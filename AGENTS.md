@@ -1,0 +1,103 @@
+# AGENTS.md
+
+本仓库对智能体与人类协作者的约定。改代码前请先读完「注释」一节，本仓库的注释有硬性格式要求。
+
+## 注释
+
+### C / C++
+
+函数、结构体、类、成员（含常量）的声明处使用块注释：
+
+```cpp
+/**
+ * 把 [from_para, to_para) 段排入 out，并返回结束时的续排状态。
+ *
+ * out 中 from_para 段之前的内容原样保留，本函数只做追加。
+ *
+ * @param state 第 from_para 段开始时的续排状态；传错不崩溃，但结果会与全量排版不一致
+ * @param out   结果缓冲，返回前其 stats 会按段重算为整篇的汇总量
+ * @return 第 to_para 段开始时的续排状态，可直接作为下一次续排的入参
+ */
+ReflowState layoutDocumentRange(FontLibrary& lib, /* ... */ LayoutResult* out);
+```
+
+行内与局部说明使用行注释（函数体内部一律用它）：
+
+```cpp
+// 间隙必须计入 slot 宽度，否则右括号会贴到相邻的字上
+const float slot = bw + kControlBracketSlotGapPt;
+```
+
+**分节标签也按声明处处理**：在类、结构体或命名空间里给一族成员分组时，不要写裸标签
+（`// 编辑`），写成一句简短的块注释，说明这一族是干什么的：
+
+```cpp
+/** 编辑入口：坐标是 (段, 段内码点偏移)，落地前吸附到字素簇边界。 */
+bool insertTextUtf8(int para, size_t offset, const std::string& utf8);
+```
+
+### JavaScript
+
+顶层函数与导出对象的方法使用 JSDoc；函数内的局部变量与行内说明用 `//`。
+同样禁用 markdown 记号与 emoji：
+
+```js
+/**
+ * 把引擎帧贴到画布。
+ * @param {Uint8ClampedArray} px 整帧 RGBA 像素
+ * @param {number} w 帧宽（设备像素）
+ * @returns {boolean} 是否真的写入了画布
+ */
+function blitFrame(px, w) {}
+```
+
+### 内容要求
+
+- 只写「为什么」与「约束」，不复述代码在做什么；签名已能表达的不要写。
+- 简洁。块注释通常一到四行，行内注释一行；超出就拆分或删减。
+- 篇幅硬上限：普通块注释不超过 12 行，文件头不超过 20 行，注释行不超过 100 列。
+- 禁用 markdown 记号：`**粗体**`、`## 标题`、`- 列表`、反引号包裹。
+  引用代码符号时直接写名字。
+- 禁用 emoji 与装饰符号：星号标记、对勾、警告符、`───`、`═══` 之类的分隔线。
+- **不写编号列表**：不用 `①②③`，也不用行首的 `1)`、`(1)`、`一、`。
+  分点写成文字句子，用分号或顿号串联；确需分点时让每点各自成句。
+  例外：测试分节标题里的 `[8]`、`(b2)` 这类是交叉引用的锚点，保留。
+- **不写口语与俚语**：坑、兜底、顺手、悄悄、搞混、白做、硬塞 之类，
+  换成技术说法（「失败点」「保证」「顺带」「静默」「混淆」「无谓重画」）。
+- 禁止变更历史与流水账：不写「原来……后来改成……」「第一版是这么写的」
+  「实测命中过」，也不写谁在什么时候发现了什么。
+  需要保留的教训写成结论句，例如：
+  写「括号占位必须计入 advance，否则括号会压在正文上」，
+  不写「以前这里忘了算占位，所以括号压字」。
+- 行宽不超过 100 列。
+- 新增代码一律遵守；改动已有文件时就近把该文件的注释改为合规写法。
+
+## 格式化
+
+代码格式由 clang-format 统一，配置在仓库根目录的 `.clang-format`：基准取 Google 家族风格
+（WebRTC / Chromium / Skia 同系），仅在与既有代码冲突处显式覆盖并注明理由（4 空格缩进、
+100 列、指针靠左、注释与字符串不重排、include 分组保持原样）。
+
+- 就地格式化：`powershell -ExecutionPolicy Bypass -File scripts\format.ps1`
+- 只检查（有差异则退出码 1，可用于提交前把关）：
+  `powershell -ExecutionPolicy Bypass -File scripts\format.ps1 -Check`
+- 交给别人评审前先跑一次格式化；`.clang-format-ignore` 已排除 third_party / .toolchain /
+  build / out，脚本本身也只扫 src 与 tests。
+
+## 构建与验证
+
+- 原生：`powershell -ExecutionPolicy Bypass -File scripts\build_native.ps1 -Run`（构建 + 跑单测）
+- WASM：`powershell -ExecutionPolicy Bypass -File scripts\build_wasm.ps1`
+- 浏览器探针：`powershell -ExecutionPolicy Bypass -File scripts\verify_web.ps1`
+  （默认跑 `scripts/edit_probe.mjs`，可用 `-Probe` 换 `stress_probe.mjs` / `web_probe.mjs`）
+- 注释合规检查：`python scripts/lint_comments.py`（加 `-v` 打印违规原文；违规则退出码 1）。
+  共 11 条规则，写在脚本文件头：反引号、装饰分隔线、markdown 强调、流水账用语、
+  口语人称、行首列表符号、行宽、块长、声明处必须是块注释、编号列表记号、口语俚语。
+- 改动排版或光栅后，除了单测还要跑浏览器探针：它带像素级与帧自审判据。
+
+## 硬性约束
+
+- 不允许执行任何 git 写入命令（add / commit / push / fetch / reset / checkout / stash 等），
+  只读命令（status / log / diff / show）可用。需要提交时由人来做。
+- 不删除或移动 `.git` 目录。
+- `.workbuddy/memory/` 是项目工作日志，只追加、不覆盖。

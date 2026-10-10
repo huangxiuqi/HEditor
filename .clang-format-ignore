@@ -1,0 +1,7 @@
+# 不参与格式化的目录/文件（clang-format 18+ 读取本文件）。
+# 这些都是本机重建出来的：第三方源码、工具链、构建与验证产物。
+third_party/*
+.toolchain/*
+build/*
+out/*
+assets/*

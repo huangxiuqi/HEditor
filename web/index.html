@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CED 编辑器引擎 · WASM 验证台</title>
+<!--  必须显式声明 icon，哪怕给个空 data URI。
+     不写的话浏览器会自动去请求 /favicon.ico，静态服务返回 404，
+     控制台里就多一条 "Failed to load resource: 404" ——
+     它是唯一能让"无 console error"这条断言变红的东西，而且会淹没真正的报错。
+     data:, 是空资源，不会产生任何网络请求。 -->
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    --bg: #f4f5f7;
+    --panel: #ffffff;
+    --ink: #1b1f24;
+    --ink-dim: #5b6572;
+    --line: #d8dde4;
+    --accent: #1f6feb;
+    --ok: #1a7f37;
+    --warn: #b54708;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171a;
+      --panel: #1c2024;
+      --ink: #e6e9ee;
+      --ink-dim: #9aa4b0;
+      --line: #2c3238;
+      --accent: #4a9eff;
+      --ok: #3fb950;
+      --warn: #d29922;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font: 13px/1.6 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    display: flex; flex-direction: column;
+  }
+  header {
+    padding: 12px 18px 10px;
+    border-bottom: 1px solid var(--line);
+    background: var(--panel);
+    display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+  }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .2px; }
+  header .sub { color: var(--ink-dim); font-size: 12px; }
+
+  #bar {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 10px 18px; border-bottom: 1px solid var(--line);
+    background: var(--panel);
+  }
+  select, button, input[type=range] { font: inherit; color: var(--ink); }
+  select, button {
+    background: var(--bg); border: 1px solid var(--line);
+    border-radius: 6px; padding: 5px 10px; cursor: pointer;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: .45; cursor: default; }
+  button.primary { background: var(--accent); color: #fff; border-color: transparent; }
+  label.zoom { display: flex; align-items: center; gap: 6px; color: var(--ink-dim); }
+  input[type=range] { width: 120px; accent-color: var(--accent); }
+  #status { margin-left: auto; color: var(--ink-dim); font-size: 12px; }
+  #status.err { color: var(--warn); font-weight: 600; }
+
+  main { flex: 1; display: flex; min-height: 0; }
+  #stage {
+    flex: 1; overflow: auto; padding: 18px; position: relative;
+    display: flex; justify-content: center; align-items: flex-start;
+  }
+  #cv {
+    box-shadow: 0 1px 3px rgba(0,0,0,.18);
+    display: block;
+    /* 不要 max-width:100% / height:auto。
+       那样会在舞台装不下时把整块画布缩小重采样 —— 文字立刻发虚变浅。
+       CSS 尺寸由 app.js 按 devicePixelRatio 精确折算（1 帧像素 = 1 设备像素），
+       装不下就让 #stage 横向滚动（它本来就有 overflow:auto）。
+       「分辨率」只有一个旋钮：引擎的 zoom。 */
+    image-rendering: auto;
+  }
+  /* 键盘与 IME 的承接层。
+     光标画在 canvas 上，键盘事件却必须由 DOM 元素接 —— 而且中文输入法的
+     预编辑与候选框只有原生输入元素才给得到（合成事件不会发给 canvas）。
+     所以这里放一个跟到光标位置的透明 textarea：
+       · 它的位置对 → IME 候选框就出现在光标附近；
+       · 它的文字透明 → 不会和 canvas 上已经画好的正文叠成两层。
+     组合期间的预编辑串显示在状态栏；把预编辑串直接渲染进正文属于档 3。 */
+  #ime {
+    position: absolute; z-index: 2;
+    border: 0; outline: 0; padding: 0; margin: 0; resize: none;
+    background: transparent; color: transparent; caret-color: transparent;
+    font-family: "Noto Sans SC", "Microsoft YaHei", sans-serif;
+    overflow: hidden; white-space: pre;
+    pointer-events: none;
+  }
+
+  #stats {
+    width: 290px; flex: none; overflow: auto;
+    border-left: 1px solid var(--line); background: var(--panel);
+    padding: 14px 16px; font-variant-numeric: tabular-nums;
+  }
+  #stats h2 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
+    color: var(--ink-dim); margin: 16px 0 6px; font-weight: 600;
+  }
+  #stats h2:first-child { margin-top: 0; }
+  #stats dl { display: grid; grid-template-columns: 1fr auto; gap: 3px 10px; margin: 0; }
+  #stats dt { color: var(--ink-dim); font-size: 12px; }
+  #stats dd { margin: 0; text-align: right; font-size: 12px; }
+  #stats dd.hi { color: var(--accent); font-weight: 600; }
+  #stats dd.ok { color: var(--ok); font-weight: 600; }
+  #stats dd.warn { color: var(--warn); font-weight: 600; }
+  #stats .note, #stats .hint {
+    color: var(--ink-dim); font-size: 11px; line-height: 1.55; margin: 8px 0 0;
+    border-left: 2px solid var(--line); padding-left: 8px;
+  }
+  #stats .hint { font-size: 10.5px; border-left-color: var(--warn); }
+  #stats code { font-family: Consolas, ui-monospace, monospace; font-size: 11px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>CED 编辑器引擎 · WASM 验证台</h1>
+  <div class="sub">C++ 算法核 → WebAssembly&nbsp;&nbsp;·&nbsp;&nbsp;跨边界只传位图，不传绘制指令</div>
+</header>
+
+<div id="bar">
+  <select id="scenario" disabled></select>
+  <label class="zoom">zoom
+    <input id="zoom" type="range" min="1" max="3" step="0.25" value="1.5" disabled>
+    <span id="zoomVal">1.5</span>
+  </label>
+  <button id="paint" class="primary" disabled>重绘</button>
+  <button id="focus" disabled>聚焦输入</button>
+  <button id="bench" disabled>引擎内循环 12 次</button>
+  <select id="editMode" disabled>
+    <option value="0">编辑模式：文档</option>
+    <option value="1">编辑模式：表单</option>
+    <option value="2">编辑模式：只读</option>
+  </select>
+  <button id="formSample" disabled>载入表单样例</button>
+  <span id="status">准备中…</span>
+</div>
+
+<main>
+  <div id="stage">
+    <canvas id="cv" width="1" height="1"></canvas>
+    <textarea id="ime" rows="1" autocapitalize="off" autocomplete="off" autocorrect="off"
+              spellcheck="false" aria-label="文本输入"></textarea>
+  </div>
+  <aside id="stats">
+    <h2>加载</h2>
+    <dl id="boot"></dl>
+    <h2>编辑（档 1）</h2>
+    <dl id="edit"></dl>
+    <p class="hint">
+      <b>「重画像素」是实际写入次数，不是去重后的脏面积</b> ——
+      重叠区域会被重复计数。所以「占全帧」偶尔略大于 100% 是正常的，
+      不是越界：整帧贴一次底图，光标那一小块还要再写两遍（贴底图 + 填色）。
+      光标移动＝ 3 × 光标矩形（擦旧、擦新、画新），
+      例：光标矩形 3×31 = 93 px ⇒ 93 × 3 = 279 px。
+    </p>
+    <h2>表单（档 4 · 控件是「区间」）</h2>
+    <dl id="form"></dl>
+    <p class="hint">
+      控件是覆盖在<b>码点区间</b>上的标注，<b>不是矩形</b> —— 所以它的内容参与正常排版
+      （断行、分页、竖排、可变字体），打印/阅读时就是普通文字，看不出任何痕迹。<br><br>
+      标记刻意做得很克制，<b>不给字段加底色、也不加外框</b>（那会让正文看起来像另一种东西）：<br>
+      · 默认：<b>每个</b>字段左右都用<b>方括号</b>括起来，<b>常驻</b> ——
+      光标移到哪儿都不影响（否则字段看起来不像字段，"这块能不能输入"看不出来）。
+      括号的宽度是<b>排版算出来的</b>，所以它把正文<b>挤开</b>而不是盖在字上；
+      字段内容被<b>删光</b>之后括号照样在。<br>
+      · 控制台 <code>__ced.setBracketScope(1)</code> 可切到紧凑档：
+      只有光标所在字段显示括号，其余字段只在<b>右下角一个小蓝点</b>。<br>
+      只读字段用灰色，免得看着像能改。<br><br>
+      表单模式只做一件事：<b>把编辑限制在可编辑字段内</b>，其余位置的按键会被拒，
+      并记进「被拒编辑次数」（否则"打不进字"和"程序卡了"在观感上无法区分）。<br><br>
+      点「载入表单样例」：三个字段里只有两个能改，中间的病程是只读的；
+      光标会<b>跨过</b>只读区间落到下一个可编辑字段。
+      <b>Tab 是缩进</b>（插 4 个空格）、<b>Shift+Tab</b> 反缩进 —— 这是编辑器的语义。
+      字段之间用<b>鼠标点</b>：<b>方向键不跨控件</b>（一次只走一格，走不过去就停住，
+      不会把光标瞬移到另一个控件里）。
+      切回「文档」模式，标记会立刻消失。
+    </p>
+    <h2>光标闪烁（独立路径）</h2>
+    <dl id="blinkOut"></dl>
+    <h2>本次布局</h2>
+    <dl id="layout"></dl>
+    <h2>引擎内循环</h2>
+    <dl id="benchOut"></dl>
+    <p class="note" id="note">
+      这一页的所有文字都由 C++ 引擎在 WASM 里排好版、光栅成一张 RGBA 位图，
+      JS 只做 <code>putImageData</code>。字体字节由 JS <code>fetch</code> 后传入，
+      不进 wasm 包。<br><br>
+      <b>切到「可编辑」场景</b>，点画布任意处定位光标，然后直接敲字、
+      退格、按方向键。右侧「编辑」面板里的几个数字就是验收依据：
+      <b>重排段 / 总段</b>、<b>重排行 / 总行</b>、<b>重画了 W×H 像素</b>。<br><br>
+      光标移动时底图一个字都没变，所以重画面积只有光标那么大。
+      排版也是增量的：只有脏段之后的后缀会重排，前面的段原样复用 ——
+      单段场景没有可复用的前缀，所以那里仍是全量；想看真增量请切到
+      <b>长文档 200 段</b>场景，在靠后的段落里敲字，面板上会看到
+      「重排 5 / 200 段」这样的数字。
+    </p>
+  </aside>
+</main>
+
+<script src="./app.js"></script>
+</body>
+</html>

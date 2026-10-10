@@ -1,0 +1,56 @@
+---
+# 基准：Google 家族风格（WebRTC / Chromium / Skia 同系）。
+# 只在与本仓库既有代码冲突处显式覆盖，覆盖项都在下面注明理由。
+Language: Cpp
+BasedOnStyle: Google
+
+# 类成员缩进 4，访问修饰符回到 0 列。
+AccessModifierOffset: -4
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+# WebRTC 默认 80 列，本仓库既定为 100（与同系 Skia 一致，也少动既有代码）。
+ColumnLimit: 100
+# 续行缩进 4（Google 默认），与现有代码一致。
+ContinuationIndentWidth: 4
+ConstructorInitializerIndentWidth: 4
+
+# 指针靠左：FontInstance* font
+DerivePointerAlignment: false
+PointerAlignment: Left
+
+# 注释与字符串一律不重排：注释是中文为主，自动折行会破坏语义；
+# 断言文案常是一整句，拆成相邻字面量没有收益。
+ReflowComments: false
+BreakStringLiterals: false
+
+# 保持作者的分组空行，不按类别重排整块 include（排序仍在每组内生效）。
+IncludeBlocks: Preserve
+SortIncludes: CaseSensitive
+
+# 尾随注释对齐到两空格，与现有代码一致。
+SpacesBeforeTrailingComments: 2
+AlignTrailingComments: true
+
+# 大括号不换行（函数、类、控制语句都在行尾）。
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterClass: false
+  AfterControlStatement: false
+  AfterEnum: false
+  AfterFunction: false
+  AfterNamespace: false
+  AfterStruct: false
+  AfterUnion: false
+  BeforeCatch: false
+  BeforeElse: false
+  IndentBraces: false
+
+# 初始化列表：冒号另起一行，成员逐行且逗号在行尾。
+BreakConstructorInitializers: BeforeColon
+
+# 短函数、短 lambda、短循环允许单行；短 if 不带 else 时允许单行（Google 默认）。
+AllowShortFunctionsOnASingleLine: All
+AllowShortLambdasOnASingleLine: All
+AllowShortLoopsOnASingleLine: true
+AllowShortIfStatementsOnASingleLine: WithoutElse

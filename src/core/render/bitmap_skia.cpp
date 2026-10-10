@@ -1,0 +1,433 @@
+/**
+ * Skia 光栅后端。定义 CED_USE_SKIA 时由它实现 Bitmap 的全部绘制入口。
+ *
+ * 对外契约不变：像素仍写在 Bitmap::px_ 里，frame / frameBytes / copyRectFrom /
+ * paintedPixels 的语义全部保留，宿主感知不到换了引擎。内部换成：绘制走 SkCanvas；
+ * 字形走 SkFont::drawGlyphs 加 FreeType（自写扫描线、4 倍纵向超采样、曲线离散化退役）；
+ * 字形缓存交给 Skia 的 SkGlyphCache，GlyphMask 只作接口占位（见 bitmap.h）。
+ *
+ * 坐标与字号（最容易错的一处）：按 hb_font_set_scale(font, S, S) 的约定，
+ * S = size_pt * kFontScalePerPt，设计单位 d 的设备像素为 d * S / upem * units_to_px。
+ * 要让 1 em 等于 size_pt 磅乘 zoom 成立，SkFont 的 size 应取 S * units_to_px（不是
+ * upem*units_to_px 或 size_pt 乘 zoom）；S 从 hb_font_get_scale() 读，故不会随之失准。
+ */
+#include "core/render/bitmap.h"
+
+#if defined(CED_USE_SKIA)
+
+#include <hb.h>
+
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
+#include "include/core/SkBitmap.h"
+#include "include/core/SkBlendMode.h"
+#include "include/core/SkCanvas.h"
+#include "include/core/SkColor.h"
+#include "include/core/SkData.h"
+#include "include/core/SkFont.h"
+#include "include/core/SkFontArguments.h"
+#include "include/core/SkFontMgr.h"
+#include "include/core/SkFontTypes.h"
+#include "include/core/SkImageInfo.h"
+#include "include/core/SkPaint.h"
+#include "include/core/SkPoint.h"
+#include "include/core/SkRect.h"
+#include "include/core/SkSpan.h"
+#include "include/core/SkStream.h"
+#include "include/core/SkTypeface.h"
+#include "include/ports/SkFontMgr_empty.h"
+
+#include <hb-ot.h>
+
+namespace ced {
+
+namespace {
+
+/**
+ * float 的精确位模式。字号是键的一部分，必须按位比较而不是量化 ——
+ * 量化会让"同一字号"被拆成多份，重复建 SkFont（每次都要走 FreeType 的 face 设置）。
+ */
+inline uint32_t fbits(float f) {
+    uint32_t b = 0;
+    std::memcpy(&b, &f, sizeof(b));
+    return b;
+}
+
+inline SkColor toSk(Color c) { return SkColorSetARGB(c.a, c.r, c.g, c.b); }
+
+/**
+ * hb_blob_t 的释放回调：把引用交给 SkData 管，不拷贝字体数据。
+ * 一份 CJK 字体动辄 2 MB，而这张 typeface 会跟着 Bitmap 活到进程结束
+ * （Bitmap 里两张图共享一份），所以按"拷贝一次"来算也不贵 ——
+ * 但 MakeWithProc 是零拷贝且同样安全，没有理由多复制一份。
+ */
+void releaseHbBlob(const void* /*ptr*/, void* ctx) {
+    hb_blob_destroy(static_cast<hb_blob_t*>(ctx));
+}
+
+/**
+ * 侧倒判定：与 bitmap.cpp 里 PathCollector 完全一致的规则
+ * （只有 0° 与 90° 两种，其它角度取最接近的）。
+ */
+inline bool isSideways(float rotate_deg) { return std::fabs(rotate_deg - 90.0f) < 45.0f; }
+
+/**
+ * 变体坐标：hb_font 到 Skia typeface 的桥。弄错的代价是整页中文变成 Thin。
+ *
+ * NotoSansSC-VF 的 fvar 里 wght 轴 min=100、默认=100、max=900，即默认实例是 Thin(100)
+ * 而非 Regular(400)。引擎在 FontInstance::init 里显式钉了 wght=400（可变字体必须钉，
+ * 否则度量会漂），故自写光栅器路径画出来是 Regular；Skia 路径若直接 makeFromData 不带
+ * 变体参数，FreeType 取默认实例 100，整页中文其实是 Thin。症状（同文本、14pt@1.5=21px、
+ * 同色，只换后端）：自写器平均灰 90、逐列墨迹 8~18 像素，Skia 平均灰 163、逐列 4~8 像素，
+ * 两后端字形包围盒一致 —— 是笔画细了，不是画小了。
+ *
+ * 结论：凡是从 hb_font 过桥到 Skia typeface，变体坐标必须一起带过去。下面按 OpenType
+ * 规则把归一化坐标还原成设计坐标（design = default + t * (t >= 0 ? max - default : min)）。
+ */
+bool hbVariationsToSkia(hb_font_t* hbf, hb_face_t* face,
+                        std::vector<SkFontArguments::VariationPosition::Coordinate>* out,
+                        uint64_t* fingerprint) {
+    out->clear();
+    *fingerprint = 0;
+    if (!hbf || !face) return false;
+
+    unsigned n_coords = 0;
+    const int* coords = hb_font_get_var_coords_normalized(hbf, &n_coords);
+    if (!coords || n_coords == 0) return false;  // 静态字体：没有变体要带
+
+    hb_ot_var_axis_info_t axes[16];
+    unsigned n_axes = 16;
+    const unsigned total = hb_ot_var_get_axis_infos(face, 0, &n_axes, axes);
+    if (total == 0 || n_axes == 0) return false;
+
+    const unsigned n = std::min(n_coords, n_axes);
+    out->reserve(n);
+    uint64_t h = 1469598103934665603ull;
+    auto mix = [&h](uint64_t v) {
+        h ^= v;
+        h *= 1099511628211ull;
+    };
+    for (unsigned i = 0; i < n; ++i) {
+        const hb_ot_var_axis_info_t& ax = axes[i];
+        const float t = static_cast<float>(coords[i]) / 16384.0f;  // HB 归一化刻度
+        const float base = ax.default_value;
+        const float span = (t >= 0.0f) ? (ax.max_value - base) : (base - ax.min_value);
+        const float design = base + t * span;
+        out->push_back(SkFontArguments::VariationPosition::Coordinate{ax.tag, design});
+        mix(static_cast<uint64_t>(ax.tag));
+        mix(static_cast<uint64_t>(fbits(design)));
+    }
+    *fingerprint = h;
+    return !out->empty();
+}
+
+}  // namespace
+
+/**
+ * Skia 侧的状态
+ */
+struct Bitmap::SkiaImpl {
+    /**
+     * 装订到 Bitmap::px_ 上的位图与画布。installPixels 不拷贝、不持有，
+     * 所以 px_ 一旦重新分配（reset）就必须重新装订 —— 见 Bitmap::reset()。
+     */
+    SkBitmap bm;
+    std::unique_ptr<SkCanvas> canvas;
+
+    sk_sp<SkFontMgr> font_mgr;  // SkFontMgr_New_Custom_Empty()：内建字体为 0，全部由我们喂
+
+    /**
+     * (hb_face_t*, 变体坐标指纹) → SkTypeface。
+     * 用 hb_face_t* 当键是安全的：FontFace 一张脸活到进程结束，指针不会复用。
+     * 指纹不能省：同一个 face 上 wght=400 与 wght=700 是两张不同的脸，
+     * 只按 face 缓存会把第一次那张错发给后面所有字重（与变体默认值同一类错误）。
+     */
+    struct TfKey {
+        const void* face = nullptr;
+        uint64_t vars = 0;
+        bool operator==(const TfKey& o) const { return face == o.face && vars == o.vars; }
+    };
+    struct TfKeyHash {
+        size_t operator()(const TfKey& k) const {
+            return static_cast<size_t>(reinterpret_cast<uintptr_t>(k.face) * 1099511628211ull ^
+                                       (k.vars + 0x9e3779b97f4a7c15ull));
+        }
+    };
+    std::unordered_map<TfKey, sk_sp<SkTypeface>, TfKeyHash> typefaces;
+
+    /**
+     * (SkTypeface*, 字号) → SkFont
+     */
+    struct FontKey {
+        const SkTypeface* tf = nullptr;
+        uint32_t em_px_bits = 0;
+        bool operator==(const FontKey& o) const { return tf == o.tf && em_px_bits == o.em_px_bits; }
+    };
+    struct FontKeyHash {
+        size_t operator()(const FontKey& k) const {
+            uint64_t h = 1469598103934665603ull;
+            auto mix = [&h](uint64_t v) {
+                h ^= v;
+                h *= 1099511628211ull;
+            };
+            mix(reinterpret_cast<uintptr_t>(k.tf));
+            mix(k.em_px_bits);
+            return static_cast<size_t>(h);
+        }
+    };
+    std::unordered_map<FontKey, SkFont, FontKeyHash> fonts;
+
+    /**
+     * 取（或建）hb 字体对应的 SkFont。
+     */
+    const SkFont* fontFor(hb_font_t* hbf, float units_to_px);
+};
+
+const SkFont* Bitmap::SkiaImpl::fontFor(hb_font_t* hbf, float units_to_px) {
+    if (!font_mgr || !hbf) return nullptr;
+    hb_face_t* face = hb_font_get_face(hbf);
+    if (!face) return nullptr;
+
+    // 先把变体坐标取出来 —— 这是"中文会不会变成 Thin"的分水岭，
+    //   详细推理见文件上方 hbVariationsToSkia 的注释。
+    std::vector<SkFontArguments::VariationPosition::Coordinate> vcoords;
+    uint64_t vfp = 0;
+    const bool has_vars = hbVariationsToSkia(hbf, face, &vcoords, &vfp);
+
+    const TfKey tkey{face, has_vars ? vfp : 0};
+    sk_sp<SkTypeface>& tf = typefaces[tkey];
+    if (!tf) {
+        hb_blob_t* blob = hb_face_reference_blob(face);  // 返回新引用，归我们
+        if (!blob) return nullptr;
+        const unsigned len = hb_blob_get_length(blob);
+        if (len == 0) {
+            hb_blob_destroy(blob);
+            return nullptr;
+        }
+        const char* p = hb_blob_get_data(blob, nullptr);
+        sk_sp<SkData> data = SkData::MakeWithProc(p, len, releaseHbBlob, blob);
+        if (has_vars) {
+            // 带变体只能走 makeFromStream(stream, SkFontArguments) ——
+            // makeFromData 没有接收 SkFontArguments 的重载。
+            SkFontArguments args;
+            SkFontArguments::VariationPosition pos;
+            pos.coordinates = vcoords.data();
+            pos.coordinateCount = static_cast<int>(vcoords.size());
+            args.setVariationDesignPosition(pos);
+            tf = font_mgr->makeFromStream(SkMemoryStream::Make(std::move(data)), args);
+        } else {
+            tf = font_mgr->makeFromData(std::move(data));
+        }
+        if (!tf) return nullptr;
+    }
+
+    // 字号：S(=hb scale) × units_to_px，见文件顶部那段推导。
+    int sx = 0;
+    int sy = 0;
+    hb_font_get_scale(hbf, &sx, &sy);
+    const float em_px = static_cast<float>(sx) * units_to_px;
+    if (!(em_px > 0.0f)) return nullptr;
+
+    const FontKey key{tf.get(), fbits(em_px)};
+    auto it = fonts.find(key);
+    if (it != fonts.end()) return &it->second;
+
+    SkFont f(tf, em_px);
+    // 下面几个开关的取值理由。
+    //
+    // hinting 取 kSlight（不是 kNone）：它对应 FreeType 的 FT_LOAD_TARGET_LIGHT，
+    //   只做纵向 hinting，横向仍走亚像素定位（Android 的 FreeType+Skia 同此配置）。
+    //   本实现的横向位置来自 HarfBuzz 的推进，光栅化只负责纵向对齐，两者不冲突。
+    //   注意 hinting 不是"字浅"的原因：同一段文本只把 kNone 换成 kSlight，平均灰
+    //   158 到 163（几乎没动）；字浅的真正原因是变体坐标没带过去（见上面的
+    //   hbVariationsToSkia），修正后平均灰从 163 降到 108，与自写光栅器的 90 对齐。
+    f.setHinting(SkFontHinting::kSlight);
+    f.setEmbeddedBitmaps(false);   // 不用内嵌点阵：那是 12px 以下的补救手段
+    f.setForceAutoHinting(false);  // 强制 auto-hint 会改字形，汉字上没必要
+    f.setBaselineSnap(false);      // 位置由外部给定，不吸附基线
+    f.setSubpixel(true);           // 与 HarfBuzz 的小数推进对齐
+    // setLinearMetrics 只影响推进（SkFontHost_FreeType.cpp 里只读
+    // linearHoriAdvance），不影响光栅化。这里开不开都行 —— 位置本来就由
+    // HarfBuzz 给定，Skia 算出来的 advance 本实现不读。
+    f.setLinearMetrics(true);
+    // 灰度抗锯齿。不能用 kSubpixelAntiAlias（LCD 子像素）：那会让每个像素
+    // 只有 R 或 B 一个通道被写，而本实现的帧是给 canvas.putImageData 的整块 RGBA。
+    f.setEdging(SkFont::Edging::kAntiAlias);
+
+    return &fonts.emplace(key, f).first->second;
+}
+
+/** 生命周期：构造、析构与移动全部交给编译器默认实现。 */
+Bitmap::Bitmap() = default;
+Bitmap::Bitmap(int w, int h) { reset(w, h); }
+Bitmap::~Bitmap() = default;
+Bitmap::Bitmap(Bitmap&& other) noexcept = default;
+Bitmap& Bitmap::operator=(Bitmap&& other) noexcept = default;
+
+void Bitmap::reset(int w, int h) {
+    w_ = std::max(w, 0);
+    h_ = std::max(h, 0);
+    px_.assign(static_cast<size_t>(w_) * static_cast<size_t>(h_) * 4u, 0);
+
+    if (!sk_) {
+        sk_ = std::make_unique<SkiaImpl>();
+        // 空字体管理器 + FreeType 后端：字体全部由宿主喂进来（生产环境本就如此），
+        // 不依赖任何"系统字体目录"，这在 wasm 上是唯一能选的形态。
+        sk_->font_mgr = SkFontMgr_New_Custom_Empty();
+    }
+
+    // 重新装订。px_ 刚刚 assign 过，地址可能变了；SkBitmap 拿的是裸指针，
+    //   不重装订就会画到已释放的内存上。这是整个文件里最容易出静默错误的一处。
+    sk_->canvas.reset();
+    sk_->bm.reset();
+    if (w_ > 0 && h_ > 0 && sk_->font_mgr) {
+        const SkImageInfo info =
+            SkImageInfo::Make(w_, h_, kRGBA_8888_SkColorType, kPremul_SkAlphaType);
+        // 行跨度 = w_*4：与 frame() 交给宿主的口径一致，中间不留 padding。
+        if (sk_->bm.installPixels(info, px_.data(), static_cast<size_t>(w_) * 4u)) {
+            sk_->canvas = std::make_unique<SkCanvas>(sk_->bm);
+        }
+    }
+}
+
+/**
+ * 铺面积
+ * 与自写后端同口径记账：都是"请求写入的像素数"，
+ * 整块覆盖（矩形）→ 精确面积。这样 engine.cpp 的两条恒等式
+ * （光标移动 = 3×光标矩形；整帧重画 = 整帧 + 2×光标矩形）继续成立。
+ */
+void Bitmap::clear(Color c) {
+    if (w_ <= 0 || h_ <= 0 || !sk_ || !sk_->canvas) return;
+    // 与自写后端一致：clear 不计入 painted_px_（它是"重建整块底图"，
+    // 不是增量写入；engine.cpp 的记账口径就是这么定的）。
+    sk_->canvas->clear(toSk(c));
+}
+
+void Bitmap::fillRect(const Rect& r, Color c) {
+    const int x0 = std::max(0, static_cast<int>(std::floor(r.x)));
+    const int y0 = std::max(0, static_cast<int>(std::floor(r.y)));
+    const int x1 = std::min(w_, static_cast<int>(std::ceil(r.x + r.w)));
+    const int y1 = std::min(h_, static_cast<int>(std::ceil(r.y + r.h)));
+    if (x1 <= x0 || y1 <= y0) return;
+    painted_px_ += static_cast<size_t>(x1 - x0) * static_cast<size_t>(y1 - y0);
+    if (!sk_ || !sk_->canvas) return;
+
+    SkPaint p;
+    p.setColor(toSk(c));
+    p.setAntiAlias(false);  // 矩形已经对齐到整数像素，开 AA 只会引入半透明边
+    // kSrcOver：本工程的颜色恒为不透明（Color::rgb 把 a 钉在 255），
+    // 不透明源 over 任意底 = 直接覆盖，与自写后端的 memcpy 逐位一致。
+    p.setBlendMode(SkBlendMode::kSrcOver);
+    sk_->canvas->drawRect(SkRect::MakeLTRB(static_cast<SkScalar>(x0), static_cast<SkScalar>(y0),
+                                           static_cast<SkScalar>(x1), static_cast<SkScalar>(y1)),
+                          p);
+}
+
+void Bitmap::strokeRect(const Rect& r, Color c, float thickness) {
+    fillRect(Rect{r.x, r.y, r.w, thickness}, c);
+    fillRect(Rect{r.x, r.y + r.h - thickness, r.w, thickness}, c);
+    fillRect(Rect{r.x, r.y, thickness, r.h}, c);
+    fillRect(Rect{r.x + r.w - thickness, r.y, thickness, r.h}, c);
+}
+
+/**
+ * 这块不过 Skia，是刻意的：copyRectFrom 是"把一块像素原样搬回去"，
+ * 是缓冲到缓冲的拷贝，不是绘制。Skia 能做这件事的只有 drawImage（要先建
+ * SkImage、走采样器），既比 memcpy 慢又语义更弱（采样器可能引入插值）。
+ * 局部重绘靠它，路径上要的是确定性。
+ */
+void Bitmap::copyRectFrom(const Bitmap& src, const Rect& r) {
+    if (src.w_ != w_ || src.h_ != h_) return;
+    const int x0 = std::max(0, static_cast<int>(std::floor(r.x)));
+    const int y0 = std::max(0, static_cast<int>(std::floor(r.y)));
+    const int x1 = std::min(w_, static_cast<int>(std::ceil(r.x + r.w)));
+    const int y1 = std::min(h_, static_cast<int>(std::ceil(r.y + r.h)));
+    if (x1 <= x0 || y1 <= y0) return;
+    painted_px_ += static_cast<size_t>(x1 - x0) * static_cast<size_t>(y1 - y0);
+    const size_t row_bytes = static_cast<size_t>(x1 - x0) * 4u;
+    for (int y = y0; y < y1; ++y) {
+        const size_t off =
+            (static_cast<size_t>(y) * static_cast<size_t>(w_) + static_cast<size_t>(x0)) * 4u;
+        std::memcpy(px_.data() + off, src.px_.data() + off, row_bytes);
+    }
+}
+
+/** 字形：把 HarfBuzz 的字形描到帧上，含侧倒竖排的旋转。 */
+void Bitmap::drawGlyph(hb_font_t* font, uint32_t glyph_id, float pen_x, float pen_y,
+                       float units_to_px, Color color, float rotate_deg) {
+    if (!font || w_ <= 0 || h_ <= 0 || !sk_ || !sk_->canvas) return;
+    const SkFont* f = sk_->fontFor(font, units_to_px);
+    if (!f) return;
+
+    const SkGlyphID gid = static_cast<SkGlyphID>(glyph_id);
+
+    // 记账：Skia 不告诉本实现"写了几个像素"，这里用字形包围盒当上界
+    //
+    // 与自写后端（只记覆盖率 > 阈值的像素）相比口径放宽了，但用途没变：
+    // 这个数字要证明的是"没有写整页"。包围盒是上界，上界都小两个数量级，结论依然硬。
+    // 侧倒时包围盒要按旋转后的朝向算，所以宽高对调。
+    {
+        const SkRect b = f->getBounds(gid, nullptr);
+        float bw = b.width();
+        float bh = b.height();
+        if (isSideways(rotate_deg)) std::swap(bw, bh);
+        if (bw > 0.0f && bh > 0.0f) {
+            painted_px_ += static_cast<size_t>(std::ceil(bw) + 1.0f) *
+                           static_cast<size_t>(std::ceil(bh) + 1.0f);
+        }
+    }
+
+    SkPaint p;
+    p.setColor(toSk(color));
+    p.setAntiAlias(true);
+
+    SkCanvas& c = *sk_->canvas;
+    const SkPoint positions[1] = {SkPoint::Make(0.0f, 0.0f)};
+    const SkPoint origin = SkPoint::Make(0.0f, 0.0f);
+    const SkSpan<const SkGlyphID> glyphs(&gid, 1);
+    const SkSpan<const SkPoint> pos(positions, 1);
+
+    if (isSideways(rotate_deg)) {
+        // 侧倒（蒙文竖排）：字体的轮廓是横排形态，"整段侧倒"属于呈现层。
+        // 与自写后端同一定义：绕字形原点顺时针转 rotate_deg。
+        c.save();
+        c.translate(pen_x, pen_y);
+        c.rotate(rotate_deg);
+        c.drawGlyphs(glyphs, pos, origin, *f, p);
+        c.restore();
+    } else {
+        // 正立：位置直接给绝对设备像素，省掉一次 save/translate ——
+        // 一帧上千个字形，这条路径必须是最短的。
+        const SkPoint at[1] = {SkPoint::Make(pen_x, pen_y)};
+        c.drawGlyphs(glyphs, SkSpan<const SkPoint>(at, 1), origin, *f, p);
+    }
+}
+
+/**
+ * GlyphCache 在 Skia 后端下只是接口占位（drawGlyph 不再查它）。
+ * 这个哈希仍要提供，否则 bitmap.cpp 缺席时会有未定义符号 —— 将来若有人
+ * 打开 CED_USE_SKIA 又去调 glyphCache()->find()，至少能链上。
+ */
+size_t GlyphCache::KeyHash::operator()(const Key& k) const {
+    uint64_t h = 1469598103934665603ull;
+    auto mix = [&h](uint64_t v) {
+        h ^= v;
+        h *= 1099511628211ull;
+    };
+    mix(reinterpret_cast<uintptr_t>(k.font));
+    mix(k.glyph_id);
+    mix(k.scale_bits);
+    mix(k.fracx_bits);
+    mix(k.fracy_bits);
+    mix(k.sideways ? 1u : 0u);
+    return static_cast<size_t>(h);
+}
+
+}  // namespace ced
+
+#endif  // defined(CED_USE_SKIA)
