@@ -14,198 +14,17 @@
 #include <string>
 #include <vector>
 
+#include "core/engine/engine_config.h"
+#include "core/engine/engine_stats.h"
 #include "core/doc/control.h"
 #include "core/doc/document.h"
 #include "core/doc/edit_policy.h"
 #include "core/layout/layout.h"
 #include "core/render/bitmap.h"
 #include "core/text/font.h"
-#include "core/writing_mode.h"
+#include "core/text/writing_mode.h"
 
 namespace ced {
-
-/**
- * 表单模式下哪些控件显示方括号。
- *
- * 括号既提示"这里可以输入"，又占宽度（进文档流，见 layout.h），所以显示范围决定
- * 排版成本：All 常显，占位集合与光标无关，光标移动不重排；Focused 只显示光标所在
- * 字段，代价是跨字段移动光标会重排整行。默认 All。
- */
-enum class FormBracketScope : uint8_t {
-    All = 0,      // 默认：所有控件一直显示括号
-    Focused = 1,  // 只有光标所在字段显示括号，其余画小点
-};
-
-struct EngineConfig {
-    PageMetrics page = PageMetrics::A4();
-    /**
-     * Tab 的缩进宽度（空格数）。
-     *
-     * Tab 在编辑器里表示缩进，不表示跳字段（跳字段是表单/网页的约定）；字段之间用
-     * 鼠标点。用空格而非 U+0009：行盒只认簇的 advance，制表符会变成零宽度字符。
-     */
-    int tab_spaces = 4;
-
-    float zoom = 2.0f;  // 设备像素 / 磅。2.0 ≈ 144dpi
-    float page_gap_pt = 14.0f;
-    Color background = Color::rgb(238, 240, 243);
-    Color page_fill = Color::rgb(255, 255, 255);
-    Color page_border = Color::rgb(206, 212, 218);
-    Color caret_color = Color::rgb(31, 111, 235);
-    float caret_width_pt = 1.4f;
-    bool draw_page_border = true;
-
-    /**
-     * 表单控件标记。
-     *
-     * 不画底色也不画边框：控件内容就是普通正文，加底纹会让它看起来像另一种东西。
-     * 括号常驻（form_brackets = All），光标只决定是否额外高亮；只读字段用灰色。
-     * 标记画在帧上而非底图，因为要跟随光标状态，见 presentInternal。
-     */
-    FormBracketScope form_brackets = FormBracketScope::All;
-    Color control_mark = Color::rgb(56, 139, 253);      // 可编辑：亮蓝
-    Color control_mark_ro = Color::rgb(168, 168, 168);  // 只读：灰（否则看着能改）
-    /**
-     * 方括号用的是字体里的字形（'[' / ']'），所以没有"线宽""臂长"这类参数 ——
-     * 粗细与形状跟着正文字体走，换字体/换字号都不用改配置。
-     * 也没有"间距"参数：括号的间隙由排版给（控件边界会占一个括号宽度，
-     * 见 layout.cpp 的占位簇），不再由绘制层补。
-     */
-    float control_dot_pt = 3.0f;  // 小点边长（磅）
-};
-
-struct EngineStats {
-    int page_count = 0;
-    int glyph_count = 0;
-    int placed_line_count = 0;
-    int cluster_count = 0;
-    int face_count = 0;
-    int font_instance_count = 0;
-    /**
-     * 字体回退取证：跑完整条链后仍是 .notdef 的字形数 / 切出的 run 数。
-     */
-    int missing_glyph_count = 0;
-    int font_run_count = 0;
-    double shape_ms = 0.0;
-    double layout_ms = 0.0;
-    double paint_ms = 0.0;
-    /**
-     * 页指纹记账的耗时（每次重排后都要算一遍）。
-     *
-     * 单独拎出来是因为它不随排版长短变化：一次 0.06 ms 的小编辑，页指纹可能还要 0.2 ms，
-     * 而它是 O(字形总数) 的。混进 layout_ms 就会得出"增量排版没省多少"的错误结论，
-     * 只看 layout_ms 又会漏掉一半成本。增量化之后（只重算受影响页）这个数应当随脏页数走，
-     * 而不是随文档大小走。
-     */
-    double page_fp_ms = 0.0;
-    /**
-     * 绘制的三段分解。存在的理由：它是"要不要引入 GPU / 第三方光栅器"的判据。
-     * 实测（4 页、1022 字形、帧面积从 0.51 Mpx 到 8.12 Mpx 共 16 倍）：
-     * paint 只从 110 ms 涨到 173 ms（1.57 倍）—— 成本不随面积走。
-     * 所以"加像素吞吐"（GPU、更快的 fill/memcpy）在这里是打空的；
-     * 必须先把这三段分开，才知道钱到底花在哪一段。
-     */
-    double paint_fill_ms = 0.0;     // 铺面积：页间隙背景 + 页底 + 页边框
-    double paint_glyph_ms = 0.0;    // 字形：hb 抽轮廓 + 扫描线光栅（或命中字形缓存后只做 blit）
-    double paint_present_ms = 0.0;  // 帧缓冲搬移：reset + 从底图贴回 + 光标
-
-    /**
-     * 字形缓存取证
-     * 这两个数字是"字形缓存到底有没有用"的唯一判据，缺一不可：
-     * 命中率高 + 耗时降   → 缓存吃掉了真正的成本；
-     * 命中率高 + 耗时没降 → 瓶颈根本不在字形光栅，别再往这儿投资；
-     * 命中率低            → 亚像素相位太散（键设计问题），
-     * 这时"再快的光栅器"能帮的也有限。
-     */
-    long long glyph_cache_hits = 0;
-    long long glyph_cache_misses = 0;
-    int glyph_cache_entries = 0;
-    double total_ms = 0.0;
-    int frame_width = 0;
-    int frame_height = 0;
-    float zoom = 1.0f;
-};
-
-/**
- * 一次编辑/呈现之后的可证伪计数。
- * 这一批数字存在的唯一理由：让"到底有没有做增量"变成一个可以当场证伪的
- * 事实，而不是一句"感觉挺流畅"。
- * 两层增量各有自己的判据：
- * 光栅（页指纹决定重画哪几页）看 repainted_pixels / repainted_pages；
- * 排版（段级续排）看 relaid_paragraphs / relaid_lines 与 layout_was_full ——
- * 在全量重排时 relaid_lines 等于 total_lines，做增量之后才真的小于它。
- */
-struct EditStats {
-    /**
-     * 布局
-     * 这一组只在"本轮真的重排过"时才有意义。
-     * layout_ran 是那个开关：光标移动、光标闪烁这两条路径不重排，
-     * 此时 relaid_lines / layout_ms 都必须是 0 —— 否则面板上会出现
-     * "移动光标重排了 12 行、耗时 3ms"这种假账（数字是真的，归属是错的）。
-     */
-    bool layout_ran = false;
-    int relaid_paragraphs = 0;
-    int reused_paragraphs = 0;  // 后缀被复用的段数（没重排）
-    /**
-     * 后缀是平移复用的（不是原样搬回）：行结构变了，于是后缀整体沿块轴挪了位置、
-     * 页码与全局行号重编过，但断行结果与字形的行内位置一个字节都没重算。
-     * 与 reused_paragraphs 一起看才有意义：复用 99 段 + 平移 = "99 段没重排，
-     * 但它们的位置变了"，面板据此解释"为什么脏页比 1 多"。
-     */
-    bool suffix_shifted = false;
-    int total_paragraphs = 0;
-    int relaid_lines = 0;
-    int total_lines = 0;
-    bool layout_was_full = false;
-    int dirty_page_count = 0;  // 内容指纹变了、需要重画的页数
-
-    /** 上屏粒度：本次真正重画的页数，以及文档总页数。 */
-    int repainted_pages = 0;
-    int total_pages = 0;
-    /**
-     * 本次真正写过的像素数（由 Bitmap 记账，非上层估算），以及写入区域的包围盒（设备像素）。
-     */
-    long long repainted_pixels = 0;
-    int repainted_x = 0;
-    int repainted_y = 0;
-    int repainted_w = 0;
-    int repainted_h = 0;
-    int frame_w = 0;
-    int frame_h = 0;
-
-    /** 耗时拆分（毫秒）：本次排版、本次绘制、以及这一次操作的总计。 */
-    double layout_ms = 0.0;
-    double paint_ms = 0.0;
-    double total_ms = 0.0;
-
-    /** 光标位置与文档规模（逻辑坐标，与视觉行列无关）。 */
-    int caret_para = 0;
-    size_t caret_offset = 0;  // 段内码点偏移
-    size_t caret_index = 0;   // 全文码点下标
-    size_t doc_codepoints = 0;
-    bool caret_visible = false;
-    /**
-     * 光标在帧像素坐标下的矩形。宿主据此摆 IME 候选框、
-     * 或把原生 textarea 覆盖层挪到光标处（档 3）。
-     */
-    int caret_x_px = 0;
-    int caret_y_px = 0;
-    int caret_w_px = 0;
-    int caret_h_px = 0;
-
-    /**
-     * 表单（区间标注 + 编辑策略）
-     * blocked_edits 是累计值，其余是本轮快照。
-     * 它存在的理由：策略生效时编辑会静默返回 false，
-     * 宿主看到的现象是"打字没反应" —— 那和"程序卡了/坏了"在观感上无法区分。
-     * 有了这个计数，"按了 5 次键一个字没进去"就有了一个可断言的说法：
-     * 文档长度不变 且 blocked_edits += 5。
-     */
-    int edit_mode = 0;  // 0=文档模式 1=表单模式 2=只读模式
-    int control_count = 0;
-    int caret_control = -1;  // 光标最内层所在的控件；-1 = 不在任何控件内
-    long long blocked_edits = 0;
-};
 
 class EditorEngine {
 public:
@@ -794,18 +613,5 @@ private:
     Rect caret_rect_px_prev_{};  // 上一帧光标矩形（帧像素）
 };
 
-/**
- * 样例文书：中文横排 → 蒙文 vertical-lr（列序从左往右）→ 蒙文 vertical-rl（对照）
- * latin_font_index >= 0 时，中文块挂上拉丁字体作为回退（上标数字等中文子集缺字）
- */
-std::vector<BlockSpec> sampleDocument(int cjk_font_index, int mongol_font_index,
-                                      int latin_font_index = -1);
-
-/**
- * 中英文混排块（病历里最常见的形态：中文叙述 + 英文缩写/数值/单位/拉丁术语）。
- * 用于验证同一段落里 CJK 与 Latin 的断行与度量是否正确。
- * latin_font_index 给出后，把它作为回退字体挂上 —— "10⁹/L" 的上标 9 正是靠它兜住。
- */
-BlockSpec mixedParagraphBlock(int cjk_font_index, int latin_font_index = -1);
 
 }  // namespace ced

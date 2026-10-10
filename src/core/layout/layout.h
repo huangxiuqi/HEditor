@@ -19,8 +19,8 @@
 #include "core/doc/control.h"
 #include "core/doc/document.h"
 #include "core/text/font.h"
-#include "core/types.h"
-#include "core/writing_mode.h"
+#include "core/utils/types.h"
+#include "core/text/writing_mode.h"
 
 namespace ced {
 

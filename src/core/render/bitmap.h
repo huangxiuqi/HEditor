@@ -19,7 +19,7 @@
 #include <vector>
 
 #include "core/text/font.h"
-#include "core/types.h"
+#include "core/utils/types.h"
 
 namespace ced {
 

@@ -6,7 +6,7 @@
 #include <cstdlib>
 
 #include "core/doc/document.h"
-#include "core/writing_mode.h"
+#include "core/text/writing_mode.h"
 
 namespace ced {
 namespace {

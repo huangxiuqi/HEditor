@@ -227,10 +227,24 @@ add_library(ced_core STATIC
   src/core/text/fallback.cpp
   ${CED_RENDER_SRC}
   src/core/layout/layout.cpp
-  src/core/engine.cpp
+  src/core/engine/engine.cpp
+  src/core/engine/engine_layout.cpp
+  src/core/engine/engine_paint.cpp
+  src/core/engine/engine_audit.cpp
+  src/core/engine/engine_diag.cpp
 )
 target_include_directories(ced_core PUBLIC ${CED_ROOT}/src)
 target_link_libraries(ced_core PUBLIC ced_harfbuzz)
+
+# 演示与测试共用的固定文书。单独成库是为了不让核心库带上演示数据 ——
+#   核心库提供的是能力，样例内容是喂给它的输入（见 docs/正式化架构与迁移路线.md 4.7）。
+#   include 目录给到仓库根，于是各处写 #include "demo/demo_documents.h"。
+add_library(ced_demo STATIC demo/demo_documents.cpp)
+target_include_directories(ced_demo PUBLIC ${CED_ROOT})
+target_link_libraries(ced_demo PUBLIC ced_core)
+# ★ 每个 target 都要走这个函数，漏掉它只在 MSVC 上炸：源码无 BOM，
+#   少了 /utf-8 就按 cp936 读，症状是"中文注释那一行报语法错"（见函数定义处的说明）。
+ced_target_flags(ced_demo)
 ced_target_flags(ced_core)
 ced_track_header_deps(ced_core ${CED_ROOT}/src/core)
 
@@ -274,7 +288,7 @@ endif()
 if(EMSCRIPTEN)
 
   add_executable(ced_wasm src/wasm/wasm_main.cpp)
-  target_link_libraries(ced_wasm PRIVATE ced_core)
+  target_link_libraries(ced_wasm PRIVATE ced_core ced_demo)
   target_compile_definitions(ced_wasm PRIVATE CED_BUILD_STAMP="${CED_BUILD_STAMP}")
   ced_target_flags(ced_wasm)
   set_target_properties(ced_wasm PROPERTIES OUTPUT_NAME "ced_editor" SUFFIX ".js")
@@ -299,7 +313,7 @@ if(EMSCRIPTEN)
 else()
 
   add_executable(ced_native src/app/native_main.cpp)
-  target_link_libraries(ced_native PRIVATE ced_core)
+  target_link_libraries(ced_native PRIVATE ced_core ced_demo)
   target_compile_definitions(ced_native PRIVATE CED_NATIVE_ASSET_DIR="${CED_ASSET_DIR}"
                                                 CED_BUILD_STAMP="${CED_BUILD_STAMP}")
   ced_target_flags(ced_native)
@@ -308,7 +322,7 @@ else()
   if(CED_BUILD_TESTS)
     enable_testing()
     add_executable(ced_tests tests/shaping_test.cpp)
-    target_link_libraries(ced_tests PRIVATE ced_core)
+    target_link_libraries(ced_tests PRIVATE ced_core ced_demo)
     target_compile_definitions(ced_tests PRIVATE CED_NATIVE_ASSET_DIR="${CED_ASSET_DIR}")
     ced_target_flags(ced_tests)
     ced_track_header_deps(ced_tests ${CED_ROOT}/src/core ${CED_ROOT}/tests)
@@ -316,7 +330,7 @@ else()
 
     # 档 1：编辑 / 光标几何 / 命中测试 / 增量呈现
     add_executable(ced_edit_tests tests/edit_test.cpp)
-    target_link_libraries(ced_edit_tests PRIVATE ced_core)
+    target_link_libraries(ced_edit_tests PRIVATE ced_core ced_demo)
     target_compile_definitions(ced_edit_tests PRIVATE CED_NATIVE_ASSET_DIR="${CED_ASSET_DIR}")
     ced_target_flags(ced_edit_tests)
     ced_track_header_deps(ced_edit_tests ${CED_ROOT}/src/core ${CED_ROOT}/tests)

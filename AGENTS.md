@@ -105,6 +105,21 @@ function blitFrame(px, w) {}
   共 11 条规则，写在脚本文件头：反引号、装饰分隔线、markdown 强调、流水账用语、
   口语人称、行首列表符号、行宽、块长、声明处必须是块注释、编号列表记号、口语俚语。
 - 改动排版或光栅后，除了单测还要跑浏览器探针：它带像素级与帧自审判据。
+- ★ **构建是否成功要看日志里的 `exit=` 行，不能看外层命令的退出码**。用
+  `& powershell -File build_*.ps1 *> $log` 包装时，`$LASTEXITCODE` 之后只要再执行任何
+  命令（包括写日志的 `Add-Content`）就会被覆盖，于是构建失败也显示成功 ——
+  这个坑真实发生过一次，把一次编译失败当成了通过。包装时读完就 `exit $code` 把它传出去；
+  直接看日志时以 `exit=0`（且没有"构建失败"与 `error` 行）为准，并且**核对产物时间戳**，
+  因为"什么都没编"与"编对了"在输出上长得一样。
+- ★ **新加构建 target 必须调 `ced_target_flags(<tgt>)`**。它按 target 下发 `/utf-8`，
+  而源码**都不带 BOM**，所以漏掉它的症状是"中文注释那一行报语法错"
+  （C2143 / C2628 / C2059），并且**只在 MSVC 上出现** —— wasm 侧（clang）默认按 UTF-8 读，
+  不会报错，于是错误看起来像"native 独有的怪问题"。新增 target 后按
+  `grep -c "add_library(<tgt>\|add_executable(<tgt>"` 与 `grep -c "ced_target_flags(<tgt>)"`
+  各应为 1。
+- ★ **演示数据在 `demo/`（`ced_demo` 库），不在 `src/`**：`sampleDocument` 与
+  `mixedParagraphBlock` 是喂给引擎的样例内容，不是引擎能力。改它们会影响单测与探针里
+  依赖页序的断言，改之前先看那些断言。
 - 比对 git 里的文件与工作区文件时**不要用 md5**：本机 `core.autocrlf=true`，
   工作区是 CRLF 检出，每个换行比 blob 多一字节；要比就比 git 对象标识
   （`git rev-parse HEAD:<path>`），或者给 diff 加 `--strip-trailing-cr`。

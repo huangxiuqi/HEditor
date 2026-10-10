@@ -11,7 +11,8 @@
 #include <vector>
 
 #include "app/png_writer.h"
-#include "core/engine.h"
+#include "core/engine/engine.h"
+#include "demo/demo_documents.h"
 
 #ifndef CED_NATIVE_ASSET_DIR
 #define CED_NATIVE_ASSET_DIR "."

@@ -2,7 +2,7 @@
 
 #include <algorithm>
 
-#include "core/utf8.h"
+#include "core/utils/utf8.h"
 
 namespace ced {
 namespace {

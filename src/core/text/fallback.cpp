@@ -4,7 +4,7 @@
 
 #include "core/doc/document.h"
 #include "core/text/font.h"
-#include "core/utf8.h"
+#include "core/utils/utf8.h"
 
 namespace ced {
 

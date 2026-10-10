@@ -5,7 +5,7 @@
  * 而非编译错误；拿两个编译单元的 sizeof / offsetof 一比就能现形。
  * 它不进 ctest：两个 TU 读的是磁盘上同一份头文件，只要都是刚编的必然一致，而"某个 TU 是
  * 旧对象"在进程内不可观测。查这类问题要看构建图，例如
- * touch src/core/engine.h 后看 ninja 是否重编依赖它的对象（见 CMakeLists.txt 的
+ * touch src/core/engine/engine.h 后看 ninja 是否重编依赖它的对象（见 CMakeLists.txt 的
  * ced_track_header_deps）。
  *
  * 用途：尺寸或偏移出现可疑变化时跑一下拿权威数值，再与反汇编或 .pdb 对照。
@@ -13,7 +13,7 @@
 #include <cstddef>
 #include <cstdio>
 
-#include "core/engine.h"
+#include "core/engine/engine.h"
 
 int main() {
     // 重定向到文件时防丢缓冲（同 shaping_test.cpp 的理由）

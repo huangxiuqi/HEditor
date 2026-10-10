@@ -18,7 +18,8 @@
 #include <vector>
 
 #include "core/doc/document.h"
-#include "core/engine.h"
+#include "core/engine/engine.h"
+#include "demo/demo_documents.h"
 #include "core/layout/layout.h"
 #include "core/text/shaper.h"
 
@@ -2007,7 +2008,7 @@ int main() {
         //
         // 单次 layout_ms 的噪声很大（系统调度与缓存抖动都能差出一倍以上），所以两边各测
         // 5 次取中位数再比 —— 报出去的绝对值也必须是稳的，否则它只是一串好看的数字。
-        // 全量的求法：没有脏段时 relayout() 按全量处理（见 engine.h 的说明）。
+        // 全量的求法：没有脏段时 relayout() 按全量处理（见 engine/engine.h 的说明）。
         auto median = [](std::vector<double> v) {
             std::sort(v.begin(), v.end());
             return v[v.size() / 2];

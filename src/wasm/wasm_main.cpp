@@ -17,7 +17,8 @@
 #include <string>
 #include <vector>
 
-#include "core/engine.h"
+#include "core/engine/engine.h"
+#include "demo/demo_documents.h"
 
 #ifndef CED_BUILD_STAMP
 #define CED_BUILD_STAMP "dev"

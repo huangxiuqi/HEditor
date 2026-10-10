@@ -10,11 +10,12 @@
 #include <string>
 #include <vector>
 
-#include "core/engine.h"
+#include "core/engine/engine.h"
+#include "demo/demo_documents.h"
 #include "core/layout/layout.h"
 #include "core/text/fallback.h"
 #include "core/text/shaper.h"
-#include "core/utf8.h"
+#include "core/utils/utf8.h"
 
 #include <hb.h>
 
