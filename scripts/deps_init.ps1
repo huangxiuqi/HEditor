@@ -130,18 +130,25 @@ foreach ($s in $sentinels) {
 $head = Get-GitOut @('-C', $Dir, 'rev-parse', 'HEAD')
 if ($head -ne $HbTagCommit) { throw "校验失败：HEAD 是 $head，应为 $HbTagCommit" }
 
+# 工作区必须与 HEAD 一致。只对 HEAD 不对文件，会漏掉"检出落在了别处、文件还是旧内容"。
+$dirty = Get-GitOut @('-C', $Dir, 'status', '--porcelain')
+if ($dirty) { throw "校验失败：子模块工作区与 HEAD 不一致：`n$dirty" }
+
 if (-not $NoSparse -and (Test-Path (Join-Path $Dir 'test'))) {
     Write-Host "[deps] 警告：test/ 仍存在，稀疏检出未生效（不影响构建，只是多占 92 MB）" -ForegroundColor Yellow
 }
 
 $size = [math]::Round((Get-ChildItem $Dir -Recurse -File -ErrorAction SilentlyContinue |
                        Measure-Object -Property Length -Sum).Sum / 1MB, 1)
-$verMd5 = (Get-FileHash (Join-Path $Dir 'src\hb-version.h') -Algorithm MD5).Hash.ToLower()
+# 别拿工作区文件的 md5 与 git 里的内容比：本机 core.autocrlf=true，工作区是 CRLF 检出，
+# 每行比 blob 多一个字节（hb-version.h 是 2692 对 2597，差的 95 就是行数），
+# 去 CR 之后才逐字节相同。要比就比 blob 标识。
+$verBlob = Get-GitOut @('-C', $Dir, 'rev-parse', 'HEAD:src/hb-version.h')
 
-Say "HEAD   : $head"
-Say "工作区 : $size MB（裁剪后约 10 MB）"
-Say "版本头 : src/hb-version.h MD5 $verMd5"
-Say "         14.6.0 的期望值是 671d707ac5839066aa1a3ede579982cf"
+Say "HEAD    : $head"
+Say "工作区  : $size MB（裁剪后约 10 MB）"
+Say "版本头  : blob $verBlob"
+Say "          （工作区是 CRLF 检出，文件本身比 blob 大，不要拿 md5 直接比）"
 
 Write-Host ""
 Write-Host "[deps] 剩下的由人完成：" -ForegroundColor Yellow

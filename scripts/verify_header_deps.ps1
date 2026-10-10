@@ -82,13 +82,15 @@ function Get-MTime($rel) {
 }
 
 # ── 契约 ──
-#   ced_track_header_deps(tgt, ... src/core) 注册过的 target，
-#   它下面**每一个** .obj 都要因 src/core 下的头文件变动而重编。
+#   ced_track_header_deps(tgt, ... 目录) 注册过的 target，
+#   它下面**每一个** .obj 都要因该目录下的头文件变动而重编。
 #   粒度是粗的（改一个头文件 = 重编该 target 全部 TU）—— 这是**有意**的取舍：
 #   用"粗"换"绝不会静默用旧对象"。本项目每个 target 只有几个到十几个 TU，值。
 #
-#   harfbuzz 那个巨型 TU（约 200 个源文件聚合成一个翻译单元）被**故意**排除，
-#   否则改任意一个 core 头文件都要重编整个 HarfBuzz。
+#   harfbuzz 那个巨型 TU（69 个 .cc 聚合成一个翻译单元）**不跟着 core 走**：
+#   它没注册 src/core，所以改任意一个 core 头都不会重编它（否则改一行 core 头
+#   就要重编整个 HarfBuzz）。但它注册了自己的 src/，所以改 HarfBuzz 自己的头
+#   必须重编它 —— 这两条方向相反，第 4 节与第 5 节分别断言。
 $expectRebuild = @(
     'CMakeFiles\ced_core.dir\src\core\doc\document.cpp.obj',
     'CMakeFiles\ced_core.dir\src\core\text\font.cpp.obj',
@@ -109,7 +111,16 @@ $expectLink = @(
     'ced_edit_tests.exe',
     'ced_abi_probe.exe'
 )
-$harfbuzzObj = 'CMakeFiles\ced_harfbuzz.dir\third_party\harfbuzz-14.6.0\src\harfbuzz.cc.obj'
+# harfbuzz 的 obj 路径取决于 CMakeLists 里 CED_HB_ROOT 选的是哪一份源码
+# （submodule 优先、旧目录回退），所以按"最近被构建维护的那个"找，不写死路径 ——
+# 写死会让本脚本去断言一个已经不在构建图里的旧文件，看着通过其实没有保护。
+$hbObjFull = @(Get-ChildItem -Path $BuildDir -Recurse -Filter 'harfbuzz.cc.obj' -ErrorAction SilentlyContinue) |
+             Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+if (-not $hbObjFull) { throw "找不到 harfbuzz.cc.obj（先在 $BuildDir 构建一次）" }
+$harfbuzzObj = $hbObjFull.FullName.Substring($BuildDir.Length + 1)
+
+# 顺带从它的路径反推 HarfBuzz 源码根的相对位置，免得再假设用的是 submodule 那份。
+$hbSrcRootRel = ($harfbuzzObj -replace '^CMakeFiles\\ced_harfbuzz\.dir\\', '') -replace '\\src\\harfbuzz\.cc\.obj$', ''
 
 Write-Host "[deps] 构建目录 : $BuildDir"
 Write-Host "[deps] 目标头文件: $Hdr"
@@ -172,8 +183,27 @@ $hbNow = Get-MTime $harfbuzzObj
 Check 'harfbuzz 的 obj 原封不动（粒度没失控）' ($hbNow -eq $pre[$harfbuzzObj]) `
       $("快照 $($pre[$harfbuzzObj]) / 现在 $hbNow")
 
-# ── 5. 收敛性：再跑一次不能还有活 ──
-Write-Host "`n[5] 收敛性"
+# ── 5. 反向场景：改 HarfBuzz 自己的头，它的聚合 TU 必须重编 ──
+#   漏掉这一条的后果不是"慢"，而是"编出来的是上一份源码"：harfbuzz.cc 本身没变，
+#   变的都在它 include 进来的 .cc/.hh 里，而 MSVC 侧没有任何自动依赖通道。
+Write-Host "`n[5] 把 HarfBuzz 头的 mtime 推一下（内容一字不改）"
+$hbHdr = Join-Path $Root ((Join-Path $hbSrcRootRel 'src') + '\hb-version.h')
+if (-not (Test-Path $hbHdr)) { throw "缺少 HarfBuzz 头: $hbHdr" }
+$hbHashBefore = (Get-FileHash $hbHdr -Algorithm SHA256).Hash
+(Get-Item $hbHdr).LastWriteTime = (Get-Date)
+$hbHashAfter = (Get-FileHash $hbHdr -Algorithm SHA256).Hash
+Check 'HarfBuzz 头的内容没动（只是 mtime 变了）' ($hbHashBefore -eq $hbHashAfter) `
+      "sha256 $($hbHashBefore.Substring(0,12))…"
+
+$hbBefore = Get-MTime $harfbuzzObj
+$null = Run-Ninja @()
+$hbAfter = Get-MTime $harfbuzzObj
+Check '改 HarfBuzz 的头会让它的聚合 TU 重编（否则静默沿用上一份源码）' `
+      ($null -ne $hbBefore -and $null -ne $hbAfter -and $hbAfter -gt $hbBefore) `
+      "之前 $hbBefore / 现在 $hbAfter"
+
+# ── 6. 收敛性：再跑一次不能还有活 ──
+Write-Host "`n[6] 收敛性"
 $mid = @{}
 foreach ($r in ($expectRebuild + $expectLink + @($harfbuzzObj))) { $mid[$r] = Get-MTime $r }
 $null = Run-Ninja @()

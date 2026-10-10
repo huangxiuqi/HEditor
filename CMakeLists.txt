@@ -150,12 +150,14 @@ endfunction()
 #
 #   ★ 这个办法有回归测试：scripts/verify_header_deps.ps1
 #     它把 engine.h 的 mtime 推一下（内容不动），然后按**文件 mtime**断言
-#     11 个 TU 全重编、5 个链接产物全重做、harfbuzz 的 obj 原封不动。
+#     11 个 TU 全重编、5 个链接产物全重做、harfbuzz 的 obj 原封不动；
+#     再把 HarfBuzz 自己的某个头的 mtime 推一下，断言它的聚合 TU 必须重编
+#     （这两条方向相反，缺一条就会漏掉"改 HarfBuzz 不重编"那种静默复用）。
 #     （为什么按 mtime 而不解析 ninja 输出：ninja 的控制台输出在管道里会丢尾巴，
 #      实测一次 17 步的构建只捕获到 [10/17]；`ninja -n` 也因为 CONFIGURE_DEPENDS
 #      的 glob stamp 而不给计划。mtime 是文件系统事实，不经过文本层。）
 #     已证伪过：把本函数短路后它变红（11 个 TU 未重编，退出码 2），
-#     恢复后回到 6/6 绿。改这里之后请跑它。
+#     恢复后回到全绿（当前 8 项）。改这里之后请跑它。
 #
 #   作用域：只对 MSVC 生效。clang/emscripten 的 depfile 通道本来是好的
 #   （实测 wasm 侧某个 .o 记了 803 条依赖，精确到具体头文件），
@@ -166,7 +168,10 @@ function(ced_track_header_deps tgt)
   endif()
   set(_hdrs "")
   foreach(_d IN LISTS ARGN)
-    file(GLOB_RECURSE _g CONFIGURE_DEPENDS "${_d}/*.h" "${_d}/*.hpp")
+    # .hh 是 C++ 内部头的常见后缀（HarfBuzz 整个 src/ 用它），.cc 也要收：
+    # 聚合源会把 .cc 直接 include 进来，它们是依赖而不是无关文件。
+    file(GLOB_RECURSE _g CONFIGURE_DEPENDS
+         "${_d}/*.h" "${_d}/*.hpp" "${_d}/*.hh" "${_d}/*.cc")
     list(APPEND _hdrs ${_g})
   endforeach()
   if(NOT _hdrs)
@@ -189,6 +194,14 @@ endfunction()
 add_library(ced_harfbuzz STATIC ${CED_HB_ROOT}/src/harfbuzz.cc)
 target_include_directories(ced_harfbuzz SYSTEM PUBLIC ${CED_HB_ROOT}/src)
 set_target_properties(ced_harfbuzz PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
+
+# HarfBuzz 的"源文件"其实是整个 src/：harfbuzz.cc 的 69 条 include 全是 .cc，
+# 再由它们包进 .hh。所以它必须挂上自己的头文件依赖 —— MSVC 侧没有任何自动依赖通道，
+# 不挂的话，换 HarfBuzz 版本（或改它任何一个 .cc/.hh）都会静默复用旧对象，
+# 于是编出来的是上一份源码，而构建一句提示都不给。
+# 这里只覆盖 HarfBuzz 自己的头；core 的头不在其中，所以改 core 不会重编这个巨型 TU
+# （那是有意的取舍，见上面 ced_track_header_deps 的说明）。
+ced_track_header_deps(ced_harfbuzz ${CED_HB_ROOT}/src)
 
 if(EMSCRIPTEN)
   # 单线程 wasm：关掉互斥量相关代码，减包体
