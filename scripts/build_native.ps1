@@ -44,7 +44,8 @@ cmake -S $Root -B $BuildDir -G Ninja `
     "-DCMAKE_MAKE_PROGRAM=$NinjaExe" `
     "-DCMAKE_BUILD_TYPE=$Config" `
     "-DCMAKE_C_COMPILER=cl" `
-    "-DCMAKE_CXX_COMPILER=cl"
+    "-DCMAKE_CXX_COMPILER=cl" `
+    "-DCED_BUILD_STAMP=$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
 if ($LASTEXITCODE -ne 0) { throw "cmake 配置失败" }
 
 # ── 构建 ────────────────────────────────────────────────────────

@@ -55,15 +55,22 @@ $env:EM_CONFIG = Join-Path $Emsdk '.emscripten'
 $env:PATH = "$EmscriptenDir;$Emsdk;$($NodeDir.FullName);$env:PATH"
 
 # ── 配置 ────────────────────────────────────────────────────
+# 每次都重跑配置：构建时间戳（CED_BUILD_STAMP）是配置期的缓存变量，
+#   不重跑就拿不到新的时间，验证台上显示的"这一版是几点编的"就会骗人。
+#   代价是每次多几秒配置时间，换来的是"页面跑的到底是哪一版"当场可判。
+$Stamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
 if ($Configure -or -not (Test-Path $cacheFile)) {
     Write-Host "[wasm] 配置 emcmake + Ninja ($BuildType, Skia=$SkiaWasOn)"
-    & (Join-Path $EmscriptenDir 'emcmake.exe') cmake `
-        -S $Root -B $BuildDir -G Ninja `
-        "-DCMAKE_BUILD_TYPE=$BuildType" `
-        "-DCMAKE_MAKE_PROGRAM=$Ninja" `
-        $SkiaFlag
-    if ($LASTEXITCODE -ne 0) { throw "emcmake 配置失败：exit $LASTEXITCODE" }
+} else {
+    Write-Host "[wasm] 刷新配置（构建时间戳 $Stamp）"
 }
+& (Join-Path $EmscriptenDir 'emcmake.exe') cmake `
+    -S $Root -B $BuildDir -G Ninja `
+    "-DCMAKE_BUILD_TYPE=$BuildType" `
+    "-DCMAKE_MAKE_PROGRAM=$Ninja" `
+    "-DCED_BUILD_STAMP=$Stamp" `
+    $SkiaFlag
+if ($LASTEXITCODE -ne 0) { throw "emcmake 配置失败：exit $LASTEXITCODE" }
 
 # ── 构建 ────────────────────────────────────────────────────
 Write-Host "[wasm] 构建 ced_wasm"

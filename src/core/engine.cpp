@@ -825,12 +825,13 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
     edit_stats_.caret_h_px = static_cast<int>(cr.h);
 
     // 表单
-    // caret_control 用 include_end = true，与 canPlaceCaret 同一口径 ——
-    // 于是"面板显示光标在某控件内"与"策略允许它停在这儿"永远不会互相矛盾。
+    // caret_control 用 include_end = true：光标停在字段末尾也算"在这个控件里"，
+    //   与编辑归属同一口径（focusedControlIndex），两者永远不会互相矛盾。
+    // 例外是点画布带进来的归属提示：共享边界上它比"最内层"更准，走同一个
+    //   focusedControlIndex（面板/探针看到的必须与实际落笔的字段一致）。
     edit_stats_.edit_mode = static_cast<int>(policy_.mode());
     edit_stats_.control_count = controls_.size();
-    edit_stats_.caret_control =
-        controls_.empty() ? -1 : controls_.innermostAt(caret_, /*include_end=*/true);
+    edit_stats_.caret_control = focusedControlIndex();
     edit_stats_.blocked_edits = blocked_edits_;
     edit_stats_.caret_index = caret_.offset;
     for (int i = 0; i < caret_.para && i < static_cast<int>(blocks_.size()); ++i)
@@ -958,9 +959,8 @@ void EditorEngine::drawControlMarks() {
 
     // 小点（Focused 档：光标不在的字段）
     //
-    // 与 canPlaceCaret 同一口径（include_end = true）：光标停在字段末尾
-    // 也算"在这个字段里" —— 否则刚打到最后一个字时括号会突然消失，
-    // 而那一刻正是最需要看到边界的时候。
+    // 用 include_end = true：光标停在字段末尾也算"在这个字段里" ——
+    // 否则刚打到最后一个字时括号会突然消失，而那一刻正是最需要看到边界的时候。
     const int focused = controls_.empty() ? -1 : controls_.innermostAt(caret_, true);
 
     for (int ci = 0; ci < controls_.size(); ++ci) {
@@ -1010,7 +1010,10 @@ const LineBox* EditorEngine::findLineFor(const TextPos& pos) const {
 bool EditorEngine::caretRectFor(const TextPos& pos, int* page_out, Rect* out) const {
     const LineBox* lb = findLineFor(pos);
     if (!lb) return false;
-    const float off = lb->inlineOffsetFor(static_cast<uint32_t>(pos.offset));
+    // 归属提示只对"当前光标"这一处有意义（它是点画布时定下来的，见 setCaretAt）。
+    //   其它位置（选区另一端、诊断打印）没有这个信息，走中性规则。
+    const int hint = (pos == caret_) ? caretFieldHint() : -1;
+    const float off = lb->inlineOffsetFor(static_cast<uint32_t>(pos.offset), hint);
     const float t = cfg_.caret_width_pt;
     Rect r;
     if (!lb->vertical) {
@@ -1053,6 +1056,8 @@ Rect EditorEngine::caretRectPx() const {
 }
 
 void EditorEngine::setCaret(int para, size_t offset) {
+    // 无侧别的入口：把上一次点击带进来的归属提示清掉。
+    caret_field_ = -1;
     if (blocks_.empty()) {
         caret_ = TextPos{0, 0};
         return;
@@ -1060,13 +1065,44 @@ void EditorEngine::setCaret(int para, size_t offset) {
     if (para < 0) para = 0;
     if (para >= static_cast<int>(blocks_.size())) para = static_cast<int>(blocks_.size()) - 1;
     const int plan_before = bracketPlanId();
-    TextPos p{para, snapToCluster(para, offset)};
-    // 表单模式下光标只允许停在可编辑字段里。找不到就近的合法位置就原地不动 ——
-    // 这比"退回到某个默认位置"安全：后者会让光标莫名其妙地跳到文档开头。
-    if (!clampToAllowed(&p, /*dir=*/0)) p = caret_;
-    caret_ = p;
+    // 光标位置不受控件约束：字段外、只读字段里都能停。约束编辑的是 EditPolicy
+    //   （插 / 删 / 分段），不是光标 —— 两者混起来会得到"字段外的正文连点都点不进去"
+    //   这种与编辑边界无关的怪现象。所以这里除了吸附到字素簇之外不改写任何东西。
+    caret_ = TextPos{para, snapToCluster(para, offset)};
     // 占位计划变了 → 必须重排（占位进文档流）。
     //   All 档下计划与光标无关 → 这一句恒为 no-op（光标移动是真增量的地基）。
+    relayoutIfBracketPlanChanged(plan_before);
+}
+
+/**
+ * 带归属的定位（点画布）。
+ *
+ * 为什么位置本身不够：共享边界上"前一个字段的末尾"与"后一个字段的开头"是同一个
+ * 偏移，两枚括号紧挨着排在同一列上。只看偏移，归属只能按"最内层、同深度取下标
+ * 小者"来定，恒定为前一个字段。于是点后一个字段的开头时，光标虽然停住了，字却会
+ * 落进前一个字段；前一个字段只读时更直接：编辑被拒，看起来就像点不进去。
+ *
+ * 浏览器里点的是具体某一枚括号，这项信息由 hitTestPt 带出来（占位簇记着
+ * owner_control），这里把它记在光标上，供画光标（决定贴闭括号之内还是开括号之后，
+ * 见 LineBox::inlineOffsetFor）与编辑归属判定两处使用。提示只在光标仍停在该位置上
+ * 时才有效，一按方向键或一打字位置就变，它随之失效。
+ */
+void EditorEngine::setCaretAt(int para, size_t offset, int field) {
+    caret_field_ = -1;
+    if (blocks_.empty()) {
+        caret_ = TextPos{0, 0};
+        return;
+    }
+    if (para < 0) para = 0;
+    if (para >= static_cast<int>(blocks_.size())) para = static_cast<int>(blocks_.size()) - 1;
+    const int plan_before = bracketPlanId();
+    caret_ = TextPos{para, snapToCluster(para, offset)};
+    // 提示只在它真的覆盖落点时才认 —— 否则它描述的是别处的事，不能拿来指挥编辑。
+    if (field >= 0 && field < controls_.size() &&
+        rangeAllowsInsert(controls_.at(field).range, caret_)) {
+        caret_field_ = field;
+        caret_field_at_ = caret_;
+    }
     relayoutIfBracketPlanChanged(plan_before);
 }
 
@@ -1086,7 +1122,6 @@ bool EditorEngine::moveCaretBy(int dcp) {
         const std::vector<uint32_t>& starts =
             have_starts ? layout_.para_cluster_starts[static_cast<size_t>(p.para)] : kEmptyStarts;
 
-        // 先算"下一步"到一个临时量，确认可停才提交 —— 见循环末尾那条。
         TextPos next = p;
         if (dcp < 0) {
             if (next.offset > 0) {
@@ -1118,18 +1153,9 @@ bool EditorEngine::moveCaretBy(int dcp) {
                 break;
             }
         }
-
-        // 表单模式：方向键不跨控件，下一步不可停就停在原地。
-        //
-        //   若改成"整段走完再投影到最近的合法位置"，投影不认方向只认距离，
-        //   一步会变成瞬移到另一头（从 #2 起点按一次左键会跨过只读字段落到 #0）。
-        //   投影适用于点击（给的是粗略的点，就近吸附是合理猜测），不适用于键盘
-        //   （给的是明确指令，光标应一次一格、走不动就停）。因此 setCaret 继续用
-        //   clampToAllowed，方向键走逐格停。
-        //
-        //   代价说清楚：字段之间不再能靠方向键走过去了（中间不是可停位置），
-        //     要进另一个字段就用鼠标点。这是"不跨控件"的必然结果，不是 bug。
-        if (!EditPolicy::canPlaceCaret(controls_, policy_.mode(), next)) break;
+        // 逐格走，唯一的停步条件是"前面没有下一格了"（段首/段尾）。
+        //   这里不再判"下一步可停吗"（表单模式下不许离开出发字段），那条约束已经撤掉：
+        //   光标位置不再受控件约束，方向键能走出字段、也能跨过只读字段。
         p = next;
     }
 
@@ -1140,55 +1166,12 @@ bool EditorEngine::moveCaretBy(int dcp) {
     return true;
 }
 
-bool EditorEngine::clampToAllowed(TextPos* pos, int dir) const {
-    if (!pos) return false;
-    // 策略允许 → 原样通过。这一句保证 Document / ReadOnly / 未配控件
-    // 这三种情况下本函数是完全透明的（改动前后行为逐字节一致）。
-    if (EditPolicy::canPlaceCaret(controls_, policy_.mode(), *pos)) return true;
-
-    // 走到这里只可能是表单模式（canPlaceCaret 的语义见 edit_policy.h）。
-    TextPos best{};
-    bool found = false;
-    auto dist = [](const TextPos& a, const TextPos& b) -> long long {
-        const long long dp = static_cast<long long>(a.para) - static_cast<long long>(b.para);
-        const long long dof = static_cast<long long>(a.offset) - static_cast<long long>(b.offset);
-        return (dp < 0 ? -dp : dp) * 1000000LL + (dof < 0 ? -dof : dof);
-    };
-    auto consider = [&](const TextPos& cand) {
-        if (!EditPolicy::canPlaceCaret(controls_, policy_.mode(), cand)) return;
-        // 方向约束：dir > 0 只往文档后方找、< 0 只往前找（"停在边界"就是这么来的）；
-        // dir == 0 就近取（鼠标点击 / setCaret 用）。
-        if (dir > 0 && !(*pos < cand)) return;
-        if (dir < 0 && !(cand < *pos)) return;
-        if (!found || dist(cand, *pos) < dist(best, *pos)) {
-            best = cand;
-            found = true;
-        }
-    };
-    // 候选 = 每个可编辑控件的两个端点。
-    // 端点就够了：能走到这里说明 pos 在字段外，那么最近的合法可停处必定是
-    // 某个字段的端点（字段内部的任何位置本来就合法，不会进这个函数）。
-    for (int i = 0; i < controls_.size(); ++i) {
-        const Control& c = controls_.at(i);
-        if (c.read_only) continue;
-        consider(c.range.start);
-        consider(c.range.end);
-    }
-    if (!found) return false;
-    *pos = best;
-    return true;
-}
-
 bool EditorEngine::moveCaretToLineStart() {
     const LineBox* lb = findLineFor(caret_);
     if (!lb) return false;
     const int plan_before = bracketPlanId();
-    TextPos p{lb->paragraph, lb->first_cp};
-    // 表单模式：不跨控件。行首落在字段外时退到当前字段起点，不作"就近吸附"——
-    //   后者会让 Home 把光标甩进另一个控件（在 #2 内按 Home 会落到 #0 的起点）。
-    //   与 moveCaretBy 的"一步一格、走不动就停"同一条原则：移动不把光标送到
-    //   当前可编辑区间之外。
-    if (!clampToFieldEdge(&p, /*to_start=*/true)) return false;
+    // 行首就是行首，不再往字段边界上收：光标位置不受控件约束（见 setCaret）。
+    const TextPos p{lb->paragraph, lb->first_cp};
     if (p == caret_) return false;
     caret_ = p;
     relayoutIfBracketPlanChanged(plan_before);
@@ -1199,30 +1182,10 @@ bool EditorEngine::moveCaretToLineEnd() {
     const LineBox* lb = findLineFor(caret_);
     if (!lb) return false;
     const int plan_before = bracketPlanId();
-    TextPos p{lb->paragraph, lb->last_cp};
-    if (!clampToFieldEdge(&p, /*to_start=*/false)) return false;
+    const TextPos p{lb->paragraph, lb->last_cp};
     if (p == caret_) return false;
     caret_ = p;
     relayoutIfBracketPlanChanged(plan_before);
-    return true;
-}
-
-/**
- * Home/End 的收边：目标（行首/行尾）在当前可编辑字段之内就照常，
- * 否则退到本字段的起点/终点；光标本来就不在任何可编辑字段里 → 不动。
- * 为什么不去用 clampToAllowed：那个函数是"投影到最近的合法位置"，
- * 对点击是对的（点击给的是粗略的点），对键盘移动是错的（会把光标送到别的控件）。
- */
-bool EditorEngine::clampToFieldEdge(TextPos* pos, bool to_start) const {
-    if (EditPolicy::canPlaceCaret(controls_, policy_.mode(), *pos)) return true;
-    if (policy_.mode() != EditMode::Form) return false;
-    const int ci = controls_.empty() ? -1 : controls_.innermostAt(caret_, true);
-    if (ci < 0) return false;  // 光标本来就不在字段里，没什么可退的
-    const Control& c = controls_.at(ci);
-    TextPos edge = to_start ? c.range.start : c.range.end;
-    if (edge == caret_) return false;  // 已经在边缘，调用方会据此返回"没动"
-    if (!EditPolicy::canPlaceCaret(controls_, policy_.mode(), edge)) return false;
-    *pos = edge;
     return true;
 }
 
@@ -1239,7 +1202,11 @@ bool EditorEngine::insertCodepoints(int para, size_t offset, const std::vector<u
     // 策略判定用的是吸附之后的位置 —— 判定用的位置和真正落笔的位置
     //   必须是同一个。否则会出现"策略放行了一个它根本没看过的位置"这种漏洞：
     //   吸附把 at 挪到簇边界之后，落笔点可能已经跨到另一个控件里去了。
-    if (!EditPolicy::canInsert(controls_, policy_.mode(), TextPos{para, at})) {
+    // 归属提示只在"落笔点就是光标现在待的地方"时才采纳：insertCodepoints 也能被
+    //   宿主或测试从别的位置调进来，那时光标上的提示与该次编辑无关。
+    const TextPos ins{para, at};
+    const int owner_hint = (ins == caret_) ? caretFieldHint() : -1;
+    if (!EditPolicy::canInsert(controls_, policy_.mode(), ins, owner_hint)) {
         ++blocked_edits_;
         return false;
     }
@@ -1248,7 +1215,7 @@ bool EditorEngine::insertCodepoints(int para, size_t offset, const std::vector<u
     // 区间是活的：端点跟随插入移动（在控件内插则变长，在控件前插则平移）。
     //   漏掉这一步，控件会与它标注的内容脱节：既拒绝本该允许的输入，
     //   又允许本该拒绝的，且区间看起来仍然有效。
-    adjustControlsOnInsert(controls_, para, at, cps.size());
+    adjustControlsOnInsert(controls_, para, at, cps.size(), owner_hint);
     caret_ = TextPos{para, at + cps.size()};
     // 内容只在这一段变了：下一轮排版从这个段续排，前面的段原样复用。
     markLayoutDirty(para);
@@ -1490,9 +1457,6 @@ void EditorEngine::setControls(std::vector<Control> list) {
     //     刚 setBlocks 过却还没 relayout 的话，控件区间会投影到上一次的行盒上
     //     （症状："4 个字的字段给了 2 个矩形块"，探针当场抓到过）。
     //     规矩是：谁改了文档，谁负责 relayout。
-    TextPos p = caret_;
-    if (!clampToAllowed(&p, /*dir=*/0)) p = caret_;
-    caret_ = p;
     relayout();
 
     // 标记画在帧上、不进底图 → 页指纹不受影响，只要求下一次整帧重贴。
@@ -1505,10 +1469,6 @@ void EditorEngine::setEditMode(EditMode m) {
     if (policy_.mode() == m) return;
     const int plan_before = bracketPlanId();
     policy_.setMode(m);
-
-    TextPos p = caret_;
-    if (!clampToAllowed(&p, /*dir=*/0)) p = caret_;
-    caret_ = p;
 
     // 切模式会改变占位集合本身（文档模式一个都不占、表单模式要占），
     //   所以这里可能也要重排（Focused 档下还有"光标被夹进最近字段"这一层）。
@@ -1618,11 +1578,9 @@ bool EditorEngine::focusControl(bool forward) {
         }
         if (!found) target = starts.back();
     }
-    TextPos p = target;
-    if (!clampToAllowed(&p, /*dir=*/0)) return false;
-    if (p == caret_) return false;
+    if (target == caret_) return false;
     const int plan_before = bracketPlanId();
-    caret_ = p;
+    caret_ = target;
     relayoutIfBracketPlanChanged(plan_before);
     return true;
 }
@@ -2058,9 +2016,11 @@ bool EditorEngine::moveCaretToLineEndAndRender() {
     return true;
 }
 
-/** 命中测试：几何的反向半边 —— 帧坐标反查 (段, 偏移)。 */
+/** 命中测试：几何的反向半边 —— 帧坐标反查 (段, 偏移) + 归属控件。 */
 
-bool EditorEngine::hitTestPt(float x_pt_frame, float y_pt_frame, TextPos* out) const {
+bool EditorEngine::hitTestPt(float x_pt_frame, float y_pt_frame, TextPos* out,
+                             int* out_owner) const {
+    if (out_owner) *out_owner = -1;
     if (!out || layout_.lines.empty()) return false;
 
     const float page_w = cfg_.page.width_pt;
@@ -2104,23 +2064,44 @@ bool EditorEngine::hitTestPt(float x_pt_frame, float y_pt_frame, TextPos* out) c
     const size_t n = best->clusters.size();
 
     size_t cp = best->last_cp;  // 默认：落在最后半个簇之后 → 行末
+    // 命中的簇下标（-1 = 落在行末，没有簇）。归属判定要用它 —— 占位簇自己记着
+    //   自己属于哪个控件，那正是"用户点的是哪一枚括号"的答案。
+    size_t hit_i = best->clusters.size();
     if (rel < 0.0f) {
         cp = n ? best->clusters.front().cp : best->first_cp;
+        hit_i = n ? 0 : best->clusters.size();
     } else {
         for (size_t i = 0; i < n; ++i) {
             const float a = best->clusters[i].inline_pt;
             const float b = (i + 1 < n) ? best->clusters[i + 1].inline_pt : best->inline_end_pt;
             if (rel < (a + b) * 0.5f) {
                 cp = best->clusters[i].cp;
+                hit_i = i;
                 break;
             }
         }
     }
 
     TextPos p{best->paragraph, cp};
-    // 表单模式下点到字段之外的正文时，就近吸附到最近的字段 ——
-    // 而不是把光标丢在一个"点得到、却改不了"的位置上（那看起来像程序坏了）。
-    clampToAllowed(&p, /*dir=*/0);
+    // 归属：点到的这一簇如果是占位括号，就是那枚括号的主人；
+    //   否则（点在真实的字上）取"该位置的内容所属的控件"（半开区间）——
+    //   于是点字段第一个字的左半边落在它的开头、归它，而不是归前一个字段。
+    //   这两条合起来给出"用户在屏幕上点的是哪一个字段"，与偏移一起交给宿主。
+    int owner = -1;
+    if (controls_.size() > 0) {
+        // 落在最后一个簇之后（行末右侧）时，算作点到了最后一个簇 ——
+        //   段尾字段的闭括号占位正好挂在那一头，这样"点字段右括号右边"仍然算它。
+        if (hit_i >= best->clusters.size() && !best->clusters.empty())
+            hit_i = best->clusters.size() - 1;
+        const bool on_slot = hit_i < best->clusters.size() && best->clusters[hit_i].placeholder &&
+                             best->clusters[hit_i].owner_control >= 0;
+        owner = on_slot ? best->clusters[hit_i].owner_control
+                        : controls_.innermostAt(p, /*include_end=*/false);
+    }
+    // 命中即落点：光标位置不受控件约束，所以这里不再做"就近吸附到最近字段"。
+    //   吸附会把"点字段外正文"改写成"停在字段端点"，于是画出来的光标不在点的地方，
+    //   表象就是"点了没反应"。归属照实返回，编辑侧自己会按策略拒绝。
+    if (out_owner) *out_owner = owner;
     *out = p;
     return true;
 }

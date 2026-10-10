@@ -54,14 +54,16 @@ void ControlSet::normalize() {
         return rb.end < ra.end;  // 起点相同 → 长的（外层的）在前
     });
 
-    // 父 = 所有"严格包含它"的控件里最内层的那个。
+    // 父 = 所有"包含它"的控件里最内层的那个。
     // 判据用区间端点而非长度：跨段区间算不出有意义的长度，
     // 而"起点更晚 / 终点更早"在任何情况下都成立。
+    // 包含的口径见 rangeContainsForNesting —— 完全重合的两段区间互为兄弟，
+    //   否则它们会互相认父，深度当场失控（两段的 depth 都会涨到上限）。
     for (size_t i = 0; i < items_.size(); ++i) {
         int best = -1;
         for (size_t j = 0; j < items_.size(); ++j) {
             if (i == j) continue;
-            if (!rangeCovers(items_[j].range, items_[i].range)) continue;
+            if (!rangeContainsForNesting(items_[j].range, items_[i].range)) continue;
             if (best < 0) {
                 best = static_cast<int>(j);
                 continue;
@@ -78,8 +80,9 @@ void ControlSet::normalize() {
     for (size_t i = 0; i < items_.size(); ++i) {
         int d = 0;
         int p = items_[i].parent;
-        // 深度上限防御：万一有人造出循环引用，也不能把这里挂死。
-        while (p >= 0 && d < 64) {
+        // 严格包含是偏序，父链必然有限（每上一级外层都严格更大），上限取控件数即可。
+        //   写成固定的 64 会把"真的出了环"也压成 64 —— 那就成了静默的错误答案。
+        while (p >= 0 && d <= static_cast<int>(items_.size())) {
             ++d;
             p = items_[static_cast<size_t>(p)].parent;
         }
@@ -120,35 +123,52 @@ std::vector<int> ControlSet::overlapping(const ControlRange& r) const {
 }
 
 /**
- * 区间伸缩：在 (para, at) 处插入 n 个码点。
- * 两步：先定落笔点归谁，再按归属选端点规则。归属与 EditPolicy::canInsert、光标判定
- * 同一口径（最内层控件，含末尾）—— 相邻两字段共享边界时，同一个位置既是前一个字段的
- * 末尾、又是后一个字段的开头，字只能进其中一个；两边都按"在末尾追加"伸缩就会得到两段
- * 重叠的区间，表现是共享边界上的括号顺序从 ][ 变成 []。
- * 吸收者 = 落笔点的主人，以及包住主人、且新字接在主人末尾的外层控件：起点 > at 才
- * 右移（起点停在 at 处 = 在字段开头打字），终点 >= at 就右移（在末尾追加，区间变长）。
- * 其余控件：起点 >= at 右移（内容整体后移，新字不许落进来），终点 > at 才右移
- * （终点正好在 at 说明内容到此为止，新字归别人）。
- * 空控件（start == end）两端点必须同进同退，否则会写出 start > end 的非法区间；
- * 唯一例外是它就是落笔点的主人 —— 空字段里打字，新字要填进来。
+ * 区间伸缩：在 (para, at) 处插入 n 个码点。两步：先定落笔点归谁，再按归属选端点规则。
+ * 归属与 EditPolicy::canInsert、光标判定同一口径（最内层控件，含末尾）—— 相邻两字段
+ * 共享边界时，同一个位置既是前一个字段的末尾、又是后一个字段的开头，字只能进其中一个；
+ * 两边都按"在末尾追加"伸缩就会得到两段重叠的区间，表现是边界上的括号顺序从 ][ 变成 []。
+ * 吸收者 = 落笔点的主人，以及包住主人、且新字接在主人末尾的外层控件：起点 > at 才右移
+ * （起点停在 at 处 = 在字段开头打字），终点 >= at 就右移（在末尾追加，区间变长）；其余
+ * 控件起点 >= at 右移（内容整体后移），终点 > at 才右移（终点在 at 说明内容到此为止，
+ * 新字归别人）。空控件两端点必须同进同退，否则会写出 start > end 的非法区间；唯一例外
+ * 是它就是落笔点的主人 —— 空字段里打字，新字要填进来。
+ * @param preferred >= 0 时"归属已经由调用方定好"（点画布：点的是这个控件的括号）；
+ *   共享边界上最内层判不出侧别（同深度取下标小者 = 前一个字段），默认 -1 = 按最内层判。
  */
-void adjustControlsOnInsert(ControlSet& ctrls, int para, size_t at, size_t n) {
+void adjustControlsOnInsert(ControlSet& ctrls, int para, size_t at, size_t n, int preferred) {
     if (n == 0) return;
     const TextPos pos{para, at};
-    const int owner = ctrls.innermostAt(pos, /*include_end=*/true);
+    int owner = ctrls.innermostAt(pos, /*include_end=*/true);
+    // 提示只在它真的覆盖落笔点时才采纳 —— 与 EditPolicy 里同一个防御。
+    if (preferred >= 0 && preferred < ctrls.size() &&
+        rangeAllowsInsert(ctrls.at(preferred).range, pos))
+        owner = preferred;
     // 判"谁包住谁"必须用调整之前的区间：循环里前面的控件会先被改，
     //   拿改过的区间去比，结果会随控件顺序变。
     const ControlRange owner_range = (owner >= 0) ? ctrls.at(owner).range : ControlRange{};
+    const bool owner_is_empty =
+        (owner >= 0) && owner_range.start == owner_range.end;
     // 外层控件要不要跟着变长：只有当新字接在"主人的末尾"时，外层必须继续盖住主人，
     //   否则外层 [0,9) 与增长后的内层 [5,10) 会互相穿过 —— 比画错括号更糟的状态。
     //   空主人不算：它只是停在外层末尾上的一个点，新字是它的第一个字，外层到 at 为止，
     //   两者相邻不相交（这恰恰是"相邻字段"该有的形态，见单测 [18] 的 (d)）。
-    const bool owner_tail_grown = (owner >= 0) && owner_range.start != owner_range.end &&
+    const bool owner_tail_grown = (owner >= 0) && !owner_is_empty &&
                                   owner_range.end.para == para && owner_range.end.offset == at;
+    // 新字落在"主人的内容最前面"（主人从这个偏移开始）。
+    const bool owner_opens_here = (owner >= 0) && !owner_is_empty &&
+                                  owner_range.start.para == para &&
+                                  owner_range.start.offset == at;
     for (Control& c : ctrls.mutableAll()) {
         const bool is_owner = (owner >= 0) && (&c == &ctrls.at(owner));
         if (!is_owner && c.range.start == c.range.end && c.range.start.para == para) {
-            if (c.range.start.offset >= at) {
+            // 空字段是"一个位置"，它的排位与括号槽序同一套规则：在"到此结束的字段"之后、
+            //   在"从此开始的字段"之前，同一偏移上的多个空字段按控件下标排。
+            //   新字落在它之后 → 它不动；落在它之前 → 它右移。
+            //   一律右移会让两个相邻空字段交换次序：往右边那个打字，左边那个被推到
+            //   新字的右侧，于是它从兄弟变成子节点，括号画成 ][痛[]] 这种嵌套形态。
+            const bool z_before_new_char =
+                owner_is_empty ? (&c < &ctrls.at(owner)) : owner_opens_here;
+            if (c.range.start.offset >= at && !z_before_new_char) {
                 c.range.start.offset += n;
                 c.range.end.offset += n;
             }
@@ -162,6 +182,12 @@ void adjustControlsOnInsert(ControlSet& ctrls, int para, size_t at, size_t n) {
             (absorbs ? c.range.end.offset >= at : c.range.end.offset > at))
             c.range.end.offset += n;
     }
+    // 区间动过之后必须重算区间树（depth/parent）。它不只影响嵌套的显示语义：
+    //   "某个位置属于哪个字段"是按最内层判的，树过期 = 判定用了一份过期的包含关系。
+    //   典型后果：把中间那个字段删空之后，它变成零宽、被左右邻居按闭合区间包含
+    //   （本该是最内层、因而最优先），但 depth 还停在 0，于是位置被左邻居抢走 ——
+    //   表现就是"这个空字段再也打不进字、光标再也进不去"。
+    ctrls.normalize();
 }
 
 void adjustControlsOnSplitPara(ControlSet& ctrls, const TextPos& pos) {
@@ -214,6 +240,9 @@ void adjustControlsOnErase(ControlSet& ctrls, int para, size_t a, size_t b) {
         fix(c.range.start);
         fix(c.range.end);
     }
+    // 同 adjustControlsOnInsert：区间动过就要重算区间树，否则"最内层"判定用的是过期包含关系。
+    //   删空一个字段正是靠这一句才让那个零宽字段重新成为自己位置上的最内层。
+    ctrls.normalize();
 }
 
 }  // namespace ced

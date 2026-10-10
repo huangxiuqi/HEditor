@@ -1,0 +1,3 @@
+# 会话原始数据体积很大（本会话 77 MB），不进版本库。
+# 需要它时重跑 _export_session.py 即可从 ~/.workbuddy/projects 下重新生成。
+*.jsonl

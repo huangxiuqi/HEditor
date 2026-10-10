@@ -45,4 +45,7 @@ Write-Host "验证台地址：http://localhost:$Port/web/index.html"
 Write-Host '按 Ctrl+C 停止'
 Write-Host ''
 
-& $py -m http.server $Port --directory $Root
+# 走 scripts\dev_server.py 而不是 python -m http.server：后者不发 Cache-Control，
+#   浏览器会按启发式新鲜度复用磁盘缓存 → 重新编译了 wasm，页面照旧跑旧的那一份
+#   （"改了没生效"最常见的原因）。dev_server.py 每个响应都发 no-store。
+& $py (Join-Path $PSScriptRoot 'dev_server.py') --port $Port --root $Root

@@ -129,6 +129,11 @@ struct BlockShaping {
          * 只读字段的边界（决定括号画成灰色）。只有占位簇有意义。
          */
         bool read_only = false;
+        /**
+         * 这个占位属于哪个控件（控件集合下标）。只有占位簇有意义 ——
+         * 命中测试靠它回答"点到的这个括号是谁的"（见 layout.h 的 LineCluster）。
+         */
+        int owner_control = -1;
     };
     std::vector<Cluster> clusters;
     std::vector<float> cluster_adv_pt;  // 沿行内轴的推进（磅）
@@ -176,9 +181,10 @@ uint64_t shapingFingerprint(const BlockSpec& b) {
  * 把"要显示括号的控件"的边界插成占位簇（括号进文档流的全部实现）。
  * 三条约定：
  *   槽宽 = 括号字形 advance + 间隙，且与绘制侧共用同一个常数（见 kControlBracketSlotGapPt）；
- *   同一处边界上的多个槽按"它属于谁"排顺序 —— 内容到此结束的闭括号最靠前，空字段自己的一
- *     对紧随其后且必须挨着（否则后一个字段的开括号会插进来，把一对方括号劈成两半），
- *     内容从此开始的字段的开括号排在最后。于是相邻字段得 ][、空字段得 []、同区间嵌套得 [[ ]]；
+ *   同一处边界上的多个槽按 (bucket, key) 排顺序 —— 内容到此结束的闭括号最靠前（内层先收），
+ *     空字段自己的一对紧随其后且必须挨着（否则后一个字段的开括号会插进来，把一对方括号
+ *     劈成两半），内容从此开始的字段的开括号排在最后（外层先开）。于是相邻字段得 ][、
+ *     一个空字段得 []、同一处两个空字段得 [][]（而不是被侧别分组画成 [[ ]]）；
  *   占位簇 g0 == g1（不产生字形、只占 advance），于是断行容量、行末位置、每个簇的行内位置、
  *     光标与命中测试全都自动把括号算进去。
  * @param shaped 纯整形结果（可能正指着只读的段级缓存条目）；没有槽要插时原样返回它
@@ -196,12 +202,19 @@ const BlockShaping* withBracketSlots(const ControlSet* controls, const std::vect
 
     // 同一处边界（簇 i 之前）可能同时挂着多个槽，来自不同字段：
     // 某字段在此结束（闭括号）、某字段在此开始（开括号）、空字段两者皆有。
-    // 空字段是零宽的：它整个落在"到此结束的内容"之后、"从此开始的内容"之前，
-    //   所以顺序是 闭(结束)-开(空)-闭(空)-开(开始)。数值只表示先后，见函数头。
+    // 顺序必须让整串括号保持正确嵌套，而且空字段的一对要成对相邻：
+    //   bucket 0  到此结束的字段（闭括号）：内层先收 —— depth 降序
+    //   bucket 1  空字段：一开一闭紧挨着，按控件下标逐个字段排列
+    //   bucket 2  从此开始的字段（开括号）：外层先开 —— depth 升序
+    // 光靠"边 + 一个优先级"是不够的：两枚空字段落在同一个偏移上时，两枚开括号会排到
+    //   一起、两枚闭括号又排到一起，画出来成了 [[ ]]（嵌套），而它们本该是 [][]（并列）。
     struct Slot {
         BracketSide side;
         bool ro;  // 只读字段的括号画灰色（颜色只有插槽这一层知道）
-        int prio;
+        int bucket;
+        int key;  // 同一 bucket 内的主排序键
+        int tie;  // 主键相同时的次序（控件下标）
+        int owner;  // 属于哪个控件 —— 命中测试要用（点到的括号是谁的）
     };
     std::vector<std::vector<Slot>> at(src.clusters.size() + 1);
     // 段内偏移 → 插入点（第一个 cp >= offset 的簇；没有就插在末尾）。
@@ -219,12 +232,14 @@ const BlockShaping* withBracketSlots(const ControlSet* controls, const std::vect
         //   位于"内容到此结束"之后、"内容从此开始"之前，那对方括号得整对留在那个缝里。
         const bool empty_field = (fc.range.start == fc.range.end);
         if (fc.range.end.para == static_cast<int>(para_index)) {
-            at[slotIndex(fc.range.end.offset)].push_back(
-                Slot{BracketSide::Close, fc.read_only, empty_field ? 2 : 0});
+            at[slotIndex(fc.range.end.offset)].push_back(Slot{
+                BracketSide::Close, fc.read_only, empty_field ? 1 : 0,
+                empty_field ? ci : -fc.depth, ci, ci});
         }
         if (fc.range.start.para == static_cast<int>(para_index)) {
-            at[slotIndex(fc.range.start.offset)].push_back(
-                Slot{BracketSide::Open, fc.read_only, empty_field ? 1 : 3});
+            at[slotIndex(fc.range.start.offset)].push_back(Slot{
+                BracketSide::Open, fc.read_only, empty_field ? 1 : 2,
+                empty_field ? ci : fc.depth, ci, ci});
         }
     }
     bool any = false;
@@ -245,8 +260,8 @@ const BlockShaping* withBracketSlots(const ControlSet* controls, const std::vect
     cl2.reserve(scratch->clusters.size() + 4);
     adv2.reserve(scratch->clusters.size() + 4);
     brk2.reserve(scratch->clusters.size() + 4);
-    // 在簇 i 前面插一个占位槽（side = 开/闭，ro = 只读）。
-    auto emitSlot = [&](size_t i, BracketSide side, bool ro) {
+    // 在簇 i 前面插一个占位槽（side = 开/闭，ro = 只读，owner = 归属控件）。
+    auto emitSlot = [&](size_t i, BracketSide side, bool ro, int owner) {
         BlockShaping::Cluster pc;
         // 占位簇的 cp = 它后面那个真实簇的 cp（末尾用段长哨兵）。这让"光标该落在槽的
         // 哪一侧"归 inlineOffsetFor 判定，判据是 bracket_side —— 光靠 cp 是分不开的。
@@ -255,15 +270,22 @@ const BlockShaping* withBracketSlots(const ControlSet* controls, const std::vect
         pc.placeholder = true;
         pc.bracket_side = side;
         pc.read_only = ro;
+        pc.owner_control = owner;
         cl2.push_back(pc);
         adv2.push_back(slot);
         brk2.push_back(false);  // 括号内部不是断点
     };
     for (size_t i = 0; i <= scratch->clusters.size(); ++i) {
-        // 按 prio 排序（见上）。stable_sort 保证同优先级内保持控件列表顺序，结果确定可复现。
-        std::stable_sort(at[i].begin(), at[i].end(),
-                         [](const Slot& a, const Slot& b) { return a.prio < b.prio; });
-        for (const Slot& s : at[i]) emitSlot(i, s.side, s.ro);
+        // 按 (bucket, key, tie, 边) 排序。stable_sort 让完全同键的槽保持控件列表顺序，
+        //   结果确定可复现。
+        std::stable_sort(at[i].begin(), at[i].end(), [](const Slot& a, const Slot& b) {
+            if (a.bucket != b.bucket) return a.bucket < b.bucket;
+            if (a.key != b.key) return a.key < b.key;
+            if (a.tie != b.tie) return a.tie < b.tie;
+            // 同一个空字段的一对：开在前、闭在后（枚举里 Open=1 < Close=2）
+            return static_cast<int>(a.side) < static_cast<int>(b.side);
+        });
+        for (const Slot& s : at[i]) emitSlot(i, s.side, s.ro, s.owner);
         if (i < scratch->clusters.size()) {
             cl2.push_back(scratch->clusters[i]);
             adv2.push_back(scratch->cluster_adv_pt[i]);
@@ -531,7 +553,8 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
                 for (size_t i = 0; i < slotted->clusters.size(); ++i) {
                     lb.clusters.push_back(LineCluster{
                         slotted->clusters[i].cp, ax, slotted->clusters[i].placeholder,
-                        slotted->clusters[i].bracket_side, slotted->clusters[i].read_only});
+                        slotted->clusters[i].bracket_side, slotted->clusters[i].read_only,
+                        slotted->clusters[i].owner_control});
                     ax += slotted->cluster_adv_pt[i];
                 }
                 lb.inline_end_pt = ax;
@@ -644,7 +667,8 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
                     for (size_t i = slice.begin; i < slice.end; ++i) {
                         lb.clusters.push_back(
                             LineCluster{bs.clusters[i].cp, ax, bs.clusters[i].placeholder,
-                                        bs.clusters[i].bracket_side, bs.clusters[i].read_only});
+                                        bs.clusters[i].bracket_side, bs.clusters[i].read_only,
+                                        bs.clusters[i].owner_control});
                         ax += bs.cluster_adv_pt[i];
                     }
                     lb.inline_end_pt = ax;

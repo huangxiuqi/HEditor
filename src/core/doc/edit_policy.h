@@ -30,14 +30,26 @@ public:
 
     /**
      * 在 pos 处插入是否允许。
+     *
+     * @param preferred >= 0 时表示"编辑已经明确属于这个控件"（点画布得到的结果，
+     *   见 EditorEngine::setCaretAt）。共享边界上两个相邻字段都覆盖同一个位置，
+     *   只看最内层会恒定选中下标更小的那个（前一个字段）—— 于是"点后一个字段的开头"
+     *   虽然光标停住了，字却会落进前一个字段；前一个字段只读时更糟：直接拒绝。
+     *   默认 -1 = 没有侧别信息，按最内层判（键盘、宿主 API 走这条路）。
      */
-    static bool canInsert(const ControlSet& ctrls, EditMode mode, const TextPos& pos);
+    static bool canInsert(const ControlSet& ctrls, EditMode mode, const TextPos& pos,
+                          int preferred = -1);
 
     /**
      * 删除 [a, b) 是否允许。
      * 要求整个删除区间完整落在同一个可编辑控件内 ——
      * 这一条同时挡掉了两种越界：从控件外往里删、从控件里往外删。
      * 只检查两个端点会漏掉"中间跨了一个只读控件"的情况。
+     *
+     * 刻意不看 preferred：删除的归属由"被删掉的那些字属于谁"决定，
+     * 与光标停在边界的哪一侧无关 —— 在字段开头退格删的是前一个字段的最后一个字，
+     * 那是用户按下去的那一下想删的东西（真要禁止得另立一条"退格不出字段"的规则，
+     * 不能混进归属里）。
      */
     static bool canErase(const ControlSet& ctrls, EditMode mode, const TextPos& a,
                          const TextPos& b);
@@ -51,7 +63,8 @@ public:
      * 拆分不会让任何文字离开它所属的控件：区间跟着内容走
      * （见 adjustControlsOnSplitPara）。
      */
-    static bool canSplit(const ControlSet& ctrls, EditMode mode, const TextPos& pos);
+    static bool canSplit(const ControlSet& ctrls, EditMode mode, const TextPos& pos,
+                         int preferred = -1);
 
     /**
      * 删掉 join 处的段落分隔符（把后一段并进前一段）是否允许。
@@ -60,14 +73,8 @@ public:
      * 而"把可编辑字段后面的段落并进来"允许。
      * 合并只会把后一段的文字搬到前一段末尾，控件区间跟着搬 —— 只读保护不会被绕过。
      */
-    static bool canMerge(const ControlSet& ctrls, EditMode mode, const TextPos& join);
-
-    /**
-     * 光标能否停在这个插入点。
-     * 只有表单模式会返回 false。文档模式与只读模式都放行 ——
-     * "只读"约束的是编辑，不是浏览，不要混。
-     */
-    static bool canPlaceCaret(const ControlSet& ctrls, EditMode mode, const TextPos& pos);
+    static bool canMerge(const ControlSet& ctrls, EditMode mode, const TextPos& join,
+                         int preferred = -1);
 
     /**
      * 某个控件是否可编辑（供 UI 决定要不要画成"可写"的样子）。

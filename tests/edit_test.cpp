@@ -70,6 +70,27 @@ bool spansCross(const ControlRange& a, const ControlRange& b) {
 }
 
 /**
+ * 独立口径：某个像素点落在"谁的内容框"里 —— 取最深的那个（嵌套时内层优先）。
+ * 内容框是控件自己投影出来的（不含括号），所以这是对"屏幕上看到并点中的那个框"的
+ * 直接陈述，不依赖字形宽度；与引擎侧的偏移判定完全独立，两者对不上就是真错。
+ */
+int expectedOwnerAt(EditorEngine& eng, float x, float y) {
+    int best = -1;
+    int best_depth = -1;
+    for (int ci = 0; ci < eng.controls().size(); ++ci) {
+        for (const EditorEngine::ControlRect& r : eng.controlRects(ci)) {
+            if (x < r.r_pt.x - 0.01f || x > r.r_pt.x + r.r_pt.w + 0.01f) continue;
+            if (y < r.r_pt.y - 0.01f || y > r.r_pt.y + r.r_pt.h + 0.01f) continue;
+            if (eng.controls().at(ci).depth > best_depth) {
+                best_depth = eng.controls().at(ci).depth;
+                best = ci;
+            }
+        }
+    }
+    return best;
+}
+
+/**
  * 括号的颜色判据：可编辑的括号亮蓝、只读的灰。
  * 判据用颜色而不是"猜字形"，是因为"谁在左"于是像素上直接可读，
  * 不会因为换字体或换实现而失效。亮蓝那条与 [11] 的 (f) 同源：光标色 r=31 被排除。
@@ -778,11 +799,8 @@ int main() {
             expectTrue(EditPolicy::canErase(cs, EditMode::Document, T(7), T(10)),
                        "同一个操作在文档模式下允许 —— 差异全部来自策略这一个开关");
 
-            expectTrue(EditPolicy::canPlaceCaret(cs, EditMode::Form, T(9)), "光标可停在字段末尾");
-            expectTrue(!EditPolicy::canPlaceCaret(cs, EditMode::Form, T(10)),
-                       "光标不能停在字段外一位");
-            expectTrue(EditPolicy::canPlaceCaret(cs, EditMode::Document, T(10)),
-                       "文档模式：随便停");
+            // 光标位置不归 EditPolicy 管：字段外、只读字段里都能停（策略约束的是编辑）。
+            //   对应的断言在 [21] 用引擎实例验（那里才有"光标能不能移动过去"这件事）。
         }
 
         // 嵌套：内层策略优先
@@ -814,8 +832,7 @@ int main() {
             cs.normalize();
             expectTrue(!EditPolicy::canInsert(cs, EditMode::ReadOnly, T(6)),
                        "只读模式：字段内也不许插");
-            expectTrue(EditPolicy::canPlaceCaret(cs, EditMode::ReadOnly, T(0)),
-                       "只读模式：光标仍能自由移动（只读约束的是编辑，不是浏览）");
+            // 只读模式的光标同样不受约束（只读约束的是编辑，不是浏览）—— 断言见 [21]。
         }
 
         // 引擎层
@@ -987,17 +1004,16 @@ int main() {
             const size_t len0 = ef.blocks()[0].cp_text.size();
 
             // "区间外"必须用直接给位置的接口（insertTextUtf8）来测。
-            //   不能用 setCaret + typeText：setCaret 在表单模式下会把光标
-            //   吸附到最近的字段里（那是另一条要测的行为），于是"区间外"
-            //   这个位置根本到不了 —— 看起来断言失败，其实是被测路径选错了。
+            //   不能用 setCaret + typeText：那样混进了"光标能不能停在区间外"这条独立行为
+            //   （光标现在哪儿都能停，见下一条），失败时分不清是哪一件事。
             expectTrue(!ef.insertTextUtf8(0, 2, "X"), "字段外（offset 2）插入被拒");
             expectTrue(ef.blocks()[0].cp_text.size() == len0, "文档长度一个码点都没变");
             expectTrue(ef.blockedEdits() == b0 + 1,
                        "这次拒绝被记了账（不是静默失败 —— 静默失败和「程序卡了」无法区分）");
 
             ef.setCaret(0, 2);
-            expectTrue(ef.caret().offset == 5,
-                       "表单模式下 setCaret(2) 被吸附到最近的字段起点 5（光标出不去）");
+            expectTrue(ef.caret().offset == 2,
+                       "光标停在字段外的 2 —— 位置不受控件约束，受约束的只有编辑");
 
             ef.setCaret(0, 6);
             expectTrue(ef.typeTextAndRender("X"), "字段内插入被允许");
@@ -1015,49 +1031,44 @@ int main() {
             expectTrue(ef.blocks()[0].cp_text.size() == len0, "长度仍然不变");
         }
 
-        // (d) 方向键不跨控件：一步一格，走不动就停
+        // (d) 方向键一步一格，且能走到字段之外
         //
-        //   语义纠偏（用户提出）：这里写着"跨过字段外的 10~11，落到下一个
-        //     字段起点 12" —— 那正是"光标移动跨两个字符"。
-        //     一个方向键指令只该做一件事：往那个方向走一格；走不过去就停住，
-        //     不能自作主张投影到另一个控件里。
-        //   代价（说清楚）：字段之间不再能靠方向键走过去 —— 中间不是可停位置。
-        //     要进另一个字段就点鼠标。这是"不跨控件"的必然结果。
+        //   规则调整（用户提出）：光标只在"编辑"上受约束，位置本身不受约束 ——
+        //     字段外、只读字段里都能停。方向键因此能跨字段、能走进正文；唯一保留的
+        //     判据是"一步一格"：一个方向键指令只往那个方向走一格，绝不瞬移。
         {
             ef.setCaret(0, 8);
             expectTrue(ef.moveCaretAndRender(1) && ef.caret().offset == 9,
-                       "右移到字段末尾 9 —— 末尾可以停（否则没法在末尾追加）");
-            expectTrue(!ef.moveCaretAndRender(1),
-                       "再右移：原地不动（10 已经在只读字段 #1 里，不是可停位置）");
-            expectTrue(ef.caret().offset == 9, "光标仍停在 9 —— 没有跨到下一个字段去");
-            expectTrue(ef.moveCaretAndRender(-1) && ef.caret().offset == 8,
-                       "左移回到 8：一步一格，正常");
+                       "右移到字段 #0 末尾 9 —— 末尾当然可以停");
+            expectTrue(ef.moveCaretAndRender(1) && ef.caret().offset == 10,
+                       "再右移：走进字段之间的正文 10（光标不是被关在字段里）");
+            expectTrue(ef.moveCaretAndRender(1) && ef.caret().offset == 11, "继续右移到 11");
+            expectTrue(ef.moveCaretAndRender(-1) && ef.caret().offset == 10, "左移回到 10");
 
-            // 那一下：在 #2 起点按左键，不许跨过只读字段 #1 落到 #0
+            // 那一下：在 #2 起点按左键，要一格一格地退出来
             ef.setCaret(0, 12);
-            expectTrue(!ef.moveCaretAndRender(-1),
-                       "在 #2 起点左移：原地不动（11/10 在只读字段里，9 在另一个字段）");
-            expectTrue(ef.caret().offset == 12 && ef.focusedControlIndex() == 1,
-                       "光标仍在 #2 的起点 12 —— 没有跨控件");
+            expectTrue(ef.moveCaretAndRender(-1) && ef.caret().offset == 11,
+                       "在 #2 起点左移：退到 11（一步一格，不是瞬移）");
+            expectTrue(ef.moveCaretAndRender(-1) && ef.caret().offset == 10, "再左移到 10");
 
             ef.setCaret(0, 16);
-            expectTrue(!ef.moveCaretAndRender(1),
-                       "在最后一个字段末尾右移：原地不动（后面还有正文，但去不了）");
-            expectTrue(ef.caret().offset == 16, "光标仍停在 16");
+            expectTrue(ef.moveCaretAndRender(1) && ef.caret().offset == 17,
+                       "最后一个字段末尾右移：走到段落末尾 17（后面的正文也去得）");
+            expectTrue(!ef.moveCaretAndRender(1), "到段尾之后右移返回 false（没动就不该重绘）");
 
-            // 穷尽：在 #2 里左右各走一趟，每一步的偏移跨度必须 ≤ 1，
-            //   而且走过的位置必须全部落在字段区间内。这一条把"瞬移"整类杀掉。
+            // 穷尽：整段左右各走一趟 —— 单步跨度必须恒为 1，而且这一趟真的走出过 #2。
+            //   只断言"没瞬移"是不够的：光标压根不动也满足它。
             {
                 ef.setCaret(0, 12);
                 int worst = 0;
-                bool inside = true;
+                bool saw_outside = false;
                 for (int i = 0; i < 8; ++i) {
                     const size_t b = ef.caret().offset;
                     ef.moveCaretAndRender(1);
                     const size_t a = ef.caret().offset;
                     const int d = static_cast<int>(a) - static_cast<int>(b);
                     if (d > worst) worst = d;
-                    if (a < 12 || a > 16) inside = false;
+                    if (a < 12 || a > 16) saw_outside = true;
                 }
                 for (int i = 0; i < 8; ++i) {
                     const size_t b = ef.caret().offset;
@@ -1065,24 +1076,19 @@ int main() {
                     const size_t a = ef.caret().offset;
                     const int d = static_cast<int>(b) - static_cast<int>(a);
                     if (d > worst) worst = d;
-                    if (a < 12 || a > 16) inside = false;
+                    if (a < 12 || a > 16) saw_outside = true;
                 }
-                std::printf(
-                    "     [诊断] #2 内左右各走 8 步：单步最大跨度 %d（应为 1），"
-                    "始终在字段内=%d\n",
-                    worst, inside ? 1 : 0);
+                std::printf("     [诊断] 左右各走 8 步：单步最大跨度 %d（应为 1），走出过字段=%d\n",
+                            worst, saw_outside ? 1 : 0);
                 expectTrue(worst == 1, "左右各走 8 步，单步跨度恒为 1（没有任何一步瞬移）");
-                expectTrue(inside, "走完一趟，光标从未离开 #2 = [12,16)");
+                expectTrue(saw_outside, "这一趟真的走出了 #2 = [12,16)（字段不再是牢笼）");
             }
 
-            // Home/End 同一条原则：不跨控件
+            // Home/End：就是行首 / 行尾，不再往字段边界上收
             ef.setCaret(0, 14);
-            expectTrue(ef.moveCaretToLineStartAndRender() && ef.caret().offset == 12,
-                       "Home 退到本字段起点 12（不是行首 0，更不是别的字段的 5）");
-            expectTrue(ef.moveCaretToLineEndAndRender() && ef.caret().offset == 16,
-                       "End 到本字段终点 16（不是行尾 17）");
-            expectTrue(!ef.moveCaretToLineStartAndRender() || ef.caret().offset == 12,
-                       "再按 Home 停在 12，不会掉进别的字段");
+            expectTrue(ef.moveCaretToLineStartAndRender() && ef.caret().offset == 0,
+                       "Home 到行首 0（落点不在任何字段里也照样到）");
+            expectTrue(ef.moveCaretToLineEndAndRender() && ef.caret().offset == 17, "End 到行尾 17");
         }
 
         // (e) Tab = 缩进（不是跳字段）
@@ -3179,6 +3185,935 @@ int main() {
             expectTrue(ch_n > 0 && ch_lo > px_open2 && ch_hi < px_open3,
                        "★ 变的只有中间那一对括号，且整对夹在左右两个字段的括号之间 ——"
                        "空字段的一对被劈开的话，它的右括号会落到右字段开括号的右边");
+        }
+
+        // (i) 三个可编辑字段连排、把中间那个删空之后的两条硬性质：
+        //     空字段仍然"进得去、打得进字"（它零宽，正是自己位置上的最内层）；
+        //     方向键不离开出发时所在的字段（邻居可编辑时，下一个格子就在隔壁字段里 ——
+        //     只判"下一步可停"会放它过去，实测从 5 连按右键会走到 8、9）。
+        {
+            EditorEngine e8;
+            if (!e8.init({cjkPath, mnPath, latinPath})) {
+                std::fprintf(stderr, "字体加载失败\n");
+                return 2;
+            }
+            e8.setConfig(c18);
+            e8.setBlocks({b18});
+            e8.relayout();
+            Control n1, n2, n3;
+            n1.range.start = TextPos{0, 5};
+            n1.range.end = TextPos{0, 7};  // 反复
+            n1.id = "n1";
+            n2.range.start = TextPos{0, 7};
+            n2.range.end = TextPos{0, 9};  // 心悸
+            n2.id = "n2";
+            n3.range.start = TextPos{0, 9};
+            n3.range.end = TextPos{0, 11};  // 三天
+            n3.id = "n3";
+            e8.setControls({n1, n2, n3});
+            e8.setEditMode(EditMode::Form);
+            e8.setCaret(0, 9);
+            for (int i = 0; i < 2; ++i) e8.backspaceAndRender();
+
+            const Control& w1 = e8.controls().at(1);
+            std::printf(
+                "     删空之后：#1=[%zu,%zu) depth=%d parent=%d，"
+                "偏移 7 归属=%d，光标在 %zu\n",
+                w1.range.start.offset, w1.range.end.offset, w1.depth, w1.parent,
+                e8.controls().innermostAt(TextPos{0, 7}, true), e8.caret().offset);
+            expectTrue(w1.range.start.offset == 7 && w1.range.end.offset == 7,
+                       "中间那个字段被删成零宽的空字段");
+            expectTrue(w1.depth == 1,
+                       "★ 零宽字段被邻居按闭合区间包含 → 区间树重算后它是内层（depth 1）。"
+                       "树停在编辑前那一刻的话这里还是 0，位置会被左邻居抢走");
+            expectTrue(e8.controls().innermostAt(TextPos{0, 7}, true) == 1 &&
+                           e8.focusedControlIndex() == 1,
+                       "★ 它自己那个位置归它（最内层）—— 否则光标再也进不去、字也打不进去");
+
+            // 打字必须进这个空字段，而不是被左边的字段抢走
+            expectTrue(e8.typeTextAndRender("痛"), "在空字段的位置上打字被放行");
+            const Control& x0 = e8.controls().at(0);
+            const Control& x1 = e8.controls().at(1);
+            const Control& x2 = e8.controls().at(2);
+            std::printf("     打字之后：#0=[%zu,%zu)  #1=[%zu,%zu)  #2=[%zu,%zu)\n",
+                        x0.range.start.offset, x0.range.end.offset, x1.range.start.offset,
+                        x1.range.end.offset, x2.range.start.offset, x2.range.end.offset);
+            expectTrue(x1.range.start.offset == 7 && x1.range.end.offset == 8,
+                       "★ 字进了空字段（它成了 [7,8)）");
+            expectTrue(x0.range.start.offset == 5 && x0.range.end.offset == 7,
+                       "左边那个字段没有被撑大（字没有同时落进两个字段）");
+            expectTrue(x2.range.start.offset == 8, "右边那个字段整体右移");
+
+            // 方向键：一次一格，且整次移动都不许离开出发时所在的字段
+            EditorEngine e9;
+            if (!e9.init({cjkPath, mnPath, latinPath})) {
+                std::fprintf(stderr, "字体加载失败\n");
+                return 2;
+            }
+            e9.setConfig(c18);
+            e9.setBlocks({b18});
+            e9.relayout();
+            e9.setControls({n1, n2, n3});
+            e9.setEditMode(EditMode::Form);
+            e9.setCaret(0, 9);
+            for (int i = 0; i < 2; ++i) e9.backspaceAndRender();
+
+            std::vector<size_t> walk;
+            int worst = 0;
+            bool left_field = false;
+            e9.setCaret(0, 5);
+            for (int i = 0; i < 6; ++i) {
+                const size_t before = e9.caret().offset;
+                e9.moveCaretAndRender(1);
+                const size_t now = e9.caret().offset;
+                walk.push_back(now);
+                worst = std::max(worst, static_cast<int>(now) - static_cast<int>(before));
+                if (now < 5 || now > 7) left_field = true;  // 走出了 #0 = [5,7]
+            }
+            std::printf("     从 5 连按 6 次右键：");
+            for (size_t o : walk) std::printf(" %zu", o);
+            std::printf("（单步最大跨度 %d）\n", worst);
+            expectTrue(worst <= 1, "★ 方向键一次只走一格（没有瞬移）");
+            expectTrue(left_field, "★ 越过 7 之后就走出了 #0 —— 方向键不再被字段边界挡住");
+
+            e9.setCaret(0, 8);  // 在 #2 里（删空之后 #2 = [7,9)）
+            std::vector<size_t> back;
+            for (int i = 0; i < 4; ++i) {
+                e9.moveCaretAndRender(-1);
+                back.push_back(e9.caret().offset);
+            }
+            std::printf("     从 8 连按 4 次左键：");
+            for (size_t o : back) std::printf(" %zu", o);
+            std::printf("\n");
+            expectTrue(back.front() == 7 && back.back() == 4,
+                       "★ 从 #2 里往左走同样是逐格退出（8 → 7 6 5 4，一路走出字段）");
+        }
+    }
+
+    std::printf("\n[19] 点击归属：共享边界上点的是哪一个字段（含三层嵌套样例）\n");
+    {
+        // 背景：相邻两个字段共享边界时（[反复][心悸]，两枚括号并排在同一列），
+        //   "前一个字段的末尾"与"后一个字段的开头"是同一个偏移。光看偏移，
+        //   归属只能按"最内层、同深度取下标小者"来定 —— 恒定给前一个字段。
+        //   后果：屏幕上点后一个字段的开头（它的开括号，或者它第一个字的左半边），
+        //   光标虽然停住了，字却落进前一个字段；前一个字段只读时那次编辑直接被拒 ——
+        //   看起来就是"这个字段点不进去"。
+        //   现在：命中测试按"点到的是哪一枚括号"给出归属（占位簇自己记着 owner_control），
+        //   宿主原样传给 setCaretAt，光标画在所属字段的内侧，编辑也照着这个归属落笔。
+        EditorEngine e;
+        if (!e.init({cjkPath, mnPath, latinPath})) {
+            std::fprintf(stderr, "字体加载失败\n");
+            return 2;
+        }
+        EngineConfig c19;
+        c19.zoom = 1.5f;
+        e.setConfig(c19);
+        BlockSpec b19;
+        b19.font_index = 0;
+        b19.size_pt = 12.0f;
+        b19.wm = WritingMode::HorizontalTB();
+        b19.line_factor = 1.75f;
+        b19.language = "zh";
+        b19.setText("患者主诉：反复心悸三天，加重一天。");
+        e.setBlocks({b19});
+        e.setEditMode(EditMode::Form);
+        Control t1;
+        t1.range.start = TextPos{0, 5};
+        t1.range.end = TextPos{0, 7};
+        Control t2;
+        t2.range.start = TextPos{0, 7};
+        t2.range.end = TextPos{0, 9};
+        Control t3;
+        t3.range.start = TextPos{0, 9};
+        t3.range.end = TextPos{0, 11};
+        e.setControls({t1, t2, t3});
+        e.relayout();
+
+        // 独立口径见文件头的 expectedOwnerAt：点在"谁的内容框"里取最深那个。
+        // 在"每个控件内容框的内部"采样（避开边缘 0.5pt：那正是相邻框相接的地方，
+        //   语义本来就模糊），逐点核对归属。
+        auto sweepBoxes = [&](EditorEngine& eng, int n_ctrl, const char* tag) {
+            int total = 0;
+            int bad = 0;
+            std::string first_bad;
+            for (int ci = 0; ci < n_ctrl; ++ci) {
+                for (const EditorEngine::ControlRect& r : eng.controlRects(ci)) {
+                    for (float x = r.r_pt.x + 0.5f; x <= r.r_pt.x + r.r_pt.w - 0.5f; x += 0.5f) {
+                        const float y = r.r_pt.y + r.r_pt.h * 0.5f;
+                        TextPos hp{};
+                        int own = -1;
+                        if (!eng.hitTestPt(x, y, &hp, &own)) continue;
+                        const int want = expectedOwnerAt(eng, x, y);
+                        ++total;
+                        if (own != want) {
+                            ++bad;
+                            if (first_bad.empty())
+                                first_bad = "例：x=" + std::to_string(static_cast<int>(x)) +
+                                            " offset=" + std::to_string(hp.offset) +
+                                            " 归属=" + std::to_string(own) +
+                                            " 应为=" + std::to_string(want);
+                        }
+                    }
+                }
+            }
+            std::printf("     %s：内容框内采样 %d 个点，归属错的 %d 个  %s\n", tag, total, bad,
+                        first_bad.c_str());
+            return bad == 0 && total > 30;
+        };
+
+        // (a) 最强的结构性判据：一个控件自己画出来的内容框，点进去必须归它自己。
+        //     这一格是最典型的错法：中间那个字段内容框的左半边归了左边那个字段。
+        expectTrue(sweepBoxes(e, 3, "三连相邻"),
+                   "★ 点任意一个字段的内容框都归它自己 —— 共享边界不再把后一个字段吃掉");
+
+        // (b) 同一个偏移 7，两种归属必须画在不同列上：
+        //     归属前一个字段 → 贴在它的闭括号之内；归属后一个字段 → 贴在后一个字段的内容
+        //     左边缘（即两枚括号之右）。这正是"光标到底进没进去"的视觉判据。
+        Rect r_plain{};
+        Rect r_right{};
+        Rect r_left{};
+        e.setCaret(0, 7);
+        e.caretRectPt(&r_plain);
+        e.setCaretAt(0, 7, 1);
+        e.caretRectPt(&r_right);
+        e.setCaretAt(0, 7, 0);
+        e.caretRectPt(&r_left);
+        float mid_left_edge = 0.0f;
+        for (const EditorEngine::ControlRect& r : e.controlRects(1)) mid_left_edge = r.r_pt.x;
+        std::printf(
+            "     偏移 7 的光标 x：中性 %.2f ｜ 归#1 %.2f ｜ 归#0 %.2f"
+            "（#1 内容框左缘 %.2f）\n",
+            r_plain.x, r_right.x, r_left.x, mid_left_edge);
+        expectTrue(r_left.x < r_right.x - 6.0f,
+                   "★ 归属不同 → 画在不同列（相差超过一个槽宽，肉眼可辨）");
+        // 容差 1.2pt：槽宽里含着 1.5pt 的间隙，光标落在"槽末"而内容框从"字的前缘"起算，
+        //   两者差不到一个槽。判的是"进没进去"，不是亚像素对齐。
+        expectTrue(std::fabs(r_right.x - mid_left_edge) < 1.2f,
+                   "★ 归属后一个字段时光标落在它内容的左边缘（=`][` 之右，视觉上真的进去了）");
+        expectTrue(std::fabs(r_left.x - r_plain.x) < 0.01f,
+                   "不带归属时的画法与老行为一致（贴在 `]` 之内）—— 键盘/宿主 API 不受影响");
+
+        // (c) 落笔归属：同一个位置，带不带归属，字进不同的字段。
+        e.setCaretAt(0, 7, 1);
+        const bool ok_right = e.insertTextUtf8(0, 7, "痛");
+        std::printf("     在偏移 7 打字：带归属(#1) → %s  #0=[%zu,%zu) #1=[%zu,%zu)\n",
+                    ok_right ? "成功" : "被拒", e.controls().at(0).range.start.offset,
+                    e.controls().at(0).range.end.offset, e.controls().at(1).range.start.offset,
+                    e.controls().at(1).range.end.offset);
+        expectTrue(ok_right && e.controls().at(0).range.end.offset == 7 &&
+                       e.controls().at(1).range.end.offset == 10,
+                   "★ 带归属在共享边界上打字 → 字进后一个字段（前一个字段没被撑大）");
+
+        e.setCaret(0, 7);  // 不带归属（键盘/宿主 API 的老路径）
+        const bool ok_plain = e.insertTextUtf8(0, 7, "痛");
+        std::printf("     同样的位置：不带归属 → %s  #0=[%zu,%zu) #1=[%zu,%zu)\n",
+                    ok_plain ? "成功" : "被拒", e.controls().at(0).range.start.offset,
+                    e.controls().at(0).range.end.offset, e.controls().at(1).range.start.offset,
+                    e.controls().at(1).range.end.offset);
+        expectTrue(ok_plain && e.controls().at(0).range.end.offset == 8,
+                   "不带归属时仍按最内层判（字进 #0）—— 老行为没被顺手改掉");
+
+        // (d) 只读的前邻居：光标能停在共享边界上（位置不受编辑权限约束），
+        //     但"字进谁"仍由归属决定 —— 归 #1 才写得进去。这是"点不进去"最直白的一种。
+        //     先复位文档与控件：上面的 (c) 往里插过字，区间已经整体右移了。
+        {
+            e.setBlocks({b19});
+            e.setEditMode(EditMode::Form);
+            std::vector<Control> ro = {t1, t2, t3};
+            ro[0].read_only = true;  // #0 只读，#1 可编辑，边界 7 仍共享
+            e.setControls(ro);
+            e.relayout();
+            std::printf("     #0 只读（#0=[%zu,%zu) ro=%d ｜ #1=[%zu,%zu) ro=%d）\n",
+                        e.controls().at(0).range.start.offset, e.controls().at(0).range.end.offset,
+                        e.controls().at(0).read_only ? 1 : 0, e.controls().at(1).range.start.offset,
+                        e.controls().at(1).range.end.offset, e.controls().at(1).read_only ? 1 : 0);
+            e.setCaret(0, 11);
+            e.setCaret(0, 7);  // 中性：光标照样停在 7（只读约束的是编辑，不是光标）
+            const size_t after_plain = e.caret().offset;
+            const int owner_plain = e.focusedControlIndex();
+            e.setCaretAt(0, 7, 1);  // 点的是 #1 的开括号
+            const size_t after_hint = e.caret().offset;
+            const int owner_hint = e.focusedControlIndex();
+            std::printf("     #0 只读时点偏移 7：不带归属 caret=%zu field=%d ｜ 带归属 caret=%zu "
+                        "field=%d\n",
+                        after_plain, owner_plain, after_hint, owner_hint);
+            expectTrue(after_plain == 7, "不带归属时光标也停在 7（位置不受控件约束）");
+            expectTrue(after_hint == 7 && owner_hint == 1,
+                       "★ 点可编辑字段的开括号 → 光标停在 7 且归属它（只读的左邻居不否决）");
+            const bool ok = e.insertTextUtf8(0, 7, "痛");
+            std::printf("     打字：%s  #0=[%zu,%zu) #1=[%zu,%zu)\n", ok ? "成功" : "被拒",
+                        e.controls().at(0).range.start.offset, e.controls().at(0).range.end.offset,
+                        e.controls().at(1).range.start.offset, e.controls().at(1).range.end.offset);
+            expectTrue(ok && e.controls().at(1).range.end.offset == 10 &&
+                           e.controls().at(0).range.end.offset == 7,
+                       "★ 并且字真的进得去（只读字段一个字都没被改）");
+        }
+
+        // (e) 三层嵌套、三层都可编辑（前端 variant 3 的形状）。
+        {
+            EditorEngine e3;
+            if (!e3.init({cjkPath, mnPath, latinPath})) {
+                std::fprintf(stderr, "字体加载失败\n");
+                return 2;
+            }
+            EngineConfig c;
+            c.zoom = 1.5f;
+            e3.setConfig(c);
+            e3.setBlocks({b19});
+            e3.setEditMode(EditMode::Form);
+            Control outer;
+            outer.range.start = TextPos{0, 5};
+            outer.range.end = TextPos{0, 11};
+            outer.id = "outer";
+            Control mid;
+            mid.range.start = TextPos{0, 6};
+            mid.range.end = TextPos{0, 10};
+            mid.id = "middle";
+            Control inner;
+            inner.range.start = TextPos{0, 7};
+            inner.range.end = TextPos{0, 9};
+            inner.id = "inner";
+            e3.setControls({outer, mid, inner});
+            e3.relayout();
+            std::printf("     嵌套结构：");
+            for (int i = 0; i < 3; ++i) {
+                std::printf("#%d[%zu,%zu) depth=%d parent=%d  ", i,
+                            e3.controls().at(i).range.start.offset,
+                            e3.controls().at(i).range.end.offset, e3.controls().at(i).depth,
+                            e3.controls().at(i).parent);
+            }
+            std::printf("\n");
+            expectTrue(e3.controls().at(0).depth == 0 && e3.controls().at(1).depth == 1 &&
+                           e3.controls().at(2).depth == 2,
+                       "三层嵌套的深度是 0/1/2（区间树算出来的，不是配的）");
+            expectTrue(e3.controls().at(1).parent == 0 && e3.controls().at(2).parent == 1,
+                       "父链是外→中→内");
+
+            // 归属取最内层：在内层里打字，三层一起变长（区间不许互相穿过）。
+            e3.setCaret(0, 8);
+            const int owner8 = e3.focusedControlIndex();
+            e3.insertTextUtf8(0, 8, "痛");
+            std::printf(
+                "     在内层打字：owner=%d  #0=[%zu,%zu) #1=[%zu,%zu) #2=[%zu,%zu)\n", owner8,
+                e3.controls().at(0).range.start.offset, e3.controls().at(0).range.end.offset,
+                e3.controls().at(1).range.start.offset, e3.controls().at(1).range.end.offset,
+                e3.controls().at(2).range.start.offset, e3.controls().at(2).range.end.offset);
+            expectTrue(owner8 == 2, "归属取最内层（不是外层）");
+            expectTrue(e3.controls().at(0).range.end.offset == 12 &&
+                           e3.controls().at(1).range.end.offset == 11 &&
+                           e3.controls().at(2).range.end.offset == 10,
+                       "★ 改内层 → 中/外层一起变长（父子区间不许互相穿过）");
+            expectTrue(e3.controls().at(0).range.start.offset == 5 &&
+                           e3.controls().at(1).range.start.offset == 6 &&
+                           e3.controls().at(2).range.start.offset == 7,
+                       "起点都没动（在字段内部打字是「内含」伸缩）");
+
+            // 嵌套的框是互相套着的 —— 判据不能是"我点的是哪个框"，而要按最内层：
+            //   子字段的括号画在父字段的内容框里面（[外[中[内 心心]悸]三]），
+            //   点在子字段的括号上当然归子字段，哪怕那个 x 还在父字段的框内。
+            auto ownerAt = [&](float x, float y) {
+                TextPos hp{};
+                int own = -1;
+                e3.hitTestPt(x, y, &hp, &own);
+                return own;
+            };
+            // 内侧那一格：最内层内容框的中部 → 最内层（三层的框在这一格重叠，必须内层优先）
+            {
+                const std::vector<EditorEngine::ControlRect> br = e3.controlRects(2);
+                expectTrue(!br.empty(), "内层字段投影出了内容框");
+                if (!br.empty()) {
+                    const float x = br[0].r_pt.x + br[0].r_pt.w * 0.5f;
+                    const int own = ownerAt(x, br[0].r_pt.y + br[0].r_pt.h * 0.5f);
+                    std::printf("     内层内容框中部 → 归属 %d（应为 2）\n", own);
+                    expectTrue(own == 2, "★ 点最内层内容框的中部 → 归最内层（外层不吃掉它）");
+                }
+            }
+            // 外侧那一格：只被外层覆盖的位置（外层第一个字的左半）→ 外层
+            {
+                const std::vector<EditorEngine::ControlRect> br = e3.controlRects(0);
+                if (!br.empty()) {
+                    const float x = br[0].r_pt.x + 1.0f;
+                    const float y = br[0].r_pt.y + br[0].r_pt.h * 0.5f;
+                    const int want = expectedOwnerAt(e3, x, y);
+                    const int own = ownerAt(x, y);
+                    std::printf("     外层框左端 +1pt → 归属 %d（该点只落在第 %d 个框里）\n", own,
+                                want);
+                    expectTrue(want == 0 && own == 0, "★ 只被外层覆盖的位置 → 归外层");
+                }
+            }
+            // 中间那一格：外层里点中层（不在内层框内）→ 中层
+            {
+                const std::vector<EditorEngine::ControlRect> br = e3.controlRects(1);
+                if (!br.empty()) {
+                    const float x = br[0].r_pt.x + 1.0f;
+                    const int own = ownerAt(x, br[0].r_pt.y + br[0].r_pt.h * 0.5f);
+                    std::printf("     中层框左端 +1pt → 归属 %d（应为 1）\n", own);
+                    expectTrue(own == 1, "★ 内层优先只在内层框盖住的位置生效，别处仍归中层");
+                }
+            }
+        }
+    }
+
+    std::printf("\n[21] 控件边界总覆盖：相邻 / 嵌套 / 换行 / 删除 / 添加 / 光标\n");
+    {
+        // 控件边界这件事按六类边界条件系统过一遍。判据只用两种互相独立的证据：
+        //   结构性证据：区间端点、区间树的 depth 与 parent、占位槽的边序与归属；
+        //   几何性证据：控件投影出的内容框、光标矩形、帧上括号的像素列。
+        // 两者来自不同的推算路径，任一条错都能单独照出来，不会一起错。
+        EditorEngine e;
+        if (!e.init({cjkPath, mnPath, latinPath})) {
+            std::fprintf(stderr, "字体加载失败\n");
+            return 2;
+        }
+        EngineConfig c21;
+        c21.zoom = 1.5f;
+        e.setConfig(c21);
+
+        const std::string kText = "患者主诉：反复心悸三天，加重一天。";  // 17 个码点
+        auto mk21 = [](size_t s, size_t en, bool ro) {
+            Control c;
+            c.range.start = TextPos{0, s};
+            c.range.end = TextPos{0, en};
+            c.read_only = ro;
+            return c;
+        };
+        // 每条用例都从零铺一份文档与控件，避免上一条用例的区间伸缩串到下一条。
+        auto reset = [&](const std::string& text, const std::vector<Control>& cs) {
+            BlockSpec b;
+            b.font_index = 0;
+            b.size_pt = 12.0f;
+            b.wm = WritingMode::HorizontalTB();
+            b.line_factor = 1.75f;
+            b.language = "zh";
+            b.setText(text);
+            e.setBlocks({b});
+            e.setControls(cs);
+            e.setEditMode(EditMode::Form);
+            e.relayout();
+            e.repaint();
+        };
+        // 一处边界上的占位槽，按渲染顺序（x 递增）给出。槽自带它所在的行号，
+        //   跨行字段的括号落在哪一行可以据此直接判。
+        struct SlotInfo {
+            int side;
+            int ro;
+            int owner;
+            int line;
+            float x;
+        };
+        auto slotsAt = [&](size_t cp) {
+            std::vector<SlotInfo> out;
+            for (const LineBox& lb : e.layout().lines) {
+                if (lb.paragraph != 0) continue;
+                for (const LineCluster& c : lb.clusters) {
+                    if (!c.placeholder || c.cp != cp) continue;
+                    out.push_back(SlotInfo{static_cast<int>(c.bracket_side), c.read_only ? 1 : 0,
+                                           c.owner_control, lb.line,
+                                           lb.inline_origin_pt + c.inline_pt});
+                }
+            }
+            return out;
+        };
+        // 槽的边序写成字符串：闭写 ]、开写 [，于是 ][ / [] / [[ ]] 一眼可读。
+        auto sides = [](const std::vector<SlotInfo>& v) {
+            std::string s;
+            for (const SlotInfo& q : v)
+                s += (q.side == static_cast<int>(BracketSide::Open)) ? '[' : ']';
+            return s;
+        };
+        // 区间两两不穿线：半开区间不许"一半重叠"。相邻与嵌套都是合法形态。
+        auto noCross = [&]() {
+            for (int i = 0; i < e.controls().size(); ++i)
+                for (int j = i + 1; j < e.controls().size(); ++j)
+                    if (spansCross(e.controls().at(i).range, e.controls().at(j).range)) return false;
+            return true;
+        };
+        auto ranges = [&]() {
+            std::string s;
+            for (int i = 0; i < e.controls().size(); ++i) {
+                if (i) s += " ";
+                s += "[" + std::to_string(e.controls().at(i).range.start.offset) + "," +
+                     std::to_string(e.controls().at(i).range.end.offset) + ")";
+            }
+            return s;
+        };
+        // 两个字段的矩形有没有真的叠在一起（面积交集非空）。
+        auto rectsOverlap = [&](int a, int b) {
+            for (const EditorEngine::ControlRect& ra : e.controlRects(a)) {
+                for (const EditorEngine::ControlRect& rb : e.controlRects(b)) {
+                    const bool ox = ra.r_pt.x < rb.r_pt.x + rb.r_pt.w - 0.01f &&
+                                    rb.r_pt.x < ra.r_pt.x + ra.r_pt.w - 0.01f;
+                    const bool oy = ra.r_pt.y < rb.r_pt.y + rb.r_pt.h - 0.01f &&
+                                    rb.r_pt.y < ra.r_pt.y + ra.r_pt.h - 0.01f;
+                    if (ox && oy) return true;
+                }
+            }
+            return false;
+        };
+        // 把某个控件标成只读（其余原样）—— 用来让某一对括号变成灰色，做像素判据。
+        auto withRo = [&](int idx, bool ro) {
+            std::vector<Control> cs;
+            for (int i = 0; i < e.controls().size(); ++i) {
+                Control c = e.controls().at(i);
+                c.read_only = (i == idx) ? ro : c.read_only;
+                cs.push_back(c);
+            }
+            return cs;
+        };
+
+        std::printf("     ---- 相邻：单共享边界 ----\n");
+        {
+            reset(kText, {mk21(5, 9, false), mk21(9, 11, true)});
+            const size_t bd = e.controls().at(0).range.end.offset;
+            expectTrue(bd == e.controls().at(1).range.start.offset,
+                       "前置：#0 的末尾与 #1 的开头是同一个位置（共享边界）");
+            const std::vector<SlotInfo> s = slotsAt(bd);
+            std::printf("     边界 %zu 上的占位：%s（%zu 个）\n", bd, sides(s).c_str(), s.size());
+            expectTrue(s.size() == 2 && sides(s) == "][",
+                       "★ 单共享边界的占位是 ][：闭在左、开在右（不是 []）");
+            expectTrue(s.size() == 2 && s[0].owner == 0 && s[1].owner == 1,
+                       "★ 两枚括号各归各的字段 —— 命中测试据此分清点的是哪一个");
+            expectTrue(s.size() == 2 && s[0].ro == 0 && s[1].ro == 1,
+                       "括号的颜色跟着字段走（只读的那一枚是灰的）");
+            const std::vector<EditorEngine::ControlRect> r0 = e.controlRects(0);
+            const std::vector<EditorEngine::ControlRect> r1 = e.controlRects(1);
+            const float right0 = r0.empty() ? -1.0f : r0.back().r_pt.x + r0.back().r_pt.w;
+            const float left1 = r1.empty() ? -1.0f : r1.front().r_pt.x;
+            std::printf("     #0 内容框右缘 %.2f ≤ #1 内容框左缘 %.2f\n", right0, left1);
+            expectTrue(right0 > 0.0f && left1 > 0.0f && right0 <= left1 + 0.01f,
+                       "★ 相邻字段的内容框不重叠（重叠就是区间穿了线）");
+            expectTrue(!rectsOverlap(0, 1), "★ 面积判据同上：两块矩形没有交集");
+        }
+
+        std::printf("     ---- 相邻：双共享边界（三连） ----\n");
+        {
+            reset(kText, {mk21(5, 7, false), mk21(7, 9, false), mk21(9, 11, false)});
+            std::string both;
+            bool both_ok = true;
+            for (size_t cp : {size_t{7}, size_t{9}}) {
+                const std::vector<SlotInfo> s = slotsAt(cp);
+                both += " " + std::to_string(cp) + ":" + sides(s);
+                if (s.size() != 2 || sides(s) != "][") both_ok = false;
+            }
+            std::printf("     两条边界上的占位：%s\n", both.c_str());
+            expectTrue(both_ok, "★ 三连的两条共享边界都是 ][（不是 []）");
+            expectTrue(!rectsOverlap(0, 1) && !rectsOverlap(1, 2) && !rectsOverlap(0, 2),
+                       "★ 三个字段的内容框两两不重叠");
+            e.setCaret(0, 7);
+            expectTrue(e.focusedControlIndex() == 0,
+                       "光标停在共享边界上时归前一个字段（末尾算在区间内）");
+            expectTrue(e.typeTextAndRender("痛"), "在共享边界上打字被放行（不是被拒）");
+            std::printf("     打字后区间：%s\n", ranges().c_str());
+            expectTrue(ranges() == "[5,8) [8,10) [10,12)",
+                       "★ 字进 #0，后两个整体右移（首尾相接）");
+            expectTrue(noCross(), "★ 三连区间两两不穿线（结构性判据）");
+            expectTrue(sides(slotsAt(8)) == "][", "★ 边界跟着字段端点搬家：新边界上仍是 ][");
+            expectTrue(slotsAt(7).empty(), "旧边界上不再留占位（括号跟着端点走）");
+        }
+
+        std::printf("     ---- 删除文字：把三连的后两个字段删空 ----\n");
+        {
+            reset(kText, {mk21(5, 7, false), mk21(7, 9, false), mk21(9, 11, false)});
+            for (int i = 2; i >= 1; --i) {
+                int guard = 0;
+                while (e.controls().at(i).range.end.offset >
+                           e.controls().at(i).range.start.offset &&
+                       guard++ < 8) {
+                    e.setCaretAt(0, e.controls().at(i).range.end.offset, i);
+                    if (!e.backspaceAndRender()) break;
+                }
+            }
+            std::printf("     删空 #1 #2 之后的区间：%s\n", ranges().c_str());
+            expectTrue(ranges() == "[5,7) [7,7) [7,7)",
+                       "两个字段被删成零宽，都收在 7 上（内容没了，位置还在）");
+            const std::vector<SlotInfo> s = slotsAt(7);
+            std::string own;
+            for (const SlotInfo& q : s) own += " " + std::to_string(q.owner);
+            std::printf("     该处 %zu 个占位：%s ｜ 归属 %s\n", s.size(), sides(s).c_str(),
+                        own.c_str());
+            expectTrue(s.size() == 5 && sides(s) == "][][]",
+                       "★ 两个零宽字段的括号交替成 ][][]:] 属 #0、[] 属 #1、[] 属 #2");
+            expectTrue(s.size() == 5 && s[0].owner == 0 && s[1].owner == 1 && s[2].owner == 1 &&
+                           s[3].owner == 2 && s[4].owner == 2,
+                       "★ 五个槽各归各的字段（两个空字段没有被画成互相嵌套）");
+            expectTrue(e.controls().at(1).depth == 1 && e.controls().at(2).depth == 1,
+                       "★ 两个零宽字段是兄弟（depth 都是 1）—— 完全重合的区间不许互相认父");
+            expectTrue(e.controls().at(1).parent == 0 && e.controls().at(2).parent == 0,
+                       "两个零宽字段的父都是 #0（区间树重算过，父链不成环）");
+            expectTrue(noCross(), "删空之后区间仍然两两不穿线");
+            // 像素证据：把 #2 标成只读，它那对括号变灰。逐个槽量两件事：
+            //   颜色（灰还是亮蓝）与墨迹的横向重心。方括号是镜像字形 —— 开括号的墨
+            //   偏在槽的左半、闭括号偏在右半，所以重心能直接从像素上读出边序。
+            //   这一条不看任何区间数据，只读帧，是排版结果最直接的可证伪判据。
+            if (s.size() == 5) {
+                e.setControls(withRo(2, true));
+                e.relayout();
+                e.showCaret(false);
+                e.repaint();
+                const std::vector<SlotInfo> sp = slotsAt(7);
+                const float z = e.config().zoom;
+                const float pitch = (sp.size() >= 2) ? (sp[1].x - sp[0].x) : 6.0f;
+                const std::vector<uint8_t> fr(e.frame(), e.frame() + e.frameBytes());
+                const int fw = e.frameWidth();
+                // 只扫槽的内部（两侧各让开 0.5pt）：槽带前后紧挨着真实字形，
+                //   而字形抗锯齿的中间档恰好落在灰括号的判据区间里，会让"灰"误报。
+                auto inkStats = [&](float xa, float xb, bool gray, int* count, float* centroid) {
+                    *count = 0;
+                    *centroid = 0.0f;
+                    const int c0 = static_cast<int>(std::lround(xa * z));
+                    const int c1 = static_cast<int>(std::lround(xb * z));
+                    double sum = 0.0;
+                    for (size_t i = 0; i + 3 < fr.size(); i += 4) {
+                        const int x = static_cast<int>(i >> 2) % fw;
+                        if (x < c0 || x > c1) continue;
+                        const uint8_t r = fr[i], g = fr[i + 1], b = fr[i + 2];
+                        if (!(gray ? isBracketGray(r, g, b) : isBracketBlue(r, g, b))) continue;
+                        ++(*count);
+                        sum += static_cast<double>(x - c0);
+                    }
+                    if (*count > 0) *centroid = static_cast<float>(sum / *count);
+                };
+                int blue_n[5] = {0, 0, 0, 0, 0};
+                int gray_n[5] = {0, 0, 0, 0, 0};
+                float blue_c[5] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+                float gray_c[5] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+                for (int k = 0; k < 5; ++k) {
+                    const float xa = sp[static_cast<size_t>(k)].x + 0.5f;
+                    const float xb = xa + pitch - 1.0f;
+                    inkStats(xa, xb, false, &blue_n[k], &blue_c[k]);
+                    inkStats(xa, xb, true, &gray_n[k], &gray_c[k]);
+                }
+                std::printf("     五个槽从左到右：亮蓝墨量 %d %d %d %d %d ｜ 灰墨量 %d %d %d %d %d\n",
+                            blue_n[0], blue_n[1], blue_n[2], blue_n[3], blue_n[4], gray_n[0],
+                            gray_n[1], gray_n[2], gray_n[3], gray_n[4]);
+                std::printf("     亮蓝重心 %.2f %.2f %.2f ｜ 灰重心 %.2f %.2f\n", blue_c[0], blue_c[1],
+                            blue_c[2], gray_c[3], gray_c[4]);
+                expectTrue(blue_n[0] > 0 && blue_n[1] > 0 && blue_n[2] > 0 && gray_n[0] == 0 &&
+                               gray_n[1] == 0 && gray_n[2] == 0,
+                           "★ 左边三枚括号都是亮蓝的（#0 的 ] 与 #1 的一对，都可编辑）");
+                expectTrue(gray_n[3] > 0 && gray_n[4] > 0 && blue_n[3] == 0 && blue_n[4] == 0,
+                           "★ 右边两枚括号都是灰的（#2 只读），且没有蓝的混进来");
+                expectTrue(blue_c[0] > blue_c[1] && blue_c[1] < blue_c[2],
+                           "★ 像素上的边序就是 ][][]: 左 ] 的重心在 [ 之右，[ 又在 ] 之左");
+                expectTrue(gray_c[3] < gray_c[4],
+                           "★ #2 那一对同样是 []（[ 的重心在 ] 之左），没有被画成 [[ ");
+                e.showCaret(true);
+                e.setControls(withRo(2, false));
+                e.relayout();
+            }
+            // 零宽字段在自己位置上仍是最内层：否则位置被左邻居抢走，字就再也打不进去。
+            e.setCaret(0, 7);
+            expectTrue(e.focusedControlIndex() == 1,
+                       "★ 零宽字段在自己位置上是内层（同位取下标小者）");
+            expectTrue(e.typeTextAndRender("痛"), "零宽字段还能接住输入（删空不等于锁死）");
+            std::printf("     在 7 上打字之后：%s\n", ranges().c_str());
+            expectTrue(ranges() == "[5,7) [7,8) [8,8)",
+                       "★ 字进它自己：左邻居没被撑大，右边那个空字段让位到 8");
+            expectTrue(e.controls().at(0).range.end.offset == 7,
+                       "★ 左邻居的端点一动不动（零宽字段不会把邻居撑大）");
+            expectTrue(noCross(), "打字之后区间仍不穿线");
+        }
+
+        std::printf("     ---- 嵌套：三层可编辑 ----\n");
+        {
+            reset(kText, {mk21(5, 11, false), mk21(6, 10, false), mk21(7, 9, false)});
+            expectTrue(e.controls().at(0).depth == 0 && e.controls().at(1).depth == 1 &&
+                           e.controls().at(2).depth == 2,
+                       "三层嵌套的深度是 0/1/2（区间树算出来的，不是配的）");
+            expectTrue(e.controls().at(1).parent == 0 && e.controls().at(2).parent == 1,
+                       "父链是外到中到内");
+            // 六处边界各有一枚括号，且开括号按外中内从左到右、闭括号按内中外。
+            const size_t bcps[6] = {5, 6, 7, 9, 10, 11};
+            const char* bside[6] = {"[", "[", "[", "]", "]", "]"};
+            std::string got;
+            bool ok = true;
+            float prev_x = -1.0f;
+            for (int k = 0; k < 6; ++k) {
+                const std::vector<SlotInfo> s = slotsAt(bcps[k]);
+                got += " " + std::to_string(bcps[k]) + ":" + sides(s);
+                if (s.size() != 1 || sides(s) != bside[k]) ok = false;
+                if (!s.empty()) {
+                    if (prev_x >= 0.0f && !(s[0].x > prev_x)) ok = false;
+                    prev_x = s[0].x;
+                }
+            }
+            std::printf("     六处边界上的占位：%s\n", got.c_str());
+            expectTrue(ok, "★ 括号在正确的边界、正确的一侧：[外[中[内 … ]内]中]外");
+            // 嵌套的几何形态与相邻相反：内层内容框整块落在外层内容框里。
+            {
+                const std::vector<EditorEngine::ControlRect> ro0 = e.controlRects(0);
+                const std::vector<EditorEngine::ControlRect> ri = e.controlRects(2);
+                bool contained = !ro0.empty() && !ri.empty();
+                if (contained)
+                    contained = ro0.front().r_pt.x <= ri.front().r_pt.x + 0.01f &&
+                                ri.front().r_pt.x + ri.front().r_pt.w <=
+                                    ro0.front().r_pt.x + ro0.front().r_pt.w + 0.01f;
+                std::printf("     外层框 [%.2f, %.2f] ｜ 内层框 [%.2f, %.2f]\n",
+                            ro0.empty() ? 0.0f : ro0.front().r_pt.x,
+                            ro0.empty() ? 0.0f : ro0.front().r_pt.x + ro0.front().r_pt.w,
+                            ri.empty() ? 0.0f : ri.front().r_pt.x,
+                            ri.empty() ? 0.0f : ri.front().r_pt.x + ri.front().r_pt.w);
+                expectTrue(contained, "★ 嵌套的形态是包含：内层内容框整块落在外层框里");
+            }
+            e.setCaret(0, 8);
+            expectTrue(e.focusedControlIndex() == 2, "光标在三层重叠区里归最内层");
+            expectTrue(e.typeTextAndRender("痛"), "内层可编辑（嵌套没有把内层的编辑权吃掉）");
+            std::printf("     在内层打字之后：%s\n", ranges().c_str());
+            expectTrue(ranges() == "[5,12) [6,11) [7,10)",
+                       "★ 内层变长，中、外层一起变长（起点不动，终点外推）");
+            expectTrue(e.controls().at(0).depth == 0 && e.controls().at(2).depth == 2,
+                       "编辑之后区间树重算，嵌套关系还在");
+            expectTrue(noCross(), "★ 嵌套伸缩之后区间仍然两两不穿线");
+            // 把内层删空：它变小成零宽，但层级与占位都不能散。
+            for (int k = 0; k < 3; ++k) {
+                e.setCaretAt(0, e.controls().at(2).range.end.offset, 2);
+                if (!e.backspaceAndRender()) break;
+            }
+            std::printf("     把内层删空之后：%s\n", ranges().c_str());
+            expectTrue(ranges() == "[5,9) [6,8) [7,7)",
+                       "外、中两层跟着收，内层变成落在 7 上的零宽");
+            const std::vector<SlotInfo> at7 = slotsAt(7);
+            std::printf("     内层位置上的占位：%s（%zu 个）\n", sides(at7).c_str(), at7.size());
+            expectTrue(sides(at7) == "[]",
+                       "★ 删空的内层画成一对相邻的 []（不是拆成 [ 与 ] 分到两边）");
+            expectTrue(e.controls().at(2).depth == 2 && e.controls().at(2).parent == 1,
+                       "★ 删空之后内层仍是第 2 层（它没有被中层认成同一段）");
+            expectTrue(sides(slotsAt(6)) == "[" && sides(slotsAt(8)) == "]" &&
+                           sides(slotsAt(5)) == "[" && sides(slotsAt(9)) == "]",
+                       "外、中两层的括号都还在原来的边界上");
+            e.setCaret(0, 7);
+            expectTrue(e.focusedControlIndex() == 2, "★ 删空的内层在自己位置上仍是最内层");
+            expectTrue(e.typeTextAndRender("痛"), "删空的内层还能接住输入");
+            std::printf("     往删空的内层里打字之后：%s\n", ranges().c_str());
+            expectTrue(ranges() == "[5,10) [6,9) [7,8)",
+                       "★ 字进内层，外、中两层一起外推（三层同步，谁也不穿谁）");
+            expectTrue(noCross(), "填回来之后区间仍不穿线");
+        }
+
+        std::printf("     ---- 换行：跨行字段与断行处的边界 ----\n");
+        {
+            std::string longtext;
+            for (int i = 0; i < 4; ++i) longtext += kText;
+            reset(longtext, {});
+            expectTrue(e.stats().placed_line_count >= 2, "长文档排成多行（否则这一节没有意义）");
+            // 断行位置：先在没有控件的行盒上量一个粗值，再用它挂控件。
+            //   括号占位本身有宽度，会把断行位置挪半格，所以最终的行盒要重新量一次。
+            size_t brk = 0;
+            for (const LineBox& lb : e.layout().lines)
+                if (lb.paragraph == 0 && lb.line == 0) brk = lb.last_cp;
+            const size_t A0 = (brk > 8) ? brk - 6 : 0;
+            const size_t A1 = brk + 6;
+            const size_t B1 = brk + 12;
+            reset(longtext, {mk21(A0, A1, false), mk21(A1, B1, false)});
+            size_t l0_end = 0, l1_start = 0;
+            int nl = 0;
+            for (const LineBox& lb : e.layout().lines) {
+                if (lb.paragraph != 0) continue;
+                ++nl;
+                if (lb.line == 0) l0_end = lb.last_cp;
+                if (lb.line == 1) l1_start = lb.first_cp;
+            }
+            std::printf("     长文档 %d 行；第 0 行止于 %zu，第 1 行起于 %zu；"
+                        "A=[%zu,%zu) B=[%zu,%zu)\n",
+                        nl, l0_end, l1_start, A0, A1, A1, B1);
+            expectTrue(nl >= 2 && l1_start == l0_end,
+                       "第 1 行的起点就是第 0 行的终点（断行处两行共享一个偏移）");
+            expectTrue(A0 <= l0_end && A1 > l0_end, "前置：A 确实跨在断行处（否则这条用例不成立）");
+            const std::vector<EditorEngine::ControlRect> ra = e.controlRects(0);
+            const std::vector<EditorEngine::ControlRect> rb = e.controlRects(1);
+            std::printf("     A → %zu 个矩形块 ｜ B → %zu 个矩形块\n", ra.size(), rb.size());
+            expectTrue(ra.size() >= 2, "★ 跨行字段投影出多个矩形块 —— 控件不是矩形");
+            expectTrue(ra.size() >= 2 && ra.back().r_pt.y > ra.front().r_pt.y,
+                       "★ A 的后一块排在更下方（按行序推进，不是横着排）");
+            expectTrue(!rectsOverlap(0, 1), "★ 跨断行的相邻字段，矩形块仍然不重叠");
+            const std::vector<SlotInfo> so = slotsAt(A0);
+            const std::vector<SlotInfo> sbd = slotsAt(A1);
+            std::printf("     A 的开括号在第 %d 行；边界上的 %s 在第 %d 行\n",
+                        so.empty() ? -1 : so[0].line, sides(sbd).c_str(),
+                        sbd.empty() ? -1 : sbd[0].line);
+            expectTrue(so.size() == 1 && sbd.size() == 2 && so[0].line != sbd[0].line,
+                       "★ 跨行字段：开括号在第 0 行、闭括号跟着落到下一行");
+            expectTrue(sbd.size() == 2 && sides(sbd) == "][" && sbd[0].line == sbd[1].line,
+                       "★ 共享边界上的两枚括号在同一行、顺序仍是 ][（换行不拆散边界）");
+            Rect cline0{}, cline1{};
+            e.setCaret(0, l0_end - 1);
+            const bool ok0 = e.caretRectPt(&cline0);
+            e.setCaret(0, l1_start + 1);
+            const bool ok1 = e.caretRectPt(&cline1);
+            std::printf("     断行前光标 (%.2f, %.2f) ｜ 断行后光标 (%.2f, %.2f)\n", cline0.x,
+                        cline0.y, cline1.x, cline1.y);
+            expectTrue(ok0 && ok1 && cline1.y > cline0.y + 1.0f,
+                       "★ 跨过断行，光标落到下一行（y 变大）");
+            expectTrue(cline1.x < cline0.x,
+                       "★ 下一行从行首开始（x 回到左边）—— 断行处光标不是横着平移");
+            e.setCaret(0, l0_end - 1);
+            e.moveCaretToLineEnd();
+            expectTrue(e.caret().offset == l0_end, "行末就是断行偏移（行末不是字段尾）");
+            e.setCaret(0, l1_start + 1);
+            e.moveCaretToLineStart();
+            expectTrue(e.caret().offset == l1_start,
+                       "★ 下一行的行首也是同一个偏移（一个位置，两条行）");
+            e.setCaret(0, l0_end);
+            expectTrue(e.focusedControlIndex() == 0, "断行处的归属不问行、只看区间：归 A");
+            const size_t a_end0 = e.controls().at(0).range.end.offset;
+            const bool typed = e.typeTextAndRender("痛");
+            std::printf("     在断行处打字之后：%s\n", ranges().c_str());
+            expectTrue(typed && e.controls().at(0).range.end.offset == a_end0 + 1 &&
+                           e.controls().at(1).range.start.offset == a_end0 + 1,
+                       "★ 字进 A、B 整体右移（换行处的共享边界与行内同一条规则）");
+            expectTrue(noCross(), "跨行字段编辑之后区间仍不穿线");
+            expectTrue(e.auditLayout() == 0,
+                       "★ 跨行编辑之后增量排版等于全量重排（括号占位也跟着重排）");
+        }
+
+        std::printf("     ---- 添加文字：归属决定落笔，邻居不被误伤 ----\n");
+        {
+            reset(kText, {mk21(5, 7, false), mk21(7, 9, false), mk21(9, 11, false)});
+            // 共享边界 7 上有两种落笔：归前一个字段（末尾追加），或归后一个字段（开头插入）。
+            e.setCaretAt(0, 7, 0);
+            expectTrue(e.typeTextAndRender("痛"), "归属前一个字段时打字被放行");
+            std::printf("     归属 #0 时在 7 上打字：%s\n", ranges().c_str());
+            expectTrue(ranges() == "[5,8) [8,10) [10,12)",
+                       "★ 归 #0：字进 #0，#1 #2 整体右移");
+            reset(kText, {mk21(5, 7, false), mk21(7, 9, false), mk21(9, 11, false)});
+            e.setCaretAt(0, 7, 1);
+            expectTrue(e.focusedControlIndex() == 1, "带归属 1 时光标归后一个字段");
+            expectTrue(e.typeTextAndRender("痛"), "归属后一个字段时打字被放行");
+            std::printf("     归属 #1 时在 7 上打字：%s\n", ranges().c_str());
+            expectTrue(ranges() == "[5,7) [7,10) [10,12)",
+                       "★ 归 #1：字进 #1，它的左端点不动（新字成了它的第一个字）");
+            expectTrue(noCross(), "两种归属下区间都不穿线");
+            // 字段内部打字：只有自己变长。
+            reset(kText, {mk21(5, 7, false), mk21(7, 9, false), mk21(9, 11, false)});
+            e.setCaret(0, 8);
+            expectTrue(e.focusedControlIndex() == 1, "位置 8 只被 #1 覆盖");
+            expectTrue(e.typeTextAndRender("痛"), "在字段内部打字被放行");
+            std::printf("     在 #1 内部打字：%s\n", ranges().c_str());
+            expectTrue(ranges() == "[5,7) [7,10) [10,12)",
+                       "★ 只有 #1 变长：左邻居不动、右邻居整体右移");
+            // 字段末尾追加：自己变长，右邻居整体右移。
+            reset(kText, {mk21(5, 7, false), mk21(7, 9, false), mk21(9, 11, false)});
+            e.setCaretAt(0, 9, 1);
+            expectTrue(e.typeTextAndRender("痛"), "在字段末尾追加被放行");
+            std::printf("     在 #1 末尾追加：%s\n", ranges().c_str());
+            expectTrue(ranges() == "[5,7) [7,10) [10,12)",
+                       "★ 末尾追加也是只撑大自己，右邻居整体右移");
+        }
+
+        std::printf("     ---- 光标移动：一步一格、可出字段、点击命中即落点 ----\n");
+        {
+            reset(kText, {mk21(5, 7, false), mk21(7, 9, false), mk21(9, 11, false)});
+            e.setCaret(0, 5);
+            std::vector<size_t> walk;
+            for (int k = 0; k < 12; ++k) {
+                e.moveCaretBy(1);
+                walk.push_back(e.caret().offset);
+            }
+            std::string ws;
+            for (size_t v : walk) ws += " " + std::to_string(v);
+            std::printf("     从 5 连按右 12 次：%s\n", ws.c_str());
+            bool step_ok = (walk.size() == 12);
+            for (size_t k = 0; k < walk.size(); ++k)
+                if (walk[k] != 6 + k) step_ok = false;
+            expectTrue(step_ok, "★ 方向键一次一格：6 7 8 9 … 17（不跳格、不被字段挡住）");
+            expectTrue(walk.size() == 12 && walk[11] == 17,
+                       "★ 一路走出三个字段，一直走到文档末尾");
+            e.setCaret(0, 5);
+            std::vector<size_t> back;
+            for (int k = 0; k < 6; ++k) {
+                e.moveCaretBy(-1);
+                back.push_back(e.caret().offset);
+            }
+            expectTrue(back.size() == 6 && back.front() == 4 && back.back() == 0,
+                       "★ 反向一步一格、走到 0（字段的左边界不是墙）");
+            e.setCaret(0, 4);
+            expectTrue(e.focusedControlIndex() == -1,
+                       "★ 光标能停在字段之外（位置不受控件约束）");
+            const long long blocked0 = e.blockedEdits();
+            expectTrue(!e.typeTextAndRender("X"), "★ 字段外打字被拒（约束编辑权，不约束光标）");
+            expectTrue(e.blockedEdits() == blocked0 + 1, "被拒的编辑记了账（宿主能看见）");
+            // 只读字段：光标进得去，字打不进去。
+            reset(kText, {mk21(5, 7, false), mk21(7, 9, true)});
+            e.setCaret(0, 8);
+            expectTrue(e.focusedControlIndex() == 1, "光标能进只读字段（只读约束编辑，不约束浏览）");
+            const long long blocked1 = e.blockedEdits();
+            expectTrue(!e.typeTextAndRender("X") && e.blockedEdits() == blocked1 + 1,
+                       "★ 只读字段里打字被拒，且记账");
+            // 键盘跨过共享边界：归属换人。
+            reset(kText, {mk21(5, 7, false), mk21(7, 9, false), mk21(9, 11, false)});
+            e.setCaret(0, 7);
+            expectTrue(e.focusedControlIndex() == 0, "位置 7 归前一个字段");
+            e.moveCaretBy(1);
+            expectTrue(e.caret().offset == 8 && e.focusedControlIndex() == 1,
+                       "★ 右移一格跨过共享边界，归属换成后一个字段");
+            e.moveCaretBy(-1);
+            expectTrue(e.focusedControlIndex() == 0, "左移回来归属又换回前一个字段");
+            e.setCaret(0, 9);
+            e.moveCaretToLineStart();
+            expectTrue(e.caret().offset == 0, "Home 到行首（不是字段首）");
+            e.moveCaretToLineEnd();
+            expectTrue(e.caret().offset == 17, "End 到行尾（不是字段尾）");
+            // 点击：横扫整行，每一个采样点都必须"命中即落点"，且没有回跳与空隙。
+            reset(kText, {mk21(5, 7, false), mk21(7, 9, false), mk21(9, 11, false)});
+            float lo = 1e9f, hi = -1e9f;
+            for (int ci = 0; ci < 3; ++ci)
+                for (const EditorEngine::ControlRect& r : e.controlRects(ci)) {
+                    lo = std::min(lo, r.r_pt.x);
+                    hi = std::max(hi, r.r_pt.x + r.r_pt.w);
+                }
+            Rect cbase{};
+            e.setCaret(0, 5);
+            e.caretRectPt(&cbase);
+            const float sy = cbase.y + cbase.h * 0.5f;
+            int probed = 0, rewritten = 0, nonmono = 0;
+            size_t prev = 0;
+            bool first = true;
+            bool covered[7] = {false, false, false, false, false, false, false};
+            for (float x = lo - 4.0f; x <= hi + 4.0f; x += 0.5f) {
+                TextPos hp{};
+                int owner = -1;
+                if (!e.hitTestPt(x, sy, &hp, &owner)) continue;
+                if (hp.offset > 17) continue;
+                ++probed;
+                if (!first && hp.offset < prev) ++nonmono;
+                first = false;
+                prev = hp.offset;
+                if (hp.offset >= 5 && hp.offset <= 11) covered[hp.offset - 5] = true;
+                e.setCaretAt(0, hp.offset, owner);
+                if (e.caret().offset != hp.offset) ++rewritten;
+            }
+            std::printf("     横扫 x ∈ [%.1f, %.1f]：采样 %d 点，落点被改写的 %d 个，"
+                        "非单调 %d 处\n",
+                        lo - 4.0f, hi + 4.0f, probed, rewritten, nonmono);
+            expectTrue(probed > 100 && rewritten == 0,
+                       "★ 点击命中即落点：命中偏移与光标位置永远一致（没有点不进去的位置）");
+            expectTrue(nonmono == 0, "★ 横扫时命中偏移单调不减（没有回跳的死区）");
+            bool all_covered = true;
+            for (int k = 0; k < 7; ++k) all_covered = all_covered && covered[k];
+            expectTrue(all_covered,
+                       "★ 三个字段里每一个光标位置都能点出来（5..11 全覆盖，没有点不到的空隙）");
+            // 逐字中点采样：字段里第 k 个字的中点百分之百落在它的内容里（与框缘无关，
+            //   也不受括号槽带影响），点那里必须归这个字段。逐字覆盖，不靠抽样碰运气。
+            int mid_probed = 0, mid_bad = 0;
+            for (int ci = 0; ci < 3; ++ci) {
+                const size_t a = e.controls().at(ci).range.start.offset;
+                const size_t b = e.controls().at(ci).range.end.offset;
+                for (size_t k = a; k < b; ++k) {
+                    Rect ra{}, rb{};
+                    e.setCaretAt(0, k, ci);
+                    if (!e.caretRectPt(&ra)) continue;
+                    e.setCaretAt(0, k + 1, ci);
+                    if (!e.caretRectPt(&rb)) continue;
+                    TextPos hp{};
+                    int owner = -1;
+                    if (!e.hitTestPt((ra.x + rb.x) * 0.5f, sy, &hp, &owner)) continue;
+                    ++mid_probed;
+                    if (owner != ci) ++mid_bad;
+                }
+            }
+            std::printf("     逐字中点采样：%d 个字，归属错的 %d 个\n", mid_probed, mid_bad);
+            expectTrue(mid_probed == 6 && mid_bad == 0,
+                       "★ 点字段里任意一个字的中间都归它自己（逐字覆盖，不是抽样碰运气）");
         }
     }
 

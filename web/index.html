@@ -67,6 +67,8 @@
   input[type=range] { width: 120px; accent-color: var(--accent); }
   #status { margin-left: auto; color: var(--ink-dim); font-size: 12px; }
   #status.err { color: var(--warn); font-weight: 600; }
+  #build { color: var(--ink-dim); font-size: 12px; font-variant-numeric: tabular-nums; }
+  #build.stale { color: var(--warn); font-weight: 600; }
 
   main { flex: 1; display: flex; min-height: 0; }
   #stage {
@@ -148,8 +150,10 @@
     <option value="0">表单：相邻字段（可编辑 + 只读）</option>
     <option value="1">表单：跨行大字段（内嵌只读）</option>
     <option value="2">表单：三连可编辑字段</option>
+    <option value="3">表单：三层嵌套（都可编辑）</option>
   </select>
   <button id="formSample" disabled>载入表单样例</button>
+  <span id="build" title="当前页面实际加载的那份 wasm 的构建时间">wasm —</span>
   <span id="status">准备中…</span>
 </div>
 
@@ -219,6 +223,23 @@
   </aside>
 </main>
 
-<script src="./app.js"></script>
+<script>
+// 入口脚本自己带版本号加载 app.js：先问一次 app.js 的 Last-Modified（no-store 强制绕过
+// 磁盘缓存），再把 app.js 以 ?v=<那个时间> 挂上去。
+//   为什么值得这么绕：静态服务（python -m http.server 这类）不发 Cache-Control 时，
+//   浏览器会按"启发式新鲜度"复用缓存 —— 改了前端却在跑旧脚本，最难查的一种假象。
+//   文件没变就命中缓存（快），文件变了就是新 URL（不会命中旧副本）。
+(function () {
+  const url = new URL('./app.js', location.href);
+  const attach = (v) => {
+    const s = document.createElement('script');
+    s.src = v ? url.href + '?v=' + encodeURIComponent(v) : url.href;
+    document.body.appendChild(s);
+  };
+  fetch(url.href, { method: 'HEAD', cache: 'no-store' })
+    .then((r) => attach(r.headers.get('last-modified') || ''))
+    .catch(() => attach(''));
+})();
+</script>
 </body>
 </html>

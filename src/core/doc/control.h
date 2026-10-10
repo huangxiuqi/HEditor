@@ -73,6 +73,22 @@ inline bool rangeCovers(const ControlRange& outer, const ControlRange& inner) {
     return true;
 }
 
+/**
+ * 区间树判父子关系用的包含：rangeCovers 再排除掉"完全重合"这一种。
+ *
+ * 完全重合的两段区间谁也不是谁的父（互为兄弟）—— 不排除的话它们会互相认父，
+ * 深度当场失控（两段的 depth 都会涨到上限，括号也跟着画成嵌套的）。
+ *   三连可编辑字段把后两个都删空之后就是这个形状：两段都成了零宽、且落在同一个偏移上。
+ *
+ * 零宽区间落在邻居端点上（[5,7) 与 [7,7)）仍然算包含，这一条必须留着：
+ *   它是"刚删空的字段在自己那个位置上是最内层"的来源。少了它，位置 7 会被左邻居
+ *   抢走，那个字段就再也接不住输入 —— 正是"中间控件删空后光标进不去"那个缺陷。
+ */
+inline bool rangeContainsForNesting(const ControlRange& outer, const ControlRange& inner) {
+    if (outer.start == inner.start && outer.end == inner.end) return false;
+    return rangeCovers(outer, inner);
+}
+
 struct Control {
     ControlRange range;
     ControlKind kind = ControlKind::TextField;
@@ -135,6 +151,8 @@ private:
  * 区间伸缩：编辑之后必须调这两个，否则控件会脱离它标注的内容。
  *
  * 插入 (para, at, n)：先看 at 归谁 —— 最内层控件（含末尾），与 canInsert 同口径。
+ *   调用方已经知道侧别时（点画布点到的是哪个字段的括号）用 preferred 覆盖它 ——
+ *   共享边界上"最内层"是同深度取下标小者，恒定选中前一个字段。
  *   落笔点的主人（及其外层控件）按"内含"伸缩：起点不动、终点 +n，
  *   在字段内打字与在末尾追加都会变长；
  *   其余控件按"平移"伸缩：起点 >= at、终点 > at 才 +n，
@@ -142,7 +160,7 @@ private:
  * 删除 (para, [a, b))：端点在 a 之前 → 不动；在 b 之后 → 左移 len；
  *   落在 [a, b) 内 → 夹到 a
  */
-void adjustControlsOnInsert(ControlSet& ctrls, int para, size_t at, size_t n);
+void adjustControlsOnInsert(ControlSet& ctrls, int para, size_t at, size_t n, int preferred = -1);
 void adjustControlsOnErase(ControlSet& ctrls, int para, size_t a, size_t b);
 
 /**

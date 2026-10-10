@@ -28,6 +28,20 @@ bool prevPos(const TextPos& b, TextPos* out) {
     return true;
 }
 
+/**
+ * "编辑已经明确属于 preferred 这个控件"时的归属判定。
+ * 带回 true 表示用它的结论；false 表示它不适用，调用方回落到最内层判定。
+ * 只在 preferred 真的覆盖 pos 时才生效 —— 防御性地挡掉"提示与位置不一致"
+ * （光标被改到别处之后，旧提示不该继续指挥编辑）。
+ */
+bool preferredDecides(const ControlSet& ctrls, const TextPos& pos, int preferred, bool* editable) {
+    if (preferred < 0 || preferred >= ctrls.size()) return false;
+    const Control& c = ctrls.at(preferred);
+    if (!rangeAllowsInsert(c.range, pos)) return false;
+    *editable = EditPolicy::isEditable(c);
+    return true;
+}
+
 }  // namespace
 
 const char* editModeName(EditMode m) {
@@ -52,10 +66,14 @@ EditMode editModeFromCode(int code) {
     }
 }
 
-bool EditPolicy::canInsert(const ControlSet& ctrls, EditMode mode, const TextPos& pos) {
+bool EditPolicy::canInsert(const ControlSet& ctrls, EditMode mode, const TextPos& pos,
+                           int preferred) {
     if (mode == EditMode::Document) return true;
     if (mode == EditMode::ReadOnly) return false;
     if (!hasEditableControl(ctrls)) return true;  // 未配控件 → 退化（见上面的说明）
+
+    bool editable = false;
+    if (preferredDecides(ctrls, pos, preferred, &editable)) return editable;
 
     // 用 include_end = true：在控件末尾追加是合法编辑。
     //   取最内层控件，于是"外层可编辑、内层只读"时内层优先 —— 这就是嵌套语义。
@@ -85,31 +103,17 @@ bool EditPolicy::canErase(const ControlSet& ctrls, EditMode mode, const TextPos&
     return isEditable(ctrls.at(ia));
 }
 
-bool EditPolicy::canSplit(const ControlSet& ctrls, EditMode mode, const TextPos& pos) {
+bool EditPolicy::canSplit(const ControlSet& ctrls, EditMode mode, const TextPos& pos,
+                          int preferred) {
     // 分段 = 在断点处插入一个段落分隔符。所以判据与"在这里插字"完全相同 ——
     // 刻意不另立一套：两者都是"这个位置能不能被写入"，分开写迟早会不一致。
-    return canInsert(ctrls, mode, pos);
+    return canInsert(ctrls, mode, pos, preferred);
 }
 
-bool EditPolicy::canMerge(const ControlSet& ctrls, EditMode mode, const TextPos& join) {
+bool EditPolicy::canMerge(const ControlSet& ctrls, EditMode mode, const TextPos& join,
+                          int preferred) {
     // 合并 = 删掉 join 处的段落分隔符（后一段的文字向前搬）。
-    return canInsert(ctrls, mode, join);
-}
-
-bool EditPolicy::canPlaceCaret(const ControlSet& ctrls, EditMode mode, const TextPos& pos) {
-    // 只有表单模式才约束光标位置。
-    //   文档模式随便停；只读模式光标也照样能移动 —— "只读"约束的是编辑，
-    //   不是浏览。把这两件事混起来，用户会发现"只读文档连翻页都点不动"，
-    //   那是把可用性当成了安全性。
-    if (mode != EditMode::Form) return true;
-    if (!hasEditableControl(ctrls)) return true;
-
-    // include_end = true：允许停在控件末尾（不然没法在末尾追加，
-    //   光标一到最后一个字后面就被弹回去，那个手感是坏的）。
-    //   但仍不允许停在 start 之前或 end 之后 —— 这就是"光标出不去"。
-    const int inner = ctrls.innermostAt(pos, /*include_end=*/true);
-    if (inner < 0) return false;
-    return isEditable(ctrls.at(inner));
+    return canInsert(ctrls, mode, join, preferred);
 }
 
 }  // namespace ced

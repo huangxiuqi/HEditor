@@ -94,15 +94,64 @@ function loadScript(src) {
  */
 async function boot() {
   setStatus('加载 WASM 胶水层…');
-  await loadScript(WASM_GLUE.href);
+  // 先问一次"磁盘上那份 wasm 是什么时候构建的"。
+  //   加它的理由：重新编译之后"改了没生效"的假象，绝大多数不是没编译，而是浏览器
+  //   拿了旧副本（静态服务不发 Cache-Control 时，浏览器按启发式新鲜度直接复用缓存）。
+  //   稍后会和 wasm 自己报出来的构建时间对照显示在工具条上，一眼可判。
+  //   配 scripts/dev_server.py 的 no-store 才是根治：开发期每次刷新都拿真文件。
+  let fileStampRaw = '';
+  let fileStamp = '未知';
+  try {
+    const head = await fetch(WASM_GLUE.href, { method: 'HEAD', cache: 'no-store' });
+    fileStampRaw = head.headers.get('last-modified') || '';
+    const d = new Date(fileStampRaw);
+    if (!Number.isNaN(d.getTime())) {
+      const p = (n) => String(n).padStart(2, '0');
+      fileStamp = `${p(d.getMonth() + 1)}-${p(d.getDate())} ` +
+                  `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+    }
+  } catch (err) {
+    console.warn('读不到 wasm 的构建时间（不影响启动）', err);
+  }
+
+  // 用文件自己的时间当版本号加载胶水层与 wasm。
+  //   为什么值得这么绕：静态服务不发 Cache-Control 时，浏览器会按"启发式新鲜度"复用
+  //   磁盘缓存 —— 重新编译了却还在跑旧副本，是排查里最费时间的一种假象。
+  //   带上 ?v=<文件时间> 之后，URL 随文件本身变化：文件没变就命中缓存（快），
+  //   文件变了就是全新 URL（不可能命中旧副本）。
+  const cacheBust = fileStampRaw ? '?v=' + encodeURIComponent(fileStampRaw) : '';
+  await loadScript(WASM_GLUE.href + cacheBust);
   if (typeof CreateCedEditor !== 'function') {
     throw new Error('胶水层已加载，但没有导出 CreateCedEditor');
   }
 
   setStatus('实例化 WASM…');
   const tWasm = performance.now();
-  mod = await CreateCedEditor();
+  mod = await CreateCedEditor({
+    // 胶水层是从自己所在的目录拼 wasm 路径的（不含 query），所以这里显式补上 ——
+    //   否则会出现"胶水是新的、wasm 是缓存里的旧的"这种最难查的组合。
+    locateFile: (path) => new URL(path, WASM_GLUE.href).href + cacheBust,
+  });
   const wasmMs = performance.now() - tWasm;
+
+  // 页面跑的到底是哪一版：两处数字对照着看。
+  //   runStamp 来自 wasm 自己（编进去的构建时间），fileStamp 来自磁盘上那个文件的
+  //   Last-Modified。两者一致 = 浏览器加载的就是磁盘上这份；runStamp 明显更旧 =
+  //   浏览器拿的是缓存里的旧副本（此时工具条会变红并给出硬刷新的提示）。
+  const runStamp = typeof mod.buildStamp === 'function' ? mod.buildStamp() : '未知';
+  const parsedFile = new Date(fileStampRaw);
+  const staleByMs = Number.isNaN(parsedFile.getTime())
+    ? 0
+    : parsedFile.getTime() - (Date.parse(runStamp.replace(' ', 'T')) || 0);
+  const staleSeed = staleByMs > 5 * 60 * 1000;  // 超过 5 分钟 = 磁盘上换了、跑的还是旧的
+  const buildEl2 = document.getElementById('build');
+  if (buildEl2) {
+    buildEl2.textContent = `wasm ${runStamp} ｜ 磁盘 ${fileStamp}`;
+    buildEl2.className = staleSeed ? 'stale' : '';
+    buildEl2.title = staleSeed
+      ? '页面跑的是缓存里的旧副本（比磁盘上的构建旧）—— 请 Ctrl+Shift+R 硬刷新'
+      : '页面实际加载的那份 wasm 的构建时间，以及磁盘上那个文件的时间';
+  }
 
   // 字体：JS fetch 进来，字节穿过边界，wasm 包里一个字体都没有
   const indices = {};
@@ -131,6 +180,8 @@ async function boot() {
   mod.setFontRoles(indices.cjk, indices.mongol, indices.latin);
 
   kv('boot', [
+    ['WASM 构建时间（wasm 自己报的）', runStamp],
+    ['WASM 文件时间（磁盘上）', fileStamp],
     ['WASM 实例化', `${fmt(wasmMs, 0)} ms`],
     ['字体 fetch + 解析', `${fmt(fontMs, 0)} ms`],
     ['字体合计', kb(fontBytes)],
@@ -188,6 +239,7 @@ async function boot() {
     '表单样例：只有两个字段能改，中间的病程只读 —— 试着往别处敲字',
     '表单样例：一个大字段跨行，里面嵌着一个只读小字段',
     '表单样例：三个可编辑字段紧挨着 —— 在边界上打字 / 把中间那个删空，看括号怎么跟',
+    '表单样例：三层嵌套（都可编辑）—— 点最里层的开头打字，三层一起变长',
   ];
   $('formSample').disabled = false;
   $('formSample').addEventListener('click', () => {
@@ -216,7 +268,14 @@ async function boot() {
   ta.focus();
 
   ready = true;
-  setStatus('就绪 · 点画布定位光标，然后敲字');
+  // 旧副本要显眼地说出来：这种情况下下面所有"改了没生效"的观感都是假象，
+  //   不提示的话会一路查到底层代码，白费时间。
+  if (staleSeed) {
+    setStatus(`⚠ 页面跑的是旧副本（跑的 ${runStamp}，磁盘上已是 ${fileStamp}）` +
+              ` —— 按 Ctrl+Shift+R 硬刷新`, true);
+  } else {
+    setStatus('就绪 · 点画布定位光标，然后敲字');
+  }
   resetBlink();
 }
 
@@ -481,7 +540,21 @@ function onCanvasMouseDown(ev) {
   const hit = mod.hitTest(xPx / currentZoom, yPx / currentZoom);
   if (hit !== 'null') {
     const p = JSON.parse(hit);
-    setCaretAndPresent(p.para, p.offset);
+    // 连"这一下点的是哪个字段"一起带过去。
+    //   相邻两个字段共享边界时（[反复]│[心悸]，两枚括号并排在同一列上），
+    //   落点是同一个偏移，光有偏移分不出用户点的是哪一侧：引擎只能按"最内层、
+    //   同深度取下标小者"归给前一个字段，于是"点后一个字段的开头"字会打进前一个字段，
+    //   前一个字段只读时那次点击更是直接被拒 —— 看起来就是"这个字段点不进去"。
+    //   引擎在命中测试里已经算出了答案（占位括号自己记着归属），这里只负责搬运。
+    if (typeof p.field === 'number' && mod.setCaretAt) {
+      mod.setCaretAt(p.para, p.offset, p.field);
+      caretOn = true;
+      mod.showCaret(true);
+      mod.present();
+      afterEdit();
+    } else {
+      setCaretAndPresent(p.para, p.offset);
+    }
   }
   ta.focus();
   ev.preventDefault();
@@ -770,6 +843,28 @@ window.__ced = {
   // 走的是和"点画布"完全相同的路径（改位置 + 呈现），
   //   所以探针拿到的统计和真人操作得到的是一回事。
   setCaret(para, offset) { setCaretAndPresent(para, offset); return this.caret; },
+  // 带归属的定位 —— 与真人点画布走的同一条路径（hitTest 给出归属，
+  //   宿主原样回传）。探针要验证"点后一个字段的开头"就必须走它，走 setCaret 是另一条路。
+  setCaretAt(para, offset, field) {
+    if (!ready) return null;
+    mod.setCaretAt(para, offset, field);
+    caretOn = true;
+    mod.showCaret(true);
+    mod.present();
+    afterEdit();
+    return this.caret;
+  },
+  // 点画布的真实入口（与 cv 的 mousedown 处理同一套坐标换算），供探针复现用户手势。
+  clickAt(xPx, yPx) {
+    if (!ready) return null;
+    const r = cv.getBoundingClientRect();
+    cv.dispatchEvent(new MouseEvent('mousedown', {
+      clientX: r.left + xPx * (r.width / cv.width),
+      clientY: r.top + yPx * (r.height / cv.height),
+      bubbles: true, cancelable: true,
+    }));
+    return this.caret;
+  },
   // 只改位置不呈现 —— 仅用于需要把"改位置"和"呈现"分账的对照实验
   setCaretOnly(para, offset) { mod.setCaret(para, offset); return this.caret; },
   hit(xPt, yPt) { return JSON.parse(mod.hitTest(xPt, yPt)); },
@@ -781,6 +876,10 @@ window.__ced = {
   //   只调引擎不收尾，画布就会停在旧内容上（同上，必须在同一个调用里收尾）。
   get editMode() { return mod ? mod.editMode() : 0; },
   get controls() { return mod ? JSON.parse(mod.controlsJson()) : null; },
+  // 占位槽清单：每一枚括号落在哪个偏移、是开还是闭、属于哪个字段、在哪一行。
+  //   括号的排布只存在于排版结果里（区间数据看不出来），探针要钉住
+  //   "两个零宽字段的括号交替成 ][][]、而不是互相嵌套" 就得读这一份。
+  get bracketSlots() { return mod ? JSON.parse(mod.bracketSlotsJson()).slots : null; },
   // 直读，不走 editStats：编辑被拒时不会 repaint，而 editStats 是在呈现时刷新的 ——
   //   走那条路读到的永远是上一拍的数字，探针按键后立刻读会差一拍。
   get blockedEdits() { return mod ? mod.blockedEdits() : 0; },
@@ -798,6 +897,18 @@ window.__ced = {
   clearControls() {
     mod.clearControls();
     return this.present();
+  },
+  // 用一份区间清单重建控件（探针用）。
+  //   为什么不逐个改：区间树的父子关系是全局性质，改一个字段的端点会改变别的
+  //   字段的 depth/parent，必须整棵重建。只读标记也只有建的时候给得进去，
+  //   所以"把某个字段临时标成只读、看它那一对括号变不变灰"要靠这条。
+  setFormControls(list) {
+    mod.clearControls();
+    for (const it of list) {
+      mod.addControl(it.start[0], it.start[1], it.end[0], it.end[1], it.kind || 0,
+                     it.id || '', it.label || '', !!it.ro);
+    }
+    return relayoutAndBlit();
   },
   // 走 relayoutAndBlit 而不是 present()：loadFormSample 会换文档，
   //   必须重排。只 present 的话，控件区间会投影到上一次布局的行盒上

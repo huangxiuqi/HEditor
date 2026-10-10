@@ -21,6 +21,11 @@ set(CED_ROOT ${CMAKE_CURRENT_SOURCE_DIR})
 set(CED_HB_ROOT ${CED_ROOT}/third_party/harfbuzz-14.6.0)
 set(CED_ASSET_DIR ${CED_ROOT}/assets)
 
+# 构建时间戳：编进 wasm/native 里，验证台把它显示出来。
+#   "改了没生效"要先能回答"页面到底跑的哪一版" —— 光看磁盘上的文件时间不够：
+#   浏览器完全可能拿的是旧副本。脚本不传时退回 dev。
+set(CED_BUILD_STAMP "dev" CACHE STRING "构建时间戳（构建脚本注入）")
+
 if(NOT EXISTS ${CED_HB_ROOT}/src/harfbuzz.cc)
   message(FATAL_ERROR
     "缺少 HarfBuzz 源码：${CED_HB_ROOT}\n"
@@ -242,6 +247,7 @@ if(EMSCRIPTEN)
 
   add_executable(ced_wasm src/wasm/wasm_main.cpp)
   target_link_libraries(ced_wasm PRIVATE ced_core)
+  target_compile_definitions(ced_wasm PRIVATE CED_BUILD_STAMP="${CED_BUILD_STAMP}")
   ced_target_flags(ced_wasm)
   set_target_properties(ced_wasm PROPERTIES OUTPUT_NAME "ced_editor" SUFFIX ".js")
 
@@ -266,7 +272,8 @@ else()
 
   add_executable(ced_native src/app/native_main.cpp)
   target_link_libraries(ced_native PRIVATE ced_core)
-  target_compile_definitions(ced_native PRIVATE CED_NATIVE_ASSET_DIR="${CED_ASSET_DIR}")
+  target_compile_definitions(ced_native PRIVATE CED_NATIVE_ASSET_DIR="${CED_ASSET_DIR}"
+                                                CED_BUILD_STAMP="${CED_BUILD_STAMP}")
   ced_target_flags(ced_native)
   ced_track_header_deps(ced_native ${CED_ROOT}/src/app ${CED_ROOT}/src/core)
 

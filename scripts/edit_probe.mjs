@@ -1024,15 +1024,12 @@ async function main() {
                     ? '' : '  ← 光标跑到 `]` 右边去了'));
       }
 
-    //  方向键不跨控件：一次一格，走不过去就停住。
+    //  方向键一次一格：光标位置不受控件约束，所以能走出字段、也能跨过只读字段。
+    //  约束编辑的是 EditPolicy（插 / 删），不是光标 —— 两者混起来会得到
+    //  "字段外的正文连点都点不进去"这类与编辑边界无关的怪现象。
     //
-    //"光标移动跨两个字符" —— 在 #2（aggravate）起点按一次左键，
-    //  光标会跨过只读字段 #1 直接落到 #0 里（实测一次跨 3 个偏移）。
-    //  根因是引擎把"走一步"做成了"走完再用 clampToAllowed 投影到最近的合法位置"，
-    //  那个投影不认方向、只认距离。
-    //
-    //  判据是逐步的：单步偏移跨度恒为 1，且整趟走下来从不离开本字段。
-    //    只看终点是抓不到的（终点"落在某个合法位置"照样成立）。
+    //  判据是逐步的：单步偏移跨度恒为 1（不许瞬移），终点是真正的下一格。
+    //    只看终点抓不到"投影式移动"：投影也能给出一个看着合法的终点。
     {
       await c.eval('return window.__ced.loadFormSample(0);');
       await c.eval('return window.__ced.stopBlink();');
@@ -1041,21 +1038,22 @@ async function main() {
       const start = await c.eval('return window.__ced.caret;');
       await c.eval(key('ArrowLeft'));                          //  真实键盘
       const afterLeft = await c.eval('return window.__ced.caret;');
-      chk.check(' 在 #2 起点按左方向键：不许跨控件（光标留在 12）',
-                afterLeft.offset === 12,
-                `12 → ${afterLeft.offset}` + (afterLeft.offset === 12 ? '' : '  ← 跨到别的字段去了'));
+      chk.check('★ 在 #2 起点按左方向键：一步一格跨过共享边界（12 → 11）',
+                afterLeft.offset === 11,
+                `12 → ${afterLeft.offset}`);
 
-      // 右走 5 步：12→13→14→15→16→16（到边界停住），单步跨度恒为 1
+      // 右走 6 步：12→13→14→15→16→17→17（到文档末尾就停住），单步跨度恒为 1
+      await c.eval('return window.__ced.setCaret(0, 12);');
       const seq = [];
-      for (let i = 0; i < 5; ++i) {
+      for (let i = 0; i < 6; ++i) {
         await c.eval(key('ArrowRight'));
         seq.push((await c.eval('return window.__ced.caret;')).offset);
       }
       let worst = 0;
-      let prev = start.offset;
+      let prev = 12;
       for (const o of seq) { worst = Math.max(worst, o - prev); prev = o; }
-      chk.check(' 从 #2 起点右走 5 步：每一步 +1，到 16 就停住',
-                seq.join(',') === '13,14,15,16,16',
+      chk.check('★ 从 #2 起点右走 6 步：每一步 +1，到文档末尾就停住',
+                seq.join(',') === '13,14,15,16,17,17',
                 `12 → ${seq.join(' → ')}`);
       chk.check(' 单步跨度恒为 1（没有任何一步瞬移）',
                 worst === 1, `最大单步跨度 ${worst}`);
@@ -1499,8 +1497,12 @@ async function main() {
                 v3b.items[1].end[1] === 10 && v3b.items[2].start[1] === 10,
               v3b.items.map((it) => `[${it.start[1]},${it.end[1]})`).join(' '));
 
-    // 把中间那个删空：它变成零宽的空字段，右边界上与"左字段的闭 + 右字段的开"并列
-    await c.eval('return window.__ced.setCaret(0, 10);');
+    // 把中间那个删空：它变成零宽的空字段，边界上与"左字段的闭 + 右字段的开"并列。
+    //   这里重新载入一次样例，拿回干净的三连区间（[5,7) [7,9) [9,11)）—— 上面那一步
+    //   已经往左字段里打过字，它变长成了 [5,8)，量出来的就不是这条边界了。
+    await c.eval('return window.__ced.loadFormSample(2);');
+    await c.eval('return window.__ced.stopBlink();');
+    await c.eval('return window.__ced.setCaret(0, 9);');
     await c.eval(key('Backspace'));
     await c.eval(key('Backspace'));
     const v3c = await c.eval('return window.__ced.controls;');
@@ -1510,6 +1512,35 @@ async function main() {
     chk.check('★ 中间字段被删成零宽的空字段，右边那个左移并保持紧挨着',
               mid.start[1] === mid.end[1] && right.start[1] === mid.end[1],
               v3c.items.map((it) => `[${it.start[1]},${it.end[1]})`).join(' '));
+
+    // 删空之后那个零宽字段必须还能进、还能打字：
+    //   它是自己位置上的最内层（区间树要跟着编辑重算），否则位置被左邻居抢走，
+    //   表现就是"中间的控件删掉最后一个字之后光标再也进不去、字也打不进去"。
+    //   注意顺序：这一段必须在"往左字段里打字"之前做，否则左字段已经变长（[5,8)），
+    //   量出来的边界就不是 [5,7] 那一处了。
+    const caretAt = await c.eval('return window.__ced.caret.offset;');
+    chk.check('★ 光标停在那个零宽字段的位置上（位置归属没被左邻居抢走）',
+              caretAt === mid.start[1], `光标 ${caretAt}，空字段 ${mid.start[1]}`);
+    // 方向键一次一格：必须能走出字段（光标位置不受控件约束），但不许瞬移
+    await c.eval('return window.__ced.setCaret(0, 5);');
+    const walk = [];
+    for (let i = 0; i < 5; ++i) {
+      await c.eval(key('ArrowRight'));
+      walk.push(await c.eval('return window.__ced.caret.offset;'));
+    }
+    report.chain3.walk = walk;
+    chk.check('★ 方向键一次一格、且能走出字段（5 → 6 7 8 9 10）',
+              JSON.stringify(walk) === JSON.stringify([6, 7, 8, 9, 10]), `落点 ${walk.join(' ')}`);
+    // 回到那个零宽字段的位置上：打字应该进它自己，左右两个字段不许被撑大
+    await c.eval('return window.__ced.setCaret(0, 7);');
+    await c.eval(key('痛'));
+    const v3d = await c.eval('return window.__ced.controls;');
+    report.chain3.afterFill = v3d.items.map((it) => [...it.start, ...it.end]);
+    chk.check('★ 在空字段的位置上打字 → 字进它自己（左右两个字段都没被撑大）',
+              v3d.items[1].start[1] === 7 && v3d.items[1].end[1] === 8 &&
+                v3d.items[0].end[1] === 7 && v3d.items[2].start[1] === 8,
+              v3d.items.map((it) => `[${it.start[1]},${it.end[1]})`).join(' '));
+
     const au3 = await c.eval('return window.__ced.auditLayout();');
     chk.check('★★ 三连样例的每一步增量排版都等于全量重排', !!au3 && au3.diff === 0,
               au3 ? `diff ${au3.diff}` : 'null');
@@ -1522,6 +1553,537 @@ async function main() {
     await c.screenshot(join(OUT, 'three-adjacent-fields.png'));
   }
 
+  chk.section('[12] 真实鼠标点击的归属：点后一个字段的开头要进后一个字段');
+  {
+    // 为什么必须用真实鼠标事件（CDP Input.dispatchMouseEvent）：
+    //   这一格坏在"点画布 → 命中测试 → 归属"这条链上，而合成 MouseEvent 与真实点击
+    //   走的虽然都是同一个监听器，但只有真实事件连坐标换算、命中、dpr 一起过一遍。
+    //   之前所有探针都用合成事件，所以这格一直没被钉住。
+    await c.eval('return window.__ced.loadFormSample(2);');
+    await c.eval('return window.__ced.stopBlink();');
+    const geo = await c.eval(`
+      const cv = window.__ced.canvas, r = cv.getBoundingClientRect();
+      const c0 = window.__ced.controls.items[0].rects[0];
+      return { left: r.left, top: r.top, sx: r.width / cv.width, sy: r.height / cv.height,
+               zoom: Number(document.getElementById('zoom').value), y: c0.y + c0.h / 2 };`);
+    const click = async (xPt, yPt) => {
+      const x = geo.left + xPt * geo.zoom * geo.sx;
+      const y = geo.top + yPt * geo.zoom * geo.sy;
+      const p = { x, y, button: 'left', clickCount: 1, buttons: 1 };
+      await c.send('Input.dispatchMouseEvent', { type: 'mousePressed', ...p });
+      await c.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...p });
+      await sleep(30);
+    };
+
+    // 控件自己投影出来的内容框（磅）：点框内任意一点都必须归它自己。
+    //   这就是用户眼里的"我点的是这个框"。
+    const boxes = await c.eval(`
+      const cs = window.__ced.controls;
+      return cs.items.map((it, i) => (it.rects || []).map(q => ({ i, x: q.x, w: q.w, y: q.y })))
+        .flat();`);
+    let probed = 0;
+    const wrong = [];
+    for (const b of boxes) {
+      for (let x = b.x + 1; x <= b.x + b.w - 1; x += 2) {
+        await click(x, geo.y);
+        const st = await c.eval('return window.__ced.controls.caret;');
+        ++probed;
+        if (st !== b.i) wrong.push(`x=${Math.round(x)}→字段${st}(应${b.i})`);
+      }
+    }
+    report.clickOwner = { probed, wrong: wrong.slice(0, 5) };
+    chk.check('★★ 真实点击：点任意字段内容框内的点，归属都是它自己',
+              probed > 20 && wrong.length === 0,
+              `采样 ${probed} 点，错的 ${wrong.length} 个 ${wrong.slice(0, 3).join(' ')}`);
+
+    // 落笔也跟着归属走：点中间字段的开头再打字，字必须进中间那个字段。
+    await c.eval('return window.__ced.loadFormSample(2);');
+    await c.eval('return window.__ced.stopBlink();');
+    const midBox = await c.eval(`
+      const q = window.__ced.controls.items[1].rects[0];
+      return { x: q.x, y: q.y, w: q.w, h: q.h };`);
+    await click(midBox.x + 1, geo.y);
+    const ownerAtStart = await c.eval('return window.__ced.controls.caret;');
+    const caretAtStart = await c.eval('return window.__ced.caret.offset;');
+    await c.eval(key('痛'));
+    const v12 = await c.eval('return window.__ced.controls;');
+    report.clickOwner.afterType = v12.items.map((it) => [...it.start, ...it.end]);
+    chk.check('★ 真实点击中间字段的开头 → 光标停在那里且归属它',
+              ownerAtStart === 1 && caretAtStart === 7,
+              `归属 ${ownerAtStart}，光标 ${caretAtStart}`);
+    chk.check('★ 接着打字 → 字进中间那个字段（左字段没被撑大）',
+              v12.items[0].end[1] === 7 && v12.items[1].end[1] === 10,
+              v12.items.map((it) => `[${it.start[1]},${it.end[1]})`).join(' '));
+
+    const au12 = await c.eval('return window.__ced.auditLayout();');
+    chk.check('★★ 点击 + 打字之后增量排版 == 全量重排', !!au12 && au12.diff === 0,
+              au12 ? `diff ${au12.diff}` : 'null');
+    const sc12 = await c.eval('return window.__ced.selfCheck();');
+    chk.check('点击之后屏幕 == 引擎帧', sc12.screenVsEngineDiffPx === 0,
+              `差 ${sc12.screenVsEngineDiffPx} px`);
+  }
+
+  chk.section('[13] 三层嵌套可编辑字段（演示样例 variant 3）');
+  {
+    await c.eval('return window.__ced.loadFormSample(3);');
+    await c.eval('return window.__ced.stopBlink();');
+    const n = await c.eval('return window.__ced.controls;');
+    report.nested = { before: n.items.map((it) => [...it.start, ...it.end]) };
+    chk.check('三层嵌套：深度 0/1/2，父链 外→中→内',
+              n.count === 3 && n.items.every((it) => !it.ro) && n.items[0].depth === 0 &&
+                n.items[1].depth === 1 && n.items[2].depth === 2 && n.items[1].parent === 0 &&
+                n.items[2].parent === 1,
+              n.items.map((it) => `#${it.depth}p${it.parent}[${it.start[1]},${it.end[1]})`).join(' '));
+
+    // 归属取最内层：在内层中间打字，三层一起变长（父子区间不许互相穿过）。
+    await c.eval('return window.__ced.setCaret(0, 8);');
+    const ownerN = await c.eval('return window.__ced.controls.caret;');
+    await c.eval(key('痛'));
+    const n2 = await c.eval('return window.__ced.controls;');
+    report.nested.afterType = n2.items.map((it) => [...it.start, ...it.end]);
+    chk.check('★ 光标在内层里打的字归最内层（不是外层）', ownerN === 2, `归属 ${ownerN}`);
+    chk.check('★ 内层变长 → 中/外层一起变长（区间不许互相穿过）',
+              n2.items[2].end[1] === 10 && n2.items[1].end[1] === 11 && n2.items[0].end[1] === 12 &&
+                n2.items[2].start[1] === 7 && n2.items[1].start[1] === 6 && n2.items[0].start[1] === 5,
+              n2.items.map((it) => `[${it.start[1]},${it.end[1]})`).join(' '));
+    // 三层都可编辑 → 内层也必须能改（嵌套最容易被误伤的一格：内层被外层"吃掉"）
+    chk.check('★ 内层可编辑（嵌套没有把内层的编辑权吃掉）',
+              n2.items[2].end[1] === n2.items[2].start[1] + 3,
+              `内层 = [${n2.items[2].start[1]},${n2.items[2].end[1]})，打进了 1 个字`);
+
+    const au13 = await c.eval('return window.__ced.auditLayout();');
+    chk.check('★★ 嵌套样例增量排版 == 全量重排（括号占位嵌套时最容易错位）',
+              !!au13 && au13.diff === 0, au13 ? `diff ${au13.diff}` : 'null');
+    const sc13 = await c.eval('return window.__ced.selfCheck();');
+    chk.check('嵌套样例：屏幕 == 引擎帧', sc13.screenVsEngineDiffPx === 0,
+              `差 ${sc13.screenVsEngineDiffPx} px`);
+
+    await c.eval('return window.__ced.loadFormSample(3);');
+    await c.eval('return window.__ced.setCaret(0, 8);');
+    await c.eval('window.__ced.present(); return true;');
+    await sleep(150);
+    await c.screenshot(join(OUT, 'nested-three-levels.png'));
+  }
+
+  chk.section('[14] 控件边界总覆盖：真实鼠标点选 + 真实按键（相邻 / 嵌套 / 换行 / 删除 / 添加 / 光标）');
+  {
+    //  这一节是"控件边界"在浏览器里的主场。判据与 [12] 同源：凡是用户用手指和
+    //  键盘做出来的动作，都必须走真实事件（CDP 的 mousePressed/mouseReleased、
+    //  派到真实 textarea 上的 keydown），不能调引擎 API 代替 —— 坏点往往就在
+    //  "坐标换算 → 命中 → 归属 → 落笔"这条链的接缝上，而引擎 API 把接缝绕过去了。
+    //
+    //  括号的排布只存在于排版结果里（区间数据看不出来：][][] 与 [[ ]] 的区间
+    //  一模一样），所以用 __ced.bracketSlots 把槽清单读出来核对：每一枚括号的
+    //  偏移、开闭、归属、所在行、行内 x 都在里面。
+    const zoomNow = async () => c.eval('return Number(document.getElementById("zoom").value);');
+    const geo = async () => c.eval(`
+      const cv = window.__ced.canvas, r = cv.getBoundingClientRect();
+      return { left: r.left, top: r.top, sx: r.width / cv.width, sy: r.height / cv.height };`);
+    // 帧磅 → CSS 像素：与页面 onCanvasMouseDown 里那套换算同源（先乘 zoom 再乘缩放比）
+    const clickPt = async (g, xPt, yPt, z) => {
+      const p = { x: g.left + xPt * z * g.sx, y: g.top + yPt * z * g.sy,
+                  button: 'left', clickCount: 1, buttons: 1 };
+      await c.send('Input.dispatchMouseEvent', { type: 'mousePressed', ...p });
+      await c.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...p });
+      await sleep(8);
+    };
+    const load = async (v) => {
+      await c.eval(`return window.__ced.loadFormSample(${v});`);
+      await c.eval('return window.__ced.stopBlink();');
+    };
+    const caretOf = () => c.eval(`
+      return { o: window.__ced.caret.offset, f: window.__ced.controls.caret };`);
+    const items = () => c.eval('return window.__ced.controls.items.map(i => [i.start[1], i.end[1]]);');
+    const slotsOf = (cp) => c.eval(`
+      return (window.__ced.bracketSlots || [])
+        .filter(s => s.para === 0 && s.cp === ${cp})
+        .map(s => ({ side: s.side, owner: s.owner, ro: s.ro, line: s.line, x: s.x }));`);
+    // BracketSide：1 = 开，2 = 闭（枚举在 layout.h）
+    const sidesOf = (arr) => arr.map((s) => (s.side === 1 ? '[' : ']')).join('');
+    // 某个控件内容框左缘内侧 2 磅处（帧磅）。那里只被这个字段自己（以及它的外层）
+    //   覆盖，所以归属必须是最内层 —— 也就是这个字段自己。
+    //   不用"第一个字的中点"：相邻字段共享边界时，槽带把两个字的几何挤在一起，
+    //   量出来的中点可能落到里层字段的框里（判据本身就不可靠，见 [19]）。
+    const fieldSpot = (ci) => c.eval(`
+      const q = window.__ced.controls.items[${ci}].rects[0];
+      return { x: q.x + 2, y: q.y + q.h / 2 };`);
+
+    chk.section('[14.1] 相邻单共享边界：点 ] 归前一个、点 [ 归后一个（variant 0）');
+    {
+      await load(0);
+      const y = await c.eval(`
+        const q = window.__ced.controls.items[0].rects[0];
+        return q.y + q.h / 2;`);
+      const g = await geo();
+      const z = await zoomNow();
+      const s9 = await slotsOf(9);
+      chk.check('边界 9 上是 ][，两枚括号各归各的字段',
+                s9.length === 2 && sidesOf(s9) === '][' && s9[0].owner === 0 && s9[1].owner === 1,
+                `${sidesOf(s9)} ｜ 归属 ${s9.map((s) => s.owner).join(' ')}`);
+      chk.check('只读字段的括号是灰的（颜色跟着字段走，不跟着位置走）',
+                s9.length === 2 && !s9[0].ro && s9[1].ro,
+                `ro ${s9.map((s) => (s.ro ? 1 : 0)).join(' ')}`);
+      const pitch = s9.length === 2 ? Math.max(1, s9[1].x - s9[0].x) : 6;
+
+      await clickPt(g, s9[0].x + pitch * 0.5, y, z);
+      const a = await caretOf();
+      chk.check('★ 真实鼠标点 ] → 光标停在 9 且归前一个字段', a.o === 9 && a.f === 0,
+                `offset ${a.o} 归属 ${a.f}`);
+      await clickPt(g, s9[1].x + pitch * 0.5, y, z);
+      const b = await caretOf();
+      chk.check('★ 真实鼠标点 [ → 同一个偏移 9，归属换成后一个字段（这就是点得进去）',
+                b.o === 9 && b.f === 1, `offset ${b.o} 归属 ${b.f}`);
+
+      // 只读字段里打字必须被拒，而且要记账
+      const blk0 = await c.eval('return window.__ced.blockedEdits;');
+      await c.eval(key('痛'));
+      const blk1 = await c.eval('return window.__ced.blockedEdits;');
+      const it0 = await items();
+      chk.check('★ 在只读字段里打字被拒，且记了账',
+                blk1 === blk0 + 1 && JSON.stringify(it0[1]) === '[9,11]',
+                `blocked ${blk0}→${blk1} ｜ #1 ${JSON.stringify(it0[1])}`);
+
+      // 点前一个字段的闭括号再打字：字进前一个字段
+      await clickPt(g, s9[0].x + pitch * 0.5, y, z);
+      await c.eval(key('痛'));
+      const it1 = await items();
+      chk.check('★ 点 ] 之后真实按键 → 字进前一个字段，后一个整体右移',
+                JSON.stringify(it1) === '[[5,10],[10,12],[13,17]]', JSON.stringify(it1));
+      const au = await c.eval('return window.__ced.auditLayout();');
+      chk.check('★★ 点选 + 打字之后增量排版等于全量重排', !!au && au.diff === 0,
+                au ? `diff ${au.diff}` : 'null');
+    }
+
+    chk.section('[14.2] 相邻双共享边界（三连）：两条边界都是 ][，落笔跟着归属（variant 2）');
+    {
+      await load(2);
+      const y = await c.eval(`
+        const q = window.__ced.controls.items[0].rects[0];
+        return q.y + q.h / 2;`);
+      const g = await geo();
+      const z = await zoomNow();
+      const s7 = await slotsOf(7);
+      const s9 = await slotsOf(9);
+      chk.check('★ 两条共享边界都是 ][', sidesOf(s7) === '][' && sidesOf(s9) === '][',
+                `7:${sidesOf(s7)} 9:${sidesOf(s9)}`);
+      const p7 = s7.length === 2 ? Math.max(1, s7[1].x - s7[0].x) : 6;
+
+      await clickPt(g, s7[1].x + p7 * 0.5, y, z);
+      const a = await caretOf();
+      chk.check('★ 真实鼠标点中间那个字段的开括号 → 归属 1', a.o === 7 && a.f === 1,
+                `offset ${a.o} 归属 ${a.f}`);
+      await c.eval(key('痛'));
+      const it1 = await items();
+      chk.check('★ 接着打字 → 字进中间那个字段，左邻居一个字都没变',
+                JSON.stringify(it1) === '[[5,7],[7,10],[10,12]]', JSON.stringify(it1));
+
+      await load(2);
+      const s7b = await slotsOf(7);
+      await clickPt(g, s7b[0].x + p7 * 0.5, y, z);
+      const b = await caretOf();
+      chk.check('★ 同一条边界上点 ] → 归属 0', b.o === 7 && b.f === 0,
+                `offset ${b.o} 归属 ${b.f}`);
+      await c.eval(key('痛'));
+      const it2 = await items();
+      chk.check('★ 接着打字 → 字进前一个字段，后两个整体右移',
+                JSON.stringify(it2) === '[[5,8],[8,10],[10,12]]', JSON.stringify(it2));
+
+      // 真实方向键：一次一格，且能走出字段
+      await c.eval('return window.__ced.setCaret(0, 5);');
+      const walk = [];
+      for (let k = 0; k < 6; ++k) {
+        await c.eval(key('ArrowRight'));
+        walk.push((await caretOf()).o);
+      }
+      chk.check('★ 真实方向键一次一格并走出字段（5 → 6 7 8 9 10 11）',
+                JSON.stringify(walk) === JSON.stringify([6, 7, 8, 9, 10, 11]),
+                `落点 ${walk.join(' ')}`);
+      await c.eval('return window.__ced.setCaret(0, 12);');
+      const back = [];
+      for (let k = 0; k < 4; ++k) {
+        await c.eval(key('ArrowLeft'));
+        back.push((await caretOf()).o);
+      }
+      chk.check('★ 反向同样一次一格（12 → 11 10 9 8）',
+                JSON.stringify(back) === JSON.stringify([11, 10, 9, 8]), `落点 ${back.join(' ')}`);
+
+      // 归属随位置换人（重新载入样例，让偏移回到干净的三连区间）
+      await load(2);
+      await c.eval('return window.__ced.setCaret(0, 7);');
+      const f7 = (await caretOf()).f;
+      await c.eval(key('ArrowRight'));
+      const at8 = await caretOf();
+      chk.check('★ 跨过共享边界归属换人（7 归 #0，8 归 #1）',
+                f7 === 0 && at8.o === 8 && at8.f === 1, `7→${f7} ｜ 8→${at8.f}`);
+
+      // Home / End 是行首行尾，不是字段首尾
+      const ncp = await c.eval('return window.__ced.caret.docCodepoints;');
+      await c.eval('return window.__ced.setCaret(0, 9);');
+      await c.eval(key('Home'));
+      const h = (await caretOf()).o;
+      await c.eval(key('End'));
+      const e2 = (await caretOf()).o;
+      chk.check('★ 真实 Home/End 到行首行尾（不是字段首尾）', h === 0 && e2 === ncp,
+                `Home→${h} End→${e2}（文档 ${ncp} 个码点）`);
+    }
+
+    chk.section('[14.3] 删除文字：真实退格把后两个字段删空，括号必须交替成 ][][]（variant 2）');
+    {
+      await load(2);
+      const y = await c.eval(`
+        const q = window.__ced.controls.items[0].rects[0];
+        return q.y + q.h / 2;`);
+      const g = await geo();
+      const z = await zoomNow();
+      // 用真实 Backspace 键把 #2、#1 依次删空（每删一次都用删除前的端点重新定位光标）
+      for (const ci of [2, 1]) {
+        for (let guard = 0; guard < 8; ++guard) {
+          const cur = await items();
+          if (cur[ci][0] === cur[ci][1]) break;
+          await c.eval(`return window.__ced.setCaretAt(0, ${cur[ci][1]}, ${ci});`);
+          await c.eval(key('Backspace'));
+        }
+      }
+      const it = await items();
+      chk.check('两个字段被真实退格删成零宽，仍收在 7 上',
+                JSON.stringify(it) === '[[5,7],[7,7],[7,7]]', JSON.stringify(it));
+      const s = await slotsOf(7);
+      chk.check('★ 该处五枚括号交替成 ][][]（不是互相嵌套成 [[ ]]）',
+                s.length === 5 && sidesOf(s) === '][][]', `${sidesOf(s)}（${s.length} 枚）`);
+      chk.check('★ 五个槽各归各的字段（0 1 1 2 2）',
+                s.map((q2) => q2.owner).join(' ') === '0 1 1 2 2',
+                s.map((q2) => q2.owner).join(' '));
+
+      // 颜色跟着字段走：把 #2 标成只读，它那一对括号必须变灰且排在右侧。
+      //   只读标记只有建控件时给得进去，所以整份重建一次（区间不变，只翻 ro）。
+      await c.eval(`
+        const it2 = window.__ced.controls.items;
+        return window.__ced.setFormControls(it2.map((x, i) => ({
+          start: x.start, end: x.end, kind: 0, id: x.id, label: '', ro: i === 2 })));`);
+      const sr = await slotsOf(7);
+      chk.check('★ 只读字段的一对括号变灰（左三枚可编辑、右两枚只读）',
+                sr.length === 5 && sr.map((q2) => (q2.ro ? 1 : 0)).join('') === '00011',
+                sr.map((q2) => (q2.ro ? 1 : 0)).join(''));
+
+      // 删空之后那个零宽字段还得能进、能打：真实鼠标点它那一对 ([ ]) 里的 [ 位置
+      await c.eval(key('痛'));  // 先确认当前光标（应停在 #1 的零宽位置上）
+      const cur = await items();
+      chk.check('★ 删空之后光标仍停在那个零宽字段上，字进它自己（左右邻居没被撑大）',
+                JSON.stringify(cur) === '[[5,7],[7,8],[8,8]]', JSON.stringify(cur));
+
+      // 真实鼠标点 #2 的开括号 → 归属 2（两个零宽字段不许被认成同一个）
+      await load(2);
+      for (const ci of [2, 1]) {
+        for (let guard = 0; guard < 8; ++guard) {
+          const k = await items();
+          if (k[ci][0] === k[ci][1]) break;
+          await c.eval(`return window.__ced.setCaretAt(0, ${k[ci][1]}, ${ci});`);
+          await c.eval(key('Backspace'));
+        }
+      }
+      const s2 = await slotsOf(7);
+      const p2 = s2.length >= 2 ? Math.max(1, s2[1].x - s2[0].x) : 6;
+      // 槽序是 ] [ ] [ ]：#2 的开括号在下标 3
+      await clickPt(g, s2[3].x + p2 * 0.5, y, z);
+      const at2 = await caretOf();
+      chk.check('★ 真实鼠标点最右那枚 [（#2 的开括号）→ 归属 2',
+                at2.o === 7 && at2.f === 2, `offset ${at2.o} 归属 ${at2.f}`);
+      await c.eval(key('痛'));
+      const it3 = await items();
+      chk.check('★ 接着打字 → 字进 #2 自己（#1 还是零宽）',
+                JSON.stringify(it3) === '[[5,7],[7,7],[7,8]]', JSON.stringify(it3));
+      const au3 = await c.eval('return window.__ced.auditLayout();');
+      chk.check('★★ 删空与回填的每一步增量排版都等于全量重排', !!au3 && au3.diff === 0,
+                au3 ? `diff ${au3.diff}` : 'null');
+    }
+
+    chk.section('[14.4] 嵌套：三层各自点得进、内层优先、删空后仍是最内层（variant 3）');
+    {
+      await load(3);
+      const y = await c.eval(`
+        const q = window.__ced.controls.items[0].rects[0];
+        return q.y + q.h / 2;`);
+      const g = await geo();
+      const z = await zoomNow();
+      const six = {};
+      for (const cp of [5, 6, 7, 9, 10, 11]) six[cp] = await slotsOf(cp);
+      chk.check('★ 六处边界各一枚括号：开在前三、闭在后三（[外[中[内 … ]内]中]外）',
+                sidesOf(six[5]) === '[' && sidesOf(six[6]) === '[' && sidesOf(six[7]) === '[' &&
+                sidesOf(six[9]) === ']' && sidesOf(six[10]) === ']' && sidesOf(six[11]) === ']',
+                [5, 6, 7, 9, 10, 11].map((cp) => `${cp}:${sidesOf(six[cp])}`).join(' '));
+
+      // 真实鼠标点三层各自内容框的左缘内侧 → 归属必须是最内层
+      const owners = [];
+      for (const ci of [0, 1, 2]) {
+        const m = await fieldSpot(ci);
+        await clickPt(g, m.x, m.y, z);
+        owners.push((await caretOf()).f);
+      }
+      chk.check('★ 真实鼠标点三层各自的第一个字 → 归属 0 / 1 / 2（内层优先）',
+                owners.join(' ') === '0 1 2', owners.join(' '));
+
+      // 真实按键在内层打字：外中内三层一起变长
+      await c.eval('return window.__ced.setCaretAt(0, 8, 2);');
+      await c.eval(key('痛'));
+      const it = await items();
+      chk.check('★ 真实按键在内层打字 → 外中内三层一起变长（区间不许互相穿过）',
+                JSON.stringify(it) === '[[5,12],[6,11],[7,10]]', JSON.stringify(it));
+
+      // 真实退格把内层删空
+      for (let guard = 0; guard < 6; ++guard) {
+        const cur = await items();
+        if (cur[2][0] === cur[2][1]) break;
+        await c.eval(`return window.__ced.setCaretAt(0, ${cur[2][1]}, 2);`);
+        await c.eval(key('Backspace'));
+      }
+      const it2 = await items();
+      const s7b = await slotsOf(7);
+      chk.check('★ 删空的内层画成一对相邻的 []，仍嵌在中层的边界之内',
+                JSON.stringify(it2) === '[[5,9],[6,8],[7,7]]' && sidesOf(s7b) === '[]',
+                `${JSON.stringify(it2)} ｜ 7:${sidesOf(s7b)}`);
+      await c.eval('return window.__ced.setCaret(0, 7);');
+      const f7 = (await caretOf()).f;
+      await c.eval(key('痛'));
+      const it3 = await items();
+      chk.check('★ 真实按键在删空的内层上打字 → 字进它自己，外中两层一起外推',
+                f7 === 2 && JSON.stringify(it3) === '[[5,10],[6,9],[7,8]]',
+                `归属 ${f7} ｜ ${JSON.stringify(it3)}`);
+      const au4 = await c.eval('return window.__ced.auditLayout();');
+      chk.check('★★ 嵌套的每一步增量排版都等于全量重排', !!au4 && au4.diff === 0,
+                au4 ? `diff ${au4.diff}` : 'null');
+
+      await load(3);
+      await c.eval('return window.__ced.setCaretAt(0, 8, 2);');
+      await c.eval('window.__ced.present(); return true;');
+      await sleep(150);
+      await c.screenshot(join(OUT, 'boundary-nested.png'));
+    }
+
+    chk.section('[14.5] 换行：跨行字段的两个括号落在不同行，嵌套的只读内层点得进打不进（variant 1）');
+    {
+      await load(1);
+      const cc = await c.eval('return window.__ced.controls;');
+      chk.check('长字段跨行（矩形块 > 1），只读小字段嵌在它里面',
+                cc.items[0].rects.length >= 2 && cc.items[1].depth === 1 && cc.items[1].ro,
+                `#0 块数 ${cc.items[0].rects.length} ｜ #1 depth ${cc.items[1].depth} ro ${cc.items[1].ro}`);
+      const s5 = await slotsOf(5);
+      const s60 = await slotsOf(60);
+      chk.check('★ 跨行字段的开括号与闭括号落在不同的行上',
+                s5.length === 1 && s60.length === 1 && s5[0].line !== s60[0].line,
+                `开括号行 ${s5.length ? s5[0].line : '-'} ｜ 闭括号行 ${s60.length ? s60[0].line : '-'}`);
+
+      const g = await geo();
+      const z = await zoomNow();
+      const mB = await fieldSpot(1);
+      await clickPt(g, mB.x, mB.y, z);
+      const inB = await caretOf();
+      const blk0 = await c.eval('return window.__ced.blockedEdits;');
+      await c.eval(key('痛'));
+      const blk1 = await c.eval('return window.__ced.blockedEdits;');
+      const itb = await items();
+      chk.check('★ 点嵌套里的只读内层 → 归属是内层、打字被拒（外层可编辑也改不动它）',
+                inB.f === 1 && blk1 === blk0 + 1 && JSON.stringify(itb[1]) === '[20,26]',
+                `归属 ${inB.f} ｜ blocked ${blk0}→${blk1} ｜ #1 ${JSON.stringify(itb[1])}`);
+
+      const mA = await fieldSpot(0);
+      await clickPt(g, mA.x, mA.y, z);
+      const inA = await caretOf();
+      await c.eval(key('痛'));
+      const ita = await items();
+      chk.check('★ 点外层（不在内层框里）→ 归属 0，字进外层、内层整体右移',
+                inA.f === 0 && JSON.stringify(ita) === '[[5,61],[21,27]]', JSON.stringify(ita));
+      const au5 = await c.eval('return window.__ced.auditLayout();');
+      chk.check('★★ 跨行字段编辑之后增量排版等于全量重排', !!au5 && au5.diff === 0,
+                au5 ? `diff ${au5.diff}` : 'null');
+    }
+
+    chk.section('[14.6] 真实鼠标横扫：命中测试说什么，点击就落在什么上（含无死区）');
+    {
+      await load(2);
+      const y = await c.eval(`
+        const q = window.__ced.controls.items[0].rects[0];
+        return q.y + q.h / 2;`);
+      const g = await geo();
+      const z = await zoomNow();
+      const lo = await c.eval(
+        'return Math.min(...window.__ced.controls.items.map(i => i.rects[0].x));');
+      const hi = await c.eval(
+        'return Math.max(...window.__ced.controls.items.map(i => i.rects[0].x + i.rects[0].w));');
+      let probed = 0;
+      let mismatch = 0;
+      let nonmono = 0;
+      let prev = -1;
+      const covered = new Set();
+      const bad = [];
+      // 关键：CDP 把鼠标坐标按整型 CSS 像素投递（实测 465.85 落到 465），而 1 磅
+      //   等于 1.5 像素，所以"计划点"与"实际投递点"最多差半个磅。括号槽宽不到一个
+      //   像素时，这半个磅足够翻到旁边那一枚括号上。所以命中要用"实际投递的那个磅值"
+      //   去问，否则量到的是探针自己的舍入误差，而不是引擎的问题。
+      const quantizedPt = (xPt) => {
+        const cx = Math.round(g.left + xPt * z * g.sx);
+        return (cx - g.left) / z;
+      };
+      for (let x = lo - 4; x <= hi + 4; x += 1) {
+        const pt = quantizedPt(x);
+        const h = await c.eval(`return window.__ced.hit(${pt.toFixed(3)}, ${y.toFixed(2)});`);
+        if (!h || h.offset > 17) continue;
+        await clickPt(g, x, y, z);
+        const st = await caretOf();
+        ++probed;
+        // 归属只在命中确实给出了"某一枚括号的主"时才比：命中返回 -1 表示没点在括号上，
+        //   那时面板上的归属是"这个偏移该往哪写"（末尾算在区间内），口径不同不是矛盾。
+        const ownerOk = h.field < 0 || st.f === h.field;
+        if (st.o !== h.offset || !ownerOk) {
+          ++mismatch;
+          if (bad.length < 3) {
+            bad.push(`x=${x.toFixed(1)} 命中(${h.offset},${h.field}) 实际(${st.o},${st.f})`);
+          }
+        }
+        if (st.o < prev) ++nonmono;
+        prev = st.o;
+        if (st.o >= 5 && st.o <= 11) covered.add(st.o);
+      }
+      report.sweep = { probed, mismatch, nonmono, covered: [...covered] };
+      chk.check('★★ 真实鼠标横扫：命中偏移与归属都等于点击后的实际落点',
+                probed > 50 && mismatch === 0,
+                `采样 ${probed} 点，不一致 ${mismatch} 个 ${bad.join(' ')}`);
+      chk.check('★ 横扫时落点单调不减（没有回跳的死区）', nonmono === 0, `非单调 ${nonmono} 处`);
+      chk.check('★ 三个字段里每一个光标位置都能点出来（5..11 全覆盖）',
+                covered.size === 7,
+                `覆盖 ${[...covered].sort((a, b) => a - b).join(' ')}`);
+
+      // 光标画在哪里：逐字点"这个字的中点"，画出来的光标必须就在点击点附近。
+      //   这是整条坐标链（CSS 像素 → 帧像素 → 帧磅）的可证伪判据：dpr 或 zoom
+      //   少乘一次，落点就会差一整格。
+      let drawnProbed = 0;
+      let drawnBad = 0;
+      for (let ci = 0; ci < 3; ++ci) {
+        const a = await c.eval(`return window.__ced.controls.items[${ci}].start[1];`);
+        const b = await c.eval(`return window.__ced.controls.items[${ci}].end[1];`);
+        for (let k = a; k < b; ++k) {
+          const m = await c.eval(`
+            window.__ced.setCaretAt(0, ${k}, ${ci});
+            const x0 = window.__ced.caret.x;
+            window.__ced.setCaretAt(0, ${k + 1}, ${ci});
+            const c2 = window.__ced.caret;
+            return { x: (x0 + c2.x) / 2, y: c2.y + c2.h / 2 };`);
+          await clickPt(g, m.x, m.y, z);
+          const st = await c.eval('return window.__ced.caret;');
+          ++drawnProbed;
+          if (Math.abs(st.x - m.x) > 8 || st.offset < a || st.offset > b) ++drawnBad;
+        }
+      }
+      chk.check('★ 逐字点选：落点在该字范围内、且光标画在点击处附近（整条坐标链）',
+                drawnProbed === 6 && drawnBad === 0, `${drawnProbed} 个字，偏的 ${drawnBad} 个`);
+
+      const sc = await c.eval('return window.__ced.selfCheck();');
+      chk.check('横扫之后屏幕 == 引擎帧', sc.screenVsEngineDiffPx === 0,
+                `差 ${sc.screenVsEngineDiffPx} px`);
+      await c.eval('window.__ced.present(); return true;');
+      await sleep(150);
+      await c.screenshot(join(OUT, 'boundary-three-adjacent.png'));
+    }
+  }
   chk.section('[7] 无页面异常 / 无 console 错误');
   {
     report.pageErrors = await c.eval('return window.__ced.errors;');

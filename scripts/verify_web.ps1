@@ -74,7 +74,7 @@ try {
     # ── 静态服务：直接持有 python 进程（不套一层 PowerShell，否则收进程时会留孤儿）──
     Write-Host "[verify] 起静态服务 :$Port"
     $server = Start-Process -PassThru -WindowStyle Hidden -FilePath $py -ArgumentList @(
-        '-m', 'http.server', "$Port", '--directory', $Root
+        (Join-Path $PSScriptRoot 'dev_server.py'), '--port', "$Port", '--root', "$Root"
     ) -RedirectStandardOutput (Join-Path $Root 'out\verify_serve.log') `
       -RedirectStandardError  (Join-Path $Root 'out\verify_serve.err')
 

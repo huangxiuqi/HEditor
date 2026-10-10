@@ -158,6 +158,14 @@ struct LineCluster {
      * 反查要拿 (段, cp, 朝向) 去控件集合里匹配，遇到相邻/嵌套字段就会出现歧义。
      */
     bool read_only = false;
+
+    /**
+     * 这个占位属于哪个控件（控件集合里的下标）；非占位恒为 -1。
+     * 与 read_only 同一个理由：只有插槽那一步知道答案。命中测试要用它来回答
+     * "用户点的这个括号是谁的" —— 共享边界上两个字段的括号挨在一起（][），
+     * 光凭 (cp, 朝向) 反查，空字段与相邻字段会给出同一个答案。
+     */
+    int owner_control = -1;
 };
 
 /**
@@ -228,9 +236,28 @@ struct LineBox {
      * 给定段内码点偏移，返回相对行首的沿行内轴位置（磅）。
      * 落在簇内部（比如 e + 组合重音之间）时返回该簇的起点 ——
      * 光标天然吸附到簇边界，正是本实现要的语义。
+     *
+     * @param prefer_owner >= 0 时，光标要画在"属于这个控件的那一侧"。
+     *   只有共享边界需要它：同一个偏移既是前一个字段的末尾、又是后一个字段的开头，
+     *   占位簇挤在一起（][，空字段还会变成 ][][ ），同一列有两种画法 ——
+     *   贴在 ] 之内（内容到此为止），或贴在 [ 之后（内容从此开始）。
+     *   鼠标点画布时浏览器知道用户点的是哪一侧（占位簇自己记着 owner_control），
+     *   于是把结论带到这里。默认 -1 = 不带偏好，保持"贴 ] 之内"的老行为，
+     *   键盘移动与 setCaret 这类没有侧别的入口走的就是它。
      */
-    float inlineOffsetFor(uint32_t cp) const {
+    float inlineOffsetFor(uint32_t cp, int prefer_owner = -1) const {
         if (clusters.empty()) return 0.0f;
+        // 偏好侧：找到这个控件自己的开括号槽，返回它之后那个簇的位置。
+        //   于是"贴在 [ 之后"是对的，而且空字段的那一对括号整体算作它的内部
+        //   （[ ] 之间），不会被推到右边字段的开括号之外。
+        if (prefer_owner >= 0) {
+            for (size_t i = 0; i < clusters.size(); ++i) {
+                const LineCluster& c = clusters[i];
+                if (!c.placeholder || c.owner_control != prefer_owner) continue;
+                if (c.bracket_side != BracketSide::Open || c.cp != cp) continue;
+                return (i + 1 < clusters.size()) ? clusters[i + 1].inline_pt : inline_end_pt;
+            }
+        }
         // 规则："最后一个 cp <= target 的簇的起点"。对普通文本它就是
         // "target 那个字的左边缘"（＝那个字的插入点），落到簇内部时吸附到簇首 ——
         // 都对。只有占位括号会破坏它，见下面那条。

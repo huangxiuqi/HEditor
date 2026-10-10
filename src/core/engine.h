@@ -248,7 +248,26 @@ public:
      */
     void setCaret(int para, size_t offset);
     void setCaret(TextPos p) { setCaret(p.para, p.offset); }
+    /**
+     * 带"归属"的定位：点画布时用户点的是某个字段的括号，位置本身（共享边界上的
+     * 那个偏移）分不出是哪一侧，于是把结论一起带进来。
+     *
+     * 适用条件写死成一条：只有当光标仍然停在这里给的位置上时，这个归属才有效
+     * （见 caretFieldHint）。于是所有会移动光标的编辑自动让它失效 ——
+     * 不需要在每个编辑入口记得清一下，忘了清正是这类"陈旧状态"bug 的来源。
+     */
+    void setCaretAt(int para, size_t offset, int field);
+    void setCaretAt(TextPos p, int field) { setCaretAt(p.para, p.offset, field); }
     const TextPos& caret() const { return caret_; }
+    /**
+     * 光标当前的归属提示（-1 = 没有；按位置是否仍旧吻合判有效性）。
+     * 仅供编辑归属与光标几何使用。
+     */
+    int caretFieldHint() const {
+        return (caret_field_ >= 0 && caret_field_at_ == caret_ && caret_field_ < controls_.size())
+                   ? caret_field_
+                   : -1;
+    }
     /**
      * 按"用户感知字符"（簇）移动。dcp > 0 向后、< 0 向前。
      * 返回 true 表示光标真的动了（没动就别重绘）。
@@ -326,9 +345,13 @@ public:
 
     /**
      * 当前光标所在的最内层控件下标（-1 = 不在任何控件内）。
-     * 口径与 canPlaceCaret 一致（include_end = true）：光标停在字段末尾也算在字段里。
+     * 用 include_end = true：光标停在字段末尾也算在字段里。
+     * 例外是"点画布带来的归属提示"：共享边界上它比最内层更准（见 setCaretAt），
+     *   有提示时以提示为准 —— 界面上的"当前字段"要跟用户的点击一致。
      */
     int focusedControlIndex() const {
+        const int hint = caretFieldHint();
+        if (hint >= 0) return hint;
         return controls_.empty() ? -1 : controls_.innermostAt(caret_, true);
     }
 
@@ -468,8 +491,17 @@ public:
     bool caretRectPt(Rect* out) const;
     /**
      * 反查：帧坐标（磅）→ (段, 偏移)。点落在页间空隙时返回 false。
+     *
+     * @param out_owner 非空时写出"该次点击属于哪个控件"（-1 = 判不出）。
+     *   与偏移分开返回是必须的：共享边界上两个相邻字段落在同一个偏移上
+     *   （前一个字段的末尾 = 后一个字段的开头），光有偏移无法表达用户点的是哪一侧。
+     *   判据全部来自排版自己插的占位簇（它记着 owner_control）：
+     *     点到占位簇 → 就是那个占位的主人；
+     *     点到真实簇 → 该位置的内容所属的控件（半开区间，于是"点字段第一个字的左半"
+     *       落在它的开头、归它，而不是归前一个字段）。
      */
-    bool hitTestPt(float x_pt_frame, float y_pt_frame, TextPos* out) const;
+    bool hitTestPt(float x_pt_frame, float y_pt_frame, TextPos* out,
+                   int* out_owner = nullptr) const;
 
     const uint8_t* frame() const { return bitmap_.data(); }
     int frameWidth() const { return bitmap_.width(); }
@@ -541,16 +573,6 @@ private:
      */
     void computePageFingerprints(int dirty_lo = -1, int dirty_hi = -1);
     void syncStatsFromLayout();
-
-    /**
-     * 把 pos 投影到策略允许的位置（就近，认距离不认方向）。
-     *
-     * 只用于鼠标点击与程序化定位：点击给的是粗略的点，投影到最近的可编辑处是合理的猜测。
-     * 键盘移动不能用它 —— 方向键是明确指令，投影会把光标送到另一个控件（在 #2 内按一次
-     * 左键会跨过只读字段落到 #0）。键盘走 moveCaretBy 的逐格停，Home/End 走
-     * clampToFieldEdge。dir > 0 向文档后方找、< 0 向前找，找不到保持原值。
-     */
-    bool clampToAllowed(TextPos* pos, int dir) const;
 
     /**
      * 标记"从第 para 段起需要重排"（取最小值，一次操作跨多段也只需一次标记）。
@@ -648,14 +670,6 @@ private:
      */
     void relayoutIfBracketPlanChanged(int prev_plan);
 
-    /**
-     * Home/End 的收边：目标在当前可编辑字段内则照常，否则退到本字段起点/终点；光标不在
-     * 任何字段内时返回 false。
-     *
-     * 不用 clampToAllowed：那是投影到最近处，会把光标送进另一个控件。
-     */
-    bool clampToFieldEdge(TextPos* pos, bool to_start) const;
-
     EngineConfig cfg_;
     FontLibrary fonts_;
     std::vector<BlockSpec> blocks_;
@@ -714,6 +728,14 @@ private:
 
     TextPos caret_{0, 0};
     bool caret_visible_ = true;
+    /**
+     * 光标归属提示：点画布时定下来的"这个光标属于哪个控件"。
+     * 共享边界上两侧字段落在同一个偏移上，光看位置判不出侧别 —— 见 setCaretAt。
+     * 与 caret_field_at_ 配套：只有光标还停在这个位置上，提示才有效
+     * （位置一变就自动失效，不需要在每个编辑入口手工清）。
+     */
+    int caret_field_ = -1;
+    TextPos caret_field_at_{-1, 0};
 
     /**
      * 底图当前显示的范围与有效性
