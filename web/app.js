@@ -179,13 +179,24 @@ async function boot() {
     ta.focus();
   });
 
+  // 表单样例有三份：相邻的一可编辑加一只读、跨行大字段内嵌只读、三个可编辑字段连排。
+  //   三连那一份是给"共享边界"用的：边界两侧都可写，所以在边界上打字、把某个字段删空、
+  //   在字段之间退格，全都能当场试出来。
+  const variantSel = $('formVariant');
+  variantSel.disabled = false;
+  const formHint = [
+    '表单样例：只有两个字段能改，中间的病程只读 —— 试着往别处敲字',
+    '表单样例：一个大字段跨行，里面嵌着一个只读小字段',
+    '表单样例：三个可编辑字段紧挨着 —— 在边界上打字 / 把中间那个删空，看括号怎么跟',
+  ];
   $('formSample').disabled = false;
   $('formSample').addEventListener('click', () => {
-    mod.loadFormSample(0);
+    const v = Number(variantSel.value);
+    mod.loadFormSample(v);
     modeSel.value = String(mod.editMode());
     relayoutAndBlit();
     ta.focus();
-    setStatus('表单样例：只有两个字段能改，中间的病程只读 —— 试着往别处敲字');
+    setStatus(formHint[v] || formHint[0]);
   });
 
   // 键盘与 IME：全部由 textarea 承接（canvas 收不到键盘，也收不到合成事件）

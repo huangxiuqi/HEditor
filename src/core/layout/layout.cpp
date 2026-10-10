@@ -174,14 +174,13 @@ uint64_t shapingFingerprint(const BlockSpec& b) {
 
 /**
  * 把"要显示括号的控件"的边界插成占位簇（括号进文档流的全部实现）。
- *
- * 三条约定，整个表单标记体系都建立在这上面：
+ * 三条约定：
  *   槽宽 = 括号字形 advance + 间隙，且与绘制侧共用同一个常数（见 kControlBracketSlotGapPt）；
- *   同一处边界上的多个槽按"槽属于谁"排序 —— 内容结束处的闭括号(0) → 开括号(1) →
- *     空字段自身的闭括号(2)，于是相邻字段得 ][、空字段得 []、同区间嵌套得 [[ ]]；
- *   占位簇 g0 == g1（不产生字形、只占 advance），于是断行容量、行末位置、每个簇的行内
- *     位置、光标与命中测试全都自动把括号算进去。
- *
+ *   同一处边界上的多个槽按"它属于谁"排顺序 —— 内容到此结束的闭括号最靠前，空字段自己的一
+ *     对紧随其后且必须挨着（否则后一个字段的开括号会插进来，把一对方括号劈成两半），
+ *     内容从此开始的字段的开括号排在最后。于是相邻字段得 ][、空字段得 []、同区间嵌套得 [[ ]]；
+ *   占位簇 g0 == g1（不产生字形、只占 advance），于是断行容量、行末位置、每个簇的行内位置、
+ *     光标与命中测试全都自动把括号算进去。
  * @param shaped 纯整形结果（可能正指着只读的段级缓存条目）；没有槽要插时原样返回它
  * @param scratch 需要可改副本时就地用它（未命中缓存时它已持有整形结果，省一次拷贝）
  */
@@ -197,6 +196,8 @@ const BlockShaping* withBracketSlots(const ControlSet* controls, const std::vect
 
     // 同一处边界（簇 i 之前）可能同时挂着多个槽，来自不同字段：
     // 某字段在此结束（闭括号）、某字段在此开始（开括号）、空字段两者皆有。
+    // 空字段是零宽的：它整个落在"到此结束的内容"之后、"从此开始的内容"之前，
+    //   所以顺序是 闭(结束)-开(空)-闭(空)-开(开始)。数值只表示先后，见函数头。
     struct Slot {
         BracketSide side;
         bool ro;  // 只读字段的括号画灰色（颜色只有插槽这一层知道）
@@ -213,7 +214,9 @@ const BlockShaping* withBracketSlots(const ControlSet* controls, const std::vect
     for (int ci : *bracketed) {
         if (ci < 0 || ci >= controls->size()) continue;
         const Control& fc = controls->at(ci);
-        // 空字段：开、闭落在同一处，且要画成 []（不是 ][）。
+        // 空字段：开、闭落在同一处，且要画成一对紧挨着的 []（不是 ][）。
+        // 它的一对必须排在"后面的字段"的开括号之前 —— 同一个位置上，空字段在文档序里
+        //   位于"内容到此结束"之后、"内容从此开始"之前，那对方括号得整对留在那个缝里。
         const bool empty_field = (fc.range.start == fc.range.end);
         if (fc.range.end.para == static_cast<int>(para_index)) {
             at[slotIndex(fc.range.end.offset)].push_back(
@@ -221,7 +224,7 @@ const BlockShaping* withBracketSlots(const ControlSet* controls, const std::vect
         }
         if (fc.range.start.para == static_cast<int>(para_index)) {
             at[slotIndex(fc.range.start.offset)].push_back(
-                Slot{BracketSide::Open, fc.read_only, 1});
+                Slot{BracketSide::Open, fc.read_only, empty_field ? 1 : 3});
         }
     }
     bool any = false;

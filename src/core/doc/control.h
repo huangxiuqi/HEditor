@@ -132,13 +132,15 @@ private:
 };
 
 /**
- * 区间伸缩：编辑之后必须调这两个，否则控件会脱离它标注的内容
- * 规则只有两条，但对两种情况（控件内编辑 / 控件外编辑）同时成立：
- * 插入 (para, at, n)：端点在 at 之后（含 at）的 → 右移 n
- * ⟹ 在控件内插入 → end 右移 = 区间变长（对）
- * ⟹ 在控件前插入 → start/end 都右移 = 区间平移（对）
+ * 区间伸缩：编辑之后必须调这两个，否则控件会脱离它标注的内容。
+ *
+ * 插入 (para, at, n)：先看 at 归谁 —— 最内层控件（含末尾），与 canInsert 同口径。
+ *   落笔点的主人（及其外层控件）按"内含"伸缩：起点不动、终点 +n，
+ *   在字段内打字与在末尾追加都会变长；
+ *   其余控件按"平移"伸缩：起点 >= at、终点 > at 才 +n，
+ *   新字不许落进它们 —— 否则共享边界上的两个字段会重叠，括号顺序从 ][ 变成 []。
  * 删除 (para, [a, b))：端点在 a 之前 → 不动；在 b 之后 → 左移 len；
- * 落在 [a, b) 内 → 夹到 a
+ *   落在 [a, b) 内 → 夹到 a
  */
 void adjustControlsOnInsert(ControlSet& ctrls, int para, size_t at, size_t n);
 void adjustControlsOnErase(ControlSet& ctrls, int para, size_t a, size_t b);

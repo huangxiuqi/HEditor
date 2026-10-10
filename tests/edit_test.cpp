@@ -58,6 +58,54 @@ void expectNear(A a, B b, double tol, const std::string& what) {
 }
 
 /**
+ * 两个控件区间是否"互相穿过"：半开区间有交集。
+ * 相邻（只共享边界点，如 [5,9) 与 [9,12)）不算 —— 那正是合法且必要的一格；
+ * 嵌套（一个盖住另一个）也不算 —— 那是嵌套控件的正常形态。
+ * 只有"一半重叠"才是非法状态：它会同时让区间归属和括号顺序失去意义。
+ */
+bool spansCross(const ControlRange& a, const ControlRange& b) {
+    const bool overlap = a.start < b.end && b.start < a.end;
+    if (!overlap) return false;
+    return !rangeCovers(a, b) && !rangeCovers(b, a);
+}
+
+/**
+ * 括号的颜色判据：可编辑的括号亮蓝、只读的灰。
+ * 判据用颜色而不是"猜字形"，是因为"谁在左"于是像素上直接可读，
+ * 不会因为换字体或换实现而失效。亮蓝那条与 [11] 的 (f) 同源：光标色 r=31 被排除。
+ */
+bool isBracketBlue(uint8_t r, uint8_t g, uint8_t b) {
+    (void)g;
+    return r > 45 && (static_cast<int>(b) - static_cast<int>(r)) > 60 && b > 140;
+}
+
+/**
+ * 灰（只读括号，标记灰 = 168）：三通道接近且在 [140,195]。
+ * 上限 195 排掉页边框（206,212,218）与抗锯齿混白，下限 140 排掉正文黑字的抗锯齿尾巴。
+ */
+bool isBracketGray(uint8_t r, uint8_t g, uint8_t b) {
+    const int drg = std::abs(static_cast<int>(r) - static_cast<int>(g));
+    const int dgb = std::abs(static_cast<int>(g) - static_cast<int>(b));
+    return r >= 140 && r <= 195 && drg <= 8 && dgb <= 8;
+}
+
+/**
+ * 在像素窗口 [x0, x1]（列）内找某类颜色的列范围；一个都没有则 lo = -1。
+ */
+void scanColumns(const std::vector<uint8_t>& f, int frame_w, int x0, int x1,
+                 bool (*pred)(uint8_t, uint8_t, uint8_t), int* lo, int* hi) {
+    *lo = -1;
+    *hi = -1;
+    for (size_t i = 0; i + 3 < f.size(); i += 4) {
+        const int x = static_cast<int>(i >> 2) % frame_w;
+        if (x < x0 || x > x1) continue;
+        if (!pred(f[i], f[i + 1], f[i + 2])) continue;
+        if (*lo < 0) *lo = x;
+        *hi = x;
+    }
+}
+
+/**
  * "增量上屏 == 从零上屏"的比对器：拿第二个引擎（同文档、同配置、同控件、同光标，
  * 从零重排重画）当参照物，与被测引擎的当前帧逐像素比。
  *
@@ -1773,56 +1821,25 @@ int main() {
 
         // (b) 像素级：亮蓝的 ] 必须整个在灰的 [ 左边
         {
-            auto snap = [](EditorEngine& eng) {
-                eng.repaint();
-                return std::vector<uint8_t>(eng.frame(), eng.frame() + eng.frameBytes());
-            };
-            // 亮蓝（可编辑括号）：与 [11] 的 (f) 同源判据，光标色 r=31 被排除。
-            auto isBlue = [](uint8_t r, uint8_t g, uint8_t b) {
-                return r > 45 && (static_cast<int>(b) - static_cast<int>(r)) > 60 && b > 140;
-            };
-            // 灰（只读括号，标记灰 = 168）：三通道接近且在 [140,195]。
-            //   上限 195 是为了排掉页边框（206,212,218）+ 抗锯齿混白；
-            //     下限 140 是为了排掉正文黑字（24,24,24）的抗锯齿尾巴。
-            //     （正文与灰括号在颜色上本来就可能撞，所以窗口还要止于 B 的内容之前。）
-            auto isGray = [](uint8_t r, uint8_t g, uint8_t b) {
-                const int drg = std::abs(static_cast<int>(r) - static_cast<int>(g));
-                const int dgb = std::abs(static_cast<int>(g) - static_cast<int>(b));
-                return r >= 140 && r <= 195 && drg <= 8 && dgb <= 8;
-            };
-            struct Span {
-                int lo = -1;
-                int hi = -1;
-                int count() const { return lo < 0 ? 0 : hi - lo + 1; }
-            };
+            ea.repaint();
+            const std::vector<uint8_t> f(ea.frame(), ea.frame() + ea.frameBytes());
             const float zoom = ea.config().zoom;
             const int fw = ea.frameWidth();
-            const std::vector<uint8_t> f = snap(ea);
             const int x0 = static_cast<int>(std::lround(p_close * zoom)) - 2;
             // 止于 B 的开槽末（再往里 1pt 就是「三」的墨迹了）
             const float slot_len = p_open - p_close;
             const int x1 = static_cast<int>(std::lround((p_open + slot_len - 1.0f) * zoom));
-
-            Span blue, gray;
-            auto scan = [&](auto pred, Span* out) {
-                for (size_t i = 0; i + 3 < f.size(); i += 4) {
-                    const int x = static_cast<int>(i >> 2) % fw;
-                    if (x < x0 || x > x1) continue;
-                    if (!pred(f[i], f[i + 1], f[i + 2])) continue;
-                    if (out->lo < 0) out->lo = x;
-                    out->hi = x;
-                }
-            };
-            scan(isBlue, &blue);
-            scan(isGray, &gray);
+            int blue_lo = -1, blue_hi = -1, gray_lo = -1, gray_hi = -1;
+            scanColumns(f, fw, x0, x1, isBracketBlue, &blue_lo, &blue_hi);
+            scanColumns(f, fw, x0, x1, isBracketGray, &gray_lo, &gray_hi);
             std::printf("     窗口 x ∈ [%d, %d]：亮蓝 %d..%d（%d 列）｜ 灰 %d..%d（%d 列）\n", x0,
-                        x1, blue.lo, blue.hi, blue.count(), gray.lo, gray.hi, gray.count());
+                        x1, blue_lo, blue_hi, blue_hi < 0 ? 0 : blue_hi - blue_lo + 1, gray_lo,
+                        gray_hi, gray_lo < 0 ? 0 : gray_hi - gray_lo + 1);
 
-            expectTrue(blue.count() > 0 && gray.count() > 0,
-                       "窗口里两种颜色的括号都在（蓝的= A 的右括号、灰的= B 的左括号）");
-            expectTrue(blue.hi > 0 && blue.hi < gray.lo,
-                       "亮蓝 `]` 整个在灰 `[` 左边 —— 相邻字段是 `][`。"
-                       "反过来的话就是用户截图里的 `[]`");
+            expectTrue(blue_lo >= 0 && gray_lo >= 0,
+                       "窗口里两种颜色的括号都在（蓝的 = A 的右括号、灰的 = B 的左括号）");
+            expectTrue(blue_hi > 0 && blue_hi < gray_lo,
+                       "亮蓝 ] 整个在灰 [ 左边 —— 相邻字段是 ][。反过来的话就是那个 []（报过的）");
         }
     }
 
@@ -2761,6 +2778,407 @@ int main() {
                        "★ 整篇重排恰好发生在「脏段为第 0 段且段数/行数变了」的那几步");
             expectTrue(frameDiffAgainstFresh(e, fonts17, {}, EditMode::Document, nullptr) == 0,
                        "★ 随机跨段编辑之后，增量上屏 == 从零上屏（逐字节）");
+        }
+    }
+
+    std::printf("\n[18] 相邻字段共享边界：打字、删空都不许把括号画错位\n");
+    {
+        //  报过的现象：两个相邻控件，在第一个控件末尾打一个字，括号又变成 []
+        //  （截图：患者主诉：[反悸[▏]三天]，[加重一天]。「▏」是光标）。
+        //
+        //  根因不在排版而在区间伸缩：共享边界 at 同时是 A 的末尾与 B 的开头，两条端点
+        //  规则同时命中 —— A 的终点 >= at 右移（字进 A），B 的起点要 > at 才右移
+        //  （于是 B 的起点原地不动）→ 插入的那个字同时落进两个控件：A=[5,10)、B=[9,12)
+        //  重叠。排版于是看到"B 从 9 开始"（左括号插在 悸 之后）、"A 结束于 10"
+        //  （右括号插在那个字之后），画出来正是 悸[字]三。
+        //
+        //  所以 [14] 只钉住了"静态相邻"，没钉住"相邻之后再打字"这一格。
+        //  判据三层：区间不重叠（结构性）、共享边界上的占位是 [闭, 开]、像素上亮蓝的
+        //  右括号整个在灰的左括号左边（与 [14] 同一把尺子，不依赖字形实现）。
+        EditorEngine e;
+        if (!e.init({cjkPath, mnPath, latinPath})) {
+            std::fprintf(stderr, "字体加载失败\n");
+            return 2;
+        }
+        EngineConfig c18;
+        c18.zoom = 1.5f;
+        e.setConfig(c18);
+
+        BlockSpec b18;
+        b18.font_index = 0;
+        b18.size_pt = 12.0f;
+        b18.wm = WritingMode::HorizontalTB();
+        b18.line_factor = 1.75f;
+        b18.language = "zh";
+        b18.setText("患者主诉：反复心悸三天，加重一天。");
+        e.setBlocks({b18});
+        e.relayout();
+
+        Control ka;
+        ka.range.start = TextPos{0, 5};
+        ka.range.end = TextPos{0, 9};  // 反复心悸
+        ka.id = "a";
+        Control kb;
+        kb.range.start = TextPos{0, 9};  // 共享边界：A 的末尾 == B 的开头
+        kb.range.end = TextPos{0, 11};   // 三天（只读）
+        kb.id = "b";
+        kb.read_only = true;
+        e.setControls({ka, kb});
+        e.setEditMode(EditMode::Form);
+        e.setCaret(0, 9);
+        e.repaint();
+
+        expectTrue(e.focusedControlIndex() == 0,
+                   "光标停在共享边界上时归前一个字段（末尾算在区间内）");
+        expectTrue(e.typeTextAndRender("X"), "在共享边界上打字被放行（不是被拒）");
+
+        const Control& a2 = e.controls().at(0);
+        const Control& b2 = e.controls().at(1);
+        std::printf("     打字后区间：A=[%zu,%zu)  B=[%zu,%zu)\n", a2.range.start.offset,
+                    a2.range.end.offset, b2.range.start.offset, b2.range.end.offset);
+
+        expectTrue(
+            a2.range.end.offset == 10 && b2.range.start.offset == 10 && b2.range.end.offset == 12,
+            "字进了前一个字段（A 变长到 10），后一个字段整体右移（B 从 10 开始）");
+        expectTrue(a2.range.end.offset <= b2.range.start.offset,
+                   "★ 两段区间不重叠 —— 重叠就是那个 `[]` 的根因（字同时属于两个字段）");
+
+        // (b) 排版：新边界（10）上是 [闭, 开]，旧边界（9）上什么都不该剩
+        int n_at9 = 0, n_at10 = 0, first10 = -1, second10 = -1;
+        float close_x = -1.0f, open_x = -1.0f;
+        for (const LineBox& lb : e.layout().lines) {
+            if (lb.paragraph != 0) continue;
+            for (const LineCluster& c : lb.clusters) {
+                if (!c.placeholder) continue;
+                if (c.cp == 9) ++n_at9;
+                if (c.cp != 10) continue;
+                ++n_at10;
+                if (first10 < 0)
+                    first10 = static_cast<int>(c.bracket_side);
+                else
+                    second10 = static_cast<int>(c.bracket_side);
+                const float x = lb.inline_origin_pt + c.inline_pt;
+                if (c.bracket_side == BracketSide::Close)
+                    close_x = x;
+                else
+                    open_x = x;
+            }
+        }
+        std::printf(
+            "     占位：旧边界 9 上 %d 个 ｜ 新边界 10 上 %d 个，顺序=[%d,%d]，"
+            "闭槽 x=%.2f 开槽 x=%.2f\n",
+            n_at9, n_at10, first10, second10, close_x, open_x);
+        expectTrue(n_at9 == 0, "旧边界 9 上不再有占位（字进了 A，A 的右括号跟着挪到 10）");
+        expectTrue(n_at10 == 2 && first10 == static_cast<int>(BracketSide::Close) &&
+                       second10 == static_cast<int>(BracketSide::Open),
+                   "★ 新共享边界上的占位顺序仍是 [闭, 开] —— 即 `][`");
+        expectTrue(close_x > 0.0f && open_x > close_x, "闭括号的槽在开括号的槽左边");
+
+        // (c) 像素：亮蓝的右括号整个在灰的左括号左边（与 [14] 同源判据）
+        {
+            e.repaint();
+            const std::vector<uint8_t> f(e.frame(), e.frame() + e.frameBytes());
+            const float zoom = e.config().zoom;
+            const int fw = e.frameWidth();
+            const int x0 = static_cast<int>(std::lround(close_x * zoom)) - 2;
+            const float slot_len = open_x - close_x;
+            const int x1 = static_cast<int>(std::lround((open_x + slot_len - 1.0f) * zoom));
+            int blue_lo = -1, blue_hi = -1, gray_lo = -1, gray_hi = -1;
+            scanColumns(f, fw, x0, x1, isBracketBlue, &blue_lo, &blue_hi);
+            scanColumns(f, fw, x0, x1, isBracketGray, &gray_lo, &gray_hi);
+            std::printf("     窗口 x ∈ [%d, %d]：亮蓝 %d..%d ｜ 灰 %d..%d\n", x0, x1, blue_lo,
+                        blue_hi, gray_lo, gray_hi);
+            expectTrue(blue_lo >= 0 && gray_lo >= 0,
+                       "窗口里两种颜色的括号都在（蓝的 = A 的右括号、灰的 = B 的左括号）");
+            expectTrue(blue_hi > 0 && blue_hi < gray_lo,
+                       "★ 亮蓝 ] 整个在灰 [ 左边 —— 相邻字段是 ][，不是那份报过的 []");
+        }
+
+        // (d) 紧挨着 A 末尾的空字段：它是这个位置上的最内层命中（空区间被 A 包住），
+        //     所以字进的是空字段，A 反而要留在原地（终点 == at 且不是主人 → 不动）。
+        //     判据仍是"不重叠 + 区间合法"这两条硬约束，而不是"谁该拿到这个字"。
+        {
+            EditorEngine e4;
+            if (!e4.init({cjkPath, mnPath, latinPath})) {
+                std::fprintf(stderr, "字体加载失败\n");
+                return 2;
+            }
+            e4.setConfig(c18);
+            e4.setBlocks({b18});
+            e4.relayout();
+            Control k1;
+            k1.range.start = TextPos{0, 5};
+            k1.range.end = TextPos{0, 9};
+            k1.id = "a";
+            Control k2;  // 空字段，紧挨着 A 的末尾
+            k2.range.start = TextPos{0, 9};
+            k2.range.end = TextPos{0, 9};
+            k2.id = "empty";
+            e4.setControls({k1, k2});
+            e4.setEditMode(EditMode::Form);
+            e4.setCaret(0, 9);
+            const int owner4 = e4.focusedControlIndex();
+            e4.typeTextAndRender("Y");
+            const Control& q1 = e4.controls().at(0);
+            const Control& q2 = e4.controls().at(1);
+            std::printf("     空字段相邻：主人=#%d  A=[%zu,%zu)  空字段=[%zu,%zu)\n", owner4,
+                        q1.range.start.offset, q1.range.end.offset, q2.range.start.offset,
+                        q2.range.end.offset);
+            expectTrue(owner4 == 1, "空字段是这个位置上的最内层命中（区间被 A 包住）");
+            expectTrue(q2.range.start.offset == 9 && q2.range.end.offset == 10,
+                       "字进了空字段（它成了 [9,10)）");
+            expectTrue(q1.range.start.offset == 5 && q1.range.end.offset == 9,
+                       "A 不许跟着长：它的终点正好在 at 处，新字已经是空字段的第一个字了 ——"
+                       "跟着长就等于一个字同时属于两个字段（括号会画成 [A[Y]]）");
+            expectTrue(!spansCross(q1.range, q2.range),
+                       "★ 两段区间不相交（相邻而不是嵌套）—— 渲染出来就是 [反复心悸][Y]");
+        }
+
+        // (e) 空控件（start == end）的两端必须同进同退，否则会写出 start > end 的非法区间。
+        //     这一格在引擎的常规编辑路径上到不了（空控件在它自己的位置上永远是最内层命中、
+        //     也就是吸收者），所以直接调区间伸缩函数把这条守护钉住：两个区间完全相同的空
+        //     控件里，只有下标小的那个吸收，另一个整对端点右移、保持为空。
+        {
+            ControlSet cs;
+            Control e1;
+            e1.range.start = TextPos{0, 9};
+            e1.range.end = TextPos{0, 9};
+            e1.id = "e1";
+            Control e2;
+            e2.range.start = TextPos{0, 9};
+            e2.range.end = TextPos{0, 9};
+            e2.id = "e2";
+            cs.add(e1);
+            cs.add(e2);
+            cs.normalize();
+            adjustControlsOnInsert(cs, 0, 9, 1);
+            std::printf("     两个相同的空控件：e1=[%zu,%zu)  e2=[%zu,%zu)\n",
+                        cs.at(0).range.start.offset, cs.at(0).range.end.offset,
+                        cs.at(1).range.start.offset, cs.at(1).range.end.offset);
+            expectTrue(cs.at(0).range.start.offset == 9 && cs.at(0).range.end.offset == 10,
+                       "吸收者的空区间被新字填上（9 → 10）");
+            expectTrue(cs.at(1).range.start.offset == 10 && cs.at(1).range.end.offset == 10,
+                       "另一个空控件整对端点右移、仍然为空（不会写成 [10,9)）");
+        }
+
+        // (f) 反向的两格：字段开头打字、以及末尾追加 —— 字都必须落进字段，
+        //     这两条是既有的行为，改归属规则时最容易一并弄丢。
+        {
+            EditorEngine e5;
+            if (!e5.init({cjkPath, mnPath, latinPath})) {
+                std::fprintf(stderr, "字体加载失败\n");
+                return 2;
+            }
+            e5.setConfig(c18);
+            e5.setBlocks({b18});
+            e5.relayout();
+            Control only;
+            only.range.start = TextPos{0, 5};
+            only.range.end = TextPos{0, 9};
+            only.id = "a";
+            e5.setControls({only});
+            e5.setEditMode(EditMode::Form);
+
+            e5.setCaret(0, 5);  // 字段开头
+            e5.typeTextAndRender("Z");
+            expectTrue(e5.controls().at(0).range.start.offset == 5 &&
+                           e5.controls().at(0).range.end.offset == 10,
+                       "在字段开头打的字属于该字段（起点留在 5，区间变长到 10）");
+
+            const size_t tail = e5.controls().at(0).range.end.offset;
+            e5.setCaret(0, tail);  // 字段末尾（末尾追加）
+            e5.typeTextAndRender("W");
+            expectTrue(e5.controls().at(0).range.end.offset == tail + 1,
+                       "在字段末尾追加的字属于该字段（长度继续变长）");
+        }
+
+        // (g) 把第一个字段的内容全删光：它变成零宽的空字段，正好夹在"到此结束的内容"
+        //     与"从此开始的内容"之间的那条缝里。空字段的一对方括号必须整对留在缝里 ——
+        //     让后一个字段的左括号插进它们中间，一对 [] 就被劈成两半，画成 [[▏]
+        //     （报过的第二张图：删掉文本控件的最后一个字符之后长这样）。
+        {
+            EditorEngine e6;
+            if (!e6.init({cjkPath, mnPath, latinPath})) {
+                std::fprintf(stderr, "字体加载失败\n");
+                return 2;
+            }
+            e6.setConfig(c18);
+            e6.setBlocks({b18});
+            e6.relayout();
+            e6.setControls({ka, kb});
+            e6.setEditMode(EditMode::Form);
+            e6.setCaret(0, 9);  // 共享边界：A 的末尾 == B 的开头
+            for (int i = 0; i < 4; ++i) {
+                expectTrue(e6.backspaceAndRender(), "退格删掉 #0 末尾的一个字");
+            }
+            const Control& z0 = e6.controls().at(0);
+            const Control& z1 = e6.controls().at(1);
+            expectTrue(z0.range.start.offset == 5 && z0.range.end.offset == 5,
+                       "第一个字段被删成零宽的空字段（停在 5）");
+            expectTrue(z1.range.start.offset == 5, "后一个字段左移到 5（两个字段仍然紧挨着）");
+
+            std::vector<int> sides;
+            float x_open = -1.0f, x_close = -1.0f, x_next = -1.0f;
+            for (const LineBox& lb : e6.layout().lines) {
+                if (lb.paragraph != 0) continue;
+                for (const LineCluster& c : lb.clusters) {
+                    if (!c.placeholder || c.cp != 5) continue;
+                    sides.push_back(static_cast<int>(c.bracket_side));
+                    const float x = lb.inline_origin_pt + c.inline_pt;
+                    if (c.read_only) {
+                        if (c.bracket_side == BracketSide::Open) x_next = x;
+                    } else if (c.bracket_side == BracketSide::Open) {
+                        x_open = x;
+                    } else {
+                        x_close = x;
+                    }
+                }
+            }
+            std::printf(
+                "     边界（偏移 5）上的占位 %zu 个：顺序=[%d,%d,%d]，空字段 x ∈ [%.2f, %.2f]，"
+                "下一个字段的左括号 x=%.2f\n",
+                sides.size(), sides.size() > 0 ? sides[0] : -1, sides.size() > 1 ? sides[1] : -1,
+                sides.size() > 2 ? sides[2] : -1, x_open, x_close, x_next);
+            expectTrue(sides.size() == 3 && sides[0] == static_cast<int>(BracketSide::Open) &&
+                           sides[1] == static_cast<int>(BracketSide::Close) &&
+                           sides[2] == static_cast<int>(BracketSide::Open),
+                       "★ 顺序是 [空字段的开, 空字段的闭, 后一个字段的开] —— 空字段的一对连着");
+            expectTrue(x_open > 0.0f && x_open < x_close && x_close < x_next,
+                       "★ 空字段的一对整对留在缝里（自己先 [ 后 ]，且都在后一个字段的左括号左边）");
+
+            // 光标也要落在这对括号之内 —— 被后面那个字段的左括号顶出去，就是那张截图的观感
+            const float half = e6.config().caret_width_pt * 0.5f;
+            Rect cr{};
+            expectTrue(e6.caretRectPt(&cr), "空字段上的光标有矩形");
+            const float caret_x = cr.x + half;
+            std::printf("     光标插入点 x=%.2f\n", caret_x);
+            expectTrue(caret_x > x_open && caret_x < x_next,
+                       "★ 光标落在空字段的一对括号之内（没被后一个字段的左括号顶到右边）");
+
+            // 像素证据：窗口里蓝的（空字段那一对）必须整个在灰的（只读字段的左括号）左边。
+            // 窗口止于三个槽里最靠右的那个加一个槽宽 —— 不能按"顺序应为"去取 x_next：
+            //   那样一旦顺序真的错了（正是要抓的情况），窗口会短一截，把跑到右边的那个
+            //   蓝括号关在窗口外，断言反而变绿。
+            e6.repaint();
+            const std::vector<uint8_t> f6(e6.frame(), e6.frame() + e6.frameBytes());
+            const float zoom6 = e6.config().zoom;
+            const float x_last = std::max(x_close, x_next);
+            const int w0 = static_cast<int>(std::lround(x_open * zoom6)) - 2;
+            const int w1 =
+                static_cast<int>(std::lround((x_last + 4.055f + kControlBracketSlotGapPt) * zoom6));
+            int blue_lo = -1, blue_hi = -1, gray_lo = -1, gray_hi = -1;
+            scanColumns(f6, e6.frameWidth(), w0, w1, isBracketBlue, &blue_lo, &blue_hi);
+            scanColumns(f6, e6.frameWidth(), w0, w1, isBracketGray, &gray_lo, &gray_hi);
+            std::printf("     窗口 x ∈ [%d, %d]：蓝 %d..%d ｜ 灰 %d..%d\n", w0, w1, blue_lo,
+                        blue_hi, gray_lo, gray_hi);
+            expectTrue(blue_hi > 0 && gray_lo > 0 && blue_hi < gray_lo,
+                       "★ 蓝的那一对整个在灰的左括号左边 —— 被劈开的话，蓝的右括号会落到灰的右边");
+        }
+
+        // (h) 三个可编辑字段连排，把中间那个删空：边界上会有四个槽
+        //     （左字段的闭、空字段的开、空字段的闭、右字段的开），顺序必须还是这个。
+        //     这一格是演示样例里的"三连可编辑字段"删空中间那个之后的样子，
+        //     也是"空字段夹在两个字段中间"的唯一一种排法。
+        {
+            EditorEngine e7;
+            if (!e7.init({cjkPath, mnPath, latinPath})) {
+                std::fprintf(stderr, "字体加载失败\n");
+                return 2;
+            }
+            e7.setConfig(c18);
+            e7.setBlocks({b18});
+            e7.relayout();
+            Control m1, m2, m3;
+            m1.range.start = TextPos{0, 5};
+            m1.range.end = TextPos{0, 7};  // 反复
+            m1.id = "m1";
+            m2.range.start = TextPos{0, 7};
+            m2.range.end = TextPos{0, 9};  // 心悸
+            m2.id = "m2";
+            m3.range.start = TextPos{0, 9};
+            m3.range.end = TextPos{0, 11};  // 三天
+            m3.id = "m3";
+            e7.setControls({m1, m2, m3});
+            e7.setEditMode(EditMode::Form);
+            e7.setCaret(0, 9);
+            for (int i = 0; i < 2; ++i) expectTrue(e7.backspaceAndRender(), "退格删掉中间字段的字");
+            expectTrue(e7.controls().at(1).range.start == e7.controls().at(1).range.end,
+                       "中间那个字段被删成零宽的空字段");
+            expectTrue(e7.controls().at(2).range.start.offset == 7,
+                       "右边那个字段左移，仍然紧挨着空字段");
+
+            std::vector<int> sides8;
+            std::vector<float> xs8;
+            std::vector<uint8_t> ro8;
+            for (const LineBox& lb : e7.layout().lines) {
+                if (lb.paragraph != 0) continue;
+                for (const LineCluster& c : lb.clusters) {
+                    if (!c.placeholder || c.cp != 7) continue;
+                    sides8.push_back(static_cast<int>(c.bracket_side));
+                    xs8.push_back(lb.inline_origin_pt + c.inline_pt);
+                    ro8.push_back(c.read_only ? 1 : 0);
+                }
+            }
+            std::printf("     边界（偏移 7）上的占位 %zu 个：顺序=[%d,%d,%d,%d]\n", sides8.size(),
+                        sides8.size() > 0 ? sides8[0] : -1, sides8.size() > 1 ? sides8[1] : -1,
+                        sides8.size() > 2 ? sides8[2] : -1, sides8.size() > 3 ? sides8[3] : -1);
+            const int kClose = static_cast<int>(BracketSide::Close);
+            const int kOpen = static_cast<int>(BracketSide::Open);
+            expectTrue(sides8.size() == 4 && sides8[0] == kClose && sides8[1] == kOpen &&
+                           sides8[2] == kClose && sides8[3] == kOpen,
+                       "★ 四个槽的顺序是 [闭(左字段), 开(空), 闭(空), 开(右字段)]");
+            expectTrue(xs8.size() == 4 && xs8[0] < xs8[1] && xs8[1] < xs8[2] && xs8[2] < xs8[3],
+                       "★ 四个槽沿行内轴依次排开（空字段的一对夹在中间，整对挨着）");
+
+            Rect cr8{};
+            const float half8 = e7.config().caret_width_pt * 0.5f;
+            expectTrue(e7.caretRectPt(&cr8), "空字段上的光标有矩形");
+            const float caret8 = cr8.x + half8;
+            std::printf("     光标插入点 x=%.2f（四个槽 x ∈ [%.2f, %.2f, %.2f, %.2f]）\n", caret8,
+                        xs8[0], xs8[1], xs8[2], xs8[3]);
+            // 偏移 7 首先是"左边那个字段内容的右端"，所以光标落在这一组括号的最左端 ——
+            //   三个字段连排也不会让它跑到空字段或右边字段的括号里。
+            expectTrue(caret8 >= xs8[0] - 0.02f && caret8 <= xs8[1] + 0.02f,
+                       "★ 光标画在这一组括号的最左端（位置由偏移本身定，不由后面的槽挤）");
+
+            // 像素证据：三个字段都可编辑时括号同色，像素上分不出谁在左，所以做一次差分 ——
+            //   只把中间那个改成只读（区间不变）再排一遍，两帧之间变的列就只有它那一对括号
+            //   （从蓝变灰）。那一对落在哪儿于是可以逐列判。
+            //   为什么不用"灰"这个颜色本身当判据：正文黑字的抗锯齿尾巴正好也落在灰带里
+            //   （实测它就压在左边第一个槽之前），会把两侧的墨迹混进窗口。
+            std::vector<Control> now8 = e7.controls().all();
+            now8[1].read_only = true;
+            e7.setControls(now8);
+            e7.relayout();
+            e7.repaint();
+            const std::vector<uint8_t> fa(e7.frame(), e7.frame() + e7.frameBytes());
+            now8[1].read_only = false;
+            e7.setControls(now8);
+            e7.relayout();
+            e7.repaint();
+            const std::vector<uint8_t> fb(e7.frame(), e7.frame() + e7.frameBytes());
+
+            std::vector<int> changed(static_cast<size_t>(e7.frameWidth()), 0);
+            for (size_t i = 0; i + 3 < fa.size(); i += 4) {
+                if (fa[i] == fb[i] && fa[i + 1] == fb[i + 1] && fa[i + 2] == fb[i + 2]) continue;
+                changed[static_cast<size_t>((i >> 2) % static_cast<size_t>(e7.frameWidth()))] = 1;
+            }
+            int ch_lo = -1, ch_hi = -1, ch_n = 0;
+            for (size_t x = 0; x < changed.size(); ++x) {
+                if (!changed[x]) continue;
+                if (ch_lo < 0) ch_lo = static_cast<int>(x);
+                ch_hi = static_cast<int>(x);
+                ++ch_n;
+            }
+            const int px_open2 = static_cast<int>(std::lround(xs8[0] * c18.zoom));
+            const int px_open3 = static_cast<int>(std::lround(xs8[3] * c18.zoom));
+            std::printf(
+                "     中间字段改只读带来的变化：%d 列 ∈ [%d, %d]；"
+                "左字段闭括号 x=%d px，右字段开括号 x=%d px\n",
+                ch_n, ch_lo, ch_hi, px_open2, px_open3);
+            expectTrue(ch_n > 0 && ch_lo > px_open2 && ch_hi < px_open3,
+                       "★ 变的只有中间那一对括号，且整对夹在左右两个字段的括号之间 ——"
+                       "空字段的一对被劈开的话，它的右括号会落到右字段开括号的右边");
         }
     }
 

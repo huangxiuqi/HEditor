@@ -120,21 +120,47 @@ std::vector<int> ControlSet::overlapping(const ControlRange& r) const {
 }
 
 /**
- * 区间伸缩
- * 两个端点用不同的比较（这是唯一容易写错的地方，所以单独说明）：
- * 起点：start.offset > at 才右移。
- * 在 start 处插入 → 起点不动，新字符成为控件的一部分（区间变长）。
- * 若写成 >=，在控件开头打字会让区间整体右移、新字落在控件外 ——
- * 症状是"在字段开头打的字立刻变成不可编辑"。
- * 终点：end.offset >= at 就右移。
- * 在 end 处插入 = 在末尾追加，区间必须变长。
- * 若写成 >，在字段末尾追加的内容会掉到控件外。
+ * 区间伸缩：在 (para, at) 处插入 n 个码点。
+ * 两步：先定落笔点归谁，再按归属选端点规则。归属与 EditPolicy::canInsert、光标判定
+ * 同一口径（最内层控件，含末尾）—— 相邻两字段共享边界时，同一个位置既是前一个字段的
+ * 末尾、又是后一个字段的开头，字只能进其中一个；两边都按"在末尾追加"伸缩就会得到两段
+ * 重叠的区间，表现是共享边界上的括号顺序从 ][ 变成 []。
+ * 吸收者 = 落笔点的主人，以及包住主人、且新字接在主人末尾的外层控件：起点 > at 才
+ * 右移（起点停在 at 处 = 在字段开头打字），终点 >= at 就右移（在末尾追加，区间变长）。
+ * 其余控件：起点 >= at 右移（内容整体后移，新字不许落进来），终点 > at 才右移
+ * （终点正好在 at 说明内容到此为止，新字归别人）。
+ * 空控件（start == end）两端点必须同进同退，否则会写出 start > end 的非法区间；
+ * 唯一例外是它就是落笔点的主人 —— 空字段里打字，新字要填进来。
  */
 void adjustControlsOnInsert(ControlSet& ctrls, int para, size_t at, size_t n) {
     if (n == 0) return;
+    const TextPos pos{para, at};
+    const int owner = ctrls.innermostAt(pos, /*include_end=*/true);
+    // 判"谁包住谁"必须用调整之前的区间：循环里前面的控件会先被改，
+    //   拿改过的区间去比，结果会随控件顺序变。
+    const ControlRange owner_range = (owner >= 0) ? ctrls.at(owner).range : ControlRange{};
+    // 外层控件要不要跟着变长：只有当新字接在"主人的末尾"时，外层必须继续盖住主人，
+    //   否则外层 [0,9) 与增长后的内层 [5,10) 会互相穿过 —— 比画错括号更糟的状态。
+    //   空主人不算：它只是停在外层末尾上的一个点，新字是它的第一个字，外层到 at 为止，
+    //   两者相邻不相交（这恰恰是"相邻字段"该有的形态，见单测 [18] 的 (d)）。
+    const bool owner_tail_grown = (owner >= 0) && owner_range.start != owner_range.end &&
+                                  owner_range.end.para == para && owner_range.end.offset == at;
     for (Control& c : ctrls.mutableAll()) {
-        if (c.range.start.para == para && c.range.start.offset > at) c.range.start.offset += n;
-        if (c.range.end.para == para && c.range.end.offset >= at) c.range.end.offset += n;
+        const bool is_owner = (owner >= 0) && (&c == &ctrls.at(owner));
+        if (!is_owner && c.range.start == c.range.end && c.range.start.para == para) {
+            if (c.range.start.offset >= at) {
+                c.range.start.offset += n;
+                c.range.end.offset += n;
+            }
+            continue;
+        }
+        const bool absorbs = is_owner || (owner_tail_grown && rangeCovers(c.range, owner_range));
+        if (c.range.start.para == para &&
+            (absorbs ? c.range.start.offset > at : c.range.start.offset >= at))
+            c.range.start.offset += n;
+        if (c.range.end.para == para &&
+            (absorbs ? c.range.end.offset >= at : c.range.end.offset > at))
+            c.range.end.offset += n;
     }
 }
 

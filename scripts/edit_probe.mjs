@@ -1413,6 +1413,115 @@ async function main() {
               `回到 ${textBefore.length} 字符`);
   }
 
+  chk.section('[11] 相邻字段共享边界上打字：字进前一个字段，括号仍是 `][`');
+  {
+    //  报过的现象（截图：患者主诉：[反悸[▏]三天]，[加重一天]。）：两个相邻控件，
+    //  在第一个控件末尾打一个字，共享边界上的括号顺序从 ][ 变成 []。
+    //
+    //  根因不在排版，在区间伸缩：插入点同时是 A 的末尾与 B 的开头，两条端点规则都命中
+    //  —— A 的终点 >= at 右移（字进 A），B 的起点要 > at 才右移（于是原地不动）——
+    //  结果一个字同时落进两个控件：A=[5,10)、B=[9,12) 重叠，B 的左括号于是被画到
+    //  A 右括号的左边。native 侧的结构性判据见单测 [18]，这里补的是"真实按键路径"。
+    await c.eval('return window.__ced.loadFormSample(0);');
+    await c.eval('return window.__ced.stopBlink();');
+    const b11 = await c.eval('return window.__ced.controls;');
+    report.boundary = { before: b11.items.map((it) => [...it.start, ...it.end]) };
+
+    chk.check('前置：字段 #0 的末尾与 #1 的开头是同一个位置（共享边界）',
+              b11.count >= 2 && b11.items[0].end[0] === b11.items[1].start[0] &&
+                b11.items[0].end[1] === b11.items[1].start[1],
+              `#0 [${b11.items[0].start[1]},${b11.items[0].end[1]}) ｜` +
+                ` #1 [${b11.items[1].start[1]},${b11.items[1].end[1]})`);
+
+    // 光标停在这个边界上，然后派一个真实按键（不是 __ced.type，见 [4] 的说明）
+    await c.eval(`return window.__ced.setCaret(0, ${b11.items[0].end[1]});`);
+    const cc11 = await c.eval('return window.__ced.controls;');
+    chk.check('光标停在边界上时归前一个字段（末尾算在区间内）', cc11.caret === 0,
+              `caret-control=${cc11.caret}`);
+    await c.eval(key('诊'));
+
+    const a11 = await c.eval('return window.__ced.controls;');
+    report.boundary.after = a11.items.map((it) => [...it.start, ...it.end]);
+    const e0 = a11.items[0].end[1], s1 = a11.items[1].start[1];
+    chk.check('★ 字进了 #0（#0 变长），#1 整体右移 —— 两段区间不重叠',
+              e0 === b11.items[0].end[1] + 1 && s1 === b11.items[1].start[1] + 1,
+              `#0 末尾 ${b11.items[0].end[1]} → ${e0} ｜ ` +
+                `#1 开头 ${b11.items[1].start[1]} → ${s1}`);
+    chk.check('★ 重叠就是那个 `[]`：一个字同时属于两个字段',
+              e0 <= s1, `#0 末尾 ${e0} vs #1 开头 ${s1}`);
+
+    // 几何证据：控件的矩形是从行盒几何投影出来的，重叠的区间投影出重叠的矩形。
+    //   #0 的右缘越过 #1 的左缘 = 两个字段的框在屏幕上叠在一起。
+    const r0b = a11.items[0].rects[0], r1b = a11.items[1].rects[0];
+    const right0 = r0b ? r0b.x + r0b.w : -1;
+    const left1 = r1b ? r1b.x : -1;
+    report.boundary.rects = { right0, left1 };
+    chk.check('★ #0 的内容矩形不越过 #1 的左缘（两个字段的框不叠在一起）',
+              right0 > 0 && left1 > 0 && right0 <= left1 + 0.01,
+              `#0 右缘 ${right0.toFixed(2)} pt ≤ #1 左缘 ${left1.toFixed(2)} pt`);
+
+    const au11 = await c.eval('return window.__ced.auditLayout();');
+    chk.check('★★ 边界上打字之后增量排版 == 全量重排（逐字段）',
+              !!au11 && au11.diff === 0,
+              au11 ? `diff ${au11.diff}（字形 ${au11.glyphDiff}、行 ${au11.lineDiff}、` +
+                `段 ${au11.paraDiff}）` : 'null');
+    const sc11 = await c.eval('return window.__ced.selfCheck();');
+    chk.check('边界上打字之后屏幕 == 引擎帧', sc11.screenVsEngineDiffPx === 0,
+              `差 ${sc11.screenVsEngineDiffPx} px`);
+
+    await c.eval('return window.__ced.setCaret(0, 10);');
+    await c.eval('window.__ced.present(); return true;');
+    await sleep(150);
+    await c.screenshot(join(OUT, 'shared-boundary.png'));
+
+    // 三连可编辑字段（演示样例 variant 2）：三条边界两侧都可写 —— 前两个样例的边界
+    //   一侧是只读的，只能在一个方向试。这里在边界上打字、再把中间那个删空，
+    //   看区间和矩形会不会互相穿过。
+    await c.eval('return window.__ced.loadFormSample(2);');
+    await c.eval('return window.__ced.stopBlink();');
+    const v3 = await c.eval('return window.__ced.controls;');
+    report.chain3 = { before: v3.items.map((it) => [...it.start, ...it.end]) };
+    chk.check('三连样例：3 个字段都紧挨着（两条共享边界）',
+              v3.count === 3 && v3.items.every((it) => !it.ro) &&
+                v3.items[0].end[1] === v3.items[1].start[1] &&
+                v3.items[1].end[1] === v3.items[2].start[1],
+              v3.items.map((it) => `[${it.start[1]},${it.end[1]})`).join(' '));
+
+    await c.eval('return window.__ced.setCaret(0, 7);');  // 第一条共享边界
+    await c.eval(key('痛'));
+    const v3b = await c.eval('return window.__ced.controls;');
+    report.chain3.afterType = v3b.items.map((it) => [...it.start, ...it.end]);
+    // 字进前一个字段、后两个整体右移；三段首尾相接就是"不穿过"的最强形式
+    const chain = (r) =>
+      r.items.every((it, i) => i + 1 >= r.items.length || it.end[1] === r.items[i + 1].start[1]);
+    chk.check('★ 三连样例：在第一条边界上打字之后，三段区间仍然首尾相接（不重叠、不穿线）',
+              chain(v3b) && v3b.items[0].end[1] === 8 && v3b.items[1].start[1] === 8 &&
+                v3b.items[1].end[1] === 10 && v3b.items[2].start[1] === 10,
+              v3b.items.map((it) => `[${it.start[1]},${it.end[1]})`).join(' '));
+
+    // 把中间那个删空：它变成零宽的空字段，右边界上与"左字段的闭 + 右字段的开"并列
+    await c.eval('return window.__ced.setCaret(0, 10);');
+    await c.eval(key('Backspace'));
+    await c.eval(key('Backspace'));
+    const v3c = await c.eval('return window.__ced.controls;');
+    report.chain3.afterEmpty = v3c.items.map((it) => [...it.start, ...it.end]);
+    const mid = v3c.items[1];
+    const right = v3c.items[2];
+    chk.check('★ 中间字段被删成零宽的空字段，右边那个左移并保持紧挨着',
+              mid.start[1] === mid.end[1] && right.start[1] === mid.end[1],
+              v3c.items.map((it) => `[${it.start[1]},${it.end[1]})`).join(' '));
+    const au3 = await c.eval('return window.__ced.auditLayout();');
+    chk.check('★★ 三连样例的每一步增量排版都等于全量重排', !!au3 && au3.diff === 0,
+              au3 ? `diff ${au3.diff}` : 'null');
+    const sc3 = await c.eval('return window.__ced.selfCheck();');
+    chk.check('三连样例：屏幕 == 引擎帧', sc3.screenVsEngineDiffPx === 0,
+              `差 ${sc3.screenVsEngineDiffPx} px`);
+    await c.eval('return window.__ced.setCaret(0, 7);');
+    await c.eval('window.__ced.present(); return true;');
+    await sleep(150);
+    await c.screenshot(join(OUT, 'three-adjacent-fields.png'));
+  }
+
   chk.section('[7] 无页面异常 / 无 console 错误');
   {
     report.pageErrors = await c.eval('return window.__ced.errors;');

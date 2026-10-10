@@ -489,6 +489,9 @@ std::string controlsJson() {
  * 从 8 往右移会跨过只读的 9~11 落到 12（不可停的地方自动跳过）。
  * variant 1（长文档）：一个跨行的长字段，里面嵌一个只读小字段
  * → 演示"控件不是矩形"（矩形块数 > 1）与"内层策略优先"。
+ * variant 2（短文档）：三个可编辑字段紧挨着 —— [5,7)、[7,9)、[9,11) 共享两条边界
+ * → 共享边界两侧都可写，于是"在边界上打字 / 把中间那个删空 / 在两段之间退格"
+ *   都能当场试出来（前两个 variant 的边界一侧是只读的，试不全）。
  */
 void loadFormSample(int variant) {
     setScenario(variant == 1 ? 3 : 6);
@@ -506,6 +509,10 @@ void loadFormSample(int variant) {
     if (variant == 1) {
         push(5, 60, ControlKind::TextField, "history", "现病史", false);
         push(20, 26, ControlKind::TextField, "onset", "发病时间（只读）", true);
+    } else if (variant == 2) {
+        push(5, 7, ControlKind::TextField, "part1", "症状一", false);
+        push(7, 9, ControlKind::TextField, "part2", "症状二", false);
+        push(9, 11, ControlKind::TextField, "part3", "病程", false);
     } else {
         push(5, 9, ControlKind::TextField, "complaint", "主诉", false);
         push(9, 11, ControlKind::NumberField, "duration", "病程（只读）", true);
