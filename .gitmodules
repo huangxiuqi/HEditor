@@ -1,0 +1,7 @@
+# 版本用 tag 名字表达，但 gitlink 只能存 commit —— submodule 真正钉住的是后者。
+# 下面这个 branch 字段的作用是把 tag 名字也记进仓库，它只被 git submodule update --remote
+# 使用；普通的 update 一律按 gitlink 里的 commit 检出，所以它不影响"钉死"这个性质。
+[submodule "third_party/harfbuzz"]
+	path = third_party/harfbuzz
+	url = https://github.com/harfbuzz/harfbuzz.git
+	branch = 14.6.0

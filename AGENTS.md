@@ -86,6 +86,11 @@ function blitFrame(px, w) {}
 
 ## 构建与验证
 
+- 源码依赖（HarfBuzz submodule，钉 tag + 稀疏检出只留 `src/`）：
+  `powershell -ExecutionPolicy Bypass -File scripts\deps_init.ps1`
+  —— 它会执行 git 写入命令，按下面的硬性约束只能由人运行。
+- 依赖归路（源码走 submodule、Skia 走脚本化归档）与判断标准见 `docs/依赖与工具链管理.md`。
+  本工程不使用包管理器：唯一的非源码依赖面（native 侧的成品库）目前是空集。
 - 原生：`powershell -ExecutionPolicy Bypass -File scripts\build_native.ps1 -Run`（构建 + 跑单测）
 - WASM：`powershell -ExecutionPolicy Bypass -File scripts\build_wasm.ps1`
 - 浏览器探针：`powershell -ExecutionPolicy Bypass -File scripts\verify_web.ps1`

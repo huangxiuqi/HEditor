@@ -20,10 +20,11 @@ web/dist/
 .toolchain/
 
 # ─────────────────────────────────────────────────────────────
-#  第三方源码：体积大，按需拉取
+#  第三方源码
 # ─────────────────────────────────────────────────────────────
-# CMake 会检查 third_party/harfbuzz-14.6.0 是否存在，不在就提示"请先 fetch_deps"
-# —— 也就是说这些源码本来就**不打算**入库。
+# HarfBuzz 走 git submodule：third_party/harfbuzz（版本 = gitlink 的 commit，
+# 由 scripts/deps_init.ps1 拉取并钉到 tag 14.6.0）。submodule 目录**要入库**，
+# 所以下面两条忽略规则只服务迁移期手工解压出来的旧目录。
 third_party/*.tar.xz
 third_party/harfbuzz-*/
 third_party/freetype-*/

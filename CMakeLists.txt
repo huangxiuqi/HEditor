@@ -18,7 +18,21 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 set(CED_ROOT ${CMAKE_CURRENT_SOURCE_DIR})
-set(CED_HB_ROOT ${CED_ROOT}/third_party/harfbuzz-14.6.0)
+
+# HarfBuzz 源码根：submodule 路径优先，回退迁移期的版本号目录。
+#   权威来源是 submodule（版本 = gitlink 的 commit，由 scripts/deps_init.ps1 钉到 tag）。
+#   旧目录只为兼容手工解压的既有工作区，两者内容未必相同 —— submodule 若停在默认分支
+#   尖端就与 tag 不同，而"取到哪一份"会改变整形结果，所以配置时打印实际用的路径。
+set(CED_HB_ROOT ${CED_ROOT}/third_party/harfbuzz)
+if(NOT EXISTS ${CED_HB_ROOT}/src/harfbuzz.cc)
+  set(CED_HB_ROOT ${CED_ROOT}/third_party/harfbuzz-14.6.0)
+  if(EXISTS ${CED_HB_ROOT}/src/harfbuzz.cc)
+    message(STATUS "HarfBuzz: 迁移期旧目录 ${CED_HB_ROOT}（可跑 scripts/deps_init.ps1 换成 submodule）")
+  endif()
+else()
+  message(STATUS "HarfBuzz: submodule ${CED_HB_ROOT}")
+endif()
+
 set(CED_ASSET_DIR ${CED_ROOT}/assets)
 
 # 构建时间戳：编进 wasm/native 里，验证台把它显示出来。
@@ -29,7 +43,8 @@ set(CED_BUILD_STAMP "dev" CACHE STRING "构建时间戳（构建脚本注入）"
 if(NOT EXISTS ${CED_HB_ROOT}/src/harfbuzz.cc)
   message(FATAL_ERROR
     "缺少 HarfBuzz 源码：${CED_HB_ROOT}\n"
-    "请先执行 scripts/fetch_deps.sh （或手动把 harfbuzz 源码放到 third_party/harfbuzz-14.6.0）")
+    "请先执行 scripts/deps_init.ps1（拉 submodule 并钉到 tag 14.6.0）；\n"
+    "或手工把 harfbuzz 源码放到 third_party/harfbuzz-14.6.0。")
 endif()
 
 option(CED_BUILD_TESTS "构建断言型单测" ON)

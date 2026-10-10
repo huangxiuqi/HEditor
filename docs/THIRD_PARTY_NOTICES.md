@@ -15,7 +15,7 @@
 
 | 依赖 | 版本 | 许可证 | Copyleft | 义务 |
 |---|---|---|---|---|
-| **HarfBuzz** | 14.6.0 | **Old MIT**（`COPYING`） | 否 | 保留版权与许可声明 |
+| **HarfBuzz** | 14.6.0 | **Old MIT**（源树 `COPYING`，入库副本 `licenses/MIT-HarfBuzz.txt`） | 否 | 保留版权与许可声明 |
 | **Skia** | main @ 2026-10-09 | **BSD-3-Clause**（`licenses/BSD-3-Clause-Skia.txt`） | 否 | 保留版权声明 |
 | **FreeType** | 2.14.3 | **FTL** 或 GPLv2（**二选一，必须显式选 FTL**） | 否（选 FTL 时） | **必须在产品文档中明确致谢 FreeType 项目**（FTL 广告条款） |
 | **libpng** | 1.6.x（Skia DEPS 钉的 commit） | **libpng License**（`licenses/libpng-LICENSE.txt`） | 否 | 保留版权与许可声明 |
