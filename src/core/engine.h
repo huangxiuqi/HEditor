@@ -271,6 +271,16 @@ public:
     bool typeTextUtf8(const std::string& utf8);
     bool backspace();
     bool deleteForward();
+    /**
+     * 跨段编辑。
+     *
+     * 回车在光标处把这一段拆成两段；新段整体继承原段的样式，只把 page_break_before
+     * 清掉（段落分隔符不该附带一次翻页）。段首退格、段末 Delete 分别合并前后段 ——
+     * 它们是 backspace() / deleteForward() 的自然延伸，不是另外的编辑命令。
+     */
+    bool splitParagraph();
+    bool mergeWithPreviousParagraph();
+    bool mergeWithNextParagraph();
 
     /**
      * 编辑 + 重排 + 呈现的组合入口
@@ -281,6 +291,9 @@ public:
     bool typeTextAndRender(const std::string& utf8);
     bool backspaceAndRender();
     bool deleteForwardAndRender();
+    bool splitParagraphAndRender();
+    bool mergeWithPreviousParagraphAndRender();
+    bool mergeWithNextParagraphAndRender();
     bool moveCaretAndRender(int dcp);
     /**
      * Home / End：到行首 / 行尾。
@@ -566,6 +579,12 @@ private:
     int minControlParagraph() const;
 
     /**
+     * 把 head + 1 段并进 head 段（段首退格 / 段末 Delete / 显式调用共用的实现）。
+     * 光标落在合并点上。策略拒绝时返回 false 并计入 blocked_edits_。
+     */
+    bool mergeParagraphInto(int head);
+
+    /**
      * 把 layout_ 截断到第 para 段之前：丢掉 [para, ...) 的行盒、字形与切片，
      * 保留 [0, para) 原样，供 layoutDocumentRange 从 para 续排。
      * para <= 0 时清空整个结果。
@@ -656,10 +675,22 @@ private:
     int layout_dirty_from_ = 0;
 
     /**
-     * 整篇都脏（换文档、改页度量、段数变化）。与"从第 0 段起脏"不同：
-     * 后者只是第一段的内容变了，后缀仍有可能原样复用（见 trySpliceOnly）。
+     * 整篇都脏（换文档、改页度量、页度量变化）。与"从第 0 段起脏"不同：
+     * 后者只是第一段的内容变了，后缀仍有可能原样复用（见 trySuffixReuse）。
      */
     bool layout_needs_full_ = true;
+
+    /**
+     * 段数变了（回车分段 / 退格合并段），尚未重排。
+     *
+     * 它必须禁掉后缀复用：复用判据是"第 from+1 段开始时的续排状态与上一轮相同"，
+     * 而段号一变，"第 from+1 段"已经不是同一段了 —— 拿两个无关段落的状态去比，
+     * 碰巧相等就会把整个后缀错当成没变（那会静默地产生错位的排版）。
+     *
+     * 但"段数变了"不等于"必须整篇重排"：前缀 [0, dirty_from) 仍然一个字都没动，
+     * 所以照走常规续排（从脏段排到末尾）。重排完成即清零。
+     */
+    bool para_count_changed_ = false;
 
     /** 上一次 relayout 的粒度，由 presentInternal 上报到 EditStats。 */
     int last_relaid_paragraphs_ = 0;

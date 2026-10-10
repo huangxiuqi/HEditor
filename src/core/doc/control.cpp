@@ -138,6 +138,39 @@ void adjustControlsOnInsert(ControlSet& ctrls, int para, size_t at, size_t n) {
     }
 }
 
+void adjustControlsOnSplitPara(ControlSet& ctrls, const TextPos& pos) {
+    for (Control& c : ctrls.mutableAll()) {
+        auto fix = [&](TextPos& e) {
+            if (e.para > pos.para) {
+                e.para += 1;  // 整体后移一段
+                return;
+            }
+            if (e.para < pos.para) return;
+            if (e.offset >= pos.offset) {  // 内容被搬进了新段
+                e.para = pos.para + 1;
+                e.offset -= pos.offset;
+            }
+        };
+        fix(c.range.start);
+        fix(c.range.end);
+    }
+}
+
+void adjustControlsOnMergePara(ControlSet& ctrls, int para, size_t prev_len) {
+    for (Control& c : ctrls.mutableAll()) {
+        auto fix = [&](TextPos& e) {
+            if (e.para == para + 1) {
+                e.para = para;
+                e.offset += prev_len;
+            } else if (e.para > para + 1) {
+                e.para -= 1;
+            }
+        };
+        fix(c.range.start);
+        fix(c.range.end);
+    }
+}
+
 void adjustControlsOnErase(ControlSet& ctrls, int para, size_t a, size_t b) {
     if (b <= a) return;
     const size_t len = b - a;

@@ -1359,6 +1359,60 @@ async function main() {
                 (fpFull <= 0.05 ? '（整篇太小，只判"不更慢"）' : ''));
   }
 
+  chk.section('[10] 跨段编辑：真实回车分段 / 段首退格合并');
+  {
+    // 用真实的 Enter 按键走一遍（不是直接调引擎）—— 键盘路径与引擎路径是两处接线，
+    //   只测引擎会漏掉"宿主没把 Enter 接上"这类问题。
+    await c.eval('return window.__ced.run(6, 1.0);');
+    await c.eval('return window.__ced.stopBlink();');
+    const before = await c.eval('return window.__ced.editStats;');
+    const textBefore = await c.eval('return window.__ced.allText;');
+    await c.eval('return window.__ced.setCaret(0, 5);');
+    await c.eval(key('Enter'));
+
+    const after = await c.eval('return window.__ced.editStats;');
+    const textAfter = await c.eval('return window.__ced.allText;');
+    report.splits = { parasBefore: before.totalParagraphs, parasAfter: after.totalParagraphs };
+    chk.check('★ 真实回车让段数 +1', after.totalParagraphs === before.totalParagraphs + 1,
+              `${before.totalParagraphs} → ${after.totalParagraphs} 段`);
+    chk.check('★ 分段的字符账守恒（不丢不重）',
+              textAfter.replace(/\n/g, '').length === textBefore.length,
+              `前 ${textBefore.length} 字符 / 后 ${textAfter.replace(/\n/g, '').length} 字符（去换行）`);
+    chk.check('★ 分段之后光标在新段段首', after.caretPara === 1 && after.caretOffset === 0,
+              `段 ${after.caretPara} 偏移 ${after.caretOffset}`);
+    chk.check('段数变了不让后缀复用（后缀段号已经错位）', after.reusedParagraphs === 0,
+              `重排 ${after.relaidParagraphs} 段 / 复用 ${after.reusedParagraphs} 段`);
+
+    // 排版与上屏两个自审都要过：分段走的是"前缀复用 + 从脏段续排"，最容易错的是段号错位
+    const auSplit = await c.eval('return window.__ced.auditLayout();');
+    chk.check('★★ 分段之后增量排版 == 全量重排（逐字段）',
+              !!auSplit && auSplit.diff === 0,
+              auSplit ? `diff ${auSplit.diff}（字形 ${auSplit.glyphDiff}、行 ${auSplit.lineDiff}、` +
+                `段 ${auSplit.paraDiff}）` : 'null');
+    const scSplit = await c.eval('return window.__ced.selfCheck();');
+    chk.check('分段之后屏幕 == 引擎帧', scSplit.screenVsEngineDiffPx === 0,
+              `差 ${scSplit.screenVsEngineDiffPx} px`);
+    const afSplit = await c.eval('return window.__ced.auditFrame();');
+    chk.check('分段之后引擎帧 == 整帧重画', afSplit && afSplit.diff === 0,
+              afSplit ? `差 ${afSplit.diff} px` : 'null');
+
+    // 段首退格并回去（同一个往返：文档要么回到原样，要么至少段数 -1）
+    await c.eval('return window.__ced.setCaret(1, 0);');
+    await c.eval(key('Backspace'));
+    const merged = await c.eval('return window.__ced.editStats;');
+    chk.check('★ 段首退格把两段并回去（段数 -1）',
+              merged.totalParagraphs === after.totalParagraphs - 1,
+              `${after.totalParagraphs} → ${merged.totalParagraphs} 段`);
+    chk.check('★ 合并之后光标落在合并点上', merged.caretPara === 0 && merged.caretOffset === 5,
+              `段 ${merged.caretPara} 偏移 ${merged.caretOffset}`);
+    const auMerge = await c.eval('return window.__ced.auditLayout();');
+    chk.check('★★ 合并之后增量排版 == 全量重排（逐字段）', !!auMerge && auMerge.diff === 0,
+              auMerge ? `diff ${auMerge.diff}` : 'null');
+    chk.check('合并之后文档回到分段之前的字符数',
+              (await c.eval('return window.__ced.allText;')).length === textBefore.length,
+              `回到 ${textBefore.length} 字符`);
+  }
+
   chk.section('[7] 无页面异常 / 无 console 错误');
   {
     report.pageErrors = await c.eval('return window.__ced.errors;');

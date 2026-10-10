@@ -43,6 +43,26 @@ public:
                          const TextPos& b);
 
     /**
+     * 在 pos 处插入一个段落分隔符（回车分段）是否允许。
+     *
+     * 判据就是 canInsert(pos) —— 回车等于"在断点处插入一个段落分隔符"，
+     * 它能不能插由插入策略决定，不需要为它单开一套规则：
+     * 只读模式一律 false；表单模式下断点必须落在可编辑控件里（或所有控件之外）。
+     * 拆分不会让任何文字离开它所属的控件：区间跟着内容走
+     * （见 adjustControlsOnSplitPara）。
+     */
+    static bool canSplit(const ControlSet& ctrls, EditMode mode, const TextPos& pos);
+
+    /**
+     * 删掉 join 处的段落分隔符（把后一段并进前一段）是否允许。
+     * join 取前一段的末尾（= 分隔符所在位置），与"光标停在段末算不算在字段内"
+     * 同一口径（include_end = true）：于是"把只读字段后面的段落并进只读字段"会被拒绝，
+     * 而"把可编辑字段后面的段落并进来"允许。
+     * 合并只会把后一段的文字搬到前一段末尾，控件区间跟着搬 —— 只读保护不会被绕过。
+     */
+    static bool canMerge(const ControlSet& ctrls, EditMode mode, const TextPos& join);
+
+    /**
      * 光标能否停在这个插入点。
      * 只有表单模式会返回 false。文档模式与只读模式都放行 ——
      * "只读"约束的是编辑，不是浏览，不要混。

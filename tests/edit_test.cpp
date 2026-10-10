@@ -57,6 +57,54 @@ void expectNear(A a, B b, double tol, const std::string& what) {
     }
 }
 
+/**
+ * "增量上屏 == 从零上屏"的比对器：拿第二个引擎（同文档、同配置、同控件、同光标，
+ * 从零重排重画）当参照物，与被测引擎的当前帧逐像素比。
+ *
+ * 为什么需要它：auditFrame() 比的是"帧 vs 从底图整块重贴"，只能抓上屏漏贴；
+ * 底图自己漏画（页指纹判错、某个变了的页没被重画）时两边会一起错、它照样是 0。
+ * 只有拿一个真正从零开始渲染的参照物，才照得出来。
+ *
+ * @param out_max_ch 最大通道差：用来区分"结构性错位"与"坐标末位差翻了一格抗锯齿"
+ * @return 不符的像素数；-1 = 帧尺寸不同（本身就不符）
+ */
+long long frameDiffAgainstFresh(EditorEngine& a, const std::vector<std::string>& fonts,
+                                const std::vector<Control>& ctrls, EditMode mode,
+                                long long* out_max_ch) {
+    EditorEngine r;
+    if (!r.init(fonts)) return -1;
+    r.setConfig(a.config());
+    r.setBlocks(a.blocks());
+    // setBlocks 只换数据不排版（"谁改文档谁负责 relayout"）—— 这里必须自己排一次，
+    // 否则帧高会按 0 页算，比出来的东西没意义。
+    r.relayout();
+    if (!ctrls.empty()) r.setControls(ctrls);
+    r.setEditMode(mode);
+    r.relayout();
+    r.setCaret(a.caret().para, a.caret().offset);
+    r.showCaret(true);
+    r.repaint();
+
+    a.showCaret(true);
+    a.repaint();
+    const size_t n = a.frameBytes();
+    if (n != r.frameBytes()) return -1;
+    const uint8_t* fa = a.frame();
+    const uint8_t* fb = r.frame();
+    long long diff = 0, max_ch = 0;
+    for (size_t k = 0; k + 3 < n; k += 4) {
+        if (fa[k] == fb[k] && fa[k + 1] == fb[k + 1] && fa[k + 2] == fb[k + 2]) continue;
+        ++diff;
+        for (int ch = 0; ch < 3; ++ch) {
+            const long long d =
+                std::llabs(static_cast<long long>(fa[k + ch]) - static_cast<long long>(fb[k + ch]));
+            if (d > max_ch) max_ch = d;
+        }
+    }
+    if (out_max_ch) *out_max_ch = max_ch;
+    return diff;
+}
+
 std::string joinPath(const std::string& dir, const std::string& name) {
     if (dir.empty()) return name;
     const char last = dir.back();
@@ -2204,24 +2252,7 @@ int main() {
         a.relayout();
         a.repaint();
 
-        // 与 a 的当前状态等价的"从零重来"：同一份文档 + 同一配置 + 同一控件 + 同一光标。
-        auto freshFrame = [&](const std::vector<BlockSpec>& blocks, const TextPos& caret,
-                              const std::vector<Control>& ctrl, EditMode mode) {
-            EditorEngine r;
-            r.init({cjkPath, mnPath, latinPath});
-            r.setConfig(cfg16);
-            r.setBlocks(blocks);
-            // setBlocks 只换数据不排版（"谁改文档谁负责 relayout"）——
-            // 这里必须自己排一次，否则帧高会按 0 页算，比出来的东西没意义。
-            r.relayout();
-            if (!ctrl.empty()) r.setControls(ctrl);
-            r.setEditMode(mode);
-            r.relayout();
-            r.setCaret(caret.para, caret.offset);
-            r.showCaret(true);
-            r.repaint();
-            return std::vector<uint8_t>(r.frame(), r.frame() + r.frameBytes());
-        };
+        const std::vector<std::string> fonts16{cjkPath, mnPath, latinPath};
         std::vector<Control> no_ctrl;
         // 判据两档，都写在断言里（不接受"看着差不多就放行"）：
         //   严格档：逐字节相同。没有重算坐标的路径（敲字、光标移动、表单标记）必须落在这一档。
@@ -2232,45 +2263,18 @@ int main() {
         //     真正的错位（整页没重画、后缀挪错行）是几十万像素、通道差上百，逃不掉。
         auto compare = [&](const char* label, const std::vector<Control>& ctrl, EditMode mode,
                            bool allow_aa_noise) {
-            a.showCaret(true);
-            a.repaint();
-            const std::vector<uint8_t> fa(a.frame(), a.frame() + a.frameBytes());
-            const std::vector<uint8_t> fb = freshFrame(a.blocks(), a.caret(), ctrl, mode);
-            expectTrue(fa.size() == fb.size(), std::string("帧尺寸一致：") + label);
-            if (fa.size() != fb.size()) return;
-
-            const int fw = a.frameWidth();
-            const long long total_px = static_cast<long long>(fa.size() / 4);
-            size_t diff = 0;
             long long max_ch = 0;
-            std::vector<int> samples;
-            for (size_t k = 0; k + 3 < fa.size(); k += 4) {
-                if (fa[k] == fb[k] && fa[k + 1] == fb[k + 1] && fa[k + 2] == fb[k + 2]) continue;
-                ++diff;
-                for (int ch = 0; ch < 3; ++ch) {
-                    const long long d = std::llabs(static_cast<long long>(fa[k + ch]) -
-                                                   static_cast<long long>(fb[k + ch]));
-                    if (d > max_ch) max_ch = d;
-                }
-                if (samples.size() < 6) samples.push_back(static_cast<int>(k / 4));
-            }
-            const bool ok = allow_aa_noise
-                                ? (diff * 100000 <= static_cast<size_t>(total_px) && max_ch <= 1)
-                                : (diff == 0);
-            std::printf("     %s：帧差 %zu 像素（最大通道差 %lld，阈值 %s）\n", label, diff, max_ch,
-                        allow_aa_noise ? "≤十万分之一像素且通道差≤1" : "0");
+            const long long diff = frameDiffAgainstFresh(a, fonts16, ctrl, mode, &max_ch);
+            const long long total_px = static_cast<long long>(a.frameBytes() / 4);
+            const bool ok = allow_aa_noise ? (diff >= 0 && diff * 100000 <= total_px && max_ch <= 1)
+                                           : (diff == 0);
+            std::printf("     %s：帧差 %lld 像素（最大通道差 %lld，阈值 %s）\n", label, diff,
+                        max_ch, allow_aa_noise ? "≤十万分之一像素且通道差≤1" : "0");
             expectTrue(ok,
                        std::string("★ ") +
                            (allow_aa_noise ? "增量上屏 ≈ 从零上屏（平移的坐标末位差只翻抗锯齿）："
                                            : "增量上屏 == 从零上屏（逐字节相同）：") +
                            label);
-            if (!ok) {
-                for (int px : samples) {
-                    const size_t k = static_cast<size_t>(px) * 4;
-                    std::printf("       像素 (%d,%d)：增量=(%d,%d,%d) 从零=(%d,%d,%d)\n", px % fw,
-                                px / fw, fa[k], fa[k + 1], fa[k + 2], fb[k], fb[k + 1], fb[k + 2]);
-                }
-            }
         };
 
         // 一：敲一个字（后缀原样复用）
@@ -2304,6 +2308,459 @@ int main() {
             a.setEditMode(EditMode::Form);
             a.repaint();
             compare("表单括号", ctrl, EditMode::Form, /*allow_aa_noise=*/true);
+        }
+    }
+
+    std::printf("\n[17] 跨段编辑：回车分段 / 段首退格合并 / 段末 Delete 合并\n");
+    {
+        const std::vector<std::string> fonts17{cjkPath, mnPath, latinPath};
+        auto mkBlocks = [](const std::vector<std::string>& texts) {
+            std::vector<BlockSpec> v;
+            for (const std::string& t : texts) {
+                BlockSpec b;
+                b.font_index = 0;
+                b.size_pt = 14.0f;
+                b.line_factor = 1.85f;
+                b.space_after_pt = 6.0f;
+                b.language = "zh";
+                b.setText(t);
+                v.push_back(std::move(b));
+            }
+            return v;
+        };
+        auto textOf = [](const EditorEngine& e, int para) {
+            return e.blocks()[static_cast<size_t>(para)].textUtf8();
+        };
+
+        // 空段落有一行、且光标画得出来 —— 这是回车的落点。
+        //   空段落若整段跳过（没有行盒），回车之后既看不见空行、光标也没地方画：
+        //   表现就是"回车没反应"。所以"空段落占一行"是分段能用的前提。
+        {
+            EditorEngine e;
+            expectTrue(e.init(fonts17), "引擎初始化（空段落）");
+            EngineConfig c;
+            c.zoom = 1.0f;
+            e.setConfig(c);
+            e.setBlocks(mkBlocks({"甲乙丙", "", "丁戊己"}));
+            e.relayout();
+            e.repaint();
+            expectTrue(e.layout().lines.size() == 3, "三个段各占一行（空段落也占一行）");
+            const LineBox* mid = nullptr;
+            for (const LineBox& lb : e.layout().lines) {
+                if (lb.paragraph == 1) mid = &lb;
+            }
+            expectTrue(mid != nullptr && mid->clusters.empty(),
+                       "空段落那一行没有真实簇（只有可能存在的括号占位）");
+            expectTrue(mid != nullptr && mid->block_lo_pt > e.layout().lines[0].block_lo_pt &&
+                           mid->block_lo_pt < e.layout().lines[2].block_lo_pt,
+                       "空行夹在前后两行之间（块轴位置正确）");
+            e.setCaret(1, 0);
+            Rect r{};
+            expectTrue(e.caretRectPt(&r) && r.w > 0.0f && r.h > 0.0f,
+                       "★ 空段落里的光标有几何（能画出来 = 回车之后看得见落点）");
+        }
+
+        // 回车分段：文本、样式、光标、翻页标记
+        {
+            EditorEngine e;
+            expectTrue(e.init(fonts17), "引擎初始化（分段）");
+            EngineConfig c;
+            c.zoom = 1.0f;
+            e.setConfig(c);
+            e.setBlocks(mkBlocks({"患者主诉：反复心悸3天加重1天。"}));
+            e.relayout();
+            e.repaint();
+            const size_t total0 = e.blocks()[0].cp_text.size();
+            const int lines0 = e.layout().stats.placed_line_count;
+
+            e.setCaret(0, 5);
+            expectTrue(e.splitParagraphAndRender(), "回车分段返回 true");
+            expectTrue(e.blocks().size() == 2, "段数 1 → 2");
+            expectTrue(textOf(e, 0) == "患者主诉：" && textOf(e, 1) == "反复心悸3天加重1天。",
+                       "文本正好断在光标处（前半段 + 后半段 = 原文）");
+            expectTrue(e.blocks()[0].cp_text.size() + e.blocks()[1].cp_text.size() == total0,
+                       "分段不丢字符也不重复");
+            expectTrue(e.caret() == TextPos{1, 0}, "光标落在新段段首");
+
+            // 样式整体继承，只有 page_break_before 必须清掉（否则中间回车会多翻一页）。
+            const BlockSpec& h = e.blocks()[0];
+            const BlockSpec& t = e.blocks()[1];
+            expectTrue(t.font_index == h.font_index && t.size_pt == h.size_pt &&
+                           t.line_factor == h.line_factor && t.space_after_pt == h.space_after_pt &&
+                           t.language == h.language && t.wm.inline_axis == h.wm.inline_axis &&
+                           t.wm.block_flow == h.wm.block_flow && t.color.r == h.color.r &&
+                           t.color.g == h.color.g && t.color.b == h.color.b,
+                       "★ 新段整体继承原段的样式（字体/字号/行距/段后距/书写模式/颜色）");
+            expectTrue(!t.page_break_before, "★ 新段不带 page_break_before（回车不该多翻一页）");
+
+            expectTrue(e.layout().stats.placed_line_count == lines0 + 1,
+                       "分段后行数 +1（段落分隔符占一行）");
+            expectTrue(e.auditLayout() == 0, "分段之后增量排版 == 全量重排（逐字段）");
+            expectTrue(frameDiffAgainstFresh(e, fonts17, {}, EditMode::Document, nullptr) == 0,
+                       "★ 分段之后增量上屏 == 从零上屏（逐字节）");
+
+            // 分段之后继续打字：新段是可编辑的段落
+            e.typeTextAndRender("前");
+            expectTrue(textOf(e, 1).substr(0, 3) == "前" && e.caret().para == 1,
+                       "分段之后可以在新段继续输入");
+            expectTrue(e.auditLayout() == 0, "继续输入之后排版仍与全量一致");
+
+            // 段首退格把它并回去（往返：分段 + 合并 = 原样）
+            e.setCaret(1, 0);
+            expectTrue(e.backspaceAndRender(), "段首退格 = 并入上一段");
+            expectTrue(e.blocks().size() == 1, "段数 2 → 1");
+            expectTrue(e.caret() == TextPos{0, 5}, "合并之后光标落在合并点（原断点处）");
+            expectTrue(e.auditLayout() == 0, "合并之后排版与全量一致");
+            expectTrue(frameDiffAgainstFresh(e, fonts17, {}, EditMode::Document, nullptr) == 0,
+                       "★ 合并之后增量上屏 == 从零上屏（逐字节）");
+        }
+
+        // 分段的排版粒度：前缀仍复用、后缀一律不复用。
+        //   要有一段真正的前缀才谈得上这件事（单段文档在第 0 段分段时没有前缀，只能全量）。
+        {
+            EditorEngine e;
+            expectTrue(e.init(fonts17), "引擎初始化（分段粒度）");
+            EngineConfig c;
+            c.zoom = 1.0f;
+            e.setConfig(c);
+            e.setBlocks(mkBlocks({"第一段内容甲乙丙丁。", "第二段内容戊己庚辛。",
+                                  "第三段内容壬癸子丑。", "第四段内容寅卯辰巳。"}));
+            e.relayout();
+            e.repaint();
+            e.setCaret(2, 5);
+            expectTrue(e.splitParagraphAndRender(), "在第 2 段中间回车分段");
+            const EditStats sp = e.editStats();
+            std::printf("     4 段文档在第 2 段分段：重排 %d 段 / 复用 %d 段 / 共 %d 段（%s）\n",
+                        sp.relaid_paragraphs, sp.reused_paragraphs, sp.total_paragraphs,
+                        sp.layout_was_full ? "全量" : "增量");
+            expectTrue(
+                !sp.layout_was_full && sp.reused_paragraphs == 0 && sp.relaid_paragraphs == 3,
+                "★ 段数变了：[0,2) 前缀复用，[2,5) 续排，后缀不复用（段号已经错位）");
+            expectTrue(e.auditLayout() == 0, "分段粒度下的排版仍与全量逐字段一致");
+        }
+
+        // 合并的两个入口对称：段首退格 与 段末 Delete 得到同一个文档
+        {
+            EditorEngine byBack, byDel;
+            expectTrue(byBack.init(fonts17) && byDel.init(fonts17), "引擎初始化（两个合并入口）");
+            EngineConfig c;
+            c.zoom = 1.0f;
+            byBack.setConfig(c);
+            byDel.setConfig(c);
+            const std::vector<std::string> texts{"第一段文字", "第二段文字"};
+            byBack.setBlocks(mkBlocks(texts));
+            byDel.setBlocks(mkBlocks(texts));
+            byBack.relayout();
+            byDel.relayout();
+
+            byBack.setCaret(1, 0);
+            expectTrue(byBack.backspace(), "段首退格");
+            byDel.setCaret(0, 9);  // 第一段末尾（"第一段文字" = 5 个汉字 2 个… 共 7 码点）
+            byDel.setCaret(0, static_cast<size_t>(byDel.blocks()[0].cp_text.size()));
+            expectTrue(byDel.deleteForward(), "段末 Delete");
+            expectTrue(byBack.blocks().size() == 1 && byDel.blocks().size() == 1,
+                       "两个入口都让段数 -1");
+            expectTrue(byBack.blocks()[0].cp_text == byDel.blocks()[0].cp_text,
+                       "★ 两个入口得到同一段文本（对称）");
+            expectTrue(byBack.caret() == byDel.caret(), "两个入口的光标落点也相同");
+        }
+
+        // 边界与策略
+        {
+            EditorEngine e;
+            expectTrue(e.init(fonts17), "引擎初始化（边界）");
+            EngineConfig c;
+            c.zoom = 1.0f;
+            e.setConfig(c);
+            e.setBlocks(mkBlocks({"甲", "乙"}));
+            e.relayout();
+
+            e.setCaret(0, 0);
+            e.backspace();  // 首段段首：没有上一段
+            expectTrue(e.blocks().size() == 2 && e.blockedEdits() == 0,
+                       "首段段首退格无效，且不计入「被策略拒绝」——「没有可合并的」不是「不许改」");
+
+            e.setCaret(1, 1);  // 末段段末
+            e.deleteForward();
+            expectTrue(e.blocks().size() == 2, "末段段末 Delete 无效（没有下一段）");
+
+            // 只读模式：分段与合并都被拒
+            e.setEditMode(EditMode::ReadOnly);
+            const int b0 = e.blockedEdits();
+            e.setCaret(0, 0);
+            expectTrue(!e.splitParagraph(), "只读模式：回车分段被拒");
+            e.setCaret(1, 0);
+            expectTrue(!e.backspace(), "只读模式：段首退格（合并）被拒");
+            expectTrue(e.blockedEdits() == b0 + 2, "两次被拒都记在 blocked_edits 上");
+            e.setEditMode(EditMode::Document);
+        }
+
+        // 表单策略：断点能不能写，由"插入策略"决定（回车 = 在断点插入一个段落分隔符）
+        {
+            EditorEngine e;
+            expectTrue(e.init(fonts17), "引擎初始化（表单策略）");
+            EngineConfig c;
+            c.zoom = 1.0f;
+            e.setConfig(c);
+            e.setBlocks(mkBlocks({"甲", "乙"}));
+            e.relayout();
+
+            // 只读字段盖住第 0 段、可编辑字段盖住第 1 段。这样安排的用处：
+            //   合并点 (0,1) 落在只读字段里（→ 该拒），而"光标停在第 1 段段首"本身是
+            //   可放的位置（→ 能走到判定那一步）。
+            std::vector<Control> ctrls;
+            Control ro;
+            ro.range.start = TextPos{0, 0};
+            ro.range.end = TextPos{0, 1};
+            ro.read_only = true;
+            ro.id = "ro";
+            ctrls.push_back(ro);
+            Control ed;
+            ed.range.start = TextPos{1, 0};
+            ed.range.end = TextPos{1, 1};
+            ed.id = "ed";
+            ctrls.push_back(ed);
+            e.setControls(ctrls);
+            e.setEditMode(EditMode::Form);
+
+            e.setCaret(1, 0);
+            const long long b1 = e.blockedEdits();
+            expectTrue(!e.backspace(), "★ 表单模式：合并点落在只读字段里 → 被拒");
+            expectTrue(e.blockedEdits() == b1 + 1 && e.blocks().size() == 2,
+                       "被拒并计数，且文档一个字都没动");
+            expectTrue(e.splitParagraph(), "表单模式：在可编辑字段里回车分段 → 放行");
+            expectTrue(e.blocks().size() == 3, "确实断成了三段（空段 + 甲 + 乙）");
+        }
+
+        // 策略层直接测：把"能不能在这里分段/合并"与光标能否到达分开。
+        //   表单模式下 setCaret 会把光标投影进最近的字段，所以"光标停在所有控件之外"
+        //   这件事在表单模式里根本到不了 —— 想验"控件之外不许写"只能直接调策略函数。
+        {
+            ControlSet cs;
+            Control a;
+            a.range.start = TextPos{0, 0};
+            a.range.end = TextPos{0, 2};
+            a.id = "a";
+            cs.add(a);
+            Control r;
+            r.range.start = TextPos{1, 0};
+            r.range.end = TextPos{1, 2};
+            r.read_only = true;
+            r.id = "r";
+            cs.add(r);
+            cs.normalize();
+
+            expectTrue(EditPolicy::canSplit(cs, EditMode::Form, TextPos{0, 1}),
+                       "可编辑字段之内：可以分段");
+            expectTrue(!EditPolicy::canSplit(cs, EditMode::Form, TextPos{2, 0}),
+                       "所有控件之外：不可以分段");
+            expectTrue(!EditPolicy::canSplit(cs, EditMode::Form, TextPos{1, 1}),
+                       "只读字段之内：不可以分段");
+            expectTrue(!EditPolicy::canSplit(cs, EditMode::ReadOnly, TextPos{0, 1}),
+                       "只读模式：一律不可以分段");
+            expectTrue(EditPolicy::canSplit(cs, EditMode::Document, TextPos{2, 0}),
+                       "文档模式：控件之外也能分段");
+            expectTrue(EditPolicy::canMerge(cs, EditMode::Form, TextPos{0, 2}),
+                       "合并点落在可编辑字段末尾：可以合并");
+            expectTrue(!EditPolicy::canMerge(cs, EditMode::Form, TextPos{1, 2}),
+                       "合并点落在只读字段末尾：不可以合并");
+            expectTrue(EditPolicy::canMerge(cs, EditMode::Document, TextPos{1, 2}),
+                       "文档模式：合并点在哪都行");
+        }
+
+        // 控件区间的适配：分段把区间拆到两段，合并再拼回来（往返必须回到原样）
+        {
+            EditorEngine e;
+            expectTrue(e.init(fonts17), "引擎初始化（控件适配）");
+            EngineConfig c;
+            c.zoom = 1.0f;
+            e.setConfig(c);
+            e.setBlocks(mkBlocks({"甲乙丙丁戊己庚辛壬癸"}));  // 10 个汉字
+            e.relayout();
+
+            std::vector<Control> ctrls;
+            auto add = [&](int ps, size_t po, int pe, size_t eo, const char* id) {
+                Control k;
+                k.range.start = TextPos{ps, po};
+                k.range.end = TextPos{pe, eo};
+                k.id = id;
+                ctrls.push_back(k);
+            };
+            add(0, 0, 0, 4, "before");  // 断点之前
+            add(0, 4, 0, 8, "across");  // 跨断点
+            add(0, 9, 0, 10, "after");  // 断点之后
+            add(0, 5, 0, 5, "empty");   // 恰好落在断点上的空字段
+            e.setControls(ctrls);
+            e.setEditMode(EditMode::Form);
+
+            e.setCaret(0, 5);
+            expectTrue(e.splitParagraph(), "在 (0,5) 处分段");
+            const ControlSet& c1 = e.controls();
+            auto at = [&](const char* id) -> const Control& {
+                for (int i = 0; i < c1.size(); ++i) {
+                    if (c1.at(i).id == id) return c1.at(i);
+                }
+                static Control none;
+                return none;
+            };
+            std::printf(
+                "     分段后：before=[%d:%zu,%d:%zu] across=[%d:%zu,%d:%zu] "
+                "after=[%d:%zu,%d:%zu] empty=[%d:%zu,%d:%zu]\n",
+                at("before").range.start.para, at("before").range.start.offset,
+                at("before").range.end.para, at("before").range.end.offset,
+                at("across").range.start.para, at("across").range.start.offset,
+                at("across").range.end.para, at("across").range.end.offset,
+                at("after").range.start.para, at("after").range.start.offset,
+                at("after").range.end.para, at("after").range.end.offset,
+                at("empty").range.start.para, at("empty").range.start.offset,
+                at("empty").range.end.para, at("empty").range.end.offset);
+            auto rangeIs = [&](const char* id, int sp, size_t so, int ep, size_t eo) {
+                const ControlRange& r = at(id).range;
+                return r.start.para == sp && r.start.offset == so && r.end.para == ep &&
+                       r.end.offset == eo;
+            };
+            expectTrue(rangeIs("before", 0, 0, 0, 4), "断点之前的字段原样不动");
+            expectTrue(rangeIs("across", 0, 4, 1, 3),
+                       "★ 跨断点的字段自动跟着断到两段（内容一点没少）");
+            expectTrue(rangeIs("after", 1, 4, 1, 5),
+                       "断点之后的字段整段后移（段号 +1、偏移 -= 断点）");
+            expectTrue(rangeIs("empty", 1, 0, 1, 0),
+                       "落在断点上的空字段归新段（与光标落在新段段首同一口径）");
+
+            // 合并回来：四个区间必须逐字段回到原样
+            e.setCaret(1, 0);
+            expectTrue(e.backspace(), "把刚拆开的两段合回去");
+            bool same = true;
+            for (int i = 0; i < c1.size(); ++i) {
+                const ControlRange& a = c1.at(i).range;
+                const ControlRange& b = e.controls().at(i).range;
+                if (a.start.para != b.start.para || a.start.offset != b.start.offset ||
+                    a.end.para != b.end.para || a.end.offset != b.end.offset) {
+                    same = false;
+                }
+            }
+            expectTrue(same, "★ 分段 + 合并 = 控件区间逐字段回到原样（往返不变）");
+            expectTrue(e.auditLayout() == 0, "控件适配之后排版仍与全量一致");
+        }
+
+        // 回车在长文档里的代价：与"撑出一行"同一量级（后缀要续排、后缀的页都要重画），
+        //   但它不是整篇重排：前缀一个字都没动。
+        {
+            EditorEngine e;
+            expectTrue(e.init(fonts17), "引擎初始化（长文档回车）");
+            EngineConfig c;
+            c.zoom = 1.0f;
+            e.setConfig(c);
+            std::vector<BlockSpec> doc;
+            for (int i = 0; i < 200; ++i) {
+                BlockSpec b;
+                b.font_index = 0;
+                b.size_pt = 14.0f;
+                b.line_factor = 1.85f;
+                b.space_after_pt = 6.0f;
+                b.language = "zh";
+                b.setText("第 " + std::to_string(i + 1) +
+                          " 次病程记录：患者诉晨起后心悸明显，持续约十分钟，休息后缓解，"
+                          "未见黑矇与晕厥。");
+                doc.push_back(std::move(b));
+            }
+            e.setBlocks(doc);
+            e.relayout();
+            e.repaint();
+
+            double best_ms = 1e9;
+            EditStats first{};  // 账目只认第一次分段之后那一份（后面几次段数还在涨）
+            for (int i = 0; i < 3; ++i) {
+                e.setCaret(100 - i, 5);
+                const auto t0 = std::chrono::steady_clock::now();
+                e.splitParagraphAndRender();
+                const auto t1 = std::chrono::steady_clock::now();
+                if (i == 0) first = e.editStats();
+                const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+                if (ms < best_ms) best_ms = ms;
+            }
+            std::printf(
+                "     200 段文档在第 100 段回车：端到端 %.3f ms（3 次取最小）｜ 重排 %.3f ms"
+                "（重排 %d 段 / 复用 %d 段）｜ 脏页 %d / 总页 %d\n",
+                best_ms, first.layout_ms, first.relaid_paragraphs, first.reused_paragraphs,
+                first.dirty_page_count, first.total_pages);
+            expectTrue(first.total_paragraphs == 201 && !first.layout_was_full &&
+                           first.reused_paragraphs == 0 && first.relaid_paragraphs == 101,
+                       "★ 长文档里回车：前缀 [0,100) 复用、后缀 [100,201) 续排（不是整篇重排）");
+        }
+
+        // 文档模式下的多段编辑序列：每一步都要"增量 == 全量"
+        {
+            EditorEngine e;
+            expectTrue(e.init(fonts17), "引擎初始化（随机跨段编辑）");
+            EngineConfig c;
+            c.zoom = 1.0f;
+            e.setConfig(c);
+            e.setBlocks(
+                mkBlocks({"第一段：患者诉心悸。", "第二段：休息后缓解。", "第三段：无晕厥。"}));
+            e.relayout();
+            e.repaint();
+
+            uint32_t seed = 20261010u;
+            auto rnd = [&](uint32_t n) {
+                seed = seed * 1103515245u + 12345u;
+                return n ? (seed >> 16) % n : 0u;
+            };
+            int bad = 0, splits = 0, merges = 0, full = 0, expect_full = 0, full_with_prefix = 0;
+            for (int step = 0; step < 40; ++step) {
+                const int np = static_cast<int>(e.blocks().size());
+                const int lines_before = e.layout().stats.placed_line_count;
+                const int p = static_cast<int>(rnd(static_cast<uint32_t>(np)));
+                const size_t len = e.blocks()[static_cast<size_t>(p)].cp_text.size();
+                const uint32_t what = rnd(4);
+                int dirty = p;  // 这一步会弄脏哪一段（决定"有没有前缀可复用"）
+                bool edited = true;
+                if (what == 0) {
+                    e.setCaret(p, static_cast<size_t>(rnd(static_cast<uint32_t>(len + 1))));
+                    edited = e.splitParagraphAndRender();
+                    if (edited) ++splits;
+                } else if (what == 1 && np > 1) {
+                    e.setCaret(p, 0);
+                    edited = e.backspaceAndRender();
+                    if (edited) ++merges;
+                    dirty = p - 1;  // 合并脏的是前一段
+                } else if (what == 2 && len > 0) {
+                    e.setCaret(p, static_cast<size_t>(1 + rnd(static_cast<uint32_t>(len))));
+                    edited = e.backspaceAndRender();
+                } else {
+                    e.setCaret(p, static_cast<size_t>(rnd(static_cast<uint32_t>(len + 1))));
+                    edited = e.typeTextAndRender(rnd(2) ? "文" : "a");
+                }
+                // 没改成的步子（比如在第 0 段段首退格：没有上一段）根本不触发重排，
+                //   不参与"全量步数"的计数 —— 否则账目会凭空多出几步。
+                if (!edited) continue;
+                // 整篇重排的充要条件（两侧都数，比"全量很少"强得多）：脏段之前没有前缀
+                //   可复用（dirty == 0），并且"后缀复用"不成立。后者有三种情形：
+                //   段数变了、行结构变了（行数跟着变）、以及根本没有后缀（文档只剩这一段）。
+                //   只改字而行结构没变时，第 0 段的后缀照样能整块复用（重排 1 段就够）。
+                const int n_after = static_cast<int>(e.blocks().size());
+                const bool struct_changed =
+                    n_after != np || e.layout().stats.placed_line_count != lines_before;
+                const bool has_suffix = dirty >= 0 && dirty + 1 < n_after;
+                if (dirty <= 0 && (struct_changed || !has_suffix)) ++expect_full;
+                if (e.editStats().layout_was_full) {
+                    ++full;
+                    if (dirty > 0) ++full_with_prefix;  // 有前缀还整篇重排 = 账目错了
+                }
+                if (e.auditLayout() != 0) ++bad;
+            }
+            std::printf(
+                "     随机 40 步（含跨段编辑）：分段 %d 次 / 合并 %d 次 / 整篇重排 %d 步"
+                "（应恰好 %d 步）｜ 与全量不符 %d 步\n",
+                splits, merges, full, expect_full, bad);
+            expectTrue(splits > 0 && merges > 0, "随机序列确实走到了分段与合并");
+            expectTrue(bad == 0, "★ 40 步随机编辑（含跨段）每一步的增量排版都等于全量");
+            expectTrue(full_with_prefix == 0,
+                       "★ 有前缀可复用的步子从不整篇重排（跨段编辑不放大代价）");
+            expectTrue(full == expect_full,
+                       "★ 整篇重排恰好发生在「脏段为第 0 段且段数/行数变了」的那几步");
+            expectTrue(frameDiffAgainstFresh(e, fonts17, {}, EditMode::Document, nullptr) == 0,
+                       "★ 随机跨段编辑之后，增量上屏 == 从零上屏（逐字节）");
         }
     }
 

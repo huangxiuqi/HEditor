@@ -259,7 +259,7 @@ void EditorEngine::relayout() {
     // 比整篇重扫一遍字形便宜两个数量级。
     int fp_lo = -1, fp_hi = -1;
     SuffixReuse reuse = SuffixReuse::None;
-    if (!must_full && from >= 0 && from < n_para) {
+    if (!must_full && !para_count_changed_ && from >= 0 && from < n_para) {
         reuse = trySuffixReuse(from, bracketed, &fp_lo, &fp_hi);
     }
     if (reuse != SuffixReuse::None) {
@@ -291,6 +291,7 @@ void EditorEngine::relayout() {
     }
     layout_dirty_from_ = n_para;  // 已重排到末尾，没有脏段了
     layout_needs_full_ = false;
+    para_count_changed_ = false;  // 这一轮已经把新段号排进去了
 
     // 这一轮排版的耗时。只算排版本身（拼接/续排/全量三种走法都算），
     // 不含页指纹记账与统计同步 —— 那两项是 O(全篇) 的固定开销，
@@ -452,11 +453,14 @@ bool EditorEngine::shiftSuffixBlockAxis(int from, const ReflowState& after) {
             ParaIndex& pi = layout_.para_index[static_cast<size_t>(p)];
             if (apply) pi.state_at_start = ReflowState{page, s, line_no};
 
-            if (b.cp_text.empty()) continue;  // 空段既不翻页也不占位
             if (b.page_break_before && s > cy + 0.01f) {
                 ++page;
                 s = cy;
             }
+            // 一段占多少块轴空间由"它实际产出了几行"决定：空段落也有一行
+            //   （见 layout.cpp 里那段说明），而有文本却取不到字体的段一行都没有 ——
+            //   后者在排版里只翻页、不让出 space_after，这里必须与它一致。
+            if (pi.line_end == pi.line_begin) continue;
             const float lh = b.size_pt * b.line_factor;
             for (int L = pi.line_begin; L < pi.line_end; ++L) {
                 LineBox& lb = layout_.lines[static_cast<size_t>(L)];
@@ -1268,7 +1272,9 @@ bool EditorEngine::backspace() {
     TextPos p = caret_;
     if (p.para < 0 || p.para >= static_cast<int>(blocks_.size())) p.para = 0;
     p.offset = snapToCluster(p.para, p.offset);
-    if (p.offset == 0) return false;  // 段首（档 1 不做跨段合并）
+    // 段首退格 = 并入上一段（跨段编辑）。策略拒绝时返回 false，与其它被拒编辑同一口径：
+    //   宿主据此判断"没变"，光标也不会动。
+    if (p.offset == 0) return mergeWithPreviousParagraph();
 
     // 往回删一个簇，不是删一个码点。
     //   e + U+0301 会被一次删掉；只删 U+0301 会留下一个孤立的组合重音。
@@ -1296,7 +1302,8 @@ bool EditorEngine::deleteForward() {
     p.offset = snapToCluster(p.para, p.offset);
 
     const size_t len = blocks_[static_cast<size_t>(p.para)].cp_text.size();
-    if (p.offset >= len) return false;
+    // 段末 Delete = 把下一段并进来（与"段首退格并入上一段"对称）。
+    if (p.offset >= len) return mergeWithNextParagraph();
 
     size_t next = p.offset + 1;
     if (p.para < static_cast<int>(layout_.para_cluster_starts.size()) &&
@@ -1322,6 +1329,89 @@ bool EditorEngine::deleteForward() {
     return true;
 }
 
+/**
+ * 回车：在光标处把这一段拆成两段（跨段编辑）。
+ *
+ * 新段的样式复制自原段（字体、字号、书写模式、行距、段后距、颜色、回退链、语言），
+ * 只有 page_break_before 刻意清掉：段落分隔符不该附带一次翻页 ——
+ * 否则在文档中间按一次回车会把后面整篇推到新页上。
+ */
+bool EditorEngine::splitParagraph() {
+    if (blocks_.empty()) return false;
+    TextPos p = caret_;
+    if (p.para < 0 || p.para >= static_cast<int>(blocks_.size())) p.para = 0;
+    p.offset = snapToCluster(p.para, p.offset);
+
+    if (!EditPolicy::canSplit(controls_, policy_.mode(), p)) {
+        ++blocked_edits_;
+        return false;
+    }
+
+    BlockSpec& head = blocks_[static_cast<size_t>(p.para)];
+    BlockSpec tail = head;  // 样式整体继承，只改文本与翻页标记
+    tail.page_break_before = false;
+    tail.cp_text.assign(head.cp_text.begin() + static_cast<ptrdiff_t>(p.offset),
+                        head.cp_text.end());
+    head.cp_text.resize(p.offset);
+
+    // 控件端点先适配、再插段：适配函数按"段号 + 偏移"定位，段一插进去就对不上了。
+    adjustControlsOnSplitPara(controls_, p);
+    blocks_.insert(blocks_.begin() + p.para + 1, std::move(tail));
+
+    markLayoutDirty(p.para);
+    // 段数变了：后缀的段号整体后移，而"后缀复用"的判据是"第 from+1 段开始时的状态" ——
+    // 现在第 from+1 段已经是另一段了，那个比较毫无意义（碰巧相等就会把整个后缀错当成
+    // 没变）。所以段数一变就禁止复用，只保留"前缀复用 + 从脏段续排"。
+    para_count_changed_ = true;
+    caret_ = TextPos{p.para + 1, 0};
+    return true;
+}
+
+/**
+ * 合并的一般形式：把 head + 1 段并进 head 段。三种入口（段首退格 / 段末 Delete /
+ * 显式调用）只是"从哪一端触发"不同，落到文档上的操作是同一个。
+ */
+bool EditorEngine::mergeParagraphInto(int head) {
+    if (head < 0 || head + 1 >= static_cast<int>(blocks_.size())) return false;
+    const size_t prev_len = blocks_[static_cast<size_t>(head)].cp_text.size();
+    const TextPos join{head, prev_len};
+
+    if (!EditPolicy::canMerge(controls_, policy_.mode(), join)) {
+        ++blocked_edits_;
+        return false;
+    }
+
+    BlockSpec& prev = blocks_[static_cast<size_t>(head)];
+    const std::vector<uint32_t>& moved = blocks_[static_cast<size_t>(head + 1)].cp_text;
+    prev.cp_text.insert(prev.cp_text.end(), moved.begin(), moved.end());
+    // 端点适配在 erase 之前：它按段号定位，段一删就对不上了。
+    adjustControlsOnMergePara(controls_, head, prev_len);
+    blocks_.erase(blocks_.begin() + head + 1);
+
+    markLayoutDirty(head);
+    para_count_changed_ = true;  // 理由同分段
+    caret_ = join;
+    return true;
+}
+
+bool EditorEngine::mergeWithPreviousParagraph() {
+    if (blocks_.empty()) return false;
+    TextPos p = caret_;
+    if (p.para <= 0 || p.para >= static_cast<int>(blocks_.size())) return false;
+    // 只有光标确实在段首才合并（否则退格该删的是前一个簇）。
+    if (snapToCluster(p.para, p.offset) != 0) return false;
+    return mergeParagraphInto(p.para - 1);
+}
+
+bool EditorEngine::mergeWithNextParagraph() {
+    if (blocks_.empty()) return false;
+    TextPos p = caret_;
+    if (p.para < 0 || p.para + 1 >= static_cast<int>(blocks_.size())) return false;
+    const size_t len = blocks_[static_cast<size_t>(p.para)].cp_text.size();
+    if (snapToCluster(p.para, p.offset) != len) return false;
+    return mergeParagraphInto(p.para);
+}
+
 bool EditorEngine::typeTextAndRender(const std::string& utf8) {
     if (!typeTextUtf8(utf8)) return false;
     relayout();
@@ -1338,6 +1428,27 @@ bool EditorEngine::backspaceAndRender() {
 
 bool EditorEngine::deleteForwardAndRender() {
     if (!deleteForward()) return false;
+    relayout();
+    repaintAfterEdit();
+    return true;
+}
+
+bool EditorEngine::splitParagraphAndRender() {
+    if (!splitParagraph()) return false;
+    relayout();
+    repaintAfterEdit();
+    return true;
+}
+
+bool EditorEngine::mergeWithPreviousParagraphAndRender() {
+    if (!mergeWithPreviousParagraph()) return false;
+    relayout();
+    repaintAfterEdit();
+    return true;
+}
+
+bool EditorEngine::mergeWithNextParagraphAndRender() {
+    if (!mergeWithNextParagraph()) return false;
     relayout();
     repaintAfterEdit();
     return true;

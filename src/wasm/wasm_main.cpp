@@ -312,6 +312,13 @@ std::string shapeReport(int font_index, float size_pt, const std::string& text, 
 bool typeText(const std::string& utf8) { return g_engine.typeTextAndRender(utf8); }
 bool backspaceText() { return g_engine.backspaceAndRender(); }
 bool deleteForwardText() { return g_engine.deleteForwardAndRender(); }
+/**
+ * 跨段编辑：段首退格 / 段末 Delete 已经自动走合并（见 engine.cpp 的 backspace/deleteForward），
+ * 这三个是显式入口（回车分段、以及从任一方向合并）。
+ */
+bool splitParagraph() { return g_engine.splitParagraphAndRender(); }
+bool mergeWithPreviousParagraph() { return g_engine.mergeWithPreviousParagraphAndRender(); }
+bool mergeWithNextParagraph() { return g_engine.mergeWithNextParagraphAndRender(); }
 bool moveCaret(int dcp) { return g_engine.moveCaretAndRender(dcp); }
 bool caretToLineStart() { return g_engine.moveCaretToLineStartAndRender(); }
 bool caretToLineEnd() { return g_engine.moveCaretToLineEndAndRender(); }
@@ -618,6 +625,9 @@ EMSCRIPTEN_BINDINGS(ced_editor) {
     emscripten::function("typeText", &typeText);
     emscripten::function("backspace", &backspaceText);
     emscripten::function("deleteForward", &deleteForwardText);
+    emscripten::function("splitParagraph", &splitParagraph);
+    emscripten::function("mergeWithPreviousParagraph", &mergeWithPreviousParagraph);
+    emscripten::function("mergeWithNextParagraph", &mergeWithNextParagraph);
     emscripten::function("moveCaret", &moveCaret);
     emscripten::function("caretToLineStart", &caretToLineStart);
     emscripten::function("caretToLineEnd", &caretToLineEnd);

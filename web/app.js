@@ -412,6 +412,11 @@ function onKeyDown(ev) {
       changed = mod.caretToLineEnd();
       break;
     case 'Enter':
+      // 回车 = 分段（跨段编辑），不是"确认/提交"。
+      //   段落模型是文档流的单位，回车在光标处断段，后面那段整体继承样式。
+      //   Shift+Enter 暂时与 Enter 同义（软换行留给以后：它需要"行内换行"这种
+      //   与段落不同的东西，现在没有，就不要假装有）。
+      changed = mod.splitParagraph();
       break;
     case 'Tab':
       // Tab = 缩进（编辑器语义），不是"跳到下一个控件"。
@@ -647,6 +652,16 @@ window.__ced = {
   get errors() { return pageErrors.slice(); },
   get edit() { return lastEdit; },
   get text() { return mod ? mod.documentText(0) : ''; },
+  // 按段取文本 + 整篇拼起来。跨段编辑的探针要核对"字符账守恒"（分段不丢不重），
+  //   而 __ced.text 只给第 0 段。
+  paragraphText(i) { return mod ? mod.documentText(i) : ''; },
+  get allText() {
+    if (!mod) return '';
+    const n = JSON.parse(mod.editStatsJson()).totalParagraphs;
+    const parts = [];
+    for (let i = 0; i < n; ++i) parts.push(mod.documentText(i));
+    return parts.join('\n');
+  },
   get caret() {
     if (!mod) return null;
     const st = JSON.parse(mod.editStatsJson());
@@ -711,6 +726,26 @@ window.__ced = {
   },
   deleteForward() {
     if (!ready || !mod.deleteForward()) return null;
+    const st = JSON.parse(mod.editStatsJson());
+    blitFrame(st);
+    return st;
+  },
+  // 跨段编辑：段首退格 / 段末 Delete 已经自动走合并（见引擎 backspace/deleteForward），
+  //   所以这里只需要给回车与"显式合并"各一个入口。
+  splitParagraph() {
+    if (!ready || !mod.splitParagraph()) return null;
+    const st = JSON.parse(mod.editStatsJson());
+    blitFrame(st);
+    return st;
+  },
+  mergeWithPreviousParagraph() {
+    if (!ready || !mod.mergeWithPreviousParagraph()) return null;
+    const st = JSON.parse(mod.editStatsJson());
+    blitFrame(st);
+    return st;
+  },
+  mergeWithNextParagraph() {
+    if (!ready || !mod.mergeWithNextParagraph()) return null;
     const st = JSON.parse(mod.editStatsJson());
     blitFrame(st);
     return st;

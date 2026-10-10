@@ -172,6 +172,107 @@ uint64_t shapingFingerprint(const BlockSpec& b) {
     return h;
 }
 
+/**
+ * 把"要显示括号的控件"的边界插成占位簇（括号进文档流的全部实现）。
+ *
+ * 三条约定，整个表单标记体系都建立在这上面：
+ *   槽宽 = 括号字形 advance + 间隙，且与绘制侧共用同一个常数（见 kControlBracketSlotGapPt）；
+ *   同一处边界上的多个槽按"槽属于谁"排序 —— 内容结束处的闭括号(0) → 开括号(1) →
+ *     空字段自身的闭括号(2)，于是相邻字段得 ][、空字段得 []、同区间嵌套得 [[ ]]；
+ *   占位簇 g0 == g1（不产生字形、只占 advance），于是断行容量、行末位置、每个簇的行内
+ *     位置、光标与命中测试全都自动把括号算进去。
+ *
+ * @param shaped 纯整形结果（可能正指着只读的段级缓存条目）；没有槽要插时原样返回它
+ * @param scratch 需要可改副本时就地用它（未命中缓存时它已持有整形结果，省一次拷贝）
+ */
+const BlockShaping* withBracketSlots(const ControlSet* controls, const std::vector<int>* bracketed,
+                                     size_t para_index, uint32_t n_cp, const BlockShaping* shaped,
+                                     BlockShaping* scratch) {
+    if (!controls || !bracketed || bracketed->empty()) return shaped;
+    const BlockShaping& src = *shaped;
+    // 槽宽 = 括号字形 advance + 间隙。间隙必须计入排版，否则 字] 会挤在一起。
+    const float bw = bracketAdvancePt(src.primary);
+    const float slot = bw > 0.0f ? bw + kControlBracketSlotGapPt : 0.0f;
+    if (!(slot > 0.0f)) return shaped;
+
+    // 同一处边界（簇 i 之前）可能同时挂着多个槽，来自不同字段：
+    // 某字段在此结束（闭括号）、某字段在此开始（开括号）、空字段两者皆有。
+    struct Slot {
+        BracketSide side;
+        bool ro;  // 只读字段的括号画灰色（颜色只有插槽这一层知道）
+        int prio;
+    };
+    std::vector<std::vector<Slot>> at(src.clusters.size() + 1);
+    // 段内偏移 → 插入点（第一个 cp >= offset 的簇；没有就插在末尾）。
+    auto slotIndex = [&](size_t offset) {
+        for (size_t i = 0; i < src.clusters.size(); ++i) {
+            if (src.clusters[i].cp >= offset) return i;
+        }
+        return src.clusters.size();
+    };
+    for (int ci : *bracketed) {
+        if (ci < 0 || ci >= controls->size()) continue;
+        const Control& fc = controls->at(ci);
+        // 空字段：开、闭落在同一处，且要画成 []（不是 ][）。
+        const bool empty_field = (fc.range.start == fc.range.end);
+        if (fc.range.end.para == static_cast<int>(para_index)) {
+            at[slotIndex(fc.range.end.offset)].push_back(
+                Slot{BracketSide::Close, fc.read_only, empty_field ? 2 : 0});
+        }
+        if (fc.range.start.para == static_cast<int>(para_index)) {
+            at[slotIndex(fc.range.start.offset)].push_back(
+                Slot{BracketSide::Open, fc.read_only, 1});
+        }
+    }
+    bool any = false;
+    for (const std::vector<Slot>& v : at) {
+        if (!v.empty()) {
+            any = true;
+            break;
+        }
+    }
+    if (!any) return shaped;
+
+    // 这一段要插占位 → 簇序列会被改 → 需要一份可改的副本
+    // （shaped 可能正指着只读的缓存条目）。
+    if (shaped != scratch) *scratch = src;
+    std::vector<BlockShaping::Cluster> cl2;
+    std::vector<float> adv2;
+    std::vector<bool> brk2;
+    cl2.reserve(scratch->clusters.size() + 4);
+    adv2.reserve(scratch->clusters.size() + 4);
+    brk2.reserve(scratch->clusters.size() + 4);
+    // 在簇 i 前面插一个占位槽（side = 开/闭，ro = 只读）。
+    auto emitSlot = [&](size_t i, BracketSide side, bool ro) {
+        BlockShaping::Cluster pc;
+        // 占位簇的 cp = 它后面那个真实簇的 cp（末尾用段长哨兵）。这让"光标该落在槽的
+        // 哪一侧"归 inlineOffsetFor 判定，判据是 bracket_side —— 光靠 cp 是分不开的。
+        pc.cp = (i < scratch->clusters.size()) ? scratch->clusters[i].cp : n_cp;
+        pc.g0 = pc.g1 = 0;
+        pc.placeholder = true;
+        pc.bracket_side = side;
+        pc.read_only = ro;
+        cl2.push_back(pc);
+        adv2.push_back(slot);
+        brk2.push_back(false);  // 括号内部不是断点
+    };
+    for (size_t i = 0; i <= scratch->clusters.size(); ++i) {
+        // 按 prio 排序（见上）。stable_sort 保证同优先级内保持控件列表顺序，结果确定可复现。
+        std::stable_sort(at[i].begin(), at[i].end(),
+                         [](const Slot& a, const Slot& b) { return a.prio < b.prio; });
+        for (const Slot& s : at[i]) emitSlot(i, s.side, s.ro);
+        if (i < scratch->clusters.size()) {
+            cl2.push_back(scratch->clusters[i]);
+            adv2.push_back(scratch->cluster_adv_pt[i]);
+            brk2.push_back(scratch->break_after[i]);
+        }
+    }
+    scratch->clusters.swap(cl2);
+    scratch->cluster_adv_pt.swap(adv2);
+    scratch->break_after.swap(brk2);
+    return scratch;
+}
+
 }  // namespace
 
 /**
@@ -378,13 +479,94 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
         pi.missing_count = 0;
         pi.font_run_count = 0;
 
-        // 下面三步的先后顺序属于既有行为，不得调换：空文本整段跳过，page_break_before
-        // 翻页，取不到字体才跳过 —— 即「有文本但无字体」的段仍会翻页，空段落不会。
+        // 空段落：占一个空行。
+        //
+        //   为什么不能整段跳过（跳过是它能"最省事"的做法）：跳过之后这一段既没有行盒
+        //   也没有字形，于是光标画不出来（findLineFor 找不到行盒）、用户也看不见
+        //   "这里有一个空段落"。而回车站上去要的正是"换行" —— 跳过就等于回车没反应，
+        //   直到敲进第一个字才突然出现一行。所以空段落必须有自己的行盒：它没有真实字形，
+        //   行内只有可能存在的括号占位，而这一份几何同时给光标提供了落点。
+        //
+        //   与有内容的段一样参与翻页判定（空段落也是一个段落）。
         if (b.cp_text.empty()) {
+            FontInstance* f = lib.instance(b.font_index, b.size_pt);
+            const float line_h = b.size_pt * b.line_factor;
+            // 取不到字体就用字号折算的近似度量：空行的几何必须存在，否则光标没地方画。
+            const float ascent = f ? f->ascenderPt() : b.size_pt * 0.8f;
+            const float descent = f ? f->descenderPt() : b.size_pt * 0.2f;
+            if (b.page_break_before && cursor_y > cy + 0.01f) {
+                ++page_index;
+                cursor_y = cy;
+            }
+            // 空段落一样要插括号占位：回车正好把字段断在两段之间、或字段所在段被删空时，
+            //   这一段里就只剩字段边界了。走的是与有内容段落同一个 withBracketSlots ——
+            //   顺序规则（][ / [] / [[ ]]）只有一份，不会两边不一致。
+            BlockShaping empty_bs;
+            empty_bs.primary = f;
+            empty_bs.ascent_pt = ascent;
+            empty_bs.descent_pt = descent;
+            empty_bs.st.vertical = b.wm.isVertical();
+            empty_bs.st.sideways = b.wm.isSideways();
+            BlockShaping slot_bs;
+            const BlockShaping* slotted =
+                withBracketSlots(controls, bracketed, para_index, /*n_cp=*/0, &empty_bs, &slot_bs);
+
+            LineBox lb;
+            lb.paragraph = static_cast<int>(para_index);
+            lb.line = line_total;
+            lb.page = page_index;
+            lb.vertical = b.wm.isVertical();
+            lb.sideways = b.wm.isSideways();
+            lb.size_pt = b.size_pt;
+            lb.bracket_font = f;
+            lb.first_cp = 0;
+            lb.last_cp = 0;
+            {
+                // 行盒的簇 = 那些占位簇（每个的宽度都是槽宽）。空段落没有真实字形，
+                //   所以行内推进只能由占位簇给出 —— 光标落在哪、括号多宽都从这一份来。
+                float ax = 0.0f;
+                for (size_t i = 0; i < slotted->clusters.size(); ++i) {
+                    lb.clusters.push_back(LineCluster{
+                        slotted->clusters[i].cp, ax, slotted->clusters[i].placeholder,
+                        slotted->clusters[i].bracket_side, slotted->clusters[i].read_only});
+                    ax += slotted->cluster_adv_pt[i];
+                }
+                lb.inline_end_pt = ax;
+            }
+            if (!lb.vertical) {
+                if (cursor_y + line_h > cy + ch) {
+                    ++page_index;
+                    cursor_y = cy;
+                    lb.page = page_index;
+                }
+                lb.block_lo_pt = cursor_y;
+                lb.block_hi_pt = cursor_y + (ascent + descent);
+                lb.inline_origin_pt = cx;
+                lb.bracket_axis_pt = cursor_y + ascent;
+                cursor_y += line_h + b.space_after_pt;
+            } else {
+                const float col_w = line_h;
+                if (cursor_y + col_w * 2.0f > cy + ch) {
+                    ++page_index;
+                    cursor_y = cy;
+                    lb.page = page_index;
+                }
+                const float center =
+                    b.wm.isBlockReversed() ? cx + cw - 0.5f * col_w : cx + 0.5f * col_w;
+                lb.block_lo_pt = center - col_w * 0.5f;
+                lb.block_hi_pt = center + col_w * 0.5f;
+                lb.inline_origin_pt = cursor_y;
+                lb.bracket_axis_pt = center;
+                // 竖排块吃掉本页剩余高度（与有内容的竖排段一致）
+                cursor_y = cy + ch + b.space_after_pt;
+            }
+            res.lines.push_back(std::move(lb));
+            ++line_total;
             pi.line_end = static_cast<int>(res.lines.size());
             pi.glyph_end = static_cast<int>(res.glyphs.size());
             continue;
         }
+        // 取不到字体（整形为空）：只翻页、不占空间 —— 与下面 !shaped 那条分支一致。
         if (b.page_break_before && cursor_y > cy + 0.01f) {
             ++page_index;
             cursor_y = cy;
@@ -405,109 +587,13 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
 
         const uint32_t n_cp = static_cast<uint32_t>(b.cp_text.size());
 
-        // 要显示括号的控件的占位（"括号进文档流"的全部实现）
-        //
-        // 把列表里那些控件的两个边界当成额外的簇插进序列：它们不产生字形
-        // （g0 == g1）、只占一个括号的 advance。于是下面的一切自动把括号算进去：
-        //   takeLine 的断行容量（括号把字挤到下一行）
-        //   行盒 inline_end_pt（行变长了）
-        //   每个 LineCluster 的 inline_pt（后面的字整体右移）
-        //   光标位置 / 命中测试（都用上面的 cluster 位置）
-        //
-        // 显示范围由引擎给出（EngineConfig::form_brackets），排版层不认识「聚焦」：
-        // 谁显示就占谁的位。默认全部控件常显，故占位集合与光标无关，光标移动不引起重排。
-        // para_cluster_starts 在此之前已生成，按约定不含占位簇。
-        if (controls && bracketed && !bracketed->empty()) {
-            // 槽宽 = 括号字形 advance + 间隙。间隙必须计入排版（见
-            // kControlBracketSlotGapPt）：否则 字] 会挤在一起。
-            const float bw = bracketAdvancePt(shaped->primary);
-            const float slot = bw > 0.0f ? bw + kControlBracketSlotGapPt : 0.0f;
-            if (slot > 0.0f) {
-                // 同一处边界（簇 i 之前）可能同时挂着多个槽，来自不同字段：
-                // 某字段在此结束（闭括号）、某字段在此开始（开括号）、空字段两者皆有。
-                // 顺序不能一律「开在前」：相邻字段 A|B 共享边界时应为 ][（A 的内容在左、
-                // B 的在右），而空字段的一对应为 []。故按槽的归属定优先级：
-                //   0 = 内容结束处的闭括号；1 = 开括号；2 = 空字段自身的闭括号。
-                // 结果：相邻 ][、空字段 []、同区间嵌套 [[ ]] 均正确。
-                struct Slot {
-                    BracketSide side;
-                    bool ro;  // 只读字段的括号画灰色（颜色只有插槽这一层知道）
-                    int prio;
-                };
-                std::vector<std::vector<Slot>> at(shaped->clusters.size() + 1);
-                // 段内偏移 → 插入点（第一个 cp >= offset 的簇；没有就插在末尾）。
-                auto slotIndex = [&](size_t offset) {
-                    for (size_t i = 0; i < shaped->clusters.size(); ++i) {
-                        if (shaped->clusters[i].cp >= offset) return i;
-                    }
-                    return shaped->clusters.size();
-                };
-                for (int ci : *bracketed) {
-                    if (ci < 0 || ci >= controls->size()) continue;
-                    const Control& fc = controls->at(ci);
-                    // 空字段：开、闭落在同一处，且要画成 []（不是 ][）。
-                    const bool empty_field = (fc.range.start == fc.range.end);
-                    if (fc.range.end.para == static_cast<int>(para_index)) {
-                        at[slotIndex(fc.range.end.offset)].push_back(
-                            Slot{BracketSide::Close, fc.read_only, empty_field ? 2 : 0});
-                    }
-                    if (fc.range.start.para == static_cast<int>(para_index)) {
-                        at[slotIndex(fc.range.start.offset)].push_back(
-                            Slot{BracketSide::Open, fc.read_only, 1});
-                    }
-                }
-                bool any = false;
-                for (const std::vector<Slot>& v : at) {
-                    if (!v.empty()) {
-                        any = true;
-                        break;
-                    }
-                }
-                if (any) {
-                    // 这一段要插占位 → 簇序列会被改 → 只有这一条分支才需要一份可改的
-                    // 副本（shaped 可能正指着只读的缓存条目）。
-                    if (shaped != &scratch) scratch = *shaped;
-                    std::vector<BlockShaping::Cluster> cl2;
-                    std::vector<float> adv2;
-                    std::vector<bool> brk2;
-                    cl2.reserve(scratch.clusters.size() + 4);
-                    adv2.reserve(scratch.clusters.size() + 4);
-                    brk2.reserve(scratch.clusters.size() + 4);
-                    // 在簇 i 前面插一个占位槽（side = 开/闭，ro = 只读）。
-                    auto emitSlot = [&](size_t i, BracketSide side, bool ro) {
-                        BlockShaping::Cluster pc;
-                        // 占位簇的 cp = 它后面那个真实簇的 cp（末尾用段长哨兵）。
-                        // 这让"光标该落在槽的哪一侧"归 inlineOffsetFor 判定，
-                        // 判据是 bracket_side —— 光靠 cp 是分不开的。
-                        pc.cp = (i < scratch.clusters.size()) ? scratch.clusters[i].cp : n_cp;
-                        pc.g0 = pc.g1 = 0;
-                        pc.placeholder = true;
-                        pc.bracket_side = side;
-                        pc.read_only = ro;
-                        cl2.push_back(pc);
-                        adv2.push_back(slot);
-                        brk2.push_back(false);  // 括号内部不是断点
-                    };
-                    for (size_t i = 0; i <= scratch.clusters.size(); ++i) {
-                        // 按 prio 排序（见上）。stable_sort 保证同优先级内保持控件列表
-                        // 顺序，结果确定可复现。
-                        std::stable_sort(
-                            at[i].begin(), at[i].end(),
-                            [](const Slot& a, const Slot& b) { return a.prio < b.prio; });
-                        for (const Slot& s : at[i]) emitSlot(i, s.side, s.ro);
-                        if (i < scratch.clusters.size()) {
-                            cl2.push_back(scratch.clusters[i]);
-                            adv2.push_back(scratch.cluster_adv_pt[i]);
-                            brk2.push_back(scratch.break_after[i]);
-                        }
-                    }
-                    scratch.clusters.swap(cl2);
-                    scratch.cluster_adv_pt.swap(adv2);
-                    scratch.break_after.swap(brk2);
-                    shaped = &scratch;
-                }
-            }
-        }
+        // 括号占位：把"要显示括号的控件"的边界插成占位簇（实现见 withBracketSlots）。
+        //   占位簇不产生字形、只占 advance，于是下面的断行容量、行末位置、每个簇的行内
+        //   位置、光标与命中测试全都自动把括号算进去 —— 这就是"括号进文档流"的全部内容。
+        //   显示范围由引擎给出（EngineConfig::form_brackets），排版层不认识「聚焦」：
+        //   谁显示就占谁的位。默认全部控件常显，故占位集合与光标无关，光标移动不引起重排。
+        //   para_cluster_starts 在此之前已生成，按约定不含占位簇。
+        shaped = withBracketSlots(controls, bracketed, para_index, n_cp, shaped, &scratch);
 
         // 从这里往下全是只读：断行、放置字形都只读整形结果。
         const BlockShaping& bs = *shaped;

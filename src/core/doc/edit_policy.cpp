@@ -85,6 +85,17 @@ bool EditPolicy::canErase(const ControlSet& ctrls, EditMode mode, const TextPos&
     return isEditable(ctrls.at(ia));
 }
 
+bool EditPolicy::canSplit(const ControlSet& ctrls, EditMode mode, const TextPos& pos) {
+    // 分段 = 在断点处插入一个段落分隔符。所以判据与"在这里插字"完全相同 ——
+    // 刻意不另立一套：两者都是"这个位置能不能被写入"，分开写迟早会不一致。
+    return canInsert(ctrls, mode, pos);
+}
+
+bool EditPolicy::canMerge(const ControlSet& ctrls, EditMode mode, const TextPos& join) {
+    // 合并 = 删掉 join 处的段落分隔符（后一段的文字向前搬）。
+    return canInsert(ctrls, mode, join);
+}
+
 bool EditPolicy::canPlaceCaret(const ControlSet& ctrls, EditMode mode, const TextPos& pos) {
     // 只有表单模式才约束光标位置。
     //   文档模式随便停；只读模式光标也照样能移动 —— "只读"约束的是编辑，

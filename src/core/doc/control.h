@@ -143,4 +143,27 @@ private:
 void adjustControlsOnInsert(ControlSet& ctrls, int para, size_t at, size_t n);
 void adjustControlsOnErase(ControlSet& ctrls, int para, size_t a, size_t b);
 
+/**
+ * 分段：在 pos 处把一段断成两段（原段保持段号，其后半段成为 pos.para + 1 段）。
+ *
+ * 端点规则唯一依据是"内容跟着谁走"：端点 >= pos 的内容被搬进了新段，于是
+ * 段号 +1、偏移 -= pos.offset；端点 < pos 的留在原段不动；段号大于 pos.para
+ * 的端点整体后移一段。两端点同时按这一条走，所以不可能出现 start > end 的
+ * 不合法区间（"恰好落在断点上的空字段"会整对搬到新段段首 —— 与"回车之后
+ * 光标落在新段段首"同一口径）。
+ */
+void adjustControlsOnSplitPara(ControlSet& ctrls, const TextPos& pos);
+
+/**
+ * 合并：把 para + 1 段并入 para 段（para 段在合并前的长度为 prev_len），
+ * 调用方随后会删掉 para + 1 段。
+ *
+ * 同理：para + 1 段的端点重基到 para 段（段号 -1、偏移 += prev_len）；
+ * 更靠后段的端点段号 -1；para 段内的端点不动 —— 它前面的内容没变，
+ * 追加进来的内容在它之后。
+ * 端点恰好等于 (para, prev_len) 的控件不会包住追加进来的内容，这是对的：
+ * 它标注的那串文字在合并前后是同一串。
+ */
+void adjustControlsOnMergePara(ControlSet& ctrls, int para, size_t prev_len);
+
 }  // namespace ced
