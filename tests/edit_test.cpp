@@ -10,6 +10,7 @@
  * 可证伪的基准，前提是基准本身是可以被证伪的。
  */
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -1814,18 +1815,93 @@ int main() {
                     e.stats().layout_ms);
         expectTrue(total_lines > kParas, "200 段排出多于 200 行（每段不止一行）");
 
+        // 页指纹的增量重算靠二分定位"受影响页的字形区间"，依据是
+        // "layout_ 的字形数组按页单调"（排版逐段追加，页号只增不减）。
+        // 这条不变式一旦被打破（有人改了追加顺序、平移时把页码写反），
+        // 二分就会静默地圈错区间 —— 所以在这里把它钉住，而不是只在注释里提一句。
+        auto expectPagesMonotonic = [&](const char* when) {
+            const std::vector<PlacedGlyph>& gl = e.layout().glyphs;
+            int bad = 0;
+            for (size_t i = 1; i < gl.size(); ++i) {
+                if (gl[i].page < gl[i - 1].page) ++bad;
+            }
+            expectTrue(bad == 0, std::string("字形数组按页单调（页指纹二分的依据）：") + when);
+        };
+        expectPagesMonotonic("整篇全量之后");
+
         // 在第 100 段中间敲一个字：前缀应当原样复用。
         e.setCaret(100, 10);
         const bool typed = e.typeTextAndRender("\xE6\xB5\x8B");  // 测
         expectTrue(typed, "第 100 段插入一个汉字");
         const EditStats es = e.editStats();
-        std::printf("     敲一个字：重排 %d 段 / %d 段，%d 行 / %d 行，%s，%.3f ms\n",
-                    es.relaid_paragraphs, es.total_paragraphs, es.relaid_lines, es.total_lines,
-                    es.layout_was_full ? "全量" : "增量", es.layout_ms);
+        std::printf(
+            "     敲一个字：重排 %d 段 / 复用 %d 段 / 共 %d 段，%d 行 / %d 行，%s，%.3f ms\n",
+            es.relaid_paragraphs, es.reused_paragraphs, es.total_paragraphs, es.relaid_lines,
+            es.total_lines, es.layout_was_full ? "全量" : "增量", es.layout_ms);
         expectTrue(!es.layout_was_full, "敲字后走的是增量排版");
-        expectTrue(es.relaid_paragraphs == kParas - 100, "只重排第 100 段起的后缀（100 段）");
+        // 行结构没变 → 只重排脏段自己，后缀整块搬回（一个字节都不动）。
+        expectTrue(es.relaid_paragraphs == 1 && es.reused_paragraphs == kParas - 1 - 100,
+                   "★ 只重排第 100 段，其余 99 段原样复用");
         expectTrue(es.relaid_lines < es.total_lines, "重排行数真的小于总行数");
         expectTrue(e.auditLayout() == 0, "增量结果与全量重排逐字段一致（diff 0）");
+        expectPagesMonotonic("后缀原样复用之后");
+
+        // 撑出一行（行结构变了）→ 后缀整体平移复用：只重排脏段，后缀的断行结果
+        // 与字形的行内位置一个字节都不重算，只把块轴位置与页码/行号平移过去。
+        e.setCaret(100, 5);
+        e.typeTextAndRender(std::string(80, 'a'));  // 80 个半角字母，足够撑出一行
+        const EditStats grew = e.editStats();
+        std::printf("     撑出一行后：重排 %d 段 / 复用 %d 段（平移=%d，%s）\n",
+                    grew.relaid_paragraphs, grew.reused_paragraphs, grew.suffix_shifted ? 1 : 0,
+                    grew.layout_was_full ? "全量" : "增量");
+        expectTrue(grew.suffix_shifted && grew.relaid_paragraphs == 1 &&
+                       grew.reused_paragraphs == kParas - 1 - 100,
+                   "★ 撑出一行 → 后缀整体平移复用（只重排 1 段，99 段不重排）");
+        // 平移是"改坐标"不是"重排"，所以判据落在坐标上：坐标允许 1e-3 pt 的舍入差
+        // （两种加法），结构性字段（页号/行号/段号/簇）必须逐位一致。
+        expectTrue(e.auditLayout() == 0, "★ 平移复用的结果与全量重排一致（几何差 < 1e-3 pt）");
+        expectPagesMonotonic("后缀平移复用之后");
+
+        // 平移复用的反面：后缀里有竖排段 → "横排行槽折线"那条规则不成立 → 必须续排。
+        // 这条同时证明常规续排路径没有被平移路径挤掉（两条路都要被走到）。
+        {
+            EditorEngine ev;
+            expectTrue(ev.init({cjkPath, mnPath, latinPath}), "引擎初始化（竖排后缀）");
+            ev.setConfig(c);
+            std::vector<BlockSpec> d2;
+            for (int i = 0; i < 12; ++i) {
+                BlockSpec b;
+                b.font_index = 0;
+                b.size_pt = 14.0f;
+                b.line_factor = 1.85f;
+                b.space_after_pt = 6.0f;
+                b.language = "zh";
+                b.setText("第 " + std::to_string(i + 1) +
+                          " 次病程记录：患者诉晨起后心悸明显，持续约十分钟，休息后缓解。");
+                d2.push_back(std::move(b));
+            }
+            BlockSpec v;
+            v.font_index = 0;
+            v.size_pt = 14.0f;
+            v.line_factor = 1.9f;
+            v.wm = WritingMode::VerticalRL();
+            v.language = "zh";
+            v.setText("患者主诉：反复心悸3天，加重1天。现病史：患者3天前无明显诱因出现心悸。");
+            d2.push_back(std::move(v));
+            ev.setBlocks(d2);
+            ev.relayout();
+            ev.repaint();
+
+            ev.setCaret(5, 5);
+            ev.typeTextAndRender(std::string(80, 'a'));
+            const EditStats sv = ev.editStats();
+            std::printf("     后缀含竖排段：重排 %d 段 / 复用 %d 段（平移=%d）\n",
+                        sv.relaid_paragraphs, sv.reused_paragraphs, sv.suffix_shifted ? 1 : 0);
+            expectTrue(
+                !sv.suffix_shifted && sv.relaid_paragraphs == 13 - 5 && sv.reused_paragraphs == 0,
+                "★ 后缀含竖排段 → 平移规则不成立，走常规续排（重排整个后缀）");
+            expectTrue(ev.auditLayout() == 0, "竖排后缀的续排结果同样与全量一致");
+        }
 
         // 随机编辑序列：每一步都要求增量 == 全量。
         uint32_t seed = 20261010u;
@@ -1892,15 +1968,179 @@ int main() {
         } else {
             expectTrue(tail_ms < full_ms, "靠后敲字的增量耗时小于全量（全量不足 1ms，比值不判）");
         }
-        // 中部编辑的脏后缀是整个后半篇，成本本就该跟着后缀走；整形缓存让未变的段全部命中，
-        // 所以它显著便宜于全量，但不会是"几乎免费"。
-        expectTrue(mid_ms < full_ms * 0.6, "中部敲字：脏后缀是半篇，成本仍显著低于全量");
+        // 中部敲字同样走快路（行结构没变）→ 成本与尾部一样接近免费。
+        // 这条同时钉住"靠位置换性能"的假象：中部与尾部都在 10% 以内才算数。
+        expectTrue(mid_ms < full_ms * 0.6, "★ 中部敲字与尾部一样便宜（不是靠离文档末尾近）");
 
-        // 边界：脏段就是第一段 → 没有前缀可复用 → 只能全量（不是缺陷）。
+        // 端到端成本：排版 + 统计同步 + 页指纹 + 上屏。
+        //
+        // layout_ms 只量排版本身，看不到另外三项 —— 而用户感觉到的是这一整条。
+        // 所以这里按真实的调用方式再量一遍（typeTextAndRender 内部就是
+        // 编辑 + 重排 + 呈现）。每次测完把文档改回原样，恢复不参与测量。
+        {
+            const std::vector<BlockSpec> pristine = e.blocks();
+            auto restore = [&]() {
+                e.setBlocks(pristine);
+                e.relayout();
+                e.repaint();
+            };
+            auto e2e = [&](int para, size_t off, const std::string& text) {
+                e.setCaret(para, static_cast<size_t>(off));
+                const auto t0 = std::chrono::steady_clock::now();
+                e.typeTextAndRender(text);
+                const auto t1 = std::chrono::steady_clock::now();
+                return std::chrono::duration<double, std::milli>(t1 - t0).count();
+            };
+            std::string wrap_text;
+            for (int i = 0; i < 40; ++i) wrap_text += "\xE6\xB5\x8B";  // 40 个汉字，必定撑出一行
+
+            std::vector<double> v_full, v_tail, v_mid, v_wrap_tail, v_wrap_mid;
+            for (int i = 0; i < 5; ++i) {
+                const auto f0 = std::chrono::steady_clock::now();
+                e.relayout();
+                e.repaint();
+                const auto f1 = std::chrono::steady_clock::now();
+                v_full.push_back(std::chrono::duration<double, std::milli>(f1 - f0).count());
+
+                v_tail.push_back(e2e(195 - i, 5, "\xE6\xB5\x8B"));
+                restore();
+                v_mid.push_back(e2e(100 - i, 5, "\xE6\xB5\x8B"));
+                restore();
+                v_wrap_tail.push_back(e2e(195 - i, 5, wrap_text));
+                restore();
+                v_wrap_mid.push_back(e2e(100 - i, 5, wrap_text));
+                restore();
+            }
+            const double e_full = median(v_full), e_tail = median(v_tail), e_mid = median(v_mid);
+            const double e_wt = median(v_wrap_tail), e_wm = median(v_wrap_mid);
+            std::printf(
+                "     端到端：全量 %.3f ms ｜ 尾部敲 1 字 %.3f ms（%.1f%%）｜ 中部敲 1 字 %.3f ms"
+                "（%.1f%%）\n",
+                e_full, e_tail, 100.0 * e_tail / e_full, e_mid, 100.0 * e_mid / e_full);
+            std::printf(
+                "             撑出一行（后缀要跟着动）：尾部 %.3f ms（%.1f%%）｜ "
+                "中部 %.3f ms（%.1f%%）\n",
+                e_wt, 100.0 * e_wt / e_full, e_wm, 100.0 * e_wm / e_full);
+            expectTrue(e_full > 0.0, "前提：端到端全量可以量");
+
+            // 页指纹的增量化：整篇重算 vs 只算脏段覆盖的那几页。
+            // 判据是相对的（耗时比值），不依赖机器速度；三个数都打印出来做对照。
+            // 各测 3 次取最小值 —— 单次计时会被调度尖峰打出一个数量级的假数字
+            // （实测有一次单测报出 4.08 ms，而同一操作随后量到 0.206 ms）。
+            auto minOf3 = [](const std::vector<double>& v) {
+                return *std::min_element(v.begin(), v.end());
+            };
+            std::vector<double> v_fp_full, v_fp_splice, v_fp_shift;
+            for (int i = 0; i < 3; ++i) {
+                restore();
+                e.relayout();
+                e.repaint();
+                v_fp_full.push_back(e.stats().page_fp_ms);
+
+                restore();
+                e.setCaret(195 - i, 5);
+                e.typeTextAndRender("\xE6\xB5\x8B");
+                v_fp_splice.push_back(e.stats().page_fp_ms);
+
+                restore();
+                e.setCaret(100 - i, 5);
+                e.typeTextAndRender(wrap_text);
+                v_fp_shift.push_back(e.stats().page_fp_ms);
+            }
+            const double fp_full = minOf3(v_fp_full);
+            const double fp_splice = minOf3(v_fp_splice);
+            const double fp_shift = minOf3(v_fp_shift);
+            std::printf(
+                "     页指纹（3 次取最小）：整篇 %.3f ms ｜ 敲 1 字 %.3f ms ｜ 平移复用 %.3f ms\n",
+                fp_full, fp_splice, fp_shift);
+            expectTrue(fp_full > 0.05, "前提：整篇页指纹的耗时可以量（> 0.05ms）");
+            // 敲字（后缀原样复用）：重算范围就是脏段占的那一两页 → 应当小一个量级。
+            expectTrue(fp_splice * 4.0 < fp_full,
+                       "★ 页指纹增量化：敲字只重算脏段覆盖的页（< 整篇的 1/4）");
+            // 平移复用：后缀整体挪了位置，从脏段所在页到末页的内容都真的变了 ——
+            // 那几页本来就必须重画，指纹也得跟着重算。省下的只是脏段之前的页。
+            // 所以这里只判"仍少于整篇"，不给比值（那种阈值会随编辑位置变成假判据）。
+            expectTrue(fp_shift < fp_full,
+                       "★ 平移复用：只重算脏段及其后的页（少于整篇，但省不了那么多）");
+
+            // 分段耗时：一次编辑拆成 编辑 / 重排（排版 + 页指纹）/ 呈现 三段。
+            // 这条打印存在的理由：端到端时间里"排版"只占几个百分点，不拆开就看不出钱花在哪
+            // （实测呈现占 80% 以上：重画一页的字形是大头，脏页多的时候更明显）。
+            for (int i = 0; i < 2; ++i) {
+                const char* tag =
+                    (i == 0) ? "尾部敲 1 字（后缀原样复用）" : "中部撑出一行（后缀平移复用）";
+                e.setCaret(i == 0 ? 195 : 100, 5);
+                const auto a0 = std::chrono::steady_clock::now();
+                e.typeTextUtf8(i == 0 ? "\xE6\xB5\x8B" : wrap_text);
+                const auto a1 = std::chrono::steady_clock::now();
+                e.relayout();
+                const auto a2 = std::chrono::steady_clock::now();
+                e.repaint();
+                const auto a3 = std::chrono::steady_clock::now();
+                const EditStats d = e.editStats();
+                const EngineStats g = e.stats();
+                std::printf(
+                    "     分段：%s ｜ 编辑 %.3f ｜ 重排 %.3f（排版 %.3f + 页指纹 %.3f）｜ 呈现 "
+                    "%.3f（贴图 %.3f 填 %.3f 字形 %.3f）｜ 脏页 %d 重画页 %d\n",
+                    tag, std::chrono::duration<double, std::milli>(a1 - a0).count(),
+                    std::chrono::duration<double, std::milli>(a2 - a1).count(), d.layout_ms,
+                    g.page_fp_ms, std::chrono::duration<double, std::milli>(a3 - a2).count(),
+                    g.paint_present_ms, g.paint_fill_ms, g.paint_glyph_ms, d.dirty_page_count,
+                    d.repainted_pages);
+                restore();
+            }
+
+            // 平移复用省掉了什么：同一个编辑，后缀里塞一个竖排段就把平移路径关掉，
+            // 于是后缀必须真重排。两边各测 3 次取最小值（最小值对负载尖峰最稳），
+            // 报出的两个数就是"后缀重排"与"后缀平移"的对照。
+            std::vector<BlockSpec> with_vertical = pristine;
+            {
+                BlockSpec v;
+                v.font_index = 0;
+                v.size_pt = 14.0f;
+                v.line_factor = 1.9f;
+                v.wm = WritingMode::VerticalRL();
+                v.language = "zh";
+                v.setText("附：本页为竖排附注，与上面的横排正文无关。");
+                with_vertical.push_back(std::move(v));
+            }
+            std::vector<double> v_shift, v_resume;
+            for (int i = 0; i < 3; ++i) {
+                e.setCaret(100, 5);
+                e.typeTextUtf8(wrap_text);
+                const auto s0 = std::chrono::steady_clock::now();
+                e.relayout();
+                const auto s1 = std::chrono::steady_clock::now();
+                v_shift.push_back(std::chrono::duration<double, std::milli>(s1 - s0).count());
+                restore();
+
+                e.setBlocks(with_vertical);
+                e.relayout();
+                e.repaint();
+                e.setCaret(100, 5);
+                e.typeTextUtf8(wrap_text);
+                const auto r0 = std::chrono::steady_clock::now();
+                e.relayout();
+                const auto r1 = std::chrono::steady_clock::now();
+                v_resume.push_back(std::chrono::duration<double, std::milli>(r1 - r0).count());
+                restore();
+            }
+            const double shift_ms = minOf3(v_shift), resume_ms = minOf3(v_resume);
+            std::printf("     后缀 100 段：平移复用 %.3f ms ｜ 续排重排 %.3f ms（%.0f%%）\n",
+                        shift_ms, resume_ms, 100.0 * shift_ms / std::max(resume_ms, 1e-9));
+            expectTrue(shift_ms * 1.5 < resume_ms,
+                       "★ 后缀平移复用比续排重排快 1.5 倍以上（断行与字形放置全省掉）");
+        }
+
+        // 边界：脏段就是第 0 段（没有前缀），但后缀仍然可以整块搬回 ——
+        // "没有前缀"不等于"必须重排全篇"。
         e.setCaret(0, 0);
         e.typeTextAndRender("a");
-        expectTrue(e.editStats().layout_was_full, "在第一段打字只能全量（没有前缀可复用）");
-        expectTrue(e.auditLayout() == 0, "全量路径同样与对照一致");
+        const EditStats first = e.editStats();
+        expectTrue(!first.layout_was_full && first.relaid_paragraphs == 1,
+                   "★ 在第 0 段打字也走快路：重排 1 段、复用其余全部");
+        expectTrue(first.reused_paragraphs == kParas - 1, "复用 kParas - 1 段");
+        expectTrue(e.auditLayout() == 0, "第 0 段的快路同样与对照一致");
 
         // 页度量：整篇标脏 → 全量，而且结果仍与对照一致。
         PageMetrics p2 = e.config().page;
@@ -1924,11 +2164,146 @@ int main() {
             // 不呈现 —— 要读这一轮的账就得先呈现一次。
             e.repaint();
             const EditStats cs = e.editStats();
-            std::printf("     挂控件：重排 %d 段 / %d 段（%s）\n", cs.relaid_paragraphs,
-                        cs.total_paragraphs, cs.layout_was_full ? "全量" : "增量");
-            expectTrue(!cs.layout_was_full && cs.relaid_paragraphs == kParas - 120,
-                       "★ 挂控件只重排第 120 段起的后缀，不是整篇");
+            std::printf("     挂控件：重排 %d 段 / 复用 %d 段 / 共 %d 段（%s）\n",
+                        cs.relaid_paragraphs, cs.reused_paragraphs, cs.total_paragraphs,
+                        cs.layout_was_full ? "全量" : "增量");
+            expectTrue(!cs.layout_was_full && cs.relaid_paragraphs == 1 &&
+                           cs.reused_paragraphs == kParas - 1 - 120,
+                       "★ 挂控件只重排第 120 段，其余 79 段原样复用");
             expectTrue(e.auditLayout() == 0, "挂控件之后的排版同样与对照一致");
+        }
+    }
+
+    std::printf("\n[16] 增量上屏 == 从零上屏：整帧逐字节比（含脏页集合对不对）\n");
+    {
+        // 为什么需要这一节：auditFrame() 比的是"帧 vs 从底图整块重贴"，抓的是上屏漏贴。
+        //   但如果底图自己就漏画了（页指纹判错、某个变了的页没被重画），
+        //   帧与底图会一起错，auditFrame 照样是 0 —— 那一类只有拿
+        //   "从零重排 + 从零重画"的第二个引擎当参照物才照得出来。
+        //   判据形状与 auditLayout 一致：增量的正确性由"与从零重来逐字节相同"定义。
+        EditorEngine a;
+        expectTrue(a.init({cjkPath, mnPath, latinPath}), "引擎初始化（逐帧比对）");
+        EngineConfig cfg16;
+        cfg16.zoom = 1.0f;
+        a.setConfig(cfg16);
+
+        std::vector<BlockSpec> doc;
+        for (int i = 0; i < 60; ++i) {
+            BlockSpec b;
+            b.font_index = 0;
+            b.size_pt = 14.0f;
+            b.line_factor = 1.85f;
+            b.space_after_pt = 6.0f;
+            b.language = "zh";
+            b.setText("第 " + std::to_string(i + 1) +
+                      " 次病程记录：患者诉晨起后心悸明显，持续约十分钟，休息后缓解，"
+                      "未见黑矇与晕厥。");
+            doc.push_back(std::move(b));
+        }
+        a.setBlocks(doc);
+        a.relayout();
+        a.repaint();
+
+        // 与 a 的当前状态等价的"从零重来"：同一份文档 + 同一配置 + 同一控件 + 同一光标。
+        auto freshFrame = [&](const std::vector<BlockSpec>& blocks, const TextPos& caret,
+                              const std::vector<Control>& ctrl, EditMode mode) {
+            EditorEngine r;
+            r.init({cjkPath, mnPath, latinPath});
+            r.setConfig(cfg16);
+            r.setBlocks(blocks);
+            // setBlocks 只换数据不排版（"谁改文档谁负责 relayout"）——
+            // 这里必须自己排一次，否则帧高会按 0 页算，比出来的东西没意义。
+            r.relayout();
+            if (!ctrl.empty()) r.setControls(ctrl);
+            r.setEditMode(mode);
+            r.relayout();
+            r.setCaret(caret.para, caret.offset);
+            r.showCaret(true);
+            r.repaint();
+            return std::vector<uint8_t>(r.frame(), r.frame() + r.frameBytes());
+        };
+        std::vector<Control> no_ctrl;
+        // 判据两档，都写在断言里（不接受"看着差不多就放行"）：
+        //   严格档：逐字节相同。没有重算坐标的路径（敲字、光标移动、表单标记）必须落在这一档。
+        //   抗锯齿档：只给"平移复用"用。平移的坐标是"旧值 + 偏移量"，比全量重排的
+        //     "从 cursor_y 重新累加"多一次舍入（实测 ≤ 6e-5 pt，见 auditLayout 的容差说明），
+        //     于是会在抗锯齿边界上翻掉几个像素、每个像素差 1 个通道值。
+        //     阈值取"差异像素 ≤ 十万分之一个像素、且通道差 ≤ 1"：
+        //     真正的错位（整页没重画、后缀挪错行）是几十万像素、通道差上百，逃不掉。
+        auto compare = [&](const char* label, const std::vector<Control>& ctrl, EditMode mode,
+                           bool allow_aa_noise) {
+            a.showCaret(true);
+            a.repaint();
+            const std::vector<uint8_t> fa(a.frame(), a.frame() + a.frameBytes());
+            const std::vector<uint8_t> fb = freshFrame(a.blocks(), a.caret(), ctrl, mode);
+            expectTrue(fa.size() == fb.size(), std::string("帧尺寸一致：") + label);
+            if (fa.size() != fb.size()) return;
+
+            const int fw = a.frameWidth();
+            const long long total_px = static_cast<long long>(fa.size() / 4);
+            size_t diff = 0;
+            long long max_ch = 0;
+            std::vector<int> samples;
+            for (size_t k = 0; k + 3 < fa.size(); k += 4) {
+                if (fa[k] == fb[k] && fa[k + 1] == fb[k + 1] && fa[k + 2] == fb[k + 2]) continue;
+                ++diff;
+                for (int ch = 0; ch < 3; ++ch) {
+                    const long long d = std::llabs(static_cast<long long>(fa[k + ch]) -
+                                                   static_cast<long long>(fb[k + ch]));
+                    if (d > max_ch) max_ch = d;
+                }
+                if (samples.size() < 6) samples.push_back(static_cast<int>(k / 4));
+            }
+            const bool ok = allow_aa_noise
+                                ? (diff * 100000 <= static_cast<size_t>(total_px) && max_ch <= 1)
+                                : (diff == 0);
+            std::printf("     %s：帧差 %zu 像素（最大通道差 %lld，阈值 %s）\n", label, diff, max_ch,
+                        allow_aa_noise ? "≤十万分之一像素且通道差≤1" : "0");
+            expectTrue(ok,
+                       std::string("★ ") +
+                           (allow_aa_noise ? "增量上屏 ≈ 从零上屏（平移的坐标末位差只翻抗锯齿）："
+                                           : "增量上屏 == 从零上屏（逐字节相同）：") +
+                           label);
+            if (!ok) {
+                for (int px : samples) {
+                    const size_t k = static_cast<size_t>(px) * 4;
+                    std::printf("       像素 (%d,%d)：增量=(%d,%d,%d) 从零=(%d,%d,%d)\n", px % fw,
+                                px / fw, fa[k], fa[k + 1], fa[k + 2], fb[k], fb[k + 1], fb[k + 2]);
+                }
+            }
+        };
+
+        // 一：敲一个字（后缀原样复用）
+        a.setCaret(30, 5);
+        a.typeTextAndRender("\xE6\xB5\x8B");
+        compare("敲 1 字", no_ctrl, EditMode::Document, /*allow_aa_noise=*/false);
+
+        // 二：撑出一行（后缀平移复用）
+        a.setCaret(30, 5);
+        a.typeTextAndRender(std::string(80, 'a'));
+        compare("撑出一行", no_ctrl, EditMode::Document, /*allow_aa_noise=*/true);
+
+        // 三：退格（内容变少，页可能变少）
+        a.backspaceAndRender();
+        compare("退格", no_ctrl, EditMode::Document, /*allow_aa_noise=*/true);
+
+        // 四：只移动光标（不重排：底图一个字都不该动，但上屏矩形必须对）
+        a.moveCaretAndRender(-1);
+        compare("光标左移", no_ctrl, EditMode::Document, /*allow_aa_noise=*/true);
+
+        // 五：表单模式 + 控件（括号画在帧上、底图里没有 —— 上屏矩形要把它算进去）
+        {
+            const size_t len = a.blocks()[20].cp_text.size();
+            Control k1;
+            k1.range.start = TextPos{20, 0};
+            k1.range.end = TextPos{20, std::min<size_t>(8, len)};
+            k1.id = "k1";
+            std::vector<Control> ctrl{k1};
+            a.setCaret(20, 4);
+            a.setControls(ctrl);
+            a.setEditMode(EditMode::Form);
+            a.repaint();
+            compare("表单括号", ctrl, EditMode::Form, /*allow_aa_noise=*/true);
         }
     }
 

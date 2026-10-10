@@ -1271,11 +1271,18 @@ async function main() {
     await c.eval(key('测'));
     const st = await c.eval('return window.__ced.editStats;');
     chk.check('★ 敲字后是增量排版（不是全量）', st.layoutWasFull === false,
-              `重排 ${st.relaidParagraphs} 段 / ${st.totalParagraphs} 段`);
-    chk.check('★ 只重排第 150 段起的后缀', st.relaidParagraphs === 50,
-              `${st.relaidParagraphs} 段`);
+              `重排 ${st.relaidParagraphs} 段 / 复用 ${st.reusedParagraphs} 段 / 共 ${st.totalParagraphs} 段`);
+    // 行结构没变 → 快路：只重排脏段自己，后缀整块搬回（一个字节都不动）。
+    chk.check('★ 只重排第 150 段，其余 49 段原样复用',
+              st.relaidParagraphs === 1 && st.reusedParagraphs === 49,
+              `重排 ${st.relaidParagraphs} 段 / 复用 ${st.reusedParagraphs} 段`);
     chk.check('★ 重排行数真小于总行数', st.relaidLines < st.totalLines,
               `${st.relaidLines} / ${st.totalLines} 行`);
+    // 分段账：前缀 [0,150) 一个字都没动、只重排第 150 段、其余 49 段整块搬回。
+    // 这条比"重排段数对不对"更强：它把分界点也钉住了（前缀/脏段/复用各占哪一段）。
+    chk.check('★ 分段账：前缀 150 段未动 + 脏段 1 段重排 + 后缀 49 段复用 = 200 段',
+              st.relaidParagraphs + st.reusedParagraphs === st.totalParagraphs - 150,
+              `1 + ${st.reusedParagraphs} = ${st.totalParagraphs} - 150`);
     chk.check('★ 增量耗时小于全量耗时（同一次测量里的两个数）',
               st.layoutMs < report.longDoc.fullMs,
               `增量 ${st.layoutMs.toFixed(3)} ms vs 首次全量 ${report.longDoc.fullMs.toFixed(3)} ms`);
@@ -1313,6 +1320,43 @@ async function main() {
 
     // 页数跟着长：200 段不可能只有一页 —— 否则上面那些"重排行数"没有意义
     chk.check('长文档确实排成了多页', st.totalPages > 1, `${st.totalPages} 页`);
+
+    // 后缀平移复用：撑出一行之后，后缀的断行结果照样复用（只挪坐标）。
+    //
+    // 40 个汉字足以撑出至少一行。走 __ced.type（直连引擎）而不是键盘逐字派发：
+    //   键盘路径上面已经验过，这里要的是"一次插入 40 个字"把行结构撑变。
+    const widened = await c.eval(
+      `return window.__ced.type(${JSON.stringify('测'.repeat(40))});`);
+    chk.check('★ 撑出一行 → 后缀整体平移复用（重排 1 段）',
+              !!widened && widened.suffixShifted === true && widened.relaidParagraphs === 1,
+              widened ? `重排 ${widened.relaidParagraphs} 段 / 复用 ${widened.reusedParagraphs} 段 / ` +
+                `平移=${widened.suffixShifted} / 脏页 ${widened.dirtyPageCount}` : 'null');
+    chk.check('★ 平移之后后缀段数照旧全部复用',
+              !!widened && widened.reusedParagraphs + widened.relaidParagraphs ===
+                widened.totalParagraphs - 150,
+              widened ? `${widened.relaidParagraphs} + ${widened.reusedParagraphs} = ` +
+                `${widened.totalParagraphs} - 150` : 'null');
+    const auShift = await c.eval('return window.__ced.auditLayout();');
+    chk.check('★★ 平移复用的排版与全量逐字段一致（auditLayout diff 0）',
+              !!auShift && auShift.diff === 0,
+              auShift ? `diff ${auShift.diff}（字形 ${auShift.glyphDiff}、行 ${auShift.lineDiff}、` +
+                `段 ${auShift.paraDiff}）` : 'null');
+    const scShift = await c.eval('return window.__ced.selfCheck();');
+    chk.check('平移之后屏幕 == 引擎帧', scShift.screenVsEngineDiffPx === 0,
+              `差 ${scShift.screenVsEngineDiffPx} px`);
+
+    // 页指纹：只重算脏页，不是整篇重扫字形。
+    //
+    // 整篇的页指纹耗时在首次全量里（base.pageFpMs），增量编辑之后应当小一个量级。
+    // 两个数都来自同一次会话的同一台机器，所以比值可比。
+    const fpFull = base.pageFpMs;
+    const fpIncr = st.pageFpMs;
+    report.longDoc.pageFpFullMs = fpFull;
+    report.longDoc.pageFpIncrMs = fpIncr;
+    chk.check('★ 页指纹增量化：增量编辑之后只重算脏页（< 整篇的 1/4）',
+              fpFull > 0.05 ? fpIncr * 4 < fpFull : fpIncr <= fpFull,
+              `整篇 ${fpFull.toFixed(3)} ms ｜ 增量 ${fpIncr.toFixed(3)} ms` +
+                (fpFull <= 0.05 ? '（整篇太小，只判"不更慢"）' : ''));
   }
 
   chk.section('[7] 无页面异常 / 无 console 错误');

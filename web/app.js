@@ -510,7 +510,11 @@ function renderEdit(st) {
   const incr = laid && !st.layoutWasFull;
   kv('edit', [
     ['本轮是否重排', laid ? '是' : '否（只重绘）', laid ? undefined : 'ok'],
-    ['重排段 / 总段', `${st.relaidParagraphs} / ${st.totalParagraphs}`, incr ? 'ok' : undefined],
+    ['重排段 / 复用段 / 总段',
+      `${st.relaidParagraphs} / ${st.reusedParagraphs} / ${st.totalParagraphs}`, incr ? 'ok' : undefined],
+    // 复用有两种：原样搬回（后缀一个字节都没动）与整体平移（位置变了、断行没重算）。
+    // 分开报是因为它们对"脏页数"的含义完全不同 —— 平移之后后缀的每一页都可能要重画。
+    ['后缀复用方式', !laid ? '—' : (st.suffixShifted ? '整体平移（断行结果复用）' : '原样搬回')],
     ['重排行 / 总行', `${st.relaidLines} / ${st.totalLines}`, incr ? 'ok' : undefined],
     ['布局粒度', !laid ? '— 本轮无布局' : (st.layoutWasFull ? '全量' : '增量'),
       incr ? 'ok' : undefined],
@@ -520,6 +524,7 @@ function renderEdit(st) {
     ['重画像素', `${fmt(st.repaintedPixels, 0)}`, 'hi'],
     ['占全帧', `${fmt(pct, 3)} %`, 'hi'],
     ['— layout', `${fmt(st.layoutMs)} ms`],
+    ['— pageFp', `${fmt(st.pageFpMs)} ms`],
     ['— paint', `${fmt(st.paintMs)} ms`],
     ['— 合计', `${fmt(st.totalMs)} ms`],
     ['光标', `段 ${st.caretPara} · 偏移 ${st.caretOffset} 码点`],

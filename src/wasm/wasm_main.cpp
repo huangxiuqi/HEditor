@@ -240,6 +240,7 @@ std::string statsJson() {
     o << "\"missingGlyphCount\":" << s.missing_glyph_count << ",";
     o << "\"shapeMs\":" << s.shape_ms << ",";
     o << "\"layoutMs\":" << s.layout_ms << ",";
+    o << "\"pageFpMs\":" << s.page_fp_ms << ",";
     o << "\"paintMs\":" << s.paint_ms << ",";
     o << "\"totalMs\":" << s.total_ms << ",";
     o << "\"frameWidth\":" << s.frame_width << ",";
@@ -526,6 +527,8 @@ std::string editStatsJson() {
     o << "\"relaidLines\":" << e.relaid_lines << ",";
     o << "\"totalLines\":" << e.total_lines << ",";
     o << "\"relaidParagraphs\":" << e.relaid_paragraphs << ",";
+    o << "\"reusedParagraphs\":" << e.reused_paragraphs << ",";
+    o << "\"suffixShifted\":" << (e.suffix_shifted ? "true" : "false") << ",";
     o << "\"totalParagraphs\":" << e.total_paragraphs << ",";
     o << "\"layoutWasFull\":" << (e.layout_was_full ? "true" : "false") << ",";
     o << "\"dirtyPageCount\":" << e.dirty_page_count << ",";
@@ -540,6 +543,7 @@ std::string editStatsJson() {
     o << "\"frameH\":" << e.frame_h << ",";
     o << "\"framePixels\":" << (static_cast<long long>(e.frame_w) * e.frame_h) << ",";
     o << "\"layoutMs\":" << e.layout_ms << ",";
+    o << "\"pageFpMs\":" << g_engine.stats().page_fp_ms << ",";
     o << "\"paintMs\":" << e.paint_ms << ",";
     o << "\"totalMs\":" << e.total_ms << ",";
     o << "\"caretPara\":" << e.caret_para << ",";

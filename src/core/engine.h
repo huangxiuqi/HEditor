@@ -90,6 +90,15 @@ struct EngineStats {
     double layout_ms = 0.0;
     double paint_ms = 0.0;
     /**
+     * 页指纹记账的耗时（每次重排后都要算一遍）。
+     *
+     * 单独拎出来是因为它不随排版长短变化：一次 0.06 ms 的小编辑，页指纹可能还要 0.2 ms，
+     * 而它是 O(字形总数) 的。混进 layout_ms 就会得出"增量排版没省多少"的错误结论，
+     * 只看 layout_ms 又会漏掉一半成本。增量化之后（只重算受影响页）这个数应当随脏页数走，
+     * 而不是随文档大小走。
+     */
+    double page_fp_ms = 0.0;
+    /**
      * 绘制的三段分解。存在的理由：它是"要不要引入 GPU / 第三方光栅器"的判据。
      * 实测（4 页、1022 字形、帧面积从 0.51 Mpx 到 8.12 Mpx 共 16 倍）：
      * paint 只从 110 ms 涨到 173 ms（1.57 倍）—— 成本不随面积走。
@@ -136,7 +145,14 @@ struct EditStats {
      */
     bool layout_ran = false;
     int relaid_paragraphs = 0;
-    int reused_paragraphs = 0;  // 后缀原样搬回的段数（内容一个字节都没动）
+    int reused_paragraphs = 0;  // 后缀被复用的段数（没重排）
+    /**
+     * 后缀是平移复用的（不是原样搬回）：行结构变了，于是后缀整体沿块轴挪了位置、
+     * 页码与全局行号重编过，但断行结果与字形的行内位置一个字节都没重算。
+     * 与 reused_paragraphs 一起看才有意义：复用 99 段 + 平移 = "99 段没重排，
+     * 但它们的位置变了"，面板据此解释"为什么脏页比 1 多"。
+     */
+    bool suffix_shifted = false;
     int total_paragraphs = 0;
     int relaid_lines = 0;
     int total_lines = 0;
@@ -504,9 +520,13 @@ private:
      */
     void presentInternal(int first_page, int count, bool force_full);
     /**
-     * 算每页内容的廉价指纹，用来跳过没变的页
+     * 页指纹：本次 relayout 的结果 / 已画进底图的那一版。
+     *
+     * 只重算受影响页（@p dirty_lo 到 @p dirty_hi，含端点）：没有脏页信息时
+     * 传 -1 走整篇重算。增量成立的前提是"没动过的页，字形一个字节都没动" ——
+     * 它由排版那侧的前缀复用保证，而不是靠这里猜。
      */
-    void computePageFingerprints();
+    void computePageFingerprints(int dirty_lo = -1, int dirty_hi = -1);
     void syncStatsFromLayout();
 
     /**
@@ -527,7 +547,7 @@ private:
 
     /**
      * 全量记号：段数、页度量、控件集合这类"影响面不可定位"的改动用它。
-     * 与 markLayoutDirty(0) 的区别在于它**禁止**走后缀复用快路：整篇都脏时
+     * 与 markLayoutDirty(0) 的区别在于它禁止走后缀复用快路：整篇都脏时
      * 后缀该不该变是不知道的（页宽变了、段数变了），只有重排一遍才算数。
      */
     void markAllLayoutDirty() {
@@ -553,20 +573,46 @@ private:
     void truncateLayoutAt(int para);
 
     /**
-     * 快路：只重排第 from 段，把后缀（[from+1, 末段]）原样保留。
-     *
-     * 判据只有一条 —— 脏段排完之后，续排状态（页号 / cursor_y / 行号）与上一轮
-     * "后缀开始时"的那个状态逐位相同。三个标量一致，就意味着后缀里每一行的断页、
-     * 全局行号与坐标都会和上一轮一模一样：可以整块搬回去，只有脏段自己的行盒与
-     * 字形要换掉（erase + insert 两次 memmove）。
-     *
-     * 为什么值得单开一条路：后缀即使命中整形缓存，仍要把断行与字形放置重跑一遍，
-     * 成本与后缀长度成正比。而"在原行里多打一个字"这类编辑根本不改变段落的行结构 ——
-     * 那之后，后缀一个字节都不该动。
-     *
-     * @return true = 排版已完成；false = 条件不满足，调用方走常规续排。
+     * 后缀复用的三种结局。
+     * 三种都要求脏段自身的排版已重做完，差别只在后缀要不要动。
      */
-    bool trySpliceOnly(int from, const std::vector<int>& bracketed);
+    enum class SuffixReuse {
+        None,       // 复用不成立，调用方走常规续排（从脏段排到末尾）
+        Unchanged,  // 后缀一个字节都不用动（续排状态逐位相同）
+        Shifted,    // 后缀整体沿块轴平移 + 重编页码/行号（行结构变了，但只有块轴位置变）
+    };
+
+    /**
+     * 后缀复用：只重排第 from 段，然后试着不动后缀。
+     *
+     * 两级判据，从严到宽：一是同状态，后缀的断页、行号与坐标都会与上一轮逐位相同，整块搬回即可；
+     * 二是后缀是纯横排，只有块轴起点变了，于是每一行都只是"平移 + 改页码"（见 shiftSuffixBlockAxis）。
+     * 值得单开这条路，是因为后缀即使全部命中整形缓存，仍要把断行与字形放置重跑一遍，
+     * 成本与后缀长度成正比（还会给每个行盒分配一次簇向量），而"在原行里多打一个字"
+     * 根本不改变行结构。
+     *
+     * @param page_lo,page_hi 出参：脏段新旧两版覆盖的页区间，供页指纹只重算这几页，拿不到时写 -1。
+     * @return None 时后缀未被动过（调用方可以安全地走续排），其余两种排版已完成。
+     */
+    SuffixReuse trySuffixReuse(int from, const std::vector<int>& bracketed, int* page_lo,
+                               int* page_hi);
+
+    /**
+     * 后缀整体平移：把 [from+1, 末段] 的每一行沿块轴挪到新的位置，并重编页码与全局行号，
+     * 字形跟着它的行一起挪。断行结果（每行的簇与行内位置）完全不重算。
+     *
+     * 为什么可以这样做：横排的块轴推进是一条纯折线 —— 每行占 blocks[p].size_pt *
+     * line_factor、段间再让出 space_after_pt，放不下就换页。所以只要知道后缀开始时的那一个
+     * 续排状态（页号 + cursor_y + 行号），整个后缀的新位置就被唯一确定。
+     * 这条规则与 layoutDocumentRange 横排分支里的断页判据同源；两者一旦分叉，
+     * 单测 [15] 的 auditLayout（增量 vs 全量逐字段比）会立刻报红。
+     *
+     * 竖排段不吃这条规则（列与"块吃掉本页剩余高度"是另一套），所以后缀里出现竖排就返回 false。
+     */
+    bool shiftSuffixBlockAxis(int from, const ReflowState& after);
+
+    /** 后缀（[from+1, 末段]）里有没有竖排段 —— 竖排不能走平移复用。 */
+    bool suffixIsHorizontalOnly(int from) const;
 
     /**
      * 画表单标记（方括号；Focused 档下还给非聚焦字段画小点）到帧上。
@@ -618,6 +664,8 @@ private:
     /** 上一次 relayout 的粒度，由 presentInternal 上报到 EditStats。 */
     int last_relaid_paragraphs_ = 0;
     int last_reused_paragraphs_ = 0;
+    /** 后缀是被"平移复用"的（见 SuffixReuse::Shifted）—— presentInternal 上报用。 */
+    bool last_suffix_shifted_ = false;
     int last_relaid_lines_ = 0;
     bool last_layout_full_ = true;
 

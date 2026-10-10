@@ -162,11 +162,37 @@ void EditorEngine::syncStatsFromLayout() {
     stats_.zoom = cfg_.zoom;
 }
 
-void EditorEngine::computePageFingerprints() {
+void EditorEngine::computePageFingerprints(int dirty_lo, int dirty_hi) {
     const int n = std::max(1, layout_.stats.page_count);
-    page_fp_new_.assign(static_cast<size_t>(n), kFnvBasis);
+
+    // 增量重算的前提：页数没变（页数变了一定整篇的重画判据都要重来），
+    // 且上一轮的指纹数组还在（长度够、页数对得上）。不满足就退化成整篇重算。
+    const bool partial = dirty_lo >= 0 && dirty_hi >= dirty_lo && page_fp_new_count_ == n &&
+                         page_fp_new_.size() >= static_cast<size_t>(n);
+    if (!partial) {
+        page_fp_new_.assign(static_cast<size_t>(n), kFnvBasis);
+        dirty_lo = 0;
+        dirty_hi = n - 1;
+    } else {
+        // 只把要重算的那几页清零，其余页保留上一轮的值 ——
+        // 那些页的字形一个字节都没动，指纹自然不变（这正是增量的依据）。
+        for (int p = dirty_lo; p <= dirty_hi; ++p) page_fp_new_[static_cast<size_t>(p)] = kFnvBasis;
+    }
     page_fp_new_count_ = n;
-    for (const PlacedGlyph& g : layout_.glyphs) {
+
+    // 只遍历受影响页的字形区间。
+    //
+    // 依据是这条不变式：layout_ 的字形数组按页单调（排版是逐段追加的，
+    // 而页号只增不减），所以"页号落在 [dirty_lo, dirty_hi]"的字形是一段连续区间，
+    // 二分就能定位。它成立的前提是排版永远按段序追加 ——
+    // 单测 [15] 里有一条断言专门钉住它（一旦有人打乱追加顺序，这里会静默算错）。
+    const std::vector<PlacedGlyph>& gs = layout_.glyphs;
+    const auto gb = std::lower_bound(gs.begin(), gs.end(), dirty_lo,
+                                     [](const PlacedGlyph& g, int page) { return g.page < page; });
+    const auto ge = std::upper_bound(gb, gs.end(), dirty_hi,
+                                     [](int page, const PlacedGlyph& g) { return page < g.page; });
+    for (auto it = gb; it != ge; ++it) {
+        const PlacedGlyph& g = *it;
         if (g.page < 0 || g.page >= n) continue;
         uint64_t h = page_fp_new_[static_cast<size_t>(g.page)];
         h = fnvMix(h, g.glyph_id);
@@ -217,22 +243,30 @@ void EditorEngine::relayout() {
     const std::vector<int> bracketed = bracketedControls();
     const int n_para = static_cast<int>(blocks_.size());
 
-    // 四档决策，从严到宽：
-    //   ① 整篇都脏 / 没有脏段 → 全量（前者影响面不可定位，后者是保守回退）
-    //   ② 只重排脏段、后缀原样搬回 → 后缀的行结构没变时才成立（trySpliceOnly）
-    //   ③ 前缀保留 + 从脏段续排 → 常规增量
-    //   ④ 其它（脏段是第 0 段且快路不成立）→ 全量
+    // 四档决策，从严到宽：整篇都脏或没有脏段走全量（前者影响面不可定位，后者是保守
+    // 回退）；只重排脏段、后缀原样搬回（trySpliceOnly，要求后缀的行结构没变）；
+    // 前缀保留加从脏段续排（常规增量）；其余情况全量。
     const bool must_full = layout_needs_full_ || layout_dirty_from_ >= n_para;
     const int from = layout_dirty_from_;
-    const bool can_resume =
-        !must_full && from > 0 && from < n_para &&
-        layout_.para_index.size() > static_cast<size_t>(from);
+    const bool can_resume = !must_full && from > 0 && from < n_para &&
+                            layout_.para_index.size() > static_cast<size_t>(from);
 
     last_reused_paragraphs_ = 0;
-    if (!must_full && from >= 0 && from < n_para && trySpliceOnly(from, bracketed)) {
+    last_suffix_shifted_ = false;
+    const auto t_layout0 = Clock::now();  // 只量排版本身：拼接/续排/全量三种走法都算
+    // 需要重算页指纹的页区间（-1 = 整篇），由后缀复用那条路带回来：
+    // 它知道脏段新旧两版占了哪几页 —— 那才是"内容真的变了的页"，
+    // 比整篇重扫一遍字形便宜两个数量级。
+    int fp_lo = -1, fp_hi = -1;
+    SuffixReuse reuse = SuffixReuse::None;
+    if (!must_full && from >= 0 && from < n_para) {
+        reuse = trySuffixReuse(from, bracketed, &fp_lo, &fp_hi);
+    }
+    if (reuse != SuffixReuse::None) {
+        const ParaIndex& pi = layout_.para_index[static_cast<size_t>(from)];
         last_relaid_paragraphs_ = 1;
         last_reused_paragraphs_ = n_para - 1 - from;
-        const ParaIndex& pi = layout_.para_index[static_cast<size_t>(from)];
+        last_suffix_shifted_ = (reuse == SuffixReuse::Shifted);
         last_relaid_lines_ = pi.line_end - pi.line_begin;
         last_layout_full_ = false;
     } else if (can_resume) {
@@ -253,12 +287,20 @@ void EditorEngine::relayout() {
         last_relaid_paragraphs_ = n_para;
         last_relaid_lines_ = layout_.stats.placed_line_count;
         last_layout_full_ = true;
+        fp_lo = -1;  // 整篇重排：没有"没变过的页"可言
     }
     layout_dirty_from_ = n_para;  // 已重排到末尾，没有脏段了
     layout_needs_full_ = false;
 
+    // 这一轮排版的耗时。只算排版本身（拼接/续排/全量三种走法都算），
+    // 不含页指纹记账与统计同步 —— 那两项是 O(全篇) 的固定开销，
+    // 混进来的话"增量到底省了多少"就看不出来了（它们的量级能盖过排版本身）。
+    // 必须在 syncStatsFromLayout 之前写：统计是从 layout_.stats 抄过去的。
+    layout_.stats.layout_ms = msSince(t_layout0);
     syncStatsFromLayout();
-    computePageFingerprints();
+    const auto t_fp0 = Clock::now();
+    computePageFingerprints(fp_lo, fp_hi);
+    stats_.page_fp_ms = msSince(t_fp0);
 
     // 光标夹回合法范围并吸附到簇边界 —— 编辑可能让段落变短。
     if (!blocks_.empty()) {
@@ -267,25 +309,27 @@ void EditorEngine::relayout() {
 
     // 这一轮排版的真实耗时（含截断/拼接/逐段汇总）—— 有些路径不经过
     // layoutDocumentRange（快路），那里算不出这个数，所以在这里统一收口。
-    layout_.stats.layout_ms = msSince(t0);
     edit_stats_.layout_ms = layout_.stats.layout_ms;
     // 排版成本只记一次：置位后由 presentInternal() 消费。
     layout_pending_ = true;
     stats_.total_ms += msSince(t0);
 }
 
-bool EditorEngine::trySpliceOnly(int from, const std::vector<int>& bracketed) {
+EditorEngine::SuffixReuse EditorEngine::trySuffixReuse(int from, const std::vector<int>& bracketed,
+                                                       int* page_lo, int* page_hi) {
+    *page_lo = -1;
+    *page_hi = -1;
     const int n_para = static_cast<int>(blocks_.size());
     // 没有后缀可搬（脏段就是最后一段），就没什么可省的 —— 交给常规路径。
-    if (from < 0 || from + 1 >= n_para) return false;
-    if (layout_.para_index.size() <= static_cast<size_t>(from + 1)) return false;
+    if (from < 0 || from + 1 >= n_para) return SuffixReuse::None;
+    if (layout_.para_index.size() <= static_cast<size_t>(from + 1)) return SuffixReuse::None;
 
     // 括号占位计划不能伸进后缀段：插入/删除会移动控件端点，而占位槽的位置由端点
     // 决定 —— 那些段的内容一个字没变、占位却变了。边界落在脏段之内的都可以搬。
     for (int ci : bracketed) {
         if (ci < 0 || ci >= controls_.size()) continue;
         const Control& c = controls_.at(ci);
-        if (c.range.start.para > from || c.range.end.para > from) return false;
+        if (c.range.start.para > from || c.range.end.para > from) return SuffixReuse::None;
     }
 
     const ParaIndex old_pi = layout_.para_index[static_cast<size_t>(from)];
@@ -297,12 +341,21 @@ bool EditorEngine::trySpliceOnly(int from, const std::vector<int>& bracketed) {
     const ReflowState after =
         layoutDocumentRange(fonts_, blocks_, cfg_.page, &controls_, &bracketed, from, from + 1,
                             resume, &shaping_cache_, &scratch);
-
-    // 后缀能不能原样搬，全看它开始时的续排状态有没有变：三个标量逐位相同，
-    // 后面每一行的断页、全局行号与坐标就都会与上一轮逐位相同。
-    if (!(after == layout_.para_index[static_cast<size_t>(from + 1)].state_at_start)) return false;
-
     const ParaIndex& np = scratch.para_index[static_cast<size_t>(from)];
+
+    // 脏段新旧两版覆盖的页区间（并集）：只有这几页的内容可能变了，
+    // 页指纹只需重算它们。取不到（两版都没行）就给 -1，让调用方整篇重算。
+    int u_lo = -1, u_hi = -1;
+    auto addPageRange = [&](const std::vector<LineBox>& lines, int b, int e) {
+        if (e <= b) return;
+        const int lo = lines[static_cast<size_t>(b)].page;
+        const int hi = lines[static_cast<size_t>(e - 1)].page;
+        u_lo = (u_lo < 0) ? lo : std::min(u_lo, lo);
+        u_hi = (u_hi < 0) ? hi : std::max(u_hi, hi);
+    };
+    addPageRange(layout_.lines, old_pi.line_begin, old_pi.line_end);
+    addPageRange(scratch.lines, np.line_begin, np.line_end);
+
     const int old_lines = old_pi.line_end - old_pi.line_begin;
     const int new_lines = np.line_end - np.line_begin;
     const int old_glyphs = old_pi.glyph_end - old_pi.glyph_begin;
@@ -342,13 +395,110 @@ bool EditorEngine::trySpliceOnly(int from, const std::vector<int>& bracketed) {
     }
     layout_.para_cluster_starts[static_cast<size_t>(from)] =
         scratch.para_cluster_starts[static_cast<size_t>(from)];
-
-    // 汇总量逐段重算；页数不动 —— 后缀原样搬回，而它的起点状态没变，所以
-    // "文档结束时的状态"也没变，总页数不该有任何变化。
     summarizeLayoutStats(&layout_);
     layout_.stats.shape_ms = scratch.stats.shape_ms;
+
+    // 一级复用：后缀开始时的续排状态逐位相同 → 后缀的断页、全局行号与坐标
+    // 都会与上一轮一模一样，一个字节都不用动。
+    if (after == layout_.para_index[static_cast<size_t>(from + 1)].state_at_start) {
+        *page_lo = u_lo;
+        *page_hi = u_hi;
+        return SuffixReuse::Unchanged;
+    }
+
+    // 二级复用：行结构变了（后缀整体挪位），但后缀是纯横排 → 只有块轴位置变，
+    // 断行与字形的行内位置一个字都不用重算。见 shiftSuffixBlockAxis。
+    if (u_lo < 0) return SuffixReuse::None;
+    if (!suffixIsHorizontalOnly(from)) return SuffixReuse::None;
+    if (!shiftSuffixBlockAxis(from, after)) return SuffixReuse::None;
+    *page_lo = u_lo;
+    *page_hi = std::max(0, layout_.stats.page_count - 1);
+    return SuffixReuse::Shifted;
+}
+
+bool EditorEngine::suffixIsHorizontalOnly(int from) const {
+    for (int p = from + 1; p < static_cast<int>(blocks_.size()); ++p) {
+        if (blocks_[static_cast<size_t>(p)].wm.isVertical()) return false;
+    }
     return true;
 }
+
+bool EditorEngine::shiftSuffixBlockAxis(int from, const ReflowState& after) {
+    const float cy = cfg_.page.margin_pt;
+    const float ch = cfg_.page.contentHeightPt();
+    const int n_para = static_cast<int>(blocks_.size());
+
+    const ParaIndex& dp = layout_.para_index[static_cast<size_t>(from)];
+    const size_t first_glyph = static_cast<size_t>(dp.glyph_end);
+    std::vector<PlacedGlyph>& gs = layout_.glyphs;  // 校验与改写共用这一份
+
+    // 沿着"行槽折线"走一遍：每行占 blocks[p].size_pt * line_factor，段间让出
+    // space_after_pt，放不下就换页 —— 与 layoutDocumentRange 横排分支同一套规则。
+    //
+    // 先空跑一遍（apply=false）做校验，通过了再真改。理由：这一趟边走边写
+    //   layout_，一旦中途发现"字形与行号对不上"就已经改了一半 —— 那时既不能
+    //   继续（结果错）也不能退出（数据已经脏了）。校验与修改必须是两趟。
+    int final_page = after.page_index;  // 出参：走完最后落在哪一页
+    auto walk = [&](bool apply) -> bool {
+        float s = after.cursor_y;
+        int page = after.page_index;
+        int line_no = after.line_total;
+        size_t g = first_glyph;
+        for (int p = from + 1; p < n_para; ++p) {
+            const BlockSpec& b = blocks_[static_cast<size_t>(p)];
+            // 续排锚点：每一段都要更新成新的位置，否则以后从这一段续排会拿着过期
+            // 状态（页号 / 块轴位置 / 行号都变了）。与主循环一致：在空段判定与翻页
+            // 之前记录。
+            ParaIndex& pi = layout_.para_index[static_cast<size_t>(p)];
+            if (apply) pi.state_at_start = ReflowState{page, s, line_no};
+
+            if (b.cp_text.empty()) continue;  // 空段既不翻页也不占位
+            if (b.page_break_before && s > cy + 0.01f) {
+                ++page;
+                s = cy;
+            }
+            const float lh = b.size_pt * b.line_factor;
+            for (int L = pi.line_begin; L < pi.line_end; ++L) {
+                LineBox& lb = layout_.lines[static_cast<size_t>(L)];
+                if (s + lh > cy + ch) {
+                    ++page;
+                    s = cy;
+                }
+                const float dy = s - lb.block_lo_pt;
+                // 字形与它的行一一对应：两边都是按行序追加的，并行往前走即可
+                // （某行可能一个字形都没有 —— 全是占位槽的行 —— 指针不动就是对的）。
+                const int old_line = lb.line;
+                while (g < gs.size() && gs[g].line == old_line) {
+                    if (apply) {
+                        gs[g].y_pt += dy;
+                        gs[g].page = page;
+                        gs[g].line = line_no;
+                    }
+                    ++g;
+                }
+                if (apply) {
+                    lb.block_lo_pt += dy;
+                    lb.block_hi_pt += dy;
+                    lb.bracket_axis_pt += dy;  // 横排下它就是基线，跟着行一起挪
+                    lb.page = page;
+                    lb.line = line_no;
+                }
+                s += lh;
+                ++line_no;
+            }
+            s += b.space_after_pt;
+        }
+        // 字形必须正好走完：多一个少一个都说明行号与字形对不上 —— 宁可整篇重排，
+        // 也不要留下错位的排版（错位是静默的，只在画面上表现为"某个字串行了"）。
+        final_page = page;
+        return g == gs.size();
+    };
+    if (!walk(/*apply=*/false)) return false;
+    walk(/*apply=*/true);
+
+    layout_.stats.page_count = final_page + 1;
+    summarizeLayoutStats(&layout_);
+    return true;
 }
 
 void EditorEngine::markLayoutDirty(int para) {
@@ -693,6 +843,7 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
         layout_pending_ = false;
         edit_stats_.relaid_paragraphs = last_relaid_paragraphs_;
         edit_stats_.reused_paragraphs = last_reused_paragraphs_;
+        edit_stats_.suffix_shifted = last_suffix_shifted_;
         edit_stats_.relaid_lines = last_relaid_lines_;
         edit_stats_.layout_was_full = last_layout_full_;
     } else {
@@ -700,6 +851,7 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
         // 不归零的话，光标闪烁会每 530ms 把上一次重排的 3ms 重复上报一遍。
         edit_stats_.relaid_paragraphs = 0;
         edit_stats_.reused_paragraphs = 0;
+        edit_stats_.suffix_shifted = false;
         edit_stats_.relaid_lines = 0;
         edit_stats_.layout_was_full = false;
         edit_stats_.layout_ms = 0.0;
@@ -1512,28 +1664,44 @@ std::string EditorEngine::auditFrameJson() {
 
 namespace {
 
+/**
+ * 位置比较：整数/标志必须逐位相同，浮点坐标允许"远小于可见阈值"的容差。
+ *
+ * 为什么不能要求浮点也逐位相同：平移复用的坐标是"在旧坐标上加一个偏移"算出来的，
+ * 而全量重排是"从 cursor_y 重新累加"出来的 —— 同一条折线两种加法，末位必然可能不同
+ * （实测最大偏差 6.1e-05 pt）。除非把复用路径的算术写成与全量逐位一致，否则这不可消除。
+ *
+ * 容差取 1e-3 pt 的界线是量出来的：比舍入噪声大 16 倍（不会假红），
+ * 又比引擎自己的可见阈值小 30 倍 —— 页指纹量化位置用 1/16 pt（见 quantPt），
+ * 即 0.03 pt 以内的差别在引擎看来本来就"不算变化"。所以容差不会掩盖任何真错位：
+ * 真正的错位是"整行挪错"，量级是几十磅。
+ */
+constexpr float kPosTol = 1e-3f;
+inline bool samePos(float a, float b) { return std::fabs(a - b) <= kPosTol; }
+
 /** 两个字形是否逐字段相同。font 比指针：同一个 FontLibrary 里同一张脸就是同一个指针。 */
 bool sameGlyph(const PlacedGlyph& a, const PlacedGlyph& b) {
-    return a.glyph_id == b.glyph_id && a.font == b.font && a.x_pt == b.x_pt && a.y_pt == b.y_pt &&
-           a.page == b.page && a.line == b.line && a.vertical == b.vertical &&
-           a.rotate_deg == b.rotate_deg && a.cluster == b.cluster && a.paragraph == b.paragraph &&
-           a.color.r == b.color.r && a.color.g == b.color.g && a.color.b == b.color.b &&
-           a.color.a == b.color.a;
+    return a.glyph_id == b.glyph_id && a.font == b.font && samePos(a.x_pt, b.x_pt) &&
+           samePos(a.y_pt, b.y_pt) && a.page == b.page && a.line == b.line &&
+           a.vertical == b.vertical && samePos(a.rotate_deg, b.rotate_deg) &&
+           a.cluster == b.cluster && a.paragraph == b.paragraph && a.color.r == b.color.r &&
+           a.color.g == b.color.g && a.color.b == b.color.b && a.color.a == b.color.a;
 }
 
 bool sameLine(const LineBox& a, const LineBox& b) {
     if (a.paragraph != b.paragraph || a.line != b.line || a.page != b.page ||
-        a.vertical != b.vertical || a.sideways != b.sideways || a.size_pt != b.size_pt ||
-        a.block_lo_pt != b.block_lo_pt || a.block_hi_pt != b.block_hi_pt ||
-        a.inline_origin_pt != b.inline_origin_pt || a.inline_end_pt != b.inline_end_pt ||
-        a.first_cp != b.first_cp || a.last_cp != b.last_cp || a.bracket_font != b.bracket_font ||
-        a.bracket_axis_pt != b.bracket_axis_pt || a.clusters.size() != b.clusters.size()) {
+        a.vertical != b.vertical || a.sideways != b.sideways || !samePos(a.size_pt, b.size_pt) ||
+        !samePos(a.block_lo_pt, b.block_lo_pt) || !samePos(a.block_hi_pt, b.block_hi_pt) ||
+        !samePos(a.inline_origin_pt, b.inline_origin_pt) ||
+        !samePos(a.inline_end_pt, b.inline_end_pt) || a.first_cp != b.first_cp ||
+        a.last_cp != b.last_cp || a.bracket_font != b.bracket_font ||
+        !samePos(a.bracket_axis_pt, b.bracket_axis_pt) || a.clusters.size() != b.clusters.size()) {
         return false;
     }
     for (size_t i = 0; i < a.clusters.size(); ++i) {
         const LineCluster& x = a.clusters[i];
         const LineCluster& y = b.clusters[i];
-        if (x.cp != y.cp || x.inline_pt != y.inline_pt || x.placeholder != y.placeholder ||
+        if (x.cp != y.cp || !samePos(x.inline_pt, y.inline_pt) || x.placeholder != y.placeholder ||
             x.bracket_side != y.bracket_side || x.read_only != y.read_only) {
             return false;
         }
@@ -1545,7 +1713,10 @@ bool sameParaIndex(const ParaIndex& a, const ParaIndex& b) {
     return a.line_begin == b.line_begin && a.line_end == b.line_end &&
            a.glyph_begin == b.glyph_begin && a.glyph_end == b.glyph_end &&
            a.cluster_count == b.cluster_count && a.missing_count == b.missing_count &&
-           a.font_run_count == b.font_run_count && a.state_at_start == b.state_at_start;
+           a.font_run_count == b.font_run_count &&
+           a.state_at_start.page_index == b.state_at_start.page_index &&
+           a.state_at_start.line_total == b.state_at_start.line_total &&
+           samePos(a.state_at_start.cursor_y, b.state_at_start.cursor_y);
 }
 
 /** 一次排版自审的结果。diff 是"不符的条目数"，不是"哪里有偏差"的近似。 */
