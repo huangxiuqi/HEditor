@@ -43,6 +43,12 @@ struct InsertText {
     FlowPos at = 0;
     std::vector<uint32_t> cps;
     CharFormat marks;
+
+    /**
+     * 插入的文本用哪个字符样式（第六节）。输入时一般是空的（沿用落点处已有的样式由命令层决定），
+     * 粘贴带样式的文本时由片段带过来。逆操作要把它记回片段里，否则撤销再重做会丢样式。
+     */
+    std::string styleRef;
 };
 
 /**
@@ -67,7 +73,13 @@ struct DeleteRange {
  */
 struct InsertParaMark {
     FlowPos at = 0;
-    ParaFormat para;
+    ParaFormatPatch para;
+
+    /**
+     * 新段的段落样式。分段时由命令层给出（通常是沿用被切那一段的样式），
+     * 从片段插回时由片段带过来。
+     */
+    std::string styleRef;
 };
 
 /**
@@ -75,7 +87,8 @@ struct InsertParaMark {
  */
 struct RemoveParaMark {
     FlowPos at = 0;
-    ParaFormat para;
+    ParaFormatPatch para;
+    std::string styleRef;
 };
 
 /**
@@ -161,6 +174,20 @@ struct DeleteBuild {
  * 构造一个删除步骤：先取区间（顺带校验可编辑集合），再带着片段构造。
  */
 DeleteBuild makeDeleteRange(const NodeTree& tree, Range range);
+
+/**
+ * 构造一个删除段落标记的步骤：标记的格式与样式引用从文档里读出来带上。
+ *
+ * 逆操作靠这两样还原，所以必须从文档取而不是让调用方自己填 —— 手填一份等于把"这一段长什么
+ * 样"记两遍，两处不一致时撤销会还原出另一个格式。
+ */
+struct ParaMarkBuild {
+    Step step;
+    bool ok = false;
+    std::string error;
+};
+
+ParaMarkBuild makeRemoveParaMark(const NodeTree& tree, FlowPos at);
 
 /**
  * 节点级步骤的构造结果。

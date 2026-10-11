@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -124,11 +125,24 @@ struct Node {
     bool hidden = false;
 
     /**
-     * 段落格式：只对 ParagraphMark 有意义（第三节：段落属性挂在结束标记上）。
-     * 放在节点上而不是另建一张表，理由同 hidden —— 编译要按流顺序取它，
-     * 而流顺序就是树的顺序。其余种类读它没有定义。
+     * 段落格式的内联覆盖：只对 ParagraphMark 有意义（第三节：段落属性挂在结束标记上）。
+     *
+     * 它是 patch 而不是完整的 ParaFormat：元素只存与样式不同的那些属性（第六节），完整形式
+     * 一挂上就"处处都是内联覆盖"，样式再也起不了作用。解析按"文档默认值 → 样式链 → 这里"
+     * 三层做，编译时执行一次。
+     *
+     * 放在节点上而不是另建一张表，理由同 hidden —— 编译要按流顺序取它，而流顺序就是树的顺序。
+     * 其余种类读它没有定义。
      */
-    ParaFormat para;
+    ParaFormatPatch para;
+
+    /**
+     * 样式引用：段落标记上指段落样式，文本节点上指字符样式（第六节）。空表示不引用。
+     *
+     * 一个字段兼两种含义，与 para / marks / control 一样按种类区别取用：段落样式与字符样式
+     * 在解析里本来就是两段独立的链，节点上不需要再分两个字段。
+     */
+    std::string styleRef;
 
     /**
      * 字符属性：只对 TextRun 有意义（第二节：标记是文本节点上的属性集合）。

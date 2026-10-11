@@ -53,4 +53,12 @@ struct CharFormat {
     bool operator==(const CharFormat& o) const = default;
 };
 
+/**
+ * 逐字段合并：over 里设置了的覆盖 under，没设置的保留 under 的。
+ *
+ * 样式链的三层解析就是它按"从根到叶"的顺序叠加，内联 marks 最后叠一次。放在这一层而不是
+ * 样式层，是因为它只认这六个字段，与样式表没有关系。
+ */
+CharFormat mergeCharFormat(const CharFormat& under, const CharFormat& over);
+
 }  // namespace heditor

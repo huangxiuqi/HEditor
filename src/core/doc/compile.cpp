@@ -10,10 +10,14 @@ namespace {
  * 只做 0.4 的窄口径（见 compile.h 顶部）。不支持的元素记一条诊断，容器仍下钻取文本，
  * 所以产出的段落文本可能只在"样式与边界语义"上不完整；诊断必须让 ok() 变假，
  * 调用方不能把产物当完整结果用。
+ *
+ * 段落格式从 1.6 起是解析出来的：文档默认值 → 段落样式链 → 标记上的内联覆盖。
+ * 引擎只吃解析后的结果，它不认识样式表。
  */
 class Compiler {
 public:
-    Compiler(const NodeTree& tree, FlowVisibility vis) : tree_(tree), vis_(vis) {}
+    Compiler(const NodeTree& tree, FlowVisibility vis, const StyleSheet& sheet)
+        : tree_(tree), vis_(vis), sheet_(sheet) {}
 
     CompileResult run() {
         walk(tree_.rootId(), false);
@@ -37,12 +41,20 @@ private:
     /**
      * 段落格式 → 引擎的块级字段。
      *
+     * 模型存的是"内联覆盖"加上一个样式引用，所以这里先按三层解析出完整格式。解析的诊断
+     * （未知样式名、继承成环）原样收进产物 —— 那两种情况都会让这一段的格式与作者以为的不一致，
+     * 不能只让它们停在解析层。
+     *
      * 长度在这里做唯一一次换算：模型存 EMU 整数，引擎吃磅值。非绝对长度（百分比 / em /
      * 字符数）要等排版给出参照才知道多长，编译期拒绝并记诊断 —— 静默取零会让一整段文字
      * 凭空没了字号。
      */
     void applyParaFormat(const Node& mark, BlockSpec* b) {
-        const ParaFormat& f = mark.para;
+        std::vector<std::string> why;
+        const ParaFormat f = resolveParagraphFormat(sheet_, mark.styleRef, mark.para, &why);
+        for (const std::string& w : why) {
+            out_.diagnostics.push_back(CompileDiagnostic{mark.kind, mark.id, w});
+        }
         b->font_index = f.font_index;
         absToPt(f.size, "字号", mark.id, &b->size_pt);
         b->wm = f.wm;
@@ -79,11 +91,13 @@ private:
         if (vis_ == FlowVisibility::Display && n->hidden) return;
 
         if (isText(n->kind)) {
-            // 字符样式还没进编译（要等 1.6 的样式表）。设了样式却不报出来，等于静默丢格式：
-            // 排版结果看着没错，只是样式没了，比"不支持"难查得多。
-            if (!n->marks.empty() && !flagged) {
+            // 字符格式已经有了三层解析（1.6），但引擎的输入还没有 run 级字段 —— BlockSpec 一段
+            // 只有一套字体与字号。设了却不报出来等于静默丢格式：排版看着没错、只是样式没了，
+            // 比"不支持"难查得多。等阶段 2 给引擎加行内区间时，这里换成把解析结果写进去。
+            if ((!n->marks.empty() || !n->styleRef.empty()) && !flagged) {
                 out_.diagnostics.push_back(CompileDiagnostic{
-                    n->kind, n->id, "文本的字符样式尚未进入编译（等 1.6 样式表），marks 被忽略"});
+                    n->kind, n->id,
+                    "文本的字符格式尚未进入编译（引擎输入只有块级字段），按段落格式排版"});
             }
             cps_.insert(cps_.end(), n->text.begin(), n->text.end());
             return;
@@ -106,14 +120,15 @@ private:
 
     const NodeTree& tree_;
     FlowVisibility vis_;
+    const StyleSheet& sheet_;
     std::vector<uint32_t> cps_;  // 正在累积的那一段的码点
     CompileResult out_;
 };
 
 }  // namespace
 
-CompileResult compileDocument(const NodeTree& tree, FlowVisibility vis) {
-    return Compiler(tree, vis).run();
+CompileResult compileDocument(const NodeTree& tree, FlowVisibility vis, const StyleSheet& sheet) {
+    return Compiler(tree, vis, sheet).run();
 }
 
 }  // namespace heditor

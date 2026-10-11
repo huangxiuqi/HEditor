@@ -27,13 +27,14 @@ bool inRange(FlowPos pos, int size) { return pos >= 0 && pos <= size; }
  * 把那个节点切开 —— 否则新内容会整段跑到原有文本的一侧去。
  */
 void insertTextAt(NodeTree& tree, const FlowIndex& idx, FlowPos at,
-                  const std::vector<uint32_t>& cps, const CharFormat& marks) {
+                  const std::vector<uint32_t>& cps, const CharFormat& marks,
+                  const std::string& style_ref) {
     const Pos p = idx.posAt(at);
     const Node* n = tree.find(p.container);
     if (n == nullptr) return;
 
     if (isText(n->kind)) {
-        if (n->marks == marks) {
+        if (n->marks == marks && n->styleRef == style_ref) {
             std::vector<uint32_t> grown = n->text;
             grown.insert(grown.begin() + p.offset, cps.begin(), cps.end());
             tree.setText(n->id, std::move(grown));
@@ -47,10 +48,12 @@ void insertTextAt(NodeTree& tree, const FlowIndex& idx, FlowPos at,
             const std::vector<uint32_t> right(n->text.begin() + p.offset, n->text.end());
             const std::vector<uint32_t> left(n->text.begin(), n->text.begin() + p.offset);
             const CharFormat kept = n->marks;
+            const std::string kept_style = n->styleRef;
             tree.setText(n->id, left);
             const NodeId tail = tree.insertChild(parent, ix + 1, NodeKind::TextRun);
             tree.setText(tail, right);
             tree.find(tail)->marks = kept;
+            tree.find(tail)->styleRef = kept_style;
         }
         const NodeId fresh = tree.insertChild(parent, ix + (has_left ? 1 : 0), NodeKind::TextRun);
         tree.setText(fresh, cps);
@@ -81,6 +84,7 @@ void insertTextAt(NodeTree& tree, const FlowIndex& idx, FlowPos at,
         const NodeId fresh = tree.insertChild(p.container, p.offset, NodeKind::TextRun);
         tree.setText(fresh, cps);
         tree.find(fresh)->marks = marks;
+        tree.find(fresh)->styleRef = style_ref;
         return;
     }
 
@@ -89,12 +93,14 @@ void insertTextAt(NodeTree& tree, const FlowIndex& idx, FlowPos at,
     const NodeId fresh = tree.insertChild(parent, indexInParent(n), NodeKind::TextRun);
     tree.setText(fresh, cps);
     tree.find(fresh)->marks = marks;
+    tree.find(fresh)->styleRef = style_ref;
 }
 
 /**
  * 把一个段落标记插到流位置 at 上。落在文本中间时先把文本切开，标记插在两半之间。
  */
-void insertParaMarkAt(NodeTree& tree, const FlowIndex& idx, FlowPos at, const ParaFormat& para) {
+void insertParaMarkAt(NodeTree& tree, const FlowIndex& idx, FlowPos at, const ParaFormatPatch& para,
+                      const std::string& style_ref) {
     const Pos p = idx.posAt(at);
     const Node* n = tree.find(p.container);
     if (n == nullptr) return;
@@ -108,10 +114,12 @@ void insertParaMarkAt(NodeTree& tree, const FlowIndex& idx, FlowPos at, const Pa
             const std::vector<uint32_t> right(n->text.begin() + p.offset, n->text.end());
             const std::vector<uint32_t> left(n->text.begin(), n->text.begin() + p.offset);
             const CharFormat kept = n->marks;
+            const std::string kept_style = n->styleRef;
             tree.setText(n->id, left);
             const NodeId tail = tree.insertChild(parent, ix + 1, NodeKind::TextRun);
             tree.setText(tail, right);
             tree.find(tail)->marks = kept;
+            tree.find(tail)->styleRef = kept_style;
             // 切开之后右半在 ix + 1，标记要插在两半之间。
             ++ix;
         } else if (p.offset > 0) {
@@ -126,7 +134,9 @@ void insertParaMarkAt(NodeTree& tree, const FlowIndex& idx, FlowPos at, const Pa
     }
 
     const NodeId mark = tree.insertChild(parent, ix, NodeKind::ParagraphMark);
+    if (mark == kInvalidNodeId) return;
     tree.find(mark)->para = para;
+    tree.find(mark)->styleRef = style_ref;
 }
 
 /**
@@ -257,6 +267,28 @@ DeleteBuild makeDeleteRange(const NodeTree& tree, Range range) {
     s.begin = norm.begin();
     s.end = norm.end();
     s.removed = ex.fragment;
+    out.step = Step{s};
+    out.ok = true;
+    return out;
+}
+
+ParaMarkBuild makeRemoveParaMark(const NodeTree& tree, FlowPos at) {
+    ParaMarkBuild out;
+    const FlowIndex idx(tree, FlowVisibility::Design);
+    if (at < 0 || at >= idx.size()) {
+        out.error = "删除段落标记：流位置越界";
+        return out;
+    }
+    const Pos p = idx.posAt(at);
+    const Node* n = tree.find(p.container);
+    if (n == nullptr || !isParagraphMark(n->kind) || p.offset != 0) {
+        out.error = "删除段落标记：该位置上没有段落标记";
+        return out;
+    }
+    RemoveParaMark s;
+    s.at = at;
+    s.para = n->para;
+    s.styleRef = n->styleRef;
     out.step = Step{s};
     out.ok = true;
     return out;
@@ -486,44 +518,45 @@ StepResult applyStep(NodeTree& tree, const Step& step) {
     if (!r.ok) return r;
 
     const FlowIndex idx = indexOf(tree);
-    std::visit(Overloaded{
-                   [&](const InsertText& s) { insertTextAt(tree, idx, s.at, s.cps, s.marks); },
-                   [&](const InsertFragment& s) {
-                       FlowPos pos = s.at;
-                       for (const Piece& p : s.content.pieces) {
-                           const FlowIndex here = indexOf(tree);
-                           if (p.kind == PieceKind::ParaMark) {
-                               insertParaMarkAt(tree, here, pos, p.para);
-                           } else {
-                               insertTextAt(tree, here, pos, p.cps, p.marks);
-                           }
-                           pos += p.span();
-                       }
-                   },
-                   [&](const DeleteRange& s) {
-                       std::string err;
-                       eraseRange(tree, s.begin, s.end, &err);
-                   },
-                   [&](const InsertParaMark& s) { insertParaMarkAt(tree, idx, s.at, s.para); },
-                   [&](const RemoveParaMark& s) {
-                       const Pos p = idx.posAt(s.at);
-                       const Node* n = tree.find(p.container);
-                       tree.eraseChild(n->parent->id, indexInParent(n));
-                   },
-                   [&](const InsertNode& s) {
-                       if (s.detached != kInvalidNodeId) {
-                           tree.attachChild(s.at.container, s.at.offset, s.detached);
-                           return;
-                       }
-                       // 没有现成的子树（例如步骤由序列化还原）：按记录现建一棵，内容一样、
-                       // 身份是新的。
-                       materializeSubtree(tree, s.at.container, s.at.offset, s.subtree);
-                   },
-                   [&](const RemoveNode& s) { tree.eraseChild(s.at.container, s.at.offset); },
-                   [&](const SetControlProp& s) { writeControlProp(tree, s.id, s.prop, s.value); },
-                   [&](const SetControlValue& s) { writeControlValue(tree, s.id, s.value); },
-               },
-               step);
+    std::visit(
+        Overloaded{
+            [&](const InsertText& s) { insertTextAt(tree, idx, s.at, s.cps, s.marks, s.styleRef); },
+            [&](const InsertFragment& s) {
+                FlowPos pos = s.at;
+                for (const Piece& p : s.content.pieces) {
+                    const FlowIndex here = indexOf(tree);
+                    if (p.kind == PieceKind::ParaMark) {
+                        insertParaMarkAt(tree, here, pos, p.para, p.styleRef);
+                    } else {
+                        insertTextAt(tree, here, pos, p.cps, p.marks, p.styleRef);
+                    }
+                    pos += p.span();
+                }
+            },
+            [&](const DeleteRange& s) {
+                std::string err;
+                eraseRange(tree, s.begin, s.end, &err);
+            },
+            [&](const InsertParaMark& s) { insertParaMarkAt(tree, idx, s.at, s.para, s.styleRef); },
+            [&](const RemoveParaMark& s) {
+                const Pos p = idx.posAt(s.at);
+                const Node* n = tree.find(p.container);
+                tree.eraseChild(n->parent->id, indexInParent(n));
+            },
+            [&](const InsertNode& s) {
+                if (s.detached != kInvalidNodeId) {
+                    tree.attachChild(s.at.container, s.at.offset, s.detached);
+                    return;
+                }
+                // 没有现成的子树（例如步骤由序列化还原）：按记录现建一棵，内容一样、
+                // 身份是新的。
+                materializeSubtree(tree, s.at.container, s.at.offset, s.subtree);
+            },
+            [&](const RemoveNode& s) { tree.eraseChild(s.at.container, s.at.offset); },
+            [&](const SetControlProp& s) { writeControlProp(tree, s.id, s.prop, s.value); },
+            [&](const SetControlValue& s) { writeControlValue(tree, s.id, s.value); },
+        },
+        step);
     return r;
 }
 
@@ -537,6 +570,7 @@ Step invertStep(const Step& step) {
                               piece.kind = PieceKind::Text;
                               piece.cps = s.cps;
                               piece.marks = s.marks;
+                              piece.styleRef = s.styleRef;
                               d.removed.pieces.push_back(std::move(piece));
                               return Step{d};
                           },
@@ -557,12 +591,14 @@ Step invertStep(const Step& step) {
                               RemoveParaMark x;
                               x.at = s.at;
                               x.para = s.para;
+                              x.styleRef = s.styleRef;
                               return Step{x};
                           },
                           [](const RemoveParaMark& s) -> Step {
                               InsertParaMark x;
                               x.at = s.at;
                               x.para = s.para;
+                              x.styleRef = s.styleRef;
                               return Step{x};
                           },
                           [](const InsertNode& s) -> Step {

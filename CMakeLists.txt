@@ -229,6 +229,9 @@ add_library(heditor_core STATIC
   src/core/doc/para.cpp
   src/core/doc/invariants.cpp
   src/core/doc/compile.cpp
+  src/core/doc/char_format.cpp
+  src/core/doc/para_format.cpp
+  src/core/doc/style.cpp
   src/core/doc/length.cpp
   src/core/doc/normalize.cpp
   src/core/doc/range.cpp

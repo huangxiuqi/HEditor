@@ -1,21 +1,21 @@
 /**
- * 文档模型 0.1 ~ 1.5 的判据。这一层靠"看起来对"验收不了（位置错一格，表象是光标跳、命中偏、
+ * 文档模型 0.1 ~ 1.6 的判据。这一层靠"看起来对"验收不了（位置错一格，表象是光标跳、命中偏、
  * 撤销回错地方，全都要到界面才看得见），所以判据只落在数据层，每条都可证伪：
- *   0.1 流位置不丢（flowAt(posAt(f)) == f）与往返不改归属 —— 后者不要求 Pos 逐字段相等，
- *       因为同一个流位置本来就有多种 Pos 写法，逐字段相等会把正确实现判成错。
+ *   0.1 流位置不丢（flowAt(posAt(f)) == f）与往返不改归属（同一流位置有多种 Pos 写法，不要求逐字段相等）。
  *   0.2 下标数组与全部段落查询跟暴力算法逐项比对，随机增删中每步与重建结果整体比对。
  *   0.3 不变量检查器：现有形状全绿，且逐条构造反例时必须报出对应的那条规则。
  *   0.4 编译：同一份内容走"现有 BlockSpec 路径"与"树 → 编译"两条路逐字段一致。
  *   0.5 长度：单位换算的两支往返、文本形式往返后类型与数值都不丢、畸形输入全被拒。
  *   1.1 规范化：幂等（第二遍零改动且快照逐条相同）、跨容器不合并、空容器不清除。
- *   1.2 步骤：内容级（往返回到原样、取删插等于原状、映射往返一致）与节点级（整棵子树增删、
- *       撤销后带身份的快照逐条相同）；端点外扩。
+ *   1.2 步骤：应用加逆操作回到原样、取删插等于原状、映射往返一致、整棵子树增删后带身份的快照相同。
  *   1.3 撤销：连撤逐次回到对应步骤的状态、重做逐次回到编辑后、连续输入并成一个撤销单位。
  *   1.4 落点判定：四个边界位置互不相同且 posAt 单射；可编辑集合取交集；方向键不跳出集合；
  *       Tab 只落可编辑控件、无下一个时放行；越界编辑被拒且给原因；结构操作默认被拒。
  *   1.5 控件与宿主 API：索引与重建逐项相同、批量设值一个撤销步骤、撤销后逐字段回到原样；
  *       属性侧的值与文本类共用一条 API 但落点不同；外观逐项读回且类型不丢；异步裁决门在
  *       等待期间不动文档与撤销栈、Allow 才应用、Deny 与超时保持原值并标 invalid。
+ *   1.6 样式：三层解析与手算逐字段一致；成环与未知样式名被诊断且不把整篇拖死；缓存按元素加
+ *       样式表版本命中，改版整体失效、单元素可单独失效；样式引用随子树与片段一起走。
  * 覆盖四层：写死的形状、穷举、随机、增删序列；前两层在两种可见性口径下各过一遍。
  */
 #include <algorithm>
@@ -38,6 +38,7 @@
 #include "core/doc/para.h"
 #include "core/doc/range.h"
 #include "core/doc/steps.h"
+#include "core/doc/style.h"
 #include "core/doc/transaction.h"
 #include "core/doc/validation.h"
 #include "core/utils/units.h"
@@ -827,13 +828,40 @@ void checkInvariantCounterexamples() {
  * 这是 0.4 的对照构造：同一份内容用"现有 BlockSpec 路径"与"树"两条路表达，再断言编译结果
  * 与前者逐字段一致。字段逐个搬而不是整体塞进节点，因为段落格式本来就该由样式/控件设置。
  */
+/**
+ * 没有样式的样式表。它的文档默认值就是各字段的默认值，所以"三层解析"的结果与"完全没有样式"
+ * 一致 —— 0.4 那条"两条路逐字段一致"的判据因此可以在不带样式的前提下继续成立。
+ */
+const StyleSheet& noStyles() {
+    static const StyleSheet sheet;
+    return sheet;
+}
+
+/**
+ * 段落内联覆盖的文本形式，用于快照比对。未设置的字段写成 -：三态里的"没写"与"写成默认值"
+ * 是两种形状，快照必须能分开，否则"覆盖被误删"这类改动会被判成相同。
+ */
+std::string paraKey(const ParaFormatPatch& p) {
+    std::string s = p.font_index.has_value() ? std::to_string(*p.font_index) : "-";
+    s += "," + (p.size.has_value() ? printLength(*p.size) : std::string("-"));
+    s += "," + (p.wm.has_value() ? std::string("wm") : std::string("-"));
+    s += "," + (p.line_factor.has_value() ? std::to_string(*p.line_factor) : std::string("-"));
+    s += "," + (p.space_after.has_value() ? printLength(*p.space_after) : std::string("-"));
+    s += "," + (p.page_break_before.has_value() ? (*p.page_break_before ? "1" : "0")
+                                                : std::string("-"));
+    s += "," + (p.language.has_value() ? std::string("lang") : std::string("-"));
+    s += "," + (p.color.has_value() ? std::string("col") : std::string("-"));
+    s += "," + (p.fallback_font_indices.has_value() ? std::string("fb") : std::string("-"));
+    return s;
+}
+
 NodeTree treeFromBlocks(const std::vector<BlockSpec>& blocks) {
     NodeTree tree;
     const NodeId sec = tree.firstSectionId();
     for (const BlockSpec& b : blocks) {
         tree.setText(tree.appendChild(sec, NodeKind::TextRun), b.cp_text);
         const NodeId mark = tree.appendChild(sec, NodeKind::ParagraphMark);
-        ParaFormat& f = tree.find(mark)->para;
+        ParaFormatPatch& f = tree.find(mark)->para;
         f.font_index = b.font_index;
         f.size = Length::abs(ptToEmu(b.size_pt));
         f.wm = b.wm;
@@ -881,7 +909,7 @@ std::string diffBlock(const BlockSpec& a, const BlockSpec& b) {
  */
 void checkCompileMatchesBlocks(const std::vector<BlockSpec>& blocks, const std::string& label) {
     const NodeTree tree = treeFromBlocks(blocks);
-    const CompileResult r = compileDocument(tree, FlowVisibility::Design);
+    const CompileResult r = compileDocument(tree, FlowVisibility::Design, noStyles());
     expectTrue(r.ok(), label + "：只有文本与段落，编译无诊断");
     if (r.blocks.size() != blocks.size()) {
         expectTrue(false, label + "：段落数一致（参照 " + std::to_string(blocks.size()) +
@@ -912,14 +940,14 @@ void checkCompileShapes() {
     {
         NodeTree tree;
         tree.appendChild(tree.firstSectionId(), NodeKind::ParagraphMark);
-        const CompileResult r = compileDocument(tree, FlowVisibility::Design);
+        const CompileResult r = compileDocument(tree, FlowVisibility::Design, noStyles());
         expectTrue(r.ok() && r.blocks.size() == 1 && r.blocks[0].cp_text.empty(),
                    "0.4 / 只有标记：编译出一段空段落");
     }
     // 空节：没有标记也没有内容，0 段。
     {
         NodeTree tree;
-        const CompileResult r = compileDocument(tree, FlowVisibility::Design);
+        const CompileResult r = compileDocument(tree, FlowVisibility::Design, noStyles());
         expectTrue(r.ok() && r.blocks.empty(), "0.4 / 空节：0 段");
     }
     // 相邻两个 run 拼在同一段；末尾还没有结束标记的那一段照落，用默认段落格式。
@@ -930,7 +958,7 @@ void checkCompileShapes() {
         tree.setText(tree.appendChild(sec, NodeKind::TextRun), cps({0x63}));
         tree.appendChild(sec, NodeKind::ParagraphMark);
         tree.setText(tree.appendChild(sec, NodeKind::TextRun), cps({0x64}));
-        const CompileResult r = compileDocument(tree, FlowVisibility::Design);
+        const CompileResult r = compileDocument(tree, FlowVisibility::Design, noStyles());
         expectTrue(r.ok() && r.blocks.size() == 2 &&
                        r.blocks[0].cp_text == cps({0x61, 0x62, 0x63}) &&
                        r.blocks[1].cp_text == cps({0x64}),
@@ -949,7 +977,7 @@ void checkCompileShapes() {
         tree.appendChild(cc, NodeKind::ParagraphMark);
         tree.setText(tree.appendChild(cc, NodeKind::TextRun), cps({0x79}));
         tree.appendChild(sec, NodeKind::ParagraphMark);
-        const CompileResult r = compileDocument(tree, FlowVisibility::Design);
+        const CompileResult r = compileDocument(tree, FlowVisibility::Design, noStyles());
         expectTrue(r.blocks.size() == 2 && r.blocks[0].cp_text == cps({0x61, 0x78}) &&
                        r.blocks[1].cp_text == cps({0x79}),
                    "0.4 / 控件跨段落标记：按流切出两段（容器边界不切段）");
@@ -966,7 +994,7 @@ void checkCompileShapes() {
         const NodeId cc = tree.appendChild(sec, NodeKind::ContentControl);
         tree.setText(tree.appendChild(cc, NodeKind::TextRun), cps({0x62}));
         tree.appendChild(sec, NodeKind::ParagraphMark);
-        const CompileResult r = compileDocument(tree, FlowVisibility::Design);
+        const CompileResult r = compileDocument(tree, FlowVisibility::Design, noStyles());
         expectTrue(r.blocks.size() == 1 && r.blocks[0].cp_text == cps({0x61, 0x62}),
                    "0.4 / 不支持的元素：容器内部文本仍按流顺序并入当前段");
         expectTrue(r.diagnostics.size() == 2 && r.diagnostics[0].kind == NodeKind::Image &&
@@ -983,8 +1011,8 @@ void checkCompileShapes() {
         tree.setText(tree.appendChild(cc, NodeKind::TextRun), cps({0x78}));
         tree.find(cc)->hidden = true;
         tree.appendChild(sec, NodeKind::ParagraphMark);
-        const CompileResult design = compileDocument(tree, FlowVisibility::Design);
-        const CompileResult display = compileDocument(tree, FlowVisibility::Display);
+        const CompileResult design = compileDocument(tree, FlowVisibility::Design, noStyles());
+        const CompileResult display = compileDocument(tree, FlowVisibility::Display, noStyles());
         expectTrue(design.blocks.size() == 1 && design.blocks[0].cp_text == cps({0x61, 0x78}),
                    "0.4 / 隐藏：编辑态下隐藏控件的内容照常参与编译");
         expectTrue(display.blocks.size() == 1 && display.blocks[0].cp_text == cps({0x61}) &&
@@ -1143,7 +1171,7 @@ void checkCompileRejectsRelativeLength() {
     const NodeId mark = tree.appendChild(sec, NodeKind::ParagraphMark);
     tree.find(mark)->para.size = Length::em(2.0);
 
-    const CompileResult r = compileDocument(tree, FlowVisibility::Design);
+    const CompileResult r = compileDocument(tree, FlowVisibility::Design, noStyles());
     expectTrue(!r.ok() && r.diagnostics.size() == 1 &&
                    r.diagnostics[0].kind == NodeKind::ParagraphMark &&
                    r.diagnostics[0].node == mark,
@@ -1152,7 +1180,7 @@ void checkCompileRejectsRelativeLength() {
     // 同一段的段后距用相对单位，也要各自记一条 —— 两个字段分头检查。
     tree.find(mark)->para.size = Length::abs(ptToEmu(12.0));
     tree.find(mark)->para.space_after = Length::percent(50, 100);
-    const CompileResult r2 = compileDocument(tree, FlowVisibility::Design);
+    const CompileResult r2 = compileDocument(tree, FlowVisibility::Design, noStyles());
     expectTrue(!r2.ok() && r2.diagnostics.size() == 1,
                "0.5 / 编译：非绝对的段后距被拒，且只报这一条");
 }
@@ -1192,8 +1220,8 @@ void snapshotInto(const NodeTree& tree, NodeId id, std::vector<std::string>* out
     s += "|t=";
     for (uint32_t cp : n->text) s += std::to_string(cp) + ",";
     s += "|m=" + marksKey(n->marks);
-    s += "|p=" + std::to_string(n->para.font_index) + "," + printLength(n->para.size) + "," +
-         printLength(n->para.space_after) + "," + std::to_string(n->para.line_factor);
+    s += "|p=" + paraKey(n->para);
+    s += "|s=" + n->styleRef;
     s += "|h=" + std::to_string(n->hidden ? 1 : 0);
     s += "|kids=" + std::to_string(n->children.size());
     out->push_back(std::move(s));
@@ -1238,8 +1266,8 @@ void snapshotIdsInto(const NodeTree& tree, NodeId id, std::vector<std::string>* 
     std::string s = std::to_string(n->id) + "|" + nodeKindName(n->kind);
     s += "|t=" + std::to_string(n->text.size());
     s += "|m=" + marksKey(n->marks);
-    s += "|p=" + std::to_string(n->para.font_index) + "," + printLength(n->para.size) + "," +
-         printLength(n->para.space_after) + "," + std::to_string(n->para.line_factor);
+    s += "|p=" + paraKey(n->para);
+    s += "|s=" + n->styleRef;
     s += "|c=" + n->control.key + "," + n->control.controlType + "," +
          (n->control.readonly ? "ro" : "-") + "," + (n->control.structureLock ? "lock" : "open");
     s += "|h=" + std::string(n->hidden ? "1" : "0");
@@ -1367,9 +1395,9 @@ void checkNormalizeIdempotent() {
  */
 void checkNormalizeKeepsContent() {
     NodeTree tree = makeMessyTree();
-    const CompileResult before = compileDocument(tree, FlowVisibility::Design);
+    const CompileResult before = compileDocument(tree, FlowVisibility::Design, noStyles());
     const NormalizeResult r = normalizeDocument(tree);
-    const CompileResult after = compileDocument(tree, FlowVisibility::Design);
+    const CompileResult after = compileDocument(tree, FlowVisibility::Design, noStyles());
 
     int diff = 0;
     std::string first;
@@ -1540,10 +1568,10 @@ void checkStepRoundTrip() {
     }
     {
         NodeTree tree = makeEditTree();
-        RemoveParaMark s;
-        s.at = 7;
-        s.para = tree.find(tree.firstSectionId())->children[1]->para;
-        expectTrue(roundTrip(tree, Step{s}).empty(), "1.2 / 往返：RemoveParaMark 合并两段");
+        // 格式与样式引用从文档读出来带上（手填一份会让撤销还原出另一个格式）。
+        const ParaMarkBuild b = makeRemoveParaMark(tree, 7);
+        expectTrue(b.ok && roundTrip(tree, b.step).empty(),
+                   "1.2 / 往返：RemoveParaMark 合并两段" + (b.ok ? "" : "（" + b.error + "）"));
     }
     {
         NodeTree tree = makeEditTree();
@@ -1742,8 +1770,8 @@ void checkUndoRedo() {
     // 帧仍与全量一致，在模型层的落点：撤到底之后重新编译，产物必须与起始状态逐字段相同。
     {
         const NodeTree fresh = makeEditTree();
-        const CompileResult ref = compileDocument(fresh, FlowVisibility::Design);
-        const CompileResult now = compileDocument(tree, FlowVisibility::Design);
+        const CompileResult ref = compileDocument(fresh, FlowVisibility::Design, noStyles());
+        const CompileResult now = compileDocument(tree, FlowVisibility::Design, noStyles());
         int diff = 0;
         if (ref.blocks.size() != now.blocks.size()) {
             diff = 1;
@@ -3175,11 +3203,374 @@ void checkAsyncGate() {
                "1.5b / 分工：随后的 Deny 只丢候选，不改已经生效的编程值");
 }
 
+/**
+ * 两份完整段落格式逐字段比。返回空串表示一致，否则返回第一处不同的字段名。
+ *
+ * 显式列出每个字段而不是靠一个"相等"：漏比一个字段，判据就变成一句空话（与 0.4 的 diffBlock
+ * 同一个理由）。
+ */
+std::string diffPara(const ParaFormat& a, const ParaFormat& b) {
+    if (a.font_index != b.font_index) return "font_index";
+    if (!(a.size == b.size)) return "size";
+    if (a.wm.inline_axis != b.wm.inline_axis || a.wm.block_flow != b.wm.block_flow ||
+        a.wm.orientation != b.wm.orientation) {
+        return "wm";
+    }
+    if (a.line_factor != b.line_factor) return "line_factor";
+    if (!(a.space_after == b.space_after)) return "space_after";
+    if (a.page_break_before != b.page_break_before) return "page_break_before";
+    const std::string la = a.language != nullptr ? a.language : "";
+    const std::string lb = b.language != nullptr ? b.language : "";
+    if (la != lb) return "language";
+    if (!(a.color == b.color)) return "color";
+    if (a.fallback_font_indices != b.fallback_font_indices) return "fallback_font_indices";
+    return "";
+}
+
+/**
+ * 1.6：三层解析。判据是"与手算一致"—— 期望值整份手写出来逐字段核，而不是只查其中一两个字段
+ * （只查一个字段的话，"继承链搭错了但恰好那一个字段相同"会蒙混过去）。
+ */
+void checkStyleResolution() {
+    // 没有样式表、没有内联覆盖：结果就是各字段的默认值。
+    {
+        const StyleSheet empty;
+        const ParaFormat got = resolveParagraphFormat(empty, "", {}, nullptr);
+        const std::string d = diffPara(got, ParaFormat{});
+        expectTrue(d.empty(),
+                   "1.6 / 三层：空表加空覆盖就是默认值" + (d.empty() ? "" : "（" + d + "）"));
+    }
+    // 文档默认值是最下面那一层。
+    {
+        StyleSheet sheet;
+        ParaFormatPatch dd;
+        dd.size = Length::abs(ptToEmu(14.0));
+        dd.color = Color::rgb(200, 0, 0);
+        sheet.setDocDefaults(dd, {});
+        ParaFormat want;
+        want.size = Length::abs(ptToEmu(14.0));
+        want.color = Color::rgb(200, 0, 0);
+        const std::string d = diffPara(resolveParagraphFormat(sheet, "", {}, nullptr), want);
+        expectTrue(d.empty(), "1.6 / 三层：文档默认值改两个字段，其余仍是默认" +
+                                  (d.empty() ? "" : "（" + d + "）"));
+    }
+    // 段落样式链：based_on 逐级继承，叶覆盖根。
+    {
+        StyleSheet sheet;
+        StyleDef base;
+        base.name = "正文";
+        base.para.font_index = 3;
+        base.para.size = Length::abs(ptToEmu(10.0));
+        sheet.add(base);
+
+        StyleDef leaf;
+        leaf.name = "强调段";
+        leaf.based_on = "正文";
+        leaf.para.color = Color::rgb(0, 0, 255);
+        leaf.para.line_factor = 2.0f;
+        sheet.add(leaf);
+
+        ParaFormat want;
+        want.font_index = 3;                     // 继承自根
+        want.size = Length::abs(ptToEmu(10.0));  // 继承自根
+        want.color = Color::rgb(0, 0, 255);      // 叶
+        want.line_factor = 2.0f;                 // 叶
+        const std::string d = diffPara(resolveParagraphFormat(sheet, "强调段", {}, nullptr), want);
+        expectTrue(d.empty(),
+                   "1.6 / 三层：样式链逐属性合并（叶覆盖根）" + (d.empty() ? "" : "（" + d + "）"));
+
+        // 内联覆盖压过整条链。
+        ParaFormatPatch inline_p;
+        inline_p.size = Length::abs(ptToEmu(20.0));
+        want.size = Length::abs(ptToEmu(20.0));
+        const std::string d2 =
+            diffPara(resolveParagraphFormat(sheet, "强调段", inline_p, nullptr), want);
+        expectTrue(d2.empty(),
+                   "1.6 / 三层：内联覆盖压过样式链" + (d2.empty() ? "" : "（" + d2 + "）"));
+    }
+    // 字符四层：文档默认值 → 段落样式的字符部分 → 字符样式链 → 元素上的内联 marks。
+    {
+        StyleSheet sheet;
+        CharFormat dd;
+        dd.bold = true;
+        sheet.setDocDefaults({}, dd);
+
+        StyleDef para_style;
+        para_style.name = "正文";
+        para_style.run.font_index = 7;
+        sheet.add(para_style);
+
+        StyleDef term;
+        term.name = "术语";
+        term.kind = StyleKind::Character;
+        term.run.size = Length::abs(ptToEmu(18.0));
+        sheet.add(term);
+
+        StyleDef strong;
+        strong.name = "术语加强";
+        strong.kind = StyleKind::Character;
+        strong.based_on = "术语";
+        strong.run.italic = true;
+        sheet.add(strong);
+
+        CharFormat inline_marks;
+        inline_marks.color = Color::rgb(9, 9, 9);
+        const CharFormat got = resolveRunFormat(sheet, "正文", "术语加强", inline_marks, nullptr);
+
+        CharFormat want;
+        want.bold = true;                        // 文档默认值
+        want.font_index = 7;                     // 段落样式自带的字符属性
+        want.size = Length::abs(ptToEmu(18.0));  // 字符样式链
+        want.italic = true;                      // 字符样式链（叶）
+        want.color = Color::rgb(9, 9, 9);        // 内联
+        expectTrue(got == want,
+                   "1.6 / 三层：字符格式四层合并（默认值 → 段落样式 → 字符样式链 → 内联）");
+        expectTrue(!got.underline.has_value(),
+                   "1.6 / 三层：四层都没设置的属性保持未设置（不是被写成了默认值）");
+    }
+}
+
+/**
+ * 1.6：链上的两种异常都要被诊断出来，而且不能把整篇拖死。
+ */
+void checkStyleChainEdges() {
+    // 成环：诊断里有"成环"，链上已经解析到的部分仍然生效。
+    {
+        StyleSheet sheet;
+        StyleDef a;
+        a.name = "A";
+        a.based_on = "B";
+        a.para.font_index = 1;
+        sheet.add(a);
+        StyleDef b;
+        b.name = "B";
+        b.based_on = "A";
+        b.para.size = Length::abs(ptToEmu(9.0));
+        sheet.add(b);
+
+        std::vector<std::string> why;
+        const ParaFormat got = resolveParagraphFormat(sheet, "A", {}, &why);
+        expectTrue(why.size() == 1 && why[0].find("成环") != std::string::npos,
+                   "1.6 / 成环：记一条诊断（" + (why.empty() ? std::string("无") : why[0]) + "）");
+        expectTrue(got.font_index == 1 && (got.size == Length::abs(ptToEmu(9.0))),
+                   "1.6 / 成环：链上已经解析到的部分仍然生效，不转圈也不整篇算不出");
+    }
+    // 样式名不存在：降级到默认值并诊断，不静默。
+    {
+        const StyleSheet sheet;
+        std::vector<std::string> why;
+        const ParaFormat got = resolveParagraphFormat(sheet, "没有这个样式", {}, &why);
+        expectTrue(
+            why.size() == 1 && why[0].find("不存在") != std::string::npos,
+            "1.6 / 未知样式：记一条诊断（" + (why.empty() ? std::string("无") : why[0]) + "）");
+        expectTrue(diffPara(got, ParaFormat{}).empty(), "1.6 / 未知样式：降级到默认值");
+    }
+    // 上游不存在：本层已经设置的属性照旧生效。
+    {
+        StyleSheet sheet;
+        StyleDef a;
+        a.name = "孤儿";
+        a.based_on = "不存在";
+        a.para.font_index = 4;
+        sheet.add(a);
+        std::vector<std::string> why;
+        const ParaFormat got = resolveParagraphFormat(sheet, "孤儿", {}, &why);
+        expectTrue(why.size() == 1 && got.font_index == 4,
+                   "1.6 / 未知上游：本层的属性照旧生效，缺的那一层记诊断");
+    }
+    // 名字为空：不算错误，也不产生诊断。
+    {
+        const StyleSheet sheet;
+        std::vector<std::string> why;
+        resolveParagraphFormat(sheet, "", {}, &why);
+        resolveRunFormat(sheet, "", "", {}, &why);
+        expectTrue(why.empty(), "1.6 / 空样式名：不引用样式，不产生诊断");
+    }
+}
+
+/**
+ * 1.6：解析结果的缓存。判据是"第二次查不重算" —— 只比结果相等证明不了这一点，重算也相等。
+ */
+void checkStyleCache() {
+    NodeTree tree;
+    const NodeId sec = tree.firstSectionId();
+    const NodeId t1 = tree.appendChild(sec, NodeKind::TextRun);
+    tree.setText(t1, cps({0x61}));
+    const NodeId m1 = tree.appendChild(sec, NodeKind::ParagraphMark);
+    const NodeId m2 = tree.appendChild(sec, NodeKind::ParagraphMark);
+
+    StyleSheet sheet;
+    StyleDef style;
+    style.name = "正文";
+    style.para.font_index = 2;
+    sheet.add(style);
+    tree.find(m1)->styleRef = "正文";
+    tree.find(m1)->para.size = Length::abs(ptToEmu(20.0));
+
+    StyleCache cache(sheet);
+    const ParaFormat first = cache.paragraph(tree, m1);
+    expectTrue(cache.computations() == 1 && cache.hits() == 0 && first.font_index == 2 &&
+                   (first.size == Length::abs(ptToEmu(20.0))),
+               "1.6 / 缓存：第一次查要算，结果是样式加内联覆盖");
+
+    cache.paragraph(tree, m1);
+    expectTrue(cache.computations() == 1 && cache.hits() == 1,
+               "1.6 / 缓存：同样的元素再查一次直接命中，不重算");
+    expectTrue(cache.paragraph(tree, m1).font_index == 2, "1.6 / 缓存：命中返回的仍是同一份结果");
+
+    cache.paragraph(tree, m2);
+    expectTrue(cache.computations() == 2, "1.6 / 缓存：另一个元素要各算一份");
+
+    // 样式表一改：整体失效（改一次样式影响的是全篇引用它的元素，逐个失效不如整体失效）。
+    StyleDef another;
+    another.name = "标题";
+    sheet.add(another);
+    cache.paragraph(tree, m1);
+    expectTrue(cache.computations() == 3, "1.6 / 缓存：样式表改版之后整体失效，要重算");
+
+    // 只有某一个元素自己改了时，只失效它一个：另一个元素仍然命中。
+    const int hits_before = cache.hits();
+    cache.invalidate(m2);
+    cache.paragraph(tree, m1);
+    expectTrue(cache.computations() == 3 && cache.hits() == hits_before + 1,
+               "1.6 / 缓存：单个元素失效不影响别的条目");
+    cache.paragraph(tree, m2);
+    expectTrue(cache.computations() == 4, "1.6 / 缓存：被失效的那一个要重算");
+
+    // run 的缓存键还带上所在段落的样式名：同一个 run 换了段落样式就是另一份结果。
+    cache.run(tree, t1, "正文");
+    const int before = cache.computations();
+    cache.run(tree, t1, "正文");
+    expectTrue(cache.computations() == before, "1.6 / 缓存：同一 run 同一段落样式命中");
+    cache.run(tree, t1, "标题");
+    expectTrue(cache.computations() == before + 1,
+               "1.6 / 缓存：同一 run 换了段落样式不能复用旧结果");
+}
+
+/**
+ * 1.6：样式经编译进引擎输入。段落格式是解析出来的，节点上只留差异。
+ */
+void checkStyleThroughCompile() {
+    NodeTree tree;
+    const NodeId sec = tree.firstSectionId();
+    tree.setText(tree.appendChild(sec, NodeKind::TextRun), cps({0x61}));
+    const NodeId mark = tree.appendChild(sec, NodeKind::ParagraphMark);
+    tree.find(mark)->styleRef = "大标题";
+    tree.find(mark)->para.size = Length::abs(ptToEmu(20.0));
+
+    expectTrue(tree.find(mark)->para.size.has_value() &&
+                   !tree.find(mark)->para.font_index.has_value() &&
+                   !tree.find(mark)->para.color.has_value(),
+               "1.6 / 编译：节点上只留与样式不同的属性（没有字号之外的覆盖）");
+
+    StyleSheet sheet;
+    StyleDef style;
+    style.name = "大标题";
+    style.para.font_index = 5;
+    style.para.size = Length::abs(ptToEmu(16.0));
+    style.para.color = Color::rgb(200, 0, 0);
+    sheet.add(style);
+
+    const CompileResult r = compileDocument(tree, FlowVisibility::Design, sheet);
+    expectTrue(r.ok() && r.blocks.size() == 1 && r.blocks[0].font_index == 5 &&
+                   r.blocks[0].size_pt == 20.0f && r.blocks[0].color == Color::rgb(200, 0, 0),
+               "1.6 / 编译：字号取内联覆盖 20 磅，字体与颜色取自样式（5 号、红）");
+
+    // 改样式表再编一次：产物跟着变（编译不做缓存，模型改了就重编）。
+    style.para.font_index = 6;
+    sheet.add(style);
+    const CompileResult r2 = compileDocument(tree, FlowVisibility::Design, sheet);
+    expectTrue(r2.ok() && r2.blocks.size() == 1 && r2.blocks[0].font_index == 6,
+               "1.6 / 编译：样式表改过之后重新编译，产物跟着变");
+
+    // 未知样式名：记诊断，不静默降级（ok() 变假，调用方不能当完整结果用）。
+    tree.find(mark)->styleRef = "没有这个样式";
+    const CompileResult r3 = compileDocument(tree, FlowVisibility::Design, sheet);
+    expectTrue(!r3.ok() && r3.blocks.size() == 1 &&
+                   r3.diagnostics[0].detail.find("不存在") != std::string::npos,
+               "1.6 / 编译：未知样式名进诊断，产物仍编出一段");
+}
+
+/**
+ * 1.6：样式引用是内容的一部分，捕获子树、复制片段、撤销都要把它带上。
+ */
+void checkStyleRefTravels() {
+    NodeTree a;
+    const NodeId sec = a.firstSectionId();
+    const NodeId t = a.appendChild(sec, NodeKind::TextRun);
+    a.setText(t, cps({0x78}));
+    a.find(t)->styleRef = "术语";
+    const NodeId m = a.appendChild(sec, NodeKind::ParagraphMark);
+    a.find(m)->styleRef = "标题";
+    a.find(m)->para.line_factor = 2.0f;
+
+    // 节点级：捕获再物化到另一棵树里，样式引用与内联覆盖逐项相同。
+    const NodeSpec spec = captureSubtree(a, sec);
+    NodeTree b;
+    const NodeId copied = materializeSubtree(b, b.rootId(), 0, spec);
+    expectTrue(copied != kInvalidNodeId && b.find(copied) != nullptr &&
+                   b.find(copied)->children.size() == 2,
+               "1.6 / 子树：捕获再物化到另一棵树成功");
+    if (copied != kInvalidNodeId && b.find(copied)->children.size() == 2) {
+        const Node* bt = b.find(copied)->children[0];
+        const Node* bm = b.find(copied)->children[1];
+        expectTrue(bt->styleRef == "术语" && isParagraphMark(bm->kind) && bm->styleRef == "标题" &&
+                       bm->para.line_factor.has_value(),
+                   "1.6 / 子树：字符样式与段落样式随子树一起过去");
+    }
+
+    // 片段级：提取带上样式引用，插回去之后仍在（复制粘贴走的就是这条路）。
+    const ExtractResult ex = extractRange(a, Range{1, 3});
+    expectTrue(ex.ok && ex.fragment.pieces.size() == 2 &&
+                   ex.fragment.pieces[0].styleRef == "术语" &&
+                   ex.fragment.pieces[1].styleRef == "标题" &&
+                   ex.fragment.pieces[1].para.line_factor.has_value(),
+               "1.6 / 片段：提取带上字符样式与段落样式");
+
+    NodeTree c;
+    InsertFragment ins;
+    ins.at = 1;
+    ins.content = ex.fragment;
+    expectTrue(applyStep(c, Step{ins}).ok, "1.6 / 片段：把提取出来的片段插进另一棵树");
+    const Node* csec = c.find(c.firstSectionId());
+    if (csec != nullptr && csec->children.size() == 2) {
+        expectTrue(csec->children[0]->styleRef == "术语" &&
+                       isParagraphMark(csec->children[1]->kind) &&
+                       csec->children[1]->styleRef == "标题" &&
+                       csec->children[1]->para.line_factor.has_value(),
+                   "1.6 / 片段：粘贴之后样式引用与内联覆盖都在");
+    } else {
+        expectTrue(false, "1.6 / 片段：插入之后应该有一个文本节点与一个段落标记");
+    }
+
+    // 撤销：删掉段落标记再撤销，样式与格式都要回来。
+    NodeTree d;
+    const NodeId dsec = d.firstSectionId();
+    d.setText(d.appendChild(dsec, NodeKind::TextRun), cps({0x79}));
+    const NodeId dm = d.appendChild(dsec, NodeKind::ParagraphMark);
+    d.find(dm)->styleRef = "标题";
+    d.find(dm)->para.line_factor = 3.0f;
+    const ParaMarkBuild built = makeRemoveParaMark(d, 2);
+    expectTrue(built.ok, "1.6 / 撤销：构造删除段落标记的步骤（格式从文档读出）" +
+                             (built.ok ? "" : "（" + built.error + "）"));
+    const std::vector<std::string> before = shapeSnapshot(d);
+    expectTrue(applyStep(d, built.step).ok, "1.6 / 撤销：应用删除");
+    const StepResult back = applyStep(d, invertStep(built.step));
+    // 比形状而不是比节点 ID：段落标记在模型里没有身份（它的身份是流位置），撤销是"造一个
+    // 新的标记"，要求 ID 不变等于给模型加一条它本来没有的约束。
+    expectTrue(back.ok && shapeSnapshot(d) == before,
+               "1.6 / 撤销：撤销之后逐字段回到原样（含段落样式与内联覆盖）");
+}
+
 }  // namespace
 
 int main() {
+    // 不缓冲：崩溃时已经打印出来的断言行不会留在缓冲区里丢掉，定位崩溃点全靠它。
+    // MSVC 把 _IOLBF 当成全缓冲，所以这里必须用 _IONBF。
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
     std::printf(
-        "=== 文档模型 0.1 ~ 1.4：位置、分段、不变量、编译、长度、规范化、步骤、撤销、落点 ===\n");
+        "=== 文档模型 0.1 ~ 1.6：位置、分段、不变量、编译、长度、规范化、步骤、撤销、落点、"
+        "控件、样式 ===\n");
 
     // 两种可见性口径各过一遍：位置空间不同，但"往返互逆"必须各自成立。
     const FlowVisibility kBoth[2] = {FlowVisibility::Design, FlowVisibility::Display};
@@ -3290,6 +3681,13 @@ int main() {
     checkAppearance();
     checkValueShapes();
     checkAsyncGate();
+
+    std::printf("  --- 1.6：样式表与三层解析、缓存 ---\n");
+    checkStyleResolution();
+    checkStyleChainEdges();
+    checkStyleCache();
+    checkStyleThroughCompile();
+    checkStyleRefTravels();
 
     std::printf("  --- 1.3：事务与撤销分组 ---\n");
     checkUndoRedo();

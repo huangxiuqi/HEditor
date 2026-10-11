@@ -65,6 +65,7 @@ ExtractResult extractRange(const NodeTree& tree, Range range) {
     for (const Cover& c : covers) {
         const Node* n = tree.find(c.node);
         Piece piece;
+        piece.styleRef = n->styleRef;
         if (isText(n->kind)) {
             piece.kind = PieceKind::Text;
             piece.marks = n->marks;

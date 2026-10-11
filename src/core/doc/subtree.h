@@ -14,6 +14,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include "core/doc/char_format.h"
@@ -30,7 +31,8 @@ struct NodeSpec {
     NodeKind kind = NodeKind::TextRun;
     bool hidden = false;
     std::vector<uint32_t> text;  // 仅文本节点
-    ParaFormat para;             // 仅段落标记
+    ParaFormatPatch para;        // 仅段落标记
+    std::string styleRef;        // 仅段落标记与文本节点
     CharFormat marks;            // 仅文本节点
     ControlSpec control;         // 仅内容控件
     std::vector<NodeSpec> children;

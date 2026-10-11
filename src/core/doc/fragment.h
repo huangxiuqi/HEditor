@@ -34,7 +34,13 @@ struct Piece {
     PieceKind kind = PieceKind::Text;
     std::vector<uint32_t> cps;  // 仅 Text
     CharFormat marks;           // 仅 Text
-    ParaFormat para;            // 仅 ParaMark
+    ParaFormatPatch para;       // 仅 ParaMark
+
+    /**
+     * 样式引用：文本片段里是字符样式，段落标记片段里是段落样式（第六节）。
+     * 复制粘贴与分段的往返都要带上它，否则"复制一段带样式的段落"粘回来样式就没了。
+     */
+    std::string styleRef;
 
     /**
      * 这一段占几个流位置：文本按码点数，段落标记占一个。
