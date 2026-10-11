@@ -79,6 +79,12 @@ private:
         if (vis_ == FlowVisibility::Display && n->hidden) return;
 
         if (isText(n->kind)) {
+            // 字符样式还没进编译（要等 1.6 的样式表）。设了样式却不报出来，等于静默丢格式：
+            // 排版结果看着没错，只是样式没了，比"不支持"难查得多。
+            if (!n->marks.empty() && !flagged) {
+                out_.diagnostics.push_back(CompileDiagnostic{
+                    n->kind, n->id, "文本的字符样式尚未进入编译（等 1.6 样式表），marks 被忽略"});
+            }
             cps_.insert(cps_.end(), n->text.begin(), n->text.end());
             return;
         }

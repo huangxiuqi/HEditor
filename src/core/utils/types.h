@@ -10,6 +10,12 @@ namespace heditor {
 struct Color {
     uint8_t r = 0, g = 0, b = 0, a = 255;
     static Color rgb(uint8_t r_, uint8_t g_, uint8_t b_) { return Color{r_, g_, b_, 255}; }
+
+    /**
+     * 逐字段相等。显式默认而不是靠调用方手写：字符属性集合要靠它判断"两个 run 的标记是否
+     * 相同"，漏比一个通道就会把两个不同的颜色判成同一个。
+     */
+    bool operator==(const Color& o) const = default;
 };
 
 struct Point {

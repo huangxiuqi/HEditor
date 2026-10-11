@@ -228,6 +228,11 @@ add_library(heditor_core STATIC
   src/core/doc/invariants.cpp
   src/core/doc/compile.cpp
   src/core/doc/length.cpp
+  src/core/doc/normalize.cpp
+  src/core/doc/range.cpp
+  src/core/doc/fragment.cpp
+  src/core/doc/steps.cpp
+  src/core/doc/transaction.cpp
   src/core/text/font.cpp
   src/core/text/shaper.cpp
   src/core/text/fallback.cpp

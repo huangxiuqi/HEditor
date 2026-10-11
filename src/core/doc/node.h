@@ -18,6 +18,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "core/doc/char_format.h"
 #include "core/doc/para_format.h"
 
 namespace heditor {
@@ -118,6 +119,12 @@ struct Node {
      * 而流顺序就是树的顺序。其余种类读它没有定义。
      */
     ParaFormat para;
+
+    /**
+     * 字符属性：只对 TextRun 有意义（第二节：标记是文本节点上的属性集合）。
+     * 与 para 同一个理由：规范化与编译都要按流顺序取它。其余种类读它没有定义。
+     */
+    CharFormat marks;
 };
 
 /**

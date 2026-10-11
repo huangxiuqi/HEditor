@@ -1,0 +1,89 @@
+/**
+ * 片段：从文档里取出来的一段内容，可以原样插回。
+ *
+ * 它只装文本与段落标记 —— 这是 1.2 的可编辑集合。含其它元素的区间在提取时就被拒并给出原因，
+ * 不会产出一个半截的片段（静默截断比"还不支持"难查得多）。片段在内存里是内容的一份拷贝，
+ * 与文档树没有连接，所以既能当剪贴板内容，也能当步骤的还原数据。
+ *
+ * 为什么片段不记节点 ID：它表达的是"内容"，而内容的落点由插回时的位置决定。文本节点的身份
+ * 本来也不参与往返判据 —— 区间边界落在文本中间时原节点被切开，插回时是新的节点。
+ */
+#pragma once
+
+#include <cstdint>
+#include <string>
+#include <vector>
+
+#include "core/doc/char_format.h"
+#include "core/doc/flow.h"
+#include "core/doc/node.h"
+#include "core/doc/para_format.h"
+#include "core/doc/range.h"
+
+namespace heditor {
+
+/**
+ * 片段里的一段。
+ */
+enum class PieceKind : uint8_t {
+    Text,      // 带标记的文本
+    ParaMark,  // 段落标记，段落格式挂在它身上
+};
+
+struct Piece {
+    PieceKind kind = PieceKind::Text;
+    std::vector<uint32_t> cps;  // 仅 Text
+    CharFormat marks;           // 仅 Text
+    ParaFormat para;            // 仅 ParaMark
+
+    /**
+     * 这一段占几个流位置：文本按码点数，段落标记占一个。
+     */
+    int span() const;
+};
+
+struct Fragment {
+    std::vector<Piece> pieces;
+
+    int span() const;
+    bool empty() const { return pieces.empty(); }
+};
+
+/**
+ * 区间覆盖到的一个直接子节点：节点本身，以及被覆盖的那一段（流坐标）。
+ */
+struct Cover {
+    NodeId node = kInvalidNodeId;
+    FlowPos first = 0;  // 该节点自己的流起点
+    FlowPos from = 0;   // 被覆盖部分的起点
+    FlowPos to = 0;     // 被覆盖部分的终点（开）
+};
+
+/**
+ * 区间覆盖到的直接子节点清单，按流顺序。
+ *
+ * 覆盖到的元素一定同属一个父容器：任何夹在中间的容器都会落进区间，而容器在这个口径下不被
+ * 支持、先被拒掉。于是调用方拿到的是同一层的孩子，不需要跨层处理。
+ *
+ * 有元素既不是文本也不是段落标记时返回 false 并写明是哪一个 —— 不静默截断。
+ */
+bool collectCovers(const NodeTree& tree, const Range& range, std::vector<Cover>* out,
+                   std::string* error);
+
+/**
+ * 提取结果。失败时 fragment 为空、error 写明原因。
+ */
+struct ExtractResult {
+    Fragment fragment;
+    bool ok = false;
+    std::string error;
+};
+
+/**
+ * 取区间（纯读，不产生步骤）。
+ *
+ * 内部先做端点规范化，于是片段永远良构：不可能切在控件中间，也不会留下落单的边界。
+ */
+ExtractResult extractRange(const NodeTree& tree, Range range);
+
+}  // namespace heditor

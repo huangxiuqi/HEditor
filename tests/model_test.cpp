@@ -1,21 +1,20 @@
 /**
- * 文档模型 0.1 / 0.2 / 0.3 / 0.4 / 0.5 的判据：位置换算、段落分段、不变量检查器、编译、长度。
+ * 文档模型 0.1 ~ 1.3 的判据：位置、分段、不变量、编译、长度、规范化、编辑步骤、撤销。
  *
- * 这一层没法靠"看起来对"验收 —— 位置错一格，表象是光标跳、命中偏、撤销回错地方，
- * 全都要到界面才看得见。所以判据只落在数据层，五条可证伪的：
- *   0.1 流位置不丢：对每个流位置 f，flowAt(posAt(f)) == f；
- *       往返不改归属：对每个合法 Pos p，flowAt(posAt(flowAt(p))) == flowAt(p)。
- *       第二条这样写是为了绕开"同一位置有多种 Pos 写法"—— 容器的第 0 个槽位与第一个孩子的
- *       第一个位置本来就是同一个流位置，要求 Pos 逐字段相等会把正确实现判成错。
- *   0.2 下标数组与全部段落查询跟暴力算法逐项比对，并在随机增删中每步与重建结果整体比对。
- *   0.3 不变量检查器：对现有形状全绿，且逐条构造反例时必须报出对应的那条规则。
- *   0.4 编译：同一份内容走"现有 BlockSpec 路径"与"树 → 编译"两条路，结果逐字段一致；
- *       另加切段口径（标记切段、容器边界不切）、末尾未结束的段、隐藏摘除、不支持元素记诊断。
- *   0.5 长度：单位换算的两支往返（正向量化误差不超过半个 EMU、反向对整数倍精确）、
- *       五种性质的文本形式往返后种类与数值都不丢、畸形输入全被拒、非绝对长度在编译期被拒。
+ * 这一层没法靠"看起来对"验收 —— 位置错一格，表象是光标跳、命中偏、撤销回错地方，全都要到
+ * 界面才看得见。所以判据只落在数据层，每条都可证伪：
+ *   0.1 流位置不丢（flowAt(posAt(f)) == f）与往返不改归属；后者绕开"同一位置有多种 Pos
+ *       写法"—— 容器第 0 槽位与第一个孩子的第一个位置本来就是一个流位置。
+ *   0.2 下标数组与全部段落查询跟暴力算法逐项比对，随机增删中每步与重建结果整体比对。
+ *   0.3 不变量检查器：现有形状全绿，且逐条构造反例时必须报出对应的那条规则。
+ *   0.4 编译：同一份内容走"现有 BlockSpec 路径"与"树 → 编译"两条路逐字段一致。
+ *   0.5 长度：单位换算的两支往返、文本形式往返后类型与数值都不丢、畸形输入全被拒。
+ *   1.1 规范化：幂等（第二遍零改动且快照逐条相同）、跨容器不合并、空容器不清除。
+ *   1.2 步骤：应用加逆操作回到原样；取删插等于原状；端点外扩；映射与逆映射往返一致。
+ *   1.3 撤销：连撤 N 次逐次回到对应步骤的状态、重做逐次回到编辑后、连续输入并成一个撤销单位、
+ *       提交中途失败整条作废。
  *
- * 覆盖四层：写死的形状（嵌套、跨段落标记、空容器、表格、隐藏）、穷举、随机、以及增删序列，
- * 前两层在两种可见性口径下各过一遍（位置空间不同，但"往返互逆"必须各自成立）。
+ * 覆盖四层：写死的形状、穷举、随机、增删序列；前两层在两种可见性口径下各过一遍。
  */
 #include <algorithm>
 #include <cmath>
@@ -26,10 +25,15 @@
 
 #include "core/doc/compile.h"
 #include "core/doc/flow.h"
+#include "core/doc/fragment.h"
 #include "core/doc/invariants.h"
 #include "core/doc/length.h"
 #include "core/doc/node.h"
+#include "core/doc/normalize.h"
 #include "core/doc/para.h"
+#include "core/doc/range.h"
+#include "core/doc/steps.h"
+#include "core/doc/transaction.h"
 #include "core/utils/units.h"
 #include "demo/demo_documents.h"
 
@@ -141,12 +145,17 @@ NodeTree makeSingleParagraph() {
 
 /**
  * 两个 run 挨着：Section → TextRun("ab"), TextRun("cd"), ParagraphMark
+ *
+ * 两个 run 的标记刻意不同：同标记的相邻文本节点是未规范形状（1.1），而这份形状要能在
+ * 不变量检查下全绿。
  */
 NodeTree makeTwoRuns() {
     NodeTree tree;
     const NodeId sec = tree.firstSectionId();
     tree.setText(tree.appendChild(sec, NodeKind::TextRun), cps({0x61, 0x62}));
-    tree.setText(tree.appendChild(sec, NodeKind::TextRun), cps({0x63, 0x64}));
+    const NodeId b = tree.appendChild(sec, NodeKind::TextRun);
+    tree.setText(b, cps({0x63, 0x64}));
+    tree.find(b)->marks.bold = true;
     tree.appendChild(sec, NodeKind::ParagraphMark);
     return tree;
 }
@@ -624,8 +633,11 @@ void checkParaIncremental(uint32_t seed, FlowVisibility vis, const char* vis_nam
     expectTrue(bad_notify == 0, pre + "：每次通知的接受与拒绝都与记账范围一致");
     expectTrue(mismatch == 0, pre + "：每一步之后整张表都与重新构造的结果逐项相同");
     checkParagraphIndex(tree, vis, pre + " 终态");
-    // 0.3："任何编辑操作之后都要重新满足"——这里就是对真实增删序列之后的树跑一遍。
-    expectClean(tree, pre + " 增删之后的不变量");
+    // 0.3："任何编辑操作之后都要重新满足"，而规范化在事务提交前跑一次（1.1）——
+    // 所以先规范化，再按"已提交文档"的口径检查。
+    const NormalizeResult norm = normalizeDocument(tree);
+    expectClean(tree, pre + " 增删之后的不变量（规范化：并 " + std::to_string(norm.merged) +
+                        "、清 " + std::to_string(norm.removed) + "）");
 }
 
 /**
@@ -674,8 +686,9 @@ void checkInvariantRuleSet() {
     static const char* kWant[] = {
         "结构.根唯一且其下是节序列", "结构.子节点类型与叶子约束",
         "结构.无孤立节点",           "结构.隐藏只在编辑模式下在流里",
-        "文本.文本节点非空",         "容器.边界成对有序不交叉",
-        "容器.切段无缝隙",           "身份.节点 ID 唯一且索引自洽",
+        "文本.文本节点非空",         "文本.相邻同标记的 run 必须合并",
+        "容器.边界成对有序不交叉",   "容器.切段无缝隙",
+        "身份.节点 ID 唯一且索引自洽",
         "身份.节点种类在声明范围内",
     };
     int missing = 0;
@@ -777,6 +790,28 @@ void checkInvariantCounterexamples() {
         const NodeId taken = tree.eraseChild(sec, 0);
         expectTrue(taken == cc && checkInvariants(tree).ok(),
                    "反例的对照：被摘下的子树留在池里不算孤立节点，检查器必须仍然全绿");
+    }
+    {
+        NodeTree tree;
+        const NodeId sec = tree.firstSectionId();
+        tree.setText(tree.appendChild(sec, NodeKind::TextRun), cps({0x61}));
+        tree.setText(tree.appendChild(sec, NodeKind::TextRun), cps({0x62}));
+        expectTrue(reported(checkInvariants(tree), "文本.相邻同标记的 run 必须合并"),
+                   "反例：相邻两个同标记的文本节点 → 报相邻同标记必须合并");
+    }
+    // 对照：不同标记的两个 run 加一个空 run，规范化之后这条规则必须安静 ——
+    // 否则它就成了"永远报警"。
+    {
+        NodeTree tree;
+        const NodeId sec = tree.firstSectionId();
+        tree.setText(tree.appendChild(sec, NodeKind::TextRun), cps({0x61}));
+        const NodeId b = tree.appendChild(sec, NodeKind::TextRun);
+        tree.setText(b, cps({0x62}));
+        tree.find(b)->marks.bold = true;
+        tree.setText(tree.appendChild(sec, NodeKind::TextRun), {});
+        normalizeDocument(tree);
+        expectTrue(checkInvariants(tree).ok() && tree.find(sec)->children.size() == 2,
+                   "反例的对照：不同标记的两个 run 加一个空 run，规范化之后全绿且只剩两个");
     }
 }
 
@@ -1116,10 +1151,697 @@ void checkCompileRejectsRelativeLength() {
                "0.5 / 编译：非绝对的段后距被拒，且只报这一条");
 }
 
+/**
+ * 1.1：把一份字符属性集合压成可比的字符串。
+ *
+ * 快照必须含"会被规范化改动的一切"，否则"跑两遍结果相同"可能因为改动被漏比而假绿。
+ * 未设置报 0、显式设成假报 1、设成真报 2 —— 三种状态要能分开，否则"继承"与"显式关掉"
+ * 会被当成同一件事。
+ */
+std::string marksKey(const CharFormat& m) {
+    std::string s;
+    s += std::to_string(m.bold.has_value() ? (m.bold.value() ? 2 : 1) : 0);
+    s += std::to_string(m.italic.has_value() ? (m.italic.value() ? 2 : 1) : 0);
+    s += std::to_string(m.underline.has_value() ? (m.underline.value() ? 2 : 1) : 0);
+    s += "|" + std::to_string(m.font_index.value_or(-1));
+    s += "|" + (m.size.has_value() ? printLength(*m.size) : std::string("-"));
+    s += "|" + (m.color.has_value() ? std::to_string(m.color->r) + "," +
+                                         std::to_string(m.color->g) + "," +
+                                         std::to_string(m.color->b)
+                                   : std::string("-"));
+    return s;
+}
+
+/**
+ * 结构化快照：前序走一遍，每个节点一条记录。拿它比"跑两遍规范化结果相同"、
+ * 以及"步骤往返之后文档回到原样" —— 只比改动读数是不够的，读数漏报一类改动时判据就成了空话。
+ *
+ * 记录含码点内容本身，否则"文本被换成另一段同样长的文本"这种错比不出来。
+ * 不含节点 ID：文本节点的身份不参与往返判据（区间边界落在文本中间时原节点被切开，
+ * 插回时是新的节点）。
+ */
+void snapshotInto(const NodeTree& tree, NodeId id, std::vector<std::string>* out) {
+    const Node* n = tree.find(id);
+    std::string s = nodeKindName(n->kind);
+    s += "|t=";
+    for (uint32_t cp : n->text) s += std::to_string(cp) + ",";
+    s += "|m=" + marksKey(n->marks);
+    s += "|p=" + std::to_string(n->para.font_index) + "," + printLength(n->para.size) + "," +
+         printLength(n->para.space_after) + "," + std::to_string(n->para.line_factor);
+    s += "|h=" + std::to_string(n->hidden ? 1 : 0);
+    s += "|kids=" + std::to_string(n->children.size());
+    out->push_back(std::move(s));
+    for (const Node* c : n->children) snapshotInto(tree, c->id, out);
+}
+
+std::vector<std::string> shapeSnapshot(const NodeTree& tree) {
+    std::vector<std::string> out;
+    snapshotInto(tree, tree.rootId(), &out);
+    return out;
+}
+
+/**
+ * 两个快照的第一处不同；全同返回 -1。
+ */
+int firstSnapshotDiff(const std::vector<std::string>& a, const std::vector<std::string>& b) {
+    const size_t n = std::min(a.size(), b.size());
+    for (size_t i = 0; i < n; ++i) {
+        if (a[i] != b[i]) return static_cast<int>(i);
+    }
+    return a.size() == b.size() ? -1 : static_cast<int>(n);
+}
+
+/**
+ * 两个快照的差异说明：相同返回空串，不同返回"第几条、两边分别是什么"。
+ */
+std::string snapshotDiffText(const std::vector<std::string>& a, const std::vector<std::string>& b) {
+    const int i = firstSnapshotDiff(a, b);
+    if (i < 0) return "";
+    const size_t k = static_cast<size_t>(i);
+    const std::string left = k < a.size() ? a[k] : std::string("（没有）");
+    const std::string right = k < b.size() ? b[k] : std::string("（没有）");
+    return "第 " + std::to_string(i) + " 条不同：" + left + " → " + right;
+}
+
+/**
+ * 刻意未规范的树：相邻同标记、夹着空 run、标记不同的 run、嵌套容器、空容器、隐藏子树。
+ */
+NodeTree makeMessyTree() {
+    NodeTree tree;
+    const NodeId sec = tree.firstSectionId();
+    tree.setText(tree.appendChild(sec, NodeKind::TextRun), cps({0x61}));
+    tree.setText(tree.appendChild(sec, NodeKind::TextRun), cps({0x62}));
+    tree.appendChild(sec, NodeKind::TextRun);  // 空 run
+    tree.setText(tree.appendChild(sec, NodeKind::TextRun), cps({0x63}));
+    const NodeId italic = tree.appendChild(sec, NodeKind::TextRun);
+    tree.setText(italic, cps({0x64}));
+    tree.find(italic)->marks.italic = true;
+    tree.appendChild(sec, NodeKind::ParagraphMark);
+
+    const NodeId cc = tree.appendChild(sec, NodeKind::ContentControl);
+    tree.setText(tree.appendChild(cc, NodeKind::TextRun), cps({0x65}));
+    const NodeId f = tree.appendChild(cc, NodeKind::TextRun);
+    tree.setText(f, cps({0x66}));
+    tree.find(f)->marks.bold = true;
+
+    tree.appendChild(sec, NodeKind::ContentControl);  // 空容器
+    tree.appendChild(sec, NodeKind::ParagraphMark);
+
+    const NodeId hidden = tree.appendChild(sec, NodeKind::ContentControl);
+    tree.find(hidden)->hidden = true;
+    tree.setText(tree.appendChild(hidden, NodeKind::TextRun), cps({0x78}));
+    tree.setText(tree.appendChild(hidden, NodeKind::TextRun), cps({0x79}));
+    return tree;
+}
+
+/**
+ * 1.1：规范化的形状判据。两条边界刻意不越界 —— 跨容器不合并、空容器不清除。
+ */
+void checkNormalizeShapes() {
+    NodeTree tree = makeMessyTree();
+    const NodeId sec = tree.firstSectionId();
+    const NormalizeResult r = normalizeDocument(tree);
+    const Node* s = tree.find(sec);
+
+    expectTrue(r.merged == 3 && r.removed == 1,
+               "1.1 / 形状：同标记三连并成一个、跨容器的一对并成一个（并 " +
+                   std::to_string(r.merged) + "）、清掉一个空 run（清 " +
+                   std::to_string(r.removed) + "）");
+    expectTrue(s->children.size() == 7, "1.1 / 形状：Section 下剩 7 个孩子（原 10 个）");
+    expectTrue(s->children.size() == 7 && isText(s->children[0]->kind) &&
+                   s->children[0]->text == cps({0x61, 0x62, 0x63}) &&
+                   s->children[0]->marks.empty(),
+               "1.1 / 形状：第一个孩子是合并后的 abc，且标记仍是空的");
+    expectTrue(s->children.size() == 7 && s->children[1]->marks.italic.value_or(false),
+               "1.1 / 形状：标记不同的 run 不被合并（第二个仍是 italic 的那一个）");
+    // 空容器不清除：它可能是"作者删空了内容的控件"，有身份、有属性，与空 run 不是一类。
+    expectTrue(s->children.size() == 7 && isContainer(s->children[4]->kind) &&
+                   s->children[4]->children.empty(),
+               "1.1 / 形状：空容器保留（与空 run 相反）");
+    expectTrue(s->children.size() == 7 && s->children[3]->children.size() == 2,
+               "1.1 / 形状：控件内部标记不同的一对不合并");
+    // 隐藏子树照样规范化：规范化是文档自身的性质，与呈现口径无关。
+    expectTrue(s->children.size() == 7 && s->children[6]->hidden &&
+                   s->children[6]->children.size() == 1 &&
+                   s->children[6]->children[0]->text == cps({0x78, 0x79}),
+               "1.1 / 形状：隐藏子树内部也合并（xy），节点本身保留");
+    expectClean(tree, "1.1 / 规范化之后的树");
+}
+
+/**
+ * 1.1 的核心判据：幂等。
+ *
+ * 两支都要验：跑第二遍的改动读数为 0（它自己认为无事可做），以及结构化快照逐条相同
+ * （它确实什么都没改）。前者漏掉"改了却没计数"，后者漏不掉，但读数更能定位问题。
+ */
+void checkNormalizeIdempotent() {
+    NodeTree tree = makeMessyTree();
+    const NormalizeResult first = normalizeDocument(tree);
+    const std::vector<std::string> snapshot1 = shapeSnapshot(tree);
+    const NormalizeResult second = normalizeDocument(tree);
+    const std::vector<std::string> snapshot2 = shapeSnapshot(tree);
+
+    expectTrue(first.changed() && first.merged == 3 && first.removed == 1,
+               "1.1 / 幂等：第一遍确实有改动（并 " + std::to_string(first.merged) + "、清 " +
+                   std::to_string(first.removed) + "）");
+    expectTrue(!second.changed(), "1.1 / 幂等：第二遍改动读数为 0（并 " +
+                                      std::to_string(second.merged) + "、清 " +
+                                      std::to_string(second.removed) + "）");
+    const int diff = firstSnapshotDiff(snapshot1, snapshot2);
+    expectTrue(diff < 0, "1.1 / 幂等：结构化快照逐条相同（" + std::to_string(snapshot1.size()) +
+                             " 个节点" +
+                             (diff < 0 ? "" : "，首处第 " + std::to_string(diff) + " 条") + "）");
+    expectTrue(shapeSnapshot(tree).size() == snapshot1.size(),
+               "1.1 / 幂等：规范形状是唯一的（节点数不再变）");
+}
+
+/**
+ * 1.1：规范化只改形状，不改内容。判据落在编译产物上 —— 它是"文本 + 段落格式"的完整取值，
+ * 比逐段核对码点更全面，也正好复用 0.4 的逐字段比较。
+ */
+void checkNormalizeKeepsContent() {
+    NodeTree tree = makeMessyTree();
+    const CompileResult before = compileDocument(tree, FlowVisibility::Design);
+    const NormalizeResult r = normalizeDocument(tree);
+    const CompileResult after = compileDocument(tree, FlowVisibility::Design);
+
+    int diff = 0;
+    std::string first;
+    if (before.blocks.size() != after.blocks.size()) {
+        diff = 1;
+    } else {
+        for (size_t i = 0; i < before.blocks.size(); ++i) {
+            const std::string d = diffBlock(before.blocks[i], after.blocks[i]);
+            if (!d.empty()) {
+                ++diff;
+                if (first.empty()) first = "第 " + std::to_string(i + 1) + " 段差在 " + d;
+            }
+        }
+    }
+    std::string msg = "1.1 / 规范化不改内容：编译产物逐字段不变（" +
+                      std::to_string(after.blocks.size()) + " 段，不一致 " + std::to_string(diff) +
+                      "）";
+    if (!first.empty()) msg += "，首处 " + first;
+    expectTrue(r.changed() && diff == 0, msg);
+}
+
+/**
+ * 1.2 的编辑用文档：两段，第二段里嵌着一个控件（用来验端点外扩）。
+ *
+ * Section → TextRun("abcdef"), ParagraphMark, TextRun("xy"),
+ *           ContentControl[TextRun("cd", italic)], ParagraphMark
+ *
+ * 流坐标：TextRun("abcdef") 占 [1,7)、标记 [7,8)、TextRun("xy") 占 [8,10)、
+ * 控件占 [10,14)（起始边界 10、内容 [11,13)、结束边界 13）、标记 [14,15)，总数 16。
+ */
+NodeTree makeEditTree() {
+    NodeTree tree;
+    const NodeId sec = tree.firstSectionId();
+    tree.setText(tree.appendChild(sec, NodeKind::TextRun), cps({0x61, 0x62, 0x63, 0x64, 0x65, 0x66}));
+    const NodeId pm = tree.appendChild(sec, NodeKind::ParagraphMark);
+    // 段落格式刻意不给默认值：这样"段落标记把格式一起带出来"才是一条真的断言。
+    tree.find(pm)->para.font_index = 3;
+    tree.find(pm)->para.size = Length::abs(ptToEmu(14.0));
+    tree.setText(tree.appendChild(sec, NodeKind::TextRun), cps({0x78, 0x79}));
+    const NodeId cc = tree.appendChild(sec, NodeKind::ContentControl);
+    const NodeId inner = tree.appendChild(cc, NodeKind::TextRun);
+    tree.setText(inner, cps({0x63, 0x64}));
+    tree.find(inner)->marks.italic = true;
+    tree.appendChild(sec, NodeKind::ParagraphMark);
+    return tree;
+}
+
+/**
+ * 1.2：端点规范化。落在不可半分单位内部的一端向外扩到那个单位的边界。
+ */
+void checkRangeNormalize() {
+    const NodeTree tree = makeEditTree();
+
+    // 两端都落在控件内部（[11,13) 是控件里的那两个码点）→ 各自扩到控件的边界。
+    expectTrue(normalizeRange(tree, Range{11, 13}) == Range{10, 14},
+               "1.2 / 端点外扩：两端都在控件内部时各扩到控件边界");
+    // 只有起点在里面：起点收到控件起点，终点不动。
+    expectTrue(normalizeRange(tree, Range{11, 15}) == Range{10, 15},
+               "1.2 / 端点外扩：只有起点在控件内部时只收起点");
+    // 反向的区间（anchor 在右）：扩的是对应那一端，方向不变。
+    expectTrue(normalizeRange(tree, Range{13, 11}) == Range{14, 10},
+               "1.2 / 端点外扩：反向区间同样按角色扩，方向保留");
+    // 不在任何单位内部的位置一个都不动（文本里的位置本来就合法）。
+    expectTrue(normalizeRange(tree, Range{2, 4}) == Range{2, 4},
+               "1.2 / 端点外扩：文本内部的位置不动");
+    // 空区间（光标）不扩：扩了会把"点在控件里"变成"选中整个控件"。
+    expectTrue(normalizeRange(tree, Range{12, 12}) == Range{12, 12},
+               "1.2 / 端点外扩：空区间（光标）保持不动");
+    expectTrue(normalizeRange(tree, Range{8, 15}) == Range{8, 15},
+               "1.2 / 端点外扩：跨过控件的区间不动（两端本来就在外面）");
+}
+
+/**
+ * 1.2：取区间（纯读）。含控件的区间被拒并给原因 —— 不静默截断。
+ */
+void checkExtract() {
+    const NodeTree tree = makeEditTree();
+
+    // 流坐标：TextRun("abcdef") 占 [1,7)，所以位置 3..5 就是 "cd"。
+    const ExtractResult one = extractRange(tree, Range{3, 5});
+    expectTrue(one.ok && one.fragment.pieces.size() == 1 &&
+                   one.fragment.pieces[0].cps == cps({0x63, 0x64}) && one.fragment.span() == 2,
+               "1.2 / 提取：一段文本，片段长度等于区间长度");
+
+    // 跨段落标记：取出文本 + 段落标记 + 文本三段，片段长度 = 2 + 1 + 1。
+    const ExtractResult multi = extractRange(tree, Range{5, 9});
+    expectTrue(multi.ok && multi.fragment.pieces.size() == 3 &&
+                   multi.fragment.pieces[0].cps == cps({0x65, 0x66}) &&
+                   multi.fragment.pieces[1].kind == PieceKind::ParaMark &&
+                   multi.fragment.pieces[2].cps == cps({0x78}) && multi.fragment.span() == 4,
+               "1.2 / 提取：跨段落标记取出三段（文本 / 标记 / 文本）");
+    expectTrue(multi.ok && multi.fragment.pieces[1].para.font_index == 3 &&
+                   multi.fragment.pieces[1].para.size == Length::abs(ptToEmu(14.0)),
+               "1.2 / 提取：段落标记把段落格式一起带出来");
+
+    const ExtractResult bad = extractRange(tree, Range{10, 14});
+    expectTrue(!bad.ok && bad.error.find("ContentControl") != std::string::npos,
+               "1.2 / 提取：区间含控件时被拒，原因里点出是哪种元素（" + bad.error + "）");
+
+    // 直接给一个落在控件内部的区间也一样：先外扩，再因为含控件而被拒。
+    const ExtractResult inside = extractRange(tree, Range{11, 13});
+    expectTrue(!inside.ok, "1.2 / 提取：落在控件内部的区间先外扩、再被判为含控件");
+
+    const ExtractResult empty = extractRange(tree, Range{3, 3});
+    expectTrue(empty.ok && empty.fragment.empty(), "1.2 / 提取：空区间取出空片段");
+}
+
+/**
+ * 1.2 的核心判据：步骤往返。
+ *
+ * 应用步骤、规范化、应用逆步骤、再规范化 —— 结构化快照必须与开始时逐条相同。规范化夹在中间
+ * 是刻意的：步骤只做最小改动，"合法形状"的定义在规范化那一侧（1.1），真实调用也是这个次序
+ * （事务提交前跑一次规范化）。
+ */
+std::string roundTrip(NodeTree& tree, const Step& step) {
+    normalizeDocument(tree);
+    const std::vector<std::string> before = shapeSnapshot(tree);
+
+    const StepResult applied = applyStep(tree, step);
+    if (!applied.ok) return "应用失败：" + applied.error;
+    normalizeDocument(tree);
+
+    const StepResult undone = applyStep(tree, invertStep(step));
+    if (!undone.ok) return "逆操作失败：" + undone.error;
+    normalizeDocument(tree);
+
+    return snapshotDiffText(before, shapeSnapshot(tree));
+}
+
+/**
+ * 1.2：每个步骤类型的往返判据，参数覆盖头、尾、中间与跨段落。
+ */
+void checkStepRoundTrip() {
+    {
+        NodeTree tree = makeEditTree();
+        InsertText s;
+        s.at = 3;
+        s.cps = cps({0x41, 0x42});
+        expectTrue(roundTrip(tree, Step{s}).empty(), "1.2 / 往返：InsertText 插在文本中间（同标记并入）");
+    }
+    {
+        NodeTree tree = makeEditTree();
+        InsertText s;
+        s.at = 3;
+        s.cps = cps({0x41});
+        s.marks.bold = true;
+        expectTrue(roundTrip(tree, Step{s}).empty(), "1.2 / 往返：InsertText 标记不同（切开原节点）");
+    }
+    {
+        NodeTree tree = makeEditTree();
+        InsertText s;
+        s.at = 1;
+        s.cps = cps({0x41});
+        expectTrue(roundTrip(tree, Step{s}).empty(), "1.2 / 往返：InsertText 插在文档最前");
+    }
+    {
+        NodeTree tree = makeEditTree();
+        InsertText s;
+        s.at = 7;
+        s.cps = cps({0x41});
+        expectTrue(roundTrip(tree, Step{s}).empty(), "1.2 / 往返：InsertText 插在段落标记之前");
+    }
+    {
+        NodeTree tree = makeEditTree();
+        InsertParaMark s;
+        s.at = 4;
+        expectTrue(roundTrip(tree, Step{s}).empty(), "1.2 / 往返：InsertParaMark 分段");
+    }
+    {
+        NodeTree tree = makeEditTree();
+        RemoveParaMark s;
+        s.at = 7;
+        s.para = tree.find(tree.firstSectionId())->children[1]->para;
+        expectTrue(roundTrip(tree, Step{s}).empty(), "1.2 / 往返：RemoveParaMark 合并两段");
+    }
+    {
+        NodeTree tree = makeEditTree();
+        const DeleteBuild b = makeDeleteRange(tree, Range{2, 4});
+        expectTrue(b.ok && roundTrip(tree, b.step).empty(), "1.2 / 往返：DeleteRange 同段内");
+    }
+    {
+        NodeTree tree = makeEditTree();
+        const DeleteBuild b = makeDeleteRange(tree, Range{5, 9});
+        expectTrue(b.ok && roundTrip(tree, b.step).empty(), "1.2 / 往返：DeleteRange 跨段落标记");
+    }
+    {
+        NodeTree tree = makeEditTree();
+        const DeleteBuild b = makeDeleteRange(tree, Range{1, 10});
+        expectTrue(b.ok && roundTrip(tree, b.step).empty(),
+                   "1.2 / 往返：DeleteRange 从文档开头取到控件之前");
+    }
+    {
+        NodeTree tree = makeEditTree();
+        const ExtractResult ex = extractRange(tree, Range{5, 9});
+        InsertFragment f;
+        f.at = 5;
+        f.content = ex.fragment;
+        expectTrue(ex.ok && roundTrip(tree, Step{f}).empty(), "1.2 / 往返：InsertFragment 插回");
+    }
+}
+
+/**
+ * 1.2：取区间 → 删除 → 插回，等于原状。
+ */
+void checkExtractDeleteInsertBack() {
+    NodeTree tree = makeEditTree();
+    normalizeDocument(tree);
+    const std::vector<std::string> before = shapeSnapshot(tree);
+
+    const Range r{5, 9};
+    const ExtractResult ex = extractRange(tree, r);
+    expectTrue(ex.ok && ex.fragment.span() == 4, "1.2 / 取删插：片段长度为 4");
+
+    const DeleteBuild b = makeDeleteRange(tree, r);
+    const StepResult del = applyStep(tree, b.step);
+    normalizeDocument(tree);
+    expectTrue(del.ok && snapshotDiffText(before, shapeSnapshot(tree)) != "",
+               "1.2 / 取删插：删除之后文档确实变了");
+
+    InsertFragment back;
+    back.at = r.begin();
+    back.content = ex.fragment;
+    const StepResult ins = applyStep(tree, Step{back});
+    normalizeDocument(tree);
+
+    const std::string diff = snapshotDiffText(before, shapeSnapshot(tree));
+    expectTrue(ins.ok && diff.empty(), "1.2 / 取删插：插回之后等于原状" +
+                                           (diff.empty() ? "" : "，差异 " + diff));
+    expectClean(tree, "1.2 / 取删插之后的树");
+}
+
+/**
+ * 1.2：位置映射与逆映射往返一致。
+ *
+ * 对区间之外的每个位置 p：映射到编辑后，再用逆步骤映射回来，必须回到 p；两个方向用同一个
+ * assoc。位置正好落在区间端点上时，贴左与贴右各归各的一边 —— 这正是 assoc 存在的理由。
+ * 被删区间内部的位置没有原像，判据不覆盖它们。
+ */
+void checkMapRoundTrip() {
+    struct Case {
+        Step step;
+        FlowPos lo;  // 被影响区间的起点
+        FlowPos hi;  // 终点（插入时为 lo）
+        const char* label;
+    };
+
+    const NodeTree probe = makeEditTree();
+    const int size = FlowIndex(probe, FlowVisibility::Design).size();
+    const DeleteBuild del = makeDeleteRange(probe, Range{5, 9});
+
+    std::vector<Case> cases;
+    {
+        InsertText s;
+        s.at = 3;
+        s.cps = cps({0x41, 0x42});
+        cases.push_back(Case{Step{s}, 3, 3, "InsertText"});
+    }
+    if (del.ok) cases.push_back(Case{del.step, 5, 9, "DeleteRange"});
+    {
+        InsertParaMark s;
+        s.at = 4;
+        cases.push_back(Case{Step{s}, 4, 4, "InsertParaMark"});
+    }
+    {
+        RemoveParaMark s;
+        s.at = 7;
+        cases.push_back(Case{Step{s}, 7, 8, "RemoveParaMark"});
+    }
+
+    for (const Case& c : cases) {
+        int checked = 0;
+        int bad = 0;
+        FlowPos worst = -1;
+        for (FlowPos p = 0; p <= size; ++p) {
+            if (p > c.lo && p < c.hi) continue;
+            const Assoc a = p <= c.lo ? Assoc::Before : Assoc::After;
+            const FlowPos q = mapPos(c.step, p, a);
+            const FlowPos back = mapPos(invertStep(c.step), q, a);
+            ++checked;
+            if (back != p) {
+                ++bad;
+                if (worst < 0) worst = p;
+            }
+        }
+        expectTrue(bad == 0, std::string("1.2 / 位置映射：") + c.label + " 与逆映射往返一致（" +
+                                 std::to_string(checked) + " 个位置，不一致 " + std::to_string(bad) +
+                                 (worst < 0 ? "" : "，首个是 " + std::to_string(worst)) + "）");
+    }
+
+    // 被删区间内部的位置一律塌到区间起点 —— 这一段是单向的，没有原像。
+    {
+        const InsertText s{5, cps({0x41})};
+        expectTrue(mapPos(Step{s}, 5, Assoc::Before) == 5 &&
+                       mapPos(Step{s}, 5, Assoc::After) == 6,
+                   "1.2 / 位置映射：插入点上的位置由 assoc 决定贴左还是贴右");
+        const DeleteBuild d = makeDeleteRange(probe, Range{5, 9});
+        expectTrue(d.ok && mapPos(d.step, 6, Assoc::Before) == 5 &&
+                       mapPos(d.step, 9, Assoc::After) == 5,
+                   "1.2 / 位置映射：被删区间内部与终点都塌到区间起点");
+    }
+}
+
+/**
+ * 1.3：事务与撤销。连撤 N 次必须逐次回到对应步骤的状态，重做再逐次回到编辑后。
+ */
+void checkUndoRedo() {
+    NodeTree tree = makeEditTree();
+    normalizeDocument(tree);
+    UndoStack stack(tree);
+
+    std::vector<std::vector<std::string>> states;
+    std::vector<Range> sel_before;
+    std::vector<Range> sel_after;
+    states.push_back(shapeSnapshot(tree));
+
+    // 事务一：插入一个粗体字（标记与邻居不同，会切开原节点）。
+    {
+        InsertText s;
+        s.at = 3;
+        s.cps = cps({0x41});
+        s.marks.bold = true;
+        const StepResult r =
+            stack.commit(Transaction{{Step{s}}, Range{3, 3}, Range{4, 4}, "输入"});
+        expectTrue(r.ok, "1.3 / 提交：插入成功（" + r.error + "）");
+    }
+    states.push_back(shapeSnapshot(tree));
+    sel_before.push_back(Range{3, 3});
+    sel_after.push_back(Range{4, 4});
+
+    // 事务二：分段。
+    {
+        InsertParaMark s;
+        s.at = 5;
+        const StepResult r =
+            stack.commit(Transaction{{Step{s}}, Range{5, 5}, Range{6, 6}, "分段"});
+        expectTrue(r.ok, "1.3 / 提交：分段成功（" + r.error + "）");
+    }
+    states.push_back(shapeSnapshot(tree));
+    sel_before.push_back(Range{5, 5});
+    sel_after.push_back(Range{6, 6});
+
+    // 事务三：删除一段（跨过刚插入的段落标记）。
+    {
+        const DeleteBuild b = makeDeleteRange(tree, Range{3, 7});
+        const StepResult r =
+            stack.commit(Transaction{{b.step}, Range{3, 7}, Range{3, 3}, "删除"});
+        expectTrue(b.ok && r.ok, "1.3 / 提交：删除成功（" + b.error + r.error + "）");
+    }
+    states.push_back(shapeSnapshot(tree));
+    sel_before.push_back(Range{3, 7});
+    sel_after.push_back(Range{3, 3});
+
+    expectTrue(stack.undoDepth() == 3 && !stack.canRedo(),
+               "1.3 / 栈：三次提交压出三个撤销单位，重做栈是空的");
+
+    int bad_state = 0;
+    int bad_sel = 0;
+    for (int i = 2; i >= 0; --i) {
+        Range restore{};
+        const StepResult r = stack.undo(&restore);
+        const std::string diff = snapshotDiffText(states[static_cast<size_t>(i)], shapeSnapshot(tree));
+        if (!r.ok || !diff.empty()) ++bad_state;
+        if (restore != sel_before[static_cast<size_t>(i)]) ++bad_sel;
+    }
+    expectTrue(bad_state == 0, "1.3 / 撤销：连撤三次，每次都与对应步骤的状态逐条相同");
+    expectTrue(bad_sel == 0, "1.3 / 撤销：每次恢复的是该事务的编辑前选区");
+    expectTrue(!stack.canUndo() && stack.redoDepth() == 3,
+               "1.3 / 撤销到底：没有可撤的事务，重做栈有三项");
+
+    // 帧仍与全量一致，在模型层的落点：撤到底之后重新编译，产物必须与起始状态逐字段相同。
+    {
+        const NodeTree fresh = makeEditTree();
+        const CompileResult ref = compileDocument(fresh, FlowVisibility::Design);
+        const CompileResult now = compileDocument(tree, FlowVisibility::Design);
+        int diff = 0;
+        if (ref.blocks.size() != now.blocks.size()) {
+            diff = 1;
+        } else {
+            for (size_t i = 0; i < ref.blocks.size(); ++i) {
+                if (!diffBlock(ref.blocks[i], now.blocks[i]).empty()) ++diff;
+            }
+        }
+        expectTrue(diff == 0, "1.3 / 帧：撤到底之后重新编译，产物与起始的文档逐字段相同（" +
+                                  std::to_string(now.blocks.size()) + " 段，不一致 " +
+                                  std::to_string(diff) + "）");
+    }
+
+    int bad_redo = 0;
+    int bad_redo_sel = 0;
+    for (int i = 0; i < 3; ++i) {
+        Range restore{};
+        const StepResult r = stack.redo(&restore);
+        const std::string diff =
+            snapshotDiffText(states[static_cast<size_t>(i) + 1], shapeSnapshot(tree));
+        if (!r.ok || !diff.empty()) ++bad_redo;
+        if (restore != sel_after[static_cast<size_t>(i)]) ++bad_redo_sel;
+    }
+    expectTrue(bad_redo == 0, "1.3 / 重做：连做三次，每次都与对应步骤的状态逐条相同");
+    expectTrue(bad_redo_sel == 0, "1.3 / 重做：每次回到该事务的编辑后选区");
+    expectTrue(stack.undoDepth() == 3 && !stack.canRedo(), "1.3 / 重做到底：栈回到撤销前的样子");
+    expectClean(tree, "1.3 / 撤销重做之后的树");
+}
+
+/**
+ * 1.3：撤销分组的几条边界 —— 什么并、什么不并，以及提交失败要整条作废。
+ */
+void checkUndoGrouping() {
+    // 连续输入并成一个撤销单位；一次撤销回退整段输入。
+    {
+        NodeTree tree = makeEditTree();
+        normalizeDocument(tree);
+        UndoStack stack(tree);
+        for (uint32_t i = 0; i < 5; ++i) {
+            InsertText s;
+            s.at = 3 + static_cast<FlowPos>(i);
+            s.cps = cps({0x41 + i});
+            stack.commit(Transaction{{Step{s}}, Range{s.at, s.at},
+                                     Range{s.at + 1, s.at + 1}, "输入"});
+        }
+        expectTrue(stack.undoDepth() == 1, "1.3 / 分组：五次连续输入并成一个撤销单位");
+
+        Range restore{};
+        const StepResult r = stack.undo(&restore);
+        const std::string diff = snapshotDiffText(shapeSnapshot(makeEditTree()), shapeSnapshot(tree));
+        expectTrue(r.ok && diff.empty() && restore == Range{3, 3},
+                   "1.3 / 分组：一次撤销回退整段输入，并回到第一笔的编辑前选区" + diff);
+    }
+
+    // 位置不接着的一笔另起一个撤销单位。
+    {
+        NodeTree tree = makeEditTree();
+        normalizeDocument(tree);
+        UndoStack stack(tree);
+        InsertText a;
+        a.at = 3;
+        a.cps = cps({0x41});
+        stack.commit(Transaction{{Step{a}}, Range{3, 3}, Range{4, 4}, "输入"});
+        InsertText b;
+        b.at = 4;
+        b.cps = cps({0x42});
+        stack.commit(Transaction{{Step{b}}, Range{4, 4}, Range{5, 5}, "输入"});
+        InsertText far;
+        far.at = 9;  // 隔开了（中间隔着段落标记）
+        far.cps = cps({0x43});
+        stack.commit(Transaction{{Step{far}}, Range{9, 9}, Range{10, 10}, "输入"});
+        expectTrue(stack.undoDepth() == 2, "1.3 / 分组：位置不接着的两笔分属两个撤销单位");
+    }
+
+    // 标记不同的一笔另起一个撤销单位。
+    {
+        NodeTree tree = makeEditTree();
+        normalizeDocument(tree);
+        UndoStack stack(tree);
+        InsertText a;
+        a.at = 3;
+        a.cps = cps({0x41});
+        stack.commit(Transaction{{Step{a}}, Range{3, 3}, Range{4, 4}, "输入"});
+        InsertText b;
+        b.at = 4;
+        b.cps = cps({0x42});
+        b.marks.bold = true;
+        stack.commit(Transaction{{Step{b}}, Range{4, 4}, Range{5, 5}, "加粗输入"});
+        expectTrue(stack.undoDepth() == 2, "1.3 / 分组：标记不同的一笔另起一个撤销单位");
+    }
+
+    // 撤销之后再提交：重做栈被清空。
+    {
+        NodeTree tree = makeEditTree();
+        normalizeDocument(tree);
+        UndoStack stack(tree);
+        InsertText a;
+        a.at = 3;
+        a.cps = cps({0x41});
+        stack.commit(Transaction{{Step{a}}, Range{3, 3}, Range{4, 4}, "输入"});
+        stack.undo(nullptr);
+        expectTrue(stack.canRedo() && stack.redoDepth() == 1, "1.3 / 重做栈：撤销之后可以重做");
+        InsertText b;
+        b.at = 3;
+        b.cps = cps({0x42});
+        stack.commit(Transaction{{Step{b}}, Range{3, 3}, Range{4, 4}, "输入"});
+        expectTrue(!stack.canRedo() && stack.redoDepth() == 0,
+                   "1.3 / 重做栈：撤销之后再提交会清空重做栈");
+    }
+
+    // 提交中途失败：整条事务作废，文档与栈都回到提交前。
+    {
+        NodeTree tree = makeEditTree();
+        normalizeDocument(tree);
+        UndoStack stack(tree);
+        const std::vector<std::string> before = shapeSnapshot(tree);
+        InsertText good;
+        good.at = 3;
+        good.cps = cps({0x41});
+        InsertText bad;
+        bad.at = 9999;
+        bad.cps = cps({0x5A});
+        const StepResult r =
+            stack.commit(Transaction{{Step{good}, Step{bad}}, Range{3, 3}, Range{4, 4}, "两条"});
+        expectTrue(!r.ok && stack.undoDepth() == 0 && !stack.canRedo() &&
+                       snapshotDiffText(before, shapeSnapshot(tree)).empty(),
+                   "1.3 / 提交失败：整条事务作废，文档与栈都回到提交前（" + r.error + "）");
+    }
+
+    // 规范化不改流位置总数 —— 撤销能在规范化之后的文档上按原坐标工作，靠的就是这一条。
+    {
+        NodeTree tree = makeMessyTree();
+        const int before = FlowIndex(tree, FlowVisibility::Design).size();
+        normalizeDocument(tree);
+        const int after = FlowIndex(tree, FlowVisibility::Design).size();
+        expectTrue(before == after, "1.3 / 坐标：规范化前后流位置总数不变（" +
+                                        std::to_string(before) + " → " + std::to_string(after) + "）");
+    }
+}
+
 }  // namespace
 
 int main() {
-    std::printf("=== 文档模型 0.1 ~ 0.5：位置、分段、不变量、编译、长度 ===\n");
+    std::printf("=== 文档模型 0.1 ~ 1.3：位置、分段、不变量、编译、长度、规范化、步骤、撤销 ===\n");
 
     // 两种可见性口径各过一遍：位置空间不同，但"往返互逆"必须各自成立。
     const FlowVisibility kBoth[2] = {FlowVisibility::Design, FlowVisibility::Display};
@@ -1171,7 +1893,11 @@ int main() {
     expectClean(makeNestedControls(), "0.3 / 嵌套控件");
     expectClean(makeTable(), "0.3 / 表格");
     for (uint32_t seed = 1; seed <= 3; ++seed) {
-        expectClean(makeRandomTree(seed, 40), "0.3 / 随机树 #" + std::to_string(seed));
+        // 随机树是中间态形状（会造出相邻同标记的 run），先规范化再按已提交文档的口径检查。
+        NodeTree t = makeRandomTree(seed, 40);
+        const NormalizeResult n = normalizeDocument(t);
+        expectClean(t, "0.3 / 随机树 #" + std::to_string(seed) + "（规范化：并 " +
+                           std::to_string(n.merged) + "、清 " + std::to_string(n.removed) + "）");
     }
     // 隐藏形状：呈现态下整棵子树（含它内部的段落标记）被摘除，两种口径都要成立。
     {
@@ -1197,6 +1923,22 @@ int main() {
     checkLengthShape();
     checkLengthParseRejects();
     checkCompileRejectsRelativeLength();
+
+    std::printf("  --- 1.1：文本节点与标记合并规范化 ---\n");
+    checkNormalizeShapes();
+    checkNormalizeIdempotent();
+    checkNormalizeKeepsContent();
+
+    std::printf("  --- 1.2：区间原语、编辑步骤与位置映射 ---\n");
+    checkRangeNormalize();
+    checkExtract();
+    checkStepRoundTrip();
+    checkExtractDeleteInsertBack();
+    checkMapRoundTrip();
+
+    std::printf("  --- 1.3：事务与撤销分组 ---\n");
+    checkUndoRedo();
+    checkUndoGrouping();
 
     std::printf("\n共 %d 项断言，失败 %d 项\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

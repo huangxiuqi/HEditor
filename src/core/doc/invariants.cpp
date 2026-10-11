@@ -19,6 +19,7 @@ constexpr char kChildKinds[] = "结构.子节点类型与叶子约束";
 constexpr char kNoOrphan[] = "结构.无孤立节点";
 constexpr char kHiddenInFlow[] = "结构.隐藏只在编辑模式下在流里";
 constexpr char kTextNonEmpty[] = "文本.文本节点非空";
+constexpr char kAdjacentRuns[] = "文本.相邻同标记的 run 必须合并";
 constexpr char kBoundaryOrder[] = "容器.边界成对有序不交叉";
 constexpr char kParagraphTiling[] = "容器.切段无缝隙";
 constexpr char kUniqueId[] = "身份.节点 ID 唯一且索引自洽";
@@ -67,11 +68,15 @@ void walk(const NodeTree& tree, NodeId id, bool ancestor_hidden, std::vector<Nod
 
 /**
  * 现在拿不到输入的条目。每条写明等哪一步带来输入，免得读的人以为已经查过了。
+ *
+ * 有一条不在这里：区间与选区的约束（选区不进模型、端点带方向、端点用流位置、端点外扩到整块
+ * 边界）。它们作用在文档之外的值（Range 与步骤）上，不是文档不变量 —— 硬要写成一条检查，
+ * 只能写成恒真，那比不写更差。判据在 tests/model_test.cpp 的区间与步骤那几节。
  */
 std::vector<PendingRule> pendingRules() {
     return {
-        {"文本.相邻同标记的 run 必须合并", "1.1 标记合并规范化"},
-        {"文本.标记无重复、顺序由 schema 固定、不允许零宽标记区间", "1.1 与 1.6 样式表"},
+        {"文本.不允许零宽标记区间（标记的无重复与顺序在结构体表示下不可违反）",
+         "1.2 临时的带标记区间"},
         {"结构.schema 的完整声明（哪些能装哪些、最少几个、最多几个）",
          "1.4 / 1.5 / 1.7 在容器、控件与表格落地时逐种登记"},
         {"容器.显式边界元素的不交叉（今天由树的区间嵌套等价保证）", "1.4 容器元素与边界位置"},
@@ -84,8 +89,6 @@ std::vector<PendingRule> pendingRules() {
          "1.4 表单模式落点判定与 1.5 控件锁"},
         {"取值与嵌套.取值拼接、含子控件拒绝整体设值、同 group 互斥、真原子的文本表示",
          "1.5 控件与 1.4 原子"},
-        {"区间与选区.选区不进模型、端点带方向、端点用流位置、端点外扩到整块边界",
-         "1.2 区间原语与 1.3 事务"},
     };
 }
 
@@ -206,6 +209,27 @@ InvariantReport checkInvariants(const NodeTree& tree) {
         const Node* n = tree.find(id);
         if (isText(n->kind) && n->text.empty()) {
             add(&r, kTextNonEmpty, id, -1, "文本节点为空（相邻同标记的 run 必须合并，空 run 无意义）");
+        }
+    }
+
+    // 文本.相邻同标记的 run 必须合并
+    //
+    // 判的是树上的相邻（隐藏与否都算兄弟），不是流上的相邻：规范形状是文档自身的性质，
+    // 与呈现口径无关。这条规则描述"已提交文档"的形状 —— 事务内部的中间态可以暂时不满足，
+    // 因为规范化在提交前才跑（见 normalize.h）。
+    r.checked.push_back(kAdjacentRuns);
+    for (NodeId id : order) {
+        const Node* n = tree.find(id);
+        if (!isContainer(n->kind)) continue;
+        for (size_t i = 0; i + 1 < n->children.size(); ++i) {
+            const Node* a = n->children[i];
+            const Node* b = n->children[i + 1];
+            if (isText(a->kind) && isText(b->kind) && a->marks == b->marks) {
+                add(&r, kAdjacentRuns, b->id, static_cast<int>(i) + 1,
+                    "相邻两个文本节点的标记集合相同，必须合并（左 " +
+                        std::to_string(a->text.size()) + " 个码点、右 " +
+                        std::to_string(b->text.size()) + " 个码点）");
+            }
         }
     }
 
