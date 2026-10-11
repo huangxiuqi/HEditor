@@ -7,7 +7,7 @@
 
 #include <chrono>
 
-namespace ced {
+namespace heditor {
 
 /**
  * 单调时钟。用 steady_clock 而不是 system_clock：后者会被对时改动往回跳，
@@ -22,4 +22,4 @@ inline double msSince(Clock::time_point t0) {
     return std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
 }
 
-}  // namespace ced
+}  // namespace heditor

@@ -1,10 +1,10 @@
 // 交互压力探针：随机/密集地在正文各处点击 + 键盘动作，每一步都当场问两个问题：
 //
-//   引擎帧本身对不对？—— __ced.auditFrame()：把当前帧与"整帧重画一遍"的结果逐字节
+//   引擎帧本身对不对？—— __heditor.auditFrame()：把当前帧与"整帧重画一遍"的结果逐字节
 //      比。这是覆盖最广的"该消失却没消失"判据（旧表单标记残留就是这一类）。
 //      不能只用 selfCheck（画布 vs 引擎帧）：引擎帧自己错了时画布会忠实反映它，
 //      两边一起错、判据照样绿。
-//   画布贴得对不对？—— __ced.selfCheck()。顺序要紧：auditFrame 会把这一帧修成真值，
+//   画布贴得对不对？—— __heditor.selfCheck()。顺序要紧：auditFrame 会把这一帧修成真值，
 //      必须先跑 selfCheck。
 //
 // 用法：scripts\verify_web.ps1 -Probe scripts\stress_probe.mjs
@@ -31,9 +31,9 @@ ensureDir(OUT);
 // 在页面上点某个"帧磅坐标"（走真实的 mousedown，就是用户点画布那条路）
 const CLICK_AT_PT = (xPt, yPt) => `
 return (function () {
-  const cv = window.__ced.canvas;
+  const cv = window.__heditor.canvas;
   const r = cv.getBoundingClientRect();
-  const z = window.__ced.zoomLevel;
+  const z = window.__heditor.zoomLevel;
   const x = r.left + (${xPt} * z) * (r.width / cv.width);
   const y = r.top + (${yPt} * z) * (r.height / cv.height);
   const ev = new MouseEvent('mousedown', { clientX: x, clientY: y, bubbles: true, cancelable: true, button: 0 });
@@ -43,13 +43,13 @@ return (function () {
 
 const SNAP = `
 return (function () {
-  const sc = window.__ced.selfCheck();
+  const sc = window.__heditor.selfCheck();
   // 先问"引擎帧本身对不对"（增量结果 vs 整帧重画），再问"画布贴得对不对"。
   //   顺序要紧：auditFrame 会把这一帧修成真值，放在 selfCheck 之后跑，
   //     否则它会顺带把上屏错误也"治好"，selfCheck 就再也抓不到上屏问题了。
-  const au = window.__ced.auditFrame();
-  const st = window.__ced.editStats;
-  const ct = window.__ced.controls;
+  const au = window.__heditor.auditFrame();
+  const st = window.__heditor.editStats;
+  const ct = window.__heditor.controls;
   return { screen: sc.screenVsEngineDiffPx, screenBox: sc.screenVsEngineDiffBox,
            frame: au.diff, frameBox: au.box,
            repaint: sc.repainted, caretCtrl: ct ? ct.caret : -1,
@@ -65,10 +65,10 @@ async function main() {
   await c.send('Emulation.setDeviceMetricsOverride',
                { width: 1500, height: 1200, deviceScaleFactor: 1, mobile: false });
   await c.send('Page.navigate', { url: URL_ });
-  await c.waitFor('return !!(window.__ced && window.__ced.ready)', 'ready', 30000);
+  await c.waitFor('return !!(window.__heditor && window.__heditor.ready)', 'ready', 30000);
 
   // 不 stopBlink —— 用户那边闪烁是一直开着的，这必须包含在内
-  await c.eval('return window.__ced.loadFormSample(0);');
+  await c.eval('return window.__heditor.loadFormSample(0);');
 
   // 采样的点击点（帧磅坐标）：field0 / gap / field1(只读) / gap / field2 / 行首 / 行尾
   const pts = [
@@ -102,8 +102,8 @@ async function main() {
         // 存一张现场
         const dataUrl = await c.eval(`
           return (function () {
-            const f = window.__ced.rawFrame();
-            const W = window.__ced.frameW(), H = window.__ced.frameH();
+            const f = window.__heditor.rawFrame();
+            const W = window.__heditor.frameW(), H = window.__heditor.frameH();
             const cv2 = document.createElement('canvas'); cv2.width = W; cv2.height = H;
             const ctx = cv2.getContext('2d');
             const img = ctx.createImageData(W, H);
@@ -125,7 +125,7 @@ async function main() {
 
   // 键盘动作也纳入：方向键（会跨字段）、Tab（缩进）、敲字、删字、切模式
   const KEY = `
-    window.__ced.textarea.dispatchEvent(new KeyboardEvent('keydown', { key: KEYNAME, bubbles: true, cancelable: true }));
+    window.__heditor.textarea.dispatchEvent(new KeyboardEvent('keydown', { key: KEYNAME, bubbles: true, cancelable: true }));
     return true;`;
   const actions = [
     ['ArrowRight', 'ArrowRight'], ['ArrowRight', 'ArrowRight'], ['ArrowLeft', 'ArrowLeft'],
@@ -145,14 +145,14 @@ async function main() {
       }
     }
     // 轮末切一次模式再切回来（模式参与占位/标记）
-    await c.eval('return window.__ced.setEditMode(0);');
+    await c.eval('return window.__heditor.setEditMode(0);');
     const sd = await c.eval(SNAP); ++steps;
     if (sd.screen > 0 || sd.frame > 0) {
       ++bad;
       log.push(` [切到文档模式] 引擎帧自审差 ${sd.frame} 盒=${JSON.stringify(sd.frameBox)}；` +
                `画布差 ${sd.screen} 盒=${JSON.stringify(sd.screenBox)}`);
     }
-    await c.eval('return window.__ced.setEditMode(1);');
+    await c.eval('return window.__heditor.setEditMode(1);');
     const sf = await c.eval(SNAP); ++steps;
     if (sf.screen > 0 || sf.frame > 0) {
       ++bad;

@@ -4,7 +4,7 @@
 
 #include "core/utils/utf8.h"
 
-namespace ced {
+namespace heditor {
 namespace {
 
 /**
@@ -110,4 +110,4 @@ size_t clusterCeil(const std::vector<uint32_t>& starts, size_t offset) {
     return lo < starts.size() ? starts[lo] : offset;
 }
 
-}  // namespace ced
+}  // namespace heditor

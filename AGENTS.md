@@ -2,6 +2,11 @@
 
 本仓库对智能体与人类协作者的约定。改代码前请先读完「注释」一节，本仓库的注释有硬性格式要求。
 
+项目名 **HEditor**。命名一律用这套（改名前叫 ced，别再用旧名）：
+C++ 命名空间 `heditor`；CMake 工程 `HEditor`、target 前缀 `heditor_`、变量前缀 `HEDITOR_`；
+wasm 产物 `heditor.js` / `heditor.wasm`（emscripten 工厂函数 `CreateHEditor`）；
+浏览器控制台 API `window.__heditor`。
+
 ## 注释
 
 ### C / C++
@@ -32,14 +37,20 @@ const float slot = bw + kControlBracketSlotGapPt;
 （`// 编辑`），写成一句简短的块注释，说明这一族是干什么的：
 
 ```cpp
-/** 编辑入口：坐标是 (段, 段内码点偏移)，落地前吸附到字素簇边界。 */
+/**
+ * 编辑入口：坐标是 (段, 段内码点偏移)，落地前吸附到字素簇边界。
+ */
 bool insertTextUtf8(int para, size_t offset, const std::string& utf8);
 ```
+
+**块注释一律多行**：写成 `/** 说明 */` 这种「单行块注释」既不是规范的行注释、
+也不是规范的块注释，两边的读者都会误判它的用途。单行说明用 `//`；
+需要块注释的地方（声明处）展开成三行 —— `/**`、` * 说明`、` */`。
 
 ### JavaScript
 
 顶层函数与导出对象的方法使用 JSDoc；函数内的局部变量与行内说明用 `//`。
-同样禁用 markdown 记号与 emoji：
+同样禁用 markdown 记号与 emoji，同样不写单行块注释（`/** 说明 */` 要展开成三行）：
 
 ```js
 /**
@@ -102,8 +113,9 @@ function blitFrame(px, w) {}
   光栅双实现（`bitmap.cpp` 与 `bitmap_skia.cpp`）不一致时以 Skia 那份为准，
   不要反向改 Skia 去迁就自写后端。
 - 注释合规检查：`python scripts/lint_comments.py`（加 `-v` 打印违规原文；违规则退出码 1）。
-  共 11 条规则，写在脚本文件头：反引号、装饰分隔线、markdown 强调、流水账用语、
-  口语人称、行首列表符号、行宽、块长、声明处必须是块注释、编号列表记号、口语俚语。
+  共 12 条规则，写在脚本文件头：反引号、装饰分隔线、markdown 强调、流水账用语、
+  口语人称、行首列表符号、行宽、块长、声明处必须是块注释、编号列表记号、口语俚语、
+  单行块注释。
 - 改动排版或光栅后，除了单测还要跑浏览器探针：它带像素级与帧自审判据。
 - ★ **构建是否成功要看日志里的 `exit=` 行，不能看外层命令的退出码**。用
   `& powershell -File build_*.ps1 *> $log` 包装时，`$LASTEXITCODE` 之后只要再执行任何
@@ -111,13 +123,13 @@ function blitFrame(px, w) {}
   这个坑真实发生过一次，把一次编译失败当成了通过。包装时读完就 `exit $code` 把它传出去；
   直接看日志时以 `exit=0`（且没有"构建失败"与 `error` 行）为准，并且**核对产物时间戳**，
   因为"什么都没编"与"编对了"在输出上长得一样。
-- ★ **新加构建 target 必须调 `ced_target_flags(<tgt>)`**。它按 target 下发 `/utf-8`，
+- ★ **新加构建 target 必须调 `heditor_target_flags(<tgt>)`**。它按 target 下发 `/utf-8`，
   而源码**都不带 BOM**，所以漏掉它的症状是"中文注释那一行报语法错"
   （C2143 / C2628 / C2059），并且**只在 MSVC 上出现** —— wasm 侧（clang）默认按 UTF-8 读，
   不会报错，于是错误看起来像"native 独有的怪问题"。新增 target 后按
-  `grep -c "add_library(<tgt>\|add_executable(<tgt>"` 与 `grep -c "ced_target_flags(<tgt>)"`
+  `grep -c "add_library(<tgt>\|add_executable(<tgt>"` 与 `grep -c "heditor_target_flags(<tgt>)"`
   各应为 1。
-- ★ **演示数据在 `demo/`（`ced_demo` 库），不在 `src/`**：`sampleDocument` 与
+- ★ **演示数据在 `demo/`（`heditor_demo` 库），不在 `src/`**：`sampleDocument` 与
   `mixedParagraphBlock` 是喂给引擎的样例内容，不是引擎能力。改它们会影响单测与探针里
   依赖页序的断言，改之前先看那些断言。
 - 比对 git 里的文件与工作区文件时**不要用 md5**：本机 `core.autocrlf=true`，

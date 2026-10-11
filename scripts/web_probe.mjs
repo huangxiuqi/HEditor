@@ -1,9 +1,9 @@
 // 用 Chrome DevTools 协议给 WASM 验证台做可证伪检查。
 //
 // 不做"截个图看看"这种模糊验证，而是把页面里的数字取回来：
-//   window.__ced.stats   每次布局的页数/字形数/缺字数/分阶段耗时
-//   window.__ced.bench   引擎内循环 12 次的平均耗时
-//   window.__ced.errors  页面级异常（有就说明静默失败了）
+//   window.__heditor.stats   每次布局的页数/字形数/缺字数/分阶段耗时
+//   window.__heditor.bench   引擎内循环 12 次的平均耗时
+//   window.__heditor.errors  页面级异常（有就说明静默失败了）
 //   每个场景截一张 PNG，用于人眼复核
 //
 // 无第三方依赖：Node 22 自带 fetch 和 WebSocket。
@@ -87,11 +87,11 @@ async function main() {
   console.log('→ 打开', URL_);
   await cdp.send('Page.navigate', { url: URL_ });
 
-  const bootMs = await waitFor(cdp, 'return !!(window.__ced && window.__ced.ready)',
-                               'window.__ced.ready');
+  const bootMs = await waitFor(cdp, 'return !!(window.__heditor && window.__heditor.ready)',
+                               'window.__heditor.ready');
   console.log(`→ 页面就绪，耗时 ${(bootMs / 1000).toFixed(1)} s`);
 
-  const env = await cdp.eval('return window.__ced.fonts');
+  const env = await cdp.eval('return window.__heditor.fonts');
   const report = {
     url: URL_,
     bootMs,
@@ -104,9 +104,9 @@ async function main() {
   };
 
   for (const [id, label] of SCENARIOS) {
-    await cdp.eval(`window.__ced.run(${id}, ${ZOOM}); return true;`);
+    await cdp.eval(`window.__heditor.run(${id}, ${ZOOM}); return true;`);
     await sleep(350);
-    const st = await cdp.eval('return window.__ced.stats');
+    const st = await cdp.eval('return window.__heditor.stats');
     report.scenarios.push({ id, label, ...st });
 
     const shot = await cdp.send('Page.captureScreenshot', {
@@ -118,12 +118,12 @@ async function main() {
                 `shape=${st.shapeMs}ms layout=${st.layoutMs}ms paint=${st.paintMs}ms`);
   }
 
-  report.bench = await cdp.eval('return window.__ced.bench(12)');
+  report.bench = await cdp.eval('return window.__heditor.bench(12)');
   console.log(`→ 引擎内循环 12 次：每帧 ${report.bench.totalMs.toFixed(1)} ms ` +
               `(shape ${report.bench.shapeMs.toFixed(2)} / layout ${report.bench.layoutMs.toFixed(2)} ` +
               `/ paint ${report.bench.paintMs.toFixed(2)})`);
 
-  report.pageErrors = await cdp.eval('return window.__ced.errors');
+  report.pageErrors = await cdp.eval('return window.__heditor.errors');
   report.consoleErrors = cdp.consoleErrors;
 
   writeFileSync(join(OUT, 'probe.json'), JSON.stringify(report, null, 2), 'utf8');

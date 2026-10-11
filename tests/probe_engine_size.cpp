@@ -6,7 +6,7 @@
  * 它不进 ctest：两个 TU 读的是磁盘上同一份头文件，只要都是刚编的必然一致，而"某个 TU 是
  * 旧对象"在进程内不可观测。查这类问题要看构建图，例如
  * touch src/core/engine/engine.h 后看 ninja 是否重编依赖它的对象（见 CMakeLists.txt 的
- * ced_track_header_deps）。
+ * heditor_track_header_deps）。
  *
  * 用途：尺寸或偏移出现可疑变化时跑一下拿权威数值，再与反汇编或 .pdb 对照。
  */
@@ -19,10 +19,10 @@ int main() {
     // 重定向到文件时防丢缓冲（同 shaping_test.cpp 的理由）
     std::setvbuf(stdout, nullptr, _IONBF, 0);
 
-    std::printf("sizeof(EditStats)      = %zu\n", sizeof(ced::EditStats));
-    std::printf("sizeof(EditorEngine)   = %zu\n", sizeof(ced::EditorEngine));
-    std::printf("offsetof(layout_ran)   = %zu\n", offsetof(ced::EditStats, layout_ran));
-    std::printf("offsetof(repainted_pixels) = %zu\n", offsetof(ced::EditStats, repainted_pixels));
-    std::printf("offsetof(caret_h_px)   = %zu\n", offsetof(ced::EditStats, caret_h_px));
+    std::printf("sizeof(EditStats)      = %zu\n", sizeof(heditor::EditStats));
+    std::printf("sizeof(EditorEngine)   = %zu\n", sizeof(heditor::EditorEngine));
+    std::printf("offsetof(layout_ran)   = %zu\n", offsetof(heditor::EditStats, layout_ran));
+    std::printf("offsetof(repainted_pixels) = %zu\n", offsetof(heditor::EditStats, repainted_pixels));
+    std::printf("offsetof(caret_h_px)   = %zu\n", offsetof(heditor::EditStats, caret_h_px));
     return 0;
 }

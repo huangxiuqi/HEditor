@@ -1,9 +1,9 @@
 /**
  * 光栅目标（帧缓冲）。两个后端共用同一份接口。
  *
- * 默认（不定义 CED_USE_SKIA）走 bitmap.cpp：自写扫描线光栅器加字形缓存。它现在的价值是
+ * 默认（不定义 HEDITOR_USE_SKIA）走 bitmap.cpp：自写扫描线光栅器加字形缓存。它现在的价值是
  * 逐字节可复现，作为 Skia 版的对照物（同一文档在两个后端下渲染，PNG 应当接近）。
- * 定义 CED_USE_SKIA 走 bitmap_skia.cpp：像素仍落在同一个 RGBA 缓冲里（frame /
+ * 定义 HEDITOR_USE_SKIA 走 bitmap_skia.cpp：像素仍落在同一个 RGBA 缓冲里（frame /
  * frameBytes / copyRectFrom 的契约不变），绘制经 SkCanvas、字形经 SkFont 与 FreeType。
  * 于是手写扫描线、曲线离散化、4 倍纵向超采样以及 GlyphMask/GlyphCache 全部退役，
  * 对应的是 Skia 的 SkGlyphCache 与 SkScalerContext；换来抗锯齿质量、变体字形与
@@ -21,7 +21,7 @@
 #include "core/text/font.h"
 #include "core/utils/types.h"
 
-namespace ced {
+namespace heditor {
 
 /**
  * 字形光栅缓存（只有非 Skia 后端用）
@@ -181,7 +181,7 @@ private:
     std::vector<uint8_t> px_;
     size_t painted_px_ = 0;  // 自上次 resetPaintedPixels() 以来实际写入的像素数
 
-#if defined(CED_USE_SKIA)
+#if defined(HEDITOR_USE_SKIA)
 
     /**
      * Skia 后端状态。用 pimpl 有两个理由：bitmap.h 是公共头，不打开 Skia 的宿主
@@ -242,4 +242,4 @@ private:
 #endif
 };
 
-}  // namespace ced
+}  // namespace heditor

@@ -9,7 +9,7 @@
 #       但那个 .dd 里**只有模块依赖、一个头文件都没有**。
 #   两条路都不记头文件 ⇒ 改头文件不重编 ⇒ 用旧类布局的 .obj 配新布局的 .lib 混链
 #   ⇒ 段错误（不是编译错误）。实测过：给 EditStats 加一个 bool 字段后，
-#   shaping_test.cpp 没重编，链接出的 ced_tests.exe 直接段错误，
+#   shaping_test.cpp 没重编，链接出的 heditor_tests.exe 直接段错误，
 #   而它打印的仍是「55 项断言，失败 0 项」——"测试通过"这句话直接失去可信度。
 #
 #   最小复现（纯 CMake 行为，与本项目无关）：
@@ -19,7 +19,7 @@
 #       加上 set_property(SOURCE a.cpp b.cpp PROPERTY OBJECT_DEPENDS <那个头>)
 #       → 同一个改动立刻重编两个 TU 并重链接，exe 输出跟着变。
 #
-#   CMakeLists.txt 里用 ced_track_header_deps()（OBJECT_DEPENDS）绕过去了。
+#   CMakeLists.txt 里用 heditor_track_header_deps()（OBJECT_DEPENDS）绕过去了。
 #   本脚本就是那个绕法的**回归测试**：删掉 OBJECT_DEPENDS，这里必须变红。
 #
 # 用法:
@@ -82,7 +82,7 @@ function Get-MTime($rel) {
 }
 
 # ── 契约 ──
-#   ced_track_header_deps(tgt, ... 目录) 注册过的 target，
+#   heditor_track_header_deps(tgt, ... 目录) 注册过的 target，
 #   它下面**每一个** .obj 都要因该目录下的头文件变动而重编。
 #   粒度是粗的（改一个头文件 = 重编该 target 全部 TU）—— 这是**有意**的取舍：
 #   用"粗"换"绝不会静默用旧对象"。本项目每个 target 只有几个到十几个 TU，值。
@@ -92,26 +92,26 @@ function Get-MTime($rel) {
 #   就要重编整个 HarfBuzz）。但它注册了自己的 src/，所以改 HarfBuzz 自己的头
 #   必须重编它 —— 这两条方向相反，第 4 节与第 5 节分别断言。
 $expectRebuild = @(
-    'CMakeFiles\ced_core.dir\src\core\doc\document.cpp.obj',
-    'CMakeFiles\ced_core.dir\src\core\text\font.cpp.obj',
-    'CMakeFiles\ced_core.dir\src\core\text\shaper.cpp.obj',
-    'CMakeFiles\ced_core.dir\src\core\text\fallback.cpp.obj',
-    'CMakeFiles\ced_core.dir\src\core\render\bitmap.cpp.obj',
-    'CMakeFiles\ced_core.dir\src\core\layout\layout.cpp.obj',
-    'CMakeFiles\ced_core.dir\src\core\engine.cpp.obj',
-    'CMakeFiles\ced_native.dir\src\app\native_main.cpp.obj',
-    'CMakeFiles\ced_tests.dir\tests\shaping_test.cpp.obj',
-    'CMakeFiles\ced_edit_tests.dir\tests\edit_test.cpp.obj',
-    'CMakeFiles\ced_abi_probe.dir\tests\probe_engine_size.cpp.obj'
+    'CMakeFiles\heditor_core.dir\src\core\doc\document.cpp.obj',
+    'CMakeFiles\heditor_core.dir\src\core\text\font.cpp.obj',
+    'CMakeFiles\heditor_core.dir\src\core\text\shaper.cpp.obj',
+    'CMakeFiles\heditor_core.dir\src\core\text\fallback.cpp.obj',
+    'CMakeFiles\heditor_core.dir\src\core\render\bitmap.cpp.obj',
+    'CMakeFiles\heditor_core.dir\src\core\layout\layout.cpp.obj',
+    'CMakeFiles\heditor_core.dir\src\core\engine.cpp.obj',
+    'CMakeFiles\heditor_native.dir\src\app\native_main.cpp.obj',
+    'CMakeFiles\heditor_tests.dir\tests\shaping_test.cpp.obj',
+    'CMakeFiles\heditor_edit_tests.dir\tests\edit_test.cpp.obj',
+    'CMakeFiles\heditor_abi_probe.dir\tests\probe_engine_size.cpp.obj'
 )
 $expectLink = @(
-    'ced_core.lib',
-    'ced_native.exe',
-    'ced_tests.exe',
-    'ced_edit_tests.exe',
-    'ced_abi_probe.exe'
+    'heditor_core.lib',
+    'heditor_native.exe',
+    'heditor_tests.exe',
+    'heditor_edit_tests.exe',
+    'heditor_abi_probe.exe'
 )
-# harfbuzz 的 obj 路径取决于 CMakeLists 里 CED_HB_ROOT 选的是哪一份源码
+# harfbuzz 的 obj 路径取决于 CMakeLists 里 HEDITOR_HB_ROOT 选的是哪一份源码
 # （submodule 优先、旧目录回退），所以按"最近被构建维护的那个"找，不写死路径 ——
 # 写死会让本脚本去断言一个已经不在构建图里的旧文件，看着通过其实没有保护。
 $hbObjFull = @(Get-ChildItem -Path $BuildDir -Recurse -Filter 'harfbuzz.cc.obj' -ErrorAction SilentlyContinue) |
@@ -120,7 +120,7 @@ if (-not $hbObjFull) { throw "找不到 harfbuzz.cc.obj（先在 $BuildDir 构�
 $harfbuzzObj = $hbObjFull.FullName.Substring($BuildDir.Length + 1)
 
 # 顺带从它的路径反推 HarfBuzz 源码根的相对位置，免得再假设用的是 submodule 那份。
-$hbSrcRootRel = ($harfbuzzObj -replace '^CMakeFiles\\ced_harfbuzz\.dir\\', '') -replace '\\src\\harfbuzz\.cc\.obj$', ''
+$hbSrcRootRel = ($harfbuzzObj -replace '^CMakeFiles\\heditor_harfbuzz\.dir\\', '') -replace '\\src\\harfbuzz\.cc\.obj$', ''
 
 Write-Host "[deps] 构建目录 : $BuildDir"
 Write-Host "[deps] 目标头文件: $Hdr"
@@ -219,7 +219,7 @@ if ($failed -gt 0) {
     Write-Host @"
 
 ★ 说明头文件依赖追踪又断了。
-  查 CMakeLists.txt 里的 ced_track_header_deps()：是不是没被调用、
+  查 CMakeLists.txt 里的 heditor_track_header_deps()：是不是没被调用、
   或者 GLOB 的目录参数写错了、又或者被谁删掉了。
   断了之后的表现是「改头文件不重编 → .obj 与新 .lib 混链 → 随机段错误」，
   不会报编译错误，所以必须在构建图这一层拦住。

@@ -18,7 +18,7 @@
 #include <string>
 #include <vector>
 
-namespace ced {
+namespace heditor {
 
 /**
  * 位置：段 + 段内码点偏移
@@ -74,4 +74,4 @@ size_t eraseRange(std::vector<uint32_t>& buf, size_t begin, size_t end);
 size_t clusterFloor(const std::vector<uint32_t>& cluster_starts, size_t offset);
 size_t clusterCeil(const std::vector<uint32_t>& cluster_starts, size_t offset);
 
-}  // namespace ced
+}  // namespace heditor

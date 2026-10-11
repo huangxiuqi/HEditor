@@ -23,11 +23,11 @@
 #include "core/layout/layout.h"
 #include "core/text/shaper.h"
 
-#ifndef CED_NATIVE_ASSET_DIR
-#define CED_NATIVE_ASSET_DIR "."
+#ifndef HEDITOR_NATIVE_ASSET_DIR
+#define HEDITOR_NATIVE_ASSET_DIR "."
 #endif
 
-using namespace ced;
+using namespace heditor;
 
 namespace {
 
@@ -187,10 +187,10 @@ std::string joinPath(const std::string& dir, const std::string& name) {
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
 
-    const std::string cjkPath = joinPath(CED_NATIVE_ASSET_DIR, "fonts/NotoSansSC-VF.ttf");
+    const std::string cjkPath = joinPath(HEDITOR_NATIVE_ASSET_DIR, "fonts/NotoSansSC-VF.ttf");
     const std::string mnPath =
-        joinPath(CED_NATIVE_ASSET_DIR, "fonts/NotoSansMongolian-Regular.ttf");
-    const std::string latinPath = joinPath(CED_NATIVE_ASSET_DIR, "fonts/NotoSans-Latin-VF.ttf");
+        joinPath(HEDITOR_NATIVE_ASSET_DIR, "fonts/NotoSansMongolian-Regular.ttf");
+    const std::string latinPath = joinPath(HEDITOR_NATIVE_ASSET_DIR, "fonts/NotoSans-Latin-VF.ttf");
 
     std::printf("[1] 码点工具：UTF-8 ↔ 码点往返\n");
     {
@@ -2096,43 +2096,59 @@ int main() {
             expectTrue(e_full > 0.0, "前提：端到端全量可以量");
 
             // 页指纹的增量化：整篇重算 vs 只算脏段覆盖的那几页。
-            // 判据是相对的（耗时比值），不依赖机器速度；三个数都打印出来做对照。
-            // 各测 3 次取最小值 —— 单次计时会被调度尖峰打出一个数量级的假数字
-            // （实测有一次单测报出 4.08 ms，而同一操作随后量到 0.206 ms）。
+            // 判据落在页数（EditStats::dirty_page_count：内容指纹变了、需要重画的页数），
+            // 不落在耗时上 —— 耗时是两次独立计时，机器有负载时会翻（实测约三次里翻一次），
+            // 那样的判据会让"全绿"变成抽奖。耗时仍打印出来做对照，但不参与断言。
             auto minOf3 = [](const std::vector<double>& v) {
                 return *std::min_element(v.begin(), v.end());
             };
+            auto maxOf3 = [](const std::vector<int>& v) {
+                return *std::max_element(v.begin(), v.end());
+            };
             std::vector<double> v_fp_full, v_fp_splice, v_fp_shift;
+            std::vector<int> v_dp_full, v_dp_splice, v_dp_shift;
             for (int i = 0; i < 3; ++i) {
                 restore();
                 e.relayout();
                 e.repaint();
                 v_fp_full.push_back(e.stats().page_fp_ms);
+                v_dp_full.push_back(e.editStats().dirty_page_count);
 
                 restore();
                 e.setCaret(195 - i, 5);
                 e.typeTextAndRender("\xE6\xB5\x8B");
                 v_fp_splice.push_back(e.stats().page_fp_ms);
+                v_dp_splice.push_back(e.editStats().dirty_page_count);
 
                 restore();
                 e.setCaret(100 - i, 5);
                 e.typeTextAndRender(wrap_text);
                 v_fp_shift.push_back(e.stats().page_fp_ms);
+                v_dp_shift.push_back(e.editStats().dirty_page_count);
             }
             const double fp_full = minOf3(v_fp_full);
             const double fp_splice = minOf3(v_fp_splice);
             const double fp_shift = minOf3(v_fp_shift);
+            // 页数取三次里最大的：它是"最坏那次脏了多少页"，不受调度影响（同一编辑的脏页数是确定的）。
+            const int dp_full = maxOf3(v_dp_full);
+            const int dp_splice = maxOf3(v_dp_splice);
+            const int dp_shift = maxOf3(v_dp_shift);
+            // 整篇的上界用总页数：全量重排是把底图整块重建，此时"脏页"这个概念不适用
+            // （没有可比对的旧底图，diff 出 0），而指纹确实重算了每一页。
+            const int total_pages = e.editStats().total_pages;
             std::printf(
-                "     页指纹（3 次取最小）：整篇 %.3f ms ｜ 敲 1 字 %.3f ms ｜ 平移复用 %.3f ms\n",
-                fp_full, fp_splice, fp_shift);
-            expectTrue(fp_full > 0.05, "前提：整篇页指纹的耗时可以量（> 0.05ms）");
+                "     页指纹：整篇 %.3f ms（重算 %d 页，脏页 %d）｜ 敲 1 字 %.3f ms / %d 页 ｜ "
+                "平移复用 %.3f ms / %d 页\n",
+                fp_full, total_pages, dp_full, fp_splice, dp_splice, fp_shift, dp_shift);
+            expectTrue(fp_full > 0.0, "前提：页指纹耗时有记账（说明该项统计是活的）");
+            expectTrue(total_pages > 1, "前提：文档多于一页，才有\"少于整篇\"可言");
             // 敲字（后缀原样复用）：重算范围就是脏段占的那一两页 → 应当小一个量级。
-            expectTrue(fp_splice * 4.0 < fp_full,
-                       "★ 页指纹增量化：敲字只重算脏段覆盖的页（< 整篇的 1/4）");
+            expectTrue(dp_splice * 4 <= total_pages,
+                       "★ 页指纹增量化：敲字只重算脏段覆盖的页（不超过整篇的 1/4）");
             // 平移复用：后缀整体挪了位置，从脏段所在页到末页的内容都真的变了 ——
             // 那几页本来就必须重画，指纹也得跟着重算。省下的只是脏段之前的页。
-            // 所以这里只判"仍少于整篇"，不给比值（那种阈值会随编辑位置变成假判据）。
-            expectTrue(fp_shift < fp_full,
+            // 所以这里只判"比敲字多、比整篇少"，不给比值（那种阈值会随编辑位置变成假判据）。
+            expectTrue(dp_splice <= dp_shift && dp_shift < total_pages,
                        "★ 平移复用：只重算脏段及其后的页（少于整篇，但省不了那么多）");
 
             // 分段耗时：一次编辑拆成 编辑 / 重排（排版 + 页指纹）/ 呈现 三段。

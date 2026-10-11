@@ -19,7 +19,7 @@ struct hb_blob_t;
 struct hb_face_t;
 struct hb_font_t;
 
-namespace ced {
+namespace heditor {
 
 /**
  * 每磅用多少个 HarfBuzz scale 单位。256 让 1/256 磅 ≈ 0.005 px（@96dpi），足够精确。
@@ -137,4 +137,4 @@ private:
     std::map<std::pair<int, int>, FontInstance*> cache_;
 };
 
-}  // namespace ced
+}  // namespace heditor

@@ -7,7 +7,7 @@
 #include <cmath>
 #include <cstdint>
 
-namespace ced {
+namespace heditor {
 
 /**
  * 把磅坐标量化到 1/16 磅再比较。
@@ -16,4 +16,4 @@ namespace ced {
  */
 inline int32_t quantPt(float v) { return static_cast<int32_t>(std::lround(v * 16.0f)); }
 
-}  // namespace ced
+}  // namespace heditor

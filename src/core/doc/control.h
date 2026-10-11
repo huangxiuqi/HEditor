@@ -17,7 +17,7 @@
 
 #include "core/doc/document.h"
 
-namespace ced {
+namespace heditor {
 
 /**
  * 控件的业务类型。决定的是"值怎么校验/怎么显示"，
@@ -186,4 +186,4 @@ void adjustControlsOnSplitPara(ControlSet& ctrls, const TextPos& pos);
  */
 void adjustControlsOnMergePara(ControlSet& ctrls, int para, size_t prev_len);
 
-}  // namespace ced
+}  // namespace heditor

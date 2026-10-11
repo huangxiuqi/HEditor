@@ -1,12 +1,12 @@
 /**
- * 自写光栅后端（默认）。打开 CED_USE_SKIA 时整个文件退位，由 bitmap_skia.cpp 接管。
- * 在标出了 CED_USE_SKIA 的构建里，这个文件仍然参与编译（CMake 不挑文件），
+ * 自写光栅后端（默认）。打开 HEDITOR_USE_SKIA 时整个文件退位，由 bitmap_skia.cpp 接管。
+ * 在标出了 HEDITOR_USE_SKIA 的构建里，这个文件仍然参与编译（CMake 不挑文件），
  * 但内容被这一个 #if 掏空 —— 好处是"两个后端"的边界是显式的：
  * 看这个文件的第一行就知道自己是不是在编译它。
  */
 #include "core/render/bitmap.h"
 
-#if !defined(CED_USE_SKIA)
+#if !defined(HEDITOR_USE_SKIA)
 
 #include <hb.h>
 
@@ -15,7 +15,7 @@
 #include <cstring>
 #include <utility>
 
-namespace ced {
+namespace heditor {
 
 Bitmap::Bitmap() = default;
 Bitmap::Bitmap(int w, int h) { reset(w, h); }
@@ -58,7 +58,9 @@ namespace {
 constexpr int kQuadSegments = 8;
 constexpr int kCubicSegments = 12;
 
-/** 纵向超采样数：覆盖率按 1/kSubSamples 行高累积，压低笔画边缘的锯齿。 */
+/**
+ * 纵向超采样数：覆盖率按 1/kSubSamples 行高累积，压低笔画边缘的锯齿。
+ */
 constexpr int kSubSamples = 4;
 
 struct Segment {
@@ -525,6 +527,6 @@ void Bitmap::drawGlyph(hb_font_t* font, uint32_t glyph_id, float pen_x, float pe
     blitMask(m, m.x0, m.y0, color);
 }
 
-}  // namespace ced
+}  // namespace heditor
 
-#endif  // !defined(CED_USE_SKIA)
+#endif  // !defined(HEDITOR_USE_SKIA)

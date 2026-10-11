@@ -1,0 +1,356 @@
+#include "core/doc/invariants.h"
+
+#include <algorithm>
+#include <unordered_map>
+#include <unordered_set>
+
+#include "core/doc/flow.h"
+#include "core/doc/para.h"
+
+namespace heditor {
+
+namespace {
+
+/**
+ * 规则名。测试按它们断言"报了哪一条"，所以集中写在这里，改名只有一处要动。
+ */
+constexpr char kRootAndSections[] = "结构.根唯一且其下是节序列";
+constexpr char kChildKinds[] = "结构.子节点类型与叶子约束";
+constexpr char kNoOrphan[] = "结构.无孤立节点";
+constexpr char kHiddenInFlow[] = "结构.隐藏只在编辑模式下在流里";
+constexpr char kTextNonEmpty[] = "文本.文本节点非空";
+constexpr char kBoundaryOrder[] = "容器.边界成对有序不交叉";
+constexpr char kParagraphTiling[] = "容器.切段无缝隙";
+constexpr char kUniqueId[] = "身份.节点 ID 唯一且索引自洽";
+constexpr char kKindValid[] = "身份.节点种类在声明范围内";
+
+void add(InvariantReport* r, const char* rule, NodeId node, int at, std::string detail) {
+    r->violations.push_back(Violation{rule, node, at, std::move(detail)});
+}
+
+/**
+ * 种类名，只用于违规信息 —— 报告要能直接读懂，拿数字去对照枚举太费事。
+ */
+const char* kindName(NodeKind kind) {
+    switch (kind) {
+        case NodeKind::Document: return "Document";
+        case NodeKind::Section: return "Section";
+        case NodeKind::Table: return "Table";
+        case NodeKind::TableRow: return "TableRow";
+        case NodeKind::TableCell: return "TableCell";
+        case NodeKind::ContentControl: return "ContentControl";
+        case NodeKind::Quote: return "Quote";
+        case NodeKind::CodeBlock: return "CodeBlock";
+        case NodeKind::ListItem: return "ListItem";
+        case NodeKind::Link: return "Link";
+        case NodeKind::Image: return "Image";
+        case NodeKind::Formula: return "Formula";
+        case NodeKind::Break: return "Break";
+        case NodeKind::PageBreak: return "PageBreak";
+        case NodeKind::Tab: return "Tab";
+        case NodeKind::Field: return "Field";
+        case NodeKind::TextRun: return "TextRun";
+        case NodeKind::ParagraphMark: return "ParagraphMark";
+    }
+    return "（未知）";
+}
+
+/**
+ * 谁允许装谁。只登记第三节已经定下的三条强约束，其余容器不限制子节点
+ * （第三节：子节点约束是一个位标志的并集，尚未逐种登记）。
+ */
+bool acceptsChild(NodeKind parent, NodeKind child) {
+    switch (parent) {
+        case NodeKind::Document: return child == NodeKind::Section;
+        case NodeKind::Table: return child == NodeKind::TableRow;
+        case NodeKind::TableRow: return child == NodeKind::TableCell;
+        default: return true;
+    }
+}
+
+bool holdsChild(const std::vector<Node*>& children, const Node* n) {
+    return std::find(children.begin(), children.end(), n) != children.end();
+}
+
+/**
+ * 从根做一次前序遍历：收集顺序、可达集合，以及"自身或祖先声明了隐藏"的期望。
+ */
+void walk(const NodeTree& tree, NodeId id, bool ancestor_hidden, std::vector<NodeId>* order,
+          std::unordered_set<NodeId>* reached, std::unordered_map<NodeId, bool>* want_hidden,
+          int* reached_twice) {
+    if (reached->count(id) != 0) {
+        ++(*reached_twice);
+        return;
+    }
+    const Node* n = tree.find(id);
+    if (n == nullptr) return;
+    reached->insert(id);
+    order->push_back(id);
+    (*want_hidden)[id] = ancestor_hidden || n->hidden;
+    for (Node* c : n->children) {
+        walk(tree, c->id, ancestor_hidden || n->hidden, order, reached, want_hidden, reached_twice);
+    }
+}
+
+/**
+ * 现在拿不到输入的条目。每条写明等哪一步带来输入，免得读的人以为已经查过了。
+ */
+std::vector<PendingRule> pendingRules() {
+    return {
+        {"文本.相邻同标记的 run 必须合并", "1.1 标记合并规范化"},
+        {"文本.标记无重复、顺序由 schema 固定、不允许零宽标记区间", "1.1 与 1.6 样式表"},
+        {"结构.schema 的完整声明（哪些能装哪些、最少几个、最多几个）",
+         "1.4 / 1.5 / 1.7 在容器、控件与表格落地时逐种登记"},
+        {"容器.显式边界元素的不交叉（今天由树的区间嵌套等价保证）", "1.4 容器元素与边界位置"},
+        {"身份.控件 id 唯一、key 不要求唯一", "1.5 控件索引"},
+        {"身份.节点 ID 在保存与重新打开之后仍然有效", "1.10 序列化往返"},
+        {"表格.跨度之和相等、无重叠、无空洞、续格紧邻、有列定义则数据行不许合并",
+         "1.7 表格"},
+        {"域.求值只更新缓存值、只有排版结果类允许迭代且必须终止", "1.8 域"},
+        {"编辑能力.可编辑集合取交集、落点是谓词、选区不受限、越界拒绝并给原因",
+         "1.4 表单模式落点判定与 1.5 控件锁"},
+        {"取值与嵌套.取值拼接、含子控件拒绝整体设值、同 group 互斥、真原子的文本表示",
+         "1.5 控件与 1.4 原子"},
+        {"区间与选区.选区不进模型、端点带方向、端点用流位置、端点外扩到整块边界",
+         "1.2 区间原语与 1.3 事务"},
+    };
+}
+
+}  // namespace
+
+InvariantReport checkInvariants(const NodeTree& tree) {
+    InvariantReport r;
+    FlowIndex design(tree, FlowVisibility::Design);
+    FlowIndex display(tree, FlowVisibility::Display);
+    ParaIndex para(tree, FlowVisibility::Design);
+
+    std::vector<NodeId> order;
+    std::unordered_set<NodeId> reached;
+    std::unordered_map<NodeId, bool> want_hidden;
+    int reached_twice = 0;
+    walk(tree, tree.rootId(), false, &order, &reached, &want_hidden, &reached_twice);
+
+    // 结构.根唯一且其下是节序列
+    r.checked.push_back(kRootAndSections);
+    {
+        int docs = 0;
+        bool root_is_doc = false;
+        for (NodeId id = 1; id <= tree.maxAllocatedId(); ++id) {
+            const Node* n = tree.find(id);
+            if (n == nullptr || n->kind != NodeKind::Document) continue;
+            ++docs;
+            if (id == tree.rootId()) root_is_doc = true;
+        }
+        if (docs != 1 || !root_is_doc) {
+            add(&r, kRootAndSections, tree.rootId(), -1,
+                "Document 节点有 " + std::to_string(docs) + " 个，根是 Document：" +
+                    (root_is_doc ? "是" : "否"));
+        }
+        const Node* root = tree.find(tree.rootId());
+        for (size_t i = 0; i < root->children.size(); ++i) {
+            const NodeKind ck = root->children[i]->kind;
+            if (ck != NodeKind::Section) {
+                add(&r, kRootAndSections, root->children[i]->id, static_cast<int>(i),
+                    std::string("根的孩子里有非节元素：") + kindName(ck));
+            }
+        }
+    }
+
+    // 结构.子节点类型与叶子约束
+    r.checked.push_back(kChildKinds);
+    for (NodeId id : order) {
+        const Node* n = tree.find(id);
+        if (!isContainer(n->kind) && !n->children.empty()) {
+            add(&r, kChildKinds, id, -1,
+                std::string("非容器有孩子（自身是 ") + kindName(n->kind) + "）");
+            continue;
+        }
+        for (size_t i = 0; i < n->children.size(); ++i) {
+            const NodeKind ck = n->children[i]->kind;
+            if (!acceptsChild(n->kind, ck)) {
+                add(&r, kChildKinds, n->children[i]->id, static_cast<int>(i),
+                    std::string(kindName(n->kind)) + " 不接受 " + kindName(ck) + " 作为子节点");
+            }
+        }
+    }
+
+    // 结构.无孤立节点
+    r.checked.push_back(kNoOrphan);
+    {
+        if (reached_twice != 0) {
+            add(&r, kNoOrphan, kInvalidNodeId, -1,
+                "有 " + std::to_string(reached_twice) +
+                    " 个节点被到达两次（父链成环，或两个父节点都持有它）");
+        }
+        for (NodeId id : order) {
+            if (id == tree.rootId()) continue;
+            const Node* n = tree.find(id);
+            if (n->parent == nullptr) {
+                add(&r, kNoOrphan, id, -1, "可达节点的父指针为空");
+            } else if (!holdsChild(n->parent->children, n)) {
+                add(&r, kNoOrphan, id, -1,
+                    "可达节点的父节点的孩子列表里找不到它（父指针与孩子列表不一致）");
+            }
+        }
+        // 池里不可达的节点：只允许出现在某棵被摘下的子树里（顶端父指针为空）。
+        // 撤销要把摘下的子树原样搬回，所以"留在池里但不在树上"是合法状态。
+        const int cap = static_cast<int>(tree.nodeCount()) + 1;
+        for (NodeId id = 1; id <= tree.maxAllocatedId(); ++id) {
+            const Node* n = tree.find(id);
+            if (n == nullptr || reached.count(id) != 0) continue;
+            const Node* top = n;
+            int steps = 0;
+            while (top->parent != nullptr && steps < cap) {
+                top = top->parent;
+                ++steps;
+            }
+            if (top->parent != nullptr || reached.count(top->id) != 0) {
+                add(&r, kNoOrphan, id, -1,
+                    "池里有既不在树上、也不属于某棵被摘下子树的节点（父链上溯不到顶端）");
+            }
+        }
+    }
+
+    // 结构.隐藏只在编辑模式下在流里
+    r.checked.push_back(kHiddenInFlow);
+    for (NodeId id : order) {
+        if (!design.inFlow(id)) {
+            add(&r, kHiddenInFlow, id, -1, "编辑态下有节点不在流里（该口径不摘除任何节点）");
+        }
+        const bool want_out = want_hidden.at(id);
+        if (display.inFlow(id) == want_out) {
+            add(&r, kHiddenInFlow, id, -1,
+                std::string("呈现态的摘除集合与隐藏声明不符：自身或祖先声明隐藏 = ") +
+                    (want_out ? "是" : "否") + "，而呈现态在流里 = " +
+                    (display.inFlow(id) ? "是" : "否"));
+        }
+    }
+
+    // 文本.文本节点非空
+    r.checked.push_back(kTextNonEmpty);
+    for (NodeId id : order) {
+        const Node* n = tree.find(id);
+        if (isText(n->kind) && n->text.empty()) {
+            add(&r, kTextNonEmpty, id, -1, "文本节点为空（相邻同标记的 run 必须合并，空 run 无意义）");
+        }
+    }
+
+    // 容器.边界成对有序不交叉，以及容器.切段无缝隙
+    r.checked.push_back(kBoundaryOrder);
+    r.checked.push_back(kParagraphTiling);
+    for (NodeId id : order) {
+        const Node* n = tree.find(id);
+        if (!isContainer(n->kind)) continue;
+
+        int first = 0;
+        int end = 0;
+        if (!design.intervalOf(id, &first, &end)) {
+            add(&r, kBoundaryOrder, id, -1, "编辑态下容器没有流位置区间");
+            continue;
+        }
+        const bool is_root = (id == tree.rootId());
+        const int content_begin = is_root ? first : first + 1;
+        const int content_end = is_root ? end : end - 1;
+        if (!is_root && end - first < 2) {
+            add(&r, kBoundaryOrder, id, -1, "非根容器的区间装不下两个边界位置");
+        }
+        int prev_end = content_begin;
+        for (size_t i = 0; i < n->children.size(); ++i) {
+            int cf = 0;
+            int ce = 0;
+            if (!design.intervalOf(n->children[i]->id, &cf, &ce)) continue;
+            if (cf < prev_end) {
+                add(&r, kBoundaryOrder, n->children[i]->id, static_cast<int>(i),
+                    "孩子区间与前面的重叠或逆序（区间必须并列或嵌套）");
+            }
+            if (cf < content_begin || ce > content_end) {
+                add(&r, kBoundaryOrder, n->children[i]->id, static_cast<int>(i),
+                    "孩子区间超出父容器的内容范围");
+            }
+            prev_end = ce;
+        }
+
+        const std::vector<int>* marks = para.marksOf(id);
+        if (marks == nullptr) {
+            add(&r, kParagraphTiling, id, -1, "在流的容器没有段落记账（建表与走树不一致）");
+            continue;
+        }
+        const int slots = static_cast<int>(n->children.size());
+        const int count = para.paragraphCount(id);
+        int expect_begin = 0;
+        for (int no = 1; no <= count; ++no) {
+            int b = -1;
+            int e = -1;
+            if (!para.paragraphRange(id, no, &b, &e)) {
+                add(&r, kParagraphTiling, id, no, "第 no 段取不到范围");
+                break;
+            }
+            if (b != expect_begin) {
+                add(&r, kParagraphTiling, id, no,
+                    "段落范围有缝隙或乱序：期望从 " + std::to_string(expect_begin) + " 起，实际从 " +
+                        std::to_string(b) + " 起");
+                break;
+            }
+            expect_begin = e;
+        }
+        if (expect_begin != slots) {
+            add(&r, kParagraphTiling, id, -1,
+                "段落范围没有铺满容器的孩子（铺到 " + std::to_string(expect_begin) + "，孩子数 " +
+                    std::to_string(slots) + "）");
+        }
+        int prev_no = 0;
+        for (int i = 0; i <= slots; ++i) {
+            const int no = para.paragraphNoIn(id, i);
+            int before = 0;
+            for (int mk : *marks) {
+                if (mk < i) ++before;
+            }
+            if (no != before + 1) {
+                add(&r, kParagraphTiling, id, i,
+                    "槽位所属段落序号与标记个数不符：期望 " + std::to_string(before + 1) + "，实际 " +
+                        std::to_string(no));
+            }
+            if (no < prev_no) {
+                add(&r, kParagraphTiling, id, i, "段落序号随槽位倒退");
+            }
+            prev_no = no;
+        }
+    }
+
+    // 身份.节点 ID 唯一且索引自洽
+    r.checked.push_back(kUniqueId);
+    {
+        int found = 0;
+        for (NodeId id = 1; id <= tree.maxAllocatedId(); ++id) {
+            const Node* n = tree.find(id);
+            if (n == nullptr) continue;
+            ++found;
+            if (n->id != id) {
+                add(&r, kUniqueId, id, -1, "索引键与节点的 id 不符（索引自洽性被破坏）");
+            }
+        }
+        if (found != static_cast<int>(tree.nodeCount())) {
+            add(&r, kUniqueId, kInvalidNodeId, -1,
+                "池里有 " + std::to_string(tree.nodeCount()) + " 个节点，按 id 只找到 " +
+                    std::to_string(found) + " 个（有重复 id 或索引漏项）");
+        }
+    }
+
+    // 身份.节点种类在声明范围内
+    r.checked.push_back(kKindValid);
+    {
+        const int max_kind = static_cast<int>(NodeKind::ParagraphMark);
+        for (NodeId id = 1; id <= tree.maxAllocatedId(); ++id) {
+            const Node* n = tree.find(id);
+            if (n == nullptr) continue;
+            if (static_cast<int>(n->kind) > max_kind) {
+                add(&r, kKindValid, id, -1, "节点种类超出声明范围（枚举值越界）");
+            }
+        }
+    }
+
+    r.pending = pendingRules();
+    return r;
+}
+
+}  // namespace heditor

@@ -22,7 +22,7 @@
 
 #include "core/text/shaper.h"
 
-namespace ced {
+namespace heditor {
 
 namespace {
 
@@ -92,7 +92,9 @@ std::string EditorEngine::describeControls() const {
     return os.str();
 }
 
-/** 诊断：把内部状态摊平成可读文本，供宿主与探针取证。 */
+/**
+ * 诊断：把内部状态摊平成可读文本，供宿主与探针取证。
+ */
 
 std::string EditorEngine::describeCaret() const {
     std::ostringstream os;
@@ -183,4 +185,4 @@ std::string EditorEngine::describeShaping(int font_index, float size_pt, const s
 }
 
 
-}  // namespace ced
+}  // namespace heditor

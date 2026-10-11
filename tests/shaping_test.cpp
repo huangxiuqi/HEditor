@@ -19,11 +19,11 @@
 
 #include <hb.h>
 
-#ifndef CED_NATIVE_ASSET_DIR
-#define CED_NATIVE_ASSET_DIR "."
+#ifndef HEDITOR_NATIVE_ASSET_DIR
+#define HEDITOR_NATIVE_ASSET_DIR "."
 #endif
 
-using namespace ced;
+using namespace heditor;
 
 namespace {
 
@@ -94,10 +94,10 @@ int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
 
     FontLibrary lib;
-    const std::string cjkPath = joinPath(CED_NATIVE_ASSET_DIR, "fonts/NotoSansSC-VF.ttf");
+    const std::string cjkPath = joinPath(HEDITOR_NATIVE_ASSET_DIR, "fonts/NotoSansSC-VF.ttf");
     const std::string mnPath =
-        joinPath(CED_NATIVE_ASSET_DIR, "fonts/NotoSansMongolian-Regular.ttf");
-    const std::string latinPath = joinPath(CED_NATIVE_ASSET_DIR, "fonts/NotoSans-Latin-VF.ttf");
+        joinPath(HEDITOR_NATIVE_ASSET_DIR, "fonts/NotoSansMongolian-Regular.ttf");
+    const std::string latinPath = joinPath(HEDITOR_NATIVE_ASSET_DIR, "fonts/NotoSans-Latin-VF.ttf");
 
     const int cjk = lib.addFace(cjkPath);
     const int mn = lib.addFace(mnPath);

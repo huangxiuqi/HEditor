@@ -1,6 +1,6 @@
 #include "core/doc/edit_policy.h"
 
-namespace ced {
+namespace heditor {
 namespace {
 
 /**
@@ -116,4 +116,4 @@ bool EditPolicy::canMerge(const ControlSet& ctrls, EditMode mode, const TextPos&
     return canInsert(ctrls, mode, join, preferred);
 }
 
-}  // namespace ced
+}  // namespace heditor

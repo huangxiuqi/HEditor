@@ -41,7 +41,7 @@
 > ★ 注意：Skia 自己**不**带 HarfBuzz。Skia 的 HarfBuzz 只服务于 `modules/skshaper`
 > （本工程不编），核心光栅化与 `SkFont` 完全不依赖它。
 > 所以 `libskia.wasm.a` 里查不到 harfbuzz 符号是**预期**的，不是漏编。
-> 引擎的整形用的是本仓库自带的 `third_party/harfbuzz-14.6.0`（`ced_harfbuzz`）。
+> 引擎的整形用的是本仓库自带的 `third_party/harfbuzz-14.6.0`（`heditor_harfbuzz`）。
 
 ### 1.2 FreeType 的关键提示（现在真的生效了）
 
@@ -66,10 +66,10 @@
 `Portions of this software are copyright © The FreeType Project (https://freetype.org). All rights reserved.`
 
 > ★ **状态变更**：这一段原来写的是"本项目 POC 阶段不使用 FreeType"。
-> 自从 `CED_USE_SKIA=ON` 之后这句话**不再成立** —— Skia 的字体后端
+> 自从 `HEDITOR_USE_SKIA=ON` 之后这句话**不再成立** —— Skia 的字体后端
 > （`SkFontMgr_New_Custom_Empty` / `SkTypeface_FreeType`）就是 FreeType，
 > 且它**进了包**（符号检查见 §1.3）。所以上面那句致谢是**现在就要加**的。
-> 旧的自写光栅器（`CED_USE_SKIA=OFF`）确实不需要 FreeType，但那是**非默认配置**，
+> 旧的自写光栅器（`HEDITOR_USE_SKIA=OFF`）确实不需要 FreeType，但那是**非默认配置**，
 > 不能拿它来免除义务。
 
 ### 1.3 到底谁进了可执行文件 —— 用符号判定，不用依赖清单
@@ -79,11 +79,11 @@
 本工程的做法是在**最终产物**里找标志性字符串：
 
 ```powershell
-# 对 build/wasm/web/ced_editor.wasm 逐条查
+# 对 build/wasm/web/heditor.wasm 逐条查
 #   SkSL / FreeType / libpng / zlib / libjpeg / libwebp ...
 ```
 
-2026-10-09 实测（`CED_USE_SKIA=ON`，wasm 3,282,875 B）：
+2026-10-09 实测（`HEDITOR_USE_SKIA=ON`，wasm 3,282,875 B）：
 
 | 依赖 | 在最终 wasm 里 | 结论 |
 |---|---|---|

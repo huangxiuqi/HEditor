@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CED 编辑器引擎 · WASM 验证台</title>
+<title>HEditor 编辑器引擎 · WASM 验证台</title>
 <!--  必须显式声明 icon，哪怕给个空 data URI。
      不写的话浏览器会自动去请求 /favicon.ico，静态服务返回 404，
      控制台里就多一条 "Failed to load resource: 404" ——
@@ -128,7 +128,7 @@
 <body>
 
 <header>
-  <h1>CED 编辑器引擎 · WASM 验证台</h1>
+  <h1>HEditor 编辑器引擎 · WASM 验证台</h1>
   <div class="sub">C++ 算法核 → WebAssembly&nbsp;&nbsp;·&nbsp;&nbsp;跨边界只传位图，不传绘制指令</div>
 </header>
 
@@ -185,7 +185,7 @@
       光标移到哪儿都不影响（否则字段看起来不像字段，"这块能不能输入"看不出来）。
       括号的宽度是<b>排版算出来的</b>，所以它把正文<b>挤开</b>而不是盖在字上；
       字段内容被<b>删光</b>之后括号照样在。<br>
-      · 控制台 <code>__ced.setBracketScope(1)</code> 可切到紧凑档：
+      · 控制台 <code>__heditor.setBracketScope(1)</code> 可切到紧凑档：
       只有光标所在字段显示括号，其余字段只在<b>右下角一个小蓝点</b>。<br>
       只读字段用灰色，免得看着像能改。<br><br>
       表单模式只做一件事：<b>把编辑限制在可编辑字段内</b>，其余位置的按键会被拒，

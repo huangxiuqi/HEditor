@@ -28,11 +28,11 @@ async function main() {
   await conn.send('Emulation.setDeviceMetricsOverride',
                   { width: 1500, height: 1200, deviceScaleFactor: 1, mobile: false });
   await conn.send('Page.navigate', { url: URL_ });
-  await conn.waitFor('return !!(window.__ced && window.__ced.ready)', 'ready');
+  await conn.waitFor('return !!(window.__heditor && window.__heditor.ready)', 'ready');
 
   const geo = async () => conn.eval(`
-    const cv = window.__ced.canvas, r = cv.getBoundingClientRect();
-    const cs = window.__ced.controls.items;
+    const cv = window.__heditor.canvas, r = cv.getBoundingClientRect();
+    const cs = window.__heditor.controls.items;
     let lo = 1e9, hi = -1e9, y = 0;
     for (const it of cs) for (const q of (it.rects || [])) {
       lo = Math.min(lo, q.x); hi = Math.max(hi, q.x + q.w); y = q.y + q.h / 2;
@@ -49,19 +49,19 @@ async function main() {
   };
 
   const sweep = async (variant, tag) => {
-    await conn.eval(`return window.__ced.loadFormSample(${variant});`);
-    await conn.eval('return window.__ced.stopBlink();');
+    await conn.eval(`return window.__heditor.loadFormSample(${variant});`);
+    await conn.eval('return window.__heditor.stopBlink();');
     const g = await geo();
     console.log(`\n=== ${tag}（variant ${variant}）x∈[${g.lo.toFixed(1)}, ${g.hi.toFixed(1)}] y=${g.y.toFixed(1)} ===`);
     let prev = '';
     for (let x = g.lo - 6; x <= g.hi + 6; x += 0.5) {
       const hit = await conn.eval(
-        `return JSON.stringify(window.__ced.hit(${x.toFixed(3)}, ${g.y.toFixed(3)}));`);
+        `return JSON.stringify(window.__heditor.hit(${x.toFixed(3)}, ${g.y.toFixed(3)}));`);
       const h = JSON.parse(hit);
       await clickPt(g, x, g.y);
       const st = await conn.eval(`
-        const c = window.__ced.caret;
-        return JSON.stringify({ off: c.offset, x: c.x, own: window.__ced.controls.caret });`);
+        const c = window.__heditor.caret;
+        return JSON.stringify({ off: c.offset, x: c.x, own: window.__heditor.controls.caret });`);
       const s = JSON.parse(st);
       const key = `${h === null ? 'null' : h.offset}|${h === null ? '?' : h.field}|${s.off}|${s.own}`;
       if (key !== prev) {
@@ -78,20 +78,20 @@ async function main() {
 
   // 三连：把后两个字段删空，看区间树
   console.log('\n=== 三连：删空后两个字段 ===');
-  await conn.eval('return window.__ced.loadFormSample(2);');
-  await conn.eval('return window.__ced.stopBlink();');
+  await conn.eval('return window.__heditor.loadFormSample(2);');
+  await conn.eval('return window.__heditor.stopBlink();');
   for (const i of [2, 1]) {
     for (let k = 0; k < 6; ++k) {
       const done = await conn.eval(`
-        const it = window.__ced.controls.items[${i}];
+        const it = window.__heditor.controls.items[${i}];
         if (it.end[1] <= it.start[1]) return true;
-        window.__ced.setCaretAt(0, it.end[1], ${i});
-        window.__ced.setCaretOnly(0, it.end[1]);
+        window.__heditor.setCaretAt(0, it.end[1], ${i});
+        window.__heditor.setCaretOnly(0, it.end[1]);
         return false;`);
       if (done) break;
       await conn.eval(key('Backspace'));
     }
-    const cs = await conn.eval('return JSON.stringify(window.__ced.controls.items' +
+    const cs = await conn.eval('return JSON.stringify(window.__heditor.controls.items' +
                                '.map((it,i)=>({i, r:[it.start[1],it.end[1]], d:it.depth, p:it.parent})));');
     console.log(`   删空 #${i} 之后：${cs}`);
   }
@@ -100,7 +100,7 @@ async function main() {
 }
 
 const key = (k) => `
-  window.__ced.textarea.dispatchEvent(
+  window.__heditor.textarea.dispatchEvent(
     new KeyboardEvent('keydown', { key: ${JSON.stringify(k)}, bubbles: true, cancelable: true }));
   return true;`;
 

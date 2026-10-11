@@ -1,5 +1,5 @@
 /**
- * Skia 光栅后端。定义 CED_USE_SKIA 时由它实现 Bitmap 的全部绘制入口。
+ * Skia 光栅后端。定义 HEDITOR_USE_SKIA 时由它实现 Bitmap 的全部绘制入口。
  *
  * 对外契约不变：像素仍写在 Bitmap::px_ 里，frame / frameBytes / copyRectFrom /
  * paintedPixels 的语义全部保留，宿主感知不到换了引擎。内部换成：绘制走 SkCanvas；
@@ -13,7 +13,7 @@
  */
 #include "core/render/bitmap.h"
 
-#if defined(CED_USE_SKIA)
+#if defined(HEDITOR_USE_SKIA)
 
 #include <hb.h>
 
@@ -44,7 +44,7 @@
 
 #include <hb-ot.h>
 
-namespace ced {
+namespace heditor {
 
 namespace {
 
@@ -262,7 +262,9 @@ const SkFont* Bitmap::SkiaImpl::fontFor(hb_font_t* hbf, float units_to_px) {
     return &fonts.emplace(key, f).first->second;
 }
 
-/** 生命周期：构造、析构与移动全部交给编译器默认实现。 */
+/**
+ * 生命周期：构造、析构与移动全部交给编译器默认实现。
+ */
 Bitmap::Bitmap() = default;
 Bitmap::Bitmap(int w, int h) { reset(w, h); }
 Bitmap::~Bitmap() = default;
@@ -357,7 +359,9 @@ void Bitmap::copyRectFrom(const Bitmap& src, const Rect& r) {
     }
 }
 
-/** 字形：把 HarfBuzz 的字形描到帧上，含侧倒竖排的旋转。 */
+/**
+ * 字形：把 HarfBuzz 的字形描到帧上，含侧倒竖排的旋转。
+ */
 void Bitmap::drawGlyph(hb_font_t* font, uint32_t glyph_id, float pen_x, float pen_y,
                        float units_to_px, Color color, float rotate_deg) {
     if (!font || w_ <= 0 || h_ <= 0 || !sk_ || !sk_->canvas) return;
@@ -411,7 +415,7 @@ void Bitmap::drawGlyph(hb_font_t* font, uint32_t glyph_id, float pen_x, float pe
 /**
  * GlyphCache 在 Skia 后端下只是接口占位（drawGlyph 不再查它）。
  * 这个哈希仍要提供，否则 bitmap.cpp 缺席时会有未定义符号 —— 将来若有人
- * 打开 CED_USE_SKIA 又去调 glyphCache()->find()，至少能链上。
+ * 打开 HEDITOR_USE_SKIA 又去调 glyphCache()->find()，至少能链上。
  */
 size_t GlyphCache::KeyHash::operator()(const Key& k) const {
     uint64_t h = 1469598103934665603ull;
@@ -428,6 +432,6 @@ size_t GlyphCache::KeyHash::operator()(const Key& k) const {
     return static_cast<size_t>(h);
 }
 
-}  // namespace ced
+}  // namespace heditor
 
-#endif  // defined(CED_USE_SKIA)
+#endif  // defined(HEDITOR_USE_SKIA)

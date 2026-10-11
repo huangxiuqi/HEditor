@@ -9,7 +9,7 @@
 #include "core/text/writing_mode.h"
 #include "core/utils/types.h"
 
-namespace ced {
+namespace heditor {
 
 /** 样例文书：单测与探针共用的固定内容。 */
 
@@ -107,4 +107,4 @@ std::vector<BlockSpec> sampleDocument(int cjk_font_index, int mongol_font_index,
     return blocks;
 }
 
-}  // namespace ced
+}  // namespace heditor

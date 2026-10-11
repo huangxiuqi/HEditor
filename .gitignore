@@ -1,7 +1,7 @@
 # ─────────────────────────────────────────────────────────────
 #  构建产物
 # ─────────────────────────────────────────────────────────────
-# build/ 下是 native 与 wasm 两套构建目录（含 ced_editor.js / ced_editor.wasm）。
+# build/ 下是 native 与 wasm 两套构建目录（含 heditor.js / heditor.wasm）。
 # ★ 两套都能由 scripts/build_native.ps1 与 scripts/build_wasm.ps1 重建，
 #   入库只会让每次 diff 都夹着几 MB 二进制。
 build/

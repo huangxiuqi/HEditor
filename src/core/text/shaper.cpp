@@ -8,7 +8,7 @@
 #include "core/doc/document.h"
 #include "core/text/writing_mode.h"
 
-namespace ced {
+namespace heditor {
 namespace {
 
 hb_direction_t toHbDirection(ShapingDirection d) {
@@ -111,4 +111,4 @@ ShapedText shapeText(hb_font_t* font, std::string_view utf8, const WritingMode& 
     return shapeTextRange(font, cps.data(), 0, cps.size(), wm, language);
 }
 
-}  // namespace ced
+}  // namespace heditor

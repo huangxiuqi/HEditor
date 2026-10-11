@@ -22,7 +22,7 @@
 #include "core/utils/types.h"
 #include "core/text/writing_mode.h"
 
-namespace ced {
+namespace heditor {
 
 struct PageMetrics {
     float width_pt = 595.276f;  // A4 宽（磅）
@@ -74,7 +74,9 @@ struct BlockSpec {
      */
     std::vector<int> fallback_font_indices;
 
-    /** 文本便捷接口：进出都是 UTF-8，内部始终是码点序列。 */
+    /**
+     * 文本便捷接口：进出都是 UTF-8，内部始终是码点序列。
+     */
     void setText(const std::string& utf8) { cp_text = utf8ToCodepoints(utf8); }
     std::string textUtf8() const { return codepointsToUtf8(cp_text); }
     size_t codepointCount() const { return cp_text.size(); }
@@ -458,4 +460,4 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
  */
 void summarizeLayoutStats(LayoutResult* out);
 
-}  // namespace ced
+}  // namespace heditor

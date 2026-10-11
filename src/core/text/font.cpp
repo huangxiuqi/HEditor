@@ -7,7 +7,7 @@
 #include <fstream>
 #include <iterator>
 
-namespace ced {
+namespace heditor {
 
 FontFace::~FontFace() {
     if (face_) hb_face_destroy(face_);
@@ -154,4 +154,4 @@ FontInstance* FontLibrary::instance(int face_index, float size_pt) {
     return raw;
 }
 
-}  // namespace ced
+}  // namespace heditor

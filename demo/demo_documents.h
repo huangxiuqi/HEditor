@@ -1,7 +1,7 @@
 /**
  * 演示与测试共用的固定文书。
  *
- * 不属于引擎，所以不编进 ced_core：它是"喂给引擎的样例内容"，
+ * 不属于引擎，所以不编进 heditor_core：它是"喂给引擎的样例内容"，
  * 被两个宿主入口（原生 / WASM）与两个测试文件共用。核心库里躺着演示数据，
  * 会让"这个库到底提供什么"变得含糊，也会让宿主以为它是产品能力的一部分。
  */
@@ -11,7 +11,7 @@
 
 #include "core/layout/layout.h"
 
-namespace ced {
+namespace heditor {
 
 /**
  * 样例文书：中文横排 → 蒙文 vertical-lr（列序从左往右）→ 蒙文 vertical-rl（对照）
@@ -27,4 +27,4 @@ std::vector<BlockSpec> sampleDocument(int cjk_font_index, int mongol_font_index,
  */
 BlockSpec mixedParagraphBlock(int cjk_font_index, int latin_font_index = -1);
 
-}  // namespace ced
+}  // namespace heditor

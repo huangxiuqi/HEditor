@@ -20,7 +20,7 @@ const URL_ = opt('url', 'http://localhost:8781/web/index.html');
 const OUT = join(ROOT, opt('out-dir', 'out/web'));
 
 const key = (k) => `
-  window.__ced.textarea.dispatchEvent(
+  window.__heditor.textarea.dispatchEvent(
     new KeyboardEvent('keydown', { key: ${JSON.stringify(k)}, bubbles: true,
                                    cancelable: true }));
   return true;`;
@@ -35,13 +35,13 @@ async function main() {
   await c.send('Emulation.setDeviceMetricsOverride',
                { width: 1500, height: 1200, deviceScaleFactor: 1, mobile: false });
   await c.send('Page.navigate', { url: URL_ });
-  await c.waitFor('return !!(window.__ced && window.__ced.ready)', 'window.__ced.ready');
+  await c.waitFor('return !!(window.__heditor && window.__heditor.ready)', 'window.__heditor.ready');
   await sleep(300);
 
   const state = async (tag) => {
     const s = await c.eval(`
-      const ctl = window.__ced.controls;
-      return { caret: window.__ced.caret.offset, owner: ctl.caret,
+      const ctl = window.__heditor.controls;
+      return { caret: window.__heditor.caret.offset, owner: ctl.caret,
                ranges: ctl.items.map(i => '[' + i.start[1] + ',' + i.end[1] + ')').join(' '),
                rects: ctl.items.map(i => i.rects.length ? i.rects.map(q => Math.round(q.x) + '+' + Math.round(q.w)).join(',') : '-').join(' | ') };`);
     console.log(`${tag.padEnd(30)} caret=${s.caret} owner=${s.owner} ${s.ranges}   rects=${s.rects}`);
@@ -49,21 +49,21 @@ async function main() {
   };
 
   console.log('=== 三连可编辑字段（variant 2）：把所有用户路径走一遍 ===');
-  await c.eval('return window.__ced.loadFormSample(2);');
-  await c.eval('return window.__ced.stopBlink();');
+  await c.eval('return window.__heditor.loadFormSample(2);');
+  await c.eval('return window.__heditor.stopBlink();');
   // 页面上实际请求到的资源名：带 ?v= 后缀 = 命中"版本号随文件变"的加载方式。
   const res = await c.eval(`
     return performance.getEntriesByType('resource')
       .map(e => e.name.replace(location.origin, ''))
-      .filter(n => n.includes('app.js') || n.includes('ced_editor'))
+      .filter(n => n.includes('app.js') || n.includes('heditor'))
       .join('\\n    ');`);
   console.log('实际加载的资源：\n    ' + res);
-  const stamp = await c.eval('return window.__ced && document.getElementById("build")'
+  const stamp = await c.eval('return window.__heditor && document.getElementById("build")'
                              + ' ? document.getElementById("build").textContent : "(无)";');
   console.log('工具条构建时间：' + stamp);
   await state('载入样例');
 
-  await c.eval('return window.__ced.setCaret(0, 9);');
+  await c.eval('return window.__heditor.setCaret(0, 9);');
   await state('光标放到中间字段末尾 9');
   await c.eval(key('Backspace'));
   await state('退格一次');
@@ -77,21 +77,21 @@ async function main() {
   await state('打字 痛');
 
   // 点画布：把光标定在空字段的那一对括号上（左右各试几个像素）
-  await c.eval('return window.__ced.loadFormSample(2);');
-  await c.eval('return window.__ced.setCaret(0, 9);');
+  await c.eval('return window.__heditor.loadFormSample(2);');
+  await c.eval('return window.__heditor.setCaret(0, 9);');
   await c.eval(key('Backspace'));
   await c.eval(key('Backspace'));
   await state('重新删空中间字段');
   for (const dx of [-8, -4, -2, 0, 2, 4, 8, 14]) {
     const got = await c.eval(`
-      const cv = window.__ced.canvas, r = cv.getBoundingClientRect();
+      const cv = window.__heditor.canvas, r = cv.getBoundingClientRect();
       const sx = r.width / cv.width, sy = r.height / cv.height;
-      const c0 = window.__ced.caret;
+      const c0 = window.__heditor.caret;
       cv.dispatchEvent(new MouseEvent('mousedown',
         { clientX: r.left + (c0.x + ${dx}) * sx, clientY: r.top + (c0.y + 5) * sy,
           bubbles: true, cancelable: true }));
-      const ctl = window.__ced.controls;
-      return { caret: window.__ced.caret.offset, owner: ctl.caret };`);
+      const ctl = window.__heditor.controls;
+      return { caret: window.__heditor.caret.offset, owner: ctl.caret };`);
     console.log(`点 光标x ${dx > 0 ? '+' : ''}${dx} px → caret=${got.caret} owner=${got.owner}` +
                 (got.owner === 1 ? '   ← 进了空字段' : ''));
   }

@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-namespace ced {
+namespace heditor {
 namespace png {
 
 inline uint32_t crc32(const uint8_t* data, size_t len, uint32_t crc = 0xFFFFFFFFu) {
@@ -114,4 +114,4 @@ inline bool writeRgba(const std::string& path, const uint8_t* rgba, int w, int h
 }
 
 }  // namespace png
-}  // namespace ced
+}  // namespace heditor

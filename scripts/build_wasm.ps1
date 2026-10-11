@@ -1,6 +1,6 @@
 ﻿# 构建 WASM 目标（Emscripten）。
 #
-# 产物：build/wasm/web/ced_editor.js + ced_editor.wasm
+# 产物：build/wasm/web/heditor.js + heditor.wasm
 #
 # 本机没有把 emsdk 装进 PATH，脚本自己拼环境：
 #   EM_CONFIG 指向 .toolchain/emsdk/.emscripten
@@ -11,7 +11,7 @@
 #   powershell -ExecutionPolicy Bypass -File scripts\build_wasm.ps1 -Configure   # 强制重跑 cmake 配置
 #   powershell -ExecutionPolicy Bypass -File scripts\build_wasm.ps1 -NoSkia      # 用自写光栅后端（对照用）
 #
-# 默认走 Skia 后端（CED_USE_SKIA=ON）—— 光栅化的活交给 Skia，见 src/core/render/bitmap.h。
+# 默认走 Skia 后端（HEDITOR_USE_SKIA=ON）—— 光栅化的活交给 Skia，见 src/core/render/bitmap.h。
 # Skia 的 wasm 静态库要用 scripts\build_skia_wasm.ps1 先构建出来。
 param(
     [string]$BuildType = 'Release',
@@ -27,7 +27,7 @@ $EmscriptenDir = Join-Path $Emsdk 'upstream\emscripten'
 $Ninja = Join-Path $Root '.toolchain\ninja\ninja.exe'
 $BuildDir = Join-Path $Root 'build\wasm'
 $SkiaWasOn = -not $NoSkia
-$SkiaFlag = if ($NoSkia) { '-DCED_USE_SKIA=OFF' } else { '-DCED_USE_SKIA=ON' }
+$SkiaFlag = if ($NoSkia) { '-DHEDITOR_USE_SKIA=OFF' } else { '-DHEDITOR_USE_SKIA=ON' }
 
 foreach ($p in @($EmscriptenDir, $Ninja)) {
     if (-not (Test-Path $p)) { throw "缺少工具链：$p" }
@@ -38,9 +38,9 @@ foreach ($p in @($EmscriptenDir, $Ninja)) {
 # 值不一致就强制重配。
 $cacheFile = Join-Path $BuildDir 'CMakeCache.txt'
 if (Test-Path $cacheFile) {
-    $cached = (Select-String -Path $cacheFile -Pattern '^CED_USE_SKIA:BOOL=(ON|OFF)$' |
+    $cached = (Select-String -Path $cacheFile -Pattern '^HEDITOR_USE_SKIA:BOOL=(ON|OFF)$' |
                Select-Object -First 1).Line
-    $want = if ($SkiaWasOn) { 'CED_USE_SKIA:BOOL=ON' } else { 'CED_USE_SKIA:BOOL=OFF' }
+    $want = if ($SkiaWasOn) { 'HEDITOR_USE_SKIA:BOOL=ON' } else { 'HEDITOR_USE_SKIA:BOOL=OFF' }
     if ($cached -and $cached -ne $want) {
         Write-Host "[wasm] 后端开关变了（$cached → $want），强制重新配置"
         $Configure = $true
@@ -55,7 +55,7 @@ $env:EM_CONFIG = Join-Path $Emsdk '.emscripten'
 $env:PATH = "$EmscriptenDir;$Emsdk;$($NodeDir.FullName);$env:PATH"
 
 # ── 配置 ────────────────────────────────────────────────────
-# 每次都重跑配置：构建时间戳（CED_BUILD_STAMP）是配置期的缓存变量，
+# 每次都重跑配置：构建时间戳（HEDITOR_BUILD_STAMP）是配置期的缓存变量，
 #   不重跑就拿不到新的时间，验证台上显示的"这一版是几点编的"就会骗人。
 #   代价是每次多几秒配置时间，换来的是"页面跑的到底是哪一版"当场可判。
 $Stamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
@@ -68,12 +68,12 @@ if ($Configure -or -not (Test-Path $cacheFile)) {
     -S $Root -B $BuildDir -G Ninja `
     "-DCMAKE_BUILD_TYPE=$BuildType" `
     "-DCMAKE_MAKE_PROGRAM=$Ninja" `
-    "-DCED_BUILD_STAMP=$Stamp" `
+    "-DHEDITOR_BUILD_STAMP=$Stamp" `
     $SkiaFlag
 if ($LASTEXITCODE -ne 0) { throw "emcmake 配置失败：exit $LASTEXITCODE" }
 
 # ── 构建 ────────────────────────────────────────────────────
-Write-Host "[wasm] 构建 ced_wasm"
+Write-Host "[wasm] 构建 heditor_wasm"
 cmake --build $BuildDir
 if ($LASTEXITCODE -ne 0) { throw "构建失败：exit $LASTEXITCODE" }
 
@@ -81,7 +81,7 @@ if ($LASTEXITCODE -ne 0) { throw "构建失败：exit $LASTEXITCODE" }
 Write-Host ""
 Write-Host "[wasm] 产物："
 $total = 0
-foreach ($n in @('ced_editor.js', 'ced_editor.wasm')) {
+foreach ($n in @('heditor.js', 'heditor.wasm')) {
     $f = Join-Path $BuildDir "web\$n"
     if (Test-Path $f) {
         $len = (Get-Item $f).Length

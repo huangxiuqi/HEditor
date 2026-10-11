@@ -5,7 +5,7 @@
 //   edit_probe.mjs —— 看编辑（这一份），断言四件事：
 //
 //   键盘路径真的通了：往真实 <textarea> 上派 KeyboardEvent，文档要变、光标要走。
-//      （不是调 window.__ced.type() 绕开宿主 —— 那样测的是引擎，不是接线。）
+//      （不是调 window.__heditor.type() 绕开宿主 —— 那样测的是引擎，不是接线。）
 //   档 1 的增量是真的：方向键只重画几百像素，而敲字仍是整页重画。
 //      两条都要断言 —— 只断言"很快"是没法证伪的，必须同时钉住"还没做到的那部分"。
 //   偏移单位是码点、且会吸附到字素簇：e + U+0301 是一个字符，
@@ -56,8 +56,8 @@ async function boot() {
                   { width: 1500, height: 1200, deviceScaleFactor: 1, mobile: false });
   console.log('→ 打开', URL_);
   await conn.send('Page.navigate', { url: URL_ });
-  const ms = await conn.waitFor('return !!(window.__ced && window.__ced.ready)',
-                               'window.__ced.ready');
+  const ms = await conn.waitFor('return !!(window.__heditor && window.__heditor.ready)',
+                               'window.__heditor.ready');
   console.log(`→ 页面就绪，耗时 ${(ms / 1000).toFixed(1)} s`);
   cdp.conn = conn;
   return conn;
@@ -74,14 +74,14 @@ async function boot() {
  */
 async function resetAndGetFullBaseline(c) {
   return c.eval(`
-    const s = window.__ced.reset(6, ${ZOOM});
-    window.__ced.stopBlink();
+    const s = window.__heditor.reset(6, ${ZOOM});
+    window.__heditor.stopBlink();
     return s;`);
 }
 
 // 往真实 textarea 派键盘事件（走的是页面的 onKeyDown，不是引擎 API）
 const key = (k, extra = '') => `
-  window.__ced.textarea.dispatchEvent(
+  window.__heditor.textarea.dispatchEvent(
     new KeyboardEvent('keydown', { key: ${JSON.stringify(k)}, bubbles: true,
                                    cancelable: true ${extra} }));
   return true;`;
@@ -107,20 +107,20 @@ async function main() {
               `${st.repaintedPages} / ${st.totalPages}`);
     chk.check('整页重画写入 ≥ 半帧', st.repaintedPixels > st.framePixels / 2,
               `${st.repaintedPixels} / ${st.framePixels}`);
-    chk.check('初始文档与预期一致', (await c.eval(CP_LEN + 'return cplen(window.__ced.text);'))
+    chk.check('初始文档与预期一致', (await c.eval(CP_LEN + 'return cplen(window.__heditor.text);'))
               === Array.from(S6).length);
   }
   const full = report.baseline.repaintedPixels;
 
   chk.section('[2] 键盘路径：派真实 keydown，文档要变、光标要走（单段文档仍整页重画）');
   {
-    const b = await c.eval(CP_LEN + 'return { n: cplen(window.__ced.text), o: window.__ced.caret.offset };');
+    const b = await c.eval(CP_LEN + 'return { n: cplen(window.__heditor.text), o: window.__heditor.caret.offset };');
     await c.eval(key('心'));
-    const a = await c.eval(CP_LEN + `return { n: cplen(window.__ced.text), o: window.__ced.caret.offset,
-                                              st: window.__ced.editStats };`);
+    const a = await c.eval(CP_LEN + `return { n: cplen(window.__heditor.text), o: window.__heditor.caret.offset,
+                                              st: window.__heditor.editStats };`);
     chk.check('文档码点数 +1', a.n === b.n + 1, `${b.n} → ${a.n}`);
     chk.check('光标停在新字之后（不是字前、也不是跳段首）', a.o === b.o + 1, `${b.o} → ${a.o}`);
-    chk.check('插入的就是那个字', (await c.eval('return window.__ced.text.includes("心");')) === true);
+    chk.check('插入的就是那个字', (await c.eval('return window.__heditor.text.includes("心");')) === true);
     chk.check(' 单段文档：敲字仍是全量重排（脏段就是第一段）',
               a.st.layoutRan === true && a.st.layoutWasFull === true);
     chk.check(' 单段文档：敲字仍是整页重画（所在页内容变了）',
@@ -138,44 +138,44 @@ async function main() {
     // 顺序也要小心：下面"该吞的吞"那一条会真的敲进一个 z。
     //   探针自己制造的状态变化必须显式收掉，否则后面每一条断言都被带偏
     //   （否则多出来的 z 会让"退格恢复原样"跟着失败）。
-    const beforeMod = await c.eval(CP_LEN + 'return cplen(window.__ced.text);');
+    const beforeMod = await c.eval(CP_LEN + 'return cplen(window.__heditor.text);');
 
     let modSwallowed = 0;
     for (const m of ['ctrlKey', 'altKey', 'metaKey']) {
       const r = await c.eval(`
         const e = new KeyboardEvent('keydown',
           { key: 'x', ${m}: true, bubbles: true, cancelable: true });
-        return window.__ced.textarea.dispatchEvent(e);`);
+        return window.__heditor.textarea.dispatchEvent(e);`);
       if (r === false) ++modSwallowed;
     }
     chk.check('Ctrl/Alt/Meta 组合不被吞（否则 Ctrl+C 之类会被吃掉）', modSwallowed === 0,
               `被吞 ${modSwallowed} / 3`);
-    const afterMod = await c.eval(CP_LEN + 'return cplen(window.__ced.text);');
+    const afterMod = await c.eval(CP_LEN + 'return cplen(window.__heditor.text);');
     chk.check('带 Ctrl/Alt/Meta 的按键不落字', afterMod === beforeMod,
               `${beforeMod} → ${afterMod}`);
 
     const swallow = await c.eval(`
       const e = new KeyboardEvent('keydown', { key: 'z', bubbles: true, cancelable: true });
-      return window.__ced.textarea.dispatchEvent(e);   // false = 被 preventDefault
+      return window.__heditor.textarea.dispatchEvent(e);   // false = 被 preventDefault
     `);
     chk.check('普通可打印字符的 keydown 被宿主吞掉（不落进 textarea）', swallow === false);
-    const afterSwallow = await c.eval(CP_LEN + 'return cplen(window.__ced.text);');
+    const afterSwallow = await c.eval(CP_LEN + 'return cplen(window.__heditor.text);');
     chk.check(' 但字确实进了文档一次（"吞掉 keydown" 和 "不落字" 是两回事）',
               afterSwallow === beforeMod + 1, `${beforeMod} → ${afterSwallow}`);
 
     // 收尾：退格两次，把 z 和前面那个 心 都收掉
     await c.eval(key('Backspace'));
     await c.eval(key('Backspace'));
-    const back = await c.eval(CP_LEN + 'return { n: cplen(window.__ced.text), o: window.__ced.caret.offset };');
+    const back = await c.eval(CP_LEN + 'return { n: cplen(window.__heditor.text), o: window.__heditor.caret.offset };');
     chk.check('两次退格把文档恢复原样', back.n === b.n && back.o === b.o,
               `${back.n} / offset ${back.o}（期望 ${b.n} / ${b.o}）`);
   }
 
   chk.section('[3] 方向键 = 真增量：不重排、0 脏页、写入量差两个数量级');
   {
-    await c.eval('window.__ced.setCaret(0, 0); return true;');
+    await c.eval('window.__heditor.setCaret(0, 0); return true;');
     await c.eval(key('ArrowRight'));
-    const right = await c.eval('return { c: window.__ced.caret, st: window.__ced.editStats };');
+    const right = await c.eval('return { c: window.__heditor.caret, st: window.__heditor.editStats };');
     chk.check('右移后光标偏移 +1', right.c.offset === 1, `offset=${right.c.offset}`);
     chk.check(' 光标移动不重排（layoutRan=false）', right.st.layoutRan === false);
     chk.check(' 光标移动重排行数为 0（不是上一次重排的残留）', right.st.relaidLines === 0);
@@ -186,31 +186,31 @@ async function main() {
               `${right.st.repaintedPixels} vs ${full}（${(100 * right.st.repaintedPixels / full).toFixed(4)}%）`);
 
     // 段首再左移：引擎应当返回 false（没动就不该重绘）
-    await c.eval('window.__ced.setCaret(0, 0); return true;');
-    const at0 = await c.eval('return window.__ced.move(-1);');
+    await c.eval('window.__heditor.setCaret(0, 0); return true;');
+    const at0 = await c.eval('return window.__heditor.move(-1);');
     chk.check('已在段首，向左移动不重绘（返回 null）', at0 === null);
 
     // Home / End
     await c.eval(key('End'));
-    const atEnd = await c.eval('return window.__ced.caret.offset;');
-    const len = await c.eval(CP_LEN + 'return cplen(window.__ced.text);');
+    const atEnd = await c.eval('return window.__heditor.caret.offset;');
+    const len = await c.eval(CP_LEN + 'return cplen(window.__heditor.text);');
     chk.check('End 走到段末', atEnd === len, `${atEnd} / 段长 ${len}`);
     await c.eval(key('Home'));
-    chk.check('Home 回到段首', (await c.eval('return window.__ced.caret.offset;')) === 0);
+    chk.check('Home 回到段首', (await c.eval('return window.__heditor.caret.offset;')) === 0);
   }
 
   chk.section('[4] 画布点选 = 命中测试往返：正查找出的光标 x，反查必须回到同一个偏移');
   {
-    const len = await c.eval(CP_LEN + 'return cplen(window.__ced.text);');
-    await c.eval('window.__ced.setCaret(0, 0); return true;');
-    const g0 = await c.eval('return window.__ced.caret;');
-    const z = await c.eval('return window.__ced.zoomLevel;');
+    const len = await c.eval(CP_LEN + 'return cplen(window.__heditor.text);');
+    await c.eval('window.__heditor.setCaret(0, 0); return true;');
+    const g0 = await c.eval('return window.__heditor.caret;');
+    const z = await c.eval('return window.__heditor.zoomLevel;');
 
     // 画出来的光标矩形（的东西）应当逐个右移
     const xs = [];
     for (let o = 0; o <= len; ++o) {
-      await c.eval(`window.__ced.setCaret(0, ${o}); return true;`);
-      xs.push(await c.eval('return window.__ced.caret.x;'));
+      await c.eval(`window.__heditor.setCaret(0, ${o}); return true;`);
+      xs.push(await c.eval('return window.__heditor.caret.x;'));
     }
     let mono = true;
     for (let i = 1; i < xs.length; ++i) if (xs[i] <= xs[i - 1]) mono = false;
@@ -227,8 +227,8 @@ async function main() {
     //
     //   控件报告里 行内起点 + 本偏移的沿轴位置 才是插入点在帧磅坐标下的位置。
     const repOf = async (o) => {
-      await c.eval(`window.__ced.setCaret(0, ${o}); return true;`);
-      return c.eval('return window.__ced.caretReport;');
+      await c.eval(`window.__heditor.setCaret(0, ${o}); return true;`);
+      return c.eval('return window.__heditor.caretReport;');
     };
     const rep0 = await repOf(0);
     const mOrigin = /行内起点=([-\d.]+) pt/.exec(rep0);
@@ -252,15 +252,15 @@ async function main() {
     let ok = 0;
     for (let o = 0; o <= len; ++o) {
       const hit = await c.eval(`
-        const cv = window.__ced.canvas, r = cv.getBoundingClientRect();
+        const cv = window.__heditor.canvas, r = cv.getBoundingClientRect();
         const sx = r.width / cv.width, sy = r.height / cv.height;
-        const zz = window.__ced.zoomLevel;
+        const zz = window.__heditor.zoomLevel;
         // 帧磅 → 帧像素（× zoom）→ 客户端像素（× CSS 缩放）
         const clientX = r.left + (${absPt[o] + 0.2} * zz) * sx;
         const clientY = r.top + ${g0.y + g0.h / 2} * sy;
         cv.dispatchEvent(new MouseEvent('mousedown',
           { clientX, clientY, bubbles: true, cancelable: true }));
-        return window.__ced.caret.offset;`);
+        return window.__heditor.caret.offset;`);
       if (hit === o) ++ok;
     }
     chk.check(` ${len + 1} 个插入点，点画布反查全部回到原位置（画光标与点选共用同一份行盒几何）`,
@@ -274,8 +274,8 @@ async function main() {
     const bad = [];
     for (let o = 0; o < len; ++o) {
       const mid = (absPt[o] + absPt[o + 1]) / 2;
-      const left = await c.eval(`return window.__ced.hit(${mid - 0.2}, ${yPt});`);
-      const right = await c.eval(`return window.__ced.hit(${mid + 0.2}, ${yPt});`);
+      const left = await c.eval(`return window.__heditor.hit(${mid - 0.2}, ${yPt});`);
+      const right = await c.eval(`return window.__heditor.hit(${mid + 0.2}, ${yPt});`);
       if (left && right && left.offset === o && right.offset === o + 1) ++bok;
       else bad.push(`o=${o}: 左→${left ? left.offset : 'null'} 右→${right ? right.offset : 'null'}`);
     }
@@ -285,30 +285,30 @@ async function main() {
     // 点在画布左边界之外：命中必须失败，而不是胡乱给一个位置。
     // （注意：页内的空白不算失败 —— hitTestPt 的语义是"取同页最近的一行"，
     //   所以"点页面底部空白光标会跳到第一行"是正确行为，不该拿来断言。）
-    await c.eval('window.__ced.setCaret(0, 5); return true;');
+    await c.eval('window.__heditor.setCaret(0, 5); return true;');
     const outside = await c.eval(`
-      const cv = window.__ced.canvas, r = cv.getBoundingClientRect();
+      const cv = window.__heditor.canvas, r = cv.getBoundingClientRect();
       const sy = r.height / cv.height;
       cv.dispatchEvent(new MouseEvent('mousedown',
-        { clientX: r.left - 50, clientY: r.top + (window.__ced.caret.y + 5) * sy,
+        { clientX: r.left - 50, clientY: r.top + (window.__heditor.caret.y + 5) * sy,
           bubbles: true, cancelable: true }));
-      return window.__ced.caret.offset;`);
+      return window.__heditor.caret.offset;`);
     chk.check('点画布左边界之外 → 命中失败，光标停在原地（不猜）', outside === 5,
               `offset=${outside}`);
   }
 
   chk.section('[5] 偏移单位是码点、且吸附到字素簇（经 WASM 边界验证）');
   {
-    await c.eval('window.__ced.setCaret(0, 0); return true;');
-    await c.eval('return window.__ced.type("e");');
-    await c.eval('return window.__ced.type("\\u0301");');   // 组合重音 U+0301
-    const st = await c.eval(CP_LEN + `return { n: cplen(window.__ced.text),
-                                               o: window.__ced.caret.offset };`);
+    await c.eval('window.__heditor.setCaret(0, 0); return true;');
+    await c.eval('return window.__heditor.type("e");');
+    await c.eval('return window.__heditor.type("\\u0301");');   // 组合重音 U+0301
+    const st = await c.eval(CP_LEN + `return { n: cplen(window.__heditor.text),
+                                               o: window.__heditor.caret.offset };`);
     chk.check('e 类序列：插入 2 个码点，光标偏移 = 2（偏移数的是码点）', st.o === 2, `offset=${st.o}`);
 
     const posOf = async (o) => {
-      await c.eval(`window.__ced.setCaret(0, ${o}); return true;`);
-      const rep = await c.eval('return window.__ced.caretReport;');
+      await c.eval(`window.__heditor.setCaret(0, ${o}); return true;`);
+      const rep = await c.eval('return window.__heditor.caretReport;');
       const m = /本偏移的沿轴位置=([-\d.]+) pt/.exec(rep);
       return m ? Number(m[1]) : NaN;
     };
@@ -317,11 +317,11 @@ async function main() {
               Math.abs(p1 - p0) < 1e-6, `pos(0)=${p0} pos(1)=${p1}`);
     chk.check('偏移 2 已经是下一个簇 → 位置前进', p2 > p0, `pos(2)=${p2}`);
 
-    const cps = await c.eval(CP_LEN + 'return cplen(window.__ced.text);');
-    await c.eval('window.__ced.setCaret(0, 2); return true;');
-    await c.eval('return window.__ced.backspace();');
-    const after = await c.eval(CP_LEN + `return { n: cplen(window.__ced.text),
-                                                 o: window.__ced.caret.offset };`);
+    const cps = await c.eval(CP_LEN + 'return cplen(window.__heditor.text);');
+    await c.eval('window.__heditor.setCaret(0, 2); return true;');
+    await c.eval('return window.__heditor.backspace();');
+    const after = await c.eval(CP_LEN + `return { n: cplen(window.__heditor.text),
+                                                 o: window.__heditor.caret.offset };`);
     chk.check(' 一次退格删掉 2 个码点（删的是簇，不是码点；否则会留下孤立的组合重音）',
               after.n === cps - 2 && after.o === 0, `${cps} → ${after.n}，offset=${after.o}`);
   }
@@ -333,19 +333,19 @@ async function main() {
     //   原生单测（edit_test.cpp 的 [8]）验的是引擎内部的簇表；而"用户按了两次 f 键"
     //   这条路上还多了一层宿主事件分发 —— 万一宿主把两次 keydown 合并、或者
     //   textarea 的 value 攒了一串才 commit，簇表再对也没用。所以这里必须
-    //   派真实的 KeyboardEvent，而不是调 window.__ced.type()。
+    //   派真实的 KeyboardEvent，而不是调 window.__heditor.type()。
     //
     //   为什么偏偏是 f：liga 连字表里 ff / fi / fl / ffi / ffl 全是以 f 开头的，
     //   而中文测试一个都盖不到 —— 这正是这个 bug 能活到现在的原因。
-    await c.eval(`window.__ced.reset(6, ${ZOOM}); window.__ced.stopBlink(); return true;`);
-    await c.eval('window.__ced.setCaret(0, 0); return true;');
+    await c.eval(`window.__heditor.reset(6, ${ZOOM}); window.__heditor.stopBlink(); return true;`);
+    await c.eval('window.__heditor.setCaret(0, 0); return true;');
 
-    const b = await c.eval(CP_LEN + 'return cplen(window.__ced.text);');
+    const b = await c.eval(CP_LEN + 'return cplen(window.__heditor.text);');
     await c.eval(key('f'));
     await c.eval(key('f'));
-    const a = await c.eval(CP_LEN + `return { n: cplen(window.__ced.text),
-                                               t: window.__ced.text,
-                                               o: window.__ced.caret.offset };`);
+    const a = await c.eval(CP_LEN + `return { n: cplen(window.__heditor.text),
+                                               t: window.__heditor.text,
+                                               o: window.__heditor.caret.offset };`);
     chk.check('两次按 f → 文档 +2 个码点', a.n === b + 2, `${b} → ${a.n}`);
     chk.check('两个 f 都真的写进了文本', Array.from(a.t).slice(0, 2).join('') === 'ff',
               JSON.stringify(Array.from(a.t).slice(0, 4).join('')));
@@ -355,8 +355,8 @@ async function main() {
     //   连字一旦把 ff 合成一个簇，解析器给出的簇表里就没有偏移 1 的起点，
     //   光标会被吸附回 0 → 这两次取值相等。用 caretReport 的沿轴位置直接比。
     const posOf = async (o) => {
-      await c.eval(`window.__ced.setCaret(0, ${o}); return true;`);
-      const rep = await c.eval('return window.__ced.caretReport;');
+      await c.eval(`window.__heditor.setCaret(0, ${o}); return true;`);
+      const rep = await c.eval('return window.__heditor.caretReport;');
       const m = /本偏移的沿轴位置=([-\d.]+) pt/.exec(rep);
       return m ? Number(m[1]) : NaN;
     };
@@ -364,57 +364,57 @@ async function main() {
     chk.check(' 偏移 1（两个 f 之间）是合法插入点，位置严格前移（连字一合并这里就相等）',
               q1 > q0 + 1e-6, `pos(0)=${q0} pos(1)=${q1}`);
 
-    await c.eval('window.__ced.setCaret(0, 2); return true;');
+    await c.eval('window.__heditor.setCaret(0, 2); return true;');
     await c.eval(key('Backspace'));
-    const d = await c.eval(CP_LEN + `return { n: cplen(window.__ced.text),
-                                               o: window.__ced.caret.offset };`);
+    const d = await c.eval(CP_LEN + `return { n: cplen(window.__heditor.text),
+                                               o: window.__heditor.caret.offset };`);
     chk.check(' 一次退格只删掉一个 f（连字一合并这里会一下少两个）',
               d.n === a.n - 1 && d.o === 1, `${a.n} → ${d.n}，offset=${d.o}`);
 
     // Delete 走的是另一条分支（clusterCeil），也得守。
     // 必须先把光标移回 0：退格之后光标停在 1，而 1 处是原文第一个字，
     //   在那儿按 Delete 删掉的是"患"而不是剩余的那个 f —— 那测的就不是连字了。
-    await c.eval('window.__ced.setCaret(0, 0); return true;');
+    await c.eval('window.__heditor.setCaret(0, 0); return true;');
     await c.eval(key('Delete'));
-    const fwd = await c.eval(CP_LEN + `return { n: cplen(window.__ced.text),
-                                                 o: window.__ced.caret.offset };`);
+    const fwd = await c.eval(CP_LEN + `return { n: cplen(window.__heditor.text),
+                                                 o: window.__heditor.caret.offset };`);
     chk.check(' Delete 也只删掉了那一个 f', fwd.n === d.n - 1 && fwd.o === 0,
               `${d.n} → ${fwd.n}，offset=${fwd.o}`);
 
     // 收尾：把文档恢复成 reset 后的原样，后面几节才不会被这一节带偏
-    await c.eval(`window.__ced.reset(6, ${ZOOM}); window.__ced.stopBlink(); return true;`);
-    const restored = await c.eval(CP_LEN + 'return cplen(window.__ced.text);');
+    await c.eval(`window.__heditor.reset(6, ${ZOOM}); window.__heditor.stopBlink(); return true;`);
+    const restored = await c.eval(CP_LEN + 'return cplen(window.__heditor.text);');
     chk.check('收尾：文档已恢复（后续小节的起点干净）', restored === Array.from(S6).length,
               `${restored} / ${Array.from(S6).length}`);
   }
 
   chk.section('[6] IME：组合期间一次都不碰引擎，只有 commit 才落文档');
   {
-    await c.eval('window.__ced.setCaret(0, 0); return true;');
-    const before = await c.eval(CP_LEN + `return { n: cplen(window.__ced.text), t: window.__ced.text };`);
+    await c.eval('window.__heditor.setCaret(0, 0); return true;');
+    const before = await c.eval(CP_LEN + `return { n: cplen(window.__heditor.text), t: window.__heditor.text };`);
 
     await c.eval(`
-      window.__ced.textarea.dispatchEvent(
+      window.__heditor.textarea.dispatchEvent(
         new CompositionEvent('compositionstart', { bubbles: true }));
       return true;`);
     // 组合更新来多少次都不该动文档
     for (const d of ['n', 'ni', 'ni3']) {
       await c.eval(`
-        window.__ced.textarea.dispatchEvent(
+        window.__heditor.textarea.dispatchEvent(
           new CompositionEvent('compositionupdate', { bubbles: true, data: ${JSON.stringify(d)} }));
         return true;`);
     }
-    const mid = await c.eval(CP_LEN + 'return { n: cplen(window.__ced.text), t: window.__ced.text };');
+    const mid = await c.eval(CP_LEN + 'return { n: cplen(window.__heditor.text), t: window.__heditor.text };');
     chk.check(' 组合期间（3 次 compositionupdate）文档一个字都没变',
               mid.n === before.n && mid.t === before.t, `${before.n} → ${mid.n}`);
 
     await c.eval(`
-      window.__ced.textarea.dispatchEvent(
+      window.__heditor.textarea.dispatchEvent(
         new CompositionEvent('compositionend', { bubbles: true, data: '\\u4f60' }));
       return true;`);
-    const after = await c.eval(CP_LEN + `return { n: cplen(window.__ced.text),
-                                                  t: window.__ced.text,
-                                                  o: window.__ced.caret.offset };`);
+    const after = await c.eval(CP_LEN + `return { n: cplen(window.__heditor.text),
+                                                  t: window.__heditor.text,
+                                                  o: window.__heditor.caret.offset };`);
     chk.check('commit 后文档 +1 码点', after.n === before.n + 1, `${before.n} → ${after.n}`);
     chk.check('commit 落下的就是那个字（你）', after.t.startsWith('你') && after.t.length > 0);
     chk.check('commit 后光标停在新字之后', after.o === 1, `offset=${after.o}`);
@@ -444,10 +444,10 @@ async function main() {
     // 同刻读 canvas 与引擎帧并逐字节比较
     const screenVsFrame = () => c.eval(`
       const cv = document.getElementById('cv');
-      const w = window.__ced.frameW(), h = window.__ced.frameH();
+      const w = window.__heditor.frameW(), h = window.__heditor.frameH();
       const g = cv.getContext('2d', { willReadFrequently: true });
       const S = g.getImageData(0, 0, w, h).data;
-      const F = window.__ced.rawFrame();
+      const F = window.__heditor.rawFrame();
       const n = Math.min(S.length, F.length);
       let diff = 0, minx = 1e9, miny = 1e9, maxx = -1, maxy = -1;
       for (let i = 0; i + 3 < n; i += 4) {
@@ -462,8 +462,8 @@ async function main() {
     `);
 
     const resetTo = async () => c.eval(`
-      window.__ced.reset(6, ${ZOOM});
-      window.__ced.setCaret(0, ${AT});
+      window.__heditor.reset(6, ${ZOOM});
+      window.__heditor.setCaret(0, ${AT});
       return true;`);
 
     // A：逐个真按键，闪烁开着，按 ~110ms 的真人节奏
@@ -472,7 +472,7 @@ async function main() {
     const drift = [];
     for (let i = 0; i < RUN.length; ++i) {
       await c.eval(key(RUN[i]));
-      perKey.push(await c.eval('return window.__ced.editStats;'));
+      perKey.push(await c.eval('return window.__heditor.editStats;'));
       // 每一次按键都查，不是抽样。
       //   "光标走了、文字没动"这种症状只在某一次贴错；抽样会把漏掉。
       drift.push(await screenVsFrame());
@@ -480,22 +480,22 @@ async function main() {
     }
     const worstDrift = drift.reduce((m, d) => Math.max(m, d.diff), 0);
     const worstBox = drift.find((d) => d.diff === worstDrift) || {};
-    const textA = await c.eval('return window.__ced.text;');
+    const textA = await c.eval('return window.__heditor.text;');
     // 定格成确定的相位再取 A 帧，否则和 B 帧的差异里混着闪烁
-    await c.eval(`window.__ced.stopBlink(); window.__ced.present(); return true;`);
-    await c.eval('window.__frameA = window.__ced.rawFrame(); return true;');
+    await c.eval(`window.__heditor.stopBlink(); window.__heditor.present(); return true;`);
+    await c.eval('window.__frameA = window.__heditor.rawFrame(); return true;');
     await c.screenshot(join(OUT, 'typing-state.png'));
 
     // B：同样的文档，一次性插入，同样定格
     await resetTo();
-    await c.eval(`return window.__ced.type(${JSON.stringify(RUN)});`);
-    const textB = await c.eval('return window.__ced.text;');
-    await c.eval(`window.__ced.stopBlink(); window.__ced.present(); return true;`);
+    await c.eval(`return window.__heditor.type(${JSON.stringify(RUN)});`);
+    const textB = await c.eval('return window.__heditor.text;');
+    await c.eval(`window.__heditor.stopBlink(); window.__heditor.present(); return true;`);
 
     const d = await c.eval(`
       const A = window.__frameA;
-      const B = window.__ced.rawFrame();
-      const w = window.__ced.frameW();
+      const B = window.__heditor.rawFrame();
+      const w = window.__heditor.frameW();
       const n = Math.min(A.length, B.length);
       let diff = 0, minx = 1e9, miny = 1e9, maxx = -1, maxy = -1;
       for (let i = 0; i + 3 < n; i += 4) {
@@ -506,7 +506,7 @@ async function main() {
           if (y < miny) miny = y; if (y > maxy) maxy = y;
         }
       }
-      return { diff, w, h: window.__ced.frameH(), minx, miny, maxx, maxy,
+      return { diff, w, h: window.__heditor.frameH(), minx, miny, maxx, maxy,
                lenA: A.length, lenB: B.length };
     `);
 
@@ -530,8 +530,8 @@ async function main() {
               minPx >= full * 0.99, `最小那次 ${minPx} vs 全量 ${full}`);
 
     // 把给用户用的取证接口也当场跑一遍 —— 它要是抛异常，用户那边就白跑一趟。
-    const sc = await c.eval('return window.__ced.selfCheck();');
-    chk.check(' 自检接口可用且当场判为一致（__ced.selfCheck()）',
+    const sc = await c.eval('return window.__heditor.selfCheck();');
+    chk.check(' 自检接口可用且当场判为一致（__heditor.selfCheck()）',
               !!sc && sc.screenVsEngineDiffPx === 0 && Array.isArray(sc.framePx),
               sc ? `屏幕与引擎帧差 ${sc.screenVsEngineDiffPx} px，帧 ${sc.framePx.join('×')}，` +
                    `dpr=${sc.dpr}，canvas css [${sc.canvas.cssSize}] / rect [${sc.canvas.rectPx}]`
@@ -559,7 +559,7 @@ async function main() {
     const MARK = `(r, g, b) => r > 45 && b - r > 60 && b > 140`;
     const inkMark = `
       const mark = ${MARK};   // 光标色 r=31 被排除
-      const f = window.__ced.rawFrame();
+      const f = window.__heditor.rawFrame();
       let n = 0;
       for (let i = 0; i + 3 < f.length; i += 4) {
         if (mark(f[i], f[i+1], f[i+2])) ++n;
@@ -581,8 +581,8 @@ async function main() {
     const bandAt = (cxPt) => `
       return (function () {
         const near = ${MARK};
-        const f = window.__ced.rawFrame();
-        const fw = window.__ced.frameW();
+        const f = window.__heditor.rawFrame();
+        const fw = window.__heditor.frameW();
         const lo = ${Math.round((cxPt - 10) * 1.5)}, hi = ${Math.round((cxPt - 1) * 1.5)};
         let n = 0;
         for (let i = 0; i + 3 < f.length; i += 4) {
@@ -600,8 +600,8 @@ async function main() {
     // 提到这一节的最外层：下面好几个子块都要用它（含"空字段"那块）。
     const bracketSlotPx = (4.055 + 1.5) * ZOOM;
 
-    await c.eval('return window.__ced.loadFormSample(0);');
-    const ct = await c.eval('return window.__ced.controls;');
+    await c.eval('return window.__heditor.loadFormSample(0);');
+    const ct = await c.eval('return window.__heditor.controls;');
     chk.check('载入表单样例：3 个控件、已切到表单模式',
               ct.count === 3 && ct.mode === 1, `count=${ct.count} mode=${ct.mode}`);
 
@@ -620,8 +620,8 @@ async function main() {
     {
       const lastInkLeft = `
         return (function () {
-          const f = window.__ced.rawFrame();
-          const W = window.__ced.frameW(), H = window.__ced.frameH();
+          const f = window.__heditor.rawFrame();
+          const W = window.__heditor.frameW(), H = window.__heditor.frameH();
           const at = (x, y) => { const i = (y * W + x) * 4; return [f[i], f[i+1], f[i+2]]; };
           const dark = (r, g, b) => r < 120 && g < 120 && b < 120;
           const rows = [];
@@ -660,14 +660,14 @@ async function main() {
       //   这条数字同时钉死了"默认档 = 全部字段占位"：改回 Focused 档会变成 2 个槽。
       const expectSlots = 6;
 
-      await c.eval(`window.__ced.reset(6, ${ZOOM}); window.__ced.stopBlink(); return true;`);
-      await c.eval('window.__ced.present(); return true;');
+      await c.eval(`window.__heditor.reset(6, ${ZOOM}); window.__heditor.stopBlink(); return true;`);
+      await c.eval('window.__heditor.present(); return true;');
       const base = await c.eval(lastInkLeft);
 
-      await c.eval('return window.__ced.loadFormSample(0);');
-      await c.eval('return window.__ced.stopBlink();');
-      await c.eval('return window.__ced.setCaret(0, 6);');
-      await c.eval('window.__ced.present(); return true;');
+      await c.eval('return window.__heditor.loadFormSample(0);');
+      await c.eval('return window.__heditor.stopBlink();');
+      await c.eval('return window.__heditor.setCaret(0, 6);');
+      await c.eval('window.__heditor.present(); return true;');
       const form = await c.eval(lastInkLeft);
 
       // 比的是右缘（最右墨迹列），不是左缘。
@@ -715,15 +715,15 @@ async function main() {
     //   但"不随光标动"本身就是要验的东西 —— 缓存矩形等于把它假设掉。
     if (ct.count >= 3) {
       const rectX = async (i) => {
-        const cc = await c.eval('return window.__ced.controls;');
+        const cc = await c.eval('return window.__heditor.controls;');
         return cc.items[i] && cc.items[i].rects[0] ? cc.items[i].rects[0].x : 0;
       };
 
-      await c.eval('return window.__ced.setCaret(0, 6);');  // 在 #0 里
+      await c.eval('return window.__heditor.setCaret(0, 6);');  // 在 #0 里
       const a0 = await c.eval(bandAt(await rectX(0)));
       const a2 = await c.eval(bandAt(await rectX(2)));
 
-      await c.eval('return window.__ced.setCaret(0, 13);');  // 在 #2 里
+      await c.eval('return window.__heditor.setCaret(0, 13);');  // 在 #2 里
       const b0 = await c.eval(bandAt(await rectX(0)));
       const b2 = await c.eval(bandAt(await rectX(2)));
 
@@ -736,10 +736,10 @@ async function main() {
       // [诊断] 把 #0 那一行的蓝色列打出来 —— 用来核对"竖带窗口是否真的框住了括号"。
       {
         const d = await c.eval(`
-          const f = window.__ced.rawFrame();
-          const fw = window.__ced.frameW();
+          const f = window.__heditor.rawFrame();
+          const fw = window.__heditor.frameW();
           const near = ${MARK};
-          const it = window.__ced.controls.items[0];
+          const it = window.__heditor.controls.items[0];
           const r0 = it.rects[0];
           const cols = new Set();
           for (let i = 0; i + 3 < f.length; i += 4) {
@@ -765,13 +765,13 @@ async function main() {
       //     左括号在它左边、右括号在它在右边（间隙各 1.5pt）。
       //     光标自己的颜色（r=31）被 mark 判据排除，不会污染计数。
       {
-        await c.eval('return window.__ced.loadFormSample(0);');
-        await c.eval('return window.__ced.stopBlink();');
-        await c.eval('return window.__ced.setCaret(0, 9);');   // complaint [5,9) 的末尾
+        await c.eval('return window.__heditor.loadFormSample(0);');
+        await c.eval('return window.__heditor.stopBlink();');
+        await c.eval('return window.__heditor.setCaret(0, 9);');   // complaint [5,9) 的末尾
         for (let i = 0; i < 4; ++i) await c.eval(key('Backspace'));  // 真实键盘删光它
-        await c.eval('window.__ced.present(); return true;');
+        await c.eval('window.__heditor.present(); return true;');
 
-        const cc = await c.eval('return window.__ced.controls;');
+        const cc = await c.eval('return window.__heditor.controls;');
         const k0 = cc.items[0];
         const emptyRect = k0 && (!k0.rects || k0.rects.length === 0);
         chk.check('⭐ 前置：字段内容被删空后，它投影不出矩形'
@@ -780,9 +780,9 @@ async function main() {
 
         const slotPx = bracketSlotPx;
         const empty = await c.eval(`
-          const st = window.__ced.editStats;
-          const f = window.__ced.rawFrame();
-          const fw = window.__ced.frameW();
+          const st = window.__heditor.editStats;
+          const f = window.__heditor.rawFrame();
+          const fw = window.__heditor.frameW();
           const mark = (r, g, b) => r > 45 && b - r > 60 && b > 140;   // 光标色 r=31 被排除
           const cx = st.caretX;
           let left = 0, right = 0;
@@ -804,8 +804,8 @@ async function main() {
 
         // 引擎帧 / 屏幕也要一致：的是"屏幕上没有括号"，
         //   所以只查帧还不够 —— 上屏那一步漏了照样是他报的现象。
-        const scEmpty = await c.eval('return window.__ced.selfCheck();');
-        const auEmpty = await c.eval('return window.__ced.auditFrame();');
+        const scEmpty = await c.eval('return window.__heditor.selfCheck();');
+        const auEmpty = await c.eval('return window.__heditor.auditFrame();');
         chk.check(' 删空字段后：引擎帧 == 整帧重画', auEmpty && auEmpty.diff === 0,
                   auEmpty ? `差 ${auEmpty.diff} px` : 'null');
         chk.check(' 删空字段后：屏幕 == 引擎帧（括号真的在屏幕上）',
@@ -820,15 +820,15 @@ async function main() {
       //  表单样例正好就是这一对：complaint[5,9)（可编辑→亮蓝）+ duration[9,11)
       //  （只读→灰）—— 所以"谁在左"可以用颜色直接读出来，不必猜字形。
       {
-        await c.eval('return window.__ced.loadFormSample(0);');
-        await c.eval('return window.__ced.stopBlink();');
-        await c.eval('return window.__ced.setCaret(0, 6);');
-        await c.eval('window.__ced.present(); return true;');
+        await c.eval('return window.__heditor.loadFormSample(0);');
+        await c.eval('return window.__heditor.stopBlink();');
+        await c.eval('return window.__heditor.setCaret(0, 6);');
+        await c.eval('window.__heditor.present(); return true;');
 
         const ord = await c.eval(`
-          const f = window.__ced.rawFrame();
-          const fw = window.__ced.frameW();
-          const cc = window.__ced.controls;
+          const f = window.__heditor.rawFrame();
+          const fw = window.__heditor.frameW();
+          const cc = window.__heditor.controls;
           const A = cc.items[0], B = cc.items[1];      // complaint / duration(只读)
           const slotPx = ${bracketSlotPx};
           const x0 = Math.round((A.rects[0].x + A.rects[0].w) * 1.5) - 2;
@@ -855,27 +855,27 @@ async function main() {
                   (ord.blueHi < ord.grayLo ? '' : '  ← 顺序反了，就是截图里的 `[]`'));
       }
 
-      // ⭐ 运行期切换显示范围：__ced.setBracketScope(0|1)
+      // ⭐ 运行期切换显示范围：__heditor.setBracketScope(0|1)
       //
       //   这条测的是"改配置也要重排"：括号进文档流，显示范围一变占位就变，
       //     正文得跟着挪。只重绘不重排的话，括号会按新档画、正文却按旧档排 ——
       //     表象是括号盖在字上/槽里空一条，而且从数字上看不出来。
       //   判据取"切档前后同一个字段的竖带"，加上屏幕/帧一致。
       {
-        await c.eval('return window.__ced.loadFormSample(0);');
-        await c.eval('return window.__ced.stopBlink();');
-        await c.eval('return window.__ced.setCaret(0, 6);');   // 光标在 #0
-        await c.eval('window.__ced.present(); return true;');
+        await c.eval('return window.__heditor.loadFormSample(0);');
+        await c.eval('return window.__heditor.stopBlink();');
+        await c.eval('return window.__heditor.setCaret(0, 6);');   // 光标在 #0
+        await c.eval('window.__heditor.present(); return true;');
         const all0 = await c.eval(bandAt(await rectX(0)));
         const all2 = await c.eval(bandAt(await rectX(2)));
 
-        await c.eval('return window.__ced.setBracketScope(1);');   // → Focused
+        await c.eval('return window.__heditor.setBracketScope(1);');   // → Focused
         const foc0 = await c.eval(bandAt(await rectX(0)));
         const foc2 = await c.eval(bandAt(await rectX(2)));
-        const scSw = await c.eval('return window.__ced.selfCheck();');
-        const auSw = await c.eval('return window.__ced.auditFrame();');
+        const scSw = await c.eval('return window.__heditor.selfCheck();');
+        const auSw = await c.eval('return window.__heditor.auditFrame();');
 
-        await c.eval('return window.__ced.setBracketScope(0);');   // → 回 All
+        await c.eval('return window.__heditor.setBracketScope(0);');   // → 回 All
         const back0 = await c.eval(bandAt(await rectX(0)));
         const back2 = await c.eval(bandAt(await rectX(2)));
 
@@ -898,7 +898,7 @@ async function main() {
       //   为什么需要它而不是只靠 selfCheck（画布 vs 引擎帧）：
       //     如果引擎帧自己就是错的（旧标记没擦掉），画布忠实反映了它，
       //     selfCheck 两边一起错、判据照样绿。实测就是这样漏掉的。
-      const aud = await c.eval('return window.__ced.auditFrame();');
+      const aud = await c.eval('return window.__heditor.auditFrame();');
       chk.check(' 换字段后引擎帧 == 整帧重画（帧自审，逐字节）—— 覆盖"该消失却没消失"',
                 aud && aud.diff === 0,
                 aud ? `差 ${aud.diff} px` + (aud.box ? ` 盒=${JSON.stringify(aud.box)}` : '')
@@ -928,23 +928,23 @@ async function main() {
       //   而默认的 All 档下换字段不重排（括号常驻、占位与光标无关）——
       //   触发条件消失了，这一节也就测不到东西了。
       //   All 档下"换字段很便宜"另有一条断言，见本节末尾。
-      await c.eval('return window.__ced.loadFormSample(0);');
-      await c.eval('return window.__ced.setBracketScope(1);');   // Focused
-      await c.eval('return window.__ced.stopBlink();');
-      await c.eval('return window.__ced.setCaret(0, 6);');   // 光标在 #0（反复心悸）
+      await c.eval('return window.__heditor.loadFormSample(0);');
+      await c.eval('return window.__heditor.setBracketScope(1);');   // Focused
+      await c.eval('return window.__heditor.stopBlink();');
+      await c.eval('return window.__heditor.setCaret(0, 6);');   // 光标在 #0（反复心悸）
 
       // 把相位摆到"隐藏"，并且让引擎的账也进入隐藏态
-      await c.eval('window.__ced.showCaret(false); window.__ced.present(); return true;');
-      const hiddenPre = await c.eval('return window.__ced.selfCheck();');
+      await c.eval('window.__heditor.showCaret(false); window.__heditor.present(); return true;');
+      const hiddenPre = await c.eval('return window.__heditor.selfCheck();');
       chk.check('前置：把闪烁相位摆到「光标隐藏」之后，屏幕仍等于引擎帧',
                 hiddenPre.screenVsEngineDiffPx === 0,
                 `差 ${hiddenPre.screenVsEngineDiffPx} px`);
 
       // 在隐藏半拍里换字段（＝鼠标点「加重一天」走的就是这条路）
-      await c.eval('return window.__ced.setCaret(0, 14);');
-      await c.eval('return window.__ced.stopBlink();');   // afterEdit 会重启定时器，再停掉
-      const scHide = await c.eval('return window.__ced.selfCheck();');
-      const auHide = await c.eval('return window.__ced.auditFrame();');
+      await c.eval('return window.__heditor.setCaret(0, 14);');
+      await c.eval('return window.__heditor.stopBlink();');   // afterEdit 会重启定时器，再停掉
+      const scHide = await c.eval('return window.__heditor.selfCheck();');
+      const auHide = await c.eval('return window.__heditor.auditFrame();');
 
       chk.check(' 隐藏半拍换字段：引擎帧必须等于整帧重画（引擎侧无罪）',
                 auHide && auHide.diff === 0,
@@ -964,16 +964,16 @@ async function main() {
       //  这条钉死"括号常驻"的收益：占位集合与光标无关 ⇒ 换字段不触发布局，
       //  上屏从"整帧"掉到"一块小矩形"。Focused 档下同样动作会写整帧（上面刚量过）。
       {
-        await c.eval('return window.__ced.setBracketScope(0);');   // 回默认 All
-        await c.eval('return window.__ced.loadFormSample(0);');
-        await c.eval('return window.__ced.stopBlink();');
-        await c.eval('return window.__ced.setCaret(0, 6);');
-        await c.eval('window.__ced.present(); return true;');
+        await c.eval('return window.__heditor.setBracketScope(0);');   // 回默认 All
+        await c.eval('return window.__heditor.loadFormSample(0);');
+        await c.eval('return window.__heditor.stopBlink();');
+        await c.eval('return window.__heditor.setCaret(0, 6);');
+        await c.eval('window.__heditor.present(); return true;');
 
-        await c.eval('return window.__ced.setCaret(0, 14);');      // 换字段
-        const cst = await c.eval('return window.__ced.editStats;');
-        const fw = await c.eval('return window.__ced.frameW();');
-        const fh = await c.eval('return window.__ced.frameH();');
+        await c.eval('return window.__heditor.setCaret(0, 14);');      // 换字段
+        const cst = await c.eval('return window.__heditor.editStats;');
+        const fw = await c.eval('return window.__heditor.frameW();');
+        const fh = await c.eval('return window.__heditor.frameH();');
         chk.check(' 默认档换字段：不重排（layoutRan=false）',
                   cst.layoutRan === false, `layoutRan=${cst.layoutRan}`);
         chk.check(' 默认档换字段：上屏量远小于整帧（括号常驻的收益）',
@@ -992,17 +992,17 @@ async function main() {
       //    要求光标的右边缘在它左边。不去拿控件矩形的几何数字比 ——
       //    这一整类 bug 的教训就是"几何元数据 ≠ 绘制结果"，两边必须分别量。
       {
-        await c.eval('return window.__ced.loadFormSample(0);');
-        await c.eval('return window.__ced.stopBlink();');
+        await c.eval('return window.__heditor.loadFormSample(0);');
+        await c.eval('return window.__heditor.stopBlink();');
         // 表单样例：complaint[5,9) / duration[9,11) 只读 / aggravate[12,16)
         // aggravate 是最右一个可编辑字段 → 它行内最右的标记墨迹就是它的 ]。
-        await c.eval('return window.__ced.setCaret(0, 16);');   // 「天」右边、`]` 左边
-        await c.eval('window.__ced.present(); return true;');
+        await c.eval('return window.__heditor.setCaret(0, 16);');   // 「天」右边、`]` 左边
+        await c.eval('window.__heditor.present(); return true;');
 
         const cmp = await c.eval(`
-          const st = window.__ced.editStats;
-          const f = window.__ced.rawFrame();
-          const fw = window.__ced.frameW();
+          const st = window.__heditor.editStats;
+          const f = window.__heditor.rawFrame();
+          const fw = window.__heditor.frameW();
           const near = ${MARK};   // 标记亮蓝；光标色 r=31 被排除
           let bracketX = -1;
           for (let i = 0; i + 3 < f.length; i += 4) {
@@ -1031,23 +1031,23 @@ async function main() {
     //  判据是逐步的：单步偏移跨度恒为 1（不许瞬移），终点是真正的下一格。
     //    只看终点抓不到"投影式移动"：投影也能给出一个看着合法的终点。
     {
-      await c.eval('return window.__ced.loadFormSample(0);');
-      await c.eval('return window.__ced.stopBlink();');
-      await c.eval('return window.__ced.setCaret(0, 12);');   // #2 = aggravate [12,16)
+      await c.eval('return window.__heditor.loadFormSample(0);');
+      await c.eval('return window.__heditor.stopBlink();');
+      await c.eval('return window.__heditor.setCaret(0, 12);');   // #2 = aggravate [12,16)
 
-      const start = await c.eval('return window.__ced.caret;');
+      const start = await c.eval('return window.__heditor.caret;');
       await c.eval(key('ArrowLeft'));                          //  真实键盘
-      const afterLeft = await c.eval('return window.__ced.caret;');
+      const afterLeft = await c.eval('return window.__heditor.caret;');
       chk.check('★ 在 #2 起点按左方向键：一步一格跨过共享边界（12 → 11）',
                 afterLeft.offset === 11,
                 `12 → ${afterLeft.offset}`);
 
       // 右走 6 步：12→13→14→15→16→17→17（到文档末尾就停住），单步跨度恒为 1
-      await c.eval('return window.__ced.setCaret(0, 12);');
+      await c.eval('return window.__heditor.setCaret(0, 12);');
       const seq = [];
       for (let i = 0; i < 6; ++i) {
         await c.eval(key('ArrowRight'));
-        seq.push((await c.eval('return window.__ced.caret;')).offset);
+        seq.push((await c.eval('return window.__heditor.caret;')).offset);
       }
       let worst = 0;
       let prev = 12;
@@ -1060,14 +1060,14 @@ async function main() {
     }
 
       // 同一件事用"敲字"再走一遍（这条路径由打字触发）
-      await c.eval('return window.__ced.loadFormSample(0);');
-      await c.eval('return window.__ced.stopBlink();');
-      await c.eval('return window.__ced.setCaret(0, 6);');
-      await c.eval('window.__ced.showCaret(false); window.__ced.present(); return true;');
+      await c.eval('return window.__heditor.loadFormSample(0);');
+      await c.eval('return window.__heditor.stopBlink();');
+      await c.eval('return window.__heditor.setCaret(0, 6);');
+      await c.eval('window.__heditor.showCaret(false); window.__heditor.present(); return true;');
       await c.eval(key('x'));                     //  真实键盘路径
-      await c.eval('return window.__ced.stopBlink();');
-      const scType = await c.eval('return window.__ced.selfCheck();');
-      const auType = await c.eval('return window.__ced.auditFrame();');
+      await c.eval('return window.__heditor.stopBlink();');
+      const scType = await c.eval('return window.__heditor.selfCheck();');
+      const auType = await c.eval('return window.__heditor.auditFrame();');
       chk.check(' 隐藏半拍敲字：引擎帧自审必须 0',
                 auType && auType.diff === 0,
                 auType ? `差 ${auType.diff} px` : '返回 null');
@@ -1080,34 +1080,34 @@ async function main() {
 
     // 只读模式：这是"策略生效"最干净的可观测形式
     //   （表单模式下光标被 clamp 在可编辑字段内，反而没法用普通按键走到"区间外"）
-    await c.eval('return window.__ced.setEditMode(2);');
-    const txt0 = await c.eval('return window.__ced.text;');
-    const blk0 = await c.eval('return window.__ced.blockedEdits;');
+    await c.eval('return window.__heditor.setEditMode(2);');
+    const txt0 = await c.eval('return window.__heditor.text;');
+    const blk0 = await c.eval('return window.__heditor.blockedEdits;');
     for (const ch of 'abc') await c.eval(key(ch));
-    const txt1 = await c.eval('return window.__ced.text;');
-    const blk1 = await c.eval('return window.__ced.blockedEdits;');
+    const txt1 = await c.eval('return window.__heditor.text;');
+    const blk1 = await c.eval('return window.__heditor.blockedEdits;');
     chk.check(' 只读模式：按键全被拒、文本一字不变、被拒次数 +3',
               txt1 === txt0 && blk1 === blk0 + 3,
               `被拒 ${blk1 - blk0} 次，文本${txt1 === txt0 ? '未变' : '变了'}`);
 
     // 表单模式：可编辑字段内能打进去，且区间跟着变长
-    await c.eval('return window.__ced.loadFormSample(0);');
-    await c.eval('return window.__ced.setCaret(0, 6);');
-    const len0 = await c.eval('return Array.from(window.__ced.text).length;');
+    await c.eval('return window.__heditor.loadFormSample(0);');
+    await c.eval('return window.__heditor.setCaret(0, 6);');
+    const len0 = await c.eval('return Array.from(window.__heditor.text).length;');
     await c.eval(key('测'));
-    const len1 = await c.eval('return Array.from(window.__ced.text).length;');
-    const ct2 = await c.eval('return window.__ced.controls;');
+    const len1 = await c.eval('return Array.from(window.__heditor.text).length;');
+    const ct2 = await c.eval('return window.__heditor.controls;');
     chk.check(' 表单模式：字段内按键成功，且字段区间跟着变长（9 → 10）',
               len1 === len0 + 1 && ct2.items[0].end[1] === 10,
               `码点 ${len0} → ${len1}，字段 #0 end=${ct2.items[0].end[1]}`);
 
     // 切回文档模式：标记必须一个像素都不剩
-    await c.eval('return window.__ced.setEditMode(0);');
+    await c.eval('return window.__heditor.setEditMode(0);');
     const docMark = await c.eval(inkMark);
     chk.check(' 切回文档模式：标记一个像素都不剩', docMark === 0, `${docMark} px`);
 
     // 切回表单模式后标记回来（证明不是"切走一次就再也不画"）
-    await c.eval('return window.__ced.setEditMode(1);');
+    await c.eval('return window.__heditor.setEditMode(1);');
     const backMark = await c.eval(inkMark);
     chk.check(' 切回表单模式：标记又出现了', backMark > 0, `${backMark} px`);
 
@@ -1126,7 +1126,7 @@ async function main() {
     // 每次还要拷一份 4.5 MB 的帧，慢到没法用。
     const exh = await c.eval(`
       const near = ${MARK};
-      const total = Array.from(window.__ced.text).length;
+      const total = Array.from(window.__heditor.text).length;
       let checked = 0, bad = 0, firstBad = '';
       // 每字段的 min/max 存成对象（{ci: [lo, hi]}），不能存数组：
       //   只读字段会被跳过 → 稀疏数组在跨进程回传时被序列化成 null
@@ -1134,10 +1134,10 @@ async function main() {
       //    看不到是哪一行 —— 因为整段是 eval 的字符串）。
       const seen = {};
       for (let off = 0; off <= total; ++off) {
-        window.__ced.setCaret(0, off);
-        const cc = window.__ced.controls;
-        const f = window.__ced.rawFrame();
-        const fw = window.__ced.frameW();
+        window.__heditor.setCaret(0, off);
+        const cc = window.__heditor.controls;
+        const f = window.__heditor.rawFrame();
+        const fw = window.__heditor.frameW();
         for (let ci = 0; ci < cc.items.length; ++ci) {
           const it = cc.items[ci];
           if (it.ro || !it.rects.length) continue;
@@ -1168,8 +1168,8 @@ async function main() {
               pf.map((p) => `#${p.ci} ${p.lo}~${p.hi}`).join(' ｜ '));
 
     // 给用户用的取证接口也当场跑一遍 —— 它要是抛异常，用户那边就白跑了。
-    const mk = await c.eval('return window.__ced.markCheck();');
-    chk.check(' 用户自检接口可用且当场判为一致（__ced.markCheck()）',
+    const mk = await c.eval('return window.__heditor.markCheck();');
+    chk.check(' 用户自检接口可用且当场判为一致（__heditor.markCheck()）',
               !!mk && mk.allOk === true && Array.isArray(mk.rows) && mk.rows.length >= 1,
               mk ? `${mk.rows.length} 个可编辑字段，全部一致=${mk.allOk}` : '返回 null');
 
@@ -1178,7 +1178,7 @@ async function main() {
     //   语义纠偏：Tab 在编辑器里是缩进。绑成"跳到下一个控件"是表单/网页里
     //     字段之间的约定，放到正文编辑器里会把肌肉记忆打断（用户明确纠正过）。
     //     字段之间用鼠标点、或者方向键（光标本来就会跨字段）。
-    //   改完之后"跳字段"只剩程序化入口 __ced.focusControl（探针/自动化用），
+    //   改完之后"跳字段"只剩程序化入口 __heditor.focusControl（探针/自动化用），
     //     下面单独验它还在。
     //
     //   这一段的核心判据是"真实按键 → 屏幕像素 == 引擎帧"。它抓的是这一类：
@@ -1186,24 +1186,24 @@ async function main() {
     //     脏矩形去上屏，画布变成"旧内容 + 局部新内容"的混合体
     //     （的"光标走了、旧括号还在"）。
     {
-      await c.eval('return window.__ced.loadFormSample(0);');
-      await c.eval('return window.__ced.setCaret(0, 6);');   // k1 内
-      await c.eval('window.__ced.stopBlink(); window.__ced.present(); return true;');
+      await c.eval('return window.__heditor.loadFormSample(0);');
+      await c.eval('return window.__heditor.setCaret(0, 6);');   // k1 内
+      await c.eval('window.__heditor.stopBlink(); window.__heditor.present(); return true;');
 
-      const beforeTab = await c.eval('return window.__ced.selfCheck();');
+      const beforeTab = await c.eval('return window.__heditor.selfCheck();');
       chk.check('前置：按 Tab 之前屏幕与引擎帧一致（否则下面的判据没意义）',
                 beforeTab.screenVsEngineDiffPx === 0, `差 ${beforeTab.screenVsEngineDiffPx} px`);
 
-      const nBefore = await c.eval('return Array.from(window.__ced.text).length;');
+      const nBefore = await c.eval('return Array.from(window.__heditor.text).length;');
       await c.eval(key('Tab'));                              //  真实键盘路径
-      const nAfter = await c.eval('return Array.from(window.__ced.text).length;');
-      const postTab = await c.eval('return window.__ced.selfCheck();');
-      const liveOff = await c.eval('return window.__ced.caretLive;');
-      const auditTab = await c.eval('return window.__ced.auditFrame();');
+      const nAfter = await c.eval('return Array.from(window.__heditor.text).length;');
+      const postTab = await c.eval('return window.__heditor.selfCheck();');
+      const liveOff = await c.eval('return window.__heditor.caretLive;');
+      const auditTab = await c.eval('return window.__heditor.auditFrame();');
 
       chk.check(' 真实 Tab 键 = 缩进：文档 +4 个码点，且是 4 个空格',
                 nAfter === nBefore + 4 &&
-                  (await c.eval('return window.__ced.text.slice(6, 10) === "    ";')),
+                  (await c.eval('return window.__heditor.text.slice(6, 10) === "    ";')),
                 `码点 ${nBefore} → ${nAfter}`);
       chk.check(' Tab 之后光标停在新插入的空格之后（offset=10）',
                 postTab.caret.offset === 10, `offset=${postTab.caret.offset}`);
@@ -1224,28 +1224,28 @@ async function main() {
 
       // Shift+Tab 反缩进
       await c.eval(key('Tab', ', shiftKey: true'));
-      const nBack = await c.eval('return Array.from(window.__ced.text).length;');
+      const nBack = await c.eval('return Array.from(window.__heditor.text).length;');
       chk.check(' Shift+Tab = 反缩进：把 4 个空格删回来',
                 nBack === nBefore, `码点 ${nAfter} → ${nBack}`);
     }
 
     // 程序化跳字段（探针/自动化入口，不再绑键盘）
     {
-      await c.eval('return window.__ced.loadFormSample(0);');
-      await c.eval('return window.__ced.setCaret(0, 5);');
-      const f1 = await c.eval('return window.__ced.focusControl(true);');
-      const c1 = await c.eval('return window.__ced.caret;');
-      const f2 = await c.eval('return window.__ced.focusControl(true);');
-      const c2 = await c.eval('return window.__ced.caret;');
-      chk.check(' __ced.focusControl（程序化跳字段）：12 → 5 绕回第一个字段',
+      await c.eval('return window.__heditor.loadFormSample(0);');
+      await c.eval('return window.__heditor.setCaret(0, 5);');
+      const f1 = await c.eval('return window.__heditor.focusControl(true);');
+      const c1 = await c.eval('return window.__heditor.caret;');
+      const f2 = await c.eval('return window.__heditor.focusControl(true);');
+      const c2 = await c.eval('return window.__heditor.caret;');
+      chk.check(' __heditor.focusControl（程序化跳字段）：12 → 5 绕回第一个字段',
                 !!f1 && !!f2 && c1.offset === 12 && c2.offset === 5,
                 `${c1.offset} → ${c2.offset}`);
-      const post = await c.eval('return window.__ced.selfCheck();');
-      const audit = await c.eval('return window.__ced.auditFrame();');
+      const post = await c.eval('return window.__heditor.selfCheck();');
+      const audit = await c.eval('return window.__heditor.auditFrame();');
       chk.check(' 跳字段之后：屏幕==引擎帧、且引擎帧==整帧重画',
                 post.screenVsEngineDiffPx === 0 && audit && audit.diff === 0,
                 `屏幕差 ${post.screenVsEngineDiffPx} px，帧自审差 ${audit ? audit.diff : '?'} px`);
-      const mk2 = await c.eval('return window.__ced.markCheck();');
+      const mk2 = await c.eval('return window.__heditor.markCheck();');
       chk.check(' 跳字段后每个字段的括号都还在（All 档常驻；markCheck 自检）',
                 !!mk2 && mk2.allOk === true && mk2.bracketScope === 0,
                 mk2 ? `${mk2.rows.length} 个可编辑字段，scope=${mk2.bracketScope}，`
@@ -1257,7 +1257,7 @@ async function main() {
   {
     // 单段文档没有可复用的前缀，增量与全量必然相等（见 [1] / [2]）。
     //   多段文档才谈得上"只重排脏段"—— 这一节用 200 段的病历文档量它。
-    const base = await c.eval('return window.__ced.run(7, 1.0);');
+    const base = await c.eval('return window.__heditor.run(7, 1.0);');
     chk.check('长文档载入：200 段', base.totalParagraphs === 200,
               `${base.totalParagraphs} 段 / ${base.totalLines} 行`);
     chk.check('首次排版是全量（整篇都脏）', base.layoutWasFull === true);
@@ -1265,9 +1265,9 @@ async function main() {
                        fullMs: base.layoutMs };
 
     // 在第 150 段中间敲一个字（走真实键盘路径）
-    await c.eval('return window.__ced.setCaret(150, 5);');
+    await c.eval('return window.__heditor.setCaret(150, 5);');
     await c.eval(key('测'));
-    const st = await c.eval('return window.__ced.editStats;');
+    const st = await c.eval('return window.__heditor.editStats;');
     chk.check('★ 敲字后是增量排版（不是全量）', st.layoutWasFull === false,
               `重排 ${st.relaidParagraphs} 段 / 复用 ${st.reusedParagraphs} 段 / 共 ${st.totalParagraphs} 段`);
     // 行结构没变 → 快路：只重排脏段自己，后缀整块搬回（一个字节都不动）。
@@ -1286,7 +1286,7 @@ async function main() {
               `增量 ${st.layoutMs.toFixed(3)} ms vs 首次全量 ${report.longDoc.fullMs.toFixed(3)} ms`);
 
     // 排版自审：增量结果与"不用缓存的全量重排"逐字段比 —— 必须完全相同
-    const au = await c.eval('return window.__ced.auditLayout();');
+    const au = await c.eval('return window.__heditor.auditLayout();');
     chk.check('★★ 增量结果与全量重排逐字段一致（auditLayout diff 0）',
               !!au && au.diff === 0,
               au ? `diff ${au.diff}（字形 ${au.glyphDiff}、行 ${au.lineDiff}、段 ${au.paraDiff}、` +
@@ -1309,10 +1309,10 @@ async function main() {
     }
 
     // 上屏与帧自审：长文档里编辑之后，屏幕 == 引擎帧，且引擎帧 == 整帧重画
-    const sc = await c.eval('return window.__ced.selfCheck();');
+    const sc = await c.eval('return window.__heditor.selfCheck();');
     chk.check('长文档编辑后：屏幕 == 引擎帧', sc.screenVsEngineDiffPx === 0,
               `差 ${sc.screenVsEngineDiffPx} px`);
-    const af = await c.eval('return window.__ced.auditFrame();');
+    const af = await c.eval('return window.__heditor.auditFrame();');
     chk.check('长文档编辑后：引擎帧 == 整帧重画', af && af.diff === 0,
               af ? `差 ${af.diff} px` : 'null');
 
@@ -1321,10 +1321,10 @@ async function main() {
 
     // 后缀平移复用：撑出一行之后，后缀的断行结果照样复用（只挪坐标）。
     //
-    // 40 个汉字足以撑出至少一行。走 __ced.type（直连引擎）而不是键盘逐字派发：
+    // 40 个汉字足以撑出至少一行。走 __heditor.type（直连引擎）而不是键盘逐字派发：
     //   键盘路径上面已经验过，这里要的是"一次插入 40 个字"把行结构撑变。
     const widened = await c.eval(
-      `return window.__ced.type(${JSON.stringify('测'.repeat(40))});`);
+      `return window.__heditor.type(${JSON.stringify('测'.repeat(40))});`);
     chk.check('★ 撑出一行 → 后缀整体平移复用（重排 1 段）',
               !!widened && widened.suffixShifted === true && widened.relaidParagraphs === 1,
               widened ? `重排 ${widened.relaidParagraphs} 段 / 复用 ${widened.reusedParagraphs} 段 / ` +
@@ -1334,12 +1334,12 @@ async function main() {
                 widened.totalParagraphs - 150,
               widened ? `${widened.relaidParagraphs} + ${widened.reusedParagraphs} = ` +
                 `${widened.totalParagraphs} - 150` : 'null');
-    const auShift = await c.eval('return window.__ced.auditLayout();');
+    const auShift = await c.eval('return window.__heditor.auditLayout();');
     chk.check('★★ 平移复用的排版与全量逐字段一致（auditLayout diff 0）',
               !!auShift && auShift.diff === 0,
               auShift ? `diff ${auShift.diff}（字形 ${auShift.glyphDiff}、行 ${auShift.lineDiff}、` +
                 `段 ${auShift.paraDiff}）` : 'null');
-    const scShift = await c.eval('return window.__ced.selfCheck();');
+    const scShift = await c.eval('return window.__heditor.selfCheck();');
     chk.check('平移之后屏幕 == 引擎帧', scShift.screenVsEngineDiffPx === 0,
               `差 ${scShift.screenVsEngineDiffPx} px`);
 
@@ -1361,15 +1361,15 @@ async function main() {
   {
     // 用真实的 Enter 按键走一遍（不是直接调引擎）—— 键盘路径与引擎路径是两处接线，
     //   只测引擎会漏掉"宿主没把 Enter 接上"这类问题。
-    await c.eval('return window.__ced.run(6, 1.0);');
-    await c.eval('return window.__ced.stopBlink();');
-    const before = await c.eval('return window.__ced.editStats;');
-    const textBefore = await c.eval('return window.__ced.allText;');
-    await c.eval('return window.__ced.setCaret(0, 5);');
+    await c.eval('return window.__heditor.run(6, 1.0);');
+    await c.eval('return window.__heditor.stopBlink();');
+    const before = await c.eval('return window.__heditor.editStats;');
+    const textBefore = await c.eval('return window.__heditor.allText;');
+    await c.eval('return window.__heditor.setCaret(0, 5);');
     await c.eval(key('Enter'));
 
-    const after = await c.eval('return window.__ced.editStats;');
-    const textAfter = await c.eval('return window.__ced.allText;');
+    const after = await c.eval('return window.__heditor.editStats;');
+    const textAfter = await c.eval('return window.__heditor.allText;');
     report.splits = { parasBefore: before.totalParagraphs, parasAfter: after.totalParagraphs };
     chk.check('★ 真实回车让段数 +1', after.totalParagraphs === before.totalParagraphs + 1,
               `${before.totalParagraphs} → ${after.totalParagraphs} 段`);
@@ -1382,32 +1382,32 @@ async function main() {
               `重排 ${after.relaidParagraphs} 段 / 复用 ${after.reusedParagraphs} 段`);
 
     // 排版与上屏两个自审都要过：分段走的是"前缀复用 + 从脏段续排"，最容易错的是段号错位
-    const auSplit = await c.eval('return window.__ced.auditLayout();');
+    const auSplit = await c.eval('return window.__heditor.auditLayout();');
     chk.check('★★ 分段之后增量排版 == 全量重排（逐字段）',
               !!auSplit && auSplit.diff === 0,
               auSplit ? `diff ${auSplit.diff}（字形 ${auSplit.glyphDiff}、行 ${auSplit.lineDiff}、` +
                 `段 ${auSplit.paraDiff}）` : 'null');
-    const scSplit = await c.eval('return window.__ced.selfCheck();');
+    const scSplit = await c.eval('return window.__heditor.selfCheck();');
     chk.check('分段之后屏幕 == 引擎帧', scSplit.screenVsEngineDiffPx === 0,
               `差 ${scSplit.screenVsEngineDiffPx} px`);
-    const afSplit = await c.eval('return window.__ced.auditFrame();');
+    const afSplit = await c.eval('return window.__heditor.auditFrame();');
     chk.check('分段之后引擎帧 == 整帧重画', afSplit && afSplit.diff === 0,
               afSplit ? `差 ${afSplit.diff} px` : 'null');
 
     // 段首退格并回去（同一个往返：文档要么回到原样，要么至少段数 -1）
-    await c.eval('return window.__ced.setCaret(1, 0);');
+    await c.eval('return window.__heditor.setCaret(1, 0);');
     await c.eval(key('Backspace'));
-    const merged = await c.eval('return window.__ced.editStats;');
+    const merged = await c.eval('return window.__heditor.editStats;');
     chk.check('★ 段首退格把两段并回去（段数 -1）',
               merged.totalParagraphs === after.totalParagraphs - 1,
               `${after.totalParagraphs} → ${merged.totalParagraphs} 段`);
     chk.check('★ 合并之后光标落在合并点上', merged.caretPara === 0 && merged.caretOffset === 5,
               `段 ${merged.caretPara} 偏移 ${merged.caretOffset}`);
-    const auMerge = await c.eval('return window.__ced.auditLayout();');
+    const auMerge = await c.eval('return window.__heditor.auditLayout();');
     chk.check('★★ 合并之后增量排版 == 全量重排（逐字段）', !!auMerge && auMerge.diff === 0,
               auMerge ? `diff ${auMerge.diff}` : 'null');
     chk.check('合并之后文档回到分段之前的字符数',
-              (await c.eval('return window.__ced.allText;')).length === textBefore.length,
+              (await c.eval('return window.__heditor.allText;')).length === textBefore.length,
               `回到 ${textBefore.length} 字符`);
   }
 
@@ -1420,9 +1420,9 @@ async function main() {
     //  —— A 的终点 >= at 右移（字进 A），B 的起点要 > at 才右移（于是原地不动）——
     //  结果一个字同时落进两个控件：A=[5,10)、B=[9,12) 重叠，B 的左括号于是被画到
     //  A 右括号的左边。native 侧的结构性判据见单测 [18]，这里补的是"真实按键路径"。
-    await c.eval('return window.__ced.loadFormSample(0);');
-    await c.eval('return window.__ced.stopBlink();');
-    const b11 = await c.eval('return window.__ced.controls;');
+    await c.eval('return window.__heditor.loadFormSample(0);');
+    await c.eval('return window.__heditor.stopBlink();');
+    const b11 = await c.eval('return window.__heditor.controls;');
     report.boundary = { before: b11.items.map((it) => [...it.start, ...it.end]) };
 
     chk.check('前置：字段 #0 的末尾与 #1 的开头是同一个位置（共享边界）',
@@ -1431,14 +1431,14 @@ async function main() {
               `#0 [${b11.items[0].start[1]},${b11.items[0].end[1]}) ｜` +
                 ` #1 [${b11.items[1].start[1]},${b11.items[1].end[1]})`);
 
-    // 光标停在这个边界上，然后派一个真实按键（不是 __ced.type，见 [4] 的说明）
-    await c.eval(`return window.__ced.setCaret(0, ${b11.items[0].end[1]});`);
-    const cc11 = await c.eval('return window.__ced.controls;');
+    // 光标停在这个边界上，然后派一个真实按键（不是 __heditor.type，见 [4] 的说明）
+    await c.eval(`return window.__heditor.setCaret(0, ${b11.items[0].end[1]});`);
+    const cc11 = await c.eval('return window.__heditor.controls;');
     chk.check('光标停在边界上时归前一个字段（末尾算在区间内）', cc11.caret === 0,
               `caret-control=${cc11.caret}`);
     await c.eval(key('诊'));
 
-    const a11 = await c.eval('return window.__ced.controls;');
+    const a11 = await c.eval('return window.__heditor.controls;');
     report.boundary.after = a11.items.map((it) => [...it.start, ...it.end]);
     const e0 = a11.items[0].end[1], s1 = a11.items[1].start[1];
     chk.check('★ 字进了 #0（#0 变长），#1 整体右移 —— 两段区间不重叠',
@@ -1458,26 +1458,26 @@ async function main() {
               right0 > 0 && left1 > 0 && right0 <= left1 + 0.01,
               `#0 右缘 ${right0.toFixed(2)} pt ≤ #1 左缘 ${left1.toFixed(2)} pt`);
 
-    const au11 = await c.eval('return window.__ced.auditLayout();');
+    const au11 = await c.eval('return window.__heditor.auditLayout();');
     chk.check('★★ 边界上打字之后增量排版 == 全量重排（逐字段）',
               !!au11 && au11.diff === 0,
               au11 ? `diff ${au11.diff}（字形 ${au11.glyphDiff}、行 ${au11.lineDiff}、` +
                 `段 ${au11.paraDiff}）` : 'null');
-    const sc11 = await c.eval('return window.__ced.selfCheck();');
+    const sc11 = await c.eval('return window.__heditor.selfCheck();');
     chk.check('边界上打字之后屏幕 == 引擎帧', sc11.screenVsEngineDiffPx === 0,
               `差 ${sc11.screenVsEngineDiffPx} px`);
 
-    await c.eval('return window.__ced.setCaret(0, 10);');
-    await c.eval('window.__ced.present(); return true;');
+    await c.eval('return window.__heditor.setCaret(0, 10);');
+    await c.eval('window.__heditor.present(); return true;');
     await sleep(150);
     await c.screenshot(join(OUT, 'shared-boundary.png'));
 
     // 三连可编辑字段（演示样例 variant 2）：三条边界两侧都可写 —— 前两个样例的边界
     //   一侧是只读的，只能在一个方向试。这里在边界上打字、再把中间那个删空，
     //   看区间和矩形会不会互相穿过。
-    await c.eval('return window.__ced.loadFormSample(2);');
-    await c.eval('return window.__ced.stopBlink();');
-    const v3 = await c.eval('return window.__ced.controls;');
+    await c.eval('return window.__heditor.loadFormSample(2);');
+    await c.eval('return window.__heditor.stopBlink();');
+    const v3 = await c.eval('return window.__heditor.controls;');
     report.chain3 = { before: v3.items.map((it) => [...it.start, ...it.end]) };
     chk.check('三连样例：3 个字段都紧挨着（两条共享边界）',
               v3.count === 3 && v3.items.every((it) => !it.ro) &&
@@ -1485,9 +1485,9 @@ async function main() {
                 v3.items[1].end[1] === v3.items[2].start[1],
               v3.items.map((it) => `[${it.start[1]},${it.end[1]})`).join(' '));
 
-    await c.eval('return window.__ced.setCaret(0, 7);');  // 第一条共享边界
+    await c.eval('return window.__heditor.setCaret(0, 7);');  // 第一条共享边界
     await c.eval(key('痛'));
-    const v3b = await c.eval('return window.__ced.controls;');
+    const v3b = await c.eval('return window.__heditor.controls;');
     report.chain3.afterType = v3b.items.map((it) => [...it.start, ...it.end]);
     // 字进前一个字段、后两个整体右移；三段首尾相接就是"不穿过"的最强形式
     const chain = (r) =>
@@ -1500,12 +1500,12 @@ async function main() {
     // 把中间那个删空：它变成零宽的空字段，边界上与"左字段的闭 + 右字段的开"并列。
     //   这里重新载入一次样例，拿回干净的三连区间（[5,7) [7,9) [9,11)）—— 上面那一步
     //   已经往左字段里打过字，它变长成了 [5,8)，量出来的就不是这条边界了。
-    await c.eval('return window.__ced.loadFormSample(2);');
-    await c.eval('return window.__ced.stopBlink();');
-    await c.eval('return window.__ced.setCaret(0, 9);');
+    await c.eval('return window.__heditor.loadFormSample(2);');
+    await c.eval('return window.__heditor.stopBlink();');
+    await c.eval('return window.__heditor.setCaret(0, 9);');
     await c.eval(key('Backspace'));
     await c.eval(key('Backspace'));
-    const v3c = await c.eval('return window.__ced.controls;');
+    const v3c = await c.eval('return window.__heditor.controls;');
     report.chain3.afterEmpty = v3c.items.map((it) => [...it.start, ...it.end]);
     const mid = v3c.items[1];
     const right = v3c.items[2];
@@ -1518,37 +1518,37 @@ async function main() {
     //   表现就是"中间的控件删掉最后一个字之后光标再也进不去、字也打不进去"。
     //   注意顺序：这一段必须在"往左字段里打字"之前做，否则左字段已经变长（[5,8)），
     //   量出来的边界就不是 [5,7] 那一处了。
-    const caretAt = await c.eval('return window.__ced.caret.offset;');
+    const caretAt = await c.eval('return window.__heditor.caret.offset;');
     chk.check('★ 光标停在那个零宽字段的位置上（位置归属没被左邻居抢走）',
               caretAt === mid.start[1], `光标 ${caretAt}，空字段 ${mid.start[1]}`);
     // 方向键一次一格：必须能走出字段（光标位置不受控件约束），但不许瞬移
-    await c.eval('return window.__ced.setCaret(0, 5);');
+    await c.eval('return window.__heditor.setCaret(0, 5);');
     const walk = [];
     for (let i = 0; i < 5; ++i) {
       await c.eval(key('ArrowRight'));
-      walk.push(await c.eval('return window.__ced.caret.offset;'));
+      walk.push(await c.eval('return window.__heditor.caret.offset;'));
     }
     report.chain3.walk = walk;
     chk.check('★ 方向键一次一格、且能走出字段（5 → 6 7 8 9 10）',
               JSON.stringify(walk) === JSON.stringify([6, 7, 8, 9, 10]), `落点 ${walk.join(' ')}`);
     // 回到那个零宽字段的位置上：打字应该进它自己，左右两个字段不许被撑大
-    await c.eval('return window.__ced.setCaret(0, 7);');
+    await c.eval('return window.__heditor.setCaret(0, 7);');
     await c.eval(key('痛'));
-    const v3d = await c.eval('return window.__ced.controls;');
+    const v3d = await c.eval('return window.__heditor.controls;');
     report.chain3.afterFill = v3d.items.map((it) => [...it.start, ...it.end]);
     chk.check('★ 在空字段的位置上打字 → 字进它自己（左右两个字段都没被撑大）',
               v3d.items[1].start[1] === 7 && v3d.items[1].end[1] === 8 &&
                 v3d.items[0].end[1] === 7 && v3d.items[2].start[1] === 8,
               v3d.items.map((it) => `[${it.start[1]},${it.end[1]})`).join(' '));
 
-    const au3 = await c.eval('return window.__ced.auditLayout();');
+    const au3 = await c.eval('return window.__heditor.auditLayout();');
     chk.check('★★ 三连样例的每一步增量排版都等于全量重排', !!au3 && au3.diff === 0,
               au3 ? `diff ${au3.diff}` : 'null');
-    const sc3 = await c.eval('return window.__ced.selfCheck();');
+    const sc3 = await c.eval('return window.__heditor.selfCheck();');
     chk.check('三连样例：屏幕 == 引擎帧', sc3.screenVsEngineDiffPx === 0,
               `差 ${sc3.screenVsEngineDiffPx} px`);
-    await c.eval('return window.__ced.setCaret(0, 7);');
-    await c.eval('window.__ced.present(); return true;');
+    await c.eval('return window.__heditor.setCaret(0, 7);');
+    await c.eval('window.__heditor.present(); return true;');
     await sleep(150);
     await c.screenshot(join(OUT, 'three-adjacent-fields.png'));
   }
@@ -1559,11 +1559,11 @@ async function main() {
     //   这一格坏在"点画布 → 命中测试 → 归属"这条链上，而合成 MouseEvent 与真实点击
     //   走的虽然都是同一个监听器，但只有真实事件连坐标换算、命中、dpr 一起过一遍。
     //   之前所有探针都用合成事件，所以这格一直没被钉住。
-    await c.eval('return window.__ced.loadFormSample(2);');
-    await c.eval('return window.__ced.stopBlink();');
+    await c.eval('return window.__heditor.loadFormSample(2);');
+    await c.eval('return window.__heditor.stopBlink();');
     const geo = await c.eval(`
-      const cv = window.__ced.canvas, r = cv.getBoundingClientRect();
-      const c0 = window.__ced.controls.items[0].rects[0];
+      const cv = window.__heditor.canvas, r = cv.getBoundingClientRect();
+      const c0 = window.__heditor.controls.items[0].rects[0];
       return { left: r.left, top: r.top, sx: r.width / cv.width, sy: r.height / cv.height,
                zoom: Number(document.getElementById('zoom').value), y: c0.y + c0.h / 2 };`);
     const click = async (xPt, yPt) => {
@@ -1578,7 +1578,7 @@ async function main() {
     // 控件自己投影出来的内容框（磅）：点框内任意一点都必须归它自己。
     //   这就是用户眼里的"我点的是这个框"。
     const boxes = await c.eval(`
-      const cs = window.__ced.controls;
+      const cs = window.__heditor.controls;
       return cs.items.map((it, i) => (it.rects || []).map(q => ({ i, x: q.x, w: q.w, y: q.y })))
         .flat();`);
     let probed = 0;
@@ -1586,7 +1586,7 @@ async function main() {
     for (const b of boxes) {
       for (let x = b.x + 1; x <= b.x + b.w - 1; x += 2) {
         await click(x, geo.y);
-        const st = await c.eval('return window.__ced.controls.caret;');
+        const st = await c.eval('return window.__heditor.controls.caret;');
         ++probed;
         if (st !== b.i) wrong.push(`x=${Math.round(x)}→字段${st}(应${b.i})`);
       }
@@ -1597,16 +1597,16 @@ async function main() {
               `采样 ${probed} 点，错的 ${wrong.length} 个 ${wrong.slice(0, 3).join(' ')}`);
 
     // 落笔也跟着归属走：点中间字段的开头再打字，字必须进中间那个字段。
-    await c.eval('return window.__ced.loadFormSample(2);');
-    await c.eval('return window.__ced.stopBlink();');
+    await c.eval('return window.__heditor.loadFormSample(2);');
+    await c.eval('return window.__heditor.stopBlink();');
     const midBox = await c.eval(`
-      const q = window.__ced.controls.items[1].rects[0];
+      const q = window.__heditor.controls.items[1].rects[0];
       return { x: q.x, y: q.y, w: q.w, h: q.h };`);
     await click(midBox.x + 1, geo.y);
-    const ownerAtStart = await c.eval('return window.__ced.controls.caret;');
-    const caretAtStart = await c.eval('return window.__ced.caret.offset;');
+    const ownerAtStart = await c.eval('return window.__heditor.controls.caret;');
+    const caretAtStart = await c.eval('return window.__heditor.caret.offset;');
     await c.eval(key('痛'));
-    const v12 = await c.eval('return window.__ced.controls;');
+    const v12 = await c.eval('return window.__heditor.controls;');
     report.clickOwner.afterType = v12.items.map((it) => [...it.start, ...it.end]);
     chk.check('★ 真实点击中间字段的开头 → 光标停在那里且归属它',
               ownerAtStart === 1 && caretAtStart === 7,
@@ -1615,19 +1615,19 @@ async function main() {
               v12.items[0].end[1] === 7 && v12.items[1].end[1] === 10,
               v12.items.map((it) => `[${it.start[1]},${it.end[1]})`).join(' '));
 
-    const au12 = await c.eval('return window.__ced.auditLayout();');
+    const au12 = await c.eval('return window.__heditor.auditLayout();');
     chk.check('★★ 点击 + 打字之后增量排版 == 全量重排', !!au12 && au12.diff === 0,
               au12 ? `diff ${au12.diff}` : 'null');
-    const sc12 = await c.eval('return window.__ced.selfCheck();');
+    const sc12 = await c.eval('return window.__heditor.selfCheck();');
     chk.check('点击之后屏幕 == 引擎帧', sc12.screenVsEngineDiffPx === 0,
               `差 ${sc12.screenVsEngineDiffPx} px`);
   }
 
   chk.section('[13] 三层嵌套可编辑字段（演示样例 variant 3）');
   {
-    await c.eval('return window.__ced.loadFormSample(3);');
-    await c.eval('return window.__ced.stopBlink();');
-    const n = await c.eval('return window.__ced.controls;');
+    await c.eval('return window.__heditor.loadFormSample(3);');
+    await c.eval('return window.__heditor.stopBlink();');
+    const n = await c.eval('return window.__heditor.controls;');
     report.nested = { before: n.items.map((it) => [...it.start, ...it.end]) };
     chk.check('三层嵌套：深度 0/1/2，父链 外→中→内',
               n.count === 3 && n.items.every((it) => !it.ro) && n.items[0].depth === 0 &&
@@ -1636,10 +1636,10 @@ async function main() {
               n.items.map((it) => `#${it.depth}p${it.parent}[${it.start[1]},${it.end[1]})`).join(' '));
 
     // 归属取最内层：在内层中间打字，三层一起变长（父子区间不许互相穿过）。
-    await c.eval('return window.__ced.setCaret(0, 8);');
-    const ownerN = await c.eval('return window.__ced.controls.caret;');
+    await c.eval('return window.__heditor.setCaret(0, 8);');
+    const ownerN = await c.eval('return window.__heditor.controls.caret;');
     await c.eval(key('痛'));
-    const n2 = await c.eval('return window.__ced.controls;');
+    const n2 = await c.eval('return window.__heditor.controls;');
     report.nested.afterType = n2.items.map((it) => [...it.start, ...it.end]);
     chk.check('★ 光标在内层里打的字归最内层（不是外层）', ownerN === 2, `归属 ${ownerN}`);
     chk.check('★ 内层变长 → 中/外层一起变长（区间不许互相穿过）',
@@ -1651,16 +1651,16 @@ async function main() {
               n2.items[2].end[1] === n2.items[2].start[1] + 3,
               `内层 = [${n2.items[2].start[1]},${n2.items[2].end[1]})，打进了 1 个字`);
 
-    const au13 = await c.eval('return window.__ced.auditLayout();');
+    const au13 = await c.eval('return window.__heditor.auditLayout();');
     chk.check('★★ 嵌套样例增量排版 == 全量重排（括号占位嵌套时最容易错位）',
               !!au13 && au13.diff === 0, au13 ? `diff ${au13.diff}` : 'null');
-    const sc13 = await c.eval('return window.__ced.selfCheck();');
+    const sc13 = await c.eval('return window.__heditor.selfCheck();');
     chk.check('嵌套样例：屏幕 == 引擎帧', sc13.screenVsEngineDiffPx === 0,
               `差 ${sc13.screenVsEngineDiffPx} px`);
 
-    await c.eval('return window.__ced.loadFormSample(3);');
-    await c.eval('return window.__ced.setCaret(0, 8);');
-    await c.eval('window.__ced.present(); return true;');
+    await c.eval('return window.__heditor.loadFormSample(3);');
+    await c.eval('return window.__heditor.setCaret(0, 8);');
+    await c.eval('window.__heditor.present(); return true;');
     await sleep(150);
     await c.screenshot(join(OUT, 'nested-three-levels.png'));
   }
@@ -1673,11 +1673,11 @@ async function main() {
     //  "坐标换算 → 命中 → 归属 → 落笔"这条链的接缝上，而引擎 API 把接缝绕过去了。
     //
     //  括号的排布只存在于排版结果里（区间数据看不出来：][][] 与 [[ ]] 的区间
-    //  一模一样），所以用 __ced.bracketSlots 把槽清单读出来核对：每一枚括号的
+    //  一模一样），所以用 __heditor.bracketSlots 把槽清单读出来核对：每一枚括号的
     //  偏移、开闭、归属、所在行、行内 x 都在里面。
     const zoomNow = async () => c.eval('return Number(document.getElementById("zoom").value);');
     const geo = async () => c.eval(`
-      const cv = window.__ced.canvas, r = cv.getBoundingClientRect();
+      const cv = window.__heditor.canvas, r = cv.getBoundingClientRect();
       return { left: r.left, top: r.top, sx: r.width / cv.width, sy: r.height / cv.height };`);
     // 帧磅 → CSS 像素：与页面 onCanvasMouseDown 里那套换算同源（先乘 zoom 再乘缩放比）
     const clickPt = async (g, xPt, yPt, z) => {
@@ -1688,14 +1688,14 @@ async function main() {
       await sleep(8);
     };
     const load = async (v) => {
-      await c.eval(`return window.__ced.loadFormSample(${v});`);
-      await c.eval('return window.__ced.stopBlink();');
+      await c.eval(`return window.__heditor.loadFormSample(${v});`);
+      await c.eval('return window.__heditor.stopBlink();');
     };
     const caretOf = () => c.eval(`
-      return { o: window.__ced.caret.offset, f: window.__ced.controls.caret };`);
-    const items = () => c.eval('return window.__ced.controls.items.map(i => [i.start[1], i.end[1]]);');
+      return { o: window.__heditor.caret.offset, f: window.__heditor.controls.caret };`);
+    const items = () => c.eval('return window.__heditor.controls.items.map(i => [i.start[1], i.end[1]]);');
     const slotsOf = (cp) => c.eval(`
-      return (window.__ced.bracketSlots || [])
+      return (window.__heditor.bracketSlots || [])
         .filter(s => s.para === 0 && s.cp === ${cp})
         .map(s => ({ side: s.side, owner: s.owner, ro: s.ro, line: s.line, x: s.x }));`);
     // BracketSide：1 = 开，2 = 闭（枚举在 layout.h）
@@ -1705,14 +1705,14 @@ async function main() {
     //   不用"第一个字的中点"：相邻字段共享边界时，槽带把两个字的几何挤在一起，
     //   量出来的中点可能落到里层字段的框里（判据本身就不可靠，见 [19]）。
     const fieldSpot = (ci) => c.eval(`
-      const q = window.__ced.controls.items[${ci}].rects[0];
+      const q = window.__heditor.controls.items[${ci}].rects[0];
       return { x: q.x + 2, y: q.y + q.h / 2 };`);
 
     chk.section('[14.1] 相邻单共享边界：点 ] 归前一个、点 [ 归后一个（variant 0）');
     {
       await load(0);
       const y = await c.eval(`
-        const q = window.__ced.controls.items[0].rects[0];
+        const q = window.__heditor.controls.items[0].rects[0];
         return q.y + q.h / 2;`);
       const g = await geo();
       const z = await zoomNow();
@@ -1735,9 +1735,9 @@ async function main() {
                 b.o === 9 && b.f === 1, `offset ${b.o} 归属 ${b.f}`);
 
       // 只读字段里打字必须被拒，而且要记账
-      const blk0 = await c.eval('return window.__ced.blockedEdits;');
+      const blk0 = await c.eval('return window.__heditor.blockedEdits;');
       await c.eval(key('痛'));
-      const blk1 = await c.eval('return window.__ced.blockedEdits;');
+      const blk1 = await c.eval('return window.__heditor.blockedEdits;');
       const it0 = await items();
       chk.check('★ 在只读字段里打字被拒，且记了账',
                 blk1 === blk0 + 1 && JSON.stringify(it0[1]) === '[9,11]',
@@ -1749,7 +1749,7 @@ async function main() {
       const it1 = await items();
       chk.check('★ 点 ] 之后真实按键 → 字进前一个字段，后一个整体右移',
                 JSON.stringify(it1) === '[[5,10],[10,12],[13,17]]', JSON.stringify(it1));
-      const au = await c.eval('return window.__ced.auditLayout();');
+      const au = await c.eval('return window.__heditor.auditLayout();');
       chk.check('★★ 点选 + 打字之后增量排版等于全量重排', !!au && au.diff === 0,
                 au ? `diff ${au.diff}` : 'null');
     }
@@ -1758,7 +1758,7 @@ async function main() {
     {
       await load(2);
       const y = await c.eval(`
-        const q = window.__ced.controls.items[0].rects[0];
+        const q = window.__heditor.controls.items[0].rects[0];
         return q.y + q.h / 2;`);
       const g = await geo();
       const z = await zoomNow();
@@ -1789,7 +1789,7 @@ async function main() {
                 JSON.stringify(it2) === '[[5,8],[8,10],[10,12]]', JSON.stringify(it2));
 
       // 真实方向键：一次一格，且能走出字段
-      await c.eval('return window.__ced.setCaret(0, 5);');
+      await c.eval('return window.__heditor.setCaret(0, 5);');
       const walk = [];
       for (let k = 0; k < 6; ++k) {
         await c.eval(key('ArrowRight'));
@@ -1798,7 +1798,7 @@ async function main() {
       chk.check('★ 真实方向键一次一格并走出字段（5 → 6 7 8 9 10 11）',
                 JSON.stringify(walk) === JSON.stringify([6, 7, 8, 9, 10, 11]),
                 `落点 ${walk.join(' ')}`);
-      await c.eval('return window.__ced.setCaret(0, 12);');
+      await c.eval('return window.__heditor.setCaret(0, 12);');
       const back = [];
       for (let k = 0; k < 4; ++k) {
         await c.eval(key('ArrowLeft'));
@@ -1809,7 +1809,7 @@ async function main() {
 
       // 归属随位置换人（重新载入样例，让偏移回到干净的三连区间）
       await load(2);
-      await c.eval('return window.__ced.setCaret(0, 7);');
+      await c.eval('return window.__heditor.setCaret(0, 7);');
       const f7 = (await caretOf()).f;
       await c.eval(key('ArrowRight'));
       const at8 = await caretOf();
@@ -1817,8 +1817,8 @@ async function main() {
                 f7 === 0 && at8.o === 8 && at8.f === 1, `7→${f7} ｜ 8→${at8.f}`);
 
       // Home / End 是行首行尾，不是字段首尾
-      const ncp = await c.eval('return window.__ced.caret.docCodepoints;');
-      await c.eval('return window.__ced.setCaret(0, 9);');
+      const ncp = await c.eval('return window.__heditor.caret.docCodepoints;');
+      await c.eval('return window.__heditor.setCaret(0, 9);');
       await c.eval(key('Home'));
       const h = (await caretOf()).o;
       await c.eval(key('End'));
@@ -1831,7 +1831,7 @@ async function main() {
     {
       await load(2);
       const y = await c.eval(`
-        const q = window.__ced.controls.items[0].rects[0];
+        const q = window.__heditor.controls.items[0].rects[0];
         return q.y + q.h / 2;`);
       const g = await geo();
       const z = await zoomNow();
@@ -1840,7 +1840,7 @@ async function main() {
         for (let guard = 0; guard < 8; ++guard) {
           const cur = await items();
           if (cur[ci][0] === cur[ci][1]) break;
-          await c.eval(`return window.__ced.setCaretAt(0, ${cur[ci][1]}, ${ci});`);
+          await c.eval(`return window.__heditor.setCaretAt(0, ${cur[ci][1]}, ${ci});`);
           await c.eval(key('Backspace'));
         }
       }
@@ -1857,8 +1857,8 @@ async function main() {
       // 颜色跟着字段走：把 #2 标成只读，它那一对括号必须变灰且排在右侧。
       //   只读标记只有建控件时给得进去，所以整份重建一次（区间不变，只翻 ro）。
       await c.eval(`
-        const it2 = window.__ced.controls.items;
-        return window.__ced.setFormControls(it2.map((x, i) => ({
+        const it2 = window.__heditor.controls.items;
+        return window.__heditor.setFormControls(it2.map((x, i) => ({
           start: x.start, end: x.end, kind: 0, id: x.id, label: '', ro: i === 2 })));`);
       const sr = await slotsOf(7);
       chk.check('★ 只读字段的一对括号变灰（左三枚可编辑、右两枚只读）',
@@ -1877,7 +1877,7 @@ async function main() {
         for (let guard = 0; guard < 8; ++guard) {
           const k = await items();
           if (k[ci][0] === k[ci][1]) break;
-          await c.eval(`return window.__ced.setCaretAt(0, ${k[ci][1]}, ${ci});`);
+          await c.eval(`return window.__heditor.setCaretAt(0, ${k[ci][1]}, ${ci});`);
           await c.eval(key('Backspace'));
         }
       }
@@ -1892,7 +1892,7 @@ async function main() {
       const it3 = await items();
       chk.check('★ 接着打字 → 字进 #2 自己（#1 还是零宽）',
                 JSON.stringify(it3) === '[[5,7],[7,7],[7,8]]', JSON.stringify(it3));
-      const au3 = await c.eval('return window.__ced.auditLayout();');
+      const au3 = await c.eval('return window.__heditor.auditLayout();');
       chk.check('★★ 删空与回填的每一步增量排版都等于全量重排', !!au3 && au3.diff === 0,
                 au3 ? `diff ${au3.diff}` : 'null');
     }
@@ -1901,7 +1901,7 @@ async function main() {
     {
       await load(3);
       const y = await c.eval(`
-        const q = window.__ced.controls.items[0].rects[0];
+        const q = window.__heditor.controls.items[0].rects[0];
         return q.y + q.h / 2;`);
       const g = await geo();
       const z = await zoomNow();
@@ -1923,7 +1923,7 @@ async function main() {
                 owners.join(' ') === '0 1 2', owners.join(' '));
 
       // 真实按键在内层打字：外中内三层一起变长
-      await c.eval('return window.__ced.setCaretAt(0, 8, 2);');
+      await c.eval('return window.__heditor.setCaretAt(0, 8, 2);');
       await c.eval(key('痛'));
       const it = await items();
       chk.check('★ 真实按键在内层打字 → 外中内三层一起变长（区间不许互相穿过）',
@@ -1933,7 +1933,7 @@ async function main() {
       for (let guard = 0; guard < 6; ++guard) {
         const cur = await items();
         if (cur[2][0] === cur[2][1]) break;
-        await c.eval(`return window.__ced.setCaretAt(0, ${cur[2][1]}, 2);`);
+        await c.eval(`return window.__heditor.setCaretAt(0, ${cur[2][1]}, 2);`);
         await c.eval(key('Backspace'));
       }
       const it2 = await items();
@@ -1941,20 +1941,20 @@ async function main() {
       chk.check('★ 删空的内层画成一对相邻的 []，仍嵌在中层的边界之内',
                 JSON.stringify(it2) === '[[5,9],[6,8],[7,7]]' && sidesOf(s7b) === '[]',
                 `${JSON.stringify(it2)} ｜ 7:${sidesOf(s7b)}`);
-      await c.eval('return window.__ced.setCaret(0, 7);');
+      await c.eval('return window.__heditor.setCaret(0, 7);');
       const f7 = (await caretOf()).f;
       await c.eval(key('痛'));
       const it3 = await items();
       chk.check('★ 真实按键在删空的内层上打字 → 字进它自己，外中两层一起外推',
                 f7 === 2 && JSON.stringify(it3) === '[[5,10],[6,9],[7,8]]',
                 `归属 ${f7} ｜ ${JSON.stringify(it3)}`);
-      const au4 = await c.eval('return window.__ced.auditLayout();');
+      const au4 = await c.eval('return window.__heditor.auditLayout();');
       chk.check('★★ 嵌套的每一步增量排版都等于全量重排', !!au4 && au4.diff === 0,
                 au4 ? `diff ${au4.diff}` : 'null');
 
       await load(3);
-      await c.eval('return window.__ced.setCaretAt(0, 8, 2);');
-      await c.eval('window.__ced.present(); return true;');
+      await c.eval('return window.__heditor.setCaretAt(0, 8, 2);');
+      await c.eval('window.__heditor.present(); return true;');
       await sleep(150);
       await c.screenshot(join(OUT, 'boundary-nested.png'));
     }
@@ -1962,7 +1962,7 @@ async function main() {
     chk.section('[14.5] 换行：跨行字段的两个括号落在不同行，嵌套的只读内层点得进打不进（variant 1）');
     {
       await load(1);
-      const cc = await c.eval('return window.__ced.controls;');
+      const cc = await c.eval('return window.__heditor.controls;');
       chk.check('长字段跨行（矩形块 > 1），只读小字段嵌在它里面',
                 cc.items[0].rects.length >= 2 && cc.items[1].depth === 1 && cc.items[1].ro,
                 `#0 块数 ${cc.items[0].rects.length} ｜ #1 depth ${cc.items[1].depth} ro ${cc.items[1].ro}`);
@@ -1977,9 +1977,9 @@ async function main() {
       const mB = await fieldSpot(1);
       await clickPt(g, mB.x, mB.y, z);
       const inB = await caretOf();
-      const blk0 = await c.eval('return window.__ced.blockedEdits;');
+      const blk0 = await c.eval('return window.__heditor.blockedEdits;');
       await c.eval(key('痛'));
-      const blk1 = await c.eval('return window.__ced.blockedEdits;');
+      const blk1 = await c.eval('return window.__heditor.blockedEdits;');
       const itb = await items();
       chk.check('★ 点嵌套里的只读内层 → 归属是内层、打字被拒（外层可编辑也改不动它）',
                 inB.f === 1 && blk1 === blk0 + 1 && JSON.stringify(itb[1]) === '[20,26]',
@@ -1992,7 +1992,7 @@ async function main() {
       const ita = await items();
       chk.check('★ 点外层（不在内层框里）→ 归属 0，字进外层、内层整体右移',
                 inA.f === 0 && JSON.stringify(ita) === '[[5,61],[21,27]]', JSON.stringify(ita));
-      const au5 = await c.eval('return window.__ced.auditLayout();');
+      const au5 = await c.eval('return window.__heditor.auditLayout();');
       chk.check('★★ 跨行字段编辑之后增量排版等于全量重排', !!au5 && au5.diff === 0,
                 au5 ? `diff ${au5.diff}` : 'null');
     }
@@ -2001,14 +2001,14 @@ async function main() {
     {
       await load(2);
       const y = await c.eval(`
-        const q = window.__ced.controls.items[0].rects[0];
+        const q = window.__heditor.controls.items[0].rects[0];
         return q.y + q.h / 2;`);
       const g = await geo();
       const z = await zoomNow();
       const lo = await c.eval(
-        'return Math.min(...window.__ced.controls.items.map(i => i.rects[0].x));');
+        'return Math.min(...window.__heditor.controls.items.map(i => i.rects[0].x));');
       const hi = await c.eval(
-        'return Math.max(...window.__ced.controls.items.map(i => i.rects[0].x + i.rects[0].w));');
+        'return Math.max(...window.__heditor.controls.items.map(i => i.rects[0].x + i.rects[0].w));');
       let probed = 0;
       let mismatch = 0;
       let nonmono = 0;
@@ -2025,7 +2025,7 @@ async function main() {
       };
       for (let x = lo - 4; x <= hi + 4; x += 1) {
         const pt = quantizedPt(x);
-        const h = await c.eval(`return window.__ced.hit(${pt.toFixed(3)}, ${y.toFixed(2)});`);
+        const h = await c.eval(`return window.__heditor.hit(${pt.toFixed(3)}, ${y.toFixed(2)});`);
         if (!h || h.offset > 17) continue;
         await clickPt(g, x, y, z);
         const st = await caretOf();
@@ -2058,17 +2058,17 @@ async function main() {
       let drawnProbed = 0;
       let drawnBad = 0;
       for (let ci = 0; ci < 3; ++ci) {
-        const a = await c.eval(`return window.__ced.controls.items[${ci}].start[1];`);
-        const b = await c.eval(`return window.__ced.controls.items[${ci}].end[1];`);
+        const a = await c.eval(`return window.__heditor.controls.items[${ci}].start[1];`);
+        const b = await c.eval(`return window.__heditor.controls.items[${ci}].end[1];`);
         for (let k = a; k < b; ++k) {
           const m = await c.eval(`
-            window.__ced.setCaretAt(0, ${k}, ${ci});
-            const x0 = window.__ced.caret.x;
-            window.__ced.setCaretAt(0, ${k + 1}, ${ci});
-            const c2 = window.__ced.caret;
+            window.__heditor.setCaretAt(0, ${k}, ${ci});
+            const x0 = window.__heditor.caret.x;
+            window.__heditor.setCaretAt(0, ${k + 1}, ${ci});
+            const c2 = window.__heditor.caret;
             return { x: (x0 + c2.x) / 2, y: c2.y + c2.h / 2 };`);
           await clickPt(g, m.x, m.y, z);
-          const st = await c.eval('return window.__ced.caret;');
+          const st = await c.eval('return window.__heditor.caret;');
           ++drawnProbed;
           if (Math.abs(st.x - m.x) > 8 || st.offset < a || st.offset > b) ++drawnBad;
         }
@@ -2076,17 +2076,17 @@ async function main() {
       chk.check('★ 逐字点选：落点在该字范围内、且光标画在点击处附近（整条坐标链）',
                 drawnProbed === 6 && drawnBad === 0, `${drawnProbed} 个字，偏的 ${drawnBad} 个`);
 
-      const sc = await c.eval('return window.__ced.selfCheck();');
+      const sc = await c.eval('return window.__heditor.selfCheck();');
       chk.check('横扫之后屏幕 == 引擎帧', sc.screenVsEngineDiffPx === 0,
                 `差 ${sc.screenVsEngineDiffPx} px`);
-      await c.eval('window.__ced.present(); return true;');
+      await c.eval('window.__heditor.present(); return true;');
       await sleep(150);
       await c.screenshot(join(OUT, 'boundary-three-adjacent.png'));
     }
   }
   chk.section('[7] 无页面异常 / 无 console 错误');
   {
-    report.pageErrors = await c.eval('return window.__ced.errors;');
+    report.pageErrors = await c.eval('return window.__heditor.errors;');
     report.consoleErrors = cdp.conn.consoleErrors;
     chk.check('无 page error', report.pageErrors.length === 0, JSON.stringify(report.pageErrors));
     chk.check('无 console error', report.consoleErrors.length === 0,
@@ -2096,14 +2096,14 @@ async function main() {
   // 收尾：载入表单样例 + 恢复闪烁，截一张给人看
   //   刻意停在表单模式（而不是纯文档场景）：截图要能一眼看出
   //     "字段的边界长什么样、只读的那个是灰的"。切回文档模式它们就消失了。
-  await c.eval('window.__ced.loadFormSample(0); window.__ced.startBlink(); return true;');
+  await c.eval('window.__heditor.loadFormSample(0); window.__heditor.startBlink(); return true;');
   await sleep(400);
   await c.screenshot(join(OUT, 'edit-scene.png'));
 
   report.checks = chk.rows;
   report.failures = chk.failures;
   report.total = chk.total;
-  report.finalStats = await c.eval('return window.__ced.editStats;');
+  report.finalStats = await c.eval('return window.__heditor.editStats;');
   writeFileSync(join(OUT, 'edit-probe.json'), JSON.stringify(report, null, 2), 'utf8');
 
   console.log('\n──────────────────────────────');

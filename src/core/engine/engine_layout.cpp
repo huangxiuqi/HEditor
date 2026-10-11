@@ -23,7 +23,7 @@
 
 #include "core/text/shaper.h"
 
-namespace ced {
+namespace heditor {
 
 // 页内容指纹
 //
@@ -34,7 +34,9 @@ namespace ced {
 //   段级整形指纹，两处必须是同一套混合（各写一份的话，"哪一处换了算法"
 //   会静默地退化成"缓存永不命中"或更糟的"两处对同一输入给出不同指纹"）。
 
-/** 布局：重排整篇，并把排版统计同步到 EngineStats。 */
+/**
+ * 布局：重排整篇，并把排版统计同步到 EngineStats。
+ */
 
 void EditorEngine::syncStatsFromLayout() {
     stats_.page_count = layout_.stats.page_count;
@@ -445,4 +447,4 @@ void EditorEngine::relayoutIfBracketPlanChanged(int prev_plan) {
 }
 
 
-}  // namespace ced
+}  // namespace heditor

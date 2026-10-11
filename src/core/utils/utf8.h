@@ -7,7 +7,7 @@
 #include <string>
 #include <string_view>
 
-namespace ced {
+namespace heditor {
 
 /**
  * 从 s[pos] 解出一个码点，*next 写回下一个字节位置。非法序列按单字节跳过。
@@ -54,4 +54,4 @@ inline uint32_t decodeUtf8(std::string_view s, size_t pos, size_t* next) {
     return cp;
 }
 
-}  // namespace ced
+}  // namespace heditor

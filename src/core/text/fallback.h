@@ -17,7 +17,7 @@
 #include <string_view>
 #include <vector>
 
-namespace ced {
+namespace heditor {
 
 class FontLibrary;
 
@@ -53,4 +53,4 @@ std::vector<FontRun> itemizeByFont(FontLibrary& lib, const uint32_t* cps, size_t
 std::vector<FontRun> itemizeByFont(FontLibrary& lib, std::string_view utf8,
                                    const std::vector<int>& chain, float size_pt);
 
-}  // namespace ced
+}  // namespace heditor

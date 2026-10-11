@@ -14,7 +14,9 @@ mkdirSync(join(ROOT, 'out'), { recursive: true });
 const LOG = join(ROOT, 'out', 'diag_ctl2.txt');
 writeFileSync(LOG, '');
 
-/** 同时写控制台与日志文件，避免验证脚本转发丢失输出。 */
+/**
+ * 同时写控制台与日志文件，避免验证脚本转发丢失输出。
+ */
 const say = (s = '') => {
   process.stdout.write(s + '\n');
   appendFileSync(LOG, s + '\n');
@@ -29,12 +31,12 @@ const PORT = Number(opt('port', '9222'));
 const URL_ = opt('url', 'http://localhost:8781/web/index.html');
 
 const keyExpr = (k) => `
-  window.__ced.textarea.dispatchEvent(
+  window.__heditor.textarea.dispatchEvent(
     new KeyboardEvent('keydown', { key: ${JSON.stringify(k)}, bubbles: true, cancelable: true }));
   return true;`;
 
 const stateExpr = `
-  const c = window.__ced.caret, cc = window.__ced.controls;
+  const c = window.__heditor.caret, cc = window.__heditor.controls;
   return JSON.stringify({
     off: c.offset, cx: Math.round(c.x), own: cc.caret,
     items: cc.items.map(i => [i.start[1], i.end[1], i.depth, i.parent, i.ro ? 1 : 0,
@@ -50,17 +52,17 @@ async function main() {
   await conn.send('Emulation.setDeviceMetricsOverride',
                   { width: 1500, height: 1200, deviceScaleFactor: 1, mobile: false });
   await conn.send('Page.navigate', { url: URL_ });
-  await conn.waitFor('return !!(window.__ced && window.__ced.ready)', 'ready');
+  await conn.waitFor('return !!(window.__heditor && window.__heditor.ready)', 'ready');
   await sleep(300);
 
   const state = async () => JSON.parse(await conn.eval(stateExpr));
   const items = (s) => s.items.map(([a, b, d, p, ro, nr], i) =>
     `#${i}[${a},${b})d${d}p${p}${ro ? 'R' : ''}:${nr}矩形`).join('  ');
-  const slotsOf = async () => (await conn.eval('return JSON.stringify(window.__ced.bracketSlots);'));
+  const slotsOf = async () => (await conn.eval('return JSON.stringify(window.__heditor.bracketSlots);'));
 
   const load = async (v) => {
-    await conn.eval(`return window.__ced.loadFormSample(${v});`);
-    await conn.eval('return window.__ced.stopBlink();');
+    await conn.eval(`return window.__heditor.loadFormSample(${v});`);
+    await conn.eval('return window.__heditor.stopBlink();');
   };
   const shot = (n) => conn.screenshot(join(ROOT, 'out', 'web', n));
 
@@ -69,10 +71,10 @@ async function main() {
     await load(variant);
     say(`variant ${variant} 逐偏移：`);
     for (let off = 0; off <= maxOff; ++off) {
-      await conn.eval(`return window.__ced.setCaretOnly(0, ${off});`);
+      await conn.eval(`return window.__heditor.setCaretOnly(0, ${off});`);
       const s = await state();
       const inner = await conn.eval(`
-        const cc = window.__ced.controls, off = ${off};
+        const cc = window.__heditor.controls, off = ${off};
         for (let i = cc.items.length - 1; i >= 0; --i) {
           const it = cc.items[i];
           if (off >= it.start[1] && off <= it.end[1]) return i;
@@ -90,17 +92,17 @@ async function main() {
   say('\n每枚括号槽附近的真实点击（variant 3）：');
   await load(3);
   const geo = await conn.eval(`
-    const cv = window.__ced.canvas, r = cv.getBoundingClientRect();
-    const q = window.__ced.controls.items[0].rects[0];
+    const cv = window.__heditor.canvas, r = cv.getBoundingClientRect();
+    const q = window.__heditor.controls.items[0].rects[0];
     return { left: r.left, top: r.top, sx: r.width / cv.width, sy: r.height / cv.height,
-             zoom: window.__ced.zoomLevel, y: q.y + q.h / 2 };`);
+             zoom: window.__heditor.zoomLevel, y: q.y + q.h / 2 };`);
   const slots = JSON.parse(await slotsOf());
   for (const sl of slots) {
     const out = [];
     for (const dx of [-3, -1.5, 0, 1.5, 3]) {
       const x = sl.x + dx;
       const hit = JSON.parse(await conn.eval(
-        `return JSON.stringify(window.__ced.hit(${x.toFixed(2)}, ${geo.y.toFixed(2)}));`));
+        `return JSON.stringify(window.__heditor.hit(${x.toFixed(2)}, ${geo.y.toFixed(2)}));`));
       const p = { x: geo.left + x * geo.zoom * geo.sx,
                   y: geo.top + geo.y * geo.zoom * geo.sy,
                   button: 'left', clickCount: 1, buttons: 1 };
@@ -118,7 +120,7 @@ async function main() {
   // 用户现象 3：只删掉最内层的「心悸」，看光标停在哪儿、再按右键去哪儿。
   say('\n现象 3：删掉「心悸」之后的光标（variant 3）：');
   await load(3);
-  await conn.eval('return window.__ced.setCaretOnly(0, 9);');
+  await conn.eval('return window.__heditor.setCaretOnly(0, 9);');
   for (let i = 0; i < 2; ++i) await conn.eval(keyExpr('Backspace'));
   let s = await state();
   say(`  删完后 光标=${s.off} 归属=${s.own} 渲染x=${s.cx}   ${items(s)}`);
@@ -133,7 +135,7 @@ async function main() {
   // 用户现象 2：把最内层的「心悸」与中层的「三天」都删掉。
   say('\n现象 2：删掉「心悸」「三天」之后的区间树（variant 3）：');
   await load(3);
-  await conn.eval('return window.__ced.setCaretOnly(0, 9);');
+  await conn.eval('return window.__heditor.setCaretOnly(0, 9);');
   for (let i = 0; i < 2; ++i) await conn.eval(keyExpr('Backspace'));
   s = await state();
   say(`  删「心悸」后 ${items(s)}`);
@@ -145,14 +147,14 @@ async function main() {
 
   // 用户现象 4：后两个控件删空后，键盘还能不能进到那个位置。
   say('\n现象 4：后两个控件删空后（variant 3，只剩最外层有内容）：');
-  await conn.eval('return window.__ced.setCaretOnly(0, 5);');
+  await conn.eval('return window.__heditor.setCaretOnly(0, 5);');
   const seq = [5];
   for (let i = 0; i < 8; ++i) {
     await conn.eval(keyExpr('ArrowRight'));
     seq.push((await state()).off);
   }
   say(`  从 5 连按右键 8 次：${seq.join(' ')}`);
-  await conn.eval('return window.__ced.setCaretOnly(0, 12);');
+  await conn.eval('return window.__heditor.setCaretOnly(0, 12);');
   const seq2 = [12];
   for (let i = 0; i < 8; ++i) {
     await conn.eval(keyExpr('ArrowLeft'));

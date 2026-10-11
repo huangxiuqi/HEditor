@@ -1,8 +1,8 @@
 // 临时诊断：把两条路径的 "x → 落点偏移" 表并排打出来。
 //
-//   A = 引擎命中测试（__ced.hit(x) 直接给帧磅）
+//   A = 引擎命中测试（__heditor.hit(x) 直接给帧磅）
 //   B = 真实鼠标点击（CDP Input.dispatchMouseEvent，走页面的坐标换算）
-//   C = 页面的合成点击（__ced.clickAt，与 B 同一套换算，只是不经过 CDP）
+//   C = 页面的合成点击（__heditor.clickAt，与 B 同一套换算，只是不经过 CDP）
 //
 // 三条同时打，就能分清差异出在"坐标换算"还是"命中 → 落点"。
 import { dirname, join } from 'node:path';
@@ -29,38 +29,38 @@ async function main() {
   await conn.send('Emulation.setDeviceMetricsOverride',
                   { width: 1500, height: 1200, deviceScaleFactor: 1, mobile: false });
   await conn.send('Page.navigate', { url: URL_ });
-  await conn.waitFor('return !!(window.__ced && window.__ced.ready)', 'ready');
+  await conn.waitFor('return !!(window.__heditor && window.__heditor.ready)', 'ready');
 
-  await conn.eval('return window.__ced.loadFormSample(2);');
-  await conn.eval('return window.__ced.stopBlink();');
+  await conn.eval('return window.__heditor.loadFormSample(2);');
+  await conn.eval('return window.__heditor.stopBlink();');
 
   const env = await conn.eval(`
-    const cv = window.__ced.canvas, r = cv.getBoundingClientRect();
+    const cv = window.__heditor.canvas, r = cv.getBoundingClientRect();
     return { left: r.left, top: r.top, w: r.width, h: r.height, cw: cv.width, ch: cv.height,
              zoomUI: Number(document.getElementById('zoom').value),
-             zoomLive: window.__ced.zoomLevel };`);
+             zoomLive: window.__heditor.zoomLevel };`);
   console.log('环境：', JSON.stringify(env));
 
   const y = await conn.eval(`
-    const q = window.__ced.controls.items[0].rects[0];
+    const q = window.__heditor.controls.items[0].rects[0];
     return q.y + q.h / 2;`);
   const lo = await conn.eval(
-    'return Math.min(...window.__ced.controls.items.map(i => i.rects[0].x));');
+    'return Math.min(...window.__heditor.controls.items.map(i => i.rects[0].x));');
   const hi = await conn.eval(
-    'return Math.max(...window.__ced.controls.items.map(i => i.rects[0].x + i.rects[0].w));');
+    'return Math.max(...window.__heditor.controls.items.map(i => i.rects[0].x + i.rects[0].w));');
   console.log(`y=${y.toFixed(2)}  lo=${lo.toFixed(2)}  hi=${hi.toFixed(2)}  zoom=${env.zoomUI}`);
 
   const z = env.zoomUI;
   const rows = [];
   const reload = async () => {
-    await conn.eval('return window.__ced.loadFormSample(2);');
-    await conn.eval('return window.__ced.stopBlink();');
+    await conn.eval('return window.__heditor.loadFormSample(2);');
+    await conn.eval('return window.__heditor.stopBlink();');
   };
 
   // A：命中测试
   const tableA = {};
   for (let x = lo - 4; x <= hi + 4; x += 0.5) {
-    const h = await conn.eval(`return window.__ced.hit(${x.toFixed(2)}, ${y.toFixed(2)});`);
+    const h = await conn.eval(`return window.__heditor.hit(${x.toFixed(2)}, ${y.toFixed(2)});`);
     if (!h) continue;
     const k = `${h.offset}/${h.field}`;
     if (!tableA[k]) tableA[k] = [x, x];
@@ -77,7 +77,7 @@ async function main() {
     await conn.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...p });
     await sleep(6);
     const st = await conn.eval(
-      'return { o: window.__ced.caret.offset, f: window.__ced.controls.caret, x: window.__ced.caret.x };');
+      'return { o: window.__heditor.caret.offset, f: window.__heditor.controls.caret, x: window.__heditor.caret.x };');
     const k = `${st.o}/${st.f}`;
     if (!tableB[k]) tableB[k] = [x, x];
     tableB[k][1] = x;
@@ -88,9 +88,9 @@ async function main() {
   await reload();
   const tableC = {};
   for (let x = lo - 4; x <= hi + 4; x += 0.5) {
-    await conn.eval(`return window.__ced.clickAt(${(x * z).toFixed(3)}, ${(y * z).toFixed(3)});`);
+    await conn.eval(`return window.__heditor.clickAt(${(x * z).toFixed(3)}, ${(y * z).toFixed(3)});`);
     const st = await conn.eval(
-      'return { o: window.__ced.caret.offset, f: window.__ced.controls.caret };');
+      'return { o: window.__heditor.caret.offset, f: window.__heditor.controls.caret };');
     const k = `${st.o}/${st.f}`;
     if (!tableC[k]) tableC[k] = [x, x];
     tableC[k][1] = x;

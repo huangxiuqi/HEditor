@@ -24,7 +24,7 @@
 #include "core/text/font.h"
 #include "core/text/writing_mode.h"
 
-namespace ced {
+namespace heditor {
 
 class EditorEngine {
 public:
@@ -99,7 +99,9 @@ public:
     bool moveCaretToLineEnd();
     void showCaret(bool on);
 
-    /** 编辑入口：坐标是 (段, 段内码点偏移)，落地前吸附到字素簇边界。 */
+    /**
+     * 编辑入口：坐标是 (段, 段内码点偏移)，落地前吸附到字素簇边界。
+     */
     bool insertTextUtf8(int para, size_t offset, const std::string& utf8);
     bool insertCodepoints(int para, size_t offset, const std::vector<uint32_t>& cps);
     bool insertCodepoint(int para, size_t offset, uint32_t cp);
@@ -264,7 +266,9 @@ public:
      */
     int auditLayout();
 
-    /** 同上的 JSON 版，供宿主取证（含两侧规模、首个不符位置与两个耗时）。 */
+    /**
+     * 同上的 JSON 版，供宿主取证（含两侧规模、首个不符位置与两个耗时）。
+     */
     std::string auditLayoutJson();
 
     /**
@@ -416,7 +420,9 @@ private:
      */
     void markLayoutDirtyForBrackets();
 
-    /** 控件列表里最靠前的段下标；没有控件时返回 -1。 */
+    /**
+     * 控件列表里最靠前的段下标；没有控件时返回 -1。
+     */
     int minControlParagraph() const;
 
     /**
@@ -471,7 +477,9 @@ private:
      */
     bool shiftSuffixBlockAxis(int from, const ReflowState& after);
 
-    /** 后缀（[from+1, 末段]）里有没有竖排段 —— 竖排不能走平移复用。 */
+    /**
+     * 后缀（[from+1, 末段]）里有没有竖排段 —— 竖排不能走平移复用。
+     */
     bool suffixIsHorizontalOnly(int from) const;
 
     /**
@@ -525,10 +533,14 @@ private:
      */
     bool para_count_changed_ = false;
 
-    /** 上一次 relayout 的粒度，由 presentInternal 上报到 EditStats。 */
+    /**
+     * 上一次 relayout 的粒度，由 presentInternal 上报到 EditStats。
+     */
     int last_relaid_paragraphs_ = 0;
     int last_reused_paragraphs_ = 0;
-    /** 后缀是被"平移复用"的（见 SuffixReuse::Shifted）—— presentInternal 上报用。 */
+    /**
+     * 后缀是被"平移复用"的（见 SuffixReuse::Shifted）—— presentInternal 上报用。
+     */
     bool last_suffix_shifted_ = false;
     int last_relaid_lines_ = 0;
     bool last_layout_full_ = true;
@@ -591,7 +603,9 @@ private:
 
     bool layout_pending_ = false;
 
-    /** 表单：控件区间集合与编辑策略（策略是纯函数，见 core/doc/edit_policy.h）。 */
+    /**
+     * 表单：控件区间集合与编辑策略（策略是纯函数，见 core/doc/edit_policy.h）。
+     */
     ControlSet controls_;
     EditPolicy policy_;
     long long blocked_edits_ = 0;
@@ -614,4 +628,4 @@ private:
 };
 
 
-}  // namespace ced
+}  // namespace heditor

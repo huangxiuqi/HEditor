@@ -5,7 +5,7 @@
 
 #include <cstdint>
 
-namespace ced {
+namespace heditor {
 
 struct Color {
     uint8_t r = 0, g = 0, b = 0, a = 255;
@@ -22,4 +22,4 @@ struct Rect {
 
 inline float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
-}  // namespace ced
+}  // namespace heditor

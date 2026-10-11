@@ -13,7 +13,7 @@
  */
 #pragma once
 
-namespace ced {
+namespace heditor {
 
 enum class InlineAxis {
     Horizontal,
@@ -111,4 +111,4 @@ struct WritingMode {
     }
 };
 
-}  // namespace ced
+}  // namespace heditor

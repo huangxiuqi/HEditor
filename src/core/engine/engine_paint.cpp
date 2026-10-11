@@ -23,9 +23,11 @@
 
 #include "core/text/shaper.h"
 
-namespace ced {
+namespace heditor {
 
-/** 呈现：把底图与光标提交到帧，并维护上屏脏矩形。 */
+/**
+ * 呈现：把底图与光标提交到帧，并维护上屏脏矩形。
+ */
 
 void EditorEngine::repaint() {
     // 帧范围取本次布局的页数，不能锁在"底图已画过多少页"上。
@@ -505,4 +507,4 @@ void EditorEngine::repaintAfterEdit() {
 }
 
 
-}  // namespace ced
+}  // namespace heditor

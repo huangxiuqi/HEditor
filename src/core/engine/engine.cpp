@@ -27,7 +27,7 @@
 
 #include "core/text/shaper.h"
 
-namespace ced {
+namespace heditor {
 
 namespace {
 
@@ -37,7 +37,9 @@ const std::vector<uint32_t> kEmptyStarts;
 
 }  // namespace
 
-/** 生命周期：字体加载与引擎初始化。 */
+/**
+ * 生命周期：字体加载与引擎初始化。
+ */
 
 bool EditorEngine::init(const std::vector<std::string>& fontPaths) {
     for (const auto& p : fontPaths) {
@@ -99,7 +101,9 @@ size_t EditorEngine::documentCodepoints() const {
     return n;
 }
 
-/** 光标：位置设置、字素簇吸附与光标矩形查询。 */
+/**
+ * 光标：位置设置、字素簇吸附与光标矩形查询。
+ */
 
 size_t EditorEngine::snapToCluster(int para, size_t offset) const {
     if (para < 0 || para >= static_cast<int>(blocks_.size())) return 0;
@@ -310,7 +314,9 @@ bool EditorEngine::moveCaretToLineEnd() {
 
 void EditorEngine::showCaret(bool on) { caret_visible_ = on; }
 
-/** 编辑：插入与删除，先过 EditPolicy 判定，再按字素簇吸附。 */
+/**
+ * 编辑：插入与删除，先过 EditPolicy 判定，再按字素簇吸附。
+ */
 
 bool EditorEngine::insertCodepoints(int para, size_t offset, const std::vector<uint32_t>& cps) {
     if (cps.empty()) return false;
@@ -841,7 +847,9 @@ bool EditorEngine::moveCaretToLineEndAndRender() {
     return true;
 }
 
-/** 命中测试：几何的反向半边 —— 帧坐标反查 (段, 偏移) + 归属控件。 */
+/**
+ * 命中测试：几何的反向半边 —— 帧坐标反查 (段, 偏移) + 归属控件。
+ */
 
 bool EditorEngine::hitTestPt(float x_pt_frame, float y_pt_frame, TextPos* out,
                              int* out_owner) const {
@@ -934,4 +942,4 @@ bool EditorEngine::hitTestPt(float x_pt_frame, float y_pt_frame, TextPos* out,
 
 
 
-}  // namespace ced
+}  // namespace heditor

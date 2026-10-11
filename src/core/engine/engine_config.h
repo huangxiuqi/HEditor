@@ -11,7 +11,7 @@
 #include "core/layout/layout.h"
 #include "core/utils/types.h"
 
-namespace ced {
+namespace heditor {
 
 /**
  * 表单模式下哪些控件显示方括号。
@@ -63,4 +63,4 @@ struct EngineConfig {
     float control_dot_pt = 3.0f;  // 小点边长（磅）
 };
 
-}  // namespace ced
+}  // namespace heditor

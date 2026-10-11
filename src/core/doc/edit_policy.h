@@ -12,7 +12,7 @@
 
 #include "core/doc/control.h"
 
-namespace ced {
+namespace heditor {
 
 enum class EditMode : int {
     Document = 0,  // 文档模式：随便改（默认值，保证旧行为一字不变）
@@ -88,4 +88,4 @@ private:
     EditMode mode_ = EditMode::Document;
 };
 
-}  // namespace ced
+}  // namespace heditor

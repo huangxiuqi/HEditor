@@ -11,7 +11,7 @@
 #include <string>
 #include <vector>
 
-namespace ced {
+namespace heditor {
 
 /**
  * FNV-1a 64 位偏移基数。
@@ -74,4 +74,4 @@ inline uint64_t fnvMixCStr(uint64_t h, const char* s) {
     return fnvMix(h, 0);
 }
 
-}  // namespace ced
+}  // namespace heditor

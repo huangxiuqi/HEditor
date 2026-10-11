@@ -10,7 +10,7 @@
 #include "core/text/shaper.h"
 #include "core/utils/utf8.h"
 
-namespace ced {
+namespace heditor {
 namespace {
 
 using Clock = std::chrono::steady_clock;
@@ -907,4 +907,4 @@ void summarizeLayoutStats(LayoutResult* out) {
     out->stats.font_run_count = runs;
 }
 
-}  // namespace ced
+}  // namespace heditor

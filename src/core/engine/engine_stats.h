@@ -8,7 +8,7 @@
 
 #include <cstddef>
 
-namespace ced {
+namespace heditor {
 
 struct EngineStats {
     int page_count = 0;
@@ -95,7 +95,9 @@ struct EditStats {
     bool layout_was_full = false;
     int dirty_page_count = 0;  // 内容指纹变了、需要重画的页数
 
-    /** 上屏粒度：本次真正重画的页数，以及文档总页数。 */
+    /**
+     * 上屏粒度：本次真正重画的页数，以及文档总页数。
+     */
     int repainted_pages = 0;
     int total_pages = 0;
     /**
@@ -109,12 +111,16 @@ struct EditStats {
     int frame_w = 0;
     int frame_h = 0;
 
-    /** 耗时拆分（毫秒）：本次排版、本次绘制、以及这一次操作的总计。 */
+    /**
+     * 耗时拆分（毫秒）：本次排版、本次绘制、以及这一次操作的总计。
+     */
     double layout_ms = 0.0;
     double paint_ms = 0.0;
     double total_ms = 0.0;
 
-    /** 光标位置与文档规模（逻辑坐标，与视觉行列无关）。 */
+    /**
+     * 光标位置与文档规模（逻辑坐标，与视觉行列无关）。
+     */
     int caret_para = 0;
     size_t caret_offset = 0;  // 段内码点偏移
     size_t caret_index = 0;   // 全文码点下标
@@ -143,4 +149,4 @@ struct EditStats {
     long long blocked_edits = 0;
 };
 
-}  // namespace ced
+}  // namespace heditor

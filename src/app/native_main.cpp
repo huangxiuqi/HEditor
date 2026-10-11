@@ -14,11 +14,11 @@
 #include "core/engine/engine.h"
 #include "demo/demo_documents.h"
 
-#ifndef CED_NATIVE_ASSET_DIR
-#define CED_NATIVE_ASSET_DIR "."
+#ifndef HEDITOR_NATIVE_ASSET_DIR
+#define HEDITOR_NATIVE_ASSET_DIR "."
 #endif
 
-using namespace ced;
+using namespace heditor;
 
 namespace {
 
@@ -67,7 +67,7 @@ int main(int argc, char** argv) {
     // 关掉 stdout 缓冲：崩溃时不至于把已经打出来的诊断信息一起丢掉
     std::setvbuf(stdout, nullptr, _IONBF, 0);
 
-    std::string assetDir = CED_NATIVE_ASSET_DIR;
+    std::string assetDir = HEDITOR_NATIVE_ASSET_DIR;
     std::string outDir = "out";
     std::string demo;
     float zoom = 1.5f;
@@ -99,7 +99,7 @@ int main(int argc, char** argv) {
             noGlyphCache = true;
         } else if (a == "--help" || a == "-h") {
             std::printf(
-                "用法: ced_native [--asset-dir DIR] [--out-dir DIR] [--zoom N] [--page N]"
+                "用法: heditor_native [--asset-dir DIR] [--out-dir DIR] [--zoom N] [--page N]"
                 " [--demo word] [--repeat N] [--no-glyph-cache]\n"
                 "  --repeat N         进程内把\"排版+绘制\"整轮跑 N 次并报 min/中位/max。\n"
                 "                     单次数字不能用来做性能决策：实测同一个二进制连跑 6 次，\n"

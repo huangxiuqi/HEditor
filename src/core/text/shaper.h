@@ -17,7 +17,7 @@
 
 struct hb_font_t;
 
-namespace ced {
+namespace heditor {
 
 struct WritingMode;
 
@@ -79,4 +79,4 @@ ShapedText shapeTextRange(hb_font_t* font, const uint32_t* all, size_t begin, si
 ShapedText shapeText(hb_font_t* font, std::string_view utf8, const WritingMode& wm,
                      const char* language = nullptr);
 
-}  // namespace ced
+}  // namespace heditor

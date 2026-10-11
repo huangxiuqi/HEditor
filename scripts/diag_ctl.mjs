@@ -32,7 +32,7 @@ const PORT = Number(opt('port', '9222'));
 const URL_ = opt('url', 'http://localhost:8781/web/index.html');
 
 const keyExpr = (k) => `
-  window.__ced.textarea.dispatchEvent(
+  window.__heditor.textarea.dispatchEvent(
     new KeyboardEvent('keydown', { key: ${JSON.stringify(k)}, bubbles: true, cancelable: true }));
   return true;`;
 
@@ -40,7 +40,7 @@ const keyExpr = (k) => `
  * 读一条完整状态：光标偏移与渲染像素、归属字段、全部控件区间与树关系。
  */
 const stateExpr = `
-  const c = window.__ced.caret, cc = window.__ced.controls;
+  const c = window.__heditor.caret, cc = window.__heditor.controls;
   return JSON.stringify({
     off: c.offset, cx: Math.round(c.x), vis: c.visible,
     own: cc.caret,
@@ -70,7 +70,7 @@ async function main() {
   await conn.send('Emulation.setDeviceMetricsOverride',
                   { width: 1500, height: 1200, deviceScaleFactor: 1, mobile: false });
   await conn.send('Page.navigate', { url: URL_ });
-  await conn.waitFor('return !!(window.__ced && window.__ced.ready)', 'ready');
+  await conn.waitFor('return !!(window.__heditor && window.__heditor.ready)', 'ready');
   await sleep(300);
 
   const state = async () => JSON.parse(await conn.eval(stateExpr));
@@ -89,24 +89,24 @@ async function main() {
    * 每次点击之间不重置，因为落点只取决于点击位置。
    */
   const sweep = async (variant) => {
-    await conn.eval(`return window.__ced.loadFormSample(${variant});`);
-    await conn.eval('return window.__ced.stopBlink();');
+    await conn.eval(`return window.__heditor.loadFormSample(${variant});`);
+    await conn.eval('return window.__heditor.stopBlink();');
     const geo = await conn.eval(`
-      const cv = window.__ced.canvas, r = cv.getBoundingClientRect();
-      const it = window.__ced.controls.items;
+      const cv = window.__heditor.canvas, r = cv.getBoundingClientRect();
+      const it = window.__heditor.controls.items;
       let lo = 1e9, hi = -1e9, y = 0;
       for (const q of it) for (const qq of (q.rects || [])) {
         lo = Math.min(lo, qq.x); hi = Math.max(hi, qq.x + qq.w); y = qq.y + qq.h / 2;
       }
       return { left: r.left, top: r.top, sx: r.width / cv.width, sy: r.height / cv.height,
-               zoom: window.__ced.zoomLevel, lo, hi, y };`);
+               zoom: window.__heditor.zoomLevel, lo, hi, y };`);
     say(`\n--- variant ${variant}：x ∈ [${geo.lo.toFixed(1)}, ${geo.hi.toFixed(1)}] ` +
                 `y=${geo.y.toFixed(1)} zoom=${geo.zoom}`);
     const samples = [];
     const step = 0.5;
     for (let x = geo.lo - 8; x <= geo.hi + 8; x += step) {
       const hit = JSON.parse(await conn.eval(
-        `return JSON.stringify(window.__ced.hit(${x.toFixed(3)}, ${geo.y.toFixed(3)}));`));
+        `return JSON.stringify(window.__heditor.hit(${x.toFixed(3)}, ${geo.y.toFixed(3)}));`));
       const p = { x: geo.left + x * geo.zoom * geo.sx, y: geo.top + geo.y * geo.zoom * geo.sy,
                   button: 'left', clickCount: 1, buttons: 1 };
       await conn.send('Input.dispatchMouseEvent', { type: 'mousePressed', ...p });
@@ -123,11 +123,13 @@ async function main() {
     return geo;
   };
 
-  /** 方向键逐格走：记录偏移序列，看有没有跨过控件边界。 */
+  /**
+   * 方向键逐格走：记录偏移序列，看有没有跨过控件边界。
+   */
   const walk = async (variant, from, dir, n) => {
-    await conn.eval(`return window.__ced.loadFormSample(${variant});`);
-    await conn.eval('return window.__ced.stopBlink();');
-    await conn.eval(`return window.__ced.setCaretOnly(0, ${from});`);
+    await conn.eval(`return window.__heditor.loadFormSample(${variant});`);
+    await conn.eval('return window.__heditor.stopBlink();');
+    await conn.eval(`return window.__heditor.setCaretOnly(0, ${from});`);
     const seq = [from];
     for (let i = 0; i < n; ++i) {
       await conn.eval(keyExpr(dir > 0 ? 'ArrowRight' : 'ArrowLeft'));
@@ -138,10 +140,10 @@ async function main() {
 
   for (const variant of [2, 3]) {
     say(`\n================ variant ${variant} ================`);
-    await conn.eval(`return window.__ced.loadFormSample(${variant});`);
-    await conn.eval('return window.__ced.stopBlink();');
+    await conn.eval(`return window.__heditor.loadFormSample(${variant});`);
+    await conn.eval('return window.__heditor.stopBlink();');
     await dump('载入');
-    const slots = await conn.eval(`return JSON.stringify(window.__ced.bracketSlots);`);
+    const slots = await conn.eval(`return JSON.stringify(window.__heditor.bracketSlots);`);
     say('  括号占位：' + slots);
     await sweep(variant);
     await walk(variant, 4, +1, 10);
@@ -150,9 +152,9 @@ async function main() {
 
   // 三层嵌套的删除链：把最内层「心悸」删掉，再看光标与区间。
   say('\n================ 复现：三层嵌套删掉「心悸」 ================');
-  await conn.eval('return window.__ced.loadFormSample(3);');
-  await conn.eval('return window.__ced.stopBlink();');
-  await conn.eval('return window.__ced.setCaretOnly(0, 9);');
+  await conn.eval('return window.__heditor.loadFormSample(3);');
+  await conn.eval('return window.__heditor.stopBlink();');
+  await conn.eval('return window.__heditor.setCaretOnly(0, 9);');
   await dump('光标置于 9（内层末尾）');
   await conn.eval(keyExpr('Backspace'));
   await dump('退格 1 次');
@@ -166,15 +168,15 @@ async function main() {
   await dump('左方向键 1 次');
 
   say('\n================ 复现：三层嵌套把三个字段都删空 ================');
-  await conn.eval('return window.__ced.loadFormSample(3);');
-  await conn.eval('return window.__ced.stopBlink();');
+  await conn.eval('return window.__heditor.loadFormSample(3);');
+  await conn.eval('return window.__heditor.stopBlink();');
   for (let i = 2; i >= 0; --i) {
     for (let k = 0; k < 6; ++k) {
       const done = await conn.eval(`
-        const it = window.__ced.controls.items[${i}];
+        const it = window.__heditor.controls.items[${i}];
         if (it.end[1] <= it.start[1]) return true;
-        window.__ced.setCaretAt(0, it.end[1], ${i});
-        window.__ced.setCaretOnly(0, it.end[1]);
+        window.__heditor.setCaretAt(0, it.end[1], ${i});
+        window.__heditor.setCaretOnly(0, it.end[1]);
         return false;`);
       if (done) break;
       await conn.eval(keyExpr('Backspace'));

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ced_editor LANGUAGES CXX C)
+project(HEditor LANGUAGES CXX C)
 
 # ─────────────────────────────────────────────────────────────
 #  一套源码，两个 target：native / wasm32
@@ -17,37 +17,37 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
-set(CED_ROOT ${CMAKE_CURRENT_SOURCE_DIR})
+set(HEDITOR_ROOT ${CMAKE_CURRENT_SOURCE_DIR})
 
 # HarfBuzz 源码根：submodule 路径优先，回退迁移期的版本号目录。
 #   权威来源是 submodule（版本 = gitlink 的 commit，由 scripts/deps_init.ps1 钉到 tag）。
 #   旧目录只为兼容手工解压的既有工作区，两者内容未必相同 —— submodule 若停在默认分支
 #   尖端就与 tag 不同，而"取到哪一份"会改变整形结果，所以配置时打印实际用的路径。
-set(CED_HB_ROOT ${CED_ROOT}/third_party/harfbuzz)
-if(NOT EXISTS ${CED_HB_ROOT}/src/harfbuzz.cc)
-  set(CED_HB_ROOT ${CED_ROOT}/third_party/harfbuzz-14.6.0)
-  if(EXISTS ${CED_HB_ROOT}/src/harfbuzz.cc)
-    message(STATUS "HarfBuzz: 迁移期旧目录 ${CED_HB_ROOT}（可跑 scripts/deps_init.ps1 换成 submodule）")
+set(HEDITOR_HB_ROOT ${HEDITOR_ROOT}/third_party/harfbuzz)
+if(NOT EXISTS ${HEDITOR_HB_ROOT}/src/harfbuzz.cc)
+  set(HEDITOR_HB_ROOT ${HEDITOR_ROOT}/third_party/harfbuzz-14.6.0)
+  if(EXISTS ${HEDITOR_HB_ROOT}/src/harfbuzz.cc)
+    message(STATUS "HarfBuzz: 迁移期旧目录 ${HEDITOR_HB_ROOT}（可跑 scripts/deps_init.ps1 换成 submodule）")
   endif()
 else()
-  message(STATUS "HarfBuzz: submodule ${CED_HB_ROOT}")
+  message(STATUS "HarfBuzz: submodule ${HEDITOR_HB_ROOT}")
 endif()
 
-set(CED_ASSET_DIR ${CED_ROOT}/assets)
+set(HEDITOR_ASSET_DIR ${HEDITOR_ROOT}/assets)
 
 # 构建时间戳：编进 wasm/native 里，验证台把它显示出来。
 #   "改了没生效"要先能回答"页面到底跑的哪一版" —— 光看磁盘上的文件时间不够：
 #   浏览器完全可能拿的是旧副本。脚本不传时退回 dev。
-set(CED_BUILD_STAMP "dev" CACHE STRING "构建时间戳（构建脚本注入）")
+set(HEDITOR_BUILD_STAMP "dev" CACHE STRING "构建时间戳（构建脚本注入）")
 
-if(NOT EXISTS ${CED_HB_ROOT}/src/harfbuzz.cc)
+if(NOT EXISTS ${HEDITOR_HB_ROOT}/src/harfbuzz.cc)
   message(FATAL_ERROR
-    "缺少 HarfBuzz 源码：${CED_HB_ROOT}\n"
+    "缺少 HarfBuzz 源码：${HEDITOR_HB_ROOT}\n"
     "请先执行 scripts/deps_init.ps1（拉 submodule 并钉到 tag 14.6.0）；\n"
     "或手工把 harfbuzz 源码放到 third_party/harfbuzz-14.6.0。")
 endif()
 
-option(CED_BUILD_TESTS "构建断言型单测" ON)
+option(HEDITOR_BUILD_TESTS "构建断言型单测" ON)
 
 # ─────────────────────────────────────────────────────────────
 #  Skia 光栅后端（可选开关）
@@ -60,31 +60,31 @@ option(CED_BUILD_TESTS "构建断言型单测" ON)
 #  因此这个开关**只在 EMSCRIPTEN 下有效**，native 侧一律走自写后端，
 #  正好留下"另一把尺子"：同一份文档、同一份字体，两套后端可以对着看。
 # ─────────────────────────────────────────────────────────────
-set(CED_SKIA_ROOT "${CED_ROOT}/.toolchain/skia/src/skia-main" CACHE PATH "Skia 源码树")
-set(CED_SKIA_LIB "${CED_SKIA_ROOT}/out/wasm/libskia.wasm.a" CACHE FILEPATH "wasm 版 libskia（gn/ninja 产出的命名带 .wasm 中缀）")
-option(CED_USE_SKIA "用 Skia 做光栅化（仅 wasm；需先构建 libskia.a）" OFF)
+set(HEDITOR_SKIA_ROOT "${HEDITOR_ROOT}/.toolchain/skia/src/skia-main" CACHE PATH "Skia 源码树")
+set(HEDITOR_SKIA_LIB "${HEDITOR_SKIA_ROOT}/out/wasm/libskia.wasm.a" CACHE FILEPATH "wasm 版 libskia（gn/ninja 产出的命名带 .wasm 中缀）")
+option(HEDITOR_USE_SKIA "用 Skia 做光栅化（仅 wasm；需先构建 libskia.a）" OFF)
 
-if(CED_USE_SKIA AND NOT EMSCRIPTEN)
+if(HEDITOR_USE_SKIA AND NOT EMSCRIPTEN)
   message(FATAL_ERROR
-    "CED_USE_SKIA=ON 目前只支持 wasm target（现有的 Skia 静态库是 wasm 版）。\n"
+    "HEDITOR_USE_SKIA=ON 目前只支持 wasm target（现有的 Skia 静态库是 wasm 版）。\n"
     "native 侧请保持 OFF —— 它同时是 Skia 版的对照实现。")
 endif()
 
-if(CED_USE_SKIA AND NOT EXISTS ${CED_SKIA_LIB})
+if(HEDITOR_USE_SKIA AND NOT EXISTS ${HEDITOR_SKIA_LIB})
   message(FATAL_ERROR
-    "CED_USE_SKIA=ON 但找不到 Skia 静态库：${CED_SKIA_LIB}\n"
+    "HEDITOR_USE_SKIA=ON 但找不到 Skia 静态库：${HEDITOR_SKIA_LIB}\n"
     "先跑： powershell -ExecutionPolicy Bypass -File scripts\\build_skia_wasm.ps1")
 endif()
 
-if(CED_USE_SKIA)
-  set(CED_RENDER_SRC src/core/render/bitmap_skia.cpp)
+if(HEDITOR_USE_SKIA)
+  set(HEDITOR_RENDER_SRC src/core/render/bitmap_skia.cpp)
 else()
-  set(CED_RENDER_SRC src/core/render/bitmap.cpp)
+  set(HEDITOR_RENDER_SRC src/core/render/bitmap.cpp)
 endif()
 
 # ── 编译选项：一律按 target 下发，绝不 add_compile_options / add_compile_definitions 全局 ──
 #    （全局下发会污染 add_subdirectory 进来的第三方子工程）
-function(ced_target_flags tgt)
+function(heditor_target_flags tgt)
   if(MSVC)
     # /utf-8 是必需的：源码里有中文注释与 UTF-8 字符串字面量
     target_compile_options(${tgt} PRIVATE /utf-8 /W3 /permissive- /Zc:__cplusplus)
@@ -133,7 +133,7 @@ endfunction()
 #     也就是说，**新克隆一份下来照样是坏的**。
 #
 #   实测代价：给 EditStats 加一个 bool 字段后，shaping_test.cpp 没重编，
-#   链接出的 ced_tests.exe 直接段错误 —— 而它打印的仍是「55 项断言，失败 0 项」。
+#   链接出的 heditor_tests.exe 直接段错误 —— 而它打印的仍是「55 项断言，失败 0 项」。
 #   这类问题不会以编译错误的形式出现，它只会让"测试通过"变成一句不可信的话。
 #
 #   试过并否掉的替代方案：
@@ -162,7 +162,7 @@ endfunction()
 #   作用域：只对 MSVC 生效。clang/emscripten 的 depfile 通道本来是好的
 #   （实测 wasm 侧某个 .o 记了 803 条依赖，精确到具体头文件），
 #   所以那里 `return()` 直通，保留细粒度增量。
-function(ced_track_header_deps tgt)
+function(heditor_track_header_deps tgt)
   if(NOT MSVC)
     return()   # clang/gcc 走 depfile，本来就正常
   endif()
@@ -191,41 +191,45 @@ endfunction()
 #  HarfBuzz（用官方聚合源 src/harfbuzz.cc：一个翻译单元装下整个库）
 #  放在两个 target 之间共享，保证原生与 wasm 用的是同一份源码、同一组宏。
 # ─────────────────────────────────────────────────────────────
-add_library(ced_harfbuzz STATIC ${CED_HB_ROOT}/src/harfbuzz.cc)
-target_include_directories(ced_harfbuzz SYSTEM PUBLIC ${CED_HB_ROOT}/src)
-set_target_properties(ced_harfbuzz PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
+add_library(heditor_harfbuzz STATIC ${HEDITOR_HB_ROOT}/src/harfbuzz.cc)
+target_include_directories(heditor_harfbuzz SYSTEM PUBLIC ${HEDITOR_HB_ROOT}/src)
+set_target_properties(heditor_harfbuzz PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
 
 # HarfBuzz 的"源文件"其实是整个 src/：harfbuzz.cc 的 69 条 include 全是 .cc，
 # 再由它们包进 .hh。所以它必须挂上自己的头文件依赖 —— MSVC 侧没有任何自动依赖通道，
 # 不挂的话，换 HarfBuzz 版本（或改它任何一个 .cc/.hh）都会静默复用旧对象，
 # 于是编出来的是上一份源码，而构建一句提示都不给。
 # 这里只覆盖 HarfBuzz 自己的头；core 的头不在其中，所以改 core 不会重编这个巨型 TU
-# （那是有意的取舍，见上面 ced_track_header_deps 的说明）。
-ced_track_header_deps(ced_harfbuzz ${CED_HB_ROOT}/src)
+# （那是有意的取舍，见上面 heditor_track_header_deps 的说明）。
+heditor_track_header_deps(heditor_harfbuzz ${HEDITOR_HB_ROOT}/src)
 
 if(EMSCRIPTEN)
   # 单线程 wasm：关掉互斥量相关代码，减包体
-  target_compile_definitions(ced_harfbuzz PUBLIC HB_NO_MT)
+  target_compile_definitions(heditor_harfbuzz PUBLIC HB_NO_MT)
 elseif(MSVC)
-  target_compile_options(ced_harfbuzz PRIVATE /utf-8 /W0 /bigobj)
+  target_compile_options(heditor_harfbuzz PRIVATE /utf-8 /W0 /bigobj)
 else()
-  target_compile_options(ced_harfbuzz PRIVATE -w)
+  target_compile_options(heditor_harfbuzz PRIVATE -w)
 endif()
 if(MSVC)
-  target_compile_options(ced_harfbuzz PRIVATE /utf-8 /W0 /bigobj)
+  target_compile_options(heditor_harfbuzz PRIVATE /utf-8 /W0 /bigobj)
 endif()
 
 # ─────────────────────────────────────────────────────────────
 #  算法核（平台无关：原生与 wasm 共用）
 # ─────────────────────────────────────────────────────────────
-add_library(ced_core STATIC
+add_library(heditor_core STATIC
   src/core/doc/document.cpp
   src/core/doc/control.cpp
   src/core/doc/edit_policy.cpp
+  src/core/doc/node.cpp
+  src/core/doc/flow.cpp
+  src/core/doc/para.cpp
+  src/core/doc/invariants.cpp
   src/core/text/font.cpp
   src/core/text/shaper.cpp
   src/core/text/fallback.cpp
-  ${CED_RENDER_SRC}
+  ${HEDITOR_RENDER_SRC}
   src/core/layout/layout.cpp
   src/core/engine/engine.cpp
   src/core/engine/engine_layout.cpp
@@ -233,22 +237,22 @@ add_library(ced_core STATIC
   src/core/engine/engine_audit.cpp
   src/core/engine/engine_diag.cpp
 )
-target_include_directories(ced_core PUBLIC ${CED_ROOT}/src)
-target_link_libraries(ced_core PUBLIC ced_harfbuzz)
+target_include_directories(heditor_core PUBLIC ${HEDITOR_ROOT}/src)
+target_link_libraries(heditor_core PUBLIC heditor_harfbuzz)
 
 # 演示与测试共用的固定文书。单独成库是为了不让核心库带上演示数据 ——
 #   核心库提供的是能力，样例内容是喂给它的输入（见 docs/正式化架构与迁移路线.md 4.7）。
 #   include 目录给到仓库根，于是各处写 #include "demo/demo_documents.h"。
-add_library(ced_demo STATIC demo/demo_documents.cpp)
-target_include_directories(ced_demo PUBLIC ${CED_ROOT})
-target_link_libraries(ced_demo PUBLIC ced_core)
+add_library(heditor_demo STATIC demo/demo_documents.cpp)
+target_include_directories(heditor_demo PUBLIC ${HEDITOR_ROOT})
+target_link_libraries(heditor_demo PUBLIC heditor_core)
 # ★ 每个 target 都要走这个函数，漏掉它只在 MSVC 上炸：源码无 BOM，
 #   少了 /utf-8 就按 cp936 读，症状是"中文注释那一行报语法错"（见函数定义处的说明）。
-ced_target_flags(ced_demo)
-ced_target_flags(ced_core)
-ced_track_header_deps(ced_core ${CED_ROOT}/src/core)
+heditor_target_flags(heditor_demo)
+heditor_target_flags(heditor_core)
+heditor_track_header_deps(heditor_core ${HEDITOR_ROOT}/src/core)
 
-if(CED_USE_SKIA)
+if(HEDITOR_USE_SKIA)
   # ── 与 libskia.a 对齐的编译期契约（一个都不能少）────────────────
   #
   # ★ 宏必须与 Skia 自己编译时**逐一对齐**：这些宏参与公共头里的类型定义
@@ -257,8 +261,8 @@ if(CED_USE_SKIA)
   #   症状是运行期读到脏数据或直接 trap，而且极难定位。
   #   这份清单是从 Skia 的编译命令行（out/wasm 的 ninja 日志）里逐条抄下来的，
   #   不是猜的。
-  target_compile_definitions(ced_core PUBLIC
-    CED_USE_SKIA=1
+  target_compile_definitions(heditor_core PUBLIC
+    HEDITOR_USE_SKIA=1
     SK_CODEC_DECODES_BMP
     SK_CODEC_DECODES_WBMP
     SK_ENABLE_PRECOMPILE
@@ -269,17 +273,17 @@ if(CED_USE_SKIA)
   )
   # Skia 的公共头是按 "include/core/xxx.h" 这种**从源码根开始**的写法互相 include 的，
   # 所以根目录必须进 include path；另外各 public 子目录也加上，方便直接 include 文件名。
-  target_include_directories(ced_core PUBLIC
-    ${CED_SKIA_ROOT}
-    ${CED_SKIA_ROOT}/include/core
-    ${CED_SKIA_ROOT}/include/config
-    ${CED_SKIA_ROOT}/include/effects
-    ${CED_SKIA_ROOT}/include/pathops
-    ${CED_SKIA_ROOT}/include/ports
-    ${CED_SKIA_ROOT}/include/utils
+  target_include_directories(heditor_core PUBLIC
+    ${HEDITOR_SKIA_ROOT}
+    ${HEDITOR_SKIA_ROOT}/include/core
+    ${HEDITOR_SKIA_ROOT}/include/config
+    ${HEDITOR_SKIA_ROOT}/include/effects
+    ${HEDITOR_SKIA_ROOT}/include/pathops
+    ${HEDITOR_SKIA_ROOT}/include/ports
+    ${HEDITOR_SKIA_ROOT}/include/utils
   )
-  # 让使用者（宿主 target）也能拿到 CED_SKIA_LIB，链接时不用重复写路径
-  target_link_libraries(ced_core INTERFACE ${CED_SKIA_LIB})
+  # 让使用者（宿主 target）也能拿到 HEDITOR_SKIA_LIB，链接时不用重复写路径
+  target_link_libraries(heditor_core INTERFACE ${HEDITOR_SKIA_LIB})
 endif()
 
 # ─────────────────────────────────────────────────────────────
@@ -287,18 +291,18 @@ endif()
 # ─────────────────────────────────────────────────────────────
 if(EMSCRIPTEN)
 
-  add_executable(ced_wasm src/wasm/wasm_main.cpp)
-  target_link_libraries(ced_wasm PRIVATE ced_core ced_demo)
-  target_compile_definitions(ced_wasm PRIVATE CED_BUILD_STAMP="${CED_BUILD_STAMP}")
-  ced_target_flags(ced_wasm)
-  set_target_properties(ced_wasm PROPERTIES OUTPUT_NAME "ced_editor" SUFFIX ".js")
+  add_executable(heditor_wasm src/wasm/wasm_main.cpp)
+  target_link_libraries(heditor_wasm PRIVATE heditor_core heditor_demo)
+  target_compile_definitions(heditor_wasm PRIVATE HEDITOR_BUILD_STAMP="${HEDITOR_BUILD_STAMP}")
+  heditor_target_flags(heditor_wasm)
+  set_target_properties(heditor_wasm PROPERTIES OUTPUT_NAME "heditor" SUFFIX ".js")
 
   # 不 preload 字体：字体由 JS fetch 后交给引擎（生产环境本就如此）
-  target_link_options(ced_wasm PRIVATE
+  target_link_options(heditor_wasm PRIVATE
     --bind
     -O3
     -sMODULARIZE=1
-    -sEXPORT_NAME=CreateCedEditor
+    -sEXPORT_NAME=CreateHEditor
     -sENVIRONMENT=web
     -sALLOW_MEMORY_GROWTH=1
     -sINITIAL_MEMORY=64MB
@@ -307,41 +311,49 @@ if(EMSCRIPTEN)
     -sEXPORTED_RUNTIME_METHODS=HEAPU8,HEAPU32
   )
   # 供宿主脚本定位产物
-  set_target_properties(ced_wasm PROPERTIES
+  set_target_properties(heditor_wasm PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/web)
 
 else()
 
-  add_executable(ced_native src/app/native_main.cpp)
-  target_link_libraries(ced_native PRIVATE ced_core ced_demo)
-  target_compile_definitions(ced_native PRIVATE CED_NATIVE_ASSET_DIR="${CED_ASSET_DIR}"
-                                                CED_BUILD_STAMP="${CED_BUILD_STAMP}")
-  ced_target_flags(ced_native)
-  ced_track_header_deps(ced_native ${CED_ROOT}/src/app ${CED_ROOT}/src/core)
+  add_executable(heditor_native src/app/native_main.cpp)
+  target_link_libraries(heditor_native PRIVATE heditor_core heditor_demo)
+  target_compile_definitions(heditor_native PRIVATE HEDITOR_NATIVE_ASSET_DIR="${HEDITOR_ASSET_DIR}"
+                                                HEDITOR_BUILD_STAMP="${HEDITOR_BUILD_STAMP}")
+  heditor_target_flags(heditor_native)
+  heditor_track_header_deps(heditor_native ${HEDITOR_ROOT}/src/app ${HEDITOR_ROOT}/src/core)
 
-  if(CED_BUILD_TESTS)
+  if(HEDITOR_BUILD_TESTS)
     enable_testing()
-    add_executable(ced_tests tests/shaping_test.cpp)
-    target_link_libraries(ced_tests PRIVATE ced_core ced_demo)
-    target_compile_definitions(ced_tests PRIVATE CED_NATIVE_ASSET_DIR="${CED_ASSET_DIR}")
-    ced_target_flags(ced_tests)
-    ced_track_header_deps(ced_tests ${CED_ROOT}/src/core ${CED_ROOT}/tests)
-    add_test(NAME shaping_and_layout COMMAND ced_tests)
+    add_executable(heditor_tests tests/shaping_test.cpp)
+    target_link_libraries(heditor_tests PRIVATE heditor_core heditor_demo)
+    target_compile_definitions(heditor_tests PRIVATE HEDITOR_NATIVE_ASSET_DIR="${HEDITOR_ASSET_DIR}")
+    heditor_target_flags(heditor_tests)
+    heditor_track_header_deps(heditor_tests ${HEDITOR_ROOT}/src/core ${HEDITOR_ROOT}/tests)
+    add_test(NAME shaping_and_layout COMMAND heditor_tests)
 
     # 档 1：编辑 / 光标几何 / 命中测试 / 增量呈现
-    add_executable(ced_edit_tests tests/edit_test.cpp)
-    target_link_libraries(ced_edit_tests PRIVATE ced_core ced_demo)
-    target_compile_definitions(ced_edit_tests PRIVATE CED_NATIVE_ASSET_DIR="${CED_ASSET_DIR}")
-    ced_target_flags(ced_edit_tests)
-    ced_track_header_deps(ced_edit_tests ${CED_ROOT}/src/core ${CED_ROOT}/tests)
-    add_test(NAME edit_and_caret COMMAND ced_edit_tests)
+    add_executable(heditor_edit_tests tests/edit_test.cpp)
+    target_link_libraries(heditor_edit_tests PRIVATE heditor_core heditor_demo)
+    target_compile_definitions(heditor_edit_tests PRIVATE HEDITOR_NATIVE_ASSET_DIR="${HEDITOR_ASSET_DIR}")
+    heditor_target_flags(heditor_edit_tests)
+    heditor_track_header_deps(heditor_edit_tests ${HEDITOR_ROOT}/src/core ${HEDITOR_ROOT}/tests)
+    add_test(NAME edit_and_caret COMMAND heditor_edit_tests)
+
+    # 文档模型：节点、Pos 与流位置的双向换算（阶段 0 的 0.1）。
+    # 不链 heditor_demo：它只吃自己构造的树，与演示文书无关。
+    add_executable(heditor_model_tests tests/model_test.cpp)
+    target_link_libraries(heditor_model_tests PRIVATE heditor_core)
+    heditor_target_flags(heditor_model_tests)
+    heditor_track_header_deps(heditor_model_tests ${HEDITOR_ROOT}/src/core ${HEDITOR_ROOT}/tests)
+    add_test(NAME doc_model COMMAND heditor_model_tests)
 
     # 诊断探针（**不进 ctest**）：打印 EditStats / EditorEngine 的尺寸与字段偏移。
     # 用途与"为什么没法自动判定"写在 tests/probe_engine_size.cpp 顶部。
-    add_executable(ced_abi_probe tests/probe_engine_size.cpp)
-    target_link_libraries(ced_abi_probe PRIVATE ced_core)
-    ced_target_flags(ced_abi_probe)
-    ced_track_header_deps(ced_abi_probe ${CED_ROOT}/src/core ${CED_ROOT}/tests)
+    add_executable(heditor_abi_probe tests/probe_engine_size.cpp)
+    target_link_libraries(heditor_abi_probe PRIVATE heditor_core)
+    heditor_target_flags(heditor_abi_probe)
+    heditor_track_header_deps(heditor_abi_probe ${HEDITOR_ROOT}/src/core ${HEDITOR_ROOT}/tests)
   endif()
 
 endif()

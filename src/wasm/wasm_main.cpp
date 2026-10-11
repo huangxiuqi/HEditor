@@ -20,11 +20,11 @@
 #include "core/engine/engine.h"
 #include "demo/demo_documents.h"
 
-#ifndef CED_BUILD_STAMP
-#define CED_BUILD_STAMP "dev"
+#ifndef HEDITOR_BUILD_STAMP
+#define HEDITOR_BUILD_STAMP "dev"
 #endif
 
-using namespace ced;
+using namespace heditor;
 using emscripten::val;
 
 namespace {
@@ -48,7 +48,9 @@ WritingMode writingModeFromCode(int code) {
     }
 }
 
-/** 字体传入：JS 侧 fetch 到字节后在这里申请堆内存，再把指针交给引擎。 */
+/**
+ * 字体传入：JS 侧 fetch 到字节后在这里申请堆内存，再把指针交给引擎。
+ */
 uintptr_t allocBuffer(size_t n) { return reinterpret_cast<uintptr_t>(std::malloc(n)); }
 void freeBuffer(uintptr_t p) { std::free(reinterpret_cast<void*>(p)); }
 
@@ -62,7 +64,9 @@ void setFontRoles(int cjk_index, int mongol_index, int latin_index) {
     g_latin_font = latin_index;
 }
 
-/** 文本素材：样例里的蒙文段落与中文文书。 */
+/**
+ * 文本素材：样例里的蒙文段落与中文文书。
+ */
 std::string mongolianParagraph(int repeats) {
     // ᠮᠣᠩᠭᠣᠯ ᠪᠢᠴᠢᠭ（"蒙古文"）重复若干次，用于撑满一列看列序
     static const char kWord[] =
@@ -119,7 +123,9 @@ std::vector<BlockSpec> longDocument(int paragraphs, int font_index) {
     return blocks;
 }
 
-/** 文书：按场景号装配 BlockSpec，供前端切换演示。 */
+/**
+ * 文书：按场景号装配 BlockSpec，供前端切换演示。
+ */
 void setScenario(int scenario) {
     std::vector<BlockSpec> blocks;
     switch (scenario) {
@@ -222,11 +228,11 @@ void relayoutAndPaint() {
 void layoutOnly() { g_engine.relayout(); }
 
 /**
- * 这份 wasm 自己的构建时间（由构建脚本经 CED_BUILD_STAMP 注入）。
+ * 这份 wasm 自己的构建时间（由构建脚本经 HEDITOR_BUILD_STAMP 注入）。
  * 用途单一但关键：验证台把它显示出来，"页面跑的到底哪一版"就不用猜了 ——
  *   磁盘上的文件时间只说明"编过"，说明不了"浏览器加载的是它"（缓存会让两者不一致）。
  */
-std::string buildStamp() { return CED_BUILD_STAMP; }
+std::string buildStamp() { return HEDITOR_BUILD_STAMP; }
 
 int frameWidth() { return g_engine.frameWidth(); }
 int frameHeight() { return g_engine.frameHeight(); }
@@ -445,7 +451,9 @@ bool focusControl(bool forward) { return g_engine.focusControlAndRender(forward)
  */
 std::string auditFrame() { return g_engine.auditFrameJson(); }
 
-/** 排版自审：增量结果 vs 全量重排，逐字段比对（0 = 一致）。 */
+/**
+ * 排版自审：增量结果 vs 全量重排，逐字段比对（0 = 一致）。
+ */
 std::string auditLayout() { return g_engine.auditLayoutJson(); }
 
 /**
@@ -672,7 +680,7 @@ std::string documentText(int para) {
  * 把来源标在面板上，是这类"指标全绿但画面上什么都没有"唯一廉价的解药。
  */
 std::string rasterBackend() {
-#if defined(CED_USE_SKIA)
+#if defined(HEDITOR_USE_SKIA)
     return "Skia（SkCanvas + FreeType）";
 #else
     return "自写扫描线光栅器";
@@ -683,7 +691,7 @@ std::string rasterBackend() {
 
 int main() { return 0; }
 
-EMSCRIPTEN_BINDINGS(ced_editor) {
+EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("rasterBackend", &rasterBackend);
     emscripten::function("allocBuffer", &allocBuffer);
     emscripten::function("freeBuffer", &freeBuffer);

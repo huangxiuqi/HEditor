@@ -6,7 +6,7 @@
 #include "core/text/font.h"
 #include "core/utils/utf8.h"
 
-namespace ced {
+namespace heditor {
 
 bool needsOwnGlyph(uint32_t cp) {
     // 控制符：本身不可见，不需要字形
@@ -112,4 +112,4 @@ std::vector<FontRun> itemizeByFont(FontLibrary& lib, std::string_view utf8,
     return itemizeByFont(lib, cps.data(), cps.size(), chain, size_pt);
 }
 
-}  // namespace ced
+}  // namespace heditor

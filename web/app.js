@@ -20,7 +20,7 @@
 'use strict';
 
 const BASE = new URL('../', location.href);
-const WASM_GLUE = new URL('build/wasm/web/ced_editor.js', BASE);
+const WASM_GLUE = new URL('build/wasm/web/heditor.js', BASE);
 
 const FONTS = [
   { role: 'cjk',    label: 'Noto Sans SC',        path: 'assets/fonts/NotoSansSC-VF.ttf' },
@@ -121,13 +121,13 @@ async function boot() {
   //   文件变了就是全新 URL（不可能命中旧副本）。
   const cacheBust = fileStampRaw ? '?v=' + encodeURIComponent(fileStampRaw) : '';
   await loadScript(WASM_GLUE.href + cacheBust);
-  if (typeof CreateCedEditor !== 'function') {
-    throw new Error('胶水层已加载，但没有导出 CreateCedEditor');
+  if (typeof CreateHEditor !== 'function') {
+    throw new Error('胶水层已加载，但没有导出 CreateHEditor');
   }
 
   setStatus('实例化 WASM…');
   const tWasm = performance.now();
-  mod = await CreateCedEditor({
+  mod = await CreateHEditor({
     // 胶水层是从自己所在的目录拼 wasm 路径的（不含 query），所以这里显式补上 ——
     //   否则会出现"胶水是新的、wasm 是缓存里的旧的"这种最难查的组合。
     locateFile: (path) => new URL(path, WASM_GLUE.href).href + cacheBust,
@@ -718,7 +718,7 @@ function runBench() {
 function wasmBytes() {
   let n = 0;
   for (const e of performance.getEntriesByType('resource')) {
-    if (e.name.includes('ced_editor')) n += e.transferSize || e.decodedBodySize || 0;
+    if (e.name.includes('heditor')) n += e.transferSize || e.decodedBodySize || 0;
   }
   return n;
 }
@@ -731,13 +731,13 @@ function wasmBytes() {
 //     edit*    —— 引擎本次编辑的统计（重排行数/重画像素/光标矩形）
 //   两组的数字来源完全不同；把它们混在一个对象里，探针就会拿"页数"去断言
 //   一个根本不存在的字段，然后静默通过。
-window.__ced = {
+window.__heditor = {
   get ready() { return ready; },
   get errors() { return pageErrors.slice(); },
   get edit() { return lastEdit; },
   get text() { return mod ? mod.documentText(0) : ''; },
   // 按段取文本 + 整篇拼起来。跨段编辑的探针要核对"字符账守恒"（分段不丢不重），
-  //   而 __ced.text 只给第 0 段。
+  //   而 __heditor.text 只给第 0 段。
   paragraphText(i) { return mod ? mod.documentText(i) : ''; },
   get allText() {
     if (!mod) return '';
@@ -794,7 +794,7 @@ window.__ced = {
   //    只调引擎的话，画布还停在旧内容上，而引擎内部已经画完了 ——
   //    紧接着任何一次"只有光标脏"的 present（比如闪烁 tick）只会贴光标那一小块，
   //    画布于是永远停在旧文字上，症状是"光标往后走、插入处的字不动、两个叠在一起"。
-  //    探针 [2b] 的 __ced.selfCheck() 当场量出过 9372 个像素不一致。
+  //    探针 [2b] 的 __heditor.selfCheck() 当场量出过 9372 个像素不一致。
   //    探针钩子必须和真人路径一样把画面收尾，否则它自己就是 bug 的制造者。
   type(s) {
     if (!ready || !mod.typeText(s)) return null;
@@ -981,7 +981,7 @@ window.__ced = {
   //   屏幕与引擎帧逐字节相同）。既然症状是"看到的和引擎画的不一致"，
   //   那就在出问题的那台机器上当场量一次，比来回猜快得多。
   //
-  //   用法：F12 控制台 →  __ced.selfCheck()  把返回的对象发出来。
+  //   用法：F12 控制台 →  __heditor.selfCheck()  把返回的对象发出来。
   //   screenVsEngineDiffPx > 0 就说明"上屏"这一步贴错了（引擎帧本身是对的）；
   //   恒为 0 就说明问题在引擎的排版/光栅化，而不在上屏。
   selfCheck() {
@@ -1034,7 +1034,7 @@ window.__ced = {
   // 判据（默认档 All）：每个可编辑字段的左缘外侧都必须有括号墨迹，
   //   与光标在哪无关（括号常驻）。Focused 档（scope=1）下才退回旧判据：
   //   聚焦字段有括号、其余为空。
-  //   用法：F12 控制台 →  __ced.markCheck()   把返回的对象发出来。
+  //   用法：F12 控制台 →  __heditor.markCheck()   把返回的对象发出来。
   //   allOk=false 就说明确实有字段没画对，rows 里能看到是哪个、差多少。
   markCheck() {
     if (!ready || !mod) return null;

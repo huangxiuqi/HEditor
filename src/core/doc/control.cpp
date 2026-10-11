@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 
-namespace ced {
+namespace heditor {
 
 const char* controlKindName(ControlKind k) {
     switch (k) {
@@ -245,4 +245,4 @@ void adjustControlsOnErase(ControlSet& ctrls, int para, size_t a, size_t b) {
     ctrls.normalize();
 }
 
-}  // namespace ced
+}  // namespace heditor

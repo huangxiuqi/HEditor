@@ -22,7 +22,7 @@
 
 #include "core/text/shaper.h"
 
-namespace ced {
+namespace heditor {
 
 namespace {
 
@@ -42,7 +42,9 @@ namespace {
 constexpr float kPosTol = 1e-3f;
 inline bool samePos(float a, float b) { return std::fabs(a - b) <= kPosTol; }
 
-/** 两个字形是否逐字段相同。font 比指针：同一个 FontLibrary 里同一张脸就是同一个指针。 */
+/**
+ * 两个字形是否逐字段相同。font 比指针：同一个 FontLibrary 里同一张脸就是同一个指针。
+ */
 bool sameGlyph(const PlacedGlyph& a, const PlacedGlyph& b) {
     return a.glyph_id == b.glyph_id && a.font == b.font && samePos(a.x_pt, b.x_pt) &&
            samePos(a.y_pt, b.y_pt) && a.page == b.page && a.line == b.line &&
@@ -82,7 +84,9 @@ bool sameParaIndex(const ParaIndex& a, const ParaIndex& b) {
            samePos(a.state_at_start.cursor_y, b.state_at_start.cursor_y);
 }
 
-/** 一次排版自审的结果。diff 是"不符的条目数"，不是"哪里有偏差"的近似。 */
+/**
+ * 一次排版自审的结果。diff 是"不符的条目数"，不是"哪里有偏差"的近似。
+ */
 struct LayoutAudit {
     int glyph_diff = 0;
     int line_diff = 0;
@@ -248,4 +252,4 @@ std::string EditorEngine::auditLayoutJson() {
     return o.str();
 }
 
-}  // namespace ced
+}  // namespace heditor

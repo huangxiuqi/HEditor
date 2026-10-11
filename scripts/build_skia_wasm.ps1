@@ -1,4 +1,4 @@
-﻿# 构建 wasm 版 Skia（给 CED_USE_SKIA 的引擎链接用）。
+﻿# 构建 wasm 版 Skia（给 HEDITOR_USE_SKIA 的引擎链接用）。
 #
 # 产物：.toolchain/skia/src/skia-main/out/wasm/libskia.a
 #
@@ -102,7 +102,7 @@ $Sentinels = @{
 }
 
 New-Item -ItemType Directory -Force -Path $Externals | Out-Null
-$Tmp = Join-Path $env:TEMP 'ced_skia_deps'
+$Tmp = Join-Path $env:TEMP 'heditor_skia_deps'
 New-Item -ItemType Directory -Force -Path $Tmp | Out-Null
 
 foreach ($name in $Deps.Keys) {

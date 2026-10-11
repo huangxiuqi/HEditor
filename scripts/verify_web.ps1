@@ -42,7 +42,7 @@ if (-not $node) {
 }
 if (-not $node) { throw '找不到 node' }
 
-$glue = Join-Path $Root 'build\wasm\web\ced_editor.wasm'
+$glue = Join-Path $Root 'build\wasm\web\heditor.wasm'
 if (-not (Test-Path $glue)) { throw "还没构建 WASM：$glue" }
 
 # ── 找 python（与 serve_web.ps1 同一套优先级）──

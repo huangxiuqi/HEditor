@@ -5,7 +5,7 @@
 #
 # 服务根目录 = 项目根，所以：
 #   页面     http://localhost:8781/web/index.html
-#   wasm     /build/wasm/web/ced_editor.js
+#   wasm     /build/wasm/web/heditor.js
 #   字体     /assets/fonts/*.ttf
 #
 # 用法： powershell -ExecutionPolicy Bypass -File scripts\serve_web.ps1 [-Port 8781]
@@ -33,7 +33,7 @@ if (-not $py) { throw '找不到 python，无法起静态服务' }
 $entry = Join-Path $Root 'web\index.html'
 if (-not (Test-Path $entry)) { throw "缺少页面：$entry" }
 
-$glue = Join-Path $Root 'build\wasm\web\ced_editor.js'
+$glue = Join-Path $Root 'build\wasm\web\heditor.js'
 if (-not (Test-Path $glue)) {
     Write-Host '警告：还没构建 WASM。先执行：' -ForegroundColor Yellow
     Write-Host '  powershell -ExecutionPolicy Bypass -File scripts\build_wasm.ps1' -ForegroundColor Yellow
