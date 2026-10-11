@@ -1,28 +1,37 @@
 /**
- * 文档模型 0.1 / 0.2 / 0.3 的判据：位置换算、段落分段、不变量检查器。
+ * 文档模型 0.1 / 0.2 / 0.3 / 0.4 / 0.5 的判据：位置换算、段落分段、不变量检查器、编译、长度。
  *
  * 这一层没法靠"看起来对"验收 —— 位置错一格，表象是光标跳、命中偏、撤销回错地方，
- * 全都要到界面才看得见。所以判据只落在数据层，三条可证伪的：
+ * 全都要到界面才看得见。所以判据只落在数据层，五条可证伪的：
  *   0.1 流位置不丢：对每个流位置 f，flowAt(posAt(f)) == f；
  *       往返不改归属：对每个合法 Pos p，flowAt(posAt(flowAt(p))) == flowAt(p)。
  *       第二条这样写是为了绕开"同一位置有多种 Pos 写法"—— 容器的第 0 个槽位与第一个孩子的
  *       第一个位置本来就是同一个流位置，要求 Pos 逐字段相等会把正确实现判成错。
  *   0.2 下标数组与全部段落查询跟暴力算法逐项比对，并在随机增删中每步与重建结果整体比对。
  *   0.3 不变量检查器：对现有形状全绿，且逐条构造反例时必须报出对应的那条规则。
+ *   0.4 编译：同一份内容走"现有 BlockSpec 路径"与"树 → 编译"两条路，结果逐字段一致；
+ *       另加切段口径（标记切段、容器边界不切）、末尾未结束的段、隐藏摘除、不支持元素记诊断。
+ *   0.5 长度：单位换算的两支往返（正向量化误差不超过半个 EMU、反向对整数倍精确）、
+ *       五种性质的文本形式往返后种类与数值都不丢、畸形输入全被拒、非绝对长度在编译期被拒。
  *
  * 覆盖四层：写死的形状（嵌套、跨段落标记、空容器、表格、隐藏）、穷举、随机、以及增删序列，
  * 前两层在两种可见性口径下各过一遍（位置空间不同，但"往返互逆"必须各自成立）。
  */
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <random>
 #include <string>
 #include <vector>
 
+#include "core/doc/compile.h"
 #include "core/doc/flow.h"
 #include "core/doc/invariants.h"
+#include "core/doc/length.h"
 #include "core/doc/node.h"
 #include "core/doc/para.h"
+#include "core/utils/units.h"
+#include "demo/demo_documents.h"
 
 using namespace heditor;
 
@@ -359,8 +368,8 @@ void collectAttached(const NodeTree& tree, NodeId id, std::vector<NodeId>* out) 
 /**
  * 0.2 的判据：对每个在流里的容器，把下标数组与全部段落查询跟暴力算法逐项比对。
  */
-void checkParaIndex(const NodeTree& tree, FlowVisibility vis, const std::string& label) {
-    ParaIndex idx(tree, vis);
+void checkParagraphIndex(const NodeTree& tree, FlowVisibility vis, const std::string& label) {
+    ParagraphIndex idx(tree, vis);
 
     std::vector<NodeId> in_flow;
     int marks_in_flow = 0;
@@ -426,7 +435,7 @@ void checkParaIndex(const NodeTree& tree, FlowVisibility vis, const std::string&
  * 比对范围含记账的容器、下标数组、段落数、逐槽位的段落序号与逐段的范围 ——
  * 只比下标数组会漏掉"数错了段落数"这类错，而那种错同样会让脏段标记失准。
  */
-int diffIndexes(const NodeTree& tree, const ParaIndex& a, const ParaIndex& b) {
+int diffIndexes(const NodeTree& tree, const ParagraphIndex& a, const ParagraphIndex& b) {
     const std::vector<NodeId> ca = a.containers();
     const std::vector<NodeId> cb = b.containers();
     if (ca != cb) return 1;
@@ -467,7 +476,7 @@ void checkParaBoundaries() {
         NodeTree tree = makeEmptyControl();
         const NodeId sec = tree.firstSectionId();
         const NodeId cc = tree.find(sec)->children[0]->id;
-        ParaIndex idx(tree, FlowVisibility::Design);
+        ParagraphIndex idx(tree, FlowVisibility::Design);
         int b = -1;
         int e = -1;
         expectTrue(idx.markCount(cc) == 0 && idx.paragraphCount(cc) == 0, "空容器：0 个标记、0 段");
@@ -480,7 +489,7 @@ void checkParaBoundaries() {
         NodeTree tree;
         const NodeId sec = tree.firstSectionId();
         const NodeId mk = tree.appendChild(sec, NodeKind::ParagraphMark);
-        ParaIndex idx(tree, FlowVisibility::Design);
+        ParagraphIndex idx(tree, FlowVisibility::Design);
         int b = -1;
         int e = -1;
         expectTrue(idx.paragraphCount(sec) == 1 && idx.paragraphRange(sec, 1, &b, &e) && b == 0 &&
@@ -498,7 +507,7 @@ void checkParaBoundaries() {
         tree.setText(tree.appendChild(sec, NodeKind::TextRun), cps({0x61}));
         tree.appendChild(sec, NodeKind::ParagraphMark);
         tree.setText(tree.appendChild(sec, NodeKind::TextRun), cps({0x62}));
-        ParaIndex idx(tree, FlowVisibility::Design);
+        ParagraphIndex idx(tree, FlowVisibility::Design);
         int b = -1;
         int e = -1;
         expectTrue(idx.paragraphCount(sec) == 2, "末尾未结束：2 段（第一段有标记，第二段还没有）");
@@ -526,11 +535,11 @@ void checkParaHidden() {
     tree.appendChild(sec, NodeKind::ParagraphMark);
     tree.find(cc)->hidden = true;
 
-    checkParaIndex(tree, FlowVisibility::Design, "隐藏与分段 / 编辑态");
-    checkParaIndex(tree, FlowVisibility::Display, "隐藏与分段 / 呈现态");
+    checkParagraphIndex(tree, FlowVisibility::Design, "隐藏与分段 / 编辑态");
+    checkParagraphIndex(tree, FlowVisibility::Display, "隐藏与分段 / 呈现态");
 
-    ParaIndex design(tree, FlowVisibility::Design);
-    ParaIndex display(tree, FlowVisibility::Display);
+    ParagraphIndex design(tree, FlowVisibility::Design);
+    ParagraphIndex display(tree, FlowVisibility::Display);
 
     int design_marks = 0;
     int display_marks = 0;
@@ -568,8 +577,8 @@ void checkParaIncremental(uint32_t seed, FlowVisibility vis, const char* vis_nam
     }
 
     const std::string pre = "增量 #" + std::to_string(seed) + " / " + vis_name;
-    ParaIndex idx(tree, vis);
-    checkParaIndex(tree, vis, pre + " 起始");
+    ParagraphIndex idx(tree, vis);
+    checkParagraphIndex(tree, vis, pre + " 起始");
 
     static const NodeKind kKinds[] = {NodeKind::ContentControl, NodeKind::TextRun,
                                       NodeKind::ParagraphMark, NodeKind::Image,
@@ -606,7 +615,7 @@ void checkParaIncremental(uint32_t seed, FlowVisibility vis, const char* vis_nam
         // 通知的接受与拒绝必须与"父容器是否被记账"一致：拒绝只可能因为容器不在流里。
         if (accepted != (idx.marksOf(parent) != nullptr)) ++bad_notify;
 
-        if (diffIndexes(tree, idx, ParaIndex(tree, vis)) != 0) ++mismatch;
+        if (diffIndexes(tree, idx, ParagraphIndex(tree, vis)) != 0) ++mismatch;
     }
 
     expectTrue(inserts > 20 && erases > 15,
@@ -614,7 +623,7 @@ void checkParaIncremental(uint32_t seed, FlowVisibility vis, const char* vis_nam
                    std::to_string(erases) + "）");
     expectTrue(bad_notify == 0, pre + "：每次通知的接受与拒绝都与记账范围一致");
     expectTrue(mismatch == 0, pre + "：每一步之后整张表都与重新构造的结果逐项相同");
-    checkParaIndex(tree, vis, pre + " 终态");
+    checkParagraphIndex(tree, vis, pre + " 终态");
     // 0.3："任何编辑操作之后都要重新满足"——这里就是对真实增删序列之后的树跑一遍。
     expectClean(tree, pre + " 增删之后的不变量");
 }
@@ -771,10 +780,346 @@ void checkInvariantCounterexamples() {
     }
 }
 
+/**
+ * 0.4：把一份 BlockSpec 列表搬进树 —— 每段一个 TextRun 加一个结束标记，段落格式挂在标记上。
+ *
+ * 这是 0.4 的对照构造：同一份内容用"现有 BlockSpec 路径"与"树"两条路表达，再断言编译结果
+ * 与前者逐字段一致。字段逐个搬而不是整体塞进节点，因为段落格式本来就该由样式/控件设置。
+ */
+NodeTree treeFromBlocks(const std::vector<BlockSpec>& blocks) {
+    NodeTree tree;
+    const NodeId sec = tree.firstSectionId();
+    for (const BlockSpec& b : blocks) {
+        tree.setText(tree.appendChild(sec, NodeKind::TextRun), b.cp_text);
+        const NodeId mark = tree.appendChild(sec, NodeKind::ParagraphMark);
+        ParaFormat& f = tree.find(mark)->para;
+        f.font_index = b.font_index;
+        f.size = Length::abs(ptToEmu(b.size_pt));
+        f.wm = b.wm;
+        f.line_factor = b.line_factor;
+        f.space_after = Length::abs(ptToEmu(b.space_after_pt));
+        f.page_break_before = b.page_break_before;
+        f.language = b.language;
+        f.color = b.color;
+        f.fallback_font_indices = b.fallback_font_indices;
+    }
+    return tree;
+}
+
+/**
+ * 两份 BlockSpec 逐字段比。返回空串表示一致，否则返回第一处不同的字段名。
+ *
+ * 语种按内容比而不是比指针：两边指向的驻留字符串可能是不同字面量。
+ * 现有 BlockSpec 没有 operator==，所以这里显式列出每个字段 —— 漏比一个字段，
+ * 判据就变成一句空话。
+ */
+std::string diffBlock(const BlockSpec& a, const BlockSpec& b) {
+    if (a.cp_text != b.cp_text) return "cp_text";
+    if (a.font_index != b.font_index) return "font_index";
+    if (a.size_pt != b.size_pt) return "size_pt";
+    if (a.wm.inline_axis != b.wm.inline_axis || a.wm.block_flow != b.wm.block_flow ||
+        a.wm.orientation != b.wm.orientation) {
+        return "wm";
+    }
+    if (a.line_factor != b.line_factor) return "line_factor";
+    if (a.space_after_pt != b.space_after_pt) return "space_after_pt";
+    if (a.page_break_before != b.page_break_before) return "page_break_before";
+    const std::string la = a.language != nullptr ? a.language : "";
+    const std::string lb = b.language != nullptr ? b.language : "";
+    if (la != lb) return "language";
+    if (a.color.r != b.color.r || a.color.g != b.color.g || a.color.b != b.color.b ||
+        a.color.a != b.color.a) {
+        return "color";
+    }
+    if (a.fallback_font_indices != b.fallback_font_indices) return "fallback_font_indices";
+    return "";
+}
+
+/**
+ * 0.4 的核心判据：同一份内容走"现有 BlockSpec 路径"与"树 → 编译"两条路，结果逐字段一致。
+ */
+void checkCompileMatchesBlocks(const std::vector<BlockSpec>& blocks, const std::string& label) {
+    const NodeTree tree = treeFromBlocks(blocks);
+    const CompileResult r = compileDocument(tree, FlowVisibility::Design);
+    expectTrue(r.ok(), label + "：只有文本与段落，编译无诊断");
+    if (r.blocks.size() != blocks.size()) {
+        expectTrue(false, label + "：段落数一致（参照 " + std::to_string(blocks.size()) +
+                              "，编译 " + std::to_string(r.blocks.size()) + "）");
+        return;
+    }
+    int diff = 0;
+    std::string first;
+    for (size_t i = 0; i < blocks.size(); ++i) {
+        const std::string d = diffBlock(blocks[i], r.blocks[i]);
+        if (!d.empty()) {
+            ++diff;
+            if (first.empty()) first = "第 " + std::to_string(i + 1) + " 段差在 " + d;
+        }
+    }
+    std::string msg = label + "：" + std::to_string(blocks.size()) + " 段逐字段一致（不一致 " +
+                      std::to_string(diff) + "）";
+    if (!first.empty()) msg += "，首处 " + first;
+    expectTrue(diff == 0, msg);
+    expectClean(tree, label + " / 构造出的树");
+}
+
+/**
+ * 0.4 的形状判据：切段口径、末尾未结束的段、跨容器边界、隐藏、不支持元素。
+ */
+void checkCompileShapes() {
+    // 只有标记：标记属于它结束的那一段，所以这里是一段空段落。
+    {
+        NodeTree tree;
+        tree.appendChild(tree.firstSectionId(), NodeKind::ParagraphMark);
+        const CompileResult r = compileDocument(tree, FlowVisibility::Design);
+        expectTrue(r.ok() && r.blocks.size() == 1 && r.blocks[0].cp_text.empty(),
+                   "0.4 / 只有标记：编译出一段空段落");
+    }
+    // 空节：没有标记也没有内容，0 段。
+    {
+        NodeTree tree;
+        const CompileResult r = compileDocument(tree, FlowVisibility::Design);
+        expectTrue(r.ok() && r.blocks.empty(), "0.4 / 空节：0 段");
+    }
+    // 相邻两个 run 拼在同一段；末尾还没有结束标记的那一段照落，用默认段落格式。
+    {
+        NodeTree tree;
+        const NodeId sec = tree.firstSectionId();
+        tree.setText(tree.appendChild(sec, NodeKind::TextRun), cps({0x61, 0x62}));
+        tree.setText(tree.appendChild(sec, NodeKind::TextRun), cps({0x63}));
+        tree.appendChild(sec, NodeKind::ParagraphMark);
+        tree.setText(tree.appendChild(sec, NodeKind::TextRun), cps({0x64}));
+        const CompileResult r = compileDocument(tree, FlowVisibility::Design);
+        expectTrue(r.ok() && r.blocks.size() == 2 &&
+                       r.blocks[0].cp_text == cps({0x61, 0x62, 0x63}) &&
+                       r.blocks[1].cp_text == cps({0x64}),
+                   "0.4 / 相邻两个 run 拼成一段，末尾未结束的一段照落");
+        expectTrue(r.blocks.size() == 2 && r.blocks[1].size_pt == 12.0f &&
+                       r.blocks[1].line_factor == 1.6f && r.blocks[1].language == nullptr,
+                   "0.4 / 末尾未结束的一段用默认段落格式");
+    }
+    // 控件跨段落标记：切段只看段落标记，容器边界不是切分点 —— 于是切出两段。
+    {
+        NodeTree tree;
+        const NodeId sec = tree.firstSectionId();
+        tree.setText(tree.appendChild(sec, NodeKind::TextRun), cps({0x61}));
+        const NodeId cc = tree.appendChild(sec, NodeKind::ContentControl);
+        tree.setText(tree.appendChild(cc, NodeKind::TextRun), cps({0x78}));
+        tree.appendChild(cc, NodeKind::ParagraphMark);
+        tree.setText(tree.appendChild(cc, NodeKind::TextRun), cps({0x79}));
+        tree.appendChild(sec, NodeKind::ParagraphMark);
+        const CompileResult r = compileDocument(tree, FlowVisibility::Design);
+        expectTrue(r.blocks.size() == 2 && r.blocks[0].cp_text == cps({0x61, 0x78}) &&
+                       r.blocks[1].cp_text == cps({0x79}),
+                   "0.4 / 控件跨段落标记：按流切出两段（容器边界不切段）");
+        expectTrue(!r.ok() && r.diagnostics.size() == 1 &&
+                       r.diagnostics[0].kind == NodeKind::ContentControl,
+                   "0.4 / 控件跨段落标记：控件本身未编译，记一条诊断");
+    }
+    // 不支持的元素：图片叶子与容器各记一条，容器内部文本仍按流顺序并入当前段。
+    {
+        NodeTree tree;
+        const NodeId sec = tree.firstSectionId();
+        tree.setText(tree.appendChild(sec, NodeKind::TextRun), cps({0x61}));
+        tree.appendChild(sec, NodeKind::Image);
+        const NodeId cc = tree.appendChild(sec, NodeKind::ContentControl);
+        tree.setText(tree.appendChild(cc, NodeKind::TextRun), cps({0x62}));
+        tree.appendChild(sec, NodeKind::ParagraphMark);
+        const CompileResult r = compileDocument(tree, FlowVisibility::Design);
+        expectTrue(r.blocks.size() == 1 && r.blocks[0].cp_text == cps({0x61, 0x62}),
+                   "0.4 / 不支持的元素：容器内部文本仍按流顺序并入当前段");
+        expectTrue(r.diagnostics.size() == 2 && r.diagnostics[0].kind == NodeKind::Image &&
+                       r.diagnostics[1].kind == NodeKind::ContentControl,
+                   "0.4 / 不支持的元素：图片与控件各记一条诊断（不含其内部）");
+        expectTrue(!r.ok(), "0.4 / 不支持的元素：有诊断时 ok() 为假");
+    }
+    // 隐藏：编辑态照常参与，呈现态整棵摘除 —— 与 FlowIndex / ParagraphIndex 同一口径。
+    {
+        NodeTree tree;
+        const NodeId sec = tree.firstSectionId();
+        tree.setText(tree.appendChild(sec, NodeKind::TextRun), cps({0x61}));
+        const NodeId cc = tree.appendChild(sec, NodeKind::ContentControl);
+        tree.setText(tree.appendChild(cc, NodeKind::TextRun), cps({0x78}));
+        tree.find(cc)->hidden = true;
+        tree.appendChild(sec, NodeKind::ParagraphMark);
+        const CompileResult design = compileDocument(tree, FlowVisibility::Design);
+        const CompileResult display = compileDocument(tree, FlowVisibility::Display);
+        expectTrue(design.blocks.size() == 1 && design.blocks[0].cp_text == cps({0x61, 0x78}),
+                   "0.4 / 隐藏：编辑态下隐藏控件的内容照常参与编译");
+        expectTrue(display.blocks.size() == 1 && display.blocks[0].cp_text == cps({0x61}) &&
+                       display.diagnostics.empty(),
+                   "0.4 / 隐藏：呈现态下整棵子树摘除（连诊断都不产生）");
+    }
+}
+
+/**
+ * 0.5：单位换算往返一致。
+ *
+ * 判据分两支，缺一支都不成立：
+ *   正向 —— "数值 → EMU → 数值"的量化误差不超过半个 EMU（在 EMU 网格上的值精确相等）；
+ *   反向 —— "整数倍 EMU → 数值 → EMU"必须原样回来。
+ * 只测正向会漏掉截断与四舍五入的差别（两者都在半个 EMU 内），只测反向会漏掉量化方向。
+ * 另外七个单位还要各自验一支"文档里写死的定值"，免得表抄错。
+ */
+void checkUnitRoundTrip() {
+    const Unit units[] = {Unit::Pt, Unit::HalfPt, Unit::Twip,
+                          Unit::Px, Unit::Mm,     Unit::Cm, Unit::Inch};
+    // 覆盖实际会用到的量级：字号、行距、线宽、页边距、纸张（A4 / Letter）。
+    const double values[] = {0.5,  0.75, 1.0,  2.0,  8.5,
+                             10.0, 11.0, 12.0, 12.5, 21.0,
+                             24.0, 29.7, 56.7};
+    int cases = 0;
+    int over_quantum = 0;
+    int bad_backward = 0;
+    for (Unit u : units) {
+        for (double v : values) {
+            ++cases;
+            const double back = fromEmu(toEmu(v, u), u);
+            if (std::fabs(back - v) * static_cast<double>(emuPerUnit(u)) > 0.5 + 1e-9) {
+                ++over_quantum;
+            }
+        }
+        // 反向：整数倍的 EMU 必须原样回来，正负各走一遍（四舍五入对负数的方向要一致）。
+        for (int k = -3; k <= 2000; k += 7) {
+            const Emu e = static_cast<Emu>(k) * emuPerUnit(u);
+            if (toEmu(fromEmu(e, u), u) != e) ++bad_backward;
+        }
+    }
+    expectTrue(over_quantum == 0, "0.5 / 单位换算：正向 " + std::to_string(cases) +
+                                      " 组取值的量化误差都在半个 EMU 以内（越界 " +
+                                      std::to_string(over_quantum) + "）");
+    expectTrue(bad_backward == 0, "0.5 / 单位换算：反向对整数倍 EMU 全部原样（不一致 " +
+                                      std::to_string(bad_backward) + "）");
+
+    int non_positive = 0;
+    for (Unit u : units) {
+        if (emuPerUnit(u) <= 0) ++non_positive;
+    }
+    expectTrue(non_positive == 0, "0.5 / 单位换算：七个单位的 EMU 因子都是正整数");
+    expectTrue(ptToEmu(12.0) == 152400 && cmToEmu(2.54) == 914400 && mmToEmu(1.0) == 36000 &&
+                   halfPtToEmu(24) == 152400 && halfPtToEmu(21) == ptToEmu(10.5),
+               "0.5 / 单位换算：定值核对（12 磅 = 152400、2.54 厘米 = 914400、"
+               "小四 = 半磅 24 = 152400、五号 = 半磅 21 = 10.5 磅）");
+}
+
+/**
+ * 0.5 的核心判据：长度类型经文本形式往返之后，种类与数值都不丢。
+ *
+ * "不丢"要两头都验：数值相同是基础，种类相同才是这一条真正防的东西 ——
+ * 把五种性质压成一个数的实现，数值可能照样对，种类却塌了。
+ */
+void checkLengthRoundTrip() {
+    const Length cases[] = {
+        Length::automatic(),
+        Length::abs(0),
+        Length::abs(914400),
+        Length::abs(-360000),
+        Length::percent(1, 2),
+        Length::percent(50, 100),
+        Length::percent(-1, 3),
+        Length::percent(0, 7),
+        Length::em(1.6),
+        Length::em(2.0),
+        Length::chars(3.0),
+        Length::chars(0.5),
+    };
+    int bad = 0;
+    int kind_lost = 0;
+    std::string first;
+    for (const Length& len : cases) {
+        Length back;
+        const std::string text = printLength(len);
+        if (!parseLength(text, &back)) {
+            ++bad;
+            if (first.empty()) first = text + " 解析失败";
+            continue;
+        }
+        if (back != len) {
+            ++bad;
+            if (first.empty()) first = text + " → " + printLength(back);
+        }
+        if (back.kind != len.kind) ++kind_lost;
+    }
+    expectTrue(bad == 0, "0.5 / 长度：五种性质的文本形式往返都原样（" +
+                             std::to_string(sizeof(cases) / sizeof(cases[0])) + " 例，不一致 " +
+                             std::to_string(bad) + (first.empty() ? "" : "，首处 " + first) + "）");
+    expectTrue(kind_lost == 0, "0.5 / 长度：往返之后种类不变（没有塌成一个数）");
+}
+
+/**
+ * 0.5：文本形式的形状与约定的定值。约分是约定的一部分 —— 50/100 与 1/2 是同一个长度、
+ * 同一个文本形式，否则相等比较与落盘都不唯一。
+ */
+void checkLengthShape() {
+    expectTrue(Length::percent(50, 100) == Length::percent(1, 2) &&
+                   printLength(Length::percent(50, 100)) == "pct:1/2",
+               "0.5 / 长度：比例按 gcd 约分，文本形式唯一");
+    expectTrue(printLength(Length::abs(914400)) == "abs:914400" &&
+                   printLength(Length::em(1.6)) == "em:8/5" &&
+                   printLength(Length::em(2.0)) == "em:2" &&
+                   printLength(Length::chars(3.0)) == "chars:3" &&
+                   printLength(Length::chars(0.5)) == "chars:1/2" &&
+                   printLength(Length::percent(-1, 3)) == "pct:-1/3" &&
+                   printLength(Length::automatic()) == "auto",
+               "0.5 / 长度：文本形式的定值（分母为 1 时不写斜杠，负号归到分子）");
+    expectTrue(Length::em(2.0) != Length::chars(2.0) && Length::abs(1) != Length::automatic() &&
+                   Length::percent(1, 2) != Length::abs(1),
+               "0.5 / 长度：种类参与相等比较（类型不是注释）");
+    // 分母为 0 不是可表达的比例：返回自动值，而不是拿 0 做除法或猜一个分母。
+    expectTrue(Length::percent(1, 0).kind == LengthKind::Auto,
+               "0.5 / 长度：分母为 0 → 自动值（没有数值可表达）");
+}
+
+/**
+ * 0.5：文本形式必须严格。静默纠正（跳过空白、截断、夹取、把 1.5 读成 1）会把
+ * "文件坏了"变成"读出来一个别的值"，那比报错难查得多。
+ */
+void checkLengthParseRejects() {
+    static const char* kBad[] = {
+        "",      "auto ", "Auto",   "abs:",  "abs:1e3", "abs:1.5", "abs:+1", "abs:1 2",
+        "pct:",  "pct:1/", "pct:/2", "pct:1/0", "pct:1/-2", "pct:1/2/3", "pct:abc",
+        "em:",   "em:1/",  "chars:1/2/3", "pt:1", "1/2", "  auto", "abs:99999999999999999999999",
+    };
+    const int total = static_cast<int>(sizeof(kBad) / sizeof(kBad[0]));
+    int accepted = 0;
+    for (const char* bad : kBad) {
+        Length out;
+        if (parseLength(bad, &out)) ++accepted;
+    }
+    expectTrue(accepted == 0, "0.5 / 长度：畸形输入全部被拒（" + std::to_string(total) +
+                                  " 例，放过 " + std::to_string(accepted) + " 例）");
+    expectTrue(!parseLength("auto", nullptr), "0.5 / 长度：输出参数为空时被拒，不解引用空指针");
+}
+
+/**
+ * 0.5：长度进入编译的那一条路。段落格式里的字号与段后距必须是绝对长度 ——
+ * 相对字号算不出磅值，静默取零会让一整段文字凭空没了字号。
+ */
+void checkCompileRejectsRelativeLength() {
+    NodeTree tree;
+    const NodeId sec = tree.firstSectionId();
+    tree.setText(tree.appendChild(sec, NodeKind::TextRun), cps({0x61}));
+    const NodeId mark = tree.appendChild(sec, NodeKind::ParagraphMark);
+    tree.find(mark)->para.size = Length::em(2.0);
+
+    const CompileResult r = compileDocument(tree, FlowVisibility::Design);
+    expectTrue(!r.ok() && r.diagnostics.size() == 1 &&
+                   r.diagnostics[0].kind == NodeKind::ParagraphMark &&
+                   r.diagnostics[0].node == mark,
+               "0.5 / 编译：非绝对的段落字号被拒，记一条诊断");
+
+    // 同一段的段后距用相对单位，也要各自记一条 —— 两个字段分头检查。
+    tree.find(mark)->para.size = Length::abs(ptToEmu(12.0));
+    tree.find(mark)->para.space_after = Length::percent(50, 100);
+    const CompileResult r2 = compileDocument(tree, FlowVisibility::Design);
+    expectTrue(!r2.ok() && r2.diagnostics.size() == 1,
+               "0.5 / 编译：非绝对的段后距被拒，且只报这一条");
+}
+
 }  // namespace
 
 int main() {
-    std::printf("=== 文档模型 0.1 / 0.2：位置换算与段落分段 ===\n");
+    std::printf("=== 文档模型 0.1 ~ 0.5：位置、分段、不变量、编译、长度 ===\n");
 
     // 两种可见性口径各过一遍：位置空间不同，但"往返互逆"必须各自成立。
     const FlowVisibility kBoth[2] = {FlowVisibility::Design, FlowVisibility::Display};
@@ -802,12 +1147,12 @@ int main() {
     checkParaBoundaries();
     for (int v = 0; v < 2; ++v) {
         const std::string pre = std::string(kVisName[v]) + " / ";
-        checkParaIndex(makeSingleParagraph(), kBoth[v], pre + "单段三码点");
-        checkParaIndex(makeTwoRuns(), kBoth[v], pre + "相邻两个 run");
-        checkParaIndex(makeEmptyControl(), kBoth[v], pre + "删空的控件");
-        checkParaIndex(makeControlAcrossMark(), kBoth[v], pre + "控件跨段落标记");
-        checkParaIndex(makeNestedControls(), kBoth[v], pre + "嵌套控件");
-        checkParaIndex(makeTable(), kBoth[v], pre + "表格");
+        checkParagraphIndex(makeSingleParagraph(), kBoth[v], pre + "单段三码点");
+        checkParagraphIndex(makeTwoRuns(), kBoth[v], pre + "相邻两个 run");
+        checkParagraphIndex(makeEmptyControl(), kBoth[v], pre + "删空的控件");
+        checkParagraphIndex(makeControlAcrossMark(), kBoth[v], pre + "控件跨段落标记");
+        checkParagraphIndex(makeNestedControls(), kBoth[v], pre + "嵌套控件");
+        checkParagraphIndex(makeTable(), kBoth[v], pre + "表格");
     }
     checkParaHidden();
     for (int v = 0; v < 2; ++v) {
@@ -840,6 +1185,18 @@ int main() {
         tree.find(cc)->hidden = true;
         expectClean(tree, "0.3 / 隐藏子树");
     }
+
+    std::printf("  --- 0.4：编译到引擎输入 ---\n");
+    checkCompileShapes();
+    checkCompileMatchesBlocks(sampleDocument(0, 1, 2), "0.4 / 演示文书 sampleDocument");
+    checkCompileMatchesBlocks({mixedParagraphBlock(0, 1)}, "0.4 / 中英文混排段");
+
+    std::printf("  --- 0.5：长度类型与 EMU 定点表示 ---\n");
+    checkUnitRoundTrip();
+    checkLengthRoundTrip();
+    checkLengthShape();
+    checkLengthParseRejects();
+    checkCompileRejectsRelativeLength();
 
     std::printf("\n共 %d 项断言，失败 %d 项\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

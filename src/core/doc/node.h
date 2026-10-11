@@ -18,6 +18,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "core/doc/para_format.h"
+
 namespace heditor {
 
 /**
@@ -86,6 +88,13 @@ bool isText(NodeKind kind);
 bool isParagraphMark(NodeKind kind);
 
 /**
+ * 种类名，与枚举逐项对应。用于诊断与报告文本（拿数字去对照枚举太费事），
+ * 也让"新加一个结构种类"这件事集中在一处 —— switch 不写 default，
+ * 少写一种时 -Wswitch 会报出来。
+ */
+const char* nodeKindName(NodeKind kind);
+
+/**
  * 节点。字段公开：它是纯数据，封装留在树那一层（见 NodeTree）。
  * 给每个字段配一对访问器只会让"谁改了 parent"更难查。
  */
@@ -102,6 +111,13 @@ struct Node {
      * 整棵子树从流里摘除，位置空间随之变化，所以 FlowIndex 必须带可见性口径。
      */
     bool hidden = false;
+
+    /**
+     * 段落格式：只对 ParagraphMark 有意义（第三节：段落属性挂在结束标记上）。
+     * 放在节点上而不是另建一张表，理由同 hidden —— 编译要按流顺序取它，
+     * 而流顺序就是树的顺序。其余种类读它没有定义。
+     */
+    ParaFormat para;
 };
 
 /**

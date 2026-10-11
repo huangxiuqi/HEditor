@@ -34,6 +34,30 @@ bool isText(NodeKind kind) { return kind == NodeKind::TextRun; }
 
 bool isParagraphMark(NodeKind kind) { return kind == NodeKind::ParagraphMark; }
 
+const char* nodeKindName(NodeKind kind) {
+    switch (kind) {
+        case NodeKind::Document: return "Document";
+        case NodeKind::Section: return "Section";
+        case NodeKind::Table: return "Table";
+        case NodeKind::TableRow: return "TableRow";
+        case NodeKind::TableCell: return "TableCell";
+        case NodeKind::ContentControl: return "ContentControl";
+        case NodeKind::Quote: return "Quote";
+        case NodeKind::CodeBlock: return "CodeBlock";
+        case NodeKind::ListItem: return "ListItem";
+        case NodeKind::Link: return "Link";
+        case NodeKind::Image: return "Image";
+        case NodeKind::Formula: return "Formula";
+        case NodeKind::Break: return "Break";
+        case NodeKind::PageBreak: return "PageBreak";
+        case NodeKind::Tab: return "Tab";
+        case NodeKind::Field: return "Field";
+        case NodeKind::TextRun: return "TextRun";
+        case NodeKind::ParagraphMark: return "ParagraphMark";
+    }
+    return "（未知）";
+}
+
 NodeTree::NodeTree() {
     auto doc = std::make_unique<Node>();
     doc->id = allocateId();

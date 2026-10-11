@@ -226,6 +226,8 @@ add_library(heditor_core STATIC
   src/core/doc/flow.cpp
   src/core/doc/para.cpp
   src/core/doc/invariants.cpp
+  src/core/doc/compile.cpp
+  src/core/doc/length.cpp
   src/core/text/font.cpp
   src/core/text/shaper.cpp
   src/core/text/fallback.cpp
@@ -340,10 +342,12 @@ else()
     heditor_track_header_deps(heditor_edit_tests ${HEDITOR_ROOT}/src/core ${HEDITOR_ROOT}/tests)
     add_test(NAME edit_and_caret COMMAND heditor_edit_tests)
 
-    # 文档模型：节点、Pos 与流位置的双向换算（阶段 0 的 0.1）。
-    # 不链 heditor_demo：它只吃自己构造的树，与演示文书无关。
+    # 文档模型：节点、Pos 与流位置的双向换算（0.1）、段落分段（0.2）、
+    # 不变量检查器（0.3）、编译到引擎输入（0.4）。
+    # 链 heditor_demo：0.4 的判据是"编译结果与现有 BlockSpec 路径逐字段一致"，
+    # 参照物就是演示文书那条路径（sampleDocument），不能自造一份对照。
     add_executable(heditor_model_tests tests/model_test.cpp)
-    target_link_libraries(heditor_model_tests PRIVATE heditor_core)
+    target_link_libraries(heditor_model_tests PRIVATE heditor_core heditor_demo)
     heditor_target_flags(heditor_model_tests)
     heditor_track_header_deps(heditor_model_tests ${HEDITOR_ROOT}/src/core ${HEDITOR_ROOT}/tests)
     add_test(NAME doc_model COMMAND heditor_model_tests)

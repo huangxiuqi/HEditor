@@ -35,14 +35,17 @@ using ParaNo = int;
 /**
  * 段落索引。构造时一次遍历建表，之后可以整体重建，也可以按增删增量维护。
  *
+ * 名字用 Paragraph 全称而不是 Para 简写：layout.h 里已有一个 ParaIndex（一段的排版结果），
+ * 而编译这一层（compile.h）会把两者拉进同一个翻译单元，同名会撞成类型重定义。
+ *
  * 增量维护的时机：先在树上做完增删，再带着被增删节点的 id 通知这里。要求传 id 而不是
  * 只传下标，是因为本类要判一件从下标看不出来的事 —— 那个节点在呈现态下是否被隐藏
  * （隐藏的节点不在流里，数组不受影响）。插入时还要靠它判种类（是不是标记）；
  * 删除时不用：那个下标是不是标记由数组本身回答，调用方报错种类也删不错。
  */
-class ParaIndex {
+class ParagraphIndex {
 public:
-    explicit ParaIndex(const NodeTree& tree, FlowVisibility vis);
+    explicit ParagraphIndex(const NodeTree& tree, FlowVisibility vis);
 
     /**
      * 该容器的标记下标数组（升序）。容器不在流里（被隐藏的子树，或根本不是容器）时

@@ -29,33 +29,6 @@ void add(InvariantReport* r, const char* rule, NodeId node, int at, std::string 
 }
 
 /**
- * 种类名，只用于违规信息 —— 报告要能直接读懂，拿数字去对照枚举太费事。
- */
-const char* kindName(NodeKind kind) {
-    switch (kind) {
-        case NodeKind::Document: return "Document";
-        case NodeKind::Section: return "Section";
-        case NodeKind::Table: return "Table";
-        case NodeKind::TableRow: return "TableRow";
-        case NodeKind::TableCell: return "TableCell";
-        case NodeKind::ContentControl: return "ContentControl";
-        case NodeKind::Quote: return "Quote";
-        case NodeKind::CodeBlock: return "CodeBlock";
-        case NodeKind::ListItem: return "ListItem";
-        case NodeKind::Link: return "Link";
-        case NodeKind::Image: return "Image";
-        case NodeKind::Formula: return "Formula";
-        case NodeKind::Break: return "Break";
-        case NodeKind::PageBreak: return "PageBreak";
-        case NodeKind::Tab: return "Tab";
-        case NodeKind::Field: return "Field";
-        case NodeKind::TextRun: return "TextRun";
-        case NodeKind::ParagraphMark: return "ParagraphMark";
-    }
-    return "（未知）";
-}
-
-/**
  * 谁允许装谁。只登记第三节已经定下的三条强约束，其余容器不限制子节点
  * （第三节：子节点约束是一个位标志的并集，尚未逐种登记）。
  */
@@ -122,7 +95,7 @@ InvariantReport checkInvariants(const NodeTree& tree) {
     InvariantReport r;
     FlowIndex design(tree, FlowVisibility::Design);
     FlowIndex display(tree, FlowVisibility::Display);
-    ParaIndex para(tree, FlowVisibility::Design);
+    ParagraphIndex para(tree, FlowVisibility::Design);
 
     std::vector<NodeId> order;
     std::unordered_set<NodeId> reached;
@@ -151,7 +124,7 @@ InvariantReport checkInvariants(const NodeTree& tree) {
             const NodeKind ck = root->children[i]->kind;
             if (ck != NodeKind::Section) {
                 add(&r, kRootAndSections, root->children[i]->id, static_cast<int>(i),
-                    std::string("根的孩子里有非节元素：") + kindName(ck));
+                    std::string("根的孩子里有非节元素：") + nodeKindName(ck));
             }
         }
     }
@@ -162,14 +135,15 @@ InvariantReport checkInvariants(const NodeTree& tree) {
         const Node* n = tree.find(id);
         if (!isContainer(n->kind) && !n->children.empty()) {
             add(&r, kChildKinds, id, -1,
-                std::string("非容器有孩子（自身是 ") + kindName(n->kind) + "）");
+                std::string("非容器有孩子（自身是 ") + nodeKindName(n->kind) + "）");
             continue;
         }
         for (size_t i = 0; i < n->children.size(); ++i) {
             const NodeKind ck = n->children[i]->kind;
             if (!acceptsChild(n->kind, ck)) {
                 add(&r, kChildKinds, n->children[i]->id, static_cast<int>(i),
-                    std::string(kindName(n->kind)) + " 不接受 " + kindName(ck) + " 作为子节点");
+                    std::string(nodeKindName(n->kind)) + " 不接受 " + nodeKindName(ck) +
+                        " 作为子节点");
             }
         }
     }

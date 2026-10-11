@@ -4,16 +4,16 @@
 
 namespace heditor {
 
-ParaIndex::ParaIndex(const NodeTree& tree, FlowVisibility vis) { rebuild(tree, vis); }
+ParagraphIndex::ParagraphIndex(const NodeTree& tree, FlowVisibility vis) { rebuild(tree, vis); }
 
-void ParaIndex::rebuild(const NodeTree& tree, FlowVisibility vis) {
+void ParagraphIndex::rebuild(const NodeTree& tree, FlowVisibility vis) {
     tree_ = &tree;
     vis_ = vis;
     marks_.clear();
     scan(tree.rootId());
 }
 
-void ParaIndex::scan(NodeId id) {
+void ParagraphIndex::scan(NodeId id) {
     const Node* n = tree_->find(id);
     if (n == nullptr || !isContainer(n->kind)) return;
     // 呈现态下隐藏的子树整棵不在流里，连它的标记数组都不建 —— 与 FlowIndex 同一条规则。
@@ -29,17 +29,17 @@ void ParaIndex::scan(NodeId id) {
     marks_.emplace(n->id, std::move(marks));
 }
 
-const std::vector<int>* ParaIndex::marksOf(NodeId container) const {
+const std::vector<int>* ParagraphIndex::marksOf(NodeId container) const {
     const auto it = marks_.find(container);
     return it == marks_.end() ? nullptr : &it->second;
 }
 
-int ParaIndex::markCount(NodeId container) const {
+int ParagraphIndex::markCount(NodeId container) const {
     const std::vector<int>* m = marksOf(container);
     return m == nullptr ? -1 : static_cast<int>(m->size());
 }
 
-int ParaIndex::paragraphCount(NodeId container) const {
+int ParagraphIndex::paragraphCount(NodeId container) const {
     const std::vector<int>* m = marksOf(container);
     if (m == nullptr) return -1;
     const int n = static_cast<int>(tree_->find(container)->children.size());
@@ -49,7 +49,7 @@ int ParaIndex::paragraphCount(NodeId container) const {
     return static_cast<int>(m->size()) + (trailing ? 1 : 0);
 }
 
-ParaNo ParaIndex::paragraphNoIn(NodeId container, int at) const {
+ParaNo ParagraphIndex::paragraphNoIn(NodeId container, int at) const {
     const std::vector<int>* m = marksOf(container);
     if (m == nullptr) return 0;
     if (at < 0 || at > static_cast<int>(tree_->find(container)->children.size())) return 0;
@@ -57,7 +57,7 @@ ParaNo ParaIndex::paragraphNoIn(NodeId container, int at) const {
     return static_cast<ParaNo>(it - m->begin()) + 1;
 }
 
-bool ParaIndex::paragraphRange(NodeId container, ParaNo no, int* begin, int* end) const {
+bool ParagraphIndex::paragraphRange(NodeId container, ParaNo no, int* begin, int* end) const {
     const std::vector<int>* m = marksOf(container);
     if (m == nullptr || no < 1) return false;
     const int n = static_cast<int>(tree_->find(container)->children.size());
@@ -73,7 +73,7 @@ bool ParaIndex::paragraphRange(NodeId container, ParaNo no, int* begin, int* end
     return true;
 }
 
-NodeId ParaIndex::markOfParagraph(NodeId container, ParaNo no, bool* ok) const {
+NodeId ParagraphIndex::markOfParagraph(NodeId container, ParaNo no, bool* ok) const {
     const std::vector<int>* m = marksOf(container);
     if (m == nullptr || no < 1 || no > static_cast<int>(m->size())) {
         if (ok != nullptr) *ok = false;
@@ -84,7 +84,7 @@ NodeId ParaIndex::markOfParagraph(NodeId container, ParaNo no, bool* ok) const {
     return tree_->find(container)->children[static_cast<size_t>(child)]->id;
 }
 
-std::vector<NodeId> ParaIndex::containers() const {
+std::vector<NodeId> ParagraphIndex::containers() const {
     std::vector<NodeId> out;
     out.reserve(marks_.size());
     for (const auto& kv : marks_) out.push_back(kv.first);
@@ -92,7 +92,7 @@ std::vector<NodeId> ParaIndex::containers() const {
     return out;
 }
 
-bool ParaIndex::onInsert(NodeId container, int at, NodeId inserted) {
+bool ParagraphIndex::onInsert(NodeId container, int at, NodeId inserted) {
     const auto it = marks_.find(container);
     if (it == marks_.end() || at < 0) return false;
     const Node* c = tree_->find(inserted);
@@ -112,7 +112,7 @@ bool ParaIndex::onInsert(NodeId container, int at, NodeId inserted) {
     return true;
 }
 
-bool ParaIndex::onErase(NodeId container, int at, NodeId erased) {
+bool ParagraphIndex::onErase(NodeId container, int at, NodeId erased) {
     const auto it = marks_.find(container);
     if (it == marks_.end() || at < 0) return false;
     const Node* c = tree_->find(erased);
@@ -131,7 +131,7 @@ bool ParaIndex::onErase(NodeId container, int at, NodeId erased) {
     return true;
 }
 
-void ParaIndex::drop(NodeId id) {
+void ParagraphIndex::drop(NodeId id) {
     const Node* n = tree_->find(id);
     if (n == nullptr || !isContainer(n->kind)) return;
     marks_.erase(id);
