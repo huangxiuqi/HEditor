@@ -248,6 +248,20 @@ EditCheck canEditStep(const NodeTree& tree, EditMode mode, const Step& step) {
         }
         return EditCheck{true, ""};
     }
+    // 改跨度是结构操作：它改的是表格的形状，不是某个格子里的内容。它的开关按第九节的说法
+    // 挂在被操作的元素上（表格 / 行 / 单元格），而那个开关要等表格自己成为控件才有地方挂，
+    // 所以现在按"默认锁住"处理：表单模式拒绝，与控件结构的默认一致。
+    if (const auto* s = std::get_if<SetTableCellSpan>(&step)) {
+        const Node* n = tree.find(s->id);
+        if (n == nullptr || n->kind != NodeKind::TableCell) {
+            return EditCheck{false, "改跨度：目标不是单元格"};
+        }
+        if (mode == EditMode::ReadOnly) return EditCheck{false, "只读模式：不接受结构操作"};
+        if (mode == EditMode::Form) {
+            return EditCheck{false, "表单模式：表格结构操作要在文档模式里做（开关默认锁住）"};
+        }
+        return EditCheck{true, ""};
+    }
     return EditCheck{false, "未知步骤"};
 }
 

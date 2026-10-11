@@ -24,6 +24,8 @@ NodeSpec captureSubtree(const NodeTree& tree, NodeId id) {
     spec.styleRef = n->styleRef;
     spec.marks = n->marks;
     spec.control = n->control;
+    spec.cell = n->cell;
+    spec.table = n->table;
     spec.children.reserve(n->children.size());
     for (const Node* c : n->children) spec.children.push_back(captureSubtree(tree, c->id));
     return spec;
@@ -40,6 +42,8 @@ NodeId materializeSubtree(NodeTree& tree, NodeId parent, int at, const NodeSpec&
     n->styleRef = spec.styleRef;
     n->marks = spec.marks;
     n->control = spec.control;
+    n->cell = spec.cell;
+    n->table = spec.table;
     if (isText(spec.kind)) tree.setText(id, spec.text);
 
     for (const NodeSpec& c : spec.children) {

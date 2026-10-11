@@ -26,6 +26,7 @@
 #include "core/doc/para_format.h"
 #include "core/doc/range.h"
 #include "core/doc/subtree.h"
+#include "core/doc/table_spec.h"
 
 namespace heditor {
 
@@ -150,8 +151,21 @@ struct SetControlValue {
     ControlValue before;
 };
 
-using Step = std::variant<InsertText, InsertFragment, DeleteRange, InsertParaMark, RemoveParaMark,
-                          InsertNode, RemoveNode, SetControlProp, SetControlValue>;
+/**
+ * 改一个单元格的跨度（第九节）。表格的行列操作落到步骤上就是"几个格子的跨度变了 + 插了几个
+ * 新格子"—— 跨度是唯一真相，网格是派生的，所以没有"插一列"这种步骤，只有跨度的改动。
+ *
+ * 位置映射是恒等：跨度不改流位置，也不改流结构。
+ */
+struct SetTableCellSpan {
+    NodeId id = kInvalidNodeId;
+    CellSpan span;
+    CellSpan before;
+};
+
+using Step =
+    std::variant<InsertText, InsertFragment, DeleteRange, InsertParaMark, RemoveParaMark,
+                 InsertNode, RemoveNode, SetControlProp, SetControlValue, SetTableCellSpan>;
 
 /**
  * 步骤的执行结果。失败时给出原因 —— 位置越界、类型不符都要显式说出来，不静默不做。
@@ -188,6 +202,15 @@ struct ParaMarkBuild {
 };
 
 ParaMarkBuild makeRemoveParaMark(const NodeTree& tree, FlowPos at);
+
+/**
+ * 把一条步骤按前面几步的映射推过去，再收进批次。
+ *
+ * 批次的约定是"一次把所有步骤建出来"，而每步的坐标属于它自己开始的那一刻 —— 前面某一步
+ * 改了文档长度，后面几步记的绝对流位置与流位置就过期了（步骤层会判"步骤过期了"）。
+ * 方向键走一步不会有这个问题，批量设值与表格行列操作都会。
+ */
+void pushMappedStep(std::vector<Step>* out, Step step);
 
 /**
  * 节点级步骤的构造结果。

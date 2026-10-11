@@ -21,6 +21,7 @@
 #include "core/doc/control_spec.h"
 #include "core/doc/node.h"
 #include "core/doc/para_format.h"
+#include "core/doc/table_spec.h"
 
 namespace heditor {
 
@@ -35,6 +36,8 @@ struct NodeSpec {
     std::string styleRef;        // 仅段落标记与文本节点
     CharFormat marks;            // 仅文本节点
     ControlSpec control;         // 仅内容控件
+    CellSpan cell;               // 仅单元格
+    TableSpec table;             // 仅表格
     std::vector<NodeSpec> children;
 
     /**

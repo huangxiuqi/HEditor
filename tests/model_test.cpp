@@ -1,5 +1,5 @@
 /**
- * 文档模型 0.1 ~ 1.6 的判据。这一层靠"看起来对"验收不了（位置错一格，表象是光标跳、命中偏、
+ * 文档模型 0.1 ~ 1.7 的判据。这一层靠"看起来对"验收不了（位置错一格，表象是光标跳、命中偏、
  * 撤销回错地方，全都要到界面才看得见），所以判据只落在数据层，每条都可证伪：
  *   0.1 流位置不丢（flowAt(posAt(f)) == f）与往返不改归属（同一流位置有多种 Pos 写法，不要求逐字段相等）。
  *   0.2 下标数组与全部段落查询跟暴力算法逐项比对，随机增删中每步与重建结果整体比对。
@@ -12,10 +12,11 @@
  *   1.4 落点判定：四个边界位置互不相同且 posAt 单射；可编辑集合取交集；方向键不跳出集合；
  *       Tab 只落可编辑控件、无下一个时放行；越界编辑被拒且给原因；结构操作默认被拒。
  *   1.5 控件与宿主 API：索引与重建逐项相同、批量设值一个撤销步骤、撤销后逐字段回到原样；
- *       属性侧的值与文本类共用一条 API 但落点不同；外观逐项读回且类型不丢；异步裁决门在
- *       等待期间不动文档与撤销栈、Allow 才应用、Deny 与超时保持原值并标 invalid。
+ *       属性侧的值与文本类共用一条 API；异步裁决门在等待期间不动文档与撤销栈、Allow 才应用。
  *   1.6 样式：三层解析与手算逐字段一致；成环与未知样式名被诊断且不把整篇拖死；缓存按元素加
- *       样式表版本命中，改版整体失效、单元素可单独失效；样式引用随子树与片段一起走。
+ *       样式表版本命中，改版整体失效；样式引用随子树与片段一起走。
+ *   1.7 表格：派生网格与手算一致、cell(r,c) 落在合并区域返回原点格；行列操作之后网格仍然成立
+ *       且撤销一次全部回来；有列定义时数据行不许合并、表头行不受限。
  * 覆盖四层：写死的形状、穷举、随机、增删序列；前两层在两种可见性口径下各过一遍。
  */
 #include <algorithm>
@@ -39,6 +40,7 @@
 #include "core/doc/range.h"
 #include "core/doc/steps.h"
 #include "core/doc/style.h"
+#include "core/doc/table.h"
 #include "core/doc/transaction.h"
 #include "core/doc/validation.h"
 #include "core/utils/units.h"
@@ -697,6 +699,7 @@ void checkInvariantRuleSet() {
         "容器.边界成对有序不交叉",   "容器.切段无缝隙",
         "身份.节点 ID 唯一且索引自洽",
         "身份.节点种类在声明范围内",
+        "表格.跨度之和相等、无重叠、无空洞、有列定义则数据行不许合并",
     };
     int missing = 0;
     for (const char* w : kWant) {
@@ -1222,6 +1225,7 @@ void snapshotInto(const NodeTree& tree, NodeId id, std::vector<std::string>* out
     s += "|m=" + marksKey(n->marks);
     s += "|p=" + paraKey(n->para);
     s += "|s=" + n->styleRef;
+    s += "|cs=" + std::to_string(n->cell.row_span) + "x" + std::to_string(n->cell.col_span);
     s += "|h=" + std::to_string(n->hidden ? 1 : 0);
     s += "|kids=" + std::to_string(n->children.size());
     out->push_back(std::move(s));
@@ -1268,6 +1272,7 @@ void snapshotIdsInto(const NodeTree& tree, NodeId id, std::vector<std::string>* 
     s += "|m=" + marksKey(n->marks);
     s += "|p=" + paraKey(n->para);
     s += "|s=" + n->styleRef;
+    s += "|cs=" + std::to_string(n->cell.row_span) + "x" + std::to_string(n->cell.col_span);
     s += "|c=" + n->control.key + "," + n->control.controlType + "," +
          (n->control.readonly ? "ro" : "-") + "," + (n->control.structureLock ? "lock" : "open");
     s += "|h=" + std::string(n->hidden ? "1" : "0");
@@ -3562,6 +3567,491 @@ void checkStyleRefTravels() {
                "1.6 / 撤销：撤销之后逐字段回到原样（含段落样式与内联覆盖）");
 }
 
+/**
+ * 往一行里加一个格子。cp 为 0 表示格子留空。
+ */
+NodeId addCell(NodeTree& tree, NodeId row, int row_span, int col_span, uint32_t cp) {
+    const NodeId cell = tree.appendChild(row, NodeKind::TableCell);
+    tree.find(cell)->cell.row_span = row_span;
+    tree.find(cell)->cell.col_span = col_span;
+    if (cp != 0) tree.setText(tree.appendChild(cell, NodeKind::TextRun), cps({cp}));
+    return cell;
+}
+
+/**
+ * 三列两行的普通表格：每个格子都是 1x1。
+ */
+NodeTree makePlainTable(int rows, int cols) {
+    NodeTree tree;
+    const NodeId table = tree.appendChild(tree.firstSectionId(), NodeKind::Table);
+    for (int r = 0; r < rows; ++r) {
+        const NodeId row = tree.appendChild(table, NodeKind::TableRow);
+        for (int c = 0; c < cols; ++c) {
+            addCell(tree, row, 1, 1, static_cast<uint32_t>(0x41 + r * cols + c));
+        }
+    }
+    return tree;
+}
+
+NodeId tableOf(const NodeTree& tree) { return tree.find(tree.firstSectionId())->children[0]->id; }
+
+/**
+ * 1.7：派生网格。判据是"推导结果与手算一致"，以及 cell(r,c) 落在合并区域时返回原点格。
+ */
+void checkTableGrid() {
+    // 普通表格：每个格位指向自己。
+    {
+        NodeTree tree = makePlainTable(3, 3);
+        TableGrid grid;
+        std::string why;
+        expectTrue(buildGrid(tree, tableOf(tree), &grid, &why),
+                   "1.7 / 网格：3x3 普通表推得出来" + (why.empty() ? "" : "（" + why + "）"));
+        expectTrue(grid.rows == 3 && grid.cols == 3 && grid.slots.size() == 9,
+                   "1.7 / 网格：尺寸是 3x3");
+        int own = 0;
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c) {
+                const GridCell* g = grid.at(r, c);
+                if (g != nullptr && g->row == r && g->col == c) ++own;
+            }
+        }
+        expectTrue(own == 9, "1.7 / 网格：没有合并时九个格位各自是原点");
+    }
+    // 横向合并：格位落在合并区域内时返回原点格。
+    {
+        NodeTree tree;
+        const NodeId table = tree.appendChild(tree.firstSectionId(), NodeKind::Table);
+        const NodeId r0 = tree.appendChild(table, NodeKind::TableRow);
+        const NodeId a = addCell(tree, r0, 1, 2, 0x41);
+        addCell(tree, r0, 1, 1, 0x42);
+        const NodeId r1 = tree.appendChild(table, NodeKind::TableRow);
+        addCell(tree, r1, 1, 1, 0x43);
+        addCell(tree, r1, 1, 1, 0x44);
+        addCell(tree, r1, 1, 1, 0x45);
+
+        TableGrid grid;
+        std::string why;
+        expectTrue(buildGrid(tree, table, &grid, &why), "1.7 / 网格：横向合并推得出来");
+        expectTrue(grid.rows == 2 && grid.cols == 3, "1.7 / 网格：列数由第一行定（3）");
+        expectTrue(grid.at(0, 0) != nullptr && grid.at(0, 0)->id == a && grid.at(0, 1) != nullptr &&
+                       grid.at(0, 1)->id == a,
+                   "1.7 / 网格：被合并掉的格位指向原点格");
+        expectTrue(grid.at(0, 1)->row == 0 && grid.at(0, 1)->col == 0,
+                   "1.7 / 网格：返回的是原点坐标，不是当前格位坐标");
+        expectTrue(grid.sameOrigin(0, 0, 0, 1) && !grid.sameOrigin(0, 1, 0, 2),
+                   "1.7 / 网格：sameOrigin 回答“这条网格线有没有被合并跨过”");
+    }
+    // 纵向合并：被覆盖的行自己的格子更少，这并不违反"每行被覆盖的格位数等于列数"。
+    {
+        NodeTree tree;
+        const NodeId table = tree.appendChild(tree.firstSectionId(), NodeKind::Table);
+        const NodeId r0 = tree.appendChild(table, NodeKind::TableRow);
+        const NodeId a = addCell(tree, r0, 2, 1, 0x41);
+        addCell(tree, r0, 1, 1, 0x42);
+        addCell(tree, r0, 1, 1, 0x43);
+        const NodeId r1 = tree.appendChild(table, NodeKind::TableRow);
+        addCell(tree, r1, 1, 1, 0x44);
+        addCell(tree, r1, 1, 1, 0x45);
+
+        TableGrid grid;
+        std::string why;
+        expectTrue(buildGrid(tree, table, &grid, &why),
+                   "1.7 / 网格：纵向合并推得出来（第二行只有两个自己的格子）" +
+                       (why.empty() ? "" : "（" + why + "）"));
+        expectTrue(
+            grid.rows == 2 && grid.cols == 3 && grid.at(1, 0) != nullptr && grid.at(1, 0)->id == a,
+            "1.7 / 网格：第二行第 0 格由上面跨下来的那个格子覆盖");
+        expectTrue(grid.at(1, 0)->row == 0 && grid.at(1, 1)->id != a,
+                   "1.7 / 网格：跨下来的格位原点在第一行，第 1 格是它自己的格子");
+    }
+    // 跨行跨列一起：原点格覆盖 2x2，两个方向都要算对。
+    {
+        NodeTree tree;
+        const NodeId table = tree.appendChild(tree.firstSectionId(), NodeKind::Table);
+        const NodeId r0 = tree.appendChild(table, NodeKind::TableRow);
+        const NodeId a = addCell(tree, r0, 2, 2, 0x41);
+        addCell(tree, r0, 1, 1, 0x42);
+        const NodeId r1 = tree.appendChild(table, NodeKind::TableRow);
+        addCell(tree, r1, 1, 1, 0x43);
+
+        TableGrid grid;
+        std::string why;
+        expectTrue(buildGrid(tree, table, &grid, &why), "1.7 / 网格：2x2 合并推得出来");
+        expectTrue(grid.cols == 3 && grid.at(1, 1) != nullptr && grid.at(1, 1)->id == a &&
+                       grid.at(0, 1)->id == a,
+                   "1.7 / 网格：2x2 合并的四个格位都指向原点格");
+        expectTrue(grid.at(1, 2) != nullptr && grid.at(1, 2)->id != a,
+                   "1.7 / 网格：合并之外的格位不受影响");
+    }
+    // 拒绝：这一行没有被完整覆盖（少一个格子）。
+    {
+        NodeTree tree = makePlainTable(1, 3);
+        const NodeId table = tableOf(tree);
+        const NodeId r1 = tree.appendChild(table, NodeKind::TableRow);
+        addCell(tree, r1, 1, 1, 0x58);
+        addCell(tree, r1, 1, 1, 0x59);
+        TableGrid grid;
+        std::string why;
+        expectTrue(
+            !buildGrid(tree, table, &grid, &why) && why.find("没有被完整覆盖") != std::string::npos,
+            "1.7 / 网格拒绝：第二行只有两格（" + why + "）");
+    }
+    // 拒绝：纵向合并跨过表格末尾。
+    {
+        NodeTree tree;
+        const NodeId table = tree.appendChild(tree.firstSectionId(), NodeKind::Table);
+        const NodeId r0 = tree.appendChild(table, NodeKind::TableRow);
+        addCell(tree, r0, 3, 1, 0x41);
+        TableGrid grid;
+        std::string why;
+        expectTrue(!buildGrid(tree, table, &grid, &why) && why.find("末尾") != std::string::npos,
+                   "1.7 / 网格拒绝：跨过表格末尾（" + why + "）");
+    }
+    // 拒绝：跨度小于 1。这一条数据结构上可达（谁都能写个 0 进去），必须拦住。
+    {
+        NodeTree tree = makePlainTable(1, 2);
+        const NodeId table = tableOf(tree);
+        tree.find(table)->children[0]->children[1]->cell.col_span = 0;
+        TableGrid grid;
+        std::string why;
+        expectTrue(
+            !buildGrid(tree, table, &grid, &why) && why.find("至少是 1") != std::string::npos,
+            "1.7 / 网格拒绝：跨度小于 1（" + why + "）");
+    }
+}
+
+/**
+ * 表格那条不变量的规则名。与 invariants.cpp 里登记的完全一致 —— reported 是精确比较，
+ * 写成前缀会被当成"没报出来"。
+ */
+constexpr char kTableRule[] = "表格.跨度之和相等、无重叠、无空洞、有列定义则数据行不许合并";
+
+/**
+ * 一批步骤提交进撤销栈，返回提交是否成功。
+ */
+bool commitBatch(UndoStack& undo, const StepBatch& batch) {
+    Transaction tx;
+    tx.steps = batch.steps;
+    tx.label = "表格行列操作";
+    return undo.commit(std::move(tx)).ok;
+}
+
+/**
+ * 1.7：行列操作。每条都断言"操作之后网格仍然成立"，并在撤销之后回到原样 ——
+ * 一批步骤是一个事务，所以撤销一次全部回来。
+ */
+void checkTableOps() {
+    // 插入一行。
+    {
+        NodeTree tree = makePlainTable(2, 3);
+        UndoStack undo(tree);
+        const NodeId table = tableOf(tree);
+        const std::vector<std::string> before = shapeSnapshot(tree);
+
+        NodeSpec c0;
+        c0.kind = NodeKind::TableCell;
+        NodeSpec c1 = c0;
+        NodeSpec c2 = c0;
+        const StepBatch add = makeInsertTableRow(tree, table, 1, {c0, c1, c2});
+        expectTrue(add.ok, "1.7 / 插行：构造成功" + (add.ok ? "" : "（" + add.error + "）"));
+        expectTrue(commitBatch(undo, add), "1.7 / 插行：提交成功");
+
+        TableGrid grid;
+        std::string why;
+        expectTrue(buildGrid(tree, table, &grid, &why) && grid.rows == 3 && grid.cols == 3,
+                   "1.7 / 插行：网格变成 3x3" + (why.empty() ? "" : "（" + why + "）"));
+        expectClean(tree, "1.7 / 插行：不变量全绿");
+        undo.undo(nullptr);
+        expectTrue(shapeSnapshot(tree) == before, "1.7 / 插行：撤销一次全部回来（含身份）");
+    }
+    // 插入行：格子跨度之和必须等于列数；新行里不许有跨行的格子。
+    {
+        NodeTree tree = makePlainTable(2, 3);
+        const NodeId table = tableOf(tree);
+        NodeSpec wide;
+        wide.kind = NodeKind::TableCell;
+        wide.cell.col_span = 2;
+        const NodeSpec wide2 = wide;
+        const StepBatch few = makeInsertTableRow(tree, table, 0, {wide, wide2});
+        expectTrue(!few.ok && few.error.find("不等") != std::string::npos,
+                   "1.7 / 插行拒绝：格子跨度之和与列数不等（" + few.error + "）");
+
+        NodeSpec narrow;
+        narrow.kind = NodeKind::TableCell;
+        NodeSpec tall = narrow;
+        tall.cell.row_span = 2;
+        const NodeSpec narrow2 = narrow;
+        const NodeSpec narrow3 = narrow;
+        const StepBatch cross = makeInsertTableRow(tree, table, 0, {tall, narrow2, narrow3});
+        expectTrue(!cross.ok && cross.error.find("跨行") != std::string::npos,
+                   "1.7 / 插行拒绝：新行里有纵向合并（" + cross.error + "）");
+    }
+    // 删除一行：从上面跨进来的纵向合并会先缩短一格。
+    {
+        NodeTree tree;
+        const NodeId table = tree.appendChild(tree.firstSectionId(), NodeKind::Table);
+        const NodeId r0 = tree.appendChild(table, NodeKind::TableRow);
+        const NodeId a = addCell(tree, r0, 2, 1, 0x41);
+        addCell(tree, r0, 1, 1, 0x42);
+        addCell(tree, r0, 1, 1, 0x43);
+        const NodeId r1 = tree.appendChild(table, NodeKind::TableRow);
+        addCell(tree, r1, 1, 1, 0x44);
+        addCell(tree, r1, 1, 1, 0x45);
+        UndoStack undo(tree);
+        const std::vector<std::string> before = shapeSnapshot(tree);
+
+        const StepBatch del = makeRemoveTableRow(tree, table, 1);
+        expectTrue(del.ok && del.steps.size() == 2,
+                   "1.7 / 删行：一条缩短跨度加一条删除" + (del.ok ? "" : "（" + del.error + "）"));
+        expectTrue(commitBatch(undo, del), "1.7 / 删行：提交成功");
+        expectTrue(tree.find(a)->cell.row_span == 1, "1.7 / 删行：从上面跨进来的纵向合并缩短一格");
+        TableGrid grid;
+        std::string why;
+        expectTrue(buildGrid(tree, table, &grid, &why) && grid.rows == 1 && grid.cols == 3,
+                   "1.7 / 删行：网格变成 1x3" + (why.empty() ? "" : "（" + why + "）"));
+        expectClean(tree, "1.7 / 删行：不变量全绿");
+        undo.undo(nullptr);
+        expectTrue(shapeSnapshot(tree) == before, "1.7 / 删行：撤销一次全部回来");
+    }
+    // 删除行：自己带纵向合并时拒绝；删最后一行也拒绝。
+    {
+        NodeTree tree;
+        const NodeId table = tree.appendChild(tree.firstSectionId(), NodeKind::Table);
+        const NodeId r0 = tree.appendChild(table, NodeKind::TableRow);
+        addCell(tree, r0, 2, 1, 0x41);
+        addCell(tree, r0, 1, 1, 0x42);
+        const NodeId r1 = tree.appendChild(table, NodeKind::TableRow);
+        addCell(tree, r1, 1, 1, 0x43);
+
+        const StepBatch tall = makeRemoveTableRow(tree, table, 0);
+        expectTrue(!tall.ok && tall.error.find("先拆分") != std::string::npos,
+                   "1.7 / 删行拒绝：本行有纵向合并（" + tall.error + "）");
+    }
+    {
+        NodeTree tree = makePlainTable(1, 2);
+        const StepBatch last = makeRemoveTableRow(tree, tableOf(tree), 0);
+        expectTrue(!last.ok && last.error.find("最后一行") != std::string::npos,
+                   "1.7 / 删行拒绝：删最后一行会让表格没有行（" + last.error + "）");
+    }
+    // 插入一列：普通表格每行各插一个新格子，仍然只是一个撤销步骤。
+    {
+        NodeTree tree = makePlainTable(2, 3);
+        UndoStack undo(tree);
+        const NodeId table = tableOf(tree);
+        const std::vector<std::string> before = shapeSnapshot(tree);
+
+        const StepBatch add = makeInsertTableColumn(tree, table, 1);
+        expectTrue(add.ok && add.steps.size() == 2 && commitBatch(undo, add),
+                   "1.7 / 插列：两行各插一格" + (add.ok ? "" : "（" + add.error + "）"));
+        expectTrue(undo.undoDepth() == 1, "1.7 / 插列：一批只算一个撤销步骤");
+        TableGrid grid;
+        std::string why;
+        expectTrue(buildGrid(tree, table, &grid, &why) && grid.rows == 2 && grid.cols == 4,
+                   "1.7 / 插列：网格变成 2x4" + (why.empty() ? "" : "（" + why + "）"));
+        expectClean(tree, "1.7 / 插列：不变量全绿");
+        undo.undo(nullptr);
+        expectTrue(shapeSnapshot(tree) == before, "1.7 / 插列：撤销一次全部回来（含身份）");
+    }
+    // 插入一列：插入点在合并内部时由那一格加宽吸收，不另插新格。
+    {
+        NodeTree tree;
+        const NodeId table = tree.appendChild(tree.firstSectionId(), NodeKind::Table);
+        const NodeId r0 = tree.appendChild(table, NodeKind::TableRow);
+        const NodeId a = addCell(tree, r0, 1, 2, 0x41);
+        addCell(tree, r0, 1, 1, 0x42);
+        const NodeId r1 = tree.appendChild(table, NodeKind::TableRow);
+        addCell(tree, r1, 1, 1, 0x43);
+        addCell(tree, r1, 1, 1, 0x44);
+        addCell(tree, r1, 1, 1, 0x45);
+
+        const StepBatch add = makeInsertTableColumn(tree, table, 1);
+        expectTrue(add.ok && add.steps.size() == 2,
+                   "1.7 / 插列：加宽一格加第一行不用插新格（第二行要）" +
+                       (add.ok ? "" : "（" + add.error + "）"));
+        UndoStack undo(tree);
+        expectTrue(commitBatch(undo, add), "1.7 / 插列：提交成功");
+        expectTrue(tree.find(a)->cell.col_span == 3, "1.7 / 插列：跨过插入线的格子加宽一格");
+        TableGrid grid;
+        std::string why;
+        expectTrue(buildGrid(tree, table, &grid, &why) && grid.cols == 4 &&
+                       grid.at(0, 1)->id == a && grid.at(0, 2)->id == a,
+                   "1.7 / 插列：加宽之后网格仍然成立，且新列位仍指向原点格");
+        expectTrue(grid.at(1, 1)->id != a, "1.7 / 插列：下面那一行在同一个列位上是新插的格子");
+        expectClean(tree, "1.7 / 插列：不变量全绿");
+    }
+    // 插入一列：跨行合并的格子只在它的原点行加宽一次，覆盖的每一行都吸收同一列。
+    {
+        NodeTree tree;
+        const NodeId table = tree.appendChild(tree.firstSectionId(), NodeKind::Table);
+        const NodeId r0 = tree.appendChild(table, NodeKind::TableRow);
+        const NodeId a = addCell(tree, r0, 2, 2, 0x41);
+        addCell(tree, r0, 1, 1, 0x42);
+        const NodeId r1 = tree.appendChild(table, NodeKind::TableRow);
+        addCell(tree, r1, 1, 1, 0x43);
+
+        const StepBatch add = makeInsertTableColumn(tree, table, 1);
+        expectTrue(add.ok && add.steps.size() == 1,
+                   "1.7 / 插列：跨行合并吸收新列时一条步骤就够（两行都不插新格）" +
+                       (add.ok ? "" : "（" + add.error + "）"));
+        UndoStack undo(tree);
+        expectTrue(commitBatch(undo, add), "1.7 / 插列：提交成功");
+        expectTrue(tree.find(a)->cell.col_span == 3 && tree.find(a)->cell.row_span == 2,
+                   "1.7 / 插列：只有原点格加宽，纵向跨度不变");
+        TableGrid grid;
+        std::string why;
+        expectTrue(buildGrid(tree, table, &grid, &why) && grid.rows == 2 && grid.cols == 4 &&
+                       grid.at(1, 2)->id == a,
+                   "1.7 / 插列：新列位在两行里都由那个格子覆盖");
+        expectClean(tree, "1.7 / 插列：不变量全绿");
+    }
+    // 插入一列：插入点在跨行合并的左边界时每行都要插（合并格子不吸收）。
+    {
+        NodeTree tree;
+        const NodeId table = tree.appendChild(tree.firstSectionId(), NodeKind::Table);
+        const NodeId r0 = tree.appendChild(table, NodeKind::TableRow);
+        const NodeId a = addCell(tree, r0, 2, 1, 0x41);
+        addCell(tree, r0, 1, 1, 0x42);
+        addCell(tree, r0, 1, 1, 0x43);
+        const NodeId r1 = tree.appendChild(table, NodeKind::TableRow);
+        addCell(tree, r1, 1, 1, 0x44);
+        addCell(tree, r1, 1, 1, 0x45);
+
+        UndoStack undo(tree);
+        const StepBatch add = makeInsertTableColumn(tree, table, 0);
+        expectTrue(
+            add.ok && add.steps.size() == 2 && commitBatch(undo, add),
+            "1.7 / 插列：插在最左边时两行各插一格" + (add.ok ? "" : "（" + add.error + "）"));
+        expectTrue(tree.find(a)->cell.col_span == 1,
+                   "1.7 / 插列：合并格子不吸收（插入点在它左边）");
+        TableGrid grid;
+        std::string why;
+        expectTrue(buildGrid(tree, table, &grid, &why) && grid.cols == 4 && grid.at(1, 1)->id == a,
+                   "1.7 / 插列：合并格子在新的列位上仍是原点");
+        expectClean(tree, "1.7 / 插列：不变量全绿");
+    }
+    // 删除一列：宽度降到 0 的格子连同内容一起删掉。
+    {
+        NodeTree tree;
+        const NodeId table = tree.appendChild(tree.firstSectionId(), NodeKind::Table);
+        const NodeId r0 = tree.appendChild(table, NodeKind::TableRow);
+        const NodeId a = addCell(tree, r0, 1, 3, 0x41);
+        const NodeId r1 = tree.appendChild(table, NodeKind::TableRow);
+        const NodeId b = addCell(tree, r1, 1, 1, 0x42);
+        const NodeId c = addCell(tree, r1, 1, 1, 0x43);
+        addCell(tree, r1, 1, 1, 0x44);
+        UndoStack undo(tree);
+        const std::vector<std::string> before = shapeSnapshot(tree);
+
+        const StepBatch del = makeRemoveTableColumn(tree, table, 1);
+        expectTrue(del.ok && del.steps.size() == 2,
+                   "1.7 / 删列：一条变窄加一条删除" + (del.ok ? "" : "（" + del.error + "）"));
+        expectTrue(commitBatch(undo, del), "1.7 / 删列：提交成功");
+        expectTrue(tree.find(a)->cell.col_span == 2, "1.7 / 删列：覆盖这一列的格子变窄");
+        expectTrue(tree.find(c) != nullptr && !isAttached(tree, c) && tree.find(b) != nullptr,
+                   "1.7 / 删列：宽度降到 0 的格子被删掉（另一个留着）");
+        TableGrid grid;
+        std::string why;
+        expectTrue(buildGrid(tree, table, &grid, &why) && grid.rows == 2 && grid.cols == 2,
+                   "1.7 / 删列：网格变成 2x2" + (why.empty() ? "" : "（" + why + "）"));
+        expectClean(tree, "1.7 / 删列：不变量全绿");
+        undo.undo(nullptr);
+        expectTrue(shapeSnapshot(tree) == before, "1.7 / 删列：撤销一次全部回来（含身份）");
+    }
+    // 删除列：删最后一列拒绝。
+    {
+        NodeTree tree = makePlainTable(2, 1);
+        const StepBatch last = makeRemoveTableColumn(tree, tableOf(tree), 0);
+        expectTrue(!last.ok && last.error.find("最后一列") != std::string::npos,
+                   "1.7 / 删列拒绝：删最后一列会让表格没有列（" + last.error + "）");
+    }
+    // 改跨度步骤本身：跨度至少是 1、原值要对得上、目标得是单元格。
+    {
+        NodeTree tree = makePlainTable(1, 2);
+        const NodeId table = tableOf(tree);
+        const NodeId cell = tree.find(table)->children[0]->children[0]->id;
+
+        SetTableCellSpan zero;
+        zero.id = cell;
+        zero.span = CellSpan{1, 0};
+        zero.before = CellSpan{1, 1};
+        const StepResult r0 = canApply(tree, Step{zero});
+        expectTrue(!r0.ok && r0.error.find("至少是 1") != std::string::npos,
+                   "1.7 / 改跨度拒绝：跨度小于 1（" + r0.error + "）");
+
+        SetTableCellSpan stale;
+        stale.id = cell;
+        stale.span = CellSpan{1, 2};
+        stale.before = CellSpan{2, 1};
+        const StepResult r1 = canApply(tree, Step{stale});
+        expectTrue(!r1.ok && r1.error.find("原值不符") != std::string::npos,
+                   "1.7 / 改跨度拒绝：原值不符（" + r1.error + "）");
+
+        SetTableCellSpan on_row;
+        on_row.id = tree.find(table)->children[0]->id;
+        const StepResult r2 = canApply(tree, Step{on_row});
+        expectTrue(!r2.ok && r2.error.find("单元格") != std::string::npos,
+                   "1.7 / 改跨度拒绝：目标不是单元格（" + r2.error + "）");
+    }
+}
+
+/**
+ * 1.7：列定义。普通表格不需要它；填了它就有"数据行不许合并"这条约束，表头行不受限。
+ */
+void checkTableColumnDefs() {
+    // 有列定义、数据行不合并：不变量全绿。
+    {
+        NodeTree tree = makePlainTable(3, 3);
+        const NodeId table = tableOf(tree);
+        tree.find(table)->table.header_rows = 1;
+        tree.find(table)->table.columns.resize(3);
+        expectClean(tree, "1.7 / 列定义：三列定义加三行不合并的表，不变量全绿");
+    }
+    // 数据行合并：不变量报表格那条规则。
+    {
+        NodeTree tree = makePlainTable(2, 2);
+        const NodeId table = tableOf(tree);
+        tree.find(table)->table.header_rows = 1;
+        tree.find(table)->table.columns.resize(2);
+        // 第二行（数据行）第一个格子跨两列 —— 于是"第 i 列"不再是确定位置。
+        const NodeId data_row = tree.find(table)->children[1]->id;
+        tree.find(data_row)->children[0]->cell.col_span = 2;
+        tree.eraseChild(data_row, 1);
+        const InvariantReport rep = checkInvariants(tree);
+        expectTrue(!rep.ok() && reported(rep, kTableRule),
+                   "1.7 / 列定义：数据行合并被不变量报出来");
+    }
+    // 表头行合并：不受限，仍然全绿。
+    {
+        NodeTree tree = makePlainTable(2, 2);
+        const NodeId table = tableOf(tree);
+        tree.find(table)->table.header_rows = 1;
+        tree.find(table)->table.columns.resize(2);
+        const NodeId head_row = tree.find(table)->children[0]->id;
+        tree.find(head_row)->children[0]->cell.col_span = 2;
+        tree.eraseChild(head_row, 1);
+        expectClean(tree, "1.7 / 列定义：表头行跨列合并不受这条限制");
+    }
+    // 列定义与网格列数对不上：报出来。
+    {
+        NodeTree tree = makePlainTable(2, 3);
+        const NodeId table = tableOf(tree);
+        tree.find(table)->table.columns.resize(2);
+        const InvariantReport rep = checkInvariants(tree);
+        expectTrue(!rep.ok() && reported(rep, kTableRule),
+                   "1.7 / 列定义：列定义数与网格列数不一致被报出来");
+    }
+    // 网格不成立时（这一行没被完整覆盖）也报同一条规则。
+    {
+        NodeTree tree = makePlainTable(1, 3);
+        const NodeId table = tableOf(tree);
+        const NodeId r1 = tree.appendChild(table, NodeKind::TableRow);
+        addCell(tree, r1, 1, 1, 0x58);
+        const InvariantReport rep = checkInvariants(tree);
+        expectTrue(!rep.ok() && reported(rep, kTableRule),
+                   "1.7 / 网格：行没有被完整覆盖时不变量报出来");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -3569,8 +4059,8 @@ int main() {
     // MSVC 把 _IOLBF 当成全缓冲，所以这里必须用 _IONBF。
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     std::printf(
-        "=== 文档模型 0.1 ~ 1.6：位置、分段、不变量、编译、长度、规范化、步骤、撤销、落点、"
-        "控件、样式 ===\n");
+        "=== 文档模型 0.1 ~ 1.7：位置、分段、不变量、编译、长度、规范化、步骤、撤销、落点、"
+        "控件、样式、表格 ===\n");
 
     // 两种可见性口径各过一遍：位置空间不同，但"往返互逆"必须各自成立。
     const FlowVisibility kBoth[2] = {FlowVisibility::Design, FlowVisibility::Display};
@@ -3688,6 +4178,11 @@ int main() {
     checkStyleCache();
     checkStyleThroughCompile();
     checkStyleRefTravels();
+
+    std::printf("  --- 1.7：表格的跨度、派生网格与行列操作 ---\n");
+    checkTableGrid();
+    checkTableOps();
+    checkTableColumnDefs();
 
     std::printf("  --- 1.3：事务与撤销分组 ---\n");
     checkUndoRedo();

@@ -255,6 +255,27 @@ bool writeControlValue(NodeTree& tree, NodeId id, const ControlValue& value) {
 
 }  // namespace
 
+namespace {
+
+/**
+ * 把流位置按一串步骤的映射推过去。表格式与批量设值都靠它：每步的坐标属于它自己那一刻。
+ */
+FlowPos throughSteps(const std::vector<Step>& prev, FlowPos pos) {
+    for (const Step& s : prev) pos = mapPos(s, pos, Assoc::Before);
+    return pos;
+}
+
+}  // namespace
+
+void pushMappedStep(std::vector<Step>* out, Step step) {
+    if (auto* ins = std::get_if<InsertNode>(&step)) {
+        ins->at_flow = throughSteps(*out, ins->at_flow);
+    } else if (auto* rm = std::get_if<RemoveNode>(&step)) {
+        rm->at_flow = throughSteps(*out, rm->at_flow);
+    }
+    out->push_back(std::move(step));
+}
+
 DeleteBuild makeDeleteRange(const NodeTree& tree, Range range) {
     DeleteBuild out;
     const ExtractResult ex = extractRange(tree, range);
@@ -508,6 +529,24 @@ StepResult canApply(const NodeTree& tree, const Step& step) {
                        }
                        r.ok = true;
                    },
+                   [&](const SetTableCellSpan& s) {
+                       const Node* n = tree.find(s.id);
+                       if (n == nullptr || n->kind != NodeKind::TableCell) {
+                           r.error = "改跨度：目标不是单元格";
+                           return;
+                       }
+                       // 0 或负数不是可表达的跨度：真放过去，派生网格会把这一行算短，
+                       // 而"每行跨度之和相等"那条不变量要到下一次检查才报出来。
+                       if (s.span.row_span < 1 || s.span.col_span < 1) {
+                           r.error = "改跨度：跨度至少是 1";
+                           return;
+                       }
+                       if (!(n->cell == s.before)) {
+                           r.error = "改跨度：当前跨度与步骤记的原值不符（步骤过期了）";
+                           return;
+                       }
+                       r.ok = true;
+                   },
                },
                step);
     return r;
@@ -555,6 +594,10 @@ StepResult applyStep(NodeTree& tree, const Step& step) {
             [&](const RemoveNode& s) { tree.eraseChild(s.at.container, s.at.offset); },
             [&](const SetControlProp& s) { writeControlProp(tree, s.id, s.prop, s.value); },
             [&](const SetControlValue& s) { writeControlValue(tree, s.id, s.value); },
+            [&](const SetTableCellSpan& s) {
+                Node* n = tree.find(s.id);
+                if (n != nullptr) n->cell = s.span;
+            },
         },
         step);
     return r;
@@ -632,6 +675,13 @@ Step invertStep(const Step& step) {
                               x.before = s.value;
                               return Step{x};
                           },
+                          [](const SetTableCellSpan& s) -> Step {
+                              SetTableCellSpan x;
+                              x.id = s.id;
+                              x.span = s.before;
+                              x.before = s.span;
+                              return Step{x};
+                          },
                       },
                       step);
 }
@@ -681,6 +731,8 @@ FlowPos mapPos(const Step& step, FlowPos pos, Assoc assoc) {
                           // （重建派生索引），不是把某个位置搬到别处。
                           [&](const SetControlProp&) -> FlowPos { return pos; },
                           [&](const SetControlValue&) -> FlowPos { return pos; },
+                          // 跨度不改流位置，也不改流结构：它改的是"这一格覆盖多少格位"。
+                          [&](const SetTableCellSpan&) -> FlowPos { return pos; },
                       },
                       step);
 }

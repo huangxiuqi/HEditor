@@ -22,6 +22,7 @@
 #include "core/doc/char_format.h"
 #include "core/doc/control_spec.h"
 #include "core/doc/para_format.h"
+#include "core/doc/table_spec.h"
 
 namespace heditor {
 
@@ -155,6 +156,18 @@ struct Node {
      * 理由同 para —— 都按流顺序取。其余种类读它没有定义。
      */
     ControlSpec control;
+
+    /**
+     * 单元格跨度：只对 TableCell 有意义（第九节）。被合并掉的格位在模型里不存在，所以跨度
+     * 就是"这一格覆盖多少格位"的全部信息，网格由它推出来。其余种类读它没有定义。
+     */
+    CellSpan cell;
+
+    /**
+     * 表格自己的记录（列定义、显式列宽、表头行数）：只对 Table 有意义。默认是空的普通表格，
+     * 列由跨度派生。其余种类读它没有定义。
+     */
+    TableSpec table;
 };
 
 /**

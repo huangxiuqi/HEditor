@@ -6,6 +6,7 @@
 
 #include "core/doc/flow.h"
 #include "core/doc/para.h"
+#include "core/doc/table.h"
 
 namespace heditor {
 
@@ -24,6 +25,7 @@ constexpr char kBoundaryOrder[] = "容器.边界成对有序不交叉";
 constexpr char kParagraphTiling[] = "容器.切段无缝隙";
 constexpr char kUniqueId[] = "身份.节点 ID 唯一且索引自洽";
 constexpr char kKindValid[] = "身份.节点种类在声明范围内";
+constexpr char kTableGrid[] = "表格.跨度之和相等、无重叠、无空洞、有列定义则数据行不许合并";
 
 void add(InvariantReport* r, const char* rule, NodeId node, int at, std::string detail) {
     r->violations.push_back(Violation{rule, node, at, std::move(detail)});
@@ -68,7 +70,6 @@ std::vector<PendingRule> pendingRules() {
          "1.5 / 1.7 在控件与表格落地时逐种登记"},
         {"身份.控件 id 唯一、key 不要求唯一", "1.5 控件索引"},
         {"身份.节点 ID 在保存与重新打开之后仍然有效", "1.10 序列化往返"},
-        {"表格.跨度之和相等、无重叠、无空洞、续格紧邻、有列定义则数据行不许合并", "1.7 表格"},
         {"域.求值只更新缓存值、只有排版结果类允许迭代且必须终止", "1.8 域"},
         {"取值与嵌套.取值拼接、含子控件拒绝整体设值、同 group 互斥、真原子的文本表示",
          "1.5 控件与 1.4 原子"},
@@ -181,8 +182,8 @@ InvariantReport checkInvariants(const NodeTree& tree) {
         if (display.inFlow(id) == want_out) {
             add(&r, kHiddenInFlow, id, -1,
                 std::string("呈现态的摘除集合与隐藏声明不符：自身或祖先声明隐藏 = ") +
-                    (want_out ? "是" : "否") + "，而呈现态在流里 = " +
-                    (display.inFlow(id) ? "是" : "否"));
+                    (want_out ? "是" : "否") +
+                    "，而呈现态在流里 = " + (display.inFlow(id) ? "是" : "否"));
         }
     }
 
@@ -191,7 +192,8 @@ InvariantReport checkInvariants(const NodeTree& tree) {
     for (NodeId id : order) {
         const Node* n = tree.find(id);
         if (isText(n->kind) && n->text.empty()) {
-            add(&r, kTextNonEmpty, id, -1, "文本节点为空（相邻同标记的 run 必须合并，空 run 无意义）");
+            add(&r, kTextNonEmpty, id, -1,
+                "文本节点为空（相邻同标记的 run 必须合并，空 run 无意义）");
         }
     }
 
@@ -268,8 +270,8 @@ InvariantReport checkInvariants(const NodeTree& tree) {
             }
             if (b != expect_begin) {
                 add(&r, kParagraphTiling, id, no,
-                    "段落范围有缝隙或乱序：期望从 " + std::to_string(expect_begin) + " 起，实际从 " +
-                        std::to_string(b) + " 起");
+                    "段落范围有缝隙或乱序：期望从 " + std::to_string(expect_begin) +
+                        " 起，实际从 " + std::to_string(b) + " 起");
                 break;
             }
             expect_begin = e;
@@ -288,8 +290,8 @@ InvariantReport checkInvariants(const NodeTree& tree) {
             }
             if (no != before + 1) {
                 add(&r, kParagraphTiling, id, i,
-                    "槽位所属段落序号与标记个数不符：期望 " + std::to_string(before + 1) + "，实际 " +
-                        std::to_string(no));
+                    "槽位所属段落序号与标记个数不符：期望 " + std::to_string(before + 1) +
+                        "，实际 " + std::to_string(no));
             }
             if (no < prev_no) {
                 add(&r, kParagraphTiling, id, i, "段落序号随槽位倒退");
@@ -326,6 +328,45 @@ InvariantReport checkInvariants(const NodeTree& tree) {
             if (n == nullptr) continue;
             if (static_cast<int>(n->kind) > max_kind) {
                 add(&r, kKindValid, id, -1, "节点种类超出声明范围（枚举值越界）");
+            }
+        }
+    }
+
+    // 表格.跨度之和相等、无重叠、无空洞、有列定义则数据行不许合并
+    //
+    // 前三条是派生网格的性质（第二节），所以这里是"推一遍网格，看它成不成立"。
+    // 规则名沿用了第二节的措辞，但其中两条不可由数据构造，因此不构成数据判据：
+    // "续格紧邻原点格"—— 模型里根本没有续格（被合并掉的格位不存在），由结构保证；
+    // "无重叠"—— 放置算法总是把格子放在第一个空闲格位，两个格子落不到同一个格位。
+    // 它们仍然留在网格推导里当守卫（将来改放置算法时先亮），只是别把它们当成"查过了"。
+    r.checked.push_back(kTableGrid);
+    for (NodeId id = 1; id <= tree.maxAllocatedId(); ++id) {
+        const Node* n = tree.find(id);
+        if (n == nullptr || n->kind != NodeKind::Table) continue;
+
+        TableGrid grid;
+        std::string why;
+        if (!buildGrid(tree, id, &grid, &why)) {
+            add(&r, kTableGrid, id, -1, why);
+            continue;
+        }
+        if (!n->table.hasColumns()) continue;
+
+        if (static_cast<int>(n->table.columns.size()) != grid.cols) {
+            add(&r, kTableGrid, id, -1,
+                "列定义有 " + std::to_string(n->table.columns.size()) + " 列，网格有 " +
+                    std::to_string(grid.cols) + " 列");
+            continue;
+        }
+        // 数据行不许合并：每一格的跨度都必须是 1x1（于是格数等于列数，"第 i 列"才是
+        // 确定的位置）。表头行不受这条限制。
+        for (size_t row_no = 0; row_no < n->children.size(); ++row_no) {
+            if (static_cast<int>(row_no) < n->table.header_rows) continue;
+            for (const Node* cell : n->children[row_no]->children) {
+                if (cell->cell.row_span != 1 || cell->cell.col_span != 1) {
+                    add(&r, kTableGrid, cell->id, static_cast<int>(row_no),
+                        "有列定义的表格里数据行不允许合并（第 " + std::to_string(row_no) + " 行）");
+                }
             }
         }
     }

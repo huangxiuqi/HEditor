@@ -232,6 +232,7 @@ add_library(heditor_core STATIC
   src/core/doc/char_format.cpp
   src/core/doc/para_format.cpp
   src/core/doc/style.cpp
+  src/core/doc/table.cpp
   src/core/doc/length.cpp
   src/core/doc/normalize.cpp
   src/core/doc/range.cpp

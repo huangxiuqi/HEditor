@@ -84,31 +84,6 @@ bool pureText(const NodeTree& tree, NodeId id, std::string* why) {
     return true;
 }
 
-/**
- * 把"构建时算出来的流位置"搬到"这一步真正应用时的坐标系"。
- *
- * 事务的约定是每步的坐标都是它自己那一步开始时的状态（transaction.h），而批量是一次把所有
- * 步骤建出来的 —— 中间那些步骤会改变文档长度，前面某一步改短了，后面几步记的绝对流位置就偏了。
- * 所以每收一步，就把后面要记的流位置按这一步的映射推过去。这不是补丁：坐标属于哪一时刻，
- * 就得按那个时刻算。
- */
-FlowPos through(const std::vector<Step>& prev, FlowPos pos) {
-    for (const Step& s : prev) pos = mapPos(s, pos, Assoc::Before);
-    return pos;
-}
-
-/**
- * 收一步，并把它的流位置推到当前时刻。
- */
-void pushStep(std::vector<Step>* out, Step step) {
-    if (auto* ins = std::get_if<InsertNode>(&step)) {
-        ins->at_flow = through(*out, ins->at_flow);
-    } else if (auto* rm = std::get_if<RemoveNode>(&step)) {
-        rm->at_flow = through(*out, rm->at_flow);
-    }
-    out->push_back(std::move(step));
-}
-
 ControlInfo describe(const NodeTree& tree, NodeId id) {
     const Node* n = tree.find(id);
     ControlInfo info;
@@ -420,7 +395,7 @@ BatchResult ControlApi::applyValues(const std::vector<ValueEdit>& edits, bool by
             s.before = n->control.value;
             one.push_back(Step{s});
         }
-        for (const Step& s : one) pushStep(&steps, s);
+        for (Step& s : one) pushMappedStep(&steps, std::move(s));
         ++out.changed;
     }
 
