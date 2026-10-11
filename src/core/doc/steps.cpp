@@ -177,6 +177,72 @@ struct Overloaded : Fs... {
 template <typename... Fs>
 Overloaded(Fs...) -> Overloaded<Fs...>;
 
+/**
+ * 读一个控件属性。目标不是内容控件时返回 false。
+ */
+bool readControlProp(const NodeTree& tree, NodeId id, ControlProp prop, bool* out) {
+    const Node* n = tree.find(id);
+    if (n == nullptr || n->kind != NodeKind::ContentControl) return false;
+    switch (prop) {
+        case ControlProp::Hidden:
+            *out = n->hidden;
+            return true;
+        case ControlProp::Readonly:
+            *out = n->control.readonly;
+            return true;
+        case ControlProp::Required:
+            *out = n->control.required;
+            return true;
+        case ControlProp::StructureLock:
+            *out = n->control.structureLock;
+            return true;
+    }
+    return false;
+}
+
+/**
+ * 写一个控件属性。目标不是内容控件时返回 false。
+ */
+bool writeControlProp(NodeTree& tree, NodeId id, ControlProp prop, bool value) {
+    Node* n = tree.find(id);
+    if (n == nullptr || n->kind != NodeKind::ContentControl) return false;
+    switch (prop) {
+        case ControlProp::Hidden:
+            n->hidden = value;
+            return true;
+        case ControlProp::Readonly:
+            n->control.readonly = value;
+            return true;
+        case ControlProp::Required:
+            n->control.required = value;
+            return true;
+        case ControlProp::StructureLock:
+            n->control.structureLock = value;
+            return true;
+    }
+    return false;
+}
+
+/**
+ * 读一个控件属性侧的值。目标不是内容控件时返回 false。
+ */
+bool readControlValue(const NodeTree& tree, NodeId id, ControlValue* out) {
+    const Node* n = tree.find(id);
+    if (n == nullptr || n->kind != NodeKind::ContentControl) return false;
+    *out = n->control.value;
+    return true;
+}
+
+/**
+ * 写一个控件属性侧的值。目标不是内容控件时返回 false。
+ */
+bool writeControlValue(NodeTree& tree, NodeId id, const ControlValue& value) {
+    Node* n = tree.find(id);
+    if (n == nullptr || n->kind != NodeKind::ContentControl) return false;
+    n->control.value = value;
+    return true;
+}
+
 }  // namespace
 
 DeleteBuild makeDeleteRange(const NodeTree& tree, Range range) {
@@ -191,6 +257,62 @@ DeleteBuild makeDeleteRange(const NodeTree& tree, Range range) {
     s.begin = norm.begin();
     s.end = norm.end();
     s.removed = ex.fragment;
+    out.step = Step{s};
+    out.ok = true;
+    return out;
+}
+
+NodeBuild makeInsertNode(NodeTree& tree, const Pos& at, const NodeSpec& spec) {
+    NodeBuild out;
+    const Node* c = tree.find(at.container);
+    if (c == nullptr || !isContainer(c->kind)) {
+        out.error = "插入节点：目标不是容器";
+        return out;
+    }
+    if (at.offset < 0 || at.offset > static_cast<int>(c->children.size())) {
+        out.error = "插入节点：槽位越界";
+        return out;
+    }
+    if (!acceptsChild(c->kind, spec.kind)) {
+        out.error = std::string("插入节点：") + nodeKindName(c->kind) + " 不接受 " +
+                    nodeKindName(spec.kind) + " 作为子节点";
+        return out;
+    }
+    const NodeId detached = materializeSubtree(tree, kInvalidNodeId, 0, spec);
+    if (detached == kInvalidNodeId) {
+        out.error = "插入节点：子树建不出来";
+        return out;
+    }
+
+    InsertNode s;
+    s.at = at;
+    // 摘下的子树不在流里，所以这个流位置与物化前后都一致。
+    s.at_flow = indexOf(tree).flowAt(at);
+    s.subtree = spec;
+    s.detached = detached;
+    out.step = Step{s};
+    out.ok = true;
+    return out;
+}
+
+NodeBuild makeRemoveNode(const NodeTree& tree, const Pos& at) {
+    NodeBuild out;
+    const Node* c = tree.find(at.container);
+    if (c == nullptr || !isContainer(c->kind)) {
+        out.error = "删除节点：目标不是容器";
+        return out;
+    }
+    if (at.offset < 0 || at.offset >= static_cast<int>(c->children.size())) {
+        out.error = "删除节点：槽位没有孩子";
+        return out;
+    }
+    const Node* kid = c->children[static_cast<size_t>(at.offset)];
+
+    RemoveNode s;
+    s.at = at;
+    s.at_flow = indexOf(tree).flowAt(at);
+    s.removed = captureSubtree(tree, kid->id);
+    s.detached = kid->id;
     out.step = Step{s};
     out.ok = true;
     return out;
@@ -254,6 +376,106 @@ StepResult canApply(const NodeTree& tree, const Step& step) {
                        }
                        r.ok = true;
                    },
+                   [&](const InsertNode& s) {
+                       const Node* c = tree.find(s.at.container);
+                       if (c == nullptr || !isContainer(c->kind)) {
+                           r.error = "插入节点：目标不是容器";
+                           return;
+                       }
+                       if (s.at.offset < 0 || s.at.offset > static_cast<int>(c->children.size())) {
+                           r.error = "插入节点：槽位越界";
+                           return;
+                       }
+                       if (!acceptsChild(c->kind, s.subtree.kind)) {
+                           r.error = std::string("插入节点：") + nodeKindName(c->kind) +
+                                     " 不接受 " + nodeKindName(s.subtree.kind) + " 作为子节点";
+                           return;
+                       }
+                       if (idx.flowAt(s.at) != s.at_flow) {
+                           r.error = "插入节点：流位置与文档对不上（步骤过期了）";
+                           return;
+                       }
+                       if (s.detached != kInvalidNodeId) {
+                           const Node* d = tree.find(s.detached);
+                           if (d == nullptr) {
+                               r.error = "插入节点：要挂回的子树不在池里";
+                               return;
+                           }
+                           // 已经挂在树上说明这一步被应用过却没撤销过，再挂一次会拆散父子链。
+                           if (d->parent != nullptr) {
+                               r.error = "插入节点：要挂回的子树已经挂在树上了";
+                               return;
+                           }
+                           if (d->kind != s.subtree.kind) {
+                               r.error = "插入节点：待挂子树的种类与步骤不符";
+                               return;
+                           }
+                       }
+                       r.ok = true;
+                   },
+                   [&](const RemoveNode& s) {
+                       const Node* c = tree.find(s.at.container);
+                       if (c == nullptr || !isContainer(c->kind)) {
+                           r.error = "删除节点：目标不是容器";
+                           return;
+                       }
+                       if (s.at.offset < 0 || s.at.offset >= static_cast<int>(c->children.size())) {
+                           r.error = "删除节点：槽位没有孩子";
+                           return;
+                       }
+                       const Node* kid = c->children[static_cast<size_t>(s.at.offset)];
+                       if (kid->kind != s.removed.kind) {
+                           r.error = "删除节点：该位置的孩子与步骤记录不符";
+                           return;
+                       }
+                       if (s.detached != kInvalidNodeId && kid->id != s.detached) {
+                           r.error = "删除节点：该位置的孩子的身份与步骤不符";
+                           return;
+                       }
+                       if (idx.flowAt(s.at) != s.at_flow) {
+                           r.error = "删除节点：流位置与文档对不上（步骤过期了）";
+                           return;
+                       }
+                       r.ok = true;
+                   },
+                   [&](const SetControlProp& s) {
+                       bool now = false;
+                       if (!readControlProp(tree, s.id, s.prop, &now)) {
+                           r.error = "改属性：目标不是内容控件";
+                           return;
+                       }
+                       // 记的原值要与文档当前值一致，否则这一步是与别的编辑抢同一个属性
+                       // （或者步骤被重放到了别的文档上）。拒绝比改错强。
+                       if (now != s.before) {
+                           r.error = std::string("改属性：") + controlPropName(s.prop) +
+                                     " 的当前值与步骤记的原值不符（步骤过期了）";
+                           return;
+                       }
+                       r.ok = true;
+                   },
+                   [&](const SetControlValue& s) {
+                       const Node* n = tree.find(s.id);
+                       if (n == nullptr || n->kind != NodeKind::ContentControl) {
+                           r.error = "改值：目标不是内容控件";
+                           return;
+                       }
+                       // 文本类的值在内容里，走内容级步骤。在这一层改它的 value 字段等于改一个
+                       // 取值时不会被读到的位置，看起来成功了、实际什么都没变。
+                       if (n->control.valueShape == ValueShape::Text) {
+                           r.error = "改值：文本类的值在内容里，不走属性侧的值步骤";
+                           return;
+                       }
+                       ControlValue now;
+                       if (!readControlValue(tree, s.id, &now)) {
+                           r.error = "改值：目标不是内容控件";
+                           return;
+                       }
+                       if (!(now == s.before)) {
+                           r.error = "改值：当前值与步骤记的原值不符（步骤过期了）";
+                           return;
+                       }
+                       r.ok = true;
+                   },
                },
                step);
     return r;
@@ -288,6 +510,18 @@ StepResult applyStep(NodeTree& tree, const Step& step) {
                        const Node* n = tree.find(p.container);
                        tree.eraseChild(n->parent->id, indexInParent(n));
                    },
+                   [&](const InsertNode& s) {
+                       if (s.detached != kInvalidNodeId) {
+                           tree.attachChild(s.at.container, s.at.offset, s.detached);
+                           return;
+                       }
+                       // 没有现成的子树（例如步骤由序列化还原）：按记录现建一棵，内容一样、
+                       // 身份是新的。
+                       materializeSubtree(tree, s.at.container, s.at.offset, s.subtree);
+                   },
+                   [&](const RemoveNode& s) { tree.eraseChild(s.at.container, s.at.offset); },
+                   [&](const SetControlProp& s) { writeControlProp(tree, s.id, s.prop, s.value); },
+                   [&](const SetControlValue& s) { writeControlValue(tree, s.id, s.value); },
                },
                step);
     return r;
@@ -331,6 +565,37 @@ Step invertStep(const Step& step) {
                               x.para = s.para;
                               return Step{x};
                           },
+                          [](const InsertNode& s) -> Step {
+                              RemoveNode d;
+                              d.at = s.at;
+                              d.at_flow = s.at_flow;
+                              d.removed = s.subtree;
+                              d.detached = s.detached;
+                              return Step{d};
+                          },
+                          [](const RemoveNode& s) -> Step {
+                              InsertNode i;
+                              i.at = s.at;
+                              i.at_flow = s.at_flow;
+                              i.subtree = s.removed;
+                              i.detached = s.detached;
+                              return Step{i};
+                          },
+                          [](const SetControlProp& s) -> Step {
+                              SetControlProp x;
+                              x.id = s.id;
+                              x.prop = s.prop;
+                              x.value = s.before;
+                              x.before = s.value;
+                              return Step{x};
+                          },
+                          [](const SetControlValue& s) -> Step {
+                              SetControlValue x;
+                              x.id = s.id;
+                              x.value = s.before;
+                              x.before = s.value;
+                              return Step{x};
+                          },
                       },
                       step);
 }
@@ -364,6 +629,22 @@ FlowPos mapPos(const Step& step, FlowPos pos, Assoc assoc) {
                               if (pos >= s.at + 1) return pos - 1;
                               return s.at;
                           },
+                          [&](const InsertNode& s) -> FlowPos {
+                              const FlowPos n = static_cast<FlowPos>(s.subtree.span());
+                              if (pos < s.at_flow) return pos;
+                              if (pos > s.at_flow) return pos + n;
+                              return assoc == Assoc::After ? s.at_flow + n : s.at_flow;
+                          },
+                          [&](const RemoveNode& s) -> FlowPos {
+                              const FlowPos n = static_cast<FlowPos>(s.removed.span());
+                              if (pos <= s.at_flow) return pos;
+                              if (pos >= s.at_flow + n) return pos - n;
+                              return s.at_flow;
+                          },
+                          // 属性不改编辑态的位置。hidden 会改呈现态的流结构，但那要重排
+                          // （重建派生索引），不是把某个位置搬到别处。
+                          [&](const SetControlProp&) -> FlowPos { return pos; },
+                          [&](const SetControlValue&) -> FlowPos { return pos; },
                       },
                       step);
 }

@@ -44,28 +44,6 @@ bool preferredDecides(const ControlSet& ctrls, const TextPos& pos, int preferred
 
 }  // namespace
 
-const char* editModeName(EditMode m) {
-    switch (m) {
-        case EditMode::Form:
-            return "表单模式";
-        case EditMode::ReadOnly:
-            return "只读模式";
-        default:
-            return "文档模式";
-    }
-}
-
-EditMode editModeFromCode(int code) {
-    switch (code) {
-        case 1:
-            return EditMode::Form;
-        case 2:
-            return EditMode::ReadOnly;
-        default:
-            return EditMode::Document;
-    }
-}
-
 bool EditPolicy::canInsert(const ControlSet& ctrls, EditMode mode, const TextPos& pos,
                            int preferred) {
     if (mode == EditMode::Document) return true;

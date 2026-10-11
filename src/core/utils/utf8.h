@@ -10,6 +10,29 @@
 namespace heditor {
 
 /**
+ * 把一个码点按 UTF-8 追加到 out。非法码点（代理区、超过 U+10FFFF）写成 U+FFFD ——
+ * 与 decodeUtf8 的容错口径对称：坏数据读进来是替换字符，写出去也不产出非法序列。
+ */
+inline void appendUtf8(std::string* out, uint32_t cp) {
+    if (cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) cp = 0xFFFD;
+    if (cp < 0x80) {
+        out->push_back(static_cast<char>(cp));
+    } else if (cp < 0x800) {
+        out->push_back(static_cast<char>(0xC0 | (cp >> 6)));
+        out->push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    } else if (cp < 0x10000) {
+        out->push_back(static_cast<char>(0xE0 | (cp >> 12)));
+        out->push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+        out->push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    } else {
+        out->push_back(static_cast<char>(0xF0 | (cp >> 18)));
+        out->push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+        out->push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+        out->push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    }
+}
+
+/**
  * 从 s[pos] 解出一个码点，*next 写回下一个字节位置。非法序列按单字节跳过。
  * 参数取 string_view：调用方既有整串（std::string）也有切片（子串视图），
  * 用 string_view 可以避免为了切一刀而复制字符串。

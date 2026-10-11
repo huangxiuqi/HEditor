@@ -41,7 +41,8 @@ bool collectCovers(const NodeTree& tree, const Range& range, std::vector<Cover>*
         if (!isText(c->kind) && !isParagraphMark(c->kind)) {
             if (error != nullptr) {
                 *error = std::string("区间含 ") + nodeKindName(c->kind) +
-                         "（节点级编辑还没落地，1.2 的可编辑集合只有文本与段落标记）";
+                         "（含整棵节点的区间提取还没落地：目前的可编辑集合只有文本与段落标记；"
+                         "控件这类整块元素走节点级步骤 InsertNode / RemoveNode）";
             }
             return false;
         }

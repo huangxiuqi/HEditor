@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "core/doc/char_format.h"
+#include "core/doc/control_spec.h"
 #include "core/doc/para_format.h"
 
 namespace heditor {
@@ -96,6 +97,15 @@ bool isParagraphMark(NodeKind kind);
 const char* nodeKindName(NodeKind kind);
 
 /**
+ * 谁允许装谁。只登记第三节已经定下的三条强约束（根只收节、表格只收行、行只收单元格），
+ * 其余容器不限制子节点 —— 子节点约束是一个位标志的并集，尚未逐种登记。
+ *
+ * 放在这一层而不是检查器内部：步骤构造也要用它（未通过就在构造时拒掉，而不是先造出非法文档
+ * 再等检查器报）。两处各写一份，迟早会在"新加一种容器"时不一致。
+ */
+bool acceptsChild(NodeKind parent, NodeKind child);
+
+/**
  * 节点。字段公开：它是纯数据，封装留在树那一层（见 NodeTree）。
  * 给每个字段配一对访问器只会让"谁改了 parent"更难查。
  */
@@ -125,6 +135,12 @@ struct Node {
      * 与 para 同一个理由：规范化与编译都要按流顺序取它。其余种类读它没有定义。
      */
     CharFormat marks;
+
+    /**
+     * 控件记录：只对 ContentControl 有意义。取值、索引与表单模式的落点判定都读它，
+     * 理由同 para —— 都按流顺序取。其余种类读它没有定义。
+     */
+    ControlSpec control;
 };
 
 /**
@@ -163,6 +179,9 @@ public:
 
     /**
      * 找不到时返回 nullptr，不抛：拿 id 来查的多半是调用方自己算错了。
+     *
+     * 它也能查到已被摘下、留在池里的子树（撤销要把它们原样挂回，所以节点不销毁、id 不回收）。
+     * 所以"这个 id 还在文档里吗"要另外问 isAttached，只看 find 非空会把删掉的东西当成活的。
      */
     Node* find(NodeId id);
     const Node* find(NodeId id) const;
@@ -188,6 +207,25 @@ public:
     NodeId appendChild(NodeId parent, NodeKind kind);
 
     /**
+     * 把一棵已经摘下的子树挂回 parent 的第 at 个槽位，返回它的根 id（身份不变）。
+     *
+     * 这是 insertChild 与 eraseChild 之外的第三条挂载路径，存在的唯一理由是"撤销要把它原样
+     * 搬回去"：insertChild 会新分配 id，搬回去就丢了身份，而控件这类节点是有身份的（宿主持着
+     * 它做取值与回填）。要求 detached 存在、当前没有父节点、且挂进去不会成环；
+     * 任一条件不满足都返回 kInvalidNodeId，不做隐式纠正。
+     */
+    NodeId attachChild(NodeId parent, int at, NodeId detached);
+
+    /**
+     * 建一个不挂在树上的节点，返回它的 id。
+     *
+     * 它不是一条结构改动路径（文档没有变化），只是让一棵待插的子树先有固定身份：节点级步骤把
+     * 子树物化成摘下的，再靠 attachChild 挂上、eraseChild 拿下，于是应用、撤销与重做之间
+     * 同一个节点的 id 始终不变。摘下的节点不进流、不参与不变量检查。
+     */
+    NodeId createDetached(NodeKind kind);
+
+    /**
      * 设置文本节点的码点。id 不存在或不是文本节点时返回 false。
      */
     bool setText(NodeId id, std::vector<uint32_t> cps);
@@ -208,5 +246,13 @@ private:
     Node* section_ = nullptr;
     NodeId next_id_ = 1;  // 0 留给"无效"
 };
+
+/**
+ * 这个 id 指向的节点是否还挂在文档上（不是已被摘下留在池里的子树）。根没有父节点，也算挂着的。
+ *
+ * 它出现在类外，是因为判定要用 NodeTree 的查询；放在类里只会让"树管结构、这个只管一个判断"
+ * 这件事更绕。
+ */
+bool isAttached(const NodeTree& tree, NodeId id);
 
 }  // namespace heditor

@@ -10,6 +10,9 @@
  *
  * 可编辑集合是文本与段落标记（1.2 的范围）：区间里出现其它元素时，构造步骤就失败并给原因，
  * 不会应用到一个半截的区间上。
+ *
+ * 控件、图片、表格这类整块元素走另一组步骤（InsertNode / RemoveNode）：它们不按区间增删，
+ * 而是整棵子树挂上、拿下，所以不会出现"半个控件"这种中间态。
  */
 #pragma once
 
@@ -22,6 +25,7 @@
 #include "core/doc/fragment.h"
 #include "core/doc/para_format.h"
 #include "core/doc/range.h"
+#include "core/doc/subtree.h"
 
 namespace heditor {
 
@@ -74,7 +78,67 @@ struct RemoveParaMark {
     ParaFormat para;
 };
 
-using Step = std::variant<InsertText, InsertFragment, DeleteRange, InsertParaMark, RemoveParaMark>;
+/**
+ * 插入一棵子树（控件、图片、表格这类整块内容）。节点级坐标用 Pos（第四节：节点级 API 用 Pos），
+ * 同时记下它对应的流位置供位置映射使用；两者对不上时 canApply 会拒掉，所以这份冗余不会被误信。
+ *
+ * detached 是已经摘下的那棵子树在池里的根 id。构造时（makeInsertNode）就把子树物化好，于是
+ * 应用、撤销与重做都是同一棵树在挂上、拿下之间来回 —— 节点的身份不变。kInvalid 表示没有可挂的
+ * 现成子树，apply 会按 subtree 现建一棵（身份不保持，序列化还原时走这条路）。
+ */
+struct InsertNode {
+    Pos at;
+    FlowPos at_flow = 0;
+    NodeSpec subtree;
+    NodeId detached = kInvalidNodeId;
+};
+
+/**
+ * 删除一个子节点（连同它的整棵子树）。用它表达"删掉一个控件"这类结构操作。
+ *
+ * removed 是内容与结构的拷贝（供序列化与校验），detached 是被摘下后留在池里的根 id（供撤销
+ * 原样挂回）。两者记的是同一棵子树：前者说明"删了什么"，后者说明"它现在在哪"。
+ */
+struct RemoveNode {
+    Pos at;
+    FlowPos at_flow = 0;
+    NodeSpec removed;
+    NodeId detached = kInvalidNodeId;
+};
+
+/**
+ * 改控件的一个属性（第七节的四个：hidden / readonly / required / structureLock）。
+ *
+ * 一次只改一项：批量的形状由事务表达（一个事务里多条步骤），步骤本身保持最小 —— 这样逆操作
+ * 与"只改 readonly 不重排"这类判断都只有一个分支要看。before 记下原值，逆操作因此自足。
+ *
+ * 位置映射是恒等：这一步不改编辑态的位置。hidden 会改呈现态的流结构，但那是"要重排"
+ * （重建派生索引），不是"把某个位置搬到别处"，所以不在这层表达。
+ */
+struct SetControlProp {
+    NodeId id = kInvalidNodeId;
+    ControlProp prop = ControlProp::Readonly;
+    bool value = false;
+    bool before = false;
+};
+
+/**
+ * 改控件属性侧的值（Bool / Enum / List / Resource）。
+ *
+ * 值分两半：文本类的值在内容里，改它走内容级的节点步骤（摘掉旧文本节点、插一个新文本节点，
+ * 见 ControlApi）；这里只覆盖"值放在记录上"的那一半。与 SetControlProp 一样带原值，
+ * 逆操作因此自足；同样一次只改一个控件，批量的形状由事务表达。
+ *
+ * 位置映射是恒等：这一步不改流位置，也不改流结构（值与属性都不占位置）。
+ */
+struct SetControlValue {
+    NodeId id = kInvalidNodeId;
+    ControlValue value;
+    ControlValue before;
+};
+
+using Step = std::variant<InsertText, InsertFragment, DeleteRange, InsertParaMark, RemoveParaMark,
+                          InsertNode, RemoveNode, SetControlProp, SetControlValue>;
 
 /**
  * 步骤的执行结果。失败时给出原因 —— 位置越界、类型不符都要显式说出来，不静默不做。
@@ -97,6 +161,26 @@ struct DeleteBuild {
  * 构造一个删除步骤：先取区间（顺带校验可编辑集合），再带着片段构造。
  */
 DeleteBuild makeDeleteRange(const NodeTree& tree, Range range);
+
+/**
+ * 节点级步骤的构造结果。
+ */
+struct NodeBuild {
+    Step step;
+    bool ok = false;
+    std::string error;
+};
+
+/**
+ * 构造"插入一棵子树"的步骤：先把 spec 物化成一棵摘下的子树（身份就此定下），再把
+ * "插到哪里"记进去。于是应用与撤销只是把它挂上、拿下，同一个节点的 id 在往返中不变。
+ */
+NodeBuild makeInsertNode(NodeTree& tree, const Pos& at, const NodeSpec& spec);
+
+/**
+ * 构造"删除一个子节点"的步骤：记下它的内容（captureSubtree）与身份（它自己就是池里的那个节点）。
+ */
+NodeBuild makeRemoveNode(const NodeTree& tree, const Pos& at);
 
 /**
  * 这个步骤现在能应用吗。applyStep 先跑它，所以失败时文档一定没被动过。

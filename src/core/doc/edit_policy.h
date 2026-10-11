@@ -11,17 +11,9 @@
 #pragma once
 
 #include "core/doc/control.h"
+#include "core/doc/edit_mode.h"
 
 namespace heditor {
-
-enum class EditMode : int {
-    Document = 0,  // 文档模式：随便改（默认值，保证旧行为一字不变）
-    Form = 1,      // 表单模式：只能在可编辑控件的区间里改
-    ReadOnly = 2,  // 只读模式：一个字都不许改
-};
-
-const char* editModeName(EditMode m);
-EditMode editModeFromCode(int code);
 
 class EditPolicy {
 public:

@@ -29,19 +29,6 @@ void add(InvariantReport* r, const char* rule, NodeId node, int at, std::string 
     r->violations.push_back(Violation{rule, node, at, std::move(detail)});
 }
 
-/**
- * 谁允许装谁。只登记第三节已经定下的三条强约束，其余容器不限制子节点
- * （第三节：子节点约束是一个位标志的并集，尚未逐种登记）。
- */
-bool acceptsChild(NodeKind parent, NodeKind child) {
-    switch (parent) {
-        case NodeKind::Document: return child == NodeKind::Section;
-        case NodeKind::Table: return child == NodeKind::TableRow;
-        case NodeKind::TableRow: return child == NodeKind::TableCell;
-        default: return true;
-    }
-}
-
 bool holdsChild(const std::vector<Node*>& children, const Node* n) {
     return std::find(children.begin(), children.end(), n) != children.end();
 }
@@ -78,15 +65,11 @@ std::vector<PendingRule> pendingRules() {
         {"文本.不允许零宽标记区间（标记的无重复与顺序在结构体表示下不可违反）",
          "1.2 临时的带标记区间"},
         {"结构.schema 的完整声明（哪些能装哪些、最少几个、最多几个）",
-         "1.4 / 1.5 / 1.7 在容器、控件与表格落地时逐种登记"},
-        {"容器.显式边界元素的不交叉（今天由树的区间嵌套等价保证）", "1.4 容器元素与边界位置"},
+         "1.5 / 1.7 在控件与表格落地时逐种登记"},
         {"身份.控件 id 唯一、key 不要求唯一", "1.5 控件索引"},
         {"身份.节点 ID 在保存与重新打开之后仍然有效", "1.10 序列化往返"},
-        {"表格.跨度之和相等、无重叠、无空洞、续格紧邻、有列定义则数据行不许合并",
-         "1.7 表格"},
+        {"表格.跨度之和相等、无重叠、无空洞、续格紧邻、有列定义则数据行不许合并", "1.7 表格"},
         {"域.求值只更新缓存值、只有排版结果类允许迭代且必须终止", "1.8 域"},
-        {"编辑能力.可编辑集合取交集、落点是谓词、选区不受限、越界拒绝并给原因",
-         "1.4 表单模式落点判定与 1.5 控件锁"},
         {"取值与嵌套.取值拼接、含子控件拒绝整体设值、同 group 互斥、真原子的文本表示",
          "1.5 控件与 1.4 原子"},
     };

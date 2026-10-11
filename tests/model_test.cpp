@@ -1,19 +1,21 @@
 /**
- * 文档模型 0.1 ~ 1.3 的判据：位置、分段、不变量、编译、长度、规范化、编辑步骤、撤销。
- *
- * 这一层没法靠"看起来对"验收 —— 位置错一格，表象是光标跳、命中偏、撤销回错地方，全都要到
- * 界面才看得见。所以判据只落在数据层，每条都可证伪：
- *   0.1 流位置不丢（flowAt(posAt(f)) == f）与往返不改归属；后者绕开"同一位置有多种 Pos
- *       写法"—— 容器第 0 槽位与第一个孩子的第一个位置本来就是一个流位置。
+ * 文档模型 0.1 ~ 1.5 的判据。这一层靠"看起来对"验收不了（位置错一格，表象是光标跳、命中偏、
+ * 撤销回错地方，全都要到界面才看得见），所以判据只落在数据层，每条都可证伪：
+ *   0.1 流位置不丢（flowAt(posAt(f)) == f）与往返不改归属 —— 后者不要求 Pos 逐字段相等，
+ *       因为同一个流位置本来就有多种 Pos 写法，逐字段相等会把正确实现判成错。
  *   0.2 下标数组与全部段落查询跟暴力算法逐项比对，随机增删中每步与重建结果整体比对。
  *   0.3 不变量检查器：现有形状全绿，且逐条构造反例时必须报出对应的那条规则。
  *   0.4 编译：同一份内容走"现有 BlockSpec 路径"与"树 → 编译"两条路逐字段一致。
  *   0.5 长度：单位换算的两支往返、文本形式往返后类型与数值都不丢、畸形输入全被拒。
  *   1.1 规范化：幂等（第二遍零改动且快照逐条相同）、跨容器不合并、空容器不清除。
- *   1.2 步骤：应用加逆操作回到原样；取删插等于原状；端点外扩；映射与逆映射往返一致。
- *   1.3 撤销：连撤 N 次逐次回到对应步骤的状态、重做逐次回到编辑后、连续输入并成一个撤销单位、
- *       提交中途失败整条作废。
- *
+ *   1.2 步骤：内容级（往返回到原样、取删插等于原状、映射往返一致）与节点级（整棵子树增删、
+ *       撤销后带身份的快照逐条相同）；端点外扩。
+ *   1.3 撤销：连撤逐次回到对应步骤的状态、重做逐次回到编辑后、连续输入并成一个撤销单位。
+ *   1.4 落点判定：四个边界位置互不相同且 posAt 单射；可编辑集合取交集；方向键不跳出集合；
+ *       Tab 只落可编辑控件、无下一个时放行；越界编辑被拒且给原因；结构操作默认被拒。
+ *   1.5 控件与宿主 API：索引与重建逐项相同、批量设值一个撤销步骤、撤销后逐字段回到原样；
+ *       属性侧的值与文本类共用一条 API 但落点不同；外观逐项读回且类型不丢；异步裁决门在
+ *       等待期间不动文档与撤销栈、Allow 才应用、Deny 与超时保持原值并标 invalid。
  * 覆盖四层：写死的形状、穷举、随机、增删序列；前两层在两种可见性口径下各过一遍。
  */
 #include <algorithm>
@@ -24,6 +26,9 @@
 #include <vector>
 
 #include "core/doc/compile.h"
+#include "core/doc/control_api.h"
+#include "core/doc/control_index.h"
+#include "core/doc/edit_capability.h"
 #include "core/doc/flow.h"
 #include "core/doc/fragment.h"
 #include "core/doc/invariants.h"
@@ -34,6 +39,7 @@
 #include "core/doc/range.h"
 #include "core/doc/steps.h"
 #include "core/doc/transaction.h"
+#include "core/doc/validation.h"
 #include "core/utils/units.h"
 #include "demo/demo_documents.h"
 
@@ -1224,6 +1230,46 @@ std::string snapshotDiffText(const std::vector<std::string>& a, const std::vecto
 }
 
 /**
+ * 带身份的快照：每行以节点 id 开头。节点级步骤的往返判据要用它 —— 光比内容的话，
+ * "撤销时重造了一棵内容一样的子树"也会被当成通过，而那个节点的身份已经换了。
+ */
+void snapshotIdsInto(const NodeTree& tree, NodeId id, std::vector<std::string>* out) {
+    const Node* n = tree.find(id);
+    std::string s = std::to_string(n->id) + "|" + nodeKindName(n->kind);
+    s += "|t=" + std::to_string(n->text.size());
+    s += "|m=" + marksKey(n->marks);
+    s += "|p=" + std::to_string(n->para.font_index) + "," + printLength(n->para.size) + "," +
+         printLength(n->para.space_after) + "," + std::to_string(n->para.line_factor);
+    s += "|c=" + n->control.key + "," + n->control.controlType + "," +
+         (n->control.readonly ? "ro" : "-") + "," + (n->control.structureLock ? "lock" : "open");
+    s += "|h=" + std::string(n->hidden ? "1" : "0");
+    s += "|kids=" + std::to_string(n->children.size());
+    out->push_back(std::move(s));
+    for (const Node* c : n->children) snapshotIdsInto(tree, c->id, out);
+}
+
+std::vector<std::string> nodeIdsSnapshot(const NodeTree& tree) {
+    std::vector<std::string> out;
+    snapshotIdsInto(tree, tree.rootId(), &out);
+    return out;
+}
+
+/**
+ * 一棵新建的控件子树：控件（key=new_field）里一个码点的文本。
+ */
+NodeSpec makeFreshControlSpec() {
+    NodeSpec cc;
+    cc.kind = NodeKind::ContentControl;
+    cc.control.key = "new_field";
+    cc.control.controlType = "text";
+    NodeSpec text;
+    text.kind = NodeKind::TextRun;
+    text.text = cps({0x41});
+    cc.children.push_back(text);
+    return cc;
+}
+
+/**
  * 刻意未规范的树：相邻同标记、夹着空 run、标记不同的 run、嵌套容器、空容器、隐藏子树。
  */
 NodeTree makeMessyTree() {
@@ -1838,10 +1884,1302 @@ void checkUndoGrouping() {
     }
 }
 
+/**
+ * 表单形状：静态文字、一个可编辑控件、一个只读控件、只读外层套可编辑内层。流坐标（size 23）：
+ *   主诉[1,3)  chief（可编辑）[3,7)：起始 3、内容 4..5、结束 6  PM[7,8)
+ *   姓名[8,10)  name（只读）[10,14)：起始 10、内容 11..12、结束 13  PM[14,15)
+ *   outer（只读）[15,21)：起始 15、内容 16..19、结束 20；内含 inner（可编辑）[17,20)：内容 18
+ *   PM[21,22)
+ * 只读外层套可编辑内层是判据的关键：可编辑集合取交集，所以 inner 的内容仍不可编辑。
+ */
+NodeTree makeFormTree() {
+    NodeTree tree;
+    const NodeId sec = tree.firstSectionId();
+    tree.setText(tree.appendChild(sec, NodeKind::TextRun), cps({0x4e3b, 0x8bc9}));
+    const NodeId chief = tree.appendChild(sec, NodeKind::ContentControl);
+    tree.find(chief)->control.key = "chief";
+    tree.setText(tree.appendChild(chief, NodeKind::TextRun), cps({0x5934, 0x75db}));
+    tree.appendChild(sec, NodeKind::ParagraphMark);
+    tree.setText(tree.appendChild(sec, NodeKind::TextRun), cps({0x59d3, 0x540d}));
+    const NodeId name = tree.appendChild(sec, NodeKind::ContentControl);
+    tree.find(name)->control.key = "name";
+    tree.find(name)->control.readonly = true;
+    tree.setText(tree.appendChild(name, NodeKind::TextRun), cps({0x5f20, 0x4e09}));
+    tree.appendChild(sec, NodeKind::ParagraphMark);
+    const NodeId outer = tree.appendChild(sec, NodeKind::ContentControl);
+    tree.find(outer)->control.key = "outer";
+    tree.find(outer)->control.readonly = true;
+    tree.setText(tree.appendChild(outer, NodeKind::TextRun), cps({0x58f9}));
+    const NodeId inner = tree.appendChild(outer, NodeKind::ContentControl);
+    tree.find(inner)->control.key = "inner";
+    tree.setText(tree.appendChild(inner, NodeKind::TextRun), cps({0x8d30}));
+    tree.appendChild(sec, NodeKind::ParagraphMark);
+    return tree;
+}
+
+/**
+ * 可编辑的外层套一个只读内层，用来验"区间整块包住只读控件"这条闸门。
+ *
+ * 流坐标：CC host（可编辑）[1,8)，内容 2..7；其中 CC locked（只读）[3,6)，内容 4..5。
+ * 于是 3 与 6 在 host 里可编辑，而中间的 4、5 被 locked 挡住。
+ */
+NodeTree makeFormNestedTree() {
+    NodeTree tree;
+    const NodeId sec = tree.firstSectionId();
+    const NodeId host = tree.appendChild(sec, NodeKind::ContentControl);
+    tree.find(host)->control.key = "host";
+    tree.setText(tree.appendChild(host, NodeKind::TextRun), cps({0x4e00}));
+    const NodeId locked = tree.appendChild(host, NodeKind::ContentControl);
+    tree.find(locked)->control.key = "locked";
+    tree.find(locked)->control.readonly = true;
+    tree.setText(tree.appendChild(locked, NodeKind::TextRun), cps({0x4e8c}));
+    tree.setText(tree.appendChild(host, NodeKind::TextRun), cps({0x4e09}));
+    tree.appendChild(sec, NodeKind::ParagraphMark);
+    return tree;
+}
+
+/**
+ * 两个可编辑控件被一个只读控件隔开：CC a [1,4)、只读 CC b [6,9)、CC c [11,14)。
+ * 用来验 Tab 跳的是"可编辑控件"，而不是"下一个控件"。
+ */
+NodeTree makeFormTabTree() {
+    NodeTree tree;
+    const NodeId sec = tree.firstSectionId();
+    const NodeId a = tree.appendChild(sec, NodeKind::ContentControl);
+    tree.find(a)->control.key = "a";
+    tree.setText(tree.appendChild(a, NodeKind::TextRun), cps({0x4e00}));
+    tree.setText(tree.appendChild(sec, NodeKind::TextRun), cps({0x4e8c, 0x4e8c}));
+    const NodeId b = tree.appendChild(sec, NodeKind::ContentControl);
+    tree.find(b)->control.key = "b";
+    tree.find(b)->control.readonly = true;
+    tree.setText(tree.appendChild(b, NodeKind::TextRun), cps({0x4e09}));
+    tree.setText(tree.appendChild(sec, NodeKind::TextRun), cps({0x56db, 0x56db}));
+    const NodeId c = tree.appendChild(sec, NodeKind::ContentControl);
+    tree.find(c)->control.key = "c";
+    tree.setText(tree.appendChild(c, NodeKind::TextRun), cps({0x4e94}));
+    tree.appendChild(sec, NodeKind::ParagraphMark);
+    return tree;
+}
+
+/**
+ * posAt 在这个形状上是否两两不同：没有两个流位置归到同一格 Pos。
+ *
+ * 少一个位置可寻址时这里会失败（某个位置被就近归给了邻居），而那种失败正是四个边界缺陷的
+ * 成因。它比"往返"更强地钉住"归属互不相同"这句话。
+ */
+bool posAtInjective(const NodeTree& tree) {
+    const FlowIndex idx(tree, FlowVisibility::Design);
+    std::vector<std::string> seen;
+    for (int f = 0; f <= idx.size(); ++f) {
+        const Pos p = idx.posAt(f);
+        const std::string key = std::to_string(p.container) + ":" + std::to_string(p.offset);
+        for (const std::string& s : seen) {
+            if (s == key) return false;
+        }
+        seen.push_back(key);
+    }
+    return true;
+}
+
+/**
+ * 1.4：控件的边界位置。一个行内控件把同段内的位置切成四段 —— 控件之前 / 内容开头 / 内容末尾 /
+ * 控件之后，四个流位置互不相同，且每一个都有自己的一格 Pos。
+ *
+ * 这是上一轮四个边界缺陷的正面判据：那时"在 [ 与 ] 之间"在整数偏移里没有编码，于是
+ * "控件之前"与"控件内部"会撞在同一个位置上。现在它们各自有位置，靠的是边界是流里的元素。
+ */
+void checkBoundaryPositions() {
+    const NodeTree tree = makeFormTree();
+    const NodeId sec = tree.firstSectionId();
+    const NodeId chief = tree.find(sec)->children[1]->id;
+    const FlowIndex idx(tree, FlowVisibility::Design);
+
+    const FlowPos before = idx.flowAt(Pos{sec, 1});
+    const FlowPos inside = idx.flowAt(Pos{chief, 0});
+    const FlowPos content_end = idx.flowAt(Pos{chief, 1});
+    const FlowPos after = idx.flowAt(Pos{sec, 2});
+    expectTrue(before == 3 && inside == 4 && content_end == 6 && after == 7,
+               "1.4 / 边界：控件之前 3、内容开头 4、内容末尾 6、控件之后 7");
+    expectTrue(before != inside && inside != content_end && content_end != after &&
+                   before != content_end && before != after && inside != after,
+               "1.4 / 边界：四个流位置两两不同");
+    expectTrue(posAtInjective(makeFormTree()) && posAtInjective(makeEmptyControl()) &&
+                   posAtInjective(makeNestedControls()) && posAtInjective(makeControlAcrossMark()),
+               "1.4 / 边界：四种控件形状下 posAt 都单射（归属互不相同）");
+}
+
+/**
+ * 1.4：可编辑集合。表单模式下它是交集 —— 包住这个位置的每一层内容控件都允许，位置才可编辑。
+ */
+void checkEditableSet() {
+    const NodeTree tree = makeFormTree();
+    const FlowIndex idx(tree, FlowVisibility::Design);
+    const int last = idx.size();
+
+    bool all = true;
+    for (int f = 0; f <= last; ++f) {
+        if (!canEditAt(tree, EditMode::Document, f).allowed) all = false;
+    }
+    expectTrue(all, "1.4 / 可编辑集合：文档模式全部位置可编辑");
+
+    bool none = true;
+    for (int f = 0; f <= last; ++f) {
+        if (canEditAt(tree, EditMode::ReadOnly, f).allowed) none = false;
+    }
+    expectTrue(none, "1.4 / 可编辑集合：只读模式全部位置不可编辑");
+
+    std::string got;
+    for (int f = 0; f <= last; ++f) {
+        if (canEditAt(tree, EditMode::Form, f).allowed) got += std::to_string(f) + " ";
+    }
+    expectTrue(got == "4 5 6 ",
+               "1.4 / 可编辑集合：表单模式只有可编辑控件的内容可编辑（实得 " + got + "）");
+
+    const NodeId sec = tree.firstSectionId();
+    const NodeId name = tree.find(sec)->children[4]->id;
+    const NodeId outer = tree.find(sec)->children[6]->id;
+    const NodeId inner = tree.find(outer)->children[1]->id;
+    expectTrue(tree.find(name)->control.readonly, "1.4 / 可编辑集合：只读控件自身标着只读（对照）");
+    expectTrue(!tree.find(inner)->control.readonly,
+               "1.4 / 可编辑集合（交集）：内层控件自身是可编辑的（只看它会判成可编辑）");
+    expectTrue(!canEditAt(tree, EditMode::Form, 18).allowed &&
+                   !canEditAt(tree, EditMode::Form, 19).allowed,
+               "1.4 / 可编辑集合（交集）：只读外层里的可编辑控件位置仍不可编辑");
+    expectTrue(!canEditAt(tree, EditMode::Form, 2).allowed,
+               "1.4 / 可编辑集合：控件之外的静态文字不可编辑");
+    expectTrue(!canEditAt(tree, EditMode::Form, 3).allowed,
+               "1.4 / 可编辑集合：控件起始边界（控件之前）不可编辑");
+    expectTrue(!canEditAt(tree, EditMode::Form, 7).allowed, "1.4 / 可编辑集合：段落标记处不可编辑");
+
+    // 隐藏的控件在表单模式下整棵摘除，位置根本不在流里，也就谈不上可编辑。
+    {
+        NodeTree t = makeFormTree();
+        const NodeId s = t.firstSectionId();
+        const NodeId chief = t.find(s)->children[1]->id;
+        t.find(chief)->hidden = true;
+        const FlowIndex disp(t, FlowVisibility::Display);
+        expectTrue(disp.flowAt(Pos{chief, 0}) < 0,
+                   "1.4 / 可编辑集合：隐藏控件在表单模式下滑除，位置不可寻址");
+        bool any = false;
+        for (int f = 0; f <= disp.size(); ++f) {
+            if (canEditAt(t, EditMode::Form, f).allowed) any = true;
+        }
+        expectTrue(!any, "1.4 / 可编辑集合：隐藏控件摘除后，表单模式无任何可编辑位置");
+    }
+}
+
+/**
+ * 1.4：方向键。表单模式下目标位置必须在集合内；集合外的方向就沿该方向找最近的可编辑位置，
+ * 找不到则原地不动。选择"跳过"而不是"顶住边界"，是为了不把键盘用户困在单个控件里。
+ */
+void checkFormNavigation() {
+    const NodeTree tree = makeFormTree();
+
+    expectTrue(stepEditable(tree, EditMode::Form, 2, +1) == 4,
+               "1.4 / 方向键：控件之外往右跳到最近的可编辑位置（跳过控件起始边界）");
+    expectTrue(stepEditable(tree, EditMode::Form, 4, +1) == 5 &&
+                   stepEditable(tree, EditMode::Form, 5, +1) == 6,
+               "1.4 / 方向键：控件内容里逐位前进");
+    expectTrue(stepEditable(tree, EditMode::Form, 6, +1) == 6,
+               "1.4 / 方向键：控件末尾往右停在原地，不跳出可编辑集合");
+    expectTrue(stepEditable(tree, EditMode::Form, 6, -1) == 5, "1.4 / 方向键：反向同理");
+    expectTrue(stepEditable(tree, EditMode::Form, 20, -1) == 6,
+               "1.4 / 方向键：从只读区往左跳回最近的可编辑位置");
+
+    std::vector<int> reached{4};
+    FlowPos cur = 4;
+    for (int i = 0; i < 8; ++i) {
+        const FlowPos next = stepEditable(tree, EditMode::Form, cur, +1);
+        if (next == cur) break;
+        cur = next;
+        reached.push_back(cur);
+    }
+    expectTrue((reached == std::vector<int>{4, 5, 6}),
+               "1.4 / 方向键：可编辑集合的每个位置都能到达");
+
+    expectTrue(stepEditable(tree, EditMode::Document, 2, +1) == 3 &&
+                   stepEditable(tree, EditMode::ReadOnly, 2, +1) == 3,
+               "1.4 / 方向键：文档与只读模式是相邻一步（落点不受限）");
+}
+
+/**
+ * 1.4：Tab。表单模式在可编辑控件之间走；文档模式（Tab 是制表符）与只读模式（放行）都不消费。
+ */
+void checkTabStops() {
+    const NodeTree tree = makeFormTabTree();
+
+    expectTrue(tabFrom(tree, EditMode::Form, 0, false).handled &&
+                   tabFrom(tree, EditMode::Form, 0, false).target == 2,
+               "1.4 / Tab：表单模式落到第一个可编辑控件的起点");
+    expectTrue(tabFrom(tree, EditMode::Form, 3, false).handled &&
+                   tabFrom(tree, EditMode::Form, 3, false).target == 12,
+               "1.4 / Tab：跳过中间的只读控件，落到下一个可编辑控件");
+    expectTrue(!tabFrom(tree, EditMode::Form, 12, false).handled,
+               "1.4 / Tab：末个可编辑控件之后放行给宿主");
+    expectTrue(tabFrom(tree, EditMode::Form, 13, true).handled &&
+                   tabFrom(tree, EditMode::Form, 13, true).target == 2,
+               "1.4 / Tab：Shift+Tab 退回上一个可编辑控件");
+    expectTrue(!tabFrom(tree, EditMode::Form, 2, true).handled,
+               "1.4 / Tab：没有上一个可编辑控件时放行");
+    expectTrue(!tabFrom(tree, EditMode::Document, 0, false).handled,
+               "1.4 / Tab：文档模式不消费 —— Tab 在那里是制表符");
+    expectTrue(!tabFrom(tree, EditMode::ReadOnly, 0, false).handled,
+               "1.4 / Tab：只读模式放行，让焦点落到编辑器之外");
+}
+
+/**
+ * 1.4：编辑动作的越界闸门。越界一律拒绝并给原因，不静默把范围裁到可编辑部分。
+ */
+void checkEditRangeGate() {
+    const NodeTree tree = makeFormTree();
+
+    expectTrue(canEditRange(tree, EditMode::Form, Range{4, 6}).allowed,
+               "1.4 / 编辑区间：整段落在可编辑控件内容里，允许");
+
+    const EditCheck out = canEditRange(tree, EditMode::Form, Range{2, 5});
+    expectTrue(!out.allowed && !out.reason.empty(),
+               "1.4 / 编辑区间：起点在控件之外被拒并给原因（" + out.reason + "）");
+
+    const EditCheck into_readonly = canEditRange(tree, EditMode::Form, Range{5, 11});
+    expectTrue(!into_readonly.allowed && into_readonly.reason.find("只读") != std::string::npos,
+               "1.4 / 编辑区间：跨进只读控件被拒，原因点名只读（" + into_readonly.reason + "）");
+
+    expectTrue(!canEditRange(tree, EditMode::Form, Range{3, 7}).allowed,
+               "1.4 / 编辑区间：整块覆盖控件（含它的一对边界）被拒");
+
+    const EditCheck inner = canEditRange(tree, EditMode::Form, Range{18, 20});
+    expectTrue(!inner.allowed && inner.reason.find("只读") != std::string::npos,
+               "1.4 / 编辑区间（交集）：只读外层内的可编辑控件区间被拒（" + inner.reason + "）");
+
+    expectTrue(canEditRange(tree, EditMode::Document, Range{2, 20}).allowed,
+               "1.4 / 编辑区间：文档模式放行");
+    expectTrue(!canEditRange(tree, EditMode::ReadOnly, Range{4, 6}).allowed,
+               "1.4 / 编辑区间：只读模式一律拒绝");
+    expectTrue(canEditRange(tree, EditMode::Form, Range{5, 5}).allowed &&
+                   !canEditRange(tree, EditMode::Form, Range{12, 12}).allowed,
+               "1.4 / 编辑区间：空区间（光标）等同落点判定");
+
+    // 区间两端都落在可编辑的外层控件里，但中间整块包住了只读内层 —— 这条闸门堵的是
+    // "跨过只读控件就能删掉它的内容"这个绕开只读的口子。
+    const NodeTree nested = makeFormNestedTree();
+    const EditCheck wrap = canEditRange(nested, EditMode::Form, Range{3, 6});
+    expectTrue(!wrap.allowed && wrap.reason.find("包住") != std::string::npos,
+               "1.4 / 编辑区间：整块包住只读控件被拒（" + wrap.reason + "）");
+    expectTrue(canEditRange(nested, EditMode::Form, Range{2, 3}).allowed,
+               "1.4 / 编辑区间：只覆盖只读控件之前的那一段，允许（对照）");
+}
+
+/**
+ * 1.4：结构操作。控件属性、默认关闭，作者显式开放后才允许。
+ */
+void checkStructureOps() {
+    const NodeTree tree = makeFormTree();
+    const NodeId sec = tree.firstSectionId();
+    const NodeId text = tree.find(sec)->children[0]->id;
+    const NodeId chief = tree.find(sec)->children[1]->id;
+
+    const EditCheck locked = canDoStructureOp(tree, EditMode::Form, chief);
+    expectTrue(!locked.allowed && locked.reason.find("锁") != std::string::npos,
+               "1.4 / 结构操作：表单模式默认被拒（" + locked.reason + "）");
+
+    NodeTree open = makeFormTree();
+    const NodeId sec2 = open.firstSectionId();
+    const NodeId chief2 = open.find(sec2)->children[1]->id;
+    open.find(chief2)->control.structureLock = false;
+    expectTrue(canDoStructureOp(open, EditMode::Form, chief2).allowed,
+               "1.4 / 结构操作：控件声明可删（structureLock = false）后才允许");
+
+    expectTrue(canDoStructureOp(tree, EditMode::Document, chief).allowed,
+               "1.4 / 结构操作：文档模式放行（作者在设计表单）");
+    expectTrue(!canDoStructureOp(tree, EditMode::ReadOnly, chief).allowed,
+               "1.4 / 结构操作：只读模式一律拒绝");
+    const EditCheck not_ctrl = canDoStructureOp(tree, EditMode::Form, text);
+    expectTrue(!not_ctrl.allowed && not_ctrl.reason.find("控件") != std::string::npos,
+               "1.4 / 结构操作：目标不是控件时被拒（" + not_ctrl.reason + "）");
+}
+
+/**
+ * 1.2 的剩余一半：节点级步骤（InsertNode / RemoveNode）。控件这类整块元素不按区间增删，
+ * 而是整棵子树挂上、拿下，所以不会出现"半个控件"的中间态。
+ *
+ * 判据是两条：流位置的总数正好增减该子树的跨度；撤销之后"带身份的快照"逐条相同 ——
+ * 只比内容的话，"重造一棵内容一样的子树"也会被当成通过，而那个节点的身份已经换了。
+ */
+void checkNodeStepRoundTrip() {
+    // 删掉一个控件再撤销：文档逐字段回到原样，那个节点的 id 不变。
+    {
+        NodeTree tree = makeEditTree();
+        const NodeId sec = tree.firstSectionId();
+        const NodeId cc = tree.find(sec)->children[3]->id;
+        normalizeDocument(tree);
+        const std::vector<std::string> before = nodeIdsSnapshot(tree);
+
+        const NodeBuild b = makeRemoveNode(tree, Pos{sec, 3});
+        const auto* rm = std::get_if<RemoveNode>(&b.step);
+        expectTrue(b.ok && rm != nullptr,
+                   "1.2 / 节点级：删除控件的步骤构造成功" + (b.ok ? "" : "（" + b.error + "）"));
+        expectTrue(rm != nullptr && rm->at_flow == 10 && rm->detached == cc &&
+                       rm->removed.kind == NodeKind::ContentControl &&
+                       rm->removed.children.size() == 1,
+                   "1.2 / 节点级：记下的正是那个控件（流位置 10、身份与内容都在）");
+
+        expectTrue(applyStep(tree, b.step).ok, "1.2 / 节点级：删除可应用");
+        expectTrue(tree.find(cc) != nullptr && tree.find(cc)->parent == nullptr,
+                   "1.2 / 节点级：控件从树上摘下，但没被销毁（节点还在池里）");
+        expectTrue(FlowIndex(tree, FlowVisibility::Design).size() == 12,
+                   "1.2 / 节点级：流位置总数 16 → 12（正好是那个控件的跨度 4）");
+        expectClean(tree, "1.2 / 节点级：删除之后不变量全绿");
+
+        const StepResult u = applyStep(tree, invertStep(b.step));
+        expectTrue(u.ok && nodeIdsSnapshot(tree) == before,
+                   "1.2 / 节点级：撤销之后带身份的快照逐条相同（id 没有变）" +
+                       (u.ok ? "" : "（" + u.error + "）"));
+    }
+
+    // 插入一个新建的控件：构造时身份就定下来，撤销与重做挂的是同一棵树。
+    {
+        NodeTree tree = makeEditTree();
+        const NodeId sec = tree.firstSectionId();
+        normalizeDocument(tree);
+
+        NodeBuild b = makeInsertNode(tree, Pos{sec, 1}, makeFreshControlSpec());
+        const auto* ins = std::get_if<InsertNode>(&b.step);
+        const NodeId planted = ins != nullptr ? ins->detached : kInvalidNodeId;
+        expectTrue(b.ok && ins != nullptr && ins->at_flow == 7,
+                   "1.2 / 节点级：插入控件的步骤构造成功，插入点流位置 7" +
+                       (b.ok ? "" : "（" + b.error + "）"));
+        expectTrue(planted != kInvalidNodeId && tree.find(planted) != nullptr &&
+                       tree.find(planted)->parent == nullptr,
+                   "1.2 / 节点级：构造时子树已经物化成摘下的一棵（身份就此定下）");
+
+        const int size_before = FlowIndex(tree, FlowVisibility::Design).size();
+        expectTrue(applyStep(tree, b.step).ok && tree.find(planted)->parent != nullptr,
+                   "1.2 / 节点级：插入可应用，挂上去的是那棵树");
+        expectTrue(FlowIndex(tree, FlowVisibility::Design).size() == size_before + 3,
+                   "1.2 / 节点级：插入内容 1 码点的控件让流位置 +3（起始 + 内容 + 结束）");
+        expectClean(tree, "1.2 / 节点级：插入之后不变量全绿");
+
+        const std::vector<std::string> with_control = nodeIdsSnapshot(tree);
+        expectTrue(applyStep(tree, invertStep(b.step)).ok && tree.find(planted)->parent == nullptr,
+                   "1.2 / 节点级：撤销把它拿下来（没有销毁，身份还在）");
+        expectTrue(applyStep(tree, b.step).ok && tree.find(planted)->parent != nullptr &&
+                       nodeIdsSnapshot(tree) == with_control,
+                   "1.2 / 节点级：重做挂回同一棵树，快照与第一次插入后逐条相同");
+        expectClean(tree, "1.2 / 节点级：撤销重做一轮之后不变量全绿");
+    }
+
+    // 嵌套子树往返：控件里含段落标记与嵌套控件，各字段都要跟着走。
+    {
+        NodeTree tree = makeEditTree();
+        const NodeId sec = tree.firstSectionId();
+        normalizeDocument(tree);
+
+        NodeSpec outer;
+        outer.kind = NodeKind::ContentControl;
+        outer.control.key = "outer";
+        outer.control.readonly = true;
+        outer.hidden = true;
+        outer.para.size = Length::abs(ptToEmu(14.0));
+        NodeSpec inner_mark;
+        inner_mark.kind = NodeKind::ParagraphMark;
+        inner_mark.para.font_index = 3;
+        outer.children.push_back(inner_mark);
+        NodeSpec inner;
+        inner.kind = NodeKind::ContentControl;
+        inner.control.key = "inner";
+        inner.control.structureLock = false;
+        NodeSpec text;
+        text.kind = NodeKind::TextRun;
+        text.text = cps({0x41, 0x42});
+        text.marks.bold = true;
+        inner.children.push_back(text);
+        outer.children.push_back(inner);
+
+        const NodeBuild b = makeInsertNode(tree, Pos{sec, 3}, outer);
+        expectTrue(b.ok, "1.2 / 节点级：嵌套子树构造成功" + (b.ok ? "" : "（" + b.error + "）"));
+        const int size_before = FlowIndex(tree, FlowVisibility::Design).size();
+        expectTrue(applyStep(tree, b.step).ok &&
+                       FlowIndex(tree, FlowVisibility::Design).size() == size_before + outer.span(),
+                   "1.2 / 节点级：嵌套子树的跨度与 NodeSpec::span 一致（" +
+                       std::to_string(outer.span()) + "）");
+        expectClean(tree, "1.2 / 节点级：嵌套子树插入后不变量全绿");
+        const std::vector<std::string> after = nodeIdsSnapshot(tree);
+        expectTrue(
+            applyStep(tree, invertStep(b.step)).ok && applyStep(tree, b.step).ok &&
+                nodeIdsSnapshot(tree) == after,
+            "1.2 / 节点级：嵌套子树撤销重做后逐字段相同（含 hidden / para / marks / 控件字段）");
+    }
+}
+
+/**
+ * 1.2：节点级步骤的位置映射。子树整体后移或前移它的跨度，被摘掉的区间没有原像。
+ */
+void checkNodeStepMap() {
+    NodeTree tree = makeEditTree();
+    const NodeId sec = tree.firstSectionId();
+    normalizeDocument(tree);
+
+    const NodeBuild rm = makeRemoveNode(tree, Pos{sec, 3});  // 流区间 [10, 14)
+    expectTrue(mapPos(rm.step, 5, Assoc::After) == 5 && mapPos(rm.step, 9, Assoc::After) == 9,
+               "1.2 / 节点级映射：删除区间之前的位置不动");
+    expectTrue(mapPos(rm.step, 10, Assoc::Before) == 10 && mapPos(rm.step, 10, Assoc::After) == 10,
+               "1.2 / 节点级映射：删除区间起点两侧都留在起点");
+    expectTrue(mapPos(rm.step, 11, Assoc::After) == 10 && mapPos(rm.step, 13, Assoc::After) == 10,
+               "1.2 / 节点级映射：被摘子树内部的位置塌到它的起点（单向）");
+    expectTrue(mapPos(rm.step, 14, Assoc::Before) == 10 && mapPos(rm.step, 16, Assoc::After) == 12,
+               "1.2 / 节点级映射：之后的位置整体前移跨度 4");
+
+    const NodeBuild in =
+        makeInsertNode(tree, Pos{sec, 1}, makeFreshControlSpec());  // 插入点 7、跨度 3
+    expectTrue(mapPos(in.step, 3, Assoc::After) == 3, "1.2 / 节点级映射：插入点之前的位置不动");
+    expectTrue(mapPos(in.step, 7, Assoc::Before) == 7 && mapPos(in.step, 7, Assoc::After) == 10,
+               "1.2 / 节点级映射：插入点上按 assoc 分到子树之前 / 之后");
+    expectTrue(mapPos(in.step, 9, Assoc::Before) == 12,
+               "1.2 / 节点级映射：插入点之后的位置整体后移跨度 3");
+
+    // 插入一个区间之外的位置，映射过去再用逆映射搬回来必须回到原处。
+    int bad = 0;
+    for (int p = 0; p <= 16; ++p) {
+        const FlowPos mid = mapPos(in.step, p, Assoc::After);
+        if (mapPos(invertStep(in.step), mid, Assoc::After) != p) ++bad;
+    }
+    expectTrue(bad == 0, "1.2 / 节点级映射：插入步骤与它的逆映射往返一致（不一致 " +
+                             std::to_string(bad) + " 个）");
+}
+
+/**
+ * 1.2：节点级步骤的拒绝路径。构造与校验都要给出原因，不静默纠正。
+ */
+void checkNodeStepRejects() {
+    {
+        const NodeTree tree = makeEditTree();
+        const NodeId sec = tree.firstSectionId();
+        const NodeId text = tree.find(sec)->children[0]->id;
+        const NodeBuild b = makeRemoveNode(tree, Pos{text, 0});
+        expectTrue(!b.ok && b.error.find("不是容器") != std::string::npos,
+                   "1.2 / 节点级：目标不是容器时构造被拒（" + b.error + "）");
+    }
+    {
+        const NodeTree tree = makeEditTree();
+        const NodeId sec = tree.firstSectionId();
+        const NodeBuild b = makeRemoveNode(tree, Pos{sec, 5});
+        expectTrue(!b.ok && b.error.find("没有孩子") != std::string::npos,
+                   "1.2 / 节点级：槽位没有孩子时被拒（" + b.error + "）");
+    }
+    {
+        NodeTree tree = makeEditTree();
+        NodeSpec t;
+        t.kind = NodeKind::TextRun;
+        t.text = cps({0x61});
+        const NodeBuild b = makeInsertNode(tree, Pos{tree.rootId(), 1}, t);
+        expectTrue(!b.ok && b.error.find("不接受") != std::string::npos,
+                   "1.2 / 节点级：根只收节，插入文本被拒（" + b.error + "）");
+    }
+    {
+        NodeTree tree = makeEditTree();
+        const NodeId sec = tree.firstSectionId();
+        const NodeBuild b = makeInsertNode(tree, Pos{sec, 99}, makeFreshControlSpec());
+        expectTrue(!b.ok && b.error.find("越界") != std::string::npos,
+                   "1.2 / 节点级：槽位越界时被拒（" + b.error + "）");
+    }
+    {
+        // 步骤过期：流位置与文档对不上时必须拒，不能照 at 硬插。
+        NodeTree tree = makeEditTree();
+        const NodeId sec = tree.firstSectionId();
+        NodeBuild b = makeRemoveNode(tree, Pos{sec, 3});
+        std::get<RemoveNode>(b.step).at_flow = 999;
+        const StepResult r = applyStep(tree, b.step);
+        expectTrue(!r.ok && r.error.find("对不上") != std::string::npos,
+                   "1.2 / 节点级：流位置与文档对不上的步骤被拒（" + r.error + "）");
+    }
+    {
+        // 同一步骤重复应用：子树已经挂在树上，再挂一次会拆散父子链。
+        NodeTree tree = makeEditTree();
+        const NodeId sec = tree.firstSectionId();
+        const NodeBuild b = makeInsertNode(tree, Pos{sec, 1}, makeFreshControlSpec());
+        expectTrue(applyStep(tree, b.step).ok, "1.2 / 节点级：插入先应用成功");
+        const StepResult again = applyStep(tree, b.step);
+        expectTrue(!again.ok && again.error.find("已经挂在树上") != std::string::npos,
+                   "1.2 / 节点级：同一步骤重复应用被拒（" + again.error + "）");
+    }
+    {
+        // 已知边界：含整棵节点的区间提取还没做（控件走节点级步骤），所以"选一段含控件的内容
+        // 再复制"仍会被拒。写成断言是为了让"还没做"可发现，而不是让人以为已经支持。
+        const NodeTree tree = makeEditTree();
+        const ExtractResult ex = extractRange(tree, Range{5, 12});
+        expectTrue(!ex.ok && ex.error.find("区间含") != std::string::npos,
+                   "1.2 / 节点级：含控件的区间提取仍被拒（" + ex.error + "）");
+    }
+}
+
+/**
+ * 1.2：节点级步骤的权限。步骤本身只答"结构上能不能应用"，权限另算一层。
+ */
+void checkNodeStepGate() {
+    NodeTree tree = makeEditTree();
+    const NodeId sec = tree.firstSectionId();
+    const NodeBuild b = makeRemoveNode(tree, Pos{sec, 3});  // 控件默认 structureLock = true
+
+    const EditCheck form = canEditStep(tree, EditMode::Form, b.step);
+    expectTrue(!form.allowed && form.reason.find("锁") != std::string::npos,
+               "1.2 / 节点级权限：表单模式默认拒绝删除控件（" + form.reason + "）");
+    expectTrue(canEditStep(tree, EditMode::Document, b.step).allowed,
+               "1.2 / 节点级权限：文档模式放行");
+    expectTrue(!canEditStep(tree, EditMode::ReadOnly, b.step).allowed,
+               "1.2 / 节点级权限：只读模式拒绝");
+
+    tree.find(tree.find(sec)->children[3]->id)->control.structureLock = false;
+    expectTrue(canEditStep(tree, EditMode::Form, b.step).allowed,
+               "1.2 / 节点级权限：控件声明可删之后表单模式放行");
+
+    NodeSpec img;
+    img.kind = NodeKind::Image;
+    const NodeBuild ib = makeInsertNode(tree, Pos{sec, 1}, img);
+    const EditCheck bad = canEditStep(tree, EditMode::Form, ib.step);
+    expectTrue(!bad.allowed && bad.reason.find("只允许插入控件") != std::string::npos,
+               "1.2 / 节点级权限：表单模式不接受插入图片（" + bad.reason + "）");
+
+    InsertText it;
+    it.at = 3;  // 落在控件之外的文本里
+    it.cps = cps({0x41});
+    const EditCheck content = canEditStep(tree, EditMode::Form, Step{it});
+    expectTrue(!content.allowed && content.reason.find("控件") != std::string::npos,
+               "1.2 / 节点级权限：内容级步骤仍按落点判，控件之外被拒（" + content.reason + "）");
+}
+
+/**
+ * 1.5 的表单文书：静态文字、一个可编辑文本控件、同一个 key 的两处、外层含内层控件、
+ * 一个跨段落标记的控件、一个选择类控件。流坐标与取值期望都在下面的断言里。
+ */
+struct FormDoc {
+    NodeTree tree;
+    NodeId chief = kInvalidNodeId;     // key=chief，内容 "AB"
+    NodeId name1 = kInvalidNodeId;     // key=patient_name，内容 "C"
+    NodeId name2 = kInvalidNodeId;     // 同 key 的第二处
+    NodeId outer = kInvalidNodeId;     // key=outer，内部 "D" + 内层控件
+    NodeId duration = kInvalidNodeId;  // key=duration，内容 "EF"（outer 的内层）
+    NodeId multi = kInvalidNodeId;     // key=multi，内容 "G" + 段落标记 + "H"
+    NodeId allergy = kInvalidNodeId;   // key=allergy，Bool 形态
+};
+
+FormDoc makeFormDoc() {
+    FormDoc d;
+    const NodeId sec = d.tree.firstSectionId();
+    d.tree.setText(d.tree.appendChild(sec, NodeKind::TextRun), cps({0x4e3b, 0x8bc9}));
+
+    d.chief = d.tree.appendChild(sec, NodeKind::ContentControl);
+    d.tree.find(d.chief)->control.key = "chief";
+    d.tree.setText(d.tree.appendChild(d.chief, NodeKind::TextRun), cps({0x41, 0x42}));
+    d.tree.appendChild(sec, NodeKind::ParagraphMark);
+
+    d.name1 = d.tree.appendChild(sec, NodeKind::ContentControl);
+    d.tree.find(d.name1)->control.key = "patient_name";
+    d.tree.setText(d.tree.appendChild(d.name1, NodeKind::TextRun), cps({0x43}));
+    d.tree.appendChild(sec, NodeKind::ParagraphMark);
+
+    d.name2 = d.tree.appendChild(sec, NodeKind::ContentControl);
+    d.tree.find(d.name2)->control.key = "patient_name";
+    d.tree.setText(d.tree.appendChild(d.name2, NodeKind::TextRun), cps({0x43}));
+    d.tree.appendChild(sec, NodeKind::ParagraphMark);
+
+    d.outer = d.tree.appendChild(sec, NodeKind::ContentControl);
+    d.tree.find(d.outer)->control.key = "outer";
+    d.tree.setText(d.tree.appendChild(d.outer, NodeKind::TextRun), cps({0x44}));
+    d.duration = d.tree.appendChild(d.outer, NodeKind::ContentControl);
+    d.tree.find(d.duration)->control.key = "duration";
+    d.tree.setText(d.tree.appendChild(d.duration, NodeKind::TextRun), cps({0x45, 0x46}));
+    d.tree.appendChild(sec, NodeKind::ParagraphMark);
+
+    d.multi = d.tree.appendChild(sec, NodeKind::ContentControl);
+    d.tree.find(d.multi)->control.key = "multi";
+    d.tree.setText(d.tree.appendChild(d.multi, NodeKind::TextRun), cps({0x47}));
+    d.tree.appendChild(d.multi, NodeKind::ParagraphMark);
+    d.tree.setText(d.tree.appendChild(d.multi, NodeKind::TextRun), cps({0x48}));
+    d.tree.appendChild(sec, NodeKind::ParagraphMark);
+
+    d.allergy = d.tree.appendChild(sec, NodeKind::ContentControl);
+    d.tree.find(d.allergy)->control.key = "allergy";
+    d.tree.find(d.allergy)->control.controlType = "checkBox";
+    d.tree.find(d.allergy)->control.valueShape = ValueShape::Bool;
+    d.tree.appendChild(sec, NodeKind::ParagraphMark);
+    return d;
+}
+
+/**
+ * 1.5：控件索引。两张表要与重建逐项相同，且文本级步骤不为它付代价。
+ */
+void checkControlIndex() {
+    FormDoc d = makeFormDoc();
+    const NodeId sec = d.tree.firstSectionId();
+    ControlIndex index;
+    index.rebuild(d.tree);
+
+    expectTrue(index.size() == 7,
+               "1.5 / 索引：七个控件（实得 " + std::to_string(index.size()) + "）");
+    expectTrue(index.has(d.chief) && !index.has(sec) && index.keyOf(sec) == nullptr,
+               "1.5 / 索引：表一回答\"这个 id 是不是控件\"");
+    expectTrue(index.byKey("patient_name").size() == 2 && index.byKey("chief").size() == 1 &&
+                   index.byKey("没有这个 key").empty(),
+               "1.5 / 索引：表二是一对多（同 key 两个控件），没有的 key 返回空表");
+    expectTrue(controlIds(d.tree) == std::vector<NodeId>{d.chief, d.name1, d.name2, d.outer,
+                                                         d.duration, d.multi, d.allergy},
+               "1.5 / 索引：控件的枚举顺序是文档顺序（外层在它的内层之前）");
+
+    // 文本级步骤：索引什么都不用做，且结果与重建一致。
+    InsertText ins;
+    ins.at = 1;
+    ins.cps = cps({0x5a});
+    expectTrue(index.onStep(d.tree, Step{ins}) && index.size() == 7,
+               "1.5 / 索引：文本级步骤不为索引付代价");
+
+    // 插入一个控件：增量跟上之后与重建逐项相同。
+    NodeSpec spec;
+    spec.kind = NodeKind::ContentControl;
+    spec.control.key = "patient_name";  // 故意用已有 key：表二是一对多
+    const NodeBuild add = makeInsertNode(d.tree, Pos{sec, 1}, spec);
+    expectTrue(add.ok && applyStep(d.tree, add.step).ok && index.onStep(d.tree, add.step),
+               "1.5 / 索引：插入控件后增量跟得上" + (add.ok ? "" : "（" + add.error + "）"));
+    expectTrue(index.size() == 8 && index.byKey("patient_name").size() == 3,
+               "1.5 / 索引：新控件按它的 key 进了表二（同 key 三处）");
+
+    ControlIndex fresh;
+    fresh.rebuild(d.tree);
+    bool same = fresh.size() == index.size();
+    for (NodeId id : controlIds(d.tree)) {
+        const std::string* a = index.keyOf(id);
+        const std::string* b = fresh.keyOf(id);
+        same = same && a != nullptr && b != nullptr && *a == *b;
+    }
+    expectTrue(same && index.byKey("patient_name") == fresh.byKey("patient_name"),
+               "1.5 / 索引：增量维护的结果与重建逐项相同");
+
+    // 删掉一个不是控件的孩子（段末的段落标记）：表不动。
+    const int last_slot = static_cast<int>(d.tree.find(sec)->children.size()) - 1;
+    const NodeBuild drop_mark = makeRemoveNode(d.tree, Pos{sec, last_slot});
+    expectTrue(drop_mark.ok && applyStep(d.tree, drop_mark.step).ok &&
+                   index.onStep(d.tree, drop_mark.step) && index.size() == 8,
+               "1.5 / 索引：删掉一个不是控件的孩子，表不变");
+
+    // 删掉刚插入的那个控件：表二少一项，仍与重建一致。
+    const NodeBuild drop_cc = makeRemoveNode(d.tree, Pos{sec, 1});
+    expectTrue(
+        drop_cc.ok && applyStep(d.tree, drop_cc.step).ok && index.onStep(d.tree, drop_cc.step),
+        "1.5 / 索引：删除控件后增量跟得上");
+    ControlIndex fresh2;
+    fresh2.rebuild(d.tree);
+    expectTrue(index.size() == 7 && index.byKey("patient_name").size() == 2 &&
+                   index.byKey("patient_name") == fresh2.byKey("patient_name"),
+               "1.5 / 索引：删除之后与重建一致（同 key 回到两处）");
+
+    // 步骤里没有子树身份时（序列化还原的形状）跟不上，调用方必须重建。
+    InsertNode no_identity;
+    no_identity.at = Pos{sec, 0};
+    no_identity.subtree.kind = NodeKind::ContentControl;
+    expectTrue(!index.onStep(d.tree, Step{no_identity}),
+               "1.5 / 索引：步骤没记下子树身份时返回\"跟不上\"，由调用方重建");
+}
+
+/**
+ * 1.5：取值。文本类递归拼接（含嵌套控件）、段落标记拼成换行、隐藏的子树不算可见文字、
+ * 选择类读属性上的值。
+ */
+void checkReadValues() {
+    FormDoc d = makeFormDoc();
+    ControlIndex index;
+    index.rebuild(d.tree);
+
+    expectTrue(getValue(d.tree, d.chief).ok && getValue(d.tree, d.chief).text == "AB",
+               "1.5 / 取值：文本控件的值就是它的内容");
+    expectTrue(getValue(d.tree, d.outer).text == "DEF",
+               "1.5 / 取值：外层取的是整棵子树的文字，含内层控件里的（DEF）");
+    expectTrue(getValue(d.tree, d.duration).text == "EF", "1.5 / 取值：内层自己取是 EF");
+    expectTrue(getValue(d.tree, d.multi).text == "G\nH",
+               "1.5 / 取值：段落标记拼成一个换行，多段控件不会粘成一行");
+
+    const Reading flag = getValue(d.tree, d.allergy);
+    expectTrue(flag.ok && flag.shape == ValueShape::Bool && !flag.flag,
+               "1.5 / 取值：选择类控件的值在属性上（shape=bool，值为假）");
+
+    // 隐藏的子树不算"可见文字"：取值取的是用户在表单与打印里能看到的那份。
+    d.tree.find(d.duration)->hidden = true;
+    expectTrue(getValue(d.tree, d.outer).text == "D",
+               "1.5 / 取值：隐藏的子树不计入（外层只剩它自己的静态文字）");
+    d.tree.find(d.duration)->hidden = false;
+
+    // 按 key：同 key 值一致时不算不一致；改了一处之后要能发现。
+    const Reading one = getValueByKey(d.tree, index, "patient_name");
+    expectTrue(one.ok && one.text == "C" && !one.inconsistent,
+               "1.5 / 取值：按 key 取到值，同 key 一致时不报警");
+    expectTrue(!getValueByKey(d.tree, index, "没有这个 key").ok,
+               "1.5 / 取值：没有这个 key 时显式失败（不静默返回空值）");
+
+    d.tree.setText(d.tree.find(d.name2)->children[0]->id, cps({0x44}));
+    const Reading two = getValueByKey(d.tree, index, "patient_name");
+    expectTrue(two.inconsistent, "1.5 / 取值：同 key 值不一致时标出来（不静默取一个）");
+    const std::vector<std::string> bad = inconsistentKeys(d.tree, index);
+    expectTrue(bad.size() == 1 && bad[0] == "patient_name",
+               "1.5 / 取值：不一致清单按 key 去重（" + std::to_string(bad.size()) + " 条）");
+
+    const std::vector<ControlInfo> infos = listControls(d.tree);
+    expectTrue(infos.size() == 7 && infos[0].id == d.chief && infos[0].value.text == "AB" &&
+                   infos[0].key == "chief",
+               "1.5 / 取值：listControls 给出轻量描述（含值），不含节点指针");
+    expectTrue(infos[6].shape == ValueShape::Bool && !infos[6].required && infos[6].structureLock,
+               "1.5 / 取值：描述里带值形态与四个属性");
+}
+
+/**
+ * 1.5：批量设值。一次调用合成一个事务 ⇒ 一个撤销步骤；撤销之后逐字段回到原样（含身份）。
+ */
+void checkSetValues() {
+    FormDoc d = makeFormDoc();
+    UndoStack undo(d.tree);
+    ControlIndex index;
+    index.rebuild(d.tree);
+    ControlApi api(d.tree, undo, index);
+
+    const std::vector<std::string> before = nodeIdsSnapshot(d.tree);
+    const int depth = undo.undoDepth();
+
+    ValueEdit e;
+    e.id = d.chief;
+    e.value.text = "XY";
+    const BatchResult one = api.setValues({e});
+    expectTrue(one.ok && one.changed == 1,
+               "1.5 / 设值：设一个控件成功" + (one.ok ? "" : "（" + one.error + "）"));
+    expectTrue(getValue(d.tree, d.chief).text == "XY", "1.5 / 设值：取回来是新值");
+    expectTrue(undo.undoDepth() == depth + 1, "1.5 / 设值：一次调用只产生一个撤销步骤");
+    expectClean(d.tree, "1.5 / 设值：设完之后不变量全绿");
+
+    undo.undo(nullptr);
+    expectTrue(nodeIdsSnapshot(d.tree) == before,
+               "1.5 / 设值：撤销之后逐字段回到原样，且节点身份不变");
+
+    // 批量：三个控件一次设，仍然只多一个撤销步骤。
+    const int depth2 = undo.undoDepth();
+    ValueEdit a;
+    a.id = d.chief;
+    a.value.text = "1";
+    ValueEdit b;
+    b.id = d.name1;
+    b.value.text = "2";
+    ValueEdit c;
+    c.id = d.multi;
+    c.value.text = "3";
+    const BatchResult three = api.setValues({a, b, c});
+    expectTrue(three.ok && three.changed == 3 && undo.undoDepth() == depth2 + 1,
+               "1.5 / 设值：三个控件一次设，只多一个撤销步骤（changed " +
+                   std::to_string(three.changed) + "，深度 " +
+                   std::to_string(undo.undoDepth() - depth2) + "）" +
+                   (three.ok ? "" : "（" + three.error + "）"));
+    expectTrue(getValue(d.tree, d.chief).text == "1" && getValue(d.tree, d.name1).text == "2" &&
+                   getValue(d.tree, d.multi).text == "3",
+               "1.5 / 设值：三个都改了");
+    undo.undo(nullptr);
+    expectTrue(getValue(d.tree, d.chief).text == "AB" && getValue(d.tree, d.multi).text == "G\nH",
+               "1.5 / 设值：一次撤销回退整批");
+
+    // 同一次调用里同一个目标出现多次：后者覆盖前者，仍算改了一个。
+    ValueEdit first;
+    first.id = d.chief;
+    first.value.text = "先";
+    ValueEdit second;
+    second.id = d.chief;
+    second.value.text = "后";
+    const int depth3 = undo.undoDepth();
+    const BatchResult twice = api.setValues({first, second});
+    expectTrue(twice.ok && twice.changed == 1 && getValue(d.tree, d.chief).text == "后" &&
+                   undo.undoDepth() == depth3 + 1,
+               "1.5 / 设值：同一目标重复时后者覆盖前者，仍是一个撤销步骤");
+
+    // 按 key：一次改掉同 key 的全部（正文与页脚镜像同一字段的做法）。
+    const int depth4 = undo.undoDepth();
+    ValueEdit by_key;
+    by_key.key = "patient_name";
+    by_key.value.text = "李四";
+    const BatchResult keyed = api.setValuesByKey({by_key});
+    expectTrue(keyed.ok && keyed.changed == 2 && undo.undoDepth() == depth4 + 1,
+               "1.5 / 设值：按 key 一次改掉同 key 的两处，仍是一个撤销步骤（changed " +
+                   std::to_string(keyed.changed) + "）" +
+                   (keyed.ok ? "" : "（" + keyed.error + "）"));
+    expectTrue(getValue(d.tree, d.name1).text == "李四" &&
+                   getValue(d.tree, d.name2).text == "李四" &&
+                   !getValueByKey(d.tree, index, "patient_name").inconsistent,
+               "1.5 / 设值：按 key 设值把两处置成同一个值（不一致消失）");
+
+    // 空值：内容清空，控件留着（空控件有身份，与空 run 不同类）。
+    ValueEdit clear;
+    clear.id = d.chief;
+    const BatchResult emptied = api.setValues({clear});
+    expectTrue(emptied.ok && getValue(d.tree, d.chief).text.empty() &&
+                   d.tree.find(d.chief)->children.empty(),
+               "1.5 / 设值：设空串把内容清掉，控件自己留着");
+    expectClean(d.tree, "1.5 / 设值：清空之后不变量全绿");
+}
+
+/**
+ * 1.5：设值的拒绝路径。拒绝带原因、不产生任何编辑步骤、文档逐字段不变。
+ */
+void checkSetValuesRejects() {
+    FormDoc d = makeFormDoc();
+    UndoStack undo(d.tree);
+    ControlIndex index;
+    index.rebuild(d.tree);
+    ControlApi api(d.tree, undo, index);
+
+    const int depth = undo.undoDepth();
+
+    // 内含嵌套控件：整体设值会把内层连同它的 key 与值一起删掉，一律拒绝。
+    ValueEdit nested;
+    nested.id = d.outer;
+    nested.value.text = "x";
+    const BatchResult r1 = api.setValues({nested});
+    expectTrue(!r1.ok && r1.error.find("嵌套字段") != std::string::npos,
+               "1.5 / 设值拒绝：内含嵌套字段时拒绝并说明（" + r1.error + "）");
+
+    // 内含不可半分的原子：同一条判据。
+    NodeSpec img;
+    img.kind = NodeKind::Image;
+    const NodeBuild add = makeInsertNode(d.tree, Pos{d.chief, 1}, img);
+    std::vector<std::string> with_image;
+    if (add.ok && applyStep(d.tree, add.step).ok) {
+        with_image = nodeIdsSnapshot(d.tree);
+        ValueEdit with_atom;
+        with_atom.id = d.chief;
+        with_atom.value.text = "x";
+        const BatchResult r2 = api.setValues({with_atom});
+        expectTrue(!r2.ok && r2.error.find("Image") != std::string::npos,
+                   "1.5 / 设值拒绝：内含图片原子时拒绝（" + r2.error + "）");
+    }
+
+    // 目标不是控件（这里给的是一个节）：显式拒绝，不静默当成功。
+    ValueEdit not_ctrl;
+    not_ctrl.id = d.tree.firstSectionId();
+    not_ctrl.value.text = "x";
+    const BatchResult r3 = api.setValues({not_ctrl});
+    expectTrue(!r3.ok && r3.error.find("不是内容控件") != std::string::npos,
+               "1.5 / 设值拒绝：目标不是控件时拒绝（" + r3.error + "）");
+
+    // 三条拒绝都不该动过文档，也不该产生撤销步骤。
+    expectTrue(undo.undoDepth() == depth, "1.5 / 设值拒绝：一次撤销步骤都没产生");
+    expectTrue(!with_image.empty() && nodeIdsSnapshot(d.tree) == with_image,
+               "1.5 / 设值拒绝：文档逐字段不变（只多了上面显式插入的那个图片节点）");
+}
+
+/**
+ * 1.5：批量设属性。一次一个撤销步骤；含 hidden 的批次要重排（呈现态流结构变了），
+ * 只改 readonly 的不重排。
+ */
+void checkSetProperties() {
+    FormDoc d = makeFormDoc();
+    UndoStack undo(d.tree);
+    ControlIndex index;
+    index.rebuild(d.tree);
+    ControlApi api(d.tree, undo, index);
+
+    const int design_before = FlowIndex(d.tree, FlowVisibility::Design).size();
+    const int display_before = FlowIndex(d.tree, FlowVisibility::Display).size();
+
+    // 只改 readonly：不重排（三种口径的流位置都不变）。
+    PropEdit ro;
+    ro.id = d.chief;
+    ro.readonly = true;
+    const int depth = undo.undoDepth();
+    const BatchResult r1 = api.setProperties({ro});
+    expectTrue(r1.ok && r1.changed == 1 && !r1.needs_relayout && undo.undoDepth() == depth + 1,
+               "1.5 / 设属性：改 readonly 成功、不重排、一个撤销步骤");
+    expectTrue(getProperties(d.tree, {d.chief})[0].readonly, "1.5 / 设属性：读回来是改过的值");
+    expectTrue(FlowIndex(d.tree, FlowVisibility::Design).size() == design_before &&
+                   FlowIndex(d.tree, FlowVisibility::Display).size() == display_before,
+               "1.5 / 设属性：只改 readonly 的批次不重排");
+    undo.undo(nullptr);
+    expectTrue(!getProperties(d.tree, {d.chief})[0].readonly, "1.5 / 设属性：撤销回退属性");
+
+    // 改 hidden：要重排（呈现态少了那棵子树，编辑态不变）。
+    PropEdit hid;
+    hid.id = d.duration;
+    hid.hidden = true;
+    const BatchResult r2 = api.setProperties({hid});
+    expectTrue(r2.ok && r2.needs_relayout, "1.5 / 设属性：含 hidden 的批次标成要重排");
+    expectTrue(FlowIndex(d.tree, FlowVisibility::Design).size() == design_before &&
+                   FlowIndex(d.tree, FlowVisibility::Display).size() < display_before,
+               "1.5 / 设属性：hidden 改变呈现态的流结构，编辑态不变");
+    undo.undo(nullptr);
+    expectTrue(FlowIndex(d.tree, FlowVisibility::Display).size() == display_before,
+               "1.5 / 设属性：撤销之后呈现态的流位置回到原数");
+
+    // 按 key 批量改属性：同 key 两处一起改，仍是一个撤销步骤。
+    PropEdit keyed;
+    keyed.key = "patient_name";
+    keyed.required = true;
+    const int depth2 = undo.undoDepth();
+    const BatchResult r3 = api.setPropertiesByKey({keyed});
+    expectTrue(r3.ok && r3.changed == 2 && undo.undoDepth() == depth2 + 1,
+               "1.5 / 设属性：按 key 一次改掉同 key 的两处，一个撤销步骤");
+    expectTrue(getProperties(d.tree, {d.name1, d.name2})[0].required &&
+                   getProperties(d.tree, {d.name1, d.name2})[1].required,
+               "1.5 / 设属性：两处都改了");
+
+    // 值与属性在同一批里设：仍然只有一个撤销步骤。
+    const int depth3 = undo.undoDepth();
+    api.beginBatch();
+    ValueEdit v;
+    v.id = d.chief;
+    v.value.text = "批";
+    const BatchResult bv = api.setValues({v});
+    PropEdit p;
+    p.id = d.chief;
+    p.hidden = false;
+    p.readonly = false;
+    const BatchResult bp = api.setProperties({p});
+    const BatchResult commit = api.commitBatch();
+    expectTrue(bv.ok && bp.ok && commit.ok && commit.changed == 3 && undo.undoDepth() == depth3 + 1,
+               "1.5 / 设属性：值与属性在同一批里设，仍然只有一个撤销步骤");
+    expectTrue(
+        getValue(d.tree, d.chief).text == "批" && !getProperties(d.tree, {d.chief})[0].readonly,
+        "1.5 / 设属性：批里的值与属性都生效");
+    expectClean(d.tree, "1.5 / 设属性：批量之后不变量全绿");
+}
+
+/**
+ * 1.5：串起来跑一轮 —— 插入控件、设值、改属性、删控件，每一步之后索引都与重建一致。
+ */
+void checkControlApiSequence() {
+    FormDoc d = makeFormDoc();
+    UndoStack undo(d.tree);
+    ControlIndex index;
+    index.rebuild(d.tree);
+    ControlApi api(d.tree, undo, index);
+    const NodeId sec = d.tree.firstSectionId();
+
+    int steps = 0;
+    for (int round = 0; round < 3; ++round) {
+        NodeSpec spec;
+        spec.kind = NodeKind::ContentControl;
+        spec.control.key = "round_" + std::to_string(round);
+        const NodeBuild add = makeInsertNode(
+            d.tree, Pos{sec, static_cast<int>(d.tree.find(sec)->children.size())}, spec);
+        if (!add.ok) continue;
+        // 插入也走事务层（与 API 内部同一条路），撤销才回得去。
+        Transaction tx;
+        tx.steps = {add.step};
+        if (undo.commit(std::move(tx)).ok) {
+            index.onStep(d.tree, add.step);
+            ++steps;
+
+            ValueEdit e;
+            e.key = "round_" + std::to_string(round);
+            e.value.text = "v";
+            if (api.setValuesByKey({e}).ok) ++steps;
+
+            PropEdit p;
+            p.key = "round_" + std::to_string(round);
+            p.required = true;
+            if (api.setPropertiesByKey({p}).ok) ++steps;
+        }
+    }
+    expectTrue(steps == 9, "1.5 / 串起来：插入 + 设值 + 设属性各三轮，共 9 次成功调用（实得 " +
+                               std::to_string(steps) + "）");
+
+    ControlIndex fresh;
+    fresh.rebuild(d.tree);
+    bool same = fresh.size() == index.size();
+    for (NodeId id : controlIds(d.tree)) {
+        const std::string* a = index.keyOf(id);
+        const std::string* b = fresh.keyOf(id);
+        same = same && a != nullptr && b != nullptr && *a == *b;
+    }
+    expectTrue(same && index.size() == 10,
+               "1.5 / 串起来：一轮混合编辑之后，增量索引与重建逐项相同（10 个控件）");
+    expectClean(d.tree, "1.5 / 串起来：不变量全绿");
+
+    // 全部撤销：回到起点。
+    while (undo.canUndo()) {
+        undo.undo(nullptr);
+    }
+    ControlIndex after;
+    after.rebuild(d.tree);
+    expectTrue(after.size() == 7 && controlIds(d.tree).size() == 7,
+               "1.5 / 串起来：全部撤销之后回到七个控件");
+    expectTrue(nodeIdsSnapshot(d.tree) == nodeIdsSnapshot(makeFormDoc().tree),
+               "1.5 / 串起来：全部撤销之后文档逐字段与初始相同（含身份）");
+}
+
+/**
+ * 1.5 的后一半：外观属性。它是设计期属性（改它等于重新定义控件），不走属性入口，
+ * 直接写在记录上；读回来要逐项相同，且 placeholder 不进内容、不被取值取出来。
+ */
+void checkAppearance() {
+    FormDoc d = makeFormDoc();
+    ControlIndex index;
+    index.rebuild(d.tree);
+
+    const Appearance a = getProperties(d.tree, {d.chief})[0].appearance;
+    expectTrue(a.width.kind == LengthKind::Auto && a.overflow == Overflow::Expand &&
+                   a.underline == Underline::None && a.align == Align::Start && !a.border.left.on &&
+                   !a.border.top.on && !a.border.bottom.on && a.glyph.kind.empty() &&
+                   a.placeholder.empty() && a.styleRef.empty(),
+               "1.5b / 外观：默认是不限宽、撑开、不画线与图元、无提示文字");
+
+    Node* n = d.tree.find(d.chief);
+    n->control.appearance.width = Length::chars(6);
+    n->control.appearance.overflow = Overflow::Clip;
+    n->control.appearance.underline = Underline::BlankOnly;
+    n->control.appearance.border.bottom.on = true;
+    n->control.appearance.border.bottom.style = BorderStyle::Dotted;
+    n->control.appearance.glyph.kind = "check";
+    n->control.appearance.align = Align::Center;
+    n->control.appearance.placeholder = "请填写主诉";
+    n->control.appearance.styleRef = "field";
+    n->control.appearance.invalidStyleRef = "field-invalid";
+    n->control.validateRef = "idCard";
+
+    const ControlInfo after = getProperties(d.tree, {d.chief})[0];
+    const Appearance b = after.appearance;
+    expectTrue(b.width.kind == LengthKind::Chars && b.width.num == 6 &&
+                   b.overflow == Overflow::Clip && b.underline == Underline::BlankOnly &&
+                   b.align == Align::Center && b.glyph.kind == "check",
+               "1.5b / 外观：宽度按类型读回（chars 6）、三档与图元名逐项相同");
+    expectTrue(b.border.bottom.on && b.border.bottom.style == BorderStyle::Dotted &&
+                   !b.border.top.on && !b.border.left.on,
+               "1.5b / 外观：四边各自独立（只画了下边，其余三边仍是关的）");
+    expectTrue(after.validateRef == "idCard" && b.styleRef == "field" &&
+                   b.invalidStyleRef == "field-invalid",
+               "1.5b / 外观：校验规则与两条样式引用都是名字（绑定是数据，不是代码）");
+    expectTrue(getValue(d.tree, d.chief).text == "AB",
+               "1.5b / 外观：placeholder 是独立字段，不进内容、不被取值取出来");
+    expectTrue(printLength(b.width) == "chars:6" &&
+                   printLength(b.border.bottom.width) == "abs:" + std::to_string(ptToEmu(0.5)),
+               "1.5b / 外观：宽度的文本形式不丢类型（" + printLength(b.width) + "）");
+    expectTrue(std::string(overflowName(b.overflow)) == "clip" &&
+                   std::string(underlineName(b.underline)) == "blankOnly" &&
+                   std::string(borderStyleName(BorderStyle::Dotted)) == "dotted" &&
+                   std::string(alignName(Align::Center)) == "center",
+               "1.5b / 外观：档位的名字可读，用于诊断与报告");
+}
+
+/**
+ * 1.5 的后一半：属性侧的值（Bool / Enum / List / Resource）。与文本类共用一条 API，
+ * 但落点不同：这一半走 SetControlValue 步骤，文本类走内容级的节点步骤。
+ */
+void checkValueShapes() {
+    FormDoc d = makeFormDoc();
+    UndoStack undo(d.tree);
+    ControlIndex index;
+    index.rebuild(d.tree);
+    ControlApi api(d.tree, undo, index);
+    const NodeId sec = d.tree.firstSectionId();
+
+    const std::vector<std::string> before = nodeIdsSnapshot(d.tree);
+    const int depth = undo.undoDepth();
+
+    ValueEdit flag;
+    flag.id = d.allergy;
+    flag.value.flag = true;
+    const BatchResult r1 = api.setValues({flag});
+    expectTrue(
+        r1.ok && r1.changed == 1 && getValue(d.tree, d.allergy).flag &&
+            undo.undoDepth() == depth + 1,
+        "1.5b / 非文本设值：Bool 写在记录上，一个撤销步骤" + (r1.ok ? "" : "（" + r1.error + "）"));
+    expectClean(d.tree, "1.5b / 非文本设值：设完之后不变量全绿");
+    undo.undo(nullptr);
+    expectTrue(nodeIdsSnapshot(d.tree) == before && !getValue(d.tree, d.allergy).flag,
+               "1.5b / 非文本设值：撤销之后逐字段回到原样（含身份）");
+
+    // 三种形态各建一个控件：枚举、多选集合、资源。
+    NodeSpec spec;
+    spec.kind = NodeKind::ContentControl;
+    auto plant = [&](const char* type, ValueShape shape) -> NodeId {
+        spec.control = ControlSpec{};
+        spec.control.key = type;
+        spec.control.controlType = type;
+        spec.control.valueShape = shape;
+        const NodeBuild b = makeInsertNode(d.tree, Pos{sec, 0}, spec);
+        if (!b.ok) return kInvalidNodeId;
+        Transaction tx;
+        tx.steps = {b.step};
+        if (!undo.commit(std::move(tx)).ok) return kInvalidNodeId;
+        index.onStep(d.tree, b.step);
+        return std::get<InsertNode>(b.step).detached;
+    };
+    const NodeId choice = plant("dropdownList", ValueShape::Enum);
+    const NodeId tags = plant("checkBoxGroup", ValueShape::List);
+    const NodeId photo = plant("picture", ValueShape::Resource);
+
+    ValueEdit en;
+    en.id = choice;
+    en.value.text = "已婚";
+    ValueEdit li;
+    li.id = tags;
+    li.value.items = {"高血压", "糖尿病"};
+    ValueEdit re;
+    re.id = photo;
+    re.value.text = "res://x1";
+    const int depth2 = undo.undoDepth();
+    const BatchResult r2 = api.setValues({en, li, re});
+    expectTrue(r2.ok && r2.changed == 3 && undo.undoDepth() == depth2 + 1,
+               "1.5b / 非文本设值：三种形态一次设，仍只多一个撤销步骤" +
+                   (r2.ok ? "" : "（" + r2.error + "）"));
+    expectTrue(getValue(d.tree, choice).text == "已婚" &&
+                   getValue(d.tree, tags).items.size() == 2 &&
+                   getValue(d.tree, tags).items[1] == "糖尿病" &&
+                   getValue(d.tree, photo).text == "res://x1",
+               "1.5b / 非文本设值：三种形态都取得到");
+    undo.undo(nullptr);
+    expectTrue(getValue(d.tree, choice).text.empty() && getValue(d.tree, tags).items.empty(),
+               "1.5b / 非文本设值：一次撤销回退整批");
+
+    // 文本类仍走内容路径：同一条 API，落点不同。
+    ValueEdit txt;
+    txt.id = d.chief;
+    txt.value.text = "赵";
+    expectTrue(api.setValues({txt}).ok && getValue(d.tree, d.chief).text == "赵" &&
+                   !d.tree.find(d.chief)->children.empty(),
+               "1.5b / 非文本设值：文本类走内容路径，与非文本形态共用一条 API");
+
+    // 步骤层的三条拒绝：原值不符（过期）、文本类走属性侧的值步骤、目标不在文档里。
+    SetControlValue stale;
+    stale.id = d.allergy;
+    stale.value.flag = true;
+    stale.before.flag = true;  // 当前是 false，对不上
+    const StepResult sr = canApply(d.tree, Step{stale});
+    expectTrue(!sr.ok && sr.error.find("原值不符") != std::string::npos,
+               "1.5b / 非文本设值：原值不符的步骤被拒（" + sr.error + "）");
+    SetControlValue on_text;
+    on_text.id = d.chief;
+    on_text.before.text = "赵";
+    const StepResult sr2 = canApply(d.tree, Step{on_text});
+    expectTrue(!sr2.ok && sr2.error.find("内容") != std::string::npos,
+               "1.5b / 非文本设值：文本类不走属性侧的值步骤（" + sr2.error + "）");
+}
+
+/**
+ * 1.5 的后一半：异步裁决门。判据是三条 —— 等待期间文档与撤销栈逐字段不变、
+ * Allow 之后才应用（此时才产生撤销步骤）、Deny 之后值与交互前一致。
+ */
+void checkAsyncGate() {
+    FormDoc d = makeFormDoc();
+    UndoStack undo(d.tree);
+    ControlIndex index;
+    index.rebuild(d.tree);
+    ControlApi api(d.tree, undo, index);
+    ChangeGate gate(api);
+    const NodeId sec = d.tree.firstSectionId();
+
+    const std::vector<std::string> before = nodeIdsSnapshot(d.tree);
+    const int depth = undo.undoDepth();
+
+    ValueEdit e;
+    e.id = d.allergy;
+    e.value.flag = true;
+    const BeginResult b = gate.begin(e);
+    expectTrue(b.ok && b.token > 0, "1.5b / 等待：登记候选成功（" + b.error + "）");
+    expectTrue(gate.isPending(d.allergy) && gate.pendingCount() == 1 &&
+                   gate.stateOf(d.allergy).state == ValidationState::Pending,
+               "1.5b / 等待：控件进 pending，只剩它一个等待");
+    expectTrue(nodeIdsSnapshot(d.tree) == before && undo.undoDepth() == depth &&
+                   !getValue(d.tree, d.allergy).flag,
+               "1.5b / 等待：文档与撤销栈逐字段不变，也不显示新值");
+
+    const GateResult ok = gate.allow(b.token);
+    expectTrue(ok.outcome == GateOutcome::Applied && getValue(d.tree, d.allergy).flag &&
+                   gate.pendingCount() == 0 &&
+                   gate.stateOf(d.allergy).state == ValidationState::None,
+               "1.5b / 裁决：Allow 之后值才变更、pending 清空");
+    expectTrue(undo.undoDepth() == depth + 1, "1.5b / 裁决：Allow 之后才产生撤销步骤");
+    undo.undo(nullptr);
+    expectTrue(nodeIdsSnapshot(d.tree) == before, "1.5b / 裁决：撤销回到交互前，逐字段相同");
+
+    const BeginResult b2 = gate.begin(e);
+    const GateResult no = gate.deny(b2.token, "该项与既往史冲突");
+    const Validation v = gate.stateOf(d.allergy);
+    expectTrue(no.outcome == GateOutcome::Denied && v.state == ValidationState::Invalid &&
+                   v.message == "该项与既往史冲突" && !getValue(d.tree, d.allergy).flag &&
+                   undo.undoDepth() == depth && nodeIdsSnapshot(d.tree) == before,
+               "1.5b / 裁决：Deny 丢弃候选、值不变、标 invalid 带原因，不多出撤销步骤");
+
+    const GateResult to = gate.expire(gate.begin(e).token);
+    expectTrue(to.outcome == GateOutcome::Denied && to.message.find("超时") != std::string::npos &&
+                   !getValue(d.tree, d.allergy).flag,
+               "1.5b / 裁决：超时按拒绝处理，不静默放行（" + to.message + "）");
+
+    // 同一控件再次交互：前一次按取消丢弃，旧结果不应用也不误报失败。
+    const BeginResult old_one = gate.begin(e);
+    const BeginResult new_one = gate.begin(e);
+    expectTrue(old_one.token != new_one.token && gate.pendingCount() == 1,
+               "1.5b / 裁决：同控件再次交互只剩一个等待（最后交互为准）");
+    const GateResult stale = gate.allow(old_one.token);
+    expectTrue(stale.outcome == GateOutcome::Dropped && !getValue(d.tree, d.allergy).flag &&
+                   undo.undoDepth() == depth,
+               "1.5b / 裁决：旧结果到达时按已取消失效，不应用也不误报失败");
+    expectTrue(gate.allow(new_one.token).outcome == GateOutcome::Applied &&
+                   getValue(d.tree, d.allergy).flag,
+               "1.5b / 裁决：后一次交互照常裁决");
+    undo.undo(nullptr);
+
+    // 锚点失效：等待期间控件被删掉，结果到达时丢弃、不做补偿。
+    // 判"还在不在"不能只看 find 非空 —— 被摘下的子树留在池里，按 id 照样查得到。
+    auto drop = [&](NodeId target) {
+        int slot = -1;
+        const Node* s = d.tree.find(sec);
+        for (size_t i = 0; i < s->children.size(); ++i) {
+            if (s->children[i]->id == target) slot = static_cast<int>(i);
+        }
+        if (slot < 0) return false;
+        const NodeBuild del = makeRemoveNode(d.tree, Pos{sec, slot});
+        if (!del.ok) return false;
+        Transaction tx;
+        tx.steps = {del.step};
+        if (!undo.commit(std::move(tx)).ok) return false;
+        index.onStep(d.tree, del.step);
+        return true;
+    };
+    const BeginResult armed = gate.begin(e);
+    expectTrue(armed.ok, "1.5b / 裁决：目标还在文档里时登记成功");
+    expectTrue(drop(d.allergy), "1.5b / 裁决：等待期间删掉目标控件");
+    const GateResult gone = gate.allow(armed.token);
+    expectTrue(gone.outcome == GateOutcome::Dropped &&
+                   gone.message.find("失效") != std::string::npos && gate.pendingCount() == 0,
+               "1.5b / 裁决：目标已失效时丢弃，不做补偿动作（" + gone.message + "）");
+    expectTrue(!isAttached(d.tree, d.allergy) && d.tree.find(d.allergy) != nullptr,
+               "1.5b / 裁决：被删的控件留在池里所以查得到，但它已经不在文档上");
+    undo.undo(nullptr);
+    expectTrue(isAttached(d.tree, d.allergy), "1.5b / 裁决：撤销之后控件带着身份挂回来了");
+
+    // sweepStale：目标不在文档里时，等待与校验状态一起清掉。
+    expectTrue(gate.begin(e).ok, "1.5b / 清理：重新登记一次等待");
+    expectTrue(drop(d.allergy) && gate.pendingCount() == 1,
+               "1.5b / 清理：目标被删时等待还挂着（尚未清理）");
+    gate.sweepStale();
+    expectTrue(gate.pendingCount() == 0 && gate.stateOf(d.allergy).state == ValidationState::None,
+               "1.5b / 清理：sweepStale 把失效目标的等待与状态一起清掉");
+    undo.undo(nullptr);
+    expectTrue(isAttached(d.tree, d.allergy), "1.5b / 清理：撤销之后控件挂回来了");
+
+    // 主动置位：晚到的校验结果没有对应的事务，只能由宿主直接设状态。
+    gate.setValidation(d.chief, ValidationState::Invalid, "格式不符");
+    expectTrue(gate.stateOf(d.chief).state == ValidationState::Invalid &&
+                   gate.stateOf(d.chief).message == "格式不符",
+               "1.5b / 状态：宿主可主动置位（晚到的结果已经不属于任何一次交互）");
+
+    // 只拦用户交互：编程设值不进门，也不取消等待。
+    const BeginResult b5 = gate.begin(e);
+    ValueEdit prog;
+    prog.id = d.allergy;
+    prog.value.flag = true;
+    expectTrue(api.setValues({prog}).ok && getValue(d.tree, d.allergy).flag,
+               "1.5b / 分工：编程设值不进门，照常立刻生效");
+    expectTrue(gate.isPending(d.allergy), "1.5b / 分工：编程设值不取消等待");
+    expectTrue(gate.deny(b5.token, "不通过").outcome == GateOutcome::Denied &&
+                   getValue(d.tree, d.allergy).flag,
+               "1.5b / 分工：随后的 Deny 只丢候选，不改已经生效的编程值");
+}
+
 }  // namespace
 
 int main() {
-    std::printf("=== 文档模型 0.1 ~ 1.3：位置、分段、不变量、编译、长度、规范化、步骤、撤销 ===\n");
+    std::printf(
+        "=== 文档模型 0.1 ~ 1.4：位置、分段、不变量、编译、长度、规范化、步骤、撤销、落点 ===\n");
 
     // 两种可见性口径各过一遍：位置空间不同，但"往返互逆"必须各自成立。
     const FlowVisibility kBoth[2] = {FlowVisibility::Design, FlowVisibility::Display};
@@ -1929,16 +3267,41 @@ int main() {
     checkNormalizeIdempotent();
     checkNormalizeKeepsContent();
 
-    std::printf("  --- 1.2：区间原语、编辑步骤与位置映射 ---\n");
+    std::printf("  --- 1.2：区间原语、编辑步骤（内容级与节点级）与位置映射 ---\n");
     checkRangeNormalize();
     checkExtract();
     checkStepRoundTrip();
     checkExtractDeleteInsertBack();
     checkMapRoundTrip();
+    checkNodeStepRoundTrip();
+    checkNodeStepMap();
+    checkNodeStepRejects();
+    checkNodeStepGate();
+
+    std::printf("  --- 1.5：控件索引与宿主 API ---\n");
+    checkControlIndex();
+    checkReadValues();
+    checkSetValues();
+    checkSetValuesRejects();
+    checkSetProperties();
+    checkControlApiSequence();
+
+    std::printf("  --- 1.5b：外观、属性侧的值与异步裁决门 ---\n");
+    checkAppearance();
+    checkValueShapes();
+    checkAsyncGate();
 
     std::printf("  --- 1.3：事务与撤销分组 ---\n");
     checkUndoRedo();
     checkUndoGrouping();
+
+    std::printf("  --- 1.4：控件边界位置与表单模式落点判定 ---\n");
+    checkBoundaryPositions();
+    checkEditableSet();
+    checkFormNavigation();
+    checkTabStops();
+    checkEditRangeGate();
+    checkStructureOps();
 
     std::printf("\n共 %d 项断言，失败 %d 项\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

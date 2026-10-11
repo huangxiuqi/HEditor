@@ -221,7 +221,9 @@ endif()
 add_library(heditor_core STATIC
   src/core/doc/document.cpp
   src/core/doc/control.cpp
+  src/core/doc/edit_mode.cpp
   src/core/doc/edit_policy.cpp
+  src/core/doc/edit_capability.cpp
   src/core/doc/node.cpp
   src/core/doc/flow.cpp
   src/core/doc/para.cpp
@@ -231,6 +233,11 @@ add_library(heditor_core STATIC
   src/core/doc/normalize.cpp
   src/core/doc/range.cpp
   src/core/doc/fragment.cpp
+  src/core/doc/subtree.cpp
+  src/core/doc/control_spec.cpp
+  src/core/doc/control_index.cpp
+  src/core/doc/control_api.cpp
+  src/core/doc/validation.cpp
   src/core/doc/steps.cpp
   src/core/doc/transaction.cpp
   src/core/text/font.cpp
