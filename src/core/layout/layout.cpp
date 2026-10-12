@@ -158,22 +158,30 @@ struct BlockShaping {
 
 /**
  * 计算段级整形指纹：涵盖所有影响整形结果的输入。
+ * 字符格式从块级字段挪进了 run（1.8 之后），所以这里混的是实际生效的 run 序列 ——
+ * 只改一个 run 的字号而文本不变，也必须判成未命中，否则会拿旧字号的字形接着用。
  * @note 刻意不含页宽页高、光标、括号占位计划、颜色、行高与段后距 —— 它们只影响落行
- * 或绘制。因此改页宽、切换聚焦字段之后整形缓存依然命中。
+ * 或绘制。颜色不进指纹是因为它不改变字形与推进（放置时才按 run 取色），
+ * 所以改颜色不该让整形缓存失效。
  * 浮点按位混入（不量化）：量化会把 12.0 与 12.001 判成同一份缓存。
  */
-uint64_t shapingFingerprint(const BlockSpec& b) {
+uint64_t shapingFingerprint(const BlockSpec& b, const std::vector<FormatRun>& runs) {
     uint64_t h = kFnvBasis;
     h = fnvMixU32s(h, b.cp_text);
-    h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(b.font_index)));
-    h = fnvMixFloat(h, b.size_pt);
     h = fnvMix(h, static_cast<uint64_t>(static_cast<int>(b.wm.inline_axis)));
     h = fnvMix(h, static_cast<uint64_t>(static_cast<int>(b.wm.block_flow)));
     h = fnvMix(h, static_cast<uint64_t>(static_cast<int>(b.wm.orientation)));
-    h = fnvMix(h, static_cast<uint64_t>(b.fallback_font_indices.size()));
-    for (int fi : b.fallback_font_indices)
-        h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(fi)));
-    h = fnvMixCStr(h, b.language);
+    h = fnvMix(h, static_cast<uint64_t>(runs.size()));
+    for (const FormatRun& fr : runs) {
+        h = fnvMix(h, static_cast<uint64_t>(fr.cp_begin));
+        h = fnvMix(h, static_cast<uint64_t>(fr.cp_end));
+        h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(fr.font_index)));
+        h = fnvMixFloat(h, fr.size_pt);
+        h = fnvMix(h, static_cast<uint64_t>(fr.fallback_font_indices.size()));
+        for (int fi : fr.fallback_font_indices)
+            h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(fi)));
+        h = fnvMixCStr(h, fr.language);
+    }
     return h;
 }
 
@@ -300,6 +308,44 @@ const BlockShaping* withBracketSlots(const ControlSet* controls, const std::vect
 
 }  // namespace
 
+bool runsTileText(const BlockSpec& b, std::string* why) {
+    const uint32_t n = static_cast<uint32_t>(b.cp_text.size());
+    if (b.runs.empty()) return true;  // 等价情形：整段一个 run，属性取块级字段
+    uint32_t expect = 0;
+    for (std::size_t i = 0; i < b.runs.size(); ++i) {
+        const FormatRun& r = b.runs[i];
+        const std::string at = "第 " + std::to_string(i) + " 个 run";
+        if (r.cp_end <= r.cp_begin) {
+            if (why) *why = at + " 是空区间（cp_end 必须大于 cp_begin）";
+            return false;
+        }
+        if (r.cp_begin != expect) {
+            if (why) {
+                *why = at + " 从 " + std::to_string(r.cp_begin) + " 起，但前一个结束在 " +
+                       std::to_string(expect) + "（" +
+                       (r.cp_begin < expect ? "与前一个重叠" : "与前一个之间有空洞") + "）";
+            }
+            return false;
+        }
+        expect = r.cp_end;
+    }
+    if (expect != n) {
+        if (why) {
+            *why = "run 序列铺到 " + std::to_string(expect) + "，段落文本有 " + std::to_string(n) +
+                   " 个码点（" + (expect < n ? "尾部有空洞" : "超出了文本末尾") + "）";
+        }
+        return false;
+    }
+    return true;
+}
+
+const FormatRun* runCovering(const std::vector<FormatRun>& runs, uint32_t cp) {
+    for (const FormatRun& r : runs) {
+        if (cp < r.cp_end) return cp >= r.cp_begin ? &r : nullptr;
+    }
+    return nullptr;
+}
+
 /**
  * 段级整形缓存的内部结构。
  * 按段下标存放而非哈希表：段是编辑的最小单位（当前不支持跨段编辑），下标访问即可
@@ -387,13 +433,16 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
     // 由调用方在那一条分支上复制（见下面 scratch 的用法）。
     // pi 是出参，提前返回的路径同样要写好统计值。
     // scratch 是"未命中时整形到这里"的缓冲；返回值指向 scratch 或缓存条目。
-    auto shapeParagraph = [&](const BlockSpec& b, size_t para_index, BlockShaping* scratch,
+    auto shapeParagraph = [&](const BlockSpec& b, const std::vector<FormatRun>& fruns,
+                              size_t para_index, BlockShaping* scratch,
                               ParaIndex* pi) -> const BlockShaping* {
         if (b.cp_text.empty()) return nullptr;
+        // 行度量（基线、行高、段后距）仍取块级字段：一段一套行高，这是本期已知边界。
+        // run 上的字号只决定字形与推进，不参与行盒高度 —— 见 layout.h 的 FormatRun。
         FontInstance* font = lib.instance(b.font_index, b.size_pt);
         if (!font) return nullptr;
 
-        const uint64_t fp = shapingFingerprint(b);
+        const uint64_t fp = shapingFingerprint(b, fruns);
         if (cache_impl && para_index < cache_impl->paras.size()) {
             const ShapingCache::Impl::Entry& e = cache_impl->paras[para_index];
             if (e.filled && e.fp == fp) {
@@ -407,20 +456,6 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
         if (cache_impl) ++cache_impl->misses;
         BlockShaping& bs = *scratch;
 
-        // 整形：字体回退切段 → 逐段整形 → 合并。
-        // 每个 run 只整形一次，切段依据是 cmap 精确查询而非整形结果。
-        std::vector<int> chain;
-        chain.reserve(1 + b.fallback_font_indices.size());
-        chain.push_back(b.font_index);
-        for (int fi : b.fallback_font_indices) {
-            if (fi != b.font_index) chain.push_back(fi);
-        }
-
-        const auto t_shape0 = Clock::now();
-        const std::vector<FontRun> runs =
-            itemizeByFont(lib, b.cp_text.data(), b.cp_text.size(), chain, b.size_pt);
-        pi->font_run_count = static_cast<int>(runs.size());
-
         bs.primary = font;
         bs.ascent_pt = font->ascenderPt();
         bs.descent_pt = font->descenderPt();
@@ -428,23 +463,43 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
         bs.st.vertical = (b.wm.shapingDirection() == ShapingDirection::TopToBottom);
         bs.st.sideways = b.wm.isSideways();
 
-        for (const FontRun& r : runs) {
-            if (r.cp_end <= r.cp_begin) continue;
-            FontInstance* rf = font;
-            if (r.face_index >= 0) {
-                FontInstance* hit = lib.instance(r.face_index, b.size_pt);
-                if (hit) rf = hit;
+        // 整形：先按字符格式 run 切，再在每段内按字体回退切 —— 两把尺子求交。
+        // 每个整形段只整形一次，切段依据是 cmap 精确查询而非整形结果。
+        // 字号取 run 自己的：run 是"字符格式相同"的区间，字号不同就不该是同一个 run。
+        const auto t_shape0 = Clock::now();
+        for (const FormatRun& fr : fruns) {
+            if (fr.cp_end <= fr.cp_begin) continue;
+            std::vector<int> chain;
+            chain.reserve(1 + fr.fallback_font_indices.size());
+            chain.push_back(fr.font_index);
+            for (int fi : fr.fallback_font_indices) {
+                if (fi != fr.font_index) chain.push_back(fi);
             }
-            // 用 shapeTextRange 传整串指针加 [begin, end)：HarfBuzz 以区间起点为基准编号
-            // cluster，故 cluster 就是段内绝对码点下标，此处不得再做任何偏移补算。
-            const ShapedText part =
-                shapeTextRange(rf->hb(), b.cp_text.data(), r.cp_begin, r.cp_end, b.wm, b.language);
-            for (const ShapedGlyph& g : part.glyphs) {
-                if (g.glyph_id == 0) ++pi->missing_count;  // 整条链都没兜住的码点
-                bs.st.glyphs.push_back(g);
-                bs.glyph_font.push_back(rf);
+            // itemizeByFont 的区间是相对于喂进去的指针的，所以传 run 的起点，
+            // 拿回来的 cp_begin/cp_end 要加回 fr.cp_begin 才是段内绝对下标。
+            const std::vector<FontRun> runs = itemizeByFont(lib, b.cp_text.data() + fr.cp_begin,
+                                                            fr.codepointCount(), chain, fr.size_pt);
+            pi->font_run_count += static_cast<int>(runs.size());
+            for (const FontRun& r : runs) {
+                const size_t begin = fr.cp_begin + r.cp_begin;
+                const size_t end = fr.cp_begin + r.cp_end;
+                if (end <= begin) continue;
+                FontInstance* rf = font;
+                if (r.face_index >= 0) {
+                    FontInstance* hit = lib.instance(r.face_index, fr.size_pt);
+                    if (hit) rf = hit;
+                }
+                // 用 shapeTextRange 传整串指针加 [begin, end)：HarfBuzz 以区间起点为基准编号
+                // cluster，故 cluster 就是段内绝对码点下标，此处不得再做任何偏移补算。
+                const ShapedText part =
+                    shapeTextRange(rf->hb(), b.cp_text.data(), begin, end, b.wm, fr.language);
+                for (const ShapedGlyph& g : part.glyphs) {
+                    if (g.glyph_id == 0) ++pi->missing_count;  // 整条链都没兜住的码点
+                    bs.st.glyphs.push_back(g);
+                    bs.glyph_font.push_back(rf);
+                }
+                bs.st.inline_advance += part.inline_advance;
             }
-            bs.st.inline_advance += part.inline_advance;
         }
         shape_ms += msSince(t_shape0);
         bs.run_count = pi->font_run_count;
@@ -598,8 +653,9 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
             cursor_y = cy;
         }
 
+        const std::vector<FormatRun> fruns = b.effectiveRuns();
         BlockShaping scratch;
-        const BlockShaping* shaped = shapeParagraph(b, para_index, &scratch, &pi);
+        const BlockShaping* shaped = shapeParagraph(b, fruns, para_index, &scratch, &pi);
         if (!shaped) {
             // 无簇（无字体或整形为空）时必须写 {0}（仅段首一个插入点）而非空表：
             // 空表会被编辑层理解为「本段无吸附边界」，导致退格删掉半个字素簇。
@@ -628,6 +684,12 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
         // 本行/本列末尾码点：下一个簇的首码点，最后一簇用段长
         auto lastCpOf = [&](size_t slice_end) -> uint32_t {
             return (slice_end < bs.clusters.size()) ? bs.clusters[slice_end].cp : n_cp;
+        };
+        // 取该码点所在 run 的颜色。颜色刻意不进整形指纹（它不改字形与推进），
+        // 所以只能在这里按 run 现取 —— 若存进整形缓存，改颜色就会拿到旧值。
+        auto runColorAt = [&fruns, &b](uint32_t cp) -> Color {
+            const FormatRun* r = runCovering(fruns, cp);
+            return r != nullptr ? r->color : b.color;
         };
 
         if (!b.wm.isVertical()) {
@@ -704,7 +766,7 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
                         //   x_offset 是 x 向右，无需变号。
                         pg.x_pt = pen_x + sg.x_offset * usToPt;
                         pg.y_pt = pen_y - sg.y_offset * usToPt;
-                        pg.color = b.color;
+                        pg.color = runColorAt(sg.cluster);
                         pg.page = page_index;
                         pg.line = line_total;
                         pg.vertical = false;
@@ -847,7 +909,7 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
                             pg.y_pt = gy - sg.y_offset * usToPt;
                             pg.rotate_deg = 0.0f;
                         }
-                        pg.color = b.color;
+                        pg.color = runColorAt(sg.cluster);
                         pg.page = page_index;
                         pg.line = line_no;
                         pg.vertical = true;

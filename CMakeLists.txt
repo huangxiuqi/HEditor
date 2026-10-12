@@ -150,14 +150,17 @@ endfunction()
 #
 #   ★ 这个办法有回归测试：scripts/verify_header_deps.ps1
 #     它把 engine.h 的 mtime 推一下（内容不动），然后按**文件 mtime**断言
-#     11 个 TU 全重编、5 个链接产物全重做、harfbuzz 的 obj 原封不动；
+#     注册过的 TU 全重编、链接产物全重做、harfbuzz 的 obj 原封不动；
 #     再把 HarfBuzz 自己的某个头的 mtime 推一下，断言它的聚合 TU 必须重编
 #     （这两条方向相反，缺一条就会漏掉"改 HarfBuzz 不重编"那种静默复用）。
 #     （为什么按 mtime 而不解析 ninja 输出：ninja 的控制台输出在管道里会丢尾巴，
 #      实测一次 17 步的构建只捕获到 [10/17]；`ninja -n` 也因为 CONFIGURE_DEPENDS
 #      的 glob stamp 而不给计划。mtime 是文件系统事实，不经过文本层。）
-#     已证伪过：把本函数短路后它变红（11 个 TU 未重编，退出码 2），
-#     恢复后回到全绿（当前 8 项）。改这里之后请跑它。
+#     已证伪过：把本函数短路后它变红（11 个 TU 未重编，退出码 2）；
+#     另外 2026-10-12 实测漏挂 heditor_demo 时它**不会**变红 —— 因为那张期望表里
+#     当时没有 demo 的 obj，脚本只能断言它认识的那些。所以新增 target 时
+#     **必须同时把它的 obj 加进 $expectRebuild**，否则守卫只是看起来在保护。
+#     改这里之后请跑它。
 #
 #   作用域：只对 MSVC 生效。clang/emscripten 的 depfile 通道本来是好的
 #   （实测 wasm 侧某个 .o 记了 803 条依赖，精确到具体头文件），
@@ -285,6 +288,12 @@ target_link_libraries(heditor_demo PUBLIC heditor_core)
 heditor_target_flags(heditor_demo)
 heditor_target_flags(heditor_core)
 heditor_track_header_deps(heditor_core ${HEDITOR_ROOT}/src/core)
+# ★ demo 也要挂头依赖，理由与 core 同一条，但后果更隐蔽：
+#   demo_documents.cpp 直接构造 BlockSpec（改 layout.h 的字段就是改它的类布局），
+#   而它是个静态库、被所有测试链着。漏挂的后果不是编译错误，而是"它的 .obj 用旧布局、
+#   测试的 .obj 用新布局"混链 —— 症状是析构时随机段错误，且断言已经全过。
+#   实测：给 BlockSpec 加一个 vector 成员后，model_test 打到 0.4 就崩。
+heditor_track_header_deps(heditor_demo ${HEDITOR_ROOT}/src/core ${HEDITOR_ROOT}/demo)
 
 if(HEDITOR_USE_SKIA)
   # ── 与 libskia.a 对齐的编译期契约（一个都不能少）────────────────

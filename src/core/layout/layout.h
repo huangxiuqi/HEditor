@@ -19,8 +19,8 @@
 #include "core/doc/control.h"
 #include "core/doc/document.h"
 #include "core/text/font.h"
-#include "core/utils/types.h"
 #include "core/text/writing_mode.h"
+#include "core/utils/types.h"
 
 namespace heditor {
 
@@ -45,6 +45,27 @@ struct PageMetrics {
         return width_pt == o.width_pt && height_pt == o.height_pt && margin_pt == o.margin_pt;
     }
     bool operator!=(const PageMetrics& o) const { return !(*this == o); }
+};
+
+/**
+ * 一段"字符格式相同"的连续码点区间（升序、首尾相接，恰好铺满段落文本）。
+ * 名字沿用 OOXML 的 run（w:r：a region of text with a common set of properties）。
+ * 它切的是字符格式，与字体回退切出的 FontRun（切的是哪个字体画得出这个字）是两把
+ * 不同的尺子，两者求交才是真正的整形边界。所以同一段文本会被切两次：先按本记录的
+ * 区间，再在每段内按字形覆盖切。
+ * 字段都是已解析的值：三层解析（文档默认、样式链、内联覆盖）在编译期做完，引擎不认识
+ * 样式表。区间是否合法由 runsTileText 判定。
+ */
+struct FormatRun {
+    uint32_t cp_begin = 0;
+    uint32_t cp_end = 0;  // 不含
+    int font_index = 0;
+    float size_pt = 12.0f;
+    Color color = Color::rgb(24, 24, 24);
+    const char* language = nullptr;
+    std::vector<int> fallback_font_indices;
+
+    uint32_t codepointCount() const { return cp_end - cp_begin; }
 };
 
 struct BlockSpec {
@@ -75,13 +96,64 @@ struct BlockSpec {
     std::vector<int> fallback_font_indices;
 
     /**
-     * 文本便捷接口：进出都是 UTF-8，内部始终是码点序列。
+     * 字符格式 run（升序、首尾相接）。空表示"整段一个 run"，属性取上面那组块级字段 ——
+     * 那条路径与加 run 之前逐字段相同，是迁移期的等价情形（见 effectiveRuns）。
+     * 落盘判据同模型层：字符格式是作者意图，要落盘；整形切出的字体段是派生量，不落盘。
      */
-    void setText(const std::string& utf8) { cp_text = utf8ToCodepoints(utf8); }
+    std::vector<FormatRun> runs;
+
+    /**
+     * 文本便捷接口：进出都是 UTF-8，内部始终是码点序列。
+     * 换文本会清掉 runs：旧区间是按旧文本的码点下标算的，留着必然铺不满，
+     * 于是静默失效。清掉是回到"整段一个 run"的等价情形，属性由块级字段给出。
+     */
+    void setText(const std::string& utf8) {
+        cp_text = utf8ToCodepoints(utf8);
+        runs.clear();
+    }
     std::string textUtf8() const { return codepointsToUtf8(cp_text); }
     size_t codepointCount() const { return cp_text.size(); }
     bool empty() const { return cp_text.empty(); }
+
+    /**
+     * 整段一个 run，属性取块级字段。空段给一个空区间（不是空序列）。
+     */
+    FormatRun wholeRun() const {
+        FormatRun r;
+        r.cp_begin = 0;
+        r.cp_end = static_cast<uint32_t>(cp_text.size());
+        r.font_index = font_index;
+        r.size_pt = size_pt;
+        r.color = color;
+        r.language = language;
+        r.fallback_font_indices = fallback_font_indices;
+        return r;
+    }
+
+    /**
+     * 实际生效的 run 序列：runs 非空时就是它，为空时合成一个覆盖全段的 run。
+     * 排版层只读这一个入口，于是"整段一个 run"与"显式一个 run"走同一条代码路径 ——
+     * 这正是等价判据成立的原因。
+     */
+    std::vector<FormatRun> effectiveRuns() const {
+        if (!runs.empty()) return runs;
+        return {wholeRun()};
+    }
 };
+
+/**
+ * runs 是否恰好铺满 [0, cp_text.size())：升序、首尾相接、无空洞、无重叠、区间非空。
+ * runs 为空时恒真（等价情形，属性由块级字段给出）。
+ * 返回 false 时把第一处不合法的原因写进 why；why 可以为空指针。
+ */
+bool runsTileText(const BlockSpec& b, std::string* why);
+
+/**
+ * 在已解析出的 run 序列里找覆盖该码点的那个；越界或序列为空返回 nullptr。
+ * 线性扫描：run 的数量就是"一段里格式变化的次数"，真实文档里是个位数。
+ * 入参是调用方自己持有的序列（effectiveRuns 的返回值是按值给的，不能取它的引用）。
+ */
+const FormatRun* runCovering(const std::vector<FormatRun>& runs, uint32_t cp);
 
 /**
  * 已定位的字形。x/y 是"字形原点"在页面坐标系里的位置（页面左上为原点，单位磅）。

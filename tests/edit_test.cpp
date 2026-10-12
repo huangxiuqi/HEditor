@@ -177,6 +177,30 @@ long long frameDiffAgainstFresh(EditorEngine& a, const std::vector<std::string>&
     return diff;
 }
 
+/**
+ * 两个引擎的整帧逐字节比较（只比 RGB，忽略 alpha）。
+ *
+ * 用于"两条路径必须产出同一帧"这类判据。它比逐字段比 LayoutResult 更强，也更省事：
+ * 任何一处几何、字体、颜色不同都会落到像素上，不必逐个字段列举 —— 而"漏比一个字段"
+ * 正是这类判据最容易变成空话的地方。
+ * 返回不符的像素数；-1 表示帧尺寸不同（本身就不符）。
+ */
+long long frameDiffBetween(EditorEngine& a, EditorEngine& b) {
+    a.showCaret(true);
+    b.showCaret(true);
+    a.repaint();
+    b.repaint();
+    if (a.frameBytes() != b.frameBytes()) return -1;
+    const uint8_t* fa = a.frame();
+    const uint8_t* fb = b.frame();
+    long long diff = 0;
+    for (size_t k = 0; k + 3 < a.frameBytes(); k += 4) {
+        if (fa[k] == fb[k] && fa[k + 1] == fb[k + 1] && fa[k + 2] == fb[k + 2]) continue;
+        ++diff;
+    }
+    return diff;
+}
+
 std::string joinPath(const std::string& dir, const std::string& name) {
     if (dir.empty()) return name;
     const char last = dir.back();
@@ -4184,6 +4208,306 @@ int main() {
         e.typeTextAndRender("\xE6\xB5\x8B");  // 测
         expectTrue(e.stats().page_count >= 2 && e.auditLayout() == 0,
                    "★ 分页之前编辑之后，页数与增量结果仍与全量一致");
+    }
+
+    std::printf("\n[23] 字符格式 run：块级字段升为 run 之后，旧路径等价、按 run 取值\n");
+    {
+        // 这一段验的是引擎输入的一次形状替换：字符格式从"一段一套"升为"一串 run"。
+        //   它是替换、不是新功能，所以第一判据必须是等价 —— run 要能原样表达旧形状，
+        //   否则迁移期没人敢用。两条独立的等价判据：
+        //   其一，runs 为空 == 显式一个 run（属性取块级字段）；
+        //   其二，一个 run 切成 N 个属性相同的 run，产出不变。
+        //   其二比其一强：它要求排版真的按 run 切了，而其一在"压根没读 runs"的实现下
+        //   也成立。它也是 ECMA-376 原文给的（w:r 一节：把一个 run 切成任意多个属性
+        //   相同的小 run，不改变文档内容）。
+        //   但其二有个前提：切点不能落在簇或连字内部 —— run 边界就是整形边界，
+        //   在 f 与 fi 之间切会把连字拆掉。所以切分判据用纯中文（一字一簇）。
+        const std::vector<std::string> fonts = {cjkPath, mnPath, latinPath};
+        auto mkBlock = [](int font_index, float size_pt, const char* lang,
+                          const std::string& text) {
+            BlockSpec b;
+            b.font_index = font_index;
+            b.size_pt = size_pt;
+            b.wm = WritingMode::HorizontalTB();
+            b.line_factor = 1.75f;
+            b.language = lang;
+            b.color = Color::rgb(24, 24, 24);
+            b.setText(text);  // 注意：setText 会清 runs，所以 runs 必须在它之后设
+            return b;
+        };
+        auto setup = [&](EditorEngine& eng, const BlockSpec& b) {
+            eng.init(fonts);
+            eng.setConfig(cfg);
+            eng.setBlocks({b});
+            eng.relayout();
+            eng.setCaret(0, 0);
+        };
+
+        // (a) 不变量：run 序列必须恰好铺满段落文本
+        {
+            const BlockSpec ok = mkBlock(0, 12.0f, "zh", "两把尺子求交");
+            const uint32_t n = static_cast<uint32_t>(ok.cp_text.size());
+            std::string why;
+
+            BlockSpec gap = ok;
+            FormatRun g0 = ok.wholeRun();
+            g0.cp_end = 2;
+            FormatRun g1 = ok.wholeRun();
+            g1.cp_begin = 3;
+            g1.cp_end = n;
+            gap.runs = {g0, g1};
+            const bool gap_ok = runsTileText(gap, &why);
+            expectTrue(!gap_ok && why.find("空洞") != std::string::npos,
+                       "不变量：run 之间有空洞被判出来（" + why + "）");
+
+            BlockSpec over = ok;
+            FormatRun o0 = ok.wholeRun();
+            o0.cp_end = 4;
+            FormatRun o1 = ok.wholeRun();
+            o1.cp_begin = 3;
+            o1.cp_end = n;
+            over.runs = {o0, o1};
+            why.clear();
+            const bool over_ok = runsTileText(over, &why);
+            expectTrue(!over_ok && why.find("重叠") != std::string::npos,
+                       "不变量：run 之间重叠被判出来（" + why + "）");
+
+            BlockSpec tail_gap = ok;
+            FormatRun s0 = ok.wholeRun();
+            s0.cp_end = n - 1;
+            tail_gap.runs = {s0};
+            why.clear();
+            const bool tail_ok = runsTileText(tail_gap, &why);
+            expectTrue(!tail_ok && why.find("尾部有空洞") != std::string::npos,
+                       "不变量：没铺到文本末尾被判出来（" + why + "）");
+
+            BlockSpec empty_run = ok;
+            FormatRun e0 = ok.wholeRun();
+            e0.cp_begin = 2;
+            e0.cp_end = 2;
+            empty_run.runs = {e0};
+            why.clear();
+            const bool empty_ok = runsTileText(empty_run, &why);
+            expectTrue(!empty_ok && why.find("空区间") != std::string::npos,
+                       "不变量：空区间被判出来（" + why + "）");
+
+            BlockSpec beyond = ok;
+            FormatRun b0 = ok.wholeRun();
+            b0.cp_end = n + 3;
+            beyond.runs = {b0};
+            why.clear();
+            const bool beyond_ok = runsTileText(beyond, &why);
+            expectTrue(!beyond_ok && why.find("超出了文本末尾") != std::string::npos,
+                       "不变量：越过文本末尾被判出来（" + why + "）");
+
+            expectTrue(runsTileText(ok, nullptr), "不变量：runs 为空恒真（等价情形）");
+
+            BlockSpec three = ok;
+            FormatRun t0 = ok.wholeRun();
+            t0.cp_end = 2;
+            FormatRun t1 = ok.wholeRun();
+            t1.cp_begin = 2;
+            t1.cp_end = 4;
+            FormatRun t2 = ok.wholeRun();
+            t2.cp_begin = 4;
+            t2.cp_end = n;
+            three.runs = {t0, t1, t2};
+            expectTrue(runsTileText(three, nullptr), "不变量：合法切分通过");
+        }
+
+        // (b) 等价：runs 为空 vs 显式一个 run
+        {
+            BlockSpec a = mkBlock(0, 12.0f, "zh", "两把尺子求交：格式 run 与字体 run。");
+            BlockSpec b = a;
+            b.runs.push_back(b.wholeRun());
+
+            EditorEngine ea, eb;
+            setup(ea, a);
+            setup(eb, b);
+            const long long d = frameDiffBetween(ea, eb);
+            expectTrue(d == 0, "★ 等价：runs 为空与显式一个 run 产出同一帧（不符像素 " +
+                                   std::to_string(d) + "）");
+            const int ga = ea.layout().stats.glyph_count;
+            const int gb = eb.layout().stats.glyph_count;
+            const int la = ea.layout().stats.placed_line_count;
+            const int lb = eb.layout().stats.placed_line_count;
+            expectTrue(ga == gb && la == lb, "等价：字形数与行数也相同（" + std::to_string(ga) +
+                                                 "/" + std::to_string(gb) + "，" +
+                                                 std::to_string(la) + "/" + std::to_string(lb) +
+                                                 "）");
+            expectTrue(ea.auditLayout() == 0 && eb.auditLayout() == 0,
+                       "两条路径各自都过增量与全量一致的审计");
+        }
+
+        // (c) 切分等价：一个 run 切成 3 个属性相同的 run
+        {
+            const std::string txt = "两把尺子求交同一段文本会被切两次";
+            BlockSpec one = mkBlock(0, 12.0f, "zh", txt);
+            one.runs.push_back(one.wholeRun());
+
+            BlockSpec three = mkBlock(0, 12.0f, "zh", txt);
+            const uint32_t n = static_cast<uint32_t>(three.cp_text.size());
+            FormatRun r0 = three.wholeRun();
+            r0.cp_end = 4;
+            FormatRun r1 = three.wholeRun();
+            r1.cp_begin = 4;
+            r1.cp_end = 9;
+            FormatRun r2 = three.wholeRun();
+            r2.cp_begin = 9;
+            r2.cp_end = n;
+            three.runs = {r0, r1, r2};
+            expectTrue(n == 16 && runsTileText(three, nullptr), "三段切分合法（文本 16 个码点）");
+
+            EditorEngine e1, e3;
+            setup(e1, one);
+            setup(e3, three);
+            const long long d = frameDiffBetween(e1, e3);
+            expectTrue(d == 0, "★ 切分等价：一个 run 切成 3 个同属性 run 产出同一帧（不符像素 " +
+                                   std::to_string(d) + "）");
+            const int c1 = e1.layout().para_index[0].font_run_count;
+            const int c3 = e3.layout().para_index[0].font_run_count;
+            // 整形段数会随格式切分增加（每段各自跑一遍回退切分），但产出必须不变。
+            //   这两句要一起看：只断言"段数不变"是错的（段数就是会变），
+            //   只断言"产出不变"则漏掉了"确实按 run 切了"这半边 ——
+            //   一个压根没读 runs 的实现两条都能过。
+            expectTrue(c1 == 1 && c3 == 3, "整形段数随格式切分增加（" + std::to_string(c1) + " → " +
+                                               std::to_string(c3) + "）");
+            const int gc1 = e1.layout().stats.glyph_count;
+            const int gc3 = e3.layout().stats.glyph_count;
+            expectTrue(gc1 == gc3, "切分之后字形数不变（" + std::to_string(gc1) + " vs " +
+                                       std::to_string(gc3) + "）");
+        }
+
+        // (d) 属性真的被读：run 的字号决定推进
+        {
+            // 块级字号故意与 run 不同，用来证伪"排版还在读块级字段"。
+            BlockSpec blk12 = mkBlock(2, 12.0f, "en", "office");
+            FormatRun r12 = blk12.wholeRun();
+            r12.size_pt = 12.0f;
+            blk12.runs = {r12};
+
+            BlockSpec blk24 = mkBlock(2, 24.0f, "en", "office");
+            FormatRun r24 = blk24.wholeRun();
+            r24.size_pt = 24.0f;
+            blk24.runs = {r24};
+
+            BlockSpec trap = mkBlock(2, 24.0f, "en", "office");
+            FormatRun rt = trap.wholeRun();
+            rt.size_pt = 12.0f;
+            trap.runs = {rt};
+
+            EditorEngine e12, e24, etrap;
+            setup(e12, blk12);
+            setup(e24, blk24);
+            setup(etrap, trap);
+            const float w12 = e12.layout().lines[0].inline_end_pt;
+            const float w24 = e24.layout().lines[0].inline_end_pt;
+            const float wtrap = etrap.layout().lines[0].inline_end_pt;
+            expectTrue(std::fabs(wtrap - w12) < 0.01f,
+                       "★ 属性真的被读：块级字号 24 而 run 是 12，行宽跟随 run（" +
+                           std::to_string(wtrap) + " ≈ " + std::to_string(w12) + "）");
+            expectTrue(std::fabs(w24 - 2.0f * w12) < 1.0f, "字号翻倍则行宽翻倍（" +
+                                                               std::to_string(w24) + " ≈ 2 × " +
+                                                               std::to_string(w12) + "）");
+        }
+
+        // (e) 指纹含 run 属性：只改 run 字号（文本一字不改）必须重整形
+        {
+            BlockSpec b = mkBlock(2, 12.0f, "en", "office");
+            FormatRun r = b.wholeRun();
+            r.size_pt = 12.0f;
+            b.runs = {r};
+
+            EditorEngine e;
+            setup(e, b);
+            const float w_first = e.layout().lines[0].inline_end_pt;
+
+            // 同一个引擎、同一段文本，只把 run 的字号改成 24 再重排。
+            //   整形缓存是段级、按指纹判命中；指纹若不覆盖 run 的属性，这里会命中旧条目
+            //   → 行宽原封不动。这正是要抓的静默复用（字形按旧字号算、排版看着"没变"）。
+            b.runs[0].size_pt = 24.0f;
+            e.setBlocks({b});  // 只换数据，不排版；整形缓存不清
+            e.relayout();
+            const float w_second = e.layout().lines[0].inline_end_pt;
+            expectTrue(std::fabs(w_second - 2.0f * w_first) < 1.0f,
+                       "★ 指纹含 run 属性：只改 run 字号也必须重整形（" + std::to_string(w_first) +
+                           " → " + std::to_string(w_second) + "）");
+        }
+
+        // (f) 颜色按 run 取（颜色不进整形指纹，只能在放置时现取）
+        {
+            BlockSpec b = mkBlock(0, 12.0f, "zh", "红绿");
+            const uint32_t n = static_cast<uint32_t>(b.cp_text.size());
+            FormatRun c0 = b.wholeRun();
+            c0.cp_end = 1;
+            c0.color = Color::rgb(200, 20, 20);
+            FormatRun c1 = b.wholeRun();
+            c1.cp_begin = 1;
+            c1.cp_end = n;
+            c1.color = Color::rgb(20, 160, 20);
+            b.runs = {c0, c1};
+
+            EditorEngine e;
+            setup(e, b);
+            const std::vector<PlacedGlyph>& gs = e.layout().glyphs;
+            int red = 0, green = 0, other = 0;
+            for (const PlacedGlyph& g : gs) {
+                if (g.color.r == 200 && g.color.g == 20) {
+                    ++red;
+                } else if (g.color.r == 20 && g.color.g == 160) {
+                    ++green;
+                } else {
+                    ++other;
+                }
+            }
+            expectTrue(gs.size() == 2 && red == 1 && green == 1 && other == 0,
+                       "★ 颜色按 run 取：两个字各用自己 run 的颜色（红 " + std::to_string(red) +
+                           " / 绿 " + std::to_string(green) + " / 其他 " + std::to_string(other) +
+                           "）");
+
+            b.runs[0].color = Color::rgb(10, 10, 200);
+            e.setBlocks({b});
+            e.relayout();
+            expectTrue(e.layout().glyphs[0].color.b == 200,
+                       "改颜色后重排，颜色跟着变（说明颜色是放置时按 run 现取的，不是缓存里的）");
+        }
+
+        // (g) 两把尺子求交：格式 run 的切分点会成为整形边界
+        {
+            // 文本里夹了希腊字母 α β：中文字体覆不覆盖它们取决于字体本身，所以这里
+            //   不断言"一定断了一次回退"，只断言相对关系 —— 格式 run 切一刀，整形段数
+            //   就多 1（切点落在某个字体 run 内部，边界的并集因此多出一个）。
+            //   实测本机 NotoSansSC 覆盖 α β，于是整段只有 1 个字体 run（base = 1）；
+            //   换一份不覆盖的字体则 base = 3，而 after 仍是 base + 1。判据两种都成立，
+            //   这正是它不依赖字体内容的意思。若排版没读格式 run，after 会等于 base。
+            const std::string txt = "体格检查αβ完毕";
+            BlockSpec whole = mkBlock(0, 12.0f, "zh", txt);
+            whole.fallback_font_indices.push_back(2);  // 拉丁字体兜住希腊字母
+            whole.runs.push_back(whole.wholeRun());
+
+            BlockSpec cut = mkBlock(0, 12.0f, "zh", txt);
+            cut.fallback_font_indices.push_back(2);
+            const uint32_t n = static_cast<uint32_t>(cut.cp_text.size());
+            FormatRun k0 = cut.wholeRun();
+            k0.cp_end = 5;  // 落在文本中段，即某个字体 run 的内部
+            FormatRun k1 = cut.wholeRun();
+            k1.cp_begin = 5;
+            k1.cp_end = n;
+            cut.runs = {k0, k1};
+
+            EditorEngine ew, ec;
+            setup(ew, whole);
+            setup(ec, cut);
+            const int base = ew.layout().para_index[0].font_run_count;
+            const int after = ec.layout().para_index[0].font_run_count;
+            expectTrue(base >= 1 && after == base + 1,
+                       "★ 两把尺子求交：格式 run 切一刀，整形段按它增加（" + std::to_string(base) +
+                           " → " + std::to_string(after) + "）");
+            expectTrue(ew.layout().stats.glyph_count == ec.layout().stats.glyph_count,
+                       "求交只改切分，不改字形数（" +
+                           std::to_string(ew.layout().stats.glyph_count) + " vs " +
+                           std::to_string(ec.layout().stats.glyph_count) + "）");
+        }
     }
 
     std::printf("\n──────────────────────────────\n");

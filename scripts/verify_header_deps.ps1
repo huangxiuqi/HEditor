@@ -39,7 +39,7 @@ $ErrorActionPreference = 'Stop'
 $Root     = Split-Path -Parent $PSScriptRoot
 $BuildDir = Join-Path $Root 'build\native'
 $NinjaExe = Join-Path $Root '.toolchain\ninja\ninja.exe'
-$Hdr      = Join-Path $Root 'src\core\engine.h'
+$Hdr      = Join-Path $Root 'src\core\engine\engine.h'
 
 if (-not (Test-Path $NinjaExe)) { throw "缺少 ninja: $NinjaExe" }
 if (-not (Test-Path $Hdr))      { throw "缺少头文件: $Hdr" }
@@ -98,7 +98,12 @@ $expectRebuild = @(
     'CMakeFiles\heditor_core.dir\src\core\text\fallback.cpp.obj',
     'CMakeFiles\heditor_core.dir\src\core\render\bitmap.cpp.obj',
     'CMakeFiles\heditor_core.dir\src\core\layout\layout.cpp.obj',
-    'CMakeFiles\heditor_core.dir\src\core\engine.cpp.obj',
+    'CMakeFiles\heditor_core.dir\src\core\engine\engine.cpp.obj',
+    # ★ demo 必须在这一列里。它是个静态库、被所有测试链着，而 demo_documents.cpp
+    #   直接构造 BlockSpec —— 漏挂头依赖的后果不是编译错误，是"它的 .obj 用旧类布局、
+    #   测试的 .obj 用新布局"混链，症状为析构时随机段错误（实测：给 BlockSpec 加一个
+    #   vector 成员后，model_test 打到 0.4 就崩，而它打印的断言全部是 PASS）。
+    'CMakeFiles\heditor_demo.dir\demo\demo_documents.cpp.obj',
     'CMakeFiles\heditor_native.dir\src\app\native_main.cpp.obj',
     'CMakeFiles\heditor_tests.dir\tests\shaping_test.cpp.obj',
     'CMakeFiles\heditor_edit_tests.dir\tests\edit_test.cpp.obj',
@@ -106,6 +111,7 @@ $expectRebuild = @(
 )
 $expectLink = @(
     'heditor_core.lib',
+    'heditor_demo.lib',
     'heditor_native.exe',
     'heditor_tests.exe',
     'heditor_edit_tests.exe',
@@ -135,7 +141,7 @@ $pre = @{}
 foreach ($r in ($expectRebuild + $expectLink + @($harfbuzzObj))) { $pre[$r] = Get-MTime $r }
 $missingPre = @($pre.Keys | Where-Object { $null -eq $pre[$_] })
 if ($missingPre.Count) { throw "构建产物缺失，先手工构建一次：$($missingPre -join ', ')" }
-Write-Host "     产物齐全（11 个 obj + 5 个链接产物 + harfbuzz）"
+Write-Host "     产物齐全（$($expectRebuild.Count) 个 obj + $($expectLink.Count) 个链接产物 + harfbuzz）"
 
 # ── 2. 只动 mtime，不改内容 ──
 Write-Host "`n[2] 把 engine.h 的 mtime 推到现在（内容一字不改）"
@@ -166,16 +172,24 @@ foreach ($r in $expectRebuild) {
     $mt = Get-MTime $r
     if ($null -eq $mt -or $mt -lt $hdrMt) { $notRebuilt += $r }
 }
-Check '注册过 src/core 的 11 个 TU 全部重编' ($notRebuilt.Count -eq 0) `
-      $(if ($notRebuilt.Count) { '没重编: ' + ($notRebuilt -join ', ') } else { '11 / 11' })
+Check "注册过 src/core 的 $($expectRebuild.Count) 个 TU 全部重编" ($notRebuilt.Count -eq 0) `
+      $(if ($notRebuilt.Count) { '没重编: ' + ($notRebuilt -join ', ') } else { "$($expectRebuild.Count) / $($expectRebuild.Count)" })
 
 $notRelinked = @()
 foreach ($r in $expectLink) {
     $mt = Get-MTime $r
     if ($null -eq $mt -or $mt -lt $hdrMt) { $notRelinked += $r }
 }
-Check '5 个链接产物全部重做' ($notRelinked.Count -eq 0) `
-      $(if ($notRelinked.Count) { '没重做: ' + ($notRelinked -join ', ') } else { '5 / 5' })
+Check "$($expectLink.Count) 个链接产物全部重做" ($notRelinked.Count -eq 0) `
+      $(if ($notRelinked.Count) { '没重做: ' + ($notRelinked -join ', ') } else { "$($expectLink.Count) / $($expectLink.Count)" })
+
+# ★ 单独再点一次 demo。它在上面那张表里已经覆盖了，但值得单独一条：
+#   它是**静态库**，漏挂的后果与别的 target 不同 —— 不报编译错、断言全过、只在析构时崩。
+#   单独一条的名字能让下次读日志的人一眼看出是哪一类漏挂。
+Check 'heditor_demo 的 .obj 也重编了（静态库漏挂头依赖 = 混链段错误）' `
+      ($null -ne (Get-MTime 'CMakeFiles\heditor_demo.dir\demo\demo_documents.cpp.obj') -and
+       (Get-MTime 'CMakeFiles\heditor_demo.dir\demo\demo_documents.cpp.obj') -ge $hdrMt) `
+      "demo_documents.cpp.obj"
 
 # ★ 反向断言：harfbuzz 的 obj 必须**原封不动**。
 #   比"它的 mtime 不大于头文件"更强 —— 直接和快照比，能抓到任何一次多余的重编。
