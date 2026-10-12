@@ -148,9 +148,12 @@ public:
      * core/doc/control.h 顶部。
      *
      * 控件本身不参与断行/分页，参与排版的是它的括号：要显示括号的字段会在自己的
-     * 边界插入"占位簇"（占宽度、不产生字形，见 layout.h）。因此挂控件、改控件范围
-     * 不必重排（正文没变），而改显示括号的范围（form_brackets）必须重排；两侧共用
-     * bracketedControls() 这一张名单，结构上不会一边占位一边不画。
+     * 边界落成一项"行内对象"（见 BlockSpec::objects），排版据此插入占位簇（占宽度、
+     * 不产生字形，见 layout.h）。因此挂控件、改控件范围不必重排（正文没变），而改显示
+     * 括号的范围（form_brackets）必须重排 —— 对象表变了，排版输入就变了。
+     *
+     * 结构与绘制共用同一份落点：括号画在哪由占位簇的几何给出（owner_control 指回
+     * 控件），不再两边各记一套 —— "占位一次、不占位一次"那类不一致没有立足处。
      */
 
     ControlSet& controls() { return controls_; }
@@ -177,8 +180,9 @@ public:
     }
 
     /**
-     * 要显示括号（= 要在排版里占宽度）的控件下标。排版只认这张表。
-     * 空表 = 一个占位都不插，排版与"没有表单"逐字节一致。
+     * 要显示括号（= 要在排版里占宽度）的控件下标 —— 产生端的名单，只有引擎认识
+     * 「聚焦」与编辑模式。syncInlineObjects() 按它决定往对象表里写哪些边界。
+     * 空 = 一个占位都不插，排版与"没有表单"逐字节一致。
      */
     std::vector<int> bracketedControls() const {
         std::vector<int> out;
@@ -208,6 +212,15 @@ public:
         if (cfg_.form_brackets == FormBracketScope::All) return -2;
         return focusedControlIndex();
     }
+
+    /**
+     * 把控件边界写进块流的行内对象表 —— 元素流在引擎侧的落点，也是排版层唯一的
+     * 括号来源（layoutDocument 不再收控件集合）。幂等，每次 relayout 之前调用。
+     *
+     * 产出端暂时还是引擎：只有它知道编辑模式与 form_brackets，也就知道哪些字段要
+     * 显示括号。等编译层能把内容控件直接编成行内对象，这里就退化成一次过滤。
+     */
+    void syncInlineObjects();
 
     /**
      * 累计被编辑策略拒掉的次数。
@@ -460,8 +473,7 @@ private:
      * @param page_lo,page_hi 出参：脏段新旧两版覆盖的页区间，供页指纹只重算这几页，拿不到时写 -1。
      * @return None 时后缀未被动过（调用方可以安全地走续排），其余两种排版已完成。
      */
-    SuffixReuse trySuffixReuse(int from, const std::vector<int>& bracketed, int* page_lo,
-                               int* page_hi);
+    SuffixReuse trySuffixReuse(int from, int* page_lo, int* page_hi);
 
     /**
      * 后缀整体平移：把 [from+1, 末段] 的每一行沿块轴挪到新的位置，并重编页码与全局行号，

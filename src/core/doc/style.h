@@ -112,6 +112,26 @@ CharFormat resolveRunFormat(const StyleSheet& sheet, const std::string& para_sty
                             std::vector<std::string>* diagnostics);
 
 /**
+ * 段落样式链贡献的字符格式基线：文档默认值的 run 部分 + 段落样式链的 run 部分。
+ *
+ * 为什么单独暴露：一段里有多个文本节点时，这条链对每个节点都一样。逐个节点重解会把
+ * "未知段落样式"这类诊断按节点数重复报出来，而调用方往往已经在解析段落格式时报过一次了
+ * （那条链是同一根），于是可以把 diagnostics 传 nullptr，只取值不报。
+ */
+CharFormat paragraphRunBase(const StyleSheet& sheet, const std::string& para_style,
+                            std::vector<std::string>* diagnostics);
+
+/**
+ * 在调用方算好的基线上叠字符样式链与内联 marks。
+ *
+ * 与 resolveRunFormat 的关系：它把"段落那一半"换成外部传入的基线，于是同一段里的多个
+ * 文本节点不必重解段落链。两者对同一个 (para_style, char_style, marks) 必须给出相同结果。
+ */
+CharFormat resolveRunFormatFrom(const StyleSheet& sheet, const CharFormat& base,
+                                const std::string& char_style, const CharFormat& inline_marks,
+                                std::vector<std::string>* diagnostics);
+
+/**
  * 解析结果的缓存。键是元素 ID 加样式表版本号。
  *
  * 命中与否有计数：判据要证明的是"第二次查不重算"，只比结果相等证明不了这一点（结果本来就

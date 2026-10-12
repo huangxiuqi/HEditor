@@ -109,8 +109,8 @@ void EditorEngine::computePageFingerprints(int dirty_lo, int dirty_hi) {
 void EditorEngine::relayout() {
     const auto t0 = Clock::now();
 
-    // 顺序有讲究：先夹光标、再排版 —— 因为排版要知道"哪些字段要显示括号"
-    //   （Focused 档下那张名单就是由光标位置决定的，见 layout.h / bracketedControls）。
+    // 顺序有讲究：先夹光标、再写对象表 —— 因为"哪些字段要显示括号"在 Focused 档下
+    //   由光标位置决定（见 bracketedControls），表写完才是排版的输入。
     //
     //   这里只夹数值范围，不吸附簇：簇吸附需要簇表，而此刻尚未排版；用上一轮的簇表
     //     会把光标拉回旧簇边界，表现为"敲字后光标差一个位置"。簇吸附放在排版之后。
@@ -124,13 +124,13 @@ void EditorEngine::relayout() {
         caret_ = TextPos{0, 0};
     }
 
-    // 把控件与要显示括号的那些控件一起传进排版：它们的两个边界会插入
+    // 把要显示括号的那些字段的两个边界写进块流的行内对象表：排版据此插入
     //   "括号占位"（占宽度、不产生字形），于是断行/行盒长度/簇位置全把括号算进去
-    //   —— 这就是"括号进文档流"。不显示的就不占位（规则：显示才占位）。
+    //   —— 这就是"括号进文档流"。不显示的就不进表（规则：显示才占位）。
     //
-    // 名单是引擎算好的（bracketedControls），排版不认识"聚焦"这个概念：
-    //   两边共用同一张名单，"要画"和"要占位"在结构上不可能不一致。
-    const std::vector<int> bracketed = bracketedControls();
+    // 名单仍由引擎算（bracketedControls，只有它认识"聚焦"），但它落成的是块流里的
+    //   一项，排版层拿到的是一份自足的输入：要画与要占位是同一条记录，分不开。
+    syncInlineObjects();
     const int n_para = static_cast<int>(blocks_.size());
 
     // 四档决策，从严到宽：整篇都脏或没有脏段走全量（前者影响面不可定位，后者是保守
@@ -150,7 +150,7 @@ void EditorEngine::relayout() {
     int fp_lo = -1, fp_hi = -1;
     SuffixReuse reuse = SuffixReuse::None;
     if (!must_full && !para_count_changed_ && from >= 0 && from < n_para) {
-        reuse = trySuffixReuse(from, bracketed, &fp_lo, &fp_hi);
+        reuse = trySuffixReuse(from, &fp_lo, &fp_hi);
     }
     if (reuse != SuffixReuse::None) {
         const ParaIndex& pi = layout_.para_index[static_cast<size_t>(from)];
@@ -165,15 +165,15 @@ void EditorEngine::relayout() {
             layout_.para_index[static_cast<size_t>(from)].state_at_start;
         const int prefix_lines = layout_.para_index[static_cast<size_t>(from)].line_begin;
         truncateLayoutAt(from);
-        layoutDocumentRange(fonts_, blocks_, cfg_.page, &controls_, &bracketed, from, n_para,
-                            resume_state, &shaping_cache_, &layout_);
+        layoutDocumentRange(fonts_, blocks_, cfg_.page, from, n_para, resume_state, &shaping_cache_,
+                            &layout_);
         last_relaid_paragraphs_ = n_para - from;
         last_relaid_lines_ = layout_.stats.placed_line_count - prefix_lines;
         last_layout_full_ = false;
     } else {
         layout_ = LayoutResult{};
-        layoutDocumentRange(fonts_, blocks_, cfg_.page, &controls_, &bracketed, 0, n_para,
-                            freshReflowState(cfg_.page), &shaping_cache_, &layout_);
+        layoutDocumentRange(fonts_, blocks_, cfg_.page, 0, n_para, freshReflowState(cfg_.page),
+                            &shaping_cache_, &layout_);
         last_relaid_paragraphs_ = n_para;
         last_relaid_lines_ = layout_.stats.placed_line_count;
         last_layout_full_ = true;
@@ -206,8 +206,7 @@ void EditorEngine::relayout() {
     stats_.total_ms += msSince(t0);
 }
 
-EditorEngine::SuffixReuse EditorEngine::trySuffixReuse(int from, const std::vector<int>& bracketed,
-                                                       int* page_lo, int* page_hi) {
+EditorEngine::SuffixReuse EditorEngine::trySuffixReuse(int from, int* page_lo, int* page_hi) {
     *page_lo = -1;
     *page_hi = -1;
     const int n_para = static_cast<int>(blocks_.size());
@@ -215,12 +214,11 @@ EditorEngine::SuffixReuse EditorEngine::trySuffixReuse(int from, const std::vect
     if (from < 0 || from + 1 >= n_para) return SuffixReuse::None;
     if (layout_.para_index.size() <= static_cast<size_t>(from + 1)) return SuffixReuse::None;
 
-    // 括号占位计划不能伸进后缀段：插入/删除会移动控件端点，而占位槽的位置由端点
-    // 决定 —— 那些段的内容一个字没变、占位却变了。边界落在脏段之内的都可以搬。
-    for (int ci : bracketed) {
-        if (ci < 0 || ci >= controls_.size()) continue;
-        const Control& c = controls_.at(ci);
-        if (c.range.start.para > from || c.range.end.para > from) return SuffixReuse::None;
+    // 行内对象不能伸进后缀段：插入/删除会移动控件端点，而占位槽的位置由端点决定 ——
+    // 那些段的内容一个字没变、占位却变了。边界落在脏段之内的都可以搬。
+    //   判据直接看块流里的对象表，不再反查控件集合：后缀里没有对象，就一定没有占位。
+    for (int p = from + 1; p < n_para; ++p) {
+        if (!blocks_[static_cast<size_t>(p)].objects.empty()) return SuffixReuse::None;
     }
 
     const ParaIndex old_pi = layout_.para_index[static_cast<size_t>(from)];
@@ -229,9 +227,8 @@ EditorEngine::SuffixReuse EditorEngine::trySuffixReuse(int from, const std::vect
 
     // 只排脏段自己。结果先待在 scratch 里，等状态判完再决定要不要用。
     LayoutResult scratch;
-    const ReflowState after =
-        layoutDocumentRange(fonts_, blocks_, cfg_.page, &controls_, &bracketed, from, from + 1,
-                            resume, &shaping_cache_, &scratch);
+    const ReflowState after = layoutDocumentRange(fonts_, blocks_, cfg_.page, from, from + 1,
+                                                  resume, &shaping_cache_, &scratch);
     const ParaIndex& np = scratch.para_index[static_cast<size_t>(from)];
 
     // 脏段新旧两版覆盖的页区间（并集）：只有这几页的内容可能变了，
@@ -323,8 +320,10 @@ bool EditorEngine::shiftSuffixBlockAxis(int from, const ReflowState& after) {
     const size_t first_glyph = static_cast<size_t>(dp.glyph_end);
     std::vector<PlacedGlyph>& gs = layout_.glyphs;  // 校验与改写共用这一份
 
-    // 沿着"行槽折线"走一遍：每行占 blocks[p].size_pt * line_factor，段间让出
-    // space_after_pt，放不下就换页 —— 与 layoutDocumentRange 横排分支同一套规则。
+    // 沿着"行槽折线"走一遍：每行占 lb.size_pt * line_factor（行盒自己的字号），
+    // 段间让出 space_after_pt，放不下就换页 —— 与 layoutDocumentRange 横排分支同一套规则。
+    //   行盒的 size_pt 是排版时按本行最大的字符格式 run 定的，所以混排字号时必须用它，
+    //   不能用块的 size_pt：否则后缀的页号会与整篇重排不一致。
     //
     // 先空跑一遍（apply=false）做校验，通过了再真改。理由：这一趟边走边写
     //   layout_，一旦中途发现"字形与行号对不上"就已经改了一半 —— 那时既不能
@@ -351,9 +350,10 @@ bool EditorEngine::shiftSuffixBlockAxis(int from, const ReflowState& after) {
             //   （见 layout.cpp 里那段说明），而有文本却取不到字体的段一行都没有 ——
             //   后者在排版里只翻页、不让出 space_after，这里必须与它一致。
             if (pi.line_end == pi.line_begin) continue;
-            const float lh = b.size_pt * b.line_factor;
             for (int L = pi.line_begin; L < pi.line_end; ++L) {
                 LineBox& lb = layout_.lines[static_cast<size_t>(L)];
+                // 行高按行盒自己的字号算（见上面那段说明）：一行里可以混排字号。
+                const float lh = lb.size_pt * b.line_factor;
                 if (s + lh > cy + ch) {
                     ++page;
                     s = cy;
@@ -440,11 +440,83 @@ void EditorEngine::truncateLayoutAt(int para) {
     layout_.para_cluster_starts.resize(k);
 }
 
+/**
+ * 把控件边界写进块流的行内对象表（元素流的过渡形态）。
+ *
+ * 产出端暂时还是引擎：只有它认识编辑模式与 form_brackets，也就知道哪些字段要显示括号。
+ * 排版层从此只吃块流，"要画"与"要占位"是同一条记录，分不开。
+ *
+ * 同一处边界上的先后在这里定死（排版层只按数组顺序插槽）：
+ *   bucket 0  到此结束的字段（闭括号）：内层先收 —— depth 降序
+ *   bucket 1  空字段：一开一闭紧挨着，按控件下标逐个字段排列
+ *   bucket 2  从此开始的字段（开括号）：外层先开 —— depth 升序
+ * 光靠"边 + 一个优先级"不够：两枚空字段落在同一个偏移上时，两枚开括号会排到一起、
+ * 两枚闭括号又排到一起，画出来成了 [[ ]]（嵌套），而它们本该是 [][]（并列）。
+ */
+void EditorEngine::syncInlineObjects() {
+    for (BlockSpec& b : blocks_) b.objects.clear();
+    const std::vector<int> bracketed = bracketedControls();
+    if (bracketed.empty()) return;
+
+    // 一条待插入的边界事件：排序键与对象本体分开，排完序只留后者。
+    struct Event {
+        uint32_t cp = 0;
+        int bucket = 0;
+        int key = 0;
+        int tie = 0;
+        InlineObject obj;
+    };
+    const int n_para = static_cast<int>(blocks_.size());
+    std::vector<std::vector<Event>> per(blocks_.size());
+    auto push = [&](int para, const Event& e) {
+        if (para < 0 || para >= n_para) return;
+        per[static_cast<size_t>(para)].push_back(e);
+    };
+    for (int ci : bracketed) {
+        if (ci < 0 || ci >= controls_.size()) continue;
+        const Control& c = controls_.at(ci);
+        // 空字段：开、闭落在同一处，且要画成一对紧挨着的 []（不是 ][）。
+        // 它的一对必须排在"后面的字段"的开括号之前 —— 同一个位置上，空字段在文档序里
+        //   位于"内容到此结束"之后、"内容从此开始"之前，那对方括号得整对留在那个缝里。
+        const bool empty = (c.range.start == c.range.end);
+
+        Event tail;
+        tail.cp = static_cast<uint32_t>(c.range.end.offset);
+        tail.bucket = empty ? 1 : 0;
+        tail.key = empty ? ci : -c.depth;
+        tail.tie = ci;
+        tail.obj = InlineObject{tail.cp, InlineObjectKind::ControlEnd, ci, c.read_only};
+        push(c.range.end.para, tail);
+
+        Event head;
+        head.cp = static_cast<uint32_t>(c.range.start.offset);
+        head.bucket = empty ? 1 : 2;
+        head.key = empty ? ci : c.depth;
+        head.tie = ci;
+        head.obj = InlineObject{head.cp, InlineObjectKind::ControlStart, ci, c.read_only};
+        push(c.range.start.para, head);
+    }
+    for (size_t p = 0; p < per.size(); ++p) {
+        std::vector<Event>& ev = per[p];
+        if (ev.empty()) continue;
+        std::stable_sort(ev.begin(), ev.end(), [](const Event& a, const Event& b) {
+            if (a.cp != b.cp) return a.cp < b.cp;
+            if (a.bucket != b.bucket) return a.bucket < b.bucket;
+            if (a.key != b.key) return a.key < b.key;
+            if (a.tie != b.tie) return a.tie < b.tie;
+            // 同一个空字段的一对：开在前、闭在后（枚举里 ControlStart=0 < ControlEnd=1）
+            return static_cast<int>(a.obj.kind) < static_cast<int>(b.obj.kind);
+        });
+        std::vector<InlineObject>& out = blocks_[p].objects;
+        out.reserve(ev.size());
+        for (const Event& e : ev) out.push_back(e.obj);
+    }
+}
+
 void EditorEngine::relayoutIfBracketPlanChanged(int prev_plan) {
     if (bracketPlanId() == prev_plan) return;
     markLayoutDirtyForBrackets();
     relayout();
 }
-
 
 }  // namespace heditor

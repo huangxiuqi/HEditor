@@ -137,13 +137,25 @@ ParaFormat resolveParagraphFormat(const StyleSheet& sheet, const std::string& st
 CharFormat resolveRunFormat(const StyleSheet& sheet, const std::string& para_style,
                             const std::string& char_style, const CharFormat& inline_marks,
                             std::vector<std::string>* diagnostics) {
+    const CharFormat base = paragraphRunBase(sheet, para_style, diagnostics);
+    return resolveRunFormatFrom(sheet, base, char_style, inline_marks, diagnostics);
+}
+
+CharFormat paragraphRunBase(const StyleSheet& sheet, const std::string& para_style,
+                            std::vector<std::string>* diagnostics) {
     const std::vector<const StyleDef*> para_chain =
         chainOf(sheet, StyleKind::Paragraph, para_style, 64, diagnostics);
-    const std::vector<const StyleDef*> char_chain =
-        chainOf(sheet, StyleKind::Character, char_style, 64, diagnostics);
-
     CharFormat run = sheet.docDefaultsRun();
     foldChain(para_chain, nullptr, &run);
+    return run;
+}
+
+CharFormat resolveRunFormatFrom(const StyleSheet& sheet, const CharFormat& base,
+                                const std::string& char_style, const CharFormat& inline_marks,
+                                std::vector<std::string>* diagnostics) {
+    const std::vector<const StyleDef*> char_chain =
+        chainOf(sheet, StyleKind::Character, char_style, 64, diagnostics);
+    CharFormat run = base;
     foldChain(char_chain, nullptr, &run);
     return mergeCharFormat(run, inline_marks);
 }

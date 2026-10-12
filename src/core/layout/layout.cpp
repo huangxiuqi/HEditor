@@ -64,6 +64,20 @@ struct LineSlice {
 };
 
 /**
+ * 一个簇的行度量：字号与基线上下界（磅）。
+ *
+ * 为什么行盒的高度不能整段一套：一行里可以混排字号（字符格式 run），行盒与基线必须由本行
+ * 最高的那个决定，否则大字会溢出到相邻行上。取的是"该簇所在 run 自己的字体与字号"——
+ * 只有一个 run 时这就是块级那套值，与加 run 之前逐字段相同。
+ * 回退字体不参与行度量：与加 run 之前同一条取舍（那时也只看主字体）。
+ */
+struct LineMetric {
+    float size_pt = 0.0f;
+    float ascent_pt = 0.0f;
+    float descent_pt = 0.0f;
+};
+
+/**
  * 贪心断行：在 [start, clusters.size()) 里切出下一行，可用范围为 avail_pt。
  * 算法：边累积边推进，同时记住"最后一个可断点"。装不下时回退到该可断点；
  * 若整行内一个可断点都没有（超长的不可断词），则在该处硬断，保证不会死循环。
@@ -186,78 +200,24 @@ uint64_t shapingFingerprint(const BlockSpec& b, const std::vector<FormatRun>& ru
 }
 
 /**
- * 把"要显示括号的控件"的边界插成占位簇（括号进文档流的全部实现）。
- * 三条约定：
- *   槽宽 = 括号字形 advance + 间隙，且与绘制侧共用同一个常数（见 kControlBracketSlotGapPt）；
- *   同一处边界上的多个槽按 (bucket, key) 排顺序 —— 内容到此结束的闭括号最靠前（内层先收），
- *     空字段自己的一对紧随其后且必须挨着（否则后一个字段的开括号会插进来，把一对方括号
- *     劈成两半），内容从此开始的字段的开括号排在最后（外层先开）。于是相邻字段得 ][、
- *     一个空字段得 []、同一处两个空字段得 [][]（而不是被侧别分组画成 [[ ]]）；
- *   占位簇 g0 == g1（不产生字形、只占 advance），于是断行容量、行末位置、每个簇的行内位置、
- *     光标与命中测试全都自动把括号算进去。
- * @param shaped 纯整形结果（可能正指着只读的段级缓存条目）；没有槽要插时原样返回它
+ * 把块流的行内对象插成占位簇（括号进文档流的全部实现）。
+ * 对象从哪来、该不该显示、谁在外谁在内，全在产生端（见 BlockSpec::objects）；排版层
+ * 只做一次线性归并 —— 在簇 i 之前插入所有锚点不大于 clusters[i].cp 的对象，末尾再收
+ * 剩下的。表已升序，于是同一处边界上的先后就是数组里的先后，这里不做第二次排序。
+ * 槽宽 = 括号字形 advance + 间隙（与绘制侧共用 kControlBracketSlotGapPt）；占位簇
+ * g0 == g1，不产生字形只占 advance，于是断行容量、行末位置、簇的行内位置、光标与命中
+ * 测试全都自动把括号算进去；owner 与 read_only 原样回填，命中测试因此能回答归属。
+ * @param shaped 纯整形结果（可能正指着只读的段级缓存条目）；没有对象要插时原样返回它
  * @param scratch 需要可改副本时就地用它（未命中缓存时它已持有整形结果，省一次拷贝）
  */
-const BlockShaping* withBracketSlots(const ControlSet* controls, const std::vector<int>* bracketed,
-                                     size_t para_index, uint32_t n_cp, const BlockShaping* shaped,
-                                     BlockShaping* scratch) {
-    if (!controls || !bracketed || bracketed->empty()) return shaped;
+const BlockShaping* withInlineObjects(const BlockSpec& b, uint32_t n_cp, const BlockShaping* shaped,
+                                      BlockShaping* scratch) {
+    if (b.objects.empty()) return shaped;
     const BlockShaping& src = *shaped;
     // 槽宽 = 括号字形 advance + 间隙。间隙必须计入排版，否则 字] 会挤在一起。
     const float bw = bracketAdvancePt(src.primary);
     const float slot = bw > 0.0f ? bw + kControlBracketSlotGapPt : 0.0f;
     if (!(slot > 0.0f)) return shaped;
-
-    // 同一处边界（簇 i 之前）可能同时挂着多个槽，来自不同字段：
-    // 某字段在此结束（闭括号）、某字段在此开始（开括号）、空字段两者皆有。
-    // 顺序必须让整串括号保持正确嵌套，而且空字段的一对要成对相邻：
-    //   bucket 0  到此结束的字段（闭括号）：内层先收 —— depth 降序
-    //   bucket 1  空字段：一开一闭紧挨着，按控件下标逐个字段排列
-    //   bucket 2  从此开始的字段（开括号）：外层先开 —— depth 升序
-    // 光靠"边 + 一个优先级"是不够的：两枚空字段落在同一个偏移上时，两枚开括号会排到
-    //   一起、两枚闭括号又排到一起，画出来成了 [[ ]]（嵌套），而它们本该是 [][]（并列）。
-    struct Slot {
-        BracketSide side;
-        bool ro;  // 只读字段的括号画灰色（颜色只有插槽这一层知道）
-        int bucket;
-        int key;  // 同一 bucket 内的主排序键
-        int tie;  // 主键相同时的次序（控件下标）
-        int owner;  // 属于哪个控件 —— 命中测试要用（点到的括号是谁的）
-    };
-    std::vector<std::vector<Slot>> at(src.clusters.size() + 1);
-    // 段内偏移 → 插入点（第一个 cp >= offset 的簇；没有就插在末尾）。
-    auto slotIndex = [&](size_t offset) {
-        for (size_t i = 0; i < src.clusters.size(); ++i) {
-            if (src.clusters[i].cp >= offset) return i;
-        }
-        return src.clusters.size();
-    };
-    for (int ci : *bracketed) {
-        if (ci < 0 || ci >= controls->size()) continue;
-        const Control& fc = controls->at(ci);
-        // 空字段：开、闭落在同一处，且要画成一对紧挨着的 []（不是 ][）。
-        // 它的一对必须排在"后面的字段"的开括号之前 —— 同一个位置上，空字段在文档序里
-        //   位于"内容到此结束"之后、"内容从此开始"之前，那对方括号得整对留在那个缝里。
-        const bool empty_field = (fc.range.start == fc.range.end);
-        if (fc.range.end.para == static_cast<int>(para_index)) {
-            at[slotIndex(fc.range.end.offset)].push_back(Slot{
-                BracketSide::Close, fc.read_only, empty_field ? 1 : 0,
-                empty_field ? ci : -fc.depth, ci, ci});
-        }
-        if (fc.range.start.para == static_cast<int>(para_index)) {
-            at[slotIndex(fc.range.start.offset)].push_back(Slot{
-                BracketSide::Open, fc.read_only, empty_field ? 1 : 2,
-                empty_field ? ci : fc.depth, ci, ci});
-        }
-    }
-    bool any = false;
-    for (const std::vector<Slot>& v : at) {
-        if (!v.empty()) {
-            any = true;
-            break;
-        }
-    }
-    if (!any) return shaped;
 
     // 这一段要插占位 → 簇序列会被改 → 需要一份可改的副本
     // （shaped 可能正指着只读的缓存条目）。
@@ -265,41 +225,39 @@ const BlockShaping* withBracketSlots(const ControlSet* controls, const std::vect
     std::vector<BlockShaping::Cluster> cl2;
     std::vector<float> adv2;
     std::vector<bool> brk2;
-    cl2.reserve(scratch->clusters.size() + 4);
-    adv2.reserve(scratch->clusters.size() + 4);
-    brk2.reserve(scratch->clusters.size() + 4);
-    // 在簇 i 前面插一个占位槽（side = 开/闭，ro = 只读，owner = 归属控件）。
-    auto emitSlot = [&](size_t i, BracketSide side, bool ro, int owner) {
+    cl2.reserve(scratch->clusters.size() + b.objects.size());
+    adv2.reserve(scratch->clusters.size() + b.objects.size());
+    brk2.reserve(scratch->clusters.size() + b.objects.size());
+    // 插一个占位槽：cp 取"它后面那个真实簇的 cp"（末尾用段长哨兵）。这让"光标该落在槽的
+    //   哪一侧"归 inlineOffsetFor 判定，判据是 bracket_side —— 光靠 cp 是分不开的。
+    auto emitSlot = [&](const InlineObject& o, uint32_t cp) {
         BlockShaping::Cluster pc;
-        // 占位簇的 cp = 它后面那个真实簇的 cp（末尾用段长哨兵）。这让"光标该落在槽的
-        // 哪一侧"归 inlineOffsetFor 判定，判据是 bracket_side —— 光靠 cp 是分不开的。
-        pc.cp = (i < scratch->clusters.size()) ? scratch->clusters[i].cp : n_cp;
+        pc.cp = cp;
         pc.g0 = pc.g1 = 0;
         pc.placeholder = true;
-        pc.bracket_side = side;
-        pc.read_only = ro;
-        pc.owner_control = owner;
+        pc.bracket_side =
+            (o.kind == InlineObjectKind::ControlStart) ? BracketSide::Open : BracketSide::Close;
+        pc.read_only = o.read_only;
+        pc.owner_control = o.owner;
         cl2.push_back(pc);
         adv2.push_back(slot);
         brk2.push_back(false);  // 括号内部不是断点
     };
+    size_t oi = 0;
     for (size_t i = 0; i <= scratch->clusters.size(); ++i) {
-        // 按 (bucket, key, tie, 边) 排序。stable_sort 让完全同键的槽保持控件列表顺序，
-        //   结果确定可复现。
-        std::stable_sort(at[i].begin(), at[i].end(), [](const Slot& a, const Slot& b) {
-            if (a.bucket != b.bucket) return a.bucket < b.bucket;
-            if (a.key != b.key) return a.key < b.key;
-            if (a.tie != b.tie) return a.tie < b.tie;
-            // 同一个空字段的一对：开在前、闭在后（枚举里 Open=1 < Close=2）
-            return static_cast<int>(a.side) < static_cast<int>(b.side);
-        });
-        for (const Slot& s : at[i]) emitSlot(i, s.side, s.ro, s.owner);
+        const uint32_t at = (i < scratch->clusters.size()) ? scratch->clusters[i].cp : n_cp;
+        while (oi < b.objects.size() && b.objects[oi].cp <= at) emitSlot(b.objects[oi++], at);
         if (i < scratch->clusters.size()) {
             cl2.push_back(scratch->clusters[i]);
             adv2.push_back(scratch->cluster_adv_pt[i]);
             brk2.push_back(scratch->break_after[i]);
         }
     }
+    // 锚点越过段长的对象夹到段尾，而不是丢掉：排版层假定表已合序且锚点不越界
+    //   （见 objectsOrdered），越界说明产生端算错了端点。此时丢一枚括号 = 凭空少画
+    //   一层，画面"看着还有括号"却层级不对，比排版错位更难发现；夹到段尾至少是
+    //   错误的可见形态，也不会让后面的括号整串前移。
+    for (; oi < b.objects.size(); ++oi) emitSlot(b.objects[oi], n_cp);
     scratch->clusters.swap(cl2);
     scratch->cluster_adv_pt.swap(adv2);
     scratch->break_after.swap(brk2);
@@ -346,6 +304,30 @@ const FormatRun* runCovering(const std::vector<FormatRun>& runs, uint32_t cp) {
     return nullptr;
 }
 
+bool objectsOrdered(const BlockSpec& b, std::string* why) {
+    const uint32_t n = static_cast<uint32_t>(b.cp_text.size());
+    uint32_t prev = 0;
+    for (std::size_t i = 0; i < b.objects.size(); ++i) {
+        const InlineObject& o = b.objects[i];
+        const std::string at = "第 " + std::to_string(i) + " 个行内对象";
+        if (o.cp > n) {
+            if (why) {
+                *why = at + "锚在 " + std::to_string(o.cp) + "，超出段落长度 " + std::to_string(n);
+            }
+            return false;
+        }
+        if (i > 0 && o.cp < prev) {
+            if (why) {
+                *why = at + "锚在 " + std::to_string(o.cp) + "，比前一个的 " +
+                       std::to_string(prev) + " 更靠前（对象表必须按 cp 升序）";
+            }
+            return false;
+        }
+        prev = o.cp;
+    }
+    return true;
+}
+
 /**
  * 段级整形缓存的内部结构。
  * 按段下标存放而非哈希表：段是编辑的最小单位（当前不支持跨段编辑），下标访问即可
@@ -387,17 +369,15 @@ struct ShapingCacheAccess {
  * 全量排版：从第 0 段排到末尾，不使用缓存（对照路径与基准）。
  */
 LayoutResult layoutDocument(FontLibrary& lib, const std::vector<BlockSpec>& blocks,
-                            const PageMetrics& page, const ControlSet* controls,
-                            const std::vector<int>* bracketed) {
+                            const PageMetrics& page) {
     LayoutResult res;
-    layoutDocumentRange(lib, blocks, page, controls, bracketed, 0, static_cast<int>(blocks.size()),
+    layoutDocumentRange(lib, blocks, page, 0, static_cast<int>(blocks.size()),
                         freshReflowState(page), /*cache=*/nullptr, &res);
     return res;
 }
 
 ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& blocks,
-                                const PageMetrics& page, const ControlSet* controls,
-                                const std::vector<int>* bracketed, int from_para, int to_para,
+                                const PageMetrics& page, int from_para, int to_para,
                                 const ReflowState& state, ShapingCache* cache, LayoutResult* out) {
     const auto t_layout0 = Clock::now();
     LayoutResult& res = *out;
@@ -579,8 +559,8 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
                 cursor_y = cy;
             }
             // 空段落一样要插括号占位：回车正好把字段断在两段之间、或字段所在段被删空时，
-            //   这一段里就只剩字段边界了。走的是与有内容段落同一个 withBracketSlots ——
-            //   顺序规则（][ / [] / [[ ]]）只有一份，不会两边不一致。
+            //   这一段里就只剩字段边界了。走的是与有内容段落同一个 withInlineObjects ——
+            //   对象表只有一份，不会两边不一致。
             BlockShaping empty_bs;
             empty_bs.primary = f;
             empty_bs.ascent_pt = ascent;
@@ -588,8 +568,7 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
             empty_bs.st.vertical = b.wm.isVertical();
             empty_bs.st.sideways = b.wm.isSideways();
             BlockShaping slot_bs;
-            const BlockShaping* slotted =
-                withBracketSlots(controls, bracketed, para_index, /*n_cp=*/0, &empty_bs, &slot_bs);
+            const BlockShaping* slotted = withInlineObjects(b, /*n_cp=*/0, &empty_bs, &slot_bs);
 
             LineBox lb;
             lb.paragraph = static_cast<int>(para_index);
@@ -669,18 +648,18 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
 
         const uint32_t n_cp = static_cast<uint32_t>(b.cp_text.size());
 
-        // 括号占位：把"要显示括号的控件"的边界插成占位簇（实现见 withBracketSlots）。
+        // 括号占位：把块流的行内对象插成占位簇（实现见 withInlineObjects）。
         //   占位簇不产生字形、只占 advance，于是下面的断行容量、行末位置、每个簇的行内
         //   位置、光标与命中测试全都自动把括号算进去 —— 这就是"括号进文档流"的全部内容。
-        //   显示范围由引擎给出（EngineConfig::form_brackets），排版层不认识「聚焦」：
-        //   谁显示就占谁的位。默认全部控件常显，故占位集合与光标无关，光标移动不引起重排。
-        //   para_cluster_starts 在此之前已生成，按约定不含占位簇。
-        shaped = withBracketSlots(controls, bracketed, para_index, n_cp, shaped, &scratch);
+        //   哪些对象在这张表里，由产生端决定（引擎按模式与 form_brackets 落成对象表），
+        //   排版层不认识「聚焦」：表里有就占位。默认全部控件常显，故对象表与光标无关，
+        //   光标移动不引起重排。para_cluster_starts 在此之前已生成，按约定不含占位簇。
+        shaped = withInlineObjects(b, n_cp, shaped, &scratch);
 
         // 从这里往下全是只读：断行、放置字形都只读整形结果。
         const BlockShaping& bs = *shaped;
 
-        const float line_h = b.size_pt * b.line_factor;
+        const float block_line_h = b.size_pt * b.line_factor;
         // 本行/本列末尾码点：下一个簇的首码点，最后一簇用段长
         auto lastCpOf = [&](size_t slice_end) -> uint32_t {
             return (slice_end < bs.clusters.size()) ? bs.clusters[slice_end].cp : n_cp;
@@ -692,19 +671,85 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
             return r != nullptr ? r->color : b.color;
         };
 
-        if (!b.wm.isVertical()) {
-            // 横排
-            const float ascent = bs.ascent_pt;
-            const float descent = bs.descent_pt;
-            if (cursor_y + line_h > cy + ch) {
-                ++page_index;
-                cursor_y = cy;
+        // 每个簇的行度量：整段算一次，横排的行循环里按行取最大值。
+        //   按"簇所在 run 自己的字体与字号"取 —— 只有一个 run 时这就是块级那套值，
+        //   与加 run 之前逐字段相同。相邻簇大多落在同一个 run 里，所以只在换 run 时查字体。
+        std::vector<LineMetric> cluster_metric(bs.clusters.size());
+        LineMetric para_metric;  // 整段的最大值：竖排的列宽必须整段一致，用不了逐行的
+        {
+            const FormatRun* cur = nullptr;
+            LineMetric m;
+            for (size_t i = 0; i < bs.clusters.size(); ++i) {
+                const FormatRun* r = runCovering(fruns, bs.clusters[i].cp);
+                if (r != cur) {
+                    cur = r;
+                    const int fi = (r != nullptr) ? r->font_index : b.font_index;
+                    m = LineMetric{};
+                    m.size_pt = (r != nullptr) ? r->size_pt : b.size_pt;
+                    if (FontInstance* f = lib.instance(fi, m.size_pt)) {
+                        m.ascent_pt = f->ascenderPt();
+                        m.descent_pt = f->descenderPt();
+                    }
+                }
+                cluster_metric[i] = m;
+                para_metric.size_pt = std::max(para_metric.size_pt, m.size_pt);
+                para_metric.ascent_pt = std::max(para_metric.ascent_pt, m.ascent_pt);
+                para_metric.descent_pt = std::max(para_metric.descent_pt, m.descent_pt);
             }
-            float baseline = cursor_y + ascent;
+            // 一个度量都取不到（取不到字体）：退回块级那套，几何必须存在。
+            if (para_metric.size_pt <= 0.0f) {
+                para_metric = LineMetric{b.size_pt, bs.ascent_pt, bs.descent_pt};
+            }
+        }
 
+        if (!b.wm.isVertical()) {
+            // 横排。推进的是行顶（top）而不是基线：一行里可以混排字号，基线 = 行顶 +
+            //   本行 ascent，而 ascent 逐行不同 —— 拿基线累加会带着上一行的 ascent 走，
+            //   翻页之后落点就错了。
             size_t start = 0;
+            float top = cursor_y;
+            float prev_line_h = block_line_h;  // 上一行的行高：本行行顶由它推进
+            bool anchor = true;                // 段首或刚翻过页：本行按 cursor_y 重新定位
             while (start < bs.clusters.size()) {
                 const LineSlice slice = takeLine(bs.cluster_adv_pt, bs.break_after, start, cw);
+
+                // 本行的行度量：取本行所有簇所在 run 的最大 ascent / descent / 字号。
+                //   一行里可以混排字号（字符格式 run），行盒高度与基线必须由本行最高的那个
+                //   决定，否则大字会溢出到相邻行上。只有一个 run 时这就是块级那套值。
+                float ascent = 0.0f;
+                float descent = 0.0f;
+                float max_size = 0.0f;
+                for (size_t i = slice.begin; i < slice.end; ++i) {
+                    ascent = std::max(ascent, cluster_metric[i].ascent_pt);
+                    descent = std::max(descent, cluster_metric[i].descent_pt);
+                    max_size = std::max(max_size, cluster_metric[i].size_pt);
+                }
+                if (max_size <= 0.0f) {
+                    ascent = bs.ascent_pt;
+                    descent = bs.descent_pt;
+                    max_size = b.size_pt;
+                }
+                const float line_h = max_size * b.line_factor;
+
+                // 本行放不下就翻页。判定必须用本行自己的高度：上一行结束时还不知道
+                //   本行多高，拿上一行的高度估会漏判（下一行更高时溢出页底）。
+                if (anchor) {
+                    // 段首那一行：本段从 cursor_y 起排。
+                    if (cursor_y + line_h > cy + ch) {
+                        ++page_index;
+                        cursor_y = cy;
+                    }
+                    top = cursor_y;
+                    anchor = false;
+                } else {
+                    top += prev_line_h;
+                    if (top + line_h > cy + ch) {
+                        ++page_index;
+                        cursor_y = cy;
+                        top = cursor_y;
+                    }
+                }
+                const float baseline = top + ascent;
 
                 // 行盒（几何的正面半边）
                 LineBox lb;
@@ -713,7 +758,7 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
                 lb.page = page_index;
                 lb.vertical = false;
                 lb.sideways = false;
-                lb.size_pt = b.size_pt;
+                lb.size_pt = max_size;
                 lb.block_lo_pt = baseline - ascent;
                 lb.block_hi_pt = baseline + descent;
                 lb.inline_origin_pt = cx;
@@ -782,24 +827,18 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
                 }
 
                 start = slice.end;
-                if (start < bs.clusters.size()) {
-                    baseline += line_h;
-                    ++line_total;
-                    // 本行底部越过页底 → 翻页
-                    if (baseline + (line_h - ascent) > cy + ch) {
-                        ++page_index;
-                        cursor_y = cy;
-                        baseline = cursor_y + ascent;
-                    }
-                }
+                prev_line_h = line_h;
+                ++line_total;
             }
-            ++line_total;
-            cursor_y = baseline + (line_h - ascent) + b.space_after_pt;
+            cursor_y = top + prev_line_h + b.space_after_pt;
 
         } else {
             // 竖排
             // 竖排块占满本页剩余高度；列宽由 line_factor 决定。
-            const float col_w = line_h;
+            //   列宽取整段最大字号（而不是块级字号）：竖排的列位是等宽推进的（见 colCenterX），
+            //   逐列变宽要连列序与页内列数一起重算，那是另一件事 —— 这里先保证"整段一套、
+            //   按段内最大字号"，于是混排字号不会把大字挤出列外。
+            const float col_w = para_metric.size_pt * b.line_factor;
             float region_top = cursor_y;
             if (region_top + col_w * 2.0f > cy + ch) {
                 ++page_index;
@@ -833,13 +872,13 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
             //   笔的定位：v 轴（-descent … +ascender）现在是水平方向，
             //   要让字身在列里居中 → 基线 x = 列中线 - (ascender - descent)/2。
             const bool sideways = bs.st.sideways;
-            const float side_asc = bs.ascent_pt;
-            const float side_desc = bs.descent_pt;
+            const float side_asc = para_metric.ascent_pt;
+            const float side_desc = para_metric.descent_pt;
 
             size_t start = 0;
             while (start < bs.clusters.size()) {
                 float avail = (cy + ch) - pen_y;
-                if (avail < b.size_pt) {
+                if (avail < para_metric.size_pt) {
                     nextColumn();
                     avail = (cy + ch) - pen_y;
                 }
@@ -860,7 +899,7 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
                 lb.page = page_index;
                 lb.vertical = true;
                 lb.sideways = sideways;
-                lb.size_pt = b.size_pt;
+                lb.size_pt = para_metric.size_pt;
                 lb.block_lo_pt = colCenterX(col) - col_w * 0.5f;
                 lb.block_hi_pt = colCenterX(col) + col_w * 0.5f;
                 lb.inline_origin_pt = pen_y;

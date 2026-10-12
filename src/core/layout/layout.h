@@ -16,7 +16,6 @@
 #include <string>
 #include <vector>
 
-#include "core/doc/control.h"
 #include "core/doc/document.h"
 #include "core/text/font.h"
 #include "core/text/writing_mode.h"
@@ -68,6 +67,38 @@ struct FormatRun {
     uint32_t codepointCount() const { return cp_end - cp_begin; }
 };
 
+/**
+ * 行内对象的种类。
+ *
+ * 本期只有控件边界两种，它们都是"行内叶子、有宽度、参与断行"（起始边界 = 内容从此
+ * 开始，结束边界 = 内容到此为止）。图片、公式、域、链接边界按同一机制后续加成员：
+ * 这一层不区分"行内 / 块级"，只认"这个位置有一项占宽度的东西"（方案一）。
+ */
+enum class InlineObjectKind : uint8_t {
+    ControlStart = 0,  // 控件起始边界（画开括号，内容在它右边）
+    ControlEnd = 1,    // 控件结束边界（画闭括号，内容在它左边）
+};
+
+/**
+ * 行内对象：块流里除文本之外的一项。
+ *
+ * 它就是"元素流"在引擎输入侧的落点 —— 段的行内序列不再只有文本，而是"对象与文本
+ * 按码点位置交错"。cp 是锚点（插到第一个 cp 不小于它的簇之前），与文本共用一个坐标，
+ * 于是光标、命中测试、断行、增量都不需要第二套坐标。
+ *
+ * owner 是产生端给的不透明句柄：排版层原样搬到 LineCluster::owner_control，不解释其含义。
+ * 编译层给控件节点 id，引擎侧那条尚未迁移的旧路径给控件集合下标，同一份产物里只用一种口径。
+ *
+ * 宽度不在这里：它由排版层按字体现算（槽宽 = 括号字形 advance + 间隙），
+ * 因为宽度依赖字号与字体回退的结果，而那一份结果只有排版层有。
+ */
+struct InlineObject {
+    uint32_t cp = 0;  // 锚点：段内码点下标（可等于段长，表示段尾）
+    InlineObjectKind kind = InlineObjectKind::ControlStart;
+    int owner = -1;          // 不透明句柄，>-1 的才画括号
+    bool read_only = false;  // 只读控件的括号画灰色
+};
+
 struct BlockSpec {
     /**
      * 段落文本的唯一真源是码点（UCS-4）。UTF-8 只是 I/O 表示，
@@ -103,13 +134,27 @@ struct BlockSpec {
     std::vector<FormatRun> runs;
 
     /**
+     * 行内对象表（升序：先按 cp，同一个 cp 上按产生端给的次序）。
+     *
+     * 这是"排版只吃块流"的落点：要显示括号的控件边界以它为准，排版层不再需要一份
+     * 外部的区间表 —— 两边各记一套正是"占位一次、不占位一次"那类不一致的温床。
+     * 同一处边界上的多枚括号的先后次序由产生端定好（嵌套的收放顺序、空字段成对
+     * 相邻都是那里的事），排版层只按数组顺序插入，不做第二次排序。
+     *
+     * 空表 = 一个对象都不插，排版与"没有表单"逐字节相同。
+     */
+    std::vector<InlineObject> objects;
+
+    /**
      * 文本便捷接口：进出都是 UTF-8，内部始终是码点序列。
      * 换文本会清掉 runs：旧区间是按旧文本的码点下标算的，留着必然铺不满，
      * 于是静默失效。清掉是回到"整段一个 run"的等价情形，属性由块级字段给出。
+     * objects 同样要清：它的 cp 锚点也是按旧文本算的，留着会把括号摆到别处去。
      */
     void setText(const std::string& utf8) {
         cp_text = utf8ToCodepoints(utf8);
         runs.clear();
+        objects.clear();
     }
     std::string textUtf8() const { return codepointsToUtf8(cp_text); }
     size_t codepointCount() const { return cp_text.size(); }
@@ -154,6 +199,14 @@ bool runsTileText(const BlockSpec& b, std::string* why);
  * 入参是调用方自己持有的序列（effectiveRuns 的返回值是按值给的，不能取它的引用）。
  */
 const FormatRun* runCovering(const std::vector<FormatRun>& runs, uint32_t cp);
+
+/**
+ * objects 是否合序：cp 非降、且每个 cp 都不越过段长（等于段长表示锚在段尾）。
+ * 为什么必须判而不是"约定一下"：排版层按数组顺序线性插槽，顺序一坏，括号的层级
+ * 就画错（][ 变 [] ），而画面看上去仍然"有括号"，不容易发现。
+ * 返回 false 时把第一处不合法的原因写进 why；why 可以为空指针。
+ */
+bool objectsOrdered(const BlockSpec& b, std::string* why);
 
 /**
  * 已定位的字形。x/y 是"字形原点"在页面坐标系里的位置（页面左上为原点，单位磅）。
@@ -490,18 +543,18 @@ struct LayoutResult {
 /**
  * 排版整篇文档：逐段整形、断行、分页，产出字形与行盒。
  *
- * bracketed 里的控件会在自己的边界插入"括号占位簇"（见 LineCluster::placeholder）：
+ * 输入只有块流与前一段的页度量：行内对象（控件边界、将来的图片与域）已经在
+ * BlockSpec::objects 里，排版层据此在对应位置插入"占位簇"（见 LineCluster::placeholder）。
  * 占宽度、不产生字形，于是断行、行盒长度与光标位置都把它算进去，括号把正文挤开而不是
- * 盖上去；列表为空则不插占位（与无表单时逐字节相同）。同一处边界上的多个占位按槽的
- * 归属排序（见 layout.cpp）：相邻字段为 ][，空字段为 []。
- * 显示范围由引擎的 EngineConfig::form_brackets 决定，排版层不认识"聚焦"，因此"跨字段
- * 移动要不要重排"由引擎按同一张列表判断，两边不会各记一套。
+ * 盖上去；objects 为空则不插占位（与无表单时逐字节相同）。
+ *
+ * 这一条契约是有意的：呈现策略（哪些字段显示括号、焦点在谁身上）不是排版的输入，
+ * 它由产生块流的那一侧落成对象表。于是"要画"和"要占位"在结构上不可能不一致。
  *
  * 已知边界：只处理同一段内的边界，端点跨段的控件拿不到占位（控件矩形与命中测试已支持跨段）。
  */
 LayoutResult layoutDocument(FontLibrary& lib, const std::vector<BlockSpec>& blocks,
-                            const PageMetrics& page, const ControlSet* controls = nullptr,
-                            const std::vector<int>* bracketed = nullptr);
+                            const PageMetrics& page);
 
 /**
  * 续排入口：把 [from_para, to_para) 排入 @p out，返回结束时的续排状态。
@@ -517,8 +570,7 @@ LayoutResult layoutDocument(FontLibrary& lib, const std::vector<BlockSpec>& bloc
  *       shape_ms 例外，只计本轮真正跑过的整形。
  */
 ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& blocks,
-                                const PageMetrics& page, const ControlSet* controls,
-                                const std::vector<int>* bracketed, int from_para, int to_para,
+                                const PageMetrics& page, int from_para, int to_para,
                                 const ReflowState& state, ShapingCache* cache, LayoutResult* out);
 
 /**

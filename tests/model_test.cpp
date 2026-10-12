@@ -912,6 +912,222 @@ std::string diffBlock(const BlockSpec& a, const BlockSpec& b) {
 }
 
 /**
+ * 两个字符格式 run 的第一处不同；返回空串表示逐字段相同。
+ *
+ * 格式 run 没有 operator==，所以显式列出每个字段 —— 漏比一个字段，判据就变成一句空话。
+ * 语言按内容比而不是比指针（两边的驻留字符串可能是不同字面量）。
+ */
+std::string diffRun(const FormatRun& a, const FormatRun& b) {
+    if (a.cp_begin != b.cp_begin || a.cp_end != b.cp_end) return "区间";
+    if (a.font_index != b.font_index) return "font_index";
+    if (a.size_pt != b.size_pt) return "size_pt";
+    if (!(a.color == b.color)) return "color";
+    const std::string la = a.language != nullptr ? a.language : "";
+    const std::string lb = b.language != nullptr ? b.language : "";
+    if (la != lb) return "language";
+    if (a.fallback_font_indices != b.fallback_font_indices) return "fallback_font_indices";
+    return "";
+}
+
+/**
+ * 一个 run 的紧凑文本形式，用在失败消息里指出实际拿到了什么。
+ */
+std::string runText(const FormatRun& r) {
+    return "[" + std::to_string(r.cp_begin) + "," + std::to_string(r.cp_end) +
+           ") f=" + std::to_string(r.font_index) + " s=" + std::to_string(r.size_pt) +
+           " c=" + std::to_string(r.color.r) + "," + std::to_string(r.color.g) + "," +
+           std::to_string(r.color.b);
+}
+
+/**
+ * 一个行内对象表的紧凑文本形式，用在失败消息里指出实际拿到了什么。
+ */
+std::string objText(const std::vector<InlineObject>& v) {
+    if (v.empty()) return "(空)";
+    std::string s;
+    for (const InlineObject& o : v) {
+        if (!s.empty()) s += " ";
+        s += std::to_string(o.cp);
+        s += (o.kind == InlineObjectKind::ControlStart) ? "<" : ">";
+        s += std::to_string(o.owner);
+        s += o.read_only ? "R" : "-";
+    }
+    return s;
+}
+
+/**
+ * 内容控件编成段内的行内对象 —— 产出端这一刀。
+ *
+ * 钉三件事：锚点是那一段里内容的首尾；次序由遍历自然给出（同一处边界上"到此结束"的闭括号
+ * 先出现、空控件的一对紧挨着）；owner 是控件的节点 id 而不是序号，于是句柄活得过重排。
+ * 反面同样要钉：没有控件的文档一个对象都不产。
+ */
+void checkCompileControlObjects() {
+    // (a) 单控件包住两个码点：起始在文本之前、结束在文本之后，owner 是节点的 id。
+    {
+        NodeTree tree;
+        const NodeId sec = tree.firstSectionId();
+        const NodeId cc = tree.appendChild(sec, NodeKind::ContentControl);
+        tree.setText(tree.appendChild(cc, NodeKind::TextRun), cps({0x61, 0x62}));
+        // 标记挂在节上（控件之外）：控件包住的是"这一段里的两个码点"，不跨段。
+        //   标记若落在控件内部，控件的闭边界就要落到下一段 —— 那是跨段控件，见 0.4 那条。
+        tree.appendChild(sec, NodeKind::ParagraphMark);
+        const CompileResult r = compileDocument(tree, FlowVisibility::Design, noStyles());
+        const std::vector<InlineObject> o =
+            r.blocks.empty() ? std::vector<InlineObject>{} : r.blocks[0].objects;
+        expectTrue(r.ok(), "(a) 控件不再记未编译诊断（ok() 为真）");
+        expectTrue(r.blocks.size() == 1 && o.size() == 2 && o[0].cp == 0 && o[1].cp == 2 &&
+                       o[0].kind == InlineObjectKind::ControlStart &&
+                       o[1].kind == InlineObjectKind::ControlEnd,
+                   "(a) 边界锚点 = 内容的首尾（实际 " + objText(o) + "）");
+        expectTrue(o.size() == 2 && o[0].owner == static_cast<int>(cc) &&
+                       o[1].owner == static_cast<int>(cc),
+                   "(a) owner 是控件的节点 id（两项相同）");
+        expectTrue(o.size() == 2 && !o[0].read_only && !o[1].read_only,
+                   "(a) 默认可编辑的控件，两枚括号都不画灰色");
+        expectTrue(r.blocks.size() == 1 && objectsOrdered(r.blocks[0], nullptr),
+                   "(a) 产出的表满足 objectsOrdered 不变量");
+    }
+    // (b) 相邻两控件：同一处边界上是 [前一个的闭, 后一个的开]，即 ][。
+    {
+        NodeTree tree;
+        const NodeId sec = tree.firstSectionId();
+        const NodeId c1 = tree.appendChild(sec, NodeKind::ContentControl);
+        tree.setText(tree.appendChild(c1, NodeKind::TextRun), cps({0x61, 0x62}));
+        const NodeId c2 = tree.appendChild(sec, NodeKind::ContentControl);
+        tree.setText(tree.appendChild(c2, NodeKind::TextRun), cps({0x63, 0x64}));
+        tree.appendChild(sec, NodeKind::ParagraphMark);
+        const CompileResult r = compileDocument(tree, FlowVisibility::Design, noStyles());
+        const std::vector<InlineObject> o =
+            r.blocks.empty() ? std::vector<InlineObject>{} : r.blocks[0].objects;
+        expectTrue(o.size() == 4 && o[0].cp == 0 && o[1].cp == 2 && o[2].cp == 2 && o[3].cp == 4,
+                   "(b) 四个锚点依次是 0 / 2 / 2 / 4（实际 " + objText(o) + "）");
+        expectTrue(o.size() == 4 && o[1].kind == InlineObjectKind::ControlEnd &&
+                       o[2].kind == InlineObjectKind::ControlStart &&
+                       o[1].owner == static_cast<int>(c1) && o[2].owner == static_cast<int>(c2),
+                   "(b) 共享边界 2 上是 [c1 闭, c2 开] —— 遍历顺序自然给出 ][，不需要排序");
+    }
+    // (c) 空控件（没有内容、也没有段落标记）：边界表照样落段。少了 run() 里"只攒下对象也落段"
+    //     这一条，这份文书连一段都产不出来，那对括号就凭空消失了。
+    {
+        NodeTree tree;
+        const NodeId sec = tree.firstSectionId();
+        const NodeId cc = tree.appendChild(sec, NodeKind::ContentControl);
+        const CompileResult r = compileDocument(tree, FlowVisibility::Design, noStyles());
+        const std::vector<InlineObject> o =
+            r.blocks.empty() ? std::vector<InlineObject>{} : r.blocks[0].objects;
+        expectTrue(r.blocks.size() == 1 && r.blocks[0].cp_text.empty(),
+                   "(c) 只有一对边界也要落一段（段落文本为空）");
+        expectTrue(o.size() == 2 && o[0].cp == 0 && o[1].cp == 0 &&
+                       o[0].kind == InlineObjectKind::ControlStart &&
+                       o[1].kind == InlineObjectKind::ControlEnd,
+                   "(c) 空控件的一对锚在同一处、开在前（实际 " + objText(o) + "）");
+        expectTrue(o.size() == 2 && o[0].owner == static_cast<int>(cc) &&
+                       o[1].owner == static_cast<int>(cc),
+                   "(c) 一对边界属于同一个控件");
+    }
+    // (d) 三层嵌套：六项边界严格嵌套（栈检查），锚点非降。
+    {
+        NodeTree tree;
+        const NodeId sec = tree.firstSectionId();
+        const NodeId out = tree.appendChild(sec, NodeKind::ContentControl);
+        tree.setText(tree.appendChild(out, NodeKind::TextRun), cps({0x61, 0x62}));
+        const NodeId mid = tree.appendChild(out, NodeKind::ContentControl);
+        tree.setText(tree.appendChild(mid, NodeKind::TextRun), cps({0x63, 0x64}));
+        const NodeId in = tree.appendChild(mid, NodeKind::ContentControl);
+        tree.setText(tree.appendChild(in, NodeKind::TextRun), cps({0x65, 0x66}));
+        tree.appendChild(sec, NodeKind::ParagraphMark);
+        const CompileResult r = compileDocument(tree, FlowVisibility::Design, noStyles());
+        const std::vector<InlineObject> o =
+            r.blocks.empty() ? std::vector<InlineObject>{} : r.blocks[0].objects;
+        expectTrue(o.size() == 6 && o[0].cp == 0 && o[1].cp == 2 && o[2].cp == 4 && o[3].cp == 6 &&
+                       o[4].cp == 6 && o[5].cp == 6,
+                   "(d) 六项锚点 0/2/4/6/6/6（实际 " + objText(o) + "）");
+        std::vector<int> stk;
+        bool paired = true;
+        for (const InlineObject& x : o) {
+            if (x.kind == InlineObjectKind::ControlStart) {
+                stk.push_back(x.owner);
+            } else if (stk.empty() || stk.back() != x.owner) {
+                paired = false;
+                break;
+            } else {
+                stk.pop_back();
+            }
+        }
+        expectTrue(paired && stk.empty(), "(d) 六项边界严格配对嵌套（栈检查）");
+        expectTrue(o.size() == 6 && o[0].owner == static_cast<int>(out) &&
+                       o[1].owner == static_cast<int>(mid) && o[2].owner == static_cast<int>(in),
+                   "(d) 三层由外到内依次开（owner 逐层收窄）");
+        expectTrue(r.blocks.size() == 1 && objectsOrdered(r.blocks[0], nullptr),
+                   "(d) 产出的表满足 objectsOrdered 不变量");
+    }
+    // (e) 只读：两枚括号都带 read_only（画灰色），可编辑的那个不带。
+    {
+        NodeTree tree;
+        const NodeId sec = tree.firstSectionId();
+        const NodeId ro = tree.appendChild(sec, NodeKind::ContentControl);
+        tree.find(ro)->control.readonly = true;
+        tree.setText(tree.appendChild(ro, NodeKind::TextRun), cps({0x61}));
+        tree.appendChild(sec, NodeKind::ParagraphMark);
+        const CompileResult r = compileDocument(tree, FlowVisibility::Design, noStyles());
+        const std::vector<InlineObject> o =
+            r.blocks.empty() ? std::vector<InlineObject>{} : r.blocks[0].objects;
+        expectTrue(o.size() == 2 && o[0].read_only && o[1].read_only,
+                   "(e) 只读控件的两枚括号都标了 read_only（实际 " + objText(o) + "）");
+    }
+    // (f) 隐藏：编辑态照常产边界（控件还在流里），呈现态整棵摘除 —— 连边界都不产。
+    {
+        NodeTree tree;
+        const NodeId sec = tree.firstSectionId();
+        const NodeId cc = tree.appendChild(sec, NodeKind::ContentControl);
+        tree.find(cc)->hidden = true;
+        tree.setText(tree.appendChild(cc, NodeKind::TextRun), cps({0x61}));
+        tree.appendChild(sec, NodeKind::ParagraphMark);
+        const CompileResult design = compileDocument(tree, FlowVisibility::Design, noStyles());
+        const CompileResult display = compileDocument(tree, FlowVisibility::Display, noStyles());
+        expectTrue(design.blocks.size() == 1 && design.blocks[0].objects.size() == 2,
+                   "(f) 编辑态：隐藏控件的边界照常进产物");
+        expectTrue(display.blocks.size() == 1 && display.blocks[0].cp_text.empty() &&
+                       display.blocks[0].objects.empty(),
+                   "(f) 呈现态：隐藏控件整棵不在流里，边界也不产");
+    }
+    // (g) 反面：一棵没有任何控件的文档，每一段的对象表都必须是空的。
+    {
+        NodeTree tree;
+        const NodeId sec = tree.firstSectionId();
+        tree.setText(tree.appendChild(sec, NodeKind::TextRun), cps({0x61}));
+        tree.appendChild(sec, NodeKind::ParagraphMark);
+        tree.setText(tree.appendChild(sec, NodeKind::TextRun), cps({0x62}));
+        tree.appendChild(sec, NodeKind::ParagraphMark);
+        const CompileResult r = compileDocument(tree, FlowVisibility::Design, noStyles());
+        int with_objs = 0;
+        for (const BlockSpec& b : r.blocks) {
+            if (!b.objects.empty()) ++with_objs;
+        }
+        expectTrue(
+            r.blocks.size() == 2 && with_objs == 0,
+            "(g) 没有控件：一段都不产对象（实际有对象的段数 " + std::to_string(with_objs) + "）");
+    }
+    // (h) 控件里带一个未编译的元素（图片）：控件自己的边界照常产，图片照常记诊断。
+    {
+        NodeTree tree;
+        const NodeId sec = tree.firstSectionId();
+        const NodeId cc = tree.appendChild(sec, NodeKind::ContentControl);
+        tree.setText(tree.appendChild(cc, NodeKind::TextRun), cps({0x61}));
+        tree.appendChild(cc, NodeKind::Image);
+        tree.appendChild(sec, NodeKind::ParagraphMark);
+        const CompileResult r = compileDocument(tree, FlowVisibility::Design, noStyles());
+        const std::vector<InlineObject> o =
+            r.blocks.empty() ? std::vector<InlineObject>{} : r.blocks[0].objects;
+        expectTrue(o.size() == 2 && o[0].cp == 0 && o[1].cp == 1,
+                   "(h) 控件内的图片不影响控件的两枚边界（实际 " + objText(o) + "）");
+        expectTrue(r.diagnostics.size() == 1 && r.diagnostics[0].kind == NodeKind::Image,
+                   "(h) 图片仍记一条诊断（控件与它各自表态）");
+    }
+}
+
+/**
  * 0.4 的核心判据：同一份内容走"现有 BlockSpec 路径"与"树 → 编译"两条路，结果逐字段一致。
  */
 void checkCompileMatchesBlocks(const std::vector<BlockSpec>& blocks, const std::string& label) {
@@ -985,12 +1201,18 @@ void checkCompileShapes() {
         tree.setText(tree.appendChild(cc, NodeKind::TextRun), cps({0x79}));
         tree.appendChild(sec, NodeKind::ParagraphMark);
         const CompileResult r = compileDocument(tree, FlowVisibility::Design, noStyles());
-        expectTrue(r.blocks.size() == 2 && r.blocks[0].cp_text == cps({0x61, 0x78}) &&
+        expectTrue(r.ok() && r.blocks.size() == 2 && r.blocks[0].cp_text == cps({0x61, 0x78}) &&
                        r.blocks[1].cp_text == cps({0x79}),
-                   "0.4 / 控件跨段落标记：按流切出两段（容器边界不切段）");
-        expectTrue(!r.ok() && r.diagnostics.size() == 1 &&
-                       r.diagnostics[0].kind == NodeKind::ContentControl,
-                   "0.4 / 控件跨段落标记：控件本身未编译，记一条诊断");
+                   "0.4 / 控件跨段落标记：按流切出两段（容器边界不切段），控件已进编译");
+        expectTrue(r.blocks.size() == 2 && r.blocks[0].objects.size() == 1 &&
+                       r.blocks[0].objects[0].cp == 1 &&
+                       r.blocks[0].objects[0].kind == InlineObjectKind::ControlStart &&
+                       r.blocks[0].objects[0].owner == static_cast<int>(cc),
+                   "0.4 / 控件跨段落标记：起始边界落在第一段（锚点 1，文本 a 之后）");
+        expectTrue(r.blocks.size() == 2 && r.blocks[1].objects.size() == 1 &&
+                       r.blocks[1].objects[0].cp == 1 &&
+                       r.blocks[1].objects[0].kind == InlineObjectKind::ControlEnd,
+                   "0.4 / 控件跨段落标记：结束边界落在第二段（与它的内容同一段）");
     }
     // 不支持的元素：图片叶子与容器各记一条，容器内部文本仍按流顺序并入当前段。
     {
@@ -1004,9 +1226,8 @@ void checkCompileShapes() {
         const CompileResult r = compileDocument(tree, FlowVisibility::Design, noStyles());
         expectTrue(r.blocks.size() == 1 && r.blocks[0].cp_text == cps({0x61, 0x62}),
                    "0.4 / 不支持的元素：容器内部文本仍按流顺序并入当前段");
-        expectTrue(r.diagnostics.size() == 2 && r.diagnostics[0].kind == NodeKind::Image &&
-                       r.diagnostics[1].kind == NodeKind::ContentControl,
-                   "0.4 / 不支持的元素：图片与控件各记一条诊断（不含其内部）");
+        expectTrue(r.diagnostics.size() == 1 && r.diagnostics[0].kind == NodeKind::Image,
+                   "0.4 / 不支持的元素：只剩图片一条诊断（控件已经进编译）");
         expectTrue(!r.ok(), "0.4 / 不支持的元素：有诊断时 ok() 为假");
     }
     // 隐藏：编辑态照常参与，呈现态整棵摘除 —— 与 FlowIndex / ParagraphIndex 同一口径。
@@ -3503,6 +3724,212 @@ void checkStyleThroughCompile() {
 }
 
 /**
+ * 阶段 1 接缝：字符格式的三层解析结果写进 run。
+ *
+ * 这一节是 1.6 那条"样式经编译进引擎输入"的后半截 —— 1.6 只验到解析层，这里验它真的走到
+ * 引擎输入的形状里，并且与"整段一个 run"的等价情形一致。
+ */
+void checkCompileRuns() {
+    // 纯文本段落：切出一个覆盖全段的 run，属性逐字段等于块级字段。
+    //   这一条是"加 run 没有改变旧路径语义"的编译侧证明（引擎侧那条是两条路径同一帧）。
+    {
+        NodeTree tree;
+        const NodeId sec = tree.firstSectionId();
+        tree.setText(tree.appendChild(sec, NodeKind::TextRun), cps({0x61, 0x62, 0x63}));
+        tree.appendChild(sec, NodeKind::ParagraphMark);
+        const CompileResult r = compileDocument(tree, FlowVisibility::Design, noStyles());
+        expectTrue(r.ok() && r.blocks.size() == 1, "接缝 / 纯文本：编译无诊断");
+        const BlockSpec& b = r.blocks[0];
+        std::string why;
+        const bool tiles = runsTileText(b, &why);
+        expectTrue(tiles,
+                   "接缝 / 纯文本：runs 恰好铺满段落文本" + (tiles ? "" : "（" + why + "）"));
+        const bool one = b.runs.size() == 1 && b.runs[0].cp_begin == 0 && b.runs[0].cp_end == 3;
+        expectTrue(one, "接缝 / 纯文本：切出一个覆盖全段的 run（实际 " +
+                            std::to_string(b.runs.size()) + " 个）");
+        const std::string d = b.runs.empty() ? "没有 run" : diffRun(b.runs[0], b.wholeRun());
+        expectTrue(d.empty(), "接缝 / 纯文本：run 的属性逐字段等于块级字段" +
+                                  (d.empty() ? "" : "（差在 " + d + "）"));
+    }
+    // 三层解析真的写进 run：文档默认值 → 段落样式的字符部分 → 字符样式链 → 内联 marks。
+    //   段落样式只设了字符部分、没设段落部分，于是块级字段与 run 必然不同 ——
+    //   这一条同时证伪"run 只是块级字段的拷贝"。
+    {
+        StyleSheet sheet;
+        CharFormat dd;
+        dd.color = Color::rgb(1, 1, 1);
+        dd.size = Length::abs(ptToEmu(20.0));
+        sheet.setDocDefaults({}, dd);
+
+        StyleDef para_style;
+        para_style.name = "正文";
+        para_style.run.font_index = 7;
+        sheet.add(para_style);
+
+        StyleDef term;
+        term.name = "术语";
+        term.kind = StyleKind::Character;
+        term.run.size = Length::abs(ptToEmu(18.0));
+        sheet.add(term);
+
+        NodeTree tree;
+        const NodeId sec = tree.firstSectionId();
+        const NodeId t = tree.appendChild(sec, NodeKind::TextRun);
+        tree.setText(t, cps({0x61, 0x62}));
+        tree.find(t)->styleRef = "术语";
+        tree.find(t)->marks.color = Color::rgb(9, 9, 9);
+        const NodeId mark = tree.appendChild(sec, NodeKind::ParagraphMark);
+        tree.find(mark)->styleRef = "正文";
+
+        const CompileResult r = compileDocument(tree, FlowVisibility::Design, sheet);
+        expectTrue(r.ok() && r.blocks.size() == 1 && r.blocks[0].runs.size() == 1,
+                   "接缝 / 三层：编译出一段一个 run（诊断 " + std::to_string(r.diagnostics.size()) +
+                       " 条）");
+        const BlockSpec& b = r.blocks[0];
+        // 期望值手写出来：字体来自段落样式的字符部分（7），字号来自字符样式（18 磅），
+        // 颜色来自内联 marks（9,9,9）。
+        FormatRun want = b.wholeRun();
+        want.font_index = 7;
+        want.size_pt = 18.0f;
+        want.color = Color::rgb(9, 9, 9);
+        const std::string d = b.runs.empty() ? "没有 run" : diffRun(b.runs[0], want);
+        expectTrue(d.empty(),
+                   "接缝 / 三层：run = 字体 7、字号 18 磅、颜色 (9,9,9)" +
+                       (d.empty() ? ""
+                                  : "（差在 " + d + "，实际 " +
+                                        (b.runs.empty() ? "" : runText(b.runs[0])) + "）"));
+        expectTrue(b.font_index == 0 && b.size_pt == 12.0f && b.color == Color::rgb(24, 24, 24),
+                   "接缝 / 三层：块级字段仍是段落那套（0 号 / 12 磅 / 深灰），与 run 不同");
+        // 交叉校验：同一组输入直接调解析函数，必须得到同一套值。
+        CharFormat inline_marks;
+        inline_marks.color = Color::rgb(9, 9, 9);
+        const CharFormat direct = resolveRunFormat(sheet, "正文", "术语", inline_marks, nullptr);
+        expectTrue(direct.font_index.value_or(-1) == 7 && direct.size.has_value() &&
+                       direct.size->abs_emu == ptToEmu(18.0) && direct.color.has_value() &&
+                       direct.color->r == 9,
+                   "接缝 / 三层：与直接调解析函数的结果一致（交叉校验）");
+    }
+    // 段落样式的字符级属性对整段文本生效 —— 不只对带 marks 的那些节点。
+    //   守的是"只有段落样式设了字体"这种写法（模型文档第六节明确要求它算进去）。
+    {
+        StyleSheet sheet;
+        StyleDef para_style;
+        para_style.name = "正文";
+        para_style.run.font_index = 7;
+        sheet.add(para_style);
+
+        NodeTree tree;
+        const NodeId sec = tree.firstSectionId();
+        tree.setText(tree.appendChild(sec, NodeKind::TextRun), cps({0x61}));
+        const NodeId mark = tree.appendChild(sec, NodeKind::ParagraphMark);
+        tree.find(mark)->styleRef = "正文";
+
+        const CompileResult r = compileDocument(tree, FlowVisibility::Design, sheet);
+        const bool shape = r.ok() && r.blocks.size() == 1 && r.blocks[0].runs.size() == 1;
+        const int got = shape ? r.blocks[0].runs[0].font_index : -1;
+        expectTrue(shape && got == 7,
+                   "接缝 / 段落样式：文本节点没有 marks，run 仍拿到段落样式的字符级字体（7，实际 " +
+                       std::to_string(got) + "）");
+        expectTrue(shape && r.blocks[0].font_index == 0,
+                   "接缝 / 段落样式：块级字体没被字符级样式改掉（段落那部分没设它）");
+    }
+    // 相邻同格式的文本节点并成一个 run；格式一变就切。
+    //   合并让 runs 是规范的（不随模型里节点的切分方式变化），而"切分不改产出"那条在引擎侧
+    //   有等价判据 —— 两条一起才说明合并不是在掩盖差异。
+    {
+        NodeTree tree;
+        const NodeId sec = tree.firstSectionId();
+        const NodeId ta = tree.appendChild(sec, NodeKind::TextRun);
+        tree.setText(ta, cps({0x61}));
+        tree.find(ta)->marks.color = Color::rgb(9, 9, 9);
+        const NodeId tb = tree.appendChild(sec, NodeKind::TextRun);
+        tree.setText(tb, cps({0x62}));
+        tree.find(tb)->marks.color = Color::rgb(9, 9, 9);
+        const NodeId tc = tree.appendChild(sec, NodeKind::TextRun);
+        tree.setText(tc, cps({0x63}));
+        tree.find(tc)->marks.color = Color::rgb(7, 7, 7);
+        tree.appendChild(sec, NodeKind::ParagraphMark);
+
+        const CompileResult r = compileDocument(tree, FlowVisibility::Design, noStyles());
+        expectTrue(r.ok() && r.blocks.size() == 1, "接缝 / 合并：编译无诊断");
+        const BlockSpec& blk = r.blocks[0];
+        const bool shape = blk.runs.size() == 2 && blk.runs[0].cp_begin == 0 &&
+                           blk.runs[0].cp_end == 2 && blk.runs[1].cp_begin == 2 &&
+                           blk.runs[1].cp_end == 3;
+        expectTrue(shape, "接缝 / 合并：同格式的前两段并成一个 run、第三段单独一个（实际 " +
+                              std::to_string(blk.runs.size()) + " 个）");
+        expectTrue(shape && blk.runs[0].color == Color::rgb(9, 9, 9) &&
+                       blk.runs[1].color == Color::rgb(7, 7, 7),
+                   "接缝 / 合并：两个 run 各拿自己的颜色");
+        std::string why;
+        const bool tiles = runsTileText(blk, &why);
+        expectTrue(tiles, "接缝 / 合并：runs 首尾相接、恰好铺满" + (tiles ? "" : "（" + why + "）"));
+    }
+    // 未知字符样式名：记诊断并降级到段落默认值；同一段里多个节点引用同一个未知样式只报一次
+    //   （否则十个节点刷十条一模一样的消息，把真正的信号淹掉）。
+    {
+        NodeTree tree;
+        const NodeId sec = tree.firstSectionId();
+        for (int i = 0; i < 3; ++i) {
+            const NodeId t = tree.appendChild(sec, NodeKind::TextRun);
+            tree.setText(t, cps({0x61}));
+            tree.find(t)->styleRef = "没有这个字符样式";
+        }
+        tree.appendChild(sec, NodeKind::ParagraphMark);
+
+        const CompileResult r = compileDocument(tree, FlowVisibility::Design, noStyles());
+        expectTrue(r.blocks.size() == 1 && r.blocks[0].runs.size() == 1,
+                   "接缝 / 未知字符样式：降级之后三段并成一个 run（都是段落默认值）");
+        expectTrue(!r.ok() && r.diagnostics.size() == 1 &&
+                       r.diagnostics[0].detail.find("不存在") != std::string::npos,
+                   "接缝 / 未知字符样式：三个节点引用同一个未知样式只报一条诊断（实际 " +
+                       std::to_string(r.diagnostics.size()) + " 条）");
+    }
+    // 粗体、斜体、下划线在引擎输入里还没有字段：设了就记诊断，不静默丢。
+    //   反向一半同样重要：显式设成 false 就是引擎的默认行为，不该报。
+    {
+        NodeTree tree;
+        const NodeId sec = tree.firstSectionId();
+        const NodeId t = tree.appendChild(sec, NodeKind::TextRun);
+        tree.setText(t, cps({0x61}));
+        tree.find(t)->marks.bold = true;
+        tree.appendChild(sec, NodeKind::ParagraphMark);
+
+        const CompileResult r = compileDocument(tree, FlowVisibility::Design, noStyles());
+        expectTrue(!r.ok() && r.diagnostics.size() == 1 &&
+                       r.diagnostics[0].detail.find("粗体") != std::string::npos,
+                   "接缝 / 未支持属性：粗体记一条诊断，不静默丢（实际 " +
+                       std::to_string(r.diagnostics.size()) + " 条）");
+        expectTrue(r.blocks.size() == 1 && r.blocks[0].runs.size() == 1 &&
+                       r.blocks[0].runs[0].size_pt == 12.0f,
+                   "接缝 / 未支持属性：其余字段照常解析（字号仍是段落默认的 12 磅）");
+
+        tree.find(t)->marks.bold = false;
+        const CompileResult r2 = compileDocument(tree, FlowVisibility::Design, noStyles());
+        expectTrue(r2.ok(),
+                   "接缝 / 未支持属性：显式 bold=false 不报诊断（它就是引擎的默认行为）");
+    }
+    // 非绝对的字符字号：算不出磅值，记诊断并保留段落默认字号（不是取零）。
+    {
+        NodeTree tree;
+        const NodeId sec = tree.firstSectionId();
+        const NodeId t = tree.appendChild(sec, NodeKind::TextRun);
+        tree.setText(t, cps({0x61}));
+        tree.find(t)->marks.size = Length::em(2.0);
+        tree.appendChild(sec, NodeKind::ParagraphMark);
+
+        const CompileResult r = compileDocument(tree, FlowVisibility::Design, noStyles());
+        expectTrue(!r.ok() && r.diagnostics.size() == 1 &&
+                       r.diagnostics[0].detail.find("绝对长度") != std::string::npos,
+                   "接缝 / 非绝对字号：字符格式的相对字号被拒并给诊断（实际 " +
+                       std::to_string(r.diagnostics.size()) + " 条）");
+        expectTrue(r.blocks.size() == 1 && r.blocks[0].runs.size() == 1 &&
+                       r.blocks[0].runs[0].size_pt == 12.0f,
+                   "接缝 / 非绝对字号：run 保留段落默认字号 12 磅");
+    }
+}
+
+/**
  * 1.6：样式引用是内容的一部分，捕获子树、复制片段、撤销都要把它带上。
  */
 void checkStyleRefTravels() {
@@ -5295,6 +5722,7 @@ int main() {
 
     std::printf("  --- 0.4：编译到引擎输入 ---\n");
     checkCompileShapes();
+    checkCompileControlObjects();
     checkCompileMatchesBlocks(sampleDocument(0, 1, 2), "0.4 / 演示文书 sampleDocument");
     checkCompileMatchesBlocks({mixedParagraphBlock(0, 1)}, "0.4 / 中英文混排段");
 
@@ -5339,6 +5767,7 @@ int main() {
     checkStyleChainEdges();
     checkStyleCache();
     checkStyleThroughCompile();
+    checkCompileRuns();
     checkStyleRefTravels();
 
     std::printf("  --- 1.7：表格的跨度、派生网格与行列操作 ---\n");

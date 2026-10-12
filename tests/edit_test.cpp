@@ -4508,6 +4508,352 @@ int main() {
                            std::to_string(ew.layout().stats.glyph_count) + " vs " +
                            std::to_string(ec.layout().stats.glyph_count) + "）");
         }
+
+        // (h) 接缝：模型编译出来的 runs 直接喂引擎，混合字号真的按各自的 run 排版。
+        {
+            auto asc = [](const std::string& s) {
+                std::vector<uint32_t> out;
+                out.reserve(s.size());
+                for (char ch : s)
+                    out.push_back(static_cast<uint32_t>(static_cast<unsigned char>(ch)));
+                return out;
+            };
+            // 三段都用同一个字母：量推进时必须比同一个字形 —— 不同字母的宽度本来就不同，
+            // 拿 a 与 c 比会得出一个与字号无关的比值。
+            NodeTree tree;
+            const NodeId sec = tree.firstSectionId();
+            const NodeId t0 = tree.appendChild(sec, NodeKind::TextRun);
+            tree.setText(t0, asc("a"));
+            const NodeId t1 = tree.appendChild(sec, NodeKind::TextRun);
+            tree.setText(t1, asc("a"));
+            tree.find(t1)->marks.size = Length::abs(ptToEmu(24.0));  // 中间那个 24 磅
+            const NodeId t2 = tree.appendChild(sec, NodeKind::TextRun);
+            tree.setText(t2, asc("a"));
+            tree.appendChild(sec, NodeKind::ParagraphMark);
+
+            const StyleSheet sheet;
+            const CompileResult cr = compileDocument(tree, FlowVisibility::Design, sheet);
+            const bool shape = cr.ok() && cr.blocks.size() == 1;
+            const std::size_t nr = shape ? cr.blocks[0].runs.size() : 0;
+            // 三段文本、格式依次是 12 / 24 / 12 磅 —— 三段各一个 run。
+            //   第三段虽然与第一段格式相同，也不并回第一段：合并只并"相邻且格式相同"的，
+            //   中间隔着 24 磅那一段就并不过去。这一条同时证明合并没有按格式去全局归并。
+            expectTrue(shape && nr == 3,
+                       "接缝：模型编译出 1 段 3 个 run（实际 " + std::to_string(nr) + " 个）");
+            expectTrue(shape && cr.blocks[0].runs[0].size_pt == 12.0f &&
+                           cr.blocks[0].runs[1].size_pt == 24.0f &&
+                           cr.blocks[0].runs[2].size_pt == 12.0f,
+                       "接缝：三段 run 的字号依次是 12 / 24 / 12 磅");
+
+            EditorEngine e;
+            setup(e, cr.blocks[0]);
+            const std::vector<PlacedGlyph>& gs = e.layout().glyphs;
+            expectTrue(gs.size() == 3,
+                       "接缝：三个字母三个字形（实际 " + std::to_string(gs.size()) + " 个）");
+            // 同一个字形在两个 run 里的推进：24 磅那个必须是 12 磅的两倍。
+            //   这条证伪"排版忽略了 run 的字号、整段按块级字号排"。
+            const float adv12 = gs[1].x_pt - gs[0].x_pt;
+            const float adv24 = gs[2].x_pt - gs[1].x_pt;
+            expectTrue(std::fabs(adv24 - 2.0f * adv12) < 0.05f,
+                       "★ 接缝：24 磅那个 run 的字形推进是 12 磅的两倍（" + std::to_string(adv24) +
+                           " ≈ 2 × " + std::to_string(adv12) + "）");
+
+            // 行度量按行取最大：这一行里有 24 磅的 run，行盒字号与上下界都按 24 磅算。
+            //   原先这里断言的是"行盒仍是块级字段的 12 磅"，它在做行内混排字号时
+            //   如期失败、于是换成了这一条 —— 这正是当初把它写成断言的目的。
+            const LineBox& lb = e.layout().lines[0];
+            expectTrue(lb.size_pt == 24.0f, "接缝：行盒字号取本行最大的 run（24 磅，实际 " +
+                                                std::to_string(lb.size_pt) + "）");
+            const float box_h = lb.block_hi_pt - lb.block_lo_pt;
+            const float block_line_h = 12.0f * 1.75f;
+            expectTrue(box_h > block_line_h, "接缝：行盒上下界按 24 磅的 ascent + descent（" +
+                                                 std::to_string(box_h) + " > 块级行高 " +
+                                                 std::to_string(block_line_h) + "）");
+            expectTrue(e.auditLayout() == 0, "接缝：混合 run 的增量排版与全量逐字段一致");
+        }
+
+        // (i) 行度量是按行取最大，不是按段取最大：窄页上把 24 磅那段挤到第二行，
+        //   两行的行盒必须各按各的来。
+        {
+            EngineConfig narrow;
+            narrow.zoom = 1.0f;
+            narrow.page.width_pt = 100.0f;
+            narrow.page.height_pt = 400.0f;
+            narrow.page.margin_pt = 5.0f;  // 内容宽 90 磅：12 磅字每行七个
+
+            BlockSpec blk = mkBlock(0, 12.0f, "zh", "两把尺子求交同一段文本会被切两次");
+            const uint32_t n = static_cast<uint32_t>(blk.cp_text.size());
+            FormatRun r0 = blk.wholeRun();
+            r0.cp_end = 7;  // 前七个字 12 磅
+            FormatRun r1 = blk.wholeRun();
+            r1.cp_begin = 7;
+            r1.cp_end = n;
+            r1.size_pt = 24.0f;  // 后面全 24 磅
+            blk.runs = {r0, r1};
+
+            EditorEngine e;
+            e.init(fonts);
+            e.setConfig(narrow);
+            e.setBlocks({blk});
+            e.relayout();
+            const std::vector<LineBox>& ls = e.layout().lines;
+            const bool two = ls.size() >= 2;
+            expectTrue(two, "接缝 / 按行：窄页把 24 磅那段挤到了第二行（实际 " +
+                                std::to_string(ls.size()) + " 行）");
+            expectTrue(two && ls[0].size_pt == 12.0f && ls[1].size_pt == 24.0f,
+                       "接缝 / 按行：第一行按 12 磅、第二行按 24 磅（各取本行最大）");
+            expectTrue(two && (ls[1].block_hi_pt - ls[1].block_lo_pt) >
+                                  (ls[0].block_hi_pt - ls[0].block_lo_pt),
+                       "接缝 / 按行：第二行的行盒比第一行高（大字那一行真的撑开了）");
+        }
+
+        // (j) 增量重排也必须按行的字号算页高：编辑前一段让它变高之后，后一段（含混合字号）
+        //   的分页必须与整篇重排一致。引擎侧那条增量路径若还按块级字号推进，这里就会不一致。
+        //   场景要卡准：前一段必须真的多出一行（否则一级复用直接短路，后缀压根没被重算），
+        //   后一段必须跨页（否则页号都一样，错了也看不出来）。
+        {
+            EngineConfig narrow;
+            narrow.zoom = 1.0f;
+            narrow.page.width_pt = 110.0f;   // 内容宽 100 磅：12 磅字每行八个
+            narrow.page.height_pt = 100.0f;  // 内容高 90 磅
+            narrow.page.margin_pt = 5.0f;
+
+            BlockSpec head = mkBlock(0, 12.0f, "zh", "一二三四五六七八");
+            BlockSpec body = mkBlock(0, 12.0f, "zh", "两把尺子求交同一段文本会被切两次");
+            const uint32_t n = static_cast<uint32_t>(body.cp_text.size());
+            FormatRun b0 = body.wholeRun();
+            b0.cp_end = 8;  // 前八个 12 磅
+            FormatRun b1 = body.wholeRun();
+            b1.cp_begin = 8;
+            b1.cp_end = n;
+            b1.size_pt = 24.0f;  // 后面全 24 磅
+            body.runs = {b0, b1};
+
+            EditorEngine e;
+            e.init(fonts);
+            e.setConfig(narrow);
+            e.setBlocks({head, body});
+            e.relayout();
+            const int pages_before = e.stats().page_count;
+            const int lines_before = e.layout().stats.placed_line_count;
+            expectTrue(pages_before >= 2 && lines_before >= 4,
+                       "接缝 / 增量分页：混合字号的段真的跨了页（" + std::to_string(pages_before) +
+                           " 页，" + std::to_string(lines_before) + " 行）");
+
+            // 在前一段末尾敲一个字：那一段从一行变两行，后缀的行结构不变但整体要挪位 ——
+            //   走的正是引擎的二级复用路径（重算页号 + 平移块轴）。
+            e.setCaret(0, 8);
+            expectTrue(e.typeTextAndRender("\xE6\xB5\x8B"), "接缝 / 增量分页：在前一段敲一个字");
+            const int lines_after = e.layout().stats.placed_line_count;
+            expectTrue(lines_after == lines_before + 1, "接缝 / 增量分页：前一段多出一行（" +
+                                                            std::to_string(lines_before) + " → " +
+                                                            std::to_string(lines_after) + "）");
+            const int drift = e.auditLayout();
+            expectTrue(drift == 0, "★ 接缝 / 增量分页：编辑之后增量与整篇重排逐字段一致（" +
+                                       e.auditLayoutJson() + "）");
+        }
+    }
+
+    std::printf("\n[24] 行内对象：块流自足，排版层不再收外部括号名单\n");
+    {
+        // 这一段验的是引擎输入的一次形状替换：控件边界从"排版接口的一个参数"搬进块流
+        //   本身（BlockSpec::objects）。它是元素流在引擎输入侧的落点，也是"括号进文档流"
+        //   那句话的结构化形态。三层判据缺一不可：
+        //   不变量：对象表按 cp 升序、锚点不越界 —— 排版按数组顺序线性归并，顺序一坏，
+        //     括号的层级就画错，而画面看上去仍然"有括号"，不容易发现；
+        //   契约：排版层只吃块流 —— 直接调 layoutDocument（完全不经引擎）也能插出占位簇，
+        //     且 side / owner / read_only 逐项到位；把表倒过来占位就跟着倒；
+        //   等价与反向：表为空 == 与"没有表单"同一份几何；表里加一项就必须让正文真的
+        //     右移，否则一个压根没读对象表的实现也能过前一条。
+        const std::vector<std::string> fonts24 = {cjkPath, mnPath, latinPath};
+        auto mkInline = [](int font_index, float size_pt, const std::string& text) {
+            BlockSpec b;
+            b.font_index = font_index;
+            b.size_pt = size_pt;
+            b.wm = WritingMode::HorizontalTB();
+            b.line_factor = 1.75f;
+            b.language = "zh";
+            b.color = Color::rgb(24, 24, 24);
+            b.setText(text);
+            return b;
+        };
+        auto mkCtl = [](int a, int b, const char* id, bool ro) {
+            Control c;
+            c.range.start = TextPos{0, static_cast<size_t>(a)};
+            c.range.end = TextPos{0, static_cast<size_t>(b)};
+            c.id = id;
+            c.read_only = ro;
+            return c;
+        };
+
+        // (a) 不变量 objectsOrdered：合序通过；逆序与越界各报各的
+        {
+            BlockSpec ok = mkInline(0, 12.0f, "住院号甲乙丙丁");
+            const uint32_t n = static_cast<uint32_t>(ok.cp_text.size());
+            expectTrue(n == 7 && objectsOrdered(ok, nullptr), "不变量：对象表为空恒真（等价情形）");
+
+            ok.objects = {InlineObject{0, InlineObjectKind::ControlStart, 0, false},
+                          InlineObject{2, InlineObjectKind::ControlEnd, 0, false},
+                          InlineObject{2, InlineObjectKind::ControlStart, 1, true},
+                          InlineObject{n, InlineObjectKind::ControlEnd, 1, true}};
+            expectTrue(objectsOrdered(ok, nullptr),
+                       "不变量：合序通过（同一个 cp 上挂两项也是合法形态）");
+
+            BlockSpec reversed = ok;
+            std::reverse(reversed.objects.begin(), reversed.objects.end());
+            std::string why;
+            const bool rev_ok = objectsOrdered(reversed, &why);
+            expectTrue(!rev_ok && why.find("更靠前") != std::string::npos,
+                       "不变量：逆序被判出来（" + why + "）");
+
+            BlockSpec beyond = mkInline(0, 12.0f, "住院号甲乙丙丁");
+            beyond.objects = {InlineObject{n + 1, InlineObjectKind::ControlStart, 0, false}};
+            why.clear();
+            const bool beyond_ok = objectsOrdered(beyond, &why);
+            expectTrue(!beyond_ok && why.find("超出段落长度") != std::string::npos,
+                       "不变量：锚点越过段长被判出来（" + why + "）");
+        }
+
+        // (b) 产生端：引擎按"要显示哪些括号"落成对象表，同一处的先后在这里定死
+        {
+            EngineConfig ec;
+            ec.zoom = 1.0f;
+
+            EditorEngine e;
+            if (!e.init(fonts24)) {
+                std::fprintf(stderr, "字体加载失败\n");
+                return 2;
+            }
+            e.setConfig(ec);
+            // 患者主诉：| 反复 | 心慌 | 三天 —— 三连字段，随后把中间那个删空。
+            e.setBlocks({mkInline(0, 12.0f, "患者主诉：反复心慌三天")});
+            e.setEditMode(EditMode::Form);
+            // 左边那个字段只读：它的两枚括号画灰色，这一位也要由产生端记进表。
+            // 只读的那个不能是被删空的：只读字段里的退格会被策略拒掉，那样这里
+            // 验的就成了"删不动"，而不是对象表的顺序。
+            e.setControls(
+                {mkCtl(5, 7, "k1", true), mkCtl(7, 9, "k2", false), mkCtl(9, 11, "k3", false)});
+            e.setCaret(0, 9);
+            // 两次退格分开写：写进断言条件里的话，第一下失败就短路，看不出是第几下没成。
+            const bool bs1 = e.backspaceAndRender();
+            const bool bs2 = e.backspaceAndRender();
+            expectTrue(bs1 && bs2, "产生端：把中间那个字段删成零宽（边界上于是有四项）");
+
+            // 表的读法：cp、开闭、owner、只读各一位，一眼能看出顺序对不对。
+            auto census = [](const std::vector<InlineObject>& v) {
+                std::string s;
+                for (const InlineObject& o : v) {
+                    if (!s.empty()) s += ' ';
+                    s += std::to_string(o.cp);
+                    s += (o.kind == InlineObjectKind::ControlStart) ? "<" : ">";
+                    s += std::to_string(o.owner);
+                    s += o.read_only ? "R" : "-";
+                }
+                return s;
+            };
+            const std::string got = census(e.blocks()[0].objects);
+            std::printf("     边界上的对象表：%s\n", got.c_str());
+            // 偏移 5：左字段的开；偏移 7：左字段的闭、空字段的一对、右字段的开；
+            //   偏移 9：右字段的闭。空字段的一对必须挨着，且夹在两个非空字段之间。
+            const std::string want = "5<0R 7>0R 7<1- 7>1- 7<2- 9>2-";
+            expectTrue(got == want,
+                       "★ 产生端定序：表是 [5<0R 7>0R 7<1- 7>1- 7<2- 9>2-]（实际 " + got + "）");
+            expectTrue(objectsOrdered(e.blocks()[0], nullptr), "产生端产出的表满足不变量");
+
+            // 换档：Focused 只放聚焦字段的边界 —— 表里"少了几项"必须真的少。
+            EngineConfig efc = ec;
+            efc.form_brackets = FormBracketScope::Focused;
+            e.setCaret(0, 6);  // 落在 k1 [5,7) 里
+            e.setConfig(efc);
+            e.relayout();
+            const std::vector<InlineObject>& focused = e.blocks()[0].objects;
+            expectTrue(focused.size() == 2 && focused[0].cp == 5 && focused[0].owner == 0 &&
+                           focused[0].kind == InlineObjectKind::ControlStart &&
+                           focused[1].cp == 7 && focused[1].kind == InlineObjectKind::ControlEnd,
+                       "Focused 档：表里只剩聚焦字段的两项（实际 " +
+                           std::to_string(focused.size()) + " 项）");
+            expectTrue(e.auditLayout() == 0, "换档之后增量与全量逐字段一致（表变了就必须重排）");
+
+            // 文档模式：括号根本不画，表就该是空的（不画却还占宽度是最坏的形态）。
+            e.setEditMode(EditMode::Document);
+            e.relayout();
+            expectTrue(e.blocks()[0].objects.empty(), "文档模式：对象表为空");
+            expectTrue(e.auditLayout() == 0, "文档模式重排后增量仍与全量一致");
+        }
+
+        // (c) 契约：排版层直接吃块流（不经引擎）就能插出占位簇
+        {
+            FontLibrary lib;
+            expectTrue(lib.addFace(cjkPath) == 0, "排版层旁路引擎：字体加载成功");
+            const PageMetrics page = PageMetrics::A4();
+
+            // 四项都在段内（锚点 1 与 3 都小于段长）—— 两项都排在末字之前，
+            // 于是"末字右移多少"可以与"行盒宽了多少"直接对照。
+            const BlockSpec plain = mkInline(0, 12.0f, "甲乙丙丁");
+            const LayoutResult r0 = layoutDocument(lib, {plain}, page);
+
+            BlockSpec marked = mkInline(0, 12.0f, "甲乙丙丁");
+            marked.objects = {InlineObject{1, InlineObjectKind::ControlStart, 7, false},
+                              InlineObject{3, InlineObjectKind::ControlEnd, 8, true}};
+            const LayoutResult r1 = layoutDocument(lib, {marked}, page);
+
+            expectTrue(r0.lines.size() == 1 && r0.lines[0].clusters.size() == 4,
+                       "无对象：簇数 == 码点数（一个占位都不插）");
+            const size_t cl1 = r1.lines.empty() ? 0 : r1.lines[0].clusters.size();
+            expectTrue(r1.lines.size() == 1 && cl1 == 6,
+                       "两项对象 → 多两个簇（实际 " + std::to_string(cl1) + " 个）");
+
+            std::vector<int> sides, owners, ros;
+            for (const LineCluster& c : r1.lines[0].clusters) {
+                if (!c.placeholder) continue;
+                sides.push_back(static_cast<int>(c.bracket_side));
+                owners.push_back(c.owner_control);
+                ros.push_back(c.read_only ? 1 : 0);
+            }
+            expectTrue(sides.size() == 2 && sides[0] == static_cast<int>(BracketSide::Open) &&
+                           sides[1] == static_cast<int>(BracketSide::Close),
+                       "占位簇的开闭跟着对象表的 kind 走（先开后备）");
+            expectTrue(owners.size() == 2 && owners[0] == 7 && owners[1] == 8,
+                       "owner 原样回填（命中测试靠它回答点到的括号是谁的）");
+            expectTrue(ros.size() == 2 && ros[0] == 0 && ros[1] == 1,
+                       "read_only 原样回填（只读字段的括号画灰色）");
+
+            // 几何：两项都在末字之前，所以末字必须正好右移两槽的宽度。
+            auto glyphX = [](const LayoutResult& r, uint32_t cp) {
+                for (const PlacedGlyph& g : r.glyphs) {
+                    if (g.cluster == cp) return g.x_pt;
+                }
+                return -1.0f;
+            };
+            const float pushed = r1.lines[0].inline_end_pt - r0.lines[0].inline_end_pt;
+            const float moved = glyphX(r1, 3) - glyphX(r0, 3);
+            expectTrue(pushed > 0.5f && std::fabs(moved - pushed) < 0.02f,
+                       "★ 占位真的把正文挤开了：末字右移量 == 行盒多出来的宽度（" +
+                           std::to_string(moved) + " ≈ " + std::to_string(pushed) + "）");
+
+            // 反向：把表倒过来 → 占位跟着倒。这一条同时是"排版按数组顺序线性归并、
+            //   不做第二次排序"的判据：若排版自己会排序，这里两边必然一样。
+            BlockSpec flipped = marked;
+            std::reverse(flipped.objects.begin(), flipped.objects.end());
+            expectTrue(!objectsOrdered(flipped, nullptr), "倒过来的表不满足不变量");
+            const LayoutResult rf = layoutDocument(lib, {flipped}, page);
+            std::vector<int> fsides;
+            for (const LineCluster& c : rf.lines[0].clusters) {
+                if (c.placeholder) fsides.push_back(static_cast<int>(c.bracket_side));
+            }
+            expectTrue(fsides.size() == 2 && fsides[0] == static_cast<int>(BracketSide::Close) &&
+                           fsides[1] == static_cast<int>(BracketSide::Open),
+                       "★ 顺序由表定：表倒过来，占位簇也跟着倒（排版不做第二次排序）");
+        }
+
+        // (d) setText 清对象表：锚点按旧文本的码点下标算，留着必然摆到别处
+        {
+            BlockSpec b = mkInline(0, 12.0f, "甲乙丙");
+            b.objects = {InlineObject{1, InlineObjectKind::ControlStart, 0, false}};
+            b.setText("甲");
+            expectTrue(b.objects.empty(), "setText 清掉对象表（旧锚点留着会把括号摆到别处）");
+            expectTrue(b.runs.empty(), "setText 同时清掉 run 表");
+        }
     }
 
     std::printf("\n──────────────────────────────\n");

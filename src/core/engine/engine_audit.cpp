@@ -211,7 +211,6 @@ std::string EditorEngine::auditFrameJson() {
     return o.str();
 }
 
-
 /**
  * 排版自审：拿"不用缓存的全量重排"当对照，与当前 layout_ 逐字段比。
  * 为什么要比逐字段而不是只看行数/字形数：增量最典型的错法是"少排了一段"
@@ -219,8 +218,7 @@ std::string EditorEngine::auditFrameJson() {
  */
 int EditorEngine::auditLayout() {
     if (blocks_.empty()) return 0;
-    const std::vector<int> bracketed = bracketedControls();
-    const LayoutResult ref = layoutDocument(fonts_, blocks_, cfg_.page, &controls_, &bracketed);
+    const LayoutResult ref = layoutDocument(fonts_, blocks_, cfg_.page);
     return auditLayoutPair(layout_, ref).total();
 }
 
@@ -229,8 +227,7 @@ std::string EditorEngine::auditLayoutJson() {
     if (blocks_.empty()) return "{\"diff\":0,\"note\":\"empty\"}";
 
     const auto t0 = Clock::now();
-    const std::vector<int> bracketed = bracketedControls();
-    const LayoutResult ref = layoutDocument(fonts_, blocks_, cfg_.page, &controls_, &bracketed);
+    const LayoutResult ref = layoutDocument(fonts_, blocks_, cfg_.page);
     const double full_ms = msSince(t0);
     const LayoutAudit a = auditLayoutPair(layout_, ref);
 
