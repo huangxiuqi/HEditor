@@ -49,6 +49,19 @@ const char* fieldKindName(FieldKind kind) {
     return "（未知）";
 }
 
+bool fieldKindFromName(const std::string& name, FieldKind* out) {
+    if (out == nullptr) return false;
+    const FieldKind all[] = {FieldKind::PageNumber, FieldKind::PageCount, FieldKind::PrintDate,
+                             FieldKind::DocProperty};
+    for (FieldKind k : all) {
+        if (name == fieldKindName(k)) {
+            *out = k;
+            return true;
+        }
+    }
+    return false;
+}
+
 bool isLayoutResult(FieldKind kind) {
     return kind == FieldKind::PageNumber || kind == FieldKind::PageCount;
 }

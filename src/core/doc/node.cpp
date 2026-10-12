@@ -79,6 +79,24 @@ const char* nodeKindName(NodeKind kind) {
     return "（未知）";
 }
 
+bool nodeKindFromName(const std::string& name, NodeKind* out) {
+    if (out == nullptr) return false;
+    const NodeKind all[] = {
+        NodeKind::Document,  NodeKind::Section,        NodeKind::Table,         NodeKind::TableRow,
+        NodeKind::TableCell, NodeKind::ContentControl, NodeKind::Quote,         NodeKind::CodeBlock,
+        NodeKind::ListItem,  NodeKind::Link,           NodeKind::HeaderFooter,  NodeKind::Image,
+        NodeKind::Formula,   NodeKind::Break,          NodeKind::PageBreak,     NodeKind::Tab,
+        NodeKind::Field,     NodeKind::TextRun,        NodeKind::ParagraphMark,
+    };
+    for (NodeKind kind : all) {
+        if (name == nodeKindName(kind)) {
+            *out = kind;
+            return true;
+        }
+    }
+    return false;
+}
+
 bool acceptsChild(NodeKind parent, NodeKind child) {
     switch (parent) {
         case NodeKind::Document:
@@ -104,10 +122,17 @@ NodeTree::NodeTree() {
     section->id = allocateId();
     section->kind = NodeKind::Section;
     section->parent = root_;
-    section_ = section.get();
-    index_[section_->id] = section_;
-    root_->children.push_back(section_);
+    Node* raw = section.get();
+    index_[raw->id] = raw;
+    root_->children.push_back(raw);
     pool_.push_back(std::move(section));
+}
+
+NodeId NodeTree::firstSectionId() const {
+    for (const Node* c : root_->children) {
+        if (c->kind == NodeKind::Section) return c->id;
+    }
+    return kInvalidNodeId;
 }
 
 Node* NodeTree::find(NodeId id) {
@@ -123,7 +148,16 @@ const Node* NodeTree::find(NodeId id) const {
 bool isAttached(const NodeTree& tree, NodeId id) {
     const Node* n = tree.find(id);
     if (n == nullptr) return false;
-    return n->parent != nullptr || id == tree.rootId();
+    // 沿父链上溯到根才算挂在文档上。只看"有没有父节点"是不够的：已摘下子树里的后代
+    // 也有父节点（指向同一棵摘下的子树），那样会把它们当成活的，于是裁决结果或编辑被写到
+    // 一个不在文档里的位置上。上溯步数封顶，免得畸形文档里的环把这里转死。
+    const Node* cur = n;
+    for (int steps = 0; cur != nullptr && steps <= static_cast<int>(tree.nodeCount()) + 1;
+         ++steps) {
+        if (cur->id == tree.rootId()) return true;
+        cur = cur->parent;
+    }
+    return false;
 }
 
 int NodeTree::sectionCount() const {
@@ -208,6 +242,40 @@ NodeId NodeTree::createDetached(NodeKind kind) {
     return raw->id;
 }
 
+NodeId NodeTree::createDetachedWithId(NodeId id, NodeKind kind) {
+    if (id == kInvalidNodeId) return kInvalidNodeId;
+    if (index_.find(id) != index_.end()) return kInvalidNodeId;
+
+    auto node = std::make_unique<Node>();
+    node->id = id;
+    node->kind = kind;
+    Node* raw = node.get();
+    index_[raw->id] = raw;
+    pool_.push_back(std::move(node));
+    // 分配器推进到这个 id 之后，否则后面新分配的 id 会与它撞上。
+    if (id >= next_id_) next_id_ = id + 1;
+    return raw->id;
+}
+
+void NodeTree::reserveIdWatermark(NodeId next) {
+    if (next > next_id_) next_id_ = next;
+}
+
+void NodeTree::reset() {
+    // 根留下，其余连池里的记录一起丢掉 —— 留池会让记录里的 id 撞上摘下的旧节点。
+    std::vector<std::unique_ptr<Node>> kept;
+    for (std::unique_ptr<Node>& up : pool_) {
+        if (up.get() == root_) kept.push_back(std::move(up));
+    }
+    pool_.clear();
+    index_.clear();
+    root_->children.clear();
+    root_->parent = nullptr;
+    pool_ = std::move(kept);
+    index_[root_->id] = root_;
+    next_id_ = root_->id + 1;
+}
+
 bool NodeTree::setText(NodeId id, std::vector<uint32_t> cps) {
     Node* n = find(id);
     if (n == nullptr || !isText(n->kind)) return false;
@@ -221,7 +289,6 @@ void NodeTree::assignFrom(const NodeTree& other) {
     pool_.clear();
     index_.clear();
     root_ = nullptr;
-    section_ = nullptr;
     next_id_ = 1;
 
     // 先按池的顺序建出全部节点（id 原样保留），再补父子链 —— 补链要按 id 查新节点，
@@ -258,7 +325,6 @@ void NodeTree::assignFrom(const NodeTree& other) {
     }
 
     root_ = (other.root_ == nullptr) ? nullptr : remap[other.root_->id];
-    section_ = (other.section_ == nullptr) ? nullptr : remap[other.section_->id];
     next_id_ = other.next_id_;
 }
 

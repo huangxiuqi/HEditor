@@ -247,6 +247,7 @@ add_library(heditor_core STATIC
   src/core/doc/steps.cpp
   src/core/doc/transaction.cpp
   src/core/doc/revision.cpp
+  src/core/doc/serialize.cpp
   src/core/text/font.cpp
   src/core/text/shaper.cpp
   src/core/text/fallback.cpp
@@ -260,6 +261,18 @@ add_library(heditor_core STATIC
 )
 target_include_directories(heditor_core PUBLIC ${HEDITOR_ROOT}/src)
 target_link_libraries(heditor_core PUBLIC heditor_harfbuzz)
+
+# ── JSON（模型层序列化，1.10）────────────────────────────────────
+#   nlohmann/json 3.12.0，单头文件库、MIT。只被 src/core/doc/serialize.cpp 用，
+#   所以是 PRIVATE：nlohmann 的类型不进任何公共头，换库不影响别处的签名。
+#   取回方式与校验写在 scripts/deps_init.ps1 与 docs/依赖与工具链管理.md。
+set(HEDITOR_JSON_INCLUDE ${HEDITOR_ROOT}/third_party/nlohmann/single_include)
+if(NOT EXISTS "${HEDITOR_JSON_INCLUDE}/nlohmann/json.hpp")
+  message(FATAL_ERROR
+    "缺少 third_party/nlohmann/single_include/nlohmann/json.hpp。"
+    "跑 scripts/deps_init.ps1 取回（见 docs/依赖与工具链管理.md）。")
+endif()
+target_include_directories(heditor_core PRIVATE ${HEDITOR_JSON_INCLUDE})
 
 # 演示与测试共用的固定文书。单独成库是为了不让核心库带上演示数据 ——
 #   核心库提供的是能力，样例内容是喂给它的输入（见 docs/正式化架构与迁移路线.md 4.7）。

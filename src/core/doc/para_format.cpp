@@ -1,6 +1,27 @@
 #include "core/doc/para_format.h"
 
+#include <map>
+#include <mutex>
+#include <set>
+#include <string>
+
 namespace heditor {
+
+const char* internLanguage(const std::string& tag) {
+    if (tag.empty()) return nullptr;
+    // 函数内的静态表：进程内唯一、只在首次使用时构造。条目永不释放（这正是"静态生存期"），
+    // 所以 map 的键与 set 里的字符串都必须自己持有 —— 不能指向调用方的临时串。
+    static std::mutex mu;
+    static std::set<std::string> pool;
+    static std::map<std::string, const char*> index;
+    const std::lock_guard<std::mutex> lock(mu);
+    const auto it = index.find(tag);
+    if (it != index.end()) return it->second;
+    const auto inserted = pool.insert(tag);
+    const char* kept = inserted.first->c_str();
+    index.emplace(tag, kept);
+    return kept;
+}
 
 void applyParaFormatPatch(const ParaFormatPatch& patch, ParaFormat* base) {
     if (base == nullptr) return;

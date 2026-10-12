@@ -101,6 +101,14 @@ bool isParagraphMark(NodeKind kind);
 const char* nodeKindName(NodeKind kind);
 
 /**
+ * 种类名 → 种类。不认识的名字返回 false。
+ *
+ * 序列化（1.10）按名字落盘、按名字读回，而不是写枚举值：枚举值一旦重排或插入，旧文件里
+ * 的数字就会静默变成另一个种类，而名字不会。这个名字来回的唯一真相就是 nodeKindName。
+ */
+bool nodeKindFromName(const std::string& name, NodeKind* out);
+
+/**
  * 谁允许装谁。只登记第三节已经定下的三条强约束（根只收节、表格只收行、行只收单元格），
  * 其余容器不限制子节点 —— 子节点约束是一个位标志的并集，尚未逐种登记。
  *
@@ -214,9 +222,12 @@ public:
     NodeId rootId() const { return root_->id; }
 
     /**
-     * 节序列的第一节。文档至少有一节：构造时就建好了。
+     * 节序列的第一节，根下没有节时返回 kInvalidNodeId。
+     *
+     * 它按根的孩子现算而不缓存一个指针：缓存会在"根的孩子被换掉"（序列化还原、未来的删节）
+     * 之后指向一个已经摘下的节点，而那种失效是静默的。根的孩子本来就只有节、数量也小。
      */
-    NodeId firstSectionId() const { return section_->id; }
+    NodeId firstSectionId() const;
 
     /**
      * 节的个数与其第 i 节的 id（i 从 0 起，越界返回 kInvalidNodeId）。
@@ -302,13 +313,38 @@ public:
      */
     NodeTree clone() const;
 
+    /**
+     * 回到"刚构造出来的空文档"：根保留（id 不变），其余节点连同池里的记录一起删掉，
+     * 分配器回到 2。
+     *
+     * 与 eraseChild 的留池语义相反，因为它的用途只有序列化还原（1.10）——那里要按记录把
+     * id 原样装回去，于是旧的 id 必须能被重新使用；留池会让 createDetachedWithId 撞上
+     * 一个早就摘下的同 id 节点。
+     */
+    void reset();
+
+    /**
+     * 按指定的 id 建一个不挂在树上的节点，返回它的 id。
+     *
+     * 只有序列化还原走这条路：id 必须原样回来（id 落盘的全部意义就在这里），而 insertChild
+     * 与 createDetached 都会另分配 id。id 无效、或池里已经有同 id 的节点时返回
+     * kInvalidNodeId —— 不静默另分配一个，那会让还原出来的文档与文件不是同一份。
+     */
+    NodeId createDetachedWithId(NodeId id, NodeKind kind);
+
+    /**
+     * 把分配器推进到给定水位（下一个要分配的 id 不小于 next）。序列化还原用它：
+     * 文件里的水位可能比现存的最大 id 还大（保存前删过节点），不推进的话新分配的 id
+     * 会与文件里引用过的 id 撞上。水位不比现在大时什么都不做。
+     */
+    void reserveIdWatermark(NodeId next);
+
 private:
     NodeId allocateId() { return next_id_++; }
 
     std::vector<std::unique_ptr<Node>> pool_;
     std::unordered_map<NodeId, Node*> index_;
     Node* root_ = nullptr;
-    Node* section_ = nullptr;
     NodeId next_id_ = 1;  // 0 留给"无效"
 };
 

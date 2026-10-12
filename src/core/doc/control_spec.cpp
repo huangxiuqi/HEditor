@@ -80,4 +80,65 @@ const char* borderStyleName(BorderStyle s) {
     return "（未知）";
 }
 
+bool borderStyleFromName(const std::string& name, BorderStyle* out) {
+    if (out == nullptr) return false;
+    const BorderStyle all[] = {BorderStyle::Solid, BorderStyle::Dashed, BorderStyle::Dotted};
+    for (BorderStyle s : all) {
+        if (name == borderStyleName(s)) {
+            *out = s;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool valueShapeFromName(const std::string& name, ValueShape* out) {
+    if (out == nullptr) return false;
+    const ValueShape all[] = {ValueShape::Text, ValueShape::Bool, ValueShape::Enum,
+                              ValueShape::List, ValueShape::Resource};
+    for (ValueShape s : all) {
+        if (name == valueShapeName(s)) {
+            *out = s;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool overflowFromName(const std::string& name, Overflow* out) {
+    if (out == nullptr) return false;
+    const Overflow all[] = {Overflow::Expand, Overflow::Clip, Overflow::Spill};
+    for (Overflow o : all) {
+        if (name == overflowName(o)) {
+            *out = o;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool underlineFromName(const std::string& name, Underline* out) {
+    if (out == nullptr) return false;
+    const Underline all[] = {Underline::None, Underline::Whole, Underline::BlankOnly};
+    for (Underline u : all) {
+        if (name == underlineName(u)) {
+            *out = u;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool alignFromName(const std::string& name, Align* out) {
+    if (out == nullptr) return false;
+    const Align all[] = {Align::Start, Align::Center, Align::End};
+    for (Align a : all) {
+        if (name == alignName(a)) {
+            *out = a;
+            return true;
+        }
+    }
+    return false;
+}
+
 }  // namespace heditor

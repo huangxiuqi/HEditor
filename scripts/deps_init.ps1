@@ -10,9 +10,11 @@
 # 用法：
 #   powershell -ExecutionPolicy Bypass -File scripts\deps_init.ps1
 #   powershell -ExecutionPolicy Bypass -File scripts\deps_init.ps1 -NoSparse
+#   powershell -ExecutionPolicy Bypass -File scripts\deps_init.ps1 -OnlyJson   # 只取单头文件依赖
 
 param(
-    [switch]$NoSparse
+    [switch]$NoSparse,
+    [switch]$OnlyJson
 )
 
 $ErrorActionPreference = 'Stop'
@@ -62,6 +64,7 @@ function Get-GitOut {
     return ($out | Out-String).Trim()
 }
 
+if (-not $OnlyJson) {
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     throw "PATH 上找不到 git"
 }
@@ -149,7 +152,45 @@ Say "HEAD    : $head"
 Say "工作区  : $size MB（裁剪后约 10 MB）"
 Say "版本头  : blob $verBlob"
 Say "          （工作区是 CRLF 检出，文件本身比 blob 大，不要拿 md5 直接比）"
+}  # if (-not $OnlyJson)
 
+# ── 5. 单头文件依赖：nlohmann/json ───────────────────────────
+# 它是头文件库：没有构建系统、没有编译宏、只有一份 .hpp，所以不走 submodule ——
+# submodule 那套（浅克隆、稀疏检出、提交 gitlink、update 会把 HEAD 悄悄拉回去）在这里
+# 只有成本没有收益。改走"脚本化取回 + 钉 tag + 校验 SHA-256"，与 Skia 归路同一档。
+# 这一步不用 git，所以 -OnlyJson 可以单独跑，智能体也能执行（其余步骤不行）。
+$JsonInc  = Join-Path $Root 'third_party\nlohmann\single_include\nlohmann'
+$JsonFile = Join-Path $JsonInc 'json.hpp'
+$JsonLic  = Join-Path $Root 'third_party\nlohmann\LICENSE.MIT'
+$JsonTag  = 'v3.12.0'
+$JsonBase = "https://raw.githubusercontent.com/nlohmann/json/$JsonTag"
+$JsonSha  = 'aaf127c04cb31c406e5b04a63f1ae89369fccde6d8fa7cdda1ed4f32dfc5de63'
+$JsonLicSha = '46a65cffd1ea955132d95a8dd921640714a8d6b537d2e4e482d31145ae95b603'
+
+# 取回一份并校验哈希。就地放好之后不再重下 —— 重复下载只会让"什么时候换过版本"更难查。
+function Get-PinnedFile {
+    param([string]$Url, [string]$Dest, [string]$Sha)
+    if ((Test-Path $Dest) -and
+        ((Get-FileHash -Algorithm SHA256 $Dest).Hash.ToLower() -eq $Sha)) {
+        Say "已在位且哈希一致：$Dest"
+        return
+    }
+    $tmp = "$Dest.download"
+    Say "取回 $Url"
+    Invoke-WebRequest -Uri $Url -OutFile $tmp -UseBasicParsing
+    $got = (Get-FileHash -Algorithm SHA256 $tmp).Hash.ToLower()
+    if ($got -ne $Sha) {
+        throw "校验失败：$Url 的 SHA-256 是 $got，应为 $Sha（上游可能改过这个 tag）"
+    }
+    Move-Item -Force $tmp $Dest
+    Say "已就位：$Dest"
+}
+
+New-Item -ItemType Directory -Force -Path $JsonInc | Out-Null
+Get-PinnedFile -Url "$JsonBase/single_include/nlohmann/json.hpp" -Dest $JsonFile -Sha $JsonSha
+Get-PinnedFile -Url "$JsonBase/LICENSE.MIT" -Dest $JsonLic -Sha $JsonLicSha
+
+if (-not $OnlyJson) {
 Write-Host ""
 Write-Host "[deps] 剩下的由人完成：" -ForegroundColor Yellow
 Write-Host "  提交 .gitmodules 与 third_party/harfbuzz 这条 gitlink —— 不提交的话，之后任何"
@@ -157,3 +198,4 @@ Write-Host "  一次 git submodule update 都会把 HEAD 拉回主分支尖端�
 Write-Host "  跑一次 powershell -ExecutionPolicy Bypass -File scripts\build_native.ps1 -Run"
 Write-Host "  跑一次 powershell -ExecutionPolicy Bypass -File scripts\build_wasm.ps1"
 Write-Host "  旧的 third_party/harfbuzz-14.6.0 先留着待查，确认无碍后再自行清理"
+}

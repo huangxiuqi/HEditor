@@ -29,9 +29,13 @@ enum class PaperName : uint8_t { A4 = 0, A5 = 1, B5 = 2, Letter = 3, Legal = 4, 
 
 const char* paperNameName(PaperName name);
 
+bool paperNameFromName(const std::string& text, PaperName* out);
+
 enum class Orientation : uint8_t { Portrait = 0, Landscape = 1 };
 
 const char* orientationName(Orientation o);
+
+bool orientationFromName(const std::string& text, Orientation* out);
 
 /**
  * 纸张。name 为 Custom 时宽高取自 width 与 height（必须是绝对长度），
@@ -99,12 +103,16 @@ enum class SectionBreak : uint8_t {
 
 const char* sectionBreakName(SectionBreak b);
 
+bool sectionBreakFromName(const std::string& text, SectionBreak* out);
+
 /**
  * 内容在页面上的垂直分布。本期只原样存住，不参与排版。
  */
 enum class VerticalAlign : uint8_t { Top = 0, Center = 1, Bottom = 2, Both = 3 };
 
 const char* verticalAlignName(VerticalAlign a);
+
+bool verticalAlignFromName(const std::string& text, VerticalAlign* out);
 
 enum class PageNumberFormat : uint8_t {
     Arabic = 0,
@@ -114,6 +122,8 @@ enum class PageNumberFormat : uint8_t {
 };
 
 const char* pageNumberFormatName(PageNumberFormat f);
+
+bool pageNumberFormatFromName(const std::string& text, PageNumberFormat* out);
 
 /**
  * 页码：格式、起始值、本节是否重新编号。restart 为真时本节从 start 重新起算，

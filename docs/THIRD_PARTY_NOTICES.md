@@ -21,6 +21,7 @@
 | **libpng** | 1.6.x（Skia DEPS 钉的 commit） | **libpng License**（`licenses/libpng-LICENSE.txt`） | 否 | 保留版权与许可声明 |
 | **zlib** | chromium fork（Skia DEPS 钉的 commit） | **zlib License**（`licenses/Zlib-LICENSE.txt`） | 否 | **不得冒充作者**；保留声明 |
 | **Emscripten** | 6.0.12 | **MIT / Expat**（`LICENSE`） | 否 | 保留许可声明（生成的 JS 胶水已带） |
+| **nlohmann/json** | 3.12.0 | **MIT**（源树 `LICENSE.MIT`，入库副本 `licenses/MIT-nlohmann-json.txt`） | 否 | 保留版权与许可声明 |
 | ICU（备选，尚未引入） | main | Unicode License V3 | 否 | 保留版权声明 |
 | SheenBidi（备选，尚未引入） | master | Apache-2.0 | 否 | 保留 NOTICE |
 

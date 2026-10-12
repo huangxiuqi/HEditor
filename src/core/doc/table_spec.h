@@ -90,6 +90,11 @@ struct TableSpec {
      * 这张表是否带列定义。带列定义就有"数据行不许合并"这条约束。
      */
     bool hasColumns() const { return !columns.empty(); }
+
+    /**
+     * 逐字段相等。序列化要拿它判断"这张表是不是全默认"，从而决定写不写这个条目。
+     */
+    bool operator==(const TableSpec& o) const = default;
 };
 
 }  // namespace heditor

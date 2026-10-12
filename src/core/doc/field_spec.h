@@ -33,6 +33,8 @@ enum class FieldKind : uint8_t { PageNumber = 0, PageCount = 1, PrintDate = 2, D
 
 const char* fieldKindName(FieldKind kind);
 
+bool fieldKindFromName(const std::string& name, FieldKind* out);
+
 /**
  * 这个种类的域是不是本次排版的结果。是则它的值依赖上一轮排版，页脚同时写页码与总页数时
  * 正是这一条让它有循环风险 —— 所以它是"哪一类域需要迭代"的唯一判据。

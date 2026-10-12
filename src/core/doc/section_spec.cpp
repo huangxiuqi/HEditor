@@ -107,6 +107,70 @@ const char* pageNumberFormatName(PageNumberFormat f) {
     return "（未知）";
 }
 
+bool paperNameFromName(const std::string& text, PaperName* out) {
+    if (out == nullptr) return false;
+    const PaperName all[] = {PaperName::A4,     PaperName::A5,    PaperName::B5,
+                             PaperName::Letter, PaperName::Legal, PaperName::Custom};
+    for (PaperName p : all) {
+        if (text == paperNameName(p)) {
+            *out = p;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool orientationFromName(const std::string& text, Orientation* out) {
+    if (out == nullptr) return false;
+    const Orientation all[] = {Orientation::Portrait, Orientation::Landscape};
+    for (Orientation o : all) {
+        if (text == orientationName(o)) {
+            *out = o;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool sectionBreakFromName(const std::string& text, SectionBreak* out) {
+    if (out == nullptr) return false;
+    const SectionBreak all[] = {SectionBreak::Continuous, SectionBreak::NextPage,
+                                SectionBreak::OddPage, SectionBreak::EvenPage};
+    for (SectionBreak b : all) {
+        if (text == sectionBreakName(b)) {
+            *out = b;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool verticalAlignFromName(const std::string& text, VerticalAlign* out) {
+    if (out == nullptr) return false;
+    const VerticalAlign all[] = {VerticalAlign::Top, VerticalAlign::Center, VerticalAlign::Bottom,
+                                 VerticalAlign::Both};
+    for (VerticalAlign a : all) {
+        if (text == verticalAlignName(a)) {
+            *out = a;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool pageNumberFormatFromName(const std::string& text, PageNumberFormat* out) {
+    if (out == nullptr) return false;
+    const PageNumberFormat all[] = {PageNumberFormat::Arabic, PageNumberFormat::RomanUpper,
+                                    PageNumberFormat::RomanLower, PageNumberFormat::Chinese};
+    for (PageNumberFormat f : all) {
+        if (text == pageNumberFormatName(f)) {
+            *out = f;
+            return true;
+        }
+    }
+    return false;
+}
+
 PaperSizeEmu paperSize(const Paper& paper) {
     PaperSizeEmu size;
     if (paper.name == PaperName::Custom) {

@@ -113,4 +113,13 @@ void applyParaFormatPatch(const ParaFormatPatch& patch, ParaFormat* base);
  */
 ParaFormatPatch mergeParaFormatPatch(const ParaFormatPatch& under, const ParaFormatPatch& over);
 
+/**
+ * 驻留一个语言标签，返回静态生存期的指针。
+ *
+ * ParaFormat 的 language 是裸指针（引擎侧的 BlockSpec 也用它），所以标签必须活过任何一次
+ * 编译。从文件读回来时字符串是临时的，只能靠驻留把它钉住 —— 这也是"驻留字符串"这个约定
+ * 在序列化（1.10）这一侧的唯一落点。空标签返回 nullptr（表示不指定语言）。
+ */
+const char* internLanguage(const std::string& tag);
+
 }  // namespace heditor

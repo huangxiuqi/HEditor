@@ -41,6 +41,7 @@
 #include "core/doc/range.h"
 #include "core/doc/revision.h"
 #include "core/doc/section_spec.h"
+#include "core/doc/serialize.h"
 #include "core/doc/steps.h"
 #include "core/doc/style.h"
 #include "core/doc/table.h"
@@ -4644,6 +4645,575 @@ void checkRevisionExpandFails() {
                "1.9 / 展开失败：失败时交出来的还是基线，不是展开到一半的文档");
 }
 
+/**
+ * 1.10 的独立比对口径：把每个可达节点逐字段写成一行文本（含 id、孩子顺序与每一个字段的
+ * 真实取值）。
+ *
+ * 为什么不能只比"print 两遍相等"：那种自比法对"序列化漏写了一个字段"是瞎的 —— 漏写的字段
+ * 在两次 print 里都不出现，两边自然相等。这条快照与序列化实现互相独立，漏写就会现形。
+ *
+ * 可达范围与序列化收集根的规则一致：正文根，加上逐节页眉页脚片段的根。
+ */
+std::string colorKey(const Color& c) {
+    return std::to_string(c.r) + "/" + std::to_string(c.g) + "/" + std::to_string(c.b) + "/" +
+           std::to_string(c.a);
+}
+
+std::string wmKey(const WritingMode& wm) {
+    return std::to_string(static_cast<int>(wm.inline_axis)) + "," +
+           std::to_string(static_cast<int>(wm.block_flow)) + "," +
+           std::to_string(static_cast<int>(wm.orientation));
+}
+
+std::string borderSideKey(const BorderSide& b) {
+    return std::string(b.on ? "on" : "off") + ":" + borderStyleName(b.style) + ":" +
+           printLength(b.width) + ":" + colorKey(b.color);
+}
+
+std::string appearanceKey(const Appearance& a) {
+    std::string s = "w=" + printLength(a.width);
+    s += "|ov=" + std::string(overflowName(a.overflow));
+    s += "|ul=" + std::string(underlineName(a.underline));
+    s += "|bd=" + borderSideKey(a.border.left) + ";" + borderSideKey(a.border.right) + ";" +
+         borderSideKey(a.border.top) + ";" + borderSideKey(a.border.bottom);
+    s += "|gl=" + a.glyph.kind + "," + printLength(a.glyph.width) + "," +
+         printLength(a.glyph.size) + "," + colorKey(a.glyph.color) + "," + colorKey(a.glyph.fill);
+    s += "|al=" + std::string(alignName(a.align));
+    s += "|ph=" + a.placeholder;
+    s += "|sr=" + a.styleRef + "|isr=" + a.invalidStyleRef;
+    return s;
+}
+
+std::string controlKey(const ControlSpec& c) {
+    std::string s = c.key + "," + c.controlType + "," + valueShapeName(c.valueShape);
+    s += "|v=" + std::string(c.value.flag ? "1" : "0") + "," + c.value.text + "," +
+         std::to_string(c.value.items.size());
+    for (const std::string& item : c.value.items) s += ";" + item;
+    s += "|ro=" + std::string(c.readonly ? "1" : "0");
+    s += "|rq=" + std::string(c.required ? "1" : "0");
+    s += "|lk=" + std::string(c.structureLock ? "1" : "0");
+    s += "|ap=" + appearanceKey(c.appearance);
+    s += "|vr=" + c.validateRef;
+    return s;
+}
+
+std::string tableKey(const TableSpec& t) {
+    std::string s;
+    for (const TableColumn& c : t.columns) {
+        s += "[" + c.field_ref + "," + c.title + "," + c.data_type + "," + c.editor_style + "," +
+             printLength(c.width) + "," + alignName(c.align) + "]";
+    }
+    s += "|grid=";
+    for (const Length& l : t.grid_cols) s += printLength(l) + ";";
+    s += "|hr=" + std::to_string(t.header_rows);
+    return s;
+}
+
+std::string sectionKey(const SectionSpec& sec) {
+    std::string s = "paper=" + std::string(paperNameName(sec.paper.name)) + "," +
+                    orientationName(sec.paper.orient) + "," + printLength(sec.paper.width) + "," +
+                    printLength(sec.paper.height);
+    s += "|mar=" + printLength(sec.margins.top) + "," + printLength(sec.margins.bottom) + "," +
+         printLength(sec.margins.left) + "," + printLength(sec.margins.right);
+    s += "|gut=" + printLength(sec.gutter.size) + "," +
+         std::to_string(static_cast<int>(sec.gutter.side));
+    s += "|mir=" + std::string(sec.mirror_margins ? "1" : "0");
+    s += "|brk=" + std::string(sectionBreakName(sec.break_kind));
+    s += "|va=" + std::string(verticalAlignName(sec.valign));
+    s += "|wm=" + wmKey(sec.writing_mode);
+    s += "|num=" + std::string(pageNumberFormatName(sec.numbering.format)) + "," +
+         std::to_string(sec.numbering.start) + "," + std::string(sec.numbering.restart ? "1" : "0");
+    for (int v = 0; v < kHeaderFooterVariantCount; ++v) {
+        const HeaderFooter& h = sec.headers[v];
+        s += "|h" + std::to_string(v) + "=" + std::to_string(h.root) + "," +
+             printLength(h.distance) + "," + std::string(h.linked_to_previous ? "1" : "0");
+    }
+    for (int v = 0; v < kHeaderFooterVariantCount; ++v) {
+        const HeaderFooter& f = sec.footers[v];
+        s += "|f" + std::to_string(v) + "=" + std::to_string(f.root) + "," +
+             printLength(f.distance) + "," + std::string(f.linked_to_previous ? "1" : "0");
+    }
+    for (const auto& kv : sec.extra) s += "|x:" + kv.first + "=" + kv.second;
+    return s;
+}
+
+std::string fullNodeKey(const Node& n) {
+    std::string s = std::to_string(n.id) + "|" + nodeKindName(n.kind);
+    s += "|h=" + std::string(n.hidden ? "1" : "0");
+    s += "|t=";
+    for (uint32_t cp : n.text) s += std::to_string(cp) + ",";
+    s += "|s=" + n.styleRef;
+    s += "|p=" + paraKey(n.para);
+    s += "|m=" + marksKey(n.marks);
+    s += "|c=" + controlKey(n.control);
+    s += "|cs=" + std::to_string(n.cell.row_span) + "x" + std::to_string(n.cell.col_span);
+    s += "|tb=" + tableKey(n.table);
+    s += "|fd=" + std::string(fieldKindName(n.field.kind)) + "," + n.field.name + "," +
+         n.field.cache;
+    s += "|sec=" + sectionKey(n.section);
+    s += "|kids=";
+    for (const Node* c : n.children) s += std::to_string(c->id) + ",";
+    return s;
+}
+
+void fullKeyInto(const NodeTree& tree, NodeId id, std::vector<std::string>* out) {
+    const Node* n = tree.find(id);
+    if (n == nullptr) return;
+    out->push_back(fullNodeKey(*n));
+    for (const Node* c : n->children) fullKeyInto(tree, c->id, out);
+}
+
+std::vector<std::string> fullSnapshot(const NodeTree& tree) {
+    std::vector<std::string> out;
+    fullKeyInto(tree, tree.rootId(), &out);
+    for (int i = 0; i < tree.sectionCount(); ++i) {
+        const Node* sec = tree.find(tree.sectionAt(i));
+        if (sec == nullptr) continue;
+        for (int v = 0; v < kHeaderFooterVariantCount; ++v) {
+            fullKeyInto(tree, sec->section.headers[v].root, &out);
+            fullKeyInto(tree, sec->section.footers[v].root, &out);
+        }
+    }
+    return out;
+}
+
+/**
+ * 1.10：富文档。每种节点各来一个，且每个字段都设成非默认值 —— 判据要覆盖"哪些字段被漏写"，
+ * 只写默认值的文档测不出漏写。
+ */
+NodeTree makeRichDocument() {
+    NodeTree tree;
+    const NodeId s1 = tree.firstSectionId();
+
+    // 文本与各种标记：段落格式九个字段全设、字符属性六个字段全设。
+    const NodeId run = tree.appendChild(s1, NodeKind::TextRun);
+    tree.setText(run, cps({0x41, 0x42}));
+    tree.find(run)->marks.bold = true;
+    tree.find(run)->marks.italic = false;
+    tree.find(run)->marks.underline = true;
+    tree.find(run)->marks.font_index = 3;
+    tree.find(run)->marks.size = Length::abs(ptToEmu(14.5));
+    tree.find(run)->marks.color = Color::rgb(10, 20, 30);
+    tree.find(run)->styleRef = "char_style";
+    const NodeId mark = tree.appendChild(s1, NodeKind::ParagraphMark);
+    ParaFormatPatch& pf = tree.find(mark)->para;
+    pf.font_index = 2;
+    pf.size = Length::abs(ptToEmu(13.0));
+    pf.wm = WritingMode::VerticalRL();
+    pf.line_factor = 1.75f;
+    pf.space_after = Length::abs(ptToEmu(6.0));
+    pf.page_break_before = true;
+    pf.language = internLanguage("zh");
+    pf.color = Color::rgb(1, 2, 3);
+    pf.fallback_font_indices = std::vector<int>{7, 8};
+    tree.find(mark)->styleRef = "para_style";
+
+    // 原子们。
+    tree.appendChild(s1, NodeKind::Image);
+    tree.appendChild(s1, NodeKind::Formula);
+    tree.appendChild(s1, NodeKind::Break);
+    tree.appendChild(s1, NodeKind::PageBreak);
+    tree.appendChild(s1, NodeKind::Tab);
+    const NodeId field = tree.appendChild(s1, NodeKind::Field);
+    tree.find(field)->field.kind = FieldKind::DocProperty;
+    tree.find(field)->field.name = "hospital";
+    tree.find(field)->field.cache = "某医院";
+
+    // 容器们：引用 / 代码块 / 列表项 / 链接 / 隐藏控件。
+    const NodeId quote = tree.appendChild(s1, NodeKind::Quote);
+    tree.setText(tree.appendChild(quote, NodeKind::TextRun), cps({0x51}));
+    const NodeId code = tree.appendChild(s1, NodeKind::CodeBlock);
+    tree.setText(tree.appendChild(code, NodeKind::TextRun), cps({0x43}));
+    const NodeId item = tree.appendChild(s1, NodeKind::ListItem);
+    tree.setText(tree.appendChild(item, NodeKind::TextRun), cps({0x4C}));
+    const NodeId link = tree.appendChild(s1, NodeKind::Link);
+    tree.setText(tree.appendChild(link, NodeKind::TextRun), cps({0x4B}));
+    const NodeId hidden = tree.appendChild(s1, NodeKind::ContentControl);
+    tree.find(hidden)->hidden = true;
+    tree.setText(tree.appendChild(hidden, NodeKind::TextRun), cps({0x48}));
+
+    // 控件：共同层每个字段都设成非默认值，外观每个字段也一样。
+    const NodeId cc = tree.appendChild(s1, NodeKind::ContentControl);
+    ControlSpec& cs = tree.find(cc)->control;
+    cs.key = "patient_name";
+    cs.controlType = "dropdownList";
+    cs.valueShape = ValueShape::Enum;
+    cs.value.flag = true;
+    cs.value.text = "选项一";
+    cs.value.items = std::vector<std::string>{"选项一", "选项二"};
+    cs.readonly = true;
+    cs.required = true;
+    cs.structureLock = false;
+    cs.validateRef = "required_rule";
+    cs.appearance.width = Length::percent(1, 2);
+    cs.appearance.overflow = Overflow::Clip;
+    cs.appearance.underline = Underline::BlankOnly;
+    cs.appearance.border.left.on = true;
+    cs.appearance.border.left.style = BorderStyle::Dashed;
+    cs.appearance.border.left.width = Length::abs(ptToEmu(1.25));
+    cs.appearance.border.left.color = Color::rgb(9, 8, 7);
+    cs.appearance.border.bottom.on = true;
+    cs.appearance.glyph.kind = "checkbox_tick";
+    cs.appearance.glyph.width = Length::abs(ptToEmu(0.9));
+    cs.appearance.glyph.size = Length::abs(cmToEmu(0.4));
+    cs.appearance.glyph.color = Color::rgb(4, 5, 6);
+    cs.appearance.glyph.fill = Color::rgb(200, 201, 202);
+    cs.appearance.align = Align::Center;
+    cs.appearance.placeholder = "请填写住院号";
+    cs.appearance.styleRef = "app_style";
+    cs.appearance.invalidStyleRef = "app_invalid";
+    tree.setText(tree.appendChild(cc, NodeKind::TextRun), cps({0x4E}));
+    tree.appendChild(cc, NodeKind::ParagraphMark);
+
+    // 表格：两行两列，左上角纵向合并两行 —— 跨度非默认值，网格仍然成立。
+    const NodeId table = tree.appendChild(s1, NodeKind::Table);
+    TableSpec& ts = tree.find(table)->table;
+    ts.header_rows = 1;
+    ts.columns.resize(2);
+    ts.columns[0].field_ref = "col_a";
+    ts.columns[0].title = "甲";
+    ts.columns[0].data_type = "text";
+    ts.columns[0].editor_style = "line";
+    ts.columns[0].width = Length::abs(cmToEmu(3.0));
+    ts.columns[0].align = Align::End;
+    ts.grid_cols = std::vector<Length>{Length::abs(cmToEmu(3.0)), Length::chars(6.0)};
+    const NodeId row0 = tree.appendChild(table, NodeKind::TableRow);
+    const NodeId a0 = tree.appendChild(row0, NodeKind::TableCell);
+    tree.find(a0)->cell.row_span = 2;
+    tree.setText(tree.appendChild(a0, NodeKind::TextRun), cps({0x31}));
+    const NodeId a1 = tree.appendChild(row0, NodeKind::TableCell);
+    tree.setText(tree.appendChild(a1, NodeKind::TextRun), cps({0x32}));
+    const NodeId row1 = tree.appendChild(table, NodeKind::TableRow);
+    const NodeId b0 = tree.appendChild(row1, NodeKind::TableCell);
+    tree.setText(tree.appendChild(b0, NodeKind::TextRun), cps({0x33}));
+    tree.appendChild(s1, NodeKind::ParagraphMark);
+
+    // 第二节：节的每个字段都设成非默认值，外加一个页眉片段与一个页脚片段。
+    const NodeId s2 = tree.insertChild(tree.rootId(), 1, NodeKind::Section);
+    SectionSpec& ss = tree.find(s2)->section;
+    ss.paper.name = PaperName::A5;
+    ss.paper.orient = Orientation::Landscape;
+    ss.paper.width = Length::abs(mmToEmu(200.0));
+    ss.paper.height = Length::abs(mmToEmu(300.0));
+    ss.margins.top = Length::abs(cmToEmu(1.5));
+    ss.margins.bottom = Length::abs(cmToEmu(3.5));
+    ss.margins.left = Length::abs(cmToEmu(2.5));
+    ss.margins.right = Length::abs(cmToEmu(2.6));
+    ss.gutter.size = Length::abs(cmToEmu(0.5));
+    ss.gutter.side = Gutter::Side::Top;
+    ss.mirror_margins = true;
+    ss.break_kind = SectionBreak::NextPage;
+    ss.valign = VerticalAlign::Both;
+    ss.writing_mode = WritingMode::VerticalLR();
+    ss.numbering.format = PageNumberFormat::RomanUpper;
+    ss.numbering.start = 5;
+    ss.numbering.restart = true;
+    ss.extra["w:printerSettings"] = "RQA=";
+    ss.extra["compat:hideMark"] = "true";
+
+    const NodeId head = tree.createDetached(NodeKind::HeaderFooter);
+    tree.setText(tree.appendChild(head, NodeKind::TextRun), cps({0x68, 0x64}));
+    tree.appendChild(head, NodeKind::ParagraphMark);
+    ss.header(HfVariant::Odd).root = head;
+    ss.header(HfVariant::Odd).distance = Length::abs(cmToEmu(1.1));
+    ss.header(HfVariant::Odd).linked_to_previous = false;
+    const NodeId foot = tree.createDetached(NodeKind::HeaderFooter);
+    const NodeId foot_field = tree.appendChild(foot, NodeKind::Field);
+    tree.find(foot_field)->field.kind = FieldKind::PageCount;
+    tree.find(foot_field)->field.cache = "9";
+    tree.appendChild(foot, NodeKind::ParagraphMark);
+    ss.footer(HfVariant::Even).root = foot;
+    ss.footer(HfVariant::Even).distance = Length::abs(cmToEmu(1.3));
+
+    tree.setText(tree.appendChild(s2, NodeKind::TextRun), cps({0x62, 0x32}));
+    tree.appendChild(s2, NodeKind::ParagraphMark);
+    return tree;
+}
+
+/**
+ * 1.10：往返。判据三支 —— 逐字段快照相同、二次写出的文本逐字节相同、不变量仍然成立。
+ */
+void checkSerializeRoundTrip() {
+    NodeTree doc = makeRichDocument();
+    normalizeDocument(doc);
+    expectClean(doc, "1.10 / 富文档本身合法");
+
+    const SerializeResult first = serializeDocument(doc);
+    expectTrue(first.ok, "1.10 / 往返：写出成功（" + first.error + "）");
+    expectTrue(
+        first.text.find('\n') == std::string::npos && first.text.find(' ') == std::string::npos,
+        "1.10 / 往返：落盘无空白（缩进只用于人工调试）");
+
+    NodeTree back;
+    const DeserializeResult rd = deserializeDocument(first.text, &back);
+    expectTrue(rd.ok, "1.10 / 往返：读回成功（" + rd.error + "）");
+    expectTrue(firstSnapshotDiff(fullSnapshot(doc), fullSnapshot(back)) < 0,
+               "1.10 / 往返：逐字段快照相同（" +
+                   snapshotDiffText(fullSnapshot(doc), fullSnapshot(back)) + "）");
+    expectClean(back, "1.10 / 往返：读回来的文档满足全部不变量");
+
+    const SerializeResult second = serializeDocument(back);
+    expectTrue(second.ok && second.text == first.text,
+               "1.10 / 往返：二次写出的文本逐字节相同（顺序稳定、无抖动）");
+}
+
+/**
+ * 1.10：默认值不写。一份只有文本与段落的文档，节点条目里不该出现任何可省字段。
+ */
+void checkSerializeNoDefaults() {
+    NodeTree doc = makeTextTree(cps({0x41}));
+    const SerializeResult out = serializeDocument(doc);
+    expectTrue(out.ok, "1.10 / 默认值：写出成功");
+
+    const char* kAbsent[] = {
+        "\"p\":", "\"m\":", "\"c\":", "\"cs\":", "\"tb\":", "\"f\":", "\"sec\":", "\"h\":"};
+    int present = 0;
+    for (const char* key : kAbsent) {
+        if (out.text.find(key) != std::string::npos) ++present;
+    }
+    expectTrue(present == 0, "1.10 / 默认值：全默认的节点不写可省字段（命中 " +
+                                 std::to_string(present) + " 个）");
+    expectTrue(out.text.find("\"sym\":{\"k\":[\"Document\",\"Section\",\"TextRun\","
+                             "\"ParagraphMark\"],\"s\":[]}") != std::string::npos,
+               "1.10 / 符号表：种类名进符号表、没有名字字符串时表是空的");
+
+    // 控件默认值的反面：structureLock 默认是 true，只在放开时写；改了它必须写出来。
+    NodeTree with_lock = makeTextTree(cps({0x41}));
+    const NodeId cc = with_lock.appendChild(with_lock.firstSectionId(), NodeKind::ContentControl);
+    with_lock.find(cc)->control.structureLock = false;
+    const SerializeResult locked = serializeDocument(with_lock);
+    expectTrue(locked.ok && locked.text.find("\"lk\":false") != std::string::npos,
+               "1.10 / 默认值：与默认不同的字段一定写出来（structureLock 放开时写 false）");
+}
+
+/**
+ * 1.10 的辅助：文档"内容"的节点 id 集合 —— 正文根，加上逐节页眉页脚片段的整棵子树。
+ * 摘下的子树不在其中（它们不是文档内容）。
+ */
+void contentIdsInto(const NodeTree& tree, NodeId id, std::vector<NodeId>* out) {
+    const Node* n = tree.find(id);
+    if (n == nullptr) return;
+    out->push_back(id);
+    for (const Node* c : n->children) contentIdsInto(tree, c->id, out);
+}
+
+std::vector<NodeId> contentIds(const NodeTree& tree) {
+    std::vector<NodeId> out;
+    contentIdsInto(tree, tree.rootId(), &out);
+    for (int i = 0; i < tree.sectionCount(); ++i) {
+        const Node* sec = tree.find(tree.sectionAt(i));
+        if (sec == nullptr) continue;
+        for (int v = 0; v < kHeaderFooterVariantCount; ++v) {
+            contentIdsInto(tree, sec->section.headers[v].root, &out);
+            contentIdsInto(tree, sec->section.footers[v].root, &out);
+        }
+    }
+    return out;
+}
+
+/**
+ * 1.10：id、key 与名字字符串往返不变，分配器水位也带过去。
+ */
+void checkSerializeIdsAndKeys() {
+    NodeTree doc = makeRichDocument();
+    const NodeId sec = doc.firstSectionId();
+    // 摘下一棵子树留在池里（撤销会这么做）：它不是文档内容，不该落盘，但水位要盖住它。
+    int quote_slot = -1;
+    for (size_t i = 0; i < doc.find(sec)->children.size(); ++i) {
+        if (doc.find(sec)->children[i]->kind == NodeKind::Quote) {
+            quote_slot = static_cast<int>(i);
+            break;
+        }
+    }
+    expectTrue(quote_slot >= 0, "1.10 / id：富文档里有那棵待摘的子树");
+    const NodeId pool_id = doc.eraseChild(sec, quote_slot);
+    expectTrue(pool_id != kInvalidNodeId && !isAttached(doc, pool_id),
+               "1.10 / id：子树已摘下（留池、不在文档里）");
+    const NodeId watermark_before = doc.maxAllocatedId();
+
+    const SerializeResult out = serializeDocument(doc);
+    NodeTree back;
+    const DeserializeResult rd = deserializeDocument(out.text, &back);
+    expectTrue(rd.ok, "1.10 / id：读回成功（" + rd.error + "）");
+
+    // 节点 id 集合：文档内容（正文加片段）一个不少，摘下的子树一个不多。
+    const std::vector<NodeId> want = contentIds(doc);
+    std::vector<NodeId> absent;
+    for (NodeId id : want) {
+        if (back.find(id) == nullptr) absent.push_back(id);
+    }
+    std::vector<NodeId> unexpected;
+    for (NodeId id = 1; id <= watermark_before; ++id) {
+        if (doc.find(id) == nullptr || back.find(id) == nullptr) continue;
+        if (std::find(want.begin(), want.end(), id) == want.end()) unexpected.push_back(id);
+    }
+    expectTrue(absent.empty(), "1.10 / id：文档内容（正文加片段）的 " +
+                                   std::to_string(want.size()) + " 个节点全部读回来了（缺 " +
+                                   std::to_string(absent.size()) + " 个）");
+    expectTrue(unexpected.empty() && back.find(pool_id) == nullptr,
+               "1.10 / id：摘下的子树不落盘（多出 " + std::to_string(unexpected.size()) + " 个）");
+    expectTrue(back.maxAllocatedId() >= watermark_before,
+               "1.10 / id：分配器水位带过去（读回后最大 id " +
+                   std::to_string(back.maxAllocatedId()) + " 不小于写之前的 " +
+                   std::to_string(watermark_before) + "）");
+
+    // 水位落盘的意义：读回之后新分配的 id 不与文件里的撞上。
+    const NodeId fresh = back.appendChild(back.firstSectionId(), NodeKind::TextRun);
+    expectTrue(fresh > watermark_before, "1.10 / id：读回后新分配的 id 大于文件里的全部 id");
+
+    // key 与名字字符串往返不变。
+    const Node* cc_in = nullptr;
+    const Node* cc_back = nullptr;
+    for (NodeId id = 1; id <= watermark_before; ++id) {
+        const Node* n = doc.find(id);
+        if (n != nullptr && n->kind == NodeKind::ContentControl && !n->control.key.empty()) {
+            cc_in = n;
+            cc_back = back.find(id);
+            break;
+        }
+    }
+    expectTrue(cc_in != nullptr && cc_back != nullptr &&
+                   cc_back->control.key == cc_in->control.key &&
+                   cc_back->control.controlType == cc_in->control.controlType &&
+                   cc_back->control.validateRef == cc_in->control.validateRef,
+               "1.10 / key：控件 key、业务类型与校验规则名往返不变");
+    expectTrue(cc_back != nullptr &&
+                   cc_back->control.appearance.styleRef == cc_in->control.appearance.styleRef &&
+                   cc_back->control.appearance.invalidStyleRef ==
+                       cc_in->control.appearance.invalidStyleRef &&
+                   cc_back->control.appearance.placeholder == cc_in->control.appearance.placeholder,
+               "1.10 / 名字：外观里的两条样式引用与提示文字往返不变");
+    expectTrue(cc_back != nullptr && cc_back->section.sameAs(cc_in->section),
+               "1.10 / 节：节记录逐字段往返不变");
+}
+
+/**
+ * 1.10：读坏了要拒绝，并且目标树一个字节都不改。
+ */
+void checkSerializeRejects() {
+    NodeTree doc = makeRichDocument();
+    const SerializeResult good = serializeDocument(doc);
+    expectTrue(good.ok, "1.10 / 拒绝：先写出一份好文件");
+
+    NodeTree target = makeTextTree(cps({0x5A}));
+    const std::vector<std::string> before = fullSnapshot(target);
+
+    struct Case {
+        const char* what;
+        std::string text;
+    };
+    const std::vector<Case> cases = {
+        {"不是 JSON", "not json at all"},
+        {"版本号不对",
+         "{\"v\":99,\"sym\":{\"k\":[],\"s\":[]},\"roots\":[],\"nodes\":[],\"next\":1}"},
+        {"缺少符号表", "{\"v\":1,\"roots\":[],\"nodes\":[],\"next\":1}"},
+        {"缺少节点表", "{\"v\":1,\"sym\":{\"k\":[],\"s\":[]},\"roots\":[],\"next\":1}"},
+        {"种类名不认识",
+         "{\"v\":1,\"sym\":{\"k\":[\"NoSuchKind\"],\"s\":[]},\"roots\":[1],"
+         "\"nodes\":[{\"id\":1,\"k\":0,\"n\":0}],\"next\":2}"},
+        {"节点表比根列表短",
+         "{\"v\":1,\"sym\":{\"k\":[\"Document\"],\"s\":[]},\"roots\":[1,2],"
+         "\"nodes\":[{\"id\":1,\"k\":0,\"n\":0}],\"next\":2}"},
+        {"孩子个数超出节点表",
+         "{\"v\":1,\"sym\":{\"k\":[\"Document\"],\"s\":[]},\"roots\":[1],"
+         "\"nodes\":[{\"id\":1,\"k\":0,\"n\":3}],\"next\":2}"},
+        {"节点表有多余条目",
+         "{\"v\":1,\"sym\":{\"k\":[\"Document\"],\"s\":[]},\"roots\":[1],"
+         "\"nodes\":[{\"id\":1,\"k\":0,\"n\":0},{\"id\":2,\"k\":0,\"n\":0}],\"next\":3}"},
+        {"根 id 与新建文档不符",
+         "{\"v\":1,\"sym\":{\"k\":[\"Document\"],\"s\":[]},\"roots\":[7],"
+         "\"nodes\":[{\"id\":7,\"k\":0,\"n\":0}],\"next\":8}"},
+        {"枚举名不认识",
+         "{\"v\":1,\"sym\":{\"k\":[\"Document\",\"Section\"],\"s\":[]},\"roots\":[1],"
+         "\"nodes\":[{\"id\":1,\"k\":0,\"n\":1},{\"id\":2,\"k\":1,\"n\":0,"
+         "\"sec\":{\"brk\":\"NoSuchBreak\"}}],\"next\":3}"},
+        {"类型不符（文本不是数组）",
+         "{\"v\":1,\"sym\":{\"k\":[\"Document\",\"Section\",\"TextRun\"],\"s\":[]},"
+         "\"roots\":[1],\"nodes\":[{\"id\":1,\"k\":0,\"n\":1},{\"id\":2,\"k\":1,\"n\":1},"
+         "{\"id\":3,\"k\":2,\"n\":0,\"t\":\"abc\"}],\"next\":4}"},
+        {"下标越界",
+         "{\"v\":1,\"sym\":{\"k\":[\"Document\",\"Section\"],\"s\":[]},\"roots\":[1],"
+         "\"nodes\":[{\"id\":1,\"k\":0,\"n\":1},{\"id\":2,\"k\":1,\"n\":0,\"s\":9}],"
+         "\"next\":3}"},
+    };
+
+    int rejected = 0;
+    int silent = 0;
+    int mutated = 0;
+    for (const Case& c : cases) {
+        NodeTree victim = target.clone();
+        const DeserializeResult r = deserializeDocument(c.text, &victim);
+        if (!r.ok && !r.error.empty()) ++rejected;
+        if (r.ok) ++silent;
+        if (firstSnapshotDiff(before, fullSnapshot(victim)) >= 0) ++mutated;
+    }
+    expectTrue(rejected == static_cast<int>(cases.size()) && silent == 0,
+               "1.10 / 拒绝：" + std::to_string(cases.size()) +
+                   " 种坏文件全部被拒并给原因（静默通过 " + std::to_string(silent) + " 个）");
+    expectTrue(mutated == 0, "1.10 / 拒绝：失败时目标树一个字段都没改（被改 " +
+                                 std::to_string(mutated) + " 次）");
+}
+
+/**
+ * 1.10：写不出去的输入给失败回执，不静默替换字符，也不崩。
+ */
+void checkSerializeBadUtf8() {
+    NodeTree doc = makeTextTree(cps({0x41}));
+    const NodeId cc = doc.appendChild(doc.firstSectionId(), NodeKind::ContentControl);
+    // 一个落单的续字节：不是合法 UTF-8，也不该被替换成问号写出去。
+    doc.find(cc)->control.key = std::string("\xE4\xB8", 2);
+    const SerializeResult bad = serializeDocument(doc);
+    expectTrue(!bad.ok && !bad.error.empty() && bad.text.empty(),
+               "1.10 / 非法 UTF-8：写出失败并给原因，不产出半份文本（" + bad.error + "）");
+
+    // 合法 UTF-8 的中文照样能写、能读回来。
+    NodeTree ok_doc = makeTextTree(cps({0x41}));
+    const NodeId cc2 = ok_doc.appendChild(ok_doc.firstSectionId(), NodeKind::ContentControl);
+    ok_doc.find(cc2)->control.key = "患者姓名";
+    const SerializeResult good = serializeDocument(ok_doc);
+    NodeTree back;
+    const DeserializeResult rd = deserializeDocument(good.text, &back);
+    expectTrue(
+        good.ok && rd.ok && back.find(cc2) != nullptr && back.find(cc2)->control.key == "患者姓名",
+        "1.10 / 非法 UTF-8：合法中文照常往返");
+}
+
+/**
+ * 1.10：页眉页脚片段与正文一起往返；域也在片段里。
+ */
+void checkSerializeFragments() {
+    NodeTree doc = makeRichDocument();
+    const SerializeResult out = serializeDocument(doc);
+    NodeTree back;
+    const DeserializeResult rd = deserializeDocument(out.text, &back);
+    expectTrue(rd.ok, "1.10 / 片段：读回成功（" + rd.error + "）");
+
+    const NodeId s2 = back.sectionAt(1);
+    expectTrue(s2 != kInvalidNodeId, "1.10 / 片段：第二节读回来了");
+    const Node* sec = back.find(s2);
+    const NodeId head = sec->section.header(HfVariant::Odd).root;
+    const NodeId foot = sec->section.footer(HfVariant::Even).root;
+    expectTrue(head != kInvalidNodeId && foot != kInvalidNodeId,
+               "1.10 / 片段：两条片段的根引用都读回来了");
+
+    // 片段的根不在正文流里，读回来之后仍然如此；正文编译不因片段而变样。
+    const FlowIndex idx(back, FlowVisibility::Design);
+    expectTrue(!idx.inFlow(head) && !idx.inFlow(foot), "1.10 / 片段：读回来之后片段仍不在正文流里");
+    expectTrue(compiledText(back) == compiledText(doc),
+               "1.10 / 片段：正文编译结果与写出前一致（实际 " + compiledText(back) + "）");
+    expectTrue(compiledText(back).find("hd") == std::string::npos,
+               "1.10 / 片段：页眉内容没有被并进正文");
+
+    // 片段里的域：种类与缓存值都要在。
+    bool found_page_count = false;
+    for (NodeId id = 1; id <= back.maxAllocatedId(); ++id) {
+        const Node* n = back.find(id);
+        if (n == nullptr || n->kind != NodeKind::Field) continue;
+        if (n->field.kind == FieldKind::PageCount && n->field.cache == "9") found_page_count = true;
+    }
+    expectTrue(found_page_count, "1.10 / 片段：页脚片段里的域（种类与缓存值）一起往返");
+}
+
 }  // namespace
 
 int main() {
@@ -4791,6 +5361,14 @@ int main() {
     checkRevisionExpand();
     checkRevisionReject();
     checkRevisionExpandFails();
+
+    std::printf("  --- 1.10：序列化与往返 ---\n");
+    checkSerializeRoundTrip();
+    checkSerializeNoDefaults();
+    checkSerializeIdsAndKeys();
+    checkSerializeFragments();
+    checkSerializeBadUtf8();
+    checkSerializeRejects();
 
     std::printf("  --- 1.3：事务与撤销分组 ---\n");
     checkUndoRedo();

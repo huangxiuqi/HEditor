@@ -44,6 +44,11 @@ enum class ValueShape : uint8_t {
 const char* valueShapeName(ValueShape shape);
 
 /**
+ * 值形态名 → 值形态。不认识的名字返回 false。序列化按名字落盘（理由见 nodeKindFromName）。
+ */
+bool valueShapeFromName(const std::string& name, ValueShape* out);
+
+/**
  * 可以走属性入口的四个属性（第七节"属性入口只收运行时状态与策略这四个"）。
  *
  * 设计期属性（controlType / format / options / appearance）不在其中 —— 改它们等于重新定义控件，
@@ -75,6 +80,8 @@ enum class Overflow : uint8_t {
 
 const char* overflowName(Overflow o);
 
+bool overflowFromName(const std::string& name, Overflow* out);
+
 /**
  * 控件下划线的三档。与字符的 underline 标记不是一回事：它是挂在边界盒子上的装饰，
  * 不进 marks、不进内容，所以删掉里面的文字线还在（内容标记会跟着文字消失）。
@@ -87,6 +94,8 @@ enum class Underline : uint8_t {
 
 const char* underlineName(Underline u);
 
+bool underlineFromName(const std::string& name, Underline* out);
+
 /**
  * 内容在控件里的对齐。
  */
@@ -94,12 +103,16 @@ enum class Align : uint8_t { Start = 0, Center = 1, End = 2 };
 
 const char* alignName(Align a);
 
+bool alignFromName(const std::string& name, Align* out);
+
 /**
  * 边框线型。没有"关闭"档：这一边画不画由 BorderSide::on 表态，两者不重复表达同一件事。
  */
 enum class BorderStyle : uint8_t { Solid = 0, Dashed = 1, Dotted = 2 };
 
 const char* borderStyleName(BorderStyle s);
+
+bool borderStyleFromName(const std::string& name, BorderStyle* out);
 
 /**
  * 一条边。四边各自独立而不是"边框开关加统一宽度"：病历表单常见只画下边（填空线）
@@ -237,6 +250,12 @@ struct ControlSpec {
      * 凡"换一个宿主仍要生效"的只能是数据。宿主把名字映射到自己的校验钩子；名字为空表示不校验。
      */
     std::string validateRef;
+
+    /**
+     * 逐字段相等。序列化要拿它判断"这个控件是不是全默认"，从而决定写不写这个条目；
+     * 少比一个字段的表现是"改了它却没落盘"。
+     */
+    bool operator==(const ControlSpec& o) const = default;
 };
 
 }  // namespace heditor
