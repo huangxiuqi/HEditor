@@ -124,9 +124,18 @@ std::vector<BlockSpec> longDocument(int paragraphs, int font_index) {
 }
 
 /**
- * 文书：按场景号装配 BlockSpec，供前端切换演示。
+ * 当前文档的两份输入：块流（内容与块级格式）与表单字段。
+ *
+ * 它们是"重新建树"的全部材料 —— 换场景、换字段、增删控件都只是改这两份再重编一次，
+ * 于是控件永远长在树上，不再有"区间是相对旧文本算的"那类错配。
  */
-void setScenario(int scenario) {
+std::vector<BlockSpec> g_blocks;
+std::vector<DemoFieldSpec> g_fields;
+
+/**
+ * 按场景号装配块流。只造数据、不动引擎 —— 装载统一走 rebuildDocument。
+ */
+std::vector<BlockSpec> buildScenarioBlocks(int scenario) {
     std::vector<BlockSpec> blocks;
     switch (scenario) {
         case 1: {  // 蒙文竖排 · 列序从左往右（侧倒，正确形态）
@@ -202,12 +211,54 @@ void setScenario(int scenario) {
             break;
     }
 
-    g_engine.setBlocks(std::move(blocks));
-    // 换文档必须清控件：旧控件的码点区间是相对旧文本的。
-    //   留着就是一堆指向错误位置的区间 —— 它会一边拒绝本该允许的输入、
-    //   一边允许本该拒绝的，而且区间看着还有效（不报任何错）。比没有控件更糟。
-    g_engine.clearControls();
+    return blocks;
 }
+
+/**
+ * 按当前的块流与字段重建文档树，一次性交给引擎。
+ *
+ * 演示页从这里起走"建树"那条路（setDocument）：控件长在树上、编辑落在树上，与单测里
+ *   那条路是同一份代码。换文档不再需要"清控件"那一步 —— 控件是树的产物，树换了它自然
+ *   跟着换，不存在"区间指向旧文本"的错配。
+ *
+ * keep_caret 为真时把光标原样搬回去（文本没变才搬）：换控件、改只读标记、增删字段都不该
+ *   动光标，而 setDocument 会把光标归零。旧路径的 setControls 本来就不动光标，所以"改控件"
+ *   这条路上必须补这一步，否则光标会自己在原地跳回段首。
+ */
+void rebuildDocument(bool keep_caret) {
+    const TextPos before = g_engine.caret();
+    // 侧别也要一起搬回来：同一个偏移上有好几个位置（括号之间、控件内外），
+    //   只搬偏移等于把光标挪到那一处的"默认"位置上 —— 用户会看到它自己跳了一格。
+    const int side = keep_caret ? g_engine.caretSide() : -1;
+    std::string text_before;
+    if (keep_caret) {
+        for (const BlockSpec& b : g_engine.blocks()) text_before += b.textUtf8();
+    }
+    g_engine.setDocument(demoTree(g_blocks, g_fields), StyleSheet{});
+    if (!keep_caret) return;
+    std::string text_after;
+    for (const BlockSpec& b : g_engine.blocks()) text_after += b.textUtf8();
+    if (text_before != text_after) return;  // 换了文档：光标归零才是对的
+    if (before.para < 0 || before.para >= static_cast<int>(g_engine.blocks().size())) return;
+    if (before.offset > g_engine.blocks()[static_cast<size_t>(before.para)].cp_text.size()) return;
+    g_engine.setCaretAtSide(before.para, before.offset, side);
+}
+
+void setScenario(int scenario) {
+    g_blocks = buildScenarioBlocks(scenario);
+    g_fields.clear();
+    rebuildDocument(false);
+}
+
+/**
+ * 把当前文档从引擎取回来，作为下一次重建的底稿。
+ *
+ * 树上编辑之后引擎里的文本已经变了，而 g_blocks 还是装载时那一份 —— 不刷新的话，
+ *   紧接着"改控件再重建"（clearControls / addControl）会把用户改过的内容整个倒回装载时的
+ *   样子：光标跟着归零，字也打不进任何字段（区间还在原处，文本却已经对不上了）。
+ * 只取文本与块级字段：demoTree 不读 runs / objects，重新编译会自己再产一份。
+ */
+void syncBlocksFromEngine() { g_blocks = g_engine.blocks(); }
 
 void setZoom(float z) {
     g_cfg.zoom = z;
@@ -358,24 +409,37 @@ int caretOffsetLive() { return static_cast<int>(g_engine.caret().offset); }
  * 命中测试：帧坐标（磅）→ 位置。返回 "null" 或 {"para":n,"offset":n,"field":n}。
  * 反查与正查共用同一份行盒几何，所以点选落点和画出来的光标必然一致。
  *
- * field = "该次点击属于哪个控件"（-1 = 判不出）。它与 offset 分开返回是必须的：
- * 相邻两个字段共享边界时，前一个字段的末尾与后一个字段的开头是同一个偏移，
- * 只给偏移，宿主就没法把归属告诉引擎，于是"点后一个字段的开头"只能按最内层规则
- * 归给前一个字段（前一个字段只读时那次点击直接失效）。判据全部在引擎侧
- * （占位簇记着 owner_control），宿主只负责原样回传。
+ * side = 落点的侧别（见引擎的 caretSide）。它是落点的完整身份：相邻两个字段共享边界时，
+ * 前一个字段的末尾与后一个字段的开头是同一个偏移，同一个偏移上还可能压着好几枚括号 ——
+ * 只给偏移，宿主就表达不了用户点的是哪一个位置，于是"点后一个字段的开头"只能按最内层
+ * 规则归给前一个字段（前一个字段只读时那次点击直接失效，相邻空字段更是整段点不进去）。
+ *
+ * field = "该次点击属于哪个控件"（-1 = 判不出）。它是 side 的投影，给人看与给判据断言用；
+ * 宿主搬运落点必须搬 side —— 投影会把"同处好几枚括号"的细节抹平。
  */
 std::string hitTest(float x_pt, float y_pt) {
     TextPos p{};
     int owner = -1;
-    if (!g_engine.hitTestPt(x_pt, y_pt, &p, &owner)) return "null";
+    int side = 0;
+    if (!g_engine.hitTestPt(x_pt, y_pt, &p, &owner, &side)) return "null";
     std::ostringstream o;
-    o << "{\"para\":" << p.para << ",\"offset\":" << p.offset << ",\"field\":" << owner << "}";
+    o << "{\"para\":" << p.para << ",\"offset\":" << p.offset << ",\"field\":" << owner
+      << ",\"side\":" << side << "}";
     return o.str();
 }
 
 /**
- * 带归属的定位（点画布的落点）。field 来自 hitTest 的同一个字段。
- * 宿主不要自己拼这个归属：它只该原样搬运引擎算出来的结论。
+ * 带侧别的定位（点画布的落点）。side 来自 hitTest 的同一个字段。
+ * 宿主不要自己拼这个侧别：它只该原样搬运引擎算出来的结论。
+ */
+void setCaretAtSide(int para, int offset, int side) {
+    g_engine.setCaretAtSide(para, static_cast<size_t>(offset < 0 ? 0 : offset), side);
+}
+
+/**
+ * 按控件归属定位（-1 = 最内层，LineBox::kInlineOffsetOuter = 贴外侧）。
+ * 给探针与诊断用：它们手上有的是控件下标，不知道侧别。点击路径请用 setCaretAtSide ——
+ * 归属会抹平"同一偏移上好几枚括号"的细节。
  */
 void setCaretAt(int para, int offset, int field) {
     g_engine.setCaretAt(para, static_cast<size_t>(offset < 0 ? 0 : offset), field);
@@ -405,7 +469,21 @@ std::string jsonEscape(const std::string& s) {
     return o;
 }
 
-void clearControls() { g_engine.clearControls(); }
+/**
+ * 清掉当前表单的全部字段并重建文档。
+ *
+ * 持树时"清控件"就是"树上没有内容控件" —— 改一份字段清单再重建一次树即可。不持树
+ *   （跨段控件那条退路留下的状态）才回到引擎的旧入口。
+ */
+void clearControls() {
+    if (!g_engine.hasDocumentTree()) {
+        g_engine.clearControls();
+        return;
+    }
+    syncBlocksFromEngine();  // 先取回引擎里那份（树上编辑可能已经改过文本）
+    g_fields.clear();
+    rebuildDocument(true);
+}
 void setEditMode(int mode) { g_engine.setEditMode(editModeFromCode(mode)); }
 int editMode() { return static_cast<int>(g_engine.editMode()); }
 
@@ -425,18 +503,32 @@ int bracketScope() { return static_cast<int>(g_cfg.form_brackets); }
 
 void addControl(int sp, int so, int ep, int eo, int kind, const std::string& id,
                 const std::string& label, bool read_only) {
-    std::vector<Control> list = g_engine.controls().all();
-    Control c;
-    c.range.start = TextPos{sp, static_cast<size_t>(so)};
-    c.range.end = TextPos{ep, static_cast<size_t>(eo)};
-    c.kind = controlKindFromCode(kind);
-    c.id = id;
-    c.label = label;
-    c.read_only = read_only;
-    list.push_back(std::move(c));
-    // 走 setControls 而不是逐个 append：区间树的父子关系是全局性质，
-    // 加一个新控件可能改变已有控件的 parent/depth，必须整棵重建。
-    g_engine.setControls(std::move(list));
+    // 字段在树里是"某一段内的一个区间"，不跨段；跨段控件只存在于旧路径上。
+    if (!g_engine.hasDocumentTree() || sp != ep) {
+        std::vector<Control> list = g_engine.controls().all();
+        Control c;
+        c.range.start = TextPos{sp, static_cast<size_t>(so)};
+        c.range.end = TextPos{ep, static_cast<size_t>(eo)};
+        c.kind = controlKindFromCode(kind);
+        c.id = id;
+        c.label = label;
+        c.read_only = read_only;
+        list.push_back(std::move(c));
+        // 走 setControls 而不是逐个 append：区间树的父子关系是全局性质，
+        // 加一个新控件可能改变已有控件的 parent/depth，必须整棵重建。
+        g_engine.setControls(std::move(list));
+        return;
+    }
+    DemoFieldSpec f;
+    f.para = sp;
+    f.so = so;
+    f.eo = eo;
+    f.kind = controlKindFromCode(kind);
+    f.key = id;
+    f.readonly = read_only;
+    syncBlocksFromEngine();  // 同 clearControls：底稿要是引擎里当前那一份
+    g_fields.push_back(std::move(f));
+    rebuildDocument(true);
 }
 
 /**
@@ -444,6 +536,17 @@ void addControl(int sp, int so, int ep, int eo, int kind, const std::string& id,
  * 不重绘的话宿主会拿上一次的脏矩形上屏（见 engine.cpp 里那段说明）。
  */
 bool focusControl(bool forward) { return g_engine.focusControlAndRender(forward); }
+
+/**
+ * Tab / Shift+Tab 的策略版：表单模式在可编辑控件之间前进 / 后退，到最后一个可编辑控件
+ * 就返回 false（不消费该 Tab，让宿主把焦点移出编辑器）；文档与只读模式一律返回 false。
+ *
+ * 与 focusControl 的差别不只是"到末尾绕不绕回"：focusControl 认控件区间的起点，
+ * 这里认"内容起点落在可编辑集合内"这个谓词 —— 于是只读控件里嵌的可编辑控件不会成为
+ * 落点，反之亦然，与编辑判定共用同一套口径（见 engine.h）。
+ * 默认键位不绑它：web 演示页把裸 Tab 留给了缩进，绑什么由宿主决定（模型文档第七节）。
+ */
+bool tabCaret(bool backward) { return g_engine.tabCaretAndRender(backward); }
 
 /**
  * Tab / Shift+Tab = 缩进 / 反缩进（不是跳字段）。
@@ -542,9 +645,11 @@ std::string bracketSlotsJson() {
             if (!first) o << ",";
             first = false;
             o << "{\"para\":" << lb.paragraph << ",\"line\":" << lb.line << ",\"cp\":" << c.cp
-              << ",\"side\":" << static_cast<int>(c.bracket_side)
-              << ",\"ro\":" << (c.read_only ? "true" : "false")
-              << ",\"owner\":" << c.owner_control
+              << ",\"side\":" << static_cast<int>(c.bracket_side) << ",\"ro\":"
+              << (c.read_only ? "true" : "false")
+              // 占位簇上记的是产生端的句柄（持树时是控件节点 id），宿主要的是控件下标 ——
+              //   差这一道翻译，报出来的归属就与 controls.items 的下标对不上。
+              << ",\"owner\":" << g_engine.controlIndexOfOwner(c.owner_control)
               << ",\"x\":" << (lb.inline_origin_pt + c.inline_pt) << "}";
         }
     }
@@ -565,43 +670,42 @@ std::string bracketSlotsJson() {
  *   括号读作 [[[心悸]悸三]，三个开括号在左、闭括号由内到外依次收。
  */
 void loadFormSample(int variant) {
-    setScenario(variant == 1 ? 3 : 6);
-    std::vector<Control> list;
-    auto push = [&](int so, int eo, ControlKind k, const char* id, const char* label, bool ro) {
-        Control c;
-        c.range.start = TextPos{0, static_cast<size_t>(so)};
-        c.range.end = TextPos{0, static_cast<size_t>(eo)};
-        c.kind = k;
-        c.id = id;
-        c.label = label;
-        c.read_only = ro;
-        list.push_back(std::move(c));
+    g_blocks = buildScenarioBlocks(variant == 1 ? 3 : 6);
+    g_fields.clear();
+    auto push = [&](int so, int eo, ControlKind k, const char* id, bool ro) {
+        DemoFieldSpec f;
+        f.para = 0;
+        f.so = so;
+        f.eo = eo;
+        f.kind = k;
+        f.key = id;
+        f.readonly = ro;
+        g_fields.push_back(std::move(f));
     };
     if (variant == 1) {
-        push(5, 60, ControlKind::TextField, "history", "现病史", false);
-        push(20, 26, ControlKind::TextField, "onset", "发病时间（只读）", true);
+        push(5, 60, ControlKind::TextField, "history", false);
+        push(20, 26, ControlKind::TextField, "onset", true);
     } else if (variant == 2) {
-        push(5, 7, ControlKind::TextField, "part1", "症状一", false);
-        push(7, 9, ControlKind::TextField, "part2", "症状二", false);
-        push(9, 11, ControlKind::TextField, "part3", "病程", false);
+        push(5, 7, ControlKind::TextField, "part1", false);
+        push(7, 9, ControlKind::TextField, "part2", false);
+        push(9, 11, ControlKind::TextField, "part3", false);
     } else if (variant == 3) {
         // 三层嵌套：外层盖住整串「反复心悸三天」，中层剥掉两端的字，
         //   内层只留中间两个字「心悸」。三层都可编辑 —— 这是"嵌套"最需要覆盖的一格：
         //   归属必须取最内层（否则改内层会改成外层），而内层一动，中/外层都要跟着长。
-        push(5, 11, ControlKind::TextField, "outer", "主诉（外层）", false);
-        push(6, 10, ControlKind::TextField, "middle", "明细（中层）", false);
-        push(7, 9, ControlKind::TextField, "inner", "要点（内层）", false);
+        push(5, 11, ControlKind::TextField, "outer", false);
+        push(6, 10, ControlKind::TextField, "middle", false);
+        push(7, 9, ControlKind::TextField, "inner", false);
     } else {
-        push(5, 9, ControlKind::TextField, "complaint", "主诉", false);
-        push(9, 11, ControlKind::NumberField, "duration", "病程（只读）", true);
-        push(12, 16, ControlKind::TextField, "aggravate", "加重情况", false);
+        push(5, 9, ControlKind::TextField, "complaint", false);
+        push(9, 11, ControlKind::NumberField, "duration", true);
+        push(12, 16, ControlKind::TextField, "aggravate", false);
     }
-    g_engine.setControls(std::move(list));
+    rebuildDocument(false);
     g_engine.setEditMode(EditMode::Form);
-    // 必须重排：上面 setScenario() 换了文档，而 layout_ 还停在上一次的行盒上。
-    //   不重排的话控件区间会投影到旧几何上 —— 症状是"字段框比文本偏了一截、
+    // 必须重排：上面换过文档，而 layout_ 还停在上一次的行盒上。
+    //   不重排的话控件会投影到旧几何上 —— 症状是"字段框比文本偏了一截、
     //   或者在错误的行上被切成两块"，而控件数据本身看着完全正常。
-    //   （setControls / setEditMode 单独用是不需要重排的：它们不改文档内容。）
     g_engine.relayout();
 }
 
@@ -642,6 +746,7 @@ std::string editStatsJson() {
     o << "\"caretOffset\":" << e.caret_offset << ",";
     o << "\"caretIndex\":" << e.caret_index << ",";
     o << "\"docCodepoints\":" << e.doc_codepoints << ",";
+    o << "\"caretSide\":" << e.caret_side << ",";
     o << "\"caretVisible\":" << (e.caret_visible ? "true" : "false") << ",";
     o << "\"caretX\":" << e.caret_x_px << ",";
     o << "\"caretY\":" << e.caret_y_px << ",";
@@ -718,6 +823,7 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("caretToLineEnd", &caretToLineEnd);
     emscripten::function("setCaret", &setCaret);
     emscripten::function("setCaretAt", &setCaretAt);
+    emscripten::function("setCaretAtSide", &setCaretAtSide);
     emscripten::function("showCaret", &showCaret);
     emscripten::function("present", &present);
     emscripten::function("caretOffsetLive", &caretOffsetLive);
@@ -734,6 +840,7 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("bracketScope", &bracketScope);
     emscripten::function("addControl", &addControl);
     emscripten::function("focusControl", &focusControl);
+    emscripten::function("tabCaret", &tabCaret);
     emscripten::function("auditFrame", &auditFrame);
     emscripten::function("auditLayout", &auditLayout);
     emscripten::function("takeBlitBox", &takeBlitBoxJson);

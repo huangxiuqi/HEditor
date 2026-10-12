@@ -93,6 +93,25 @@ struct RemoveParaMark {
 };
 
 /**
+ * 改一个段落标记的格式与样式引用（段落级属性的内联覆盖，第六节）。
+ *
+ * 分段与合并需要它，理由不是"也想顺便改格式"：段落属性挂在结束标记上，而标记的归属与
+ * "用户心里那一段"在两种情况下正好错位。回车是在光标处插一枚新标记，于是新标记结束的是
+ * 前半段，"拆出来的后半段不该跟着强制分页"这条约定落不到它身上；合并是删掉前一段的
+ * 结束标记，于是留下来的标记是后一段的，合并之后那一段会顶着后一段的格式。两个偏差都
+ * 只改标记的数据、不改流结构，位置映射是恒等，所以它们该是独立的一步而不是挤进那两步里。
+ *
+ * before 与 beforeStyleRef 记下原值，逆操作因此自足；一次只改一枚标记，批量的形状由事务表达。
+ */
+struct SetParaMarkFormat {
+    NodeId id = kInvalidNodeId;
+    ParaFormatPatch para;
+    std::string styleRef;
+    ParaFormatPatch before;
+    std::string beforeStyleRef;
+};
+
+/**
  * 插入一棵子树（控件、图片、表格这类整块内容）。节点级坐标用 Pos（第四节：节点级 API 用 Pos），
  * 同时记下它对应的流位置供位置映射使用；两者对不上时 canApply 会拒掉，所以这份冗余不会被误信。
  *
@@ -165,7 +184,8 @@ struct SetTableCellSpan {
 
 using Step =
     std::variant<InsertText, InsertFragment, DeleteRange, InsertParaMark, RemoveParaMark,
-                 InsertNode, RemoveNode, SetControlProp, SetControlValue, SetTableCellSpan>;
+                 SetParaMarkFormat, InsertNode, RemoveNode, SetControlProp, SetControlValue,
+                 SetTableCellSpan>;
 
 /**
  * 步骤的执行结果。失败时给出原因 —— 位置越界、类型不符都要显式说出来，不静默不做。
@@ -185,9 +205,27 @@ struct DeleteBuild {
 };
 
 /**
- * 构造一个删除步骤：先取区间（顺带校验可编辑集合），再带着片段构造。
+ * 构造一条删除步骤：先取区间（顺带校验可编辑集合），再带着片段构造。
+ *
+ * 它按结构取区间：端点落在不可半分单位（控件、表格、链接）内部时向外扩到那个单位的
+ * 边界，于是取出来的片段永远良构、不会把边界切成两半。按结构取区间（选中一段、剪切、
+ * 删除一个结构单元）走它；按码点编辑走下面的 makeDeleteTextSteps。
  */
 DeleteBuild makeDeleteRange(const NodeTree& tree, Range range);
+
+/**
+ * 构造"删掉这段文本"的一组步骤：把流区间 [from, to) 覆盖到的文本按所在的文本节点切开，
+ * 每个文本节点一条 DeleteRange，从后往前排（删右边的不会移动左边的坐标，于是每步的坐标
+ * 都是它自己那一刻的坐标，不必再做位置映射）。
+ *
+ * 为什么不能只用一条 makeDeleteRange：按结构取区间时，落在控件内容里的端点会被向外扩到
+ * 控件边界，取出来覆盖的是控件节点本身 —— 集合里只有文本与段落标记，构造因此直接失败。
+ * 编辑要删的是码点，所以这条按文本节点切分，每步都严格落在一个文本节点里。
+ *
+ * 覆盖到的位置若不落在任何文本上（容器边界、段落标记、原子）不产生步骤；跨越它们由切分
+ * 自然处理成多条步骤。区间越界或与文档对不上时返回空序列。
+ */
+std::vector<Step> makeDeleteTextSteps(const NodeTree& tree, FlowPos from, FlowPos to);
 
 /**
  * 构造一个删除段落标记的步骤：标记的格式与样式引用从文档里读出来带上。

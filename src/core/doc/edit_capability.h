@@ -65,6 +65,13 @@ FlowPos stepEditable(const NodeTree& tree, EditMode mode, FlowPos from, int dir)
 struct TabStop {
     bool handled = false;  // 编辑器是否消费这次 Tab
     FlowPos target = 0;    // handled 为真时的目标位置
+    /**
+     * 目标所属的控件。带上它不是可有可无的：目标总是落在控件的内容起点上，而共享边界
+     * 上"前面那个控件的末尾"与"这个控件的开头"是同一个码点偏移 —— 只给位置，调用方
+     * 按"最内层含端点"再推一次归属，会推成前一个控件（同深度取下标小者），于是
+     * "Tab 跳过去之后打不进字"。归属由这里给出，调用方不要再推。
+     */
+    NodeId owner = kInvalidNodeId;
 };
 
 /**

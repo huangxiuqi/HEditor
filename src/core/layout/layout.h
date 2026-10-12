@@ -360,68 +360,62 @@ struct LineBox {
     float bracket_axis_pt = 0.0f;
 
     /**
-     * 给定段内码点偏移，返回相对行首的沿行内轴位置（磅）。
-     * 落在簇内部（比如 e + 组合重音之间）时返回该簇的起点 ——
-     * 光标天然吸附到簇边界，正是本实现要的语义。
+     * 落点画在括号【之外】时的哨兵值。
      *
-     * @param prefer_owner >= 0 时，光标要画在"属于这个控件的那一侧"。
-     *   只有共享边界需要它：同一个偏移既是前一个字段的末尾、又是后一个字段的开头，
-     *   占位簇挤在一起（][，空字段还会变成 ][][ ），同一列有两种画法 ——
-     *   贴在 ] 之内（内容到此为止），或贴在 [ 之后（内容从此开始）。
-     *   鼠标点画布时浏览器知道用户点的是哪一侧（占位簇自己记着 owner_control），
-     *   于是把结论带到这里。默认 -1 = 不带偏好，保持"贴 ] 之内"的老行为，
-     *   键盘移动与 setCaret 这类没有侧别的入口走的就是它。
+     * 宿主与探针只知道"控件下标"，分不出共享边界的两侧，于是用这个负数说"贴外侧"。
+     * 引擎收到它就换成侧别（见 offsetAtSide）：本偏移上的闭括号数。
      */
-    float inlineOffsetFor(uint32_t cp, int prefer_owner = -1) const {
+    static constexpr int kInlineOffsetOuter = -2;
+
+    /**
+     * 本偏移上第一枚簇在 clusters 里的下标；本行没有这个偏移的簇时返回 clusters.size()。
+     * 同一偏移上的簇必然连续：占位括号在前、真实簇在后（见 layout.cpp 的 emitSlot）。
+     */
+    size_t firstClusterAt(uint32_t cp) const {
+        for (size_t i = 0; i < clusters.size(); ++i)
+            if (clusters[i].cp == cp) return i;
+        return clusters.size();
+    }
+
+    /**
+     * 本偏移上占位括号的枚数 —— 也就是这个偏移的侧别上限。
+     */
+    int bracketCountAt(uint32_t cp) const {
+        int n = 0;
+        for (size_t i = firstClusterAt(cp); i < clusters.size() && clusters[i].cp == cp; ++i)
+            if (clusters[i].placeholder) ++n;
+        return n;
+    }
+
+    /**
+     * (码点偏移, 侧别) → 相对行首的沿行内轴位置（磅）。侧别 = 在这个偏移上跨过了几枚簇。
+     *
+     * 为什么偏移本身不够：同一个偏移上可能压着好几枚括号，于是"控件之前 / 进入控件 /
+     * 内容末尾 / 控件之后"是好几个互不相同的插入点（flow.h 定的四个流位置）。偏移把这个
+     * 分量丢掉了，只剩一个数 —— "字与开括号之间""两个相邻控件之间"这些位置于是根本表达
+     * 不出来：点不进去，方向键也整段跳过去。
+     *
+     * 补回来的那个分量排版侧本来就记着：括号占位各占一枚簇，所以侧别就是"数格子"。
+     * 取值 0 = 所有括号之前；逐枚数下去；到 bracketCountAt(cp) 就是本偏移上所有括号之后，
+     * 也就是紧随其后那个真实簇的位置（本偏移没有真实簇时是行末）。
+     */
+    float offsetAtSide(uint32_t cp, int side) const {
         if (clusters.empty()) return 0.0f;
-        // 偏好侧：找到这个控件自己的开括号槽，返回它之后那个簇的位置。
-        //   于是"贴在 [ 之后"是对的，而且空字段的那一对括号整体算作它的内部
-        //   （[ ] 之间），不会被推到右边字段的开括号之外。
-        if (prefer_owner >= 0) {
-            for (size_t i = 0; i < clusters.size(); ++i) {
-                const LineCluster& c = clusters[i];
-                if (!c.placeholder || c.owner_control != prefer_owner) continue;
-                if (c.bracket_side != BracketSide::Open || c.cp != cp) continue;
-                return (i + 1 < clusters.size()) ? clusters[i + 1].inline_pt : inline_end_pt;
+        const size_t k0 = firstClusterAt(cp);
+        if (k0 >= clusters.size()) {
+            // 本行里没有这个偏移的簇：退化成"最后一个 cp <= target 的簇起点"。
+            if (cp >= last_cp) return inline_end_pt;
+            float best = clusters.front().inline_pt;
+            for (const LineCluster& c : clusters) {
+                if (c.cp > cp) break;
+                best = c.inline_pt;
             }
+            return best;
         }
-        // 规则："最后一个 cp <= target 的簇的起点"。对普通文本它就是
-        // "target 那个字的左边缘"（＝那个字的插入点），落到簇内部时吸附到簇首 ——
-        // 都对。只有占位括号会破坏它，见下面那条。
-        float best = clusters.front().inline_pt;
-        for (const LineCluster& c : clusters) {
-            if (c.cp > cp) break;
-            best = c.inline_pt;
-            // 闭括号占位是这个查找的终点，立刻返回。
-            //
-            //   不返回的话，循环会继续走到它后面那个真实簇
-            //   （就是字段外紧跟着的那个字，比如 ] 后面的。），
-            //   best 被覆盖成"那个字的左边缘" —— 那已经在 ] 之外了。
-            //   症状：光标停在字段最后一个字，按右方向键会直接跳到 ] 右边，
-            //   中间"在 ] 之内"的位置被跳过。
-            //
-            //   开括号占位不能这么处理：内容在它右边，光标要落在它之后，
-            //   而那正是"继续往前走、取到后面那个真实簇"的结果。
-            //
-            // 必须再要求 c.cp == cp（只在这个边界码点上才当终点）。
-            //
-            //   闭括号占位记录的 cp 就是字段的结束偏移。而"最后一个 cp <= target"
-            //   的查找会路过所有更早的边界：查询字段之后的位置时，也会命中
-            //   前面那个字段的闭括号 —— 于是落点被拉回到前一个字段的 ] 之内。
-            //   症状：多个字段时，字段 #1 起点之后的所有位置（含 #1 自己的边界）
-            //   全都映射到 #0 右括号里那一个点（实测 off12=off13=off15=off16=170.255），
-            //   光标"逐字右移"于是完全不动。
-            //
-            //   只在 c.cp == cp 时短路，语义才对：这个偏移就是这个边界，
-            //   越过它之后（cp > 边界）就继续往后走，落到下一个真实簇上。
-            //   段尾字段也覆盖到了：那时占位的 cp 是段长哨兵 == cp，照样命中。
-            if (c.placeholder && c.bracket_side == BracketSide::Close && c.cp == cp) return best;
-        }
-        // 这一句必须在循环之后：字段末尾正好是段尾时，闭括号占位的 cp
-        //   就是段长哨兵（== last_cp），先短路的话会返回"行末"（＝括号右边），
-        //   又跑到框外去了。
-        if (cp >= last_cp) return inline_end_pt;
-        return best;
+        const int n = bracketCountAt(cp);
+        const int s = (side < 0) ? 0 : (side > n ? n : side);
+        const size_t k = k0 + static_cast<size_t>(s);
+        return (k < clusters.size()) ? clusters[k].inline_pt : inline_end_pt;
     }
 };
 

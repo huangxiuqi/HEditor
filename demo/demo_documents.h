@@ -7,8 +7,11 @@
  */
 #pragma once
 
+#include <string>
 #include <vector>
 
+#include "core/doc/control.h"
+#include "core/doc/node.h"
 #include "core/layout/layout.h"
 
 namespace heditor {
@@ -26,5 +29,33 @@ std::vector<BlockSpec> sampleDocument(int cjk_font_index, int mongol_font_index,
  * latin_font_index 给出后，把它作为回退字体挂上 —— "10⁹/L" 的上标 9 正是靠它兜住。
  */
 BlockSpec mixedParagraphBlock(int cjk_font_index, int latin_font_index = -1);
+
+/**
+ * 演示表单里一个字段怎么摆在树里：第几段、码点区间 [so, eo)、业务种类与编码、是否只读。
+ *
+ * 与引擎侧那个按 TextPos 记区间的旧表示（Control）用途相同，差别是它描述的是"树里怎么切" ——
+ * 段落内置，一个字段不跨段。业务种类走 ControlKind，建树时翻成 controlType 字符串，
+ * 与引擎侧 controlKindFromBusinessType 那条映射互为逆。
+ */
+struct DemoFieldSpec {
+    int para = 0;
+    int so = 0;
+    int eo = 0;
+    ControlKind kind = ControlKind::TextField;
+    std::string key;
+    bool readonly = false;
+};
+
+/**
+ * 把一份块流连同块级格式建成模型树：每块 = 一个文本节点 + 一枚段落结束标记。
+ *
+ * 块级字段（字体、字号、书写方向、行距、段后距、分页、语言、颜色、回退链）逐项搬到标记的
+ * 段落格式上 —— 编译正是从"标记 + 样式表"再解析出这些字段的，所以搬过去之后编译回来的块
+ * 与原来逐字段相同。fields 指的区间换成内容控件，嵌套的按"外层先开"建。
+ *
+ * 它存在的理由是宿主从"拼块流"切到"建树交给引擎"必须产出同一份排版：没有这份等价，
+ * 切换本身就是一次静默的显示回归。判据在 tests/edit_test.cpp 的等价一节。
+ */
+NodeTree demoTree(const std::vector<BlockSpec>& blocks, const std::vector<DemoFieldSpec>& fields);
 
 }  // namespace heditor

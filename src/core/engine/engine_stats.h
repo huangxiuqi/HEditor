@@ -124,6 +124,11 @@ struct EditStats {
     int caret_para = 0;
     size_t caret_offset = 0;  // 段内码点偏移
     size_t caret_index = 0;   // 全文码点下标
+    /**
+     * 光标侧别：在这个偏移上跨过了几枚边界括号（0 = 在所有括号之前）。
+     * 与 caret_offset 合起来才是光标的完整位置 —— 同一个偏移上有好几个插入点。
+     */
+    int caret_side = 0;
     size_t doc_codepoints = 0;
     bool caret_visible = false;
     /**

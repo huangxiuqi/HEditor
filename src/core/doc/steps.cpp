@@ -188,6 +188,33 @@ template <typename... Fs>
 Overloaded(Fs...) -> Overloaded<Fs...>;
 
 /**
+ * 两个书写模式是否相同（逐字段比）。
+ *
+ * 单写一个而不是给 WritingMode 加 operator==：那个结构在文本层，它的字段全是枚举，
+ * 默认相等本来是对的，但 std::optional<WritingMode> 的默认相等又要靠它 —— 而
+ * std::optional 的默认相等在 MSVC 上被隐式删除时不报错、只在真去比较的地方炸开。
+ * 比较写在需要它的这一侧，坏掉的时候一眼能看出是哪一处。
+ */
+bool sameWritingMode(const WritingMode& a, const WritingMode& b) {
+    return a.inline_axis == b.inline_axis && a.block_flow == b.block_flow &&
+           a.orientation == b.orientation;
+}
+
+/**
+ * 两个段落格式 patch 是否逐字段相同。检查器与步骤守卫都要问这个问题。
+ */
+bool sameParaPatch(const ParaFormatPatch& a, const ParaFormatPatch& b) {
+    if (a.font_index != b.font_index || a.size != b.size || a.line_factor != b.line_factor ||
+        a.space_after != b.space_after || a.page_break_before != b.page_break_before ||
+        a.language != b.language || a.color != b.color ||
+        a.fallback_font_indices != b.fallback_font_indices) {
+        return false;
+    }
+    if (a.wm.has_value() != b.wm.has_value()) return false;
+    return !a.wm.has_value() || sameWritingMode(*a.wm, *b.wm);
+}
+
+/**
  * 读一个控件属性。目标不是内容控件时返回 false。
  */
 bool readControlProp(const NodeTree& tree, NodeId id, ControlProp prop, bool* out) {
@@ -290,6 +317,88 @@ DeleteBuild makeDeleteRange(const NodeTree& tree, Range range) {
     s.removed = ex.fragment;
     out.step = Step{s};
     out.ok = true;
+    return out;
+}
+
+namespace {
+
+/**
+ * 取一段文本区间：与 extractRange 的差别只在"不做端点规范化"。
+ *
+ * 规范化会把落在不可半分单位内部的端点向外扩到那个单位的边界（"不能被切开"），
+ * 那条规则是给按结构取区间的场合用的；编辑删的是码点，起点落在控件内容里时扩到控件开头
+ * 意味着"删一个字"变成"删掉整个控件的内容"。所以编辑这条路显式要求调用方给出已经切分好的
+ * 区间（严格落在一个文本节点里），并在 makeDeleteTextSteps 的说明里写明这一点。
+ */
+bool extractTextRange(const NodeTree& tree, FlowPos begin, FlowPos end, Fragment* out,
+                      std::string* error) {
+    std::vector<Cover> covers;
+    if (!collectCovers(tree, Range{begin, end}, &covers, error)) return false;
+    Fragment frag;
+    int span = 0;
+    for (const Cover& c : covers) {
+        const Node* n = tree.find(c.node);
+        if (n == nullptr) continue;
+        Piece piece;
+        piece.styleRef = n->styleRef;
+        if (isText(n->kind)) {
+            piece.kind = PieceKind::Text;
+            piece.marks = n->marks;
+            piece.cps.assign(n->text.begin() + (c.from - c.first),
+                             n->text.begin() + (c.to - c.first));
+            if (piece.cps.empty()) continue;
+        } else {
+            piece.kind = PieceKind::ParaMark;
+            piece.para = n->para;
+        }
+        span += c.to - c.from;
+        frag.pieces.push_back(std::move(piece));
+    }
+    if (span != end - begin) {
+        if (error != nullptr) *error = "删除文本：区间与文档对不上（步骤过期了）";
+        return false;
+    }
+    *out = std::move(frag);
+    return true;
+}
+
+}  // namespace
+
+std::vector<Step> makeDeleteTextSteps(const NodeTree& tree, FlowPos from, FlowPos to) {
+    std::vector<Step> out;
+    if (from < 0 || to <= from) return out;
+    const FlowIndex idx = indexOf(tree);
+    if (to > idx.size()) return out;
+
+    // 某个流位置所在的文本节点；落在容器边界、段落标记或原子上时给"没有"。
+    auto owner_at = [&](FlowPos p) {
+        const Pos np = idx.posAt(p);
+        const Node* n = tree.find(np.container);
+        return (n != nullptr && isText(n->kind)) ? n->id : kInvalidNodeId;
+    };
+
+    // 按"所属文本节点"分组：同一节点上的连续位置合成一段。
+    std::vector<std::pair<int, int>> segs;
+    int seg_start = from;
+    NodeId seg_node = owner_at(from);
+    for (FlowPos p = from + 1; p <= to; ++p) {
+        const NodeId owner = (p < to) ? owner_at(p) : kInvalidNodeId;
+        if (p == to || owner != seg_node) {
+            if (seg_node != kInvalidNodeId) segs.push_back({seg_start, p});
+            seg_start = p;
+            seg_node = owner;
+        }
+    }
+
+    // 从后往前发步：删右边的不会移动左边的坐标，每步的坐标就是它自己那一刻的坐标。
+    out.reserve(segs.size());
+    for (size_t i = segs.size(); i-- > 0;) {
+        DeleteRange s;
+        s.begin = segs[i].first;
+        s.end = segs[i].second;
+        if (!extractTextRange(tree, s.begin, s.end, &s.removed, nullptr)) return {};
+        out.push_back(Step{s});
+    }
     return out;
 }
 
@@ -425,6 +534,20 @@ StepResult canApply(const NodeTree& tree, const Step& step) {
                        const Node* n = tree.find(p.container);
                        if (n == nullptr || !isParagraphMark(n->kind) || p.offset != 0) {
                            r.error = "该位置上没有段落标记";
+                           return;
+                       }
+                       r.ok = true;
+                   },
+                   [&](const SetParaMarkFormat& s) {
+                       const Node* n = tree.find(s.id);
+                       if (n == nullptr || !isParagraphMark(n->kind)) {
+                           r.error = "改段落格式：目标不是段落标记";
+                           return;
+                       }
+                       // 记的原值要与文档当前值一致，否则这一步是在与别的编辑抢同一枚标记
+                       // （或者步骤被重放到了别的文档上）。拒绝比改错强。
+                       if (!sameParaPatch(n->para, s.before) || n->styleRef != s.beforeStyleRef) {
+                           r.error = "改段落格式：当前值与步骤记的原值不符（步骤过期了）";
                            return;
                        }
                        r.ok = true;
@@ -582,6 +705,12 @@ StepResult applyStep(NodeTree& tree, const Step& step) {
                 const Node* n = tree.find(p.container);
                 tree.eraseChild(n->parent->id, indexInParent(n));
             },
+            [&](const SetParaMarkFormat& s) {
+                Node* n = tree.find(s.id);
+                if (n == nullptr) return;
+                n->para = s.para;
+                n->styleRef = s.styleRef;
+            },
             [&](const InsertNode& s) {
                 if (s.detached != kInvalidNodeId) {
                     tree.attachChild(s.at.container, s.at.offset, s.detached);
@@ -642,6 +771,15 @@ Step invertStep(const Step& step) {
                               x.at = s.at;
                               x.para = s.para;
                               x.styleRef = s.styleRef;
+                              return Step{x};
+                          },
+                          [](const SetParaMarkFormat& s) -> Step {
+                              SetParaMarkFormat x;
+                              x.id = s.id;
+                              x.para = s.before;
+                              x.styleRef = s.beforeStyleRef;
+                              x.before = s.para;
+                              x.beforeStyleRef = s.styleRef;
                               return Step{x};
                           },
                           [](const InsertNode& s) -> Step {
@@ -733,16 +871,19 @@ FlowPos mapPos(const Step& step, FlowPos pos, Assoc assoc) {
                           [&](const SetControlValue&) -> FlowPos { return pos; },
                           // 跨度不改流位置，也不改流结构：它改的是"这一格覆盖多少格位"。
                           [&](const SetTableCellSpan&) -> FlowPos { return pos; },
+                          // 段落格式同理：改的是标记上的数据，位置一个都不动。
+                          [&](const SetParaMarkFormat&) -> FlowPos { return pos; },
                       },
                       step);
 }
 
 bool mapStepPositions(Step* target, const Step& mapped_by, Assoc assoc) {
     if (target == nullptr) return false;
-    // 属性与跨度步骤不带流位置，搬一次等于没搬（但它们不是"搬不动"，所以算成功）。
+    // 属性、跨度与段落格式步骤不带流位置，搬一次等于没搬（但它们不是"搬不动"，所以算成功）。
     if (std::holds_alternative<SetControlProp>(*target) ||
         std::holds_alternative<SetControlValue>(*target) ||
-        std::holds_alternative<SetTableCellSpan>(*target)) {
+        std::holds_alternative<SetTableCellSpan>(*target) ||
+        std::holds_alternative<SetParaMarkFormat>(*target)) {
         return true;
     }
     if (auto* s = std::get_if<InsertText>(target)) {

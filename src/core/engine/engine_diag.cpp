@@ -120,8 +120,8 @@ std::string EditorEngine::describeCaret() const {
         os << " [" << lb->clusters[i].cp << "→" << lb->clusters[i].inline_pt << "]";
     if (lb->clusters.size() > 12) os << " ...";
     os << "\n";
-    os << "  本偏移的沿轴位置=" << lb->inlineOffsetFor(static_cast<uint32_t>(caret_.offset))
-       << " pt\n";
+    os << "  本偏移的沿轴位置="
+       << lb->offsetAtSide(static_cast<uint32_t>(caret_.offset), caretSide()) << " pt\n";
 
     Rect r{};
     if (caretRectPt(&r))

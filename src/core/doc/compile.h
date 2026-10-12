@@ -39,12 +39,33 @@ struct CompileDiagnostic {
 };
 
 /**
+ * 一块产物的来源身份。
+ *
+ * first 是本块吃到的第一个在流里占位的元素：文本节点、控件节点，或"空段"时的那枚结束标记。
+ * 记节点 id 而不是流位置，是因为编译这一层不认识 FlowIndex（两者口径不同、都会随树变化），
+ * 让这边算一个位置、那边又算一个，分叉是迟早的事。引擎拿它经 FlowIndex 换出本块内容起点的
+ * 流位置 —— 单向换算，只有 FlowIndex 一个权威。控件节点落在它自己的起始边界上，与
+ * "块内容从控件的开括号起"一致；空段落在标记上，就是"标记之前"。
+ *
+ * mark 是本块的结束标记；kInvalidNodeId 表示末尾那一段还没被标记结束（它用默认段落格式）。
+ * 跨段控件会让中间那些块的 mark 落在控件内部，这不影响身份的正确性：每个块的 first 与 mark
+ * 都是它自己那一段真实吃到的那两个元素。
+ */
+struct BlockSource {
+    NodeId first = kInvalidNodeId;
+    NodeId mark = kInvalidNodeId;
+};
+
+/**
  * 编译结果。blocks 按流顺序排列；diagnostics 非空表示有元素没被编译 —— 这时 blocks 只是
  * "能编的那部分"，调用方应据此拒绝使用或降级，不能当成完整结果。
+ *
+ * sources 与 blocks 一一对应（同长同序）；它只给引擎做坐标换算用，不影响"编了什么"。
  */
 struct CompileResult {
     std::vector<BlockSpec> blocks;
     std::vector<CompileDiagnostic> diagnostics;
+    std::vector<BlockSource> sources;
 
     bool ok() const { return diagnostics.empty(); }
 };

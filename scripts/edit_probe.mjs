@@ -1028,21 +1028,20 @@ async function main() {
     //  约束编辑的是 EditPolicy（插 / 删），不是光标 —— 两者混起来会得到
     //  "字段外的正文连点都点不进去"这类与编辑边界无关的怪现象。
     //
-    //  判据是逐步的：单步偏移跨度恒为 1（不许瞬移），终点是真正的下一格。
+    //  判据是逐步的：一次只跨一枚簇（括号占位也算一格），到文档末尾就停住。
     //    只看终点抓不到"投影式移动"：投影也能给出一个看着合法的终点。
     {
       await c.eval('return window.__heditor.loadFormSample(0);');
       await c.eval('return window.__heditor.stopBlink();');
       await c.eval('return window.__heditor.setCaret(0, 12);');   // #2 = aggravate [12,16)
 
-      const start = await c.eval('return window.__heditor.caret;');
       await c.eval(key('ArrowLeft'));                          //  真实键盘
       const afterLeft = await c.eval('return window.__heditor.caret;');
-      chk.check('★ 在 #2 起点按左方向键：一步一格跨过共享边界（12 → 11）',
-                afterLeft.offset === 11,
-                `12 → ${afterLeft.offset}`);
+      chk.check('★ 在 #2 起点按左方向键：先退到 [ 之前（括号占一格，不瞬移）',
+                afterLeft.offset === 12 && afterLeft.side === 0,
+                `12 → ${afterLeft.offset}/${afterLeft.side}`);
 
-      // 右走 6 步：12→13→14→15→16→17→17（到文档末尾就停住），单步跨度恒为 1
+      // 右走 6 步：13 14 15 16 16(跨 ]) 17（到文档末尾就停住），单步跨度恒为 1
       await c.eval('return window.__heditor.setCaret(0, 12);');
       const seq = [];
       for (let i = 0; i < 6; ++i) {
@@ -1052,8 +1051,8 @@ async function main() {
       let worst = 0;
       let prev = 12;
       for (const o of seq) { worst = Math.max(worst, o - prev); prev = o; }
-      chk.check('★ 从 #2 起点右走 6 步：每一步 +1，到文档末尾就停住',
-                seq.join(',') === '13,14,15,16,17,17',
+      chk.check('★ 从 #2 起点右走 6 步：一次一格，到文档末尾就停住',
+                seq.join(',') === '13,14,15,16,16,17',
                 `12 → ${seq.join(' → ')}`);
       chk.check(' 单步跨度恒为 1（没有任何一步瞬移）',
                 worst === 1, `最大单步跨度 ${worst}`);
@@ -1521,16 +1520,21 @@ async function main() {
     const caretAt = await c.eval('return window.__heditor.caret.offset;');
     chk.check('★ 光标停在那个零宽字段的位置上（位置归属没被左邻居抢走）',
               caretAt === mid.start[1], `光标 ${caretAt}，空字段 ${mid.start[1]}`);
-    // 方向键一次一格：必须能走出字段（光标位置不受控件约束），但不许瞬移
+    // 方向键一次一格 —— 括号也是格（占位簇各占一枚），所以共享边界 ][ 要按两下：
+    //   一格一格地走过"字与开括号之间""两枚括号之间"那些位置，不许整段跳过去。
     await c.eval('return window.__heditor.setCaret(0, 5);');
     const walk = [];
     for (let i = 0; i < 5; ++i) {
       await c.eval(key('ArrowRight'));
-      walk.push(await c.eval('return window.__heditor.caret.offset;'));
+      const a = await c.eval(`
+        const q = window.__heditor.caret;
+        return { o: q.offset, s: q.side };`);
+      walk.push(`${a.o}/${a.s}`);
     }
     report.chain3.walk = walk;
-    chk.check('★ 方向键一次一格、且能走出字段（5 → 6 7 8 9 10）',
-              JSON.stringify(walk) === JSON.stringify([6, 7, 8, 9, 10]), `落点 ${walk.join(' ')}`);
+    chk.check('★ 方向键一次一格（括号占格：][][] 上要按好几下才过去）',
+              JSON.stringify(walk) === JSON.stringify(['6/0', '7/0', '7/1', '7/2', '7/3']),
+              `落点 ${walk.join(' ')}`);
     // 回到那个零宽字段的位置上：打字应该进它自己，左右两个字段不许被撑大
     await c.eval('return window.__heditor.setCaret(0, 7);');
     await c.eval(key('痛'));
@@ -1692,7 +1696,8 @@ async function main() {
       await c.eval('return window.__heditor.stopBlink();');
     };
     const caretOf = () => c.eval(`
-      return { o: window.__heditor.caret.offset, f: window.__heditor.controls.caret };`);
+      const q = window.__heditor.caret;
+      return { o: q.offset, s: q.side, f: window.__heditor.controls.caret };`);
     const items = () => c.eval('return window.__heditor.controls.items.map(i => [i.start[1], i.end[1]]);');
     const slotsOf = (cp) => c.eval(`
       return (window.__heditor.bracketSlots || [])
@@ -1708,6 +1713,25 @@ async function main() {
       const q = window.__heditor.controls.items[${ci}].rects[0];
       return { x: q.x + 2, y: q.y + q.h / 2 };`);
 
+    // 某个控件在某偏移上的"内侧"插入点（帧磅）。
+    //   caret.x / caret.w 是帧像素（乘过 zoom），除以 zoom 换成帧磅；x 是光标矩形的左缘，
+    //   插入点还要再往右半个光标宽 —— 少算这半个，点选位置就会落在括号格的正中偏左。
+    const innerCaretPt = async (cp, ci) => {
+      const r = JSON.parse(await c.eval(`
+        window.__heditor.setCaretAt(0, ${cp}, ${ci});
+        const q = window.__heditor.caret;
+        return JSON.stringify({ x: q.x, w: q.w,
+                                z: Number(document.getElementById('zoom').value) });`));
+      return r.x / r.z + (r.w / r.z) * 0.5;
+    };
+    // 点"某字段开括号的内侧"那一格：落在括号与它后面那个字之间、靠右的一小段。
+    //   括号占位簇的势力范围按左右半边分 —— 左半边是"括号之前"（控件之外）、右半边是
+    //   "括号之后"（控件之内）。要"点进这个字段"，落点得在右半边，所以取内侧插入点左侧
+    //   半磅：那里既在右半边之内，又紧贴着字段的第一个字。
+    const clickOpenInner = async (g, z, y, cp, ci) => {
+      const inner = await innerCaretPt(cp, ci);
+      await clickPt(g, inner - 0.5, y, z);
+    };
     chk.section('[14.1] 相邻单共享边界：点 ] 归前一个、点 [ 归后一个（variant 0）');
     {
       await load(0);
@@ -1729,7 +1753,7 @@ async function main() {
       const a = await caretOf();
       chk.check('★ 真实鼠标点 ] → 光标停在 9 且归前一个字段', a.o === 9 && a.f === 0,
                 `offset ${a.o} 归属 ${a.f}`);
-      await clickPt(g, s9[1].x + pitch * 0.5, y, z);
+      await clickOpenInner(g, z, y, 9, 1);
       const b = await caretOf();
       chk.check('★ 真实鼠标点 [ → 同一个偏移 9，归属换成后一个字段（这就是点得进去）',
                 b.o === 9 && b.f === 1, `offset ${b.o} 归属 ${b.f}`);
@@ -1768,7 +1792,7 @@ async function main() {
                 `7:${sidesOf(s7)} 9:${sidesOf(s9)}`);
       const p7 = s7.length === 2 ? Math.max(1, s7[1].x - s7[0].x) : 6;
 
-      await clickPt(g, s7[1].x + p7 * 0.5, y, z);
+      await clickOpenInner(g, z, y, 7, 1);
       const a = await caretOf();
       chk.check('★ 真实鼠标点中间那个字段的开括号 → 归属 1', a.o === 7 && a.f === 1,
                 `offset ${a.o} 归属 ${a.f}`);
@@ -1788,33 +1812,39 @@ async function main() {
       chk.check('★ 接着打字 → 字进前一个字段，后两个整体右移',
                 JSON.stringify(it2) === '[[5,8],[8,10],[10,12]]', JSON.stringify(it2));
 
-      // 真实方向键：一次一格，且能走出字段
+      // 真实方向键：一次一格 —— 括号也占一格，所以共享边界 ][ 要按两下。
       await c.eval('return window.__heditor.setCaret(0, 5);');
       const walk = [];
       for (let k = 0; k < 6; ++k) {
         await c.eval(key('ArrowRight'));
-        walk.push((await caretOf()).o);
+        const a = await caretOf();
+        walk.push(`${a.o}/${a.s}`);
       }
-      chk.check('★ 真实方向键一次一格并走出字段（5 → 6 7 8 9 10 11）',
-                JSON.stringify(walk) === JSON.stringify([6, 7, 8, 9, 10, 11]),
+      chk.check('★ 真实方向键一次一格（括号占格：][ 边界要按两下）',
+                JSON.stringify(walk) === JSON.stringify(['6/0', '7/0', '8/0', '8/1', '8/2', '9/0']),
                 `落点 ${walk.join(' ')}`);
       await c.eval('return window.__heditor.setCaret(0, 12);');
       const back = [];
       for (let k = 0; k < 4; ++k) {
         await c.eval(key('ArrowLeft'));
-        back.push((await caretOf()).o);
+        const a = await caretOf();
+        back.push(`${a.o}/${a.s}`);
       }
-      chk.check('★ 反向同样一次一格（12 → 11 10 9 8）',
-                JSON.stringify(back) === JSON.stringify([11, 10, 9, 8]), `落点 ${back.join(' ')}`);
+      chk.check('★ 反向同样一次一格（12/0 → 11/0 → 10/2 10/1 10/0）',
+                JSON.stringify(back) === JSON.stringify(['11/0', '10/2', '10/1', '10/0']),
+                `落点 ${back.join(' ')}`);
 
       // 归属随位置换人（重新载入样例，让偏移回到干净的三连区间）
       await load(2);
       await c.eval('return window.__heditor.setCaret(0, 7);');
       const f7 = (await caretOf()).f;
       await c.eval(key('ArrowRight'));
-      const at8 = await caretOf();
-      chk.check('★ 跨过共享边界归属换人（7 归 #0，8 归 #1）',
-                f7 === 0 && at8.o === 8 && at8.f === 1, `7→${f7} ｜ 8→${at8.f}`);
+      const mid = await caretOf();
+      await c.eval(key('ArrowRight'));
+      const inB = await caretOf();
+      chk.check('★ 跨过共享边界归属依次换人（#0 → 括号之间 → #1）',
+                f7 === 0 && mid.s === 1 && inB.o === 7 && inB.f === 1,
+                `7→${f7} ｜ 中间 ${mid.o}/${mid.s}→归 ${mid.f} ｜ 再一步→${inB.o}/${inB.f}`);
 
       // Home / End 是行首行尾，不是字段首尾
       const ncp = await c.eval('return window.__heditor.caret.docCodepoints;');
@@ -1882,9 +1912,8 @@ async function main() {
         }
       }
       const s2 = await slotsOf(7);
-      const p2 = s2.length >= 2 ? Math.max(1, s2[1].x - s2[0].x) : 6;
       // 槽序是 ] [ ] [ ]：#2 的开括号在下标 3
-      await clickPt(g, s2[3].x + p2 * 0.5, y, z);
+      await clickOpenInner(g, z, y, 7, 2);
       const at2 = await caretOf();
       chk.check('★ 真实鼠标点最右那枚 [（#2 的开括号）→ 归属 2',
                 at2.o === 7 && at2.f === 2, `offset ${at2.o} 归属 ${at2.f}`);
@@ -2082,6 +2111,123 @@ async function main() {
       await c.eval('window.__heditor.present(); return true;');
       await sleep(150);
       await c.screenshot(join(OUT, 'boundary-three-adjacent.png'));
+    }
+
+    chk.section('[14.7] 括号外侧那一段也点得进去：开括号之前 / 闭括号之后（variant 3）');
+    {
+      // 同一个偏移在控件边界上对应两个位置（flow.h：控件之前与进入控件），而括号占位簇
+      //   的势力范围按左右半边分。判据落在可证伪的数字上：点左半边，光标必须画在括号【之外】。
+      await load(3);
+      const y = await c.eval(`
+        const q = window.__heditor.controls.items[0].rects[0];
+        return q.y + q.h / 2;`);
+      const g = await geo();
+      const z = await zoomNow();
+      const s6 = await slotsOf(6);
+      const s10 = await slotsOf(10);
+
+      await clickPt(g, s6[0].x + 0.5, y, z);  // 中层开括号那一格的左半边
+      const a = await caretOf();
+      const ax = await c.eval('return window.__heditor.caret.x;');
+      chk.check('★★ 点开括号的左半边 → 光标落在括号之前（不是被贴回括号之内）',
+                a.o === 6 && ax / z < s6[0].x + 1.0,
+                `偏移 ${a.o} ｜ 光标 x=${(ax / z).toFixed(2)} ｜ 括号左缘 ${s6[0].x.toFixed(2)}`);
+
+      const afterPt = await innerCaretPt(10, -2);  // 闭括号之后那个插入点（＝天 的左缘）
+      // 落在它左边半磅：那里既是闭括号那一格的右半边（"括号之后"），也紧贴天 的左半边。
+      await clickPt(g, afterPt - 0.5, y, z);
+      const b = await caretOf();
+      const bx = await c.eval('return window.__heditor.caret.x;');
+      chk.check('★★ 点闭括号的右半边 → 光标落在括号之后（字与闭括号之间）',
+                b.o === 10 && bx / z > s10[0].x + 1.0,
+                `偏移 ${b.o} ｜ 光标 x=${(bx / z).toFixed(2)} ｜ 括号左缘 ${s10[0].x.toFixed(2)}`);
+      const sc7 = await c.eval('return window.__heditor.selfCheck();');
+      chk.check('点括号外侧之后屏幕 == 引擎帧', sc7.screenVsEngineDiffPx === 0,
+                `差 ${sc7.screenVsEngineDiffPx} px`);
+    }
+
+    chk.section('[14.8] 方向键在括号边界上一格一格走（嵌套样例：反字前 / 天字前）');
+    {
+      // 报过的两条现象：光标在「反」前面按左键会一步跳到「冒号」前；在「天」前面按左键
+      //   会一步跳到「悸」后面 —— 都是"整段跳过括号那一格"。
+      // 判据是像素上的位移：一格 = 一枚括号的宽度（约 5.5pt），跳一整段 = 一个字 + 括号。
+      await load(3);
+      await c.eval('return window.__heditor.stopBlink();');
+      const z = await zoomNow();
+
+      // 先看开括号那一侧：外层 [ 之后（＝反字前面）→ 按一下左键，只该退到 [ 之前
+      await c.eval('return window.__heditor.setCaretAtSide(0, 5, 1);');
+      const x1 = (await c.eval('return window.__heditor.caret.x;')) / z;
+      await c.eval(key('ArrowLeft'));
+      const a1 = await caretOf();
+      const x0 = (await c.eval('return window.__heditor.caret.x;')) / z;
+      chk.check('★★ 反字前按左键 → 只退一格到左括号之前（不是一步跳到冒号前）',
+                a1.o === 5 && a1.s === 0 && (x1 - x0) > 2 && (x1 - x0) < 12,
+                `偏移 ${a1.o} 侧别 ${a1.s} ｜ 光标 x ${x1.toFixed(2)} → ${x0.toFixed(2)}` +
+                  `（退 ${(x1 - x0).toFixed(2)} pt）`);
+
+      // 闭括号那一侧同样：中层 ] 之后（＝天字前面）→ 按一下左键，只该退到 ] 之前
+      await c.eval('return window.__heditor.setCaretAtSide(0, 10, 1);');
+      const y1 = (await c.eval('return window.__heditor.caret.x;')) / z;
+      await c.eval(key('ArrowLeft'));
+      const a2 = await caretOf();
+      const y0 = (await c.eval('return window.__heditor.caret.x;')) / z;
+      chk.check('★★ 天字前按左键 → 只退一格到闭括号之前（不是一步跳到悸字后面）',
+                a2.o === 10 && a2.s === 0 && (y1 - y0) > 2 && (y1 - y0) < 12,
+                `偏移 ${a2.o} 侧别 ${a2.s} ｜ 光标 x ${y1.toFixed(2)} → ${y0.toFixed(2)}` +
+                  `（退 ${(y1 - y0).toFixed(2)} pt）`);
+
+      // 再按一下才跨过「三」那一格（一次一格，不跳）
+      await c.eval(key('ArrowLeft'));
+      const a3 = await caretOf();
+      chk.check('★ 再按一下才退到「三」之前（一次一格，不跳格）', a3.o === 9,
+                `偏移 ${a3.o} 侧别 ${a3.s}`);
+
+      // 反向：从「三」前按右键，依次是 三 之前 → 三 之后（＝] 之前）→ ] 之后
+      const seq = [];
+      for (let i = 0; i < 3; ++i) {
+        await c.eval(key('ArrowRight'));
+        const r = await caretOf();
+        seq.push(`${r.o}/${r.s}`);
+      }
+      chk.check('★ 反向同样一格一格（9/2 → 10/0 10/1 11/0）',
+                JSON.stringify(seq) === JSON.stringify(['10/0', '10/1', '11/0']),
+                `落点 ${seq.join(' ')}`);
+      await c.screenshot(join(OUT, 'arrow-boundary-nested.png'));
+    }
+
+    chk.section('[14.9] 删除之后的落点：一次只退一个字，不跨括号（嵌套 / 三连）');
+    {
+      // 两条现象：嵌套删「天」之后光标落到 ]中 之前（该在它之后，＝被删那个字所在的位置）；
+      //   三连删「悸」之后光标跑进第三个控件（该停在第一个字段末尾）。
+      // 判据落在 (偏移, 侧别) 上 —— 侧别就是"这个偏移上跨过了几枚括号"，是落点的完整身份；
+      //   再加一条像素证据：光标要落在 ]中 之后，不是它之前。
+      await load(3);
+      await c.eval('return window.__heditor.setCaret(0, 11);');
+      await c.eval(key('Backspace'));
+      const a = await caretOf();
+      const s10 = await slotsOf(10);
+      const z9 = await zoomNow();
+      const ax = (await c.eval('return window.__heditor.caret.x;')) / z9;
+      chk.check('★★ 嵌套删「天」→ 落点＝「天」原来的位置（cp 10 跨过 ]中，侧别 1）',
+                a.o === 10 && a.s === 1 && s10.length === 2 && ax > s10[0].x + 1,
+                `落点 ${a.o}/${a.s} ｜ 光标 x=${ax.toFixed(2)} ｜ cp10 两枚 ] 的 x=` +
+                  `${s10.map((q) => q.x.toFixed(2)).join(' / ')}`);
+
+      await load(2);
+      await c.eval('return window.__heditor.setCaret(0, 11);');
+      for (let i = 0; i < 3; ++i) {
+        await c.eval(key('Backspace'));
+        await sleep(20);
+      }
+      const b = await caretOf();
+      chk.check('★★ 三连删「悸」→ 落点＝第一个字段末尾（cp 8 侧别 0），不许进第三个控件',
+                b.o === 8 && b.s === 0, `落点 ${b.o}/${b.s}`);
+      await c.eval(key('痛'));
+      const it = await items();
+      chk.check('★ 接着打字进的是第二个字段（不是第三个控件）',
+                JSON.stringify(it) === '[[5,7],[7,9],[9,9]]', JSON.stringify(it));
+      await c.screenshot(join(OUT, 'delete-caret-landing.png'));
     }
   }
   chk.section('[7] 无页面异常 / 无 console 错误');

@@ -540,14 +540,14 @@ function onCanvasMouseDown(ev) {
   const hit = mod.hitTest(xPx / currentZoom, yPx / currentZoom);
   if (hit !== 'null') {
     const p = JSON.parse(hit);
-    // 连"这一下点的是哪个字段"一起带过去。
-    //   相邻两个字段共享边界时（[反复]│[心悸]，两枚括号并排在同一列上），
-    //   落点是同一个偏移，光有偏移分不出用户点的是哪一侧：引擎只能按"最内层、
-    //   同深度取下标小者"归给前一个字段，于是"点后一个字段的开头"字会打进前一个字段，
-    //   前一个字段只读时那次点击更是直接被拒 —— 看起来就是"这个字段点不进去"。
-    //   引擎在命中测试里已经算出了答案（占位括号自己记着归属），这里只负责搬运。
-    if (typeof p.field === 'number' && mod.setCaretAt) {
-      mod.setCaretAt(p.para, p.offset, p.field);
+    // 连"这一下点的是哪一个位置"一起带过去。
+    //   相邻两个字段共享边界时（[反复]│[心悸]，两枚括号并排在同一列上），落点是同一个
+    //   偏移，光有偏移分不出用户点的是哪一侧；同一个偏移上还可能压着好几枚括号（相邻的
+    //   空字段就是 ][][ ），于是"字与括号之间""两个控件之间"整段都点不进去。
+    //   引擎在命中测试里已经算出了侧别（括号占位各占一格，数格子即可），这里只负责搬运。
+    //   p.field 是它的投影，只用来显示"当前在哪个字段"，搬运请用 p.side。
+    if (typeof p.side === 'number' && mod.setCaretAtSide) {
+      mod.setCaretAtSide(p.para, p.offset, p.side);
       caretOn = true;
       mod.showCaret(true);
       mod.present();
@@ -750,6 +750,7 @@ window.__heditor = {
     if (!mod) return null;
     const st = JSON.parse(mod.editStatsJson());
     return { para: st.caretPara, offset: st.caretOffset, index: st.caretIndex,
+             side: st.caretSide,
              x: st.caretX, y: st.caretY, w: st.caretW, h: st.caretH,
              visible: st.caretVisible, docCodepoints: st.docCodepoints };
   },
@@ -854,6 +855,18 @@ window.__heditor = {
     afterEdit();
     return this.caret;
   },
+  // 带侧别的定位 —— 与点画布完全相同的那条路（onCanvasMouseDown 搬的就是侧别）。
+  //   归属只是侧别的投影，同一个偏移上压着好几枚括号时投影会抹平细节，所以
+  //   探针要复现"点在两个控件之间"这类手势，得走这一个而不是 setCaretAt。
+  setCaretAtSide(para, offset, side) {
+    if (!ready) return null;
+    mod.setCaretAtSide(para, offset, side);
+    caretOn = true;
+    mod.showCaret(true);
+    mod.present();
+    afterEdit();
+    return this.caret;
+  },
   // 点画布的真实入口（与 cv 的 mousedown 处理同一套坐标换算），供探针复现用户手势。
   clickAt(xPx, yPx) {
     if (!ready) return null;
@@ -943,6 +956,13 @@ window.__heditor = {
   // 注意：Tab 不再绑到它。Tab 是缩进。这个接口留着给探针/自动化用。
   focusControl(forward) {
     if (!mod.focusControl(forward === undefined ? true : forward)) return null;
+    return this.present();
+  },
+  // 策略版 Tab：表单模式在可编辑控件之间前进/后退，到最后一个返回 null（不消费）。
+  //   与 focusControl 的区别是"不绕回第一个"且判据走可编辑集合谓词（见 engine.h）。
+  //   默认键位同样不绑它 —— 裸 Tab 留给缩进，绑什么由宿主决定。
+  tabCaret(backward) {
+    if (!mod.tabCaret(backward === undefined ? false : !!backward)) return null;
     return this.present();
   },
   controlAt(xPt, yPt) { return mod.controlAtPoint(xPt, yPt); },

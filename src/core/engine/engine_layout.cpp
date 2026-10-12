@@ -119,9 +119,12 @@ void EditorEngine::relayout() {
         if (caret_.para >= static_cast<int>(blocks_.size()))
             caret_.para = static_cast<int>(blocks_.size()) - 1;
         const size_t len = blocks_[static_cast<size_t>(caret_.para)].cp_text.size();
-        if (caret_.offset > len) caret_.offset = len;
+        // 超界才动它 —— 动的时候清侧别（位置变了，旧侧别描述的是另一个格子）。
+        //   位置没变就一个字都别碰：侧别留着（重排不改流位置，见 caretSide 的注释），
+        //   而"敲字之后紧接一次重排"正是侧别刚被算准的那一刻，清掉就白算了。
+        if (caret_.offset > len) setCaretRaw(TextPos{caret_.para, len});
     } else {
-        caret_ = TextPos{0, 0};
+        setCaretRaw(TextPos{0, 0});
     }
 
     // 把要显示括号的那些字段的两个边界写进块流的行内对象表：排版据此插入
@@ -195,7 +198,8 @@ void EditorEngine::relayout() {
 
     // 光标夹回合法范围并吸附到簇边界 —— 编辑可能让段落变短。
     if (!blocks_.empty()) {
-        caret_.offset = snapToCluster(caret_.para, caret_.offset);
+        const size_t snapped = snapToCluster(caret_.para, caret_.offset);
+        if (snapped != caret_.offset) setCaretRaw(TextPos{caret_.para, snapped});
     }
 
     // 这一轮排版的真实耗时（含截断/拼接/逐段汇总）—— 有些路径不经过
@@ -459,8 +463,9 @@ void EditorEngine::syncInlineObjects() {
     //   "显示才占位"这条规则没变，变的是分工：产边界在编译层（第五刀），
     //   决定显示哪些留在这里（只有引擎认识编辑模式与聚焦）。
     //
-    //   只改 objects、不整段拷回：编辑路径暂时仍直接改块流（树上编辑是下一刀），
-    //   整段拷回会把那些改动一起抹掉。
+    //   只改 objects、不整段拷回：这条路径该做的事只有"按名单筛"，别的字段不归它管。
+    //   （编辑已经改在树上，所以 blocks_ 与 blocks_full_ 现在同源 —— 整段拷回也等价，
+    //   但那样一来"筛名单"就顺带重写了别的字段，将来任何一处增量修改都会被它静默抹掉。）
     if (tree_valid_) {
         std::vector<NodeId> keep;
         const std::vector<int> bracketed = bracketedControls();

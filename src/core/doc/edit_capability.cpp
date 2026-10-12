@@ -150,13 +150,14 @@ FlowPos stepEditable(const NodeTree& tree, EditMode mode, FlowPos from, int dir)
 
 TabStop tabFrom(const NodeTree& tree, EditMode mode, FlowPos from, bool backward) {
     // 文档模式与只读模式都不消费：前者要把 Tab 当制表符，后者要放行给宿主。
-    if (mode != EditMode::Form) return TabStop{false, from};
+    if (mode != EditMode::Form) return TabStop{false, from, kInvalidNodeId};
 
     const FlowIndex idx(tree, visibilityOf(mode));
     std::vector<const Node*> all;
     collectAllControls(tree, tree.rootId(), &all);
 
     FlowPos best = -1;
+    NodeId best_owner = kInvalidNodeId;
     for (const Node* c : all) {
         const FlowPos start = idx.flowAt(Pos{c->id, 0});
         if (start < 0) continue;  // 隐藏，不在流里
@@ -169,10 +170,13 @@ TabStop tabFrom(const NodeTree& tree, EditMode mode, FlowPos from, bool backward
         // 所在的那个控件自己，否则从控件中间按 Shift+Tab 会先回到它自己的开头。
         const bool candidate = backward ? (e <= from) : (start > from);
         if (!candidate) continue;
-        if (best < 0 || (backward ? start > best : start < best)) best = start;
+        if (best < 0 || (backward ? start > best : start < best)) {
+            best = start;
+            best_owner = c->id;
+        }
     }
-    if (best < 0) return TabStop{false, from};
-    return TabStop{true, best};
+    if (best < 0) return TabStop{false, from, kInvalidNodeId};
+    return TabStop{true, best, best_owner};
 }
 
 EditCheck canDoStructureOp(const NodeTree& tree, EditMode mode, NodeId id) {

@@ -1829,6 +1829,141 @@ void checkStepRoundTrip() {
         f.content = ex.fragment;
         expectTrue(ex.ok && roundTrip(tree, Step{f}).empty(), "1.2 / 往返：InsertFragment 插回");
     }
+    {
+        // 段落格式与样式引用一起改：段落属性挂在结束标记上，改它只动数据、不动流结构。
+        NodeTree tree = makeEditTree();
+        const NodeId pm = tree.find(tree.firstSectionId())->children[1]->id;
+        SetParaMarkFormat s;
+        s.id = pm;
+        s.before = tree.find(pm)->para;
+        s.beforeStyleRef = tree.find(pm)->styleRef;
+        s.para = tree.find(pm)->para;
+        s.para.space_after = Length::abs(ptToEmu(18.0));
+        s.styleRef = "Quote";
+        expectTrue(roundTrip(tree, Step{s}).empty(),
+                   "1.2 / 往返：SetParaMarkFormat 改段落格式与样式引用");
+    }
+}
+
+/**
+ * 1.2：段落格式步骤的原值守卫。
+ *
+ * 这一步的用途是分段与合并里"把格式搬到正确的标记上"（见 steps.h），搬错一次就是整段换了
+ * 字号与样式。所以它与 SetControlProp 同一个口径：记的原值必须与文档当前值一致，不一致就拒绝
+ * —— 那说明这一步是在与别的编辑抢同一枚标记，或者被重放到了别的文档上。
+ */
+void checkParaMarkFormatGuard() {
+    const NodeTree probe = makeEditTree();
+    const NodeId pm = probe.find(probe.firstSectionId())->children[1]->id;
+
+    {
+        NodeTree tree = makeEditTree();
+        SetParaMarkFormat s;
+        s.id = pm;
+        s.before = probe.find(pm)->para;  // 与文档一致
+        s.beforeStyleRef = probe.find(pm)->styleRef;
+        s.para = s.before;  // 在原格式上只改一项
+        s.para.space_after = Length::abs(ptToEmu(18.0));
+        s.styleRef = s.beforeStyleRef;
+        const StepResult r = applyStep(tree, Step{s});
+        expectTrue(r.ok,
+                   "1.2 / 段落格式守卫：原值一致时放行" + (r.ok ? "" : "（" + r.error + "）"));
+        expectTrue(tree.find(pm)->para.space_after == Length::abs(ptToEmu(18.0)) &&
+                       tree.find(pm)->para.font_index == 3,
+                   "1.2 / 段落格式守卫：改一项不动其余（段后距 18 磅，字体仍是 3 号）");
+    }
+    {
+        NodeTree tree = makeEditTree();
+        SetParaMarkFormat s;
+        s.id = pm;
+        s.before.space_after = Length::abs(ptToEmu(99.0));  // 与文档当前值不符
+        const StepResult r = applyStep(tree, Step{s});
+        expectTrue(!r.ok && r.error.find("过期") != std::string::npos,
+                   "1.2 / 段落格式守卫：原值不符时被拒（" + r.error + "）");
+        expectTrue(
+            !tree.find(pm)->para.space_after.has_value() && tree.find(pm)->para.font_index == 3,
+            "★ 被拒时文档一个字段都没改（标记上还是原来那两项）");
+    }
+    {
+        NodeTree tree = makeEditTree();
+        SetParaMarkFormat s;
+        s.id = tree.find(tree.firstSectionId())->children[0]->id;  // 文本节点，不是标记
+        const StepResult r = applyStep(tree, Step{s});
+        expectTrue(!r.ok && r.error.find("段落标记") != std::string::npos,
+                   "1.2 / 段落格式守卫：目标不是段落标记时被拒（" + r.error + "）");
+    }
+    {
+        // 位置映射是恒等：它不改流位置，所以"穿过它搬坐标"必须原样返回。
+        NodeTree tree = makeEditTree();
+        SetParaMarkFormat s;
+        s.id = pm;
+        Step mapped = Step{s};
+        expectTrue(mapStepPositions(&mapped, Step{s}, Assoc::Before) &&
+                       std::get_if<SetParaMarkFormat>(&mapped) != nullptr,
+                   "1.2 / 段落格式：位置映射是恒等（不是搬不动）");
+    }
+}
+
+/**
+ * 1.2：删文本的切分（makeDeleteTextSteps）。
+ *
+ * 判据是一条对比加一条结构：同一个区间，按结构取（makeDeleteRange）构造不出来，按码点取能
+ * —— 结构口径会把落在控件内容里的端点向外扩到控件边界，取出来覆盖的是控件节点本身，
+ * 而可编辑集合里只有文本与段落标记。跨容器的那种要切成多条步骤，且从后往前排：每一步的坐标
+ * 都是它自己那一刻的坐标，不必再做位置映射。
+ */
+void checkDeleteTextSteps() {
+    {
+        NodeTree tree = makeEditTree();
+        const NodeId cc = tree.find(tree.firstSectionId())->children[3]->id;
+        const NodeId inner = tree.find(cc)->children[0]->id;
+        expectTrue(tree.find(inner)->text.size() == 2,
+                   "删文本 / 前提：控件内容里是两个码点（流位置 11 与 12）");
+
+        const DeleteBuild structural = makeDeleteRange(tree, Range{11, 12});
+        expectTrue(!structural.ok, "★ 删文本：按结构取同一个区间构造被拒（端点被扩到控件边界）—— " +
+                                       structural.error);
+
+        const std::vector<Step> steps = makeDeleteTextSteps(tree, 11, 12);
+        expectTrue(steps.size() == 1, "删文本：按码点取切出 1 条步骤");
+        bool applied = true;
+        for (const Step& s : steps) applied = applyStep(tree, s).ok && applied;
+        expectTrue(applied && tree.find(inner)->text == cps({0x64}),
+                   "★ 删文本：应用之后控件内容只剩 'd'（控件本身一个字都没动）");
+    }
+    {
+        // 跨控件边界：一边一个文本节点 → 两条步骤，从后往前排。
+        NodeTree tree;
+        const NodeId sec = tree.firstSectionId();
+        tree.setText(tree.appendChild(sec, NodeKind::TextRun), cps({0x61}));  // a
+        const NodeId cc = tree.appendChild(sec, NodeKind::ContentControl);
+        const NodeId inner = tree.appendChild(cc, NodeKind::TextRun);
+        tree.setText(inner, cps({0x62, 0x63}));  // bc
+        const NodeId tail = tree.appendChild(sec, NodeKind::TextRun);
+        tree.setText(tail, cps({0x64}));  // d
+        // 流：0 节起 ｜ 1 'a' ｜ 2 控件起 ｜ 3 'b' ｜ 4 'c' ｜ 5 控件止 ｜ 6 'd' ｜ 7 节止
+
+        expectTrue(makeDeleteTextSteps(tree, 2, 3).empty(),
+                   "删文本：只覆盖一枚容器边界时不给步骤（边界不是能删掉的码点）");
+
+        const std::vector<Step> steps = makeDeleteTextSteps(tree, 3, 7);
+        expectTrue(steps.size() == 2, "★ 删文本：跨控件边界切成两条（一边一条）");
+        const auto* first = (steps.size() == 2) ? std::get_if<DeleteRange>(&steps[0]) : nullptr;
+        expectTrue(first != nullptr && first->begin == 6 && first->end == 7,
+                   "★ 删文本：从后往前排（第一条先删右边那一段，左边那一步的坐标才不会失效）");
+
+        bool applied = true;
+        for (const Step& s : steps) applied = applyStep(tree, s).ok && applied;
+        expectTrue(applied, "★ 删文本：依次应用全部成功（没有步骤过期）");
+        // 被整块覆盖的文本节点是"摘下来"（find 仍找得到它，所以要看 isAttached），不是被改成空节点。
+        expectTrue(!isAttached(tree, inner) && !isAttached(tree, tail),
+                   "★ 删文本：两个文本节点都被整块摘下来（边界两侧各一条步骤）");
+        std::string left;
+        for (const Node* c : tree.find(sec)->children) {
+            left += codepointsToUtf8(c->text);
+        }
+        expectTrue(left == "a", "★ 删文本：节里剩下的文本只有 'a' —— 实际 " + left);
+    }
 }
 
 /**
@@ -2385,6 +2520,22 @@ void checkTabStops() {
                "1.4 / Tab：文档模式不消费 —— Tab 在那里是制表符");
     expectTrue(!tabFrom(tree, EditMode::ReadOnly, 0, false).handled,
                "1.4 / Tab：只读模式放行，让焦点落到编辑器之外");
+
+    // 目标必须带上它所属的控件：目标落在控件的内容起点上，而共享边界上"前一个控件的末尾"
+    //   与"这个控件的开头"是同一个位置 —— 只给位置，调用方按"最内层"重推会推成前一个控件
+    //   （只读时更糟：Tab 跳过去之后一个字都打不进去）。
+    {
+        const TabStop first = tabFrom(tree, EditMode::Form, 0, false);
+        const TabStop second = tabFrom(tree, EditMode::Form, 3, false);
+        const Node* c1 = tree.find(first.owner);
+        const Node* c2 = tree.find(second.owner);
+        expectTrue(c1 != nullptr && c1->kind == NodeKind::ContentControl && c2 != nullptr &&
+                       c2->kind == NodeKind::ContentControl && first.owner != second.owner,
+                   "1.4 / Tab：目标带上归属（两次落点分属两个不同的内容控件）");
+        expectTrue(!tabFrom(tree, EditMode::Form, 12, false).handled &&
+                       tabFrom(tree, EditMode::Form, 12, false).owner == kInvalidNodeId,
+                   "1.4 / Tab：放行时不给归属（kInvalidNodeId），不猜一个控件出来");
+    }
 }
 
 /**
@@ -5748,6 +5899,8 @@ int main() {
     checkNodeStepMap();
     checkNodeStepRejects();
     checkNodeStepGate();
+    checkParaMarkFormatGuard();
+    checkDeleteTextSteps();
 
     std::printf("  --- 1.5：控件索引与宿主 API ---\n");
     checkControlIndex();

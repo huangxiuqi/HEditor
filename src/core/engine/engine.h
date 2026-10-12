@@ -11,6 +11,8 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -18,7 +20,10 @@
 #include "core/doc/compile.h"
 #include "core/doc/control.h"
 #include "core/doc/document.h"
+#include "core/doc/edit_capability.h"
 #include "core/doc/edit_policy.h"
+#include "core/doc/flow.h"
+#include "core/doc/transaction.h"
 #include "core/engine/engine_config.h"
 #include "core/engine/engine_stats.h"
 #include "core/layout/layout.h"
@@ -71,6 +76,28 @@ public:
     const NodeTree& documentTree() const { return tree_; }
 
     /**
+     * 段落坐标与模型流位置的桥接 —— 第十四节那条接缝的另一半。
+     *
+     * 引擎对外一直说 (段, 段内码点偏移)，模型层说流位置；两者不能靠算式互换 —— 控件与节这些
+     * 容器在流里各占起止两位，而段的码点里没有它们。所以换算只认一个权威：编译给出的块来源
+     * 身份（BlockSource）加 FlowIndex。桥是单向的：模型是真相，段坐标是它的一个视图。
+     * 只有持树时（hasDocumentTree）桥才存在；旧路径的块流没有对应的树，入口返回 -1 与 false。
+     *
+     * owner_hint 是宿主与探针的说话方式（它们只认控件下标）：同一处边界上"控件之前 /
+     * 进入控件"是两个位置，提示把它投影成一个控件下标。引擎内部一律说侧别，见 flowPosAtSide。
+     */
+    FlowPos flowPosAt(int para, size_t cp_offset, int owner_hint = -1) const;
+    /**
+     * 桥接的底层：位置 = (段, 码点偏移, 侧别)。侧别见 caretSide 的注释。
+     */
+    FlowPos flowPosAtSide(int para, size_t cp_offset, int side) const;
+    /**
+     * 反向：流位置 → (段, 段内码点偏移)。落在段间（段落标记、节边界）上时归到相邻段的端点上
+     * —— 模型里的位置只有"内容上"的，没有"段间"的。不持树时返回 false。
+     */
+    bool flowToTextPos(FlowPos flow, TextPos* out) const;
+
+    /**
      * 重排版：从 layout_dirty_from_ 起的段重排，之前的段原样复用（续排契约见
      * core/layout/layout.h）。没有脏段时按全量处理 —— 宁可多排一次，也不拿旧前缀
      * 去接新后缀。底图内容随之作废，呈现时按页指纹增量重画。
@@ -101,16 +128,37 @@ public:
      */
     void setCaretAt(int para, size_t offset, int field);
     void setCaretAt(TextPos p, int field) { setCaretAt(p.para, p.offset, field); }
+    /**
+     * 带侧别的定位：光标位置 = (段, 段内码点偏移, 侧别)，侧别见 caretSide 的注释。
+     * 点击（宿主把 hitTestPt 量到的侧别带回来）与文档重建后搬回光标走它。
+     */
+    void setCaretAtSide(int para, size_t offset, int side);
+    void setCaretAtSide(TextPos p, int side) { setCaretAtSide(p.para, p.offset, side); }
+    /**
+     * 把光标摆到一个流位置上（绝对）。位置与侧别一次算准 —— 不猜、不查区间。
+     *
+     * 编辑路径全用它：删除后的落点是删除区间的起点、插入后是插入区间的终点、Tab 的目标、
+     * 撤销恢复的位置，它们都已经是流位置。只留一个码点偏移、再由"最内层含端点"猜回侧别的话，
+     * 猜错的表象就是"删一个字光标跳一格"。
+     */
+    bool setCaretAtFlow(FlowPos flow);
     const TextPos& caret() const { return caret_; }
     /**
-     * 光标当前的归属提示（-1 = 没有；按位置是否仍旧吻合判有效性）。
-     * 仅供编辑归属与光标几何使用。
+     * 光标当前的归属（-1 = 不在任何控件里；LineBox::kInlineOffsetOuter = 在所有控件之外）。
+     * 由"位置 + 侧别"推出来，不是独立状态（见 caretSide）。
      */
-    int caretFieldHint() const {
-        return (caret_field_ >= 0 && caret_field_at_ == caret_ && caret_field_ < controls_.size())
-                   ? caret_field_
-                   : -1;
-    }
+    int caretFieldHint() const;
+    /**
+     * 光标的侧别：在它那个码点偏移上跨过了几枚边界括号（0 = 在所有括号之前）。
+     * 与 caret() 合起来才是光标的完整位置 —— 同一个偏移上可能有好几个插入点
+     * （控件之前 / 进入控件 / 内容末尾 / 控件之后），光有偏移表达不了。
+     * 宿主重建文档后搬回光标、探针断言落点，都要用它。
+     */
+    int caretSide() const;
+    /**
+     * 写光标位置（侧别随之失效）。所有不带侧别的写入都走它 —— 见 setCaretRaw 的实现。
+     */
+    void setCaretRaw(TextPos p);
     /**
      * 按"用户感知字符"（簇）移动。dcp > 0 向后、< 0 向前。
      * 返回 true 表示光标真的动了（没动就别重绘）。
@@ -193,14 +241,45 @@ public:
 
     /**
      * 当前光标所在的最内层控件下标（-1 = 不在任何控件内）。
-     * 用 include_end = true：光标停在字段末尾也算在字段里。
-     * 例外是"点画布带来的归属提示"：共享边界上它比最内层更准（见 setCaretAt），
-     *   有提示时以提示为准 —— 界面上的"当前字段"要跟用户的点击一致。
+     * 由光标位置与侧别推出来（见 caretFieldHint）；推不出来时（旧路径的块流还没有
+     * 边界对象表、或光标落在所有控件之外）回落成"最内层含端点"—— 与编辑归属同一口径。
+     *
+     * 这条回落不只是为了好看：bracketedControls() 在聚焦档下要问它，而边界对象表
+     * 又是由 bracketedControls() 决定的 —— 少了回落，首次排版前会互相等成死结
+     * （一个括号都排不出来，于是更推不出归属）。
      */
     int focusedControlIndex() const {
         const int hint = caretFieldHint();
         if (hint >= 0) return hint;
         return controls_.empty() ? -1 : controls_.innermostAt(caret_, true);
+    }
+
+    /**
+     * 占位簇上的 owner 句柄 → 对外控件下标。
+     *
+     * 块流由编译产出时 owner 是控件的节点 id（第五刀：序号会在插入之后整体平移，而节点
+     * id 是身份），setBlocks 旧路径给的一直是下标。对外（宿主、探针、既有判据）的口径始终
+     * 是下标，所以"拿下标去和占位簇的 owner_control 比"的地方都要先过这里 ——
+     * 宿主报"这枚括号归谁"正是其中一处。
+     */
+    int controlIndexOfOwner(int owner) const {
+        if (owner_index_.empty()) return owner;  // 旧路径给的本来就是下标，原样返回
+        const auto it = owner_index_.find(owner);
+        return it == owner_index_.end() ? -1 : it->second;
+    }
+
+    /**
+     * 反方向：对外控件下标 → 块流对象表里的 owner 句柄。
+     *
+     * caretRectFor 拿它把光标归属（下标）换成句柄再去问排版 —— 比反了的表现是"共享边界上
+     * 光标画到另一侧去"，位置差一格，只有像素级判据看得出来。
+     * 负数（没有归属、贴外侧哨兵）原样传下去：它们在排版侧是同一种含义的另一种取值。
+     */
+    int slotOwnerOf(int control_index) const {
+        if (control_index < 0) return control_index;
+        if (!tree_valid_) return control_index;
+        if (control_index >= static_cast<int>(control_node_ids_.size())) return -1;
+        return static_cast<int>(control_node_ids_[static_cast<size_t>(control_index)]);
     }
 
     /**
@@ -255,13 +334,18 @@ public:
     long long blockedEdits() const { return blocked_edits_; }
 
     /**
-     * 最近一次从持树退回块流路径是否丢掉了字符级格式（编译产物的 run 序列不全是块级属性）。
-     * 诊断用：它说明该次降级是有损的 —— 旧路径的块流只有"整段一个 run"这一种形态，
-     * 混合字号的 run 序列没有地方表达，而那份格式要等树上编辑带过来。
+     * 撤销与重做：树上编辑走事务，栈由引擎持有。
+     *
+     * 撤销按事务逆序应用逆操作，不做文档快照 —— 快照回退会让整篇变脏，直接击穿增量排版。
+     * 撤销之后按事务记的编辑前选区恢复光标（选区在模型坐标里，经桥换回段坐标）。
+     * 不持树时（旧路径）没有事务可言：四个入口都返回 false，不假装能做。
      */
-    bool droppedCharFormats() const { return dropped_char_formats_; }
-
-    /**
+    bool canUndo() const { return undo_ != nullptr && undo_->canUndo(); }
+    bool canRedo() const { return undo_ != nullptr && undo_->canRedo(); }
+    bool undo();
+    bool redo();
+    bool undoAndRender();
+    bool redoAndRender(); /**
      * 帧坐标（磅）落在哪个控件上（取最内层）。-1 = 没有。
      * 它走的是 hitTestPt 的同一份几何，所以"视觉上在框里"与
      * "逻辑上在控件里"永远一致。
@@ -285,6 +369,21 @@ public:
      * 到头会绕回第一个 —— 表单里 Tab 就该是循环的。
      */
     bool focusControl(bool forward);
+
+    /**
+     * Tab / Shift+Tab 的策略版：持树时走模型层的能力表（edit_capability 的 tabFrom），
+     * 到最后一个可编辑控件就放行（返回 false，不消费该 Tab），不绕回第一个。
+     *
+     * 与 focusControl 的差别不只是循环与否：focusControl 认的是控件集合的区间起点，
+     * 而 tabFrom 认的是"内容起点落在可编辑集合内"这个谓词 —— 于是"只读控件里嵌的
+     * 可编辑控件"不会成为落点，反之亦然，两处口径不会各说各话。
+     * 不持树时退回 focusControl（旧路径没有流位置，能力表也用不上）。
+     */
+    bool tabCaret(bool backward);
+    /**
+     * 同上，带收尾重绘。
+     */
+    bool tabCaretAndRender(bool backward);
 
     /**
      * 跨字段移动光标必须用这一个（Tab / Shift+Tab 走的就是它）。
@@ -357,18 +456,17 @@ public:
      */
     bool caretRectPt(Rect* out) const;
     /**
-     * 反查：帧坐标（磅）→ (段, 偏移)。点落在页间空隙时返回 false。
+     * 反查：帧坐标（磅）→ (段, 偏移) + 侧别。点落在页间空隙时返回 false。
      *
-     * @param out_owner 非空时写出"该次点击属于哪个控件"（-1 = 判不出）。
-     *   与偏移分开返回是必须的：共享边界上两个相邻字段落在同一个偏移上
-     *   （前一个字段的末尾 = 后一个字段的开头），光有偏移无法表达用户点的是哪一侧。
-     *   判据全部来自排版自己插的占位簇（它记着 owner_control）：
-     *     点到占位簇 → 就是那个占位的主人；
-     *     点到真实簇 → 该位置的内容所属的控件（半开区间，于是"点字段第一个字的左半"
-     *       落在它的开头、归它，而不是归前一个字段）。
+     * @param out_side 非空时写出落点的侧别（见 caretSide）。它是落点的完整身份：
+     *   共享边界上"前一个字段的末尾"与"后一个字段的开头"是同一个偏移，同一个偏移上
+     *   还可能压着好几枚括号，光有偏移表达不了用户点的是哪一个位置。
+     * @param out_owner 非空时写出"该次点击属于哪个控件"（-1 = 判不出，
+     *   LineBox::kInlineOffsetOuter = 在所有控件之外）。它是侧别的投影，供宿主显示用；
+     *   搬运落点请用 out_side —— 投影会丢掉"同处好几枚括号"的细节。
      */
-    bool hitTestPt(float x_pt_frame, float y_pt_frame, TextPos* out,
-                   int* out_owner = nullptr) const;
+    bool hitTestPt(float x_pt_frame, float y_pt_frame, TextPos* out, int* out_owner = nullptr,
+                   int* out_side = nullptr) const;
 
     const uint8_t* frame() const { return bitmap_.data(); }
     int frameWidth() const { return bitmap_.width(); }
@@ -412,19 +510,69 @@ public:
 
 private:
     /**
+     * 落点判定的唯一入口：持树时走模型层的能力表（树 + 流位置），否则走旧的控件集合策略。
+     * 两条路只在这一处分叉，调用方拿到的是同一种回执（能不能 + 为什么不能）。
+     *
+     * 为什么不在调用处各写一遍：编辑入口有六个（插入、退格、前删、分段、合并、反缩进），
+     * 每处各写一遍必然分叉，而分叉的表现是"某一条路上打得进字、另一条路上打不进"，极难查。
+     *
+     * owner_hint 只对持树那条路有意义：它把落点贴到共享边界的内侧（见 flowPosAt）。
+     * 旧路径的归属提示由 EditPolicy 自己消化。
+     */
+    EditCheck policyAt(TextPos p, int owner_hint) const;
+    /**
+     * 删除区间的判定。跨段删除两条路都拒（档 1 的删除不跨段，段落标记的删除走合并）。
+     */
+    EditCheck policyErase(TextPos a, TextPos b) const;
+    /**
+     * 表单模式的安全阀：一个可编辑控件都没有时，表单退化为文档模式（编辑一律放行），
+     * 而不是"什么都不让改"。两条编辑路径共用它 —— 判据见 edit_policy.cpp 顶上那段。
+     */
+    bool formDegraded() const;
+    /**
+     * 导出后的控件集合里有没有可编辑的那一个。formDegraded 用它。
+     */
+    bool hasEditableControl() const;
+    /**
+     * 编辑落点的归属提示：p 就是当前光标时用点击带来的侧别（两条路都要用：旧路径把它交给
+     * EditPolicy 的 preferred，持树那条路用它把桥的落点贴到控件内侧）；没有点击提示且持树时，
+     * 回落成"最内层含端点的控件"—— 旧路径的归属规则。不持树且没有提示时返回 -1。
+     *
+     * 为什么持树时要回落而不是直接给 -1：桥上"无提示"取最外侧，于是光标停在字段起点会被
+     * 读成"在控件之前"，编辑被拒 —— 而光标看起来正贴在开括号之后。回落让两侧口径
+     * 一致：归属按"最内层含端点"定，与旧路径逐字相同。
+     */
+    int editOwnerHintAt(TextPos p) const;
+
+    /**
      * 从持有的树重新编译出块流，并把控件集合从产物的边界里导出来。
      * 隐藏控件的可见性口径按当前编辑模式取（见 setDocument 的说明）。
      */
     void rebuildFromTree();
     /**
-     * 编辑前的退让：树上编辑还没做，所以一旦真的要在文档上落笔，就摘掉"树是真相"这个标记，
-     * 诚实地退回块流路径 —— 不假装 blocks_ 还是树的产物。
+     * 在树上提交一个事务，然后把块流按新树重编译一次。
      *
-     * 退回之后控件集合与边界句柄全部按旧口径重来（owner 从节点 id 换回下标），
-     * 于是行为与"从未装载过树"逐字段相同。没有这一步，产物里的 owner 是节点 id
-     * 而控件集合已是旧路径的，命中测试会一律判不出"点到的括号是谁的"。
+     * 重编译是必须的而不是图省事：块流、流索引、块起点、来源身份、控件集合全是树的派生量，
+     * 少重建任何一个，下一轮就会拿旧树的位置去对新树的块（症状是光标落偏一个字、控件区间
+     * 慢一拍）。脏区只标到 dirty_para —— 同一段内的编辑不影响它前面的段，增量因此照旧成立；
+     * para_count_changed 为真时禁止后缀复用，理由见那个成员的说明。
      */
-    void leaveTreeModeForEdit();
+    bool commitOnTree(Transaction tx, int dirty_para, bool para_count_changed);
+    /**
+     * 树上的一段删除：把同一段内 [a, b) 这段（已吸附到簇边界）删掉。
+     *
+     * 退格、前删、反缩进三个入口只是算区间的方式不同，落到文档上的操作是同一个 —— 与旧路径
+     * 里它们共用 adjustControlsOnErase 同一个道理。策略判定留在调用方：被拒时要报的是
+     * "用户按的那一下没生效"，与"这一步做不成"不是一回事。
+     */
+    bool eraseOnTree(TextPos a, TextPos b, const char* label);
+    /**
+     * 落点处应当沿用的字符格式：取紧挨在它左边的那个文本节点的标记与样式引用。
+     *
+     * 不取"块级默认"：那样在粗体字中间敲一个字会得到不粗的新字。取邻居是"输入沿用落点处
+     * 已有样式"这条约定的最小实现；左边没有文本节点时返回空标记（= 全继承）。
+     */
+    CharFormat marksAtFlow(FlowPos at, std::string* style_ref) const;
     /**
      * 从块流的行内对象表导出控件集合：按 owner 配对起始与结束两枚边界，
      * 得到控件的 (起, 止) 区间。
@@ -436,18 +584,57 @@ private:
      */
     void exportControlsFromBlocks();
     /**
-     * 把排版产物里的不透明 owner 句柄翻译成控件集合下标。
-     *
-     * 块流由编译产出时 owner 是控件的节点 id（第五刀：序号会在插入之后整体平移，
-     * 而节点 id 是身份），setBlocks 旧路径给的一直是下标。对外（宿主、探针、既有判据）
-     * 的口径始终是下标，翻译只在这一处发生。
+     * 块内流偏移 → 段内码点偏移（flowToTextPos 的其中一段）。落在边界位上时归到那个
+     * 边界锚着的码点 —— 于是桥的两端互逆，不会因为中间隔着括号而越走越偏。
      */
-    int controlIndexOfOwner(int owner) const;
+    int cpOffsetInBlock(int para, int rel) const;
 
     /**
      * 把偏移吸附到簇边界（用当前 layout 的簇表）
      */
     size_t snapToCluster(int para, size_t offset) const;
+
+    /**
+     * 某偏移上的边界括号统计。侧别与流位置都从它推出来（两者是同一件事的两种说法）。
+     */
+    struct BracketCounts {
+        int closes = 0;  // 闭括号数 = "所有控件之外"那一侧的侧别
+        int opens = 0;
+        int before = 0;  // 排在它前面的边界枚数（对象表按 cp 升序，所以这也就是它的下标）
+    };
+    BracketCounts bracketCountsAt(int para, size_t cp) const;
+    /**
+     * 这个段的边界对象表。两条路各存一处：持树时产物在 blocks_full_（编译给的、
+     * 不筛显示名单的那一份，流位置就是按它摊开的），旧路径的块流没有编译产物，
+     * 对象由 syncInlineObjects 直接写进 blocks_。
+     */
+    const std::vector<InlineObject>& objectsFor(int para) const;
+    /**
+     * 段内相对流位置 = 码点偏移 + 排在它前面的边界数 + 侧别。
+     */
+    int relAt(int para, size_t cp, int side) const;
+    /**
+     * 提示（控件下标 / 贴外侧哨兵 / -1）→ 侧别。宿主与探针给的是提示，排版与流要的是侧别。
+     */
+    int sideFromHint(int para, size_t cp, int hint) const;
+    /**
+     * 文本码点区间 [a, b) 在流里占的那一段（段内相对，半开）。括号不是文本，不进这个区间。
+     * 判定（policyErase）与实际删除（eraseOnTree）共用它 —— 两处分叉就会出现
+     * "判据说能删、真删却越界"。
+     */
+    bool textSpanAt(int para, size_t a, size_t b, int* from, int* to) const;
+    /**
+     * 不带侧别时的默认侧别：按"最内层含端点"归一次（见 defaultSideAt 的实现）。
+     */
+    int defaultSideAt(int para, size_t cp) const;
+    /**
+     * 某个位置（不是光标）的侧别：按"最内层含端点"归一次，归不到就是"所有控件之外"。
+     */
+    int sideForPos(TextPos p) const;
+    /**
+     * 段内相对流位置 → 最内层包含它的控件下标（LineBox::kInlineOffsetOuter = 在所有控件之外）。
+     */
+    int hintFromRel(int para, int rel) const;
     /**
      * 找到包含该位置的行盒（先按行内范围命中，再退化为"同段最近行"）
      */
@@ -601,6 +788,30 @@ private:
      */
     std::unordered_map<int, int> owner_index_;
 
+    /**
+     * 树口径的流索引。可见性与编译同一处取（编辑态是设计态，呈现态摘掉隐藏子树），
+     * 于是"块流里数得到的东西"与"流位置里数得到的位数"始终是同一份文档的两种说法。
+     *
+     * 它是派生量：树一改就过期，所以只在重建块流时一起重建，不单独维护。用 optional
+     * 而不是常驻对象，是因为 FlowIndex 没有默认构造 —— 它一造出来就要一棵树。
+     */
+    std::optional<FlowIndex> flow_;
+    /**
+     * 每块内容起点的流位置，与 blocks_full_ 同长同序。取自 BlockSource::first 那枚元素在
+     * 流里的起点（见 compile.h）—— 空段取的是它自己的结束标记，"标记之前"就是内容起点。
+     */
+    std::vector<FlowPos> block_flow_;
+    /**
+     * 每块内容在流里占的位数：文本码点数 + 控件边界数。段间那个段落标记不在这里 ——
+     * 它是段与段之间的位置，不属于任何一段的内容。
+     */
+    std::vector<int> block_flow_span_;
+    /**
+     * 每块的来源身份（编译给出，与 blocks_full_ 同长同序）。编辑要在树上落笔时靠它找到
+     * "这一段是哪一棵子树里的那一段、被哪枚标记结束"。
+     */
+    std::vector<BlockSource> block_src_;
+
     LayoutResult layout_;
 
     /**
@@ -661,13 +872,17 @@ private:
     TextPos caret_{0, 0};
     bool caret_visible_ = true;
     /**
-     * 光标归属提示：点画布时定下来的"这个光标属于哪个控件"。
-     * 共享边界上两侧字段落在同一个偏移上，光看位置判不出侧别 —— 见 setCaretAt。
-     * 与 caret_field_at_ 配套：只有光标还停在这个位置上，提示才有效
-     * （位置一变就自动失效，不需要在每个编辑入口手工清）。
+     * 光标侧别：在它那个码点偏移上跨过了几枚边界括号（0 = 在所有括号之前）。
+     *
+     * 光标的完整位置是 (caret_, caret_side_)：同一个偏移上可能压着好几枚括号，
+     * "控件之前 / 进入控件 / 内容末尾 / 控件之后"是互不相同的插入点，只存偏移分不出来。
+     * 括号占位在排版侧各占一枚簇，所以侧别就是"数格子"，没有额外约定。
+     *
+     * 与 caret_side_at_ 配套：位置一变（编辑、程序化定位）它就失效，按"最内侧"重算 ——
+     * 不需要每个入口记得清，忘了清正是这类陈旧状态 bug 的来源。
      */
-    int caret_field_ = -1;
-    TextPos caret_field_at_{-1, 0};
+    int caret_side_ = -1;
+    TextPos caret_side_at_{-1, 0};
 
     /**
      * 底图当前显示的范围与有效性
@@ -711,9 +926,11 @@ private:
     EditPolicy policy_;
     long long blocked_edits_ = 0;
     /**
-     * 上一次从持树退回块流路径时丢掉了字符级格式（见 droppedCharFormats 的说明）。
+     * 撤销栈。只在持树时存在（setDocument 建、setBlocks 与 setControls 拆）——
+     * 旧路径的编辑由调用方自己改块流，引擎没有"改动由哪几步构成"可言，也就没有可撤销的单位。
+     * 它持的是 tree_ 的引用，而 tree_ 的地址在整个生命周期里不变。
      */
-    bool dropped_char_formats_ = false;
+    std::unique_ptr<UndoStack> undo_;
 
     /**
      * 表单标记（小点/方括号）在帧像素下的矩形，用来在下一帧把它们擦掉。

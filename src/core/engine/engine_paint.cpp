@@ -289,6 +289,7 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
 
     edit_stats_.caret_para = caret_.para;
     edit_stats_.caret_offset = caret_.offset;
+    edit_stats_.caret_side = caretSide();
     edit_stats_.caret_visible = (caret_visible_ && cr.w > 0.0f);
     edit_stats_.caret_x_px = static_cast<int>(cr.x);
     edit_stats_.caret_y_px = static_cast<int>(cr.y);

@@ -68,6 +68,16 @@ private:
         return n;
     }
     /**
+     * 记下本块第一个吃进内容的元素 —— 只在"这一块还没有过任何内容"时生效。
+     *
+     * 内容指会被算进产物的东西：待解析的文本、控件边界。控件被包在未编译的子树里时不产边界，
+     * 那时不该记它，否则来源身份会指向一个在产物里没有位置的节点。
+     */
+    void noteFirst(NodeId id) {
+        if (cur_first_ == kInvalidNodeId && pending_.empty() && obj_.empty()) cur_first_ = id;
+    }
+
+    /**
      * 记一条诊断，同一条原因只记一次。
      *
      * 为什么要去重：字符格式的诊断说的是"这段文字引用的样式有问题"，同一段里十个文本节点
@@ -84,6 +94,13 @@ private:
      * 落一段。mark 为空表示这一段没有结束标记（末尾未结束），用默认段落格式。
      */
     void flush(const Node* mark) {
+        const NodeId mark_id = (mark != nullptr) ? mark->id : kInvalidNodeId;
+        // 本块的来源身份：第一个吃进内容的元素；一段空空如也时就是它自己的结束标记。
+        //   在 obj_ 被搬走之前取，之后没法再判"这一段到底有没有过内容"。
+        const NodeId first_id = (cur_first_ != kInvalidNodeId) ? cur_first_
+                                                              : mark_id;
+        cur_first_ = kInvalidNodeId;
+
         BlockSpec b;
         if (mark != nullptr) applyParaFormat(*mark, &b);
         // 本段的行内对象表：进出控件边界时就地攒下（见 walk 里控件那一段），落段时一起带走。
@@ -131,6 +148,7 @@ private:
         }
         pending_.clear();
         out_.blocks.push_back(std::move(b));
+        out_.sources.push_back(BlockSource{first_id, mark_id});
     }
 
     /**
@@ -218,6 +236,7 @@ private:
 
         if (isText(n->kind)) {
             // 只缓存，不解析：三层解析要拿本段的段落样式，而它挂在这一段末尾的标记上。
+            noteFirst(n->id);
             PendingText t;
             t.cps = n->text;
             t.marks = n->marks;
@@ -245,6 +264,7 @@ private:
             const int owner = static_cast<int>(n->id);
             const bool ro = n->control.readonly;
             if (!flagged) {
+                noteFirst(n->id);
                 obj_.push_back(InlineObject{cpCount(), InlineObjectKind::ControlStart, owner, ro});
             }
             for (const Node* c : n->children) walk(c->id, flagged);
@@ -273,6 +293,10 @@ private:
     const StyleSheet& sheet_;
     std::vector<PendingText> pending_;  // 当前段落里待解析的文本段
     std::vector<InlineObject> obj_;     // 当前段落里已攒下的行内对象（控件边界）
+    /**
+     * 本块第一个吃进内容的元素（见 noteFirst）。落段时收进 sources，随后复位。
+     */
+    NodeId cur_first_ = kInvalidNodeId;
     CompileResult out_;
     int sections_seen_ = 0;
     bool pending_section_break_ = false;
