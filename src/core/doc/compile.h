@@ -58,4 +58,14 @@ struct CompileResult {
  */
 CompileResult compileDocument(const NodeTree& tree, FlowVisibility vis, const StyleSheet& sheet);
 
+/**
+ * 把一条独立的内容片段编译成段落序列：页眉页脚（第十节）走这条路。
+ *
+ * 它与正文共用同一个编译过程（同一套块级节点、同一套三层解析），差别只在入口 —— 片段根
+ * 不在正文流里、也不会遇到节，所以没有分节强制分页这一项。root 不是容器或不存在时返回
+ * 空产物（blocks 为空、诊断也为空），调用方拿不到内容就是拿不到，不伪造一段空段落。
+ */
+CompileResult compileFragment(const NodeTree& tree, NodeId root, FlowVisibility vis,
+                              const StyleSheet& sheet);
+
 }  // namespace heditor

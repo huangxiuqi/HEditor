@@ -26,7 +26,9 @@
 namespace heditor {
 
 /**
- * 一棵子树的描述。字段与 Node 一一对应，只少 id 与 parent。
+ * 一棵子树的描述。字段与 Node 一一对应，只有两处例外：不带 id 与 parent，也不带节记录
+ * （SectionSpec 里的页眉页脚引用是本文件内的节点 id，搬进一份可移植的值里没有意义；
+ * 整棵节的搬运要等序列化那一步把片段解析成内容）。
  */
 struct NodeSpec {
     NodeKind kind = NodeKind::TextRun;
@@ -38,6 +40,7 @@ struct NodeSpec {
     ControlSpec control;         // 仅内容控件
     CellSpan cell;               // 仅单元格
     TableSpec table;             // 仅表格
+    FieldSpec field;             // 仅域
     std::vector<NodeSpec> children;
 
     /**

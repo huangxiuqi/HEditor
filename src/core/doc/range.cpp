@@ -18,6 +18,7 @@ bool isSplittable(NodeKind kind) {
     switch (kind) {
         case NodeKind::Document:
         case NodeKind::Section:
+        case NodeKind::HeaderFooter:
         case NodeKind::Quote:
         case NodeKind::CodeBlock:
         case NodeKind::ListItem:

@@ -239,11 +239,14 @@ add_library(heditor_core STATIC
   src/core/doc/fragment.cpp
   src/core/doc/subtree.cpp
   src/core/doc/control_spec.cpp
+  src/core/doc/section_spec.cpp
+  src/core/doc/field_spec.cpp
   src/core/doc/control_index.cpp
   src/core/doc/control_api.cpp
   src/core/doc/validation.cpp
   src/core/doc/steps.cpp
   src/core/doc/transaction.cpp
+  src/core/doc/revision.cpp
   src/core/text/font.cpp
   src/core/text/shaper.cpp
   src/core/text/fallback.cpp

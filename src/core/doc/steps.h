@@ -255,4 +255,13 @@ Step invertStep(const Step& step);
  */
 FlowPos mapPos(const Step& step, FlowPos pos, Assoc assoc);
 
+/**
+ * 把 target 里记的全部流位置按 mapped_by 这一步的映射搬一次。
+ *
+ * 用在"一条步骤的坐标是在含某次编辑的文档里记下的，而那次编辑后来不生效了"这种场合：
+ * 把坐标穿过那次编辑的逆步骤，就回到了不含它的坐标。只覆盖内容级的五个步骤 —— 结构步骤
+ * （节点级）的位置含 Pos，单靠流位置映射搬不动，返回 false 让调用方显式处理，不静默照搬。
+ */
+bool mapStepPositions(Step* target, const Step& mapped_by, Assoc assoc);
+
 }  // namespace heditor

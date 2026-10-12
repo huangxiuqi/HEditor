@@ -21,17 +21,13 @@
 
 #include "core/doc/char_format.h"
 #include "core/doc/control_spec.h"
+#include "core/doc/field_spec.h"
+#include "core/doc/node_id.h"
 #include "core/doc/para_format.h"
+#include "core/doc/section_spec.h"
 #include "core/doc/table_spec.h"
 
 namespace heditor {
-
-/**
- * 节点身份。64 位、文档内唯一、不回收（删掉的 ID 不再复用，避免旧引用指向新节点），
- * 所以序列化时必须落盘。0 保留给"无效"。
- */
-using NodeId = uint64_t;
-inline constexpr NodeId kInvalidNodeId = 0;
 
 /**
  * 节点种类：只回答"结构上怎么处理"这一个问题。
@@ -56,6 +52,12 @@ enum class NodeKind : uint8_t {
     CodeBlock,
     ListItem,
     Link,
+    /**
+     * 页眉页脚的内容片段根（第十节）。它装块级内容，但不在正文流里：位置换算与段落序号
+     * 都看不到它，它由节的记录 HeaderFooter::root 引用，走自己的编译路径。单独一种容器，
+     * 是因为"在哪条流里"是结构差别，不是属性差别。
+     */
+    HeaderFooter,
     /**
      * 原子：不可再分，在流里是一个带宽度、参与断行的叶子
      */
@@ -168,6 +170,18 @@ struct Node {
      * 列由跨度派生。其余种类读它没有定义。
      */
     TableSpec table;
+
+    /**
+     * 域记录：只对 Field 有意义（第八节）。缓存值求值写入，其余字段是作者给的种类与属性名。
+     * 理由同 para —— 求值按流顺序走一遍树。其余种类读它没有定义。
+     */
+    FieldSpec field;
+
+    /**
+     * 节记录：只对 Section 有意义（第十节）。纸张、页边距、页眉页脚引用、页码，以及装未知
+     * 页面设置的属性袋。其余种类读它没有定义。
+     */
+    SectionSpec section;
 };
 
 /**
@@ -200,9 +214,18 @@ public:
     NodeId rootId() const { return root_->id; }
 
     /**
-     * 节序列的第一节。0.1 只建一节，分节在 1.8。
+     * 节序列的第一节。文档至少有一节：构造时就建好了。
      */
     NodeId firstSectionId() const { return section_->id; }
+
+    /**
+     * 节的个数与其第 i 节的 id（i 从 0 起，越界返回 kInvalidNodeId）。
+     *
+     * 分节（第十节）之后文档下有多个节，按序访问与逐节求值都需要它。顺序枚举走一遍根的孩子
+     * 即可：根的合法孩子只有节，数量也小，不值得再维护一张顺序表。
+     */
+    int sectionCount() const;
+    NodeId sectionAt(int index) const;
 
     /**
      * 找不到时返回 nullptr，不抛：拿 id 来查的多半是调用方自己算错了。
@@ -263,6 +286,21 @@ public:
      * 迄今分配过的最大 ID。序列化要用它续上分配器（1.10）。
      */
     NodeId maxAllocatedId() const { return next_id_ - 1; }
+
+    /**
+     * 把另一棵树的内容整体拷过来：先清空自己，再按原 id 重建全部节点与父子链，
+     * 连摘下的子树与节的页眉页脚引用一起带上，分配器也续在原处。
+     *
+     * 提供的是显式的拷贝入口而不是拷贝构造：整棵树的深拷贝很贵，隐式拷贝会藏在
+     * "按值传一个 NodeTree"这种看不出代价的地方。修订留痕（1.9）的基线要的就是一份
+     * 独立的值拷贝 —— 基线不能被后续编辑改到。
+     */
+    void assignFrom(const NodeTree& other);
+
+    /**
+     * 一份独立的值拷贝，内容与 id 都与自己相同。
+     */
+    NodeTree clone() const;
 
 private:
     NodeId allocateId() { return next_id_++; }

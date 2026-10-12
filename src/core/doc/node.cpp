@@ -16,6 +16,7 @@ bool isContainer(NodeKind kind) {
         case NodeKind::CodeBlock:
         case NodeKind::ListItem:
         case NodeKind::Link:
+        case NodeKind::HeaderFooter:
             return true;
         case NodeKind::Image:
         case NodeKind::Formula:
@@ -56,6 +57,8 @@ const char* nodeKindName(NodeKind kind) {
             return "ListItem";
         case NodeKind::Link:
             return "Link";
+        case NodeKind::HeaderFooter:
+            return "HeaderFooter";
         case NodeKind::Image:
             return "Image";
         case NodeKind::Formula:
@@ -121,6 +124,25 @@ bool isAttached(const NodeTree& tree, NodeId id) {
     const Node* n = tree.find(id);
     if (n == nullptr) return false;
     return n->parent != nullptr || id == tree.rootId();
+}
+
+int NodeTree::sectionCount() const {
+    int count = 0;
+    for (const Node* c : root_->children) {
+        if (c->kind == NodeKind::Section) ++count;
+    }
+    return count;
+}
+
+NodeId NodeTree::sectionAt(int index) const {
+    if (index < 0) return kInvalidNodeId;
+    int seen = 0;
+    for (const Node* c : root_->children) {
+        if (c->kind != NodeKind::Section) continue;
+        if (seen == index) return c->id;
+        ++seen;
+    }
+    return kInvalidNodeId;
 }
 
 NodeId NodeTree::insertChild(NodeId parent, int at, NodeKind kind) {
@@ -191,6 +213,59 @@ bool NodeTree::setText(NodeId id, std::vector<uint32_t> cps) {
     if (n == nullptr || !isText(n->kind)) return false;
     n->text = std::move(cps);
     return true;
+}
+
+void NodeTree::assignFrom(const NodeTree& other) {
+    if (this == &other) return;
+
+    pool_.clear();
+    index_.clear();
+    root_ = nullptr;
+    section_ = nullptr;
+    next_id_ = 1;
+
+    // 先按池的顺序建出全部节点（id 原样保留），再补父子链 —— 补链要按 id 查新节点，
+    // 所以两遍走。摘下的子树也在池里，一并拷过来，节的页眉页脚引用因此不会指向空。
+    std::unordered_map<NodeId, Node*> remap;
+    remap.reserve(other.pool_.size());
+    pool_.reserve(other.pool_.size());
+    for (const std::unique_ptr<Node>& src : other.pool_) {
+        auto dst = std::make_unique<Node>();
+        dst->id = src->id;
+        dst->kind = src->kind;
+        dst->text = src->text;
+        dst->hidden = src->hidden;
+        dst->para = src->para;
+        dst->styleRef = src->styleRef;
+        dst->marks = src->marks;
+        dst->control = src->control;
+        dst->cell = src->cell;
+        dst->table = src->table;
+        dst->field = src->field;
+        dst->section = src->section;
+        remap[dst->id] = dst.get();
+        index_[dst->id] = dst.get();
+        pool_.push_back(std::move(dst));
+    }
+    // 第二遍只搬 parent 与 children 这两个指针字段：整节点赋值会把旧指针也拷进来。
+    for (size_t i = 0; i < other.pool_.size(); ++i) {
+        Node* dst = pool_[i].get();
+        const Node* src = other.pool_[i].get();
+        dst->parent = (src->parent == nullptr) ? nullptr : remap[src->parent->id];
+        dst->children.clear();
+        dst->children.reserve(src->children.size());
+        for (const Node* c : src->children) dst->children.push_back(remap[c->id]);
+    }
+
+    root_ = (other.root_ == nullptr) ? nullptr : remap[other.root_->id];
+    section_ = (other.section_ == nullptr) ? nullptr : remap[other.section_->id];
+    next_id_ = other.next_id_;
+}
+
+NodeTree NodeTree::clone() const {
+    NodeTree out;
+    out.assignFrom(*this);
+    return out;
 }
 
 }  // namespace heditor

@@ -30,6 +30,7 @@
 #include "core/doc/control_api.h"
 #include "core/doc/control_index.h"
 #include "core/doc/edit_capability.h"
+#include "core/doc/field_spec.h"
 #include "core/doc/flow.h"
 #include "core/doc/fragment.h"
 #include "core/doc/invariants.h"
@@ -38,6 +39,8 @@
 #include "core/doc/normalize.h"
 #include "core/doc/para.h"
 #include "core/doc/range.h"
+#include "core/doc/revision.h"
+#include "core/doc/section_spec.h"
 #include "core/doc/steps.h"
 #include "core/doc/style.h"
 #include "core/doc/table.h"
@@ -1226,6 +1229,7 @@ void snapshotInto(const NodeTree& tree, NodeId id, std::vector<std::string>* out
     s += "|p=" + paraKey(n->para);
     s += "|s=" + n->styleRef;
     s += "|cs=" + std::to_string(n->cell.row_span) + "x" + std::to_string(n->cell.col_span);
+    s += "|fd=" + std::string(fieldKindName(n->field.kind)) + "," + n->field.name;
     s += "|h=" + std::to_string(n->hidden ? 1 : 0);
     s += "|kids=" + std::to_string(n->children.size());
     out->push_back(std::move(s));
@@ -1273,6 +1277,7 @@ void snapshotIdsInto(const NodeTree& tree, NodeId id, std::vector<std::string>* 
     s += "|p=" + paraKey(n->para);
     s += "|s=" + n->styleRef;
     s += "|cs=" + std::to_string(n->cell.row_span) + "x" + std::to_string(n->cell.col_span);
+    s += "|fd=" + std::string(fieldKindName(n->field.kind)) + "," + n->field.name;
     s += "|c=" + n->control.key + "," + n->control.controlType + "," +
          (n->control.readonly ? "ro" : "-") + "," + (n->control.structureLock ? "lock" : "open");
     s += "|h=" + std::string(n->hidden ? "1" : "0");
@@ -4052,6 +4057,593 @@ void checkTableColumnDefs() {
     }
 }
 
+/**
+ * 1.8：域的取值。四种取值与手算一致；文档属性缺失给空串；只有排版结果类需要迭代。
+ */
+void checkFieldValue() {
+    FieldContext ctx;
+    ctx.page_number = 3;
+    ctx.page_count = 9;
+    ctx.print_date = "2026-10-12";
+    ctx.doc_properties["hospital"] = "某医院";
+
+    FieldSpec f;
+    f.kind = FieldKind::PageNumber;
+    expectTrue(fieldValue(f, ctx) == "3", "1.8 / 域：页码取上下文里的页码");
+    f.kind = FieldKind::PageCount;
+    expectTrue(fieldValue(f, ctx) == "9", "1.8 / 域：总页数取上下文里的总页数");
+    f.kind = FieldKind::PrintDate;
+    expectTrue(fieldValue(f, ctx) == "2026-10-12", "1.8 / 域：打印日期取上下文里的日期");
+    f.kind = FieldKind::DocProperty;
+    f.name = "hospital";
+    expectTrue(fieldValue(f, ctx) == "某医院", "1.8 / 域：文档属性按名字取值");
+    f.name = "missing";
+    expectTrue(fieldValue(f, ctx).empty(), "1.8 / 域：文档属性缺失给空串（不猜、不报错）");
+
+    // 只有页码与总页数是本次排版的结果 —— 它们是唯一需要迭代的那一类。
+    expectTrue(isLayoutResult(FieldKind::PageNumber) && isLayoutResult(FieldKind::PageCount) &&
+                   !isLayoutResult(FieldKind::PrintDate) && !isLayoutResult(FieldKind::DocProperty),
+               "1.8 / 域：只有页码与总页数是排版结果（需要迭代的那一类）");
+}
+
+/**
+ * 1.8：求值幂等，且只写缓存值。
+ *
+ * 判据三支：第一次求值更新的个数与手算一致；除缓存外形状快照逐条相同、节点数不变
+ * （结构上不可能产生编辑步骤）；第二次求值 updated 为 0。
+ */
+void checkFieldEval() {
+    NodeTree tree;
+    const NodeId sec = tree.firstSectionId();
+    // 正文一个页码域，缓存先写一个过期的值。
+    const NodeId f_page = tree.appendChild(sec, NodeKind::Field);
+    tree.find(f_page)->field.kind = FieldKind::PageNumber;
+    tree.find(f_page)->field.cache = "过期值";
+    tree.setText(tree.appendChild(sec, NodeKind::TextRun), cps({0x41}));
+    tree.appendChild(sec, NodeKind::ParagraphMark);
+
+    // 页眉片段里的一个文档属性域：它不在正文流里，但也是这篇文档的域。
+    const NodeId hf = tree.createDetached(NodeKind::HeaderFooter);
+    const NodeId f_prop = tree.appendChild(hf, NodeKind::Field);
+    tree.find(f_prop)->field.kind = FieldKind::DocProperty;
+    tree.find(f_prop)->field.name = "hospital";
+    tree.appendChild(hf, NodeKind::ParagraphMark);
+    tree.find(sec)->section.header(HfVariant::First).root = hf;
+
+    FieldContext ctx;
+    ctx.page_number = 3;
+    ctx.page_count = 9;
+    ctx.print_date = "2026-10-12";
+    ctx.doc_properties["hospital"] = "某医院";
+
+    const std::vector<std::string> before = shapeSnapshot(tree);
+    const size_t nodes_before = tree.nodeCount();
+    const NodeId max_before = tree.maxAllocatedId();
+
+    const FieldEvalResult r1 = evaluateFields(tree, ctx);
+    expectTrue(r1.examined == 2 && r1.updated == 2,
+               "1.8 / 求值：看到 2 个域（正文一个、页眉一个），两个缓存都更新了");
+    expectTrue(tree.find(f_page)->field.cache == "3" && tree.find(f_prop)->field.cache == "某医院",
+               "1.8 / 求值：正文域更新为页码、页眉域更新为文档属性");
+
+    const std::vector<std::string> after = shapeSnapshot(tree);
+    expectTrue(firstSnapshotDiff(before, after) < 0,
+               "1.8 / 求值：除缓存值以外，文档形状一个字段都没动");
+    expectTrue(tree.nodeCount() == nodes_before && tree.maxAllocatedId() == max_before,
+               "1.8 / 求值：不新增、不删除节点 —— 结构上不可能产生编辑步骤");
+
+    const FieldEvalResult r2 = evaluateFields(tree, ctx);
+    expectTrue(r2.examined == 2 && r2.updated == 0,
+               "1.8 / 求值幂等：第二遍看到同样多的域、更新的个数为 0");
+    expectTrue(firstSnapshotDiff(after, shapeSnapshot(tree)) < 0,
+               "1.8 / 求值幂等：第二遍之后形状快照仍逐条相同");
+
+    // 上下文变了，只有相关的那一个域跟着变；再跑一遍又幂等。
+    ctx.page_number = 4;
+    const FieldEvalResult r3 = evaluateFields(tree, ctx);
+    expectTrue(r3.updated == 1 && tree.find(f_page)->field.cache == "4",
+               "1.8 / 求值：上下文变了只更新相关的那一个域");
+    expectTrue(evaluateFields(tree, ctx).updated == 0, "1.8 / 求值幂等：新值之后再跑一遍仍为 0");
+}
+
+/**
+ * 1.8：域在流里是原子。占一个位置、参与断行、不可被拆开，含域的区间不能被提取。
+ */
+void checkFieldAtomic() {
+    NodeTree tree;
+    const NodeId sec = tree.firstSectionId();
+    const NodeId f = tree.appendChild(sec, NodeKind::Field);
+    tree.find(f)->field.kind = FieldKind::PageNumber;  // 缓存为空：尚未分页
+    tree.setText(tree.appendChild(sec, NodeKind::TextRun), cps({0x41, 0x42}));
+    tree.appendChild(sec, NodeKind::ParagraphMark);
+
+    const FlowIndex idx(tree, FlowVisibility::Design);
+    int first = -1;
+    int end = -1;
+    expectTrue(idx.intervalOf(f, &first, &end) && end - first == 1,
+               "1.8 / 域是原子：在流里正好占一个位置（缓存为空也一样）");
+    expectTrue(idx.flowAt(Pos{f, 0}) == first && idx.flowAt(Pos{f, 1}) == -1,
+               "1.8 / 域是原子：只有自身之前可寻址，内部没有半个位置");
+
+    // 与其它原子同一条限制：可编辑集合只有文本与段落标记，含域的区间在提取时被拒并给原因。
+    const ExtractResult bad = extractRange(tree, Range{first, first + 1});
+    expectTrue(!bad.ok && bad.error.find("Field") != std::string::npos,
+               "1.8 / 域是原子：含域的区间被拒，原因里点出是哪种元素（" + bad.error + "）");
+}
+
+/**
+ * 1.8：纸张尺寸是派生值，只有自定义纸张才存显式宽高；默认节与引擎当前默认一致。
+ */
+void checkPaperDerivation() {
+    Paper p;
+    expectTrue(paperSize(p) == PaperSizeEmu{mmToEmu(210.0), mmToEmu(297.0)},
+               "1.8 / 纸张：A4 纵向派生 210x297 毫米");
+    p.orient = Orientation::Landscape;
+    expectTrue(paperSize(p) == PaperSizeEmu{mmToEmu(297.0), mmToEmu(210.0)},
+               "1.8 / 纸张：横向交换宽高，规格本身不变");
+    p.orient = Orientation::Portrait;
+    p.name = PaperName::A5;
+    expectTrue(paperSize(p) == PaperSizeEmu{mmToEmu(148.0), mmToEmu(210.0)},
+               "1.8 / 纸张：A5 派生 148x210 毫米");
+    p.name = PaperName::B5;
+    expectTrue(paperSize(p) == PaperSizeEmu{mmToEmu(176.0), mmToEmu(250.0)},
+               "1.8 / 纸张：B5 取 ISO 176x250");
+    p.name = PaperName::Letter;
+    expectTrue(paperSize(p) == PaperSizeEmu{toEmu(8.5, Unit::Inch), toEmu(11.0, Unit::Inch)},
+               "1.8 / 纸张：Letter 按英寸派生 8.5x11");
+    p.name = PaperName::Legal;
+    expectTrue(paperSize(p) == PaperSizeEmu{toEmu(8.5, Unit::Inch), toEmu(14.0, Unit::Inch)},
+               "1.8 / 纸张：Legal 按英寸派生 8.5x14");
+
+    p.name = PaperName::Custom;
+    p.width = Length::abs(mmToEmu(200.0));
+    p.height = Length::abs(mmToEmu(300.0));
+    expectTrue(paperSize(p) == PaperSizeEmu{mmToEmu(200.0), mmToEmu(300.0)},
+               "1.8 / 纸张：自定义纸张用显式宽高");
+    p.height = Length::percent(1, 2);
+    expectTrue(paperSize(p) == PaperSizeEmu{0, 0},
+               "1.8 / 纸张：自定义纸张的高度不是绝对长度时给零尺寸（不猜、不截断）");
+
+    const SectionSpec def;
+    expectTrue(def.paper.name == PaperName::A4 && def.paper.orient == Orientation::Portrait &&
+                   def.margins.top == Length::abs(cmToEmu(2.0)) &&
+                   def.margins.bottom == Length::abs(cmToEmu(2.0)) &&
+                   def.margins.left == Length::abs(cmToEmu(2.0)) &&
+                   def.margins.right == Length::abs(cmToEmu(2.0)),
+               "1.8 / 节：默认节是 A4 纵向、四边 2 厘米（与引擎当前默认一致）");
+    expectTrue(def.break_kind == SectionBreak::Continuous && !def.mirror_margins &&
+                   def.valign == VerticalAlign::Top && !def.numbering.restart,
+               "1.8 / 节：默认连续、不镜像、垂直对齐于上、页码不重编");
+}
+
+/**
+ * 1.8：节点与节的记录 —— 能存住、能比出来。属性袋是"打开再保存不损坏文档"的落点。
+ */
+void checkSectionBag() {
+    SectionSpec s;
+    s.extra["w:printerSettings"] = "RQA=";
+    s.extra["compat:hideMark"] = "true";
+    const SectionSpec copy = s;
+    expectTrue(copy.sameAs(s), "1.8 / 节：属性袋随节记录一起拷贝，一个键都不丢");
+    SectionSpec changed = s;
+    changed.extra["compat:hideMark"] = "false";
+    expectTrue(!changed.sameAs(s), "1.8 / 节：属性袋里改一个值，sameAs 比得出来");
+    changed = s;
+    changed.extra.erase("compat:hideMark");
+    expectTrue(!changed.sameAs(s), "1.8 / 节：属性袋里少一个键，sameAs 比得出来");
+
+    // 只原样存住的那几项也要能存住、能比出来。
+    SectionSpec a;
+    a.gutter.size = Length::abs(cmToEmu(0.5));
+    a.gutter.side = Gutter::Side::Top;
+    a.mirror_margins = true;
+    a.valign = VerticalAlign::Both;
+    a.numbering.format = PageNumberFormat::RomanUpper;
+    a.numbering.start = 5;
+    a.numbering.restart = true;
+    a.writing_mode = WritingMode::VerticalRL();
+    const SectionSpec b = a;
+    expectTrue(b.sameAs(a) && b.gutter.side == Gutter::Side::Top && b.mirror_margins &&
+                   b.valign == VerticalAlign::Both &&
+                   b.numbering.format == PageNumberFormat::RomanUpper && b.numbering.start == 5 &&
+                   b.numbering.restart,
+               "1.8 / 节：装订线、镜像、垂直对齐、页码、竖排都存进节记录并可拷贝");
+    SectionSpec c = a;
+    c.writing_mode = WritingMode::HorizontalTB();
+    expectTrue(!c.sameAs(a), "1.8 / 节：书写模式差一个分量，sameAs 比得出来");
+}
+
+/**
+ * 1.8：分节的结构与节的边界不进流。
+ */
+NodeId appendSectionWithParagraph(NodeTree& tree, const std::vector<uint32_t>& text,
+                                  SectionBreak brk) {
+    const NodeId sec = tree.insertChild(tree.rootId(), tree.sectionCount(), NodeKind::Section);
+    tree.find(sec)->section.break_kind = brk;
+    tree.setText(tree.appendChild(sec, NodeKind::TextRun), text);
+    tree.appendChild(sec, NodeKind::ParagraphMark);
+    return sec;
+}
+
+void checkMultiSection() {
+    NodeTree tree;
+    const NodeId s1 = tree.firstSectionId();
+    tree.setText(tree.appendChild(s1, NodeKind::TextRun), cps({0x41}));
+    tree.appendChild(s1, NodeKind::ParagraphMark);
+    const NodeId s2 = appendSectionWithParagraph(tree, cps({0x42}), SectionBreak::NextPage);
+
+    expectTrue(tree.sectionCount() == 2 && tree.sectionAt(0) == s1 && tree.sectionAt(1) == s2 &&
+                   tree.sectionAt(2) == kInvalidNodeId && tree.sectionAt(-1) == kInvalidNodeId,
+               "1.8 / 分节：文档下两节按序可取，越界给无效 id");
+
+    // 节边界不是流元素：两节各 4 个位置（起始边界 + 一个码点 + 一个标记 + 结束边界）。
+    const FlowIndex idx(tree, FlowVisibility::Design);
+    expectTrue(idx.size() == 8, "1.8 / 分节：节边界不进流，两节各 4 个位置共 8 个");
+
+    // 正文编译按节顺序连起来，两段文本都在。
+    const CompileResult r = compileDocument(tree, FlowVisibility::Design, noStyles());
+    expectTrue(r.ok() && r.blocks.size() == 2 && r.blocks[0].cp_text == cps({0x41}) &&
+                   r.blocks[1].cp_text == cps({0x42}),
+               "1.8 / 分节：正文编译按节顺序连成两段");
+}
+
+/**
+ * 1.8：页眉页脚片段不在正文流里，走自己的编译路径，复用同一套块级节点。
+ */
+void checkHeaderFooterFragment() {
+    NodeTree tree;
+    const NodeId s1 = tree.firstSectionId();
+    tree.setText(tree.appendChild(s1, NodeKind::TextRun), cps({0x41}));
+    tree.appendChild(s1, NodeKind::ParagraphMark);
+
+    const NodeId hf = tree.createDetached(NodeKind::HeaderFooter);
+    const NodeId hf_text = tree.appendChild(hf, NodeKind::TextRun);
+    tree.setText(hf_text, cps({0x48, 0x49}));
+    tree.appendChild(hf, NodeKind::ParagraphMark);
+    tree.find(s1)->section.header(HfVariant::First).root = hf;
+
+    const FlowIndex idx(tree, FlowVisibility::Design);
+    expectTrue(!idx.inFlow(hf) && !idx.inFlow(hf_text),
+               "1.8 / 页眉页脚：片段不在正文流里（位置换算看不到它）");
+
+    const CompileResult body = compileDocument(tree, FlowVisibility::Design, noStyles());
+    expectTrue(body.ok() && body.blocks.size() == 1 && body.blocks[0].cp_text == cps({0x41}),
+               "1.8 / 页眉页脚：正文编译不把页眉内容并进来");
+
+    const CompileResult frag = compileFragment(tree, hf, FlowVisibility::Design, noStyles());
+    expectTrue(frag.ok() && frag.blocks.size() == 1 && frag.blocks[0].cp_text == cps({0x48, 0x49}),
+               "1.8 / 页眉页脚：片段走自己的编译路径，复用同一套块级节点");
+
+    expectTrue(
+        compileFragment(tree, kInvalidNodeId, FlowVisibility::Design, noStyles()).blocks.empty() &&
+            compileFragment(tree, hf_text, FlowVisibility::Design, noStyles()).blocks.empty(),
+        "1.8 / 页眉页脚：根无效或不是容器时返回空产物（不伪造一段空段落）");
+
+    expectTrue(tree.find(s1)->section.header(HfVariant::Odd).linked_to_previous &&
+                   tree.find(s1)->section.footer(HfVariant::Even).linked_to_previous,
+               "1.8 / 页眉页脚：默认链接到前一节（不设就是继承）");
+}
+
+/**
+ * 1.8：分节强制分页落成引擎已认识的段前分页标记，因此不引入新的排版路径。
+ */
+void checkSectionBreakCompile() {
+    // 第二节 = 下一页：它的第一个段落被标上段前分页，第一节不标。
+    NodeTree tree;
+    const NodeId s1 = tree.firstSectionId();
+    tree.setText(tree.appendChild(s1, NodeKind::TextRun), cps({0x41}));
+    tree.appendChild(s1, NodeKind::ParagraphMark);
+    appendSectionWithParagraph(tree, cps({0x42}), SectionBreak::NextPage);
+    const CompileResult r = compileDocument(tree, FlowVisibility::Design, noStyles());
+    expectTrue(r.ok() && r.blocks.size() == 2 && !r.blocks[0].page_break_before &&
+                   r.blocks[1].page_break_before,
+               "1.8 / 分节强制分页：第一节不标、第二节的第一个段落标上段前分页");
+
+    // 与全量一致的形式：同一份内容，走分节与走段落自带的段前分页产出一致。
+    NodeTree manual;
+    const NodeId m1 = manual.firstSectionId();
+    manual.setText(manual.appendChild(m1, NodeKind::TextRun), cps({0x41}));
+    manual.appendChild(m1, NodeKind::ParagraphMark);
+    const NodeId m2 = appendSectionWithParagraph(manual, cps({0x42}), SectionBreak::Continuous);
+    // 把第二节第一段换成显式段前分页。
+    manual.find(m2)->children[1]->para.page_break_before = true;
+    const CompileResult rm = compileDocument(manual, FlowVisibility::Design, noStyles());
+    expectTrue(rm.blocks.size() == 2 &&
+                   rm.blocks[0].page_break_before == r.blocks[0].page_break_before &&
+                   rm.blocks[1].page_break_before == r.blocks[1].page_break_before &&
+                   rm.blocks[1].cp_text == r.blocks[1].cp_text,
+               "1.8 / 分节强制分页：与段落自带段前分页的产物逐字段一致");
+
+    // 首节写了节类型也不生效（它前面没有节）；连续节不标。
+    NodeTree cont;
+    const NodeId c1 = cont.firstSectionId();
+    cont.find(c1)->section.break_kind = SectionBreak::NextPage;
+    cont.setText(cont.appendChild(c1, NodeKind::TextRun), cps({0x41}));
+    cont.appendChild(c1, NodeKind::ParagraphMark);
+    appendSectionWithParagraph(cont, cps({0x42}), SectionBreak::Continuous);
+    const CompileResult rc = compileDocument(cont, FlowVisibility::Design, noStyles());
+    expectTrue(
+        rc.blocks.size() == 2 && !rc.blocks[0].page_break_before && !rc.blocks[1].page_break_before,
+        "1.8 / 分节强制分页：首节的节类型不生效、连续节不标分页");
+
+    // 奇数页/偶数页现在与下一页等效：都表达"下一节从新页开始"。
+    NodeTree odd;
+    const NodeId o1 = odd.firstSectionId();
+    odd.setText(odd.appendChild(o1, NodeKind::TextRun), cps({0x41}));
+    odd.appendChild(o1, NodeKind::ParagraphMark);
+    appendSectionWithParagraph(odd, cps({0x42}), SectionBreak::OddPage);
+    appendSectionWithParagraph(odd, cps({0x43}), SectionBreak::EvenPage);
+    const CompileResult ro = compileDocument(odd, FlowVisibility::Design, noStyles());
+    expectTrue(ro.blocks.size() == 3 && !ro.blocks[0].page_break_before &&
+                   ro.blocks[1].page_break_before && ro.blocks[2].page_break_before,
+               "1.8 / 分节强制分页：奇数页与偶数页起始都从新页开始");
+}
+
+/**
+ * 1.9 的辅助：一棵只有一段文字的文档。
+ */
+NodeTree makeTextTree(const std::vector<uint32_t>& text) {
+    NodeTree tree;
+    const NodeId sec = tree.firstSectionId();
+    tree.setText(tree.appendChild(sec, NodeKind::TextRun), text);
+    tree.appendChild(sec, NodeKind::ParagraphMark);
+    return tree;
+}
+
+/**
+ * 1.9 的辅助：把文档编译成段落序列再拼成文本，段与段之间一个换行。
+ *
+ * 走编译而不是直接遍历树，是为了拿到一个与"树里怎么存"无关的视图 —— 文本节点怎么切、
+ * 有没有合并，都不影响它。展开结果与手算的比对落在它上面，判据才不依赖内部形状。
+ */
+std::string compiledText(const NodeTree& tree) {
+    const CompileResult r = compileDocument(tree, FlowVisibility::Design, noStyles());
+    std::string out;
+    for (size_t i = 0; i < r.blocks.size(); ++i) {
+        if (i > 0) out.push_back('\n');
+        for (uint32_t cp : r.blocks[i].cp_text) out.push_back(static_cast<char>(cp));
+    }
+    return out;
+}
+
+/**
+ * 1.9 的辅助：展开到 out，成功时把文本读出来。
+ *
+ * 单独一步而不是写进断言里：断言的条件与消息的求值顺序未指定，把展开放在条件里、把读文本
+ * 放在消息里，消息会拿到展开之前的文本（失败时给出的"实际值"就是错的）。
+ */
+bool expandText(const RevisionLog& log, NodeTree& out, std::string* text) {
+    if (!log.expand(out).ok) return false;
+    *text = compiledText(out);
+    return true;
+}
+
+/**
+ * 1.9：修订记录的状态机与边界。三态、越界、已接受的不能再拒绝、非内容级步骤被拒。
+ */
+void checkRevisionStates() {
+    NodeTree tree = makeTextTree(cps({0x41, 0x42}));  // AB
+    RevisionLog log;
+    expectTrue(!log.hasBaseline() && log.count() == 0, "1.9 / 修订：新建的记录没有基线、没有修订");
+
+    log.reset(tree);
+    expectTrue(log.hasBaseline() && log.count() == 0, "1.9 / 修订：记基线之后基线就位、修订为空");
+
+    InsertText ins;
+    ins.at = 1;
+    ins.cps = cps({0x58});  // X
+    const Step step = Step{ins};
+    expectTrue(log.record(step, "张三", "2026-10-12 09:00").ok, "1.9 / 修订：记录一条内容级修订");
+    expectTrue(log.count() == 1 && log.count(RevisionState::Pending) == 1 &&
+                   log.revisions()[0].author == "张三" &&
+                   log.revisions()[0].time == "2026-10-12 09:00",
+               "1.9 / 修订：新记的修订是待定，作者与时间原样保留");
+
+    expectTrue(log.accept(0).ok && log.count(RevisionState::Accepted) == 1 &&
+                   log.count(RevisionState::Pending) == 0,
+               "1.9 / 修订：接受之后状态变已接受");
+    expectTrue(!log.reject(0).ok, "1.9 / 修订：已接受的修订不能再拒绝（给失败而不是改状态）");
+    expectTrue(log.accept(1).error.find("越界") != std::string::npos,
+               "1.9 / 修订：下标越界给失败并写明原因");
+
+    // 结构步骤与属性步骤不作为修订记录：它们的位置含槽位，单靠流位置映射搬不动。
+    SetControlProp prop;
+    prop.id = tree.firstSectionId();
+    const StepResult prop_r = log.record(Step{prop}, "张三", "t");
+    expectTrue(!prop_r.ok && prop_r.error.find("内容级") != std::string::npos,
+               "1.9 / 修订：结构 / 属性步骤被显式拒绝（" + prop_r.error + "）");
+
+    // 拒绝之后可以再接受，等于撤回那次拒绝。
+    RevisionLog log2;
+    log2.reset(tree);
+    log2.record(step, "a", "t");
+    expectTrue(log2.reject(0).ok && log2.count(RevisionState::Rejected) == 1,
+               "1.9 / 修订：拒绝之后状态变已拒绝");
+    expectTrue(log2.accept(0).ok && log2.count(RevisionState::Accepted) == 1 &&
+                   log2.count(RevisionState::Rejected) == 0,
+               "1.9 / 修订：拒绝过的修订可以再接受（撤回那次拒绝）");
+}
+
+/**
+ * 1.9：展开 = 基线 + 未被拒绝的修订。判据与"正常编辑路径"的文档逐条比对。
+ */
+void checkRevisionExpand() {
+    NodeTree base = makeTextTree(cps({0x41, 0x42, 0x43}));  // ABC
+    RevisionLog log;
+    log.reset(base);
+
+    auto insertAt = [](FlowPos at, uint32_t cp) {
+        InsertText s;
+        s.at = at;
+        s.cps = {cp};
+        return Step{s};
+    };
+    // 坐标是文档的流位置：节内容从 1 起（0 是节的起始边界）。ABC 占 [1,4)，
+    // 所以"插在 A 之后"是 2、"插在 B 之后"是 4、"插在末尾"是 6。
+    const std::vector<Step> steps = {insertAt(2, 0x58), insertAt(4, 0x59), insertAt(6, 0x5A)};
+
+    // 正常编辑路径：同样的三步应用到一个工作文档上（走撤销栈，与命令层同一条路）。
+    NodeTree work = base.clone();
+    UndoStack stack(work);
+    const Range caret{0, 0};
+    for (const Step& s : steps) {
+        const StepResult applied = stack.commit(Transaction{{s}, caret, caret, "t"});
+        expectTrue(applied.ok, "1.9 / 展开：工作文档上应用一条编辑");
+        expectTrue(log.record(s, "张三", "t").ok, "1.9 / 展开：记录同一条修订");
+    }
+    expectTrue(compiledText(work) == "AXBYCZ",
+               "1.9 / 展开：工作文档的文本是 AXBYCZ（实际 " + compiledText(work) + "）");
+
+    NodeTree out;
+    std::string got;
+    const StepResult ex = log.expand(out);
+    expectTrue(ex.ok, "1.9 / 展开：三条待定修订展开成功（" + ex.error + "）");
+    expectTrue(firstSnapshotDiff(shapeSnapshot(work), shapeSnapshot(out)) < 0,
+               "1.9 / 展开：与正常编辑路径的文档逐条相同（" +
+                   snapshotDiffText(shapeSnapshot(work), shapeSnapshot(out)) + "）");
+    got = compiledText(out);
+    expectTrue(got == "AXBYCZ", "1.9 / 展开：文本按记录顺序应用（手算 AXBYCZ，实际 " + got + "）");
+    expectClean(out, "1.9 / 展开：产物满足全部不变量");
+
+    NodeTree out2;
+    expectTrue(
+        log.expand(out2).ok && firstSnapshotDiff(shapeSnapshot(out), shapeSnapshot(out2)) < 0,
+        "1.9 / 展开幂等：同一个记录展开两次结果逐条相同");
+
+    // 接受只改状态：已接受的修订本来就在展开里，所以展开结果不变。
+    log.accept(0);
+    log.accept(2);
+    NodeTree out3;
+    expectTrue(
+        log.expand(out3).ok && firstSnapshotDiff(shapeSnapshot(out), shapeSnapshot(out3)) < 0,
+        "1.9 / 展开：接受两条之后展开结果不变");
+
+    // 基线是独立的拷贝：工作文档被改过，基线仍是记录那一刻的内容。
+    expectTrue(compiledText(log.baseline()) == "ABC" && compiledText(base) == "ABC",
+               "1.9 / 修订：基线是独立拷贝，没有被后续编辑改到");
+}
+
+/**
+ * 1.9：拒绝之后展开结果与手算一致 —— 插入、删除、分段各一条，再加一条早的修订。
+ */
+void checkRevisionReject() {
+    // 拒绝一条插入：内容回到基线。
+    {
+        NodeTree base = makeTextTree(cps({0x41, 0x42}));  // AB，A 在 1、B 在 2
+        RevisionLog log;
+        log.reset(base);
+        InsertText ins;
+        ins.at = 2;  // A 与 B 之间
+        ins.cps = cps({0x58});
+        log.record(Step{ins}, "张三", "t");
+        NodeTree out;
+        std::string got;
+        const bool pending_ok = expandText(log, out, &got);
+        expectTrue(pending_ok && got == "AXB", "1.9 / 拒绝：待定时展开是 AXB（实际 " + got + "）");
+        const bool rejected_ok = log.reject(0).ok && expandText(log, out, &got);
+        expectTrue(rejected_ok && got == "AB",
+                   "1.9 / 拒绝插入：拒绝之后展开回到基线 AB（实际 " + got + "）");
+    }
+    // 拒绝一条删除：被删的内容恢复。
+    {
+        NodeTree base = makeTextTree(cps({0x41, 0x42, 0x43}));  // ABC
+        RevisionLog log;
+        log.reset(base);
+        const DeleteBuild del = makeDeleteRange(base, Range{2, 3});  // B 在流位置 2
+        expectTrue(del.ok, "1.9 / 拒绝：构造删除 B 的步骤");
+        log.record(del.step, "张三", "t");
+        NodeTree out;
+        std::string got;
+        const bool pending_ok = expandText(log, out, &got);
+        expectTrue(pending_ok && got == "AC", "1.9 / 拒绝：待定时展开是 AC（实际 " + got + "）");
+        const bool rejected_ok = log.reject(0).ok && expandText(log, out, &got);
+        expectTrue(rejected_ok && got == "ABC",
+                   "1.9 / 拒绝删除：拒绝之后 B 回来，展开是 ABC（实际 " + got + "）");
+    }
+    // 拒绝一条分段：两段合回去。
+    {
+        NodeTree base = makeTextTree(cps({0x41, 0x42}));  // AB 一段
+        RevisionLog log;
+        log.reset(base);
+        InsertParaMark pm;
+        pm.at = 2;  // A 与 B 之间
+        log.record(Step{pm}, "张三", "t");
+        NodeTree out;
+        std::string got;
+        const bool pending_ok = expandText(log, out, &got);
+        expectTrue(pending_ok && got == "A\nB",
+                   "1.9 / 拒绝：待定时展开是两段 A 与 B（实际 " + got + "）");
+        const bool rejected_ok = log.reject(0).ok && expandText(log, out, &got);
+        expectTrue(rejected_ok && got == "AB",
+                   "1.9 / 拒绝分段：拒绝之后合成一段 AB（实际 " + got + "）");
+    }
+    // 拒绝一条早的修订：后面修订的坐标被搬回来（手算 AYB）。
+    {
+        NodeTree base = makeTextTree(cps({0x41, 0x42}));  // AB
+        RevisionLog log;
+        log.reset(base);
+        InsertText r0;
+        r0.at = 1;                   // 内容开头
+        r0.cps = cps({0x58, 0x58});  // 开头插 XX，文档变 XXAB
+        log.record(Step{r0}, "张三", "t");
+        InsertText r1;
+        r1.at = 4;  // 在 XXAB 里 A（3）与 B（4）之间
+        r1.cps = cps({0x59});
+        log.record(Step{r1}, "李四", "t");
+        NodeTree out;
+        std::string got;
+        const bool pending_ok = expandText(log, out, &got);
+        expectTrue(pending_ok && got == "XXAYB",
+                   "1.9 / 拒绝：两条待定时展开是 XXAYB（实际 " + got + "）");
+        const bool rejected_ok = log.reject(0).ok && expandText(log, out, &got);
+        expectTrue(
+            rejected_ok && got == "AYB",
+            "1.9 / 拒绝早的修订：后面那条的坐标被搬回来，展开是 AYB（手算，实际 " + got + "）");
+    }
+    // 拒绝一条删除，而后面有内容插在删除点上：位置留在左边（约定的那一档）。
+    {
+        NodeTree base = makeTextTree(cps({0x41, 0x42, 0x43}));  // ABC
+        RevisionLog log;
+        log.reset(base);
+        log.record(makeDeleteRange(base, Range{2, 3}).step, "张三", "t");  // 删 B
+        InsertText r1;
+        r1.at = 2;  // AC 里 B 原来所在的位置
+        r1.cps = cps({0x5A});
+        log.record(Step{r1}, "李四", "t");
+        NodeTree out;
+        std::string got;
+        const bool pending_ok = expandText(log, out, &got);
+        expectTrue(pending_ok && got == "AZC",
+                   "1.9 / 拒绝：两条待定时展开是 AZC（实际 " + got + "）");
+        const bool rejected_ok = log.reject(0).ok && expandText(log, out, &got);
+        expectTrue(rejected_ok && got == "AZBC",
+                   "1.9 / 拒绝删除：B 回来、插在删除点上的 Z 留在它左边（AZBC，实际 " + got + "）");
+    }
+}
+
+/**
+ * 1.9：展开遇到应用不了的步骤时失败并写明是哪一条，且不把半个结果交出去。
+ */
+void checkRevisionExpandFails() {
+    NodeTree base = makeTextTree(cps({0x41}));  // A
+    RevisionLog log;
+    log.reset(base);
+    InsertText r0;
+    r0.at = 1;
+    r0.cps = cps({0x58});
+    log.record(Step{r0}, "a", "t");
+    InsertText bad;
+    bad.at = 99;  // 记录时不校验（记录这一层没有文档），展开时才暴露
+    log.record(Step{bad}, "a", "t");
+
+    NodeTree out;
+    const StepResult r = log.expand(out);
+    expectTrue(!r.ok && r.error.find("第 1 条") != std::string::npos,
+               "1.9 / 展开失败：写明是哪一条修订应用不了（" + r.error + "）");
+    expectTrue(compiledText(out) == "A",
+               "1.9 / 展开失败：失败时交出来的还是基线，不是展开到一半的文档");
+}
+
 }  // namespace
 
 int main() {
@@ -4059,8 +4651,8 @@ int main() {
     // MSVC 把 _IOLBF 当成全缓冲，所以这里必须用 _IONBF。
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     std::printf(
-        "=== 文档模型 0.1 ~ 1.7：位置、分段、不变量、编译、长度、规范化、步骤、撤销、落点、"
-        "控件、样式、表格 ===\n");
+        "=== 文档模型 0.1 ~ 1.8：位置、分段、不变量、编译、长度、规范化、步骤、撤销、落点、"
+        "控件、样式、表格、域与节 ===\n");
 
     // 两种可见性口径各过一遍：位置空间不同，但"往返互逆"必须各自成立。
     const FlowVisibility kBoth[2] = {FlowVisibility::Design, FlowVisibility::Display};
@@ -4183,6 +4775,22 @@ int main() {
     checkTableGrid();
     checkTableOps();
     checkTableColumnDefs();
+
+    std::printf("  --- 1.8：域、页眉页脚、分节 ---\n");
+    checkFieldValue();
+    checkFieldEval();
+    checkFieldAtomic();
+    checkPaperDerivation();
+    checkSectionBag();
+    checkMultiSection();
+    checkHeaderFooterFragment();
+    checkSectionBreakCompile();
+
+    std::printf("  --- 1.9：修订留痕（步骤叠加） ---\n");
+    checkRevisionStates();
+    checkRevisionExpand();
+    checkRevisionReject();
+    checkRevisionExpandFails();
 
     std::printf("  --- 1.3：事务与撤销分组 ---\n");
     checkUndoRedo();

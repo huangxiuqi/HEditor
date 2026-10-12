@@ -17,11 +17,13 @@
 #include <string>
 #include <vector>
 
+#include "core/doc/compile.h"
 #include "core/doc/document.h"
+#include "core/doc/section_spec.h"
 #include "core/engine/engine.h"
-#include "demo/demo_documents.h"
 #include "core/layout/layout.h"
 #include "core/text/shaper.h"
+#include "demo/demo_documents.h"
 
 #ifndef HEDITOR_NATIVE_ASSET_DIR
 #define HEDITOR_NATIVE_ASSET_DIR "."
@@ -4132,6 +4134,56 @@ int main() {
             expectTrue(mid_probed == 6 && mid_bad == 0,
                        "★ 点字段里任意一个字的中间都归它自己（逐字覆盖，不是抽样碰运气）");
         }
+    }
+
+    std::printf("\n[22] 分节强制分页：模型编译产物落到引擎，增量与全量一致\n");
+    {
+        EditorEngine e;
+        if (!e.init({cjkPath, mnPath, latinPath})) {
+            std::fprintf(stderr, "字体加载失败\n");
+            return 2;
+        }
+        EngineConfig ec;
+        ec.zoom = 1.0f;
+        e.setConfig(ec);
+
+        // 用文档模型搭两节：第一节三段、第二节（下一页）一段。编译产物直接喂给引擎 ——
+        // 这一段验的是模型的分节强制分页落成引擎既有的段前分页，不引入新的排版路径。
+        auto asc = [](const std::string& s) {
+            std::vector<uint32_t> out;
+            out.reserve(s.size());
+            for (char ch : s) out.push_back(static_cast<uint32_t>(static_cast<unsigned char>(ch)));
+            return out;
+        };
+        NodeTree tree;
+        const NodeId s1 = tree.firstSectionId();
+        for (int i = 0; i < 3; ++i) {
+            const NodeId t = tree.appendChild(s1, NodeKind::TextRun);
+            tree.setText(t, asc("Section 1 paragraph " + std::to_string(i + 1) + "."));
+            tree.appendChild(s1, NodeKind::ParagraphMark);
+        }
+        const NodeId s2 = tree.insertChild(tree.rootId(), 1, NodeKind::Section);
+        tree.find(s2)->section.break_kind = SectionBreak::NextPage;
+        const NodeId t2 = tree.appendChild(s2, NodeKind::TextRun);
+        tree.setText(t2, asc("Section 2 starts on a new page."));
+        tree.appendChild(s2, NodeKind::ParagraphMark);
+
+        const StyleSheet sheet;
+        const CompileResult r = compileDocument(tree, FlowVisibility::Design, sheet);
+        expectTrue(r.ok() && r.blocks.size() == 4 && r.blocks[3].page_break_before,
+                   "模型编译出 4 段，末段带段前分页（第二节的起点）");
+
+        e.setBlocks(r.blocks);
+        e.relayout();
+        e.repaint();
+        expectTrue(e.stats().page_count >= 2, "分节强制分页真的起了新页");
+        expectTrue(e.auditLayout() == 0, "分页之后增量结果与全量重排逐字段一致（diff 0）");
+
+        // 在分页之前编辑：受影响的页重算，分页仍成立且与全量一致。
+        e.setCaret(0, 0);
+        e.typeTextAndRender("\xE6\xB5\x8B");  // 测
+        expectTrue(e.stats().page_count >= 2 && e.auditLayout() == 0,
+                   "★ 分页之前编辑之后，页数与增量结果仍与全量一致");
     }
 
     std::printf("\n──────────────────────────────\n");

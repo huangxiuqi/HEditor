@@ -737,4 +737,37 @@ FlowPos mapPos(const Step& step, FlowPos pos, Assoc assoc) {
                       step);
 }
 
+bool mapStepPositions(Step* target, const Step& mapped_by, Assoc assoc) {
+    if (target == nullptr) return false;
+    // 属性与跨度步骤不带流位置，搬一次等于没搬（但它们不是"搬不动"，所以算成功）。
+    if (std::holds_alternative<SetControlProp>(*target) ||
+        std::holds_alternative<SetControlValue>(*target) ||
+        std::holds_alternative<SetTableCellSpan>(*target)) {
+        return true;
+    }
+    if (auto* s = std::get_if<InsertText>(target)) {
+        s->at = mapPos(mapped_by, s->at, assoc);
+        return true;
+    }
+    if (auto* s = std::get_if<InsertFragment>(target)) {
+        s->at = mapPos(mapped_by, s->at, assoc);
+        return true;
+    }
+    if (auto* s = std::get_if<DeleteRange>(target)) {
+        s->begin = mapPos(mapped_by, s->begin, assoc);
+        s->end = mapPos(mapped_by, s->end, assoc);
+        return true;
+    }
+    if (auto* s = std::get_if<InsertParaMark>(target)) {
+        s->at = mapPos(mapped_by, s->at, assoc);
+        return true;
+    }
+    if (auto* s = std::get_if<RemoveParaMark>(target)) {
+        s->at = mapPos(mapped_by, s->at, assoc);
+        return true;
+    }
+    // 节点级步骤：流位置能搬，但 Pos（槽位）搬不动 —— 半个映射比不映射更危险。
+    return false;
+}
+
 }  // namespace heditor
