@@ -4856,6 +4856,269 @@ int main() {
         }
     }
 
+    std::printf("\n[25] 引擎接文档模型：树 → 编译 → 引擎，与手工块流逐项一致\n");
+    {
+        // 这一段验的是引擎输入的一次来源替换：块流从"调用方拼好递进来"改成"由模型树编译
+        //   产出"。它也是控件这条链第一次由文档模型驱动 —— 边界的锚点、只读位、哪些字段
+        //   显示括号，全部只有一个产处。六条判据：
+        //   其一，两条路逐项一致（文本、run、对象锚点与只读位、控件区间与业务标识）——
+        //     形状换了，产出不换；
+        //   其二，帧逐字节一致：形状替换最典型的错法是"排版多算了一处"，只比数据字段抓不到；
+        //   其三，句柄口径：产物里的 owner 是控件的节点 id，命中测试仍须按下标回答；
+        //   其四，业务类型与业务标识来自节点的记录，不是边界里的位；
+        //   其五，可见性随模式变（呈现态摘除隐藏控件、设计态参与流）；
+        //   其六，反向：树里改一个字，重编译的结果与手工改块流一致 ——
+        //     证伪"持树只是把首次编译的结果存了一份"。
+        EngineConfig ec25;
+        ec25.zoom = 1.0f;
+        ec25.form_brackets = FormBracketScope::All;
+        const std::vector<std::string> fonts25 = {cjkPath, mnPath, latinPath};
+
+        // 形状：一段文字「住院号甲乙丙丁」，一个只读控件包住中间两个字（码点 3..5）。
+        //   只包住一半是关键 —— 两枚边界因此落在段的中间，而不是段首段尾那两个好糊弄的位置。
+        auto makeTree25 = [&](const char* type, bool hidden) {
+            NodeTree tree;
+            const NodeId sec = tree.firstSectionId();
+            NodeId t = tree.appendChild(sec, NodeKind::TextRun);
+            tree.setText(t, utf8ToCodepoints("住院号"));
+            const NodeId cc = tree.appendChild(sec, NodeKind::ContentControl);
+            Node* cn = tree.find(cc);
+            cn->hidden = hidden;
+            cn->control.key = "no";
+            cn->control.controlType = type;
+            cn->control.readonly = true;
+            t = tree.appendChild(cc, NodeKind::TextRun);
+            tree.setText(t, utf8ToCodepoints("甲乙"));
+            t = tree.appendChild(sec, NodeKind::TextRun);
+            tree.setText(t, utf8ToCodepoints("丙丁"));
+            tree.appendChild(sec, NodeKind::ParagraphMark);
+            return tree;
+        };
+        // 手工路：与上面同一段文字、同一个区间的控件。
+        auto setManual25 = [&](EditorEngine* e, const char* text) {
+            BlockSpec blk;
+            blk.setText(text);
+            e->setBlocks({blk});
+            Control c;
+            c.range.start = TextPos{0, static_cast<size_t>(3)};
+            c.range.end = TextPos{0, static_cast<size_t>(5)};
+            c.id = "no";
+            c.read_only = true;
+            e->setControls({c});
+            e->setEditMode(EditMode::Form);
+        };
+
+        EditorEngine a;
+        EditorEngine b;
+        if (!a.init(fonts25) || !b.init(fonts25)) {
+            std::fprintf(stderr, "字体加载失败\n");
+            return 2;
+        }
+        a.setConfig(ec25);
+        b.setConfig(ec25);
+        setManual25(&a, "住院号甲乙丙丁");                       // 路 A：手工块流 + 旧控件集合
+        b.setDocument(makeTree25("text", false), StyleSheet{});  // 路 B：模型树
+        b.setEditMode(EditMode::Form);
+        a.relayout();
+        a.repaint();
+        b.relayout();
+        b.repaint();
+
+        expectTrue(!a.hasDocumentTree() && b.hasDocumentTree(),
+                   "装载来源不同：A 是递进来的块流，B 是持有的树");
+        expectTrue(a.blocks().size() == 1 && b.blocks().size() == 1, "两条路都产出 1 段");
+        expectTrue(
+            a.blocks()[0].cp_text == b.blocks()[0].cp_text && a.blocks()[0].cp_text.size() == 7,
+            "两条路的文本逐码点一致（7 个码点）");
+
+        // (a) run：手工路的 runs 为空（整段一个 run，属性取块级字段），编译路显式产一个
+        //   覆盖全段的 run —— 两者是等价情形，按 effectiveRuns 比才比的是同一件事。
+        auto sameRuns = [](const std::vector<FormatRun>& x, const std::vector<FormatRun>& y) {
+            if (x.size() != y.size()) return false;
+            for (size_t i = 0; i < x.size(); ++i) {
+                if (x[i].cp_begin != y[i].cp_begin || x[i].cp_end != y[i].cp_end ||
+                    x[i].font_index != y[i].font_index || x[i].size_pt != y[i].size_pt ||
+                    x[i].color != y[i].color || x[i].language != y[i].language ||
+                    x[i].fallback_font_indices != y[i].fallback_font_indices) {
+                    return false;
+                }
+            }
+            return true;
+        };
+        expectTrue(a.blocks()[0].runs.empty() && !b.blocks()[0].runs.empty(),
+                   "形状差异：手工路 runs 为空，编译路显式产 run");
+        expectTrue(sameRuns(a.blocks()[0].effectiveRuns(), b.blocks()[0].effectiveRuns()),
+                   "★ 按 effectiveRuns 比：两条路的 run 属性与区间逐字段一致");
+
+        // (b) 对象表：不比 owner（口径不同，见下），比锚点、边别与只读位
+        auto census = [](const BlockSpec& blk) {
+            std::string s;
+            for (const InlineObject& o : blk.objects) {
+                if (!s.empty()) s += " ";
+                s += std::to_string(o.cp);
+                s += (o.kind == InlineObjectKind::ControlStart) ? "<" : ">";
+                s += o.read_only ? "R" : "-";
+            }
+            return s;
+        };
+        const std::string oa = census(a.blocks()[0]);
+        const std::string ob = census(b.blocks()[0]);
+        expectTrue(oa == "3<R 5>R" && oa == ob,
+                   "★ 两条路的对象表逐项一致（锚点 3 与 5、开在闭前、只读位）—— 实际 " + oa);
+        expectTrue(a.blocks()[0].objects.size() == 2 && a.blocks()[0].objects[0].owner == 0,
+                   "旧路径的 owner 是控件集合下标（0）");
+        expectTrue(b.blocks()[0].objects[0].owner > 0 &&
+                       b.blocks()[0].objects[0].owner == b.blocks()[0].objects[1].owner,
+                   "★ 编译给的 owner 是控件的节点 id（>0，两枚边界同一个）");
+
+        // (c) 控件集合：区间、只读位、业务标识
+        const ControlSet& ca = a.controls();
+        const ControlSet& cb = b.controls();
+        expectTrue(ca.size() == 1 && cb.size() == 1, "两条路都导出一个控件");
+        if (ca.size() == 1 && cb.size() == 1) {
+            expectTrue(ca.at(0).range.start == cb.at(0).range.start &&
+                           ca.at(0).range.end == cb.at(0).range.end &&
+                           ca.at(0).read_only == cb.at(0).read_only,
+                       "控件区间与只读位逐字段一致（起点 (0,3)、终点 (0,5)、只读）");
+            expectTrue(ca.at(0).id == "no" && cb.at(0).id == "no", "业务标识取控件的 key");
+        }
+
+        // (d) 帧逐字节相同：比数据字段抓不到"排版多算了一处"
+        bool same_frame = a.frameBytes() == b.frameBytes();
+        if (same_frame) same_frame = std::memcmp(a.frame(), b.frame(), a.frameBytes()) == 0;
+        expectTrue(same_frame, "★ 两条路的帧逐字节相同（形状替换不能改画面）");
+        expectTrue(a.auditLayout() == 0 && b.auditLayout() == 0,
+                   "两条路的增量排版都与各自的全量逐字段一致");
+
+        // (e) 句柄口径：编译给的 owner 是节点 id，命中测试仍须按下标回答
+        const std::vector<EditorEngine::ControlRect> rca = a.controlRects(0);
+        const std::vector<EditorEngine::ControlRect> rcb = b.controlRects(0);
+        expectTrue(rca.size() == 1 && rcb.size() == 1, "两条路各给出一个控件矩形");
+        if (rca.size() == 1 && rcb.size() == 1) {
+            const float px = rca[0].r_pt.x + rca[0].r_pt.w * 0.5f;
+            const float py = rca[0].r_pt.y + rca[0].r_pt.h * 0.5f;
+            TextPos pa{};
+            TextPos pb{};
+            int oa_i = -1;
+            int ob_i = -1;
+            const bool ha = a.hitTestPt(px, py, &pa, &oa_i);
+            const bool hb = b.hitTestPt(px, py, &pb, &ob_i);
+            expectTrue(ha && hb && pa == pb, "同一个点在两条路上落到同一个位置（含段内码点偏移）");
+            expectTrue(ob_i == 0 && oa_i == ob_i,
+                       "★ 归属口径一致：编译给的 owner 是节点 id，翻译回来仍是控件下标 0");
+        }
+
+        // (f) 业务类型与业务标识来自节点的记录，不是边界里的位
+        {
+            EditorEngine c;
+            if (!c.init(fonts25)) {
+                std::fprintf(stderr, "字体加载失败\n");
+                return 2;
+            }
+            c.setConfig(ec25);
+            c.setDocument(makeTree25("number", false), StyleSheet{});
+            expectTrue(
+                c.controls().size() == 1 && c.controls().at(0).kind == ControlKind::NumberField,
+                "★ 控件的业务类型从节点记录来（number → 数值字段）");
+        }
+
+        // (g) 可见性随模式变：呈现态摘除隐藏控件、设计态让它参与流
+        {
+            EditorEngine h1;
+            EditorEngine h2;
+            if (!h1.init(fonts25) || !h2.init(fonts25)) {
+                std::fprintf(stderr, "字体加载失败\n");
+                return 2;
+            }
+            h1.setConfig(ec25);
+            h2.setConfig(ec25);
+            h1.setDocument(makeTree25("text", true), StyleSheet{});
+            h1.setEditMode(EditMode::Form);  // 呈现态
+            expectTrue(h1.blocks().size() == 1 && h1.blocks()[0].cp_text.size() == 5 &&
+                           h1.blocks()[0].objects.empty() && h1.controls().empty(),
+                       "★ 呈现态：隐藏控件整棵摘除（只剩「住院号丙丁」5 个码点，边界也没了）");
+            h2.setDocument(makeTree25("text", true), StyleSheet{});
+            expectTrue(h2.blocks().size() == 1 && h2.blocks()[0].cp_text.size() == 7 &&
+                           h2.blocks()[0].objects.size() == 2,
+                       "设计态：隐藏控件照常参与流（7 个码点、两枚边界都在）");
+        }
+
+        // (h) 反向：树里改一个字，重编译的结果与手工改块流一致
+        {
+            EditorEngine a2;
+            EditorEngine b2;
+            if (!a2.init(fonts25) || !b2.init(fonts25)) {
+                std::fprintf(stderr, "字体加载失败\n");
+                return 2;
+            }
+            a2.setConfig(ec25);
+            b2.setConfig(ec25);
+            NodeTree t2 = makeTree25("text", false);
+            // 最后一段文本（「丙丁」）就是节里最后一个 TextRun 孩子。
+            NodeId tail = kInvalidNodeId;
+            for (const Node* c : t2.find(t2.firstSectionId())->children) {
+                if (c->kind == NodeKind::TextRun) tail = c->id;
+            }
+            t2.setText(tail, utf8ToCodepoints("丙戊"));
+            b2.setDocument(t2, StyleSheet{});
+            b2.setEditMode(EditMode::Form);
+            setManual25(&a2, "住院号甲乙丙戊");
+            a2.relayout();
+            a2.repaint();
+            b2.relayout();
+            b2.repaint();
+            expectTrue(b2.blocks()[0].cp_text == a2.blocks()[0].cp_text,
+                       "树里改一个字之后，编译出的文本跟着变（不是一份冻结的快照）");
+            bool same2 = a2.frameBytes() == b2.frameBytes();
+            if (same2) same2 = std::memcmp(a2.frame(), b2.frame(), a2.frameBytes()) == 0;
+            expectTrue(same2, "★ 改字之后两条路仍逐字节相同（重编译与手工改块流等价）");
+        }
+
+        // (i) 树上编辑还没做：一经落笔就退回块流路径，行为与旧路径逐字节相同
+        {
+            b.setCaret(0, 7);
+            expectTrue(b.typeTextAndRender("\xE6\xB5\x8B"), "持树的引擎仍能编辑（退回旧路径）");
+            expectTrue(!b.hasDocumentTree(),
+                       "★ 落笔之后引擎不再声称块流是树的产物（诚实退回，不假装同步）");
+            expectTrue(b.blocks()[0].runs.empty() && !b.droppedCharFormats(),
+                       "★ 退回时 run 表拉回旧口径（本例的 run 属性全等于块级字段，所以无损）");
+            a.setCaret(0, 7);
+            a.typeTextAndRender("\xE6\xB5\x8B");
+            bool same3 = a.frameBytes() == b.frameBytes();
+            if (same3) same3 = std::memcmp(a.frame(), b.frame(), a.frameBytes()) == 0;
+            expectTrue(same3, "退回之后的帧与旧路径逐字节相同");
+            expectTrue(a.auditLayout() == 0 && b.auditLayout() == 0,
+                       "退回之后两条路的增量仍与全量一致");
+        }
+
+        // (j) 有损降级的信号必须真的会亮 —— 否则"不静默丢"只是句口号
+        {
+            NodeTree t3 = makeTree25("text", false);
+            NodeId head3 = kInvalidNodeId;
+            for (const Node* c : t3.find(t3.firstSectionId())->children) {
+                if (c->kind == NodeKind::TextRun) {
+                    head3 = c->id;
+                    break;
+                }
+            }
+            t3.find(head3)->marks.size = Length::abs(ptToEmu(14.0));  // 首段 14 磅，其余 12
+            EditorEngine d;
+            if (!d.init(fonts25)) {
+                std::fprintf(stderr, "字体加载失败\n");
+                return 2;
+            }
+            d.setConfig(ec25);
+            d.setDocument(t3, StyleSheet{});
+            expectTrue(d.blocks()[0].runs.size() == 2,
+                       "字符格式不同的文本段切成两个 run（14 磅 / 12 磅）");
+            d.setCaret(0, 7);
+            d.typeTextAndRender("\xE6\xB5\x8B");
+            expectTrue(d.droppedCharFormats(),
+                       "★ 有损降级要报出来：run 属性与块级字段不同时，退回时记下这次丢失");
+            expectTrue(d.blocks()[0].runs.empty(), "退回之后 run 表已拉回旧口径（整段一个 run）");
+        }
+    }
+
     std::printf("\n──────────────────────────────\n");
     std::printf("共 %d 项断言，失败 %d 项\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

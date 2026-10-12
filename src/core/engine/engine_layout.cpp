@@ -454,6 +454,35 @@ void EditorEngine::truncateLayoutAt(int para) {
  * 两枚闭括号又排到一起，画出来成了 [[ ]]（嵌套），而它们本该是 [][]（并列）。
  */
 void EditorEngine::syncInlineObjects() {
+    // 块流由编译产出时，边界已经在产物里（编译对所有内容控件都产边界，不区分显示与否）——
+    //   这一处于是只剩"按要显示括号的名单筛一遍"：不显示的字段连占位都不要。
+    //   "显示才占位"这条规则没变，变的是分工：产边界在编译层（第五刀），
+    //   决定显示哪些留在这里（只有引擎认识编辑模式与聚焦）。
+    //
+    //   只改 objects、不整段拷回：编辑路径暂时仍直接改块流（树上编辑是下一刀），
+    //   整段拷回会把那些改动一起抹掉。
+    if (tree_valid_) {
+        std::vector<NodeId> keep;
+        const std::vector<int> bracketed = bracketedControls();
+        keep.reserve(bracketed.size());
+        for (int ci : bracketed) {
+            if (ci >= 0 && ci < static_cast<int>(control_node_ids_.size())) {
+                keep.push_back(control_node_ids_[static_cast<size_t>(ci)]);
+            }
+        }
+        const size_t n = std::min(blocks_.size(), blocks_full_.size());
+        for (size_t p = 0; p < n; ++p) {
+            const std::vector<InlineObject>& src = blocks_full_[p].objects;
+            std::vector<InlineObject>& dst = blocks_[p].objects;
+            dst.clear();
+            for (const InlineObject& o : src) {
+                const NodeId owner = static_cast<NodeId>(o.owner);
+                if (std::find(keep.begin(), keep.end(), owner) != keep.end()) dst.push_back(o);
+            }
+        }
+        return;
+    }
+
     for (BlockSpec& b : blocks_) b.objects.clear();
     const std::vector<int> bracketed = bracketedControls();
     if (bracketed.empty()) return;

@@ -12,13 +12,15 @@
 
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
-#include "core/engine/engine_config.h"
-#include "core/engine/engine_stats.h"
+#include "core/doc/compile.h"
 #include "core/doc/control.h"
 #include "core/doc/document.h"
 #include "core/doc/edit_policy.h"
+#include "core/engine/engine_config.h"
+#include "core/engine/engine_stats.h"
 #include "core/layout/layout.h"
 #include "core/render/bitmap.h"
 #include "core/text/font.h"
@@ -45,6 +47,28 @@ public:
     }
     void setBlocks(std::vector<BlockSpec> blocks);
     const std::vector<BlockSpec>& blocks() const { return blocks_; }
+
+    /**
+     * 用文档模型树装载文档：引擎从此持有那棵树，块流由编译产出（第十四节那条接缝）。
+     * 与 setBlocks 的分工是"来源"而不是"形状"：两条路给排版的都是同一份块流，差别在它是
+     * 调用方拼好递进来，还是由模型树编译出来 —— 后者才是这一层的目标形态，控件边界、
+     * 段落格式与字符格式因此都只有一个产处（compile.cpp），引擎不再自己拼。
+     *
+     * 隐藏控件的可见性口径与编译同一处取值（见 rebuildFromTree），所以 setEditMode 落在
+     * 这条路上时必须重编译。装载会复位光标、作废底图并整篇标脏。
+     *
+     * 接 const 引用、内部走 assignFrom 深拷贝：树刻意不给拷贝构造（见 NodeTree 的说明），
+     * 所以"按值收一棵树"在这里编译不过，那是对的。
+     */
+    void setDocument(const NodeTree& tree, const StyleSheet& sheet);
+    /**
+     * 块流是不是树的编译产物（而不是 setBlocks 递进来的）。
+     */
+    bool hasDocumentTree() const { return tree_valid_; }
+    /**
+     * 持有中的模型树。hasDocumentTree() 为假时它的内容没有意义。
+     */
+    const NodeTree& documentTree() const { return tree_; }
 
     /**
      * 重排版：从 layout_dirty_from_ 起的段重排，之前的段原样复用（续排契约见
@@ -231,6 +255,13 @@ public:
     long long blockedEdits() const { return blocked_edits_; }
 
     /**
+     * 最近一次从持树退回块流路径是否丢掉了字符级格式（编译产物的 run 序列不全是块级属性）。
+     * 诊断用：它说明该次降级是有损的 —— 旧路径的块流只有"整段一个 run"这一种形态，
+     * 混合字号的 run 序列没有地方表达，而那份格式要等树上编辑带过来。
+     */
+    bool droppedCharFormats() const { return dropped_char_formats_; }
+
+    /**
      * 帧坐标（磅）落在哪个控件上（取最内层）。-1 = 没有。
      * 它走的是 hitTestPt 的同一份几何，所以"视觉上在框里"与
      * "逻辑上在控件里"永远一致。
@@ -381,6 +412,39 @@ public:
 
 private:
     /**
+     * 从持有的树重新编译出块流，并把控件集合从产物的边界里导出来。
+     * 隐藏控件的可见性口径按当前编辑模式取（见 setDocument 的说明）。
+     */
+    void rebuildFromTree();
+    /**
+     * 编辑前的退让：树上编辑还没做，所以一旦真的要在文档上落笔，就摘掉"树是真相"这个标记，
+     * 诚实地退回块流路径 —— 不假装 blocks_ 还是树的产物。
+     *
+     * 退回之后控件集合与边界句柄全部按旧口径重来（owner 从节点 id 换回下标），
+     * 于是行为与"从未装载过树"逐字段相同。没有这一步，产物里的 owner 是节点 id
+     * 而控件集合已是旧路径的，命中测试会一律判不出"点到的括号是谁的"。
+     */
+    void leaveTreeModeForEdit();
+    /**
+     * 从块流的行内对象表导出控件集合：按 owner 配对起始与结束两枚边界，
+     * 得到控件的 (起, 止) 区间。
+     *
+     * 为什么不从树直接遍历：编译已经把边界写进产物了（第五刀），而产物就是这一层
+     * 拿到的全部输入 —— 再从树走一遍等于把"哪一段、第几个码点"重算一次，两处一旦
+     * 分叉就会出现"排版按产物画括号、策略按另一套区间判可编辑"的错配。
+     * 没有配对的那一枚整体丢掉：宁可少一个控件，也不要一个区间反了的控件。
+     */
+    void exportControlsFromBlocks();
+    /**
+     * 把排版产物里的不透明 owner 句柄翻译成控件集合下标。
+     *
+     * 块流由编译产出时 owner 是控件的节点 id（第五刀：序号会在插入之后整体平移，
+     * 而节点 id 是身份），setBlocks 旧路径给的一直是下标。对外（宿主、探针、既有判据）
+     * 的口径始终是下标，翻译只在这一处发生。
+     */
+    int controlIndexOfOwner(int owner) const;
+
+    /**
      * 把偏移吸附到簇边界（用当前 layout 的簇表）
      */
     size_t snapToCluster(int para, size_t offset) const;
@@ -512,6 +576,31 @@ private:
     EngineConfig cfg_;
     FontLibrary fonts_;
     std::vector<BlockSpec> blocks_;
+
+    /**
+     * 文档模型树与样式表（setDocument 装载）。tree_valid_ 为真时 blocks_ 是它们的
+     * 编译产物；为假时 blocks_ 由调用方拼好递进来（setBlocks 旧路径）。
+     */
+    NodeTree tree_;
+    StyleSheet sheet_;
+    bool tree_valid_ = false;
+    /**
+     * 编译的完整产物。"按要显示括号的名单筛一遍"这一处读它 —— blocks_ 是筛过之后的
+     * 副本。筛是破坏性的（对象表会被删项），而名单会来回变（Focused 档与 All 档之间切），
+     * 没有这份原件，被删掉的边界就回不来了。
+     */
+    std::vector<BlockSpec> blocks_full_;
+    /**
+     * 控件集合下标 → 控件的节点 id（导出时按同一顺序建）。旧路径下为空 —— 那条路的
+     * 边界句柄本来就是下标。
+     */
+    std::vector<NodeId> control_node_ids_;
+    /**
+     * 产物的 owner（节点 id）→ 控件集合下标。导出时一并建好，命中测试与编辑归属
+     * 靠它把句柄翻译成本层对外的口径。
+     */
+    std::unordered_map<int, int> owner_index_;
+
     LayoutResult layout_;
 
     /**
@@ -621,6 +710,10 @@ private:
     ControlSet controls_;
     EditPolicy policy_;
     long long blocked_edits_ = 0;
+    /**
+     * 上一次从持树退回块流路径时丢掉了字符级格式（见 droppedCharFormats 的说明）。
+     */
+    bool dropped_char_formats_ = false;
 
     /**
      * 表单标记（小点/方括号）在帧像素下的矩形，用来在下一帧把它们擦掉。
@@ -638,6 +731,5 @@ private:
 
     Rect caret_rect_px_prev_{};  // 上一帧光标矩形（帧像素）
 };
-
 
 }  // namespace heditor

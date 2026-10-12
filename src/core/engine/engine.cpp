@@ -1,8 +1,9 @@
 /**
  * 引擎门面与编辑会话。
  *
- * 这里放三样东西：生命周期与配置（init / setConfig / setBlocks）、把排版结果暴露给宿主的
- * 查询（帧、光标、命中、控件）、以及编辑入口（插入删除、分段合并、缩进）。
+ * 这里放三样东西：生命周期与文档装载（init / setConfig / setBlocks / setDocument）、
+ * 把排版结果暴露给宿主的查询（帧、光标、命中、控件）、以及编辑入口（插入删除、分段合并、
+ * 缩进）。
  * 排版调度在 engine_layout.cpp、呈现与光栅增量在 engine_paint.cpp、审计判据在
  * engine_audit.cpp、诊断输出在 engine_diag.cpp —— 拆开是因为它们的变更理由不同。
  *
@@ -31,9 +32,21 @@ namespace heditor {
 
 namespace {
 
-
 const std::vector<uint32_t> kEmptyStarts;
 
+/**
+ * 业务类型字符串 → 旧表示的三种控件种类。
+ *
+ * 两者层次不同：controlType 是开放的（宿主可以注册一种新的），ControlKind 是封闭的三档 ——
+ * 只够表达"值怎么校验、怎么显示"这一层，界面上的差别（复选、下拉、日期浮层）要等控件类型
+ * 注册表落地。认不出来的类型回落到文本：宁可当一个普通文本框，也不要让一个没登记的类型
+ * 变成一个"打不进去"的字段。空串同理（没写类型的控件就是文本框）。
+ */
+ControlKind controlKindFromBusinessType(const std::string& type) {
+    if (type == "number") return ControlKind::NumberField;
+    if (type == "date") return ControlKind::DateField;
+    return ControlKind::TextField;
+}
 
 }  // namespace
 
@@ -86,11 +99,141 @@ void EditorEngine::setConfig(const EngineConfig& cfg) {
 
 void EditorEngine::setBlocks(std::vector<BlockSpec> blocks) {
     blocks_ = std::move(blocks);
+    // 块流是调用方拼好递进来的 = 没走编译那条路：树与产物不再有对应关系，控件集合也不再
+    //   是派生的。两个标记一起清掉，免得后面还按"树是真相"去用它。
+    tree_valid_ = false;
+    owner_index_.clear();
+    blocks_full_.clear();
+    control_node_ids_.clear();
     caret_ = TextPos{0, 0};
     caret_rect_px_prev_ = Rect{};
     base_valid_ = false;
     // 整份文档换了：段数与内容都可能全变，没有可复用的前缀。
     markAllLayoutDirty();
+}
+
+/**
+ * 文档装载：模型树那条路（第十四节的接缝）。
+ */
+void EditorEngine::setDocument(const NodeTree& tree, const StyleSheet& sheet) {
+    tree_.assignFrom(tree);
+    sheet_ = sheet;
+    tree_valid_ = true;
+    caret_ = TextPos{0, 0};
+    caret_rect_px_prev_ = Rect{};
+    base_valid_ = false;
+    rebuildFromTree();
+    // 整份文档换了：段数与内容都可能全变，没有可复用的前缀。
+    markAllLayoutDirty();
+    // 控件集合随之变了 → 帧上的标记与上一帧不是一回事，下一次呈现整帧重贴。
+    frame_needs_full_refresh_ = true;
+}
+
+void EditorEngine::rebuildFromTree() {
+    // 隐藏控件的可见性口径与编译同一处取值：文档模式是设计态（隐藏的照常参与流，
+    //   否则作者没法把它选中改回来），表单与只读是呈现态（整棵摘除、不占流位置）。
+    const FlowVisibility vis =
+        (policy_.mode() == EditMode::Document) ? FlowVisibility::Design : FlowVisibility::Display;
+    std::vector<BlockSpec> blocks = compileDocument(tree_, vis, sheet_).blocks;
+    blocks_full_ = std::move(blocks);
+    blocks_ = blocks_full_;
+    exportControlsFromBlocks();
+}
+
+void EditorEngine::exportControlsFromBlocks() {
+    controls_.clear();
+    owner_index_.clear();
+    control_node_ids_.clear();
+
+    struct Boundary {
+        TextPos start{};
+        TextPos end{};
+        bool has_start = false;
+        bool has_end = false;
+        bool read_only = false;
+    };
+    std::unordered_map<int, Boundary> acc;
+    std::vector<int> order;  // owner 首见顺序 = 流顺序（对象按锚点单调不减地排在产物里）
+    for (size_t i = 0; i < blocks_.size(); ++i) {
+        const int para = static_cast<int>(i);
+        for (const InlineObject& o : blocks_[i].objects) {
+            auto it = acc.find(o.owner);
+            if (it == acc.end()) {
+                order.push_back(o.owner);
+                it = acc.emplace(o.owner, Boundary{}).first;
+            }
+            Boundary& b = it->second;
+            const TextPos at{para, static_cast<size_t>(o.cp)};
+            if (o.kind == InlineObjectKind::ControlStart) {
+                b.start = at;
+                b.has_start = true;
+            } else {
+                b.end = at;
+                b.has_end = true;
+            }
+            // 两枚边界的只读位同源（编译一次读定），取或只是让"配不成对"的那一半也能留下痕迹。
+            b.read_only = b.read_only || o.read_only;
+        }
+    }
+
+    for (int owner : order) {
+        const Boundary& b = acc[owner];
+        // 两枚边界必须成对：编译产的是一个开一个闭。少了任何一枚都说明这棵子树有一半
+        //   没进产物（例如被一个只记诊断的元素包着），那样的区间只会误导策略 ——
+        //   整对丢掉，宁可少一个控件，也不要一个只有半截的区间。
+        if (!b.has_start || !b.has_end) continue;
+        Control c;
+        c.range.start = b.start;
+        c.range.end = b.end;
+        c.read_only = b.read_only;
+        // 业务标识与种类是节点上的数据，不在边界里 —— 从树取。
+        //   标签刻意不填：第七节里标签是内容（它自己是文本节点），渲染时从内容取；
+        //   旧表示的 label 是调用方自填的显示名，编译产物里没有对应物。
+        const Node* n = tree_.find(static_cast<NodeId>(owner));
+        if (n != nullptr) {
+            c.id = n->control.key;
+            c.kind = controlKindFromBusinessType(n->control.controlType);
+        }
+        const int index = controls_.add(c);
+        owner_index_[owner] = index;
+        control_node_ids_.push_back(static_cast<NodeId>(owner));
+    }
+    controls_.normalize();
+}
+
+int EditorEngine::controlIndexOfOwner(int owner) const {
+    if (owner_index_.empty()) return owner;  // 旧路径给的本来就是下标，原样返回
+    const auto it = owner_index_.find(owner);
+    return it == owner_index_.end() ? -1 : it->second;
+}
+
+void EditorEngine::leaveTreeModeForEdit() {
+    if (!tree_valid_) return;
+    tree_valid_ = false;
+    owner_index_.clear();
+    blocks_full_.clear();
+    control_node_ids_.clear();
+
+    // 退回块流路径时把 run 表也拉回旧口径。旧路径的块流只有"整段一个 run、属性取块级字段"
+    //   这一种形态，而编译产物带着按字符格式切开的 run 序列；编辑操作只改 cp_text、不动 run
+    //   区间，留着就是"run 铺不满文本"—— 排版在尾部取不到属性，而画面只是"尾部字变了形"。
+    //   清掉才是回到旧路径能表达的那个形态，也才与"从未装载过树"逐字节相同。
+    //   丢没丢东西由 droppedCharFormats 报出来，不静默：run 属性全等于块级字段时是无损的。
+    dropped_char_formats_ = false;
+    for (BlockSpec& b : blocks_) {
+        for (const FormatRun& r : b.runs) {
+            if (r.font_index != b.font_index || r.size_pt != b.size_pt || r.color != b.color ||
+                r.language != b.language || r.fallback_font_indices != b.fallback_font_indices) {
+                dropped_char_formats_ = true;
+                break;
+            }
+        }
+        b.runs.clear();
+    }
+
+    // 边界句柄的口径跟着换：编译给的是控件的节点 id，旧路径重建的是下标。立刻重排一次
+    //   对象表，免得在"下一次 relayout"之前的这段时间里，谁读 objects 谁读到节点 id。
+    syncInlineObjects();
 }
 
 size_t EditorEngine::frameBytes() const { return bitmap_.byteSize(); }
@@ -336,6 +479,8 @@ bool EditorEngine::insertCodepoints(int para, size_t offset, const std::vector<u
         return false;
     }
 
+    // 真要落笔了：树上编辑还没做（下一刀），这里诚实地退回块流路径。
+    leaveTreeModeForEdit();
     textbuf::insertAt(blocks_[static_cast<size_t>(para)].cp_text, at, cps);
     // 区间是活的：端点跟随插入移动（在控件内插则变长，在控件前插则平移）。
     //   漏掉这一步，控件会与它标注的内容脱节：既拒绝本该允许的输入，
@@ -378,6 +523,8 @@ bool EditorEngine::backspace() {
         ++blocked_edits_;
         return false;
     }
+    // 真要落笔了：树上编辑还没做（下一刀），这里诚实地退回块流路径。
+    leaveTreeModeForEdit();
     const size_t erased =
         textbuf::eraseRange(blocks_[static_cast<size_t>(p.para)].cp_text, at, p.offset);
     if (erased == 0) return false;
@@ -412,6 +559,8 @@ bool EditorEngine::deleteForward() {
         return false;
     }
 
+    // 真要落笔了：树上编辑还没做（下一刀），这里诚实地退回块流路径。
+    leaveTreeModeForEdit();
     const size_t erased =
         textbuf::eraseRange(blocks_[static_cast<size_t>(p.para)].cp_text, p.offset, next);
     if (erased == 0) return false;
@@ -439,6 +588,8 @@ bool EditorEngine::splitParagraph() {
         return false;
     }
 
+    // 真要落笔了：树上编辑还没做（下一刀），这里诚实地退回块流路径。
+    leaveTreeModeForEdit();
     BlockSpec& head = blocks_[static_cast<size_t>(p.para)];
     BlockSpec tail = head;  // 样式整体继承，只改文本与翻页标记
     tail.page_break_before = false;
@@ -473,6 +624,8 @@ bool EditorEngine::mergeParagraphInto(int head) {
         return false;
     }
 
+    // 真要落笔了：树上编辑还没做（下一刀），这里诚实地退回块流路径。
+    leaveTreeModeForEdit();
     BlockSpec& prev = blocks_[static_cast<size_t>(head)];
     const std::vector<uint32_t>& moved = blocks_[static_cast<size_t>(head + 1)].cp_text;
     prev.cp_text.insert(prev.cp_text.end(), moved.begin(), moved.end());
@@ -555,6 +708,14 @@ bool EditorEngine::mergeWithNextParagraphAndRender() {
  */
 
 void EditorEngine::setControls(std::vector<Control> list) {
+    // 调用方直接把控件集合递进来 = 它不再是编译产物的派生结果（产物里的 owner 是控件的
+    //   节点 id，而这里的下标由调用方定）。两个标记一起清掉：owner 翻译退回"原样返回"，
+    //   文档装载也不算走树那条路了。混用这两条路是接口层面的错误，这里选择"诚实地退回"
+    //   而不是继续假装树还是真相。
+    tree_valid_ = false;
+    owner_index_.clear();
+    control_node_ids_.clear();
+
     // 旧集合的最靠前段也要算进来：删掉一个控件同样要把它所在的段重排一次，
     // 否则那一处的括号占位会留在旧的排版结果里（括号不画了、宽度却还占着）。
     int dirty_lo = minControlParagraph();
@@ -594,6 +755,15 @@ void EditorEngine::setEditMode(EditMode m) {
     if (policy_.mode() == m) return;
     const int plan_before = bracketPlanId();
     policy_.setMode(m);
+
+    // 持树时切模式要重编译，而且整篇重排：隐藏控件的可见性口径随模式变（文档模式是设计态、
+    //   表单与只读是呈现态），所以块流本身可能变 —— 隐藏字段的子树被摘除或放回，段数都可能
+    //   跟着变。不重编译的话，呈现态下那些内容还留在版面上，而它们已经不可寻址。
+    //   不能走后缀复用：摘除/放回发生在文档任何位置，脏区不是一个后缀。
+    if (tree_valid_) {
+        rebuildFromTree();
+        markAllLayoutDirty();
+    }
 
     // 切模式会改变占位集合本身（文档模式一个都不占、表单模式要占），
     //   所以这里可能也要重排（Focused 档下还有"光标被夹进最近字段"这一层）。
@@ -780,6 +950,8 @@ bool EditorEngine::outdent() {
         ++blocked_edits_;
         return false;
     }
+    // 真要落笔了：树上编辑还没做（下一刀），这里诚实地退回块流路径。
+    leaveTreeModeForEdit();
     const size_t erased =
         textbuf::eraseRange(blocks_[static_cast<size_t>(p.para)].cp_text, at, p.offset);
     if (erased == 0) return false;
@@ -928,7 +1100,10 @@ bool EditorEngine::hitTestPt(float x_pt_frame, float y_pt_frame, TextPos* out,
             hit_i = best->clusters.size() - 1;
         const bool on_slot = hit_i < best->clusters.size() && best->clusters[hit_i].placeholder &&
                              best->clusters[hit_i].owner_control >= 0;
-        owner = on_slot ? best->clusters[hit_i].owner_control
+        // 占位簇上的 owner 是产生端给的不透明句柄：块流由编译产出时它是控件的节点 id
+        //   （身份，不随插入平移），旧路径给的是控件下标。对外口径始终是下标，
+        //   翻译只在这一处发生。
+        owner = on_slot ? controlIndexOfOwner(best->clusters[hit_i].owner_control)
                         : controls_.innermostAt(p, /*include_end=*/false);
     }
     // 命中即落点：光标位置不受控件约束，所以这里不再做"就近吸附到最近字段"。
@@ -938,8 +1113,5 @@ bool EditorEngine::hitTestPt(float x_pt_frame, float y_pt_frame, TextPos* out,
     *out = p;
     return true;
 }
-
-
-
 
 }  // namespace heditor
