@@ -42,8 +42,8 @@ const SCENARIOS = [
 const DEFAULT_SCENARIO = 6;   // 直接进可编辑场景，省得还要先切一下
 
 const $ = (id) => document.getElementById(id);
-const cv = $('cv');
-const ctx = cv.getContext('2d', { alpha: false });
+const stageEl = $('stage');
+const pagesEl = $('pages');
 const ta = $('ime');
 
 let mod = null;
@@ -51,13 +51,260 @@ let busy = false;
 let ready = false;
 let currentZoom = 1.5;
 let lastEdit = null;
-// 上一次设给 canvas 的 CSS 尺寸（缓存起来，避免每帧都写 style 触发样式重算）
-let cvCssW = 0;
-let cvCssH = 0;
 let composing = false;
 let caretOn = true;
 let blinkTimer = null;
 const pageErrors = [];
+
+/**
+ * 宿主侧上屏耗时（最近一轮的四段分解）。
+ *
+ * 引擎的 paint_ms 只算到"帧缓冲组装完"。帧缓冲跨到 JS 之后还有三段钱：
+ * 取视图、构造 ImageData、putImageData。面板此前完全没有这三个数，
+ * 于是"页面卡"只能看到引擎那一半，另一半是盲区 —— 而这一段恰好是唯一
+ * 随帧面积走的部分（画布是整篇大小的单张位图，脏矩形只决定源数据偏移，
+ * 不决定浏览器要把多大的图层重新合成）。
+ * 记"最近一轮"而不是累加：面板每次读的都是刚发生的一轮。
+ */
+let lastBlit = { frameMs: 0, imageMs: 0, putMs: 0, imeMs: 0, totalMs: 0,
+                 full: true, w: 0, h: 0, boxW: 0, boxH: 0, framePx: 0,
+                 pages: 0, windowFirst: 0 };
+
+/**
+ * 每页一张画布。
+ *
+ * 帧从"整篇一张位图"改成"窗口一张"之后，宿主这边也要跟着切：把窗口位图按页切成
+ * 若干块，每块贴进它自己那张画布。这样改哪一页就只重合成那一页 —— 而"整篇一张"时
+ * 哪怕只改 1 页，浏览器也要把整张 18 Mpx 的图层重新合成一遍（实测多花整整一个
+ * vsync，见 scripts/diag_perf.mjs）。
+ *
+ * 只保留窗口内的页：画布是宿主侧唯一持有像素的地方，留几张就等于留多少内存，
+ * 也是"整篇 3000 段"不再撑爆内存的原因。
+ */
+const pageCanvases = new Map();  // 绝对页号 -> { el, g }
+
+/**
+ * 帧画布的兼容代理（只给探针与 __heditor.canvas 用，宿主自己一律走页画布）。
+ *
+ * 探针的契约是"帧坐标"：取 rect、按帧宽高换算、往它上面派 mousedown。帧现在被切成
+ * 每页一张画布，于是这里按"窗口帧在屏幕上占的那块区域"给出几何，事件转发给真正
+ * 接鼠标的页容器 —— 探针因此不必区分一张还是多张，判据口径也没变。
+ */
+const frameCanvasProxy = {
+  get width() { return mod ? mod.frameWidth() : 1; },
+  get height() { return mod ? mod.frameHeight() : 1; },
+  get style() { return pagesEl.style; },
+  getBoundingClientRect() {
+    const r = pagesEl.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    const step = mod ? mod.pagePxHeight() + mod.pageGapPx() : 0;
+    const first = mod ? mod.windowFirstPage() : 0;
+    const top = r.top + (first * step) / dpr;
+    const width = this.width / dpr;
+    const height = this.height / dpr;
+    return { left: r.left, top, right: r.left + width, bottom: top + height,
+             width, height, x: r.left, y: top };
+  },
+  dispatchEvent(ev) { return pagesEl.dispatchEvent(ev); },
+  addEventListener(...a) { return pagesEl.addEventListener(...a); },
+  getContext() { return null; },
+};
+
+function pageCanvasFor(page) {
+  let rec = pageCanvases.get(page);
+  if (!rec) {
+    const el = document.createElement('canvas');
+    rec = { el, g: el.getContext('2d', { alpha: false }) };
+    pageCanvases.set(page, rec);
+    pagesEl.appendChild(el);
+  }
+  return rec;
+}
+
+/**
+ * 把页画布集合调整成"窗口内每页一张"，并摆好位置与尺寸。
+ * 位置用绝对页号算（不是窗口内下标）—— 这样滚动换窗口时画布不会跟着漂。
+ */
+function syncPageCanvases(first, count, total) {
+  const pw = mod.pagePxWidth();
+  const ph = mod.pagePxHeight();
+  const step = ph + mod.pageGapPx();
+  const dpr = window.devicePixelRatio || 1;
+
+  // 只在真的变了才写 style：写一次就触发一次样式重算与布局，
+  //   而这一段每拍都跑（敲一个字就跑一次），没变还写就是白付这笔钱。
+  const w = (pw / dpr) + 'px';
+  const h = ((Math.max(1, total) * step - mod.pageGapPx()) / dpr) + 'px';
+  if (pagesEl.style.width !== w) pagesEl.style.width = w;
+  if (pagesEl.style.height !== h) pagesEl.style.height = h;
+
+  for (const [p, rec] of pageCanvases) {
+    if (p < first || p >= first + count) {
+      rec.el.remove();
+      pageCanvases.delete(p);
+    }
+  }
+  for (let p = first; p < first + count; ++p) {
+    const rec = pageCanvasFor(p);
+    if (rec.el.width !== pw || rec.el.height !== ph) {
+      rec.el.width = pw;
+      rec.el.height = ph;
+    }
+    const cssW = (pw / dpr) + 'px';
+    const cssH = (ph / dpr) + 'px';
+    if (rec.el.style.width !== cssW) rec.el.style.width = cssW;
+    if (rec.el.style.height !== cssH) rec.el.style.height = cssH;
+    const top = (p * step / dpr) + 'px';
+    if (rec.el.style.top !== top) rec.el.style.top = top;
+  }
+}
+
+/**
+ * 视口窗口：帧只装"看得见的那几页"，再并上光标所在页。
+ *
+ * 光标那一页必须进来：帧只装窗口内的页，光标不在窗口里就既画不出来、也点不中。
+ * 窗口一变就整帧重建（底图按新范围重光栅，一页约 13 ms），所以锚点只在真的
+ * 盖不住时才挪 —— 见 applyWindow 的滞回。
+ *
+ * 长度封顶 MAX_WINDOW 页：光标页与可见页可能隔得很远（用户把屏幕滚到别处去了），
+ * 不封顶就会算出跨越整篇的窗口，那正好把"帧只装几页"这件事作废。
+ * 实测（scripts/diag_perf.mjs 扫 zoom）：窗口 2~3 页时帧间隔只由单拍操作耗时决定，
+ * 画布面积本身不再多花时间；而作废之前那张 18.3 Mpx 的整篇画布要多花整整一个 vsync。
+ */
+const PAGE_MARGIN = 0;   // 可见页两侧各多留几页（0 = 只装看得见的）
+const MAX_WINDOW = 3;    // 窗口封顶页数
+let lastAnchor = '';
+
+function visiblePageRange() {
+  const dpr = window.devicePixelRatio || 1;
+  const step = mod.pagePxHeight() + mod.pageGapPx();
+  const total = Math.max(1, lastEdit ? lastEdit.totalPages : 1);
+  const sr = stageEl.getBoundingClientRect();
+  const pr = pagesEl.getBoundingClientRect();
+  const top = Math.max(0, (sr.top - pr.top) * dpr);
+  const bot = Math.max(top, (sr.bottom - pr.top) * dpr);
+  const first = Math.min(total - 1, Math.max(0, Math.floor(top / step)));
+  const last = Math.min(total - 1, Math.max(first, Math.floor(Math.max(top, bot - 1) / step)));
+  return { first, last };
+}
+
+function desiredWindow() {
+  const total = Math.max(1, lastEdit ? lastEdit.totalPages : 1);
+  const cp = lastEdit ? lastEdit.caretPage : -1;
+  const vis = visiblePageRange();
+  let lo = total - 1;
+  let hi = 0;
+  if (cp >= 0 && cp < total) {
+    lo = Math.min(lo, cp);
+    hi = Math.max(hi, cp);
+  }
+  lo = Math.min(lo, vis.first);
+  hi = Math.max(hi, vis.last);
+  let first = Math.max(0, lo - PAGE_MARGIN);
+  let count = Math.min(MAX_WINDOW, hi - lo + 1 + 2 * PAGE_MARGIN);
+  count = Math.max(1, Math.min(count, total));
+  if (first + count > total) first = Math.max(0, total - count);
+  return { first, count };
+}
+
+/**
+ * 按当前滚动位置与光标把视口锚点对一遍。返回 true 表示锚点变了（调用方要重新呈现）。
+ *
+ * 滞回：现有窗口只要还盖得住"光标页 + 可见页"，就原样留着不动。
+ *   没有这一层的话，光标一路往下打字、可见页一格一格地换，每换一格就整帧重建一次
+ *   （一页约 13 ms），手感就是"每隔十几个字卡一下"。
+ */
+function applyWindow() {
+  if (!mod) return false;
+  const w = desiredWindow();
+  const key = w.first + ':' + w.count;
+  if (key === lastAnchor) return false;
+  const cur = lastAnchor.split(':').map(Number);
+  if (cur.length === 2 && Number.isFinite(cur[0]) && Number.isFinite(cur[1]) && lastEdit) {
+    const cp = lastEdit.caretPage;
+    const vis = visiblePageRange();
+    const covers = (a, b) => cur[0] <= a && b <= cur[0] + cur[1] - 1;
+    if (covers(vis.first, vis.last) && (cp < 0 || (cur[0] <= cp && cp <= cur[0] + cur[1] - 1))) {
+      return false;
+    }
+  }
+  lastAnchor = key;
+  mod.setViewportAnchor(w.first, w.count);
+  return true;
+}
+
+/**
+ * 换文档之前先把窗口摆到"开头几页"。
+ *
+ * 换文档会让光标归零、滚动回顶，所以窗口必然落在开头。先设好再重排 —— 顺序反了的话
+ * 第一次重排会按上一篇文档留下的锚点栅格化，随后 settle 再挪一次窗口重排，
+ * 于是"装载花了多少"这件事被后一次覆盖掉（面板与探针读到的会是"重排 0 段"）。
+ *
+ * 这里故意开满 MAX_WINDOW 页而不是精确算：settle 里的滞回只认"现有窗口盖不盖得住"，
+ * 盖得住就不动 —— 开满一定盖得住，于是装载之后不会再挪窗口、不会再重排一次。
+ * 精确算成 1 页反而会因为差一页而触发第二次重排（那正是要避免的）。
+ */
+function presetWindowForLoad() {
+  if (!mod) return;
+  stageEl.scrollTop = 0;
+  mod.setViewportAnchor(0, MAX_WINDOW);
+  lastAnchor = '0:' + MAX_WINDOW;
+}
+
+/**
+ * 把光标滚进视口。编辑之后光标可能落在窗口外（程序化定位、跳段），
+ * 那种情况下窗口会自己把光标页并进来，但屏幕上看不见它 —— 所以要滚。
+ */
+function scrollCaretIntoView(st) {
+  if (!st || st.caretPage < 0) return;
+  const dpr = window.devicePixelRatio || 1;
+  const ph = mod.pagePxHeight();
+  const step = ph + mod.pageGapPx();
+  const top = (st.caretPage * step + st.caretY) / dpr;
+  const bot = top + Math.max(12, st.caretH / dpr);
+  const pad = 18;
+  const viewTop = stageEl.scrollTop;
+  const viewBot = viewTop + stageEl.clientHeight - 2 * pad;
+  if (top - pad < viewTop) stageEl.scrollTop = Math.max(0, top - pad);
+  else if (bot + pad > viewBot) stageEl.scrollTop = bot + pad - stageEl.clientHeight;
+}
+
+/**
+ * 一次操作之后统一收尾：把光标滚进视口 → 对窗口 → 上屏 → 刷面板。
+ * 返回最终那一轮的编辑统计。
+ *
+ * 顺序要紧，两步都不能换：
+ *   先滚再对窗口 —— 反过来的话窗口按"旧的滚动位置"算，光标在第 0 页而屏幕还停在
+ *     第 15 页时会把窗口拉成整篇（封顶那一层只是兜住它，根子在这里）。
+ *   先对窗口再上屏 —— 反过来的话第一次上屏会把帧贴到错的页上（帧覆盖的页与
+ *     画布集合不是同一批），画面上就是"别处的内容出现在这一页"。
+ */
+function settle(st, opts) {
+  if (!mod) return st;
+  const t0 = performance.now();
+  const o = opts || {};
+  if (st) lastEdit = st;
+  if (o.scroll !== false) scrollCaretIntoView(st);
+  if (applyWindow()) {
+    mod.present();
+    st = JSON.parse(mod.editStatsJson());
+    lastEdit = st;
+  }
+  const t1 = performance.now();
+  blitFrame(st);
+  const t2 = performance.now();
+  if (o.render !== false) {
+    renderEdit(st);
+    renderForm(st);
+    renderLayout(JSON.parse(mod.statsJson()));
+  }
+  // 宿主侧两段的账：窗口对齐 + 滚动（窗口）+ 上屏 + 刷面板。
+  //   引擎那一段由 editStats 报，这两段只有宿主自己知道 —— 而"敲一个字 20 ms"
+  //   里它们占了小一半，不记下来就只能一直猜是引擎慢。
+  lastBlit.windowMs = t1 - t0;
+  lastBlit.settleMs = performance.now() - t0;
+  return st;
+}
 
 window.addEventListener('error', (e) => pageErrors.push('error: ' + String(e.message)));
 window.addEventListener('unhandledrejection', (e) =>
@@ -256,13 +503,16 @@ async function boot() {
   ta.addEventListener('compositionstart', onCompositionStart);
   ta.addEventListener('compositionupdate', onCompositionUpdate);
   ta.addEventListener('compositionend', onCompositionEnd);
-  cv.addEventListener('mousedown', onCanvasMouseDown);
-  $('stage').addEventListener('mousedown', (e) => {
-    if (e.target === cv || e.target === ta) return;
-  });
+  // 鼠标挂在页容器上而不是某一张画布：事件落在哪一页都走同一条换算。
+  pagesEl.addEventListener('mousedown', onCanvasMouseDown);
+  stageEl.addEventListener('scroll', onStageScroll, { passive: true });
 
   currentZoom = Number(zoom.value);
   mod.setZoom(currentZoom);
+  // 先把视口锚点摆成"开头几页"，再装载。顺序反了的话第一次重排会按整篇栅格化 ——
+  //   200 段那一份就是 16 页、~450 ms，而其中 13 页马上就会被丢掉。
+  //   页数这时还不知道，交给引擎夹回文档范围内即可。
+  presetWindowForLoad();
   mod.setScenario(DEFAULT_SCENARIO);
   relayoutAndBlit();
   ta.focus();
@@ -280,76 +530,66 @@ async function boot() {
 }
 
 /**
- * 呈现：一次跨界，然后只贴脏矩形
+ * 上屏：把窗口位图按页切片，贴进各页画布。
+ *
+ * 四段计时写进 lastBlit：取帧 / 构造 ImageData / putImageData / 摆 IME。
+ * 分段的理由与引擎的 paint_fill/glyph/present 同一条：只有分开记，
+ * 才知道该优化哪一段，而不是笼统地说"上屏慢"。
+ *
+ * 切片的做法是 putImageData 的源矩形：位图是整张窗口帧，源 y 取"该页在窗口里的
+ * 偏移"，于是不需要在 JS 里再拷一份。页与页之间的间隙不贴 —— 宿主没有它的画布，
+ * 它只是引擎帧上的背景色。
  */
 function blitFrame(st) {
+  const t0 = performance.now();
   const w = mod.frameWidth();
   const h = mod.frameHeight();
   const view = mod.frameRgba();
   if (view.byteLength !== w * h * 4) {
     throw new Error(`帧长度不符：${view.byteLength} ≠ ${w}×${h}×4`);
   }
+  const t1 = performance.now();
 
-  const resized = cv.width !== w || cv.height !== h;
-  if (resized) {
-    cv.width = w;
-    cv.height = h;
-  }
+  const first = mod.windowFirstPage();
+  const count = mod.windowPageCount();
+  const ph = mod.pagePxHeight();
+  const step = ph + mod.pageGapPx();
+  syncPageCanvases(first, count, st ? st.totalPages : 1);
 
-  // CSS 尺寸必须按设备像素比折算，否则浏览器会把整块画布重采样一遍。
-  //
-  //   画布的 backing store 是 w×h 个帧像素，而 CSS 像素在 dpr≠1 的屏上是
-  //   更大的单位：不折算出 style.width，浏览器就会把 893 px 的位图铺到 893 CSS px
-  //   （在 125% 缩放的屏上 = 1116 设备像素）→ 每个帧像素被插值成 1.25 个，
-  //   整页文字发虚、笔画变浅 —— 这就是"字好浅"。
-  //
-  //   折算成 w/dpr 之后：1 帧像素 == 1 设备像素，浏览器不做任何重采样。
-  //   引擎那边的 zoom 才是"分辨率"的唯一旋钮，DPI 不该再叠一层。
-  //
-  //   顺带：positionIme / 点击命中都用 cr.width / cv.width 求比例，
-  //   折算后这个比例正好是 1/dpr，比更准。
-  const dpr = window.devicePixelRatio || 1;
-  const cssW = w / dpr;
-  const cssH = h / dpr;
-  if (cvCssW !== cssW || cvCssH !== cssH) {
-    cvCssW = cssW;
-    cvCssH = cssH;
-    cv.style.width = cssW + 'px';
-    cv.style.height = cssH + 'px';
-  }
-
+  // 帧像素与设备像素一一对应：CSS 尺寸按 devicePixelRatio 折算过（在 syncPageCanvases 里），
+  // 浏览器因此不做任何重采样。引擎那边的 zoom 才是"分辨率"的唯一旋钮，DPI 不该再叠一层。
   const img = new ImageData(
     new Uint8ClampedArray(view.buffer, view.byteOffset, view.byteLength), w, h);
+  const t2 = performance.now();
 
-  // 上屏矩形来自引擎的待上屏累加器（读后即清零），而不是 editStats 的
-  //    repaintedX/Y/W/H。这两个数字的用途不同：
-  //      editStats 那几个  = "这一轮写了多少"（面板要的就是它）
-  //      takeBlitBox()     = "自上次上屏以来一共写过哪些区域"（上屏要的是它）
+  // 只贴引擎报过的脏页。口径与引擎那份 bbox 完全一致（同一批矩形算出来的），
+  //   所以不会出现"引擎画了、画布没更新"。光标与表单标记画在帧上而不进底图，
+  //   它们所在的那一页也在清单里 —— 这正是"页指纹"给不出的信息。
   //
-  //   它们在一件事上分道扬镳：一次用户操作可能触发两次 present。
-  //   最典型的是 afterEdit() 里那条补救路径 —— 引擎返回 caretVisible == false
-  //   时会再 present 一次把光标拉回来。第二次只写了光标与标记那几小块，
-  //   若拿它的脏矩形去 putImageData，第一次那次全帧重绘就从没上屏。
-  //   症状：引擎帧完全正确（auditFrame 差 0），画布却差一千多像素
-  //   ——「光标走了、文字没动、那个字段的方括号还留在原地」。
-  //
-  //   必须每次都读（哪怕下面走了全帧分支），否则累加器不会清零。
-  const box = (mod.takeBlitBox) ? JSON.parse(mod.takeBlitBox()) : null;
-
-  // 上屏也只贴脏矩形 —— JS 这一侧同样不做全帧搬运。
-  //   引擎报了"写了哪一块"，这里就用 putImageData 的 dirty-rect 参数只更新那一块。
-  const canPatch = !resized && box && box.w > 0 && box.h > 0 &&
-                   box.x >= 0 && box.y >= 0 && box.x < w && box.y < h;
-  if (canPatch) {
-    const dx = box.x;
-    const dy = box.y;
-    const dw = Math.min(box.w, w - dx);
-    const dh = Math.min(box.h, h - dy);
-    ctx.putImageData(img, 0, 0, dx, dy, dw, dh);
-  } else {
-    ctx.putImageData(img, 0, 0);
+  //   源矩形与目标位置：putImageData(img, dx, dy, dirtyX, dirtyY, dw, dh) 把
+  //     ImageData 上 (dirtyX, dirtyY) 那一块画到画布的 (dx + dirtyX, dy + dirtyY)。
+  //     目标位置是"和"，不是 dx/dy —— 写成 putImageData(img, 0, 0, 0, srcY, w, ph)
+  //     会把第 2 页起的内容画到画布外面（超出的部分被裁掉、画布一点没变），
+  //     症状是"只有第 1 页是对的、其余页停在旧内容上"。所以 dy 要取 -srcY 抵消。
+  const dirty = JSON.parse(mod.dirtyPagesJson());
+  let patched = 0;
+  for (const p of dirty) {
+    const rec = pageCanvases.get(p);
+    if (!rec) continue;
+    const srcY = (p - first) * step;
+    rec.g.putImageData(img, 0, -srcY, 0, srcY, w, ph);
+    ++patched;
   }
+  const t3 = performance.now();
+
   positionIme(st);
+  const t4 = performance.now();
+
+  lastBlit = {
+    frameMs: t1 - t0, imageMs: t2 - t1, putMs: t3 - t2, imeMs: t4 - t3,
+    totalMs: t4 - t0, full: patched >= count, w, h, boxW: w, boxH: ph,
+    framePx: w * h, pages: patched, windowFirst: first,
+  };
 }
 
 /**
@@ -358,6 +598,9 @@ function blitFrame(st) {
  * 这不是 UI 细节，而是架构依赖：IME 的候选框位置由输入元素的屏幕位置决定。
  * 所以"光标几何"（caretRect）是"中文能输得舒服"的前置条件 ——
  * 也就是为什么档 1 不能跳过、必须先把行盒几何做出来。
+ *
+ * 坐标基准换成页容器：它是 #stage 的滚动内容，1 CSS 像素 = dpr 帧像素，
+ * 而它的顶边就是文档第 0 页的顶边 —— 于是"第 k 页 + 页内 y"直接就是文档坐标。
  */
 function positionIme(st) {
   if (!st || !st.caretW) {
@@ -365,19 +608,19 @@ function positionIme(st) {
     ta.style.height = '1px';
     return;
   }
-  const stage = $('stage');
-  const cr = cv.getBoundingClientRect();
-  const sr = stage.getBoundingClientRect();
-  const sx = cr.width / cv.width;
-  const sy = cr.height / cv.height;
+  const dpr = window.devicePixelRatio || 1;
+  const step = mod.pagePxHeight() + mod.pageGapPx();
+  const sr = stageEl.getBoundingClientRect();
+  const pr = pagesEl.getBoundingClientRect();
 
-  const left = cr.left - sr.left + stage.scrollLeft + st.caretX * sx;
-  const top = cr.top - sr.top + stage.scrollTop + st.caretY * sy;
-  const lineH = Math.max(12, Math.round(st.caretH * sy));
+  const left = pr.left - sr.left + stageEl.scrollLeft + st.caretX / dpr;
+  const top = pr.top - sr.top + stageEl.scrollTop +
+              (mod.windowFirstPage() * step + st.caretY) / dpr;
+  const lineH = Math.max(12, Math.round(st.caretH / dpr));
 
   ta.style.left = Math.round(left) + 'px';
   ta.style.top = Math.round(top) + 'px';
-  ta.style.width = Math.max(24, Math.round(cr.width - st.caretX * sx)) + 'px';
+  ta.style.width = Math.max(24, Math.round(pagesEl.clientWidth - st.caretX / dpr)) + 'px';
   ta.style.height = lineH + 'px';
   ta.style.lineHeight = lineH + 'px';
   ta.style.fontSize = Math.max(10, Math.round(lineH * 0.62)) + 'px';
@@ -386,45 +629,31 @@ function positionIme(st) {
 function afterEdit() {
   // 顺序有讲究：先在编辑引起的那次重绘之后把统计取下来，
   //   这才是"敲一个字写了多少像素"。若先做别的事再读，读到的就是别的账。
-  const st = JSON.parse(mod.editStatsJson());
-  lastEdit = st;
+  let st = JSON.parse(mod.editStatsJson());
 
   // 不变量：编辑之后光标必须立即可见。
   //   闪烁相位可能正好停在"隐藏"那半拍上。
   //   现在这条不变量由引擎保证（repaintAfterEdit() 会先把 caret_visible_
   //     置真再重绘），所以下面这个分支正常情况下不会被走到。
-  //     留着它是因为它是个真 bug 的现场，而且它现在也真的安全了：
-  //     上屏走的是 takeBlitBox() 的累加器，第二次 present 的脏矩形不会把
-  //     第一次那次全帧重绘挤掉（见 blitFrame 顶部那段注释）。
   if (!st.caretVisible) {
     caretOn = true;
     mod.showCaret(true);
     mod.present();
-    blitFrame(JSON.parse(mod.editStatsJson()));
-  } else {
-    blitFrame(st);
+    st = JSON.parse(mod.editStatsJson());
   }
 
-  renderEdit(st);
-  renderForm(st);
-  // "本次布局"面板的字段来自 statsJson（页数/字形数/缺字），
-  //   不是 editStatsJson。之前这里传的是编辑统计，于是那一栏的页数字形数
-  //   全是 undefined —— 面板照样渲染，所以不看就发现不了。
-  renderLayout(JSON.parse(mod.statsJson()));
+  // 窗口对齐、上屏、刷面板、把光标滚进视口 —— 收尾只有这一处，
+  //   漏掉任何一步的症状都是"画面停在上一拍"。
+  st = settle(st);
   resetBlink();
   return st;
 }
 
 function relayoutAndBlit() {
   if (!ready && !mod) return;
+  presetWindowForLoad();
   mod.relayoutAndPaint();
-  const st = JSON.parse(mod.editStatsJson());
-  lastEdit = st;
-  blitFrame(st);
-  renderEdit(st);
-  renderForm(st);
-  renderLayout(JSON.parse(mod.statsJson()));
-  return st;
+  return settle(JSON.parse(mod.editStatsJson()), { scroll: false });
 }
 
 /**
@@ -531,13 +760,28 @@ function onCompositionEnd(ev) {
   setStatus('就绪');
 }
 
+/**
+ * 把一次鼠标事件换算成"窗口帧坐标（帧像素）"。
+ *
+ * 事件可能落在任意一张页画布上，所以基准取页容器：页容器里 1 CSS 像素 = dpr 帧像素，
+ * 而它的顶边就是文档第 0 页的顶边 —— 于是"页内位置"直接就是文档坐标，再减去窗口
+ * 首页的偏移就是帧坐标。这样点第几页都一样，不需要知道点的是哪张画布。
+ */
+function framePointFromEvent(ev) {
+  const r = pagesEl.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const step = mod.pagePxHeight() + mod.pageGapPx();
+  return {
+    x: (ev.clientX - r.left) * dpr,
+    y: (ev.clientY - r.top) * dpr - mod.windowFirstPage() * step,
+  };
+}
+
 function onCanvasMouseDown(ev) {
   if (!ready || busy) return;
-  const r = cv.getBoundingClientRect();
-  const xPx = (ev.clientX - r.left) * (cv.width / r.width);
-  const yPx = (ev.clientY - r.top) * (cv.height / r.height);
-  // hitTest 收的是帧磅坐标，而画布上量到的是帧像素 —— 除以 zoom 换算。
-  const hit = mod.hitTest(xPx / currentZoom, yPx / currentZoom);
+  const pt = framePointFromEvent(ev);
+  // hitTest 收的是帧磅坐标，而页容器上量到的是帧像素 —— 除以 zoom 换算。
+  const hit = mod.hitTest(pt.x / currentZoom, pt.y / currentZoom);
   if (hit !== 'null') {
     const p = JSON.parse(hit);
     // 连"这一下点的是哪一个位置"一起带过去。
@@ -578,10 +822,29 @@ function resetBlink() {
     // 统计必须在 present() 之后读。
     //   present 之前拿到的是上一帧的脏矩形，拿它去 putImageData 会贴错位置 ——
     //   症状是"光标走了，残影留在原地"。所以这里只读一次，且读完就用。
-    const st = JSON.parse(mod.editStatsJson());
-    blitFrame(st);
+    //   闪烁这一拍不滚视口：它每 530ms 来一次，跟着滚会把用户正在看的地方拽走。
+    const st = settle(JSON.parse(mod.editStatsJson()), { render: false, scroll: false });
     renderBlink(st);
   }, 530);
+}
+
+/**
+ * 滚动：可见页变了就挪窗口，再重新呈现。
+ *
+ * 用 rAF 合流：滚动事件一次手势能来几十个，每个都重排会让滚动变成幻灯片。
+ * 只有"窗口真的变了"才重排（见 applyWindow），窗口内滚动一格都不碰引擎。
+ */
+let scrollRaf = 0;
+
+function onStageScroll() {
+  if (!ready || busy || scrollRaf) return;
+  scrollRaf = requestAnimationFrame(() => {
+    scrollRaf = 0;
+    if (!ready || busy || !mod) return;
+    if (!applyWindow()) return;
+    mod.present();
+    settle(JSON.parse(mod.editStatsJson()), { scroll: false });
+  });
 }
 
 /**
@@ -608,6 +871,7 @@ function renderEdit(st) {
     ['布局粒度', !laid ? '— 本轮无布局' : (st.layoutWasFull ? '全量' : '增量'),
       incr ? 'ok' : undefined],
     ['脏页 / 总页', `${st.dirtyPageCount} / ${st.totalPages}`],
+    ['窗口页 / 首页', `${st.windowPages} / ${st.windowFirstPage}`],
     ['重画页数', st.repaintedPages],
     ['重画区域', `${st.repaintedW} × ${st.repaintedH} px`, 'hi'],
     ['重画像素', `${fmt(st.repaintedPixels, 0)}`, 'hi'],
@@ -616,6 +880,19 @@ function renderEdit(st) {
     ['— pageFp', `${fmt(st.pageFpMs)} ms`],
     ['— paint', `${fmt(st.paintMs)} ms`],
     ['— 合计', `${fmt(st.totalMs)} ms`],
+    // 引擎那四行只算到帧缓冲组装完。跨界与上屏是另外的账，分开记的理由：
+    //   该优化哪一边完全取决于钱在哪一段 —— putImageData 的代价随画布面积走，
+    //   取帧与 ImageData 构造都是常数级，而它们加起来可能比引擎那一段还大。
+    ['— 上屏取帧', `${fmt(lastBlit.frameMs)} ms`],
+    ['— putImageData', `${fmt(lastBlit.putMs)} ms`, 'hi'],
+    ['— 上屏合计', `${fmt(lastBlit.totalMs)} ms`, 'hi'],
+    // 宿主收尾 = 窗口对齐 + 滚动 + 面板刷新。它不含上屏那几段（那几行在上面），
+    //   而"敲一个字"的总账 = 引擎（上面那四行）+ 上屏 + 这一行。
+    ['— 宿主收尾（窗口+面板）',
+      `${fmt(Math.max(0, (lastBlit.settleMs || 0) - lastBlit.totalMs))} ms`, 'hi'],
+    ['上屏页数 / 窗口页数', `${lastBlit.pages} / ${mod.windowPageCount()}`],
+    ['窗口', `第 ${lastBlit.windowFirst} 页起 · 帧 ${lastBlit.w} × ${lastBlit.h} px`],
+    ['帧面积（=画布面积）', `${(lastBlit.framePx / 1e6).toFixed(2)} Mpx`],
     ['光标', `段 ${st.caretPara} · 偏移 ${st.caretOffset} 码点`],
     ['光标矩形', `${st.caretX},${st.caretY} ${st.caretW}×${st.caretH} px`],
     ['全文码点数', st.docCodepoints],
@@ -682,7 +959,16 @@ function renderLayout(st) {
       st.missingGlyphCount === 0 ? 'ok' : 'warn'],
     ['— shape', `${fmt(st.shapeMs)} ms`],
     ['— paint（' + rasterBackendLabel() + '）', `${fmt(st.paintMs)} ms`],
+    // 绘制三段：铺面积 / 字形 / 帧搬运。分开报的理由与引擎里那三个字段一致 ——
+    //   它们各自对应一种完全不同的优化手段，合成一个数就只能得出"绘制慢"。
+    ['  · 铺面积', `${fmt(st.paintFillMs)} ms`],
+    ['  · 字形', `${fmt(st.paintGlyphMs)} ms`, 'hi'],
+    ['  · 帧搬运', `${fmt(st.paintPresentMs)} ms`],
+    ['字形缓存 命中 / 未命中', `${st.glyphCacheHits} / ${st.glyphCacheMisses}`],
     ['帧尺寸', `${mod.frameWidth()} × ${mod.frameHeight()} px`],
+    ['页尺寸 / 页间隙', `${mod.pagePxWidth()} × ${mod.pagePxHeight()} / ${mod.pageGapPx()} px`],
+    ['视口窗口', `第 ${mod.windowFirstPage()} 页起 · ${mod.windowPageCount()} 页` +
+      `（${pageCanvases.size} 张页画布）`],
     ['帧字节数', kb(mod.frameByteSize())],
   ]);
 }
@@ -764,6 +1050,10 @@ window.__heditor = {
   get stats() { return mod ? JSON.parse(mod.statsJson()) : null; },
   // 编辑统计（= editStatsJson）
   get editStats() { return mod ? JSON.parse(mod.editStatsJson()) : null; },
+  // 宿主侧上屏耗时（最近一轮的四段分解），见 lastBlit。
+  //   与 editStats 并列而不是塞进去：这两笔账的来源不同（一个是 wasm 里的计时，
+  //   一个是 JS 的 performance.now），合成一个对象会让探针分不清单位归属。
+  get blitStats() { return lastBlit; },
 
   // 压力文档：造 N 段、每段 M 字。性能判据只能在大文档上做 —— 演示场景只有一段，
   //   量出来的编译与索引耗时全是 0.0x ms，看不出 O(文档) 的那一层。
@@ -787,14 +1077,9 @@ window.__heditor = {
       mod.setZoom(currentZoom);
     }
     mod.setScenario(Number(id));
+    presetWindowForLoad();
     mod.relayoutAndPaint();
-    const st = JSON.parse(mod.editStatsJson());
-    lastEdit = st;
-    blitFrame(st);
-    renderEdit(st);
-    renderForm(st);
-    renderLayout(JSON.parse(mod.statsJson()));
-    return st;
+    return settle(JSON.parse(mod.editStatsJson()), { scroll: false });
   },
   reset(id, zoom) { return this.run(id === undefined ? 6 : id, zoom === undefined ? 1.5 : zoom); },
 
@@ -808,41 +1093,29 @@ window.__heditor = {
   //    探针钩子必须和真人路径一样把画面收尾，否则它自己就是 bug 的制造者。
   type(s) {
     if (!ready || !mod.typeText(s)) return null;
-    const st = JSON.parse(mod.editStatsJson());
-    blitFrame(st);
-    return st;
+    return settle(JSON.parse(mod.editStatsJson()));
   },
   backspace() {
     if (!ready || !mod.backspace()) return null;
-    const st = JSON.parse(mod.editStatsJson());
-    blitFrame(st);
-    return st;
+    return settle(JSON.parse(mod.editStatsJson()));
   },
   deleteForward() {
     if (!ready || !mod.deleteForward()) return null;
-    const st = JSON.parse(mod.editStatsJson());
-    blitFrame(st);
-    return st;
+    return settle(JSON.parse(mod.editStatsJson()));
   },
   // 跨段编辑：段首退格 / 段末 Delete 已经自动走合并（见引擎 backspace/deleteForward），
   //   所以这里只需要给回车与"显式合并"各一个入口。
   splitParagraph() {
     if (!ready || !mod.splitParagraph()) return null;
-    const st = JSON.parse(mod.editStatsJson());
-    blitFrame(st);
-    return st;
+    return settle(JSON.parse(mod.editStatsJson()));
   },
   mergeWithPreviousParagraph() {
     if (!ready || !mod.mergeWithPreviousParagraph()) return null;
-    const st = JSON.parse(mod.editStatsJson());
-    blitFrame(st);
-    return st;
+    return settle(JSON.parse(mod.editStatsJson()));
   },
   mergeWithNextParagraph() {
     if (!ready || !mod.mergeWithNextParagraph()) return null;
-    const st = JSON.parse(mod.editStatsJson());
-    blitFrame(st);
-    return st;
+    return settle(JSON.parse(mod.editStatsJson()));
   },
   // 返回 null 表示"光标没动"（引擎返回 false 就不重绘）——
   //   探针据此断言"已经在段首了，再左移不会重绘"。
@@ -876,13 +1149,16 @@ window.__heditor = {
     afterEdit();
     return this.caret;
   },
-  // 点画布的真实入口（与 cv 的 mousedown 处理同一套坐标换算），供探针复现用户手势。
+  // 点画布的真实入口（与页容器上那个 mousedown 处理同一套坐标换算），供探针复现用户手势。
+  //   收的是窗口帧像素；帧坐标 → 文档坐标 → 屏幕坐标，反向走一遍 framePointFromEvent。
   clickAt(xPx, yPx) {
     if (!ready) return null;
-    const r = cv.getBoundingClientRect();
-    cv.dispatchEvent(new MouseEvent('mousedown', {
-      clientX: r.left + xPx * (r.width / cv.width),
-      clientY: r.top + yPx * (r.height / cv.height),
+    const r = pagesEl.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    const step = mod.pagePxHeight() + mod.pageGapPx();
+    pagesEl.dispatchEvent(new MouseEvent('mousedown', {
+      clientX: r.left + xPx / dpr,
+      clientY: r.top + (yPx + mod.windowFirstPage() * step) / dpr,
       bubbles: true, cancelable: true,
     }));
     return this.caret;
@@ -950,8 +1226,11 @@ window.__heditor = {
   //   这是"编译这一层有没有做到增量"的唯一证据 —— 只有分子没有分母的耗时数说明不了事。
   auditCompile() { return mod && mod.auditCompile ? JSON.parse(mod.auditCompile()) : null; },
 
-  // 直读"待上屏"矩形（读后清零）—— 探针用它核对"引擎写了多少、宿主该贴多少"。
-  get blitBox() { return mod && mod.takeBlitBox ? JSON.parse(mod.takeBlitBox()) : null; },
+  // 本轮写过哪几页（绝对页号）—— 宿主按页上屏的依据，也是"帧切页之后"取代
+  //   原先那个单矩形 blitBox 的判据：一次上屏现在贴的是若干整页，不是一个矩形。
+  //   （引擎的 takeBlitBox 仍在，单测 edit_test 用它钉"一次操作两次 present 的账
+  //     不会互相挤掉"；宿主这条路已经不吃它了。）
+  get dirtyPages() { return mod && mod.dirtyPagesJson ? JSON.parse(mod.dirtyPagesJson()) : null; },
 
   // 给探针用的：直接摆光标可见相位（真实闪烁由定时器摆，探针要能自己定住）。
   //   存在的理由：用户的 bug 只在"光标停在隐藏那半拍"时触发 ——
@@ -999,9 +1278,7 @@ window.__heditor = {
   present() {
     if (!ready) return null;
     mod.present();
-    const st = JSON.parse(mod.editStatsJson());
-    blitFrame(st);
-    return st;
+    return settle(JSON.parse(mod.editStatsJson()));
   },
 
   // 一键自检：把屏幕上真实的像素和引擎那一帧逐字节比一遍，外加缩放/DPI 现场。
@@ -1014,36 +1291,54 @@ window.__heditor = {
   //   用法：F12 控制台 →  __heditor.selfCheck()  把返回的对象发出来。
   //   screenVsEngineDiffPx > 0 就说明"上屏"这一步贴错了（引擎帧本身是对的）；
   //   恒为 0 就说明问题在引擎的排版/光栅化，而不在上屏。
+  //
+  //   帧被切成每页一张画布之后，判据的口径跟着改：宿主手里只有页的像素（页与页之间
+  //   的间隙只是引擎帧上的背景色，没有画布），所以逐字节比的是"窗口内每一页"，
+  //   页间隙不比。覆盖范围与"整篇一张画布"时相同 —— 少拼一页就等于漏检一页。
   selfCheck() {
     if (!ready) return null;
     const w = mod.frameWidth();
     const h = mod.frameHeight();
-    const g = cv.getContext('2d', { willReadFrequently: true });
-    const S = g.getImageData(0, 0, w, h).data;
+    const ph = mod.pagePxHeight();
+    const step = ph + mod.pageGapPx();
+    const first = mod.windowFirstPage();
+    const count = mod.windowPageCount();
     const F = mod.frameRgba();
-    const n = Math.min(S.length, F.length);
     let diff = 0, minx = 1e9, miny = 1e9, maxx = -1, maxy = -1;
-    for (let i = 0; i + 3 < n; i += 4) {
-      if (S[i] !== F[i] || S[i + 1] !== F[i + 1] || S[i + 2] !== F[i + 2]) {
-        ++diff;
-        const p = i >> 2, x = p % w, y = (p - x) / w;
-        if (x < minx) minx = x;
-        if (x > maxx) maxx = x;
-        if (y < miny) miny = y;
-        if (y > maxy) maxy = y;
+    let comparedPages = 0;
+    for (const [p, rec] of pageCanvases) {
+      const local = p - first;
+      if (local < 0 || local >= count) continue;
+      ++comparedPages;
+      const g = rec.g;
+      const S = g.getImageData(0, 0, w, ph).data;
+      const base = local * step * w * 4;
+      for (let i = 0; i + 3 < S.length; i += 4) {
+        const j = base + i;
+        if (j + 3 >= F.length) break;
+        if (S[i] !== F[j] || S[i + 1] !== F[j + 1] || S[i + 2] !== F[j + 2]) {
+          ++diff;
+          const q = i >> 2, x = q % w, y = (q - x) / w + local * step;
+          if (x < minx) minx = x;
+          if (x > maxx) maxx = x;
+          if (y < miny) miny = y;
+          if (y > maxy) maxy = y;
+        }
       }
     }
     const st = JSON.parse(mod.editStatsJson());
-    const r = cv.getBoundingClientRect();
+    const r = pagesEl.getBoundingClientRect();
     return {
       text: mod.documentText(0),
       docCodepoints: st.docCodepoints,
       caret: { para: st.caretPara, offset: st.caretOffset, x: st.caretX, y: st.caretY,
-               w: st.caretW, h: st.caretH, visible: st.caretVisible },
+               w: st.caretW, h: st.caretH, visible: st.caretVisible, page: st.caretPage },
       framePx: [w, h],
-      canvas: {
-        backing: [cv.width, cv.height],
-        cssSize: [cv.style.width, cv.style.height],
+      window: { first, count, comparedPages },
+      pageCanvases: pageCanvases.size,
+      pages: {
+        backing: [mod.pagePxWidth(), ph],
+        cssSize: [pagesEl.style.width, pagesEl.style.height],
         rectPx: [Math.round(r.width), Math.round(r.height)],
       },
       dpr: window.devicePixelRatio,
@@ -1129,7 +1424,28 @@ window.__heditor = {
 
   // 给探针用的 DOM 句柄（键盘路径要往真实元素上派事件，不能直接调引擎）
   get textarea() { return ta; },
-  get canvas() { return cv; },
+  // 帧画布的代理（见 frameCanvasProxy）。帧已按页切成多张画布，这个代理按"窗口帧"
+  //   算几何、事件转发给页容器，老探针因此一行都不用改。
+  get canvas() { return frameCanvasProxy; },
+  // 真正持有像素的那批页画布（绝对页号 → canvas），供新探针核对"窗口内每页都在"。
+  get pageCanvases() {
+    const out = [];
+    for (const [p, rec] of pageCanvases) out.push({ page: p, el: rec.el });
+    return out.sort((a, b) => a.page - b.page);
+  },
+  // 页在帧像素下的几何 [宽, 高, 间隙]。
+  get pagePx() {
+    return mod ? [mod.pagePxWidth(), mod.pagePxHeight(), mod.pageGapPx()] : null;
+  },
+  // 视口窗口现场：宿主与引擎各自认为窗口是哪几页（两者必须一致）。
+  get viewport() {
+    if (!mod) return null;
+    return { anchor: lastAnchor, engineFirst: mod.windowFirstPage(),
+             engineCount: mod.windowPageCount(),
+             desired: desiredWindow(), visible: visiblePageRange(),
+             pagePx: [mod.pagePxWidth(), mod.pagePxHeight(), mod.pageGapPx()],
+             canvases: pageCanvases.size };
+  },
   get zoomLevel() { return currentZoom; },
   get scenario() { return Number($('scenario').value); },
 };

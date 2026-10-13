@@ -37,10 +37,34 @@ void EditorEngine::repaint() {
     //   "字打进去了，屏幕上什么都没多"，且之后每次重绘都按 N 页算帧高，不会自愈。
     //   页数增加时全帧重建；页数不变时仍走脏页增量。
     const int total = std::max(1, stats_.page_count);
-    // 档 1 的帧恒从第 0 页起（还没有视口虚拟化）。将来做滚动窗口时，
-    // 这里换成"窗口首屏"，并且必须同时把 total 换成窗口内的页数 ——
-    // 只改其中一个，就会退化成"帧高是全文、只画一页"或反过来。
-    presentInternal(/*first_page=*/0, /*count=*/total, /*force_full=*/false);
+    // 视口锚点把帧缩到"看得见的那几页"。帧高就是宿主画布的高度，而画布越大，
+    //   浏览器每帧要重新合成的图层越大 —— 这一笔不随脏矩形变小（见 setViewportAnchor）。
+    //   锚点越界时夹回文档范围内：文档变短、页度量变了都会让旧锚点失效，
+    //   夹一下比要求每个调用方自己算安全。
+    int first = 0;
+    int count = total;
+    if (vp_count_ > 0) {
+        first = std::max(0, std::min(vp_first_page_, total - 1));
+        count = std::max(1, std::min(vp_count_, total - first));
+    }
+    presentInternal(first, count, /*force_full=*/false);
+}
+
+void EditorEngine::setViewportAnchor(int first_page, int page_count) {
+    vp_first_page_ = first_page;
+    vp_count_ = page_count;
+}
+
+int EditorEngine::pagePxWidth() const {
+    return std::max(1, static_cast<int>(std::lround(cfg_.page.width_pt * cfg_.zoom)));
+}
+
+int EditorEngine::pagePxHeight() const {
+    return std::max(1, static_cast<int>(std::lround(cfg_.page.height_pt * cfg_.zoom)));
+}
+
+int EditorEngine::pageGapPx() const {
+    return std::max(0, static_cast<int>(std::lround(cfg_.page_gap_pt * cfg_.zoom)));
 }
 
 void EditorEngine::paintPageRange(int first_page, int count) {
@@ -54,9 +78,9 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
     if (glyph_cache_) glyph_cache_->resetStats();
 
     const float zoom = cfg_.zoom;
-    const int page_px_w = std::max(1, static_cast<int>(std::lround(cfg_.page.width_pt * zoom)));
-    const int page_px_h = std::max(1, static_cast<int>(std::lround(cfg_.page.height_pt * zoom)));
-    const int gap_px = std::max(0, static_cast<int>(std::lround(cfg_.page_gap_pt * zoom)));
+    const int page_px_w = pagePxWidth();
+    const int page_px_h = pagePxHeight();
+    const int gap_px = pageGapPx();
 
     const int total_pages = std::max(1, stats_.page_count);
     if (first_page < 0) first_page = 0;
@@ -180,7 +204,9 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
         page_fp_base_count_ = page_fp_new_count_;
         edit_stats_.repainted_pages = dirty;
     }
-    edit_stats_.total_pages = count;
+    edit_stats_.total_pages = total_pages;
+    edit_stats_.window_pages = count;
+    edit_stats_.window_first_page = first_page;
 
     // 把帧缓冲刷新到与底图一致
     //
@@ -282,6 +308,30 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
         edit_stats_.repainted_w = any ? static_cast<int>(std::ceil(uni.w)) : 0;
         edit_stats_.repainted_h = any ? static_cast<int>(std::ceil(uni.h)) : 0;
 
+        // 顺带记下"这一帧写过哪几页"，口径与上面这份 bbox 完全一致：同样这几份矩形，
+        //   一个都不多、一个都不少。宿主按页上屏靠的就是它 —— 页指纹只能说明
+        //   "底图哪几页变了"，而光标与表单标记画在帧上、不进底图，它们所在的那一页
+        //   同样要重贴，页指纹里却看不见。
+        last_dirty_pages_.clear();
+        const int step = page_px_h + gap_px;
+        auto notePage = [&](const Rect& r) {
+            if (r.w <= 0.0f || r.h <= 0.0f) return;
+            const int y0 = static_cast<int>(std::floor(r.y));
+            const int y1 = static_cast<int>(std::ceil(r.y + r.h)) - 1;
+            const int i0 = std::max(0, y0 / step);
+            const int i1 = std::min(count - 1, y1 / step);
+            for (int i = i0; i <= i1; ++i) {
+                const int page = first_page + i;
+                if (std::find(last_dirty_pages_.begin(), last_dirty_pages_.end(), page) ==
+                    last_dirty_pages_.end())
+                    last_dirty_pages_.push_back(page);
+            }
+        };
+        for (const Rect& r : refresh) notePage(r);
+        for (const Rect& r : control_marks_prev_) notePage(r);
+        notePage(cr);
+        std::sort(last_dirty_pages_.begin(), last_dirty_pages_.end());
+
         // 同时累积进"待上屏"—— 宿主上屏必须用它，不能用上面这几个"本轮"数字。
         //   理由（一次操作两次 present）写在 takeBlitBox 的注释里。
         if (any) noteBlitDirty(uni);
@@ -290,6 +340,7 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
     edit_stats_.caret_para = caret().para;
     edit_stats_.caret_offset = caret().offset;
     edit_stats_.caret_side = caretSide();
+    edit_stats_.caret_page = caretPage();
     edit_stats_.caret_visible = (caret_visible_ && cr.w > 0.0f);
     edit_stats_.caret_x_px = static_cast<int>(cr.x);
     edit_stats_.caret_y_px = static_cast<int>(cr.y);

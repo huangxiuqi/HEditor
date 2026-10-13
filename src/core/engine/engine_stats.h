@@ -111,9 +111,18 @@ struct EditStats {
 
     /**
      * 上屏粒度：本次真正重画的页数，以及文档总页数。
+     *
+     * total_pages 是文档页数，不是帧里那几页 —— 帧只装视口窗口（见
+     * EditorEngine::setViewportAnchor），而"脏页 / 总页"这个比值的分母必须是整篇，
+     * 否则它会恒等于 1，读起来像"只有一页脏"。帧里那几页看 window_pages。
      */
     int repainted_pages = 0;
     int total_pages = 0;
+    /**
+     * 帧（= 宿主那张画布）覆盖的页数，以及它的首页。
+     */
+    int window_pages = 0;
+    int window_first_page = 0;
     /**
      * 本次真正写过的像素数（由 Bitmap 记账，非上层估算），以及写入区域的包围盒（设备像素）。
      */
@@ -137,6 +146,12 @@ struct EditStats {
      */
     int caret_para = 0;
     size_t caret_offset = 0;  // 段内码点偏移
+    /**
+     * 光标所在页（绝对页号；-1 = 找不到行盒）。
+     * 帧只装窗口内的页之后，这是"光标在不在此刻的窗口里"的唯一判据 ——
+     * 不在窗口里则光标画不出来、点也点不中，宿主据此挪窗口。
+     */
+    int caret_page = -1;
     size_t caret_index = 0;   // 全文码点下标
     /**
      * 光标侧别：在这个偏移上跨过了几枚边界括号（0 = 在所有括号之前）。

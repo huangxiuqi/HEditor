@@ -293,6 +293,36 @@ val frameRgba() {
     return val(emscripten::typed_memory_view(g_engine.frameBytes(), g_engine.frame()));
 }
 
+/**
+ * 视口锚点：帧只装 [first, first+count) 这几页。count <= 0 表示整篇。
+ * 宿主按"可见页 ± 1"设它，帧高于是与文档长度无关 —— 帧高就是画布高度，
+ * 而画布越大浏览器每帧要重新合成的图层越大（见 EditorEngine::setViewportAnchor）。
+ */
+void setViewportAnchor(int first_page, int page_count) {
+    g_engine.setViewportAnchor(first_page, page_count);
+}
+
+int windowFirstPage() { return g_engine.windowFirstPage(); }
+int windowPageCount() { return g_engine.windowPageCount(); }
+int pagePxWidth() { return g_engine.pagePxWidth(); }
+int pagePxHeight() { return g_engine.pagePxHeight(); }
+int pageGapPx() { return g_engine.pageGapPx(); }
+
+/**
+ * 本次呈现写过的页（绝对页号，升序）。宿主据此决定哪几张页画布要重贴。
+ */
+std::string dirtyPagesJson() {
+    std::ostringstream o;
+    o << "[";
+    const std::vector<int>& v = g_engine.dirtyPages();
+    for (size_t i = 0; i < v.size(); ++i) {
+        if (i) o << ",";
+        o << v[i];
+    }
+    o << "]";
+    return o.str();
+}
+
 std::string statsJson() {
     const EngineStats& s = g_engine.stats();
     std::ostringstream o;
@@ -311,6 +341,11 @@ std::string statsJson() {
     o << "\"layoutMs\":" << s.layout_ms << ",";
     o << "\"pageFpMs\":" << s.page_fp_ms << ",";
     o << "\"paintMs\":" << s.paint_ms << ",";
+    // 三段的用途是判"该优化哪一段"：铺面积走 memcpy、字形走扫描线光栅、
+    //   帧搬运走 copyRectFrom。合成一个 paintMs 就只能得出"绘制慢"。
+    o << "\"paintFillMs\":" << s.paint_fill_ms << ",";
+    o << "\"paintGlyphMs\":" << s.paint_glyph_ms << ",";
+    o << "\"paintPresentMs\":" << s.paint_present_ms << ",";
     o << "\"totalMs\":" << s.total_ms << ",";
     o << "\"frameWidth\":" << s.frame_width << ",";
     o << "\"frameHeight\":" << s.frame_height << ",";
@@ -750,6 +785,8 @@ std::string editStatsJson() {
     o << "\"dirtyPageCount\":" << e.dirty_page_count << ",";
     o << "\"repaintedPages\":" << e.repainted_pages << ",";
     o << "\"totalPages\":" << e.total_pages << ",";
+    o << "\"windowPages\":" << e.window_pages << ",";
+    o << "\"windowFirstPage\":" << e.window_first_page << ",";
     o << "\"repaintedPixels\":" << e.repainted_pixels << ",";
     o << "\"repaintedX\":" << e.repainted_x << ",";
     o << "\"repaintedY\":" << e.repainted_y << ",";
@@ -772,6 +809,7 @@ std::string editStatsJson() {
     o << "\"caretIndex\":" << e.caret_index << ",";
     o << "\"docCodepoints\":" << e.doc_codepoints << ",";
     o << "\"caretSide\":" << e.caret_side << ",";
+    o << "\"caretPage\":" << e.caret_page << ",";
     o << "\"caretVisible\":" << (e.caret_visible ? "true" : "false") << ",";
     o << "\"caretX\":" << e.caret_x_px << ",";
     o << "\"caretY\":" << e.caret_y_px << ",";
@@ -883,6 +921,14 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("frameHeight", &frameHeight);
     emscripten::function("frameByteSize", &frameByteSize);
     emscripten::function("frameRgba", &frameRgba);
+
+    emscripten::function("setViewportAnchor", &setViewportAnchor);
+    emscripten::function("windowFirstPage", &windowFirstPage);
+    emscripten::function("windowPageCount", &windowPageCount);
+    emscripten::function("pagePxWidth", &pagePxWidth);
+    emscripten::function("pagePxHeight", &pagePxHeight);
+    emscripten::function("pageGapPx", &pageGapPx);
+    emscripten::function("dirtyPagesJson", &dirtyPagesJson);
 
     emscripten::function("statsJson", &statsJson);
     emscripten::function("buildStamp", &buildStamp);

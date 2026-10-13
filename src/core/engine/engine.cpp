@@ -728,8 +728,8 @@ Rect EditorEngine::caretRectPx() const {
     Rect r{};
     if (!caretRectFor(caret(), &page, &r)) return Rect{};
     const float zoom = cfg_.zoom;
-    const int page_px_h = std::max(1, static_cast<int>(std::lround(cfg_.page.height_pt * zoom)));
-    const int gap_px = std::max(0, static_cast<int>(std::lround(cfg_.page_gap_pt * zoom)));
+    const int page_px_h = pagePxHeight();
+    const int gap_px = pageGapPx();
     const float off_y = static_cast<float>((page - base_first_page_) * (page_px_h + gap_px));
     Rect px;
     px.x = std::floor(r.x * zoom);
@@ -737,6 +737,13 @@ Rect EditorEngine::caretRectPx() const {
     px.w = std::max(1.0f, std::ceil(r.w * zoom));
     px.h = std::max(1.0f, std::ceil(r.h * zoom));
     return px;
+}
+
+int EditorEngine::caretPage() const {
+    int page = 0;
+    Rect r{};
+    if (!caretRectFor(caret(), &page, &r)) return -1;
+    return page;
 }
 
 /**

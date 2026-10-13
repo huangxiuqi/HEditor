@@ -75,9 +75,15 @@
     flex: 1; overflow: auto; padding: 18px; position: relative;
     display: flex; justify-content: center; align-items: flex-start;
   }
-  #cv {
+  /* 页容器：撑出整篇文档的高度，让 #stage 能滚；每页一张画布绝对定位在里面。
+     为什么是一页一张而不是整篇一张：画布越大，浏览器每帧要重新合成的图层越大，
+     而这一笔不随脏矩形变小 —— 实测 18.3 Mpx 的整篇画布比 1.13 Mpx 的单页画布
+     每帧多花整整一个 vsync（见 scripts/diag_perf.mjs）。切成一页一张之后，
+     改哪一页就只重合成那一页。 */
+  #pages { position: relative; flex: none; }
+  #pages canvas {
+    position: absolute; left: 0; display: block;
     box-shadow: 0 1px 3px rgba(0,0,0,.18);
-    display: block;
     /* 不要 max-width:100% / height:auto。
        那样会在舞台装不下时把整块画布缩小重采样 —— 文字立刻发虚变浅。
        CSS 尺寸由 app.js 按 devicePixelRatio 精确折算（1 帧像素 = 1 设备像素），
@@ -159,7 +165,7 @@
 
 <main>
   <div id="stage">
-    <canvas id="cv" width="1" height="1"></canvas>
+    <div id="pages"></div>
     <textarea id="ime" rows="1" autocapitalize="off" autocomplete="off" autocorrect="off"
               spellcheck="false" aria-label="文本输入"></textarea>
   </div>

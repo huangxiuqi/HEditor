@@ -441,24 +441,15 @@ async function main() {
     const RUN = 'ssssss' + 'd'.repeat(15) + 'f'.repeat(14) + 'g'.repeat(25);
     const AT = 8;   // 「患者主诉：反复心」之后（8 个码点）
 
-    // 同刻读 canvas 与引擎帧并逐字节比较
+    // 同刻读 canvas 与引擎帧并逐字节比较。
+    //   帧切成一页一张画布之后，这件事交给 __heditor.selfCheck()：它按页读、按页比，
+    //   口径与"整篇一张画布"时相同 —— 屏幕上每一页的像素都必须等于引擎那一帧，
+    //   页与页之间的间隙不比（宿主没有它的画布，它只是引擎帧上的背景色）。
     const screenVsFrame = () => c.eval(`
-      const cv = document.getElementById('cv');
-      const w = window.__heditor.frameW(), h = window.__heditor.frameH();
-      const g = cv.getContext('2d', { willReadFrequently: true });
-      const S = g.getImageData(0, 0, w, h).data;
-      const F = window.__heditor.rawFrame();
-      const n = Math.min(S.length, F.length);
-      let diff = 0, minx = 1e9, miny = 1e9, maxx = -1, maxy = -1;
-      for (let i = 0; i + 3 < n; i += 4) {
-        if (S[i] !== F[i] || S[i+1] !== F[i+1] || S[i+2] !== F[i+2]) {
-          ++diff;
-          const p = i >> 2, x = p % w, y = (p - x) / w;
-          if (x < minx) minx = x; if (x > maxx) maxx = x;
-          if (y < miny) miny = y; if (y > maxy) maxy = y;
-        }
-      }
-      return { diff, w, h, minx, miny, maxx, maxy, lenS: S.length, lenF: F.length };
+      const sc = window.__heditor.selfCheck();
+      const b = sc.screenVsEngineDiffBox || [0, 0, 0, 0];
+      return { diff: sc.screenVsEngineDiffPx, w: sc.framePx[0], h: sc.framePx[1],
+               minx: b[0], miny: b[1], maxx: b[2], maxy: b[3] };
     `);
 
     const resetTo = async () => c.eval(`
@@ -534,7 +525,9 @@ async function main() {
     chk.check(' 自检接口可用且当场判为一致（__heditor.selfCheck()）',
               !!sc && sc.screenVsEngineDiffPx === 0 && Array.isArray(sc.framePx),
               sc ? `屏幕与引擎帧差 ${sc.screenVsEngineDiffPx} px，帧 ${sc.framePx.join('×')}，` +
-                   `dpr=${sc.dpr}，canvas css [${sc.canvas.cssSize}] / rect [${sc.canvas.rectPx}]`
+                   `dpr=${sc.dpr}，窗口 第${sc.window.first}页起 ${sc.window.count} 页` +
+                   `（比了 ${sc.window.comparedPages} 页 / 页画布 ${sc.pageCanvases} 张），` +
+                   `页 css [${sc.pages.cssSize}] / rect [${sc.pages.rectPx}]`
                  : '返回 null');
   }
 

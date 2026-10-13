@@ -107,6 +107,42 @@ public:
     void paintPageRange(int first_page, int count);
 
     /**
+     * 视口锚点：帧只呈现 [first_page, first_page+page_count) 这几页。
+     *
+     * 帧是一张位图，它的高度就是"宿主那张画布有多高"—— 而画布越大，浏览器
+     * 每次上屏要重新合成的图层就越大。实测（见 scripts/diag_perf.mjs）：18.3 Mpx
+     * 的帧比 1.13 Mpx 的帧每帧多花整整一个 vsync（16.6 ms），这一笔既不在引擎
+     * 计时里、也不在 putImageData 里。所以帧只该装看得见的那几页。
+     *
+     * page_count <= 0 表示"整篇"（默认）—— 默认值下行为与没有这个机制时逐字节相同，
+     * 单测与既有探针因此一行都不用改。
+     */
+    void setViewportAnchor(int first_page, int page_count);
+
+    /**
+     * 本次呈现覆盖到的页（绝对页号，升序去重）。
+     * 宿主据此决定"哪几张页画布要重贴" —— 它比"脏页数"更准：光标与表单标记
+     * 画在帧上而不进底图，它们所在的那一页同样要重贴，而页指纹里没有这两样。
+     */
+    const std::vector<int>& dirtyPages() const { return last_dirty_pages_; }
+    /**
+     * 帧当前覆盖的首页（= 宿主算页偏移与命中换算的基准）。
+     */
+    int windowFirstPage() const { return base_first_page_; }
+    /**
+     * 帧当前覆盖的页数。宿主按它把窗口位图切成几块贴给页画布。
+     */
+    int windowPageCount() const { return base_page_count_; }
+
+    /**
+     * 页在帧像素下的几何。宿主用它把"第 k 张页画布 + 页内 y"换算成帧坐标，
+     * 以及给页画布定位。三者都是 cfg_ 与 zoom 的纯函数。
+     */
+    int pagePxWidth() const;
+    int pagePxHeight() const;
+    int pageGapPx() const;
+
+    /**
      * 光标。对外坐标仍是 (段, 段内码点偏移)，任何设置入口都会先夹到合法范围、
      * 再吸附到字素簇边界 —— 所以光标永远不会停在半个 é（e + U+0301）中间。
      *
@@ -676,6 +712,12 @@ private:
      */
     Rect caretRectPx() const;
     /**
+     * 光标所在页（绝对页号；-1 = 找不到行盒）。
+     * 窗口化之后这是必需的一个数：帧只装窗口内的页，光标不在窗口里就既画不出来、
+     * 也点不中它 —— 宿主拿它决定窗口该锚在哪。
+     */
+    int caretPage() const;
+    /**
      * 统一呈现入口。内部按"页指纹是否变了"决定重建底图的哪几页。
      */
     void presentInternal(int first_page, int count, bool force_full);
@@ -921,6 +963,17 @@ private:
     int base_first_page_ = 0;
     int base_page_count_ = 0;
     bool base_valid_ = false;
+
+    /**
+     * 视口锚点（见 setViewportAnchor）。count <= 0 = 整篇。
+     */
+    int vp_first_page_ = 0;
+    int vp_count_ = 0;
+
+    /**
+     * 本次呈现写过的页（绝对页号，升序去重）。见 dirtyPages()。
+     */
+    std::vector<int> last_dirty_pages_;
 
     /**
      * 页内容指纹：本次 relayout 的结果 / 已画进底图的那一版。
