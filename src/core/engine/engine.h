@@ -729,6 +729,25 @@ private:
      * 它由排版那侧的前缀复用保证，而不是靠这里猜。
      */
     void computePageFingerprints(int dirty_lo = -1, int dirty_hi = -1);
+    /**
+     * 行指纹：与页指纹同一次遍历里算出来，只是分桶到行（见 line_fp_new_）。
+     * @p dirty_lo / @p dirty_hi 是脏页范围，与页指纹同一口径；同样只重算落在这几页里的行。
+     */
+    void computeLineFingerprints(int dirty_lo, int dirty_hi, bool full);
+    /**
+     * 把当前行指纹与行盒几何存成"底图里那一版"。
+     * 与 page_fp_in_base_ 同一时机调用：底图变了就要跟着换。
+     */
+    void snapshotLineGeometry();
+    /**
+     * 行带边界：第 k 行独占的块轴区间（页内磅），上下都取与相邻行盒的中线。
+     * 见 engine_paint.cpp 的实现注释（为什么不能用行盒自己的 block_lo/hi）。
+     */
+    void lineBand(int k, float* lo, float* hi) const;
+    /**
+     * 第 @p page 页上的行下标范围（闭区间，[lo, hi]）；这一页没有行时 hi < lo。
+     */
+    void linesOnPage(int page, int* lo, int* hi) const;
     void syncStatsFromLayout();
 
     /**
@@ -982,6 +1001,35 @@ private:
     std::vector<uint64_t> page_fp_in_base_;
     int page_fp_new_count_ = 0;
     int page_fp_base_count_ = 0;
+
+    /**
+     * 行内容指纹：与页指纹同源、同一把尺子，只是分桶到行（下标 = LineBox::line）。
+     *
+     * 它存在的唯一理由是把"这一页要重画"细化成"这一页的哪几行要重画"：
+     * 一页约 1000 个字形，而敲一个字只动其中一两行的字形 —— 页指纹粒度下，
+     * 改一行与改整页同价（实测字形光栅 10~14 ms，其中九成是白画的）。
+     *
+     * 指纹必须含行盒几何（block_lo/hi、inline_origin）：字形一样但位置挪了
+     * 也算变了 —— 那是"后缀整体平移"那一类。
+     */
+    std::vector<uint64_t> line_fp_new_;
+    std::vector<uint64_t> line_fp_in_base_;
+    int line_fp_base_count_ = 0;
+
+    /**
+     * 底图里每一行的块轴范围（页内磅），按行下标。
+     * 重画一条行带时要靠它算"擦到哪儿"：上边界取新旧两版里更靠上的那个，
+     * 否则行往下挪之后旧墨迹会留在原地（幽灵字）。下边界同理取更靠下的。
+     */
+    std::vector<float> line_lo_in_base_;
+    std::vector<float> line_hi_in_base_;
+
+    /**
+     * 本次重画那条行带的页内磅范围（computeBand 写、paintPageIntoBase 读）。
+     * 放成员是为了不把两个 float 在 lambda 之间传来传去。
+     */
+    float band_lo_scratch_ = 0.0f;
+    float band_hi_scratch_ = 0.0f;
 
     /**
      * relayout() 置位、presentInternal() 消费。

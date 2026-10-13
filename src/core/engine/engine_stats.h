@@ -119,6 +119,13 @@ struct EditStats {
     int repainted_pages = 0;
     int total_pages = 0;
     /**
+     * 本次重画的那条行带（帧像素、页内 y；band_y1 < 0 = 本轮没走行带路径）。
+     * 与 repainted_pixels 一起看：后者说"写了多少"，这两个说"写的是哪一条"。
+     * 页粒度重画时它就是整页（y0=0、y1=页高）。
+     */
+    int band_y0 = -1;
+    int band_y1 = -1;
+    /**
      * 帧（= 宿主那张画布）覆盖的页数，以及它的首页。
      */
     int window_pages = 0;

@@ -71,6 +71,51 @@ void EditorEngine::paintPageRange(int first_page, int count) {
     presentInternal(first_page, count, /*force_full=*/false);
 }
 
+/**
+ * 行带边界：第 k 行独占的块轴区间（页内磅）。
+ *
+ * 上下边界都取"与相邻行盒的中线"，而不是这一行自己的 block_lo/block_hi：
+ *   行盒给的是字体的 ascent/descent，而个别字形（标点、带钩的部件）的墨迹会略微
+ *   探出这个范围。取中线之后，相邻两行的带正好相接、互不重叠 ——
+ *   于是"擦一条带"绝不会碰到没重画的那一行的墨迹，而这一行自己的全部墨迹
+ *   一定落在带里（字形在行盒内）。用行盒自己的边界会啃掉相邻行的抗锯齿边：
+ *   增量帧与从零重画的帧差 339~3550 px、最大通道差 49。
+ */
+void EditorEngine::lineBand(int k, float* lo, float* hi) const {
+    const std::vector<LineBox>& ls = layout_.lines;
+    if (k < 0 || k >= static_cast<int>(ls.size())) {
+        *lo = 0.0f;
+        *hi = 0.0f;
+        return;
+    }
+    const LineBox& lb = ls[static_cast<size_t>(k)];
+    const bool first_on_page = (k == 0) || (ls[static_cast<size_t>(k - 1)].page != lb.page);
+    const bool last_on_page = (k + 1 >= static_cast<int>(ls.size())) ||
+                              (ls[static_cast<size_t>(k + 1)].page != lb.page);
+    *lo = first_on_page
+              ? 0.0f
+              : (ls[static_cast<size_t>(k - 1)].block_hi_pt + lb.block_lo_pt) * 0.5f;
+    *hi = last_on_page ? static_cast<float>(pagePxHeight()) / cfg_.zoom
+                       : (lb.block_hi_pt + ls[static_cast<size_t>(k + 1)].block_lo_pt) * 0.5f;
+}
+
+void EditorEngine::snapshotLineGeometry() {
+    line_fp_in_base_ = line_fp_new_;
+    line_fp_base_count_ = static_cast<int>(line_fp_new_.size());
+    line_lo_in_base_.clear();
+    line_hi_in_base_.clear();
+    const int n = static_cast<int>(layout_.lines.size());
+    line_lo_in_base_.resize(static_cast<size_t>(n));
+    line_hi_in_base_.resize(static_cast<size_t>(n));
+    for (int k = 0; k < n; ++k) {
+        float lo = 0.0f;
+        float hi = 0.0f;
+        lineBand(k, &lo, &hi);
+        line_lo_in_base_[static_cast<size_t>(k)] = lo;
+        line_hi_in_base_[static_cast<size_t>(k)] = hi;
+    }
+}
+
 void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
     const auto t0 = Clock::now();
     bitmap_.resetPaintedPixels();
@@ -106,15 +151,36 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
     double sub_fill_ms = 0.0;
     double sub_glyph_ms = 0.0;
 
-    auto paintPageIntoBase = [&](int local, int page_index) {
-        const auto t_fill0 = Clock::now();
-        const Rect full = pageRectLocal(local);
-        base_.fillRect(full, cfg_.background);
+    // 把一页（或它的一条横带）画进底图。
+    //   band_lo_pt / band_hi_pt 是"页内磅"的纵向范围，两者都非空时只画这一条带 ——
+    //   带以外的底图内容保持不变（那正是"只重画脏行"能省下九成字形的原因）。
+    //   带一定落在页内（行盒的块轴范围本来就夹在页里），所以底色直接用页面底色。
+    auto paintPageIntoBase = [&](int local, int page_index, const float* band_lo_pt = nullptr,
+                                 const float* band_hi_pt = nullptr) {
         const float off_y = static_cast<float>(local * (page_px_h + gap_px));
-        const Rect page_rect{0.0f, off_y, static_cast<float>(page_px_w),
-                             static_cast<float>(page_px_h)};
-        base_.fillRect(page_rect, cfg_.page_fill);
-        if (cfg_.draw_page_border) base_.strokeRect(page_rect, cfg_.page_border, 1.0f);
+        const auto t_fill0 = Clock::now();
+        // 擦除范围向外扩 1 px：相邻两条带的边界取两行中线，留 1 px 免得接缝上留一条线。
+        const bool band = band_lo_pt && band_hi_pt;
+        const float y0 = band ? std::max(0.0f, (*band_lo_pt) * zoom - 1.0f) : 0.0f;
+        const float y1 = band ? std::min(static_cast<float>(page_px_h), (*band_hi_pt) * zoom + 1.0f)
+                              : static_cast<float>(page_px_h);
+        base_.fillRect(Rect{0.0f, off_y + y0, static_cast<float>(page_px_w),
+                            std::max(0.0f, y1 - y0)},
+                       cfg_.page_fill);
+        if (!band) {
+            // 整页时还要把上下半格页间隙也擦成背景色
+            base_.fillRect(pageRectLocal(local), cfg_.background);
+            base_.fillRect(Rect{0.0f, off_y, static_cast<float>(page_px_w),
+                                static_cast<float>(page_px_h)},
+                           cfg_.page_fill);
+        }
+        // 页边框必须每次都补：它在页矩形的边上，而上面那次底色填充会把它擦掉一条。
+        //   漏掉这一笔的后果是"帧差 4308 像素"—— 正好是 2×(893+1263)-4，页边框的长度。
+        //   （先量出来的，不是推出来的：增量帧与从零重画的帧差 4308、最大通道差 49。）
+        if (cfg_.draw_page_border)
+            base_.strokeRect(Rect{0.0f, off_y, static_cast<float>(page_px_w),
+                                  static_cast<float>(page_px_h)},
+                             cfg_.page_border, 1.0f);
         sub_fill_ms += msSince(t_fill0);
 
         // 底图里只有页面底色与字形 —— 表单标记（小点/方括号）不在这里画。
@@ -122,6 +188,9 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
         const auto t_glyph0 = Clock::now();
         for (const PlacedGlyph& pg : layout_.glyphs) {
             if (pg.page != page_index || !pg.font) continue;
+            // 画带时按字形的纵向位置筛：行盒的块轴范围就是它的 ascent/descent，
+            //   所以"落在带内"就是"属于这条带"。带向外扩了 1 px，相邻带在中线相接。
+            if (band && (pg.y_pt < *band_lo_pt - 1.0f || pg.y_pt > *band_hi_pt + 1.0f)) continue;
             base_.drawGlyph(pg.font->hb(), pg.glyph_id, pg.x_pt * zoom, pg.y_pt * zoom + off_y,
                             units_to_px, pg.color, pg.rotate_deg);
         }
@@ -174,6 +243,53 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
 
     std::vector<Rect> refresh;
 
+    // 行带：把"这一页要重画"细化成"这一页的哪几行要重画"。
+    //   一页约 1000 个字形，而敲一个字只动其中一两行 —— 页粒度下改一行与改整页同价
+    //   （实测字形光栅 10~14 ms，其中九成是白画的）。
+    //   结果写进 band_lo_scratch_ / band_hi_scratch_（页内磅）。
+    //   返回 -1 = 这一页一行都没变；0 = 要整页重画；1 = 只重画一条带。
+    //
+    //   竖排页整页重画：行盒的"块轴"在竖排下是横轴，行带会变成竖条，
+    //     而擦除矩形、字形筛选都按纵轴写；竖排文档少，不值得为它多一套几何。
+    auto computeBand = [&](int page) -> int {
+        int la = 0;
+        int lb = 0;
+        linesOnPage(page, &la, &lb);
+        for (int k = la; k <= lb; ++k) {
+            if (layout_.lines[static_cast<size_t>(k)].vertical) return 0;
+        }
+        int d0 = -1;
+        int d1 = -1;
+        for (int k = la; k <= lb; ++k) {
+            const bool same = k < line_fp_base_count_ &&
+                              line_fp_new_[static_cast<size_t>(k)] ==
+                                  line_fp_in_base_[static_cast<size_t>(k)];
+            if (same) continue;
+            if (d0 < 0) d0 = k;
+            d1 = k;
+        }
+        if (d0 < 0) return -1;
+        float lo = 0.0f;
+        float hi = 0.0f;
+        lineBand(d0, &lo, &hi);
+        float lo2 = 0.0f;
+        float hi2 = 0.0f;
+        lineBand(d1, &lo2, &hi2);
+        hi = std::max(hi, hi2);
+        // 新旧两版里更靠外的那个边界：行往下挪之后旧墨迹在更靠上的位置，
+        //   只擦新位置就会留下幽灵字（auditFrame 正是抓这个的判据）。
+        if (d0 < static_cast<int>(line_lo_in_base_.size()))
+            lo = std::min(lo, line_lo_in_base_[static_cast<size_t>(d0)]);
+        if (d1 < static_cast<int>(line_hi_in_base_.size()))
+            hi = std::max(hi, line_hi_in_base_[static_cast<size_t>(d1)]);
+        // 底图里的行数比现在多（删掉了行）⇒ 尾巴一直擦到页底，否则旧墨迹留在那儿
+        if (line_fp_base_count_ > static_cast<int>(layout_.lines.size()))
+            hi = static_cast<float>(page_px_h) / zoom;
+        band_lo_scratch_ = lo;
+        band_hi_scratch_ = hi;
+        return 1;
+    };
+
     if (force_full || geom_changed || !base_valid_) {
         // 底图全建
         base_.reset(frame_w, frame_h);
@@ -184,10 +300,11 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
         base_page_count_ = count;
         page_fp_in_base_ = page_fp_new_;
         page_fp_base_count_ = page_fp_new_count_;
+        snapshotLineGeometry();
         edit_stats_.repainted_pages = count;
         for (int i = 0; i < count; ++i) refresh.push_back(pageRectLocal(i));
     } else {
-        // 底图增量：只重画指纹变了的页
+        // 底图增量：只重画指纹变了的页 —— 页里再按行指纹缩到那几条带
         int dirty = 0;
         for (int i = 0; i < count; ++i) {
             const int page = first_page + i;
@@ -196,12 +313,30 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
                                  (page_fp_new_[static_cast<size_t>(page)] !=
                                   page_fp_in_base_[static_cast<size_t>(page)]);
             if (!changed) continue;
-            paintPageIntoBase(i, page);
-            refresh.push_back(pageRectLocal(i));
             ++dirty;
+            const int band = computeBand(page);
+            if (band <= 0) {
+                // -1：页指纹变了而行指纹全同（只有页数/页间隙/页边框这类页外属性变了）
+                //  0：竖排页 —— 两种都退回整页重画，宁可多画也不留幽灵。
+                paintPageIntoBase(i, page);
+                refresh.push_back(pageRectLocal(i));
+                edit_stats_.band_y0 = 0;
+                edit_stats_.band_y1 = page_px_h;
+                continue;
+            }
+            paintPageIntoBase(i, page, &band_lo_scratch_, &band_hi_scratch_);
+            // 帧那边也只贴这条带：底图本轮只动了这一条带，其余像素帧里已经是对的。
+            const float off_y = static_cast<float>(i * (page_px_h + gap_px));
+            const float y0 = std::max(0.0f, band_lo_scratch_ * zoom - 1.0f);
+            const float y1 = std::min(static_cast<float>(page_px_h), band_hi_scratch_ * zoom + 1.0f);
+            refresh.push_back(Rect{0.0f, off_y + y0, static_cast<float>(frame_w),
+                                   std::max(1.0f, y1 - y0)});
+            edit_stats_.band_y0 = static_cast<int>(y0);
+            edit_stats_.band_y1 = static_cast<int>(y1);
         }
         page_fp_in_base_ = page_fp_new_;
         page_fp_base_count_ = page_fp_new_count_;
+        snapshotLineGeometry();
         edit_stats_.repainted_pages = dirty;
     }
     edit_stats_.total_pages = total_pages;

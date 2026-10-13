@@ -104,6 +104,89 @@ void EditorEngine::computePageFingerprints(int dirty_lo, int dirty_hi) {
     //   切模式时旧标记的清除靠 frame_needs_full_refresh_：切模式 / 改控件时置位，
     //     下一次呈现整帧重贴，旧标记自然被覆盖。这比往指纹里塞东西更直接，
     //     也不影响底图的增量。
+
+    computeLineFingerprints(dirty_lo, dirty_hi, !partial);
+}
+
+/**
+ * 行指纹与行盒几何快照。
+ *
+ * 与页指纹同一次调用里做，理由有两条：一是同一批字形不必遍历两遍；
+ * 二是"哪几页脏"和"这几页里哪几行脏"必须是同一轮排版的两面 —— 分成两次算，
+ * 两次之间排版若再动一次，两边就对不上了。
+ *
+ * 指纹含三样：行盒几何（位置挪了也算变）、簇表（占位槽与括号侧别都在里面）、
+ * 这一行的字形（id / 位置 / 朝向 / 颜色）。少一样就会出现"字形没重画但确实变了"的
+ * 幽灵墨迹，而 auditFrame（当前帧 vs 整帧重画）正是抓它的判据。
+ */
+void EditorEngine::computeLineFingerprints(int dirty_lo, int dirty_hi, bool full) {
+    const int n_lines = static_cast<int>(layout_.lines.size());
+    const bool partial = !full && dirty_lo >= 0 && dirty_hi >= dirty_lo &&
+                         line_fp_new_.size() == static_cast<size_t>(n_lines);
+    if (!partial) {
+        line_fp_new_.assign(static_cast<size_t>(n_lines), kFnvBasis);
+        dirty_lo = 0;
+        dirty_hi = std::max(0, layout_.stats.page_count - 1);
+    }
+    line_fp_new_.resize(static_cast<size_t>(n_lines), kFnvBasis);
+
+    const std::vector<PlacedGlyph>& gs = layout_.glyphs;
+    for (int li = 0; li < n_lines; ++li) {
+        const LineBox& lb = layout_.lines[static_cast<size_t>(li)];
+        if (lb.page < dirty_lo || lb.page > dirty_hi) continue;
+        uint64_t h = kFnvBasis;
+        auto mixf = [&h](float v) {
+            h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(quantPt(v))));
+        };
+        mixf(lb.block_lo_pt);
+        mixf(lb.block_hi_pt);
+        mixf(lb.inline_origin_pt);
+        mixf(lb.inline_end_pt);
+        h = fnvMix(h, static_cast<uint64_t>(lb.page));
+        h = fnvMix(h, static_cast<uint64_t>(lb.paragraph));
+        h = fnvMix(h, static_cast<uint64_t>(lb.first_cp));
+        h = fnvMix(h, static_cast<uint64_t>(lb.last_cp));
+        h = fnvMix(h, (lb.vertical ? 1ull : 0ull) | (lb.sideways ? 2ull : 0ull));
+        for (const LineCluster& c : lb.clusters) {
+            h = fnvMix(h, static_cast<uint64_t>(c.cp));
+            mixf(c.inline_pt);
+            h = fnvMix(h, (c.placeholder ? 1ull : 0ull) |
+                              (c.read_only ? 2ull : 0ull) |
+                              (static_cast<uint64_t>(c.bracket_side) << 2));
+        }
+        // 这一行的字形：按 line 单调，二分定位这一段
+        const auto gb = std::lower_bound(gs.begin(), gs.end(), li,
+                                         [](const PlacedGlyph& g, int line) { return g.line < line; });
+        for (auto it = gb; it != gs.end() && it->line == li; ++it) {
+            h = fnvMix(h, it->glyph_id);
+            mixf(it->x_pt);
+            mixf(it->y_pt);
+            mixf(it->rotate_deg);
+            h = fnvMix(h, static_cast<uint64_t>(it->color.r) |
+                              (static_cast<uint64_t>(it->color.g) << 8) |
+                              (static_cast<uint64_t>(it->color.b) << 16));
+        }
+        line_fp_new_[static_cast<size_t>(li)] = h;
+    }
+}
+
+/**
+ * 第 page 页上的行下标范围（闭区间）。这一页没有行时把 hi 置成 lo-1。
+ * 行数组按页单调（与字形数组同一条不变式），所以两端都能二分。
+ */
+void EditorEngine::linesOnPage(int page, int* lo, int* hi) const {
+    const std::vector<LineBox>& ls = layout_.lines;
+    const auto b = std::lower_bound(ls.begin(), ls.end(), page,
+                                    [](const LineBox& l, int p) { return l.page < p; });
+    if (b == ls.end() || b->page != page) {
+        *lo = static_cast<int>(b - ls.begin());
+        *hi = *lo - 1;
+        return;
+    }
+    *lo = static_cast<int>(b - ls.begin());
+    int i = *lo;
+    while (i < static_cast<int>(ls.size()) && ls[static_cast<size_t>(i)].page == page) ++i;
+    *hi = i - 1;
 }
 
 void EditorEngine::relayout() {

@@ -517,8 +517,13 @@ async function main() {
                 ? '完全相同'
                 : `差 ${d.diff} 像素，包围盒 x∈[${d.minx},${d.maxx}] y∈[${d.miny},${d.maxy}]` +
                   `（帧 ${d.w}×${d.h}）`);
-    chk.check(' 每一次按键都整页重画（否则上面那条可能是"两边错得一样"）',
-              minPx >= full * 0.99, `最小那次 ${minPx} vs 全量 ${full}`);
+    // 这一条一度断言"每一次按键都整页重画"，用来证明上面那条"增量 == 从零"不是
+    //   "两边错得一样"。行带重画之后它不再成立：改一行只重画那一条带。
+    //   "不是空话"这件事改由上面两条更强的保证 —— 屏幕 == 引擎帧、增量帧 == 从零重画的帧，
+    //   两条都是逐像素比。这里只留一个上界：写入量不许超过整页（带 + 光标 + 标记）。
+    const maxPx = perKey.reduce((m, s) => Math.max(m, s.repaintedPixels), 0);
+    chk.check(' 每一次按键的写入量都不超过整页（行带重画的上界）', maxPx <= full * 1.05,
+              `最大那次 ${maxPx} vs 整页 ${full}`);
 
     // 把给用户用的取证接口也当场跑一遍 —— 它要是抛异常，用户那边就白跑一趟。
     const sc = await c.eval('return window.__heditor.selfCheck();');
@@ -1347,6 +1352,37 @@ async function main() {
               fpFull > 0.05 ? fpIncr * 4 < fpFull : fpIncr <= fpFull,
               `整篇 ${fpFull.toFixed(3)} ms ｜ 增量 ${fpIncr.toFixed(3)} ms` +
                 (fpFull <= 0.05 ? '（整篇太小，只判"不更慢"）' : ''));
+
+    // 点第二页：不许乱滚。
+    //   这一格坏在"caretY 是窗口帧内的 y"被当成了页内 y —— 页偏移算了两遍，
+    //   光标坐标落到下一页去，屏幕跟着往下冲，随后窗口重算又滚一次。
+    //   取点选在"光标当前所在的那一行"：它一定看得见，所以根本不该把页面挪走。
+    const clickP2 = await c.eval(`
+      const H = window.__heditor;
+      const stage = document.getElementById('stage');
+      const dpr = window.devicePixelRatio || 1;
+      const cr0 = H.setCaret(20, 5);            // 第 20 段在 16 页的那一份里是第二页
+      const before = stage.scrollTop;
+      const cv = H.canvas, r = cv.getBoundingClientRect();
+      const sx = r.width / cv.width, sy = r.height / cv.height;
+      cv.dispatchEvent(new MouseEvent('mousedown',
+        { clientX: r.left + (cr0.x + 2) * sx, clientY: r.top + (cr0.y + 2) * sy,
+          bubbles: true, cancelable: true }));
+      return { pageBefore: cr0.page, pageAfter: H.caret.page,
+               before, after: stage.scrollTop,
+               stepCss: (H.pagePx[1] + H.pagePx[2]) / dpr,
+               wf: H.editStats.windowFirstPage, caretY: cr0.y,
+               frameDiff: H.selfCheck().screenVsEngineDiffPx };
+    `);
+    chk.check('★ 点第二页光标所在那一行：页不变、滚动量小于半页（不乱滚）',
+              clickP2.pageBefore >= 1 && clickP2.pageAfter === clickP2.pageBefore &&
+                Math.abs(clickP2.after - clickP2.before) <= clickP2.stepCss / 2,
+              `光标页 ${clickP2.pageBefore} → ${clickP2.pageAfter} ｜ 滚动 ` +
+                `${clickP2.before.toFixed(0)} → ${clickP2.after.toFixed(0)} px` +
+                `（半页 ${(clickP2.stepCss / 2).toFixed(0)}）` +
+                ` ｜ 窗口首页 ${clickP2.wf}，光标帧内 y=${clickP2.caretY}`);
+    chk.check(' 点第二页之后屏幕 == 引擎帧', clickP2.frameDiff === 0,
+              `差 ${clickP2.frameDiff} px`);
   }
 
   chk.section('[10] 跨段编辑：真实回车分段 / 段首退格合并');

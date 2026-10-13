@@ -787,6 +787,8 @@ std::string editStatsJson() {
     o << "\"totalPages\":" << e.total_pages << ",";
     o << "\"windowPages\":" << e.window_pages << ",";
     o << "\"windowFirstPage\":" << e.window_first_page << ",";
+    o << "\"bandY0\":" << e.band_y0 << ",";
+    o << "\"bandY1\":" << e.band_y1 << ",";
     o << "\"repaintedPixels\":" << e.repainted_pixels << ",";
     o << "\"repaintedX\":" << e.repainted_x << ",";
     o << "\"repaintedY\":" << e.repainted_y << ",";

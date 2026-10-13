@@ -258,9 +258,12 @@ function presetWindowForLoad() {
 function scrollCaretIntoView(st) {
   if (!st || st.caretPage < 0) return;
   const dpr = window.devicePixelRatio || 1;
-  const ph = mod.pagePxHeight();
-  const step = ph + mod.pageGapPx();
-  const top = (st.caretPage * step + st.caretY) / dpr;
+  const step = mod.pagePxHeight() + mod.pageGapPx();
+  // caretY 是"窗口帧内的 y"，它已经含了 (caretPage - 窗口首页) * step 这一项
+  //   （见 EditorEngine::caretRectPx 的 off_y）。所以文档坐标 = 窗口首页偏移 + caretY。
+  //   写成 caretPage * step + caretY 等于把页偏移算了两遍 —— 点第二页时光标坐标会落到
+  //   第三页去，屏幕跟着往下冲两页；随后窗口重算、又一次滚动，看起来就是"乱滚"。
+  const top = (mod.windowFirstPage() * step + st.caretY) / dpr;
   const bot = top + Math.max(12, st.caretH / dpr);
   const pad = 18;
   const viewTop = stageEl.scrollTop;
@@ -872,6 +875,9 @@ function renderEdit(st) {
       incr ? 'ok' : undefined],
     ['脏页 / 总页', `${st.dirtyPageCount} / ${st.totalPages}`],
     ['窗口页 / 首页', `${st.windowPages} / ${st.windowFirstPage}`],
+    // 行带：把"这一页要重画"缩到"这一页的哪几行"。一页约 1000 个字形，
+    //   敲一个字只动一两行 —— 页粒度下改一行与改整页同价。
+    ['重画行带（页内 y）', st.bandY1 < 0 ? '—（本轮没重画）' : `${st.bandY0} ~ ${st.bandY1} px`],
     ['重画页数', st.repaintedPages],
     ['重画区域', `${st.repaintedW} × ${st.repaintedH} px`, 'hi'],
     ['重画像素', `${fmt(st.repaintedPixels, 0)}`, 'hi'],
@@ -1036,7 +1042,7 @@ window.__heditor = {
     if (!mod) return null;
     const st = JSON.parse(mod.editStatsJson());
     return { para: st.caretPara, offset: st.caretOffset, index: st.caretIndex,
-             side: st.caretSide,
+             side: st.caretSide, page: st.caretPage,
              x: st.caretX, y: st.caretY, w: st.caretW, h: st.caretH,
              visible: st.caretVisible, docCodepoints: st.docCodepoints };
   },

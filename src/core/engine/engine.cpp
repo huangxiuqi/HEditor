@@ -1624,9 +1624,13 @@ bool EditorEngine::hitTestPt(float x_pt_frame, float y_pt_frame, TextPos* out, i
     int page = 0;
     float local_y = y_pt_frame;
     if (stride > 0.0f) {
-        page = static_cast<int>(std::floor(y_pt_frame / stride));
+        // 帧是视口窗口：传进来的 y 是"窗口内"的，而页号是文档里的绝对页号。
+        //   加回窗口首页的偏移才是同一个坐标系 —— 与 caretRectPx 的 off_y 对称，
+        //   少了这一步，点第二页会被判成第一页（整体少了 base_first_page_ 页）。
+        const float doc_y = y_pt_frame + static_cast<float>(base_first_page_) * stride;
+        page = static_cast<int>(std::floor(doc_y / stride));
         if (page < 0) page = 0;
-        local_y = y_pt_frame - static_cast<float>(page) * stride;
+        local_y = doc_y - static_cast<float>(page) * stride;
         // 落在页间空隙里，或者横向出了页外 —— 没有"这一页的哪一行"可言
         if (local_y < 0.0f || local_y > page_h) return false;
         if (x_pt_frame < 0.0f || x_pt_frame > page_w) return false;
