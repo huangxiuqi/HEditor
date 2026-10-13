@@ -56,6 +56,10 @@ Thumbs.db
 # ─────────────────────────────────────────────────────────────
 #  工具缓存
 # ─────────────────────────────────────────────────────────────
+# CMakeUserPresets.json 是**个人的**工具链环境（MSVC 的 INCLUDE/LIB/Path、编译器路径），
+# 里面写死了本机的版本号目录 —— 换机器/升级 VS 就不一样。CMake 官方就是把它设计成
+# 不入库的那一半（通用预设看 CMakePresets.json）。
+CMakeUserPresets.json
 .cache/
 .clangd/
 compile_commands.json

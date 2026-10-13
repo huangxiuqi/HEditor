@@ -5,9 +5,12 @@
  * 布局系统；表单模式只负责显示边界，阅读与打印时看不出区别（同类设计见 OOXML 的
  * 内容控件 w:sdt）。若改成"固定矩形加独立排版"，整套排版管线都要重写。
  *
- * 区间是活的：控件内打字则变长，控件前插入则整体右移，删掉区间内的字则缩短。
- * 由 EditorEngine 在每次编辑后维护（adjustControlsOnInsert / adjustControlsOnErase）；
- * 漏掉这一步，控件会与它标注的内容脱节，既拒绝该允许的输入又允许该拒绝的输入。
+ * 区间不是独立状态：它是编译产物的派生结果 —— 引擎按产物的边界导出控件集合
+ * （见 EditorEngine::exportControlsFromBlocks），而边界由编译层从树上产出。于是"控件内
+ * 打字就变长、控件前插入就整体右移、删掉区间内的字就缩短"这件事不用谁来维护：内容在
+ * 树上变，边界跟着变，导出一遍自然就对上了。手工维护区间那一套（编辑之后逐个伸缩端点）
+ * 是会脱节的 —— 它要求"每一次内容改动"与"每一次端点适配"永远配对，漏一处就会让控件
+ * 与它标注的内容错位，而错位之后界面看着仍然正常。
  */
 #pragma once
 
@@ -143,50 +146,9 @@ public:
      */
     std::vector<int> overlapping(const ControlRange& r) const;
 
-    std::vector<Control>& mutableAll() { return items_; }
-
 private:
     std::vector<Control> items_;
     std::vector<int> order_;  // 按区间起点排序后的下标序（外层在前）
 };
-
-/**
- * 区间伸缩：编辑之后必须调这两个，否则控件会脱离它标注的内容。
- *
- * 插入 (para, at, n)：先看 at 归谁 —— 最内层控件（含末尾），与 canInsert 同口径。
- *   调用方已经知道侧别时（点画布点到的是哪个字段的括号）用 preferred 覆盖它 ——
- *   共享边界上"最内层"是同深度取下标小者，恒定选中前一个字段。
- *   落笔点的主人（及其外层控件）按"内含"伸缩：起点不动、终点 +n，
- *   在字段内打字与在末尾追加都会变长；
- *   其余控件按"平移"伸缩：起点 >= at、终点 > at 才 +n，
- *   新字不许落进它们 —— 否则共享边界上的两个字段会重叠，括号顺序从 ][ 变成 []。
- * 删除 (para, [a, b))：端点在 a 之前 → 不动；在 b 之后 → 左移 len；
- *   落在 [a, b) 内 → 夹到 a
- */
-void adjustControlsOnInsert(ControlSet& ctrls, int para, size_t at, size_t n, int preferred = -1);
-void adjustControlsOnErase(ControlSet& ctrls, int para, size_t a, size_t b);
-
-/**
- * 分段：在 pos 处把一段断成两段（原段保持段号，其后半段成为 pos.para + 1 段）。
- *
- * 端点规则唯一依据是"内容跟着谁走"：端点 >= pos 的内容被搬进了新段，于是
- * 段号 +1、偏移 -= pos.offset；端点 < pos 的留在原段不动；段号大于 pos.para
- * 的端点整体后移一段。两端点同时按这一条走，所以不可能出现 start > end 的
- * 不合法区间（"恰好落在断点上的空字段"会整对搬到新段段首 —— 与"回车之后
- * 光标落在新段段首"同一口径）。
- */
-void adjustControlsOnSplitPara(ControlSet& ctrls, const TextPos& pos);
-
-/**
- * 合并：把 para + 1 段并入 para 段（para 段在合并前的长度为 prev_len），
- * 调用方随后会删掉 para + 1 段。
- *
- * 同理：para + 1 段的端点重基到 para 段（段号 -1、偏移 += prev_len）；
- * 更靠后段的端点段号 -1；para 段内的端点不动 —— 它前面的内容没变，
- * 追加进来的内容在它之后。
- * 端点恰好等于 (para, prev_len) 的控件不会包住追加进来的内容，这是对的：
- * 它标注的那串文字在合并前后是同一串。
- */
-void adjustControlsOnMergePara(ControlSet& ctrls, int para, size_t prev_len);
 
 }  // namespace heditor

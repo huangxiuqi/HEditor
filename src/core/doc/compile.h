@@ -76,7 +76,7 @@ struct CompileResult {
  *
  * sheet 是样式表：段落上挂的是"样式引用 + 内联覆盖"，这里按三层解析出完整格式再写进
  * 引擎输入（第六节）。没有样式表也要传一张空表 —— 空表的文档默认值就是各字段的默认值，
- * 于是解析结果与"完全没有样式"一致，0.4 那条"两条路逐字段一致"的判据因此仍然成立。
+ * 于是"传空表"与"完全不解析样式"逐字段相同。
  */
 CompileResult compileDocument(const NodeTree& tree, FlowVisibility vis, const StyleSheet& sheet);
 

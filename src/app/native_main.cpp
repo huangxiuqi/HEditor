@@ -133,14 +133,17 @@ int main(int argc, char** argv) {
     // 抽成 lambda 是为了让 --repeat 能重复整轮（而不是只重复 repaint —— 那走的是
     // 增量路径，量不到"全量绘制"这个本实现真正关心、也是 Skia 会替换掉的那一段）。
     auto runOnce = [&]() {
+        std::vector<BlockSpec> blocks;
         if (demo == "word") {
-            engine.setBlocks(wordDemo(1));
+            blocks = wordDemo(1);
         } else if (demo == "mixed") {
             // 0 = 中文主字体，2 = 拉丁回退字体
-            engine.setBlocks({mixedParagraphBlock(0, 2)});
+            blocks = {mixedParagraphBlock(0, 2)};
         } else {
-            engine.setBlocks(sampleDocument(0, 1, 2));
+            blocks = sampleDocument(0, 1, 2);
         }
+        // 建树交给引擎（与 web 那条路同一份代码）：这里没有字段，字段名单给空。
+        engine.setDocument(demoTree(blocks, {}), StyleSheet{});
         engine.relayout();
         engine.repaint();
     };

@@ -105,8 +105,14 @@ function blitFrame(px, w) {}
   —— 它会执行 git 写入命令，按下面的硬性约束只能由人运行。
 - 依赖归路（源码走 submodule、Skia 走脚本化归档）与判断标准见 `docs/依赖与工具链管理.md`。
   本工程不使用包管理器：唯一的非源码依赖面（native 侧的成品库）目前是空集。
-- 原生：`powershell -ExecutionPolicy Bypass -File scripts\build_native.ps1 -Run`（构建 + 跑单测）
-- WASM：`powershell -ExecutionPolicy Bypass -File scripts\build_wasm.ps1`
+- 预设写在 `CMakePresets.json`：`native` / `native-debug` / `wasm` / `wasm-noskia`。
+  `native` 需要先有 MSVC 工具链环境（从 VS 的 x64 Native Tools 命令行跑）。
+  本机 `vcvars64.bat` 跑不起来（它内部调 `reg.exe`，被安全策略拦），所以那份环境
+  摊在**不入库**的 `CMakeUserPresets.json` 里 —— 名字带 `-local` 后缀的就是它。
+- 原生：`cmake --workflow --preset native-local`（配置 + 构建 + 跑三个断言套件）。
+  只要构建 `cmake --build --preset native-local`；只要单测 `ctest --preset native-local`。
+- WASM：`cmake --workflow --preset wasm`（工具链取仓库内的 `.toolchain/emsdk`）。
+- 原生渲染出图（验证台要用）：`build/native/heditor_native.exe --out-dir out`。
 - 浏览器探针：`powershell -ExecutionPolicy Bypass -File scripts\verify_web.ps1`
   （默认跑 `scripts/edit_probe.mjs`，可用 `-Probe` 换 `stress_probe.mjs` / `web_probe.mjs`）
 - 两个宿主的分工（详见 `docs/正式化架构与迁移路线.md` 4.6）：wasm 是交付物，

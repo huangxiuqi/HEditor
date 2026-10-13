@@ -9,8 +9,9 @@
  * 已落的是共同层里的这几项：key、controlType、valueShape 与 value、readonly、required、
  * structureLock、appearance、validateRef（id 就是 Node::id，hidden 是 Node 上的字段）。
  * 还差业务类型特有层的 options / group 与 format，它们要等 1.7 的表格与选项控件。
- * 名字不叫 Control 是因为引擎侧已有一个同名的旧表示（按 TextPos 记区间，待迁移），
- * 两者含义不同，不能共用一个名字。
+ * 名字不叫 Control 是因为引擎侧另有一个同名的扁平视图（ControlSet 里的 Control，按
+ * TextPos 记区间，由编译产物导出、供宿主与几何使用）：一个是节点上的数据，一个是它的
+ * 一种投影，含义不同，不能共用一个名字。
  */
 #pragma once
 

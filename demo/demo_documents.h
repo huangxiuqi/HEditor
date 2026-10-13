@@ -31,21 +31,29 @@ std::vector<BlockSpec> sampleDocument(int cjk_font_index, int mongol_font_index,
 BlockSpec mixedParagraphBlock(int cjk_font_index, int latin_font_index = -1);
 
 /**
- * 演示表单里一个字段怎么摆在树里：第几段、码点区间 [so, eo)、业务种类与编码、是否只读。
+ * 演示表单里一个字段怎么摆在树里：起点 (para, so) 与终点 (epara, eo) 之间的那一段文档流、
+ * 业务种类与编码、是否只读。
  *
- * 与引擎侧那个按 TextPos 记区间的旧表示（Control）用途相同，差别是它描述的是"树里怎么切"。
- * 这里的 so/eo 是段内偏移加段号，于是这份演示数据按约定只摆段内字段 —— 那是演示的简化，
- * 模型本身允许控件跨段（见 node.h 的 ContentControl）。业务种类走 ControlKind，
- * 建树时翻成 controlType 字符串，与引擎侧 controlKindFromBusinessType 那条映射互为逆。
+ * epara 省略（小于 0）即"同段"，终点落在 para 段里的 eo 处 —— 大多数演示字段如此。
+ * epara 大于 para 时这个字段跨段：中间那些段落连同它们的结束标记都落在它里面，
+ * 这正是模型层允许的形状（见 node.h 的 ContentControl；控件可以跨段）。
+ * so/eo 是段内码点偏移；业务种类走 ControlKind，建树时翻成 controlType 字符串，
+ * 与引擎侧 controlKindFromBusinessType 那条映射互为逆。
  */
 struct DemoFieldSpec {
     int para = 0;
     int so = 0;
+    int epara = -1;  // 终点所在段；< 0 = 与起点同段
     int eo = 0;
     ControlKind kind = ControlKind::TextField;
     std::string key;
     bool readonly = false;
 };
+
+/**
+ * 字段的终点段号：epara 没给就是起点那一段。
+ */
+inline int endParaOf(const DemoFieldSpec& f) { return f.epara < 0 ? f.para : f.epara; }
 
 /**
  * 把一份块流连同块级格式建成模型树：每块 = 一个文本节点 + 一枚段落结束标记。
@@ -54,8 +62,8 @@ struct DemoFieldSpec {
  * 段落格式上 —— 编译正是从"标记 + 样式表"再解析出这些字段的，所以搬过去之后编译回来的块
  * 与原来逐字段相同。fields 指的区间换成内容控件，嵌套的按"外层先开"建。
  *
- * 它存在的理由是宿主从"拼块流"切到"建树交给引擎"必须产出同一份排版：没有这份等价，
- * 切换本身就是一次静默的显示回归。判据在 tests/edit_test.cpp 的等价一节。
+ * 每段自己的结束标记默认排在它内容之后、与字段并列；某个字段跨段时，中间那些段落连同
+ * 它们的标记就落在这个字段里面 —— 那是跨段控件唯一可能的形状（容器的孩子必须连续）。
  */
 NodeTree demoTree(const std::vector<BlockSpec>& blocks, const std::vector<DemoFieldSpec>& fields);
 

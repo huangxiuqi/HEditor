@@ -450,20 +450,18 @@ void EditorEngine::truncateLayoutAt(int para) {
 }
 
 /**
- * 把控件边界写进块流的行内对象表（元素流的过渡形态）。
+ * 把"要显示括号的那些字段"的边界写进块流的行内对象表（元素流的过渡形态）。
  *
- * 产出端暂时还是引擎：只有它认识编辑模式与 form_brackets，也就知道哪些字段要显示括号。
- * 排版层从此只吃块流，"要画"与"要占位"是同一条记录，分不开。
+ * 边界本身不在这里产：编译层按树的遍历顺序给每个内容控件都产一对（次序规则见
+ * compile.cpp —— 同一处边界上闭括号先、开括号后，空控件的一对紧挨着，所以产出端没有
+ * 排序步骤）。这里只剩筛名单：只有引擎认识编辑模式与 form_brackets，也就知道哪些字段
+ * 要显示括号。排版层从此只吃块流，"要画"与"要占位"是同一条记录，分不开。
  *
- * 同一处边界上的先后在这里定死（排版层只按数组顺序插槽）：
- *   bucket 0  到此结束的字段（闭括号）：内层先收 —— depth 降序
- *   bucket 1  空字段：一开一闭紧挨着，按控件下标逐个字段排列
- *   bucket 2  从此开始的字段（开括号）：外层先开 —— depth 升序
- * 光靠"边 + 一个优先级"不够：两枚空字段落在同一个偏移上时，两枚开括号会排到一起、
- * 两枚闭括号又排到一起，画出来成了 [[ ]]（嵌套），而它们本该是 [][]（并列）。
+ * 筛是破坏性的（对象表会被删项），所以原件留在 blocks_full_ 里 —— 名单会来回变
+ * （Focused 档与 All 档之间切），没有那份原件，被删掉的边界就回不来了。
  */
 void EditorEngine::syncInlineObjects() {
-    // 块流由编译产出时，边界已经在产物里（编译对所有内容控件都产边界，不区分显示与否）——
+    // 边界已经在产物里（编译对所有内容控件都产边界，不区分显示与否）——
     //   这一处于是只剩"按要显示括号的名单筛一遍"：不显示的字段连占位都不要。
     //   "显示才占位"这条规则没变，变的是分工：产边界在编译层（第五刀），
     //   决定显示哪些留在这里（只有引擎认识编辑模式与聚焦）。
@@ -471,87 +469,23 @@ void EditorEngine::syncInlineObjects() {
     //   只改 objects、不整段拷回：这条路径该做的事只有"按名单筛"，别的字段不归它管。
     //   （编辑已经改在树上，所以 blocks_ 与 blocks_full_ 现在同源 —— 整段拷回也等价，
     //   但那样一来"筛名单"就顺带重写了别的字段，将来任何一处增量修改都会被它静默抹掉。）
-    if (tree_valid_) {
-        std::vector<NodeId> keep;
-        const std::vector<int> bracketed = bracketedControls();
-        keep.reserve(bracketed.size());
-        for (int ci : bracketed) {
-            if (ci >= 0 && ci < static_cast<int>(control_node_ids_.size())) {
-                keep.push_back(control_node_ids_[static_cast<size_t>(ci)]);
-            }
-        }
-        const size_t n = std::min(blocks_.size(), blocks_full_.size());
-        for (size_t p = 0; p < n; ++p) {
-            const std::vector<InlineObject>& src = blocks_full_[p].objects;
-            std::vector<InlineObject>& dst = blocks_[p].objects;
-            dst.clear();
-            for (const InlineObject& o : src) {
-                const NodeId owner = static_cast<NodeId>(o.owner);
-                if (std::find(keep.begin(), keep.end(), owner) != keep.end()) dst.push_back(o);
-            }
-        }
-        return;
-    }
-
-    // 名单要先问，清表要在它之后：名单靠"光标在哪"定（聚焦档），而光标位置是拿对象表
-    //   解释出来的（rel 数的是这一处的边界）—— 先清表再问，光标会被解释成另一个偏移
-    //   （表空了、边界数归零），于是"聚焦字段"当场换人。
+    std::vector<NodeId> keep;
     const std::vector<int> bracketed = bracketedControls();
-    for (BlockSpec& b : blocks_) b.objects.clear();
-    if (bracketed.empty()) return;
-
-    // 一条待插入的边界事件：排序键与对象本体分开，排完序只留后者。
-    struct Event {
-        uint32_t cp = 0;
-        int bucket = 0;
-        int key = 0;
-        int tie = 0;
-        InlineObject obj;
-    };
-    const int n_para = static_cast<int>(blocks_.size());
-    std::vector<std::vector<Event>> per(blocks_.size());
-    auto push = [&](int para, const Event& e) {
-        if (para < 0 || para >= n_para) return;
-        per[static_cast<size_t>(para)].push_back(e);
-    };
+    keep.reserve(bracketed.size());
     for (int ci : bracketed) {
-        if (ci < 0 || ci >= controls_.size()) continue;
-        const Control& c = controls_.at(ci);
-        // 空字段：开、闭落在同一处，且要画成一对紧挨着的 []（不是 ][）。
-        // 它的一对必须排在"后面的字段"的开括号之前 —— 同一个位置上，空字段在文档序里
-        //   位于"内容到此结束"之后、"内容从此开始"之前，那对方括号得整对留在那个缝里。
-        const bool empty = (c.range.start == c.range.end);
-
-        Event tail;
-        tail.cp = static_cast<uint32_t>(c.range.end.offset);
-        tail.bucket = empty ? 1 : 0;
-        tail.key = empty ? ci : -c.depth;
-        tail.tie = ci;
-        tail.obj = InlineObject{tail.cp, InlineObjectKind::ControlEnd, ci, c.read_only};
-        push(c.range.end.para, tail);
-
-        Event head;
-        head.cp = static_cast<uint32_t>(c.range.start.offset);
-        head.bucket = empty ? 1 : 2;
-        head.key = empty ? ci : c.depth;
-        head.tie = ci;
-        head.obj = InlineObject{head.cp, InlineObjectKind::ControlStart, ci, c.read_only};
-        push(c.range.start.para, head);
+        if (ci >= 0 && ci < static_cast<int>(control_node_ids_.size())) {
+            keep.push_back(control_node_ids_[static_cast<size_t>(ci)]);
+        }
     }
-    for (size_t p = 0; p < per.size(); ++p) {
-        std::vector<Event>& ev = per[p];
-        if (ev.empty()) continue;
-        std::stable_sort(ev.begin(), ev.end(), [](const Event& a, const Event& b) {
-            if (a.cp != b.cp) return a.cp < b.cp;
-            if (a.bucket != b.bucket) return a.bucket < b.bucket;
-            if (a.key != b.key) return a.key < b.key;
-            if (a.tie != b.tie) return a.tie < b.tie;
-            // 同一个空字段的一对：开在前、闭在后（枚举里 ControlStart=0 < ControlEnd=1）
-            return static_cast<int>(a.obj.kind) < static_cast<int>(b.obj.kind);
-        });
-        std::vector<InlineObject>& out = blocks_[p].objects;
-        out.reserve(ev.size());
-        for (const Event& e : ev) out.push_back(e.obj);
+    const size_t n = std::min(blocks_.size(), blocks_full_.size());
+    for (size_t p = 0; p < n; ++p) {
+        const std::vector<InlineObject>& src = blocks_full_[p].objects;
+        std::vector<InlineObject>& dst = blocks_[p].objects;
+        dst.clear();
+        for (const InlineObject& o : src) {
+            const NodeId owner = static_cast<NodeId>(o.owner);
+            if (std::find(keep.begin(), keep.end(), owner) != keep.end()) dst.push_back(o);
+        }
     }
 }
 

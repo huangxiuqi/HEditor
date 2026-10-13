@@ -1025,7 +1025,7 @@ async function main() {
       }
 
     //  方向键一次一格：光标位置不受控件约束，所以能走出字段、也能跨过只读字段。
-    //  约束编辑的是 EditPolicy（插 / 删），不是光标 —— 两者混起来会得到
+    //  约束编辑的是编辑能力表（插 / 删），不是光标 —— 两者混起来会得到
     //  "字段外的正文连点都点不进去"这类与编辑边界无关的怪现象。
     //
     //  判据是逐步的：一次只跨一枚簇（括号占位也算一格），到文档末尾就停住。
@@ -1889,7 +1889,7 @@ async function main() {
       await c.eval(`
         const it2 = window.__heditor.controls.items;
         return window.__heditor.setFormControls(it2.map((x, i) => ({
-          start: x.start, end: x.end, kind: 0, id: x.id, label: '', ro: i === 2 })));`);
+          start: x.start, end: x.end, kind: 0, id: x.id, ro: i === 2 })));`);
       const sr = await slotsOf(7);
       chk.check('★ 只读字段的一对括号变灰（左三枚可编辑、右两枚只读）',
                 sr.length === 5 && sr.map((q2) => (q2.ro ? 1 : 0)).join('') === '00011',

@@ -21,7 +21,7 @@
 #include "core/doc/control.h"
 #include "core/doc/document.h"
 #include "core/doc/edit_capability.h"
-#include "core/doc/edit_policy.h"
+#include "core/doc/edit_mode.h"
 #include "core/doc/flow.h"
 #include "core/doc/transaction.h"
 #include "core/engine/engine_config.h"
@@ -50,28 +50,22 @@ public:
         if (page != cfg_.page) markAllLayoutDirty();
         cfg_.page = page;
     }
-    void setBlocks(std::vector<BlockSpec> blocks);
+    /**
+     * 排版层的输入：块流。它只有一个产处 —— 模型树编译出来的产物（见 setDocument）。
+     */
     const std::vector<BlockSpec>& blocks() const { return blocks_; }
 
     /**
-     * 用文档模型树装载文档：引擎从此持有那棵树，块流由编译产出（第十四节那条接缝）。
-     * 与 setBlocks 的分工是"来源"而不是"形状"：两条路给排版的都是同一份块流，差别在它是
-     * 调用方拼好递进来，还是由模型树编译出来 —— 后者才是这一层的目标形态，控件边界、
-     * 段落格式与字符格式因此都只有一个产处（compile.cpp），引擎不再自己拼。
+     * 文档装载：引擎从此持有一棵模型树，块流是它的编译产物（第十四节那条接缝）。
+     * 控件边界、段落格式与字符格式因此都只有一个产处（compile.cpp），引擎不自己拼。
      *
-     * 隐藏控件的可见性口径与编译同一处取值（见 rebuildFromTree），所以 setEditMode 落在
-     * 这条路上时必须重编译。装载会复位光标、作废底图并整篇标脏。
-     *
-     * 接 const 引用、内部走 assignFrom 深拷贝：树刻意不给拷贝构造（见 NodeTree 的说明），
-     * 所以"按值收一棵树"在这里编译不过，那是对的。
+     * 隐藏控件的可见性口径与编译同一处取值（见 rebuildFromTree），所以 setEditMode 必须重编译。
+     * 装载会复位光标、作废底图并整篇标脏。接 const 引用、内部走 assignFrom 深拷贝：树刻意
+     * 不给拷贝构造（见 NodeTree 的说明），"按值收一棵树"在这里编译不过，那是对的。
      */
     void setDocument(const NodeTree& tree, const StyleSheet& sheet);
     /**
-     * 块流是不是树的编译产物（而不是 setBlocks 递进来的）。
-     */
-    bool hasDocumentTree() const { return tree_valid_; }
-    /**
-     * 持有中的模型树。hasDocumentTree() 为假时它的内容没有意义。
+     * 持有中的模型树。引擎只认这一条装载入口，所以它一直有效。
      */
     const NodeTree& documentTree() const { return tree_; }
 
@@ -81,7 +75,7 @@ public:
      * 引擎对外一直说 (段, 段内码点偏移)，模型层说流位置；两者不能靠算式互换 —— 控件与节这些
      * 容器在流里各占起止两位，而段的码点里没有它们。所以换算只认一个权威：编译给出的块来源
      * 身份（BlockSource）加 FlowIndex。桥是单向的：模型是真相，段坐标是它的一个视图。
-     * 只有持树时（hasDocumentTree）桥才存在；旧路径的块流没有对应的树，入口返回 -1 与 false。
+     * 树是唯一的装载入口，所以桥一直存在；没装载过（段流为空）时入口返回 -1 与 false。
      *
      * owner_hint 是宿主与探针的说话方式（它们只认控件下标）：同一处边界上"控件之前 /
      * 进入控件"是两个位置，提示把它投影成一个控件下标。引擎内部一律说侧别，见 flowPosAtSide。
@@ -232,19 +226,14 @@ public:
 
     ControlSet& controls() { return controls_; }
     const ControlSet& controls() const { return controls_; }
-    /**
-     * 传空 vector = 清空。内部会 normalize（建区间树）。
-     */
-    void setControls(std::vector<Control> list);
-    void clearControls();
 
     void setEditMode(EditMode m);
-    EditMode editMode() const { return policy_.mode(); }
+    EditMode editMode() const { return mode_; }
 
     /**
      * 当前光标所在的最内层控件下标（-1 = 不在任何控件内）。
-     * 由光标位置与侧别推出来（见 caretFieldHint）；推不出来时（旧路径的块流还没有
-     * 边界对象表、或光标落在所有控件之外）回落成"最内层含端点"—— 与编辑归属同一口径。
+     * 由光标位置与侧别推出来（见 caretFieldHint）；推不出来时（光标落在所有控件之外）
+     * 回落成"最内层含端点"—— 与编辑归属同一口径。
      *
      * 这条回落不只是为了好看：bracketedControls() 在聚焦档下要问它，而边界对象表
      * 又是由 bracketedControls() 决定的 —— 少了回落，首次排版前会互相等成死结
@@ -259,13 +248,11 @@ public:
     /**
      * 占位簇上的 owner 句柄 → 对外控件下标。
      *
-     * 块流由编译产出时 owner 是控件的节点 id（第五刀：序号会在插入之后整体平移，而节点
-     * id 是身份），setBlocks 旧路径给的一直是下标。对外（宿主、探针、既有判据）的口径始终
-     * 是下标，所以"拿下标去和占位簇的 owner_control 比"的地方都要先过这里 ——
-     * 宿主报"这枚括号归谁"正是其中一处。
+     * owner 是控件的节点 id（第五刀：序号会在插入之后整体平移，而节点 id 是身份）。
+     * 对外（宿主、探针、既有判据）的口径始终是下标，所以"拿下标去和占位簇的
+     * owner_control 比"的地方都要先过这里 —— 宿主报"这枚括号归谁"正是其中一处。
      */
     int controlIndexOfOwner(int owner) const {
-        if (owner_index_.empty()) return owner;  // 旧路径给的本来就是下标，原样返回
         const auto it = owner_index_.find(owner);
         return it == owner_index_.end() ? -1 : it->second;
     }
@@ -279,7 +266,6 @@ public:
      */
     int slotOwnerOf(int control_index) const {
         if (control_index < 0) return control_index;
-        if (!tree_valid_) return control_index;
         if (control_index >= static_cast<int>(control_node_ids_.size())) return -1;
         return static_cast<int>(control_node_ids_[static_cast<size_t>(control_index)]);
     }
@@ -291,7 +277,7 @@ public:
      */
     std::vector<int> bracketedControls() const {
         std::vector<int> out;
-        if (policy_.mode() != EditMode::Form || controls_.empty()) return out;
+        if (mode_ != EditMode::Form || controls_.empty()) return out;
         if (cfg_.form_brackets == FormBracketScope::All) {
             out.reserve(static_cast<size_t>(controls_.size()));
             for (int i = 0; i < controls_.size(); ++i) {
@@ -313,7 +299,7 @@ public:
      * 括号根本不画，却会照样把正文推开一截 —— 凭空多出来的空隙，谁也没要。
      */
     int bracketPlanId() const {
-        if (policy_.mode() != EditMode::Form || controls_.empty()) return -1;
+        if (mode_ != EditMode::Form || controls_.empty()) return -1;
         if (cfg_.form_brackets == FormBracketScope::All) return -2;
         return focusedControlIndex();
     }
@@ -340,7 +326,7 @@ public:
      *
      * 撤销按事务逆序应用逆操作，不做文档快照 —— 快照回退会让整篇变脏，直接击穿增量排版。
      * 撤销之后按事务记的编辑前选区恢复光标（选区在模型坐标里，经桥换回段坐标）。
-     * 不持树时（旧路径）没有事务可言：四个入口都返回 false，不假装能做。
+     * 没装载过文档时没有事务栈，四个入口一律返回 false，不假装能做。
      */
     bool canUndo() const { return undo_ != nullptr && undo_->canUndo(); }
     bool canRedo() const { return undo_ != nullptr && undo_->canRedo(); }
@@ -373,13 +359,12 @@ public:
     bool focusControl(bool forward);
 
     /**
-     * Tab / Shift+Tab 的策略版：持树时走模型层的能力表（edit_capability 的 tabFrom），
+     * Tab / Shift+Tab 的策略版：走模型层的能力表（edit_capability 的 tabFrom），
      * 到最后一个可编辑控件就放行（返回 false，不消费该 Tab），不绕回第一个。
      *
      * 与 focusControl 的差别不只是循环与否：focusControl 认的是控件集合的区间起点，
      * 而 tabFrom 认的是"内容起点落在可编辑集合内"这个谓词 —— 于是"只读控件里嵌的
      * 可编辑控件"不会成为落点，反之亦然，两处口径不会各说各话。
-     * 不持树时退回 focusControl（旧路径没有流位置，能力表也用不上）。
      */
     bool tabCaret(bool backward);
     /**
@@ -421,7 +406,7 @@ public:
      *
      * 与 auditLayout 同一个理由：编译这一层的增量的正确性由"与全量一致"定义。
      * 只比段数看不出来 —— 增量最典型的错法是"某一段的产物还是旧的"，
-     * 而段数、行数全都对得上。无树（旧路径）时返回 0：那条路没有全量编译这个对照物。
+     * 而段数、行数全都对得上。没装载过文档时返回 0：那时没有可比的东西。
      */
     int auditCompile() const;
 
@@ -525,41 +510,34 @@ public:
      */
     size_t documentCodepoints() const;
 
-private:
     /**
-     * 落点判定的唯一入口：持树时走模型层的能力表（树 + 流位置），否则走旧的控件集合策略。
-     * 两条路只在这一处分叉，调用方拿到的是同一种回执（能不能 + 为什么不能）。
+     * 落点判定的唯一入口：一次编辑能不能落在这里 / 能不能删掉这个区间。
      *
-     * 为什么不在调用处各写一遍：编辑入口有六个（插入、退格、前删、分段、合并、反缩进），
-     * 每处各写一遍必然分叉，而分叉的表现是"某一条路上打得进字、另一条路上打不进"，极难查。
+     * 六个编辑入口（插入、退格、前删、分段、合并、反缩进）全部走它，所以"判定与动作
+     * 一致"是结构上的事实，不是一条要另外维护的约定。对外也开放：宿主拿它做禁用态提示，
+     * 判据拿它把"能不能编辑"与"光标能不能到"分开 —— 表单模式下 setCaret 会把光标
+     * 投影进最近的字段，"控件之外"那个位置根本到不了，只有直接问它才问得到。
      *
-     * owner_hint 只对持树那条路有意义：它把落点贴到共享边界的内侧（见 flowPosAt）。
-     * 旧路径的归属提示由 EditPolicy 自己消化。
+     * 落点的侧别由位置自己推（见 sideForPos）：光标那一处用光标自己的侧别，别处按
+     * "最内层含端点"归一次。不另收归属提示 —— 那是"控件下标"这套说话方式，只有
+     * 区间判定需要它，而落点判定已经改说侧别了。
      */
-    EditCheck policyAt(TextPos p, int owner_hint) const;
+    EditCheck policyAt(TextPos p) const;
     /**
-     * 删除区间的判定。跨段删除两条路都拒（档 1 的删除不跨段，段落标记的删除走合并）。
+     * 删除区间 [a, b) 的判定。跨段删除一律拒（档 1 的删除不跨段，段落标记的删除走合并）。
      */
     EditCheck policyErase(TextPos a, TextPos b) const;
+
+private:
     /**
      * 表单模式的安全阀：一个可编辑控件都没有时，表单退化为文档模式（编辑一律放行），
-     * 而不是"什么都不让改"。两条编辑路径共用它 —— 判据见 edit_policy.cpp 顶上那段。
+     * 而不是"什么都不让改"。理由写在实现处。
      */
     bool formDegraded() const;
     /**
      * 导出后的控件集合里有没有可编辑的那一个。formDegraded 用它。
      */
     bool hasEditableControl() const;
-    /**
-     * 编辑落点的归属提示：p 就是当前光标时用点击带来的侧别（两条路都要用：旧路径把它交给
-     * EditPolicy 的 preferred，持树那条路用它把桥的落点贴到控件内侧）；没有点击提示且持树时，
-     * 回落成"最内层含端点的控件"—— 旧路径的归属规则。不持树且没有提示时返回 -1。
-     *
-     * 为什么持树时要回落而不是直接给 -1：桥上"无提示"取最外侧，于是光标停在字段起点会被
-     * 读成"在控件之前"，编辑被拒 —— 而光标看起来正贴在开括号之后。回落让两侧口径
-     * 一致：归属按"最内层含端点"定，与旧路径逐字相同。
-     */
-    int editOwnerHintAt(TextPos p) const;
 
     /**
      * 从持有的树重新编译出块流，并把控件集合从产物的边界里导出来。
@@ -600,8 +578,8 @@ private:
     /**
      * 树上的一段删除：把同一段内 [a, b) 这段（已吸附到簇边界）删掉。
      *
-     * 退格、前删、反缩进三个入口只是算区间的方式不同，落到文档上的操作是同一个 —— 与旧路径
-     * 里它们共用 adjustControlsOnErase 同一个道理。策略判定留在调用方：被拒时要报的是
+     * 退格、前删、反缩进三个入口只是算区间的方式不同，落到文档上的操作是同一个 ——
+     * 一条 makeDeleteTextSteps + 一次事务提交。策略判定留在调用方：被拒时要报的是
      * "用户按的那一下没生效"，与"这一步做不成"不是一回事。
      */
     bool eraseOnTree(TextPos a, TextPos b, const char* label);
@@ -643,9 +621,7 @@ private:
     };
     BracketCounts bracketCountsAt(int para, size_t cp) const;
     /**
-     * 这个段的边界对象表。两条路各存一处：持树时产物在 blocks_full_（编译给的、
-     * 不筛显示名单的那一份，流位置就是按它摊开的），旧路径的块流没有编译产物，
-     * 对象由 syncInlineObjects 直接写进 blocks_。
+     * 这个段的边界对象表（编译产物里那一份，没被显示名单筛过）。
      */
     const std::vector<InlineObject>& objectsFor(int para) const;
     /**
@@ -817,12 +793,15 @@ private:
     std::vector<BlockSpec> blocks_;
 
     /**
-     * 文档模型树与样式表（setDocument 装载）。tree_valid_ 为真时 blocks_ 是它们的
-     * 编译产物；为假时 blocks_ 由调用方拼好递进来（setBlocks 旧路径）。
+     * 文档模型树与样式表（setDocument 装载）。blocks_ 与 blocks_full_ 都是它的编译产物。
      */
     NodeTree tree_;
     StyleSheet sheet_;
-    bool tree_valid_ = false;
+    /**
+     * 装载过文档没有（setDocument 置位）。没装载过时没有树、没有流、也没有事务栈 ——
+     * 编辑入口一律拒绝，审计入口报"没有可比的东西"，而不是拿一棵空树去编出 0 段来。
+     */
+    bool loaded_ = false;
     /**
      * 编译的完整产物。"按要显示括号的名单筛一遍"这一处读它 —— blocks_ 是筛过之后的
      * 副本。筛是破坏性的（对象表会被删项），而名单会来回变（Focused 档与 All 档之间切），
@@ -830,8 +809,7 @@ private:
      */
     std::vector<BlockSpec> blocks_full_;
     /**
-     * 控件集合下标 → 控件的节点 id（导出时按同一顺序建）。旧路径下为空 —— 那条路的
-     * 边界句柄本来就是下标。
+     * 控件集合下标 → 控件的节点 id（导出时按同一顺序建）。
      */
     std::vector<NodeId> control_node_ids_;
     /**
@@ -973,15 +951,17 @@ private:
     bool layout_pending_ = false;
 
     /**
-     * 表单：控件区间集合与编辑策略（策略是纯函数，见 core/doc/edit_policy.h）。
+     * 表单：控件区间集合与编辑模式。
+     *
+     * 模式只决定"光标能落在哪、哪些命令可用"这一层策略（见 edit_capability），它属于
+     * 控件这一侧的口径而不是文档：同一棵树切到不同模式，块流与可见性都可能跟着变。
      */
     ControlSet controls_;
-    EditPolicy policy_;
+    EditMode mode_ = EditMode::Document;
     long long blocked_edits_ = 0;
     /**
-     * 撤销栈。只在持树时存在（setDocument 建、setBlocks 与 setControls 拆）——
-     * 旧路径的编辑由调用方自己改块流，引擎没有"改动由哪几步构成"可言，也就没有可撤销的单位。
-     * 它持的是 tree_ 的引用，而 tree_ 的地址在整个生命周期里不变。
+     * 撤销栈。setDocument 装载时建（它持的是 tree_ 的引用，而 tree_ 的地址在整个生命
+     * 周期里不变）。编辑是一条条事务，撤销就是按事务逆序应用逆操作。
      */
     std::unique_ptr<UndoStack> undo_;
 

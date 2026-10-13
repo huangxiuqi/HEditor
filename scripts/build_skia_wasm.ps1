@@ -250,4 +250,4 @@ try {
 if (-not (Test-Path $Lib)) { throw "构建结束但找不到 $Lib" }
 $mb = (Get-Item $Lib).Length / 1MB
 Say ("libskia.a  {0:N1} MB  ({1})" -f $mb, $Lib)
-Say "现在可以跑： powershell -ExecutionPolicy Bypass -File scripts\build_wasm.ps1"
+Say "现在可以跑： cmake --workflow --preset wasm"

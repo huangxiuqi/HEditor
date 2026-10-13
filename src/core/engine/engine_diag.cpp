@@ -75,7 +75,7 @@ std::string EditorEngine::describeControls() const {
     std::ostringstream os;
     os.setf(std::ios::fixed);
     os.precision(2);
-    os << "edit-mode=" << editModeName(policy_.mode()) << "  controls=" << controls_.size()
+    os << "edit-mode=" << editModeName(mode_) << "  controls=" << controls_.size()
        << "  blocked-edits=" << blocked_edits_ << "\n";
     for (int i = 0; i < controls_.size(); ++i) {
         const Control& c = controls_.at(i);

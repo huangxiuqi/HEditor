@@ -36,7 +36,7 @@ if (-not (Test-Path $entry)) { throw "缺少页面：$entry" }
 $glue = Join-Path $Root 'build\wasm\web\heditor.js'
 if (-not (Test-Path $glue)) {
     Write-Host '警告：还没构建 WASM。先执行：' -ForegroundColor Yellow
-    Write-Host '  powershell -ExecutionPolicy Bypass -File scripts\build_wasm.ps1' -ForegroundColor Yellow
+    Write-Host '  cmake --workflow --preset wasm' -ForegroundColor Yellow
     Write-Host ''
 }
 

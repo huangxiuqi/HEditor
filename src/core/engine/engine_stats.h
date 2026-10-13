@@ -106,7 +106,7 @@ struct EditStats {
     double rebuild_compile_ms = 0.0;
     double rebuild_flow_ms = 0.0;      // FlowIndex 重建（按节点记流位置）
     double rebuild_flowpos_ms = 0.0;   // 段的流区间递推
-    double rebuild_copy_ms = 0.0;      // 块流副本（旧路径要的那一份）
+    double rebuild_copy_ms = 0.0;      // 块流副本（排版吃的 blocks_ 那一份）
     double rebuild_controls_ms = 0.0;  // 控件视图导出
 
     /**

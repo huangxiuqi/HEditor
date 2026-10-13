@@ -84,7 +84,7 @@ function loadScript(src) {
     s.src = src;
     s.onload = resolve;
     s.onerror = () =>
-      reject(new Error(`无法加载 ${src}\n先执行：powershell -ExecutionPolicy Bypass -File scripts\\build_wasm.ps1`));
+      reject(new Error(`无法加载 ${src}\n先执行：cmake --workflow --preset wasm`));
     document.head.appendChild(s);
   });
 }
@@ -220,7 +220,7 @@ async function boot() {
 
   // 表单：模式切换 + 样例
   //
-  // 策略判断全在 C++ 侧（EditPolicy），这里只是把开关递过去。
+  // 策略判断全在 C++ 侧（编辑能力表），这里只是把开关递过去。
   //   如果"能不能改"由 JS 决定，那它就只是个 UI 提示，不是边界。
   const modeSel = $('editMode');
   modeSel.disabled = false;
@@ -916,28 +916,17 @@ window.__heditor = {
     return this.present();
   },
   get bracketScope() { return mod ? mod.bracketScope() : 0; },
-  clearControls() {
-    mod.clearControls();
-    return this.present();
-  },
-  // 用一份区间清单重建控件（探针用）。
+  // 用一份区间清单整批重建控件（探针用）。
   //   为什么不逐个改：区间树的父子关系是全局性质，改一个字段的端点会改变别的
   //   字段的 depth/parent，必须整棵重建。只读标记也只有建的时候给得进去，
   //   所以"把某个字段临时标成只读、看它那一对括号变不变灰"要靠这条。
+  //   引擎那边一次建完（换名单 + 重建树在同一次调用里），中间态不存在，
+  //   光标连侧别由引擎自己搬 —— 宿主不必再存一份。
   setFormControls(list) {
-    // 整批重建之前先把光标连侧别一起记下来 —— 中间态里控件是缺的（clearControls 之后
-    //   一枚括号都不剩），那一刻"侧别"没有对应物，引擎自己搬必然把它抹成 0：
-    //   实测光标 7/2（在零宽字段 #1 里）会变成 7/0（跑到左边那个字段的末尾），
-    //   接着打字就进了左边那个字段。所以整批做完之后由宿主原样摆回去。
-    const keep = this.caret;
-    mod.clearControls();
-    for (const it of list) {
-      mod.addControl(it.start[0], it.start[1], it.end[0], it.end[1], it.kind || 0,
-                     it.id || '', it.label || '', !!it.ro);
-    }
-    if (keep && typeof keep.side === 'number' && mod.setCaretAtSide) {
-      mod.setCaretAtSide(keep.para, keep.offset, keep.side);
-    }
+    mod.setFormControls(list.map((it) => ({
+      start: it.start, end: it.end, kind: it.kind || 0,
+      id: it.id || '', ro: !!it.ro,
+    })));
     return relayoutAndBlit();
   },
   // 走 relayoutAndBlit 而不是 present()：loadFormSample 会换文档，

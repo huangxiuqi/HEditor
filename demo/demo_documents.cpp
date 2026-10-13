@@ -178,49 +178,80 @@ void appendTextRuns(NodeTree& tree, NodeId parent, const BlockSpec& b, int from,
     }
 }
 
-/** 零宽字段：区间为空，它的开闭两枚落在同一处。 */
+/** 零宽字段：两个端点落在同一处。 */
 bool isEmptyField(const DemoFieldSpec* f) { return f->eo <= f->so; }
 
-/**
- * 同一层里谁排在前面：起点最小者优先；起点相同时空字段在前（它紧贴"到此为止"的闭括号，
- * 要排在后一个字段的开括号之前）；再取终点最大者 —— 外层先开。
- */
-bool fieldBefore(const DemoFieldSpec* a, const DemoFieldSpec* b) {
-    if (a->so != b->so) return a->so < b->so;
-    const bool a_empty = isEmptyField(a);
-    const bool b_empty = isEmptyField(b);
-    if (a_empty != b_empty) return a_empty;
+/** 终点谁更靠后：先比段号，再比段内偏移。 */
+bool endsAfter(const DemoFieldSpec* a, const DemoFieldSpec* b) {
+    const int ea = endParaOf(*a);
+    const int eb = endParaOf(*b);
+    if (ea != eb) return ea > eb;
     return a->eo > b->eo;
 }
 
 /**
- * 把 [from, to) 这段文本按 rest 里的字段切成"正文 + 内容控件"，嵌套的递归进去。
- *
- * 两条与老路径对齐的次序规则，都写在"取谁当前、谁进内层"上：
- *   其一，外层先开（起点小的先取）、同一处边界上闭括号先于开括号（见 fieldBefore）；
- *   其二，**空字段不参与嵌套** —— 它与"到此为止"的闭括号落在同一列，老路径把它那一对排在
- *     那枚闭括号之后、后一个字段的开括号之前，而一个包的住的字段的闭括号排在它自己内容的
- *     最后 —— 所以空字段只有与包住它的字段并列在当前这一层，才画得出同一个次序。
- *
- * 两个完全相同的区间不互相包含（它们是兄弟，见 rangeContainsForNesting），各自成对排列。
- * rest 按值收，每轮把这一枚连同递归吃掉的那些一起消掉：只消这一枚的话，内层字段会留在外层
- * 的候选里被再建一遍。
+ * 起点谁更靠前：先比段号；同段内起点最小者优先；起点相同时空字段在前（它紧贴"到此为止"
+ * 的闭括号，要排在后一个字段的开括号之前）；再取终点更靠后者 —— 外层先开。
  */
-void emitFields(NodeTree& tree, NodeId parent, const BlockSpec& b, int from, int to,
-                std::vector<const DemoFieldSpec*> rest) {
-    const std::vector<uint32_t>& cps = b.cp_text;
-    int pos = from;
+bool startsBefore(const DemoFieldSpec* a, const DemoFieldSpec* b) {
+    if (a->para != b->para) return a->para < b->para;
+    if (a->so != b->so) return a->so < b->so;
+    const bool a_empty = isEmptyField(a);
+    const bool b_empty = isEmptyField(b);
+    if (a_empty != b_empty) return a_empty;
+    return endsAfter(a, b);
+}
+
+/**
+ * 把 [(pf, off_f) .. (pt, off_t)] 这一段"平文本"建到 parent 下：段落内容 + 段落结束标记。
+ *
+ * 除最后一段之外，每段都要连它的结束标记一起吐出来 —— 标记是"这一段到此为止"的那一位，
+ * 在流里就排在内容之后。最后一段的标记不由这里吐（调用方在它外面接着吐，或由 demoTree
+ * 在最后补上）：那一位属于"最后一段的结束"，不该被任何字段的窗口截断。
+ */
+void emitPlain(NodeTree& tree, NodeId parent, const std::vector<BlockSpec>& blocks, int pf,
+               int off_f, int pt, int off_t) {
+    for (int i = pf; i <= pt; ++i) {
+        const BlockSpec& b = blocks[static_cast<size_t>(i)];
+        const int len = static_cast<int>(b.cp_text.size());
+        appendTextRuns(tree, parent, b, (i == pf) ? off_f : 0, (i == pt) ? off_t : len);
+        if (i == pt) break;
+        const NodeId mark = tree.appendChild(parent, NodeKind::ParagraphMark);
+        applyBlockFormat(b, tree.find(mark));
+    }
+}
+
+/**
+ * 把 [(pf, off_f) .. (pt, off_t)] 这一段文档流按 rest 里的字段切成"正文 + 内容控件"，
+ * 嵌套的递归进去。窗口可以跨段：字段的起点与终点各自带段号。
+ *
+ * 三条次序规则（取谁当前、谁进内层）：
+ *   一，外层先开（起点在前者先取）、同一处边界上闭括号先于开括号（见 startsBefore）；
+ *   二，零宽字段贴在别的字段边界上时（端点重合）与它并列当前这一层 —— 它那一对排在
+ *     "到此为止"那枚闭括号之后、后一个字段的开括号之前；
+ *   三，零宽字段严格落在某字段内部时跟着递归进去，与区间树判父子同一口径。
+ *
+ * 两个完全相同的区间不互相包含（互为兄弟），各自成对排列。rest 按值收，每轮把这一枚
+ * 连同递归吃掉的那些一起消掉：只消这一枚的话，内层字段会留在外层的候选里被再建一遍。
+ */
+void emitFields(NodeTree& tree, NodeId parent, const std::vector<BlockSpec>& blocks, int pf,
+                int off_f, int pt, int off_t, std::vector<const DemoFieldSpec*> rest) {
+    int cur_p = pf;
+    int pos = off_f;
     while (true) {
         size_t at = rest.size();
         for (size_t i = 0; i < rest.size(); ++i) {
             const DemoFieldSpec* f = rest[i];
-            if (f->so < pos || f->eo > to) continue;
-            if (at == rest.size() || fieldBefore(f, rest[at])) at = i;
+            // 候选 = 整个落在当前窗口里（比大小一律连带段号一起比，跨段字段才不会越界）。
+            if (f->para < cur_p || endParaOf(*f) > pt) continue;
+            if (f->para == cur_p && f->so < pos) continue;
+            if (endParaOf(*f) == pt && f->eo > off_t) continue;
+            if (at == rest.size() || startsBefore(f, rest[at])) at = i;
         }
         if (at == rest.size()) break;
         const DemoFieldSpec* pick = rest[at];
 
-        appendTextRuns(tree, parent, b, pos, pick->so);
+        emitPlain(tree, parent, blocks, cur_p, pos, pick->para, pick->so);
         const NodeId cc = tree.appendChild(parent, NodeKind::ContentControl);
         Node* cn = tree.find(cc);
         cn->control.key = pick->key;
@@ -233,20 +264,26 @@ void emitFields(NodeTree& tree, NodeId parent, const BlockSpec& b, int from, int
         for (size_t i = 0; i < rest.size(); ++i) {
             const DemoFieldSpec* g = rest[i];
             if (i == at) continue;
-            const bool same_span = (g->so == pick->so && g->eo == pick->eo);
-            const bool covered = !isEmptyField(g) && !isEmptyField(pick) && !same_span &&
-                                 g->so >= pick->so && g->eo <= pick->eo;
+            const bool same_span = (g->para == pick->para && g->so == pick->so &&
+                                    endParaOf(*g) == endParaOf(*pick) && g->eo == pick->eo);
+            // 零宽字段按位置分两种（见本函数顶上第三条）：贴在边界上的与对方并列，
+            //   严格落在内部的跟着递归进去 —— 后者的端点要真严格，贴边那一侧留给前一条。
+            const bool inside = isEmptyField(g)
+                                    ? (startsBefore(pick, g) && endsAfter(pick, g))
+                                    : (!startsBefore(g, pick) && !endsAfter(g, pick));
+            const bool covered = !isEmptyField(pick) && !same_span && inside;
             if (covered) {
                 inner.push_back(g);
             } else {
                 remaining.push_back(g);
             }
         }
-        emitFields(tree, cc, b, pick->so, pick->eo, inner);
+        emitFields(tree, cc, blocks, pick->para, pick->so, endParaOf(*pick), pick->eo, inner);
         rest.swap(remaining);
-        if (pick->eo > pos) pos = pick->eo;
+        cur_p = endParaOf(*pick);
+        pos = pick->eo;
     }
-    appendTextRuns(tree, parent, b, pos, to);
+    emitPlain(tree, parent, blocks, cur_p, pos, pt, off_t);
 }
 
 }  // namespace
@@ -254,23 +291,21 @@ void emitFields(NodeTree& tree, NodeId parent, const BlockSpec& b, int from, int
 NodeTree demoTree(const std::vector<BlockSpec>& blocks, const std::vector<DemoFieldSpec>& fields) {
     NodeTree tree;
     const NodeId sec = tree.firstSectionId();
-    for (size_t i = 0; i < blocks.size(); ++i) {
-        const BlockSpec& b = blocks[i];
-        std::vector<const DemoFieldSpec*> mine;
-        for (const DemoFieldSpec& f : fields) {
-            if (f.para == static_cast<int>(i)) mine.push_back(&f);
-        }
-        const int n = static_cast<int>(b.cp_text.size());
-        if (mine.empty()) {
-            appendTextRuns(tree, sec, b, 0, n);
-        } else {
-            emitFields(tree, sec, b, 0, n, mine);
-        }
-        // 段落标记挂在控件之外（与控件并列、排在它后面）：标记落进控件内部等于让那个控件跨段，
-        //   闭边界会落到下一段去。
-        const NodeId mark = tree.appendChild(sec, NodeKind::ParagraphMark);
-        applyBlockFormat(b, tree.find(mark));
+    if (blocks.empty()) return tree;
+    std::vector<const DemoFieldSpec*> all;
+    all.reserve(fields.size());
+    for (const DemoFieldSpec& f : fields) {
+        // 段号越界的字段整个丢掉：宁可不摆，也不要拿它去索引别的段。
+        if (f.para < 0 || f.para >= static_cast<int>(blocks.size())) continue;
+        if (endParaOf(f) < f.para || endParaOf(f) >= static_cast<int>(blocks.size())) continue;
+        all.push_back(&f);
     }
+    const int last = static_cast<int>(blocks.size()) - 1;
+    const int last_len = static_cast<int>(blocks[static_cast<size_t>(last)].cp_text.size());
+    emitFields(tree, sec, blocks, 0, 0, last, last_len, all);
+    // 末尾那一段的结束标记：它在流里排在所有内容之后，所以最后补。
+    const NodeId mark = tree.appendChild(sec, NodeKind::ParagraphMark);
+    applyBlockFormat(blocks[static_cast<size_t>(last)], tree.find(mark));
     return tree;
 }
 

@@ -216,7 +216,7 @@ int main() {
     {
         EditorEngine engine;
         expectTrue(engine.init({cjkPath, mnPath, latinPath}), "引擎初始化（加载三个字体）");
-        engine.setBlocks(sampleDocument(0, 1, 2));
+        engine.setDocument(demoTree(sampleDocument(0, 1, 2), {}), StyleSheet{});
         engine.relayout();
         const LayoutResult& r = engine.layout();
         std::printf("     pages=%d glyphs=%d lines/cols=%d clusters=%d shape=%.2fms\n",
@@ -318,8 +318,8 @@ int main() {
         expectTrue(eOff.init({cjkPath, mnPath, latinPath}), "引擎初始化（三个字体）");
         expectTrue(eOn.init({cjkPath, mnPath, latinPath}), "引擎初始化（三个字体）");
 
-        eOff.setBlocks({mixedParagraphBlock(cjk)});        // 不回退
-        eOn.setBlocks({mixedParagraphBlock(cjk, latin)});  // 回退到拉丁
+        eOff.setDocument(demoTree({mixedParagraphBlock(cjk)}, {}), StyleSheet{});        // 不回退
+        eOn.setDocument(demoTree({mixedParagraphBlock(cjk, latin)}, {}), StyleSheet{});  // 回退到拉丁
         eOff.relayout();
         eOn.relayout();
 
@@ -397,7 +397,7 @@ int main() {
         b.language = "mn";
         b.setText(kMongol_word);
         const std::string word = b.textUtf8();
-        e.setBlocks({b});
+        e.setDocument(demoTree({b}, {}), StyleSheet{});
         e.relayout();
 
         const LayoutResult& r = e.layout();

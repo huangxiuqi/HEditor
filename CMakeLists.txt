@@ -37,8 +37,13 @@ set(HEDITOR_ASSET_DIR ${HEDITOR_ROOT}/assets)
 
 # 构建时间戳：编进 wasm/native 里，验证台把它显示出来。
 #   "改了没生效"要先能回答"页面到底跑的哪一版" —— 光看磁盘上的文件时间不够：
-#   浏览器完全可能拿的是旧副本。脚本不传时退回 dev。
-set(HEDITOR_BUILD_STAMP "dev" CACHE STRING "构建时间戳（构建脚本注入）")
+#   浏览器完全可能拿的是旧副本。默认取**配置时刻**（每次 cmake --preset 都是新的），
+#   需要时用环境变量 HEDITOR_BUILD_STAMP 覆盖（CI 里传 commit 号有用）。
+if(DEFINED ENV{HEDITOR_BUILD_STAMP})
+  set(HEDITOR_BUILD_STAMP "$ENV{HEDITOR_BUILD_STAMP}")
+else()
+  string(TIMESTAMP HEDITOR_BUILD_STAMP "%Y-%m-%d %H:%M:%S")
+endif()
 
 if(NOT EXISTS ${HEDITOR_HB_ROOT}/src/harfbuzz.cc)
   message(FATAL_ERROR
@@ -95,100 +100,14 @@ function(heditor_target_flags tgt)
   endif()
 endfunction()
 
-# ── 头文件依赖追踪：本机（中文 VS + CMake 4.1 + Ninja + C++20）唯一可靠的路径 ──
+# ─────────────────────────────────────────────────────────────
+#  头文件依赖：走 Ninja 的 /showIncludes 通道（CMake + Ninja + MSVC 的标准路径）
 #
-# ★ 这个坑很值得写清楚，因为它的症状是「一切看起来都正常」。
-#
-#   两条依赖通道**同时**失效，而且都不报错：
-#
-#   ① /showIncludes 通道：cl 用 /showIncludes 报依赖，ninja 拿一条
-#      msvc_deps_prefix 字符串去匹配那行输出。而两边的**字节**不一样：
-#
-#          cl.exe 通过管道吐出的  : \xd7\xa2\xd2\xe2: \xb0\xfc\xba\xac\xce\xc4\xbc\xfe:   (CP936)
-#          CMake 写进 rules.ninja : \xe6\xb3\xa8\xe6\x84\x8f: ...                          (UTF-8)
-#
-#      （注意：在 PowerShell 里 `cl > f.txt` 看到的"UTF-8"是 PowerShell 自己
-#      解码后再编码的结果，掩盖了真实字节。要拿真字节必须用子进程抓 stdout。）
-#
-#      逐字节比对必然不等 → ninja 把那些行当普通输出打印（所以日志里满屏
-#      「注意: 包含文件:」），一条依赖都没记下（`ninja -t deps` 全是 `#deps 0`）。
-#
-#   ② dyndep 通道：CMake 4.1 只要 CMAKE_CXX_STANDARD >= 20，就会给 MSVC 生成
-#      带 `-scanDependencies $DYNDEP_INTERMEDIATE_FILE` 的规则 —— **即使**
-#      CMAKE_CXX_SCAN_FOR_MODULES 是 OFF（实测：C++17 工程生成的是普通规则，
-#      加两行 C++20 就变成 dyndep 规则）。看起来像是有了更可靠的依赖来源，
-#      但生成的 CXX.dd 里只有 `build <obj>: dyndep` 这种空行，
-#      **一个头文件都没有** —— CMake 的 dyndep 只映射**模块**依赖。
-#      （顺带：它还会让 harfbuzz 那个大 TU 白扫一遍。）
-#
-#   两条通道都不记头文件 → 改头文件不触发重编译 → 用旧类布局编出来的 .obj
-#   与新布局的 .lib 混链 → 段错误（不是编译错误）。
-#
-#   ★ 这不是本构建目录的残留状态，是**确定性的**：最小复现（一个干净工程，
-#     一个被两个 TU include 的头，除此之外什么都不加）：
-#           set(CMAKE_CXX_STANDARD 20) + MSVC + Ninja
-#           → ninja -t deps 报 #deps 0
-#           → 改那个头的函数体，`ninja` 说 "no work to do"，一个都不重编
-#           → 跑出来的 exe 还是旧行为
-#     也就是说，**新克隆一份下来照样是坏的**。
-#
-#   实测代价：给 EditStats 加一个 bool 字段后，shaping_test.cpp 没重编，
-#   链接出的 heditor_tests.exe 直接段错误 —— 而它打印的仍是「55 项断言，失败 0 项」。
-#   这类问题不会以编译错误的形式出现，它只会让"测试通过"变成一句不可信的话。
-#
-#   试过并否掉的替代方案：
-#     · 开 C++20 模块扫描（CMP0155 NEW + CXX_SCAN_FOR_MODULES ON）→ 见上面 ②；
-#     · CMAKE_DEPFILE_FLAGS_CXX=/showIncludes- → 对 Ninja 的 MSVC 规则**毫无影响**
-#       （两个变体生成的命令行逐字节相同）；而且规则里 `-showIncludes` 出现在
-#       $FLAGS **之后**，所以按 target 下发的 `/showIncludes-` 也覆盖不了它。
-#
-#   最后采用的办法：干脆不依赖任何自动依赖通道，把该 target 自己的头文件
-#   直接挂到每个源文件上（OBJECT_DEPENDS）。粒度粗（改一个头文件会重编该 target
-#   的全部 TU），但它是**确定的**：不依赖本地化字符串、不依赖代码页、不依赖
-#   CMake 版本。本项目每个 target 只有几个到十几个 TU，粗一点换"绝不会静默
-#   用旧对象"，值。
-#
-#   ★ 这个办法有回归测试：scripts/verify_header_deps.ps1
-#     它把 engine.h 的 mtime 推一下（内容不动），然后按**文件 mtime**断言
-#     注册过的 TU 全重编、链接产物全重做、harfbuzz 的 obj 原封不动；
-#     再把 HarfBuzz 自己的某个头的 mtime 推一下，断言它的聚合 TU 必须重编
-#     （这两条方向相反，缺一条就会漏掉"改 HarfBuzz 不重编"那种静默复用）。
-#     （为什么按 mtime 而不解析 ninja 输出：ninja 的控制台输出在管道里会丢尾巴，
-#      实测一次 17 步的构建只捕获到 [10/17]；`ninja -n` 也因为 CONFIGURE_DEPENDS
-#      的 glob stamp 而不给计划。mtime 是文件系统事实，不经过文本层。）
-#     已证伪过：把本函数短路后它变红（11 个 TU 未重编，退出码 2）；
-#     另外 2026-10-12 实测漏挂 heditor_demo 时它**不会**变红 —— 因为那张期望表里
-#     当时没有 demo 的 obj，脚本只能断言它认识的那些。所以新增 target 时
-#     **必须同时把它的 obj 加进 $expectRebuild**，否则守卫只是看起来在保护。
-#     改这里之后请跑它。
-#
-#   作用域：只对 MSVC 生效。clang/emscripten 的 depfile 通道本来是好的
-#   （实测 wasm 侧某个 .o 记了 803 条依赖，精确到具体头文件），
-#   所以那里 `return()` 直通，保留细粒度增量。
-function(heditor_track_header_deps tgt)
-  if(NOT MSVC)
-    return()   # clang/gcc 走 depfile，本来就正常
-  endif()
-  set(_hdrs "")
-  foreach(_d IN LISTS ARGN)
-    # .hh 是 C++ 内部头的常见后缀（HarfBuzz 整个 src/ 用它），.cc 也要收：
-    # 聚合源会把 .cc 直接 include 进来，它们是依赖而不是无关文件。
-    file(GLOB_RECURSE _g CONFIGURE_DEPENDS
-         "${_d}/*.h" "${_d}/*.hpp" "${_d}/*.hh" "${_d}/*.cc")
-    list(APPEND _hdrs ${_g})
-  endforeach()
-  if(NOT _hdrs)
-    return()
-  endif()
-  get_target_property(_srcs ${tgt} SOURCES)
-  set(_own "")
-  foreach(_s IN LISTS _srcs)
-    if(_s MATCHES "\\.(cpp|cc|cxx)$")
-      list(APPEND _own ${_s})
-    endif()
-  endforeach()
-  set_property(SOURCE ${_own} PROPERTY OBJECT_DEPENDS "${_hdrs}")
-endfunction()
+#  ★ 不要在这里挂 OBJECT_DEPENDS（把 target 目录下的头全挂到每个源文件上）：
+#    它无条件重编 —— 改一个 core 头要重编 37 个 TU、实测 ~380 s，而按真实依赖只需要 9 个；
+#    它还会把依赖通道的故障整个盖住（通道断了它照样全绿）。2026-10-13 撤过一次，别挂回来。
+#    这条通道的前提与排查手法记在 .workbuddy/memory/ENV.md。
+# ─────────────────────────────────────────────────────────────
 
 # ─────────────────────────────────────────────────────────────
 #  HarfBuzz（用官方聚合源 src/harfbuzz.cc：一个翻译单元装下整个库）
@@ -199,12 +118,8 @@ target_include_directories(heditor_harfbuzz SYSTEM PUBLIC ${HEDITOR_HB_ROOT}/src
 set_target_properties(heditor_harfbuzz PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
 
 # HarfBuzz 的"源文件"其实是整个 src/：harfbuzz.cc 的 69 条 include 全是 .cc，
-# 再由它们包进 .hh。所以它必须挂上自己的头文件依赖 —— MSVC 侧没有任何自动依赖通道，
-# 不挂的话，换 HarfBuzz 版本（或改它任何一个 .cc/.hh）都会静默复用旧对象，
-# 于是编出来的是上一份源码，而构建一句提示都不给。
-# 这里只覆盖 HarfBuzz 自己的头；core 的头不在其中，所以改 core 不会重编这个巨型 TU
-# （那是有意的取舍，见上面 heditor_track_header_deps 的说明）。
-heditor_track_header_deps(heditor_harfbuzz ${HEDITOR_HB_ROOT}/src)
+# 再由它们包进 .hh —— 这些边由 /showIncludes 记着（换 HarfBuzz 版本、或改它自己的头，
+# 这个聚合 TU 必须重编，否则编出来的是上一份源码）。它不 include 任何 core 头。
 
 if(EMSCRIPTEN)
   # 单线程 wasm：关掉互斥量相关代码，减包体
@@ -225,7 +140,6 @@ add_library(heditor_core STATIC
   src/core/doc/document.cpp
   src/core/doc/control.cpp
   src/core/doc/edit_mode.cpp
-  src/core/doc/edit_policy.cpp
   src/core/doc/edit_capability.cpp
   src/core/doc/node.cpp
   src/core/doc/flow.cpp
@@ -287,13 +201,11 @@ target_link_libraries(heditor_demo PUBLIC heditor_core)
 #   少了 /utf-8 就按 cp936 读，症状是"中文注释那一行报语法错"（见函数定义处的说明）。
 heditor_target_flags(heditor_demo)
 heditor_target_flags(heditor_core)
-heditor_track_header_deps(heditor_core ${HEDITOR_ROOT}/src/core)
-# ★ demo 也要挂头依赖，理由与 core 同一条，但后果更隐蔽：
-#   demo_documents.cpp 直接构造 BlockSpec（改 layout.h 的字段就是改它的类布局），
-#   而它是个静态库、被所有测试链着。漏挂的后果不是编译错误，而是"它的 .obj 用旧布局、
-#   测试的 .obj 用新布局"混链 —— 症状是析构时随机段错误，且断言已经全过。
-#   实测：给 BlockSpec 加一个 vector 成员后，model_test 打到 0.4 就崩。
-heditor_track_header_deps(heditor_demo ${HEDITOR_ROOT}/src/core ${HEDITOR_ROOT}/demo)
+# ★ 这个静态库对头依赖尤其敏感：demo_documents.cpp 直接构造 BlockSpec（改 layout.h
+#   的字段就是改它的类布局），而它被所有测试链着。一旦它的 .obj 没跟着重编，后果不是
+#   编译错误，而是"它的 .obj 用旧布局、测试的 .obj 用新布局"混链 —— 症状是析构时随机
+#   段错误，而断言已经全过（实测：给 BlockSpec 加一个 vector 成员后，model_test 打到
+#   0.4 就崩）。这条在 2026-10-12 真的发生过：heditor_demo 当时漏挂了头依赖。
 
 if(HEDITOR_USE_SKIA)
   # ── 与 libskia.a 对齐的编译期契约（一个都不能少）────────────────
@@ -364,7 +276,6 @@ else()
   target_compile_definitions(heditor_native PRIVATE HEDITOR_NATIVE_ASSET_DIR="${HEDITOR_ASSET_DIR}"
                                                 HEDITOR_BUILD_STAMP="${HEDITOR_BUILD_STAMP}")
   heditor_target_flags(heditor_native)
-  heditor_track_header_deps(heditor_native ${HEDITOR_ROOT}/src/app ${HEDITOR_ROOT}/src/core)
 
   if(HEDITOR_BUILD_TESTS)
     enable_testing()
@@ -372,7 +283,6 @@ else()
     target_link_libraries(heditor_tests PRIVATE heditor_core heditor_demo)
     target_compile_definitions(heditor_tests PRIVATE HEDITOR_NATIVE_ASSET_DIR="${HEDITOR_ASSET_DIR}")
     heditor_target_flags(heditor_tests)
-    heditor_track_header_deps(heditor_tests ${HEDITOR_ROOT}/src/core ${HEDITOR_ROOT}/tests)
     add_test(NAME shaping_and_layout COMMAND heditor_tests)
 
     # 档 1：编辑 / 光标几何 / 命中测试 / 增量呈现
@@ -380,7 +290,6 @@ else()
     target_link_libraries(heditor_edit_tests PRIVATE heditor_core heditor_demo)
     target_compile_definitions(heditor_edit_tests PRIVATE HEDITOR_NATIVE_ASSET_DIR="${HEDITOR_ASSET_DIR}")
     heditor_target_flags(heditor_edit_tests)
-    heditor_track_header_deps(heditor_edit_tests ${HEDITOR_ROOT}/src/core ${HEDITOR_ROOT}/tests)
     add_test(NAME edit_and_caret COMMAND heditor_edit_tests)
 
     # 文档模型：节点、Pos 与流位置的双向换算（0.1）、段落分段（0.2）、
@@ -390,7 +299,6 @@ else()
     add_executable(heditor_model_tests tests/model_test.cpp)
     target_link_libraries(heditor_model_tests PRIVATE heditor_core heditor_demo)
     heditor_target_flags(heditor_model_tests)
-    heditor_track_header_deps(heditor_model_tests ${HEDITOR_ROOT}/src/core ${HEDITOR_ROOT}/tests)
     add_test(NAME doc_model COMMAND heditor_model_tests)
 
     # 诊断探针（**不进 ctest**）：打印 EditStats / EditorEngine 的尺寸与字段偏移。
@@ -398,7 +306,6 @@ else()
     add_executable(heditor_abi_probe tests/probe_engine_size.cpp)
     target_link_libraries(heditor_abi_probe PRIVATE heditor_core)
     heditor_target_flags(heditor_abi_probe)
-    heditor_track_header_deps(heditor_abi_probe ${HEDITOR_ROOT}/src/core ${HEDITOR_ROOT}/tests)
   endif()
 
 endif()

@@ -296,10 +296,10 @@ std::string EditorEngine::auditLayoutJson() {
 }
 
 int EditorEngine::auditCompile() const {
-    // 旧路径没有"全量编译"这个对照物（块流是调用方递进来的），没有可比的东西。
-    if (!tree_valid_) return 0;
+    // 没装载过文档就没有"全量编译"这个对照物，没有可比的东西。
+    if (!loaded_) return 0;
     const FlowVisibility vis =
-        (policy_.mode() == EditMode::Document) ? FlowVisibility::Design : FlowVisibility::Display;
+        (mode_ == EditMode::Document) ? FlowVisibility::Design : FlowVisibility::Display;
     const CompileResult ref = compileDocument(tree_, vis, sheet_);
     // 段数不同就没法逐段对齐了：报一个大数（不是 1），让"哪里不符"一眼看得出来。
     if (ref.blocks.size() != blocks_full_.size()) return 1000;
@@ -323,7 +323,7 @@ int EditorEngine::auditCompile() const {
 }
 
 std::string EditorEngine::auditCompileJson() {
-    if (!tree_valid_) return "{\"diff\":0,\"note\":\"no-tree\"}";
+    if (!loaded_) return "{\"diff\":0,\"note\":\"not-loaded\"}";
     const auto t0 = Clock::now();
     const int d = auditCompile();
     const double full_ms = msSince(t0);

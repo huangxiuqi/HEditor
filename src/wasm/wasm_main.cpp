@@ -222,8 +222,8 @@ std::vector<BlockSpec> buildScenarioBlocks(int scenario) {
  *   跟着换，不存在"区间指向旧文本"的错配。
  *
  * keep_caret 为真时把光标原样搬回去（文本没变才搬）：换控件、改只读标记、增删字段都不该
- *   动光标，而 setDocument 会把光标归零。旧路径的 setControls 本来就不动光标，所以"改控件"
- *   这条路上必须补这一步，否则光标会自己在原地跳回段首。
+ *   动光标，而 setDocument 会把光标归零。所以"改控件"这条路上必须补这一步，否则光标会自己
+ *   在原地跳回段首。
  */
 void rebuildDocument(bool keep_caret) {
     const TextPos before = g_engine.caret();
@@ -254,7 +254,7 @@ void setScenario(int scenario) {
  * 把当前文档从引擎取回来，作为下一次重建的底稿。
  *
  * 树上编辑之后引擎里的文本已经变了，而 g_blocks 还是装载时那一份 —— 不刷新的话，
- *   紧接着"改控件再重建"（clearControls / addControl）会把用户改过的内容整个倒回装载时的
+ *   紧接着"改控件再重建"（setFormControls）会把用户改过的内容整个倒回装载时的
  *   样子：光标跟着归零，字也打不进任何字段（区间还在原处，文本却已经对不上了）。
  * 只取文本与块级字段：demoTree 不读 runs / objects，重新编译会自己再产一份。
  */
@@ -448,7 +448,7 @@ void setCaretAt(int para, int offset, int field) {
 /**
  * 表单：控件是区间（模型见 core/doc/control.h）。
  *
- * 这一层只做"配数据加报状态"，不含任何策略判断：判断全在 C++ 侧的 EditPolicy，
+ * 这一层只做"配数据加报状态"，不含任何策略判断：判断全在 C++ 侧的编辑能力表，
  * 前端改不了它。这是刻意的 —— 如果"能不能改"由 JS 决定，那它就只是 UI 提示，
  * 而不是边界。
  */
@@ -470,18 +470,32 @@ std::string jsonEscape(const std::string& s) {
 }
 
 /**
- * 清掉当前表单的全部字段并重建文档。
+ * 整批换上一份字段名单，重建一次文档树（探针用）。
  *
- * 持树时"清控件"就是"树上没有内容控件" —— 改一份字段清单再重建一次树即可。不持树
- *   （跨段控件那条退路留下的状态）才回到引擎的旧入口。
+ * 为什么是"整批"而不是"清空 + 逐个加"：控件是树的产物，改控件就是换一份字段名单再建一次
+ *   树。拆成两步做的话，中间态里一枚括号都没有 —— 那一刻"侧别"没有对应物，引擎搬光标只
+ *   能抹成 0（实测 7/2 变 7/0，接着打字就进了左边那个字段）。合成一次调用，中间态不存在，
+ *   宿主也不必自己存光标再摆回去（见 docs/正式化架构与迁移路线.md 4.2）。
+ * 每项形如 {start:[段,偏移], end:[段,偏移], kind, id, ro}。不收 label：树里不存它，
+ *   界面上显示的那份是引擎从树里导出的（见 controlsJson）。
  */
-void clearControls() {
-    if (!g_engine.hasDocumentTree()) {
-        g_engine.clearControls();
-        return;
-    }
-    syncBlocksFromEngine();  // 先取回引擎里那份（树上编辑可能已经改过文本）
+void setFormControls(val list) {
+    syncBlocksFromEngine();  // 底稿要是引擎里当前那一份（树上编辑可能已经改过文本）
     g_fields.clear();
+    const int n = list["length"].as<int>();
+    g_fields.reserve(static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i) {
+        const val it = list[i];
+        DemoFieldSpec f;
+        f.para = it["start"][0].as<int>();
+        f.so = it["start"][1].as<int>();
+        f.epara = it["end"][0].as<int>();  // 跨段字段（终段 != 起段）照建：中间那些段落在它里面
+        f.eo = it["end"][1].as<int>();
+        if (!it["kind"].isUndefined()) f.kind = controlKindFromCode(it["kind"].as<int>());
+        if (!it["id"].isUndefined()) f.key = it["id"].as<std::string>();
+        f.readonly = !it["ro"].isUndefined() && it["ro"].as<bool>();
+        g_fields.push_back(std::move(f));
+    }
     rebuildDocument(true);
 }
 void setEditMode(int mode) { g_engine.setEditMode(editModeFromCode(mode)); }
@@ -500,36 +514,6 @@ void setBracketScope(int scope) {
     applyConfig();
 }
 int bracketScope() { return static_cast<int>(g_cfg.form_brackets); }
-
-void addControl(int sp, int so, int ep, int eo, int kind, const std::string& id,
-                const std::string& label, bool read_only) {
-    // 字段在树里是"某一段内的一个区间"，不跨段；跨段控件只存在于旧路径上。
-    if (!g_engine.hasDocumentTree() || sp != ep) {
-        std::vector<Control> list = g_engine.controls().all();
-        Control c;
-        c.range.start = TextPos{sp, static_cast<size_t>(so)};
-        c.range.end = TextPos{ep, static_cast<size_t>(eo)};
-        c.kind = controlKindFromCode(kind);
-        c.id = id;
-        c.label = label;
-        c.read_only = read_only;
-        list.push_back(std::move(c));
-        // 走 setControls 而不是逐个 append：区间树的父子关系是全局性质，
-        // 加一个新控件可能改变已有控件的 parent/depth，必须整棵重建。
-        g_engine.setControls(std::move(list));
-        return;
-    }
-    DemoFieldSpec f;
-    f.para = sp;
-    f.so = so;
-    f.eo = eo;
-    f.kind = controlKindFromCode(kind);
-    f.key = id;
-    f.readonly = read_only;
-    syncBlocksFromEngine();  // 同 clearControls：底稿要是引擎里当前那一份
-    g_fields.push_back(std::move(f));
-    rebuildDocument(true);
-}
 
 /**
  * 必须走 AndRender 版：Tab 会让占位跟着换字段、整行重排，
@@ -874,12 +858,11 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("documentText", &documentText);
 
     // 表单（控件是区间 + 编辑策略）
-    emscripten::function("clearControls", &clearControls);
+    emscripten::function("setFormControls", &setFormControls);
     emscripten::function("setEditMode", &setEditMode);
     emscripten::function("editMode", &editMode);
     emscripten::function("setBracketScope", &setBracketScope);
     emscripten::function("bracketScope", &bracketScope);
-    emscripten::function("addControl", &addControl);
     emscripten::function("focusControl", &focusControl);
     emscripten::function("tabCaret", &tabCaret);
     emscripten::function("auditFrame", &auditFrame);

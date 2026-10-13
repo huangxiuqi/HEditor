@@ -1,0 +1,98 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "native",
+      "displayName": "原生 Release（验证宿主）",
+      "description": "MSVC + Ninja。要先有 MSVC 的工具链环境：从 VS 的 x64 Native Tools 命令行里跑，或者用 CMakeUserPresets.json 里的 native-local（本机 vcvars64.bat 不可用时用的那份）。",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build/native",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "native-debug",
+      "displayName": "原生 Debug",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build/native-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "wasm",
+      "displayName": "WebAssembly（Emscripten + Skia）",
+      "description": "交付物。工具链取仓库内的 .toolchain/emsdk，见 docs/依赖与工具链管理.md。",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build/wasm",
+      "toolchainFile": "${sourceDir}/.toolchain/emsdk/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake",
+      "environment": {
+        "EM_CONFIG": "${sourceDir}/.toolchain/emsdk/.emscripten",
+        "PATH": "${sourceDir}/.toolchain/emsdk/upstream/emscripten;${sourceDir}/.toolchain/emsdk;$penv{PATH}"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "HEDITOR_USE_SKIA": "ON"
+      }
+    },
+    {
+      "name": "wasm-noskia",
+      "displayName": "WebAssembly（自写光栅后端，对照用）",
+      "inherits": "wasm",
+      "binaryDir": "${sourceDir}/build/wasm-noskia",
+      "cacheVariables": {
+        "HEDITOR_USE_SKIA": "OFF"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "native", "configurePreset": "native" },
+    { "name": "native-debug", "configurePreset": "native-debug" },
+    { "name": "wasm", "configurePreset": "wasm" },
+    { "name": "wasm-noskia", "configurePreset": "wasm-noskia" }
+  ],
+  "testPresets": [
+    {
+      "name": "native",
+      "configurePreset": "native",
+      "output": { "verbosity": "verbose", "outputOnFailure": true },
+      "execution": { "noTestsAction": "error" }
+    },
+    {
+      "name": "native-debug",
+      "configurePreset": "native-debug",
+      "output": { "verbosity": "verbose", "outputOnFailure": true },
+      "execution": { "noTestsAction": "error" }
+    }
+  ],
+  "workflowPresets": [
+    {
+      "name": "native",
+      "displayName": "配置 + 构建 + 跑三个断言套件",
+      "steps": [
+        { "type": "configure", "name": "native" },
+        { "type": "build", "name": "native" },
+        { "type": "test", "name": "native" }
+      ]
+    },
+    {
+      "name": "wasm",
+      "displayName": "配置 + 构建 wasm 产物",
+      "steps": [
+        { "type": "configure", "name": "wasm" },
+        { "type": "build", "name": "wasm" }
+      ]
+    }
+  ]
+}

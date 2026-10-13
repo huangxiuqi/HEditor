@@ -229,7 +229,7 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
     //
     // 画在光标之后：光标和标记会在字段末尾附近贴住，
     //   标记后画才能保证它不被光标盖掉（反过来就是上面那个 bug）。
-    if (policy_.mode() == EditMode::Form) drawControlMarks();
+    if (mode_ == EditMode::Form) drawControlMarks();
 
     // 记账
     //
@@ -301,7 +301,7 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
     //   与编辑归属同一口径（focusedControlIndex），两者永远不会互相矛盾。
     // 例外是点画布带进来的归属提示：共享边界上它比"最内层"更准，走同一个
     //   focusedControlIndex（面板/探针看到的必须与实际落笔的字段一致）。
-    edit_stats_.edit_mode = static_cast<int>(policy_.mode());
+    edit_stats_.edit_mode = static_cast<int>(mode_);
     edit_stats_.control_count = controls_.size();
     edit_stats_.caret_control = focusedControlIndex();
     edit_stats_.blocked_edits = blocked_edits_;

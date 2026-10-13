@@ -195,7 +195,7 @@ Write-Host ""
 Write-Host "[deps] 剩下的由人完成：" -ForegroundColor Yellow
 Write-Host "  提交 .gitmodules 与 third_party/harfbuzz 这条 gitlink —— 不提交的话，之后任何"
 Write-Host "  一次 git submodule update 都会把 HEAD 拉回主分支尖端，这个 tag 就白钉了"
-Write-Host "  跑一次 powershell -ExecutionPolicy Bypass -File scripts\build_native.ps1 -Run"
-Write-Host "  跑一次 powershell -ExecutionPolicy Bypass -File scripts\build_wasm.ps1"
+Write-Host "  跑一次 cmake --workflow --preset native   （配置 + 构建 + 三个断言套件）"
+Write-Host "  跑一次 cmake --workflow --preset wasm"
 Write-Host "  旧的 third_party/harfbuzz-14.6.0 先留着待查，确认无碍后再自行清理"
 }
