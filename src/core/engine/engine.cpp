@@ -112,7 +112,7 @@ void EditorEngine::setBlocks(std::vector<BlockSpec> blocks) {
     block_src_.clear();
     // 撤销栈持的是上面那棵树：递进来的块流与它没有对应关系，栈留着只会撤出一份对不上的文档。
     undo_.reset();
-    setCaretRaw(TextPos{0, 0});
+    setCaretByText(TextPos{0, 0});
     caret_rect_px_prev_ = Rect{};
     base_valid_ = false;
     // 整份文档换了：段数与内容都可能全变，没有可复用的前缀。
@@ -129,7 +129,7 @@ void EditorEngine::setDocument(const NodeTree& tree, const StyleSheet& sheet) {
     // 撤销栈在建栈时就绑定了 tree_ 的地址，而 assignFrom 只换内容、不换对象 —— 所以
     //   换文档时旧栈必须整个丢掉：它记的步骤属于上一份文档，坐标在新文档上毫无意义。
     undo_ = std::make_unique<UndoStack>(tree_);
-    setCaretRaw(TextPos{0, 0});
+    setCaretByText(TextPos{0, 0});
     caret_rect_px_prev_ = Rect{};
     base_valid_ = false;
     rebuildFromTree();
@@ -154,20 +154,37 @@ void EditorEngine::rebuildFromTree() {
     const size_t n = blocks_full_.size();
     block_flow_.assign(n, 0);
     block_flow_span_.assign(n, 0);
-    FlowPos carry = 0;
+    // 段与段之间由段落标记分隔，所以段的流区间只该由标记位置推：段 i 的内容是
+    //   [段 i 起点, 标记位置)，段 i+1 的起点 = 标记之后那一位。标记位置是权威
+    //   （FlowIndex 给的），递推出来的区间于是与流严丝合缝。
+    //
+    // 不能拿"首个内容元素所属节点的区间起点"当段起点：段落被控件从中间切开时
+    //   （在控件内容里回车），那个节点是控件本身，而控件的区间起点在上一段里 ——
+    //   算出来偏前若干位，于是 setCaretAtFlow 拿到一个偏小的段起点、rel 偏大、
+    //   侧别落到别的控件上。表象就是"回车之后光标跑进了下一个控件"。
+    FlowPos start = 0;
+    // 段 0 的起点不能硬编 0：它前面可能有节边界（节有起止两位），所以首段第一个
+    //   内容元素的区间起点才是权威。段 0 的 first 一定落在本段内（首段没有"从中间
+    //   开始"的情形），所以它的区间起点就是段起点。
+    if (n > 0 && !block_src_.empty()) {
+        int first = -1;
+        if (flow_->intervalOf(block_src_[0].first, &first, nullptr) && first >= 0) start = first;
+    }
     for (size_t i = 0; i < n; ++i) {
-        FlowPos start = carry;
-        if (i < block_src_.size()) {
-            int first = 0;
-            // 来源身份那枚元素在流里的起点就是本块内容的起点（空段取的是它的结束标记）。
-            if (flow_->intervalOf(block_src_[i].first, &first, nullptr)) start = first;
+        int mark_first = -1;
+        int mark_end = -1;
+        if (i < block_src_.size() &&
+            flow_->intervalOf(block_src_[i].mark, &mark_first, &mark_end) && mark_first >= start) {
+            block_flow_[i] = start;
+            block_flow_span_[i] = mark_first - start;
+            start = mark_first + 1;
+            continue;
         }
+        // 标记查不到（不该发生）：退回推定值，至少保证区间单调不重叠。
         block_flow_[i] = start;
         block_flow_span_[i] =
             static_cast<int>(blocks_full_[i].cp_text.size() + blocks_full_[i].objects.size());
-        // 退化时用的推定值：内容之后紧跟段落标记。分节边界会让它偏小，但下一轮的
-        //   intervalOf 才是权威，推定值只在"那枚元素查不到"时才被用上。
-        carry = start + block_flow_span_[i] + 1;
+        start = block_flow_[i] + block_flow_span_[i] + 1;
     }
 
     blocks_ = blocks_full_;
@@ -296,21 +313,59 @@ int EditorEngine::hintFromRel(int para, int rel) const {
             break;
         }
     }
-    return best;
+    if (best != LineBox::kInlineOffsetOuter) return best;
+    // 段内找不到配对的开括号：这个偏移上只有一枚"从上一段跨进来"的结束边界。
+    //   见 hintFromCrossSegment —— 不兜的话，界面会把当前字段显示成紧挨着的下一个控件。
+    return hintFromCrossSegment(para, rel);
+}
+
+/**
+ * 跨段控件的归属补判：段内对象表里只有本段那一半边界，所以控件从上一段跨进来时
+ * 找不到配对的开括号，hintFromRel 会判成"在所有控件之外"。这里用控件集合的跨段区间补上：
+ * 把段内相对流位置换成全局流位置，与每个控件的内容区间 (起始边界, 结束边界] 比，
+ * 取起点最晚的那个。
+ *
+ * 为什么要兜：段落被控件从中间切开之后（在控件内容里回车），光标落在"这个控件在本段的
+ * 那一半"里，而它在段内看起来只是孤零零一枚结束边界 —— 不兜的话，"当前字段"会显示成
+ * 紧挨着的下一个控件，界面显示的就成了"回车之后光标跑进第三个控件"。
+ */
+int EditorEngine::hintFromCrossSegment(int para, int rel) const {
+    if (controls_.empty() || !flow_.has_value()) return LineBox::kInlineOffsetOuter;
+    if (para < 0 || para >= static_cast<int>(block_flow_.size()))
+        return LineBox::kInlineOffsetOuter;
+    const FlowPos f = block_flow_[static_cast<size_t>(para)] + rel;
+    int pick = -1;
+    int pick_start = -1;
+    for (int i = 0; i < controls_.size(); ++i) {
+        const Control& c = controls_.at(i);
+        // 两枚边界各自"自己那一格"的流位置：开括号取内容起点（括号之后），闭括号取内容末尾。
+        const FlowPos cs = flowPosAtSide(c.range.start.para, c.range.start.offset,
+                                         sideFromHint(c.range.start.para, c.range.start.offset, i));
+        const FlowPos ce = flowPosAtSide(c.range.end.para, c.range.end.offset,
+                                         sideFromHint(c.range.end.para, c.range.end.offset, i));
+        if (cs < 0 || ce < 0) continue;
+        // 内容区间是 (起始边界, 结束边界]：起始边界属于"控件之前"，结束边界属于内容末尾。
+        if (f <= cs || f > ce) continue;
+        if (cs > pick_start) {
+            pick_start = cs;
+            pick = i;
+        }
+    }
+    return pick >= 0 ? pick : LineBox::kInlineOffsetOuter;
 }
 
 int EditorEngine::caretSide() const {
-    // 位置没变就认存着的侧别 —— 不再拿边界枚数去卡它。卡的话，宿主重建文档时那段
-    //   中间态（先把控件清空、再逐个加回来）会让侧别当场作废：清空那一刻本偏移上一枚
-    //   括号都没有，任何侧别都"越界"，于是光标被重置成默认侧别，重建完就落到别的字段里。
-    // 越界由使用端兜：relAt 与 LineBox::offsetAtSide 都会把侧别夹到本偏移实际有的枚数。
-    if (caret_side_at_ == caret_ && caret_side_ >= 0) return caret_side_;
-    return defaultSideAt(caret_.para, caret_.offset);
+    // 派生：rel 减去"这个偏移在流里占的起点"就是跨过的边界枚数。没有"存着的侧别"
+    //   可以失配，所以既不需要失效标记，也不需要拿边界枚数去卡它。
+    const TextPos p = caret();
+    const BracketCounts bc = bracketCountsAt(p.para, p.offset);
+    const int side = caret_rel_ - static_cast<int>(p.offset) - bc.before;
+    return side < 0 ? 0 : side;
 }
 
 int EditorEngine::caretFieldHint() const {
     if (blocks_.empty()) return -1;
-    return hintFromRel(caret_.para, relAt(caret_.para, caret_.offset, caretSide()));
+    return hintFromRel(caret_para_, caret_rel_);
 }
 
 /**
@@ -318,7 +373,7 @@ int EditorEngine::caretFieldHint() const {
  * 删除区间的两个端点、诊断打印这类没有侧别信息的入口走它。
  */
 int EditorEngine::sideForPos(TextPos p) const {
-    if (p == caret_) return caretSide();
+    if (p == caret()) return caretSide();
     const BracketCounts bc = bracketCountsAt(p.para, p.offset);
     if (controls_.empty()) return bc.closes;
     const int ci = controls_.innermostAt(p, /*include_end=*/true);
@@ -587,7 +642,7 @@ bool EditorEngine::caretRectFor(const TextPos& pos, int* page_out, Rect* out) co
     //   其它位置（选区另一端、诊断打印）没有这个信息，按"最内侧"算。
     // 侧别直接就是排版侧的"跨过几枚簇"，不再经过控件下标 —— 括号占位各占一枚簇，
     //   两边说的是同一件事，中间那次翻译（下标 ↔ 节点 id）正是"画到另一侧去"的来源。
-    const int side = (pos == caret_) ? caretSide() : defaultSideAt(pos.para, pos.offset);
+    const int side = (pos == caret()) ? caretSide() : defaultSideAt(pos.para, pos.offset);
     const float off = lb->offsetAtSide(static_cast<uint32_t>(pos.offset), side);
     const float t = cfg_.caret_width_pt;
     Rect r;
@@ -611,13 +666,13 @@ bool EditorEngine::caretRectFor(const TextPos& pos, int* page_out, Rect* out) co
 
 bool EditorEngine::caretRectPt(Rect* out) const {
     int page = 0;
-    return caretRectFor(caret_, &page, out);
+    return caretRectFor(caret(), &page, out);
 }
 
 Rect EditorEngine::caretRectPx() const {
     int page = 0;
     Rect r{};
-    if (!caretRectFor(caret_, &page, &r)) return Rect{};
+    if (!caretRectFor(caret(), &page, &r)) return Rect{};
     const float zoom = cfg_.zoom;
     const int page_px_h = std::max(1, static_cast<int>(std::lround(cfg_.page.height_pt * zoom)));
     const int gap_px = std::max(0, static_cast<int>(std::lround(cfg_.page_gap_pt * zoom)));
@@ -631,35 +686,78 @@ Rect EditorEngine::caretRectPx() const {
 }
 
 /**
- * 写光标位置。侧别随之失效：位置一变，旧侧别描述的就是已经不存在的格子 ——
- * 而"位置变过又变回来"（编辑把光标挪走、又落回同一个偏移）会骗过位置相等这一条，
- * 把上一处的侧别复活。所以所有写 caret_ 的地方都走这里，只有显式带侧别的入口例外。
+ * 唯一写入点：段内流位置。其余入口都只是把它换算成 rel 再调这里。
  */
-void EditorEngine::setCaretRaw(TextPos p) {
-    caret_ = p;
-    caret_side_ = -1;
-    caret_side_at_ = TextPos{-1, 0};
+void EditorEngine::setCaretRel(int para, int rel) {
+    caret_para_ = para;
+    caret_rel_ = rel;
 }
 
-void EditorEngine::setCaret(int para, size_t offset) {
-    // 无侧别的入口：把上一次点击带进来的侧别清掉，落点按"最内侧"重算。
-    caret_side_ = -1;
-    caret_side_at_ = TextPos{-1, 0};
+/**
+ * 光标位置（派生）：段号 + 段内码点偏移，由 caret_rel_ 算出来 —— 不再是独立状态。
+ */
+TextPos EditorEngine::caret() const {
+    int para = caret_para_;
+    if (para < 0) para = 0;
+    if (!blocks_.empty() && para >= static_cast<int>(blocks_.size()))
+        para = static_cast<int>(blocks_.size()) - 1;
+    int off = cpOffsetInBlock(para, caret_rel_);
+    if (off < 0) off = 0;
+    return TextPos{para, static_cast<size_t>(off)};
+}
+
+/**
+ * 按对外坐标（段, 段内码点偏移）写光标，侧别按"最内层含端点"投影一次。
+ * 这是文本坐标投影到流位置的唯一约定，只给"没有侧别信息"的入口用（宿主程序化定位、
+ * 排版收口）；编辑路径一律走 setCaretAtFlow / setCaretRel —— 侧别由操作自己算出来。
+ */
+void EditorEngine::setCaretByText(TextPos p) {
     if (blocks_.empty()) {
-        setCaretRaw(TextPos{0, 0});
+        setCaretRel(0, 0);
+        return;
+    }
+    int para = p.para;
+    if (para < 0) para = 0;
+    if (para >= static_cast<int>(blocks_.size())) para = static_cast<int>(blocks_.size()) - 1;
+    size_t off = p.offset;
+    const size_t len = blocks_[static_cast<size_t>(para)].cp_text.size();
+    if (off > len) off = len;
+    setCaretRel(para, relAt(para, off, defaultSideAt(para, off)));
+}
+
+/**
+ * 把"文本坐标 + 侧别"投影成 rel 并摆好，含重排。
+ *
+ * 为什么摆两次：聚焦档下"显示哪些括号"由光标位置决定（见 bracketedControls），
+ * 而 rel 是按对象表算出来的 —— 先摆一次让重排看到光标的新位置，重排换表之后再摆一次，
+ * rel 才是按最终那张表算的。只摆一次的话，rel 描述的是重排前那一批格子。
+ * 两次之间输入（文本坐标 + 侧别）不变，所以收敛：第二次不会再触发重排。
+ *
+ * side < 0 = 没有侧别信息，按"最内层含端点"投影一次（见 setCaretByText）。
+ */
+void EditorEngine::projectCaret(int para, size_t offset, int side) {
+    if (blocks_.empty()) {
+        setCaretRel(0, 0);
         return;
     }
     if (para < 0) para = 0;
     if (para >= static_cast<int>(blocks_.size())) para = static_cast<int>(blocks_.size()) - 1;
+    const auto place = [&]() {
+        const size_t at = snapToCluster(para, offset);
+        setCaretRel(para, relAt(para, at, (side < 0) ? defaultSideAt(para, at) : side));
+    };
     const int plan_before = bracketPlanId();
+    place();
+    relayoutIfBracketPlanChanged(plan_before);
+    place();
+}
+
+void EditorEngine::setCaret(int para, size_t offset) {
     // 这个入口是程序化定位（宿主恢复光标、测试摆位），不是用户的一次点击 —— 落点限制
     //   不在这里生效。限制在"用户真的能点到哪"的那三个入口上：点击（setCaretAt）、
     //   方向键（moveCaretBy）、Home/End 与 Tab。编辑被拒仍由 policyAt 兜住，
     //   所以"摆到集合外再打字"得到的仍然是拒绝，不会静默越界。
-    setCaretRaw(TextPos{para, snapToCluster(para, offset)});
-    // 占位计划变了 → 必须重排（占位进文档流）。
-    //   All 档下计划与光标无关 → 这一句恒为 no-op（光标移动是真增量的地基）。
-    relayoutIfBracketPlanChanged(plan_before);
+    projectCaret(para, offset, -1);
 }
 
 /**
@@ -671,26 +769,13 @@ void EditorEngine::setCaret(int para, size_t offset) {
  * 看起来就像点不进去。相邻的空字段（][][ ）更是整段位置都点不进去。
  *
  * 侧别就是被丢掉的那个分量，浏览器点画布时量得到：占位簇各占一枚，数格子即可。
- * 宿主把 hitTestPt 给的侧别原样带回来，这里记在光标上，供画光标与编辑归属判定两处使用。
- * 位置一变（编辑、方向键、程序化定位）侧别就失效，按"最内侧"重算。
+ * 宿主把 hitTestPt 给的侧别原样带回来，这里与偏移合成 rel（唯一真源）。
  */
 void EditorEngine::setCaretAtSide(int para, size_t offset, int side) {
-    caret_side_ = -1;
-    caret_side_at_ = TextPos{-1, 0};
-    if (blocks_.empty()) {
-        setCaretRaw(TextPos{0, 0});
-        return;
-    }
-    if (para < 0) para = 0;
-    if (para >= static_cast<int>(blocks_.size())) para = static_cast<int>(blocks_.size()) - 1;
-    const int plan_before = bracketPlanId();
     // 光标位置不受控件约束：字段外、只读字段里都能停。约束编辑的是能力表
     //   （插 / 删 / 分段 / 合并），不是光标 —— 两者混起来会得到"字段外的正文连点都点不进去"
     //   这种与编辑边界无关的怪现象。所以这里除了吸附到字素簇之外不改写任何东西。
-    setCaretRaw(TextPos{para, snapToCluster(para, offset)});
-    relayoutIfBracketPlanChanged(plan_before);  // 重排会清侧别，写在它之后
-    caret_side_ = (side < 0) ? -1 : side;
-    caret_side_at_ = caret_;
+    projectCaret(para, offset, side);
 }
 
 /**
@@ -722,16 +807,8 @@ bool EditorEngine::setCaretAtFlow(FlowPos flow) {
     TextPos p{};
     if (!flowToTextPos(flow, &p)) return false;
     if (p.para < 0 || p.para >= static_cast<int>(block_flow_.size())) return false;
-    const int rel = flow - block_flow_[static_cast<size_t>(p.para)];
-    const BracketCounts bc = bracketCountsAt(p.para, p.offset);
-    const int side = rel - static_cast<int>(p.offset) - bc.before;
-    setCaretRaw(p);
-    // 侧别落在合法范围里才认：越界说明这个流位置与这个偏移对不上（不该发生），
-    //   那就退回"最内层"这条安全网，而不是记一个描述不存在的格子的侧别。
-    if (side >= 0 && side <= bc.closes + bc.opens) {
-        caret_side_ = side;
-        caret_side_at_ = p;
-    }
+    // 段内流位置 = 全局流位置 - 本段起点。位置与侧别由此一次算准（侧别是派生的）。
+    setCaretRel(p.para, static_cast<int>(flow) - block_flow_[static_cast<size_t>(p.para)]);
     return true;
 }
 
@@ -791,57 +868,60 @@ bool EditorEngine::moveCaretBy(int dcp) {
     if (blocks_.empty() || dcp == 0) return false;
     const int plan_before = bracketPlanId();
 
-    TextPos p = caret_;
-    if (p.para < 0) p.para = 0;
-    if (p.para >= static_cast<int>(blocks_.size())) p.para = static_cast<int>(blocks_.size()) - 1;
-    p.offset = snapToCluster(p.para, p.offset);
-    int side = (p == caret_) ? caretSide() : defaultSideAt(p.para, p.offset);
+    int para = caret_para_;
+    if (para < 0) para = 0;
+    if (para >= static_cast<int>(blocks_.size())) para = static_cast<int>(blocks_.size()) - 1;
+    int rel = caret_rel_;
+    // 本段最后一个流位置 = 段长 + 本段边界枚数（＝ relAt(len, 全部边界)）。
+    const auto span_of = [&](int q) {
+        const size_t len = blocks_[static_cast<size_t>(q)].cp_text.size();
+        const BracketCounts bc = bracketCountsAt(q, len);
+        return static_cast<int>(len) + bc.before + bc.closes + bc.opens;
+    };
+    // 落点是不是字素簇边界：括号占位自己就是一枚簇，文本里的字素簇（e + 组合重音）
+    //   占好几个码点，所以"一格"要一路挪到簇边界上才算数。
+    const auto at_boundary = [&](int q, int r) {
+        const size_t off = static_cast<size_t>(cpOffsetInBlock(q, r));
+        return snapToCluster(q, off) == off;
+    };
 
     // 一次一格 = 一次跨一个流位置。括号也在流里（各占一位），所以"一个字符一个字符地移动"
     //   不需要认识括号 —— 就是在流位置上加减一。按码点偏移走的话，括号那一格被整段跳过，
     //   "字与开括号之间""两个相邻控件之间"这些位置方向键就到不了。
+    //   停步条件只有一个：前面没有下一格了（段首 / 段尾）。
     const int steps = std::abs(dcp);
     for (int k = 0; k < steps; ++k) {
-        const size_t len = blocks_[static_cast<size_t>(p.para)].cp_text.size();
-        // 本段最后一个流位置 = 段长 + 本段的边界枚数（＝ relAt(len, 全部边界)）。
-        const BracketCounts bl = bracketCountsAt(p.para, len);
-        const int max_rel = static_cast<int>(len) + bl.before + bl.closes + bl.opens;
-        const int nr = relAt(p.para, p.offset, side) + dcp;
-        if (nr < 0) {
-            if (p.para == 0) break;
-            --p.para;
-            const size_t plen = blocks_[static_cast<size_t>(p.para)].cp_text.size();
-            const BracketCounts pb = bracketCountsAt(p.para, plen);
-            p.offset = plen;
-            side = pb.closes + pb.opens;  // 上一段的最后一个位置
-            continue;
+        bool moved = false;
+        for (;;) {
+            if (dcp < 0) {
+                if (rel > 0) {
+                    --rel;
+                } else if (para > 0) {
+                    --para;
+                    rel = span_of(para);
+                } else {
+                    break;
+                }
+            } else {
+                if (rel < span_of(para)) {
+                    ++rel;
+                } else if (para + 1 < static_cast<int>(blocks_.size())) {
+                    ++para;
+                    rel = 0;
+                } else {
+                    break;
+                }
+            }
+            moved = true;
+            if (at_boundary(para, rel)) break;
         }
-        if (nr > max_rel) {
-            if (p.para + 1 >= static_cast<int>(blocks_.size())) break;
-            ++p.para;
-            p.offset = 0;
-            side = 0;
-            continue;
-        }
-        // 逐格走，唯一的停步条件是"前面没有下一格了"（段首/段尾）。
-        //   这里不再判"下一步可停吗"（表单模式下不许离开出发字段），那条约束已经撤掉：
-        //   光标位置不再受控件约束，方向键能走出字段、也能跨过只读字段。约束编辑的是
-        //   能力表（插 / 删 / 分段 / 合并），不是光标。
-        p.offset = static_cast<size_t>(cpOffsetInBlock(p.para, nr));
-        const BracketCounts bc = bracketCountsAt(p.para, p.offset);
-        side = nr - static_cast<int>(p.offset) - bc.before;
-        if (side < 0) side = 0;
+        if (!moved) break;
     }
 
-    // 位置没动且侧别也没动才算没动 —— 在括号之间退一格是同一个偏移上的另一个位置，
-    //   不比这一下就会当成"没动"，宿主随即跳过重绘（表象：方向键按了没反应）。
-    if (p == caret_ && side == caretSide()) return false;
-    setCaretRaw(p);
-    // 跨字段移动在聚焦档下会换占位集合、整行重排；重排会清掉侧别（位置没变，
-    //   但边界换了一批），所以侧别必须在重排之后再写。
+    if (para == caret_para_ && rel == caret_rel_) return false;
+    setCaretRel(para, rel);
+    // 跨字段移动在聚焦档下会换占位集合、整行重排 —— 光标在 rel 上，重排不改变它。
     relayoutIfBracketPlanChanged(plan_before);
-    caret_side_ = side;
-    caret_side_at_ = p;
     return true;
 }
 
@@ -854,7 +934,7 @@ bool EditorEngine::moveCaretBy(int dcp) {
  */
 int EditorEngine::editOwnerHintAt(TextPos p) const {
     // 点击带来的侧别：光标这一处换算成"它所在的最内层控件"，好让旧路径也贴对侧。
-    if (p == caret_) {
+    if (p == caret()) {
         const int hint = caretFieldHint();
         if (hint >= 0) return hint;
     }
@@ -864,25 +944,21 @@ int EditorEngine::editOwnerHintAt(TextPos p) const {
 }
 
 bool EditorEngine::moveCaretToLineStart() {
-    const LineBox* lb = findLineFor(caret_);
+    const LineBox* lb = findLineFor(caret());
     if (!lb) return false;
-    const int plan_before = bracketPlanId();
     // 行首就是行首，不再往字段边界上收：光标位置不受控件约束（见 setCaret）。
     const TextPos p{lb->paragraph, lb->first_cp};
-    if (p == caret_) return false;
-    setCaretRaw(p);
-    relayoutIfBracketPlanChanged(plan_before);
+    if (p == caret()) return false;
+    projectCaret(p.para, p.offset, -1);
     return true;
 }
 
 bool EditorEngine::moveCaretToLineEnd() {
-    const LineBox* lb = findLineFor(caret_);
+    const LineBox* lb = findLineFor(caret());
     if (!lb) return false;
-    const int plan_before = bracketPlanId();
     const TextPos p{lb->paragraph, lb->last_cp};
-    if (p == caret_) return false;
-    setCaretRaw(p);
-    relayoutIfBracketPlanChanged(plan_before);
+    if (p == caret()) return false;
+    projectCaret(p.para, p.offset, -1);
     return true;
 }
 
@@ -910,7 +986,10 @@ bool EditorEngine::insertCodepoints(int para, size_t offset, const std::vector<u
 
     // 持树时落笔在树上：插入是一条步骤，经事务提交，块流随后由新树重编译出来。
     if (tree_valid_) {
-        const FlowPos at_flow = flowPosAt(para, at, owner_hint);
+        // 落点的流位置由 (偏移, 侧别) 给出 —— 侧别取光标自己存的那个。
+        //   用控件下标反推（老 flowPosAt）在多枚括号压在同一个偏移上时会猜错：空嵌套里
+        //   "最后一枚右括号之前"会被猜成"第一枚左括号之后"，字与光标一起插到别处去。
+        const FlowPos at_flow = flowPosAtSide(para, at, sideForPos(ins));
         if (at_flow < 0) {
             ++blocked_edits_;
             return false;
@@ -944,7 +1023,7 @@ bool EditorEngine::insertCodepoints(int para, size_t offset, const std::vector<u
     //   又允许本该拒绝的，且区间看起来仍然有效。
     textbuf::insertAt(blocks_[static_cast<size_t>(para)].cp_text, at, cps);
     adjustControlsOnInsert(controls_, para, at, cps.size(), owner_hint);
-    setCaretRaw(TextPos{para, at + cps.size()});
+    setCaretByText(TextPos{para, at + cps.size()});
     // 内容只在这一段变了：下一轮排版从这个段续排，前面的段原样复用。
     markLayoutDirty(para);
     return true;
@@ -959,12 +1038,12 @@ bool EditorEngine::insertTextUtf8(int para, size_t offset, const std::string& ut
 }
 
 bool EditorEngine::typeTextUtf8(const std::string& utf8) {
-    return insertCodepoints(caret_.para, caret_.offset, utf8ToCodepoints(utf8));
+    return insertCodepoints(caret().para, caret().offset, utf8ToCodepoints(utf8));
 }
 
 bool EditorEngine::backspace() {
     if (blocks_.empty()) return false;
-    TextPos p = caret_;
+    TextPos p = caret();
     if (p.para < 0 || p.para >= static_cast<int>(blocks_.size())) p.para = 0;
     p.offset = snapToCluster(p.para, p.offset);
     // 段首退格 = 并入上一段（跨段编辑）。策略拒绝时返回 false，与其它被拒编辑同一口径：
@@ -991,13 +1070,13 @@ bool EditorEngine::backspace() {
     if (erased == 0) return false;
     adjustControlsOnErase(controls_, p.para, at, p.offset);
     markLayoutDirty(p.para);
-    setCaretRaw(TextPos{p.para, at});
+    setCaretByText(TextPos{p.para, at});
     return true;
 }
 
 bool EditorEngine::deleteForward() {
     if (blocks_.empty()) return false;
-    TextPos p = caret_;
+    TextPos p = caret();
     if (p.para < 0 || p.para >= static_cast<int>(blocks_.size())) p.para = 0;
     p.offset = snapToCluster(p.para, p.offset);
 
@@ -1029,7 +1108,7 @@ bool EditorEngine::deleteForward() {
     if (erased == 0) return false;
     adjustControlsOnErase(controls_, p.para, p.offset, next);
     markLayoutDirty(p.para);
-    setCaretRaw(TextPos{p.para, p.offset});
+    setCaretByText(TextPos{p.para, p.offset});
     return true;
 }
 
@@ -1042,7 +1121,7 @@ bool EditorEngine::deleteForward() {
  */
 bool EditorEngine::splitParagraph() {
     if (blocks_.empty()) return false;
-    TextPos p = caret_;
+    TextPos p = caret();
     if (p.para < 0 || p.para >= static_cast<int>(blocks_.size())) p.para = 0;
     p.offset = snapToCluster(p.para, p.offset);
 
@@ -1070,7 +1149,9 @@ bool EditorEngine::splitParagraph() {
             patch = mk->para;
             style_ref = mk->styleRef;
         }
-        const FlowPos at_flow = flowPosAt(p.para, p.offset, owner_hint);
+        // 与 insertCodepoints 同一条：位置由 (偏移, 侧别) 给出，不从控件下标反推。
+        //   反推在空控件处会猜错侧别，于是标记插到了别的控件里（"回车之后光标跑进第三个控件"）。
+        const FlowPos at_flow = flowPosAtSide(p.para, p.offset, sideForPos(p));
         if (at_flow < 0) {
             ++blocked_edits_;
             return false;
@@ -1120,7 +1201,7 @@ bool EditorEngine::splitParagraph() {
     // 现在第 from+1 段已经是另一段了，那个比较毫无意义（碰巧相等就会把整个后缀错当成
     // 没变）。所以段数一变就禁止复用，只保留"前缀复用 + 从脏段续排"。
     para_count_changed_ = true;
-    setCaretRaw(TextPos{p.para + 1, 0});
+    setCaretByText(TextPos{p.para + 1, 0});
     return true;
 }
 
@@ -1208,13 +1289,13 @@ bool EditorEngine::mergeParagraphInto(int head) {
 
     markLayoutDirty(head);
     para_count_changed_ = true;  // 理由同分段
-    setCaretRaw(join);
+    setCaretByText(join);
     return true;
 }
 
 bool EditorEngine::mergeWithPreviousParagraph() {
     if (blocks_.empty()) return false;
-    TextPos p = caret_;
+    TextPos p = caret();
     if (p.para <= 0 || p.para >= static_cast<int>(blocks_.size())) return false;
     // 只有光标确实在段首才合并（否则退格该删的是前一个簇）。
     if (snapToCluster(p.para, p.offset) != 0) return false;
@@ -1223,7 +1304,7 @@ bool EditorEngine::mergeWithPreviousParagraph() {
 
 bool EditorEngine::mergeWithNextParagraph() {
     if (blocks_.empty()) return false;
-    TextPos p = caret_;
+    TextPos p = caret();
     if (p.para < 0 || p.para + 1 >= static_cast<int>(blocks_.size())) return false;
     const size_t len = blocks_[static_cast<size_t>(p.para)].cp_text.size();
     if (snapToCluster(p.para, p.offset) != len) return false;
@@ -1431,7 +1512,7 @@ bool EditorEngine::focusControl(bool forward) {
     bool found = false;
     if (forward) {
         for (const TextPos& s : starts) {
-            if (caret_ < s) {
+            if (caret() < s) {
                 target = s;
                 found = true;
                 break;
@@ -1440,7 +1521,7 @@ bool EditorEngine::focusControl(bool forward) {
         if (!found) target = starts.front();  // 到头绕回第一个（表单里 Tab 就该循环）
     } else {
         for (auto it = starts.rbegin(); it != starts.rend(); ++it) {
-            if (*it < caret_) {
+            if (*it < caret()) {
                 target = *it;
                 found = true;
                 break;
@@ -1448,9 +1529,9 @@ bool EditorEngine::focusControl(bool forward) {
         }
         if (!found) target = starts.back();
     }
-    if (target == caret_) return false;
+    if (target == caret()) return false;
     const int plan_before = bracketPlanId();
-    setCaretRaw(target);
+    setCaretByText(target);
     relayoutIfBracketPlanChanged(plan_before);
     return true;
 }
@@ -1504,7 +1585,7 @@ bool EditorEngine::indent() {
 
 bool EditorEngine::outdent() {
     if (blocks_.empty()) return false;
-    TextPos p = caret_;
+    TextPos p = caret();
     if (p.para < 0 || p.para >= static_cast<int>(blocks_.size())) p.para = 0;
     p.offset = snapToCluster(p.para, p.offset);
 
@@ -1534,7 +1615,7 @@ bool EditorEngine::outdent() {
     if (erased == 0) return false;
     adjustControlsOnErase(controls_, p.para, at, p.offset);
     markLayoutDirty(p.para);
-    setCaretRaw(TextPos{p.para, at});
+    setCaretByText(TextPos{p.para, at});
     return true;
 }
 
@@ -1575,9 +1656,9 @@ bool EditorEngine::tabCaret(bool backward) {
     if (policy_.mode() != EditMode::Form) return false;
 
     const int plan_before = bracketPlanId();
-    const TextPos before = caret_;
+    const TextPos before = caret();
     if (tree_valid_ && flow_.has_value()) {
-        const FlowPos from = flowPosAtSide(caret_.para, caret_.offset, caretSide());
+        const FlowPos from = flowPosAtSide(caret().para, caret().offset, caretSide());
         if (from < 0) return false;
         const TabStop stop = tabFrom(tree_, policy_.mode(), from, backward);
         // handled 为假 = 已经没有下一个（上一个）可编辑控件了：放行给宿主，不绕回第一个。
@@ -1586,7 +1667,7 @@ bool EditorEngine::tabCaret(bool backward) {
         //   同一个偏移 —— 位置与侧别都由目标流位置一次算准（重推会推成前一个控件，
         //   Tab 跳过去就打不进字）。
         setCaretAtFlow(stop.target);
-        if (caret_ == before) return false;
+        if (caret() == before) return false;
         relayoutIfBracketPlanChanged(plan_before);
         return true;
     }

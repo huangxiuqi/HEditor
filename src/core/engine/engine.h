@@ -113,52 +113,54 @@ public:
     void paintPageRange(int first_page, int count);
 
     /**
-     * 光标。坐标是 (段, 段内码点偏移)，任何设置入口都会先夹到合法范围、
+     * 光标。对外坐标仍是 (段, 段内码点偏移)，任何设置入口都会先夹到合法范围、
      * 再吸附到字素簇边界 —— 所以光标永远不会停在半个 é（e + U+0301）中间。
+     *
+     * 引擎内部只存一个数：caret_rel_（段内流位置，括号占位算在里面）。下面这些入口
+     * 都是"把别的坐标系翻成它"，对外接口一个字没变。
      */
     void setCaret(int para, size_t offset);
     void setCaret(TextPos p) { setCaret(p.para, p.offset); }
     /**
      * 带"归属"的定位：点画布时用户点的是某个字段的括号，位置本身（共享边界上的
-     * 那个偏移）分不出是哪一侧，于是把结论一起带进来。
-     *
-     * 适用条件写死成一条：只有当光标仍然停在这里给的位置上时，这个归属才有效
-     * （见 caretFieldHint）。于是所有会移动光标的编辑自动让它失效 ——
-     * 不需要在每个编辑入口记得清一下，忘了清正是这类"陈旧状态"bug 的来源。
+     * 那个偏移）分不出是哪一侧，于是把结论一起带进来。归属是侧别的投影，见 setCaretAtSide。
      */
     void setCaretAt(int para, size_t offset, int field);
     void setCaretAt(TextPos p, int field) { setCaretAt(p.para, p.offset, field); }
     /**
-     * 带侧别的定位：光标位置 = (段, 段内码点偏移, 侧别)，侧别见 caretSide 的注释。
-     * 点击（宿主把 hitTestPt 量到的侧别带回来）与文档重建后搬回光标走它。
+     * 带侧别的定位：点击（宿主把 hitTestPt 量到的侧别带回来）与文档重建后搬回光标走它。
+     * 侧别见 caretSide 的注释。
      */
     void setCaretAtSide(int para, size_t offset, int side);
     void setCaretAtSide(TextPos p, int side) { setCaretAtSide(p.para, p.offset, side); }
     /**
-     * 把光标摆到一个流位置上（绝对）。位置与侧别一次算准 —— 不猜、不查区间。
-     *
-     * 编辑路径全用它：删除后的落点是删除区间的起点、插入后是插入区间的终点、Tab 的目标、
-     * 撤销恢复的位置，它们都已经是流位置。只留一个码点偏移、再由"最内层含端点"猜回侧别的话，
-     * 猜错的表象就是"删一个字光标跳一格"。
+     * 把光标摆到一个流位置上（绝对）。编辑路径全用它：删除后的落点是删除区间的起点、
+     * 插入后是插入区间的终点、Tab 的目标、撤销恢复的位置，它们都已经是流位置。
      */
     bool setCaretAtFlow(FlowPos flow);
-    const TextPos& caret() const { return caret_; }
+    /**
+     * 光标位置（派生）。段号 + 段内码点偏移，由 caret_rel_ 算出来 —— 不再是独立状态。
+     */
+    TextPos caret() const;
     /**
      * 光标当前的归属（-1 = 不在任何控件里；LineBox::kInlineOffsetOuter = 在所有控件之外）。
-     * 由"位置 + 侧别"推出来，不是独立状态（见 caretSide）。
+     * 由 caret_rel_ 直接查，不是独立状态。
      */
     int caretFieldHint() const;
     /**
-     * 光标的侧别：在它那个码点偏移上跨过了几枚边界括号（0 = 在所有括号之前）。
+     * 光标的侧别（派生）：在它那个码点偏移上跨过了几枚边界括号（0 = 在所有括号之前）。
      * 与 caret() 合起来才是光标的完整位置 —— 同一个偏移上可能有好几个插入点
      * （控件之前 / 进入控件 / 内容末尾 / 控件之后），光有偏移表达不了。
-     * 宿主重建文档后搬回光标、探针断言落点，都要用它。
+     * 它是 rel 与偏移的差，所以不可能与光标位置不同步 —— 这就是它取代 caret_side_
+     * 与 caret_side_at_ 那两个字段的理由（那两个字段天然可能失配，才需要失效标记兜）。
      */
     int caretSide() const;
     /**
-     * 写光标位置（侧别随之失效）。所有不带侧别的写入都走它 —— 见 setCaretRaw 的实现。
+     * 按对外坐标（段, 段内码点偏移）写光标，侧别按"最内层含端点"投影一次。
+     * 这是文本坐标投影到流位置的唯一约定 —— 只给"没有侧别信息"的入口用（宿主程序化定位、
+     * 排版收口）；编辑路径一律走 setCaretAtFlow / setCaretRel，侧别由操作自己算出来。
      */
-    void setCaretRaw(TextPos p);
+    void setCaretByText(TextPos p);
     /**
      * 按"用户感知字符"（簇）移动。dcp > 0 向后、< 0 向前。
      * 返回 true 表示光标真的动了（没动就别重绘）。
@@ -251,7 +253,7 @@ public:
     int focusedControlIndex() const {
         const int hint = caretFieldHint();
         if (hint >= 0) return hint;
-        return controls_.empty() ? -1 : controls_.innermostAt(caret_, true);
+        return controls_.empty() ? -1 : controls_.innermostAt(caret(), true);
     }
 
     /**
@@ -610,6 +612,14 @@ private:
      */
     const std::vector<InlineObject>& objectsFor(int para) const;
     /**
+     * 光标唯一的写入点：段内流位置。其余入口都只是把它换算成 rel 再调这里。
+     */
+    void setCaretRel(int para, int rel);
+    /**
+     * 把"文本坐标 + 侧别"投影成 rel 并摆好（含重排）。side < 0 = 按"最内层含端点"投影。
+     */
+    void projectCaret(int para, size_t offset, int side);
+    /**
      * 段内相对流位置 = 码点偏移 + 排在它前面的边界数 + 侧别。
      */
     int relAt(int para, size_t cp, int side) const;
@@ -635,6 +645,11 @@ private:
      * 段内相对流位置 → 最内层包含它的控件下标（LineBox::kInlineOffsetOuter = 在所有控件之外）。
      */
     int hintFromRel(int para, int rel) const;
+    /**
+     * 跨段控件的归属补判（见实现处的注释）：段内对象表只有本段那一半边界，
+     * 控件从上一段跨进来时配对不上，这里用控件集合的跨段区间判。
+     */
+    int hintFromCrossSegment(int para, int rel) const;
     /**
      * 找到包含该位置的行盒（先按行内范围命中，再退化为"同段最近行"）
      */
@@ -869,20 +884,21 @@ private:
     EngineStats stats_;
     EditStats edit_stats_;
 
-    TextPos caret_{0, 0};
-    bool caret_visible_ = true;
+    int caret_para_ = 0;
     /**
-     * 光标侧别：在它那个码点偏移上跨过了几枚边界括号（0 = 在所有括号之前）。
+     * 光标的唯一真源：段内流位置（括号占位算在里面）。
      *
-     * 光标的完整位置是 (caret_, caret_side_)：同一个偏移上可能压着好几枚括号，
-     * "控件之前 / 进入控件 / 内容末尾 / 控件之后"是互不相同的插入点，只存偏移分不出来。
-     * 括号占位在排版侧各占一枚簇，所以侧别就是"数格子"，没有额外约定。
-     *
-     * 与 caret_side_at_ 配套：位置一变（编辑、程序化定位）它就失效，按"最内侧"重算 ——
-     * 不需要每个入口记得清，忘了清正是这类陈旧状态 bug 的来源。
+     * 为什么不是一个码点偏移：同一个偏移上可能压着好几枚括号（相邻空字段就是 ][][]），
+     * "控件之前 / 进入控件 / 内容末尾 / 控件之后"是互不相同的插入点，而码点偏移不含括号、
+     * 表达不了它们 —— 每次要问"这是流里的哪个位置"都得猜，猜的入口越多、漏在接缝上的
+     * bug 越多（"删一个字光标跳一格""字打进了隔壁字段"）。
+     * rel 就是"数格子"：文本字与边界括号各占一位，于是
+     *   偏移 = cpOffsetInBlock(para, rel)（派生）
+     *   侧别 = rel - 偏移 - 排在它前面的边界数（派生）
+     * 两个派生值不可能与它不同步 —— 这就是它取代 caret_side_ / caret_side_at_ 的理由。
      */
-    int caret_side_ = -1;
-    TextPos caret_side_at_{-1, 0};
+    int caret_rel_ = 0;
+    bool caret_visible_ = true;
 
     /**
      * 底图当前显示的范围与有效性

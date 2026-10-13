@@ -287,8 +287,8 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
         if (any) noteBlitDirty(uni);
     }
 
-    edit_stats_.caret_para = caret_.para;
-    edit_stats_.caret_offset = caret_.offset;
+    edit_stats_.caret_para = caret().para;
+    edit_stats_.caret_offset = caret().offset;
     edit_stats_.caret_side = caretSide();
     edit_stats_.caret_visible = (caret_visible_ && cr.w > 0.0f);
     edit_stats_.caret_x_px = static_cast<int>(cr.x);
@@ -305,8 +305,8 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
     edit_stats_.control_count = controls_.size();
     edit_stats_.caret_control = focusedControlIndex();
     edit_stats_.blocked_edits = blocked_edits_;
-    edit_stats_.caret_index = caret_.offset;
-    for (int i = 0; i < caret_.para && i < static_cast<int>(blocks_.size()); ++i)
+    edit_stats_.caret_index = caret().offset;
+    for (int i = 0; i < caret().para && i < static_cast<int>(blocks_.size()); ++i)
         edit_stats_.caret_index += blocks_[static_cast<size_t>(i)].cp_text.size();
     edit_stats_.doc_codepoints = documentCodepoints();
 
@@ -433,7 +433,7 @@ void EditorEngine::drawControlMarks() {
     //
     // 用 include_end = true：光标停在字段末尾也算"在这个字段里" ——
     // 否则刚打到最后一个字时括号会突然消失，而那一刻正是最需要看到边界的时候。
-    const int focused = controls_.empty() ? -1 : controls_.innermostAt(caret_, true);
+    const int focused = controls_.empty() ? -1 : controls_.innermostAt(caret(), true);
 
     for (int ci = 0; ci < controls_.size(); ++ci) {
         if (ci == focused) continue;
@@ -506,6 +506,5 @@ void EditorEngine::repaintAfterEdit() {
     caret_visible_ = true;
     repaint();
 }
-
 
 }  // namespace heditor

@@ -3502,9 +3502,10 @@ int main() {
             e.setCaretAt(0, 7, 1);  // 点的是 #1 的开括号
             const size_t after_hint = e.caret().offset;
             const int owner_hint = e.focusedControlIndex();
-            std::printf("     #0 只读时点偏移 7：不带归属 caret=%zu field=%d ｜ 带归属 caret=%zu "
-                        "field=%d\n",
-                        after_plain, owner_plain, after_hint, owner_hint);
+            std::printf(
+                "     #0 只读时点偏移 7：不带归属 caret=%zu field=%d ｜ 带归属 caret=%zu "
+                "field=%d\n",
+                after_plain, owner_plain, after_hint, owner_hint);
             expectTrue(after_plain == 7, "不带归属时光标也停在 7（位置不受控件约束）");
             expectTrue(after_hint == 7 && owner_hint == 1,
                        "★ 点可编辑字段的开括号 → 光标停在 7 且归属它（只读的左邻居不否决）");
@@ -3693,7 +3694,8 @@ int main() {
         auto noCross = [&]() {
             for (int i = 0; i < e.controls().size(); ++i)
                 for (int j = i + 1; j < e.controls().size(); ++j)
-                    if (spansCross(e.controls().at(i).range, e.controls().at(j).range)) return false;
+                    if (spansCross(e.controls().at(i).range, e.controls().at(j).range))
+                        return false;
             return true;
         };
         auto ranges = [&]() {
@@ -3772,8 +3774,7 @@ int main() {
                        "光标停在共享边界上时归前一个字段（末尾算在区间内）");
             expectTrue(e.typeTextAndRender("痛"), "在共享边界上打字被放行（不是被拒）");
             std::printf("     打字后区间：%s\n", ranges().c_str());
-            expectTrue(ranges() == "[5,8) [8,10) [10,12)",
-                       "★ 字进 #0，后两个整体右移（首尾相接）");
+            expectTrue(ranges() == "[5,8) [8,10) [10,12)", "★ 字进 #0，后两个整体右移（首尾相接）");
             expectTrue(noCross(), "★ 三连区间两两不穿线（结构性判据）");
             expectTrue(sides(slotsAt(8)) == "][", "★ 边界跟着字段端点搬家：新边界上仍是 ][");
             expectTrue(slotsAt(7).empty(), "旧边界上不再留占位（括号跟着端点走）");
@@ -3851,11 +3852,12 @@ int main() {
                     inkStats(xa, xb, false, &blue_n[k], &blue_c[k]);
                     inkStats(xa, xb, true, &gray_n[k], &gray_c[k]);
                 }
-                std::printf("     五个槽从左到右：亮蓝墨量 %d %d %d %d %d ｜ 灰墨量 %d %d %d %d %d\n",
-                            blue_n[0], blue_n[1], blue_n[2], blue_n[3], blue_n[4], gray_n[0],
-                            gray_n[1], gray_n[2], gray_n[3], gray_n[4]);
-                std::printf("     亮蓝重心 %.2f %.2f %.2f ｜ 灰重心 %.2f %.2f\n", blue_c[0], blue_c[1],
-                            blue_c[2], gray_c[3], gray_c[4]);
+                std::printf(
+                    "     五个槽从左到右：亮蓝墨量 %d %d %d %d %d ｜ 灰墨量 %d %d %d %d %d\n",
+                    blue_n[0], blue_n[1], blue_n[2], blue_n[3], blue_n[4], gray_n[0], gray_n[1],
+                    gray_n[2], gray_n[3], gray_n[4]);
+                std::printf("     亮蓝重心 %.2f %.2f %.2f ｜ 灰重心 %.2f %.2f\n", blue_c[0],
+                            blue_c[1], blue_c[2], gray_c[3], gray_c[4]);
                 expectTrue(blue_n[0] > 0 && blue_n[1] > 0 && blue_n[2] > 0 && gray_n[0] == 0 &&
                                gray_n[1] == 0 && gray_n[2] == 0,
                            "★ 左边三枚括号都是亮蓝的（#0 的 ] 与 #1 的一对，都可编辑）");
@@ -3981,9 +3983,10 @@ int main() {
                 if (lb.line == 0) l0_end = lb.last_cp;
                 if (lb.line == 1) l1_start = lb.first_cp;
             }
-            std::printf("     长文档 %d 行；第 0 行止于 %zu，第 1 行起于 %zu；"
-                        "A=[%zu,%zu) B=[%zu,%zu)\n",
-                        nl, l0_end, l1_start, A0, A1, A1, B1);
+            std::printf(
+                "     长文档 %d 行；第 0 行止于 %zu，第 1 行起于 %zu；"
+                "A=[%zu,%zu) B=[%zu,%zu)\n",
+                nl, l0_end, l1_start, A0, A1, A1, B1);
             expectTrue(nl >= 2 && l1_start == l0_end,
                        "第 1 行的起点就是第 0 行的终点（断行处两行共享一个偏移）");
             expectTrue(A0 <= l0_end && A1 > l0_end, "前置：A 确实跨在断行处（否则这条用例不成立）");
@@ -4041,8 +4044,7 @@ int main() {
             e.setCaretAt(0, 7, 0);
             expectTrue(e.typeTextAndRender("痛"), "归属前一个字段时打字被放行");
             std::printf("     归属 #0 时在 7 上打字：%s\n", ranges().c_str());
-            expectTrue(ranges() == "[5,8) [8,10) [10,12)",
-                       "★ 归 #0：字进 #0，#1 #2 整体右移");
+            expectTrue(ranges() == "[5,8) [8,10) [10,12)", "★ 归 #0：字进 #0，#1 #2 整体右移");
             reset(kText, {mk21(5, 7, false), mk21(7, 9, false), mk21(9, 11, false)});
             e.setCaretAt(0, 7, 1);
             expectTrue(e.focusedControlIndex() == 1, "带归属 1 时光标归后一个字段");
@@ -4162,9 +4164,10 @@ int main() {
                 e.setCaretAt(0, hp.offset, owner);
                 if (e.caret().offset != hp.offset) ++rewritten;
             }
-            std::printf("     横扫 x ∈ [%.1f, %.1f]：采样 %d 点，落点被改写的 %d 个，"
-                        "非单调 %d 处\n",
-                        lo - 4.0f, hi + 4.0f, probed, rewritten, nonmono);
+            std::printf(
+                "     横扫 x ∈ [%.1f, %.1f]：采样 %d 点，落点被改写的 %d 个，"
+                "非单调 %d 处\n",
+                lo - 4.0f, hi + 4.0f, probed, rewritten, nonmono);
             expectTrue(probed > 100 && rewritten == 0,
                        "★ 点击命中即落点：命中偏移与光标位置永远一致（没有点不进去的位置）");
             expectTrue(nonmono == 0, "★ 横扫时命中偏移单调不减（没有回跳的死区）");
@@ -4807,8 +4810,10 @@ int main() {
             expectTrue(focused.size() == 2 && focused[0].cp == 5 && focused[0].owner == 0 &&
                            focused[0].kind == InlineObjectKind::ControlStart &&
                            focused[1].cp == 7 && focused[1].kind == InlineObjectKind::ControlEnd,
-                       "Focused 档：表里只剩聚焦字段的两项（实际 " +
-                           std::to_string(focused.size()) + " 项）");
+                       "Focused 档：表里只剩聚焦字段的两项（实际 " + census(focused) +
+                           "，聚焦=" + std::to_string(e.focusedControlIndex()) +
+                           "，光标=" + std::to_string(e.caret().offset) + "/" +
+                           std::to_string(e.caretSide()) + "）");
             expectTrue(e.auditLayout() == 0, "换档之后增量与全量逐字段一致（表变了就必须重排）");
 
             // 文档模式：括号根本不画，表就该是空的（不画却还占宽度是最坏的形态）。
@@ -6233,6 +6238,88 @@ int main() {
                        "★★ 三连字段删「悸」之后光标停在第一个字段末尾（cp 8 侧别 0），"
                        "不许跑进第三个控件 —— 实际 " +
                            afterDelete(2, 11, 3));
+        }
+
+        //   两条现象：三层嵌套字段全删空之后，在最后一枚右括号之前输入，字与光标
+        //   都跑到了第一枚左括号之后；三连字段后两个删空后在第二个字段里回车，
+        //   光标（与当前字段）跑进了第三个字段。
+        //   根因一：编辑落点从"控件下标"反推侧别 —— 下标是多对一的投影，空嵌套下
+        //   必然猜错。根因二：段的流起点取自"首个内容元素所属节点"的区间起点，
+        //   而段落被控件从中间切开时那个节点（控件）的起点在上一段里。
+        {
+            auto build = [&](int variant, std::vector<BlockSpec>* bl,
+                             std::vector<DemoFieldSpec>* fd) {
+                bl->assign(1, BlockSpec{});
+                (*bl)[0].setText("患者主诉：反复心悸三天，加重一天。");
+                auto add = [&](int so, int eo, const char* key) {
+                    DemoFieldSpec f;
+                    f.para = 0;
+                    f.so = so;
+                    f.eo = eo;
+                    f.key = key;
+                    fd->push_back(std::move(f));
+                };
+                if (variant == 3) {
+                    add(5, 11, "outer");
+                    add(6, 10, "middle");
+                    add(7, 9, "inner");
+                } else {
+                    add(5, 7, "a");
+                    add(7, 9, "b");
+                    add(9, 11, "c");
+                }
+            };
+
+            // (a) 全空嵌套：在 ]外 之前输入一个字符，字与光标都该停在所有内层括号之后。
+            {
+                std::vector<BlockSpec> bl;
+                std::vector<DemoFieldSpec> fd;
+                build(3, &bl, &fd);
+                EditorEngine ex;
+                expectTrue(ex.init(fonts29), "字体加载失败（全空嵌套输入）");
+                ex.setConfig(ec29);
+                ex.setDocument(demoTree(bl, fd), StyleSheet{});
+                ex.setEditMode(EditMode::Form);
+                ex.relayout();
+                ex.setCaret(0, 11);
+                for (int i = 0; i < 6; ++i) ex.backspace();
+                expectTrue(ex.caret().offset == 5, "三层字段全删空后光标落在共享偏移上 —— 实际 " +
+                                                       std::to_string(ex.caret().offset));
+                ex.setCaretAtSide(0, 5, 5);  // 定位到最后一枚右括号之前
+                ex.insertTextUtf8(0, 5, "X");
+                expectTrue(ex.caret().offset == 6 && ex.caretSide() == 0,
+                           "★★ 全空嵌套里在 ]外 之前输入：字与光标都停在所有内层括号之后"
+                           "（cp 6 侧别 0，即 ]外 之前）—— 实际 " +
+                               std::to_string(ex.caret().offset) + "/" +
+                               std::to_string(ex.caretSide()));
+            }
+
+            // (b) 三连后两个删空：在第二个字段里回车，光标仍该在第二个字段。
+            {
+                std::vector<BlockSpec> bl;
+                std::vector<DemoFieldSpec> fd;
+                build(2, &bl, &fd);
+                EditorEngine ex;
+                expectTrue(ex.init(fonts29), "字体加载失败（跨段归属）");
+                ex.setConfig(ec29);
+                ex.setDocument(demoTree(bl, fd), StyleSheet{});
+                ex.setEditMode(EditMode::Form);
+                ex.relayout();
+                ex.setCaret(0, 11);
+                for (int i = 0; i < 4; ++i) ex.backspace();
+                ex.setCaretAtSide(0, 7, 2);
+                expectTrue(ex.focusedControlIndex() == 1, "回车之前当前字段是第二个");
+                ex.splitParagraph();
+                expectTrue(ex.caret().para == 1 && ex.caret().offset == 0 && ex.caretSide() == 0,
+                           "★★ 第二个字段里回车：光标落在新段第一个位置（1:0 侧别 0）"
+                           "—— 实际 " +
+                               std::to_string(ex.caret().para) + ":" +
+                               std::to_string(ex.caret().offset) + "/" +
+                               std::to_string(ex.caretSide()));
+                expectTrue(ex.focusedControlIndex() == 1,
+                           "★★ 回车之后当前字段仍是第二个字段，没跑进第三个 —— 实际 " +
+                               std::to_string(ex.focusedControlIndex()));
+            }
         }
     }
 

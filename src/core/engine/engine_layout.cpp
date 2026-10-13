@@ -115,16 +115,18 @@ void EditorEngine::relayout() {
     //   这里只夹数值范围，不吸附簇：簇吸附需要簇表，而此刻尚未排版；用上一轮的簇表
     //     会把光标拉回旧簇边界，表现为"敲字后光标差一个位置"。簇吸附放在排版之后。
     if (!blocks_.empty()) {
-        if (caret_.para < 0) caret_.para = 0;
-        if (caret_.para >= static_cast<int>(blocks_.size()))
-            caret_.para = static_cast<int>(blocks_.size()) - 1;
-        const size_t len = blocks_[static_cast<size_t>(caret_.para)].cp_text.size();
-        // 超界才动它 —— 动的时候清侧别（位置变了，旧侧别描述的是另一个格子）。
-        //   位置没变就一个字都别碰：侧别留着（重排不改流位置，见 caretSide 的注释），
-        //   而"敲字之后紧接一次重排"正是侧别刚被算准的那一刻，清掉就白算了。
-        if (caret_.offset > len) setCaretRaw(TextPos{caret_.para, len});
+        if (caret_para_ < 0) caret_para_ = 0;
+        if (caret_para_ >= static_cast<int>(blocks_.size()))
+            caret_para_ = static_cast<int>(blocks_.size()) - 1;
+        // 只夹数值范围，不吸附簇（理由见上面那段注释）。上界 = 段长 + 本段边界枚数，
+        //   也就是 relAt(len, 全部边界) —— rel 本身就是"段内流位置"，越界才动它。
+        const size_t len = blocks_[static_cast<size_t>(caret_para_)].cp_text.size();
+        const BracketCounts bc = bracketCountsAt(caret_para_, len);
+        const int span = static_cast<int>(len) + bc.before + bc.closes + bc.opens;
+        if (caret_rel_ > span) caret_rel_ = span;
+        if (caret_rel_ < 0) caret_rel_ = 0;
     } else {
-        setCaretRaw(TextPos{0, 0});
+        setCaretRel(0, 0);
     }
 
     // 把要显示括号的那些字段的两个边界写进块流的行内对象表：排版据此插入
@@ -196,10 +198,13 @@ void EditorEngine::relayout() {
     computePageFingerprints(fp_lo, fp_hi);
     stats_.page_fp_ms = msSince(t_fp0);
 
-    // 光标夹回合法范围并吸附到簇边界 —— 编辑可能让段落变短。
+    // 光标吸附到簇边界 —— 编辑可能让段落变短。吸附只改码点偏移，侧别跟着走
+    //   （rel 是唯一真源，见 setCaretRel）：已经落在簇边界上就一个字都别碰，
+    //   否则按"最内层"重投影一次。
     if (!blocks_.empty()) {
-        const size_t snapped = snapToCluster(caret_.para, caret_.offset);
-        if (snapped != caret_.offset) setCaretRaw(TextPos{caret_.para, snapped});
+        const TextPos cp = caret();
+        const size_t snapped = snapToCluster(cp.para, cp.offset);
+        if (snapped != cp.offset) setCaretByText(TextPos{cp.para, snapped});
     }
 
     // 这一轮排版的真实耗时（含截断/拼接/逐段汇总）—— 有些路径不经过
@@ -488,8 +493,11 @@ void EditorEngine::syncInlineObjects() {
         return;
     }
 
-    for (BlockSpec& b : blocks_) b.objects.clear();
+    // 名单要先问，清表要在它之后：名单靠"光标在哪"定（聚焦档），而光标位置是拿对象表
+    //   解释出来的（rel 数的是这一处的边界）—— 先清表再问，光标会被解释成另一个偏移
+    //   （表空了、边界数归零），于是"聚焦字段"当场换人。
     const std::vector<int> bracketed = bracketedControls();
+    for (BlockSpec& b : blocks_) b.objects.clear();
     if (bracketed.empty()) return;
 
     // 一条待插入的边界事件：排序键与对象本体分开，排完序只留后者。

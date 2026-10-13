@@ -916,10 +916,18 @@ window.__heditor = {
   //   字段的 depth/parent，必须整棵重建。只读标记也只有建的时候给得进去，
   //   所以"把某个字段临时标成只读、看它那一对括号变不变灰"要靠这条。
   setFormControls(list) {
+    // 整批重建之前先把光标连侧别一起记下来 —— 中间态里控件是缺的（clearControls 之后
+    //   一枚括号都不剩），那一刻"侧别"没有对应物，引擎自己搬必然把它抹成 0：
+    //   实测光标 7/2（在零宽字段 #1 里）会变成 7/0（跑到左边那个字段的末尾），
+    //   接着打字就进了左边那个字段。所以整批做完之后由宿主原样摆回去。
+    const keep = this.caret;
     mod.clearControls();
     for (const it of list) {
       mod.addControl(it.start[0], it.start[1], it.end[0], it.end[1], it.kind || 0,
                      it.id || '', it.label || '', !!it.ro);
+    }
+    if (keep && typeof keep.side === 'number' && mod.setCaretAtSide) {
+      mod.setCaretAtSide(keep.para, keep.offset, keep.side);
     }
     return relayoutAndBlit();
   },

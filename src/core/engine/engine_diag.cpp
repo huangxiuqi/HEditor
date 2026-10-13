@@ -69,9 +69,7 @@ hb_draw_funcs_t* bboxFuncs() {
     return f;
 }
 
-
 }  // namespace
-
 
 std::string EditorEngine::describeControls() const {
     std::ostringstream os;
@@ -88,7 +86,7 @@ std::string EditorEngine::describeControls() const {
            << " parent=" << c.parent << " boxes=" << controlRects(i).size() << "\n";
     }
     os << "  caret-control="
-       << (controls_.empty() ? -1 : controls_.innermostAt(caret_, /*include_end=*/true)) << "\n";
+       << (controls_.empty() ? -1 : controls_.innermostAt(caret(), /*include_end=*/true)) << "\n";
     return os.str();
 }
 
@@ -100,10 +98,10 @@ std::string EditorEngine::describeCaret() const {
     std::ostringstream os;
     os.setf(std::ios::fixed);
     os.precision(3);
-    os << "caret: para=" << caret_.para << " offset(段内码点)=" << caret_.offset
+    os << "caret: para=" << caret().para << " offset(段内码点)=" << caret().offset
        << " 全文下标=" << edit_stats_.caret_index << " 全文码点=" << documentCodepoints() << "\n";
 
-    const LineBox* lb = findLineFor(caret_);
+    const LineBox* lb = findLineFor(caret());
     if (!lb) {
         os << "  找不到行盒（该段没有可排内容）\n";
         return os.str();
@@ -121,7 +119,7 @@ std::string EditorEngine::describeCaret() const {
     if (lb->clusters.size() > 12) os << " ...";
     os << "\n";
     os << "  本偏移的沿轴位置="
-       << lb->offsetAtSide(static_cast<uint32_t>(caret_.offset), caretSide()) << " pt\n";
+       << lb->offsetAtSide(static_cast<uint32_t>(caret().offset), caretSide()) << " pt\n";
 
     Rect r{};
     if (caretRectPt(&r))
@@ -183,6 +181,5 @@ std::string EditorEngine::describeShaping(int font_index, float size_pt, const s
     }
     return os.str();
 }
-
 
 }  // namespace heditor
