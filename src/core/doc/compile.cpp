@@ -54,6 +54,21 @@ public:
         return std::move(out_);
     }
 
+    /**
+     * 只走一个容器的 children[begin..end]。增量编译用它（见 compileChildRange）。
+     * 区间不完整时（begin 越界等）返回空产物，让调用方退回全量而不是拿半份结果。
+     */
+    CompileResult runRange(NodeId container, int begin, int end) {
+        const Node* c = tree_.find(container);
+        if (c == nullptr || !isContainer(c->kind)) return CompileResult{};
+        if (begin < 0 || end < begin || end >= static_cast<int>(c->children.size())) {
+            return CompileResult{};
+        }
+        for (int i = begin; i <= end; ++i) walk(c->children[static_cast<size_t>(i)]->id, false);
+        if (!pending_.empty() || !obj_.empty()) flush(nullptr);
+        return std::move(out_);
+    }
+
 private:
     /**
      * 当前段已经累积了多少个码点 —— 行内对象的锚点就是它。
@@ -97,8 +112,7 @@ private:
         const NodeId mark_id = (mark != nullptr) ? mark->id : kInvalidNodeId;
         // 本块的来源身份：第一个吃进内容的元素；一段空空如也时就是它自己的结束标记。
         //   在 obj_ 被搬走之前取，之后没法再判"这一段到底有没有过内容"。
-        const NodeId first_id = (cur_first_ != kInvalidNodeId) ? cur_first_
-                                                              : mark_id;
+        const NodeId first_id = (cur_first_ != kInvalidNodeId) ? cur_first_ : mark_id;
         cur_first_ = kInvalidNodeId;
 
         BlockSpec b;
@@ -313,6 +327,11 @@ CompileResult compileFragment(const NodeTree& tree, NodeId root, FlowVisibility 
     const Node* n = tree.find(root);
     if (n == nullptr || !isContainer(n->kind)) return CompileResult{};
     return Compiler(tree, vis, sheet).run(root);
+}
+
+CompileResult compileChildRange(const NodeTree& tree, NodeId container, int begin, int end,
+                                FlowVisibility vis, const StyleSheet& sheet) {
+    return Compiler(tree, vis, sheet).runRange(container, begin, end);
 }
 
 }  // namespace heditor

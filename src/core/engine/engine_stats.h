@@ -96,6 +96,20 @@ struct EditStats {
     int dirty_page_count = 0;  // 内容指纹变了、需要重画的页数
 
     /**
+     * 重建树产物（每次提交都做）的耗时拆分。
+     *
+     * 四项都是 O(文档)，而排版已经是增量的 —— 所以这几个数是"编译这一层有没有做到增量"的
+     * 可证伪证据：真增量之后它们该随改动规模走，不是随文档长度走。
+     * 拆到四项而不是合成一个数：3000 段实测下它们各有量级（流索引比编译还贵），
+     * 合成一个就分不清该优化谁。
+     */
+    double rebuild_compile_ms = 0.0;
+    double rebuild_flow_ms = 0.0;      // FlowIndex 重建（按节点记流位置）
+    double rebuild_flowpos_ms = 0.0;   // 段的流区间递推
+    double rebuild_copy_ms = 0.0;      // 块流副本（旧路径要的那一份）
+    double rebuild_controls_ms = 0.0;  // 控件视图导出
+
+    /**
      * 上屏粒度：本次真正重画的页数，以及文档总页数。
      */
     int repainted_pages = 0;

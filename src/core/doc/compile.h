@@ -90,4 +90,17 @@ CompileResult compileDocument(const NodeTree& tree, FlowVisibility vis, const St
 CompileResult compileFragment(const NodeTree& tree, NodeId root, FlowVisibility vis,
                               const StyleSheet& sheet);
 
+/**
+ * 只编译某个容器的一段子节点区间（[begin, end]，含两端），用来做增量编译。
+ *
+ * 编辑只动一段时没必要把整棵树重编一遍 —— 3000 段的文档里整树编译约 1.8ms，
+ * 而那是每次按键都要付的一笔。区间由调用方从"上一枚段落标记之后"到"本段的结束标记"
+ * 算出来，并且必须保证区间内不含节边界与嵌套的段落标记（含则退回 compileDocument）：
+ * 那两样都会让"这一段的产物"依赖区间之外的状态（分节强制分页、段数）。
+ *
+ * 产出的 blocks 与 sources 仍按流顺序，且只覆盖这个区间里的段落。
+ */
+CompileResult compileChildRange(const NodeTree& tree, NodeId container, int begin, int end,
+                                FlowVisibility vis, const StyleSheet& sheet);
+
 }  // namespace heditor

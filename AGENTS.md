@@ -7,6 +7,9 @@ C++ 命名空间 `heditor`；CMake 工程 `HEditor`、target 前缀 `heditor_`�
 wasm 产物 `heditor.js` / `heditor.wasm`（emscripten 工厂函数 `CreateHEditor`）；
 浏览器控制台 API `window.__heditor`。
 
+文档里的名词按层组织（模型层 / 编译层 / 排版层 / 编辑层），层与层同名不同物是设计使然。
+对照表见 `docs/名词对照.md` —— 分不清"码点 / 簇 / 流位置 / run"时先查它。
+
 ## 注释
 
 ### C / C++

@@ -33,9 +33,10 @@ BlockSpec mixedParagraphBlock(int cjk_font_index, int latin_font_index = -1);
 /**
  * 演示表单里一个字段怎么摆在树里：第几段、码点区间 [so, eo)、业务种类与编码、是否只读。
  *
- * 与引擎侧那个按 TextPos 记区间的旧表示（Control）用途相同，差别是它描述的是"树里怎么切" ——
- * 段落内置，一个字段不跨段。业务种类走 ControlKind，建树时翻成 controlType 字符串，
- * 与引擎侧 controlKindFromBusinessType 那条映射互为逆。
+ * 与引擎侧那个按 TextPos 记区间的旧表示（Control）用途相同，差别是它描述的是"树里怎么切"。
+ * 这里的 so/eo 是段内偏移加段号，于是这份演示数据按约定只摆段内字段 —— 那是演示的简化，
+ * 模型本身允许控件跨段（见 node.h 的 ContentControl）。业务种类走 ControlKind，
+ * 建树时翻成 controlType 字符串，与引擎侧 controlKindFromBusinessType 那条映射互为逆。
  */
 struct DemoFieldSpec {
     int para = 0;

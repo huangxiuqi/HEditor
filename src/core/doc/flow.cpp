@@ -19,25 +19,30 @@ int indexInParent(const Node* n) {
 }  // namespace
 
 FlowIndex::FlowIndex(const NodeTree& tree, FlowVisibility vis) : tree_(&tree), vis_(vis) {
+    // 按水位一次开表并填 -1：重建是每次提交都要走的一步，顺序写一遍比重建哈希表快
+    // 一个量级。水位（maxAllocatedId）+ 1 就是下标上界 —— id 从 1 起，0 那格空着。
+    const size_t slots = static_cast<size_t>(tree.maxAllocatedId()) + 1;
+    first_.assign(slots, -1);
+    span_.assign(slots, 0);
     int cursor = 0;
-    measure(tree.rootId(), cursor, true);
+    const Node* root = tree.find(tree.rootId());
+    if (root != nullptr) measure(root, cursor, true);
     size_ = cursor;
 }
 
-void FlowIndex::measure(NodeId id, int& cursor, bool is_root) {
-    const Node* n = tree_->find(id);
-
+void FlowIndex::measure(const Node* n, int& cursor, bool is_root) {
     // 非编辑模式下隐藏的控件整棵子树摘除：不占位置，也不给后代记区间
     // （于是 flowAt 对它们一律返回 -1，"不在流里"与"越界"同一种回执）。
     if (vis_ == FlowVisibility::Display && n->hidden) return;
 
     const int start = cursor;
-    first_[id] = start;
+    const size_t slot = static_cast<size_t>(n->id);
+    first_[slot] = start;
 
     if (isContainer(n->kind)) {
         // 根的展开不含边界：它不嵌在别处，没有任何位置指向"根之前 / 之后"。
         if (!is_root) ++cursor;
-        for (Node* child : n->children) measure(child->id, cursor, false);
+        for (const Node* child : n->children) measure(child, cursor, false);
         if (!is_root) ++cursor;
     } else if (isText(n->kind)) {
         cursor += static_cast<int>(n->text.size());
@@ -45,7 +50,7 @@ void FlowIndex::measure(NodeId id, int& cursor, bool is_root) {
         ++cursor;  // 原子与段落标记各占一位
     }
 
-    span_[id] = cursor - start;
+    span_[slot] = cursor - start;
 }
 
 int FlowIndex::contentStartOf(NodeId id) const {
@@ -54,10 +59,10 @@ int FlowIndex::contentStartOf(NodeId id) const {
 }
 
 bool FlowIndex::intervalOf(NodeId id, int* first, int* end) const {
-    const auto it = first_.find(id);
-    if (it == first_.end()) return false;
-    if (first != nullptr) *first = it->second;
-    if (end != nullptr) *end = it->second + span_.at(id);
+    if (!inFlow(id)) return false;
+    const int start = firstOf(id);
+    if (first != nullptr) *first = start;
+    if (end != nullptr) *end = start + spanOf(id);
     return true;
 }
 

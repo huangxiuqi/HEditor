@@ -42,6 +42,20 @@ const std::vector<uint32_t> kEmptyStarts;
  * 注册表落地。认不出来的类型回落到文本：宁可当一个普通文本框，也不要让一个没登记的类型
  * 变成一个"打不进去"的字段。空串同理（没写类型的控件就是文本框）。
  */
+/**
+ * 这棵子树里有没有段落标记。
+ *
+ * 增量编译要判"这一段的内容区间是不是干净的"：区间里若嵌着段落标记，那些标记本身
+ * 就切出别的段，这一段的产物于是依赖区间之外的段边界 —— 那种情况退回全量。
+ */
+bool subtreeHasParagraphMark(const Node* n) {
+    if (isParagraphMark(n->kind)) return true;
+    for (const Node* c : n->children) {
+        if (subtreeHasParagraphMark(c)) return true;
+    }
+    return false;
+}
+
 ControlKind controlKindFromBusinessType(const std::string& type) {
     if (type == "number") return ControlKind::NumberField;
     if (type == "date") return ControlKind::DateField;
@@ -139,17 +153,76 @@ void EditorEngine::setDocument(const NodeTree& tree, const StyleSheet& sheet) {
     frame_needs_full_refresh_ = true;
 }
 
-void EditorEngine::rebuildFromTree() {
+FlowVisibility EditorEngine::flowVisibility() const {
     // 隐藏控件的可见性口径与编译同一处取值：文档模式是设计态（隐藏的照常参与流，
     //   否则作者没法把它选中改回来），表单与只读是呈现态（整棵摘除、不占流位置）。
-    const FlowVisibility vis =
-        (policy_.mode() == EditMode::Document) ? FlowVisibility::Design : FlowVisibility::Display;
+    return (policy_.mode() == EditMode::Document) ? FlowVisibility::Design
+                                                  : FlowVisibility::Display;
+}
+
+void EditorEngine::rebuildFromTree() {
+    const FlowVisibility vis = flowVisibility();
+    const auto t_compile0 = Clock::now();
     CompileResult res = compileDocument(tree_, vis, sheet_);
     blocks_full_ = std::move(res.blocks);
     block_src_ = std::move(res.sources);
+    edit_stats_.rebuild_compile_ms = msSince(t_compile0);
+    finishRebuildFromTree(vis);
+}
+
+bool EditorEngine::rebuildParagraphFromTree(int para) {
+    // 条件先判完再动手：任何一条不满足就原样返回 false，由调用方退回全量 ——
+    //   半途改一半再失败会留下"这一段按新树、别处按旧树"的产物，那种错最难查。
+    if (!tree_valid_ || para < 0) return false;
+    if (para >= static_cast<int>(block_src_.size())) return false;
+    if (para >= static_cast<int>(blocks_full_.size())) return false;
+    const Node* mark = tree_.find(block_src_[static_cast<size_t>(para)].mark);
+    if (mark == nullptr || !isParagraphMark(mark->kind) || mark->parent == nullptr) return false;
+    const Node* container = mark->parent;
+    int mark_idx = -1;
+    for (size_t i = 0; i < container->children.size(); ++i) {
+        if (container->children[i]->id == mark->id) {
+            mark_idx = static_cast<int>(i);
+            break;
+        }
+    }
+    if (mark_idx < 0) return false;
+
+    // 内容区间 = 上一枚段落标记之后 到 本段标记。区间里出现节边界或嵌套的段落标记时，
+    //   这一段的产物依赖区间之外的状态（段数、分节强制分页），退回全量。
+    int begin = 0;
+    for (int i = mark_idx - 1; i >= 0; --i) {
+        const Node* sib = container->children[static_cast<size_t>(i)];
+        if (isParagraphMark(sib->kind)) {
+            begin = i + 1;
+            break;
+        }
+        if (sib->kind == NodeKind::Section || subtreeHasParagraphMark(sib)) return false;
+    }
+    // 分节强制分页是"进入第二节及以后"时才落在那一段上的一位，区间编译看不到上一节。
+    if (begin == 0 && container->kind == NodeKind::Section &&
+        container->id != tree_.firstSectionId()) {
+        return false;
+    }
+
+    const FlowVisibility vis = flowVisibility();
+    const auto t_compile0 = Clock::now();
+    CompileResult part = compileChildRange(tree_, container->id, begin, mark_idx, vis, sheet_);
+    if (part.blocks.size() != 1 || part.sources.size() != 1) return false;
+    blocks_full_[static_cast<size_t>(para)] = std::move(part.blocks[0]);
+    block_src_[static_cast<size_t>(para)] = part.sources[0];
+    edit_stats_.rebuild_compile_ms = msSince(t_compile0);
+    finishRebuildFromTree(vis);
+    return true;
+}
+
+void EditorEngine::finishRebuildFromTree(FlowVisibility vis) {
+    const auto t_index0 = Clock::now();
     // 流索引与块起点一起重建：两者是同一份文档的两种说法，分两次建就会出现
     //   "块按新树、流位置按旧树"的错配，而那种错配只表现为光标落偏一个字，很难查。
     flow_.emplace(tree_, vis);
+    edit_stats_.rebuild_flow_ms = msSince(t_index0);
+    const auto t_pos0 = Clock::now();
 
     const size_t n = blocks_full_.size();
     block_flow_.assign(n, 0);
@@ -187,8 +260,13 @@ void EditorEngine::rebuildFromTree() {
         start = block_flow_[i] + block_flow_span_[i] + 1;
     }
 
+    edit_stats_.rebuild_flowpos_ms = msSince(t_pos0);
+    const auto t_copy0 = Clock::now();
     blocks_ = blocks_full_;
+    edit_stats_.rebuild_copy_ms = msSince(t_copy0);
+    const auto t_ctl0 = Clock::now();
     exportControlsFromBlocks();
+    edit_stats_.rebuild_controls_ms = msSince(t_ctl0);
 }
 
 /**
@@ -501,7 +579,14 @@ bool EditorEngine::commitOnTree(Transaction tx, int dirty_para, bool para_count_
 
     // 树变了：块流、流索引、块起点、来源身份、控件集合一次重建。分两次建就会留下
     //   "块按新树、位置按旧树"的错配，而那种错配只表现为光标落偏一个字。
-    rebuildFromTree();
+    //
+    // 段数没变时只重编译被改的那一段（增量）：整树编译是 O(文档)，3000 段实测约 1.8ms，
+    //   而那是每次按键都要付的。段数变了就没有"第 k 段还是同一段"这回事，走全量。
+    if (para_count_changed) {
+        rebuildFromTree();
+    } else if (!rebuildParagraphFromTree(dirty_para)) {
+        rebuildFromTree();
+    }
     markLayoutDirty(dirty_para);
     // 段数变了就禁止后缀复用：复用判据是"第 from+1 段开始时的状态与上一轮相同"，
     //   而段号一变，"第 from+1 段"已经不是同一段了。

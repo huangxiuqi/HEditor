@@ -35,8 +35,11 @@ ControlKind controlKindFromCode(int code);
 /**
  * 区间：半开 [start, end)
  * 端点是 (段, 段内码点偏移)，与文档、整形 cluster、光标同一把尺子。
- * 允许跨段（start.para != end.para），但编辑时的伸缩只处理同段端点 ——
- * 病历表单里"一个字段 = 一段"是绝大多数情况，跨段控件先只做标注与判定。
+ *
+ * 允许跨段（start.para != end.para）：控件是容器，里面可以放文字、嵌套控件、甚至表格
+ * （见 node.h 的 ContentControl 与 isContainer），所以它跨段落是正常形态而不是特例。
+ * 端点的伸缩由各编辑入口按"内容归属"处理，不能拿段号做假设 —— 在控件内容里分段时，
+ * 起止端点本来就该分落两段。
  */
 struct ControlRange {
     TextPos start{};

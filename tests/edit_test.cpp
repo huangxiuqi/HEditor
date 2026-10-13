@@ -6323,6 +6323,59 @@ int main() {
         }
     }
 
+    std::printf("\n[30] 增量编译：单段重编译的产物必须与整树全量编译逐字段一致\n");
+    {
+        // 增量最容易错的不是"少编了什么"，而是"只重编译了一段、别处的来源身份跟着动了" ——
+        //   那种错只表现为光标落偏一个字，段数与每段文本全都对得上。所以对照物必须是
+        //   整树全量编译（auditCompile），而不是"看起来对"。
+        auto mk = [&](const std::string& txt) {
+            BlockSpec b;
+            b.font_index = 0;  // init 的第一个路径就是 cjk
+            b.size_pt = 12.0f;
+            b.wm = WritingMode::HorizontalTB();
+            b.line_factor = 1.5f;
+            b.language = "zh";
+            b.color = Color::rgb(24, 24, 24);
+            b.setText(txt);
+            return b;
+        };
+        std::vector<BlockSpec> bl;
+        bl.push_back(mk("第一段文字"));
+        bl.push_back(mk("第二段文字"));
+        bl.push_back(mk("第三段文字"));
+
+        EditorEngine e;
+        expectTrue(e.init({cjkPath}), "增量编译：字体加载成功");
+        EngineConfig ec;
+        ec.zoom = 1.0f;
+        e.setConfig(ec);
+        e.setDocument(demoTree(bl, {}), StyleSheet{});
+        e.setEditMode(EditMode::Form);
+        e.relayout();
+        expectTrue(e.auditCompile() == 0, "装载之后：产物与整树全量编译一致");
+
+        e.setCaret(1, 2);
+        expectTrue(e.typeTextUtf8("字"), "在第 1 段打字");
+        expectTrue(e.auditCompile() == 0, "★ 打字之后（走增量）：产物仍与整树全量逐字段一致");
+
+        e.setCaret(2, 1);
+        expectTrue(e.backspace(), "在第 2 段退格");
+        expectTrue(e.auditCompile() == 0, "★ 退格之后（走增量）：产物仍与整树全量逐字段一致");
+
+        e.setCaret(0, 1);
+        expectTrue(e.typeTextUtf8("甲"), "再在第 0 段打字");
+        expectTrue(e.auditCompile() == 0, "★ 再在第 0 段打字：产物仍与整树全量逐字段一致");
+
+        // 段数变了 → 走全量；产物同样必须一致（这条把"什么时候该退全量"钉住）
+        e.setCaret(0, 2);
+        expectTrue(e.splitParagraph(), "在第 0 段分段");
+        expectTrue(e.auditCompile() == 0, "★ 分段之后（走全量）：产物与整树全量编译一致");
+
+        e.setCaret(1, 0);
+        expectTrue(e.backspace(), "在第 1 段段首退格（合并）");
+        expectTrue(e.auditCompile() == 0, "★ 合并之后（走全量）：产物与整树全量编译一致");
+    }
+
     std::printf("\n──────────────────────────────\n");
     std::printf("共 %d 项断言，失败 %d 项\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

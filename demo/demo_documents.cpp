@@ -142,12 +142,40 @@ void applyBlockFormat(const BlockSpec& b, Node* mark) {
     }
 }
 
-/** 追加一段普通文本（空区间不建节点 —— 空文本节点会被规范化并掉，不如一开始就不建）。 */
-void appendTextRun(NodeTree& tree, NodeId parent, const std::vector<uint32_t>& cps, int from,
-                   int to) {
-    if (to <= from) return;
-    const NodeId t = tree.appendChild(parent, NodeKind::TextRun);
-    tree.setText(t, std::vector<uint32_t>(cps.begin() + from, cps.begin() + to));
+/**
+ * 追加一段文本，按字符格式 run 切开：一段一个文本节点，格式落在它的标记上。
+ *
+ * 为什么要切：run 是作者意图，而编译正是从"标记 + 样式表"再解析出 run 的 —— 不切的话，
+ * 块流里设了 runs 的文本搬进树就只剩一个节点，编译回来退化成"整段一个 run"，
+ * 于是"按 run 取字号 / 颜色"那一整类判据在树这条路上全部失效。
+ * 树里没有 run 级的语言与回退链，这两项只跟块级走（见 applyBlockFormat）。
+ * runs 为空表示"整段一个 run"，属性取块级字段，与不切之前逐字段相同。
+ */
+void appendTextRuns(NodeTree& tree, NodeId parent, const BlockSpec& b, int from, int to) {
+    const std::vector<uint32_t>& cps = b.cp_text;
+    int pos = from;
+    while (pos < to) {
+        const FormatRun* r = nullptr;
+        for (const FormatRun& cand : b.runs) {
+            const int lo = static_cast<int>(cand.cp_begin);
+            const int hi = static_cast<int>(cand.cp_end);
+            if (lo <= pos && pos < hi) {
+                r = &cand;
+                break;
+            }
+        }
+        int end = (r != nullptr) ? std::min(to, static_cast<int>(r->cp_end)) : to;
+        if (end <= pos) end = to;  // runs 没铺满这一段时退回段末，不丢字
+        const NodeId t = tree.appendChild(parent, NodeKind::TextRun);
+        tree.setText(t, std::vector<uint32_t>(cps.begin() + pos, cps.begin() + end));
+        if (r != nullptr) {
+            Node* n = tree.find(t);
+            n->marks.font_index = r->font_index;
+            n->marks.size = Length::abs(ptToEmu(r->size_pt));
+            n->marks.color = r->color;
+        }
+        pos = end;
+    }
 }
 
 /** 零宽字段：区间为空，它的开闭两枚落在同一处。 */
@@ -178,8 +206,9 @@ bool fieldBefore(const DemoFieldSpec* a, const DemoFieldSpec* b) {
  * rest 按值收，每轮把这一枚连同递归吃掉的那些一起消掉：只消这一枚的话，内层字段会留在外层
  * 的候选里被再建一遍。
  */
-void emitFields(NodeTree& tree, NodeId parent, const std::vector<uint32_t>& cps, int from, int to,
+void emitFields(NodeTree& tree, NodeId parent, const BlockSpec& b, int from, int to,
                 std::vector<const DemoFieldSpec*> rest) {
+    const std::vector<uint32_t>& cps = b.cp_text;
     int pos = from;
     while (true) {
         size_t at = rest.size();
@@ -191,7 +220,7 @@ void emitFields(NodeTree& tree, NodeId parent, const std::vector<uint32_t>& cps,
         if (at == rest.size()) break;
         const DemoFieldSpec* pick = rest[at];
 
-        appendTextRun(tree, parent, cps, pos, pick->so);
+        appendTextRuns(tree, parent, b, pos, pick->so);
         const NodeId cc = tree.appendChild(parent, NodeKind::ContentControl);
         Node* cn = tree.find(cc);
         cn->control.key = pick->key;
@@ -213,11 +242,11 @@ void emitFields(NodeTree& tree, NodeId parent, const std::vector<uint32_t>& cps,
                 remaining.push_back(g);
             }
         }
-        emitFields(tree, cc, cps, pick->so, pick->eo, inner);
+        emitFields(tree, cc, b, pick->so, pick->eo, inner);
         rest.swap(remaining);
         if (pick->eo > pos) pos = pick->eo;
     }
-    appendTextRun(tree, parent, cps, pos, to);
+    appendTextRuns(tree, parent, b, pos, to);
 }
 
 }  // namespace
@@ -233,9 +262,9 @@ NodeTree demoTree(const std::vector<BlockSpec>& blocks, const std::vector<DemoFi
         }
         const int n = static_cast<int>(b.cp_text.size());
         if (mine.empty()) {
-            appendTextRun(tree, sec, b.cp_text, 0, n);
+            appendTextRuns(tree, sec, b, 0, n);
         } else {
-            emitFields(tree, sec, b.cp_text, 0, n, mine);
+            emitFields(tree, sec, b, 0, n, mine);
         }
         // 段落标记挂在控件之外（与控件并列、排在它后面）：标记落进控件内部等于让那个控件跨段，
         //   闭边界会落到下一段去。

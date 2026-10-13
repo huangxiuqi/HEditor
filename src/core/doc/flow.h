@@ -20,7 +20,7 @@
  */
 #pragma once
 
-#include <unordered_map>
+#include <vector>
 
 #include "core/doc/node.h"
 
@@ -78,8 +78,13 @@ public:
      * 这个节点当前在流里吗？Display 口径下被摘除的子树整个不在。
      * 公开是因为调用方也要问这个问题（例如"这个控件现在隐藏着，别去动它"），
      * 而 flowAt 的 -1 分不清"越界"与"不在流里"。
+     *
+     * 越界的 id（不是这棵树的节点）同样判不在流里：只有数组成员才谈得上位置。
      */
-    bool inFlow(NodeId id) const { return first_.find(id) != first_.end(); }
+    bool inFlow(NodeId id) const {
+        const size_t i = static_cast<size_t>(id);
+        return i < first_.size() && first_[i] >= 0;
+    }
 
     /**
      * 节点占用的流位置区间 [first, end)。不在流里时返回 false。
@@ -90,12 +95,15 @@ public:
 
 private:
     /**
-     * 递归算出 id 的展开起点与跨度，cursor 是"下一个可用流位置"。
+     * 递归算出这个节点的展开起点与跨度，cursor 是"下一个可用流位置"。
+     *
+     * 直接吃节点指针而不是 id：重建要按节点走一遍全树，而 find(id) 本身是一次哈希查找 ——
+     * 拿 id 递归等于每个节点多付一次哈希，3000 段的文档里这一项与编译同量级。
      */
-    void measure(NodeId id, int& cursor, bool is_root);
+    void measure(const Node* n, int& cursor, bool is_root);
 
-    int firstOf(NodeId id) const { return first_.at(id); }
-    int spanOf(NodeId id) const { return span_.at(id); }
+    int firstOf(NodeId id) const { return first_[static_cast<size_t>(id)]; }
+    int spanOf(NodeId id) const { return span_[static_cast<size_t>(id)]; }
     /**
      * 节点展开之后的位置（= 第一个"不属于它"的流位置）。
      */
@@ -107,8 +115,20 @@ private:
 
     const NodeTree* tree_ = nullptr;
     FlowVisibility vis_ = FlowVisibility::Design;
-    std::unordered_map<NodeId, int> first_;
-    std::unordered_map<NodeId, int> span_;
+    /**
+     * 位置表按节点 id 直接下标，既不缓存在节点上，也不走哈希表。
+     *
+     * 缓存在节点上会更快，但同一棵树上可以同时存在两个不同可见性口径的索引 ——
+     * invariants 就是这么用的（design 与 display 各一个，用来判"摘除集合与隐藏声明
+     * 是否相符"）；缓存放节点上，后构造的那个会把先构造的口径覆盖掉，于是 design
+     * 对一个隐藏节点说"不在流里"，不变量当场报红。
+     *
+     * 数组够用是因为 id 是递增水位（node.h 的 maxAllocatedId）：构造时按水位开一次、
+     * 顺序写一遍，比重建哈希表快一个量级。不在流里的节点留 -1（摘下的子树、呈现态下
+     * 被隐藏的子树），inFlow 就是问"这一格不是 -1"。
+     */
+    std::vector<int> first_;
+    std::vector<int> span_;
     int size_ = 0;
 };
 

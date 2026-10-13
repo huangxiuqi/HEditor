@@ -26,7 +26,6 @@ namespace heditor {
 
 namespace {
 
-
 /**
  * 位置比较：整数/标志必须逐位相同，浮点坐标允许"远小于可见阈值"的容差。
  *
@@ -155,6 +154,53 @@ LayoutAudit auditLayoutPair(const LayoutResult& cur, const LayoutResult& ref) {
     return a;
 }
 
+/**
+ * 一段编译产物与参照逐字段比，返回不符项数。
+ *
+ * 为什么逐字段而不是只比段数或文本：编译增量最典型的错法是"某一段的产物还是旧的"，
+ * 段数、每段文本长度可能全都对得上，差别只在一个 run 的字号或一个边界的锚点上 ——
+ * 而那正是静默错版式的来源。
+ */
+int diffBlockSpec(const BlockSpec& a, const BlockSpec& b) {
+    int d = 0;
+    if (a.cp_text != b.cp_text) ++d;
+    if (a.runs.size() != b.runs.size()) {
+        ++d;
+    } else {
+        for (size_t i = 0; i < a.runs.size(); ++i) {
+            const FormatRun& x = a.runs[i];
+            const FormatRun& y = b.runs[i];
+            if (x.cp_begin != y.cp_begin || x.cp_end != y.cp_end || x.font_index != y.font_index ||
+                x.size_pt != y.size_pt || x.color != y.color || x.language != y.language ||
+                x.fallback_font_indices != y.fallback_font_indices) {
+                ++d;
+            }
+        }
+    }
+    if (a.objects.size() != b.objects.size()) {
+        ++d;
+    } else {
+        for (size_t i = 0; i < a.objects.size(); ++i) {
+            const InlineObject& x = a.objects[i];
+            const InlineObject& y = b.objects[i];
+            if (x.cp != y.cp || x.kind != y.kind || x.owner != y.owner ||
+                x.read_only != y.read_only) {
+                ++d;
+            }
+        }
+    }
+    if (a.font_index != b.font_index || a.size_pt != b.size_pt || a.line_factor != b.line_factor ||
+        a.space_after_pt != b.space_after_pt || a.page_break_before != b.page_break_before ||
+        a.language != b.language || a.color != b.color ||
+        a.fallback_font_indices != b.fallback_font_indices) {
+        ++d;
+    }
+    if (a.wm.inline_axis != b.wm.inline_axis || a.wm.block_flow != b.wm.block_flow ||
+        a.wm.orientation != b.wm.orientation) {
+        ++d;
+    }
+    return d;
+}
 
 }  // namespace
 
@@ -246,6 +292,48 @@ std::string EditorEngine::auditLayoutJson() {
     // 全量重排 —— 分母与分子同源，不掺历史数字。
     o << ",\"curMs\":" << layout_.stats.layout_ms << ",\"fullMs\":" << full_ms;
     o << "}";
+    return o.str();
+}
+
+int EditorEngine::auditCompile() const {
+    // 旧路径没有"全量编译"这个对照物（块流是调用方递进来的），没有可比的东西。
+    if (!tree_valid_) return 0;
+    const FlowVisibility vis =
+        (policy_.mode() == EditMode::Document) ? FlowVisibility::Design : FlowVisibility::Display;
+    const CompileResult ref = compileDocument(tree_, vis, sheet_);
+    // 段数不同就没法逐段对齐了：报一个大数（不是 1），让"哪里不符"一眼看得出来。
+    if (ref.blocks.size() != blocks_full_.size()) return 1000;
+    int d = 0;
+    for (size_t i = 0; i < ref.blocks.size(); ++i) {
+        d += diffBlockSpec(blocks_full_[i], ref.blocks[i]);
+    }
+    // 来源身份也要比：段的流区间是由标记位置递推出来的，这一项错了只表现为光标落偏一个字，
+    //   而段的文本与格式可能全都对 —— 是最难查的一类。
+    if (ref.sources.size() != block_src_.size()) {
+        ++d;
+    } else {
+        for (size_t i = 0; i < ref.sources.size(); ++i) {
+            if (ref.sources[i].first != block_src_[i].first ||
+                ref.sources[i].mark != block_src_[i].mark) {
+                ++d;
+            }
+        }
+    }
+    return d;
+}
+
+std::string EditorEngine::auditCompileJson() {
+    if (!tree_valid_) return "{\"diff\":0,\"note\":\"no-tree\"}";
+    const auto t0 = Clock::now();
+    const int d = auditCompile();
+    const double full_ms = msSince(t0);
+    std::ostringstream o;
+    o.setf(std::ios::fixed);
+    o.precision(3);
+    // curMs 是本轮提交实际花在编译上的时间（rebuildFromTree 记的），fullMs 是这一次
+    //   整树全量编译 —— 两者同源，所以"增量省了多少"是一个可当场证伪的比值。
+    o << "{\"diff\":" << d << ",\"paras\":" << blocks_full_.size()
+      << ",\"curMs\":" << edit_stats_.rebuild_compile_ms << ",\"fullMs\":" << full_ms << "}";
     return o.str();
 }
 

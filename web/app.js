@@ -765,6 +765,15 @@ window.__heditor = {
   // 编辑统计（= editStatsJson）
   get editStats() { return mod ? JSON.parse(mod.editStatsJson()) : null; },
 
+  // 压力文档：造 N 段、每段 M 字。性能判据只能在大文档上做 —— 演示场景只有一段，
+  //   量出来的编译与索引耗时全是 0.0x ms，看不出 O(文档) 的那一层。
+  loadStressDocument(paras, chars) {
+    if (!ready) return null;
+    mod.loadStressDocument(paras, chars);
+    relayoutAndBlit();
+    return this.editStats;
+  },
+
   // 切场景并按 zoom 重排重绘（供探针用；走的是和 UI 完全相同的路径）
   //
   // 返回值就是"本次全量呈现"的统计 —— 探针要拿它当增量比值的分母。
@@ -947,6 +956,10 @@ window.__heditor = {
   //   顺便带回两个耗时：curMs 是刚才那次增量，fullMs 是本次审计做的全量 ——
   //   分子分母同一次测量，探针拿它们算"增量是全量的百分之几"。
   auditLayout() { return mod && mod.auditLayout ? JSON.parse(mod.auditLayout()) : null; },
+
+  // 编译自审：本轮实际编译耗时与一次整树全量编译同源对照。
+  //   这是"编译这一层有没有做到增量"的唯一证据 —— 只有分子没有分母的耗时数说明不了事。
+  auditCompile() { return mod && mod.auditCompile ? JSON.parse(mod.auditCompile()) : null; },
 
   // 直读"待上屏"矩形（读后清零）—— 探针用它核对"引擎写了多少、宿主该贴多少"。
   get blitBox() { return mod && mod.takeBlitBox ? JSON.parse(mod.takeBlitBox()) : null; },

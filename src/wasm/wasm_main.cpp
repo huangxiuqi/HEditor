@@ -560,6 +560,12 @@ std::string auditFrame() { return g_engine.auditFrameJson(); }
 std::string auditLayout() { return g_engine.auditLayoutJson(); }
 
 /**
+ * 编译自审：本轮实际编译耗时与一次整树全量编译的耗时同源对照。
+ * 判"编译这一层有没有做到增量"只能靠它 —— 没有分母的耗时数说明不了任何事。
+ */
+std::string auditCompile() { return g_engine.auditCompileJson(); }
+
+/**
  * 上屏矩形：宿主必须用它，不能用 editStats 的 repaintedX/Y/W/H。
  * 前者是"自上次上屏以来写过哪些区域"（读后清零），后者是"这一轮写了多少"。
  * 一次用户操作可能触发两次 present（见 afterEdit 那条补救路径），
@@ -669,6 +675,36 @@ std::string bracketSlotsJson() {
  * → 归属取最内层，且改内层时中/外层必须一起长（区间不许互相穿过）；
  *   括号读作 [[[心悸]悸三]，三个开括号在左、闭括号由内到外依次收。
  */
+
+/**
+ * 压力文档：造 paras 段、每段 chars 个汉字的横排中文。
+ *
+ * 为什么必须有这个口子：演示场景只有一段，量出来的编译与索引耗时全是 0.0x ms ——
+ * 既看不出 O(文档) 的那一层，也证明不了"增量到底省了多少"。性能判据只能在大文档上做，
+ * 而且要能调长度：同一份代码在 10 段与 1000 段上的差别，才是可证伪的证据。
+ */
+void loadStressDocument(int paras, int chars) {
+    if (paras < 1) paras = 1;
+    if (chars < 1) chars = 1;
+    std::string text;
+    for (int k = 0; k < chars; ++k) text += "字";
+    std::vector<BlockSpec> blocks;
+    for (int i = 0; i < paras; ++i) {
+        BlockSpec b;
+        b.font_index = g_cjk_font;
+        b.size_pt = 12.0f;
+        b.wm = WritingMode::HorizontalTB();
+        b.line_factor = 1.5f;
+        b.language = "zh";
+        b.color = Color::rgb(24, 24, 24);
+        b.setText(text);
+        blocks.push_back(std::move(b));
+    }
+    g_blocks = std::move(blocks);
+    g_fields.clear();
+    rebuildDocument(false);
+}
+
 void loadFormSample(int variant) {
     g_blocks = buildScenarioBlocks(variant == 1 ? 3 : 6);
     g_fields.clear();
@@ -739,6 +775,11 @@ std::string editStatsJson() {
     o << "\"frameH\":" << e.frame_h << ",";
     o << "\"framePixels\":" << (static_cast<long long>(e.frame_w) * e.frame_h) << ",";
     o << "\"layoutMs\":" << e.layout_ms << ",";
+    o << "\"rebuildCompileMs\":" << e.rebuild_compile_ms << ",";
+    o << "\"rebuildFlowMs\":" << e.rebuild_flow_ms << ",";
+    o << "\"rebuildFlowPosMs\":" << e.rebuild_flowpos_ms << ",";
+    o << "\"rebuildCopyMs\":" << e.rebuild_copy_ms << ",";
+    o << "\"rebuildControlsMs\":" << e.rebuild_controls_ms << ",";
     o << "\"pageFpMs\":" << g_engine.stats().page_fp_ms << ",";
     o << "\"paintMs\":" << e.paint_ms << ",";
     o << "\"totalMs\":" << e.total_ms << ",";
@@ -843,6 +884,7 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("tabCaret", &tabCaret);
     emscripten::function("auditFrame", &auditFrame);
     emscripten::function("auditLayout", &auditLayout);
+    emscripten::function("auditCompile", &auditCompile);
     emscripten::function("takeBlitBox", &takeBlitBoxJson);
     emscripten::function("indent", &indentText);
     emscripten::function("outdent", &outdentText);
@@ -852,6 +894,7 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("describeControls", &describeControls);
     emscripten::function("blockedEdits", &blockedEdits);
     emscripten::function("loadFormSample", &loadFormSample);
+    emscripten::function("loadStressDocument", &loadStressDocument);
 
     emscripten::function("frameWidth", &frameWidth);
     emscripten::function("frameHeight", &frameHeight);
