@@ -49,6 +49,13 @@ void EditorEngine::syncStatsFromLayout() {
     stats_.layout_ms = layout_.stats.layout_ms;
     stats_.face_count = fonts_.faceCount();
     stats_.font_instance_count = static_cast<int>(fonts_.instanceCount());
+    const FontCacheTotals fc = fonts_.cacheTotals();
+    stats_.font_cache_hits = static_cast<long long>(fc.hits);
+    stats_.font_cache_misses = static_cast<long long>(fc.misses);
+    stats_.font_storage_reads = static_cast<long long>(fc.storage_reads);
+    stats_.font_storage_bytes = static_cast<long long>(fc.storage_bytes);
+    stats_.font_io_ms = fc.io_ms;
+    stats_.font_resident_bytes = static_cast<long long>(fc.resident_bytes);
     stats_.zoom = cfg_.zoom;
 }
 

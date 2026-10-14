@@ -22,6 +22,18 @@ struct EngineStats {
      */
     int missing_glyph_count = 0;
     int font_run_count = 0;
+    /**
+     * 字体按需读的账：命中、未命中、落存储的次数与字节、存储耗时、当前常驻。
+     *
+     * 用途是判"按需是否走得通"：命中率高说明块缓存真的在挡，落存储的次数应当远小于
+     * 字形数；常驻字节是这条路换来的收益（整份装载时恒为零，因为没有数据源）。
+     */
+    long long font_cache_hits = 0;
+    long long font_cache_misses = 0;
+    long long font_storage_reads = 0;
+    long long font_storage_bytes = 0;
+    double font_io_ms = 0.0;
+    long long font_resident_bytes = 0;
     double shape_ms = 0.0;
     double layout_ms = 0.0;
     double paint_ms = 0.0;

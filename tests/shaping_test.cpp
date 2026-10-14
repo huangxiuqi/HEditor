@@ -7,12 +7,14 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <fstream>
 #include <string>
 #include <vector>
 
 #include "core/engine/engine.h"
 #include "core/layout/layout.h"
 #include "core/text/fallback.h"
+#include "core/text/font_source.h"
 #include "core/text/shaper.h"
 #include "core/utils/utf8.h"
 #include "demo/demo_documents.h"
@@ -450,6 +452,154 @@ int main() {
         std::printf("     列内跨度=%.3f pt，横排推进=%.3f pt\n", actualH, expectH);
         expectTrue(actualH > 0.0 && actualH < expectH + 1.0,
                    "列内跨度与横排推进量一致（竖排高度 = 横排宽度）");
+    }
+
+    std::printf("\n[按需] 数据源：目录、骨架、按需读\n");
+    {
+        FontSource src;
+        expectTrue(src.open(cjkPath), "数据源能打开文件并解析表目录");
+        expectTrue(src.dir().count() > 10,
+                   "表目录里不止十张表（实际 " + std::to_string(src.dir().count()) + " 张）");
+
+        const uint32_t glyf = SfntDirectory::tagOf("glyf");
+        const uint32_t gvar = SfntDirectory::tagOf("gvar");
+        const uint32_t cmap = SfntDirectory::tagOf("cmap");
+        const uint32_t hmtx = SfntDirectory::tagOf("hmtx");
+        expectTrue(src.dir().find(glyf) != nullptr && src.dir().find(cmap) != nullptr,
+                   "目录里能查到 glyf 与 cmap");
+        expectTrue(!FontSource::inSkeleton(glyf) && !FontSource::inSkeleton(gvar),
+                   "轮廓与变体数据不进骨架（按需要省的就是它们）");
+        expectTrue(FontSource::inSkeleton(cmap) && FontSource::inSkeleton(hmtx),
+                   "排版要读的小表全进骨架");
+
+        std::vector<uint8_t> skeleton;
+        expectTrue(src.buildSkeleton(&skeleton), "骨架能拼出来");
+        const double skel_mb = static_cast<double>(skeleton.size()) / 1048576.0;
+        const double full_mb = static_cast<double>(src.size()) / 1048576.0;
+        std::printf("     骨架 %.3f MB（原字体 %.2f MB）\n", skel_mb, full_mb);
+        expectTrue(skel_mb > 0.05 && skel_mb < 2.0, "骨架远小于原字体（上限取 2 MB）");
+
+        // 骨架自己得是一份合法 SFNT：能被 HarfBuzz 打开，且字形数与原字体一致。
+        //   这一条是"骨架没拼坏"的直接判据 —— 表目录偏移算错就会在这里露出来。
+        hb_blob_t* skel_blob =
+            hb_blob_create(reinterpret_cast<const char*>(skeleton.data()),
+                           static_cast<unsigned>(skeleton.size()), HB_MEMORY_MODE_READONLY,
+                           nullptr, nullptr);
+        hb_face_t* skel_face = hb_face_create(skel_blob, 0);
+        const unsigned skel_glyphs = skel_face ? hb_face_get_glyph_count(skel_face) : 0;
+        const unsigned full_glyphs = lib.face(cjk)->glyphCount();
+        if (skel_face) hb_face_destroy(skel_face);
+        hb_blob_destroy(skel_blob);
+        expectTrue(skel_glyphs == full_glyphs && full_glyphs > 0,
+                   "骨架是合法 SFNT 且字形数与原字体一致（" + std::to_string(skel_glyphs) +
+                       " vs " + std::to_string(full_glyphs) + "）");
+
+        // 按需读与整份读逐字节相同：偏移算术与块缓存的正确性都在这一条上。
+        std::ifstream in(cjkPath, std::ios::binary);
+        const std::vector<uint8_t> whole((std::istreambuf_iterator<char>(in)),
+                                         std::istreambuf_iterator<char>());
+        expectTrue(whole.size() == src.size(), "数据源报的大小与文件实际大小一致");
+
+        bool same_bytes = true;
+        const uint64_t offsets[] = {0, 1, 12, 63, 64, 4095, 4096, 65535, 65536, 65537};
+        for (uint64_t off : offsets) {
+            if (off >= whole.size()) continue;
+            const size_t n =
+                std::min<size_t>(96, whole.size() - static_cast<size_t>(off));
+            std::vector<uint8_t> got(n, 0);
+            if (!src.readAt(off, got.data(), n) ||
+                !std::equal(got.begin(), got.end(), whole.begin() + static_cast<size_t>(off))) {
+                same_bytes = false;
+            }
+        }
+        // 文件尾单独取一段 —— 这是最容易把偏移算错的地方。
+        const size_t tail = 64;
+        const uint64_t tail_off = src.size() - tail;
+        std::vector<uint8_t> got_tail(tail, 0);
+        if (!src.readAt(tail_off, got_tail.data(), tail) ||
+            !std::equal(got_tail.begin(), got_tail.end(),
+                        whole.begin() + static_cast<size_t>(tail_off))) {
+            same_bytes = false;
+        }
+        expectTrue(same_bytes, "十个位置（含块边界前后与文件尾）的按需读逐字节等于整份读");
+
+        std::vector<uint8_t> probe(16, 0);
+        expectTrue(!src.readAt(src.size() - 4, probe.data(), 16),
+                   "越过文件尾的读被拒（不返回垃圾）");
+
+        // 缓存生效的直接判据：同一区间连读两次，第二次一次存储都不落。
+        //   只数总命中是测不出来的 —— 拼骨架时每张表只读一次，本来就全是不命中。
+        const uint64_t probe_off = 1u << 20;
+        std::vector<uint8_t> p1(4096, 0);
+        std::vector<uint8_t> p2(4096, 0);
+        const size_t reads_before = src.cache().storageReads();
+        const bool r1 = src.readAt(probe_off, p1.data(), p1.size());
+        const size_t reads_first = src.cache().storageReads();
+        const bool r2 = src.readAt(probe_off, p2.data(), p2.size());
+        const size_t reads_second = src.cache().storageReads();
+        expectTrue(r1 && r2 && p1 == p2, "同一区间两次读到相同内容");
+        expectTrue(reads_first > reads_before, "第一次读落了存储");
+        expectTrue(reads_second == reads_first, "第二次读全部命中，一次存储都没落");
+
+        const FontBlockCache& c = src.cache();
+        std::printf("     块缓存：命中 %zu，未命中 %zu，落存储 %zu 次 / %.1f KB，IO %.3f ms\n",
+                    c.hits(), c.misses(), c.storageReads(),
+                    static_cast<double>(c.storageBytes()) / 1024.0, c.ioMs());
+        expectTrue(c.misses() > 0 && c.storageReads() == c.misses(),
+                   "拼骨架确实落了存储，且落存储次数等于未命中次数");
+        expectTrue(c.storageBytes() >= skeleton.size(),
+                   "从存储搬进来的字节不少于骨架本身");
+        expectTrue(c.residentBytes() <= 48u * 64u * 1024u, "常驻不超过块数乘块大小");
+    }
+
+    std::printf("\n[按需] 按需脸与全量脸的整形结果逐字段相同\n");
+    {
+        FontLibrary lazy;
+        const int lazy_cjk = lazy.addFaceLazy(cjkPath);
+        const int lazy_latin = lazy.addFace(latinPath);
+        expectTrue(lazy_cjk >= 0, "按需模式能装上一张脸");
+        if (lazy_cjk >= 0) {
+            FontFace* lf = lazy.face(lazy_cjk);
+            expectTrue(lf->source() != nullptr, "按需脸挂着数据源");
+            expectTrue(lf->glyphCount() == lib.face(cjk)->glyphCount(),
+                       "按需脸的字形数与全量脸一致");
+
+            const FontInstance* full = lib.instance(cjk, kSize);
+            const FontInstance* part = lazy.instance(lazy_cjk, kSize);
+            const ShapedText a =
+                shapeText(full->hb(), kCJK_sentence, WritingMode::HorizontalTB(), "zh");
+            const ShapedText b =
+                shapeText(part->hb(), kCJK_sentence, WritingMode::HorizontalTB(), "zh");
+
+            bool identical =
+                a.glyphs.size() == b.glyphs.size() && a.inline_advance == b.inline_advance;
+            for (size_t i = 0; identical && i < a.glyphs.size(); ++i) {
+                const ShapedGlyph& x = a.glyphs[i];
+                const ShapedGlyph& y = b.glyphs[i];
+                identical = x.glyph_id == y.glyph_id && x.cluster == y.cluster &&
+                            x.x_advance == y.x_advance && x.y_advance == y.y_advance &&
+                            x.x_offset == y.x_offset && x.y_offset == y.y_offset;
+            }
+            std::printf("     字形数 %zu vs %zu，推进 %d vs %d\n", a.glyphs.size(), b.glyphs.size(),
+                        a.inline_advance, b.inline_advance);
+            expectTrue(identical, "同一段文本：两种装载方式的整形结果逐字段相同");
+
+            // 回退链也要一致：这是"骨架的 cmap 覆盖与原字体相同"的间接判据。
+            //   探针用的是 10 上标 9 /L —— NotoSansSC 恰好没有 U+2079，回退真的会被走到。
+            const std::vector<int> chain_full{cjk, latin};
+            const std::vector<int> chain_lazy{lazy_cjk, lazy_latin};
+            const std::vector<FontRun> rf = itemizeByFont(lib, kMixedProbe, chain_full, kSize);
+            const std::vector<FontRun> rl = itemizeByFont(lazy, kMixedProbe, chain_lazy, kSize);
+            // 比"命中的是哪张脸"要用文件路径，不能比 face_index —— 后者是库内下标，
+            //   两个库的装载顺序不同就不一样，拿它比会把"结果其实相同"误判成不同。
+            bool runs_same = rf.size() == rl.size();
+            for (size_t i = 0; runs_same && i < rf.size(); ++i) {
+                runs_same = rf[i].cp_begin == rl[i].cp_begin && rf[i].cp_end == rl[i].cp_end &&
+                            lib.facePath(rf[i].face_index) == lazy.facePath(rl[i].face_index);
+            }
+            std::printf("     回退段 %zu vs %zu\n", rf.size(), rl.size());
+            expectTrue(runs_same, "字体回退的切段与命中字体也一致（cmap 覆盖没变）");
+        }
     }
 
     std::printf("\n──────────────────────────────\n");

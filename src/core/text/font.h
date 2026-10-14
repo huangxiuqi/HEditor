@@ -18,6 +18,7 @@
 struct hb_blob_t;
 struct hb_face_t;
 struct hb_font_t;
+struct hb_user_data_key_t;
 
 namespace heditor {
 
@@ -25,6 +26,16 @@ namespace heditor {
  * 每磅用多少个 HarfBuzz scale 单位。256 让 1/256 磅 ≈ 0.005 px（@96dpi），足够精确。
  */
 inline constexpr float kFontScalePerPt = 256.0f;
+
+class FontSource;
+
+/**
+ * hb_face 上挂 FontSource 的键。
+ *
+ * render 层只能从 hb_face 反查数据源（它拿不到 FontFace），两处共用这个静态
+ * 实例作为标识。
+ */
+hb_user_data_key_t* fontSourceKey();
 
 /**
  * 字体文件（进程内只加载一次）
@@ -42,11 +53,24 @@ public:
      * 而不是打进 wasm 包（生产环境字体本来就来自服务端/CDN）。
      */
     bool loadFromMemory(const std::string& name, const uint8_t* data, size_t len);
+    /**
+     * 按需模式：磁盘上留原文件，内存里只放骨架（小表）与块缓存。
+     *
+     * HarfBuzz 拿到的是骨架（排版要读的表一张不少，不足 1 MB），Skia 的 FreeType
+     * 后端经过数据源按需读轮廓与变体数据。整份字体里按字形可寻址的大表占九成以上，
+     * 所以这条路的常驻降到骨架加块缓存那么多。
+     */
+    bool loadFromFileLazy(const std::string& path);
 
     hb_face_t* face() const { return face_; }
     const std::string& path() const { return path_; }
     bool valid() const { return face_ != nullptr; }
     unsigned glyphCount() const;
+
+    /**
+     * 按需模式的数据源；整份装载时为空。render 层靠它按需取字节。
+     */
+    FontSource* source() const { return source_.get(); }
 
 private:
     bool buildFromData(const std::string& name);
@@ -55,6 +79,7 @@ private:
     std::vector<uint8_t> data_;
     hb_blob_t* blob_ = nullptr;
     hb_face_t* face_ = nullptr;
+    std::unique_ptr<FontSource> source_;
 };
 
 /**
@@ -108,13 +133,37 @@ private:
  * 缓存的意义在于——同一个字号在一篇文书里会出现成百上千次，
  * 每次都 hb_font_create 会白白制造大量对象。
  */
+/**
+ * 字体按需读的账（所有数据源之和）。
+ *
+ * 判"按需是否划算"就靠这几个数：命中率高、落存储次数远小于字形数，才说明块缓存
+ * 真的在挡；常驻字节是这条路换来的收益。整份装载的脸没有数据源，对总账没有贡献。
+ */
+struct FontCacheTotals {
+    size_t hits = 0;
+    size_t misses = 0;
+    size_t storage_reads = 0;
+    size_t storage_bytes = 0;
+    size_t resident_bytes = 0;
+    double io_ms = 0.0;
+};
+
 class FontLibrary {
 public:
     /**
      * 返回字体索引；失败返回 -1
      */
     int addFace(const std::string& path);
+    /**
+     * 按需装一张脸：磁盘上留原文件，内存里只放骨架与块缓存。
+     */
+    int addFaceLazy(const std::string& path);
     int addFaceFromMemory(const std::string& name, const uint8_t* data, size_t len);
+
+    /**
+     * 所有按需数据源的统计之和（整份装载的脸不计）。
+     */
+    FontCacheTotals cacheTotals() const;
 
     int faceCount() const { return static_cast<int>(faces_.size()); }
     FontFace* face(int index);

@@ -367,6 +367,54 @@ function loadScript(src) {
 /**
  * 启动
  */
+/**
+ * 字体装载模式：'full' 把整份字节交给引擎（原有方式），'lazy' 先写进 MEMFS
+ * 再让引擎按路径按需读（内存里只留一张骨架与块缓存）。探针靠 reloadFonts
+ * 在同一页里对照两者。
+ */
+let fontMode = 'full';
+
+/**
+ * 装字体并设好角色。两种模式的差别只在"字节怎么交给引擎"这一步：
+ *   lazy：字节写进 MEMFS（数据留在 JS 侧），引擎拿路径按块读；
+ *   full：字节穿边界整份交给引擎。
+ * 返回装载行给启动面板显示，调用方不必知道模式。
+ */
+async function loadFonts(mode) {
+  const indices = {};
+  const rows = [];
+  let bytes = 0;
+  const t0 = performance.now();
+
+  for (const f of FONTS) {
+    setStatus(`加载字体 ${f.label}…`);
+    const res = await fetch(new URL(f.path, BASE));
+    if (!res.ok) throw new Error(`${f.path} → HTTP ${res.status}`);
+    const buf = new Uint8Array(await res.arrayBuffer());
+    bytes += buf.length;
+
+    let idx = -1;
+    if (mode === 'lazy') {
+      // MEMFS 里用文件名：引擎拿到的是路径，它按块去读。canOwn 传 false，
+      //   由 MEMFS 自己持有一份，省得与 buf 的生存期纠缠。
+      const name = '/' + f.path.split('/').pop();
+      mod.FS.createDataFile('/', name, buf, true, false);
+      idx = mod.loadFontFromFile(name);
+    } else {
+      const ptr = mod.allocBuffer(buf.length);  // ① 在 wasm 堆里要一块地
+      mod.HEAPU8.set(buf, ptr);                 // ② 字节穿边界（alloc 之后才读 HEAPU8）
+      idx = mod.loadFont(f.label, ptr, buf.length);  // ③ wasm 侧解析
+      mod.freeBuffer(ptr);
+    }
+    if (idx < 0) throw new Error(`字体解析失败：${f.path}（${mode}）`);
+    indices[f.role] = idx;
+    rows.push([f.label, `${kb(buf.length)} → #${idx}（${mode}）`]);
+  }
+
+  mod.setFontRoles(indices.cjk, indices.mongol, indices.latin);
+  return { indices, rows, bytes, ms: performance.now() - t0 };
+}
+
 async function boot() {
   setStatus('加载 WASM 胶水层…');
   // 先问一次"磁盘上那份 wasm 是什么时候构建的"。
@@ -438,31 +486,13 @@ async function boot() {
       : '页面实际加载的那份 wasm 的配置时刻，以及产物文件的构建时刻';
   }
 
-  // 字体：JS fetch 进来，字节穿过边界，wasm 包里一个字体都没有
-  const indices = {};
-  const fontRows = [];
-  const tFont = performance.now();
-  let fontBytes = 0;
-
-  for (const f of FONTS) {
-    setStatus(`加载字体 ${f.label}…`);
-    const res = await fetch(new URL(f.path, BASE));
-    if (!res.ok) throw new Error(`${f.path} → HTTP ${res.status}`);
-    const buf = new Uint8Array(await res.arrayBuffer());
-    fontBytes += buf.length;
-
-    const ptr = mod.allocBuffer(buf.length);   // ① 在 wasm 堆里要一块地
-    mod.HEAPU8.set(buf, ptr);                  // ② 字节穿边界（alloc 之后才读 HEAPU8，避开 grow 失效）
-    const idx = mod.loadFont(f.label, ptr, buf.length);  // ③ wasm 侧解析
-    mod.freeBuffer(ptr);
-
-    if (idx < 0) throw new Error(`字体解析失败：${f.path}`);
-    indices[f.role] = idx;
-    fontRows.push([f.label, `${kb(buf.length)} → #${idx}`]);
-  }
-  const fontMs = performance.now() - tFont;
-
-  mod.setFontRoles(indices.cjk, indices.mongol, indices.latin);
+  // 字体：JS fetch 进来，字节穿过边界，wasm 包里一个字体都没有。
+  //   装载方式由 loadFonts 决定（这里可能是按需那条路，见它的说明）。
+  const fontLoad = await loadFonts(fontMode);
+  const indices = fontLoad.indices;
+  const fontRows = fontLoad.rows;
+  const fontBytes = fontLoad.bytes;
+  const fontMs = fontLoad.ms;
 
   kv('boot', [
     ['WASM 构建时间（wasm 自己报的）', runStamp],
@@ -1140,6 +1170,15 @@ window.__heditor = {
     return this.editStats;
   },
 
+  // 同上，但每段用一批不同的常用字 —— 给"字形集合要有规模"的判据用。
+  //   整篇同一个字时字形缓存与块缓存都会命中到失真，按需读的账量不出来。
+  loadStressDocumentDiverse(paras, chars) {
+    if (!ready) return null;
+    mod.loadStressDocumentDiverse(Number(paras), Number(chars));
+    relayoutAndBlit();
+    return this.editStats;
+  },
+
   // 切场景并按 zoom 重排重绘（供探针用；走的是和 UI 完全相同的路径）
   //
   // 返回值就是"本次全量呈现"的统计 —— 探针要拿它当增量比值的分母。
@@ -1352,6 +1391,25 @@ window.__heditor = {
   //   默认键位在 onKeyDown 里：Ctrl/Cmd+Z 撤、Ctrl+Y 或 Ctrl+Shift+Z 重做。
   //   这里留着的是同一件事的宿主门面版：探针与自动化用它（不必造键盘事件），
   //   也不受 ready/busy 限制 —— 键位那条路要受。
+  /**
+   * 重装字体并切换装载模式（'full' 整份交给引擎 / 'lazy' 写 MEMFS 后按需读）。
+   *   探针靠它在一页里对照两种模式：引擎侧只新增脸、不做替换，所以两种模式的脸
+   *   会同时留在库里 —— 按需那条路的统计只算有数据源的脸，不受影响。
+   */
+  async reloadFonts(mode) {
+    const m = mode === 'lazy' ? 'lazy' : 'full';
+    const r = await loadFonts(m);
+    fontMode = m;
+    relayoutAndBlit();
+    return { mode: fontMode, rows: r.rows };
+  },
+  get fontMode() { return fontMode; },
+  // 视口锚点：探针量"按需读覆盖多少页"时用。走真实滚动路径受布局与 rAF 节流影响，
+  //   直接设锚点更稳，也正好把"换窗口就要读新字形"这件事单独量出来。
+  setViewportAnchor(first, count) {
+    mod.setViewportAnchor(Number(first), Number(count));
+    return this.present();
+  },
   undo() { if (!mod.undoEdit()) return null; return this.present(); },
   redo() { if (!mod.redoEdit()) return null; return this.present(); },
 

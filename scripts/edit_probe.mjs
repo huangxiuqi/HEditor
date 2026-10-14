@@ -2649,6 +2649,90 @@ async function main() {
               JSON.stringify(report.consoleErrors));
   }
 
+  chk.section('[17] 字体按需读：命中率 / 每页落存储 / 每帧 IO');
+  {
+    // 整份装载时这六个数应当全是零 —— 没有数据源，也就没有按需读的账。
+    //   这一条同时是"按需这条路没被误开"的判据。
+    const full = await c.eval('return window.__heditor.editStats;');
+    chk.check('整份装载时按需的账全为零（没有数据源）',
+              Number(full.fontStorageReads) === 0 && Number(full.fontResidentBytes) === 0 &&
+                Number(full.fontCacheHits) === 0,
+              `reads=${full.fontStorageReads} resident=${full.fontResidentBytes}`);
+
+    const switched = await c.eval('return window.__heditor.reloadFonts("lazy");');
+    chk.check('能切到按需装载（字体写进 MEMFS，引擎按路径装）',
+              !!(switched && switched.mode === 'lazy'), JSON.stringify(switched && switched.mode));
+
+    // 三个数要在真实排版上量：装 2000 段并把它排一遍。
+    //   用 diverse 那一个入口 —— stress 文档整篇是同一个字，字形集合只有一个，
+    //   字形缓存与块缓存都会命中到失真（量出来的数完全不反映真文档）。
+    await c.eval('window.__heditor.loadStressDocumentDiverse(2000, 20); return true;');
+    await c.eval('return window.__heditor.present();');
+    // 再换几个窗口位置。只量"当前窗口那 3 页"会低估浏览成本 —— 换到新区域
+    //   要读它自己的字形。这里直接设视口锚点（比模拟滚动稳），前中后各一次。
+    for (const first of [0, 25, 50]) {
+      await c.eval(`return window.__heditor.setViewportAnchor(${first}, 3);`);
+    }
+    const st = await c.eval('return window.__heditor.editStats;');
+
+    const hits = Number(st.fontCacheHits);
+    const misses = Number(st.fontCacheMisses);
+    const reads = Number(st.fontStorageReads);
+    const ioBytes = Number(st.fontStorageBytes);
+    const ioMs = Number(st.fontIoMs);
+    const resident = Number(st.fontResidentBytes);
+    const glyphs = Number(st.glyphCount);
+    const pages = Math.max(1, Number(st.totalPages));
+    const hitRate = hits + misses > 0 ? hits / (hits + misses) : 0;
+
+    report.fontLazy = {
+      hits, misses, reads, ioBytes, ioMs, resident, glyphs, pages,
+      hitRate: +hitRate.toFixed(4),
+      readsPerPage: +(reads / pages).toFixed(2),
+      residentMB: +(resident / 1048576).toFixed(2),
+      ioPerPageMs: +(ioMs / pages).toFixed(3),
+    };
+    chk.check('按需读真的发生了（未命中不为零）', misses > 0, `misses=${misses}`);
+    chk.check(`块缓存真的在挡：命中率 ${(hitRate * 100).toFixed(1)}%`,
+              hitRate > 0.5, `hits=${hits} misses=${misses}`);
+    chk.check(`落存储次数 ${reads} 远小于字形数 ${glyphs}`, reads < glyphs,
+              `${reads} vs ${glyphs}`);
+    chk.check(`每页落存储 ${(reads / pages).toFixed(2)} 次`, reads / pages < 200,
+              `pages=${pages}`);
+    chk.check(`每页存储 IO ${(ioMs / pages).toFixed(3)} ms（上限 1 ms）`,
+              ioMs / pages < 1.0, `ioMs=${ioMs.toFixed(3)}`);
+    // 上限按数据源个数算：三个字体各有一份块缓存（48 块 × 64 KB）。
+    const residentCap = 3 * 48 * 64 * 1024;
+    chk.check(
+      `常驻 ${(resident / 1048576).toFixed(2)} MB（上限 ${(residentCap / 1048576).toFixed(1)} MB）`,
+      resident <= residentCap, `resident=${resident}`);
+    // 这条才是收益本身：整份三个字体约 20 MB，按需的常驻该只有它的零头。
+    chk.check('常驻不到整份字体的四分之一', resident < 5 * 1024 * 1024,
+              `${(resident / 1048576).toFixed(2)} MB vs 约 20 MB`);
+    chk.check('按需装载后不缺字（骨架没漏掉排版要用的表）',
+              Number(st.missingGlyphCount) === 0, `missing=${st.missingGlyphCount}`);
+
+    // 最要紧的一条：帧上必须真的有字。读数字再漂亮，画不出来就是没走通 ——
+    //   而且这一条不能只看"非零"，要跟整份模式画同一页的墨迹比。
+    const INK = `
+      const f = window.__heditor.rawFrame();
+      let n = 0;
+      for (let i = 0; i + 3 < f.length; i += 4) {
+        if (f[i] < 200 || f[i+1] < 200 || f[i+2] < 200) ++n;
+      }
+      return n;
+    `;
+    const inkLazy = await c.eval(INK);
+    await c.eval('return window.__heditor.reloadFonts("full");');
+    await c.eval('window.__heditor.loadStressDocumentDiverse(2000, 20); return true;');
+    const inkFull = await c.eval(INK);
+    report.inkCompare = { lazy: inkLazy, full: inkFull };
+    chk.check('按需模式下帧上有字', inkLazy > 1000, `${inkLazy} px`);
+    chk.check(`按需与整份渲染同一页的墨迹一致（${inkLazy} vs ${inkFull}）`,
+              inkFull > 1000 && Math.abs(inkLazy - inkFull) / Math.max(1, inkFull) < 0.02,
+              `${inkLazy} vs ${inkFull}`);
+  }
+
   // 收尾：载入表单样例 + 恢复闪烁，截一张给人看
   //   刻意停在表单模式（而不是纯文档场景）：截图要能一眼看出
   //     "字段的边界长什么样、只读的那个是灰的"。文档模式也画括号，只有只读模式不画。

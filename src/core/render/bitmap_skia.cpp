@@ -15,6 +15,9 @@
 
 #if defined(HEDITOR_USE_SKIA)
 
+#include "core/text/font.h"
+#include "core/text/font_source.h"
+
 #include <hb.h>
 
 #include <algorithm>
@@ -68,6 +71,70 @@ inline SkColor toSk(Color c) { return SkColorSetARGB(c.a, c.r, c.g, c.b); }
  */
 void releaseHbBlob(const void* /*ptr*/, void* ctx) {
     hb_blob_destroy(static_cast<hb_blob_t*>(ctx));
+}
+
+/**
+ * 按需字体流：把 FreeType 的读请求转给字体数据源。
+ *
+ * getMemoryBase 故意返回空。Skia 的 FreeType 端口据此在内存与流之间选后者
+ * （判定处见 Skia 的 src/ports/SkFontHost_FreeType.cpp 里 openFace 的两条分岔），
+ * 读取于是变成 FT_Stream 的 seek 加 read，而不是把整份字体钉在内存里。
+ * duplicate 与 fork 都共享同一个数据源，块缓存与统计因此也是共享的。
+ */
+class CachedFontStream : public SkStreamAsset {
+public:
+    explicit CachedFontStream(FontSource& src, uint64_t pos = 0) : src_(src), pos_(pos) {}
+
+    size_t read(void* buffer, size_t size) override {
+        if (buffer == nullptr || size == 0) return 0;
+        if (pos_ >= src_.size()) return 0;
+        const uint64_t left = src_.size() - pos_;
+        size_t want = size;
+        if (static_cast<uint64_t>(want) > left) want = static_cast<size_t>(left);
+        if (!src_.readAt(pos_, buffer, want)) return 0;
+        pos_ += want;
+        return want;
+    }
+
+    bool isAtEnd() const override { return pos_ >= src_.size(); }
+    bool rewind() override { pos_ = 0; return true; }
+    size_t getPosition() const override { return static_cast<size_t>(pos_); }
+
+    bool seek(size_t position) override {
+        if (static_cast<uint64_t>(position) > src_.size()) return false;
+        pos_ = position;
+        return true;
+    }
+
+    bool move(long offset) override {
+        const int64_t next = static_cast<int64_t>(pos_) + static_cast<int64_t>(offset);
+        if (next < 0 || static_cast<uint64_t>(next) > src_.size()) return false;
+        pos_ = static_cast<uint64_t>(next);
+        return true;
+    }
+
+    size_t getLength() const override { return static_cast<size_t>(src_.size()); }
+
+private:
+    /**
+     * 副本从数据开头开始（Skia 对 duplicate 的约定）。
+     */
+    SkStreamAsset* onDuplicate() const override { return new CachedFontStream(src_); }
+    /**
+     * fork 停在当前位置（Skia 对 fork 的约定）。
+     */
+    SkStreamAsset* onFork() const override { return new CachedFontStream(src_, pos_); }
+
+    FontSource& src_;
+    uint64_t pos_ = 0;
+};
+
+/**
+ * 从 hb_face 反查它的按需数据源。整份装载的脸没有挂，返回空。
+ */
+FontSource* fontSourceOf(hb_face_t* face) {
+    if (face == nullptr) return nullptr;
+    return static_cast<FontSource*>(hb_face_get_user_data(face, fontSourceKey()));
 }
 
 /**
@@ -211,26 +278,32 @@ const SkFont* Bitmap::SkiaImpl::fontFor(hb_font_t* hbf, float units_to_px) {
     const TfKey tkey{face, has_vars ? vfp : 0};
     sk_sp<SkTypeface>& tf = typefaces[tkey];
     if (!tf) {
-        hb_blob_t* blob = hb_face_reference_blob(face);  // 返回新引用，归我们
-        if (!blob) return nullptr;
-        const unsigned len = hb_blob_get_length(blob);
-        if (len == 0) {
-            hb_blob_destroy(blob);
-            return nullptr;
-        }
-        const char* p = hb_blob_get_data(blob, nullptr);
-        sk_sp<SkData> data = SkData::MakeWithProc(p, len, releaseHbBlob, blob);
+        // 变体坐标两条路都要：带变体只能走带 SkFontArguments 的重载，
+        //   而 makeFromData 没有接收变体位置的那一个。
+        SkFontArguments args;
         if (has_vars) {
-            // 带变体只能走 makeFromStream(stream, SkFontArguments) ——
-            // makeFromData 没有接收 SkFontArguments 的重载。
-            SkFontArguments args;
             SkFontArguments::VariationPosition pos;
             pos.coordinates = vcoords.data();
             pos.coordinateCount = static_cast<int>(vcoords.size());
             args.setVariationDesignPosition(pos);
-            tf = font_mgr->makeFromStream(SkMemoryStream::Make(std::move(data)), args);
+        }
+        FontSource* src = fontSourceOf(face);
+        if (src != nullptr) {
+            // 按需模式：流的内存基址为空，Skia 于是把读取交给 FT_Stream，
+            //   轮廓与变体数据用到哪块读哪块。数据源由 FontFace 持有到进程结束，
+            //   流的生命周期由 Skia 管，两边都不会先走。
+            tf = font_mgr->makeFromStream(std::make_unique<CachedFontStream>(*src), args);
         } else {
-            tf = font_mgr->makeFromData(std::move(data));
+            hb_blob_t* blob = hb_face_reference_blob(face);  // 返回新引用，归我们
+            if (!blob) return nullptr;
+            const unsigned len = hb_blob_get_length(blob);
+            if (len == 0) {
+                hb_blob_destroy(blob);
+                return nullptr;
+            }
+            const char* p = hb_blob_get_data(blob, nullptr);
+            sk_sp<SkData> data = SkData::MakeWithProc(p, len, releaseHbBlob, blob);
+            tf = font_mgr->makeFromStream(SkMemoryStream::Make(std::move(data)), args);
         }
         if (!tf) return nullptr;
     }

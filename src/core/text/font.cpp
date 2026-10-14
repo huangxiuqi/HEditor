@@ -1,5 +1,7 @@
 #include "core/text/font.h"
 
+#include "core/text/font_source.h"
+
 #include <hb-ot.h>
 #include <hb.h>
 
@@ -26,6 +28,31 @@ bool FontFace::loadFromMemory(const std::string& name, const uint8_t* data, size
     if (!data || len == 0) return false;
     data_.assign(data, data + len);
     return buildFromData(name);
+}
+
+bool FontFace::loadFromFileLazy(const std::string& path) {
+    auto src = std::make_unique<FontSource>();
+    if (!src->open(path)) return false;
+
+    std::vector<uint8_t> skeleton;
+    if (!src->buildSkeleton(&skeleton)) return false;
+
+    data_ = std::move(skeleton);
+    source_ = std::move(src);
+    if (!buildFromData(path)) {
+        source_.reset();
+        return false;
+    }
+    // 数据源挂在 hb_face 上：render 层手里只有 hb_face（拿不到 FontFace），
+    //   它靠这个键反查按需取字节的那条路。销毁交给 FontFace 自己管，所以
+    //   destroy 传空 —— 两者的生命周期都是到进程结束，不会先走一个。
+    hb_face_set_user_data(face_, fontSourceKey(), source_.get(), nullptr, false);
+    return true;
+}
+
+hb_user_data_key_t* fontSourceKey() {
+    static hb_user_data_key_t key;
+    return &key;
 }
 
 bool FontFace::buildFromData(const std::string& name) {
@@ -114,6 +141,13 @@ int FontLibrary::addFace(const std::string& path) {
     return static_cast<int>(faces_.size()) - 1;
 }
 
+int FontLibrary::addFaceLazy(const std::string& path) {
+    auto f = std::make_unique<FontFace>();
+    if (!f->loadFromFileLazy(path)) return -1;
+    faces_.push_back(std::move(f));
+    return static_cast<int>(faces_.size()) - 1;
+}
+
 int FontLibrary::addFaceFromMemory(const std::string& name, const uint8_t* data, size_t len) {
     auto f = std::make_unique<FontFace>();
     if (!f->loadFromMemory(name, data, len)) return -1;
@@ -135,6 +169,22 @@ const std::string& FontLibrary::facePath(int index) const {
     static const std::string kEmpty;
     const FontFace* f = face(index);
     return f ? f->path() : kEmpty;
+}
+
+FontCacheTotals FontLibrary::cacheTotals() const {
+    FontCacheTotals t;
+    for (const auto& f : faces_) {
+        const FontSource* src = f->source();
+        if (src == nullptr) continue;  // 整份装载的脸没有数据源
+        const FontBlockCache& c = src->cache();
+        t.hits += c.hits();
+        t.misses += c.misses();
+        t.storage_reads += c.storageReads();
+        t.storage_bytes += c.storageBytes();
+        t.resident_bytes += c.residentBytes();
+        t.io_ms += c.ioMs();
+    }
+    return t;
 }
 
 FontInstance* FontLibrary::instance(int face_index, float size_pt) {

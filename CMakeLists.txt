@@ -170,6 +170,7 @@ add_library(heditor_core STATIC
   src/core/doc/revision.cpp
   src/core/doc/serialize.cpp
   src/core/text/font.cpp
+  src/core/text/font_source.cpp
   src/core/text/shaper.cpp
   src/core/text/fallback.cpp
   ${HEDITOR_RENDER_SRC}
@@ -274,8 +275,10 @@ if(EMSCRIPTEN)
     #   每实例一份）—— 要压内存先做字体子集化，比调这个数更有效。
     -sINITIAL_MEMORY=16MB
     -sSTACK_SIZE=2MB
-    -sFILESYSTEM=0
-    -sEXPORTED_RUNTIME_METHODS=HEAPU8,HEAPU32
+    # 字体按需读要有文件系统：宿主把字体字节写进 MEMFS，引擎按路径按需取块。
+    #   默认的 -sFILESYSTEM=0 会让 fopen 直接失败，所以这里必须放开。
+    -sFORCE_FILESYSTEM=1
+    -sEXPORTED_RUNTIME_METHODS=HEAPU8,HEAPU32,FS
   )
   # 供宿主脚本定位产物
   set_target_properties(heditor_wasm PROPERTIES

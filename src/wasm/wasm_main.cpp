@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "core/engine/engine.h"
+#include "core/utils/utf8.h"
 #include "demo/demo_documents.h"
 
 #ifndef HEDITOR_BUILD_STAMP
@@ -57,6 +58,12 @@ void freeBuffer(uintptr_t p) { std::free(reinterpret_cast<void*>(p)); }
 int loadFont(const std::string& name, uintptr_t ptr, size_t len) {
     return g_engine.fonts().addFaceFromMemory(name, reinterpret_cast<const uint8_t*>(ptr), len);
 }
+
+/**
+ * 按需装一张脸：字体已由宿主写进 MEMFS，这里只给路径。引擎按需读它的块，
+ * 内存里只留一张骨架（小表）与块缓存，不再整份常驻。
+ */
+int loadFontFromFile(const std::string& path) { return g_engine.fonts().addFaceLazy(path); }
 
 void setFontRoles(int cjk_index, int mongol_index, int latin_index) {
     g_cjk_font = cjk_index;
@@ -350,6 +357,15 @@ std::string statsJson() {
     o << "\"fontInstances\":" << s.font_instance_count << ",";
     o << "\"fontRunCount\":" << s.font_run_count << ",";
     o << "\"missingGlyphCount\":" << s.missing_glyph_count << ",";
+    // 字体按需读的账。整份装载时这六个数全是零 —— 那就说明按需这条路没被走到。
+    //   实时取而不是用快照：字形光栅化在排版之后，那一段的读不进排版时的快照。
+    const FontCacheTotals fc = g_engine.fonts().cacheTotals();
+    o << "\"fontCacheHits\":" << fc.hits << ",";
+    o << "\"fontCacheMisses\":" << fc.misses << ",";
+    o << "\"fontStorageReads\":" << fc.storage_reads << ",";
+    o << "\"fontStorageBytes\":" << fc.storage_bytes << ",";
+    o << "\"fontIoMs\":" << fc.io_ms << ",";
+    o << "\"fontResidentBytes\":" << fc.resident_bytes << ",";
     o << "\"shapeMs\":" << s.shape_ms << ",";
     o << "\"layoutMs\":" << s.layout_ms << ",";
     o << "\"pageFpMs\":" << s.page_fp_ms << ",";
@@ -742,14 +758,29 @@ std::string bracketSlotsJson() {
  * 为什么必须有这个口子：演示场景只有一段，量出来的编译与索引耗时全是 0.0x ms ——
  * 既看不出 O(文档) 的那一层，也证明不了"增量到底省了多少"。性能判据只能在大文档上做，
  * 而且要能调长度：同一份代码在 10 段与 1000 段上的差别，才是可证伪的证据。
+ *
+ * diverse 为真时按一批不同的常用字轮着填，否则整篇是同一个字。这个开关是为字体
+ * 按需读的账设的：同一个字重复时字形集合只有一个，字形缓存与块缓存都会命中到失真，
+ * 落存储的次数与字节都量不出来。真实中文的重复率本来就高，所以"有重复但集合有
+ * 规模"才像真文档。
  */
-void loadStressDocument(int paras, int chars) {
+void loadStressDocumentImpl(int paras, int chars, bool diverse) {
     if (paras < 1) paras = 1;
     if (chars < 1) chars = 1;
-    std::string text;
-    for (int k = 0; k < chars; ++k) text += "字";
+
+
     std::vector<BlockSpec> blocks;
     for (int i = 0; i < paras; ++i) {
+        std::string text;
+        for (int k = 0; k < chars; ++k) {
+            if (diverse) {
+                // 用一段连续的基本汉字码点当池子：只为了让字形集合有规模。
+                //   真实文档的不同字数在几百到几千之间，这里取 800 个。
+                appendUtf8(&text, 0x4E00u + (static_cast<uint32_t>(i) * chars + k) % 800u);
+            } else {
+                text += "字";
+            }
+        }
         BlockSpec b;
         b.font_index = g_cjk_font;
         b.size_pt = 12.0f;
@@ -763,6 +794,15 @@ void loadStressDocument(int paras, int chars) {
     g_blocks = std::move(blocks);
     g_fields.clear();
     rebuildDocument(false);
+}
+
+void loadStressDocument(int paras, int chars) { loadStressDocumentImpl(paras, chars, false); }
+
+/**
+ * 同上，但每段用一批不同的常用字 —— 给"字形集合要有规模"的判据用。
+ */
+void loadStressDocumentDiverse(int paras, int chars) {
+    loadStressDocumentImpl(paras, chars, true);
 }
 
 void loadFormSample(int variant) {
@@ -849,6 +889,19 @@ std::string editStatsJson() {
     o << "\"totalMs\":" << e.total_ms << ",";
     o << "\"caretPara\":" << e.caret_para << ",";
     o << "\"caretOffset\":" << e.caret_offset << ",";
+    // 字体按需读的账在这里也带一份：探针取的是编辑统计，排版口那份（statsJson）
+    //   它读不到。六个数实时取，不用 EngineStats 的快照 —— 快照是排版结束那一刻的，
+    //   而字形光栅化发生在排版之后，正是按需读的大头，用快照会把它整个漏掉。
+    const EngineStats& es = g_engine.stats();
+    o << "\"glyphCount\":" << es.glyph_count << ",";
+    o << "\"missingGlyphCount\":" << es.missing_glyph_count << ",";
+    const FontCacheTotals fc = g_engine.fonts().cacheTotals();
+    o << "\"fontCacheHits\":" << fc.hits << ",";
+    o << "\"fontCacheMisses\":" << fc.misses << ",";
+    o << "\"fontStorageReads\":" << fc.storage_reads << ",";
+    o << "\"fontStorageBytes\":" << fc.storage_bytes << ",";
+    o << "\"fontIoMs\":" << fc.io_ms << ",";
+    o << "\"fontResidentBytes\":" << fc.resident_bytes << ",";
     o << "\"caretIndex\":" << e.caret_index << ",";
     o << "\"docCodepoints\":" << e.doc_codepoints << ",";
     o << "\"caretSide\":" << e.caret_side << ",";
@@ -907,6 +960,7 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("allocBuffer", &allocBuffer);
     emscripten::function("freeBuffer", &freeBuffer);
     emscripten::function("loadFont", &loadFont);
+    emscripten::function("loadFontFromFile", &loadFontFromFile);
     emscripten::function("setFontRoles", &setFontRoles);
 
     emscripten::function("setScenario", &setScenario);
@@ -965,6 +1019,7 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("blockedEdits", &blockedEdits);
     emscripten::function("loadFormSample", &loadFormSample);
     emscripten::function("loadStressDocument", &loadStressDocument);
+    emscripten::function("loadStressDocumentDiverse", &loadStressDocumentDiverse);
 
     emscripten::function("frameWidth", &frameWidth);
     emscripten::function("frameHeight", &frameHeight);
