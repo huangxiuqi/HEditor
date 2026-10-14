@@ -2081,6 +2081,37 @@ int main() {
         expectTrue(e.auditLayout() == 0, "★ 平移复用的结果与全量重排一致（几何差 < 1e-3 pt）");
         expectPagesMonotonic("后缀平移复用之后");
 
+        // 段数变化（回车分段）也必须能复用后缀：内容一个字没改，只是段边界挪了。
+        //   这一格与"撑出一行"是两种不同的账：脏区在新版里占两段（前半段 + 新段），
+        //   而段数增量让后缀的段号整体平移，段表、行盒与字形的段号都要跟着改。
+        e.setCaret(100, 8);
+        // 用带 render 的入口：editStats 里的那一份是呈现时抄下来的，
+        //   不 render 就读到上一次的陈旧值（而陈旧值恰好也是"1 段/99 段"，读起来像是通过了）。
+        const bool split = e.splitParagraphAndRender();
+        expectTrue(split, "第 100 段中间回车分段");
+        const EditStats sp = e.editStats();
+        std::printf("     回车分段后：重排 %d 段 / 复用 %d 段 / 共 %d 段（%d 段，平移=%d，%s）\n",
+                    sp.relaid_paragraphs, sp.reused_paragraphs, sp.total_paragraphs,
+                    static_cast<int>(e.blocks().size()), sp.suffix_shifted ? 1 : 0,
+                    sp.layout_was_full ? "全量" : "增量");
+        expectTrue(!sp.layout_was_full, "分段后走的是增量排版（不是整篇重排）");
+        expectTrue(sp.relaid_paragraphs <= 2 && sp.reused_paragraphs >= kParas - 1 - 100,
+                   "★ 回车分段 → 只重排脏区（1~2 段），后缀全部复用");
+        expectTrue(e.auditLayout() == 0, "★ 分段复用的结果与全量重排逐字段一致");
+        expectPagesMonotonic("段数变化的后缀复用之后");
+
+        // 合并回来：段首退格把两段并回一段，同样只该重排脏区。
+        //   与分段是一对反向的开销 —— 两个方向都得走复用，否则用户连按退格会卡。
+        const bool merged = e.backspaceAndRender();
+        expectTrue(merged, "新段段首退格合并回一段");
+        const EditStats mg = e.editStats();
+        std::printf("     合并回来：重排 %d 段 / 复用 %d 段 / 共 %d 段（%d 段）\n",
+                    mg.relaid_paragraphs, mg.reused_paragraphs, mg.total_paragraphs,
+                    static_cast<int>(e.blocks().size()));
+        expectTrue(!mg.layout_was_full && mg.reused_paragraphs >= kParas - 1 - 100,
+                   "★ 退格合并 → 同样只重排脏区，后缀全部复用");
+        expectTrue(e.auditLayout() == 0, "★ 合并复用的结果与全量重排逐字段一致");
+
         // 平移复用的反面：后缀里有竖排段 → "横排行槽折线"那条规则不成立 → 必须续排。
         // 这条同时证明常规续排路径没有被平移路径挤掉（两条路径都要被走到）。
         {
@@ -2627,9 +2658,11 @@ int main() {
             std::printf("     4 段文档在第 2 段分段：重排 %d 段 / 复用 %d 段 / 共 %d 段（%s）\n",
                         sp.relaid_paragraphs, sp.reused_paragraphs, sp.total_paragraphs,
                         sp.layout_was_full ? "全量" : "增量");
+            // 段数变了不等于后缀不能复用：内容一个字没变，只是段边界挪了 ——
+            //   前缀 [0,2) 照旧，脏区占新版的 [2,4)（原第 2 段拆成两段），后缀 [4,5) 整块复用。
             expectTrue(
-                !sp.layout_was_full && sp.reused_paragraphs == 0 && sp.relaid_paragraphs == 3,
-                "★ 段数变了：[0,2) 前缀复用，[2,5) 续排，后缀不复用（段号已经错位）");
+                !sp.layout_was_full && sp.relaid_paragraphs == 2 && sp.reused_paragraphs == 1,
+                "★ 段数变了：只重排脏区 [2,4)，后缀 [4,5) 照旧复用（段号整体平移）");
             expectTrue(e.auditLayout() == 0, "分段粒度下的排版仍与全量逐字段一致");
         }
 
@@ -2934,9 +2967,10 @@ int main() {
                 "（重排 %d 段 / 复用 %d 段）｜ 脏页 %d / 总页 %d\n",
                 best_ms, first.layout_ms, first.relaid_paragraphs, first.reused_paragraphs,
                 first.dirty_page_count, first.total_pages);
+            // 回车只把脏区从 1 段撑成 2 段，后缀（99 段）整块复用 —— 不是续排 101 段。
             expectTrue(first.total_paragraphs == 201 && !first.layout_was_full &&
-                           first.reused_paragraphs == 0 && first.relaid_paragraphs == 101,
-                       "★ 长文档里回车：前缀 [0,100) 复用、后缀 [100,201) 续排（不是整篇重排）");
+                           first.relaid_paragraphs == 2 && first.reused_paragraphs == 99,
+                       "★ 长文档里回车：只重排脏区 2 段，前缀 100 段与后缀 99 段都不动");
         }
 
         // 文档模式下的多段编辑序列：每一步都要"增量 == 全量"
@@ -2957,9 +2991,9 @@ int main() {
                 return n ? (seed >> 16) % n : 0u;
             };
             int bad = 0, splits = 0, merges = 0, full = 0, expect_full = 0, full_with_prefix = 0;
+            int head_steps = 0;
             for (int step = 0; step < 40; ++step) {
                 const int np = static_cast<int>(e.blocks().size());
-                const int lines_before = e.layout().stats.placed_line_count;
                 const int p = static_cast<int>(rnd(static_cast<uint32_t>(np)));
                 const size_t len = e.blocks()[static_cast<size_t>(p)].cp_text.size();
                 const uint32_t what = rnd(4);
@@ -2984,15 +3018,15 @@ int main() {
                 // 没改成的步子（比如在第 0 段段首退格：没有上一段）根本不触发重排，
                 //   不参与"全量步数"的计数 —— 否则账目会凭空多出几步。
                 if (!edited) continue;
-                // 整篇重排的充要条件（两侧都数，比"全量很少"强得多）：脏段之前没有前缀
-                //   可复用（dirty == 0），并且"后缀复用"不成立。后者有三种情形：
-                //   段数变了、行结构变了（行数跟着变）、以及根本没有后缀（文档只剩这一段）。
-                //   只改字而行结构没变时，第 0 段的后缀照样能整块复用（重排 1 段就够）。
+                // 整篇重排的两侧判据（比"全量很少"强得多）：
+                //   必然整篇重排 —— 脏段是第 0 段、且它后面一段都没有（"后缀复用"无从谈起，
+                //     续排也没有前缀可以接着走）。
+                //   绝不整篇重排 —— 脏段之前有前缀（dirty > 0）。段数变、行数变都不再是理由：
+                //     后缀整体平移那一级已经把"段边界挪了"与"行结构变了"都吃掉。
                 const int n_after = static_cast<int>(e.blocks().size());
-                const bool struct_changed =
-                    n_after != np || e.layout().stats.placed_line_count != lines_before;
                 const bool has_suffix = dirty >= 0 && dirty + 1 < n_after;
-                if (dirty <= 0 && (struct_changed || !has_suffix)) ++expect_full;
+                if (dirty <= 0 && !has_suffix) ++expect_full;
+                if (dirty <= 0) ++head_steps;
                 if (e.editStats().layout_was_full) {
                     ++full;
                     if (dirty > 0) ++full_with_prefix;  // 有前缀还整篇重排 = 账目错了
@@ -3007,8 +3041,9 @@ int main() {
             expectTrue(bad == 0, "★ 40 步随机编辑（含跨段）每一步的增量排版都等于全量");
             expectTrue(full_with_prefix == 0,
                        "★ 有前缀可复用的步子从不整篇重排（跨段编辑不放大代价）");
-            expectTrue(full == expect_full,
-                       "★ 整篇重排恰好发生在「脏段为第 0 段且段数/行数变了」的那几步");
+            expectTrue(full >= expect_full && full <= head_steps,
+                       "★ 整篇重排只出现在「脏段是第 0 段」的那几步，"
+                       "且没有后缀的那几步必然整篇重排（两侧都数）");
             expectTrue(frameDiffAgainstFresh(e, fonts17, {}, EditMode::Document, nullptr) == 0,
                        "★ 随机跨段编辑之后，增量上屏 == 从零上屏（逐字节）");
         }

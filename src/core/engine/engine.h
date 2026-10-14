@@ -802,32 +802,33 @@ private:
     };
 
     /**
-     * 后缀复用：只重排第 from 段，然后试着不动后缀。
+     * 后缀复用：只重排脏区，然后试着不动后缀。
      *
-     * 两级判据，从严到宽：一是同状态，后缀的断页、行号与坐标都会与上一轮逐位相同，整块搬回即可；
-     * 二是后缀是纯横排，只有块轴起点变了，于是每一行都只是"平移 + 改页码"（见 shiftSuffixBlockAxis）。
-     * 值得单开这条路，是因为后缀即使全部命中整形缓存，仍要把断行与字形放置重跑一遍，
-     * 成本与后缀长度成正比（还会给每个行盒分配一次簇向量），而"在原行里多打一个字"
-     * 根本不改变行结构。
+     * 两级判据从严到宽：一是同状态 —— 后缀的断页、行号与坐标都与上一轮逐位相同，
+     * 整块搬回即可；二是后缀纯横排 —— 只有块轴起点变了，于是每行只是"平移 + 改页码"。
+     * 段数变化（回车分段 / 退格合并）走的是一级：内容没变、只是段边界挪了，
+     * 此时脏区在旧版占 m_old 段、新版占 m_new 段，m_old 要靠试（算法见 .cpp）。
      *
-     * @param page_lo,page_hi 出参：脏段新旧两版覆盖的页区间，供页指纹只重算这几页，拿不到时写 -1。
+     * @param page_lo,page_hi 出参：脏区新旧两版覆盖的页区间，供页指纹只重算这几页，-1 = 整篇。
+     * @param relaid_paragraphs 出参：脏区在新版里占几段。
      * @return None 时后缀未被动过（调用方可以安全地走续排），其余两种排版已完成。
      */
-    SuffixReuse trySuffixReuse(int from, int* page_lo, int* page_hi);
+    SuffixReuse trySuffixReuse(int from, int* page_lo, int* page_hi, int* relaid_paragraphs);
 
     /**
-     * 后缀整体平移：把 [from+1, 末段] 的每一行沿块轴挪到新的位置，并重编页码与全局行号，
+     * 后缀整体平移：把 [from, 末段] 的每一行沿块轴挪到新的位置，并重编页码与全局行号，
      * 字形跟着它的行一起挪。断行结果（每行的簇与行内位置）完全不重算。
+     *
+     * @param from 后缀的第一段（含）；段数变化时它与脏区首段相差不止一（脏区可能占几段）。
+     * @param first_glyph 后缀的第一个字形在 glyphs 里的下标（脏区的字形之后）。
      *
      * 为什么可以这样做：横排的块轴推进是一条纯折线 —— 每行占 blocks[p].size_pt *
      * line_factor、段间再让出 space_after_pt，放不下就换页。所以只要知道后缀开始时的那一个
-     * 续排状态（页号 + cursor_y + 行号），整个后缀的新位置就被唯一确定。
-     * 这条规则与 layoutDocumentRange 横排分支里的断页判据同源；两者一旦分叉，
-     * 单测 [15] 的 auditLayout（增量 vs 全量逐字段比）会立刻报红。
-     *
-     * 竖排段不吃这条规则（列与"块吃掉本页剩余高度"是另一套），所以后缀里出现竖排就返回 false。
+     * 续排状态（页号 + cursor_y + 行号），整个后缀的新位置就被唯一确定；这条规则与
+     * layoutDocumentRange 横排分支里的断页判据同源，分叉会被 auditLayout 抓住。
+     * 竖排段不吃这条规则，所以后缀里出现竖排就返回 false。
      */
-    bool shiftSuffixBlockAxis(int from, const ReflowState& after);
+    bool shiftSuffixBlockAxis(int from, size_t first_glyph, const ReflowState& after);
 
     /**
      * 后缀（[from+1, 末段]）里有没有竖排段 —— 竖排不能走平移复用。
@@ -923,18 +924,6 @@ private:
      * 后者只是第一段的内容变了，后缀仍有可能原样复用（见 trySuffixReuse）。
      */
     bool layout_needs_full_ = true;
-
-    /**
-     * 段数变了（回车分段 / 退格合并段），尚未重排。
-     *
-     * 它必须禁掉后缀复用：复用判据是"第 from+1 段开始时的续排状态与上一轮相同"，
-     * 而段号一变，"第 from+1 段"已经不是同一段了 —— 拿两个无关段落的状态去比，
-     * 碰巧相等就会把整个后缀错当成没变（那会静默地产生错位的排版）。
-     *
-     * 但"段数变了"不等于"必须整篇重排"：前缀 [0, dirty_from) 仍然一个字都没动，
-     * 所以照走常规续排（从脏段排到末尾）。重排完成即清零。
-     */
-    bool para_count_changed_ = false;
 
     /**
      * 上一次 relayout 的粒度，由 presentInternal 上报到 EditStats。

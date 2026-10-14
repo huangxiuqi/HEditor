@@ -236,15 +236,18 @@ void EditorEngine::relayout() {
     // 比整篇重扫一遍字形便宜两个数量级。
     int fp_lo = -1, fp_hi = -1;
     SuffixReuse reuse = SuffixReuse::None;
-    if (!must_full && !para_count_changed_ && from >= 0 && from < n_para) {
-        reuse = trySuffixReuse(from, &fp_lo, &fp_hi);
+    // 段数变了也照样试后缀复用：回车分段与退格合并一个字都没改内容，只挪了段边界。
+    int relaid_paras = 1;
+    if (!must_full && from >= 0 && from < n_para) {
+        reuse = trySuffixReuse(from, &fp_lo, &fp_hi, &relaid_paras);
     }
     if (reuse != SuffixReuse::None) {
-        const ParaIndex& pi = layout_.para_index[static_cast<size_t>(from)];
-        last_relaid_paragraphs_ = 1;
-        last_reused_paragraphs_ = n_para - 1 - from;
+        const ParaIndex& head = layout_.para_index[static_cast<size_t>(from)];
+        const ParaIndex& tail = layout_.para_index[static_cast<size_t>(from + relaid_paras - 1)];
+        last_relaid_paragraphs_ = relaid_paras;
+        last_reused_paragraphs_ = n_para - relaid_paras - from;
         last_suffix_shifted_ = (reuse == SuffixReuse::Shifted);
-        last_relaid_lines_ = pi.line_end - pi.line_begin;
+        last_relaid_lines_ = tail.line_end - head.line_begin;
         last_layout_full_ = false;
     } else if (can_resume) {
         // 续排锚点必须在截断之前读出来 —— 截断会把它一起丢掉。
@@ -268,7 +271,6 @@ void EditorEngine::relayout() {
     }
     layout_dirty_from_ = n_para;  // 已重排到末尾，没有脏段了
     layout_needs_full_ = false;
-    para_count_changed_ = false;  // 这一轮已经把新段号排进去了
 
     // 这一轮排版的耗时。只算排版本身（拼接/续排/全量三种走法都算），
     // 不含页指纹记账与统计同步 —— 那两项是 O(全篇) 的固定开销，
@@ -297,32 +299,58 @@ void EditorEngine::relayout() {
     stats_.total_ms += msSince(t0);
 }
 
-EditorEngine::SuffixReuse EditorEngine::trySuffixReuse(int from, int* page_lo, int* page_hi) {
+EditorEngine::SuffixReuse EditorEngine::trySuffixReuse(int from, int* page_lo, int* page_hi,
+                                                       int* relaid_paragraphs) {
     *page_lo = -1;
     *page_hi = -1;
+    *relaid_paragraphs = 1;
     const int n_para = static_cast<int>(blocks_.size());
-    // 没有后缀可搬（脏段就是最后一段），就没什么可省的 —— 交给常规路径。
+    const int n_old = static_cast<int>(layout_.para_index.size());
+    // 段数增量：这一次编辑把旧 [from, from + m_old) 段换成了新 [from, from + m_new) 段，
+    //   m_new - m_old 恒等于它（回车分段 +1、退格合并 -1、段内敲字 0）。
+    const int d_para = n_para - n_old;
+    // 没有后缀可搬（脏区已经是最后一段），就没什么可省的 —— 交给常规路径。
     if (from < 0 || from + 1 >= n_para) return SuffixReuse::None;
-    if (layout_.para_index.size() <= static_cast<size_t>(from + 1)) return SuffixReuse::None;
 
     // 行内对象不能伸进后缀段：插入/删除会移动控件端点，而占位槽的位置由端点决定 ——
-    // 那些段的内容一个字没变、占位却变了。边界落在脏段之内的都可以搬。
+    // 那些段的内容一个字没变、占位却变了。边界落在脏区之内的都可以搬。
     //   判据直接看块流里的对象表，不再反查控件集合：后缀里没有对象，就一定没有占位。
+    //   从 from+1 起扫（而不是脏区的后面），偏保守：脏区自己带对象时也一并放弃复用。
     for (int p = from + 1; p < n_para; ++p) {
         if (!blocks_[static_cast<size_t>(p)].objects.empty()) return SuffixReuse::None;
     }
 
-    const ParaIndex old_pi = layout_.para_index[static_cast<size_t>(from)];
-    // 脏段自己的续排锚点来自上一轮（前缀一个字都没动）。第 0 段没有前缀，用全篇起点。
-    const ReflowState resume = (from == 0) ? freshReflowState(cfg_.page) : old_pi.state_at_start;
+    const ParaIndex old_first = layout_.para_index[static_cast<size_t>(from)];
+    // 脏区自己的续排锚点来自上一轮（前缀一个字都没动）。第 0 段没有前缀，用全篇起点。
+    const ReflowState resume = (from == 0) ? freshReflowState(cfg_.page) : old_first.state_at_start;
 
-    // 只排脏段自己。结果先待在 scratch 里，等状态判完再决定要不要用。
+    // 脏区在新旧两版里各占几段。段数没变时各占一段；段数变了时，窄的那一侧恒为一段 ——
+    //   段落数的变化只可能来自插入或删除一枚段落标记，而一枚标记只牵动它所在的那一段
+    //   （插入：1 段拆成 2 段；删除：2 段并回 1 段；粘进来 k 段就是 1 段拆成 k+1 段）。
+    //   哪一侧是"1"由段数增量的符号决定。
+    const int m_new = 1 + std::max(0, d_para);
+    const int m_old = 1 + std::max(0, -d_para);
+    // 新版要够长；旧版也要还有"下一段"可以拿来对照。
+    if (from + m_new > n_para || from + m_old >= n_old) return SuffixReuse::None;
+
     LayoutResult scratch;
-    const ReflowState after = layoutDocumentRange(fonts_, blocks_, cfg_.page, from, from + 1,
+    const ReflowState after = layoutDocumentRange(fonts_, blocks_, cfg_.page, from, from + m_new,
                                                   resume, &shaping_cache_, &scratch);
-    const ParaIndex& np = scratch.para_index[static_cast<size_t>(from)];
 
-    // 脏段新旧两版覆盖的页区间（并集）：只有这几页的内容可能变了，
+    // 脏区新旧两版的段范围 → 行/字形范围。段在数组里是连续排列的，两端各取一次就是整段。
+    const ParaIndex& old_last = layout_.para_index[static_cast<size_t>(from + m_old - 1)];
+    const int old_line_lo = old_first.line_begin;
+    const int old_line_hi = old_last.line_end;
+    const int old_glyph_lo = old_first.glyph_begin;
+    const int old_glyph_hi = old_last.glyph_end;
+    const ParaIndex& new_first = scratch.para_index[static_cast<size_t>(from)];
+    const ParaIndex& new_last = scratch.para_index[static_cast<size_t>(from + m_new - 1)];
+    const int new_line_lo = new_first.line_begin;
+    const int new_line_hi = new_last.line_end;
+    const int new_glyph_lo = new_first.glyph_begin;
+    const int new_glyph_hi = new_last.glyph_end;
+
+    // 脏区新旧两版覆盖的页区间（并集）：只有这几页的内容可能变了，
     // 页指纹只需重算它们。取不到（两版都没行）就给 -1，让调用方整篇重算。
     int u_lo = -1, u_hi = -1;
     auto addPageRange = [&](const std::vector<LineBox>& lines, int b, int e) {
@@ -332,54 +360,101 @@ EditorEngine::SuffixReuse EditorEngine::trySuffixReuse(int from, int* page_lo, i
         u_lo = (u_lo < 0) ? lo : std::min(u_lo, lo);
         u_hi = (u_hi < 0) ? hi : std::max(u_hi, hi);
     };
-    addPageRange(layout_.lines, old_pi.line_begin, old_pi.line_end);
-    addPageRange(scratch.lines, np.line_begin, np.line_end);
+    addPageRange(layout_.lines, old_line_lo, old_line_hi);
+    addPageRange(scratch.lines, new_line_lo, new_line_hi);
 
-    const int old_lines = old_pi.line_end - old_pi.line_begin;
-    const int new_lines = np.line_end - np.line_begin;
-    const int old_glyphs = old_pi.glyph_end - old_pi.glyph_begin;
-    const int new_glyphs = np.glyph_end - np.glyph_begin;
+    const int old_lines = old_line_hi - old_line_lo;
+    const int new_lines = new_line_hi - new_line_lo;
+    const int old_glyphs = old_glyph_hi - old_glyph_lo;
+    const int new_glyphs = new_glyph_hi - new_glyph_lo;
     const int dline = new_lines - old_lines;
     const int dglyph = new_glyphs - old_glyphs;
 
-    // 换掉脏段那一段：erase + insert 各一次 memmove，比重新排一遍后缀便宜一到两个数量级。
-    layout_.lines.erase(layout_.lines.begin() + old_pi.line_begin,
-                        layout_.lines.begin() + old_pi.line_end);
-    layout_.lines.insert(layout_.lines.begin() + old_pi.line_begin,
-                         scratch.lines.begin() + np.line_begin,
-                         scratch.lines.begin() + np.line_end);
-    layout_.glyphs.erase(layout_.glyphs.begin() + old_pi.glyph_begin,
-                         layout_.glyphs.begin() + old_pi.glyph_end);
-    layout_.glyphs.insert(layout_.glyphs.begin() + old_pi.glyph_begin,
-                          scratch.glyphs.begin() + np.glyph_begin,
-                          scratch.glyphs.begin() + np.glyph_end);
+    // 换掉脏区那一段：erase + insert 各一次 memmove，比重新排一遍后缀便宜一到两个数量级。
+    layout_.lines.erase(layout_.lines.begin() + old_line_lo, layout_.lines.begin() + old_line_hi);
+    layout_.lines.insert(layout_.lines.begin() + old_line_lo, scratch.lines.begin() + new_line_lo,
+                         scratch.lines.begin() + new_line_hi);
+    layout_.glyphs.erase(layout_.glyphs.begin() + old_glyph_lo,
+                         layout_.glyphs.begin() + old_glyph_hi);
+    layout_.glyphs.insert(layout_.glyphs.begin() + old_glyph_lo,
+                          scratch.glyphs.begin() + new_glyph_lo,
+                          scratch.glyphs.begin() + new_glyph_hi);
 
-    // 切片：本段换成新的（起点仍在原处），后面的段整体平移 dline / dglyph。
-    // 不能只改本段 —— 切片的 begin/end 是"在全局数组里的下标"，前一段的长度一变，
-    // 后面所有段的下标都要跟着移，否则汇总会按错位的下标求和（数字会静默地错）。
-    {
-        ParaIndex& p = layout_.para_index[static_cast<size_t>(from)];
-        p = np;
-        p.line_begin = old_pi.line_begin;
-        p.line_end = old_pi.line_begin + new_lines;
-        p.glyph_begin = old_pi.glyph_begin;
-        p.glyph_end = old_pi.glyph_begin + new_glyphs;
+    // 段号整体平移：脏区之后那些段的段号全变了，而行盒与字形都把段号记在字段里，
+    //   而光标几何、审计都按它找行 —— 不跟着改，光标会落到别的段上（静默错位）。
+    //   范围从"脏区在新版里占的那些行/字形之后"起。
+    if (d_para != 0) {
+        for (size_t k = static_cast<size_t>(old_line_lo + new_lines); k < layout_.lines.size();
+             ++k) {
+            layout_.lines[k].paragraph += d_para;
+        }
+        for (size_t k = static_cast<size_t>(old_glyph_lo + new_glyphs); k < layout_.glyphs.size();
+             ++k) {
+            layout_.glyphs[k].paragraph += d_para;
+        }
     }
-    for (int j = from + 1; j < n_para; ++j) {
+
+    // 段表：把脏区之后的项整体挪 d_para 个槽位，再调成新长度。
+    //   顺序与方向都不能错：往后挪（d_para > 0）要先扩容、再从尾到头搬，否则会盖住还没搬的项；
+    //   往前挪（d_para < 0）要先把项搬到新位置、最后才缩容 —— 反过来会先丢掉末尾那几项，
+    //   再读它们就是越界（搬过去的是垃圾，而排版看起来还"成功了"）。
+    if (d_para > 0) {
+        layout_.para_index.resize(static_cast<size_t>(n_para));
+        layout_.para_cluster_starts.resize(static_cast<size_t>(n_para));
+        for (int j = n_old - 1; j >= from + m_old; --j) {
+            layout_.para_index[static_cast<size_t>(j + d_para)] =
+                layout_.para_index[static_cast<size_t>(j)];
+            layout_.para_cluster_starts[static_cast<size_t>(j + d_para)] =
+                layout_.para_cluster_starts[static_cast<size_t>(j)];
+        }
+    } else if (d_para < 0) {
+        for (int j = from + m_old; j < n_old; ++j) {
+            layout_.para_index[static_cast<size_t>(j + d_para)] =
+                layout_.para_index[static_cast<size_t>(j)];
+            layout_.para_cluster_starts[static_cast<size_t>(j + d_para)] =
+                layout_.para_cluster_starts[static_cast<size_t>(j)];
+        }
+        layout_.para_index.resize(static_cast<size_t>(n_para));
+        layout_.para_cluster_starts.resize(static_cast<size_t>(n_para));
+    }
+
+    // 脏区：m_new 段一段一段填，行/字形下标接着前一段累加（起点仍在原处）。
+    //   切片的 begin/end 是"在全局数组里的下标"，前一段的长度一变，后面所有段的下标
+    //   都要跟着移，否则汇总会按错位的下标求和（数字会静默地错）。
+    {
+        int line_cursor = old_line_lo;
+        int glyph_cursor = old_glyph_lo;
+        for (int k = 0; k < m_new; ++k) {
+            ParaIndex p = scratch.para_index[static_cast<size_t>(from + k)];
+            const int lk = p.line_end - p.line_begin;
+            const int gk = p.glyph_end - p.glyph_begin;
+            p.line_begin = line_cursor;
+            p.line_end = line_cursor + lk;
+            p.glyph_begin = glyph_cursor;
+            p.glyph_end = glyph_cursor + gk;
+            line_cursor += lk;
+            glyph_cursor += gk;
+            layout_.para_index[static_cast<size_t>(from + k)] = p;
+            layout_.para_cluster_starts[static_cast<size_t>(from + k)] =
+                scratch.para_cluster_starts[static_cast<size_t>(from + k)];
+        }
+    }
+    for (int j = from + m_new; j < n_para; ++j) {
         ParaIndex& p = layout_.para_index[static_cast<size_t>(j)];
         p.line_begin += dline;
         p.line_end += dline;
         p.glyph_begin += dglyph;
         p.glyph_end += dglyph;
     }
-    layout_.para_cluster_starts[static_cast<size_t>(from)] =
-        scratch.para_cluster_starts[static_cast<size_t>(from)];
     summarizeLayoutStats(&layout_);
     layout_.stats.shape_ms = scratch.stats.shape_ms;
+    *relaid_paragraphs = m_new;
 
     // 一级复用：后缀开始时的续排状态逐位相同 → 后缀的断页、全局行号与坐标
     // 都会与上一轮一模一样，一个字节都不用动。
-    if (after == layout_.para_index[static_cast<size_t>(from + 1)].state_at_start) {
+    //   段表挪完槽位之后，新表的第 from+m_new 项就是旧表的第 from+m_old 项
+    //   （就是后缀的第一段），它的 state_at_start 被原样搬了过来 —— 直接拿来比。
+    if (after == layout_.para_index[static_cast<size_t>(from + m_new)].state_at_start) {
         *page_lo = u_lo;
         *page_hi = u_hi;
         return SuffixReuse::Unchanged;
@@ -387,28 +462,31 @@ EditorEngine::SuffixReuse EditorEngine::trySuffixReuse(int from, int* page_lo, i
 
     // 二级复用：行结构变了（后缀整体挪位），但后缀是纯横排 → 只有块轴位置变，
     // 断行与字形的行内位置一个字都不用重算。见 shiftSuffixBlockAxis。
+    //   段数变化几乎总落到这一级：段落边界一变就多让（或少让）一次段间距，
+    //   后缀必然整体下移 —— 那不是"同状态"，而是"纯平移"。
+    //   段表已经挪好槽位、行盒与字形的段号也已经重编过，平移那一趟按新段号走即可。
     if (u_lo < 0) return SuffixReuse::None;
-    if (!suffixIsHorizontalOnly(from)) return SuffixReuse::None;
-    if (!shiftSuffixBlockAxis(from, after)) return SuffixReuse::None;
+    if (!suffixIsHorizontalOnly(from + m_new)) return SuffixReuse::None;
+    if (!shiftSuffixBlockAxis(from + m_new, static_cast<size_t>(old_glyph_lo + new_glyphs), after))
+        return SuffixReuse::None;
     *page_lo = u_lo;
     *page_hi = std::max(0, layout_.stats.page_count - 1);
     return SuffixReuse::Shifted;
 }
 
 bool EditorEngine::suffixIsHorizontalOnly(int from) const {
-    for (int p = from + 1; p < static_cast<int>(blocks_.size()); ++p) {
+    // from 就是后缀的第一段（含）；后缀整体平移只对横排成立，见 shiftSuffixBlockAxis。
+    for (int p = from; p < static_cast<int>(blocks_.size()); ++p) {
         if (blocks_[static_cast<size_t>(p)].wm.isVertical()) return false;
     }
     return true;
 }
 
-bool EditorEngine::shiftSuffixBlockAxis(int from, const ReflowState& after) {
+bool EditorEngine::shiftSuffixBlockAxis(int from, size_t first_glyph, const ReflowState& after) {
     const float cy = cfg_.page.margin_pt;
     const float ch = cfg_.page.contentHeightPt();
     const int n_para = static_cast<int>(blocks_.size());
 
-    const ParaIndex& dp = layout_.para_index[static_cast<size_t>(from)];
-    const size_t first_glyph = static_cast<size_t>(dp.glyph_end);
     std::vector<PlacedGlyph>& gs = layout_.glyphs;  // 校验与改写共用这一份
 
     // 沿着"行槽折线"走一遍：每行占 lb.size_pt * line_factor（行盒自己的字号），
@@ -425,7 +503,8 @@ bool EditorEngine::shiftSuffixBlockAxis(int from, const ReflowState& after) {
         int page = after.page_index;
         int line_no = after.line_total;
         size_t g = first_glyph;
-        for (int p = from + 1; p < n_para; ++p) {
+        // from 就是后缀的第一段（脏区可能占不止一段，所以调用方另给了 first_glyph）
+        for (int p = from; p < n_para; ++p) {
             const BlockSpec& b = blocks_[static_cast<size_t>(p)];
             // 续排锚点：每一段都要更新成新的位置，否则以后从这一段续排会拿着过期
             // 状态（页号 / 块轴位置 / 行号都变了）。与主循环一致：在空段判定与翻页

@@ -555,9 +555,6 @@ bool EditorEngine::commitOnTree(Transaction tx, int dirty_para, bool para_count_
         rebuildFromTree();
     }
     markLayoutDirty(dirty_para);
-    // 段数变了就禁止后缀复用：复用判据是"第 from+1 段开始时的状态与上一轮相同"，
-    //   而段号一变，"第 from+1 段"已经不是同一段了。
-    if (para_count_changed) para_count_changed_ = true;
     return true;
 }
 
