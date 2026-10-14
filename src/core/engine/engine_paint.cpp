@@ -559,6 +559,7 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
         edit_stats_.relaid_lines = 0;
         edit_stats_.layout_was_full = false;
         edit_stats_.layout_ms = 0.0;
+        edit_stats_.page_fp_ms = 0.0;
     }
 
     const double paint_ms = msSince(t0);
@@ -571,7 +572,7 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
     stats_.frame_width = frame_w;
     stats_.frame_height = frame_h;
     edit_stats_.paint_ms = paint_ms;
-    edit_stats_.total_ms = edit_stats_.layout_ms + paint_ms;
+    edit_stats_.total_ms = edit_stats_.layout_ms + edit_stats_.page_fp_ms + paint_ms;
 
     if (glyph_cache_) {
         stats_.glyph_cache_hits = static_cast<long long>(glyph_cache_->hits());

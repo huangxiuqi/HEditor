@@ -23,6 +23,17 @@ inline constexpr uint64_t kFnvBasis = 1469598103934665603ULL;
 inline constexpr uint64_t kFnvPrime = 1099511628211ULL;
 
 /**
+ * 指纹里的"已知变了"哨兵位。
+ *
+ * 指纹有两个来源：一是真去哈希内容（computePageFingerprints / computeLineFingerprints），
+ * 二是排版那侧直接告知"这一段变了，不必问"（后缀整体平移时后缀每一页都变了，答案早已
+ * 确定，见 EditorEngine::markPagesChangedFrom）。后一种写下的不是真指纹，所以必须在编码上
+ * 就与真指纹不相交：真指纹一律清掉这一位，标脏值把它置起来，两者不可能相等。
+ * 少了这条约定，标脏值就有可能与某个真指纹撞上，症状是"那一页永远不重画"。
+ */
+inline constexpr uint64_t kFpDirtyBit = 1ULL << 63;
+
+/**
  * 把 64 位值逐字节混入哈希。
  * @note 逐字节（而非单次异或再乘）是页指纹沿用至今的算法，此处原样保留：
  * 换算法等于换指纹，只影响碰撞分布，没有收益。

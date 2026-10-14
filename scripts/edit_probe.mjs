@@ -2295,6 +2295,43 @@ async function main() {
                 JSON.stringify(it) === '[[5,7],[7,9],[9,9]]', JSON.stringify(it));
       await c.screenshot(join(OUT, 'delete-caret-landing.png'));
     }
+
+    chk.section('[14.10] 在字段末尾回车（字段因此跨段）之后再退格：整段与控件都不许丢');
+    {
+      // 现象：三连可编辑字段（variant 2）里把光标放到「天」后面回车，再把光标移到
+      //   「悸」后面退格 —— 结果「患者主诉：反复心悸」九个字与三个控件整个消失，只剩一行
+      //   「三天」。根因不在删除：回车把段落标记插进了控件内部（字段因此跨段，这是正常形态，
+      //   见 compile.h 的 BlockSource），而"只重编译被改的那一段"是按标记的父容器取子节点
+      //   区间的 —— 控件里的半截被当成整段编译，前半段的字与控件边界一起丢掉，block_src_ /
+      //   block_flow_ 也被覆盖，控件集合随之空掉。
+      // 判据三层：文本（只少了「悸」）、控件区间（三条都还在，跨段那条的终点落在第二段）、
+      //   以及屏幕 == 引擎帧 —— 半截产物会当场把括号画错。
+      await load(2);
+      await c.eval('return window.__heditor.setCaret(0, 11);');
+      await c.eval(key('Enter'));
+      await sleep(30);
+      const p1 = Array.from(await c.eval('return window.__heditor.allText;')).join('');
+      chk.check('回车在字段内容里分段：两段的文本都对（字段因此跨段）',
+                p1 === '患者主诉：反复心悸三天\n，加重一天。', JSON.stringify(p1));
+      await c.eval('return window.__heditor.setCaret(0, 9);');
+      await c.eval(key('Backspace'));
+      await sleep(30);
+      const p2 = Array.from(await c.eval('return window.__heditor.allText;')).join('');
+      chk.check('★★ 退格只删掉「悸」一个字（曾经把前面九个字与所有控件整批抹掉）',
+                p2 === '患者主诉：反复心三天\n，加重一天。', JSON.stringify(p2));
+      const it2 = await c.eval(`
+        return JSON.stringify(window.__heditor.controls.items
+          .map(i => [i.start[0], i.start[1], i.end[0], i.end[1]]));`);
+      chk.check('★★ 三个控件都还在，且跨段那条的终点落在第二段第 0 位',
+                it2 === '[[0,5,0,7],[0,7,0,8],[0,8,1,0]]', it2);
+      const au = await c.eval('return window.__heditor.auditCompile();');
+      chk.check('★ 产物与整树全量编译逐字段一致（diff 0）', !!au && au.diff === 0,
+                au ? `diff ${au.diff}` : 'null');
+      const sc = await c.eval('return window.__heditor.selfCheck();');
+      chk.check('★ 屏幕 == 引擎帧（半截产物会把括号画丢/画错）',
+                sc.screenVsEngineDiffPx === 0, `差 ${sc.screenVsEngineDiffPx} px`);
+      await c.screenshot(join(OUT, 'ctl-split-then-backspace.png'));
+    }
   }
   chk.section('[7] 无页面异常 / 无 console 错误');
   {

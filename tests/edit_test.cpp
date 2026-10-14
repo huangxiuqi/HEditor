@@ -155,7 +155,7 @@ void loadControls(EditorEngine& e, const std::vector<Control>& controls);
  */
 long long frameDiffAgainstFresh(EditorEngine& a, const std::vector<std::string>& fonts,
                                 const std::vector<Control>& ctrls, EditMode mode,
-                                long long* out_max_ch) {
+                                long long* out_max_ch, int* out_box = nullptr) {
     EditorEngine r;
     if (!r.init(fonts)) return -1;
     r.setConfig(a.config());
@@ -177,9 +177,17 @@ long long frameDiffAgainstFresh(EditorEngine& a, const std::vector<std::string>&
     const uint8_t* fa = a.frame();
     const uint8_t* fb = r.frame();
     long long diff = 0, max_ch = 0;
+    const int fw = a.frameWidth();
+    int bx0 = 1 << 30, by0 = 1 << 30, bx1 = -1, by1 = -1;
     for (size_t k = 0; k + 3 < n; k += 4) {
         if (fa[k] == fb[k] && fa[k + 1] == fb[k + 1] && fa[k + 2] == fb[k + 2]) continue;
         ++diff;
+        const int px = static_cast<int>((k >> 2) % static_cast<size_t>(fw));
+        const int py = static_cast<int>((k >> 2) / static_cast<size_t>(fw));
+        if (px < bx0) bx0 = px;
+        if (px > bx1) bx1 = px;
+        if (py < by0) by0 = py;
+        if (py > by1) by1 = py;
         for (int ch = 0; ch < 3; ++ch) {
             const long long d =
                 std::llabs(static_cast<long long>(fa[k + ch]) - static_cast<long long>(fb[k + ch]));
@@ -187,6 +195,12 @@ long long frameDiffAgainstFresh(EditorEngine& a, const std::vector<std::string>&
         }
     }
     if (out_max_ch) *out_max_ch = max_ch;
+    if (out_box) {
+        out_box[0] = bx0;
+        out_box[1] = by0;
+        out_box[2] = bx1;
+        out_box[3] = by1;
+    }
     return diff;
 }
 
@@ -2111,6 +2125,55 @@ int main() {
         expectTrue(!mg.layout_was_full && mg.reused_paragraphs >= kParas - 1 - 100,
                    "★ 退格合并 → 同样只重排脏区，后缀全部复用");
         expectTrue(e.auditLayout() == 0, "★ 合并复用的结果与全量重排逐字段一致");
+
+        // 连续两次回车（中间不夹任何别的编辑）：两次都得把文档推下去。
+        //   标脏写进的是"与底图那一版必然不同"的值，而 present 之后底图也变成了它 ——
+        //   若下一次标脏写回同一个值，判据（new != base）读出来就是"没变"，
+        //   这一页从此不再重画：症状是连续换行只有第一次把文档推下去。
+        //   两条判据各管一头：一条脆的（画面必须成片地变），一条有界的（与从零重画几乎相同）。
+        //   另起一个引擎来做，免得把这一段文档改长（后面的小节按 200 段算账）。
+        {
+            EditorEngine ep;
+            expectTrue(ep.init({cjkPath, mnPath, latinPath}), "引擎初始化（连续两次回车）");
+            ep.setConfig(c);
+            loadBlocks(ep, e.blocks());
+            ep.relayout();
+            ep.setCaret(100, 8);
+            const bool push1 = ep.splitParagraphAndRender();
+            expectTrue(push1, "第一次回车");
+            const size_t fbytes = ep.frameBytes();
+            std::vector<uint8_t> frame_before(ep.frame(), ep.frame() + fbytes);
+            const bool push2 = ep.splitParagraphAndRender();
+            expectTrue(push2, "紧接着第二次回车");
+            long long moved = 0;
+            {
+                const uint8_t* fa = ep.frame();
+                for (size_t k = 0; k + 3 < fbytes; k += 4) {
+                    if (fa[k] != frame_before[k] || fa[k + 1] != frame_before[k + 1] ||
+                        fa[k + 2] != frame_before[k + 2])
+                        ++moved;
+                }
+            }
+            long long max_ch_shift = 0;
+            int box[4] = {0, 0, 0, 0};
+            const long long shift_fresh = frameDiffAgainstFresh(
+                ep, {cjkPath, mnPath, latinPath}, {}, EditMode::Document, &max_ch_shift, box);
+            std::printf(
+                "     第二次回车：画面变了 %lld 像素 ｜ 与从零重画差 %lld 像素"
+                "（最大通道差 %lld，x %d~%d / y %d~%d）\n",
+                moved, shift_fresh, max_ch_shift, box[0], box[2], box[1], box[3]);
+            // 脆的那条：编辑点以下的每一行都往下挪了一格，画面必须成片地变。
+            //   漏重画时只有光标那几个像素会动（几百），与这里的量级差两个数量级。
+            expectTrue(moved > 20000, "★ 第二次回车把画面成片换掉了（标脏不能退化成\"没变\"）");
+            // 有界的那条：与"从零重排重画"比，允许抗锯齿在量化边界上翻格。
+            //   平移走的是"旧坐标 + 增量"，全量重排走的是"从头累加"，两者在浮点末位上
+            //   可以差到 1e-3 pt（auditLayout 正为此留了容差）；落在 Skia 的 1/16 px
+            //   量化边界上的那几个字形会翻一格 —— 实测 562 px、最大通道差 3，
+            //   而"整页没重画"是几十万像素、通道差上百。上界按后者量级取。
+            expectTrue(shift_fresh < 5000 && max_ch_shift <= 4,
+                       "★ 连续两次回车之后：增量帧与从零重画几乎逐像素相同（只差抗锯齿翻格）");
+            expectTrue(ep.auditLayout() == 0, "连续两次回车之后，增量排版与全量重排逐字段一致");
+        }
 
         // 平移复用的反面：后缀里有竖排段 → "横排行槽折线"那条规则不成立 → 必须续排。
         // 这条同时证明常规续排路径没有被平移路径挤掉（两条路径都要被走到）。
@@ -6686,6 +6749,97 @@ int main() {
         e.setCaret(1, 0);
         expectTrue(e.backspace(), "在第 1 段段首退格（合并）");
         expectTrue(e.auditCompile() == 0, "★ 合并之后（走全量）：产物与整树全量编译一致");
+    }
+
+    std::printf("\n[31] 在控件内容里回车（控件因此跨段）之后编辑：不许把整段与控件一起弄丢\n");
+    {
+        // 现象：三连可编辑字段里把光标放到「天」后面回车，再把光标放到「悸」后面
+        //   退格，结果「患者主诉：反复心悸」九个字与三个控件整个消失，只剩一行「三天」。
+        // 根因：回车把段落标记插进了控件内部（跨段控件是正常形态，见 compile.h 的 BlockSource），
+        //   而"只重编译被改的那一段"是按标记的父容器取子节点区间的 —— 那一段的内容其实起自
+        //   控件之外，于是控件里的半截被当成整段编译：前半段的字与控件自己的边界一起丢掉，
+        //   block_src_ / block_flow_ 又被这半个产物覆盖，控件集合随之空掉。删除本身没错，
+        //   错的是增量重编译的形状判据（rebuildParagraphFromTree）。
+        // 判据两层：产物必须与整树全量编译逐字段一致（自己会报"哪一类形状没覆盖到"，上面那
+        //   一条错在 auditCompile 上就是 4 项差异），以及文本与三条控件区间逐个对上 ——
+        //   钉住界面上那一行文本。
+        std::vector<BlockSpec> bl(1);
+        bl[0].setText("患者主诉：反复心悸三天，加重一天。");
+        std::vector<DemoFieldSpec> fd;
+        auto add = [&](int so, int eo, const char* key) {
+            DemoFieldSpec f;
+            f.para = 0;
+            f.so = so;
+            f.eo = eo;
+            f.key = key;
+            fd.push_back(std::move(f));
+        };
+        add(5, 7, "a");
+        add(7, 9, "b");
+        add(9, 11, "c");
+        EditorEngine e;
+        expectTrue(e.init({cjkPath}), "控件跨段：字体加载成功");
+        EngineConfig ec;
+        ec.zoom = 1.0f;
+        e.setConfig(ec);
+        e.setDocument(demoTree(bl, fd), StyleSheet{});
+        e.setEditMode(EditMode::Form);
+        e.relayout();
+        auto textOf = [&]() {
+            std::string t;
+            for (const BlockSpec& b : e.blocks()) t += "[" + b.textUtf8() + "]";
+            return t;
+        };
+        auto rangesOf = [&]() {
+            std::string s;
+            for (int i = 0; i < e.controls().size(); ++i) {
+                const Control& c = e.controls().at(i);
+                if (i) s += " ";
+                s += "[" + std::to_string(c.range.start.offset) + "," +
+                     std::to_string(c.range.end.para == c.range.start.para
+                                        ? c.range.end.offset
+                                        : 100 + c.range.end.offset) +
+                     ")";  // 跨段时把段号折进数字里（100+ 表示落在第 1 段）
+            }
+            return s;
+        };
+
+        // 「天」之后 = 第三个字段的末尾：侧别 0 表示落在闭括号之内（末尾算在区间内）。
+        e.setCaretAtSide(0, 11, 0);
+        expectTrue(e.splitParagraph(), "在可编辑字段末尾回车：分段成功");
+        expectTrue(e.auditCompile() == 0, "回车之后（控件因此跨段）：产物与整树全量编译一致");
+        expectTrue(e.controls().size() == 3 && e.controls().at(2).range.start.para == 0 &&
+                       e.controls().at(2).range.end.para == 1,
+                   "第三个字段跨到第二段（段落标记插在它的内容里）");
+
+        e.setCaretAtSide(0, 9, 0);
+        expectTrue(e.backspace(), "再把光标放到「悸」后面退格");
+        expectTrue(e.auditCompile() == 0,
+                   "★ 退格之后：产物仍与整树全量编译逐字段一致（不许只剩控件里的半段）");
+        std::printf("     退格后 段=%s 控件=%d 个 区间=%s\n", textOf().c_str(), e.controls().size(),
+                    rangesOf().c_str());
+        expectTrue(textOf() == "[患者主诉：反复心三天][，加重一天。]",
+                   "★ 只少了「悸」一个字 —— 实际 " + textOf());
+        expectTrue(e.controls().size() == 3, "★ 三个控件都还在（曾经被整批抹掉）");
+        expectTrue(rangesOf() == "[5,7) [7,8) [8,100)",
+                   "★ 三条区间跟着内容缩：只有 #1 短了一格 —— 实际 " + rangesOf());
+        e.relayout();
+        expectTrue(e.auditLayout() == 0, "★ 排版也是对的：与全量重排逐字段一致");
+
+        // 再退一格：把 #1 删空。零宽字段与跨段字段同时在场，是这段坐标最容易错的一格。
+        expectTrue(e.backspace(), "再退一格删「心」（把第二个字段删空）");
+        expectTrue(e.auditCompile() == 0,
+                   "★ 字段删空之后：产物仍与整树全量编译逐字段一致 —— 实际 " +
+                       std::to_string(e.auditCompile()));
+        std::printf("     再退一格 段=%s 区间=%s\n", textOf().c_str(), rangesOf().c_str());
+        expectTrue(textOf() == "[患者主诉：反复三天][，加重一天。]",
+                   "★ 段里只少了「心」—— 实际 " + textOf());
+        expectTrue(rangesOf() == "[5,7) [7,7) [7,100)",
+                   "★ #1 变成零宽、收在 7 上，#2 跟着左移 —— 实际 " + rangesOf());
+
+        // 光标所在字段仍然认得对：这一段被控件从中间切开，#2 在本段的归属不能丢。
+        expectTrue(e.focusedControlIndex() == 1, "光标（在被删空的那个字段里）仍归 #1 —— 实际 " +
+                                                     std::to_string(e.focusedControlIndex()));
     }
 
     std::printf("\n──────────────────────────────\n");

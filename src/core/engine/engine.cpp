@@ -180,6 +180,27 @@ bool EditorEngine::rebuildParagraphFromTree(int para) {
         return false;
     }
 
+    // 这一段的内容起点必须与它的结束标记同在一个容器里，且落在这段子节点区间内。
+    //
+    //   为什么非判不可：在控件内容里回车时，段落标记就落在控件内部（跨段控件是正常形态），
+    //   而这一段的内容其实起自控件之外。只编"控件内那一截子节点"，产物就成了半个段落 ——
+    //   前半段的字与控件自己的边界一起丢掉；更糟的是 block_src_ / block_flow_ 会被这半个
+    //   产物覆盖，之后每一次编辑都按错的坐标算、控件集合也空掉。界面上看到的就是退格删一个
+    //   字、前面一串字连同所有控件一起不见。这种形状退回全量编译。
+    //   表格单元格里的段落不受影响：它的起点就在同一个单元格内，下标落在 [begin, mark_idx]。
+    int first_idx = -1;
+    const Node* fn = tree_.find(block_src_[static_cast<size_t>(para)].first);
+    while (fn != nullptr && fn->parent != container) fn = fn->parent;
+    if (fn != nullptr) {
+        for (size_t i = 0; i < container->children.size(); ++i) {
+            if (container->children[i] == fn) {
+                first_idx = static_cast<int>(i);
+                break;
+            }
+        }
+    }
+    if (first_idx < begin || first_idx > mark_idx) return false;
+
     const FlowVisibility vis = flowVisibility();
     const auto t_compile0 = Clock::now();
     CompileResult part = compileChildRange(tree_, container->id, begin, mark_idx, vis, sheet_);

@@ -94,6 +94,9 @@ void EditorEngine::computePageFingerprints(int dirty_lo, int dirty_hi) {
                           (static_cast<uint64_t>(g.color.b) << 16));
         page_fp_new_[static_cast<size_t>(g.page)] = h;
     }
+    // 真指纹一律清掉哨兵位（见 kFpDirtyBit）：这一位只在 markPagesChangedFrom 里置起来，
+    //   于是"标脏"与"真值"在编码上不相交。别的页保留原值 —— 它们可能正是标脏值。
+    for (int p = dirty_lo; p <= dirty_hi; ++p) page_fp_new_[static_cast<size_t>(p)] &= ~kFpDirtyBit;
 
     // 表单控件与编辑模式刻意不进页指纹。
     //
@@ -165,8 +168,63 @@ void EditorEngine::computeLineFingerprints(int dirty_lo, int dirty_hi, bool full
                               (static_cast<uint64_t>(it->color.g) << 8) |
                               (static_cast<uint64_t>(it->color.b) << 16));
         }
-        line_fp_new_[static_cast<size_t>(li)] = h;
+        line_fp_new_[static_cast<size_t>(li)] = h & ~kFpDirtyBit;
     }
+}
+
+/**
+ * 把 [first_page, 末页) 直接标成"与底图那一版不同"，不去哈希（见声明处的说明）。
+ *
+ * 标脏值的高位恒置：真指纹一律清掉那一位，所以它与任何真指纹都不可能相等 ——
+ * 这不是"大概率不同"，而是编码上就不相交。
+ *
+ * 低位还要按底图那一版翻一下：present 之后底图也会变成标脏值，下一次标脏若写回
+ *   同一个值，判据读出来就是"没变"，那一页从此不再重画（症状：连续换行只有第一次
+ *   把文档推下去，之后屏幕不动）。
+ * 行指纹同一把尺子、同一批页：那些页上的每一行都跟着挪了，行带要覆盖整页。
+ */
+void EditorEngine::markPagesChangedFrom(int first_page) {
+    const int first = std::max(0, first_page);
+    const int n = std::max(1, layout_.stats.page_count);
+    page_fp_new_.resize(static_cast<size_t>(n), kFnvBasis);
+    page_fp_new_count_ = n;
+    // 标脏值：高位恒置（真指纹一律清它，所以它不可能等于真指纹），
+    //   低位按底图那一版翻一下 —— 这一下是必须的，见下面那段注释。
+    auto dirty_value = [](uint64_t base) {
+        const uint64_t v = kFnvBasis | kFpDirtyBit;
+        return (v == base) ? (v ^ 1ull) : v;
+    };
+    for (int p = first; p < n; ++p) {
+        const uint64_t base =
+            (p < page_fp_base_count_) ? page_fp_in_base_[static_cast<size_t>(p)] : 0;
+        page_fp_new_[static_cast<size_t>(p)] = dirty_value(base);
+    }
+
+    // 行数组只标 [first_page, 末页) 里的行：前缀那些行一个字都没动，标脏只会让它们多画一遍。
+    //   linesOnPage 给的 lo 就是"页号不小于 first 的第一行"，正是这里的起点
+    //   （这一页上没有行时它会指向页号更大的第一行，同样是对的）。
+    const int n_lines = static_cast<int>(layout_.lines.size());
+    line_fp_new_.resize(static_cast<size_t>(n_lines), kFnvBasis);
+    int lo = 0;
+    int hi = 0;
+    linesOnPage(first, &lo, &hi);
+    (void)hi;
+    for (int k = lo; k < n_lines; ++k) {
+        const uint64_t base =
+            (k < line_fp_base_count_) ? line_fp_in_base_[static_cast<size_t>(k)] : 0;
+        line_fp_new_[static_cast<size_t>(k)] = dirty_value(base);
+    }
+}
+
+/**
+ * 第 p 段的第一行落在哪一页；这一段没有行盒时返回 -1。
+ */
+int EditorEngine::firstPageOfParagraph(int p) const {
+    if (p < 0 || p >= static_cast<int>(layout_.para_index.size())) return -1;
+    const ParaIndex& pi = layout_.para_index[static_cast<size_t>(p)];
+    if (pi.line_begin < 0 || pi.line_begin >= pi.line_end) return -1;
+    if (pi.line_begin >= static_cast<int>(layout_.lines.size())) return -1;
+    return layout_.lines[static_cast<size_t>(pi.line_begin)].page;
 }
 
 /**
@@ -238,8 +296,10 @@ void EditorEngine::relayout() {
     SuffixReuse reuse = SuffixReuse::None;
     // 段数变了也照样试后缀复用：回车分段与退格合并一个字都没改内容，只挪了段边界。
     int relaid_paras = 1;
+    // 后缀整体平移：后缀在的每一页内容都跟着挪了 —— 这个答案已知，不必再去哈希它们。
+    bool pages_known_changed = false;
     if (!must_full && from >= 0 && from < n_para) {
-        reuse = trySuffixReuse(from, &fp_lo, &fp_hi, &relaid_paras);
+        reuse = trySuffixReuse(from, &fp_lo, &fp_hi, &relaid_paras, &pages_known_changed);
     }
     if (reuse != SuffixReuse::None) {
         const ParaIndex& head = layout_.para_index[static_cast<size_t>(from)];
@@ -250,6 +310,8 @@ void EditorEngine::relayout() {
         last_relaid_lines_ = tail.line_end - head.line_begin;
         last_layout_full_ = false;
     } else if (can_resume) {
+        // 脏段在旧版里落在哪一页 —— 截断会把这一段从段表里摘掉，所以先读。
+        const int old_first_page = firstPageOfParagraph(from);
         // 续排锚点必须在截断之前读出来 —— 截断会把它一起丢掉。
         const ReflowState resume_state =
             layout_.para_index[static_cast<size_t>(from)].state_at_start;
@@ -260,6 +322,25 @@ void EditorEngine::relayout() {
         last_relaid_paragraphs_ = n_para - from;
         last_relaid_lines_ = layout_.stats.placed_line_count - prefix_lines;
         last_layout_full_ = false;
+        // 脏页范围：脏段新旧两版的起点取更靠前的那一页（行数变少时内容往上走，
+        //   新页号可能小于旧页号），它之后每一页都可能跟着重排了。
+        //   不框出来的话就得整篇重算：在文档末尾敲一个字要哈希全篇的字形
+        //   （实测 3000 段 = 7.5 ms，而那一步只动了最后一页）。
+        const int new_first_page = firstPageOfParagraph(from);
+        const int lo = (old_first_page < 0)   ? new_first_page
+                       : (new_first_page < 0) ? old_first_page
+                                              : std::min(old_first_page, new_first_page);
+        if (lo < 0) {
+            fp_lo = -1;  // 两版都找不到行盒（空段）—— 保守起见整篇重算
+        } else if (layout_.stats.page_count != page_fp_new_count_) {
+            // 页数变了 = 从脏段起重新分页了，那之后的每一页都跟着挪位。
+            //   computePageFingerprints 遇到页数变化会退回整篇重算，这里不必：直接标脏。
+            pages_known_changed = true;
+            fp_lo = lo;
+        } else {
+            fp_lo = lo;
+            fp_hi = std::max(0, layout_.stats.page_count - 1);
+        }
     } else {
         layout_ = LayoutResult{};
         layoutDocumentRange(fonts_, blocks_, cfg_.page, 0, n_para, freshReflowState(cfg_.page),
@@ -279,8 +360,13 @@ void EditorEngine::relayout() {
     layout_.stats.layout_ms = msSince(t_layout0);
     syncStatsFromLayout();
     const auto t_fp0 = Clock::now();
-    computePageFingerprints(fp_lo, fp_hi);
+    if (pages_known_changed) {
+        markPagesChangedFrom(fp_lo);
+    } else {
+        computePageFingerprints(fp_lo, fp_hi);
+    }
     stats_.page_fp_ms = msSince(t_fp0);
+    edit_stats_.page_fp_ms = stats_.page_fp_ms;
 
     // 光标吸附到簇边界 —— 编辑可能让段落变短。吸附只改码点偏移，侧别跟着走
     //   （rel 是唯一真源，见 setCaretRel）：已经落在簇边界上就一个字都别碰，
@@ -300,10 +386,12 @@ void EditorEngine::relayout() {
 }
 
 EditorEngine::SuffixReuse EditorEngine::trySuffixReuse(int from, int* page_lo, int* page_hi,
-                                                       int* relaid_paragraphs) {
+                                                       int* relaid_paragraphs,
+                                                       bool* all_pages_changed) {
     *page_lo = -1;
     *page_hi = -1;
     *relaid_paragraphs = 1;
+    *all_pages_changed = false;
     const int n_para = static_cast<int>(blocks_.size());
     const int n_old = static_cast<int>(layout_.para_index.size());
     // 段数增量：这一次编辑把旧 [from, from + m_old) 段换成了新 [from, from + m_new) 段，
@@ -471,6 +559,10 @@ EditorEngine::SuffixReuse EditorEngine::trySuffixReuse(int from, int* page_lo, i
         return SuffixReuse::None;
     *page_lo = u_lo;
     *page_hi = std::max(0, layout_.stats.page_count - 1);
+    // 后缀整体挪位 ⇒ 它在的每一页内容都变了。这个结论不必靠哈希去问：
+    //   后缀每一行都沿块轴平移了（挪量为零的话上面那条"同状态"判据早就命中了），
+    //   而指纹里含行盒几何与每个字形的坐标 —— 它们必然不一样。
+    *all_pages_changed = true;
     return SuffixReuse::Shifted;
 }
 

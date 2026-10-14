@@ -735,6 +735,15 @@ private:
      */
     void computeLineFingerprints(int dirty_lo, int dirty_hi, bool full);
     /**
+     * 把 [first_page, 末页) 直接标成"与底图那一版不同"，不去哈希。
+     *
+     * 用在后缀整体平移那一级：后缀的每一行都沿块轴挪了位，于是它在的每一页内容都变了 ——
+     * 这个答案在进这里之前就已经确定，再把几百页的字形哈希一遍纯属白花
+     * （实测 161 页 = 21 ms，比排版本身贵一个数量级，而它在"回车/合并/敲到换行"上每一下都付）。
+     * 页数变多时新页也落在 [first_page, 末页) 里，一并标脏，不必退回整篇重算。
+     */
+    void markPagesChangedFrom(int first_page);
+    /**
      * 把当前行指纹与行盒几何存成"底图里那一版"。
      * 与 page_fp_in_base_ 同一时机调用：底图变了就要跟着换。
      */
@@ -748,6 +757,11 @@ private:
      * 第 @p page 页上的行下标范围（闭区间，[lo, hi]）；这一页没有行时 hi < lo。
      */
     void linesOnPage(int page, int* lo, int* hi) const;
+    /**
+     * 第 p 段的第一行落在哪一页；这一段没有行盒时返回 -1。
+     * 截断之前读一次、重排之后再读一次，就能框出"这一轮可能动到的最靠前那一页"。
+     */
+    int firstPageOfParagraph(int p) const;
     void syncStatsFromLayout();
 
     /**
@@ -804,16 +818,17 @@ private:
     /**
      * 后缀复用：只重排脏区，然后试着不动后缀。
      *
-     * 两级判据从严到宽：一是同状态 —— 后缀的断页、行号与坐标都与上一轮逐位相同，
-     * 整块搬回即可；二是后缀纯横排 —— 只有块轴起点变了，于是每行只是"平移 + 改页码"。
-     * 段数变化（回车分段 / 退格合并）走的是一级：内容没变、只是段边界挪了，
-     * 此时脏区在旧版占 m_old 段、新版占 m_new 段，m_old 要靠试（算法见 .cpp）。
+     * 两级判据从严到宽：一是同状态 —— 后缀的断页、行号与坐标都与上一轮逐位相同，整块搬回；
+     * 二是后缀纯横排 —— 只有块轴起点变了，于是每行只是"平移 + 改页码"。段数变化（回车分段 /
+     * 退格合并）几乎总落到第二级：段落边界一变就多让或少让一次段间距，后缀必然整体下移。
      *
      * @param page_lo,page_hi 出参：脏区新旧两版覆盖的页区间，供页指纹只重算这几页，-1 = 整篇。
      * @param relaid_paragraphs 出参：脏区在新版里占几段。
+     * @param all_pages_changed 出参：Shifted 那一级专用 —— 后缀在的每一页都变了，直接标脏。
      * @return None 时后缀未被动过（调用方可以安全地走续排），其余两种排版已完成。
      */
-    SuffixReuse trySuffixReuse(int from, int* page_lo, int* page_hi, int* relaid_paragraphs);
+    SuffixReuse trySuffixReuse(int from, int* page_lo, int* page_hi, int* relaid_paragraphs,
+                               bool* all_pages_changed);
 
     /**
      * 后缀整体平移：把 [from, 末段] 的每一行沿块轴挪到新的位置，并重编页码与全局行号，
@@ -985,6 +1000,9 @@ private:
 
     /**
      * 页内容指纹：本次 relayout 的结果 / 已画进底图的那一版。
+     *
+     * 真指纹一律清掉 kFpDirtyBit —— 那一位留给"已知变了"的哨兵（markPagesChangedFrom），
+     * 于是"这一页变了没有"永远只有一个判据：new != base。
      */
     std::vector<uint64_t> page_fp_new_;
     std::vector<uint64_t> page_fp_in_base_;

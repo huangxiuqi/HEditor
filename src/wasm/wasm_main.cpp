@@ -804,7 +804,7 @@ std::string editStatsJson() {
     o << "\"rebuildFlowPosMs\":" << e.rebuild_flowpos_ms << ",";
     o << "\"rebuildCopyMs\":" << e.rebuild_copy_ms << ",";
     o << "\"rebuildControlsMs\":" << e.rebuild_controls_ms << ",";
-    o << "\"pageFpMs\":" << g_engine.stats().page_fp_ms << ",";
+    o << "\"pageFpMs\":" << e.page_fp_ms << ",";
     o << "\"paintMs\":" << e.paint_ms << ",";
     o << "\"totalMs\":" << e.total_ms << ",";
     o << "\"caretPara\":" << e.caret_para << ",";

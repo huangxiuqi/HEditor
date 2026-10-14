@@ -148,7 +148,9 @@ return (function () {
 // 操作耗时一起记下来。
 //   帧间隔是"手感"：rAF 回调的间隔就是屏幕真正刷新的节拍，主线程算得再快、
 //   只要合成跟不上，帧间隔一样会被拉长。两者一起看才分得清"是算得慢"还是"刷不上"。
-const FPS_BURST = `
+//   burst(call) 把"每一拍做哪件事"抽出来：敲字与回车是同一套节拍测量，
+//   差别只在那一行调用 —— 而回车的每一拍都真的改段数，正是"持续按回车"的现场。
+const burst = (call) => `
 return (function () {
   const H = window.__heditor;
   const gaps = [];
@@ -163,7 +165,7 @@ return (function () {
     if (n < ${REPS}) {
       ++n;
       const t0 = performance.now();
-      H.type('字');
+      ${call}
       ops.push(performance.now() - t0);
       hosts.push(H.blitStats.settleMs || 0);
       requestAnimationFrame(tick);
@@ -192,6 +194,9 @@ return (function () {
     }, 20);
   });
 })()`;
+
+const FPS_BURST = burst("H.type('字')");
+const ENTER_BURST = burst('H.splitParagraph()');
 
 function line(tag, rows) {
   const r = rows[rows.length - 1];
@@ -319,6 +324,40 @@ async function main() {
                   `  重画页 ${r.repaintedPages}/${r.windowPages}` +
                   `  行带 ${r.bandY0}~${r.bandY1}px  重画 ${r.pixels} px` +
                   `（占全帧 ${(100 * r.pixels / r.framePx).toFixed(1)} %）`);
+    }
+
+    // 连续两次回车：第二次的重画量必须与第一次同量级。
+    //   标脏若写成"常量"，present 之后底图也变成那个常量，第二次判据读出来就是"没变"
+    //   —— 症状是连续换行只有第一次把文档推下去。浏览器侧要能自己看见这一条。
+    {
+      const two = JSON.parse(await c.eval(`
+        const H = window.__heditor;
+        H.setCaret(Math.floor(H.editStats.totalParagraphs / 2), 5);
+        H.stopBlink();
+        return new Promise((res) => setTimeout(() => {
+          const r = [];
+          for (let i = 0; i < 2; ++i) {
+            H.splitParagraph();
+            const st = H.editStats;
+            r.push({ px: st.repaintedPixels, paint: st.paintMs, dirty: st.dirtyPageCount });
+          }
+          res(JSON.stringify(r));
+        }, 120));
+      `));
+      console.log(`  连续两次回车         第 1 次重画 ${two[0].px} px（脏页 ${two[0].dirty}）` +
+                  `  第 2 次重画 ${two[1].px} px（脏页 ${two[1].dirty}）` +
+                  `  ${two[1].px * 4 > two[0].px ? '同量级 OK' : '★ 第二次几乎没重画'}`);
+    }
+
+    // 连按回车：用户的原话是"持续按回车时很卡"。每一拍都真的把一段拆成两段
+    //   （段数一路涨），所以它是这条路的稳态节拍，而不是把同一次测量重复几十遍。
+    {
+      const eb = JSON.parse(await c.eval(ENTER_BURST));
+      console.log(`  连按 ${eb.frames} 次回车     帧间隔 p50 ${eb.gapP50.toFixed(1)}` +
+                  ` / p90 ${eb.gapP90.toFixed(1)} / max ${eb.gapMax.toFixed(1)} ms` +
+                  `（>20ms 的慢帧 ${eb.slowFrames}）` +
+                  `  单拍操作 p50 ${eb.opP50.toFixed(1)} / p90 ${eb.opP90.toFixed(1)}` +
+                  ` / max ${eb.opMax.toFixed(1)} ms（宿主收尾 p50 ${eb.hostP50.toFixed(1)}）`);
     }
 
     // 屏幕真正刷新的节拍：连敲 REPS 个字，记 rAF 间隔
