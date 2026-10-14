@@ -271,6 +271,16 @@ void setPageMetrics(float w_pt, float h_pt, float margin_pt) {
     applyConfig();
 }
 
+/**
+ * 撤销栈的深度上限（条数，0 = 不限制）。与 EngineConfig::undo_limit 是同一处值。
+ * 它不影响呈现，所以走 applyConfig 那条路就够了（不重排、不重绘）。
+ */
+void setUndoLimit(int n) {
+    g_cfg.undo_limit = n < 0 ? 0 : n;
+    applyConfig();
+}
+int undoLimit() { return g_cfg.undo_limit; }
+
 void relayoutAndPaint() {
     g_engine.relayout();
     g_engine.repaint();
@@ -297,6 +307,9 @@ val frameRgba() {
  * 视口锚点：帧只装 [first, first+count) 这几页。count <= 0 表示整篇。
  * 宿主按"可见页 ± 1"设它，帧高于是与文档长度无关 —— 帧高就是画布高度，
  * 而画布越大浏览器每帧要重新合成的图层越大（见 EditorEngine::setViewportAnchor）。
+ *
+ * 不调它 = 整篇帧。长文档上差别是一个量级：2000 段实测每实例堆 82.6 MB（窗口 3 页）
+ * 对 1031.6 MB（整篇），装载 115 ms 对 1583 ms。数字与拆解见该函数的注释。
  */
 void setViewportAnchor(int first_page, int page_count) {
     g_engine.setViewportAnchor(first_page, page_count);
@@ -432,6 +445,15 @@ void showCaret(bool on) { g_engine.showCaret(on); }
 void present() { g_engine.repaint(); }
 
 /**
+ * 撤销 / 重做一条事务（栈里没有可撤销的条目时返回 false）。
+ * 走 AndRender 版 —— 与其它编辑入口同一口径，宿主一次调用就收尾。
+ * web 宿主的默认键位是 Ctrl/Cmd+Z 撤、Ctrl+Y 与 Ctrl+Shift+Z 重做（在 app.js 的
+ *   onKeyDown 里）；这里这一层是给探针与自动化用的同一件事，不必造键盘事件。
+ */
+bool undoEdit() { return g_engine.undoAndRender(); }
+bool redoEdit() { return g_engine.redoAndRender(); }
+
+/**
  * 引擎实时的光标偏移（直读，不经过编辑统计）。
  * 为什么需要它：editStats 是 presentInternal 里写下来的账 ——
  * 任何"改了状态却没重绘"的入口之后，这份账都停在上一次呈现上。
@@ -550,6 +572,24 @@ void setBracketScope(int scope) {
     applyConfig();
 }
 int bracketScope() { return static_cast<int>(g_cfg.form_brackets); }
+
+/**
+ * 删控件：拆壳（保留内容）或连内容一起删。走 AndRender 版 —— 宿主一次调用就收尾，
+ * 不必自己记得再排一次（漏掉那步的症状是"控件没了但画布上括号还在"）。
+ * 表单模式默认被 structureLock 拒（返回 false），探针要删就得先切文档模式。
+ */
+bool removeControlAt(int index, bool keep_content) {
+    return g_engine.removeControlAndRender(index, keep_content);
+}
+
+/**
+ * 改控件的运行时属性：0 = hidden、1 = readonly、2 = required、3 = structureLock
+ * （与 ControlProp 同序）。hidden 改的是呈现态的流结构，重排不能省。
+ */
+bool setControlPropAt(int index, int prop, bool value) {
+    if (prop < 0 || prop > 3) return false;
+    return g_engine.setControlPropAndRender(index, static_cast<ControlProp>(prop), value);
+}
 
 /**
  * 必须走 AndRender 版：Tab 会让占位跟着换字段、整行重排，
@@ -872,6 +912,8 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("setScenario", &setScenario);
     emscripten::function("setZoom", &setZoom);
     emscripten::function("setPageMetrics", &setPageMetrics);
+    emscripten::function("setUndoLimit", &setUndoLimit);
+    emscripten::function("undoLimit", &undoLimit);
 
     emscripten::function("relayout", &layoutOnly);
     emscripten::function("relayoutAndPaint", &relayoutAndPaint);
@@ -897,6 +939,8 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("editStatsJson", &editStatsJson);
     emscripten::function("caretReport", &caretReport);
     emscripten::function("documentText", &documentText);
+    emscripten::function("undoEdit", &undoEdit);
+    emscripten::function("redoEdit", &redoEdit);
 
     // 表单（控件是区间 + 编辑策略）
     emscripten::function("setFormControls", &setFormControls);
@@ -904,6 +948,8 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("editMode", &editMode);
     emscripten::function("setBracketScope", &setBracketScope);
     emscripten::function("bracketScope", &bracketScope);
+    emscripten::function("removeControlAt", &removeControlAt);
+    emscripten::function("setControlPropAt", &setControlPropAt);
     emscripten::function("focusControl", &focusControl);
     emscripten::function("tabCaret", &tabCaret);
     emscripten::function("auditFrame", &auditFrame);

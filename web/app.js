@@ -402,6 +402,10 @@ async function boot() {
 
   setStatus('实例化 WASM…');
   const tWasm = performance.now();
+  // 注意这个参数对象会被消费：它就是 emscripten 的 Module，工厂会把状态写回去。
+  //   所以两次实例化必须各传一个新对象 —— 复用同一个对象会让第二次实例化直接抛
+  //   "BindingError: Cannot register multiple overloads of a function..."（实测）。
+  //   多实例宿主尤其要守这一条；这里是字面量，天然满足。
   mod = await CreateHEditor({
     // 胶水层是从自己所在的目录拼 wasm 路径的（不含 query），所以这里显式补上 ——
     //   否则会出现"胶水是新的、wasm 是缓存里的旧的"这种最难查的组合。
@@ -722,6 +726,31 @@ function onKeyDown(ev) {
   // 组合期间一律不动文档。中文输入法在组合时会持续发 keydown，
   //   若每次都去重排，画面就会又卡又闪 —— WASM 编辑器最容易在这里出问题。
   if (composing || ev.isComposing) return;
+
+  // 撤销 / 重做：Ctrl+Z 撤、Ctrl+Y 重做，Ctrl+Shift+Z 也当重做。
+  //
+  //   这一段必须排在下面那句"带修饰键一律放行"之前 —— 否则 Ctrl+Z 会被直接交给
+  //     浏览器。本页没有可撤销的 DOM 编辑（键盘的承接层是个只读 textarea），
+  //     交给浏览器就等于这个键位没绑。
+  //
+  //   重做收两个键位：Ctrl+Y 与 Ctrl+Shift+Z。两者互不冲突，代价只是多一个判断。
+  //     比较前要转小写 —— 真键盘在 shift 按下时给的是大写 'Z'。
+  //   Cmd 一并认下：Mac 上 Command 才是惯用修饰键，写在这里免得另开一条分支。
+  //
+  //   走 wasm 的 undoEdit/redoEdit（引擎侧的 *AndRender 版）：引擎改完状态就把
+  //     重排重绘收尾好，这里只管上屏 —— 与上面的 Backspace/Enter 同一个模式。
+  //     栈空时返回 false，落到下面那条 resetBlink()，光标重新开始闪。
+  if ((ev.ctrlKey || ev.metaKey) && !ev.altKey) {
+    const k = (ev.key || '').toLowerCase();
+    if (k === 'z' || k === 'y') {
+      const redo = (k === 'y') || ev.shiftKey;
+      ev.preventDefault();
+      if (redo ? mod.redoEdit() : mod.undoEdit()) afterEdit();
+      else resetBlink();
+      return;
+    }
+  }
+
   if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
 
   let changed = false;
@@ -758,7 +787,8 @@ function onKeyDown(ev) {
       break;
     case 'Tab':
       // Tab = 缩进（编辑器语义），不是"跳到下一个控件"。
-      //   表单字段之间用鼠标点、或者方向键（光标本来就跨字段）。
+      //   两种模式现在都是这样：文档模式的"Tab = 制表符"与表单模式的"Tab = 跳下一个可编辑
+      //     字段"都还没接（引擎侧的 tabCaret 已经就绪，目前只有探针在调）。
       //   Shift+Tab = 反缩进（删掉光标前最多 tab_spaces 个空格）。
       //   走 mod.indent/outdent（*AndRender 路径）：入口改状态就必须收尾，
       //     否则宿主会拿上一次的脏矩形上屏，画布变成新旧混合体。
@@ -1302,6 +1332,35 @@ window.__heditor = {
   },
   controlAt(xPt, yPt) { return mod.controlAtPoint(xPt, yPt); },
   describeControls() { return mod ? mod.describeControls() : ''; },
+
+  // 删控件 / 改控件属性：结构操作的引擎入口（宿主 UI 还没接，先给探针与自动化用）。
+  //   keepContent = true 是"拆壳"（字段内容留下来变成普通正文）。
+  //   表单模式默认被 structureLock 拒（返回 null，不消费）；探针要删就先切文档模式。
+  //   引擎侧走的是 AndRender 版，这里只负责把它上屏 —— 与 indent/outdent 同一个写法。
+  removeControl(i, keepContent) {
+    if (!mod.removeControlAt(Number(i), !!keepContent)) return null;
+    return this.present();
+  },
+  // 改运行时属性：prop 0 = hidden、1 = readonly、2 = required、3 = structureLock。
+  //   幂等（值没变）时引擎返回 true 但不重排重绘，这里的账也随之为"没重画"。
+  setControlProp(i, prop, value) {
+    if (!mod.setControlPropAt(Number(i), Number(prop), !!value)) return null;
+    return this.present();
+  },
+
+  // 撤销 / 重做（栈空时返回 null）。
+  //   默认键位在 onKeyDown 里：Ctrl/Cmd+Z 撤、Ctrl+Y 或 Ctrl+Shift+Z 重做。
+  //   这里留着的是同一件事的宿主门面版：探针与自动化用它（不必造键盘事件），
+  //   也不受 ready/busy 限制 —— 键位那条路要受。
+  undo() { if (!mod.undoEdit()) return null; return this.present(); },
+  redo() { if (!mod.redoEdit()) return null; return this.present(); },
+
+  // 撤销栈的深度上限（条数，0 = 不限制）。
+  //   默认 100（EngineConfig::undo_limit）—— 与 Office 系和 Quill 的 maxStack 同值。
+  //   改它不动呈现，所以这里不上屏；调小时当场裁掉多余的条目。
+  //   粒度是一笔编辑一步、没有时间合并，同样 100 条覆盖的输入比 Quill 短。
+  setUndoLimit(n) { mod.setUndoLimit(Number(n)); return this.undoLimit(); },
+  undoLimit() { return mod.undoLimit(); },
 
   // 给探针用的：把引擎当前那一帧原样拷出来
   //

@@ -264,7 +264,15 @@ if(EMSCRIPTEN)
     -sEXPORT_NAME=CreateHEditor
     -sENVIRONMENT=web
     -sALLOW_MEMORY_GROWTH=1
-    -sINITIAL_MEMORY=64MB
+    # 初始内存是**起步值**，不是上限（ALLOW_MEMORY_GROWTH=1 会按需增长）。
+    #
+    # 为什么关心它：wasm 的内存是**每实例一份**的 —— 一个页面开 N 个编辑器就有 N 份。
+    # 实测（2026-10-14）：64MB 起点时每实例恒占 64MB；16MB 起点时，灌完 16.9MB 的
+    #   中文字体是 36.3MB（期间增长两次，且 HEAPU8 视图随增长更新正常），
+    #   两个实例同时装载并渲染互不干扰，浏览器探针 256 项全绿。
+    # 调高能少几次增长，调低能让多实例更省内存。真正的大头是字体（十几 MB 的 CJK 字体，
+    #   每实例一份）—— 要压内存先做字体子集化，比调这个数更有效。
+    -sINITIAL_MEMORY=16MB
     -sSTACK_SIZE=2MB
     -sFILESYSTEM=0
     -sEXPORTED_RUNTIME_METHODS=HEAPU8,HEAPU32

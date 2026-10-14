@@ -20,26 +20,16 @@ StepResult success() {
 
 }  // namespace
 
-bool canMerge(const Transaction& older, const Transaction& newer) {
-    if (newer.steps.size() != 1) return false;
-    const auto* fresh = std::get_if<InsertText>(&newer.steps[0]);
-    if (fresh == nullptr) return false;
+void UndoStack::setLimit(int limit) {
+    limit_ = limit < 0 ? 0 : limit;
+    trim();
+}
 
-    // 旧事务整串都必须是同标记的插入，末尾位置由最后一笔算出来。
-    FlowPos tail = 0;
-    bool any = false;
-    for (const Step& s : older.steps) {
-        const auto* hit = std::get_if<InsertText>(&s);
-        if (hit == nullptr || hit->marks != fresh->marks) return false;
-        const FlowPos end = hit->at + static_cast<FlowPos>(hit->cps.size());
-        if (!any) {
-            tail = end;
-            any = true;
-        } else if (end > tail) {
-            tail = end;
-        }
-    }
-    return any && fresh->at == tail;
+void UndoStack::trim() {
+    if (limit_ <= 0) return;
+    if (done_.size() <= static_cast<size_t>(limit_)) return;
+    // 丢最旧的：留下的是用户刚刚敲的那些。反过来（丢最新的）会把最该撤的那一笔扔掉。
+    done_.erase(done_.begin(), done_.end() - static_cast<std::ptrdiff_t>(limit_));
 }
 
 void UndoStack::revert(const std::vector<Step>& applied) {
@@ -61,14 +51,8 @@ StepResult UndoStack::commit(Transaction tx) {
     }
     normalizeDocument(tree_);
     undone_.clear();
-
-    if (!done_.empty() && canMerge(done_.back(), tx)) {
-        Transaction& top = done_.back();
-        top.steps.insert(top.steps.end(), tx.steps.begin(), tx.steps.end());
-        top.selection_after = tx.selection_after;
-        return success();
-    }
     done_.push_back(std::move(tx));
+    trim();
     return success();
 }
 

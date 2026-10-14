@@ -133,6 +133,8 @@ async function main() {
     //   dispatchEvent 返回 false 表示监听器调了 preventDefault。
     //   普通可打印字符 → 必须吞掉（否则字符会落进 textarea，和 canvas 上的正文叠成两层）
     //   Ctrl/Alt/Meta 组合 → 必须不吞（否则用户按 Ctrl+C 就被吃掉了）
+    //   例外只有 Ctrl+Z / Ctrl+Y 这一对（撤销键位，见 [16] (g)）—— 这里用 'x'
+    //     探的就是"修饰键本身不构成吞掉的理由"，不是"任何一个组合都不吞"。
     //   只断言"文档没变"是测不出后者的 —— 合成事件本来就没有默认行为。
     //
     // 顺序也要小心：下面"该吞的吞"那一条会真的敲进一个 z。
@@ -542,7 +544,7 @@ async function main() {
     //   标记真的被画出来了（不是"数据里有控件、画面上什么都没有"）；
     //   括号常驻：每个字段的左括号一直在，且不随光标变（默认档 All）；
     //   字段被删空之后括号仍然在（内容没了、"位置还占着"、括号却消失了）；
-    //   切回文档模式标记真的消失。
+    //   只读模式标记真的消失（文档与表单都画，只读是呈现与打印态，不画也不占位）。
     //
     // 标记色 = 亮蓝 rgb(56,139,253)，与 EngineConfig::control_mark 一致
     // —— 刻意和光标色 (31,111,235) 不同，否则像素断言里分不清"括号"和"光标"。
@@ -1098,15 +1100,23 @@ async function main() {
               len1 === len0 + 1 && ct2.items[0].end[1] === 10,
               `码点 ${len0} → ${len1}，字段 #0 end=${ct2.items[0].end[1]}`);
 
-    // 切回文档模式：标记必须一个像素都不剩
+    // 只读模式：标记必须一个像素都不剩。
+    //   文档模式与表单模式都画括号（编辑态要一眼看出哪块是控件），只有只读不画 ——
+    //   它是要印出来的呈现态，画上去就印出来了。三档的这一条口径见 [15]。
+    await c.eval('return window.__heditor.setEditMode(2);');
+    const roMark = await c.eval(inkMark);
+    chk.check('★ 只读模式：标记一个像素都不剩', roMark === 0, `${roMark} px`);
+
+    // 文档模式：标记照常画出来（不再是"只有表单模式才看得见控件边界"）
     await c.eval('return window.__heditor.setEditMode(0);');
     const docMark = await c.eval(inkMark);
-    chk.check(' 切回文档模式：标记一个像素都不剩', docMark === 0, `${docMark} px`);
+    chk.check('★ 文档模式：标记照常出现（编辑态看得见哪块是控件）', docMark > 0,
+              `${docMark} px`);
 
-    // 切回表单模式后标记回来（证明不是"切走一次就再也不画"）
+    // 切回表单模式后标记仍在（证明不是"切走一次就再也不画"）
     await c.eval('return window.__heditor.setEditMode(1);');
     const backMark = await c.eval(inkMark);
-    chk.check(' 切回表单模式：标记又出现了', backMark > 0, `${backMark} px`);
+    chk.check(' 切回表单模式：标记也没有丢', backMark > 0, `${backMark} px`);
 
     // 穷尽不变式（在这一侧尤其重要：native 用的是自写光栅器，
     //     浏览器是 Skia，两边的字形光栅/度量并不完全相同）。
@@ -2367,6 +2377,269 @@ async function main() {
       await c.screenshot(join(OUT, 'ctl-split-twice-then-backspace.png'));
     }
   }
+  chk.section('[15] 文档模式也画控件边界（方括号、与表单一致），只读才不画不占位');
+  {
+    //  用户的原话："编辑模式下不显示控件边界了，我都不知道哪块是控件"。
+    //  口径（引擎的 bracketedControls / bracketPlanId）：文档模式与表单模式都占位、都画；
+    //  只读模式是呈现与打印态，一个都不占 —— 占位会把正文凭空推开一截，而它又不画。
+    //  判据落在占位槽清单上：占位与不占位的区别是"正文有没有被推开"，画的都是同一对括号，
+    //  截图分不出来。槽清单里每枚括号的偏移、开闭、归属、所在行都在，这是唯一看得见它的地方。
+    const load15 = async (v) => {
+      await c.eval(`return window.__heditor.loadFormSample(${v});`);
+      await c.eval('return window.__heditor.stopBlink();');
+    };
+    const slots15 = () => c.eval('return (window.__heditor.bracketSlots || []).length;');
+    const text15 = () => c.eval('return Array.from(window.__heditor.allText).join("");');
+
+    await load15(0);
+    await c.eval('return window.__heditor.setBracketScope(0);');  // 显式回到 All 档
+    const cnt15 = await c.eval('return window.__heditor.controls.count;');
+    const form15 = await slots15();
+    // 每个字段自己的那一对：一枚开、一枚闭，归属不许串台（串台就是几何投影错位）
+    const owned15 = await c.eval(`
+      const m = {};
+      for (const s of (window.__heditor.bracketSlots || [])) {
+        m[s.owner] = m[s.owner] || { open: 0, close: 0 };
+        if (s.side === 1) m[s.owner].open++; else m[s.owner].close++;
+      }
+      return m;`);
+    const ownedOk = Object.keys(owned15).length === cnt15 &&
+      Object.values(owned15).every((v) => v.open === 1 && v.close === 1);
+    report.docBrackets = { count: cnt15, form: form15, owned: owned15 };
+
+    chk.check('前置：表单模式下每个字段两枚括号',
+              form15 === cnt15 * 2, `${form15} 槽 / ${cnt15} 字段`);
+    chk.check('表单模式：每个字段各一枚开括号 + 一枚闭括号（归属不串台）', ownedOk,
+              JSON.stringify(owned15));
+
+    const tForm15 = await text15();
+    await c.eval('return window.__heditor.setEditMode(0);');  // 文档模式
+    const doc15 = await slots15();
+    report.docBrackets.doc = doc15;
+    chk.check('★ 文档模式：括号照常占位（不再"编辑模式下什么都看不见"）',
+              doc15 === cnt15 * 2, `${doc15} 槽 / ${cnt15} 字段`);
+    chk.check('★ 文档模式：正文一个字都没变（括号是占位簇，不是插进去的字符）',
+              (await text15()) === tForm15, JSON.stringify(await text15()));
+
+    // All 档下括号常驻：光标跨字段移动不改变占位集合，也不该重排（这是 All 档的意义）
+    await c.eval('return window.__heditor.setCaret(0, 6);');
+    chk.check('文档模式：光标跨字段移动不改变占位集合（All 档括号常驻）',
+              (await slots15()) === cnt15 * 2, `${await slots15()} 槽`);
+
+    await c.eval('return window.__heditor.setEditMode(2);');  // 只读
+    const ro15 = await slots15();
+    chk.check('★ 只读模式：一个括号都不占、也不画（它是要印出来的呈现态）',
+              ro15 === 0, `${ro15} 槽`);
+    chk.check('只读模式：正文也没变（"不占位"不等于"删了字"）',
+              (await text15()) === tForm15, JSON.stringify(await text15()));
+
+    await c.eval('return window.__heditor.setEditMode(0);');
+    const sc15 = await c.eval('return window.__heditor.selfCheck();');
+    chk.check('★ 三档来回切之后屏幕 == 引擎帧（标记改了、底图没改，靠整帧重贴收口）',
+              sc15.screenVsEngineDiffPx === 0, `差 ${sc15.screenVsEngineDiffPx} px`);
+    await c.eval('window.__heditor.present(); return true;');
+    await sleep(150);
+    await c.screenshot(join(OUT, 'brackets-in-document-mode.png'));
+  }
+
+  chk.section('[16] 删控件：光标贴闭括号按退格（真实按键）+ 引擎命令');
+  {
+    //  用户的原话："编辑模式下，光标在控件后面，退格就是删除控件"。
+    //  三连可编辑字段（variant 2）：part1=[5,7) 反复、part2=[7,9) 心悸、part3=[9,11) 三天。
+    //  字段末尾那个码点偏移上压着两格 —— 侧别 0 还在内容里（退的是字），侧别 1 已经跨过
+    //  闭括号（退的是这个控件）。任何"按码点偏移猜"的实现都过不了下面 (a)/(b) 这一对。
+    //  结构操作要文档模式：表单模式默认被 structureLock 锁住，(c) 那一条正是它的对照。
+    const load16 = async (v) => {
+      await c.eval(`return window.__heditor.loadFormSample(${v});`);
+      await c.eval('return window.__heditor.stopBlink();');
+    };
+    const text16 = () => c.eval('return Array.from(window.__heditor.allText).join("");');
+    const ids16 = () => c.eval('return window.__heditor.controls.items.map(i => i.id);');
+    const n16 = () => c.eval('return window.__heditor.controls.count;');
+    const blocked16 = () => c.eval('return window.__heditor.blockedEdits;');
+    const side16 = () => c.eval('return window.__heditor.caret.side;');
+
+    await load16(2);
+    await c.eval('return window.__heditor.setEditMode(0);');
+    const base16 = { t: await text16(), ids: await ids16() };
+    report.removeControl = { base: base16 };
+    chk.check('前置：三连可编辑字段 part1 / part2 / part3',
+              JSON.stringify(base16.ids) === '["part1","part2","part3"]',
+              JSON.stringify(base16.ids));
+
+    // (a) 对照组：侧别 0 —— 还在 part2 的内容里，退格删的是「悸」这个字
+    await c.eval('return window.__heditor.setCaretAtSide(0, 9, 0);');
+    chk.check('前置：侧别 0 是 part2 的内容末尾', (await side16()) === 0, `侧别 ${await side16()}`);
+    await c.eval(key('Backspace'));
+    chk.check('★ 侧别 0（内容末尾）退格删的是「悸」，控件一个都没少',
+              (await n16()) === 3 && (await text16()) === '患者主诉：反复心三天，加重一天。',
+              `${await n16()} 个字段 ｜ ${JSON.stringify(await text16())}`);
+
+    // (b) 主判据：侧别 1 —— 已经跨过 part2 的闭括号，退格退役这个控件，内容留成正文
+    await load16(2);
+    await c.eval('return window.__heditor.setEditMode(0);');
+    await c.eval('return window.__heditor.setCaretAtSide(0, 9, 1);');
+    chk.check('前置：侧别 1 是 part2 的闭括号之后', (await side16()) === 1, `侧别 ${await side16()}`);
+    await c.eval(key('Backspace'));
+    report.removeControl.afterBackspace = { ids: await ids16(), t: await text16() };
+    chk.check('★★ 退格退掉的是 part2 这个控件（不是字）',
+              JSON.stringify(await ids16()) === '["part1","part3"]', JSON.stringify(await ids16()));
+    // 区间不许被撑大：拆壳上提出来的「心悸」是 part1 / part3 的兄弟，不是被前一个字段吃掉。
+    //   单列这一条是因为"内容被并进 part1"也能让上面三条全绿 —— 视觉上就是
+    //   "删掉一个字段、前一个字段把它吞了"，不量区间看不出来。
+    const rng16 = await c.eval('return window.__heditor.controls.items.map(i => [i.start[1], i.end[1]]);');
+    report.removeControl.ranges = rng16;
+    chk.check('★★ 剩下两个字段的区间仍是 [5,7) 与 [9,11)（推广出来的正文是兄弟，没被吞进 part1）',
+              JSON.stringify(rng16) === '[[5,7],[9,11]]', JSON.stringify(rng16));
+    chk.check('★★ 拆壳留内容：文本一个字都没少',
+              (await text16()) === base16.t, JSON.stringify(await text16()));
+    const lv16 = await c.eval('return window.__heditor.auditLayout();');
+    chk.check('★★ 删控件之后增量排版 == 全量重排', !!lv16 && lv16.diff === 0,
+              lv16 ? `diff ${lv16.diff}` : 'null');
+    const sc16 = await c.eval('return window.__heditor.selfCheck();');
+    chk.check('★ 删控件之后屏幕 == 引擎帧（括号与占位都得跟着走）',
+              sc16.screenVsEngineDiffPx === 0, `差 ${sc16.screenVsEngineDiffPx} px`);
+    await c.screenshot(join(OUT, 'ctl-remove-by-backspace.png'));
+
+    // 撤销要把控件整棵装回去：拆壳那一步是可逆的（内容与两枚边界都回原处）
+    chk.check('★★ 撤销把 part2 装回来（身份与文本都回原处）',
+              (await c.eval('return window.__heditor.undo() ? 1 : 0;')) === 1 &&
+                JSON.stringify(await ids16()) === JSON.stringify(base16.ids) &&
+                (await text16()) === base16.t,
+              JSON.stringify(await ids16()));
+
+    // (c) 表单模式：结构被 structureLock 锁住 —— 这一次按键不许被吞掉，回落成普通退格
+    await load16(2);
+    const b16 = await blocked16();
+    await c.eval('return window.__heditor.setCaretAtSide(0, 9, 1);');
+    await c.eval(key('Backspace'));
+    chk.check('★ 表单模式：结构操作被拒之后回落成普通退格（没吞掉这次按键）',
+              (await n16()) === 3 && (await text16()) === '患者主诉：反复心三天，加重一天。',
+              `${await n16()} 个字段 ｜ ${JSON.stringify(await text16())}`);
+    chk.check('★ 那次被拒的结构操作记了账', (await blocked16()) === b16 + 1,
+              `blockedEdits ${b16} → ${await blocked16()}`);
+
+    // (d) 引擎命令：连内容一起删（keep_content = false）
+    await load16(2);
+    await c.eval('return window.__heditor.setEditMode(0);');
+    const rm16 = await c.eval('return window.__heditor.removeControl(1, false) ? 1 : 0;');
+    chk.check('★ 引擎命令 removeControl(1,false)：连内容一起删',
+              rm16 === 1 && JSON.stringify(await ids16()) === '["part1","part3"]' &&
+                (await text16()) === '患者主诉：反复三天，加重一天。',
+              `${JSON.stringify(await ids16())} ｜ ${JSON.stringify(await text16())}`);
+    chk.check('★ 撤销把它整棵装回来',
+              (await c.eval('return window.__heditor.undo() ? 1 : 0;')) === 1 &&
+                JSON.stringify(await ids16()) === JSON.stringify(base16.ids) &&
+                (await text16()) === base16.t,
+              JSON.stringify(await ids16()));
+
+    // (e) 锁是逐控件的：表单模式里给 part2 开锁之后它删得掉，没开锁的 part1 仍被拒
+    await load16(2);
+    const unlock16 = await c.eval('return window.__heditor.setControlProp(1, 3, false) ? 1 : 0;');
+    const rmLocked16 = await c.eval('return window.__heditor.removeControl(0, true) ? 1 : 0;');
+    const rmOpen16 = await c.eval('return window.__heditor.removeControl(1, true) ? 1 : 0;');
+    chk.check('★ 表单模式：开锁的那个删得掉、没开锁的仍被拒（锁挂在控件自己身上）',
+              unlock16 === 1 && rmLocked16 === 0 && rmOpen16 === 1 &&
+                JSON.stringify(await ids16()) === '["part1","part3"]',
+              `开锁 ${unlock16} 删被锁的 ${rmLocked16} 删已开锁的 ${rmOpen16} ｜ ` +
+                JSON.stringify(await ids16()));
+
+    // (f) 属性入口幂等：拿同一个值再设一次，撤销栈上不留记录
+    await load16(2);
+    await c.eval('return window.__heditor.setEditMode(0);');
+    await c.eval('return window.__heditor.setControlProp(0, 3, false);');  // 锁 → 开：记一条
+    const before16 = await text16();
+    await c.eval('return window.__heditor.setControlProp(0, 3, false);');  // 再设一次：不记
+    chk.check('★ 属性入口幂等：同一个值设两次只留一条撤销记录',
+              (await c.eval('return window.__heditor.undo() ? 1 : 0;')) === 1 &&
+                (await c.eval('return window.__heditor.undo() ? 1 : 0;')) === 0 &&
+                (await text16()) === before16,
+              JSON.stringify(await text16()));
+
+    // (g) 默认键位：Ctrl+Z 撤销、Ctrl+Y（与 Ctrl+Shift+Z）重做。
+    //   上面几条走的是宿主门面 undo() —— 那是同一件事的另一条路。键位这条路要真的
+    //   派按键才算验过，而且它多担一条："该吞的吞"。页面没有可撤销的 DOM 编辑
+    //   （键盘的承接层是个只读 textarea），漏给浏览器只会让 Ctrl+Z 表现成"按了没反应"。
+    //   这也是 [2] 段那条"Ctrl/Alt/Meta 一律不吞"的例外，例外必须写进判据里。
+    await load16(2);
+    await c.eval('return window.__heditor.setEditMode(0);');
+    const L16 = (await text16()).length;
+    await c.eval(`return window.__heditor.setCaret(0, ${L16});`);
+    await c.eval(key('X'));
+    await c.eval(key('Y'));
+    const typed16 = await text16();
+    chk.check('前置：真实按键敲进两个字（各是一笔事务）',
+              typed16 === base16.t + 'XY', JSON.stringify(typed16));
+
+    const ctrl = (k, extra = '') => c.eval(`
+      const e = new KeyboardEvent('keydown',
+        { key: ${JSON.stringify(k)}, ${extra}bubbles: true, cancelable: true });
+      return window.__heditor.textarea.dispatchEvent(e);   // false = 被 preventDefault
+    `);
+    // 摆前置状态一律用门面 undo()，不借上一条键位判据的结果 —— 判据要各自承重：
+    //   若靠上一条把状态摆好，键位整段没绑时"重做回原样"照样是通过的。
+    const undoFacade = () => c.eval('return window.__heditor.undo() ? 1 : 0;');
+
+    // 撤销粒度 = 一笔编辑一步，不做合并：敲进去两个字符就要撤两次。
+    chk.check('★ Ctrl+Z 被宿主吞掉（不吞 = 这个键位等于没绑）',
+              (await ctrl('z', 'ctrlKey: true, ')) === false);
+    chk.check('★ Ctrl+Z 一次只退掉最后那个字符（撤销不做合并）',
+              (await text16()) === base16.t + 'X', JSON.stringify(await text16()));
+    await ctrl('z', 'ctrlKey: true, ');
+    chk.check('★ 再撤一次，回到载入时的文本（栈空）',
+              (await text16()) === base16.t, JSON.stringify(await text16()));
+
+    // 重做同样一步一个字。此时状态是 base、重做栈里有两项，所以这一对判据各自承重。
+    await ctrl('y', 'ctrlKey: true, ');
+    chk.check('★ Ctrl+Y 重做一步：退掉的字回来一个',
+              (await text16()) === base16.t + 'X', JSON.stringify(await text16()));
+    await ctrl('y', 'ctrlKey: true, ');
+    chk.check('★ 再重做一次：两个字都回来了', (await text16()) === typed16,
+              JSON.stringify(await text16()));
+
+    // Ctrl+Shift+Z 也是重做。真键盘在 shift 按下时给的是大写 'Z' ——
+    //   判据必须走这一格，否则"只在 key === 'z' 上判"的实现会漏掉它。
+    chk.check('前置：门面撤销一次（文本退到 base + 一个字）',
+              (await undoFacade()) === 1 && (await text16()) === base16.t + 'X',
+              JSON.stringify(await text16()));
+    await ctrl('Z', 'ctrlKey: true, shiftKey: true, ');
+    chk.check('★ Ctrl+Shift+Z 也当重做（大写 Z 同样要认）',
+              (await text16()) === typed16, JSON.stringify(await text16()));
+
+    // 撤到底：栈空之后再一次 Ctrl+Z 不许改文档，也不许被当成"没处理"漏给浏览器
+    //   —— 那条路落到 resetBlink()，吞掉动作在调引擎之前就做完了。
+    chk.check('前置：门面撤销两次，栈空、文本回到载入时',
+              (await undoFacade()) === 1 && (await undoFacade()) === 1 &&
+                (await text16()) === base16.t,
+              JSON.stringify(await text16()));
+    chk.check('★ 栈空时 Ctrl+Z 仍然被吞、且文档一个字不改',
+              (await ctrl('z', 'ctrlKey: true, ')) === false && (await text16()) === base16.t,
+              JSON.stringify(await text16()));
+
+    // (h) 撤销上限：宿主的门面把它一路传到引擎（默认 100，与 Office 系和 Quill 的
+    //   maxStack 同值）。这条走的是 setUndoLimit → wasm → EngineConfig → UndoStack 一整条线，
+    //   任何一环断了这里都会露出来。
+    chk.check('默认撤销上限 100（Office 系与 Quill 的 maxStack 同值）',
+              (await c.eval('return window.__heditor.undoLimit();')) === 100,
+              String(await c.eval('return window.__heditor.undoLimit();')));
+
+    await load16(2);
+    await c.eval('return window.__heditor.setEditMode(0);');
+    await c.eval('return window.__heditor.setUndoLimit(2);');
+    await c.eval(`return window.__heditor.setCaret(0, ${L16});`);
+    for (const ch of ['X', 'Y', 'Z']) await c.eval(key(ch));
+    chk.check('前置：敲进三个字符', (await text16()) === base16.t + 'XYZ',
+              JSON.stringify(await text16()));
+
+    let undoneH = 0;
+    while (await c.eval('return window.__heditor.undo() ? 1 : 0;')) ++undoneH;
+    chk.check('★ 上限 2：三笔只撤得动两次', undoneH === 2, String(undoneH));
+    chk.check('★ 丢的是最旧的 —— 第一个字符撤不回去了',
+              (await text16()) === base16.t + 'X', JSON.stringify(await text16()));
+    // 还原成默认，免得影响后面的判据。
+    chk.check('还原成默认上限', (await c.eval('return window.__heditor.setUndoLimit(100);')) === 100);
+  }
+
   chk.section('[7] 无页面异常 / 无 console 错误');
   {
     report.pageErrors = await c.eval('return window.__heditor.errors;');
@@ -2378,7 +2651,7 @@ async function main() {
 
   // 收尾：载入表单样例 + 恢复闪烁，截一张给人看
   //   刻意停在表单模式（而不是纯文档场景）：截图要能一眼看出
-  //     "字段的边界长什么样、只读的那个是灰的"。切回文档模式它们就消失了。
+  //     "字段的边界长什么样、只读的那个是灰的"。文档模式也画括号，只有只读模式不画。
   await c.eval('window.__heditor.loadFormSample(0); window.__heditor.startBlink(); return true;');
   await sleep(400);
   await c.screenshot(join(OUT, 'edit-scene.png'));

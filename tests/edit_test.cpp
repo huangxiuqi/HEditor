@@ -1022,7 +1022,10 @@ int main() {
                        "文档模式一次都没被拒 —— 策略层对旧行为是完全透明的");
         }
 
-        // (b) "显示才占位"：光标不在字段里 → 不占位；进了字段 → 把正文挤开
+        // (b) "看得见就占位"：文档（设计态）与表单都画方括号 → 都占位；只读不画 → 不占位。
+        //
+        //   括号落进版面就连宽度一起占了，所以"画不画"与"占不占位"是同一条记录
+        //   （排版层只吃块流的对象表，两者分不开）。
         {
             ef.setCaret(0, 0);  // 文档开头 —— 在任何字段之外
             const float end_none =
@@ -1030,7 +1033,7 @@ int main() {
             const int glyphs_none = ef.stats().glyph_count;
 
             loadControls(ef, {mk(5, 9, "k1", false), mk(12, 16, "k2", false)});
-            const float end_away =
+            const float end_doc =
                 ef.layout().lines.empty() ? 0.0f : ef.layout().lines[0].inline_end_pt;
 
             ef.setEditMode(EditMode::Form);
@@ -1038,19 +1041,28 @@ int main() {
             const float end_in =
                 ef.layout().lines.empty() ? 0.0f : ef.layout().lines[0].inline_end_pt;
 
-            std::printf(
-                "     首行宽：无控件 %.2f pt ｜ 有控件但光标在字段外 %.2f pt ｜ "
-                "光标在字段内 %.2f pt（字形始终 %d 个）\n",
-                end_none, end_away, end_in, ef.stats().glyph_count);
+            ef.setEditMode(EditMode::ReadOnly);
+            const float end_ro =
+                ef.layout().lines.empty() ? 0.0f : ef.layout().lines[0].inline_end_pt;
+            ef.setEditMode(EditMode::Form);
 
-            expectTrue(std::fabs(end_away - end_none) < 0.01f,
-                       "光标不在字段里 → 括号不显示 → 不占位（行宽与没有控件时一模一样）");
-            expectTrue(end_in > end_away + 1.0f,
-                       "光标进入字段 → 括号显示 → 占位（首行宽变大，正文被挤开了）");
+            std::printf(
+                "     首行宽：无控件 %.2f pt ｜ 文档模式 %.2f pt ｜ 表单模式 %.2f pt ｜ "
+                "只读模式 %.2f pt（字形始终 %d 个）\n",
+                end_none, end_doc, end_in, end_ro, ef.stats().glyph_count);
+
+            expectTrue(end_doc > end_none + 1.0f,
+                       "文档模式（设计态）也占位 —— 看不见字段的边界，作者就无从增删改");
+            expectTrue(std::fabs(end_in - end_doc) < 0.01f,
+                       "表单模式占位量与文档模式一模一样"
+                       "（括号范围由 form_brackets 决定，不随编辑模式变）");
+            expectTrue(
+                std::fabs(end_ro - end_none) < 0.01f,
+                "只读模式不占位（括号不画就不该占宽度 —— 那样会凭空多出一段空隙，谁也没要）");
             expectTrue(ef.stats().glyph_count == glyphs_none,
                        "括号不产生字形（占位簇 g0==g1，墨迹数量一个都没变）");
             expectTrue(ef.editMode() == EditMode::Form && ef.controls().size() == 2,
-                       "已切到表单模式，2 个字段");
+                       "已切回表单模式，2 个字段");
         }
 
         // (b2) 占位必须体现在画出来的字形上，而不只是行盒的几何数字。
@@ -1132,21 +1144,27 @@ int main() {
             expectTrue(!r0b.empty() && std::fabs(x_fan1 - r0b[0].r_pt.x) < 0.02f,
                        "字形「反」的 x == 字段 #0 矩形左缘（绘制与几何同一把尺子）");
 
-            // (b3) 占位只属于表单模式
-            //   文档模式下标着同一份控件、光标也在字段里，但括号根本不画 ——
-            //   那就不该占宽度。否则会凭空多出一段空隙，谁也没要，
-            //   而且很难发现（正文看起来"字距有点怪"，不像个 bug）。
+            // (b3) 占位只属于"看得见的模式"
+            //   文档（设计态）要看得见边界，表单要看得见填哪，两者都画方括号 → 都占位；
+            //   只读不画（它是呈现与打印态，括号落进版面就印出来了）→ 那就一个宽度都不许占，
+            //   否则会凭空多出一段空隙，谁也没要，而且很难发现（正文看起来"字距有点怪"）。
             ef.setEditMode(EditMode::Document);
             ef.setCaret(0, 6);  // 光标仍在 k1 里（控件还挂着）
             const float x_doc = glyphX(ef, 5);
+            ef.setEditMode(EditMode::ReadOnly);
+            ef.setCaret(0, 6);
+            const float x_ro = glyphX(ef, 5);
             ef.setEditMode(EditMode::Form);
             const float x_form = glyphX(ef, 5);
-            std::printf("     文档模式字形 x=%.3f（无表单基线 %.3f）｜ 表单模式 %.3f\n", x_doc,
-                        x_fan0, x_form);
-            expectTrue(std::fabs(x_doc - x_fan0) < 0.01f,
-                       "文档模式下不占位：光标即使落在字段里，字形也回到无表单时的位置");
-            expectTrue(x_form - x_doc > 1.0f,
-                       "切回表单模式立刻占位（证明\"切模式会重排\"确实接上了）");
+            std::printf(
+                "     字形「反」x：无表单基线 %.3f ｜ 文档 %.3f ｜ 表单 %.3f ｜ 只读 %.3f\n",
+                x_fan0, x_doc, x_form, x_ro);
+            expectTrue(x_doc - x_fan0 > 1.0f,
+                       "文档模式也占位：字形让开一个括号槽（设计态看不见边界就无从增删改）");
+            expectTrue(std::fabs(x_doc - x_form) < 0.01f,
+                       "文档与表单占位量逐像素一致（括号范围由 form_brackets 定，与模式无关）");
+            expectTrue(std::fabs(x_ro - x_fan0) < 0.01f,
+                       "只读模式回到无表单基线的位置：不画就不占宽度");
         }
 
         // (c) 区间外拒、区间内允、区间随内容伸缩
@@ -1430,10 +1448,17 @@ int main() {
                            "括号的墨迹量与光标位置无关（常驻 ⟺ 帧里那几笔不随光标变）");
             }
 
+            // 文档模式（设计态）也画：作者要看得见边界才谈得上增删改。
             ef.setEditMode(EditMode::Document);
             const std::vector<uint8_t> f_doc = snapshot(ef);
             const size_t doc_mark = countCols(f_doc, fw, 0, fw - 1);
-            expectTrue(doc_mark == 0, "切回文档模式：标记一个像素都不剩");
+            expectTrue(doc_mark > 0, "文档模式也画标记（看不见字段就无从增删改）");
+
+            // 只读模式不画：它是呈现与打印态，括号落进版面就印出来了。
+            ef.setEditMode(EditMode::ReadOnly);
+            const std::vector<uint8_t> f_ro = snapshot(ef);
+            const size_t ro_mark = countCols(f_ro, fw, 0, fw - 1);
+            expectTrue(ro_mark == 0, "只读模式：标记一个像素都不剩（印不出来）");
 
             ef.setEditMode(EditMode::Form);
             const std::vector<uint8_t> f_form = snapshot(ef);
@@ -5108,10 +5133,18 @@ int main() {
                            std::to_string(e.caretSide()) + "）");
             expectTrue(e.auditLayout() == 0, "换档之后增量与全量逐字段一致（表变了就必须重排）");
 
-            // 文档模式：括号根本不画，表就该是空的（不画却还占宽度是最坏的形态）。
+            // 只读模式：括号根本不画，表就该是空的（不画却还占宽度是最坏的形态）。
+            e.setEditMode(EditMode::ReadOnly);
+            e.relayout();
+            expectTrue(e.blocks()[0].objects.empty(), "只读模式：对象表为空");
+            expectTrue(e.auditLayout() == 0, "只读模式重排后增量仍与全量一致");
+
+            // 文档模式（设计态）反过来：边界照常入表 —— 看不见字段就无从增删改。
             e.setEditMode(EditMode::Document);
             e.relayout();
-            expectTrue(e.blocks()[0].objects.empty(), "文档模式：对象表为空");
+            expectTrue(!e.blocks()[0].objects.empty(),
+                       "文档模式：字段边界照常入表（设计态要看得见，实际 " +
+                           census(e.blocks()[0].objects) + "）");
             expectTrue(e.auditLayout() == 0, "文档模式重排后增量仍与全量一致");
         }
 
@@ -7012,6 +7045,355 @@ int main() {
                                       " 次编辑，异常 " + std::to_string(edit_bad) + " 次）");
         expectTrue(layout_bad == 0, "★ 段首退格之后的排版与全量重排一致（异常 " +
                                         std::to_string(layout_bad) + " 次）");
+    }
+
+    std::printf("\n[34] 删控件与改控件属性：引擎命令走树的提交，审计与撤销都对得上\n");
+    {
+        // 用户提出的运维问题："编辑模式下不显示控件边界了，我都不知道哪块是控件，
+        //   之后删除控件、编辑控件怎么操作？"
+        // 这一节管后半句：引擎先给出命令（宿主 UI 稍后接）。两条命令都只动树，改完交给
+        //   commitOnTree 一次重建 —— 与文本编辑同一条路，于是撤销、重排、重绘、记账自动
+        //   一致；凡是另开一条特权通道的做法，这几件事里迟早有一件忘了做。
+        std::vector<BlockSpec> bl(1);
+        bl[0].setText("患者主诉：反复心悸三天，加重一天。");
+        std::vector<DemoFieldSpec> fd;
+        auto add = [&](int so, int eo, const char* key) {
+            DemoFieldSpec f;
+            f.para = 0;
+            f.so = so;
+            f.eo = eo;
+            f.key = key;
+            fd.push_back(std::move(f));
+        };
+        add(5, 9, "k1");    // 反复心悸
+        add(12, 16, "k2");  // 加重一天
+        const std::string kFull = "患者主诉：反复心悸三天，加重一天。";
+
+        EditorEngine e4;
+        expectTrue(e4.init({cjkPath}), "删控件：字体加载成功");
+        EngineConfig ec4;
+        ec4.zoom = 1.0f;
+        e4.setConfig(ec4);
+        auto reload4 = [&]() {
+            e4.setDocument(demoTree(bl, fd), StyleSheet{});
+            e4.setEditMode(EditMode::Document);
+            e4.relayout();
+        };
+
+        // (a) 文档模式：拆壳留内容 —— "删除控件"最常用的一档（字段不想要了，字还得在）
+        reload4();
+        {
+            expectTrue(e4.controls().size() == 2 && e4.controls().at(0).id == "k1",
+                       "装载：两个字段，第一个是 k1");
+            const long long b0 = e4.blockedEdits();
+            expectTrue(e4.removeControl(0, /*keep_content=*/true),
+                       "文档模式允许删控件（设计期的事）");
+            expectTrue(e4.controls().size() == 1 && e4.controls().at(0).id == "k2",
+                       "删的正是下标 0 那个：剩下 k2（实际 " +
+                           std::to_string(e4.controls().size()) + " 个）");
+            expectTrue(e4.blocks()[0].textUtf8() == kFull,
+                       "拆壳留内容：一个字都没丢 —— 实际 " + e4.blocks()[0].textUtf8());
+            expectTrue(e4.controls().at(0).range.start.offset == 12 &&
+                           e4.controls().at(0).range.end.offset == 16,
+                       "k2 的区间仍是 12..16（拆壳不动别人的坐标）");
+            expectTrue(e4.blockedEdits() == b0, "被允许的操作不记账");
+            expectTrue(e4.auditCompile() == 0, "★ 拆壳之后产物仍与整树全量编译逐字段一致");
+        }
+        {
+            // 撤销：一次删控件一条事务，撤销之后控件与文本都原样。
+            expectTrue(e4.undo(), "撤销回退这次删控件");
+            expectTrue(e4.controls().size() == 2 && e4.controls().at(0).id == "k1",
+                       "撤销之后控件原样回来（身份还是 k1，不是重新建了一个）");
+            expectTrue(e4.blocks()[0].textUtf8() == kFull, "撤销之后文本也回到原样");
+            expectTrue(e4.auditCompile() == 0, "★ 撤销之后产物仍与整树全量编译一致");
+            // 重做把拆壳再来一遍：这一步最能暴露"槽位下标活不过一次规范化"——
+            //   撤销那一步把合并掉的文本切了回来，重做又要在同一个流位置上拆同一个节点。
+            expectTrue(e4.redo(), "重做这次删控件");
+            expectTrue(e4.controls().size() == 1 && e4.controls().at(0).id == "k2",
+                       "重做之后又只剩 k2");
+            expectTrue(e4.blocks()[0].textUtf8() == kFull, "重做之后文本仍然一字不差");
+            expectTrue(e4.auditCompile() == 0, "★ 重做之后产物仍与整树全量编译一致");
+            expectTrue(e4.undo(), "再撤销回来");
+        }
+        {
+            // 拆壳要真拆掉 —— 先前字段里的位置从此是普通正文，编辑不再受那个控件约束。
+            //   这一条是"拆壳"与"连内容删"之外唯一能证明壳真没了的行为判据。
+            expectTrue(e4.removeControl(0, /*keep_content=*/true), "再删一次");
+            expectTrue(e4.insertTextUtf8(0, 6, "X"),
+                       "拆壳之后原来字段里的位置成了普通正文（不再受控件约束）");
+            expectTrue(e4.blocks()[0].cp_text.size() == 18,
+                       "那个位置真的插进了一个字（实际 " +
+                           std::to_string(e4.blocks()[0].cp_text.size()) + " 个码点）");
+        }
+
+        // (b) 连内容一起删
+        reload4();
+        {
+            expectTrue(e4.removeControl(0, /*keep_content=*/false), "连内容一起删");
+            expectTrue(e4.blocks()[0].textUtf8() == "患者主诉：三天，加重一天。",
+                       "字段里的四个字一起没了 —— 实际 " + e4.blocks()[0].textUtf8());
+            expectTrue(e4.controls().size() == 1 && e4.controls().at(0).id == "k2", "只剩 k2");
+            expectTrue(e4.controls().at(0).range.start.offset == 8,
+                       "k2 的起点跟着前移了四位（12 → 8）—— 实际 " +
+                           std::to_string(e4.controls().at(0).range.start.offset));
+            expectTrue(e4.auditCompile() == 0, "★ 连内容删之后产物仍与整树全量编译逐字段一致");
+        }
+
+        // (c) 表单模式默认被 structureLock 挡住；作者显式开锁之后放行
+        reload4();
+        e4.setEditMode(EditMode::Form);
+        e4.relayout();
+        {
+            expectTrue(e4.controls().size() == 2, "表单模式：两个字段都在");
+            const long long b1 = e4.blockedEdits();
+            expectTrue(
+                !e4.removeControl(0, /*keep_content=*/true),
+                "表单模式默认拒：structureLock 默认锁住（表单的默认是内容可编辑、控件不可删）");
+            expectTrue(e4.controls().size() == 2, "被拒之后一个字段都没动");
+            expectTrue(e4.blockedEdits() == b1 + 1,
+                       "这次拒绝记了账（静默失败与「程序卡了」分不开）");
+            // 改属性本身在表单模式是允许的（第七节：它是宿主回填与业务逻辑发起的运行时状态，
+            //   不受落点判定限制）—— 不然没有任何一条路能把这把锁打开。
+            expectTrue(e4.setControlProp(0, ControlProp::StructureLock, false),
+                       "把 k1 的结构锁打开");
+            const long long b2 = e4.blockedEdits();
+            expectTrue(e4.removeControl(0, /*keep_content=*/true), "开锁之后表单模式也允许删");
+            expectTrue(e4.controls().size() == 1 && e4.controls().at(0).id == "k2", "确实少了一个");
+            expectTrue(e4.blockedEdits() == b2, "这一次没有被拒");
+            expectTrue(e4.auditCompile() == 0, "★ 开锁后删除仍与整树全量编译一致");
+        }
+
+        // (d) 幂等：设成同一个值不提交（撤销栈里多一条什么都没做的记录只会让人困惑）。
+        //   判据用"撤销两次"来数栈里有几条，不引入新的计数接口。
+        reload4();
+        {
+            expectTrue(e4.setControlProp(0, ControlProp::Readonly, true), "把 k1 设成只读");
+            expectTrue(e4.controls().at(0).read_only, "只读生效");
+            expectTrue(e4.setControlProp(0, ControlProp::Readonly, true),
+                       "再设一次同一个值：返回成功（幂等）");
+            expectTrue(e4.undo(), "撤销");
+            expectTrue(!e4.controls().at(0).read_only, "只读回退了");
+            expectTrue(!e4.undo(), "★ 撤销栈里只有那一条真改动 —— 幂等的那一次没有入栈");
+        }
+
+        // (e) hidden 是四项属性里唯一"改呈现态流结构"的一项（整棵摘除），改它要重排
+        reload4();
+        {
+            const size_t n_before = e4.blocks()[0].cp_text.size();
+            expectTrue(e4.setControlProp(1, ControlProp::Hidden, true), "把 k2 隐藏");
+            expectTrue(e4.blocks()[0].cp_text.size() == n_before,
+                       "隐藏不改文本（摘的是呈现态，不是内容）");
+            expectTrue(e4.controls().size() == 2,
+                       "控件集合仍有两个 —— 隐藏的还在文档里，只是不呈现");
+            e4.relayout();
+            expectTrue(e4.auditLayout() == 0, "★ 隐藏之后排版与全量重排逐字段一致");
+            expectTrue(e4.setControlProp(1, ControlProp::Hidden, false), "再显示回来");
+            expectTrue(e4.blocks()[0].cp_text.size() == n_before, "恢复之后文本一字不差");
+            expectTrue(e4.auditCompile() == 0, "★ 显示回来之后产物仍与全量一致");
+        }
+    }
+
+    std::printf("\n[35] 退格删控件：光标在闭括号后面才退役它，在内容末尾删的是字\n");
+    {
+        // 用户的原话："编辑模式下，光标在控件后面，退格就是删除控件"。
+        // 这一格与"字段内容末尾"共用一个码点偏移，只有流位置分得开 —— 所以判据必须落在
+        //   流位置上，而下面 (a)/(b) 这一对正是它的对照：同一格 (0, 9)，侧别 0 删字、
+        //   侧别 1 删控件。任何"按码点偏移猜"的实现都过不了这一对。
+        std::vector<BlockSpec> bl(1);
+        bl[0].setText("患者主诉：反复心悸三天，加重一天。");
+        std::vector<DemoFieldSpec> fd;
+        auto add = [&](int so, int eo, const char* key) {
+            DemoFieldSpec f;
+            f.para = 0;
+            f.so = so;
+            f.eo = eo;
+            f.key = key;
+            fd.push_back(std::move(f));
+        };
+        add(5, 9, "k1");
+        add(12, 16, "k2");
+
+        EditorEngine e5;
+        expectTrue(e5.init({cjkPath}), "退格删控件：字体加载成功");
+        EngineConfig ec5;
+        ec5.zoom = 1.0f;
+        e5.setConfig(ec5);
+        auto reload5 = [&]() {
+            e5.setDocument(demoTree(bl, fd), StyleSheet{});
+            e5.setEditMode(EditMode::Document);
+            e5.relayout();
+        };
+
+        // (a) 对照组：内容末尾（侧别 0）—— 退格删的是最后一个字，控件一个都不该少
+        reload5();
+        expectTrue(e5.controls().size() == 2, "装载：两个字段");
+        e5.setCaretAtSide(0, 9, 0);
+        expectTrue(e5.caretSide() == 0, "光标在字段 #0 的内容末尾（侧别 0）");
+        expectTrue(e5.backspace(), "内容末尾退格");
+        expectTrue(e5.controls().size() == 2, "★ 控件一个都没少：那一格还没跨过闭括号");
+        expectTrue(e5.blocks()[0].textUtf8() == "患者主诉：反复心三天，加重一天。",
+                   "★ 删的是「悸」这一个字 —— 实际 " + e5.blocks()[0].textUtf8());
+        expectTrue(e5.auditCompile() == 0, "★ 之后产物仍与整树全量编译逐字段一致");
+
+        // (b) 光标在闭括号后面（侧别 1）—— 退格退役整个控件，内容留成正文
+        reload5();
+        e5.setCaretAtSide(0, 9, 1);
+        expectTrue(e5.caretSide() == 1, "光标在字段 #0 的闭括号之后（侧别 1）");
+        expectTrue(e5.backspace(), "闭括号之后退格 = 删这个控件");
+        expectTrue(e5.controls().size() == 1 && e5.controls().at(0).id == "k2",
+                   "★ 少的是 k1（实际剩 " + std::to_string(e5.controls().size()) + " 个）");
+        // 剩下的那个字段区间不许被撑大：拆壳上提出来的内容是它的兄弟，不是它的子节点。
+        //   这一条单列出来是因为"内容被并进前一个字段"也能让上面三条全绿 ——
+        //   区间 [12,16) 一旦变成 [5,16)，视觉上就是"删掉一个字段、另一个字段把它吃了"。
+        expectTrue(
+            e5.controls().at(0).range.start.offset == 12 &&
+                e5.controls().at(0).range.end.offset == 16,
+            "★ 剩下的 k2 区间仍是 [12,16)（推广出来的内容是兄弟，没被前一个字段吃掉）—— 实际 [" +
+                std::to_string(e5.controls().at(0).range.start.offset) + "," +
+                std::to_string(e5.controls().at(0).range.end.offset) + ")");
+        expectTrue(
+            e5.blocks()[0].textUtf8() == "患者主诉：反复心悸三天，加重一天。",
+            "★ 保留内容：字段里的字变成正文，一个字都没丢 —— 实际 " + e5.blocks()[0].textUtf8());
+        expectTrue(e5.auditCompile() == 0, "★ 之后产物仍与整树全量编译逐字段一致");
+        e5.relayout();
+        expectTrue(e5.auditLayout() == 0, "★ 排版与全量重排逐字段一致");
+
+        // (c) 表单模式默认被结构锁挡住：这一次按键不许被吞掉，回落到普通退格
+        reload5();
+        e5.setEditMode(EditMode::Form);
+        e5.relayout();
+        e5.setCaretAtSide(0, 9, 1);
+        {
+            const long long b3 = e5.blockedEdits();
+            expectTrue(e5.backspace(), "表单模式拒了结构操作之后回落到普通退格（没吞掉这次按键）");
+            expectTrue(e5.controls().size() == 2, "控件还在（结构被锁住）");
+            expectTrue(e5.blocks()[0].textUtf8() == "患者主诉：反复心三天，加重一天。",
+                       "★ 删掉的是字段最后一个字（表单里「退格」的旧语义）—— 实际 " +
+                           e5.blocks()[0].textUtf8());
+            expectTrue(e5.blockedEdits() == b3 + 1,
+                       "★ 那次被拒的结构操作记了账 —— 按键成功了，但它确实试过一次被锁住的操作");
+        }
+
+        // (d) 相邻字段（][）：那一格既是"左边之后"又是"右边之前"，退格退的是左边那个
+        {
+            std::vector<BlockSpec> bl2(1);
+            bl2[0].setText("甲乙丙丁");
+            std::vector<DemoFieldSpec> fd2;
+            auto add2 = [&](int so, int eo, const char* key) {
+                DemoFieldSpec f;
+                f.para = 0;
+                f.so = so;
+                f.eo = eo;
+                f.key = key;
+                fd2.push_back(std::move(f));
+            };
+            add2(0, 1, "a");  // 甲
+            add2(1, 2, "b");  // 乙
+            EditorEngine e6;
+            expectTrue(e6.init({cjkPath}), "相邻字段：字体加载成功");
+            EngineConfig ec6;
+            ec6.zoom = 1.0f;
+            e6.setConfig(ec6);
+            e6.setDocument(demoTree(bl2, fd2), StyleSheet{});
+            e6.setEditMode(EditMode::Document);
+            e6.relayout();
+            expectTrue(e6.controls().size() == 2, "两个字段紧挨着（甲、乙各一个）");
+            e6.setCaretAtSide(0, 1, 1);  // 跨过 ]a 之后 —— 那一格也是 [b 之前
+            expectTrue(e6.caretSide() == 1, "光标落在 ]a 与 [b 之间那一格");
+            expectTrue(e6.backspace(), "退格");
+            expectTrue(e6.controls().size() == 1 && e6.controls().at(0).id == "b",
+                       "★ 退的是左边那个：a 掉了、b 还在（实际剩 " +
+                           std::to_string(e6.controls().size()) + " 个）");
+            expectTrue(e6.controls().at(0).range.start.offset == 1 &&
+                           e6.controls().at(0).range.end.offset == 2,
+                       "★ 剩下的 b 区间仍是 [1,2)（甲被上提成正文，没被并进 b）");
+            expectTrue(e6.blocks()[0].textUtf8() == "甲乙丙丁", "文本一字不差（拆壳留内容）");
+            expectTrue(e6.auditCompile() == 0, "★ 之后产物仍与整树全量编译逐字段一致");
+        }
+
+        // (e) 嵌套：内层字段的闭括号后面退格，退掉的是内层那一个（不是外层）
+        {
+            std::vector<BlockSpec> bl3(1);
+            bl3[0].setText("甲乙丙丁");
+            std::vector<DemoFieldSpec> fd3;
+            auto add3 = [&](int so, int eo, const char* key) {
+                DemoFieldSpec f;
+                f.para = 0;
+                f.so = so;
+                f.eo = eo;
+                f.key = key;
+                fd3.push_back(std::move(f));
+            };
+            add3(1, 3, "outer");  // 乙丙
+            add3(2, 3, "inner");  // 丙（严格落在 outer 内部 → 成为它的子控件）
+            EditorEngine e7;
+            expectTrue(e7.init({cjkPath}), "嵌套字段：字体加载成功");
+            EngineConfig ec7;
+            ec7.zoom = 1.0f;
+            e7.setConfig(ec7);
+            e7.setDocument(demoTree(bl3, fd3), StyleSheet{});
+            e7.setEditMode(EditMode::Document);
+            e7.relayout();
+            expectTrue(e7.controls().size() == 2, "两个字段（一个套在另一个里）");
+            // 流： 甲 [outer 乙 [inner 丙 ]inner ]outer 丁
+            //   ]inner 之后那一格（侧别 1 在 cp3 上）与 ]outer 之后那一格（侧别 2）是
+            //   两个不同的流位置 —— 嵌套时内层的 hi 严格小于外层，退格才分得清退哪个。
+            e7.setCaretAtSide(0, 3, 1);
+            expectTrue(e7.caretSide() == 1, "光标在 ]inner 之后（还没跨过 ]outer）");
+            expectTrue(e7.backspace(), "退格");
+            expectTrue(e7.controls().size() == 1 && e7.controls().at(0).id == "outer",
+                       "★ 退掉的是内层（outer 还在，实际剩 " +
+                           std::to_string(e7.controls().size()) + " 个）");
+            expectTrue(e7.blocks()[0].textUtf8() == "甲乙丙丁", "文本一字不差");
+            expectTrue(e7.auditCompile() == 0, "★ 之后产物仍与整树全量编译逐字段一致");
+        }
+    }
+
+    std::printf("\n[36] 撤销上限：配置项真的落到了栈上，超出时丢最旧的\n");
+    {
+        //  上限是 EngineConfig 的一项（默认 100 —— 与 Office 系和 Quill 的 maxStack 同值）。
+        //  这一节管的是"配置那一项真的转到了 UndoStack 上"：只测 UndoStack 自己的上限
+        //  （model_test 1.3 那两条）测不出引擎漏转发 —— 那种情况下它照样全绿。
+        std::vector<BlockSpec> bl36(1);
+        bl36[0].setText("甲乙丙丁戊己庚辛壬癸");
+        EditorEngine e36;
+        expectTrue(e36.init({cjkPath}), "撤销上限：字体加载成功");
+        EngineConfig c36;
+        c36.zoom = 1.0f;
+        c36.undo_limit = 3;
+        e36.setConfig(c36);
+        e36.setDocument(demoTree(bl36, {}), StyleSheet{});
+        e36.setEditMode(EditMode::Document);
+        e36.relayout();
+        expectTrue(e36.config().undo_limit == 3, "配置里的上限是 3（装载之前就设好了）");
+        expectTrue(!e36.canRedo(), "刚装载：没有可重做的");
+
+        // 敲六笔（每笔一个"测"），上限 3 ⇒ 提交时最旧的三笔已被丢掉。
+        e36.setCaret(0, 0);
+        for (int i = 0; i < 6; ++i) expectTrue(e36.typeTextAndRender("\xE6\xB5\x8B"), "敲一笔");
+        int undone = 0;
+        while (e36.undoAndRender()) ++undone;
+        expectTrue(undone == 3, "★ 只撤得动三笔（配置的上限真的落到了栈上，实际 " +
+                                    std::to_string(undone) + "）");
+        expectTrue(e36.blocks()[0].textUtf8() == "测测测甲乙丙丁戊己庚辛壬癸",
+                   "★ 撤不回的是最旧那三笔（剩下 " + e36.blocks()[0].textUtf8() + "）");
+
+        // 调小上限当场裁，不必等下一次提交。
+        for (int i = 0; i < 3; ++i) e36.typeTextAndRender("\xE6\xB5\x8B");
+        EngineConfig c36b = e36.config();
+        c36b.undo_limit = 1;
+        e36.setConfig(c36b);
+        int undone2 = 0;
+        while (e36.undoAndRender()) ++undone2;
+        expectTrue(undone2 == 1, "★ 上限调成 1 之后当场裁到一条（实际还能撤 " +
+                                     std::to_string(undone2) + " 次）");
+
+        // 0 = 不限制，改完仍是可编辑的（别把栈设成 0 之后连编辑都不让）。
+        EngineConfig c36c = e36.config();
+        c36c.undo_limit = 0;
+        e36.setConfig(c36c);
+        expectTrue(e36.typeTextAndRender("\xE6\xB5\x8B"), "上限 0 时照样能编辑");
+        expectTrue(e36.undoAndRender(), "上限 0 时那一笔照样能撤");
     }
 
     std::printf("\n──────────────────────────────\n");

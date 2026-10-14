@@ -231,6 +231,28 @@ EditCheck canEditStep(const NodeTree& tree, EditMode mode, const Step& step) {
         }
         return canDoStructureOp(tree, mode, c->children[static_cast<size_t>(s->at.offset)]->id);
     }
+    // 拆壳（UnwrapNode）也是"把这个节点从结构里拿掉"，与 RemoveNode 同一个门：
+    //   它少掉的正是节点自己那两枚边界，内容与身份都还在。
+    if (const auto* s = std::get_if<UnwrapNode>(&step)) {
+        const Node* c = tree.find(s->at.container);
+        if (c == nullptr || !isContainer(c->kind)) return EditCheck{false, "拆开节点：目标不是容器"};
+        if (s->at.offset < 0 || s->at.offset >= static_cast<int>(c->children.size())) {
+            return EditCheck{false, "拆开节点：槽位没有孩子"};
+        }
+        return canDoStructureOp(tree, mode, c->children[static_cast<size_t>(s->at.offset)]->id);
+    }
+    // 包一层（WrapNode）是"新造一个容器"，与 InsertNode 同一个门 —— 门挂在被包裹出来的
+    //   那个节点上（结构锁默认锁住，于是表单模式默认拒绝）。
+    if (const auto* s = std::get_if<WrapNode>(&step)) {
+        if (s->node.kind != NodeKind::ContentControl) {
+            return EditCheck{false, std::string("表单模式只允许包裹控件，不接受：") +
+                                        nodeKindName(s->node.kind)};
+        }
+        if (s->node.control.structureLock) {
+            return EditCheck{false, "控件结构被锁住（包裹被拒）"};
+        }
+        return EditCheck{true, ""};
+    }
 
     // 改属性是"运行时状态与策略"，由宿主回填与业务逻辑发起（第七节），不受表单模式的落点判定
     // 限制 —— 只读模式在上面已经挡住了。这里只保证目标确实是个控件。

@@ -107,6 +107,8 @@ void EditorEngine::setConfig(const EngineConfig& cfg) {
     if (plan_changed) markLayoutDirtyForBrackets();
     if (page_changed) markAllLayoutDirty();
     if (plan_changed || page_changed) relayout();
+    // 撤销上限不影响呈现，只影响栈能留多长 —— 调小的话当场裁掉多余的（不必等下一次提交）。
+    if (undo_) undo_->setLimit(cfg_.undo_limit);
 }
 
 /**
@@ -119,6 +121,7 @@ void EditorEngine::setDocument(const NodeTree& tree, const StyleSheet& sheet) {
     // 撤销栈在建栈时就绑定了 tree_ 的地址，而 assignFrom 只换内容、不换对象 —— 所以
     //   换文档时旧栈必须整个丢掉：它记的步骤属于上一份文档，坐标在新文档上毫无意义。
     undo_ = std::make_unique<UndoStack>(tree_);
+    undo_->setLimit(cfg_.undo_limit);
     setCaretByText(TextPos{0, 0});
     caret_rect_px_prev_ = Rect{};
     base_valid_ = false;
@@ -1097,6 +1100,34 @@ bool EditorEngine::backspace() {
     TextPos p = caret();
     if (p.para < 0 || p.para >= static_cast<int>(blocks_.size())) p.para = 0;
     p.offset = snapToCluster(p.para, p.offset);
+
+    // 光标紧贴着一枚控件的闭括号（在它后面）时，退格退掉的是「[字段]」这个整体 —— 保留
+    //   内容、拆成普通正文。闭括号只占流位置不占码点，按码点往回删会删掉字段里的最后一个
+    //   字，而用户眼里那里根本没有字可删。
+    // 判据只能落在流位置上：同一枚闭括号，"在它后面"与"在内容末尾"在文本坐标上是同一个
+    //   (段, 偏移)，只有流位置分得开（侧别也是流位置的派生量）。控件区间是
+    //   [开括号, 闭括号之后)，于是"闭括号就在光标左边那一格"等价于 hi == 光标流位置。
+    // 这一条要排在"段首退格 = 并入上一段"之前：控件跨段时它的闭括号落在下一段的段首，
+    //   此时光标在段首靠右（跨过了那枚闭括号），按段首处理会并段而不是退役这枚悬空边界；
+    //   而段首靠左那一格不可能是任何控件的 hi —— 它既然是闭括号所在格，hi 就至少再多一。
+    // 命中即唯一：嵌套时内层的 hi 严格小于外层，相邻字段（][）处只有左边那个的 hi 落在这
+    //   一格上；hi 是区间右端，而控件区间彼此要么不相交、要么严格包含，不会有两个相等。
+    // 策略拒绝时（表单模式默认把结构锁住）落到下面那条普通退格上，不把这一次按键吞掉。
+    if (flow_.has_value() && !controls_.empty() && caret_para_ >= 0 &&
+        caret_para_ < static_cast<int>(block_flow_.size())) {
+        // caret_rel_ 是相对"它自己那一段"起点的，必须配 caret_para_ 读，不能用取整后的 p.para。
+        const FlowPos cur =
+            block_flow_[static_cast<size_t>(caret_para_)] + static_cast<FlowPos>(caret_rel_);
+        for (int i = 0; i < controls_.size(); ++i) {
+            int lo = -1;
+            int hi = -1;
+            if (!flow_->intervalOf(control_node_ids_[static_cast<size_t>(i)], &lo, &hi)) continue;
+            if (hi != cur) continue;
+            if (removeControl(i, /*keep_content=*/true)) return true;
+            break;  // 被策略拒了：不再找下一个（命中唯一），直接回落
+        }
+    }
+
     // 段首退格 = 并入上一段（跨段编辑）。策略拒绝时返回 false，与其它被拒编辑同一口径：
     //   宿主据此判断"没变"，光标也不会动。
     if (p.offset == 0) return mergeWithPreviousParagraph();
@@ -1358,15 +1389,15 @@ void EditorEngine::setEditMode(EditMode m) {
     rebuildFromTree();
     markAllLayoutDirty();
 
-    // 切模式会改变占位集合本身（文档模式一个都不占、表单模式要占），
+    // 切模式会改变占位集合本身（只读模式一个都不占，文档与表单都要占），
     //   所以这里可能也要重排（Focused 档下还有"光标被夹进最近字段"这一层）。
     relayoutIfBracketPlanChanged(plan_before);
 
     // 切模式只影响帧上的标记（画 / 不画），底图一个字都不变 ——
     //   所以不动页指纹，只要求下一次整帧重贴。
     //   如果哪天标记改回"画进底图"，这里必须换成重算页指纹 ——
-    //     否则切回文档模式后括号会残留，而"内容没变 → 跳过重画"会让它一直在。
-    //     对应的断言是单测里"切回文档模式后一个像素都不剩"那一条。
+    //     否则切到只读模式后括号会残留，而"内容没变 → 跳过重画"会让它一直在。
+    //     对应的断言是单测里"切到只读模式后一个像素都不剩"那一条。
     frame_needs_full_refresh_ = true;
 }
 
@@ -1376,6 +1407,146 @@ int EditorEngine::controlAtPt(float x_pt_frame, float y_pt_frame) const {
     // include_end = false：点在内容上才算"点进了这个控件"。
     // 点在字段末尾之后一位、视觉上已经在框外，就不该算。
     return controls_.innermostAt(p, /*include_end=*/false);
+}
+
+namespace {
+
+/**
+ * 读控件的运行时属性。四个分居两处：hidden 在节点上（呈现态的流位置换算要看它），
+ * 其余三个在控件数据里。
+ */
+bool readPropValue(const Node* n, ControlProp p, bool* out) {
+    if (n == nullptr || n->kind != NodeKind::ContentControl || out == nullptr) return false;
+    switch (p) {
+        case ControlProp::Hidden:
+            *out = n->hidden;
+            return true;
+        case ControlProp::Readonly:
+            *out = n->control.readonly;
+            return true;
+        case ControlProp::Required:
+            *out = n->control.required;
+            return true;
+        case ControlProp::StructureLock:
+            *out = n->control.structureLock;
+            return true;
+    }
+    return false;
+}
+
+}  // namespace
+
+/**
+ * 删控件与改控件属性：结构操作的引擎入口。
+ *
+ * 两件事都只动树，改完交给 commitOnTree 一次重建 —— 与文本编辑走同一条路，于是撤销、重排、
+ * 重绘、记账自动一致，不必另开一条特权通道。
+ */
+bool EditorEngine::removeControl(int index, bool keep_content) {
+    if (!loaded_ || !flow_.has_value()) return false;
+    if (index < 0 || index >= controls_.size()) return false;
+    const NodeId id = control_node_ids_[static_cast<size_t>(index)];
+    const Node* c = tree_.find(id);
+    if (c == nullptr || c->kind != NodeKind::ContentControl || c->parent == nullptr) return false;
+    const NodeId parent_id = c->parent->id;
+    int idx = -1;
+    for (size_t i = 0; i < c->parent->children.size(); ++i) {
+        if (c->parent->children[i]->id == id) {
+            idx = static_cast<int>(i);
+            break;
+        }
+    }
+    if (idx < 0) return false;
+
+    // 结构操作的门：表单模式默认被 structureLock 锁住，文档模式放行（作者在设计表单）。
+    if (!formDegraded() && !canDoStructureOp(tree_, mode_, id).allowed) {
+        ++blocked_edits_;
+        return false;
+    }
+
+    int lo = -1;
+    int hi = -1;
+    if (!flow_->intervalOf(id, &lo, &hi)) return false;
+
+    Transaction tx;
+    tx.label = keep_content ? "删除控件（保留内容）" : "删除控件";
+    tx.selection_before = Range{lo, hi};
+    tx.selection_after = Range{lo, lo};
+
+    if (keep_content) {
+        // 拆壳：内容上提、节点移除。两个 span 的差就是节点自己那两枚边界。
+        UnwrapNode u;
+        u.at = Pos{parent_id, idx};
+        u.at_flow = lo;
+        u.span_before = hi - lo;
+        u.span_after = hi - lo - 2;
+        u.node = captureSubtree(tree_, id);
+        u.detached = id;
+        tx.steps.push_back(Step{u});
+    } else {
+        RemoveNode r;
+        r.at = Pos{parent_id, idx};
+        r.at_flow = lo;
+        r.removed = captureSubtree(tree_, id);
+        r.detached = id;
+        tx.steps.push_back(Step{r});
+    }
+
+    const int dirty = controls_.at(index).range.start.para;
+    // 段数可能变（控件里的段落标记没了，或者上提之后换了容器），所以走全量重编译。
+    if (!commitOnTree(std::move(tx), dirty, /*para_count_changed=*/true)) {
+        ++blocked_edits_;
+        return false;
+    }
+    // 落点 = 控件区间的起点：保留内容时那里正是它的第一枚内容。
+    setCaretAtFlow(lo);
+    return true;
+}
+
+bool EditorEngine::setControlProp(int index, ControlProp prop, bool value) {
+    if (!loaded_ || index < 0 || index >= controls_.size()) return false;
+    const NodeId id = control_node_ids_[static_cast<size_t>(index)];
+    bool before = false;
+    if (!readPropValue(tree_.find(id), prop, &before)) return false;
+    // 幂等：没变就不提交 —— 撤销栈里多一条什么都没做的记录只会让人困惑。
+    if (before == value) return true;
+
+    SetControlProp s;
+    s.id = id;
+    s.prop = prop;
+    s.value = value;
+    s.before = before;
+
+    Transaction tx;
+    tx.label = "改控件属性";
+    tx.steps.push_back(Step{s});
+    // hidden 改呈现态的流结构（整棵摘除），其余三项不改结构。
+    const bool structural = (prop == ControlProp::Hidden);
+    const int dirty = controls_.at(index).range.start.para;
+    if (!commitOnTree(std::move(tx), dirty, structural)) return false;
+    if (structural) markAllLayoutDirty();
+    return true;
+}
+
+bool EditorEngine::removeControlAndRender(int index, bool keep_content) {
+    if (!removeControl(index, keep_content)) return false;
+    relayout();
+    repaintAfterEdit();
+    return true;
+}
+
+bool EditorEngine::setControlPropAndRender(int index, ControlProp prop, bool value) {
+    // 先读旧值：幂等（值没变）时 setControlProp 也返回 true，但状态与呈现一个字都没动 ——
+    //   跟着白跑一次重排重绘没有意义，也会把探针的"一次操作重画了多少"记账弄脏。
+    bool before = false;
+    if (loaded_ && index >= 0 && index < static_cast<int>(controls_.size())) {
+        readPropValue(tree_.find(control_node_ids_[static_cast<size_t>(index)]), prop, &before);
+    }
+    if (!setControlProp(index, prop, value)) return false;
+    if (before == value) return true;
+    relayout();
+    repaintAfterEdit();
+    return true;
 }
 
 std::vector<EditorEngine::ControlRect> EditorEngine::controlRects(int index) const {
@@ -1577,8 +1748,9 @@ bool EditorEngine::focusControlAndRender(bool forward) {
 
 bool EditorEngine::tabCaret(bool backward) {
     if (blocks_.empty()) return false;
-    // 文档模式与只读模式都不消费 Tab：前者要把 Tab 当制表符，后者要放行给宿主
-    //   （吞掉会把键盘用户困在编辑器里）。模型文档第七节把这条写成了分工。
+    // 文档模式与只读模式都不消费 Tab：后者要放行给宿主（吞掉会把键盘用户困在编辑器里），
+    //   前者的 Tab 该是制表符 —— 但那一步还没落地（排版层没有制表位），所以文档模式现在
+    //   由宿主当缩进处理，见 EngineConfig::tab_spaces。
     if (mode_ != EditMode::Form) return false;
 
     const int plan_before = bracketPlanId();

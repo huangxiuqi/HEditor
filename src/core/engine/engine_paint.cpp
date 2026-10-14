@@ -430,7 +430,8 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
     //
     // 画在光标之后：光标和标记会在字段末尾附近贴住，
     //   标记后画才能保证它不被光标盖掉（反过来就是上面那个 bug）。
-    if (mode_ == EditMode::Form) drawControlMarks();
+    // 只读不画：它是呈现与打印态，括号落进版面就印出来了。
+    if (mode_ != EditMode::ReadOnly) drawControlMarks();
 
     // 记账
     //

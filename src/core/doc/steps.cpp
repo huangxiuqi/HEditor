@@ -20,6 +20,93 @@ FlowIndex indexOf(const NodeTree& tree) { return FlowIndex(tree, FlowVisibility:
 bool inRange(FlowPos pos, int size) { return pos >= 0 && pos <= size; }
 
 /**
+ * 流位置 → 它落在哪个孩子槽位上（只读，不改树）。
+ *
+ * 落进文本节点内部的位置，切开之后会成为"那两半之间"那一格 —— 所以它在孩子槽位上的编号
+ * 是"这个文本节点之后"，不是它自己。这里只做这个换算，切分归 applyStep（canApply 不能改树）。
+ */
+Pos slotForFlow(const NodeTree& tree, const FlowIndex& idx, FlowPos flow) {
+    const Pos p = idx.posAt(flow);
+    const Node* n = tree.find(p.container);
+    if (n == nullptr) return Pos{};
+    if (isContainer(n->kind)) return p;
+    if (n->parent == nullptr) return Pos{};
+    // 文本节点内部（offset > 0）要切开，位置于是落在它的两半之间；offset == 0 时不用切，
+    //   位置就在它自己那一格上。原子与段落标记内部没有可寻址的位置，只有"自身之前"。
+    const bool split = isText(n->kind) && p.offset > 0;
+    return Pos{n->parent->id, indexInParent(n) + (split ? 1 : 0)};
+}
+
+/**
+ * 一段流区间在一个容器里对应哪些孩子（按切开文本之后的切片算），并给出它们的起始槽位。
+ *
+ * 内容被整个包在一个容器孩子里时返回 false：那一段的容器该是那个孩子，不是本层 ——
+ * 硬包的话会把容器劈成两半，那是模型里说不出来的形状。
+ * 被整个包在一个文本孩子里不算错：文本可以切（被规范化合并掉的边界就是这么回来的）。
+ */
+bool runForFlowRange(const NodeTree& tree, const FlowIndex& idx, NodeId container, FlowPos begin,
+                     FlowPos end, std::vector<const Node*>* out, int* start_slot) {
+    const Node* c = tree.find(container);
+    if (c == nullptr || !isContainer(c->kind)) return false;
+    out->clear();
+    int first = -1;
+    bool split_head = false;
+    for (size_t i = 0; i < c->children.size(); ++i) {
+        const Node* kid = c->children[i];
+        if (!idx.inFlow(kid->id)) continue;
+        int kf = 0;
+        int ke = 0;
+        if (!idx.intervalOf(kid->id, &kf, &ke)) continue;
+        if (ke <= begin) continue;
+        if (kf >= end) break;
+        if (kf < begin && ke > end && isContainer(kid->kind)) return false;
+        if (first < 0) {
+            first = static_cast<int>(i);
+            split_head = (kf < begin);
+        }
+        out->push_back(kid);
+    }
+    if (first < 0) return false;
+    if (start_slot != nullptr) *start_slot = first + (split_head ? 1 : 0);
+    return true;
+}
+
+/**
+ * 按流位置取一个孩子槽位，必要时先把文本节点从中间切开（会改树）。
+ *
+ * 为什么非走流位置不可：规范化在每次提交之后跑一遍，它把相邻且同标记的文本节点并成一个 ——
+ * 孩子槽位从此整体前移，步骤里记下的下标再也对不上，而流位置是唯一能活过它的坐标。
+ * 所以凡是"指向某个孩子"的步骤都要能按流位置把这个槽位重新算出来。
+ */
+bool slotAtFlow(NodeTree& tree, FlowPos flow, NodeId* container, int* slot) {
+    FlowIndex idx = indexOf(tree);
+    const Pos p = idx.posAt(flow);
+    const Node* n = tree.find(p.container);
+    if (n == nullptr) return false;
+    if (isText(n->kind) && p.offset > 0 && p.offset < static_cast<int>(n->text.size()) &&
+        n->parent != nullptr) {
+        const NodeId parent = n->parent->id;
+        const int ix = indexInParent(n);
+        // 先把两半都取出来再动树：insertChild 会让节点指针失效。
+        const std::vector<uint32_t> left(n->text.begin(), n->text.begin() + p.offset);
+        const std::vector<uint32_t> right(n->text.begin() + p.offset, n->text.end());
+        const CharFormat kept = n->marks;
+        const std::string kept_style = n->styleRef;
+        tree.setText(n->id, left);
+        const NodeId tail = tree.insertChild(parent, ix + 1, NodeKind::TextRun);
+        tree.setText(tail, right);
+        tree.find(tail)->marks = kept;
+        tree.find(tail)->styleRef = kept_style;
+        idx = indexOf(tree);  // 树变了，重新算一遍
+    }
+    const Pos q = slotForFlow(tree, idx, flow);
+    if (q.container == kInvalidNodeId) return false;
+    if (container != nullptr) *container = q.container;
+    if (slot != nullptr) *slot = q.offset;
+    return true;
+}
+
+/**
  * 把一段码点插到流位置 at 上。
  *
  * 标记与紧邻的文本节点相同就并入它：插入不该平白造出一个"同标记的邻居"，那正是规范化要合并
@@ -614,6 +701,92 @@ StepResult canApply(const NodeTree& tree, const Step& step) {
                        }
                        r.ok = true;
                    },
+                   [&](const UnwrapNode& s) {
+                       // 槽位下标活不过一次规范化（相邻同标记文本节点会被合并，后面的槽位整体
+                       //   前移），所以判据落在流位置上：那一格上必须站着一个与记录同种的节点。
+                       const Pos p = idx.posAt(s.at_flow);
+                       const Node* c = tree.find(p.container);
+                       if (c == nullptr || !isContainer(c->kind)) {
+                           r.error = "拆开节点：目标不是容器";
+                           return;
+                       }
+                       if (p.container != s.at.container) {
+                           // 流位置落进了文本节点内部 —— 那儿不可能站着一个容器：说明这个流
+                           //  位置上要拆的节点已经不在树上了（步骤过期，或已经应用过）。
+                           r.error = "拆开节点：那个流位置上没有容器（步骤过期了）";
+                           return;
+                       }
+                       if (p.offset < 0 || p.offset >= static_cast<int>(c->children.size())) {
+                           r.error = "拆开节点：槽位没有孩子";
+                           return;
+                       }
+                       const Node* node = c->children[static_cast<size_t>(p.offset)];
+                       if (node->kind != s.node.kind) {
+                           r.error = "拆开节点：该位置的孩子与步骤记录不符";
+                           return;
+                       }
+                       if (s.detached != kInvalidNodeId && node->id != s.detached) {
+                           r.error = "拆开节点：该位置的孩子的身份与步骤不符";
+                           return;
+                       }
+                       // 上提之后每个孩子都要落在父容器里 —— 父容器可能不接受它的种类。
+                       //   先查再动手：半途拒绝会留下"孩子已经搬了一半"的树。
+                       for (const Node* kid : node->children) {
+                           if (!acceptsChild(c->kind, kid->kind)) {
+                               r.error = std::string("拆开节点：") + nodeKindName(c->kind) +
+                                         " 不能直接容纳 " + nodeKindName(kid->kind);
+                               return;
+                           }
+                       }
+                       r.ok = true;
+                   },
+                   [&](const WrapNode& s) {
+                       // 两端的槽位不能各算各的：规范化把整段文字并成一个文本节点之后，
+                       //   两个端点会落在同一个孩子上，各自换算都得到同一个槽位（个数就成了 0）。
+                       //   所以按"这一段流区间在容器里对应哪些切片"一次性算出来。
+                       if (s.span_before < 2) {
+                           r.error = "包起节点：区间太窄，装不下一个容器";
+                           return;
+                       }
+                       const Pos a = slotForFlow(tree, idx, s.at_flow);
+                       const Node* c = tree.find(a.container);
+                       if (c == nullptr || !isContainer(c->kind)) {
+                           r.error = "包起节点：目标不是容器";
+                           return;
+                       }
+                       std::vector<const Node*> run;
+                       int start_slot = -1;
+                       // 区间取 [at_flow, at_flow + span_after)：这是这一步所在状态里的地址，
+                       //   也就是拆开之后（少了那两枚边界）的地址。span_before 是拆之前节点
+                       //   的跨度，只在 mapPos 与校验宽度时用。
+                       if (!runForFlowRange(tree, idx, a.container, s.at_flow,
+                                            s.at_flow + s.span_after, &run, &start_slot)) {
+                           r.error = "包起节点：这段流区间横跨了容器边界";
+                           return;
+                       }
+                       if (run.size() != s.node.children.size()) {
+                           r.error = "包起节点：槽位里有 " + std::to_string(run.size()) +
+                                     " 个孩子，步骤记的是 " +
+                                     std::to_string(s.node.children.size());
+                           return;
+                       }
+                       for (size_t k = 0; k < run.size(); ++k) {
+                           if (run[k]->kind != s.node.children[k].kind) {
+                               r.error = "包起节点：槽位里的孩子与步骤记录不符";
+                               return;
+                           }
+                       }
+                       if (!acceptsChild(c->kind, s.node.kind)) {
+                           r.error = std::string("包起节点：") + nodeKindName(c->kind) +
+                                     " 不接受 " + nodeKindName(s.node.kind);
+                           return;
+                       }
+                       if (s.detached == kInvalidNodeId || tree.find(s.detached) == nullptr) {
+                           r.error = "包起节点：要挂回的节点不在池里";
+                           return;
+                       }
+                       r.ok = true;
+                   },
                    [&](const SetControlProp& s) {
                        bool now = false;
                        if (!readControlProp(tree, s.id, s.prop, &now)) {
@@ -721,6 +894,47 @@ StepResult applyStep(NodeTree& tree, const Step& step) {
                 materializeSubtree(tree, s.at.container, s.at.offset, s.subtree);
             },
             [&](const RemoveNode& s) { tree.eraseChild(s.at.container, s.at.offset); },
+            [&](const UnwrapNode& s) {
+                // 槽位按流位置当场重算：参数里那个 at.offset 只是记录，规范化的合并会让它过期。
+                NodeId container = kInvalidNodeId;
+                int slot = -1;
+                if (!slotAtFlow(tree, s.at_flow, &container, &slot)) return;
+                const Node* c = tree.find(container);
+                if (c == nullptr || slot < 0 || slot >= static_cast<int>(c->children.size()))
+                    return;
+                const Node* probe = tree.find(s.detached);
+                if (probe == nullptr) return;
+                // 从后往前搬，每枚都挂到同一个槽位（节点自己后面那一格），顺序因此保持；
+                //   而节点的下标全程不动，最后摘它的时候不必重算。
+                const int count = static_cast<int>(probe->children.size());
+                for (int k = count - 1; k >= 0; --k) {
+                    const Node* cur = tree.find(s.detached);
+                    if (cur == nullptr || k >= static_cast<int>(cur->children.size())) break;
+                    const NodeId kid = cur->children[static_cast<size_t>(k)]->id;
+                    tree.eraseChild(s.detached, k);
+                    tree.attachChild(container, slot + 1, kid);
+                }
+                tree.eraseChild(container, slot);
+            },
+            [&](const WrapNode& s) {
+                // 区间取 [at_flow, at_flow + span_after)：这是拆开之后（少了那两枚边界）的
+                //   地址，也正是这一步所在状态里的地址。两端都按流位置定位、该切的文本就切
+                //   （见 slotAtFlow）：切出来的两个槽位就是区间起止。
+                NodeId container = kInvalidNodeId;
+                int a = -1;
+                int b = -1;
+                if (!slotAtFlow(tree, s.at_flow, &container, &a)) return;
+                if (!slotAtFlow(tree, s.at_flow + s.span_after, &container, &b)) return;
+                if (a < 0 || b <= a) return;
+                for (int k = b - 1; k >= a; --k) {
+                    const Node* c = tree.find(container);
+                    if (c == nullptr || k >= static_cast<int>(c->children.size())) break;
+                    const NodeId kid = c->children[static_cast<size_t>(k)]->id;
+                    tree.eraseChild(container, k);
+                    tree.attachChild(s.detached, 0, kid);
+                }
+                tree.attachChild(container, a, s.detached);
+            },
             [&](const SetControlProp& s) { writeControlProp(tree, s.id, s.prop, s.value); },
             [&](const SetControlValue& s) { writeControlValue(tree, s.id, s.value); },
             [&](const SetTableCellSpan& s) {
@@ -798,6 +1012,27 @@ Step invertStep(const Step& step) {
                               i.detached = s.detached;
                               return Step{i};
                           },
+                          // 这两个互为逆：字段一一对应，于是往返严格。
+                          [](const UnwrapNode& s) -> Step {
+                              WrapNode w;
+                              w.at = s.at;
+                              w.at_flow = s.at_flow;
+                              w.span_before = s.span_before;
+                              w.span_after = s.span_after;
+                              w.node = s.node;
+                              w.detached = s.detached;
+                              return Step{w};
+                          },
+                          [](const WrapNode& s) -> Step {
+                              UnwrapNode u;
+                              u.at = s.at;
+                              u.at_flow = s.at_flow;
+                              u.span_before = s.span_before;
+                              u.span_after = s.span_after;
+                              u.node = s.node;
+                              u.detached = s.detached;
+                              return Step{u};
+                          },
                           [](const SetControlProp& s) -> Step {
                               SetControlProp x;
                               x.id = s.id;
@@ -864,6 +1099,22 @@ FlowPos mapPos(const Step& step, FlowPos pos, Assoc assoc) {
                               if (pos <= s.at_flow) return pos;
                               if (pos >= s.at_flow + n) return pos - n;
                               return s.at_flow;
+                          },
+                          // 拆开：区间里的流长度从"节点占的"缩到"内容占的"，差就是节点自己
+                          //   那两枚边界。落在区间里的位置夹到区间末尾 —— 它先前的去处已经不在。
+                          [&](const UnwrapNode& s) -> FlowPos {
+                              const FlowPos shrink = s.span_before - s.span_after;
+                              if (pos <= s.at_flow) return pos;
+                              if (pos >= s.at_flow + s.span_before) return pos - shrink;
+                              return s.at_flow +
+                                     std::min(pos - s.at_flow, static_cast<FlowPos>(s.span_after));
+                          },
+                          // 包起：反过来。落在内容里的位置越过新出现的那枚开括号，所以 +1。
+                          [&](const WrapNode& s) -> FlowPos {
+                              const FlowPos grow = s.span_before - s.span_after;
+                              if (pos <= s.at_flow) return pos;
+                              if (pos >= s.at_flow + s.span_after) return pos + grow;
+                              return pos + 1;
                           },
                           // 属性不改编辑态的位置。hidden 会改呈现态的流结构，但那要重排
                           // （重建派生索引），不是把某个位置搬到别处。

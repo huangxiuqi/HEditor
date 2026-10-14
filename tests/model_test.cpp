@@ -8,7 +8,7 @@
  *   0.5 长度：单位换算的两支往返、文本形式往返后类型与数值都不丢、畸形输入全被拒。
  *   1.1 规范化：幂等（第二遍零改动且快照逐条相同）、跨容器不合并、空容器不清除。
  *   1.2 步骤：应用加逆操作回到原样、取删插等于原状、映射往返一致、整棵子树增删后带身份的快照相同。
- *   1.3 撤销：连撤逐次回到对应步骤的状态、重做逐次回到编辑后、连续输入并成一个撤销单位。
+ *   1.3 撤销：连撤逐次回到对应步骤的状态、重做逐次回到编辑后、一笔编辑一个撤销单位（不合并）。
  *   1.4 落点判定：四个边界位置互不相同且 posAt 单射；可编辑集合取交集；方向键不跳出集合；
  *       Tab 只落可编辑控件、无下一个时放行；越界编辑被拒且给原因；结构操作默认被拒。
  *   1.5 控件与宿主 API：索引与重建逐项相同、批量设值一个撤销步骤、撤销后逐字段回到原样；
@@ -1845,6 +1845,42 @@ void checkStepRoundTrip() {
         expectTrue(roundTrip(tree, Step{s}).empty(),
                    "1.2 / 往返：SetParaMarkFormat 改段落格式与样式引用");
     }
+    {
+        // 拆开容器（"删控件但保留内容"就是它）。判据两层：往返本身，以及路由过规范化 ——
+        //   内容上提之后与左邻的标记相同就会被合并，孩子槽位与流位置都变了，逆操作必须
+        //   能按流位置把边界重算回来。
+        NodeTree tree = makeEditTree();
+        const NodeId sec = tree.firstSectionId();
+        const NodeId cc = tree.find(sec)->children[3]->id;  // 控件：流区间 [10, 14)
+        UnwrapNode u;
+        u.at = Pos{sec, 3};
+        u.at_flow = 10;
+        u.span_before = 4;
+        u.span_after = 2;
+        u.node = captureSubtree(tree, cc);
+        u.detached = cc;
+        expectTrue(roundTrip(tree, Step{u}).empty(),
+                   "1.2 / 往返：拆开容器（内容标记不同，不合并）");
+    }
+    {
+        // 同一件事，但上提的内容与左邻同标记 —— 规范化会把它们并成一个文本节点。这才是
+        //   真正的回归判据：按孩子槽位记坐标的实现在这里会找不到先前的那个位置。
+        NodeTree tree;
+        const NodeId sec = tree.firstSectionId();
+        tree.setText(tree.appendChild(sec, NodeKind::TextRun), cps({0x61, 0x62}));
+        const NodeId cc = tree.appendChild(sec, NodeKind::ContentControl);
+        tree.setText(tree.appendChild(cc, NodeKind::TextRun), cps({0x63, 0x64}));
+        tree.appendChild(sec, NodeKind::ParagraphMark);
+        UnwrapNode u;
+        u.at = Pos{sec, 1};
+        u.at_flow = 3;
+        u.span_before = 4;
+        u.span_after = 2;
+        u.node = captureSubtree(tree, cc);
+        u.detached = cc;
+        expectTrue(roundTrip(tree, Step{u}).empty(),
+                   "1.2 / 往返：拆开容器之后内容与左邻合并，逆操作仍能把边界算回来");
+    }
 }
 
 /**
@@ -2169,52 +2205,41 @@ void checkUndoRedo() {
 }
 
 /**
- * 1.3：撤销分组的几条边界 —— 什么并、什么不并，以及提交失败要整条作废。
+ * 1.3：撤销的粒度与边界 —— 一笔编辑一个撤销单位（不做合并），提交失败要整条作废。
  */
 void checkUndoGrouping() {
-    // 连续输入并成一个撤销单位；一次撤销回退整段输入。
+    // 粒度 = 一笔一步：连续敲下的五个字符就是五个撤销单位，一撤销掉一个。
+    //   只对插入生效的合并规则会在这里得到 1 —— 而它让同一件事有两种粒度：
+    //   连续敲五个字一步退掉，连续退五个字却要五步（退格是另一种步骤）。
     {
         NodeTree tree = makeEditTree();
         normalizeDocument(tree);
         UndoStack stack(tree);
+        std::vector<std::vector<std::string>> states;
+        states.push_back(shapeSnapshot(tree));
         for (uint32_t i = 0; i < 5; ++i) {
             InsertText s;
             s.at = 3 + static_cast<FlowPos>(i);
             s.cps = cps({0x41 + i});
             stack.commit(
                 Transaction{{Step{s}}, Range{s.at, s.at}, Range{s.at + 1, s.at + 1}, "输入"});
+            states.push_back(shapeSnapshot(tree));
         }
-        expectTrue(stack.undoDepth() == 1, "1.3 / 分组：五次连续输入并成一个撤销单位");
+        expectTrue(stack.undoDepth() == 5, "1.3 / 粒度：五笔输入是五个撤销单位（不做合并）");
 
-        Range restore{};
-        const StepResult r = stack.undo(&restore);
-        const std::string diff =
-            snapshotDiffText(shapeSnapshot(makeEditTree()), shapeSnapshot(tree));
-        expectTrue(r.ok && diff.empty() && restore == Range{3, 3},
-                   "1.3 / 分组：一次撤销回退整段输入，并回到第一笔的编辑前选区" + diff);
+        int bad = 0;
+        for (int i = 4; i >= 0; --i) {
+            const StepResult r = stack.undo(nullptr);
+            if (!r.ok ||
+                !snapshotDiffText(states[static_cast<size_t>(i)], shapeSnapshot(tree)).empty()) {
+                ++bad;
+            }
+        }
+        expectTrue(bad == 0, "1.3 / 粒度：连撤五次，每次都退回一个字、且回到对应状态");
     }
 
-    // 位置不接着的一笔另起一个撤销单位。
-    {
-        NodeTree tree = makeEditTree();
-        normalizeDocument(tree);
-        UndoStack stack(tree);
-        InsertText a;
-        a.at = 3;
-        a.cps = cps({0x41});
-        stack.commit(Transaction{{Step{a}}, Range{3, 3}, Range{4, 4}, "输入"});
-        InsertText b;
-        b.at = 4;
-        b.cps = cps({0x42});
-        stack.commit(Transaction{{Step{b}}, Range{4, 4}, Range{5, 5}, "输入"});
-        InsertText far;
-        far.at = 9;  // 隔开了（中间隔着段落标记）
-        far.cps = cps({0x43});
-        stack.commit(Transaction{{Step{far}}, Range{9, 9}, Range{10, 10}, "输入"});
-        expectTrue(stack.undoDepth() == 2, "1.3 / 分组：位置不接着的两笔分属两个撤销单位");
-    }
-
-    // 标记不同的一笔另起一个撤销单位。
+    // 位置接着的、标记不同的、隔开的三笔同样各是一个撤销单位 —— 任何两笔都不并，
+    //   所以"同类才合并"那套分情况判断在这里不再需要。
     {
         NodeTree tree = makeEditTree();
         normalizeDocument(tree);
@@ -2228,7 +2253,59 @@ void checkUndoGrouping() {
         b.cps = cps({0x42});
         b.marks.bold = true;
         stack.commit(Transaction{{Step{b}}, Range{4, 4}, Range{5, 5}, "加粗输入"});
-        expectTrue(stack.undoDepth() == 2, "1.3 / 分组：标记不同的一笔另起一个撤销单位");
+        InsertText far;
+        far.at = 9;  // 隔开了（中间隔着段落标记）
+        far.cps = cps({0x43});
+        stack.commit(Transaction{{Step{far}}, Range{9, 9}, Range{10, 10}, "输入"});
+        expectTrue(stack.undoDepth() == 3,
+                   "1.3 / 粒度：接着的、加粗的、隔开的三笔分属三个撤销单位");
+    }
+
+    // 深度上限：超出的丢最旧的（与 Quill 的 maxStack 同一条口径）。
+    {
+        NodeTree tree = makeEditTree();
+        normalizeDocument(tree);
+        UndoStack stack(tree);
+        stack.setLimit(3);
+        for (uint32_t i = 0; i < 6; ++i) {
+            InsertText s;
+            s.at = 3 + static_cast<FlowPos>(i);
+            s.cps = cps({0x41 + i});
+            stack.commit(
+                Transaction{{Step{s}}, Range{s.at, s.at}, Range{s.at + 1, s.at + 1}, "输入"});
+        }
+        expectTrue(stack.undoDepth() == 3, "1.3 / 上限：六笔只留最新三笔");
+
+        // 调小上限当场裁剪（不必等下一次提交）。
+        stack.setLimit(2);
+        expectTrue(stack.undoDepth() == 2, "1.3 / 上限：调小上限当场裁到 2 条");
+
+        // 撤的是哪两笔：撤销会把各自的编辑前选区写回来，凭它就能认出丢没丢错方向 ——
+        //   若实现丢的是"最新的"，restore 就会从 6 往回数，而不是从 8。
+        std::vector<FlowPos> restores;
+        for (int i = 0; i < 3; ++i) {
+            Range r{};
+            if (!stack.undo(&r).ok) break;
+            restores.push_back(r.begin());
+        }
+        expectTrue(restores.size() == 2 && restores[0] == 8 && restores[1] == 7,
+                   "1.3 / 上限：撤的是最后两笔 —— 最旧的已经不在栈里");
+    }
+
+    // 0 表示不限制（也就是默认值）：五笔都在栈上。
+    {
+        NodeTree tree = makeEditTree();
+        normalizeDocument(tree);
+        UndoStack stack(tree);
+        expectTrue(stack.limit() == 0, "1.3 / 上限：默认不限制");
+        for (uint32_t i = 0; i < 5; ++i) {
+            InsertText s;
+            s.at = 3 + static_cast<FlowPos>(i);
+            s.cps = cps({0x41 + i});
+            stack.commit(
+                Transaction{{Step{s}}, Range{s.at, s.at}, Range{s.at + 1, s.at + 1}, "输入"});
+        }
+        expectTrue(stack.undoDepth() == 5, "1.3 / 上限：0 表示不限制，五笔都留着");
     }
 
     // 撤销之后再提交：重做栈被清空。

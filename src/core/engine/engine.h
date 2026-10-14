@@ -108,14 +108,14 @@ public:
 
     /**
      * 视口锚点：帧只呈现 [first_page, first_page+page_count) 这几页。
+     * 帧是一张位图，高度就是"宿主那张画布有多高"—— 画布越大，浏览器每次上屏要重新
+     * 合成的图层就越大。实测（scripts/diag_perf.mjs）：18.3 Mpx 的帧比 1.13 Mpx 的帧
+     * 每帧多花整整一个 vsync，这一笔既不在引擎计时里、也不在 putImageData 里。
      *
-     * 帧是一张位图，它的高度就是"宿主那张画布有多高"—— 而画布越大，浏览器
-     * 每次上屏要重新合成的图层就越大。实测（见 scripts/diag_perf.mjs）：18.3 Mpx
-     * 的帧比 1.13 Mpx 的帧每帧多花整整一个 vsync（16.6 ms），这一笔既不在引擎
-     * 计时里、也不在 putImageData 里。所以帧只该装看得见的那几页。
-     *
-     * page_count <= 0 表示"整篇"（默认）—— 默认值下行为与没有这个机制时逐字节相同，
-     * 单测与既有探针因此一行都不用改。
+     * page_count <= 0 表示"整篇"（默认）：默认值下行为与没有这个机制时逐字节相同，
+     * 单测与既有探针一行都不用改。但产品宿主必须记得设它 —— 整篇帧在长文档上是内存与
+     * 耗时的双重放大：2000 段（65 页）实测每实例堆 82.6 MB、装载 115 ms（窗口 3 页），
+     * 对 1031.6 MB、1583 ms（整篇帧）。同一份文档，差一个量级。
      */
     void setViewportAnchor(int first_page, int page_count);
 
@@ -310,10 +310,13 @@ public:
      * 要显示括号（= 要在排版里占宽度）的控件下标 —— 产生端的名单，只有引擎认识
      * 「聚焦」与编辑模式。syncInlineObjects() 按它决定往对象表里写哪些边界。
      * 空 = 一个占位都不插，排版与"没有表单"逐字节一致。
+     *
+     * 文档与表单都要（前者是设计态：看不见字段就无从增删改），只有只读不画 ——
+     * 它是呈现与打印态，括号落进版面就印出来了。
      */
     std::vector<int> bracketedControls() const {
         std::vector<int> out;
-        if (mode_ != EditMode::Form || controls_.empty()) return out;
+        if (mode_ == EditMode::ReadOnly || controls_.empty()) return out;
         if (cfg_.form_brackets == FormBracketScope::All) {
             out.reserve(static_cast<size_t>(controls_.size()));
             for (int i = 0; i < controls_.size(); ++i) {
@@ -331,11 +334,11 @@ public:
      * 编码：-1 = 没有占位；-2 = 全部控件（All 档）；>= 0 = 那一个控件（Focused 档）。
      * 为什么 All 档返回常数：占位集合与光标无关 → 光标跨字段移动不再重排
      * （Focused 档下那是一次整行重排，是"显示才占位"的真实代价）。
-     * 为什么不能用 focusedControlIndex() 代替它：文档模式下标着同一份文档、
-     * 括号根本不画，却会照样把正文推开一截 —— 凭空多出来的空隙，谁也没要。
+     * 为什么不能用 focusedControlIndex() 代替它：只读模式下下标着同一份文档、括号根本不画，
+     * 却会照样把正文推开一截 —— 凭空多出来的空隙，谁也没要。
      */
     int bracketPlanId() const {
-        if (mode_ != EditMode::Form || controls_.empty()) return -1;
+        if (mode_ == EditMode::ReadOnly || controls_.empty()) return -1;
         if (cfg_.form_brackets == FormBracketScope::All) return -2;
         return focusedControlIndex();
     }
@@ -387,6 +390,40 @@ public:
         Rect r_pt{};
     };
     std::vector<ControlRect> controlRects(int index) const;
+
+    /**
+     * 删除一个控件。keep_content 为真时拆壳留内容（那一段字符变成普通正文），
+     * 为假时连内容一起删。
+     *
+     * 策略走 canDoStructureOp（structureLock 默认锁住）：表单模式默认拒绝、文档模式放行 ——
+     * 增删字段是设计期的事。删完段数可能变（控件里的段落标记没了或者换了位置），所以走
+     * 全量重编译，不进增量那条路。
+     *
+     * @param index      控件下标（对外一律用下标，节点 id 不外露）
+     * @param keep_content 真 = 保留内容，假 = 连内容一起删
+     * @return 是否真的改了文档
+     */
+    bool removeControl(int index, bool keep_content);
+
+    /**
+     * 删除控件 + 重排 + 呈现的组合入口（理由同上面那组 AndRender）。
+     * 宿主侧一次调用就收尾，不必自己记得再排一次 —— 漏掉那一步的症状是
+     * "控件没了但括号还在画布上"。
+     */
+    bool removeControlAndRender(int index, bool keep_content);
+
+    /**
+     * 改控件的一个运行时属性（hidden / readonly / required / structureLock）。
+     * 与 removeControl 同一套策略门；设计期属性（类型、格式、选项）不走这里。
+     */
+    bool setControlProp(int index, ControlProp prop, bool value);
+
+    /**
+     * 改控件属性 + 重排 + 呈现的组合入口。hidden 会改呈现态的流结构（整棵摘除），
+     * 所以这一次重排不能省。幂等（值没变）时它和 setControlProp 一样返回 true，
+     * 但不会白跑一次重排与重绘。
+     */
+    bool setControlPropAndRender(int index, ControlProp prop, bool value);
 
     /**
      * Tab / Shift+Tab：把光标移到下一个（上一个）可编辑控件的起点。
@@ -1083,7 +1120,7 @@ private:
      * 要求下一次呈现整帧重贴（而不是只贴几个脏矩形）。
      * 用在"帧上画的东西变了、但底图没变"的时候 —— 切编辑模式、改控件集合。
      * （底图不含控件标记，所以那两件事不会让页指纹变；不显式置位就会出现
-     * "切回文档模式后括号还在"这种残留。）
+     * "切到只读模式后括号还在"这种残留。）
      */
     bool frame_needs_full_refresh_ = false;
 

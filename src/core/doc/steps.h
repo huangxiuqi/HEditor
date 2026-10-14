@@ -140,6 +140,47 @@ struct RemoveNode {
 };
 
 /**
+ * 拆开一个容器节点：子节点原样上提到它自己的位置，节点本身移除。
+ *
+ * "删除控件但保留内容"就是它（与 RemoveNode 的差别只有这一处，而那一处就是语义本身：那个
+ * 连内容一起删）。子节点是同一批节点被搬了位置，身份不变 —— 撤销重做之后句柄仍然有效。
+ * 逆操作是 WrapNode，两者共用一份记录、字段一一对应；span_before / span_after 是节点自身
+ * 与内容各占的流长度（差就是它自己那两枚边界），位置映射要用它们。
+ *
+ * at 只是记录，at_flow 才是权威：规范化会在提交之后合并相邻同标记的文本节点，孩子槽位整体
+ * 前移而流位置不动，所以应用与校验都按 at_flow 当场重算槽位（steps.cpp 的 slotAtFlow），
+ * 必要时把被合并的文本节点切回来。
+ */
+struct UnwrapNode {
+    Pos at;
+    FlowPos at_flow = 0;
+    int span_before = 0;
+    int span_after = 0;
+    NodeSpec node;  // 被拆开那个节点离开时的快照（子节点仍活在树里，这一份只用来校验与定位）
+    NodeId detached = kInvalidNodeId;
+};
+
+/**
+ * 包装：把流区间 [at_flow, at_flow + span_after) 里的孩子收进一个容器节点。
+ * UnwrapNode 的逆操作；记录字段与它一一对应，所以两个方向的往返是严格的。
+ *
+ * 注意两个方向的 at_flow 指的不是同一格：步骤的坐标一律是"这一步将要应用的那个状态"里的
+ * 地址。UnwrapNode 应用在拆之前（at_flow = 容器起点），WrapNode 应用在拆之后 —— 那两枚
+ * 边界已经不在，内容整体前移一格，所以它的 at_flow 是内容起点。span_before 与 span_after
+ * 把这层差别带过去（mapPos 也按这个口径写）。
+ *
+ * 同样以流位置为准，不用槽位下标：被合并的文本节点要在这一刻切回来，区间才重新有边界。
+ */
+struct WrapNode {
+    Pos at;
+    FlowPos at_flow = 0;
+    int span_before = 0;
+    int span_after = 0;
+    NodeSpec node;
+    NodeId detached = kInvalidNodeId;
+};
+
+/**
  * 改控件的一个属性（第七节的四个：hidden / readonly / required / structureLock）。
  *
  * 一次只改一项：批量的形状由事务表达（一个事务里多条步骤），步骤本身保持最小 —— 这样逆操作
@@ -183,8 +224,8 @@ struct SetTableCellSpan {
 };
 
 using Step = std::variant<InsertText, InsertFragment, DeleteRange, InsertParaMark, RemoveParaMark,
-                          SetParaMarkFormat, InsertNode, RemoveNode, SetControlProp,
-                          SetControlValue, SetTableCellSpan>;
+                          SetParaMarkFormat, InsertNode, RemoveNode, UnwrapNode, WrapNode,
+                          SetControlProp, SetControlValue, SetTableCellSpan>;
 
 /**
  * 步骤的执行结果。失败时给出原因 —— 位置越界、类型不符都要显式说出来，不静默不做。
