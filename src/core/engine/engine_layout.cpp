@@ -150,13 +150,12 @@ void EditorEngine::computeLineFingerprints(int dirty_lo, int dirty_hi, bool full
         for (const LineCluster& c : lb.clusters) {
             h = fnvMix(h, static_cast<uint64_t>(c.cp));
             mixf(c.inline_pt);
-            h = fnvMix(h, (c.placeholder ? 1ull : 0ull) |
-                              (c.read_only ? 2ull : 0ull) |
+            h = fnvMix(h, (c.placeholder ? 1ull : 0ull) | (c.read_only ? 2ull : 0ull) |
                               (static_cast<uint64_t>(c.bracket_side) << 2));
         }
         // 这一行的字形：按 line 单调，二分定位这一段
-        const auto gb = std::lower_bound(gs.begin(), gs.end(), li,
-                                         [](const PlacedGlyph& g, int line) { return g.line < line; });
+        const auto gb = std::lower_bound(
+            gs.begin(), gs.end(), li, [](const PlacedGlyph& g, int line) { return g.line < line; });
         for (auto it = gb; it != gs.end() && it->line == li; ++it) {
             h = fnvMix(h, it->glyph_id);
             mixf(it->x_pt);

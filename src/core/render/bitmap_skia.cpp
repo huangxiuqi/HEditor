@@ -142,6 +142,15 @@ struct Bitmap::SkiaImpl {
     sk_sp<SkFontMgr> font_mgr;  // SkFontMgr_New_Custom_Empty()：内建字体为 0，全部由我们喂
 
     /**
+     * 批量画字形的转存缓冲。留着复用是为了不让"批量"本身变成每段两次 malloc ——
+     * 一段上千个字形时，分配开销能盖过省下来的那笔固定开销。
+     * 存的是 Skia 自己的类型（SkGlyphID / SkPoint），所以放在这里而不是 Bitmap 里。
+     */
+    std::vector<SkGlyphID> glyph_scratch;
+    std::vector<SkPoint> pos_scratch;
+    std::vector<SkRect> bounds_scratch;
+
+    /**
      * (hb_face_t*, 变体坐标指纹) → SkTypeface。
      * 用 hb_face_t* 当键是安全的：FontFace 一张脸活到进程结束，指针不会复用。
      * 指纹不能省：同一个 face 上 wght=400 与 wght=700 是两张不同的脸，
@@ -361,28 +370,61 @@ void Bitmap::copyRectFrom(const Bitmap& src, const Rect& r) {
 
 /**
  * 字形：把 HarfBuzz 的字形描到帧上，含侧倒竖排的旋转。
+ *
+ * 单个字形走 drawGlyphs（count = 1）：两条入口只能有一条实现，否则
+ *   "逐字形画"与"整段画"会各长一套，差一点就是两边对不上的幽灵。
  */
 void Bitmap::drawGlyph(hb_font_t* font, uint32_t glyph_id, float pen_x, float pen_y,
                        float units_to_px, Color color, float rotate_deg) {
-    if (!font || w_ <= 0 || h_ <= 0 || !sk_ || !sk_->canvas) return;
+    drawGlyphs(font, &glyph_id, &pen_x, &pen_y, 1, units_to_px, color, rotate_deg);
+}
+
+/**
+ * 批量画字形：一段（同字体、同颜色、同朝向）只付一次固定开销。
+ *
+ * 病根：drawGlyphs 每调用一次都要新建 SkPaint、装配一遍字形运行、
+ *   算一遍运行包围盒 —— 单字形调用时这笔固定开销全摊在一个字上。
+ *   实测一页约 1200 个字形要 10 ms 上下，而字形本身的 blit 只占一小半。
+ *
+ * 记账：Skia 不告诉本实现"写了几个像素"，用字形包围盒当上界（与自写后端的
+ *   "只记覆盖率超阈值的像素"相比口径放宽了，用途没变：这个数字要证明的是
+ *   "没有写整页"，包围盒是上界，上界都小两个数量级，结论依然硬）。
+ *   侧倒时包围盒按旋转后的朝向算，所以宽高对调。
+ */
+void Bitmap::drawGlyphs(hb_font_t* font, const uint32_t* ids, const float* xs, const float* ys,
+                        int count, float units_to_px, Color color, float rotate_deg) {
+    if (!font || !ids || !xs || !ys || count <= 0 || w_ <= 0 || h_ <= 0 || !sk_ || !sk_->canvas)
+        return;
     const SkFont* f = sk_->fontFor(font, units_to_px);
     if (!f) return;
+    painted_glyphs_ += static_cast<size_t>(count);
 
-    const SkGlyphID gid = static_cast<SkGlyphID>(glyph_id);
+    const bool sideways = isSideways(rotate_deg);
+    std::vector<SkGlyphID>& gids = sk_->glyph_scratch;
+    std::vector<SkPoint>& pos = sk_->pos_scratch;
+    gids.resize(static_cast<size_t>(count));
+    pos.resize(static_cast<size_t>(count));
+    for (int i = 0; i < count; ++i) {
+        gids[static_cast<size_t>(i)] = static_cast<SkGlyphID>(ids[i]);
+        pos[static_cast<size_t>(i)] = SkPoint::Make(xs[i], ys[i]);
+    }
 
-    // 记账：Skia 不告诉本实现"写了几个像素"，这里用字形包围盒当上界
-    //
-    // 与自写后端（只记覆盖率 > 阈值的像素）相比口径放宽了，但用途没变：
-    // 这个数字要证明的是"没有写整页"。包围盒是上界，上界都小两个数量级，结论依然硬。
-    // 侧倒时包围盒要按旋转后的朝向算，所以宽高对调。
+    // 记账：包围盒一次取完（SkFont::getBounds 的批量重载）。
+    //   逐字形 getBounds 每调用一次都要进一遍字形缓存（一次全局查找），
+    //   上千个字形时这一笔能盖过字形本身的 blit。
     {
-        const SkRect b = f->getBounds(gid, nullptr);
-        float bw = b.width();
-        float bh = b.height();
-        if (isSideways(rotate_deg)) std::swap(bw, bh);
-        if (bw > 0.0f && bh > 0.0f) {
-            painted_px_ += static_cast<size_t>(std::ceil(bw) + 1.0f) *
-                           static_cast<size_t>(std::ceil(bh) + 1.0f);
+        std::vector<SkRect>& bxs = sk_->bounds_scratch;
+        bxs.resize(static_cast<size_t>(count));
+        f->getBounds(SkSpan<const SkGlyphID>(gids.data(), count), SkSpan<SkRect>(bxs.data(), count),
+                     nullptr);
+        for (int i = 0; i < count; ++i) {
+            float bw = bxs[static_cast<size_t>(i)].width();
+            float bh = bxs[static_cast<size_t>(i)].height();
+            if (sideways) std::swap(bw, bh);
+            if (bw > 0.0f && bh > 0.0f) {
+                painted_px_ += static_cast<size_t>(std::ceil(bw) + 1.0f) *
+                               static_cast<size_t>(std::ceil(bh) + 1.0f);
+            }
         }
     }
 
@@ -391,25 +433,29 @@ void Bitmap::drawGlyph(hb_font_t* font, uint32_t glyph_id, float pen_x, float pe
     p.setAntiAlias(true);
 
     SkCanvas& c = *sk_->canvas;
-    const SkPoint positions[1] = {SkPoint::Make(0.0f, 0.0f)};
     const SkPoint origin = SkPoint::Make(0.0f, 0.0f);
-    const SkSpan<const SkGlyphID> glyphs(&gid, 1);
-    const SkSpan<const SkPoint> pos(positions, 1);
 
-    if (isSideways(rotate_deg)) {
+    if (sideways) {
         // 侧倒（蒙文竖排）：字体的轮廓是横排形态，"整段侧倒"属于呈现层。
-        // 与自写后端同一定义：绕字形原点顺时针转 rotate_deg。
-        c.save();
-        c.translate(pen_x, pen_y);
-        c.rotate(rotate_deg);
-        c.drawGlyphs(glyphs, pos, origin, *f, p);
-        c.restore();
-    } else {
-        // 正立：位置直接给绝对设备像素，省掉一次 save/translate ——
-        // 一帧上千个字形，这条路径必须是最短的。
-        const SkPoint at[1] = {SkPoint::Make(pen_x, pen_y)};
-        c.drawGlyphs(glyphs, SkSpan<const SkPoint>(at, 1), origin, *f, p);
+        //   与自写后端同一定义：绕字形原点顺时针转 rotate_deg。
+        // 旋转是逐字形各绕自己的原点转，一次 drawGlyphs 只有一个画布变换表达不了
+        //   —— 退回逐字形。这条路少见，不值得为它把变换凑成一个矩阵。
+        for (int i = 0; i < count; ++i) {
+            const SkPoint zero[1] = {SkPoint::Make(0.0f, 0.0f)};
+            c.save();
+            c.translate(xs[i], ys[i]);
+            c.rotate(rotate_deg);
+            c.drawGlyphs(SkSpan<const SkGlyphID>(&gids[static_cast<size_t>(i)], 1),
+                         SkSpan<const SkPoint>(zero, 1), origin, *f, p);
+            c.restore();
+        }
+        return;
     }
+
+    // 位置直接给绝对设备像素，省掉逐字形的 save/translate ——
+    //   一帧上千个字形，这条路径必须是最短的。
+    c.drawGlyphs(SkSpan<const SkGlyphID>(gids.data(), count),
+                 SkSpan<const SkPoint>(pos.data(), count), origin, *f, p);
 }
 
 /**

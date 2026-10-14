@@ -103,7 +103,7 @@ int main(int argc, char** argv) {
                 " [--demo word] [--repeat N] [--no-glyph-cache]\n"
                 "  --repeat N         进程内把\"排版+绘制\"整轮跑 N 次并报 min/中位/max。\n"
                 "                     单次数字不能用来做性能决策：实测同一个二进制连跑 6 次，\n"
-                "                       4 页 @1.5× 的绘制耗时在 135~179 ms 之间摆（±15%）。\n"
+                "                       4 页 @1.5× 的绘制耗时在 135~179 ms 之间摆（±15%%）。\n"
                 "  --no-glyph-cache  关掉字形光栅缓存。用来证伪\"缓存是纯等价变换\"：\n"
                 "                     带/不带两种跑法写出的 page-*.png 必须逐字节相同。\n");
             return 0;

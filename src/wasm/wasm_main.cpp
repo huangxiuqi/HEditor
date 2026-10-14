@@ -202,8 +202,8 @@ std::vector<BlockSpec> buildScenarioBlocks(int scenario) {
             blocks.push_back(std::move(b));
             break;
         }
-        case 7: {  // 档 2：长文档（200 段）—— 多段才有"可复用的前缀"可谈
-            blocks = longDocument(200, g_cjk_font);
+        case 7: {  // 档 2：长文档 —— 多段才有"可复用的前缀"可谈（段数见下面这行）
+            blocks = longDocument(2000, g_cjk_font);
             break;
         }
         default:
@@ -345,6 +345,7 @@ std::string statsJson() {
     //   帧搬运走 copyRectFrom。合成一个 paintMs 就只能得出"绘制慢"。
     o << "\"paintFillMs\":" << s.paint_fill_ms << ",";
     o << "\"paintGlyphMs\":" << s.paint_glyph_ms << ",";
+    o << "\"paintedGlyphs\":" << s.painted_glyphs << ",";
     o << "\"paintPresentMs\":" << s.paint_present_ms << ",";
     o << "\"totalMs\":" << s.total_ms << ",";
     o << "\"frameWidth\":" << s.frame_width << ",";

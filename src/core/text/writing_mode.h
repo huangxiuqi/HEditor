@@ -49,6 +49,14 @@ struct WritingMode {
     BlockFlow block_flow = BlockFlow::TopToBottom;
     TextOrientation orientation = TextOrientation::Mixed;
 
+    /**
+     * 逐字段相等。必须显式写出来：WritingMode 会被放进 std::optional 再挂到
+     * ParaFormatPatch / StyleDef 上，而那两个的默认相等比较是逐成员递归的 ——
+     * 少了这一个，它们的 operator== 会被静默删除，任何一处比较都编不过，
+     * 而编译器只丢下一句"隐式删除"和一长串无关候选（每包含一次头就报一遍）。
+     */
+    bool operator==(const WritingMode& o) const = default;
+
     bool isVertical() const { return inline_axis == InlineAxis::Vertical; }
 
     /**

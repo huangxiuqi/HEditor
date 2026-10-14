@@ -110,10 +110,22 @@ const frameCanvasProxy = {
   getContext() { return null; },
 };
 
+/**
+ * 画布池：卸下来的页画布留着复用，不销毁。
+ *
+ * 为什么值得留着：换窗口时要卸掉几页、建起几页，而"新建一张画布"的钱几乎全在
+ * 重新分配 backing store —— 893×1263 一页就是 4.5 MB。实测（diag_perf.mjs）：
+ * 重建 4 张 14.60 ms，复用 4 张 3.80 ms，每张 2.7 ms 差在这上面。
+ * 一句话说清：频繁重建确实有开销，但开销来自"重新分配"，不来自"换内容"——
+ * 池子把前者消掉，后者本来就躲不掉（新露出来的那页必须重新贴像素）。
+ * 池子封顶 MAX_WINDOW 页，够换一个来回。
+ */
+const canvasPool = [];
+
 function pageCanvasFor(page) {
   let rec = pageCanvases.get(page);
   if (!rec) {
-    const el = document.createElement('canvas');
+    const el = canvasPool.pop() || document.createElement('canvas');
     rec = { el, g: el.getContext('2d', { alpha: false }) };
     pageCanvases.set(page, rec);
     pagesEl.appendChild(el);
@@ -142,6 +154,8 @@ function syncPageCanvases(first, count, total) {
     if (p < first || p >= first + count) {
       rec.el.remove();
       pageCanvases.delete(p);
+      // 进池而不是丢掉：它的 backing store 还留着，下次换窗口拿来就能用。
+      if (canvasPool.length < MAX_WINDOW) canvasPool.push(rec.el);
     }
   }
   for (let p = first; p < first + count; ++p) {
@@ -190,18 +204,26 @@ function visiblePageRange() {
 
 function desiredWindow() {
   const total = Math.max(1, lastEdit ? lastEdit.totalPages : 1);
-  const cp = lastEdit ? lastEdit.caretPage : -1;
   const vis = visiblePageRange();
-  let lo = total - 1;
-  let hi = 0;
-  if (cp >= 0 && cp < total) {
-    lo = Math.min(lo, cp);
-    hi = Math.max(hi, cp);
+  // 以看得见的那几页为准 —— 它们必须全在窗口里，否则那几页没有画布（一片空白）。
+  //
+  //   光标页只在"不挤掉可见页"时才并进窗口（窗口封顶 MAX_WINDOW 页）：
+  //     无条件并进来，会让用户把屏幕滚到别处之后窗口仍被钉在光标页上；
+  //     有位置就并但不管可见页，会让可见页的最后一页落到窗口外（同样没有画布）。
+  //     两种错法的症状一样（滚动之后一片空白），只有这条断言能分辨它们。
+  //   光标不在窗口里时它不画 —— 它本来就在屏幕外，画了也看不见。
+  let lo = vis.first;
+  let hi = vis.last;
+  const cp = lastEdit ? lastEdit.caretPage : -1;
+  if (MAX_WINDOW - (hi - lo + 1) > 0 && cp >= 0 && cp < total) {
+    if (cp === lo - 1) lo = cp;
+    else if (cp === hi + 1) hi = cp;
   }
-  lo = Math.min(lo, vis.first);
-  hi = Math.max(hi, vis.last);
   let first = Math.max(0, lo - PAGE_MARGIN);
-  let count = Math.min(MAX_WINDOW, hi - lo + 1 + 2 * PAGE_MARGIN);
+  // 下界是"装下可见页"，MAX_WINDOW 只是它的上界而不是替代品：
+  //   舞台比 3 页还高时（最大化窗口、缩小 zoom），宁可多画几页也不能留空白页。
+  const need = hi - lo + 1;
+  let count = Math.max(need, Math.min(MAX_WINDOW, need + 2 * PAGE_MARGIN));
   count = Math.max(1, Math.min(count, total));
   if (first + count > total) first = Math.max(0, total - count);
   return { first, count };
@@ -220,13 +242,11 @@ function applyWindow() {
   const key = w.first + ':' + w.count;
   if (key === lastAnchor) return false;
   const cur = lastAnchor.split(':').map(Number);
-  if (cur.length === 2 && Number.isFinite(cur[0]) && Number.isFinite(cur[1]) && lastEdit) {
-    const cp = lastEdit.caretPage;
-    const vis = visiblePageRange();
-    const covers = (a, b) => cur[0] <= a && b <= cur[0] + cur[1] - 1;
-    if (covers(vis.first, vis.last) && (cp < 0 || (cur[0] <= cp && cp <= cur[0] + cur[1] - 1))) {
-      return false;
-    }
+  if (cur.length === 2 && Number.isFinite(cur[0]) && Number.isFinite(cur[1])) {
+    // 滞回：现有窗口还盖得住"该装的那几页"就不动。
+    //   判据取 desiredWindow 的结果而不是另一个口径的可见页 —— 两个口径各判一次
+    //   就会出现"一个说盖得住、一个说盖不住"，于是锚点每轮都挪、每挪一次整窗重光栅。
+    if (cur[0] <= w.first && w.first + w.count <= cur[0] + cur[1]) return false;
   }
   lastAnchor = key;
   mod.setViewportAnchor(w.first, w.count);
@@ -259,11 +279,16 @@ function scrollCaretIntoView(st) {
   if (!st || st.caretPage < 0) return;
   const dpr = window.devicePixelRatio || 1;
   const step = mod.pagePxHeight() + mod.pageGapPx();
+  // 光标不在窗口里时（用户把屏幕滚到别处了）caretY 是个"窗口帧外"的数，
+  //   拿它算绝对位置会滚到一个毫无关系的地方 —— 直接按页算到那一页的页首。
+  const inWindow = st.caretPage >= st.windowFirstPage &&
+                   st.caretPage < st.windowFirstPage + st.windowPages;
   // caretY 是"窗口帧内的 y"，它已经含了 (caretPage - 窗口首页) * step 这一项
   //   （见 EditorEngine::caretRectPx 的 off_y）。所以文档坐标 = 窗口首页偏移 + caretY。
   //   写成 caretPage * step + caretY 等于把页偏移算了两遍 —— 点第二页时光标坐标会落到
   //   第三页去，屏幕跟着往下冲两页；随后窗口重算、又一次滚动，看起来就是"乱滚"。
-  const top = (mod.windowFirstPage() * step + st.caretY) / dpr;
+  const top = inWindow ? (mod.windowFirstPage() * step + st.caretY) / dpr
+                       : (st.caretPage * step) / dpr;
   const bot = top + Math.max(12, st.caretH / dpr);
   const pad = 18;
   const viewTop = stageEl.scrollTop;
@@ -384,23 +409,29 @@ async function boot() {
   });
   const wasmMs = performance.now() - tWasm;
 
-  // 页面跑的到底是哪一版：两处数字对照着看。
-  //   runStamp 来自 wasm 自己（编进去的构建时间），fileStamp 来自磁盘上那个文件的
-  //   Last-Modified。两者一致 = 浏览器加载的就是磁盘上这份；runStamp 明显更旧 =
-  //   浏览器拿的是缓存里的旧副本（此时工具条会变红并给出硬刷新的提示）。
+  // 页面跑的到底是哪一版：两次对照的必须是同一种时刻。
+  //   runStamp 来自 wasm 自己（编进去的配置时刻），而产物文件的 mtime 是构建时刻 ——
+  //   拿两者相减，只要"构建比配置晚五分钟以上"就恒报旧副本，而页面跑的其实是最新那份。
+  //   判据改用产物旁边的 heditor.buildstamp（由构建成功时刷新，与编进 wasm 的值同源）：
+  //   一致 = 跑的就是磁盘上这一份；不一致才是真旧副本（浏览器拿了缓存里的旧 wasm）。
+  let diskStamp = '';
+  try {
+    const r = await fetch(new URL('heditor.buildstamp', WASM_GLUE.href).href,
+                          { cache: 'no-store' });
+    if (r.ok) diskStamp = (await r.text()).trim();
+  } catch (err) {
+    console.warn('读不到构建戳旁证（不影响启动）', err);
+  }
   const runStamp = typeof mod.buildStamp === 'function' ? mod.buildStamp() : '未知';
-  const parsedFile = new Date(fileStampRaw);
-  const staleByMs = Number.isNaN(parsedFile.getTime())
-    ? 0
-    : parsedFile.getTime() - (Date.parse(runStamp.replace(' ', 'T')) || 0);
-  const staleSeed = staleByMs > 5 * 60 * 1000;  // 超过 5 分钟 = 磁盘上换了、跑的还是旧的
+  const staleSeed = diskStamp !== '' && diskStamp !== runStamp;
   const buildEl2 = document.getElementById('build');
   if (buildEl2) {
-    buildEl2.textContent = `wasm ${runStamp} ｜ 磁盘 ${fileStamp}`;
+    buildEl2.textContent = `wasm ${runStamp} ｜ 构建 ${fileStamp}`;
     buildEl2.className = staleSeed ? 'stale' : '';
     buildEl2.title = staleSeed
-      ? '页面跑的是缓存里的旧副本（比磁盘上的构建旧）—— 请 Ctrl+Shift+R 硬刷新'
-      : '页面实际加载的那份 wasm 的构建时间，以及磁盘上那个文件的时间';
+      ? `页面跑的不是磁盘上这一份（跑 ${runStamp}，产物是 ${diskStamp} 产的）` +
+        ` —— 请 Ctrl+Shift+R 硬刷新`
+      : '页面实际加载的那份 wasm 的配置时刻，以及产物文件的构建时刻';
   }
 
   // 字体：JS fetch 进来，字节穿过边界，wasm 包里一个字体都没有
@@ -524,7 +555,7 @@ async function boot() {
   // 旧副本要显眼地说出来：这种情况下下面所有"改了没生效"的观感都是假象，
   //   不提示的话会一路查到底层代码，白费时间。
   if (staleSeed) {
-    setStatus(`⚠ 页面跑的是旧副本（跑的 ${runStamp}，磁盘上已是 ${fileStamp}）` +
+    setStatus(`⚠ 页面跑的不是磁盘上这一份 wasm（跑 ${runStamp}，产物是 ${diskStamp} 产的）` +
               ` —— 按 Ctrl+Shift+R 硬刷新`, true);
   } else {
     setStatus('就绪 · 点画布定位光标，然后敲字');
@@ -606,7 +637,12 @@ function blitFrame(st) {
  * 而它的顶边就是文档第 0 页的顶边 —— 于是"第 k 页 + 页内 y"直接就是文档坐标。
  */
 function positionIme(st) {
-  if (!st || !st.caretW) {
+  // 光标不在窗口里时把输入框收成 1 px：这一帧光标本来就没画，
+  //   拿窗口帧外的 caretY 去摆会把输入框（以及它带出来的输入法候选框）
+  //   摆到屏幕某个莫名其妙的角落。
+  const inWindow = st && st.caretPage >= st.windowFirstPage &&
+                   st.caretPage < st.windowFirstPage + st.windowPages;
+  if (!st || !st.caretW || !inWindow) {
     ta.style.width = '1px';
     ta.style.height = '1px';
     return;
@@ -969,6 +1005,10 @@ function renderLayout(st) {
     //   它们各自对应一种完全不同的优化手段，合成一个数就只能得出"绘制慢"。
     ['  · 铺面积', `${fmt(st.paintFillMs)} ms`],
     ['  · 字形', `${fmt(st.paintGlyphMs)} ms`, 'hi'],
+    // 每字形微秒：分不出"字多"与"每个字贵"就等于没量。
+    //   几百个字形 1 ms（1~3 µs/个）是正常量级；上了 10 µs/个 才是光栅本身的问题。
+    ['  · 每字形', st.paintedGlyphs ? `${fmt(st.paintGlyphMs * 1000 / st.paintedGlyphs, 2)} µs` +
+                                     `（${st.paintedGlyphs} 个）` : '—'],
     ['  · 帧搬运', `${fmt(st.paintPresentMs)} ms`],
     ['字形缓存 命中 / 未命中', `${st.glyphCacheHits} / ${st.glyphCacheMisses}`],
     ['帧尺寸', `${mod.frameWidth()} × ${mod.frameHeight()} px`],
@@ -1450,7 +1490,7 @@ window.__heditor = {
              engineCount: mod.windowPageCount(),
              desired: desiredWindow(), visible: visiblePageRange(),
              pagePx: [mod.pagePxWidth(), mod.pagePxHeight(), mod.pageGapPx()],
-             canvases: pageCanvases.size };
+             canvases: pageCanvases.size, pooled: canvasPool.length };
   },
   get zoomLevel() { return currentZoom; },
   get scenario() { return Number($('scenario').value); },

@@ -152,7 +152,19 @@ public:
      * 上界都小两个数量级，结论才硬。
      */
     size_t paintedPixels() const { return painted_px_; }
-    void resetPaintedPixels() { painted_px_ = 0; }
+    void resetPaintedPixels() {
+        painted_px_ = 0;
+        painted_glyphs_ = 0;
+    }
+
+    /**
+     * 本次提交给光栅器的字形个数。
+     *
+     * 与 paintedPixels 配对使用：一个说"写了多少像素"，一个说"画了几个字"。
+     * 判"字形光栅贵不贵"要看它们的商（每字形多少微秒）——
+     *   只看总耗时是分不出"字多"与"每个字贵"的，而这两者的修法完全不同。
+     */
+    size_t paintedGlyphs() const { return painted_glyphs_; }
 
     /**
      * 画一个字形。
@@ -164,6 +176,22 @@ public:
      */
     void drawGlyph(hb_font_t* font, uint32_t glyph_id, float pen_x, float pen_y, float units_to_px,
                    Color color, float rotate_deg = 0.0f);
+
+    /**
+     * 批量画字形：一次调用画一整段（同字体、同颜色、同朝向）。
+     *
+     * 为什么要有批量入口：光栅器每画一个字形都要付一笔固定开销 —— Skia 侧是
+     * "新建 SkPaint、装配一遍字形运行、进字形缓存"，自写侧是"查缓存键"。单字形
+     * 调用时这笔全摊在一个字上：一页约 1200 个字形实测要 10 ms 上下，大头正是它。
+     *
+     * ids / xs / ys 都是长度 count 的数组；xs / ys 是设备像素坐标下的字形原点。
+     * 调用方负责把同一 font / color / rotate 的字形攒成一段，且不要打乱顺序：
+     * 数组里的次序就是绘制次序，重叠的字形（组合符、括号贴内容）靠它决定压盖。
+     * rotate_deg != 0（侧倒竖排）时本实现退化成逐字形 —— 旋转是每个字形各绕自己的
+     * 原点转，一次调用表达不了，而那条路很少见。
+     */
+    void drawGlyphs(hb_font_t* font, const uint32_t* ids, const float* xs, const float* ys,
+                    int count, float units_to_px, Color color, float rotate_deg = 0.0f);
 
     /**
      * 多个 Bitmap（帧缓冲 bitmap_ + 底图 base_）应当共享同一份字形缓存：
@@ -179,7 +207,8 @@ private:
     int w_ = 0;
     int h_ = 0;
     std::vector<uint8_t> px_;
-    size_t painted_px_ = 0;  // 自上次 resetPaintedPixels() 以来实际写入的像素数
+    size_t painted_px_ = 0;      // 自上次 resetPaintedPixels() 以来实际写入的像素数
+    size_t painted_glyphs_ = 0;  // 同一口径下的字形个数（见 paintedGlyphs）
 
 #if defined(HEDITOR_USE_SKIA)
 

@@ -36,9 +36,13 @@ endif()
 set(HEDITOR_ASSET_DIR ${HEDITOR_ROOT}/assets)
 
 # 构建时间戳：编进 wasm/native 里，验证台把它显示出来。
-#   "改了没生效"要先能回答"页面到底跑的哪一版" —— 光看磁盘上的文件时间不够：
-#   浏览器完全可能拿的是旧副本。默认取**配置时刻**（每次 cmake --preset 都是新的），
-#   需要时用环境变量 HEDITOR_BUILD_STAMP 覆盖（CI 里传 commit 号有用）。
+#   "改了没生效"要先能回答"页面到底跑的哪一版"。这里取的是**配置时刻**
+#   （每次 cmake --preset 都是新的；CI 里可用环境变量 HEDITOR_BUILD_STAMP 覆盖成 commit 号）。
+#   取配置时刻而不是构建时刻，是为了让"没改源码的构建"停在第 0 步 ——
+#   否则每跑一次 cmake --build 都要重编那几个引用它的 TU 并重新链接。
+#   ★ 代价：产物文件的 mtime（构建时刻）与它**不可比**，所以别拿两者相减判"旧副本"
+#   （差值等于"构建比配置晚了多久"）。页面用 heditor_wasm 的 POST_BUILD 写出的
+#   heditor.buildstamp 当旁证 —— 它与编进 wasm 的那个值同源。
 if(DEFINED ENV{HEDITOR_BUILD_STAMP})
   set(HEDITOR_BUILD_STAMP "$ENV{HEDITOR_BUILD_STAMP}")
 else()
@@ -268,6 +272,17 @@ if(EMSCRIPTEN)
   # 供宿主脚本定位产物
   set_target_properties(heditor_wasm PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/web)
+
+  # 构建戳旁证：把"这次构建用的是哪一次配置的戳"写到产物旁边。
+  #   页面判"跑的是不是磁盘上这一份"要拿同一种时刻对照：wasm 里编的是配置时刻，
+  #   而产物文件的 mtime 是构建时刻，两者不可比。这份旁证与编进 wasm 的值同源，
+  #   且只在构建成功时才刷新 —— 构建失败时它保持旧值，于是页面对照出来的仍是"一致"。
+  file(WRITE ${CMAKE_BINARY_DIR}/heditor_buildstamp.txt "${HEDITOR_BUILD_STAMP}\n")
+  add_custom_command(TARGET heditor_wasm POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_BINARY_DIR}/heditor_buildstamp.txt
+            $<TARGET_FILE_DIR:heditor_wasm>/heditor.buildstamp
+    COMMENT "写构建戳旁证 heditor.buildstamp")
 
 else()
 

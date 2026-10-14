@@ -112,6 +112,34 @@ return (function () {
     full: st.layoutWasFull, shifted: st.suffixShifted,
     dirtyPages: st.dirtyPageCount, repaintedPages: st.repaintedPages,
     pixels: st.repaintedPixels, framePx: st.framePixels, totalPages: st.totalPages,
+    glyphs: ss.paintedGlyphs,
+    blitPut: bl.putMs, blitTotal: bl.totalMs, blitFull: bl.full,
+  });
+})()`;
+
+// 页内：走宿主真实路径的一次"回车"（段数变化）。
+//   与敲字同一个账本，多记几项：脏页数、重画页数、行带落在哪。
+//   回车与"敲字敲到换行"是同一类事 —— 行数一变，编辑点以下的每一行都要重新
+//   定位，整窗的页内容跟着移位，于是整窗都要重画。它比单敲一个字贵得多，
+//   也正是"输入到新增一行时卡一下"的那一下。
+const ONE_ENTER = `
+return (function () {
+  const H = window.__heditor;
+  const t0 = performance.now();
+  H.splitParagraph();
+  const op = performance.now() - t0;
+  const st = H.editStats;
+  const bl = H.blitStats;
+  const ss = H.stats;
+  return JSON.stringify({
+    op, layout: st.layoutMs, pageFp: st.pageFpMs, paint: st.paintMs, engine: st.totalMs,
+    fill: ss.paintFillMs, glyph: ss.paintGlyphMs, present: ss.paintPresentMs,
+    relaid: st.relaidParagraphs, reused: st.reusedParagraphs, totalParas: st.totalParagraphs,
+    full: st.layoutWasFull,
+    dirtyPages: st.dirtyPageCount, repaintedPages: st.repaintedPages,
+    windowPages: st.windowPages, bandY0: st.bandY0, bandY1: st.bandY1,
+    pixels: st.repaintedPixels, framePx: st.framePixels, totalPages: st.totalPages,
+    glyphs: ss.paintedGlyphs,
     blitPut: bl.putMs, blitTotal: bl.totalMs, blitFull: bl.full,
   });
 })()`;
@@ -263,12 +291,34 @@ async function main() {
       console.log(`  ${tag.padEnd(20)} 操作 ${r.op.toFixed(1)} ms` +
                   `（引擎 layout ${r.layout.toFixed(1)} / pageFp ${r.pageFp.toFixed(1)}` +
                   ` / paint ${r.paint.toFixed(1)} = 铺面积 ${r.fill.toFixed(1)}` +
-                  ` + 字形 ${r.glyph.toFixed(1)} + 帧搬运 ${r.present.toFixed(1)}，上屏 ${r.blitTotal.toFixed(1)}）` +
+                  ` + 字形 ${r.glyph.toFixed(1)}（${r.glyphs} 个` +
+                  `　${r.glyphs ? (r.glyph * 1000 / r.glyphs).toFixed(2) : '—'} µs/个）` +
+                  ` + 帧搬运 ${r.present.toFixed(1)}，上屏 ${r.blitTotal.toFixed(1)}）` +
                   `  重排 ${r.relaid}/${r.totalParas}${r.full ? ' 全量' : ' 增量'}` +
                   `${r.shifted ? ' 平移' : ''}` +
                   `  脏页 ${r.dirtyPages}  重画 ${r.pixels} px` +
                   `（占全帧 ${(100 * r.pixels / r.framePx).toFixed(3)} %）` +
                   `  缓存 ${r.hits}/${r.misses}`);
+    }
+
+    // 回车：段数变化。行数一变，编辑点以下每一行都要重新定位，整窗跟着移位。
+    for (const [tag, para] of [['回车·中段', Math.floor(load.total / 2)],
+                               ['回车·末段', load.total - 2]]) {
+      await c.eval(`return window.__heditor.setCaret(${para}, 5);`);
+      await c.eval('return window.__heditor.stopBlink();');
+      await sleep(120);
+      const r = JSON.parse(await c.eval(ONE_ENTER));
+      console.log(`  ${tag.padEnd(20)} 操作 ${r.op.toFixed(1)} ms` +
+                  `（引擎 layout ${r.layout.toFixed(1)} / pageFp ${r.pageFp.toFixed(1)}` +
+                  ` / paint ${r.paint.toFixed(1)} = 铺面积 ${r.fill.toFixed(1)}` +
+                  ` + 字形 ${r.glyph.toFixed(1)}（${r.glyphs} 个` +
+                  `　${r.glyphs ? (r.glyph * 1000 / r.glyphs).toFixed(2) : '—'} µs/个）` +
+                  ` + 帧搬运 ${r.present.toFixed(1)}，上屏 ${r.blitTotal.toFixed(1)}）` +
+                  `  重排 ${r.relaid}/${r.totalParas}${r.full ? ' 全量' : ' 增量'}` +
+                  `  脏页 ${r.dirtyPages}/${r.totalPages}` +
+                  `  重画页 ${r.repaintedPages}/${r.windowPages}` +
+                  `  行带 ${r.bandY0}~${r.bandY1}px  重画 ${r.pixels} px` +
+                  `（占全帧 ${(100 * r.pixels / r.framePx).toFixed(1)} %）`);
     }
 
     // 屏幕真正刷新的节拍：连敲 REPS 个字，记 rAF 间隔
@@ -354,6 +404,126 @@ async function main() {
                 `  差 ${(vis.gapP50 - hid.gapP50).toFixed(1)} ms` +
                 `  操作 p50 ${vis.opP50.toFixed(1)} ms`);
   }
+
+  // 同一份文档、同一个 zoom，连装三次：三次的字形位置逐字节相同。
+  //   这一条判"字形缓存认不认位置"，而它正是"回车为什么贵"的答案 ——
+  //   回车把编辑点以下所有行的纵向位置整体挪一下（横向推进一字未变）。
+  //   若第二、三次明显更快：mask 与绝对位置无关，缓存命中 ⇒ 钱省在不再光栅；
+  //   若三次一样慢：钱花在每字形的 FreeType 光栅或 blit 本身，只能靠"少画"。
+  console.log('\n=== 同一文档连装三次（字形缓存认不认位置）===');
+  for (let k = 0; k < 3; ++k) {
+    const t0 = performance.now();
+    await c.eval('return window.__heditor.run(7, 1.5);');
+    const op = performance.now() - t0;
+    await sleep(120);
+    const r = JSON.parse(await c.eval(`return (function () {
+      const H = window.__heditor;
+      const st = H.editStats, ss = H.stats;
+      return JSON.stringify({ paint: st.paintMs, fill: ss.paintFillMs,
+        glyph: ss.paintGlyphMs, n: ss.paintedGlyphs, px: st.repaintedPixels,
+        wf: st.windowFirstPage, wp: st.windowPages });
+    })()`));
+    console.log(`  第 ${k + 1} 次  合计 ${op.toFixed(0)} ms  绘制 ${r.paint.toFixed(1)}` +
+                `（铺面积 ${r.fill.toFixed(1)} + 字形 ${r.glyph.toFixed(1)}` +
+                `　${r.n} 个　${r.n ? (r.glyph * 1000 / r.n).toFixed(2) : '—'} µs/个）` +
+                `  重画 ${(r.px / 1e6).toFixed(3)} Mpx  窗口 ${r.wp} 页@${r.wf}`);
+  }
+
+  // 快速滚动：每拍跳一整页，必然换窗口。量的不是"滚动事件有多密"，
+  //   而是"换一次窗口要几帧才补上" —— 窗口重建是同步做在 rAF 回调里的，
+  //   所以它的耗时直接决定滚动会不会掉帧。
+  console.log('\n=== 快速滚动（每拍跳一整页，必然换窗口）===');
+  await c.eval('return window.__heditor.run(7, 1.5);');
+  await c.eval('return window.__heditor.stopBlink();');
+  await sleep(200);
+  const scrollN = 12;
+  const sc = JSON.parse(await c.eval(`
+    return (function () {
+      const H = window.__heditor;
+      const stage = document.getElementById('stage');
+      const dpr = window.devicePixelRatio || 1;
+      const step = (H.pagePx[1] + H.pagePx[2]) / dpr;
+      const gaps = [];
+      const rebuild = [];
+      const canvases = [];
+      let last = 0;
+      let n = 0;
+      stage.scrollTop = 0;
+      const tick = (ts) => {
+        if (last) gaps.push(ts - last);
+        last = ts;
+        if (n < ${scrollN}) {
+          ++n;
+          const t0 = performance.now();
+          stage.scrollTop = n * step;   // 跨一整页 ⇒ 必然换窗口
+          rebuild.push(performance.now() - t0);
+          requestAnimationFrame(tick);
+        } else {
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              const q = (a, p) => {
+                const s = a.slice().sort((x, y) => x - y);
+                return s[Math.min(s.length - 1, Math.floor(s.length * p))];
+              };
+              resolve(JSON.stringify({
+                frames: gaps.length, gapP50: q(gaps, 0.5), gapP90: q(gaps, 0.9),
+                gapMax: q(gaps, 1), slowFrames: gaps.filter((g) => g > 20).length,
+                winPages: H.editStats.windowPages, canvases: H.viewport.canvases,
+                pooled: H.viewport.pooled,
+              }));
+            });
+          });
+        }
+      };
+      let resolve;
+      const done = new Promise((r) => { resolve = r; });
+      requestAnimationFrame(tick);
+      return done;
+    })()`));
+  console.log(`  跳 ${scrollN} 页：帧间隔 p50 ${sc.gapP50.toFixed(1)} / p90 ${sc.gapP90.toFixed(1)}` +
+              ` / max ${sc.gapMax.toFixed(1)} ms（>20ms 的慢帧 ${sc.slowFrames}/${sc.frames}）` +
+              `  窗口 ${sc.winPages} 页  画布 ${sc.canvases} 张（池里 ${sc.pooled} 张）`);
+
+  // 画布重建 vs 复用：同一件事（把一页像素贴上去）两种做法各做 N 次。
+  //   重建那张每次都从 300×150 改到页尺寸 ⇒ 重新分配 backing store + 重建合成层；
+  //   复用那张尺寸已经是页尺寸 ⇒ 只贴像素。差的就是"频繁重建"的钱。
+  console.log('\n=== 画布：重建一张 vs 复用一张（各 24 次）===');
+  const churn = JSON.parse(await c.eval(`
+    return (function () {
+      const H = window.__heditor;
+      const pw = H.pagePx[0], ph = H.pagePx[1];
+      const host = document.getElementById('pages');
+      const data = new Uint8ClampedArray(pw * ph * 4);
+      for (let i = 3; i < data.length; i += 4) data[i] = 255;
+      const img = new ImageData(data, pw, ph);
+      const pool = [];
+      for (let i = 0; i < 4; ++i) {
+        const c = document.createElement('canvas');
+        c.width = pw; c.height = ph;
+        pool.push(c);
+      }
+      const run = (reuse) => {
+        const rows = [];
+        for (let k = 0; k < 6; ++k) {
+          const t0 = performance.now();
+          for (let i = 0; i < 4; ++i) {
+            let c;
+            if (reuse) { c = pool[i]; }
+            else { c = document.createElement('canvas'); }
+            if (c.width !== pw || c.height !== ph) { c.width = pw; c.height = ph; }
+            host.appendChild(c);
+            const g = c.getContext('2d', { alpha: false });
+            g.putImageData(img, 0, 0);
+            host.removeChild(c);
+          }
+          rows.push(performance.now() - t0);
+        }
+        return Math.min.apply(null, rows);
+      };
+      return JSON.stringify({ create: run(false), reuse: run(true) });
+    })()`));
+  console.log(`  重建 4 张 ${churn.create.toFixed(2)} ms  复用 4 张 ${churn.reuse.toFixed(2)} ms` +
+              `  差 ${(churn.create - churn.reuse).toFixed(2)} ms（每次换窗口约 1~2 张）`);
 
   c.ws.close();
   process.exit(0);

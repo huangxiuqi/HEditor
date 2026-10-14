@@ -2,21 +2,7 @@
 
 namespace heditor {
 
-namespace {
-
-/**
- * 节点在父容器里的槽位序号。没有父节点时返回 -1。
- */
-int indexInParent(const Node* n) {
-    if (n->parent == nullptr) return -1;
-    const std::vector<Node*>& siblings = n->parent->children;
-    for (size_t i = 0; i < siblings.size(); ++i) {
-        if (siblings[i] == n) return static_cast<int>(i);
-    }
-    return -1;
-}
-
-}  // namespace
+namespace {}  // namespace
 
 FlowIndex::FlowIndex(const NodeTree& tree, FlowVisibility vis) : tree_(&tree), vis_(vis) {
     // 按水位一次开表并填 -1：重建是每次提交都要走的一步，顺序写一遍比重建哈希表快

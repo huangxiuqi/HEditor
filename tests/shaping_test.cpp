@@ -11,11 +11,11 @@
 #include <vector>
 
 #include "core/engine/engine.h"
-#include "demo/demo_documents.h"
 #include "core/layout/layout.h"
 #include "core/text/fallback.h"
 #include "core/text/shaper.h"
 #include "core/utils/utf8.h"
+#include "demo/demo_documents.h"
 
 #include <hb.h>
 
@@ -318,8 +318,9 @@ int main() {
         expectTrue(eOff.init({cjkPath, mnPath, latinPath}), "引擎初始化（三个字体）");
         expectTrue(eOn.init({cjkPath, mnPath, latinPath}), "引擎初始化（三个字体）");
 
-        eOff.setDocument(demoTree({mixedParagraphBlock(cjk)}, {}), StyleSheet{});        // 不回退
-        eOn.setDocument(demoTree({mixedParagraphBlock(cjk, latin)}, {}), StyleSheet{});  // 回退到拉丁
+        eOff.setDocument(demoTree({mixedParagraphBlock(cjk)}, {}), StyleSheet{});  // 不回退
+        eOn.setDocument(demoTree({mixedParagraphBlock(cjk, latin)}, {}),
+                        StyleSheet{});  // 回退到拉丁
         eOff.relayout();
         eOn.relayout();
 

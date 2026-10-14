@@ -6,7 +6,7 @@
 #pragma once
 
 #include <cstdint>
-#include <cstdio>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -106,11 +106,10 @@ inline bool writeRgba(const std::string& path, const uint8_t* rgba, int w, int h
     pushChunk(out, "IDAT", idat);
     pushChunk(out, "IEND", {});
 
-    std::FILE* f = std::fopen(path.c_str(), "wb");
+    std::ofstream f(path, std::ios::binary);
     if (!f) return false;
-    const size_t written = std::fwrite(out.data(), 1, out.size(), f);
-    std::fclose(f);
-    return written == out.size();
+    f.write(reinterpret_cast<const char*>(out.data()), static_cast<std::streamsize>(out.size()));
+    return f.good();
 }
 
 }  // namespace png

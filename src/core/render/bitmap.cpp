@@ -27,11 +27,13 @@ Bitmap::Bitmap(Bitmap&& other) noexcept
       h_(other.h_),
       px_(std::move(other.px_)),
       painted_px_(other.painted_px_),
+      painted_glyphs_(other.painted_glyphs_),
       cov_scratch_(std::move(other.cov_scratch_)),
       row_scratch_(std::move(other.row_scratch_)) {
     other.w_ = 0;
     other.h_ = 0;
     other.painted_px_ = 0;
+    other.painted_glyphs_ = 0;
 }
 
 Bitmap& Bitmap::operator=(Bitmap&& other) noexcept {
@@ -41,11 +43,13 @@ Bitmap& Bitmap::operator=(Bitmap&& other) noexcept {
         h_ = other.h_;
         px_ = std::move(other.px_);
         painted_px_ = other.painted_px_;
+        painted_glyphs_ = other.painted_glyphs_;
         cov_scratch_ = std::move(other.cov_scratch_);
         row_scratch_ = std::move(other.row_scratch_);
         other.w_ = 0;
         other.h_ = 0;
         other.painted_px_ = 0;
+        other.painted_glyphs_ = 0;
     }
     return *this;
 }
@@ -486,6 +490,7 @@ bool Bitmap::rasterizeGlyph(hb_font_t* font, uint32_t glyph_id, float pen_x, flo
 void Bitmap::drawGlyph(hb_font_t* font, uint32_t glyph_id, float pen_x, float pen_y,
                        float units_to_px, Color color, float rotate_deg) {
     if (!font || w_ <= 0 || h_ <= 0) return;
+    ++painted_glyphs_;
 
     GlyphCache::Key k;
     const bool use_cache = (glyph_cache_ != nullptr);
@@ -525,6 +530,22 @@ void Bitmap::drawGlyph(hb_font_t* font, uint32_t glyph_id, float pen_x, float pe
     // 只在"本次光栅没被裁剪"时才存入 —— 被裁过的 mask 依赖画布尺寸。
     if (use_cache && cacheable) glyph_cache_->insert(k, m);
     blitMask(m, m.x0, m.y0, color);
+}
+
+/**
+ * 批量画字形。
+ *
+ * 这一侧刻意只是逐个转调 drawGlyph：自写光栅器的固定开销本来就小
+ *   （一次字形缓存的哈希查找），省不下什么；Skia 侧那笔"装配一遍字形运行"
+ *   才是大头（见 bitmap_skia.cpp）。
+ * 两条入口的存在是为了让调用方能按段调用，而不是让这里也长出第二套光栅。
+ */
+void Bitmap::drawGlyphs(hb_font_t* font, const uint32_t* ids, const float* xs, const float* ys,
+                        int count, float units_to_px, Color color, float rotate_deg) {
+    if (!font || !ids || !xs || !ys) return;
+    for (int i = 0; i < count; ++i) {
+        drawGlyph(font, ids[i], xs[i], ys[i], units_to_px, color, rotate_deg);
+    }
 }
 
 }  // namespace heditor

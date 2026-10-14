@@ -67,7 +67,9 @@ void expectTrue(bool cond, const std::string& what) {
     }
 }
 
-std::vector<uint32_t> cps(std::initializer_list<uint32_t> list) { return std::vector<uint32_t>(list); }
+std::vector<uint32_t> cps(std::initializer_list<uint32_t> list) {
+    return std::vector<uint32_t>(list);
+}
 
 /**
  * 前向声明：增量测试要顺带在增删之后的树上跑一遍不变量检查，
@@ -87,9 +89,8 @@ void checkTree(const NodeTree& tree, FlowVisibility vis, const std::string& labe
         const Pos p = idx.posAt(f);
         if (idx.flowAt(p) != f) ++lost;
     }
-    expectTrue(lost == 0, label + "：每个流位置都能回到自己（共 " +
-                              std::to_string(idx.size() + 1) + " 个位置，不一致 " +
-                              std::to_string(lost) + " 个）");
+    expectTrue(lost == 0, label + "：每个流位置都能回到自己（共 " + std::to_string(idx.size() + 1) +
+                              " 个位置，不一致 " + std::to_string(lost) + " 个）");
 
     int bad = 0;
     int tried = 0;
@@ -135,8 +136,8 @@ void checkTree(const NodeTree& tree, FlowVisibility vis, const std::string& labe
         }
     }
     expectTrue(bad == 0, label + "：枚举 " + std::to_string(tried) +
-                              " 个合法位置，往返后流位置不变（不一致 " + std::to_string(bad) +
-                              " 个）");
+                             " 个合法位置，往返后流位置不变（不一致 " + std::to_string(bad) +
+                             " 个）");
     expectTrue(reachable_from_removed == 0, label + "：被摘除的节点没有任何可寻址位置");
     // 越界必须被拒，不能静默夹取 —— 夹取会把调用方的算错藏起来。
     const Node* sec = tree.find(tree.firstSectionId());
@@ -244,8 +245,7 @@ void checkEmptyContainerBoundaries(FlowVisibility vis) {
     expectTrue(before >= 0 && inside >= 0 && after >= 0 && before != inside && inside != after &&
                    before != after,
                "删空的控件：'控件之前'/'进入控件'/'控件之后'是三个不同的流位置");
-    expectTrue(idx.flowAt(Pos{cc, 1}) < 0,
-               "删空的控件：内容槽位只有一个（0），越界的 1 被拒");
+    expectTrue(idx.flowAt(Pos{cc, 1}) < 0, "删空的控件：内容槽位只有一个（0），越界的 1 被拒");
 }
 
 /**
@@ -256,8 +256,8 @@ NodeTree makeRandomTree(uint32_t seed, int target_nodes) {
     NodeTree tree;
 
     static const NodeKind kKinds[] = {
-        NodeKind::ContentControl, NodeKind::Quote,   NodeKind::ListItem, NodeKind::Link,
-        NodeKind::Image,          NodeKind::Formula, NodeKind::Field,    NodeKind::Tab,
+        NodeKind::ContentControl, NodeKind::Quote,         NodeKind::ListItem, NodeKind::Link,
+        NodeKind::Image,          NodeKind::Formula,       NodeKind::Field,    NodeKind::Tab,
         NodeKind::TextRun,        NodeKind::ParagraphMark,
     };
     const int kind_count = static_cast<int>(sizeof(kKinds) / sizeof(kKinds[0]));
@@ -321,8 +321,7 @@ void checkHiddenSubtree() {
     expectTrue(display.flowAt(Pos{cc, 0}) < 0 && display.flowAt(Pos{inner_mark, 0}) < 0,
                "隐藏：呈现态下被摘除的节点没有任何可寻址位置");
     // 槽位 2 的含义是"在被摘除的控件之后"，而那个位置不存在 —— 这条是要记住的后果。
-    expectTrue(display.flowAt(Pos{sec, 2}) < 0,
-               "隐藏：呈现态下被摘除者之后那个槽位不可寻址");
+    expectTrue(display.flowAt(Pos{sec, 2}) < 0, "隐藏：呈现态下被摘除者之后那个槽位不可寻址");
     expectTrue(display.flowAt(Pos{sec, 1}) >= 0 && display.flowAt(Pos{sec, 3}) >= 0,
                "隐藏：呈现态下被摘除者两侧的槽位仍然可寻址");
 }
@@ -398,9 +397,8 @@ void checkParagraphIndex(const NodeTree& tree, FlowVisibility vis, const std::st
     walkInFlow(tree, vis, tree.rootId(), &in_flow, &marks_in_flow);
     // 走树得到的是前序，记账表按 id 升序 —— 比之前先对齐顺序，否则比的是两种排列。
     std::sort(in_flow.begin(), in_flow.end());
-    expectTrue(idx.containers() == in_flow,
-               label + "：记账的容器正好是在流里的那些（" + std::to_string(in_flow.size()) +
-                   " 个）");
+    expectTrue(idx.containers() == in_flow, label + "：记账的容器正好是在流里的那些（" +
+                                                std::to_string(in_flow.size()) + " 个）");
 
     int bad_marks = 0;
     int bad_count = 0;
@@ -514,9 +512,9 @@ void checkParaBoundaries() {
         ParagraphIndex idx(tree, FlowVisibility::Design);
         int b = -1;
         int e = -1;
-        expectTrue(idx.paragraphCount(sec) == 1 && idx.paragraphRange(sec, 1, &b, &e) && b == 0 &&
-                       e == 1,
-                   "只有标记：1 段，范围就是那个标记本身");
+        expectTrue(
+            idx.paragraphCount(sec) == 1 && idx.paragraphRange(sec, 1, &b, &e) && b == 0 && e == 1,
+            "只有标记：1 段，范围就是那个标记本身");
         bool ok = false;
         expectTrue(idx.markOfParagraph(sec, 1, &ok) == mk && ok, "只有标记：属性宿主就是它");
         expectTrue(idx.paragraphNoIn(sec, 1) == 2 && idx.paragraphCount(sec) == 1,
@@ -603,8 +601,8 @@ void checkParaIncremental(uint32_t seed, FlowVisibility vis, const char* vis_nam
     checkParagraphIndex(tree, vis, pre + " 起始");
 
     static const NodeKind kKinds[] = {NodeKind::ContentControl, NodeKind::TextRun,
-                                      NodeKind::ParagraphMark, NodeKind::Image,
-                                      NodeKind::Quote,        NodeKind::Tab};
+                                      NodeKind::ParagraphMark,  NodeKind::Image,
+                                      NodeKind::Quote,          NodeKind::Tab};
     const int kind_count = static_cast<int>(sizeof(kKinds) / sizeof(kKinds[0]));
 
     int inserts = 0;
@@ -640,9 +638,9 @@ void checkParaIncremental(uint32_t seed, FlowVisibility vis, const char* vis_nam
         if (diffIndexes(tree, idx, ParagraphIndex(tree, vis)) != 0) ++mismatch;
     }
 
-    expectTrue(inserts > 20 && erases > 15,
-               pre + "：随机序列真的做了增删（插入 " + std::to_string(inserts) + "、删除 " +
-                   std::to_string(erases) + "）");
+    expectTrue(inserts > 20 && erases > 15, pre + "：随机序列真的做了增删（插入 " +
+                                                std::to_string(inserts) + "、删除 " +
+                                                std::to_string(erases) + "）");
     expectTrue(bad_notify == 0, pre + "：每次通知的接受与拒绝都与记账范围一致");
     expectTrue(mismatch == 0, pre + "：每一步之后整张表都与重新构造的结果逐项相同");
     checkParagraphIndex(tree, vis, pre + " 终态");
@@ -650,7 +648,7 @@ void checkParaIncremental(uint32_t seed, FlowVisibility vis, const char* vis_nam
     // 所以先规范化，再按"已提交文档"的口径检查。
     const NormalizeResult norm = normalizeDocument(tree);
     expectClean(tree, pre + " 增删之后的不变量（规范化：并 " + std::to_string(norm.merged) +
-                        "、清 " + std::to_string(norm.removed) + "）");
+                          "、清 " + std::to_string(norm.removed) + "）");
 }
 
 /**
@@ -660,12 +658,11 @@ void expectClean(const NodeTree& tree, const std::string& label) {
     const InvariantReport rep = checkInvariants(tree);
     if (rep.ok()) {
         expectTrue(true, label + "：不变量全绿（查了 " + std::to_string(rep.checked.size()) +
-                           " 条，待落地 " + std::to_string(rep.pending.size()) + " 条）");
+                             " 条，待落地 " + std::to_string(rep.pending.size()) + " 条）");
         return;
     }
-    expectTrue(false, label + "：违规 " + std::to_string(rep.violations.size()) +
-                          " 条，第一条是 " + rep.violations[0].rule + " —— " +
-                          rep.violations[0].detail);
+    expectTrue(false, label + "：违规 " + std::to_string(rep.violations.size()) + " 条，第一条是 " +
+                          rep.violations[0].rule + " —— " + rep.violations[0].detail);
 }
 
 /**
@@ -697,10 +694,14 @@ bool checked(const InvariantReport& rep, const std::string& rule) {
 void checkInvariantRuleSet() {
     const InvariantReport rep = checkInvariants(makeSingleParagraph());
     static const char* kWant[] = {
-        "结构.根唯一且其下是节序列", "结构.子节点类型与叶子约束",
-        "结构.无孤立节点",           "结构.隐藏只在编辑模式下在流里",
-        "文本.文本节点非空",         "文本.相邻同标记的 run 必须合并",
-        "容器.边界成对有序不交叉",   "容器.切段无缝隙",
+        "结构.根唯一且其下是节序列",
+        "结构.子节点类型与叶子约束",
+        "结构.无孤立节点",
+        "结构.隐藏只在编辑模式下在流里",
+        "文本.文本节点非空",
+        "文本.相邻同标记的 run 必须合并",
+        "容器.边界成对有序不交叉",
+        "容器.切段无缝隙",
         "身份.节点 ID 唯一且索引自洽",
         "身份.节点种类在声明范围内",
         "表格.跨度之和相等、无重叠、无空洞、有列定义则数据行不许合并",
@@ -717,9 +718,9 @@ void checkInvariantRuleSet() {
     for (const PendingRule& p : rep.pending) {
         if (p.rule.empty() || p.waiting_for.empty()) ++incomplete;
     }
-    expectTrue(!rep.pending.empty() && incomplete == 0,
-               "0.3：待落地 " + std::to_string(rep.pending.size()) +
-                   " 条，每条都写明了等哪一步带来输入");
+    expectTrue(
+        !rep.pending.empty() && incomplete == 0,
+        "0.3：待落地 " + std::to_string(rep.pending.size()) + " 条，每条都写明了等哪一步带来输入");
 }
 
 /**
@@ -854,8 +855,8 @@ std::string paraKey(const ParaFormatPatch& p) {
     s += "," + (p.wm.has_value() ? std::string("wm") : std::string("-"));
     s += "," + (p.line_factor.has_value() ? std::to_string(*p.line_factor) : std::string("-"));
     s += "," + (p.space_after.has_value() ? printLength(*p.space_after) : std::string("-"));
-    s += "," + (p.page_break_before.has_value() ? (*p.page_break_before ? "1" : "0")
-                                                : std::string("-"));
+    s += "," +
+         (p.page_break_before.has_value() ? (*p.page_break_before ? "1" : "0") : std::string("-"));
     s += "," + (p.language.has_value() ? std::string("lang") : std::string("-"));
     s += "," + (p.color.has_value() ? std::string("col") : std::string("-"));
     s += "," + (p.fallback_font_indices.has_value() ? std::string("fb") : std::string("-"));
@@ -1259,12 +1260,11 @@ void checkCompileShapes() {
  * 另外七个单位还要各自验一支"文档里写死的定值"，免得表抄错。
  */
 void checkUnitRoundTrip() {
-    const Unit units[] = {Unit::Pt, Unit::HalfPt, Unit::Twip,
-                          Unit::Px, Unit::Mm,     Unit::Cm, Unit::Inch};
+    const Unit units[] = {Unit::Pt, Unit::HalfPt, Unit::Twip, Unit::Px,
+                          Unit::Mm, Unit::Cm,     Unit::Inch};
     // 覆盖实际会用到的量级：字号、行距、线宽、页边距、纸张（A4 / Letter）。
-    const double values[] = {0.5,  0.75, 1.0,  2.0,  8.5,
-                             10.0, 11.0, 12.0, 12.5, 21.0,
-                             24.0, 29.7, 56.7};
+    const double values[] = {0.5,  0.75, 1.0,  2.0,  8.5,  10.0, 11.0,
+                             12.0, 12.5, 21.0, 24.0, 29.7, 56.7};
     int cases = 0;
     int over_quantum = 0;
     int bad_backward = 0;
@@ -1307,18 +1307,10 @@ void checkUnitRoundTrip() {
  */
 void checkLengthRoundTrip() {
     const Length cases[] = {
-        Length::automatic(),
-        Length::abs(0),
-        Length::abs(914400),
-        Length::abs(-360000),
-        Length::percent(1, 2),
-        Length::percent(50, 100),
-        Length::percent(-1, 3),
-        Length::percent(0, 7),
-        Length::em(1.6),
-        Length::em(2.0),
-        Length::chars(3.0),
-        Length::chars(0.5),
+        Length::automatic(),    Length::abs(0),        Length::abs(914400),
+        Length::abs(-360000),   Length::percent(1, 2), Length::percent(50, 100),
+        Length::percent(-1, 3), Length::percent(0, 7), Length::em(1.6),
+        Length::em(2.0),        Length::chars(3.0),    Length::chars(0.5),
     };
     int bad = 0;
     int kind_lost = 0;
@@ -1373,9 +1365,17 @@ void checkLengthShape() {
  */
 void checkLengthParseRejects() {
     static const char* kBad[] = {
-        "",      "auto ", "Auto",   "abs:",  "abs:1e3", "abs:1.5", "abs:+1", "abs:1 2",
-        "pct:",  "pct:1/", "pct:/2", "pct:1/0", "pct:1/-2", "pct:1/2/3", "pct:abc",
-        "em:",   "em:1/",  "chars:1/2/3", "pt:1", "1/2", "  auto", "abs:99999999999999999999999",
+        "",         "auto ",
+        "Auto",     "abs:",
+        "abs:1e3",  "abs:1.5",
+        "abs:+1",   "abs:1 2",
+        "pct:",     "pct:1/",
+        "pct:/2",   "pct:1/0",
+        "pct:1/-2", "pct:1/2/3",
+        "pct:abc",  "em:",
+        "em:1/",    "chars:1/2/3",
+        "pt:1",     "1/2",
+        "  auto",   "abs:99999999999999999999999",
     };
     const int total = static_cast<int>(sizeof(kBad) / sizeof(kBad[0]));
     int accepted = 0;
@@ -1427,9 +1427,9 @@ std::string marksKey(const CharFormat& m) {
     s += std::to_string(m.underline.has_value() ? (m.underline.value() ? 2 : 1) : 0);
     s += "|" + std::to_string(m.font_index.value_or(-1));
     s += "|" + (m.size.has_value() ? printLength(*m.size) : std::string("-"));
-    s += "|" + (m.color.has_value() ? std::to_string(m.color->r) + "," +
-                                         std::to_string(m.color->g) + "," +
-                                         std::to_string(m.color->b)
+    s +=
+        "|" + (m.color.has_value() ? std::to_string(m.color->r) + "," + std::to_string(m.color->g) +
+                                         "," + std::to_string(m.color->b)
                                    : std::string("-"));
     return s;
 }
@@ -1575,8 +1575,7 @@ void checkNormalizeShapes() {
                    std::to_string(r.removed) + "）");
     expectTrue(s->children.size() == 7, "1.1 / 形状：Section 下剩 7 个孩子（原 10 个）");
     expectTrue(s->children.size() == 7 && isText(s->children[0]->kind) &&
-                   s->children[0]->text == cps({0x61, 0x62, 0x63}) &&
-                   s->children[0]->marks.empty(),
+                   s->children[0]->text == cps({0x61, 0x62, 0x63}) && s->children[0]->marks.empty(),
                "1.1 / 形状：第一个孩子是合并后的 abc，且标记仍是空的");
     expectTrue(s->children.size() == 7 && s->children[1]->marks.italic.value_or(false),
                "1.1 / 形状：标记不同的 run 不被合并（第二个仍是 italic 的那一个）");
@@ -1663,7 +1662,8 @@ void checkNormalizeKeepsContent() {
 NodeTree makeEditTree() {
     NodeTree tree;
     const NodeId sec = tree.firstSectionId();
-    tree.setText(tree.appendChild(sec, NodeKind::TextRun), cps({0x61, 0x62, 0x63, 0x64, 0x65, 0x66}));
+    tree.setText(tree.appendChild(sec, NodeKind::TextRun),
+                 cps({0x61, 0x62, 0x63, 0x64, 0x65, 0x66}));
     const NodeId pm = tree.appendChild(sec, NodeKind::ParagraphMark);
     // 段落格式刻意不给默认值：这样"段落标记把格式一起带出来"才是一条真的断言。
     tree.find(pm)->para.font_index = 3;
@@ -1768,7 +1768,8 @@ void checkStepRoundTrip() {
         InsertText s;
         s.at = 3;
         s.cps = cps({0x41, 0x42});
-        expectTrue(roundTrip(tree, Step{s}).empty(), "1.2 / 往返：InsertText 插在文本中间（同标记并入）");
+        expectTrue(roundTrip(tree, Step{s}).empty(),
+                   "1.2 / 往返：InsertText 插在文本中间（同标记并入）");
     }
     {
         NodeTree tree = makeEditTree();
@@ -1776,7 +1777,8 @@ void checkStepRoundTrip() {
         s.at = 3;
         s.cps = cps({0x41});
         s.marks.bold = true;
-        expectTrue(roundTrip(tree, Step{s}).empty(), "1.2 / 往返：InsertText 标记不同（切开原节点）");
+        expectTrue(roundTrip(tree, Step{s}).empty(),
+                   "1.2 / 往返：InsertText 标记不同（切开原节点）");
     }
     {
         NodeTree tree = makeEditTree();
@@ -1991,8 +1993,8 @@ void checkExtractDeleteInsertBack() {
     normalizeDocument(tree);
 
     const std::string diff = snapshotDiffText(before, shapeSnapshot(tree));
-    expectTrue(ins.ok && diff.empty(), "1.2 / 取删插：插回之后等于原状" +
-                                           (diff.empty() ? "" : "，差异 " + diff));
+    expectTrue(ins.ok && diff.empty(),
+               "1.2 / 取删插：插回之后等于原状" + (diff.empty() ? "" : "，差异 " + diff));
     expectClean(tree, "1.2 / 取删插之后的树");
 }
 
@@ -2050,20 +2052,20 @@ void checkMapRoundTrip() {
             }
         }
         expectTrue(bad == 0, std::string("1.2 / 位置映射：") + c.label + " 与逆映射往返一致（" +
-                                 std::to_string(checked) + " 个位置，不一致 " + std::to_string(bad) +
+                                 std::to_string(checked) + " 个位置，不一致 " +
+                                 std::to_string(bad) +
                                  (worst < 0 ? "" : "，首个是 " + std::to_string(worst)) + "）");
     }
 
     // 被删区间内部的位置一律塌到区间起点 —— 这一段是单向的，没有原像。
     {
         const InsertText s{5, cps({0x41})};
-        expectTrue(mapPos(Step{s}, 5, Assoc::Before) == 5 &&
-                       mapPos(Step{s}, 5, Assoc::After) == 6,
+        expectTrue(mapPos(Step{s}, 5, Assoc::Before) == 5 && mapPos(Step{s}, 5, Assoc::After) == 6,
                    "1.2 / 位置映射：插入点上的位置由 assoc 决定贴左还是贴右");
         const DeleteBuild d = makeDeleteRange(probe, Range{5, 9});
-        expectTrue(d.ok && mapPos(d.step, 6, Assoc::Before) == 5 &&
-                       mapPos(d.step, 9, Assoc::After) == 5,
-                   "1.2 / 位置映射：被删区间内部与终点都塌到区间起点");
+        expectTrue(
+            d.ok && mapPos(d.step, 6, Assoc::Before) == 5 && mapPos(d.step, 9, Assoc::After) == 5,
+            "1.2 / 位置映射：被删区间内部与终点都塌到区间起点");
     }
 }
 
@@ -2086,8 +2088,7 @@ void checkUndoRedo() {
         s.at = 3;
         s.cps = cps({0x41});
         s.marks.bold = true;
-        const StepResult r =
-            stack.commit(Transaction{{Step{s}}, Range{3, 3}, Range{4, 4}, "输入"});
+        const StepResult r = stack.commit(Transaction{{Step{s}}, Range{3, 3}, Range{4, 4}, "输入"});
         expectTrue(r.ok, "1.3 / 提交：插入成功（" + r.error + "）");
     }
     states.push_back(shapeSnapshot(tree));
@@ -2098,8 +2099,7 @@ void checkUndoRedo() {
     {
         InsertParaMark s;
         s.at = 5;
-        const StepResult r =
-            stack.commit(Transaction{{Step{s}}, Range{5, 5}, Range{6, 6}, "分段"});
+        const StepResult r = stack.commit(Transaction{{Step{s}}, Range{5, 5}, Range{6, 6}, "分段"});
         expectTrue(r.ok, "1.3 / 提交：分段成功（" + r.error + "）");
     }
     states.push_back(shapeSnapshot(tree));
@@ -2109,8 +2109,7 @@ void checkUndoRedo() {
     // 事务三：删除一段（跨过刚插入的段落标记）。
     {
         const DeleteBuild b = makeDeleteRange(tree, Range{3, 7});
-        const StepResult r =
-            stack.commit(Transaction{{b.step}, Range{3, 7}, Range{3, 3}, "删除"});
+        const StepResult r = stack.commit(Transaction{{b.step}, Range{3, 7}, Range{3, 3}, "删除"});
         expectTrue(b.ok && r.ok, "1.3 / 提交：删除成功（" + b.error + r.error + "）");
     }
     states.push_back(shapeSnapshot(tree));
@@ -2125,7 +2124,8 @@ void checkUndoRedo() {
     for (int i = 2; i >= 0; --i) {
         Range restore{};
         const StepResult r = stack.undo(&restore);
-        const std::string diff = snapshotDiffText(states[static_cast<size_t>(i)], shapeSnapshot(tree));
+        const std::string diff =
+            snapshotDiffText(states[static_cast<size_t>(i)], shapeSnapshot(tree));
         if (!r.ok || !diff.empty()) ++bad_state;
         if (restore != sel_before[static_cast<size_t>(i)]) ++bad_sel;
     }
@@ -2181,14 +2181,15 @@ void checkUndoGrouping() {
             InsertText s;
             s.at = 3 + static_cast<FlowPos>(i);
             s.cps = cps({0x41 + i});
-            stack.commit(Transaction{{Step{s}}, Range{s.at, s.at},
-                                     Range{s.at + 1, s.at + 1}, "输入"});
+            stack.commit(
+                Transaction{{Step{s}}, Range{s.at, s.at}, Range{s.at + 1, s.at + 1}, "输入"});
         }
         expectTrue(stack.undoDepth() == 1, "1.3 / 分组：五次连续输入并成一个撤销单位");
 
         Range restore{};
         const StepResult r = stack.undo(&restore);
-        const std::string diff = snapshotDiffText(shapeSnapshot(makeEditTree()), shapeSnapshot(tree));
+        const std::string diff =
+            snapshotDiffText(shapeSnapshot(makeEditTree()), shapeSnapshot(tree));
         expectTrue(r.ok && diff.empty() && restore == Range{3, 3},
                    "1.3 / 分组：一次撤销回退整段输入，并回到第一笔的编辑前选区" + diff);
     }
@@ -2275,7 +2276,8 @@ void checkUndoGrouping() {
         normalizeDocument(tree);
         const int after = FlowIndex(tree, FlowVisibility::Design).size();
         expectTrue(before == after, "1.3 / 坐标：规范化前后流位置总数不变（" +
-                                        std::to_string(before) + " → " + std::to_string(after) + "）");
+                                        std::to_string(before) + " → " + std::to_string(after) +
+                                        "）");
     }
 }
 
@@ -4014,7 +4016,8 @@ void checkCompileRuns() {
                    "接缝 / 合并：两个 run 各拿自己的颜色");
         std::string why;
         const bool tiles = runsTileText(blk, &why);
-        expectTrue(tiles, "接缝 / 合并：runs 首尾相接、恰好铺满" + (tiles ? "" : "（" + why + "）"));
+        expectTrue(tiles,
+                   "接缝 / 合并：runs 首尾相接、恰好铺满" + (tiles ? "" : "（" + why + "）"));
     }
     // 未知字符样式名：记诊断并降级到段落默认值；同一段里多个节点引用同一个未知样式只报一次
     //   （否则十个节点刷十条一模一样的消息，把真正的信号淹掉）。
@@ -4057,8 +4060,7 @@ void checkCompileRuns() {
 
         tree.find(t)->marks.bold = false;
         const CompileResult r2 = compileDocument(tree, FlowVisibility::Design, noStyles());
-        expectTrue(r2.ok(),
-                   "接缝 / 未支持属性：显式 bold=false 不报诊断（它就是引擎的默认行为）");
+        expectTrue(r2.ok(), "接缝 / 未支持属性：显式 bold=false 不报诊断（它就是引擎的默认行为）");
     }
     // 非绝对的字符字号：算不出磅值，记诊断并保留段落默认字号（不是取零）。
     {
@@ -5816,8 +5818,7 @@ int main() {
         checkTree(makeTable(), kBoth[v], pre + "表格");
         checkEmptyContainerBoundaries(kBoth[v]);
         for (uint32_t seed = 1; seed <= 3; ++seed) {
-            checkTree(makeRandomTree(seed, 40), kBoth[v],
-                      pre + "随机树 #" + std::to_string(seed));
+            checkTree(makeRandomTree(seed, 40), kBoth[v], pre + "随机树 #" + std::to_string(seed));
         }
     }
 

@@ -37,11 +37,6 @@ int rowWidth(const Node* row) {
 }
 
 /**
- * 一行的格数（不是跨度之和：合并之后格数会小于列数，这正是"数据行不许合并"要管的事）。
- */
-int rowCellCount(const Node* row) { return static_cast<int>(row->children.size()); }
-
-/**
  * 某个单元格在它所在行里是第几格。
  */
 int indexInRow(const Node* row, NodeId cell) {

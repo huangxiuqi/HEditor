@@ -90,11 +90,10 @@ void EditorEngine::lineBand(int k, float* lo, float* hi) const {
     }
     const LineBox& lb = ls[static_cast<size_t>(k)];
     const bool first_on_page = (k == 0) || (ls[static_cast<size_t>(k - 1)].page != lb.page);
-    const bool last_on_page = (k + 1 >= static_cast<int>(ls.size())) ||
-                              (ls[static_cast<size_t>(k + 1)].page != lb.page);
-    *lo = first_on_page
-              ? 0.0f
-              : (ls[static_cast<size_t>(k - 1)].block_hi_pt + lb.block_lo_pt) * 0.5f;
+    const bool last_on_page =
+        (k + 1 >= static_cast<int>(ls.size())) || (ls[static_cast<size_t>(k + 1)].page != lb.page);
+    *lo =
+        first_on_page ? 0.0f : (ls[static_cast<size_t>(k - 1)].block_hi_pt + lb.block_lo_pt) * 0.5f;
     *hi = last_on_page ? static_cast<float>(pagePxHeight()) / cfg_.zoom
                        : (lb.block_hi_pt + ls[static_cast<size_t>(k + 1)].block_lo_pt) * 0.5f;
 }
@@ -119,6 +118,9 @@ void EditorEngine::snapshotLineGeometry() {
 void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
     const auto t0 = Clock::now();
     bitmap_.resetPaintedPixels();
+    // 底图那份账单独清、单独读：字形是画在底图上的（帧那边只从底图搬像素过来），
+    //   两块的写入量口径不同 —— 帧的记账回答"上屏搬了多少"，底图的回答"光栅画了多少"。
+    base_.resetPaintedPixels();
     // 本次呈现的缓存命中率 —— 与 paintedPixels 同一条纪律：统计只描述这一轮。
     if (glyph_cache_) glyph_cache_->resetStats();
 
@@ -151,6 +153,12 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
     double sub_fill_ms = 0.0;
     double sub_glyph_ms = 0.0;
 
+    // 批量画字形的攒段缓冲。在 lambda 外面声明，跨页复用 ——
+    //   否则"批量"自己会变成每页三次 malloc，一页上千个字形时分配合计能盖过省下的钱。
+    std::vector<uint32_t> run_ids;
+    std::vector<float> run_x;
+    std::vector<float> run_y;
+
     // 把一页（或它的一条横带）画进底图。
     //   band_lo_pt / band_hi_pt 是"页内磅"的纵向范围，两者都非空时只画这一条带 ——
     //   带以外的底图内容保持不变（那正是"只重画脏行"能省下九成字形的原因）。
@@ -164,36 +172,67 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
         const float y0 = band ? std::max(0.0f, (*band_lo_pt) * zoom - 1.0f) : 0.0f;
         const float y1 = band ? std::min(static_cast<float>(page_px_h), (*band_hi_pt) * zoom + 1.0f)
                               : static_cast<float>(page_px_h);
-        base_.fillRect(Rect{0.0f, off_y + y0, static_cast<float>(page_px_w),
-                            std::max(0.0f, y1 - y0)},
-                       cfg_.page_fill);
+        base_.fillRect(
+            Rect{0.0f, off_y + y0, static_cast<float>(page_px_w), std::max(0.0f, y1 - y0)},
+            cfg_.page_fill);
         if (!band) {
             // 整页时还要把上下半格页间隙也擦成背景色
             base_.fillRect(pageRectLocal(local), cfg_.background);
-            base_.fillRect(Rect{0.0f, off_y, static_cast<float>(page_px_w),
-                                static_cast<float>(page_px_h)},
-                           cfg_.page_fill);
+            base_.fillRect(
+                Rect{0.0f, off_y, static_cast<float>(page_px_w), static_cast<float>(page_px_h)},
+                cfg_.page_fill);
         }
         // 页边框必须每次都补：它在页矩形的边上，而上面那次底色填充会把它擦掉一条。
         //   漏掉这一笔的后果是"帧差 4308 像素"—— 正好是 2×(893+1263)-4，页边框的长度。
         //   （先量出来的，不是推出来的：增量帧与从零重画的帧差 4308、最大通道差 49。）
         if (cfg_.draw_page_border)
-            base_.strokeRect(Rect{0.0f, off_y, static_cast<float>(page_px_w),
-                                  static_cast<float>(page_px_h)},
-                             cfg_.page_border, 1.0f);
+            base_.strokeRect(
+                Rect{0.0f, off_y, static_cast<float>(page_px_w), static_cast<float>(page_px_h)},
+                cfg_.page_border, 1.0f);
         sub_fill_ms += msSince(t_fill0);
 
         // 底图里只有页面底色与字形 —— 表单标记（小点/方括号）不在这里画。
         //   它们依赖光标位置，所以画在帧上；见 presentInternal 里那段说明。
+        //
+        // 同一字体 / 颜色 / 朝向的字形攒成一段，一次交给光栅器（见 Bitmap::drawGlyphs）：
+        //   逐字形调用时，光栅器那笔固定开销（Skia 侧要新建 paint、装配一遍字形运行）
+        //   全摊在一个字上 —— 整页重画变成 10 ms 量级就是这么来的。
+        //   段内的次序不能动：它就是绘制次序，重叠字形靠它决定压盖。
         const auto t_glyph0 = Clock::now();
+        hb_font_t* run_font = nullptr;
+        Color run_color{};
+        float run_rot = 0.0f;
+        run_ids.clear();
+        run_x.clear();
+        run_y.clear();
+        auto flush_run = [&]() {
+            if (run_ids.empty()) return;
+            base_.drawGlyphs(run_font, run_ids.data(), run_x.data(), run_y.data(),
+                             static_cast<int>(run_ids.size()), units_to_px, run_color, run_rot);
+            run_ids.clear();
+            run_x.clear();
+            run_y.clear();
+        };
         for (const PlacedGlyph& pg : layout_.glyphs) {
             if (pg.page != page_index || !pg.font) continue;
             // 画带时按字形的纵向位置筛：行盒的块轴范围就是它的 ascent/descent，
             //   所以"落在带内"就是"属于这条带"。带向外扩了 1 px，相邻带在中线相接。
             if (band && (pg.y_pt < *band_lo_pt - 1.0f || pg.y_pt > *band_hi_pt + 1.0f)) continue;
-            base_.drawGlyph(pg.font->hb(), pg.glyph_id, pg.x_pt * zoom, pg.y_pt * zoom + off_y,
-                            units_to_px, pg.color, pg.rotate_deg);
+            hb_font_t* f = pg.font->hb();
+            if (!run_ids.empty() &&
+                (f != run_font || pg.color != run_color || pg.rotate_deg != run_rot)) {
+                flush_run();
+            }
+            if (run_ids.empty()) {
+                run_font = f;
+                run_color = pg.color;
+                run_rot = pg.rotate_deg;
+            }
+            run_ids.push_back(pg.glyph_id);
+            run_x.push_back(pg.x_pt * zoom);
+            run_y.push_back(pg.y_pt * zoom + off_y);
         }
+        flush_run();
         sub_glyph_ms += msSince(t_glyph0);
     };
 
@@ -261,9 +300,9 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
         int d0 = -1;
         int d1 = -1;
         for (int k = la; k <= lb; ++k) {
-            const bool same = k < line_fp_base_count_ &&
-                              line_fp_new_[static_cast<size_t>(k)] ==
-                                  line_fp_in_base_[static_cast<size_t>(k)];
+            const bool same =
+                k < line_fp_base_count_ &&
+                line_fp_new_[static_cast<size_t>(k)] == line_fp_in_base_[static_cast<size_t>(k)];
             if (same) continue;
             if (d0 < 0) d0 = k;
             d1 = k;
@@ -328,9 +367,10 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
             // 帧那边也只贴这条带：底图本轮只动了这一条带，其余像素帧里已经是对的。
             const float off_y = static_cast<float>(i * (page_px_h + gap_px));
             const float y0 = std::max(0.0f, band_lo_scratch_ * zoom - 1.0f);
-            const float y1 = std::min(static_cast<float>(page_px_h), band_hi_scratch_ * zoom + 1.0f);
-            refresh.push_back(Rect{0.0f, off_y + y0, static_cast<float>(frame_w),
-                                   std::max(1.0f, y1 - y0)});
+            const float y1 =
+                std::min(static_cast<float>(page_px_h), band_hi_scratch_ * zoom + 1.0f);
+            refresh.push_back(
+                Rect{0.0f, off_y + y0, static_cast<float>(frame_w), std::max(1.0f, y1 - y0)});
             edit_stats_.band_y0 = static_cast<int>(y0);
             edit_stats_.band_y1 = static_cast<int>(y1);
         }
@@ -404,6 +444,7 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
     //   记"写入次数"而非"去重面积"：这个数字的用途是证明"真的没写整页"，
     //     写入次数是上界，上界都小两个数量级时结论才站得住。
     edit_stats_.repainted_pixels = static_cast<long long>(bitmap_.paintedPixels());
+    stats_.painted_glyphs = static_cast<int>(base_.paintedGlyphs());
     edit_stats_.frame_w = frame_w;
     edit_stats_.frame_h = frame_h;
 

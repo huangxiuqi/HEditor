@@ -32,8 +32,6 @@ namespace heditor {
 
 namespace {
 
-const std::vector<uint32_t> kEmptyStarts;
-
 /**
  * 业务类型字符串 → 旧表示的三种控件种类。
  *

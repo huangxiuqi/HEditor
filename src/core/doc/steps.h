@@ -182,10 +182,9 @@ struct SetTableCellSpan {
     CellSpan before;
 };
 
-using Step =
-    std::variant<InsertText, InsertFragment, DeleteRange, InsertParaMark, RemoveParaMark,
-                 SetParaMarkFormat, InsertNode, RemoveNode, SetControlProp, SetControlValue,
-                 SetTableCellSpan>;
+using Step = std::variant<InsertText, InsertFragment, DeleteRange, InsertParaMark, RemoveParaMark,
+                          SetParaMarkFormat, InsertNode, RemoveNode, SetControlProp,
+                          SetControlValue, SetTableCellSpan>;
 
 /**
  * 步骤的执行结果。失败时给出原因 —— 位置越界、类型不符都要显式说出来，不静默不做。

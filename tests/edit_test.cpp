@@ -409,18 +409,16 @@ int main() {
         const int band0 = es.band_y0;
         const int band1 = es.band_y1;
         std::printf("     敲字后写入 %.2f M 像素（全帧 %.2f M），行带 y ∈ [%d, %d] px\n",
-                    static_cast<double>(wrote_px) / 1e6,
-                    static_cast<double>(framePixels) / 1e6, band0, band1);
+                    static_cast<double>(wrote_px) / 1e6, static_cast<double>(framePixels) / 1e6,
+                    band0, band1);
         expectTrue(band0 == 0 && band1 == es.frame_h,
                    "单行页的行带 = 整页（页首行 + 页末行，带按定义从页顶到页底）");
         long long max_ch = 0;
         const long long fresh_diff =
-            frameDiffAgainstFresh(e, {cjkPath, mnPath, latinPath}, {}, EditMode::Document,
-                                  &max_ch);
-        expectTrue(fresh_diff == 0,
-                   "敲字之后：增量帧 == 从零重画的帧（逐像素；差 " +
-                       std::to_string(fresh_diff) + "，最大通道差 " + std::to_string(max_ch) +
-                       "）");
+            frameDiffAgainstFresh(e, {cjkPath, mnPath, latinPath}, {}, EditMode::Document, &max_ch);
+        expectTrue(fresh_diff == 0, "敲字之后：增量帧 == 从零重画的帧（逐像素；差 " +
+                                        std::to_string(fresh_diff) + "，最大通道差 " +
+                                        std::to_string(max_ch) + "）");
 
         // 退回原状，便于后续小节
         e.setCaret(0, 4);
@@ -2682,7 +2680,7 @@ int main() {
 
             // 只读模式：分段与合并都被拒
             e.setEditMode(EditMode::ReadOnly);
-            const int b0 = e.blockedEdits();
+            const long long b0 = e.blockedEdits();
             e.setCaret(0, 0);
             expectTrue(!e.splitParagraph(), "只读模式：回车分段被拒");
             e.setCaret(1, 0);

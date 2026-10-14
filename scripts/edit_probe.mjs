@@ -1250,34 +1250,39 @@ async function main() {
     }
   }
 
-  chk.section('[9] 长文档（200 段）：增量排版只重排脏段之后的后缀');
+  chk.section('[9] 长文档：增量排版只重排脏段之后的后缀');
   {
     // 单段文档没有可复用的前缀，增量与全量必然相等（见 [1] / [2]）。
-    //   多段文档才谈得上"只重排脏段"—— 这一节用 200 段的病历文档量它。
+    //   多段文档才谈得上"只重排脏段"—— 这一节用演示的长文档量它。
+    //   段数不写死：那张文书是演示数据，随时可能被调大调小，而这一节要钉的是
+    //   "重排了几段、复用了几段"这个结构，不是那个数本身。
+    const DIRTY = 150;
     const base = await c.eval('return window.__heditor.run(7, 1.0);');
-    chk.check('长文档载入：200 段', base.totalParagraphs === 200,
+    chk.check('长文档载入（段数 ≥ 200）', base.totalParagraphs >= 200,
               `${base.totalParagraphs} 段 / ${base.totalLines} 行`);
     chk.check('首次排版是全量（整篇都脏）', base.layoutWasFull === true);
     report.longDoc = { paragraphs: base.totalParagraphs, lines: base.totalLines,
                        fullMs: base.layoutMs };
 
-    // 在第 150 段中间敲一个字（走真实键盘路径）
-    await c.eval('return window.__heditor.setCaret(150, 5);');
+    // 在脏段中间敲一个字（走真实键盘路径）
+    await c.eval(`return window.__heditor.setCaret(${DIRTY}, 5);`);
     await c.eval(key('测'));
     const st = await c.eval('return window.__heditor.editStats;');
     chk.check('★ 敲字后是增量排版（不是全量）', st.layoutWasFull === false,
               `重排 ${st.relaidParagraphs} 段 / 复用 ${st.reusedParagraphs} 段 / 共 ${st.totalParagraphs} 段`);
     // 行结构没变 → 快路：只重排脏段自己，后缀整块搬回（一个字节都不动）。
-    chk.check('★ 只重排第 150 段，其余 49 段原样复用',
-              st.relaidParagraphs === 1 && st.reusedParagraphs === 49,
-              `重排 ${st.relaidParagraphs} 段 / 复用 ${st.reusedParagraphs} 段`);
+    chk.check(`★ 只重排第 ${DIRTY} 段，其余原样复用`,
+              st.relaidParagraphs === 1 &&
+                st.reusedParagraphs === st.totalParagraphs - DIRTY - 1,
+              `重排 ${st.relaidParagraphs} 段 / 复用 ${st.reusedParagraphs} 段` +
+                `（应为 1 / ${st.totalParagraphs - DIRTY - 1}）`);
     chk.check('★ 重排行数真小于总行数', st.relaidLines < st.totalLines,
               `${st.relaidLines} / ${st.totalLines} 行`);
-    // 分段账：前缀 [0,150) 一个字都没动、只重排第 150 段、其余 49 段整块搬回。
+    // 分段账：前缀 [0,DIRTY) 一个字都没动、只重排第 DIRTY 段、其余整块搬回。
     // 这条比"重排段数对不对"更强：它把分界点也钉住了（前缀/脏段/复用各占哪一段）。
-    chk.check('★ 分段账：前缀 150 段未动 + 脏段 1 段重排 + 后缀 49 段复用 = 200 段',
-              st.relaidParagraphs + st.reusedParagraphs === st.totalParagraphs - 150,
-              `1 + ${st.reusedParagraphs} = ${st.totalParagraphs} - 150`);
+    chk.check('★ 分段账：前缀未动 + 脏段 1 段重排 + 后缀全部复用',
+              st.relaidParagraphs + st.reusedParagraphs === st.totalParagraphs - DIRTY,
+              `1 + ${st.reusedParagraphs} = ${st.totalParagraphs} - ${DIRTY}`);
     chk.check('★ 增量耗时小于全量耗时（同一次测量里的两个数）',
               st.layoutMs < report.longDoc.fullMs,
               `增量 ${st.layoutMs.toFixed(3)} ms vs 首次全量 ${report.longDoc.fullMs.toFixed(3)} ms`);
@@ -1313,7 +1318,7 @@ async function main() {
     chk.check('长文档编辑后：引擎帧 == 整帧重画', af && af.diff === 0,
               af ? `差 ${af.diff} px` : 'null');
 
-    // 页数跟着长：200 段不可能只有一页 —— 否则上面那些"重排行数"没有意义
+    // 页数跟着长：演示长文档不可能只有一页 —— 否则上面那些"重排行数"没有意义
     chk.check('长文档确实排成了多页', st.totalPages > 1, `${st.totalPages} 页`);
 
     // 后缀平移复用：撑出一行之后，后缀的断行结果照样复用（只挪坐标）。
@@ -1383,6 +1388,38 @@ async function main() {
                 ` ｜ 窗口首页 ${clickP2.wf}，光标帧内 y=${clickP2.caretY}`);
     chk.check(' 点第二页之后屏幕 == 引擎帧', clickP2.frameDiff === 0,
               `差 ${clickP2.frameDiff} px`);
+
+    // 滚到下面几页：窗口必须跟着可见页走，可见页必须有画布。
+    //   这一格坏在"窗口被光标页钉住"——把光标页无条件并进窗口、再从 min 那一端起算，
+    //   用户把屏幕滚到别处之后窗口仍锁在光标那几页：可见页没进窗口 ⇒ 一片空白，
+    //   而且算出的锚点与上一轮相同 ⇒ applyWindow 返回 false、连 present 都不做。
+    //   症状正是"滚动时下面的画布不生成，点一下才出来"（点击把光标带到那一页）。
+    const scrollWin = JSON.parse(await c.eval(`
+      return (async function () {
+        const H = window.__heditor;
+        const stage = document.getElementById('stage');
+        const dpr = window.devicePixelRatio || 1;
+        const step = (H.pagePx[1] + H.pagePx[2]) / dpr;
+        const wait = () => new Promise((r) => requestAnimationFrame(
+          () => requestAnimationFrame(r)));
+        const rows = [];
+        for (const p of [3, 6, 9]) {
+          stage.scrollTop = p * step;
+          await wait();
+          const vp = H.viewport;
+          rows.push({ want: p, first: vp.engineFirst, count: vp.engineCount,
+                      canvases: vp.canvases, visFirst: vp.visible.first,
+                      visLast: vp.visible.last });
+        }
+        return JSON.stringify(rows);
+      })();
+    `));
+    for (const r of scrollWin) {
+      const covered = r.first <= r.visFirst && r.visLast <= r.first + r.count - 1;
+      chk.check(` 滚到第 ${r.want} 页：窗口跟着可见页走（${r.first}+${r.count}）`,
+                covered, `可见 ${r.visFirst}~${r.visLast}｜窗口 ${r.first}+${r.count}` +
+                         `｜画布 ${r.canvases} 张`);
+    }
   }
 
   chk.section('[10] 跨段编辑：真实回车分段 / 段首退格合并');

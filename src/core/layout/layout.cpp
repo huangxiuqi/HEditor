@@ -5,9 +5,9 @@
 #include <algorithm>
 #include <chrono>
 
-#include "core/utils/hash.h"
 #include "core/text/fallback.h"
 #include "core/text/shaper.h"
+#include "core/utils/hash.h"
 #include "core/utils/utf8.h"
 
 namespace heditor {
