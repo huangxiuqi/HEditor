@@ -19,6 +19,7 @@
 #include <cmath>
 #include <cstring>
 #include <sstream>
+#include <unordered_map>
 
 #include "core/text/shaper.h"
 
@@ -202,6 +203,36 @@ int diffBlockSpec(const BlockSpec& a, const BlockSpec& b) {
     return d;
 }
 
+/**
+ * 产物里"成对的控件边界"个数。
+ *
+ * 口径与 exportControlsFromBlocks 一致：按 owner 聚合两枚边界，只有成对的才算一个控件。
+ * 半截边界在那里会被整对丢掉 —— 静默降级，所以审计必须独立数一遍，否则那一类差异
+ * 只剩块级那点小数，看不出"控件整批消失"。
+ */
+int pairedControlCount(const std::vector<BlockSpec>& blocks) {
+    struct Pair {
+        bool has_start = false;
+        bool has_end = false;
+    };
+    std::unordered_map<int, Pair> acc;
+    for (const BlockSpec& b : blocks) {
+        for (const InlineObject& o : b.objects) {
+            Pair& p = acc[o.owner];
+            if (o.kind == InlineObjectKind::ControlStart) {
+                p.has_start = true;
+            } else {
+                p.has_end = true;
+            }
+        }
+    }
+    int n = 0;
+    for (const auto& kv : acc) {
+        if (kv.second.has_start && kv.second.has_end) ++n;
+    }
+    return n;
+}
+
 }  // namespace
 
 /**
@@ -315,6 +346,35 @@ int EditorEngine::auditCompile() const {
         for (size_t i = 0; i < ref.sources.size(); ++i) {
             if (ref.sources[i].first != block_src_[i].first ||
                 ref.sources[i].mark != block_src_[i].mark) {
+                ++d;
+            }
+        }
+    }
+    // 控件集合单独数一遍：它是产物的一次派生，而那次派生对"半截边界"是整对丢弃 ——
+    //   一条静默降级。产物只错掉一枚边界时，块级差异常常小到看不出来，而界面上控件会
+    //   整批消失（"字段没了"就是这么被放大出来的）。独立数一遍，让这一类差异可读。
+    if (pairedControlCount(ref.blocks) != controls_.size()) ++d;
+    // 来源身份的契约也要盯住：sources 的 first 是"这一段第一枚吃进内容的元素"，所以段的
+    //   流起点必须落在这个元素的区间里。这一条破了，任何靠 first 判归属的判据都会跟着失效，
+    //   而产物本身可能逐字段全对 —— 闭括号形态漏记时就是这样。这里独立重算段起点
+    //   （与 rebuildParagraphFromTree 同一口径，刻意不共享代码），审计的价值就来自独立。
+    {
+        const FlowIndex idx(tree_, vis);
+        for (size_t i = 0; i < block_src_.size(); ++i) {
+            int seg_start = -1;
+            if (i == 0) {
+                if (!idx.intervalOf(block_src_[0].first, &seg_start, nullptr)) {
+                    ++d;
+                    continue;
+                }
+            } else if (!idx.intervalOf(block_src_[i - 1].mark, nullptr, &seg_start)) {
+                ++d;
+                continue;
+            }
+            int lo = 0;
+            int hi = 0;
+            if (!idx.intervalOf(block_src_[i].first, &lo, &hi) || seg_start < lo ||
+                seg_start >= hi) {
                 ++d;
             }
         }

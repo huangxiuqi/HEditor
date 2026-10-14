@@ -6842,6 +6842,178 @@ int main() {
                                                      std::to_string(e.focusedControlIndex()));
     }
 
+    std::printf("\n[32] 两枚段落标记都落进控件内部之后，段内编辑不许丢段首的边界\n");
+    {
+        // 现象：三连可编辑字段里「天」后回车、再「悸」后回车，然后把光标放到「天」后面
+        //   退格 —— 第二段段首的两枚控件边界成对消失（前一个字段的闭括号、后一个字段的
+        //   开括号都没了），控件集合里跟着少两个。
+        // 形态：第二次回车把段落标记插进了第二个字段内部，于是第二段从"前一个字段的
+        //   闭括号"起，而那枚边界属于容器之外的兄弟。增量编译按容器内区间取子节点，
+        //   看不见段首还有一枚外面的边界，产物因此缺了它。
+        // 判据两层：退格之后产物与整树全量编译逐字段一致，以及文本与三条区间逐个对上。
+        std::vector<BlockSpec> bl(1);
+        bl[0].setText("患者主诉：反复心悸三天，加重一天。");
+        std::vector<DemoFieldSpec> fd;
+        auto add = [&](int so, int eo, const char* key) {
+            DemoFieldSpec f;
+            f.para = 0;
+            f.so = so;
+            f.eo = eo;
+            f.key = key;
+            fd.push_back(std::move(f));
+        };
+        add(5, 7, "a");
+        add(7, 9, "b");
+        add(9, 11, "c");
+        EditorEngine e2;
+        expectTrue(e2.init({cjkPath}), "两次分段：字体加载成功");
+        EngineConfig ec2;
+        ec2.zoom = 1.0f;
+        e2.setConfig(ec2);
+        auto textOf2 = [&]() {
+            std::string t;
+            for (const BlockSpec& b : e2.blocks()) t += "[" + b.textUtf8() + "]";
+            return t;
+        };
+        auto rangesOf2 = [&]() {
+            std::string s;
+            for (int i = 0; i < e2.controls().size(); ++i) {
+                const Control& c = e2.controls().at(i);
+                if (i) s += " ";
+                s += "(" + std::to_string(c.range.start.para) + ":" +
+                     std::to_string(c.range.start.offset) + ".." +
+                     std::to_string(c.range.end.para) + ":" + std::to_string(c.range.end.offset) +
+                     ")";
+            }
+            return s;
+        };
+        // 两次回车的落点都必须"落在闭括号之内"（侧别 0），否则回车本身就被策略据掉；
+        //   退格那一步的侧别两种都试 —— 它是"段首有没有那枚边界"的直接触发点。
+        for (int s3 = 0; s3 <= 1; ++s3) {
+            e2.setDocument(demoTree(bl, fd), StyleSheet{});
+            e2.setEditMode(EditMode::Form);
+            e2.relayout();
+            e2.setCaretAtSide(0, 11, 0);
+            expectTrue(e2.splitParagraph(), "「天」后回车");
+            e2.setCaretAtSide(0, 9, 0);
+            expectTrue(e2.splitParagraph(), "「悸」后回车（标记落进第二个字段内部）");
+            expectTrue(e2.auditCompile() == 0, "两次回车之后（走全量）：产物与整树全量编译一致");
+            e2.setCaretAtSide(1, 2, s3);
+            expectTrue(e2.backspace(), "「天」后按退格");
+            expectTrue(e2.auditCompile() == 0,
+                       "★ 退格之后：产物仍与整树全量编译逐字段一致（不许丢段首那枚边界）"
+                       " —— 实际 " +
+                           std::to_string(e2.auditCompile()));
+            std::printf("     退格后 侧=%d 段=%s 控件=%d 个 区间=%s\n", s3, textOf2().c_str(),
+                        e2.controls().size(), rangesOf2().c_str());
+            expectTrue(textOf2() == "[患者主诉：反复心悸][三][，加重一天。]",
+                       "★ 只少了「天」一个字 —— 实际 " + textOf2());
+            expectTrue(e2.controls().size() == 3, "★ 三个控件都还在（曾经整批消失）");
+            expectTrue(rangesOf2() == "(0:5..0:7) (0:7..1:0) (1:0..2:0)",
+                       "★ 三条区间：后两个字段各自跨到下一段段首 —— 实际 " + rangesOf2());
+            e2.relayout();
+            expectTrue(e2.auditLayout() == 0, "★ 排版与全量重排逐字段一致");
+        }
+    }
+
+    std::printf("\n[33] 枚举：切点落进控件内部之后，段内编辑的产物必须与全量一致\n");
+    {
+        // 同类问题都是同一句话：某一段的内容起点落在它的结束标记所属容器之外，而增量编译
+        //   只编容器内那一截。靠人列举形态总会漏（闭括号形态就是这么漏掉的），所以这里把
+        //   位置穷举一遍：先枚举回车落在每一个 (码点偏移, 侧别) 上，再枚举切完之后每一段
+        //   每一位的一次退格 —— 段数不变，走增量这条最容易错的路径。
+        std::vector<BlockSpec> bl(1);
+        bl[0].setText("患者主诉：反复心悸三天，加重一天。");
+        std::vector<DemoFieldSpec> fd;
+        auto add = [&](int so, int eo, const char* key) {
+            DemoFieldSpec f;
+            f.para = 0;
+            f.so = so;
+            f.eo = eo;
+            f.key = key;
+            fd.push_back(std::move(f));
+        };
+        add(5, 7, "a");
+        add(7, 9, "b");
+        add(9, 11, "c");
+        EditorEngine e3;
+        expectTrue(e3.init({cjkPath}), "枚举：字体加载成功");
+        EngineConfig ec3;
+        ec3.zoom = 1.0f;
+        e3.setConfig(ec3);
+        auto reload = [&]() {
+            e3.setDocument(demoTree(bl, fd), StyleSheet{});
+            e3.setEditMode(EditMode::Form);
+            e3.relayout();
+        };
+        const int cp_len = static_cast<int>(bl[0].cp_text.size());
+
+        int cuts = 0;
+        int cut_bad = 0;
+        for (int off = 0; off <= cp_len; ++off) {
+            for (int side = 0; side <= 1; ++side) {
+                reload();
+                e3.setCaretAtSide(0, off, side);
+                if (!e3.splitParagraph()) continue;
+                ++cuts;
+                const int d = e3.auditCompile();
+                if (d != 0) {
+                    ++cut_bad;
+                    std::printf("     回车 off=%d side=%d 之后审计=%d\n", off, side, d);
+                }
+            }
+        }
+        expectTrue(cut_bad == 0, "★ 每个回车切点之后产物都与整树全量一致（" + std::to_string(cuts) +
+                                     " 个切点，异常 " + std::to_string(cut_bad) + " 个）");
+
+        int edits = 0;
+        int edit_bad = 0;
+        int layout_bad = 0;
+        for (int off = 0; off <= cp_len; ++off) {
+            for (int side = 0; side <= 1; ++side) {
+                reload();
+                e3.setCaretAtSide(0, off, side);
+                if (!e3.splitParagraph()) continue;
+                const int np = static_cast<int>(e3.blocks().size());
+                for (int p = 0; p < np; ++p) {
+                    const int len =
+                        static_cast<int>(e3.blocks()[static_cast<size_t>(p)].cp_text.size());
+                    for (int q = 0; q <= len; ++q) {
+                        for (int s2 = 0; s2 <= 1; ++s2) {
+                            reload();
+                            e3.setCaretAtSide(0, off, side);
+                            if (!e3.splitParagraph()) break;
+                            e3.setCaretAtSide(p, q, s2);
+                            if (!e3.backspace()) continue;
+                            ++edits;
+                            const int d = e3.auditCompile();
+                            if (d != 0) {
+                                ++edit_bad;
+                                std::printf("     退格 切(%d,%d) 后在 (%d,%d) 侧=%d 审计=%d\n", off,
+                                            side, p, q, s2, d);
+                                continue;
+                            }
+                            // 段首是"内容起点最容易跑到容器外"的一枚，排版在这一格单独对一次。
+                            if (q == 0) {
+                                e3.relayout();
+                                if (e3.auditLayout() != 0) {
+                                    ++layout_bad;
+                                    std::printf(
+                                        "     退格 切(%d,%d) 后在 (%d,%d) 侧=%d 排版不一致\n", off,
+                                        side, p, q, s2);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        expectTrue(edit_bad == 0, "★ 每次退格之后产物都与整树全量一致（" + std::to_string(edits) +
+                                      " 次编辑，异常 " + std::to_string(edit_bad) + " 次）");
+        expectTrue(layout_bad == 0, "★ 段首退格之后的排版与全量重排一致（异常 " +
+                                        std::to_string(layout_bad) + " 次）");
+    }
+
     std::printf("\n──────────────────────────────\n");
     std::printf("共 %d 项断言，失败 %d 项\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

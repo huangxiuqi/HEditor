@@ -180,26 +180,38 @@ bool EditorEngine::rebuildParagraphFromTree(int para) {
         return false;
     }
 
-    // 这一段的内容起点必须与它的结束标记同在一个容器里，且落在这段子节点区间内。
+    // 段的流起点必须与容器内这段区间的起点重合。
     //
-    //   为什么非判不可：在控件内容里回车时，段落标记就落在控件内部（跨段控件是正常形态），
-    //   而这一段的内容其实起自控件之外。只编"控件内那一截子节点"，产物就成了半个段落 ——
-    //   前半段的字与控件自己的边界一起丢掉；更糟的是 block_src_ / block_flow_ 会被这半个
-    //   产物覆盖，之后每一次编辑都按错的坐标算、控件集合也空掉。界面上看到的就是退格删一个
-    //   字、前面一串字连同所有控件一起不见。这种形状退回全量编译。
-    //   表格单元格里的段落不受影响：它的起点就在同一个单元格内，下标落在 [begin, mark_idx]。
-    int first_idx = -1;
-    const Node* fn = tree_.find(block_src_[static_cast<size_t>(para)].first);
-    while (fn != nullptr && fn->parent != container) fn = fn->parent;
-    if (fn != nullptr) {
-        for (size_t i = 0; i < container->children.size(); ++i) {
-            if (container->children[i] == fn) {
-                first_idx = static_cast<int>(i);
-                break;
-            }
+    //   为什么非判不可：在控件内容里回车时，段落标记落在控件内部（跨段控件是正常形态），
+    //   而这一段的内容其实起自控件之外 —— 段首那枚边界可能是前一段的控件在这里结束的
+    //   闭括号，它属于容器之外的兄弟。只编"容器内这一截子节点"，产物就成了半个段落：
+    //   段首的边界丢掉，block_src_ / block_flow_ 又被这半个产物覆盖，之后每一次编辑都按
+    //   错的坐标算、控件集合也空掉，界面上表现为退格删一个字、前面一串字连同控件一起不见。
+    //
+    //   用流位置判而不是看"第一个内容元素的归属"：归属是 block_src_ 记下来的，记法漏掉
+    //   一种形态判据当场失效（闭括号就没被记过）。流位置是段与区间各自的权威口径，
+    //   与来源身份怎么记无关。
+    if (!flow_.has_value()) return false;
+    if (begin < 0 || begin >= static_cast<int>(container->children.size())) return false;
+    int seg_start = -1;
+    if (para == 0) {
+        // 段 0 前面可能有节边界，它的第一个内容元素才是权威起点。
+        if (!flow_->intervalOf(block_src_[0].first, &seg_start, nullptr)) return false;
+    } else {
+        // 段的起点 = 上一枚段落标记之后那一位（标记位置是段区间的权威，见 finishRebuildFromTree）。
+        int prev_end = 0;
+        if (!flow_->intervalOf(block_src_[static_cast<size_t>(para) - 1].mark, nullptr,
+                               &prev_end)) {
+            return false;
         }
+        seg_start = prev_end;
     }
-    if (first_idx < begin || first_idx > mark_idx) return false;
+    int range_start = -1;
+    if (!flow_->intervalOf(container->children[static_cast<size_t>(begin)]->id, &range_start,
+                           nullptr)) {
+        return false;
+    }
+    if (seg_start < 0 || range_start < 0 || seg_start != range_start) return false;
 
     const FlowVisibility vis = flowVisibility();
     const auto t_compile0 = Clock::now();

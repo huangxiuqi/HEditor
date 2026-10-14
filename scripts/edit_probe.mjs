@@ -2332,6 +2332,40 @@ async function main() {
                 sc.screenVsEngineDiffPx === 0, `差 ${sc.screenVsEngineDiffPx} px`);
       await c.screenshot(join(OUT, 'ctl-split-then-backspace.png'));
     }
+
+    chk.section('[14.11] 两次回车都落进字段内部之后再退格：段首那两枚边界不许丢');
+    {
+      // 现象：三连字段里「天」后回车、再「悸」后回车，然后把光标放到「天」后面退格 ——
+      //   第二段段首的两枚边界（第一个字段的闭括号、第二个字段的开括号）成对消失，
+      //   控件从 3 个掉到 1 个。根因见 edit_test [32]：段首第一枚内容是闭括号时，编译层
+      //   没把它记进这段的来源身份，而增量重编译的形状判据正是靠那个身份判的。
+      // 判据三层：文本与三条区间、产物与整树全量一致、屏幕 == 引擎帧。
+      await load(2);
+      await c.eval('return window.__heditor.setCaret(0, 11);');
+      await c.eval(key('Enter'));
+      await sleep(30);
+      await c.eval('return window.__heditor.setCaret(0, 9);');
+      await c.eval(key('Enter'));
+      await sleep(30);
+      await c.eval('return window.__heditor.setCaret(1, 2);');
+      await c.eval(key('Backspace'));
+      await sleep(30);
+      const p3 = Array.from(await c.eval('return window.__heditor.allText;')).join('');
+      chk.check('★★ 退格只删掉「天」一个字（曾经把第二段的控件边界整对抹掉）',
+                p3 === '患者主诉：反复心悸\n三\n，加重一天。', JSON.stringify(p3));
+      const it3 = await c.eval(`
+        return JSON.stringify(window.__heditor.controls.items
+          .map(i => [i.start[0], i.start[1], i.end[0], i.end[1]]));`);
+      chk.check('★★ 三个控件都还在，后两条各自跨到下一段段首',
+                it3 === '[[0,5,0,7],[0,7,1,0],[1,0,2,0]]', it3);
+      const au3 = await c.eval('return window.__heditor.auditCompile();');
+      chk.check('★ 产物与整树全量编译逐字段一致（diff 0）', !!au3 && au3.diff === 0,
+                au3 ? `diff ${au3.diff}` : 'null');
+      const sc3 = await c.eval('return window.__heditor.selfCheck();');
+      chk.check('★ 屏幕 == 引擎帧', sc3.screenVsEngineDiffPx === 0,
+                `差 ${sc3.screenVsEngineDiffPx} px`);
+      await c.screenshot(join(OUT, 'ctl-split-twice-then-backspace.png'));
+    }
   }
   chk.section('[7] 无页面异常 / 无 console 错误');
   {

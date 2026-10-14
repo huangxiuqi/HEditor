@@ -283,6 +283,11 @@ private:
             }
             for (const Node* c : n->children) walk(c->id, flagged);
             if (!flagged) {
+                // 闭括号同样吃进内容，也要记来源。段落从一枚闭括号起是正常形态（前一段的
+                //   控件跨到了这一段，它的结束边界落在段首）。不记的话 first 会退化成这一段
+                //   自己的结束标记，而结束标记必然在容器内 —— 增量编译的形状判据据此认为起点
+                //   就在容器里，于是编出缺掉这枚边界的半段，界面上表现为整段的控件一起消失。
+                noteFirst(n->id);
                 obj_.push_back(InlineObject{cpCount(), InlineObjectKind::ControlEnd, owner, ro});
             }
             return;
