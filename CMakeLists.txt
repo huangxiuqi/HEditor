@@ -72,6 +72,8 @@ option(HEDITOR_BUILD_TESTS "构建断言型单测" ON)
 set(HEDITOR_SKIA_ROOT "${HEDITOR_ROOT}/.toolchain/skia/src/skia-main" CACHE PATH "Skia 源码树")
 set(HEDITOR_SKIA_LIB "${HEDITOR_SKIA_ROOT}/out/wasm/libskia.wasm.a" CACHE FILEPATH "wasm 版 libskia（gn/ninja 产出的命名带 .wasm 中缀）")
 option(HEDITOR_USE_SKIA "用 Skia 做光栅化（仅 wasm；需先构建 libskia.a）" OFF)
+# 调试档：开断言、栈溢出检查与源码映射（见 wasm 链接参数里那一段说明）。
+option(HEDITOR_WASM_DEBUG "wasm 构建带断言/栈检查/源码映射（调试用，release 不开）" OFF)
 
 if(HEDITOR_USE_SKIA AND NOT EMSCRIPTEN)
   message(FATAL_ERROR
@@ -99,6 +101,12 @@ function(heditor_target_flags tgt)
     target_compile_options(${tgt} PRIVATE /utf-8 /W3 /permissive- /Zc:__cplusplus)
   elseif(EMSCRIPTEN)
     target_compile_options(${tgt} PRIVATE -Wall -Wextra -fno-exceptions)
+    if(HEDITOR_WASM_DEBUG)
+      # 调试档要"编译期"就带完整调试信息：source map 靠 DWARF 的行号表生成。
+      #   实测 -g2 不够 —— 编译命令里确实带了 -g2（41/42 个 TU），但映射表里 318 个
+      #   源文件仍是 emsdk 自带的那些，本工程一个 .cpp 都不在。换成 -g 才拿得到。
+      target_compile_options(${tgt} PRIVATE -g)
+    endif()
   else()
     target_compile_options(${tgt} PRIVATE -Wall -Wextra)
   endif()
@@ -280,6 +288,23 @@ if(EMSCRIPTEN)
     -sFORCE_FILESYSTEM=1
     -sEXPORTED_RUNTIME_METHODS=HEAPU8,HEAPU32,FS
   )
+
+  # 调试档（HEDITOR_WASM_DEBUG=ON，预设 wasm-debug）：断言、栈溢出检查、源码映射。
+  #   release 档一个都不带 —— 它们都要付体积与速度的代价，是排查时才需要的东西。
+  #   为什么要显式写 ASSERTIONS：它在优化构建里默认是关的（默认只在 -O0 开）。
+  #   STACK_OVERFLOW_CHECK 会随 ASSERTIONS=1 默认为 1，写出来是为了不依赖那条隐含规则。
+  #   -g2 保函数名与行号（不影响优化）；-gsource-map 让浏览器把 wasm 栈映射回 C++ 源码。
+  #   用途：trap（越界、非法指令、栈溢出）时能拿到可读的栈与源码位置，而不是一句
+  #   "RuntimeError: memory access out of bounds"。共享堆那种"越界写进邻居不 trap"的情形
+  #   它抓不到（那要 ASan），但至少把"响的那一半"变得可读。
+  if(HEDITOR_WASM_DEBUG)
+    target_link_options(heditor_wasm PRIVATE
+      -g
+      -gsource-map
+      -sASSERTIONS=1
+      -sSTACK_OVERFLOW_CHECK=1)
+  endif()
+
   # 供宿主脚本定位产物
   set_target_properties(heditor_wasm PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/web)

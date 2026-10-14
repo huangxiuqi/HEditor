@@ -144,6 +144,8 @@ int FontLibrary::addFace(const std::string& path) {
 int FontLibrary::addFaceLazy(const std::string& path) {
     auto f = std::make_unique<FontFace>();
     if (!f->loadFromFileLazy(path)) return -1;
+    // 新脸按当前配置建缓存 —— 否则"换配置再重装"拿到的仍是默认档的那套。
+    if (FontSource* src = f->source()) src->configureCache(cache_block_size_, cache_max_blocks_);
     faces_.push_back(std::move(f));
     return static_cast<int>(faces_.size()) - 1;
 }
@@ -185,6 +187,17 @@ FontCacheTotals FontLibrary::cacheTotals() const {
         t.io_ms += c.ioMs();
     }
     return t;
+}
+
+void FontLibrary::setCacheConfig(size_t block_size, size_t max_blocks) {
+    cache_block_size_ = block_size > 0 ? block_size : 1u;
+    cache_max_blocks_ = max_blocks > 0 ? max_blocks : 1u;
+    // 已有的脸当场换（configureCache 会清空它们已有的块与统计），
+    //   于是"换配置 → 重装文档 → 量"这条路得到的账是干净的。
+    for (const auto& f : faces_) {
+        FontSource* src = f->source();
+        if (src != nullptr) src->configureCache(cache_block_size_, cache_max_blocks_);
+    }
 }
 
 FontInstance* FontLibrary::instance(int face_index, float size_pt) {

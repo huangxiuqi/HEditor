@@ -10,10 +10,13 @@
 # 用法：
 #   powershell -ExecutionPolicy Bypass -File scripts\verify_web.ps1
 #   powershell -ExecutionPolicy Bypass -File scripts\verify_web.ps1 -KeepAlive   # 不清理，留着手动看
+#   powershell -ExecutionPolicy Bypass -File scripts\verify_web.ps1 -Wasm wasm-debug   # 跑调试档产物
 param(
     [int]$Port = 8781,
     [int]$DebugPort = 9222,
     [string]$Probe = 'scripts\edit_probe.mjs',
+    # 产物档：wasm（交付）或 wasm-debug（断言 + 栈检查 + 源码映射）。预设见 CMakePresets.json。
+    [string]$Wasm = 'wasm',
     [switch]$KeepAlive
 )
 
@@ -42,8 +45,8 @@ if (-not $node) {
 }
 if (-not $node) { throw '找不到 node' }
 
-$glue = Join-Path $Root 'build\wasm\web\heditor.wasm'
-if (-not (Test-Path $glue)) { throw "还没构建 WASM：$glue" }
+$glue = Join-Path $Root "build\$Wasm\web\heditor.wasm"
+if (-not (Test-Path $glue)) { throw "还没构建 WASM：$glue（先跑 cmake --workflow --preset $Wasm）" }
 
 # ── 找 python（与 serve_web.ps1 同一套优先级）──
 $py = @(
@@ -127,7 +130,7 @@ try {
     Push-Location $Root
     try {
         $probeOut = & $node $Probe --port $DebugPort `
-                        --url "http://127.0.0.1:$Port/web/index.html" 2>&1 |
+                        --url "http://127.0.0.1:$Port/web/index.html?wasm=$Wasm" 2>&1 |
                     ForEach-Object { $_.ToString() }
         $exit = $LASTEXITCODE
         $probeOut | Tee-Object -FilePath $log

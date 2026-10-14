@@ -2733,6 +2733,50 @@ async function main() {
               `${inkLazy} vs ${inkFull}`);
   }
 
+  chk.section('[18] 字体块大小：块越小带宽越省、次数越贵');
+  {
+    // 三档块大小，常驻上限固定 3 MB（块数 = 上限 / 块大小）—— 只让"粒度"这一个变量变。
+    //   换档之后必须重装字体：块缓存的配置在建脸时就定了，而且 FreeType 自己缓存过
+    //   的字形不会因为换了配置就失效（不重装的话第二次量到的是"没读"）。
+    const CAP = 3 * 1024 * 1024;
+    const rows = [];
+    for (const bs of [4096, 16384, 65536]) {
+      const blocks = Math.floor(CAP / bs);
+      await c.eval(`return window.__heditor.setFontCacheConfig(${bs}, ${blocks});`);
+      await c.eval('return window.__heditor.reloadFonts("lazy");');
+      await c.eval('window.__heditor.loadStressDocumentDiverse(2000, 20); return true;');
+      await c.eval('return window.__heditor.present();');
+      const s = await c.eval('return window.__heditor.editStats;');
+      const hits = Number(s.fontCacheHits);
+      const misses = Number(s.fontCacheMisses);
+      rows.push({
+        blockKB: bs / 1024,
+        blocks,
+        hitRate: hits + misses > 0 ? +(hits / (hits + misses)).toFixed(4) : 0,
+        reads: Number(s.fontStorageReads),
+        ioMB: +(Number(s.fontStorageBytes) / 1048576).toFixed(2),
+        ioMs: +Number(s.fontIoMs).toFixed(2),
+        residentMB: +(Number(s.fontResidentBytes) / 1048576).toFixed(2),
+      });
+    }
+    report.blockSizes = rows;
+    for (const r of rows) {
+      console.log(`     块 ${String(r.blockKB).padStart(3)} KB x ${String(r.blocks).padStart(5)}` +
+                  `（上限 3 MB）：命中 ${(r.hitRate * 100).toFixed(1)}%，` +
+                  `读 ${r.reads} 次 / ${r.ioMB} MB，IO ${r.ioMs} ms，常驻 ${r.residentMB} MB`);
+    }
+    const small = rows[0];
+    const big = rows[rows.length - 1];
+    chk.check('三档都真的读过存储（配置生效了）', rows.every((r) => r.reads > 0),
+              rows.map((r) => r.reads).join(' / '));
+    chk.check(
+      `块越小、读进来的字节越少（${big.blockKB} KB 的 ${big.ioMB} MB -> ${small.blockKB} KB 的 ${small.ioMB} MB）`,
+      small.ioMB < big.ioMB, `${big.ioMB} -> ${small.ioMB} MB`);
+    chk.check(
+      `块越小、命中率越低（${(small.hitRate * 100).toFixed(1)}% vs ${(big.hitRate * 100).toFixed(1)}%）`,
+      small.hitRate <= big.hitRate, `${small.hitRate} vs ${big.hitRate}`);
+  }
+
   // 收尾：载入表单样例 + 恢复闪烁，截一张给人看
   //   刻意停在表单模式（而不是纯文档场景）：截图要能一眼看出
   //     "字段的边界长什么样、只读的那个是灰的"。文档模式也画括号，只有只读模式不画。

@@ -165,6 +165,12 @@ public:
      */
     FontCacheTotals cacheTotals() const;
 
+    /**
+     * 换块缓存的配置（块大小与块数）。已有的按需脸当场换（连同清空块与统计），
+     * 之后新装的脸也用它 —— 否则"换配置再重装"会得到一张用旧配置的脸。
+     */
+    void setCacheConfig(size_t block_size, size_t max_blocks);
+
     int faceCount() const { return static_cast<int>(faces_.size()); }
     FontFace* face(int index);
     const FontFace* face(int index) const;
@@ -184,6 +190,12 @@ private:
      * key: (face_index, 字号 * 4 取整) —— 允许 0.25pt 粒度
      */
     std::map<std::pair<int, int>, FontInstance*> cache_;
+    /**
+     * 新装的按需脸用这套块缓存配置（setCacheConfig 会改它，见那里的说明）。
+     * 默认值与 FontBlockCache 的构造参数一致 —— 依据记在那里。
+     */
+    size_t cache_block_size_ = 4u * 1024u;
+    size_t cache_max_blocks_ = 768u;
 };
 
 }  // namespace heditor

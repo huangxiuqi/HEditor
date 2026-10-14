@@ -184,6 +184,13 @@ void FontBlockCache::clear() {
     for (Block& b : blocks_) b.used = false;
 }
 
+void FontBlockCache::configure(size_t block_size, size_t max_blocks) {
+    blocks_.assign(max_blocks > 0 ? max_blocks : 1u, Block{});
+    block_size_ = block_size > 0 ? block_size : 1u;
+    clock_ = 0;
+    resetStats();
+}
+
 void FontBlockCache::resetStats() {
     hits_ = 0;
     misses_ = 0;

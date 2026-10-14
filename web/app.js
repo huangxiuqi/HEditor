@@ -20,7 +20,12 @@
 'use strict';
 
 const BASE = new URL('../', location.href);
-const WASM_GLUE = new URL('build/wasm/web/heditor.js', BASE);
+// 产物目录：默认交付档；带 ?wasm=debug 时指向调试档（断言 + 栈检查 + 源码映射）。
+//   两档是各自独立构建的目录，切换只影响取胶水层的路径。
+const WASM_DIR = new URLSearchParams(location.search).get('wasm') === 'debug'
+                     ? 'build/wasm-debug/web/'
+                     : 'build/wasm/web/';
+const WASM_GLUE = new URL(WASM_DIR + 'heditor.js', BASE);
 
 const FONTS = [
   { role: 'cjk',    label: 'Noto Sans SC',        path: 'assets/fonts/NotoSansSC-VF.ttf' },
@@ -395,10 +400,16 @@ async function loadFonts(mode) {
 
     let idx = -1;
     if (mode === 'lazy') {
-      // MEMFS 里用文件名：引擎拿到的是路径，它按块去读。canOwn 传 false，
-      //   由 MEMFS 自己持有一份，省得与 buf 的生存期纠缠。
+      // MEMFS 里用文件名：引擎拿到的是路径，它按块去读。
+      //   先 unlink 再建 —— 同一个名字重复 createDataFile 会抛 EEXIST（切档重装时会遇到）。
+      //   canOwn 传 true：MEMFS 直接持有这份字节，不再拷一份（十几 MB，这一拷很贵）。
       const name = '/' + f.path.split('/').pop();
-      mod.FS.createDataFile('/', name, buf, true, false);
+      try {
+        mod.FS.unlink(name);
+      } catch (e) {
+        // 文件不在就是常态（第一次装），什么都不用做
+      }
+      mod.FS.createDataFile('/', name, buf, true, false, true);
       idx = mod.loadFontFromFile(name);
     } else {
       const ptr = mod.allocBuffer(buf.length);  // ① 在 wasm 堆里要一块地
@@ -1404,6 +1415,12 @@ window.__heditor = {
     return { mode: fontMode, rows: r.rows };
   },
   get fontMode() { return fontMode; },
+  // 改字体块缓存的配置（字节 / 块数），并清空已有块与统计 —— 给"块大小该取多少"做实验。
+  //   注意它同时会改"之后新装的脸"用的配置，所以换档之后要重装字体才干净。
+  setFontCacheConfig(blockSize, maxBlocks) {
+    mod.setFontCacheConfig(Number(blockSize), Number(maxBlocks));
+    return true;
+  },
   // 视口锚点：探针量"按需读覆盖多少页"时用。走真实滚动路径受布局与 rAF 节流影响，
   //   直接设锚点更稳，也正好把"换窗口就要读新字形"这件事单独量出来。
   setViewportAnchor(first, count) {

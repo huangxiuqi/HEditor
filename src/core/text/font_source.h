@@ -84,11 +84,32 @@ private:
  */
 class FontBlockCache {
 public:
-    FontBlockCache(size_t block_size = 64u * 1024u, size_t max_blocks = 48u);
+    /**
+     * 块大小与块数决定常驻上限。默认 4 KB x 768 块（上限 3 MB）。
+     *
+     * 依据是 2026-10-14 的实测（同一份 2000 段文档、同一窗口位置，只换块大小）：
+     *   4 KB：读入 1.34 MB、常驻 1.34 MB、IO 1.1 ms、命中 98.1%
+     *   16 KB：读入 2.57 MB、常驻 2.57 MB、IO 1.2 ms、命中 99.1%
+     *   64 KB：读入 8.71 MB、常驻 2.95 MB、IO 1.1 ms、命中 99.2%
+     * 块越大，一次读进来的字节里用不到的部分越多 —— 字形在 glyf 里按字形号连续，
+     * 而一段文本用到的字形号是散的。所以 4 KB 在读入字节与常驻两项上都明显更省，
+     * 而 IO 时间持平（那种规模下次数还换不来时间）。切到真磁盘后要重测一遍。
+     */
+    FontBlockCache(size_t block_size = 4u * 1024u, size_t max_blocks = 768u);
 
     bool read(const FontStorage& src, uint64_t off, void* dst, size_t len);
     void clear();
     void resetStats();
+    /**
+     * 换一套缓存配置（块大小与块数）并清空已有块与统计。
+     *
+     * 存在的理由是一个一直没有依据的参数：块大小按"减少读的次数"这一个目标取，
+     * 没有量过它的代价 —— 一次读进来的字节里有多少是用不到的。
+     * 块越大，落存储的次数越少，但一次读进来的字节里用不到的部分越多 —— 字形在 glyf 里
+     * 按字形号连续，而一段文本用到的字形号是散的，所以块读的空间效率取决于块有多大。
+     * 要在这两者之间挑，就得能改它、并且量出来。
+     */
+    void configure(size_t block_size, size_t max_blocks);
     /**
      * 当前常驻的字节数（已装入的块之和），不是上限。
      */
@@ -144,6 +165,13 @@ public:
      * 按需读（经过块缓存）。上游要同步契约，所以这里也是同步的。
      */
     bool readAt(uint64_t off, void* dst, size_t len) { return cache_.read(storage_, off, dst, len); }
+
+    /**
+     * 转发给块缓存的配置入口（给"块大小该取多少"的实验用）。
+     */
+    void configureCache(size_t block_size, size_t max_blocks) {
+        cache_.configure(block_size, max_blocks);
+    }
 
     /**
      * 拼一张只含小表的骨架字体。会经过块缓存，因此会改动统计。

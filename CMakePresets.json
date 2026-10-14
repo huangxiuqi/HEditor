@@ -54,13 +54,25 @@
       "cacheVariables": {
         "HEDITOR_USE_SKIA": "OFF"
       }
+    },
+    {
+      "name": "wasm-debug",
+      "displayName": "WebAssembly（调试档：断言 + 栈检查 + 源码映射）",
+      "description": "与 wasm 同一套产物，只是多带调试信息：trap 时能给出可读的 C++ 栈与源码位置。",
+      "inherits": "wasm",
+      "binaryDir": "${sourceDir}/build/wasm-debug",
+      "cacheVariables": {
+        "HEDITOR_WASM_DEBUG": "ON",
+        "CMAKE_MAKE_PROGRAM": "${sourceDir}/.toolchain/ninja/ninja.exe"
+      }
     }
   ],
   "buildPresets": [
     { "name": "native", "configurePreset": "native" },
     { "name": "native-debug", "configurePreset": "native-debug" },
     { "name": "wasm", "configurePreset": "wasm" },
-    { "name": "wasm-noskia", "configurePreset": "wasm-noskia" }
+    { "name": "wasm-noskia", "configurePreset": "wasm-noskia" },
+    { "name": "wasm-debug", "configurePreset": "wasm-debug" }
   ],
   "testPresets": [
     {
@@ -92,6 +104,14 @@
       "steps": [
         { "type": "configure", "name": "wasm" },
         { "type": "build", "name": "wasm" }
+      ]
+    },
+    {
+      "name": "wasm-debug",
+      "displayName": "配置 + 构建 wasm 调试档（断言 + 栈检查 + 源码映射）",
+      "steps": [
+        { "type": "configure", "name": "wasm-debug" },
+        { "type": "build", "name": "wasm-debug" }
       ]
     }
   ]

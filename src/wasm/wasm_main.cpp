@@ -65,6 +65,15 @@ int loadFont(const std::string& name, uintptr_t ptr, size_t len) {
  */
 int loadFontFromFile(const std::string& path) { return g_engine.fonts().addFaceLazy(path); }
 
+/**
+ * 改字体块缓存的配置（块大小与块数），并清空已有块与统计。
+ *   给"块大小该取多少"做实验用 —— 它一直是个没有依据的参数（见 font_source.h 的说明）。
+ */
+void setFontCacheConfig(int block_size, int max_blocks) {
+    g_engine.fonts().setCacheConfig(block_size > 0 ? static_cast<size_t>(block_size) : 0u,
+                                    max_blocks > 0 ? static_cast<size_t>(max_blocks) : 0u);
+}
+
 void setFontRoles(int cjk_index, int mongol_index, int latin_index) {
     g_cjk_font = cjk_index;
     g_mn_font = mongol_index;
@@ -961,6 +970,7 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("freeBuffer", &freeBuffer);
     emscripten::function("loadFont", &loadFont);
     emscripten::function("loadFontFromFile", &loadFontFromFile);
+    emscripten::function("setFontCacheConfig", &setFontCacheConfig);
     emscripten::function("setFontRoles", &setFontRoles);
 
     emscripten::function("setScenario", &setScenario);
