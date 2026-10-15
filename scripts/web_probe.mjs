@@ -6,10 +6,16 @@
 //   window.__heditor.errors  页面级异常（有就说明静默失败了）
 //   每个场景截一张 PNG，用于人眼复核
 //
+// 两宿主通吃，做法与 edit_probe.mjs / stress_probe.mjs 一致：表达式统一包 async IIFE
+//   并预检语法，跑完等宿主排空。单线程宿主（index.html）全同步、没有 quiesce，跳过即可；
+//   Worker 宿主（worker.html）的门面一律异步，不排空就会读到上一拍的 stats。
+//   产物按宿主分名（见下面的 SUF），两个宿主各跑一遍时不会互相覆盖。
+//
 // 无第三方依赖：Node 22 自带 fetch 和 WebSocket。
 //
-// 用法（先用 scripts\serve_web.ps1 起服务、并让 Chrome 带 --remote-debugging-port）：
-//   node scripts/web_probe.mjs --port 9222 --url http://localhost:8781/web/index.html
+// 用法：
+//   scripts\verify_web.ps1 -Probe scripts\web_probe.mjs                    # 单线程宿主
+//   scripts\verify_web.ps1 -Probe scripts\web_probe.mjs -Page worker.html  # Worker 宿主
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -30,6 +36,14 @@ const PORT = Number(opt('port', '9222'));
 const URL_ = opt('url', 'http://localhost:8781/web/index.html');
 const OUT = join(ROOT, opt('out-dir', 'out/web'));
 const ZOOM = Number(opt('zoom', '1.5'));
+
+// 产物按宿主分名。两个宿主各跑一遍是常态，同名会互相覆盖 —— 那时"看着是绿的"看的
+//   可能是另一份。index.html 保持原名（历史产物与文档都按那个名字引用）。
+const SUF = (() => {
+  const file = (new URL(URL_)).pathname.split('/').pop() || '';
+  const base = file.replace(/\.[^.]*$/, '');
+  return base && base !== 'index' ? '-' + base : '';
+})();
 
 const SCENARIOS = [
   [0, '完整样例（4 页）'],
@@ -72,6 +86,7 @@ async function waitFor(cdp, expr, label, timeoutMs = 180000) {
 
 async function main() {
   mkdirSync(OUT, { recursive: true });
+  console.log(`→ 产物目录 ${OUT}（后缀 ${SUF || '(无，即 index.html 那套)'}）`);
 
   const target = await findTarget();
   const cdp = await CDP.connect(target.webSocketDebuggerUrl);
@@ -91,6 +106,23 @@ async function main() {
                                'window.__heditor.ready');
   console.log(`→ 页面就绪，耗时 ${(bootMs / 1000).toFixed(1)} s`);
 
+  // 包装要在"页面就绪之后"才生效：waitFor 用的那句求值必须原样发出去，
+  //   不能在 ready 之前就去 quiesce（那时 Worker 还没起来处理 ping）。
+  const RAW = cdp.eval.bind(cdp);
+  const asBody = (b) => 'return (async () => {\n' + b + '\n})();';
+  const AsyncFn = Object.getPrototypeOf(async function () {}).constructor;
+  cdp.eval = async (expr) => {
+    try { new AsyncFn(expr); } catch (e) {
+      throw new Error('表达式语法错误：' + e.message + '\n---- 表达式原文 ----\n' + expr);
+    }
+    const r = await RAW(asBody(expr));
+    await RAW('const H = window.__heditor;' +
+              'if (window.__wheditor && !H.quiesce)' +
+              '  throw new Error("异步宿主必须提供 quiesce()");' +
+              'return H.quiesce ? H.quiesce().then(() => true) : true;');
+    return r;
+  };
+
   const env = await cdp.eval('return window.__heditor.fonts');
   const report = {
     url: URL_,
@@ -104,15 +136,22 @@ async function main() {
   };
 
   for (const [id, label] of SCENARIOS) {
-    await cdp.eval(`window.__heditor.run(${id}, ${ZOOM}); return true;`);
-    await sleep(350);
+    await cdp.eval(`await window.__heditor.run(${id}, ${ZOOM}); return true;`);
+    // 先读 stats，再睡。顺序反了会读到别的一拍的账。
+    //
+    //   装载后立刻读是 paintedGlyphs=568 / paintMs=63ms，隔 650ms 再读变成 0 / 0ms：
+    //   stats 里的 paint 一列描述的是最近一次绘制，而宿主每 530ms 会为光标闪烁做一次
+    //   只有光标的呈现，这份账会把装载这份盖掉。若先睡 350ms 再读，就变成与闪烁周期
+    //   赛跑：赢到装载那笔账（几百个字形），输就拿到 0，同一份代码两次能差两个数量级。
+    //   睡挪到后面既能拿到装载那笔账，又保住截图前先让合成器歇一下的做法。
     const st = await cdp.eval('return window.__heditor.stats');
     report.scenarios.push({ id, label, ...st });
+    await sleep(350);
 
     const shot = await cdp.send('Page.captureScreenshot', {
       format: 'png', captureBeyondViewport: true,
     });
-    writeFileSync(join(OUT, `scene-${id}.png`), Buffer.from(shot.data, 'base64'));
+    writeFileSync(join(OUT, `scene${SUF}-${id}.png`), Buffer.from(shot.data, 'base64'));
     console.log(`  [${id}] ${label}  pages=${st.pageCount} glyphs=${st.glyphCount} ` +
                 `missing=${st.missingGlyphCount} runs=${st.fontRunCount} ` +
                 `shape=${st.shapeMs}ms layout=${st.layoutMs}ms paint=${st.paintMs}ms`);
@@ -126,7 +165,7 @@ async function main() {
   report.pageErrors = await cdp.eval('return window.__heditor.errors');
   report.consoleErrors = cdp.consoleErrors;
 
-  writeFileSync(join(OUT, 'probe.json'), JSON.stringify(report, null, 2), 'utf8');
+  writeFileSync(join(OUT, `probe${SUF}.json`), JSON.stringify(report, null, 2), 'utf8');
 
   const bad = report.pageErrors.length + report.consoleErrors.length;
   console.log('');

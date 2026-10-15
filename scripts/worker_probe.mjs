@@ -52,8 +52,8 @@ async function clickAt(c, x, y) {
 
 const caretOf = (c) => c.eval(
   'const h = window.__wheditor;' +
-  'if (!h || !h.stats) return null;' +
-  'return { off: h.stats.caretOffset, vis: h.stats.caretVisible, x: h.stats.caretX };');
+  'if (!h || !h.editStats) return null;' +
+  'return { off: h.editStats.caretOffset, vis: h.editStats.caretVisible, x: h.editStats.caretX };');
 
 const chk = new Checks('Worker 宿主');
 
@@ -102,12 +102,35 @@ async function main() {
   chk.check('Worker 里单实例堆在合理范围', info.heapMB > 10 && info.heapMB < 200,
             `${info.heapMB.toFixed(1)} MB`);
 
+  // 两本账必须分开：单线程宿主那边 stats 是 statsJson（页数 / 字形 / run 数 / 形状耗时），
+  //   editStats 是 editStatsJson（段数 / 总页数 / 光标矩形 / 重画像素），来源与单位都不同。
+  //   两个入口指向同一个对象时，web_probe 读 stats.pageCount 会得到 undefined —— 而
+  //   undefined 不会让任何断言变红，只会让报告里少几列。这条判据把它钉住。
+  chk.section('[W1b] 两个统计入口是两本账（形状与单线程宿主一致）');
+  {
+    const two = await c.eval(
+      'const h = window.__wheditor;' +
+      'return { same: h.stats === h.editStats,' +
+      '         layPages: h.stats.pageCount, layRuns: h.stats.fontRunCount,' +
+      '         layShape: h.stats.shapeMs, layGlyphs: h.stats.glyphCount,' +
+      '         edPages: h.editStats.totalPages, edParas: h.editStats.totalParagraphs,' +
+      '         edMissing: h.editStats.missingGlyphCount };');
+    chk.check('stats 与 editStats 不是同一个对象（两本账）', two.same === false, j(two.same));
+    chk.check('排版那本（stats）带页数 / run 数 / 形状耗时',
+              two.layPages >= 1 && two.layRuns >= 1 && typeof two.layShape === 'number',
+              `页 ${two.layPages} / run ${two.layRuns} / shape ${two.layShape}`);
+    chk.check('编辑那本（editStats）带段数 / 总页数 / 缺字数',
+              two.edParas >= 1 && two.edPages >= 1 && typeof two.edMissing === 'number',
+              `段 ${two.edParas} / 页 ${two.edPages} / 缺字 ${two.edMissing}`);
+  }
+
   chk.section('[W2] 首帧：帧上真的有字，且每页画布与帧对应段逐像素一致');
   const s0 = await c.eval('return window.__wheditor.stats');
+  const e0 = await c.eval('return window.__wheditor.editStats');
   const ink0 = await c.eval('return window.__wheditor.ink()');
   const self0 = await c.eval('return window.__wheditor.selfCheck()');
-  chk.check('首帧有页有字', s0.totalPages >= 1 && s0.glyphCount > 0,
-            `${s0.totalPages} 页 / ${s0.glyphCount} 字形`);
+  chk.check('首帧有页有字', e0.totalPages >= 1 && s0.glyphCount > 0,
+            `${e0.totalPages} 页 / ${s0.glyphCount} 字形`);
   chk.check('帧上有墨迹', ink0 > 500, `${ink0} px`);
   chk.check(`每页画布都在，且与帧对应段逐像素一致（差 ${self0.diff} / ${self0.compared}）`,
             self0.missing === 0 && self0.sizeBad === 0 && self0.ratio < 0.0005,
@@ -124,19 +147,19 @@ async function main() {
   const s6 = await c.eval(body(
     'const h = window.__wheditor;' +
     'await h.run(6, 1.5);' +
-    'const p0 = h.stats.totalParagraphs;' +
+    'const p0 = h.editStats.totalParagraphs;' +
     'const before = h.text;' +
     'await h.setCaret(0, 0);' +
     'await h.type("测");' +
     'const typed = { text: h.text, off: h.caret.offset };' +
     'await h.splitParagraph();' +
-    'const split = h.stats.totalParagraphs;' +
+    'const split = h.editStats.totalParagraphs;' +
     'await h.setCaret(0, 0);' +
     'await h.mergeWithNextParagraph();' +
-    'const atStart = h.stats.totalParagraphs;' +
+    'const atStart = h.editStats.totalParagraphs;' +
     'await h.setCaret(0, h.text.length);' +
     'await h.mergeWithNextParagraph();' +
-    'const merged = h.stats.totalParagraphs;' +
+    'const merged = h.editStats.totalParagraphs;' +
     'await h.setCaret(0, 1);' +
     'const moved0 = h.caret;' +
     'await h.move(-1);' +
@@ -146,10 +169,10 @@ async function main() {
     'const deleted = h.text;' +
     'await h.setCaret(0, 1);' +
     'await h.splitParagraph();' +
-    'const split2 = h.stats.totalParagraphs;' +
+    'const split2 = h.editStats.totalParagraphs;' +
     'await h.setCaret(1, 0);' +
     'await h.mergeWithPreviousParagraph();' +
-    'const prevMerged = h.stats.totalParagraphs;' +
+    'const prevMerged = h.editStats.totalParagraphs;' +
     'return { before, p0, typed, split, atStart, merged, moved0, moved1, deleted,' +
     '         split2, prevMerged };'));
   chk.check('打字改变了第 0 段文本', s6.typed.text.length === String(s6.before).length + 1,
@@ -228,7 +251,7 @@ async function main() {
     'const a = performance.now();' +
     'await h.run(7, 1.5);' +
     'const loadMs = performance.now() - a;' +
-    'const pages = h.stats.totalPages;' +
+    'const pages = h.editStats.totalPages;' +
     'const before = { first: h.geom.first, ink: await h.ink(), self: await h.selfCheck() };' +
     'const step = h.geom.pageH + h.geom.gap;' +
     'const b = performance.now();' +
@@ -255,7 +278,7 @@ async function main() {
     'const mode = h.fontMode;' +
     'const ink = await h.ink();' +
     'const self = await h.selfCheck();' +
-    'return { mode, ink, self, missing: h.stats.missingGlyphCount };'));
+    'return { mode, ink, self, missing: h.editStats.missingGlyphCount };'));
   chk.check('切到按需装载后宿主记到了模式', lazy.mode === 'lazy', j(lazy.mode));
   chk.check('按需装载后帧上仍有字', lazy.ink > 500, `${lazy.ink} px`);
   chk.check('按需装载后每页画布仍与帧一致', lazy.self.ratio < 0.0005,
@@ -357,7 +380,7 @@ async function main() {
     '  await new Promise((r) => setTimeout(r, 10));' +
     '}' +
     'return { step, firstBefore, firstAfter, inWin, cross, changes,' +
-    '         self: await h.selfCheck(), pages: h.stats.totalPages };'));
+    '         self: await h.selfCheck(), pages: h.editStats.totalPages };'));
   chk.check('同一页内来回滚动不换窗口（滞回在起作用）',
             scroll.firstBefore === scroll.firstAfter,
             `窗口首 ${scroll.firstBefore} -> ${scroll.firstAfter}`);
@@ -415,7 +438,7 @@ async function main() {
   try {
     await c.waitFor(
       'return !!(window.__wheditor && window.__wheditor.stats)' +
-      ' && window.__wheditor.stats.caretVisible === false', '相位落到隐藏', 6000);
+      ' && window.__wheditor.editStats.caretVisible === false', '相位落到隐藏', 6000);
   } catch { sawHidden = false; }
   chk.check('闪烁在跑（6 秒内能等到隐藏相位）', sawHidden, sawHidden ? '' : '一直没隐藏');
   if (sawHidden) {

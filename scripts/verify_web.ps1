@@ -11,12 +11,16 @@
 #   powershell -ExecutionPolicy Bypass -File scripts\verify_web.ps1
 #   powershell -ExecutionPolicy Bypass -File scripts\verify_web.ps1 -KeepAlive   # 不清理，留着手动看
 #   powershell -ExecutionPolicy Bypass -File scripts\verify_web.ps1 -Wasm wasm-debug   # 跑调试档产物
+#   powershell -ExecutionPolicy Bypass -File scripts\verify_web.ps1 -Page worker.html  # 跑 Worker 宿主
 param(
     [int]$Port = 8781,
     [int]$DebugPort = 9222,
     [string]$Probe = 'scripts\edit_probe.mjs',
     # 产物档：wasm（交付）或 wasm-debug（断言 + 栈检查 + 源码映射）。预设见 CMakePresets.json。
     [string]$Wasm = 'wasm',
+    # 跑哪个宿主页：index.html（单线程，验收基准）或 worker.html（引擎在 Worker 里）。
+    #   两宿主并存，所以同一份探针必须两边都能跑 —— 这个开关就是那条路。
+    [string]$Page = 'index.html',
     [switch]$KeepAlive
 )
 
@@ -130,7 +134,7 @@ try {
     Push-Location $Root
     try {
         $probeOut = & $node $Probe --port $DebugPort `
-                        --url "http://127.0.0.1:$Port/web/index.html?wasm=$Wasm" 2>&1 |
+                        --url "http://127.0.0.1:$Port/web/${Page}?wasm=$Wasm" 2>&1 |
                     ForEach-Object { $_.ToString() }
         $exit = $LASTEXITCODE
         $probeOut | Tee-Object -FilePath $log

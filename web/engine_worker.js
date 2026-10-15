@@ -281,6 +281,12 @@ function sendState(ts, label, stats, changed) {
     // 引擎实时光标偏移（直读，不经过 editStats 那本账）。宿主拿它和 editStats 里的
     //   光标位置比，就能判出"有没有哪个改了状态的入口忘了给自己收尾"。
     caretLive: mod.caretOffsetLive(),
+    // 排版那本账（statsJson）与编辑那本账（editStatsJson）在单线程宿主上是两个入口，
+    //   上面那个 stats 走的是编辑那本（宿主的内部逻辑要它：光标矩形、脏页、重画像素）。
+    //   这里必须把排版那本也推过去 —— 否则主线程的 stats 会与 editStats 指向同一个对象，
+    //   页数 / 字形 run 数 / 分阶段形状耗时这些字段读出来全是 undefined。
+    //   undefined 不会让任何断言变红，只会让报告里少几列：那是查错方向都定不下来的那种错。
+    layout: JSON.parse(mod.statsJson()),
   });
   scrollReset = false;   // 一次性信号：随这一份状态送出去就清掉
 }
@@ -335,6 +341,21 @@ function loadBlocks(fn) {
   paintFull();
 }
 
+/**
+ * 胶水与 wasm 这两个资源的传输字节数（口径与单线程宿主的 wasmBytes() 逐条相同）。
+ *
+ * 必须在 Worker 这一侧量：胶水（importScripts）与 wasm（胶水自己去取）都是这一侧发出的，
+ *   主线程的 performance 资源表里没有它们 —— 在那边量恒为 0，而 0 会安安静静地进报告，
+ *   没人会怀疑一个数字。
+ */
+function glueBytesInWorker() {
+  let n = 0;
+  for (const e of performance.getEntriesByType('resource')) {
+    if (e.name.includes('heditor')) n += e.transferSize || e.decodedBodySize || 0;
+  }
+  return n;
+}
+
 async function boot(m) {
   const t0 = performance.now();
   importScripts(m.glue);
@@ -355,6 +376,7 @@ async function boot(m) {
   bootMs = performance.now() - t0;
   post({
     t: 'ready', bootMs, fontMs, fontBytes, fontMode,
+    glueBytes: glueBytesInWorker(),
     heapMB: mod.HEAPU8.length / 1048576,
     zeroCopyFrame: mod.frameRgba().buffer === mod.HEAPU8.buffer,
   });

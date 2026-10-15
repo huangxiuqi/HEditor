@@ -81,7 +81,7 @@ const now = () => performance.now();
 const post = (msg, transfer) => worker.postMessage(msg, transfer || []);
 
 const mirror = {
-  info: null, stats: null, geom: null,
+  info: null, stats: null, layout: null, geom: null,
   text0: '', controls: null, blockedEdits: 0, dirtyPages: [], caretReport: '',
   caretLive: -1, heapMB: 0, fontMode: 'full', stateSeq: 0, lastLabel: '', lastMs: 0,
 };
@@ -352,6 +352,7 @@ function syncScrollFromGeom(gm, reset) {
 
 function onState(m) {
   mirror.stats = m.stats;
+  mirror.layout = m.layout || mirror.layout;
   mirror.geom = m.geom;
   mirror.text0 = m.text0;
   mirror.controls = m.controls;
@@ -734,7 +735,11 @@ const frameCanvasProxy = {
 
 Object.defineProperties(host, {
   info: { get: () => mirror.info },
-  stats: { get: () => mirror.stats },
+  // 这两本账不能指向同一个对象：单线程宿主那边 stats 是 statsJson（页数/字形/形状耗时），
+  //   editStats 是 editStatsJson（重排行数/重画像素/光标矩形），来源不同、单位不同。
+  //   两个入口指向同一份时，web_probe 读 stats.pageCount 会得到 undefined ——
+  //   而 undefined 不会让任何断言变红，只会让报告里少几列。
+  stats: { get: () => mirror.layout },
   editStats: { get: () => mirror.stats },
   geom: { get: () => mirror.geom },
   caret: {
@@ -763,6 +768,16 @@ Object.defineProperties(host, {
   //   frameW: { get: ... } 也不行 —— 那样 frameW 不是函数。
   heapMB: { get: () => mirror.heapMB },
   fontMode: { get: () => mirror.fontMode },
+  // 环境信息，形状与单线程宿主的 env / fonts 一致：探针拿它记报告（胶水体积、UA、地址）。
+  //   wasmGlue 必须由 Worker 侧量好随 ready 报过来 —— 主线程的资源表里没有 Worker 发出的
+  //   请求（胶水与 wasm 都是那一侧取的），在那边量恒为 0，而 0 会安安静静地进报告。
+  fonts: {
+    get: () => ({
+      wasmGlue: mirror.info ? mirror.info.glueBytes : 0,
+      ua: navigator.userAgent,
+      url: location.href,
+    }),
+  },
   zoomLevel: { get: () => zoom },
   scenario: { get: () => scenario },
   editMode: { get: () => mode },
