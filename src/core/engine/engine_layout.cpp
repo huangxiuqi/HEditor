@@ -264,16 +264,13 @@ void EditorEngine::relayout() {
     //   这里只夹数值范围，不吸附簇：簇吸附需要簇表，而此刻尚未排版；用上一轮的簇表
     //     会把光标拉回旧簇边界，表现为"敲字后光标差一个位置"。簇吸附放在排版之后。
     if (!blocks_.empty()) {
-        if (caret_para_ < 0) caret_para_ = 0;
-        if (caret_para_ >= static_cast<int>(blocks_.size()))
-            caret_para_ = static_cast<int>(blocks_.size()) - 1;
-        // 只夹数值范围，不吸附簇（理由见上面那段注释）。上界 = 段长 + 本段边界枚数，
-        //   也就是 relAt(len, 全部边界) —— rel 本身就是"段内流位置"，越界才动它。
-        const size_t len = blocks_[static_cast<size_t>(caret_para_)].cp_text.size();
-        const BracketCounts bc = bracketCountsAt(caret_para_, len);
+        int para = caretPara();
+        if (para >= static_cast<int>(blocks_.size()))
+            para = static_cast<int>(blocks_.size()) - 1;
+        const size_t len = blocks_[static_cast<size_t>(para)].cp_text.size();
+        const BracketCounts bc = bracketCountsAt(para, len);
         const int span = static_cast<int>(len) + bc.before + bc.closes + bc.opens;
-        if (caret_rel_ > span) caret_rel_ = span;
-        if (caret_rel_ < 0) caret_rel_ = 0;
+        if (caretRel() > span) setCaretRel(para, span);
     } else {
         setCaretRel(0, 0);
     }

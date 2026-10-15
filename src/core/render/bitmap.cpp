@@ -258,6 +258,29 @@ void Bitmap::fillRect(const Rect& r, Color c) {
     }
 }
 
+void Bitmap::blendRect(const Rect& r, Color c) {
+    const int x0 = std::max(0, static_cast<int>(std::floor(r.x)));
+    const int y0 = std::max(0, static_cast<int>(std::floor(r.y)));
+    const int x1 = std::min(w_, static_cast<int>(std::ceil(r.x + r.w)));
+    const int y1 = std::min(h_, static_cast<int>(std::ceil(r.y + r.h)));
+    if (x1 <= x0 || y1 <= y0) return;
+    painted_px_ += static_cast<size_t>(x1 - x0) * static_cast<size_t>(y1 - y0);
+
+    const int a = c.a;
+    const int ia = 255 - a;
+    const size_t row_bytes = static_cast<size_t>(w_) * 4;
+    uint8_t* base = px_.data();
+    for (int y = y0; y < y1; ++y) {
+        uint8_t* p = base + static_cast<size_t>(y) * row_bytes + static_cast<size_t>(x0) * 4;
+        for (int x = x0; x < x1; ++x, p += 4) {
+            // 四舍五入的整数混合：两条光栅路径都走这一段，帧才继续逐字节可比。
+            p[0] = static_cast<uint8_t>((p[0] * ia + c.r * a + 127) / 255);
+            p[1] = static_cast<uint8_t>((p[1] * ia + c.g * a + 127) / 255);
+            p[2] = static_cast<uint8_t>((p[2] * ia + c.b * a + 127) / 255);
+        }
+    }
+}
+
 void Bitmap::copyRectFrom(const Bitmap& src, const Rect& r) {
     // 尺寸必须一致：两图的行跨度不同时，"同位置拷贝"这件事本身就没定义。
     if (src.w_ != w_ || src.h_ != h_) return;

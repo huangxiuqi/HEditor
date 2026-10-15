@@ -154,6 +154,7 @@ const post = (msg, transfer) => {
 const mirror = {
   info: null, stats: null, layout: null, geom: null,
   text0: '', controls: null, blockedEdits: 0, dirtyPages: [], caretReport: '',
+  selection: null,
   caretLive: -1, heapMB: 0, fontMode: 'full', stateSeq: 0, lastLabel: '', lastMs: 0,
 };
 const host = { ready: false, errors, mirror, pageCanvasCount: 0 };
@@ -479,6 +480,7 @@ function onState(m) {
   mirror.blockedEdits = m.blockedEdits;
   mirror.dirtyPages = m.dirtyPages;
   mirror.caretReport = m.caretReport;
+  mirror.selection = m.selection || mirror.selection;
   mirror.caretLive = m.caretLive;
   mirror.heapMB = m.heapMB;
   mirror.fontMode = m.fontMode;
@@ -555,15 +557,24 @@ function keyToOp(ev) {
   if ((ev.ctrlKey || ev.metaKey) && !ev.altKey) {
     const k = (ev.key || '').toLowerCase();
     if (k === 'z' || k === 'y') return [ev.shiftKey || k === 'y' ? 'redo' : 'undo', {}];
+    // 全选与"到文档首尾"必须在这里拦下。下面那句 return null 会把带修饰键的键位
+    //   全部放行给浏览器，而浏览器对 #ime 的原生全选选中的是一行假文本（空的），
+    //   与文档毫无关系；Ctrl+Home/End 则会把整页滚到顶/底。
+    if (k === 'a') return ['selectAll', {}];
+    if (ev.key === 'Home') return ['docStart', { extend: ev.shiftKey }];
+    if (ev.key === 'End') return ['docEnd', { extend: ev.shiftKey }];
   }
   if (ev.ctrlKey || ev.metaKey || ev.altKey) return null;
   switch (ev.key) {
     case 'Backspace': return ['backspace', {}];
     case 'Delete': return ['deleteForward', {}];
-    case 'ArrowLeft': return ['move', { dcp: -1 }];
-    case 'ArrowRight': return ['move', { dcp: 1 }];
-    case 'Home': return ['lineStart', {}];
-    case 'End': return ['lineEnd', {}];
+    // extend = Shift：锚点不动，选区从锚点那一端继续长（引擎侧 setCaretRel 的 collapse）。
+    case 'ArrowLeft': return ['move', { dcp: -1, extend: ev.shiftKey }];
+    case 'ArrowRight': return ['move', { dcp: 1, extend: ev.shiftKey }];
+    case 'ArrowUp': return ['vertical', { dir: -1, extend: ev.shiftKey }];
+    case 'ArrowDown': return ['vertical', { dir: 1, extend: ev.shiftKey }];
+    case 'Home': return ['lineStart', { extend: ev.shiftKey }];
+    case 'End': return ['lineEnd', { extend: ev.shiftKey }];
     case 'Enter': return ['splitParagraph', {}];
     case 'Tab': return [ev.shiftKey ? 'outdent' : 'indent', {}];
     default:
@@ -655,7 +666,17 @@ const CMD = {
   splitParagraph: () => ['splitParagraph', {}, true],
   mergeWithPreviousParagraph: () => ['mergePrev', {}, true],
   mergeWithNextParagraph: () => ['mergeNext', {}, true],
-  move: (dcp) => ['move', { dcp: dcp || 1 }, true],
+  move: (dcp, extend) => ['move', { dcp: dcp || 1, extend: !!extend }, true],
+  // 上下键与文档首尾：与 move 同一档（引擎的 *AndRender 版自己收尾）。
+  vertical: (dir, extend) => ['vertical', { dir: dir || 1, extend: !!extend }, true],
+  docStart: (extend) => ['docStart', { extend: !!extend }, true],
+  docEnd: (extend) => ['docEnd', { extend: !!extend }, true],
+  lineStart: (extend) => ['lineStart', { extend: !!extend }, true],
+  lineEnd: (extend) => ['lineEnd', { extend: !!extend }, true],
+  // 选区三个入口：两端是全局流位置（不是段内偏移）。
+  selectAll: () => ['selectAll', {}, true],
+  setSelection: (anchor, focus) => ['setSelection', { anchor, focus }, true],
+  clearSelection: () => ['clearSelection', {}, true],
   setCaret: (para, offset) => ['setCaret', { para, offset }],
   setCaretAt: (para, offset, field) => ['setCaretAt', { para, offset, field }],
   setCaretAtSide: (para, offset, side) => ['setCaretAtSide', { para, offset, side }],
@@ -878,6 +899,9 @@ Object.defineProperties(host, {
   blockedEdits: { get: () => mirror.blockedEdits },
   dirtyPages: { get: () => mirror.dirtyPages },
   caretReport: { get: () => mirror.caretReport },
+  // 选区（两端全局流位置 + 页面坐标矩形）。与 caretReport 同一条路：随 state 推过来，
+  //   所以宿主侧读它是同步的 —— 引擎在 Worker 那侧，而"读一次选区"不该是一次往返。
+  selection: { get: () => mirror.selection },
   // 引擎实时光标偏移。引擎在 Worker 那侧，所以这个"实时"只能是**推送那一刻**的实时
   //   —— 与 editStats 里的光标位置取自同一次 state，两者可比。排空之后（quiesce）
   //   读到的就是最新那一拍的账。

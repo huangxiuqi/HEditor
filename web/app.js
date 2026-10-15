@@ -966,6 +966,24 @@ function onKeyDown(ev) {
       else resetBlink();
       return;
     }
+    if (k === 'a') {
+      // 全选走引擎。不能让浏览器对 #ime 做原生全选 —— 那只会选中承接层里那一行
+      //   假文本（它是空的），与文档毫无关系，而且会把选区交给 DOM，
+      //   于是"选中之后打字"落到浏览器手里、文档一个字都不变。
+      ev.preventDefault();
+      if (mod.selectAll()) afterEdit();
+      else resetBlink();
+      return;
+    }
+    if (ev.key === 'Home' || ev.key === 'End') {
+      // Ctrl+Home / Ctrl+End = 文档首 / 文档末；行首行尾是裸 Home/End。
+      ev.preventDefault();
+      const ok = ev.key === 'Home' ? mod.caretToDocStart(ev.shiftKey)
+                                   : mod.caretToDocEnd(ev.shiftKey);
+      if (ok) afterEdit();
+      else resetBlink();
+      return;
+    }
   }
 
   if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
@@ -981,19 +999,26 @@ function onKeyDown(ev) {
       changed = mod.deleteForward();
       break;
     case 'ArrowLeft':
-      changed = mod.moveCaret(-1);
+      changed = mod.moveCaret(-1, ev.shiftKey);
       break;
     case 'ArrowRight':
-      changed = mod.moveCaret(1);
+      changed = mod.moveCaret(1, ev.shiftKey);
+      break;
+    case 'ArrowUp':
+      // 上下键：沿块轴走到相邻行，列位沿行内轴保持（跨短行不丢列）。
+      changed = mod.moveCaretVertical(-1, ev.shiftKey);
+      break;
+    case 'ArrowDown':
+      changed = mod.moveCaretVertical(1, ev.shiftKey);
       break;
     case 'Home':
       // 走引擎的"到行首"，不要用 moveCaret(-1e9) 凑。
       //   之所以"能用"，只是因为 moveCaretBy 走不动时会提前 break；
       //   而且 1e9 表达的是段首段尾，Home/End 要的是行首行尾，语义并不一样。
-      changed = mod.caretToLineStart();
+      changed = mod.caretToLineStart(ev.shiftKey);
       break;
     case 'End':
-      changed = mod.caretToLineEnd();
+      changed = mod.caretToLineEnd(ev.shiftKey);
       break;
     case 'Enter':
       // 回车 = 分段（跨段编辑），不是"确认/提交"。
@@ -1442,10 +1467,42 @@ const facade = {
   },
   // 返回 null 表示"光标没动"（引擎返回 false 就不重绘）——
   //   探针据此断言"已经在段首了，再左移不会重绘"。
-  move(dcp) {
-    if (!ready || !mod.moveCaret(dcp || 1)) return null;
+  // extend = Shift 扩展：锚点不动，选区从锚点那一端继续长。
+  move(dcp, extend) {
+    if (!ready || !mod.moveCaret(dcp || 1, !!extend)) return null;
     return JSON.parse(mod.editStatsJson());
   },
+  // 上下键（dir < 0 上 / > 0 下）、文档首尾、全选、选区读写。
+  //   全部走引擎的 *AndRender 版 —— 与真人按键同一条路径，探针拿到的统计才有意义。
+  vertical(dir, extend) {
+    if (!ready || !mod.moveCaretVertical(dir || 1, !!extend)) return null;
+    return JSON.parse(mod.editStatsJson());
+  },
+  docStart(extend) {
+    if (!ready || !mod.caretToDocStart(!!extend)) return null;
+    return JSON.parse(mod.editStatsJson());
+  },
+  docEnd(extend) {
+    if (!ready || !mod.caretToDocEnd(!!extend)) return null;
+    return JSON.parse(mod.editStatsJson());
+  },
+  selectAll() {
+    if (!ready || !mod.selectAll()) return null;
+    return JSON.parse(mod.editStatsJson());
+  },
+  setSelection(anchor, focus) {
+    if (!ready || !mod.setSelection(anchor, focus)) return null;
+    return JSON.parse(mod.editStatsJson());
+  },
+  clearSelection() {
+    if (!ready) return null;
+    mod.clearSelection();
+    return JSON.parse(mod.editStatsJson());
+  },
+  // 选区取证：两端（全局流位置）+ 页面坐标矩形。空选区给空 rects。
+  //   是属性不是方法 —— 与 caretReport / caretLive 同一个形态，两个宿主的门面
+  //   在这里必须逐字对齐（探针两边跑同一份脚本）。
+  get selection() { return mod ? JSON.parse(mod.selectionReport()) : null; },
   // 走的是和"点画布"完全相同的路径（改位置 + 呈现），
   //   所以探针拿到的统计和真人操作得到的是一回事。
   setCaret(para, offset) { setCaretAndPresent(para, offset); return this.caret; },

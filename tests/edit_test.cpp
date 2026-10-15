@@ -7191,6 +7191,42 @@ int main() {
             expectTrue(e4.blocks()[0].cp_text.size() == n_before, "恢复之后文本一字不差");
             expectTrue(e4.auditCompile() == 0, "★ 显示回来之后产物仍与全量一致");
         }
+
+        // (f) 换坐标基之后光标不动。判据钉的是"块起点一换，光标要按段内位置重新落基"：
+        //   光标存的是全局流位置，而这个下标只有配上块起点才读得出段与段内位置 —— 前面那一段
+        //   少了几位，下标没变、含义却变了，于是光标会往前漂。漂移是静默的：它只让 caret()
+        //   的两个字段各差一点，不相邻的段之间没有任何断言会顺带撞上。
+        //   这一段走隐藏控件：改完结构却不摆落点的只有它（别的编辑入口改完都把落点摆到编辑处），
+        //   而 hidden 只在呈现态摘除，所以要装在表单模式上。
+        {
+            std::vector<BlockSpec> b5(3);
+            b5[0].setText("前一段带字段：甲乙丙");
+            b5[1].setText("中间那段");
+            b5[2].setText("后面那段，光标停在这里");
+            std::vector<DemoFieldSpec> f5(1);
+            f5[0].para = 0;
+            f5[0].so = 7;
+            f5[0].eo = 9;
+            f5[0].key = "k1";
+
+            EditorEngine e5;
+            expectTrue(e5.init({cjkPath}), "落基：字体加载成功");
+            EngineConfig ec5;
+            ec5.zoom = 1.0f;
+            e5.setConfig(ec5);
+            e5.setDocument(demoTree(b5, f5), StyleSheet{});
+            e5.setEditMode(EditMode::Form);
+            e5.relayout();
+
+            e5.setCaret(2, 4);
+            const TextPos before5 = e5.caret();
+            expectTrue(before5.para == 2 && before5.offset == 4, "落基：光标先停在第三段第 4 个字");
+            expectTrue(e5.setControlProp(0, ControlProp::Hidden, true), "把第一段那个字段隐藏");
+            const TextPos after5 = e5.caret();
+            expectTrue(after5 == before5,
+                       "★ 前面那一段少了几位之后光标仍在 (2, 4)：换基要按段内位置重新落基（实际 (" +
+                           std::to_string(after5.para) + ", " + std::to_string(after5.offset) + ")）");
+        }
     }
 
     std::printf("\n[35] 退格删控件：光标在闭括号后面才退役它，在内容末尾删的是字\n");
@@ -7394,6 +7430,156 @@ int main() {
         e36.setConfig(c36c);
         expectTrue(e36.typeTextAndRender("\xE6\xB5\x8B"), "上限 0 时照样能编辑");
         expectTrue(e36.undoAndRender(), "上限 0 时那一笔照样能撤");
+    }
+
+    std::printf("\n[37] 选区与移动族：真源、扩展、上下键与矩形\n");
+    {
+        // 这一节管的是"选区是引擎里的一等状态，不是宿主自己记的两对数"：扩展移动只动
+        //   focus（anchor 留在原处）、别的定位一律把选区折叠、上下键跨短行保住列位，
+        //   以及选区最终能不能落到矩形上 —— 看不见的选区等于没有。
+        std::vector<BlockSpec> bl37(3);
+        bl37[0].setText("第一段甲乙丙丁戊己庚辛壬癸子丑寅卯");
+        bl37[1].setText("第二段辰巳午未申酉戌亥甲乙丙丁戊");
+        bl37[2].setText("第三段");
+
+        EditorEngine e37;
+        expectTrue(e37.init({cjkPath}), "选区：字体加载成功");
+        EngineConfig c37;
+        c37.zoom = 1.0f;
+        // 页宽调窄：上下键与"跨行拆矩形"必须真的跨行才算测到，A4 宽很可能一行装得下。
+        c37.page.width_pt = 200.0f;
+        c37.page.margin_pt = 20.0f;
+        e37.setConfig(c37);
+        e37.setDocument(demoTree(bl37, {}), StyleSheet{});
+        e37.setEditMode(EditMode::Document);
+        e37.relayout();
+
+        // (a) 初始：空选区
+        expectTrue(!e37.hasSelection(), "刚装载：没有选区");
+
+        // (b) 扩展移动：anchor 不动
+        e37.setCaret(0, 3);
+        const FlowPos anchor0 = e37.selection().anchor;
+        expectTrue(e37.moveCaretBy(2, /*extend=*/true), "Shift+右 走两格");
+        expectTrue(e37.hasSelection(), "★ 扩展之后有选区");
+        expectTrue(e37.selection().anchor == anchor0, "★ 锚点没动（扩展从锚点那一端长）");
+        const FlowPos focus0 = e37.selection().focus;
+        expectTrue(focus0 == anchor0 + 2, "焦点端在锚点之后两格");
+        expectTrue(e37.moveCaretBy(3, true), "再 Shift+右 走三格");
+        expectTrue(e37.selection().anchor == anchor0, "★ 连续扩展锚点仍不动");
+        expectTrue(e37.selection().focus == focus0 + 3, "焦点端又前进三格");
+
+        // (c) 反向扩展：锚点仍然不动、焦点越过锚点（选区换了方向）
+        expectTrue(e37.moveCaretBy(-4, true), "Shift+左 回退四格");
+        expectTrue(e37.selection().anchor == anchor0, "★ 反向扩展锚点还是不动");
+        expectTrue(e37.selection().focus == focus0 - 1, "焦点端落到锚点之前一格");
+
+        // (d) 普通移动把选区折叠
+        expectTrue(e37.moveCaretBy(1, false), "裸右移");
+        expectTrue(!e37.hasSelection(), "★ 非扩展移动把选区折叠（两端收到一起）");
+
+        // (e) 越界夹取
+        e37.setSelection(Range{999999, -5});
+        const Range clamped = e37.selection();
+        expectTrue(clamped.anchor >= 0 && clamped.focus >= 0, "夹取：两端都不为负");
+        expectTrue(clamped.focus == 0, "夹取：负的那端收到 0");
+        expectTrue(clamped.anchor > 0, "夹取：越界的那端收到能到的最远处");
+
+        // (f) 全选：起点是第一块内容的起点、末端是最后一段的段末
+        expectTrue(e37.selectAll(), "全选");
+        const Range all37 = e37.selection();
+        //   起点不写死 0：流位置 0 可能落在文档最前面的节点边界上，而"全选"选的是
+        //   内容 —— 起点该是第一块内容的第一个插入点，那才是"到文档首"的落点
+        //   （moveCaretToDocStart 走的就是它）。
+        e37.moveCaretToDocStart();
+        const FlowPos doc_first = e37.selection().focus;
+        expectTrue(all37.begin() == doc_first,
+                   "★ 全选起点是第一块内容起点（期望 " + std::to_string(doc_first) +
+                       "，实际 " + std::to_string(all37.begin()) + "）");
+        expectTrue(all37.focus > all37.anchor, "锚点在首、焦点在末");
+        e37.setCaretAtFlow(all37.end());
+        expectTrue(e37.caret().para == 2 && e37.caret().offset == 3,
+                   "★ 全选的末端就是最后一段的段末（实际 (" +
+                       std::to_string(e37.caret().para) + ", " +
+                       std::to_string(e37.caret().offset) + ")）");
+
+        // (g) 空选区零矩形
+        e37.setCaret(0, 0);
+        expectTrue(!e37.hasSelection(), "定位之后没有选区");
+        expectTrue(e37.selectionRects().empty(), "★ 空选区零矩形");
+
+        // (h) 一行内两字：一个矩形，宽 = 两簇推进之和
+        expectTrue(e37.moveCaretBy(2, true), "Shift+右 两格 = 选中两个字");
+        const std::vector<EditorEngine::PageRect> rects37 = e37.selectionRects();
+        expectTrue(rects37.size() == 1,
+                   "同一行内两字 → 一个矩形（实际 " + std::to_string(rects37.size()) + "）");
+        const LineBox* lb37 = nullptr;
+        for (const LineBox& lb : e37.layout().lines) {
+            if (lb.paragraph == 0) { lb37 = &lb; break; }
+        }
+        expectTrue(lb37 != nullptr, "第一段有行盒");
+        if (lb37 != nullptr && rects37.size() == 1) {
+            const float x0 = lb37->clusters[0].inline_pt;
+            const float x1 = lb37->clusters[2].inline_pt;
+            expectTrue(std::fabs(rects37[0].r_pt.w - (x1 - x0)) < 0.01f,
+                       "★ 矩形宽 = 两簇推进之和（期望 " + std::to_string(x1 - x0) +
+                           "，实际 " + std::to_string(rects37[0].r_pt.w) + "）");
+        }
+
+        // (i) 跨行：矩形按行拆开，块轴范围各不同
+        expectTrue(e37.selectAll(), "再全选");
+        const std::vector<EditorEngine::PageRect> many37 = e37.selectionRects();
+        expectTrue(many37.size() >= 4,
+                   "★ 全选的矩形按行拆（实际 " + std::to_string(many37.size()) + " 个）");
+        if (many37.size() >= 2) {
+            float lo_y = 1e9f;
+            float hi_y = -1e9f;
+            for (const EditorEngine::PageRect& pr : many37) {
+                lo_y = std::min(lo_y, pr.r_pt.y);
+                hi_y = std::max(hi_y, pr.r_pt.y);
+            }
+            expectTrue(hi_y > lo_y, "★ 折行的矩形块轴位置各不相同（最小的 " +
+                                        std::to_string(lo_y) + " < 最大的 " +
+                                        std::to_string(hi_y) + "）");
+        }
+
+        // (j) 上下键：↓↑ 回原位
+        e37.clearSelection();
+        e37.setCaret(0, 4);
+        const TextPos base37 = e37.caret();
+        expectTrue(e37.moveCaretVertical(1), "向下走一行");
+        expectTrue(!(e37.caret() == base37), "★ 向下之后位置变了");
+        expectTrue(e37.moveCaretVertical(-1), "向上回来");
+        expectTrue(e37.caret() == base37, "★ ↓↑ 回到原位");
+
+        // (k) 列位保持：跨过一条短行之后，落点仍与起点同列而不是短行的行末
+        e37.setCaret(0, 8);
+        Rect ra37{};
+        expectTrue(e37.caretRectPt(&ra37), "取起始光标的页面矩形");
+        expectTrue(e37.moveCaretVertical(1), "下移（进短行）");
+        expectTrue(e37.moveCaretVertical(1), "再下移（出行）");
+        Rect rc37{};
+        expectTrue(e37.caretRectPt(&rc37), "取落定光标的页面矩形");
+        expectTrue(std::fabs(rc37.x - ra37.x) < 1.0f,
+                   "★ 跨过短行后列位保留（起点 x " + std::to_string(ra37.x) +
+                       "，落点 x " + std::to_string(rc37.x) + "）");
+
+        // (l) 文档首尾
+        e37.setCaret(2, 3);
+        expectTrue(e37.moveCaretToDocStart(), "到文档首");
+        expectTrue(e37.caret().para == 0 && e37.caret().offset == 0, "★ 到文档首");
+        expectTrue(!e37.moveCaretToDocStart(), "已经在文档首：再按不动（返回假）");
+        expectTrue(e37.moveCaretToDocEnd(), "到文档末");
+        expectTrue(e37.caret().para == 2 && e37.caret().offset == 3, "★ 到文档末");
+        e37.setCaret(1, 2);
+        expectTrue(e37.moveCaretToDocEnd(/*extend=*/true), "Shift+Ctrl+End");
+        expectTrue(e37.selection().anchor != e37.selection().focus, "★ 扩展版真的扩展了");
+
+        // (m) 编辑之后不留残选区 —— 忘了清的症状是"打完字还留着一条看不见的选区"
+        e37.selectAll();
+        expectTrue(e37.hasSelection(), "先全选");
+        expectTrue(e37.typeTextAndRender("\xE6\xB5\x8B"), "打一个字");
+        expectTrue(!e37.hasSelection(), "★ 编辑之后选区被清掉了（没有残留）");
     }
 
     std::printf("\n──────────────────────────────\n");

@@ -2899,6 +2899,129 @@ async function main() {
     }
   }
 
+  chk.section('[18] 选区与移动族：Shift 扩展、上下键、Ctrl+A、选区上屏');
+  {
+    // 这一节判的是"用户按键这一路"：全部派真实 keydown，不走门面调用 ——
+    //   门面调用绕过的正是要判的那一段（宿主把 key + 修饰键翻译成引擎命令）。
+    // 文档换成长段：上下键与"跨行拆矩形"必须真的跨行，一行装得下的文档测不出来。
+    await c.eval(
+      'await window.__heditor.loadTextDocument(' +
+      JSON.stringify('甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉戌亥') +
+      ', 3); return true;');
+
+    // (a) 装载之后没有选区 —— 反向一半：没有选区就没有要画的东西
+    const s0 = await c.eval('return window.__heditor.selection;');
+    chk.check('装载之后没有选区（两端重合）', !!s0 && s0.empty === true, JSON.stringify(s0));
+    chk.check('★ 空选区零矩形（反向：没选区就没东西可画）',
+              !!s0 && s0.rects.length === 0, JSON.stringify(s0 && s0.rects));
+
+    // (b) Shift+右：选区从锚点那一端长
+    await c.eval('await window.__heditor.setCaret(0, 0); return true;');
+    const anchor0 = await c.eval('return window.__heditor.selection.anchor;');
+    await c.eval(key('ArrowRight', ', shiftKey: true'));
+    await c.eval(key('ArrowRight', ', shiftKey: true'));
+    const s1 = await c.eval('return window.__heditor.selection;');
+    chk.check('★ Shift+右 之后有选区', s1.empty === false, JSON.stringify(s1));
+    chk.check('★ 锚点留在起点没动', s1.anchor === anchor0, `anchor=${s1.anchor} 原=${anchor0}`);
+    chk.check('焦点端前进两格', s1.focus === anchor0 + 2, `focus=${s1.focus}`);
+
+    // (c) 连续扩展：锚点还是那一个（不是"每次重新起头"）
+    await c.eval(key('ArrowRight', ', shiftKey: true'));
+    const s2 = await c.eval('return window.__heditor.selection;');
+    chk.check('★ 连续 Shift+右 锚点仍不动', s2.anchor === anchor0, `anchor=${s2.anchor}`);
+    chk.check('焦点端再前进一格', s2.focus === s1.focus + 1, `focus=${s2.focus}`);
+
+    // (d) Shift+左：反向扩展，锚点仍不动
+    await c.eval(key('ArrowLeft', ', shiftKey: true'));
+    const s3 = await c.eval('return window.__heditor.selection;');
+    chk.check('★ 反向扩展锚点也不动', s3.anchor === anchor0, `anchor=${s3.anchor}`);
+    chk.check('焦点端回退一格', s3.focus === s2.focus - 1, `focus=${s3.focus}`);
+
+    // (e) 选区上屏：矩形真的落到了页面上
+    chk.check('★ 选区落到了矩形上', s3.rects.length >= 1, `rects=${s3.rects.length}`);
+    if (s3.rects.length) {
+      const r = s3.rects[0];
+      chk.check('矩形有正的宽高', r.w > 0 && r.h > 0, JSON.stringify(r));
+    }
+    // 像素级证据：同一份文档、同一相位，只看"有选区 / 无选区"两张帧。
+    //
+    //   尺子不能用"非白像素数（任一通道 < 200）"：选区填充是留给文字透出来的浅蓝
+    //   （alpha 90），混到纸面上是 228/241/255 —— 三个通道都够亮，那把尺子按定义
+    //   量不出它（实测差 +2，那只是字形抗锯齿边缘被压过阈值的那几个像素）。
+    //   填充的指纹是"偏蓝"：b 明显高于 r。空选区时这个计数只来自次像素抗锯齿的边缘。
+    //
+    //   两条一起才算数，而且它们各自只钉一件事，能独立地翻红：
+    //     偏蓝的像素变多 —— 有东西被涂上去了（没画 ⇒ 这条红）；
+    //     变暗的像素基本不涨 —— 涂上去的是"洗"不是"块"，纸面与文字都还亮着
+    //       （改成实心填充 ⇒ 这条红，而上一条照样绿）。
+    //   所以门限取 r >= 170：实心填充的 r 是 178，仍然算"偏蓝"，
+    //   两条才能各自只钉一件事，而不是一起红。
+    const scanExpr = `
+      const f = await window.__heditor.rawFrame();
+      let ink = 0, blue = 0;
+      for (let i = 0; i + 3 < f.length; i += 4) {
+        const r = f[i], g = f[i + 1], b = f[i + 2];
+        if (r < 200 || g < 200 || b < 200) ++ink;
+        if (b - r >= 8 && r >= 170) ++blue;
+      }
+      return { ink, blue };`;
+    await c.eval(
+      'await window.__heditor.setCaret(0, 0); await window.__heditor.stopBlink(); return true;');
+    const pxNo = await c.eval(scanExpr);
+    await c.eval(key('ArrowRight', ', shiftKey: true'));
+    await c.eval(key('ArrowRight', ', shiftKey: true'));
+    const pxSel = await c.eval(scanExpr);
+    const dBlue = Number(pxSel.blue) - Number(pxNo.blue);
+    const dInk = Number(pxSel.ink) - Number(pxNo.ink);
+    chk.check('★ 选区真的画进了帧（偏蓝的像素数变多）', dBlue >= 200,
+              `有选区 ${pxSel.blue} vs 无选区 ${pxNo.blue}（差 ${dBlue}）`);
+    chk.check('★ 涂上去的是混合不是实心（纸面没被压暗）', dInk <= 50,
+              `有选区 ${pxSel.ink} vs 无选区 ${pxNo.ink}（差 ${dInk}）`);
+    const stSel = await c.eval('return window.__heditor.editStats;');
+    chk.check('这一拍确实重画过（不是"只算了矩形没画"）', Number(stSel.repaintedPixels) > 0,
+              `${stSel.repaintedPixels}`);
+
+    // (f) 裸方向键把选区折叠
+    await c.eval(key('ArrowRight'));
+    const s4 = await c.eval('return window.__heditor.selection;');
+    chk.check('★ 裸方向键把选区折叠（不留看不见的选区）', s4.empty === true, JSON.stringify(s4));
+
+    // (g) Ctrl+A 全选
+    await c.eval('await window.__heditor.setCaret(0, 0); return true;');
+    await c.eval(key('a', ', ctrlKey: true'));
+    const sa = await c.eval('return window.__heditor.selection;');
+    chk.check('★ Ctrl+A 全选（走真事件）', sa.empty === false, JSON.stringify(sa));
+    chk.check('★ 全选跨行 ⇒ 多个矩形（整篇确实被选中）', sa.rects.length >= 2,
+              `rects=${sa.rects.length}`);
+
+    // (h) 上下键：↓↑ 回原位
+    await c.eval('await window.__heditor.setCaret(0, 0); return true;');
+    const cb = await c.eval('return window.__heditor.caret;');
+    await c.eval(key('ArrowDown'));
+    const cd = await c.eval('return window.__heditor.caret;');
+    chk.check('★ ↓ 走到了别的行（位置变了）', !(cd.para === cb.para && cd.offset === cb.offset),
+              `${JSON.stringify(cb)} → ${JSON.stringify(cd)}`);
+    await c.eval(key('ArrowUp'));
+    const cu = await c.eval('return window.__heditor.caret;');
+    chk.check('★ ↓↑ 回到原位', cu.para === cb.para && cu.offset === cb.offset,
+              `${JSON.stringify(cb)} → ${JSON.stringify(cu)}`);
+
+    // (i) Shift+↓ 扩展（与 Shift+左右 共用同一个 collapse 口径）
+    await c.eval(key('ArrowDown', ', shiftKey: true'));
+    const sd = await c.eval('return window.__heditor.selection;');
+    chk.check('★ Shift+↓ 扩展出选区', sd.empty === false, JSON.stringify(sd));
+
+    // (j) 文档首尾：Ctrl+Home / Ctrl+End（裸 Home/End 是行首行尾，见 [3]）
+    const tp = await c.eval('return window.__heditor.editStats.totalParagraphs;');
+    await c.eval(key('End', ', ctrlKey: true'));
+    const ce = await c.eval('return window.__heditor.caret;');
+    chk.check('Ctrl+End 落在最后一段', ce.para === Number(tp) - 1, `para=${ce.para} 共 ${tp} 段`);
+    await c.eval(key('Home', ', ctrlKey: true'));
+    const chh = await c.eval('return window.__heditor.caret;');
+    chk.check('Ctrl+Home 回到第一段段首', chh.para === 0 && chh.offset === 0,
+              JSON.stringify(chh));
+  }
+
   // 收尾：载入表单样例 + 恢复闪烁，截一张给人看
   //   刻意停在表单模式（而不是纯文档场景）：截图要能一眼看出
   //     "字段的边界长什么样、只读的那个是灰的"。文档模式也画括号，只有只读模式不画。

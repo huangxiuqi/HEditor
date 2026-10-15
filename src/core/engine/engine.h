@@ -146,8 +146,9 @@ public:
      * 光标。对外坐标仍是 (段, 段内码点偏移)，任何设置入口都会先夹到合法范围、
      * 再吸附到字素簇边界 —— 所以光标永远不会停在半个 é（e + U+0301）中间。
      *
-     * 引擎内部只存一个数：caret_rel_（段内流位置，括号占位算在里面）。下面这些入口
-     * 都是"把别的坐标系翻成它"，对外接口一个字没变。
+     * 引擎内部的真源是一对全局流位置（selection_ 的 anchor 与 focus，见它的注释），
+     * 段号与段内流位置都由 focus 投影出来。下面这些入口都是"把别的坐标系翻成它"，
+     * 对外接口一个字没变。
      */
     void setCaret(int para, size_t offset);
     void setCaret(TextPos p) { setCaret(p.para, p.offset); }
@@ -168,21 +169,55 @@ public:
      * 插入后是插入区间的终点、Tab 的目标、撤销恢复的位置，它们都已经是流位置。
      */
     bool setCaretAtFlow(FlowPos flow);
+
     /**
-     * 光标位置（派生）。段号 + 段内码点偏移，由 caret_rel_ 算出来 —— 不再是独立状态。
+     * 选区：一对流位置，带方向（anchor 是不动的那一端）。
+     *
+     * 引擎从第一天起就只存这一个值（见 selection_ 的注释），此前对外只露它的 focus；
+     * 下面这几个入口把它按选区露出来。空选区（两端重合）就是光标 —— 所以
+     * hasSelection() 为假时 caret() 给出的就是它的位置，两者不是两套状态。
+     */
+    Range selection() const { return selection_; }
+    /**
+     * 选区非空：两端不重合。它判的是"有没有选中东西"，不是"光标在不在"。
+     */
+    bool hasSelection() const { return !selection_.empty(); }
+    /**
+     * 程序化设选区（宿主恢复、探针摆位）。两端各自夹到文档流的合法范围内。
+     * 传空区间就等于定位。
+     *
+     * 这里不做端点规范化（外扩到控件边界）：那是"要取出片段"时才需要的性质
+     * （见 range.h 的 normalizeRange），而拖选出来的端点本来就该停在用户指的地方。
+     */
+    bool setSelection(Range r);
+    /**
+     * 取消选区：anchor 收到 focus，焦点端不动 —— 光标留在原地。
+     */
+    void clearSelection();
+    /**
+     * 全选：文档首到文档末。
+     *
+     * 末端的口径是"最后一块的段内末端"，不是最后一块之后：段间那个段落标记不属于
+     * 任何一段的内容，够不到它。
+     */
+    bool selectAll();
+
+    /**
+     * 光标位置（派生）。段号 + 段内码点偏移，由 focus 投影出来 —— 不再是独立状态。
      */
     TextPos caret() const;
     /**
      * 光标当前的归属（-1 = 不在任何控件里；LineBox::kInlineOffsetOuter = 在所有控件之外）。
-     * 由 caret_rel_ 直接查，不是独立状态。
+     * 由 focus 投影出来的段内流位置直接查，不是独立状态。
      */
     int caretFieldHint() const;
     /**
      * 光标的侧别（派生）：在它那个码点偏移上跨过了几枚边界括号（0 = 在所有括号之前）。
      * 与 caret() 合起来才是光标的完整位置 —— 同一个偏移上可能有好几个插入点
      * （控件之前 / 进入控件 / 内容末尾 / 控件之后），光有偏移表达不了。
-     * 它是 rel 与偏移的差，所以不可能与光标位置不同步 —— 这就是它取代 caret_side_
-     * 与 caret_side_at_ 那两个字段的理由（那两个字段天然可能失配，才需要失效标记兜）。
+     * 它是段内流位置与码点偏移的差，而两者都由 focus 投影 —— 这一路没有中间状态，
+     * 所以不可能与光标位置不同步。这就是它取代 caret_side_ 与 caret_side_at_ 那两个
+     * 字段的理由（那两个字面量天然可能失配，才需要失效标记兜）。
      */
     int caretSide() const;
     /**
@@ -194,13 +229,32 @@ public:
     /**
      * 按"用户感知字符"（簇）移动。dcp > 0 向后、< 0 向前。
      * 返回 true 表示光标真的动了（没动就别重绘）。
+     *
+     * extend 为真时锚点不动：Shift+方向 是从锚点那一端继续扩展，而不是每次重新起头。
+     * 锚点不需要"进入扩展态"这样一个额外状态 —— 第一次按 Shift 时它自然就是那时的
+     * 光标位置（此前所有非扩展移动都把两端收到一起）。
      */
-    bool moveCaretBy(int dcp);
+    bool moveCaretBy(int dcp, bool extend = false);
     /**
      * 到行首/行尾，不是段首/段尾 —— 这才是 Home/End 该有的语义。
      */
-    bool moveCaretToLineStart();
-    bool moveCaretToLineEnd();
+    bool moveCaretToLineStart(bool extend = false);
+    bool moveCaretToLineEnd(bool extend = false);
+    /**
+     * 到文档首 / 文档末（Ctrl+Home / Ctrl+End）。
+     *
+     * 与行首行尾分开：段与行是两个概念，而"整篇的开头"还要再退过节点边界。
+     */
+    bool moveCaretToDocStart(bool extend = false);
+    bool moveCaretToDocEnd(bool extend = false);
+    /**
+     * 上下键：沿块轴走到相邻行，列位沿行内轴保持。
+     *
+     * dir < 0 向上、> 0 向下。跨短行时列位不丢（列位在第一次按时取自光标当前的行内
+     * 坐标，之后连续按都沿用）。列位是会话状态不是文档状态，任何非扩展的定位都会清掉它
+     * （见 setCaretRel）—— 不清的症状是"鼠标点去别处，再按上还跳回那一列"。
+     */
+    bool moveCaretVertical(int dir, bool extend = false);
     void showCaret(bool on);
 
     /**
@@ -238,14 +292,19 @@ public:
     bool splitParagraphAndRender();
     bool mergeWithPreviousParagraphAndRender();
     bool mergeWithNextParagraphAndRender();
-    bool moveCaretAndRender(int dcp);
+    bool moveCaretAndRender(int dcp, bool extend = false);
     /**
      * Home / End：到行首 / 行尾。
      *
      * 不用 moveCaret(±1e9) 实现：那样依赖 moveCaretBy 走不动时提前 break，且语义不同。
      */
-    bool moveCaretToLineStartAndRender();
-    bool moveCaretToLineEndAndRender();
+    bool moveCaretToLineStartAndRender(bool extend = false);
+    bool moveCaretToLineEndAndRender(bool extend = false);
+    bool moveCaretToDocStartAndRender(bool extend = false);
+    bool moveCaretToDocEndAndRender(bool extend = false);
+    bool moveCaretVerticalAndRender(int dir, bool extend = false);
+    bool selectAllAndRender();
+    bool setSelectionAndRender(Range r);
 
     /**
      * 表单控件：文档流里的区间标注，不是矩形。模型与"区间为什么是活的"见
@@ -380,16 +439,24 @@ public:
     int controlAtPt(float x_pt_frame, float y_pt_frame) const;
 
     /**
-     * 控件在页面坐标下的矩形。
-     * 返回的是 vector —— 因为区间跨行/跨页时它本来就该是多个矩形。
-     * "控件是一个矩形"这个直觉只在单行短字段上成立；一旦内容换行就不成立了，
-     * 所以接口从第一天就按"多个"来设计，免得以后改签名。
+     * 页面坐标下的一个矩形（页号 + 页面坐标磅矩形）。
+     *
+     * 控件矩形与选区矩形共用它：两者都可能跨行/跨页，"一个矩形"只在单行短内容上
+     * 成立，所以接口从第一天就按"多个"来设计，免得以后改签名。
      */
-    struct ControlRect {
+    struct PageRect {
         int page = 0;
         Rect r_pt{};
     };
+    /**
+     * 控件矩形的原名。改名只是把"页号 + 页面矩形"从控件里提出来，调用点不必动。
+     */
+    using ControlRect = PageRect;
     std::vector<ControlRect> controlRects(int index) const;
+    /**
+     * 选区 → 页面坐标矩形（跨行拆、跨页分段）。空选区是空的 —— 没有选区就没有要画的。
+     */
+    std::vector<PageRect> selectionRects() const;
 
     /**
      * 删除一个控件。keep_content 为真时拆壳留内容（那一段字符变成普通正文），
@@ -698,13 +765,55 @@ private:
      */
     const std::vector<InlineObject>& objectsFor(int para) const;
     /**
-     * 光标唯一的写入点：段内流位置。其余入口都只是把它换算成 rel 再调这里。
+     * 光标与选区的唯一写入点：段内流位置。
+     *
+     * collapse 为真（默认）时 anchor 与 focus 一起落到同一个位置（空选区）——
+     * 程序化定位不是"扩展选区"，它表达的是"把光标摆到这里"，选区因此随之作废。
+     * 为假时只动 focus、anchor 留在原处，这就是 Shift+方向 的扩展。
+     *
+     * 顺带把上下键的列位作废：列位只在一串连续的上下键里才有意义，
+     * 别的定位都该让它从头取（见 moveCaretVertical）。
      */
-    void setCaretRel(int para, int rel);
+    void setCaretRel(int para, int rel, bool collapse = true);
+    /**
+     * 光标那一段（派生）= focus 落在哪一块。block_flow_ 单调，二分取最后一个起点不超过它的块。
+     */
+    int caretPara() const;
+    /**
+     * 段内流位置（派生）= focus 减本段起点。侧别与归属都由它推。
+     */
+    int caretRel() const;
+    /**
+     * 任意流位置的段下标（caretPara 的投影原型；这个入口是它在 focus 上的特例）。
+     */
+    int paraForFlow(FlowPos f) const;
+    /**
+     * 任意流位置的段内流位置（caretRel 的投影原型）。
+     */
+    int relForFlow(FlowPos f) const;
+    /**
+     * 任意流位置的侧别（caretSide 的投影原型）：段内流位置减去该偏移在流里占的起点。
+     */
+    int sideForFlow(FlowPos f) const;
+    /**
+     * 在某一行里按"沿行内轴的页面坐标"（横排 x / 竖排 y）命中插入点。
+     * hitTestPt 的行内那一半抽出来给上下键共用 —— 两份实现会分头长出不同的势力范围。
+     */
+    void hitTestInLine(const LineBox& lb, float inline_page_pt, uint32_t* cp_out,
+                       int* side_out) const;
+    /**
+     * 光标沿行内轴的页面坐标 —— 上下键的列位就是它。找不到行盒返回 0。
+     */
+    float caretInlineAxisPt() const;
+    /**
+     * 选区矩形（帧像素坐标，与 caretRectPx 同口径）。
+     */
+    std::vector<Rect> selectionRectsPx() const;
     /**
      * 把"文本坐标 + 侧别"投影成 rel 并摆好（含重排）。side < 0 = 按"最内层含端点"投影。
+     * extend 为真时不动锚点（Shift+Home/End 用）。
      */
-    void projectCaret(int para, size_t offset, int side);
+    void projectCaret(int para, size_t offset, int side, bool extend = false);
     /**
      * 段内相对流位置 = 码点偏移 + 排在它前面的边界数 + 侧别。
      */
@@ -1001,21 +1110,34 @@ private:
     EngineStats stats_;
     EditStats edit_stats_;
 
-    int caret_para_ = 0;
     /**
-     * 光标的唯一真源：段内流位置（括号占位算在里面）。
+     * 光标与选区的唯一真源：一对全局流位置（anchor 是不动的那一端，focus 跟着光标走）。
      *
-     * 为什么不是一个码点偏移：同一个偏移上可能压着好几枚括号（相邻空字段就是 ][][]），
-     * "控件之前 / 进入控件 / 内容末尾 / 控件之后"是互不相同的插入点，而码点偏移不含括号、
-     * 表达不了它们 —— 每次要问"这是流里的哪个位置"都得猜，猜的入口越多、漏在接缝上的
-     * bug 越多（"删一个字光标跳一格""字打进了隔壁字段"）。
-     * rel 就是"数格子"：文本字与边界括号各占一位，于是
-     *   偏移 = cpOffsetInBlock(para, rel)（派生）
-     *   侧别 = rel - 偏移 - 排在它前面的边界数（派生）
-     * 两个派生值不可能与它不同步 —— 这就是它取代 caret_side_ / caret_side_at_ 的理由。
+     * 为什么用全局流位置而不是 (段, 段内流位置)：同一个码点偏移上可能压着好几枚括号
+     * （相邻空字段就是 ][][]），"控件之前 / 进入控件 / 内容末尾 / 控件之后"是互不相同的
+     * 插入点 —— 这一点本来就要流位置才表达得了。而选区一落地就有两个端点，两端必须共用
+     * 一套坐标，全局流位置正是模型层的 Range 与事务里那两份选区快照用的坐标：端点、事务、
+     * 位置映射三者同源，中间不必再翻译一次（翻译正是"共享边界上画到另一侧"那类缺陷的来处）。
+     *
+     * 段号与段内流位置降为派生量（caretPara / caretRel），侧别照旧是段内流位置与码点偏移
+     * 的差 —— 三个派生量都由 focus 现算，没有一个能与它失配。
      */
-    int caret_rel_ = 0;
+    Range selection_{};
     bool caret_visible_ = true;
+    /**
+     * 上下键的列位（沿行内轴的页面坐标，磅）与"它还算数吗"。
+     *
+     * 为什么是会话状态而不是每次从光标现取：跨过一条短行之后光标已经贴在那一行的行末，
+     * 再按一下要落回同一个列位，否则连按会沿着短行的行末一路滑走。
+     * 第一次按取光标当前位置，之后连续按沿用；任何别的定位都清掉它（见 setCaretRel）。
+     */
+    float vertical_goal_pt_ = 0.0f;
+    bool vertical_goal_valid_ = false;
+    /**
+     * 上一帧画过的选区矩形（帧像素）。下次呈现先按它擦掉 —— 与 caret_rect_px_prev_
+     * 同一个理由：选区画在帧上、不进底图，不擦就会留下上一帧的一片蓝。
+     */
+    std::vector<Rect> selection_rects_prev_;
 
     /**
      * 底图当前显示的范围与有效性

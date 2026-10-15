@@ -57,6 +57,11 @@ struct EngineConfig {
     Color page_fill = Color::rgb(255, 255, 255);
     Color page_border = Color::rgb(206, 212, 218);
     Color caret_color = Color::rgb(31, 111, 235);
+    /**
+     * 选区底色。alpha 故意不是 255：它盖在文字上，实心填充会把字一起抹掉。
+     * 混过之后白底大约落在浅蓝那一带、字仍是深色 —— 这才是"选中"该有的样子。
+     */
+    Color selection_color = Color{178, 214, 255, 90};
     float caret_width_pt = 1.4f;
     bool draw_page_border = true;
 

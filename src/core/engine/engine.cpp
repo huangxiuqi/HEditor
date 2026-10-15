@@ -236,6 +236,17 @@ void EditorEngine::finishRebuildFromTree(FlowVisibility vis) {
     const auto t_pos0 = Clock::now();
 
     const size_t n = blocks_full_.size();
+    // 光标与块起点是同一套坐标的两半，所以重建块起点时必须一起重算光标：光标存的是全局
+    //   流位置，而这个下标只有配上 block_flow_ 才读得出"段与段内位置"。基一换，光标的数字
+    //   没变、含义却变了 —— 前面某一段变长之后，它会静默漂到相邻位置。
+    //   重算按"段内位置"落基而不是保留绝对下标：光标此刻的语义是"停在这一段内容的这个流
+    //   位置上"，段落内容变了它该跟着文本走。编辑之后真正的跟随由事务的位置映射负责，
+    //   这条只保证"基换过之后读数仍然自洽"。
+    //   两个读数必须在覆盖 block_flow_ 之前取，assign 之后旧基就没了。
+    //   选区落地之后这里要连 anchor 一起落基：setCaretRel 把两端都写成 focus，
+    //   而现在 anchor 恒等于 focus，写的本来就是一回事。
+    const int rebase_para = caretPara();
+    const int rebase_rel = caretRel();
     block_flow_.assign(n, 0);
     block_flow_span_.assign(n, 0);
     // 段与段之间由段落标记分隔，所以段的流区间只该由标记位置推：段 i 的内容是
@@ -270,6 +281,8 @@ void EditorEngine::finishRebuildFromTree(FlowVisibility vis) {
             static_cast<int>(blocks_full_[i].cp_text.size() + blocks_full_[i].objects.size());
         start = block_flow_[i] + block_flow_span_[i] + 1;
     }
+    // 新基写完了才落基（见上面那段说明）。
+    setCaretRel(rebase_para, rebase_rel);
 
     edit_stats_.rebuild_flowpos_ms = msSince(t_pos0);
     const auto t_copy0 = Clock::now();
@@ -437,18 +450,14 @@ int EditorEngine::hintFromCrossSegment(int para, int rel) const {
     return pick >= 0 ? pick : LineBox::kInlineOffsetOuter;
 }
 
-int EditorEngine::caretSide() const {
-    // 派生：rel 减去"这个偏移在流里占的起点"就是跨过的边界枚数。没有"存着的侧别"
-    //   可以失配，所以既不需要失效标记，也不需要拿边界枚数去卡它。
-    const TextPos p = caret();
-    const BracketCounts bc = bracketCountsAt(p.para, p.offset);
-    const int side = caret_rel_ - static_cast<int>(p.offset) - bc.before;
-    return side < 0 ? 0 : side;
-}
+/**
+ * 光标侧别（派生）= focus 的侧别，与 caret() 同源，不可能不同步。
+ */
+int EditorEngine::caretSide() const { return sideForFlow(selection_.focus); }
 
 int EditorEngine::caretFieldHint() const {
     if (blocks_.empty()) return -1;
-    return hintFromRel(caret_para_, caret_rel_);
+    return hintFromRel(caretPara(), caretRel());
 }
 
 /**
@@ -778,22 +787,181 @@ int EditorEngine::caretPage() const {
 }
 
 /**
- * 唯一写入点：段内流位置。其余入口都只是把它换算成 rel 再调这里。
+ * 选区 → 页面坐标矩形（跨行拆、跨页分段）。空选区是空的。
+ *
+ * 两端各取一次行内位置，中间就是矩形 —— 一行一个，所以跨行自然是多个矩形，跨页也一样
+ * （行盒自己带页号）。端点那一侧用真端点的侧别（同一个码点偏移上可能压着好几枚括号，
+ * 只有侧别分得开"控件之前 / 内容末尾"），被行或段截断的那一侧用该偏移的最外沿，
+ * 免得按端点的侧别把矩形切在行中间。
+ *
+ * 空行给的是零宽矩形（调用方按宽高为 0 丢掉）：选中一个空段落时它下面那一行确实只有
+ * 一个插入点，没有宽度可言。
  */
-void EditorEngine::setCaretRel(int para, int rel) {
-    caret_para_ = para;
-    caret_rel_ = rel;
+std::vector<EditorEngine::PageRect> EditorEngine::selectionRects() const {
+    std::vector<PageRect> out;
+    if (selection_.empty() || !flow_.has_value() || layout_.lines.empty() || block_flow_.empty())
+        return out;
+
+    const FlowPos lo = selection_.begin();
+    const FlowPos hi = selection_.end();
+    const int pa_lo = paraForFlow(lo);
+    const int pa_hi = paraForFlow(hi);
+    const int n_para = static_cast<int>(block_flow_.size());
+
+    for (const LineBox& lb : layout_.lines) {
+        const int para = lb.paragraph;
+        if (para < pa_lo || para > pa_hi) continue;
+        if (para < 0 || para >= n_para) continue;
+
+        // 选区在本段的段内流位置区间（整段被选中时就是 [0, 本段占的位数]）。
+        const FlowPos base = block_flow_[static_cast<size_t>(para)];
+        const FlowPos seg_lo = std::max(lo, base);
+        const FlowPos seg_hi = std::min(hi, base + block_flow_span_[static_cast<size_t>(para)]);
+        if (seg_hi <= seg_lo) continue;
+
+        const int off_lo = cpOffsetInBlock(para, static_cast<int>(seg_lo - base));
+        const int off_hi = cpOffsetInBlock(para, static_cast<int>(seg_hi - base));
+        if (off_lo < 0 || off_hi < 0) continue;
+        const uint32_t sel_lo = static_cast<uint32_t>(off_lo);
+        const uint32_t sel_hi = static_cast<uint32_t>(off_hi);
+
+        // 与这一行的段内码点区间 [first_cp, last_cp] 求交。
+        const uint32_t l_lo = std::max(sel_lo, lb.first_cp);
+        const uint32_t l_hi = std::min(sel_hi, lb.last_cp);
+        if (l_hi < l_lo) continue;
+
+        // 左端：真端点（选区确实起在这一处）用它的侧别；被本行截断时用"该偏移之前"。
+        int side_lo = 0;
+        if (l_lo == sel_lo && seg_lo == lo) side_lo = sideForFlow(lo);
+        // 右端：真端点用它的侧别；被本行/本段截断时用"该偏移所有括号之后"。
+        int side_hi = lb.bracketCountAt(l_hi);
+        if (l_hi == sel_hi && seg_hi == hi) side_hi = sideForFlow(hi);
+
+        const float a0 = lb.inline_origin_pt + lb.offsetAtSide(l_lo, side_lo);
+        const float a1 = lb.inline_origin_pt + lb.offsetAtSide(l_hi, side_hi);
+        Rect r;
+        if (!lb.vertical) {
+            r.x = std::min(a0, a1);
+            r.y = lb.block_lo_pt;
+            r.w = std::abs(a1 - a0);
+            r.h = lb.block_hi_pt - lb.block_lo_pt;
+        } else {
+            r.x = lb.block_lo_pt;
+            r.y = std::min(a0, a1);
+            r.w = lb.block_hi_pt - lb.block_lo_pt;
+            r.h = std::abs(a1 - a0);
+        }
+        out.push_back(PageRect{lb.page, r});
+    }
+    return out;
 }
 
 /**
- * 光标位置（派生）：段号 + 段内码点偏移，由 caret_rel_ 算出来 —— 不再是独立状态。
+ * 选区矩形（帧像素坐标）。与 caretRectPx 同一套换算：先乘 zoom，再加"窗口首页之下的
+ * 那几页"的累加偏移。宽高为 0 的（空行的那个插入点）在这里丢掉 —— 画不出来。
+ */
+std::vector<Rect> EditorEngine::selectionRectsPx() const {
+    std::vector<Rect> out;
+    const std::vector<PageRect> prs = selectionRects();
+    if (prs.empty()) return out;
+    const float zoom = cfg_.zoom;
+    const int page_px_h = pagePxHeight();
+    const int gap_px = pageGapPx();
+    for (const PageRect& pr : prs) {
+        const float off_y = static_cast<float>((pr.page - base_first_page_) * (page_px_h + gap_px));
+        Rect px;
+        px.x = std::floor(pr.r_pt.x * zoom);
+        px.y = std::floor(pr.r_pt.y * zoom + off_y);
+        px.w = std::ceil(pr.r_pt.w * zoom);
+        px.h = std::ceil(pr.r_pt.h * zoom);
+        if (px.w <= 0.0f || px.h <= 0.0f) continue;
+        out.push_back(px);
+    }
+    return out;
+}
+
+/**
+ * 唯一写入点：段内流位置。其余入口都只是把它换算成全局流位置再调这里。
+ *
+ * 夹取只做范围收缩，不做簇吸附（簇表要排版之后才有，见 relayout 里的说明）。
+ * 上界取 block_flow_span_（流索引给的权威段长）而不是显示名单筛过的那张对象表的长度：
+ * 前者是树的口径，后者随聚焦档变化，拿它当上界会在换档时把光标往回拉。
+ */
+void EditorEngine::setCaretRel(int para, int rel, bool collapse) {
+    FlowPos f = 0;
+    if (!block_flow_.empty()) {
+        if (para < 0) para = 0;
+        if (para >= static_cast<int>(block_flow_.size()))
+            para = static_cast<int>(block_flow_.size()) - 1;
+        const int span = block_flow_span_[static_cast<size_t>(para)];
+        if (rel > span) rel = span;
+        if (rel < 0) rel = 0;
+        f = block_flow_[static_cast<size_t>(para)] + rel;
+    }
+    selection_.focus = f;
+    if (collapse) {
+        selection_.anchor = f;
+        // 列位是一串连续上下键之间的事：任何别的定位都让它从头取。
+        vertical_goal_valid_ = false;
+    }
+}
+
+/**
+ * 任意流位置落在哪一块（派生）。block_flow_ 单调，二分取最后一个起点不超过它的块。
+ * caretPara 是它在 focus 上的特例 —— 选区另一端的段号也走这里。
+ */
+int EditorEngine::paraForFlow(FlowPos f) const {
+    if (block_flow_.empty()) return 0;
+    const auto it = std::upper_bound(block_flow_.begin(), block_flow_.end(), f);
+    const size_t i = static_cast<size_t>(it - block_flow_.begin());
+    return i == 0 ? 0 : static_cast<int>(i - 1);
+}
+
+/**
+ * 任意流位置的段内流位置（派生）= 它减本段起点。
+ */
+int EditorEngine::relForFlow(FlowPos f) const {
+    if (block_flow_.empty()) return 0;
+    const int para = paraForFlow(f);
+    const int rel = f - block_flow_[static_cast<size_t>(para)];
+    return rel < 0 ? 0 : rel;
+}
+
+/**
+ * 任意流位置的侧别（派生）：段内流位置减去"这个偏移在流里占的起点"就是跨过的边界枚数。
+ * 没有"存着的侧别"可以失配，所以既不需要失效标记，也不需要拿边界枚数去卡它。
+ */
+int EditorEngine::sideForFlow(FlowPos f) const {
+    const int para = paraForFlow(f);
+    const int rel = relForFlow(f);
+    int off = cpOffsetInBlock(para, rel);
+    if (off < 0) off = 0;
+    const BracketCounts bc = bracketCountsAt(para, off);
+    const int side = rel - off - bc.before;
+    return side < 0 ? 0 : side;
+}
+
+/**
+ * 光标那一段（派生）：focus 落在哪一块。
+ *
+ * 不能借 flowToTextPos：那个入口的职责是"把流位置翻成文本坐标"，段间的位置会被归到相邻段
+ * 端点；这里要的是"focus 归属哪一块"，段尾那个位置（段落标记所在位）必须仍算本段。
+ */
+int EditorEngine::caretPara() const { return paraForFlow(selection_.focus); }
+
+/**
+ * 段内流位置（派生）= focus 减本段起点。
+ */
+int EditorEngine::caretRel() const { return relForFlow(selection_.focus); }
+
+/**
+ * 光标位置（派生）：段号 + 段内码点偏移，由 focus 投影出来 —— 不再是独立状态。
  */
 TextPos EditorEngine::caret() const {
-    int para = caret_para_;
-    if (para < 0) para = 0;
+    int para = caretPara();
     if (!blocks_.empty() && para >= static_cast<int>(blocks_.size()))
         para = static_cast<int>(blocks_.size()) - 1;
-    int off = cpOffsetInBlock(para, caret_rel_);
+    int off = cpOffsetInBlock(para, caretRel());
     if (off < 0) off = 0;
     return TextPos{para, static_cast<size_t>(off)};
 }
@@ -827,16 +995,16 @@ void EditorEngine::setCaretByText(TextPos p) {
  *
  * side < 0 = 没有侧别信息，按"最内层含端点"投影一次（见 setCaretByText）。
  */
-void EditorEngine::projectCaret(int para, size_t offset, int side) {
+void EditorEngine::projectCaret(int para, size_t offset, int side, bool extend) {
     if (blocks_.empty()) {
-        setCaretRel(0, 0);
+        setCaretRel(0, 0, !extend);
         return;
     }
     if (para < 0) para = 0;
     if (para >= static_cast<int>(blocks_.size())) para = static_cast<int>(blocks_.size()) - 1;
     const auto place = [&]() {
         const size_t at = snapToCluster(para, offset);
-        setCaretRel(para, relAt(para, at, (side < 0) ? defaultSideAt(para, at) : side));
+        setCaretRel(para, relAt(para, at, (side < 0) ? defaultSideAt(para, at) : side), !extend);
     };
     const int plan_before = bracketPlanId();
     place();
@@ -905,6 +1073,47 @@ bool EditorEngine::setCaretAtFlow(FlowPos flow) {
 }
 
 /**
+ * 程序化设选区（宿主恢复、探针摆位）。两端各自夹到文档流的合法范围内 —— 越界的那
+ * 一端收到能到的最远处，不会让一个悬空端点把后面的几何全带偏。
+ */
+bool EditorEngine::setSelection(Range r) {
+    if (!flow_.has_value() || block_flow_.empty()) return false;
+    const size_t last = block_flow_.size() - 1;
+    const FlowPos hi = block_flow_[last] + block_flow_span_[last];
+    const auto clamp_flow = [hi](FlowPos v) -> FlowPos {
+        if (v < 0) return 0;
+        return v > hi ? hi : v;
+    };
+    selection_.anchor = clamp_flow(r.anchor);
+    selection_.focus = clamp_flow(r.focus);
+    vertical_goal_valid_ = false;
+    return true;
+}
+
+/**
+ * 取消选区：anchor 收到 focus，焦点端不动 —— 光标留在原地。
+ */
+void EditorEngine::clearSelection() {
+    selection_.anchor = selection_.focus;
+    vertical_goal_valid_ = false;
+}
+
+/**
+ * 全选：文档首到文档末。
+ *
+ * 末端是"最后一块的段内末端"（块起点 + 本块占的位数），而不是下一块之前那个段落标记
+ * 所在的位置 —— 段落标记不属于任何一段的内容，够不到它。
+ */
+bool EditorEngine::selectAll() {
+    if (!flow_.has_value() || block_flow_.empty()) return false;
+    const size_t last = block_flow_.size() - 1;
+    selection_.anchor = block_flow_[0];
+    selection_.focus = block_flow_[last] + block_flow_span_[last];
+    vertical_goal_valid_ = false;
+    return true;
+}
+
+/**
  * 落点判定：走模型层的能力表（树 + 流位置）。
  * 六个编辑入口与四个光标入口都调它，免得十来处各写一遍。
  */
@@ -950,14 +1159,13 @@ bool EditorEngine::hasEditableControl() const {
     return false;
 }
 
-bool EditorEngine::moveCaretBy(int dcp) {
+bool EditorEngine::moveCaretBy(int dcp, bool extend) {
     if (blocks_.empty() || dcp == 0) return false;
     const int plan_before = bracketPlanId();
 
-    int para = caret_para_;
-    if (para < 0) para = 0;
+    int para = caretPara();
     if (para >= static_cast<int>(blocks_.size())) para = static_cast<int>(blocks_.size()) - 1;
-    int rel = caret_rel_;
+    int rel = caretRel();
     // 本段最后一个流位置 = 段长 + 本段边界枚数（＝ relAt(len, 全部边界)）。
     const auto span_of = [&](int q) {
         const size_t len = blocks_[static_cast<size_t>(q)].cp_text.size();
@@ -1004,30 +1212,148 @@ bool EditorEngine::moveCaretBy(int dcp) {
         if (!moved) break;
     }
 
-    if (para == caret_para_ && rel == caret_rel_) return false;
-    setCaretRel(para, rel);
+    if (para == caretPara() && rel == caretRel()) return false;
+    setCaretRel(para, rel, !extend);
     // 跨字段移动在聚焦档下会换占位集合、整行重排 —— 光标在 rel 上，重排不改变它。
     relayoutIfBracketPlanChanged(plan_before);
     return true;
 }
 
-bool EditorEngine::moveCaretToLineStart() {
+bool EditorEngine::moveCaretToLineStart(bool extend) {
     const LineBox* lb = findLineFor(caret());
     if (!lb) return false;
     // 行首就是行首，不再往字段边界上收：光标位置不受控件约束（见 setCaret）。
     const TextPos p{lb->paragraph, lb->first_cp};
     if (p == caret()) return false;
-    projectCaret(p.para, p.offset, -1);
+    projectCaret(p.para, p.offset, -1, extend);
     return true;
 }
 
-bool EditorEngine::moveCaretToLineEnd() {
+bool EditorEngine::moveCaretToLineEnd(bool extend) {
     const LineBox* lb = findLineFor(caret());
     if (!lb) return false;
     const TextPos p{lb->paragraph, lb->last_cp};
     if (p == caret()) return false;
-    projectCaret(p.para, p.offset, -1);
+    projectCaret(p.para, p.offset, -1, extend);
     return true;
+}
+
+/**
+ * 到文档首 / 文档末（Ctrl+Home / Ctrl+End）。
+ *
+ * 落点用流位置给（块起点 / 块起点 + 本块占的位数），不走文本坐标 —— 段末那个位置在
+ * 文本坐标里与"下一段段首"是同一个偏移，翻回来会跑到下一段去。
+ */
+bool EditorEngine::moveCaretToDocStart(bool extend) {
+    if (block_flow_.empty()) return false;
+    if (selection_.focus == block_flow_[0]) return false;
+    const int plan_before = bracketPlanId();
+    setCaretRel(0, 0, !extend);
+    relayoutIfBracketPlanChanged(plan_before);
+    return true;
+}
+
+bool EditorEngine::moveCaretToDocEnd(bool extend) {
+    if (block_flow_.empty()) return false;
+    const size_t last = block_flow_.size() - 1;
+    if (selection_.focus == block_flow_[last] + block_flow_span_[last]) return false;
+    const int plan_before = bracketPlanId();
+    setCaretRel(static_cast<int>(last), block_flow_span_[last], !extend);
+    relayoutIfBracketPlanChanged(plan_before);
+    return true;
+}
+
+/**
+ * 光标沿行内轴的页面坐标 —— 上下键的列位就是它。找不到行盒返回 0。
+ */
+float EditorEngine::caretInlineAxisPt() const {
+    const TextPos p = caret();
+    const LineBox* lb = findLineFor(p);
+    if (!lb) return 0.0f;
+    const float off = lb->offsetAtSide(static_cast<uint32_t>(p.offset), caretSide());
+    return lb->inline_origin_pt + off;
+}
+
+/**
+ * 上下键：沿块轴走到相邻行，列位沿行内轴保持。
+ *
+ * 实现是"当前行盒在全局行数组里的下标 ±1 → 在目标行上按列位做一次行内命中"，不新增
+ * 排版接口 —— 行盒数组本来就是按块轴排好的。到文档首/末时停在原地（返回假），但列位
+ * 留着，于是"按到头上、再按回来"落的是同一个列位。
+ */
+bool EditorEngine::moveCaretVertical(int dir, bool extend) {
+    if (layout_.lines.empty() || dir == 0) return false;
+    const int n = static_cast<int>(layout_.lines.size());
+    const LineBox* cur_lb = findLineFor(caret());
+    if (!cur_lb) return false;
+    int cur_i = -1;
+    for (int i = 0; i < n; ++i) {
+        if (&layout_.lines[static_cast<size_t>(i)] == cur_lb) {
+            cur_i = i;
+            break;
+        }
+    }
+    if (cur_i < 0) return false;
+
+    // 列位：第一次按取自光标当前的行内坐标，之后连续按沿用（这就是"跨短行不丢列"）。
+    if (!vertical_goal_valid_) {
+        vertical_goal_pt_ = caretInlineAxisPt();
+        vertical_goal_valid_ = true;
+    }
+    const float goal = vertical_goal_pt_;
+
+    const int dst_i = cur_i + (dir < 0 ? -1 : 1);
+    if (dst_i < 0 || dst_i >= n) return false;  // 到头了：不动，列位留着
+
+    const LineBox& dst = layout_.lines[static_cast<size_t>(dst_i)];
+    uint32_t cp = 0;
+    int side = 0;
+    hitTestInLine(dst, goal, &cp, &side);
+    const int rel = relAt(dst.paragraph, cp, side);
+    if (dst.paragraph == caretPara() && rel == caretRel()) return false;
+
+    const int plan_before = bracketPlanId();
+    setCaretRel(dst.paragraph, rel, !extend);
+    // collapse 那一路会把列位清掉（它就是"别的定位"），这里再摆回去 —— 连续按要同一列。
+    vertical_goal_pt_ = goal;
+    vertical_goal_valid_ = true;
+    relayoutIfBracketPlanChanged(plan_before);
+    return true;
+}
+
+/**
+ * 在某一行里按"沿行内轴的页面坐标"（横排 x / 竖排 y）命中插入点。
+ *
+ * 每个插入点的势力范围是它到相邻插入点的中点；落在某个簇的后半段时，落点是下一个簇的
+ * 首码点 —— 这就是"字素不可切分"的正确语义（点 e+U+0301 的右半边，光标跑到它后面，
+ * 而不是钻进它内部）。hitTestPt 与上下键共用它，免得两份实现分头长出不同的势力范围。
+ */
+void EditorEngine::hitTestInLine(const LineBox& lb, float inline_page_pt, uint32_t* cp_out,
+                                 int* side_out) const {
+    const float rel = inline_page_pt - lb.inline_origin_pt;
+    const size_t n = lb.clusters.size();
+
+    uint32_t cp = lb.last_cp;  // 默认：落在最后半个簇之后 → 行末
+    // 命中的簇下标（= clusters.size() 表示落在最后一个簇之后）。落点是"这一簇之前"那个
+    //   边界，侧别就是同一个偏移上排在它前面的簇数 —— 数格子，不需要认识括号。
+    size_t hit_i = n;
+    if (rel < 0.0f) {
+        cp = n ? lb.clusters.front().cp : lb.first_cp;
+        hit_i = n ? 0 : n;
+    } else {
+        for (size_t i = 0; i < n; ++i) {
+            const float a = lb.clusters[i].inline_pt;
+            const float b = (i + 1 < n) ? lb.clusters[i + 1].inline_pt : lb.inline_end_pt;
+            if (rel < (a + b) * 0.5f) {
+                cp = lb.clusters[i].cp;
+                hit_i = i;
+                break;
+            }
+        }
+    }
+    const size_t k0 = lb.firstClusterAt(cp);
+    if (cp_out) *cp_out = cp;
+    if (side_out) *side_out = (hit_i > k0) ? static_cast<int>(hit_i - k0) : 0;
 }
 
 void EditorEngine::showCaret(bool on) { caret_visible_ = on; }
@@ -1113,11 +1439,9 @@ bool EditorEngine::backspace() {
     // 命中即唯一：嵌套时内层的 hi 严格小于外层，相邻字段（][）处只有左边那个的 hi 落在这
     //   一格上；hi 是区间右端，而控件区间彼此要么不相交、要么严格包含，不会有两个相等。
     // 策略拒绝时（表单模式默认把结构锁住）落到下面那条普通退格上，不把这一次按键吞掉。
-    if (flow_.has_value() && !controls_.empty() && caret_para_ >= 0 &&
-        caret_para_ < static_cast<int>(block_flow_.size())) {
-        // caret_rel_ 是相对"它自己那一段"起点的，必须配 caret_para_ 读，不能用取整后的 p.para。
-        const FlowPos cur =
-            block_flow_[static_cast<size_t>(caret_para_)] + static_cast<FlowPos>(caret_rel_);
+    if (flow_.has_value() && !controls_.empty() && !block_flow_.empty()) {
+        // 光标的全局流位置就是 focus —— 它就是为"同一码点偏移上的不同插入点"而存在的量。
+        const FlowPos cur = selection_.focus;
         for (int i = 0; i < controls_.size(); ++i) {
             int lo = -1;
             int hi = -1;
@@ -1779,8 +2103,8 @@ bool EditorEngine::tabCaretAndRender(bool backward) {
     return true;
 }
 
-bool EditorEngine::moveCaretAndRender(int dcp) {
-    if (!moveCaretBy(dcp)) return false;
+bool EditorEngine::moveCaretAndRender(int dcp, bool extend) {
+    if (!moveCaretBy(dcp, extend)) return false;
     // 光标移动不重排 —— 这就是增量的意义：
     //   底图一个字都没变，只需要把两个小矩形贴回去。
     //
@@ -1795,15 +2119,45 @@ bool EditorEngine::moveCaretAndRender(int dcp) {
     return true;
 }
 
-bool EditorEngine::moveCaretToLineStartAndRender() {
-    if (!moveCaretToLineStart()) return false;
+bool EditorEngine::moveCaretToLineStartAndRender(bool extend) {
+    if (!moveCaretToLineStart(extend)) return false;
     repaint();  // 不重排 —— 和 moveCaretAndRender 同一条增量路径（也不点亮光标，同上）
     return true;
 }
 
-bool EditorEngine::moveCaretToLineEndAndRender() {
-    if (!moveCaretToLineEnd()) return false;
+bool EditorEngine::moveCaretToLineEndAndRender(bool extend) {
+    if (!moveCaretToLineEnd(extend)) return false;
     repaint();  // 同 moveCaretAndRender：不重排、不点亮光标
+    return true;
+}
+
+bool EditorEngine::moveCaretToDocStartAndRender(bool extend) {
+    if (!moveCaretToDocStart(extend)) return false;
+    repaint();
+    return true;
+}
+
+bool EditorEngine::moveCaretToDocEndAndRender(bool extend) {
+    if (!moveCaretToDocEnd(extend)) return false;
+    repaint();
+    return true;
+}
+
+bool EditorEngine::moveCaretVerticalAndRender(int dir, bool extend) {
+    if (!moveCaretVertical(dir, extend)) return false;
+    repaint();
+    return true;
+}
+
+bool EditorEngine::selectAllAndRender() {
+    if (!selectAll()) return false;
+    repaint();
+    return true;
+}
+
+bool EditorEngine::setSelectionAndRender(Range r) {
+    if (!setSelection(r)) return false;
+    repaint();
     return true;
 }
 
@@ -1851,36 +2205,11 @@ bool EditorEngine::hitTestPt(float x_pt_frame, float y_pt_frame, TextPos* out, i
     }
     if (!best) return false;
 
-    // 行内轴：找最近的插入点。
-    //
-    //   每个插入点的"势力范围"是它到相邻插入点的中点。
-    //   落在某个簇的后半段时，光标会跳到下一个簇的首码点 ——
-    //     这就是"字素不可切分"的正确语义：点 e+U+0301 的右半边，
-    //     光标跑到它后面，而不是钻进它内部。
+    // 行内轴：找最近的插入点。势力范围与簇边界的口径在 hitTestInLine 里（上下键也走它）。
     const float ip = best->vertical ? local_y : x_pt_frame;
-    const float rel = ip - best->inline_origin_pt;
-    const size_t n = best->clusters.size();
-
-    size_t cp = best->last_cp;  // 默认：落在最后半个簇之后 → 行末
-    // 命中的簇下标（= clusters.size() 表示落在最后一个簇之后）。落点是"这一簇之前"那个
-    //   边界，侧别就是同一个偏移上排在它前面的簇数 —— 数格子，不需要认识括号。
-    size_t hit_i = n;
-    if (rel < 0.0f) {
-        cp = n ? best->clusters.front().cp : best->first_cp;
-        hit_i = n ? 0 : n;
-    } else {
-        for (size_t i = 0; i < n; ++i) {
-            const float a = best->clusters[i].inline_pt;
-            const float b = (i + 1 < n) ? best->clusters[i + 1].inline_pt : best->inline_end_pt;
-            if (rel < (a + b) * 0.5f) {
-                cp = best->clusters[i].cp;
-                hit_i = i;
-                break;
-            }
-        }
-    }
-    const size_t k0 = best->firstClusterAt(static_cast<uint32_t>(cp));
-    const int side = (hit_i > k0) ? static_cast<int>(hit_i - k0) : 0;
+    uint32_t cp = 0;
+    int side = 0;
+    hitTestInLine(*best, ip, &cp, &side);
 
     TextPos p{best->paragraph, cp};
     // 侧别是落点的完整身份（同一个偏移上有几个位置就看它）；归属只是它的一个投影，

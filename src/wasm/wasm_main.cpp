@@ -464,9 +464,34 @@ bool deleteForwardText() { return g_engine.deleteForwardAndRender(); }
 bool splitParagraph() { return g_engine.splitParagraphAndRender(); }
 bool mergeWithPreviousParagraph() { return g_engine.mergeWithPreviousParagraphAndRender(); }
 bool mergeWithNextParagraph() { return g_engine.mergeWithNextParagraphAndRender(); }
-bool moveCaret(int dcp) { return g_engine.moveCaretAndRender(dcp); }
-bool caretToLineStart() { return g_engine.moveCaretToLineStartAndRender(); }
-bool caretToLineEnd() { return g_engine.moveCaretToLineEndAndRender(); }
+bool moveCaret(int dcp, bool extend) { return g_engine.moveCaretAndRender(dcp, extend); }
+bool caretToLineStart(bool extend) { return g_engine.moveCaretToLineStartAndRender(extend); }
+bool caretToLineEnd(bool extend) { return g_engine.moveCaretToLineEndAndRender(extend); }
+/**
+ * 到文档首 / 末（Ctrl+Home / Ctrl+End）。
+ */
+bool caretToDocStart(bool extend) { return g_engine.moveCaretToDocStartAndRender(extend); }
+bool caretToDocEnd(bool extend) { return g_engine.moveCaretToDocEndAndRender(extend); }
+/**
+ * 上下键：dir < 0 向上、> 0 向下。列位沿行内轴保持（跨短行不丢列）。
+ */
+bool moveCaretVertical(int dir, bool extend) {
+    return g_engine.moveCaretVerticalAndRender(dir, extend);
+}
+/**
+ * 选区三个入口。两端是全局流位置，不是段内偏移 —— 与事务里那两份选区快照
+ * 同一个坐标系，所以探针拿到的数与模型层的 Range 是同一把尺子。
+ */
+bool selectAll() { return g_engine.selectAllAndRender(); }
+bool setSelection(int anchor, int focus) {
+    return g_engine.setSelectionAndRender(
+        Range{static_cast<FlowPos>(anchor), static_cast<FlowPos>(focus)});
+}
+bool clearSelection() {
+    g_engine.clearSelection();
+    g_engine.repaint();
+    return true;
+}
 void setCaret(int para, int offset) { g_engine.setCaret(para, static_cast<size_t>(offset)); }
 void showCaret(bool on) { g_engine.showCaret(on); }
 void present() { g_engine.repaint(); }
@@ -489,6 +514,30 @@ bool redoEdit() { return g_engine.redoAndRender(); }
  * 探针用这一条把整类问题一次性钉住（Tab 跳字段就是栽在这上面）。
  */
 int caretOffsetLive() { return static_cast<int>(g_engine.caret().offset); }
+
+/**
+ * 选区取证：两端（全局流位置）、是否为空，以及它在页面坐标下的矩形。
+ *
+ * 矩形是判据要的正面证据 —— "选中了哪一段"最终要落到"哪几行被盖住了"。空选区给空数组，
+ * 与"光标没有尺寸"是同一条：选区的可视范围就是矩形，没矩形就没选中。
+ */
+std::string selectionReport() {
+    const Range r = g_engine.selection();
+    const std::vector<EditorEngine::PageRect> rects = g_engine.selectionRects();
+    std::ostringstream o;
+    o.setf(std::ios::fixed);
+    o.precision(2);
+    o << "{\"anchor\":" << r.anchor << ",\"focus\":" << r.focus
+      << ",\"empty\":" << (r.empty() ? "true" : "false") << ",\"rects\":[";
+    for (size_t i = 0; i < rects.size(); ++i) {
+        if (i) o << ",";
+        o << "{\"page\":" << rects[i].page << ",\"x\":" << rects[i].r_pt.x
+          << ",\"y\":" << rects[i].r_pt.y << ",\"w\":" << rects[i].r_pt.w
+          << ",\"h\":" << rects[i].r_pt.h << "}";
+    }
+    o << "]}";
+    return o.str();
+}
 
 /**
  * 命中测试：帧坐标（磅）→ 位置。返回 "null" 或 {"para":n,"offset":n,"field":n}。
@@ -1037,6 +1086,13 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("moveCaret", &moveCaret);
     emscripten::function("caretToLineStart", &caretToLineStart);
     emscripten::function("caretToLineEnd", &caretToLineEnd);
+    emscripten::function("caretToDocStart", &caretToDocStart);
+    emscripten::function("caretToDocEnd", &caretToDocEnd);
+    emscripten::function("moveCaretVertical", &moveCaretVertical);
+    emscripten::function("selectAll", &selectAll);
+    emscripten::function("setSelection", &setSelection);
+    emscripten::function("clearSelection", &clearSelection);
+    emscripten::function("selectionReport", &selectionReport);
     emscripten::function("setCaret", &setCaret);
     emscripten::function("setCaretAt", &setCaretAt);
     emscripten::function("setCaretAtSide", &setCaretAtSide);

@@ -402,8 +402,22 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
         //   光标移出某个字段时，那个字段的方括号必须消失。
         for (const Rect& r : control_marks_prev_) refresh.push_back(r);
         control_marks_prev_.clear();
+        // 选区也一样：它画在帧上，页指纹里没有它，不擦就会在拖动时留下一路淡蓝。
+        for (const Rect& r : selection_rects_prev_) refresh.push_back(r);
+        selection_rects_prev_.clear();
     }
     for (const Rect& r : refresh) bitmap_.copyRectFrom(base_, r);
+
+    // 选区
+    //
+    //   与光标、表单标记同一条纪律：画在帧上、不进底图（底图的更新判据是页指纹，
+    //   而那里面没有选区 —— 带上的话拖一次选就要整页重光栅）。
+    //   必须先擦后画（擦在 refresh 那一步），否则拖动时会留下一路累积的淡蓝。
+    //   用混合而不是实心填充：选区盖在文字上，实心填充会把字一起抹掉。
+    //   画在光标之前，光标才能压在它上面。
+    const std::vector<Rect> sel_rects = selectionRectsPx();
+    for (const Rect& r : sel_rects) bitmap_.blendRect(r, cfg_.selection_color);
+    selection_rects_prev_ = sel_rects;
 
     // 光标
     const Rect cr = caretRectPx();
@@ -514,8 +528,11 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
         if (any) noteBlitDirty(uni);
     }
 
-    edit_stats_.caret_para = caret().para;
-    edit_stats_.caret_offset = caret().offset;
+    // 光标那几个数字一次算完：caret() 是投影（含一次二分），反复调既没必要也让读数
+    //   有可能落在两个状态之间（下一次投影的代价换来的是"同一帧里的数来自同一处"）。
+    const TextPos caret_now = caret();
+    edit_stats_.caret_para = caret_now.para;
+    edit_stats_.caret_offset = caret_now.offset;
     edit_stats_.caret_side = caretSide();
     edit_stats_.caret_page = caretPage();
     edit_stats_.caret_visible = (caret_visible_ && cr.w > 0.0f);
@@ -533,8 +550,8 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
     edit_stats_.control_count = controls_.size();
     edit_stats_.caret_control = focusedControlIndex();
     edit_stats_.blocked_edits = blocked_edits_;
-    edit_stats_.caret_index = caret().offset;
-    for (int i = 0; i < caret().para && i < static_cast<int>(blocks_.size()); ++i)
+    edit_stats_.caret_index = caret_now.offset;
+    for (int i = 0; i < caret_now.para && i < static_cast<int>(blocks_.size()); ++i)
         edit_stats_.caret_index += blocks_[static_cast<size_t>(i)].cp_text.size();
     edit_stats_.doc_codepoints = documentCodepoints();
 

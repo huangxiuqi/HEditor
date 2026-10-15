@@ -278,6 +278,9 @@ function sendState(ts, label, stats, changed) {
     blockedEdits: mod.blockedEdits(),
     dirtyPages: JSON.parse(mod.dirtyPagesJson()),
     caretReport: mod.caretReport(),
+    // 选区取证（两端全局流位置 + 页面坐标矩形）。与 caretReport 同档：小字符串，
+    //   随 state 推过去，主线程的 host.selection 于是仍是同步读。
+    selection: JSON.parse(mod.selectionReport()),
     // 引擎实时光标偏移（直读，不经过 editStats 那本账）。宿主拿它和 editStats 里的
     //   光标位置比，就能判出"有没有哪个改了状态的入口忘了给自己收尾"。
     caretLive: mod.caretOffsetLive(),
@@ -415,7 +418,20 @@ const WRITE = {
   splitParagraph: () => mod.splitParagraph(),
   mergePrev: () => mod.mergeWithPreviousParagraph(),
   mergeNext: () => mod.mergeWithNextParagraph(),
-  move: (a) => mod.moveCaret(a.dcp | 0),
+  move: (a) => mod.moveCaret(a.dcp | 0, !!a.extend),
+  /**
+   * 上下键（dir < 0 上 / > 0 下）与文档首尾。extend = Shift 扩展（锚点不动）。
+   *   与 move 同一档：引擎的 *AndRender 版自己收尾，这里不额外 present。
+   */
+  vertical: (a) => mod.moveCaretVertical(a.dir | 0, !!a.extend),
+  docStart: (a) => mod.caretToDocStart(!!a.extend),
+  docEnd: (a) => mod.caretToDocEnd(!!a.extend),
+  /**
+   * 选区三个入口。两端是全局流位置（与事务里那份快照同一把尺子），不是段内偏移。
+   */
+  selectAll: () => mod.selectAll(),
+  setSelection: (a) => mod.setSelection(a.anchor | 0, a.focus | 0),
+  clearSelection: () => mod.clearSelection(),
   // ★ 落光标的三个入口都要**无条件**把相位拉回可见，与单线程宿主的 setCaretAndPresent
   //   逐字对齐（那边就是 mod.setCaret(...); caretOn = true; mod.showCaret(true);
   //   mod.present();）。漏掉的症状：相位停在隐藏那半拍时落一次光标，光标不出现 ——
@@ -432,8 +448,8 @@ const WRITE = {
   indent: () => mod.indent(),
   outdent: () => mod.outdent(),
   tabCaret: (a) => mod.tabCaret(!!a.backward),
-  lineStart: () => mod.caretToLineStart(),
-  lineEnd: () => mod.caretToLineEnd(),
+  lineStart: (a) => mod.caretToLineStart(!!a.extend),
+  lineEnd: (a) => mod.caretToLineEnd(!!a.extend),
   undo: () => mod.undoEdit(),
   redo: () => mod.redoEdit(),
   setUndoLimit: (a) => mod.setUndoLimit(a.n | 0),

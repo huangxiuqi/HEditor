@@ -423,6 +423,36 @@ void Bitmap::strokeRect(const Rect& r, Color c, float thickness) {
 }
 
 /**
+ * 按 alpha 混色。与自写后端（bitmap.cpp）逐字节同一段算术。
+ *
+ * 这里刻意不走 SkCanvas：那条路上颜色是按 premul 参与运算的，同一份 (r,g,b,a)
+ * 过一遍会与自写侧差一个舍入档，而"两个后端连像素都算得一样"正是这个工程拿来
+ * 互证的东西（见 bitmap.h 里 drawGlyph 那段关于两条路径的口径）。
+ * 直接写 px_ 是安全的：sk_->bm 就是 installPixels 装订到这块内存上的。
+ */
+void Bitmap::blendRect(const Rect& r, Color c) {
+    const int x0 = std::max(0, static_cast<int>(std::floor(r.x)));
+    const int y0 = std::max(0, static_cast<int>(std::floor(r.y)));
+    const int x1 = std::min(w_, static_cast<int>(std::ceil(r.x + r.w)));
+    const int y1 = std::min(h_, static_cast<int>(std::ceil(r.y + r.h)));
+    if (x1 <= x0 || y1 <= y0) return;
+    painted_px_ += static_cast<size_t>(x1 - x0) * static_cast<size_t>(y1 - y0);
+
+    const int a = c.a;
+    const int ia = 255 - a;
+    const size_t row_bytes = static_cast<size_t>(w_) * 4u;
+    uint8_t* base = px_.data();
+    for (int y = y0; y < y1; ++y) {
+        uint8_t* p = base + static_cast<size_t>(y) * row_bytes + static_cast<size_t>(x0) * 4u;
+        for (int x = x0; x < x1; ++x, p += 4) {
+            p[0] = static_cast<uint8_t>((p[0] * ia + c.r * a + 127) / 255);
+            p[1] = static_cast<uint8_t>((p[1] * ia + c.g * a + 127) / 255);
+            p[2] = static_cast<uint8_t>((p[2] * ia + c.b * a + 127) / 255);
+        }
+    }
+}
+
+/**
  * 这块不过 Skia，是刻意的：copyRectFrom 是"把一块像素原样搬回去"，
  * 是缓冲到缓冲的拷贝，不是绘制。Skia 能做这件事的只有 drawImage（要先建
  * SkImage、走采样器），既比 memcpy 慢又语义更弱（采样器可能引入插值）。
