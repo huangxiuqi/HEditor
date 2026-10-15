@@ -1,0 +1,1006 @@
+// 主线程侧：只做四件事，不碰像素，也不做排版。
+//
+//   一、按页摆 canvas 并把每张的所有权交给 Worker（帧从此不跨线程搬，一页一张）；
+//   二、把键盘 / 输入法 / 滚动事件发过去，**不等回话** —— 交互路径因此零 await；
+//   三、接收 Worker 推回来的镜像（统计、光标矩形、页面几何、控件清单），用它摆输入法
+//       候选窗、光标闪烁与滚动条，并让门面里那批"读"保持同步形态；
+//   四、把命令与查询暴露成与单线程宿主**同名**的方法；命令返回 Promise 但不等它也行。
+//
+// ★ 为什么是一页一张：画布摆在滚动容器里各自的页位置上，所以**滚动由浏览器合成器搬像素**，
+//   引擎一次都不跑；编辑时 Worker 只重贴引擎报过的脏页，不是整窗重贴。
+//   （一张和视口一样大、粘在顶上的画布也能跑，但每次滚动都要过一次边框 —— 实测 2~10 ms。）
+//
+// 为什么必须异步：主线程无法同步等 Worker。Atomics.wait 在主线程直接抛，而且它要
+//   SharedArrayBuffer ⇒ 要跨源隔离。所以引擎搬进 Worker 就等于门面异步 —— 这是代价，
+//   不是选择。上面第二条把交互路径上的 await 全消掉了：消息在调用那一刻就发出去了，
+//   返回的 Promise 只是"结果到了"的通知。
+
+const DPR = window.devicePixelRatio || 1;
+const FONTS = [
+  { role: 'cjk', label: 'Noto Sans SC', path: 'assets/fonts/NotoSansSC-VF.ttf' },
+  { role: 'mongol', label: 'Noto Sans Mongolian', path: 'assets/fonts/NotoSansMongolian-Regular.ttf' },
+  { role: 'latin', label: 'Noto Sans (Latin)', path: 'assets/fonts/NotoSans-Latin-VF.ttf' },
+];
+
+/**
+ * 缓存戳：验证台的 Chrome profile 是跨次运行复用的，而 Worker 脚本的请求不受
+ * Page 侧"关掉缓存"的影响 —— 出现过改了 engine_worker.js 但页面仍跑旧副本。
+ *   查询串同时带给胶水层与 wasm，避免"新胶水 + 旧 wasm"这种最难查的组合。
+ */
+const BUST = '?v=' + Date.now();
+const CALL_TIMEOUT_MS = 15000;
+
+const stageEl = document.getElementById('stage');
+const spacerEl = document.getElementById('spacer');
+const ta = document.getElementById('ime');
+const statEl = document.getElementById('stats');
+const barEl = document.getElementById('bar');
+const statusEl = document.getElementById('status');
+
+/** 状态栏（与单线程宿主同形）：组合期间在这里本地预览预编辑串。 */
+function setStatus(text) {
+  if (statusEl) statusEl.textContent = text;
+}
+
+const errors = [];
+// ★ 挂起表用**自增序号**做键，不能用 performance.now()：
+//   页面没做跨源隔离时 Chrome 把计时器粗化到 100 µs，do 与 view 又是同一张表 ——
+//   同一拍里两条消息会撞键，后一条把前一条**静默覆盖**，那条 Promise 就永远不落地
+//   （症状是"视口消息超时"，而 Worker 其实既没报错也还活着）。发送时刻另存在
+//   条目里，只用来算延迟。
+const pendingState = new Map();  // 序号 -> {resolve,reject,tt,name}
+const pendingReply = new Map();  // 序号 -> {resolve,reject,name}
+const pageCanvases = new Map();  // 页号 -> canvas 元素（在用）
+let opSeq = 0;
+let askSeq = 0;
+let worker = null;
+let bootLead = 0;
+let composing = false;
+let blinkTimer = null;
+let blinkAuto = false;   // 闪烁只在首帧自动起一次，别把 stopBlink 又拉起来
+let caretOn = true;
+let zoom = 1.5;
+let scenario = 6;
+let mode = 0;
+let lastPageX = 0;   // 页在视口里横向居中的偏移（设备像素）
+
+/**
+ * 把当前的缩放回写到页面上的 #zoom 输入框。
+ *
+ * 不是为了好看：探针（以及任何外部脚本）算点击坐标时要读这个输入框的 zoom 去把帧磅
+ *   换成客户端像素。单线程宿主的 run() 会写它（`$('zoom').value = String(zoom)`），
+ *   搬进 Worker 之后这条回写没了 —— 于是引擎按 1.0 排版、探针按输入框里的 1.5 算坐标，
+ *   点击整片落到别处（错得整整齐齐，最不像坐标问题）。
+ */
+function syncZoomInput() {
+  const el = document.getElementById('zoom');
+  if (el) el.value = String(zoom);
+}
+
+const now = () => performance.now();
+const post = (msg, transfer) => worker.postMessage(msg, transfer || []);
+
+const mirror = {
+  info: null, stats: null, geom: null,
+  text0: '', controls: null, blockedEdits: 0, dirtyPages: [], caretReport: '',
+  caretLive: -1, heapMB: 0, fontMode: 'full', stateSeq: 0, lastLabel: '', lastMs: 0,
+};
+const host = { ready: false, errors, mirror, pageCanvasCount: 0 };
+
+function glueUrl() {
+  const dir = new URLSearchParams(location.search).get('wasm') === 'debug'
+    ? 'build/wasm-debug/web/' : 'build/wasm/web/';
+  return new URL(dir + 'heditor.js', new URL('../', location.href)).href;
+}
+
+/** 视口尺寸（设备像素）。画布尺寸不归宿主定，但"看得见多大"要知道。 */
+const viewSize = () => ({
+  viewW: Math.max(1, Math.round(stageEl.clientWidth * DPR)),
+  viewH: Math.max(1, Math.round(stageEl.clientHeight * DPR)),
+});
+
+/* ── 消息 ───────────────────────────────────────────────────────────────── */
+
+/**
+ * 发一条"要等回话"的消息（命令与视口都用它）。返回 Promise；不等它就是单向消息
+ *   —— 消息在调用那一刻就发出去了，"等"只是拿到通知。
+ */
+function waitOp(name, msg) {
+  const id = ++opSeq;
+  const tt = now();
+  return new Promise((resolve, reject) => {
+    const to = setTimeout(() => {
+      if (pendingState.delete(id)) reject(new Error(`${name} 超时`));
+    }, CALL_TIMEOUT_MS);
+    pendingState.set(id, {
+      resolve: (v) => { clearTimeout(to); resolve(v); },
+      reject,
+      tt,
+      name,
+    });
+    post(Object.assign({ ts: id }, msg));
+  });
+}
+
+/**
+ * 发一条命令。返回 Promise，resolve 成 **editStats**（与单线程宿主的门面同形）。
+ *
+ * nullIfUnchanged = true 的那些入口（引擎那一步返回假值）resolve 成 null ——
+ *   这是门面契约里的"没改动"，不是失败：对照 app.js 的
+ *   `if (!mod.X()) return null; return this.present();`。
+ *   ★ 不区分的话，探针里"已在段首向左移动不重绘（返回 null）"这类断言会永远拿到真值。
+ */
+function doOp(name, args, nullIfUnchanged) {
+  return waitOp(`命令 ${name}`, { t: 'do', name, args: args || {} }).then((m) => {
+    const st = m && m.stats ? m.stats : null;
+    return nullIfUnchanged ? (m && m.changed ? st : null) : st;
+  });
+}
+
+/**
+ * 单向命令：发出去就不管了（ts=0 ⇒ Worker 推回来的 state 找不到对应挂起条目）。
+ *   闪烁那一拍每 530 ms 来一次，给它也建挂起条目只是白造一批 setTimeout。
+ */
+const postOp = (name, args) => post({ t: 'do', ts: 0, name, args: args || {} });
+
+/**
+ * 用户动作（门面里的命令）：先把光标按住可见并重置闪烁，再把命令发出去。
+ *
+ * 放在命令**之前**而不是之后：命令那一次呈现才会把光标画在新位置上，先按住可见才能
+ *   保证"移动完的那一帧光标就在那儿"，中间不夹一个隐藏帧。
+ */
+function opUser(name, args, nullIfUnchanged) {
+  blinkHold();
+  return doOp(name, args, nullIfUnchanged);
+}
+
+function askOp(name, args) {
+  const id = ++askSeq;
+  return new Promise((resolve, reject) => {
+    const to = setTimeout(() => {
+      if (pendingReply.delete(id)) reject(new Error(`查询 ${name} 超时`));
+    }, CALL_TIMEOUT_MS);
+    pendingReply.set(id, { resolve: (v) => { clearTimeout(to); resolve(v); }, reject, name });
+    post({ t: 'ask', id, name, args: args || {} });
+  });
+}
+
+function viewOp(scrollDevicePx) {
+  const vs = viewSize();
+  // 与命令同一个口径：resolve 成 editStats（窗口没换时 Worker 只回 ack，那就是 null）。
+  return waitOp('视口', { t: 'view', scrollY: scrollDevicePx, viewW: vs.viewW, viewH: vs.viewH })
+    .then((m) => (m && m.stats ? m.stats : null));
+}
+
+/**
+ * 滚动事件专用的单向版本：不要回话。
+ *   滚动这条路上没人等结果（画布在文档流里，浏览器已经搬完像素了），
+ *   给它也发一个 Promise 只是白造一批挂起条目。
+ */
+function viewFireAndForget() {
+  const vs = viewSize();
+  post({ t: 'view', ts: 0, scrollY: Math.round(stageEl.scrollTop * DPR),
+         viewW: vs.viewW, viewH: vs.viewH });
+}
+
+/* ── 每页一张画布 ───────────────────────────────────────────────────────── */
+
+/**
+ * 一页要一张**新**画布。
+ *
+ * ★ 不能做画布池：transferControlToOffscreen 是**一次性**的，交出去的 canvas 再交
+ *   第二次会抛 InvalidStateError。旧宿主能复用元素，是因为它只在同一个线程里拿 2D
+ *   上下文、从不转移所有权 —— 搬进 Worker 之后那条路就不成立了。
+ *   （也不该按页号长期缓存：一页 893×1263 的背衬就是 4.5 MB，160 页就是 700 MB。）
+ */
+function acquireCanvas() {
+  const el = document.createElement('canvas');
+  el.className = 'pg';
+  el.style.position = 'absolute';
+  el.style.display = 'block';
+  stageEl.appendChild(el);
+  return el;
+}
+
+/**
+ * 把一页的画布交给 Worker。
+ *   转移列表必须带上 —— 不带会抛 DataCloneError（OffscreenCanvas 不能按值克隆），
+ *   那个错只在"新增页"时才露头，页面表现是那几页一直空白。
+ */
+function sendPageCanvas(page, el, gm) {
+  const off = el.transferControlToOffscreen();
+  post({ t: 'pageCanvas', ts: now(), page, canvas: off, dpr: gm.dpr,
+         viewW: gm.viewW, viewH: gm.viewH }, [off]);
+}
+
+/**
+ * 让页画布集合与"当前窗口"对齐：不在窗口里的回收、在窗口里而没有的建出来并交过去。
+ *   位置与尺寸全部按 Worker 推来的几何算 —— 一张画布就是那一页，不是"视口里的一段"。
+ */
+function syncPageCanvases(gm) {
+  const dpr = gm.dpr || 1;
+  const first = gm.first;
+  const count = gm.count;
+
+  for (const [p, el] of [...pageCanvases]) {
+    if (p >= first && p < first + count) continue;
+    pageCanvases.delete(p);
+    // 告诉 Worker 放掉它那边的上下文（背衬内存跟着释放），元素直接扔给 GC。
+    post({ t: 'dropPage', page: p });
+    el.remove();
+  }
+
+  const vs = viewSize();
+  lastPageX = Math.max(0, Math.round((vs.viewW - gm.pageW) / 2));
+  const left = Math.round(lastPageX / dpr) + 'px';
+  const w = Math.round(gm.pageW / dpr) + 'px';
+  const h = Math.round(gm.pageH / dpr) + 'px';
+
+  for (let p = first; p < first + count; ++p) {
+    let el = pageCanvases.get(p);
+    if (!el) {
+      el = acquireCanvas();
+      el.dataset.page = String(p);   // 指针事件靠它认页（见 onPointerDown）
+      pageCanvases.set(p, el);
+      // 转移之后宿主的 width/height 属性就作废了：显示尺寸只能靠 CSS，
+      //   而背衬尺寸由 Worker 按帧的页宽页高定 —— 两边都是 pageW × pageH。
+      el.style.width = w;
+      el.style.height = h;
+      sendPageCanvas(p, el, gm);
+    }
+    const top = Math.round((p * gm.pageStep) / dpr) + 'px';
+    if (el.style.left !== left) el.style.left = left;
+    if (el.style.top !== top) el.style.top = top;
+  }
+  host.pageCanvasCount = pageCanvases.size;
+}
+
+/* ── 接收 ───────────────────────────────────────────────────────────────── */
+
+function onWorkerError(m) {
+  errors.push(m.where + ': ' + m.message);
+  barEl.textContent = 'Worker 报错 ' + m.where + '：' + String(m.message).split('\n')[0];
+  barEl.className = 'err';
+  // ★ 出错的那一拍不会再有 state / ack 回来 —— 把还在等的挂起调用**当场拒掉**。
+  //   不这样做的话调用方只能等到超时，而真正的错误信息就在手边（症状是
+  //   "视口超时"这种把根因藏起来的报错，最费时间）。
+  rejectPending(`Worker 报错 ${m.where}：${String(m.message).split('\n')[0]}`);
+}
+
+/**
+ * 宿主自己处理消息时抛的异常也要浮出来。
+ *
+ * ★ 消息处理器里抛异常是**无声的**：既不会进 window.onerror 的那套收集，也不会回给
+ *   调用方 —— 表现成"调用一直等不到回话然后超时"，而真相（比如某个 DOM 操作抛了）
+ *   完全看不到。实测就是被这条坑了一轮：Worker 把 state 推过来了、帧也重画了，
+ *   宿主在解析时抛掉，调用方只看到超时。
+ */
+function rejectPending(reason) {
+  const e = new Error(reason);
+  for (const [id, p] of [...pendingState]) { pendingState.delete(id); p.reject(e); }
+  for (const [id, p] of [...pendingReply]) { pendingReply.delete(id); p.reject(e); }
+}
+
+function onPageError(where, e) {
+  const msg = String((e && e.stack) || e);
+  errors.push(`${where}: ${msg}`);
+  barEl.textContent = `宿主 ${where} 抛异常：${String(msg).split('\n')[0]}`;
+  barEl.className = 'err';
+  rejectPending(`宿主 ${where} 抛异常：${String(msg).split('\n')[0]}`);
+}
+
+function syncSpacer(st, gm) {
+  const total = Math.max(1, Number(st.totalPages) || 1);
+  const h = Math.max(1, (total * gm.pageStep - gm.gap) / DPR);
+  if (spacerEl.style.height !== h + 'px') spacerEl.style.height = h + 'px';
+}
+
+function positionIme(st, gm) {
+  const inWindow = st.caretPage >= gm.first && st.caretPage < gm.first + gm.count;
+  if (!st.caretW || !inWindow) {
+    ta.style.width = '1px';
+    ta.style.height = '1px';
+    return;
+  }
+  const lineH = Math.max(12, Math.round(st.caretH / DPR));
+  ta.style.left = Math.round((lastPageX + st.caretX) / DPR) + 'px';
+  ta.style.top =
+    Math.round(((gm.first * gm.pageStep) + st.caretY) / DPR - stageEl.scrollTop) + 'px';
+  ta.style.width = Math.max(24, Math.round((gm.pageW - st.caretX) / DPR)) + 'px';
+  ta.style.height = lineH + 'px';
+  ta.style.lineHeight = lineH + 'px';
+  ta.style.fontSize = Math.max(10, Math.round(lineH * 0.62)) + 'px';
+}
+
+function paintPanel() {
+  const st = mirror.stats;
+  const gm = mirror.geom;
+  if (!st || !gm || !statEl) return;
+  const rows = [
+    ['页数', st.totalPages],
+    ['字形', st.glyphCount],
+    ['缺字', st.missingGlyphCount],
+    ['光标', `第 ${st.caretPara} 段 / 偏移 ${st.caretOffset}`],
+    ['窗口', `${gm.first} + ${gm.count} 页（页画布 ${host.pageCanvasCount} 张）`],
+    ['帧', `${gm.frameW}×${gm.frameH}，每张 ${gm.pageW}×${gm.pageH}`],
+    ['排版', `${st.layoutMs.toFixed(2)} ms`],
+    ['上屏', `${st.paintMs.toFixed(2)} ms`],
+    ['Worker 堆', mirror.heapMB.toFixed(1) + ' MB'],
+    ['字体模式', mirror.fontMode],
+    ['上一拍', mirror.lastLabel + ' ' + mirror.lastMs.toFixed(2) + ' ms'],
+  ];
+  statEl.innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
+}
+
+/**
+ * 让 DOM 的滚动位置跟随引擎 —— 只在**引擎自己把滚动归零**时（装载文档、换缩放）。
+ *
+ * 单线程宿主是在同一线程里直接写 stageEl.scrollTop = 0（presetWindowForLoad），这条
+ *   通道在 Worker 化之后必须补出来。不补的症状不是"看起来没滚"，而是**画布与点击
+ *   坐标全对不上**：代理画布的 rect 按引擎的 scrollY 算，浏览器却在另一个位置命中，
+ *   于是"点字段框里的任意一点"全部落到别处（错得整整齐齐，不好往这儿想）。
+ *
+ * ★ 靠的是 Worker 送来的**显式信号**（state.scrollReset），不是"两边不一致就追平"。
+ *   后者是错的：追平要写 scrollTop，而写它会触发 scroll 事件、再发一条视口消息回来，
+ *   与正在滚动的用户来回打架 —— 窗口反复变、画布反复建与丢，实测后果是跨页滚动之后
+ *   某一页始终拿不到画布（逐像素比对时"比了 0 px、缺页 1"）。
+ */
+function syncScrollFromGeom(gm, reset) {
+  if (!reset || !gm || typeof gm.scrollY !== 'number') return;
+  stageEl.scrollTop = Math.round(gm.scrollY / DPR);
+}
+
+function onState(m) {
+  mirror.stats = m.stats;
+  mirror.geom = m.geom;
+  mirror.text0 = m.text0;
+  mirror.controls = m.controls;
+  mirror.blockedEdits = m.blockedEdits;
+  mirror.dirtyPages = m.dirtyPages;
+  mirror.caretReport = m.caretReport;
+  mirror.caretLive = m.caretLive;
+  mirror.heapMB = m.heapMB;
+  mirror.fontMode = m.fontMode;
+  mirror.stateSeq += 1;
+  syncSpacer(m.stats, m.geom);
+  syncScrollFromGeom(m.geom, m.scrollReset);
+  syncPageCanvases(m.geom);
+  positionIme(m.stats, m.geom);
+  const p = pendingState.get(m.ts);
+  if (p) {
+    pendingState.delete(m.ts);
+    mirror.lastMs = p.tt ? now() - p.tt : 0;
+    mirror.lastLabel = m.label;
+    p.resolve(m);
+  }
+  // 首帧一到就把闪烁起来 —— 单线程宿主是在装载收尾里调 resetBlink 的，这里没有那个
+  //   收尾点，所以挂在"第一份状态"上。只自动起一次：否则 stopBlink 之后随便一次
+  //   状态推送又把它拉起来（探针里那句 stopBlink 就白调了）。
+  if (!blinkAuto) { blinkAuto = true; resetBlinkPhase(); }
+  paintPanel();
+}
+
+function onMessage(ev) {
+  try {
+    return handleMessage(ev.data || {});
+  } catch (e) {
+    onPageError('onMessage', e);
+  }
+}
+
+function handleMessage(m) {
+  if (m.t === 'ready') {
+    mirror.info = m;
+    mirror.heapMB = m.heapMB;
+    mirror.fontMode = m.fontMode;
+    // ready 一到就算起来了，不等第一帧：装载里抛异常时"永远等不到 ready"会把主线程
+    //   变成静默挂起，而这个页面是拿来验证的 —— 挂住等于什么都没验到。
+    host.ready = true;
+    barEl.textContent =
+      `引擎在 Worker 里 · 启动 ${m.bootMs.toFixed(0)} ms（字体 ${m.fontMs.toFixed(0)} ms）· ` +
+      `帧零拷贝 ${m.zeroCopyFrame} · 一页一张画布`;
+    host.readyWallMs = now() - bootLead;
+    return;
+  }
+  if (m.t === 'state') return onState(m);
+  // 视口消息在"窗口没变"时只回一个 ack：那一下 Worker 什么都没做（浏览器已经把
+  //   画布搬走了），所以没有新状态可推。宿主拿到 ack 就把 Promise 收掉。
+  if (m.t === 'ack') {
+    const p = pendingState.get(m.ts);
+    if (p) {
+      pendingState.delete(m.ts);
+      mirror.lastMs = p.tt ? now() - p.tt : 0;
+      mirror.lastLabel = 'ack:窗口没变';
+      p.resolve(m);
+    }
+    return;
+  }
+  if (m.t === 'reply') {
+    const p = pendingReply.get(m.id);
+    if (!p) return;
+    pendingReply.delete(m.id);
+    if (m.error) p.reject(new Error(m.error));
+    else p.resolve(m.value);
+    return;
+  }
+  if (m.t === 'error') return onWorkerError(m);
+}
+
+/* ── 输入 ───────────────────────────────────────────────────────────────── */
+
+function keyToOp(ev) {
+  if ((ev.ctrlKey || ev.metaKey) && !ev.altKey) {
+    const k = (ev.key || '').toLowerCase();
+    if (k === 'z' || k === 'y') return [ev.shiftKey || k === 'y' ? 'redo' : 'undo', {}];
+  }
+  if (ev.ctrlKey || ev.metaKey || ev.altKey) return null;
+  switch (ev.key) {
+    case 'Backspace': return ['backspace', {}];
+    case 'Delete': return ['deleteForward', {}];
+    case 'ArrowLeft': return ['move', { dcp: -1 }];
+    case 'ArrowRight': return ['move', { dcp: 1 }];
+    case 'Home': return ['lineStart', {}];
+    case 'End': return ['lineEnd', {}];
+    case 'Enter': return ['splitParagraph', {}];
+    case 'Tab': return [ev.shiftKey ? 'outdent' : 'indent', {}];
+    default:
+      // 可打印字符（ASCII / 标点 / 空格）：与单线程宿主同一条路 —— 直接在 keydown 里
+      //   提交，并 preventDefault 掉浏览器往 textarea 里的插入。
+      //   ★ 不能指望 textarea 的 input 事件：合成 KeyboardEvent 根本不会产生 input；
+      //   而真键盘下又因为这里 preventDefault 掉了插入，同样不会有 input。
+      //   两头都不成立 ⇒ 打字会静默地什么都不发生（探针里表现为"文档码点数没变"）。
+      if (ev.key && ev.key.length === 1) return ['type', { s: ev.key }];
+      return null;
+  }
+}
+
+function onKeyDown(ev) {
+  if (!host.ready || composing || ev.isComposing) return;
+  const c = keyToOp(ev);
+  if (!c) return;                 // 不认识的键（含 IME 的 Process 键）放行给浏览器
+  ev.preventDefault();
+  // 走 opUser 而不是 doOp：方向键与退格之后光标要立刻可见，并把闪烁整拍推后。
+  //   键盘与打字这几条输入路径都必须在 opUser 上，否则"移动中光标照旧按固定周期闪"。
+  trackInput(opUser(c[0], c[1]));   // 不等结果（零 await），但把句柄留给 host.rendered
+}
+
+/**
+ * 在页面上按下鼠标：命中测试 → 落光标。
+ *
+ * ★ 末尾那句 ta.focus() 不是收尾，是这条路的必要条件。
+ *   canvas / div 都不可聚焦，Chrome 在 mousedown 的默认行为里会把 activeElement
+ *   打回 <body> —— 此后 keydown 事件再也到不了宿主，键盘看起来"整个失灵"。
+ *   实测（`out/_inputcheck.mjs`）：点一下之后 activeElement 变成 BODY，
+ *   再按方向键偏移一动不动；点之前按同一键是动的。
+ *   ⇒ "点击与键盘都不动了"是同一个成因，不是两处坏了。
+ *   preventDefault() 只能挡住默认的焦点转移，显式 focus() 更稳（单线程宿主两样都做）。
+ */
+function onPointerDown(ev) {
+  if (!host.ready || ev.button !== 0) return;
+  const el = ev.target && ev.target.closest ? ev.target.closest('canvas.pg') : null;
+  if (!el) return;                     // 点在页外的灰底上：什么也不做
+  const gm = mirror.geom;
+  const page = Number(el.dataset.page);
+  if (!gm || !Number.isFinite(page)) return;
+  // 点击也要立刻按住光标可见：命中测试是一次往返，等它回来再归相位会晚一拍。
+  blinkHold();
+  const rect = el.getBoundingClientRect();
+  // 帧窗口坐标（设备像素）：x 从页左缘量，y 从窗口首页顶量 —— 与单线程宿主的
+  //   framePointFromEvent 同一口径，命中测试收的就是这个坐标系。
+  const xDev = (ev.clientX - rect.left) * DPR;
+  const yDev = (ev.clientY - rect.top) * DPR + (page - gm.first) * gm.pageStep;
+  // clickAt 里有一次命中测试的往返，所以这一条既是"在途链"（排空要等它）也是
+  //   "最近一次输入的渲染"（host.rendered）。
+  trackInput(host.clickAt(xDev, yDev));
+  ta.focus();
+  ev.preventDefault();
+}
+
+function onCompositionEnd(ev) {
+  composing = false;
+  const text = ev.data || ta.value || '';
+  ta.value = '';
+  if (text) trackInput(opUser('type', { s: text }));
+  setStatus('就绪');
+}
+
+/** 把 markdown 还原成纯段落：与单线程宿主同一份规则，两处不能各写一套。 */
+function cleanMarkdownLines(raw) {
+  return raw
+    .split('\n')
+    .map((l) => l
+      .replace(/\*\*/g, '')
+      .replace(/\s*\\$/, '')
+      .replace(/^#+\s*/, '')
+      .replace(/^\d+[.、]\s*/, '')
+      .trim())
+    .filter((l) => l.length > 0)
+    .join('\n');
+}
+
+/* ── 门面 ───────────────────────────────────────────────────────────────── */
+
+/**
+ * 命令表：名字与单线程宿主一致，参数在这里翻译成 Worker 的运算名。
+ *   写成表而不是一个个手写方法，是为了让"哪些是命令"一眼可数。
+ */
+const CMD = {
+  present: () => ['present', {}],
+  type: (s) => ['type', { s }, true],
+  backspace: () => ['backspace', {}, true],
+  deleteForward: () => ['deleteForward', {}, true],
+  splitParagraph: () => ['splitParagraph', {}, true],
+  mergeWithPreviousParagraph: () => ['mergePrev', {}, true],
+  mergeWithNextParagraph: () => ['mergeNext', {}, true],
+  move: (dcp) => ['move', { dcp: dcp || 1 }, true],
+  setCaret: (para, offset) => ['setCaret', { para, offset }],
+  setCaretAt: (para, offset, field) => ['setCaretAt', { para, offset, field }],
+  setCaretAtSide: (para, offset, side) => ['setCaretAtSide', { para, offset, side }],
+  setCaretOnly: (para, offset) => ['setCaret', { para, offset }],
+  indent: () => ['indent', {}, true],
+  outdent: () => ['outdent', {}, true],
+  tabCaret: (backward) => ['tabCaret', { backward: !!backward }, true],
+  undo: () => ['undo', {}, true],
+  redo: () => ['redo', {}, true],
+  setUndoLimit: (n) => ['setUndoLimit', { n }],
+  setEditMode: (m) => { mode = Number(m) | 0; return ['setEditMode', { mode }]; },
+  setBracketScope: (s) => ['setBracketScope', { scope: Number(s) | 0 }],
+  setFormControls: (list) => ['setFormControls', { list: list || [] }],
+  loadFormSample: (variant) => ['formSample', { variant }],
+  loadStressDocument: (paras, chars) => ['stress', { paras, chars }],
+  loadStressDocumentDiverse: (paras, chars) => ['stressDiverse', { paras, chars }],
+  loadTextDocument: (text, repeat) => ['textDoc', { text, repeat }],
+  run: (id, z) => {
+    scenario = Number(id);
+    if (z) { zoom = Number(z); syncZoomInput(); }
+    return ['scenario', { id: scenario, zoom: z }];
+  },
+  reset: (id, z) => {
+    scenario = id === undefined ? 6 : Number(id);
+    zoom = z === undefined ? 1.5 : Number(z);
+    syncZoomInput();
+    return ['reset', { id: scenario, zoom }];
+  },
+  reloadFonts: (m) => ['fonts', { mode: m || 'full' }],
+  setFontCacheConfig: (blockSize, blocks) => ['setFontCacheConfig', { blockSize, blocks }],
+  setViewportAnchor: (first, count) => ['viewport', { first, count }],
+  zoomTo: (z) => { zoom = Number(z); syncZoomInput(); return ['zoom', { zoom }]; },
+  // 只改引擎里的相位，**不呈现** —— 与单线程宿主门面的 showCaret 同语义
+  //   （那边就是 mod.showCaret(!!on) 一行；探针常在这之后自己调 present()）。
+  showCaret: (on) => ['phase', { on: !!on }],
+  focusControl: (forward) => ['focusControl', { forward: forward === undefined ? true : !!forward }, true],
+  removeControl: (i, keepContent) => ['removeControl', { i, keepContent: !!keepContent }, true],
+  setControlProp: (i, prop, value) => ['setControlProp', { i, prop, value: !!value }, true],
+};
+
+for (const name of Object.keys(CMD)) {
+  host[name] = (...a) => {
+    const r = CMD[name](...a);
+    // 走 opUser（不是 doOp）：每条用户命令跑完都把闪烁相位归到可见。
+    //   r[2] = 这条命令是否"没改动就返回 null"（见 doOp 的说明）。
+    return opUser(r[0], r[1], r[2]);
+  };
+}
+
+// bracketSlots 与 allText 同理：单线程宿主那边是取值器（同步取得到槽清单），探针写的是
+//   不带括号的形式。异步宿主给不出同步值，所以做成"取值器 + 值为 Promise"，
+//   靠探针 eval 的 awaitPromise 把不带括号的读法撑住。
+Object.defineProperty(host, 'bracketSlots', {
+  get: () => askOp('bracketSlots', {}),
+});
+
+/**
+ * 落光标的这几个入口返回的是**光标本身**，不是 editStats。
+ *   对照单线程宿主：setCaretAndPresent 末尾是 `return this.caret;`，而探针紧接着就读
+ *   `cr0.x / cr0.page`（拿它算点击坐标）。返回形状也是门面契约的一部分 ——
+ *   形状不对时症状是一条 "clientX 不是有限数"，完全看不出是返回值的问题。
+ */
+for (const name of ['setCaret', 'setCaretAt', 'setCaretAtSide', 'setCaretOnly']) {
+  const spec = CMD[name];
+  host[name] = (...a) => {
+    const r = spec(...a);
+    return opUser(r[0], r[1]).then((st) => (st ? host.caret : null));
+  };
+}
+
+// reloadFonts 返回的是 { mode, rows }（app.js: `return { mode: fontMode, rows: r.rows }`），
+//   不是 editStats。rows 只是启动面板那几行，这一侧给空数组 —— 探针只取 mode。
+{
+  const spec = CMD.reloadFonts;
+  host.reloadFonts = (m) => {
+    const r = spec(m);
+    return waitOp('重装字体', { t: 'do', name: r[0], args: r[1] })
+      .then((msg) => ({ mode: msg && msg.fontMode, rows: [] }));
+  };
+}
+
+// setUndoLimit 返回的是**新的上限**（app.js 写的是 `return this.undoLimit();`），不是 editStats。
+//   这类"返回一个标量"的入口也要按契约来，否则探针那条 `=== 100` 永远不成立。
+{
+  const spec = CMD.setUndoLimit;
+  host.setUndoLimit = (n) => {
+    const r = spec(n);
+    return opUser(r[0], r[1]).then(() => host.undoLimit());
+  };
+}
+
+/** 要返回值的查询：一律返回 Promise。 */
+const ASK = {
+  paragraphText: (i) => ['text', { i: i | 0 }],
+  hit: (x, y) => ['hit', { x, y }],
+  controlAt: (x, y) => ['controlAt', { x, y }],
+  describeControls: () => ['describeControls', {}],
+  auditFrame: () => ['auditFrame', {}],
+  auditLayout: () => ['auditLayout', {}],
+  auditCompile: () => ['auditCompile', {}],
+  bench: (runs) => ['bench', { runs }],
+  undoLimit: () => ['undoLimit', {}],
+  selfCheck: () => ['selfCheck', {}],
+  markCheck: () => ['markCheck', {}],
+  ink: () => ['ink', {}],
+  engineStats: () => ['stats', {}],
+  engineEditStats: () => ['editStats', {}],
+};
+for (const name of Object.keys(ASK)) {
+  host[name] = (...a) => {
+    const r = ASK[name](...a);
+    return askOp(r[0], r[1]);
+  };
+}
+host.ask = askOp;
+
+/**
+ * 整篇文本。一次问一段太多趟，一次传整篇又要有那个口子 —— 所以逐段问再拼。
+ *
+ * ★ 做成**取值器，值是一个 Promise**，而不是方法：单线程宿主那边 allText 就是取值器
+ *   （同步取得到整篇），探针写的是 `window.__heditor.allText` 不带括号。异步宿主给不出
+ *   同步的整篇文本，这是本质差异 —— 但探针的 eval 带 awaitPromise，所以"取值器返回
+ *   Promise"能让那几处不带括号的读取原样成立。唯一要改的是把它再套进 Array.from 的那
+ *   两处（那里必须显式 await）。
+ */
+Object.defineProperty(host, 'allText', {
+  get: () => (async () => {
+    const es = await askOp('editStats', {});
+    const total = Math.max(1, Number(es.totalParagraphs) || 1);
+    const parts = [];
+    for (let i = 0; i < total; ++i) parts.push(await askOp('text', { i }));
+    return parts.join('\n');
+  })(),
+});
+
+/**
+ * 命中并把光标落过去 —— 与单线程宿主走同一条路（hitTest 给归属与侧别）。
+ *
+ * 坐标口径：xPx / yPx 是帧窗口坐标（设备像素）—— x 从页左缘量，y 从窗口首页顶量。
+ *   命中测试收的就是这个坐标系，所以这里只把设备像素折成磅（除以 zoom），
+ *   不做窗口与文档之间的换算。换算在调用方（onPointerDown 从页元素的 rect 算）。
+ */
+host.clickAt = async function clickAt(xPx, yPx) {
+  const hit = await askOp('hit', { x: xPx / zoom, y: yPx / zoom });
+  if (!hit) return mirror.stats;
+  if (typeof hit.side === 'number') return host.setCaretAtSide(hit.para, hit.offset, hit.side);
+  return host.setCaret(hit.para, hit.offset);
+};
+
+/* ── 帧画布代理（给探针的适配层）────────────────────────────────────────── */
+
+/**
+ * 把"窗口帧"当成一张虚拟画布暴露出去：几何按窗口帧算，事件转发到真正的页画布上。
+ *
+ * 为什么要有它：帧在本宿主里是**按页切成多张画布**的，而探针（与单线程宿主那套断言）
+ *   是按"整帧一张画布"写的 —— 它要 `canvas.getBoundingClientRect()` 把帧磅坐标换成
+ *   客户端坐标，再派 mousedown。单线程宿主的 app.js 里有一个同名同形的代理，注释原话
+ *   是"老探针因此一行都不用改"。这一侧照同一口径补上，两套宿主才对得上。
+ *   getContext 故意返回 null（真的上下文已经交出去了，主线程读不到像素）。
+ */
+const frameCanvasProxy = {
+  get width() { return mirror.geom ? mirror.geom.frameW : 1; },
+  get height() { return mirror.geom ? mirror.geom.frameH : 1; },
+  get style() { return stageEl.style; },
+  getBoundingClientRect() {
+    const r = stageEl.getBoundingClientRect();
+    const gm = mirror.geom;
+    if (!gm) {
+      return { left: r.left, top: r.top, right: r.left + 1, bottom: r.top + 1,
+               width: 1, height: 1, x: r.left, y: r.top };
+    }
+    // 窗口首页的视口位置：页在滚动内容里是绝对定位（top = 页号 × 步距），
+    //   所以还要减掉滚动量；横向是居中偏移 lastPageX。
+    const left = r.left + lastPageX / DPR;
+    const top = r.top + (gm.first * gm.pageStep) / DPR - stageEl.scrollTop;
+    const width = gm.frameW / DPR;
+    const height = gm.frameH / DPR;
+    return { left, top, right: left + width, bottom: top + height,
+             width, height, x: left, y: top };
+  },
+  dispatchEvent(ev) {
+    // ★ 派到坐标所在的那一页画布上，而不是派到滚动容器上：指针处理按 event.target
+    //   认页（dataset.page），派到容器上 target 就不是画布，命中测试根本不会跑。
+    let el = null;
+    if (typeof ev.clientY === 'number') {
+      for (const c of pageCanvases.values()) {
+        const r = c.getBoundingClientRect();
+        if (ev.clientY >= r.top && ev.clientY <= r.bottom) { el = c; break; }
+      }
+    }
+    if (!el) el = pageCanvases.get(mirror.geom ? mirror.geom.first : 0) || stageEl;
+    return el.dispatchEvent(ev);
+  },
+  addEventListener(...a) { return stageEl.addEventListener(...a); },
+  getContext() { return null; },
+};
+
+/* ── 同步读（来自推送的镜像）───────────────────────────────────────────── */
+
+Object.defineProperties(host, {
+  info: { get: () => mirror.info },
+  stats: { get: () => mirror.stats },
+  editStats: { get: () => mirror.stats },
+  geom: { get: () => mirror.geom },
+  caret: {
+    get: () => {
+      const s = mirror.stats;
+      if (!s) return null;
+      return { para: s.caretPara, offset: s.caretOffset, side: s.caretSide, page: s.caretPage,
+               x: s.caretX, y: s.caretY, w: s.caretW, h: s.caretH,
+               visible: s.caretVisible, docCodepoints: s.docCodepoints };
+    },
+  },
+  text: { get: () => mirror.text0 },
+  controls: { get: () => mirror.controls },
+  blockedEdits: { get: () => mirror.blockedEdits },
+  dirtyPages: { get: () => mirror.dirtyPages },
+  caretReport: { get: () => mirror.caretReport },
+  // 引擎实时光标偏移。引擎在 Worker 那侧，所以这个"实时"只能是**推送那一刻**的实时
+  //   —— 与 editStats 里的光标位置取自同一次 state，两者可比。排空之后（quiesce）
+  //   读到的就是最新那一拍的账。
+  caretLive: { get: () => mirror.caretLive },
+  pagePx: {
+    get: () => (mirror.geom ? [mirror.geom.pageW, mirror.geom.pageH, mirror.geom.gap] : null),
+  },
+  // 与单线程宿主同形：**方法**而不是取值器（探针写的是 frameW()）。
+  //   形状不一致的代价是一条 TypeError，看不出是命名的问题。
+  //   frameW: { get: ... } 也不行 —— 那样 frameW 不是函数。
+  heapMB: { get: () => mirror.heapMB },
+  fontMode: { get: () => mirror.fontMode },
+  zoomLevel: { get: () => zoom },
+  scenario: { get: () => scenario },
+  editMode: { get: () => mode },
+  edit: { get: () => mirror.stats },
+  blitStats: {
+    get: () => ({ stateMs: mirror.lastMs, label: mirror.lastLabel, seq: mirror.stateSeq }),
+  },
+  textarea: { get: () => ta },
+  // 页画布：每页一张。元素本身已经交出去了（主线程拿不到上下文），
+  //   这里给的是页号清单与元素清单，供诊断与结构断言用。
+  pageCanvasList: { get: () => [...pageCanvases.keys()].sort((a, b) => a - b) },
+  pageCanvasEls: { get: () => [...pageCanvases.values()] },
+  canvas: { get: () => frameCanvasProxy },
+  // 形状与单线程宿主的 viewport 对齐（anchor / desired / visible / canvases 一个都不能少：
+  //   探针靠它判"窗口跟着可见页走"，缺一格就是一条 `.first` 的 TypeError）。
+  //   pooled 恒为 0 —— 这个宿主没有画布池（已转移的画布不能再转移一次）。
+  viewport: {
+    get: () => (mirror.geom ? {
+      anchor: mirror.geom.anchor,
+      engineFirst: mirror.geom.first, engineCount: mirror.geom.count,
+      desired: mirror.geom.desired, visible: mirror.geom.visible,
+      scrollY: mirror.geom.scrollY, dpr: mirror.geom.dpr,
+      pages: [...pageCanvases.keys()].sort((a, b) => a - b),
+      canvases: pageCanvases.size, pooled: 0,
+      pagePx: [mirror.geom.pageW, mirror.geom.pageH, mirror.geom.gap],
+      viewSize: viewSize(),
+    } : null),
+  },
+});
+
+/* ── 宿主自己的动作 ─────────────────────────────────────────────────────── */
+
+/** 帧尺寸（设备像素）。与单线程宿主一致地做成方法（见上面那段说明）。 */
+host.frameW = () => (mirror.geom ? mirror.geom.frameW : 0);
+host.frameH = () => (mirror.geom ? mirror.geom.frameH : 0);
+
+/**
+ * 排空屏障：等 Worker 把**此刻已经在途的消息**全部处理完。
+ *
+ * 靠的是 postMessage 保序 —— 发一条什么都不算的 ping（READ.ping），它的 reply 回来时，
+ *   之前发出的消息必然都已处理完。这是"交互之后要读到那一拍结果"的同步点。
+ * ★ 刻意用 ping 而不是拿 present 当哨兵：一次 present 会重画并改变帧，那会把
+ *   "某个入口忘了收尾" 这类断言直接盖掉（哨兵必须无副作用）。
+ *   与单线程宿主的 quiesce 是同一个契约（那边全同步，直接 resolve）。
+ */
+/**
+ * 宿主动作里"自带往返"的那些链（命中测试 → 落光标就是一条：中间要先问一次 hitTest）。
+ *   排空屏障必须等它们，否则屏障会在链的中途就返回 —— 探针随即读到的是**旧镜像**，
+ *   而症状是"点了画布但光标没动"这种看起来像功能没接的红。
+ */
+const inFlight = new Set();
+
+function trackChain(p) {
+  const w = Promise.resolve(p).catch(() => { /* 失败已记进 errors */ });
+  inFlight.add(w);
+  w.then(() => inFlight.delete(w));
+  return p;
+}
+
+/** DOM 输入事件引起的链：登记进在途表，并把它挂成 host.rendered。 */
+function trackInput(p) {
+  host.rendered = trackChain(p);
+  return p;
+}
+
+/**
+ * 等"最近一次输入引起的渲染"完成的 Promise。
+ *
+ * 交互路径是**单向**的（消息发出去就不等），所以宿主手里本来没有它的句柄 —— 但那个
+ *   "发出去就不等"的 Promise 一直都在（message 发出那一刻就存在），只是被丢掉了。
+ *   把它留着，就得到"输入 → 渲染完成"这一个可等待的点。
+ *
+ * 它 resolve 的时刻是精确的：命令的 state 是 Worker 在 render()（present + 重贴脏页）
+ *   跑完之后才推回来的，所以 Promise 落地 == 那一帧已经画进离屏画布。
+ *   ★ 边界：它保证的是"离屏画布已经有这一帧"，不保证浏览器合成器已经把它刷到屏幕上。
+ *   查像素（selfCheck 读的就是离屏画布）够用；要等真正上屏得再补一次 rAF。
+ *
+ * 与 quiesce 的分工：这是"我这一下画完了"，quiesce 是"队列全空了"。
+ *   一次点击会牵出命中测试那样**自带往返**的链，那种要等的是 quiesce。
+ */
+host.rendered = Promise.resolve(true);
+
+host.quiesce = async () => {
+  // 反复"等在途链 → 消息屏障"：ping 的等待期间，先前那条链的 hitTest 答复可能刚回来并
+  //   接着发出了 setCaret —— 于是又有了新在途。循环把它收干净（有上限，不会空转）。
+  for (let i = 0; i < 6; ++i) {
+    while (inFlight.size) await Promise.all([...inFlight]);
+    await askOp('ping', {});
+    if (!inFlight.size) break;
+  }
+  return true;
+};
+
+/**
+ * 引擎当前那一帧的**一份拷贝**（探针用）。
+ *   拷贝由 Worker 侧做，然后转移 buffer 过来（O(1)，不白拷 8 MB）。
+ *   必须是快照：wasm 堆上那个视图任何一次 present 都会把它原地覆盖，
+ *   两次读到的永远是同一块内存 —— 逐字节比对会永远绿且毫无意义。
+ */
+host.rawFrame = () => askOp('rawFrame', {});
+
+/**
+ * 自检：把 Worker 算出来的像素差补上"只有主线程知道"的那几格。
+ *
+ * 返回形状与单线程宿主的 selfCheck 一致 —— 它是给用户的取证入口（F12 里把对象发出来），
+ *   也是探针的主判据。cssSize / rectPx 要看 DOM，只能在这一侧补；dpr 也用主线程的，
+ *   免得两边对"设备像素比"的口径有分歧。
+ */
+const askSelfCheck = host.selfCheck;
+host.selfCheck = async () => {
+  const r = await askSelfCheck();
+  if (!r) return r;
+  const el = pageCanvases.get(mirror.geom ? mirror.geom.first : 0);
+  const pr = frameCanvasProxy.getBoundingClientRect();
+  return Object.assign({}, r, {
+    dpr: DPR,
+    pages: Object.assign({}, r.pages, {
+      cssSize: el ? [el.style.width, el.style.height] : null,
+      rectPx: [Math.round(pr.width), Math.round(pr.height)],
+    }),
+  });
+};
+
+host.setScroll = (cssPx) => {
+  stageEl.scrollTop = cssPx;
+  return viewOp(Math.round(stageEl.scrollTop * DPR));
+};
+
+host.syncScroll = () => viewOp(Math.round(stageEl.scrollTop * DPR));
+
+host.loadMedicalSample = async function loadMedicalSample(repeat) {
+  const base = new URL('../', location.href);
+  const res = await fetch(new URL('assets/samples/medical-records.md', base));
+  if (!res.ok) throw new Error(String(res.status));
+  const text = cleanMarkdownLines(await res.text());
+  await host.loadTextDocument(text, Math.max(1, Number(repeat) || 1));
+  return { paragraphs: text.split('\n').length, chars: text.length };
+};
+
+/* ── 光标闪烁 ───────────────────────────────────────────────────────────── */
+
+/**
+ * 把闪烁相位归到"可见"并重启定时器。
+ *
+ * 光标不是 DOM 元素 —— 它是引擎画进帧里的（单线程宿主那侧同样如此：那边也是
+ *   setInterval 里 showCaret + present）。宿主能做的只有每 530 ms 把相位发过去。
+ * ⇒ 只"翻转"不"归相位"是不够的：相位可能停在隐藏上，用户敲完字光标却是隐的。
+ *
+ * 组合期间不动（与单线程宿主同一守卫）：重排会让输入法候选窗跳。
+ */
+function restartBlinkTimer() {
+  if (blinkTimer) clearInterval(blinkTimer);
+  blinkTimer = setInterval(() => {
+    if (!host.ready || composing) return;
+    caretOn = !caretOn;
+    postOp('blinkPhase', { on: caretOn });   // 单向：这一拍只有可见相位在变
+  }, 530);
+}
+
+/**
+ * 交互（按键 / 打字 / 点击 / 命令）之后把光标按住可见，并把下一次翻转推迟一整拍。
+ *
+ * 两个动作缺一不可：
+ *   ① 相位若停在隐藏上，补一次 showCaret(true)。引擎那边 caret_visible_ 只由本侧翻转
+ *      （engine.cpp 的 showCaret，引擎自己只在 repaintAfterEdit 里置真），一旦停在 false，
+ *      后面每次 present 都不再画光标 —— 表现成"按了方向键，光标好像没动"。
+ *   ② 无条件重启定时器。即便相位此刻可见，也可能下一秒就到 530 ms 的翻转点，
+ *      那样"刚移动完光标又灭了"，仍然像没重置。重启把这一次翻转整拍推后。
+ *
+ * ② 只动 JS 定时器、不发消息，所以"相位本来就可见"时这一路是零额外开销。
+ */
+function blinkHold() {
+  if (!caretOn) postOp('blinkPhase', { on: true });
+  // ★ 无条件把**本地相位**也写成可见。原来只在补发时才写，于是探针用门面 showCaret(false)
+  //   把引擎摆成隐藏之后，本地 caretOn 仍是 true —— 两边脱节，后续的"该补一次呈现"
+  //   就永远不会发生（症状是光标一直不出现，看起来像渲染坏了）。
+  caretOn = true;
+  restartBlinkTimer();
+}
+
+/** 启动与强制归相位：无条件让光标可见（首帧自动起、探针的 startBlink 走这条）。 */
+function resetBlinkPhase() {
+  caretOn = true;
+  postOp('blinkPhase', { on: true });
+  restartBlinkTimer();
+}
+
+host.stopBlink = () => {
+  if (blinkTimer) { clearInterval(blinkTimer); blinkTimer = null; }
+  caretOn = true;
+  // 走静默档（只改状态、不呈现）：与单线程宿主的 stopBlink 逐字对齐 ——
+  //   探针紧接着要读的是"上一次全量呈现"的账（它的分母），这一下不能把它覆盖掉。
+  return waitOp('停止闪烁', { t: 'do', name: 'phase', args: { on: true } });
+};
+
+host.startBlink = () => { resetBlinkPhase(); return true; };
+
+/* ── 启动 ───────────────────────────────────────────────────────────────── */
+
+async function boot() {
+  worker = new Worker('engine_worker.js' + BUST);
+  worker.onmessage = onMessage;
+  worker.onerror = (e) => onWorkerError({ where: 'worker.onerror', message: e.message || String(e) });
+  bootLead = now();
+  const base = new URL('../', location.href);
+  const vs = viewSize();
+  // boot 不带画布：窗口要等引擎排完才知道，所以先报几何，宿主再按窗口把每页画布交过去。
+  post({
+    t: 'boot', glue: glueUrl() + BUST, bust: BUST, exportName: 'CreateHEditor',
+    fonts: FONTS.map((f) => ({ ...f, path: new URL(f.path, base).pathname })),
+    dpr: DPR, viewW: vs.viewW, viewH: vs.viewH,
+    scenario: 6, zoom: 1.5, fontMode: 'full',
+  });
+
+  ta.addEventListener('keydown', onKeyDown);
+  ta.addEventListener('compositionstart', () => {
+    composing = true;
+    ta.value = '';
+    setStatus('输入法组合中…（此期间不触碰引擎）');
+  });
+  // 预编辑串先在状态栏本地预览（与单线程宿主同一处理，渲染进正文属于档 3）。
+  ta.addEventListener('compositionupdate', (ev) => setStatus(`组合中：${ev.data || ''}`));
+  ta.addEventListener('compositionend', onCompositionEnd);
+  // 指针走事件委托（挂在滚动容器上，不挂在每张画布上）：画布是随窗口动态建与丢的，
+  //   逐张挂监听会在换窗时漏挂 —— 委托给容器就不会有那个缺口。
+  stageEl.addEventListener('mousedown', onPointerDown);
+  // 滚动走单向：没人等结果（画布在文档流里，浏览器已经把像素搬完了）。
+  stageEl.addEventListener('scroll', viewFireAndForget, { passive: true });
+  // 视口变了不用换画布：页画布的尺寸只取决于页，视口只影响"窗口要哪几页" ——
+  //   窗口一变，推回来的几何会让 syncPageCanvases 自己把缺的页建出来。
+  window.addEventListener('resize', () => { viewOp(Math.round(stageEl.scrollTop * DPR)); });
+  ta.focus();
+}
+
+window.__wheditor = host;
+window.__heditor = host;   // 同名：两个宿主对外是同一个门面形状
+boot().catch((e) => {
+  errors.push('boot: ' + ((e && e.stack) || e));
+  barEl.textContent = '启动失败：' + e;
+  barEl.className = 'err';
+});

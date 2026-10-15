@@ -271,7 +271,12 @@ if(EMSCRIPTEN)
     -O3
     -sMODULARIZE=1
     -sEXPORT_NAME=CreateHEditor
-    -sENVIRONMENT=web
+    # 环境必须把 worker 列进去：只写 web 时胶水层会把 ENVIRONMENT_IS_WORKER 判成
+    #   常数 false、并整段删掉 importScripts 相关的分支（实测那版胶水里
+    #   ENVIRONMENT_IS_WORKER=false、importScripts 出现 0 次）。那样的产物在 Worker 里
+    #   仍可能实例化成功 —— 但那是走运（web 分支恰好不碰 document，且我们显式给了
+    #   locateFile 绕过默认的脚本目录推导），不是配置对了。
+    -sENVIRONMENT=web,worker
     -sALLOW_MEMORY_GROWTH=1
     # 初始内存是**起步值**，不是上限（ALLOW_MEMORY_GROWTH=1 会按需增长）。
     #

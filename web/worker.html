@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<!-- 空 favicon：不然浏览器会去要 /favicon.ico 并回一个 404，那条 console error 会被
+     探针的"无 console 错误"判据抓住（单线程宿主那边 index.html 也有同样一行）。 -->
+<link rel="icon" href="data:,">
+<title>HEditor · 引擎在 Worker 里</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #f2f3f5; color: #1d1d1f;
+               font: 13px/1.6 "Segoe UI", "Microsoft YaHei", sans-serif; }
+  #bar { padding: 8px 14px; background: #1f2937; color: #e5e7eb; }
+  #bar.err { background: #7f1d1d; }
+  #tools { padding: 6px 14px; background: #e5e7eb; display: flex; gap: 8px;
+           align-items: center; flex-wrap: wrap; border-bottom: 1px solid #d1d5db; }
+  #tools label { color: #4b5563; }
+  #tools select, #tools input, #tools button { font: inherit; padding: 2px 6px;
+           border: 1px solid #cbd5e1; border-radius: 6px; background: #fff; }
+  #tools button { cursor: pointer; }
+  #wrap { position: relative; height: calc(100% - 74px); }
+  #stage { position: absolute; inset: 0; overflow-y: auto; overflow-x: hidden; background: #e9eaec; }
+  /* 一页一张画布：位置与尺寸由宿主按 Worker 推来的几何摆（见 syncPageCanvases） */
+  .pg { display: block; }
+  #spacer { position: absolute; top: 0; left: 0; width: 1px; }
+  #overlay { position: absolute; inset: 0; pointer-events: none; }
+  /* ★ pointer-events 必须是 none（与单线程宿主 index.html 的 #ime 一致）：
+     它被撑成"从光标到页右缘"那么宽去承接输入法与候选窗定位，若允许吃指针，
+     光标那一行的整条横带都点不进画布 —— 点击落在 textarea 上，命中测试永远不跑。 */
+  #ime { position: absolute; pointer-events: none; border: 0; outline: 0; padding: 0;
+         background: transparent; color: transparent; caret-color: transparent;
+         resize: none; overflow: hidden; white-space: pre; }
+  #panel { position: absolute; right: 10px; top: 10px; width: 320px;
+           background: rgba(255,255,255,.94); border: 1px solid #d7dade;
+           border-radius: 8px; padding: 10px 12px; }
+  #panel h3 { margin: 0 0 6px; font-size: 13px; font-weight: 500; }
+  #stats { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; }
+  #stats dt { color: #6b7280; }
+  #stats dd { margin: 0; }
+</style>
+</head>
+<body>
+  <div id="bar">启动中…</div>
+  <div id="tools">
+    <label>场景</label>
+    <select id="scenario">
+      <option value="0">完整样例</option>
+      <option value="1">蒙文竖排 vertical-lr</option>
+      <option value="2">中文竖排 vertical-rl</option>
+      <option value="3">中文长文本</option>
+      <option value="4">中英混排 + 回退</option>
+      <option value="5">蒙文竖排对照</option>
+      <option value="6" selected>可编辑（敲字 / 光标）</option>
+      <option value="7">长文档 2000 段</option>
+      <option value="8">真病历样例</option>
+    </select>
+    <label>缩放</label>
+    <input id="zoom" type="number" step="0.25" min="0.5" max="4" value="1.5" style="width:64px">
+    <label>模式</label>
+    <select id="mode">
+      <option value="0" selected>文档</option>
+      <option value="1">表单</option>
+      <option value="2">只读</option>
+    </select>
+    <button id="btnPlus">表单样例</button>
+    <button id="btnUndo">撤销</button>
+    <button id="btnRedo">重做</button>
+    <button id="btnSelf">自检</button>
+    <span id="status">就绪</span>
+  </div>
+  <div id="wrap">
+    <div id="stage"><div id="spacer"></div></div>
+    <div id="overlay"><textarea id="ime" rows="1" spellcheck="false"></textarea></div>
+    <div id="panel">
+      <h3>引擎在 Worker 里（主线程不参与排版与上屏）</h3>
+      <dl id="stats"></dl>
+    </div>
+  </div>
+  <script src="worker_host.js"></script>
+  <script>
+    // 工具条：只把命令发过去，不等结果 —— 这就是"交互路径零 await"的形态。
+    (function () {
+      const h = () => window.__wheditor;
+      const q = (id) => document.getElementById(id);
+      q('scenario').addEventListener('change', (e) => {
+        const id = Number(e.target.value);
+        if (id === 8) h().loadMedicalSample(1); else h().run(id, Number(q('zoom').value));
+      });
+      q('zoom').addEventListener('change', (e) => h().zoomTo(Number(e.target.value)));
+      q('mode').addEventListener('change', (e) => h().setEditMode(Number(e.target.value)));
+      q('btnPlus').addEventListener('click', () => h().loadFormSample(0));
+      q('btnUndo').addEventListener('click', () => h().undo());
+      q('btnRedo').addEventListener('click', () => h().redo());
+      q('btnSelf').addEventListener('click', async () => {
+        const r = await h().selfCheck();
+        window.__lastSelfCheck = r;
+        q('bar').textContent =
+          `自检：画布与帧不同 ${r.diff} px / 共 ${r.compared}（比例 ${r.ratio.toFixed(6)}）`;
+      });
+    })();
+  </script>
+</body>
+</html>
