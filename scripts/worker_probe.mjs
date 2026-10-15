@@ -461,6 +461,61 @@ async function main() {
   chk.check('空闲时闪烁仍在翻转（没被"移动即可见"弄停）',
             new Set(idle).size > 1, j(idle));
 
+  chk.section('[W14] 缩放：显示尺寸与几何都要跟着倍率走');
+  // 这一段是从一个页面上看得见的缺陷反推出来的：画布的 CSS 尺寸只在新建画布时设过一次，
+  //   缩放之后背衬（Worker 按新倍率重画的页宽页高）变了而显示尺寸没变 ⇒ 整页按旧尺寸
+  //   显示新倍率的内容，表现是"缩放之后整页偏小兼发虚"。判据取两条：画布的矩形宽高必须
+  //   等于几何里的页宽页高（这才是"缩放落到画布上"）；同一光标位置的帧内坐标必须按倍率
+  //   成比例（这才是"缩放真的重排了"）。
+  const zoomGeom = async (z) => {
+    await c.eval(
+      'const el = document.getElementById("zoom");' +
+      'el.value = String(' + z + ');' +
+      'el.dispatchEvent(new Event("change"));' +
+      'return true;');
+    await c.waitFor(
+      'return !!(window.__wheditor.geom && window.__wheditor.editStats)' +
+      ' && Math.abs(window.__wheditor.zoomLevel - ' + z + ') < 1e-6' +
+      ' && window.__wheditor.geom.pagesReady', '缩放 ' + z + ' 落地');
+    await c.eval('return window.__wheditor.setCaret(0, 1);');
+    // 光标也要等它真的落地：这是一个异步宿主，读早了拿到的是上一拍的位置，
+    //   而两个倍率读的若是不同位置，最后那条比例判据会变成噪声。
+    await c.waitFor(
+      'const s = window.__wheditor.editStats;' +
+      'return !!s && s.caretPara === 0 && s.caretOffset === 1;', '光标停到 (0,1)');
+    await sleep(150);
+    return c.eval(
+      'const h = window.__wheditor;' +
+      'const el = document.querySelector("canvas.pg");' +
+      'const r = el.getBoundingClientRect();' +
+      'return { zoom: h.zoomLevel, geom: [h.geom.pageW, h.geom.pageH], dpr: h.geom.dpr,' +
+      '         rect: [Math.round(r.width), Math.round(r.height)],' +
+      '         style: [el.style.width, el.style.height],' +
+      '         caretX: h.editStats.caretX };');
+  };
+  const z15 = await zoomGeom(1.5);
+  const z20 = await zoomGeom(2);
+  chk.check('改 #zoom 输入框（真实 change 事件）之后 zoomLevel 跟着变',
+            z15.zoom === 1.5 && z20.zoom === 2, `${z15.zoom} → ${z20.zoom}`);
+  chk.check('画布矩形宽高等于几何的页宽页高（1.5 倍）',
+            z15.rect[0] === Math.round(z15.geom[0] / z15.dpr) &&
+            z15.rect[1] === Math.round(z15.geom[1] / z15.dpr),
+            `矩形 ${j(z15.rect)}，几何 ${j(z15.geom)} / dpr ${z15.dpr}`);
+  chk.check('画布矩形宽高等于几何的页宽页高（2 倍）',
+            z20.rect[0] === Math.round(z20.geom[0] / z20.dpr) &&
+            z20.rect[1] === Math.round(z20.geom[1] / z20.dpr),
+            `矩形 ${j(z20.rect)}，几何 ${j(z20.geom)} / dpr ${z20.dpr}`);
+  chk.check('画布显示尺寸确实变大了（不是只有内部状态变）',
+            z20.rect[0] > z15.rect[0] && z20.rect[1] > z15.rect[1],
+            `${j(z15.rect)} → ${j(z20.rect)}`);
+  // 反向一半：显示尺寸对了不等于缩放真的重排了。同一光标位置的帧内 x 必须按倍率成比例 ——
+  //   少了这一条，"只改样式不改排版"同样能让上面几条通过。
+  const ratio = z20.caretX / z15.caretX;
+  chk.check('同一光标位置的帧内坐标按倍率成比例（缩放真的重排了）',
+            Math.abs(ratio - 2 / 1.5) < 0.02,
+            `caretX ${z15.caretX} → ${z20.caretX}，比值 ${ratio.toFixed(4)}（应为 ${(2 / 1.5).toFixed(4)}）`);
+  await zoomGeom(1.5);
+
   chk.section('[W12] 错误面');
   const errs = await c.eval('return window.__wheditor.errors');
   chk.check('宿主与 Worker 都没有报错', errs.length === 0, j(errs));

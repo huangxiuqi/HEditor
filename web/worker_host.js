@@ -14,6 +14,10 @@
 //   SharedArrayBuffer ⇒ 要跨源隔离。所以引擎搬进 Worker 就等于门面异步 —— 这是代价，
 //   不是选择。上面第二条把交互路径上的 await 全消掉了：消息在调用那一刻就发出去了，
 //   返回的 Promise 只是"结果到了"的通知。
+//
+// 整个文件包一层立即执行函数：同页多实例时这一份会与另一个宿主（app.js）一起加载，
+//   两边各有自己的顶层常量（FONTS / DPR 之类），不隔离就是"标识符重复声明"的语法错误。
+(function () {
 
 const DPR = window.devicePixelRatio || 1;
 const FONTS = [
@@ -30,17 +34,80 @@ const FONTS = [
 const BUST = '?v=' + Date.now();
 const CALL_TIMEOUT_MS = 15000;
 
-const stageEl = document.getElementById('stage');
-const spacerEl = document.getElementById('spacer');
-const ta = document.getElementById('ime');
-const statEl = document.getElementById('stats');
-const barEl = document.getElementById('bar');
-const statusEl = document.getElementById('status');
+/**
+ * 造一个"引擎在 Worker 里"的编辑器实例：舞台、页容器、输入层都在 container 里找。
+ *
+ * 每份实例有自己的 Worker、自己的挂起表、自己的镜像与页画布 —— 同页多实例时互不来往。
+ *   查找限定在容器内，因为 #stage / #ime 在同页多实例时重名，全局查找只会命中第一个
+ *   实例那一份；容器里没有的元素再回落到整页查找，演示页的工具栏因此仍然接得上。
+ *   opts.chrome 为 false 时只接编辑器本体（舞台 / 页容器 / 输入层）。
+ *
+ * 返回值是门面（与单线程宿主同形），另带 whenReady（resolve 成 { ok, error }，刻意
+ *   不做成失败即 reject：没人接的 rejection 会变成一条未处理的异步失败）与 dispose()
+ *   （终止 Worker、清定时器、摘画布）。函数体保持文件原有的零缩进，逐行重排缩进会把
+ *   diff 变成整文件重写。
+ */
+function createWorkerEditor(container, opts) {
+const o = opts || {};
+const root = container || document.body;
+const chrome = o.chrome !== false;
+const $ = (id) => root.querySelector('#' + id) || document.getElementById(id);
+
+const stageEl = $('stage');
+const spacerEl = $('spacer');
+const ta = $('ime');
+const statEl = chrome ? $('stats') : null;
+const barEl = chrome ? $('bar') : null;
+const statusEl = chrome ? $('status') : null;
 
 /** 状态栏（与单线程宿主同形）：组合期间在这里本地预览预编辑串。 */
 function setStatus(text) {
   if (statusEl) statusEl.textContent = text;
 }
+
+/**
+ * 错误降级面（见 web/host_error.js）。
+ *
+ * 两档的分法在这一侧尤其重要，因为报错来源有两类：Worker 脚本自身出错（整条不可用），
+ *   以及某一条命令在 Worker 里抛异常（引擎还活着，换一条命令照常能用）。此前两者都只
+ *   写进 errors 数组，页面上反映出来的区别只是"点什么都不动了"。
+ */
+const errorRoot = root;
+const errorSurface = typeof window.createErrorSurface === 'function'
+  ? window.createErrorSurface(errorRoot, {}) : null;
+
+// 容器里必须有三件：滚动舞台、撑高度的占位块、承接键盘与输入法的 textarea。
+//   缺了就是容器配错，当场说清楚，而不是等到摆输入层时抛一个看不懂的错。
+if (!stageEl || !spacerEl || !ta) {
+  const missing = [!stageEl && '#stage', !spacerEl && '#spacer', !ta && '#ime']
+    .filter(Boolean).join(' / ');
+  const err = new Error(`容器里缺少 ${missing}，无法建立编辑器`);
+  if (errorSurface) {
+    errorSurface.fatal('编辑器初始化失败', {
+      detail: err.message,
+      hint: 'container 必须是包含 #stage / #spacer / #ime 的那个元素。',
+    });
+  }
+  throw err;
+}
+const report = {
+  fatal(message, info) { if (errorSurface) errorSurface.fatal(message, info); },
+  warn(message, info) { if (errorSurface) errorSurface.warn(message, info); },
+  get entries() { return errorSurface ? errorSurface.entries : []; },
+  get fatalActive() { return errorSurface ? errorSurface.fatalActive : false; },
+};
+
+/**
+ * 引擎是否已经不可用。
+ *
+ * 一旦为真：命令不再发出去（发了也没人执行，只会变成一串超时），查询当场以明确的
+ *   理由拒绝。判据是"页面上已经有一条致命横幅"，而不是"猜测还能不能恢复"——
+ *   唯一的恢复路径是页面重载，横幅上给了按钮。
+ */
+let dead = false;
+
+// 这一份实例是否已经被拆掉（拆掉之后门面一律给空值，不再报告任何内容）。
+let disposed = false;
 
 const errors = [];
 // ★ 挂起表用**自增序号**做键，不能用 performance.now()：
@@ -73,12 +140,16 @@ let lastPageX = 0;   // 页在视口里横向居中的偏移（设备像素）
  *   点击整片落到别处（错得整整齐齐，最不像坐标问题）。
  */
 function syncZoomInput() {
-  const el = document.getElementById('zoom');
+  const el = $('zoom');
   if (el) el.value = String(zoom);
 }
 
 const now = () => performance.now();
-const post = (msg, transfer) => worker.postMessage(msg, transfer || []);
+// 引擎已不可用时不再往外发：这些消息只会变成一串超时，把真正的失败藏起来。
+const post = (msg, transfer) => {
+  if (dead) return;
+  worker.postMessage(msg, transfer || []);
+};
 
 const mirror = {
   info: null, stats: null, layout: null, geom: null,
@@ -88,8 +159,12 @@ const mirror = {
 const host = { ready: false, errors, mirror, pageCanvasCount: 0 };
 
 function glueUrl() {
-  const dir = new URLSearchParams(location.search).get('wasm') === 'debug'
-    ? 'build/wasm-debug/web/' : 'build/wasm/web/';
+  // 与单线程宿主的 WASM_DIR 同一口径：debug 走调试档，留空走交付档，
+  //   别的值按产物目录处理（用来复现"产物不存在"这条失败路径）。
+  const p = new URLSearchParams(location.search).get('wasm') || '';
+  const dir = p === 'debug' ? 'build/wasm-debug/web/'
+            : p ? (p.endsWith('/') ? p : p + '/')
+            : 'build/wasm/web/';
   return new URL(dir + 'heditor.js', new URL('../', location.href)).href;
 }
 
@@ -106,11 +181,17 @@ const viewSize = () => ({
  *   —— 消息在调用那一刻就发出去了，"等"只是拿到通知。
  */
 function waitOp(name, msg) {
+  if (dead) return Promise.reject(new Error(`引擎已不可用，命令 ${name} 未发送`));
   const id = ++opSeq;
   const tt = now();
   return new Promise((resolve, reject) => {
     const to = setTimeout(() => {
-      if (pendingState.delete(id)) reject(new Error(`${name} 超时`));
+      if (pendingState.delete(id)) {
+        // 超时也降级给用户看：调用方各自只关心自己那一条，页面上要有人知道
+        //   "刚才那一下没成功"。
+        report.warn(`命令 ${name} 超时（${CALL_TIMEOUT_MS} ms 没有回话）`);
+        reject(new Error(`${name} 超时`));
+      }
     }, CALL_TIMEOUT_MS);
     pendingState.set(id, {
       resolve: (v) => { clearTimeout(to); resolve(v); },
@@ -155,10 +236,14 @@ function opUser(name, args, nullIfUnchanged) {
 }
 
 function askOp(name, args) {
+  if (dead) return Promise.reject(new Error(`引擎已不可用，查询 ${name} 未发送`));
   const id = ++askSeq;
   return new Promise((resolve, reject) => {
     const to = setTimeout(() => {
-      if (pendingReply.delete(id)) reject(new Error(`查询 ${name} 超时`));
+      if (pendingReply.delete(id)) {
+        report.warn(`查询 ${name} 超时（${CALL_TIMEOUT_MS} ms 没有回话）`);
+        reject(new Error(`查询 ${name} 超时`));
+      }
     }, CALL_TIMEOUT_MS);
     pendingReply.set(id, { resolve: (v) => { clearTimeout(to); resolve(v); }, reject, name });
     post({ t: 'ask', id, name, args: args || {} });
@@ -242,12 +327,13 @@ function syncPageCanvases(gm) {
       el = acquireCanvas();
       el.dataset.page = String(p);   // 指针事件靠它认页（见 onPointerDown）
       pageCanvases.set(p, el);
-      // 转移之后宿主的 width/height 属性就作废了：显示尺寸只能靠 CSS，
-      //   而背衬尺寸由 Worker 按帧的页宽页高定 —— 两边都是 pageW × pageH。
-      el.style.width = w;
-      el.style.height = h;
       sendPageCanvas(p, el, gm);
     }
+    // 显示尺寸每推一次状态都要对一遍，不能只在新建画布时设一次。转移之后这个元素的
+    //   width/height 属性就作废了：背衬尺寸由 Worker 按帧的页宽页高定，CSS 尺寸只有
+    //   这里能改。漏掉的表现是缩放之后"按新的倍率画进旧的显示尺寸"——整页偏小兼发虚。
+    if (el.style.width !== w) el.style.width = w;
+    if (el.style.height !== h) el.style.height = h;
     const top = Math.round((p * gm.pageStep) / dpr) + 'px';
     if (el.style.left !== left) el.style.left = left;
     if (el.style.top !== top) el.style.top = top;
@@ -258,22 +344,47 @@ function syncPageCanvases(gm) {
 /* ── 接收 ───────────────────────────────────────────────────────────────── */
 
 function onWorkerError(m) {
+  const brief = String(m.message).split('\n')[0];
   errors.push(m.where + ': ' + m.message);
-  barEl.textContent = 'Worker 报错 ' + m.where + '：' + String(m.message).split('\n')[0];
-  barEl.className = 'err';
-  // ★ 出错的那一拍不会再有 state / ack 回来 —— 把还在等的挂起调用**当场拒掉**。
+  if (barEl) {
+    barEl.textContent = 'Worker 报错 ' + m.where + '：' + brief;
+    barEl.className = 'err';
+  }
+  /**
+   * 两档判据：报错的来源决定"引擎还能不能用"。
+   *
+   *   worker.onerror  ：Worker 脚本自身出错（语法错误、未捕获异常）—— 整条不可用。
+   *   boot 开头（boot / boot:layout）：装载就失败了（胶水取不到、实例化抛异常、
+   *     首帧排版失败）—— 引擎没有可显示的内容，也是不可用。
+   *   其余（do / ask / view 的某一条）：那一条命令失败，引擎还活着，换一条照常能用。
+   */
+  const fatal = m.where === 'worker.onerror' || /^boot/.test(m.where);
+  if (fatal) {
+    dead = true;
+    report.fatal(m.where === 'worker.onerror' ? '引擎 Worker 崩溃' : '引擎装载失败', {
+      detail: brief,
+      hint: '这一页的编辑器已经不可用；重新加载页面会重建引擎。',
+      retry: () => location.reload(),
+    });
+  } else {
+    report.warn(`命令 ${m.where} 失败：${brief}`);
+  }
+  // 出错的那一拍不会再有 state / ack 回来 —— 把还在等的挂起调用**当场拒掉**。
   //   不这样做的话调用方只能等到超时，而真正的错误信息就在手边（症状是
   //   "视口超时"这种把根因藏起来的报错，最费时间）。
-  rejectPending(`Worker 报错 ${m.where}：${String(m.message).split('\n')[0]}`);
+  rejectPending(`Worker 报错 ${m.where}：${brief}`);
 }
 
 /**
  * 宿主自己处理消息时抛的异常也要浮出来。
  *
- * ★ 消息处理器里抛异常是**无声的**：既不会进 window.onerror 的那套收集，也不会回给
+ * 消息处理器里抛异常是无声的：既不会进 window.onerror 的那套收集，也不会回给
  *   调用方 —— 表现成"调用一直等不到回话然后超时"，而真相（比如某个 DOM 操作抛了）
  *   完全看不到。实测就是被这条坑了一轮：Worker 把 state 推过来了、帧也重画了，
  *   宿主在解析时抛掉，调用方只看到超时。
+ *
+ * 这一档按致命处理：宿主处理不了引擎推来的状态，意味着画面已经和引擎对不上，
+ *   继续让它看起来可用只会让人以为"编辑没生效"，那是更难查的一种失败。
  */
 function rejectPending(reason) {
   const e = new Error(reason);
@@ -283,10 +394,19 @@ function rejectPending(reason) {
 
 function onPageError(where, e) {
   const msg = String((e && e.stack) || e);
+  const brief = String(msg).split('\n')[0];
   errors.push(`${where}: ${msg}`);
-  barEl.textContent = `宿主 ${where} 抛异常：${String(msg).split('\n')[0]}`;
-  barEl.className = 'err';
-  rejectPending(`宿主 ${where} 抛异常：${String(msg).split('\n')[0]}`);
+  if (barEl) {
+    barEl.textContent = `宿主 ${where} 抛异常：${brief}`;
+    barEl.className = 'err';
+  }
+  dead = true;
+  report.fatal('宿主处理引擎状态时抛异常', {
+    detail: brief,
+    hint: '画面已与引擎不一致，这一页的编辑器不再可用。',
+    retry: () => location.reload(),
+  });
+  rejectPending(`宿主 ${where} 抛异常：${brief}`);
 }
 
 function syncSpacer(st, gm) {
@@ -397,9 +517,11 @@ function handleMessage(m) {
     // ready 一到就算起来了，不等第一帧：装载里抛异常时"永远等不到 ready"会把主线程
     //   变成静默挂起，而这个页面是拿来验证的 —— 挂住等于什么都没验到。
     host.ready = true;
-    barEl.textContent =
-      `引擎在 Worker 里 · 启动 ${m.bootMs.toFixed(0)} ms（字体 ${m.fontMs.toFixed(0)} ms）· ` +
-      `帧零拷贝 ${m.zeroCopyFrame} · 一页一张画布`;
+    if (barEl) {
+      barEl.textContent =
+        `引擎在 Worker 里 · 启动 ${m.bootMs.toFixed(0)} ms（字体 ${m.fontMs.toFixed(0)} ms）· ` +
+        `帧零拷贝 ${m.zeroCopyFrame} · 一页一张画布`;
+    }
     host.readyWallMs = now() - bootLead;
     return;
   }
@@ -861,6 +983,9 @@ function trackInput(p) {
 host.rendered = Promise.resolve(true);
 
 host.quiesce = async () => {
+  // 引擎已经不可用时没有队列可等：在途调用在崩溃那一刻就被当场拒掉了，也没有谁能回 ping。
+  //   这里必须直接返回，否则屏障本身会抛"引擎已不可用"，把真正的失败原因盖在下面。
+  if (dead) return true;
   // 反复"等在途链 → 消息屏障"：ping 的等待期间，先前那条链的 hitTest 答复可能刚回来并
   //   接着发出了 setCaret —— 于是又有了新在途。循环把它收干净（有上限，不会空转）。
   for (let i = 0; i < 6; ++i) {
@@ -977,6 +1102,14 @@ host.startBlink = () => { resetBlinkPhase(); return true; };
 
 /* ── 启动 ───────────────────────────────────────────────────────────────── */
 
+/**
+ * 窗口尺寸变化：把新的视口推给引擎。
+ *
+ * 具名而不是就地写箭头函数，是为了 dispose() 能摘掉这个监听 —— 监听挂在 window 上，
+ *   实例拆掉之后它仍然活着，会拿着已经废弃的 stageEl 继续发消息。
+ */
+const onResize = () => viewOp(Math.round(stageEl.scrollTop * DPR));
+
 async function boot() {
   worker = new Worker('engine_worker.js' + BUST);
   worker.onmessage = onMessage;
@@ -1008,14 +1141,90 @@ async function boot() {
   stageEl.addEventListener('scroll', viewFireAndForget, { passive: true });
   // 视口变了不用换画布：页画布的尺寸只取决于页，视口只影响"窗口要哪几页" ——
   //   窗口一变，推回来的几何会让 syncPageCanvases 自己把缺的页建出来。
-  window.addEventListener('resize', () => { viewOp(Math.round(stageEl.scrollTop * DPR)); });
+  window.addEventListener('resize', onResize);
   ta.focus();
 }
 
-window.__wheditor = host;
-window.__heditor = host;   // 同名：两个宿主对外是同一个门面形状
-boot().catch((e) => {
-  errors.push('boot: ' + ((e && e.stack) || e));
-  barEl.textContent = '启动失败：' + e;
-  barEl.className = 'err';
+// 错误降级面的取证句柄（与单线程宿主的 hostErrors 同形）。
+Object.defineProperty(host, 'hostErrors', {
+  get: () => ({
+    fatalActive: report.fatalActive,
+    bannerText: errorSurface ? errorSurface.bannerText : '',
+    bannerDetail: errorSurface ? errorSurface.bannerDetail : '',
+    toastTexts: errorSurface ? errorSurface.toastTexts : [],
+    entries: report.entries,
+    dead,
+  }),
 });
+
+Object.defineProperty(host, 'container', { get: () => root });
+Object.defineProperty(host, 'dead', { get: () => dead });
+Object.defineProperty(host, 'disposed', { get: () => disposed });
+
+/**
+ * 拆掉这一份实例。
+ *
+ * 终止 Worker（这是唯一能真正释放那一侧 wasm 堆的动作）、清掉本地定时器、摘掉 window
+ *   上的 resize 监听、把页画布从文档里移除、抹掉错误界面，最后把 ready 打回 false。
+ *   容器里那些元素上的监听不逐个摘：它们随着容器一起被丢弃，而残留的处理器会因为
+ *   dead 为真而什么都不做。
+ */
+host.dispose = () => {
+  if (disposed) return false;
+  disposed = true;
+  dead = true;
+  host.ready = false;
+  if (blinkTimer) { clearInterval(blinkTimer); blinkTimer = null; }
+  window.removeEventListener('resize', onResize);
+  if (worker) { worker.terminate(); worker = null; }
+  for (const [, el] of pageCanvases) if (el.parentNode) el.parentNode.removeChild(el);
+  pageCanvases.clear();
+  host.pageCanvasCount = 0;
+  if (errorSurface) errorSurface.clear();
+  return true;
+};
+
+/**
+ * 启动这一份实例。resolve 成 { ok, error }，不 reject —— 没人接的 rejection 会变成
+ *   一条未处理的异步失败，把真正的失败原因淹掉（这一侧的致命失败必须显示在横幅上）。
+ */
+const readyPromise = boot().then(
+  () => ({ ok: true }),
+  (e) => {
+    const msg = String((e && e.message) || e);
+    errors.push('boot: ' + ((e && e.stack) || e));
+    dead = true;
+    if (barEl) {
+      barEl.textContent = '启动失败：' + msg;
+      barEl.className = 'err';
+    }
+    // 启动失败必须在页面上看得见：Worker 起不来时这一侧什么都画不出，
+    //   只写进 errors 数组的话用户面对的是一块空白区域。
+    report.fatal('编辑器启动失败', {
+      detail: msg,
+      hint: '先执行：cmake --workflow --preset wasm；若用 ?wasm= 指定了产物目录，检查它是否存在。',
+      retry: () => location.reload(),
+    });
+    return { ok: false, error: e };
+  });
+
+Object.defineProperty(host, 'whenReady', { get: () => readyPromise });
+
+return host;
+}
+
+// 页面入口
+window.createWorkerEditor = createWorkerEditor;
+
+/**
+ * 演示页（worker.html）自动起一个实例，并把门面同时挂到 window.__wheditor 与
+ *   window.__heditor 上：两个宿主对外是同一个门面形状，探针才可能同一份通吃。
+ *   多实例页面在加载本文件之前写 window.__heditorAutoBoot = false，由页面自己调。
+ */
+if (window.__heditorAutoBoot !== false && document.getElementById('stage')) {
+  const inst = createWorkerEditor(document.body, { chrome: true });
+  window.__wheditor = inst;
+  window.__heditor = inst;
+}
+
+})();   // 文件级作用域结束

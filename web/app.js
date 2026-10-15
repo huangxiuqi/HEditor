@@ -19,12 +19,22 @@
 //     预编辑串先在状态栏本地预览，commit 时才脏化文档、只重排一次。
 'use strict';
 
+// 整个文件包一层立即执行函数：同页多实例时这一份会与另一个宿主（worker_host.js）
+//   一起加载，两边各有自己的顶层常量（FONTS / DPR 之类），不隔离就是"标识符重复声明"
+//   的语法错误 —— 而这类错误只在同页加载两个宿主时才出现，单个演示页永远看不到。
+(function () {
+
 const BASE = new URL('../', location.href);
 // 产物目录：默认交付档；带 ?wasm=debug 时指向调试档（断言 + 栈检查 + 源码映射）。
 //   两档是各自独立构建的目录，切换只影响取胶水层的路径。
-const WASM_DIR = new URLSearchParams(location.search).get('wasm') === 'debug'
+//   ?wasm= 给别的值时按"产物目录"处理（相对仓库根，末尾有无斜杠都行）：这样
+//   "产物不存在"这条失败路径才能在页面上复现出来，错误降级那条通路才有可证伪的造法。
+const wasmParam = new URLSearchParams(location.search).get('wasm') || '';
+const WASM_DIR = wasmParam === 'debug'
                      ? 'build/wasm-debug/web/'
-                     : 'build/wasm/web/';
+                     : wasmParam
+                       ? (wasmParam.endsWith('/') ? wasmParam : wasmParam + '/')
+                       : 'build/wasm/web/';
 const WASM_GLUE = new URL(WASM_DIR + 'heditor.js', BASE);
 
 const FONTS = [
@@ -47,7 +57,23 @@ const SCENARIOS = [
 
 const DEFAULT_SCENARIO = 6;   // 直接进可编辑场景，省得还要先切一下
 
-const $ = (id) => document.getElementById(id);
+/**
+ * 造一个编辑器实例：舞台、页容器、输入层都在 container 里找。
+ *
+ * 查找限定在容器内，因为同页多实例时 #stage / #pages / #ime 会重名，全局查找只会命中
+ *   第一个实例那一份 —— 两个实例会互相抢元素；容器里没有的元素再回落到整页查找，演示页
+ *   放在容器外的工具条与统计栏因此仍然接得上。opts.chrome 为 false 时只接编辑器本体。
+ *
+ * 返回值是门面（与 Worker 宿主同形），另带 whenReady（resolve 成 { ok, error }，刻意
+ *   不做成失败即 reject：没人接的 rejection 会变成一条未处理的异步失败）与 dispose()。
+ *   函数体保持文件原有的零缩进，逐行重排缩进会把 diff 变成整文件重写。
+ */
+function createEditor(container, opts) {
+const o = opts || {};
+const root = container || document.body;
+const chrome = o.chrome !== false;
+
+const $ = (id) => root.querySelector('#' + id) || document.getElementById(id);
 const stageEl = $('stage');
 const pagesEl = $('pages');
 const ta = $('ime');
@@ -61,6 +87,55 @@ let composing = false;
 let caretOn = true;
 let blinkTimer = null;
 const pageErrors = [];
+let disposed = false;
+
+/**
+ * 错误降级面（见 web/host_error.js）。
+ *
+ * 挂在容器上：那一块就是"这个实例所在的位置"，横幅出现时不会跑到别的实例头上。
+ *   host_error.js 没加载成功时退化成"只记进 pageErrors"，不因为展示层缺席而抛异常。
+ *   容器建议写成 position:relative，横幅才落在这块实例内部（多实例页面上尤其重要）。
+ */
+const errorSurface = typeof window.createErrorSurface === 'function'
+  ? window.createErrorSurface(root, {}) : null;
+
+// 容器里必须有三件：滚动舞台、页容器、输入层。缺了就是容器配错，当场说清楚 ——
+//   否则会等到某次摆输入层时抛一个看不懂的错，或者整个区域一片空白。
+if (!stageEl || !pagesEl || !ta) {
+  const missing = [!stageEl && '#stage', !pagesEl && '#pages', !ta && '#ime']
+    .filter(Boolean).join(' / ');
+  const err = new Error(`容器里缺少 ${missing}，无法建立编辑器`);
+  if (errorSurface) {
+    errorSurface.fatal('编辑器初始化失败', {
+      detail: err.message,
+      hint: 'container 必须是包含 #stage / #pages / #ime 的那个元素。',
+    });
+  }
+  throw err;
+}
+
+/**
+ * 失败上报的两个档位。
+ *
+ * 分成两档的理由：启动失败与"某一次操作失败"对用户的含义完全不同 —— 前者要说明
+ *   这个编辑器已经不能用，后者只需提示一次并让编辑继续。混成一档的话，要么把可恢复的
+ *   失败说成致命，要么把致命失败只写进日志而不显示。
+ */
+const report = {
+  fatal(message, info) { if (errorSurface) errorSurface.fatal(message, info); },
+  warn(message, info) { if (errorSurface) errorSurface.warn(message, info); },
+  get entries() { return errorSurface ? errorSurface.entries : []; },
+  get fatalActive() { return errorSurface ? errorSurface.fatalActive : false; },
+};
+
+/**
+ * 引擎是否已经不可用。
+ *
+ * 这一侧目前唯一会致命的是启动失败（引擎没起来，mod 为 null），此时 UI 接线还没跑过，
+ *   所以不需要额外的输入拦截；把它记下来是为了与 Worker 宿主的 hostErrors 同形，
+ *   让"哪个实例坏了"在多实例页面上读法一致。
+ */
+let dead = false;
 
 /**
  * 宿主侧上屏耗时（最近一轮的四段分解）。
@@ -340,34 +415,65 @@ function settle(st, opts) {
   return st;
 }
 
-window.addEventListener('error', (e) => pageErrors.push('error: ' + String(e.message)));
-window.addEventListener('unhandledrejection', (e) =>
-  pageErrors.push('unhandledrejection: ' + String(e.reason)));
+// 页面级异常照旧进 pageErrors（探针断言它是空的），同时降级成一条提示：
+//   脚本错误不必然致命（引擎还在），但它绝不该只有控制台知道。
+//   监听器写成具名函数是为了 dispose() 能摘掉它们；多实例页面上每个实例都会收到
+//   同一条页面级异常 —— 它本来就是页面级的，谁也没法把它归给某一个实例。
+function onWindowError(e) {
+  if (disposed) return;
+  pageErrors.push('error: ' + String(e.message));
+  report.warn('页面脚本抛错：' + String(e.message));
+}
+function onUnhandledRejection(e) {
+  if (disposed) return;
+  pageErrors.push('unhandledrejection: ' + String(e.reason));
+  report.warn('未处理的异步失败：' + String(e.reason));
+}
+window.addEventListener('error', onWindowError);
+window.addEventListener('unhandledrejection', onUnhandledRejection);
 
 const fmt = (n, d = 2) => Number(n).toFixed(d);
 const kb = (n) => (n / 1024).toFixed(1) + ' KB';
 
 function setStatus(text, isErr) {
   const el = $('status');
+  if (!el) return;   // 产品容器里没有状态栏，不该因此抛异常
   el.textContent = text;
   el.classList.toggle('err', !!isErr);
 }
 
 function kv(id, rows) {
-  $(id).innerHTML = rows
+  const el = $(id);
+  if (!el) return;   // 统计栏同样是演示页专有的
+  el.innerHTML = rows
     .map(([k, v, cls]) => `<dt>${k}</dt><dd class="${cls || ''}">${v}</dd>`)
     .join('');
 }
 
+/**
+ * 胶水层按页加载一次，多个实例共用同一份模块工厂。
+ *
+ *   每个实例都要调一次 CreateHEditor() 拿自己的引擎（每次都是独立实例），但胶水脚本
+ *   本身只该注入一次 —— 重复注入同一个 URL 时浏览器会不会再发一次 load 事件并不确定，
+ *   而在这条路上押"会"等于赌一个未定义行为。
+ */
+let gluePromises = new Map();
 function loadScript(src) {
-  return new Promise((resolve, reject) => {
-    const s = document.createElement('script');
-    s.src = src;
-    s.onload = resolve;
-    s.onerror = () =>
-      reject(new Error(`无法加载 ${src}\n先执行：cmake --workflow --preset wasm`));
-    document.head.appendChild(s);
-  });
+  let p = gluePromises.get(src);
+  if (!p) {
+    p = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = src;
+      s.onload = resolve;
+      s.onerror = () =>
+        reject(new Error(`无法加载 ${src}\n先执行：cmake --workflow --preset wasm`));
+      document.head.appendChild(s);
+    });
+    // 失败之后允许下一次重试：把 memo 清掉，否则后续实例会直接复用同一个失败结果。
+    p.catch(() => { gluePromises.delete(src); });
+    gluePromises.set(src, p);
+  }
+  return p;
 }
 
 /**
@@ -550,76 +656,102 @@ async function boot() {
   ]);
 
   // UI 接线
-  const sel = $('scenario');
-  sel.innerHTML = SCENARIOS.map((s) => `<option value="${s.id}">${s.label}</option>`).join('');
-  sel.value = String(DEFAULT_SCENARIO);
-  sel.disabled = false;
-  sel.addEventListener('change', () => {
-    const id = Number(sel.value);
-    if (id === 8) {
-      // 真病历样例的内容来自文件，不走 wasm 里的场景表。
-      setStatus('读取病历样例…');
-      applyMedicalSample(1)
-        .then((r) => setStatus(`病历样例：${r.paragraphs} 段 / ${r.chars} 字`))
-        .catch((err) => setStatus(`病历样例读取失败：${err.message}`));
+  //
+  //   整段按"元素可能不存在"写：演示页有工具条与统计栏，产品容器只有舞台与输入层。
+  //   缺元素时跳过接线，而不是抛异常 —— 抛在这里的表现是"编辑器空白"，最难查的一种。
+  const sel = chrome ? $('scenario') : null;
+  if (sel) {
+    sel.innerHTML = SCENARIOS.map((s) => `<option value="${s.id}">${s.label}</option>`).join('');
+    sel.value = String(DEFAULT_SCENARIO);
+    sel.disabled = false;
+    sel.addEventListener('change', () => {
+      const id = Number(sel.value);
+      if (id === 8) {
+        // 真病历样例的内容来自文件，不走 wasm 里的场景表。
+        setStatus('读取病历样例…');
+        applyMedicalSample(1)
+          .then((r) => setStatus(`病历样例：${r.paragraphs} 段 / ${r.chars} 字`))
+          .catch((err) => {
+            // 一次装载失败不致命：引擎还活着，用户可以直接换一个场景。
+            setStatus(`病历样例读取失败：${err.message}`, true);
+            report.warn('病历样例读取失败：' + err.message);
+          });
+        ta.focus();
+        return;
+      }
+      mod.setScenario(id);
+      relayoutAndBlit();
       ta.focus();
-      return;
-    }
-    mod.setScenario(id);
-    relayoutAndBlit();
-    ta.focus();
-  });
+    });
+  }
 
-  const zoom = $('zoom');
-  zoom.disabled = false;
-  zoom.addEventListener('input', () => {
-    currentZoom = Number(zoom.value);
-    $('zoomVal').textContent = currentZoom.toFixed(2).replace(/0$/, '');
-    mod.setZoom(currentZoom);
-    relayoutAndBlit();
-  });
+  const zoom = chrome ? $('zoom') : null;
+  if (zoom) {
+    zoom.disabled = false;
+    zoom.addEventListener('input', () => {
+      currentZoom = Number(zoom.value);
+      const zv = $('zoomVal');
+      if (zv) zv.textContent = currentZoom.toFixed(2).replace(/0$/, '');
+      mod.setZoom(currentZoom);
+      relayoutAndBlit();
+    });
+  }
 
-  $('paint').disabled = false;
-  $('paint').addEventListener('click', () => relayoutAndBlit());
+  const paintBtn = chrome ? $('paint') : null;
+  if (paintBtn) {
+    paintBtn.disabled = false;
+    paintBtn.addEventListener('click', () => relayoutAndBlit());
+  }
 
-  $('focus').disabled = false;
-  $('focus').addEventListener('click', () => ta.focus());
+  const focusBtn = chrome ? $('focus') : null;
+  if (focusBtn) {
+    focusBtn.disabled = false;
+    focusBtn.addEventListener('click', () => ta.focus());
+  }
 
-  $('bench').disabled = false;
-  $('bench').addEventListener('click', runBench);
+  const benchBtn = chrome ? $('bench') : null;
+  if (benchBtn) {
+    benchBtn.disabled = false;
+    benchBtn.addEventListener('click', runBench);
+  }
 
   // 表单：模式切换 + 样例
   //
   // 策略判断全在 C++ 侧（编辑能力表），这里只是把开关递过去。
   //   如果"能不能改"由 JS 决定，那它就只是个 UI 提示，不是边界。
-  const modeSel = $('editMode');
-  modeSel.disabled = false;
-  modeSel.addEventListener('change', () => {
-    mod.setEditMode(Number(modeSel.value));
-    relayoutAndBlit();
-    ta.focus();
-  });
+  const modeSel = chrome ? $('editMode') : null;
+  if (modeSel) {
+    modeSel.disabled = false;
+    modeSel.addEventListener('change', () => {
+      mod.setEditMode(Number(modeSel.value));
+      relayoutAndBlit();
+      ta.focus();
+    });
+  }
 
   // 表单样例有三份：相邻的一可编辑加一只读、跨行大字段内嵌只读、三个可编辑字段连排。
   //   三连那一份是给"共享边界"用的：边界两侧都可写，所以在边界上打字、把某个字段删空、
   //   在字段之间退格，全都能当场试出来。
-  const variantSel = $('formVariant');
-  variantSel.disabled = false;
+  const variantSel = chrome ? $('formVariant') : null;
+  if (variantSel) variantSel.disabled = false;
   const formHint = [
     '表单样例：只有两个字段能改，中间的病程只读 —— 试着往别处敲字',
     '表单样例：一个大字段跨行，里面嵌着一个只读小字段',
     '表单样例：三个可编辑字段紧挨着 —— 在边界上打字 / 把中间那个删空，看括号怎么跟',
     '表单样例：三层嵌套（都可编辑）—— 点最里层的开头打字，三层一起变长',
   ];
-  $('formSample').disabled = false;
-  $('formSample').addEventListener('click', () => {
-    const v = Number(variantSel.value);
-    mod.loadFormSample(v);
-    modeSel.value = String(mod.editMode());
-    relayoutAndBlit();
-    ta.focus();
-    setStatus(formHint[v] || formHint[0]);
-  });
+  const formBtn = chrome ? $('formSample') : null;
+  if (formBtn) {
+    formBtn.disabled = false;
+    formBtn.addEventListener('click', () => {
+      const v = variantSel ? Number(variantSel.value) : 0;
+      mod.loadFormSample(v);
+      if (modeSel) modeSel.value = String(mod.editMode());
+      relayoutAndBlit();
+      ta.focus();
+      setStatus(formHint[v] || formHint[0]);
+    });
+  }
 
   // 键盘与 IME：全部由 textarea 承接（canvas 收不到键盘，也收不到合成事件）
   ta.addEventListener('keydown', onKeyDown);
@@ -630,7 +762,7 @@ async function boot() {
   pagesEl.addEventListener('mousedown', onCanvasMouseDown);
   stageEl.addEventListener('scroll', onStageScroll, { passive: true });
 
-  currentZoom = Number(zoom.value);
+  currentZoom = zoom ? Number(zoom.value) : currentZoom;
   mod.setZoom(currentZoom);
   // 先把视口锚点摆成"开头几页"，再装载。顺序反了的话第一次重排会按整篇栅格化 ——
   //   200 段那一份就是 16 页、~450 ms，而其中 13 页马上就会被丢掉。
@@ -1139,8 +1271,9 @@ function renderLayout(st) {
  */
 function runBench() {
   if (!mod || busy) return;
+  const btn = $('bench');
   busy = true;
-  $('bench').disabled = true;
+  if (btn) btn.disabled = true;
   setStatus('引擎内循环 12 次…');
   try {
     const r = mod.benchRelayoutPaint(12);
@@ -1158,7 +1291,7 @@ function runBench() {
     console.error(e);
   } finally {
     busy = false;
-    $('bench').disabled = false;
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -1178,7 +1311,7 @@ function wasmBytes() {
 //     edit*    —— 引擎本次编辑的统计（重排行数/重画像素/光标矩形）
 //   两组的数字来源完全不同；把它们混在一个对象里，探针就会拿"页数"去断言
 //   一个根本不存在的字段，然后静默通过。
-window.__heditor = {
+const facade = {
   get ready() { return ready; },
   get errors() { return pageErrors.slice(); },
   get edit() { return lastEdit; },
@@ -1259,8 +1392,11 @@ window.__heditor = {
   run(id, zoom) {
     if (zoom) {
       currentZoom = Number(zoom);
-      $('zoom').value = String(zoom);
-      $('zoomVal').textContent = currentZoom.toFixed(2).replace(/0$/, '');
+      // 缩放输入框是演示页专有的：容器里没有它就只改引擎那一侧，不抛异常。
+      const zEl = $('zoom');
+      const zVal = $('zoomVal');
+      if (zEl) zEl.value = String(zoom);
+      if (zVal) zVal.textContent = currentZoom.toFixed(2).replace(/0$/, '');
       mod.setZoom(currentZoom);
     }
     mod.setScenario(Number(id));
@@ -1688,17 +1824,96 @@ window.__heditor = {
              canvases: pageCanvases.size, pooled: canvasPool.length };
   },
   get zoomLevel() { return currentZoom; },
-  get scenario() { return Number($('scenario').value); },
+  get scenario() {
+    const el = $('scenario');
+    return el ? Number(el.value) : DEFAULT_SCENARIO;
+  },
+  // 这一份实例的根节点（多实例页面上用来分清是哪一个）。
+  get container() { return root; },
+  // 引擎是否已经不可用（与 Worker 宿主的同名成员同形）。
+  get dead() { return dead; },
+  // 启动结果。刻意 resolve 成 { ok, error } 而不是失败即 reject：没人接的 rejection
+  //   会变成一条未处理的异步失败，把真正的失败原因淹掉。
+  get whenReady() { return readyPromise; },
+  /**
+   * 拆掉这一份实例。
+   *
+   * DOM、定时器、监听、错误界面、画布引用都摘掉；wasm 堆交给 GC（Emscripten 实例
+   *   没有显式销毁接口）。拆完 ready 变回 false，门面剩下的取值器一律给空值 ——
+   *   一个已经拆掉的实例继续报告内容，就是最难查的那种假象。
+   */
+  dispose() {
+    if (disposed) return false;
+    disposed = true;
+    dead = true;
+    ready = false;
+    if (blinkTimer) { clearInterval(blinkTimer); blinkTimer = null; }
+    window.removeEventListener('error', onWindowError);
+    window.removeEventListener('unhandledrejection', onUnhandledRejection);
+    for (const [, rec] of pageCanvases) if (rec.el.parentNode) rec.el.parentNode.removeChild(rec.el);
+    pageCanvases.clear();
+    canvasPool.length = 0;
+    if (errorSurface) errorSurface.clear();
+    mod = null;
+    return true;
+  },
+  get disposed() { return disposed; },
+  // 错误降级面的取证句柄。界面本身带 data-host-error 属性，探针也可以直接从 DOM 读；
+  //   这里给一份对象是为了让"哪个实例降级了"在多实例页面上分得清。
+  get hostErrors() {
+    return {
+      fatalActive: report.fatalActive,
+      bannerText: errorSurface ? errorSurface.bannerText : '',
+      bannerDetail: errorSurface ? errorSurface.bannerDetail : '',
+      toastTexts: errorSurface ? errorSurface.toastTexts : [],
+      entries: report.entries,
+      dead,
+    };
+  },
 };
 
-main();
-async function main() {
+/**
+ * 启动这一份实例。
+ *
+ * 放在门面定义之后：boot() 会碰门面的取值器（例如 ready），而 errorSurface 与
+ *   report 在更早处就已经就绪，所以这里的先后只影响可读性。
+ */
+const readyPromise = (async () => {
   try {
     await boot();
+    return { ok: true };
   } catch (e) {
-    setStatus(String(e.message || e), true);
-    $('note').innerHTML =
-      `<b>启动失败。</b><br>${String(e.message || e).replace(/\n/g, '<br>')}`;
+    const msg = String((e && e.message) || e);
+    dead = true;
+    setStatus(msg, true);
+    // #note 是演示页的说明栏，产品页不会有它 —— 取不到就只留横幅，不能因此再抛一次。
+    const note = $('note');
+    if (note) note.innerHTML = `<b>启动失败。</b><br>${msg.replace(/\n/g, '<br>')}`;
+    report.fatal('编辑器启动失败', {
+      detail: msg,
+      hint: '先执行：cmake --workflow --preset wasm；若用 ?wasm= 指定了产物目录，检查它是否存在。',
+      retry: () => location.reload(),
+    });
     console.error(e);
+    return { ok: false, error: e };
   }
+})();
+
+return facade;
 }
+
+// 页面入口
+window.createEditor = createEditor;
+
+/**
+ * 演示页（index.html）自动起一个实例并把门面挂到 window.__heditor 上。
+ *
+ *   容器给 body：页面上的 #stage / #pages / #ime 与工具条都在里面，行为与"整页一个
+ *   编辑器"的旧形态逐条一致。多实例页面在加载本文件之前写
+ *   window.__heditorAutoBoot = false，由页面自己调 createEditor。
+ */
+if (window.__heditorAutoBoot !== false && document.getElementById('stage')) {
+  window.__heditor = createEditor(document.body, { chrome: true });
+}
+
+})();   // 文件级作用域结束
