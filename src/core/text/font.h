@@ -145,6 +145,14 @@ struct FontCacheTotals {
     size_t storage_reads = 0;
     size_t storage_bytes = 0;
     size_t resident_bytes = 0;
+    /**
+     * 真失败的次数（与因文件尾短读的 eof_reads 分开）。
+     */
+    size_t read_failures = 0;
+    /**
+     * 因请求越过文件尾而短读的次数。正常终止，不是失败。
+     */
+    size_t eof_reads = 0;
     double io_ms = 0.0;
 };
 
@@ -195,7 +203,7 @@ private:
      * 默认值与 FontBlockCache 的构造参数一致 —— 依据记在那里。
      */
     size_t cache_block_size_ = 4u * 1024u;
-    size_t cache_max_blocks_ = 768u;
+    size_t cache_max_blocks_ = 1024u;
 };
 
 }  // namespace heditor

@@ -87,13 +87,16 @@ public:
 
     size_t read(void* buffer, size_t size) override {
         if (buffer == nullptr || size == 0) return 0;
-        if (pos_ >= src_.size()) return 0;
+        if (pos_ >= src_.size()) return 0;  // 文件尾：流契约允许短读，不是错误
         const uint64_t left = src_.size() - pos_;
         size_t want = size;
         if (static_cast<uint64_t>(want) > left) want = static_cast<size_t>(left);
-        if (!src_.readAt(pos_, buffer, want)) return 0;
-        pos_ += want;
-        return want;
+        size_t got = 0;
+        const FontRead r = src_.readAt(pos_, buffer, want, &got);
+        // 只有存储层真失败才返回零字节；文件尾那一种按实际读到的字节数返回。
+        if (r == FontRead::Error) return 0;
+        pos_ += got;
+        return got;
     }
 
     bool isAtEnd() const override { return pos_ >= src_.size(); }

@@ -53,6 +53,20 @@ private:
 };
 
 /**
+ * 一次存储读的结果。
+ *
+ * 请求越过文件尾与读失败是两件事：流契约允许短读，越过文件尾只是正常的终止条件，
+ * 不是错误；定位失败、落盘出错、文件在被打开之后被截断才是错误。两者混在一个
+ * bool 里时，"字体读不到"在页面上表现为"某些字不出现"，而从统计里看不出来 ——
+ * 这就是要把它们分成两个状态的理由，也是 eofReads 与 readFailures 分开计的原因。
+ */
+enum class FontRead {
+    Ok,
+    Eof,
+    Error,
+};
+
+/**
  * 存储层：一个只读文件。
  *
  * readAt 是同步的，因为它服务的上游（FreeType 的 FT_Stream）就是同步契约。
@@ -66,7 +80,12 @@ public:
     FontStorage& operator=(const FontStorage&) = delete;
 
     bool open(const std::string& path);
-    bool readAt(uint64_t off, void* dst, size_t len) const;
+    /**
+     * 读一段字节。请求越过文件尾时先夹到可读范围，交出能读的那部分并返回 Eof；
+     * 只有夹过之后仍然短读（文件被截断、I/O 出错）才返回 Error。
+     * got 可选，写回实际读到的字节数 —— 返回 Eof 时它与 len 的差就是缺的字节。
+     */
+    FontRead readAt(uint64_t off, void* dst, size_t len, size_t* got = nullptr) const;
     uint64_t size() const { return size_; }
     bool valid() const { return file_ != nullptr; }
 
@@ -85,19 +104,23 @@ private:
 class FontBlockCache {
 public:
     /**
-     * 块大小与块数决定常驻上限。默认 4 KB x 768 块（上限 3 MB）。
+     * 块大小与块数决定常驻上限。默认 4 KB x 1024 块（上限 4 MB）。
      *
-     * 依据是 2026-10-14 的实测（同一份 2000 段文档、同一窗口位置，只换块大小）：
-     *   4 KB：读入 1.34 MB、常驻 1.34 MB、IO 1.1 ms、命中 98.1%
-     *   16 KB：读入 2.57 MB、常驻 2.57 MB、IO 1.2 ms、命中 99.1%
-     *   64 KB：读入 8.71 MB、常驻 2.95 MB、IO 1.1 ms、命中 99.2%
-     * 块越大，一次读进来的字节里用不到的部分越多 —— 字形在 glyf 里按字形号连续，
-     * 而一段文本用到的字形号是散的。所以 4 KB 在读入字节与常驻两项上都明显更省，
-     * 而 IO 时间持平（那种规模下次数还换不来时间）。切到真磁盘后要重测一遍。
+     * 依据（同一窗口只换配置，两种文本各测一遍；读入字节）：合成文本 4 KB 1.34 MB、
+     * 16 KB 2.57 MB、64 KB 8.71 MB；真病历 4 KB 3.05 MB、16 KB 15.68 MB、64 KB 88.32 MB
+     * —— 后两档都顶到常驻上限反复淘汰重读，而 IO 时间在两种文本下都是 1 ms 量级。
+     * 原因是字形在 glyf 里按字形号连续、而一段文本用到的字形号是散的：块越大，
+     * 一次读进来用不到的部分越多。真文本的工作集约 3 MB，上限取 4 MB 留余量。
+     * 切到真磁盘后这张表要重测。
      */
-    FontBlockCache(size_t block_size = 4u * 1024u, size_t max_blocks = 768u);
+    FontBlockCache(size_t block_size = 4u * 1024u, size_t max_blocks = 1024u);
 
-    bool read(const FontStorage& src, uint64_t off, void* dst, size_t len);
+    /**
+     * 带缓存的读。语义与 FontStorage::readAt 一致：越过文件尾返回 Eof（不是错误），
+     * 并且把 eofReads 与 readFailures 分开累计。
+     */
+    FontRead read(const FontStorage& src, uint64_t off, void* dst, size_t len,
+                  size_t* got = nullptr);
     void clear();
     void resetStats();
     /**
@@ -121,6 +144,18 @@ public:
     size_t storageBytes() const { return storage_bytes_; }
     double ioMs() const { return io_ms_; }
     size_t blockSize() const { return block_size_; }
+    /**
+     * 常驻上限（块大小乘块数）。residentBytes 是当前实际装入的量，不会超过它。
+     */
+    size_t capacityBytes() const { return block_size_ * blocks_.size(); }
+    /**
+     * 真失败的次数。文件尾的短读不计在这里，见 eofReads。
+     */
+    size_t readFailures() const { return read_failures_; }
+    /**
+     * 因请求越过文件尾而短读的次数。这是正常终止，不是失败。
+     */
+    size_t eofReads() const { return eof_reads_; }
 
 private:
     struct Block {
@@ -138,6 +173,8 @@ private:
     size_t misses_ = 0;
     size_t storage_reads_ = 0;
     size_t storage_bytes_ = 0;
+    size_t read_failures_ = 0;
+    size_t eof_reads_ = 0;
     double io_ms_ = 0.0;
 };
 
@@ -164,7 +201,9 @@ public:
     /**
      * 按需读（经过块缓存）。上游要同步契约，所以这里也是同步的。
      */
-    bool readAt(uint64_t off, void* dst, size_t len) { return cache_.read(storage_, off, dst, len); }
+    FontRead readAt(uint64_t off, void* dst, size_t len, size_t* got = nullptr) {
+        return cache_.read(storage_, off, dst, len, got);
+    }
 
     /**
      * 转发给块缓存的配置入口（给"块大小该取多少"的实验用）。

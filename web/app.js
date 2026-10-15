@@ -42,6 +42,7 @@ const SCENARIOS = [
   { id: 5, label: '蒙文竖排 vertical-rl（对照）' },
   { id: 6, label: ' 可编辑（敲字 / 光标 / 增量）' },
   { id: 7, label: '长文档 200 段（增量排版）' },
+  { id: 8, label: '真病历样例（8 例，读文件）' },
 ];
 
 const DEFAULT_SCENARIO = 6;   // 直接进可编辑场景，省得还要先切一下
@@ -385,6 +386,39 @@ let fontMode = 'full';
  *   full：字节穿边界整份交给引擎。
  * 返回装载行给启动面板显示，调用方不必知道模式。
  */
+/**
+ * 把 markdown 里的示例文本还原成纯段落：去掉标题号、强调记号与行尾的换行符，丢掉空行。
+ * 标点、数字与单位原样保留 —— 病历里的体温、剂量、比值都要能原样排版。
+ */
+function cleanMarkdownLines(raw) {
+  return raw
+    .split('\n')
+    .map((l) =>
+      l
+        .replace(/\*\*/g, '')
+        .replace(/\s*\\$/, '')
+        .replace(/^#+\s*/, '')
+        .replace(/^\d+[.、]\s*/, '')
+        .trim())
+    .filter((l) => l.length > 0)
+    .join('\n');
+}
+
+/**
+ * 装真病历样例：读 assets/samples/medical-records.md，清洗后交给引擎按段落建文档。
+ *
+ * 与其余场景不同，它的内容不在 wasm 产物里而是一份可替换的文件 —— 病历正文本来就走
+ * 服务端下发这条路，把二十几 KB 文本编进产物只会多出一份需要同步的副本。
+ */
+async function applyMedicalSample(repeat) {
+  const res = await fetch(new URL('assets/samples/medical-records.md', BASE));
+  if (!res.ok) throw new Error(`${res.status}`);
+  const text = cleanMarkdownLines(await res.text());
+  mod.loadTextDocument(text, Math.max(1, Number(repeat) || 1));
+  relayoutAndBlit();
+  return { paragraphs: text.split('\n').length, chars: text.length };
+}
+
 async function loadFonts(mode) {
   const indices = {};
   const rows = [];
@@ -521,7 +555,17 @@ async function boot() {
   sel.value = String(DEFAULT_SCENARIO);
   sel.disabled = false;
   sel.addEventListener('change', () => {
-    mod.setScenario(Number(sel.value));
+    const id = Number(sel.value);
+    if (id === 8) {
+      // 真病历样例的内容来自文件，不走 wasm 里的场景表。
+      setStatus('读取病历样例…');
+      applyMedicalSample(1)
+        .then((r) => setStatus(`病历样例：${r.paragraphs} 段 / ${r.chars} 字`))
+        .catch((err) => setStatus(`病历样例读取失败：${err.message}`));
+      ta.focus();
+      return;
+    }
+    mod.setScenario(id);
     relayoutAndBlit();
     ta.focus();
   });
@@ -1188,6 +1232,23 @@ window.__heditor = {
     mod.loadStressDocumentDiverse(Number(paras), Number(chars));
     relayoutAndBlit();
     return this.editStats;
+  },
+
+  // 用真文本造文档：宿主把文件读进来、清洗掉 markdown 记号后传进来，重复 repeat 遍。
+  //   合成文本（一批码点循环）的用字分布不像真病历，缓存账会偏，所以判据要能喂真文本。
+  loadTextDocument(text, repeat) {
+    if (!ready) return null;
+    mod.loadTextDocument(text, Number(repeat) || 1);
+    relayoutAndBlit();
+    return this.editStats;
+  },
+
+  // 真病历样例：从文件读、清洗后按段落建文档。页面下拉与探针都走这一条，
+  //   清洗逻辑只此一份。repeat 用来把语料重复放大到长文档规模。
+  async loadMedicalSample(repeat) {
+    if (!ready) return null;
+    const r = await applyMedicalSample(repeat);
+    return Object.assign({}, r, { stats: this.editStats });
   },
 
   // 切场景并按 zoom 重排重绘（供探针用；走的是和 UI 完全相同的路径）

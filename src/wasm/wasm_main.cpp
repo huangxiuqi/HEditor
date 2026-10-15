@@ -366,7 +366,7 @@ std::string statsJson() {
     o << "\"fontInstances\":" << s.font_instance_count << ",";
     o << "\"fontRunCount\":" << s.font_run_count << ",";
     o << "\"missingGlyphCount\":" << s.missing_glyph_count << ",";
-    // 字体按需读的账。整份装载时这六个数全是零 —— 那就说明按需这条路没被走到。
+    // 字体按需读的账。整份装载时这些数全是零 —— 那就说明按需这条路没被走到。
     //   实时取而不是用快照：字形光栅化在排版之后，那一段的读不进排版时的快照。
     const FontCacheTotals fc = g_engine.fonts().cacheTotals();
     o << "\"fontCacheHits\":" << fc.hits << ",";
@@ -375,6 +375,8 @@ std::string statsJson() {
     o << "\"fontStorageBytes\":" << fc.storage_bytes << ",";
     o << "\"fontIoMs\":" << fc.io_ms << ",";
     o << "\"fontResidentBytes\":" << fc.resident_bytes << ",";
+    o << "\"fontStorageFailures\":" << fc.read_failures << ",";
+    o << "\"fontStorageEofs\":" << fc.eof_reads << ",";
     o << "\"shapeMs\":" << s.shape_ms << ",";
     o << "\"layoutMs\":" << s.layout_ms << ",";
     o << "\"pageFpMs\":" << s.page_fp_ms << ",";
@@ -814,6 +816,46 @@ void loadStressDocumentDiverse(int paras, int chars) {
     loadStressDocumentImpl(paras, chars, true);
 }
 
+/**
+ * 用一段真实文本造文档：按换行切段，每段一个块，整体重复 repeat 遍。
+ *
+ * 判据要用真文本才准：合成文本（一批码点循环）的字形集合与用字分布都不像真病历，
+ * 量出来的缓存账会偏。文本由宿主读进来并清洗掉 markdown 记号后传进来。
+ */
+void loadTextDocument(const std::string& text, int repeat) {
+    if (text.empty()) return;
+    if (repeat < 1) repeat = 1;
+
+    std::vector<std::string> paras;
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t nl = text.find('\n', pos);
+        if (nl == std::string::npos) nl = text.size();
+        if (nl > pos) paras.emplace_back(text, pos, nl - pos);
+        pos = nl + 1;
+    }
+    if (paras.empty()) return;
+
+    std::vector<BlockSpec> blocks;
+    blocks.reserve(paras.size() * static_cast<size_t>(repeat));
+    for (int r = 0; r < repeat; ++r) {
+        for (const std::string& t : paras) {
+            BlockSpec b;
+            b.font_index = g_cjk_font;
+            b.size_pt = 12.0f;
+            b.wm = WritingMode::HorizontalTB();
+            b.line_factor = 1.5f;
+            b.language = "zh";
+            b.color = Color::rgb(24, 24, 24);
+            b.setText(t);
+            blocks.push_back(std::move(b));
+        }
+    }
+    g_blocks = std::move(blocks);
+    g_fields.clear();
+    rebuildDocument(false);
+}
+
 void loadFormSample(int variant) {
     g_blocks = buildScenarioBlocks(variant == 1 ? 3 : 6);
     g_fields.clear();
@@ -899,7 +941,7 @@ std::string editStatsJson() {
     o << "\"caretPara\":" << e.caret_para << ",";
     o << "\"caretOffset\":" << e.caret_offset << ",";
     // 字体按需读的账在这里也带一份：探针取的是编辑统计，排版口那份（statsJson）
-    //   它读不到。六个数实时取，不用 EngineStats 的快照 —— 快照是排版结束那一刻的，
+    //   它读不到。这些数实时取，不用 EngineStats 的快照 —— 快照是排版结束那一刻的，
     //   而字形光栅化发生在排版之后，正是按需读的大头，用快照会把它整个漏掉。
     const EngineStats& es = g_engine.stats();
     o << "\"glyphCount\":" << es.glyph_count << ",";
@@ -911,6 +953,8 @@ std::string editStatsJson() {
     o << "\"fontStorageBytes\":" << fc.storage_bytes << ",";
     o << "\"fontIoMs\":" << fc.io_ms << ",";
     o << "\"fontResidentBytes\":" << fc.resident_bytes << ",";
+    o << "\"fontStorageFailures\":" << fc.read_failures << ",";
+    o << "\"fontStorageEofs\":" << fc.eof_reads << ",";
     o << "\"caretIndex\":" << e.caret_index << ",";
     o << "\"docCodepoints\":" << e.doc_codepoints << ",";
     o << "\"caretSide\":" << e.caret_side << ",";
@@ -1030,6 +1074,7 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("loadFormSample", &loadFormSample);
     emscripten::function("loadStressDocument", &loadStressDocument);
     emscripten::function("loadStressDocumentDiverse", &loadStressDocumentDiverse);
+    emscripten::function("loadTextDocument", &loadTextDocument);
 
     emscripten::function("frameWidth", &frameWidth);
     emscripten::function("frameHeight", &frameHeight);

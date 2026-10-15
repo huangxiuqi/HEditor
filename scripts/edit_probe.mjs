@@ -2684,6 +2684,8 @@ async function main() {
     const glyphs = Number(st.glyphCount);
     const pages = Math.max(1, Number(st.totalPages));
     const hitRate = hits + misses > 0 ? hits / (hits + misses) : 0;
+    const storageFailures = Number(st.fontStorageFailures);
+    const storageEofs = Number(st.fontStorageEofs);
 
     report.fontLazy = {
       hits, misses, reads, ioBytes, ioMs, resident, glyphs, pages,
@@ -2691,6 +2693,7 @@ async function main() {
       readsPerPage: +(reads / pages).toFixed(2),
       residentMB: +(resident / 1048576).toFixed(2),
       ioPerPageMs: +(ioMs / pages).toFixed(3),
+      storageFailures, storageEofs,
     };
     chk.check('按需读真的发生了（未命中不为零）', misses > 0, `misses=${misses}`);
     chk.check(`块缓存真的在挡：命中率 ${(hitRate * 100).toFixed(1)}%`,
@@ -2701,8 +2704,10 @@ async function main() {
               `pages=${pages}`);
     chk.check(`每页存储 IO ${(ioMs / pages).toFixed(3)} ms（上限 1 ms）`,
               ioMs / pages < 1.0, `ioMs=${ioMs.toFixed(3)}`);
-    // 上限按数据源个数算：三个字体各有一份块缓存（48 块 × 64 KB）。
-    const residentCap = 3 * 48 * 64 * 1024;
+    // 常驻的两个上界：不会超过累计读进来的字节，也不会超过"数据源个数乘单源上限"。
+    chk.check(`常驻 ${(resident / 1048576).toFixed(2)} MB 不超过累计读入`,
+              resident <= ioBytes, `${resident} vs ${ioBytes}`);
+    const residentCap = 3 * 4 * 1024 * 1024;  // 三张按需脸，每张的上限 4 MB
     chk.check(
       `常驻 ${(resident / 1048576).toFixed(2)} MB（上限 ${(residentCap / 1048576).toFixed(1)} MB）`,
       resident <= residentCap, `resident=${resident}`);
@@ -2711,6 +2716,13 @@ async function main() {
               `${(resident / 1048576).toFixed(2)} MB vs 约 20 MB`);
     chk.check('按需装载后不缺字（骨架没漏掉排版要用的表）',
               Number(st.missingGlyphCount) === 0, `missing=${st.missingGlyphCount}`);
+    // 两个诊断字段必须真的接在链条上：接到别处（或没接）时是 undefined，
+    //   而 Number(undefined) 是 NaN —— 这一条既查"接上了"也查"是零"。
+    chk.check('存储失败计数已接到诊断口且为零（MEMFS 下不该有真失败）',
+              Number.isFinite(storageFailures) && storageFailures === 0,
+              `fontStorageFailures=${st.fontStorageFailures}`);
+    chk.check('文件尾计数已接到诊断口且为有限数',
+              Number.isFinite(storageEofs), `fontStorageEofs=${st.fontStorageEofs}`);
 
     // 最要紧的一条：帧上必须真的有字。读数字再漂亮，画不出来就是没走通 ——
     //   而且这一条不能只看"非零"，要跟整份模式画同一页的墨迹比。
@@ -2775,6 +2787,69 @@ async function main() {
     chk.check(
       `块越小、命中率越低（${(small.hitRate * 100).toFixed(1)}% vs ${(big.hitRate * 100).toFixed(1)}%）`,
       small.hitRate <= big.hitRate, `${small.hitRate} vs ${big.hitRate}`);
+  }
+
+  chk.section('[19] 真病历文本：用字更分散，缓存账更紧');
+  {
+    // 真文本由门面读文件并清洗（清洗逻辑只此一份，页面下拉用的是同一条路）。
+    const textInfo = await c.eval('return window.__heditor.loadMedicalSample(1);');
+    console.log(`     病历文本：${textInfo.paragraphs} 段 / ${textInfo.chars} 字`);
+    chk.check('页面下拉里有真病历这一项（场景入了 UI，不只是探针能用）',
+              await c.eval(`return [...document.querySelectorAll('#scenario option')]
+                              .some((o) => o.value === '8');`), 'id=8');
+
+    // 四个档位：块大小与常驻上限各变一次 —— 真文本的工作集比合成文本大，
+    //   所以除了"块多大"，还要看"上限给多少"。
+    const VARIANTS = [
+      { kb: 4, capMB: 3 },
+      { kb: 4, capMB: 6 },
+      { kb: 16, capMB: 3 },
+      { kb: 64, capMB: 3 },
+    ];
+    const rows = [];
+    for (const v of VARIANTS) {
+      const bs = v.kb * 1024;
+      const blocks = Math.floor((v.capMB * 1024 * 1024) / bs);
+      await c.eval(`return window.__heditor.setFontCacheConfig(${bs}, ${blocks});`);
+      await c.eval('return window.__heditor.reloadFonts("lazy");');
+      await c.eval('return window.__heditor.loadMedicalSample(7);');
+      await c.eval('return window.__heditor.present();');
+      const s = await c.eval('return window.__heditor.editStats;');
+      const hits = Number(s.fontCacheHits);
+      const misses = Number(s.fontCacheMisses);
+      rows.push({
+        label: `${v.kb} KB x ${blocks} 块（上限 ${v.capMB} MB）`,
+        blockKB: v.kb,
+        capMB: v.capMB,
+        hitRate: hits + misses > 0 ? +(hits / (hits + misses)).toFixed(4) : 0,
+        reads: Number(s.fontStorageReads),
+        ioMB: +(Number(s.fontStorageBytes) / 1048576).toFixed(2),
+        residentMB: +(Number(s.fontResidentBytes) / 1048576).toFixed(2),
+        glyphs: Number(s.glyphCount),
+        pages: Number(s.totalPages),
+      });
+    }
+    report.medicalDoc = { text: textInfo, variants: rows };
+    for (const r of rows) {
+      console.log(`     ${r.label.padEnd(26)} 命中 ${(r.hitRate * 100).toFixed(1)}%，` +
+                  `读 ${String(r.reads).padStart(5)} 次 / ${String(r.ioMB).padStart(6)} MB，` +
+                  `常驻 ${String(r.residentMB).padStart(5)} MB（${r.pages} 页 / ${r.glyphs} 字形）`);
+    }
+    chk.check('真文本装载成功并排出了页', rows.every((r) => r.glyphs > 0 && r.pages > 1),
+              rows.map((r) => `${r.pages}页`).join(' / '));
+    chk.check('真文本下块越小读入越少', rows[0].ioMB < rows[3].ioMB,
+              `4KB=${rows[0].ioMB} 64KB=${rows[3].ioMB} MB`);
+    chk.check('上限从 3 MB 提到 6 MB 后读入不上升（工作集越界会淘汰重读）',
+              rows[1].ioMB <= rows[0].ioMB, `3MB=${rows[0].ioMB} 6MB=${rows[1].ioMB} MB`);
+    // 真文本用字分散、重复少，命中率比合成文本低是正常的；关键是"块越小越省"的关系
+    // 不但保持，而且差距拉大 —— 工作集一旦越界，大块会雪崩式淘汰重读。
+    const synth = report.blockSizes || [];
+    if (synth.length) {
+      const rm = rows[3].ioMB / Math.max(0.01, rows[0].ioMB);
+      const rs = synth[2].ioMB / Math.max(0.01, synth[0].ioMB);
+      chk.check(`真文本下"大块比小块多读"的倍数更大（${rm.toFixed(1)}x vs ${rs.toFixed(1)}x）`,
+                rm > rs, `${rm.toFixed(1)}x vs ${rs.toFixed(1)}x`);
+    }
   }
 
   // 收尾：载入表单样例 + 恢复闪烁，截一张给人看

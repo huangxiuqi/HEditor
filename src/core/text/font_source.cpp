@@ -110,34 +110,66 @@ bool FontStorage::open(const std::string& path) {
     return true;
 }
 
-bool FontStorage::readAt(uint64_t off, void* dst, size_t len) const {
-    if (file_ == nullptr || dst == nullptr) return false;
-    if (off > size_ || len > size_ - off) return false;
-    if (std::fseek(file_, static_cast<long>(off), SEEK_SET) != 0) return false;
-    return std::fread(dst, 1, len, file_) == len;
+FontRead FontStorage::readAt(uint64_t off, void* dst, size_t len, size_t* got) const {
+    if (got != nullptr) *got = 0;
+    if (file_ == nullptr || dst == nullptr) return FontRead::Error;
+    if (len == 0) return FontRead::Ok;
+    if (off >= size_) return FontRead::Eof;  // 起点已在文件尾：零字节可读，不是错误
+    // 先把请求夹到可读范围里。夹过之后还短读，就只能是文件被截断或 I/O 出错 ——
+    //   这就是"文件尾触发的 fread 读不满"不会被当成失败的原因。
+    const bool clamped = len > size_ - off;
+    const size_t want = clamped ? static_cast<size_t>(size_ - off) : len;
+    if (std::fseek(file_, static_cast<long>(off), SEEK_SET) != 0) return FontRead::Error;
+    const size_t n = std::fread(dst, 1, want, file_);
+    if (got != nullptr) *got = n;
+    if (n != want) return FontRead::Error;
+    return clamped ? FontRead::Eof : FontRead::Ok;
 }
 
 FontBlockCache::FontBlockCache(size_t block_size, size_t max_blocks)
-    : blocks_(max_blocks), block_size_(block_size > 0 ? block_size : 1u) {}
+    : blocks_(max_blocks > 0 ? max_blocks : 1u),  // 零块的缓存会让每次读都失败
+      block_size_(block_size > 0 ? block_size : 1u) {}
 
-bool FontBlockCache::read(const FontStorage& src, uint64_t off, void* dst, size_t len) {
-    if (dst == nullptr) return false;
-    if (len == 0) return true;
-    uint8_t* out = static_cast<uint8_t*>(dst);
-    while (len > 0) {
-        const uint64_t id = off / block_size_;
-        const size_t within = static_cast<size_t>(off % block_size_);
-        const size_t want = std::min(len, block_size_ - within);
-        const Block* b = fetch(src, id);
-        if (b == nullptr || within >= b->data.size()) return false;
-        const size_t avail = std::min(want, b->data.size() - within);
-        if (avail < want) return false;  // 块尾不足：这次请求越过了文件末尾
-        std::memcpy(out, b->data.data() + within, avail);
-        out += avail;
-        off += avail;
-        len -= avail;
+FontRead FontBlockCache::read(const FontStorage& src, uint64_t off, void* dst, size_t len,
+                              size_t* got) {
+    if (got != nullptr) *got = 0;
+    if (dst == nullptr) {
+        ++read_failures_;
+        return FontRead::Error;
     }
-    return true;
+    if (len == 0) return FontRead::Ok;
+    const uint64_t total = src.size();
+    if (off >= total) {
+        ++eof_reads_;
+        return FontRead::Eof;
+    }
+    // 与存储层同一套口径：先夹到可读范围，夹过之后还读不满才算失败。
+    const bool clamped = len > total - off;
+    const size_t want_total = clamped ? static_cast<size_t>(total - off) : len;
+
+    uint8_t* out = static_cast<uint8_t*>(dst);
+    size_t done = 0;
+    while (done < want_total) {
+        const uint64_t cur = off + done;
+        const uint64_t id = cur / block_size_;
+        const size_t within = static_cast<size_t>(cur % block_size_);
+        const size_t want = std::min(want_total - done, block_size_ - within);
+        const Block* b = fetch(src, id);
+        // 块取不到、或块比请求的区间短（文件在装入之后被截断），都是真失败。
+        if (b == nullptr || within >= b->data.size() || b->data.size() - within < want) {
+            ++read_failures_;
+            if (got != nullptr) *got = done;
+            return FontRead::Error;
+        }
+        std::memcpy(out + done, b->data.data() + within, want);
+        done += want;
+    }
+    if (got != nullptr) *got = done;
+    if (clamped) {
+        ++eof_reads_;
+        return FontRead::Eof;
+    }
+    return FontRead::Ok;
 }
 
 FontBlockCache::Block* FontBlockCache::fetch(const FontStorage& src, uint64_t id) {
@@ -166,7 +198,7 @@ FontBlockCache::Block* FontBlockCache::fetch(const FontStorage& src, uint64_t id
         static_cast<size_t>(std::min<uint64_t>(static_cast<uint64_t>(block_size_), total - begin));
     victim->data.resize(n);
     const auto t0 = std::chrono::steady_clock::now();
-    if (!src.readAt(begin, victim->data.data(), n)) {
+    if (src.readAt(begin, victim->data.data(), n, nullptr) != FontRead::Ok) {
         victim->used = false;
         return nullptr;
     }
@@ -196,6 +228,8 @@ void FontBlockCache::resetStats() {
     misses_ = 0;
     storage_reads_ = 0;
     storage_bytes_ = 0;
+    read_failures_ = 0;
+    eof_reads_ = 0;
     io_ms_ = 0.0;
 }
 
@@ -214,12 +248,13 @@ bool FontSource::open(const std::string& path) {
     // 表目录在文件最前面：先读 12 字节头拿到表数，再把目录整段读进来。
     //   这两次读刻意不走块缓存 —— 它们是装载期的元数据，不该算进按需读的账。
     uint8_t header[12];
-    if (!storage_.readAt(0, header, sizeof(header))) return false;
+    if (storage_.readAt(0, header, sizeof(header)) != FontRead::Ok) return false;
     const uint16_t num = readBE16(header + 4);
     if (num == 0) return false;
     const size_t need = 12u + static_cast<size_t>(num) * 16u;
     std::vector<uint8_t> raw(need);
-    if (!storage_.readAt(0, raw.data(), need)) return false;
+    // 表目录声明了 num 张表，文件里就得真有那么多目录项 —— 少一个字节都是坏文件。
+    if (storage_.readAt(0, raw.data(), need) != FontRead::Ok) return false;
     return dir_.parse(raw.data(), raw.size());
 }
 
@@ -286,7 +321,8 @@ bool FontSource::buildSkeleton(std::vector<uint8_t>* out) {
     for (size_t i = 0; i < n; ++i) {
         const SfntTable& t = *keep[i];
         raw.resize(t.length);
-        if (!readAt(t.offset, raw.data(), t.length)) return false;
+        // 目录里的表长必须落在文件里；缺了就当这份骨架拼不成（别把半张表拼进去）。
+        if (readAt(t.offset, raw.data(), t.length) != FontRead::Ok) return false;
         std::memcpy(base + new_off[i], raw.data(), t.length);
 
         uint8_t* e = base + 12u + i * 16u;

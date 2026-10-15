@@ -184,6 +184,8 @@ FontCacheTotals FontLibrary::cacheTotals() const {
         t.storage_reads += c.storageReads();
         t.storage_bytes += c.storageBytes();
         t.resident_bytes += c.residentBytes();
+        t.read_failures += c.readFailures();
+        t.eof_reads += c.eofReads();
         t.io_ms += c.ioMs();
     }
     return t;

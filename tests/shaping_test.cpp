@@ -507,7 +507,7 @@ int main() {
             const size_t n =
                 std::min<size_t>(96, whole.size() - static_cast<size_t>(off));
             std::vector<uint8_t> got(n, 0);
-            if (!src.readAt(off, got.data(), n) ||
+            if (src.readAt(off, got.data(), n) != FontRead::Ok ||
                 !std::equal(got.begin(), got.end(), whole.begin() + static_cast<size_t>(off))) {
                 same_bytes = false;
             }
@@ -516,16 +516,125 @@ int main() {
         const size_t tail = 64;
         const uint64_t tail_off = src.size() - tail;
         std::vector<uint8_t> got_tail(tail, 0);
-        if (!src.readAt(tail_off, got_tail.data(), tail) ||
+        if (src.readAt(tail_off, got_tail.data(), tail) != FontRead::Ok ||
             !std::equal(got_tail.begin(), got_tail.end(),
                         whole.begin() + static_cast<size_t>(tail_off))) {
             same_bytes = false;
         }
         expectTrue(same_bytes, "十个位置（含块边界前后与文件尾）的按需读逐字节等于整份读");
 
-        std::vector<uint8_t> probe(16, 0);
-        expectTrue(!src.readAt(src.size() - 4, probe.data(), 16),
-                   "越过文件尾的读被拒（不返回垃圾）");
+        std::printf("\n[按需] 存储读：失败与文件尾是两种状态\n");
+        {
+            const size_t eof_before = src.cache().eofReads();
+            const size_t fail_before = src.cache().readFailures();
+            const uint64_t tail_start = src.size() - 4;
+
+            // 请求越过文件尾：交出能读的那 4 字节，尾后一个字节都不许写（不返回垃圾）。
+            std::vector<uint8_t> probe(16, 0xAB);
+            size_t got_n = 0;
+            const FontRead r = src.readAt(tail_start, probe.data(), probe.size(), &got_n);
+            expectTrue(r == FontRead::Eof, "越过文件尾的读是文件尾，不是失败");
+            expectTrue(got_n == 4, "越过文件尾的读只交出可读的那 4 字节（实得 " +
+                                       std::to_string(got_n) + "）");
+            bool untouched = true;
+            for (size_t i = 4; i < probe.size(); ++i) {
+                if (probe[i] != 0xAB) untouched = false;
+            }
+            expectTrue(untouched &&
+                           std::equal(probe.begin(), probe.begin() + 4, whole.end() - 4),
+                       "可读那 4 字节等于文件尾，其后的缓冲一个字节都没被写");
+
+            // 起点直接落在文件尾之后：零字节可读，同样是文件尾而不是失败。
+            size_t got_zero = 99;
+            expectTrue(src.readAt(src.size(), probe.data(), 4, &got_zero) == FontRead::Eof &&
+                           got_zero == 0,
+                       "起点在文件尾之后的读也是文件尾，交出零字节");
+
+            // 这两条是分开计数的核心判据：文件尾只进 eofReads，不进 readFailures。
+            expectTrue(src.cache().eofReads() == eof_before + 2,
+                       "两次越尾读都记进了 eofReads");
+            expectTrue(src.cache().readFailures() == fail_before,
+                       "文件尾的短读一次都没记进 readFailures");
+
+            // 真失败长什么样：文件在打开之后被截断（存储记的尺寸大于实际可读的部分）。
+            //   只断言"存储层没打开会失败"是不够的 —— 那不进块缓存的计数，
+            //   证明不了这个计数器在按需那条路上真的会动。
+            const std::string cut_path = "_font_truncate_probe.bin";
+            const size_t keep = 1u << 20;  // 留 1 MB：够放下头与表目录
+            {
+                std::ofstream cut(cut_path, std::ios::binary | std::ios::trunc);
+                cut.write(reinterpret_cast<const char*>(whole.data()),
+                          static_cast<std::streamsize>(std::min(keep, whole.size())));
+            }
+            FontSource truncated;
+            const bool cut_open = truncated.open(cut_path);
+            expectTrue(cut_open, "截断成 1 MB 的副本还能解析表目录（所以后面读到的是真失败）");
+            if (cut_open) {
+                const size_t cut_fail_before = truncated.cache().readFailures();
+                const size_t cut_eof_before = truncated.cache().eofReads();
+                // 把文件再砍到 4 KB。存储记的尺寸仍是 1 MB，于是 512 KB 处的读
+                //   落在记录范围内、却读不到 —— 这正是"失败"而不是"文件尾"。
+                {
+                    std::ofstream shrink(cut_path, std::ios::binary | std::ios::trunc);
+                    shrink.write(reinterpret_cast<const char*>(whole.data()), 4096);
+                }
+                std::vector<uint8_t> lost(4096, 0);
+                size_t lost_got = 0;
+                const FontRead lr =
+                    truncated.readAt(512u * 1024u, lost.data(), lost.size(), &lost_got);
+                expectTrue(lr == FontRead::Error,
+                           "文件被截断后的读是失败（不是文件尾）");
+                expectTrue(truncated.cache().readFailures() == cut_fail_before + 1,
+                           "真失败会让 readFailures 加一 —— 这个计数不是死代码");
+                expectTrue(truncated.cache().eofReads() == cut_eof_before,
+                           "真失败一次都不进 eofReads（两个计数互不串台）");
+            }
+            std::remove(cut_path.c_str());
+
+            // 与它对照：没打开的存储同样是失败，且返回的字节数是零。
+            FontStorage unopened;
+            std::vector<uint8_t> buf(4, 0);
+            size_t unopened_got = 7;
+            expectTrue(unopened.readAt(0, buf.data(), buf.size(), &unopened_got) ==
+                               FontRead::Error &&
+                           unopened_got == 0,
+                       "没打开的存储读是失败，交出零字节");
+
+            std::printf("     存储读：文件尾 %zu 次，失败 %zu 次\n", src.cache().eofReads(),
+                        src.cache().readFailures());
+        }
+
+        // 块缓存自己也会把请求夹到文件尾，所以上面那几条走不到存储层的夹取逻辑 ——
+        //   这里直接对存储层再测一遍，否则"存储层的越尾读是文件尾"没人管。
+        {
+            FontStorage raw;
+            expectTrue(raw.open(cjkPath), "存储层能单独打开字体文件");
+            if (raw.valid()) {
+                std::vector<uint8_t> probe2(32, 0x5A);
+                size_t got2 = 0;
+                const FontRead r2 = raw.readAt(raw.size() - 3, probe2.data(), probe2.size(), &got2);
+                expectTrue(r2 == FontRead::Eof, "存储层的越尾读也是文件尾，不是失败");
+                expectTrue(got2 == 3, "存储层的越尾读只交出可读的那 3 字节（实得 " +
+                                          std::to_string(got2) + "）");
+                bool clean = true;
+                for (size_t i = 3; i < probe2.size(); ++i) {
+                    if (probe2[i] != 0x5A) clean = false;
+                }
+                expectTrue(clean && std::equal(probe2.begin(), probe2.begin() + 3, whole.end() - 3),
+                           "存储层越尾读之后，尾后缓冲一个字节都没被写");
+                // 正好读到文件尾不算越尾：请求区间完整落在文件里，那就是 Ok。
+                std::vector<uint8_t> exact(64, 0);
+                expectTrue(raw.readAt(raw.size() - 64, exact.data(), exact.size()) == FontRead::Ok,
+                           "正好读到文件尾的那一次是成功的读（不是文件尾）");
+
+                // 块数配成零时不该造出一个"每次读都失败"的缓存。
+                FontBlockCache zero_blocks(4096, 0);
+                std::vector<uint8_t> zb(64, 0);
+                expectTrue(zero_blocks.read(raw, 0, zb.data(), zb.size()) == FontRead::Ok &&
+                               zero_blocks.readFailures() == 0,
+                           "块数传零时缓存仍读得出内容，且不记成失败");
+            }
+        }
 
         // 缓存生效的直接判据：同一区间连读两次，第二次一次存储都不落。
         //   只数总命中是测不出来的 —— 拼骨架时每张表只读一次，本来就全是不命中。
@@ -533,11 +642,12 @@ int main() {
         std::vector<uint8_t> p1(4096, 0);
         std::vector<uint8_t> p2(4096, 0);
         const size_t reads_before = src.cache().storageReads();
-        const bool r1 = src.readAt(probe_off, p1.data(), p1.size());
+        const FontRead r1 = src.readAt(probe_off, p1.data(), p1.size());
         const size_t reads_first = src.cache().storageReads();
-        const bool r2 = src.readAt(probe_off, p2.data(), p2.size());
+        const FontRead r2 = src.readAt(probe_off, p2.data(), p2.size());
         const size_t reads_second = src.cache().storageReads();
-        expectTrue(r1 && r2 && p1 == p2, "同一区间两次读到相同内容");
+        expectTrue(r1 == FontRead::Ok && r2 == FontRead::Ok && p1 == p2,
+                   "同一区间两次读到相同内容");
         expectTrue(reads_first > reads_before, "第一次读落了存储");
         expectTrue(reads_second == reads_first, "第二次读全部命中，一次存储都没落");
 
@@ -549,7 +659,12 @@ int main() {
                    "拼骨架确实落了存储，且落存储次数等于未命中次数");
         expectTrue(c.storageBytes() >= skeleton.size(),
                    "从存储搬进来的字节不少于骨架本身");
-        expectTrue(c.residentBytes() <= 48u * 64u * 1024u, "常驻不超过块数乘块大小");
+        // 常驻不可能超过累计读进来的字节，也不可能超过块数乘块大小。
+        expectTrue(c.residentBytes() <= c.storageBytes(),
+                   "常驻不超过累计从存储读入的字节");
+        expectTrue(c.residentBytes() <= c.capacityBytes(),
+                   "常驻不超过块数乘块大小（上限 " +
+                       std::to_string(c.capacityBytes() / 1024) + " KB）");
     }
 
     std::printf("\n[按需] 按需脸与全量脸的整形结果逐字段相同\n");

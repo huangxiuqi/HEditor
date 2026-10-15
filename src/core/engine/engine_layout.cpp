@@ -56,6 +56,8 @@ void EditorEngine::syncStatsFromLayout() {
     stats_.font_storage_bytes = static_cast<long long>(fc.storage_bytes);
     stats_.font_io_ms = fc.io_ms;
     stats_.font_resident_bytes = static_cast<long long>(fc.resident_bytes);
+    stats_.font_storage_failures = static_cast<long long>(fc.read_failures);
+    stats_.font_storage_eofs = static_cast<long long>(fc.eof_reads);
     stats_.zoom = cfg_.zoom;
 }
 

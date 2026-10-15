@@ -34,6 +34,17 @@ struct EngineStats {
     long long font_storage_bytes = 0;
     double font_io_ms = 0.0;
     long long font_resident_bytes = 0;
+    /**
+     * 存储读真失败的次数。与 font_storage_eofs 分开：文件尾的短读不算失败。
+     *
+     * 这两个数存在的理由是把"静默"变成"可见"：失败与文件尾用同一个零字节返回值时，
+     * 字体读不到在页面上只表现为某些字不出现，而从任何统计里都看不出来。
+     */
+    long long font_storage_failures = 0;
+    /**
+     * 因请求越过文件尾而短读的次数（正常终止，不是失败）。
+     */
+    long long font_storage_eofs = 0;
     double shape_ms = 0.0;
     double layout_ms = 0.0;
     double paint_ms = 0.0;
