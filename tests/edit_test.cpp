@@ -7582,6 +7582,335 @@ int main() {
         expectTrue(!e37.hasSelection(), "★ 编辑之后选区被清掉了（没有残留）");
     }
 
+    std::printf("\n[38] 编辑入口吃掉选区：替换、只删选区、跨段删除与撤销\n");
+    {
+        // 这一节管的是"选中之后按下任何一个编辑键"。四条口径：
+        //   插类入口（打字、缩进、回车）是"先删掉选区，再在原地插"；
+        //   删类入口（退格、前删、合并、反缩进）是"删掉选区就完事"，不再多吃一个字；
+        //   跨段选区能整段删掉（此前 eraseOnTree 见到跨段直接返回假）；
+        //   撤销一次回到编辑前那两端（anchor 与 focus 都在）。
+        //
+        // 文本一律从 blocks()[i].textUtf8() 读回逐个字符比对 —— 不比"看起来对不对"。
+        const auto reload38 = [](EditorEngine& e) {
+            std::vector<BlockSpec> bl(3);
+            bl[0].setText("零一二三四五六七八九十");
+            bl[1].setText("甲乙丙丁戊己庚辛壬癸");
+            bl[2].setText("子丑寅卯");
+            e.setDocument(demoTree(bl, {}), StyleSheet{});
+            e.setEditMode(EditMode::Document);
+            e.relayout();
+        };
+        const auto text38 = [](EditorEngine& e, int i) {
+            const auto& bs = e.blocks();
+            if (i < 0 || i >= static_cast<int>(bs.size())) return std::string();
+            return bs[static_cast<size_t>(i)].textUtf8();
+        };
+        const auto paras38 = [](EditorEngine& e) { return static_cast<int>(e.blocks().size()); };
+        // 从 (0, 2) 起扩展两格 = 选中第 2、3 两个字。每节都用它起头，免得各写一遍。
+        const auto selectTwo38 = [](EditorEngine& e) {
+            e.setCaret(0, 2);
+            return e.moveCaretBy(2, /*extend=*/true);
+        };
+
+        EditorEngine e38;
+        expectTrue(e38.init({cjkPath}), "选区吃掉：字体加载成功");
+        EngineConfig c38;
+        c38.zoom = 1.0f;
+        c38.page.width_pt = 200.0f;
+        c38.page.margin_pt = 20.0f;
+        e38.setConfig(c38);
+        reload38(e38);
+
+        // (a) 选中再打字 = 原文 − 选区 + 新字
+        expectTrue(selectTwo38(e38), "选中第 2、3 两个字");
+        expectTrue(e38.hasSelection(), "选区非空");
+        const Range before38 = e38.selection();
+        expectTrue(e38.typeTextUtf8("测"), "打字");
+        expectTrue(text38(e38, 0) == "零一测四五六七八九十",
+                   "★ 选中再打字 = 原文 − 选区 + 新字（实际 " + text38(e38, 0) + "）");
+        expectTrue(!e38.hasSelection(), "★ 替换之后没有残选区");
+        expectTrue(e38.caret().para == 0 && e38.caret().offset == 3,
+                   "落点在插入的那个字之后（实际 (" + std::to_string(e38.caret().para) + ", " +
+                       std::to_string(e38.caret().offset) + ")）");
+        expectTrue(paras38(e38) == 3, "★ 同段内替换不改段数（实际 " +
+                                          std::to_string(paras38(e38)) + " 段）");
+
+        // (b) 撤销一次：文字与选区那两端一起回来
+        expectTrue(e38.undo(), "撤销");
+        expectTrue(text38(e38, 0) == "零一二三四五六七八九十",
+                   "★ 撤销回原文（实际 " + text38(e38, 0) + "）");
+        expectTrue(e38.hasSelection(), "★ 撤销之后选区还在（不是只剩一个光标）");
+        expectTrue(e38.selection() == before38,
+                   "★ 撤销回到编辑前两端（期望 " + std::to_string(before38.anchor) + ".." +
+                       std::to_string(before38.focus) + "，实际 " +
+                       std::to_string(e38.selection().anchor) + ".." +
+                       std::to_string(e38.selection().focus) + "）");
+        // 撤销只重编译、只标脏；要看矩形得先重排一次（宿主侧的 *AndRender 版自带这一步）。
+        e38.relayout();
+        expectTrue(!e38.selectionRects().empty(), "★ 回来的选区真的画得出来（有矩形）");
+
+        // (c) 重做：替换那一下整套回来，且落回它记下的"编辑后"空选区
+        expectTrue(e38.redo(), "重做");
+        expectTrue(text38(e38, 0) == "零一测四五六七八九十", "★ 重做回到替换之后");
+        expectTrue(!e38.hasSelection(), "重做之后没有选区（事务记的是折叠后的位置）");
+
+        // (d) 退格在选区非空时只删选区，不再往前多吃一个字
+        reload38(e38);
+        expectTrue(selectTwo38(e38), "再选中两个字");
+        expectTrue(e38.backspace(), "退格");
+        expectTrue(text38(e38, 0) == "零一四五六七八九十",
+                   "★ 退格只删掉选中的两个字（实际 " + text38(e38, 0) +
+                       "；若多删一个字会得到 零四五六七八九十）");
+        expectTrue(e38.caret().para == 0 && e38.caret().offset == 2,
+                   "落点在删除区间的起点");
+        expectTrue(paras38(e38) == 3, "同段内删除不改段数");
+
+        // (e) 前删同理
+        reload38(e38);
+        expectTrue(selectTwo38(e38), "再选中两个字");
+        expectTrue(e38.deleteForward(), "前删");
+        expectTrue(text38(e38, 0) == "零一四五六七八九十",
+                   "★ 前删也只删选区（实际 " + text38(e38, 0) +
+                       "；若多删一个字会得到 零一五六七八九十）");
+
+        // (f) 空选区时退格照旧删一个字 —— 反向一半：这条不变红，
+        //     "退格只删选区"那条就没有对照，"退格什么都不做"也能让它绿。
+        reload38(e38);
+        e38.setCaret(0, 3);
+        expectTrue(!e38.hasSelection(), "没有选区");
+        expectTrue(e38.backspace(), "裸退格");
+        expectTrue(text38(e38, 0) == "零一三四五六七八九十",
+                   "★ 空选区时退格照旧删一个字（实际 " + text38(e38, 0) +
+                       "；若空选区下也去删选区，就会一个字都不动）");
+
+        // (g) 跨段删除：与"手工删同样内容"逐字节同帧
+        EditorEngine eA;
+        EditorEngine eC;
+        expectTrue(eA.init({cjkPath}) && eC.init({cjkPath}), "跨段删除：两个引擎都起得来");
+        eA.setConfig(c38);
+        eC.setConfig(c38);
+        reload38(eA);
+        reload38(eC);
+
+        // A 路：选中 [第 0 段第 4 字, 第 1 段第 3 字) 一次删掉。
+        //   中间跨过 7 个字 + 一枚段落标记 + 3 个字 = 11 个流位置。
+        eA.setCaret(0, 4);
+        expectTrue(eA.moveCaretBy(11, true), "扩展 11 格（跨过段落标记）");
+        expectTrue(eA.caret().para == 1 && eA.caret().offset == 3,
+                   "焦点落在第 1 段第 3 个字之前（实际 (" + std::to_string(eA.caret().para) +
+                       ", " + std::to_string(eA.caret().offset) + ")）");
+        expectTrue(eA.backspace(), "退格删掉跨段选区");
+        expectTrue(text38(eA, 0) == "零一二三丁戊己庚辛壬癸",
+                   "★ 两段并成一段、内容接得上（实际 " + text38(eA, 0) + "）");
+        expectTrue(paras38(eA) == 2, "★ 跨段删除并掉一段（3 → 2，实际 " +
+                                         std::to_string(paras38(eA)) + "）");
+        expectTrue(text38(eA, 1) == "子丑寅卯", "后面那一段没受影响");
+
+        // C 路：同样的结果用 11 下前删手工做出来（7 个字 + 一次段末合并 + 3 个字）。
+        eC.setCaret(0, 4);
+        bool hand38 = true;
+        for (int i = 0; i < 7; ++i) hand38 = hand38 && eC.deleteForward();
+        expectTrue(hand38, "手工删：前删 7 下");
+        expectTrue(eC.deleteForward(), "手工删：段末前删把下一段并进来");
+        hand38 = true;
+        for (int i = 0; i < 3; ++i) hand38 = hand38 && eC.deleteForward();
+        expectTrue(hand38, "手工删：再前删 3 下");
+        expectTrue(text38(eC, 0) == text38(eA, 0),
+                   "★ 手工删同样内容得到同一段文本（" + text38(eC, 0) + "）");
+        expectTrue(paras38(eC) == paras38(eA), "段数也一样");
+        expectTrue(eC.caret().para == eA.caret().para && eC.caret().offset == eA.caret().offset,
+                   "落点也一样");
+
+        // 逐字节同帧：两条路走到同一个文档状态，帧就该一个字节都不差。
+        //   关掉光标再比 —— 闪烁相位与光标位置是另一件事，别让它污染这一条。
+        eA.showCaret(false);
+        eC.showCaret(false);
+        // 必须各自重排一次再呈现：编辑只标脏（markLayoutDirty），真正的排版要等 relayout。
+        //   少了这一步，两张帧画的都是编辑之前那一版 layout，它们当然逐字节相同，
+        //   于是这条"逐字节同帧"变成一句空话（反证 A 就是这么被漏过去的）。
+        eA.relayout();
+        eC.relayout();
+        eA.repaint();
+        eC.repaint();
+        expectTrue(eA.frameBytes() == eC.frameBytes(), "两条路的帧大小一致");
+        expectTrue(std::memcmp(eA.frame(), eC.frame(), eA.frameBytes()) == 0,
+                   "★ 跨段删除与手工删同样内容逐字节同帧");
+
+        // (h) 全选再打字 = 整篇被替换成一个字
+        reload38(e38);
+        expectTrue(e38.selectAll(), "全选");
+        expectTrue(e38.typeTextUtf8("测"), "整篇替换成一个字");
+        expectTrue(paras38(e38) == 1, "★ 段数收成 1（实际 " + std::to_string(paras38(e38)) + "）");
+        expectTrue(text38(e38, 0) == "测", "★ 全选再打字 = 只剩那个字（实际 " +
+                                               text38(e38, 0) + "）");
+        expectTrue(!e38.hasSelection(), "没有残选区");
+
+        // (i) 插类的另两个入口：回车与缩进也是"先删选区再插"
+        reload38(e38);
+        expectTrue(selectTwo38(e38), "选中两个字");
+        expectTrue(e38.splitParagraph(), "回车（带选区）");
+        expectTrue(paras38(e38) == 4, "★ 回车：先删选区再分段（3 → 4，实际 " +
+                                          std::to_string(paras38(e38)) + "）");
+        expectTrue(text38(e38, 0) == "零一", "前半段（实际 " + text38(e38, 0) + "）");
+        expectTrue(text38(e38, 1) == "四五六七八九十", "后半段（实际 " + text38(e38, 1) + "）");
+
+        reload38(e38);
+        expectTrue(selectTwo38(e38), "选中两个字");
+        expectTrue(e38.indent(), "Tab（带选区）");
+        expectTrue(text38(e38, 0) == "零一    四五六七八九十",
+                   "★ 缩进：选区被 4 个空格替换（实际 " + text38(e38, 0) + "）");
+
+        // (j) 反缩进归"删类"：删完即止，不去动光标前面那些空格
+        reload38(e38);
+        expectTrue(selectTwo38(e38), "选中两个字");
+        expectTrue(e38.outdent(), "反缩进（带选区）");
+        expectTrue(text38(e38, 0) == "零一四五六七八九十",
+                   "★ 反缩进只删选区（实际 " + text38(e38, 0) + "）");
+
+        // (k) 程序化指定落点的插入不把选区当靶子 —— 那种坐标是按调用时的文档算出来的，
+        //     先删掉一段会让整批坐标一起过期，所以这条边界刻意留着。
+        //     它当然仍会把光标搬到插入处（那是"插入"自己的契约），这里要钉的是
+        //     "选区里的字一个都没少"，而不是"选区状态原封不动"。
+        reload38(e38);
+        expectTrue(selectTwo38(e38), "选中两个字");
+        expectTrue(e38.insertTextUtf8(0, 9, "X"), "在别处插一个字");
+        expectTrue(text38(e38, 0) == "零一二三四五六七八X九十",
+                   "★ 指定落点的插入不动选区里的字（实际 " + text38(e38, 0) +
+                       "；若把它当靶子会先删掉 二三）");
+
+        // (l) 合并入口在选区非空时也退化成"删掉选区"
+        reload38(e38);
+        expectTrue(selectTwo38(e38), "选中两个字");
+        expectTrue(e38.mergeWithPreviousParagraph(), "合并（带选区）");
+        expectTrue(text38(e38, 0) == "零一四五六七八九十",
+                   "★ 合并退化成删选区（实际 " + text38(e38, 0) + "）");
+        expectTrue(paras38(e38) == 3, "段数不变（没有真的合并）");
+    }
+
+    std::printf("\n[39] 拖选只搬焦点端：anchor 不动、方向可反、拖回原位收成空\n");
+    {
+        // 这一节钉引擎侧那一个入口（宿主侧的按下与移动由探针 [20] 走真鼠标事件管）。
+        // 三条口径：拖动只改选区不改正文；anchor 是按下点、focus 是当前点且可前可后；
+        // focus 回到按下点就是空选区 —— 最后这条是反向的一半，没有它"什么都不做"也能全绿。
+        const auto reload39 = [](EditorEngine& e) {
+            std::vector<BlockSpec> bl(3);
+            bl[0].setText("零一二三四五六七八九十");
+            bl[1].setText("甲乙丙丁戊己庚辛壬癸");
+            bl[2].setText("子丑寅卯");
+            e.setDocument(demoTree(bl, {}), StyleSheet{});
+            e.setEditMode(EditMode::Document);
+            e.relayout();
+        };
+        const auto text39 = [](EditorEngine& e, int i) {
+            const auto& bs = e.blocks();
+            if (i < 0 || i >= static_cast<int>(bs.size())) return std::string();
+            return bs[static_cast<size_t>(i)].textUtf8();
+        };
+        // 两端是全局流位置，断言要的是"它落在哪一段哪一位"，于是翻回文本坐标再比。
+        const auto at39 = [](EditorEngine& e, FlowPos f) {
+            TextPos p{};
+            if (!e.flowToTextPos(f, &p)) return TextPos{-1, 0};
+            return p;
+        };
+
+        EditorEngine e39;
+        expectTrue(e39.init({cjkPath}), "拖选：字体加载成功");
+        EngineConfig c39;
+        c39.zoom = 1.0f;
+        c39.page.width_pt = 200.0f;
+        c39.page.margin_pt = 20.0f;
+        e39.setConfig(c39);
+
+        // (a) 按下落在 (0,2)，拖到 (0,6)：anchor 停在按下点，focus 跟着走
+        reload39(e39);
+        const std::string before39 = text39(e39, 0);
+        e39.setCaretAtSide(0, 2, -1);
+        expectTrue(!e39.hasSelection(), "按下时还是空选区（定位把 anchor 定在按下点）");
+        e39.setFocusAtSide(0, 6, -1);
+        expectTrue(e39.hasSelection(), "拖出选区");
+        {
+            const Range r = e39.selection();
+            const TextPos a = at39(e39, r.anchor);
+            const TextPos f = at39(e39, r.focus);
+            expectTrue(a.para == 0 && a.offset == 2,
+                       "★ anchor 停在按下点（实际 " + std::to_string(a.para) + "," +
+                           std::to_string(a.offset) + "）");
+            expectTrue(f.para == 0 && f.offset == 6,
+                       "★ focus 在拖动终点（实际 " + std::to_string(f.para) + "," +
+                           std::to_string(f.offset) + "）");
+            expectTrue(text39(e39, 0) == before39,
+                       "★ 拖动不改正文（实际 " + text39(e39, 0) + "）");
+        }
+
+        // (b) 反向拖：focus 跑到 anchor 前面，两端不交换（选区是带方向的）
+        e39.setFocusAtSide(0, 0, -1);
+        {
+            const Range r = e39.selection();
+            const TextPos a = at39(e39, r.anchor);
+            const TextPos f = at39(e39, r.focus);
+            expectTrue(a.offset == 2 && f.offset == 0, "★ 反向拖：anchor 仍在前端");
+        }
+
+        // (c) 拖回按下点 = 空选区
+        e39.setFocusAtSide(0, 2, -1);
+        expectTrue(!e39.hasSelection(), "★ 拖回按下点收成空选区");
+
+        // (d) 连续移动不碰正文（一次拖动是很多次移动，不是一次）
+        reload39(e39);
+        e39.setCaretAtSide(0, 1, -1);
+        for (int k = 2; k <= 9; ++k) e39.setFocusAtSide(0, k, -1);
+        expectTrue(e39.hasSelection(), "连续移动之后有选区");
+        {
+            const Range r = e39.selection();
+            const TextPos a = at39(e39, r.anchor);
+            const TextPos f = at39(e39, r.focus);
+            expectTrue(a.offset == 1 && f.offset == 9, "★ 两端落在按下点与最后一次移动的落点");
+        }
+        expectTrue(text39(e39, 0) == "零一二三四五六七八九十" &&
+                       text39(e39, 1) == "甲乙丙丁戊己庚辛壬癸" &&
+                       text39(e39, 2) == "子丑寅卯",
+                   "★ 连续移动不碰正文（实际 " + text39(e39, 0) + " / " + text39(e39, 1) + " / " +
+                       text39(e39, 2) + "）");
+        expectTrue(static_cast<int>(e39.blocks().size()) == 3, "段数不变");
+
+        // (e) 跨段拖：按下在第 0 段第 8 个字之前、拖到第 1 段第 3 个字之前
+        reload39(e39);
+        e39.setCaretAtSide(0, 8, -1);
+        e39.setFocusAtSide(1, 3, -1);
+        expectTrue(e39.hasSelection(), "跨段拖出选区");
+        expectTrue(e39.caret().para == 1 && e39.caret().offset == 3,
+                   "★ 焦点端落到第 1 段（实际 " + std::to_string(e39.caret().para) + "," +
+                       std::to_string(e39.caret().offset) + "）");
+        // 先把两端钉住，后面的"吃掉之后正文变成什么"才有依据：
+        //   从第 0 段第 8 位到段末是 八九十 三个字，加一枚段落标记，再加第 1 段的 甲乙丙。
+        {
+            const Range r = e39.selection();
+            const TextPos a = at39(e39, r.anchor);
+            expectTrue(a.para == 0 && a.offset == 8,
+                       "★ 跨段拖的 anchor 在 (0, 8)（实际 " + std::to_string(a.para) + "," +
+                           std::to_string(a.offset) + "）");
+        }
+        // 先重排再读几何：改选区只标脏，矩形要等重排之后才成立。
+        e39.relayout();
+        expectTrue(!e39.selectionRects().empty(), "★ 跨段选区有矩形（画得进帧）");
+        // 拖出来的选区与键盘扩出来的选区是同一件东西：打字一样会被吃掉（与第 5 刀接上）。
+        expectTrue(e39.typeTextUtf8("测"), "拖选之后打字");
+        expectTrue(text39(e39, 0) == "零一二三四五六七测丁戊己庚辛壬癸",
+                   "★ 拖出来的跨段选区被吃掉并掉一段（实际 " + text39(e39, 0) + "）");
+        expectTrue(static_cast<int>(e39.blocks().size()) == 2 && text39(e39, 1) == "子丑寅卯",
+                   "★ 段数 3 变 2、末段没受影响（实际 " +
+                       std::to_string(static_cast<int>(e39.blocks().size())) + " 段）");
+
+        // (f) 侧别与定位走同一条投影：两边在同一个 (段, 偏移, 侧别) 上必须落在同一个流位置
+        reload39(e39);
+        e39.setCaretAtSide(0, 3, 1);
+        const FlowPos byPress39 = e39.selection().focus;
+        e39.setCaretAtSide(0, 0, -1);
+        e39.setFocusAtSide(0, 3, 1);
+        expectTrue(e39.selection().focus == byPress39,
+                   "★ 拖选的落点与按下定位同一条投影（侧别也一起透传）");
+    }
+
     std::printf("\n──────────────────────────────\n");
     std::printf("共 %d 项断言，失败 %d 项\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

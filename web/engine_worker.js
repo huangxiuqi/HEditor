@@ -232,7 +232,7 @@ function retarget(st) {
  */
 const PRESENT_ALWAYS = new Set([
   'present', 'blinkPhase', 'viewport',
-  'setCaret', 'setCaretAt', 'setCaretAtSide',
+  'setCaret', 'setCaretAt', 'setCaretAtSide', 'setFocusAtSide',
   'setEditMode', 'setBracketScope', 'setViewportAnchor',
   'undo', 'redo', 'indent', 'outdent', 'focusControl', 'tabCaret',
   'removeControl', 'setControlProp',
@@ -443,6 +443,12 @@ const WRITE = {
   },
   setCaretAtSide: (a) => {
     mod.setCaretAtSide(a.para | 0, a.offset | 0, a.side | 0);
+    mod.showCaret(true);
+  },
+  // 拖选的移动端：只搬焦点端，anchor 不动。与 setCaretAtSide 同档 ——
+  //   引擎不自己重绘，所以它也在 PRESENT_ALWAYS 里（否则拖动时选区不更新）。
+  setFocusAtSide: (a) => {
+    mod.setFocusAtSide(a.para | 0, a.offset | 0, a.side | 0);
     mod.showCaret(true);
   },
   indent: () => mod.indent(),

@@ -1515,6 +1515,14 @@ async function main() {
     chk.check('合并之后文档回到分段之前的字符数',
               (await c.eval('return window.__heditor.allText;')).length === textBefore.length,
               `回到 ${textBefore.length} 字符`);
+
+    // 把缩放还回去：[9] 与本节的 run(7/6, 1.0) 只是为了让长文档的窗口页数可控，
+    //   而缩放是页面级状态。不还原的话，从 [11] 往后的每一节都在 1.0 下跑，
+    //   report.zoom 里记的却是 1.5。后面各节都读实时的实际缩放来算坐标（自洽），
+    //   只有依赖"文档有多高"的小节会失真：拖选出可视区那一节就是这样，文档矮了
+    //   三分之一，自动滚动很快滚到底，"还在继续滚"于是永远量不出来。
+    //   判据必须自己钉住前提，不靠前一节留下的状态。
+    await c.eval(`return await window.__heditor.run(6, ${ZOOM});`);
   }
 
   chk.section('[11] 相邻字段共享边界上打字：字进前一个字段，括号仍是 `][`');
@@ -2207,26 +2215,41 @@ async function main() {
       // 光标画在哪里：逐字点"这个字的中点"，画出来的光标必须就在点击点附近。
       //   这是整条坐标链（CSS 像素 → 帧像素 → 帧磅）的可证伪判据：dpr 或 zoom
       //   少乘一次，落点就会差一整格。
+      //
+      // 中点量出来的是帧像素（caret.x / caret.h 乘过 zoom），clickPt 收的是帧磅，
+      //   所以要先除以 z 再交出去；少这一步只在 zoom 为 1 时看不出（恒等）。
+      // "偏得远不远"的尺子要用实测字格宽，不能写死像素值：点的是字格中点，画出
+      //   来的光标只能落在这一格的两端之一，上限就是半个字宽（跨到隔壁字才叫偏）。
+      //   写死的像素值只在某个特定缩放下等于半个字宽，缩放一变就不是那个意思了。
       let drawnProbed = 0;
       let drawnBad = 0;
+      const drawnWorst = [];
       for (let ci = 0; ci < 3; ++ci) {
         const a = await c.eval(`return window.__heditor.controls.items[${ci}].start[1];`);
         const b = await c.eval(`return window.__heditor.controls.items[${ci}].end[1];`);
         for (let k = a; k < b; ++k) {
           const m = await c.eval(`
             await window.__heditor.setCaretAt(0, ${k}, ${ci});
-            const x0 = window.__heditor.caret.x;
+            const c1 = window.__heditor.caret;
             await window.__heditor.setCaretAt(0, ${k + 1}, ${ci});
             const c2 = window.__heditor.caret;
-            return { x: (x0 + c2.x) / 2, y: c2.y + c2.h / 2 };`);
-          await clickPt(g, m.x, m.y, z);
+            return { x: (c1.x + c2.x) / 2, y: c2.y + c2.h / 2, w: Math.abs(c2.x - c1.x) };`);
+          await clickPt(g, m.x / z, m.y / z, z);
           const st = await c.eval('return window.__heditor.caret;');
           ++drawnProbed;
-          if (Math.abs(st.x - m.x) > 8 || st.offset < a || st.offset > b) ++drawnBad;
+          const off = Math.abs(st.x - m.x);
+          if (off > m.w / 2 + 2 || st.offset < a || st.offset > b) {
+            ++drawnBad;
+            if (drawnWorst.length < 3) {
+              drawnWorst.push(`字段${ci} 偏移${k}: 偏 ${off.toFixed(1)}px` +
+                              `（半个字宽 ${(m.w / 2).toFixed(1)}）落 ${st.offset}`);
+            }
+          }
         }
       }
       chk.check('★ 逐字点选：落点在该字范围内、且光标画在点击处附近（整条坐标链）',
-                drawnProbed === 6 && drawnBad === 0, `${drawnProbed} 个字，偏的 ${drawnBad} 个`);
+                drawnProbed === 6 && drawnBad === 0,
+                `${drawnProbed} 个字，偏的 ${drawnBad} 个 ${drawnWorst.join(' ')}`);
 
       const sc = await c.eval('return await window.__heditor.selfCheck();');
       chk.check('横扫之后屏幕 == 引擎帧', sc.screenVsEngineDiffPx === 0,
@@ -3020,6 +3043,349 @@ async function main() {
     const chh = await c.eval('return window.__heditor.caret;');
     chk.check('Ctrl+Home 回到第一段段首', chh.para === 0 && chh.offset === 0,
               JSON.stringify(chh));
+  }
+
+  chk.section('[19] 编辑入口吃掉选区：替换、退格只删选区、跨段删除、撤销回两端');
+  {
+    // 与 [18] 同一条纪律：全走真 keydown（含 Ctrl+A / Ctrl+Z / Ctrl+Y），
+    //   不走门面调用 —— 门面调用绕过的正是"宿主把按键翻译成引擎命令"那一段。
+    const DOC19 = '零一二三四五六七八九十';
+    const load19 = () => c.eval(
+      'await window.__heditor.loadTextDocument(' + JSON.stringify(DOC19) + ', 3); return true;');
+    // 从 (0, 2) 起 Shift+右 两格 = 选中第 2、3 两个字。
+    const selectTwo19 = async () => {
+      await c.eval('await window.__heditor.setCaret(0, 2); return true;');
+      await c.eval(key('ArrowRight', ', shiftKey: true'));
+      await c.eval(key('ArrowRight', ', shiftKey: true'));
+      return c.eval('return window.__heditor.selection;');
+    };
+
+    // (a) 选中再打字 = 原文 − 选区 + 新字
+    await load19();
+    const s19 = await selectTwo19();
+    chk.check('★ Shift+右 选中两个字（走真事件）',
+              s19.empty === false && s19.focus === s19.anchor + 2, JSON.stringify(s19));
+    await c.eval(key('测'));
+    const t19 = await c.eval('return window.__heditor.paragraphText(0);');
+    chk.check('★ 选中再打字 = 原文 − 选区 + 新字', t19 === '零一测四五六七八九十', t19);
+    const r19 = await c.eval('return window.__heditor.selection;');
+    chk.check('★ 替换之后没有残选区（反向：不许留一条看不见的选区）', r19.empty === true,
+              JSON.stringify(r19));
+
+    // (b) 撤销一次：文字与选区的两端一起回来
+    await c.eval(key('z', ', ctrlKey: true'));
+    const u19 = await c.eval(
+      'return { t: await window.__heditor.paragraphText(0), s: window.__heditor.selection };');
+    chk.check('★ 撤销把文字还回来了', u19.t === DOC19, u19.t);
+    chk.check('★ 撤销回到编辑前两端（不是只剩一个光标）',
+              u19.s.empty === false && u19.s.anchor === s19.anchor && u19.s.focus === s19.focus,
+              `期望 ${s19.anchor}..${s19.focus}，实际 ${u19.s.anchor}..${u19.s.focus}`);
+    chk.check('★ 回来的选区画得出来（有矩形）', u19.s.rects.length >= 1,
+              `rects=${u19.s.rects.length}`);
+
+    // (c) 重做：替换那一下整套回来
+    await c.eval(key('y', ', ctrlKey: true'));
+    const re19 = await c.eval(
+      'return { t: await window.__heditor.paragraphText(0), s: window.__heditor.selection };');
+    chk.check('★ 重做回到替换之后', re19.t === '零一测四五六七八九十', re19.t);
+    chk.check('重做之后没有选区', re19.s.empty === true, JSON.stringify(re19.s));
+
+    // (d) 退格在选区非空时只删选区，不再往前多删一个字
+    await load19();
+    await selectTwo19();
+    await c.eval(key('Backspace'));
+    const b19 = await c.eval('return window.__heditor.paragraphText(0);');
+    chk.check('★ 退格只删掉选中的两个字（不多吃一个字）', b19 === '零一四五六七八九十', b19);
+
+    // (e) 反向一半：没有选区时退格照旧删一个字。
+    //     没有这一条，"退格什么都不做"也能让上面那条绿。
+    await load19();
+    await c.eval('await window.__heditor.setCaret(0, 3); return true;');
+    await c.eval(key('Backspace'));
+    const b19b = await c.eval('return window.__heditor.paragraphText(0);');
+    chk.check('★ 空选区时退格照旧删一个字', b19b === '零一三四五六七八九十', b19b);
+
+    // (f) 前删同理
+    await load19();
+    await selectTwo19();
+    await c.eval(key('Delete'));
+    const d19 = await c.eval('return window.__heditor.paragraphText(0);');
+    chk.check('★ 前删也只删选区', d19 === '零一四五六七八九十', d19);
+
+    // (g) 跨段：选区跨过段落标记，退格把两段并起来
+    await load19();
+    await c.eval('await window.__heditor.setCaret(0, 8); return true;');
+    for (let i = 0; i < 5; ++i) await c.eval(key('ArrowRight', ', shiftKey: true'));
+    const x19 = await c.eval('return window.__heditor.selection;');
+    chk.check('★ 选区跨过了段落标记（焦点进了下一段）', x19.empty === false, JSON.stringify(x19));
+    await c.eval(key('Backspace'));
+    const xa = await c.eval(
+      'return { t: await window.__heditor.allText,' +
+      '         n: window.__heditor.editStats.totalParagraphs };');
+    chk.check('★ 跨段退格把两段并成一段、内容接得上',
+              xa.t === '零一二三四五六七一二三四五六七八九十\n零一二三四五六七八九十', xa.t);
+    chk.check('★ 段数少了一段（3 → 2）', Number(xa.n) === 2, `${xa.n}`);
+
+    // (h) Ctrl+A 再退格：整篇删空，只剩一个空段
+    await load19();
+    await c.eval(key('a', ', ctrlKey: true'));
+    await c.eval(key('Backspace'));
+    const e19 = await c.eval(
+      'return { t: await window.__heditor.allText,' +
+      '         n: window.__heditor.editStats.totalParagraphs,' +
+      '         s: window.__heditor.selection };');
+    chk.check('★ Ctrl+A 再退格把整篇删空（只剩一个空段）',
+              e19.t === '' && Number(e19.n) === 1, `${JSON.stringify(e19.t)} / ${e19.n} 段`);
+    chk.check('删空之后没有残选区', e19.s.empty === true, JSON.stringify(e19.s));
+
+    // (i) 全选再打字 = 整篇只剩那个字
+    await load19();
+    await c.eval(key('a', ', ctrlKey: true'));
+    await c.eval(key('测'));
+    const f19 = await c.eval(
+      'return { t: await window.__heditor.allText,' +
+      '         n: window.__heditor.editStats.totalParagraphs };');
+    chk.check('★ 全选再打字 = 整篇只剩那个字', f19.t === '测' && Number(f19.n) === 1,
+              `${JSON.stringify(f19.t)} / ${f19.n} 段`);
+
+    // (j) 回车（带选区）：先删掉选区，再在落点分段
+    await load19();
+    await selectTwo19();
+    await c.eval(key('Enter'));
+    const g19 = await c.eval(
+      'return { p0: await window.__heditor.paragraphText(0),' +
+      '         p1: await window.__heditor.paragraphText(1),' +
+      '         n: window.__heditor.editStats.totalParagraphs };');
+    chk.check('★ 回车（带选区）：先删选区再分段（3 → 4 段）', Number(g19.n) === 4, `${g19.n}`);
+    chk.check('前半段是选区之前的内容', g19.p0 === '零一', g19.p0);
+    chk.check('后半段是选区之后的内容', g19.p1 === '四五六七八九十', g19.p1);
+
+    // 收尾：把文档换回去，别把这一节的痕迹留给后面的节
+    await c.eval(
+      'await window.__heditor.loadTextDocument(' + JSON.stringify(S6) + ', 1); return true;');
+  }
+
+  chk.section('[20] 拖选：按下、移动、抬起（真鼠标事件）');
+  {
+    // 为什么必须走 CDP 的真鼠标事件（与 [12] 同一条理由）：拖选这一格坏在
+    //   "按下 → 命中 → 定位 → 移动 → 焦点端跟着走"这条链上，合成 MouseEvent 虽然
+    //   也能打到监听器上，但只有真事件连坐标换算、命中、目标元素（画布）一起过一遍。
+    //   另外两套宿主对"按下目标"的判断不同（单线程看坐标，Worker 看 event.target），
+    //   合成事件很容易只在一侧成立。
+    //
+    // 本节自己钉住缩放：坐标换算读的是实时的实际缩放（自洽），但 (i) 那一节还依赖
+    //   "文档有多高"（自动滚动要跑得够久），那是缩放决定的。不钉住的话，前一节把
+    //   缩放留在别的值上，这一节就在另一种高度下跑，红项看起来像拖选坏了。
+    await c.eval(`return await window.__heditor.reset(6, ${ZOOM});`);
+    await c.eval('return await window.__heditor.stopBlink();');
+
+    const DOC20 = '零一二三四五六七八九十';
+    const load20 = () => c.eval(
+      'await window.__heditor.loadTextDocument(' + JSON.stringify(DOC20) + ', 3); return true;');
+
+    // 光标几何 -> 客户端坐标。geo 每次现取：换文档、换窗口都会动。
+    const geo20 = async () => c.eval(`
+      const cv = window.__heditor.canvas, r = cv.getBoundingClientRect();
+      const s = document.getElementById('stage').getBoundingClientRect();
+      return { left: r.left, top: r.top, sx: r.width / cv.width, sy: r.height / cv.height,
+               stageTop: s.top, stageBottom: s.bottom, stageRight: s.right, stageMidX: (s.left + s.right) / 2 };`);
+
+    // caret.x / caret.y / caret.h 是帧像素（引擎那一侧乘过 zoom，见 [14] 的
+    //   innerCaretPt），所以这里只差"帧像素转 CSS 像素"这一道换算，不能再乘 zoom；
+    //   多乘一次只在 zoom 为 1 时是恒等。对照组：[14] 用的是 controls.items[].rects，
+    //   那是帧磅，所以那边要乘 zoom。两种单位混用会让点击整体偏若干行，
+    //   症状像命中测试点错了字。
+    const toClient = (g, pt, dx, dy) => ({
+      x: g.left + (pt.x + (dx || 0)) * g.sx,
+      y: g.top + (pt.y + (dy || 0)) * g.sy,
+    });
+    const mouse = async (type, at, over) => {
+      const p = { x: Math.round(at.x), y: Math.round(at.y), button: 'left',
+                  buttons: type === 'mouseReleased' ? 0 : 1, clickCount: 1, ...(over || {}) };
+      await c.send('Input.dispatchMouseEvent', { type, ...p });
+    };
+    // 走完一次完整手势：按下 → 若干次移动 → 抬起。中间那次 sleep 给异步宿主留往返。
+    const dragGesture = async (from, to, steps = 4) => {
+      await mouse('mousePressed', from);
+      for (let i = 1; i <= steps; ++i) {
+        await mouse('mouseMoved', {
+          x: from.x + (to.x - from.x) * (i / steps),
+          y: from.y + (to.y - from.y) * (i / steps),
+        });
+        await sleep(20);
+      }
+      await mouse('mouseReleased', to);
+      await c.eval('return await window.__heditor.dragSettled();');
+      await sleep(30);
+    };
+    const sel20 = () => c.eval('return window.__heditor.selection;');
+    const caret20 = () => c.eval('return window.__heditor.caret;');
+
+    // (a) 量两个端点：文档末尾一个点、文档开头一个点。端点用键盘把光标摆过去再量，
+    //     量完把选区收回来（setCaret 会清掉 anchor），免得量测本身影响了待测的手势。
+    await load20();
+    const g20 = await geo20();
+    await c.eval('await window.__heditor.setCaret(0, 0); return true;');
+    await c.eval(key('End', ', ctrlKey: true, shiftKey: true'));
+    const ref20 = await sel20();                       // 键盘扩到文档末尾的答案
+    const caretEnd = await caret20();
+    await c.eval('await window.__heditor.setCaret(0, 0); return true;');
+    const caretStart = await caret20();
+    chk.check('★ 参考值：Ctrl+Shift+End 扩到文档末尾（真 keydown）',
+              ref20.empty === false && Number(ref20.focus) > Number(ref20.anchor),
+              JSON.stringify(ref20));
+
+    const ptStart = toClient(g20, caretStart, 1, caretStart.h / 2);
+    const ptEnd = toClient(g20, caretEnd, 2, caretEnd.h / 2);
+
+    // (b) 按下不拖：空选区（单击不该选出任何东西）
+    await mouse('mousePressed', ptStart);
+    await mouse('mouseReleased', ptStart);
+    const s20a = await sel20();
+    const c20a = await caret20();
+    chk.check('★ 按下不拖：没有选区（单击不等于选一个字）', s20a.empty === true,
+              JSON.stringify(s20a));
+    chk.check('按下点就是光标位置', Number(c20a.para) === 0 && Number(c20a.offset) === 0,
+              `${c20a.para},${c20a.offset}`);
+
+    // (c) 按下 → 拖到文档末尾 → 抬起：两端与键盘扩到同一处逐值相同
+    await dragGesture(ptStart, ptEnd);
+    const s20b = await sel20();
+    const c20b = await caret20();
+    chk.check('★ 拖出来的选区有内容', s20b.empty === false, JSON.stringify(s20b));
+    chk.check('★ 拖到文档末尾与键盘扩到文档末尾逐值相同（两端与方向）',
+              Number(s20b.anchor) === Number(ref20.anchor) &&
+              Number(s20b.focus) === Number(ref20.focus),
+              `拖 ${s20b.anchor}..${s20b.focus} vs 键盘 ${ref20.anchor}..${ref20.focus}`);
+    chk.check('★ 焦点端落在文档末尾（光标跟着焦点端走）',
+              Number(c20b.para) === 2 && Number(c20b.offset) === DOC20.length,
+              `${c20b.para},${c20b.offset}（末段长 ${DOC20.length}）`);
+
+    // (d) 反向拖：从末尾按下、拖回开头 —— 两端不交换（选区带方向）
+    await c.eval('await window.__heditor.setCaret(0, 0); return true;');
+    const g20d = await geo20();
+    await dragGesture(toClient(g20d, caretEnd, 2, caretEnd.h / 2),
+                      toClient(g20d, caretStart, 1, caretStart.h / 2));
+    const s20c = await sel20();
+    chk.check('★ 反向拖：anchor 在末尾、focus 在开头（方向没被交换）',
+              Number(s20c.anchor) === Number(ref20.focus) &&
+              Number(s20c.focus) === Number(ref20.anchor),
+              JSON.stringify(s20c));
+
+    // (e) 拖出去再拖回来：抬手时落在按下点，选区收成空（反向的一半：不许留下看不见的选区）
+    const back = toClient(g20d, caretStart, 1, caretStart.h / 2);
+    await mouse('mousePressed', back);
+    await mouse('mouseMoved', toClient(g20d, caretEnd, 2, caretEnd.h / 2));
+    await sleep(20);
+    await mouse('mouseMoved', back);
+    await mouse('mouseReleased', back);
+    await c.eval('return await window.__heditor.dragSettled();');
+    const s20d = await sel20();
+    chk.check('★ 拖出去再拖回来收成空选区', s20d.empty === true, JSON.stringify(s20d));
+
+    // (f) 抬起之后再移动鼠标不再改选区（反向的一半：拖动只在按着的时候有效）
+    await mouse('mouseMoved', { x: ptEnd.x, y: ptEnd.y }, { buttons: 0 });
+    await sleep(40);
+    const s20e = await sel20();
+    chk.check('★ 抬起之后再移动不再改选区', s20e.empty === true, JSON.stringify(s20e));
+
+    // (g) 拖选之后打字 = 选区被吃掉（与第 5 刀接上：拖出来的与键盘扩出来的是同一件东西）
+    await load20();
+    await c.eval('await window.__heditor.setCaret(0, 0); return true;');
+    const g20g = await geo20();
+    const cs20 = await caret20();
+    await c.eval('await window.__heditor.setCaret(0, 0); return true;');
+    await c.eval(key('End', ', ctrlKey: true, shiftKey: true'));
+    const ce20 = await caret20();
+    await c.eval('await window.__heditor.setCaret(0, 0); return true;');
+    await dragGesture(toClient(g20g, cs20, 1, cs20.h / 2),
+                      toClient(g20g, ce20, 2, ce20.h / 2));
+    await c.eval(key('测'));
+    const g20h = await c.eval(
+      'return { t: await window.__heditor.allText,' +
+      '         n: window.__heditor.editStats.totalParagraphs };');
+    chk.check('★ 拖选之后打字：整篇被替换成一个字', g20h.t === '测' && Number(g20h.n) === 1,
+              `${JSON.stringify(g20h.t)} / ${g20h.n} 段`);
+
+    // (h) 页外的灰底起手不选中：按下点没落在正文上，拖动不该选中任何东西
+    await load20();
+    const g20i = await geo20();
+    const outside = { x: g20i.stageRight - 8, y: g20i.stageTop + 30 };
+    await dragGesture(outside, { x: outside.x - 4, y: outside.y + 60 });
+    const s20f = await sel20();
+    chk.check('★ 页外灰底起手不选中（按下点必须在正文上）', s20f.empty === true,
+              JSON.stringify(s20f));
+
+    // (i) 拖出可视区：指针停在容器下缘之外，容器自己滚起来、选区继续长
+    await c.eval('await window.__heditor.loadStressDocument(200, 20); return true;');
+    // 显式回到文档顶部：这一节要的是"往下还有得滚"，视口停在哪一层不该由前面的节决定。
+    await c.eval('document.getElementById("stage").scrollTop = 0; return true;');
+    await sleep(250);
+    await c.eval('await window.__heditor.setCaret(0, 0); return true;');
+    const g20j = await geo20();
+    const cj = await caret20();
+    const fromJ = toClient(g20j, cj, 1, cj.h / 2);
+    const outJ = { x: g20j.stageMidX, y: g20j.stageBottom + 30 };
+    // 前置：按下点要落在容器内（否则"拖出可视区"这一节无从发生），而且视口要真的
+    //   在文档顶部、下面还有可滚的余量。这三条不成立时后面的断言会量到空值，
+    //   那时再去看红项只会往命中测试上想。
+    //
+    // 第一条必须钉"接近 0"，不能只写"离底部还远"：top 接近上限时"离底部还远"照样
+    //   成立，整节就会在已经滚到底的状态下跑，两次读数自然一模一样。
+    const room = await c.eval(`
+      const s = document.getElementById('stage');
+      return { top: s.scrollTop, max: s.scrollHeight - s.clientHeight };`);
+    chk.check('前置：视口钉在文档顶部、下面还有可滚余量，按下点在容器内',
+              Number(room.top) <= 50 && Number(room.max) > 1000 &&
+              fromJ.y > g20j.stageTop && fromJ.y < g20j.stageBottom,
+              `scrollTop ${room.top}/${room.max}，按下点 y=${Math.round(fromJ.y)}，` +
+              `容器 ${Math.round(g20j.stageTop)}..${Math.round(g20j.stageBottom)}`);
+
+    // 量测必须落在自动滚动还没停的时候，不能先 await 收尾再量。
+    //   dragSettled 等的是自动滚动停下来（滚到两端、或指针回到框内），而自动滚动
+    //   一直把 raf 挂满，所以 await 它等于等到滚到底；那时量到的 j0 已经是终值，
+    //   j1 自然一模一样，"还在继续滚"就量不出来了。
+    const readStage = () => c.eval(`
+      const s = document.getElementById('stage');
+      return { top: s.scrollTop, max: s.scrollHeight - s.clientHeight,
+               scrollH: s.scrollHeight, clientH: s.clientHeight,
+               zoom: Number(document.getElementById('zoom').value),
+               sel: window.__heditor.selection,
+               drag: window.__heditor.drag };`);
+
+    await mouse('mousePressed', fromJ);
+    await mouse('mouseMoved', outJ);
+    await sleep(220);                                   // 让它先跑几帧，但不到底
+    const j0 = await readStage();
+    await sleep(900);                                   // 继续滚、继续长
+    const j1 = await readStage();
+    await mouse('mouseReleased', outJ);
+    await c.eval('return await window.__heditor.dragSettled();');
+
+    // 诊断面本身也要有内容：拖动中它必须说"在拖、已经移动过、发过若干次焦点端搬运"。
+    chk.check('★ 拖动中的诊断读数：在拖、移动过、搬过焦点端',
+              j0.drag && j0.drag.active === true && j0.drag.moved === true &&
+              Number(j0.drag.extends) > 0,
+              JSON.stringify(j0.drag));
+    chk.check('★ 拖出可视区：容器自己滚起来了（指针没动）',
+              Number(j0.top) > 0, `scrollTop ${j0.top}（上限 ${j0.max}）`);
+    chk.check('★ 拖出可视区：还在继续滚（不是一次到位）',
+              Number(j1.top) > Number(j0.top),
+              `${j0.top} -> ${j1.top}（上限 ${j1.max}，滚动高 ${j1.scrollH}，` +
+              `视口高 ${j1.clientH}，zoom ${j1.zoom}，指针 y=${Math.round(outJ.y)}）`);
+    chk.check('★ 拖出可视区仍继续扩展：焦点端继续往后走',
+              Number(j1.sel.focus) > Number(j0.sel.focus),
+              `${j0.sel.focus} -> ${j1.sel.focus}`);
+    chk.check('★ 这一节没滚到底（滚到底是靠自动滚动、不是被别的东西拽过去）',
+              Number(j1.top) < Number(j1.max),
+              `${j1.top} / ${j1.max}`);
+    const d20 = await c.eval('return window.__heditor.drag;');
+    chk.check('★ 抬手之后拖选收尾（诊断面回到不在拖）', d20 && d20.active === false,
+              JSON.stringify(d20));
+
+    // 收尾：把文档换回去，别把这一节的痕迹留给后面的节
+    await c.eval(
+      'await window.__heditor.loadTextDocument(' + JSON.stringify(S6) + ', 1); return true;');
   }
 
   // 收尾：载入表单样例 + 恢复闪烁，截一张给人看

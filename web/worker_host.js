@@ -130,6 +130,7 @@ let zoom = 1.5;
 let scenario = 6;
 let mode = 0;
 let lastPageX = 0;   // 页在视口里横向居中的偏移（设备像素）
+let drag = null;     // 拖选控制器（共享模块造的，按下之后由它接管）
 
 /**
  * 把当前的缩放回写到页面上的 #zoom 输入框。
@@ -623,9 +624,15 @@ function onPointerDown(ev) {
   //   framePointFromEvent 同一口径，命中测试收的就是这个坐标系。
   const xDev = (ev.clientX - rect.left) * DPR;
   const yDev = (ev.clientY - rect.top) * DPR + (page - gm.first) * gm.pageStep;
+  // 命中一次往返，结果有两个去处：定位，以及"这一下要不要起拖选"。
+  //   落在正文之外时不起手 —— 从页外的空白拖起不该选中任何东西。定位由 placeAt 做，
+  //   与点击路径共用同一段，免得"拖选能不能起手"和"点击落哪"两处各判一次。
+  const p = placeAt(xDev, yDev).then((hit) => {
+    if (hit && drag) drag.begin(ev, true);
+  });
   // clickAt 里有一次命中测试的往返，所以这一条既是"在途链"（排空要等它）也是
   //   "最近一次输入的渲染"（host.rendered）。
-  trackInput(host.clickAt(xDev, yDev));
+  trackInput(p);
   ta.focus();
   ev.preventDefault();
 }
@@ -680,6 +687,9 @@ const CMD = {
   setCaret: (para, offset) => ['setCaret', { para, offset }],
   setCaretAt: (para, offset, field) => ['setCaretAt', { para, offset, field }],
   setCaretAtSide: (para, offset, side) => ['setCaretAtSide', { para, offset, side }],
+  // 拖选的移动端：只搬焦点端，anchor 留在按下点。与 setCaretAtSide 同一档
+  //   （引擎不自己重绘，Worker 侧在 PRESENT_ALWAYS 里主动 present）。
+  setFocusAtSide: (para, offset, side) => ['setFocusAtSide', { para, offset, side }],
   setCaretOnly: (para, offset) => ['setCaret', { para, offset }],
   indent: () => ['indent', {}, true],
   outdent: () => ['outdent', {}, true],
@@ -739,7 +749,7 @@ Object.defineProperty(host, 'bracketSlots', {
  *   `cr0.x / cr0.page`（拿它算点击坐标）。返回形状也是门面契约的一部分 ——
  *   形状不对时症状是一条 "clientX 不是有限数"，完全看不出是返回值的问题。
  */
-for (const name of ['setCaret', 'setCaretAt', 'setCaretAtSide', 'setCaretOnly']) {
+for (const name of ['setCaret', 'setCaretAt', 'setCaretAtSide', 'setFocusAtSide', 'setCaretOnly']) {
   const spec = CMD[name];
   host[name] = (...a) => {
     const r = spec(...a);
@@ -813,18 +823,54 @@ Object.defineProperty(host, 'allText', {
 });
 
 /**
+ * 命中并定位（内部共用）。返回命中结果本身，没命中给 null。
+ *
+ * 坐标口径：xDev / yDev 是帧窗口坐标（设备像素）—— x 从页左缘量，y 从窗口首页顶量。
+ *   命中测试收的就是这个坐标系，所以这里只把设备像素折成磅（除以 zoom），
+ *   不做窗口与文档之间的换算。
+ *
+ * 与 clickAt 分开的理由：按下这一下有两个用处（定位、以及"要不要起拖选"），
+ *   而 clickAt 的返回值是光标（门面契约，与单线程宿主逐字对齐），塞不下第二个结论。
+ */
+async function placeAt(xDev, yDev) {
+  const hit = await askOp('hit', { x: xDev / zoom, y: yDev / zoom });
+  if (!hit) return null;
+  if (typeof hit.side === 'number') await host.setCaretAtSide(hit.para, hit.offset, hit.side);
+  else await host.setCaret(hit.para, hit.offset);
+  return hit;
+}
+
+/**
  * 命中并把光标落过去 —— 与单线程宿主走同一条路（hitTest 给归属与侧别）。
  *
- * 坐标口径：xPx / yPx 是帧窗口坐标（设备像素）—— x 从页左缘量，y 从窗口首页顶量。
- *   命中测试收的就是这个坐标系，所以这里只把设备像素折成磅（除以 zoom），
- *   不做窗口与文档之间的换算。换算在调用方（onPointerDown 从页元素的 rect 算）。
+ * 换算在调用方（onPointerDown 从页元素的 rect 算），这里收的是帧坐标。
  */
 host.clickAt = async function clickAt(xPx, yPx) {
-  const hit = await askOp('hit', { x: xPx / zoom, y: yPx / zoom });
-  if (!hit) return mirror.stats;
-  if (typeof hit.side === 'number') return host.setCaretAtSide(hit.para, hit.offset, hit.side);
-  return host.setCaret(hit.para, hit.offset);
+  const hit = await placeAt(xPx, yPx);
+  return hit ? host.caret : mirror.stats;
 };
+
+/**
+ * 客户端坐标 -> 窗口帧坐标（设备像素）。
+ *
+ * 与单线程宿主的 framePointAt 同一口径，只是基准换成滚动容器：页在滚动内容里是绝对
+ *   定位（top = 页号 × 步距），所以"某点的文档偏移" = 容器内偏移 + 滚动量。这样换算
+ *   不依赖"点在哪一张页画布上" —— 拖选要按夹到容器边缘的点重新命中，那时没有目标元素。
+ */
+function framePointAt(clientX, clientY) {
+  const gm = mirror.geom;
+  if (!gm) return null;
+  const r = stageEl.getBoundingClientRect();
+  return {
+    x: (clientX - r.left) * DPR - lastPageX,
+    y: (clientY - r.top) * DPR + stageEl.scrollTop * DPR - gm.first * gm.pageStep,
+  };
+}
+
+// 拖选拖动中那一端：只搬焦点端，anchor 留在按下点。
+function dragExtendTo(hit) {
+  host.setFocusAtSide(hit.para, hit.offset, hit.side);
+}
 
 /* ── 帧画布代理（给探针的适配层）────────────────────────────────────────── */
 
@@ -1166,6 +1212,20 @@ async function boot() {
   // 视口变了不用换画布：页画布的尺寸只取决于页，视口只影响"窗口要哪几页" ——
   //   窗口一变，推回来的几何会让 syncPageCanvases 自己把缺的页建出来。
   window.addEventListener('resize', onResize);
+  // 拖选：按下之后的移动与抬起由共享模块挂在 window 上（拖出画布再拖回来都收得到）。
+  //   命中要走一次往返，所以模块那边按"只留最新一个待处理点"合并 —— 不合并的话
+  //   每帧一次往返会排起长队，选区看起来追着鼠标跑却总是慢几拍。
+  if (typeof window.createDragSelect === 'function') {
+    drag = window.createDragSelect({
+      container: stageEl,
+      pointAt: framePointAt,
+      hitAt: (x, y) => askOp('hit', { x: x / zoom, y: y / zoom }),
+      extendTo: dragExtendTo,
+    });
+  } else {
+    // 不许静默降级：模块没加载成功时"拖不动"要有痕迹，否则会一路查命中测试。
+    report.warn('拖选不可用', { where: 'boot', message: 'web/drag_select.js 未加载' });
+  }
   ta.focus();
 }
 
@@ -1184,6 +1244,12 @@ Object.defineProperty(host, 'hostErrors', {
 Object.defineProperty(host, 'container', { get: () => root });
 Object.defineProperty(host, 'dead', { get: () => dead });
 Object.defineProperty(host, 'disposed', { get: () => disposed });
+/**
+ * 拖选的诊断面。与单线程宿主逐字对齐：drag 是读数不是方法，dragSettled() 等所有
+ *   在途命中落地 —— 这一侧拖动是几次往返，不等就读到的是旧选区。
+ */
+Object.defineProperty(host, 'drag', { get: () => (drag ? drag.state() : null) });
+host.dragSettled = () => (drag ? drag.settled() : Promise.resolve());
 
 /**
  * 拆掉这一份实例。

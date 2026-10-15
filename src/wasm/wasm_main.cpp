@@ -571,6 +571,14 @@ void setCaretAtSide(int para, int offset, int side) {
 }
 
 /**
+ * 拖选的移动端：只搬焦点端，anchor 不动。side 与 setCaretAtSide 同一来源。
+ * 定位与拖选是两个动作，这里刻意不合并：合并之后"按下"这件事就没有落点了。
+ */
+void setFocusAtSide(int para, int offset, int side) {
+    g_engine.setFocusAtSide(para, static_cast<size_t>(offset < 0 ? 0 : offset), side);
+}
+
+/**
  * 按控件归属定位（-1 = 最内层，LineBox::kInlineOffsetOuter = 贴外侧）。
  * 给探针与诊断用：它们手上有的是控件下标，不知道侧别。点击路径请用 setCaretAtSide ——
  * 归属会抹平"同一偏移上好几枚括号"的细节。
@@ -1096,6 +1104,7 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("setCaret", &setCaret);
     emscripten::function("setCaretAt", &setCaretAt);
     emscripten::function("setCaretAtSide", &setCaretAtSide);
+    emscripten::function("setFocusAtSide", &setFocusAtSide);
     emscripten::function("showCaret", &showCaret);
     emscripten::function("present", &present);
     emscripten::function("caretOffsetLive", &caretOffsetLive);

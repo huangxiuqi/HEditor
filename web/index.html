@@ -233,6 +233,8 @@
 
 <!-- 共享的错误降级层：把失败变成页面上看得见的东西。必须在 app.js 之前加载。 -->
 <script src="host_error.js"></script>
+<!-- 拖选状态机：两套宿主共用一份，同样必须在 app.js 之前加载（app.js 初始化时就取它）。 -->
+<script src="drag_select.js"></script>
 <script>
 // 入口脚本自己带版本号加载 app.js：先问一次 app.js 的 Last-Modified（no-store 强制绕过
 // 磁盘缓存），再把 app.js 以 ?v=<那个时间> 挂上去。

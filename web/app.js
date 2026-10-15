@@ -86,6 +86,7 @@ let lastEdit = null;
 let composing = false;
 let caretOn = true;
 let blinkTimer = null;
+let drag = null;
 const pageErrors = [];
 let disposed = false;
 
@@ -761,6 +762,22 @@ async function boot() {
   // 鼠标挂在页容器上而不是某一张画布：事件落在哪一页都走同一条换算。
   pagesEl.addEventListener('mousedown', onCanvasMouseDown);
   stageEl.addEventListener('scroll', onStageScroll, { passive: true });
+  // 拖选：按下之后的移动与抬起由共享模块挂在 window 上（拖出画布再拖回来都收得到，
+  //   挂在画布上会在出边界那一下就断）。按下时的定位仍走上面那个处理器，模块只管拖动。
+  if (typeof window.createDragSelect === 'function') {
+    drag = window.createDragSelect({
+      container: stageEl,
+      pointAt: framePointAt,
+      hitAt: (x, y) => {
+        const hit = mod.hitTest(x / currentZoom, y / currentZoom);
+        return hit === 'null' ? null : JSON.parse(hit);
+      },
+      extendTo: dragExtendTo,
+    });
+  } else if (errorSurface) {
+    // 不许静默降级：模块没加载成功时"拖不动"要有痕迹，否则会一路查命中测试。
+    errorSurface.warn('拖选不可用', { detail: 'web/drag_select.js 未加载' });
+  }
 
   currentZoom = zoom ? Number(zoom.value) : currentZoom;
   mod.setZoom(currentZoom);
@@ -1072,20 +1089,43 @@ function onCompositionEnd(ev) {
 }
 
 /**
- * 把一次鼠标事件换算成"窗口帧坐标（帧像素）"。
+ * 把一次的客户端坐标换算成"窗口帧坐标（帧像素）"。
  *
  * 事件可能落在任意一张页画布上，所以基准取页容器：页容器里 1 CSS 像素 = dpr 帧像素，
  * 而它的顶边就是文档第 0 页的顶边 —— 于是"页内位置"直接就是文档坐标，再减去窗口
  * 首页的偏移就是帧坐标。这样点第几页都一样，不需要知道点的是哪张画布。
+ *
+ * 收客户端坐标而不是事件对象：拖选的边缘自动滚动要把指针夹到容器边缘再换算，
+ *   那时手上没有事件。事件入口 framePointFromEvent 只是它的一层壳。
  */
-function framePointFromEvent(ev) {
+function framePointAt(clientX, clientY) {
   const r = pagesEl.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
   const step = mod.pagePxHeight() + mod.pageGapPx();
   return {
-    x: (ev.clientX - r.left) * dpr,
-    y: (ev.clientY - r.top) * dpr - mod.windowFirstPage() * step,
+    x: (clientX - r.left) * dpr,
+    y: (clientY - r.top) * dpr - mod.windowFirstPage() * step,
   };
+}
+
+function framePointFromEvent(ev) {
+  return framePointAt(ev.clientX, ev.clientY);
+}
+
+/**
+ * 拖选的移动端：搬焦点端，不搬 anchor。
+ *
+ * 走 settle 的"不滚视口"档：拖动过程中每一拍都把光标滚进视口，会把视口拽到焦点端去，
+ *   与边缘自动滚动抢同一个 scrollTop，看起来是画面在抖。滚动只由拖选自己那一侧负责。
+ */
+function dragExtendTo(hit) {
+  if (!mod || !mod.setFocusAtSide) return;
+  mod.setFocusAtSide(hit.para, hit.offset, hit.side);
+  caretOn = true;
+  mod.showCaret(true);
+  mod.present();
+  settle(JSON.parse(mod.editStatsJson()), { scroll: false });
+  resetBlink();
 }
 
 function onCanvasMouseDown(ev) {
@@ -1093,7 +1133,9 @@ function onCanvasMouseDown(ev) {
   const pt = framePointFromEvent(ev);
   // hitTest 收的是帧磅坐标，而页容器上量到的是帧像素 —— 除以 zoom 换算。
   const hit = mod.hitTest(pt.x / currentZoom, pt.y / currentZoom);
+  let onText = false;
   if (hit !== 'null') {
+    onText = true;
     const p = JSON.parse(hit);
     // 连"这一下点的是哪一个位置"一起带过去。
     //   相邻两个字段共享边界时（[反复]│[心悸]，两枚括号并排在同一列上），落点是同一个
@@ -1111,6 +1153,9 @@ function onCanvasMouseDown(ev) {
       setCaretAndPresent(p.para, p.offset);
     }
   }
+  // 定位之后再交给拖选：这一下已经把 anchor 摆在按下点，之后的移动只搬焦点端。
+  //   落在灰底上（没命中正文）时只定位不拖选 —— 从页外的空白起手不该选中任何东西。
+  if (drag) drag.begin(ev, onText);
   ta.focus();
   ev.preventDefault();
 }
@@ -1503,6 +1548,11 @@ const facade = {
   //   是属性不是方法 —— 与 caretReport / caretLive 同一个形态，两个宿主的门面
   //   在这里必须逐字对齐（探针两边跑同一份脚本）。
   get selection() { return mod ? JSON.parse(mod.selectionReport()) : null; },
+  // 拖选的诊断面：state() 说"现在在不在拖、移动过没有、自动滚动起没起"，
+  //   settled() 等所有在途的命中落地（异步宿主下拖动是几次往返，不等就读会读到旧选区）。
+  //   单线程宿主上命中是同步的，settled() 立刻兑现 —— 探针两边写同一句。
+  get drag() { return drag ? drag.state() : null; },
+  dragSettled() { return drag ? drag.settled() : Promise.resolve(); },
   // 走的是和"点画布"完全相同的路径（改位置 + 呈现），
   //   所以探针拿到的统计和真人操作得到的是一回事。
   setCaret(para, offset) { setCaretAndPresent(para, offset); return this.caret; },

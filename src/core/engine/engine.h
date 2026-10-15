@@ -165,6 +165,14 @@ public:
     void setCaretAtSide(int para, size_t offset, int side);
     void setCaretAtSide(TextPos p, int side) { setCaretAtSide(p.para, p.offset, side); }
     /**
+     * 拖选：把焦点端搬到点击位置，anchor 端不动。
+     *
+     * 与 setCaretAtSide 只差收尾方式：那边两端一起摆到新位置（定位），这边只动 focus。
+     * 按下时宿主先用 setCaretAtSide 定位，于是 anchor 落在按下点；拖动过程中的每一次
+     * 移动都走这里，选区就是从按下点到当前位置那一段。侧别的含义与 setCaretAtSide 相同。
+     */
+    void setFocusAtSide(int para, size_t offset, int side);
+    /**
      * 把光标摆到一个流位置上（绝对）。编辑路径全用它：删除后的落点是删除区间的起点、
      * 插入后是插入区间的终点、Tab 的目标、撤销恢复的位置，它们都已经是流位置。
      */
@@ -723,6 +731,50 @@ private:
      * "用户按的那一下没生效"，与"这一步做不成"不是一回事。
      */
     bool eraseOnTree(TextPos a, TextPos b, const char* label);
+
+    /**
+     * 选区被编辑入口"吃掉"时折算出来的一份删除计划（见 planEraseSelection）。
+     */
+    struct SelectionErase {
+        std::vector<Step> steps;
+        Range before{};
+        FlowPos at = 0;
+        bool blocked = false;
+    };
+    /**
+     * 把当前选区折算成"删掉这一段"的步骤（不提交）。
+     *
+     * 编辑入口的统一前缀：任何编辑在选区非空时都是"先删掉选区，再在原地做这件事"。
+     * 空选区返回空 steps（调用方照原路走）；策略拒绝时置 blocked —— 调用方据此中止整条
+     * 编辑，与"这一下没发生"同一口径，blocked_edits_ 也已经记过一笔。
+     *
+     * 为什么不在这里直接提交：用户在"选中 + 打字"里按的是一下，撤销也该是一下。删除与
+     * 插入合并进同一个事务，撤销一次就回到编辑前的两端。
+     */
+    SelectionErase planEraseSelection();
+    /**
+     * 把删除计划提交成一次事务，并把光标摆到删除区间的起点。
+     */
+    bool commitErase(const SelectionErase& plan, const char* label);
+    /**
+     * 流区间 [from, to) 上的删除步骤（不提交）：区间覆盖到的文本按文本节点切
+     * （makeDeleteTextSteps），整覆盖到的段落标记各发一步 RemoveParaMark。
+     *
+     * 两条构造混在一起从后往前发 —— 每步的坐标是它自己应用那一刻的坐标，而"删右边不会
+     * 移动左边"正是从后往前的全部理由。分两批发（先文本后标记，或反过来）会让后一批的
+     * 坐标过期。区间的总覆盖长度对不上时返回空：宁可整条编辑被拒，也不要删掉半截区间。
+     */
+    std::vector<Step> eraseFlowSteps(FlowPos from, FlowPos to) const;
+    /**
+     * 用一段文本替换当前选区 —— 打字与缩进的共同落点（见实现处的说明）。
+     */
+    bool replaceSelectionWithText(const std::vector<uint32_t>& cps);
+    /**
+     * 段内相对流位置 → 全局流位置（夹到本段跨度内）。setCaretRel 与重编译落基共用 ——
+     * 夹取规则只此一处，两处各写一份就会出现"落基时允许而写入时不允许"这种半截宽度。
+     */
+    FlowPos flowForRel(int para, int rel) const;
+
     /**
      * 落点处应当沿用的字符格式：取紧挨在它左边的那个文本节点的标记与样式引用。
      *
