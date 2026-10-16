@@ -22,6 +22,12 @@ const PORT = Number(opt('port', '9222'));
 const URL_ = opt('url', 'http://127.0.0.1:8781/web/multi.html');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// 缩放的两套口径：门面（zoomLevel / zoomTo / run）与引擎收的是"密度"（设备像素 / 磅，
+//   1 = 72 dpi），界面 #zoom 输入框收的是"倍数"（1 = 100% = 96 dpi）。差一个 4 / 3。
+//   本文件里的 zoom 参数一律是密度，只有往输入框里写值时才换成倍数。
+const ZOOM_BASE = 4 / 3;
+const uiZoom = (density) => density / ZOOM_BASE;
+
 const chk = new Checks('多实例');
 
 async function findTarget() {
@@ -173,12 +179,13 @@ async function main() {
   console.log('\n[P5b] 缩放输入框走真实 change 事件，画布要跟着变');
   // 上面那一条走的是门面调用，绕过了页面的输入框本身。而"缩放不对"这类问题恰好出在
   //   入口上（门面调对了、用户点不动），所以这里补一遍真实事件：改值 + 派发 change。
+  //   输入框那一格是倍数：目标 2.5 是密度，写进输入框要换成 2.5 / (4 / 3) = 1.875。
   const zoomUi = await cdp.eval(
     `const c = ${C};` +
     'const el = c.container.querySelector("#zoom");' +
     'const w = () => Math.round(c.container.querySelector("canvas").getBoundingClientRect().width);' +
     'const at2 = w();' +
-    'el.value = "2.5";' +
+    `el.value = "${uiZoom(2.5)}";` +
     'el.dispatchEvent(new Event("change"));' +
     'return { before: at2, inputValue: el.value };');
   // 异步宿主：等它在页面上真的落地（每轮求值都会顺带排空，这里再等一拍稳态）。
@@ -195,7 +202,7 @@ async function main() {
     'return { zoom: c.zoomLevel, rect: [Math.round(r.width), Math.round(r.height)],' +
     '         geom: [c.geom.pageW, c.geom.pageH], dpr: c.geom.dpr,' +
     '         inputValue: c.container.querySelector("#zoom").value };');
-  chk.check('改输入框之后 C 的 zoomLevel 真的变了（入口通到了宿主）',
+  chk.check('改输入框之后 C 的 zoomLevel 真的变了（入口通到了宿主；框里 1.875 倍 = 2.5 密度）',
             zoomUi2.zoom === 2.5, `zoomLevel=${zoomUi2.zoom}`);
   chk.check('画布显示尺寸等于几何的页宽页高（缩放落到画布上）',
             zoomUi2.rect[0] === Math.round(zoomUi2.geom[0] / zoomUi2.dpr) &&

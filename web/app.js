@@ -81,7 +81,36 @@ const ta = $('ime');
 let mod = null;
 let busy = false;
 let ready = false;
-let currentZoom = 1.5;
+// 缩放在界面那一格上是"倍数"（1 = 100% = Web 标准的 96 dpi，无量纲），引擎收的却是
+//   "密度"（设备像素 / 磅，1 = 72 dpi，有量纲）—— 两者差一个 4 / 3。
+//   96 dpi 对应 96 / 72 = 4 / 3：页宽 round(595.276 x 4 / 3) = 794。
+//   换算只做在界面接缝上（两个输入框、门面的 zoomFactor / zoomToFactor 一对）。
+//   引擎、判据、诊断读数一律继续用密度，别把倍数漏进去。
+const kZoomBase = 4 / 3;
+const engineZoomOf = (factor) => Number(factor) * kZoomBase;
+const uiZoomOf = (density) => density / kZoomBase;
+let currentZoom = kZoomBase;
+
+/**
+ * 把当前缩放按"倍数"回写到输入框与它右边那一格。
+ *
+ * 两个方向上都要过换算：读输入框要乘 kZoomBase（倍数转密度），写输入框要除以它。
+ *   截到 4 位是给输入框的 —— 4 / 3 这种无限小数直接塞进去会拖一长串；那一档差
+ *   0.00003，千像素尺度上不到 0.1 像素，落不进任何容差。
+ * 元素可能不存在（产品页只有舞台与输入层），缺了就跳过，不抛异常。
+ */
+function syncZoomLabel() {
+  const zEl = $('zoom');
+  const zVal = $('zoomVal');
+  const factor = uiZoomOf(currentZoom);
+  if (zEl) zEl.value = String(Number(factor.toFixed(4)));
+  if (zVal) zVal.textContent = String(Number(factor.toFixed(3)));
+}
+// 页度量由宿主传：引擎自带的那份缺省值只服务 native 单测，产品路径一律在这里设。
+// A4 = 595.276 x 841.89 磅（210 x 297 毫米）；页边距 2 厘米 = 2 x 72 / 2.54 磅。
+const kPageWidthPt = 595.276;
+const kPageHeightPt = 841.89;
+const kPageMarginPt = 56.7;
 let lastEdit = null;
 let composing = false;
 let caretOn = true;
@@ -858,9 +887,8 @@ async function boot() {
   if (zoom) {
     zoom.disabled = false;
     zoom.addEventListener('input', () => {
-      currentZoom = Number(zoom.value);
-      const zv = $('zoomVal');
-      if (zv) zv.textContent = currentZoom.toFixed(2).replace(/0$/, '');
+      currentZoom = engineZoomOf(zoom.value);
+      syncZoomLabel();
       mod.setZoom(currentZoom);
       relayoutAndBlit();
     });
@@ -995,7 +1023,12 @@ async function boot() {
     errorSurface.warn('拖选不可用', { detail: 'web/drag_select.js 未加载' });
   }
 
-  currentZoom = zoom ? Number(zoom.value) : currentZoom;
+  currentZoom = zoom ? engineZoomOf(zoom.value) : currentZoom;
+  // 回写一次：让"界面那一格 = 门面的倍数"这条不变量从装载起就成立，而不是靠 HTML 里
+  //   那个 value 恰好等于默认档。换算方向写反了在这里就会露出来。
+  syncZoomLabel();
+  // 页度量要先设再装载：它会让整篇重排，排在装载之前只会排这一次。
+  mod.setPageMetrics(kPageWidthPt, kPageHeightPt, kPageMarginPt);
   mod.setZoom(currentZoom);
   // 先把视口锚点摆成"开头几页"，再装载。顺序反了的话第一次重排会按整篇栅格化 ——
   //   200 段那一份就是 16 页、~450 ms，而其中 13 页马上就会被丢掉。
@@ -1801,17 +1834,16 @@ const facade = {
 
   // 切场景并按 zoom 重排重绘（供探针用；走的是和 UI 完全相同的路径）
   //
+  // 这里的 zoom 是密度（设备像素 / 磅），与引擎和 zoomLevel 同口径 —— 门面不做单位
+  //   换算，按倍数调就用 zoomToFactor。输入框那一格收的才是倍数，写回去要除以 kZoomBase。
+  //
   // 返回值就是"本次全量呈现"的统计 —— 探针要拿它当增量比值的分母。
   //   分母只能是真正的全量，不能取"再 present 一次"的数字：后者本身已经是增量
   //   （帧尺寸没变，只贴了个旧光标），拿它当分母会得出"100%"这种荒谬结论。
   run(id, zoom) {
     if (zoom) {
       currentZoom = Number(zoom);
-      // 缩放输入框是演示页专有的：容器里没有它就只改引擎那一侧，不抛异常。
-      const zEl = $('zoom');
-      const zVal = $('zoomVal');
-      if (zEl) zEl.value = String(zoom);
-      if (zVal) zVal.textContent = currentZoom.toFixed(2).replace(/0$/, '');
+      syncZoomLabel();
       mod.setZoom(currentZoom);
     }
     mod.setScenario(Number(id));
@@ -1819,7 +1851,18 @@ const facade = {
     mod.relayoutAndPaint();
     return settle(JSON.parse(mod.editStatsJson()), { scroll: false });
   },
-  reset(id, zoom) { return this.run(id === undefined ? 6 : id, zoom === undefined ? 1.5 : zoom); },
+  reset(id, zoom) { return this.run(id === undefined ? 6 : id, zoom === undefined ? kZoomBase : zoom); },
+
+  // 按倍数设缩放（界面输入框的入口）。门面其余成员收的都是密度。
+  //
+  // 走的收尾与 run 同一条路（重排 + 重绘），只是不换场景。
+  zoomToFactor(factor) {
+    currentZoom = engineZoomOf(factor);
+    syncZoomLabel();
+    mod.setZoom(currentZoom);
+    relayoutAndBlit();
+    return currentZoom;
+  },
 
   // 直接调引擎（绕开键盘），走和真人编辑相同的上屏步骤。
   //
@@ -2310,7 +2353,10 @@ const facade = {
              pagePx: [mod.pagePxWidth(), mod.pagePxHeight(), mod.pageGapPx()],
              canvases: pageCanvases.size, pooled: canvasPool.length };
   },
+  // 同一件事的两种口径：zoomLevel 是密度（设备像素 / 磅），zoomFactor 是倍数
+  //   （1 = 100% = 96 dpi）。界面上那一格与 zoomFactor 一致；引擎与判据读 zoomLevel。
   get zoomLevel() { return currentZoom; },
+  get zoomFactor() { return uiZoomOf(currentZoom); },
   get scenario() {
     const el = $('scenario');
     return el ? Number(el.value) : DEFAULT_SCENARIO;

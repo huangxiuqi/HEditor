@@ -27,7 +27,14 @@ let fontMs = 0;
 let fontBytes = 0;
 let fontList = [];
 let fontMode = 'full';
-let zoomLevel = 1.5;   // markCheck 要用：括号左缘的像素位置随缩放走
+// 与单线程宿主同一口径（理由见 app.js 的同名声明）：缩放 1 倍 = 96 dpi = 4 / 3。
+const kZoomBase = 4 / 3;
+let zoomLevel = kZoomBase;   // markCheck 要用：括号左缘的像素位置随缩放走
+// 页度量由宿主传，与单线程宿主同一组值（常量与理由见 app.js 的同名声明）。
+// A4 = 595.276 x 841.89 磅；页边距 2 厘米 = 2 x 72 / 2.54 磅。
+const kPageWidthPt = 595.276;
+const kPageHeightPt = 841.89;
+const kPageMarginPt = 56.7;
 
 /** 页号 -> 该页的离屏上下文。宿主要走掉的页会发 dropPage。 */
 const pageCtx = new Map();
@@ -473,6 +480,8 @@ async function boot(m) {
     zeroCopyFrame: mod.frameRgba().buffer === mod.HEAPU8.buffer,
   });
   try {
+    // 页度量要先设再装载：它会让整篇重排，排在装载之前只会排这一次。
+    mod.setPageMetrics(kPageWidthPt, kPageHeightPt, kPageMarginPt);
     loadScenario(m.scenario === undefined ? 6 : m.scenario, m.zoom);
     // 首帧的几何先报出去，宿主才能按窗口把每页画布建出来并交给这一侧。
     //   这时候还没有画布，所以只推几何；画布到一张贴一张（见 pageCanvas 分支）。
@@ -489,7 +498,7 @@ const WRITE = {
   /** 什么都不改，只收尾。给宿主的 present() 用 —— 它就是"重画并回推"。 */
   present: () => {},
   scenario: (a) => loadScenario(a.id, a.zoom),
-  reset: (a) => loadScenario(a.id === undefined ? 6 : a.id, a.zoom === undefined ? 1.5 : a.zoom),
+  reset: (a) => loadScenario(a.id === undefined ? 6 : a.id, a.zoom === undefined ? kZoomBase : a.zoom),
   zoom: (a) => {
     mod.setZoom(a.zoom);
     zoomLevel = a.zoom;

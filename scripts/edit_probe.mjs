@@ -1737,7 +1737,7 @@ async function main() {
       const cv = window.__heditor.canvas, r = cv.getBoundingClientRect();
       const c0 = window.__heditor.controls.items[0].rects[0];
       return { left: r.left, top: r.top, sx: r.width / cv.width, sy: r.height / cv.height,
-               zoom: Number(document.getElementById('zoom').value), y: c0.y + c0.h / 2 };`);
+               zoom: window.__heditor.zoomLevel, y: c0.y + c0.h / 2 };`);
     const click = async (xPt, yPt) => {
       const x = geo.left + xPt * geo.zoom * geo.sx;
       const y = geo.top + yPt * geo.zoom * geo.sy;
@@ -1847,7 +1847,9 @@ async function main() {
     //  括号的排布只存在于排版结果里（区间数据看不出来：][][] 与 [[ ]] 的区间
     //  一模一样），所以用 __heditor.bracketSlots 把槽清单读出来核对：每一枚括号的
     //  偏移、开闭、归属、所在行、行内 x 都在里面。
-    const zoomNow = async () => c.eval('return Number(document.getElementById("zoom").value);');
+    // 换算因子读门面的 zoomLevel（密度：设备像素 / 磅）。不要读 #zoom 输入框 ——
+    //   那一格是倍数（1 = 100% = 96 dpi），两者差 4 / 3，读错就是整片点不准。
+    const zoomNow = async () => c.eval('return window.__heditor.zoomLevel;');
     const geo = async () => c.eval(`
       const cv = window.__heditor.canvas, r = cv.getBoundingClientRect();
       return { left: r.left, top: r.top, sx: r.width / cv.width, sy: r.height / cv.height };`);
@@ -1894,7 +1896,7 @@ async function main() {
         await window.__heditor.setCaretAt(0, ${cp}, ${ci});
         const q = window.__heditor.caret;
         return JSON.stringify({ x: q.x, w: q.w,
-                                z: Number(document.getElementById('zoom').value) });`));
+                                z: window.__heditor.zoomLevel });`));
       return r.x / r.z + (r.w / r.z) * 0.5;
     };
     // 点"某字段开括号的内侧"那一格：落在括号与它后面那个字之间、靠右的一小段。
@@ -3412,7 +3414,7 @@ async function main() {
       const s = document.getElementById('stage');
       return { top: s.scrollTop, max: s.scrollHeight - s.clientHeight,
                scrollH: s.scrollHeight, clientH: s.clientHeight,
-               zoom: Number(document.getElementById('zoom').value),
+               zoom: window.__heditor.zoomLevel,
                sel: window.__heditor.selection,
                drag: window.__heditor.drag };`);
 

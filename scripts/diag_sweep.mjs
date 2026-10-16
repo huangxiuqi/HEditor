@@ -34,10 +34,12 @@ async function main() {
   await conn.eval('return window.__heditor.loadFormSample(2);');
   await conn.eval('return window.__heditor.stopBlink();');
 
+  // 换算因子取 zoomLive（门面报的密度：设备像素 / 磅）。zoomUI 是 #zoom 输入框那一格，
+  //   按倍数记（1 = 100% = 96 dpi），两者差一个 4 / 3 —— 拿它算坐标会整片偏。
   const env = await conn.eval(`
     const cv = window.__heditor.canvas, r = cv.getBoundingClientRect();
     return { left: r.left, top: r.top, w: r.width, h: r.height, cw: cv.width, ch: cv.height,
-             zoomUI: Number(document.getElementById('zoom').value),
+             zoomInput: Number(document.getElementById('zoom').value),
              zoomLive: window.__heditor.zoomLevel };`);
   console.log('环境：', JSON.stringify(env));
 
@@ -48,9 +50,9 @@ async function main() {
     'return Math.min(...window.__heditor.controls.items.map(i => i.rects[0].x));');
   const hi = await conn.eval(
     'return Math.max(...window.__heditor.controls.items.map(i => i.rects[0].x + i.rects[0].w));');
-  console.log(`y=${y.toFixed(2)}  lo=${lo.toFixed(2)}  hi=${hi.toFixed(2)}  zoom=${env.zoomUI}`);
+  console.log(`y=${y.toFixed(2)}  lo=${lo.toFixed(2)}  hi=${hi.toFixed(2)}  zoom=${env.zoomLive}`);
 
-  const z = env.zoomUI;
+  const z = env.zoomLive;
   const rows = [];
   const reload = async () => {
     await conn.eval('return window.__heditor.loadFormSample(2);');

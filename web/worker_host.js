@@ -126,7 +126,12 @@ let composing = false;
 let blinkTimer = null;
 let blinkAuto = false;   // 闪烁只在首帧自动起一次，别把 stopBlink 又拉起来
 let caretOn = true;
-let zoom = 1.5;
+// 与两宿主同一口径（理由见 app.js 的同名声明）：缩放 1 倍 = 96 dpi = 4 / 3。
+//   界面输入框收"倍数"，引擎与门面收"密度"，换算只在 syncZoomInput 与 zoomToFactor 两处做。
+const kZoomBase = 4 / 3;
+const engineZoomOf = (factor) => Number(factor) * kZoomBase;
+const uiZoomOf = (density) => density / kZoomBase;
+let zoom = kZoomBase;
 let scenario = 6;
 let mode = 0;
 let lastPageX = 0;   // 页在视口里横向居中的偏移（设备像素）
@@ -135,16 +140,21 @@ let lastPointerId = null;   // 最近一次 pointerdown 的指针 id（按下时
 let capturedId = null;      // 已经捕获在容器上的指针 id（下次按下时先放掉，见 pointerdown）
 
 /**
- * 把当前的缩放回写到页面上的 #zoom 输入框。
+ * 把当前的缩放按"倍数"回写到页面上的 #zoom 输入框。
  *
- * 不是为了好看：探针（以及任何外部脚本）算点击坐标时要读这个输入框的 zoom 去把帧磅
- *   换成客户端像素。单线程宿主的 run() 会写它（`$('zoom').value = String(zoom)`），
- *   搬进 Worker 之后这条回写没了 —— 于是引擎按 1.0 排版、探针按输入框里的 1.5 算坐标，
- *   点击整片落到别处（错得整整齐齐，最不像坐标问题）。
+ * 输入框那一格是倍数（1 = 100% = 96 dpi），引擎与门面收的是密度（设备像素 / 磅），
+ *   所以写进去之前要除以 kZoomBase。要拿换算因子请读门面的 zoomLevel —— 输入框里
+ *   那个数不是它。
+ *
+ * 这一笔回写本身是有来历的：单线程宿主的 run() 会写输入框，搬进 Worker 之后这条回写
+ *   一度没了 —— 于是引擎按 1.0 排版、外部脚本按输入框里的旧值算坐标，点击整片落到
+ *   别处（错得整整齐齐，最不像坐标问题）。所以每次改 zoom 都要同步它。
+ *   4 / 3 那样的无限小数截到 4 位再写，免得住 number 输入框里塞一串 1.3333333333333333
+ *   （差 0.00003，千像素尺度上不到 0.1 像素，落不进任何容差）。
  */
 function syncZoomInput() {
   const el = $('zoom');
-  if (el) el.value = String(zoom);
+  if (el) el.value = String(Number(uiZoomOf(zoom).toFixed(4)));
 }
 
 const now = () => performance.now();
@@ -908,7 +918,7 @@ const CMD = {
   },
   reset: (id, z) => {
     scenario = id === undefined ? 6 : Number(id);
-    zoom = z === undefined ? 1.5 : Number(z);
+    zoom = z === undefined ? kZoomBase : Number(z);
     syncZoomInput();
     return ['reset', { id: scenario, zoom }];
   },
@@ -916,6 +926,8 @@ const CMD = {
   setFontCacheConfig: (blockSize, blocks) => ['setFontCacheConfig', { blockSize, blocks }],
   setViewportAnchor: (first, count) => ['viewport', { first, count }],
   zoomTo: (z) => { zoom = Number(z); syncZoomInput(); return ['zoom', { zoom }]; },
+  // 按倍数设缩放（界面输入框的入口）。门面其余成员收的都是密度。
+  zoomToFactor: (f) => { zoom = engineZoomOf(f); syncZoomInput(); return ['zoom', { zoom }]; },
   // 只改引擎里的相位，**不呈现** —— 与单线程宿主门面的 showCaret 同语义
   //   （那边就是 mod.showCaret(!!on) 一行；探针常在这之后自己调 present()）。
   showCaret: (on) => ['phase', { on: !!on }],
@@ -1175,7 +1187,10 @@ Object.defineProperties(host, {
       url: location.href,
     }),
   },
+  // 同一件事的两种口径：zoomLevel 是密度（设备像素 / 磅），zoomFactor 是倍数
+  //   （1 = 100% = 96 dpi）。界面上那一格与 zoomFactor 一致；引擎与判据读 zoomLevel。
   zoomLevel: { get: () => zoom },
+  zoomFactor: { get: () => uiZoomOf(zoom) },
   scenario: { get: () => scenario },
   editMode: { get: () => mode },
   edit: { get: () => mirror.stats },
@@ -1414,8 +1429,11 @@ async function boot() {
     t: 'boot', glue: glueUrl() + BUST, bust: BUST, exportName: 'CreateHEditor',
     fonts: FONTS.map((f) => ({ ...f, path: new URL(f.path, base).pathname })),
     dpr: DPR, viewW: vs.viewW, viewH: vs.viewH,
-    scenario: 6, zoom: 1.5, fontMode: 'full',
+    scenario: 6, zoom: kZoomBase, fontMode: 'full',
   });
+  // 回写一次：让"界面那一格 = 门面的倍数"这条不变量从启动起就成立，而不是靠 HTML 里
+  //   那个 value 恰好等于默认档。换算方向写反了在这里就会露出来。
+  syncZoomInput();
 
   ta.addEventListener('keydown', onKeyDown);
   ta.addEventListener('compositionstart', () => {

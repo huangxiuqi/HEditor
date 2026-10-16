@@ -39,7 +39,7 @@ const box = () => run(`
            stageTop: sr.top, stageBottom: sr.bottom, stageLeft: sr.left, stageRight: sr.right,
            proxyTop: r.top, proxyLeft: r.left, proxyW: r.width, proxyH: r.height,
            cvW: cv.width, cvH: cv.height, dpr: window.devicePixelRatio,
-           zoom: Number((document.getElementById('zoom') || {}).value) || 1.5 };`);
+           zoom: window.__heditor.zoomLevel };`);
 
 console.log('--- 装载长文档 ---');
 await run('await window.__heditor.loadStressDocument(200, 20); return true;');

@@ -146,8 +146,12 @@
 <div id="bar">
   <select id="scenario" disabled></select>
   <label class="zoom">zoom
-    <input id="zoom" type="range" min="1" max="3" step="0.25" value="1.5" disabled>
-    <span id="zoomVal">1.5</span>
+    <!-- 这一格是倍数：1 = 100% = Web 标准的 96 dpi（引擎那一侧收的是"设备像素 / 磅"，
+         96 dpi 对应 4 / 3，换算在 app.js 的接缝上做）。
+         步长取 1 / 16 的倍数，使引擎那一侧的格点仍是 1 / 12 磅 —— 96 dpi 那一档
+         （倍数 1）正好落在格点上。 -->
+    <input id="zoom" type="range" min="0.75" max="2.25" step="0.0625" value="1" disabled>
+    <span id="zoomVal">1</span>
   </label>
   <button id="paint" class="primary" disabled>重绘</button>
   <button id="focus" disabled>聚焦输入</button>

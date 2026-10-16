@@ -44,7 +44,8 @@ async function main() {
     await conn.eval(`return window.__heditor.loadFormSample(${v});`);
     await conn.eval('return window.__heditor.stopBlink();');
   };
-  const zoom = async () => conn.eval('return Number(document.getElementById("zoom").value);');
+  // 换算因子读门面（密度：设备像素 / 磅）。#zoom 那一格是倍数，差一个 4 / 3。
+  const zoom = async () => conn.eval('return window.__heditor.zoomLevel;');
   const state = async () => JSON.parse(await conn.eval(`
     const c = window.__heditor.caret;
     const st = window.__heditor.editStats;

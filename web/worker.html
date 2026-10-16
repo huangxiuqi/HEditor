@@ -54,7 +54,8 @@
       <option value="8">真病历样例</option>
     </select>
     <label>缩放</label>
-    <input id="zoom" type="number" step="0.25" min="0.5" max="4" value="1.5" style="width:64px">
+    <!-- 倍数：1 = 100% = 96 dpi。引擎收的是"设备像素 / 磅"，换算在 zoomToFactor 里做。 -->
+    <input id="zoom" type="number" step="0.0625" min="0.375" max="3" value="1" style="width:96px">
     <label>光标</label>
     <input id="caretColor" type="color">
     <input id="caretWidth" type="number" min="0.4" max="8" step="0.2" style="width:64px"
@@ -95,9 +96,10 @@
       const q = (id) => document.getElementById(id);
       q('scenario').addEventListener('change', (e) => {
         const id = Number(e.target.value);
-        if (id === 8) h().loadMedicalSample(1); else h().run(id, Number(q('zoom').value));
+        // 缩放从门面读（密度），不从输入框读 —— 输入框那一格是倍数，两者差 4 / 3。
+        if (id === 8) h().loadMedicalSample(1); else h().run(id, h().zoomLevel);
       });
-      q('zoom').addEventListener('change', (e) => h().zoomTo(Number(e.target.value)));
+      q('zoom').addEventListener('change', (e) => h().zoomToFactor(Number(e.target.value)));
       // 光标与选区的样式。初值从推过来的 state 里读（默认值只在 EngineConfig 里有一份），
       //   读到之前控件的值是空的，所以那时按下的 input 一律丢掉 —— 否则第一次触摸会把
       //   颜色写成取色器的空值黑。这条路上每一拍只有一次 present：样式参数不作废底图，

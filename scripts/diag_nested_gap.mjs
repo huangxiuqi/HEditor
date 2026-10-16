@@ -46,7 +46,7 @@ async function main() {
       lo = Math.min(lo, q.x); hi = Math.max(hi, q.x + q.w); y = q.y + q.h / 2;
     }
     return { left: r.left, top: r.top, sx: r.width / cv.width, sy: r.height / cv.height,
-             zoom: Number(document.getElementById('zoom').value), lo, hi, y };`);
+             zoom: window.__heditor.zoomLevel, lo, hi, y };`);
 
   const clickPt = async (g, xPt, yPt) => {
     const p = { x: g.left + xPt * g.zoom * g.sx, y: g.top + yPt * g.zoom * g.sy,

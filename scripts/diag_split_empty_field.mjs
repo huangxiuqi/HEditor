@@ -55,7 +55,8 @@ async function main() {
   const slots = async () => JSON.parse(await conn.eval(
     'return JSON.stringify(window.__heditor.bracketSlots || []);'));
   const fmtSlots = (ss) => ss.map((s) => `${s.cp}${s.side === 1 ? '[' : ']'}`).join(' ');
-  const zoom = async () => conn.eval('return Number(document.getElementById("zoom").value);');
+  // 换算因子读门面（密度：设备像素 / 磅）。#zoom 那一格是倍数，差一个 4 / 3。
+  const zoom = async () => conn.eval('return window.__heditor.zoomLevel;');
   // 几何：光标 x 是帧像素，括号槽 x 是磅 —— 换算到同一坐标系再比，
   //   才能回答"光标画在哪一枚括号的哪一侧"。
   const geom = async () => {

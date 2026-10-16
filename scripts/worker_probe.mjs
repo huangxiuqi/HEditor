@@ -26,6 +26,13 @@ const opt = (n, d) => {
 const PORT = Number(opt('port', '9222'));
 const URL_ = opt('url', 'http://localhost:8781/web/worker.html');
 
+// 缩放的两套口径：门面（zoomLevel / zoomTo / run）与引擎收的是"密度"（设备像素 / 磅，
+//   1 = 72 dpi），界面 #zoom 输入框收的是"倍数"（1 = 100% = 96 dpi）。差一个 4 / 3。
+//   本文件里的 zoom 参数一律是密度，只有往输入框里写值时才换成倍数 —— 混用会在千像素
+//   尺度上整片偏，而且只在倍数正好等于密度时看不出来。
+const ZOOM_BASE = 4 / 3;
+const uiZoom = (density) => density / ZOOM_BASE;
+
 const say = (s) => process.stdout.write(s + '\n');
 const j = (v) => JSON.stringify(v);
 const body = (b) => 'return (async () => {\n' + b + '\n})();';
@@ -474,10 +481,11 @@ async function main() {
   //   显示新倍率的内容，表现是"缩放之后整页偏小兼发虚"。判据取两条：画布的矩形宽高必须
   //   等于几何里的页宽页高（这才是"缩放落到画布上"）；同一光标位置的帧内坐标必须按倍率
   //   成比例（这才是"缩放真的重排了"）。
+  // 传入的 z 是密度，写进输入框要换成倍数；断言与几何仍是密度口径。
   const zoomGeom = async (z) => {
     await c.eval(
       'const el = document.getElementById("zoom");' +
-      'el.value = String(' + z + ');' +
+      'el.value = String(' + uiZoom(z) + ');' +
       'el.dispatchEvent(new Event("change"));' +
       'return true;');
     await c.waitFor(
@@ -502,7 +510,7 @@ async function main() {
   };
   const z15 = await zoomGeom(1.5);
   const z20 = await zoomGeom(2);
-  chk.check('改 #zoom 输入框（真实 change 事件）之后 zoomLevel 跟着变',
+  chk.check('改 #zoom 输入框（真实 change 事件）之后 zoomLevel 跟着变（输入框写倍数，回读是密度）',
             z15.zoom === 1.5 && z20.zoom === 2, `${z15.zoom} → ${z20.zoom}`);
   chk.check('画布矩形宽高等于几何的页宽页高（1.5 倍）',
             z15.rect[0] === Math.round(z15.geom[0] / z15.dpr) &&

@@ -97,8 +97,9 @@
     const opts = SCEN.map(([v, l]) => `<option value="${v}">${l}</option>`).join('');
     const toolbar = `<div class="bar"><span class="tag">${tag}</span>` +
       `<select id="scenario">${opts}</select>` +
-      `<label>zoom <input id="zoom" type="number" step="0.25" min="0.5" max="3" ` +
-      `value="1.5" style="width:56px"></label>` +
+      // 缩放这一格是倍数（1 = 100% = 96 dpi）：1.125 倍 = 引擎的 1.5，这批用例的基准档。
+      `<label>zoom <input id="zoom" type="number" step="0.0625" min="0.375" max="2.25" ` +
+      `value="1.125" style="width:56px"></label>` +
       `<span id="status">准备中…</span></div>`;
     const bar = kind === 'worker' ? toolbar + `<div class="msg" id="bar">启动中…</div>` : toolbar;
     // 两种宿主的输入层挂法不同，标记也就不同：单线程那一侧按"滚动位移加在坐标上"摆
@@ -125,9 +126,10 @@
       const zm = el.querySelector('#zoom');
       sc.addEventListener('change', (e) => {
         const id = Number(e.target.value);
-        if (id === 8) inst.loadMedicalSample(1); else inst.run(id, Number(zm.value));
+        // 缩放从门面读（密度），不从输入框读 —— 输入框那一格是倍数，两者差 4 / 3。
+        if (id === 8) inst.loadMedicalSample(1); else inst.run(id, inst.zoomLevel);
       });
-      zm.addEventListener('change', (e) => inst.zoomTo(Number(e.target.value)));
+      zm.addEventListener('change', (e) => inst.zoomToFactor(Number(e.target.value)));
     }
     editors[c.id] = inst;
   }
