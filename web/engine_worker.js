@@ -115,8 +115,13 @@ function blitPage(p) {
  * only 为空 = 窗口里每页都贴（窗口换了、或有新页的画布刚到，必须整窗来一遍）；
  *   only 给页号清单 = 只贴这几页 —— 编辑时用引擎报的脏页清单。一页一贴正是
  *   "一页一张画布"换来的东西：改一个字只碰它所在的那一页。
+ *
+ * 计时与页数随状态回推（见 sendState 的 blitMs）：它是"往返减去渲染"那一段里的一刀。
  */
+let blitLastMs = 0;
+let blitLastPages = 0;
 function blitPages(only) {
+  const tBlit = performance.now();
   const first = mod.windowFirstPage();
   const count = mod.windowPageCount();
   let n = 0;
@@ -124,6 +129,8 @@ function blitPages(only) {
     if (only && !only.includes(p)) continue;
     if (blitPage(p)) ++n;
   }
+  blitLastMs = performance.now() - tBlit;
+  blitLastPages = n;
   return n;
 }
 
@@ -167,8 +174,6 @@ function geom(st) {
  *   就一个字都不动。没有这一层的话，滚动每跨一条页边界就整帧重光栅（一页约 13 ms）；
  *   有了它，同一页内的滚动连一次重贴都不需要 —— 浏览器把画布搬走就行。
  */
-const MAX_WINDOW = 3;
-
 /** 看得见的那几页（设备像素下的滚动位置与视口高度）。 */
 function visibleRange(st) {
   const total = Math.max(1, Number(st.totalPages) || 1);
@@ -177,6 +182,24 @@ function visibleRange(st) {
   const first = clamp(Math.floor(scrollY / step), 0, total - 1);
   const last = clamp(Math.floor((scrollY + viewH - 1) / step), first, total - 1);
   return { first, last };
+}
+
+/**
+ * 窗口最多装几页：视口装得下的页数，再加 4 页余量。与单线程宿主的 maxWindowPages
+ *   同一口径（那条注释给了实测数字：换窗成本正比于窗口长度而非位移，余量 8 时一跳要
+ *   94~286 ms，余量 4 时 45 ms 上下；余量大了反而把落后从 3 页推到 8~28 页）。
+ *   两道封顶同理：页数 8、帧像素 24 Mpx。
+ */
+const kWindowMarginPages = 4;
+const kWindowMaxPages = 8;
+const kWindowMaxPixels = 24 * 1024 * 1024;
+
+function maxWindowPages() {
+  const step = mod.pagePxHeight() + mod.pageGapPx();
+  const vis = Math.ceil(viewH / step);
+  const byPixels = Math.floor(kWindowMaxPixels /
+                               Math.max(1, mod.pagePxWidth() * mod.pagePxHeight()));
+  return Math.max(vis, Math.min(kWindowMaxPages, byPixels, vis + kWindowMarginPages));
 }
 
 /**
@@ -189,7 +212,7 @@ function desiredWindow(st) {
   let lo = vis.first;
   let hi = vis.last;
   const cp = Number(st.caretPage);
-  if (MAX_WINDOW - (hi - lo + 1) > 0 && cp >= 0 && cp < total) {
+  if (maxWindowPages() - (hi - lo + 1) > 0 && cp >= 0 && cp < total) {
     if (cp === lo - 1) lo = cp;
     else if (cp === hi + 1) hi = cp;
   }
@@ -201,13 +224,23 @@ function desiredWindow(st) {
 }
 
 /**
- * 要挪窗口时挪到哪：以"必须装下的那几页"为中心，尽量开满 MAX_WINDOW 页。
- *   与单线程宿主的 targetWindow 同一口径 —— 只开"必须的那几页"会让每滚一页都整窗重光栅
- *   （那边注释里有实测数字：留余量之后一页滚动只要 1 ms，不留则一页 10~30 ms）。
+ * 换窗的提前量（页）与滚动方向。与单线程宿主的同名常量同一口径 ——
+ *   那边解释了为什么余量要偏向滚动方向、以及"贴到窗口边缘才换窗"为什么会闪白
+ *   （换窗那一拍 20~45 ms，合成器在这期间继续往前滚，每秒 80 页就是 4~5 页）。
  */
-function targetWindow(req, total) {
-  const count = Math.max(req.count, Math.min(MAX_WINDOW, total));
-  let first = req.first - Math.floor((count - req.count) / 2);
+const kWindowLookaheadPages = 2;
+let scrollDir = 1;
+
+/**
+ * 要挪窗口时挪到哪：把多出来的页放在滚动方向上。与单线程宿主的 targetWindow 同一口径
+ *   —— 只开"必须的那几页"会让每滚一页都整窗重光栅（那边注释里有实测数字：留余量之后
+ *   一页滚动只要 1 ms，不留则一页 10~30 ms）。
+ */
+function targetWindow(req, total, cap) {
+  const count = Math.max(req.count, Math.min(cap || 3, total));
+  const spare = count - req.count;
+  const behind = scrollDir < 0 ? Math.max(0, spare - 1) : 1;
+  let first = req.first - Math.min(behind, spare);
   if (first + count > total) first = total - count;
   if (first < 0) first = 0;
   return { first, count: Math.max(1, Math.min(count, total)) };
@@ -216,18 +249,25 @@ function targetWindow(req, total) {
 function retarget(st) {
   const total = Math.max(1, Number(st.totalPages) || 1);
   const req = desiredWindow(st);
+  const look = kWindowLookaheadPages;
+  // 要求先夹到文档范围内：第 0 页往上、最后一页往下都没有"那一页"可留，
+  //   不夹的话 needFirst 会是 -1 —— 那是个永远满足不了的判据（窗口不可能从 -1 页起），
+  //   于是滞回恒判"盖不住"，每一拍都白换一次窗。
+  const needFirst = Math.max(0, req.first - (scrollDir < 0 ? look : 0));
+  const needLast = Math.min(total - 1,
+                            req.first + req.count - 1 + (scrollDir > 0 ? look : 0));
   const cur = lastAnchor.split(':').map(Number);
-  // 滞回：现有窗口只要盖得住"必须装下的那几页"就不动。判据与单线程宿主的 applyWindow
-  //   逐条相同 —— 特别是不许再加"现有窗口不能超过总页数"那一条：装载时会先把窗口钉成
-  //   (0, MAX_WINDOW) 再排版，而单页文档的总页数是 1 ⇒ 多那一条会把"钉好的窗口"判成
-  //   换窗，于是全量重排之外再 present 一次（那次只重画一个光标），首次全量那笔账被冲掉。
-  //   判据取"要求"而不是"目标窗口"：目标带余量还随可见页挪，拿它当判据等于要求窗口
-  //   永远精确居中，一滚就动、滞回形同虚设。
+  // 滞回：现有窗口只要盖得住"要求 + 滚动方向上 1 页提前量"就不动。判据与单线程宿主的
+  //   applyWindow 逐条相同 —— 特别是不许再加"现有窗口不能超过总页数"那一条：装载时会
+  //   先把窗口钉成 (0, 上限) 再排版，而单页文档的总页数是 1 ⇒ 多那一条会把"钉好的窗口"
+  //   判成换窗，于是全量重排之外再 present 一次（那次只重画一个光标），首次全量那笔账
+  //   被冲掉。判据取"要求"（加提前量）而不是"目标窗口"：目标带余量还随可见页挪，
+  //   拿它当判据等于要求窗口永远精确居中，一滚就动、滞回形同虚设。
   if (cur.length === 2 && Number.isFinite(cur[0]) && Number.isFinite(cur[1]) &&
-      cur[0] <= req.first && req.first + req.count <= cur[0] + cur[1]) {
+      cur[0] <= needFirst && needLast <= cur[0] + cur[1] - 1) {
     return false;   // 现有窗口还盖得住
   }
-  const w = targetWindow(req, total);
+  const w = targetWindow(req, total, maxWindowPages());
   const key = w.first + ':' + w.count;
   if (key === lastAnchor) return false;
   mod.setViewportAnchor(w.first, w.count);
@@ -279,11 +319,32 @@ function render(opName) {
   return st;
 }
 
-function sendState(ts, label, stats, changed) {
+/**
+ * 回话的打包成本（构造那份状态对象 + 结构化克隆），随每一份状态带回宿主。
+ *
+ * 它是"往返里没算进 work 的那一段"里最容易被忽略的一块：work 只从消息进来到
+ *   present/blit 结束为止，而一份状态里有整段文本、控件、选区、光标报告、排版账，
+ *   构造它们与克隆它们都在这之后。收与发都在 Worker 这边，所以量在这里最准。
+ */
+let packSum = 0, packMax = 0, packN = 0;
+const packAvg = () => (packN ? packSum / packN : 0);
+
+function sendState(ts, label, stats, changed, workMs) {
+  const tPack = performance.now();
   post({
     t: 'state', ts: ts || 0, label: label || '',
     stats, geom: geom(stats),
     scrollReset,
+    // 这一下在 Worker 里花了多少毫秒。只有视口那条路会填；0 = 与视口无关的一份状态
+    //   （编辑、装载、画布到达）。宿主拿它和往返比（见 host.viewDiag）。
+    workMs: workMs || 0,
+    // 打包那一段（构造 + 克隆）的近期均值与峰值。宿主只读不判 —— 它只为把
+    //   "往返减 work"那段缺口拆成两半，好知道时间花在打包上还是花在路上。
+    packAvgMs: packAvg(), packMaxMs: packMax,
+    // 这一拍重贴了几页画布、花了多少毫秒。挪窗时贴的是全窗，而真正需要新像素的只有
+    //   新露出来那一页 —— 其余页的画布在文档流里位置没动、像素本来就是对的。这两数
+    //   相减就是"白贴"的量，宿主只读不判。
+    blitMs: blitLastMs, blitPages: blitLastPages,
     // 这一下到底有没有真的改动。宿主门面的契约是"没改 => 返回 null"（对照单线程宿主
     //   app.js 里 `if (!mod.X()) return null; return this.present();`），
     //   引擎那一步的返回值就是它，必须一路带到主线程。
@@ -314,6 +375,10 @@ function sendState(ts, label, stats, changed) {
     caretStyle: JSON.parse(mod.caretStyleJson()),
     selectionStyle: JSON.parse(mod.selectionStyleJson()),
   });
+  const pack = performance.now() - tPack;
+  packSum += pack;
+  ++packN;
+  if (pack > packMax) packMax = pack;
   scrollReset = false;   // 一次性信号：随这一份状态送出去就清掉
 }
 
@@ -343,8 +408,9 @@ function paintFull() {
   //   事件、再发一条视口消息回来 —— 与正在滚动的用户（或外部脚本）来回打架，
   //   窗口跟着反复变、画布反复建与丢。实测症状：跨页滚动后某一页始终没有画布。
   scrollReset = true;
-  mod.setViewportAnchor(0, MAX_WINDOW);
-  lastAnchor = '0:' + MAX_WINDOW;
+  const n = maxWindowPages();
+  mod.setViewportAnchor(0, n);
+  lastAnchor = '0:' + n;
   mod.relayoutAndPaint();
 }
 
@@ -586,6 +652,7 @@ const READ = {
   controls: () => JSON.parse(mod.controlsJson()),
   bracketSlots: () => JSON.parse(mod.bracketSlotsJson()).slots,
   blockedEdits: () => mod.blockedEdits(),
+  prewarmPage: (a) => mod.prewarmPageGlyphs(a.page | 0),
   dirtyPages: () => JSON.parse(mod.dirtyPagesJson()),
   editMode: () => mod.editMode(),
   bracketScope: () => mod.bracketScope(),
@@ -706,6 +773,41 @@ const READ = {
   },
 };
 
+/**
+ * 每轮换窗之后往前预热一页的字形，且要等 90 ms 没有新的视口消息才动手。
+ *
+ * 为什么要预热：换窗那一拍要重新光栅新露出来的那几页，而冷字形占那一拍的一大半 ——
+ *   同一条路上同一页量到：冷的 14.6 µs·字形、整拍 44.5 ms；预热带过之后 7.0 µs、25.7 ms。
+ * 为什么要限量成"一页 + 静下来 90 ms 才跑"：预热是 Worker 这条唯一线程上的活，
+ *   成串地跑会把视口消息、编辑命令与宿主的查询全排在后面 —— 实测探针的求值直接超时。
+ *   连续快滚时它几乎不跑（那时每一拍都该留给滚动），滚动一停就把下一页先烘上。
+ */
+const PREFETCH_PAGES = 1;
+const PREFETCH_DELAY_MS = 90;
+let pfTimer = 0;
+let pfNext = -1;
+let pfLeft = 0;
+let pfDir = 1;
+
+function schedulePrewarm(dir) {
+  if (!mod) return;
+  pfDir = dir < 0 ? -1 : 1;
+  pfNext = pfDir > 0 ? mod.windowFirstPage() + mod.windowPageCount() : mod.windowFirstPage() - 1;
+  pfLeft = PREFETCH_PAGES;
+  if (pfTimer) clearTimeout(pfTimer);
+  pfTimer = setTimeout(pumpPrewarm, PREFETCH_DELAY_MS);
+}
+
+function pumpPrewarm() {
+  pfTimer = 0;
+  if (!mod || pfLeft <= 0) return;
+  const total = Math.max(1, JSON.parse(mod.editStatsJson()).totalPages);
+  if (pfNext < 0 || pfNext >= total) return;
+  mod.prewarmPageGlyphs(pfNext);
+  pfNext += pfDir;
+  --pfLeft;
+}
+
 async function handle(m) {
   try {
     if (m.t === 'boot') return void await boot(m);
@@ -722,17 +824,25 @@ async function handle(m) {
       return void post({ t: 'ack', ts: m.ts });
     }
     if (m.t === 'view') {
+      // 自报这一下花了多少毫秒。宿主拿它和"发出→收到回话"的往返比：差值是排队等待，
+      //   近 0 说明队列是空的（慢是因为这一下真的贵），差得远说明 Worker 在补课。
+      const tWork = performance.now();
+      const prevScrollY = scrollY;
       scrollY = Math.max(0, m.scrollY || 0);
       viewW = m.viewW || viewW;
       viewH = m.viewH || viewH;
+      // 方向只用来决定余量放前面还是后面（见 targetWindow），得在 retarget 之前定下来。
+      if (scrollY !== prevScrollY) scrollDir = scrollY > prevScrollY ? 1 : -1;
       // 窗口没变就**什么都不做**：画布摆在文档流里，浏览器已经把像素搬走了。
       //   这一条是"滚动不花引擎的钱"的落点 —— 只回一个 ack，不重贴、不推统计。
       if (!retarget(JSON.parse(mod.editStatsJson()))) {
-        return void post({ t: 'ack', ts: m.ts });
+        return void post({ t: 'ack', ts: m.ts, workMs: performance.now() - tWork });
       }
       mod.present();
       blitPages(null);
-      return void sendState(m.ts, 'view', JSON.parse(mod.editStatsJson()));
+      schedulePrewarm(scrollY - prevScrollY);
+      return void sendState(m.ts, 'view', JSON.parse(mod.editStatsJson()), undefined,
+                            performance.now() - tWork);
     }
     if (m.t === 'do') {
       // 静默档先查：它只改引擎状态，什么都不回推（对照单线程宿主的 stopBlink/showCaret）。
@@ -763,6 +873,10 @@ async function handle(m) {
     throw new Error('未知消息类型 ' + m.t);
   } catch (e) {
     if (m.t === 'ask') post({ t: 'reply', id: m.id, error: String((e && e.stack) || e) });
+    // 视口消息抛了异常也要回一条：宿主那边靠回话解门闩，丢一条就把之后的滚动锁死
+    //   （画面再也不动）。异常这条路只发错误通知、不回话，宿主就只能靠"超时放行"去猜，
+    //   而超时放行会在真忙的时候放进第二条，队列于是又排起来，正是要消掉的东西。
+    if (m.t === 'view') post({ t: 'ack', ts: m.ts, workMs: -1 });
     err(e, m.t + (m.name ? ':' + m.name : ''));
   }
 }

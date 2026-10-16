@@ -789,6 +789,266 @@ return (async () => {
     console.log(`  元素失焦：拖选中 ${b2} -> 其他元素失焦后 ${a2}（期望 true -> true）`);
   }
 
+  // 量 O：匀速滚到底，窗口跟不跟得上
+  //   症状是"滚动时一直是一片空白，停下来几百毫秒才渲染出来"。空白的确切含义是
+  //   "那一页连画布都没有" —— 画布随窗口建与拆（syncPageCanvases），窗口没跟上滚动位置时，
+  //   屏幕上看的那几页根本没有画布可贴，露出来的是页面底色。所以每帧数的就是它。
+  //   第二段量"停下来之后多久才画对"：窗口只会在最后一次对准时挪一次，那之后画面应当
+  //   在几十毫秒内追平；要几百毫秒就说明还有别的队列在排。
+  console.log('\n=== O. 匀速滚到底：窗口跟不跟得上 ===');
+  {
+    // 可见页只能按 scrollTop 算，不能拿 #pages 的矩形 —— 那是单线程宿主才有的元素
+    //   （Worker 侧是 #spacer）；而 scrollTop 在两边是同一把尺子（文档顶起算的 CSS 像素）。
+    const VIS = `
+      const dpr = window.devicePixelRatio || 1;
+      const step = H.pagePx[1] + H.pagePx[2];
+      const top = Math.round(stage.scrollTop * dpr);
+      const visFirst = Math.floor(top / step);
+      const visLast = Math.floor((top + stage.clientHeight * dpr - 1) / step);`;
+    const SAMPLER = `
+      const H = window.__heditor;
+      const stage = document.getElementById('stage');
+      ${VIS}
+      const have = new Set(H.pageCanvasList || []);
+      let miss = 0;
+      for (let p = visFirst; p <= visLast; ++p) if (!have.has(p)) ++miss;
+      const st = H.editStats || {};
+      return JSON.stringify({ top: Math.round(stage.scrollTop), vis: [visFirst, visLast],
+        visN: visLast - visFirst + 1, miss, win: [st.windowFirstPage, st.windowPages],
+        pages: st.totalPages });`;
+
+    const oneRun = async (label, pxPerSec, ms, vh) => {
+      await c.send('Emulation.setDeviceMetricsOverride',
+                   { width: 1500, height: vh || 1200, deviceScaleFactor: 1, mobile: false });
+      await c.send('Page.navigate', { url: URL_ });
+      await sleep(1800);
+      for (let i = 0; i < 60; ++i) {
+        const ok = await ev('!!(window.__heditor && window.__heditor.ready)').catch(() => false);
+        if (ok) break;
+        await sleep(200);
+      }
+      await c.eval('return window.__heditor.stopBlink();');
+      await run('return await window.__heditor.run(7, 1.5);');
+      await sleep(400);
+      const geo = JSON.parse(await run(SAMPLER));
+      console.log(`  ${label}：${geo.pages} 页 / 可见 ${geo.visN} 页，` +
+                  `按 ${pxPerSec} px/s 滚 ${ms} ms`);
+      // 在页面里逐帧推进：匀速是这条判据的前提，而真实滚轮的节拍由合成器决定，
+      //   量到的速度先不可控。scrollTop 一样会派发 scroll 事件，宿主那条路一字不差。
+      const rows = JSON.parse(await run(`
+        const H = window.__heditor;
+        const stage = document.getElementById('stage');
+        const perFrame = ${pxPerSec} / 60;
+        const rows = [];
+        let t0 = 0;
+        return JSON.stringify(await new Promise((resolve) => {
+          const tick = (ts) => {
+            if (!t0) t0 = ts;
+            const maxTop = stage.scrollHeight - stage.clientHeight;
+            stage.scrollTop = Math.min(maxTop, stage.scrollTop + perFrame);
+            ${VIS}
+            const have = new Set(H.pageCanvasList || []);
+            let miss = 0;
+            for (let p = visFirst; p <= visLast; ++p) if (!have.has(p)) ++miss;
+            const st = H.editStats || {};
+            // 绘制分解在排版那本账里（statsJson），不在编辑那本（editStatsJson 只有合计）。
+            const ss = H.stats || {};
+            rows.push({ t: Math.round(ts - t0), top: Math.round(stage.scrollTop),
+              vis: visFirst, visN: visLast - visFirst + 1, miss,
+              win: st.windowFirstPage, winN: st.windowPages,
+              // 换窗那一拍的钱花在哪：绘制分解 + 宿主贴页。冷缓存下这几个数才是真相 ——
+              //   热缓存（把整篇走过一遍）时字形全命中，量出来的"换窗只要 20 ms"是假的。
+              paint: Math.round(st.paintMs || 0), glyph: Math.round(ss.paintGlyphMs || 0),
+              fill: Math.round(ss.paintFillMs || 0), move: Math.round(ss.paintPresentMs || 0),
+              glyphs: ss.paintedGlyphs || 0, rep: st.repaintedPages || 0,
+              px: st.repaintedPixels || 0, hits: ss.glyphCacheHits || 0,
+              missG: ss.glyphCacheMisses || 0,
+              // 字形这一段的钱里有多少花在"回字体文件取数据"上（块缓存命中率）
+              fHits: st.fontCacheHits || 0, fMiss: st.fontCacheMisses || 0,
+              fReads: st.fontStorageReads || 0, fMs: Math.round(st.fontIoMs || 0),
+              blit: Math.round((H.lastBlit || {}).totalMs || 0),
+              put: Math.round((H.lastBlit || {}).putMs || 0) });
+            if (ts - t0 < ${ms}) requestAnimationFrame(tick);
+            else resolve(rows);
+          };
+          requestAnimationFrame(tick);
+        }));`));
+      const n = rows.length;
+      let bad = 0;
+      let missMax = 0;
+      let lagMax = 0;
+      let moves = 0;
+      let lastWin = null;
+      // 换窗那一拍最贵的一次：冷缓存下这才是"跟不跟得上"的真正约束。
+      let worst = null;
+      for (const r of rows) {
+        if (r.miss > 0) ++bad;
+        if (r.miss > missMax) missMax = r.miss;
+        // 窗口顶页与可见首页的差：窗口落后多少页。窗口在可见页之前是正常的（有余量），
+        //   比可见首页还靠后才是落后 —— 那时可见页多半没有画布。
+        const lag = r.win - r.vis;
+        if (lag > lagMax) lagMax = lag;
+        if (r.win !== lastWin) { ++moves; lastWin = r.win; }
+        if (!worst || r.paint > worst.paint) worst = r;
+      }
+      const paints = rows.map((r) => r.paint).sort((a, b) => a - b);
+      console.log(`     滚动期间 ${n} 帧：有页没画布的 ${bad} 帧（${Math.round(100 * bad / n)}%），` +
+                  `最多缺 ${missMax} 页；窗口改了 ${moves} 次（${(n / Math.max(1, moves)).toFixed(1)}` +
+                  ` 帧一次）；窗口顶页落后可见首页最多 ${lagMax} 页`);
+      console.log(`     换窗那一拍的绘制：中位 ${q(paints, 0.5)} / p90 ${q(paints, 0.9)}` +
+                  ` / 最大 ${paints[n - 1]} ms；>50 ms 的 ${paints.filter((v) => v > 50).length}` +
+                  ` 次`);
+      console.log(`     最贵那一拍 ${JSON.stringify(worst)}`);
+      const heavy = rows.filter((r) => r.paint > 50).slice(0, 3);
+      for (const r of heavy) console.log(`      >50 ms：${JSON.stringify(r)}`);
+
+      // 停下来之后：轮询到"可见页都有画布、且屏幕与引擎帧逐点相同"为止。
+      const t1 = Date.now();
+      let rec = null;
+      let waited = 0;
+      for (let i = 0; i < 200; ++i) {
+        rec = JSON.parse(await run(SAMPLER));
+        const sc = await run('return await window.__heditor.selfCheck();');
+        if (rec.miss === 0 && sc && sc.screenVsEngineDiffPx === 0) break;
+        waited += 25;
+        await sleep(25);
+      }
+      const stopMs = Date.now() - t1;
+      console.log(`     停下后 ${stopMs} ms 画对（轮询等了 ${waited} ms）：` +
+                  `缺画布 ${rec.miss} 页，窗口 ${JSON.stringify(rec.win)}`);
+    };
+
+    await oneRun('视口 1200·慢速 4000 px/s', 4000, 3000, 1200);
+    await oneRun('视口 1200·快速 12000 px/s', 12000, 3000, 1200);
+    // 视口高过一页（真人的显示器差不多是这么高）时窗口的余量就只剩一点点了 ——
+    //   这一臂是"滚动时一直空白"的关键：可见页一多，3 页窗口的余量就不足以吃掉
+    //   一次换窗的耗时，于是可见页反复落在窗口之外。
+    await oneRun('视口 1800·慢速 4000 px/s', 4000, 3000, 1800);
+    await oneRun('视口 1800·快速 12000 px/s', 12000, 3000, 1800);
+    // 视口高到能装下 3 页时，窗口（3 页）就没有任何余量了 —— 这是"滚动时一直空白"
+    //   最可能的触发条件：余量为 0 ⇒ 每跨一页边界都要换窗，而换窗那一拍新页还没画布。
+    await oneRun('视口 2600·慢速 4000 px/s', 4000, 3000, 2600);
+    await oneRun('视口 2600·快速 12000 px/s', 12000, 3000, 2600);
+    await c.send('Emulation.setDeviceMetricsOverride',
+                 { width: 1500, height: 1200, deviceScaleFactor: 1, mobile: false });
+  }
+
+  // 量 P：一次换窗之后，新露出来的那几页到底有没有被画
+  //   Worker 侧的次序是：滚 → Worker 算窗口 → present + blitPages → 回推几何 →
+  //   主线程才把新页的画布建出来并交给 Worker。也就是说"贴"发生在"画布存在"之前，
+  //   那一页本该是空的 —— 而它只会在下一次 present 时才被补上。滚动停下之后
+  //   没有下一次 present（闪烁那一拍要 530 ms），症状正是"停下来等几百毫秒才渲染出来"。
+  //   这条只做一件事：隔离出一次换窗，然后干等，看那一页会不会自己出现。
+  console.log('\n=== P. 换窗之后新页有没有被画（隔离测试）===');
+  {
+    await c.send('Page.navigate', { url: URL_ });
+    await sleep(1800);
+    for (let i = 0; i < 60; ++i) {
+      const ok = await ev('!!(window.__heditor && window.__heditor.ready)').catch(() => false);
+      if (ok) break;
+      await sleep(200);
+    }
+    await c.eval('return window.__heditor.stopBlink();');
+    await run('return await window.__heditor.run(7, 1.5);');
+    await sleep(400);
+    const before = JSON.parse(await run(`
+      const H = window.__heditor;
+      const st = H.editStats;
+      return JSON.stringify({ win: [st.windowFirstPage, st.windowPages],
+        cvs: H.pageCanvasList });`));
+    // 滚过 3 页：一定触发一次换窗
+    const moved = JSON.parse(await run(`
+      const H = window.__heditor;
+      const stage = document.getElementById('stage');
+      const step = H.pagePx[1] + H.pagePx[2];
+      const dpr = window.devicePixelRatio || 1;
+      stage.scrollTop = 3 * step / dpr + 10;
+      // 与 C 段同一档的等待：滚动事件是异步派的，Worker 侧还要一次往返才回推几何。
+      await new Promise((r) => setTimeout(r, 400));
+      const st = H.editStats;
+      return JSON.stringify({ top: Math.round(stage.scrollTop),
+        win: [st.windowFirstPage, st.windowPages], cvs: H.pageCanvasList,
+        vp: H.viewport, geomFirst: (H.geom || {}).first });`));
+    console.log(`  换窗前：窗口 ${JSON.stringify(before.win)} 画布 ${JSON.stringify(before.cvs)}`);
+    console.log(`  换窗后：scrollTop ${moved.top} 窗口 ${JSON.stringify(moved.win)}` +
+                ` 画布 ${JSON.stringify(moved.cvs)} 几何首页 ${moved.geomFirst}`);
+    console.log(`  视口：${JSON.stringify(moved.vp)}`);
+    // 干等，不做任何会触发 present 的事（stopBlink 已停掉闪烁那一拍）。
+    let last = null;
+    for (const wait of [60, 120, 250, 500, 1000, 2000]) {
+      await sleep(wait === 60 ? 60 : wait - (last ? last : 0));
+      last = wait;
+      const sc = await run('return await window.__heditor.selfCheck();');
+      console.log(`    +${wait} ms：窗口内缺画布 ${sc.missing} 页，` +
+                  `屏幕与引擎帧差 ${sc.screenVsEngineDiffPx} px（比了 ${sc.compared}）`);
+    }
+  }
+
+  // 量 Q：预热到底有没有预热到"正确的那份 mask"
+  //   这条只在单线程宿主上量（引擎就在这个线程里，读数直接）。做法是同一件事做两遍：
+  //   把窗口挪到一个从没画过的页上，量那一拍的冷字形开销；再挑另一个同样从没画过的页，
+  //   先 prewarm 一遍再挪过去，量同一笔账。两页的规模可比（同一份重复文本），
+  //   所以"每个字形的微秒数"是一个可比的数。
+  //   这一条是预热这条路的唯一判据：横向是亚像素定位，只要坐标挪错一点，
+  //     预热就落不到实时绘制要用的那个键上 —— 而那种失败是完全静默的（画面照旧，
+  //     只是"没快"），所以必须有一个能红的数。
+  console.log('\n=== Q. 预热有没有提前把那笔字形钱付掉 ===');
+  {
+    await c.send('Emulation.setDeviceMetricsOverride',
+                 { width: 1500, height: 1200, deviceScaleFactor: 1, mobile: false });
+    await c.send('Page.navigate', { url: URL_ });
+    await sleep(1800);
+    for (let i = 0; i < 60; ++i) {
+      const ok = await ev('!!(window.__heditor && window.__heditor.ready)').catch(() => false);
+      if (ok) break;
+      await sleep(200);
+    }
+    await c.eval('return window.__heditor.stopBlink();');
+    // 必须用"每段换一批字"的那份压力文档：纯重复的样例在画过一页之后字形就全命中了
+    //   （实测第 20 页冷 12.8 µs·字形、第 40 页就只剩 5.1），冷缓存这件事根本量不出来。
+    await run('return await window.__heditor.loadStressDocumentDiverse(2000, 20);');
+    await sleep(600);
+    const total = await ev('window.__heditor.editStats.totalPages');
+    console.log(`  文档 ${total} 页（每段一批不同的常用字）`);
+
+    // 每一臂都重新装载一次页面：字形缓存是进程级的，前一条臂跑过的页会把缓存烘热，
+    //   于是后一条臂量到的"冷"根本不是冷 —— 那样量出来的差别是假的。
+    const arm = async (label, page, prewarm) => {
+      await c.send('Page.navigate', { url: URL_ });
+      await sleep(1500);
+      for (let i = 0; i < 60; ++i) {
+        const ok = await ev('!!(window.__heditor && window.__heditor.ready)').catch(() => false);
+        if (ok) break;
+        await sleep(200);
+      }
+      await c.eval('return window.__heditor.stopBlink();');
+      await run('return await window.__heditor.run(7, 1.5);');
+      await sleep(300);
+      const pre = prewarm ? await run(`return window.__heditor.prewarmPage(${page});`) : 0;
+      const st = JSON.parse(await run(`
+        const H = window.__heditor;
+        const s = await H.setViewportAnchor(${page}, 3);
+        return JSON.stringify({ paint: s.paintMs,
+          glyph: (H.stats || {}).paintGlyphMs || 0,
+          fill: (H.stats || {}).paintFillMs || 0,
+          move: (H.stats || {}).paintPresentMs || 0,
+          glyphs: (H.stats || {}).paintedGlyphs || 0,
+          rep: s.repaintedPages, win: s.windowFirstPage });`));
+      const per = st.glyphs ? (1000 * st.glyph) / st.glyphs : 0;
+      console.log(`  ${label}（第 ${page} 页，预热${prewarm ? '过 ' + pre + ' 个字形' : '无'}）：` +
+                  `绘制 ${st.paint.toFixed(1)} ms（字形 ${st.glyph.toFixed(1)}` +
+                  ` / ${st.glyphs} 个 = ${per.toFixed(2)} µs·字形 + 铺面积 ${st.fill.toFixed(1)}` +
+                  ` + 帧搬运 ${st.move.toFixed(1)}）重画 ${st.rep} 页`);
+      return { ...st, per };
+    };
+    // 同一个页号、两条互不污染的臂：只有"预热过 / 没预热过"这一处不同。
+    const cold = await arm('冷', 20, false);
+    const warm = await arm('预热后', 20, true);
+    console.log(`  每个字形：冷 ${cold.per.toFixed(2)} µs vs 预热后 ${warm.per.toFixed(2)} µs` +
+                `（${(cold.per / Math.max(0.01, warm.per)).toFixed(1)} 倍）` +
+                (cold.per > warm.per * 1.5 ? '  ← 预热有效' : '  ← 预热没起作用（键没对上？）'));
+  }
+
   c.ws.close();
   process.exit(0);
 }

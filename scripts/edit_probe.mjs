@@ -1443,9 +1443,16 @@ async function main() {
         const step = (H.pagePx[1] + H.pagePx[2]) / dpr;
         const wait = () => new Promise((r) => requestAnimationFrame(
           () => requestAnimationFrame(r)));
+        // 跳页之后要给窗口一个对齐的机会：滚动快过"渲染能力"时宿主会主动放弃追窗口
+        //   （app.js 的 tooFastToFollow），等安静 140 ms 再对齐（alignAfterScroll）。
+        //   这里每次跳 3 页、三跳连着做，正是会被判成"追不上"的形态 —— 不等就会读到
+        //   还没对齐的那一帧。等的是"滚动停下来"，不是"等到断言成立"：安静 180 ms 之后
+        //   仍旧读一次状态，对齐没发生的话下面照红。
+        const settle = () => new Promise((r) => setTimeout(r, 180));
         const rows = [];
         for (const p of [3, 6, 9]) {
           stage.scrollTop = p * step;
+          await settle();
           await wait();
           const vp = H.viewport;
           rows.push({ want: p, first: vp.engineFirst, count: vp.engineCount,
@@ -1454,10 +1461,14 @@ async function main() {
         }
         // 逐页下滚：这一步才是"平移复用"那一支（上面每次跳 3 页，重叠为 0，
         //   走的是整窗重建）。逐拍记下重画页数 —— 平移复用时它应当小于窗口页数。
+        //   滚 8 页而不是 4 页：窗口带 3 页余量、且余量偏向滚动方向，所以往下滚 3 页
+        //   才换一次窗（见 app.js 的 kWindowLookaheadPages）—— 滚 4 页只赶上一次换窗，
+        //   而判据要求至少两次。页数取多少是"被测策略的余量"决定的，不是随手写的：
+        //   余量再调大时这里要跟着调，否则判据会变成"恒红"而不是"恒绿"。
         stage.scrollTop = 0;
         await wait();
         const shiftSteps = [];
-        for (let k = 1; k <= 4; ++k) {
+        for (let k = 1; k <= 8; ++k) {
           stage.scrollTop = k * step;
           await wait();
           const st = H.editStats;
@@ -2838,17 +2849,27 @@ async function main() {
 
     // 最要紧的一条：帧上必须真的有字。读数字再漂亮，画不出来就是没走通 ——
     //   而且这一条不能只看"非零"，要跟整份模式画同一页的墨迹比。
+    //
+    //   两次取墨迹必须先钉住同一个窗口、同一页：上面那几段把锚点挪到过第 50 页，
+    //   而这里比的是"同一页"。不钉的话就成了"第 50 页 vs 第 0 页"（整帧版曾靠
+    //   "这段语料只有 20 个词、每页长得差不多"侥幸过关，改成只数第一页就露馅）。
+    //   只数第一页那几行也正是判据名字里的"同一页"：帧是窗口大的，按整帧数会掺进
+    //   "窗口盖着哪几页"，那个数随窗口策略变，测的就成了窗口在哪而不是字画没画出来。
     const INK = `
-      const f = await window.__heditor.rawFrame();
+      const H = window.__heditor;
+      const f = await H.rawFrame();
+      const rows = H.frameW() * H.pagePx[1] * 4;
       let n = 0;
-      for (let i = 0; i + 3 < f.length; i += 4) {
+      for (let i = 0; i + 3 < rows; i += 4) {
         if (f[i] < 200 || f[i+1] < 200 || f[i+2] < 200) ++n;
       }
       return n;
     `;
+    await c.eval('return await window.__heditor.setViewportAnchor(0, 3);');
     const inkLazy = await c.eval(INK);
     await c.eval('return await window.__heditor.reloadFonts("full");');
     await c.eval('await window.__heditor.loadStressDocumentDiverse(2000, 20); return true;');
+    await c.eval('return await window.__heditor.setViewportAnchor(0, 3);');
     const inkFull = await c.eval(INK);
     report.inkCompare = { lazy: inkLazy, full: inkFull };
     chk.check('按需模式下帧上有字', inkLazy > 1000, `${inkLazy} px`);
@@ -3540,8 +3561,12 @@ async function main() {
 
     // 参考臂：整篇重排重绘那一拍写多少像素。没有它，"改样式那拍写得少"这句无从比较
     //   —— 一个恒报 0 的计数器也会让它成立。
+    //   先切到另一个场景再切回来：run(同 id) 那一步在"这个场景已经装着"时是空操作，
+    //   读回来的会变成上一拍（改样式那一拍）的 186 px —— 那样参考臂就恒等于被测对象，
+    //   判据恒红。换文档是保证这一拍真的是整篇重排重绘的唯一稳当办法。
     const fullPix = await c.eval(`
       await window.__heditor.setCaretStyle({ color: [31, 111, 235, 255] });
+      await window.__heditor.run(7, ${ZOOM});
       const s = await window.__heditor.run(6, ${ZOOM});
       return s.repaintedPixels;`);
     chk.check('参考臂：整篇重排重绘确实写了大半个帧（否则下面那条判据是恒真的）',

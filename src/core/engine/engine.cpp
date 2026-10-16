@@ -67,6 +67,20 @@ ControlKind controlKindFromBusinessType(const std::string& type) {
  */
 constexpr float kMinCaretWidthPt = 0.4f;
 
+/**
+ * Skia 全局字形 mask 缓存的字节预算。
+ *
+ * SkStrikeCache 的默认上限是 2 MB（SK_DEFAULT_FONT_CACHE_LIMIT），而它清理时按
+ *   "整份 strike"删：internalPurge 断言不做小清理（bytesNeeded 至少取已用的四分之一），
+ *   从 LRU 尾巴上摘对象，一次就是一份 strike。本项目一般只有一两个字体规格，
+ *   也就是一个 strike —— 越过 2 MB 就等于缓存被整份抹掉，接下来每个字形都重新冷光栅，
+ *   而"预热"这件事也跟着作废（预热正是把 mask 送进这份缓存）。
+ * 取 48 MB：一页约 700 个字形、mask 数百字节，再乘 setSubpixel(true) 的横向相位
+ *   （同一字形按 1/4 px 拆成多份 mask），一页的常驻量在 MB 量级；整篇用到的不同字形
+ *   撑死几万份 mask，48 MB 足够整篇一次装下、之后只命中。
+ */
+constexpr size_t kGlyphCacheBudgetBytes = 48u * 1024u * 1024u;
+
 }  // namespace
 
 /**
@@ -86,7 +100,24 @@ bool EditorEngine::init(const std::vector<std::string>& fontPaths) {
     if (!glyph_cache_) glyph_cache_ = std::make_shared<GlyphCache>();
     bitmap_.setGlyphCache(glyph_cache_);
     base_.setGlyphCache(glyph_cache_);
+
+    ensureRenderSetup();
     return true;
+}
+
+/**
+ * 光栅后端那几项一次性设置。目前只有一项：Skia 全局字形 mask 缓存的预算。
+ *
+ * 为什么必须显式设：SkStrikeCache 的默认上限只有 2 MB（SK_DEFAULT_FONT_CACHE_LIMIT），
+ *   而它清理时按"整份 strike"删 —— internalPurge 断言"不做小清理"，从 LRU 尾巴上
+ *   摘对象，一次就是一份 strike。本项目一般只有一两个字体规格，也就是一个 strike：
+ *   越限就等于把缓存一次抹光，接下来每个字形都重新冷光栅。
+ * 幂等：engine.h 里记了为什么要放在这里而不是 init()（wasm 宿主不走 init）。
+ */
+void EditorEngine::ensureRenderSetup() {
+    if (render_setup_done_) return;
+    render_setup_done_ = true;
+    base_.setGlyphCacheBudget(kGlyphCacheBudgetBytes);
 }
 
 void EditorEngine::disableGlyphCache() {

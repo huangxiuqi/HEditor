@@ -351,8 +351,16 @@ std::string selectionStyleJson() {
     return o.str();
 }
 
-void relayoutAndPaint() {
-    g_engine.relayout();
+/**
+ * 预热一页的字形：只把 mask 光栅进缓存，画面不动、也不呈现。
+ *
+ * 宿主在滚动停下之后的空闲帧里调用它，把"下一页的字形"这笔钱先付掉 ——
+ *   换窗那一拍于是只剩铺底色与帧搬运（见 EditorEngine::prewarmPageGlyphs）。
+ * 返回本次预热触及的字形数，宿主据此判断"这一页还有没有要预热的"。
+ */
+int prewarmPageGlyphs(int page) { return g_engine.prewarmPageGlyphs(page); }
+
+void relayoutAndPaint() {    g_engine.relayout();
     g_engine.repaint();
 }
 
@@ -439,6 +447,9 @@ std::string statsJson() {
     //   帧搬运走 copyRectFrom。合成一个 paintMs 就只能得出"绘制慢"。
     o << "\"paintFillMs\":" << s.paint_fill_ms << ",";
     o << "\"paintGlyphMs\":" << s.paint_glyph_ms << ",";
+    // 含在 paintGlyphMs 里的一笔：只为记账取字形包围盒。它不画像素，
+    //   判"字形贵不贵"时必须先把它减掉，否则会把记账算成光栅。
+    o << "\"paintGlyphBoundsMs\":" << s.paint_glyph_bounds_ms << ",";
     o << "\"paintedGlyphs\":" << s.painted_glyphs << ",";
     o << "\"paintPresentMs\":" << s.paint_present_ms << ",";
     o << "\"totalMs\":" << s.total_ms << ",";
@@ -448,6 +459,10 @@ std::string statsJson() {
     o << "\"glyphCacheHits\":" << s.glyph_cache_hits << ",";
     o << "\"glyphCacheMisses\":" << s.glyph_cache_misses << ",";
     o << "\"glyphCacheEntries\":" << s.glyph_cache_entries << ",";
+    // 预算与占用（字节）：占用贴着上限就说明缓存随时会被整份抹掉 —— 那时
+    //   "预热"与"命中"都无从谈起，而面板上只看命中率是看不出来的。
+    o << "\"glyphCacheBytes\":" << s.glyph_cache_bytes << ",";
+    o << "\"glyphCacheLimit\":" << s.glyph_cache_limit << ",";
     o << "\"zoom\":" << s.zoom;
     o << "}";
     return o.str();
@@ -1148,6 +1163,7 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("setSelectionStyle", &setSelectionStyle);
     emscripten::function("caretStyleJson", &caretStyleJson);
     emscripten::function("selectionStyleJson", &selectionStyleJson);
+    emscripten::function("prewarmPageGlyphs", &prewarmPageGlyphs);
 
     emscripten::function("relayout", &layoutOnly);
     emscripten::function("relayoutAndPaint", &relayoutAndPaint);

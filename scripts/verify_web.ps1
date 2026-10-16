@@ -17,6 +17,9 @@ param(
     [int]$DebugPort = 9222,
     [string]$Probe = 'scripts\edit_probe.mjs',
     # 产物档：wasm（交付）或 wasm-debug（断言 + 栈检查 + 源码映射）。预设见 CMakePresets.json。
+    #   ★ 这是**预设名**，传进页面时要换成产物目录 build\<预设>\web —— 页面的 ?wasm=
+    #   收的是目录（相对仓库根），不是预设名。当成预设名传过去会去取 <仓库根>\wasm\heditor.js
+    #   （不存在），症状是"页面永远不 ready、探针等待超时"，看不出跟参数有关。
     [string]$Wasm = 'wasm',
     # 跑哪个宿主页：index.html（单线程，验收基准）或 worker.html（引擎在 Worker 里）。
     #   两宿主并存，所以同一份探针必须两边都能跑 —— 这个开关就是那条路。
@@ -134,7 +137,7 @@ try {
     Push-Location $Root
     try {
         $probeOut = & $node $Probe --port $DebugPort `
-                        --url "http://127.0.0.1:$Port/web/${Page}?wasm=$Wasm" 2>&1 |
+                        --url "http://127.0.0.1:$Port/web/${Page}?wasm=build/${Wasm}/web" 2>&1 |
                     ForEach-Object { $_.ToString() }
         $exit = $LASTEXITCODE
         $probeOut | Tee-Object -FilePath $log

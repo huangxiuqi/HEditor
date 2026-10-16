@@ -66,6 +66,14 @@ struct EngineStats {
      */
     double paint_fill_ms = 0.0;     // 铺面积：页间隙背景 + 页底 + 页边框
     double paint_glyph_ms = 0.0;    // 字形：hb 抽轮廓 + 扫描线光栅（或命中字形缓存后只做 blit）
+    /**
+     * 字形那一段里"只为记账取包围盒"花掉的时间。
+     *
+     * 它是 paint_glyph_ms 的一部分（记账在 drawGlyphs 内部），单列出来是因为这一笔
+     *   不画任何像素：要判断"字形贵"还是"记账贵"，只能看这两个数谁大。
+     * 自写后端不取包围盒，恒为 0。
+     */
+    double paint_glyph_bounds_ms = 0.0;
     double paint_present_ms = 0.0;  // 帧缓冲搬移：reset + 从底图贴回 + 光标
 
     /**
@@ -87,6 +95,15 @@ struct EngineStats {
     long long glyph_cache_hits = 0;
     long long glyph_cache_misses = 0;
     int glyph_cache_entries = 0;
+    /**
+     * 字形缓存的占用与上限（字节）。只有 Skia 后端报得出这两个数
+     * （它的 strike 缓存是进程内全局一份，上限可设；见 EditorEngine::init 里
+     * kGlyphCacheBudgetBytes 的说明）。它们回答的是另一类问题：
+     *   占用贴着上限 ⇒ 随时会被整份抹掉，"缓存命中率高"也就无从谈起 ——
+     *   而那正是"预热了却不见变快"的成因。
+     */
+    size_t glyph_cache_bytes = 0;
+    size_t glyph_cache_limit = 0;
     double total_ms = 0.0;
     int frame_width = 0;
     int frame_height = 0;

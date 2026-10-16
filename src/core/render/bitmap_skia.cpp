@@ -21,6 +21,7 @@
 #include <hb.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <unordered_map>
@@ -36,6 +37,7 @@
 #include "include/core/SkFontArguments.h"
 #include "include/core/SkFontMgr.h"
 #include "include/core/SkFontTypes.h"
+#include "include/core/SkGraphics.h"
 #include "include/core/SkImageInfo.h"
 #include "include/core/SkPaint.h"
 #include "include/core/SkPoint.h"
@@ -209,7 +211,10 @@ struct Bitmap::SkiaImpl {
     SkBitmap bm;
     std::unique_ptr<SkCanvas> canvas;
 
-    sk_sp<SkFontMgr> font_mgr;  // SkFontMgr_New_Custom_Empty()：内建字体为 0，全部由我们喂
+    /**
+     * 字体表（字体管理器 + 两张缓存）。跨 Bitmap 共享，见 Bitmap::shareFonts。
+     */
+    std::shared_ptr<SkiaFonts> fonts_shared;
 
     /**
      * 批量画字形的转存缓冲。留着复用是为了不让"批量"本身变成每段两次 malloc ——
@@ -219,6 +224,19 @@ struct Bitmap::SkiaImpl {
     std::vector<SkGlyphID> glyph_scratch;
     std::vector<SkPoint> pos_scratch;
     std::vector<SkRect> bounds_scratch;
+
+    /**
+     * 取（或建）hb 字体对应的 SkFont。
+     */
+    const SkFont* fontFor(hb_font_t* hbf, float units_to_px);
+};
+
+/**
+ * 字体表。单独拎出来是为了能被多块 Bitmap 共享 —— Skia 的字形缓存按 strike 规格
+ * 索引，而规格里含 SkTypeface 的身份，各建一份就是把缓存切成互不相见的几份。
+ */
+struct Bitmap::SkiaFonts {
+    sk_sp<SkFontMgr> font_mgr;  // SkFontMgr_New_Custom_Empty()：内建字体为 0，全部由我们喂
 
     /**
      * (hb_face_t*, 变体坐标指纹) → SkTypeface。
@@ -260,15 +278,12 @@ struct Bitmap::SkiaImpl {
         }
     };
     std::unordered_map<FontKey, SkFont, FontKeyHash> fonts;
-
-    /**
-     * 取（或建）hb 字体对应的 SkFont。
-     */
-    const SkFont* fontFor(hb_font_t* hbf, float units_to_px);
 };
 
 const SkFont* Bitmap::SkiaImpl::fontFor(hb_font_t* hbf, float units_to_px) {
-    if (!font_mgr || !hbf) return nullptr;
+    if (!fonts_shared || !fonts_shared->font_mgr || !hbf) return nullptr;
+    SkiaFonts& fs = *fonts_shared;
+    SkFontMgr* font_mgr = fs.font_mgr.get();
     hb_face_t* face = hb_font_get_face(hbf);
     if (!face) return nullptr;
 
@@ -278,8 +293,8 @@ const SkFont* Bitmap::SkiaImpl::fontFor(hb_font_t* hbf, float units_to_px) {
     uint64_t vfp = 0;
     const bool has_vars = hbVariationsToSkia(hbf, face, &vcoords, &vfp);
 
-    const TfKey tkey{face, has_vars ? vfp : 0};
-    sk_sp<SkTypeface>& tf = typefaces[tkey];
+    const SkiaFonts::TfKey tkey{face, has_vars ? vfp : 0};
+    sk_sp<SkTypeface>& tf = fs.typefaces[tkey];
     if (!tf) {
         // 变体坐标两条路都要：带变体只能走带 SkFontArguments 的重载，
         //   而 makeFromData 没有接收变体位置的那一个。
@@ -318,9 +333,9 @@ const SkFont* Bitmap::SkiaImpl::fontFor(hb_font_t* hbf, float units_to_px) {
     const float em_px = static_cast<float>(sx) * units_to_px;
     if (!(em_px > 0.0f)) return nullptr;
 
-    const FontKey key{tf.get(), fbits(em_px)};
-    auto it = fonts.find(key);
-    if (it != fonts.end()) return &it->second;
+    const SkiaFonts::FontKey key{tf.get(), fbits(em_px)};
+    auto it = fs.fonts.find(key);
+    if (it != fs.fonts.end()) return &it->second;
 
     SkFont f(tf, em_px);
     // 下面几个开关的取值理由。
@@ -344,7 +359,7 @@ const SkFont* Bitmap::SkiaImpl::fontFor(hb_font_t* hbf, float units_to_px) {
     // 只有 R 或 B 一个通道被写，而本实现的帧是给 canvas.putImageData 的整块 RGBA。
     f.setEdging(SkFont::Edging::kAntiAlias);
 
-    return &fonts.emplace(key, f).first->second;
+    return &fs.fonts.emplace(key, f).first->second;
 }
 
 /**
@@ -365,14 +380,15 @@ void Bitmap::reset(int w, int h) {
         sk_ = std::make_unique<SkiaImpl>();
         // 空字体管理器 + FreeType 后端：字体全部由宿主喂进来（生产环境本就如此），
         // 不依赖任何"系统字体目录"，这在 wasm 上是唯一能选的形态。
-        sk_->font_mgr = SkFontMgr_New_Custom_Empty();
+        sk_->fonts_shared = std::make_shared<SkiaFonts>();
+        sk_->fonts_shared->font_mgr = SkFontMgr_New_Custom_Empty();
     }
 
     // 重新装订。px_ 刚刚 assign 过，地址可能变了；SkBitmap 拿的是裸指针，
     //   不重装订就会画到已释放的内存上。这是整个文件里最容易出静默错误的一处。
     sk_->canvas.reset();
     sk_->bm.reset();
-    if (w_ > 0 && h_ > 0 && sk_->font_mgr) {
+    if (w_ > 0 && h_ > 0 && sk_->fonts_shared && sk_->fonts_shared->font_mgr) {
         const SkImageInfo info =
             SkImageInfo::Make(w_, h_, kRGBA_8888_SkColorType, kPremul_SkAlphaType);
         // 行跨度 = w_*4：与 frame() 交给宿主的口径一致，中间不留 padding。
@@ -380,6 +396,39 @@ void Bitmap::reset(int w, int h) {
             sk_->canvas = std::make_unique<SkCanvas>(sk_->bm);
         }
     }
+}
+
+/**
+ * 共用字体表。字形缓存按 strike 规格索引、规格里含 SkTypeface 的身份，
+ *   所以只有换了字体表，缓存才真的跟着共用（见 Bitmap::shareFonts）。
+ */
+void Bitmap::shareFonts(const Bitmap& other) {
+    if (!sk_ || !other.sk_ || !other.sk_->fonts_shared) return;
+    sk_->fonts_shared = other.sk_->fonts_shared;
+}
+
+/**
+ * 字形 mask 缓存的预算 / 占用 / 上限。走 Skia 的全局 strike 缓存（进程内一份，
+ *   与是哪个 Bitmap 无关，所以在哪一块图上设都一样）。
+ *
+ * 默认值是 SkStrikeCache.h 里的 SK_DEFAULT_FONT_CACHE_LIMIT = 2 MB。为什么这个数
+ *   在本文档上不够用：一页约 700 个字形、字号 36 px 量级，一个 mask 数百字节，
+ *   再乘上亚像素横向相位（setSubpixel(true) 会把同一个字形按 1/4 px 拆成多份 mask），
+ *   一页的常驻量就到 MB 量级 —— 越限之后 internalPurge 按整份 strike 删，
+ *   一删全没。于是"预热过的那一页"在下一拍就可能是冷的。
+ * 这条只在 Skia 后端有意义：自写后端用自己的 GlyphCache（bitmap.cpp 里是空实现）。
+ */
+void Bitmap::setGlyphCacheBudget(size_t bytes) {
+    if (bytes == 0) return;
+    SkGraphics::SetFontCacheLimit(bytes);
+}
+
+size_t Bitmap::glyphCacheUsedBytes() const {
+    return SkGraphics::GetFontCacheUsed();
+}
+
+size_t Bitmap::glyphCacheBudgetBytes() const {
+    return SkGraphics::GetFontCacheLimit();
 }
 
 /**
@@ -466,10 +515,17 @@ void Bitmap::copyRectFrom(const Bitmap& src, const Rect& r) {
     const int y1 = std::min(h_, static_cast<int>(std::ceil(r.y + r.h)));
     if (x1 <= x0 || y1 <= y0) return;
     painted_px_ += static_cast<size_t>(x1 - x0) * static_cast<size_t>(y1 - y0);
+    const size_t off0 =
+        (static_cast<size_t>(y0) * static_cast<size_t>(w_) + static_cast<size_t>(x0)) * 4u;
+    if (x0 == 0 && x1 == w_) {
+        // 整幅宽：行与行在内存里首尾相接，一次 memcpy 就是整块（见 bitmap.cpp 同名处）。
+        std::memcpy(px_.data() + off0, src.px_.data() + off0,
+                    static_cast<size_t>(x1 - x0) * 4u * static_cast<size_t>(y1 - y0));
+        return;
+    }
     const size_t row_bytes = static_cast<size_t>(x1 - x0) * 4u;
     for (int y = y0; y < y1; ++y) {
-        const size_t off =
-            (static_cast<size_t>(y) * static_cast<size_t>(w_) + static_cast<size_t>(x0)) * 4u;
+        const size_t off = off0 + static_cast<size_t>(y - y0) * static_cast<size_t>(w_) * 4u;
         std::memcpy(px_.data() + off, src.px_.data() + off, row_bytes);
     }
 }
@@ -518,7 +574,12 @@ void Bitmap::drawGlyphs(hb_font_t* font, const uint32_t* ids, const float* xs, c
     // 记账：包围盒一次取完（SkFont::getBounds 的批量重载）。
     //   逐字形 getBounds 每调用一次都要进一遍字形缓存（一次全局查找），
     //   上千个字形时这一笔能盖过字形本身的 blit。
+    //
+    //   单独计时（见 glyphBoundsMs）：这一段不画像素，"值不值得"与光栅那一段是两笔账。
+    //     Skia 侧取包围盒要逐字形进一遍字形缓存，而缓存里没有的那个还要生成一次度量 ——
+    //     整页上千个字形时它未必比画字便宜，合成一个数就查不出来了。
     {
+        const auto t_bounds0 = std::chrono::steady_clock::now();
         std::vector<SkRect>& bxs = sk_->bounds_scratch;
         bxs.resize(static_cast<size_t>(count));
         f->getBounds(SkSpan<const SkGlyphID>(gids.data(), count), SkSpan<SkRect>(bxs.data(), count),
@@ -532,6 +593,9 @@ void Bitmap::drawGlyphs(hb_font_t* font, const uint32_t* ids, const float* xs, c
                                static_cast<size_t>(std::ceil(bh) + 1.0f);
             }
         }
+        glyph_bounds_ms_ +=
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_bounds0)
+                .count();
     }
 
     SkPaint p;

@@ -198,7 +198,18 @@ public:
     void resetPaintedPixels() {
         painted_px_ = 0;
         painted_glyphs_ = 0;
+        glyph_bounds_ms_ = 0.0;
     }
+
+    /**
+     * 本次提交里"只为了记账"花掉的时间（毫秒）。
+     *
+     * 记账本身不画任何像素：它要把每个字形的包围盒取出来，好让 paintedPixels 有个上界。
+     *   而取包围盒在 Skia 侧要逐字形进一遍字形缓存（自写后端不记包围盒，恒为 0）。
+     * 单列这一项的理由：它和"画字"混在同一个 drawGlyphs 里，合成一个数就永远分不清
+     *   "字形贵"与"记账贵"—— 而这两者的修法正好相反（一个要动光栅，一个要动记账口径）。
+     */
+    double glyphBoundsMs() const { return glyph_bounds_ms_; }
 
     /**
      * 本次提交给光栅器的字形个数。
@@ -244,6 +255,31 @@ public:
     void setGlyphCache(std::shared_ptr<GlyphCache> c) { glyph_cache_ = std::move(c); }
     GlyphCache* glyphCache() const { return glyph_cache_.get(); }
 
+    /**
+     * 与另一块 Bitmap 共用字体表（Skia 侧的 SkTypeface / SkFont）。
+     *
+     * 为什么非共用不可：Skia 的字形缓存按 strike 规格索引，而规格里含字体对象的身份。
+     *   两块 Bitmap 各建一份 SkTypeface，缓存就分成互不相见的两份 —— 往其中一份预热
+     *   对另一份毫无帮助，而症状只是"没变快"，什么都看不出来。
+     * 自写后端没有字体对象（字形缓存由 setGlyphCache 共享），所以那一侧是空实现。
+     */
+    void shareFonts(const Bitmap& other);
+
+    /**
+     * 字形 mask 缓存的字节预算（0 = 不动，用后端自己的默认值），以及当前的占用与上限。
+     *
+     * 为什么要这条口子：Skia 的全局 strike 缓存默认上限只有 2 MB，而它清理时是按
+     *   "整份 strike"删的（SkStrikeCache::internalPurge 从 LRU 尾巴上摘对象，一次至少
+     *   放掉已用的四分之一）。本项目里通常只有一两个字体规格，也就是只剩下一个 strike
+     *   —— 一旦越过 2 MB，清理就把整份缓存一次抹掉，下一个字形又从头冷光栅。
+     *   对一整页上千个汉字、每页都要重光栅的滚动场景，这条等于"缓存从不起作用"；
+     *   而它的症状只是"没变快"，看不出来是哪一层的问题。
+     * 自写后端有自己的 GlyphCache（按条数限容量），这两个入口在那一侧是空实现 / 0。
+     */
+    void setGlyphCacheBudget(size_t bytes);
+    size_t glyphCacheUsedBytes() const;
+    size_t glyphCacheBudgetBytes() const;
+
 private:
     std::shared_ptr<GlyphCache> glyph_cache_;
 
@@ -252,6 +288,7 @@ private:
     std::vector<uint8_t> px_;
     size_t painted_px_ = 0;      // 自上次 resetPaintedPixels() 以来实际写入的像素数
     size_t painted_glyphs_ = 0;  // 同一口径下的字形个数（见 paintedGlyphs）
+    double glyph_bounds_ms_ = 0.0;  // 同一口径下"记账取包围盒"花掉的时间（见 glyphBoundsMs）
 
 #if defined(HEDITOR_USE_SKIA)
 
@@ -262,6 +299,7 @@ private:
      * 随 Skia 版本变化（ABI 不稳）。
      */
     struct SkiaImpl;
+    struct SkiaFonts;
     std::unique_ptr<SkiaImpl> sk_;
 
 #else

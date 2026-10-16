@@ -262,14 +262,157 @@ function viewOp(scrollDevicePx) {
 }
 
 /**
- * 滚动事件专用的单向版本：不要回话。
- *   滚动这条路上没人等结果（画布在文档流里，浏览器已经搬完像素了），
+ * 滚动事件专用的单向版本：不要回话，而且最多一条在飞。
+ *
+ * 为什么不要回话：滚动这条路上没人等结果（画布在文档流里，浏览器已经搬完像素了），
  *   给它也发一个 Promise 只是白造一批挂起条目。
+ * 为什么还要门闩：甩滚时 scroll 事件每秒上百个，而 Worker 是一条线程、逐条处理，
+ *   每次换窗要 20~45 ms —— 不限量就是"命令排在队列里排队执行"，画面呈现出来的就是
+ *   "已经滚到底了，中间那些窗口还在一个一个地渲染"，停下后还要等一秒才追平
+ *   （取证时状态里的窗口序列一路补课）。门闩把队列压到"一条在飞 + 一个待发标记"，
+ *   于是 Worker 永远只处理最新那一个位置，中间那些过期的位置根本不会进去。
+ *   代价是丢掉中间位置 —— 那正是想要的：它们是"已经被滚过去"的视口，
+ *   渲染它们没有意义。
  */
+let viewInFlight = false;
+let viewWanted = false;
+let viewTs = 0;          // 负数序列：与 waitOp 的正数 ts 天然不撞
+let viewSentAt = 0;
+
+/**
+ * 视口这一路的小账，host.viewDiag() 读。
+ *
+ * rtt 是"发出到收到回话"的往返墙钟，work 是 Worker 自报的渲染耗时，pack 是 Worker 自报的
+ *   打包耗时（构造那份状态 + 结构化克隆）。回话要带的字段很多，构造与克隆都不算在 work 里，
+ *   所以要三段一起看：rtt 减 work 减 pack 剩下的才是"跨线程 + 主线程受理"那一段。
+ * handle 是主线程处理这一份状态花的时间（改几何、对画布、定位输入法、重画面板）。
+ * coalesced 是"在飞期间被折掉的位置"条数 —— 它就是门闩消掉的排队量；released 是在飞
+ *   期间照样发的次数（见 kViewLatchMs），正常应当恒为 0。
+ * blit 与 blitPages 是 Worker 自报的"这一拍重贴了几页画布、花了多少毫秒"。挪窗时贴的是
+ *   全窗，而真正需要新像素的只有新露出来那一页，两者之差就是白贴的量。
+ */
+const viewDiag = {
+  sent: 0, coalesced: 0, released: 0, settled: 0, canvasMsgs: 0,
+  packAvg: 0, packMax: 0, rtt: [], work: [], handle: [], blit: [], blitPages: [],
+};
+const kViewDiagMax = 512;
+function pushSample(arr, v) {
+  if (arr.length >= kViewDiagMax) arr.shift();
+  arr.push(v);
+}
+
+/**
+ * 在飞期间的放行上限。它只在回话真的丢了时才有用 —— Worker 那边任何一条视口消息都会
+ *   回话（连抛异常都回一条），所以这里只是最后一道保险，取大一点：取小了会在"这一下
+ *   真的要 300 ms"的时候放进第二条，队列于是又排起来，而排起来正是要消掉的东西。
+ */
+const kViewLatchMs = 1000;
+// 发出时刻按 ts 记账：放行时会有两条同时在飞，收到哪条就销哪条。
+const viewSentAtByTs = new Map();
+
+/**
+ * 视口提前量：消息里报的位置沿滚动方向再往前一点。
+ *
+ * 为什么必须提前：从发出到 Worker 换完窗，合成器并不等主线程 —— 这一趟往返里用户又
+ *   走了"速度乘往返"那么远。报当前位置的话，窗口（5 页长）就永远建在用户已经走过的
+ *   那些页上：实测 4 秒档（40 页/秒、往返 50 ms）窗口落后可见首页中位 4 页、p90 6 页，
+ *   而窗口只有 5 页 —— 可见的那几页于是有一半时间落在窗口外，画布全是给看不见的页建
+ *   的（可见页缺画布 46%；2 秒档更差，96%）。
+ * 提前量就是那一趟的估计：近期速度乘近期往返，夹在 kViewLeadMaxPages 页以内 ——
+ *   夹上界是免得把窗口推到用户前面太远（推过头等于把"后面"变成看不见）。
+ * 位置只用来选窗口，不写回 scrollTop（宿主只在 scrollReset 那份一次性信号上写，见
+ *   syncScrollFromGeom），所以报一个未来的位置不会与用户打架。
+ */
+const kViewLeadMaxPages = 4;
+const kSpeedIdleMs = 200;
+let lastScrollTopPx = -1;
+let lastScrollAt = 0;
+let speedPxPerMs = 0;
+let rttEmaMs = 0;
+
+function trackScrollSpeed(top, t) {
+  if (lastScrollTopPx < 0 || t - lastScrollAt > kSpeedIdleMs || t <= lastScrollAt) {
+    speedPxPerMs = 0;
+  } else {
+    const v = (top - lastScrollTopPx) / (t - lastScrollAt);
+    speedPxPerMs = speedPxPerMs === 0 ? v : speedPxPerMs * 0.6 + v * 0.4;
+  }
+  lastScrollTopPx = top;
+  lastScrollAt = t;
+}
+
+function viewLeadPx() {
+  if (!speedPxPerMs || !rttEmaMs || !mirror.geom) return 0;
+  const cap = kViewLeadMaxPages * mirror.geom.pageStep;
+  return Math.max(-cap, Math.min(cap, speedPxPerMs * rttEmaMs));
+}
+
+/**
+ * 甩滚停下来之后补一趟"零提前量"的对齐。
+ *
+ * 提前过的位置只用来选窗口，但它会留在引擎记着的 scrollY 上，而那个值还要用来定位
+ *   输入法候选窗与页内控件。停稳之后不回这一趟，候选窗就停在提前过的位置上。
+ * 安静 kScrollSettleMs 之内又有滚动事件的话，定时器重排。
+ */
+const kScrollSettleMs = 200;
+let viewSettleTimer = 0;
+
+function armViewSettle() {
+  if (viewSettleTimer) clearTimeout(viewSettleTimer);
+  viewSettleTimer = setTimeout(() => {
+    viewSettleTimer = 0;
+    speedPxPerMs = 0;
+    viewFireAndForget();
+  }, kScrollSettleMs);
+}
+
 function viewFireAndForget() {
+  if (dead) { viewInFlight = false; return; }
+  const t = now();
+  const top = stageEl.scrollTop * DPR;
+  trackScrollSpeed(top, t);
+  if (viewInFlight && t - viewSentAt < kViewLatchMs) {
+    ++viewDiag.coalesced;
+    viewWanted = true;
+    return;
+  }
+  if (viewInFlight) ++viewDiag.released;
+  viewInFlight = true;
+  viewWanted = false;
+  viewSentAt = t;
+  const ts = --viewTs;
+  viewSentAtByTs.set(ts, viewSentAt);
+  ++viewDiag.sent;
+  const lead = viewLeadPx();
+  if (lead !== 0) armViewSettle();
   const vs = viewSize();
-  post({ t: 'view', ts: 0, scrollY: Math.round(stageEl.scrollTop * DPR),
+  post({ t: 'view', ts, scrollY: Math.round(top + lead),
          viewW: vs.viewW, viewH: vs.viewH });
+}
+
+/**
+ * 一条视口消息处理完了（state 或 ack 都算）：飞完之后若期间又滚过，再补发一次。
+ *   补发的是"发的那一刻"的位置，所以永远追最新。
+ */
+function viewSettled(m) {
+  const at = viewSentAtByTs.get(m.ts);
+  if (at === undefined) return;      // 不在账上：别的命令的 ts，或已销过账
+  viewSentAtByTs.delete(m.ts);
+  const rtt = now() - at;
+  pushSample(viewDiag.rtt, rtt);
+  // 往返的近期均值：下一趟的提前量要乘它（见 viewLeadPx）。
+  rttEmaMs = rttEmaMs === 0 ? rtt : rttEmaMs * 0.6 + rtt * 0.4;
+  pushSample(viewDiag.work, typeof m.workMs === 'number' ? m.workMs : -1);
+  if (typeof m.packAvgMs === 'number') {
+    viewDiag.packAvg = m.packAvgMs;
+    viewDiag.packMax = m.packMaxMs || 0;
+  }
+  pushSample(viewDiag.blit, typeof m.blitMs === 'number' ? m.blitMs : -1);
+  pushSample(viewDiag.blitPages, typeof m.blitPages === 'number' ? m.blitPages : -1);
+  ++viewDiag.settled;
+  if (m.ts !== viewTs) return;       // 放行过的那条旧消息：销账即可，门闩归新的那条
+  viewInFlight = false;
+  if (viewWanted) viewFireAndForget();
 }
 
 /* ── 每页一张画布 ───────────────────────────────────────────────────────── */
@@ -298,6 +441,7 @@ function acquireCanvas() {
  */
 function sendPageCanvas(page, el, gm) {
   const off = el.transferControlToOffscreen();
+  ++viewDiag.canvasMsgs;
   post({ t: 'pageCanvas', ts: now(), page, canvas: off, dpr: gm.dpr,
          viewW: gm.viewW, viewH: gm.viewH }, [off]);
 }
@@ -316,6 +460,7 @@ function syncPageCanvases(gm) {
     pageCanvases.delete(p);
     // 告诉 Worker 放掉它那边的上下文（背衬内存跟着释放），元素直接扔给 GC。
     post({ t: 'dropPage', page: p });
+    ++viewDiag.canvasMsgs;
     el.remove();
   }
 
@@ -417,6 +562,26 @@ function syncSpacer(st, gm) {
   const total = Math.max(1, Number(st.totalPages) || 1);
   const h = Math.max(1, (total * gm.pageStep - gm.gap) / DPR);
   if (spacerEl.style.height !== h + 'px') spacerEl.style.height = h + 'px';
+
+  // 页纸底：让"还没渲染出来的页"也是一张白纸，而不是什么都没有。
+  //   为什么必须有、为什么用 CSS 而不是多建画布，与单线程宿主的 syncPageBackdrop
+  //   同一条理由（甩滚时引擎追不上，可见区域里既没有字也没有画布，看起来像坏了）。
+  //   这里挂在撑高层上：画布是绝对定位在它外面的，所以还要按 lastPageX 把底图
+  //   横向摆到页的位置上，宽度取页宽 —— 否则白纸会横铺满整个舞台。
+  const stepCss = Math.round(gm.pageStep / DPR);
+  const pageCss = Math.round(gm.pageW / DPR);
+  const hCss = Math.round((gm.pageStep - gm.gap) / DPR);
+  const img = `linear-gradient(to bottom, #ffffff 0 ${hCss}px,` +
+              ` rgba(255,255,255,0) ${hCss}px ${stepCss}px)`;
+  if (spacerEl.style.backgroundImage !== img) {
+    spacerEl.style.backgroundImage = img;
+    spacerEl.style.backgroundSize = `${pageCss}px ${stepCss}px`;
+    spacerEl.style.backgroundRepeat = 'repeat-y';
+  }
+  const bx = Math.round(lastPageX / DPR) + 'px';
+  if (spacerEl.style.backgroundPosition !== bx + ' 0px') {
+    spacerEl.style.backgroundPosition = bx + ' 0px';
+  }
 }
 
 function positionIme(st, gm) {
@@ -533,10 +698,19 @@ function handleMessage(m) {
     host.readyWallMs = now() - bootLead;
     return;
   }
-  if (m.t === 'state') return onState(m);
+  if (m.t === 'state') {
+    viewSettled(m);
+    // 主线程受理这一份状态花的时间。与"往返减 work"不是一回事，但要一起看：那边缺口大
+    //   而这边耗时小，说明时间花在路上（打包与跨线程），不是花在主线程的处理上。
+    const tHandle = now();
+    onState(m);
+    pushSample(viewDiag.handle, now() - tHandle);
+    return;
+  }
   // 视口消息在"窗口没变"时只回一个 ack：那一下 Worker 什么都没做（浏览器已经把
   //   画布搬走了），所以没有新状态可推。宿主拿到 ack 就把 Promise 收掉。
   if (m.t === 'ack') {
+    viewSettled(m);
     const p = pendingState.get(m.ts);
     if (p) {
       pendingState.delete(m.ts);
@@ -818,6 +992,9 @@ const ASK = {
   ink: () => ['ink', {}],
   engineStats: () => ['stats', {}],
   engineEditStats: () => ['editStats', {}],
+  // 预热一页的字形（不呈现、不改画面）。与单线程宿主同名入口，形状是 Promise ——
+  //   引擎在 Worker 那侧，异步是本质差异（与 allText 同一条说明）。
+  prewarmPage: (page) => ['prewarmPage', { page: page | 0 }],
 };
 for (const name of Object.keys(ASK)) {
   host[name] = (...a) => {
@@ -1123,6 +1300,18 @@ host.selfCheck = async () => {
     }),
   });
 };
+
+/**
+ * 视口队列的账（见 viewDiag 的说明）。rtt 与 work 按同一次回话成对入账，逐对相减就是
+ *   该次的排队等待。两个数组各留最近 512 条。
+ */
+host.viewDiag = () => ({
+  sent: viewDiag.sent, coalesced: viewDiag.coalesced, released: viewDiag.released,
+  settled: viewDiag.settled, canvasMsgs: viewDiag.canvasMsgs,
+  packAvg: viewDiag.packAvg, packMax: viewDiag.packMax,
+  rtt: viewDiag.rtt.slice(), work: viewDiag.work.slice(), handle: viewDiag.handle.slice(),
+  blit: viewDiag.blit.slice(), blitPages: viewDiag.blitPages.slice(),
+});
 
 host.setScroll = (cssPx) => {
   stageEl.scrollTop = cssPx;

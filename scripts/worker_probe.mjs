@@ -319,7 +319,9 @@ async function main() {
     'const before = { count: h.geom.count, pages: h.pageCanvasList, first: h.geom.first,' +
     '                 self: await h.selfCheck() };' +
     'const step = h.geom.pageStep;' +
-    'await h.setScroll((2 * step) / h.geom.dpr);' +
+    // 滚够 3 页：窗口是按"视口能装几页 + 2 页余量"开的，滚 2 页可能整段落在余量里
+    //   （那是对的，不是漏洞）—— 那样子集合本来就不该换，这条断言也就验不到东西。
+    'await h.setScroll((h.geom.count * step + step) / h.geom.dpr);' +
     'const after = { count: h.geom.count, pages: h.pageCanvasList, first: h.geom.first,' +
     '                self: await h.selfCheck() };' +
     'await h.zoomTo(1.5);' +

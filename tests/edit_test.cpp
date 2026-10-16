@@ -742,7 +742,7 @@ int main() {
         expectTrue(pages2 == 2, "这一个字把文档推到了第 2 页");
 
         // 核心断言。修复前 count 锁在 base_page_count_（=1），
-        //   frame_h 与宽高都没变 → geom_changed 恒 false → h2 == h1，新页不可见。
+        //   frame_h 与宽高都没变 → 换窗判据全不成立 → h2 == h1，新页不可见。
         expectTrue(h2 > h1, "帧缓冲高度跟随页数增长（修复前这里恒等 → 新页不可见）");
         expectTrue(e5.editStats().total_pages == 2, "本次呈现覆盖 2 页");
         expectTrue(e5.editStats().repainted_pages == 2,

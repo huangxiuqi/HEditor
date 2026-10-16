@@ -197,12 +197,13 @@ const frameCanvasProxy = {
 /**
  * 画布池：卸下来的页画布留着复用，不销毁。
  *
- * 为什么值得留着：换窗口时要卸掉几页、建起几页，而"新建一张画布"的钱几乎全在
- * 重新分配 backing store —— 893×1263 一页就是 4.5 MB。实测（diag_perf.mjs）：
- * 重建 4 张 14.60 ms，复用 4 张 3.80 ms，每张 2.7 ms 差在这上面。
- * 一句话说清：频繁重建确实有开销，但开销来自"重新分配"，不来自"换内容"——
- * 池子把前者消掉，后者本来就躲不掉（新露出来的那页必须重新贴像素）。
- * 池子封顶 MAX_WINDOW 页，够换一个来回。
+ * 为什么值得留着：换窗口时要卸掉几页、建起几页。实测（out/_diagCanvasAlloc.mjs，
+ *   一页 893×1263）把尺寸设成页背衬只要 0.001 ms —— 背衬是"第一次真画"时才实体化的，
+ *   那一下 2.65 ms/张；而已经实体化过的画布再贴一次只要 0.7 ms。池子留住元素，就是
+ *   留住那份已实体化的背衬，重新上场时省掉的是这 2 ms 上下的"首次触碰"。
+ *   （重建 4 张 14.60 ms 与复用 4 张 3.80 ms 的旧读数，差的正是这一笔，不在
+ *   "重新分配"本身 —— 分配那一步在页内几乎量不到。）
+ * 池子封顶 8 页（与 maxWindowPages 的上限同值），够换一个来回。
  */
 const canvasPool = [];
 
@@ -215,6 +216,31 @@ function pageCanvasFor(page) {
     pagesEl.appendChild(el);
   }
   return rec;
+}
+
+/**
+ * 页纸底：让"还没渲染出来的页"也是一张白纸，而不是什么都没有。
+ *
+ * 为什么必须有：甩滚时引擎追不上（一页在屏幕上只停留十几毫秒，而渲染一页要几十毫秒），
+ *   画布只存在于窗口覆盖的页上，于是可见区域里既没有字也没有画布 —— 看到的就是
+ *   "滚动时一片空白、停下来才刷出来"，而那片空白看起来像坏了。铺一层页形底之后，
+ *   全程都看得见一页页白纸在动，内容随后补上；PDF 阅读器用的也是这一手。
+ * 为什么用 CSS 而不是多建画布：这张图是纯渐变，浏览器自己画，主线程零成本；多建画布
+ *   要么白占几十 MB 背衬，要么还得为它跑一次 putImageData —— 那又把主线程占住了
+ *   （正是要避开的东西）。它是占位，不是内容：真正的字仍然只在画布上。
+ * 周期与页高都按 devicePixelRatio 折算，与画布用的是同一组尺寸，所以底下那层与画布
+ *   逐个对齐（对不齐会看到两条错位的边）。
+ */
+function syncPageBackdrop(pw, ph, step, dpr) {
+  const h = Math.round(ph / dpr);
+  const s = Math.round(step / dpr);
+  const img = `linear-gradient(to bottom, #ffffff 0 ${h}px,` +
+              ` rgba(255,255,255,0) ${h}px ${s}px)`;
+  if (pagesEl.style.backgroundImage !== img) {
+    pagesEl.style.backgroundImage = img;
+    pagesEl.style.backgroundSize = `100% ${s}px`;
+    pagesEl.style.backgroundRepeat = 'repeat-y';
+  }
 }
 
 /**
@@ -233,13 +259,14 @@ function syncPageCanvases(first, count, total) {
   const h = ((Math.max(1, total) * step - mod.pageGapPx()) / dpr) + 'px';
   if (pagesEl.style.width !== w) pagesEl.style.width = w;
   if (pagesEl.style.height !== h) pagesEl.style.height = h;
+  syncPageBackdrop(pw, ph, step, dpr);
 
   for (const [p, rec] of pageCanvases) {
     if (p < first || p >= first + count) {
       rec.el.remove();
       pageCanvases.delete(p);
       // 进池而不是丢掉：它的 backing store 还留着，下次换窗口拿来就能用。
-      if (canvasPool.length < MAX_WINDOW) canvasPool.push(rec.el);
+      if (canvasPool.length < 8) canvasPool.push(rec.el);
     }
   }
   for (let p = first; p < first + count; ++p) {
@@ -264,12 +291,11 @@ function syncPageCanvases(first, count, total) {
  * 窗口一变就整帧重建（底图按新范围重光栅，实测 3 页约 30 ms），所以锚点只在真的
  * 盖不住"必须装下的那几页"时才挪 —— 见 applyWindow 的滞回。
  *
- * 长度封顶 MAX_WINDOW 页：光标页与可见页可能隔得很远（用户把屏幕滚到别处去了），
+ * 长度封顶 maxWindowPages() 页：光标页与可见页可能隔得很远（用户把屏幕滚到别处去了），
  * 不封顶就会算出跨越整篇的窗口，那正好把"帧只装几页"这件事作废。
  * 实测（scripts/diag_perf.mjs 扫 zoom）：窗口 2~3 页时帧间隔只由单拍操作耗时决定，
  * 画布面积本身不再多花时间；而作废之前那张 18.3 Mpx 的整篇画布要多花整整一个 vsync。
  */
-const MAX_WINDOW = 3;    // 窗口封顶页数
 let lastAnchor = '';
 
 function visiblePageRange() {
@@ -283,6 +309,93 @@ function visiblePageRange() {
   const first = Math.min(total - 1, Math.max(0, Math.floor(top / step)));
   const last = Math.min(total - 1, Math.max(first, Math.floor(Math.max(top, bot - 1) / step)));
   return { first, last };
+}
+
+/**
+ * 窗口最多装几页：视口装得下的页数，再加 4 页余量 —— 余量就是"还能滚多远才需要换
+ *   窗"，也是换窗那一拍能用来垫的行程；它不由"看得见几页"定，而由"一拍跨过几页"定
+ *   —— 真机甩滚实测到每秒 80 页，一拍就是 1~2 页。
+ * 为什么不是更大（试过 8）：换窗成本正比于窗口长度而不是位移，窗口落后超过一个窗口长
+ *   时引擎走整窗重建（重画 count 页），一跳 94~286 ms，而余量 4 只要 45 ms 上下；余量
+ *   大了省下的只是换窗次数，而它不是瓶颈（实测余量 8 把落后从 3 页推到 8~28 页）。
+ * 页数按视口高度算而不是按"可见页 first..last"：后者随页边界在 n 与 n+1 之间跳，
+ *   而窗口尺寸一变就整窗重建。
+ * 两道封顶都是内存：一页约 4.5 MB 设备像素（893x1263 的 RGBA）故页数上限定 8；
+ *   高 DPI 下同样页数翻几倍，再按帧像素总量封一道（24 Mpx 约 96 MB），取小的那个。
+ * 封顶只压余量，不压"盖住视口"：盖不住就是整页空白，那是硬要求。
+ */
+const kWindowMarginPages = 4;
+const kWindowMaxPages = 8;
+const kWindowMaxPixels = 24 * 1024 * 1024;
+
+function maxWindowPages() {
+  const dpr = window.devicePixelRatio || 1;
+  const step = mod.pagePxHeight() + mod.pageGapPx();
+  const vis = Math.ceil((stageEl.clientHeight * dpr) / step);
+  const byPixels = Math.floor(kWindowMaxPixels /
+                               Math.max(1, mod.pagePxWidth() * mod.pagePxHeight()));
+  return Math.max(vis, Math.min(kWindowMaxPages, byPixels, vis + kWindowMarginPages));
+}
+
+/**
+ * 换窗的提前量（页）与滚动方向。
+ *
+ * 为什么需要提前量：换窗那一拍要重光栅新露出来的那几页并挪一次底图，中位 20~45 ms，
+ *   而合成器不等主线程 —— 这几十毫秒里它照样按用户速度往前滚（每秒 80 页就是 4~5 页）。
+ *   所以这笔钱得在"窗口还盖得住前面那几页"时就付掉；等可见页贴到窗口边缘才动手，
+ *   那几十毫秒里新露出来的地方必然是空白。
+ * 为什么是 2 页：提前量要盖住的是"触发到呈现完成"的延迟。实测换窗一拍 20~45 ms，
+ *   而每秒 80 页对应每毫秒 0.08 页 —— 45 ms 就是 3.6 页。取 2 页意味着触发时前方
+ *   还剩 2 页（约 25 ms @80 页/s）可以垫，而余量 8 页保证这 2 页是"额外的"，
+ *   不会把窗口长度吃掉（长度一改就走整窗重建）。
+ * 方向只影响"多出来的页放前面还是后面"，不影响长度，所以来回滚不会反复整窗重建。
+ */
+const kWindowLookaheadPages = 2;
+let scrollDir = 1;
+
+/**
+ * 让出点：滚动快到"追不上"时这一拍不换窗，把主线程让给合成器。判据是实测出来的而不是常数：换窗那一拍花
+ *   T 毫秒，而合成器不等主线程 —— 这 T 毫秒里它照样按用户速度往前滚，滚过的页数就是 T 乘速度。触发时前方
+ *   只剩"提前量"那几页可以垫（kWindowLookaheadPages），所以只要 T × 速度 > 提前量，窗口就必然在这期间被
+ *   滚出可见范围，而且每一拍都追不回来 —— 这不是"慢一点"，是雪崩。
+ * 实测（真滚轮，2 秒滚完 160 页 = 每秒 80 页）进入这一档后窗口落后 8~28 页、可见页 55% 的帧无画布、长任务
+ *   占用 169%~318%，画面仍是空白：代价全付了，一点内容都没换来。所以这一档要主动放弃 —— 不换窗，让合成器
+ *   把已有内容平滑滚过去（画布在文档流里，滚动本身不花引擎的钱），速度降下来（用户松手或放慢）再一次性对齐。
+ *   对齐的成本只与窗口大小有关（整窗重建 count 页），与落后多少页无关，所以不会因为放弃而变贵。
+ * 速度取平滑值而不是瞬时值：相邻两拍的位移差很大（合成器按惯性加速），用瞬时值会让判据在
+ *   "放弃—对齐—放弃"之间来回切；平滑之后它在整段甩滚里稳定地保持放弃状态。单位取页/毫秒，
+ *   判据两边都是页；空闲超过 200 ms 直接归零 —— 用户已经停下，速度不该被惯性拖着。
+ */
+const kSpeedIdleMs = 200;
+let speedPagesPerMs = 0;
+let lastSpeedStamp = 0;
+// 上一拍"对齐窗口 + 重光栅 + 上屏"实际占住的墙钟时间（只用于取证显示）。
+let lastScrollWorkMs = 0;
+// 判据用的成本估计：对齐耗时的近期最小值，而不是最后那一拍的值。
+//
+// 为什么不能用最后一次：一旦放弃过一次，下一次对齐必然是"追了很久之后的整窗重建"
+//   （窗口落后超过一个窗口长，走不了平移复用），那一拍要 60~150 ms。拿它当成本，
+//   判据就会一直说"追不上"，于是永远放弃下去 —— 实测这个自锁把每秒 40 页那一档
+//   从"整屏全空 0%"直接打成 87%（它本来跟得上）。
+//   取最小值拿到的是稳态路径的成本（平移复用一页，实测 26 ms 上下），那才是
+//   "跟得上时本来要花多少"的答案。乘 1.05 是允许它慢慢爬：机器真的更慢时，
+//   成本估计会跟着上去，判据最终还是能得出"追不上"。
+let followCostMs = 0;
+
+function updateScrollSpeed(movedPages, t) {
+  if (lastSpeedStamp > 0) {
+    const dt = t - lastSpeedStamp;
+    if (dt > 0 && dt < kSpeedIdleMs) {
+      speedPagesPerMs = speedPagesPerMs * 0.6 + (movedPages / dt) * 0.4;
+    } else if (dt >= kSpeedIdleMs) {
+      speedPagesPerMs = 0;
+    }
+  }
+  lastSpeedStamp = t;
+}
+
+function tooFastToFollow() {
+  return followCostMs > 0 && followCostMs * speedPagesPerMs > kWindowLookaheadPages;
 }
 
 /**
@@ -302,33 +415,45 @@ function desiredWindow() {
   const vis = visiblePageRange();
   let lo = vis.first;
   let hi = vis.last;
+  // 可见页数封顶在 maxWindowPages()：真值本来就不可能到那儿（视口装得下的页数
+  //   是 ceil(视口/步距)+1，而 maxWindowPages 是这个数再加 3），所以这一条只会拦下
+  //   算歪了的范围 —— 而 range 是拿 getBoundingClientRect 算的，滚动位置刚变、
+  //   布局还没落定的那一拍它能虚高好几页。虚高的后果不是画多了，而是滞回判"窗口
+  //   盖不住"，白换一次窗：那次 setViewportAnchor 其实和引擎的窗口一样，于是只重画
+  //   一个光标，把上一拍整篇重绘的账冲成 186 px（edit_probe 的参考臂就是这么红的）。
+  const visCap = maxWindowPages();
+  if (hi - lo + 1 > visCap) hi = lo + visCap - 1;
   const cp = lastEdit ? lastEdit.caretPage : -1;
-  if (MAX_WINDOW - (hi - lo + 1) > 0 && cp >= 0 && cp < total) {
+  if (maxWindowPages() - (hi - lo + 1) > 0 && cp >= 0 && cp < total) {
     if (cp === lo - 1) lo = cp;
     else if (cp === hi + 1) hi = cp;
   }
   let first = Math.max(0, lo);
   const need = hi - lo + 1;
   const count = Math.max(1, Math.min(need, total));
-  // 下界是"装下可见页"，MAX_WINDOW 只是它的上界而不是替代品：
+  // 下界是"装下可见页"，maxWindowPages 只是它的上界而不是替代品：
   //   舞台比 3 页还高时（最大化窗口、缩小 zoom），宁可多画几页也不能留空白页。
   if (first + count > total) first = Math.max(0, total - count);
   return { first, count };
 }
 
 /**
- * 要挪窗口时挪到哪：以"必须装下的那几页"为中心，尽量开满 MAX_WINDOW 页。
+ * 要挪窗口时挪到哪：把多出来的页放在滚动方向上，见 kWindowLookaheadPages。
  *
  * 为什么不直接把要求当成窗口（窗口刚好贴住可见页）：那样每滚一页，要求立刻跑到
  *   窗口外面，于是每滚一页都要整窗重光栅 —— 3 页窗口量到 30 ms、1 页窗口 10 ms，
  *   连续滚动就是十几二十帧的节奏。
  *   留出余量之后，一页滚动落在余量里：窗口不动，引擎一个字都不用重画
  *   （实测这个时候 present 只要 1 ms，画布搬运全交给合成器）。
- *   代价是窗口大一点、重建时多画一两页；重建次数少一个量级，这一头划算。
+ * 为什么余量偏向滚动方向而不是两边各一半：两边各一半时，往下滚只有一半余量在前面，
+ *   而"前面还剩多少"正好就是换窗那一拍能容许多久（见 kWindowLookaheadPages）。
+ *   放 1 页在后面是为了吸收"来回轻推"——完全不给后面留余量时，往回一点就得再换一次窗。
  */
 function targetWindow(req, total) {
-  const count = Math.max(req.count, Math.min(MAX_WINDOW, total));
-  let first = req.first - Math.floor((count - req.count) / 2);
+  const count = Math.max(req.count, Math.min(maxWindowPages(), total));
+  const spare = count - req.count;
+  const behind = scrollDir < 0 ? Math.max(0, spare - 1) : 1;
+  let first = req.first - Math.min(behind, spare);
   if (first + count > total) first = total - count;
   if (first < 0) first = 0;
   return { first, count: Math.max(1, Math.min(count, total)) };
@@ -337,19 +462,31 @@ function targetWindow(req, total) {
 /**
  * 按当前滚动位置与光标把视口锚点对一遍。返回 true 表示锚点变了（调用方要重新呈现）。
  *
- * 滞回：现有窗口只要还盖得住"必须装下的那几页"，就原样留着不动。
- *   判据必须取"要求"而不是"目标窗口" —— 目标带余量、还会随可见页挪，
+ * 滞回：现有窗口只要还盖得住"要求 + 滚动方向上 1 页提前量"，就原样留着不动。
+ *   判据取要求 + 提前量，而不是"目标窗口" —— 目标带余量、还会随可见页挪，
  *   拿它当判据等于"窗口要永远精确居中"，一滚就动、滞回形同虚设。
- *   没有滞回的话，光标一路往下打字、可见页一格一格地换，每换一格就整帧重建一次，
- *   手感就是"每隔十几个字卡一下"。
+ *   但也不能只取要求（旧写法）：那时换窗发生在"可见页已经贴到窗口边缘"的一刻，
+ *   而换窗那一拍有 48~67 ms，合成器在这期间继续往前滚 —— 露出来的地方必然空白。
+ *   多留这一页，触发时前方就还剩约一页（83 ms @12000 px/s）可以垫。
+ *   实测（scripts/diag_selperf.mjs 的 O 段）这条把"可见页没有画布的帧"从 8~9% 压到 0。
+ * 没有滞回的话，光标一路往下打字、可见页一格一格地换，每换一格就整帧重建一次，
+ * 手感就是"每隔十几个字卡一下"。
  */
 function applyWindow() {
   if (!mod) return false;
   const total = Math.max(1, lastEdit ? lastEdit.totalPages : 1);
   const req = desiredWindow();
+  const look = kWindowLookaheadPages;
+  // 要求先夹到文档范围内：第 0 页往上、最后一页往下都没有"那一页"可留，
+  //   不夹的话 needFirst 会是 -1 —— 那是个永远满足不了的判据（窗口不可能从 -1 页起），
+  //   于是滞回恒判"盖不住"，每一拍都白换一次窗（文档顶端往上滚过之后，每次
+  //   applyWindow 都触发，把整篇重绘那一拍的账冲成"只重画光标"的 186 px）。
+  const needFirst = Math.max(0, req.first - (scrollDir < 0 ? look : 0));
+  const needLast = Math.min(total - 1,
+                            req.first + req.count - 1 + (scrollDir > 0 ? look : 0));
   const cur = lastAnchor.split(':').map(Number);
   if (cur.length === 2 && Number.isFinite(cur[0]) && Number.isFinite(cur[1]) &&
-      cur[0] <= req.first && req.first + req.count <= cur[0] + cur[1]) {
+      cur[0] <= needFirst && needLast <= cur[0] + cur[1] - 1) {
     return false;
   }
   const w = targetWindow(req, total);
@@ -367,15 +504,16 @@ function applyWindow() {
  * 第一次重排会按上一篇文档留下的锚点栅格化，随后 settle 再挪一次窗口重排，
  * 于是"装载花了多少"这件事被后一次覆盖掉（面板与探针读到的会是"重排 0 段"）。
  *
- * 这里故意开满 MAX_WINDOW 页而不是精确算：settle 里的滞回只认"现有窗口盖不盖得住"，
+ * 这里故意开满 maxWindowPages() 页而不是精确算：settle 里的滞回只认"现有窗口盖不盖得住"，
  * 盖得住就不动 —— 开满一定盖得住，于是装载之后不会再挪窗口、不会再重排一次。
  * 精确算成 1 页反而会因为差一页而触发第二次重排（那正是要避免的）。
  */
 function presetWindowForLoad() {
   if (!mod) return;
   stageEl.scrollTop = 0;
-  mod.setViewportAnchor(0, MAX_WINDOW);
-  lastAnchor = '0:' + MAX_WINDOW;
+  const n = maxWindowPages();
+  mod.setViewportAnchor(0, n);
+  lastAnchor = '0:' + n;
 }
 
 /**
@@ -1288,15 +1426,120 @@ function resetBlink() {
  * 只有"窗口真的变了"才重排（见 applyWindow），窗口内滚动一格都不碰引擎。
  */
 let scrollRaf = 0;
+let lastScrollTop = 0;
+
+// 每轮滚动之后往前预热一页：一页约 10~30 ms，且要等滚动静下来 90 ms 才动手。
+//   这两个限量的理由都是"别把事件循环占死"：预热一旦成串地跑，它就把滚动自己的
+//   那一拍、输入与探针的求值全排在后面 —— 那不是优化，是拿一个卡顿换另一个。
+const PREFETCH_PAGES = 1;
+const PREFETCH_DELAY_MS = 90;
+let prefetchDir = 1;
+let prefetchNext = -1;
+let prefetchLeft = 0;
+let prefetchTimer = 0;
+
+/**
+ * 空闲一拍里预热"再往前会露出来的那一页"的字形。
+ *
+ * 为什么需要它：滚动换窗那一拍要重新光栅新露出来的那几页，而冷字形占那一拍的一大半。
+ *   同一条路上同一页量到：冷的 14.6 µs·字形、整拍 44.5 ms；预热带过之后 7.0 µs、25.7 ms。
+ *   把这笔钱挪到"当前画面还够用"的空闲帧里先付掉，换窗那一拍就短一截。
+ * 每轮换窗只排一页、且要等 90 ms 没有新滚动才真的跑：连续快滚时它几乎不跑（那是
+ *   对的，那时候每一拍都该留给滚动），滚动一停就先把下一页烘上。
+ */
+function schedulePrefetch(dir) {
+  if (!ready || !mod || typeof mod.prewarmPageGlyphs !== 'function') return;
+  prefetchDir = dir < 0 ? -1 : 1;
+  prefetchNext = prefetchDir > 0 ? mod.windowFirstPage() + mod.windowPageCount()
+                                 : mod.windowFirstPage() - 1;
+  prefetchLeft = PREFETCH_PAGES;
+  if (prefetchTimer) clearTimeout(prefetchTimer);
+  prefetchTimer = setTimeout(pumpPrefetch, PREFETCH_DELAY_MS);
+}
+
+function pumpPrefetch() {
+  prefetchTimer = 0;
+  if (!ready || !mod || prefetchLeft <= 0) return;
+  const total = Math.max(1, lastEdit ? lastEdit.totalPages : 1);
+  if (prefetchNext < 0 || prefetchNext >= total) return;
+  mod.prewarmPageGlyphs(prefetchNext);
+  prefetchNext += prefetchDir;
+  --prefetchLeft;
+}
+
+/**
+ * 连续放弃的对数上限：放弃状态不许无限持续。
+ *
+ * 判据是实测推出来的，而实测会高估 —— 平滑后的速度在惯性尾部降得比真实慢，一直放弃的
+ *   后果是"画面停在早已滚过的那一屏"。所以每放弃这么多拍就强制对齐一次：对齐的成本只与
+ *   窗口大小有关（整窗重建 5 页 ≈ 55 ms），偶发一次完全可以承受，而它保证画面每隔
+ *   一小段时间就回到正确的位置上。
+ */
+const kMaxSkipRun = 6;
+let skipRun = 0;
+
+/**
+ * 滚动停下后的收尾对齐。
+ *
+ * 为什么必须有：放弃期间画面故意停在旧位置，而停下来之后不会再有 scroll 事件
+ *   —— 没有事件就没有下一拍，画面就永远停在旧位置上（看到的正是"停下后还要等"）。
+ *   所以放弃时挂一个定时器：安静够久就对齐一次。用定时器而不是 scrollend 事件，
+ *   是因为放弃期间本来就在等"安静下来"这件事，两者是同一个条件，多一个事件源只是
+ *   多一条要维护的降级路径。
+ */
+const kScrollSettleMs = 140;
+let settleTimer = 0;
+
+function alignAfterScroll() {
+  settleTimer = 0;
+  if (!ready || busy || !mod) return;
+  if (performance.now() - lastSpeedStamp < kScrollSettleMs) {
+    // 还在动：再等一轮。这样连续滚动时它一直不会对齐，也就不会与放弃判据打架。
+    settleTimer = setTimeout(alignAfterScroll, kScrollSettleMs);
+    return;
+  }
+  // 停了：速度归零，下一拍起恢复正常跟随，并立刻把窗口对齐到当前可见页。
+  speedPagesPerMs = 0;
+  skipRun = 0;
+  if (!applyWindow()) return;
+  mod.present();
+  settle(JSON.parse(mod.editStatsJson()), { scroll: false });
+}
 
 function onStageScroll() {
   if (!ready || busy || scrollRaf) return;
   scrollRaf = requestAnimationFrame(() => {
     scrollRaf = 0;
     if (!ready || busy || !mod) return;
+    const t = performance.now();
+    const top = stageEl.scrollTop;
+    const dirPx = top - lastScrollTop;
+    lastScrollTop = top;
+    // 方向只用来决定"多出来的余量放前面还是后面"（见 targetWindow），
+    //   所以只在真的动了的时候更新 —— 把 0 差值当下行会让来回轻推翻转方向。
+    if (dirPx !== 0) scrollDir = dirPx > 0 ? 1 : -1;
+    const dpr = window.devicePixelRatio || 1;
+    const step = mod.pagePxHeight() + mod.pageGapPx();
+    const movedPages = Math.abs(dirPx) * dpr / Math.max(1, step);
+    updateScrollSpeed(movedPages, t);
+    if (tooFastToFollow() && skipRun < kMaxSkipRun) {
+      ++skipRun;
+      // 放弃期间必须留一个收尾：停下之后不会再有 scroll 事件，见 alignAfterScroll。
+      if (!settleTimer) settleTimer = setTimeout(alignAfterScroll, kScrollSettleMs);
+      return;
+    }
+    skipRun = 0;
+    // 这一拍被占住多久：从对齐窗口到上屏完成。引擎那一段（present）不在 settle 里，
+    //   settleMs 只记了宿主侧的上屏与面板（实测 5 ms 对 45 ms），所以这里自己量整段。
+    const tWork = performance.now();
     if (!applyWindow()) return;
     mod.present();
-    settle(JSON.parse(mod.editStatsJson()), { scroll: false });
+    const st = JSON.parse(mod.editStatsJson());
+    settle(st, { scroll: false });
+    lastScrollWorkMs = performance.now() - tWork;
+    followCostMs = followCostMs === 0 ? lastScrollWorkMs
+                                      : Math.min(followCostMs * 1.05, lastScrollWorkMs);
+    schedulePrefetch(Math.sign(dirPx));
   });
 }
 
@@ -1719,12 +1962,16 @@ const facade = {
     return this.present();
   },
   get bracketScope() { return mod ? mod.bracketScope() : 0; },
-  // 光标与选区的样式（色值 [r,g,b,a]，宽度单位磅）。
-  //   引擎只换参数、不作废底图（见 setCaretAndSelectionStyle），所以这里补一次 present
+  // 光标与选区的样式（色值 [r,g,b,a]，宽度单位磅）。  //   引擎只换参数、不作废底图（见 setCaretAndSelectionStyle），所以这里补一次 present
   //   就够 —— 走 setConfig 那条路会把窗口里的每一页重新光栅，取色器连续改时每一下都付。
   //   两个取值器与两个 setter 的读写形状一致，探针两边写同一句。
   get caretStyle() { return mod ? JSON.parse(mod.caretStyleJson()) : null; },
   get selectionStyle() { return mod ? JSON.parse(mod.selectionStyleJson()) : null; },
+  // 宿主侧上屏那四段（取帧 / ImageData / putImageData / 摆 IME）。引擎的 paintMs 不含它 ——
+  //   滚动时"一卡一下"的总时长是两段之和，分开记才知道该优化哪一边。
+  get lastBlit() { return lastBlit; },
+  // 预热一页的字形：不呈现、不改画面，只把 mask 光栅进缓存。返回触及的字形数。
+  prewarmPage(page) { return mod ? mod.prewarmPageGlyphs(page | 0) : 0; },
   // 部分字段缺省时按现状补全：面板往往只想改颜色，不该被迫把宽度也读一遍。
   setCaretStyle(style) {
     if (!ready) return null;
@@ -2041,6 +2288,10 @@ const facade = {
     for (const [p, rec] of pageCanvases) out.push({ page: p, el: rec.el });
     return out.sort((a, b) => a.page - b.page);
   },
+  // 窗口里当前有画布的页号（升序）。与 Worker 宿主的同名取值器逐字对齐 ——
+  //   探针要数"看得见的那几页里有几张没有画布"（没有画布 = 屏幕上一片空白），
+  //   两个宿主给的形状不一致的话，那一句就得分成两处写。
+  get pageCanvasList() { return [...pageCanvases.keys()].sort((a, b) => a - b); },
   // 页在帧像素下的几何 [宽, 高, 间隙]。
   get pagePx() {
     return mod ? [mod.pagePxWidth(), mod.pagePxHeight(), mod.pageGapPx()] : null;

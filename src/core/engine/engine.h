@@ -58,6 +58,17 @@ public:
                                    const Color& selection);
 
     /**
+     * 预热一页的字形：把它的 mask 光栅一遍送进字形缓存，不呈现、不改画面。
+     *
+     * 为什么要有它：滚动换窗那一拍最贵的部分是冷字形光栅 —— 2000 段长文档 @1.5 倍
+     *   一页约 1500 个字形，冷缓存下实测 50~90 ms（热缓存只要 8~12 ms），而它必须
+     *   在换窗那一拍里做完，于是"滚动时那几页还没画出来"。把这笔钱挪到当前画面还
+     *   够用的空闲帧里先付掉，换窗就只剩铺底色与帧搬运。
+     * 返回本次预热触及的字形数（0 = 这一页没有字形或还没排版）。
+     */
+    int prewarmPageGlyphs(int page);
+
+    /**
      * 页度量：断行依赖内容宽度，所以改它必须整篇重排（影响面不可定位）。
      */
     void setPage(const PageMetrics& page) {
@@ -960,8 +971,7 @@ private:
     /**
      * 光标矩形（帧像素坐标）。caret_visible 为 false 或找不到行盒时返回零矩形。
      */
-    Rect caretRectPx() const;
-    /**
+    Rect caretRectPx() const;    /**
      * 光标所在页（绝对页号；-1 = 找不到行盒）。
      * 窗口化之后这是必需的一个数：帧只装窗口内的页，光标不在窗口里就既画不出来、
      * 也点不中它 —— 宿主拿它决定窗口该锚在哪。
@@ -1206,6 +1216,16 @@ private:
     Bitmap base_;    // 底图（无光标）—— 局部重绘的全部依据就是这个缓存
 
     /**
+     * 预热字形用的临时靶子：一条页宽的窄带，画进去的像素随用随丢。
+     *
+     * 为什么不另做一条"只光栅不画"的路径：mask 进缓存这件事由绘制路径负责
+     *   （Skia 侧是它自己的 strike，自写侧是 GlyphCache）。另起一条就要再写一遍
+     *   缓存键的算法，而两条路径的键只要差一点，预热就毫无效果，且不会报错。
+     *   靶子够宽够高，字形不会被裁，缓存才存得下（见 rasterizeGlyph 的 uncut）。
+     */
+    Bitmap prewarm_;
+
+    /**
      * 帧缓冲与底图共享的字形光栅缓存。见 core/render/bitmap.h 里的
      * GlyphMask / GlyphCache 注释（为什么必须有亚像素相位、为什么两条路径
      * 必须算出同一串浮点数）。
@@ -1213,6 +1233,18 @@ private:
     std::shared_ptr<GlyphCache> glyph_cache_;
     EngineStats stats_;
     EditStats edit_stats_;
+
+    /**
+     * 与光栅后端有关的、只能设一次的那些参数（目前是 Skia 的字形缓存预算）。
+     *
+     * 为什么要有这么一个"懒做一次"的入口，而不是摆在 init() 里：wasm 宿主不走 init() ——
+     *   它是 g_engine.fonts().addFaceFromMemory(...) 直接装字体，于是摆在 init() 里的
+     *   设置在那条路上一次都不会执行（预算写成 48 MB，面板读回来仍是默认的 2 MB）。
+     *   present 与预热是所有宿主都必经的两条路，而它们又都在"要光栅字形"之前，
+     *   所以放在那儿是唯一保证生效的位置。
+     */
+    void ensureRenderSetup();
+    bool render_setup_done_ = false;
 
     /**
      * 光标与选区的唯一真源：一对全局流位置（anchor 是不动的那一端，focus 跟着光标走）。

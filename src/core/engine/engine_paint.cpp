@@ -33,7 +33,7 @@ void EditorEngine::repaint() {
     // 帧范围取本次布局的页数，不能锁在"底图已画过多少页"上。
     //
     //   否则文档从 N 页涨到 N+1 页时（页尾敲字、内容溢出到下一页）帧高不变，
-    //   presentInternal 里 geom_changed 恒为 false，新页永远不进帧 —— 表现为
+    //   presentInternal 里换窗判据（尺寸与页范围）都不成立，新页永远不进帧 —— 表现为
     //   "字打进去了，屏幕上什么都没多"，且之后每次重绘都按 N 页算帧高，不会自愈。
     //   页数增加时全帧重建；页数不变时仍走脏页增量。
     const int total = std::max(1, stats_.page_count);
@@ -115,8 +115,84 @@ void EditorEngine::snapshotLineGeometry() {
     }
 }
 
+/**
+ * 预热带的像素高度。两行多一点：字形画进去不会被上下裁掉，缓存才存得住。
+ */
+constexpr int kPrewarmBandPx = 96;
+
+/**
+ * 预热时字形的纵向落点（预热带的局部像素）。
+ *
+ * 取在带的中部：给上行伸展与带下缘都留出余地，免得幅面大的字形被裁。
+ */
+constexpr float kPrewarmYOffsetPx = 40.0f;
+
+/**
+ * 预热一页的字形：把 mask 光栅一遍送进字形缓存，画面一个像素都不动。
+ *
+ * 靶子是一条页宽的窄带（见 prewarm_ 的说明）。字形按真实横向坐标画进去 ——
+ *   横向是亚像素定位（Skia 侧 setSubpixel），横向小数相位不同就是另一份 mask，
+ *   水平挪一下就把预热做废了。纵向只把整数部分挪走、小数相位原样保留，让字形
+ *   落进这条带里；纵向相位不进缓存键（掩码的纵向落点由 blit 决定）。
+ */
+int EditorEngine::prewarmPageGlyphs(int page) {
+    if (layout_.glyphs.empty() || page < 0) return 0;
+    ensureRenderSetup();
+    const int page_px_w = pagePxWidth();
+    const int page_px_h = pagePxHeight();
+    if (page_px_w <= 0 || page_px_h <= 0) return 0;
+    // 带高取两行多一点：字形不会被上下裁掉，缓存才存得住（见 rasterizeGlyph 的 uncut）。
+    if (prewarm_.width() != page_px_w || prewarm_.height() != kPrewarmBandPx) {
+        prewarm_.reset(page_px_w, kPrewarmBandPx);
+    }
+    // 必须与底图共用字体表：字形缓存按 strike 规格索引，规格里含字体对象的身份，
+    //   各建一份 SkTypeface 就是两份互不相见的缓存：预热会静默地什么都不做
+    //   （症状只是"没变快"）。
+    prewarm_.shareFonts(base_);
+    prewarm_.setGlyphCache(glyph_cache_);
+    prewarm_.clear(cfg_.page_fill);
+
+    const float zoom = cfg_.zoom;
+    const float units_to_px = zoom / kFontScalePerPt;
+    std::vector<uint32_t> ids;
+    std::vector<float> xs;
+    std::vector<float> ys;
+    hb_font_t* run_font = nullptr;
+    Color run_color{};
+    float run_rot = 0.0f;
+    auto flush = [&]() {
+        if (ids.empty()) return;
+        prewarm_.drawGlyphs(run_font, ids.data(), xs.data(), ys.data(),
+                            static_cast<int>(ids.size()), units_to_px, run_color, run_rot);
+        ids.clear();
+        xs.clear();
+        ys.clear();
+    };
+    int n = 0;
+    for (const PlacedGlyph& pg : layout_.glyphs) {
+        if (pg.page != page || !pg.font) continue;
+        hb_font_t* f = pg.font->hb();
+        if (!ids.empty() && (f != run_font || pg.color != run_color || pg.rotate_deg != run_rot)) {
+            flush();
+        }
+        if (ids.empty()) {
+            run_font = f;
+            run_color = pg.color;
+            run_rot = pg.rotate_deg;
+        }
+        const float y = pg.y_pt * zoom;
+        ids.push_back(pg.glyph_id);
+        xs.push_back(pg.x_pt * zoom);
+        ys.push_back(y - std::floor(y) + kPrewarmYOffsetPx);
+        ++n;
+    }
+    flush();
+    return n;
+}
+
 void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
     const auto t0 = Clock::now();
+    ensureRenderSetup();
     bitmap_.resetPaintedPixels();
     // 底图那份账单独清、单独读：字形是画在底图上的（帧那边只从底图搬像素过来），
     //   两块的写入量口径不同 —— 帧的记账回答"上屏搬了多少"，底图的回答"光栅画了多少"。
@@ -172,12 +248,31 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
         const float y0 = band ? std::max(0.0f, (*band_lo_pt) * zoom - 1.0f) : 0.0f;
         const float y1 = band ? std::min(static_cast<float>(page_px_h), (*band_hi_pt) * zoom + 1.0f)
                               : static_cast<float>(page_px_h);
-        base_.fillRect(
-            Rect{0.0f, off_y + y0, static_cast<float>(page_px_w), std::max(0.0f, y1 - y0)},
-            cfg_.page_fill);
-        if (!band) {
-            // 整页时还要把上下半格页间隙也擦成背景色
-            base_.fillRect(pageRectLocal(local), cfg_.background);
+        if (band) {
+            base_.fillRect(
+                Rect{0.0f, off_y + y0, static_cast<float>(page_px_w), std::max(0.0f, y1 - y0)},
+                cfg_.page_fill);
+        } else {
+            // 整页：上下半格页间隙擦成背景色，页内填页面底色。
+            //   间隙只有上下半格，所以分两条擦即可 —— 若按整个页矩形擦一次（含页内），
+            //   紧接着又要把页内填回页面底色，那笔里九成九是页内区域，等于多写一遍
+            //   整页（一页 4.4 MB）。两条的边界按整数像素算，与页矩形的 floor/ceil 同值。
+            const float half = static_cast<float>(gap_px) * 0.5f + 1.0f;
+            const int bg_top = static_cast<int>(std::floor(std::max(0.0f, off_y - half)));
+            const int bg_bot = static_cast<int>(std::ceil(std::min(
+                static_cast<float>(frame_h), off_y + static_cast<float>(page_px_h) + half)));
+            const int pg_top = static_cast<int>(std::floor(off_y));
+            const int pg_bot = static_cast<int>(std::ceil(off_y + static_cast<float>(page_px_h)));
+            if (pg_top > bg_top)
+                base_.fillRect(Rect{0.0f, static_cast<float>(bg_top),
+                                    static_cast<float>(page_px_w),
+                                    static_cast<float>(pg_top - bg_top)},
+                               cfg_.background);
+            if (bg_bot > pg_bot)
+                base_.fillRect(Rect{0.0f, static_cast<float>(pg_bot),
+                                    static_cast<float>(page_px_w),
+                                    static_cast<float>(bg_bot - pg_bot)},
+                               cfg_.background);
             base_.fillRect(
                 Rect{0.0f, off_y, static_cast<float>(page_px_w), static_cast<float>(page_px_h)},
                 cfg_.page_fill);
@@ -248,9 +343,6 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
         }
         edit_stats_.dirty_page_count = dp;
     }
-
-    const bool geom_changed = (base_.width() != frame_w) || (base_.height() != frame_h) ||
-                              (base_first_page_ != first_page) || (base_page_count_ != count);
 
     // 标记计划变了就整帧重贴。这是结构性的：标记画在帧上，擦除只能靠
     // control_marks_prev_ 记下的矩形，一旦记漏就会永久残留。
@@ -667,6 +759,9 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
     stats_.paint_ms = paint_ms;
     stats_.paint_fill_ms = sub_fill_ms;
     stats_.paint_glyph_ms = sub_glyph_ms;
+    // 记账那一笔含在 sub_glyph_ms 里，这里只是把它单独报出来（口径见 EngineStats）。
+    //   取数的时机在整页循环之后、resetPaintedPixels 之前 —— 与 painted_glyphs 同一份账。
+    stats_.paint_glyph_bounds_ms = base_.glyphBoundsMs();
     // 减掉前两段，剩下的就是"帧缓冲搬移"这一段 —— 比再插一个计时点更不容易漏
     // （中间还有光标擦除/填充那一小块）。
     stats_.paint_present_ms = std::max(0.0, paint_ms - sub_fill_ms - sub_glyph_ms);
@@ -680,6 +775,9 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
         stats_.glyph_cache_misses = static_cast<long long>(glyph_cache_->misses());
         stats_.glyph_cache_entries = static_cast<int>(glyph_cache_->entries());
     }
+    // Skia 那一侧的预算与占用：自写后端这两个入口是空实现 / 0。
+    stats_.glyph_cache_bytes = base_.glyphCacheUsedBytes();
+    stats_.glyph_cache_limit = base_.glyphCacheBudgetBytes();
 }
 
 /**
