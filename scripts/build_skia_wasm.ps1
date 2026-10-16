@@ -36,6 +36,18 @@
 #    全部找不到。解法：在 args.gn 里把每条 skia_use_system_* 显式关掉，
 #    改回从 third_party/externals 编源码（源码就是第 ① 步拉下来的）。
 #
+# ⑤ 上游的 wasm 工具链不给 -msimd128，还显式定义 SKVX_DISABLE_SIMD
+#    （gn/toolchain/wasm.gni 的 wasm_defines 里），于是 Skia 的 SkVx 与
+#    SkRasterPipeline 在 wasm 上全走标量。两处必须**成对**改：args.gn 里加
+#    extra_cflags 的 -msimd128，同时 patch 掉那条 define —— 只做前一半的话
+#    SKVX_USE_SIMD 仍被强制为 0，等于白加。
+#    ★ 改完要做三件配套事，缺一件就出静默错误：① 重建 libskia；
+#    ② CMakeLists 的契约宏列表里删掉 SKVX_DISABLE_SIMD（新库不再定义它，
+#    留着会让主程序按标量版理解 SkVx、库按 SIMD 版实现，属 ODR 违规）；
+#    ③ 主程序的编译与链接都补 -msimd128（wasm-ld 要求对象文件与库的
+#    target_features 一致，否则报 features 冲突）。
+#    代价：产物需要支持 WebAssembly SIMD 的浏览器（2021 年后主流全支持）。
+#
 # 用法：
 #   powershell -ExecutionPolicy Bypass -File scripts\build_skia_wasm.ps1
 #   powershell -ExecutionPolicy Bypass -File scripts\build_skia_wasm.ps1 -Fetch     # 只补依赖
@@ -130,11 +142,20 @@ if (-not (Test-Path $EmsdkLink)) {
 }
 
 # ── 4. Patch Skia 的 gn 文件（幂等）─────────────────────────
+#   ★ 幂等判据用一句**独立标记**，绝不能用整段 $new：$new 里的注释随脚本演进
+#   （而且它常引用脚本自己的名字）。拿它当指纹，"脚本改过注释或改过名"就会变成
+#   "补丁点找不到"的假故障 —— 本机真栽过：磁盘上的 BUILD.gn 是旧脚本
+#   prepare_skia.ps1 打的补丁，脚本改名成 build_skia_wasm.ps1 之后，
+#   Contains($new) 与 Contains($old) 同时为假，脚本直接抛错。
 function Patch-File([string]$path, [string]$old, [string]$new, [string]$tag) {
     $text = [System.IO.File]::ReadAllText($path)
-    if ($text.Contains($new)) { Say "已打过补丁：$tag"; return }
-    if (-not $text.Contains($old)) { throw "补丁点找不到（$tag）：$path — 上游可能改了结构" }
-    [System.IO.File]::WriteAllText($path, $text.Replace($old, $new))
+    $marker = "# heditor-patch: $tag"
+    if ($text.Contains($marker)) { Say "已打过补丁：$tag"; return }
+    if (-not $text.Contains($old)) {
+        throw "补丁点找不到（$tag）：$path —— 上游可能改了结构；若该文件已被旧版脚本 patch 过，" +
+              "用 .toolchain/skia/skia-main.tar.gz 里的原版覆盖后再跑。"
+    }
+    [System.IO.File]::WriteAllText($path, $text.Replace($old, "$marker`n$new"))
     Say "打补丁：$tag"
 }
 
@@ -176,6 +197,13 @@ Patch-File $ToolchainGn @'
   }
 }
 '@ '去掉 emsdk activate 依赖'
+
+# ── 4b. 打开 wasm SIMD：撤掉上游那条 SKVX_DISABLE_SIMD（见坑 ⑤）──
+#   ★ 只替换这一行、匹配串里不带换行 —— 免得被脚本与 .gni 的行尾差异（CRLF/LF）绊倒。
+$WasmGni = Join-Path $SkiaSrc 'gn\toolchain\wasm.gni'
+Patch-File $WasmGni '  "SKVX_DISABLE_SIMD",' `
+  '  # "SKVX_DISABLE_SIMD",  # heditor: wasm SIMD on, see build_skia_wasm.ps1' `
+  'wasm 打开 SIMD'
 
 # ── 5. gn 参数 ──────────────────────────────────────────────
 #   ★ 每一条 skia_use_system_* 都是必须的，理由见文件顶部坑 ④。
@@ -220,6 +248,10 @@ skia_enable_graphite = false
 
 skia_use_partition_alloc = false
 
+# wasm SIMD（见文件顶部坑 ⑤）：上游的 wasm 工具链不给 -msimd128。这里显式打开，
+#   并且下面同时 patch 掉 wasm.gni 里的 SKVX_DISABLE_SIMD —— 两处成对才生效。
+extra_cflags = [ "-msimd128" ]
+
 # emsdk 由 .toolchain/emsdk 提供（注意用正斜杠，gn 里反斜杠是转义符）
 skia_emsdk_dir = "SKIA_EMSDK_DIR_PLACEHOLDER"
 '@
@@ -237,10 +269,13 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "gn gen 失败：exit $LASTEXITCODE" }
 
     # ── 7. ninja ────────────────────────────────────────────
-    $jobs = @()
-    if ($Jobs -gt 0) { $jobs = @("-j$Jobs") }
+    # ★ 这里别用 $jobs 当局部变量名 —— param 里的 [int]$Jobs 是**强类型**的，
+    #   而 PowerShell 变量名不区分大小写，$jobs = @() 会撞上它并报
+    #   "无法将 System.Object[] 转换为 System.Int32"。
+    $ninjaArgs = @()
+    if ($Jobs -gt 0) { $ninjaArgs = @("-j$Jobs") }
     Say "ninja -C out/wasm skia"
-    & $Ninja -C out/wasm @jobs skia
+    & $Ninja -C out/wasm @ninjaArgs skia
     if ($LASTEXITCODE -ne 0) { throw "ninja 构建 Skia 失败：exit $LASTEXITCODE" }
 } finally {
     Pop-Location

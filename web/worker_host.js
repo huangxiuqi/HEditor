@@ -1398,6 +1398,11 @@ host.startBlink = () => { resetBlinkPhase(); return true; };
 const onResize = () => viewOp(Math.round(stageEl.scrollTop * DPR));
 
 async function boot() {
+  // 产物是用 -msimd128 编的：引擎不支持 SIMD 时，失败发生在 Worker 侧实例化那一步，
+  //   报出来的话术却是"先执行 cmake --workflow --preset wasm"，与真实原因对不上。
+  //   所以在起 Worker 之前判一次，抛出的失败自带标题与下一步。
+  //   探测模块没加载时不拦：它与拖选同属可选前置，缺了不该让启动整个炸掉。
+  if (window.heditorWasmFeature) window.heditorWasmFeature.assertSimd();
   worker = new Worker('engine_worker.js' + BUST);
   worker.onmessage = onMessage;
   worker.onerror = (e) => onWorkerError({ where: 'worker.onerror', message: e.message || String(e) });
@@ -1522,9 +1527,12 @@ const readyPromise = boot().then(
     }
     // 启动失败必须在页面上看得见：Worker 起不来时这一侧什么都画不出，
     //   只写进 errors 数组的话用户面对的是一块空白区域。
-    report.fatal('编辑器启动失败', {
+    // 探测层（wasm_feature.js）抛的失败自带标题与下一步，原样展示。
+    //   不这么做的话，浏览器不支持 SIMD 会被说成"先执行 cmake"—— 而产物明明在。
+    report.fatal((e && e.heditorTitle) || '编辑器启动失败', {
       detail: msg,
-      hint: '先执行：cmake --workflow --preset wasm；若用 ?wasm= 指定了产物目录，检查它是否存在。',
+      hint: (e && e.heditorHint) ||
+            '先执行：cmake --workflow --preset wasm；若用 ?wasm= 指定了产物目录，检查它是否存在。',
       retry: () => location.reload(),
     });
     return { ok: false, error: e };

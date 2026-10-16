@@ -248,6 +248,9 @@
 <script src="host_error.js"></script>
 <!-- 拖选状态机：两套宿主共用一份，同样必须在 app.js 之前加载（app.js 初始化时就取它）。 -->
 <script src="drag_select.js"></script>
+<!-- WebAssembly SIMD 能力探测：必须在主脚本之前。产物是用 -msimd128 编的，
+     引擎不支持时报出来的话术与真实原因对不上，这一步在启动最前面把它变成可读的失败。 -->
+<script src="wasm_feature.js"></script>
 <script>
 // 入口脚本自己带版本号加载 app.js：先问一次 app.js 的 Last-Modified（no-store 强制绕过
 // 磁盘缓存），再把 app.js 以 ?v=<那个时间> 挂上去。

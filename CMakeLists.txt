@@ -229,16 +229,22 @@ if(HEDITOR_USE_SKIA)
   #   症状是运行期读到脏数据或直接 trap，而且极难定位。
   #   这份清单是从 Skia 的编译命令行（out/wasm 的 ninja 日志）里逐条抄下来的，
   #   不是猜的。
+  # ★ 这份清单里**没有** SKVX_DISABLE_SIMD：那份 libskia 是本工程用 -msimd128
+  #   编出来的（见 scripts/build_skia_wasm.ps1 顶部坑 ⑤），Skia 侧不再定义它。
+  #   这里若凭空补上，主程序会按标量版理解 SkVx、而库里是 SIMD 版 —— 正是上面
+  #   说的"同一个结构体两种理解"，属于 ODR 违规。
   target_compile_definitions(heditor_core PUBLIC
     HEDITOR_USE_SKIA=1
     SK_CODEC_DECODES_BMP
     SK_CODEC_DECODES_WBMP
     SK_ENABLE_PRECOMPILE
     SK_ENABLE_YUVA_PACKED_422
-    SKVX_DISABLE_SIMD
     SK_FORCE_8_BYTE_ALIGNMENT
     SK_DISABLE_TRACING
   )
+  # wasm SIMD 要对主程序也开着：Skia 的公共头（SkVx.h 等）按 __wasm_simd128__
+  #   走不同实现，只有一边有就是上一条的另一种形态。连编译命令一起对齐才算数。
+  target_compile_options(heditor_core PUBLIC -msimd128)
   # Skia 的公共头是按 "include/core/xxx.h" 这种**从源码根开始**的写法互相 include 的，
   # 所以根目录必须进 include path；另外各 public 子目录也加上，方便直接 include 文件名。
   target_include_directories(heditor_core PUBLIC
@@ -293,6 +299,13 @@ if(EMSCRIPTEN)
     -sFORCE_FILESYSTEM=1
     -sEXPORTED_RUNTIME_METHODS=HEAPU8,HEAPU32,FS
   )
+
+  if(HEDITOR_USE_SKIA)
+    # libskia 是本工程用 -msimd128 编的，而 wasm-ld 要求所有对象文件与库的
+    #   target_features 一致 —— 少这一条会报
+    #   "linking module flags 'target_features': IDs have conflicting values"。
+    target_link_options(heditor_wasm PRIVATE -msimd128)
+  endif()
 
   # 调试档（HEDITOR_WASM_DEBUG=ON，预设 wasm-debug）：断言、栈溢出检查、源码映射。
   #   release 档一个都不带 —— 它们都要付体积与速度的代价，是排查时才需要的东西。

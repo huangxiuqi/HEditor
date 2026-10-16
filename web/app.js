@@ -731,6 +731,11 @@ async function loadFonts(mode) {
 }
 
 async function boot() {
+  // 产物是用 -msimd128 编的：引擎不支持 SIMD 时，失败发生在胶水层自己去实例化那一步，
+  //   报出来的话术却是"先执行 cmake --workflow --preset wasm"，与真实原因对不上。
+  //   所以在最前面判一次，抛出的失败自带标题与下一步。
+  //   探测模块没加载时不拦：它与拖选同属可选前置，缺了不该让启动整个炸掉。
+  if (window.heditorWasmFeature) window.heditorWasmFeature.assertSimd();
   setStatus('加载 WASM 胶水层…');
   // 先问一次"磁盘上那份 wasm 是什么时候构建的"。
   //   加它的理由：重新编译之后"改了没生效"的假象，绝大多数不是没编译，而是浏览器
@@ -2371,9 +2376,12 @@ const readyPromise = (async () => {
     // #note 是演示页的说明栏，产品页不会有它 —— 取不到就只留横幅，不能因此再抛一次。
     const note = $('note');
     if (note) note.innerHTML = `<b>启动失败。</b><br>${msg.replace(/\n/g, '<br>')}`;
-    report.fatal('编辑器启动失败', {
+    // 探测层（wasm_feature.js）抛的失败自带标题与下一步，原样展示。
+    //   不这么做的话，浏览器不支持 SIMD 会被说成"先执行 cmake"—— 而产物明明在。
+    report.fatal((e && e.heditorTitle) || '编辑器启动失败', {
       detail: msg,
-      hint: '先执行：cmake --workflow --preset wasm；若用 ?wasm= 指定了产物目录，检查它是否存在。',
+      hint: (e && e.heditorHint) ||
+            '先执行：cmake --workflow --preset wasm；若用 ?wasm= 指定了产物目录，检查它是否存在。',
       retry: () => location.reload(),
     });
     console.error(e);
