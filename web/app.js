@@ -87,9 +87,17 @@ let ready = false;
 //   换算只做在界面接缝上（两个输入框、门面的 zoomFactor / zoomToFactor 一对）。
 //   引擎、判据、诊断读数一律继续用密度，别把倍数漏进去。
 const kZoomBase = 4 / 3;
-const engineZoomOf = (factor) => Number(factor) * kZoomBase;
-const uiZoomOf = (density) => density / kZoomBase;
-let currentZoom = kZoomBase;
+// 密度基准含 DPR：界面上的 1 倍永远是同一个物理尺寸，要花多少像素去画由屏幕决定。
+//   这个宿主里 devicePixelRatio 本来就是每处现读的，所以基准也现读，跟着屏幕走。
+const baseDensity = () => kZoomBase * (window.devicePixelRatio || 1);
+// currentZoom 这个密度是按哪个 DPR 算出来的。读倍数要用它，不能用当前屏幕那个：换屏那一拍
+//   两者不同，拿新 DPR 去除会读到一个平白缩掉一半的假倍数，照它反推回去就成了空操作。
+let zoomDpr = window.devicePixelRatio || 1;
+const engineZoomOf = (factor) => Number(factor) * baseDensity();
+const uiZoomOf = (density) => density / (kZoomBase * zoomDpr);
+// 改密度必须走它：同时把 zoomDpr 记成"算这一刻用的那个屏幕"，两个口径才始终对得上。
+const setZoomDensity = (d) => { zoomDpr = window.devicePixelRatio || 1; currentZoom = Number(d); };
+let currentZoom = baseDensity();
 
 /**
  * 把当前缩放按"倍数"回写到输入框与它右边那一格。
@@ -625,6 +633,27 @@ function onUnhandledRejection(e) {
 window.addEventListener('error', onWindowError);
 window.addEventListener('unhandledrejection', onUnhandledRejection);
 
+// 屏幕像素比变了（窗口被拖到另一块显示器上）：密度基准跟着变，整幅要按新 DPR 重排重画。
+//   判据取 devicePixelRatio 本身，不取 resize 事件 —— 拖窗口大小也会来 resize，那时
+//   DPR 没变，重排一遍纯属白花。媒体查询按 Ndppx 精确匹配，每变一次要重挂。
+let dprQuery = null;
+function armDprWatch() {
+  if (dprQuery) dprQuery.removeEventListener('change', onDprWatch);
+  dprQuery = window.matchMedia('(resolution: ' + (window.devicePixelRatio || 1) + 'dppx)');
+  dprQuery.addEventListener('change', onDprWatch);
+}
+function onDprWatch() {
+  armDprWatch();
+  if (!ready || disposed || !mod) return;
+  if ((window.devicePixelRatio || 1) === zoomDpr) return;
+  // 倍数从 zoomDpr 反推，所以它此刻读出来就是用户真正要的那个（不受屏幕已变的影响）。
+  setZoomDensity(engineZoomOf(uiZoomOf(currentZoom)));
+  mod.setZoom(currentZoom);
+  syncZoomLabel();
+  relayoutAndBlit();
+}
+armDprWatch();
+
 const fmt = (n, d = 2) => Number(n).toFixed(d);
 const kb = (n) => (n / 1024).toFixed(1) + ' KB';
 
@@ -887,7 +916,7 @@ async function boot() {
   if (zoom) {
     zoom.disabled = false;
     zoom.addEventListener('input', () => {
-      currentZoom = engineZoomOf(zoom.value);
+      setZoomDensity(engineZoomOf(zoom.value));
       syncZoomLabel();
       mod.setZoom(currentZoom);
       relayoutAndBlit();
@@ -1023,7 +1052,7 @@ async function boot() {
     errorSurface.warn('拖选不可用', { detail: 'web/drag_select.js 未加载' });
   }
 
-  currentZoom = zoom ? engineZoomOf(zoom.value) : currentZoom;
+  if (zoom) setZoomDensity(engineZoomOf(zoom.value));
   // 回写一次：让"界面那一格 = 门面的倍数"这条不变量从装载起就成立，而不是靠 HTML 里
   //   那个 value 恰好等于默认档。换算方向写反了在这里就会露出来。
   syncZoomLabel();
@@ -1842,7 +1871,7 @@ const facade = {
   //   （帧尺寸没变，只贴了个旧光标），拿它当分母会得出"100%"这种荒谬结论。
   run(id, zoom) {
     if (zoom) {
-      currentZoom = Number(zoom);
+      setZoomDensity(zoom);
       syncZoomLabel();
       mod.setZoom(currentZoom);
     }
@@ -1851,13 +1880,13 @@ const facade = {
     mod.relayoutAndPaint();
     return settle(JSON.parse(mod.editStatsJson()), { scroll: false });
   },
-  reset(id, zoom) { return this.run(id === undefined ? 6 : id, zoom === undefined ? kZoomBase : zoom); },
+  reset(id, zoom) { return this.run(id === undefined ? 6 : id, zoom === undefined ? baseDensity() : zoom); },
 
   // 按倍数设缩放（界面输入框的入口）。门面其余成员收的都是密度。
   //
   // 走的收尾与 run 同一条路（重排 + 重绘），只是不换场景。
   zoomToFactor(factor) {
-    currentZoom = engineZoomOf(factor);
+    setZoomDensity(engineZoomOf(factor));
     syncZoomLabel();
     mod.setZoom(currentZoom);
     relayoutAndBlit();
@@ -2383,6 +2412,7 @@ const facade = {
     if (blinkTimer) { clearInterval(blinkTimer); blinkTimer = null; }
     window.removeEventListener('error', onWindowError);
     window.removeEventListener('unhandledrejection', onUnhandledRejection);
+    if (dprQuery) { dprQuery.removeEventListener('change', onDprWatch); dprQuery = null; }
     for (const [, rec] of pageCanvases) if (rec.el.parentNode) rec.el.parentNode.removeChild(rec.el);
     pageCanvases.clear();
     canvasPool.length = 0;

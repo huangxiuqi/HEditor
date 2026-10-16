@@ -502,6 +502,9 @@ const WRITE = {
   zoom: (a) => {
     mod.setZoom(a.zoom);
     zoomLevel = a.zoom;
+    // 屏幕像素比会随窗口换显示器而变，宿主每次改缩放都捎一份新的过来。回推的状态里带着
+    //   它，宿主拿它折算页画布的 CSS 尺寸 —— 不回传就会按旧值折算，显示尺寸与背衬差一档。
+    if (a.dpr) dpr = a.dpr;
     paintFull();
   },
   stress: (a) => loadBlocks(() => mod.loadStressDocument(a.paras | 0, a.chars | 0)),

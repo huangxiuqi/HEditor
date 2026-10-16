@@ -19,7 +19,11 @@
 //   两边各有自己的顶层常量（FONTS / DPR 之类），不隔离就是"标识符重复声明"的语法错误。
 (function () {
 
-const DPR = window.devicePixelRatio || 1;
+// 屏幕像素比：1 个 CSS 像素背后有几个设备像素。渲染密度与显示换算都以它为准。
+//   做成现读而不是加载时缓存：缓存那份一旦与屏幕脱节（窗口被拖到另一块显示器上），
+//   凡是拿它折算的尺寸都会错，而且错得整整齐齐、看不出是 DPR 的问题。
+//   与单线程宿主同构 —— 那边本来就是每处现读 window.devicePixelRatio。
+const dprNow = () => window.devicePixelRatio || 1;
 const FONTS = [
   { role: 'cjk', label: 'Noto Sans SC', path: 'assets/fonts/NotoSansSC-VF.ttf' },
   { role: 'mongol', label: 'Noto Sans Mongolian', path: 'assets/fonts/NotoSansMongolian-Regular.ttf' },
@@ -126,12 +130,20 @@ let composing = false;
 let blinkTimer = null;
 let blinkAuto = false;   // 闪烁只在首帧自动起一次，别把 stopBlink 又拉起来
 let caretOn = true;
-// 与两宿主同一口径（理由见 app.js 的同名声明）：缩放 1 倍 = 96 dpi = 4 / 3。
+// 与两宿主同一口径（理由见 app.js 的同名声明）：缩放 1 倍 = 96 dpi，其密度是 4 / 3。
 //   界面输入框收"倍数"，引擎与门面收"密度"，换算只在 syncZoomInput 与 zoomToFactor 两处做。
 const kZoomBase = 4 / 3;
-const engineZoomOf = (factor) => Number(factor) * kZoomBase;
-const uiZoomOf = (density) => density / kZoomBase;
-let zoom = kZoomBase;
+// 密度基准含 DPR：界面上的 1 倍永远是同一个物理尺寸，要花多少像素去画由屏幕决定 ——
+//   高分屏上同一个 A4 要用两倍的像素画才既尺寸正确又清晰。界面那一格不受影响。
+const baseDensity = () => kZoomBase * (window.devicePixelRatio || 1);
+// zoom 这个密度是按哪个 DPR 算出来的。读倍数要用它，不能用当前屏幕那个：换屏那一拍两者
+//   不同，拿新 DPR 去除会读到一个平白缩掉一半的假倍数，照它反推回去就成了空操作。
+let zoomDpr = window.devicePixelRatio || 1;
+const engineZoomOf = (factor) => Number(factor) * baseDensity();
+const uiZoomOf = (density) => density / (kZoomBase * zoomDpr);
+// 改密度必须走它：同时把 zoomDpr 记成"算这一刻用的那个屏幕"，两个口径才始终对得上。
+const setZoomDensity = (d) => { zoomDpr = window.devicePixelRatio || 1; zoom = Number(d); };
+let zoom = baseDensity();
 let scenario = 6;
 let mode = 0;
 let lastPageX = 0;   // 页在视口里横向居中的偏移（设备像素）
@@ -184,8 +196,8 @@ function glueUrl() {
 
 /** 视口尺寸（设备像素）。画布尺寸不归宿主定，但"看得见多大"要知道。 */
 const viewSize = () => ({
-  viewW: Math.max(1, Math.round(stageEl.clientWidth * DPR)),
-  viewH: Math.max(1, Math.round(stageEl.clientHeight * DPR)),
+  viewW: Math.max(1, Math.round(stageEl.clientWidth * dprNow())),
+  viewH: Math.max(1, Math.round(stageEl.clientHeight * dprNow())),
 });
 
 /* ── 消息 ───────────────────────────────────────────────────────────────── */
@@ -379,7 +391,7 @@ function armViewSettle() {
 function viewFireAndForget() {
   if (dead) { viewInFlight = false; return; }
   const t = now();
-  const top = stageEl.scrollTop * DPR;
+  const top = stageEl.scrollTop * dprNow();
   trackScrollSpeed(top, t);
   if (viewInFlight && t - viewSentAt < kViewLatchMs) {
     ++viewDiag.coalesced;
@@ -570,7 +582,7 @@ function onPageError(where, e) {
 
 function syncSpacer(st, gm) {
   const total = Math.max(1, Number(st.totalPages) || 1);
-  const h = Math.max(1, (total * gm.pageStep - gm.gap) / DPR);
+  const h = Math.max(1, (total * gm.pageStep - gm.gap) / dprNow());
   if (spacerEl.style.height !== h + 'px') spacerEl.style.height = h + 'px';
 
   // 页纸底：让"还没渲染出来的页"也是一张白纸，而不是什么都没有。
@@ -578,9 +590,9 @@ function syncSpacer(st, gm) {
   //   同一条理由（甩滚时引擎追不上，可见区域里既没有字也没有画布，看起来像坏了）。
   //   这里挂在撑高层上：画布是绝对定位在它外面的，所以还要按 lastPageX 把底图
   //   横向摆到页的位置上，宽度取页宽 —— 否则白纸会横铺满整个舞台。
-  const stepCss = Math.round(gm.pageStep / DPR);
-  const pageCss = Math.round(gm.pageW / DPR);
-  const hCss = Math.round((gm.pageStep - gm.gap) / DPR);
+  const stepCss = Math.round(gm.pageStep / dprNow());
+  const pageCss = Math.round(gm.pageW / dprNow());
+  const hCss = Math.round((gm.pageStep - gm.gap) / dprNow());
   const img = `linear-gradient(to bottom, #ffffff 0 ${hCss}px,` +
               ` rgba(255,255,255,0) ${hCss}px ${stepCss}px)`;
   if (spacerEl.style.backgroundImage !== img) {
@@ -588,7 +600,7 @@ function syncSpacer(st, gm) {
     spacerEl.style.backgroundSize = `${pageCss}px ${stepCss}px`;
     spacerEl.style.backgroundRepeat = 'repeat-y';
   }
-  const bx = Math.round(lastPageX / DPR) + 'px';
+  const bx = Math.round(lastPageX / dprNow()) + 'px';
   if (spacerEl.style.backgroundPosition !== bx + ' 0px') {
     spacerEl.style.backgroundPosition = bx + ' 0px';
   }
@@ -601,11 +613,11 @@ function positionIme(st, gm) {
     ta.style.height = '1px';
     return;
   }
-  const lineH = Math.max(12, Math.round(st.caretH / DPR));
-  ta.style.left = Math.round((lastPageX + st.caretX) / DPR) + 'px';
+  const lineH = Math.max(12, Math.round(st.caretH / dprNow()));
+  ta.style.left = Math.round((lastPageX + st.caretX) / dprNow()) + 'px';
   ta.style.top =
-    Math.round(((gm.first * gm.pageStep) + st.caretY) / DPR - stageEl.scrollTop) + 'px';
-  ta.style.width = Math.max(24, Math.round((gm.pageW - st.caretX) / DPR)) + 'px';
+    Math.round(((gm.first * gm.pageStep) + st.caretY) / dprNow() - stageEl.scrollTop) + 'px';
+  ta.style.width = Math.max(24, Math.round((gm.pageW - st.caretX) / dprNow())) + 'px';
   ta.style.height = lineH + 'px';
   ta.style.lineHeight = lineH + 'px';
   ta.style.fontSize = Math.max(10, Math.round(lineH * 0.62)) + 'px';
@@ -646,7 +658,7 @@ function paintPanel() {
  */
 function syncScrollFromGeom(gm, reset) {
   if (!reset || !gm || typeof gm.scrollY !== 'number') return;
-  stageEl.scrollTop = Math.round(gm.scrollY / DPR);
+  stageEl.scrollTop = Math.round(gm.scrollY / dprNow());
 }
 
 function onState(m) {
@@ -820,8 +832,8 @@ function onPointerDown(ev) {
   const rect = el.getBoundingClientRect();
   // 帧窗口坐标（设备像素）：x 从页左缘量，y 从窗口首页顶量 —— 与单线程宿主的
   //   framePointFromEvent 同一口径，命中测试收的就是这个坐标系。
-  const xDev = (ev.clientX - rect.left) * DPR;
-  const yDev = (ev.clientY - rect.top) * DPR + (page - gm.first) * gm.pageStep;
+  const xDev = (ev.clientX - rect.left) * dprNow();
+  const yDev = (ev.clientY - rect.top) * dprNow() + (page - gm.first) * gm.pageStep;
   // 命中一次往返，结果有两个去处：定位，以及"这一下要不要起拖选"。
   //   落在正文之外时不起手 —— 从页外的空白拖起不该选中任何东西。定位由 placeAt 做，
   //   与点击路径共用同一段，免得"拖选能不能起手"和"点击落哪"两处各判一次。
@@ -913,21 +925,23 @@ const CMD = {
   loadTextDocument: (text, repeat) => ['textDoc', { text, repeat }],
   run: (id, z) => {
     scenario = Number(id);
-    if (z) { zoom = Number(z); syncZoomInput(); }
+    if (z) { setZoomDensity(z); syncZoomInput(); }
     return ['scenario', { id: scenario, zoom: z }];
   },
   reset: (id, z) => {
     scenario = id === undefined ? 6 : Number(id);
-    zoom = z === undefined ? kZoomBase : Number(z);
+    setZoomDensity(z === undefined ? baseDensity() : z);
     syncZoomInput();
     return ['reset', { id: scenario, zoom }];
   },
   reloadFonts: (m) => ['fonts', { mode: m || 'full' }],
   setFontCacheConfig: (blockSize, blocks) => ['setFontCacheConfig', { blockSize, blocks }],
   setViewportAnchor: (first, count) => ['viewport', { first, count }],
-  zoomTo: (z) => { zoom = Number(z); syncZoomInput(); return ['zoom', { zoom }]; },
+  // 每条改缩放的消息都捎上当前 DPR：引擎回推的状态里带着它，宿主拿它折算 CSS 尺寸，
+  //   窗口换过显示器之后不回传就会按旧值折算，画布的显示尺寸与背衬差一个比例。
+  zoomTo: (z) => { setZoomDensity(z); syncZoomInput(); return ['zoom', { zoom, dpr: dprNow() }]; },
   // 按倍数设缩放（界面输入框的入口）。门面其余成员收的都是密度。
-  zoomToFactor: (f) => { zoom = engineZoomOf(f); syncZoomInput(); return ['zoom', { zoom }]; },
+  zoomToFactor: (f) => { setZoomDensity(engineZoomOf(f)); syncZoomInput(); return ['zoom', { zoom, dpr: dprNow() }]; },
   // 只改引擎里的相位，**不呈现** —— 与单线程宿主门面的 showCaret 同语义
   //   （那边就是 mod.showCaret(!!on) 一行；探针常在这之后自己调 present()）。
   showCaret: (on) => ['phase', { on: !!on }],
@@ -1075,8 +1089,8 @@ function framePointAt(clientX, clientY) {
   if (!gm) return null;
   const r = stageEl.getBoundingClientRect();
   return {
-    x: (clientX - r.left) * DPR - lastPageX,
-    y: (clientY - r.top) * DPR + stageEl.scrollTop * DPR - gm.first * gm.pageStep,
+    x: (clientX - r.left) * dprNow() - lastPageX,
+    y: (clientY - r.top) * dprNow() + stageEl.scrollTop * dprNow() - gm.first * gm.pageStep,
   };
 }
 
@@ -1109,10 +1123,10 @@ const frameCanvasProxy = {
     }
     // 窗口首页的视口位置：页在滚动内容里是绝对定位（top = 页号 × 步距），
     //   所以还要减掉滚动量；横向是居中偏移 lastPageX。
-    const left = r.left + lastPageX / DPR;
-    const top = r.top + (gm.first * gm.pageStep) / DPR - stageEl.scrollTop;
-    const width = gm.frameW / DPR;
-    const height = gm.frameH / DPR;
+    const left = r.left + lastPageX / dprNow();
+    const top = r.top + (gm.first * gm.pageStep) / dprNow() - stageEl.scrollTop;
+    const width = gm.frameW / dprNow();
+    const height = gm.frameH / dprNow();
     return { left, top, right: left + width, bottom: top + height,
              width, height, x: left, y: top };
   },
@@ -1308,7 +1322,7 @@ host.selfCheck = async () => {
   const el = pageCanvases.get(mirror.geom ? mirror.geom.first : 0);
   const pr = frameCanvasProxy.getBoundingClientRect();
   return Object.assign({}, r, {
-    dpr: DPR,
+    dpr: dprNow(),
     pages: Object.assign({}, r.pages, {
       cssSize: el ? [el.style.width, el.style.height] : null,
       rectPx: [Math.round(pr.width), Math.round(pr.height)],
@@ -1330,10 +1344,10 @@ host.viewDiag = () => ({
 
 host.setScroll = (cssPx) => {
   stageEl.scrollTop = cssPx;
-  return viewOp(Math.round(stageEl.scrollTop * DPR));
+  return viewOp(Math.round(stageEl.scrollTop * dprNow()));
 };
 
-host.syncScroll = () => viewOp(Math.round(stageEl.scrollTop * DPR));
+host.syncScroll = () => viewOp(Math.round(stageEl.scrollTop * dprNow()));
 
 host.loadMedicalSample = async function loadMedicalSample(repeat) {
   const base = new URL('../', location.href);
@@ -1410,7 +1424,32 @@ host.startBlink = () => { resetBlinkPhase(); return true; };
  * 具名而不是就地写箭头函数，是为了 dispose() 能摘掉这个监听 —— 监听挂在 window 上，
  *   实例拆掉之后它仍然活着，会拿着已经废弃的 stageEl 继续发消息。
  */
-const onResize = () => viewOp(Math.round(stageEl.scrollTop * DPR));
+const onResize = () => viewOp(Math.round(stageEl.scrollTop * dprNow()));
+
+/**
+ * 屏幕像素比变了（窗口被拖到另一块显示器上）：密度基准跟着变，整幅要按新 DPR 重排重画。
+ *
+ * 判据取 devicePixelRatio 本身，不取 resize 事件 —— 拖窗口大小也会来 resize，那时 DPR
+ *   没变，重排一遍纯属白花。动作只有一件：把同一个倍数按新基准重设一次。引擎那边按新
+ *   密度重算页像素与帧，宿主再按回推的几何重建画布尺寸，两条腿走的都是既有路径。
+ * 媒体查询按 Ndppx 精确匹配，所以每变一次要按新值重新挂一次，否则下次不再触发。
+ *   具名是为了 dispose() 能摘掉监听。
+ */
+let dprQuery = null;
+function armDprWatch() {
+  if (dprQuery) dprQuery.removeEventListener('change', onDprWatch);
+  dprQuery = window.matchMedia('(resolution: ' + (window.devicePixelRatio || 1) + 'dppx)');
+  dprQuery.addEventListener('change', onDprWatch);
+}
+function onDprWatch() {
+  armDprWatch();
+  // 与"这份密度是按哪个屏幕算的"比，不与上一次读到的 DPR 比：密度才是换算的唯一真源，
+  //   它没按新屏幕重算过，就说明该重算。倍数从 zoomDpr 反推，所以读出来正是用户要的那个。
+  if (dprNow() === zoomDpr) return;
+  setZoomDensity(engineZoomOf(uiZoomOf(zoom)));
+  syncZoomInput();
+  post({ t: 'zoom', zoom, dpr: dprNow() });
+}
 
 async function boot() {
   // 产物是用 -msimd128 编的：引擎不支持 SIMD 时，失败发生在 Worker 侧实例化那一步，
@@ -1428,8 +1467,8 @@ async function boot() {
   post({
     t: 'boot', glue: glueUrl() + BUST, bust: BUST, exportName: 'CreateHEditor',
     fonts: FONTS.map((f) => ({ ...f, path: new URL(f.path, base).pathname })),
-    dpr: DPR, viewW: vs.viewW, viewH: vs.viewH,
-    scenario: 6, zoom: kZoomBase, fontMode: 'full',
+    dpr: dprNow(), viewW: vs.viewW, viewH: vs.viewH,
+    scenario: 6, zoom: baseDensity(), fontMode: 'full',
   });
   // 回写一次：让"界面那一格 = 门面的倍数"这条不变量从启动起就成立，而不是靠 HTML 里
   //   那个 value 恰好等于默认档。换算方向写反了在这里就会露出来。
@@ -1467,6 +1506,8 @@ async function boot() {
   // 视口变了不用换画布：页画布的尺寸只取决于页，视口只影响"窗口要哪几页" ——
   //   窗口一变，推回来的几何会让 syncPageCanvases 自己把缺的页建出来。
   window.addEventListener('resize', onResize);
+  // 窗口换到另一块显示器上时 DPR 会变，那时光 resize 不够：渲染密度也得跟着换。
+  armDprWatch();
   // 拖选：按下之后的移动与抬起由共享模块挂在 window 上（拖出画布再拖回来都收得到）。
   //   命中要走一次往返，所以模块那边按"只留最新一个待处理点"合并 —— 不合并的话
   //   每帧一次往返会排起长队，选区看起来追着鼠标跑却总是慢几拍。
@@ -1521,6 +1562,7 @@ host.dispose = () => {
   host.ready = false;
   if (blinkTimer) { clearInterval(blinkTimer); blinkTimer = null; }
   window.removeEventListener('resize', onResize);
+  if (dprQuery) { dprQuery.removeEventListener('change', onDprWatch); dprQuery = null; }
   if (worker) { worker.terminate(); worker = null; }
   for (const [, el] of pageCanvases) if (el.parentNode) el.parentNode.removeChild(el);
   pageCanvases.clear();
