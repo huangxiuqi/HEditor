@@ -57,8 +57,15 @@ bool subtreeHasParagraphMark(const Node* n) {
 ControlKind controlKindFromBusinessType(const std::string& type) {
     if (type == "number") return ControlKind::NumberField;
     if (type == "date") return ControlKind::DateField;
+
     return ControlKind::TextField;
 }
+
+/**
+ * 光标宽度的下限（磅）。窄于它之后，缩放到 1.0 以下时细到看不见 ——
+ * 而"看不见的光标"与"没有光标"在界面上无法区分。比它更细的取值一律夹到这里。
+ */
+constexpr float kMinCaretWidthPt = 0.4f;
 
 }  // namespace
 
@@ -101,7 +108,7 @@ void EditorEngine::setConfig(const EngineConfig& cfg) {
     cfg_ = cfg;
     if (cfg_.zoom < 0.25f) cfg_.zoom = 0.25f;
     if (cfg_.zoom > 8.0f) cfg_.zoom = 8.0f;
-    if (cfg_.caret_width_pt < 0.4f) cfg_.caret_width_pt = 0.4f;
+    if (cfg_.caret_width_pt < kMinCaretWidthPt) cfg_.caret_width_pt = kMinCaretWidthPt;
     base_valid_ = false;  // 缩放/页度量变了，底图作废
     caret_rect_px_prev_ = Rect{};
     if (plan_changed) markLayoutDirtyForBrackets();
@@ -109,6 +116,13 @@ void EditorEngine::setConfig(const EngineConfig& cfg) {
     if (plan_changed || page_changed) relayout();
     // 撤销上限不影响呈现，只影响栈能留多长 —— 调小的话当场裁掉多余的（不必等下一次提交）。
     if (undo_) undo_->setLimit(cfg_.undo_limit);
+}
+
+void EditorEngine::setCaretAndSelectionStyle(const Color& caret, float caret_width_pt,
+                                             const Color& selection) {
+    cfg_.caret_color = caret;
+    cfg_.caret_width_pt = caret_width_pt < kMinCaretWidthPt ? kMinCaretWidthPt : caret_width_pt;
+    cfg_.selection_color = selection;
 }
 
 /**
@@ -932,6 +946,18 @@ int EditorEngine::caretPage() const {
  * 一个插入点，没有宽度可言。
  */
 std::vector<EditorEngine::PageRect> EditorEngine::selectionRects() const {
+    return selectionRectsIn(0, 0);
+}
+
+/**
+ * 当前视口窗口内的选区矩形（视口没钉过时退化成整篇）。
+ */
+std::vector<EditorEngine::PageRect> EditorEngine::selectionRectsVisible() const {
+    if (vp_count_ <= 0) return selectionRects();
+    return selectionRectsIn(vp_first_page_, vp_count_);
+}
+
+std::vector<EditorEngine::PageRect> EditorEngine::selectionRectsIn(int first_page, int count) const {
     std::vector<PageRect> out;
     if (selection_.empty() || !flow_.has_value() || layout_.lines.empty() || block_flow_.empty())
         return out;
@@ -942,7 +968,32 @@ std::vector<EditorEngine::PageRect> EditorEngine::selectionRects() const {
     const int pa_hi = paraForFlow(hi);
     const int n_para = static_cast<int>(block_flow_.size());
 
-    for (const LineBox& lb : layout_.lines) {
+    // 行下标范围。行数组按页单调，所以限页时两端都能二分 ——
+    //   不限页时遍历全篇是为了挑出真正落进选区的那几行，那是"文档行数"这个量级；
+    //   而呈现每拍都走这一趟，全选时这笔开销会盖过真正要画的字。
+    const int n_lines = static_cast<int>(layout_.lines.size());
+    int k_begin = 0;
+    int k_end = n_lines - 1;  // 闭区间
+    if (count > 0 && n_lines > 0) {
+        const int last_page = first_page + count - 1;
+        linesOnPage(first_page, &k_begin, &k_end);
+        int hi_lo = 0;
+        int hi_hi = 0;
+        linesOnPage(last_page, &hi_lo, &hi_hi);
+        // 末页上没有行时 hi_hi == hi_lo - 1：这时窗口内的行止于末页之前。
+        k_end = hi_hi;
+        // k_begin 可能被夹到"页号更大的第一行"上，往前一页兜一下不会错：
+        //   多算的行会被下面的段区间判断滤掉，少算的行却会漏画。
+        if (k_begin > 0) --k_begin;
+    }
+
+    for (int k = k_begin; k <= k_end && k < n_lines; ++k) {
+        if (k < 0) continue;
+        const LineBox& lb = layout_.lines[static_cast<size_t>(k)];
+        // 页范围必须逐行再判一次：上面的二分只把范围收窄，端点会为了不漏而往外兜，
+        //   而帧坐标是"相对窗口首页"的 —— 窗口上方那一页的矩形算出来是负 y，
+        //   正好压在帧顶部，会被当成窗口内的选区画出来。
+        if (count > 0 && (lb.page < first_page || lb.page >= first_page + count)) continue;
         const int para = lb.paragraph;
         if (para < pa_lo || para > pa_hi) continue;
         if (para < 0 || para >= n_para) continue;
@@ -995,8 +1046,12 @@ std::vector<EditorEngine::PageRect> EditorEngine::selectionRects() const {
  * 那几页"的累加偏移。宽高为 0 的（空行的那个插入点）在这里丢掉 —— 画不出来。
  */
 std::vector<Rect> EditorEngine::selectionRectsPx() const {
+    return selectionRectsPxIn(0, 0);
+}
+
+std::vector<Rect> EditorEngine::selectionRectsPxIn(int first_page, int count) const {
     std::vector<Rect> out;
-    const std::vector<PageRect> prs = selectionRects();
+    const std::vector<PageRect> prs = selectionRectsIn(first_page, count);
     if (prs.empty()) return out;
     const float zoom = cfg_.zoom;
     const int page_px_h = pagePxHeight();

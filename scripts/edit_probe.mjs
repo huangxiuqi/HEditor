@@ -1452,15 +1452,57 @@ async function main() {
                       canvases: vp.canvases, visFirst: vp.visible.first,
                       visLast: vp.visible.last });
         }
-        return JSON.stringify(rows);
+        // 逐页下滚：这一步才是"平移复用"那一支（上面每次跳 3 页，重叠为 0，
+        //   走的是整窗重建）。逐拍记下重画页数 —— 平移复用时它应当小于窗口页数。
+        stage.scrollTop = 0;
+        await wait();
+        const shiftSteps = [];
+        for (let k = 1; k <= 4; ++k) {
+          stage.scrollTop = k * step;
+          await wait();
+          const st = H.editStats;
+          shiftSteps.push({ page: k, first: st.windowFirstPage, pages: st.windowPages,
+                            repainted: st.repaintedPages, bands: st.bandY1 >= 0 });
+        }
+        return JSON.stringify({ rows, shiftSteps });
       })();
     `));
-    for (const r of scrollWin) {
+    for (const r of scrollWin.rows) {
       const covered = r.first <= r.visFirst && r.visLast <= r.first + r.count - 1;
       chk.check(` 滚到第 ${r.want} 页：窗口跟着可见页走（${r.first}+${r.count}）`,
                 covered, `可见 ${r.visFirst}~${r.visLast}｜窗口 ${r.first}+${r.count}` +
                          `｜画布 ${r.canvases} 张`);
     }
+
+    // 逐页下滚时确实在"平移复用"：重画页数严格小于窗口页数。
+    //   这一条是下面那两条自审的前提检查 —— 没有它，一次"跳 3 页"的滚动
+    //   会让窗口重叠为 0、退化成整窗重建，于是底图自审恒绿，什么也没测到
+    //   （反证做过：把平移量故意少搬 3 px，只有自审的那一版照样全绿）。
+    //   判"至少有 2 步在复用"而不是"每一步都是"：回滚到文档顶部那一步位移可能
+    //   超过一整个窗口，重叠为 0 时本来就该整窗重建。
+    const reusedSteps = scrollWin.shiftSteps.filter((s) => s.repainted > 0 && s.repainted < s.pages);
+    chk.check('逐页下滚走的是平移复用（重画页数 < 窗口页数）',
+              reusedSteps.length >= 2,
+              scrollWin.shiftSteps.map((s) =>
+                `第${s.page}页 窗${s.first}+${s.pages} 重画${s.repainted}`).join(' ｜ '));
+
+    // 换窗之后底图必须与"从零全建"逐字节相同。
+    //   滚动换窗走的是平移复用（把重叠页的像素 memmove 过去、只重画新露出的页），
+    //   最容易错的三种：搬错行、上一帧的光标/标记/选区跟着搬走变成幽灵、指纹没重新对齐。
+    //   为什么不能用 auditFrame 顶替：那一条比的是帧，而帧是从底图搬的 ——
+    //   底图整个错了，帧与"整帧重贴"照样一致，两条都绿而画面是错的。
+    const abScroll = await c.eval('return await window.__heditor.auditBase();');
+    chk.check('★★ 滚动换窗之后底图 == 从零全建（逐字节）',
+              !!abScroll && abScroll.diff === 0,
+              abScroll ? `差 ${abScroll.diff} px` +
+                (abScroll.diff > 0 ? `（框 ${JSON.stringify(abScroll.box)}）` : '') : 'null');
+    const afScroll = await c.eval('return await window.__heditor.auditFrame();');
+    chk.check('★★ 滚动换窗之后引擎帧 == 整帧重画（逐字节）',
+              !!afScroll && afScroll.diff === 0,
+              afScroll ? `差 ${afScroll.diff} px` : 'null');
+    const scScroll = await c.eval('return await window.__heditor.selfCheck();');
+    chk.check('滚动换窗之后屏幕 == 引擎帧', scScroll.screenVsEngineDiffPx === 0,
+              `差 ${scScroll.screenVsEngineDiffPx} px`);
   }
 
   chk.section('[10] 跨段编辑：真实回车分段 / 段首退格合并');
@@ -3383,9 +3425,221 @@ async function main() {
     chk.check('★ 抬手之后拖选收尾（诊断面回到不在拖）', d20 && d20.active === false,
               JSON.stringify(d20));
 
+    // (j) 抬起事件丢了也要收尾：用户报过"有时鼠标都松开了还在拖"。
+    //   真实成因都是"页面收不到 mouseup"（在浏览器窗口之外松手、被别的窗口抢走、
+    //   被浏览器接管成原生拖放），那些场景 CDP 造不出来。能造的是它的后果：
+    //   移动事件里已经带着"按钮抬起了"。
+    //
+    //   这一条的刺激必须是页内合成的：给 CDP 的 mouseMoved 传 buttons=0 没用 ——
+    //   Chrome 用它自己的按钮状态覆盖那个字段（实测读到的还是 1，于是那条移动把选区
+    //   又扩了一格）。被测的只是"onMove 读到按钮已抬起就收尾"这一条，
+    //   坐标换算与命中都不在它里面，所以合成事件在这里是恰当的刺激而不是绕过接线。
+    await c.eval('await window.__heditor.loadStressDocument(200, 20); return true;');
+    await c.eval('document.getElementById("stage").scrollTop = 0; return true;');
+    await sleep(250);
+    await c.eval('await window.__heditor.setCaret(0, 0); return true;');
+    const g20k = await geo20();
+    const ck20 = await caret20();
+    const pk20 = toClient(g20k, ck20, 1, ck20.h / 2);
+    const outK = { x: g20k.stageMidX, y: g20k.stageBottom + 30 };
+    // 页内派一条移动事件（按钮位可指定）—— 见上面为什么必须合成。
+    const synthMove = (x, y, buttons) => c.eval(
+      'window.dispatchEvent(new MouseEvent("mousemove", { clientX: ' + Math.round(x) +
+      ', clientY: ' + Math.round(y) + ', buttons: ' + buttons +
+      ', bubbles: true, cancelable: true })); return true;');
+    const readK = () => c.eval(
+      'const s = document.getElementById("stage");' +
+      'return { drag: window.__heditor.drag, top: s.scrollTop };');
+    await mouse('mousePressed', pk20);
+    await mouse('mouseMoved', outK);                      // 拖到容器外：自动滚动起来
+    await sleep(300);
+    const k0 = await readK();
+    await synthMove(outK.x, outK.y, 0);                   // 抬起丢了，但人还在动鼠标
+    await sleep(80);
+    const k1 = await readK();
+    await sleep(300);
+    const k2 = await readK();
+    chk.check('★ 前置：拖到容器外确实在自动滚动（否则这一节测了个空）',
+              k0.drag && k0.drag.active === true && k0.drag.autoScroll === true,
+              JSON.stringify(k0.drag));
+    chk.check('★ 抬起事件丢失时，下一次移动（按钮已抬起）也收尾',
+              k1.drag && k1.drag.active === false,
+              `收尾前 ${JSON.stringify(k0.drag)} → 之后 ${JSON.stringify(k1.drag)}`);
+    chk.check('★ 收尾之后自动滚动也停了（松手后画面不再自己滚）',
+              k2.top === k1.top, `${k1.top} → ${k2.top}`);
+    await mouse('mouseReleased', outK);                   // 收尾：把按下状态也放掉
+
+    // (k) pointercancel 也要收尾：触摸被识别成滚动、或笔被系统抢走时只剩这一个信号。
+    await load20();
+    await c.eval('await window.__heditor.setCaret(0, 0); return true;');
+    const g20m = await geo20();
+    const cm20 = await caret20();
+    await mouse('mousePressed', toClient(g20m, cm20, 1, cm20.h / 2));
+    await mouse('mouseMoved', { x: g20m.stageMidX, y: g20m.stageTop + 120 });
+    await sleep(60);
+    const m0 = await c.eval('return window.__heditor.drag;');
+    await c.eval('window.dispatchEvent(new PointerEvent("pointercancel",' +
+                 ' { bubbles: true, cancelable: true })); return true;');
+    await sleep(60);
+    const m1 = await c.eval('return window.__heditor.drag;');
+    chk.check('★ pointercancel 也收尾（触摸/笔被系统接管）',
+              m0 && m0.active === true && m1 && m1.active === false,
+              `${JSON.stringify(m0)} → ${JSON.stringify(m1)}`);
+    await mouse('mouseReleased', { x: g20m.stageMidX, y: g20m.stageTop + 120 });
+
     // 收尾：把文档换回去，别把这一节的痕迹留给后面的节
     await c.eval(
       'await window.__heditor.loadTextDocument(' + JSON.stringify(S6) + ', 1); return true;');
+  }
+
+  // 光标与选区的样式：宿主可配置的参数
+  //
+  // 两件事一起钉。正面：改了样式，帧上那个像素真的变成新颜色。
+  // 反面：改这一拍不会整窗重光栅 —— 把样式塞进 setConfig 的实现（每拍作废底图）
+  //   在正面也全绿，而那条路每一拍都要把窗口里的每一页重新光栅。所以两条缺一不可。
+  chk.section('[21] 光标与选区的样式：可配置的参数');
+  {
+    await c.eval(
+      'await window.__heditor.loadTextDocument(' + JSON.stringify(S6) + ', 1); return true;');
+    await c.eval('await window.__heditor.setCaret(0, 0); return true;');
+    await c.eval('return await window.__heditor.stopBlink();');
+
+    // 采样点取光标矩形中心偏下 3 px：一定在光标内，又躲开上缘的取整边界。
+    //   读的是引擎帧（rawFrame 是快照），不是画布 —— 两个宿主的画布形状不同。
+    const FRAME_PIX = `
+      const H = window.__heditor;
+      const f = await H.rawFrame();
+      const w = H.frameW(), h = H.frameH();
+      const cr = H.caret;
+      const x = cr.x + Math.max(0, Math.floor(cr.w / 2));
+      const y = cr.y + Math.min(3, Math.max(0, cr.h - 1));
+      if (!(x >= 0 && y >= 0 && x < w && y < h)) return null;
+      const i = (y * w + x) * 4;
+      return [f[i], f[i + 1], f[i + 2], f[i + 3]];`;
+    const frameArea = await c.eval('return window.__heditor.frameW() * window.__heditor.frameH();');
+
+    const defCaret = await c.eval('return window.__heditor.caretStyle;');
+    const defSel = await c.eval('return window.__heditor.selectionStyle;');
+    const p0 = await c.eval(FRAME_PIX);
+    chk.check('默认光标色就是配置里那一份（31,111,235）',
+              !!p0 && p0[0] === 31 && p0[1] === 111 && p0[2] === 235,
+              `采样 ${JSON.stringify(p0)}，配置 ${JSON.stringify(defCaret.color)}`);
+
+    const st1 = await c.eval(
+      'return await window.__heditor.setCaretStyle({ color: [220, 20, 60, 255] });');
+    const p1 = await c.eval(FRAME_PIX);
+    const back1 = await c.eval('return window.__heditor.caretStyle;');
+    chk.check('改光标色：帧上那个像素变成新颜色（不只是改了参数）',
+              !!p1 && p1[0] === 220 && p1[1] === 20 && p1[2] === 60 &&
+              !!p0 && (p0[0] !== p1[0] || p0[1] !== p1[1] || p0[2] !== p1[2]),
+              `${JSON.stringify(p0)} → ${JSON.stringify(p1)}`);
+    chk.check(' 读回来的光标样式与设进去的一致',
+              back1.color[0] === 220 && back1.color[1] === 20 && back1.color[2] === 60 &&
+              back1.color[3] === 255 && back1.widthPt === defCaret.widthPt,
+              JSON.stringify(back1));
+
+    // 参考臂：整篇重排重绘那一拍写多少像素。没有它，"改样式那拍写得少"这句无从比较
+    //   —— 一个恒报 0 的计数器也会让它成立。
+    const fullPix = await c.eval(`
+      await window.__heditor.setCaretStyle({ color: [31, 111, 235, 255] });
+      const s = await window.__heditor.run(6, ${ZOOM});
+      return s.repaintedPixels;`);
+    chk.check('参考臂：整篇重排重绘确实写了大半个帧（否则下面那条判据是恒真的）',
+              fullPix > frameArea * 0.5, `写 ${fullPix} / 帧 ${frameArea} px`);
+    const st2 = await c.eval(
+      'return await window.__heditor.setCaretStyle({ color: [0, 128, 0, 255] });');
+    chk.check('★ 改样式那一拍的写入量比整篇重绘少一个量级以上（没有整窗重光栅）',
+              st2.repaintedPixels * 10 < fullPix,
+              `改样式写 ${st2.repaintedPixels} px，整篇重绘写 ${fullPix} px，` +
+              `帧 ${frameArea} px`);
+    chk.check(' 改样式不脏页（底图一个字都没变）', st2.dirtyPageCount === 0,
+              `脏页 ${st2.dirtyPageCount}`);
+    chk.check(' 改样式不重排', st2.layoutRan === false && st1.layoutRan === false,
+              `layoutRan ${st1.layoutRan} / ${st2.layoutRan}`);
+
+    // 宽度下限：引擎把它夹到 0.4 —— 读回来必须是夹过的那一份，不是递进去的那一份。
+    await c.eval('return await window.__heditor.setCaretStyle({ widthPt: 0.1 });');
+    const wClamp = await c.eval('return window.__heditor.caretStyle;');
+    chk.check('光标宽度下限被夹到 0.4 磅（递 0.1 进去）', wClamp.widthPt === 0.4,
+              `读回 ${wClamp.widthPt}`);
+    await c.eval('return await window.__heditor.setCaretStyle({ widthPt: 3 });');
+    const wSet = await c.eval('return window.__heditor.caretStyle;');
+    chk.check(' 宽度在范围内的取值原样保留（不是恒被夹到下限）', wSet.widthPt === 3,
+              `读回 ${wSet.widthPt}`);
+
+    // 宽度参数确实改变了画出来的东西：数整帧上等于光标色的像素，那个面积就是光标的
+    //   可见大小。只读回 widthPt 只能证明引擎存下了这个数，证明不了它被画出来 ——
+    //   而"存下来但没画"正是这类参数最常见的失败方式。
+    const caretArea = async (w) => c.eval(`
+      const H = window.__heditor;
+      await H.setCaretStyle({ color: [0, 128, 0, 255], widthPt: ${w} });
+      const f = await H.rawFrame();
+      let n = 0;
+      for (let i = 0; i + 3 < f.length; i += 4) {
+        if (f[i] === 0 && f[i + 1] === 128 && f[i + 2] === 0) ++n;
+      }
+      return n;`);
+    const areaThin = await caretArea(0.4);
+    const areaThick = await caretArea(6);
+    chk.check('光标宽度参数改变了画出来的粗细（整帧上光标色的像素面积）',
+              areaThin > 0 && areaThick > areaThin * 5,
+              `0.4 磅 ${areaThin} px，6 磅 ${areaThick} px`);
+
+    // 通道越界：递进去 300 / -5，必须夹到 255 / 0 而不是回绕。
+    await c.eval('return await window.__heditor.setSelectionStyle({ color: [300, -5, 0, 0] });');
+    const cClamp = await c.eval('return window.__heditor.selectionStyle;');
+    chk.check('色通道越界被夹到 0~255（不回绕）',
+              JSON.stringify(cClamp.color) === JSON.stringify([255, 0, 0, 0]),
+              JSON.stringify(cClamp.color));
+
+    // 选区：alpha 255 + 纯红 ⇒ 选区矩形内任一点都是那个红。用实心色是为了可判 ——
+    //   半透明混出来的值依赖 blend 的取整口径，那不该由这条判据来钉。
+    //
+    // 单位：selection.rects 的 x/y/w/h 是页面磅（另带 page），而帧是帧像素 ——
+    //   两套单位混用只在 zoom=1 时是恒等，取中心点会取到行外去（读回一片白）。见名词对照。
+    const selPix = await c.eval(`
+      const H = window.__heditor;
+      await H.setSelectionStyle({ color: [255, 0, 0, 255] });
+      await H.selectAll();
+      const f = await H.rawFrame();
+      const w = H.frameW(), h = H.frameH();
+      const z = H.stats.zoom;
+      const step = H.pagePx[1] + H.pagePx[2];
+      const first = H.editStats.windowFirstPage;
+      const r = H.selection.rects[0];
+      const x = Math.floor((r.x + r.w / 2) * z);
+      const y = Math.floor((r.page - first) * step + (r.y + r.h / 2) * z);
+      const i = (y * w + x) * 4;
+      return { px: [f[i], f[i + 1], f[i + 2], f[i + 3]], n: H.selection.rects.length,
+               at: [x, y], inFrame: x >= 0 && y >= 0 && x < w && y < h, z, step, first };`);
+    chk.check('改选区色：选区矩形内那个像素就是新颜色',
+              selPix.inFrame && selPix.n > 0 &&
+              JSON.stringify(selPix.px) === JSON.stringify([255, 0, 0, 255]),
+              `${selPix.n} 条矩形，取 ${JSON.stringify(selPix.at)}（zoom ${selPix.z}）` +
+              ` 得到 ${JSON.stringify(selPix.px)}`);
+    const selBack = await c.eval(`
+      const H = window.__heditor;
+      await H.setSelectionStyle({ color: ${JSON.stringify(defSel.color)} });
+      const f = await H.rawFrame();
+      const i = (${selPix.at[1]} * H.frameW() + ${selPix.at[0]}) * 4;
+      return [f[i], f[i + 1], f[i + 2], f[i + 3]];`);
+    chk.check(' 换回默认的半透明色之后同一点不再是纯红（说明上一条读的是真像素）',
+              !(selBack[0] === 255 && selBack[1] === 0 && selBack[2] === 0),
+              `读回 ${JSON.stringify(selBack)}`);
+
+    // 收尾：把两处样式恢复成引擎的默认值，别把这一节的痕迹留给后面的节和截图。
+    await c.eval(
+      'await window.__heditor.setCaretStyle({ color: ' + JSON.stringify(defCaret.color) +
+      ', widthPt: ' + defCaret.widthPt + ' });' +
+      'await window.__heditor.setSelectionStyle({ color: ' + JSON.stringify(defSel.color) +
+      ' });' +
+      'await window.__heditor.clearSelection(); return true;');
+    const restored = await c.eval(
+      'return { c: window.__heditor.caretStyle, s: window.__heditor.selectionStyle };');
+    chk.check('收尾：两处样式已恢复成默认',
+              JSON.stringify(restored.c.color) === JSON.stringify(defCaret.color) &&
+              JSON.stringify(restored.s.color) === JSON.stringify(defSel.color),
+              JSON.stringify(restored));
   }
 
   // 收尾：载入表单样例 + 恢复闪烁，截一张给人看

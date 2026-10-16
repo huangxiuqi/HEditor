@@ -297,6 +297,60 @@ void setUndoLimit(int n) {
 }
 int undoLimit() { return g_cfg.undo_limit; }
 
+/**
+ * 色通道夹到 0~255：宿主的面板递进来的可能越界，而截断的失败方式不明显。
+ */
+uint8_t channelClamp(int v) { return static_cast<uint8_t>(v < 0 ? 0 : (v > 255 ? 255 : v)); }
+
+/**
+ * 光标样式：颜色与宽度。色值是各通道 0~255，宽度单位是磅。
+ *
+ * 走引擎的 setCaretAndSelectionStyle 而不是 applyConfig：后者会作废底图，
+ *   而底图全建要把窗口里的每一页重新光栅（3 页约 32 ms）—— 取色器连续改时每一下都付。
+ * 不在这里呈现：与 setZoom 同一档，由宿主决定何时上屏（两个宿主的门面都会补一次 present）。
+ */
+void setCaretStyle(int r, int g, int b, int a, float width_pt) {
+    g_cfg.caret_color = Color{channelClamp(r), channelClamp(g), channelClamp(b), channelClamp(a)};
+    g_engine.setCaretAndSelectionStyle(g_cfg.caret_color, width_pt, g_cfg.selection_color);
+    // 引擎会把过窄的宽度夹到下限，取回来才是真正的现状（宿主面板要读它）。
+    g_cfg.caret_width_pt = g_engine.config().caret_width_pt;
+}
+
+/**
+ * 选区样式：底色与 alpha。alpha 不足 255 是刻意的，见 EngineConfig::selection_color。
+ */
+void setSelectionStyle(int r, int g, int b, int a) {
+    g_cfg.selection_color =
+        Color{channelClamp(r), channelClamp(g), channelClamp(b), channelClamp(a)};
+    g_engine.setCaretAndSelectionStyle(g_cfg.caret_color, g_cfg.caret_width_pt,
+                                       g_cfg.selection_color);
+}
+
+/**
+ * 光标样式的现状。宿主面板用它初始化控件 —— 默认值只在 EngineConfig 里有一份。
+ */
+std::string caretStyleJson() {
+    const EngineConfig& c = g_engine.config();
+    std::ostringstream o;
+    o.setf(std::ios::fixed);
+    o.precision(2);
+    o << "{\"color\":[" << static_cast<int>(c.caret_color.r) << ","
+      << static_cast<int>(c.caret_color.g) << "," << static_cast<int>(c.caret_color.b) << ","
+      << static_cast<int>(c.caret_color.a) << "],\"widthPt\":" << c.caret_width_pt << "}";
+    return o.str();
+}
+
+/**
+ * 选区样式的现状。形状与 caretStyleJson 一致，少一个宽度。
+ */
+std::string selectionStyleJson() {
+    const Color& s = g_engine.config().selection_color;
+    std::ostringstream o;
+    o << "{\"color\":[" << static_cast<int>(s.r) << "," << static_cast<int>(s.g) << ","
+      << static_cast<int>(s.b) << "," << static_cast<int>(s.a) << "]}";
+    return o.str();
+}
+
 void relayoutAndPaint() {
     g_engine.relayout();
     g_engine.repaint();
@@ -520,10 +574,15 @@ int caretOffsetLive() { return static_cast<int>(g_engine.caret().offset); }
  *
  * 矩形是判据要的正面证据 —— "选中了哪一段"最终要落到"哪几行被盖住了"。空选区给空数组，
  * 与"光标没有尺寸"是同一条：选区的可视范围就是矩形，没矩形就没选中。
+ *
+ * 矩形只给当前窗口内的那部分（selectionRectsVisible），与"这一帧画了什么"同一口径。
+ *   整篇给的话，2000 段全选就是 4000 条 / 197 KB，而 Worker 宿主每一拍状态都要推一份
+ *   （实测每次交互的墙钟从 3.4 ms 涨到 50.3 ms，拖选直接不跟手）。
+ *   要看"选区到底盖了多少行"，用两端 anchor..focus，它与窗口无关。
  */
 std::string selectionReport() {
     const Range r = g_engine.selection();
-    const std::vector<EditorEngine::PageRect> rects = g_engine.selectionRects();
+    const std::vector<EditorEngine::PageRect> rects = g_engine.selectionRectsVisible();
     std::ostringstream o;
     o.setf(std::ios::fixed);
     o.precision(2);
@@ -697,6 +756,12 @@ bool tabCaret(bool backward) { return g_engine.tabCaretAndRender(backward); }
  * 走 *AndRender：入口改状态就必须自己收尾，理由见 engine.cpp 里那段说明。
  */
 std::string auditFrame() { return g_engine.auditFrameJson(); }
+
+/**
+ * 底图自审：平移复用得到的底图 vs 从零全建，逐字节比对（0 = 一致）。
+ * 与 auditFrame 的分工见 engine.h：那一条比帧，帧是从底图搬的，盖不住底图本身出错。
+ */
+std::string auditBase() { return g_engine.auditBaseJson(); }
 
 /**
  * 排版自审：增量结果 vs 全量重排，逐字段比对（0 = 一致）。
@@ -1079,6 +1144,10 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("setPageMetrics", &setPageMetrics);
     emscripten::function("setUndoLimit", &setUndoLimit);
     emscripten::function("undoLimit", &undoLimit);
+    emscripten::function("setCaretStyle", &setCaretStyle);
+    emscripten::function("setSelectionStyle", &setSelectionStyle);
+    emscripten::function("caretStyleJson", &caretStyleJson);
+    emscripten::function("selectionStyleJson", &selectionStyleJson);
 
     emscripten::function("relayout", &layoutOnly);
     emscripten::function("relayoutAndPaint", &relayoutAndPaint);
@@ -1126,6 +1195,7 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("focusControl", &focusControl);
     emscripten::function("tabCaret", &tabCaret);
     emscripten::function("auditFrame", &auditFrame);
+    emscripten::function("auditBase", &auditBase);
     emscripten::function("auditLayout", &auditLayout);
     emscripten::function("auditCompile", &auditCompile);
     emscripten::function("takeBlitBox", &takeBlitBoxJson);

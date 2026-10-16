@@ -131,6 +131,8 @@ let scenario = 6;
 let mode = 0;
 let lastPageX = 0;   // 页在视口里横向居中的偏移（设备像素）
 let drag = null;     // 拖选控制器（共享模块造的，按下之后由它接管）
+let lastPointerId = null;   // 最近一次 pointerdown 的指针 id（按下时用来做指针捕获）
+let capturedId = null;      // 已经捕获在容器上的指针 id（下次按下时先放掉，见 pointerdown）
 
 /**
  * 把当前的缩放回写到页面上的 #zoom 输入框。
@@ -155,7 +157,7 @@ const post = (msg, transfer) => {
 const mirror = {
   info: null, stats: null, layout: null, geom: null,
   text0: '', controls: null, blockedEdits: 0, dirtyPages: [], caretReport: '',
-  selection: null,
+  selection: null, caretStyle: null, selectionStyle: null,
   caretLive: -1, heapMB: 0, fontMode: 'full', stateSeq: 0, lastLabel: '', lastMs: 0,
 };
 const host = { ready: false, errors, mirror, pageCanvasCount: 0 };
@@ -482,6 +484,9 @@ function onState(m) {
   mirror.dirtyPages = m.dirtyPages;
   mirror.caretReport = m.caretReport;
   mirror.selection = m.selection || mirror.selection;
+  // 样式现状：与 selection 同一条路（随 state 推过来），所以宿主侧读它也是同步的。
+  mirror.caretStyle = m.caretStyle || mirror.caretStyle;
+  mirror.selectionStyle = m.selectionStyle || mirror.selectionStyle;
   mirror.caretLive = m.caretLive;
   mirror.heapMB = m.heapMB;
   mirror.fontMode = m.fontMode;
@@ -617,6 +622,15 @@ function onPointerDown(ev) {
   const gm = mirror.geom;
   const page = Number(el.dataset.page);
   if (!gm || !Number.isFinite(page)) return;
+  // 指针捕获：在浏览器窗口之外松手时，页面未必收得到 mouseup —— 那是
+  //   "松开了还在拖"的一条来源。捕获之后抬起一定回到容器上（容器在 DOM 里常驻，
+  //   不像页画布那样会被换窗丢掉）。捕获失败也无所谓：drag_select 那边还有
+  //   pointerup/pointercancel/dragend 与"移动时按钮已抬起"两条自愈路。
+  if (lastPointerId !== null) {
+    try { stageEl.setPointerCapture(lastPointerId); capturedId = lastPointerId; }
+    catch (e) { /* 合成事件没有指针 */ }
+    lastPointerId = null;
+  }
   // 点击也要立刻按住光标可见：命中测试是一次往返，等它回来再归相位会晚一拍。
   blinkHold();
   const rect = el.getBoundingClientRect();
@@ -627,8 +641,13 @@ function onPointerDown(ev) {
   // 命中一次往返，结果有两个去处：定位，以及"这一下要不要起拖选"。
   //   落在正文之外时不起手 —— 从页外的空白拖起不该选中任何东西。定位由 placeAt 做，
   //   与点击路径共用同一段，免得"拖选能不能起手"和"点击落哪"两处各判一次。
+  //
+  // 监听必须当场挂上（begin 传 false 表示先算"还没确定"），命中回来再 arm。
+  //   等命中回来才 begin 的话，按下与第一次移动之间的移动会被整段丢掉 ——
+  //   而那次移动往往正好是"用户按下去就往右拖"的头一段。
+  if (drag) drag.begin(ev, false);
   const p = placeAt(xDev, yDev).then((hit) => {
-    if (hit && drag) drag.begin(ev, true);
+    if (drag) drag.arm(!!hit);
   });
   // clickAt 里有一次命中测试的往返，所以这一条既是"在途链"（排空要等它）也是
   //   "最近一次输入的渲染"（host.rendered）。
@@ -699,6 +718,10 @@ const CMD = {
   setUndoLimit: (n) => ['setUndoLimit', { n }],
   setEditMode: (m) => { mode = Number(m) | 0; return ['setEditMode', { mode }]; },
   setBracketScope: (s) => ['setBracketScope', { scope: Number(s) | 0 }],
+  // 光标与选区的样式。参数整块递过去，缺的字段由 Worker 侧按现状补 —— 与单线程宿主
+  //   门面同一套补全规则。返回的是 editStats（那边 setEditMode 也是），不是样式本身。
+  setCaretStyle: (style) => ['caretStyle', { style: style || {} }],
+  setSelectionStyle: (style) => ['selectionStyle', { style: style || {} }],
   setFormControls: (list) => ['setFormControls', { list: list || [] }],
   loadFormSample: (variant) => ['formSample', { variant }],
   loadStressDocument: (paras, chars) => ['stress', { paras, chars }],
@@ -785,6 +808,7 @@ const ASK = {
   controlAt: (x, y) => ['controlAt', { x, y }],
   describeControls: () => ['describeControls', {}],
   auditFrame: () => ['auditFrame', {}],
+  auditBase: () => ['auditBase', {}],
   auditLayout: () => ['auditLayout', {}],
   auditCompile: () => ['auditCompile', {}],
   bench: (runs) => ['bench', { runs }],
@@ -948,6 +972,10 @@ Object.defineProperties(host, {
   // 选区（两端全局流位置 + 页面坐标矩形）。与 caretReport 同一条路：随 state 推过来，
   //   所以宿主侧读它是同步的 —— 引擎在 Worker 那侧，而"读一次选区"不该是一次往返。
   selection: { get: () => mirror.selection },
+  // 光标与选区的样式。与 selection 同一条路（随 state 推过来），所以读它是同步的；
+  //   形状与单线程宿主的 caretStyle / selectionStyle 逐字对齐。
+  caretStyle: { get: () => mirror.caretStyle },
+  selectionStyle: { get: () => mirror.selectionStyle },
   // 引擎实时光标偏移。引擎在 Worker 那侧，所以这个"实时"只能是**推送那一刻**的实时
   //   —— 与 editStats 里的光标位置取自同一次 state，两者可比。排空之后（quiesce）
   //   读到的就是最新那一拍的账。
@@ -1207,6 +1235,21 @@ async function boot() {
   // 指针走事件委托（挂在滚动容器上，不挂在每张画布上）：画布是随窗口动态建与丢的，
   //   逐张挂监听会在换窗时漏挂 —— 委托给容器就不会有那个缺口。
   stageEl.addEventListener('mousedown', onPointerDown);
+  // 记下最近一次 pointerdown 的指针 id：mousedown 的事件对象上没有 pointerId，
+  //   而按下时要拿它去 setPointerCapture。用掉就清 —— 探针派的合成 MouseEvent
+  //   没有配套的 pointerdown，靠这一条不会拿到过期的 id 去乱捕获。
+  //
+  // 顺便把上一次的捕获放掉：捕获只在 pointerup 时由浏览器自动释放，而
+  //   "抬起事件丢了"正是要处理的那种情形 —— 捕获会一直挂着，把之后的
+  //   pointerdown/mousedown 重定向到容器上，于是下一次点在页上根本起不了拖选
+  //   （症状从"一直在拖"变成"拖不动了"）。下一拍按下就清，是这一条唯一的自愈点。
+  stageEl.addEventListener('pointerdown', (ev) => {
+    if (capturedId !== null) {
+      try { stageEl.releasePointerCapture(capturedId); } catch (e) { /* 已经没了 */ }
+      capturedId = null;
+    }
+    lastPointerId = ev.pointerId;
+  });
   // 滚动走单向：没人等结果（画布在文档流里，浏览器已经把像素搬完了）。
   stageEl.addEventListener('scroll', viewFireAndForget, { passive: true });
   // 视口变了不用换画布：页画布的尺寸只取决于页，视口只影响"窗口要哪几页" ——

@@ -55,6 +55,14 @@
     </select>
     <label>缩放</label>
     <input id="zoom" type="number" step="0.25" min="0.5" max="4" value="1.5" style="width:64px">
+    <label>光标</label>
+    <input id="caretColor" type="color">
+    <input id="caretWidth" type="number" min="0.4" max="8" step="0.2" style="width:64px"
+           title="宽度（磅）">
+    <label>选区</label>
+    <input id="selColor" type="color">
+    <input id="selAlpha" type="number" min="0" max="255" step="5" style="width:64px"
+           title="不透明度 0~255">
     <label>模式</label>
     <select id="mode">
       <option value="0" selected>文档</option>
@@ -88,6 +96,40 @@
         if (id === 8) h().loadMedicalSample(1); else h().run(id, Number(q('zoom').value));
       });
       q('zoom').addEventListener('change', (e) => h().zoomTo(Number(e.target.value)));
+      // 光标与选区的样式。初值从推过来的 state 里读（默认值只在 EngineConfig 里有一份），
+      //   读到之前控件的值是空的，所以那时按下的 input 一律丢掉 —— 否则第一次触摸会把
+      //   颜色写成取色器的空值黑。这条路上每一拍只有一次 present：样式参数不作废底图，
+      //   见 setCaretAndSelectionStyle。
+      (function () {
+        const hex = (c) => '#' + c.slice(0, 3).map((v) => v.toString(16).padStart(2, '0')).join('');
+        const rgb = (v) => [1, 3, 5].map((i) => parseInt(v.slice(i, i + 2), 16));
+        let live = false;
+        const pushCaret = () => {
+          if (!live) return;
+          const c = rgb(q('caretColor').value);
+          h().setCaretStyle({ color: [...c, 255], widthPt: Number(q('caretWidth').value) });
+        };
+        const pushSel = () => {
+          if (!live) return;
+          const c = rgb(q('selColor').value);
+          h().setSelectionStyle({ color: [...c, Number(q('selAlpha').value)] });
+        };
+        for (const [id, fn] of [['caretColor', pushCaret], ['caretWidth', pushCaret],
+                                ['selColor', pushSel], ['selAlpha', pushSel]]) {
+          q(id).addEventListener('input', fn);
+        }
+        const t = setInterval(() => {
+          const cs = h().caretStyle;
+          const ss = h().selectionStyle;
+          if (!cs || !ss) return;
+          clearInterval(t);
+          q('caretColor').value = hex(cs.color);
+          q('caretWidth').value = String(cs.widthPt);
+          q('selColor').value = hex(ss.color);
+          q('selAlpha').value = String(ss.color[3]);
+          live = true;
+        }, 100);
+      })();
       q('mode').addEventListener('change', (e) => h().setEditMode(Number(e.target.value)));
       q('btnPlus').addEventListener('click', () => h().loadFormSample(0));
       q('btnUndo').addEventListener('click', () => h().undo());

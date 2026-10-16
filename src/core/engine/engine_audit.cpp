@@ -289,6 +289,60 @@ std::string EditorEngine::auditFrameJson() {
 }
 
 /**
+ * 底图自审：把底图按"从零全建"重来一遍，与现在这一份逐字节比。
+ *
+ * 与 auditFrameJson 的分工：那一条比的是帧，而帧是从底图搬的 ——
+ *   底图错了，帧与"整帧重贴"照样一致，两条都绿、画面却是错的。
+ *   换窗时的"平移复用重叠页"只动底图，正是这一条要看的对象。
+ *
+ * 做法：把 base_valid_ 置假再 repaint()，就会走"底图全建"那一支。
+ *   同一窗口、同一布局、同一字形缓存下，全建是确定性的，所以两边必须逐字节相同。
+ * 副作用（与 auditFrameJson 同一条纪律）：跑完底图就是真值，本身也是自愈手段。
+ */
+std::string EditorEngine::auditBaseJson() {
+    const int bw = base_.width();
+    const int bh = base_.height();
+    std::ostringstream o;
+    if (bw <= 0 || bh <= 0 || !base_valid_) return "{\"diff\":-1,\"box\":null}";
+
+    const size_t n = base_.byteSize();
+    const std::vector<uint8_t> before(base_.data(), base_.data() + n);
+
+    base_valid_ = false;   // ← 强制"底图全建"
+    repaint();
+
+    const uint8_t* now = base_.data();
+    long long diff = 0;
+    int minx = 1 << 30;
+    int miny = 1 << 30;
+    int maxx = -1;
+    int maxy = -1;
+    for (int y = 0; y < bh; ++y) {
+        for (int x = 0; x < bw; ++x) {
+            const size_t off =
+                (static_cast<size_t>(y) * static_cast<size_t>(bw) + static_cast<size_t>(x)) * 4u;
+            if (before[off] == now[off] && before[off + 1] == now[off + 1] &&
+                before[off + 2] == now[off + 2]) {
+                continue;
+            }
+            ++diff;
+            if (x < minx) minx = x;
+            if (x > maxx) maxx = x;
+            if (y < miny) miny = y;
+            if (y > maxy) maxy = y;
+        }
+    }
+    o << "{\"diff\":" << diff << ",\"frameW\":" << bw << ",\"frameH\":" << bh;
+    if (diff > 0) {
+        o << ",\"box\":[" << minx << "," << miny << "," << maxx << "," << maxy << "]";
+    } else {
+        o << ",\"box\":null";
+    }
+    o << "}";
+    return o.str();
+}
+
+/**
  * 排版自审：拿"不用缓存的全量重排"当对照，与当前 layout_ 逐字段比。
  * 为什么要比逐字段而不是只看行数/字形数：增量最典型的错法是"少排了一段"
  * 或者"前缀多留了一段"，两者都只差几行 —— 看总数看不出来，看内容才看得见。

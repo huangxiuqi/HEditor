@@ -87,6 +87,8 @@ let composing = false;
 let caretOn = true;
 let blinkTimer = null;
 let drag = null;
+let lastPointerId = null;   // 最近一次 pointerdown 的指针 id（按下时用来做指针捕获）
+let capturedId = null;      // 已经捕获在页容器上的指针 id（下次按下时先放掉）
 const pageErrors = [];
 let disposed = false;
 
@@ -256,18 +258,17 @@ function syncPageCanvases(first, count, total) {
 }
 
 /**
- * 视口窗口：帧只装"看得见的那几页"，再并上光标所在页。
+ * 视口窗口：帧只装"看得见的那几页"（再留一两页余量），并尽量把光标页并进来。
  *
- * 光标那一页必须进来：帧只装窗口内的页，光标不在窗口里就既画不出来、也点不中。
- * 窗口一变就整帧重建（底图按新范围重光栅，一页约 13 ms），所以锚点只在真的
- * 盖不住时才挪 —— 见 applyWindow 的滞回。
+ * 光标那一页要尽量进来：帧只装窗口内的页，光标不在窗口里就既画不出来、也点不中。
+ * 窗口一变就整帧重建（底图按新范围重光栅，实测 3 页约 30 ms），所以锚点只在真的
+ * 盖不住"必须装下的那几页"时才挪 —— 见 applyWindow 的滞回。
  *
  * 长度封顶 MAX_WINDOW 页：光标页与可见页可能隔得很远（用户把屏幕滚到别处去了），
  * 不封顶就会算出跨越整篇的窗口，那正好把"帧只装几页"这件事作废。
  * 实测（scripts/diag_perf.mjs 扫 zoom）：窗口 2~3 页时帧间隔只由单拍操作耗时决定，
  * 画布面积本身不再多花时间；而作废之前那张 18.3 Mpx 的整篇画布要多花整整一个 vsync。
  */
-const PAGE_MARGIN = 0;   // 可见页两侧各多留几页（0 = 只装看得见的）
 const MAX_WINDOW = 3;    // 窗口封顶页数
 let lastAnchor = '';
 
@@ -284,16 +285,21 @@ function visiblePageRange() {
   return { first, last };
 }
 
+/**
+ * 必须装下的那几页：看得见的那几页，外加（还放得下时）紧挨着的光标页。
+ *
+ * 这是要求，不是"要设成的窗口" —— 两者分开是这一块的关键，理由见 targetWindow。
+ * 以看得见的那几页为准：它们必须全在窗口里，否则那几页没有画布（一片空白）。
+ *
+ *   光标页只在"不挤掉可见页"时才并进要求里：
+ *     无条件并进来，会让用户把屏幕滚到别处之后窗口仍被钉在光标页上；
+ *     有位置就并但不管可见页，会让可见页的最后一页落到窗口外（同样没有画布）。
+ *     两种错法的症状一样（滚动之后一片空白），只有这条断言能分辨它们。
+ *   光标不在窗口里时它不画 —— 它本来就在屏幕外，画了也看不见。
+ */
 function desiredWindow() {
   const total = Math.max(1, lastEdit ? lastEdit.totalPages : 1);
   const vis = visiblePageRange();
-  // 以看得见的那几页为准 —— 它们必须全在窗口里，否则那几页没有画布（一片空白）。
-  //
-  //   光标页只在"不挤掉可见页"时才并进窗口（窗口封顶 MAX_WINDOW 页）：
-  //     无条件并进来，会让用户把屏幕滚到别处之后窗口仍被钉在光标页上；
-  //     有位置就并但不管可见页，会让可见页的最后一页落到窗口外（同样没有画布）。
-  //     两种错法的症状一样（滚动之后一片空白），只有这条断言能分辨它们。
-  //   光标不在窗口里时它不画 —— 它本来就在屏幕外，画了也看不见。
   let lo = vis.first;
   let hi = vis.last;
   const cp = lastEdit ? lastEdit.caretPage : -1;
@@ -301,35 +307,54 @@ function desiredWindow() {
     if (cp === lo - 1) lo = cp;
     else if (cp === hi + 1) hi = cp;
   }
-  let first = Math.max(0, lo - PAGE_MARGIN);
+  let first = Math.max(0, lo);
+  const need = hi - lo + 1;
+  const count = Math.max(1, Math.min(need, total));
   // 下界是"装下可见页"，MAX_WINDOW 只是它的上界而不是替代品：
   //   舞台比 3 页还高时（最大化窗口、缩小 zoom），宁可多画几页也不能留空白页。
-  const need = hi - lo + 1;
-  let count = Math.max(need, Math.min(MAX_WINDOW, need + 2 * PAGE_MARGIN));
-  count = Math.max(1, Math.min(count, total));
   if (first + count > total) first = Math.max(0, total - count);
   return { first, count };
 }
 
 /**
+ * 要挪窗口时挪到哪：以"必须装下的那几页"为中心，尽量开满 MAX_WINDOW 页。
+ *
+ * 为什么不直接把要求当成窗口（窗口刚好贴住可见页）：那样每滚一页，要求立刻跑到
+ *   窗口外面，于是每滚一页都要整窗重光栅 —— 3 页窗口量到 30 ms、1 页窗口 10 ms，
+ *   连续滚动就是十几二十帧的节奏。
+ *   留出余量之后，一页滚动落在余量里：窗口不动，引擎一个字都不用重画
+ *   （实测这个时候 present 只要 1 ms，画布搬运全交给合成器）。
+ *   代价是窗口大一点、重建时多画一两页；重建次数少一个量级，这一头划算。
+ */
+function targetWindow(req, total) {
+  const count = Math.max(req.count, Math.min(MAX_WINDOW, total));
+  let first = req.first - Math.floor((count - req.count) / 2);
+  if (first + count > total) first = total - count;
+  if (first < 0) first = 0;
+  return { first, count: Math.max(1, Math.min(count, total)) };
+}
+
+/**
  * 按当前滚动位置与光标把视口锚点对一遍。返回 true 表示锚点变了（调用方要重新呈现）。
  *
- * 滞回：现有窗口只要还盖得住"光标页 + 可见页"，就原样留着不动。
- *   没有这一层的话，光标一路往下打字、可见页一格一格地换，每换一格就整帧重建一次
- *   （一页约 13 ms），手感就是"每隔十几个字卡一下"。
+ * 滞回：现有窗口只要还盖得住"必须装下的那几页"，就原样留着不动。
+ *   判据必须取"要求"而不是"目标窗口" —— 目标带余量、还会随可见页挪，
+ *   拿它当判据等于"窗口要永远精确居中"，一滚就动、滞回形同虚设。
+ *   没有滞回的话，光标一路往下打字、可见页一格一格地换，每换一格就整帧重建一次，
+ *   手感就是"每隔十几个字卡一下"。
  */
 function applyWindow() {
   if (!mod) return false;
-  const w = desiredWindow();
+  const total = Math.max(1, lastEdit ? lastEdit.totalPages : 1);
+  const req = desiredWindow();
+  const cur = lastAnchor.split(':').map(Number);
+  if (cur.length === 2 && Number.isFinite(cur[0]) && Number.isFinite(cur[1]) &&
+      cur[0] <= req.first && req.first + req.count <= cur[0] + cur[1]) {
+    return false;
+  }
+  const w = targetWindow(req, total);
   const key = w.first + ':' + w.count;
   if (key === lastAnchor) return false;
-  const cur = lastAnchor.split(':').map(Number);
-  if (cur.length === 2 && Number.isFinite(cur[0]) && Number.isFinite(cur[1])) {
-    // 滞回：现有窗口还盖得住"该装的那几页"就不动。
-    //   判据取 desiredWindow 的结果而不是另一个口径的可见页 —— 两个口径各判一次
-    //   就会出现"一个说盖得住、一个说盖不住"，于是锚点每轮都挪、每挪一次整窗重光栅。
-    if (cur[0] <= w.first && w.first + w.count <= cur[0] + cur[1]) return false;
-  }
   lastAnchor = key;
   mod.setViewportAnchor(w.first, w.count);
   return true;
@@ -754,6 +779,41 @@ async function boot() {
     });
   }
 
+  // 光标与选区的样式。控件里的初值从引擎读 —— 默认值只在 C++ 的 EngineConfig 里有一份，
+  //   在这里再写一遍就会分成两处，改一处忘一处时界面上显示的和实际画的不是一回事。
+  //   选区另给一个 alpha 数字框：它是 90（半透明）而不是 255，取色器表达不了这一档。
+  const caretColor = chrome ? $('caretColor') : null;
+  const caretWidth = chrome ? $('caretWidth') : null;
+  const selColor = chrome ? $('selColor') : null;
+  const selAlpha = chrome ? $('selAlpha') : null;
+  if (caretColor && caretWidth && selColor && selAlpha) {
+    const hex = (c) => '#' + c.slice(0, 3).map((v) => v.toString(16).padStart(2, '0')).join('');
+    const rgb = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
+    const initCaret = JSON.parse(mod.caretStyleJson());
+    const initSel = JSON.parse(mod.selectionStyleJson());
+    caretColor.value = hex(initCaret.color);
+    caretWidth.value = String(initCaret.widthPt);
+    selColor.value = hex(initSel.color);
+    selAlpha.value = String(initSel.color[3]);
+    for (const el of [caretColor, caretWidth, selColor, selAlpha]) el.disabled = false;
+    // input 而不是 change：取色器拖动时要跟着变。引擎只换参数、不作废底图，
+    //   所以这条路上每一拍只有一次 present，没有整页重光栅。
+    const pushCaret = () => {
+      const c = rgb(caretColor.value);
+      mod.setCaretStyle(c[0], c[1], c[2], 255, Number(caretWidth.value));
+      presentStyleChange();
+    };
+    const pushSel = () => {
+      const c = rgb(selColor.value);
+      mod.setSelectionStyle(c[0], c[1], c[2], Number(selAlpha.value));
+      presentStyleChange();
+    };
+    caretColor.addEventListener('input', pushCaret);
+    caretWidth.addEventListener('input', pushCaret);
+    selColor.addEventListener('input', pushSel);
+    selAlpha.addEventListener('input', pushSel);
+  }
+
   // 键盘与 IME：全部由 textarea 承接（canvas 收不到键盘，也收不到合成事件）
   ta.addEventListener('keydown', onKeyDown);
   ta.addEventListener('compositionstart', onCompositionStart);
@@ -761,6 +821,19 @@ async function boot() {
   ta.addEventListener('compositionend', onCompositionEnd);
   // 鼠标挂在页容器上而不是某一张画布：事件落在哪一页都走同一条换算。
   pagesEl.addEventListener('mousedown', onCanvasMouseDown);
+  // 记下最近一次 pointerdown 的指针 id：mousedown 上没有 pointerId，而按下时要拿它
+  //   去 setPointerCapture。用掉就清，合成事件（探针 clickAt 派的 MouseEvent）
+  //   不会拿到过期的 id 去乱捕获。
+  //   顺便把上一次的捕获放掉：捕获只在 pointerup 时由浏览器自动释放，而"抬起事件
+  //   丢了"正是要处理的情形 —— 它会一直挂着，把之后的按下重定向到容器上，
+  //   下一次点在页上就起不了拖选。下一拍按下就清，是唯一的自愈点。
+  pagesEl.addEventListener('pointerdown', (ev) => {
+    if (capturedId !== null) {
+      try { pagesEl.releasePointerCapture(capturedId); } catch (e) { /* 已经没了 */ }
+      capturedId = null;
+    }
+    lastPointerId = ev.pointerId;
+  });
   stageEl.addEventListener('scroll', onStageScroll, { passive: true });
   // 拖选：按下之后的移动与抬起由共享模块挂在 window 上（拖出画布再拖回来都收得到，
   //   挂在画布上会在出边界那一下就断）。按下时的定位仍走上面那个处理器，模块只管拖动。
@@ -930,6 +1003,18 @@ function relayoutAndBlit() {
   if (!ready && !mod) return;
   presetWindowForLoad();
   mod.relayoutAndPaint();
+  return settle(JSON.parse(mod.editStatsJson()), { scroll: false });
+}
+
+/**
+ * 光标与选区的样式改完之后收尾：呈现一次并上屏。
+ *
+ * 为什么不走 relayoutAndBlit：样式参数只在绘制期用（见 setCaretAndSelectionStyle），
+ *   重排一遍是白排；而引擎不自己重绘，少了那次 present 画面就停在旧颜色上。
+ * 不滚动视口：改颜色与光标在哪无关，把视口拽到光标处是多余的位移。
+ */
+function presentStyleChange() {
+  mod.present();
   return settle(JSON.parse(mod.editStatsJson()), { scroll: false });
 }
 
@@ -1130,6 +1215,15 @@ function dragExtendTo(hit) {
 
 function onCanvasMouseDown(ev) {
   if (!ready || busy) return;
+  // 指针捕获：在浏览器窗口之外松手时页面未必收得到 mouseup —— 那是"松开了还在拖"
+  //   的一条来源。捕获之后抬起一定回到容器上（它常驻，不像页画布会被换窗丢掉）。
+  //   捕获失败也无所谓：drag_select 那边还有 pointerup/pointercancel/dragend
+  //   与"移动时按钮已抬起"两条自愈路。
+  if (lastPointerId !== null) {
+    try { pagesEl.setPointerCapture(lastPointerId); capturedId = lastPointerId; }
+    catch (e) { /* 合成事件没有指针 */ }
+    lastPointerId = null;
+  }
   const pt = framePointFromEvent(ev);
   // hitTest 收的是帧磅坐标，而页容器上量到的是帧像素 —— 除以 zoom 换算。
   const hit = mod.hitTest(pt.x / currentZoom, pt.y / currentZoom);
@@ -1155,7 +1249,10 @@ function onCanvasMouseDown(ev) {
   }
   // 定位之后再交给拖选：这一下已经把 anchor 摆在按下点，之后的移动只搬焦点端。
   //   落在灰底上（没命中正文）时只定位不拖选 —— 从页外的空白起手不该选中任何东西。
-  if (drag) drag.begin(ev, onText);
+  //   这条路上命中是同步的，所以 begin 直接带上结论；两宿主的分工保持同形
+  //   （Worker 侧命中是往返，先 begin(false) 再 arm）。
+  if (drag) drag.begin(ev, false);
+  if (drag) drag.arm(onText);
   ta.focus();
   ev.preventDefault();
 }
@@ -1622,6 +1719,28 @@ const facade = {
     return this.present();
   },
   get bracketScope() { return mod ? mod.bracketScope() : 0; },
+  // 光标与选区的样式（色值 [r,g,b,a]，宽度单位磅）。
+  //   引擎只换参数、不作废底图（见 setCaretAndSelectionStyle），所以这里补一次 present
+  //   就够 —— 走 setConfig 那条路会把窗口里的每一页重新光栅，取色器连续改时每一下都付。
+  //   两个取值器与两个 setter 的读写形状一致，探针两边写同一句。
+  get caretStyle() { return mod ? JSON.parse(mod.caretStyleJson()) : null; },
+  get selectionStyle() { return mod ? JSON.parse(mod.selectionStyleJson()) : null; },
+  // 部分字段缺省时按现状补全：面板往往只想改颜色，不该被迫把宽度也读一遍。
+  setCaretStyle(style) {
+    if (!ready) return null;
+    const cur = JSON.parse(mod.caretStyleJson());
+    const c = (style && style.color) || cur.color;
+    const w = style && style.widthPt !== undefined ? Number(style.widthPt) : cur.widthPt;
+    mod.setCaretStyle(c[0] | 0, c[1] | 0, c[2] | 0, (c[3] === undefined ? 255 : c[3]) | 0, w);
+    return presentStyleChange();
+  },
+  setSelectionStyle(style) {
+    if (!ready) return null;
+    const cur = JSON.parse(mod.selectionStyleJson());
+    const c = (style && style.color) || cur.color;
+    mod.setSelectionStyle(c[0] | 0, c[1] | 0, c[2] | 0, (c[3] === undefined ? 255 : c[3]) | 0);
+    return presentStyleChange();
+  },
   // 用一份区间清单整批重建控件（探针用）。
   //   为什么不逐个改：区间树的父子关系是全局性质，改一个字段的端点会改变别的
   //   字段的 depth/parent，必须整棵重建。只读标记也只有建的时候给得进去，
@@ -1646,6 +1765,11 @@ const facade = {
   //   selfCheck 只能抓"上屏贴错"；这个能抓"引擎帧本身就是错的"（旧标记没擦掉）。
   //   跑完会顺带把这一帧修成真值。
   auditFrame() { return mod ? JSON.parse(mod.auditFrame()) : null; },
+
+  // 底图自审：平移复用的底图 vs "从零全建"，逐字节比。
+  //   auditFrame 比的是帧，而帧是从底图搬的 —— 底图本身错了它照样全绿。
+  //   滚动换窗走的就是底图平移，所以这一条是那条路唯一的判据。
+  auditBase() { return mod && mod.auditBase ? JSON.parse(mod.auditBase()) : null; },
 
   // 排版自审：增量续排的结果 vs 一次全量重排，逐字段比对（diff 必须为 0）。
   //   顺便带回两个耗时：curMs 是刚才那次增量，fullMs 是本次审计做的全量 ——

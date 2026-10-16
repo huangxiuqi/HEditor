@@ -14,6 +14,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <unordered_map>
 #include <vector>
@@ -131,6 +132,38 @@ public:
 
     void fillRect(const Rect& r, Color c);
     void strokeRect(const Rect& r, Color c, float thickness);
+
+    /**
+     * 整幅按行平移 dy 像素（dy > 0 向下、< 0 向上），露出来的那一条填零。
+     *
+     * 为什么要有它：视口窗口整体挪 k 页时，帧与底图里重叠的那几页像素其实是同一批，
+     *   只是位置变了。搬一次 memmove 就能把它们留住，而重新光栅一遍要付整页的
+     *   字形钱（3 页量到 32 ms，其中字形 15 ms）。露出来的那一条是垃圾，
+     *   调用方必须紧接着把它写掉（贴新页），不能直接上屏。
+     * 实现放头文件是因为它与光栅后端无关（只是搬字节），而两个后端只有一个会被
+     *   编进目标 —— 放在 .cpp 里会出现"native 有、wasm 没有"的链接失败。
+     * 记账（painted_px_）不动：它搬的是像素、不是"画"像素。
+     */
+    void shiftVertical(int dy) {
+        if (dy == 0 || w_ <= 0 || h_ <= 0) return;
+        const size_t row_bytes = static_cast<size_t>(w_) * 4u;
+        uint8_t* p = px_.data();
+        if (dy >= h_ || dy <= -h_) {
+            std::memset(p, 0, row_bytes * static_cast<size_t>(h_));
+            return;
+        }
+        if (dy > 0) {
+            std::memmove(p + row_bytes * static_cast<size_t>(dy), p,
+                         row_bytes * static_cast<size_t>(h_ - dy));
+            std::memset(p, 0, row_bytes * static_cast<size_t>(dy));
+        } else {
+            const int d = -dy;
+            std::memmove(p, p + row_bytes * static_cast<size_t>(d),
+                         row_bytes * static_cast<size_t>(h_ - d));
+            std::memset(p + row_bytes * static_cast<size_t>(h_ - d), 0,
+                        row_bytes * static_cast<size_t>(d));
+        }
+    }
 
     /**
      * 按 c.a 的透明度把颜色混进 r 覆盖的区域（保留底下已经画好的内容）。

@@ -24,6 +24,13 @@
   const MAX_SCROLL_CSS = 24;
   const RAMP_CSS = 60;
 
+  // 收尾信号："按下结束了"不止一条来源，缺一条就会出现"松开了还在拖"。
+  //   mouseup 是主路径。pointerup / pointercancel 覆盖笔与触摸 —— 浏览器会给触摸补一套
+  //   鼠标事件，但补得不全（拖动被识别成滚动时只剩 pointercancel）。
+  //   dragend / drop 是"浏览器把按下接管成了原生拖放"：那种情况下鼠标事件流会被
+  //   直接截断，页面再也收不到 mouseup，只留下这几个 —— 症状正是"松开了还在拖"。
+  const END_EVENTS = ['mouseup', 'pointerup', 'pointercancel', 'dragend', 'drop'];
+
   /**
    * 造一个拖选控制器。
    *
@@ -159,54 +166,108 @@
       raf = requestAnimationFrame(tick);
     }
 
+    /**
+     * 把一个点落成"焦点端搬到那儿"。
+     *
+     * 指针在容器外时按夹住的点命中：直接用真实坐标会落到窗口外，命中测试把它夹到
+     *   窗口最后一行，选区于是先跳到窗口末尾、再被自动滚动拽回来，看起来是抖的。
+     *   指针在外面时顺便把下一帧的自动滚动排上。
+     */
+    function applyAt(cx, cy) {
+      const box = contentBox();
+      const outside = cy < box.top || cy > box.bottom;
+      if (outside) {
+        st.clampY = clampedCy(box);
+        if (!raf) raf = requestAnimationFrame(tick);
+      }
+      st.lastCx = cx;
+      st.lastCy = cy;
+      queueAt(cx, outside ? clampedCy(box) : cy);
+    }
+
     function onMove(ev) {
       if (!st) return;
-      st.lastCx = ev.clientX;
-      st.lastCy = ev.clientY;
-      if (!st.armed) return;
+      // 按钮已经抬起来了，可 mouseup 没到页面 —— 这是"松开了还在拖"最省的一条自愈路：
+      //   mousemove 自带 buttons，下一次移动就能收尾。丢 mouseup 的三种情形
+      //   （在浏览器窗口之外松手、被别的窗口抢走、被原生拖放截断）都会走到这里，
+      //   只要用户还在动鼠标就一定能自愈。
+      if (typeof ev.buttons === 'number' && (ev.buttons & 1) === 0) { end(); return; }
+      if (!st.armed) {
+        // 还没确定算不算拖（命中在往返中），但位置要记下来 —— 见 arm()。
+        st.lastCx = ev.clientX;
+        st.lastCy = ev.clientY;
+        return;
+      }
       if (!st.moved) {
         const dx = ev.clientX - st.downCx;
         const dy = ev.clientY - st.downCy;
         if (dx * dx + dy * dy < threshold * threshold) return;
         st.moved = true;
       }
-      // 指针在外面时按夹住的点命中：直接用真实坐标会落到窗口外，命中测试把它夹到
-      //   窗口最后一行，选区于是先跳到窗口末尾、再被自动滚动拽回来，看起来是抖的。
-      const box = contentBox();
-      const outside = edgeDeltaPx(box) !== 0;
-      if (outside) {
-        st.clampY = clampedCy(box);
-        if (!raf) raf = requestAnimationFrame(tick);
-      }
-      queueAt(st.lastCx, outside ? clampedCy(box) : st.lastCy);
+      applyAt(ev.clientX, ev.clientY);
       ev.preventDefault();
     }
 
     function onUp() { end(); }
+
+    // 只有整个窗口失焦（切标签、切应用）才收尾 —— 那之后 mouseup 不会再到达页面。
+    //   元素级失焦不能当收尾信号：宿主在按下的同一条链里会 ta.focus()，焦点从别处
+    //   挪到输入框必然派发一次 blur，而 blur 不冒泡、捕获阶段却经过 window，
+    //   于是第一次按下刚建立的拖选被当场收掉（症状是同一个位置要拖两次）。
+    //   注册时不带捕获，再加 target 判据，两道都只放行窗口自己的 blur。
+    function onWindowBlur(ev) { if (ev.target === window) end(); }
+
+    // 拖选期间不许浏览器接管成原生拖放：一旦接管，鼠标事件流当场断掉，
+    //   页面再也收不到 mouseup（"松开了还在拖"的另一条来源）。dragend 那条补救
+    //   只在接管已经发生时才救得回来，能不让它发生就别让它发生。
+    function onDragStart(ev) { if (st) ev.preventDefault(); }
 
     function end() {
       if (!st) return;
       st = null;
       if (raf) { cancelAnimationFrame(raf); raf = 0; }
       window.removeEventListener('mousemove', onMove, true);
-      window.removeEventListener('mouseup', onUp, true);
-      window.removeEventListener('blur', onUp, true);
+      for (const t of END_EVENTS) window.removeEventListener(t, onUp, true);
+      window.removeEventListener('dragstart', onDragStart, true);
+      window.removeEventListener('blur', onWindowBlur);
       flushSettled();
     }
 
     /**
      * 按下。armed 为假表示这一下没落在正文上（灰底、页间空隙）—— 那就只定位，不拖选。
      * 定位本身由宿主先做完（setCaretAt），于是 engine 那边的 anchor 已经落在按下点。
+     *
+     * 监听必须在按下的那一拍就挂上，不能等命中测试回来。Worker 宿主的命中是一次
+     *   往返，而按下与第一次移动之间可能只隔几毫秒 —— 等回来再挂，那几毫秒里的移动
+     *   会被整段丢掉（状态停在按下点、moved 一直是 false），而且丢不丢全看往返快慢，
+     *   同一段代码时对时错。所以这里先挂上、按"还没确定"起手，
+     *   命中回来再由宿主调 arm() 补上那半句。
      */
     function begin(ev, armed) {
       end();
       st = { armed: !!armed, moved: false, extends: 0, held: false, clampY: 0,
              downCx: ev.clientX, downCy: ev.clientY, lastCx: ev.clientX, lastCy: ev.clientY };
       window.addEventListener('mousemove', onMove, true);
-      window.addEventListener('mouseup', onUp, true);
-      window.addEventListener('blur', onUp, true);
+      for (const t of END_EVENTS) window.addEventListener(t, onUp, true);
+      window.addEventListener('dragstart', onDragStart, true);
+      window.addEventListener('blur', onWindowBlur);
     }
 
-    return { begin, end, state, settled };
+    /**
+     * 按下那一刻没落在正文上就不拖 —— 但从按下到命中回来之间的移动已经记进 lastC 了，
+     * 所以打开时要按最近那个点补一次，否则"按下后立刻快拖"的头一段还是丢了。
+     */
+    function arm(on) {
+      if (!st) return;
+      st.armed = !!on;
+      if (!st.armed) return;
+      const dx = st.lastCx - st.downCx;
+      const dy = st.lastCy - st.downCy;
+      if (dx * dx + dy * dy < threshold * threshold) return;
+      st.moved = true;
+      applyAt(st.lastCx, st.lastCy);
+    }
+
+    return { begin, end, arm, state, settled };
   };
 })();

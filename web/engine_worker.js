@@ -180,8 +180,8 @@ function visibleRange(st) {
 }
 
 /**
- * 该装哪几页。与单线程宿主的 desiredWindow 同一口径（那边注释解释了为什么光标页只在
- *   "不挤掉可见页"时才并进来）。
+ * 该装哪几页（这是要求，不是"要设成的窗口"）。与单线程宿主的 desiredWindow 同一口径
+ *   （那边注释解释了为什么光标页只在"不挤掉可见页"时才并进来）。
  */
 function desiredWindow(st) {
   const total = Math.max(1, Number(st.totalPages) || 1);
@@ -195,25 +195,41 @@ function desiredWindow(st) {
   }
   let first = Math.max(0, lo);
   const need = hi - lo + 1;
-  let count = Math.max(need, Math.min(MAX_WINDOW, need));
-  count = Math.max(1, Math.min(count, total));
+  const count = Math.max(1, Math.min(need, total));
   if (first + count > total) first = Math.max(0, total - count);
   return { first, count };
 }
 
+/**
+ * 要挪窗口时挪到哪：以"必须装下的那几页"为中心，尽量开满 MAX_WINDOW 页。
+ *   与单线程宿主的 targetWindow 同一口径 —— 只开"必须的那几页"会让每滚一页都整窗重光栅
+ *   （那边注释里有实测数字：留余量之后一页滚动只要 1 ms，不留则一页 10~30 ms）。
+ */
+function targetWindow(req, total) {
+  const count = Math.max(req.count, Math.min(MAX_WINDOW, total));
+  let first = req.first - Math.floor((count - req.count) / 2);
+  if (first + count > total) first = total - count;
+  if (first < 0) first = 0;
+  return { first, count: Math.max(1, Math.min(count, total)) };
+}
+
 function retarget(st) {
-  const w = desiredWindow(st);
-  const key = w.first + ':' + w.count;
-  if (key === lastAnchor) return false;
+  const total = Math.max(1, Number(st.totalPages) || 1);
+  const req = desiredWindow(st);
   const cur = lastAnchor.split(':').map(Number);
-  // 滞回：现有窗口只要盖得住"该装的那几页"就不动。判据与单线程宿主的 applyWindow 逐条
-  //   相同 —— 特别是**不能**再加"现有窗口不能超过总页数"那一条：装载时会先把窗口钉成
+  // 滞回：现有窗口只要盖得住"必须装下的那几页"就不动。判据与单线程宿主的 applyWindow
+  //   逐条相同 —— 特别是不许再加"现有窗口不能超过总页数"那一条：装载时会先把窗口钉成
   //   (0, MAX_WINDOW) 再排版，而单页文档的总页数是 1 ⇒ 多那一条会把"钉好的窗口"判成
   //   换窗，于是全量重排之外再 present 一次（那次只重画一个光标），首次全量那笔账被冲掉。
+  //   判据取"要求"而不是"目标窗口"：目标带余量还随可见页挪，拿它当判据等于要求窗口
+  //   永远精确居中，一滚就动、滞回形同虚设。
   if (cur.length === 2 && Number.isFinite(cur[0]) && Number.isFinite(cur[1]) &&
-      cur[0] <= w.first && w.first + w.count <= cur[0] + cur[1]) {
+      cur[0] <= req.first && req.first + req.count <= cur[0] + cur[1]) {
     return false;   // 现有窗口还盖得住
   }
+  const w = targetWindow(req, total);
+  const key = w.first + ':' + w.count;
+  if (key === lastAnchor) return false;
   mod.setViewportAnchor(w.first, w.count);
   lastAnchor = key;
   return true;
@@ -234,6 +250,9 @@ const PRESENT_ALWAYS = new Set([
   'present', 'blinkPhase', 'viewport',
   'setCaret', 'setCaretAt', 'setCaretAtSide', 'setFocusAtSide',
   'setEditMode', 'setBracketScope', 'setViewportAnchor',
+  // 样式那两条：与 setEditMode 同档 —— 引擎只换参数（见 setCaretAndSelectionStyle），
+  //   没有这层收尾的话帧上留的还是上一版颜色。
+  'caretStyle', 'selectionStyle',
   'undo', 'redo', 'indent', 'outdent', 'focusControl', 'tabCaret',
   'removeControl', 'setControlProp',
 ]);
@@ -290,6 +309,10 @@ function sendState(ts, label, stats, changed) {
     //   页数 / 字形 run 数 / 分阶段形状耗时这些字段读出来全是 undefined。
     //   undefined 不会让任何断言变红，只会让报告里少几列：那是查错方向都定不下来的那种错。
     layout: JSON.parse(mod.statsJson()),
+    // 样式现状。与 selection 同档：小字符串，随 state 推过去，主线程读它是同步的 ——
+    //   面板初始化控件要用它，而默认值只在 EngineConfig 里有一份。
+    caretStyle: JSON.parse(mod.caretStyleJson()),
+    selectionStyle: JSON.parse(mod.selectionStyleJson()),
   });
   scrollReset = false;   // 一次性信号：随这一份状态送出去就清掉
 }
@@ -463,6 +486,23 @@ const WRITE = {
   setEditMode: (a) => mod.setEditMode(a.mode | 0),
   setBracketScope: (a) => mod.setBracketScope(a.scope | 0),
   /**
+   * 光标与选区的样式。缺的字段按现状补 —— 与单线程宿主门面同一套补全规则，
+   *   两处不能各写一套（面板只改颜色时，宽度必须原样保留）。
+   */
+  caretStyle: (a) => {
+    const s = a.style || {};
+    const cur = JSON.parse(mod.caretStyleJson());
+    const c = s.color || cur.color;
+    mod.setCaretStyle(c[0] | 0, c[1] | 0, c[2] | 0, (c[3] === undefined ? 255 : c[3]) | 0,
+                      s.widthPt === undefined ? cur.widthPt : Number(s.widthPt));
+  },
+  selectionStyle: (a) => {
+    const s = a.style || {};
+    const cur = JSON.parse(mod.selectionStyleJson());
+    const c = s.color || cur.color;
+    mod.setSelectionStyle(c[0] | 0, c[1] | 0, c[2] | 0, (c[3] === undefined ? 255 : c[3]) | 0);
+  },
+  /**
    * 换字段名单。★ 必须**重排**，不能只 present —— 括号标记（含只读的灰括号）是排进
    *   布局结果里的，只 present 的话标记还是上一轮的：症状是"控件清单里 ro=true，
    *   可槽清单里 ro 全是 false"（一条自相矛盾的读数，很难往"没重排"上想）。
@@ -551,6 +591,7 @@ const READ = {
   bracketScope: () => mod.bracketScope(),
   undoLimit: () => mod.undoLimit(),
   auditFrame: () => JSON.parse(mod.auditFrame()),
+  auditBase: () => JSON.parse(mod.auditBase()),
   auditLayout: () => (mod.auditLayout ? JSON.parse(mod.auditLayout()) : null),
   auditCompile: () => (mod.auditCompile ? JSON.parse(mod.auditCompile()) : null),
   bench: (a) => JSON.parse(mod.benchRelayoutPaint(a.runs || 12)),

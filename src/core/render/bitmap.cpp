@@ -266,17 +266,51 @@ void Bitmap::blendRect(const Rect& r, Color c) {
     if (x1 <= x0 || y1 <= y0) return;
     painted_px_ += static_cast<size_t>(x1 - x0) * static_cast<size_t>(y1 - y0);
 
+    // 混合系数只与颜色有关，与像素无关 ⇒ 一张 256 项的查表就够，内层循环里没有除法。
+    //
+    //   为什么值得为它建表：选区高亮是这一段的常客，整篇选中时一帧要混上百万像素
+    //   （实测 1.8 Mpx），而原式每个分量一次带符号除法（三轮除法），
+    //   一帧就是几百万次整除。表是按"通道值"建的，对一个 rect 只建一次。
+    //
+    //   表值与原式逐位相同：同一个四舍五入整数式，只是把常量项提到表外。
+    //   这条不能松 —— 两条光栅路径的帧要逐字节可比（见 auditFrame）。
     const int a = c.a;
     const int ia = 255 - a;
+    const int cr = c.r * a + 127;
+    const int cg = c.g * a + 127;
+    const int cb = c.b * a + 127;
     const size_t row_bytes = static_cast<size_t>(w_) * 4;
     uint8_t* base = px_.data();
+
+    // 小矩形（光标、小标记）建表比直算还贵：搬一个光标是 2×3×27 像素，
+    //   建表那一趟 256×3 就盖过省下的除法。阈值按"表的建立成本 ≈ 直算 200 个像素"取。
+    if (static_cast<long long>(x1 - x0) * (y1 - y0) < 1024) {
+        for (int y = y0; y < y1; ++y) {
+            uint8_t* p = base + static_cast<size_t>(y) * row_bytes + static_cast<size_t>(x0) * 4;
+            for (int x = x0; x < x1; ++x, p += 4) {
+                p[0] = static_cast<uint8_t>((p[0] * ia + cr) / 255);
+                p[1] = static_cast<uint8_t>((p[1] * ia + cg) / 255);
+                p[2] = static_cast<uint8_t>((p[2] * ia + cb) / 255);
+            }
+        }
+        return;
+    }
+
+    uint8_t lut[3][256];
+    for (int v = 0; v < 256; ++v) {
+        lut[0][v] = static_cast<uint8_t>((v * ia + cr) / 255);
+        lut[1][v] = static_cast<uint8_t>((v * ia + cg) / 255);
+        lut[2][v] = static_cast<uint8_t>((v * ia + cb) / 255);
+    }
+    const uint8_t* lr = lut[0];
+    const uint8_t* lg = lut[1];
+    const uint8_t* lb = lut[2];
     for (int y = y0; y < y1; ++y) {
         uint8_t* p = base + static_cast<size_t>(y) * row_bytes + static_cast<size_t>(x0) * 4;
         for (int x = x0; x < x1; ++x, p += 4) {
-            // 四舍五入的整数混合：两条光栅路径都走这一段，帧才继续逐字节可比。
-            p[0] = static_cast<uint8_t>((p[0] * ia + c.r * a + 127) / 255);
-            p[1] = static_cast<uint8_t>((p[1] * ia + c.g * a + 127) / 255);
-            p[2] = static_cast<uint8_t>((p[2] * ia + c.b * a + 127) / 255);
+            p[0] = lr[p[0]];
+            p[1] = lg[p[1]];
+            p[2] = lb[p[2]];
         }
     }
 }

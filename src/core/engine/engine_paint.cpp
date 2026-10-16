@@ -329,7 +329,23 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
         return 1;
     };
 
-    if (force_full || geom_changed || !base_valid_) {
+    // 换窗分三种，代价差一个量级，所以要分开判：
+    //   帧尺寸变了 / 从来没建过 ⇒ 只能全建；
+    //   尺寸没变、只是页范围整体挪了 k 页（|k| < 页数）⇒ 平移复用：
+    //      重叠的那几页像素原样搬过去，只重画新露出来的 |k| 页；
+    //   页范围没动 ⇒ 走下面的页/行增量。
+    // 平移复用是滚动的主路径。整窗重光栅一页约 5~10 ms（3 页量到 32 ms，其中字形 15 ms），
+    //   而滚动时九成的换窗都只是"窗口往下挪一页"—— 那两页的字形钱全是白付的。
+    const bool size_changed = (base_.width() != frame_w) || (base_.height() != frame_h);
+    const bool range_moved = (base_first_page_ != first_page);
+    const bool range_resized = (base_page_count_ != count);
+    const int shift_pages = first_page - base_first_page_;
+    // 挪得太远（重叠一页都没有）时平移无从谈起，退回整窗重建。
+    //   这一步不能省：漏了它会掉进下面的"页/行增量"分支，而那一支假定底图里
+    //   装的还是同一个窗口 —— 于是底图留着旧窗口的内容、帧贴出错的页。
+    const bool far_moved = range_moved && std::abs(shift_pages) >= count;
+
+    if (force_full || size_changed || range_resized || far_moved || !base_valid_) {
         // 底图全建
         base_.reset(frame_w, frame_h);
         base_.clear(cfg_.background);
@@ -342,6 +358,68 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
         snapshotLineGeometry();
         edit_stats_.repainted_pages = count;
         for (int i = 0; i < count; ++i) refresh.push_back(pageRectLocal(i));
+    } else if (range_moved) {
+        // 平移复用（到这里 shift_pages 一定非零且 |shift_pages| < count）。
+        //
+        //   顺序很讲究：先擦后搬。上一帧画在帧上的三样东西（光标、表单标记、选区）
+        //   会跟着 memmove 一起挪位置，不先擦干净，它们就会留在新坐标上变成幽灵。
+        //   擦的时候矩形坐标要按同一个位移折算 —— 那些坐标记的是上一帧的帧坐标。
+        const float dy = static_cast<float>(shift_pages * (page_px_h + gap_px));
+        if (caret_rect_px_prev_.w > 0.0f) caret_rect_px_prev_.y -= dy;
+        for (Rect& r : control_marks_prev_) r.y -= dy;
+        for (Rect& r : selection_rects_prev_) r.y -= dy;
+        auto eraseStillVisible = [&](const Rect& r) {
+            if (r.w <= 0.0f || r.h <= 0.0f) return;
+            if (r.y + r.h <= 0.0f || r.y >= static_cast<float>(frame_h)) return;
+            refresh.push_back(r);
+        };
+        if (caret_rect_px_prev_.w > 0.0f) eraseStillVisible(caret_rect_px_prev_);
+        for (const Rect& r : control_marks_prev_) eraseStillVisible(r);
+        for (const Rect& r : selection_rects_prev_) eraseStillVisible(r);
+        control_marks_prev_.clear();
+        selection_rects_prev_.clear();
+
+        base_.shiftVertical(-static_cast<int>(std::lround(dy)));
+        bitmap_.shiftVertical(-static_cast<int>(std::lround(dy)));
+
+        // 新露出来的那一条：先按背景色铺满，再画新页，最后整条重贴到帧上。
+        //
+        //   三个动作缺一不可，而且都不是可省的收尾：
+        //     不铺背景，memmove 之外那几行是零（黑），而"底图全建"那里是
+        //       clear(background) —— 底图自审逐字节比，一抓一个准；
+        //     只铺背景不画页，那一页是空的；
+        //     只把新页的矩形贴回帧，新页的 pageRectLocal 与相邻页的
+        //       pageRectLocal 之间会漏掉一条缝（两者各只外扩 1 px），帧上留一条黑线。
+        //   整条重贴同时解决了第三个问题，代价只是多搬一次页间隙。
+        const int band_h = std::abs(shift_pages) * (page_px_h + gap_px);
+        const int band_y0 = (shift_pages > 0) ? frame_h - band_h : 0;
+        base_.fillRect(
+            Rect{0.0f, static_cast<float>(band_y0), static_cast<float>(frame_w),
+                 static_cast<float>(band_h)},
+            cfg_.background);
+
+        const int lo = shift_pages > 0 ? count - shift_pages : 0;
+        const int hi = shift_pages > 0 ? count : -shift_pages;
+        for (int i = lo; i < hi; ++i) paintPageIntoBase(i, first_page + i);
+        refresh.push_back(Rect{0.0f, static_cast<float>(band_y0), static_cast<float>(frame_w),
+                               static_cast<float>(band_h)});
+
+        base_first_page_ = first_page;
+        base_page_count_ = count;
+        // 指纹按页号索引，所以平移之后要逐页重新对齐：窗口内那几页照现在的布局记，
+        //   窗口外的旧条目不用管（判脏只看窗口内的页）。
+        for (int i = 0; i < count; ++i) {
+            const int page = first_page + i;
+            if (page < static_cast<int>(page_fp_in_base_.size()))
+                page_fp_in_base_[static_cast<size_t>(page)] = page_fp_new_[static_cast<size_t>(page)];
+        }
+        page_fp_base_count_ = page_fp_new_count_;
+        // 行几何快照整份重取：平移之后"底图里是哪几行"跟着窗口一起变了，
+        //   逐行增量维护这张表的代价与收益不成比例（它只有几千项）。
+        snapshotLineGeometry();
+        edit_stats_.repainted_pages = std::abs(shift_pages);
+        edit_stats_.band_y0 = band_y0;
+        edit_stats_.band_y1 = band_y0 + band_h;
     } else {
         // 底图增量：只重画指纹变了的页 —— 页里再按行指纹缩到那几条带
         int dirty = 0;
@@ -415,7 +493,12 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
     //   必须先擦后画（擦在 refresh 那一步），否则拖动时会留下一路累积的淡蓝。
     //   用混合而不是实心填充：选区盖在文字上，实心填充会把字一起抹掉。
     //   画在光标之前，光标才能压在它上面。
-    const std::vector<Rect> sel_rects = selectionRectsPx();
+    //
+    //   只取窗口内的矩形：帧就是这一窗，窗口外的矩形画不到也擦不着，
+    //     而它们的条数是"文档行数"这个量级（2000 段 ≈ 4000 条）。全取的话，
+    //     全选之后每一拍都要混合 1.8 Mpx（实测 present 从 3.6 ms 涨到 9.8 ms），
+    //     而真正的画面一个字都没变。
+    const std::vector<Rect> sel_rects = selectionRectsPxIn(first_page, count);
     for (const Rect& r : sel_rects) bitmap_.blendRect(r, cfg_.selection_color);
     selection_rects_prev_ = sel_rects;
 

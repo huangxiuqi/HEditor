@@ -44,6 +44,20 @@ public:
     const EngineConfig& config() const { return cfg_; }
 
     /**
+     * 只改光标与选区的样式（颜色、光标宽度）。
+     *
+     * 为什么不复用 setConfig：那一处会作废底图，而底图全建要把窗口里的每一页重新光栅
+     *   （3 页约 32 ms）。样式由界面上的取色器连续改时，每一下都付这笔钱。
+     *   底图的内容与样式无关 —— 光标与选区都画在帧上，见 presentInternal。
+     *
+     * 不动底图，也不清 caret_rect_px_prev_ 与 selection_rects_prev_：那两份正是下一次
+     *   呈现用来把旧样式的像素从帧上擦掉的依据，清了就会在帧上留下旧颜色。
+     *   调用方改完要呈现一次（引擎不自己重绘）。
+     */
+    void setCaretAndSelectionStyle(const Color& caret, float caret_width_pt,
+                                   const Color& selection);
+
+    /**
      * 页度量：断行依赖内容宽度，所以改它必须整篇重排（影响面不可定位）。
      */
     void setPage(const PageMetrics& page) {
@@ -463,8 +477,29 @@ public:
     std::vector<ControlRect> controlRects(int index) const;
     /**
      * 选区 → 页面坐标矩形（跨行拆、跨页分段）。空选区是空的 —— 没有选区就没有要画的。
+     *
+     * 只返回落在页范围 [first_page, first_page + count) 里的那部分；count <= 0 表示不限页。
+     *
+     * 为什么要能限页：整篇选中的矩形条数是"文档行数"这个量级（2000 段 ≈ 4000 条），
+     *   而呈现与状态推送每拍都要过一遍。不限页时，全选之后每一拍都要造 4000 条矩形、
+     *   把它们全刻进擦除清单、再逐条混合一遍 —— 其中九成以上落在当前帧之外，
+     *   画不到也擦不着（量到的是单线程宿主 present 从 3.6 ms 涨到 9.8 ms，
+     *   Worker 宿主每拍状态消息里那一份 197 KB）。
+     *   限页之后这两笔都只随"看得见的行数"走，与选区多大无关。
+     */
+    std::vector<PageRect> selectionRectsIn(int first_page, int count) const;
+
+    /**
+     * 整篇的选区矩形。判据与审计用它（要看"选区到底盖了多少行"），
+     * 呈现与状态推送不要用它 —— 用 selectionRectsIn。
      */
     std::vector<PageRect> selectionRects() const;
+
+    /**
+     * 当前视口窗口内的选区矩形。宿主取证入口用它，口径与"这一帧画了什么"一致。
+     * 视口没钉过（vp_count_ <= 0）时限页失效，退化成整篇。
+     */
+    std::vector<PageRect> selectionRectsVisible() const;
 
     /**
      * 删除一个控件。keep_content 为真时拆壳留内容（那一段字符变成普通正文），
@@ -534,6 +569,18 @@ public:
      * 跑完顺便把这一帧修成真值。理由见 engine.cpp 的实现。
      */
     std::string auditFrameJson();
+
+    /**
+     * 底图自审：把底图按"从零全建"重来一遍，与现在这一份逐字节比，返回
+     * {"diff":N,"frameW":..,"frameH":..,"box":[x0,y0,x1,y1]}。
+     *
+     * 为什么必须单独有一条（auditFrameJson 盖不住）：帧是从底图搬过来的，
+     *   底图本身错了，帧与"整帧重贴"当然一致 —— 两条都绿，画面却是错的。
+     *   而"换窗时平移复用重叠页"这条优化只动底图，正是这一条要看的对象。
+     *   判据：同一窗口下，平移复用得到的底图必须与全建逐字节相同。
+     * 跑完顺便把底图修成真值（与 auditFrameJson 同一口径：自审不掩盖问题）。
+     */
+    std::string auditBaseJson();
 
     /**
      * 排版自审：用"不用缓存的全量重排"做一份对照，与当前排版结果逐字段比对，
@@ -858,7 +905,12 @@ private:
      */
     float caretInlineAxisPt() const;
     /**
-     * 选区矩形（帧像素坐标，与 caretRectPx 同口径）。
+     * 选区矩形（帧像素坐标，与 caretRectPx 同口径）。只取落在页范围
+     * 页范围 [first_page, first_page + count) 里的那部分；count <= 0 表示不限页。
+     */
+    std::vector<Rect> selectionRectsPxIn(int first_page, int count) const;
+    /**
+     * 整篇的选区矩形（帧像素坐标）。判据/取证用它，呈现不要用 —— 用 selectionRectsPxIn。
      */
     std::vector<Rect> selectionRectsPx() const;
     /**
