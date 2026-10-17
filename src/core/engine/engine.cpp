@@ -184,6 +184,7 @@ FlowVisibility EditorEngine::flowVisibility() const {
 }
 
 void EditorEngine::rebuildFromTree() {
+    edit_stats_.rebuild_path = 0;
     const FlowVisibility vis = flowVisibility();
     const auto t_compile0 = Clock::now();
     CompileResult res = compileDocument(tree_, vis, sheet_);
@@ -194,6 +195,14 @@ void EditorEngine::rebuildFromTree() {
 }
 
 bool EditorEngine::rebuildParagraphFromTree(int para) {
+    if (!compileParagraphInto(para)) return false;
+    edit_stats_.rebuild_path = 1;
+    edit_stats_.rebuild_reject = 0;
+    finishRebuildFromTree(flowVisibility());
+    return true;
+}
+
+bool EditorEngine::compileParagraphInto(int para) {
     // 条件先判完再动手：任何一条不满足就原样返回 false，由调用方退回全量 ——
     //   半途改一半再失败会留下"这一段按新树、别处按旧树"的产物，那种错最难查。
     if (para < 0) return false;
@@ -267,8 +276,7 @@ bool EditorEngine::rebuildParagraphFromTree(int para) {
     if (part.blocks.size() != 1 || part.sources.size() != 1) return false;
     blocks_full_[static_cast<size_t>(para)] = std::move(part.blocks[0]);
     block_src_[static_cast<size_t>(para)] = part.sources[0];
-    edit_stats_.rebuild_compile_ms = msSince(t_compile0);
-    finishRebuildFromTree(vis);
+    edit_stats_.rebuild_compile_ms += msSince(t_compile0);
     return true;
 }
 
@@ -339,6 +347,89 @@ void EditorEngine::finishRebuildFromTree(FlowVisibility vis) {
     const auto t_ctl0 = Clock::now();
     exportControlsFromBlocks();
     edit_stats_.rebuild_controls_ms = msSince(t_ctl0);
+}
+
+/**
+ * 分段之后的局部重建（说明见 engine.h 的同名声明）。
+ *
+ * 找新标记的办法：在原标记所在容器里往回找最近的一枚段落标记 —— 它就是新插入的那一枚
+ *   （插入点落在段的内容中间，两者之间隔着段的后半内容）。只有"事务确实只插了一枚段落
+ *   标记"时才成立，所以下面用两条判据锁住形状：它的流区间末尾必须与原标记的区间起点
+ *   重合，且它必须落在原段的区间之内。控件内分段、跨容器插入都会被挡下并退回全量。
+ */
+bool EditorEngine::rebuildAfterSplit(int at, int* reject_out) {
+    auto reject = [&](int code) {
+        if (reject_out != nullptr) *reject_out = code;
+        return false;
+    };
+    if (at < 0) return reject(1);
+    if (block_src_.size() != blocks_full_.size()) return reject(2);
+    if (at + 1 > static_cast<int>(block_src_.size())) return reject(3);
+    if (at >= static_cast<int>(block_flow_.size())) return reject(4);
+
+    // 段 at 的原结束标记归新段：新插入的那枚在它前面，被它结束的是前半段。
+    const NodeId mark_b = block_src_[static_cast<size_t>(at)].mark;
+    const Node* mb = tree_.find(mark_b);
+    if (mb == nullptr || !isParagraphMark(mb->kind) || mb->parent == nullptr) return reject(5);
+    const Node* container = mb->parent;
+    int idx = -1;
+    for (size_t i = 0; i < container->children.size(); ++i) {
+        if (container->children[i]->id == mark_b) {
+            idx = static_cast<int>(i);
+            break;
+        }
+    }
+    if (idx <= 0) return reject(6);
+    // 新标记 = 原标记之前最近的那一枚段落标记。
+    //   插入点落在段的内容中间，所以两者之间隔着段的后半内容 —— 不是紧邻的兄弟。
+    //   往回找第一枚段落标记即可；它是不是"贴着原标记的那一枚"由下面的区间判据锁住
+    //   （控件内分段那一类会让两者区间不相接，当场退回全量）。
+    const Node* mark_a = nullptr;
+    for (int i = idx - 1; i >= 0; --i) {
+        const Node* sib = container->children[static_cast<size_t>(i)];
+        if (sib != nullptr && isParagraphMark(sib->kind)) {
+            mark_a = sib;
+            break;
+        }
+    }
+    if (mark_a == nullptr) return reject(7);
+
+    // 流索引必须先按新树重建：区间定位全靠它，而旧索引里没有新插入的那枚标记。
+    //   这一笔与"整树重编"无关，是局部重建自己的固定成本（2000 段实测约 0.9 ms）。
+    const FlowVisibility vis = flowVisibility();
+    const auto t_index0 = Clock::now();
+    flow_.emplace(tree_, vis);
+    edit_stats_.rebuild_flow_ms = msSince(t_index0);
+
+    // 形状判据：新标记必须整个落在原段 at 的区间之内 —— 起点不早于段起点，末尾不晚于原
+    //   标记的起点。插入点在段的内容中间，所以两者之间本就隔着段的后半内容，不能要求它们
+    //   首尾相接（那是我按"插入点总在段尾"想出来的条件，与真实形状不符）。
+    int a_first = 0;
+    int a_end = 0;
+    int b_first = 0;
+    int b_end = 0;
+    if (!flow_->intervalOf(mark_a->id, &a_first, &a_end)) return reject(8);
+    if (!flow_->intervalOf(mark_b, &b_first, &b_end)) return reject(9);
+    if (a_end > b_first) return reject(10);
+    if (a_first < block_flow_[static_cast<size_t>(at)]) return reject(11);
+
+    // 数组对齐到新树：段 at+1 是新增的那一段，先占位（它的首个内容元素由下面的局部
+    //   编译填对）；段 at 改由新标记结束。其余段落下标整体后移一位，内容原样不动。
+    BlockSource placeholder;
+    placeholder.mark = mark_b;
+    block_src_.insert(block_src_.begin() + at + 1, placeholder);
+    blocks_full_.insert(blocks_full_.begin() + at + 1, BlockSpec{});
+    block_src_[static_cast<size_t>(at)].mark = mark_a->id;
+
+    // 两段各编一次。任何一段编不成，调用方会退回整树重建 —— 那条路把 blocks_full_ 与
+    //   block_src_ 整体换掉，所以上面这几处改动不会留下半截产物。
+    if (!compileParagraphInto(at)) return reject(12);
+    if (!compileParagraphInto(at + 1)) return reject(13);
+
+    finishRebuildFromTree(vis);
+    edit_stats_.rebuild_path = 2;
+    if (reject_out != nullptr) *reject_out = 0;
+    return true;
 }
 
 /**
@@ -632,7 +723,7 @@ void EditorEngine::exportControlsFromBlocks() {
     controls_.normalize();
 }
 
-bool EditorEngine::commitOnTree(Transaction tx, int dirty_para, bool para_count_changed) {
+bool EditorEngine::commitOnTree(Transaction tx, int dirty_para, ParaDelta delta) {
     if (!loaded_) return false;  // 没装载过文档：没有树可依，也就没有可提交的事务
     const StepResult r = undo_->commit(std::move(tx));
     if (!r.ok) return false;
@@ -640,11 +731,24 @@ bool EditorEngine::commitOnTree(Transaction tx, int dirty_para, bool para_count_
     // 树变了：块流、流索引、块起点、来源身份、控件集合一次重建。分两次建就会留下
     //   "块按新树、位置按旧树"的错配，而那种错配只表现为光标落偏一个字。
     //
-    // 段数没变时只重编译被改的那一段（增量）：整树编译是 O(文档)，3000 段实测约 1.8ms，
-    //   而那是每次按键都要付的。段数变了就没有"第 k 段还是同一段"这回事，走全量。
-    if (para_count_changed) {
-        rebuildFromTree();
-    } else if (!rebuildParagraphFromTree(dirty_para)) {
+    // 三条路的取舍：段数没变时只重编被改的那一段；分段只重编被劈开的两段（其余段落的
+    //   产物按段号平移）；形状不认识时整树重编。前两条比整树便宜一个数量级 ——
+    //   2000 段实测整树 8.5 ms、只编一段 0.10 ms，而它们是每次按键都要付的一笔。
+    //
+    // 计时先归零：它是"这一轮重建产物花了多少"，而局部路径会连编两段并累加。
+    edit_stats_.rebuild_compile_ms = 0.0;
+    edit_stats_.rebuild_reject = 0;
+    if (!delta.changed) {
+        if (!rebuildParagraphFromTree(dirty_para)) rebuildFromTree();
+    } else if (delta.at >= 0 && delta.inserted == 1) {
+        int reject = 0;
+        if (!rebuildAfterSplit(delta.at, &reject)) {
+            rebuildFromTree();
+            // 退回全量之后再把原因写回去：它记的是"局部路径为什么没接住"，
+            //   而全量路径没有这个信息，不该把它清成 0。
+            edit_stats_.rebuild_reject = reject;
+        }
+    } else {
         rebuildFromTree();
     }
     markLayoutDirty(dirty_para);
@@ -670,7 +774,7 @@ bool EditorEngine::eraseOnTree(TextPos a, TextPos b, const char* label) {
     tx.selection_before = Range{from, from};
     tx.selection_after = Range{from, from};
     tx.steps = std::move(steps);
-    if (!commitOnTree(std::move(tx), a.para, false)) return false;
+    if (!commitOnTree(std::move(tx), a.para, ParaDelta{})) return false;
     // 落点 = 删除区间的起点，也就是被删掉那段文本所在的位置。这个流位置本来就算出来了，
     //   直接摆过去即可 —— 只留一个码点偏移、再由"最内层含端点"猜回侧别的话，
     //   删完一个字光标会落到相邻括号的另一侧（"跳了一格"）。
@@ -761,7 +865,8 @@ bool EditorEngine::commitErase(const SelectionErase& plan, const char* label) {
     tx.selection_before = plan.before;
     tx.selection_after = Range{plan.at, plan.at};
     tx.steps = plan.steps;
-    if (!commitOnTree(std::move(tx), paraForFlow(plan.at), cross)) {
+    if (!commitOnTree(std::move(tx), paraForFlow(plan.at),
+                      cross ? ParaDelta{true} : ParaDelta{})) {
         ++blocked_edits_;
         return false;
     }
@@ -798,7 +903,8 @@ bool EditorEngine::replaceSelectionWithText(const std::vector<uint32_t>& cps) {
     tx.steps.push_back(Step{s});
 
     const bool cross = paraForFlow(plan.at) != paraForFlow(plan.before.end() - 1);
-    if (!commitOnTree(std::move(tx), paraForFlow(plan.at), cross)) {
+    if (!commitOnTree(std::move(tx), paraForFlow(plan.at),
+                      cross ? ParaDelta{true} : ParaDelta{})) {
         ++blocked_edits_;
         return false;
     }
@@ -1638,7 +1744,7 @@ bool EditorEngine::insertCodepoints(int para, size_t offset, const std::vector<u
     const FlowPos after = at_flow + static_cast<FlowPos>(cps.size());
     tx.selection_after = Range{after, after};
     tx.steps.push_back(Step{s});
-    if (!commitOnTree(std::move(tx), para, false)) {
+    if (!commitOnTree(std::move(tx), para, ParaDelta{})) {
         ++blocked_edits_;
         return false;
     }
@@ -1815,7 +1921,7 @@ bool EditorEngine::splitParagraph() {
         clear_pbb.beforeStyleRef = style_ref;
         tx.steps.push_back(Step{clear_pbb});
     }
-    if (!commitOnTree(std::move(tx), p.para, true)) {
+    if (!commitOnTree(std::move(tx), p.para, ParaDelta{true, p.para, 1})) {
         ++blocked_edits_;
         return consumed;
     }
@@ -1880,7 +1986,7 @@ bool EditorEngine::mergeParagraphInto(int head) {
         tx.steps.push_back(rm.step);
         tx.steps.push_back(Step{ins});
     }
-    if (!commitOnTree(std::move(tx), head, true)) {
+    if (!commitOnTree(std::move(tx), head, ParaDelta{true})) {
         ++blocked_edits_;
         return false;
     }
@@ -2085,7 +2191,7 @@ bool EditorEngine::removeControl(int index, bool keep_content) {
 
     const int dirty = controls_.at(index).range.start.para;
     // 段数可能变（控件里的段落标记没了，或者上提之后换了容器），所以走全量重编译。
-    if (!commitOnTree(std::move(tx), dirty, /*para_count_changed=*/true)) {
+    if (!commitOnTree(std::move(tx), dirty, ParaDelta{true})) {
         ++blocked_edits_;
         return false;
     }
@@ -2114,7 +2220,7 @@ bool EditorEngine::setControlProp(int index, ControlProp prop, bool value) {
     // hidden 改呈现态的流结构（整棵摘除），其余三项不改结构。
     const bool structural = (prop == ControlProp::Hidden);
     const int dirty = controls_.at(index).range.start.para;
-    if (!commitOnTree(std::move(tx), dirty, structural)) return false;
+    if (!commitOnTree(std::move(tx), dirty, structural ? ParaDelta{true} : ParaDelta{})) return false;
     if (structural) markAllLayoutDirty();
     return true;
 }

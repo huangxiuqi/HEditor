@@ -173,6 +173,16 @@ struct EditStats {
     double rebuild_flow_ms = 0.0;      // FlowIndex 重建（按节点记流位置）
     double rebuild_flowpos_ms = 0.0;   // 段的流区间递推
     double rebuild_copy_ms = 0.0;      // 块流副本（排版吃的 blocks_ 那一份）
+    /**
+     * 这一轮产物是怎么重建的，以及局部路径被否决的原因。
+     *
+     * 没有这两格就只能看耗时反推走了哪条路，而耗时在同一台机器上能差一倍（同一段代码
+     *   两次量到 1.2 与 2.0 ms）—— 那不足以分清"走到了局部路径但没省下来"与"根本没走到"。
+     * path 取 0 = 整树编译、1 = 只编一段、2 = 分段局部重建；
+     * reject 是分段局部重建里第几条判据否决的（0 = 没有否决），编号与实现里的顺序一致。
+     */
+    int rebuild_path = 0;
+    int rebuild_reject = 0;
     double rebuild_controls_ms = 0.0;  // 控件视图导出
 
     /**

@@ -1081,6 +1081,10 @@ std::string editStatsJson() {
     o << "\"rebuildFlowPosMs\":" << e.rebuild_flowpos_ms << ",";
     o << "\"rebuildCopyMs\":" << e.rebuild_copy_ms << ",";
     o << "\"rebuildControlsMs\":" << e.rebuild_controls_ms << ",";
+    // 这一轮走了哪条重建路径，以及分段局部重建被第几条判据否决 —— 只报耗时的话，
+    //   抖动能把"走到了局部路径但没省下来"与"根本没走到"混成同一个读数。
+    o << "\"rebuildPath\":" << e.rebuild_path << ",";
+    o << "\"rebuildReject\":" << e.rebuild_reject << ",";
     o << "\"pageFpMs\":" << e.page_fp_ms << ",";
     o << "\"paintMs\":" << e.paint_ms << ",";
     o << "\"totalMs\":" << e.total_ms << ",";
