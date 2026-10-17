@@ -380,6 +380,55 @@ std::string EditorEngine::auditLayoutJson() {
     return o.str();
 }
 
+std::string EditorEngine::auditGlyphPagesJson() const {
+    const std::vector<PlacedGlyph>& gs = layout_.glyphs;
+    const int pages = std::max(0, layout_.stats.page_count);
+    std::ostringstream o;
+
+    // 参照物：一次全篇扫描，把每个字形登记到它自己声明的页上。
+    //   不用"逐页再全篇筛"（那是 O(页数 x 全篇)，160 页 x 8 万字形 = 一千多万次），
+    //   一次扫描 O(全篇) 就够，成本从分钟级降到毫秒级。
+    std::vector<int> ref(static_cast<size_t>(pages), 0);
+    int stray = 0;   // 页号落在 [0, pages) 之外的字形：那是排版自己的错，单独计数
+    for (const PlacedGlyph& g : gs) {
+        if (g.page < 0 || g.page >= pages) {
+            ++stray;
+            continue;
+        }
+        ++ref[static_cast<size_t>(g.page)];
+    }
+
+    // 逐页验两条：区间长度等于该页的字形总数（不漏不多），区间内没有别页的字形（不错位）。
+    int bad_pages = 0;
+    int first_bad = -1;
+    int missing = 0;
+    int extra = 0;
+    for (int p = 0; p < pages; ++p) {
+        int b = 0;
+        int e = 0;
+        glyphRangeOnPage(p, &b, &e);
+        const int want = ref[static_cast<size_t>(p)];
+        int wrong = 0;
+        for (int k = b; k < e; ++k) {
+            if (gs[static_cast<size_t>(k)].page != p) ++wrong;
+        }
+        const int got = (e - b) - wrong;
+        if (got != want || wrong != 0) {
+            ++bad_pages;
+            missing += (want > got) ? (want - got) : 0;
+            extra += (got > want) ? (got - want) : 0;
+            if (first_bad < 0) first_bad = p;
+        }
+    }
+
+    o << "{\"diff\":" << (bad_pages + stray);
+    o << ",\"pages\":" << pages << ",\"glyphs\":" << gs.size();
+    o << ",\"badPages\":" << bad_pages << ",\"firstBadPage\":" << first_bad;
+    o << ",\"missing\":" << missing << ",\"extra\":" << extra << ",\"stray\":" << stray;
+    o << "}";
+    return o.str();
+}
+
 int EditorEngine::auditCompile() const {
     // 没装载过文档就没有"全量编译"这个对照物，没有可比的东西。
     if (!loaded_) return 0;

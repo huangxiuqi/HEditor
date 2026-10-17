@@ -793,6 +793,13 @@ std::string auditBase() { return g_engine.auditBaseJson(); }
 std::string auditLayout() { return g_engine.auditLayoutJson(); }
 
 /**
+ * 字形页索引自审：二分出来的页区间 vs 全篇扫一遍的归属，逐页比对（0 = 一致）。
+ * 绘制侧按页二分之后必须有这一条：auditBase 是"强制全建再比"，而全建走同一条二分，
+ *   两边错得一样，逐字节比照样全绿（同一个代码路径当判据必然恒绿）。
+ */
+std::string auditGlyphPages() { return g_engine.auditGlyphPagesJson(); }
+
+/**
  * 编译自审：本轮实际编译耗时与一次整树全量编译的耗时同源对照。
  * 判"编译这一层有没有做到增量"只能靠它 —— 没有分母的耗时数说明不了任何事。
  */
@@ -1226,6 +1233,7 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("auditFrame", &auditFrame);
     emscripten::function("auditBase", &auditBase);
     emscripten::function("auditLayout", &auditLayout);
+    emscripten::function("auditGlyphPages", &auditGlyphPages);
     emscripten::function("auditCompile", &auditCompile);
     emscripten::function("takeBlitBox", &takeBlitBoxJson);
     emscripten::function("indent", &indentText);

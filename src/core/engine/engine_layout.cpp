@@ -255,6 +255,24 @@ void EditorEngine::linesOnPage(int page, int* lo, int* hi) const {
     *hi = i - 1;
 }
 
+/**
+ * 第 page 页的字形下标区间。
+ *
+ * 排版按段流顺序 push 字形，页号只前进不后退，所以 layout_.glyphs 的 page 单调不降。
+ *   这条单调性让绘制侧可以二分定位，而不必为每一页把全篇筛一遍。
+ * 用 lower_bound 找起点、upper_bound 找终点，两个都从同一个大数组里二分；
+ *   终点那一端拿起点当搜索下界，省掉前半截比较。
+ */
+void EditorEngine::glyphRangeOnPage(int page, int* begin, int* end) const {
+    const std::vector<PlacedGlyph>& gs = layout_.glyphs;
+    const auto b = std::lower_bound(gs.begin(), gs.end(), page,
+                                    [](const PlacedGlyph& g, int p) { return g.page < p; });
+    const auto e = std::upper_bound(b, gs.end(), page,
+                                    [](int p, const PlacedGlyph& g) { return p < g.page; });
+    *begin = static_cast<int>(b - gs.begin());
+    *end = static_cast<int>(e - gs.begin());
+}
+
 void EditorEngine::relayout() {
     const auto t0 = Clock::now();
 

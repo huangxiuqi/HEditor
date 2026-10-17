@@ -771,6 +771,7 @@ const READ = {
   auditBase: () => JSON.parse(mod.auditBase()),
   auditLayout: () => (mod.auditLayout ? JSON.parse(mod.auditLayout()) : null),
   auditCompile: () => (mod.auditCompile ? JSON.parse(mod.auditCompile()) : null),
+  auditGlyphPages: () => (mod.auditGlyphPages ? JSON.parse(mod.auditGlyphPages()) : null),
   bench: (a) => JSON.parse(mod.benchRelayoutPaint(a.runs || 12)),
   heap: () => mod.HEAPU8.length / 1048576,
 

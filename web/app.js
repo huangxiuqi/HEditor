@@ -2104,6 +2104,11 @@ const facade = {
   //   这是"编译这一层有没有做到增量"的唯一证据 —— 只有分子没有分母的耗时数说明不了事。
   auditCompile() { return mod && mod.auditCompile ? JSON.parse(mod.auditCompile()) : null; },
 
+  // 字形页索引自审：二分出来的页区间 vs 全篇扫一遍的归属，逐页比（diff 必须为 0）。
+  //   绘制按页二分之后必须有这一条：auditBase 是"强制全建再比"，而全建走同一条二分，
+  //   两边错得一样，逐字节比照样全绿（同一个代码路径当判据必然恒绿）。
+  auditGlyphPages() { return mod && mod.auditGlyphPages ? JSON.parse(mod.auditGlyphPages()) : null; },
+
   // 本轮写过哪几页（绝对页号）—— 宿主按页上屏的依据，也是"帧切页之后"取代
   //   原先那个单矩形 blitBox 的判据：一次上屏现在贴的是若干整页，不是一个矩形。
   //   （引擎的 takeBlitBox 仍在，单测 edit_test 用它钉"一次操作两次 present 的账

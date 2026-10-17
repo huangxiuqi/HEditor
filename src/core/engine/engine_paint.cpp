@@ -169,8 +169,13 @@ int EditorEngine::prewarmPageGlyphs(int page) {
         ys.clear();
     };
     int n = 0;
-    for (const PlacedGlyph& pg : layout_.glyphs) {
-        if (pg.page != page || !pg.font) continue;
+    // 只过这一页的字形区间，不整篇筛。预热是逐页调用的，整篇筛会让每次预热都付 O(全篇)。
+    int gb = 0;
+    int ge = 0;
+    glyphRangeOnPage(page, &gb, &ge);
+    for (int k = gb; k < ge; ++k) {
+        const PlacedGlyph& pg = layout_.glyphs[static_cast<size_t>(k)];
+        if (!pg.font) continue;
         hb_font_t* f = pg.font->hb();
         if (!ids.empty() && (f != run_font || pg.color != run_color || pg.rotate_deg != run_rot)) {
             flush();
@@ -314,8 +319,15 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
             run_x.clear();
             run_y.clear();
         };
-        for (const PlacedGlyph& pg : layout_.glyphs) {
-            if (pg.page != page_index || !pg.font) continue;
+        // 只过这一页的字形区间（二分，见 glyphRangeOnPage）。
+        //   整篇遍历 + 判页号：2000 段文档约 8 万个字形，每画一页都要过一遍，
+        //   反推约 2 ms/页 —— 比真正画这一页的字形（742 个约 0.9 ms）还贵。
+        int gb = 0;
+        int ge = 0;
+        glyphRangeOnPage(page_index, &gb, &ge);
+        for (int k = gb; k < ge; ++k) {
+            const PlacedGlyph& pg = layout_.glyphs[static_cast<size_t>(k)];
+            if (!pg.font) continue;
             // 画带时按字形的纵向位置筛：行盒的块轴范围就是它的 ascent/descent，
             //   所以"落在带内"就是"属于这条带"。带向外扩了 1 px，相邻带在中线相接。
             if (band && (pg.y_pt < *band_lo_pt - 1.0f || pg.y_pt > *band_hi_pt + 1.0f)) continue;

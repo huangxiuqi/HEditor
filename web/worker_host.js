@@ -1060,6 +1060,7 @@ const ASK = {
   auditBase: () => ['auditBase', {}],
   auditLayout: () => ['auditLayout', {}],
   auditCompile: () => ['auditCompile', {}],
+  auditGlyphPages: () => ['auditGlyphPages', {}],
   bench: (runs) => ['bench', { runs }],
   undoLimit: () => ['undoLimit', {}],
   selfCheck: () => ['selfCheck', {}],
