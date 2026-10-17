@@ -134,9 +134,20 @@ void EditorEngine::setConfig(const EngineConfig& cfg) {
     //   （其它配置项不动排版结构：zoom / 页度量只影响几何，底图作废就够了 ——
     //     宿主改那两项之后本来就会立刻重排重绘。）
     const bool plan_changed = (cfg.form_brackets != cfg_.form_brackets);
+    // 连页标志与条带高度是引擎从"页度量 + 页间隙"装配出来的，排版层只认 PageMetrics。
+    //   必须在比较之前装配 —— 否则切模式时 PageMetrics 没变，判不出"要重排"，
+    //   画面上就成了"分页的排版 + 连页的落点"（内容按旧断点排，却按新条带贴）。
+    PageMetrics want = cfg.page;
+    want.continuous = cfg.continuous;
+    // 只有连页才需要条带高度。分页下留 0，排版按 slabHeightPt 的回退值算（页高）；
+    //   这样改页间隙不会牵动分页的"要不要重排"判据 —— 那个改动只影响落点，不影响断行。
+    want.slab_pt = cfg.continuous
+                       ? want.height_pt + (cfg.page_gap_pt > 0.0f ? cfg.page_gap_pt : 0.0f)
+                       : 0.0f;
     // 页度量改了整篇的断行位置都会变，没有可定位的影响面 → 整篇标脏。
-    const bool page_changed = (cfg.page != cfg_.page);
+    const bool page_changed = (want != cfg_.page);
     cfg_ = cfg;
+    cfg_.page = want;
     if (cfg_.zoom < 0.25f) cfg_.zoom = 0.25f;
     if (cfg_.zoom > 8.0f) cfg_.zoom = 8.0f;
     if (cfg_.caret_width_pt < kMinCaretWidthPt) cfg_.caret_width_pt = kMinCaretWidthPt;
@@ -2560,28 +2571,56 @@ bool EditorEngine::hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* 
     if (!out || layout_.lines.empty()) return false;
 
     const float page_w = cfg_.page.width_pt;
-    const float page_h = cfg_.page.height_pt;
-    const float stride = page_h + cfg_.page_gap_pt;
+    const float zoom = cfg_.zoom;
+    const int page_px_h = pagePxHeight();
+    const int step_px = page_px_h + pageGapPx();
 
     int page = 0;
     float local_y = y_pt_doc;
-    if (stride > 0.0f) {
-        // 页号由文档坐标直接给出，页内 y 是它对步距取余。
-        page = std::max(0, static_cast<int>(std::floor(y_pt_doc / stride)));
-        local_y = y_pt_doc - static_cast<float>(page) * stride;
+    if (step_px > 0 && zoom > 0.0f) {
+        // 页号按宿主摆页用的那个像素步距折，不按磅步距：宿主把页摆在
+        //   pagePxHeight + pageGapPx 这些整数像素上，而磅步距是未取整的页高 + 页间隙
+        //   （本机 855.89 磅对 1142 px / zoom = 856.5 磅）。用磅步距折，误差随页号累积
+        //   —— 2000 段文档第 160 页上实测偏下约 130 px（0.6 磅/页 x 160 页），
+        //   表象就是"最后几页点哪都偏下"。乘 zoom 折成设备像素再取页号，两边就一致。
+        const float y_px = y_pt_doc * zoom;
+        page = std::max(0, static_cast<int>(std::floor(y_px / static_cast<float>(step_px))));
+        const float local_px = y_px - static_cast<float>(page) * static_cast<float>(step_px);
         // 落在页间空隙里，或者横向出了页外 —— 没有"这一页的哪一行"可言
-        if (local_y < 0.0f || local_y > page_h) return false;
+        if (local_px < 0.0f || local_px > static_cast<float>(page_px_h)) return false;
         if (x_pt_doc < 0.0f || x_pt_doc > page_w) return false;
+        local_y = local_px / zoom;
     }
 
-    // 块轴：找同一页里最近的一行。
+    // 块轴：找最近的一行。
+    //   连页下按文档像素比：一行可以跨条带，它跨过去的那一段落在下一条带里，
+    //   而那个位置的页号已经不是行盒的页号 —— 按页号筛会把这一点判给下一条带上
+    //   离得最近的另一行（每跨一条带就有一条这样的窄带点不中）。
+    //   比的是"渲染位置"（页号 x 像素步距 + 页内磅 x zoom），与宿主把页摆在哪、
+    //   与帧里的槽号都无关 —— 与绘制用的是同一套映射。
+    const bool cont = cfg_.page.continuous;
     const LineBox* best = nullptr;
     float best_d = 1e30f;
     for (const LineBox& lb : layout_.lines) {
-        if (lb.page != page) continue;
-        const float bp = lb.vertical ? x_pt_doc : local_y;
-        const float d = (bp < lb.block_lo_pt) ? (lb.block_lo_pt - bp)
-                                              : (bp > lb.block_hi_pt ? bp - lb.block_hi_pt : 0.0f);
+        float bp = 0.0f;
+        float lo = 0.0f;
+        float hi = 0.0f;
+        if (lb.vertical) {
+            bp = x_pt_doc;
+            lo = lb.block_lo_pt;
+            hi = lb.block_hi_pt;
+        } else if (cont) {
+            const float base = static_cast<float>(lb.page) * static_cast<float>(step_px);
+            bp = y_pt_doc * zoom;
+            lo = base + lb.block_lo_pt * zoom;
+            hi = base + lb.block_hi_pt * zoom;
+        } else {
+            if (lb.page != page) continue;
+            bp = local_y;
+            lo = lb.block_lo_pt;
+            hi = lb.block_hi_pt;
+        }
+        const float d = (bp < lo) ? (lo - bp) : (bp > hi ? bp - hi : 0.0f);
         if (d < best_d) {
             best_d = d;
             best = &lb;
@@ -2590,7 +2629,14 @@ bool EditorEngine::hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* 
     if (!best) return false;
 
     // 行内轴：找最近的插入点。势力范围与簇边界的口径在 hitTestInLine 里（上下键也走它）。
-    const float ip = best->vertical ? local_y : x_pt_doc;
+    //   竖排的行内轴是 y，页内位置要按"选中那一行自己的页号"折 —— 跨条带时它与
+    //   点击位置的页号可以差一条带。
+    const float ip = best->vertical
+                         ? (cont ? (y_pt_doc * zoom -
+                                    static_cast<float>(best->page) * static_cast<float>(step_px)) /
+                                       zoom
+                                 : local_y)
+                         : x_pt_doc;
     uint32_t cp = 0;
     int side = 0;
     hitTestInLine(*best, ip, &cp, &side);

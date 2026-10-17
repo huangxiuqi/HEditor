@@ -53,6 +53,14 @@ struct EngineConfig {
 
     float zoom = 2.0f;  // 设备像素 / 磅。2.0 ≈ 144dpi
     float page_gap_pt = 14.0f;
+    /**
+     * 连页模式：排版不分页，内容一列连到底。
+     *
+     * 它改的是排版的形状（页底断行、显式分页符、竖排吃页尾），所以必须重排；
+     *   引擎把它与页度量一起装配成 PageMetrics 交给排版层（见 setConfig）。
+     * 宿主配合的两件事：页间隙设成 0（条带首尾相接）、滚动高度取内容总高而不是页数乘步距。
+     */
+    bool continuous = false;
     Color background = Color::rgb(238, 240, 243);
     Color page_fill = Color::rgb(255, 255, 255);
     Color page_border = Color::rgb(206, 212, 218);

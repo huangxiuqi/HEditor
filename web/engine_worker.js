@@ -20,6 +20,9 @@ let dpr = 1;
 let viewW = 1;
 let viewH = 1;
 let scrollY = 0;
+// 宿主报来的提前量（设备像素，连页模式下可能是负的）。它只用来选窗口 —— 真实落点一律按
+//   scrollY 算，两者混用会让连页的内容跑到滚动位置前面去（停稳再弹回来）。
+let scrollLead = 0;
 let lastAnchor = '';
 let scrollReset = false;   // 引擎自己归零过滚动位置，要通知宿主追平
 let bootMs = 0;
@@ -66,6 +69,13 @@ const kSlotCount = 8;
  * 初值取 8 与宿主的下限一致：第一个 pageCanvas 到达之前不会有页要贴。
  */
 let slotN = kSlotCount;
+
+/**
+ * 连页模式：一个视口画布，页按文档坐标贴（页间隙同时设成 0，页首尾相接）。
+ *   与分页模式的差别只有"贴到哪儿" —— 源行仍按帧槽号取，帧的摆法与画布几张无关。
+ */
+let continuous = false;
+let viewCtx = null;
 
 // 页号 -> 槽号。取模处理负页号，所以先加一轮再取。
 function slotOf(p) {
@@ -193,6 +203,36 @@ function blitPage(p) {
 }
 
 /**
+ * 连页模式：一个视口画布，页按文档坐标贴到它上面（同时页间隙设成 0，页首尾相接）。
+ *
+ * 与分页模式的差别只有"贴到哪儿"：源行仍按帧槽号取（帧怎么摆与画布几张无关），
+ *   目标 y = 页号 x 步距 - 滚动量。超出画布的部分由 putImageData 自己裁掉。
+ * 代价是"每拍都要贴"：滚动 1 像素，每页的目标 y 都变了，槽过期那套判据在这里不适用。
+ *   实测一屏五页 1.1 ms（out/_blitprobe.mjs），与分页模式的一页一贴相当。
+ */
+function blitPageContinuous(p) {
+  if (!viewCtx) return false;
+  const fw = mod.frameWidth();
+  const ph = mod.pagePxHeight();
+  const step = ph + mod.pageGapPx();
+  if (fw <= 0 || ph <= 0) return false;
+  const dy = p * step - scrollY;
+  if (dy + ph <= 0 || dy >= viewH) return false;  // 整页在视口之外
+  if (viewCtx.canvas.width !== fw || viewCtx.canvas.height !== viewH) {
+    viewCtx.canvas.width = fw;
+    viewCtx.canvas.height = viewH;
+  }
+  const fv = mod.frameRgba();
+  const fs = (mod.frameSlots ? mod.frameSlots() : 0) | 0;
+  const local = p - mod.windowFirstPage();
+  const srcY = (fs > 0 ? ((p % fs) + fs) % fs : local) * step;
+  const img = new ImageData(
+    new Uint8ClampedArray(fv.buffer, fv.byteOffset + srcY * fw * 4, fw * ph * 4), fw, ph);
+  viewCtx.putImageData(img, 0, dy);
+  return true;
+}
+
+/**
  * 重贴。
  *
  * only 为空 = 窗口里每页都贴（窗口换了、或有新页的画布刚到，必须整窗来一遍）；
@@ -208,6 +248,16 @@ function blitPages(only) {
   const first = mod.windowFirstPage();
   const count = mod.windowPageCount();
   let n = 0;
+  if (continuous) {
+    // 连页模式：目标 y 随滚动变，所以每拍都重贴（不看槽过期与脏页）。
+    //   先清一遍：视口内可能露出"没有页"的地方（文档首尾之外），而那些像素
+    //   还留着上一拍的内容。clearRect 写的是透明，页容器的底色因此透得出来。
+    if (viewCtx) viewCtx.clearRect(0, 0, viewCtx.canvas.width, viewH);
+    for (let p = first; p < first + count; ++p) if (blitPageContinuous(p)) ++n;
+    blitLastMs = performance.now() - tBlit;
+    blitLastPages = n;
+    return n;
+  }
   for (let p = first; p < first + count; ++p) {
     const s = slotOf(p);
     // 两个理由之一成立就要贴：这一页的内容刚变（在 only 里），或者它落的那个槽
@@ -249,6 +299,8 @@ function geom(st) {
     frameW: mod.frameWidth(),
     frameH: mod.frameHeight(),
     dpr, viewW, viewH, scrollY,
+    // 内容底边（设备像素）。连页下宿主拿它当滚动高度 —— 没有页可数，只有内容。
+    contentPx: mod.contentPx ? mod.contentPx() : 0,
     // 槽数的上限（与文档位置无关，只随视口与页度量变）。宿主按它建槽、再把自己实际
     //   建了几个报回来（pageCanvas.slots）—— 一个数、一个来源，两侧不会分叉。
     maxWindowPages: maxWindowPages(),
@@ -273,12 +325,16 @@ function geom(st) {
  *   有了它，同一页内的滚动连一次重贴都不需要 —— 浏览器把画布搬走就行。
  */
 // 看得见的那几页（设备像素下的滚动位置与视口高度）。
+//   这里用的是"报了提前量的位置"（scrollY + scrollLead）：提前量只该影响"先装哪几页"，
+//   让窗口朝滚动方向多留一点，不要等滚到了才开始装。它不能影响"画在哪儿" ——
+//   连页模式下内容落点是按真实滚动位置算的（见 blitPageContinuous）。
 function visibleRange(st) {
   const total = Math.max(1, Number(st.totalPages) || 1);
   const step = mod.pagePxHeight() + mod.pageGapPx();
   const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
-  const first = clamp(Math.floor(scrollY / step), 0, total - 1);
-  const last = clamp(Math.floor((scrollY + viewH - 1) / step), first, total - 1);
+  const at = scrollY + scrollLead;
+  const first = clamp(Math.floor(at / step), 0, total - 1);
+  const last = clamp(Math.floor((at + viewH - 1) / step), first, total - 1);
   return { first, last };
 }
 
@@ -784,6 +840,81 @@ const READ = {
     }
     return n;
   },
+  /**
+   * 逐行的墨迹与底色，按文档顺序给出窗口内每一条带的那一段。
+   *
+   * 判据用它回答两个问题，都是"连页到底连不连"的直接读数：
+   *   一、条带里有没有"不是白底"的行 —— 有就是还有页间隙或页边框（分页的痕迹）。
+   *   二、相邻条带的文字行距是不是与条带内部一样 —— 不一样就是内容在边界上断开了。
+   * 为什么在 Worker 侧数：帧的所有权在这一侧（主线程拿不到画布）。这是测量，
+   *   走的是与绘制不同的代码路径（只读帧、不做任何布局判断），不会自我循环验证。
+   */
+  inkRows: () => {
+    const f = mod.frameRgba();
+    const fw = mod.frameWidth();
+    const ph = mod.pagePxHeight();
+    const step = ph + mod.pageGapPx();
+    const fs = (mod.frameSlots ? mod.frameSlots() : 0) | 0;
+    const first = mod.windowFirstPage();
+    const count = mod.windowPageCount();
+    const out = [];
+    for (let p = first; p < first + count; ++p) {
+      const slot = fs > 0 ? ((p % fs) + fs) % fs : p - first;
+      const base = slot * step;
+      const ink = [];
+      const sel = [];
+      const selDeep = [];
+      let gray = 0;
+      for (let y = 0; y < step; ++y) {
+        const off = (base + y) * fw * 4;
+        if (off + fw * 4 > f.length) { ink.push(-1); sel.push(-1); selDeep.push(-1); continue; }
+        // 左边那一列（x = 1）是不是白：不是就是页间隙或页边框。
+        const l = off + 4;
+        if (f[l] < 250 || f[l + 1] < 250 || f[l + 2] < 250) ++gray;
+        // 暗像素 = 字；偏蓝的浅色 = 选区（默认选区色混白之后约 228/241/255，
+        //   而背景灰 238/240/243 的蓝红差只有 5，页边框 206/212/218 是 12 —— 取 15 分得开）。
+        let n = 0;
+        let s = 0;
+        let deep = 0;
+        for (let x = 0; x < fw; x += 2) {
+          const i = off + x * 4;
+          if (f[i] < 128 && f[i + 1] < 128 && f[i + 2] < 128) ++n;
+          else if (f[i + 2] - f[i] > 15 && f[i] > 150) {
+            ++s;
+            // "深"的选区像素：混一次应当是 228/241/255（红 228），叠加多次会往 178 走。
+            //   这一格是"选区被反复混色"的直接读数（见 engine_paint 里 sel_paint 的说明）。
+            if (f[i] < 205) ++deep;
+          }
+        }
+        ink.push(n);
+        sel.push(s);
+        selDeep.push(deep);
+      }
+      out.push({ page: p, step, ink, sel, selDeep, gray });
+    }
+    return { first, count, step, ph, slabs: out };
+  },
+  /**
+   * 某几段的行盒与字形（诊断"字画到哪儿去了"）。见 wasm 侧 linesJson 的说明。
+   */
+  lines: (a) => JSON.parse(mod.linesJson(a.from | 0, a.to | 0)),
+  /**
+   * 帧的指纹（FNV-1a，只算 RGB 三通道）。
+   *
+   * 判据用它回答"同一份逻辑状态重画一次，像素是不是一个字都没变" —— 增量绘制最容易犯的
+   *   错是"重画时把叠加式的效果又叠了一遍"（选区混色就是这么变深的）。整帧搬回去比太贵
+   *   （8 MB 一份），指纹在这一侧算完只回一个数。
+   */
+  frameDigest: () => {
+    const v = mod.frameRgba();
+    let h = 2166136261;
+    for (let i = 0; i + 3 < v.length; i += 4) {
+      h ^= v[i]; h = Math.imul(h, 16777619);
+      h ^= v[i + 1]; h = Math.imul(h, 16777619);
+      h ^= v[i + 2]; h = Math.imul(h, 16777619);
+    }
+    return h >>> 0;
+  },
   stats: () => JSON.parse(mod.statsJson()),
   editStats: () => JSON.parse(mod.editStatsJson()),
   caretReport: () => mod.caretReport(),
@@ -834,31 +965,73 @@ const READ = {
     let miny = 1e9;
     let maxx = -1;
     let maxy = -1;
-    for (let p = first; p < first + count; ++p) {
-      const c = ctxOfPage(p);
-      if (!c) { ++missing; continue; }
-      if (c.canvas.width !== fw || c.canvas.height !== ph) { ++sizeBad; continue; }
-      ++comparedPages;
-      const D = c.getImageData(0, 0, fw, ph).data;
-      // 帧里的偏移按帧槽号算（引擎的槽数），不是"窗口内第几页"。
-      //   这两套槽号可以不等（画布槽只增、帧槽跟着窗口页数上限走），所以这里必须
-      //   与 blitPage 用同一个来源 —— 用画布槽号会把整段比错位置（实测差 17%）。
-      const fs = (mod.frameSlots ? mod.frameSlots() : 0) | 0;
-      const local = (fs > 0 ? ((p % fs) + fs) % fs : p - first);
-      const base = local * step * fw * 4;
-      for (let i = 0; i + 3 < D.length; i += 4) {
-        const j = base + i;
-        if (j + 3 >= fv.length) break;
-        if (D[i] !== fv[j] || D[i + 1] !== fv[j + 1] || D[i + 2] !== fv[j + 2]) {
-          ++diff;
-          const q = i >> 2, x = q % fw, y = (q - x) / fw + local * step;
-          if (x < minx) minx = x;
-          if (x > maxx) maxx = x;
-          if (y < miny) miny = y;
-          if (y > maxy) maxy = y;
+    // 连页模式没有页画布，屏上那一份是视口画布：逐字节比的是"视口画布 vs 帧"。
+    //   帧仍是源（引擎的产物），视口画布是它按文档坐标贴出来的那一份 —— 目标 y 算错、
+    //   或者压根没贴上（画布没转移成功），这里都会报出来。
+    //   这一支不是可有可无的：没有它，连页下每一页都会被记成"缺画布"，diff 恒为 0 ——
+    //   看着全绿，实际一个字节都没比过。
+    if (continuous) {
+      if (!viewCtx) {
+        missing = count;
+      } else if (viewCtx.canvas.width !== fw || viewCtx.canvas.height !== viewH) {
+        sizeBad = 1;
+      } else {
+        const V = viewCtx.getImageData(0, 0, fw, viewH).data;
+        const fs = (mod.frameSlots ? mod.frameSlots() : 0) | 0;
+        for (let p = first; p < first + count; ++p) {
+          // 页在视口里的落点：目标 y = 页号 x 步距 - 滚动量（与 blitPageContinuous 同式）。
+          const dy = p * step - scrollY;
+          const y0 = Math.max(0, -dy);
+          const y1 = Math.min(ph, viewH - dy);
+          if (y1 <= y0) continue;                 // 这一页整页在视口外，没得比
+          ++comparedPages;
+          const srcY = (fs > 0 ? ((p % fs) + fs) % fs : p - first) * step;
+          for (let y = y0; y < y1; ++y) {
+            const j0 = (srcY + y) * fw * 4;
+            const k0 = (dy + y) * fw * 4;
+            for (let x = 0; x < fw; ++x) {
+              const j = j0 + x * 4;
+              const k = k0 + x * 4;
+              ++compared;
+              if (V[k] !== fv[j] || V[k + 1] !== fv[j + 1] || V[k + 2] !== fv[j + 2]) {
+                ++diff;
+                if (x < minx) minx = x;
+                if (x > maxx) maxx = x;
+                const yy = dy + y;
+                if (yy < miny) miny = yy;
+                if (yy > maxy) maxy = yy;
+              }
+            }
+          }
         }
       }
-      compared += D.length / 4;
+    } else {
+      for (let p = first; p < first + count; ++p) {
+        const c = ctxOfPage(p);
+        if (!c) { ++missing; continue; }
+        if (c.canvas.width !== fw || c.canvas.height !== ph) { ++sizeBad; continue; }
+        ++comparedPages;
+        const D = c.getImageData(0, 0, fw, ph).data;
+        // 帧里的偏移按帧槽号算（引擎的槽数），不是"窗口内第几页"。
+        //   这两套槽号可以不等（画布槽只增、帧槽跟着窗口页数上限走），所以这里必须
+        //   与 blitPage 用同一个来源 —— 用画布槽号会把整段比错位置（实测差 17%）。
+        const fs = (mod.frameSlots ? mod.frameSlots() : 0) | 0;
+        const local = (fs > 0 ? ((p % fs) + fs) % fs : p - first);
+        const base = local * step * fw * 4;
+        for (let i = 0; i + 3 < D.length; i += 4) {
+          const j = base + i;
+          if (j + 3 >= fv.length) break;
+          if (D[i] !== fv[j] || D[i + 1] !== fv[j + 1] || D[i + 2] !== fv[j + 2]) {
+            ++diff;
+            const q = i >> 2, x = q % fw, y = (q - x) / fw + local * step;
+            if (x < minx) minx = x;
+            if (x > maxx) maxx = x;
+            if (y < miny) miny = y;
+            if (y > maxy) maxy = y;
+          }
+        }
+        compared += D.length / 4;
+      }
     }
     const st = JSON.parse(mod.editStatsJson());
     return {
@@ -971,19 +1144,52 @@ async function handle(m) {
       blitPages(null);
       return void sendState(m.ts, 'pageCanvas', JSON.parse(mod.editStatsJson()));
     }
+    if (m.t === 'viewCanvas') {
+      // 视图模式与它的页间隙。连页：宿主建一张视口画布交过来（间隙 0 = 页首尾相接）；
+      //   回分页：不带画布（间隙回到 14），这里把连页标志与画布一起丢掉。
+      //   间隙跟着模式走是有意的 —— 它是"页的落点"这件事的一半，两套模式是两套落点，
+      //   分开传会让中间那一拍出现"连页的间隙 + 分页的画布"这种不存在的组合。
+      if (typeof m.gap === 'number' && mod.setPageGap) mod.setPageGap(m.gap);
+      continuous = !!m.continuous;
+      // 引擎侧的连页标志：它改的是排版的形状（页底断行、显式分页符、竖排吃页尾），
+      //   所以必须与页间隙一起设下去 —— 只设间隙的话，排版还是分页的，只是页首尾
+      //   相接（内容照样在页底断开），那正是"看着像连页、其实还有页"的来源。
+      if (mod.setContinuous) mod.setContinuous(continuous);
+      viewCtx = null;
+      if (continuous && m.canvas) {
+        viewCtx = m.canvas.getContext('2d');
+        if (!viewCtx) throw new Error('OffscreenCanvas 拿不到 2d 上下文');
+      }
+      // 切模式会把帧的布局与页的落点整套换掉（间隙 0 与 14 是两套），所以这里要
+      //   重排 + 重画帧，再作废槽表重贴 —— 三件缺一不可：
+      //   间隙一改步距就变，而帧缓冲里还是上一套布局的像素。只作废槽表重贴的话，
+      //   贴出去的是"新步距 x 旧像素"，从第二页起整体错位（第一页恰好对，它的偏移是 0）；
+      //   更麻烦的是槽表随即被记成"这一槽已经装了这一页"，后面整窗重贴也会跳过它，
+      //   错位就永久留在画面上。
+      syncFrameSlots();
+      mod.relayoutAndPaint();
+      for (let s = 0; s < slotPage.length; ++s) slotPage[s] = -1;
+      blitPages(null);
+      return void sendState(m.ts, 'viewCanvas', JSON.parse(mod.editStatsJson()));
+    }
     if (m.t === 'view') {
       // 自报这一下花了多少毫秒。宿主拿它和"发出→收到回话"的往返比：差值是排队等待，
       //   近 0 说明队列是空的（慢是因为这一下真的贵），差得远说明 Worker 在补课。
       const tWork = performance.now();
       const prevScrollY = scrollY;
       scrollY = Math.max(0, m.scrollY || 0);
+      scrollLead = Number(m.leadPx) || 0;
       viewW = m.viewW || viewW;
       viewH = m.viewH || viewH;
       // 方向只用来决定余量放前面还是后面（见 targetWindow），得在 retarget 之前定下来。
       if (scrollY !== prevScrollY) scrollDir = scrollY > prevScrollY ? 1 : -1;
       // 窗口没变就什么都不做：画布摆在文档流里，浏览器已经把像素搬走了。
       //   这一条是"滚动不花引擎的钱"的落点 —— 只回一个 ack，不重贴、不推统计。
+      //   连页是例外：屏上那一张视口画布不动，页在它上面的落点是随滚动量算出来的，
+      //   所以滚动量一变就必须重贴 —— 哪怕窗口一动没动（否则画面停在上一拍的位置，
+      //   而那正是"滚动后有的页看着还是旧内容"的来源）。
       if (!retarget(JSON.parse(mod.editStatsJson()))) {
+        if (continuous && scrollY !== prevScrollY) blitPages(null);
         return void post({ t: 'ack', ts: m.ts, workMs: performance.now() - tWork });
       }
       // 滚动这一路也会遇到视口变化（窗口被拉高/拉矮），所以槽数同样要在画之前报过去。

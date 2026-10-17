@@ -7916,6 +7916,121 @@ int main() {
                    "★ 拖选的落点与按下定位同一条投影（侧别也一起透传）");
     }
 
+    std::printf("\n[40] 连页模式：排版不在页底断开，内容一列连到底\n");
+    {
+        // 一条判据要能证伪，就得有反向的一半：同一个文档、同一套页度量，
+        //   分页下必须在页底让位（行盒的文档 y 会回跳、墨迹够不到下边距），
+        //   连页下必须不让位（y 单调不降、墨迹跑进下边距那条带）。
+        //   只断言"连页下 y 单调"是不够的 —— 那个断言的成立与否也可能与模式无关。
+        EditorEngine e40;
+        expectTrue(e40.init({cjkPath, mnPath, latinPath}), "引擎初始化");
+
+        EngineConfig c40;
+        c40.zoom = 1.0f;  // 1 pt = 1 px：便于直接按磅定位像素
+        // 页度量取"边距与页间隙都够大"的那一档：分页下跨页那一跳至少是
+        //   页间隙 + 两倍上边距（= 60 磅），而连页下最大的一跳只是段间距（= 31 磅）——
+        //   两者必须彻底分开，判据才不是"恰好比大小"。
+        c40.page.width_pt = 240.0f;
+        c40.page.height_pt = 120.0f;
+        c40.page.margin_pt = 20.0f;
+        c40.page_gap_pt = 20.0f;
+        e40.setConfig(c40);
+
+        BlockSpec b40;
+        b40.font_index = 0;  // 中文
+        b40.size_pt = 12.0f;
+        b40.wm = WritingMode::HorizontalTB();
+        b40.line_factor = 1.75f;
+        b40.language = "zh";
+        // 12 段各 40 个「测」：足够跨好几页，而且段与段之间有段间距。
+        std::vector<BlockSpec> bs40;
+        for (int i = 0; i < 12; ++i) {
+            b40.cp_text.assign(40, 0x6D4B);
+            bs40.push_back(b40);
+        }
+        loadBlocks(e40, bs40);
+
+        // 行盒的"文档 y"（磅）：页号 x 条带高 + 页内块轴位置。
+        //   横排的块轴是 y；这份文档全是横排。
+        auto docY = [&](const LineBox& lb) {
+            const float slab = c40.page.height_pt + c40.page_gap_pt;
+            return static_cast<float>(lb.page) * slab + lb.block_lo_pt;
+        };
+        // 扫一遍行盒，报四件事：相邻两行的最大回跳、最大间距（文档 y）、
+        //   行盒底离条带底的最小距离、用到了几条带。
+        //   为什么要有"最大间距"这一条：分页下页底让位表现为"间距突然变大"
+        //   （上一页的最后一行 + 下边距 + 页间隙 + 上边距 + 下一页的第一行），
+        //   而不是文档 y 回跳 —— 加回页号之后它一定还是递增的，回跳只发生在页内坐标上。
+        struct Scan {
+            float max_back = 0.0f;   // 最大回跳（正数表示回跳了这么多）
+            float max_step = 0.0f;   // 相邻两行的最大间距
+            float max_pitch = 0.0f;  // 同段内相邻两行的最大间距（= 行距）
+            float min_slack = 1e9f;  // 行盒底离条带底的最小距离
+            int slabs = 0;
+        };
+        auto scan40 = [&]() {
+            Scan s;
+            const float slab = c40.page.height_pt + c40.page_gap_pt;
+            const std::vector<LineBox>& ls = e40.layout().lines;
+            for (size_t i = 1; i < ls.size(); ++i) {
+                const float d = docY(ls[i]) - docY(ls[i - 1]);
+                if (d < -s.max_back) s.max_back = -d;
+                if (d > s.max_step) s.max_step = d;
+                if (ls[i].paragraph == ls[i - 1].paragraph && d > s.max_pitch) s.max_pitch = d;
+            }
+            for (const LineBox& lb : ls) {
+                const float slack = slab - lb.block_hi_pt;
+                if (slack < s.min_slack) s.min_slack = slack;
+                if (lb.page + 1 > s.slabs) s.slabs = lb.page + 1;
+            }
+            return s;
+        };
+
+        c40.continuous = false;
+        e40.setConfig(c40);
+        e40.relayout();
+        const Scan paged40 = scan40();
+        std::printf("     分页：%d 条带，最大间距 %.2f 磅，同段行距 %.2f 磅，"
+                    "离条带底最近 %.2f 磅\n",
+                    paged40.slabs, paged40.max_step, paged40.max_pitch, paged40.min_slack);
+        expectTrue(paged40.slabs >= 2, "这份文档在分页下确实跨了多条带");
+        // 页底让位：跨页那两行的间距 = 页底剩下的空当 + 下边距 + 页间隙 + 上边距，
+        //   所以它至少是"页间隙 + 两倍上边距"。这是分页的硬下界，连页下必须被打破。
+        expectTrue(paged40.max_step >= c40.page_gap_pt + 2.0f * c40.page.margin_pt - 0.01f,
+                   "分页下内容在页底让位（跨页那两行的间距至少多出一整条页间隙与两倍边距）");
+        // 另一条分页硬下界：行盒底到条带底至少还有一整个上边距加一条页间隙
+        //   （断行判据要求"本行放得进内容区"）。
+        expectTrue(paged40.min_slack >= c40.page.margin_pt + c40.page_gap_pt - 0.01f,
+                   "分页下墨迹永远够不到条带底（至少留着上边距 + 页间隙）");
+
+        c40.continuous = true;
+        e40.setConfig(c40);
+        e40.relayout();
+        const Scan cont40 = scan40();
+        std::printf("     连页：%d 条带，最大间距 %.2f 磅，同段行距 %.2f 磅，"
+                    "离条带底最近 %.2f 磅\n",
+                    cont40.slabs, cont40.max_step, cont40.max_pitch, cont40.min_slack);
+        expectTrue(cont40.max_back < 0.01f, "连页下文档 y 单调不降（没有一处回跳 = 没有页底）");
+        expectTrue(cont40.max_pitch <= 12.0f * 1.75f + 0.01f,
+                   "连页下同段相邻两行的间距就是行距（中间没插页边距）");
+        // 连页的最大间距只可能出现在段与段之间（段间距 10 磅），
+        //   而分页那条跨页间距的下界是 60 磅 —— 两条判据互不重叠。
+        expectTrue(cont40.max_step <= cont40.max_pitch + 10.0f + 0.01f,
+                   "连页下最大的那一跳就是段间距（没有页底那一跳）");
+        expectTrue(cont40.slabs < paged40.slabs,
+                   "连页下条带数比分页少（内容不再为页边距让位）");
+        expectTrue(cont40.min_slack < c40.page.margin_pt,
+                   "连页下墨迹跑进了下边距那条带（页边距不再约束内容）");
+
+        // 内容底边：连页下它就是滚动高度。它必须落在最后一行之下、且在条带范围内。
+        const int bottom40 = e40.contentBottomPx();
+        const float slab_px = (c40.page.height_pt + c40.page_gap_pt) * c40.zoom;
+        std::printf("     内容底边 %d px（最后一条带从 %.0f px 起）\n",
+                    bottom40, static_cast<double>((cont40.slabs - 1) * slab_px));
+        expectTrue(bottom40 > static_cast<int>((cont40.slabs - 1) * slab_px),
+                   "内容底边落在最后一条带里（宿主按它设滚动高度）");
+    }
+
     std::printf("\n──────────────────────────────\n");
     std::printf("共 %d 项断言，失败 %d 项\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

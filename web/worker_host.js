@@ -423,7 +423,11 @@ function viewFireAndForget() {
   const lead = viewLeadPx();
   if (lead !== 0) armViewSettle();
   const vs = viewSize();
-  post({ t: 'view', ts, scrollY: Math.round(top + lead),
+  // scrollY 是真实滚动位置，leadPx 是提前量，两者分开发：
+  //   连页模式下 scrollY 直接决定内容画在哪儿（页贴到 页号 x 步距 - scrollY），
+  //   而提前量只该影响"先装哪几页"。合成一个数的话，滚动时内容会整体跑到实际位置
+  //   前面去（最快能差小半页），停稳再弹回来。
+  post({ t: 'view', ts, scrollY: Math.round(top), leadPx: Math.round(lead),
          viewW: vs.viewW, viewH: vs.viewH });
 }
 
@@ -499,7 +503,52 @@ function sendPageCanvas(slot, el, gm, slots) {
  *   （命中测试、诊断、探针）都按页号读，这样它们一行都不用改。
  * 八个槽一次建齐（首帧那一趟），此后元素与背衬全留着，换窗只是改几行 style。
  */
+/**
+ * 连页模式的视口画布：整个视口一张画布，内容按滚动位置重贴（见 Worker 侧的 blitPageContinuous）。
+ *
+ * 它挂在页容器外面（stage 的父级），因为放在滚动内容里就会随内容一起滚 ——
+ *   那样"贴"这件事在屏幕上根本看不出来。指针事件仍由页容器接（这张画布 pointer-events: none），
+ *   而页号在连页模式下由坐标反算（见 onPointerDown）—— 这里没有"页画布"可以问。
+ */
+let viewCanvas = null;
+let viewContinuous = false;
+
+function syncViewCanvas(gm) {
+  const dpr = gm.dpr || 1;
+  const vs = viewSize();
+  const host = stageEl.parentElement;
+  const sr = stageEl.getBoundingClientRect();
+  const hr = host.getBoundingClientRect();
+  if (!viewCanvas) {
+    viewCanvas = document.createElement('canvas');
+    viewCanvas.style.position = 'absolute';
+    viewCanvas.style.zIndex = '1';
+    viewCanvas.style.pointerEvents = 'none';
+    host.appendChild(viewCanvas);
+    // 只交一次：之后换窗、改尺寸都在这张上做（OffscreenCanvas 交出去就收不回来）。
+    //   转移列表必须带上，理由与 sendPageCanvas 那条一样 —— 不带会抛 DataCloneError
+    //   （OffscreenCanvas 不能按值克隆），而这一处抛在"状态到达"的路上，会被宿主当成
+    //   致命错误整页停用（横幅：宿主处理引擎状态时抛异常）。
+    const off = viewCanvas.transferControlToOffscreen();
+    post({ t: 'viewCanvas', ts: now(), continuous: true, gap: 0, dpr, canvas: off }, [off]);
+  }
+  const w = Math.round(gm.pageW / dpr);
+  const h = Math.round(vs.viewH / dpr);
+  const left = Math.round((vs.viewW - gm.pageW) / 2 / dpr);
+  const top = Math.round(sr.top - hr.top);
+  const px = (v) => v + 'px';
+  if (viewCanvas.style.width !== px(w)) viewCanvas.style.width = px(w);
+  if (viewCanvas.style.height !== px(h)) viewCanvas.style.height = px(h);
+  if (viewCanvas.style.left !== px(left)) viewCanvas.style.left = px(left);
+  if (viewCanvas.style.top !== px(top)) viewCanvas.style.top = px(top);
+  lastPageX = Math.max(0, Math.round((vs.viewW - gm.pageW) / 2));
+  // 连页模式没有页画布：这两张表按空报，探针据此走"读不到像素"的分支。
+  pageCanvases.clear();
+  host.pageCanvasCount = 0;
+}
+
 function syncPageCanvases(gm) {
+  if (viewContinuous) return syncViewCanvas(gm);
   const dpr = gm.dpr || 1;
   const first = gm.first;
   const count = gm.count;
@@ -629,7 +678,14 @@ function onPageError(where, e) {
 
 function syncSpacer(st, gm) {
   const total = Math.max(1, Number(st.totalPages) || 1);
-  const h = Math.max(1, (total * gm.pageStep - gm.gap) / dprNow());
+  const pageCss = Math.round(gm.pageW / dprNow());
+  const bx = Math.round(lastPageX / dprNow()) + 'px';
+  // 滚动高度：分页是"页数 x 步距"（页是实在的，末尾那一格页间隙不算）；
+  //   连页没有页可数，只有内容 —— 取引擎报的内容底边（contentPx）。
+  //   用页数算的话，末尾会多出一整条空条带的空白（内容排到哪算哪，条带却是整格）。
+  const h = viewContinuous
+    ? Math.max(1, Math.round((gm.contentPx || 0) / dprNow()))
+    : Math.max(1, (total * gm.pageStep - gm.gap) / dprNow());
   if (spacerEl.style.height !== h + 'px') spacerEl.style.height = h + 'px';
 
   // 页纸底：让"还没渲染出来的页"也是一张白纸，而不是什么都没有。
@@ -637,20 +693,33 @@ function syncSpacer(st, gm) {
   //   同一条理由（甩滚时引擎追不上，可见区域里既没有字也没有画布，看起来像坏了）。
   //   这里挂在撑高层上：画布是绝对定位在它外面的，所以还要按 lastPageX 把底图
   //   横向摆到页的位置上，宽度取页宽 —— 否则白纸会横铺满整个舞台。
+  //   连页下没有页间隙可分隔，就是一条从顶到底的白列（背景块宽度仍取页宽）。
   const stepCss = Math.round(gm.pageStep / dprNow());
-  const pageCss = Math.round(gm.pageW / dprNow());
   const hCss = Math.round((gm.pageStep - gm.gap) / dprNow());
-  const img = `linear-gradient(to bottom, #ffffff 0 ${hCss}px,` +
-              ` rgba(255,255,255,0) ${hCss}px ${stepCss}px)`;
+  const img = viewContinuous
+    ? 'linear-gradient(#ffffff, #ffffff)'
+    : `linear-gradient(to bottom, #ffffff 0 ${hCss}px,` +
+      ` rgba(255,255,255,0) ${hCss}px ${stepCss}px)`;
+  const size = viewContinuous ? `${pageCss}px 100%` : `${pageCss}px ${stepCss}px`;
+  const repeat = viewContinuous ? 'no-repeat' : 'repeat-y';
   if (spacerEl.style.backgroundImage !== img) {
     spacerEl.style.backgroundImage = img;
-    spacerEl.style.backgroundSize = `${pageCss}px ${stepCss}px`;
-    spacerEl.style.backgroundRepeat = 'repeat-y';
+    spacerEl.style.backgroundSize = size;
+    spacerEl.style.backgroundRepeat = repeat;
   }
-  const bx = Math.round(lastPageX / dprNow()) + 'px';
   if (spacerEl.style.backgroundPosition !== bx + ' 0px') {
     spacerEl.style.backgroundPosition = bx + ' 0px';
   }
+}
+
+/**
+ * 帧槽号：页在帧内的位置由引擎的槽数决定（页号 mod 槽数）。
+ *   与单线程宿主的 frameSlotOf 同一口径 —— 光标坐标里的 y 含的就是这个槽偏移。
+ */
+function frameSlotOf(page) {
+  const n = host.frameSlots();
+  if (n <= 0) return 0;
+  return ((page % n) + n) % n;
 }
 
 function positionIme(st, gm) {
@@ -662,8 +731,14 @@ function positionIme(st, gm) {
   }
   const lineH = Math.max(12, Math.round(st.caretH / dprNow()));
   ta.style.left = Math.round((lastPageX + st.caretX) / dprNow()) + 'px';
+  // caretY 是"帧内的 y"，含的是槽偏移（第 caretPage 页落在哪个槽），不是"窗口里排第几页"。
+  //   所以文档坐标 = 页号 x 步距 + 页内 y，而页内 y = caretY - 槽偏移。写成"窗口首页 x 步距
+  //   + caretY"在窗口首页不是槽数整数倍时会把框摆到别的页上去（与命中测试那次同类）。
+  //   连页与分页在这里是同一个式子：分页下画布在文档流里、连页下视口画布不动而内容按
+  //   滚动量贴，两者都等价于"文档坐标减滚动量"。
+  const local = st.caretY - frameSlotOf(st.caretPage) * gm.pageStep;
   ta.style.top =
-    Math.round(((gm.first * gm.pageStep) + st.caretY) / dprNow() - stageEl.scrollTop) + 'px';
+    Math.round((st.caretPage * gm.pageStep + local) / dprNow() - stageEl.scrollTop) + 'px';
   ta.style.width = Math.max(24, Math.round((gm.pageW - st.caretX) / dprNow())) + 'px';
   ta.style.height = lineH + 'px';
   ta.style.lineHeight = lineH + 'px';
@@ -868,11 +943,20 @@ function onKeyDown(ev) {
  */
 function onPointerDown(ev) {
   if (!host.ready || ev.button !== 0) return;
-  const el = ev.target && ev.target.closest ? ev.target.closest('canvas.pg') : null;
-  if (!el) return;                     // 点在页外的灰底上：什么也不做
   const gm = mirror.geom;
-  const page = Number(el.dataset.page);
-  if (!gm || !Number.isFinite(page)) return;
+  if (!gm) return;
+  // 文档坐标（设备像素）：x 从页列左缘量、y 从文档第 0 页顶量。两个模式同一个算式，
+  //   而且直接复用拖选取点那一个 framePointAt —— 两处各写一遍迟早会分叉（点与拖
+  //   落在不同位置，而症状只是"拖选的头一段跳一下"）。
+  //   不从页画布的 rect 量：换窗会换画布，而"容器顶 + 滚动量"是文档坐标的定义本身。
+  const pt = framePointAt(ev.clientX, ev.clientY);
+  if (!pt) return;
+  const xDev = pt.x;
+  const yDev = pt.y;
+  // 页号按宿主的像素步距反算（与引擎的命中测试同一口径，见 EditorEngine::hitTestPt）：
+  //   宿主把页摆在 pagePxHeight + pageGapPx 这些整数像素上，与磅值差不到一像素，
+  //   但误差随页号累积 —— 用磅值折页号时，2000 段文档最后几页会偏下一整段。
+  const page = Math.max(0, Math.floor(yDev / gm.pageStep));
   // 指针捕获：在浏览器窗口之外松手时，页面未必收得到 mouseup —— 那是
   //   "松开了还在拖"的一条来源。捕获之后抬起一定回到容器上（容器在 DOM 里常驻，
   //   不像页画布那样会被换窗丢掉）。捕获失败也无所谓：drag_select 那边还有
@@ -884,12 +968,6 @@ function onPointerDown(ev) {
   }
   // 点击也要立刻按住光标可见：命中测试是一次往返，等它回来再归相位会晚一拍。
   blinkHold();
-  const rect = el.getBoundingClientRect();
-  // 文档坐标（设备像素）：x 从页左缘量，y 从文档第 0 页顶量（= 页内 y 加上页号 × 步距）
-  //   —— 与单线程宿主的 framePointFromEvent 同一口径，命中测试收的就是这个坐标系。
-  //   与窗口无关：这一页在窗口里排第几不影响它落在文档的哪里。
-  const xDev = (ev.clientX - rect.left) * dprNow();
-  const yDev = (ev.clientY - rect.top) * dprNow() + page * gm.pageStep;
   // 命中一次往返，结果有两个去处：定位，以及"这一下要不要起拖选"。
   //   落在正文之外时不起手 —— 从页外的空白拖起不该选中任何东西。定位由 placeAt 做，
   //   与点击路径共用同一段，免得"拖选能不能起手"和"点击落哪"两处各判一次。
@@ -1073,6 +1151,9 @@ const ASK = {
   selfCheck: () => ['selfCheck', {}],
   markCheck: () => ['markCheck', {}],
   ink: () => ['ink', {}],
+  inkRows: () => ['inkRows', {}],
+  frameDigest: () => ['frameDigest', {}],
+  lines: (from, to) => ['lines', { from: from | 0, to: to | 0 }],
   engineStats: () => ['stats', {}],
   engineEditStats: () => ['editStats', {}],
   // 预热一页的字形（不呈现、不改画面）。与单线程宿主同名入口，形状是 Promise ——
@@ -1128,6 +1209,37 @@ async function placeAt(xDev, yDev) {
  *
  * 换算在调用方（onPointerDown 从页元素的 rect 算），这里收的是文档坐标。
  */
+/**
+ * 切换视图模式：分页（一页一张画布，默认）与连页（一个视口画布）。
+ *
+ * 两条路的差别只有"贴到哪儿"（见 syncViewCanvas 与 Worker 侧的 blitPageContinuous），
+ *   引擎那一侧完全不动 —— 帧、槽、增量重画、字形二分、编译增量都是按文档算的，
+ *   与画布几张无关。页间隙随之切换：连页要 0（页首尾相接），分页回到 14 磅。
+ *
+ * 切换必须重来一遍画布：OffscreenCanvas 交出去就收不回来，所以每次切换都把旧的丢掉、
+ *   让下一次 syncPageCanvases 按新模式重新建。
+ */
+host.setViewMode = function setViewMode(mode) {
+  const want = mode === 'continuous';
+  if (want === viewContinuous) return;
+  viewContinuous = want;
+  for (const cv of slotCanvases) cv.remove();
+  slotCanvases.length = 0;
+  pageCanvases.clear();
+  if (viewCanvas) {
+    viewCanvas.remove();
+    viewCanvas = null;
+  }
+  // 回分页要显式说一声：Worker 那边还留着连页标志与视口画布，不说它就会继续往一张
+  //   已经从 DOM 里摘掉的画布上贴 —— 表现是切回去之后画面停在最后一拍。
+  //   连页方向不用在这里说：画布那条消息（syncViewCanvas）带着标志与间隙一起过去。
+  //   间隙与模式同源（连页 0 = 页首尾相接，分页 14），所以它跟着这条消息走。
+  if (!want) post({ t: 'viewCanvas', ts: now(), continuous: false, gap: 14 });
+  viewFireAndForget();
+};
+Object.defineProperty(host, 'viewMode',
+                      { get: () => (viewContinuous ? 'continuous' : 'paged') });
+
 host.clickAt = async function clickAt(xPx, yPx) {
   const hit = await placeAt(xPx, yPx);
   return hit ? host.caret : mirror.stats;
@@ -1150,8 +1262,15 @@ function framePointAt(clientX, clientY) {
   };
 }
 
-// 拖选拖动中那一端：只搬焦点端，anchor 留在按下点。
+/**
+ * 拖选拖动中那一端：只搬焦点端，anchor 留在按下点。
+ *
+ * 每一步都按住光标可见（与按下那一刻同一件事）：拖拽期间光标必须一直亮着 ——
+ *   不按住的话 530 ms 的闪烁计时器照常翻转，拖的过程中光标一亮一灭。
+ *   单线程宿主是同一口径：那边每一步都显式 showCaret(true) 再呈现。
+ */
 function dragExtendTo(hit) {
+  blinkHold();
   host.setFocusAtSide(hit.para, hit.offset, hit.side);
 }
 
@@ -1430,15 +1549,24 @@ host.loadMedicalSample = async function loadMedicalSample(repeat) {
  *   setInterval 里 showCaret + present）。宿主能做的只有每 530 ms 把相位发过去。
  * ⇒ 只"翻转"不"归相位"是不够的：相位可能停在隐藏上，用户敲完字光标却是隐的。
  *
- * 组合期间不动（与单线程宿主同一守卫）：重排会让输入法候选窗跳。
+ * 两个守卫：组合期间不动（与单线程宿主同一守卫，重排会让输入法候选窗跳）；
+ *   拖选进行中整个停掉（按下之后手指停住不动时没有"拖了一步"这个事件可挂，
+ *   而拖动期间光标一亮一灭看上去就是画面在抖）。
  */
 function restartBlinkTimer() {
   if (blinkTimer) clearInterval(blinkTimer);
   blinkTimer = setInterval(() => {
     if (!host.ready || composing) return;
+    if (dragActive()) return;
     caretOn = !caretOn;
     postOp('blinkPhase', { on: caretOn });   // 单向：这一拍只有可见相位在变
   }, 530);
+}
+
+/** 拖选是否正在进行（按下已受理、还没收尾）。 */
+function dragActive() {
+  const st = drag ? drag.state() : null;
+  return !!(st && st.active);
 }
 
 /**

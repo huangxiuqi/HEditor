@@ -404,6 +404,25 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
     int line_total = state.line_total;
     double shape_ms = 0.0;  // 本轮真实整形耗时；命中缓存的段不计
 
+    // 连页：块轴位置一路累加，页号由它现算。断页判据在下面每一处都短路。
+    //   条带高度与帧的槽步距是同一个数（页高 + 页间隙），所以"这段内容落在哪一条带"
+    //   在排版层就定下来了 —— 绘制、光标、选区、命中测试读的都是同一个页号。
+    const bool cont = page.continuous;
+    const float slab = page.slabHeightPt();
+    // 块轴位置 -> 页号。分页下就是循环里那个页号（排版自己决定翻页），
+    //   连页下由位置现算（没有翻页这回事）。
+    auto slabOfY = [&](float y) -> int {
+        if (!cont) return page_index;
+        return static_cast<int>(std::floor(y / slab));
+    };
+    // 块轴位置 -> 页内位置。分页下是恒等（cursor_y 本来就是页内坐标），
+    //   连页下要减掉条带偏移。凡是"写进 LineBox / PlacedGlyph 的 y"都必须过它 ——
+    //   漏一处就是那一处按绝对坐标落进帧里（跨条带时整体错位一条带）。
+    auto locY = [&](int pg, float y) -> float {
+        if (!cont) return y;
+        return y - static_cast<float>(pg) * slab;
+    };
+
     // 取出一段的纯整形结果（优先命中段级缓存）。
     //
     // 命中时返回的是指向缓存条目的只读引用，不做深拷贝：一份 BlockShaping 里挂着
@@ -554,7 +573,7 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
             // 取不到字体就用字号折算的近似度量：空行的几何必须存在，否则光标没地方画。
             const float ascent = f ? f->ascenderPt() : b.size_pt * 0.8f;
             const float descent = f ? f->descenderPt() : b.size_pt * 0.2f;
-            if (b.page_break_before && cursor_y > cy + 0.01f) {
+            if (!cont && b.page_break_before && cursor_y > cy + 0.01f) {
                 ++page_index;
                 cursor_y = cy;
             }
@@ -573,7 +592,7 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
             LineBox lb;
             lb.paragraph = static_cast<int>(para_index);
             lb.line = line_total;
-            lb.page = page_index;
+            lb.page = slabOfY(cursor_y);
             lb.vertical = b.wm.isVertical();
             lb.sideways = b.wm.isSideways();
             lb.size_pt = b.size_pt;
@@ -594,31 +613,33 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
                 lb.inline_end_pt = ax;
             }
             if (!lb.vertical) {
-                if (cursor_y + line_h > cy + ch) {
+                if (!cont && cursor_y + line_h > cy + ch) {
                     ++page_index;
                     cursor_y = cy;
-                    lb.page = page_index;
+                    lb.page = slabOfY(cursor_y);
                 }
-                lb.block_lo_pt = cursor_y;
-                lb.block_hi_pt = cursor_y + (ascent + descent);
+                lb.page = slabOfY(cursor_y);
+                lb.block_lo_pt = locY(lb.page, cursor_y);
+                lb.block_hi_pt = locY(lb.page, cursor_y + (ascent + descent));
                 lb.inline_origin_pt = cx;
-                lb.bracket_axis_pt = cursor_y + ascent;
+                lb.bracket_axis_pt = locY(lb.page, cursor_y + ascent);
                 cursor_y += line_h + b.space_after_pt;
             } else {
                 const float col_w = line_h;
-                if (cursor_y + col_w * 2.0f > cy + ch) {
+                if (!cont && cursor_y + col_w * 2.0f > cy + ch) {
                     ++page_index;
                     cursor_y = cy;
-                    lb.page = page_index;
                 }
+                lb.page = slabOfY(cursor_y);
                 const float center =
                     b.wm.isBlockReversed() ? cx + cw - 0.5f * col_w : cx + 0.5f * col_w;
                 lb.block_lo_pt = center - col_w * 0.5f;
                 lb.block_hi_pt = center + col_w * 0.5f;
-                lb.inline_origin_pt = cursor_y;
+                lb.inline_origin_pt = locY(lb.page, cursor_y);
                 lb.bracket_axis_pt = center;
-                // 竖排块吃掉本页剩余高度（与有内容的竖排段一致）
-                cursor_y = cy + ch + b.space_after_pt;
+                // 竖排块在分页下吃掉本页剩余高度；连页下它占的是一条高 col_w 的横带。
+                cursor_y = cont ? (cursor_y + col_w + b.space_after_pt)
+                                : (cy + ch + b.space_after_pt);
             }
             res.lines.push_back(std::move(lb));
             ++line_total;
@@ -627,7 +648,7 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
             continue;
         }
         // 取不到字体（整形为空）：只翻页、不占空间 —— 与下面 !shaped 那条分支一致。
-        if (b.page_break_before && cursor_y > cy + 0.01f) {
+        if (!cont && b.page_break_before && cursor_y > cy + 0.01f) {
             ++page_index;
             cursor_y = cy;
         }
@@ -733,9 +754,10 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
 
                 // 本行放不下就翻页。判定必须用本行自己的高度：上一行结束时还不知道
                 //   本行多高，拿上一行的高度估会漏判（下一行更高时溢出页底）。
+                //   连页下这一整条短路：内容一列连到底，行照样往前排（跨条带也不断）。
                 if (anchor) {
                     // 段首那一行：本段从 cursor_y 起排。
-                    if (cursor_y + line_h > cy + ch) {
+                    if (!cont && cursor_y + line_h > cy + ch) {
                         ++page_index;
                         cursor_y = cy;
                     }
@@ -743,7 +765,7 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
                     anchor = false;
                 } else {
                     top += prev_line_h;
-                    if (top + line_h > cy + ch) {
+                    if (!cont && top + line_h > cy + ch) {
                         ++page_index;
                         cursor_y = cy;
                         top = cursor_y;
@@ -755,18 +777,18 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
                 LineBox lb;
                 lb.paragraph = static_cast<int>(para_index);
                 lb.line = line_total;
-                lb.page = page_index;
+                lb.page = slabOfY(top);
                 lb.vertical = false;
                 lb.sideways = false;
                 lb.size_pt = max_size;
-                lb.block_lo_pt = baseline - ascent;
-                lb.block_hi_pt = baseline + descent;
+                lb.block_lo_pt = locY(lb.page, baseline - ascent);
+                lb.block_hi_pt = locY(lb.page, baseline + descent);
                 lb.inline_origin_pt = cx;
                 // 画括号用：字体与基线（横排下字形原点的 y 就是基线）。
                 // 字体必须是块的主字体（= 上面算占位槽宽那个 bracketAdvancePt 的来源），
                 //   换个字体画括号，字形 advance 就和槽宽对不上了。
                 lb.bracket_font = bs.primary;
-                lb.bracket_axis_pt = baseline;
+                lb.bracket_axis_pt = locY(lb.page, baseline);
                 lb.first_cp = bs.clusters[slice.begin].cp;
                 lb.last_cp = lastCpOf(slice.end);
                 {
@@ -810,9 +832,13 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
                         //   HarfBuzz 原样写进 y_offset，所以进屏幕坐标（y 向下）要取负。
                         //   x_offset 是 x 向右，无需变号。
                         pg.x_pt = pen_x + sg.x_offset * usToPt;
-                        pg.y_pt = pen_y - sg.y_offset * usToPt;
+                        // 字形自己的条带：一行可以跨条带，而"跨过去的那几个字"必须落进
+                        //   后一条带 —— 所以页号按字形自己的块轴位置取，不跟行盒走。
+                        //   跟行盒走的话，跨条带的尾字会被画到行盒所在那一条带的框外。
+                        const int gpage = slabOfY(pen_y);
+                        pg.y_pt = locY(gpage, pen_y - sg.y_offset * usToPt);
                         pg.color = runColorAt(sg.cluster);
-                        pg.page = page_index;
+                        pg.page = gpage;
                         pg.line = line_total;
                         pg.vertical = false;
                         pg.rotate_deg = 0.0f;
@@ -840,7 +866,8 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
             //   按段内最大字号"，于是混排字号不会把大字挤出列外。
             const float col_w = para_metric.size_pt * b.line_factor;
             float region_top = cursor_y;
-            if (region_top + col_w * 2.0f > cy + ch) {
+            // 分页下要判"本页还放得下两条列位吗"；连页下没有页底，横带是新开的。
+            if (!cont && region_top + col_w * 2.0f > cy + ch) {
                 ++page_index;
                 cursor_y = cy;
                 region_top = cy;
@@ -854,13 +881,19 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
                 if (b.wm.isBlockReversed()) return cx + cw - (static_cast<float>(c) + 0.5f) * col_w;
                 return cx + (static_cast<float>(c) + 0.5f) * col_w;
             };
-            // 进入下一列；本页列位用尽则翻页
+            // 进入下一列；列位用尽则另起一条横带（分页下就是翻页）。
+            //   连页下横带的长度取内容高度 ch（竖排的列长本来就是固定的一列），
+            //   下一条带排在它下面 —— 与分页下"另起一页"是同一个位置关系。
             auto nextColumn = [&]() {
                 ++col;
                 if ((static_cast<float>(col) + 1.0f) * col_w > cw + 0.01f) {
-                    ++page_index;
+                    if (cont) {
+                        region_top += ch;
+                    } else {
+                        ++page_index;
+                        region_top = cy;
+                    }
                     col = 0;
-                    region_top = cy;
                 }
                 pen_y = region_top;
             };
@@ -896,13 +929,13 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
                 LineBox lb;
                 lb.paragraph = static_cast<int>(para_index);
                 lb.line = line_total + col;
-                lb.page = page_index;
+                lb.page = slabOfY(pen_y);
                 lb.vertical = true;
                 lb.sideways = sideways;
                 lb.size_pt = para_metric.size_pt;
                 lb.block_lo_pt = colCenterX(col) - col_w * 0.5f;
                 lb.block_hi_pt = colCenterX(col) + col_w * 0.5f;
-                lb.inline_origin_pt = pen_y;
+                lb.inline_origin_pt = locY(lb.page, pen_y);
                 // 画括号用：字体 + 竖排下的列内横轴起始笔位。
                 lb.bracket_font = bs.primary;
                 lb.bracket_axis_pt = gx0;
@@ -948,12 +981,15 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
                             pg.y_pt = gy - sg.y_offset * usToPt;
                             pg.rotate_deg = 0.0f;
                         }
+                        const int gpage = slabOfY(gy);
                         pg.color = runColorAt(sg.cluster);
-                        pg.page = page_index;
+                        pg.page = gpage;
                         pg.line = line_no;
                         pg.vertical = true;
                         pg.cluster = sg.cluster;
                         pg.paragraph = static_cast<int>(para_index);
+                        // 竖排的行内轴是 y，所以页内坐标只改 y（x 是列内横轴，不过 locY）。
+                        pg.y_pt = locY(gpage, pg.y_pt);
                         res.glyphs.push_back(pg);
 
                         if (sideways) {
@@ -972,8 +1008,10 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
                 if (start < bs.clusters.size()) nextColumn();
             }
             line_total += col + 1;
-            // 竖排块吃掉本页剩余高度，后续块另起一页
-            cursor_y = cy + ch + b.space_after_pt;
+            // 竖排块在分页下吃掉本页剩余高度（后续块另起一页）；连页下它占的是
+            //   若干条长 ch 的横带，所以下一条从最后那条带的底下开始。
+            cursor_y = cont ? (region_top + ch + b.space_after_pt)
+                            : (cy + ch + b.space_after_pt);
         }
 
         pi.line_end = static_cast<int>(res.lines.size());
@@ -984,6 +1022,9 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
     // 只数本轮会让 page_count / glyph_count / placed_line_count 变成半篇，
     // 而这些数字是帧高、翻页与面板的直接判据。
     summarizeLayoutStats(&res);
+    // 连页下页号是派生的：把收尾那一处的条带号写回状态，否则续排从这里开始时
+    //   page_index 还停在上一段的值（ReflowState 的相等判据会因此恒不等，增量续排白跑）。
+    if (cont) page_index = slabOfY(cursor_y);
     res.stats.page_count = page_index + 1;
     // shape_ms 只计本轮：命中缓存的段不产生整形耗时，本轮耗时才是关心的量。
     res.stats.shape_ms = shape_ms;

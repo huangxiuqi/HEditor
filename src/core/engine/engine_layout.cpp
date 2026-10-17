@@ -273,6 +273,19 @@ void EditorEngine::glyphRangeOnPage(int page, int* begin, int* end) const {
     *end = static_cast<int>(e - gs.begin());
 }
 
+int EditorEngine::contentBottomPx() const {
+    const float slab = cfg_.page.slabHeightPt();
+    float bottom_pt = 0.0f;
+    for (const LineBox& lb : layout_.lines) {
+        // 横排的块轴是 y，竖排的块轴是 x（它的 y 是行内轴）—— 两种朝向取不同的字段。
+        const float end = lb.vertical ? (lb.inline_origin_pt + lb.inline_end_pt) : lb.block_hi_pt;
+        const float v = static_cast<float>(lb.page) * slab + end;
+        if (v > bottom_pt) bottom_pt = v;
+    }
+    // 末尾补一个下边距：不留的话最后一行会贴着滚动底，鼠标点不到它下面那一小段。
+    return static_cast<int>(std::ceil((bottom_pt + cfg_.page.margin_pt) * cfg_.zoom));
+}
+
 /**
  * 第 page 页在帧内的首行偏移。
  *

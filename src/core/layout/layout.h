@@ -27,6 +27,19 @@ struct PageMetrics {
     float width_pt = 595.276f;  // A4 宽（磅）
     float height_pt = 841.89f;  // A4 高（磅）
     float margin_pt = 56.7f;    // 默认 2cm
+    /**
+     * 连页（不分页）：排版不在页底断开，内容一列连到底。
+     *
+     * 页号在连页下退化成"渲染条带号" = floor(块轴位置 / slab_pt)：它不再是排版的
+     *   约束，只是"这段内容将来落进帧的哪一个槽"。条带是渲染的私事，排版不认识它。
+     * 断页判据（页底溢出、显式分页符、竖排"吃掉本页剩余高度"）在连页下全部短路 ——
+     *   漏掉任何一条都会留下"某一处还在翻页"的接缝。
+     */
+    bool continuous = false;
+    /**
+     * 连页下条带的高度（磅）= 页高 + 页间隙。分页下不用它（页高自己就是约束）。
+     */
+    float slab_pt = 841.89f;
 
     static PageMetrics A4(float margin_pt_ = 56.7f) {
         PageMetrics p;
@@ -35,13 +48,20 @@ struct PageMetrics {
     }
     float contentWidthPt() const { return width_pt - 2.0f * margin_pt; }
     float contentHeightPt() const { return height_pt - 2.0f * margin_pt; }
+    /**
+     * 连页下的条带高度：给 0 或负值时退回页高（永远不能返回 0，它是除数）。
+     */
+    float slabHeightPt() const { return slab_pt > 0.0f ? slab_pt : height_pt; }
 
     /**
      * 精确相等。引擎靠它判断"页度量动了没有"来决定要不要整篇重排：
      * 断行依赖内容宽度，任何一位浮点变化都可能让某一行多收/少收一个字。
+     * 连页标志与条带高度同样要进比较 —— 它们改的是断页与页号，不改的话
+     *   切模式不会重排，画面上就是"分页的排版 + 连页的落点"。
      */
     bool operator==(const PageMetrics& o) const {
-        return width_pt == o.width_pt && height_pt == o.height_pt && margin_pt == o.margin_pt;
+        return width_pt == o.width_pt && height_pt == o.height_pt && margin_pt == o.margin_pt &&
+               continuous == o.continuous && slab_pt == o.slab_pt;
     }
     bool operator!=(const PageMetrics& o) const { return !(*this == o); }
 };

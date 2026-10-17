@@ -9,20 +9,32 @@
 <style>
   html, body { margin: 0; height: 100%; background: #f2f3f5; color: #1d1d1f;
                font: 13px/1.6 "Segoe UI", "Microsoft YaHei", sans-serif; }
-  #bar { padding: 8px 14px; background: #1f2937; color: #e5e7eb; }
+  /* 纵向弹性布局：工具条占它自己需要的高度，剩下的全给滚动区。
+     为什么不写 height: calc(100% - 74px)：74 是个魔数，工具条一换行（项目多了、
+     窗口窄了）它就失配 —— 内容比视口高一截，页面因此长出一条外层滚动条，
+     而那条滚动条一动，里外两个滚动区就开始互相打架。 */
+  body { display: flex; flex-direction: column; }
+  #bar { padding: 8px 14px; background: #1f2937; color: #e5e7eb; flex: 0 0 auto; }
   #bar.err { background: #7f1d1d; }
   #tools { padding: 6px 14px; background: #e5e7eb; display: flex; gap: 8px;
-           align-items: center; flex-wrap: wrap; border-bottom: 1px solid #d1d5db; }
+           align-items: center; flex-wrap: wrap; border-bottom: 1px solid #d1d5db;
+           flex: 0 0 auto; }
   #tools label { color: #4b5563; }
   #tools select, #tools input, #tools button { font: inherit; padding: 2px 6px;
            border: 1px solid #cbd5e1; border-radius: 6px; background: #fff; }
   #tools button { cursor: pointer; }
-  #wrap { position: relative; height: calc(100% - 74px); }
+  /* min-height: 0 是必须的：弹性项的默认最小高度是"内容高度"，不写它，滚动区
+     会被内容撑高而不是自己滚 —— 表现就是整页一条外层滚动条。 */
+  #wrap { position: relative; flex: 1 1 auto; min-height: 0; }
   #stage { position: absolute; inset: 0; overflow-y: auto; overflow-x: hidden; background: #e9eaec; }
   /* 一页一张画布：位置与尺寸由宿主按 Worker 推来的几何摆（见 syncPageCanvases） */
   .pg { display: block; }
   #spacer { position: absolute; top: 0; left: 0; width: 1px; }
-  #overlay { position: absolute; inset: 0; pointer-events: none; }
+  /* overflow: hidden 是必须的：这一层装着跟随光标的输入法框（它被撑成"从光标到页右缘"
+     那么宽、位置跟着光标走）。光标滚到视口之外时那个框会落到视口外面，而这一层不裁剪的话
+     它就顶出 body、整页长出一条外层滚动条（点一下让光标回到视口内，滚动条又消失）。
+     单线程宿主那边不存在这个问题：它的 #ime 挂在 #stage 里，天然被滚动容器裁掉。 */
+  #overlay { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
   /* ★ pointer-events 必须是 none（与单线程宿主 index.html 的 #ime 一致）：
      它被撑成"从光标到页右缘"那么宽去承接输入法与候选窗定位，若允许吃指针，
      光标那一行的整条横带都点不进画布 —— 点击落在 textarea 上，命中测试永远不跑。 */
@@ -70,6 +82,11 @@
       <option value="1">表单</option>
       <option value="2">只读</option>
     </select>
+    <label>视图</label>
+    <select id="viewMode">
+      <option value="paged" selected>分页</option>
+      <option value="continuous">连页</option>
+    </select>
     <button id="btnPlus">表单样例</button>
     <button id="btnUndo">撤销</button>
     <button id="btnRedo">重做</button>
@@ -100,6 +117,9 @@
         if (id === 8) h().loadMedicalSample(1); else h().run(id, h().zoomLevel);
       });
       q('zoom').addEventListener('change', (e) => h().zoomToFactor(Number(e.target.value)));
+      // 视图模式：分页（一页一张画布）与连页（一个视口画布）。切换要重来一遍画布，
+      //   所以走门面而不是改一条消息 —— 那里同时管着页间隙（连页 0 / 分页 14 磅）。
+      q('viewMode').addEventListener('change', (e) => h().setViewMode(e.target.value));
       // 光标与选区的样式。初值从推过来的 state 里读（默认值只在 EngineConfig 里有一份），
       //   读到之前控件的值是空的，所以那时按下的 input 一律丢掉 —— 否则第一次触摸会把
       //   颜色写成取色器的空值黑。这条路上每一拍只有一次 present：样式参数不作废底图，

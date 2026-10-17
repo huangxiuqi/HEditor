@@ -272,6 +272,13 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
             base_.fillRect(
                 Rect{0.0f, off_y + y0, static_cast<float>(page_px_w), std::max(0.0f, y1 - y0)},
                 cfg_.page_fill);
+        } else if (cfg_.page.continuous) {
+            // 连页：没有页，也就没有页间隙与页边框 —— 整条内容列从头到尾是同一片底色，
+            //   而条带首尾相接（宿主把页间隙设成 0），于是相邻条带在屏幕上连成一片。
+            //   这一笔就是"一整条连续白底"的全部：条带的整幅都填页面底色。
+            base_.fillRect(
+                Rect{0.0f, off_y, static_cast<float>(page_px_w), static_cast<float>(page_px_h)},
+                cfg_.page_fill);
         } else {
             // 整页：上下半格页间隙擦成背景色，页内填页面底色。
             //   间隙只有上下半格，所以分两条擦即可 —— 若按整个页矩形擦一次（含页内），
@@ -300,7 +307,8 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
         // 页边框必须每次都补：它在页矩形的边上，而上面那次底色填充会把它擦掉一条。
         //   漏掉这一笔的后果是"帧差 4308 像素"—— 正好是 2×(893+1263)-4，页边框的长度。
         //   （先量出来的，不是推出来的：增量帧与从零重画的帧差 4308、最大通道差 49。）
-        if (cfg_.draw_page_border)
+        //   连页下不画：没有页，也就没有"页的边"可画。
+        if (cfg_.draw_page_border && !cfg_.page.continuous)
             base_.strokeRect(
                 Rect{0.0f, off_y, static_cast<float>(page_px_w), static_cast<float>(page_px_h)},
                 cfg_.page_border, 1.0f);
@@ -604,6 +612,23 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
             if (!had) refresh.push_back(r);
         }
     }
+    // 这一拍要重画的那几块选区：与 refresh 相交的（帧是增量的，不相交的像素本来就是对的）。
+    //
+    //   整块都要进 refresh，这是幂等性的前提：混色是叠加式的（把当前像素按 alpha 再混一次），
+    //   而 refresh 里常常只有光标那一小条 —— 光标每闪一次就把它自己那一格铺回底图，
+    //   若只铺那一小条、却把整块矩形再混一遍，就等于"这一行的选区每闪一次深一层"：
+    //   越闪越深，最后连字都被叠成与底色同色（看上去是一条空白的蓝条）。
+    //   先整块铺回底图（bg + 字形）再混一次，颜色就与"只混一次"完全相同。
+    std::vector<Rect> sel_paint;
+    for (const Rect& r : sel_rects) {
+        for (const Rect& q : refresh) {
+            if (r.x < q.x + q.w && q.x < r.x + r.w && r.y < q.y + q.h && q.y < r.y + r.h) {
+                sel_paint.push_back(r);
+                break;
+            }
+        }
+    }
+    for (const Rect& r : sel_paint) refresh.push_back(r);
     for (const Rect& r : refresh) bitmap_.copyRectFrom(base_, r);
 
     const auto t_blit = Clock::now();
@@ -625,17 +650,9 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
     //     （底图没变、选区也没变），重画一遍纯属白干 —— 而选区是逐像素混色，
     //     一页的量就是几毫秒。新旧差集那一套保证了"该画的都在 refresh 里"，
     //     窗口内平移时 refresh 只覆盖进出窗口的那两页，这一项因此从整窗降到一页。
-    for (const Rect& r : sel_rects) {
-        bool touched = false;
-        for (const Rect& q : refresh) {
-            if (r.x < q.x + q.w && q.x < r.x + r.w && r.y < q.y + q.h && q.y < r.y + r.h) {
-                touched = true;
-                break;
-            }
-        }
-        if (!touched) continue;
-        bitmap_.blendRect(r, cfg_.selection_color);
-    }
+    //   混色一律作用在"刚从底图铺回来"的那一块上（见上面 sel_paint 的说明）——
+    //   这一条不成立时颜色会随重画次数累积变深。
+    for (const Rect& r : sel_paint) bitmap_.blendRect(r, cfg_.selection_color);
     // 帧上真有选区的区域就是这一批：交集那一大片没被重贴、仍在帧上，差集那几块刚画过。
     //   下一拍要擦的正是它们 —— 记少了会留下残影，记多了会把没画的也擦一遍。
     selection_rects_prev_ = sel_rects;

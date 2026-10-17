@@ -288,6 +288,32 @@ void setPageMetrics(float w_pt, float h_pt, float margin_pt) {
 }
 
 /**
+ * 页间隙（磅）。连页模式把它设成 0：页首尾相接，一屏内容在帧里是连续的一段，
+ *   于是"一张视口画布"可以按文档坐标直接贴，页与页之间不会留缝。
+ * 与页度量分开成一条门面，是因为它只影响页的落点，不影响页本身的宽高与内容区。
+ */
+void setPageGap(float gap_pt) {
+    g_cfg.page_gap_pt = gap_pt < 0.0f ? 0.0f : gap_pt;
+    applyConfig();
+}
+
+/**
+ * 连页模式开关（不分页，内容一列连到底）。
+ *
+ * 它改的是排版的形状，所以走 applyConfig（setConfig 会判"页度量变了"并整篇重排）。
+ *   宿主配合的两件事：页间隙设成 0（条带首尾相接）、滚动高度取 contentPx。
+ */
+void setContinuous(bool on) {
+    g_cfg.continuous = on;
+    applyConfig();
+}
+
+/**
+ * 内容底边（帧像素）。连页下宿主拿它当滚动高度（见 EditorEngine::contentBottomPx）。
+ */
+int contentPx() { return g_engine.contentBottomPx(); }
+
+/**
  * 撤销栈的深度上限（条数，0 = 不限制）。与 EngineConfig::undo_limit 是同一处值。
  * 它不影响呈现，所以走 applyConfig 那条路就够了（不重排、不重绘）。
  */
@@ -884,6 +910,44 @@ std::string controlsJson() {
  * 的括号交替出现、而不是互相嵌套"，就只能读这份结构。
  * 只读接口，不改任何状态。
  */
+/**
+ * 某几段的行盒与字形（只读，供诊断"字画到哪儿去了"）。
+ *
+ * 为什么要有这个口子：行盒与字形是两份产物（一份给光标/选区/命中测试，一份给光栅器），
+ *   它们一旦不一致，屏幕上就是"选中了一块但那里没有字"或"字跑到别的条带去"——
+ *   而截图分不出是行盒错了还是字形错了。逐条列出来才判得动。
+ * 范围由参数框住（一段几十行，够用），不做整篇导出。
+ */
+std::string linesJson(int from_para, int to_para) {
+    const LayoutResult& lay = g_engine.layout();
+    std::ostringstream o;
+    o.setf(std::ios::fixed);
+    o.precision(2);
+    o << "{\"lines\":[";
+    bool first = true;
+    for (const LineBox& lb : lay.lines) {
+        if (lb.paragraph < from_para || lb.paragraph > to_para) continue;
+        if (!first) o << ",";
+        first = false;
+        o << "{\"para\":" << lb.paragraph << ",\"line\":" << lb.line << ",\"page\":" << lb.page
+          << ",\"v\":" << (lb.vertical ? 1 : 0) << ",\"cp\":[" << lb.first_cp << ","
+          << lb.last_cp << "],\"blo\":" << lb.block_lo_pt << ",\"bhi\":" << lb.block_hi_pt
+          << ",\"iorg\":" << lb.inline_origin_pt << ",\"iend\":" << lb.inline_end_pt
+          << ",\"ncl\":" << lb.clusters.size() << "}";
+    }
+    o << "],\"glyphs\":[";
+    first = true;
+    for (const PlacedGlyph& pg : lay.glyphs) {
+        if (pg.paragraph < from_para || pg.paragraph > to_para) continue;
+        if (!first) o << ",";
+        first = false;
+        o << "{\"para\":" << pg.paragraph << ",\"line\":" << pg.line << ",\"page\":" << pg.page
+          << ",\"cl\":" << pg.cluster << ",\"x\":" << pg.x_pt << ",\"y\":" << pg.y_pt << "}";
+    }
+    o << "]}";
+    return o.str();
+}
+
 std::string bracketSlotsJson() {
     const LayoutResult& lay = g_engine.layout();
     std::ostringstream o;
@@ -1183,6 +1247,9 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("setScenario", &setScenario);
     emscripten::function("setZoom", &setZoom);
     emscripten::function("setPageMetrics", &setPageMetrics);
+    emscripten::function("setPageGap", &setPageGap);
+    emscripten::function("setContinuous", &setContinuous);
+    emscripten::function("contentPx", &contentPx);
     emscripten::function("setUndoLimit", &setUndoLimit);
     emscripten::function("undoLimit", &undoLimit);
     emscripten::function("setCaretStyle", &setCaretStyle);
@@ -1247,6 +1314,7 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("controlAtPoint", &controlAtPoint);
     emscripten::function("controlsJson", &controlsJson);
     emscripten::function("bracketSlotsJson", &bracketSlotsJson);
+    emscripten::function("linesJson", &linesJson);
     emscripten::function("describeControls", &describeControls);
     emscripten::function("blockedEdits", &blockedEdits);
     emscripten::function("loadFormSample", &loadFormSample);
