@@ -565,12 +565,13 @@ function scrollCaretIntoView(st) {
   //   拿它算绝对位置会滚到一个毫无关系的地方 —— 直接按页算到那一页的页首。
   const inWindow = st.caretPage >= st.windowFirstPage &&
                    st.caretPage < st.windowFirstPage + st.windowPages;
-  // caretY 是"窗口帧内的 y"，它已经含了 (caretPage - 窗口首页) * step 这一项
-  //   （见 EditorEngine::caretRectPx 的 off_y）。所以文档坐标 = 窗口首页偏移 + caretY。
-  //   写成 caretPage * step + caretY 等于把页偏移算了两遍 —— 点第二页时光标坐标会落到
-  //   第三页去，屏幕跟着往下冲两页；随后窗口重算、又一次滚动，看起来就是"乱滚"。
-  const top = inWindow ? (mod.windowFirstPage() * step + st.caretY) / dpr
-                       : (st.caretPage * step) / dpr;
+  // caretY 是"帧内的 y"，它含的是槽偏移（第 caretPage 页落在哪个槽），不是
+  //   "在窗口里排第几页"（见 EditorEngine::caretRectPx 的 off_y 与 frameSlotOf）。
+  //   所以文档坐标 = 页号 x 步距 + 页内 y，而页内 y = caretY - 槽偏移。
+  //   写成 caretY 直接加页号会算两遍偏移（滚动后光标坐标跑到别的页去，屏幕跟着乱滚）。
+  const top = inWindow
+    ? (st.caretPage * step + (st.caretY - frameSlotOf(st.caretPage) * step)) / dpr
+    : (st.caretPage * step) / dpr;
   const bot = top + Math.max(12, st.caretH / dpr);
   const pad = 18;
   const viewTop = stageEl.scrollTop;
@@ -589,6 +590,47 @@ function scrollCaretIntoView(st) {
  *   先对窗口再上屏 —— 反过来的话第一次上屏会把帧贴到错的页上（帧覆盖的页与
  *     画布集合不是同一批），画面上就是"别处的内容出现在这一页"。
  */
+/**
+ * 帧槽号：页在帧内的位置由引擎的槽数决定（页号 mod 槽数）。
+ *   切帧、自审、光标滚动定位三处都按它算，不再用"页号 - 窗口首页"。
+ */
+function frameSlotOf(page) {
+  const n = (mod && mod.frameSlots) ? mod.frameSlots() : 0;
+  if (n <= 0) return 0;
+  return ((page % n) + n) % n;
+}
+
+/**
+ * 把"帧槽数"报给引擎（等于窗口页数上限，与 worker 宿主同一个来源）。
+ * 返回是否变过 —— 变过就意味着帧的布局整体换了，调用方必须重画一次再上屏。
+ */
+let frameSlotsSent = 0;
+function syncFrameSlots() {
+  if (!mod || typeof mod.setFrameSlots !== 'function') return false;
+  const n = maxWindowPages();
+  if (n <= 0 || n === frameSlotsSent) return false;
+  frameSlotsSent = n;
+  mod.setFrameSlots(n);
+  return true;
+}
+
+/**
+ * 呈现一次。画之前先把帧槽数报给引擎 —— 帧的布局由它决定，顺序反了就会拿新槽号
+ *   去取旧布局的源行（每一页都贴错位置）。幂等：槽数没变时它只是一次比较。
+ */
+function presentNow() {
+  syncFrameSlots();
+  mod.present();
+}
+
+/**
+ * 重排并呈现。同上，槽数要排在重排之前 —— 帧尺寸是重排时按槽数算出来的。
+ */
+function relayoutNow() {
+  syncFrameSlots();
+  mod.relayoutAndPaint();
+}
+
 function settle(st, opts) {
   if (!mod) return st;
   const t0 = performance.now();
@@ -596,7 +638,14 @@ function settle(st, opts) {
   if (st) lastEdit = st;
   if (o.scroll !== false) scrollCaretIntoView(st);
   if (applyWindow()) {
-    mod.present();
+    presentNow();
+    st = JSON.parse(mod.editStatsJson());
+    lastEdit = st;
+  }
+  // 槽数变了要再画一次：帧的布局整体换了（引擎那边已把帧作废），不重画就会拿
+  //   新槽号去取旧布局的源行 —— 每一页都贴错位置。
+  if (syncFrameSlots()) {
+    presentNow();
     st = JSON.parse(mod.editStatsJson());
     lastEdit = st;
   }
@@ -1126,7 +1175,7 @@ function blitFrame(st) {
   for (const p of dirty) {
     const rec = pageCanvases.get(p);
     if (!rec) continue;
-    const srcY = (p - first) * step;
+    const srcY = frameSlotOf(p) * step;
     rec.g.putImageData(img, 0, -srcY, 0, srcY, w, ph);
     ++patched;
   }
@@ -1169,8 +1218,9 @@ function positionIme(st) {
   const pr = pagesEl.getBoundingClientRect();
 
   const left = pr.left - sr.left + stageEl.scrollLeft + st.caretX / dpr;
+  // 与 scrollCaretIntoView 同一口径：帧里的 caretY 含的是槽偏移，折回文档坐标要减掉它。
   const top = pr.top - sr.top + stageEl.scrollTop +
-              (mod.windowFirstPage() * step + st.caretY) / dpr;
+              (st.caretPage * step + (st.caretY - frameSlotOf(st.caretPage) * step)) / dpr;
   const lineH = Math.max(12, Math.round(st.caretH / dpr));
 
   ta.style.left = Math.round(left) + 'px';
@@ -1193,7 +1243,7 @@ function afterEdit() {
   if (!st.caretVisible) {
     caretOn = true;
     mod.showCaret(true);
-    mod.present();
+    presentNow();
     st = JSON.parse(mod.editStatsJson());
   }
 
@@ -1207,7 +1257,11 @@ function afterEdit() {
 function relayoutAndBlit() {
   if (!ready && !mod) return;
   presetWindowForLoad();
-  mod.relayoutAndPaint();
+  // 槽数必须在重排重画之前报过去：帧的布局由它定，报晚了这一趟就按旧槽号画，
+  //   而 settle 里那次"发现槽数变了再补一次 present"会额外消费掉排版账
+  //   （首次装载的 layoutRan / layoutMs 被后一次 present 冲成 0）。
+  syncFrameSlots();
+  relayoutNow();
   return settle(JSON.parse(mod.editStatsJson()), { scroll: false });
 }
 
@@ -1219,7 +1273,7 @@ function relayoutAndBlit() {
  * 不滚动视口：改颜色与光标在哪无关，把视口拽到光标处是多余的位移。
  */
 function presentStyleChange() {
-  mod.present();
+  presentNow();
   return settle(JSON.parse(mod.editStatsJson()), { scroll: false });
 }
 
@@ -1238,7 +1292,7 @@ function setCaretAndPresent(para, offset) {
   mod.setCaret(para, offset);
   caretOn = true;
   mod.showCaret(true);
-  mod.present();
+  presentNow();
   return afterEdit();
 }
 
@@ -1413,7 +1467,7 @@ function dragExtendTo(hit) {
   mod.setFocusAtSide(hit.para, hit.offset, hit.side);
   caretOn = true;
   mod.showCaret(true);
-  mod.present();
+  presentNow();
   settle(JSON.parse(mod.editStatsJson()), { scroll: false });
   resetBlink();
 }
@@ -1446,7 +1500,7 @@ function onCanvasMouseDown(ev) {
       mod.setCaretAtSide(p.para, p.offset, p.side);
       caretOn = true;
       mod.showCaret(true);
-      mod.present();
+      presentNow();
       afterEdit();
     } else {
       setCaretAndPresent(p.para, p.offset);
@@ -1476,7 +1530,7 @@ function resetBlink() {
     if (!ready || busy || composing) return;
     caretOn = !caretOn;
     mod.showCaret(caretOn);
-    mod.present();
+    presentNow();
     // 统计必须在 present() 之后读。
     //   present 之前拿到的是上一帧的脏矩形，拿它去 putImageData 会贴错位置 ——
     //   症状是"光标走了，残影留在原地"。所以这里只读一次，且读完就用。
@@ -1569,7 +1623,7 @@ function alignAfterScroll() {
   speedPagesPerMs = 0;
   skipRun = 0;
   if (!applyWindow()) return;
-  mod.present();
+  presentNow();
   settle(JSON.parse(mod.editStatsJson()), { scroll: false });
 }
 
@@ -1600,7 +1654,7 @@ function onStageScroll() {
     //   settleMs 只记了宿主侧的上屏与面板（实测 5 ms 对 45 ms），所以这里自己量整段。
     const tWork = performance.now();
     if (!applyWindow()) return;
-    mod.present();
+    presentNow();
     const st = JSON.parse(mod.editStatsJson());
     settle(st, { scroll: false });
     lastScrollWorkMs = performance.now() - tWork;
@@ -1877,7 +1931,7 @@ const facade = {
     }
     mod.setScenario(Number(id));
     presetWindowForLoad();
-    mod.relayoutAndPaint();
+    relayoutNow();
     return settle(JSON.parse(mod.editStatsJson()), { scroll: false });
   },
   reset(id, zoom) { return this.run(id === undefined ? 6 : id, zoom === undefined ? baseDensity() : zoom); },
@@ -1980,7 +2034,7 @@ const facade = {
     mod.setCaretAt(para, offset, field);
     caretOn = true;
     mod.showCaret(true);
-    mod.present();
+    presentNow();
     afterEdit();
     return this.caret;
   },
@@ -1992,7 +2046,7 @@ const facade = {
     mod.setCaretAtSide(para, offset, side);
     caretOn = true;
     mod.showCaret(true);
-    mod.present();
+    presentNow();
     afterEdit();
     return this.caret;
   },
@@ -2205,6 +2259,8 @@ const facade = {
     return new Uint8ClampedArray(new Uint8ClampedArray(v.buffer, v.byteOffset, v.byteLength));
   },
   frameW() { return mod.frameWidth(); },
+  // 引擎侧的帧槽数：切帧、自审、光标定位都按它算源行（见 frameSlotOf）。
+  frameSlots() { return mod && mod.frameSlots ? mod.frameSlots() : 0; },
   frameH() { return mod.frameHeight(); },
 
   // 按当前光标可见相位重画一次并上屏。
@@ -2214,7 +2270,7 @@ const facade = {
   //    真正的渲染差异反而被淹掉。定格之后两帧才有可比性。
   present() {
     if (!ready) return null;
-    mod.present();
+    presentNow();
     return settle(JSON.parse(mod.editStatsJson()));
   },
 
@@ -2249,7 +2305,7 @@ const facade = {
       ++comparedPages;
       const g = rec.g;
       const S = g.getImageData(0, 0, w, ph).data;
-      const base = local * step * w * 4;
+      const base = frameSlotOf(p) * step * w * 4;
       for (let i = 0; i + 3 < S.length; i += 4) {
         const j = base + i;
         if (j + 3 >= F.length) break;

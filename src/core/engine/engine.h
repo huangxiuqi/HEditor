@@ -155,6 +155,15 @@ public:
      */
     int windowFirstPage() const { return base_first_page_; }
     /**
+     * 帧槽数：页在帧内的行偏移 = (页号 mod 槽数) x 步距。由宿主侧算好传进来
+     *   （它等于窗口页数上限 maxWindowPages，与宿主的画布槽数是同一个数）。
+     * 为什么不是引擎自己算：引擎不知道视口尺寸；而两侧各算一次会分叉 ——
+     *   画布槽那边实测出过分叉（宿主按"已建槽数"只增、引擎按"当前几何"可减，
+     *   视口从很高变矮时槽号整体错位、画布上是别的页）。
+     */
+    void setFrameSlots(int n);
+    int frameSlots() const { return frame_slot_count_; }
+    /**
      * 帧当前覆盖的页数。宿主按它把窗口位图切成几块贴给页画布。
      */
     int windowPageCount() const { return base_page_count_; }
@@ -464,12 +473,12 @@ public:
     bool undo();
     bool redo();
     bool undoAndRender();
-    bool redoAndRender(); /**
-     * 帧坐标（磅）落在哪个控件上（取最内层）。-1 = 没有。
+    bool redoAndRender();     /**
+     * 窗口坐标（磅）落在哪个控件上（取最内层）。-1 = 没有。
      * 它走的是 hitTestPt 的同一份几何，所以"视觉上在框里"与
      * "逻辑上在控件里"永远一致。
      */
-    int controlAtPt(float x_pt_frame, float y_pt_frame) const;
+    int controlAtPt(float x_pt_win, float y_pt_win) const;
 
     /**
      * 页面坐标下的一个矩形（页号 + 页面坐标磅矩形）。
@@ -677,8 +686,10 @@ public:
      */
     bool caretRectPt(Rect* out) const;
     /**
-     * 反查：帧坐标（磅）→ (段, 偏移) + 侧别。点落在页间空隙时返回 false。
+     * 反查：窗口坐标（磅）→ (段, 偏移) + 侧别。点落在页间空隙时返回 false。
      *
+     * 窗口坐标是"相对窗口首页顶边的偏移"：帧按槽号装页（页号 mod 槽数），窗口首页
+     *   落在哪个槽由页号决定，两者只在特定位置重合 —— 命中测试只认文档坐标。
      * @param out_side 非空时写出落点的侧别（见 caretSide）。它是落点的完整身份：
      *   共享边界上"前一个字段的末尾"与"后一个字段的开头"是同一个偏移，同一个偏移上
      *   还可能压着好几枚括号，光有偏移表达不了用户点的是哪一个位置。
@@ -686,7 +697,7 @@ public:
      *   LineBox::kInlineOffsetOuter = 在所有控件之外）。它是侧别的投影，供宿主显示用；
      *   搬运落点请用 out_side —— 投影会丢掉"同处好几枚括号"的细节。
      */
-    bool hitTestPt(float x_pt_frame, float y_pt_frame, TextPos* out, int* out_owner = nullptr,
+    bool hitTestPt(float x_pt_win, float y_pt_win, TextPos* out, int* out_owner = nullptr,
                    int* out_side = nullptr) const;
 
     const uint8_t* frame() const { return bitmap_.data(); }
@@ -1063,6 +1074,15 @@ private:
      */
     void lineBand(int k, float* lo, float* hi) const;
     /**
+     * 第 @p page 页在帧内的首行偏移（行）。
+     *
+     * 一维布局下就是 (页号 - 底图首页) x 步距。页在帧里的位置只有这一个算法 ——
+     *   原先同一个算式散在七处（页矩形、画入底图、只重贴一条带、表单括号、焦点小点、
+     *   光标矩形、控件矩形），改布局时漏掉任何一处都只表现为"某一层偏几页"，而其余全对。
+     * 帧改造（按页号分槽，见 out/_design_slotframe.md）只需要换这一个函数的实现。
+     */
+    int frameOffsetOfPage(int page) const;
+    /**
      * 第 @p page 页上的行下标范围（闭区间，[lo, hi]）；这一页没有行时 hi < lo。
      */
     void linesOnPage(int page, int* lo, int* hi) const;
@@ -1341,6 +1361,25 @@ private:
      * 底图当前显示的范围与有效性
      */
     int base_first_page_ = 0;
+    /**
+     * 帧槽数（页号取模的模数），0 = 还没被设过。
+     *   它一变，所有页的槽号都跟着变，所以帧里的内容整体作废（见 setFrameSlots）。
+     */
+    int frame_slot_count_ = 0;
+    /**
+     * 槽 -> 该槽当前画着哪一页（-1 = 未知）。它是"要不要重画"的第二个判据：
+     *   页指纹只说明"这一页的内容变了"，而窗口平移/换缩放会让某个槽里装的换成别的页 ——
+     *   那件事页指纹看不见，必须由这张表回答。
+     */
+    std::vector<int> slot_page_;
+    /**
+     * 页号 -> 槽号。取模处理负页号，所以先加一轮再取。
+     */
+    int slotOfPage(int page) const {
+        const int n = frame_slot_count_;
+        if (n <= 0) return 0;
+        return ((page % n) + n) % n;
+    }
     int base_page_count_ = 0;
     bool base_valid_ = false;
 

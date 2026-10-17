@@ -273,6 +273,34 @@ void EditorEngine::glyphRangeOnPage(int page, int* begin, int* end) const {
     *end = static_cast<int>(e - gs.begin());
 }
 
+/**
+ * 第 page 页在帧内的首行偏移。
+ *
+ * 唯一的"页 -> 帧内位置"算法。原先同一个算式散在七处，改布局时漏掉一处就只表现为
+ *   某一层偏几页（例如光标对了、表单括号偏一页），而其余全对 —— 那种错最难查。
+ *
+ * 布局是"按页号分槽"：位置由页号直接决定，与窗口开在哪里无关。于是窗口平移时
+ *   重叠页的像素一行都不用搬（改前每次换窗要把底图与帧各 memmove 一遍，实测 11 ms）。
+ * 前提是"任意连续 count 页的槽号互不相同"，它由"槽数 >= 窗口页数"保证；调用方
+ *   （presentInternal）会夹住这一条。
+ */
+int EditorEngine::frameOffsetOfPage(int page) const {
+    const int step = pagePxHeight() + pageGapPx();
+    // 槽数还没被设过（宿主没接这条门面，例如 native 单测与审计）：
+    //   退回"帧就是这一窗的条带"，即改动前的算法。那时帧里第 0 行就是窗口首页。
+    if (frame_slot_count_ <= 0) return (page - base_first_page_) * step;
+    return slotOfPage(page) * step;
+}
+
+void EditorEngine::setFrameSlots(int n) {
+    if (n <= 0 || n == frame_slot_count_) return;
+    frame_slot_count_ = n;
+    // 槽数是取模的模数：一变，所有页的槽号全都变，帧里的内容整体作废。
+    //   下一次呈现会走"底图全建"那一支，把新布局重新画一遍。
+    base_valid_ = false;
+    slot_page_.assign(static_cast<size_t>(n), -1);
+}
+
 void EditorEngine::relayout() {
     const auto t0 = Clock::now();
 

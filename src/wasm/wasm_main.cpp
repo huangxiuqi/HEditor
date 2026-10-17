@@ -394,6 +394,12 @@ void setViewportAnchor(int first_page, int page_count) {
 }
 
 int windowFirstPage() { return g_engine.windowFirstPage(); }
+
+/**
+ * 帧槽数：页在帧内的行偏移 = (页号 mod 槽数) x 步距。宿主切帧用它算源行，
+ *   所以两侧必须是同一个数 —— 它由 worker 按窗口页数上限设一次，宿主读回同一个值。
+ */
+int frameSlots() { return g_engine.frameSlots(); }
 int windowPageCount() { return g_engine.windowPageCount(); }
 int pagePxWidth() { return g_engine.pagePxWidth(); }
 int pagePxHeight() { return g_engine.pagePxHeight(); }
@@ -1255,6 +1261,9 @@ EMSCRIPTEN_BINDINGS(heditor) {
 
     emscripten::function("setViewportAnchor", &setViewportAnchor);
     emscripten::function("windowFirstPage", &windowFirstPage);
+    emscripten::function("frameSlots", &frameSlots);
+    emscripten::function("setFrameSlots",
+                         +[](int n) { g_engine.setFrameSlots(n); });
     emscripten::function("windowPageCount", &windowPageCount);
     emscripten::function("pagePxWidth", &pagePxWidth);
     emscripten::function("pagePxHeight", &pagePxHeight);

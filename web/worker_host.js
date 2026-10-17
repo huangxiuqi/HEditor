@@ -121,15 +121,12 @@ const errors = [];
 //   条目里，只用来算延迟。
 const pendingState = new Map();  // 序号 -> {resolve,reject,tt,name}
 const pendingReply = new Map();  // 序号 -> {resolve,reject,name}
-// 槽数。与引擎的 kWindowMaxPages 同值（那边也在 worker 里各声明一份）。
-//   取固定值的原因见 engine_worker 的 kSlotCount：槽号 = 页号模槽数，槽数一变，
-//   所有页的槽号跟着变，而且两侧会有一个消息往返的不同步窗口 —— 那一帧里页会落到错的槽上。
-const kSlotCount = 8;
-// 槽数下限是 8，上限跟着"视口装得下几页"走。为什么不能就钉死在 8：引擎的窗口页数
-//   是 max(视口页数, min(8, ...))，视口比 8 页还高时它会超过 8 —— 那时固定 8 槽
-//   会让两页落进同一个槽。它与 worker 侧从同一份几何现推，所以两边一致。
+// 槽数不在这里定：它等于窗口页数上限，由 worker 随几何报来（geom.maxWindowPages），
+//   宿主再把自己实际建了几个报回去（pageCanvas.slots）。两侧必须同一个数 ——
+//   各算一次就会分叉（视口从很高变矮时，一边只增不减、一边回落到下限，槽号整体错位）。
 const slotOf = (p, n) => ((p % n) + n) % n;
-// 槽号 -> canvas 元素。只增不减：固定八张，建满就不再建。
+// 槽号 -> canvas 元素。只增不减：建到上限就不再建（已转移的画布不能再转移第二次）。
+//   窗口页数上限变小时多出来的槽留着不用，槽号仍按实际建了几个算。
 const slotCanvases = [];
 // 页号 -> canvas 元素。每个状态按槽重建的派生映射 —— 下游一律按页号读，所以它必须存在，
 //   但它不是真源：真源是 slotCanvases 加当前窗口首页。
@@ -480,11 +477,14 @@ function acquireCanvas() {
  *   转移列表必须带上 —— 不带会抛 DataCloneError（OffscreenCanvas 不能按值克隆），
  *   那个错只在"新增槽"时才露头，页面表现是那几页一直空白。
  */
-function sendPageCanvas(slot, el, gm) {
+function sendPageCanvas(slot, el, gm, slots) {
   const off = el.transferControlToOffscreen();
   ++viewDiag.canvasMsgs;
   ++viewDiag.canvasNew;
-  post({ t: 'pageCanvas', ts: now(), slot, canvas: off, dpr: gm.dpr,
+  // slots 是本宿主实际的槽数，引擎用它当槽号模数 —— 不再自己按几何现算。
+  //   两侧各算一次的做法在"视口从很高变矮"时会分叉：宿主建的槽不回收，
+  //   引擎却会回落到下限，槽号整体错位、画布上是别的页。
+  post({ t: 'pageCanvas', ts: now(), slot, slots, canvas: off, dpr: gm.dpr,
          viewW: gm.viewW, viewH: gm.viewH }, [off]);
 }
 
@@ -505,14 +505,20 @@ function syncPageCanvases(gm) {
   const count = gm.count;
   const step = gm.pageStep;
 
-  // 槽数 = max(8, 视口装得下的页数)，与 worker 侧同一算法（见那里的 slotCountNow）。
-  const slotStep = gm.pageH + gm.gap;
-  const nSlots = Math.max(kSlotCount, slotStep > 0 ? Math.ceil(gm.viewH / slotStep) : 1);
+  // 槽数 = 窗口页数上限，由 worker 算好随几何报来（见那里的 maxWindowPages）。
+  //   不用"max(8, 视口装得下几页)"：那个下限 8 既大于窗口页数（本机窗口 5 页，白占 3 个槽），
+  //   又与引擎的口径无关 —— 引擎的帧槽将来用的是同一个上限，两边必须是同一个数。
+  //   窗口页数本来就是由这个上限截出来的，所以它一定装得下当前窗口；
+  //   仍取 max(上限, 当前页数) 作下限 —— 门面允许外部把窗口页数指到上限之外（探针会如此），
+  //   那时槽少了会让两页共用一个槽、那几页永远缺画布。
+  const nSlots = Math.max(1, (gm.maxWindowPages | 0) || 1, count);
   // 一次建齐到 nSlots：慢慢长会让"哪一页在哪个槽里"在中途改一次口径，而那正是要避免的。
-  while (slotCanvases.length < nSlots) {
-    const el = acquireCanvas();
-    slotCanvases.push(el);
-    sendPageCanvas(slotCanvases.length - 1, el, gm);
+  // 先把槽建齐、再逐个转移：转移要带"最终槽数"，边建边发会让中途那几条带的是
+  //   1、2、3…… 引擎每收到一条就得把槽表整体作废一次。
+  const firstNew = slotCanvases.length;
+  while (slotCanvases.length < nSlots) slotCanvases.push(acquireCanvas());
+  for (let k = firstNew; k < slotCanvases.length; ++k) {
+    sendPageCanvas(k, slotCanvases[k], gm, slotCanvases.length);
   }
 
   const vs = viewSize();
@@ -1279,6 +1285,8 @@ Object.defineProperties(host, {
       scrollY: mirror.geom.scrollY, dpr: mirror.geom.dpr,
       pages: [...pageCanvases.keys()].sort((a, b) => a - b),
       canvases: pageCanvases.size, pooled: slotCanvases.length - pageCanvases.size,
+      // 宿主侧实际在用的槽数（= 已建槽数，只增不减）。必须与引擎报的 geom.slots 相等。
+      slots: slotCanvases.length,
       pagePx: [mirror.geom.pageW, mirror.geom.pageH, mirror.geom.gap],
       viewSize: viewSize(),
     } : null),
@@ -1289,6 +1297,9 @@ Object.defineProperties(host, {
 
 // 帧尺寸（设备像素）。与单线程宿主一致地做成方法（见上面那段说明）。
 host.frameW = () => (mirror.geom ? mirror.geom.frameW : 0);
+// 引擎侧的帧槽数：切帧（blitPage / selfCheck / 光标定位）按它算源行。
+//   由 worker 从引擎读回、随 geom 报来 —— 宿主不自己算，两侧必须是同一个数。
+host.frameSlots = () => (mirror.geom ? (mirror.geom.frameSlots | 0) : 0);
 host.frameH = () => (mirror.geom ? mirror.geom.frameH : 0);
 
 /**

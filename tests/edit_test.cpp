@@ -425,7 +425,9 @@ int main() {
         std::printf("     敲字后写入 %.2f M 像素（全帧 %.2f M），行带 y ∈ [%d, %d] px\n",
                     static_cast<double>(wrote_px) / 1e6, static_cast<double>(framePixels) / 1e6,
                     band0, band1);
-        expectTrue(band0 == 0 && band1 == es.frame_h,
+        // 判据基准是页高，不是帧高：帧按页号分槽之后，帧高 = 槽数 x 步距
+        //   （含页间隙、而且槽数可能大于窗口页数），它不再等于一页。
+        expectTrue(band0 == 0 && band1 == e.pagePxHeight(),
                    "单行页的行带 = 整页（页首行 + 页末行，带按定义从页顶到页底）");
         long long max_ch = 0;
         const long long fresh_diff =
@@ -1801,8 +1803,11 @@ int main() {
         expectTrue(st2.repainted_w < st1.repainted_w,
                    "补救那次 present 的本轮脏矩形确实小得多 "
                    "（这就是宿主被误导的地方：拿它上屏会漏掉第一次 present）");
-        expectTrue(box.w == eg.frameWidth() && box.h == eg.frameHeight(),
-                   "但 takeBlitBox() 给出的并集必须覆盖整帧（第一次 present 的功劳）"
+        // 帧按页号分槽之后，"覆盖整帧"这句话要改成"覆盖窗口内那几页"：帧高 = 槽数 x 步距
+        //   （含没被使用的空槽），而空槽永远不会被上屏 —— 宿主是按页贴的。
+        const int win_px_h = eg.editStats().window_pages * eg.pagePxHeight();
+        expectTrue(box.w == eg.frameWidth() && box.h >= win_px_h,
+                   "但 takeBlitBox() 给出的并集必须覆盖窗口内那几页（第一次 present 的功劳）"
                    "—— 少算了，画布就会停在旧排版上：引擎帧对、屏幕是旧的");
         expectTrue(small_box.w < eg.frameWidth(),
                    "对照：隐藏相位那次 present 自己远不是整帧 —— 所以并集只能靠累加器");

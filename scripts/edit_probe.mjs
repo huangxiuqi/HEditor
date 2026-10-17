@@ -133,8 +133,14 @@ async function main() {
     chk.check('单段文档的首次排版是全量（没有前缀可复用）', st.layoutWasFull === true);
     chk.check('重画页数 = 总页数', st.repaintedPages === st.totalPages,
               `${st.repaintedPages} / ${st.totalPages}`);
-    chk.check('整页重画写入 ≥ 半帧', st.repaintedPixels > st.framePixels / 2,
-              `${st.repaintedPixels} / ${st.framePixels}`);
+    // 参照是窗口内那几页，不是整个帧：帧按页号分槽之后，帧高 = 槽数 x 步距，
+    //   而槽数可以多于窗口页数（多出来的是空槽）—— 拿 framePixels 当分母，判据会
+    //   随槽数一起松掉。
+    const pageH0 = await c.eval('return window.__heditor.pagePx[1];');
+    const winPx = st.windowPages * st.frameW * pageH0;
+    chk.check('整页重画写入 ≥ 半窗（窗口内几页，不是整个帧）',
+              st.repaintedPixels > winPx / 2,
+              `${st.repaintedPixels} / ${winPx}`);
     chk.check('初始文档与预期一致', (await c.eval(CP_LEN + 'return cplen(window.__heditor.text);'))
               === Array.from(S6).length);
   }
@@ -3571,8 +3577,15 @@ async function main() {
       await window.__heditor.run(7, ${ZOOM});
       const s = await window.__heditor.run(6, ${ZOOM});
       return s.repaintedPixels;`);
-    chk.check('参考臂：整篇重排重绘确实写了大半个帧（否则下面那条判据是恒真的）',
-              fullPix > frameArea * 0.5, `写 ${fullPix} / 帧 ${frameArea} px`);
+    // 分母是窗口内几页的像素，不是整个帧：帧按页号分槽之后帧高 = 槽数 x 步距，
+    //   槽数可以多于窗口页数（多出来的是空槽，永远不写），拿 frameArea 当分母会让这条
+    //   判据随槽数一起松掉（空槽越多越松，最后恒真）。
+    const winArea = await c.eval(`
+      const H = window.__heditor;
+      const st = H.editStats || {};
+      return (st.windowPages || 1) * H.frameW() * H.pagePx[1];`);
+    chk.check('参考臂：整篇重排重绘确实写了大半个窗口（否则下面那条判据是恒真的）',
+              fullPix > winArea * 0.5, `写 ${fullPix} / 窗口 ${winArea} px（帧 ${frameArea}）`);
     const st2 = await c.eval(
       'return await window.__heditor.setCaretStyle({ color: [0, 128, 0, 255] });');
     chk.check('★ 改样式那一拍的写入量比整篇重绘少一个量级以上（没有整窗重光栅）',

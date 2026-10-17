@@ -56,19 +56,15 @@ const slotCtx = [];
 const kSlotCount = 8;
 
 /**
- * 当前的槽数 = max(下限, 视口装得下的页数)。
+ * 槽数。槽号 = 页号 mod 槽数，所以两侧必须是同一个数。
  *
- * 为什么不能就用那个下限：引擎的窗口页数是 max(视口页数, min(8, ...))（见
- *   maxWindowPages 的 Math.max(vis, ...)），视口比 8 页还高时它会超过 8 ——
- *   那时固定 8 槽会让两页落进同一个槽，表现为那几页永远"缺画布"、且每一拍都在重贴。
- * 两侧都从同一份几何（视口高、页高、间隙）现推，所以不必额外通信，推出来的也一致。
+ * 真源在宿主：画布在它手里，"实际有几个槽"只有它知道（它建了几个就交了几个）。
+ *   它随每条 pageCanvas 消息把槽数报过来，这里照用 —— 不自己按几何现算。
+ * 旧写法是两侧各算一次（这里取 max(8, 视口页数)，宿主取 max(8, 已建槽数)），
+ *   在"视口从很高变矮"时分叉：宿主建的槽不回收，这里会回落到下限，
+ *   于是槽号整体错位、画布上装的是别的页（out/_slotsync.mjs 复现过 11 对 8）。
+ * 初值取 8 与宿主的下限一致：第一个 pageCanvas 到达之前不会有页要贴。
  */
-function slotCountNow() {
-  const step = mod.pagePxHeight() + mod.pageGapPx();
-  const vis = step > 0 ? Math.ceil(viewH / step) : 1;
-  return Math.max(kSlotCount, vis);
-}
-
 let slotN = kSlotCount;
 
 // 页号 -> 槽号。取模处理负页号，所以先加一轮再取。
@@ -87,17 +83,18 @@ const slotPage = [];
 
 // 内容整体作废（换缩放、换页度量、换文档）：所有槽都要重贴。
 function invalidateSlots() {
-  for (let s = 0; s < slotPage.length; ++s) slotPage[s] = -1;
+  slotPage.length = slotN;
+  slotPage.fill(-1);
 }
 
 /**
- * 把槽数与当前几何对一次。变了就整体作废 —— 槽数一变，所有页的槽号都跟着变。
- *   返回是否变过。凡是"要按槽取页"的地方都先调它。
+ * 把槽数换成宿主报来的值。变了就整体作废 —— 槽数一变，所有页的槽号都跟着变。
+ *   只在 pageCanvas 到达时调（那是宿主建槽的唯一时刻）。
  */
-function syncSlotCount() {
-  const n = slotCountNow();
-  if (n === slotN) return false;
-  slotN = n;
+function setSlotCount(n) {
+  const v = n | 0;
+  if (v <= 0 || v === slotN) return false;
+  slotN = v;
   invalidateSlots();
   return true;
 }
@@ -110,7 +107,6 @@ function syncSlotCount() {
  *   "画布与帧对不上"，而看代码完全看不出哪里错了。现算的成本可以忽略。
  */
 function ctxOfPage(p) {
-  syncSlotCount();
   const first = mod.windowFirstPage();
   if (p < first || p >= first + mod.windowPageCount()) return null;
   return slotCtx[slotOf(p)] || null;
@@ -186,7 +182,10 @@ function blitPage(p) {
     c.canvas.width = fw;
     c.canvas.height = ph;
   }
-  const srcY = local * step;
+  // 源行按帧槽号算（页号 mod 引擎的槽数），不是"窗口内第几页"。
+  //   槽表变了以后这就是唯一正确的算法；本地那个 local 只用来判"这一页在不在窗口里"。
+  const fs = (mod.frameSlots ? mod.frameSlots() : 0) | 0;
+  const srcY = (fs > 0 ? ((p % fs) + fs) % fs : local) * step;
   const img = new ImageData(
     new Uint8ClampedArray(fv.buffer, fv.byteOffset + srcY * fw * 4, fw * ph * 4), fw, ph);
   c.putImageData(img, 0, 0);
@@ -206,7 +205,6 @@ let blitLastMs = 0;
 let blitLastPages = 0;
 function blitPages(only) {
   const tBlit = performance.now();
-  syncSlotCount();
   const first = mod.windowFirstPage();
   const count = mod.windowPageCount();
   let n = 0;
@@ -251,6 +249,13 @@ function geom(st) {
     frameW: mod.frameWidth(),
     frameH: mod.frameHeight(),
     dpr, viewW, viewH, scrollY,
+    // 槽数的上限（与文档位置无关，只随视口与页度量变）。宿主按它建槽、再把自己实际
+    //   建了几个报回来（pageCanvas.slots）—— 一个数、一个来源，两侧不会分叉。
+    maxWindowPages: maxWindowPages(),
+    // 引擎侧的帧槽数（宿主切帧按它算源行）。它必须等于上面那个上限 —— 同一个数。
+    frameSlots: mod.frameSlots ? mod.frameSlots() : 0,
+    // 这一侧实际在用的槽数，供诊断读。它必须等于宿主报回来的那个值。
+    slots: slotN,
     pagesReady: pagesMissing() === 0,
     // 与单线程宿主的 viewport 同形的两格：锚点原文与"该装哪几页"。
     //   探针靠它们判"窗口跟着可见页走"，缺了就是一条 .first 的 TypeError。
@@ -403,7 +408,10 @@ const KEEP_ANCHOR = new Set(['viewport']);
 function render(opName) {
   let st = JSON.parse(mod.editStatsJson());
   const moved = KEEP_ANCHOR.has(opName) ? false : retarget(st);
-  if (moved || PRESENT_ALWAYS.has(opName)) {
+  // 槽数变了必须重画：帧的布局整体换了（引擎那边会把帧作废），不 present 就会拿
+  //   新槽号去取旧布局的源行 —— 每一页都贴错位置。
+  const slotsChanged = syncFrameSlots();
+  if (moved || slotsChanged || PRESENT_ALWAYS.has(opName)) {
     mod.present();
     st = JSON.parse(mod.editStatsJson());
   }
@@ -411,7 +419,7 @@ function render(opName) {
   // 窗口换了：传 null 让 blitPages 只贴"槽过期"的那几页（就是新进窗口的页）。
   //   内容整体作废（换缩放/换页度量/换文档）不在这里判 —— paintFull 已经把槽表全置空，
   //   于是这一趟无论传什么都会整窗重贴。
-  blitPages(moved ? null : JSON.parse(mod.dirtyPagesJson()));
+  blitPages(moved || slotsChanged ? null : JSON.parse(mod.dirtyPagesJson()));
   return st;
 }
 
@@ -497,6 +505,27 @@ function push(ts, opName, changed) { sendState(ts, opName, render(opName), chang
  *   于是在全量之外再 present 一次 —— 后一次只重画一个光标，首次全量那笔账
  *   （探针的分母）就被冲掉了。
  */
+/**
+ * 把"帧槽数"报给引擎。它等于窗口页数上限，与画布槽数是同一个数（同一个来源）。
+ *
+ * 引擎侧的帧按"页号 mod 槽数"布局，槽数一变所有页的位置都变 ⇒ 引擎会把帧整体作废、
+ *   下一趟整窗重画。所以这里返回"是否变过"，调用方据此强制一次 present ——
+ *   否则帧还是旧布局，而贴图已经按新槽号取源行，结果是每一页都贴错位置。
+ *
+ * 它与画布槽数可以不等，这是有意的：画布槽建了就不回收（已转移的画布不能再转移
+ *   第二次，缩回去再涨就得新建加首画），所以那个数是"历史最大"；而帧槽只是内存，
+ *   跟着窗口页数上限走就行。blitPage 用两个槽号分别取"源行"与"目标画布"，各自自洽。
+ */
+let frameSlotsSent = 0;
+function syncFrameSlots() {
+  if (!mod || typeof mod.setFrameSlots !== 'function') return false;
+  const n = maxWindowPages();
+  if (n <= 0 || n === frameSlotsSent) return false;
+  frameSlotsSent = n;
+  mod.setFrameSlots(n);
+  return true;
+}
+
 function paintFull() {
   // 换文档、换缩放、换页度量、重设窗口锚点：页像素尺寸或页面内容整体变了，
   //   每个槽里装的都可能是上一份的像素，所以槽表整体作废、这一趟整窗重贴。
@@ -513,6 +542,8 @@ function paintFull() {
   //   事件、再发一条视口消息回来 —— 与正在滚动的用户（或外部脚本）来回打架，
   //   窗口跟着反复变、画布反复建与丢。实测症状：跨页滚动后某一页始终没有画布。
   scrollReset = true;
+  // 槽数要在重排重画之前报过去：帧的布局由它决定，报晚了这一趟就按旧槽号画。
+  syncFrameSlots();
   const n = maxWindowPages();
   mod.setViewportAnchor(0, n);
   lastAnchor = '0:' + n;
@@ -809,7 +840,11 @@ const READ = {
       if (c.canvas.width !== fw || c.canvas.height !== ph) { ++sizeBad; continue; }
       ++comparedPages;
       const D = c.getImageData(0, 0, fw, ph).data;
-      const local = p - first;
+      // 帧里的偏移按帧槽号算（引擎的槽数），不是"窗口内第几页"。
+      //   这两套槽号可以不等（画布槽只增、帧槽跟着窗口页数上限走），所以这里必须
+      //   与 blitPage 用同一个来源 —— 用画布槽号会把整段比错位置（实测差 17%）。
+      const fs = (mod.frameSlots ? mod.frameSlots() : 0) | 0;
+      const local = (fs > 0 ? ((p % fs) + fs) % fs : p - first);
       const base = local * step * fw * 4;
       for (let i = 0; i + 3 < D.length; i += 4) {
         const j = base + i;
@@ -927,6 +962,8 @@ async function handle(m) {
       //   槽只建一次，之后换窗只会再收到新的槽，不会重复收到同一个槽。
       const c = m.canvas.getContext('2d', { alpha: false });
       if (!c) throw new Error('OffscreenCanvas 拿不到 2d 上下文');
+      // 槽数由宿主说了算：它建了几个槽、就把几条画布交过来，槽号也由它定。
+      if (setSlotCount(m.slots)) slotCtx.length = Math.max(slotCtx.length, slotN);
       slotCtx[m.slot | 0] = c;
       // 新来的槽内容未知，先作废，再让 blitPages 把该在它上面的那一页贴上去。
       //   刚启动时八个槽陆续到达，每来一个都会把已到齐的那几页补一遍，自然收敛。
@@ -949,6 +986,9 @@ async function handle(m) {
       if (!retarget(JSON.parse(mod.editStatsJson()))) {
         return void post({ t: 'ack', ts: m.ts, workMs: performance.now() - tWork });
       }
+      // 滚动这一路也会遇到视口变化（窗口被拉高/拉矮），所以槽数同样要在画之前报过去。
+      //   这里本来就整窗重贴，槽数变过时正是它需要的。
+      syncFrameSlots();
       mod.present();
       blitPages(null);
       schedulePrewarm(scrollY - prevScrollY);
