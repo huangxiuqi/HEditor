@@ -474,11 +474,11 @@ public:
     bool redo();
     bool undoAndRender();
     bool redoAndRender();     /**
-     * 窗口坐标（磅）落在哪个控件上（取最内层）。-1 = 没有。
+     * 文档坐标（磅）落在哪个控件上（取最内层）。-1 = 没有。
      * 它走的是 hitTestPt 的同一份几何，所以"视觉上在框里"与
      * "逻辑上在控件里"永远一致。
      */
-    int controlAtPt(float x_pt_win, float y_pt_win) const;
+    int controlAtPt(float x_pt_doc, float y_pt_doc) const;
 
     /**
      * 页面坐标下的一个矩形（页号 + 页面坐标磅矩形）。
@@ -686,10 +686,10 @@ public:
      */
     bool caretRectPt(Rect* out) const;
     /**
-     * 反查：窗口坐标（磅）→ (段, 偏移) + 侧别。点落在页间空隙时返回 false。
+     * 反查：文档坐标（磅）→ (段, 偏移) + 侧别。点落在页间空隙时返回 false。
      *
-     * 窗口坐标是"相对窗口首页顶边的偏移"：帧按槽号装页（页号 mod 槽数），窗口首页
-     *   落在哪个槽由页号决定，两者只在特定位置重合 —— 命中测试只认文档坐标。
+     * 文档坐标就是页容器里的位置：第 0 页顶边为原点。命中测试与帧怎么摆无关 ——
+     *   帧按槽号装页（页号 mod 槽数），拿窗口坐标或槽号来反查都会整体错位。
      * @param out_side 非空时写出落点的侧别（见 caretSide）。它是落点的完整身份：
      *   共享边界上"前一个字段的末尾"与"后一个字段的开头"是同一个偏移，同一个偏移上
      *   还可能压着好几枚括号，光有偏移表达不了用户点的是哪一个位置。
@@ -697,7 +697,7 @@ public:
      *   LineBox::kInlineOffsetOuter = 在所有控件之外）。它是侧别的投影，供宿主显示用；
      *   搬运落点请用 out_side —— 投影会丢掉"同处好几枚括号"的细节。
      */
-    bool hitTestPt(float x_pt_win, float y_pt_win, TextPos* out, int* out_owner = nullptr,
+    bool hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* out_owner = nullptr,
                    int* out_side = nullptr) const;
 
     const uint8_t* frame() const { return bitmap_.data(); }

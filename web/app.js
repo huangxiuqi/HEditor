@@ -207,7 +207,7 @@ const pageCanvases = new Map();  // 绝对页号 -> { el, g }
 /**
  * 帧画布的兼容代理（只给探针与 __heditor.canvas 用，宿主自己一律走页画布）。
  *
- * 探针的契约是"帧坐标"：取 rect、按帧宽高换算、往它上面派 mousedown。帧现在被切成
+ * 探针的契约是"文档坐标"：取 rect、按帧宽高换算、往它上面派 mousedown。帧现在被切成
  * 每页一张画布，于是这里按"窗口帧在屏幕上占的那块区域"给出几何，事件转发给真正
  * 接鼠标的页容器 —— 探针因此不必区分一张还是多张，判据口径也没变。
  */
@@ -1433,11 +1433,11 @@ function onCompositionEnd(ev) {
 }
 
 /**
- * 把一次的客户端坐标换算成"窗口帧坐标（帧像素）"。
+ * 把一次的客户端坐标换算成"文档坐标（帧像素）"。
  *
  * 事件可能落在任意一张页画布上，所以基准取页容器：页容器里 1 CSS 像素 = dpr 帧像素，
- * 而它的顶边就是文档第 0 页的顶边 —— 于是"页内位置"直接就是文档坐标，再减去窗口
- * 首页的偏移就是帧坐标。这样点第几页都一样，不需要知道点的是哪张画布。
+ * 而它的顶边就是文档第 0 页的顶边 —— 于是量到的位置直接就是文档坐标。这样点第几页
+ * 都一样，不需要知道点的是哪张画布，也不需要知道窗口开在哪里（命中测试收的就是这个口径）。
  *
  * 收客户端坐标而不是事件对象：拖选的边缘自动滚动要把指针夹到容器边缘再换算，
  *   那时手上没有事件。事件入口 framePointFromEvent 只是它的一层壳。
@@ -1445,10 +1445,9 @@ function onCompositionEnd(ev) {
 function framePointAt(clientX, clientY) {
   const r = pagesEl.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
-  const step = mod.pagePxHeight() + mod.pageGapPx();
   return {
     x: (clientX - r.left) * dpr,
-    y: (clientY - r.top) * dpr - mod.windowFirstPage() * step,
+    y: (clientY - r.top) * dpr,
   };
 }
 
@@ -1484,7 +1483,7 @@ function onCanvasMouseDown(ev) {
     lastPointerId = null;
   }
   const pt = framePointFromEvent(ev);
-  // hitTest 收的是帧磅坐标，而页容器上量到的是帧像素 —— 除以 zoom 换算。
+  // hitTest 收的是文档磅坐标，而页容器上量到的是帧像素 —— 除以 zoom 换算。
   const hit = mod.hitTest(pt.x / currentZoom, pt.y / currentZoom);
   let onText = false;
   if (hit !== 'null') {
@@ -2051,21 +2050,21 @@ const facade = {
     return this.caret;
   },
   // 点画布的真实入口（与页容器上那个 mousedown 处理同一套坐标换算），供探针复现用户手势。
-  //   收的是窗口帧像素；帧坐标 → 文档坐标 → 屏幕坐标，反向走一遍 framePointFromEvent。
+  //   收的是文档帧像素（第 0 页顶边为原点）；反向走一遍 framePointFromEvent 换成屏幕坐标。
   clickAt(xPx, yPx) {
     if (!ready) return null;
     const r = pagesEl.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
-    const step = mod.pagePxHeight() + mod.pageGapPx();
     pagesEl.dispatchEvent(new MouseEvent('mousedown', {
       clientX: r.left + xPx / dpr,
-      clientY: r.top + (yPx + mod.windowFirstPage() * step) / dpr,
+      clientY: r.top + yPx / dpr,
       bubbles: true, cancelable: true,
     }));
     return this.caret;
   },
   // 只改位置不呈现 —— 仅用于需要把"改位置"和"呈现"分账的对照实验
   setCaretOnly(para, offset) { mod.setCaret(para, offset); return this.caret; },
+  // 直接问引擎的命中测试（文档磅坐标）。与 clickAt 的区别是它不落光标、不做任何换算。
   hit(xPt, yPt) { return JSON.parse(mod.hitTest(xPt, yPt)); },
   bench(runs) { return JSON.parse(mod.benchRelayoutPaint(runs || 12)); },
 

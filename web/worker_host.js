@@ -885,10 +885,11 @@ function onPointerDown(ev) {
   // 点击也要立刻按住光标可见：命中测试是一次往返，等它回来再归相位会晚一拍。
   blinkHold();
   const rect = el.getBoundingClientRect();
-  // 帧窗口坐标（设备像素）：x 从页左缘量，y 从窗口首页顶量 —— 与单线程宿主的
-  //   framePointFromEvent 同一口径，命中测试收的就是这个坐标系。
+  // 文档坐标（设备像素）：x 从页左缘量，y 从文档第 0 页顶量（= 页内 y 加上页号 × 步距）
+  //   —— 与单线程宿主的 framePointFromEvent 同一口径，命中测试收的就是这个坐标系。
+  //   与窗口无关：这一页在窗口里排第几不影响它落在文档的哪里。
   const xDev = (ev.clientX - rect.left) * dprNow();
-  const yDev = (ev.clientY - rect.top) * dprNow() + (page - gm.first) * gm.pageStep;
+  const yDev = (ev.clientY - rect.top) * dprNow() + page * gm.pageStep;
   // 命中一次往返，结果有两个去处：定位，以及"这一下要不要起拖选"。
   //   落在正文之外时不起手 —— 从页外的空白拖起不该选中任何东西。定位由 placeAt 做，
   //   与点击路径共用同一段，免得"拖选能不能起手"和"点击落哪"两处各判一次。
@@ -1108,9 +1109,8 @@ Object.defineProperty(host, 'allText', {
 /**
  * 命中并定位（内部共用）。返回命中结果本身，没命中给 null。
  *
- * 坐标口径：xDev / yDev 是帧窗口坐标（设备像素）—— x 从页左缘量，y 从窗口首页顶量。
- *   命中测试收的就是这个坐标系，所以这里只把设备像素折成磅（除以 zoom），
- *   不做窗口与文档之间的换算。
+ * 坐标口径：xDev / yDev 是文档坐标（设备像素）—— x 从页左缘量，y 从文档第 0 页顶量。
+ *   命中测试收的就是这个坐标系，所以这里只把设备像素折成磅（除以 zoom），不做别的换算。
  *
  * 与 clickAt 分开的理由：按下这一下有两个用处（定位、以及"要不要起拖选"），
  *   而 clickAt 的返回值是光标（门面契约，与单线程宿主逐字对齐），塞不下第二个结论。
@@ -1126,7 +1126,7 @@ async function placeAt(xDev, yDev) {
 /**
  * 命中并把光标落过去 —— 与单线程宿主走同一条路（hitTest 给归属与侧别）。
  *
- * 换算在调用方（onPointerDown 从页元素的 rect 算），这里收的是帧坐标。
+ * 换算在调用方（onPointerDown 从页元素的 rect 算），这里收的是文档坐标。
  */
 host.clickAt = async function clickAt(xPx, yPx) {
   const hit = await placeAt(xPx, yPx);
@@ -1134,19 +1134,19 @@ host.clickAt = async function clickAt(xPx, yPx) {
 };
 
 /**
- * 客户端坐标 -> 窗口帧坐标（设备像素）。
+ * 客户端坐标 -> 文档坐标（设备像素）。
  *
  * 与单线程宿主的 framePointAt 同一口径，只是基准换成滚动容器：页在滚动内容里是绝对
  *   定位（top = 页号 × 步距），所以"某点的文档偏移" = 容器内偏移 + 滚动量。这样换算
  *   不依赖"点在哪一张页画布上" —— 拖选要按夹到容器边缘的点重新命中，那时没有目标元素。
+ *   也不依赖窗口开在哪里：命中测试收的就是文档坐标（帧怎么摆是渲染的私事）。
  */
 function framePointAt(clientX, clientY) {
-  const gm = mirror.geom;
-  if (!gm) return null;
+  if (!mirror.geom) return null;
   const r = stageEl.getBoundingClientRect();
   return {
     x: (clientX - r.left) * dprNow() - lastPageX,
-    y: (clientY - r.top) * dprNow() + stageEl.scrollTop * dprNow() - gm.first * gm.pageStep,
+    y: (clientY - r.top) * dprNow() + stageEl.scrollTop * dprNow(),
   };
 }
 

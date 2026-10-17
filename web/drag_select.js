@@ -5,7 +5,7 @@
 // "单线程能选、Worker 上选不动"这类只在一边复现的偏差。
 //
 // 宿主注入三件事（按下时的定位由宿主自己做，模块只管"按下之后"），模块不碰引擎门面：
-//   pointAt(cx, cy)   客户端坐标 -> 窗口帧设备像素
+//   pointAt(cx, cy)   客户端坐标 -> 文档设备像素
 //   hitAt(x, y)       命中：返回 {para, offset, side}；同步值或 Promise 都收
 //   extendTo(hit)     移动时的焦点端搬运（只动 focus）
 // 另加一个滚动容器（container），边缘自动滚动用它。
@@ -44,7 +44,7 @@
 
     let st = null;          // 活动状态；null = 没在拖
     let raf = 0;            // 边缘自动滚动的帧句柄
-    let pending = null;     // 最近一个待处理的帧坐标（合并用）
+    let pending = null;     // 最近一个待处理的文档坐标（合并用）
     let inFlight = false;   // 有一次命中还没回来
     let waiters = [];       // settled() 的等待者
 

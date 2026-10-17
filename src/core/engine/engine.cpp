@@ -2094,9 +2094,9 @@ void EditorEngine::setEditMode(EditMode m) {
     frame_needs_full_refresh_ = true;
 }
 
-int EditorEngine::controlAtPt(float x_pt_win, float y_pt_win) const {
+int EditorEngine::controlAtPt(float x_pt_doc, float y_pt_doc) const {
     TextPos p{};
-    if (!hitTestPt(x_pt_win, y_pt_win, &p)) return -1;
+    if (!hitTestPt(x_pt_doc, y_pt_doc, &p)) return -1;
     // include_end = false：点在内容上才算"点进了这个控件"。
     // 点在字段末尾之后一位、视觉上已经在框外，就不该算。
     return controls_.innermostAt(p, /*include_end=*/false);
@@ -2539,12 +2539,11 @@ bool EditorEngine::setSelectionAndRender(Range r) {
 /**
  * 命中测试：几何的反向半边 —— 由落点反查 (段, 偏移) + 侧别 + 归属控件。
  *
- * 收的是窗口坐标（相对窗口首页顶边的磅偏移）：宿主按这个口径换算，与帧里的像素
- *   怎么摆无关。帧按槽号装页（页号 mod 槽数），窗口首页落在哪个槽由页号决定，
- *   所以拿槽号去反查页归属会整体错位 —— 这里只把窗口坐标折回文档坐标。
+ * 收的是文档坐标：命中测试问的是"文档里的哪个位置"，与帧怎么摆无关。帧按槽号装页
+ *   （页号 mod 槽数），拿窗口坐标或槽号去反查都会让页归属整体错位。
  */
 
-bool EditorEngine::hitTestPt(float x_pt_win, float y_pt_win, TextPos* out, int* out_owner,
+bool EditorEngine::hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* out_owner,
                              int* out_side) const {
     if (out_owner) *out_owner = -1;
     if (out_side) *out_side = 0;
@@ -2555,15 +2554,14 @@ bool EditorEngine::hitTestPt(float x_pt_win, float y_pt_win, TextPos* out, int* 
     const float stride = page_h + cfg_.page_gap_pt;
 
     int page = 0;
-    float local_y = y_pt_win;
+    float local_y = y_pt_doc;
     if (stride > 0.0f) {
-        // 折回文档坐标再按页高反查页号：命中测试问的是"文档里的哪个位置"。
-        const float doc_y = y_pt_win + static_cast<float>(base_first_page_) * stride;
-        page = std::max(0, static_cast<int>(std::floor(doc_y / stride)));
-        local_y = doc_y - static_cast<float>(page) * stride;
+        // 页号由文档坐标直接给出，页内 y 是它对步距取余。
+        page = std::max(0, static_cast<int>(std::floor(y_pt_doc / stride)));
+        local_y = y_pt_doc - static_cast<float>(page) * stride;
         // 落在页间空隙里，或者横向出了页外 —— 没有"这一页的哪一行"可言
         if (local_y < 0.0f || local_y > page_h) return false;
-        if (x_pt_win < 0.0f || x_pt_win > page_w) return false;
+        if (x_pt_doc < 0.0f || x_pt_doc > page_w) return false;
     }
 
     // 块轴：找同一页里最近的一行。
@@ -2571,7 +2569,7 @@ bool EditorEngine::hitTestPt(float x_pt_win, float y_pt_win, TextPos* out, int* 
     float best_d = 1e30f;
     for (const LineBox& lb : layout_.lines) {
         if (lb.page != page) continue;
-        const float bp = lb.vertical ? x_pt_win : local_y;
+        const float bp = lb.vertical ? x_pt_doc : local_y;
         const float d = (bp < lb.block_lo_pt) ? (lb.block_lo_pt - bp)
                                               : (bp > lb.block_hi_pt ? bp - lb.block_hi_pt : 0.0f);
         if (d < best_d) {
@@ -2582,7 +2580,7 @@ bool EditorEngine::hitTestPt(float x_pt_win, float y_pt_win, TextPos* out, int* 
     if (!best) return false;
 
     // 行内轴：找最近的插入点。势力范围与簇边界的口径在 hitTestInLine 里（上下键也走它）。
-    const float ip = best->vertical ? local_y : x_pt_win;
+    const float ip = best->vertical ? local_y : x_pt_doc;
     uint32_t cp = 0;
     int side = 0;
     hitTestInLine(*best, ip, &cp, &side);
