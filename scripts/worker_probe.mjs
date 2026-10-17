@@ -1,17 +1,17 @@
 // Worker 宿主的验收探针（可证伪判据 + 实测数字）。
 //
-// 与 scripts/edit_probe.mjs 的分工：那一份验的是**单线程宿主**，这一份验的是
-//   **引擎跑在 Worker 里**那个宿主。两份的断言口径尽量对齐（同样的墨迹判据、
+// 与 scripts/edit_probe.mjs 的分工：那一份验的是单线程宿主，这一份验的是
+//   引擎跑在 Worker 里那个宿主。两份的断言口径尽量对齐（同样的墨迹判据、
 //   同样的括号左缘判据），因为它们要能互相印证。
 //
 // 这一份特别要钉住的几件事：
-//   ① 帧真的没有跨线程搬 —— 主线程那个 canvas 已经是占位画布，getContext 必须拿不到；
-//   ② 交互路径真的可以零 await —— 命令发出去就不管，状态由推送回来；
-//   ③ 新增的"把帧切片贴到画布"那段代码是对的 —— selfCheck 逐像素比画布与帧；
-//   ④ 三类通道各自的代价 —— 按键端到端、查询往返、长文档装载。
+//   一是帧真的没有跨线程搬 —— 主线程那个 canvas 已经是占位画布，getContext 必须拿不到；
+//   二是交互路径真的可以零 await —— 命令发出去就不管，状态由推送回来；
+//   三是"把帧切片贴到画布"那段代码是对的 —— selfCheck 逐像素比画布与帧；
+//   四是三类通道各自的代价 —— 按键端到端、查询往返、长文档装载。
 //
 // 两条写法上的硬约束（都栽过）：
-//   求值体是 (function(){ ... })()，**不是 async** —— 表达式里不能出现顶层 await；
+//   求值体是 (function(){ ... })()，不是 async —— 表达式里不能出现顶层 await；
 //   单行的直接 return 那个 Promise（awaitPromise 会等），多行的包一层 async IIFE。
 //
 // 跑法：
@@ -71,7 +71,7 @@ async function main() {
   await c.send('Runtime.enable');
   await c.disableHttpCache();
   await c.send('Page.navigate', { url: URL_ });
-  // 等首帧 + 页画布齐：ready 是**故意提前报**的（装载里抛异常时"永远等不到 ready"
+  // 等首帧 + 页画布齐：ready 是故意提前报的（装载里抛异常时"永远等不到 ready"
   //   会变成静默挂起）；而画布是引擎报出窗口之后宿主才建的，得等每一页都交过去。
   await c.waitFor(
     'return !!(window.__wheditor && window.__wheditor.stats &&' +
@@ -92,8 +92,8 @@ async function main() {
     '         aliased: window.__heditor === window.__wheditor };');
   chk.check('引擎在 Worker 里起来了', !!info, `boot ${info.bootMs.toFixed(0)} ms`);
   chk.check('帧共享 wasm 线性内存（零拷贝）', info.zeroCopyFrame === true, j(info.zeroCopyFrame));
-  // 已转移控制权的画布在主线程 getContext 会**抛**（不是返回 null）—— 这是"像素确实
-  //   不归主线程管"最硬的一条结构性判据：不是我们不去读，而是读不到。
+  // 已转移控制权的画布在主线程 getContext 会抛（不是返回 null）—— 这是"像素确实
+  //   不归主线程管"最硬的一条结构性判据：不是宿主不去读，而是读不到。
   chk.check('页画布一页一张，且每一张都已交出去（getContext 直接抛）',
             struct.allTransferred === true && struct.els === struct.pages.length,
             `${struct.els} 张 / 页 ${j(struct.pages)} / ${struct.why}`);
@@ -147,8 +147,8 @@ async function main() {
   // 每一步都先把光标摆到明确位置再动 —— 上一步操作会带着光标走，靠"上一步留下的
   //   位置"推下一步的语义，最容易把判据写成"操作没生效"。
   //
-  // 合并的语义要按引擎的守卫来写：mergeWithNextParagraph 要求**光标在段尾**
-  //   （engine.cpp 里 `snapToCluster(p.offset) != len` 就返回 false），mergeWithPrevious
+  // 合并的语义要按引擎的守卫来写：mergeWithNextParagraph 要求光标在段尾
+  //   （engine.cpp 里 snapToCluster(p.offset) != len 就返回 false），mergeWithPrevious
   //   要求光标在段首。它们是 backspace/deleteForward 在段落边界处委托的原语，
   //   所以边界外的位置本来就不该动 —— 这一点先单独钉一条，省得后面把"没动"当成 bug。
   const s6 = await c.eval(body(
@@ -314,9 +314,9 @@ async function main() {
 
   chk.section('[W10] 一窗多页 + 换窗：每页一张画布，换窗时页集合跟着换');
   // 这一条要的是"窗口里同时有好几页"（浏览器窗口开得比一页高），因为两件事只有在这种
-  //   窗口下才验得到：① 每页都有自己的画布、各自与帧对应段逐像素相等；
-  //   ② 换窗时旧页的画布要**丢掉并新建** —— 这就是刚才踩的坑（复用已转移的 canvas
-  //   会抛 InvalidStateError，transferControlToOffscreen 是一次性的）。
+  //   窗口下才验得到：一是每页都有自己的画布、各自与帧对应段逐像素相等；
+  //   二是换窗时旧页的画布要丢掉并新建 —— 复用已转移的 canvas 会抛
+  //   InvalidStateError，transferControlToOffscreen 是一次性的）。
   // 用缩小让一页变矮，窗口里自然就装下好几页 —— 比去斗浏览器窗口尺寸可靠得多。
   const multi = await c.eval(body(
     'const h = window.__wheditor;' +
@@ -353,7 +353,7 @@ async function main() {
             multi.errs.length === 0, j(multi.errs));
 
   chk.section('[W11] 滚动的代价（一页一张画布换来的就是这一段）');
-  // 一页一张画布 → 画布在文档流里 → **滚动是浏览器搬像素**，引擎一次都不跑。
+  // 一页一张画布 → 画布在文档流里 → 滚动是浏览器搬像素，引擎一次都不跑。
   //   所以两段必须分开量：窗口没变的那一半应当接近"只有一次消息往返"，
   //   窗口变了的那一半才要整帧重光栅（一页约 13 ms）。混在一起只有一个平均数，
   //   看不出"贵在哪"，也就没法判断这个方案到底赢没赢。
@@ -381,7 +381,7 @@ async function main() {
     '  if (h.geom.first !== prev) ++changes;' +
     '  prev = h.geom.first;' +
     '}' +
-    // ★ 换窗之后要等"新页的画布到了"再做逐像素比对。这不是掩盖问题，而是这一套设计的
+    // 换窗之后要等"新页的画布到了"再做逐像素比对。这不是掩盖问题，而是这一套设计的
     //   固有节奏：窗口由引擎改，画布由主线程建并把所有权交过来 —— 中间隔着一趟往返，
     //   那段窗口期里新页本来就没有画布（geom.pagesReady 就是为此存在的信号）。
     //   不等的话量到的是"比了 0 px、缺页 1"，看着像画布贴错了。
@@ -393,7 +393,7 @@ async function main() {
   chk.check('同一页内来回滚动不换窗口（滞回在起作用）',
             scroll.firstBefore === scroll.firstAfter,
             `窗口首 ${scroll.firstBefore} -> ${scroll.firstAfter}`);
-  // 断言取**中位**：窗口没变时这一拍只是"一条消息 + 一次会话"，量级应在 1 ms 上下；
+  // 断言取中位：窗口没变时这一拍只是"一条消息 + 一次会话"，量级应在 1 ms 上下；
   //   单个样本偶发 4 ms 级抖动（GC）不该把结论说成"这一拍很贵"。最坏值照样打出来。
   const medIn = [...scroll.inWin].sort((a, b) => a - b)[scroll.inWin.length >> 1];
   chk.check(`同一页内滚动中位 ${medIn.toFixed(2)} ms（最坏 ${Math.max(...scroll.inWin).toFixed(2)} ms）`,
@@ -413,7 +413,7 @@ async function main() {
 
   chk.section('[W13] 真实输入事件：点击落光标、焦点不被抢走、移动即重置闪烁');
   // 这一节的入口是真实事件，不是门面调用 —— 门面调用会绕过 keydown / mousedown
-  //   这两个入口本身，而用户报的问题恰好就出在入口上。
+  //   这两个入口本身，而真实环境里出问题的地方恰好就是入口。
   await c.eval('return window.__wheditor.run(6, 1.5);');   // 换回可编辑单页文档
   await c.waitFor('return !!(window.__wheditor.geom && window.__wheditor.geom.pagesReady)',
                   'page canvases after reset');
@@ -435,7 +435,7 @@ async function main() {
   const focus = await c.eval(
     'const a = document.activeElement;' +
     'return { id: a ? a.id : null, isTa: a === window.__wheditor.textarea };');
-  // ★ 这一条是"点击之后键盘整个失灵"的解：canvas 不可聚焦，Chrome 在 mousedown 的
+  // 这一条是"点击之后键盘整个失灵"的解：canvas 不可聚焦，Chrome 在 mousedown 的
   //   默认行为里会把 activeElement 打回 body，此后 keydown 到不了宿主。
   //   必须在指针处理里显式 ta.focus()（单线程宿主也一样）。
   chk.check('点击之后焦点仍在输入层上（否则键盘会整个失灵）',

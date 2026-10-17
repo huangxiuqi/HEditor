@@ -1,12 +1,12 @@
 // 主线程侧：只做四件事，不碰像素，也不做排版。
 //
 //   一、按页摆 canvas 并把每张的所有权交给 Worker（帧从此不跨线程搬，一页一张）；
-//   二、把键盘 / 输入法 / 滚动事件发过去，**不等回话** —— 交互路径因此零 await；
+//   二、把键盘 / 输入法 / 滚动事件发过去，不等回话 —— 交互路径因此零 await；
 //   三、接收 Worker 推回来的镜像（统计、光标矩形、页面几何、控件清单），用它摆输入法
 //       候选窗、光标闪烁与滚动条，并让门面里那批"读"保持同步形态；
-//   四、把命令与查询暴露成与单线程宿主**同名**的方法；命令返回 Promise 但不等它也行。
+//   四、把命令与查询暴露成与单线程宿主同名的方法；命令返回 Promise 但不等它也行。
 //
-// ★ 为什么是一页一张：画布摆在滚动容器里各自的页位置上，所以**滚动由浏览器合成器搬像素**，
+// 为什么是一页一张：画布摆在滚动容器里各自的页位置上，所以滚动由浏览器合成器搬像素，
 //   引擎一次都不跑；编辑时 Worker 只重贴引擎报过的脏页，不是整窗重贴。
 //   （一张和视口一样大、粘在顶上的画布也能跑，但每次滚动都要过一次边框 —— 实测 2~10 ms。）
 //
@@ -64,7 +64,7 @@ const statEl = chrome ? $('stats') : null;
 const barEl = chrome ? $('bar') : null;
 const statusEl = chrome ? $('status') : null;
 
-/** 状态栏（与单线程宿主同形）：组合期间在这里本地预览预编辑串。 */
+// 状态栏（与单线程宿主同形）：组合期间在这里本地预览预编辑串。
 function setStatus(text) {
   if (statusEl) statusEl.textContent = text;
 }
@@ -114,9 +114,9 @@ let dead = false;
 let disposed = false;
 
 const errors = [];
-// ★ 挂起表用**自增序号**做键，不能用 performance.now()：
+// 挂起表用自增序号做键，不能用 performance.now()：
 //   页面没做跨源隔离时 Chrome 把计时器粗化到 100 µs，do 与 view 又是同一张表 ——
-//   同一拍里两条消息会撞键，后一条把前一条**静默覆盖**，那条 Promise 就永远不落地
+//   同一拍里两条消息会撞键，后一条把前一条静默覆盖，那条 Promise 就永远不落地
 //   （症状是"视口消息超时"，而 Worker 其实既没报错也还活着）。发送时刻另存在
 //   条目里，只用来算延迟。
 const pendingState = new Map();  // 序号 -> {resolve,reject,tt,name}
@@ -206,13 +206,13 @@ function glueUrl() {
   return new URL(dir + 'heditor.js', new URL('../', location.href)).href;
 }
 
-/** 视口尺寸（设备像素）。画布尺寸不归宿主定，但"看得见多大"要知道。 */
+// 视口尺寸（设备像素）。画布尺寸不归宿主定，但"看得见多大"要知道。
 const viewSize = () => ({
   viewW: Math.max(1, Math.round(stageEl.clientWidth * dprNow())),
   viewH: Math.max(1, Math.round(stageEl.clientHeight * dprNow())),
 });
 
-/* ── 消息 ───────────────────────────────────────────────────────────────── */
+/* 消息 */
 
 /**
  * 发一条"要等回话"的消息（命令与视口都用它）。返回 Promise；不等它就是单向消息
@@ -242,12 +242,12 @@ function waitOp(name, msg) {
 }
 
 /**
- * 发一条命令。返回 Promise，resolve 成 **editStats**（与单线程宿主的门面同形）。
+ * 发一条命令。返回 Promise，resolve 成 editStats（与单线程宿主的门面同形）。
  *
  * nullIfUnchanged = true 的那些入口（引擎那一步返回假值）resolve 成 null ——
  *   这是门面契约里的"没改动"，不是失败：对照 app.js 的
- *   `if (!mod.X()) return null; return this.present();`。
- *   ★ 不区分的话，探针里"已在段首向左移动不重绘（返回 null）"这类断言会永远拿到真值。
+ *   if (!mod.X()) return null; return this.present();。
+ *   不区分的话，探针里"已在段首向左移动不重绘（返回 null）"这类断言会永远拿到真值。
  */
 function doOp(name, args, nullIfUnchanged) {
   return waitOp(`命令 ${name}`, { t: 'do', name, args: args || {} }).then((m) => {
@@ -265,7 +265,7 @@ const postOp = (name, args) => post({ t: 'do', ts: 0, name, args: args || {} });
 /**
  * 用户动作（门面里的命令）：先把光标按住可见并重置闪烁，再把命令发出去。
  *
- * 放在命令**之前**而不是之后：命令那一次呈现才会把光标画在新位置上，先按住可见才能
+ * 放在命令之前而不是之后：命令自身的呈现才会把光标画在新位置上，先按住可见才能
  *   保证"移动完的那一帧光标就在那儿"，中间不夹一个隐藏帧。
  */
 function opUser(name, args, nullIfUnchanged) {
@@ -455,7 +455,7 @@ function viewSettled(m) {
   if (viewWanted) viewFireAndForget();
 }
 
-/* ── 每页一张画布（按槽复用）───────────────────────────────────────────── */
+/* 每页一张画布（按槽复用） */
 
 /**
  * 造一个槽元素。
@@ -491,7 +491,7 @@ function sendPageCanvas(slot, el, gm) {
 /**
  * 让槽与"当前窗口"对齐：第 p 页永远用第 p 模槽数 个槽。
  *
- * 为什么按模取而不是"窗口里第几个位置"：后者在窗口平移时会让**每个槽都换一页**，
+ * 为什么按模取而不是"窗口里第几个位置"：后者在窗口平移时会让每个槽都换一页，
  *   于是每次换窗都得整窗重贴（实测 99 次换窗、每次中位 6.9 ms，合往返的 22%）。
  *   按模取之后，窗口平移只让"新进窗口的那几页"落到旧内容的槽上，其余槽里的页
  *   一动没动、像素本来就是对的。
@@ -553,7 +553,7 @@ function syncPageCanvases(gm) {
   host.pageCanvasCount = pageCanvases.size;
 }
 
-/* ── 接收 ───────────────────────────────────────────────────────────────── */
+/* 接收 */
 
 function onWorkerError(m) {
   const brief = String(m.message).split('\n')[0];
@@ -581,7 +581,7 @@ function onWorkerError(m) {
   } else {
     report.warn(`命令 ${m.where} 失败：${brief}`);
   }
-  // 出错的那一拍不会再有 state / ack 回来 —— 把还在等的挂起调用**当场拒掉**。
+  // 出错的那一拍不会再有 state / ack 回来 —— 把还在等的挂起调用当场拒掉。
   //   不这样做的话调用方只能等到超时，而真正的错误信息就在手边（症状是
   //   "视口超时"这种把根因藏起来的报错，最费时间）。
   rejectPending(`Worker 报错 ${m.where}：${brief}`);
@@ -592,7 +592,7 @@ function onWorkerError(m) {
  *
  * 消息处理器里抛异常是无声的：既不会进 window.onerror 的那套收集，也不会回给
  *   调用方 —— 表现成"调用一直等不到回话然后超时"，而真相（比如某个 DOM 操作抛了）
- *   完全看不到。实测就是被这条坑了一轮：Worker 把 state 推过来了、帧也重画了，
+ *   完全看不到。实测就是被这一条误导了一轮：Worker 把 state 推过来了、帧也重画了，
  *   宿主在解析时抛掉，调用方只看到超时。
  *
  * 这一档按致命处理：宿主处理不了引擎推来的状态，意味着画面已经和引擎对不上，
@@ -685,14 +685,14 @@ function paintPanel() {
 }
 
 /**
- * 让 DOM 的滚动位置跟随引擎 —— 只在**引擎自己把滚动归零**时（装载文档、换缩放）。
+ * 让 DOM 的滚动位置跟随引擎 —— 只在引擎自己把滚动归零时（装载文档、换缩放）。
  *
  * 单线程宿主是在同一线程里直接写 stageEl.scrollTop = 0（presetWindowForLoad），这条
- *   通道在 Worker 化之后必须补出来。不补的症状不是"看起来没滚"，而是**画布与点击
- *   坐标全对不上**：代理画布的 rect 按引擎的 scrollY 算，浏览器却在另一个位置命中，
+ *   通道在 Worker 化之后必须补出来。不补的症状不是"看起来没滚"，而是画布与点击
+ *   坐标全对不上：代理画布的 rect 按引擎的 scrollY 算，浏览器却在另一个位置命中，
  *   于是"点字段框里的任意一点"全部落到别处（错得整整齐齐，不好往这儿想）。
  *
- * ★ 靠的是 Worker 送来的**显式信号**（state.scrollReset），不是"两边不一致就追平"。
+ * 靠的是 Worker 送来的显式信号（state.scrollReset），不是"两边不一致就追平"。
  *   后者是错的：追平要写 scrollTop，而写它会触发 scroll 事件、再发一条视口消息回来，
  *   与正在滚动的用户来回打架 —— 窗口反复变、画布反复建与丢，实测后果是跨页滚动之后
  *   某一页始终拿不到画布（逐像素比对时"比了 0 px、缺页 1"）。
@@ -802,7 +802,7 @@ function handleMessage(m) {
   if (m.t === 'error') return onWorkerError(m);
 }
 
-/* ── 输入 ───────────────────────────────────────────────────────────────── */
+/* 输入 */
 
 function keyToOp(ev) {
   if ((ev.ctrlKey || ev.metaKey) && !ev.altKey) {
@@ -831,7 +831,7 @@ function keyToOp(ev) {
     default:
       // 可打印字符（ASCII / 标点 / 空格）：与单线程宿主同一条路 —— 直接在 keydown 里
       //   提交，并 preventDefault 掉浏览器往 textarea 里的插入。
-      //   ★ 不能指望 textarea 的 input 事件：合成 KeyboardEvent 根本不会产生 input；
+      //   不能指望 textarea 的 input 事件：合成 KeyboardEvent 根本不会产生 input；
       //   而真键盘下又因为这里 preventDefault 掉了插入，同样不会有 input。
       //   两头都不成立 ⇒ 打字会静默地什么都不发生（探针里表现为"文档码点数没变"）。
       if (ev.key && ev.key.length === 1) return ['type', { s: ev.key }];
@@ -852,10 +852,10 @@ function onKeyDown(ev) {
 /**
  * 在页面上按下鼠标：命中测试 → 落光标。
  *
- * ★ 末尾那句 ta.focus() 不是收尾，是这条路的必要条件。
+ * 末尾那句 ta.focus() 不是收尾，是这条路的必要条件。
  *   canvas / div 都不可聚焦，Chrome 在 mousedown 的默认行为里会把 activeElement
  *   打回 <body> —— 此后 keydown 事件再也到不了宿主，键盘看起来"整个失灵"。
- *   实测（`out/_inputcheck.mjs`）：点一下之后 activeElement 变成 BODY，
+ *   实测（out/_inputcheck.mjs）：点一下之后 activeElement 变成 BODY，
  *   再按方向键偏移一动不动；点之前按同一键是动的。
  *   ⇒ "点击与键盘都不动了"是同一个成因，不是两处坏了。
  *   preventDefault() 只能挡住默认的焦点转移，显式 focus() 更稳（单线程宿主两样都做）。
@@ -909,7 +909,7 @@ function onCompositionEnd(ev) {
   setStatus('就绪');
 }
 
-/** 把 markdown 还原成纯段落：与单线程宿主同一份规则，两处不能各写一套。 */
+// 把 markdown 还原成纯段落：与单线程宿主同一份规则，两处不能各写一套。
 function cleanMarkdownLines(raw) {
   return raw
     .split('\n')
@@ -923,7 +923,7 @@ function cleanMarkdownLines(raw) {
     .join('\n');
 }
 
-/* ── 门面 ───────────────────────────────────────────────────────────────── */
+/* 门面 */
 
 /**
  * 命令表：名字与单线程宿主一致，参数在这里翻译成 Worker 的运算名。
@@ -991,7 +991,7 @@ const CMD = {
   zoomTo: (z) => { setZoomDensity(z); syncZoomInput(); return ['zoom', { zoom, dpr: dprNow() }]; },
   // 按倍数设缩放（界面输入框的入口）。门面其余成员收的都是密度。
   zoomToFactor: (f) => { setZoomDensity(engineZoomOf(f)); syncZoomInput(); return ['zoom', { zoom, dpr: dprNow() }]; },
-  // 只改引擎里的相位，**不呈现** —— 与单线程宿主门面的 showCaret 同语义
+  // 只改引擎里的相位，不呈现 —— 与单线程宿主门面的 showCaret 同语义
   //   （那边就是 mod.showCaret(!!on) 一行；探针常在这之后自己调 present()）。
   showCaret: (on) => ['phase', { on: !!on }],
   focusControl: (forward) => ['focusControl', { forward: forward === undefined ? true : !!forward }, true],
@@ -1016,9 +1016,9 @@ Object.defineProperty(host, 'bracketSlots', {
 });
 
 /**
- * 落光标的这几个入口返回的是**光标本身**，不是 editStats。
- *   对照单线程宿主：setCaretAndPresent 末尾是 `return this.caret;`，而探针紧接着就读
- *   `cr0.x / cr0.page`（拿它算点击坐标）。返回形状也是门面契约的一部分 ——
+ * 落光标的这几个入口返回的是光标本身，不是 editStats。
+ *   对照单线程宿主：setCaretAndPresent 末尾是 return this.caret;，而探针紧接着就读
+ *   cr0.x / cr0.page（拿它算点击坐标）。返回形状也是门面契约的一部分 ——
  *   形状不对时症状是一条 "clientX 不是有限数"，完全看不出是返回值的问题。
  */
 for (const name of ['setCaret', 'setCaretAt', 'setCaretAtSide', 'setFocusAtSide', 'setCaretOnly']) {
@@ -1029,7 +1029,7 @@ for (const name of ['setCaret', 'setCaretAt', 'setCaretAtSide', 'setFocusAtSide'
   };
 }
 
-// reloadFonts 返回的是 { mode, rows }（app.js: `return { mode: fontMode, rows: r.rows }`），
+// reloadFonts 返回的是 { mode, rows }（app.js: return { mode: fontMode, rows: r.rows }），
 //   不是 editStats。rows 只是启动面板那几行，这一侧给空数组 —— 探针只取 mode。
 {
   const spec = CMD.reloadFonts;
@@ -1040,8 +1040,8 @@ for (const name of ['setCaret', 'setCaretAt', 'setCaretAtSide', 'setFocusAtSide'
   };
 }
 
-// setUndoLimit 返回的是**新的上限**（app.js 写的是 `return this.undoLimit();`），不是 editStats。
-//   这类"返回一个标量"的入口也要按契约来，否则探针那条 `=== 100` 永远不成立。
+// setUndoLimit 返回的是新的上限（app.js 写的是 return this.undoLimit();），不是 editStats。
+//   这类"返回一个标量"的入口也要按契约来，否则探针那条 === 100 永远不成立。
 {
   const spec = CMD.setUndoLimit;
   host.setUndoLimit = (n) => {
@@ -1050,7 +1050,7 @@ for (const name of ['setCaret', 'setCaretAt', 'setCaretAtSide', 'setFocusAtSide'
   };
 }
 
-/** 要返回值的查询：一律返回 Promise。 */
+// 要返回值的查询：一律返回 Promise。
 const ASK = {
   paragraphText: (i) => ['text', { i: i | 0 }],
   hit: (x, y) => ['hit', { x, y }],
@@ -1082,8 +1082,8 @@ host.ask = askOp;
 /**
  * 整篇文本。一次问一段太多趟，一次传整篇又要有那个口子 —— 所以逐段问再拼。
  *
- * ★ 做成**取值器，值是一个 Promise**，而不是方法：单线程宿主那边 allText 就是取值器
- *   （同步取得到整篇），探针写的是 `window.__heditor.allText` 不带括号。异步宿主给不出
+ * 做成取值器，值是一个 Promise，而不是方法：单线程宿主那边 allText 就是取值器
+ *   （同步取得到整篇），探针写的是 window.__heditor.allText 不带括号。异步宿主给不出
  *   同步的整篇文本，这是本质差异 —— 但探针的 eval 带 awaitPromise，所以"取值器返回
  *   Promise"能让那几处不带括号的读取原样成立。唯一要改的是把它再套进 Array.from 的那
  *   两处（那里必须显式 await）。
@@ -1148,13 +1148,13 @@ function dragExtendTo(hit) {
   host.setFocusAtSide(hit.para, hit.offset, hit.side);
 }
 
-/* ── 帧画布代理（给探针的适配层）────────────────────────────────────────── */
+/* 帧画布代理（给探针的适配层） */
 
 /**
  * 把"窗口帧"当成一张虚拟画布暴露出去：几何按窗口帧算，事件转发到真正的页画布上。
  *
- * 为什么要有它：帧在本宿主里是**按页切成多张画布**的，而探针（与单线程宿主那套断言）
- *   是按"整帧一张画布"写的 —— 它要 `canvas.getBoundingClientRect()` 把帧磅坐标换成
+ * 为什么要有它：帧在本宿主里是按页切成多张画布的，而探针（与单线程宿主那套断言）
+ *   是按"整帧一张画布"写的 —— 它要 canvas.getBoundingClientRect() 把帧磅坐标换成
  *   客户端坐标，再派 mousedown。单线程宿主的 app.js 里有一个同名同形的代理，注释原话
  *   是"老探针因此一行都不用改"。这一侧照同一口径补上，两套宿主才对得上。
  *   getContext 故意返回 null（真的上下文已经交出去了，主线程读不到像素）。
@@ -1180,7 +1180,7 @@ const frameCanvasProxy = {
              width, height, x: left, y: top };
   },
   dispatchEvent(ev) {
-    // ★ 派到坐标所在的那一页画布上，而不是派到滚动容器上：指针处理按 event.target
+    // 派到坐标所在的那一页画布上，而不是派到滚动容器上：指针处理按 event.target
     //   认页（dataset.page），派到容器上 target 就不是画布，命中测试根本不会跑。
     let el = null;
     if (typeof ev.clientY === 'number') {
@@ -1196,7 +1196,7 @@ const frameCanvasProxy = {
   getContext() { return null; },
 };
 
-/* ── 同步读（来自推送的镜像）───────────────────────────────────────────── */
+/* 同步读（来自推送的镜像） */
 
 Object.defineProperties(host, {
   info: { get: () => mirror.info },
@@ -1228,14 +1228,14 @@ Object.defineProperties(host, {
   //   形状与单线程宿主的 caretStyle / selectionStyle 逐字对齐。
   caretStyle: { get: () => mirror.caretStyle },
   selectionStyle: { get: () => mirror.selectionStyle },
-  // 引擎实时光标偏移。引擎在 Worker 那侧，所以这个"实时"只能是**推送那一刻**的实时
+  // 引擎实时光标偏移。引擎在 Worker 那侧，所以这个"实时"只能是推送那一刻的实时
   //   —— 与 editStats 里的光标位置取自同一次 state，两者可比。排空之后（quiesce）
   //   读到的就是最新那一拍的账。
   caretLive: { get: () => mirror.caretLive },
   pagePx: {
     get: () => (mirror.geom ? [mirror.geom.pageW, mirror.geom.pageH, mirror.geom.gap] : null),
   },
-  // 与单线程宿主同形：**方法**而不是取值器（探针写的是 frameW()）。
+  // 与单线程宿主同形：方法而不是取值器（探针写的是 frameW()）。
   //   形状不一致的代价是一条 TypeError，看不出是命名的问题。
   //   frameW: { get: ... } 也不行 —— 那样 frameW 不是函数。
   heapMB: { get: () => mirror.heapMB },
@@ -1267,7 +1267,7 @@ Object.defineProperties(host, {
   pageCanvasEls: { get: () => [...pageCanvases.values()] },
   canvas: { get: () => frameCanvasProxy },
   // 形状与单线程宿主的 viewport 对齐（anchor / desired / visible / canvases 一个都不能少：
-  //   探针靠它判"窗口跟着可见页走"，缺一格就是一条 `.first` 的 TypeError）。
+  //   探针靠它判"窗口跟着可见页走"，缺一格就是一条 .first 的 TypeError）。
   //   pooled = 闲置槽数（窗口缩小时留下的槽；已转移的画布不能再转移一次，
   //   所以"池"只能是"按槽固定"，不是"回收后重新分配"）。
   viewport: {
@@ -1284,24 +1284,24 @@ Object.defineProperties(host, {
   },
 });
 
-/* ── 宿主自己的动作 ─────────────────────────────────────────────────────── */
+/* 宿主自己的动作 */
 
-/** 帧尺寸（设备像素）。与单线程宿主一致地做成方法（见上面那段说明）。 */
+// 帧尺寸（设备像素）。与单线程宿主一致地做成方法（见上面那段说明）。
 host.frameW = () => (mirror.geom ? mirror.geom.frameW : 0);
 host.frameH = () => (mirror.geom ? mirror.geom.frameH : 0);
 
 /**
- * 排空屏障：等 Worker 把**此刻已经在途的消息**全部处理完。
+ * 排空屏障：等 Worker 把此刻已经在途的消息全部处理完。
  *
  * 靠的是 postMessage 保序 —— 发一条什么都不算的 ping（READ.ping），它的 reply 回来时，
  *   之前发出的消息必然都已处理完。这是"交互之后要读到那一拍结果"的同步点。
- * ★ 刻意用 ping 而不是拿 present 当哨兵：一次 present 会重画并改变帧，那会把
+ * 刻意用 ping 而不是拿 present 当哨兵：一次 present 会重画并改变帧，那会把
  *   "某个入口忘了收尾" 这类断言直接盖掉（哨兵必须无副作用）。
  *   与单线程宿主的 quiesce 是同一个契约（那边全同步，直接 resolve）。
  */
 /**
  * 宿主动作里"自带往返"的那些链（命中测试 → 落光标就是一条：中间要先问一次 hitTest）。
- *   排空屏障必须等它们，否则屏障会在链的中途就返回 —— 探针随即读到的是**旧镜像**，
+ *   排空屏障必须等它们，否则屏障会在链的中途就返回 —— 探针随即读到的是旧镜像，
  *   而症状是"点了画布但光标没动"这种看起来像功能没接的红。
  */
 const inFlight = new Set();
@@ -1313,7 +1313,7 @@ function trackChain(p) {
   return p;
 }
 
-/** DOM 输入事件引起的链：登记进在途表，并把它挂成 host.rendered。 */
+// DOM 输入事件引起的链：登记进在途表，并把它挂成 host.rendered。
 function trackInput(p) {
   host.rendered = trackChain(p);
   return p;
@@ -1322,17 +1322,14 @@ function trackInput(p) {
 /**
  * 等"最近一次输入引起的渲染"完成的 Promise。
  *
- * 交互路径是**单向**的（消息发出去就不等），所以宿主手里本来没有它的句柄 —— 但那个
- *   "发出去就不等"的 Promise 一直都在（message 发出那一刻就存在），只是被丢掉了。
- *   把它留着，就得到"输入 → 渲染完成"这一个可等待的点。
+ * 交互路径是单向的（消息发出去就不等），所以宿主手里本来没有它的句柄 —— 但那个
+ *   Promise 一直都在（message 发出那一刻就存在），只是被丢掉了。留着它就得到
+ *   "输入 → 渲染完成"这个可等待的点：命令的 state 是 Worker 跑完 render()
+ *   （present + 重贴脏页）才推回来的。边界：它保证"离屏画布已经有这一帧"，
+ *   不保证合成器已经刷到屏幕上；查像素够用，要等上屏得再补一次 rAF。
  *
- * 它 resolve 的时刻是精确的：命令的 state 是 Worker 在 render()（present + 重贴脏页）
- *   跑完之后才推回来的，所以 Promise 落地 == 那一帧已经画进离屏画布。
- *   ★ 边界：它保证的是"离屏画布已经有这一帧"，不保证浏览器合成器已经把它刷到屏幕上。
- *   查像素（selfCheck 读的就是离屏画布）够用；要等真正上屏得再补一次 rAF。
- *
- * 与 quiesce 的分工：这是"我这一下画完了"，quiesce 是"队列全空了"。
- *   一次点击会牵出命中测试那样**自带往返**的链，那种要等的是 quiesce。
+ * 与 quiesce 的分工：这是"我这一下画完了"，quiesce 是"队列全空了"。一次点击会牵出
+ *   命中测试那样自带往返的链，那种要等的是 quiesce。
  */
 host.rendered = Promise.resolve(true);
 
@@ -1351,7 +1348,7 @@ host.quiesce = async () => {
 };
 
 /**
- * 引擎当前那一帧的**一份拷贝**（探针用）。
+ * 引擎当前那一帧的一份拷贝（探针用）。
  *   拷贝由 Worker 侧做，然后转移 buffer 过来（O(1)，不白拷 8 MB）。
  *   必须是快照：wasm 堆上那个视图任何一次 present 都会把它原地覆盖，
  *   两次读到的永远是同一块内存 —— 逐字节比对会永远绿且毫无意义。
@@ -1412,7 +1409,7 @@ host.loadMedicalSample = async function loadMedicalSample(repeat) {
   return { paragraphs: text.split('\n').length, chars: text.length };
 };
 
-/* ── 光标闪烁 ───────────────────────────────────────────────────────────── */
+/* 光标闪烁 */
 
 /**
  * 把闪烁相位归到"可见"并重启定时器。
@@ -1436,24 +1433,24 @@ function restartBlinkTimer() {
  * 交互（按键 / 打字 / 点击 / 命令）之后把光标按住可见，并把下一次翻转推迟一整拍。
  *
  * 两个动作缺一不可：
- *   ① 相位若停在隐藏上，补一次 showCaret(true)。引擎那边 caret_visible_ 只由本侧翻转
+ *   一是相位若停在隐藏上，补一次 showCaret(true)。引擎那边 caret_visible_ 只由本侧翻转
  *      （engine.cpp 的 showCaret，引擎自己只在 repaintAfterEdit 里置真），一旦停在 false，
  *      后面每次 present 都不再画光标 —— 表现成"按了方向键，光标好像没动"。
- *   ② 无条件重启定时器。即便相位此刻可见，也可能下一秒就到 530 ms 的翻转点，
+ *   二是无条件重启定时器。即便相位此刻可见，也可能下一秒就到 530 ms 的翻转点，
  *      那样"刚移动完光标又灭了"，仍然像没重置。重启把这一次翻转整拍推后。
  *
- * ② 只动 JS 定时器、不发消息，所以"相位本来就可见"时这一路是零额外开销。
+ * 二是只动 JS 定时器、不发消息，所以"相位本来就可见"时这一路是零额外开销。
  */
 function blinkHold() {
   if (!caretOn) postOp('blinkPhase', { on: true });
-  // ★ 无条件把**本地相位**也写成可见。原来只在补发时才写，于是探针用门面 showCaret(false)
+  // 无条件把本地相位也写成可见。只在补发时才写的话，探针用门面 showCaret(false)
   //   把引擎摆成隐藏之后，本地 caretOn 仍是 true —— 两边脱节，后续的"该补一次呈现"
   //   就永远不会发生（症状是光标一直不出现，看起来像渲染坏了）。
   caretOn = true;
   restartBlinkTimer();
 }
 
-/** 启动与强制归相位：无条件让光标可见（首帧自动起、探针的 startBlink 走这条）。 */
+// 启动与强制归相位：无条件让光标可见（首帧自动起、探针的 startBlink 走这条）。
 function resetBlinkPhase() {
   caretOn = true;
   postOp('blinkPhase', { on: true });
@@ -1470,7 +1467,7 @@ host.stopBlink = () => {
 
 host.startBlink = () => { resetBlinkPhase(); return true; };
 
-/* ── 启动 ───────────────────────────────────────────────────────────────── */
+/* 启动 */
 
 /**
  * 窗口尺寸变化：把新的视口推给引擎。

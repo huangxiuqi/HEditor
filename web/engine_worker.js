@@ -1,6 +1,6 @@
 // 引擎侧：把整个编辑器放进 Dedicated Worker。
 //
-// 为什么要有这个文件：主线程**无法同步等 Worker**（Atomics.wait 在主线程直接抛，
+// 为什么要有这个文件：主线程无法同步等 Worker（Atomics.wait 在主线程直接抛，
 // 而且它要 SharedArrayBuffer ⇒ 要跨源隔离，正是要避开的）。所以引擎一旦搬进 Worker，
 // 门面就只能异步。但交互路径仍然可以一个 await 都没有 —— 消息在调用那一刻就发出去了，
 // 返回的 Promise 只是"结果到了"的通知；不等它就等于单向消息。
@@ -9,9 +9,9 @@
 //   下行：boot / pageCanvas / view / do（改状态）/ ask（要返回值）
 //   上行：ready / state / ack（视口没变，什么都没做）/ reply / error
 //
-// ★ 画布是**一页一张**，不是一窗一张：
+// 画布是一页一张，不是一窗一张：
 //   宿主在滚动容器里按页摆 canvas，每张 transferControlToOffscreen 交给这一侧，
-//   这一侧的 map 按页号存上下文。滚动因此是**浏览器搬像素**（合成器），引擎一次都不跑；
+//   这一侧的 map 按页号存上下文。滚动因此是浏览器搬像素（合成器），引擎一次都不跑；
 //   编辑时也只重贴引擎报过的脏页，而不是整窗重贴 —— 改一个字只碰它所在的那一页。
 //   帧本身不跨线程：它就是 wasm 线性内存上的一块，切片用子数组视图构造，不做拷贝。
 
@@ -119,7 +119,7 @@ function ctxOfPage(p) {
 const post = (msg, transfer) => self.postMessage(msg, transfer || []);
 const err = (e, where) => post({ t: 'error', where: where || '', message: String((e && e.stack) || e) });
 
-/* ── 字体 ───────────────────────────────────────────────────────────────── */
+/* 字体 */
 
 async function fetchFont(path) {
   const res = await fetch(path);
@@ -161,12 +161,12 @@ async function installFonts(mode) {
   return bytes;
 }
 
-/* ── 上屏 ───────────────────────────────────────────────────────────────── */
+/* 上屏 */
 
 /**
  * 把窗口帧里第 p 页那一段贴到它自己的画布上。
  *
- * 源是 wasm 线性内存上的整帧，用**子数组视图**取那几行连成一张小图 —— 不做拷贝。
+ * 源是 wasm 线性内存上的整帧，用子数组视图取那几行连成一张小图 —— 不做拷贝。
  *   刻意不用 putImageData 的脏矩形重载：那个重载的目标位置口径（是否叠加 dirtyX/dirtyY）
  *   在实现之间容易踩错，两参数形式没有歧义。
  */
@@ -228,7 +228,7 @@ function blitPages(only) {
   return n;
 }
 
-/** 这一窗里还有几页没有画布（宿主还没把该槽的 canvas 交过来）。 */
+// 这一窗里还有几页没有画布（宿主还没把该槽的 canvas 交过来）。
 function pagesMissing() {
   const count = mod.windowPageCount();
   let n = 0;
@@ -253,7 +253,7 @@ function geom(st) {
     dpr, viewW, viewH, scrollY,
     pagesReady: pagesMissing() === 0,
     // 与单线程宿主的 viewport 同形的两格：锚点原文与"该装哪几页"。
-    //   探针靠它们判"窗口跟着可见页走"，缺了就是一条 `.first` 的 TypeError。
+    //   探针靠它们判"窗口跟着可见页走"，缺了就是一条 .first 的 TypeError。
     anchor: lastAnchor,
     desired: st ? desiredWindow(st) : null,
     visible: st ? visibleRange(st) : null,
@@ -261,13 +261,13 @@ function geom(st) {
 }
 
 /**
- * 按当前滚动位置决定窗口。返回 true 表示**窗口变了**（调用方要重排重画）。
+ * 按当前滚动位置决定窗口。返回 true 表示窗口变了（调用方要重排重画）。
  *
- * ★ 滞回（与单线程宿主的 applyWindow 同一口径）：现有窗口只要还盖得住"看得见的那几页"，
+ * 滞回（与单线程宿主的 applyWindow 同一口径）：现有窗口只要还盖得住"看得见的那几页"，
  *   就一个字都不动。没有这一层的话，滚动每跨一条页边界就整帧重光栅（一页约 13 ms）；
  *   有了它，同一页内的滚动连一次重贴都不需要 —— 浏览器把画布搬走就行。
  */
-/** 看得见的那几页（设备像素下的滚动位置与视口高度）。 */
+// 看得见的那几页（设备像素下的滚动位置与视口高度）。
 function visibleRange(st) {
   const total = Math.max(1, Number(st.totalPages) || 1);
   const step = mod.pagePxHeight() + mod.pageGapPx();
@@ -369,22 +369,22 @@ function retarget(st) {
 }
 
 /**
- * 引擎自己**不会**画的那几个入口：改完要主动呈现一次。
+ * 引擎自己不会画的那几个入口：改完要主动呈现一次。
  *
- * 为什么必须逐条列出来（这不是风格问题）：`present()` 会把 edit_stats_ 覆盖成
+ * 为什么必须逐条列出来（这不是风格问题）：present() 会把 edit_stats_ 覆盖成
  *   "这一下重画了多少"。引擎的 *AndRender 系入口（typeText / backspace / moveCaret /
- *   undoEdit ...）在库里就把重排重绘收尾好了，那笔账正是"这次编辑的代价"——**再
- *   present 一次就把它冲掉，只剩一个光标**。探针拿这笔账当分母（"整页重画 ≥ 半帧"、
- *   "光标移动 < 全量的 1/100"），产品面板也用；所以多做一次 present 是**静默的失真**。
- *   对照单线程宿主 app.js：settle() 只在窗口变了才 present，move() 干脆不 present，
- *   而 setCaret / setEditMode / undo ... 这些是自己 `return this.present()` 的。
+ *   undoEdit ...）在库里就把重排重绘收尾好了，那笔账正是"编辑这一下的代价"——再
+ *   present 一次就把它冲掉，只剩一个光标。探针拿这笔账当分母（"整页重画 ≥ 半帧"、
+ *   "光标移动 < 全量的 1/100"），产品面板也用；所以多做一次 present 是静默的失真。
+ *   对照单线程宿主 app.js：settle() 只在窗口变了才 present，move() 则完全不 present，
+ *   而 setCaret / setEditMode / undo ... 这些是自己 return this.present() 的。
  */
 const PRESENT_ALWAYS = new Set([
   'present', 'blinkPhase', 'viewport',
   'setCaret', 'setCaretAt', 'setCaretAtSide', 'setFocusAtSide',
   'setEditMode', 'setBracketScope', 'setViewportAnchor',
   // 样式那两条：与 setEditMode 同档 —— 引擎只换参数（见 setCaretAndSelectionStyle），
-  //   没有这层收尾的话帧上留的还是上一版颜色。
+  //   没有这层收尾的话帧上留的还是旧颜色。
   'caretStyle', 'selectionStyle',
   'undo', 'redo', 'indent', 'outdent', 'focusControl', 'tabCaret',
   'removeControl', 'setControlProp',
@@ -393,11 +393,11 @@ const PRESENT_ALWAYS = new Set([
 /**
  * 收尾：必要时呈现一次，然后把脏页重贴上去，返回这一拍的账。
  *
- * 呈现的条件是"引擎没画（见 PRESENT_ALWAYS）**或**窗口换了" —— 与 app.js 的 settle 同一
+ * 呈现的条件是"引擎没画（见 PRESENT_ALWAYS）或窗口换了" —— 与 app.js 的 settle 同一
  *   口径（窗口没变就不 present）。setFontCacheConfig / setUndoLimit 这类根本不碰帧的
  *   运算，两次条件都不成立，于是连 present 都不做。
  */
-/** 自己钉锚点的运算：不要再让 retarget 按可见范围改回来（见 WRITE.viewport 的说明）。 */
+// 自己钉锚点的运算：不要再让 retarget 按可见范围改回来（见 WRITE.viewport 的说明）。
 const KEEP_ANCHOR = new Set(['viewport']);
 
 function render(opName) {
@@ -442,7 +442,7 @@ function sendState(ts, label, stats, changed, workMs) {
     //   相减就是"白贴"的量，宿主只读不判。
     blitMs: blitLastMs, blitPages: blitLastPages,
     // 这一下到底有没有真的改动。宿主门面的契约是"没改 => 返回 null"（对照单线程宿主
-    //   app.js 里 `if (!mod.X()) return null; return this.present();`），
+    //   app.js 里 if (!mod.X()) return null; return this.present();），
     //   引擎那一步的返回值就是它，必须一路带到主线程。
     changed: !!changed,
     heapMB: mod.HEAPU8.length / 1048576,
@@ -480,10 +480,10 @@ function sendState(ts, label, stats, changed, workMs) {
 
 function push(ts, opName, changed) { sendState(ts, opName, render(opName), changed); }
 
-/* ── 装载 ───────────────────────────────────────────────────────────────── */
+/* 装载 */
 
 /**
- * 换文档：**必须走 relayoutAndPaint**，不能只 present。
+ * 换文档：必须走 relayoutAndPaint，不能只 present。
  *
  * present 只画不排 —— 装载之后排版还一次都没跑过，此时 present 画出来是一片空白
  *   （症状是首帧 ink 为 0、totalPages 恒为 1，而后面每次编辑看起来都正常，
@@ -493,8 +493,8 @@ function push(ts, opName, changed) { sendState(ts, opName, render(opName), chang
  * 全量重排重绘的公共收尾。锚点必须先钉住、再排 —— 与单线程宿主的 presetWindowForLoad
  *   同一口径：排版按视口窗口走，锚点没设时窗口是"只有第 0 页"，算出来的 totalPages
  *   跟着不对。
- * ★ 而且锚点不能事后留空：留空会让随后的 retarget 把"窗口从无到有"判成换窗，
- *   于是在这次全量之外**再 present 一次** —— 那次只重画一个光标，首次全量那笔账
+ * 而且锚点不能事后留空：留空会让随后的 retarget 把"窗口从无到有"判成换窗，
+ *   于是在全量之外再 present 一次 —— 后一次只重画一个光标，首次全量那笔账
  *   （探针的分母）就被冲掉了。
  */
 function paintFull() {
@@ -508,7 +508,7 @@ function paintFull() {
   //   （自审逐像素比对一比就露）。所以这件事必须由上面说出来，不能指望下游有谁代劳。
   invalidateSlots();
   scrollY = 0;
-  // 告诉宿主"引擎把滚动位置归零了"。★ 必须是**显式信号**，不能让宿主那边
+  // 告诉宿主"引擎把滚动位置归零了"。必须是显式信号，不能让宿主那边
   //   用"两边不一致就追平"来猜：追平要写 DOM 的 scrollTop，而写它会触发 scroll
   //   事件、再发一条视口消息回来 —— 与正在滚动的用户（或外部脚本）来回打架，
   //   窗口跟着反复变、画布反复建与丢。实测症状：跨页滚动后某一页始终没有画布。
@@ -529,7 +529,7 @@ function loadScenario(id, zoom) {
  * 换块流之后的统一收尾（与 loadScenario 同理，只是入口在别处）。
  *
  * 锚点必须先钉住、再排 —— 与单线程宿主的 presetWindowForLoad 同一口径。
- *   ★ 这里若图省事写 lastAnchor = ''，retarget 会把"窗口从无到有"判成换窗，
+ *   这里若图省事写 lastAnchor = ''，retarget 会把"窗口从无到有"判成换窗，
  *   于是在 relayoutAndPaint 的全量之外再 present 一次 —— 而那次只重画一个光标，
  *   首次全量那笔账（探针的分母）就被冲掉了。
  */
@@ -589,11 +589,11 @@ async function boot(m) {
   }
 }
 
-/* ── 运算表 ─────────────────────────────────────────────────────────────── */
+/* 运算表 */
 
-/** 改状态的运算。跑完一律收尾（present + 重贴 + 回推 state）。 */
+// 改状态的运算。跑完一律收尾（present + 重贴 + 回推 state）。
 const WRITE = {
-  /** 什么都不改，只收尾。给宿主的 present() 用 —— 它就是"重画并回推"。 */
+  // 什么都不改，只收尾。给宿主的 present() 用 —— 它就是"重画并回推"。
   present: () => {},
   scenario: (a) => loadScenario(a.id, a.zoom),
   reset: (a) => loadScenario(a.id === undefined ? 6 : a.id, a.zoom === undefined ? kZoomBase : a.zoom),
@@ -631,7 +631,7 @@ const WRITE = {
   selectAll: () => mod.selectAll(),
   setSelection: (a) => mod.setSelection(a.anchor | 0, a.focus | 0),
   clearSelection: () => mod.clearSelection(),
-  // ★ 落光标的三个入口都要**无条件**把相位拉回可见，与单线程宿主的 setCaretAndPresent
+  // 落光标的三个入口都要无条件把相位拉回可见，与单线程宿主的 setCaretAndPresent
   //   逐字对齐（那边就是 mod.setCaret(...); caretOn = true; mod.showCaret(true);
   //   mod.present();）。漏掉的症状：相位停在隐藏那半拍时落一次光标，光标不出现 ——
   //   而这正是"点画布换字段后光标看不见"那个用户 bug 的一半。
@@ -679,10 +679,10 @@ const WRITE = {
     mod.setSelectionStyle(c[0] | 0, c[1] | 0, c[2] | 0, (c[3] === undefined ? 255 : c[3]) | 0);
   },
   /**
-   * 换字段名单。★ 必须**重排**，不能只 present —— 括号标记（含只读的灰括号）是排进
+   * 换字段名单。必须重排，不能只 present —— 括号标记（含只读的灰括号）是排进
    *   布局结果里的，只 present 的话标记还是上一轮的：症状是"控件清单里 ro=true，
    *   可槽清单里 ro 全是 false"（一条自相矛盾的读数，很难往"没重排"上想）。
-   *   对照单线程宿主的 setFormControls：它就是 `return relayoutAndBlit();`。
+   *   对照单线程宿主的 setFormControls：它就是 return relayoutAndBlit();。
    */
   setFormControls: (a) => {
     mod.setFormControls((a.list || []).map((it) => ({
@@ -692,7 +692,7 @@ const WRITE = {
   },
   /**
    * 闪烁那一拍：摆相位并呈现（对照单线程宿主 tick 里的 showCaret + present）。
-   *   ★ 它必须是"会收尾"的那一类 —— 闪烁要在屏幕上看得见，就得重画。
+   *   它必须是"会收尾"的那一类 —— 闪烁要在屏幕上看得见，就得重画。
    *   而门面的 showCaret / stopBlink 走的是 SILENT 那张表（只改状态不呈现），
    *   两者不能混：混了就会把探针的"全量基线"（分母）覆盖掉。
    */
@@ -704,9 +704,9 @@ const WRITE = {
 
   /**
    * 视口锚点：与单线程宿主的门面 setViewportAnchor 逐字对齐 —— 直接钉锚点（不碰滚动
-   *   位置），并且**必须呈现**。
-   * ★ 也不能让它走 retarget：retarget 会按"滚动位置算出来的可见页"把锚点改回去。
-   *   探针靠这个入口把窗口挪到前/中/后去量按需读的覆盖面 —— 被改回去就会量到别的页，
+   *   位置），并且必须呈现。
+   * 也不能让它走 retarget：retarget 会按"滚动位置算出来的可见页"把锚点又挪回可见范围。
+   *   探针靠这个入口把窗口挪到前/中/后去量按需读的覆盖面 —— 被挪回去就会量到别的页，
    *   而且是静默的（数字看着正常，只是不是那一页）。
    */
   viewport: (a) => {
@@ -716,12 +716,12 @@ const WRITE = {
 };
 
 /**
- * 只改引擎状态、**不做收尾**的运算（不回推 state、不重画）。
+ * 只改引擎状态、不做收尾的运算（不回推 state、不重画）。
  *
  * 为什么需要这一档：单线程宿主的 stopBlink() 与门面 showCaret() 都只调 mod.showCaret，
- *   **不 present** —— 那边注释写得很清楚："present 会把 edit_stats_ 覆盖成'只重画了个
+ *   不 present —— 那边注释写得很清楚："present 会把 edit_stats_ 覆盖成'只重画了个
  *   光标'，而探针紧接着要读的往往是'上一次全量呈现'的数字（分母）。停表就只停表。"
- *   搬进 Worker 之后若把这两个入口也走统一收尾，基线就被悄悄换掉了：一堆增量断言会以
+ *   搬进 Worker 之后若把这两个入口也走统一收尾，基线就被无声地换掉了：一堆增量断言会以
  *   错误的分母照绿（这是最难发现的一类失真）。
  * ⇒ 门面 showCaret / stopBlink 走这张表；闪烁那一拍走 WRITE.blinkPhase（那个要呈现）。
  */
@@ -729,14 +729,14 @@ const SILENT = {
   phase: (a) => mod.showCaret(!!a.on),
 };
 
-/** 要返回值的查询。 */
+// 要返回值的查询。
 const READ = {
   /**
    * 排空屏障：什么都不算，立刻回一个值。
    *
    * 用途是给宿主一个"顺序保证"—— postMessage 保序，所以这条 reply 回来时，它之前
-   *   发出的消息都已经处理完了。这是探针的**同步点**（交互之后要读到那一拍的结果）。
-   * ★ 它刻意不碰 mod、也不走 push：哨兵不能有副作用（一次 present 就会改变帧，
+   *   发出的消息都已经处理完了。这是探针的同步点（交互之后要读到那一拍的结果）。
+   * 它刻意不碰 mod、也不走 push：哨兵不能有副作用（一次 present 就会改变帧，
    *   把"某个入口忘了收尾"这类断言直接盖掉）。
    */
   ping: () => 1,
@@ -777,10 +777,10 @@ const READ = {
   /**
    * 自检：把每页画布上真正的像素与帧里对应的一段逐点比。
    *
-   * 返回形状必须与单线程宿主的 selfCheck 一致 —— 它是**给用户的取证入口**
+   * 返回形状必须与单线程宿主的 selfCheck 一致 —— 它是给用户的取证入口
    *   （F12 里 __heditor.selfCheck() 把对象发出来），也是探针的主判据：
    *   screenVsEngineDiffPx > 0 说明"上屏"贴错了，恒为 0 说明问题在引擎的排版与光栅化。
-   *   ★ 形状不一致的代价不是"少几个字段"：探针读 sc.framePx[0] 会直接抛，
+   *   形状不一致的代价不是"少几个字段"：探针读 sc.framePx[0] 会直接抛，
    *   整段断言连跑都跑不到（表现为一个 TypeError，看不出是这个原因）。
    * 多出来的 compared / ratio / missing / sizeBad 是本侧扩展：缺页与尺寸不符单独报数 ——
    *   "有页还没拿到画布"和"画错了"是两件事，混在一起会让人查错方向。
@@ -943,7 +943,7 @@ async function handle(m) {
       viewH = m.viewH || viewH;
       // 方向只用来决定余量放前面还是后面（见 targetWindow），得在 retarget 之前定下来。
       if (scrollY !== prevScrollY) scrollDir = scrollY > prevScrollY ? 1 : -1;
-      // 窗口没变就**什么都不做**：画布摆在文档流里，浏览器已经把像素搬走了。
+      // 窗口没变就什么都不做：画布摆在文档流里，浏览器已经把像素搬走了。
       //   这一条是"滚动不花引擎的钱"的落点 —— 只回一个 ack，不重贴、不推统计。
       if (!retarget(JSON.parse(mod.editStatsJson()))) {
         return void post({ t: 'ack', ts: m.ts, workMs: performance.now() - tWork });
@@ -968,7 +968,7 @@ async function handle(m) {
     }
     if (m.t === 'ask') {
       // rawFrame 要单独走：帧是 8 MB 量级，按值结构化克隆会白拷一份；拷到新 buffer
-      //   再**转移**所有权过去是 O(1)。探针要拿它做逐字节比对，所以必须是一份快照
+      //   再转移所有权过去是 O(1)。探针要拿它做逐字节比对，所以必须是一份快照
       //   （wasm 堆上那个视图任何一次 present 都会被原地覆盖）。
       if (m.name === 'rawFrame') {
         const v = mod.frameRgba();
