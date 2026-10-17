@@ -1231,7 +1231,7 @@ function positionIme(st) {
   ta.style.fontSize = Math.max(10, Math.round(lineH * 0.62)) + 'px';
 }
 
-function afterEdit() {
+function afterEdit(opts) {
   // 顺序有讲究：先在编辑引起的那次重绘之后把统计取下来，
   //   这才是"敲一个字写了多少像素"。若先做别的事再读，读到的就是别的账。
   let st = JSON.parse(mod.editStatsJson());
@@ -1248,8 +1248,9 @@ function afterEdit() {
   }
 
   // 窗口对齐、上屏、刷面板、把光标滚进视口 —— 收尾只有这一处，
-  //   漏掉任何一步的症状都是"画面停在上一拍"。
-  st = settle(st);
+  //   漏掉任何一步的症状都是"画面停在上一拍"。opts 透传给 settle：
+  //   全选这类"光标端不代表用户在看哪"的编辑要显式关掉滚动。
+  st = settle(st, opts);
   resetBlink();
   return st;
 }
@@ -1331,8 +1332,13 @@ function onKeyDown(ev) {
       // 全选走引擎。不能让浏览器对 #ime 做原生全选 —— 那只会选中承接层里那一行
       //   假文本（它是空的），与文档毫无关系，而且会把选区交给 DOM，
       //   于是"选中之后打字"落到浏览器手里、文档一个字都不变。
+      //
+      // 不搬视口：全选的焦点端在文档末尾，把视口拽过去等于让屏幕整篇跳一次 ——
+      //   而换窗要重画一屏（冷字形，实测 100 ms 以上），画面因此分两拍出现
+      //   （先画当前那一窗的选区、再跳到末尾）。主流编辑器的 Ctrl+A 都保持当前视图，
+      //   用户下一步要么是"再看一眼"、要么是"直接删掉"，两者都不需要光标可见。
       ev.preventDefault();
-      if (mod.selectAll()) afterEdit();
+      if (mod.selectAll()) afterEdit({ scroll: false });
       else resetBlink();
       return;
     }

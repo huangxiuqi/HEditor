@@ -77,6 +77,15 @@ bool collectCovers(const NodeTree& tree, const Range& range, std::vector<Cover>*
                    std::string* error);
 
 /**
+ * 同上，复用调用方已建好的流索引（Design 口径）。
+ *
+ * 批量删除时每一步都要取一次覆盖清单，而建一次索引是 O(节点数) —— 四千步的批次就是
+ *   几千次全树遍历。索引必须与 tree 同一口径。
+ */
+bool collectCovers(const NodeTree& tree, const FlowIndex& idx, const Range& range,
+                   std::vector<Cover>* out, std::string* error);
+
+/**
  * 提取结果。失败时 fragment 为空、error 写明原因。
  */
 struct ExtractResult {

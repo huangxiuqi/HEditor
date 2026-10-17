@@ -799,17 +799,27 @@ FlowPos stepStartFlow(const Step& s) {
 std::vector<Step> EditorEngine::eraseFlowSteps(FlowPos from, FlowPos to) const {
     std::vector<Step> steps;
     if (from < 0 || to <= from) return steps;
+    // 优先"整段并成一步"：区间里全是文本与段落标记时成立，而整篇删除与跨段删除都是这种。
+    //   按节点切分要发几千步，每一步在提交时都要重建一次流索引（O(节点数)）——
+    //   2000 段整篇删除实测几秒，其中一多半在这一项上。
+    if (flow_.has_value()) {
+        steps = makeDeleteRangeOneStep(tree_, *flow_, from, to);
+        if (!steps.empty()) return steps;
+    }
     // 文本那一条：按"所属文本节点"切分，落在段落标记、容器边界与原子上的位置不产生步骤。
     steps = makeDeleteTextSteps(tree_, from, to);
-    // 段落标记那一条：标记各占一个流位置，要么整覆盖要么不覆盖，所以逐位问一遍即可。
+    // 段落标记那一条：标记各占一个流位置，要么整覆盖要么不覆盖。
     //   它不能用 makeDeleteRange 顶替：那条按结构取区间，会把端点向外扩到控件边界
     //   （见 makeDeleteTextSteps 的说明），而这里要的正是"只删掉这一位"。
+    //
+    //   位置由块表直接给出，不逐位问 posAt：标记夹在两段之间，位置就是后一段的流起点减一。
+    //   逐位问是 O(位置数 x 扇出)（posAt 要从根下降到最内层，每层线性扫孩子），
+    //   2000 段文档整篇删除是亿级 —— 实测那一笔占了删除总耗时的几秒。
     if (flow_.has_value()) {
-        for (FlowPos p = from; p < to; ++p) {
-            const Pos np = flow_->posAt(p);
-            const Node* n = tree_.find(np.container);
-            if (n == nullptr || !isParagraphMark(n->kind) || np.offset != 0) continue;
-            const ParaMarkBuild mb = makeRemoveParaMark(tree_, p);
+        for (size_t k = 1; k < block_flow_.size(); ++k) {
+            const FlowPos p = block_flow_[k] - 1;
+            if (p < from || p >= to) continue;
+            const ParaMarkBuild mb = makeRemoveParaMark(tree_, *flow_, p);
             if (mb.ok) steps.push_back(mb.step);
         }
     }

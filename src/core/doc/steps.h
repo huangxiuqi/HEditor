@@ -268,6 +268,19 @@ DeleteBuild makeDeleteRange(const NodeTree& tree, Range range);
 std::vector<Step> makeDeleteTextSteps(const NodeTree& tree, FlowPos from, FlowPos to);
 
 /**
+ * 用一个步骤删掉整个区间 [from, to)：区间里全是文本与段落标记时可行。
+ *
+ * 与 makeDeleteTextSteps 的差别只有"分几步"。那边按文本节点切分，每一步严格落在一个
+ *   文本节点里；这边把整段并成一步 —— Fragment 本来就支持多 piece（文本与段落标记
+ *   交错），applyStep 的 eraseRange 也是按 covers 逐个处理，所以一步是合法的。
+ *   整篇删除时步骤数从四千降到一，而每一步在提交时都要重建一次流索引（O(节点数)）。
+ *
+ * 区间里有别的东西（控件、原子、容器边界）时返回空 —— 调用方退回按节点切分那条路。
+ */
+std::vector<Step> makeDeleteRangeOneStep(const NodeTree& tree, const FlowIndex& idx,
+                                         FlowPos from, FlowPos to);
+
+/**
  * 构造一个删除段落标记的步骤：标记的格式与样式引用从文档里读出来带上。
  *
  * 逆操作靠这两样还原，所以必须从文档取而不是让调用方自己填 —— 手填一份等于把"这一段长什么
@@ -280,6 +293,14 @@ struct ParaMarkBuild {
 };
 
 ParaMarkBuild makeRemoveParaMark(const NodeTree& tree, FlowPos at);
+
+/**
+ * 同上，复用调用方已建好的流索引。
+ *
+ * 批量删除时每个段落标记都要问一次，而建一次索引是 O(节点数) —— 整篇删除就成了
+ *   O(段数 x 节点数)。索引必须与 tree 同一口径，且是 Design（编辑态）。
+ */
+ParaMarkBuild makeRemoveParaMark(const NodeTree& tree, const FlowIndex& idx, FlowPos at);
 
 /**
  * 把一条步骤按前面几步的映射推过去，再收进批次。
@@ -314,6 +335,12 @@ NodeBuild makeRemoveNode(const NodeTree& tree, const Pos& at);
  * 这个步骤现在能应用吗。applyStep 先跑它，所以失败时文档一定没被动过。
  */
 StepResult canApply(const NodeTree& tree, const Step& step);
+
+/**
+ * 同上，复用调用方已建好的流索引。applyStep 每一步都要跑一次判据，两边各建一次索引
+ *   等于把每步的成本翻倍 —— 一批四千步的删除里那就是几千次全树遍历。
+ */
+StepResult canApply(const NodeTree& tree, const FlowIndex& idx, const Step& step);
 
 /**
  * 应用步骤。

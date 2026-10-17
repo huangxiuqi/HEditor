@@ -12,10 +12,14 @@ int Fragment::span() const {
 
 bool collectCovers(const NodeTree& tree, const Range& range, std::vector<Cover>* out,
                    std::string* error) {
+    return collectCovers(tree, FlowIndex(tree, FlowVisibility::Design), range, out, error);
+}
+
+bool collectCovers(const NodeTree& tree, const FlowIndex& idx, const Range& range,
+                   std::vector<Cover>* out, std::string* error) {
     out->clear();
     if (range.empty()) return true;
 
-    const FlowIndex idx(tree, FlowVisibility::Design);
     const Pos b = idx.posAt(range.begin());
     const Node* bn = tree.find(b.container);
     if (bn == nullptr) {

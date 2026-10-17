@@ -233,11 +233,12 @@ void insertParaMarkAt(NodeTree& tree, const FlowIndex& idx, FlowPos at, const Pa
  * 文本节点截断，中间被完整覆盖的整个删掉。截断先做（它不改孩子下标），删除从后往前做
  * （从后往前删，前面的下标才不会失效）。
  */
-bool eraseRange(NodeTree& tree, FlowPos begin, FlowPos end, std::string* error) {
+bool eraseRange(NodeTree& tree, const FlowIndex& idx, FlowPos begin, FlowPos end,
+                std::string* error) {
     if (begin >= end) return true;
     std::vector<Cover> covers;
     std::string err;
-    if (!collectCovers(tree, Range{begin, end}, &covers, &err)) {
+    if (!collectCovers(tree, idx, Range{begin, end}, &covers, &err)) {
         if (error != nullptr) *error = err;
         return false;
     }
@@ -417,10 +418,10 @@ namespace {
  * 意味着"删一个字"变成"删掉整个控件的内容"。所以编辑这条路显式要求调用方给出已经切分好的
  * 区间（严格落在一个文本节点里），并在 makeDeleteTextSteps 的说明里写明这一点。
  */
-bool extractTextRange(const NodeTree& tree, FlowPos begin, FlowPos end, Fragment* out,
-                      std::string* error) {
+bool extractTextRange(const NodeTree& tree, const FlowIndex& idx, FlowPos begin, FlowPos end,
+                      Fragment* out, std::string* error) {
     std::vector<Cover> covers;
-    if (!collectCovers(tree, Range{begin, end}, &covers, error)) return false;
+    if (!collectCovers(tree, idx, Range{begin, end}, &covers, error)) return false;
     Fragment frag;
     int span = 0;
     for (const Cover& c : covers) {
@@ -457,24 +458,24 @@ std::vector<Step> makeDeleteTextSteps(const NodeTree& tree, FlowPos from, FlowPo
     const FlowIndex idx = indexOf(tree);
     if (to > idx.size()) return out;
 
-    // 某个流位置所在的文本节点；落在容器边界、段落标记或原子上时给"没有"。
-    auto owner_at = [&](FlowPos p) {
+    // 按"所属文本节点"分组：同一节点上的连续位置合成一段。
+    //   逐位问 posAt 是 O(位置数 x 扇出) —— posAt 要从根下降到最内层，每层线性扫孩子，
+    //   2000 段的文档每次约 O(段数)，整篇删除就是亿级。改为逐节点跳跃：拿到当前节点后
+    //   直接跳到它的流末端，下一个位置必然落在别的节点上（节点区间两两不重叠）。
+    std::vector<std::pair<int, int>> segs;
+    FlowPos p = from;
+    while (p < to) {
         const Pos np = idx.posAt(p);
         const Node* n = tree.find(np.container);
-        return (n != nullptr && isText(n->kind)) ? n->id : kInvalidNodeId;
-    };
-
-    // 按"所属文本节点"分组：同一节点上的连续位置合成一段。
-    std::vector<std::pair<int, int>> segs;
-    int seg_start = from;
-    NodeId seg_node = owner_at(from);
-    for (FlowPos p = from + 1; p <= to; ++p) {
-        const NodeId owner = (p < to) ? owner_at(p) : kInvalidNodeId;
-        if (p == to || owner != seg_node) {
-            if (seg_node != kInvalidNodeId) segs.push_back({seg_start, p});
-            seg_start = p;
-            seg_node = owner;
+        int nf = 0;
+        int ne = 0;
+        if (n == nullptr || !isText(n->kind) || !idx.intervalOf(n->id, &nf, &ne)) {
+            ++p;  // 容器边界、段落标记、原子：这一位不产生步骤
+            continue;
         }
+        const int seg_to = (ne < to) ? ne : to;
+        if (seg_to > p) segs.push_back({p, seg_to});
+        p = ne;  // 跳过整个文本节点
     }
 
     // 从后往前发步：删右边的不会移动左边的坐标，每步的坐标就是它自己那一刻的坐标。
@@ -483,15 +484,35 @@ std::vector<Step> makeDeleteTextSteps(const NodeTree& tree, FlowPos from, FlowPo
         DeleteRange s;
         s.begin = segs[i].first;
         s.end = segs[i].second;
-        if (!extractTextRange(tree, s.begin, s.end, &s.removed, nullptr)) return {};
+        if (!extractTextRange(tree, idx, s.begin, s.end, &s.removed, nullptr)) return {};
         out.push_back(Step{s});
     }
     return out;
 }
 
+std::vector<Step> makeDeleteRangeOneStep(const NodeTree& tree, const FlowIndex& idx,
+                                         FlowPos from, FlowPos to) {
+    std::vector<Step> out;
+    if (from < 0 || to <= from || to > idx.size()) return out;
+    Fragment frag;
+    std::string err;
+    // 区间里出现文本与段落标记之外的东西（控件、原子、容器边界）时它会失败，
+    //   调用方据此退回"按节点切分"那条路。
+    if (!extractTextRange(tree, idx, from, to, &frag, &err)) return out;
+    DeleteRange s;
+    s.begin = from;
+    s.end = to;
+    s.removed = std::move(frag);
+    out.push_back(Step{s});
+    return out;
+}
+
 ParaMarkBuild makeRemoveParaMark(const NodeTree& tree, FlowPos at) {
+    return makeRemoveParaMark(tree, FlowIndex(tree, FlowVisibility::Design), at);
+}
+
+ParaMarkBuild makeRemoveParaMark(const NodeTree& tree, const FlowIndex& idx, FlowPos at) {
     ParaMarkBuild out;
-    const FlowIndex idx(tree, FlowVisibility::Design);
     if (at < 0 || at >= idx.size()) {
         out.error = "删除段落标记：流位置越界";
         return out;
@@ -568,7 +589,10 @@ NodeBuild makeRemoveNode(const NodeTree& tree, const Pos& at) {
 }
 
 StepResult canApply(const NodeTree& tree, const Step& step) {
-    const FlowIndex idx = indexOf(tree);
+    return canApply(tree, indexOf(tree), step);
+}
+
+StepResult canApply(const NodeTree& tree, const FlowIndex& idx, const Step& step) {
     const int size = idx.size();
     StepResult r;
     std::visit(Overloaded{
@@ -593,7 +617,7 @@ StepResult canApply(const NodeTree& tree, const Step& step) {
                        }
                        std::vector<Cover> covers;
                        std::string err;
-                       if (!collectCovers(tree, Range{s.begin, s.end}, &covers, &err)) {
+                       if (!collectCovers(tree, idx, Range{s.begin, s.end}, &covers, &err)) {
                            r.error = err;
                            return;
                        }
@@ -849,10 +873,12 @@ StepResult canApply(const NodeTree& tree, const Step& step) {
 }
 
 StepResult applyStep(NodeTree& tree, const Step& step) {
-    StepResult r = canApply(tree, step);
+    // 判据与应用共用同一份流索引：两边各建一次等于把每步的成本翻倍，
+    //   而一批四千步的删除里那就是几千次全树遍历。
+    const FlowIndex idx = indexOf(tree);
+    StepResult r = canApply(tree, idx, step);
     if (!r.ok) return r;
 
-    const FlowIndex idx = indexOf(tree);
     std::visit(
         Overloaded{
             [&](const InsertText& s) { insertTextAt(tree, idx, s.at, s.cps, s.marks, s.styleRef); },
@@ -870,7 +896,7 @@ StepResult applyStep(NodeTree& tree, const Step& step) {
             },
             [&](const DeleteRange& s) {
                 std::string err;
-                eraseRange(tree, s.begin, s.end, &err);
+                eraseRange(tree, idx, s.begin, s.end, &err);
             },
             [&](const InsertParaMark& s) { insertParaMarkAt(tree, idx, s.at, s.para, s.styleRef); },
             [&](const RemoveParaMark& s) {

@@ -547,6 +547,15 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
     //
     // 关键：bitmap_ 只在尺寸变化时才 reset。尺寸不变时它保留上一帧内容，
     //   于是"没有脏页、只有光标动了一下"时只贴回两个小矩形；写下的像素数由 Bitmap 记账。
+    // 选区矩形要在 refresh 定下来之前算：这一拍新出现的那几块必须进 refresh，
+    //   否则它们永远等不到被画（帧是增量的，不在 refresh 里的像素被当成已经是对的）。
+    //   矩形含槽偏移，而槽号只由页号决定 —— 所以窗口内平移时同一页给出的是同一个矩形，
+    //   新旧两批各只差"进窗口那一页"与"出窗口那一页"。
+    const std::vector<Rect> sel_rects = selectionRectsPxIn(first_page, count);
+    const auto same_rect = [](const Rect& a, const Rect& b) {
+        return a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h;
+    };
+
     const bool frame_geom_changed = (bitmap_.width() != frame_w) || (bitmap_.height() != frame_h);
     if (frame_geom_changed || frame_needs_full_refresh_) {
         if (frame_geom_changed) {
@@ -570,9 +579,30 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
         //   光标移出某个字段时，那个字段的方括号必须消失。
         for (const Rect& r : control_marks_prev_) refresh.push_back(r);
         control_marks_prev_.clear();
-        // 选区也一样：它画在帧上，页指纹里没有它，不擦就会在拖动时留下一路淡蓝。
-        for (const Rect& r : selection_rects_prev_) refresh.push_back(r);
-        selection_rects_prev_.clear();
+        // 选区按新旧差集处理：不再有的擦掉、新出现的铺底后画，交集那一大片不动。
+        //   它画在帧上，而帧是增量的 —— 这一拍没被重贴的像素本来就是对的。
+        //   窗口内平移时新旧各只差一页的矩形（页的槽号与窗口无关，矩形本身不变），
+        //   于是这一项从"整窗五页"降到"一页"；换窗那一拍两边几乎不相交，退化成整窗重画。
+        for (const Rect& q : selection_rects_prev_) {
+            bool still = false;
+            for (const Rect& r : sel_rects) {
+                if (same_rect(r, q)) {
+                    still = true;
+                    break;
+                }
+            }
+            if (!still) refresh.push_back(q);
+        }
+        for (const Rect& r : sel_rects) {
+            bool had = false;
+            for (const Rect& q : selection_rects_prev_) {
+                if (same_rect(r, q)) {
+                    had = true;
+                    break;
+                }
+            }
+            if (!had) refresh.push_back(r);
+        }
     }
     for (const Rect& r : refresh) bitmap_.copyRectFrom(base_, r);
 
@@ -590,8 +620,24 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
     //     而它们的条数是"文档行数"这个量级（2000 段 ≈ 4000 条）。全取的话，
     //     全选之后每一拍都要混合 1.8 Mpx（实测 present 从 3.6 ms 涨到 9.8 ms），
     //     而真正的画面一个字都没变。
-    const std::vector<Rect> sel_rects = selectionRectsPxIn(first_page, count);
-    for (const Rect& r : sel_rects) bitmap_.blendRect(r, cfg_.selection_color);
+    //
+    //   再只画落在 refresh 里的那些：帧是增量的，refresh 之外的像素本来就是对的
+    //     （底图没变、选区也没变），重画一遍纯属白干 —— 而选区是逐像素混色，
+    //     一页的量就是几毫秒。新旧差集那一套保证了"该画的都在 refresh 里"，
+    //     窗口内平移时 refresh 只覆盖进出窗口的那两页，这一项因此从整窗降到一页。
+    for (const Rect& r : sel_rects) {
+        bool touched = false;
+        for (const Rect& q : refresh) {
+            if (r.x < q.x + q.w && q.x < r.x + r.w && r.y < q.y + q.h && q.y < r.y + r.h) {
+                touched = true;
+                break;
+            }
+        }
+        if (!touched) continue;
+        bitmap_.blendRect(r, cfg_.selection_color);
+    }
+    // 帧上真有选区的区域就是这一批：交集那一大片没被重贴、仍在帧上，差集那几块刚画过。
+    //   下一拍要擦的正是它们 —— 记少了会留下残影，记多了会把没画的也擦一遍。
     selection_rects_prev_ = sel_rects;
 
     // 光标
