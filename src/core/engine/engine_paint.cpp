@@ -192,6 +192,11 @@ int EditorEngine::prewarmPageGlyphs(int page) {
 
 void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
     const auto t0 = Clock::now();
+    // 五段分解的取值：两个时间点之差。用差值而不是"到这儿的累计时长"减，
+    //   免得同一个时刻被读两次而算出一点零头。
+    auto spanMs = [](Clock::time_point a, Clock::time_point b) {
+        return std::chrono::duration<double, std::milli>(b - a).count();
+    };
     ensureRenderSetup();
     bitmap_.resetPaintedPixels();
     // 底图那份账单独清、单独读：字形是画在底图上的（帧那边只从底图搬像素过来），
@@ -200,6 +205,7 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
     // 本次呈现的缓存命中率 —— 与 paintedPixels 同一条纪律：统计只描述这一轮。
     if (glyph_cache_) glyph_cache_->resetStats();
 
+    const auto t_pre = Clock::now();
     const float zoom = cfg_.zoom;
     const int page_px_w = pagePxWidth();
     const int page_px_h = pagePxHeight();
@@ -546,12 +552,22 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
         }
         page_fp_in_base_ = page_fp_new_;
         page_fp_base_count_ = page_fp_new_count_;
-        snapshotLineGeometry();
+        // 行几何快照是 O(全部行) 的：它按 layout_.lines.size() 重新开数组并逐行算带范围，
+        //   2000 段那一份是 4005 行、实测约 1.2 ms。而它描述的是"底图里装的是哪些行"，
+        //   只有排版真的跑过才可能变 —— 与窗口挪不挪、有没有脏页都无关。
+        //   原先三个分支各调一次，等于每次呈现都整份重取，于是什么都没有改的空转 present
+        //   也要为它付一遍钱（1 页文档量到 0.00 ms、2000 段量到 1.3 ms，正是这一笔）。
+        //   这里加判据之后，空转与"只动光标"的那几拍都不再重取。
+        //   另外两支（底图全建、平移复用）保持无条件重取：那两支本身就是换窗，
+        //   重取一次相对它们自己的代价可以忽略，而漏取会留下幽灵行。
+        if (layout_pending_) snapshotLineGeometry();
         edit_stats_.repainted_pages = dirty;
     }
     edit_stats_.total_pages = total_pages;
     edit_stats_.window_pages = count;
     edit_stats_.window_first_page = first_page;
+
+    const auto t_swap = Clock::now();
 
     // 把帧缓冲刷新到与底图一致
     //
@@ -577,6 +593,8 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
         selection_rects_prev_.clear();
     }
     for (const Rect& r : refresh) bitmap_.copyRectFrom(base_, r);
+
+    const auto t_blit = Clock::now();
 
     // 选区
     //
@@ -620,7 +638,9 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
     // 画在光标之后：光标和标记会在字段末尾附近贴住，
     //   标记后画才能保证它不被光标盖掉（反过来就是上面那个 bug）。
     // 只读不画：它是呈现与打印态，括号落进版面就印出来了。
-    if (mode_ != EditMode::ReadOnly) drawControlMarks();
+    if (mode_ != EditMode::ReadOnly) drawControlMarks(first_page, count);
+
+    const auto t_overlay = Clock::now();
 
     // 记账
     //
@@ -703,6 +723,8 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
         if (any) noteBlitDirty(uni);
     }
 
+    const auto t_ledger = Clock::now();
+
     // 光标那几个数字一次算完：caret() 是投影（含一次二分），反复调既没必要也让读数
     //   有可能落在两个状态之间（下一次投影的代价换来的是"同一帧里的数来自同一处"）。
     const TextPos caret_now = caret();
@@ -755,6 +777,7 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
         edit_stats_.page_fp_ms = 0.0;
     }
 
+    const auto t_end = Clock::now();
     const double paint_ms = msSince(t0);
     stats_.paint_ms = paint_ms;
     stats_.paint_fill_ms = sub_fill_ms;
@@ -765,6 +788,12 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
     // 减掉前两段，剩下的就是"帧缓冲搬移"这一段 —— 比再插一个计时点更不容易漏
     // （中间还有光标擦除/填充那一小块）。
     stats_.paint_present_ms = std::max(0.0, paint_ms - sub_fill_ms - sub_glyph_ms);
+    stats_.paint_pre_ms = spanMs(t0, t_pre);
+    stats_.paint_swap_ms = spanMs(t_pre, t_swap);
+    stats_.paint_blit_ms = spanMs(t_swap, t_blit);
+    stats_.paint_overlay_ms = spanMs(t_blit, t_overlay);
+    stats_.paint_ledger_ms = spanMs(t_overlay, t_ledger);
+    stats_.paint_report_ms = spanMs(t_ledger, t_end);
     stats_.frame_width = frame_w;
     stats_.frame_height = frame_h;
     edit_stats_.paint_ms = paint_ms;
@@ -792,7 +821,7 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
  * 字体与基线取行盒的 bracket_font 与 bracket_axis_pt。这样"要占位"与"要画"
  * 共用同一份数据，槽在就画得出，与那一行有没有字形无关，空字段也不例外。
  */
-void EditorEngine::drawControlMarks() {
+void EditorEngine::drawControlMarks(int first_page, int count) {
     const float zoom = cfg_.zoom;
     const int page_px_h = std::max(1, static_cast<int>(std::lround(cfg_.page.height_pt * zoom)));
     const int gap_px = std::max(0, static_cast<int>(std::lround(cfg_.page_gap_pt * zoom)));
@@ -800,8 +829,33 @@ void EditorEngine::drawControlMarks() {
     const float units_to_px = zoom / kFontScalePerPt;
     const float dot = std::max(1.0f, cfg_.control_dot_pt * zoom);
 
-    // 括号
-    for (const LineBox& lb : layout_.lines) {
+    // 括号：只过窗口内的行，不遍历整份 layout_.lines。
+    //
+    //   原先遍历全篇：2000 段文档是 4005 行，每行还要再过一遍簇（绝大多数行没有
+    //   占位簇，走的就是跳过那一支），实测每次呈现 2.0 ms —— 而"什么都没改的空转
+    //   呈现"的全部耗时恰好就是这 2.0 ms（同一条路径在 1 页文档上只有 0.00 ms）。
+    //   限窗同时也是正确性上的修正：帧坐标的 off_y 按 base_first_page_ 折算，窗口外的
+    //   行算出来是帧外坐标，画不进帧，却会被记进 control_marks_prev_，于是进 refresh
+    //   做一趟无用的搬运，还会把窗口外的页算进脏页清单与上屏框。
+    //   行数组按页单调，所以窗口的行区间两端各二分一次就够。
+    const std::vector<LineBox>& lines = layout_.lines;
+    const int n_lines = static_cast<int>(lines.size());
+    int k_begin = 0;
+    int k_end = n_lines - 1;
+    if (count > 0) {
+        int lo = 0, hi = -1;
+        linesOnPage(first_page, &lo, &hi);
+        int lo2 = 0, hi2 = -1;
+        linesOnPage(first_page + count - 1, &lo2, &hi2);
+        // 首页没有行时 lo 已经指向"页号更大的第一行"；末页没有行时取相邻页边界减一。
+        // 这两处的多取/少取都由下面逐行判页号兜住 —— 判据是页号，不是下标。
+        k_begin = lo;
+        k_end = (hi2 >= lo2) ? hi2 : lo2 - 1;
+    }
+    for (int k = k_begin; k <= k_end && k < n_lines; ++k) {
+        if (k < 0) continue;
+        const LineBox& lb = lines[static_cast<size_t>(k)];
+        if (count > 0 && (lb.page < first_page || lb.page >= first_page + count)) continue;
         if (!lb.bracket_font) continue;
         const float off_y = static_cast<float>((lb.page - base_first_page_) * (page_px_h + gap_px));
 
@@ -867,6 +921,7 @@ void EditorEngine::drawControlMarks() {
         const Control& c = controls_.at(ci);
         const Color col = c.read_only ? cfg_.control_mark_ro : cfg_.control_mark;
         for (const ControlRect& cr : controlRects(ci)) {
+            if (count > 0 && (cr.page < first_page || cr.page >= first_page + count)) continue;
             const float off_y =
                 static_cast<float>((cr.page - base_first_page_) * (page_px_h + gap_px));
             // 小点：右下角、内缩一点

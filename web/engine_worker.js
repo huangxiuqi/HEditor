@@ -6,7 +6,7 @@
 // 返回的 Promise 只是"结果到了"的通知；不等它就等于单向消息。
 //
 // 通道（与 web/worker_host.js 的约定）：
-//   下行：boot / pageCanvas / dropPage / view / do（改状态）/ ask（要返回值）
+//   下行：boot / pageCanvas / view / do（改状态）/ ask（要返回值）
 //   上行：ready / state / ack（视口没变，什么都没做）/ reply / error
 //
 // ★ 画布是**一页一张**，不是一窗一张：
@@ -36,8 +36,85 @@ const kPageWidthPt = 595.276;
 const kPageHeightPt = 841.89;
 const kPageMarginPt = 56.7;
 
-/** 页号 -> 该页的离屏上下文。宿主要走掉的页会发 dropPage。 */
-const pageCtx = new Map();
+/**
+ * 槽号 -> 该槽的离屏上下文。
+ *
+ * 槽 = 页在窗口里的位置（窗口首页是槽 0）。画布与转移都是一次性的，交出去就收不回来，
+ *   所以"按槽固定"是唯一能复用的形态：换窗只改"哪个槽画哪一页"，上下文一直留着。
+ */
+const slotCtx = [];
+
+/**
+ * 槽数。与引擎的 kWindowMaxPages 同值，两侧各声明一份。
+ *
+ * 为什么取固定值而不是"按窗口需要多少就多少"：槽号 = 页号模槽数，槽数一变，
+ *   所有页的槽号都会跟着变，于是"哪一页在哪个槽里"这件事整体作废、必须整窗重贴；
+ *   更麻烦的是两侧会有一个消息往返的不同步窗口，那一帧里页会落到错的槽上。
+ *   取固定值就没有这个问题：窗口页数上限本来就是 8（见 kWindowMaxPages），
+ *   而槽数取 8 之后，窗口里任意连续 8 页以内的页号模 8 都互不相同。
+ */
+const kSlotCount = 8;
+
+/**
+ * 当前的槽数 = max(下限, 视口装得下的页数)。
+ *
+ * 为什么不能就用那个下限：引擎的窗口页数是 max(视口页数, min(8, ...))（见
+ *   maxWindowPages 的 Math.max(vis, ...)），视口比 8 页还高时它会超过 8 ——
+ *   那时固定 8 槽会让两页落进同一个槽，表现为那几页永远"缺画布"、且每一拍都在重贴。
+ * 两侧都从同一份几何（视口高、页高、间隙）现推，所以不必额外通信，推出来的也一致。
+ */
+function slotCountNow() {
+  const step = mod.pagePxHeight() + mod.pageGapPx();
+  const vis = step > 0 ? Math.ceil(viewH / step) : 1;
+  return Math.max(kSlotCount, vis);
+}
+
+let slotN = kSlotCount;
+
+// 页号 -> 槽号。取模处理负页号，所以先加一轮再取。
+function slotOf(p) {
+  return ((p % slotN) + slotN) % slotN;
+}
+
+/**
+ * 每一槽当前画着哪一页（-1 = 空，或内容已整体失效）。
+ *
+ * 它是"要不要重贴"的判据：窗口平移之后，只有新进窗口的那几页所落的槽装着别的页，
+ *   其余页仍在自己那个槽里、像素是对的，所以只要贴那几页 —— 这就是按模取槽换来的
+ *   东西：窗口平移不再等于"所有槽都换了页"。
+ */
+const slotPage = [];
+
+// 内容整体作废（换缩放、换页度量、换文档）：所有槽都要重贴。
+function invalidateSlots() {
+  for (let s = 0; s < slotPage.length; ++s) slotPage[s] = -1;
+}
+
+/**
+ * 把槽数与当前几何对一次。变了就整体作废 —— 槽数一变，所有页的槽号都跟着变。
+ *   返回是否变过。凡是"要按槽取页"的地方都先调它。
+ */
+function syncSlotCount() {
+  const n = slotCountNow();
+  if (n === slotN) return false;
+  slotN = n;
+  invalidateSlots();
+  return true;
+}
+
+/**
+ * 页号 -> 上下文。现算，不缓存。
+ *
+ * 为什么不做成缓存的映射：读它的地方不只有贴图那一条路（自审那条走的是 ask，不经过
+ *   贴图）。缓存的派生值只要有一条路没更新到，读出来就是上一窗的对应 —— 症状是
+ *   "画布与帧对不上"，而看代码完全看不出哪里错了。现算的成本可以忽略。
+ */
+function ctxOfPage(p) {
+  syncSlotCount();
+  const first = mod.windowFirstPage();
+  if (p < first || p >= first + mod.windowPageCount()) return null;
+  return slotCtx[slotOf(p)] || null;
+}
 
 const post = (msg, transfer) => self.postMessage(msg, transfer || []);
 const err = (e, where) => post({ t: 'error', where: where || '', message: String((e && e.stack) || e) });
@@ -94,7 +171,7 @@ async function installFonts(mode) {
  *   在实现之间容易踩错，两参数形式没有歧义。
  */
 function blitPage(p) {
-  const c = pageCtx.get(p);
+  const c = ctxOfPage(p);
   if (!c) return false;
   const fw = mod.frameWidth();
   const ph = mod.pagePxHeight();
@@ -129,24 +206,33 @@ let blitLastMs = 0;
 let blitLastPages = 0;
 function blitPages(only) {
   const tBlit = performance.now();
+  syncSlotCount();
   const first = mod.windowFirstPage();
   const count = mod.windowPageCount();
   let n = 0;
   for (let p = first; p < first + count; ++p) {
-    if (only && !only.includes(p)) continue;
-    if (blitPage(p)) ++n;
+    const s = slotOf(p);
+    // 两个理由之一成立就要贴：这一页的内容刚变（在 only 里），或者它落的那个槽
+    //   装的还是别的页（窗口平移进来的新页、或内容整体作废）。
+    //   两者都不成立时它已经是对的 —— 窗口平移的绝大多数槽都属于这一档。
+    const stale = slotPage[s] !== p;
+    const dirty = only ? only.includes(p) : false;
+    if (!stale && !dirty) continue;
+    if (blitPage(p)) {
+      slotPage[s] = p;
+      ++n;
+    }
   }
   blitLastMs = performance.now() - tBlit;
   blitLastPages = n;
   return n;
 }
 
-/** 这一窗里还有几页没有画布（宿主还没把它的 canvas 交过来）。 */
+/** 这一窗里还有几页没有画布（宿主还没把该槽的 canvas 交过来）。 */
 function pagesMissing() {
-  const first = mod.windowFirstPage();
   const count = mod.windowPageCount();
   let n = 0;
-  for (let p = first; p < first + count; ++p) if (!pageCtx.has(p)) ++n;
+  for (let s = 0; s < count; ++s) if (!slotCtx[s]) ++n;
   return n;
 }
 
@@ -322,6 +408,9 @@ function render(opName) {
     st = JSON.parse(mod.editStatsJson());
   }
   // 窗口换了要整窗重贴；没换就只贴脏页 —— 这正是"一页一张画布"省下来的那部分。
+  // 窗口换了：传 null 让 blitPages 只贴"槽过期"的那几页（就是新进窗口的页）。
+  //   内容整体作废（换缩放/换页度量/换文档）不在这里判 —— paintFull 已经把槽表全置空，
+  //   于是这一趟无论传什么都会整窗重贴。
   blitPages(moved ? null : JSON.parse(mod.dirtyPagesJson()));
   return st;
 }
@@ -409,6 +498,15 @@ function push(ts, opName, changed) { sendState(ts, opName, render(opName), chang
  *   （探针的分母）就被冲掉了。
  */
 function paintFull() {
+  // 换文档、换缩放、换页度量、重设窗口锚点：页像素尺寸或页面内容整体变了，
+  //   每个槽里装的都可能是上一份的像素，所以槽表整体作废、这一趟整窗重贴。
+  //
+  // 这一条必须显式：paintFull 自己先把窗口锚点设好了，随后 render() 里的 retarget
+  //   会判"窗口没动"。按页号建销的那一版里，这一趟总有一批新画布陆续到达、各自把
+  //   那一页贴一次，于是"整窗都换过页"被顺带补齐了；改成按槽复用之后画布不再新建，
+  //   那条隐式触发就没了 —— 表现为切字体之后画布还留着上一窗的像素，而帧是对的
+  //   （自审逐像素比对一比就露）。所以这件事必须由上面说出来，不能指望下游有谁代劳。
+  invalidateSlots();
   scrollY = 0;
   // 告诉宿主"引擎把滚动位置归零了"。★ 必须是**显式信号**，不能让宿主那边
   //   用"两边不一致就追平"来猜：追平要写 DOM 的 scrollTop，而写它会触发 scroll
@@ -705,7 +803,7 @@ const READ = {
     let maxx = -1;
     let maxy = -1;
     for (let p = first; p < first + count; ++p) {
-      const c = pageCtx.get(p);
+      const c = ctxOfPage(p);
       if (!c) { ++missing; continue; }
       if (c.canvas.width !== fw || c.canvas.height !== ph) { ++sizeBad; continue; }
       ++comparedPages;
@@ -734,7 +832,7 @@ const READ = {
                w: st.caretW, h: st.caretH, visible: st.caretVisible, page: st.caretPage },
       framePx: [fw, fh],
       window: { first, count, comparedPages },
-      pageCanvases: pageCtx.size,
+      pageCanvases: slotCtx.reduce((n, c) => n + (c ? 1 : 0), 0),
       // cssSize / rectPx 要看主线程上的 DOM，由宿主那边补（见 worker_host.js 的 selfCheck 包装）。
       pages: { backing: [mod.pagePxWidth(), ph], cssSize: null, rectPx: null },
       dpr,
@@ -824,16 +922,16 @@ async function handle(m) {
   try {
     if (m.t === 'boot') return void await boot(m);
     if (m.t === 'pageCanvas') {
-      // 某页的画布到了：立刻把那一页贴出来，并把几何重推一次（pagesReady 可能刚变真）。
+      // 某个槽的画布到了：记下它，把那一槽贴出来，并把几何重推一次（pagesReady 可能刚变真）。
+      //   槽只建一次，之后换窗只会再收到新的槽，不会重复收到同一个槽。
       const c = m.canvas.getContext('2d', { alpha: false });
       if (!c) throw new Error('OffscreenCanvas 拿不到 2d 上下文');
-      pageCtx.set(m.page | 0, c);
-      blitPage(m.page | 0);
+      slotCtx[m.slot | 0] = c;
+      // 新来的槽内容未知，先作废，再让 blitPages 把该在它上面的那一页贴上去。
+      //   刚启动时八个槽陆续到达，每来一个都会把已到齐的那几页补一遍，自然收敛。
+      slotPage[m.slot | 0] = -1;
+      blitPages(null);
       return void sendState(m.ts, 'pageCanvas', JSON.parse(mod.editStatsJson()));
-    }
-    if (m.t === 'dropPage') {
-      pageCtx.delete(m.page | 0);
-      return void post({ t: 'ack', ts: m.ts });
     }
     if (m.t === 'view') {
       // 自报这一下花了多少毫秒。宿主拿它和"发出→收到回话"的往返比：差值是排队等待，

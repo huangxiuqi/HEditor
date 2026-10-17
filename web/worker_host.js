@@ -121,7 +121,19 @@ const errors = [];
 //   条目里，只用来算延迟。
 const pendingState = new Map();  // 序号 -> {resolve,reject,tt,name}
 const pendingReply = new Map();  // 序号 -> {resolve,reject,name}
-const pageCanvases = new Map();  // 页号 -> canvas 元素（在用）
+// 槽数。与引擎的 kWindowMaxPages 同值（那边也在 worker 里各声明一份）。
+//   取固定值的原因见 engine_worker 的 kSlotCount：槽号 = 页号模槽数，槽数一变，
+//   所有页的槽号跟着变，而且两侧会有一个消息往返的不同步窗口 —— 那一帧里页会落到错的槽上。
+const kSlotCount = 8;
+// 槽数下限是 8，上限跟着"视口装得下几页"走。为什么不能就钉死在 8：引擎的窗口页数
+//   是 max(视口页数, min(8, ...))，视口比 8 页还高时它会超过 8 —— 那时固定 8 槽
+//   会让两页落进同一个槽。它与 worker 侧从同一份几何现推，所以两边一致。
+const slotOf = (p, n) => ((p % n) + n) % n;
+// 槽号 -> canvas 元素。只增不减：固定八张，建满就不再建。
+const slotCanvases = [];
+// 页号 -> canvas 元素。每个状态按槽重建的派生映射 —— 下游一律按页号读，所以它必须存在，
+//   但它不是真源：真源是 slotCanvases 加当前窗口首页。
+const pageCanvases = new Map();
 let opSeq = 0;
 let askSeq = 0;
 let worker = null;
@@ -315,6 +327,12 @@ let viewSentAt = 0;
  */
 const viewDiag = {
   sent: 0, coalesced: 0, released: 0, settled: 0, canvasMsgs: 0,
+  // 画布消息：新建（pageCanvas，每建一个槽一条）与回收。按槽复用之后回收恒为 0 ——
+  //   留着它是为了当反证：哪天它不为 0，就说明有地方又在按页建销了。
+  canvasNew: 0, canvasDrop: 0,
+  // 状态回推的账：按 label 分类计数，外加文档正文那一格的体量（它是最大的一笔，
+  //   且每推一份就重来一次）。主线程只读不判。
+  label: Object.create(null), textMax: 0, textSum: 0,
   packAvg: 0, packMax: 0, rtt: [], work: [], handle: [], blit: [], blitPages: [],
 };
 const kViewDiagMax = 512;
@@ -437,15 +455,16 @@ function viewSettled(m) {
   if (viewWanted) viewFireAndForget();
 }
 
-/* ── 每页一张画布 ───────────────────────────────────────────────────────── */
+/* ── 每页一张画布（按槽复用）───────────────────────────────────────────── */
 
 /**
- * 一页要一张**新**画布。
+ * 造一个槽元素。
  *
- * ★ 不能做画布池：transferControlToOffscreen 是**一次性**的，交出去的 canvas 再交
- *   第二次会抛 InvalidStateError。旧宿主能复用元素，是因为它只在同一个线程里拿 2D
- *   上下文、从不转移所有权 —— 搬进 Worker 之后那条路就不成立了。
- *   （也不该按页号长期缓存：一页 893×1263 的背衬就是 4.5 MB，160 页就是 700 MB。）
+ * 为什么按槽而不是按页号：transferControlToOffscreen 是一次性的，交出去的画布收不回来，
+ *   而"一页一张、随窗口建销"会让每一次换窗都新建一批元素、转移一批、在新背衬上首画一次。
+ *   槽的个数有硬上限（窗口页数上限，至多 8），把元素与背衬钉在槽上就都能复用 ——
+ *   换窗只是"哪个槽画哪一页"变了，元素一个不建、一个不删。
+ *   反过来按页号长期缓存是不行的：一页背衬就是 3.4 MB，全文 160 页是 550 MB。
  */
 function acquireCanvas() {
   const el = document.createElement('canvas');
@@ -457,33 +476,43 @@ function acquireCanvas() {
 }
 
 /**
- * 把一页的画布交给 Worker。
+ * 把一个槽的画布交给 Worker。
  *   转移列表必须带上 —— 不带会抛 DataCloneError（OffscreenCanvas 不能按值克隆），
- *   那个错只在"新增页"时才露头，页面表现是那几页一直空白。
+ *   那个错只在"新增槽"时才露头，页面表现是那几页一直空白。
  */
-function sendPageCanvas(page, el, gm) {
+function sendPageCanvas(slot, el, gm) {
   const off = el.transferControlToOffscreen();
   ++viewDiag.canvasMsgs;
-  post({ t: 'pageCanvas', ts: now(), page, canvas: off, dpr: gm.dpr,
+  ++viewDiag.canvasNew;
+  post({ t: 'pageCanvas', ts: now(), slot, canvas: off, dpr: gm.dpr,
          viewW: gm.viewW, viewH: gm.viewH }, [off]);
 }
 
 /**
- * 让页画布集合与"当前窗口"对齐：不在窗口里的回收、在窗口里而没有的建出来并交过去。
- *   位置与尺寸全部按 Worker 推来的几何算 —— 一张画布就是那一页，不是"视口里的一段"。
+ * 让槽与"当前窗口"对齐：第 p 页永远用第 p 模槽数 个槽。
+ *
+ * 为什么按模取而不是"窗口里第几个位置"：后者在窗口平移时会让**每个槽都换一页**，
+ *   于是每次换窗都得整窗重贴（实测 99 次换窗、每次中位 6.9 ms，合往返的 22%）。
+ *   按模取之后，窗口平移只让"新进窗口的那几页"落到旧内容的槽上，其余槽里的页
+ *   一动没动、像素本来就是对的。
+ * 页号到元素的映射（pageCanvases）仍是每个状态重建的派生量 —— 下游二十来处读点
+ *   （命中测试、诊断、探针）都按页号读，这样它们一行都不用改。
+ * 八个槽一次建齐（首帧那一趟），此后元素与背衬全留着，换窗只是改几行 style。
  */
 function syncPageCanvases(gm) {
   const dpr = gm.dpr || 1;
   const first = gm.first;
   const count = gm.count;
+  const step = gm.pageStep;
 
-  for (const [p, el] of [...pageCanvases]) {
-    if (p >= first && p < first + count) continue;
-    pageCanvases.delete(p);
-    // 告诉 Worker 放掉它那边的上下文（背衬内存跟着释放），元素直接扔给 GC。
-    post({ t: 'dropPage', page: p });
-    ++viewDiag.canvasMsgs;
-    el.remove();
+  // 槽数 = max(8, 视口装得下的页数)，与 worker 侧同一算法（见那里的 slotCountNow）。
+  const slotStep = gm.pageH + gm.gap;
+  const nSlots = Math.max(kSlotCount, slotStep > 0 ? Math.ceil(gm.viewH / slotStep) : 1);
+  // 一次建齐到 nSlots：慢慢长会让"哪一页在哪个槽里"在中途改一次口径，而那正是要避免的。
+  while (slotCanvases.length < nSlots) {
+    const el = acquireCanvas();
+    slotCanvases.push(el);
+    sendPageCanvas(slotCanvases.length - 1, el, gm);
   }
 
   const vs = viewSize();
@@ -492,22 +521,34 @@ function syncPageCanvases(gm) {
   const w = Math.round(gm.pageW / dpr) + 'px';
   const h = Math.round(gm.pageH / dpr) + 'px';
 
-  for (let p = first; p < first + count; ++p) {
-    let el = pageCanvases.get(p);
-    if (!el) {
-      el = acquireCanvas();
-      el.dataset.page = String(p);   // 指针事件靠它认页（见 onPointerDown）
-      pageCanvases.set(p, el);
-      sendPageCanvas(p, el, gm);
-    }
-    // 显示尺寸每推一次状态都要对一遍，不能只在新建画布时设一次。转移之后这个元素的
+  pageCanvases.clear();
+  const used = new Set();
+  for (let i = 0; i < count; ++i) {
+    const p = first + i;
+    const s = slotOf(p, slotCanvases.length);
+    const el = slotCanvases[s];
+    if (!el) continue;
+    used.add(s);
+    pageCanvases.set(p, el);
+    const pStr = String(p);
+    // 指针事件靠 dataset.page 认页（见 onPointerDown），换窗必须跟着改。
+    if (el.dataset.page !== pStr) el.dataset.page = pStr;
+    if (el.style.display === 'none') el.style.display = 'block';
+    // 显示尺寸每推一次状态都要对一遍，不能只在建槽时设一次。转移之后这个元素的
     //   width/height 属性就作废了：背衬尺寸由 Worker 按帧的页宽页高定，CSS 尺寸只有
     //   这里能改。漏掉的表现是缩放之后"按新的倍率画进旧的显示尺寸"——整页偏小兼发虚。
     if (el.style.width !== w) el.style.width = w;
     if (el.style.height !== h) el.style.height = h;
-    const top = Math.round((p * gm.pageStep) / dpr) + 'px';
     if (el.style.left !== left) el.style.left = left;
+    const top = Math.round((p * step) / dpr) + 'px';
     if (el.style.top !== top) el.style.top = top;
+  }
+  // 这一窗没用到的那几个槽藏起来。窗口里连续不超过 8 页 ⇒ 页号模 8 互不相同 ⇒
+  //   一个槽不会被两页同时认领。
+  for (let s = 0; s < slotCanvases.length; ++s) {
+    if (!used.has(s) && slotCanvases[s].style.display !== 'none') {
+      slotCanvases[s].style.display = 'none';
+    }
   }
   host.pageCanvasCount = pageCanvases.size;
 }
@@ -726,6 +767,14 @@ function handleMessage(m) {
     //   而这边耗时小，说明时间花在路上（打包与跨线程），不是花在主线程的处理上。
     const tHandle = now();
     onState(m);
+    // 这份状态是谁推的、正文那一格多大。正文随每份状态整体重来一次，所以它既是
+    //   每份的固定成本、也随文档长度线性涨（见 viewDiag 的注释）。
+    const lbl = m.label || '(空)';
+    viewDiag.label[lbl] = (viewDiag.label[lbl] || 0) + 1;
+    if (typeof m.text0 === 'string') {
+      viewDiag.textSum += m.text0.length;
+      if (m.text0.length > viewDiag.textMax) viewDiag.textMax = m.text0.length;
+    }
     pushSample(viewDiag.handle, now() - tHandle);
     return;
   }
@@ -1219,7 +1268,8 @@ Object.defineProperties(host, {
   canvas: { get: () => frameCanvasProxy },
   // 形状与单线程宿主的 viewport 对齐（anchor / desired / visible / canvases 一个都不能少：
   //   探针靠它判"窗口跟着可见页走"，缺一格就是一条 `.first` 的 TypeError）。
-  //   pooled 恒为 0 —— 这个宿主没有画布池（已转移的画布不能再转移一次）。
+  //   pooled = 闲置槽数（窗口缩小时留下的槽；已转移的画布不能再转移一次，
+  //   所以"池"只能是"按槽固定"，不是"回收后重新分配"）。
   viewport: {
     get: () => (mirror.geom ? {
       anchor: mirror.geom.anchor,
@@ -1227,7 +1277,7 @@ Object.defineProperties(host, {
       desired: mirror.geom.desired, visible: mirror.geom.visible,
       scrollY: mirror.geom.scrollY, dpr: mirror.geom.dpr,
       pages: [...pageCanvases.keys()].sort((a, b) => a - b),
-      canvases: pageCanvases.size, pooled: 0,
+      canvases: pageCanvases.size, pooled: slotCanvases.length - pageCanvases.size,
       pagePx: [mirror.geom.pageW, mirror.geom.pageH, mirror.geom.gap],
       viewSize: viewSize(),
     } : null),
@@ -1337,6 +1387,10 @@ host.selfCheck = async () => {
 host.viewDiag = () => ({
   sent: viewDiag.sent, coalesced: viewDiag.coalesced, released: viewDiag.released,
   settled: viewDiag.settled, canvasMsgs: viewDiag.canvasMsgs,
+  // 画布消息分两类、状态回推按 label 分类（含正文那一格的体量）：门面是手搭形状，
+  //   新加的账在这里漏一次就是"读数恒为 0"那种最难查的假象。
+  canvasNew: viewDiag.canvasNew, canvasDrop: viewDiag.canvasDrop,
+  label: { ...viewDiag.label }, textMax: viewDiag.textMax, textSum: viewDiag.textSum,
   packAvg: viewDiag.packAvg, packMax: viewDiag.packMax,
   rtt: viewDiag.rtt.slice(), work: viewDiag.work.slice(), handle: viewDiag.handle.slice(),
   blit: viewDiag.blit.slice(), blitPages: viewDiag.blitPages.slice(),
@@ -1564,7 +1618,8 @@ host.dispose = () => {
   window.removeEventListener('resize', onResize);
   if (dprQuery) { dprQuery.removeEventListener('change', onDprWatch); dprQuery = null; }
   if (worker) { worker.terminate(); worker = null; }
-  for (const [, el] of pageCanvases) if (el.parentNode) el.parentNode.removeChild(el);
+  for (const el of slotCanvases) if (el.parentNode) el.parentNode.removeChild(el);
+  slotCanvases.length = 0;
   pageCanvases.clear();
   host.pageCanvasCount = 0;
   if (errorSurface) errorSurface.clear();

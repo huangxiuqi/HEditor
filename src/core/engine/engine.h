@@ -1115,8 +1115,11 @@ private:
      * 几何全部从排版的行盒派生（占位簇的位置 + 行盒的括号参考字体/基线）：
      * 排版说槽在哪，就画在哪 —— 空字段（一个字形都没有）也画得出来。
      * 不进底图：见 presentInternal 里那段说明。
+     *
+     * first_page / count 是这一帧的窗口。标记只画窗口内的行：帧坐标按窗口首页折算，
+     *   窗口外的行落在帧外，画不进去也擦不着。
      */
-    void drawControlMarks();
+    void drawControlMarks(int first_page, int count);
 
     /**
      * 光标 / 编辑模式动过之后调用：括号占位计划变了就重排。

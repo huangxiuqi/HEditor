@@ -452,6 +452,15 @@ std::string statsJson() {
     o << "\"paintGlyphBoundsMs\":" << s.paint_glyph_bounds_ms << ",";
     o << "\"paintedGlyphs\":" << s.painted_glyphs << ",";
     o << "\"paintPresentMs\":" << s.paint_present_ms << ",";
+    // 残差那五段的分解。残差 = 总耗时减掉铺面积与字形，它装的是入口准备、换窗与页循环的
+    //   杂项、帧贴回、上屏记账、光标与上报 —— 合成一个数就只能猜该动哪一块。
+    //   注意写底图那两段（铺面积、字形）包在 paintSwapMs 里面，不是与它并列。
+    o << "\"paintPreMs\":" << s.paint_pre_ms << ",";
+    o << "\"paintSwapMs\":" << s.paint_swap_ms << ",";
+    o << "\"paintBlitMs\":" << s.paint_blit_ms << ",";
+    o << "\"paintOverlayMs\":" << s.paint_overlay_ms << ",";
+    o << "\"paintLedgerMs\":" << s.paint_ledger_ms << ",";
+    o << "\"paintReportMs\":" << s.paint_report_ms << ",";
     o << "\"totalMs\":" << s.total_ms << ",";
     o << "\"frameWidth\":" << s.frame_width << ",";
     o << "\"frameHeight\":" << s.frame_height << ",";
