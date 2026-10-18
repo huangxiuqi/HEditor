@@ -331,7 +331,10 @@ void EditorEngine::relayout() {
     // 前缀保留加从脏段续排（常规增量）；其余情况全量。
     const bool must_full = layout_needs_full_ || layout_dirty_from_ >= n_para;
     const int from = layout_dirty_from_;
-    const bool can_resume = !must_full && from > 0 && from < n_para &&
+    // 有表格时不做任何增量：续排与后缀复用都假定"排版状态只有页号、块轴位置、行数三个标量"，
+    //   而表格外的状态还有"当前在第几行第几格的哪一页片段"。从中间续排会丢掉那份上下文，
+    //   产出的位置与全量重排不一致 —— 退回整篇重排，正确优先。
+    const bool can_resume = tables_.empty() && !must_full && from > 0 && from < n_para &&
                             layout_.para_index.size() > static_cast<size_t>(from);
 
     last_reused_paragraphs_ = 0;
@@ -365,7 +368,7 @@ void EditorEngine::relayout() {
             layout_.para_index[static_cast<size_t>(from)].state_at_start;
         const int prefix_lines = layout_.para_index[static_cast<size_t>(from)].line_begin;
         truncateLayoutAt(from);
-        layoutDocumentRange(fonts_, blocks_, cfg_.page, from, n_para, resume_state, &shaping_cache_,
+        layoutDocumentRangeWithTables(fonts_, blocks_, cfg_.page, tables_, from, n_para, resume_state, &shaping_cache_,
                             &layout_);
         last_relaid_paragraphs_ = n_para - from;
         last_relaid_lines_ = layout_.stats.placed_line_count - prefix_lines;
@@ -391,7 +394,7 @@ void EditorEngine::relayout() {
         }
     } else {
         layout_ = LayoutResult{};
-        layoutDocumentRange(fonts_, blocks_, cfg_.page, 0, n_para, freshReflowState(cfg_.page),
+        layoutDocumentRangeWithTables(fonts_, blocks_, cfg_.page, tables_, 0, n_para, freshReflowState(cfg_.page),
                             &shaping_cache_, &layout_);
         last_relaid_paragraphs_ = n_para;
         last_relaid_lines_ = layout_.stats.placed_line_count;
@@ -440,6 +443,9 @@ EditorEngine::SuffixReuse EditorEngine::trySuffixReuse(int from, int* page_lo, i
     *page_hi = -1;
     *relaid_paragraphs = 1;
     *all_pages_changed = false;
+    // 有表格时不做后缀复用：理由与 can_resume 那一条相同 —— 搬回来的后缀带着旧的页号与
+    //   块轴位置，而表格让"这一段落在哪一页的哪一格"不再是三个标量能续上的。
+    if (!tables_.empty()) return SuffixReuse::None;
     const int n_para = static_cast<int>(blocks_.size());
     const int n_old = static_cast<int>(layout_.para_index.size());
     // 段数增量：这一次编辑把旧 [from, from + m_old) 段换成了新 [from, from + m_new) 段，
@@ -476,7 +482,7 @@ EditorEngine::SuffixReuse EditorEngine::trySuffixReuse(int from, int* page_lo, i
     if (from + m_new > n_para || from + m_old >= n_old) return SuffixReuse::None;
 
     LayoutResult scratch;
-    const ReflowState after = layoutDocumentRange(fonts_, blocks_, cfg_.page, from, from + m_new,
+    const ReflowState after = layoutDocumentRangeWithTables(fonts_, blocks_, cfg_.page, tables_, from, from + m_new,
                                                   resume, &shaping_cache_, &scratch);
 
     // 脏区新旧两版的段范围 → 行/字形范围。段在数组里是连续排列的，两端各取一次就是整段。

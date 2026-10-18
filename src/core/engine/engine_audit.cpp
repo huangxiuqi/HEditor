@@ -349,7 +349,7 @@ std::string EditorEngine::auditBaseJson() {
  */
 int EditorEngine::auditLayout() {
     if (blocks_.empty()) return 0;
-    const LayoutResult ref = layoutDocument(fonts_, blocks_, cfg_.page);
+    const LayoutResult ref = layoutDocument(fonts_, blocks_, cfg_.page, tables_);
     return auditLayoutPair(layout_, ref).total();
 }
 
@@ -358,7 +358,7 @@ std::string EditorEngine::auditLayoutJson() {
     if (blocks_.empty()) return "{\"diff\":0,\"note\":\"empty\"}";
 
     const auto t0 = Clock::now();
-    const LayoutResult ref = layoutDocument(fonts_, blocks_, cfg_.page);
+    const LayoutResult ref = layoutDocument(fonts_, blocks_, cfg_.page, tables_);
     const double full_ms = msSince(t0);
     const LayoutAudit a = auditLayoutPair(layout_, ref);
 
@@ -476,8 +476,11 @@ int EditorEngine::auditCompile() const {
             }
             int lo = 0;
             int hi = 0;
-            if (!idx.intervalOf(block_src_[i].first, &lo, &hi) || seg_start < lo ||
-                seg_start >= hi) {
+            // seg_start 落在本块第一个元素之前是合法的 —— 表格的格边界（离开上一格、
+            //   进入这一格）就夹在两者之间。所以只要求它不越过这个元素的末尾：越过了
+            //   说明段起点跑进了下一块的内容里。
+            (void)lo;
+            if (!idx.intervalOf(block_src_[i].first, &lo, &hi) || seg_start >= hi) {
                 ++d;
             }
         }

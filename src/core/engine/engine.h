@@ -1174,6 +1174,11 @@ private:
      */
     std::vector<BlockSpec> blocks_full_;
     /**
+     * 表格结构（编译产物的一种投影，与 blocks_full_ 同源）。排版吃它来按格布局；
+     * 它也是"这张表跨了几页、格线画在哪"的输入。没有表格时为空。
+     */
+    std::vector<LayoutTable> tables_;
+    /**
      * 控件集合下标 → 控件的节点 id（导出时按同一顺序建）。
      */
     std::vector<NodeId> control_node_ids_;

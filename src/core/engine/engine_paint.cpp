@@ -314,6 +314,45 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
                 cfg_.page_border, 1.0f);
         sub_fill_ms += msSince(t_fill0);
 
+        // 表格格线：画在底图里（它不随光标变），在字形之前 —— 线压不到字上。
+        //   每个格只画自己的外框，于是合并格内部不会多出几条线；跨页处按片段的
+        //   cont_top / cont_bottom 跳过切口那条边，看起来是裁开的而不是分出一条线。
+        if (!layout_.placed_tables.empty()) {
+            const float lw_px = 1.0f;
+            for (const PlacedTable& pt : layout_.placed_tables) {
+                for (const PlacedRow& pr : pt.placed) {
+                    if (pr.page != page_index) continue;
+                    const float top = off_y + pr.y * zoom;
+                    const float bot = top + pr.h * zoom;
+                    if (bot <= top) continue;
+                    int row_seen = -1;
+                    int grid_col = 0;
+                    for (const LayoutCell& lc : pt.cells) {
+                        if (lc.row != pr.row) continue;
+                        if (row_seen != lc.row) {
+                            row_seen = lc.row;
+                            grid_col = 0;
+                        }
+                        const int c0 = grid_col;
+                        grid_col += std::max(lc.col_span, 1);
+                        const int c1 = grid_col;
+                        if (c0 >= static_cast<int>(pt.col_x.size())) continue;
+                        const int c1s = std::min(c1, static_cast<int>(pt.col_x.size()) - 1);
+                        const float left = (pt.x + pt.col_x[static_cast<size_t>(c0)]) * zoom;
+                        const float right = (pt.x + pt.col_x[static_cast<size_t>(c1s)]) * zoom;
+                        if (right <= left) continue;
+                        base_.fillRect(Rect{left, top, lw_px, bot - top}, cfg_.table_line);
+                        base_.fillRect(Rect{right - lw_px, top, lw_px, bot - top}, cfg_.table_line);
+                        if (!pr.cont_top)
+                            base_.fillRect(Rect{left, top, right - left, lw_px}, cfg_.table_line);
+                        if (!pr.cont_bottom)
+                            base_.fillRect(Rect{left, bot - lw_px, right - left, lw_px},
+                                           cfg_.table_line);
+                    }
+                }
+            }
+        }
+
         // 底图里只有页面底色与字形 —— 表单标记（小点/方括号）不在这里画。
         //   它们依赖光标位置，所以画在帧上；见 presentInternal 里那段说明。
         //

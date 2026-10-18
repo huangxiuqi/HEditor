@@ -617,6 +617,7 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
         float row_content_h = 0.0f;
         size_t line_begin = 0;   // 本行第一个行盒下标（换页时整行平移）
         size_t glyph_begin = 0;  // 同上，字形
+        size_t placed_index = 0;  // 这张表在 res.placed_tables 里的下标（绘制几何）
     };
     std::vector<TableFrame> tstack;
     // 行内起点与可用宽度：正文是内容区左边界与内容区宽，格内是格左加内边距与格宽减两侧。
@@ -705,6 +706,19 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
         f.row_top = top_y;
         f.line_begin = res.lines.size();
         f.glyph_begin = res.glyphs.size();
+        // 绘制几何：列边界与表格位置在这里定下，行片段由 closeRow 逐行追加。
+        {
+            PlacedTable pt;
+            pt.handle = t.handle;
+            pt.x = f.x;
+            pt.w = w;
+            pt.cols = cols;
+            pt.col_x = f.col_x;
+            pt.col_x.push_back(w);
+            pt.cells = t.cells;
+            res.placed_tables.push_back(std::move(pt));
+            f.placed_index = res.placed_tables.size() - 1;
+        }
         tstack.push_back(std::move(f));
     };
 
@@ -823,6 +837,50 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
         if (!placed) {
             f.row_top += row_h;
             cursor_y = f.row_top;
+        }
+        // 记录这一行的绘制几何：按页给出片段，切点那两条边不画。空格没有行盒，
+        //   整行按放置后的位置记一条。
+        {
+            PlacedTable& pt = res.placed_tables[f.placed_index];
+            struct PageSpan {
+                int page = 0;
+                float lo = 0.0f;
+                float hi = 0.0f;
+            };
+            std::vector<PageSpan> spans;
+            for (size_t j = f.line_begin; j < res.lines.size(); ++j) {
+                const LineBox& lb = res.lines[j];
+                bool found = false;
+                for (PageSpan& s : spans) {
+                    if (s.page != lb.page) continue;
+                    s.lo = std::min(s.lo, lb.block_lo_pt);
+                    s.hi = std::max(s.hi, lb.block_hi_pt);
+                    found = true;
+                    break;
+                }
+                if (!found) spans.push_back(PageSpan{lb.page, lb.block_lo_pt, lb.block_hi_pt});
+            }
+            std::sort(spans.begin(), spans.end(),
+                      [](const PageSpan& a, const PageSpan& b) { return a.page < b.page; });
+            if (spans.empty()) {
+                PlacedRow pr;
+                pr.row = f.row;
+                pr.page = page_index;
+                pr.y = f.row_top - row_h;
+                pr.h = row_h;
+                pt.placed.push_back(pr);
+            } else {
+                for (size_t i = 0; i < spans.size(); ++i) {
+                    PlacedRow pr;
+                    pr.row = f.row;
+                    pr.page = spans[i].page;
+                    pr.y = spans[i].lo - kTableCellPaddingPt;
+                    pr.h = (spans[i].hi - spans[i].lo) + 2.0f * kTableCellPaddingPt;
+                    pr.cont_top = (i > 0);
+                    pr.cont_bottom = (i + 1 < spans.size());
+                    pt.placed.push_back(pr);
+                }
+            }
         }
         f.line_begin = res.lines.size();
         f.glyph_begin = res.glyphs.size();

@@ -353,6 +353,41 @@ struct LayoutTable {
 };
 
 /**
+ * 一条已放置的表格行（页片段）。跨页拆开的一行在每页各有一条。
+ *
+ * cont_top / cont_bottom 说明这一片段的上边或下边是"接着别处"的 —— 绘制跳过那条边，
+ * 于是跨页处看起来是裁开的，而不是被分出一条线。这条区分只能在产物里表达：
+ * 光看矩形分不出"行的顶边"与"上一片段被我接着的那条切口"。
+ */
+struct PlacedRow {
+    int row = 0;
+    int page = 0;
+    float y = 0.0f;  // 行顶（页内坐标）
+    float h = 0.0f;
+    bool cont_top = false;
+    bool cont_bottom = false;
+};
+
+/**
+ * 一张已放置的表格：位置、列边界（相对表格左边，长度 cols+1）与它的行片段。
+ *
+ * 它只是绘制与命中用的几何投影，不是排版输入 —— 排版输入是 LayoutTable。
+ */
+struct PlacedTable {
+    uint64_t handle = 0;
+    float x = 0.0f;  // 表格左边（页内坐标）
+    float w = 0.0f;
+    int cols = 0;
+    std::vector<float> col_x;
+    /**
+     * 逻辑格（含跨度）。绘制要靠它算每个格自己的框 —— 只画格的外框，合并格内部就不会
+     * 多出几条线，而"哪些列边界被跨过"这件事也不必另存一份掩码。
+     */
+    std::vector<LayoutCell> cells;
+    std::vector<PlacedRow> placed;
+};
+
+/**
  * runs 是否恰好铺满 [0, cp_text.size())：升序、首尾相接、无空洞、无重叠、区间非空。
  * runs 为空时恒真（等价情形，属性由块级字段给出）。
  * 返回 false 时把第一处不合法的原因写进 why；why 可以为空指针。
@@ -724,6 +759,12 @@ struct LayoutResult {
      * 下标即块下标；空块给一个 {0}。
      */
     std::vector<std::vector<uint32_t>> para_cluster_starts;
+
+    /**
+     * 表格的绘制几何（每张表一条，嵌套时内层也各有一条）。没有表格时为空 ——
+     * 空表与"这段代码不存在"逐字节相同。
+     */
+    std::vector<PlacedTable> placed_tables;
     LayoutStats stats;
 };
 

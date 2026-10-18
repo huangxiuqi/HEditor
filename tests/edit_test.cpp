@@ -8639,6 +8639,78 @@ int main() {
                        "撤销把文本与原子一起装回来");
         }
     }
+    std::printf("\n[45] 表格：装载、格内编辑与「有表格不走增量」\n");
+    {
+        EditorEngine e45;
+        expectTrue(e45.init({cjkPath, mnPath, latinPath}), "引擎初始化");
+        EngineConfig c45;
+        c45.zoom = 1.0f;
+        c45.page.width_pt = 300.0f;
+        c45.page.height_pt = 300.0f;
+        c45.page.margin_pt = 10.0f;
+        e45.setConfig(c45);
+
+        NodeTree t;
+        const NodeId s = t.firstSectionId();
+        const NodeId table = t.appendChild(s, NodeKind::Table);
+        for (int r = 0; r < 2; ++r) {
+            const NodeId row = t.appendChild(table, NodeKind::TableRow);
+            for (int c = 0; c < 2; ++c) {
+                const NodeId cell = t.appendChild(row, NodeKind::TableCell);
+                const char ch = static_cast<char>('A' + r * 2 + c);
+                t.setText(t.appendChild(cell, NodeKind::TextRun),
+                          utf8ToCodepoints(std::string(1, ch)));
+                // 格内段落以标记结束：块与流的映射靠标记递推，没有标记就续不到下一格。
+                t.appendChild(cell, NodeKind::ParagraphMark);
+            }
+        }
+        e45.setDocument(t, StyleSheet{});
+        e45.relayout();
+        expectTrue(e45.auditLayout() == 0, "装载之后：增量与整篇重排逐字段一致");
+        expectTrue(e45.auditCompile() == 0, "装载之后：产物与整树全量编译一致");
+
+        const std::vector<BlockSpec>& bl = e45.blocks();
+        expectTrue(bl.size() == 4, "2x2 表编出四段");
+        bool path_ok = (bl.size() == 4);
+        for (size_t i = 0; i < bl.size() && path_ok; ++i) {
+            path_ok = bl[i].cell_path.size() == 1 &&
+                      bl[i].cell_path[0].row == static_cast<int>(i / 2) &&
+                      bl[i].cell_path[0].cell == static_cast<int>(i % 2);
+        }
+        expectTrue(path_ok, "四段各带自己的单元格路径（行优先）");
+
+        const LayoutResult& lay = e45.layout();
+        expectTrue(lay.lines.size() == 4, "四段各一行");
+        expectTrue(lay.placed_tables.size() == 1 && lay.placed_tables[0].placed.size() == 2,
+                   "产物里有一张表、两条行几何");
+        if (lay.lines.size() == 4 && lay.placed_tables.size() == 1 &&
+            lay.placed_tables[0].col_x.size() >= 2) {
+            const PlacedTable& pt = lay.placed_tables[0];
+            expectNear(lay.lines[1].inline_origin_pt, pt.x + pt.col_x[1] + kTableCellPaddingPt, 0.01,
+                       "第二格的行内起点落在第二列的起点上（不是内容区左边）");
+            expectTrue(lay.lines[2].block_lo_pt > lay.lines[0].block_lo_pt,
+                       "第二行在第一行下面");
+        }
+
+        // 格内编辑：增量被禁（有表格），文本必须落进第二格那一段。
+        e45.setCaret(1, 1);
+        expectTrue(e45.typeTextAndRender("Z"), "在表格第二格打字");
+        const EditStats st45 = e45.editStats();
+        expectTrue(st45.layout_was_full, "有表格时不做增量（整篇重排）");
+        expectTrue(e45.auditLayout() == 0, "编辑之后仍与整篇重排逐字段一致");
+        expectTrue(e45.blocks().size() == 4 && e45.blocks()[1].textUtf8() == "BZ",
+                   "打进去的字落在第二格（第 1 段）");
+        expectTrue(e45.blocks()[0].textUtf8() == "A" && e45.blocks()[2].textUtf8() == "C" &&
+                       e45.blocks()[3].textUtf8() == "D",
+                   "其余三格的内容一个字都没动");
+
+        expectTrue(e45.undo(), "撤销");
+        e45.relayout();
+        expectTrue(e45.blocks().size() == 4 && e45.blocks()[1].textUtf8() == "B",
+                   "撤销之后第二格回到一个字");
+        expectTrue(e45.auditLayout() == 0, "撤销之后仍与整篇重排逐字段一致");
+    }
+
     std::printf("\n──────────────────────────────\n");
     std::printf("共 %d 项断言，失败 %d 项\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

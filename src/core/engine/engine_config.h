@@ -72,6 +72,11 @@ struct EngineConfig {
     Color selection_color = Color{178, 214, 255, 90};
     float caret_width_pt = 1.4f;
     bool draw_page_border = true;
+    /**
+     * 表格格线。宽度固定为一个设备像素（见绘制处），线宽不做成配置项 ——
+     * 它一旦跟着缩放变粗，跨页拼接处的两条半像素线就会显出来。
+     */
+    Color table_line = Color::rgb(120, 126, 134);
 
     /**
      * 表单控件标记。

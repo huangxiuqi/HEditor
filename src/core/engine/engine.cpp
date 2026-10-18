@@ -209,6 +209,7 @@ void EditorEngine::rebuildFromTree() {
     CompileResult res = compileDocument(tree_, vis, sheet_);
     blocks_full_ = std::move(res.blocks);
     block_src_ = std::move(res.sources);
+    tables_ = std::move(res.tables);
     edit_stats_.rebuild_compile_ms = msSince(t_compile0);
     finishRebuildFromTree(vis);
 }
@@ -227,6 +228,9 @@ bool EditorEngine::compileParagraphInto(int para) {
     if (para < 0) return false;
     if (para >= static_cast<int>(block_src_.size())) return false;
     if (para >= static_cast<int>(blocks_full_.size())) return false;
+    // 有表格时一律退回整树重编：单段编译只走一个容器的一截子节点，不经过表格、行、格
+    //   这三层，编出来的块没有单元格路径 —— 排版就会把格里的字当正文摆到页面上。
+    if (!tables_.empty()) return false;
     const Node* mark = tree_.find(block_src_[static_cast<size_t>(para)].mark);
     if (mark == nullptr || !isParagraphMark(mark->kind) || mark->parent == nullptr) return false;
     const Node* container = mark->parent;
@@ -340,6 +344,16 @@ void EditorEngine::finishRebuildFromTree(FlowVisibility vis) {
         if (flow_->intervalOf(block_src_[0].first, &first, nullptr) && first >= 0) start = first;
     }
     for (size_t i = 0; i < n; ++i) {
+        // 上一条递推出的起点与本块第一枚内容元素的区间起点之间可能隔着容器边界 ——
+        //   表格的格边界就是两位（离开上一格、进入这一格）。取两者的较大值：
+        //   控件从中间切开的场景里 first 是控件节点、起点偏前，递推值更大，取它；
+        //   表格场景里格边界在递推值之后，first 的起点更大，取它。
+        //   少了这一步，表格里的第二块起流位置会停在格边界上，光标与编辑一律落偏。
+        int first_lo = -1;
+        if (!block_src_.empty() && i < block_src_.size() &&
+            flow_->intervalOf(block_src_[i].first, &first_lo, nullptr) && first_lo > start) {
+            start = first_lo;
+        }
         int mark_first = -1;
         int mark_end = -1;
         if (i < block_src_.size() &&
