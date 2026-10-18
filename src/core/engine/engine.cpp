@@ -89,7 +89,7 @@ constexpr size_t kGlyphCacheBudgetBytes = 48u * 1024u * 1024u;
 
 bool EditorEngine::init(const std::vector<std::string>& fontPaths) {
     // 视图先摆好：init 之后任何一次光标读写都要它，而它只存容器地址（之后不再变）。
-    refreshCaretView();
+    refreshViews();
     for (const auto& p : fontPaths) {
         if (fonts_.addFace(p) < 0) return false;
     }
@@ -160,7 +160,7 @@ void EditorEngine::setConfig(const EngineConfig& cfg) {
     if (plan_changed || page_changed) relayout();
     // 撤销上限不影响呈现，只影响栈能留多长 —— 调小的话当场裁掉多余的（不必等下一次提交）。
     if (undo_) undo_->setLimit(cfg_.undo_limit);
-    refreshCaretView();
+    refreshViews();
 }
 
 void EditorEngine::setCaretAndSelectionStyle(const Color& caret, float caret_width_pt,
@@ -168,14 +168,14 @@ void EditorEngine::setCaretAndSelectionStyle(const Color& caret, float caret_wid
     cfg_.caret_color = caret;
     cfg_.caret_width_pt = caret_width_pt < kMinCaretWidthPt ? kMinCaretWidthPt : caret_width_pt;
     cfg_.selection_color = selection;
-    refreshCaretView();
+    refreshViews();
 }
 
 /**
  * 文档装载：模型树那条路（第十四节的接缝）。
  */
 void EditorEngine::setDocument(const NodeTree& tree, const StyleSheet& sheet) {
-    refreshCaretView();
+    refreshViews();
     tree_.assignFrom(tree);
     sheet_ = sheet;
     loaded_ = true;
@@ -202,7 +202,7 @@ FlowVisibility EditorEngine::flowVisibility() const {
 void EditorEngine::rebuildFromTree() {
     // 视图先摆好：下面这一段就要用位置解析（落基、控件导出），而它读的是视图。
     //   容器都是成员、不换对象，所以地址现在取和最后取一样。
-    refreshCaretView();
+    refreshViews();
     edit_stats_.rebuild_path = 0;
     const FlowVisibility vis = flowVisibility();
     const auto t_compile0 = Clock::now();
@@ -528,12 +528,13 @@ void EditorEngine::exportControlsFromBlocks() {
 }
 
 /**
- * 把位置解析要读的那几样东西摆给解析器（见 PositionView）。
+ * 把两份视图摆给它们各自的类：位置解析读 PositionView，命令层读 EditView。
  *
  * 视图里存的是这些容器的地址，而容器都是引擎的成员、不换对象（重建是 assign、重排是就地
- * 改），所以摆一次之后地址一直有效；两个收口点（重建之后、重排之后）各摆一次是保守做法。
+ * 改），所以摆一次之后地址一直有效；四个收口点（init / setDocument / 重建之后 / 重排之后）
+ * 各摆一次是保守做法。
  */
-void EditorEngine::refreshCaretView() {
+void EditorEngine::refreshViews() {
     PositionView v;
     v.blocks = &blocks_;
     v.blocks_full = &blocks_full_;
@@ -546,9 +547,26 @@ void EditorEngine::refreshCaretView() {
     v.layout = &layout_;
     caret_.setView(v);
     caret_.setCaretWidthPt(cfg_.caret_width_pt);
+
+    EditView e;
+    e.host = this;
+    e.tree = &tree_;
+    e.caret = &caret_;
+    e.flow = &flow_;
+    e.blocks = &blocks_;
+    e.blocks_full = &blocks_full_;
+    e.block_flow = &block_flow_;
+    e.block_flow_span = &block_flow_span_;
+    e.block_src = &block_src_;
+    e.controls = &controls_;
+    e.control_node_ids = &control_node_ids_;
+    e.mode = &mode_;
+    e.tab_spaces = &cfg_.tab_spaces;
+    e.blocked_edits = &blocked_edits_;
+    edit_.setView(e);
 }
 
-bool EditorEngine::commitOnTree(Transaction tx, int dirty_para, ParaDelta delta) {
+bool EditorEngine::commitEdit(Transaction tx, int dirty_para, ParaDelta delta) {
     if (!loaded_) return false;  // 没装载过文档：没有树可依，也就没有可提交的事务
     const StepResult r = undo_->commit(std::move(tx));
     if (!r.ok) return false;
@@ -578,198 +596,6 @@ bool EditorEngine::commitOnTree(Transaction tx, int dirty_para, ParaDelta delta)
     }
     markLayoutDirty(dirty_para);
     return true;
-}
-
-bool EditorEngine::eraseOnTree(TextPos a, TextPos b, const char* label, bool caret_at_end) {
-    if (a.para != b.para) return false;
-    // 删除区间取"这段文本码点自己占的那一段"（括号不在里面，见 textSpanAt）。
-    int rel_from = 0;
-    int rel_to = 0;
-    if (!caret_.textSpanAt(a.para, a.offset, b.offset, &rel_from, &rel_to)) return false;
-    const FlowPos base = block_flow_[static_cast<size_t>(a.para)];
-    const FlowPos from = base + rel_from;
-    const FlowPos to = base + rel_to;
-    if (from < 0 || to < 0 || from >= to) return false;
-    // 按文本节点切分着删（见 makeDeleteTextSteps）：区间级那套"端点向外扩到结构单元边界"
-    //   的规则在这里正好帮倒忙 —— 删控件里的一个字会被理解成删掉整个控件的内容。
-    std::vector<Step> steps = makeDeleteTextSteps(tree_, from, to);
-    if (steps.empty()) return false;
-    Transaction tx;
-    tx.label = label;
-    // 撤销恢复的是"删除之前光标在哪"：退格与反缩进的光标在右端（被删的字在它左边），
-    //   前删在左端。两处都写成左端的话，退格一次再撤销，光标会落到被恢复那个字的前面。
-    const FlowPos caret_before = caret_at_end ? to : from;
-    tx.selection_before = Range{caret_before, caret_before};
-    tx.selection_after = Range{from, from};
-    tx.steps = std::move(steps);
-    if (!commitOnTree(std::move(tx), a.para, ParaDelta{})) return false;
-    // 落点 = 删除区间的起点，也就是被删掉那段文本所在的位置。这个流位置本来就算出来了，
-    //   直接摆过去即可 —— 只留一个码点偏移、再由"最内层含端点"猜回侧别的话，
-    //   删完一个字光标会落到相邻括号的另一侧（"跳了一格"）。
-    setCaretAtFlow(from);
-    return true;
-}
-
-namespace {
-
-/**
- * 一步删除的起点（把整批删除步骤从后往前排时用）。
- * 只认两种删除步骤 —— 这个序列里不会有别的。
- */
-FlowPos stepStartFlow(const Step& s) {
-    if (const auto* d = std::get_if<DeleteRange>(&s)) return d->begin;
-    if (const auto* r = std::get_if<RemoveParaMark>(&s)) return r->at;
-    return -1;
-}
-
-}  // namespace
-
-std::vector<Step> EditorEngine::eraseFlowSteps(FlowPos from, FlowPos to) const {
-    std::vector<Step> steps;
-    if (from < 0 || to <= from) return steps;
-    // 优先"整段并成一步"：区间里全是文本与段落标记时成立，而整篇删除与跨段删除都是这种。
-    //   按节点切分要发几千步，每一步在提交时都要重建一次流索引（O(节点数)）——
-    //   2000 段整篇删除实测几秒，其中一多半在这一项上。
-    if (flow_.has_value()) {
-        steps = makeDeleteRangeOneStep(tree_, *flow_, from, to);
-        if (!steps.empty()) return steps;
-    }
-    // 文本那一条：按"所属文本节点"切分，落在段落标记、容器边界与原子上的位置不产生步骤。
-    steps = makeDeleteTextSteps(tree_, from, to);
-    // 段落标记那一条：标记各占一个流位置，要么整覆盖要么不覆盖。
-    //   它不能用 makeDeleteRange 顶替：那条按结构取区间，会把端点向外扩到控件边界
-    //   （见 makeDeleteTextSteps 的说明），而这里要的正是"只删掉这一位"。
-    //
-    //   位置由块表直接给出，不逐位问 posAt：标记夹在两段之间，位置就是后一段的流起点减一。
-    //   逐位问是 O(位置数 x 扇出)（posAt 要从根下降到最内层，每层线性扫孩子），
-    //   2000 段文档整篇删除是亿级 —— 实测那一笔占了删除总耗时的几秒。
-    if (flow_.has_value()) {
-        for (size_t k = 1; k < block_flow_.size(); ++k) {
-            const FlowPos p = block_flow_[k] - 1;
-            if (p < from || p >= to) continue;
-            const ParaMarkBuild mb = makeRemoveParaMark(tree_, *flow_, p);
-            if (mb.ok) steps.push_back(mb.step);
-        }
-    }
-    // 从后往前：删右边的不会移动左边的坐标，于是每步的坐标都是它自己那一刻的坐标。
-    std::sort(steps.begin(), steps.end(), [](const Step& a, const Step& b) {
-        return stepStartFlow(a) > stepStartFlow(b);
-    });
-    // 安全阀：两批步骤加起来必须刚好覆盖整个区间。差一位都说明区间里有东西是这套可编辑
-    //   集合处理不了的（节边界、控件边界），此时宁可整条编辑被拒，也不要删掉半截区间 ——
-    //   半截区间的症状是"选中的字还剩一个没删掉"，很难归因。
-    FlowPos covered = 0;
-    for (const Step& s : steps) {
-        if (const auto* d = std::get_if<DeleteRange>(&s)) {
-            covered += d->end - d->begin;
-        } else if (std::get_if<RemoveParaMark>(&s) != nullptr) {
-            covered += 1;
-        }
-    }
-    if (covered != to - from) return {};
-    return steps;
-}
-
-EditorEngine::SelectionErase EditorEngine::planEraseSelection() {
-    SelectionErase plan;
-    if (!hasSelection() || !flow_.has_value() || block_flow_.empty()) return plan;
-    plan.before = caret_.selection();
-    plan.at = caret_.selection().begin();
-    const FlowPos from = caret_.selection().begin();
-    const FlowPos to = caret_.selection().end();
-    if (from >= to) return plan;
-    // 判定与实际删除同一把尺子：判的是整个区间能不能编辑，删的是同一个区间。
-    //   跨段的区间在这里第一次被放行 —— 档 1 的 policyErase 只管同段。
-    if (!formDegraded() && !canEditRange(tree_, mode_, Range{from, to}).allowed) {
-        ++blocked_edits_;
-        plan.blocked = true;
-        return plan;
-    }
-    plan.steps = eraseFlowSteps(from, to);
-    if (plan.steps.empty()) {
-        ++blocked_edits_;
-        plan.blocked = true;
-    }
-    return plan;
-}
-
-bool EditorEngine::commitErase(const SelectionErase& plan, const char* label) {
-    if (plan.steps.empty()) return false;
-    // 段数变了就得禁掉后缀复用：跨段删除删掉段落标记，后一段的起点整体前移，
-    //   "第 k 段还是同一段"这件事不再成立。同段内删除照旧只标脏那一段。
-    const bool cross = caret_.paraForFlow(plan.at) != caret_.paraForFlow(plan.before.end() - 1);
-    Transaction tx;
-    tx.label = label;
-    tx.selection_before = plan.before;
-    tx.selection_after = Range{plan.at, plan.at};
-    tx.steps = plan.steps;
-    if (!commitOnTree(std::move(tx), caret_.paraForFlow(plan.at),
-                      cross ? ParaDelta{true} : ParaDelta{})) {
-        ++blocked_edits_;
-        return false;
-    }
-    setCaretAtFlow(plan.at);
-    return true;
-}
-
-/**
- * 用一段文本替换当前选区 —— 打字与缩进的共同落点。
- *
- * 删除与插入合并成一次事务：用户按下的是一下，撤销也该是一下。分成两个事务的话，
- * 第一次撤销只退掉那个字、选区还没回来，而"撤销回到编辑前两端"要求一次就回去。
- *
- * 插入的坐标直接用删除区间的起点 —— 那正是选区被删掉之后光标所在的位置（那些删除
- * 都在它右边，删右边不会移动左边的坐标，所以它在整批步骤里始终有效）。沿用的字符
- * 格式得在删除之前取：要的是"落点左边那个字"的格式，删完就取不到了。
- */
-bool EditorEngine::replaceSelectionWithText(const std::vector<uint32_t>& cps) {
-    if (cps.empty()) return false;
-    const SelectionErase plan = planEraseSelection();
-    if (plan.blocked || plan.steps.empty()) return false;
-
-    InsertText s;
-    s.at = plan.at;
-    s.cps = cps;
-    s.marks = marksAtFlow(s.at, &s.styleRef);
-
-    const FlowPos after = plan.at + static_cast<FlowPos>(cps.size());
-    Transaction tx;
-    tx.label = "输入";
-    tx.selection_before = plan.before;
-    tx.selection_after = Range{after, after};
-    tx.steps = plan.steps;
-    tx.steps.push_back(Step{s});
-
-    const bool cross = caret_.paraForFlow(plan.at) != caret_.paraForFlow(plan.before.end() - 1);
-    if (!commitOnTree(std::move(tx), caret_.paraForFlow(plan.at),
-                      cross ? ParaDelta{true} : ParaDelta{})) {
-        ++blocked_edits_;
-        return false;
-    }
-    setCaretAtFlow(after);
-    return true;
-}
-
-CharFormat EditorEngine::marksAtFlow(FlowPos at, std::string* style_ref) const {
-    if (style_ref != nullptr) style_ref->clear();
-    if (!flow_.has_value()) return CharFormat{};
-    const Pos p = flow_->posAt(at);
-    const Node* n = tree_.find(p.container);
-    if (n == nullptr) return CharFormat{};
-    if (isText(n->kind)) {
-        if (style_ref != nullptr) *style_ref = n->styleRef;
-        return n->marks;
-    }
-    // 落在容器里（含"文本之前"的空位置）：看前一个孩子是不是文本 —— 打字接在已有文字
-    //   后面是最常见的一种，沿用它的标记才不会在粗体字后面敲出一个不粗的字。
-    if (isContainer(n->kind) && p.offset > 0) {
-        const Node* prev = n->children[static_cast<size_t>(p.offset) - 1];
-        if (prev != nullptr && isText(prev->kind)) {
-            if (style_ref != nullptr) *style_ref = prev->styleRef;
-            return prev->marks;
-        }
-    }
-    return CharFormat{};
 }
 
 bool EditorEngine::undo() {
@@ -984,50 +810,10 @@ void EditorEngine::clearSelection() { caret_.clearSelection(); }
 
 bool EditorEngine::selectAll() { return caret_.selectAll(); }
 
-/**
- * 落点判定：走模型层的能力表（树 + 流位置）。
- * 六个编辑入口与四个光标入口都调它，免得十来处各写一遍。
- */
-EditCheck EditorEngine::policyAt(TextPos p) const {
-    if (formDegraded()) return EditCheck{true, ""};
-    // 侧别由位置自己推（光标这一处用光标自己的侧别，见 sideForPos）——
-    //   不从控件下标反推：同一个偏移上可能压着好几枚括号，反推会猜错。
-    const FlowPos f = flowPosAtSide(p.para, p.offset, caret_.sideForPos(p));
-    if (f < 0) return EditCheck{false, "落点不在文档流里"};
-    return canEditAt(tree_, mode_, f);
-}
+EditCheck EditorEngine::policyAt(TextPos p) const { return edit_.policyAt(p); }
 
 EditCheck EditorEngine::policyErase(TextPos a, TextPos b) const {
-    // 档 1 的删除不跨段；段落标记的删除走合并那条路（另有判定）。
-    if (a.para != b.para) return EditCheck{false, "删除区间跨段"};
-    if (formDegraded()) return EditCheck{true, ""};
-    // 区间 = "这段文本码点自己占的那一段"，与实际删除（eraseOnTree）同一把尺子。
-    //   端点取错侧就会被判成越出控件而拒掉，表象是"删到只剩一个字就删不动了"；
-    //   取宽了又会把相邻的括号圈进来，表象是"删完光标跳一格"。
-    int rel_from = 0;
-    int rel_to = 0;
-    if (!caret_.textSpanAt(a.para, a.offset, b.offset, &rel_from, &rel_to))
-        return EditCheck{false, "删除区间不在文档流里"};
-    const FlowPos base = block_flow_[static_cast<size_t>(a.para)];
-    return canEditRange(tree_, mode_, Range{base + rel_from, base + rel_to});
-}
-
-/**
- * 表单模式的安全阀：一份"一个可编辑控件都没有"的文档退化为文档模式，而不是什么都不让改。
- *
- * 理由：一个还没配字段的文档切到表单模式，用户期望的是"跟平时一样"，而不是突然一个字都
- *   打不进去 —— 后者会被当成功能坏了，没人会想到是策略在生效。它是个刻意的安全阀，不是
- *   遗漏；将来若要做"严格表单"，应该另加一个 EditMode，不要改这里。
- *
- * 判据只看导出后的控件集合（隐藏控件在呈现态本就不在里面），有一个非只读的就为真。
- */
-bool EditorEngine::formDegraded() const { return mode_ == EditMode::Form && !hasEditableControl(); }
-
-bool EditorEngine::hasEditableControl() const {
-    for (int i = 0; i < controls_.size(); ++i) {
-        if (!controls_.at(i).read_only) return true;
-    }
-    return false;
+    return edit_.policyErase(a, b);
 }
 
 bool EditorEngine::moveCaretBy(int dcp, bool extend) {
@@ -1078,472 +864,34 @@ bool EditorEngine::moveCaretVertical(int dir, bool extend) {
 
 void EditorEngine::showCaret(bool on) { caret_visible_ = on; }
 
-/**
- * 编辑：插入与删除，先过落点判定（policyAt / policyErase），再按字素簇吸附。
- */
-
 bool EditorEngine::insertCodepoints(int para, size_t offset, const std::vector<uint32_t>& cps) {
-    if (cps.empty()) return false;
-    if (para < 0 || para >= static_cast<int>(blocks_.size())) return false;
-    // 落点就是光标（打字与缩进都走这里）而选区非空：这一次输入是"替换选中内容"。
-    //   落到别处的插入（程序化插入）不动选区 —— 那种调用的坐标是按调用时的文档算出来
-    //   的，删掉一段会让它整批一起过期。
-    if (hasSelection()) {
-        const TextPos here = caret();
-        if (para == here.para && offset == here.offset) return replaceSelectionWithText(cps);
-    }
-    // 插入前必须吸附：否则一串 e + U+0301 中间被插进字符，基字与标记就分家了。
-    const size_t at = caret_.snapToCluster(para, offset);
-
-    // 策略判定用的是吸附之后的位置 —— 判定用的位置和真正落笔的位置
-    //   必须是同一个。否则会出现"策略放行了一个它根本没看过的位置"这种漏洞：
-    //   吸附把 at 挪到簇边界之后，落笔点可能已经跨到另一个控件里去了。
-    const TextPos ins{para, at};
-    if (!policyAt(ins).allowed) {
-        ++blocked_edits_;
-        return false;
-    }
-
-    // 落笔在树上：插入是一条步骤，经事务提交，块流随后由新树重编译出来。
-    // 落点的流位置由 (偏移, 侧别) 给出 —— 侧别取光标自己存的那个。
-    //   从控件下标反推（老的 flowPosAt）在多枚括号压在同一个偏移上时会猜错：空嵌套里
-    //   "最后一枚右括号之前"会被猜成"第一枚左括号之后"，字与光标一起插到别处去。
-    const FlowPos at_flow = flowPosAtSide(para, at, caret_.sideForPos(ins));
-    if (at_flow < 0) {
-        ++blocked_edits_;
-        return false;
-    }
-    InsertText s;
-    s.at = at_flow;
-    s.cps = cps;
-    // 沿用落点左侧的字符格式：否则在粗体字中间敲出来的字不是粗的。
-    s.marks = marksAtFlow(at_flow, &s.styleRef);
-    Transaction tx;
-    tx.label = "输入";
-    tx.selection_before = Range{at_flow, at_flow};
-    const FlowPos after = at_flow + static_cast<FlowPos>(cps.size());
-    tx.selection_after = Range{after, after};
-    tx.steps.push_back(Step{s});
-    if (!commitOnTree(std::move(tx), para, ParaDelta{})) {
-        ++blocked_edits_;
-        return false;
-    }
-    // 落点 = 插入区间的终点，事务里已经算好了（tx.selection_after）—— 直接摆过去，
-    //   不再"丢成一个码点偏移再猜侧别"。
-    // 段号不变、段内码点偏移整体后移：控件的开闭括号会跟着内容走，而段的码点里
-    //   没有它们，所以区间端点不必手工修。
-    setCaretAtFlow(after);
-    return true;
+    return edit_.insertCodepoints(para, offset, cps);
 }
 
 bool EditorEngine::insertCodepoint(int para, size_t offset, uint32_t cp) {
-    return insertCodepoints(para, offset, std::vector<uint32_t>{cp});
+    return edit_.insertCodepoint(para, offset, cp);
 }
 
 bool EditorEngine::insertTextUtf8(int para, size_t offset, const std::string& utf8) {
-    return insertCodepoints(para, offset, utf8ToCodepoints(utf8));
+    return edit_.insertTextUtf8(para, offset, utf8);
 }
 
 bool EditorEngine::typeTextUtf8(const std::string& utf8) {
-    return insertCodepoints(caret().para, caret().offset, utf8ToCodepoints(utf8));
+    return edit_.typeTextUtf8(utf8);
 }
 
-bool EditorEngine::controlFlowSpan(int index, FlowPos* lo, FlowPos* hi) const {
-    if (!flow_.has_value()) return false;
-    if (index < 0 || index >= static_cast<int>(control_node_ids_.size())) return false;
-    int first = -1;
-    int end = -1;
-    if (!flow_->intervalOf(control_node_ids_[static_cast<size_t>(index)], &first, &end)) return false;
-    if (lo != nullptr) *lo = first;
-    if (hi != nullptr) *hi = end;
-    return true;
-}
+bool EditorEngine::backspace() { return edit_.backspace(); }
 
-bool EditorEngine::controlIsEmpty(int index) const {
-    FlowPos lo = 0;
-    FlowPos hi = 0;
-    if (!controlFlowSpan(index, &lo, &hi)) return false;
-    // 容器的两枚边界各占一格，中间什么都没有时区间恰好两格宽。
-    return hi - lo == 2;
-}
+bool EditorEngine::deleteForward() { return edit_.deleteForward(); }
 
-int EditorEngine::controlEndingAt(FlowPos p) const {
-    for (int i = 0; i < static_cast<int>(control_node_ids_.size()); ++i) {
-        FlowPos lo = 0;
-        FlowPos hi = 0;
-        if (!controlFlowSpan(i, &lo, &hi)) continue;
-        if (hi == p) return i;
-    }
-    return -1;
-}
-
-int EditorEngine::controlStartingAt(FlowPos p) const {
-    for (int i = 0; i < static_cast<int>(control_node_ids_.size()); ++i) {
-        FlowPos lo = 0;
-        FlowPos hi = 0;
-        if (!controlFlowSpan(i, &lo, &hi)) continue;
-        if (lo == p) return i;
-    }
-    return -1;
-}
-
-/**
- * 退格贴着控件括号时的四种情形（从左到右的书写方向）。
- *
- * 光标在闭括号右面：控件有内容 ⇒ 光标进控件（落到内容末尾），再删掉左边那一项；空 ⇒ 删控件。
- * 光标在开括号右面：控件有内容 ⇒ 光标退到开括号左面，一个字都不删；空 ⇒ 删控件
- *   （空控件的内部就这一格，两条规则落在同一个位置上）。
- *
- * "删掉左边那一项"只有两种东西：一个字符，或者一个空控件。左边是个有内容的控件时，就按
- * 同一套规则再往里进一层 —— 嵌套不是特例，是这个循环自然走出来的（参考实现 DCWriterLite
- * 的 DocumentControler.Backspace 也是拿 while 一路进入）。选"进入"而不是"直接删掉整个
- * 内层控件"，是因为后者会把用户没打算删的内容一起带走。
- */
-EditorEngine::BracketHit EditorEngine::bracketBackspace(FlowPos* at) {
-    if (at == nullptr || !flow_.has_value() || controls_.empty()) return BracketHit::None;
-    *at = -1;
-    const FlowPos cur = caret_.selection().focus;
-
-    const int open_before = controlStartingAt(cur - 1);
-    if (open_before >= 0) {
-        FlowPos lo = 0;
-        FlowPos hi = 0;
-        if (!controlFlowSpan(open_before, &lo, &hi)) return BracketHit::None;
-        if (controlIsEmpty(open_before) &&
-            removeControl(open_before, /*keep_content=*/false, cur)) {
-            return BracketHit::Handled;
-        }
-        // 有内容，或者空控件被结构锁挡住：两种都退到开括号左面，不删任何东西。
-        *at = lo;
-        return BracketHit::MoveOnly;
-    }
-
-    FlowPos p = cur;
-    for (int depth = 0; depth < 64; ++depth) {
-        const int ci = controlEndingAt(p);
-        if (ci < 0) break;
-        if (controlIsEmpty(ci)) {
-            if (removeControl(ci, /*keep_content=*/false, cur)) return BracketHit::Handled;
-            FlowPos lo = 0;
-            FlowPos hi = 0;
-            if (!controlFlowSpan(ci, &lo, &hi)) return BracketHit::None;
-            *at = lo;  // 删不掉（结构锁）：至少让光标退出控件，别吞掉这一下
-            return BracketHit::MoveOnly;
-        }
-        p -= 1;  // 进入控件：光标落到闭括号左面，也就是内容末尾
-    }
-    if (p == cur) return BracketHit::None;
-    *at = p;
-    return BracketHit::MoveThenErase;
-}
-
-/**
- * 前删贴着控件括号时的四种情形，与退格左右对称。
- *
- * 光标在开括号左面：有内容 ⇒ 光标进到开括号右面，删掉右边那一项；空 ⇒ 删掉控件。
- * 光标在闭括号左面：有内容 ⇒ 光标跳到闭括号右面（跳出控件），删掉右边那一项；空 ⇒ 删掉控件。
- *
- * 跳出之后右边可能又是一枚闭括号（内层控件正好是外层的最后一项），那就继续往外跳 ——
- * 括号本身没有"删掉它"这个动作，能删的永远是内容。
- */
-EditorEngine::BracketHit EditorEngine::bracketDeleteForward(FlowPos* at) {
-    if (at == nullptr || !flow_.has_value() || controls_.empty()) return BracketHit::None;
-    *at = -1;
-    const FlowPos cur = caret_.selection().focus;
-
-    // 闭括号左面：闭括号占 cur 那一格，于是这个控件的区间终点是 cur + 1。
-    int ci = controlEndingAt(cur + 1);
-    if (ci < 0) ci = controlStartingAt(cur);  // 开括号左面
-    if (ci < 0) return BracketHit::None;
-    if (controlIsEmpty(ci)) {
-        if (removeControl(ci, /*keep_content=*/false, cur)) return BracketHit::Handled;
-        FlowPos lo = 0;
-        FlowPos hi = 0;
-        if (!controlFlowSpan(ci, &lo, &hi)) return BracketHit::None;
-        *at = lo;
-        return BracketHit::MoveOnly;
-    }
-
-    FlowPos p = cur + 1;
-    for (int depth = 0; depth < 64; ++depth) {
-        const int inner = controlStartingAt(p);
-        if (inner >= 0) {
-            if (controlIsEmpty(inner)) {
-                // 右边紧挨着一个空控件：删掉它（"删一个字符或空控件"里的后半句）。
-                if (removeControl(inner, /*keep_content=*/false, cur)) return BracketHit::Handled;
-                FlowPos lo = 0;
-                FlowPos hi = 0;
-                if (!controlFlowSpan(inner, &lo, &hi)) return BracketHit::None;
-                *at = lo;
-                return BracketHit::MoveOnly;
-            }
-            p += 1;  // 进入右边那个控件，删它的第一个字
-            continue;
-        }
-        if (controlEndingAt(p + 1) >= 0) {
-            p += 1;  // 右边是一枚闭括号：跳出去，接着往外找
-            continue;
-        }
-        break;
-    }
-    *at = p;
-    return BracketHit::MoveThenErase;
-}
-
-bool EditorEngine::backspace() {
-    if (blocks_.empty()) return false;
-    // 选区非空时退格是"删掉选区"，不再往前多删一个字 —— 这是最容易抄错的一条：
-    //   抄成"先折叠选区再退格"的症状是用户删掉三个字，却连带把选区前面那个字也吃了。
-    const SelectionErase plan = planEraseSelection();
-    if (plan.blocked) return false;
-    if (!plan.steps.empty()) return commitErase(plan, "退格");
-    const FlowPos caret_before = caret_.selection().focus;
-
-    // 控件边界上的退格（四条规则见 bracketBackspace）。这一段必须排在"段首退格 = 并入
-    //   上一段"之前：控件跨段时它的闭括号落在下一段的段首，从段首那条路走会并段，
-    //   而不是按括号规则处理。
-    FlowPos at = -1;
-    const BracketHit hit = bracketBackspace(&at);
-    if (hit == BracketHit::Handled) return true;
-    if (hit == BracketHit::MoveOnly) {
-        if (at >= 0) setCaretAtFlow(at);
-        return true;
-    }
-    if (hit == BracketHit::MoveThenErase && at >= 0) setCaretAtFlow(at);
-
-    TextPos p = caret();
-    if (p.para < 0 || p.para >= static_cast<int>(blocks_.size())) p.para = 0;
-    p.offset = caret_.snapToCluster(p.para, p.offset);
-
-    // 段首退格 = 并入上一段（跨段编辑）。策略拒绝时返回 false，与其它被拒编辑同一口径：
-    //   宿主据此判断"没变"，光标也不会动。按括号规则搬过光标的那一下同样算变过。
-    if (p.offset == 0) return mergeWithPreviousParagraph() || caret_before != caret_.selection().focus;
-
-    // 往回删一个簇，不是删一个码点。
-    //   e + U+0301 会被一次删掉；只删 U+0301 会留下一个孤立的组合重音。
-    const size_t at_cp = caret_.snapToCluster(p.para, p.offset - 1);
-    // 策略：整个删除区间必须落在同一个可编辑控件内。
-    // 这一条同时挡掉两个方向 —— 从控件外往里删、从控件里往外删。
-    if (!policyErase(TextPos{p.para, at_cp}, TextPos{p.para, p.offset}).allowed) {
-        ++blocked_edits_;
-        // 光标已经搬过了（例如刚按括号规则进入控件）：搬了就是变了，别让宿主跳过重绘。
-        return caret_before != caret_.selection().focus;
-    }
-    // at_cp 与 p.offset 同段、且 at_cp < p.offset（簇吸附保证的），所以这是一个良构的
-    //   删除区间。光标在右端：撤销时它要回到被删的那个字后面。
-    return eraseOnTree(TextPos{p.para, at_cp}, TextPos{p.para, p.offset}, "退格",
-                       /*caret_at_end=*/true);
-}
-
-bool EditorEngine::deleteForward() {
-    if (blocks_.empty()) return false;
-    // 与退格同一条：选区非空时只删选区，不再往后多删一个字。
-    const SelectionErase plan = planEraseSelection();
-    if (plan.blocked) return false;
-    if (!plan.steps.empty()) return commitErase(plan, "前删");
-    const FlowPos caret_before = caret_.selection().focus;
-
-    FlowPos at = -1;
-    const BracketHit hit = bracketDeleteForward(&at);
-    if (hit == BracketHit::Handled) return true;
-    if (hit == BracketHit::MoveOnly) {
-        if (at >= 0) setCaretAtFlow(at);
-        return true;
-    }
-    if (hit == BracketHit::MoveThenErase && at >= 0) setCaretAtFlow(at);
-
-    TextPos p = caret();
-    if (p.para < 0 || p.para >= static_cast<int>(blocks_.size())) p.para = 0;
-    p.offset = caret_.snapToCluster(p.para, p.offset);
-
-    const size_t len = blocks_[static_cast<size_t>(p.para)].cp_text.size();
-    // 段末 Delete = 把下一段并进来（与"段首退格并入上一段"对称）。
-    if (p.offset >= len) return mergeWithNextParagraph() || caret_before != caret_.selection().focus;
-
-    size_t next = p.offset + 1;
-    if (p.para < static_cast<int>(layout_.para_cluster_starts.size()) &&
-        !layout_.para_cluster_starts[static_cast<size_t>(p.para)].empty()) {
-        const size_t ceil_cp =
-            clusterCeil(layout_.para_cluster_starts[static_cast<size_t>(p.para)], p.offset);
-        if (ceil_cp > p.offset) next = ceil_cp;
-    }
-    if (next > len) next = len;
-
-    if (!policyErase(TextPos{p.para, p.offset}, TextPos{p.para, next}).allowed) {
-        ++blocked_edits_;
-        return caret_before != caret_.selection().focus;
-    }
-
-    return eraseOnTree(TextPos{p.para, p.offset}, TextPos{p.para, next}, "前删");
-}
-
-/**
- * 回车：在光标处把这一段拆成两段（跨段编辑）。
- *
- * 新段的样式复制自原段（字体、字号、书写模式、行距、段后距、颜色、回退链、语言），
- * 只有 page_break_before 刻意清掉：段落分隔符不该附带一次翻页 ——
- * 否则在文档中间按一次回车会把后面整篇推到新页上。
- */
-bool EditorEngine::splitParagraph() {
-    if (blocks_.empty()) return false;
-    // 选区非空时回车是"删掉选区，再在落点分段"。
-    const SelectionErase plan = planEraseSelection();
-    if (plan.blocked) return false;
-    // 删完就往下走，而不是删完即止：回车与退格不同，它要的是"在这里断开"。
-    // 已经删过之后，下面任何一步被拒都得报"变过"（consumed）—— 报假会让宿主跳过
-    //   重绘，症状是"选中的内容已经没了，屏幕上还留着"。
-    const bool consumed = !plan.steps.empty();
-    if (consumed && !commitErase(plan, "分段")) return false;
-    TextPos p = caret();
-    if (p.para < 0 || p.para >= static_cast<int>(blocks_.size())) p.para = 0;
-    p.offset = caret_.snapToCluster(p.para, p.offset);
-
-    // 分段 = 在断点处插入一个段落分隔符，所以判据与"在这里插字"完全相同。
-    //   判定用的位置与真正插标记的位置必须是同一个，安全阀也只该有一处。
-    if (!policyAt(p).allowed) {
-        ++blocked_edits_;
-        return consumed;
-    }
-
-    // 新标记插在光标处，于是它结束的是前半段：段落属性整体沿用原段（新段必须与原段
-    //   同格式），只有一条例外 —— 拆出来的后半段不该跟着强制分页。
-    //   后半段由被替代的那枚标记结束，所以那一条例外要落到它身上；原段不带强制
-    //   分页时不必动它（那样会平白多出一条内联覆盖）。
-    const NodeId mark_a = (p.para < static_cast<int>(block_src_.size()))
-                              ? block_src_[static_cast<size_t>(p.para)].mark
-                              : kInvalidNodeId;
-    const Node* mk = tree_.find(mark_a);
-    ParaFormatPatch patch;
-    std::string style_ref;
-    if (mk != nullptr && isParagraphMark(mk->kind)) {
-        patch = mk->para;
-        style_ref = mk->styleRef;
-    }
-    // 位置由 (偏移, 侧别) 给出，不从控件下标反推。
-    //   反推在空控件处会猜错侧别，于是标记插到了别的控件里（"回车之后光标跑进第三个控件"）。
-    const FlowPos at_flow = flowPosAtSide(p.para, p.offset, caret_.sideForPos(p));
-    if (at_flow < 0) {
-        ++blocked_edits_;
-        return consumed;
-    }
-    Transaction tx;
-    tx.label = "分段";
-    tx.selection_before = Range{at_flow, at_flow};
-    tx.selection_after = Range{at_flow + 1, at_flow + 1};
-    InsertParaMark s;
-    s.at = at_flow;
-    s.para = patch;
-    s.styleRef = style_ref;
-    tx.steps.push_back(Step{s});
-    if (mk != nullptr && isParagraphMark(mk->kind) &&
-        blocks_full_[static_cast<size_t>(p.para)].page_break_before) {
-        SetParaMarkFormat clear_pbb;
-        clear_pbb.id = mark_a;
-        clear_pbb.para = patch;
-        clear_pbb.para.page_break_before = false;
-        clear_pbb.styleRef = style_ref;
-        clear_pbb.before = patch;
-        clear_pbb.beforeStyleRef = style_ref;
-        tx.steps.push_back(Step{clear_pbb});
-    }
-    if (!commitOnTree(std::move(tx), p.para, ParaDelta{true, p.para, 1})) {
-        ++blocked_edits_;
-        return consumed;
-    }
-    // 新标记之后那一位 = 新段的第一个位置。段数变了，后缀复用随之作废（见 commitOnTree）。
-    setCaretAtFlow(at_flow + 1);
-    return true;
-}
-
-/**
- * 合并的一般形式：把 head + 1 段并进 head 段。三种入口（段首退格 / 段末 Delete /
- * 显式调用）只是"从哪一端触发"不同，落到文档上的操作是同一个。
- */
-bool EditorEngine::mergeParagraphInto(int head) {
-    if (head < 0 || head + 1 >= static_cast<int>(blocks_.size())) return false;
-
-    // 合并 = 删掉前一段的结束标记。两段的内容合成一段，而留下来的标记是后一段的 ——
-    //   于是"合并之后那一段保留前一段的格式"这条约定不能白拿：要显式搬到后一段的标记上。
-    const NodeId mark_a = block_src_[static_cast<size_t>(head)].mark;
-    const NodeId mark_b = block_src_[static_cast<size_t>(head + 1)].mark;
-    const Node* ma = tree_.find(mark_a);
-    FlowPos at_a = 0;
-    if (ma == nullptr || !flow_->intervalOf(mark_a, &at_a, nullptr)) return false;
-
-    // 权限按"这枚段落标记能不能被删"判：区间 [at_a, at_a + 1) 就是标记自己那一位。
-    //   判的是标记那一位可不可编辑，不是光标落在哪 —— 光标在字段外、标记在字段内时能合。
-    //   安全阀（表单退化成文档模式）先过一遍，退化的情形该放行。
-    if (!formDegraded() && !canEditRange(tree_, mode_, Range{at_a, at_a + 1}).allowed) {
-        ++blocked_edits_;
-        return false;
-    }
-
-    Transaction tx;
-    tx.label = "合并";
-    tx.selection_before = Range{at_a, at_a};
-    tx.selection_after = Range{at_a, at_a};
-
-    const ParaMarkBuild rm = makeRemoveParaMark(tree_, at_a);
-    if (!rm.ok) return false;
-
-    if (mark_b != kInvalidNodeId) {
-        const Node* mb = tree_.find(mark_b);
-        if (mb == nullptr) return false;
-        SetParaMarkFormat keep;
-        keep.id = mark_b;
-        keep.para = ma->para;
-        keep.styleRef = ma->styleRef;
-        keep.before = mb->para;
-        keep.beforeStyleRef = mb->styleRef;
-        tx.steps.push_back(Step{keep});
-        tx.steps.push_back(rm.step);
-    } else {
-        // 后一段是末尾那一段、没有结束标记：删掉前一段的标记之后，合并出来的那一段就没有
-        //   标记了 —— 它会按默认段落格式编译，前一段的格式静默丢掉。所以补一枚标记在末尾，
-        //   带上被删那枚的格式。
-        //   位置要按"删完之后"的坐标系给：删除让标记之后的一切前移一位。
-        const FlowPos end_before = block_flow_[static_cast<size_t>(head + 1)] +
-                                   block_flow_span_[static_cast<size_t>(head + 1)];
-        InsertParaMark ins;
-        ins.at = mapPos(rm.step, end_before, Assoc::After);
-        ins.para = ma->para;
-        ins.styleRef = ma->styleRef;
-        tx.steps.push_back(rm.step);
-        tx.steps.push_back(Step{ins});
-    }
-    if (!commitOnTree(std::move(tx), head, ParaDelta{true})) {
-        ++blocked_edits_;
-        return false;
-    }
-    setCaretAtFlow(at_a);  // 被删掉的那枚段落标记的位置 = 合并点
-    return true;
-}
+bool EditorEngine::splitParagraph() { return edit_.splitParagraph(); }
 
 bool EditorEngine::mergeWithPreviousParagraph() {
-    if (blocks_.empty()) return false;
-    // 选区非空时它退化成"删掉选区"：它与段首退格本来就是同一件事的两面，
-    //   而退格在选区非空时只删选区（见 backspace），这条必须跟着一致。
-    const SelectionErase plan = planEraseSelection();
-    if (plan.blocked) return false;
-    if (!plan.steps.empty()) return commitErase(plan, "合并");
-    TextPos p = caret();
-    if (p.para <= 0 || p.para >= static_cast<int>(blocks_.size())) return false;
-    // 只有光标确实在段首才合并（否则退格该删的是前一个簇）。
-    if (caret_.snapToCluster(p.para, p.offset) != 0) return false;
-    return mergeParagraphInto(p.para - 1);
+    return edit_.mergeWithPreviousParagraph();
 }
 
 bool EditorEngine::mergeWithNextParagraph() {
-    if (blocks_.empty()) return false;
-    // 同上：选区非空时只删选区。
-    const SelectionErase plan = planEraseSelection();
-    if (plan.blocked) return false;
-    if (!plan.steps.empty()) return commitErase(plan, "合并");
-    TextPos p = caret();
-    if (p.para < 0 || p.para + 1 >= static_cast<int>(blocks_.size())) return false;
-    const size_t len = blocks_[static_cast<size_t>(p.para)].cp_text.size();
-    if (caret_.snapToCluster(p.para, p.offset) != len) return false;
-    return mergeParagraphInto(p.para);
+    return edit_.mergeWithNextParagraph();
 }
 
 bool EditorEngine::typeTextAndRender(const std::string& utf8) {
@@ -1631,125 +979,18 @@ int EditorEngine::controlAtPt(float x_pt_doc, float y_pt_doc) const {
     return controls_.innermostAt(p, /*include_end=*/false);
 }
 
-namespace {
-
-/**
- * 读控件的运行时属性。四个分居两处：hidden 在节点上（呈现态的流位置换算要看它），
- * 其余三个在控件数据里。
- */
-bool readPropValue(const Node* n, ControlProp p, bool* out) {
-    if (n == nullptr || n->kind != NodeKind::ContentControl || out == nullptr) return false;
-    switch (p) {
-        case ControlProp::Hidden:
-            *out = n->hidden;
-            return true;
-        case ControlProp::Readonly:
-            *out = n->control.readonly;
-            return true;
-        case ControlProp::Required:
-            *out = n->control.required;
-            return true;
-        case ControlProp::StructureLock:
-            *out = n->control.structureLock;
-            return true;
-    }
-    return false;
-}
-
-}  // namespace
-
-/**
- * 删控件与改控件属性：结构操作的引擎入口。
- *
- * 两件事都只动树，改完交给 commitOnTree 一次重建 —— 与文本编辑走同一条路，于是撤销、重排、
- * 重绘、记账自动一致，不必另开一条特权通道。
- */
 bool EditorEngine::removeControl(int index, bool keep_content, FlowPos caret_before) {
-    if (!loaded_ || !flow_.has_value()) return false;
-    if (index < 0 || index >= controls_.size()) return false;
-    const NodeId id = control_node_ids_[static_cast<size_t>(index)];
-    const Node* c = tree_.find(id);
-    if (c == nullptr || c->kind != NodeKind::ContentControl || c->parent == nullptr) return false;
-    const NodeId parent_id = c->parent->id;
-    int idx = -1;
-    for (size_t i = 0; i < c->parent->children.size(); ++i) {
-        if (c->parent->children[i]->id == id) {
-            idx = static_cast<int>(i);
-            break;
-        }
-    }
-    if (idx < 0) return false;
-
-    // 结构操作的门：表单模式默认被 structureLock 锁住，文档模式放行（作者在设计表单）。
-    if (!formDegraded() && !canDoStructureOp(tree_, mode_, id).allowed) {
-        ++blocked_edits_;
-        return false;
-    }
-
-    int lo = -1;
-    int hi = -1;
-    if (!flow_->intervalOf(id, &lo, &hi)) return false;
-
-    Transaction tx;
-    tx.label = keep_content ? "删除控件（保留内容）" : "删除控件";
-    // 撤销恢复的是"删除之前光标在哪"：键盘那一路把原位置传进来（它可能在控件里、也可能
-    //   在控件之前），不传时按"选中整个控件"记 —— 那是显式删控件按钮的叙事。
-    tx.selection_before =
-        (caret_before >= 0) ? Range{caret_before, caret_before} : Range{lo, hi};
-    tx.selection_after = Range{lo, lo};
-
-    if (keep_content) {
-        // 拆壳：内容上提、节点移除。两个 span 的差就是节点自己那两枚边界。
-        UnwrapNode u;
-        u.at = Pos{parent_id, idx};
-        u.at_flow = lo;
-        u.span_before = hi - lo;
-        u.span_after = hi - lo - 2;
-        u.node = captureSubtree(tree_, id);
-        u.detached = id;
-        tx.steps.push_back(Step{u});
-    } else {
-        RemoveNode r;
-        r.at = Pos{parent_id, idx};
-        r.at_flow = lo;
-        r.removed = captureSubtree(tree_, id);
-        r.detached = id;
-        tx.steps.push_back(Step{r});
-    }
-
-    const int dirty = controls_.at(index).range.start.para;
-    // 段数可能变（控件里的段落标记没了，或者上提之后换了容器），所以走全量重编译。
-    if (!commitOnTree(std::move(tx), dirty, ParaDelta{true})) {
-        ++blocked_edits_;
-        return false;
-    }
-    // 落点 = 控件区间的起点：保留内容时那里正是它的第一枚内容。
-    setCaretAtFlow(lo);
-    return true;
+    // "有没有可编辑的东西"是引擎的装载状态，命令层只管"编辑怎么做" —— 这一条留在门面。
+    if (!loaded_) return false;
+    return edit_.removeControl(index, keep_content, caret_before);
 }
 
 bool EditorEngine::setControlProp(int index, ControlProp prop, bool value) {
-    if (!loaded_ || index < 0 || index >= controls_.size()) return false;
-    const NodeId id = control_node_ids_[static_cast<size_t>(index)];
-    bool before = false;
-    if (!readPropValue(tree_.find(id), prop, &before)) return false;
-    // 幂等：没变就不提交 —— 撤销栈里多一条什么都没做的记录只会让人困惑。
-    if (before == value) return true;
-
-    SetControlProp s;
-    s.id = id;
-    s.prop = prop;
-    s.value = value;
-    s.before = before;
-
-    Transaction tx;
-    tx.label = "改控件属性";
-    tx.steps.push_back(Step{s});
-    // hidden 改呈现态的流结构（整棵摘除），其余三项不改结构。
-    const bool structural = (prop == ControlProp::Hidden);
-    const int dirty = controls_.at(index).range.start.para;
-    if (!commitOnTree(std::move(tx), dirty, structural ? ParaDelta{true} : ParaDelta{})) return false;
-    if (structural) markAllLayoutDirty();
+    if (!loaded_) return false;  // 没装载过文档：没有控件可改
+    const EditCommand::PropResult r = edit_.setControlProp(index, prop, value);
+    if (r == EditCommand::PropResult::Failed) return false;
+    // hidden 改的是呈现态的流结构（整棵摘除），影响面不可定位 —— 整篇排版作废。
+    if (r == EditCommand::PropResult::Structural) markAllLayoutDirty();
     return true;
 }
 
@@ -1761,14 +1002,13 @@ bool EditorEngine::removeControlAndRender(int index, bool keep_content) {
 }
 
 bool EditorEngine::setControlPropAndRender(int index, ControlProp prop, bool value) {
-    // 先读旧值：幂等（值没变）时 setControlProp 也返回 true，但状态与呈现一个字都没动 ——
-    //   跟着白跑一次重排重绘没有意义，也会把探针的"一次操作重画了多少"记账弄脏。
-    bool before = false;
-    if (loaded_ && index >= 0 && index < static_cast<int>(controls_.size())) {
-        readPropValue(tree_.find(control_node_ids_[static_cast<size_t>(index)]), prop, &before);
-    }
-    if (!setControlProp(index, prop, value)) return false;
-    if (before == value) return true;
+    if (!loaded_) return false;
+    const EditCommand::PropResult r = edit_.setControlProp(index, prop, value);
+    if (r == EditCommand::PropResult::Failed) return false;
+    if (r == EditCommand::PropResult::Structural) markAllLayoutDirty();
+    // 幂等（值没变）时状态与呈现一个字都没动 —— 跟着白跑一次重排重绘没有意义，
+    //   也会把探针的"一次操作重画了多少"记账弄脏。
+    if (r == EditCommand::PropResult::Unchanged) return true;
     relayout();
     repaintAfterEdit();
     return true;
@@ -1900,54 +1140,9 @@ uint64_t EditorEngine::markPlanSignature() const {
     return h;
 }
 
-/**
- * Tab / Shift+Tab：缩进与反缩进
- * 语义先说清楚：Tab 是缩进，不是"跳到下一个控件"。
- * 表单字段之间用鼠标点、或者方向键（光标本来就会跨字段）。理由写在
- * EngineConfig::tab_spaces 那里。
- * 实现上刻意复用"敲字 / 退格"那两条路径：这样策略检查、区间伸缩、
- * 重排、重绘、记账全部自动一致 —— 缩进不该是一条特权通道，
- * 它必须和手打 4 个空格得到的结果逐字节相同（探针里有这条断言）。
- */
-bool EditorEngine::indent() {
-    const int n = std::max(0, cfg_.tab_spaces);
-    if (n == 0) return false;
-    std::string spaces(static_cast<size_t>(n), ' ');
-    return typeTextUtf8(spaces);
-}
+bool EditorEngine::indent() { return edit_.indent(); }
 
-bool EditorEngine::outdent() {
-    if (blocks_.empty()) return false;
-    // 反缩进归"删类"：选区非空时它要做的事就是删掉选区，删完即止 —— 与退格同一口径。
-    //   删完再去找前面的空格是错的：光标这时停在选区起点，前面那一段空格跟用户选中的
-    //   东西无关，退掉它等于多删了用户没选的内容。
-    const SelectionErase plan = planEraseSelection();
-    if (plan.blocked) return false;
-    if (!plan.steps.empty()) return commitErase(plan, "反缩进");
-    TextPos p = caret();
-    if (p.para < 0 || p.para >= static_cast<int>(blocks_.size())) p.para = 0;
-    p.offset = caret_.snapToCluster(p.para, p.offset);
-
-    const std::vector<uint32_t>& cps = blocks_[static_cast<size_t>(p.para)].cp_text;
-    // 光标前连续空格的起点（最多 tab_spaces 个；只在本段内找，
-    // 不跨段回退 —— 跨段删空格会把上一段的段尾吃掉，那是不对的）。
-    size_t at = p.offset;
-    int n = 0;
-    while (at > 0 && n < std::max(0, cfg_.tab_spaces) && cps[at - 1] == 0x20u) {
-        --at;
-        ++n;
-    }
-    if (n == 0) return false;
-
-    // 与 backspace 同一条策略：删掉的区间必须落在同一个可编辑控件内。
-    if (!policyErase(TextPos{p.para, at}, TextPos{p.para, p.offset}).allowed) {
-        ++blocked_edits_;
-        return false;
-    }
-    // 与退格同一档：光标在右端，撤销要回到被删掉的空格后面。
-    return eraseOnTree(TextPos{p.para, at}, TextPos{p.para, p.offset}, "反缩进",
-                       /*caret_at_end=*/true);
-}
+bool EditorEngine::outdent() { return edit_.outdent(); }
 
 bool EditorEngine::indentAndRender() {
     if (!indent()) return false;

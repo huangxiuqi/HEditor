@@ -298,7 +298,7 @@ void EditorEngine::setFrameSlots(int n) {
 void EditorEngine::relayout() {
     const auto t0 = Clock::now();
     // 视图先摆好：下面第一件事就是夹光标，而它读的是视图（地址稳定，摆一次就够）。
-    refreshCaretView();
+    refreshViews();
 
     // 顺序有讲究：先夹光标、再写对象表 —— 因为"哪些字段要显示括号"在 Focused 档下
     //   由光标位置决定（见 bracketedControls），表写完才是排版的输入。

@@ -25,6 +25,7 @@
 #include "core/doc/flow.h"
 #include "core/doc/transaction.h"
 #include "core/engine/caret.h"
+#include "core/engine/edit_command.h"
 #include "core/engine/engine_config.h"
 #include "core/engine/engine_stats.h"
 #include "core/layout/layout.h"
@@ -34,7 +35,7 @@
 
 namespace heditor {
 
-class EditorEngine {
+class EditorEngine : private EditHost {
 public:
     /**
      * fontPaths 的顺序决定字体索引
@@ -797,15 +798,6 @@ public:
     EditCheck policyErase(TextPos a, TextPos b) const;
 
 private:
-    /**
-     * 表单模式的安全阀：一个可编辑控件都没有时，表单退化为文档模式（编辑一律放行），
-     * 而不是"什么都不让改"。理由写在实现处。
-     */
-    bool formDegraded() const;
-    /**
-     * 导出后的控件集合里有没有可编辑的那一个。formDegraded 用它。
-     */
-    bool hasEditableControl() const;
 
     /**
      * 从持有的树重新编译出块流，并把控件集合从产物的边界里导出来。
@@ -832,18 +824,6 @@ private:
     bool compileParagraphInto(int para);
 
     /**
-     * 段数变化的结构形状。
-     *
-     * 只有"在某一段之后插入或删除若干整段"能走局部重建 —— 分段与合并是这种形状；
-     * 控件结构操作（隐藏、删控件）会让段的边界整体重排，形状无从表达，只能整树重编。
-     */
-    struct ParaDelta {
-        bool changed = false;  // 段数变了没有
-        int at = -1;           // 变化点：插入或删除发生在第 at 段之后
-        int inserted = 0;      // 正数 = 插入几段
-    };
-
-    /**
      * 分段之后的局部重建：只重编被劈开的那两段，其余段的产物按段号平移。
      *
      * 为什么值得单开：分段必然让段数加一，而段数变化此前一律走整树编译 —— 2000 段实测
@@ -867,7 +847,7 @@ private:
      */
     FlowVisibility flowVisibility() const;
     /**
-     * 在树上提交一个事务，然后把块流按新树重编译一次。
+     * 命令层的出口（EditHost）：在树上提交一个事务，然后把块流按新树重编译一次。
      *
      * 重编译是必须的而不是图省事：块流、流索引、块起点、来源身份、控件集合全是树的派生量，
      * 少重建任何一个，下一轮就会拿旧树的位置去对新树的块（症状是光标落偏一个字、控件区间
@@ -878,108 +858,12 @@ private:
      * 不认识就整树重编。这个判断放在这里而不是调用方：重建那几条路各自退守的写法
      * 已经够多，再散到八处调用点去就没人能保证一致了。
      */
-    bool commitOnTree(Transaction tx, int dirty_para, ParaDelta delta);
-    /**
-     * 树上的一段删除：把同一段内 [a, b) 这段（已吸附到簇边界）删掉。
-     *
-     * 退格、前删、反缩进三个入口只是算区间的方式不同，落到文档上的操作是同一个 ——
-     * 一条 makeDeleteTextSteps + 一次事务提交。策略判定留在调用方：被拒时要报的是
-     * "用户按的那一下没生效"，与"这一步做不成"不是一回事。
-     *
-     * caret_at_end 说的是"删除之前光标在这段文本的哪一端"，撤销要靠它把光标放回原处：
-     * 退格与反缩进的光标在右端（删完留下的字在光标左边），前删在左端。记成左端的话，
-     * 退格一次再撤销，光标会落到被恢复那个字的前面 —— 而它删除前明明在后面。
-     */
-    bool eraseOnTree(TextPos a, TextPos b, const char* label, bool caret_at_end = false);
-
-    /**
-     * 控件边界上的一次删除落到哪一类（四条规则见 bracketBackspace 的实现处）。
-     */
-    enum class BracketHit {
-        None,           // 不贴任何括号：调用方走普通删除
-        MoveOnly,       // 只搬光标，不删东西
-        MoveThenErase,  // 光标搬到 at，调用方接着删那个方向上的一个字符
-        Handled         // 整个按键已经做完（删掉了控件本身）
-    };
-    /**
-     * 退格贴着控件括号时的四种情形：光标在闭括号右面 / 开括号右面。
-     *
-     * 返回 MoveThenErase 时 at 是已经算好的落点（控件内部的最后一个位置），调用方接着按
-     * 普通退格删左边一项 —— "删控件内的一个字符"就是这样复用普通退格得到的，不另写一套。
-     */
-    BracketHit bracketBackspace(FlowPos* at);
-    /**
-     * 前删贴着控件括号时的四种情形：光标在开括号左面 / 闭括号左面。与退格左右对称。
-     */
-    BracketHit bracketDeleteForward(FlowPos* at);
-    /**
-     * 控件的流区间。不在流里（隐藏、摘除）返回 false。
-     */
-    bool controlFlowSpan(int index, FlowPos* lo, FlowPos* hi) const;
-    /**
-     * 控件内部除了自己那两枚括号什么都没有。只有它为真才允许一次按键删掉整个控件 ——
-     * 有内容时按键删的永远是内容里的一项，控件本身得等它被删空。
-     */
-    bool controlIsEmpty(int index) const;
-    /**
-     * 流区间终点正好是 p 的控件（= 它的闭括号占 p-1 那一格）；没有返回 -1。
-     * 括号各占一格且互不相同，所以这个匹配唯一，不需要挑"最内层"。
-     */
-    int controlEndingAt(FlowPos p) const;
-    /**
-     * 流区间起点正好是 p 的控件（= 它的开括号占 p 那一格）；没有返回 -1。
-     */
-    int controlStartingAt(FlowPos p) const;
-
-    /**
-     * 选区被编辑入口"吃掉"时折算出来的一份删除计划（见 planEraseSelection）。
-     */
-    struct SelectionErase {
-        std::vector<Step> steps;
-        Range before{};
-        FlowPos at = 0;
-        bool blocked = false;
-    };
-    /**
-     * 把当前选区折算成"删掉这一段"的步骤（不提交）。
-     *
-     * 编辑入口的统一前缀：任何编辑在选区非空时都是"先删掉选区，再在原地做这件事"。
-     * 空选区返回空 steps（调用方照原路走）；策略拒绝时置 blocked —— 调用方据此中止整条
-     * 编辑，与"这一下没发生"同一口径，blocked_edits_ 也已经记过一笔。
-     *
-     * 为什么不在这里直接提交：用户在"选中 + 打字"里按的是一下，撤销也该是一下。删除与
-     * 插入合并进同一个事务，撤销一次就回到编辑前的两端。
-     */
-    SelectionErase planEraseSelection();
-    /**
-     * 把删除计划提交成一次事务，并把光标摆到删除区间的起点。
-     */
-    bool commitErase(const SelectionErase& plan, const char* label);
-    /**
-     * 流区间 [from, to) 上的删除步骤（不提交）：区间覆盖到的文本按文本节点切
-     * （makeDeleteTextSteps），整覆盖到的段落标记各发一步 RemoveParaMark。
-     *
-     * 两条构造混在一起从后往前发 —— 每步的坐标是它自己应用那一刻的坐标，而"删右边不会
-     * 移动左边"正是从后往前的全部理由。分两批发（先文本后标记，或反过来）会让后一批的
-     * 坐标过期。区间的总覆盖长度对不上时返回空：宁可整条编辑被拒，也不要删掉半截区间。
-     */
-    std::vector<Step> eraseFlowSteps(FlowPos from, FlowPos to) const;
-    /**
-     * 用一段文本替换当前选区 —— 打字与缩进的共同落点（见实现处的说明）。
-     */
-    bool replaceSelectionWithText(const std::vector<uint32_t>& cps);
+    bool commitEdit(Transaction tx, int dirty_para, ParaDelta delta) override;
     /**
      * 段内相对流位置 → 全局流位置（夹到本段跨度内）。setCaretRel 与重编译落基共用 ——
      * 夹取规则只此一处，两处各写一份就会出现"落基时允许而写入时不允许"这种半截宽度。
      */
 
-    /**
-     * 落点处应当沿用的字符格式：取紧挨在它左边的那个文本节点的标记与样式引用。
-     *
-     * 不取"块级默认"：那样在粗体字中间敲一个字会得到不粗的新字。取邻居是"输入沿用落点处
-     * 已有样式"这条约定的最小实现；左边没有文本节点时返回空标记（= 全继承）。
-     */
-    CharFormat marksAtFlow(FlowPos at, std::string* style_ref) const;
     /**
      * 从块流的行内对象表导出控件集合：按 owner 配对起始与结束两枚边界，
      * 得到控件的 (起, 止) 区间。
@@ -1186,12 +1070,6 @@ private:
     int minControlParagraph() const;
 
     /**
-     * 把 head + 1 段并进 head 段（段首退格 / 段末 Delete / 显式调用共用的实现）。
-     * 光标落在合并点上。策略拒绝时返回 false 并计入 blocked_edits_。
-     */
-    bool mergeParagraphInto(int head);
-
-    /**
      * 把 layout_ 截断到第 para 段之前：丢掉 [para, ...) 的行盒、字形与切片，
      * 保留 [0, para) 原样，供 layoutDocumentRange 从 para 续排。
      * para <= 0 时清空整个结果。
@@ -1395,19 +1273,26 @@ private:
      * 的差 —— 三个派生量都由 focus 现算，没有一个能与它失配。
      */
     /**
-     * 把位置解析要读的那几样东西摆给解析器（见 PositionView）。
+     * 把两份视图摆给它们各自的类：位置解析读 PositionView，命令层读 EditView。
      *
      * 只在文档重建之后与重排之后各摆一次就够：视图里存的是这些容器的地址，而容器都是引擎的
      * 成员、不换对象（重建是 assign、重排是就地改），地址一直有效。
      * 谁要是把某个容器换成了另一个对象（move 走、重新 new），这里就是唯一的失效点。
      */
-    void refreshCaretView();
+    void refreshViews();
 
     /**
      * 光标与位置解析。选区两端、行别、上下键的列位、光标条宽度全在它里面 ——
      * 引擎这一层只留"读文档产物"与"协调重排"（见 projectCaret 与移动族的转发）。
      */
     CaretResolver caret_;
+    /**
+     * 命令层：一次编辑怎么变成一条事务（插入、删除、分段、合并、缩进、结构操作）。
+     *
+     * 它只认 EditView 与 EditHost 两个接口 —— 引擎在这里的角色是"事务的出口"与
+     * "视图的持有者"，编辑本身的做法（策略、步骤、撤销快照、光标落点）全在它里面。
+     */
+    EditCommand edit_;
     bool caret_visible_ = true;
     /**
      * 上一帧画过的选区矩形（帧像素）。下次呈现先按它擦掉 —— 与 caret_rect_px_prev_

@@ -366,6 +366,14 @@ size_t CaretResolver::snapToCluster(int para, size_t offset) const {
     return offset;
 }
 
+size_t CaretResolver::clusterCeilAt(int para, size_t offset) const {
+    if (para < 0 || para >= static_cast<int>(view_.layout->para_cluster_starts.size())) return offset;
+    const std::vector<uint32_t>& starts =
+        view_.layout->para_cluster_starts[static_cast<size_t>(para)];
+    if (starts.empty()) return offset;
+    return clusterCeil(starts, offset);
+}
+
 /**
  * 光标侧别（派生）= focus 的侧别，与 caret() 同源，不可能不同步。
  */

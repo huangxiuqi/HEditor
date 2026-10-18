@@ -223,6 +223,14 @@ int sideForFlow(FlowPos f) const;
 size_t snapToCluster(int para, size_t offset) const;
 
 /**
+ * 下一个簇边界：大于 offset 的最小簇起点；没有（或这一段没有簇表）就返回 offset。
+ *
+ * 与 snapToCluster 配成一对（那个是"<= offset 的最大簇起点"）。前删要用它找"下一个可删
+ * 边界"—— 删一个簇而不是删一个码点，否则 e + U+0301 会被拆开，留下一个孤立的组合重音。
+ */
+size_t clusterCeilAt(int para, size_t offset) const;
+
+/**
  * 光标侧别（派生）= focus 的侧别，与 caret() 同源，不可能不同步。
  */
 int caretSide() const;
