@@ -897,14 +897,30 @@ function keyToOp(ev) {
     if (ev.key === 'End') return ['docEnd', { extend: ev.shiftKey }];
   }
   if (ev.ctrlKey || ev.metaKey || ev.altKey) return null;
+  // 方向键按物理方向映射：横排的行内轴是水平的、块轴是竖直的，所以左右走字、上下换行。
+  //   竖排正好翻过来（行内轴竖直、块轴水平）：上下走字、左右换列。
+  //   换列往哪一边由列序定 —— 中日竖排列自右向左（左 = 下一列），蒙文列自左向右
+  //   （右 = 下一列）。只按"是竖排吗"映射，蒙文的左右就会按反。
+  //   参考行为：Chrome 在 vertical-rl 的 contenteditable 里实测就是这个（out/_vkeyref.mjs）。
+  const axes = mirror.stats || {};
+  const vert = !!axes.caretVertical;
+  const dirLeft = axes.caretBlockReversed ? 1 : -1;   // 物理向左 = 行序 +1 还是 -1
   switch (ev.key) {
     case 'Backspace': return ['backspace', {}];
     case 'Delete': return ['deleteForward', {}];
     // extend = Shift：锚点不动，选区从锚点那一端继续长（引擎侧 setCaretRel 的 collapse）。
-    case 'ArrowLeft': return ['move', { dcp: -1, extend: ev.shiftKey }];
-    case 'ArrowRight': return ['move', { dcp: 1, extend: ev.shiftKey }];
-    case 'ArrowUp': return ['vertical', { dir: -1, extend: ev.shiftKey }];
-    case 'ArrowDown': return ['vertical', { dir: 1, extend: ev.shiftKey }];
+    case 'ArrowLeft':
+      return vert ? ['vertical', { dir: dirLeft, extend: ev.shiftKey }]
+                  : ['move', { dcp: -1, extend: ev.shiftKey }];
+    case 'ArrowRight':
+      return vert ? ['vertical', { dir: -dirLeft, extend: ev.shiftKey }]
+                  : ['move', { dcp: 1, extend: ev.shiftKey }];
+    case 'ArrowUp':
+      return vert ? ['move', { dcp: -1, extend: ev.shiftKey }]
+                  : ['vertical', { dir: -1, extend: ev.shiftKey }];
+    case 'ArrowDown':
+      return vert ? ['move', { dcp: 1, extend: ev.shiftKey }]
+                  : ['vertical', { dir: 1, extend: ev.shiftKey }];
     case 'Home': return ['lineStart', { extend: ev.shiftKey }];
     case 'End': return ['lineEnd', { extend: ev.shiftKey }];
     case 'Enter': return ['splitParagraph', {}];
@@ -1036,9 +1052,15 @@ const CMD = {
   setCaret: (para, offset) => ['setCaret', { para, offset }],
   setCaretAt: (para, offset, field) => ['setCaretAt', { para, offset, field }],
   setCaretAtSide: (para, offset, side) => ['setCaretAtSide', { para, offset, side }],
+  // 带行别的版本：折行处"上一行行尾"与"下一行行首"是同一个偏移与侧别，
+  //   只有行别分得开（见 EditorEngine::caretLineAffinity）。
+  setCaretAtSideLine: (para, offset, side, line) =>
+    ['setCaretAtSideLine', { para, offset, side, line }],
   // 拖选的移动端：只搬焦点端，anchor 留在按下点。与 setCaretAtSide 同一档
   //   （引擎不自己重绘，Worker 侧在 PRESENT_ALWAYS 里主动 present）。
   setFocusAtSide: (para, offset, side) => ['setFocusAtSide', { para, offset, side }],
+  setFocusAtSideLine: (para, offset, side, line) =>
+    ['setFocusAtSideLine', { para, offset, side, line }],
   setCaretOnly: (para, offset) => ['setCaret', { para, offset }],
   indent: () => ['indent', {}, true],
   outdent: () => ['outdent', {}, true],
@@ -1106,7 +1128,8 @@ Object.defineProperty(host, 'bracketSlots', {
  *   cr0.x / cr0.page（拿它算点击坐标）。返回形状也是门面契约的一部分 ——
  *   形状不对时症状是一条 "clientX 不是有限数"，完全看不出是返回值的问题。
  */
-for (const name of ['setCaret', 'setCaretAt', 'setCaretAtSide', 'setFocusAtSide', 'setCaretOnly']) {
+for (const name of ['setCaret', 'setCaretAt', 'setCaretAtSide', 'setCaretAtSideLine',
+                    'setFocusAtSide', 'setFocusAtSideLine', 'setCaretOnly']) {
   const spec = CMD[name];
   host[name] = (...a) => {
     const r = spec(...a);
@@ -1199,8 +1222,13 @@ Object.defineProperty(host, 'allText', {
 async function placeAt(xDev, yDev) {
   const hit = await askOp('hit', { x: xDev / zoom, y: yDev / zoom });
   if (!hit) return null;
-  if (typeof hit.side === 'number') await host.setCaretAtSide(hit.para, hit.offset, hit.side);
-  else await host.setCaret(hit.para, hit.offset);
+  if (typeof hit.side === 'number') {
+    // 行别一起搬：折行处"上一行行尾"与"下一行行首"是同一个偏移与侧别，
+    //   不带回去的话点下一行的行首会画到上一行行尾。
+    await host.setCaretAtSideLine(hit.para, hit.offset, hit.side, hit.line | 0);
+  } else {
+    await host.setCaret(hit.para, hit.offset);
+  }
   return hit;
 }
 
@@ -1271,7 +1299,7 @@ function framePointAt(clientX, clientY) {
  */
 function dragExtendTo(hit) {
   blinkHold();
-  host.setFocusAtSide(hit.para, hit.offset, hit.side);
+  host.setFocusAtSideLine(hit.para, hit.offset, hit.side, hit.line | 0);
 }
 
 /* 帧画布代理（给探针的适配层） */
@@ -1563,7 +1591,9 @@ function restartBlinkTimer() {
   }, 530);
 }
 
-/** 拖选是否正在进行（按下已受理、还没收尾）。 */
+/*
+ * 拖选是否正在进行（按下已受理、还没收尾）。
+ */
 function dragActive() {
   const st = drag ? drag.state() : null;
   return !!(st && st.active);

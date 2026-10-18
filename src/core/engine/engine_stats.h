@@ -246,6 +246,16 @@ struct EditStats {
      * 与 caret_offset 合起来才是光标的完整位置 —— 同一个偏移上有好几个插入点。
      */
     int caret_side = 0;
+    /**
+     * 光标是否落在竖排的段里。方向键的物理映射由它决定：竖排的行内轴是竖直的，
+     * 上下走字、左右换列（见宿主的 keyToOp）。
+     */
+    bool caret_vertical = false;
+    /**
+     * 光标所在段的列序是否反向（中日竖数列自右向左为真，蒙文为假）。
+     * 方向键的左右换列靠它定方向：两种竖排的列序相反，只按"竖排"映射会把蒙文按反。
+     */
+    bool caret_block_reversed = false;
     size_t doc_codepoints = 0;
     bool caret_visible = false;
     /**

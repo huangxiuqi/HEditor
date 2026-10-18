@@ -1197,9 +1197,21 @@ int main() {
             expectTrue(ef.controls().at(0).range.end.offset == 9, "退格后 end 缩回 9");
             expectTrue(ef.blocks()[0].cp_text.size() == len0, "长度退回");
 
+            // 字段开头（开括号右面）退格：规则 2 —— 光标退到开括号左面，一个字都不删。
+            //   退出去之后落在控件之外，那儿的字在表单模式里本来就不可编辑 ⇒ 再退一次才被拒。
             ef.setCaret(0, 5);
-            expectTrue(!ef.backspaceAndRender(), "在字段开头退格 → 拒（不许从字段里删到字段外）");
-            expectTrue(ef.blocks()[0].cp_text.size() == len0, "长度仍然不变");
+            expectTrue(ef.caretSide() == 1, "光标在字段 #0 的开括号之后");
+            expectTrue(ef.backspaceAndRender(), "★ 开括号之后退格：这次按键没被吞掉（光标退了出去）");
+            expectTrue(ef.blocks()[0].cp_text.size() == len0, "长度仍然不变（一个字都没删）");
+            expectTrue(ef.caret().offset == 5 && ef.caretSide() == 0,
+                       "★ 光标退到了开括号左面（cp 5 侧别 0）—— 实际 " +
+                           std::to_string(ef.caret().offset) + "/" +
+                           std::to_string(ef.caretSide()));
+            const long long b1 = ef.blockedEdits();
+            expectTrue(!ef.backspaceAndRender(),
+                       "★ 再退一次：控件之外那一格不可编辑 → 拒（不许从字段外删到字段里）");
+            expectTrue(ef.blocks()[0].cp_text.size() == len0 && ef.blockedEdits() == b1 + 1,
+                       "被拒并记账，长度仍然不变");
         }
 
         // (d) 方向键一步一格，且能走到字段之外
@@ -2845,9 +2857,15 @@ int main() {
 
             e.setCaret(1, 0);
             const long long b1 = e.blockedEdits();
-            expectTrue(!e.backspace(), "★ 表单模式：合并点落在只读字段里 → 被拒");
+            // 段首这一格同时是字段 ed 的开括号右面 ⇒ 第一次按键按规则 2 把光标退出去
+            //   （不删、不合并），第二次才轮到"合并"那一步判定。
+            expectTrue(e.backspace(), "★ 段首退格：先按括号规则把光标退出字段（不删、不合并）");
+            expectTrue(e.caretSide() == 0 && e.blocks().size() == 2 && e.blockedEdits() == b1,
+                       "光标退到开括号左面，文档一个字都没动，也没有被拒的记录");
+            expectTrue(!e.backspace(), "★ 再按一次：合并点落在只读字段里 → 被拒");
             expectTrue(e.blockedEdits() == b1 + 1 && e.blocks().size() == 2,
                        "被拒并计数，且文档一个字都没动");
+            e.setCaret(1, 0);  // 重新落回字段里（setCaret 的默认侧别就是"进入控件"）
             expectTrue(e.splitParagraph(), "表单模式：在可编辑字段里回车分段 → 放行");
             expectTrue(e.blocks().size() == 3, "确实断成了三段（空段 + 甲 + 乙）");
         }
@@ -2908,8 +2926,10 @@ int main() {
 
             // 合并判的是"前一段那枚段落标记自己那一位可不可编辑"，不是光标落在哪。
             //   字段整个落在某一段里时，标记在字段之外 ⇒ 表单模式下拒。
+            //   （第 1 段段首那一格同时是字段 b 的开括号右面，所以先要按括号规则退出去。）
             reload17({mk17(0, 0, 4, "a", false), mk17(1, 0, 4, "b", false)});
             es.setCaret(1, 0);
+            expectTrue(es.backspaceAndRender(), "★ 段首退格：先按括号规则把光标退出字段 b");
             expectTrue(!es.backspaceAndRender(), "段落标记落在字段之外：不可以合并");
 
             // 反向一半：先在字段里分段，字段就被拉成跨两段，那枚标记随之落进字段内部 ⇒ 放行。
@@ -6645,10 +6665,15 @@ int main() {
             expectTrue(
                 afterDelete(3, 11, 2) == "9/1",
                 "★★ 再退一格删「三」→ cp 9 跨过 ]内（侧别 1）—— 实际 " + afterDelete(3, 11, 2));
-            // 三连可编辑：先删"三天"（两下），再删"悸" → 落点回到第一个字段的末尾
-            //   （cp 8 上"所有括号之前"，侧别 0），不是被第三个控件吃掉。
-            expectTrue(afterDelete(2, 11, 3) == "8/0",
-                       "★★ 三连字段删「悸」之后光标停在第一个字段末尾（cp 8 侧别 0），"
+            // 三连可编辑：先删"三天"（两下）→ 第三个字段空了；第三下按规则 2 删掉那个空
+            //   控件本身，第四下才删"悸"，落点回到第一个字段的末尾（cp 8 上"所有括号之前"，
+            //   侧别 0），不是被第三个控件吃掉。
+            expectTrue(afterDelete(2, 11, 3) == "9/1",
+                       "★★ 三连字段：第三个删空之后再退一格，删掉的是那个空控件（光标停在它"
+                       "原来那一格，cp 9 跨过 ]b，侧别 1）—— 实际 " +
+                           afterDelete(2, 11, 3));
+            expectTrue(afterDelete(2, 11, 4) == "8/0",
+                       "★★ 再退一格删「悸」：光标停在第一个字段末尾（cp 8 侧别 0），"
                        "不许跑进第三个控件 —— 实际 " +
                            afterDelete(2, 11, 3));
         }
@@ -6685,26 +6710,47 @@ int main() {
 
             // (a) 全空嵌套：在 ]外 之前输入一个字符，字与光标都该停在所有内层括号之后。
             {
-                std::vector<BlockSpec> bl;
-                std::vector<DemoFieldSpec> fd;
-                build(3, &bl, &fd);
+                // 这一节的状态（三个控件都在、内容全空）直接按树搭出来：按键删空之后光标
+                //   正好停在空控件内部，下一次按键就会把控件本身删掉（规则 2），所以
+                //   "全空且都在"这个状态不是靠退格能停在的 —— 拿退格当铺垫会变成测别的东西。
+                NodeTree tree;
+                const NodeId sec = tree.firstSectionId();
+                auto putText = [&](NodeId parent, const char* s) {
+                    const NodeId t = tree.appendChild(parent, NodeKind::TextRun);
+                    tree.setText(t, utf8ToCodepoints(s));
+                };
+                auto putControl = [&](NodeId parent, const char* key) {
+                    const NodeId c = tree.appendChild(parent, NodeKind::ContentControl);
+                    tree.find(c)->control.key = key;
+                    return c;
+                };
+                putText(sec, "患者主诉：");
+                const NodeId outer = putControl(sec, "outer");
+                const NodeId middle = putControl(outer, "middle");
+                putControl(middle, "inner");
+                putText(sec, "，加重一天。");
+                tree.appendChild(sec, NodeKind::ParagraphMark);
+
                 EditorEngine ex;
                 expectTrue(ex.init(fonts29), "字体加载失败（全空嵌套输入）");
                 ex.setConfig(ec29);
-                ex.setDocument(demoTree(bl, fd), StyleSheet{});
-                ex.setEditMode(EditMode::Form);
+                ex.setDocument(tree, StyleSheet{});
+                ex.setEditMode(EditMode::Document);
                 ex.relayout();
-                ex.setCaret(0, 11);
-                for (int i = 0; i < 6; ++i) ex.backspace();
-                expectTrue(ex.caret().offset == 5, "三层字段全删空后光标落在共享偏移上 —— 实际 " +
-                                                       std::to_string(ex.caret().offset));
-                ex.setCaretAtSide(0, 5, 5);  // 定位到最后一枚右括号之前
+                expectTrue(ex.controls().size() == 3, "三个嵌套控件都在，内容全空");
+                // 三枚右括号都落在同一个码点偏移上（5），侧别 3 = 排在它们之后那一格。
+                ex.setCaretAtSide(0, 5, 3);
+                expectTrue(ex.caretSide() == 3, "光标定在所有内层右括号之后（侧别 3）");
                 ex.insertTextUtf8(0, 5, "X");
                 expectTrue(ex.caret().offset == 6 && ex.caretSide() == 0,
                            "★★ 全空嵌套里在 ]外 之前输入：字与光标都停在所有内层括号之后"
-                           "（cp 6 侧别 0，即 ]外 之前）—— 实际 " +
+                           "（cp 6 侧别 0，即 ]外 之后）—— 实际 " +
                                std::to_string(ex.caret().offset) + "/" +
                                std::to_string(ex.caretSide()));
+                expectTrue(ex.blocks()[0].textUtf8() == "患者主诉：X，加重一天。",
+                           "★ 字插在了所有内层括号之后，没跑到第一枚左括号后面 —— 实际 " +
+                               ex.blocks()[0].textUtf8());
+                expectTrue(ex.auditCompile() == 0, "★ 产物仍与整树全量编译逐字段一致");
             }
 
             // (b) 三连后两个删空：在第二个字段里回车，光标仍该在第二个字段。
@@ -7234,12 +7280,17 @@ int main() {
         }
     }
 
-    std::printf("\n[35] 退格删控件：光标在闭括号后面才退役它，在内容末尾删的是字\n");
+    std::printf("\n[35] 控件边界上的退格与前删：进控件删内容，空控件才删控件\n");
     {
-        // 用户的原话："编辑模式下，光标在控件后面，退格就是删除控件"。
-        // 这一格与"字段内容末尾"共用一个码点偏移，只有流位置分得开 —— 所以判据必须落在
-        //   流位置上，而下面 (a)/(b) 这一对正是它的对照：同一格 (0, 9)，侧别 0 删字、
-        //   侧别 1 删控件。任何"按码点偏移猜"的实现都过不了这一对。
+        // 四条规则（从左到右的书写方向，参照 DCWriterLite 的 Backspace / Delete）：
+        //   退格 光标在闭括号右面：控件有内容 ⇒ 光标进控件，删掉左边那一项；空 ⇒ 删控件
+        //   退格 光标在开括号右面：控件有内容 ⇒ 光标退到开括号左面，不删；空 ⇒ 删控件
+        //   前删 光标在开括号左面：控件有内容 ⇒ 光标进控件，删掉右边那一项；空 ⇒ 删控件
+        //   前删 光标在闭括号左面：控件有内容 ⇒ 光标跳到闭括号右面，删右边那一项；空 ⇒ 删控件
+        // 四条都必须落在流位置上判：这些格子两两共用同一个码点偏移（"内容末尾"与"闭括号之后"
+        //   在文本坐标里是同一个 (段, 偏移)），只有流位置分得开。
+        // 判据同时钉住"控件还在"与"删掉的是哪一项"两半 —— 只钉文本的话，
+        //   "整块内容一起删掉"也能让文本对上。
         std::vector<BlockSpec> bl(1);
         bl[0].setText("患者主诉：反复心悸三天，加重一天。");
         std::vector<DemoFieldSpec> fd;
@@ -7251,11 +7302,11 @@ int main() {
             f.key = key;
             fd.push_back(std::move(f));
         };
-        add(5, 9, "k1");
-        add(12, 16, "k2");
+        add(5, 9, "k1");    // 反复心悸
+        add(12, 16, "k2");  // 加重一天
 
         EditorEngine e5;
-        expectTrue(e5.init({cjkPath}), "退格删控件：字体加载成功");
+        expectTrue(e5.init({cjkPath}), "控件边界：字体加载成功");
         EngineConfig ec5;
         ec5.zoom = 1.0f;
         e5.setConfig(ec5);
@@ -7265,7 +7316,7 @@ int main() {
             e5.relayout();
         };
 
-        // (a) 对照组：内容末尾（侧别 0）—— 退格删的是最后一个字，控件一个都不该少
+        // (a) 对照：内容末尾（侧别 0）退格删的是字，控件一个都不少
         reload5();
         expectTrue(e5.controls().size() == 2, "装载：两个字段");
         e5.setCaretAtSide(0, 9, 0);
@@ -7276,46 +7327,72 @@ int main() {
                    "★ 删的是「悸」这一个字 —— 实际 " + e5.blocks()[0].textUtf8());
         expectTrue(e5.auditCompile() == 0, "★ 之后产物仍与整树全量编译逐字段一致");
 
-        // (b) 光标在闭括号后面（侧别 1）—— 退格退役整个控件，内容留成正文
+        // (b) 规则 1：闭括号右面退格 ⇒ 进控件删掉内容里的最后一项，控件本身还在
         reload5();
         e5.setCaretAtSide(0, 9, 1);
         expectTrue(e5.caretSide() == 1, "光标在字段 #0 的闭括号之后（侧别 1）");
-        expectTrue(e5.backspace(), "闭括号之后退格 = 删这个控件");
-        expectTrue(e5.controls().size() == 1 && e5.controls().at(0).id == "k2",
-                   "★ 少的是 k1（实际剩 " + std::to_string(e5.controls().size()) + " 个）");
-        // 剩下的那个字段区间不许被撑大：拆壳上提出来的内容是它的兄弟，不是它的子节点。
-        //   这一条单列出来是因为"内容被并进前一个字段"也能让上面三条全绿 ——
-        //   区间 [12,16) 一旦变成 [5,16)，视觉上就是"删掉一个字段、另一个字段把它吃了"。
-        expectTrue(
-            e5.controls().at(0).range.start.offset == 12 &&
-                e5.controls().at(0).range.end.offset == 16,
-            "★ 剩下的 k2 区间仍是 [12,16)（推广出来的内容是兄弟，没被前一个字段吃掉）—— 实际 [" +
-                std::to_string(e5.controls().at(0).range.start.offset) + "," +
-                std::to_string(e5.controls().at(0).range.end.offset) + ")");
-        expectTrue(
-            e5.blocks()[0].textUtf8() == "患者主诉：反复心悸三天，加重一天。",
-            "★ 保留内容：字段里的字变成正文，一个字都没丢 —— 实际 " + e5.blocks()[0].textUtf8());
+        expectTrue(e5.backspace(), "闭括号之后退格");
+        expectTrue(e5.controls().size() == 2,
+                   "★ 控件还在（里面有内容时，退格删的是内容里那一项，不是控件本身）—— 实际剩 " +
+                       std::to_string(e5.controls().size()) + " 个");
+        expectTrue(e5.blocks()[0].textUtf8() == "患者主诉：反复心三天，加重一天。",
+                   "★ 删掉的仍是「悸」—— 实际 " + e5.blocks()[0].textUtf8());
+        expectTrue(e5.caret().offset == 8 && e5.caretSide() == 0,
+                   "★ 光标进到了控件里（内容末尾 cp 8 侧别 0）—— 实际 " +
+                       std::to_string(e5.caret().offset) + "/" + std::to_string(e5.caretSide()));
         expectTrue(e5.auditCompile() == 0, "★ 之后产物仍与整树全量编译逐字段一致");
         e5.relayout();
         expectTrue(e5.auditLayout() == 0, "★ 排版与全量重排逐字段一致");
 
-        // (c) 表单模式默认被结构锁挡住：这一次按键不许被吞掉，回落到普通退格
+        // (c) 规则 2：开括号右面退格 ⇒ 退到开括号左面，一个字都不删
         reload5();
-        e5.setEditMode(EditMode::Form);
-        e5.relayout();
-        e5.setCaretAtSide(0, 9, 1);
-        {
-            const long long b3 = e5.blockedEdits();
-            expectTrue(e5.backspace(), "表单模式拒了结构操作之后回落到普通退格（没吞掉这次按键）");
-            expectTrue(e5.controls().size() == 2, "控件还在（结构被锁住）");
-            expectTrue(e5.blocks()[0].textUtf8() == "患者主诉：反复心三天，加重一天。",
-                       "★ 删掉的是字段最后一个字（表单里「退格」的旧语义）—— 实际 " +
-                           e5.blocks()[0].textUtf8());
-            expectTrue(e5.blockedEdits() == b3 + 1,
-                       "★ 那次被拒的结构操作记了账 —— 按键成功了，但它确实试过一次被锁住的操作");
-        }
+        e5.setCaretAtSide(0, 5, 1);
+        expectTrue(e5.caret().offset == 5 && e5.caretSide() == 1, "光标在字段 #0 的开括号之后");
+        expectTrue(e5.backspace(), "开括号之后退格");
+        expectTrue(e5.blocks()[0].textUtf8() == "患者主诉：反复心悸三天，加重一天。",
+                   "★ 一个字都没删 —— 实际 " + e5.blocks()[0].textUtf8());
+        expectTrue(e5.caret().offset == 5 && e5.caretSide() == 0,
+                   "★ 光标退到开括号左面（cp 5 侧别 0）—— 实际 " +
+                       std::to_string(e5.caret().offset) + "/" + std::to_string(e5.caretSide()));
+        expectTrue(e5.controls().size() == 2, "控件一个都没少");
 
-        // (d) 相邻字段（][）：那一格既是"左边之后"又是"右边之前"，退格退的是左边那个
+        // (d) 空控件：内容删光之后再退一格，删掉的是控件本身（连它那两枚括号）
+        reload5();
+        e5.setCaretAtSide(0, 9, 1);
+        for (int i = 0; i < 4; ++i) expectTrue(e5.backspace(), "退掉字段内容里的一个字");
+        expectTrue(e5.blocks()[0].textUtf8() == "患者主诉：三天，加重一天。",
+                   "★ 四个字都进了控件删掉 —— 实际 " + e5.blocks()[0].textUtf8());
+        expectTrue(e5.controls().size() == 2 && e5.controls().at(0).id == "k1",
+                   "k1 还在（只是空了）");
+        expectTrue(e5.backspace(), "★ 空控件上再退一格");
+        expectTrue(e5.controls().size() == 1 && e5.controls().at(0).id == "k2",
+                   "★ 删掉的是控件本身（实际剩 " + std::to_string(e5.controls().size()) + " 个）");
+        expectTrue(e5.blocks()[0].textUtf8() == "患者主诉：三天，加重一天。",
+                   "文本不变（控件里本来就空了）");
+        expectTrue(e5.controls().at(0).range.start.offset == 8 &&
+                       e5.controls().at(0).range.end.offset == 12,
+                   "★ 剩下的 k2 区间跟着前移成 [8,12) —— 实际 [" +
+                       std::to_string(e5.controls().at(0).range.start.offset) + "," +
+                       std::to_string(e5.controls().at(0).range.end.offset) + ")");
+        expectTrue(e5.caret().offset == 5 && e5.caretSide() == 0,
+                   "★ 光标落在控件原来那一格（cp 5 侧别 0）—— 实际 " +
+                       std::to_string(e5.caret().offset) + "/" + std::to_string(e5.caretSide()));
+        expectTrue(e5.auditCompile() == 0, "★ 之后产物仍与整树全量编译逐字段一致");
+
+        // (d2) 删掉的控件要撤得回来（删控件走的是 RemoveNode，撤销要把它挂回原处 ——
+        //   而规范化会把相邻的两段文字并成一个，槽位下标活不过它，只能按流位置挂回）
+        expectTrue(e5.undoAndRender(), "★ 撤销这一次删控件");
+        expectTrue(e5.controls().size() == 2 && e5.controls().at(0).id == "k1",
+                   "★ 控件回来了（实际 " + std::to_string(e5.controls().size()) + " 个）");
+        expectTrue(e5.controls().at(0).range.start.offset == 5 &&
+                       e5.controls().at(0).range.end.offset == 5,
+                   "★ 回到它原来那一格、且仍是空的（零宽区间）—— 实际 [" +
+                       std::to_string(e5.controls().at(0).range.start.offset) + "," +
+                       std::to_string(e5.controls().at(0).range.end.offset) + ")");
+        expectTrue(e5.blocks()[0].textUtf8() == "患者主诉：三天，加重一天。", "文本没变");
+        expectTrue(e5.auditCompile() == 0, "★ 撤销之后产物仍与整树全量编译逐字段一致");
+
+        // (e) 相邻字段（][）：那一格既是"左边之后"又是"右边之前"，退格退的是左边那个
         {
             std::vector<BlockSpec> bl2(1);
             bl2[0].setText("甲乙丙丁");
@@ -7342,17 +7419,24 @@ int main() {
             e6.setCaretAtSide(0, 1, 1);  // 跨过 ]a 之后 —— 那一格也是 [b 之前
             expectTrue(e6.caretSide() == 1, "光标落在 ]a 与 [b 之间那一格");
             expectTrue(e6.backspace(), "退格");
-            expectTrue(e6.controls().size() == 1 && e6.controls().at(0).id == "b",
-                       "★ 退的是左边那个：a 掉了、b 还在（实际剩 " +
+            expectTrue(e6.controls().size() == 2,
+                       "★ 两个字段都还在：退格进的是左边那个 a，删的是它里面的字（实际剩 " +
                            std::to_string(e6.controls().size()) + " 个）");
-            expectTrue(e6.controls().at(0).range.start.offset == 1 &&
-                           e6.controls().at(0).range.end.offset == 2,
-                       "★ 剩下的 b 区间仍是 [1,2)（甲被上提成正文，没被并进 b）");
-            expectTrue(e6.blocks()[0].textUtf8() == "甲乙丙丁", "文本一字不差（拆壳留内容）");
+            expectTrue(e6.blocks()[0].textUtf8() == "乙丙丁",
+                       "★ 删掉的是「甲」—— 实际 " + e6.blocks()[0].textUtf8());
+            expectTrue(e6.controls().at(0).id == "a" &&
+                           e6.controls().at(0).range.start.offset == 0 &&
+                           e6.controls().at(0).range.end.offset == 0,
+                       "★ a 被删空成零宽区间（没被拆壳、也没被 b 吃掉）—— 实际 [" +
+                           std::to_string(e6.controls().at(0).range.start.offset) + "," +
+                           std::to_string(e6.controls().at(0).range.end.offset) + ")");
+            expectTrue(e6.controls().at(1).range.start.offset == 0 &&
+                           e6.controls().at(1).range.end.offset == 1,
+                       "★ b 的区间跟着前移成 [0,1)（乙）");
             expectTrue(e6.auditCompile() == 0, "★ 之后产物仍与整树全量编译逐字段一致");
         }
 
-        // (e) 嵌套：内层字段的闭括号后面退格，退掉的是内层那一个（不是外层）
+        // (f) 嵌套：内层闭括号右面退格，进的是内层那一个（不是外层）
         {
             std::vector<BlockSpec> bl3(1);
             bl3[0].setText("甲乙丙丁");
@@ -7382,11 +7466,101 @@ int main() {
             e7.setCaretAtSide(0, 3, 1);
             expectTrue(e7.caretSide() == 1, "光标在 ]inner 之后（还没跨过 ]outer）");
             expectTrue(e7.backspace(), "退格");
-            expectTrue(e7.controls().size() == 1 && e7.controls().at(0).id == "outer",
-                       "★ 退掉的是内层（outer 还在，实际剩 " +
+            expectTrue(e7.controls().size() == 2,
+                       "★ 两个字段都还在：进的是内层，删的是它里面的「丙」（实际剩 " +
                            std::to_string(e7.controls().size()) + " 个）");
-            expectTrue(e7.blocks()[0].textUtf8() == "甲乙丙丁", "文本一字不差");
+            expectTrue(e7.blocks()[0].textUtf8() == "甲乙丁",
+                       "★ 删掉的是「丙」—— 实际 " + e7.blocks()[0].textUtf8());
+            expectTrue(e7.controls().at(1).id == "inner" &&
+                           e7.controls().at(1).range.start.offset == 2 &&
+                           e7.controls().at(1).range.end.offset == 2,
+                       "★ inner 被删空成零宽区间，outer 的区间不受影响 —— 实际 inner=[" +
+                           std::to_string(e7.controls().at(1).range.start.offset) + "," +
+                           std::to_string(e7.controls().at(1).range.end.offset) + ")");
+            // 反向一半：再退一格，删掉的是那个空的内层控件本身
+            expectTrue(e7.backspace(), "★ 空内层控件上再退一格");
+            expectTrue(e7.controls().size() == 1 && e7.controls().at(0).id == "outer",
+                       "★ 删掉的是空的内层（outer 还在，实际剩 " +
+                           std::to_string(e7.controls().size()) + " 个）");
+            expectTrue(e7.blocks()[0].textUtf8() == "甲乙丁", "文本一字不差");
             expectTrue(e7.auditCompile() == 0, "★ 之后产物仍与整树全量编译逐字段一致");
+        }
+
+        // (g) 前删（Delete）的四条规则，与退格左右对称
+        //
+        //   规则 4：开括号左面 —— 有内容时进控件删右边那一项
+        reload5();
+        e5.setCaretAtSide(0, 5, 0);
+        expectTrue(e5.caretSide() == 0, "光标在字段 #0 的开括号之前（侧别 0）");
+        expectTrue(e5.deleteForward(), "开括号之前按 Delete");
+        expectTrue(e5.controls().size() == 2, "★ 控件还在（删的是内容里的第一项）");
+        expectTrue(e5.blocks()[0].textUtf8() == "患者主诉：复心悸三天，加重一天。",
+                   "★ 删掉的是「反」—— 实际 " + e5.blocks()[0].textUtf8());
+        expectTrue(e5.caret().offset == 5 && e5.caretSide() == 1,
+                   "★ 光标进到控件里（开括号右面）—— 实际 " + std::to_string(e5.caret().offset) +
+                       "/" + std::to_string(e5.caretSide()));
+        expectTrue(e5.auditCompile() == 0, "★ 之后产物仍与整树全量编译逐字段一致");
+
+        //   规则 3：闭括号左面 —— 有内容时跳到闭括号右面，删右边那一项
+        reload5();
+        e5.setCaretAtSide(0, 9, 0);
+        expectTrue(e5.caretSide() == 0, "光标在字段 #0 的闭括号之前（＝内容末尾）");
+        expectTrue(e5.deleteForward(), "闭括号之前按 Delete");
+        expectTrue(e5.controls().size() == 2, "★ 控件还在");
+        expectTrue(e5.blocks()[0].textUtf8() == "患者主诉：反复心悸天，加重一天。",
+                   "★ 删掉的是控件外那一个「三」—— 实际 " + e5.blocks()[0].textUtf8());
+        expectTrue(e5.caret().offset == 9 && e5.caretSide() == 1,
+                   "★ 光标跳到了闭括号右面 —— 实际 " + std::to_string(e5.caret().offset) + "/" +
+                       std::to_string(e5.caretSide()));
+
+        //   规则 3 + 空控件：光标在空控件的闭括号左面（＝开括号右面），删掉控件本身
+        reload5();
+        e5.setCaretAtSide(0, 9, 1);
+        for (int i = 0; i < 4; ++i) expectTrue(e5.backspace(), "先把这个字段删空");
+        expectTrue(e5.controls().size() == 2, "k1 还在（空的）");
+        expectTrue(e5.deleteForward(), "★ 空控件上按 Delete");
+        expectTrue(e5.controls().size() == 1 && e5.controls().at(0).id == "k2",
+                   "★ 删掉的是控件本身（实际剩 " + std::to_string(e5.controls().size()) + " 个）");
+        expectTrue(e5.blocks()[0].textUtf8() == "患者主诉：三天，加重一天。", "文本不变");
+        expectTrue(e5.auditCompile() == 0, "★ 之后产物仍与整树全量编译逐字段一致");
+
+        //   规则 4 + 空控件：光标在空控件的开括号左面，删掉控件本身；
+        //   撤销要把光标放回按键之前那一格，而不是"选中整个控件"：后者的表现是撤销之后
+        //   光标落到闭括号右边，还带着一圈选区。
+        reload5();
+        e5.setCaretAtSide(0, 9, 1);
+        for (int i = 0; i < 4; ++i) expectTrue(e5.backspace(), "先把这个字段删空");
+        e5.setCaretAtSide(0, 5, 0);
+        expectTrue(e5.caretSide() == 0 && e5.caret().offset == 5, "光标在字段 #0 的开括号之前");
+        expectTrue(e5.deleteForward(), "★ 开括号之前按 Delete：删掉这个空控件");
+        expectTrue(e5.controls().size() == 1 && e5.controls().at(0).id == "k2", "控件没了");
+        expectTrue(e5.undoAndRender(), "★ 撤销这一次删除");
+        expectTrue(e5.controls().size() == 2 && e5.controls().at(0).id == "k1",
+                   "★ 控件回来了（实际 " + std::to_string(e5.controls().size()) + " 个）");
+        expectTrue(!e5.hasSelection(), "★ 撤销之后没有选区（按键之前本来就没有）");
+        expectTrue(e5.caret().offset == 5 && e5.caretSide() == 0,
+                   "★ 撤销之后光标回到按键之前那一格（cp 5 侧别 0），不是跑到闭括号右边 —— "
+                   "实际 " +
+                       std::to_string(e5.caret().offset) + "/" + std::to_string(e5.caretSide()));
+        expectTrue(e5.auditCompile() == 0, "★ 撤销之后产物仍与整树全量编译逐字段一致");
+
+        // (h) 表单模式：控件结构默认锁住 —— 空控件删不掉，这一次按键退化成"只把光标移出去"
+        reload5();
+        e5.setEditMode(EditMode::Form);
+        e5.relayout();
+        e5.setCaretAtSide(0, 9, 1);
+        for (int i = 0; i < 4; ++i) expectTrue(e5.backspace(), "表单模式：先把这个字段删空");
+        expectTrue(e5.controls().size() == 2, "k1 还在（空的）");
+        {
+            const long long b3 = e5.blockedEdits();
+            expectTrue(e5.backspace(), "★ 空控件上退格：按键没被吞掉");
+            expectTrue(e5.controls().size() == 2, "控件还在（结构被锁住，删不掉）");
+            expectTrue(e5.caret().offset == 5 && e5.caretSide() == 0,
+                       "★ 光标退到控件之外（cp 5 侧别 0）—— 实际 " +
+                           std::to_string(e5.caret().offset) + "/" +
+                           std::to_string(e5.caretSide()));
+            expectTrue(e5.blockedEdits() == b3 + 1,
+                       "★ 那次被拒的结构操作记了账 —— 按键成功了，但它确实试过一次被锁住的操作");
         }
     }
 
@@ -8029,6 +8203,232 @@ int main() {
                     bottom40, static_cast<double>((cont40.slabs - 1) * slab_px));
         expectTrue(bottom40 > static_cast<int>((cont40.slabs - 1) * slab_px),
                    "内容底边落在最后一条带里（宿主按它设滚动高度）");
+    }
+
+    std::printf("\n[41] 折行处的行首与行尾是两个位置（光标行别）\n");
+    {
+        // 一条折行的段落里，上一行的末尾与下一行的开头是同一个位置：偏移一样、侧别一样。
+        //   只按位置找行，找回来的必然是上一行 —— 于是"点下一行的行首"变成"光标跳到上一行
+        //   行尾"。这一节就是把那个自由度（行别）钉住，而且三个断言互相证伪：
+        //   两次点击命中同一个偏移（说明位置确实相同）；带行别时各自画在自己那一行；
+        //   不带行别时两次都画到上一行（把老 bug 本身写成判据，证明这条判据对它敏感）。
+        EditorEngine e41;
+        expectTrue(e41.init({cjkPath, mnPath, latinPath}), "引擎初始化");
+
+        EngineConfig c41;
+        c41.zoom = 1.0f;  // 1 磅 = 1 像素：命中测试收的磅值与行盒里的磅值同一把尺子
+        c41.page.width_pt = 240.0f;
+        c41.page.height_pt = 200.0f;
+        c41.page.margin_pt = 20.0f;
+        c41.page_gap_pt = 20.0f;
+        e41.setConfig(c41);
+
+        BlockSpec b41;
+        b41.font_index = 0;
+        b41.size_pt = 12.0f;
+        b41.wm = WritingMode::HorizontalTB();
+        b41.line_factor = 1.75f;
+        b41.language = "zh";
+        // 一段 60 个字：内容宽 200 磅、字宽 12 磅，于是一行放得下十六七个 —— 折成四行。
+        b41.cp_text.assign(60, 0x6D4B);
+        loadBlocks(e41, std::vector<BlockSpec>{b41});
+        e41.relayout();
+
+        // 找一对相邻行：上一行 A 的末尾就是下一行 B 的开头，而且 A 不是段首那一行
+        //   （段首前面没有上一行，那种边界不存在歧义）。
+        const LineBox* lbA = nullptr;
+        const LineBox* lbB = nullptr;
+        for (size_t i = 0; i + 1 < e41.layout().lines.size(); ++i) {
+            const LineBox& x = e41.layout().lines[i];
+            const LineBox& y = e41.layout().lines[i + 1];
+            if (x.paragraph != y.paragraph) continue;
+            if (x.first_cp == 0) continue;
+            if (x.last_cp != y.first_cp) continue;
+            lbA = &x;
+            lbB = &y;
+            break;
+        }
+        expectTrue(lbA != nullptr && lbB != nullptr, "这一段确实折了行（找到一对相邻行）");
+        if (lbA == nullptr || lbB == nullptr) {
+            std::printf("共 %d 项断言，失败 %d 项\n", g_checks, g_failures);
+            return g_failures == 0 ? 0 : 1;
+        }
+        const uint32_t k = lbA->last_cp;
+        std::printf("     折行边界在第 %u 个码点：上一行 [%u,%u)，下一行 [%u,%u)\n", k,
+                    lbA->first_cp, lbA->last_cp, lbB->first_cp, lbB->last_cp);
+
+        // 两次点击：下一行行首（往行内挪两磅）、上一行行尾（往回退两磅）。
+        //   行内坐标是"相对行首"的（inline_end_pt 不含行首那一截），所以要加回行首位置。
+        const float xB = lbB->inline_origin_pt + 2.0f;
+        const float xA = lbA->inline_origin_pt + lbA->inline_end_pt - 2.0f;
+        const float yA = (lbA->block_lo_pt + lbA->block_hi_pt) * 0.5f;
+        const float yB = (lbB->block_lo_pt + lbB->block_hi_pt) * 0.5f;
+        const float yA_doc = static_cast<float>(lbA->page) * 140.0f + yA;
+        const float yB_doc = static_cast<float>(lbB->page) * 140.0f + yB;
+
+        TextPos pA{};
+        TextPos pB{};
+        int sideA = 0;
+        int sideB = 0;
+        int affA = -1;
+        int affB = -1;
+        const bool okA = e41.hitTestPt(xA, yA_doc, &pA, nullptr, &sideA, &affA);
+        const bool okB = e41.hitTestPt(xB, yB_doc, &pB, nullptr, &sideB, &affB);
+        expectTrue(okA && okB, "两次点击都命中");
+        expectTrue(pA.offset == k && pB.offset == k,
+                   "★ 行尾与下一行行首命中同一个偏移（位置确实相同，行别不是多余的）");
+        expectTrue(sideA == sideB, "★ 两次点击的侧别也相同（侧别分不开这两个位置）");
+        expectTrue(affA == 0 && affB > 0,
+                   "★ 点上一行行尾报贴上一行，点下一行行首报贴下一行");
+
+        // 带行别：各自画在自己那一行。
+        e41.setCaretAtSideLine(pA.para, pA.offset, sideA, affA);
+        Rect rA{};
+        expectTrue(e41.caretRectPt(&rA), "上一行行尾的光标矩形可查");
+        expectTrue(std::fabs(rA.y - lbA->block_lo_pt) < lbA->block_hi_pt - lbA->block_lo_pt + 0.01f &&
+                       rA.y < lbB->block_lo_pt,
+                   "★ 点上一行行尾，光标画在上一行");
+
+        e41.setCaretAtSideLine(pB.para, pB.offset, sideB, affB);
+        Rect rB{};
+        expectTrue(e41.caretRectPt(&rB), "下一行行首的光标矩形可查");
+        expectTrue(rB.y >= lbB->block_lo_pt - 0.01f,
+                   "★ 点下一行行首，光标画在下一行（不是上一行行尾）");
+        expectTrue(std::fabs(rB.x - (lbB->inline_origin_pt - c41.caret_width_pt * 0.5f)) < 0.51f,
+                   "落点就是那一行的行首（行内位置贴着行首）");
+        expectTrue(e41.caretLineAffinity() > 0, "行别存在引擎里，不是命中测试的一次性产物");
+
+        // 不带行别（老路径）：同一个位置又回到上一行。这一条是上面那两条的反向一半 ——
+        //   它证明"带上行别"确实改变了结果，而不是两处碰巧都对。
+        e41.setCaretAtSide(pB.para, pB.offset, sideB);
+        Rect rOld{};
+        expectTrue(e41.caretRectPt(&rOld) && std::fabs(rOld.y - rA.y) < 0.01f,
+                   "★ 不带行别时同一位置仍画在上一行行尾（这就是修之前的样子）");
+        expectTrue(e41.caretLineAffinity() == 0, "不带行别的定位把行别清回 0");
+
+        // 别的定位不该被行别污染：挪一次光标之后行别必须归零。
+        e41.setCaretAtSideLine(pB.para, pB.offset, sideB, 1);
+        e41.setCaret(0, 3);
+        expectTrue(e41.caretLineAffinity() == 0, "普通定位把行别清回 0");
+    }
+
+    std::printf("\n[42] 撤销把光标放回编辑之前的位置\n");
+    {
+        // 撤销恢复的是事务里那一对快照（selection_before / selection_after）。
+        //   删除类操作的 before 该记"删除之前光标在哪"：退格与反缩进的光标在区间右端，
+        //   前删在左端。三处都记左端的话，退格一次再撤销，光标会落到被恢复那个字的前面。
+        //   判据按"撤销之后偏移回到编辑之前"写，于是它对三条路径同时成立 —— 记错一端的那条
+        //   会当场掉出来。
+        EditorEngine e42;
+        expectTrue(e42.init({cjkPath, mnPath, latinPath}), "引擎初始化");
+        EngineConfig c42;
+        c42.zoom = 1.0f;
+        c42.page.width_pt = 240.0f;
+        c42.page.height_pt = 200.0f;
+        c42.page.margin_pt = 20.0f;
+        e42.setConfig(c42);
+        BlockSpec b42;
+        b42.font_index = 0;
+        b42.size_pt = 12.0f;
+        b42.wm = WritingMode::HorizontalTB();
+        b42.language = "zh";
+        // 四个前导空格 + 八个字：反缩进那一条要用到前导空格。
+        b42.cp_text.assign(4, 0x20);
+        for (int i = 0; i < 8; ++i) b42.cp_text.push_back(0x6D4B);
+        loadBlocks(e42, std::vector<BlockSpec>{b42});
+        e42.relayout();
+        const size_t len0 = e42.blocks()[0].cp_text.size();
+
+        // 其一：退格。光标在第 6 个位置，删掉第 5 个，撤销之后光标要回到第 6 个。
+        e42.setCaret(0, 6);
+        expectTrue(e42.backspace(), "退格删掉一个字符");
+        expectTrue(e42.caret().offset == 5, "退格之后光标落在被删位置（第 5 个）");
+        expectTrue(e42.undo(), "撤销这一次退格");
+        expectTrue(e42.caret().offset == 6,
+                   "★ 撤销之后光标回到编辑之前那一格（被恢复的字在它左边，实际 " +
+                       std::to_string(e42.caret().offset) + "）");
+        expectTrue(e42.blocks()[0].cp_text.size() == len0, "撤销把字符也恢复了");
+
+        // 其二：前删。光标在第 6 个位置，删掉第 6 个，撤销之后光标仍是第 6 个 ——
+        //   它就在被恢复那个字的左边，与退格那一条正好相反的两端。
+        e42.setCaret(0, 6);
+        expectTrue(e42.deleteForward(), "前删掉一个字符");
+        expectTrue(e42.caret().offset == 6, "前删之后光标留在原处");
+        expectTrue(e42.undo(), "撤销这一次前删");
+        expectTrue(e42.caret().offset == 6, "★ 前删撤销之后光标仍在第 6 个（被恢复的字在它右边）");
+        expectTrue(e42.blocks()[0].cp_text.size() == len0, "撤销把字符也恢复了");
+
+        // 其三：反缩进。光标在第 4 个位置（前导空格之后），删掉四个空格，撤销回到第 4 个。
+        e42.setCaret(0, 4);
+        expectTrue(e42.outdent(), "反缩进删掉前导空格");
+        expectTrue(e42.caret().offset == 0, "反缩进之后光标到了段首");
+        expectTrue(e42.undo(), "撤销这一次反缩进");
+        expectTrue(e42.caret().offset == 4,
+                   "★ 反缩进撤销之后光标回到空格之后（实际 " +
+                       std::to_string(e42.caret().offset) + "）");
+        expectTrue(e42.blocks()[0].cp_text.size() == len0, "撤销把空格也恢复了");
+
+        // 重做仍然回到"编辑之后"那一格：两条快照各自的方向不能混。
+        expectTrue(e42.redo(), "重做这一次反缩进");
+        expectTrue(e42.caret().offset == 0, "重做之后光标回到编辑之后的落点");
+    }
+
+    std::printf("\n[43] 竖排的列序：中日从右往左、蒙文从左往右\n");
+    {
+        // 方向键在竖排下是"换列"，而"下一列在哪一边"由列序定。宿主的键位表只认两件事：
+        //   竖不竖排、列序反不反向 —— 这一节把这两个结论钉在引擎侧，而且用"下一列的 x
+        //   往哪边走"做判据（不是只读标志位：标志位对了、算出来的位置反了照样是错的）。
+        EditorEngine e43;
+        expectTrue(e43.init({cjkPath, mnPath, latinPath}), "引擎初始化");
+        EngineConfig c43;
+        c43.zoom = 1.0f;
+        c43.page.width_pt = 240.0f;
+        c43.page.height_pt = 300.0f;
+        c43.page.margin_pt = 20.0f;
+        e43.setConfig(c43);
+
+        BlockSpec b43;
+        b43.font_index = 0;
+        b43.size_pt = 12.0f;
+        b43.line_factor = 1.75f;
+        b43.language = "zh";
+        // 60 个字、内容高 260 磅 ⇒ 一列二十来个字，折成三列。
+        b43.cp_text.assign(60, 0x6D4B);
+
+        b43.wm = WritingMode::VerticalRL();
+        loadBlocks(e43, std::vector<BlockSpec>{b43});
+        e43.relayout();
+        expectTrue(e43.caretVertical(), "竖排段里光标报竖排");
+        expectTrue(e43.caretBlockReversed(), "中日竖排的列序反向（第一列在最右）");
+        e43.setCaret(0, 5);
+        Rect rl0{};
+        expectTrue(e43.caretRectPt(&rl0), "竖排光标的矩形可查");
+        expectTrue(e43.moveCaretVertical(1, false), "中日竖排：下一列走得动");
+        Rect rl1{};
+        expectTrue(e43.caretRectPt(&rl1), "下一列的光标矩形可查");
+        expectTrue(rl1.x < rl0.x - 1.0f,
+                   "★ 中日竖排的下一列在左边（列自右向左推进）");
+        // 走回来：-1 必须回到右边那一列，而且 x 与出发时那一列重合 ——
+        //   两个方向都钉住，免得只把其中一个方向的符号弄对。
+        expectTrue(e43.moveCaretVertical(-1, false), "中日竖排：上一列走得动");
+        Rect rlb{};
+        expectTrue(e43.caretRectPt(&rlb) && std::fabs(rlb.x - rl0.x) < 0.01f,
+                   "★ 中日竖排的上一列在右边（走回来落在出发那一列）");
+
+        // 同一个位置、同一份文本，只换列序 —— 下一列必须走到另一边。
+        b43.wm = WritingMode::VerticalLR();
+        loadBlocks(e43, std::vector<BlockSpec>{b43});
+        e43.relayout();
+        expectTrue(e43.caretVertical(), "蒙文段也是竖排");
+        expectTrue(!e43.caretBlockReversed(), "★ 蒙文竖排的列序正向（第一列在最左）");
+        e43.setCaret(0, 5);
+        Rect lr0{};
+        expectTrue(e43.caretRectPt(&lr0), "蒙文竖排光标的矩形可查");
+        expectTrue(e43.moveCaretVertical(1, false), "蒙文竖排：下一列走得动");
+        Rect lr1{};
+        expectTrue(e43.caretRectPt(&lr1), "蒙文下一列的光标矩形可查");
+        expectTrue(lr1.x > lr0.x + 1.0f,
+                   "★ 蒙文竖排的下一列在右边（与中日竖排相反，左右键的方向必须跟着翻）");
     }
 
     std::printf("\n──────────────────────────────\n");

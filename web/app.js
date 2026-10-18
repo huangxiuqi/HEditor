@@ -1358,6 +1358,15 @@ function onKeyDown(ev) {
   let changed = false;
   let handled = true;
 
+  // 方向键按物理方向映射：横排的行内轴是水平的、块轴是竖直的，所以左右走字、上下换行。
+  //   竖排正好翻过来（行内轴竖直、块轴水平）：上下走字、左右换列。
+  //   换列往哪一边由列序定 —— 中日竖排列自右向左（左 = 下一列），蒙文列自左向右
+  //   （右 = 下一列）。只按"是竖排吗"映射，蒙文的左右就会按反。
+  //   参考行为：Chrome 在 vertical-rl 的 contenteditable 里实测就是这个（out/_vkeyref.mjs）。
+  const vert = !!(mod.caretVerticalNow && mod.caretVerticalNow());
+  const vertReversed = !!(mod.caretBlockReversedNow && mod.caretBlockReversedNow());
+  const dirLeft = vertReversed ? 1 : -1;   // 物理向左 = 行序 +1 还是 -1
+
   switch (ev.key) {
     case 'Backspace':
       changed = mod.backspace();
@@ -1366,17 +1375,17 @@ function onKeyDown(ev) {
       changed = mod.deleteForward();
       break;
     case 'ArrowLeft':
-      changed = mod.moveCaret(-1, ev.shiftKey);
+      changed = vert ? mod.moveCaretVertical(dirLeft, ev.shiftKey) : mod.moveCaret(-1, ev.shiftKey);
       break;
     case 'ArrowRight':
-      changed = mod.moveCaret(1, ev.shiftKey);
+      changed = vert ? mod.moveCaretVertical(-dirLeft, ev.shiftKey) : mod.moveCaret(1, ev.shiftKey);
       break;
     case 'ArrowUp':
-      // 上下键：沿块轴走到相邻行，列位沿行内轴保持（跨短行不丢列）。
-      changed = mod.moveCaretVertical(-1, ev.shiftKey);
+      // 横排：沿块轴走到相邻行，列位沿行内轴保持（跨短行不丢列）。
+      changed = vert ? mod.moveCaret(-1, ev.shiftKey) : mod.moveCaretVertical(-1, ev.shiftKey);
       break;
     case 'ArrowDown':
-      changed = mod.moveCaretVertical(1, ev.shiftKey);
+      changed = vert ? mod.moveCaret(1, ev.shiftKey) : mod.moveCaretVertical(1, ev.shiftKey);
       break;
     case 'Home':
       // 走引擎的"到行首"，不要用 moveCaret(-1e9) 凑。
@@ -1468,8 +1477,15 @@ function framePointFromEvent(ev) {
  *   与边缘自动滚动抢同一个 scrollTop，看起来是画面在抖。滚动只由拖选自己那一侧负责。
  */
 function dragExtendTo(hit) {
-  if (!mod || !mod.setFocusAtSide) return;
-  mod.setFocusAtSide(hit.para, hit.offset, hit.side);
+  if (!mod) return;
+  // 行别一起搬：拖到下一行行首时焦点端也要贴着那一行，否则选区末端停在上一行行尾。
+  if (typeof hit.line === 'number' && mod.setFocusAtSideLine) {
+    mod.setFocusAtSideLine(hit.para, hit.offset, hit.side, hit.line);
+  } else if (mod.setFocusAtSide) {
+    mod.setFocusAtSide(hit.para, hit.offset, hit.side);
+  } else {
+    return;
+  }
   caretOn = true;
   mod.showCaret(true);
   presentNow();
@@ -1501,8 +1517,10 @@ function onCanvasMouseDown(ev) {
     //   空字段就是 ][][ ），于是"字与括号之间""两个控件之间"整段都点不进去。
     //   引擎在命中测试里已经算出了侧别（括号占位各占一格，数格子即可），这里只负责搬运。
     //   p.field 是它的投影，只用来显示"当前在哪个字段"，搬运请用 p.side。
-    if (typeof p.side === 'number' && mod.setCaretAtSide) {
-      mod.setCaretAtSide(p.para, p.offset, p.side);
+    //   p.line 是行别：折行处"上一行行尾"与"下一行行首"是同一个偏移与侧别，
+    //   只有它分得开 —— 不带回去，点下一行行首会画到上一行行尾。
+    if (typeof p.side === 'number' && mod.setCaretAtSideLine) {
+      mod.setCaretAtSideLine(p.para, p.offset, p.side, p.line | 0);
       caretOn = true;
       mod.showCaret(true);
       presentNow();
@@ -2049,6 +2067,17 @@ const facade = {
   setCaretAtSide(para, offset, side) {
     if (!ready) return null;
     mod.setCaretAtSide(para, offset, side);
+    caretOn = true;
+    mod.showCaret(true);
+    presentNow();
+    afterEdit();
+    return this.caret;
+  },
+  // 带侧别与行别的定位。行别见 hit.line：折行处"上一行行尾"与"下一行行首"同位置，
+  //   探针要复现"点下一行行首"必须走这一个。
+  setCaretAtSideLine(para, offset, side, line) {
+    if (!ready) return null;
+    mod.setCaretAtSideLine(para, offset, side, line | 0);
     caretOn = true;
     mod.showCaret(true);
     presentNow();

@@ -199,6 +199,15 @@ public:
     void setCaretAtSide(int para, size_t offset, int side);
     void setCaretAtSide(TextPos p, int side) { setCaretAtSide(p.para, p.offset, side); }
     /**
+     * 带侧别与行别的定位（点击落点）。
+     *
+     * 行别说的是"折行处贴哪一行"：一行排满折到下一行时，上一行的末尾与下一行的开头
+     * 是同一个位置（偏移与侧别都一样），光凭位置分不开。默认贴上一行行尾；点下一行的
+     * 行首时点明贴下一行，光标才画在点的地方。行别见 caretLineAffinity。
+     */
+    void setCaretAtSideLine(int para, size_t offset, int side, int line_aff);
+    void setFocusAtSideLine(int para, size_t offset, int side, int line_aff);
+    /**
      * 拖选：把焦点端搬到点击位置，anchor 端不动。
      *
      * 与 setCaretAtSide 只差收尾方式：那边两端一起摆到新位置（定位），这边只动 focus。
@@ -262,6 +271,29 @@ public:
      * 字段的理由（那两个字面量天然可能失配，才需要失效标记兜）。
      */
     int caretSide() const;
+    /**
+     * 光标当前的行别：折行处贴上一行行尾（0）还是贴下一行行首（1）。
+     *
+     * 它只解决一件事：折行把一个位置落在两行之间。段内第 k 个位置既是上一行的末尾，
+     * 也是下一行的开头，偏移与侧别都一样 —— 只按位置找行，找回来的必然是上一行，
+     * 于是"点下一行的行首"变成"光标跳到上一行行尾"。行别是那个被丢掉的自由度。
+     *
+     * 它不是文档状态：任何不带行别的定位都会把它清成 0（贴上一行），与上下键的列位
+     * 同一待遇（见 vertical_goal_valid_）。写完字之后光标本来就该贴在前一个字后面，
+     * 而那个位置在上一行的末尾。
+     */
+    int caretLineAffinity() const { return caret_line_aff_; }
+    /**
+     * 光标是否落在竖排的段里（宿主据此把方向键按物理方向映射，见 keyToOp）。
+     */
+    bool caretVertical() const;
+    /**
+     * 光标所在段的列序是否反向（中日竖排为真：第一列在最右；蒙文为假：第一列在最左）。
+     *
+     * 方向键要用它：竖排下左右是换列，而"下一列在哪一边"由列序决定 ——
+     * 中日竖排往左换列，蒙文往右换列。只按"是竖排吗"映射会把蒙文的左右按反。
+     */
+    bool caretBlockReversed() const;
     /**
      * 按对外坐标（段, 段内码点偏移）写光标，侧别按"最内层含端点"投影一次。
      * 这是文本坐标投影到流位置的唯一约定 —— 只给"没有侧别信息"的入口用（宿主程序化定位、
@@ -522,18 +554,18 @@ public:
     std::vector<PageRect> selectionRectsVisible() const;
 
     /**
-     * 删除一个控件。keep_content 为真时拆壳留内容（那一段字符变成普通正文），
-     * 为假时连内容一起删。
+     * 删除一个控件。keep_content 为真时拆壳留内容（那段字符变成普通正文），假时连内容一起删。
      *
      * 策略走 canDoStructureOp（structureLock 默认锁住）：表单模式默认拒绝、文档模式放行 ——
-     * 增删字段是设计期的事。删完段数可能变（控件里的段落标记没了或者换了位置），所以走
-     * 全量重编译，不进增量那条路。
+     * 增删字段是设计期的事。删完段数可能变，所以走全量重编译，不进增量那条路。
      *
-     * @param index      控件下标（对外一律用下标，节点 id 不外露）
+     * @param index        控件下标（对外一律用下标，节点 id 不外露）
      * @param keep_content 真 = 保留内容，假 = 连内容一起删
+     * @param caret_before 删除之前光标在哪（流位置），撤销恢复的就是它。键盘那一路必须传；不传
+     *                     （-1）时按"选中整个控件"记，撤销会把控件重新选中、光标落到闭括号之后。
      * @return 是否真的改了文档
      */
-    bool removeControl(int index, bool keep_content);
+    bool removeControl(int index, bool keep_content, FlowPos caret_before = -1);
 
     /**
      * 删除控件 + 重排 + 呈现的组合入口（理由同上面那组 AndRender）。
@@ -686,19 +718,18 @@ public:
      */
     bool caretRectPt(Rect* out) const;
     /**
-     * 反查：文档坐标（磅）→ (段, 偏移) + 侧别。点落在页间空隙时返回 false。
-     *
-     * 文档坐标就是页容器里的位置：第 0 页顶边为原点。命中测试与帧怎么摆无关 ——
-     *   帧按槽号装页（页号 mod 槽数），拿窗口坐标或槽号来反查都会整体错位。
-     * @param out_side 非空时写出落点的侧别（见 caretSide）。它是落点的完整身份：
-     *   共享边界上"前一个字段的末尾"与"后一个字段的开头"是同一个偏移，同一个偏移上
-     *   还可能压着好几枚括号，光有偏移表达不了用户点的是哪一个位置。
-     * @param out_owner 非空时写出"该次点击属于哪个控件"（-1 = 判不出，
-     *   LineBox::kInlineOffsetOuter = 在所有控件之外）。它是侧别的投影，供宿主显示用；
-     *   搬运落点请用 out_side —— 投影会丢掉"同处好几枚括号"的细节。
+     * 反查：文档坐标（磅）→ (段, 偏移) + 侧别 + 行别；点落在页间空隙时返回 false。
+     * 文档坐标就是页容器里的位置：第 0 页顶边为原点。与帧怎么摆无关 —— 帧按槽号装页
+     *   （页号 mod 槽数），拿窗口坐标或槽号来反查都会整体错位。
+     * @param out_side 落点的侧别（见 caretSide）。共享边界上"前一个字段的末尾"与"后一个
+     *   字段的开头"是同一个偏移，同一个偏移上还可能压着几枚括号，光有偏移表达不了。
+     * @param out_owner "该次点击属于哪个控件"（-1 = 判不出，kInlineOffsetOuter = 在所有
+     *   控件之外）。它是侧别的投影，供宿主显示用；搬运落点请用 out_side。
+     * @param out_line_aff 落点的行别（见 caretLineAffinity）：点下一行行首时它大于 0，
+     *   落点必须带着它回去，否则光标会画到上一行的行尾。
      */
     bool hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* out_owner = nullptr,
-                   int* out_side = nullptr) const;
+                   int* out_side = nullptr, int* out_line_aff = nullptr) const;
 
     const uint8_t* frame() const { return bitmap_.data(); }
     int frameWidth() const { return bitmap_.width(); }
@@ -856,8 +887,51 @@ private:
      * 退格、前删、反缩进三个入口只是算区间的方式不同，落到文档上的操作是同一个 ——
      * 一条 makeDeleteTextSteps + 一次事务提交。策略判定留在调用方：被拒时要报的是
      * "用户按的那一下没生效"，与"这一步做不成"不是一回事。
+     *
+     * caret_at_end 说的是"删除之前光标在这段文本的哪一端"，撤销要靠它把光标放回原处：
+     * 退格与反缩进的光标在右端（删完留下的字在光标左边），前删在左端。记成左端的话，
+     * 退格一次再撤销，光标会落到被恢复那个字的前面 —— 而它删除前明明在后面。
      */
-    bool eraseOnTree(TextPos a, TextPos b, const char* label);
+    bool eraseOnTree(TextPos a, TextPos b, const char* label, bool caret_at_end = false);
+
+    /**
+     * 控件边界上的一次删除落到哪一类（四条规则见 bracketBackspace 的实现处）。
+     */
+    enum class BracketHit {
+        None,           // 不贴任何括号：调用方走普通删除
+        MoveOnly,       // 只搬光标，不删东西
+        MoveThenErase,  // 光标搬到 at，调用方接着删那个方向上的一个字符
+        Handled         // 整个按键已经做完（删掉了控件本身）
+    };
+    /**
+     * 退格贴着控件括号时的四种情形：光标在闭括号右面 / 开括号右面。
+     *
+     * 返回 MoveThenErase 时 at 是已经算好的落点（控件内部的最后一个位置），调用方接着按
+     * 普通退格删左边一项 —— "删控件内的一个字符"就是这样复用普通退格得到的，不另写一套。
+     */
+    BracketHit bracketBackspace(FlowPos* at);
+    /**
+     * 前删贴着控件括号时的四种情形：光标在开括号左面 / 闭括号左面。与退格左右对称。
+     */
+    BracketHit bracketDeleteForward(FlowPos* at);
+    /**
+     * 控件的流区间。不在流里（隐藏、摘除）返回 false。
+     */
+    bool controlFlowSpan(int index, FlowPos* lo, FlowPos* hi) const;
+    /**
+     * 控件内部除了自己那两枚括号什么都没有。只有它为真才允许一次按键删掉整个控件 ——
+     * 有内容时按键删的永远是内容里的一项，控件本身得等它被删空。
+     */
+    bool controlIsEmpty(int index) const;
+    /**
+     * 流区间终点正好是 p 的控件（= 它的闭括号占 p-1 那一格）；没有返回 -1。
+     * 括号各占一格且互不相同，所以这个匹配唯一，不需要挑"最内层"。
+     */
+    int controlEndingAt(FlowPos p) const;
+    /**
+     * 流区间起点正好是 p 的控件（= 它的开括号占 p 那一格）；没有返回 -1。
+     */
+    int controlStartingAt(FlowPos p) const;
 
     /**
      * 选区被编辑入口"吃掉"时折算出来的一份删除计划（见 planEraseSelection）。
@@ -952,8 +1026,11 @@ private:
      *
      * 顺带把上下键的列位作废：列位只在一串连续的上下键里才有意义，
      * 别的定位都该让它从头取（见 moveCaretVertical）。
+     *
+     * line_aff 是行别（见 caretLineAffinity）：只有点击落点会带非零值，
+     * 其余入口一律按"贴上一行"。
      */
-    void setCaretRel(int para, int rel, bool collapse = true);
+    void setCaretRel(int para, int rel, bool collapse = true, int line_aff = 0);
     /**
      * 光标那一段（派生）= focus 落在哪一块。block_flow_ 单调，二分取最后一个起点不超过它的块。
      */
@@ -995,9 +1072,9 @@ private:
     std::vector<Rect> selectionRectsPx() const;
     /**
      * 把"文本坐标 + 侧别"投影成 rel 并摆好（含重排）。side < 0 = 按"最内层含端点"投影。
-     * extend 为真时不动锚点（Shift+Home/End 用）。
+     * extend 为真时不动锚点（Shift+Home/End 用）。line_aff 见 caretLineAffinity。
      */
-    void projectCaret(int para, size_t offset, int side, bool extend = false);
+    void projectCaret(int para, size_t offset, int side, bool extend = false, int line_aff = 0);
     /**
      * 段内相对流位置 = 码点偏移 + 排在它前面的边界数 + 侧别。
      */
@@ -1030,9 +1107,12 @@ private:
      */
     int hintFromCrossSegment(int para, int rel) const;
     /**
-     * 找到包含该位置的行盒（先按行内范围命中，再退化为"同段最近行"）
+     * 找到包含该位置的行盒（先按行内范围命中，再退化为"同段最近行"）。
+     *
+     * 折行处一行有两个候选（上一行的末尾、下一行的开头），aff 选一个：0 取上一行、
+     * 大于 0 取下一行（见 caretLineAffinity）。
      */
-    const LineBox* findLineFor(const TextPos& pos) const;
+    const LineBox* findLineFor(const TextPos& pos, int aff = 0) const;
     /**
      * 给定位置的行盒 + 页号 + 页面坐标矩形
      */
@@ -1360,6 +1440,11 @@ private:
      */
     float vertical_goal_pt_ = 0.0f;
     bool vertical_goal_valid_ = false;
+    /**
+     * 光标行别：0 = 折行处贴上一行行尾，1 = 贴下一行行首（见 caretLineAffinity）。
+     * 与列位同一待遇 —— 任何别的定位都把它清成 0。
+     */
+    int caret_line_aff_ = 0;
     /**
      * 上一帧画过的选区矩形（帧像素）。下次呈现先按它擦掉 —— 与 caret_rect_px_prev_
      * 同一个理由：选区画在帧上、不进底图，不擦就会留下上一帧的一片蓝。

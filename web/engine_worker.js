@@ -443,6 +443,7 @@ function retarget(st) {
 const PRESENT_ALWAYS = new Set([
   'present', 'blinkPhase', 'viewport',
   'setCaret', 'setCaretAt', 'setCaretAtSide', 'setFocusAtSide',
+  'setCaretAtSideLine', 'setFocusAtSideLine',
   'setEditMode', 'setBracketScope', 'setViewportAnchor',
   // 样式那两条：与 setEditMode 同档 —— 引擎只换参数（见 setCaretAndSelectionStyle），
   //   没有这层收尾的话帧上留的还是旧颜色。
@@ -729,6 +730,16 @@ const WRITE = {
   },
   setCaretAtSide: (a) => {
     mod.setCaretAtSide(a.para | 0, a.offset | 0, a.side | 0);
+    mod.showCaret(true);
+  },
+  // 带行别的版本：折行处"上一行行尾"与"下一行行首"是同一个偏移与侧别，
+  //   只有行别分得开（点击落点走它，见 EditorEngine::caretLineAffinity）。
+  setCaretAtSideLine: (a) => {
+    mod.setCaretAtSideLine(a.para | 0, a.offset | 0, a.side | 0, a.line | 0);
+    mod.showCaret(true);
+  },
+  setFocusAtSideLine: (a) => {
+    mod.setFocusAtSideLine(a.para | 0, a.offset | 0, a.side | 0, a.line | 0);
     mod.showCaret(true);
   },
   // 拖选的移动端：只搬焦点端，anchor 不动。与 setCaretAtSide 同档 ——

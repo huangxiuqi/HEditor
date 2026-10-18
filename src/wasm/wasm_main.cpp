@@ -246,6 +246,8 @@ void rebuildDocument(bool keep_caret) {
     // 侧别也要一起搬回来：同一个偏移上有好几个位置（括号之间、控件内外），
     //   只搬偏移等于把光标挪到那一处的"默认"位置上 —— 用户会看到它自己跳了一格。
     const int side = keep_caret ? g_engine.caretSide() : -1;
+    // 行别同一待遇：折行处的光标贴哪一行是用户点出来的，重建之后不该变。
+    const int line_aff = keep_caret ? g_engine.caretLineAffinity() : 0;
     std::string text_before;
     if (keep_caret) {
         for (const BlockSpec& b : g_engine.blocks()) text_before += b.textUtf8();
@@ -257,7 +259,7 @@ void rebuildDocument(bool keep_caret) {
     if (text_before != text_after) return;  // 换了文档：光标归零才是对的
     if (before.para < 0 || before.para >= static_cast<int>(g_engine.blocks().size())) return;
     if (before.offset > g_engine.blocks()[static_cast<size_t>(before.para)].cp_text.size()) return;
-    g_engine.setCaretAtSide(before.para, before.offset, side);
+    g_engine.setCaretAtSideLine(before.para, before.offset, side, line_aff);
 }
 
 void setScenario(int scenario) {
@@ -626,6 +628,19 @@ bool redoEdit() { return g_engine.redoAndRender(); }
 int caretOffsetLive() { return static_cast<int>(g_engine.caret().offset); }
 
 /**
+ * 光标是否落在竖排的段里（直读）。宿主的方向键映射要用它 ——
+ * 竖排的行内轴是竖直的，上下走字、左右换列（见宿主侧的键位表）。
+ * 键位映射必须同步问，所以它不能走 editStats 那条异步回传。
+ */
+bool caretVerticalNow() { return g_engine.caretVertical(); }
+
+/**
+ * 光标所在段的列序是否反向（直读）。与 caretVerticalNow 同一条路：
+ * 竖排的左右是换列，而往左还是往右换由列序决定（中日竖排左、蒙文右）。
+ */
+bool caretBlockReversedNow() { return g_engine.caretBlockReversed(); }
+
+/**
  * 选区取证：两端（全局流位置）、是否为空，以及它在页面坐标下的矩形。
  *
  * 矩形是判据要的正面证据 —— "选中了哪一段"最终要落到"哪几行被盖住了"。空选区给空数组，
@@ -655,26 +670,34 @@ std::string selectionReport() {
 }
 
 /**
- * 命中测试：帧坐标（磅）→ 位置。返回 "null" 或 {"para":n,"offset":n,"field":n}。
- * 反查与正查共用同一份行盒几何，所以点选落点和画出来的光标必然一致。
+ * 命中测试：文档坐标（磅）→ 位置。返回 "null" 或 {para, offset, field, side, line}。
  *
- * side = 落点的侧别（见引擎的 caretSide）。它是落点的完整身份：相邻两个字段共享边界时，
- * 前一个字段的末尾与后一个字段的开头是同一个偏移，同一个偏移上还可能压着好几枚括号 ——
- * 只给偏移，宿主就表达不了用户点的是哪一个位置，于是"点后一个字段的开头"只能按最内层
- * 规则归给前一个字段（前一个字段只读时那次点击直接失效，相邻空字段更是整段点不进去）。
- *
- * field = "该次点击属于哪个控件"（-1 = 判不出）。它是 side 的投影，给人看与给判据断言用；
- * 宿主搬运落点必须搬 side —— 投影会把"同处好几枚括号"的细节抹平。
+ * side 是落点的完整身份：相邻字段共享边界、同一偏移上压着几枚括号时，只给偏移分不开
+ *   "前一个字段的末尾"与"后一个字段的开头"（前一个字段只读时那次点击直接失效）。
+ *   field 是它的投影，只给人看 —— 宿主搬运落点必须搬 side。
+ * line 是行别（见引擎的 caretLineAffinity）：折行处"上一行行尾"与"下一行行首"是同一个
+ *   偏移与侧别，只有它分得开；宿主必须原样带回去（setCaretAtSideLine），
+ *   否则点下一行行首会画到上一行行尾。
  */
 std::string hitTest(float x_pt, float y_pt) {
     TextPos p{};
     int owner = -1;
     int side = 0;
-    if (!g_engine.hitTestPt(x_pt, y_pt, &p, &owner, &side)) return "null";
+    int line_aff = 0;
+    if (!g_engine.hitTestPt(x_pt, y_pt, &p, &owner, &side, &line_aff)) return "null";
     std::ostringstream o;
     o << "{\"para\":" << p.para << ",\"offset\":" << p.offset << ",\"field\":" << owner
-      << ",\"side\":" << side << "}";
+      << ",\"side\":" << side << ",\"line\":" << line_aff << "}";
     return o.str();
+}
+
+/**
+ * 带侧别与行别的定位（点画布的落点）。side 与 line 都来自 hitTest 的同一份结果。
+ * 宿主不要自己拼这两个数：它只该原样搬运引擎算出来的结论。
+ */
+void setCaretAtSideLine(int para, int offset, int side, int line_aff) {
+    g_engine.setCaretAtSideLine(para, static_cast<size_t>(offset < 0 ? 0 : offset), side,
+                                line_aff);
 }
 
 /**
@@ -691,6 +714,15 @@ void setCaretAtSide(int para, int offset, int side) {
  */
 void setFocusAtSide(int para, int offset, int side) {
     g_engine.setFocusAtSide(para, static_cast<size_t>(offset < 0 ? 0 : offset), side);
+}
+
+/**
+ * 拖选的移动端（带行别）。line 与 setCaretAtSideLine 同一来源。
+ * 拖到下一行行首时也要贴着那一行，否则选区末端的矩形停在上一行行尾。
+ */
+void setFocusAtSideLine(int para, int offset, int side, int line_aff) {
+    g_engine.setFocusAtSideLine(para, static_cast<size_t>(offset < 0 ? 0 : offset), side,
+                                line_aff);
 }
 
 /**
@@ -1185,6 +1217,10 @@ std::string editStatsJson() {
     o << "\"caretIndex\":" << e.caret_index << ",";
     o << "\"docCodepoints\":" << e.doc_codepoints << ",";
     o << "\"caretSide\":" << e.caret_side << ",";
+    // 竖排标记：宿主靠它把方向键按物理方向映射（竖排上下走字、左右换列）。
+    o << "\"caretVertical\":" << (e.caret_vertical ? "true" : "false") << ",";
+    // 列序：中日竖排往左换列、蒙文往右换列。只给"是竖排"，左右就会按反。
+    o << "\"caretBlockReversed\":" << (e.caret_block_reversed ? "true" : "false") << ",";
     o << "\"caretPage\":" << e.caret_page << ",";
     o << "\"caretVisible\":" << (e.caret_visible ? "true" : "false") << ",";
     o << "\"caretX\":" << e.caret_x_px << ",";
@@ -1282,10 +1318,14 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("setCaret", &setCaret);
     emscripten::function("setCaretAt", &setCaretAt);
     emscripten::function("setCaretAtSide", &setCaretAtSide);
+    emscripten::function("setCaretAtSideLine", &setCaretAtSideLine);
+    emscripten::function("setFocusAtSideLine", &setFocusAtSideLine);
     emscripten::function("setFocusAtSide", &setFocusAtSide);
     emscripten::function("showCaret", &showCaret);
     emscripten::function("present", &present);
     emscripten::function("caretOffsetLive", &caretOffsetLive);
+    emscripten::function("caretVerticalNow", &caretVerticalNow);
+    emscripten::function("caretBlockReversedNow", &caretBlockReversedNow);
     emscripten::function("hitTest", &hitTest);
     emscripten::function("editStatsJson", &editStatsJson);
     emscripten::function("caretReport", &caretReport);

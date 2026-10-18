@@ -664,22 +664,21 @@ StepResult canApply(const NodeTree& tree, const FlowIndex& idx, const Step& step
                        r.ok = true;
                    },
                    [&](const InsertNode& s) {
-                       const Node* c = tree.find(s.at.container);
-                       if (c == nullptr || !isContainer(c->kind)) {
-                           r.error = "插入节点：目标不是容器";
+                       // 判据落在流位置上：槽位下标活不过一次规范化（相邻同标记的文本节点
+                       //   会被并成一个，后面的槽位整体前移）—— 与 UnwrapNode 同一条。
+                       if (!inRange(s.at_flow, size)) {
+                           r.error = "插入节点：流位置与文档对不上（越界）";
                            return;
                        }
-                       if (s.at.offset < 0 || s.at.offset > static_cast<int>(c->children.size())) {
-                           r.error = "插入节点：槽位越界";
+                       const Pos p = slotForFlow(tree, idx, s.at_flow);
+                       const Node* c = tree.find(p.container);
+                       if (c == nullptr || !isContainer(c->kind)) {
+                           r.error = "插入节点：目标不是容器";
                            return;
                        }
                        if (!acceptsChild(c->kind, s.subtree.kind)) {
                            r.error = std::string("插入节点：") + nodeKindName(c->kind) +
                                      " 不接受 " + nodeKindName(s.subtree.kind) + " 作为子节点";
-                           return;
-                       }
-                       if (idx.flowAt(s.at) != s.at_flow) {
-                           r.error = "插入节点：流位置与文档对不上（步骤过期了）";
                            return;
                        }
                        if (s.detached != kInvalidNodeId) {
@@ -701,26 +700,31 @@ StepResult canApply(const NodeTree& tree, const FlowIndex& idx, const Step& step
                        r.ok = true;
                    },
                    [&](const RemoveNode& s) {
-                       const Node* c = tree.find(s.at.container);
+                       // 与 UnwrapNode 同一条：槽位下标活不过一次规范化，判据落在流位置上 ——
+                       //   那一格上必须站着一个与记录同种（同身份）的节点。
+                       //   槽位用 slotForFlow 而不是 posAt 取：posAt 会下降进叶子孩子
+                       //   （"流位置等于叶子的起点"归叶子自己），要删的正是那个叶子。
+                       if (!inRange(s.at_flow, size)) {
+                           r.error = "删除节点：流位置与文档对不上（越界）";
+                           return;
+                       }
+                       const Pos p = slotForFlow(tree, idx, s.at_flow);
+                       const Node* c = tree.find(p.container);
                        if (c == nullptr || !isContainer(c->kind)) {
                            r.error = "删除节点：目标不是容器";
                            return;
                        }
-                       if (s.at.offset < 0 || s.at.offset >= static_cast<int>(c->children.size())) {
+                       if (p.offset < 0 || p.offset >= static_cast<int>(c->children.size())) {
                            r.error = "删除节点：槽位没有孩子";
                            return;
                        }
-                       const Node* kid = c->children[static_cast<size_t>(s.at.offset)];
+                       const Node* kid = c->children[static_cast<size_t>(p.offset)];
                        if (kid->kind != s.removed.kind) {
                            r.error = "删除节点：该位置的孩子与步骤记录不符";
                            return;
                        }
                        if (s.detached != kInvalidNodeId && kid->id != s.detached) {
                            r.error = "删除节点：该位置的孩子的身份与步骤不符";
-                           return;
-                       }
-                       if (idx.flowAt(s.at) != s.at_flow) {
-                           r.error = "删除节点：流位置与文档对不上（步骤过期了）";
                            return;
                        }
                        r.ok = true;
@@ -911,15 +915,26 @@ StepResult applyStep(NodeTree& tree, const Step& step) {
                 n->styleRef = s.styleRef;
             },
             [&](const InsertNode& s) {
+                // 槽位按流位置当场重算，必要时把文本节点切开：撤销"删掉一个节点"时，那两段
+                //   相邻的文字已被规范化并成一个节点，步骤里记下的槽位下标不再指向它
+                //   （见 UnwrapNode / WrapNode 同一条理由）。
+                NodeId container = kInvalidNodeId;
+                int slot = -1;
+                if (!slotAtFlow(tree, s.at_flow, &container, &slot)) return;
                 if (s.detached != kInvalidNodeId) {
-                    tree.attachChild(s.at.container, s.at.offset, s.detached);
+                    tree.attachChild(container, slot, s.detached);
                     return;
                 }
                 // 没有现成的子树（例如步骤由序列化还原）：按记录现建一棵，内容一样、
                 // 身份是新的。
-                materializeSubtree(tree, s.at.container, s.at.offset, s.subtree);
+                materializeSubtree(tree, container, slot, s.subtree);
             },
-            [&](const RemoveNode& s) { tree.eraseChild(s.at.container, s.at.offset); },
+            [&](const RemoveNode& s) {
+                NodeId container = kInvalidNodeId;
+                int slot = -1;
+                if (!slotAtFlow(tree, s.at_flow, &container, &slot)) return;
+                tree.eraseChild(container, slot);
+            },
             [&](const UnwrapNode& s) {
                 // 槽位按流位置当场重算：参数里那个 at.offset 只是记录，规范化的合并会让它过期。
                 NodeId container = kInvalidNodeId;

@@ -2422,18 +2422,28 @@ async function main() {
                   `${s10.map((q) => q.x.toFixed(2)).join(' / ')}`);
 
       await load(2);
+      // 删控件是结构操作：表单模式默认被 structureLock 锁住（[16](c) 是它的对照），
+      //   这一段要验"空控件被删掉"，所以切文档模式。
+      await c.eval('return await window.__heditor.setEditMode(0);');
       await c.eval('return await window.__heditor.setCaret(0, 11);');
       for (let i = 0; i < 3; ++i) {
         await c.eval(key('Backspace'));
         await sleep(20);
       }
+      const b0 = await caretOf();
+      const it0 = await items();
+      chk.check('★★ 三连：第三个字段删空之后再退一格，删掉的是这个空控件（落点＝它原来那一格）',
+                b0.o === 9 && b0.s === 1 && JSON.stringify(it0) === '[[5,7],[7,9]]',
+                `落点 ${b0.o}/${b0.s} ｜ ${JSON.stringify(it0)}`);
+      await c.eval(key('Backspace'));
+      await sleep(20);
       const b = await caretOf();
-      chk.check('★★ 三连删「悸」→ 落点＝第一个字段末尾（cp 8 侧别 0），不许进第三个控件',
+      chk.check('★★ 再退一格删「悸」→ 落点＝第一个字段末尾（cp 8 侧别 0），不许进别的控件',
                 b.o === 8 && b.s === 0, `落点 ${b.o}/${b.s}`);
       await c.eval(key('痛'));
       const it = await items();
-      chk.check('★ 接着打字进的是第二个字段（不是第三个控件）',
-                JSON.stringify(it) === '[[5,7],[7,9],[9,9]]', JSON.stringify(it));
+      chk.check('★ 接着打字进的是第二个字段（不是别的控件）',
+                JSON.stringify(it) === '[[5,7],[7,9]]', JSON.stringify(it));
       await c.screenshot(join(OUT, 'delete-caret-landing.png'));
     }
 
@@ -2573,12 +2583,12 @@ async function main() {
     await c.screenshot(join(OUT, 'brackets-in-document-mode.png'));
   }
 
-  chk.section('[16] 删控件：光标贴闭括号按退格（真实按键）+ 引擎命令');
+  chk.section('[16] 控件边界上的退格（真实按键）+ 引擎命令');
   {
-    //  用户的原话："编辑模式下，光标在控件后面，退格就是删除控件"。
+    //  四条规则（见 engine.cpp 的 bracketBackspace / bracketDeleteForward）。
     //  三连可编辑字段（variant 2）：part1=[5,7) 反复、part2=[7,9) 心悸、part3=[9,11) 三天。
     //  字段末尾那个码点偏移上压着两格 —— 侧别 0 还在内容里（退的是字），侧别 1 已经跨过
-    //  闭括号（退的是这个控件）。任何"按码点偏移猜"的实现都过不了下面 (a)/(b) 这一对。
+    //  闭括号（退的是控件内容里那一项）。任何"按码点偏移猜"的实现都过不了下面 (a)/(b) 这一对。
     //  结构操作要文档模式：表单模式默认被 structureLock 锁住，(c) 那一条正是它的对照。
     const load16 = async (v) => {
       await c.eval(`return await window.__heditor.loadFormSample(${v});`);
@@ -2606,46 +2616,69 @@ async function main() {
               (await n16()) === 3 && (await text16()) === '患者主诉：反复心三天，加重一天。',
               `${await n16()} 个字段 ｜ ${JSON.stringify(await text16())}`);
 
-    // (b) 主判据：侧别 1 —— 已经跨过 part2 的闭括号，退格退役这个控件，内容留成正文
+    // (b) 侧别 1 —— 已经跨过 part2 的闭括号：按规则先进 part2 删掉它内容里的最后一项，
+    //   控件本身要等它空了才删得掉（"删一个字符或空控件"）。
     await load16(2);
     await c.eval('return await window.__heditor.setEditMode(0);');
     await c.eval('return await window.__heditor.setCaretAtSide(0, 9, 1);');
     chk.check('前置：侧别 1 是 part2 的闭括号之后', (await side16()) === 1, `侧别 ${await side16()}`);
     await c.eval(key('Backspace'));
     report.removeControl.afterBackspace = { ids: await ids16(), t: await text16() };
-    chk.check('★★ 退格退掉的是 part2 这个控件（不是字）',
-              JSON.stringify(await ids16()) === '["part1","part3"]', JSON.stringify(await ids16()));
-    // 区间不许被撑大：拆壳上提出来的「心悸」是 part1 / part3 的兄弟，不是被前一个字段吃掉。
-    //   单列这一条是因为"内容被并进 part1"也能让上面三条全绿 —— 视觉上就是
-    //   "删掉一个字段、前一个字段把它吞了"，不量区间看不出来。
-    const rng16 = await c.eval('return window.__heditor.controls.items.map(i => [i.start[1], i.end[1]]);');
-    report.removeControl.ranges = rng16;
-    chk.check('★★ 剩下两个字段的区间仍是 [5,7) 与 [9,11)（推广出来的正文是兄弟，没被吞进 part1）',
-              JSON.stringify(rng16) === '[[5,7],[9,11]]', JSON.stringify(rng16));
-    chk.check('★★ 拆壳留内容：文本一个字都没少',
-              (await text16()) === base16.t, JSON.stringify(await text16()));
+    chk.check('★★ 闭括号之后退格：进 part2 删掉「悸」，控件一个都没少',
+              JSON.stringify(await ids16()) === '["part1","part2","part3"]' &&
+                (await text16()) === '患者主诉：反复心三天，加重一天。',
+              `${JSON.stringify(await ids16())} ｜ ${JSON.stringify(await text16())}`);
+    chk.check('★ 光标进到了 part2 里（内容末尾，侧别 0）', (await side16()) === 0,
+              `侧别 ${await side16()}`);
     const lv16 = await c.eval('return await window.__heditor.auditLayout();');
-    chk.check('★★ 删控件之后增量排版 == 全量重排', !!lv16 && lv16.diff === 0,
+    chk.check('★★ 删字之后增量排版 == 全量重排', !!lv16 && lv16.diff === 0,
               lv16 ? `diff ${lv16.diff}` : 'null');
     const sc16 = await c.eval('return await window.__heditor.selfCheck();');
-    chk.check('★ 删控件之后屏幕 == 引擎帧（括号与占位都得跟着走）',
+    chk.check('★ 删字之后屏幕 == 引擎帧（括号与占位都得跟着走）',
               sc16.screenVsEngineDiffPx === 0, `差 ${sc16.screenVsEngineDiffPx} px`);
+
+    // part2 的内容删光（两下）之后光标停在它内部 ⇒ 第三下删掉的是这个空控件本身
+    await c.eval(key('Backspace'));
+    await c.eval(key('Backspace'));
+    report.removeControl.afterBackspace2 = { ids: await ids16(), t: await text16() };
+    chk.check('★★ 空控件上再退一格：删掉的是 part2 这个控件（不是字）',
+              JSON.stringify(await ids16()) === '["part1","part3"]', JSON.stringify(await ids16()));
+    // 区间不许被撑大：part2 整个消失之后 part1 / part3 各守自己的位置。
+    //   单列这一条是因为"删掉一个字段、前一个字段把它吞了"也能让上面那条全绿，
+    //   视觉上就是区间被撑大，不量区间看不出来。
+    const rng16 = await c.eval('return window.__heditor.controls.items.map(i => [i.start[1], i.end[1]]);');
+    report.removeControl.ranges = rng16;
+    chk.check('★★ 剩下两个字段的区间仍是 [5,7) 与 [7,9)（前一个字段没把它吞进去）',
+              JSON.stringify(rng16) === '[[5,7],[7,9]]', JSON.stringify(rng16));
+    chk.check('★★ 文本只剩 part1 与 part3 的内容（控件里本来就空了）',
+              (await text16()) === '患者主诉：反复三天，加重一天。', JSON.stringify(await text16()));
     await c.screenshot(join(OUT, 'ctl-remove-by-backspace.png'));
 
-    // 撤销要把控件整棵装回去：拆壳那一步是可逆的（内容与两枚边界都回原处）
-    chk.check('★★ 撤销把 part2 装回来（身份与文本都回原处）',
+    // 撤销要把控件整棵装回去，而且光标回到按键之前那一格 —— 不是"选中整个控件"
+    //   （那样撤销之后光标会落到闭括号右边，屏幕上还留着一圈选区）。
+    chk.check('★★ 撤销把 part2 装回来（空的、还在原来那一格），光标归位且不留选区',
               (await c.eval('return await window.__heditor.undo() ? 1 : 0;')) === 1 &&
-                JSON.stringify(await ids16()) === JSON.stringify(base16.ids) &&
-                (await text16()) === base16.t,
-              JSON.stringify(await ids16()));
+                JSON.stringify(await ids16()) === '["part1","part2","part3"]' &&
+                (await text16()) === '患者主诉：反复三天，加重一天。' &&
+                (await c.eval('return window.__heditor.selection.empty ? 1 : 0;')) === 1 &&
+                JSON.stringify(await c.eval(
+                  'return window.__heditor.controls.items.map(i => [i.start[1], i.end[1]]);')) ===
+                  '[[5,7],[7,7],[7,9]]',
+              JSON.stringify(await ids16()) + ' ｜ 侧别 ' + (await side16()));
 
-    // (c) 表单模式：结构被 structureLock 锁住 —— 这一次按键不许被吞掉，回落成普通退格
+    // (c) 表单模式：结构被 structureLock 锁住 —— 删字那一下照样生效，删控件那一下被拒
     await load16(2);
     const b16 = await blocked16();
     await c.eval('return await window.__heditor.setCaretAtSide(0, 9, 1);');
     await c.eval(key('Backspace'));
-    chk.check('★ 表单模式：结构操作被拒之后回落成普通退格（没吞掉这次按键）',
-              (await n16()) === 3 && (await text16()) === '患者主诉：反复心三天，加重一天。',
+    chk.check('★ 表单模式：闭括号之后退格照样进 part2 删掉「悸」（删的是内容，不是结构）',
+              (await n16()) === 3 && (await text16()) === '患者主诉：反复心三天，加重一天。' &&
+                (await blocked16()) === b16,
+              `${await n16()} 个字段 ｜ ${JSON.stringify(await text16())}`);
+    await c.eval(key('Backspace'));
+    await c.eval(key('Backspace'));
+    chk.check('★ 空控件上那一下被结构锁拒了：控件还在、按键没被吞掉（光标退了出去）',
+              (await n16()) === 3 && (await text16()) === '患者主诉：反复三天，加重一天。',
               `${await n16()} 个字段 ｜ ${JSON.stringify(await text16())}`);
     chk.check('★ 那次被拒的结构操作记了账', (await blocked16()) === b16 + 1,
               `blockedEdits ${b16} → ${await blocked16()}`);
