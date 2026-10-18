@@ -173,6 +173,12 @@ enum class RowHeightRule : uint8_t { Auto, AtLeast, Exact };
 enum class BoxVAlign : uint8_t { Top, Center, Bottom };
 
 /**
+ * 单元格内边距（四边相同）。它是引擎配置常数，不来自样式表 —— 等 TableStyle 落地再接。
+ * 排版按它算格内可用宽度与行高，绘制按它画内容框；两处共用这一个数，各写一遍必然分叉。
+ */
+inline constexpr float kTableCellPaddingPt = 4.0f;
+
+/**
  * 表格在内容区里的水平位置（引擎侧）。只在表宽小于可用宽度时才有意义。
  */
 enum class TableHAlign : uint8_t { Start, Center, End };
@@ -735,7 +741,8 @@ struct LayoutResult {
  * 已知边界：只处理同一段内的边界，端点跨段的控件拿不到占位（控件矩形与命中测试已支持跨段）。
  */
 LayoutResult layoutDocument(FontLibrary& lib, const std::vector<BlockSpec>& blocks,
-                            const PageMetrics& page);
+                            const PageMetrics& page,
+                            const std::vector<LayoutTable>& tables = {});
 
 /**
  * 续排入口：把 [from_para, to_para) 排入 @p out，返回结束时的续排状态。
@@ -753,6 +760,19 @@ LayoutResult layoutDocument(FontLibrary& lib, const std::vector<BlockSpec>& bloc
 ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& blocks,
                                 const PageMetrics& page, int from_para, int to_para,
                                 const ReflowState& state, ShapingCache* cache, LayoutResult* out);
+
+/**
+ * 带表格结构的续排入口。带 cell_path 的块按格矩形排（格内断行、行高按内容结算），
+ * 其余与上面那条完全相同。
+ *
+ * 表格只支持横排：竖排文档里的表格块仍按整页宽排（明确的边界，不做静默的错误布局）。
+ * tables 为空时与不带表格的那条入口逐字节相同（所有现有调用点走的就是这条路）。
+ */
+ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<BlockSpec>& blocks,
+                                          const PageMetrics& page,
+                                          const std::vector<LayoutTable>& tables, int from_para,
+                                          int to_para, const ReflowState& state,
+                                          ShapingCache* cache, LayoutResult* out);
 
 /**
  * 按 para_index 逐段求和，写回 stats 里的字面量汇总（字形数、行数、簇数、缺字、run 数）。

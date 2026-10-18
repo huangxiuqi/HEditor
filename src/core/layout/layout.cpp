@@ -409,16 +409,25 @@ struct ShapingCacheAccess {
  * 全量排版：从第 0 段排到末尾，不使用缓存（对照路径与基准）。
  */
 LayoutResult layoutDocument(FontLibrary& lib, const std::vector<BlockSpec>& blocks,
-                            const PageMetrics& page) {
+                            const PageMetrics& page, const std::vector<LayoutTable>& tables) {
     LayoutResult res;
-    layoutDocumentRange(lib, blocks, page, 0, static_cast<int>(blocks.size()),
-                        freshReflowState(page), /*cache=*/nullptr, &res);
+    layoutDocumentRangeWithTables(lib, blocks, page, tables, 0, static_cast<int>(blocks.size()),
+                                  freshReflowState(page), /*cache=*/nullptr, &res);
     return res;
 }
 
 ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& blocks,
                                 const PageMetrics& page, int from_para, int to_para,
                                 const ReflowState& state, ShapingCache* cache, LayoutResult* out) {
+    return layoutDocumentRangeWithTables(lib, blocks, page, {}, from_para, to_para, state, cache,
+                                         out);
+}
+
+ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<BlockSpec>& blocks,
+                                          const PageMetrics& page,
+                                          const std::vector<LayoutTable>& tables, int from_para,
+                                          int to_para, const ReflowState& state,
+                                          ShapingCache* cache, LayoutResult* out) {
     const auto t_layout0 = Clock::now();
     LayoutResult& res = *out;
     ShapingCache::Impl* cache_impl = ShapingCacheAccess::impl(cache);
@@ -585,10 +594,246 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
         return bs.clusters.empty() ? nullptr : &bs;
     };
 
+    // 表格排版上下文。
+    //
+    // 表格是扁平化进块流的：格里的块照常走这个循环，只是它们的行内起点与可用宽度由格矩形
+    // 给。所以这里维护一个栈（嵌套表格），在块之间切换时开/关格与行。
+    //
+    // 一行多格的顺序就是块流顺序（(0,0) 的块、然后 (0,1) 的块、然后 (1,0) …），于是
+    // "同行的下一格"要回到行顶重排，而"这一行多高"要等所有格都排完才知道 —— 所以行高在
+    // closeRow 里结算。整行放不下时把这一行已经写下的行盒与字形一起平移（行内排版不翻页，
+    // 否则同一行的几个格会落到不同的页上）。
+    struct TableFrame {
+        const LayoutTable* t = nullptr;
+        std::vector<float> col_x;  // 每列左边缘（相对表格左边）
+        std::vector<float> col_w;
+        float x = 0.0f;  // 表格左边缘（页内坐标）
+        float w = 0.0f;
+        float cell_cx = 0.0f;  // 当前格的行内起点与可用宽度（进内层表时保存，回来后恢复）
+        float cell_cw = 0.0f;
+        int row = -1;
+        int cell = -1;
+        float row_top = 0.0f;
+        float row_content_h = 0.0f;
+        size_t line_begin = 0;   // 本行第一个行盒下标（换页时整行平移）
+        size_t glyph_begin = 0;  // 同上，字形
+    };
+    std::vector<TableFrame> tstack;
+    // 行内起点与可用宽度：正文是内容区左边界与内容区宽，格内是格左加内边距与格宽减两侧。
+    //   横排分支只读这两个变量，于是"在正文里排"与"在格里排"共用同一套断行与放置代码。
+    float cur_cx = cx;
+    float cur_cw = cw;
+    // 最后排完的那一块的段后距。格内容高要把它扣掉：格的底边由最后一段的文字底加内边距
+    //   定，段后距是段与段之间的距离，最后一段后面没有下一段可让。
+    float last_space_after = 0.0f;
+
+    auto tableByHandle = [&tables](uint64_t h) -> const LayoutTable* {
+        for (const LayoutTable& t : tables) {
+            if (t.handle == h) return &t;
+        }
+        return nullptr;
+    };
+
+    // 进表：列宽与表格位置只由表宽与列定义决定，与内容无关，所以一次算好。
+    //   自动列平分剩余宽度；显式列宽之和超出表宽时整体按比例缩 —— 否则表格会越出内容区。
+    auto openTable = [&](const LayoutTable& t, float top_y) {
+        TableFrame f;
+        f.t = &t;
+        float w = cw;
+        switch (t.width.kind) {
+            case WidthSpec::Kind::Abs:
+                w = t.width.pt;
+                break;
+            case WidthSpec::Kind::Percent:
+                w = cw * t.width.ratio;
+                break;
+            case WidthSpec::Kind::Auto:
+                break;
+        }
+        w = std::min(std::max(w, 1.0f), cw);
+        float shift = 0.0f;
+        switch (t.align) {
+            case TableHAlign::Center:
+                shift = 0.5f * (cw - w);
+                break;
+            case TableHAlign::End:
+                shift = cw - w;
+                break;
+            case TableHAlign::Start:
+                break;
+        }
+        f.x = cx + shift;
+        f.w = w;
+        const int cols = std::max(t.cols, 0);
+        f.col_w.assign(static_cast<size_t>(cols), 0.0f);
+        float used = 0.0f;
+        int auto_cols = 0;
+        for (int c = 0; c < cols; ++c) {
+            const WidthSpec spec = (static_cast<size_t>(c) < t.col_widths.size())
+                                       ? t.col_widths[static_cast<size_t>(c)]
+                                       : WidthSpec{};
+            if (spec.kind == WidthSpec::Kind::Abs) {
+                f.col_w[static_cast<size_t>(c)] = spec.pt;
+            } else if (spec.kind == WidthSpec::Kind::Percent) {
+                f.col_w[static_cast<size_t>(c)] = w * spec.ratio;
+            } else {
+                ++auto_cols;
+            }
+            used += f.col_w[static_cast<size_t>(c)];
+        }
+        if (auto_cols > 0) {
+            const float each = std::max(0.0f, w - used) / static_cast<float>(auto_cols);
+            for (int c = 0; c < cols; ++c) {
+                const WidthSpec spec = (static_cast<size_t>(c) < t.col_widths.size())
+                                           ? t.col_widths[static_cast<size_t>(c)]
+                                           : WidthSpec{};
+                if (spec.kind == WidthSpec::Kind::Auto) f.col_w[static_cast<size_t>(c)] = each;
+            }
+        }
+        float total = 0.0f;
+        for (float v : f.col_w) total += v;
+        if (total > w && total > 0.0f) {
+            const float k = w / total;
+            for (float& v : f.col_w) v *= k;
+        }
+        f.col_x.assign(f.col_w.size(), 0.0f);
+        float acc = 0.0f;
+        for (size_t c = 0; c < f.col_w.size(); ++c) {
+            f.col_x[c] = acc;
+            acc += f.col_w[c];
+        }
+        f.row_top = top_y;
+        f.line_begin = res.lines.size();
+        f.glyph_begin = res.glyphs.size();
+        tstack.push_back(std::move(f));
+    };
+
+    // 出一个格：把这一格的内容高记进本行的最大值。cursor_y 此刻已经在格内容的末尾 ——
+    //   收尾放在"切到下一格/下一行"时做，所以遍历途中的提前 continue 一个都不用记。
+    auto closeCell = [&]() {
+        TableFrame& f = tstack.back();
+        if (f.cell >= 0) {
+            f.row_content_h = std::max(
+                f.row_content_h,
+                cursor_y - f.row_top - kTableCellPaddingPt - last_space_after);
+        }
+        f.cell = -1;
+    };
+
+    // 出一行：结算行高，整行放不下就换页并把这一行已写下的行盒与字形一起平移。
+    auto closeRow = [&]() {
+        TableFrame& f = tstack.back();
+        closeCell();
+        if (f.row < 0) return;
+        LayoutRow rs;
+        if (static_cast<size_t>(f.row) < f.t->row_specs.size()) {
+            rs = f.t->row_specs[static_cast<size_t>(f.row)];
+        }
+        const float spec_h = rs.height_pt.value_or(0.0f);
+        float row_h = std::max(f.row_content_h + 2.0f * kTableCellPaddingPt, spec_h);
+        if (row_h <= 0.0f) row_h = 2.0f * kTableCellPaddingPt;
+        const bool overflow = (f.row_top + row_h > cy + ch + 0.01f);
+        if (!cont && (rs.page_break_before || overflow) && f.row_top > cy + 0.01f) {
+            const float dy = cy - f.row_top;
+            for (size_t k = f.line_begin; k < res.lines.size(); ++k) {
+                LineBox& lb = res.lines[k];
+                lb.block_lo_pt += dy;
+                lb.block_hi_pt += dy;
+                lb.bracket_axis_pt += dy;
+                lb.page += 1;
+            }
+            for (size_t k = f.glyph_begin; k < res.glyphs.size(); ++k) {
+                res.glyphs[k].y_pt += dy;
+                res.glyphs[k].page += 1;
+            }
+            ++page_index;
+            f.row_top = cy;
+            cursor_y = cy;
+        }
+        f.row_top += row_h;
+        cursor_y = f.row_top;
+        f.line_begin = res.lines.size();
+        f.glyph_begin = res.glyphs.size();
+        f.row = -1;
+        f.row_content_h = 0.0f;
+    };
+
+    // 进一个格：摆好行内起点、可用宽度与块轴起点。跨列的格把覆盖的列宽加起来。
+    auto openCell = [&](const CellSlot& slot) {
+        TableFrame& f = tstack.back();
+        if (f.row != slot.row) {
+            closeRow();
+            f.row = slot.row;
+        }
+        int grid_col = 0;
+        const LayoutCell* lc = nullptr;
+        for (const LayoutCell& c : f.t->cells) {
+            if (c.row != slot.row) continue;
+            if (c.cell == slot.cell) {
+                lc = &c;
+                break;
+            }
+            grid_col += c.col_span;
+        }
+        const int span = (lc != nullptr) ? std::max(lc->col_span, 1) : 1;
+        float cell_x = 0.0f;
+        float cell_w = 0.0f;
+        for (int c = grid_col; c < grid_col + span && c < static_cast<int>(f.col_w.size()); ++c) {
+            if (c == grid_col) cell_x = f.col_x[static_cast<size_t>(c)];
+            cell_w += f.col_w[static_cast<size_t>(c)];
+        }
+        f.cell = slot.cell;
+        f.cell_cx = f.x + cell_x + kTableCellPaddingPt;
+        f.cell_cw = std::max(1.0f, cell_w - 2.0f * kTableCellPaddingPt);
+        cur_cx = f.cell_cx;
+        cur_cw = f.cell_cw;
+        cursor_y = f.row_top + kTableCellPaddingPt;
+    };
+
+    // 出表：结算最后一行，退回外层上下文（正文或外层格）。
+    auto closeTable = [&]() {
+        closeRow();
+        tstack.pop_back();
+        if (tstack.empty()) {
+            cur_cx = cx;
+            cur_cw = cw;
+        } else {
+            TableFrame& outer = tstack.back();
+            cur_cx = outer.cell_cx;
+            cur_cw = outer.cell_cw;
+        }
+    };
+
     for (int para_i = from_para; para_i < to_para; ++para_i) {
         const size_t para_index = static_cast<size_t>(para_i);
         const BlockSpec& b = blocks[para_index];
         ParaIndex& pi = res.para_index[para_index];
+
+        // 表格上下文切换：让 tstack 与这一块的 cell_path 对齐。逐层比对前缀，不同的层
+        //   从内往外关、再按需从外往内开。表结构缺失（句柄找不到）时这一块按正文排 ——
+        //   宁可位置不对，也不要拿一张错表去排。
+        {
+            const std::vector<CellSlot>& path = b.cell_path;
+            size_t keep = 0;
+            while (keep < path.size() && keep < tstack.size() &&
+                   tstack[keep].t->handle == path[keep].table) {
+                ++keep;
+            }
+            while (tstack.size() > keep) closeTable();
+            for (size_t d = keep; d < path.size(); ++d) {
+                const LayoutTable* t = tableByHandle(path[d].table);
+                if (t == nullptr) break;
+                openTable(*t, cursor_y);
+            }
+            if (!path.empty() && path.size() == tstack.size()) {
+                const TableFrame& f = tstack.back();
+                if (f.row != path.back().row || f.cell != path.back().cell) {
+                    openCell(path.back());
+                }
+            }
+        }
+        // 切换之后才更新：上面 closeCell 要读的是"上一块"的段后距。
+        last_space_after = b.space_after_pt;
 
         // 续排锚点必须在任何提前返回之前记录，空段也记，否则「从第 k 段续排」在空段上无定义。
         pi.state_at_start = ReflowState{page_index, cursor_y, line_total};
@@ -612,7 +857,7 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
             // 取不到字体就用字号折算的近似度量：空行的几何必须存在，否则光标没地方画。
             const float ascent = f ? f->ascenderPt() : b.size_pt * 0.8f;
             const float descent = f ? f->descenderPt() : b.size_pt * 0.2f;
-            if (!cont && b.page_break_before && cursor_y > cy + 0.01f) {
+            if (!cont && tstack.empty() && b.page_break_before && cursor_y > cy + 0.01f) {
                 ++page_index;
                 cursor_y = cy;
             }
@@ -671,7 +916,7 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
                 lb.inline_end_pt = ax;
             }
             if (!lb.vertical) {
-                if (!cont && cursor_y + line_h > cy + ch) {
+                if (!cont && tstack.empty() && cursor_y + line_h > cy + ch) {
                     ++page_index;
                     cursor_y = cy;
                     lb.page = slabOfY(cursor_y);
@@ -679,7 +924,7 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
                 lb.page = slabOfY(cursor_y);
                 lb.block_lo_pt = locY(lb.page, cursor_y);
                 lb.block_hi_pt = locY(lb.page, cursor_y + (ascent_eff + descent));
-                lb.inline_origin_pt = cx;
+                lb.inline_origin_pt = cur_cx;
                 lb.bracket_axis_pt = locY(lb.page, cursor_y + ascent_eff);
                 cursor_y += line_h + b.space_after_pt;
             } else {
@@ -706,7 +951,7 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
             continue;
         }
         // 取不到字体（整形为空）：只翻页、不占空间 —— 与下面 !shaped 那条分支一致。
-        if (!cont && b.page_break_before && cursor_y > cy + 0.01f) {
+        if (!cont && tstack.empty() && b.page_break_before && cursor_y > cy + 0.01f) {
             ++page_index;
             cursor_y = cy;
         }
@@ -802,7 +1047,7 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
             float prev_line_h = block_line_h;  // 上一行的行高：本行行顶由它推进
             bool anchor = true;                // 段首或刚翻过页：本行按 cursor_y 重新定位
             while (start < bs.clusters.size()) {
-                const LineSlice slice = takeLine(bs.cluster_adv_pt, bs.break_after, start, cw);
+                const LineSlice slice = takeLine(bs.cluster_adv_pt, bs.break_after, start, cur_cw);
 
                 // 本行的行度量：取本行所有簇所在 run 的最大 ascent / descent / 字号。
                 //   一行里可以混排字号（字符格式 run），行盒高度与基线必须由本行最高的那个
@@ -848,7 +1093,7 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
                 //   连页下这一整条短路：内容一列连到底，行照样往前排（跨条带也不断）。
                 if (anchor) {
                     // 段首那一行：本段从 cursor_y 起排。
-                    if (!cont && cursor_y + line_h > cy + ch) {
+                    if (!cont && tstack.empty() && cursor_y + line_h > cy + ch) {
                         ++page_index;
                         cursor_y = cy;
                     }
@@ -856,7 +1101,7 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
                     anchor = false;
                 } else {
                     top += prev_line_h;
-                    if (!cont && top + line_h > cy + ch) {
+                    if (!cont && tstack.empty() && top + line_h > cy + ch) {
                         ++page_index;
                         cursor_y = cy;
                         top = cursor_y;
@@ -874,7 +1119,7 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
                 lb.size_pt = (max_size > 0.0f) ? max_size : b.size_pt;
                 lb.block_lo_pt = locY(lb.page, baseline - ascent);
                 lb.block_hi_pt = locY(lb.page, baseline + descent);
-                lb.inline_origin_pt = cx;
+                lb.inline_origin_pt = cur_cx;
                 // 画括号用：字体与基线（横排下字形原点的 y 就是基线）。
                 // 字体必须是块的主字体（= 上面算占位槽宽那个 bracketAdvancePt 的来源），
                 //   换个字体画括号，字形 advance 就和槽宽对不上了。
@@ -902,7 +1147,7 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
                 }
                 res.lines.push_back(std::move(lb));
 
-                float pen_x = cx;
+                float pen_x = cur_cx;
                 float pen_y = baseline;
                 // 行内位置由簇推进，不由字形连加推进 —— 这是一处结构性修正。
                 //
@@ -918,7 +1163,7 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
                 //   结构上不可能再不一致（对普通簇是恒等变换，不改任何既有结果）。
                 float ax = 0.0f;
                 for (size_t i = slice.begin; i < slice.end; ++i) {
-                    pen_x = cx + ax;
+                    pen_x = cur_cx + ax;
                     for (size_t g = bs.clusters[i].g0; g < bs.clusters[i].g1; ++g) {
                         const ShapedGlyph& sg = bs.st.glyphs[g];
                         PlacedGlyph pg;
@@ -1167,6 +1412,9 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
         pi.line_end = static_cast<int>(res.lines.size());
         pi.glyph_end = static_cast<int>(res.glyphs.size());
     }
+
+    // 收尾：文档以表格结尾时最后一行还没结算。出表的顺序与入表相反，逐层关到底。
+    while (!tstack.empty()) closeTable();
 
     // 汇总量按 para_index 逐段求和（而非只统计本轮）：前缀可能复用自上一轮，
     // 只数本轮会让 page_count / glyph_count / placed_line_count 变成半篇，

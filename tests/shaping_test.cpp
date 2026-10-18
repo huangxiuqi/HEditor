@@ -1005,6 +1005,198 @@ int main() {
         }
     }
 
+    std::printf("\n[9] 表格排版：格内断行、列宽、行高与整行换页\n");
+    {
+        PageMetrics page;
+        page.width_pt = 300.0f;
+        page.height_pt = 300.0f;
+        page.margin_pt = 10.0f;
+        const float cx = page.margin_pt;
+        const float cw = page.contentWidthPt();  // 280
+        const float pad = kTableCellPaddingPt;
+
+        auto mkCellBlock = [&](const std::string& text, uint64_t table, int row, int cell) {
+            BlockSpec b;
+            b.font_index = cjk;
+            b.size_pt = kSize;
+            b.cp_text = utf8ToCodepoints(text);
+            b.cell_path.push_back(CellSlot{table, row, cell});
+            return b;
+        };
+        auto mkTable = [&](uint64_t handle, int rows, int cols) {
+            LayoutTable t;
+            t.handle = handle;
+            t.rows = rows;
+            t.cols = cols;
+            t.col_widths.assign(static_cast<size_t>(cols), WidthSpec{});
+            t.row_specs.assign(static_cast<size_t>(rows), LayoutRow{});
+            return t;
+        };
+        // 每格的在 grid 里的原点列（无合并时就是格号）。
+        auto cellsOf = [&](int rows, int cols) {
+            std::vector<LayoutCell> out;
+            for (int r = 0; r < rows; ++r) {
+                for (int c = 0; c < cols; ++c) {
+                    LayoutCell lc;
+                    lc.row = r;
+                    lc.cell = c;
+                    out.push_back(lc);
+                }
+            }
+            return out;
+        };
+
+        // 一：2x2 表，每格一个字 —— 四个行盒，同行的 y 相同、不同列的 x 差一个列宽。
+        {
+            constexpr uint64_t kT = 7;
+            std::vector<BlockSpec> blocks = {
+                mkCellBlock("甲", kT, 0, 0), mkCellBlock("乙", kT, 0, 1),
+                mkCellBlock("丙", kT, 1, 0), mkCellBlock("丁", kT, 1, 1)};
+            LayoutTable t = mkTable(kT, 2, 2);
+            t.width = WidthSpec::makeAbs(cw);  // 撑满 280 → 每列 140
+            t.cells = cellsOf(2, 2);
+            const LayoutResult r = layoutDocument(lib, blocks, page, {t});
+            expectTrue(r.lines.size() == 4, "2x2 每格一行，共四个行盒");
+            if (r.lines.size() == 4) {
+                const float col_w = cw / 2.0f;
+                expectNear(r.lines[0].inline_origin_pt, cx + pad, 0.01,
+                           "第一格的行内起点 = 表左 + 内边距");
+                expectNear(r.lines[1].inline_origin_pt, cx + col_w + pad, 0.01,
+                           "第二格的行内起点 = 表左 + 一个列宽 + 内边距");
+                expectNear(r.lines[1].block_lo_pt, r.lines[0].block_lo_pt, 0.01,
+                           "同一行的两格在同一基线上");
+                expectTrue(r.lines[2].block_lo_pt > r.lines[0].block_lo_pt + 1.0f,
+                           "第二行在第一行下面");
+                expectNear(r.lines[2].block_lo_pt - r.lines[0].block_lo_pt,
+                           kSize * 1.6f + 2.0f * pad, 0.05,
+                           "行高 = 内容高 + 上下内边距（Auto 规则）");
+                expectNear(r.lines[2].inline_origin_pt, cx + pad, 0.01,
+                           "第二行第一格又回到第一列的起点");
+            }
+        }
+        // 二：格内断行用格宽（不是页宽），行高 = 内容高 + 上下内边距。
+        {
+            constexpr uint64_t kT = 8;
+            // 20 个汉字 = 240 磅；格宽 = 280 - 8 = 272 也装得下 —— 所以缩成两列，
+            //   让格宽只有 136，15 个汉字必断行。
+            std::vector<BlockSpec> blocks = {mkCellBlock(
+                "一二三四五六七八九十一二三四五", kT, 0, 0)};
+            LayoutTable t = mkTable(kT, 1, 2);
+            t.cells = cellsOf(1, 2);
+            const LayoutResult r = layoutDocument(lib, blocks, page, {t});
+            expectTrue(r.lines.size() >= 2, "格内文本按格宽断行（不是按页宽）");
+            const float cell_cw = cw / 2.0f - 2.0f * pad;
+            bool fits = !r.lines.empty();
+            for (const LineBox& lb : r.lines) {
+                if (lb.inline_end_pt > cell_cw + 0.01f) fits = false;
+            }
+            expectTrue(fits, "每一行的行内推进都不超过格内可用宽度");
+            if (r.lines.size() >= 2) {
+                // 格内相邻行的间距就是行高（内边距只在格的首尾各加一次，由行高结算时加）。
+                const float line_h = kSize * 1.6f;
+                expectNear(r.lines[1].block_lo_pt - r.lines[0].block_lo_pt, line_h, 0.05,
+                           "格内相邻行的间距 = 行高（内边距不逐行加）");
+            }
+        }
+        // 三：显式行高（Exact）把整行撑到给定高度。
+        {
+            constexpr uint64_t kT = 9;
+            std::vector<BlockSpec> blocks = {mkCellBlock("甲", kT, 0, 0),
+                                             mkCellBlock("乙", kT, 1, 0)};
+            LayoutTable t = mkTable(kT, 2, 1);
+            t.cells = cellsOf(2, 1);
+            t.row_specs[0].height_pt = 40.0f;
+            t.row_specs[0].height_rule = RowHeightRule::Exact;
+            const LayoutResult r = layoutDocument(lib, blocks, page, {t});
+            expectTrue(r.lines.size() == 2, "两行各一个行盒");
+            if (r.lines.size() == 2) {
+                expectNear(r.lines[1].block_lo_pt - r.lines[0].block_lo_pt, 40.0, 0.05,
+                           "显式行高 40 磅：下一行从 40 磅之后开始");
+            }
+        }
+        // 四：显式列宽只占一列，其余列平分剩下的宽度。
+        {
+            constexpr uint64_t kT = 10;
+            std::vector<BlockSpec> blocks = {mkCellBlock("甲", kT, 0, 0),
+                                             mkCellBlock("乙", kT, 0, 1)};
+            LayoutTable t = mkTable(kT, 1, 2);
+            t.width = WidthSpec::makeAbs(200.0f);
+            t.col_widths[0] = WidthSpec::makeAbs(60.0f);
+            t.col_widths[1] = WidthSpec::makeAbs(140.0f);
+            t.cells = cellsOf(1, 2);
+            const LayoutResult r = layoutDocument(lib, blocks, page, {t});
+            expectTrue(r.lines.size() == 2, "两格各一行");
+            if (r.lines.size() == 2) {
+                expectNear(r.lines[1].inline_origin_pt - r.lines[0].inline_origin_pt, 60.0, 0.01,
+                           "第一列宽 60：第二格从 60 磅之后开始");
+            }
+        }
+        // 五：表宽百分比 + 居中 —— 表左边缘按对齐算。
+        {
+            constexpr uint64_t kT = 11;
+            std::vector<BlockSpec> blocks = {mkCellBlock("甲", kT, 0, 0)};
+            LayoutTable t = mkTable(kT, 1, 1);
+            t.width = WidthSpec::makePercent(0.5f);  // 140
+            t.align = TableHAlign::Center;
+            t.cells = cellsOf(1, 1);
+            const LayoutResult r = layoutDocument(lib, blocks, page, {t});
+            expectTrue(r.lines.size() == 1, "一格一行");
+            if (r.lines.size() == 1) {
+                expectNear(r.lines[0].inline_origin_pt, cx + (cw - cw * 0.5f) * 0.5f + pad, 0.01,
+                           "表宽一半并居中：左边缘落在内容区中间再偏移");
+            }
+        }
+        // 六：反向一半 —— 同一批块不传表格结构时，按正文排（行内起点就是内容区左边）。
+        {
+            constexpr uint64_t kT = 12;
+            std::vector<BlockSpec> blocks = {mkCellBlock("甲", kT, 0, 0),
+                                             mkCellBlock("乙", kT, 0, 1)};
+            LayoutTable t = mkTable(kT, 1, 2);
+            t.cells = cellsOf(1, 2);
+            const LayoutResult with = layoutDocument(lib, blocks, page, {t});
+            const LayoutResult without = layoutDocument(lib, blocks, page);
+            expectTrue(with.lines.size() == 2 && without.lines.size() == 2,
+                       "有无结构表都各排两个行盒（内容不丢）");
+            if (with.lines.size() == 2 && without.lines.size() == 2) {
+                expectNear(without.lines[0].inline_origin_pt, cx, 0.01,
+                           "不传结构表：按正文排，起点是内容区左边");
+                expectNear(without.lines[1].inline_origin_pt, cx, 0.01,
+                           "不传结构表：第二格也按正文排（不起新列）");
+                expectTrue(with.lines[1].inline_origin_pt > without.lines[1].inline_origin_pt + 1.0f,
+                           "传了结构表：第二格才起新列");
+            }
+        }
+        // 七：整行放不下时整行换页，两个格一起走。
+        {
+            constexpr uint64_t kT = 13;
+            PageMetrics small;
+            small.width_pt = 200.0f;
+            small.height_pt = 60.0f;
+            small.margin_pt = 10.0f;
+            std::vector<BlockSpec> blocks;
+            // 每行 3 个字：行高 19.2 + 上下内边距 8 = 27.2，两行 54.4 —— 第二行在本页
+            //   只剩 40 磅时放不下，整行要换到第 2 页。
+            for (int r = 0; r < 2; ++r) {
+                for (int c = 0; c < 2; ++c) {
+                    blocks.push_back(mkCellBlock("甲乙丙", kT, r, c));
+                }
+            }
+            LayoutTable t = mkTable(kT, 2, 2);
+            t.cells = cellsOf(2, 2);
+            const LayoutResult r = layoutDocument(lib, blocks, small, {t});
+            expectTrue(r.lines.size() == 4, "两行两列共四个行盒");
+            if (r.lines.size() == 4) {
+                expectTrue(r.lines[0].page == 0 && r.lines[1].page == 0, "第一行的两格都在第 0 页");
+                expectTrue(r.lines[2].page == 1 && r.lines[3].page == 1,
+                           "第二行整行换页（两个格一起走，不拆散）");
+                expectNear(r.lines[2].block_lo_pt, small.margin_pt + pad, 0.05,
+                           "换页后第二行落在新页的内容区顶部（加内边距）");
+                expectNear(r.lines[2].block_lo_pt, r.lines[3].block_lo_pt, 0.01,
+                           "换页后同一行的两格仍在同一基线上");
+            }
+        }
+    }
+
     std::printf("\n──────────────────────────────\n");
     std::printf("共 %d 项断言，失败 %d 项\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
