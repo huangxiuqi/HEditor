@@ -588,10 +588,42 @@ NodeBuild makeRemoveNode(const NodeTree& tree, const Pos& at) {
     return out;
 }
 
+NodeBuild makeRemoveAtom(const NodeTree& tree, const FlowIndex& idx, FlowPos at) {
+    NodeBuild out;
+    if (!inRange(at, idx.size())) {
+        out.error = "删除原子：流位置越界";
+        return out;
+    }
+    // 原子是叶子，它自己的起点就是它在流里唯一可寻址的位置（posAt 对叶子把"流位置 == 叶子
+    //   起点"归给叶子自己），所以这里必然拿到原子本身、且段内偏移为 0。
+    const Pos p = idx.posAt(at);
+    const Node* n = tree.find(p.container);
+    if (n == nullptr || !isAtom(n->kind)) {
+        out.error = "删除原子：该位置上没有原子";
+        return out;
+    }
+    if (p.offset != 0) {
+        out.error = "删除原子：位置落在原子内部（原子没有可寻址的内部）";
+        return out;
+    }
+    const Pos slot = slotForFlow(tree, idx, at);
+    if (slot.container == kInvalidNodeId) {
+        out.error = "删除原子：算不出它所在的槽位";
+        return out;
+    }
+    RemoveNode s;
+    s.at = slot;
+    s.at_flow = at;
+    s.removed = captureSubtree(tree, n->id);
+    s.detached = n->id;
+    out.step = Step{s};
+    out.ok = true;
+    return out;
+}
+
 StepResult canApply(const NodeTree& tree, const Step& step) {
     return canApply(tree, indexOf(tree), step);
 }
-
 StepResult canApply(const NodeTree& tree, const FlowIndex& idx, const Step& step) {
     const int size = idx.size();
     StepResult r;

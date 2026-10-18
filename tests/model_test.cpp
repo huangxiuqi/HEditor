@@ -281,6 +281,13 @@ NodeTree makeRandomTree(uint32_t seed, int target_nodes) {
             std::vector<uint32_t> text;
             for (int i = 0; i < len; ++i) text.push_back(0x61 + (rng() % 26));
             tree.setText(id, std::move(text));
+        } else if (kind == NodeKind::Image) {
+            // 图片必须给得出尺寸，否则违反"原子的尺寸可定"（见 invariants.cpp）——
+            // 随机树要造的是合法文档，不是反例。
+            tree.find(id)->image.px_w = 16 + static_cast<int>(rng() % 64);
+            tree.find(id)->image.px_h = 16 + static_cast<int>(rng() % 64);
+        } else if (kind == NodeKind::Formula) {
+            tree.find(id)->formula.expr = "x_" + std::to_string(rng() % 10);
         }
     }
     return tree;
@@ -622,7 +629,14 @@ void checkParaIncremental(uint32_t seed, FlowVisibility vis, const char* vis_nam
             const NodeKind kind = kKinds[rng() % static_cast<uint32_t>(kind_count)];
             const NodeId id = tree.insertChild(parent, at, kind);
             if (id == kInvalidNodeId) continue;
-            if (kind == NodeKind::TextRun) tree.setText(id, cps({0x61}));
+            if (kind == NodeKind::TextRun) {
+                tree.setText(id, cps({0x61}));
+            } else if (kind == NodeKind::Image) {
+                // 图片必须给得出尺寸（见 invariants.cpp 的"原子的尺寸可定"）——
+                // 随机序列造的是合法文档，不是反例。
+                tree.find(id)->image.px_w = 32;
+                tree.find(id)->image.px_h = 24;
+            }
             accepted = idx.onInsert(parent, at, id);
             ++inserts;
         } else {
@@ -705,6 +719,7 @@ void checkInvariantRuleSet() {
         "身份.节点 ID 唯一且索引自洽",
         "身份.节点种类在声明范围内",
         "表格.跨度之和相等、无重叠、无空洞、有列定义则数据行不许合并",
+        "结构.原子的尺寸可定",
     };
     int missing = 0;
     for (const char* w : kWant) {
@@ -1110,21 +1125,32 @@ void checkCompileControlObjects() {
             r.blocks.size() == 2 && with_objs == 0,
             "(g) 没有控件：一段都不产对象（实际有对象的段数 " + std::to_string(with_objs) + "）");
     }
-    // (h) 控件里带一个未编译的元素（图片）：控件自己的边界照常产，图片照常记诊断。
+    // (h) 控件里带一枚原子（图片）：控件自己的两枚边界照常产，原子自己也进对象表 ——
+    //   三者共用同一条码点轴，谁也不挤掉谁。
     {
         NodeTree tree;
         const NodeId sec = tree.firstSectionId();
         const NodeId cc = tree.appendChild(sec, NodeKind::ContentControl);
         tree.setText(tree.appendChild(cc, NodeKind::TextRun), cps({0x61}));
-        tree.appendChild(cc, NodeKind::Image);
+        const NodeId img = tree.appendChild(cc, NodeKind::Image);
+        tree.find(img)->image.px_w = 96;
+        tree.find(img)->image.px_h = 48;
         tree.appendChild(sec, NodeKind::ParagraphMark);
         const CompileResult r = compileDocument(tree, FlowVisibility::Design, noStyles());
         const std::vector<InlineObject> o =
             r.blocks.empty() ? std::vector<InlineObject>{} : r.blocks[0].objects;
-        expectTrue(o.size() == 2 && o[0].cp == 0 && o[1].cp == 1,
-                   "(h) 控件内的图片不影响控件的两枚边界（实际 " + objText(o) + "）");
-        expectTrue(r.diagnostics.size() == 1 && r.diagnostics[0].kind == NodeKind::Image,
-                   "(h) 图片仍记一条诊断（控件与它各自表态）");
+        expectTrue(o.size() == 3 && o[0].kind == InlineObjectKind::ControlStart && o[0].cp == 0 &&
+                       o[1].kind == InlineObjectKind::Atom && o[1].cp == 1 &&
+                       o[2].kind == InlineObjectKind::ControlEnd && o[2].cp == 1,
+                   "(h) 控件里的原子进对象表（两枚边界 + 原子，锚点在同一条码点轴上）—— 实际 " +
+                       objText(o));
+        expectTrue(o.size() == 3 && o[1].atom == InlineAtom::Image &&
+                       o[1].owner == static_cast<int>(img),
+                   "(h) 原子记下自己的种类与节点 id（绘制靠它回树里取框里写什么）");
+        expectTrue(o.size() == 3 && o[1].w_pt > 71.9f && o[1].w_pt < 72.1f && o[1].h_pt > 35.9f &&
+                       o[1].h_pt < 36.1f,
+                   "(h) 盒宽高按原始像素与 DPI 折算（96x48 px / 96 dpi = 72x36 磅）");
+        expectTrue(r.diagnostics.empty() && r.ok(), "(h) 图片已经进编译：不再记诊断");
     }
 }
 
@@ -1215,21 +1241,31 @@ void checkCompileShapes() {
                        r.blocks[1].objects[0].kind == InlineObjectKind::ControlEnd,
                    "0.4 / 控件跨段落标记：结束边界落在第二段（与它的内容同一段）");
     }
-    // 不支持的元素：图片叶子与容器各记一条，容器内部文本仍按流顺序并入当前段。
+    // 尚未进编译的元素：制表符与域仍各记一条，容器内部文本仍按流顺序并入当前段。
+    //   图片与公式已经进了编译（阶段 4），所以它们不再出现在诊断里 —— 这一节同时是
+    //   "原子确实编出来了"的反向一半。
     {
         NodeTree tree;
         const NodeId sec = tree.firstSectionId();
         tree.setText(tree.appendChild(sec, NodeKind::TextRun), cps({0x61}));
-        tree.appendChild(sec, NodeKind::Image);
+        const NodeId img = tree.appendChild(sec, NodeKind::Image);
+        tree.find(img)->image.px_w = 8;
+        tree.find(img)->image.px_h = 8;
+        tree.appendChild(sec, NodeKind::Tab);
         const NodeId cc = tree.appendChild(sec, NodeKind::ContentControl);
         tree.setText(tree.appendChild(cc, NodeKind::TextRun), cps({0x62}));
         tree.appendChild(sec, NodeKind::ParagraphMark);
         const CompileResult r = compileDocument(tree, FlowVisibility::Design, noStyles());
         expectTrue(r.blocks.size() == 1 && r.blocks[0].cp_text == cps({0x61, 0x62}),
-                   "0.4 / 不支持的元素：容器内部文本仍按流顺序并入当前段");
-        expectTrue(r.diagnostics.size() == 1 && r.diagnostics[0].kind == NodeKind::Image,
-                   "0.4 / 不支持的元素：只剩图片一条诊断（控件已经进编译）");
-        expectTrue(!r.ok(), "0.4 / 不支持的元素：有诊断时 ok() 为假");
+                   "0.4 / 尚未进编译的元素：容器内部文本仍按流顺序并入当前段");
+        expectTrue(r.diagnostics.size() == 1 && r.diagnostics[0].kind == NodeKind::Tab,
+                   "0.4 / 尚未进编译的元素：制表符一条诊断，图片已经进编译（实际 " +
+                       std::to_string(r.diagnostics.size()) + " 条）");
+        expectTrue(r.blocks.size() == 1 && r.blocks[0].objects.size() == 3 &&
+                       r.blocks[0].objects[0].kind == InlineObjectKind::Atom &&
+                       r.blocks[0].objects[0].cp == 1,
+                   "0.4 / 尚未进编译的元素：图片仍按自己的锚点进了对象表");
+        expectTrue(!r.ok(), "0.4 / 尚未进编译的元素：有诊断时 ok() 为假");
     }
     // 隐藏：编辑态照常参与，呈现态整棵摘除 —— 与 FlowIndex / ParagraphIndex 同一口径。
     {
@@ -5408,6 +5444,13 @@ std::string fullNodeKey(const Node& n) {
     s += "|fd=" + std::string(fieldKindName(n.field.kind)) + "," + n.field.name + "," +
          n.field.cache;
     s += "|sec=" + sectionKey(n.section);
+    s += "|im=" + n.image.resource_id + "," + std::to_string(n.image.px_w) + "x" +
+         std::to_string(n.image.px_h) + "@" + std::to_string(n.image.dpi) + "," +
+         printLength(n.image.width) + "," + printLength(n.image.height) + "," +
+         std::string(imageAnchorName(n.image.anchor)) + "," +
+         std::string(imageWrapName(n.image.wrap));
+    s += "|fm=" + n.formula.expr + "," + std::string(formulaBackendName(n.formula.backend)) + "," +
+         printLength(n.formula.width) + "," + printLength(n.formula.height);
     s += "|kids=";
     for (const Node* c : n.children) s += std::to_string(c->id) + ",";
     return s;
@@ -5466,8 +5509,13 @@ NodeTree makeRichDocument() {
     tree.find(mark)->styleRef = "para_style";
 
     // 原子们。
-    tree.appendChild(s1, NodeKind::Image);
-    tree.appendChild(s1, NodeKind::Formula);
+    const NodeId img = tree.appendChild(s1, NodeKind::Image);
+    tree.find(img)->image.resource_id = "res-1";
+    tree.find(img)->image.px_w = 640;
+    tree.find(img)->image.px_h = 480;
+    tree.find(img)->image.width = Length::abs(cmToEmu(6.0));
+    const NodeId formula = tree.appendChild(s1, NodeKind::Formula);
+    tree.find(formula)->formula.expr = "\\frac{a}{b}";
     tree.appendChild(s1, NodeKind::Break);
     tree.appendChild(s1, NodeKind::PageBreak);
     tree.appendChild(s1, NodeKind::Tab);

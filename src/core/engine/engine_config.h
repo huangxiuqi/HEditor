@@ -90,6 +90,23 @@ struct EngineConfig {
      * 见 layout.cpp 的占位簇），不再由绘制层补。
      */
     float control_dot_pt = 3.0f;  // 小点边长（磅）
+
+    /**
+     * 行内原子的占位框。
+     *
+     * 图片与公式本期都画框、不画内容（见 image_spec.h / formula_spec.h）：图片的字节还没
+     * 进来，公式的排版后端还没做，把表达式按普通文字画出来会得到错误的字距与上下标。
+     * 框里写上它是什么（资源标识 / 表达式，放不下就截断），读者一眼看得出这里是一枚原子。
+     *
+     * 底色调得很浅：它是页面内容的一部分（画在底图里），重了会盖过正文的灰度。
+     */
+    Color atom_fill = Color::rgb(246, 248, 250);
+    Color atom_border = Color::rgb(174, 186, 199);
+    Color atom_text = Color::rgb(110, 122, 135);
+    /**
+     * 框里文字左右各留的边距（磅）。
+     */
+    float atom_pad_pt = 2.0f;
 };
 
 }  // namespace heditor

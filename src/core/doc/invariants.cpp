@@ -26,6 +26,7 @@ constexpr char kParagraphTiling[] = "容器.切段无缝隙";
 constexpr char kUniqueId[] = "身份.节点 ID 唯一且索引自洽";
 constexpr char kKindValid[] = "身份.节点种类在声明范围内";
 constexpr char kTableGrid[] = "表格.跨度之和相等、无重叠、无空洞、有列定义则数据行不许合并";
+constexpr char kAtomSized[] = "结构.原子的尺寸可定";
 
 void add(InvariantReport* r, const char* rule, NodeId node, int at, std::string detail) {
     r->violations.push_back(Violation{rule, node, at, std::move(detail)});
@@ -182,6 +183,24 @@ InvariantReport checkInvariants(const NodeTree& tree) {
                 std::string("呈现态的摘除集合与隐藏声明不符：自身或祖先声明隐藏 = ") +
                     (want_out ? "是" : "否") +
                     "，而呈现态在流里 = " + (display.inFlow(id) ? "是" : "否"));
+        }
+    }
+
+    // 结构.原子的尺寸可定
+    //
+    // 图片查一条：原始像素与显示尺寸不能两头都缺 —— 那时排版给不出宽度，只能凭空猜一个，
+    // 而"凭空猜"正是这一层要挡住的东西。两头都缺不是"还没填"，是"这张图没有尺寸"。
+    // 公式不查：Auto 档有默认框（见 formula_spec.h），一枚还没写表达式的公式照样画得出框。
+    r.checked.push_back(kAtomSized);
+    for (NodeId id : order) {
+        const Node* n = tree.find(id);
+        if (n->kind != NodeKind::Image) continue;
+        const bool px_ok = n->image.px_w > 0 && n->image.px_h > 0;
+        const bool shown_ok = n->image.width.kind != LengthKind::Auto ||
+                              n->image.height.kind != LengthKind::Auto;
+        if (!px_ok && !shown_ok) {
+            add(&r, kAtomSized, id, -1,
+                "图片既没有正的原始像素尺寸，也没有非自动的显示尺寸 —— 排版无从定出它的宽度");
         }
     }
 

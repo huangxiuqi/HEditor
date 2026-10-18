@@ -580,6 +580,168 @@ int main() {
         expectTrue(rl_first_hi > cx + cw - big_pt * factor - 0.05f,
                    "中日竖排的第一列贴着内容区右边（列自右向左）");
     }
+    std::printf("\n[8] 行内原子：不可断的盒子参与断行\n");
+    {
+        // 原子是"有宽高、不可断"的行内盒子（迁移路线阶段 4）。三条判据各有反向一半：
+        //   宽度真的进了行宽（不只看对象表里有没有这一项）、高度真的进了行盒（不是跟着
+        //   字号走）、超宽时整枚换行而不是被拆开。少了反向那一半，判据会在"原子被完全
+        //   忽略"时照样全绿。
+        auto mkAtom = [](uint32_t cp, float w_pt, float h_pt) {
+            InlineObject o;
+            o.cp = cp;
+            o.kind = InlineObjectKind::Atom;
+            o.owner = 7;
+            o.atom = InlineAtom::Image;
+            o.w_pt = w_pt;
+            o.h_pt = h_pt;
+            o.content_hash = 99;
+            return o;
+        };
+        auto mkPara = [&](const std::string& txt, std::vector<InlineObject> objs, float size_pt) {
+            BlockSpec b;
+            b.font_index = cjk;
+            b.size_pt = size_pt;
+            b.line_factor = 1.6f;
+            b.space_after_pt = 0.0f;
+            b.setText(txt);
+            b.objects = std::move(objs);
+            return b;
+        };
+        // 一行里那个原子的推进（磅）；行里没有原子时返回 0。
+        auto atomAdvance = [](const LineBox& lb, int* count) -> float {
+            float adv = 0.0f;
+            for (size_t i = 0; i < lb.clusters.size(); ++i) {
+                if (lb.clusters[i].atom == InlineAtom::None) continue;
+                ++(*count);
+                adv = (i + 1 < lb.clusters.size())
+                          ? (lb.clusters[i + 1].inline_pt - lb.clusters[i].inline_pt)
+                          : (lb.inline_end_pt - lb.clusters[i].inline_pt);
+            }
+            return adv;
+        };
+        auto textAdvance = [](const LineBox& lb) -> float {
+            float adv = 0.0f;
+            for (size_t i = 0; i < lb.clusters.size(); ++i) {
+                if (lb.clusters[i].atom != InlineAtom::None) continue;
+                adv += (i + 1 < lb.clusters.size())
+                           ? (lb.clusters[i + 1].inline_pt - lb.clusters[i].inline_pt)
+                           : (lb.inline_end_pt - lb.clusters[i].inline_pt);
+            }
+            return adv;
+        };
+
+        PageMetrics page;
+        page.width_pt = 200.0f;
+        page.height_pt = 400.0f;
+        page.margin_pt = 10.0f;
+        const float box_w = 60.0f;
+        const float box_h = 40.0f;
+
+        // 一段 "汉字汉字"（四个 12 磅的汉字）+ 一枚 60x40 的原子，锚在第三个字之前。
+        const LayoutResult r =
+            layoutDocument(lib, {mkPara("汉字汉字", {mkAtom(2, box_w, box_h)}, 12.0f)}, page);
+        expectTrue(r.lines.size() == 1, "原子段排出一行（内容 48 + 60 = 108 磅 < 180）");
+        if (!r.lines.empty()) {
+            const LineBox& lb = r.lines[0];
+            int atom_count = 0;
+            const float adv = atomAdvance(lb, &atom_count);
+            expectTrue(atom_count == 1, "原子在行里是一个簇（不可分的最小单位）");
+            expectNear(adv, box_w, 0.05, "原子占的宽度就是它自己的盒宽");
+            expectNear(lb.inline_end_pt, textAdvance(lb) + box_w, 0.05,
+                       "行末位置把原子的宽度算了进去（不只是表里有这一项）");
+
+            // 高度进的是行盒，不是字号：盒高 40 > 字号 x 行距 19.2。
+            const float line_h = lb.block_hi_pt - lb.block_lo_pt;
+            expectTrue(line_h >= box_h - 0.05f,
+                       "行盒高度不小于盒高（40 磅的图把行撑到 40 以上，实际 " +
+                           std::to_string(line_h) + "）");
+
+            // 反向一半：把盒高压到 6 磅（比一行 19.2 矮）⇒ 行盒回落到字号 x 行距。
+            const LayoutResult r_small =
+                layoutDocument(lib, {mkPara("汉字汉字", {mkAtom(2, box_w, 6.0f)}, 12.0f)}, page);
+            const float small_h = r_small.lines.empty()
+                                      ? 0.0f
+                                      : (r_small.lines[0].block_hi_pt - r_small.lines[0].block_lo_pt);
+            expectTrue(small_h > 0.0f && small_h < line_h - 1.0f,
+                       "盒高变小之后行盒跟着变矮（高度不是从字号来的，实际 " +
+                           std::to_string(small_h) + "）");
+        }
+
+        // 断行处不可分割：内容宽度压到只放得下两个字（30 磅）⇒ 原子整枚换到下一行，
+        //   宽度一分不少。判据只看"原子整枚落在某一行里"，不看它落在第几行 ——
+        //   那由断行算法决定，钉死它会让判据在无关的改动上红。
+        PageMetrics narrow = page;
+        narrow.width_pt = 50.0f;  // 内容宽 30 磅
+        const LayoutResult r_narrow =
+            layoutDocument(lib, {mkPara("汉字汉字", {mkAtom(2, box_w, box_h)}, 12.0f)}, narrow);
+        int lines_with_atom = 0;
+        int bad_whole = 0;
+        for (const LineBox& l : r_narrow.lines) {
+            int n = 0;
+            const float adv = atomAdvance(l, &n);
+            if (n == 0) continue;
+            ++lines_with_atom;
+            if (n != 1 || std::fabs(adv - box_w) > 0.05f) ++bad_whole;
+        }
+        expectTrue(lines_with_atom == 1 && bad_whole == 0,
+                   "窄行里原子整枚落在某一行、宽度一分不少（断行处不可分割，跨 " +
+                       std::to_string(lines_with_atom) + " 行）");
+
+        // 超宽原子：比整行还宽（60 > 50）也独占一行，不产生空行、不丢内容。
+        PageMetrics tiny = page;
+        tiny.width_pt = 60.0f;  // 内容宽 50 磅，比盒宽窄
+        tiny.margin_pt = 5.0f;
+        const LayoutResult r_wide =
+            layoutDocument(lib, {mkPara("汉字汉字", {mkAtom(2, box_w, box_h)}, 12.0f)}, tiny);
+        int wide_lines = 0;
+        int wide_empty = 0;
+        bool saw_atom = false;
+        for (const LineBox& l : r_wide.lines) {
+            ++wide_lines;
+            if (l.clusters.empty()) ++wide_empty;
+            for (const LineCluster& c : l.clusters) {
+                if (c.atom != InlineAtom::None) saw_atom = true;
+            }
+        }
+        expectTrue(saw_atom && wide_empty == 0 && wide_lines >= 3,
+                   "超宽原子独占一行，且不是空行（行数 " + std::to_string(wide_lines) +
+                       "，空行 " + std::to_string(wide_empty) + "）");
+
+        // 反向一半：没有原子时这一段的排版与加原子之前逐字段相同（空表 = 一个都不插）。
+        const LayoutResult r_plain =
+            layoutDocument(lib, {mkPara("汉字汉字", {}, 12.0f)}, page);
+        expectTrue(r_plain.lines.size() == 1 && r_plain.lines[0].clusters.size() == 4,
+                   "对象表为空时行里只有四个字（没有凭空多出占位簇）");
+
+        // 行距不能被盒高吃掉：原子那一行的下一行要落在同样的空隙之后。
+        //   量的是"上一行的底边到下一行的顶边"这段空隙 —— 纯文本行是行距减文本高，
+        //   原子行必须一样：盒高撑高的是内容，而行距是段落属性。
+        //   行高只取 max(行距, 盒高) 时这段空隙与纯文本行对不上（实测差 20.8 磅），
+        //   症状就是"带盒子的那一行的行距没了"。
+        {
+            // 二十个字（240 磅 > 内容宽 180）⇒ 一定折成两行；原子锚在第 2 个字之前，
+            //   于是它落在第一行上、第二行纯文本 —— 正是"盒子的下一行"那个位置关系。
+            std::string twenty;
+            for (int i = 0; i < 10; ++i) twenty += "汉字";
+            const LayoutResult rp = layoutDocument(lib, {mkPara(twenty, {}, 12.0f)}, page);
+            const LayoutResult ra =
+                layoutDocument(lib, {mkPara(twenty, {mkAtom(2, box_w, box_h)}, 12.0f)}, page);
+            expectTrue(rp.lines.size() == 2 && ra.lines.size() == 2,
+                       "对照段与原子段都排成两行（实际 " + std::to_string(rp.lines.size()) + " / " +
+                           std::to_string(ra.lines.size()) + "）");
+            if (rp.lines.size() == 2 && ra.lines.size() == 2) {
+                const float plain_gap = rp.lines[1].block_lo_pt - rp.lines[0].block_hi_pt;
+                const float atom_gap = ra.lines[1].block_lo_pt - ra.lines[0].block_hi_pt;
+                expectTrue(plain_gap > 0.0f, "纯文本两行之间有空隙（行距减文本高）");
+                expectNear(atom_gap, plain_gap, 0.05,
+                           "★ 带原子那一行的下一行落在同样的空隙之后（行距没被盒高吃掉）");
+                // 反向一半：原子那一行的行盒要装得下它自己的盒子（盒顶不越出行顶）。
+                const LineBox& al = ra.lines[0];
+                expectTrue(al.bracket_axis_pt - box_h >= al.block_lo_pt - 0.05f,
+                           "原子盒顶不越出它自己那一行的行顶");
+            }
+        }
+    }
     std::printf("\n[按需] 数据源：目录、骨架、按需读\n");
     {
         FontSource src;

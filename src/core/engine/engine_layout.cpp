@@ -452,8 +452,14 @@ EditorEngine::SuffixReuse EditorEngine::trySuffixReuse(int from, int* page_lo, i
     // 那些段的内容一个字没变、占位却变了。边界落在脏区之内的都可以搬。
     //   判据直接看块流里的对象表，不再反查控件集合：后缀里没有对象，就一定没有占位。
     //   从 from+1 起扫（而不是脏区的后面），偏保守：脏区自己带对象时也一并放弃复用。
+    //
+    //   行内原子是例外，它照常复用：原子的锚点是段内码点、几何是自己的宽高，两样都只
+    //   属于它自己那一段 —— 前面某一段的编辑既不移它的锚点，也不改它的盒宽高。把原子
+    //   也当成"端点会动"的占位，会让"每段都有一张图"的文档整篇失去后缀复用。
     for (int p = from + 1; p < n_para; ++p) {
-        if (!blocks_[static_cast<size_t>(p)].objects.empty()) return SuffixReuse::None;
+        for (const InlineObject& o : blocks_[static_cast<size_t>(p)].objects) {
+            if (o.kind != InlineObjectKind::Atom) return SuffixReuse::None;
+        }
     }
 
     const ParaIndex old_first = layout_.para_index[static_cast<size_t>(from)];
@@ -784,6 +790,13 @@ void EditorEngine::syncInlineObjects() {
         std::vector<InlineObject>& dst = blocks_[p].objects;
         dst.clear();
         for (const InlineObject& o : src) {
+            // 原子是内容，不在"显示哪些括号"的名单里 —— 它照常进。
+            //   名单管的是控件边界（聚焦档下只显示光标所在字段的括号），原子没有这种
+            //   随光标变化的显示策略：它要么在文档里、要么不在，与编辑模式无关。
+            if (o.kind == InlineObjectKind::Atom) {
+                dst.push_back(o);
+                continue;
+            }
             const NodeId owner = static_cast<NodeId>(o.owner);
             if (std::find(keep.begin(), keep.end(), owner) != keep.end()) dst.push_back(o);
         }

@@ -1133,6 +1133,20 @@ private:
     void drawControlMarks(int first_page, int count);
 
     /**
+     * 画一枚行内原子的显式占位框到底图上。
+     *
+     * 与表单标记分开：原子是页面内容（它是流里的一项，进页指纹与行指纹），所以画在底图里、
+     * 不随光标状态擦除；标记是瞬态的，画在帧上。
+     *
+     * 几何全部从行盒的占位簇派生：沿行内轴的两端取簇的 inline_pt 与下一个簇的 inline_pt，
+     * 底边坐在行盒的基线上，高度取簇自带的盒高。于是"占了位"与"画了框"共用同一份数据。
+     *
+     * @param a1_pt 框在行内轴上的末端（页内磅）；a0 由 c.inline_pt 与行盒的 inline_origin 给
+     * @param off_y 这一页在帧里的纵向偏移（帧像素）
+     */
+    void drawAtomBox(const LineBox& lb, const LineCluster& c, float a1_pt, float off_y);
+
+    /**
      * 光标 / 编辑模式动过之后调用：括号占位计划变了就重排。
      * 传的是改动之前的 bracketPlanId()。All 档下它恒为常数 →
      * 光标在同一/不同字段间移动都不会重排（"光标移动 = 真增量"的地基）。

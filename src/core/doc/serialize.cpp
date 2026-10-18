@@ -40,6 +40,8 @@ constexpr const char* kCell = "cs";
 constexpr const char* kTable = "tb";
 constexpr const char* kField = "f";
 constexpr const char* kSection = "sec";
+constexpr const char* kImage = "im";
+constexpr const char* kFormula = "fm";
 
 /**
  * 名字池：写的时候按首次出现顺序编号，正文里只留下标。
@@ -363,6 +365,28 @@ ordered_json sectionJson(const SectionSpec& sec) {
     return j;
 }
 
+ordered_json imageJson(const ImageSpec& im) {
+    ordered_json j = ordered_json::object();
+    if (!im.resource_id.empty()) j["res"] = im.resource_id;
+    if (im.px_w != 0) j["pw"] = im.px_w;
+    if (im.px_h != 0) j["ph"] = im.px_h;
+    if (im.dpi != 96) j["dpi"] = im.dpi;
+    if (im.width != Length{}) j["w"] = printLength(im.width);
+    if (im.height != Length{}) j["h"] = printLength(im.height);
+    if (im.anchor != ImageAnchor::Inline) j["anchor"] = imageAnchorName(im.anchor);
+    if (im.wrap != ImageWrap::None) j["wrap"] = imageWrapName(im.wrap);
+    return j;
+}
+
+ordered_json formulaJson(const FormulaSpec& f) {
+    ordered_json j = ordered_json::object();
+    if (!f.expr.empty()) j["e"] = f.expr;
+    if (f.backend != FormulaBackend::Placeholder) j["be"] = formulaBackendName(f.backend);
+    if (f.width != Length{}) j["w"] = printLength(f.width);
+    if (f.height != Length{}) j["h"] = printLength(f.height);
+    return j;
+}
+
 /**
  * 一个节点的条目。只写与默认不同的字段，孩子个数永远写（它是结构）。
  */
@@ -381,6 +405,8 @@ ordered_json nodeJson(const Node& n, Strings* kinds, Strings* strings) {
     if (!(n.table == TableSpec{})) j[kTable] = tableJson(n.table);
     if (!(n.field == FieldSpec{})) j[kField] = fieldJson(n.field);
     if (!n.section.sameAs(SectionSpec{})) j[kSection] = sectionJson(n.section);
+    if (!(n.image == ImageSpec{})) j[kImage] = imageJson(n.image);
+    if (!(n.formula == FormulaSpec{})) j[kFormula] = formulaJson(n.formula);
     return j;
 }
 
@@ -957,6 +983,32 @@ bool readSection(const ordered_json& j, const char* key, SectionSpec* out) {
     return true;
 }
 
+bool readImage(const ordered_json& j, const char* key, ImageSpec* out) {
+    if (!j.contains(key)) return true;
+    if (!j[key].is_object()) return false;
+    const ordered_json& im = j[key];
+    if (!readString(im, "res", &out->resource_id)) return false;
+    if (!readInt(im, "pw", &out->px_w)) return false;
+    if (!readInt(im, "ph", &out->px_h)) return false;
+    if (!readInt(im, "dpi", &out->dpi)) return false;
+    if (!readLength(im, "w", &out->width)) return false;
+    if (!readLength(im, "h", &out->height)) return false;
+    if (!readEnum(im, "anchor", imageAnchorFromName, &out->anchor)) return false;
+    if (!readEnum(im, "wrap", imageWrapFromName, &out->wrap)) return false;
+    return true;
+}
+
+bool readFormula(const ordered_json& j, const char* key, FormulaSpec* out) {
+    if (!j.contains(key)) return true;
+    if (!j[key].is_object()) return false;
+    const ordered_json& f = j[key];
+    if (!readString(f, "e", &out->expr)) return false;
+    if (!readEnum(f, "be", formulaBackendFromName, &out->backend)) return false;
+    if (!readLength(f, "w", &out->width)) return false;
+    if (!readLength(f, "h", &out->height)) return false;
+    return true;
+}
+
 /**
  * 一个节点的全部字段（结构之外的部分）。返回 false 时 error 已写明位置。
  */
@@ -970,6 +1022,8 @@ bool readNodeFields(const Reader& r, const ordered_json& entry, NodeTree* out, N
     if (!readTable(entry, kTable, &n->table)) return r.fail("表格记录读不出来");
     if (!readField(entry, kField, &n->field)) return r.fail("域记录读不出来");
     if (!readSection(entry, kSection, &n->section)) return r.fail("节记录读不出来");
+    if (!readImage(entry, kImage, &n->image)) return r.fail("图片记录读不出来");
+    if (!readFormula(entry, kFormula, &n->formula)) return r.fail("公式记录读不出来");
     if (entry.contains(kStyle)) {
         int index = 0;
         if (!readInt(entry, kStyle, &index)) return r.fail("样式引用不是下标");

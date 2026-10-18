@@ -75,6 +75,14 @@ struct LineMetric {
     float size_pt = 0.0f;
     float ascent_pt = 0.0f;
     float descent_pt = 0.0f;
+    /**
+     * 行内原子的盒子高度（磅）；文本簇为 0。
+     *
+     * 它不能混进 size_pt：行高是"字号 × 行距"，而盒高不是字号推出来的 ——
+     * 一张 200 磅高的图不该被行距撑到 320 磅，也不该按 200 磅的字号去算基线。
+     * 所以行高取"字号 × 行距"与盒高的大者，两条来源分开算再取大。
+     */
+    float box_h_pt = 0.0f;
 };
 
 /**
@@ -148,6 +156,18 @@ struct BlockShaping {
          * 命中测试靠它回答"点到的这个括号是谁的"（见 layout.h 的 LineCluster）。
          */
         int owner_control = -1;
+        /**
+         * 行内原子：这是哪一种（不是原子时为 None），以及它的盒高（磅）。
+         * 盒宽不用另存 —— 它就是 cluster_adv_pt，与括号槽共用同一个累加器。
+         * 盒高进行度量：行高与基线由它定，见下面的 cluster_metric。
+         */
+        InlineAtom atom = InlineAtom::None;
+        float atom_h_pt = 0.0f;
+        /**
+         * 原子的内容指纹（见 InlineObject::content_hash）。原样搬到 LineCluster，
+         * 再进行指纹 —— 几何看不见的那类变化（换了一张同样大的图）靠它。
+         */
+        uint64_t content_hash = 0;
     };
     std::vector<Cluster> clusters;
     std::vector<float> cluster_adv_pt;  // 沿行内轴的推进（磅）
@@ -200,15 +220,15 @@ uint64_t shapingFingerprint(const BlockSpec& b, const std::vector<FormatRun>& ru
 }
 
 /**
- * 把块流的行内对象插成占位簇（括号进文档流的全部实现）。
- * 对象从哪来、该不该显示、谁在外谁在内，全在产生端（见 BlockSpec::objects）；排版层
- * 只做一次线性归并 —— 在簇 i 之前插入所有锚点不大于 clusters[i].cp 的对象，末尾再收
- * 剩下的。表已升序，于是同一处边界上的先后就是数组里的先后，这里不做第二次排序。
- * 槽宽 = 括号字形 advance + 间隙（与绘制侧共用 kControlBracketSlotGapPt）；占位簇
+ * 把块流的行内对象插成占位簇（括号与行内原子进文档流的全部实现）。
+ * 对象从哪来、该不该显示、谁在外谁在内，全在产生端（见 BlockSpec::objects）；排版层只做
+ * 一次线性归并（表已升序，同一处边界上的先后就是数组里的先后，不做第二次排序）。
+ *
+ * 宽度来源两种：控件边界 = 括号字形 advance + 间隙，原子 = 产生端给的盒宽。占位簇
  * g0 == g1，不产生字形只占 advance，于是断行容量、行末位置、簇的行内位置、光标与命中
- * 测试全都自动把括号算进去；owner 与 read_only 原样回填，命中测试因此能回答归属。
- * @param shaped 纯整形结果（可能正指着只读的段级缓存条目）；没有对象要插时原样返回它
- * @param scratch 需要可改副本时就地用它（未命中缓存时它已持有整形结果，省一次拷贝）
+ * 测试全都自动算进去。原子之后可以断（它与一个全角字同价），括号之后不断。
+ *
+ * shaped 可能正指着只读的段级缓存条目，需要可改副本时用它旁边的 scratch。
  */
 const BlockShaping* withInlineObjects(const BlockSpec& b, uint32_t n_cp, const BlockShaping* shaped,
                                       BlockShaping* scratch) {
@@ -217,7 +237,16 @@ const BlockShaping* withInlineObjects(const BlockSpec& b, uint32_t n_cp, const B
     // 槽宽 = 括号字形 advance + 间隙。间隙必须计入排版，否则 字] 会挤在一起。
     const float bw = bracketAdvancePt(src.primary);
     const float slot = bw > 0.0f ? bw + kControlBracketSlotGapPt : 0.0f;
-    if (!(slot > 0.0f)) return shaped;
+    // 一个都插不进去（取不到括号字形，表里又只有控件边界）就原样返回。
+    //   原子不走这一条：它的宽度是自己给的，没有字体照样排得出。
+    bool has_atom = false;
+    for (const InlineObject& o : b.objects) {
+        if (o.kind == InlineObjectKind::Atom) {
+            has_atom = true;
+            break;
+        }
+    }
+    if (!(slot > 0.0f) && !has_atom) return shaped;
 
     // 这一段要插占位 → 簇序列会被改 → 需要一份可改的副本
     // （shaped 可能正指着只读的缓存条目）。
@@ -228,17 +257,28 @@ const BlockShaping* withInlineObjects(const BlockSpec& b, uint32_t n_cp, const B
     cl2.reserve(scratch->clusters.size() + b.objects.size());
     adv2.reserve(scratch->clusters.size() + b.objects.size());
     brk2.reserve(scratch->clusters.size() + b.objects.size());
-    // 插一个占位槽：cp 取"它后面那个真实簇的 cp"（末尾用段长哨兵）。这让"光标该落在槽的
-    //   哪一侧"归 inlineOffsetFor 判定，判据是 bracket_side —— 光靠 cp 是分不开的。
+    // 插一个占位槽：cp 取"它后面那个真实簇的 cp"（末尾用段长哨兵）。槽里带的是"这一格
+    //   是什么"（括号朝向、原子种类与盒高），光标与命中测试不读 bracket_side ——
+    //   它们按 cp 与 placeholder 定位，侧别另由位置层按对象表算。
     auto emitSlot = [&](const InlineObject& o, uint32_t cp) {
         BlockShaping::Cluster pc;
         pc.cp = cp;
         pc.g0 = pc.g1 = 0;
         pc.placeholder = true;
+        pc.owner_control = o.owner;
+        if (o.kind == InlineObjectKind::Atom) {
+            pc.atom = o.atom;
+            pc.atom_h_pt = o.h_pt;
+            pc.content_hash = o.content_hash;
+            cl2.push_back(pc);
+            adv2.push_back(o.w_pt);
+            // 盒子之后可以断：它与一个全角字同价，断在它后面不拆开任何东西。
+            brk2.push_back(true);
+            return;
+        }
         pc.bracket_side =
             (o.kind == InlineObjectKind::ControlStart) ? BracketSide::Open : BracketSide::Close;
         pc.read_only = o.read_only;
-        pc.owner_control = o.owner;
         cl2.push_back(pc);
         adv2.push_back(slot);
         brk2.push_back(false);  // 括号内部不是断点
@@ -569,7 +609,6 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
         //   与有内容的段一样参与翻页判定（空段落也是一个段落）。
         if (b.cp_text.empty()) {
             FontInstance* f = lib.instance(b.font_index, b.size_pt);
-            const float line_h = b.size_pt * b.line_factor;
             // 取不到字体就用字号折算的近似度量：空行的几何必须存在，否则光标没地方画。
             const float ascent = f ? f->ascenderPt() : b.size_pt * 0.8f;
             const float descent = f ? f->descenderPt() : b.size_pt * 0.2f;
@@ -580,6 +619,10 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
             // 空段落一样要插括号占位：回车正好把字段断在两段之间、或字段所在段被删空时，
             //   这一段里就只剩字段边界了。走的是与有内容段落同一个 withInlineObjects ——
             //   对象表只有一份，不会两边不一致。
+            //
+            //   只有一枚图片的段落也走这一条（它的文本确实是空的），所以这里的行高与基线
+            //   要把原子的盒高算进去 —— 否则"一个图片的段落"会按空行的字号占位，
+            //   图片直接盖到下一段上。
             BlockShaping empty_bs;
             empty_bs.primary = f;
             empty_bs.ascent_pt = ascent;
@@ -588,6 +631,13 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
             empty_bs.st.sideways = b.wm.isSideways();
             BlockShaping slot_bs;
             const BlockShaping* slotted = withInlineObjects(b, /*n_cp=*/0, &empty_bs, &slot_bs);
+
+            float box_h = 0.0f;
+            for (const BlockShaping::Cluster& c : slotted->clusters) {
+                if (c.atom != InlineAtom::None) box_h = std::max(box_h, c.atom_h_pt);
+            }
+            const float line_h = std::max(b.size_pt * b.line_factor, box_h);
+            const float ascent_eff = std::max(ascent, box_h);
 
             LineBox lb;
             lb.paragraph = static_cast<int>(para_index);
@@ -600,14 +650,22 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
             lb.first_cp = 0;
             lb.last_cp = 0;
             {
-                // 行盒的簇 = 那些占位簇（每个的宽度都是槽宽）。空段落没有真实字形，
-                //   所以行内推进只能由占位簇给出 —— 光标落在哪、括号多宽都从这一份来。
+                // 行盒的簇 = 那些占位簇（每个的宽度都是槽宽，原子是自己给的盒宽）。
+                //   空段落没有真实字形，所以行内推进只能由占位簇给出 —— 光标落在哪、
+                //   括号多宽都从这一份来。
                 float ax = 0.0f;
                 for (size_t i = 0; i < slotted->clusters.size(); ++i) {
-                    lb.clusters.push_back(LineCluster{
-                        slotted->clusters[i].cp, ax, slotted->clusters[i].placeholder,
-                        slotted->clusters[i].bracket_side, slotted->clusters[i].read_only,
-                        slotted->clusters[i].owner_control});
+                    LineCluster lc;
+                    lc.cp = slotted->clusters[i].cp;
+                    lc.inline_pt = ax;
+                    lc.placeholder = slotted->clusters[i].placeholder;
+                    lc.bracket_side = slotted->clusters[i].bracket_side;
+                    lc.read_only = slotted->clusters[i].read_only;
+                    lc.owner_control = slotted->clusters[i].owner_control;
+                    lc.atom = slotted->clusters[i].atom;
+                    lc.atom_h_pt = slotted->clusters[i].atom_h_pt;
+                    lc.content_hash = slotted->clusters[i].content_hash;
+                    lb.clusters.push_back(lc);
                     ax += slotted->cluster_adv_pt[i];
                 }
                 lb.inline_end_pt = ax;
@@ -620,9 +678,9 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
                 }
                 lb.page = slabOfY(cursor_y);
                 lb.block_lo_pt = locY(lb.page, cursor_y);
-                lb.block_hi_pt = locY(lb.page, cursor_y + (ascent + descent));
+                lb.block_hi_pt = locY(lb.page, cursor_y + (ascent_eff + descent));
                 lb.inline_origin_pt = cx;
-                lb.bracket_axis_pt = locY(lb.page, cursor_y + ascent);
+                lb.bracket_axis_pt = locY(lb.page, cursor_y + ascent_eff);
                 cursor_y += line_h + b.space_after_pt;
             } else {
                 const float col_w = line_h;
@@ -713,13 +771,25 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
                     }
                 }
                 cluster_metric[i] = m;
-                para_metric.size_pt = std::max(para_metric.size_pt, m.size_pt);
-                para_metric.ascent_pt = std::max(para_metric.ascent_pt, m.ascent_pt);
-                para_metric.descent_pt = std::max(para_metric.descent_pt, m.descent_pt);
+                // 原子自己一套度量：盒高就是它的 ascent（盒底坐在基线上），
+                //   字号留 0 —— 盒高不是字号推出来的，混进去会让行高被行距再乘一遍。
+                if (bs.clusters[i].atom != InlineAtom::None) {
+                    LineMetric am;
+                    am.ascent_pt = bs.clusters[i].atom_h_pt;
+                    am.descent_pt = 0.0f;
+                    am.box_h_pt = bs.clusters[i].atom_h_pt;
+                    cluster_metric[i] = am;
+                }
+                para_metric.size_pt = std::max(para_metric.size_pt, cluster_metric[i].size_pt);
+                para_metric.ascent_pt = std::max(para_metric.ascent_pt, cluster_metric[i].ascent_pt);
+                para_metric.descent_pt =
+                    std::max(para_metric.descent_pt, cluster_metric[i].descent_pt);
+                para_metric.box_h_pt = std::max(para_metric.box_h_pt, cluster_metric[i].box_h_pt);
             }
             // 一个度量都取不到（取不到字体）：退回块级那套，几何必须存在。
             if (para_metric.size_pt <= 0.0f) {
-                para_metric = LineMetric{b.size_pt, bs.ascent_pt, bs.descent_pt};
+                para_metric = LineMetric{b.size_pt, bs.ascent_pt, bs.descent_pt,
+                                         para_metric.box_h_pt};
             }
         }
 
@@ -740,17 +810,38 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
                 float ascent = 0.0f;
                 float descent = 0.0f;
                 float max_size = 0.0f;
+                float max_box = 0.0f;
+                // 文本自己的度量（不含原子）：行距是"文本行之间的距离"，它由字号定 ——
+                //   算行高时要把它和"内容撑出来的高度"分开，见下面。
+                float text_ascent = 0.0f;
+                float text_descent = 0.0f;
                 for (size_t i = slice.begin; i < slice.end; ++i) {
                     ascent = std::max(ascent, cluster_metric[i].ascent_pt);
                     descent = std::max(descent, cluster_metric[i].descent_pt);
                     max_size = std::max(max_size, cluster_metric[i].size_pt);
+                    max_box = std::max(max_box, cluster_metric[i].box_h_pt);
+                    if (bs.clusters[i].atom == InlineAtom::None) {
+                        text_ascent = std::max(text_ascent, cluster_metric[i].ascent_pt);
+                        text_descent = std::max(text_descent, cluster_metric[i].descent_pt);
+                    }
                 }
-                if (max_size <= 0.0f) {
+                if (max_size <= 0.0f && max_box <= 0.0f) {
                     ascent = bs.ascent_pt;
                     descent = bs.descent_pt;
                     max_size = b.size_pt;
                 }
-                const float line_h = max_size * b.line_factor;
+                // 行高 = 行距（字号 × 倍数），但行里塞进比文本更高的东西（原子盒）时，
+                //   撑高的是内容，行距本身要留着：max(行距, 内容高 + 行距 - 文本高)。
+                //   纯文本行两项相等 ⇒ 就是行距，与加原子之前逐字段相同；
+                //   原子行 ⇒ 盒高 + 行距。
+                //   只取 max(行距, 盒高) 是错的：那样盒底下面一点空隙都没有，下一行的字
+                //   紧贴着盒底排（实测相邻两行的行盒还重叠 3.5 磅）—— 看起来就是"那一行的
+                //   行距没了"。行距是段落属性，不该被行里的一枚盒子吃掉。
+                float text_extent = text_ascent + text_descent;
+                if (!(text_extent > 0.0f)) text_extent = bs.ascent_pt + bs.descent_pt;
+                const float pitch = ((max_size > 0.0f) ? max_size : b.size_pt) * b.line_factor;
+                const float leading = std::max(0.0f, pitch - text_extent);
+                const float line_h = std::max(pitch, ascent + descent + leading);
 
                 // 本行放不下就翻页。判定必须用本行自己的高度：上一行结束时还不知道
                 //   本行多高，拿上一行的高度估会漏判（下一行更高时溢出页底）。
@@ -780,7 +871,7 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
                 lb.page = slabOfY(top);
                 lb.vertical = false;
                 lb.sideways = false;
-                lb.size_pt = max_size;
+                lb.size_pt = (max_size > 0.0f) ? max_size : b.size_pt;
                 lb.block_lo_pt = locY(lb.page, baseline - ascent);
                 lb.block_hi_pt = locY(lb.page, baseline + descent);
                 lb.inline_origin_pt = cx;
@@ -794,10 +885,17 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
                 {
                     float ax = 0.0f;
                     for (size_t i = slice.begin; i < slice.end; ++i) {
-                        lb.clusters.push_back(
-                            LineCluster{bs.clusters[i].cp, ax, bs.clusters[i].placeholder,
-                                        bs.clusters[i].bracket_side, bs.clusters[i].read_only,
-                                        bs.clusters[i].owner_control});
+                        LineCluster lc;
+                        lc.cp = bs.clusters[i].cp;
+                        lc.inline_pt = ax;
+                        lc.placeholder = bs.clusters[i].placeholder;
+                        lc.bracket_side = bs.clusters[i].bracket_side;
+                        lc.read_only = bs.clusters[i].read_only;
+                        lc.owner_control = bs.clusters[i].owner_control;
+                        lc.atom = bs.clusters[i].atom;
+                        lc.atom_h_pt = bs.clusters[i].atom_h_pt;
+                        lc.content_hash = bs.clusters[i].content_hash;
+                        lb.clusters.push_back(lc);
                         ax += bs.cluster_adv_pt[i];
                     }
                     lb.inline_end_pt = ax;
@@ -920,17 +1018,32 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
                 float col_size = 0.0f;
                 float col_asc = 0.0f;
                 float col_desc = 0.0f;
+                float col_box = 0.0f;
+                float col_text_asc = 0.0f;
+                float col_text_desc = 0.0f;
                 for (size_t i = slice.begin; i < slice.end; ++i) {
                     col_size = std::max(col_size, cluster_metric[i].size_pt);
                     col_asc = std::max(col_asc, cluster_metric[i].ascent_pt);
                     col_desc = std::max(col_desc, cluster_metric[i].descent_pt);
+                    col_box = std::max(col_box, cluster_metric[i].box_h_pt);
+                    if (bs.clusters[i].atom == InlineAtom::None) {
+                        col_text_asc = std::max(col_text_asc, cluster_metric[i].ascent_pt);
+                        col_text_desc = std::max(col_text_desc, cluster_metric[i].descent_pt);
+                    }
                 }
-                if (col_size <= 0.0f) {
+                if (col_size <= 0.0f && col_box <= 0.0f) {
                     col_size = b.size_pt;
                     col_asc = bs.ascent_pt;
                     col_desc = bs.descent_pt;
                 }
-                col_w = col_size * b.line_factor;
+                // 列宽同理：原子的盒高在竖排下占的是列宽（横轴），与横排下行高占的是同一个
+                //   位置关系，所以"行距要留着"这条也一样 —— 见横排那一支的说明。
+                float col_text_extent = col_text_asc + col_text_desc;
+                if (!(col_text_extent > 0.0f)) col_text_extent = bs.ascent_pt + bs.descent_pt;
+                const float col_pitch =
+                    ((col_size > 0.0f) ? col_size : b.size_pt) * b.line_factor;
+                const float col_leading = std::max(0.0f, col_pitch - col_text_extent);
+                col_w = std::max(col_pitch, col_asc + col_desc + col_leading);
 
                 // 本列在剩余宽度里放不下就换一条带。这一步只能放在"这一列的内容定下来
                 //   之后"：列宽是逐列算出来的，事先不知道。列长与列宽无关，换带之后同一段
@@ -969,9 +1082,17 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
                 {
                     float ay = 0.0f;
                     for (size_t i = slice.begin; i < slice.end; ++i) {
-                        lb.clusters.push_back(
-                            LineCluster{bs.clusters[i].cp, ay, bs.clusters[i].placeholder,
-                                        bs.clusters[i].bracket_side, bs.clusters[i].read_only});
+                        LineCluster lc;
+                        lc.cp = bs.clusters[i].cp;
+                        lc.inline_pt = ay;
+                        lc.placeholder = bs.clusters[i].placeholder;
+                        lc.bracket_side = bs.clusters[i].bracket_side;
+                        lc.read_only = bs.clusters[i].read_only;
+                        lc.owner_control = bs.clusters[i].owner_control;
+                        lc.atom = bs.clusters[i].atom;
+                        lc.atom_h_pt = bs.clusters[i].atom_h_pt;
+                        lc.content_hash = bs.clusters[i].content_hash;
+                        lb.clusters.push_back(lc);
                         ay += bs.cluster_adv_pt[i];
                     }
                     lb.inline_end_pt = ay;

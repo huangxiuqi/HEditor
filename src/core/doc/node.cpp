@@ -35,6 +35,33 @@ bool isText(NodeKind kind) { return kind == NodeKind::TextRun; }
 
 bool isParagraphMark(NodeKind kind) { return kind == NodeKind::ParagraphMark; }
 
+bool isAtom(NodeKind kind) {
+    switch (kind) {
+        case NodeKind::Image:
+        case NodeKind::Formula:
+        case NodeKind::Break:
+        case NodeKind::PageBreak:
+        case NodeKind::Tab:
+        case NodeKind::Field:
+            return true;
+        case NodeKind::Document:
+        case NodeKind::Section:
+        case NodeKind::Table:
+        case NodeKind::TableRow:
+        case NodeKind::TableCell:
+        case NodeKind::ContentControl:
+        case NodeKind::Quote:
+        case NodeKind::CodeBlock:
+        case NodeKind::ListItem:
+        case NodeKind::Link:
+        case NodeKind::HeaderFooter:
+        case NodeKind::TextRun:
+        case NodeKind::ParagraphMark:
+            return false;
+    }
+    return false;
+}
+
 const char* nodeKindName(NodeKind kind) {
     switch (kind) {
         case NodeKind::Document:
@@ -309,6 +336,8 @@ void NodeTree::assignFrom(const NodeTree& other) {
         dst->cell = src->cell;
         dst->table = src->table;
         dst->field = src->field;
+        dst->image = src->image;
+        dst->formula = src->formula;
         dst->section = src->section;
         remap[dst->id] = dst.get();
         index_[dst->id] = dst.get();

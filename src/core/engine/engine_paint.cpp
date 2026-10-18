@@ -364,6 +364,34 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
         }
         flush_run();
         sub_glyph_ms += msSince(t_glyph0);
+
+        // 行内原子的占位框。与字形一样只过这一页的行（行数组按页单调，两端二分一次），
+        //   也照样按行带筛：一条带的边界就是行的块轴范围，框不会跨出它自己那一行。
+        {
+            const auto t_atom0 = Clock::now();
+            int lb_lo = 0;
+            int lb_hi = -1;
+            caret_.linesOnPage(page_index, &lb_lo, &lb_hi);
+            const int n_lines = static_cast<int>(layout_.lines.size());
+            for (int li = lb_lo; li <= lb_hi && li < n_lines; ++li) {
+                if (li < 0) continue;
+                const LineBox& lb = layout_.lines[static_cast<size_t>(li)];
+                if (band && (lb.block_hi_pt < *band_lo_pt - 1.0f ||
+                             lb.block_lo_pt > *band_hi_pt + 1.0f)) {
+                    continue;
+                }
+                for (size_t ci = 0; ci < lb.clusters.size(); ++ci) {
+                    const LineCluster& c = lb.clusters[ci];
+                    if (c.atom == InlineAtom::None) continue;
+                    // 框在行内轴上的末端 = 下一个簇的起点（最后一个簇用行末）。
+                    const float a1 = (ci + 1 < lb.clusters.size())
+                                         ? lb.inline_origin_pt + lb.clusters[ci + 1].inline_pt
+                                         : lb.inline_origin_pt + lb.inline_end_pt;
+                    drawAtomBox(lb, c, a1, off_y);
+                }
+            }
+            sub_fill_ms += msSince(t_atom0);
+        }
     };
 
     // 脏页数（在底图指纹被刷新之前算，否则比不出差异）
@@ -863,6 +891,79 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
 }
 
 /**
+ * 行内原子的显式占位框（说明见 engine.h 的同名声明）。
+ *
+ * 为什么画框而不是内容：图片的字节还没进来（二进制资源外置是阶段 6 的事），公式的排版
+ * 后端本期不做 —— 把表达式按普通文字画出来会得到错误的字距与上下标，那是伪渲染，
+ * 比一个明确的框更危险。框里写上它是什么，读者一眼看得出这里是一枚原子。
+ */
+void EditorEngine::drawAtomBox(const LineBox& lb, const LineCluster& c, float a1_pt, float off_y) {
+    const float zoom = cfg_.zoom;
+    const float a0 = lb.inline_origin_pt + c.inline_pt;
+    // 底边坐在基线上（与字形同一个原点），高度是原子自己的 —— 不是行盒的：一行里混排
+    //   大字号文字时行盒比盒子高，拿行盒画框会画出一个不对的矩形。
+    const float axis = lb.bracket_axis_pt;
+    const float top = axis - c.atom_h_pt;
+    Rect box;
+    if (!lb.vertical) {
+        box = Rect{a0 * zoom, top * zoom + off_y, (a1_pt - a0) * zoom, c.atom_h_pt * zoom};
+    } else {
+        box = Rect{top * zoom, a0 * zoom + off_y, c.atom_h_pt * zoom, (a1_pt - a0) * zoom};
+    }
+    if (!(box.w > 0.0f) || !(box.h > 0.0f)) return;
+    base_.fillRect(box, cfg_.atom_fill);
+    base_.strokeRect(box, cfg_.atom_border, 1.0f);
+
+    hb_font_t* hbf = (lb.bracket_font != nullptr) ? lb.bracket_font->hb() : nullptr;
+    if (hbf == nullptr) return;
+    // 框里写什么：图片写资源标识，公式写表达式；两者都空就写一个说明性的词 ——
+    //   空框看不出是哪一种原子，而"看不出"正是这一层要避免的。
+    const Node* n = tree_.find(static_cast<NodeId>(c.owner_control));
+    std::string label;
+    if (n != nullptr) {
+        label = (c.atom == InlineAtom::Formula) ? n->formula.expr : n->image.resource_id;
+    }
+    if (label.empty()) label = (c.atom == InlineAtom::Formula) ? "公式" : "图片";
+
+    const float pad = cfg_.atom_pad_pt;
+    const float avail = (a1_pt - a0) - pad * 2.0f;
+    if (!(avail > 0.0f)) return;
+    const float units_to_px = zoom / kFontScalePerPt;
+    // 框内居中。横排下"居中"指基线：基线 = 框顶 + (框高 + ascent - descent) / 2；
+    //   竖排下标签转 90°，居中指的是列内横轴，取框的横向中心（与括号同一条做法）。
+    const float asc = lb.bracket_font->ascenderPt();
+    const float desc = lb.bracket_font->descenderPt();
+    const float centered = top + (c.atom_h_pt + asc - desc) * 0.5f;
+    const float cross = lb.vertical ? (top + c.atom_h_pt * 0.5f) : centered;
+    const float rot = lb.vertical ? 90.0f : 0.0f;
+
+    std::vector<uint32_t> ids;
+    std::vector<float> xs;
+    std::vector<float> ys;
+    float pen = 0.0f;
+    for (uint32_t cp : utf8ToCodepoints(label)) {
+        hb_codepoint_t g = 0;
+        if (!hb_font_get_nominal_glyph(hbf, cp, &g) || g == 0) continue;  // 缺字跳过这一枚
+        const float adv = hb_font_get_glyph_h_advance(hbf, g) / kFontScalePerPt;
+        // 放不下就截断：溢出的字会盖到相邻内容上，比少写几个字更糟。
+        if (pen + adv > avail) break;
+        if (!lb.vertical) {
+            xs.push_back((a0 + pad + pen) * zoom);
+            ys.push_back(cross * zoom + off_y);
+        } else {
+            xs.push_back(cross * zoom);
+            ys.push_back((a0 + pad + pen) * zoom + off_y);
+        }
+        ids.push_back(g);
+        pen += adv;
+    }
+    if (!ids.empty()) {
+        base_.drawGlyphs(hbf, ids.data(), xs.data(), ys.data(), static_cast<int>(ids.size()),
+                         units_to_px, cfg_.atom_text, rot);
+    }
+}
+
+/**
  * 表单标记：
  * 方括号 —— 字段常驻（默认全部字段；Focused 档下只有光标所在的那个）
  * 小点   —— 只有 Focused 档才画，给"光标不在"的字段（右下角一个方块）
@@ -921,7 +1022,12 @@ void EditorEngine::drawControlMarks(int first_page, int count) {
 
         for (const LineCluster& c : lb.clusters) {
             if (!c.placeholder) continue;
-            const bool open = (c.bracket_side != BracketSide::Close);
+            // 占位簇不止括号一种：行内原子也占一个槽（它不产生字形，所以同样是占位）。
+            //   这里必须显式把 None 挡掉，不能写成"不是闭括号就是开括号"：原子的
+            //   bracket_side 正是 None，那样写会给每枚原子左边长出一枚开括号，
+            //   而它用的是括号色、贴在框的左沿上，看着像原子自带的装饰。
+            if (c.bracket_side == BracketSide::None) continue;
+            const bool open = (c.bracket_side == BracketSide::Open);
             hb_codepoint_t g = 0;
             const hb_codepoint_t want = static_cast<hb_codepoint_t>(open ? '[' : ']');
             if (!hb_font_get_nominal_glyph(hbf, want, &g) || !g) continue;

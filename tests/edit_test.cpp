@@ -8431,6 +8431,214 @@ int main() {
                    "★ 蒙文竖排的下一列在右边（与中日竖排相反，左右键的方向必须跟着翻）");
     }
 
+    std::printf("\n[44] 行内原子：不可断的盒子进流之后，增量排版仍与全量一致\n");
+    {
+        // 阶段 4 的判据是"断行处不可分割；增量与全量一致"。断行那一半在 shaping_test 里
+        //   （它直接看行盒）；这一节管后一半：原子进了引擎的块流之后，改别的段落、改它自己
+        //   所在的段落、换一枚更大的原子，增量排版都必须与整篇重排逐字段相同。
+        EditorEngine e44;
+        expectTrue(e44.init({cjkPath, mnPath, latinPath}), "引擎初始化");
+        EngineConfig c44;
+        c44.zoom = 1.0f;
+        c44.page.width_pt = 200.0f;
+        c44.page.height_pt = 300.0f;
+        c44.page.margin_pt = 10.0f;
+        e44.setConfig(c44);
+
+        // 三段：纯文本 / 汉字 + 图片 / 纯文本。原子夹在中间，于是"改前一段"这条路上
+        //   后缀里正好带着一枚原子（后缀复用对原子的取舍因此有判据）。
+        auto mkTree = [&](int px_w, int px_h) {
+            NodeTree t;
+            const NodeId s = t.firstSectionId();
+            t.setText(t.appendChild(s, NodeKind::TextRun), utf8ToCodepoints("甲乙丙丁戊己庚辛"));
+            t.appendChild(s, NodeKind::ParagraphMark);
+            t.setText(t.appendChild(s, NodeKind::TextRun), utf8ToCodepoints("汉字"));
+            const NodeId img = t.appendChild(s, NodeKind::Image);
+            t.find(img)->image.px_w = px_w;
+            t.find(img)->image.px_h = px_h;
+            t.appendChild(s, NodeKind::ParagraphMark);
+            t.setText(t.appendChild(s, NodeKind::TextRun), utf8ToCodepoints("子丑寅卯辰巳午未"));
+            t.appendChild(s, NodeKind::ParagraphMark);
+            return t;
+        };
+        e44.setDocument(mkTree(96, 48), StyleSheet{});
+        e44.relayout();
+        expectTrue(e44.auditLayout() == 0, "装载之后：增量排版与整篇重排逐字段一致");
+        expectTrue(e44.auditCompile() == 0, "装载之后：产物与整树全量编译一致");
+
+        // 原子真的进了块流：对象表里有一枚 Atom，盒宽按原始像素与 DPI 折算。
+        const std::vector<BlockSpec>& bl = e44.blocks();
+        expectTrue(bl.size() == 3 && bl[1].objects.size() == 1 &&
+                       bl[1].objects[0].kind == InlineObjectKind::Atom,
+                   "原子进了块流的对象表（第 1 段一枚）");
+        expectTrue(bl.size() == 3 && bl[1].objects.size() == 1 && bl[1].objects[0].w_pt > 71.9f &&
+                       bl[1].objects[0].w_pt < 72.1f,
+                   "盒宽按原始像素与 DPI 折算（96 px / 96 dpi = 72 磅）");
+
+        // 行盒里那枚原子占的宽度就是盒宽 —— 与 shaping_test 同一把尺子，这里量的是
+        //   "经引擎装载之后仍然成立"（编译 → 块流 → 排版这条链没有把宽度丢掉）。
+        auto atomAdv = [&]() -> float {
+            for (const LineBox& lb : e44.layout().lines) {
+                for (size_t i = 0; i < lb.clusters.size(); ++i) {
+                    if (lb.clusters[i].atom == InlineAtom::None) continue;
+                    return (i + 1 < lb.clusters.size())
+                               ? (lb.clusters[i + 1].inline_pt - lb.clusters[i].inline_pt)
+                               : (lb.inline_end_pt - lb.clusters[i].inline_pt);
+                }
+            }
+            return -1.0f;
+        };
+        expectNear(atomAdv(), 72.0, 0.05, "装载之后行里那枚原子占的宽度还是盒宽");
+
+        // 改第一段：后缀是第 1、2 段，其中第 1 段带原子 —— 两段都要复用。
+        //   这一条同时是"原子不算'端点会动的占位'"的判据：把原子也当成占位来否决复用，
+        //   这里会掉到 0 段。
+        e44.setCaret(0, 2);
+        expectTrue(e44.typeTextAndRender("X"), "在第一段中间敲一个字");
+        const EditStats st44 = e44.editStats();
+        expectTrue(!st44.layout_was_full && st44.reused_paragraphs >= 2,
+                   "★ 后缀里带原子也照常复用（复用 " + std::to_string(st44.reused_paragraphs) +
+                       " 段）");
+        expectTrue(e44.auditLayout() == 0, "★ 增量结果与整篇重排一致");
+        expectNear(atomAdv(), 72.0, 0.05, "复用之后原子占的宽度没变");
+
+        // 改原子所在的那一段、且改在原子之前：这一整段要重排，结果仍须与全量一致。
+        e44.setCaret(1, 1);
+        expectTrue(e44.typeTextAndRender("Y"), "在原子所在段的原子之前敲一个字");
+        expectTrue(e44.auditLayout() == 0, "★ 原子所在段重排之后仍与整篇重排一致");
+        expectNear(atomAdv(), 72.0, 0.05, "重排之后原子占的宽度没变");
+
+        // 换一枚更高的原子（整篇重载）：行盒必须跟着变高，且与整篇重排一致。
+        //   192 px / 96 dpi = 144 磅，远高于一行 19.2 磅 —— 这是"盒高真的进了行盒"的
+        //   端到端一半（排版层那一半在 shaping_test 的 [8]）。
+        e44.setDocument(mkTree(96, 192), StyleSheet{});
+        e44.relayout();
+        expectTrue(e44.auditLayout() == 0, "★ 换一枚更高的原子之后仍与整篇重排一致");
+        float line_h = 0.0f;
+        for (const LineBox& lb : e44.layout().lines) {
+            bool has = false;
+            for (const LineCluster& c : lb.clusters) {
+                if (c.atom != InlineAtom::None) has = true;
+            }
+            if (has) line_h = lb.block_hi_pt - lb.block_lo_pt;
+        }
+        expectTrue(line_h >= 144.0f - 0.05f,
+                   "144 磅高的原子把行盒撑到 144 以上（实际 " + std::to_string(line_h) + "）");
+
+        // 演示那一路（demoTree）也要按锚点落原子，而不是把它们挤到段末。
+        //   这一条单列，是因为它量的是"建树"而不是"排版"：demoTree 是 BlockSpec → 树的
+        //   有损转换（只读文本与块级字段），原子得由它按锚点切成节点插进文本流里 ——
+        //   否则演示页上两枚原子会一起出现在段尾，锚点白给。段里没有 runs 时尤其容易漏：
+        //   那种情况下"整段一个文本节点"的写法会把所有原子都推到后面。
+        {
+            BlockSpec b;
+            b.size_pt = 14.0f;
+            b.setText("甲乙丙丁");
+            InlineObject im;
+            im.cp = 1;
+            im.kind = InlineObjectKind::Atom;
+            im.atom = InlineAtom::Image;
+            im.w_pt = 30.0f;
+            im.h_pt = 20.0f;
+            b.objects.push_back(im);
+            InlineObject fm;
+            fm.cp = 3;
+            fm.kind = InlineObjectKind::Atom;
+            fm.atom = InlineAtom::Formula;
+            fm.w_pt = 40.0f;
+            fm.h_pt = 18.0f;
+            b.objects.push_back(fm);
+
+            const NodeTree t44 = demoTree({b}, {});
+            const CompileResult cr44 = compileDocument(t44, FlowVisibility::Design, StyleSheet{});
+            std::string got;
+            if (!cr44.blocks.empty()) {
+                for (const InlineObject& o : cr44.blocks[0].objects) {
+                    if (!got.empty()) got += ",";
+                    got += std::to_string(o.cp) + ":" + std::to_string(static_cast<int>(o.atom));
+                }
+            }
+            expectTrue(got == "1:1,3:2",
+                       "★★ demoTree 按锚点落原子（段内码点 1 与 3，种类图片与公式）—— 实际 " +
+                           got);
+        }
+
+        // 原子要删得掉。它没有可寻址的内部，删它就是整枚移除 —— 退格看左边那一格、前删看
+        //   右边那一格；选区跨过它也一样（那条路原先被"覆盖长度对不上"整条拒掉：文本与段落
+        //   标记两条都产不出覆盖它的步骤）。
+        {
+            auto mkOne = [&]() {
+                NodeTree t;
+                const NodeId s = t.firstSectionId();
+                t.setText(t.appendChild(s, NodeKind::TextRun), utf8ToCodepoints("甲乙"));
+                const NodeId img = t.appendChild(s, NodeKind::Image);
+                t.find(img)->image.px_w = 48;
+                t.find(img)->image.px_h = 48;
+                t.setText(t.appendChild(s, NodeKind::TextRun), utf8ToCodepoints("丙丁"));
+                t.appendChild(s, NodeKind::ParagraphMark);
+                return t;
+            };
+            auto atomCount = [](const EditorEngine& eng) {
+                int n = 0;
+                for (const BlockSpec& b : eng.blocks()) {
+                    for (const InlineObject& o : b.objects) {
+                        if (o.kind == InlineObjectKind::Atom) ++n;
+                    }
+                }
+                return n;
+            };
+
+            EditorEngine ea;
+            expectTrue(ea.init({cjkPath, mnPath, latinPath}), "引擎初始化（删原子）");
+            ea.setConfig(c44);
+            ea.setDocument(mkOne(), StyleSheet{});
+            ea.setEditMode(EditMode::Document);
+            ea.relayout();
+            expectTrue(atomCount(ea) == 1 && ea.blocks()[0].textUtf8() == "甲乙丙丁",
+                       "装载之后：一枚原子夹在四个字中间");
+
+            // 退格：光标在原子右边那一格（cp 2 侧别 1 = 跨过原子），退掉的是原子本身。
+            ea.setCaretAtSide(0, 2, 1);
+            expectTrue(ea.backspaceAndRender(), "★ 原子右边退格 → 改了文档");
+            expectTrue(atomCount(ea) == 0 && ea.blocks()[0].textUtf8() == "甲乙丙丁",
+                       "★★ 退格退掉的是那枚原子（四个字一个不少）—— 实际原子 " +
+                           std::to_string(atomCount(ea)) + " 枚");
+            // 撤销要把原子整枚装回来，光标也回到按键之前那一格（与删控件同一条）。
+            expectTrue(ea.undoAndRender(), "撤销");
+            expectTrue(atomCount(ea) == 1 && ea.blocks()[0].textUtf8() == "甲乙丙丁",
+                       "★★ 撤销把原子装回来（文本仍是一个字不少）");
+            expectTrue(ea.caret().offset == 2 && ea.caretSide() == 1 && !ea.hasSelection(),
+                       "撤销之后光标回到原子右边那一格且不留选区 —— 实际 " +
+                           std::to_string(ea.caret().offset) + "/" +
+                           std::to_string(ea.caretSide()));
+
+            // 前删：光标在原子左边那一格（cp 2 侧别 0 = 还没跨过原子）。
+            ea.setCaretAtSide(0, 2, 0);
+            expectTrue(ea.deleteForwardAndRender(), "★ 原子左边前删 → 改了文档");
+            expectTrue(atomCount(ea) == 0 && ea.blocks()[0].textUtf8() == "甲乙丙丁",
+                       "★★ 前删删掉的也是那枚原子（四个字一个不少）");
+
+            // 选区跨过原子：文本 + 原子 + 文本一起删（区间 = "乙" + 原子 + "丙"）。
+            EditorEngine es;
+            expectTrue(es.init({cjkPath, mnPath, latinPath}), "引擎初始化（选区跨原子）");
+            es.setConfig(c44);
+            es.setDocument(mkOne(), StyleSheet{});
+            es.setEditMode(EditMode::Document);
+            es.relayout();
+            const FlowPos f1 = es.flowPosAtSide(0, 1, 0);
+            const FlowPos f3 = es.flowPosAtSide(0, 3, 0);
+            expectTrue(f3 - f1 == 3, "区间 [cp 1, cp 3) 在流里占三格（乙 + 原子 + 丙），实际 " +
+                                         std::to_string(f3 - f1));
+            es.setSelection(Range{f1, f3});
+            expectTrue(es.backspaceAndRender(), "★ 选区跨过原子 → 改了文档");
+            expectTrue(atomCount(es) == 0 && es.blocks()[0].textUtf8() == "甲丁",
+                       "★★ 选区里的文本与原子一起删掉（只剩 甲丁）—— 实际 " +
+                           es.blocks()[0].textUtf8() + " / 原子 " + std::to_string(atomCount(es)));
+            expectTrue(es.undoAndRender() && atomCount(es) == 1 &&
+                           es.blocks()[0].textUtf8() == "甲乙丙丁",
+                       "撤销把文本与原子一起装回来");
+        }
+    }
     std::printf("\n──────────────────────────────\n");
     std::printf("共 %d 项断言，失败 %d 项\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

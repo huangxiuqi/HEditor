@@ -170,6 +170,8 @@ add_library(heditor_core STATIC
   src/core/doc/control_spec.cpp
   src/core/doc/section_spec.cpp
   src/core/doc/field_spec.cpp
+  src/core/doc/image_spec.cpp
+  src/core/doc/formula_spec.cpp
   src/core/doc/control_index.cpp
   src/core/doc/control_api.cpp
   src/core/doc/validation.cpp

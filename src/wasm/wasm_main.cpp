@@ -222,6 +222,45 @@ std::vector<BlockSpec> buildScenarioBlocks(int scenario) {
             blocks = longDocument(2000, g_cjk_font);
             break;
         }
+        case 9: {  // 行内原子：图片与公式的显式占位框（阶段 4）
+            BlockSpec b;
+            b.font_index = g_cjk_font;
+            b.size_pt = 14.0f;
+            b.wm = WritingMode::HorizontalTB();
+            b.line_factor = 1.85f;
+            b.language = "zh";
+            b.color = Color::rgb(24, 24, 24);
+            // 先设文本：setText 会清空对象表（锚点是按旧文本算的）。
+            b.setText("心电图：图三张，节律规整。");
+            InlineObject img;
+            img.cp = 4;
+            img.kind = InlineObjectKind::Atom;
+            img.atom = InlineAtom::Image;
+            img.w_pt = 60.0f;
+            img.h_pt = 45.0f;
+            b.objects.push_back(img);
+            InlineObject fm;
+            fm.cp = 9;
+            fm.kind = InlineObjectKind::Atom;
+            fm.atom = InlineAtom::Formula;
+            fm.w_pt = 90.0f;
+            fm.h_pt = 28.0f;
+            b.objects.push_back(fm);
+            blocks.push_back(std::move(b));
+
+            // 第二段纯文本：用来看原子把后面的字挤开、以及长到换行时原子整枚走。
+            BlockSpec b2;
+            b2.font_index = g_cjk_font;
+            b2.size_pt = 14.0f;
+            b2.wm = WritingMode::HorizontalTB();
+            b2.line_factor = 1.85f;
+            b2.space_after_pt = 6.0f;
+            b2.language = "zh";
+            b2.color = Color::rgb(24, 24, 24);
+            b2.setText(chineseNote() + chineseNote());
+            blocks.push_back(std::move(b2));
+            break;
+        }
         default:
             blocks = sampleDocument(g_cjk_font, g_mn_font, g_latin_font);
             break;
@@ -998,6 +1037,11 @@ std::string bracketSlotsJson() {
               // 占位簇上记的是产生端的句柄（持树时是控件节点 id），宿主要的是控件下标 ——
               //   差这一道翻译，报出来的归属就与 controls.items 的下标对不上。
               << ",\"owner\":" << g_engine.controlIndexOfOwner(c.owner_control)
+              // 行内原子也在这张表里（它同样是"占了一个槽的占位簇"）：kind 0 不是原子，
+              //   1 是图片、2 是公式。判据靠它区分"槽是括号还是原子" —— 两者的
+              //   side / owner 都是 0 与 -1，光看那两个字段分不开。
+              << ",\"atom\":" << static_cast<int>(c.atom)
+              << ",\"h\":" << c.atom_h_pt
               << ",\"x\":" << (lb.inline_origin_pt + c.inline_pt) << "}";
         }
     }

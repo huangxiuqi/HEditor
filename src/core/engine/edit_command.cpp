@@ -23,6 +23,7 @@ namespace {
 FlowPos stepStartFlow(const Step& s) {
     if (const auto* d = std::get_if<DeleteRange>(&s)) return d->begin;
     if (const auto* r = std::get_if<RemoveParaMark>(&s)) return r->at;
+    if (const auto* n = std::get_if<RemoveNode>(&s)) return n->at_flow;
     return -1;
 }
 
@@ -213,6 +214,31 @@ int EditCommand::controlStartingAt(FlowPos p) const {
  * 的 DocumentControler.Backspace 也是拿 while 一路进入）。选"进入"而不是"直接删掉整个
  * 内层控件"，是因为后者会把用户没打算删的内容一起带走。
  */
+bool EditCommand::eraseAtomBeside(FlowPos cur, bool left) {
+    if (!hasFlow() || cur < 0) return false;
+    const FlowPos f = left ? (cur - 1) : cur;
+    if (f < 0 || f >= flowIndex().size()) return false;
+    const Pos p = flowIndex().posAt(f);
+    const Node* n = tree().find(p.container);
+    if (n == nullptr || !isAtom(n->kind) || p.offset != 0) return false;
+    if (!formDegraded() && !canEditRange(tree(), mode(), Range{f, f + 1}).allowed) {
+        noteBlocked();
+        return false;
+    }
+    const NodeBuild nb = makeRemoveAtom(tree(), flowIndex(), f);
+    if (!nb.ok) return false;
+    Transaction tx;
+    tx.label = "删除原子";
+    // 撤销恢复的是"按键之前光标在哪"（与删控件同一条）：记成原子自己那一格的话，撤销之后
+    //   光标会落到原子前面，而按键之前它在后面。
+    tx.selection_before = Range{cur, cur};
+    tx.selection_after = Range{f, f};
+    tx.steps.push_back(nb.step);
+    if (!commit(std::move(tx), pos().paraForFlow(f), ParaDelta{})) return false;
+    pos().setCaretAtFlow(f);
+    return true;
+}
+
 EditCommand::BracketHit EditCommand::bracketBackspace(FlowPos* at) {
     if (at == nullptr || !hasFlow() || controls().empty()) return BracketHit::None;
     *at = -1;
@@ -313,6 +339,10 @@ bool EditCommand::backspace() {
     if (!plan.steps.empty()) return commitErase(plan, "退格");
     const FlowPos caret_before = pos().selection().focus;
 
+    // 紧邻的是一枚原子就整枚删掉（见 eraseAtomBeside）。它排在括号规则之前：两者不会同时
+    //   成立，而"左边那一格是原子"比"光标贴在一枚括号上"更贴近屏幕上看到的那个东西。
+    if (eraseAtomBeside(caret_before, /*left=*/true)) return true;
+
     // 控件边界上的退格（四条规则见 bracketBackspace）。这一段必须排在"段首退格 = 并入
     //   上一段"之前：控件跨段时它的闭括号落在下一段的段首，从段首那条路走会并段，
     //   而不是按括号规则处理。
@@ -356,6 +386,9 @@ bool EditCommand::deleteForward() {
     if (plan.blocked) return false;
     if (!plan.steps.empty()) return commitErase(plan, "前删");
     const FlowPos caret_before = pos().selection().focus;
+
+    // 与退格左右对称：右边那一格是原子就整枚删掉。
+    if (eraseAtomBeside(caret_before, /*left=*/false)) return true;
 
     FlowPos at = -1;
     const BracketHit hit = bracketDeleteForward(&at);
@@ -613,6 +646,27 @@ std::vector<Step> EditCommand::eraseFlowSteps(FlowPos from, FlowPos to) const {
             if (mb.ok) steps.push_back(mb.step);
         }
     }
+    // 原子那一条：整枚移除（它没有可寻址的内部，这是它唯一的删法）。
+    //   位置同样由表直接给出，不逐位问 posAt：第 p 段第 i 枚对象的流位置 =
+    //   段起点 + 锚点 + i —— 它前面有 i 枚对象，每枚各占一格，与 textSpanAt 同一把尺子。
+    //   表的第 i 项要按全部对象数（含控件边界）数，因为流位置把它们也算进去了；
+    //   只对原子发步骤，所以下面按对象表整体遍历、只在原子处发。
+    if (hasFlow()) {
+        for (size_t p = 0; p < blocks().size(); ++p) {
+            const FlowPos base = blockFlow()[p];
+            const FlowPos span = blockFlowSpan()[p];
+            if (base + span <= from || base >= to) continue;  // 这一段与区间不相交
+            const std::vector<InlineObject>& objs = blocks()[p].objects;
+            for (size_t i = 0; i < objs.size(); ++i) {
+                if (objs[i].kind != InlineObjectKind::Atom) continue;
+                const FlowPos f = base + static_cast<FlowPos>(objs[i].cp) +
+                                  static_cast<FlowPos>(i);
+                if (f < from || f >= to) continue;
+                const NodeBuild nb = makeRemoveAtom(tree(), flowIndex(), f);
+                if (nb.ok) steps.push_back(nb.step);
+            }
+        }
+    }
     // 从后往前：删右边的不会移动左边的坐标，于是每步的坐标都是它自己那一刻的坐标。
     std::sort(steps.begin(), steps.end(), [](const Step& a, const Step& b) {
         return stepStartFlow(a) > stepStartFlow(b);
@@ -626,6 +680,8 @@ std::vector<Step> EditCommand::eraseFlowSteps(FlowPos from, FlowPos to) const {
             covered += d->end - d->begin;
         } else if (std::get_if<RemoveParaMark>(&s) != nullptr) {
             covered += 1;
+        } else if (std::get_if<RemoveNode>(&s) != nullptr) {
+            covered += 1;  // 原子整枚占一格
         }
     }
     if (covered != to - from) return {};

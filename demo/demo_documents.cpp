@@ -143,17 +143,53 @@ void applyBlockFormat(const BlockSpec& b, Node* mark) {
 }
 
 /**
- * 追加一段文本，按字符格式 run 切开：一段一个文本节点，格式落在它的标记上。
+ * 追加一段文本与它中间的行内原子，文本按字符格式 run 切开：一段一个文本节点，格式落在
+ * 它的标记上。
  *
- * 为什么要切：run 是作者意图，而编译正是从"标记 + 样式表"再解析出 run 的 —— 不切的话，
+ * 为什么要切 run：run 是作者意图，而编译正是从"标记 + 样式表"再解析出 run 的 —— 不切的话，
  * 块流里设了 runs 的文本搬进树就只剩一个节点，编译回来退化成"整段一个 run"，
  * 于是"按 run 取字号 / 颜色"那一整类判据在树这条路上全部失效。
  * 树里没有 run 级的语言与回退链，这两项只跟块级走（见 applyBlockFormat）。
  * runs 为空表示"整段一个 run"，属性取块级字段，与不切之前逐字段相同。
+ *
+ * 原子按锚点落成自己的节点。它只能按盒子的宽高重建：InlineObject 按设计只带几何，不带
+ * 资源标识与表达式（那是模型自己的事，见 layout.h）。于是演示文档里的图片退回"按 96 dpi
+ * 折算的像素尺寸 + 空的资源标识"，框里写的是"图片"两个字。对演示而言这就够 —— 框的尺寸
+ * 与位置与原来逐字段相同，而复现真实图片本来也要等二进制资源那条路。
  */
 void appendTextRuns(NodeTree& tree, NodeId parent, const BlockSpec& b, int from, int to) {
     const std::vector<uint32_t>& cps = b.cp_text;
+    // 本窗口该吐的原子：锚点在 [from, to) 里；段末那一枚（锚点等于段长）只在窗口也到段末
+    //   时吐 —— 否则它会同时被相邻的两个窗口吐一遍（窗口端点重合时重复建节点）。
+    const int len = static_cast<int>(cps.size());
+    std::vector<const InlineObject*> atoms;
+    for (const InlineObject& o : b.objects) {
+        if (o.kind != InlineObjectKind::Atom) continue;
+        const int cp = static_cast<int>(o.cp);
+        if (cp < from) continue;
+        if (cp >= to && !(cp == len && to == len)) continue;
+        atoms.push_back(&o);
+    }
+    size_t next_atom = 0;
+    auto flushAtomsUpTo = [&](int at) {
+        while (next_atom < atoms.size() && static_cast<int>(atoms[next_atom]->cp) <= at) {
+            const InlineObject& o = *atoms[next_atom++];
+            const bool formula = (o.atom == InlineAtom::Formula);
+            const NodeId id = tree.appendChild(parent, formula ? NodeKind::Formula : NodeKind::Image);
+            if (formula) {
+                tree.find(id)->formula.expr = "\\frac{a}{b}";
+            } else {
+                Node* n = tree.find(id);
+                // 资源标识写短一点：框里放不下就截断，而"demo-image"截成"demo-i"看着像
+                //   画错了。框宽是盒子自己的（见上），标识该迁就它。
+                n->image.resource_id = "img1";
+                n->image.px_w = std::max(1, static_cast<int>(o.w_pt * 96.0f / 72.0f + 0.5f));
+                n->image.px_h = std::max(1, static_cast<int>(o.h_pt * 96.0f / 72.0f + 0.5f));
+            }
+        }
+    };
     int pos = from;
+    flushAtomsUpTo(pos);
     while (pos < to) {
         const FormatRun* r = nullptr;
         for (const FormatRun& cand : b.runs) {
@@ -166,6 +202,18 @@ void appendTextRuns(NodeTree& tree, NodeId parent, const BlockSpec& b, int from,
         }
         int end = (r != nullptr) ? std::min(to, static_cast<int>(r->cp_end)) : to;
         if (end <= pos) end = to;  // runs 没铺满这一段时退回段末，不丢字
+        // 下一枚原子把这一段文本切开。不切的话整段会先落成一个文本节点、原子全被挤到段尾
+        //   —— 锚点就白给了。runs 为空时上面那一步把 end 直接取成段末，正是这种情形：
+        //   演示文档多数段本来就没有 runs，所以这条路不是边角。
+        if (next_atom < atoms.size()) {
+            end = std::min(end, static_cast<int>(atoms[next_atom]->cp));
+        }
+        if (end <= pos) {
+            // 原子正好落在 pos 上：先把它落成节点，下一轮再接着取文本。
+            //   推进由 flushAtomsUpTo 保证 —— 它把 cp <= pos 的都吐掉，于是 next_atom 必前移。
+            flushAtomsUpTo(pos);
+            continue;
+        }
         const NodeId t = tree.appendChild(parent, NodeKind::TextRun);
         tree.setText(t, std::vector<uint32_t>(cps.begin() + pos, cps.begin() + end));
         if (r != nullptr) {
@@ -175,6 +223,7 @@ void appendTextRuns(NodeTree& tree, NodeId parent, const BlockSpec& b, int from,
             n->marks.color = r->color;
         }
         pos = end;
+        flushAtomsUpTo(pos);
     }
 }
 

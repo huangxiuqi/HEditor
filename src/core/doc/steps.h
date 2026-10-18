@@ -332,6 +332,16 @@ NodeBuild makeInsertNode(NodeTree& tree, const Pos& at, const NodeSpec& spec);
 NodeBuild makeRemoveNode(const NodeTree& tree, const Pos& at);
 
 /**
+ * 构造"删掉某一枚原子"的步骤（按流位置寻址）。
+ *
+ * 与 makeRemoveNode 的分工：那个按孩子槽位寻址、不挑种类，给"删控件"这类结构操作用；这个按
+ * 流位置寻址、只认原子 —— 原子在流里整枚占一格，删它只有整枚移除这一种做法，而它的槽位活不过
+ * 一次规范化（相邻同标记的文本节点会被合并、槽位整体前移，见 slotForFlow），所以寻址只能落在
+ * 流位置上。段落标记另有一种步骤（RemoveParaMark），文本按码点删 —— 三类各占一条路。
+ */
+NodeBuild makeRemoveAtom(const NodeTree& tree, const FlowIndex& idx, FlowPos at);
+
+/**
  * 这个步骤现在能应用吗。applyStep 先跑它，所以失败时文档一定没被动过。
  */
 StepResult canApply(const NodeTree& tree, const Step& step);

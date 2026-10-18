@@ -22,6 +22,8 @@
 #include "core/doc/char_format.h"
 #include "core/doc/control_spec.h"
 #include "core/doc/field_spec.h"
+#include "core/doc/formula_spec.h"
+#include "core/doc/image_spec.h"
 #include "core/doc/node_id.h"
 #include "core/doc/para_format.h"
 #include "core/doc/section_spec.h"
@@ -92,6 +94,15 @@ bool isText(NodeKind kind);
  * 但流位置换算必须给它一个位置 —— 段落序号正是数它的个数得来的。
  */
 bool isParagraphMark(NodeKind kind);
+
+/**
+ * 是否为原子：在流里整枚占一个位置、没有可寻址的内部（图片、公式、域、制表符、分页符、换行）。
+ *
+ * 单独判定是因为"删掉它"只有整枚移除这一种做法：文本按码点删、容器按边界进出，而原子既没有
+ * 可寻址的内部、也不是结构边界。它同时也是排版层"不可断的盒子"那一类，但两者不是一回事 ——
+ * 排版只认已经进了编译产物的那几种（见 InlineObjectKind::Atom）。
+ */
+bool isAtom(NodeKind kind);
 
 /**
  * 种类名，与枚举逐项对应。用于诊断与报告文本（拿数字去对照枚举太费事），
@@ -184,6 +195,17 @@ struct Node {
      * 理由同 para —— 求值按流顺序走一遍树。其余种类读它没有定义。
      */
     FieldSpec field;
+
+    /**
+     * 图片记录：只对 Image 有意义（第十一节）。资源标识、原始像素尺寸与显示尺寸都在这里，
+     * 理由同 para —— 编译按流顺序取它，而流顺序就是树的顺序。其余种类读它没有定义。
+     */
+    ImageSpec image;
+
+    /**
+     * 公式记录：只对 Formula 有意义。表达式、排版后端与显示尺寸。其余种类读它没有定义。
+     */
+    FormulaSpec formula;
 
     /**
      * 节记录：只对 Section 有意义（第十节）。纸张、页边距、页眉页脚引用、页码，以及装未知

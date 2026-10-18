@@ -1,5 +1,10 @@
 #include "core/doc/compile.h"
 
+#include <algorithm>
+
+#include "core/doc/document.h"
+#include "core/utils/hash.h"
+
 namespace heditor {
 
 namespace {
@@ -161,6 +166,14 @@ private:
             }
         }
         pending_.clear();
+        // 原子的盒子几何在这里定：公式的默认框要按段落字号估，而字号是段落属性 ——
+        //   走到文本节点时还看不到它。emit 那一刻只记下"这里有一枚原子"。
+        for (InlineObject& o : b.objects) {
+            if (o.kind != InlineObjectKind::Atom) continue;
+            const Node* atom = tree_.find(static_cast<NodeId>(o.owner));
+            if (atom == nullptr) continue;
+            resolveAtomBox(*atom, b, &o);
+        }
         out_.blocks.push_back(std::move(b));
         out_.sources.push_back(BlockSource{first_id, mark_id});
     }
@@ -230,6 +243,94 @@ private:
     }
 
     /**
+     * 绝对长度 → 磅。Auto 与非绝对都不是编译期能换算的，返回 false 由调用方兜。
+     *
+     * 非绝对（百分比 / em / 字符位）是这一层真的做不到的事，所以显式记一条诊断 ——
+     * 静默按 Auto 处理会让"作者给了 5 厘米宽"变成"按原始像素算"，而画面看着又是合理的。
+     * Auto 是作者声明"由排版方决定"，不记。
+     */
+    bool absLenToPt(const Length& len, const Node& n, const char* field, float* out) {
+        if (len.kind == LengthKind::Auto) return false;
+        if (len.kind != LengthKind::Abs) {
+            note(n.kind, n.id,
+                 std::string("原子的") + field + "是相对长度，编译期算不出参照值，已按原始尺寸折算");
+            return false;
+        }
+        *out = static_cast<float>(emuToPt(len.abs_emu));
+        return true;
+    }
+
+    /**
+     * 原子的内容指纹：绘制要看的那些字节（图片是资源标识，公式是表达式与后端）。
+     *
+     * 尺寸不进它 —— 尺寸改了行盒几何跟着改，行指纹自己就变了。它管的是几何看不见的那一类：
+     * 换了一张同样大的图、改了公式表达式。
+     */
+    uint64_t atomContentHash(const Node& n) {
+        uint64_t h = kFnvBasis;
+        h = fnvMix(h, static_cast<uint64_t>(n.kind == NodeKind::Image ? 1 : 2));
+        if (n.kind == NodeKind::Image) {
+            h = fnvMixCStr(h, n.image.resource_id.c_str());
+        } else {
+            h = fnvMixCStr(h, n.formula.expr.c_str());
+            h = fnvMix(h, static_cast<uint64_t>(n.formula.backend));
+        }
+        return h;
+    }
+
+    /**
+     * 定出原子盒子的显示尺寸（磅）。
+     *
+     * 优先用作者给的绝对显示尺寸；只给一边时按原始宽高比推另一边 —— 原图比例是"给了尺寸却
+     * 不给另一边"唯一说得通的解释。两边都没有时按原始像素与 DPI 折算（96 DPI 是行业惯例，
+     * 见 image_spec.h）。三条都走不通（图片既没有像素也没有显示尺寸，或者给的是编译期算不出
+     * 的相对长度）时用默认框并记诊断 —— 排版必须有一份几何，而诊断让调用方知道这不是作者
+     * 要的结果。
+     */
+    void resolveAtomBox(const Node& n, const BlockSpec& b, InlineObject* o) {
+        const bool is_img = (n.kind == NodeKind::Image);
+        const Length& lw = is_img ? n.image.width : n.formula.width;
+        const Length& lh = is_img ? n.image.height : n.formula.height;
+        const float dpi =
+            (is_img && n.image.dpi > 0) ? static_cast<float>(n.image.dpi) : 96.0f;
+        const float px_w = is_img ? static_cast<float>(n.image.px_w) : 0.0f;
+        const float px_h = is_img ? static_cast<float>(n.image.px_h) : 0.0f;
+        const bool has_px = (px_w > 0.0f && px_h > 0.0f);
+        const float nat_w = has_px ? px_w * 72.0f / dpi : 0.0f;
+        const float nat_h = has_px ? px_h * 72.0f / dpi : 0.0f;
+
+        // 默认框：图片给一个 4:3 的空框（尺寸本该来自像素或作者，走到这儿说明两者都缺），
+        //   公式按表达式的码点数估宽、高取一行。估的是框，不是公式的排版结果 ——
+        //   本期不做伪渲染（见 formula_spec.h）。
+        float def_w = 0.0f;
+        float def_h = 0.0f;
+        if (is_img) {
+            def_w = 4.0f * b.size_pt * 4.0f;
+            def_h = 4.0f * b.size_pt * 3.0f;
+        } else {
+            const size_t n_cp = utf8ToCodepoints(n.formula.expr).size();
+            def_w = 2.0f * b.size_pt + static_cast<float>(n_cp) * 0.5f * b.size_pt;
+            def_w = std::min(std::max(def_w, 4.0f * b.size_pt), 40.0f * b.size_pt);
+            def_h = b.size_pt * 2.0f;
+        }
+
+        float w = 0.0f;
+        float h = 0.0f;
+        const bool w_abs = absLenToPt(lw, n, "显示宽度", &w);
+        const bool h_abs = absLenToPt(lh, n, "显示高度", &h);
+        if (w_abs && !h_abs) {
+            h = has_px ? w * (nat_h / nat_w) : def_h;
+        } else if (!w_abs && h_abs) {
+            w = has_px ? h * (nat_w / nat_h) : def_w;
+        } else if (!w_abs && !h_abs) {
+            w = has_px ? nat_w : def_w;
+            h = has_px ? nat_h : def_h;
+        }
+        o->w_pt = (w > 0.0f) ? w : def_w;
+        o->h_pt = (h > 0.0f) ? h : def_h;
+    }
+
+    /**
      * flagged 表示"已经在某个未编译的子树里"：那种情况下不再重复记诊断，
      * 只继续按流顺序取文本，免得一棵表格子树刷出几十条同因诊断。
      */
@@ -292,9 +393,25 @@ private:
             }
             return;
         }
+        // 行内原子：图片与公式在流里各占一个位置、各是一个不可断的盒子。它没有孩子、
+        //   也不切段，所以走的是与控件边界同一条路 —— 就地攒一枚行内对象，落段时一起带走。
+        //   盒子几何留到 flush 再定：公式的默认框要按段落字号估，而字号是段落属性。
+        if (n->kind == NodeKind::Image || n->kind == NodeKind::Formula) {
+            if (!flagged) {
+                noteFirst(n->id);
+                InlineObject o;
+                o.cp = cpCount();
+                o.kind = InlineObjectKind::Atom;
+                o.owner = static_cast<int>(n->id);  // 绘制要靠它回树里取"框里写什么"
+                o.atom = (n->kind == NodeKind::Image) ? InlineAtom::Image : InlineAtom::Formula;
+                o.content_hash = atomContentHash(*n);
+                obj_.push_back(o);
+            }
+            return;
+        }
         // 只把分组遍历用的容器与片段根当"支持"：它们是结构外壳，边界不进内容；其余容器与
-        // 全部原子都只记诊断。域（Field）是原子，本期引擎输入还没有域这一项，所以同样记
-        // 诊断而不静默丢 —— 它的缓存值留给页眉页脚渲染时再用。
+        // 尚未进编译的原子（域、制表符、分页符）都只记诊断。域（Field）是原子，本期引擎
+        // 输入还没有域这一项，所以同样记诊断而不静默丢 —— 它的缓存值留给页眉页脚渲染时再用。
         const bool supported = (n->kind == NodeKind::Document || n->kind == NodeKind::Section ||
                                 n->kind == NodeKind::HeaderFooter);
         if (!supported && !flagged) {
