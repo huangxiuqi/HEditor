@@ -720,7 +720,85 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
         f.cell = -1;
     };
 
-    // 出一行：结算行高，整行放不下就换页并把这一行已写下的行盒与字形一起平移。
+    // 把 [from_line, 末尾) 的行盒与对应的字形整体挪到下一页的 dest_top。
+    //   字形用 line 号筛：行号是排版顺序递增的，所以"这一行及以后"的行盒与字形是同一个后缀。
+    auto moveToNextPage = [&](size_t from_line, float dest_top) {
+        const float dy = dest_top - res.lines[from_line].block_lo_pt;
+        const int line_no = res.lines[from_line].line;
+        for (size_t j = from_line; j < res.lines.size(); ++j) {
+            LineBox& lb = res.lines[j];
+            lb.block_lo_pt += dy;
+            lb.block_hi_pt += dy;
+            lb.bracket_axis_pt += dy;
+            lb.page += 1;
+        }
+        for (PlacedGlyph& g : res.glyphs) {
+            if (g.line < line_no) continue;
+            g.y_pt += dy;
+            g.page += 1;
+        }
+        ++page_index;
+    };
+
+    // 整行挪到下一页（不允许跨页断行的那一档）。
+    auto shiftRowDown = [&](TableFrame& f) {
+        const float dy = cy - f.row_top;
+        for (size_t k = f.line_begin; k < res.lines.size(); ++k) {
+            LineBox& lb = res.lines[k];
+            lb.block_lo_pt += dy;
+            lb.block_hi_pt += dy;
+            lb.bracket_axis_pt += dy;
+            lb.page += 1;
+        }
+        const int line_no =
+            (f.line_begin < res.lines.size()) ? res.lines[f.line_begin].line : 0;
+        for (PlacedGlyph& g : res.glyphs) {
+            if (g.line < line_no) continue;
+            g.y_pt += dy;
+            g.page += 1;
+        }
+        ++page_index;
+        f.row_top = cy;
+        cursor_y = cy;
+    };
+
+    // 按行盒切片：本页装得下的留在本页，装不下的挪到下一页再试。切点落在行与行之间，
+    //   一行文字本身不被切开。合并单元格跨页时内容重复显示是绘制层的事（这里只保证
+    //   下半片段的内容真的到了下一页）。
+    auto splitRow = [&](TableFrame& f) {
+        size_t k = f.line_begin;
+        while (k < res.lines.size()) {
+            size_t bad = res.lines.size();
+            for (size_t j = k; j < res.lines.size(); ++j) {
+                if (res.lines[j].block_hi_pt > cy + ch + 0.01f) {
+                    bad = j;
+                    break;
+                }
+            }
+            if (bad >= res.lines.size()) break;
+            // 本片段第一行就放不下：整片挪走。挪完仍放不下说明这一行比整页还高，
+            //   不再挪第二次（否则会一直翻页），让它溢出。
+            const bool first = (bad == k);
+            moveToNextPage(bad, cy + kTableCellPaddingPt);
+            if (first && res.lines[k].block_hi_pt > cy + ch + 0.01f) break;
+            k = bad;
+        }
+        // 行底只看最后一个页片段：跨页之后各页的 y 是各自的页内坐标，混在一起比没有意义。
+        int last_page = 0;
+        for (size_t j = f.line_begin; j < res.lines.size(); ++j) {
+            last_page = std::max(last_page, res.lines[j].page);
+        }
+        float bottom = cy;
+        for (size_t j = f.line_begin; j < res.lines.size(); ++j) {
+            if (res.lines[j].page != last_page) continue;
+            bottom = std::max(bottom, res.lines[j].block_hi_pt);
+        }
+        f.row_top = bottom + kTableCellPaddingPt;
+        cursor_y = f.row_top;
+    };
+
+    // 出一行：结算行高。整行放不下时按行记录的开关分两种走法 —— 允许跨页断行的按行盒切片，
+    //   不允许的整行挪到下一页。
     auto closeRow = [&]() {
         TableFrame& f = tstack.back();
         closeCell();
@@ -733,25 +811,19 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
         float row_h = std::max(f.row_content_h + 2.0f * kTableCellPaddingPt, spec_h);
         if (row_h <= 0.0f) row_h = 2.0f * kTableCellPaddingPt;
         const bool overflow = (f.row_top + row_h > cy + ch + 0.01f);
+        bool placed = false;
         if (!cont && (rs.page_break_before || overflow) && f.row_top > cy + 0.01f) {
-            const float dy = cy - f.row_top;
-            for (size_t k = f.line_begin; k < res.lines.size(); ++k) {
-                LineBox& lb = res.lines[k];
-                lb.block_lo_pt += dy;
-                lb.block_hi_pt += dy;
-                lb.bracket_axis_pt += dy;
-                lb.page += 1;
+            if (rs.can_split_by_page && !rs.page_break_before) {
+                splitRow(f);
+                placed = true;
+            } else {
+                shiftRowDown(f);
             }
-            for (size_t k = f.glyph_begin; k < res.glyphs.size(); ++k) {
-                res.glyphs[k].y_pt += dy;
-                res.glyphs[k].page += 1;
-            }
-            ++page_index;
-            f.row_top = cy;
-            cursor_y = cy;
         }
-        f.row_top += row_h;
-        cursor_y = f.row_top;
+        if (!placed) {
+            f.row_top += row_h;
+            cursor_y = f.row_top;
+        }
         f.line_begin = res.lines.size();
         f.glyph_begin = res.glyphs.size();
         f.row = -1;

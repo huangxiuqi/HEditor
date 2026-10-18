@@ -1195,6 +1195,52 @@ int main() {
                            "换页后同一行的两格仍在同一基线上");
             }
         }
+        // 八：行跨页断开 —— 允许断行的按行盒切片，不允许的整行挪到下一页。
+        {
+            constexpr uint64_t kT = 14;
+            PageMetrics tiny;
+            tiny.width_pt = 200.0f;
+            tiny.height_pt = 100.0f;  // 内容区高 80
+            tiny.margin_pt = 10.0f;
+            // 第一行一个字（高 27.2），第二行一长串（格宽 192，每行 16 字，五行 96）。
+            const std::string long_text =
+                "一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十"
+                "一二三四五六七八九十";
+            auto build = [&](bool can_split) {
+                std::vector<BlockSpec> blocks = {mkCellBlock("甲", kT, 0, 0),
+                                                 mkCellBlock(long_text, kT, 1, 0)};
+                LayoutTable t = mkTable(kT, 2, 1);
+                t.cells = cellsOf(2, 1);
+                t.row_specs[0].can_split_by_page = can_split;
+                t.row_specs[1].can_split_by_page = can_split;
+                return layoutDocument(lib, blocks, tiny, {t});
+            };
+            const LayoutResult split = build(true);
+            int p0 = 0;
+            int p1 = 0;
+            float hi_on_p0 = 0.0f;
+            for (const LineBox& lb : split.lines) {
+                if (lb.page == 0) {
+                    ++p0;
+                    hi_on_p0 = std::max(hi_on_p0, lb.block_hi_pt);
+                } else if (lb.page == 1) {
+                    ++p1;
+                }
+            }
+            expectTrue(p0 >= 2 && p1 >= 1, "允许跨页断行：这一行的行盒分布在两页上");
+            expectTrue(hi_on_p0 <= tiny.margin_pt + tiny.contentHeightPt() + 0.01f,
+                       "本页上那半片段的底不超过内容区底边");
+
+            const LayoutResult whole = build(false);
+            int q0 = 0;
+            int q1 = 0;
+            for (const LineBox& lb : whole.lines) {
+                if (lb.page == 0) ++q0;
+                if (lb.page == 1) ++q1;
+            }
+            expectTrue(q0 == 1 && q1 >= 2,
+                       "不允许跨页断行：第二行整行挪到下一页，本页只剩第一行");
+        }
     }
 
     std::printf("\n──────────────────────────────\n");
