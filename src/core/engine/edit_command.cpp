@@ -239,6 +239,69 @@ bool EditCommand::eraseAtomBeside(FlowPos cur, bool left) {
     return true;
 }
 
+/**
+ * 表格边界上的删除：光标在表格第一个块的最前面时退格、最后一个块的末尾时前删，
+ * 整张表删掉。
+ *
+ * 表格是块级容器 —— 它没有"删一个字符就缩一格"的形态，能删的只有整张表。判定落在
+ * 块流上（段号 + 段内偏移）而不是流位置：表格的边界不进块流，没有能站光标的括号。
+ * 嵌套表格按最内层判：光标在内层格子里时退格删的是内层那张，不是外层的。
+ */
+bool EditCommand::eraseTableBeside(FlowPos cur, bool left) {
+    if (!hasFlow() || cur < 0 || blocks().empty()) return false;
+    const TextPos c = pos().caret();
+    if (c.para < 0 || c.para >= static_cast<int>(blocks().size())) return false;
+    const std::vector<CellSlot>& path = blocks()[static_cast<size_t>(c.para)].cell_path;
+    if (path.empty()) return false;
+    const uint64_t handle = path.back().table;
+    const int len = static_cast<int>(blocks()[static_cast<size_t>(c.para)].cp_text.size());
+    if (left ? (c.offset != 0) : (c.offset != static_cast<size_t>(len))) return false;
+
+    // 这一张表在块流里的连续区间：首尾两端才能删（中间那些块的两侧都是本表的内容）。
+    auto inside = [&](int i) {
+        const std::vector<CellSlot>& p = blocks()[static_cast<size_t>(i)].cell_path;
+        return !p.empty() && p.back().table == handle;
+    };
+    int first = c.para;
+    while (first > 0 && inside(first - 1)) --first;
+    int last = c.para;
+    while (last + 1 < static_cast<int>(blocks().size()) && inside(last + 1)) ++last;
+    if (left ? (c.para != first) : (c.para != last)) return false;
+
+    const Node* t = tree().find(static_cast<NodeId>(handle));
+    if (t == nullptr || t->parent == nullptr) return false;
+    int idx = -1;
+    for (size_t i = 0; i < t->parent->children.size(); ++i) {
+        if (t->parent->children[i]->id == t->id) {
+            idx = static_cast<int>(i);
+            break;
+        }
+    }
+    if (idx < 0) return false;
+
+    FlowPos lo = 0;
+    FlowPos hi = 0;
+    if (!flowIndex().intervalOf(t->id, &lo, &hi)) return false;
+    // 整块包住它必然被拒（与删控件同一条口径）：表单结构锁与只读都落在这里。
+    if (!formDegraded() && !canEditRange(tree(), mode(), Range{lo, hi}).allowed) {
+        noteBlocked();
+        return false;
+    }
+    const NodeBuild nb = makeRemoveNode(tree(), Pos{t->parent->id, idx});
+    if (!nb.ok) return false;
+
+    Transaction tx;
+    tx.label = "删除表格";
+    tx.selection_before = Range{cur, cur};
+    tx.selection_after = Range{lo, lo};
+    tx.steps.push_back(nb.step);
+    // 段数一定变（一张表至少一个块），走整树重编。
+    if (!commit(std::move(tx), c.para, ParaDelta{true})) return false;
+    // 落点 = 表格区间的起点：删掉之后光标停在这张表空出来的位置上。
+    pos().setCaretAtFlow(lo);
+    return true;
+}
+
 EditCommand::BracketHit EditCommand::bracketBackspace(FlowPos* at) {
     if (at == nullptr || !hasFlow() || controls().empty()) return BracketHit::None;
     *at = -1;
@@ -343,6 +406,10 @@ bool EditCommand::backspace() {
     //   成立，而"左边那一格是原子"比"光标贴在一枚括号上"更贴近屏幕上看到的那个东西。
     if (eraseAtomBeside(caret_before, /*left=*/true)) return true;
 
+    // 表格首尾边界上的退格（见 eraseTableBeside）。它排在这里，是为了赶在"段首退格 =
+    //   并入上一段"之前：否则表格内容会先被并进上一段，表格壳子留在原地。
+    if (eraseTableBeside(caret_before, /*left=*/true)) return true;
+
     // 控件边界上的退格（四条规则见 bracketBackspace）。这一段必须排在"段首退格 = 并入
     //   上一段"之前：控件跨段时它的闭括号落在下一段的段首，从段首那条路走会并段，
     //   而不是按括号规则处理。
@@ -389,6 +456,7 @@ bool EditCommand::deleteForward() {
 
     // 与退格左右对称：右边那一格是原子就整枚删掉。
     if (eraseAtomBeside(caret_before, /*left=*/false)) return true;
+    if (eraseTableBeside(caret_before, /*left=*/false)) return true;
 
     FlowPos at = -1;
     const BracketHit hit = bracketDeleteForward(&at);

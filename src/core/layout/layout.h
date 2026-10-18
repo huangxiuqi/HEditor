@@ -563,6 +563,15 @@ struct LineBox {
     uint32_t last_cp = 0;
 
     /**
+     * 这一行所属格在行内轴上的范围（页内坐标）。两者相等表示不在表格里。
+     *
+     * 命中测试靠它：格里的文字只占开头一小段，按"行内范围"判势力范围，点格子的后半段
+     * 就会跳到下一格。格范围是这一格的宽度，与文字多长无关。
+     */
+    float cell_lo_pt = 0.0f;
+    float cell_hi_pt = 0.0f;
+
+    /**
      * 行内簇（cp 升序）
      */
     std::vector<LineCluster> clusters;

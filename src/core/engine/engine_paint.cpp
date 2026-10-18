@@ -89,13 +89,32 @@ void EditorEngine::lineBand(int k, float* lo, float* hi) const {
         return;
     }
     const LineBox& lb = ls[static_cast<size_t>(k)];
-    const bool first_on_page = (k == 0) || (ls[static_cast<size_t>(k - 1)].page != lb.page);
+    // 同一块轴位置上的行盒是一组：表格一行的几个格各有自己的行盒，y 完全相同。
+    //   行带必须按"组"的上下边界算 —— 拿"本行与下一个行盒的中线"当 hi，在表格里
+    //   取到的是同一行的另一格，带只盖住字的上半，重画之后字被裁成两截。
+    //   正文里不会有两行 y 相同，组大小恒为 1，与加表格之前逐字节相同。
+    auto sameRow = [](const LineBox& a, const LineBox& b) {
+        return a.page == b.page && std::fabs(a.block_lo_pt - b.block_lo_pt) <= 0.01f;
+    };
+    int first = k;
+    while (first > 0 && sameRow(ls[static_cast<size_t>(first - 1)], lb)) --first;
+    int last = k;
+    while (last + 1 < static_cast<int>(ls.size()) &&
+           sameRow(ls[static_cast<size_t>(last + 1)], lb)) {
+        ++last;
+    }
+    const bool first_on_page =
+        (first == 0) || (ls[static_cast<size_t>(first - 1)].page != lb.page);
     const bool last_on_page =
-        (k + 1 >= static_cast<int>(ls.size())) || (ls[static_cast<size_t>(k + 1)].page != lb.page);
-    *lo =
-        first_on_page ? 0.0f : (ls[static_cast<size_t>(k - 1)].block_hi_pt + lb.block_lo_pt) * 0.5f;
-    *hi = last_on_page ? static_cast<float>(pagePxHeight()) / cfg_.zoom
-                       : (lb.block_hi_pt + ls[static_cast<size_t>(k + 1)].block_lo_pt) * 0.5f;
+        (last + 1 >= static_cast<int>(ls.size())) ||
+        (ls[static_cast<size_t>(last + 1)].page != lb.page);
+    *lo = first_on_page
+              ? 0.0f
+              : (ls[static_cast<size_t>(first - 1)].block_hi_pt + lb.block_lo_pt) * 0.5f;
+    *hi = last_on_page
+              ? static_cast<float>(pagePxHeight()) / cfg_.zoom
+              : (ls[static_cast<size_t>(last)].block_hi_pt +
+                 ls[static_cast<size_t>(last + 1)].block_lo_pt) * 0.5f;
 }
 
 void EditorEngine::snapshotLineGeometry() {

@@ -824,6 +824,9 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
         const float spec_h = rs.height_pt.value_or(0.0f);
         float row_h = std::max(f.row_content_h + 2.0f * kTableCellPaddingPt, spec_h);
         if (row_h <= 0.0f) row_h = 2.0f * kTableCellPaddingPt;
+        // 放置前的页号与行顶：行被整体挪走或拆开时，第一片段落在哪一页要用这两个值判。
+        const int page_before = page_index;
+        const float top_before = f.row_top;
         const bool overflow = (f.row_top + row_h > cy + ch + 0.01f);
         bool placed = false;
         if (!cont && (rs.page_break_before || overflow) && f.row_top > cy + 0.01f) {
@@ -866,16 +869,25 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
                 PlacedRow pr;
                 pr.row = f.row;
                 pr.page = page_index;
-                pr.y = f.row_top - row_h;
-                pr.h = row_h;
+                // 空格没有行盒：整行按"放置前后"的实际范围记。
+                pr.y = (page_index == page_before) ? top_before : cy;
+                pr.h = std::max(0.0f, f.row_top - pr.y);
                 pt.placed.push_back(pr);
             } else {
+                // 行矩形按"这一行实际占的高度"给，不是按行盒的范围：显式行高（AtLeast）
+                //   比内容高时，中间那段空白也要有格线，否则一行看起来断成两块。
+                //   跨页拆开时按页切：首片段到页底、中间片段占满内容区、末片段到行底。
                 for (size_t i = 0; i < spans.size(); ++i) {
                     PlacedRow pr;
                     pr.row = f.row;
                     pr.page = spans[i].page;
-                    pr.y = spans[i].lo - kTableCellPaddingPt;
-                    pr.h = (spans[i].hi - spans[i].lo) + 2.0f * kTableCellPaddingPt;
+                    if (i == 0) {
+                        pr.y = (spans[i].page == page_before) ? top_before : cy;
+                    } else {
+                        pr.y = cy;
+                    }
+                    const float bottom = (i + 1 == spans.size()) ? f.row_top : (cy + ch);
+                    pr.h = std::max(0.0f, bottom - pr.y);
                     pr.cont_top = (i > 0);
                     pr.cont_bottom = (i + 1 < spans.size());
                     pt.placed.push_back(pr);
@@ -1018,6 +1030,11 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
             lb.paragraph = static_cast<int>(para_index);
             lb.line = line_total;
             lb.page = slabOfY(cursor_y);
+            // 格范围（命中用）：在格内时是这一格的左右边界；正文里保持 0，表示没有格。
+            if (!tstack.empty()) {
+                lb.cell_lo_pt = cur_cx;
+                lb.cell_hi_pt = cur_cx + cur_cw;
+            }
             lb.vertical = b.wm.isVertical();
             lb.sideways = b.wm.isSideways();
             lb.size_pt = b.size_pt;
@@ -1244,6 +1261,10 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
                 lb.paragraph = static_cast<int>(para_index);
                 lb.line = line_total;
                 lb.page = slabOfY(top);
+                if (!tstack.empty()) {
+                    lb.cell_lo_pt = cur_cx;
+                    lb.cell_hi_pt = cur_cx + cur_cw;
+                }
                 lb.vertical = false;
                 lb.sideways = false;
                 lb.size_pt = (max_size > 0.0f) ? max_size : b.size_pt;
@@ -1443,6 +1464,10 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
                 lb.paragraph = static_cast<int>(para_index);
                 lb.line = line_total + col;
                 lb.page = slabOfY(pen_y);
+                if (!tstack.empty()) {
+                    lb.cell_lo_pt = cur_cx;
+                    lb.cell_hi_pt = cur_cx + cur_cw;
+                }
                 lb.vertical = true;
                 lb.sideways = sideways;
                 lb.size_pt = col_size;

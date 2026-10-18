@@ -8707,6 +8707,14 @@ int main() {
             expectTrue(hit2 && (between.para == 1 || between.para == 2),
                        "点两行之间的空隙落在相邻两行之一（实际段 " +
                            std::to_string(hit2 ? between.para : -1) + "）");
+            // 点第一格的后半（文字早已结束）：势力范围是格宽而不是文字宽，仍该命中第 1 段。
+            TextPos tail;
+            const float tail_x = lay.lines[1].cell_hi_pt - 4.0f;
+            const bool hit3 = e45.hitTestPt(tail_x, lay.lines[1].block_lo_pt + 2.0f, &tail);
+            expectTrue(hit3 && tail.para == 1,
+                       "点第一格的后半（x=" + std::to_string(static_cast<int>(tail_x)) +
+                           "）仍命中第 1 段（实际段 " +
+                           std::to_string(hit3 ? tail.para : -1) + "）");
         }
 
         // 格内编辑：增量被禁（有表格），文本必须落进第二格那一段。
@@ -8715,6 +8723,15 @@ int main() {
         const EditStats st45 = e45.editStats();
         expectTrue(st45.layout_was_full, "有表格时不做增量（整篇重排）");
         expectTrue(e45.auditLayout() == 0, "编辑之后仍与整篇重排逐字段一致");
+        // 底图自审：增量重画（行带）得到的底图必须与从零全建逐字节相同。
+        //   表格一行有多个行盒，行带的上下边界按"组"算 —— 旧口径取"与下一个行盒的
+        //   中线"，取到的是同一行的另一格，带只盖住字的上半，重画之后字被裁成两截
+        //   （画面上就是"输入不更新"）。
+        //   必须用 auditBaseJson 而不是 auditFrameJson：帧是从底图搬的，底图错了
+        //   帧与"整帧重贴"照样一致（实测旧口径下 auditFrameJson 全绿、底图差 3 万像素）。
+        const std::string ab45 = e45.auditBaseJson();
+        expectTrue(ab45.find("\"diff\":0") != std::string::npos,
+                   "编辑之后：行带重画的底图与全建逐字节一致（字没被裁）：" + ab45);
         expectTrue(e45.blocks().size() == 4 && e45.blocks()[1].textUtf8() == "BZ",
                    "打进去的字落在第二格（第 1 段）");
         expectTrue(e45.blocks()[0].textUtf8() == "A" && e45.blocks()[2].textUtf8() == "C" &&
@@ -8726,6 +8743,71 @@ int main() {
         expectTrue(e45.blocks().size() == 4 && e45.blocks()[1].textUtf8() == "B",
                    "撤销之后第二格回到一个字");
         expectTrue(e45.auditLayout() == 0, "撤销之后仍与整篇重排逐字段一致");
+    }
+
+    std::printf("\n[46] 表格：首尾边界上的删除把整张表删掉\n");
+    {
+        EditorEngine e46;
+        expectTrue(e46.init({cjkPath, mnPath, latinPath}), "引擎初始化");
+        EngineConfig c46;
+        c46.zoom = 1.0f;
+        c46.page.width_pt = 300.0f;
+        c46.page.height_pt = 300.0f;
+        c46.page.margin_pt = 10.0f;
+        e46.setConfig(c46);
+
+        // 段 + 表格（1 行 1 格）+ 段：删掉表格之后前后两段都还在。
+        auto mkDoc = [&]() {
+            NodeTree t;
+            const NodeId s = t.firstSectionId();
+            t.setText(t.appendChild(s, NodeKind::TextRun), utf8ToCodepoints("前"));
+            t.appendChild(s, NodeKind::ParagraphMark);
+            const NodeId tb = t.appendChild(s, NodeKind::Table);
+            const NodeId row = t.appendChild(tb, NodeKind::TableRow);
+            const NodeId cell = t.appendChild(row, NodeKind::TableCell);
+            t.setText(t.appendChild(cell, NodeKind::TextRun), utf8ToCodepoints("格"));
+            t.appendChild(cell, NodeKind::ParagraphMark);
+            t.setText(t.appendChild(s, NodeKind::TextRun), utf8ToCodepoints("后"));
+            t.appendChild(s, NodeKind::ParagraphMark);
+            return t;
+        };
+        e46.setDocument(mkDoc(), StyleSheet{});
+        e46.relayout();
+        expectTrue(e46.blocks().size() == 3, "前、表格、后共三段");
+
+        // 光标在表格第一格的最前面：退格删整张表。
+        e46.setCaret(1, 0);
+        expectTrue(e46.backspace(), "退格删掉整张表");
+        expectTrue(e46.blocks().size() == 2 && e46.blocks()[0].textUtf8() == "前" &&
+                       e46.blocks()[1].textUtf8() == "后",
+                   "删掉之后只剩前后两段（表格的格内容一起没了）");
+        // 段数变了：要有一次重排，layout_ 才是新版的（宿主每帧都会做这一步）。
+        e46.relayout();
+        expectTrue(e46.auditLayout() == 0 && e46.auditCompile() == 0,
+                   "删表之后排版与编译两份自审都是 0");
+
+        // 撤销：表格整张回来（含格里的字）。
+        expectTrue(e46.undo(), "撤销");
+        e46.relayout();
+        expectTrue(e46.blocks().size() == 3 && e46.blocks()[1].textUtf8() == "格",
+                   "撤销之后表格与格里的字都回来了");
+        expectTrue(e46.auditLayout() == 0 && e46.auditCompile() == 0,
+                   "撤销之后两份自审仍然是 0");
+
+        // 前删在表格最后一个块的末尾：同样删整张表。
+        e46.setCaret(1, 1);
+        expectTrue(e46.deleteForward(), "前删删掉整张表");
+        expectTrue(e46.blocks().size() == 2 && e46.blocks()[0].textUtf8() == "前" &&
+                       e46.blocks()[1].textUtf8() == "后",
+                   "前删之后同样只剩前后两段");
+
+        // 反向一半：光标在表格中间（格内容里）时，退格只删一个字符，不删表。
+        expectTrue(e46.undo(), "撤销回表格");
+        e46.relayout();
+        e46.setCaret(1, 1);
+        expectTrue(e46.backspace(), "在格内容末尾退格");
+        expectTrue(e46.blocks().size() == 3 && e46.blocks()[1].textUtf8().empty(),
+                   "只删掉格里的那个字，表格还在（三段没变）");
     }
 
     std::printf("\n──────────────────────────────\n");

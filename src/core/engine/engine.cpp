@@ -1349,8 +1349,10 @@ bool EditorEngine::hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* 
         //   （一行的几个格在同一个 y 上），只按块轴比会一律选中先出现的那一格 ——
         //   表象是"点第二格的字，光标跳到第一格"。正文里同一 y 不会有两条行盒，
         //   所以这一条在无表格时不会改变任何选择。
-        const float a0 = lb.inline_origin_pt;
-        const float a1 = lb.inline_origin_pt + lb.inline_end_pt;
+        const float a0 = (lb.cell_hi_pt > lb.cell_lo_pt) ? lb.cell_lo_pt : lb.inline_origin_pt;
+        const float a1 = (lb.cell_hi_pt > lb.cell_lo_pt)
+                             ? lb.cell_hi_pt
+                             : (lb.inline_origin_pt + lb.inline_end_pt);
         const float ipos = lb.vertical ? y_pt_doc : x_pt_doc;
         const float dx = (ipos < a0) ? (a0 - ipos) : (ipos > a1 ? ipos - a1 : 0.0f);
         if (d < best_d - 0.01f || (std::fabs(d - best_d) <= 0.01f && dx < best_dx)) {

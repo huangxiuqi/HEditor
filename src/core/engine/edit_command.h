@@ -229,6 +229,18 @@ private:
     bool eraseAtomBeside(FlowPos cur, bool left);
 
     /**
+     * 表格边界上的删除：光标在表格第一个块的最前面时退格、最后一个块的末尾时前删，
+     * 整张表删掉。
+     *
+     * 表格是块级容器，它没有"删一个字符就缩一格"的形态 —— 能删的只有整张表。判定落在
+     * 块流上（段号 + 段内偏移）而不是流位置：表格的边界不进块流，没有能站光标的括号。
+     * 嵌套表格按最内层判（光标在内层格子里时删的是内层那张）。
+     *
+     * @return 真 = 已经删掉；假 = 光标不在本表的首/尾边界上，调用方照原路走
+     */
+    bool eraseTableBeside(FlowPos cur, bool left);
+
+    /**
      * 控件边界上的一次删除落到哪一类（四条规则见 bracketBackspace 的实现处）。
      */
     enum class BracketHit {

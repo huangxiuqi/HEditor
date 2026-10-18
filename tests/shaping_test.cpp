@@ -1113,6 +1113,14 @@ int main() {
                 expectNear(r.lines[1].block_lo_pt - r.lines[0].block_lo_pt, 40.0, 0.05,
                            "显式行高 40 磅：下一行从 40 磅之后开始");
             }
+            // 行矩形按"这一行实际占的高度"给：行高比内容高时中间那段空白也要有格线，
+            //   否则一行看起来断成两块（连"相邻两行的格线首尾相接"都不成立）。
+            if (r.placed_tables.size() == 1 && r.placed_tables[0].placed.size() == 2) {
+                const PlacedTable& pt = r.placed_tables[0];
+                expectNear(pt.placed[1].y, pt.placed[0].y + pt.placed[0].h, 0.05,
+                           "相邻两行的格线首尾相接（中间没有缝）");
+                expectNear(pt.placed[0].h, 40.0, 0.05, "第一行的格线高度是显式行高 40 磅");
+            }
         }
         // 四：显式列宽只占一列，其余列平分剩下的宽度。
         {

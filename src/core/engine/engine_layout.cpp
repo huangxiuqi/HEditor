@@ -334,7 +334,11 @@ void EditorEngine::relayout() {
     // 有表格时不做任何增量：续排与后缀复用都假定"排版状态只有页号、块轴位置、行数三个标量"，
     //   而表格外的状态还有"当前在第几行第几格的哪一页片段"。从中间续排会丢掉那份上下文，
     //   产出的位置与全量重排不一致 —— 退回整篇重排，正确优先。
-    const bool can_resume = tables_.empty() && !must_full && from > 0 && from < n_para &&
+    // 旧版有表格、新版没有（删掉整张表）同样要走全量：那时 tables_ 已经空了，只看它会把
+    //   这一下当成普通编辑，而 layout_ 里全是带表格时排出来的行盒。
+    const bool had_tables = !layout_.placed_tables.empty();
+    const bool can_resume = tables_.empty() && !had_tables && !must_full && from > 0 &&
+                            from < n_para &&
                             layout_.para_index.size() > static_cast<size_t>(from);
 
     last_reused_paragraphs_ = 0;
@@ -445,7 +449,7 @@ EditorEngine::SuffixReuse EditorEngine::trySuffixReuse(int from, int* page_lo, i
     *all_pages_changed = false;
     // 有表格时不做后缀复用：理由与 can_resume 那一条相同 —— 搬回来的后缀带着旧的页号与
     //   块轴位置，而表格让"这一段落在哪一页的哪一格"不再是三个标量能续上的。
-    if (!tables_.empty()) return SuffixReuse::None;
+    if (!tables_.empty() || !layout_.placed_tables.empty()) return SuffixReuse::None;
     const int n_para = static_cast<int>(blocks_.size());
     const int n_old = static_cast<int>(layout_.para_index.size());
     // 段数增量：这一次编辑把旧 [from, from + m_old) 段换成了新 [from, from + m_new) 段，
