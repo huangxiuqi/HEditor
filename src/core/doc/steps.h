@@ -219,8 +219,8 @@ struct SetControlValue {
  */
 struct SetTableCellSpan {
     NodeId id = kInvalidNodeId;
-    CellSpan span;
-    CellSpan before;
+    CellSpec span;
+    CellSpec before;
 };
 
 using Step = std::variant<InsertText, InsertFragment, DeleteRange, InsertParaMark, RemoveParaMark,

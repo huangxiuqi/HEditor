@@ -26,6 +26,7 @@ constexpr char kParagraphTiling[] = "容器.切段无缝隙";
 constexpr char kUniqueId[] = "身份.节点 ID 唯一且索引自洽";
 constexpr char kKindValid[] = "身份.节点种类在声明范围内";
 constexpr char kTableGrid[] = "表格.跨度之和相等、无重叠、无空洞、有列定义则数据行不许合并";
+constexpr char kTableHeaderPrefix[] = "表格.标题行是从第 0 行起的连续前缀";
 constexpr char kAtomSized[] = "结构.原子的尺寸可定";
 
 void add(InvariantReport* r, const char* rule, NodeId node, int at, std::string detail) {
@@ -376,14 +377,39 @@ InvariantReport checkInvariants(const NodeTree& tree) {
             continue;
         }
         // 数据行不许合并：每一格的跨度都必须是 1x1（于是格数等于列数，"第 i 列"才是
-        // 确定的位置）。表头行不受这条限制。
+        // 确定的位置）。标题行不受这条限制 —— 它不承载数据，跨列合并是常见的排版需求。
         for (size_t row_no = 0; row_no < n->children.size(); ++row_no) {
-            if (static_cast<int>(row_no) < n->table.header_rows) continue;
+            if (n->children[row_no]->row.is_header) continue;
             for (const Node* cell : n->children[row_no]->children) {
                 if (cell->cell.row_span != 1 || cell->cell.col_span != 1) {
                     add(&r, kTableGrid, cell->id, static_cast<int>(row_no),
                         "有列定义的表格里数据行不允许合并（第 " + std::to_string(row_no) + " 行）");
                 }
+            }
+        }
+    }
+
+    // 表格.标题行是从第 0 行起的连续前缀
+    //
+    // 逐行开关允许标出"第二行是标题、第一行不是"，但"重复哪几行"只有连续前缀才有意义。
+    // 这条不靠 headerRowCount 判 —— 那个函数遇到第一个非标题行就停，正好把坏形状数成 0，
+    // 拿它当判据会永远绿。
+    r.checked.push_back(kTableHeaderPrefix);
+    for (NodeId id = 1; id <= tree.maxAllocatedId(); ++id) {
+        const Node* n = tree.find(id);
+        if (n == nullptr || n->kind != NodeKind::Table) continue;
+        bool seen_data_row = false;
+        for (size_t row_no = 0; row_no < n->children.size(); ++row_no) {
+            const Node* row = n->children[row_no];
+            if (row->kind != NodeKind::TableRow) continue;
+            if (row->row.is_header) {
+                if (seen_data_row) {
+                    add(&r, kTableHeaderPrefix, row->id, static_cast<int>(row_no),
+                        "第 " + std::to_string(row_no) +
+                            " 行是标题行，但它前面已经出现过数据行；重复的标题行只能从第 0 行起连续");
+                }
+            } else {
+                seen_data_row = true;
             }
         }
     }

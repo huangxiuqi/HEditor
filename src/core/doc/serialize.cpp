@@ -37,6 +37,7 @@ constexpr const char* kStyle = "s";
 constexpr const char* kMarks = "m";
 constexpr const char* kControl = "c";
 constexpr const char* kCell = "cs";
+constexpr const char* kRow = "rw";
 constexpr const char* kTable = "tb";
 constexpr const char* kField = "f";
 constexpr const char* kSection = "sec";
@@ -276,7 +277,22 @@ ordered_json tableJson(const TableSpec& t) {
         for (const Length& l : t.grid_cols) grid.push_back(printLength(l));
         j["grid"] = std::move(grid);
     }
-    if (t.header_rows != 0) j["hr"] = t.header_rows;
+    if (t.width != Length{}) j["w"] = printLength(t.width);
+    if (t.align != Align::Start) j["al"] = alignName(t.align);
+    return j;
+}
+
+/**
+ * 行记录。三个开关里 can_split_by_page 的默认是真，所以只在关掉时写；
+ * 另外两个默认是假，只在打开时写。行高与规则各自只在非默认时写。
+ */
+ordered_json rowJson(const RowSpec& r) {
+    ordered_json j = ordered_json::object();
+    if (!r.can_split_by_page) j["sp"] = false;
+    if (r.is_header) j["hd"] = true;
+    if (r.page_break_before) j["pb"] = true;
+    if (!(r.height == Length{})) j["ht"] = printLength(r.height);
+    if (r.height_rule != HeightRule::Auto) j["hr"] = heightRuleName(r.height_rule);
     return j;
 }
 
@@ -401,7 +417,16 @@ ordered_json nodeJson(const Node& n, Strings* kinds, Strings* strings) {
     if (!n.styleRef.empty()) j[kStyle] = strings->add(n.styleRef);
     if (!n.marks.empty()) j[kMarks] = marksJson(n.marks);
     if (!(n.control == ControlSpec{})) j[kControl] = controlJson(n.control, strings);
-    if (!(n.cell == CellSpan{})) j[kCell] = ordered_json::array({n.cell.row_span, n.cell.col_span});
+    if (!(n.cell == CellSpec{})) {
+        ordered_json cell = ordered_json::array({n.cell.row_span, n.cell.col_span});
+        // v_align 的默认是顶端，只在非默认时补第三个元素 —— 数组长度因此可以省略，
+        // 旧文书（两元素）读出来就是默认对齐。
+        if (n.cell.v_align != CellVAlign::Top) {
+            cell.push_back(cellVAlignName(n.cell.v_align));
+        }
+        j[kCell] = std::move(cell);
+    }
+    if (!(n.row == RowSpec{})) j[kRow] = rowJson(n.row);
     if (!(n.table == TableSpec{})) j[kTable] = tableJson(n.table);
     if (!(n.field == FieldSpec{})) j[kField] = fieldJson(n.field);
     if (!n.section.sameAs(SectionSpec{})) j[kSection] = sectionJson(n.section);
@@ -872,7 +897,23 @@ bool readTable(const ordered_json& j, const char* key, TableSpec* out) {
             out->grid_cols.push_back(len);
         }
     }
-    if (!readInt(t, "hr", &out->header_rows)) return false;
+    if (!readLength(t, "w", &out->width)) return false;
+    if (!readEnum(t, "al", alignFromName, &out->align)) return false;
+    return true;
+}
+
+/**
+ * 行记录。键与 rowJson 一一对应；缺键即默认值（can_split_by_page 缺键是 true）。
+ */
+bool readRow(const ordered_json& j, const char* key, RowSpec* out) {
+    if (!j.contains(key)) return true;
+    if (!j[key].is_object()) return false;
+    const ordered_json& r = j[key];
+    if (!readBool(r, "sp", &out->can_split_by_page)) return false;
+    if (!readBool(r, "hd", &out->is_header)) return false;
+    if (!readBool(r, "pb", &out->page_break_before)) return false;
+    if (!readLength(r, "ht", &out->height)) return false;
+    if (!readEnum(r, "hr", heightRuleFromName, &out->height_rule)) return false;
     return true;
 }
 
@@ -1030,8 +1071,8 @@ bool readNodeFields(const Reader& r, const ordered_json& entry, NodeTree* out, N
         if (!r.stringAt(index, &n->styleRef)) return false;
     }
     if (entry.contains(kCell)) {
-        if (!entry[kCell].is_array() || entry[kCell].size() != 2) {
-            return r.fail("跨度不是两个整数");
+        if (!entry[kCell].is_array() || entry[kCell].size() < 2 || entry[kCell].size() > 3) {
+            return r.fail("单元格记录不是两个整数（加可选的垂直对齐名）");
         }
         int spans[2] = {1, 1};
         for (int i = 0; i < 2; ++i) {
@@ -1042,7 +1083,14 @@ bool readNodeFields(const Reader& r, const ordered_json& entry, NodeTree* out, N
         }
         n->cell.row_span = spans[0];
         n->cell.col_span = spans[1];
+        if (entry[kCell].size() == 3) {
+            if (!entry[kCell][2].is_string()) return r.fail("垂直对齐不是名字");
+            if (!cellVAlignFromName(entry[kCell][2].get<std::string>(), &n->cell.v_align)) {
+                return r.fail("不认识的垂直对齐名");
+            }
+        }
     }
+    if (!readRow(entry, kRow, &n->row)) return r.fail("行记录读不出来");
     if (entry.contains(kText)) {
         if (!isText(n->kind)) return r.fail("非文本节点带文本");
         std::vector<uint32_t> cps;

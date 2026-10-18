@@ -719,6 +719,7 @@ void checkInvariantRuleSet() {
         "身份.节点 ID 唯一且索引自洽",
         "身份.节点种类在声明范围内",
         "表格.跨度之和相等、无重叠、无空洞、有列定义则数据行不许合并",
+        "表格.标题行是从第 0 行起的连续前缀",
         "结构.原子的尺寸可定",
     };
     int missing = 0;
@@ -4424,6 +4425,7 @@ void checkTableGrid() {
  * 写成前缀会被当成"没报出来"。
  */
 constexpr char kTableRule[] = "表格.跨度之和相等、无重叠、无空洞、有列定义则数据行不许合并";
+constexpr char kTableHeaderRule[] = "表格.标题行是从第 0 行起的连续前缀";
 
 /**
  * 一批步骤提交进撤销栈，返回提交是否成功。
@@ -4671,16 +4673,16 @@ void checkTableOps() {
 
         SetTableCellSpan zero;
         zero.id = cell;
-        zero.span = CellSpan{1, 0};
-        zero.before = CellSpan{1, 1};
+        zero.span = CellSpec{1, 0};
+        zero.before = CellSpec{1, 1};
         const StepResult r0 = canApply(tree, Step{zero});
         expectTrue(!r0.ok && r0.error.find("至少是 1") != std::string::npos,
                    "1.7 / 改跨度拒绝：跨度小于 1（" + r0.error + "）");
 
         SetTableCellSpan stale;
         stale.id = cell;
-        stale.span = CellSpan{1, 2};
-        stale.before = CellSpan{2, 1};
+        stale.span = CellSpec{1, 2};
+        stale.before = CellSpec{2, 1};
         const StepResult r1 = canApply(tree, Step{stale});
         expectTrue(!r1.ok && r1.error.find("原值不符") != std::string::npos,
                    "1.7 / 改跨度拒绝：原值不符（" + r1.error + "）");
@@ -4701,7 +4703,7 @@ void checkTableColumnDefs() {
     {
         NodeTree tree = makePlainTable(3, 3);
         const NodeId table = tableOf(tree);
-        tree.find(table)->table.header_rows = 1;
+        tree.find(tree.find(table)->children[0]->id)->row.is_header = true;
         tree.find(table)->table.columns.resize(3);
         expectClean(tree, "1.7 / 列定义：三列定义加三行不合并的表，不变量全绿");
     }
@@ -4709,7 +4711,7 @@ void checkTableColumnDefs() {
     {
         NodeTree tree = makePlainTable(2, 2);
         const NodeId table = tableOf(tree);
-        tree.find(table)->table.header_rows = 1;
+        tree.find(tree.find(table)->children[0]->id)->row.is_header = true;
         tree.find(table)->table.columns.resize(2);
         // 第二行（数据行）第一个格子跨两列 —— 于是"第 i 列"不再是确定位置。
         const NodeId data_row = tree.find(table)->children[1]->id;
@@ -4723,9 +4725,9 @@ void checkTableColumnDefs() {
     {
         NodeTree tree = makePlainTable(2, 2);
         const NodeId table = tableOf(tree);
-        tree.find(table)->table.header_rows = 1;
         tree.find(table)->table.columns.resize(2);
         const NodeId head_row = tree.find(table)->children[0]->id;
+        tree.find(head_row)->row.is_header = true;
         tree.find(head_row)->children[0]->cell.col_span = 2;
         tree.eraseChild(head_row, 1);
         expectClean(tree, "1.7 / 列定义：表头行跨列合并不受这条限制");
@@ -4748,6 +4750,77 @@ void checkTableColumnDefs() {
         const InvariantReport rep = checkInvariants(tree);
         expectTrue(!rep.ok() && reported(rep, kTableRule),
                    "1.7 / 网格：行没有被完整覆盖时不变量报出来");
+    }
+}
+
+/**
+ * 1.7（阶段 5 第一刀）：表格 / 行 / 单元格的属性记录。
+ *
+ * 三组：默认值就是 Word 的默认；标题行是逐行开关而"几个"是派生量；行的三个开关与行高
+ * 各自只影响自己那一处（不变量、派生量）。
+ */
+void checkTableAttributes() {
+    // 默认值：普通表格不需要任何声明，行与格也一样。
+    {
+        NodeTree tree = makePlainTable(2, 2);
+        const NodeId table = tableOf(tree);
+        const Node* t = tree.find(table);
+        expectTrue(t->table.width == Length{} && t->table.align == Align::Start,
+                   "阶段 5 / 表格默认：宽度自动（撑满可用宽度）、起点对齐");
+        const NodeId row = t->children[0]->id;
+        expectTrue(tree.find(row)->row == RowSpec{} && tree.find(row)->row.can_split_by_page &&
+                       !tree.find(row)->row.is_header && !tree.find(row)->row.page_break_before &&
+                       tree.find(row)->row.height_rule == HeightRule::Auto,
+                   "阶段 5 / 行默认：允许跨页断行、不是标题行、不强制分页、行高自动");
+        const NodeId cell = t->children[0]->children[0]->id;
+        expectTrue(tree.find(cell)->cell.v_align == CellVAlign::Top,
+                   "阶段 5 / 单元格默认：顶端对齐");
+    }
+    // 标题行是逐行开关，"几个"是数出来的前缀，不是存下来的字段。
+    {
+        NodeTree tree = makePlainTable(3, 2);
+        const NodeId table = tableOf(tree);
+        expectTrue(headerRowCount(tree, table) == 0, "阶段 5 / headerRowCount：一行都没标时是 0");
+        tree.find(tree.find(table)->children[0]->id)->row.is_header = true;
+        expectTrue(headerRowCount(tree, table) == 1, "阶段 5 / headerRowCount：只标第一行是 1");
+        tree.find(tree.find(table)->children[1]->id)->row.is_header = true;
+        expectTrue(headerRowCount(tree, table) == 2, "阶段 5 / headerRowCount：连着标两行是 2");
+        expectClean(tree, "阶段 5 / 标题行：从第 0 行起连续两行，不变量全绿");
+    }
+    // 前缀断开：派生量只数到 0（它不负责纠正），坏形状由不变量报。
+    {
+        NodeTree tree = makePlainTable(3, 2);
+        const NodeId table = tableOf(tree);
+        tree.find(tree.find(table)->children[1]->id)->row.is_header = true;
+        expectTrue(headerRowCount(tree, table) == 0,
+                   "阶段 5 / headerRowCount：第 0 行不是标题就只数到 0");
+        const InvariantReport rep = checkInvariants(tree);
+        expectTrue(!rep.ok() && reported(rep, kTableHeaderRule),
+                   "阶段 5 / 标题行：第 1 行标了而第 0 行没标 —— 不变量报出来");
+    }
+    // 反向一半：把断开的那一行改回来，同一条不变量必须转绿（否则"报出来"可能是别的原因）。
+    {
+        NodeTree tree = makePlainTable(3, 2);
+        const NodeId table = tableOf(tree);
+        tree.find(tree.find(table)->children[0]->id)->row.is_header = true;
+        tree.find(tree.find(table)->children[1]->id)->row.is_header = true;
+        tree.find(tree.find(table)->children[2]->id)->row.is_header = false;
+        expectTrue(headerRowCount(tree, table) == 2 && checkInvariants(tree).ok(),
+                   "阶段 5 / 标题行：补上第 0 行之后同一条规则转绿");
+    }
+    // 行高与规则是两件事：Exact 带一个非零值，序列化的往返由下面的整份文档判据覆盖。
+    {
+        NodeTree tree = makePlainTable(1, 2);
+        const NodeId table = tableOf(tree);
+        const NodeId row = tree.find(table)->children[0]->id;
+        tree.find(row)->row.height = Length::abs(ptToEmu(30.0));
+        tree.find(row)->row.height_rule = HeightRule::Exact;
+        expectTrue(tree.find(row)->row.height != Length{} &&
+                       tree.find(row)->row.height_rule == HeightRule::Exact,
+                   "阶段 5 / 行高：值与规则是两个字段（不靠负数编码固定值）");
+        expectTrue(std::string(heightRuleName(HeightRule::AtLeast)) == "atLeast" &&
+                       std::string(cellVAlignName(CellVAlign::Bottom)) == "bottom",
+                   "阶段 5 / 枚举名：行高规则与垂直对齐各有自己的文本形式");
     }
 }
 
@@ -5390,6 +5463,14 @@ std::string controlKey(const ControlSpec& c) {
     return s;
 }
 
+std::string rowKey(const RowSpec& r) {
+    std::string s = std::string(r.can_split_by_page ? "1" : "0") + "," +
+                    std::string(r.is_header ? "1" : "0") + "," +
+                    std::string(r.page_break_before ? "1" : "0");
+    s += "," + printLength(r.height) + "," + heightRuleName(r.height_rule);
+    return s;
+}
+
 std::string tableKey(const TableSpec& t) {
     std::string s;
     for (const TableColumn& c : t.columns) {
@@ -5398,7 +5479,7 @@ std::string tableKey(const TableSpec& t) {
     }
     s += "|grid=";
     for (const Length& l : t.grid_cols) s += printLength(l) + ";";
-    s += "|hr=" + std::to_string(t.header_rows);
+    s += "|w=" + printLength(t.width) + "|al=" + alignName(t.align);
     return s;
 }
 
@@ -5439,7 +5520,9 @@ std::string fullNodeKey(const Node& n) {
     s += "|p=" + paraKey(n.para);
     s += "|m=" + marksKey(n.marks);
     s += "|c=" + controlKey(n.control);
-    s += "|cs=" + std::to_string(n.cell.row_span) + "x" + std::to_string(n.cell.col_span);
+    s += "|cs=" + std::to_string(n.cell.row_span) + "x" + std::to_string(n.cell.col_span) + "," +
+         cellVAlignName(n.cell.v_align);
+    s += "|rw=" + rowKey(n.row);
     s += "|tb=" + tableKey(n.table);
     s += "|fd=" + std::string(fieldKindName(n.field.kind)) + "," + n.field.name + "," +
          n.field.cache;
@@ -5573,7 +5656,8 @@ NodeTree makeRichDocument() {
     // 表格：两行两列，左上角纵向合并两行 —— 跨度非默认值，网格仍然成立。
     const NodeId table = tree.appendChild(s1, NodeKind::Table);
     TableSpec& ts = tree.find(table)->table;
-    ts.header_rows = 1;
+    ts.width = Length::percent(3, 4);
+    ts.align = Align::Center;
     ts.columns.resize(2);
     ts.columns[0].field_ref = "col_a";
     ts.columns[0].title = "甲";
@@ -5583,12 +5667,18 @@ NodeTree makeRichDocument() {
     ts.columns[0].align = Align::End;
     ts.grid_cols = std::vector<Length>{Length::abs(cmToEmu(3.0)), Length::chars(6.0)};
     const NodeId row0 = tree.appendChild(table, NodeKind::TableRow);
+    tree.find(row0)->row.is_header = true;
+    tree.find(row0)->row.height = Length::abs(ptToEmu(24.0));
+    tree.find(row0)->row.height_rule = HeightRule::AtLeast;
     const NodeId a0 = tree.appendChild(row0, NodeKind::TableCell);
     tree.find(a0)->cell.row_span = 2;
+    tree.find(a0)->cell.v_align = CellVAlign::Center;
     tree.setText(tree.appendChild(a0, NodeKind::TextRun), cps({0x31}));
     const NodeId a1 = tree.appendChild(row0, NodeKind::TableCell);
     tree.setText(tree.appendChild(a1, NodeKind::TextRun), cps({0x32}));
     const NodeId row1 = tree.appendChild(table, NodeKind::TableRow);
+    tree.find(row1)->row.can_split_by_page = false;
+    tree.find(row1)->row.page_break_before = true;
     const NodeId b0 = tree.appendChild(row1, NodeKind::TableCell);
     tree.setText(tree.appendChild(b0, NodeKind::TextRun), cps({0x33}));
     tree.appendChild(s1, NodeKind::ParagraphMark);
@@ -6053,6 +6143,7 @@ int main() {
     checkTableGrid();
     checkTableOps();
     checkTableColumnDefs();
+    checkTableAttributes();
 
     std::printf("  --- 1.8：域、页眉页脚、分节 ---\n");
     checkFieldValue();

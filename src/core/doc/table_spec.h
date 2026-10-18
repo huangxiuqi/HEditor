@@ -24,15 +24,77 @@
 namespace heditor {
 
 /**
- * 单元格跨度。被合并掉的格位在模型里不存在，所以跨度就是"这一格覆盖多少格位"的全部信息。
+ * 单元格内文字的垂直对齐（Word 的 w:vAlign，挂在 w:tcPr 上而不是样式里）。
  *
- * 两个都至少是 1（0 或负数不是可表达的跨度，步骤层会拒绝）。
+ * 刻意另立一个枚举，不借节的 VerticalAlign：那个有 Both（两端对齐）这一档，而单元格没有
+ * 这个取值。借一个值域更宽的枚举等于让非法值有地方可待。
  */
-struct CellSpan {
+enum class CellVAlign : uint8_t {
+    Top,
+    Center,
+    Bottom,
+};
+
+/**
+ * 行高的规则（Word 的 trHeight）。参照项目用一个符号编码三档（0 自动 / 正数不小于 /
+ * 负数固定），这里拆成"值 + 规则"两个字段：比符号可读，也不必约定负数表示固定。
+ */
+enum class HeightRule : uint8_t {
+    Auto,     // 自动：按内容
+    AtLeast,  // 不小于：内容多了会长高
+    Exact,    // 固定：超出裁切
+};
+
+/**
+ * 单元格的记录。跨度是"这一格覆盖多少格位"的全部信息 —— 被合并掉的格位在模型里不存在。
+ *
+ * 两个跨度都至少是 1（0 或负数不是可表达的跨度，步骤层会拒绝）。
+ */
+struct CellSpec {
     int row_span = 1;
     int col_span = 1;
 
-    bool operator==(const CellSpan& o) const = default;
+    /**
+     * 格内垂直对齐。默认顶端，与 Word 的默认一致。
+     */
+    CellVAlign v_align = CellVAlign::Top;
+
+    bool operator==(const CellSpec& o) const = default;
+};
+
+/**
+ * 一行自己的记录，挂在 TableRow 上（与 CellSpec 对 TableCell 的关系同构）。
+ *
+ * 三个开关都是逐行属性 —— Word 里也都在 w:trPr 上：允许跨页断行（w:cantSplit 取反）、
+ * 标题行重复（w:tblHeader）、行前分页（w:pageBreakBefore）。行高（w:trHeight）同样在这里，
+ * 病历里那种"一大格用来写字"的表全靠它撑开。
+ */
+struct RowSpec {
+    /**
+     * 允许被分页线切开。默认允许（Word 的 cantSplit 默认是假）。
+     */
+    bool can_split_by_page = true;
+
+    /**
+     * 标题行：表格跨页时在每页顶端重复这一行。默认不是。
+     *
+     * 它必须满足"从第 0 行起的连续前缀"这条不变量 —— 重复哪几行只有连续前缀才有意义。
+     */
+    bool is_header = false;
+
+    /**
+     * 行前强制分页，效果同分页符。默认不是。
+     */
+    bool page_break_before = false;
+
+    /**
+     * 行高。height_rule 为 Auto 时无意义（Length 的 Auto 是同一个意思，两处取一处即可，
+     * 判据要求它们不打架）。
+     */
+    Length height;
+    HeightRule height_rule = HeightRule::Auto;
+
+    bool operator==(const RowSpec& o) const = default;
 };
 
 /**
@@ -65,8 +127,9 @@ struct TableColumn {
 /**
  * 表格自己的记录。默认为空 —— 普通表格不需要任何声明，列由跨度派生（第九节）。
  *
- * header_rows 是"前几行是表头行"。它必须显式写出来而不能靠约定"第一行就是表头"：有了列定义
- * 之后，数据行不允许合并而表头行不受限，这时"哪几行是数据行"就成了会影响合法性的判据。
+ * 表头不再是一个"前几行"的数字：它改成逐行开关（RowSpec::is_header），于是"重复哪几行"
+ * 由不变量约束成从第 0 行起的连续前缀，"几个标题行"降为派生量（headerRowCount）。
+ * 这样"数据行不许合并"那条约束可以直接说"非标题行"，不再依赖"表头一定在前面"这个前提。
  */
 struct TableSpec {
     /**
@@ -82,9 +145,14 @@ struct TableSpec {
     std::vector<Length> grid_cols;
 
     /**
-     * 表头行的行数（从第 0 行起算）。0 表示没有表头行，于是每一行都是数据行。
+     * 表格宽度。Auto 表示撑满可用宽度（Word 默认）；Percent 相对内容区；Abs 是固定值。
      */
-    int header_rows = 0;
+    Length width;
+
+    /**
+     * 表格在内容区里的水平位置。只在宽度小于可用宽度时才有意义。
+     */
+    Align align = Align::Start;
 
     /**
      * 这张表是否带列定义。带列定义就有"数据行不许合并"这条约束。
@@ -96,5 +164,14 @@ struct TableSpec {
      */
     bool operator==(const TableSpec& o) const = default;
 };
+
+/**
+ * 行高规则与单元格垂直对齐的文本形式。序列化与宿主共用同一份名字，
+ * 两边各写一遍必然分叉（一个写 "atLeast"、另一个写 "at_least"）。
+ */
+const char* heightRuleName(HeightRule rule);
+bool heightRuleFromName(const std::string& name, HeightRule* out);
+const char* cellVAlignName(CellVAlign align);
+bool cellVAlignFromName(const std::string& name, CellVAlign* out);
 
 }  // namespace heditor

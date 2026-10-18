@@ -38,7 +38,8 @@ struct NodeSpec {
     std::string styleRef;        // 仅段落标记与文本节点
     CharFormat marks;            // 仅文本节点
     ControlSpec control;         // 仅内容控件
-    CellSpan cell;               // 仅单元格
+    CellSpec cell;               // 仅单元格
+    RowSpec row;                 // 仅表格行
     TableSpec table;             // 仅表格
     FieldSpec field;             // 仅域
     std::vector<NodeSpec> children;

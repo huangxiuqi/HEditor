@@ -334,6 +334,7 @@ void NodeTree::assignFrom(const NodeTree& other) {
         dst->marks = src->marks;
         dst->control = src->control;
         dst->cell = src->cell;
+        dst->row = src->row;
         dst->table = src->table;
         dst->field = src->field;
         dst->image = src->image;
