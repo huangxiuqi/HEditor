@@ -8692,6 +8692,23 @@ int main() {
                        "第二行在第一行下面");
         }
 
+        // 命中测试：点第二格的字落在第 1 段 —— 格内的定位靠行盒坐标，不需要表格特例。
+        //   点在两行之间的空隙上时，落点必须落在相邻两行之一，不许跑到表格之外。
+        {
+            const LineBox& lb2 = lay.lines[1];
+            TextPos got;
+            const bool hit = e45.hitTestPt(lb2.inline_origin_pt + 1.0f,
+                                           lb2.block_lo_pt + 2.0f, &got);
+            expectTrue(hit && got.para == 1, "点第二格的字命中第 1 段（实际段 " +
+                                                 std::to_string(hit ? got.para : -1) + "）");
+            TextPos between;
+            const float gap_y = (lay.lines[1].block_hi_pt + lay.lines[2].block_lo_pt) * 0.5f;
+            const bool hit2 = e45.hitTestPt(lay.lines[1].inline_origin_pt + 1.0f, gap_y, &between);
+            expectTrue(hit2 && (between.para == 1 || between.para == 2),
+                       "点两行之间的空隙落在相邻两行之一（实际段 " +
+                           std::to_string(hit2 ? between.para : -1) + "）");
+        }
+
         // 格内编辑：增量被禁（有表格），文本必须落进第二格那一段。
         e45.setCaret(1, 1);
         expectTrue(e45.typeTextAndRender("Z"), "在表格第二格打字");

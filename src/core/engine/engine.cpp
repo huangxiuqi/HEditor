@@ -1324,6 +1324,7 @@ bool EditorEngine::hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* 
     const bool cont = cfg_.page.continuous;
     const LineBox* best = nullptr;
     float best_d = 1e30f;
+    float best_dx = 1e30f;
     for (const LineBox& lb : layout_.lines) {
         float bp = 0.0f;
         float lo = 0.0f;
@@ -1344,8 +1345,17 @@ bool EditorEngine::hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* 
             hi = lb.block_hi_pt;
         }
         const float d = (bp < lo) ? (lo - bp) : (bp > hi ? bp - hi : 0.0f);
-        if (d < best_d) {
+        // 块轴距离并列时用行内轴距离定夺。表格让"同一块轴位置上有多个行盒"成为常态
+        //   （一行的几个格在同一个 y 上），只按块轴比会一律选中先出现的那一格 ——
+        //   表象是"点第二格的字，光标跳到第一格"。正文里同一 y 不会有两条行盒，
+        //   所以这一条在无表格时不会改变任何选择。
+        const float a0 = lb.inline_origin_pt;
+        const float a1 = lb.inline_origin_pt + lb.inline_end_pt;
+        const float ipos = lb.vertical ? y_pt_doc : x_pt_doc;
+        const float dx = (ipos < a0) ? (a0 - ipos) : (ipos > a1 ? ipos - a1 : 0.0f);
+        if (d < best_d - 0.01f || (std::fabs(d - best_d) <= 0.01f && dx < best_dx)) {
             best_d = d;
+            best_dx = dx;
             best = &lb;
         }
     }
