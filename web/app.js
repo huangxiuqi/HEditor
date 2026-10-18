@@ -54,6 +54,7 @@ const SCENARIOS = [
   { id: 7, label: '长文档 200 段（增量排版）' },
   { id: 8, label: '真病历样例（8 例，读文件）' },
   { id: 9, label: '行内原子：图片 / 公式（占位框）' },
+  { id: 10, label: '表格（格线 / 合并格 / 行高）' },
 ];
 
 const DEFAULT_SCENARIO = 6;   // 直接进可编辑场景，省得还要先切一下
