@@ -26,6 +26,18 @@ struct Rect {
     float x = 0.0f, y = 0.0f, w = 0.0f, h = 0.0f;
 };
 
+/**
+ * 页号加页内矩形（页面坐标，磅）。
+ *
+ * 为什么从引擎里提出来：光标矩形、选区矩形、控件矩形都是这个形状，而光标与选区那一层
+ * （CaretResolver）不该反过来依赖引擎头。提成公共类型之后，Engine 侧保留一个同名别名，
+ * 既有的 EditorEngine::PageRect 调用点不必动。
+ */
+struct PageRect {
+    int page = 0;
+    Rect r_pt{};
+};
+
 inline float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
 }  // namespace heditor

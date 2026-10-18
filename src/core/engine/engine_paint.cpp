@@ -420,7 +420,7 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
     auto computeBand = [&](int page) -> int {
         int la = 0;
         int lb = 0;
-        linesOnPage(page, &la, &lb);
+        caret_.linesOnPage(page, &la, &lb);
         for (int k = la; k <= lb; ++k) {
             if (layout_.lines[static_cast<size_t>(k)].vertical) return 0;
         }
@@ -784,7 +784,7 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
     edit_stats_.caret_side = caretSide();
     edit_stats_.caret_vertical = caretVertical();
     edit_stats_.caret_block_reversed = caretBlockReversed();
-    edit_stats_.caret_page = caretPage();
+    edit_stats_.caret_page = caret_.caretPage();
     edit_stats_.caret_visible = (caret_visible_ && cr.w > 0.0f);
     edit_stats_.caret_x_px = static_cast<int>(cr.x);
     edit_stats_.caret_y_px = static_cast<int>(cr.y);
@@ -895,9 +895,9 @@ void EditorEngine::drawControlMarks(int first_page, int count) {
     int k_end = n_lines - 1;
     if (count > 0) {
         int lo = 0, hi = -1;
-        linesOnPage(first_page, &lo, &hi);
+        caret_.linesOnPage(first_page, &lo, &hi);
         int lo2 = 0, hi2 = -1;
-        linesOnPage(first_page + count - 1, &lo2, &hi2);
+        caret_.linesOnPage(first_page + count - 1, &lo2, &hi2);
         // 首页没有行时 lo 已经指向"页号更大的第一行"；末页没有行时取相邻页边界减一。
         // 这两处的多取/少取都由下面逐行判页号兜住 —— 判据是页号，不是下标。
         k_begin = lo;

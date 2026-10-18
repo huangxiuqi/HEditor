@@ -101,7 +101,7 @@ std::string EditorEngine::describeCaret() const {
     os << "caret: para=" << caret().para << " offset(段内码点)=" << caret().offset
        << " 全文下标=" << edit_stats_.caret_index << " 全文码点=" << documentCodepoints() << "\n";
 
-    const LineBox* lb = findLineFor(caret());
+    const LineBox* lb = caret_.findLineFor(caret());
     if (!lb) {
         os << "  找不到行盒（该段没有可排内容）\n";
         return os.str();

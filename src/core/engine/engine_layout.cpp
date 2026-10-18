@@ -216,7 +216,7 @@ void EditorEngine::markPagesChangedFrom(int first_page) {
     line_fp_new_.resize(static_cast<size_t>(n_lines), kFnvBasis);
     int lo = 0;
     int hi = 0;
-    linesOnPage(first, &lo, &hi);
+    caret_.linesOnPage(first, &lo, &hi);
     (void)hi;
     for (int k = lo; k < n_lines; ++k) {
         const uint64_t base =
@@ -234,25 +234,6 @@ int EditorEngine::firstPageOfParagraph(int p) const {
     if (pi.line_begin < 0 || pi.line_begin >= pi.line_end) return -1;
     if (pi.line_begin >= static_cast<int>(layout_.lines.size())) return -1;
     return layout_.lines[static_cast<size_t>(pi.line_begin)].page;
-}
-
-/**
- * 第 page 页上的行下标范围（闭区间）。这一页没有行时把 hi 置成 lo-1。
- * 行数组按页单调（与字形数组同一条不变式），所以两端都能二分。
- */
-void EditorEngine::linesOnPage(int page, int* lo, int* hi) const {
-    const std::vector<LineBox>& ls = layout_.lines;
-    const auto b = std::lower_bound(ls.begin(), ls.end(), page,
-                                    [](const LineBox& l, int p) { return l.page < p; });
-    if (b == ls.end() || b->page != page) {
-        *lo = static_cast<int>(b - ls.begin());
-        *hi = *lo - 1;
-        return;
-    }
-    *lo = static_cast<int>(b - ls.begin());
-    int i = *lo;
-    while (i < static_cast<int>(ls.size()) && ls[static_cast<size_t>(i)].page == page) ++i;
-    *hi = i - 1;
 }
 
 /**
@@ -316,6 +297,8 @@ void EditorEngine::setFrameSlots(int n) {
 
 void EditorEngine::relayout() {
     const auto t0 = Clock::now();
+    // 视图先摆好：下面第一件事就是夹光标，而它读的是视图（地址稳定，摆一次就够）。
+    refreshCaretView();
 
     // 顺序有讲究：先夹光标、再写对象表 —— 因为"哪些字段要显示括号"在 Focused 档下
     //   由光标位置决定（见 bracketedControls），表写完才是排版的输入。
@@ -323,15 +306,15 @@ void EditorEngine::relayout() {
     //   这里只夹数值范围，不吸附簇：簇吸附需要簇表，而此刻尚未排版；用上一轮的簇表
     //     会把光标拉回旧簇边界，表现为"敲字后光标差一个位置"。簇吸附放在排版之后。
     if (!blocks_.empty()) {
-        int para = caretPara();
+        int para = caret_.caretPara();
         if (para >= static_cast<int>(blocks_.size()))
             para = static_cast<int>(blocks_.size()) - 1;
         const size_t len = blocks_[static_cast<size_t>(para)].cp_text.size();
-        const BracketCounts bc = bracketCountsAt(para, len);
+        const CaretResolver::BracketCounts bc = caret_.bracketCountsAt(para, len);
         const int span = static_cast<int>(len) + bc.before + bc.closes + bc.opens;
-        if (caretRel() > span) setCaretRel(para, span);
+        if (caret_.caretRel() > span) caret_.setCaretRel(para, span);
     } else {
-        setCaretRel(0, 0);
+        caret_.setCaretRel(0, 0);
     }
 
     // 把要显示括号的那些字段的两个边界写进块流的行内对象表：排版据此插入
@@ -438,7 +421,7 @@ void EditorEngine::relayout() {
     //   否则按"最内层"重投影一次。
     if (!blocks_.empty()) {
         const TextPos cp = caret();
-        const size_t snapped = snapToCluster(cp.para, cp.offset);
+        const size_t snapped = caret_.snapToCluster(cp.para, cp.offset);
         if (snapped != cp.offset) setCaretByText(TextPos{cp.para, snapped});
     }
 

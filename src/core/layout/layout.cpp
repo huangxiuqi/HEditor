@@ -860,41 +860,40 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
 
         } else {
             // 竖排
-            // 竖排块占满本页剩余高度；列宽由 line_factor 决定。
-            //   列宽取整段最大字号（而不是块级字号）：竖排的列位是等宽推进的（见 colCenterX），
-            //   逐列变宽要连列序与页内列数一起重算，那是另一件事 —— 这里先保证"整段一套、
-            //   按段内最大字号"，于是混排字号不会把大字挤出列外。
-            const float col_w = para_metric.size_pt * b.line_factor;
+            // 列长固定 = 内容高度（一列到底），列宽按这一列自己的最大字号算 —— 混排字号下
+            //   小字列不该占大字列的宽度（与 CSS 竖排一致：列宽由该列的行高决定）。
+            //   于是列位由前缀和推进而不是乘法：中日（RTL）从右边缘往左推，蒙文（LTR）
+            //   从左边缘往右推，两侧各记一个"下一列的边缘"。
+            //   列宽要等这一列的内容定下来才知道，而列长与列宽无关（列长就是内容高度），
+            //   所以"先取内容、再算宽度、再落列位"没有循环依赖。
+            //   col_w_max 是列宽的上界，只用于分页估计。
+            const float col_w_max = para_metric.size_pt * b.line_factor;
             float region_top = cursor_y;
             // 分页下要判"本页还放得下两条列位吗"；连页下没有页底，横带是新开的。
-            if (!cont && region_top + col_w * 2.0f > cy + ch) {
+            if (!cont && region_top + col_w_max * 2.0f > cy + ch) {
                 ++page_index;
                 cursor_y = cy;
                 region_top = cy;
             }
 
+            const bool rtl = b.wm.isBlockReversed();
             int col = 0;
             float pen_y = region_top;
+            float next_edge = rtl ? (cx + cw) : cx;  // 下一列的起始边缘
+            float col_w = col_w_max;                 // 本列宽度，进循环后按内容改写
 
-            // 列的中线 x。蒙文（LTR 列序）从左边开始排；中日（RTL 列序）从右边开始排。
-            auto colCenterX = [&](int c) -> float {
-                if (b.wm.isBlockReversed()) return cx + cw - (static_cast<float>(c) + 0.5f) * col_w;
-                return cx + (static_cast<float>(c) + 0.5f) * col_w;
-            };
-            // 进入下一列；列位用尽则另起一条横带（分页下就是翻页）。
+            // 换一条横带：列位用尽则另起一条（分页下就是翻页）。
             //   连页下横带的长度取内容高度 ch（竖排的列长本来就是固定的一列），
             //   下一条带排在它下面 —— 与分页下"另起一页"是同一个位置关系。
-            auto nextColumn = [&]() {
-                ++col;
-                if ((static_cast<float>(col) + 1.0f) * col_w > cw + 0.01f) {
-                    if (cont) {
-                        region_top += ch;
-                    } else {
-                        ++page_index;
-                        region_top = cy;
-                    }
-                    col = 0;
+            auto nextBand = [&]() {
+                if (cont) {
+                    region_top += ch;
+                } else {
+                    ++page_index;
+                    region_top = cy;
                 }
+                col = 0;
+                next_edge = rtl ? (cx + cw) : cx;
                 pen_y = region_top;
             };
 
@@ -905,25 +904,51 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
             //   笔的定位：v 轴（-descent … +ascender）现在是水平方向，
             //   要让字身在列里居中 → 基线 x = 列中线 - (ascender - descent)/2。
             const bool sideways = bs.st.sideways;
-            const float side_asc = para_metric.ascent_pt;
-            const float side_desc = para_metric.descent_pt;
 
             size_t start = 0;
             while (start < bs.clusters.size()) {
                 float avail = (cy + ch) - pen_y;
                 if (avail < para_metric.size_pt) {
-                    nextColumn();
+                    nextBand();
                     avail = (cy + ch) - pen_y;
                 }
 
                 const LineSlice slice = takeLine(bs.cluster_adv_pt, bs.break_after, start, avail);
 
+                // 本列的列度量：取本列所有簇所在 run 的最大字号 / ascent / descent。
+                //   列宽与侧倒的笔位都由它定；只有一个 run 时这就是块级那套值。
+                float col_size = 0.0f;
+                float col_asc = 0.0f;
+                float col_desc = 0.0f;
+                for (size_t i = slice.begin; i < slice.end; ++i) {
+                    col_size = std::max(col_size, cluster_metric[i].size_pt);
+                    col_asc = std::max(col_asc, cluster_metric[i].ascent_pt);
+                    col_desc = std::max(col_desc, cluster_metric[i].descent_pt);
+                }
+                if (col_size <= 0.0f) {
+                    col_size = b.size_pt;
+                    col_asc = bs.ascent_pt;
+                    col_desc = bs.descent_pt;
+                }
+                col_w = col_size * b.line_factor;
+
+                // 本列在剩余宽度里放不下就换一条带。这一步只能放在"这一列的内容定下来
+                //   之后"：列宽是逐列算出来的，事先不知道。列长与列宽无关，换带之后同一段
+                //   内容仍然装得下（avail 不变），所以不必重新取。
+                //   第一列例外：放不下也照排，否则永远排不进去。
+                const float edge_after = rtl ? (next_edge - col_w) : (next_edge + col_w);
+                const bool overflow =
+                    rtl ? (edge_after < cx - 0.01f) : (edge_after > cx + cw + 0.01f);
+                if (col > 0 && overflow) nextBand();
+
+                const float col_center =
+                    rtl ? (next_edge - col_w * 0.5f) : (next_edge + col_w * 0.5f);
                 // 列内横轴的起始笔位：直立竖排 = 列心；侧倒 = 列心减去半个字身
-                // （理由见下面那段"笔的定位"注释）。
+                // （理由见上面那段"笔的定位"注释）。
                 // 名字里带 0：它只是"这一列的起点"，字形放置时那个 gx 会往前推进
                 //   （直立竖排下每画完一个字形 gx += x_advance）。
                 const float gx0 =
-                    sideways ? (colCenterX(col) - (side_asc - side_desc) * 0.5f) : colCenterX(col);
+                    sideways ? (col_center - (col_asc - col_desc) * 0.5f) : col_center;
 
                 // 列盒（竖排下的行盒）
                 LineBox lb;
@@ -932,9 +957,9 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
                 lb.page = slabOfY(pen_y);
                 lb.vertical = true;
                 lb.sideways = sideways;
-                lb.size_pt = para_metric.size_pt;
-                lb.block_lo_pt = colCenterX(col) - col_w * 0.5f;
-                lb.block_hi_pt = colCenterX(col) + col_w * 0.5f;
+                lb.size_pt = col_size;
+                lb.block_lo_pt = col_center - col_w * 0.5f;
+                lb.block_hi_pt = col_center + col_w * 0.5f;
                 lb.inline_origin_pt = locY(lb.page, pen_y);
                 // 画括号用：字体 + 竖排下的列内横轴起始笔位。
                 lb.bracket_font = bs.primary;
@@ -1005,7 +1030,11 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
                 }
 
                 start = slice.end;
-                if (start < bs.clusters.size()) nextColumn();
+                if (start < bs.clusters.size()) {
+                    next_edge = rtl ? (next_edge - col_w) : (next_edge + col_w);
+                    ++col;
+                    pen_y = region_top;
+                }
             }
             line_total += col + 1;
             // 竖排块在分页下吃掉本页剩余高度（后续块另起一页）；连页下它占的是

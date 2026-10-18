@@ -24,6 +24,7 @@
 #include "core/doc/edit_mode.h"
 #include "core/doc/flow.h"
 #include "core/doc/transaction.h"
+#include "core/engine/caret.h"
 #include "core/engine/engine_config.h"
 #include "core/engine/engine_stats.h"
 #include "core/layout/layout.h"
@@ -228,11 +229,11 @@ public:
      * 下面这几个入口把它按选区露出来。空选区（两端重合）就是光标 —— 所以
      * hasSelection() 为假时 caret() 给出的就是它的位置，两者不是两套状态。
      */
-    Range selection() const { return selection_; }
+    Range selection() const { return caret_.selection(); }
     /**
      * 选区非空：两端不重合。它判的是"有没有选中东西"，不是"光标在不在"。
      */
-    bool hasSelection() const { return !selection_.empty(); }
+    bool hasSelection() const { return caret_.hasSelection(); }
     /**
      * 程序化设选区（宿主恢复、探针摆位）。两端各自夹到文档流的合法范围内。
      * 传空区间就等于定位。
@@ -282,7 +283,7 @@ public:
      * 同一待遇（见 vertical_goal_valid_）。写完字之后光标本来就该贴在前一个字后面，
      * 而那个位置在上一行的末尾。
      */
-    int caretLineAffinity() const { return caret_line_aff_; }
+    int caretLineAffinity() const { return caret_.lineAffinity(); }
     /**
      * 光标是否落在竖排的段里（宿主据此把方向键按物理方向映射，见 keyToOp）。
      */
@@ -515,13 +516,10 @@ public:
     /**
      * 页面坐标下的一个矩形（页号 + 页面坐标磅矩形）。
      *
-     * 控件矩形与选区矩形共用它：两者都可能跨行/跨页，"一个矩形"只在单行短内容上
-     * 成立，所以接口从第一天就按"多个"来设计，免得以后改签名。
+     * 定义已提到 utils/types.h：光标与选区那一层（CaretResolver）也要用它，
+     * 而那一层不该反过来依赖引擎头。这里留一个同名别名，既有调用点不必动。
      */
-    struct PageRect {
-        int page = 0;
-        Rect r_pt{};
-    };
+    using PageRect = heditor::PageRect;
     /**
      * 控件矩形的原名。改名只是把"页号 + 页面矩形"从控件里提出来，调用点不必动。
      */
@@ -974,7 +972,6 @@ private:
      * 段内相对流位置 → 全局流位置（夹到本段跨度内）。setCaretRel 与重编译落基共用 ——
      * 夹取规则只此一处，两处各写一份就会出现"落基时允许而写入时不允许"这种半截宽度。
      */
-    FlowPos flowForRel(int para, int rel) const;
 
     /**
      * 落点处应当沿用的字符格式：取紧挨在它左边的那个文本节点的标记与样式引用。
@@ -997,26 +994,14 @@ private:
      * 块内流偏移 → 段内码点偏移（flowToTextPos 的其中一段）。落在边界位上时归到那个
      * 边界锚着的码点 —— 于是桥的两端互逆，不会因为中间隔着括号而越走越偏。
      */
-    int cpOffsetInBlock(int para, int rel) const;
 
     /**
      * 把偏移吸附到簇边界（用当前 layout 的簇表）
      */
-    size_t snapToCluster(int para, size_t offset) const;
 
-    /**
-     * 某偏移上的边界括号统计。侧别与流位置都从它推出来（两者是同一件事的两种说法）。
-     */
-    struct BracketCounts {
-        int closes = 0;  // 闭括号数 = "所有控件之外"那一侧的侧别
-        int opens = 0;
-        int before = 0;  // 排在它前面的边界枚数（对象表按 cp 升序，所以这也就是它的下标）
-    };
-    BracketCounts bracketCountsAt(int para, size_t cp) const;
     /**
      * 这个段的边界对象表（编译产物里那一份，没被显示名单筛过）。
      */
-    const std::vector<InlineObject>& objectsFor(int para) const;
     /**
      * 光标与选区的唯一写入点：段内流位置。
      *
@@ -1030,37 +1015,28 @@ private:
      * line_aff 是行别（见 caretLineAffinity）：只有点击落点会带非零值，
      * 其余入口一律按"贴上一行"。
      */
-    void setCaretRel(int para, int rel, bool collapse = true, int line_aff = 0);
     /**
      * 光标那一段（派生）= focus 落在哪一块。block_flow_ 单调，二分取最后一个起点不超过它的块。
      */
-    int caretPara() const;
     /**
      * 段内流位置（派生）= focus 减本段起点。侧别与归属都由它推。
      */
-    int caretRel() const;
     /**
      * 任意流位置的段下标（caretPara 的投影原型；这个入口是它在 focus 上的特例）。
      */
-    int paraForFlow(FlowPos f) const;
     /**
      * 任意流位置的段内流位置（caretRel 的投影原型）。
      */
-    int relForFlow(FlowPos f) const;
     /**
      * 任意流位置的侧别（caretSide 的投影原型）：段内流位置减去该偏移在流里占的起点。
      */
-    int sideForFlow(FlowPos f) const;
     /**
      * 在某一行里按"沿行内轴的页面坐标"（横排 x / 竖排 y）命中插入点。
      * hitTestPt 的行内那一半抽出来给上下键共用 —— 两份实现会分头长出不同的势力范围。
      */
-    void hitTestInLine(const LineBox& lb, float inline_page_pt, uint32_t* cp_out,
-                       int* side_out) const;
     /**
      * 光标沿行内轴的页面坐标 —— 上下键的列位就是它。找不到行盒返回 0。
      */
-    float caretInlineAxisPt() const;
     /**
      * 选区矩形（帧像素坐标，与 caretRectPx 同口径）。只取落在页范围
      * 页范围 [first_page, first_page + count) 里的那部分；count <= 0 表示不限页。
@@ -1078,45 +1054,36 @@ private:
     /**
      * 段内相对流位置 = 码点偏移 + 排在它前面的边界数 + 侧别。
      */
-    int relAt(int para, size_t cp, int side) const;
     /**
      * 提示（控件下标 / 贴外侧哨兵 / -1）→ 侧别。宿主与探针给的是提示，排版与流要的是侧别。
      */
-    int sideFromHint(int para, size_t cp, int hint) const;
     /**
      * 文本码点区间 [a, b) 在流里占的那一段（段内相对，半开）。括号不是文本，不进这个区间。
      * 判定（policyErase）与实际删除（eraseOnTree）共用它 —— 两处分叉就会出现
      * "判据说能删、真删却越界"。
      */
-    bool textSpanAt(int para, size_t a, size_t b, int* from, int* to) const;
     /**
      * 不带侧别时的默认侧别：按"最内层含端点"归一次（见 defaultSideAt 的实现）。
      */
-    int defaultSideAt(int para, size_t cp) const;
     /**
      * 某个位置（不是光标）的侧别：按"最内层含端点"归一次，归不到就是"所有控件之外"。
      */
-    int sideForPos(TextPos p) const;
     /**
      * 段内相对流位置 → 最内层包含它的控件下标（LineBox::kInlineOffsetOuter = 在所有控件之外）。
      */
-    int hintFromRel(int para, int rel) const;
     /**
      * 跨段控件的归属补判（见实现处的注释）：段内对象表只有本段那一半边界，
      * 控件从上一段跨进来时配对不上，这里用控件集合的跨段区间判。
      */
-    int hintFromCrossSegment(int para, int rel) const;
     /**
      * 找到包含该位置的行盒（先按行内范围命中，再退化为"同段最近行"）。
      *
      * 折行处一行有两个候选（上一行的末尾、下一行的开头），aff 选一个：0 取上一行、
      * 大于 0 取下一行（见 caretLineAffinity）。
      */
-    const LineBox* findLineFor(const TextPos& pos, int aff = 0) const;
     /**
      * 给定位置的行盒 + 页号 + 页面坐标矩形
      */
-    bool caretRectFor(const TextPos& pos, int* page_out, Rect* out) const;
     /**
      * 光标矩形（帧像素坐标）。caret_visible 为 false 或找不到行盒时返回零矩形。
      */
@@ -1125,7 +1092,6 @@ private:
      * 窗口化之后这是必需的一个数：帧只装窗口内的页，光标不在窗口里就既画不出来、
      * 也点不中它 —— 宿主拿它决定窗口该锚在哪。
      */
-    int caretPage() const;
     /**
      * 统一呈现入口。内部按"页指纹是否变了"决定重建底图的哪几页。
      */
@@ -1174,7 +1140,6 @@ private:
     /**
      * 第 @p page 页上的行下标范围（闭区间，[lo, hi]）；这一页没有行时 hi < lo。
      */
-    void linesOnPage(int page, int* lo, int* hi) const;
     /**
      * 第 @p page 页上的字形下标区间（半开区间 [begin, end)）；这一页没有字形时两者相等。
      *
@@ -1429,22 +1394,21 @@ private:
      * 段号与段内流位置降为派生量（caretPara / caretRel），侧别照旧是段内流位置与码点偏移
      * 的差 —— 三个派生量都由 focus 现算，没有一个能与它失配。
      */
-    Range selection_{};
-    bool caret_visible_ = true;
     /**
-     * 上下键的列位（沿行内轴的页面坐标，磅）与"它还算数吗"。
+     * 把位置解析要读的那几样东西摆给解析器（见 PositionView）。
      *
-     * 为什么是会话状态而不是每次从光标现取：跨过一条短行之后光标已经贴在那一行的行末，
-     * 再按一下要落回同一个列位，否则连按会沿着短行的行末一路滑走。
-     * 第一次按取光标当前位置，之后连续按沿用；任何别的定位都清掉它（见 setCaretRel）。
+     * 只在文档重建之后与重排之后各摆一次就够：视图里存的是这些容器的地址，而容器都是引擎的
+     * 成员、不换对象（重建是 assign、重排是就地改），地址一直有效。
+     * 谁要是把某个容器换成了另一个对象（move 走、重新 new），这里就是唯一的失效点。
      */
-    float vertical_goal_pt_ = 0.0f;
-    bool vertical_goal_valid_ = false;
+    void refreshCaretView();
+
     /**
-     * 光标行别：0 = 折行处贴上一行行尾，1 = 贴下一行行首（见 caretLineAffinity）。
-     * 与列位同一待遇 —— 任何别的定位都把它清成 0。
+     * 光标与位置解析。选区两端、行别、上下键的列位、光标条宽度全在它里面 ——
+     * 引擎这一层只留"读文档产物"与"协调重排"（见 projectCaret 与移动族的转发）。
      */
-    int caret_line_aff_ = 0;
+    CaretResolver caret_;
+    bool caret_visible_ = true;
     /**
      * 上一帧画过的选区矩形（帧像素）。下次呈现先按它擦掉 —— 与 caret_rect_px_prev_
      * 同一个理由：选区画在帧上、不进底图，不擦就会留下上一帧的一片蓝。

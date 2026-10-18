@@ -454,6 +454,132 @@ int main() {
                    "列内跨度与横排推进量一致（竖排高度 = 横排宽度）");
     }
 
+    std::printf("\n[7] 竖排列宽逐列算：混排字号时小字列不占大字列的宽度\n");
+    {
+        // 列宽 = 这一列自己的最大字号 × 行距，不是整段最大字号 —— 与 CSS 竖排同一条
+        //   （列宽就是该列的行高）。判据必须两半都有：一半钉"每列宽 = 该列字号 × 行距"，
+        //   一半钉"同一段里大字列真的比小字列宽"。少了后一半，列宽取整段最大照样全绿。
+        // 列长（一列能装多少）与列宽无关，所以把内容高度压到装不下两个字，就得到
+        //   "一个字符一列"，列的归属不再依赖字号 —— 判据因此不脆。
+        auto mkVertical = [&](WritingMode wm, int big_n, int small_n, float big_pt,
+                              float small_pt) {
+            BlockSpec b;
+            b.wm = wm;
+            b.line_factor = 1.6f;
+            std::string txt;
+            for (int i = 0; i < big_n; ++i) txt += "汉";
+            for (int i = 0; i < small_n; ++i) txt += "汉";
+            b.setText(txt);
+            FormatRun a;
+            a.cp_begin = 0;
+            a.cp_end = static_cast<uint32_t>(big_n);
+            a.font_index = cjk;
+            a.size_pt = big_pt;
+            a.language = "zh";
+            b.runs.push_back(a);
+            if (small_n > 0) {
+                FormatRun c;
+                c.cp_begin = static_cast<uint32_t>(big_n);
+                c.cp_end = static_cast<uint32_t>(big_n + small_n);
+                c.font_index = cjk;
+                c.size_pt = small_pt;
+                c.language = "zh";
+                b.runs.push_back(c);
+            }
+            return b;
+        };
+
+        PageMetrics page;
+        page.width_pt = 110.0f;
+        page.height_pt = 20.0f;
+        page.margin_pt = 5.0f;
+        const float cx = page.margin_pt;
+        const float cw = page.contentWidthPt();
+        const float big_pt = 24.0f;
+        const float small_pt = 12.0f;
+        const float factor = 1.6f;
+
+        const LayoutResult r =
+            layoutDocument(lib, {mkVertical(WritingMode::VerticalRL(), 4, 4, big_pt, small_pt)},
+                           page);
+        std::vector<const LineBox*> cols;
+        for (const LineBox& lb : r.lines)
+            if (lb.vertical) cols.push_back(&lb);
+        expectTrue(cols.size() == 8, "8 个字符各占一列（列长只有 10 磅，一列装不下第二个字）");
+
+        int bad_size = 0;
+        int bad_w = 0;
+        int bad_box = 0;
+        float big_w = 0.0f;
+        float small_w = 0.0f;
+        for (const LineBox* lb : cols) {
+            const bool big = lb->first_cp < 4;
+            const float want = big ? big_pt : small_pt;
+            const float w = lb->block_hi_pt - lb->block_lo_pt;
+            if (std::fabs(lb->size_pt - want) > 0.01f) ++bad_size;
+            if (std::fabs(w - want * factor) > 0.05f) ++bad_w;
+            if (lb->block_lo_pt < cx - 0.01f || lb->block_hi_pt > cx + cw + 0.01f) ++bad_box;
+            if (big) {
+                big_w = w;
+            } else {
+                small_w = w;
+            }
+        }
+        expectTrue(bad_size == 0, "每一列的字号都等于本列内容的最大字号（8 列）");
+        expectTrue(bad_w == 0, "每一列的列宽都等于本列字号 × 行距（逐列算，不是整段最大）");
+        expectTrue(bad_box == 0, "所有列都落在内容框里（列位按前缀和推进，没有越界）");
+        std::printf("     大字列宽 %.2f pt，小字列宽 %.2f pt\n", big_w, small_w);
+        expectTrue(big_w > small_w + 1.0f,
+                   "大字列真的比小字列宽（取整段最大字号时两者会相等）");
+
+        int overlap = 0;
+        int order_bad = 0;
+        for (const LineBox* a : cols) {
+            for (const LineBox* b : cols) {
+                if (a == b || a->page != b->page) continue;
+                if (a->block_lo_pt < b->block_hi_pt - 0.01f &&
+                    b->block_lo_pt < a->block_hi_pt - 0.01f) {
+                    ++overlap;
+                }
+                // 中日竖排：列序自右向左 ⇒ 列号小的那一列更靠右。
+                if (a->line < b->line && a->block_hi_pt < b->block_hi_pt - 0.01f) ++order_bad;
+            }
+        }
+        expectTrue(overlap == 0, "同一页上的列两两不重叠");
+        expectTrue(order_bad == 0, "中日竖排：列号小的更靠右（列序方向没被前缀和带反）");
+
+        // 反向一半：整段一个字号 ⇒ 所有列宽相等，且等于那个字号 × 行距。
+        const LayoutResult r1 =
+            layoutDocument(lib, {mkVertical(WritingMode::VerticalRL(), 8, 0, small_pt, 0.0f)},
+                           page);
+        std::vector<float> widths;
+        for (const LineBox& lb : r1.lines) {
+            if (!lb.vertical) continue;
+            widths.push_back(std::round((lb.block_hi_pt - lb.block_lo_pt) * 100.0f) / 100.0f);
+        }
+        std::sort(widths.begin(), widths.end());
+        widths.erase(std::unique(widths.begin(), widths.end()), widths.end());
+        expectTrue(widths.size() == 1 &&
+                       std::fabs(widths.front() - small_pt * factor) < 0.05f,
+                   "整段一个字号：所有列宽相等且等于字号 × 行距（与逐列算之前逐字段相同）");
+
+        // 列序的正面判据也要有一份：蒙文（LTR）的第一列在最左，中日（RTL）在最右。
+        const LayoutResult rl =
+            layoutDocument(lib, {mkVertical(WritingMode::VerticalLR(), 4, 4, big_pt, small_pt)},
+                           page);
+        float lr_first_lo = 1e9f;
+        float rl_first_hi = -1e9f;
+        for (const LineBox& lb : rl.lines) {
+            if (lb.vertical && lb.line == 0) lr_first_lo = lb.block_lo_pt;
+        }
+        for (const LineBox* lb : cols) {
+            if (lb->line == 0) rl_first_hi = lb->block_hi_pt;
+        }
+        expectTrue(lr_first_lo < cx + big_pt * factor + 0.05f,
+                   "蒙文竖排的第一列贴着内容区左边（列自左向右）");
+        expectTrue(rl_first_hi > cx + cw - big_pt * factor - 0.05f,
+                   "中日竖排的第一列贴着内容区右边（列自右向左）");
+    }
     std::printf("\n[按需] 数据源：目录、骨架、按需读\n");
     {
         FontSource src;

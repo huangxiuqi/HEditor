@@ -184,6 +184,7 @@ add_library(heditor_core STATIC
   ${HEDITOR_RENDER_SRC}
   src/core/layout/layout.cpp
   src/core/engine/engine.cpp
+  src/core/engine/caret.cpp
   src/core/engine/engine_layout.cpp
   src/core/engine/engine_paint.cpp
   src/core/engine/engine_audit.cpp
