@@ -147,6 +147,10 @@ std::vector<BlockSpec> longDocument(int paragraphs, int font_index) {
  */
 std::vector<BlockSpec> g_blocks;
 std::vector<DemoFieldSpec> g_fields;
+/**
+ * 表格场景：这一档不走块流建树（表格结构不在 BlockSpec 里），直接建一棵含表格的树。
+ */
+bool g_table_demo = false;
 
 /**
  * 按场景号装配块流。只造数据、不动引擎 —— 装载统一走 rebuildDocument。
@@ -291,7 +295,9 @@ void rebuildDocument(bool keep_caret) {
     if (keep_caret) {
         for (const BlockSpec& b : g_engine.blocks()) text_before += b.textUtf8();
     }
-    g_engine.setDocument(demoTree(g_blocks, g_fields), StyleSheet{});
+    g_engine.setDocument(g_table_demo ? demoTableTree(g_cjk_font)
+                                      : demoTree(g_blocks, g_fields),
+                         StyleSheet{});
     if (!keep_caret) return;
     std::string text_after;
     for (const BlockSpec& b : g_engine.blocks()) text_after += b.textUtf8();
@@ -302,6 +308,7 @@ void rebuildDocument(bool keep_caret) {
 }
 
 void setScenario(int scenario) {
+    g_table_demo = (scenario == 10);
     g_blocks = buildScenarioBlocks(scenario);
     g_fields.clear();
     rebuildDocument(false);

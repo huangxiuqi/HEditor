@@ -358,4 +358,54 @@ NodeTree demoTree(const std::vector<BlockSpec>& blocks, const std::vector<DemoFi
     return tree;
 }
 
+NodeTree demoTableTree(int cjk_font_index) {
+    NodeTree tree;
+    const NodeId sec = tree.firstSectionId();
+
+    // 一个段落：文本节点 + 结束标记，块级格式搬到标记上（与 demoTree 同一条口径）。
+    auto para = [&](NodeId parent, const char* text) {
+        BlockSpec b;
+        b.font_index = cjk_font_index;
+        b.size_pt = 12.0f;
+        b.wm = WritingMode::HorizontalTB();
+        b.line_factor = 1.6f;
+        b.language = "zh";
+        b.color = Color::rgb(24, 24, 24);
+        b.setText(text);
+        const NodeId t = tree.appendChild(parent, NodeKind::TextRun);
+        tree.setText(t, b.cp_text);
+        const NodeId m = tree.appendChild(parent, NodeKind::ParagraphMark);
+        applyBlockFormat(b, tree.find(m));
+    };
+    auto cell = [&](NodeId row, const char* text, int col_span) {
+        const NodeId c = tree.appendChild(row, NodeKind::TableCell);
+        tree.find(c)->cell.col_span = col_span;
+        para(c, text);
+    };
+
+    para(sec, "入院记录：");
+    const NodeId table = tree.appendChild(sec, NodeKind::Table);
+    tree.find(table)->table.align = Align::Start;
+
+    const NodeId row0 = tree.appendChild(table, NodeKind::TableRow);
+    tree.find(row0)->row.is_header = true;
+    cell(row0, "项目", 1);
+    cell(row0, "结果", 2);
+
+    const NodeId row1 = tree.appendChild(table, NodeKind::TableRow);
+    tree.find(row1)->row.height = Length::abs(ptToEmu(36.0));
+    tree.find(row1)->row.height_rule = HeightRule::AtLeast;
+    cell(row1, "血压", 1);
+    cell(row1, "120/80", 1);
+    cell(row1, "mmHg", 1);
+
+    const NodeId row2 = tree.appendChild(table, NodeKind::TableRow);
+    cell(row2, "心率", 1);
+    cell(row2, "72", 1);
+    cell(row2, "次/分", 1);
+
+    para(sec, "以上为本次查体记录。");
+    return tree;
+}
+
 }  // namespace heditor

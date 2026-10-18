@@ -67,4 +67,13 @@ inline int endParaOf(const DemoFieldSpec& f) { return f.epara < 0 ? f.para : f.e
  */
 NodeTree demoTree(const std::vector<BlockSpec>& blocks, const std::vector<DemoFieldSpec>& fields);
 
+/**
+ * 表格场景的文书：引导段 + 3 行 3 列表格 + 结尾段。
+ *
+ * 表格本身值得演示的三件事都在里面：第一行是标题行（跨页时会在每页顶端重复）、
+ * 标题行第二格跨两列、第二行用 AtLeast 行高撑开（病历里"一大格用来写字"就是这一档）。
+ * 格内的段落一律以标记结束 —— 块与流位置的映射靠标记递推。
+ */
+NodeTree demoTableTree(int cjk_font_index);
+
 }  // namespace heditor
