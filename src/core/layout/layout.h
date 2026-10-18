@@ -13,6 +13,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -145,7 +146,72 @@ struct InlineObject {
     uint64_t content_hash = 0;
 };
 
+/**
+ * 一个格位：这一块内容属于哪张表的哪一格。
+ *
+ * table 是不透明身份（编译层填模型节点 id，排版层不解释它），与 InlineObject::owner
+ * 同一个分工 —— 引擎拿它回宿主换"这是哪张表"，自己不认识节点 id 的空间。
+ */
+struct CellSlot {
+    uint64_t table = 0;
+    int row = 0;   // 逻辑行号（在该表的行序列里的下标）
+    int cell = 0;  // 逻辑格号（在该行里的下标）
+
+    bool operator==(const CellSlot& o) const = default;
+};
+
+/**
+ * 行高的取值规则（引擎侧）。模型层的 HeightRule 由编译层映射过来 —— 引擎不认模型枚举，
+ * 就像它不认 Length（只吃磅值）。
+ */
+enum class RowHeightRule : uint8_t { Auto, AtLeast, Exact };
+
+/**
+ * 单元格内垂直对齐（引擎侧）。与模型层的 CellVAlign 同值域，名字刻意不同：
+ * 两个类型在同一命名空间里，同名会撞。
+ */
+enum class BoxVAlign : uint8_t { Top, Center, Bottom };
+
+/**
+ * 表格在内容区里的水平位置（引擎侧）。只在表宽小于可用宽度时才有意义。
+ */
+enum class TableHAlign : uint8_t { Start, Center, End };
+
+/**
+ * 引擎侧的宽度：自动 / 绝对磅 / 相对可用宽度。用带标签的三态而不是一个浮点数 ——
+ * 自动值与"零宽"必须能分开，百分比要等到知道内容区宽度才求值。
+ */
+struct WidthSpec {
+    enum class Kind : uint8_t { Auto, Abs, Percent } kind = Kind::Auto;
+    float pt = 0.0f;     // Abs：磅
+    float ratio = 0.0f;  // Percent：0..1
+
+    static WidthSpec makeAuto() { return WidthSpec{}; }
+    static WidthSpec makeAbs(float v) {
+        WidthSpec w;
+        w.kind = Kind::Abs;
+        w.pt = v;
+        return w;
+    }
+    static WidthSpec makePercent(float r) {
+        WidthSpec w;
+        w.kind = Kind::Percent;
+        w.ratio = r;
+        return w;
+    }
+    bool isAuto() const { return kind == Kind::Auto; }
+};
+
 struct BlockSpec {
+    /**
+     * 这一段所在的单元格路径（外层到内层）。空 = 正文。
+     *
+     * 表格是扁平化进块流的：格里的内容照常编成段落，"它在哪一格"只记在这条路径上。
+     * 嵌套表格就是路径更长一条。句柄不透明 —— 排版层只拿它把同一格的块聚到一起，
+     * 再经结构表换出这一格的几何，不认识节点。
+     */
+    std::vector<CellSlot> cell_path;
+
     /**
      * 段落文本的唯一真源是码点（UCS-4）。UTF-8 只是 I/O 表示，
      * 用 setText()/textUtf8() 在两个表示之间往返。
@@ -230,6 +296,54 @@ struct BlockSpec {
         if (!runs.empty()) return runs;
         return {wholeRun()};
     }
+};
+
+/**
+ * 一个逻辑格（不是网格格位）：单元格的覆盖范围由跨度表达，被合并掉的格位不存在。
+ *
+ * first_block / block_count 是它在 blocks 里的内容区间。空格的 count 为 0 ——
+ * 排版层要按"一个空段落占一行"处理，不能当成这一格没有内容。
+ */
+struct LayoutCell {
+    int row = 0;
+    int cell = 0;
+    int row_span = 1;
+    int col_span = 1;
+    BoxVAlign v_align = BoxVAlign::Top;
+    int first_block = 0;
+    int block_count = 0;
+};
+
+/**
+ * 一行的排版输入。三个开关都在行上（Word 的 w:trPr），行高也在。
+ */
+struct LayoutRow {
+    bool can_split_by_page = true;
+    bool is_header = false;
+    bool page_break_before = false;
+
+    /**
+     * 行高的绝对值。空表示没有绝对值（规则为 Auto，或者模型给的是编译期算不出的相对长度）。
+     */
+    std::optional<float> height_pt;
+    RowHeightRule height_rule = RowHeightRule::Auto;
+};
+
+/**
+ * 一张表的排版输入。rows / cols 是派生网格的尺寸（由跨度推出来，与模型层 buildGrid
+ * 同一口径），不是"行记录条数"与"列定义条数"。
+ *
+ * col_widths 的长度恒为 cols：显式列宽可能比网格短，短的部分补自动。
+ */
+struct LayoutTable {
+    uint64_t handle = 0;
+    WidthSpec width;
+    TableHAlign align = TableHAlign::Start;
+    int rows = 0;
+    int cols = 0;
+    std::vector<WidthSpec> col_widths;
+    std::vector<LayoutRow> row_specs;  // 长度恒为 rows
+    std::vector<LayoutCell> cells;     // 逻辑格，按行列顺序
 };
 
 /**

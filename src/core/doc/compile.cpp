@@ -3,11 +3,43 @@
 #include <algorithm>
 
 #include "core/doc/document.h"
+#include "core/doc/table.h"
 #include "core/utils/hash.h"
 
 namespace heditor {
 
 namespace {
+
+/**
+ * 行高规则：模型层的枚举映射到引擎侧那一份。两边的值域一一对应，但引擎不认模型枚举
+ * （它也不认 Length，只吃磅值），所以这一层是唯一映射点。
+ */
+RowHeightRule mapHeightRule(HeightRule r) {
+    switch (r) {
+        case HeightRule::Auto:
+            return RowHeightRule::Auto;
+        case HeightRule::AtLeast:
+            return RowHeightRule::AtLeast;
+        case HeightRule::Exact:
+            return RowHeightRule::Exact;
+    }
+    return RowHeightRule::Auto;
+}
+
+/**
+ * 单元格垂直对齐。原因同上：同名会撞（两个类型都在 heditor 里）。
+ */
+BoxVAlign mapVAlign(CellVAlign a) {
+    switch (a) {
+        case CellVAlign::Top:
+            return BoxVAlign::Top;
+        case CellVAlign::Center:
+            return BoxVAlign::Center;
+        case CellVAlign::Bottom:
+            return BoxVAlign::Bottom;
+    }
+    return BoxVAlign::Top;
+}
 
 /**
  * 一段待解析的文本：码点 + 它在模型里的格式来源。
@@ -121,6 +153,9 @@ private:
         cur_first_ = kInvalidNodeId;
 
         BlockSpec b;
+        // 这一块属于哪一格。路径栈在遍历格时压/弹，落段时照抄一份 ——
+        // 块的归属与它的内容在同一次落段里定下，不可能出现"内容进了这一段、归属还是上一格"。
+        b.cell_path = path_;
         if (mark != nullptr) applyParaFormat(*mark, &b);
         // 本段的行内对象表：进出控件边界时就地攒下（见 walk 里控件那一段），落段时一起带走。
         //   它与 cp_text 共用同一个码点坐标，同一次落段，于是不可能出现"文本进了这一段、
@@ -258,6 +293,153 @@ private:
         }
         *out = static_cast<float>(emuToPt(len.abs_emu));
         return true;
+    }
+
+    /**
+     * 把"待落的那一段"落掉。没有待落内容时什么也不做 —— 与 flush 的差别在这里：
+     * 表格的格边界要的是"如果还有内容就落"，而不是"无论如何产一段空段落"。
+     */
+    void flushIfPending() {
+        if (!pending_.empty() || !obj_.empty()) flush(nullptr);
+    }
+
+    /**
+     * 模型长度 → 引擎宽度。Auto 保持自动，绝对长度换成磅，百分比换成比例。
+     *
+     * em 与字符位在这一层算不出参照（要等字号与列宽），记诊断后按自动处理 —— 静默取零会让
+     * "作者给了 3 个字宽"变成零宽列，而画面看着又是合理的。
+     */
+    WidthSpec toWidthSpec(const Length& len, const Node& n, const char* field) {
+        switch (len.kind) {
+            case LengthKind::Auto:
+                return WidthSpec{};
+            case LengthKind::Abs:
+                return WidthSpec::makeAbs(static_cast<float>(emuToPt(len.abs_emu)));
+            case LengthKind::Percent:
+                return WidthSpec::makePercent(static_cast<float>(len.num) /
+                                              static_cast<float>(len.den));
+            case LengthKind::Em:
+            case LengthKind::Chars:
+                break;
+        }
+        note(n.kind, n.id,
+             std::string("表格的") + field + "是相对长度，编译期算不出参照值，已按自动处理");
+        return WidthSpec{};
+    }
+
+    /**
+     * 进入一张表：填结构表里与内容无关的那一半（尺寸、行属性、列宽），返回它的下标。
+     *
+     * 网格尺寸由跨度推（与模型层 buildGrid 同一口径），不用"行记录条数乘格数"那种算法 ——
+     * 后者在合并单元格上必然错。推不出来时记诊断、列数按第一行的跨度之和给出：内容不能
+     * 因此丢，但 ok() 已经为假。
+     *
+     * 返回下标而不是引用：格内容编译期间可能再 push 进嵌套表格，引用会失效。
+     */
+    size_t beginTable(const Node& t) {
+        LayoutTable lt;
+        lt.handle = static_cast<uint64_t>(t.id);
+        lt.width = toWidthSpec(t.table.width, t, "宽度");
+        switch (t.table.align) {
+            case Align::Start:
+                lt.align = TableHAlign::Start;
+                break;
+            case Align::Center:
+                lt.align = TableHAlign::Center;
+                break;
+            case Align::End:
+                lt.align = TableHAlign::End;
+                break;
+        }
+        int rows = 0;
+        int first_row_cols = 0;
+        for (const Node* c : t.children) {
+            if (c->kind != NodeKind::TableRow) continue;
+            ++rows;
+            if (rows == 1) {
+                for (const Node* cell : c->children) {
+                    if (cell->kind == NodeKind::TableCell) first_row_cols += cell->cell.col_span;
+                }
+            }
+        }
+        lt.rows = rows;
+        TableGrid grid;
+        std::string why;
+        if (buildGrid(tree_, t.id, &grid, &why)) {
+            lt.cols = grid.cols;
+        } else {
+            note(NodeKind::Table, t.id, "表格结构不成立：" + why);
+            lt.cols = first_row_cols;
+        }
+        lt.col_widths.assign(static_cast<size_t>(lt.cols), WidthSpec{});
+        for (int i = 0; i < lt.cols && i < static_cast<int>(t.table.grid_cols.size()); ++i) {
+            lt.col_widths[static_cast<size_t>(i)] =
+                toWidthSpec(t.table.grid_cols[static_cast<size_t>(i)], t, "列宽");
+        }
+        lt.row_specs.reserve(static_cast<size_t>(rows));
+        for (const Node* c : t.children) {
+            if (c->kind != NodeKind::TableRow) continue;
+            LayoutRow lr;
+            lr.can_split_by_page = c->row.can_split_by_page;
+            lr.is_header = c->row.is_header;
+            lr.page_break_before = c->row.page_break_before;
+            lr.height_rule = mapHeightRule(c->row.height_rule);
+            const bool has_value = (c->row.height.kind != LengthKind::Auto);
+            if (lr.height_rule == RowHeightRule::Auto) {
+                if (has_value) {
+                    note(NodeKind::TableRow, c->id, "行高的规则是自动，但作者给了值（值不被解释）");
+                }
+            } else if (!has_value) {
+                note(NodeKind::TableRow, c->id, "行高规则要求一个值，但给的是自动");
+            } else if (c->row.height.kind == LengthKind::Abs) {
+                lr.height_pt = static_cast<float>(emuToPt(c->row.height.abs_emu));
+            } else {
+                note(NodeKind::TableRow, c->id, "行高必须是绝对长度");
+            }
+            lt.row_specs.push_back(lr);
+        }
+        out_.tables.push_back(std::move(lt));
+        return out_.tables.size() - 1;
+    }
+
+    /**
+     * 一张表：按行按格遍历，把格里的内容编成段落。
+     *
+     * 每一格是独立的段落上下文：进格前把格外的残留落掉（表格是块级元素，不与正文共用一段），
+     * 格结束时落掉格内最后一段 —— 格内结尾常常没有段落标记，不落它这一格就会与下一格并成
+     * 一段。空格的块数为 0，由排版层按"一个空段落占一行"处理。
+     *
+     * 用 out_.tables 的下标而不是引用：格内容里可能再 push 进嵌套表格，vector 会重新分配。
+     */
+    void walkTable(const Node& t) {
+        const size_t ti = beginTable(t);
+        flushIfPending();
+        int row_no = 0;
+        for (const Node* row : t.children) {
+            if (row->kind != NodeKind::TableRow) continue;
+            int cell_no = 0;
+            for (const Node* cell : row->children) {
+                if (cell->kind != NodeKind::TableCell) continue;
+                path_.push_back(CellSlot{static_cast<uint64_t>(t.id), row_no, cell_no});
+                flushIfPending();
+                LayoutCell lc;
+                lc.row = row_no;
+                lc.cell = cell_no;
+                lc.row_span = cell->cell.row_span;
+                lc.col_span = cell->cell.col_span;
+                lc.v_align = mapVAlign(cell->cell.v_align);
+                lc.first_block = static_cast<int>(out_.blocks.size());
+                const size_t ci = out_.tables[ti].cells.size();
+                out_.tables[ti].cells.push_back(lc);
+                for (const Node* c : cell->children) walk(c->id, false);
+                flushIfPending();
+                out_.tables[ti].cells[ci].block_count =
+                    static_cast<int>(out_.blocks.size()) - out_.tables[ti].cells[ci].first_block;
+                path_.pop_back();
+                ++cell_no;
+            }
+            ++row_no;
+        }
     }
 
     /**
@@ -409,6 +591,19 @@ private:
             }
             return;
         }
+        // 表格：扁平化进块流。格里的内容照常编成段落（带单元格路径），结构表另记一份 ——
+        // 排版要按格取内容，光标要按块找格，两个方向各留一条索引。
+        //
+        // flagged 为真（表格本身在某个未编译的子树里）时只下钻不产结构：那部分内容没进产物，
+        // 凭空多一张结构表只会指向一段被诊断标出来的文字。
+        if (n->kind == NodeKind::Table) {
+            if (!flagged) {
+                walkTable(*n);
+            } else {
+                for (const Node* c : n->children) walk(c->id, true);
+            }
+            return;
+        }
         // 只把分组遍历用的容器与片段根当"支持"：它们是结构外壳，边界不进内容；其余容器与
         // 尚未进编译的原子（域、制表符、分页符）都只记诊断。域（Field）是原子，本期引擎
         // 输入还没有域这一项，所以同样记诊断而不静默丢 —— 它的缓存值留给页眉页脚渲染时再用。
@@ -429,6 +624,10 @@ private:
     const StyleSheet& sheet_;
     std::vector<PendingText> pending_;  // 当前段落里待解析的文本段
     std::vector<InlineObject> obj_;     // 当前段落里已攒下的行内对象（控件边界）
+    /**
+     * 当前所在的单元格路径（外层到内层），空表示正文。遍历格时压/弹，落段时抄进 BlockSpec。
+     */
+    std::vector<CellSlot> path_;
     /**
      * 本块第一个吃进内容的元素（见 noteFirst）。落段时收进 sources，随后复位。
      */

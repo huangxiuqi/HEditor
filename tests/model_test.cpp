@@ -4825,6 +4825,166 @@ void checkTableAttributes() {
 }
 
 /**
+ * 1.7（阶段 5 第二刀）：表格进编译。
+ *
+ * 判据按"产物里有什么"分组：格内的段落独立且带路径、结构表的几何与跨度一致、行的三个
+ * 开关与行高按磅落地、嵌套表格的路径栈、表格夹在段落中间时不吞掉前后的文字。
+ */
+void checkTableCompile() {
+    // 2x2 普通表：每格一段，路径与结构表两边对得上。
+    {
+        NodeTree tree = makePlainTable(2, 2);
+        const NodeId table = tableOf(tree);
+        const CompileResult r = compileDocument(tree, FlowVisibility::Design, noStyles());
+        expectTrue(r.ok() && r.diagnostics.empty(), "阶段 5 / 编译：表格已进编译（不再记诊断）");
+        expectTrue(r.blocks.size() == 4 && r.tables.size() == 1,
+                   "阶段 5 / 编译：2x2 每格一段，结构表一张");
+        if (r.tables.size() == 1) {
+            const LayoutTable& lt = r.tables[0];
+            expectTrue(lt.handle == table && lt.rows == 2 && lt.cols == 2 &&
+                           lt.cells.size() == 4 && lt.row_specs.size() == 2 &&
+                           lt.col_widths.size() == 2,
+                       "阶段 5 / 编译：行、列、格、行属性、列宽的数量与派生网格一致");
+        }
+        bool path_ok = (r.blocks.size() == 4);
+        for (size_t i = 0; i < r.blocks.size() && path_ok; ++i) {
+            const BlockSpec& b = r.blocks[i];
+            path_ok = b.cell_path.size() == 1 && b.cell_path[0].table == table &&
+                      b.cell_path[0].row == static_cast<int>(i / 2) &&
+                      b.cell_path[0].cell == static_cast<int>(i % 2);
+        }
+        expectTrue(path_ok, "阶段 5 / 编译：四块的单元格路径逐项是 (0,0)(0,1)(1,0)(1,1)");
+        bool text_ok = (r.blocks.size() == 4);
+        for (size_t i = 0; i < r.blocks.size() && text_ok; ++i) {
+            text_ok = r.blocks[i].cp_text == cps({static_cast<uint32_t>(0x41 + i)});
+        }
+        expectTrue(text_ok, "阶段 5 / 编译：格内的字按行优先顺序各归自己那一格");
+        bool span_ok = (r.tables.size() == 1 && r.tables[0].cells.size() == 4);
+        if (span_ok) {
+            for (size_t i = 0; i < 4; ++i) {
+                const LayoutCell& c = r.tables[0].cells[i];
+                span_ok = c.first_block == static_cast<int>(i) && c.block_count == 1 &&
+                          c.row == static_cast<int>(i / 2) && c.cell == static_cast<int>(i % 2);
+            }
+        }
+        expectTrue(span_ok, "阶段 5 / 编译：每格的块区间是一个块，行列号与路径一致");
+    }
+    // 空格与格内两段：块数为 0 与 2。
+    {
+        NodeTree tree = makePlainTable(1, 2);
+        const NodeId table = tableOf(tree);
+        const NodeId row = tree.find(table)->children[0]->id;
+        const NodeId c0 = tree.find(row)->children[0]->id;
+        tree.eraseChild(c0, 0);
+        const NodeId c1 = tree.find(row)->children[1]->id;
+        tree.appendChild(c1, NodeKind::ParagraphMark);
+        tree.setText(tree.appendChild(c1, NodeKind::TextRun), cps({0x5A}));
+        const CompileResult r = compileDocument(tree, FlowVisibility::Design, noStyles());
+        expectTrue(r.ok() && r.blocks.size() == 2 && r.tables.size() == 1,
+                   "阶段 5 / 编译：空格不产段落，格内两个段落各产一块");
+        if (r.tables.size() == 1 && r.tables[0].cells.size() == 2) {
+            expectTrue(r.tables[0].cells[0].block_count == 0,
+                       "阶段 5 / 编译：空格记 0 个块（不是记成没有这一格）");
+            expectTrue(r.tables[0].cells[1].block_count == 2 &&
+                           r.tables[0].cells[1].first_block == 0,
+                       "阶段 5 / 编译：第二格从第 0 块起、占两块");
+        }
+    }
+    // 合并单元格：跨度不改网格列数，跨两列的格只有一条记录。
+    {
+        NodeTree tree = makePlainTable(2, 3);
+        const NodeId table = tableOf(tree);
+        const NodeId row0 = tree.find(table)->children[0]->id;
+        tree.find(row0)->children[0]->cell.col_span = 2;
+        tree.eraseChild(row0, 1);
+        const CompileResult r = compileDocument(tree, FlowVisibility::Design, noStyles());
+        expectTrue(r.ok() && r.tables.size() == 1 && r.tables[0].cols == 3,
+                   "阶段 5 / 编译：合并格不改变网格列数（仍由第一行跨度推）");
+        if (r.tables.size() == 1 && !r.tables[0].cells.empty()) {
+            expectTrue(r.tables[0].cells[0].col_span == 2 && r.tables[0].cells.size() == 5,
+                       "阶段 5 / 编译：跨两列的格一条记录，2x3 去掉一格后共五条");
+        }
+    }
+    // 行属性与宽度：三个开关、行高磅值、表宽百分比、列宽绝对与自动。
+    {
+        NodeTree tree = makePlainTable(2, 2);
+        const NodeId table = tableOf(tree);
+        tree.find(table)->table.width = Length::percent(1, 2);
+        tree.find(table)->table.align = Align::Center;
+        tree.find(table)->table.grid_cols = {Length::abs(ptToEmu(60.0)), Length{}};
+        const NodeId row0 = tree.find(table)->children[0]->id;
+        tree.find(row0)->row.is_header = true;
+        tree.find(row0)->row.height = Length::abs(ptToEmu(30.0));
+        tree.find(row0)->row.height_rule = HeightRule::AtLeast;
+        const NodeId row1 = tree.find(table)->children[1]->id;
+        tree.find(row1)->row.can_split_by_page = false;
+        tree.find(row1)->row.page_break_before = true;
+        const CompileResult r = compileDocument(tree, FlowVisibility::Design, noStyles());
+        expectTrue(r.ok() && r.tables.size() == 1, "阶段 5 / 编译：带属性的表编得出来");
+        if (r.tables.size() == 1) {
+            const LayoutTable& lt = r.tables[0];
+            expectTrue(lt.width.kind == WidthSpec::Kind::Percent &&
+                           std::abs(lt.width.ratio - 0.5f) < 1e-6f &&
+                           lt.align == TableHAlign::Center,
+                       "阶段 5 / 编译：表宽百分比与对齐映射过去");
+            expectTrue(lt.col_widths.size() == 2 &&
+                           lt.col_widths[0].kind == WidthSpec::Kind::Abs &&
+                           std::abs(lt.col_widths[0].pt - 60.0f) < 1e-4f &&
+                           lt.col_widths[1].kind == WidthSpec::Kind::Auto,
+                       "阶段 5 / 编译：列宽绝对换磅、自动仍是自动");
+            expectTrue(lt.row_specs.size() == 2 && lt.row_specs[0].is_header &&
+                           lt.row_specs[0].height_rule == RowHeightRule::AtLeast &&
+                           lt.row_specs[0].height_pt.has_value() &&
+                           std::abs(*lt.row_specs[0].height_pt - 30.0f) < 1e-4f,
+                       "阶段 5 / 编译：标题行与行高按磅落地");
+            expectTrue(!lt.row_specs[1].can_split_by_page && lt.row_specs[1].page_break_before,
+                       "阶段 5 / 编译：两个开关逐行映射");
+        }
+    }
+    // 嵌套表格：外层路径一条、内层两条，结构表按出现顺序外层在前。
+    {
+        NodeTree tree;
+        const NodeId sec = tree.firstSectionId();
+        const NodeId outer = tree.appendChild(sec, NodeKind::Table);
+        const NodeId orow = tree.appendChild(outer, NodeKind::TableRow);
+        const NodeId ocell = tree.appendChild(orow, NodeKind::TableCell);
+        tree.setText(tree.appendChild(ocell, NodeKind::TextRun), cps({0x31}));
+        const NodeId inner = tree.appendChild(ocell, NodeKind::Table);
+        const NodeId irow = tree.appendChild(inner, NodeKind::TableRow);
+        const NodeId icell = tree.appendChild(irow, NodeKind::TableCell);
+        tree.setText(tree.appendChild(icell, NodeKind::TextRun), cps({0x32}));
+        const CompileResult r = compileDocument(tree, FlowVisibility::Design, noStyles());
+        expectTrue(r.ok() && r.tables.size() == 2 && r.blocks.size() == 2,
+                   "阶段 5 / 编译：嵌套表格产两张结构表、两块内容");
+        if (r.blocks.size() == 2) {
+            expectTrue(r.blocks[0].cell_path.size() == 1 && r.blocks[0].cell_path[0].table == outer,
+                       "阶段 5 / 编译：外层格里的块路径只有一条");
+            expectTrue(r.blocks[1].cell_path.size() == 2 &&
+                           r.blocks[1].cell_path[1].table == inner &&
+                           r.blocks[1].cell_path[0].table == outer,
+                       "阶段 5 / 编译：内层格里的块路径是外层到内层两条");
+        }
+    }
+    // 表格夹在段落中间：它是块级元素，前后的文本各成一段，都不带格路径。
+    {
+        NodeTree tree;
+        const NodeId sec = tree.firstSectionId();
+        tree.setText(tree.appendChild(sec, NodeKind::TextRun), cps({0x41}));
+        const NodeId table = tree.appendChild(sec, NodeKind::Table);
+        const NodeId row = tree.appendChild(table, NodeKind::TableRow);
+        addCell(tree, row, 1, 1, 0x42);
+        tree.setText(tree.appendChild(sec, NodeKind::TextRun), cps({0x43}));
+        const CompileResult r = compileDocument(tree, FlowVisibility::Design, noStyles());
+        expectTrue(r.ok() && r.blocks.size() == 3, "阶段 5 / 编译：表前、表格、表后各一段");
+        if (r.blocks.size() == 3) {
+            expectTrue(r.blocks[0].cell_path.empty() && r.blocks[1].cell_path.size() == 1 &&
+                           r.blocks[2].cell_path.empty(),
+                       "阶段 5 / 编译：只有中间那一段属于表格");
+        }
+    }
+}
+
+/**
  * 1.8：域的取值。四种取值与手算一致；文档属性缺失给空串；只有排版结果类需要迭代。
  */
 void checkFieldValue() {
@@ -6144,6 +6304,7 @@ int main() {
     checkTableOps();
     checkTableColumnDefs();
     checkTableAttributes();
+    checkTableCompile();
 
     std::printf("  --- 1.8：域、页眉页脚、分节 ---\n");
     checkFieldValue();
