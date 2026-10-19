@@ -337,7 +337,6 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
         //   每个格只画自己的外框，于是合并格内部不会多出几条线；跨页处按片段的
         //   cont_top / cont_bottom 跳过切口那条边，看起来是裁开的而不是分出一条线。
         if (!layout_.placed_tables.empty()) {
-            const float lw_px = 1.0f;
             for (const PlacedTable& pt : layout_.placed_tables) {
                 for (const PlacedRow& pr : pt.placed) {
                     if (pr.page != page_index) continue;
@@ -360,16 +359,28 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
                         const float left = (pt.x + pt.col_x[static_cast<size_t>(c0)]) * zoom;
                         const float right = (pt.x + pt.col_x[static_cast<size_t>(c1s)]) * zoom;
                         if (right <= left) continue;
-                        base_.fillRect(Rect{left, top, lw_px, bot - top}, cfg_.table_line);
-                        base_.fillRect(Rect{right - lw_px, top, lw_px, bot - top}, cfg_.table_line);
+                        const int xl = static_cast<int>(std::lround(left));
+                        const int xr = static_cast<int>(std::lround(right));
+                        const int yt = static_cast<int>(std::lround(top));
+                        const int yb = static_cast<int>(std::lround(bot));
+                        if (xr <= xl || yb <= yt) continue;
+                        // 先取整再画：fillRect 按 floor/ceil 取像素范围，浮点坐标下
+                        //   "宽 1 磅"会被放大成两个像素 —— 那正是"边框比颜色更粗"的真因。
+                        const float fxl = static_cast<float>(xl);
+                        const float fyt = static_cast<float>(yt);
+                        const float fh = static_cast<float>(yb - yt);
+                        const float fw = static_cast<float>(xr - xl);
+                        base_.fillRect(Rect{fxl, fyt, 1.0f, fh}, cfg_.table_line);
+                        base_.fillRect(Rect{static_cast<float>(xr - 1), fyt, 1.0f, fh},
+                                       cfg_.table_line);
                         // 横线：上边每条都画，下边只在"表格最后一行"补。相邻两行如果各画
-                        //   自己的下边与上边，两条线错开一个像素，看起来就是加粗的一条粗线
-                        //   （这是"边框怎么这么粗"的真因）。跨页片段的切口两边都不画。
+                        //   自己的下边与上边，两条 1px 线错开一格就是加粗的一条粗线。
+                        //   跨页片段的切口两边都不画。
                         if (!pr.cont_top)
-                            base_.fillRect(Rect{left, top, right - left, lw_px}, cfg_.table_line);
+                            base_.fillRect(Rect{fxl, fyt, fw, 1.0f}, cfg_.table_line);
                         const bool last_row = (pr.row == pt.rows - 1);
                         if (!pr.cont_bottom && last_row)
-                            base_.fillRect(Rect{left, bot - lw_px, right - left, lw_px},
+                            base_.fillRect(Rect{fxl, static_cast<float>(yb - 1), fw, 1.0f},
                                            cfg_.table_line);
                     }
                 }

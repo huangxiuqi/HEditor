@@ -679,9 +679,18 @@ std::vector<PageRect> CaretResolver::selectionRectsIn(int first_page, int count)
         const float a1 = lb.inline_origin_pt + lb.offsetAtSide(l_hi, side_hi);
         Rect r;
         if (!lb.vertical) {
-            r.x = std::min(a0, a1);
+            float x0 = std::min(a0, a1);
+            float x1 = std::max(a0, a1);
+            // 表格：选区覆盖到这一行的行首/行尾时，高亮铺到格的左右边界。
+            //   一格被整段选中时应当整格反白，而不是只贴在字上 —— 这是"单元格选区"
+            //   与"文字选区"的差别（Word 的行为）。正文里 cell_lo / cell_hi 都是 0，不动。
+            if (lb.cell_hi_pt > lb.cell_lo_pt) {
+                if (l_lo == lb.first_cp) x0 = std::min(x0, lb.cell_lo_pt);
+                if (l_hi == lb.last_cp) x1 = std::max(x1, lb.cell_hi_pt);
+            }
+            r.x = x0;
             r.y = lb.block_lo_pt;
-            r.w = std::abs(a1 - a0);
+            r.w = x1 - x0;
             r.h = lb.block_hi_pt - lb.block_lo_pt;
         } else {
             r.x = lb.block_lo_pt;

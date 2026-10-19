@@ -8717,6 +8717,22 @@ int main() {
                            std::to_string(hit3 ? tail.para : -1) + "）");
         }
 
+        // 选区：整格被选中时高亮铺满格宽（不是只贴着字）—— 这是"单元格选区"与
+        //   "文字选区"的差别。参考 Word：一格整段选中时整格反白。
+        {
+            const float cell_w = lay.lines[0].cell_hi_pt - lay.lines[0].cell_lo_pt;
+            e45.selectAll();
+            const std::vector<PageRect> rects = e45.selectionRects();
+            bool full = false;
+            for (const PageRect& rr : rects) {
+                if (std::fabs(rr.r_pt.w - cell_w) < 1.0f) full = true;
+            }
+            expectTrue(cell_w > 10.0f && full,
+                       "全选时表格的格被整格高亮（格宽 " + std::to_string(cell_w) + "）");
+            e45.setCaret(0, 0);
+            e45.relayout();
+        }
+
         // 格内编辑：增量被禁（有表格），文本必须落进第二格那一段。
         e45.setCaret(1, 1);
         expectTrue(e45.typeTextAndRender("Z"), "在表格第二格打字");
