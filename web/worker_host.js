@@ -19,6 +19,11 @@
 //   两边各有自己的顶层常量（FONTS / DPR 之类），不隔离就是"标识符重复声明"的语法错误。
 (function () {
 
+// 两宿主共用的输入层（键位映射、命中归宿、连击、组合提交、DPI 跟随）。
+//   没有它就不启动：缺了它也能跑，只是键盘与指针各走一份，两边迟早分叉。
+if (!window.HEditorCore) throw new Error('web/host_core.js 未加载');
+const core = window.HEditorCore;
+
 // 屏幕像素比：1 个 CSS 像素背后有几个设备像素。渲染密度与显示换算都以它为准。
 //   做成现读而不是加载时缓存：缓存那份一旦与屏幕脱节（窗口被拖到另一块显示器上），
 //   凡是拿它折算的尺寸都会错，而且错得整整齐齐、看不出是 DPR 的问题。
@@ -135,23 +140,21 @@ let opSeq = 0;
 let askSeq = 0;
 let worker = null;
 let bootLead = 0;
-let composing = false;
+let input = null;         // 输入层句柄（见 host_core.createInput）
 let blinkTimer = null;
 let blinkAuto = false;   // 闪烁只在首帧自动起一次，别把 stopBlink 又拉起来
 let caretOn = true;
 // 与两宿主同一口径（理由见 app.js 的同名声明）：缩放 1 倍 = 96 dpi，其密度是 4 / 3。
 //   界面输入框收"倍数"，引擎与门面收"密度"，换算只在 syncZoomInput 与 zoomToFactor 两处做。
-const kZoomBase = 4 / 3;
-// 密度基准含 DPR：界面上的 1 倍永远是同一个物理尺寸，要花多少像素去画由屏幕决定 ——
-//   高分屏上同一个 A4 要用两倍的像素画才既尺寸正确又清晰。界面那一格不受影响。
-const baseDensity = () => kZoomBase * (window.devicePixelRatio || 1);
-// zoom 这个密度是按哪个 DPR 算出来的。读倍数要用它，不能用当前屏幕那个：换屏那一拍两者
-//   不同，拿新 DPR 去除会读到一个平白缩掉一半的假倍数，照它反推回去就成了空操作。
-let zoomDpr = window.devicePixelRatio || 1;
-const engineZoomOf = (factor) => Number(factor) * baseDensity();
-const uiZoomOf = (density) => density / (kZoomBase * zoomDpr);
-// 改密度必须走它：同时把 zoomDpr 记成"算这一刻用的那个屏幕"，两个口径才始终对得上。
-const setZoomDensity = (d) => { zoomDpr = window.devicePixelRatio || 1; zoom = Number(d); };
+//
+// 换算本身与"两个 DPR"的记账在 host_core.createZoom 里（两宿主同一份）：
+//   一个是当下屏幕的，一个是现有密度按哪个屏幕算的 —— 换屏那一拍两者不同。
+// 这里保留原有函数名，调用点一处不动；密度仍存在 zoom 这个局部变量里。
+const zoomCtl = core.createZoom({ base: 4 / 3 });
+const baseDensity = () => zoomCtl.base();
+const engineZoomOf = (factor) => zoomCtl.ofFactor(factor);
+const uiZoomOf = (density) => zoomCtl.factorOf(density);
+const setZoomDensity = (d) => { zoom = zoomCtl.set(d); };
 let zoom = baseDensity();
 let scenario = 6;
 let mode = 0;
@@ -161,34 +164,10 @@ let lastPointerId = null;   // 最近一次 pointerdown 的指针 id（按下时
 let capturedId = null;      // 已经捕获在容器上的指针 id（下次按下时先放掉，见 pointerdown）
 
 /**
- * 连击计数。
- *
- * pointerdown 的 detail 恒为 0 —— 规范只给 mousedown 定义了连击计数，指针事件沿用同一个
- *   MouseEvent 字段却没人填。直接读 ev.detail 的话三击永远不成立（"三击没反应"的成因）。
- *   这里自己数：两次按下间隔不超过 520 ms、位置差不超过 4 CSS px 算同一次连击。
- *   阈值按手感定，与起始拖选阈值同一个量级。
- */
-let clickSeq = 0;
-let clickTime = 0;
-let clickX = 0;
-let clickY = 0;
-
-function clickCountOf(ev) {
-  const now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
-  const near = clickSeq > 0 && now - clickTime <= 520 &&
-               Math.abs(ev.clientX - clickX) <= 4 && Math.abs(ev.clientY - clickY) <= 4;
-  clickSeq = near ? clickSeq + 1 : 1;
-  clickTime = now;
-  clickX = ev.clientX;
-  clickY = ev.clientY;
-  return clickSeq;
-}
-
-/**
  * 把当前的缩放按"倍数"回写到页面上的 #zoom 输入框。
  *
  * 输入框那一格是倍数（1 = 100% = 96 dpi），引擎与门面收的是密度（设备像素 / 磅），
- *   所以写进去之前要除以 kZoomBase。要拿换算因子请读门面的 zoomLevel —— 输入框里
+ *   所以写进去之前要折成倍数。要拿换算因子请读门面的 zoomLevel —— 输入框里
  *   那个数不是它。
  *
  * 这一笔回写本身是有来历的：单线程宿主的 run() 会写输入框，搬进 Worker 之后这条回写
@@ -907,161 +886,7 @@ function handleMessage(m) {
   if (m.t === 'error') return onWorkerError(m);
 }
 
-/* 输入 */
-
-function keyToOp(ev) {
-  if ((ev.ctrlKey || ev.metaKey) && !ev.altKey) {
-    const k = (ev.key || '').toLowerCase();
-    if (k === 'z' || k === 'y') return [ev.shiftKey || k === 'y' ? 'redo' : 'undo', {}];
-    // 全选与"到文档首尾"必须在这里拦下。下面那句 return null 会把带修饰键的键位
-    //   全部放行给浏览器，而浏览器对 #ime 的原生全选选中的是一行假文本（空的），
-    //   与文档毫无关系；Ctrl+Home/End 则会把整页滚到顶/底。
-    if (k === 'a') return ['selectAll', {}];
-    if (ev.key === 'Home') return ['docStart', { extend: ev.shiftKey }];
-    if (ev.key === 'End') return ['docEnd', { extend: ev.shiftKey }];
-  }
-  if (ev.ctrlKey || ev.metaKey || ev.altKey) return null;
-  // 方向键按物理方向映射：横排的行内轴是水平的、块轴是竖直的，所以左右走字、上下换行。
-  //   竖排正好翻过来（行内轴竖直、块轴水平）：上下走字、左右换列。
-  //   换列往哪一边由列序定 —— 中日竖排列自右向左（左 = 下一列），蒙文列自左向右
-  //   （右 = 下一列）。只按"是竖排吗"映射，蒙文的左右就会按反。
-  //   参考行为：Chrome 在 vertical-rl 的 contenteditable 里实测就是这个（out/_vkeyref.mjs）。
-  const axes = mirror.stats || {};
-  const vert = !!axes.caretVertical;
-  const dirLeft = axes.caretBlockReversed ? 1 : -1;   // 物理向左 = 行序 +1 还是 -1
-  switch (ev.key) {
-    case 'Backspace': return ['backspace', {}];
-    case 'Delete': return ['deleteForward', {}];
-    // extend = Shift：锚点不动，选区从锚点那一端继续长（引擎侧 setCaretRel 的 collapse）。
-    case 'ArrowLeft':
-      return vert ? ['vertical', { dir: dirLeft, extend: ev.shiftKey }]
-                  : ['move', { dcp: -1, extend: ev.shiftKey }];
-    case 'ArrowRight':
-      return vert ? ['vertical', { dir: -dirLeft, extend: ev.shiftKey }]
-                  : ['move', { dcp: 1, extend: ev.shiftKey }];
-    case 'ArrowUp':
-      return vert ? ['move', { dcp: -1, extend: ev.shiftKey }]
-                  : ['vertical', { dir: -1, extend: ev.shiftKey }];
-    case 'ArrowDown':
-      return vert ? ['move', { dcp: 1, extend: ev.shiftKey }]
-                  : ['vertical', { dir: 1, extend: ev.shiftKey }];
-    case 'Home': return ['lineStart', { extend: ev.shiftKey }];
-    case 'End': return ['lineEnd', { extend: ev.shiftKey }];
-    case 'Enter': return ['splitParagraph', {}];
-    case 'Tab': return [ev.shiftKey ? 'outdent' : 'indent', {}];
-    default:
-      // 可打印字符（ASCII / 标点 / 空格）：与单线程宿主同一条路 —— 直接在 keydown 里
-      //   提交，并 preventDefault 掉浏览器往 textarea 里的插入。
-      //   不能指望 textarea 的 input 事件：合成 KeyboardEvent 根本不会产生 input；
-      //   而真键盘下又因为这里 preventDefault 掉了插入，同样不会有 input。
-      //   两头都不成立 ⇒ 打字会静默地什么都不发生（探针里表现为"文档码点数没变"）。
-      if (ev.key && ev.key.length === 1) return ['type', { s: ev.key }];
-      return null;
-  }
-}
-
-function onKeyDown(ev) {
-  if (!host.ready || composing || ev.isComposing) return;
-  const c = keyToOp(ev);
-  if (!c) return;                 // 不认识的键（含 IME 的 Process 键）放行给浏览器
-  ev.preventDefault();
-  // 走 opUser 而不是 doOp：方向键与退格之后光标要立刻可见，并把闪烁整拍推后。
-  //   键盘与打字这几条输入路径都必须在 opUser 上，否则"移动中光标照旧按固定周期闪"。
-  trackInput(opUser(c[0], c[1]));   // 不等结果（零 await），但把句柄留给 host.rendered
-}
-
-/**
- * 在页面上按下鼠标：命中测试 → 落光标。
- *
- * 末尾那句 ta.focus() 不是收尾，是这条路的必要条件。
- *   canvas / div 都不可聚焦，Chrome 在 mousedown 的默认行为里会把 activeElement
- *   打回 <body> —— 此后 keydown 事件再也到不了宿主，键盘看起来"整个失灵"。
- *   实测（out/_inputcheck.mjs）：点一下之后 activeElement 变成 BODY，
- *   再按方向键偏移一动不动；点之前按同一键是动的。
- *   ⇒ "点击与键盘都不动了"是同一个成因，不是两处坏了。
- *   preventDefault() 只能挡住默认的焦点转移，显式 focus() 更稳（单线程宿主两样都做）。
- */
-function onPointerDown(ev) {
-  if (!host.ready || ev.button !== 0) return;
-  const gm = mirror.geom;
-  if (!gm) return;
-  // 文档坐标（设备像素）：x 从页列左缘量、y 从文档第 0 页顶量。两个模式同一个算式，
-  //   而且直接复用拖选取点那一个 framePointAt —— 两处各写一遍迟早会分叉（点与拖
-  //   落在不同位置，而症状只是"拖选的头一段跳一下"）。
-  //   不从页画布的 rect 量：换窗会换画布，而"容器顶 + 滚动量"是文档坐标的定义本身。
-  const pt = framePointAt(ev.clientX, ev.clientY);
-  if (!pt) return;
-  const xDev = pt.x;
-  const yDev = pt.y;
-  // 三击：选整格。点在哪一格的字上都算（边距带那条路太窄）；点不在表格里时退回
-  //   正常的落光标。与单线程宿主同一条手势。
-  //   计数自己数（见 clickCountOf）：pointerdown 的 detail 是 0，读它三击永远不成立。
-  if (clickCountOf(ev) === 3) {
-    clickSeq = 0;
-    blinkHold();
-    // 走命令（不是查询）：选整格会重画帧，而查询只回一个值、不重贴脏页 —— 画面于是停在
-    //   旧帧上，要等下一次闪烁相位（≤530 ms）那一拍把它重贴出来，画面上就是"点了要等
-    //   一秒才选中"。changed = false（点不在表格里）时退回正常落光标。
-    trackInput(opUser('cellSelectAt', { x: xDev / zoom, y: yDev / zoom }, true)
-      .then((st) => (st ? null : placeAt(xDev, yDev))));
-    ta.focus();
-    ev.preventDefault();
-    return;
-  }
-  // 页号按宿主的像素步距反算（与引擎的命中测试同一口径，见 EditorEngine::hitTestPt）：
-  //   宿主把页摆在 pagePxHeight + pageGapPx 这些整数像素上，与磅值差不到一像素，
-  //   但误差随页号累积 —— 用磅值折页号时，2000 段文档最后几页会偏下一整段。
-  const page = Math.max(0, Math.floor(yDev / gm.pageStep));
-  // 指针捕获：在浏览器窗口之外松手时，页面未必收得到 mouseup —— 那是
-  //   "松开了还在拖"的一条来源。捕获之后抬起一定回到容器上（容器在 DOM 里常驻，
-  //   不像页画布那样会被换窗丢掉）。捕获失败也无所谓：drag_select 那边还有
-  //   pointerup/pointercancel/dragend 与"移动时按钮已抬起"两条自愈路。
-  if (lastPointerId !== null) {
-    try { stageEl.setPointerCapture(lastPointerId); capturedId = lastPointerId; }
-    catch (e) { /* 合成事件没有指针 */ }
-    lastPointerId = null;
-  }
-  // 点击也要立刻按住光标可见：命中测试是一次往返，等它回来再归相位会晚一拍。
-  blinkHold();
-  // 命中一次往返，结果有两个去处：定位，以及"这一下要不要起拖选"。
-  //   落在正文之外时不起手 —— 从页外的空白拖起不该选中任何东西。定位由 placeAt 做，
-  //   与点击路径共用同一段，免得"拖选能不能起手"和"点击落哪"两处各判一次。
-  //
-  // 监听必须当场挂上（begin 传 false 表示先算"还没确定"），命中回来再 arm。
-  //   等命中回来才 begin 的话，按下与第一次移动之间的移动会被整段丢掉 ——
-  //   而那次移动往往正好是"用户按下去就往右拖"的头一段。
-  if (drag) drag.begin(ev, false);
-  const p = placeAt(xDev, yDev).then((hit) => {
-    if (drag) drag.arm(!!hit);
-  });
-  // clickAt 里有一次命中测试的往返，所以这一条既是"在途链"（排空要等它）也是
-  //   "最近一次输入的渲染"（host.rendered）。
-  trackInput(p);
-  ta.focus();
-  ev.preventDefault();
-}
-
-function onCompositionEnd(ev) {
-  composing = false;
-  const text = ev.data || ta.value || '';
-  ta.value = '';
-  if (text) trackInput(opUser('type', { s: text }));
-  setStatus('就绪');
-}
-
-// 把 markdown 还原成纯段落：与单线程宿主同一份规则，两处不能各写一套。
-function cleanMarkdownLines(raw) {
-  return raw
-    .split('\n')
-    .map((l) => l
-      .replace(/\*\*/g, '')
-      .replace(/\s*\\$/, '')
-      .replace(/^#+\s*/, '')
-      .replace(/^\d+[.、]\s*/, '')
-      .trim())
-    .filter((l) => l.length > 0)
-    .join('\n');
-}
+/* 输入层见 web/host_core.js：键位映射、命中归宿、连击、组合提交都在那里。 */
 
 /* 门面 */
 
@@ -1264,28 +1089,11 @@ Object.defineProperty(host, 'allText', {
  * 命中并定位（内部共用）。返回命中结果本身，没命中给 null。
  *
  * 坐标口径：xDev / yDev 是文档坐标（设备像素）—— x 从页左缘量，y 从文档第 0 页顶量。
- *   命中测试收的就是这个坐标系，所以这里只把设备像素折成磅（除以 zoom），不做别的换算。
- *
- * 与 clickAt 分开的理由：按下这一下有两个用处（定位、以及"要不要起拖选"），
- *   而 clickAt 的返回值是光标（门面契约，与单线程宿主逐字对齐），塞不下第二个结论。
+ *   命中测试收的就是这个坐标系，所以折磅（除以 zoom）与三种归宿（整格 / 带侧别与行别 /
+ *   普通落点）都在 host_core 里判。这里只剩一层壳，给门面的 clickAt 用。
  */
-async function placeAt(xDev, yDev) {
-  const hit = await askOp('hit', { x: xDev / zoom, y: yDev / zoom });
-  if (!hit) return null;
-  // 格子的边距带：引擎在命中里给了这一格的流区间，那就是"选整格"这条操作线。
-  //   它与落光标互斥 —— 点边距带不该同时把光标摆进格里的某个字之间。
-  if (typeof hit.cellPara === 'number') {
-    await host.selectCellAtPara(hit.cellPara | 0);
-    return hit;
-  }
-  if (typeof hit.side === 'number') {
-    // 行别一起搬：折行处"上一行行尾"与"下一行行首"是同一个偏移与侧别，
-    //   不带回去的话点下一行的行首会画到上一行行尾。
-    await host.setCaretAtSideLine(hit.para, hit.offset, hit.side, hit.line | 0);
-  } else {
-    await host.setCaret(hit.para, hit.offset);
-  }
-  return hit;
+function placeAt(xDev, yDev) {
+  return input.placeAt({ x: xDev, y: yDev });
 }
 
 /**
@@ -1619,7 +1427,7 @@ host.loadMedicalSample = async function loadMedicalSample(repeat) {
   const base = new URL('../', location.href);
   const res = await fetch(new URL('assets/samples/medical-records.md', base));
   if (!res.ok) throw new Error(String(res.status));
-  const text = cleanMarkdownLines(await res.text());
+  const text = core.cleanMarkdownLines(await res.text());
   await host.loadTextDocument(text, Math.max(1, Number(repeat) || 1));
   return { paragraphs: text.split('\n').length, chars: text.length };
 };
@@ -1640,7 +1448,7 @@ host.loadMedicalSample = async function loadMedicalSample(repeat) {
 function restartBlinkTimer() {
   if (blinkTimer) clearInterval(blinkTimer);
   blinkTimer = setInterval(() => {
-    if (!host.ready || composing) return;
+    if (!host.ready || (input && input.composing)) return;
     if (dragActive()) return;
     caretOn = !caretOn;
     postOp('blinkPhase', { on: caretOn });   // 单向：这一拍只有可见相位在变
@@ -1706,27 +1514,16 @@ const onResize = () => viewOp(Math.round(stageEl.scrollTop * dprNow()));
 /**
  * 屏幕像素比变了（窗口被拖到另一块显示器上）：密度基准跟着变，整幅要按新 DPR 重排重画。
  *
- * 判据取 devicePixelRatio 本身，不取 resize 事件 —— 拖窗口大小也会来 resize，那时 DPR
- *   没变，重排一遍纯属白花。动作只有一件：把同一个倍数按新基准重设一次。引擎那边按新
- *   密度重算页像素与帧，宿主再按回推的几何重建画布尺寸，两条腿走的都是既有路径。
- * 媒体查询按 Ndppx 精确匹配，所以每变一次要按新值重新挂一次，否则下次不再触发。
- *   具名是为了 dispose() 能摘掉监听。
+ * 监听与重挂由 host_core.armDprWatch 管，这里只写"变了之后做什么"：把同一个倍数按新
+ *   基准重设一次。引擎那边按新密度重算页像素与帧，宿主再按回推的几何重建画布尺寸。
+ *   与"这份密度是按哪个屏幕算的"比，不与上一次读到的 DPR 比：密度才是换算的唯一真源。
  */
-let dprQuery = null;
-function armDprWatch() {
-  if (dprQuery) dprQuery.removeEventListener('change', onDprWatch);
-  dprQuery = window.matchMedia('(resolution: ' + (window.devicePixelRatio || 1) + 'dppx)');
-  dprQuery.addEventListener('change', onDprWatch);
-}
-function onDprWatch() {
-  armDprWatch();
-  // 与"这份密度是按哪个屏幕算的"比，不与上一次读到的 DPR 比：密度才是换算的唯一真源，
-  //   它没按新屏幕重算过，就说明该重算。倍数从 zoomDpr 反推，所以读出来正是用户要的那个。
-  if (dprNow() === zoomDpr) return;
+const stopDprWatch = core.armDprWatch(() => {
+  if (dprNow() === zoomCtl.dpr) return;
   setZoomDensity(engineZoomOf(uiZoomOf(zoom)));
   syncZoomInput();
   post({ t: 'zoom', zoom, dpr: dprNow() });
-}
+});
 
 async function boot() {
   // 产物是用 -msimd128 编的：引擎不支持 SIMD 时，失败发生在 Worker 侧实例化那一步，
@@ -1751,18 +1548,54 @@ async function boot() {
   //   那个 value 恰好等于默认档。换算方向写反了在这里就会露出来。
   syncZoomInput();
 
-  ta.addEventListener('keydown', onKeyDown);
-  ta.addEventListener('compositionstart', () => {
-    composing = true;
-    ta.value = '';
-    setStatus('输入法组合中…（此期间不触碰引擎）');
+  // 输入层：键位映射、命中归宿、连击、组合提交都在 host_core 里，两宿主共用一份。
+  //   这里只交环境 —— 坐标怎么算、命令怎么发、落点怎么收尾，是这一侧才有的知识。
+  input = core.createInput({
+    isReady: () => host.ready,
+    ta,
+    hot: () => ({
+      vertical: !!(mirror.stats && mirror.stats.caretVertical),
+      blockReversed: !!(mirror.stats && mirror.stats.caretBlockReversed),
+    }),
+    // 一律按"没改动给 null"发：输入层只关心这一下有没有改动，而异步宿主的那一步
+    //   结果要到下一拍才知道，形状统一成 null / 统计，两边判断才一致。
+    write: (name, args) => opUser(name, args, true),
+    hit: (xPt, yPt) => askOp('hit', { x: xPt, y: yPt }),
+    pointOf: (ev) => framePointAt(ev.clientX, ev.clientY),
+    zoom: () => zoom,
+    capturePointer: () => {
+      if (lastPointerId === null) return;
+      try { stageEl.setPointerCapture(lastPointerId); capturedId = lastPointerId; }
+      catch (e) { /* 合成事件没有指针 */ }
+      lastPointerId = null;
+    },
+    // 监听必须当场挂上：命中是一次往返，等它回来才起手的话，按下与第一次移动之间的
+    //   移动会被整段丢掉，而那一段往往正是"按下去就往右拖"。
+    beginDrag: (ev) => { if (drag) drag.begin(ev, false); },
+    get drag() { return drag; },
+    focus: () => ta.focus(),
+    // 引擎在 Worker 那侧自己收尾（编辑完重排重画、脏页推回来），闪烁相位由 opUser 归位，
+    //   所以这一侧没有单线程宿主那套 afterEdit。
+    commit: () => {},
+    place: (a) => (typeof a.side === 'number'
+      ? opUser('setCaretAtSideLine',
+               { para: a.para, offset: a.offset, side: a.side, line: a.line | 0 })
+      : opUser('setCaret', { para: a.para, offset: a.offset })),
+    selectCellPara: (para) => opUser('selectCellAtPara', { para }, true),
+    cellSelected: () => {},
+    status: (text) => setStatus(text),
+    // 在途链：排空要等它，host.rendered 也取它。
+    onChain: (p) => trackInput(p),
   });
-  // 预编辑串先在状态栏本地预览（与单线程宿主同一处理，渲染进正文属于档 3）。
-  ta.addEventListener('compositionupdate', (ev) => setStatus(`组合中：${ev.data || ''}`));
-  ta.addEventListener('compositionend', onCompositionEnd);
+
+  // 键盘与 IME：全部由 textarea 承接（canvas 收不到键盘，也收不到合成事件）。
+  ta.addEventListener('keydown', input.onKeyDown);
+  ta.addEventListener('compositionstart', input.onCompositionStart);
+  ta.addEventListener('compositionupdate', input.onCompositionUpdate);
+  ta.addEventListener('compositionend', input.onCompositionEnd);
   // 指针走事件委托（挂在滚动容器上，不挂在每张画布上）：画布是随窗口动态建与丢的，
   //   逐张挂监听会在换窗时漏挂 —— 委托给容器就不会有那个缺口。
-  stageEl.addEventListener('mousedown', onPointerDown);
+  stageEl.addEventListener('mousedown', input.onPointerDown);
   // 记下最近一次 pointerdown 的指针 id：mousedown 的事件对象上没有 pointerId，
   //   而按下时要拿它去 setPointerCapture。用掉就清 —— 探针派的合成 MouseEvent
   //   没有配套的 pointerdown，靠这一条不会拿到过期的 id 去乱捕获。
@@ -1778,13 +1611,10 @@ async function boot() {
     }
     lastPointerId = ev.pointerId;
   });
-  // 滚动走单向：没人等结果（画布在文档流里，浏览器已经把像素搬完了）。
   stageEl.addEventListener('scroll', viewFireAndForget, { passive: true });
   // 视口变了不用换画布：页画布的尺寸只取决于页，视口只影响"窗口要哪几页" ——
   //   窗口一变，推回来的几何会让 syncPageCanvases 自己把缺的页建出来。
   window.addEventListener('resize', onResize);
-  // 窗口换到另一块显示器上时 DPR 会变，那时光 resize 不够：渲染密度也得跟着换。
-  armDprWatch();
   // 拖选：按下之后的移动与抬起由共享模块挂在 window 上（拖出画布再拖回来都收得到）。
   //   命中要走一次往返，所以模块那边按"只留最新一个待处理点"合并 —— 不合并的话
   //   每帧一次往返会排起长队，选区看起来追着鼠标跑却总是慢几拍。
@@ -1839,7 +1669,7 @@ host.dispose = () => {
   host.ready = false;
   if (blinkTimer) { clearInterval(blinkTimer); blinkTimer = null; }
   window.removeEventListener('resize', onResize);
-  if (dprQuery) { dprQuery.removeEventListener('change', onDprWatch); dprQuery = null; }
+  if (stopDprWatch) stopDprWatch();
   if (worker) { worker.terminate(); worker = null; }
   for (const el of slotCanvases) if (el.parentNode) el.parentNode.removeChild(el);
   slotCanvases.length = 0;

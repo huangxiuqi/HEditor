@@ -23,8 +23,8 @@
 | `app.js` 直接调 `mod.*` | 96 个方法 / 261 次 | 正则统计 |
 | 两边命令名的字面交集 | 35 | 集合运算 |
 | 仅 `app.js` 直调 | 61 | 同上 |
-| 其中与表内条目同义不同名 | 33 | 人工配对，见附录 B |
-| 表内完全没有对应命令 | 24 | 同上 |
+| 其中与表内条目同义不同名 | 36 | 人工配对，见附录 B |
+| 表内完全没有对应命令 | 21 | 同上 |
 | 特权访问（不能进表） | 4 | `FS` / `HEAPU8` / `allocBuffer` / `freeBuffer` |
 
 两条结论：
@@ -34,14 +34,14 @@
   滚动符号、结果何时到达而各自变形。把能抽的抽干净，收益约 15 行。
 - **重复的真实位置是引擎访问面，而且是两层重复。** 第一层是命名：命令表用短名加参数
   对象（`type` / `move` / `undo` / `caretStyle`），`app.js` 用 wasm 原名加位置参数
-  （`typeText` / `moveCaret` / `undoEdit` / `caretStyleJson`），61 个里 33 个是同一件事
+  （`typeText` / `moveCaret` / `undoEdit` / `caretStyleJson`），61 个里 36 个是同一件事
   的另一个名字。第二层是覆盖：帧几何（`frameRgba` / `frameWidth` / `frameHeight` /
   `frameSlots` / `frameByteSize`）、页度量（`pagePxWidth` / `pagePxHeight` / `pageGapPx` /
   `setPageMetrics`）、光标即时读数（`caretOffsetLive` / `caretVerticalNow` /
   `caretBlockReversedNow`）这几组表里根本没有，只能由 in-thread 直调。
 
   命名这一层比覆盖更值得先处理：它不涉及语义，却让"读一份代码要会两套名字"成为常态。
-  统一命名之后，缺口会从 61 缩到 24，剩下的才是真的需要补的命令。
+  翻译一次之后，缺口只剩 21 条，其中 17 条是读命令。
 
 ## 2. 先例
 
@@ -176,15 +176,20 @@ Promise 是 5.2 的取舍，不在这一层决定。**
 `applyWindow`（`app.js`）与 `desiredWindow` / `targetWindow` / `retarget`
 （`engine_worker.js`）是同一个算法的两份，且已经出现参数名不同的漂移。
 
-### 4.4 两件事：先统一命名，再补缺口
+### 4.4 命名：以命令表的短名为准
 
-**统一命名**是前置动作，因为它不涉及语义、却是"读一份代码要会两套名字"的根源。做法是
-命令表沿用 `app.js` 的 wasm 原名（`typeText` / `moveCaret` / `undoEdit` /
-`caretStyleJson`），废弃表里的短名（`type` / `move` / `undo` / `caretStyle`）。选原名
-而不是短名的理由：引擎的导出名是 C++ 侧的权威命名，短名只是宿主侧的手写别名，
-保留短名等于让引擎 API 有两套词汇。
+**方向**是短名，不是 wasm 原名。命令表是协议层，词汇由协议自己定义；`mod.typeText`
+那一层是实现细节。让协议名跟随导出名，等于把两层绑在一起：C++ 侧一次改名就会同时
+打到两个宿主与所有探针，而协议本该是稳定的那一面。
 
-配对样本（完整 33 对见附录 B）：
+短名还避开一个实际撞名：光标样式的读与写是两个操作，表内写叫 `caretStyle`，
+读若也叫 `caretStyle` 就无法区分。用原名则读是 `caretStyleJson`、写是 `setCaretStyle`，
+字母上分得开、语义上反而更像同一件事的两个方向。
+
+代价是 `app.js` 在步 3 改调表时按下面的表做一次名字翻译（36 个方法）。这个翻译只
+发生一次，翻译完就只剩一套词汇。
+
+配对样本（完整 36 对见附录 B）：
 
 | 表内短名 | app 直调原名 |
 | --- | --- |
@@ -201,22 +206,27 @@ Promise 是 5.2 的取舍，不在这一层决定。**
 | `stress` / `textDoc` | `loadStressDocument` / `loadTextDocument` |
 | `scenario` / `formSample` | `setScenario` / `loadFormSample` |
 
-**补缺口**共 24 条：
+**补缺口**共 21 条，其中 17 条是读命令（已补进表，见 6 节步 2），4 条是宿主自己的
+收尾入口，不进表：
 
 | 组 | 命令 | 数量 |
 | --- | --- | --- |
-| 帧几何 | `frameRgba` / `frameWidth` / `frameHeight` / `frameSlots` / `frameByteSize` | 5 |
-| 页度量 | `pagePxWidth` / `pagePxHeight` / `pageGapPx` / `setPageMetrics` | 4 |
-| 呈现与视图 | `relayoutAndPaint` / `setViewportAnchor` / `showCaret` / `setCaretStyle` / `setFrameSlots` | 5 |
+| 帧几何 | `frameWidth` / `frameHeight` / `frameByteSize` / `frameSlots` | 4 |
+| 页度量 | `pagePxWidth` / `pagePxHeight` / `pageGapPx` | 3 |
 | 光标即时读数 | `caretOffsetLive` / `caretVerticalNow` / `caretBlockReversedNow` | 3 |
 | 窗口 | `windowFirstPage` / `windowPageCount` | 2 |
 | 诊断 | `rasterBackend` / `buildStamp` | 2 |
-| 文档文本 | `documentText` | 1 |
-| 选区 | `selectionReport` / `setSelectionStyle` | 2 |
+| 样式读 | `caretStyleJson` / `selectionStyleJson` | 2 |
+| 选区 | `selectionReport` | 1 |
 
-另有 4 个**不进表**：`FS`（字体文件写入）、`allocBuffer` / `freeBuffer`（wasm 堆）、
-`HEAPU8`。它们是 in-thread 特权访问，worker 侧不存在对应的主线程堆。这 4 个在步 3 之后
-仍然是 `app.js` 里仅剩的直接访问。
+不进表的 4 条：
+
+- `frameRgba` —— 返回 wasm 堆视图，只在持有该实例的一侧有效，跨传输拿到的指针没有意义；
+- `setPageMetrics` / `setFrameSlots` / `relayoutAndPaint` —— 宿主装载与收尾内部调用的入口，
+  门面不暴露（暴露会让"什么时候重排"变成调用方的事）。
+
+另有 4 个**特权访问**（`FS` / `allocBuffer` / `freeBuffer` / `HEAPU8`）：worker 侧不存在
+对应的主线程堆，这 4 个在步 3 之后仍是 `app.js` 里仅剩的直接访问。
 
 ## 5. 三个不可合并的分叉
 
@@ -265,9 +275,30 @@ wasm 实例的一侧有效，不能跨传输）。今天的 `blitFrame`（`app.j
 取舍判据很简单：**不做步 4 就不要选路 B**。路 B 付出的是同步对照，换回来的是事件层合并；
 事件层不合并，这笔代价就白付。按第 7 节做到步 3 为止，走**路 A**。
 
+实测补充（见 6 节步 3b）：把门面方法包成 `async` 之后，`edit_probe` 14 项变红、
+整轮耗时从 42 s 涨到 158 s。所以路 B 的落地必须与事件层合并同步进行，不能先改形状
+再合并 —— 先改形状会得到一个"两边都异步、但探针同步假设全废"的中间态。
+
+**路 C：不逼同步，按值折链**（做步 4 时实际采用的那条）
+
+- 读：两边都是同步的。in-thread 直读引擎，异步宿主读镜像（`mirror.stats` / `mirror.geom`
+  这批字段本来就是推回来的热读）。
+- 写与命中：异步宿主返回 Promise，in-thread 返回当场结果。合并层用一个 `then1(v, fn)`
+  折链 —— 同步值当场回调，Promise 才等。
+- 于是事件层的代码只有一份，in-thread 那条路**仍然在同一个调用栈里完成**，
+  探针的同步假设一条都不用改。
+
+路 C 与路 A 的差别不是形状，而是"事件层归谁"：路 A 只能共享命令名，路 C 共享整层。
+与路 B 的差别是 in-thread 不必假装异步。判据见第 9 节：合完之后 `edit_probe` 两宿主
+各 365 项 0 红，没有任何中间态变红。
+
+路 B 的代价在实测里出现了两次折扣：先异步化（步 3b）拿不到合并收益却丢掉同步性质；
+强行异步之后，凡"发命令 → 立刻读值"的地方都要改成 `await`，而探针与工具栏接线里
+这样的地方有几百处。没有一处需要那个异步 —— 需要异步的只有 Worker 那一侧的传输。
+
 ### 5.3 标记契约：三条必须由宿主页声明
 
-（只有在路 B 下 `host_core` 才存在。路 A 下这张表仍然有用，它是两个宿主页的差异对照。）
+（`host_core` 落地之后这张表是"写宿主页时必须知道"的差异对照。）
 
 `host_core` 收一个 `opts.layout`，它决定三件事，这三条在 4.6.2 里已经写明是
 "写宿主页时必须知道"的：
@@ -280,6 +311,38 @@ wasm 实例的一侧有效，不能跨传输）。今天的 `blitFrame`（`app.j
 
 前两条是纯参数；第三条决定 `sink` 的实现，与 5.1 是同一件事的两面。
 
+### 5.4 成本核算：读为什么走镜像而不是异步
+
+实测（`out/_t_askcost.mjs`，worker 页，各 500 次）：
+
+| 读法 | 单次 | 说明 |
+| --- | --- | --- |
+| `ask` 一次往返 | **0.188 ms** | 消息 + 克隆 + 回包；与 188 µs 的旧读数一致 |
+| 读镜像两个字段 | **0.0006 ms** | 同拍快照，纯属性访问 |
+| 读镜像一组四个字段 | **0.001 ms** | 仍是同一次快照 |
+
+差 300 倍。按帧算更直观：某个字段每帧读 60 次，异步是 11 ms/帧，镜像 0.04 ms/帧。
+
+但**慢不是主要理由**，绝对值 0.19 ms 单次并不致命。三条真正的理由：
+
+- **自洽**：镜像是一份同拍快照，读 A 与读 B 之间不会插进一次编辑。异步读是逐个往返，
+  要"一组自洽的量"就必须另做批量协议加版本号。
+- **形态**：`if (caret.para === n)` 这类判断在异步读下变成 then 链。一次交互里
+  "读 → 判断 → 写"三步要串起来，点击从一次往返变成两三次，而每次都把这一拍让给渲染。
+- **对照**：in-thread 宿主能同步读，才使"两宿主同形门面 + 一套探针"成立。全异步之后
+  探针 630 处求值要改写，且失去独立对照（见 6 节步 3b 的实测代价）。
+
+镜像也不是免费：每拍 `sendState` 要把 `text0`（第 0 段全文）、`controls`、`dirtyPages`、
+`selection` 一起打包过去。这笔账记在 `host.viewDiag` 的 `textMax` / `textSum` /
+`packAvg` / `packMax` 上，宿主只读不判。
+
+判据因此是一条分工，而不是一个偏好：
+
+| 读的性质 | 走哪条 | 例子 |
+| --- | --- | --- |
+| 每帧或每次按键都读、字段小 | 进 `sendState`，读镜像 | 光标、统计、几何、选区、样式 |
+| 大对象、低频、本来就要等 | `ask` 往返 | 整篇文本、帧像素、bench、审计、命中 |
+
 ## 6. 迁移步骤
 
 每步都可停，每步都有可证伪判据。判据一律以 wasm 侧的浏览器探针为准。
@@ -289,61 +352,137 @@ wasm 实例的一侧有效，不能跨传输）。今天的 `blitFrame`（`app.j
 把 `engine_worker.js` 的分派、状态、窗口计算、页几何搬进新文件；`engine_worker.js`
 只剩 `importScripts` 与 `onmessage` 转发。行为不变。
 
-判据：`worker_probe` 68 项 0 红；`edit_probe` 在 `worker.html` 上项数与 0 红同前；
-`stress_probe` 69 次点击 0 不一致；`web_probe` 6 场景结构列一致。
+判据（已实测）：`worker_probe` 68 项 0 红；`edit_probe` 在 `worker.html` 上 365 项 0 红；
+`stress_probe` 69 次点击 0 不一致；`web_probe` 6 场景 0 页面异常、缺字 0。
 
-反向一半：`engine_worker.js` 里除 `importScripts` 与 `glueUrl` 外不得再出现 `mod.`
-（`grep -n "mod\."` 只剩这两处）。仍有残留说明分派没搬干净，"一份 API"就只是名义上的。
+反向一半：`engine_worker.js` 里除文件头那句说明外不再出现 `mod.`
+（`grep -n "mod\."` 只剩注释）。仍有调用说明分派没搬干净，"一份 API"就只是名义上的。
 
-### 步 2：统一命名并补齐 24 条命令
+### 步 2：补齐 17 条读命令
 
-按 4.4 先把表里的短名换成引擎原名，再补 24 条。改名与新命令都不动调用方。
-新增命令各配一条最小探针断言，避免"加了但没人用、也没人验"。
+按 4.4 的表把 17 条读命令补进 `engine_api.js` 的 READ 表。命名翻译不在这一步做 ——
+那是步 3 在 `app.js` 一侧的事，表内名一次定下就不再动。
 
-判据：新命令在 worker 页可调且返回形状与 `app.js` 直调同一方法一致。做法是在
-`worker_probe` 里对同一命令与 in-thread 同方法各取一次值做结构比对。
+`worker_probe` 加一节 [W15] 逐条取一次值并校验形状，另配一条反向断言（未知命令必须
+抛错，不能返回 undefined）。少了这一节，方法名拼错只会表现为某处 undefined，而
+undefined 不会让任何断言变红。
+
+判据：`worker_probe` 项数从 68 增到 74，0 红。已实测通过。
 
 ### 步 3：`app.js` 改调命令表
 
-261 处替换，机械但需要逐个核对返回形态。按三类处理：
+已完成。`app.js` 里 `mod.` 字面量从 261 处降到 0，引擎访问面收成两档：
 
-| 现有形态 | 处理 |
+| 档 | 用法 | 内容 |
+| --- | --- | --- |
+| 语义命令 | `api.read(name, args)` / `api.write(name, args)` | 编辑、光标、选区、命中、样式、控件、记账 —— 全部 |
+| 宿主特权 | `api.engine().xxx()` | 装载（字体、页度量、场景、缩放）、呈现（present / frameRgba / relayoutAndPaint / setFrameSlots）、wasm 堆（FS / HEAPU8 / allocBuffer / freeBuffer） |
+
+第二档的存在理由是策略而非语义：装载类命令在命令表里带着 `paintFull` 收尾，in-thread
+宿主有自己的 `settle`，两边都跑一遍就是双重重排。所以"改完之后怎么重画"留在宿主侧，
+命令表只管引擎那一步。
+
+替换形态分四类，前三类可批量、第四类必须逐条看：
+
+| 现有形态 | 处理 | 规模 |
+| --- | --- | --- |
+| `JSON.parse(mod.xxxJson())` | `api.read('xxx')`（表内已解析） | 50 |
+| 无参读写 | `api.read` / `api.write` | 91 |
+| 有参命令 | 位置参数转对象 | 87 |
+| 装载与呈现 | `api.engine().xxx()` | 33 |
+
+判据（已实测）：`edit_probe` 在 `index.html` 上 365 项 0 红；`worker_probe` 74 项 0 红；
+`lint_comments.py` 0 违规。
+
+三个实测踩到的坑，都不是"名字写错"这类显性问题：
+
+- **`present` 在命令表里是空壳。** 表内 `present: () => {}` 的收尾由 Worker 侧的 `push`
+  统一做；in-thread 直接调它等于什么都不做，症状是帧停在上一拍而所有读数正常。
+  这一处必须走 `api.engine().present()`。
+- **`bracketSlots` 在表内剥了一层。** 表内返回 `.slots` 数组（Worker 门面的形状），
+  而 `app.js` 要的是整个对象，直接替换得到 `数组.slots` 即 undefined。
+- **`hit` 的返回形态变了。** 原来返回 JSON 字符串（`'null'` 表示没命中），表内已经
+  `JSON.parse`。调用点若还写 `JSON.parse(hit)`，会在真实点击路径上抛错、光标不落，
+  表现成"点画布没反应"而不是报错。
+
+### 步 3b：门面一律返回 Promise（未落地，与技术判断相反）
+
+实测把 `facade` 的方法包成 `async`：`edit_probe` 14 项变红、整轮耗时从 42 s 涨到 158 s。
+原因是探针在单线程宿主上依赖"调用即生效、随后同步读值"，包成 Promise 后读到的是上一拍。
+
+结论：**门面异步化不能单独落地**，必须与步 4 的 `host_core` 合并一起做 —— 那时两边的
+事件层同时改写，探针的同步假设也一起换掉。单独做它等于丢掉 in-thread 的同步属性、
+却拿不到合并的收益。
+
+### 步 4：合并 `host_core.js`（走路 C，已落地第一刀）
+
+`web/host_core.js` 收的是**输入层**，判据是"这一层决定的都是这一下算哪条命令"：
+
+| 内容 | 原来在哪 |
 | --- | --- |
-| `JSON.parse(mod.xxxJson())` 一类（`editStatsJson` 单是 29 次） | 命令表侧已经 `JSON.parse`，调用点去掉外包 |
-| `mod.pagePxHeight()` 这类标量 | 替换为 `api.read('pagePxHeight')` |
-| `mod.FS` / `mod.allocBuffer` / `mod.freeBuffer` / `mod.HEAPU8` | 不动，in-thread 特权 |
+| 键位到命令（含竖排方向、修饰键、可打印字符） | 两份各自 60 行 `switch` |
+| 命中到落点（整格 / 带侧别与行别 / 普通落点） | 两份各自 30 行 `if` 链 |
+| 三击计数、组合提交、指针捕获记账 | 两份逐字重复 |
+| 屏幕像素比跟随、markdown 还原 | 两份逐字重复 |
 
-判据：`edit_probe` 在 `index.html` 上 361 项 0 红（`edit_probe` 的断言是具体像素与文本，
-不是"与另一宿主相同"，所以这一步的真判据就是它全绿）；`grep -n "mod\."` 在 `app.js`
-里只剩特权访问那几处。
+宿主交给它一个环境对象：`write` / `hit` / `pointOf` / `zoom` / `place` / `commit` /
+`status`，加上可选的 `onChain`。差异从环境进来，判定只写一遍。
 
-反向一半：替换后若某条命令的返回值形态与原直调不同，探针必须变红。验证办法是故意
-把一条命令的 `JSON.parse` 去掉，`edit_probe` 应出现类型错误而不是静默通过。
+**没有并进这一层的**（它们不是"算哪条命令"，而是"像素去哪"）：帧与画布的归属、
+窗口与滚动的策略、IME 框的定位、上屏与统计面板。这几处留在各自传输里，
+与第 5 节那三个分叉是同一条边界。
 
-### 步 4：合并 `host_core.js`（可选项，前提是切到路 B）
+判据（已实测）：`edit_probe` 两宿主各 365 项 0 红；`worker_probe` 74 项 0 红；
+`stress_probe` 69 次点击 0 不一致；`multi_probe` 35 项 0 红；`error_probe` 两宿主各
+19 项 0 红；`web_probe` 6 场景 0 异常；23 个诊断脚本全绿。
 
-实施前提是把门面切到路 B（一律 Promise）。不切直接合并，得到的是"看起来一份、
-实际两套分支"的代码，比两份更难读。
+**这一刀踩到的一个真缺陷**：`placeAt` 最初没等"落光标"那一步就返回，于是异步宿主的
+`clickAt` 在光标摆好之前就 resolve，调用方读到的是上一拍的光标。`edit_probe` 没抓到，
+`out/_linehead.mjs`（折行处点行首）抓到了 —— 两次点击读到同一个偏移。
+判据的差别就在这里：像素断言看的是最终画面，时序缺陷要看"调用返回之后立刻读"。
+修法是让 `placeAt` 把 `place` / `selectCellPara` 的返回值也折进链里（`then1`）。
+in-thread 侧 `then1` 当场回调，行为零变化。
 
-切完之后事件层收成一份，两个传输各自注入。这一步的重排量最大（约 4400 行 → 3000 行），
-收益是"新增交互只写一遍"。
+**第二刀：缩放换算收进 `core.createZoom`**（已完成）
 
-判据：四份探针在两宿主各跑一遍全绿；`stress_probe` 两宿主的现场帧逐像素一致；
-`multi_probe` 的混合三实例仍全绿。
+`kZoomBase` / `baseDensity` / `engineZoomOf` / `uiZoomOf` / `setZoomDensity` 在两侧逐字
+相同，各有 20~25 个调用点。收进 `createZoom` 之后，宿主保留同名函数与全部调用点，
+只把实现换成 `zoomCtl.base()` / `ofFactor()` / `factorOf()` / `set()`，密度仍存在各自的
+局部变量（`currentZoom` / `zoom`）里 —— 这样 diff 只落在声明处。
+
+这一刀真正留下的是"两个 DPR"的记账：
+
+| 名字 | 含义 | 用在哪 |
+| --- | --- | --- |
+| 当下屏幕的 DPR | 现读 `devicePixelRatio` | 算基准密度、倍数转密度 |
+| 密度按哪个屏幕算的 | `set()` 时记下 | 密度转倍数、换屏判断 |
+
+混用这两个的后果是"换屏那一拍读到缩掉一半的假倍数，照它反推回去等于空操作" ——
+原来这段说明在两个文件里各写一遍，现在只有一份，而且 `set()` 是唯一能同时更新两者的入口。
+
+**还没做的，以及为什么不再往下合**：
+
+- 画布与窗口：单线程宿主自己算窗口（`visiblePageRange` / `desiredWindow` / `applyWindow`），
+  worker 宿主把滚动交给引擎、按回推的几何建画布。这不是重复，是**两套所有权模型**。
+  合成一份等于让其中一侧改模型，那是产品决策，不是重排。
+- IME 框定位、上屏、统计面板、bench / 表单 / 布局诊断：各自依赖本侧 DOM，合并只会
+  产出一堆 `if (transport)`。
+- 剩下的逐字重复只有 `frameSlotOf` 的三行取模，与 `setStatus` 的几行文字。
+
+判据：23 个探针全绿（同第一刀），`lint_comments.py` 0 违规。
 
 回退点：任一步的探针出现无法在当轮解释的红，回到上一步的产物，不做"边修边合"。
 
 ## 7. 建议的落点
 
-**推荐做到步 3 为止。**
+**步 1～3 已完成**（见第 9 节）。做到这里，用户感知的繁琐已经消掉大半：同一件事不再有
+三个写法，命令表覆盖了 in-thread 用到的全部读命令，新增能力只动一处。
 
-理由：步 1～3 解决的是用户实际感知的繁琐——同一件事三个写法、命令表覆盖不全、
-加功能要动两处。做完之后 `app.js` 与 `worker_host.js` 各剩 800～1000 行纯 DOM 与事件
-代码，差异全部落在三个已知分叉上；`app.js` 不再出现 `mod.*` 字面量（四个特权访问除外），
-它对引擎的全部知识收敛到那张表里，"第二个产品"的风险随之消失。
+`app.js` 里不再出现 `mod.*` 字面量；它对引擎的全部知识收敛到命令表，剩下的
+`api.engine()` 只在装载、呈现、wasm 堆三类出现，每一处都能说出为什么必须直连。
 
-剩下的判断只有一条：事件层要不要合并。要合，就选路 B 并付那笔代价（5.2）；
-不合，步 1～3 就是终点。
+剩下的判断只有一条：事件层要不要合并。要合，就选路 B 把门面异步化**与** `host_core`
+合并一起做（5.2 与步 3b 的实测说明这两件事不能拆开）；不合，步 1～3 就是终点。
 
 步 4 的收益递减：剩下的是事件层，而事件层的差异（滚动的符号、输入层挂法、命中结果的
 到达时刻）真正存在，合并后仍要分支。它值得做的前提是"交互功能还在快速增加"，
@@ -363,6 +502,18 @@ wasm 实例的一侧有效，不能跨传输）。今天的 `blitFrame`（`app.j
 - 不因为步 3 就删掉 `index.html` 的验证台面板。那些面板（bench、重绘计数、表单变体、
   构建时间）是手工诊断入口，与宿主合并无关；要删是另一件事。
 
+## 9. 落地进度（2026-10-19）
+
+| 步 | 产物 | 判据 |
+| --- | --- | --- |
+| 1 | `engine_api.js` 1070 行；`engine_worker.js` 从 1258 行降到 342 行 | worker_probe 68/0、edit_probe(worker) 365/0、stress 69 次 0 不一致、web_probe 6 场景 0 异常 |
+| 2 | READ 表补 17 条读命令；worker_probe 加 [W15] 6 项 | worker_probe 74/0 |
+| 3 | `app.js` 的 `mod.` 从 261 处降到 0，改走 `api.read` / `api.write` / `api.engine()` | edit_probe(index) 365/0、worker_probe 74/0、lint_comments 0 违规 |
+| 3b | 门面异步化（试过，已回退） | 14 项红、耗时 42 s → 158 s，见 6 节步 3b |
+| 4 | `host_core.js`：输入层（键位、命中归宿、三击、组合、指针记账、DPI、markdown）+ 缩放换算（`createZoom`，两个 DPR 的记账）；两宿主的 `onKeyDown` / `onPointerDown` / `onComposition*` / `clickCountOf` / `cleanMarkdownLines` / `armDprWatch` / `kZoomBase` 一族全部删除 | 23 个探针全绿；`edit_probe` 两宿主 365/0；`worker_probe` 74/0；`stress` 69 次 0 不一致；`multi_probe` 35/0；`lint_comments` 0 违规 |
+
+步 2 之后 `worker_probe` 从 68 项增到 74 项；其余探针项数不变。
+
 ## 附录 A：两宿主同名函数（11 个）
 
 `armDprWatch`、`clickCountOf`（完全一致）；`cleanMarkdownLines`、`dragExtendTo`、
@@ -371,53 +522,63 @@ wasm 实例的一侧有效，不能跨传输）。今天的 `blitFrame`（`app.j
 
 ## 附录 B：仅 `app.js` 直调的 61 个方法
 
-数据来源：`app.js` 中 `mod.<name>` 去重后，与 `engine_worker.js` 命令表的键做差集。
-61 = 同义不同名 33 + 表内无对应 24 + 特权 4。另有 44 个命令表条目 `app.js` 未直调
+数据来源：`app.js` 中 `mod.<name>` 去重后，与 `engine_api.js` 命令表的键做差集。
+61 = 同义不同名 36 + 表内无对应 21 + 特权 4。另有 44 个命令表条目 `app.js` 未直调
 （`ping` / `heap` / `inkRows` / `frameDigest` / `blinkPhase` 等），属 worker 宿主专用或
 调试用，合并时原样保留。
 
-### B.1 表内无对应命令（24 条，需新增）
+### B.1 表内无对应命令（21 条）
+
+读命令 17 条，步 2 已补进 READ 表：
 
 | 组 | 命令 |
 | --- | --- |
-| 帧几何 | `frameRgba` / `frameWidth` / `frameHeight` / `frameSlots` / `frameByteSize` |
-| 页度量 | `pagePxWidth` / `pagePxHeight` / `pageGapPx` / `setPageMetrics` |
-| 呈现与视图 | `relayoutAndPaint` / `setViewportAnchor` / `showCaret` / `setCaretStyle` / `setFrameSlots` |
+| 帧几何 | `frameWidth` / `frameHeight` / `frameByteSize` / `frameSlots` |
+| 页度量 | `pagePxWidth` / `pagePxHeight` / `pageGapPx` |
 | 光标即时读数 | `caretOffsetLive` / `caretVerticalNow` / `caretBlockReversedNow` |
 | 窗口 | `windowFirstPage` / `windowPageCount` |
 | 诊断 | `rasterBackend` / `buildStamp` |
-| 文档文本 | `documentText` |
-| 选区 | `selectionReport` / `setSelectionStyle` |
+| 样式读 | `caretStyleJson` / `selectionStyleJson` |
+| 选区 | `selectionReport` |
 
-### B.2 同义不同名（33 个 app 方法对应 26 个表内条目，需改名统一）
+宿主内部入口 4 条，不进表：`frameRgba`（wasm 堆视图，只在持有该实例的一侧有效）、
+`setPageMetrics` / `setFrameSlots` / `relayoutAndPaint`（装载与收尾内部用）。
 
-| 表内现有名 | `app.js` 直调名 |
+### B.2 同义不同名（36 个 app 方法对应 34 个表内条目）
+
+步 3 按这张表翻译。左列是 `app.js` 现在的调用，右列是命令表里的名字。
+
+| `app.js` 直调名 | 表内名 |
 | --- | --- |
-| `type` | `typeText` |
-| `move` | `moveCaret` |
-| `vertical` | `moveCaretVertical` |
-| `undo` / `redo` | `undoEdit` / `redoEdit` |
-| `docStart` / `docEnd` | `caretToDocStart` / `caretToDocEnd` |
-| `lineStart` / `lineEnd` | `caretToLineStart` / `caretToLineEnd` |
-| `mergePrev` / `mergeNext` | `mergeWithPreviousParagraph` / `mergeWithNextParagraph` |
-| `caretStyle` | `caretStyleJson` |
-| `selectionStyle` | `selectionStyleJson` |
-| `stats` / `editStats` | `statsJson` / `editStatsJson` |
-| `controls` | `controlsJson` |
-| `dirtyPages` | `dirtyPagesJson` |
-| `bracketSlots` | `bracketSlotsJson` |
-| `hit` | `hitTest` |
-| `controlAt` | `controlAtPoint` |
-| `removeControl` | `removeControlAt` |
-| `setControlProp` | `setControlPropAt` |
-| `bench` | `benchRelayoutPaint` |
-| `prewarmPage` | `prewarmPageGlyphs` |
-| `scenario` | `setScenario` |
-| `zoom` | `setZoom` |
-| `formSample` | `loadFormSample` |
-| `stress` / `stressDiverse` | `loadStressDocument` / `loadStressDocumentDiverse` |
-| `textDoc` | `loadTextDocument` |
-| `fonts` | `loadFont` / `loadFontFromFile` / `setFontRoles` |
+| `typeText` | `type` |
+| `moveCaret` | `move` |
+| `moveCaretVertical` | `vertical` |
+| `undoEdit` / `redoEdit` | `undo` / `redo` |
+| `caretToDocStart` / `caretToDocEnd` | `docStart` / `docEnd` |
+| `caretToLineStart` / `caretToLineEnd` | `lineStart` / `lineEnd` |
+| `mergeWithPreviousParagraph` | `mergePrev` |
+| `mergeWithNextParagraph` | `mergeNext` |
+| `setCaretStyle` | `caretStyle` |
+| `setSelectionStyle` | `selectionStyle` |
+| `setViewportAnchor` | `viewport` |
+| `showCaret` | `phase`（SILENT 档，只改状态不呈现） |
+| `statsJson` / `editStatsJson` | `stats` / `editStats` |
+| `controlsJson` | `controls` |
+| `dirtyPagesJson` | `dirtyPages` |
+| `bracketSlotsJson` | `bracketSlots` |
+| `documentText` | `text` |
+| `hitTest` | `hit` |
+| `controlAtPoint` | `controlAt` |
+| `removeControlAt` | `removeControl` |
+| `setControlPropAt` | `setControlProp` |
+| `benchRelayoutPaint` | `bench` |
+| `prewarmPageGlyphs` | `prewarmPage` |
+| `setScenario` | `scenario` |
+| `setZoom` | `zoom` |
+| `loadFormSample` | `formSample` |
+| `loadStressDocument` / `loadStressDocumentDiverse` | `stress` / `stressDiverse` |
+| `loadTextDocument` | `textDoc` |
+| `loadFont` / `loadFontFromFile` / `setFontRoles` | `fonts`（三条合成一条 installFonts） |
 
 ### B.3 特权访问（4 条，不进表）
 

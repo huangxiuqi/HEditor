@@ -69,6 +69,10 @@
 <script src="drag_select.js"></script>
 <!-- WebAssembly SIMD 能力探测：与另两张页同一份，必须在两个主脚本之前。 -->
 <script src="wasm_feature.js"></script>
+<!-- 引擎命令表：app.js 的单线程实例也走它，必须在前。 -->
+<script src="engine_api.js"></script>
+<!-- 两宿主的共享输入层：两个主脚本都会在加载时就取它。 -->
+<script src="host_core.js"></script>
 <script src="app.js"></script>
 <script src="worker_host.js"></script>
 <script>

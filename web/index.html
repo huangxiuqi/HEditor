@@ -262,15 +262,31 @@
 //   浏览器会按"启发式新鲜度"复用缓存 —— 改了前端却在跑旧脚本，最难查的一种假象。
 //   文件没变就命中缓存（快），文件变了就是新 URL（不会命中旧副本）。
 (function () {
-  const url = new URL('./app.js', location.href);
-  const attach = (v) => {
-    const s = document.createElement('script');
-    s.src = v ? url.href + '?v=' + encodeURIComponent(v) : url.href;
-    document.body.appendChild(s);
+  // 两个脚本都要带版本戳：engine_api.js 也改得很勤，不带给它就会跑旧副本。
+  const bust = (name) => {
+    const url = new URL('./' + name, location.href);
+    return fetch(url.href, { method: 'HEAD', cache: 'no-store' })
+      .then((r) => {
+        const v = r.headers.get('last-modified');
+        return url.href + (v ? '?v=' + encodeURIComponent(v) : '');
+      })
+      .catch(() => url.href);
   };
-  fetch(url.href, { method: 'HEAD', cache: 'no-store' })
-    .then((r) => attach(r.headers.get('last-modified') || ''))
-    .catch(() => attach(''));
+  const attach = (src) => new Promise((res) => {
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = res;
+    s.onerror = res;
+    document.body.appendChild(s);
+  });
+  // 顺序是硬要求：host_core 与 engine_api 都必须先于 app.js ——
+  //   前者是输入层（app.js 一加载就取它的工厂），后者是命令表（启动时取工厂）。
+  bust('host_core.js')
+    .then((src) => attach(src))
+    .then(() => bust('engine_api.js'))
+    .then((src) => attach(src))
+    .then(() => bust('app.js'))
+    .then((src) => attach(src));
 })();
 </script>
 </body>

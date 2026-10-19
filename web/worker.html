@@ -105,6 +105,8 @@
   </div>
   <script src="host_error.js"></script>
   <script src="drag_select.js"></script>
+  <!-- 两宿主共用的输入层：必须在 worker_host.js 之前（它一加载就取这里的工厂）。 -->
+  <script src="host_core.js"></script>
   <!-- WebAssembly SIMD 能力探测：与另两张页同一份，必须在主脚本之前。 -->
   <script src="wasm_feature.js"></script>
   <script src="worker_host.js"></script>

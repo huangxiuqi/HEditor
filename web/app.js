@@ -24,6 +24,11 @@
 //   的语法错误 —— 而这类错误只在同页加载两个宿主时才出现，单个演示页永远看不到。
 (function () {
 
+// 两宿主共用的输入层（键位映射、命中归宿、连击、组合提交、DPI 跟随）。
+//   没有它就不启动：缺了它也能跑，只是键盘与指针各走一份，两边迟早分叉。
+if (!window.HEditorCore) throw new Error('web/host_core.js 未加载');
+const core = window.HEditorCore;
+
 const BASE = new URL('../', location.href);
 // 产物目录：默认交付档；带 ?wasm=debug 时指向调试档（断言 + 栈检查 + 源码映射）。
 //   两档是各自独立构建的目录，切换只影响取胶水层的路径。
@@ -81,6 +86,32 @@ const pagesEl = $('pages');
 const ta = $('ime');
 
 let mod = null;
+// 命令表实例：引擎语义的唯一来源（见 docs/一个引擎API与两种传输.md）。
+//   app.js 只经 api.read / api.write 访问引擎；直接调 mod 的只剩四个特权访问
+//   （FS / allocBuffer / freeBuffer / HEAPU8）。
+let api = null;
+
+/**
+ * in-thread 侧的呈现钩子。
+ *
+ * app.js 自己管画布与呈现，所以这些钩子只做空实现 —— 它们在 api 的 do / sendState
+ *   路径上才被调用，而 in-thread 只走 read / write。留成显式桩而不是 null：
+ *   万一以后误调，报的是"这里没有画布"而不是一个空引用。
+ */
+const apiHost = {
+  loadGlue: () => {
+    throw new Error('in-thread 的引擎由宿主自己装载，不走 api.boot');
+  },
+  slotCount: () => 0,
+  pagesMissing: () => 0,
+  ctxOfPage: () => null,
+  isContinuous: () => false,
+  viewCtx: () => null,
+  canvasCount: () => 0,
+  invalidateSlots: () => {},
+  blitPages: () => 0,
+  blitStats: () => ({ ms: 0, pages: 0 }),
+};
 let busy = false;
 let ready = false;
 // 缩放在界面那一格上是"倍数"（1 = 100% = Web 标准的 96 dpi，无量纲），引擎收的却是
@@ -88,23 +119,21 @@ let ready = false;
 //   96 dpi 对应 96 / 72 = 4 / 3：页宽 round(595.276 x 4 / 3) = 794。
 //   换算只做在界面接缝上（两个输入框、门面的 zoomFactor / zoomToFactor 一对）。
 //   引擎、判据、诊断读数一律继续用密度，别把倍数漏进去。
-const kZoomBase = 4 / 3;
-// 密度基准含 DPR：界面上的 1 倍永远是同一个物理尺寸，要花多少像素去画由屏幕决定。
-//   这个宿主里 devicePixelRatio 本来就是每处现读的，所以基准也现读，跟着屏幕走。
-const baseDensity = () => kZoomBase * (window.devicePixelRatio || 1);
-// currentZoom 这个密度是按哪个 DPR 算出来的。读倍数要用它，不能用当前屏幕那个：换屏那一拍
-//   两者不同，拿新 DPR 去除会读到一个平白缩掉一半的假倍数，照它反推回去就成了空操作。
-let zoomDpr = window.devicePixelRatio || 1;
-const engineZoomOf = (factor) => Number(factor) * baseDensity();
-const uiZoomOf = (density) => density / (kZoomBase * zoomDpr);
-// 改密度必须走它：同时把 zoomDpr 记成"算这一刻用的那个屏幕"，两个口径才始终对得上。
-const setZoomDensity = (d) => { zoomDpr = window.devicePixelRatio || 1; currentZoom = Number(d); };
+//
+// 换算本身与"两个 DPR"的记账在 host_core.createZoom 里（两宿主同一份）：
+//   一个是当下屏幕的，一个是现有密度按哪个屏幕算的 —— 换屏那一拍两者不同。
+// 这里保留原有函数名，调用点一处不动；密度仍存在 currentZoom 这个局部变量里。
+const zoomCtl = core.createZoom({ base: 4 / 3 });
+const baseDensity = () => zoomCtl.base();
+const engineZoomOf = (factor) => zoomCtl.ofFactor(factor);
+const uiZoomOf = (density) => zoomCtl.factorOf(density);
+const setZoomDensity = (d) => { currentZoom = zoomCtl.set(d); };
 let currentZoom = baseDensity();
 
 /**
  * 把当前缩放按"倍数"回写到输入框与它右边那一格。
  *
- * 两个方向上都要过换算：读输入框要乘 kZoomBase（倍数转密度），写输入框要除以它。
+ * 两个方向上都要过换算：读输入框要倍数转密度，写输入框要密度转倍数。
  *   截到 4 位是给输入框的 —— 4 / 3 这种无限小数直接塞进去会拖一长串；那一档差
  *   0.00003，千像素尺度上不到 0.1 像素，落不进任何容差。
  * 元素可能不存在（产品页只有舞台与输入层），缺了就跳过，不抛异常。
@@ -122,16 +151,12 @@ const kPageWidthPt = 595.276;
 const kPageHeightPt = 841.89;
 const kPageMarginPt = 56.7;
 let lastEdit = null;
-let composing = false;
 let caretOn = true;
 let blinkTimer = null;
 let drag = null;
 let lastPointerId = null;   // 最近一次 pointerdown 的指针 id（按下时用来做指针捕获）
 let capturedId = null;      // 已经捕获在页容器上的指针 id（下次按下时先放掉）
-let clickSeq = 0;           // 连击计数（三击选整格用它，见 clickCountOf）
-let clickTime = 0;
-let clickX = 0;
-let clickY = 0;
+let input = null;           // 输入层句柄（见 host_core.createInput）
 const pageErrors = [];
 let disposed = false;
 
@@ -218,14 +243,14 @@ const pageCanvases = new Map();  // 绝对页号 -> { el, g }
  * 接鼠标的页容器 —— 探针因此不必区分一张还是多张，判据口径也没变。
  */
 const frameCanvasProxy = {
-  get width() { return mod ? mod.frameWidth() : 1; },
-  get height() { return mod ? mod.frameHeight() : 1; },
+  get width() { return mod ? api.read('frameWidth') : 1; },
+  get height() { return mod ? api.read('frameHeight') : 1; },
   get style() { return pagesEl.style; },
   getBoundingClientRect() {
     const r = pagesEl.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
-    const step = mod ? mod.pagePxHeight() + mod.pageGapPx() : 0;
-    const first = mod ? mod.windowFirstPage() : 0;
+    const step = mod ? api.read('pagePxHeight') + api.read('pageGapPx') : 0;
+    const first = mod ? api.read('windowFirstPage') : 0;
     const top = r.top + (first * step) / dpr;
     const width = this.width / dpr;
     const height = this.height / dpr;
@@ -291,15 +316,15 @@ function syncPageBackdrop(pw, ph, step, dpr) {
  * 位置用绝对页号算（不是窗口内下标）—— 这样滚动换窗口时画布不会跟着漂。
  */
 function syncPageCanvases(first, count, total) {
-  const pw = mod.pagePxWidth();
-  const ph = mod.pagePxHeight();
-  const step = ph + mod.pageGapPx();
+  const pw = api.read('pagePxWidth');
+  const ph = api.read('pagePxHeight');
+  const step = ph + api.read('pageGapPx');
   const dpr = window.devicePixelRatio || 1;
 
   // 只在真的变了才写 style：写一次就触发一次样式重算与布局，
   //   而这一段每拍都跑（敲一个字就跑一次），没变还写就是白付这笔钱。
   const w = (pw / dpr) + 'px';
-  const h = ((Math.max(1, total) * step - mod.pageGapPx()) / dpr) + 'px';
+  const h = ((Math.max(1, total) * step - api.read('pageGapPx')) / dpr) + 'px';
   if (pagesEl.style.width !== w) pagesEl.style.width = w;
   if (pagesEl.style.height !== h) pagesEl.style.height = h;
   syncPageBackdrop(pw, ph, step, dpr);
@@ -343,7 +368,7 @@ let lastAnchor = '';
 
 function visiblePageRange() {
   const dpr = window.devicePixelRatio || 1;
-  const step = mod.pagePxHeight() + mod.pageGapPx();
+  const step = api.read('pagePxHeight') + api.read('pageGapPx');
   const total = Math.max(1, lastEdit ? lastEdit.totalPages : 1);
   const sr = stageEl.getBoundingClientRect();
   const pr = pagesEl.getBoundingClientRect();
@@ -373,10 +398,10 @@ const kWindowMaxPixels = 24 * 1024 * 1024;
 
 function maxWindowPages() {
   const dpr = window.devicePixelRatio || 1;
-  const step = mod.pagePxHeight() + mod.pageGapPx();
+  const step = api.read('pagePxHeight') + api.read('pageGapPx');
   const vis = Math.ceil((stageEl.clientHeight * dpr) / step);
   const byPixels = Math.floor(kWindowMaxPixels /
-                               Math.max(1, mod.pagePxWidth() * mod.pagePxHeight()));
+                               Math.max(1, api.read('pagePxWidth') * api.read('pagePxHeight')));
   return Math.max(vis, Math.min(kWindowMaxPages, byPixels, vis + kWindowMarginPages));
 }
 
@@ -536,7 +561,7 @@ function applyWindow() {
   const key = w.first + ':' + w.count;
   if (key === lastAnchor) return false;
   lastAnchor = key;
-  mod.setViewportAnchor(w.first, w.count);
+  api.write('viewport', { first: w.first, count: w.count });
   return true;
 }
 
@@ -555,7 +580,7 @@ function presetWindowForLoad() {
   if (!mod) return;
   stageEl.scrollTop = 0;
   const n = maxWindowPages();
-  mod.setViewportAnchor(0, n);
+  api.write('viewport', { first: 0, count: n });
   lastAnchor = '0:' + n;
 }
 
@@ -566,7 +591,7 @@ function presetWindowForLoad() {
 function scrollCaretIntoView(st) {
   if (!st || st.caretPage < 0) return;
   const dpr = window.devicePixelRatio || 1;
-  const step = mod.pagePxHeight() + mod.pageGapPx();
+  const step = api.read('pagePxHeight') + api.read('pageGapPx');
   // 光标不在窗口里时（用户把屏幕滚到别处了）caretY 是个"窗口帧外"的数，
   //   拿它算绝对位置会滚到一个毫无关系的地方 —— 直接按页算到那一页的页首。
   const inWindow = st.caretPage >= st.windowFirstPage &&
@@ -601,7 +626,7 @@ function scrollCaretIntoView(st) {
  *   切帧、自审、光标滚动定位三处都按它算，不再用"页号 - 窗口首页"。
  */
 function frameSlotOf(page) {
-  const n = (mod && mod.frameSlots) ? mod.frameSlots() : 0;
+  const n = mod ? api.read('frameSlots') : 0;
   if (n <= 0) return 0;
   return ((page % n) + n) % n;
 }
@@ -612,11 +637,11 @@ function frameSlotOf(page) {
  */
 let frameSlotsSent = 0;
 function syncFrameSlots() {
-  if (!mod || typeof mod.setFrameSlots !== 'function') return false;
+  if (!mod || typeof api.engine().setFrameSlots !== 'function') return false;
   const n = maxWindowPages();
   if (n <= 0 || n === frameSlotsSent) return false;
   frameSlotsSent = n;
-  mod.setFrameSlots(n);
+  api.engine().setFrameSlots(n);
   return true;
 }
 
@@ -626,7 +651,10 @@ function syncFrameSlots() {
  */
 function presentNow() {
   syncFrameSlots();
-  mod.present();
+  // 命令表里的 present 是"空操作 + 由传输层统一收尾"（Worker 侧 push 会 present）。
+  //   in-thread 没有收尾层，所以这里必须直调引擎 —— 换成 api.write('present') 会
+  //   什么都不做，症状是帧停在上一拍、而所有读数看起来都正常。
+  api.engine().present();
 }
 
 /**
@@ -634,7 +662,7 @@ function presentNow() {
  */
 function relayoutNow() {
   syncFrameSlots();
-  mod.relayoutAndPaint();
+  api.engine().relayoutAndPaint();
 }
 
 function settle(st, opts) {
@@ -645,14 +673,14 @@ function settle(st, opts) {
   if (o.scroll !== false) scrollCaretIntoView(st);
   if (applyWindow()) {
     presentNow();
-    st = JSON.parse(mod.editStatsJson());
+    st = api.read('editStats');
     lastEdit = st;
   }
   // 槽数变了要再画一次：帧的布局整体换了（引擎那边已把帧作废），不重画就会拿
   //   新槽号去取旧布局的源行 —— 每一页都贴错位置。
   if (syncFrameSlots()) {
     presentNow();
-    st = JSON.parse(mod.editStatsJson());
+    st = api.read('editStats');
     lastEdit = st;
   }
   const t1 = performance.now();
@@ -661,7 +689,7 @@ function settle(st, opts) {
   if (o.render !== false) {
     renderEdit(st);
     renderForm(st);
-    renderLayout(JSON.parse(mod.statsJson()));
+    renderLayout(api.read('stats'));
   }
   // 宿主侧两段的账：窗口对齐 + 滚动（窗口）+ 上屏 + 刷面板。
   //   引擎那一段由 editStats 报，这两段只有宿主自己知道 —— 而"敲一个字 20 ms"
@@ -689,25 +717,17 @@ window.addEventListener('error', onWindowError);
 window.addEventListener('unhandledrejection', onUnhandledRejection);
 
 // 屏幕像素比变了（窗口被拖到另一块显示器上）：密度基准跟着变，整幅要按新 DPR 重排重画。
-//   判据取 devicePixelRatio 本身，不取 resize 事件 —— 拖窗口大小也会来 resize，那时
-//   DPR 没变，重排一遍纯属白花。媒体查询按 Ndppx 精确匹配，每变一次要重挂。
-let dprQuery = null;
-function armDprWatch() {
-  if (dprQuery) dprQuery.removeEventListener('change', onDprWatch);
-  dprQuery = window.matchMedia('(resolution: ' + (window.devicePixelRatio || 1) + 'dppx)');
-  dprQuery.addEventListener('change', onDprWatch);
-}
-function onDprWatch() {
-  armDprWatch();
+//   监听与重挂由 host_core.armDprWatch 管，这里只写"变了之后做什么"。
+//   与"这份密度是按哪个屏幕算的"比，不与上一次读到的 DPR 比：密度才是换算的唯一真源。
+const stopDprWatch = core.armDprWatch(() => {
   if (!ready || disposed || !mod) return;
-  if ((window.devicePixelRatio || 1) === zoomDpr) return;
-  // 倍数从 zoomDpr 反推，所以它此刻读出来就是用户真正要的那个（不受屏幕已变的影响）。
+  if ((window.devicePixelRatio || 1) === zoomCtl.dpr) return;
+  // 倍数从 zoomCtl.dpr 反推，所以它此刻读出来就是用户真正要的那个（不受屏幕已变的影响）。
   setZoomDensity(engineZoomOf(uiZoomOf(currentZoom)));
-  mod.setZoom(currentZoom);
+  api.engine().setZoom(currentZoom);
   syncZoomLabel();
   relayoutAndBlit();
-}
-armDprWatch();
+});
 
 const fmt = (n, d = 2) => Number(n).toFixed(d);
 const kb = (n) => (n / 1024).toFixed(1) + ' KB';
@@ -773,20 +793,6 @@ let fontMode = 'full';
  * 把 markdown 里的示例文本还原成纯段落：去掉标题号、强调记号与行尾的换行符，丢掉空行。
  * 标点、数字与单位原样保留 —— 病历里的体温、剂量、比值都要能原样排版。
  */
-function cleanMarkdownLines(raw) {
-  return raw
-    .split('\n')
-    .map((l) =>
-      l
-        .replace(/\*\*/g, '')
-        .replace(/\s*\\$/, '')
-        .replace(/^#+\s*/, '')
-        .replace(/^\d+[.、]\s*/, '')
-        .trim())
-    .filter((l) => l.length > 0)
-    .join('\n');
-}
-
 /**
  * 装真病历样例：读 assets/samples/medical-records.md，清洗后交给引擎按段落建文档。
  *
@@ -796,8 +802,8 @@ function cleanMarkdownLines(raw) {
 async function applyMedicalSample(repeat) {
   const res = await fetch(new URL('assets/samples/medical-records.md', BASE));
   if (!res.ok) throw new Error(`${res.status}`);
-  const text = cleanMarkdownLines(await res.text());
-  mod.loadTextDocument(text, Math.max(1, Number(repeat) || 1));
+  const text = core.cleanMarkdownLines(await res.text());
+  api.engine().loadTextDocument(text, Math.max(1, Number(repeat) || 1));
   relayoutAndBlit();
   return { paragraphs: text.split('\n').length, chars: text.length };
 }
@@ -822,24 +828,24 @@ async function loadFonts(mode) {
       //   canOwn 传 true：MEMFS 直接持有这份字节，不再拷一份（十几 MB，这一拷很贵）。
       const name = '/' + f.path.split('/').pop();
       try {
-        mod.FS.unlink(name);
+        api.engine().FS.unlink(name);
       } catch (e) {
         // 文件不在就是常态（第一次装），什么都不用做
       }
-      mod.FS.createDataFile('/', name, buf, true, false, true);
-      idx = mod.loadFontFromFile(name);
+      api.engine().FS.createDataFile('/', name, buf, true, false, true);
+      idx = api.engine().loadFontFromFile(name);
     } else {
-      const ptr = mod.allocBuffer(buf.length);  // ① 在 wasm 堆里要一块地
-      mod.HEAPU8.set(buf, ptr);                 // ② 字节穿边界（alloc 之后才读 HEAPU8）
-      idx = mod.loadFont(f.label, ptr, buf.length);  // ③ wasm 侧解析
-      mod.freeBuffer(ptr);
+      const ptr = api.engine().allocBuffer(buf.length);  // ① 在 wasm 堆里要一块地
+      api.engine().HEAPU8.set(buf, ptr);                 // ② 字节穿边界（alloc 之后才读 HEAPU8）
+      idx = api.engine().loadFont(f.label, ptr, buf.length);  // ③ wasm 侧解析
+      api.engine().freeBuffer(ptr);
     }
     if (idx < 0) throw new Error(`字体解析失败：${f.path}（${mode}）`);
     indices[f.role] = idx;
     rows.push([f.label, `${kb(buf.length)} → #${idx}（${mode}）`]);
   }
 
-  mod.setFontRoles(indices.cjk, indices.mongol, indices.latin);
+  api.engine().setFontRoles(indices.cjk, indices.mongol, indices.latin);
   return { indices, rows, bytes, ms: performance.now() - t0 };
 }
 
@@ -894,6 +900,15 @@ async function boot() {
   });
   const wasmMs = performance.now() - tWasm;
 
+  // 引擎交给命令表。in-thread 的装载路径与 Worker 不同（要读 HEAD、比构建戳、量字体
+  //   字节），所以由这里装载、再 attach；之后对引擎的调用一律走 api.read / api.write。
+  const EngineApi = window.__heditorEngineApi;
+  if (!EngineApi) {
+    throw new Error('engine_api.js 没加载（它必须在 app.js 之前）');
+  }
+  api = EngineApi.createEngineApi({ post: () => {}, host: apiHost });
+  api.attach(mod);
+
   // 页面跑的到底是哪一版：两次对照的必须是同一种时刻。
   //   runStamp 来自 wasm 自己（编进去的配置时刻），而产物文件的 mtime 是构建时刻 ——
   //   拿两者相减，只要"构建比配置晚五分钟以上"就恒报旧副本，而页面跑的其实是最新那份。
@@ -907,7 +922,7 @@ async function boot() {
   } catch (err) {
     console.warn('读不到构建戳旁证（不影响启动）', err);
   }
-  const runStamp = typeof mod.buildStamp === 'function' ? mod.buildStamp() : '未知';
+  const runStamp = api.read('buildStamp');
   const staleSeed = diskStamp !== '' && diskStamp !== runStamp;
   const buildEl2 = document.getElementById('build');
   if (buildEl2) {
@@ -961,7 +976,7 @@ async function boot() {
         ta.focus();
         return;
       }
-      mod.setScenario(id);
+      api.engine().setScenario(id);
       relayoutAndBlit();
       ta.focus();
     });
@@ -973,7 +988,7 @@ async function boot() {
     zoom.addEventListener('input', () => {
       setZoomDensity(engineZoomOf(zoom.value));
       syncZoomLabel();
-      mod.setZoom(currentZoom);
+      api.engine().setZoom(currentZoom);
       relayoutAndBlit();
     });
   }
@@ -1004,7 +1019,7 @@ async function boot() {
   if (modeSel) {
     modeSel.disabled = false;
     modeSel.addEventListener('change', () => {
-      mod.setEditMode(Number(modeSel.value));
+      api.write('setEditMode', { mode: Number(modeSel.value) });
       relayoutAndBlit();
       ta.focus();
     });
@@ -1026,8 +1041,8 @@ async function boot() {
     formBtn.disabled = false;
     formBtn.addEventListener('click', () => {
       const v = variantSel ? Number(variantSel.value) : 0;
-      mod.loadFormSample(v);
-      if (modeSel) modeSel.value = String(mod.editMode());
+      api.engine().loadFormSample(v);
+      if (modeSel) modeSel.value = String(api.read('editMode'));
       relayoutAndBlit();
       ta.focus();
       setStatus(formHint[v] || formHint[0]);
@@ -1044,8 +1059,8 @@ async function boot() {
   if (caretColor && caretWidth && selColor && selAlpha) {
     const hex = (c) => '#' + c.slice(0, 3).map((v) => v.toString(16).padStart(2, '0')).join('');
     const rgb = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
-    const initCaret = JSON.parse(mod.caretStyleJson());
-    const initSel = JSON.parse(mod.selectionStyleJson());
+    const initCaret = api.read('caretStyleJson');
+    const initSel = api.read('selectionStyleJson');
     caretColor.value = hex(initCaret.color);
     caretWidth.value = String(initCaret.widthPt);
     selColor.value = hex(initSel.color);
@@ -1055,12 +1070,12 @@ async function boot() {
     //   所以这条路上每一拍只有一次 present，没有整页重光栅。
     const pushCaret = () => {
       const c = rgb(caretColor.value);
-      mod.setCaretStyle(c[0], c[1], c[2], 255, Number(caretWidth.value));
+      api.write('caretStyle', { style: { color: [c[0], c[1], c[2], 255], widthPt: Number(caretWidth.value) } });
       presentStyleChange();
     };
     const pushSel = () => {
       const c = rgb(selColor.value);
-      mod.setSelectionStyle(c[0], c[1], c[2], Number(selAlpha.value));
+      api.write('selectionStyle', { style: { color: [c[0], c[1], c[2], Number(selAlpha.value)] } });
       presentStyleChange();
     };
     caretColor.addEventListener('input', pushCaret);
@@ -1069,13 +1084,63 @@ async function boot() {
     selAlpha.addEventListener('input', pushSel);
   }
 
-  // 键盘与 IME：全部由 textarea 承接（canvas 收不到键盘，也收不到合成事件）
-  ta.addEventListener('keydown', onKeyDown);
-  ta.addEventListener('compositionstart', onCompositionStart);
-  ta.addEventListener('compositionupdate', onCompositionUpdate);
-  ta.addEventListener('compositionend', onCompositionEnd);
+  // 输入层：键位映射、命中归宿、连击、组合提交都在 host_core 里，两宿主共用一份。
+  //   这里只交环境 —— 坐标怎么算、命令怎么发、落点怎么收尾，是这一侧才有的知识。
+  input = core.createInput({
+    isReady: () => ready,
+    isBusy: () => busy,
+    ta,
+    hot: () => ({
+      vertical: !!api.read('caretVerticalNow'),
+      blockReversed: !!api.read('caretBlockReversedNow'),
+    }),
+    write: (name, args) => api.write(name, args),
+    hit: (xPt, yPt) => api.read('hit', { x: xPt, y: yPt }),
+    pointOf: (ev) => framePointFromEvent(ev),
+    zoom: () => currentZoom,
+    capturePointer: () => {
+      if (lastPointerId === null) return;
+      try { pagesEl.setPointerCapture(lastPointerId); capturedId = lastPointerId; }
+      catch (e) { /* 合成事件没有指针 */ }
+      lastPointerId = null;
+    },
+    beginDrag: (ev) => { if (drag) drag.begin(ev, false); },
+    get drag() { return drag; },
+    focus: () => ta.focus(),
+    // 编辑之后的收尾只有这一处：取统计、对齐窗口、上屏、刷面板、把光标滚进视口。
+    //   没有改动就走重置闪烁 —— 栈空时的撤销与"已经在段首"都属于这一类。
+    commit: (changed) => { if (changed) afterEdit(); else resetBlink(); },
+    place: (a) => {
+      if (typeof a.side === 'number') {
+        api.write('setCaretAtSideLine',
+                  { para: a.para, offset: a.offset, side: a.side, line: a.line | 0 });
+        caretOn = true;
+        api.write('phase', { on: true });
+        presentNow();
+        afterEdit();
+      } else {
+        setCaretAndPresent(a.para, a.offset);
+      }
+    },
+    selectCellPara: (para) => {
+      api.write('selectCellAtPara', { para });
+      caretOn = true;
+      presentNow();
+      afterEdit();
+    },
+    // 整格选区的插入点钉在焦点那一格的末尾，它是"接下来打字会落在哪"的读数，
+    //   藏掉就看不见了，所以这里只按住可见、不改相位。
+    cellSelected: () => { caretOn = true; presentNow(); afterEdit(); },
+    status: (text) => setStatus(text),
+  });
+
+  // 键盘与 IME：全部由 textarea 承接（canvas 收不到键盘，也收不到合成事件）。
+  ta.addEventListener('keydown', input.onKeyDown);
+  ta.addEventListener('compositionstart', input.onCompositionStart);
+  ta.addEventListener('compositionupdate', input.onCompositionUpdate);
+  ta.addEventListener('compositionend', input.onCompositionEnd);
   // 鼠标挂在页容器上而不是某一张画布：事件落在哪一页都走同一条换算。
-  pagesEl.addEventListener('mousedown', onCanvasMouseDown);
+  pagesEl.addEventListener('mousedown', input.onPointerDown);
   // 记下最近一次 pointerdown 的指针 id：mousedown 上没有 pointerId，而按下时要拿它
   //   去 setPointerCapture。用掉就清，合成事件（探针 clickAt 派的 MouseEvent）
   //   不会拿到过期的 id 去乱捕获。
@@ -1096,10 +1161,7 @@ async function boot() {
     drag = window.createDragSelect({
       container: stageEl,
       pointAt: framePointAt,
-      hitAt: (x, y) => {
-        const hit = mod.hitTest(x / currentZoom, y / currentZoom);
-        return hit === 'null' ? null : JSON.parse(hit);
-      },
+      hitAt: (x, y) => api.read('hit', { x: x / currentZoom, y: y / currentZoom }),
       extendTo: dragExtendTo,
     });
   } else if (errorSurface) {
@@ -1112,13 +1174,13 @@ async function boot() {
   //   那个 value 恰好等于默认档。换算方向写反了在这里就会露出来。
   syncZoomLabel();
   // 页度量要先设再装载：它会让整篇重排，排在装载之前只会排这一次。
-  mod.setPageMetrics(kPageWidthPt, kPageHeightPt, kPageMarginPt);
-  mod.setZoom(currentZoom);
+  api.engine().setPageMetrics(kPageWidthPt, kPageHeightPt, kPageMarginPt);
+  api.engine().setZoom(currentZoom);
   // 先把视口锚点摆成"开头几页"，再装载。顺序反了的话第一次重排会按整篇栅格化 ——
   //   200 段那一份就是 16 页、~450 ms，而其中 13 页马上就会被丢掉。
   //   页数这时还不知道，交给引擎夹回文档范围内即可。
   presetWindowForLoad();
-  mod.setScenario(DEFAULT_SCENARIO);
+  api.engine().setScenario(DEFAULT_SCENARIO);
   relayoutAndBlit();
   ta.focus();
 
@@ -1147,18 +1209,18 @@ async function boot() {
  */
 function blitFrame(st) {
   const t0 = performance.now();
-  const w = mod.frameWidth();
-  const h = mod.frameHeight();
-  const view = mod.frameRgba();
+  const w = api.read('frameWidth');
+  const h = api.read('frameHeight');
+  const view = api.engine().frameRgba();
   if (view.byteLength !== w * h * 4) {
     throw new Error(`帧长度不符：${view.byteLength} ≠ ${w}×${h}×4`);
   }
   const t1 = performance.now();
 
-  const first = mod.windowFirstPage();
-  const count = mod.windowPageCount();
-  const ph = mod.pagePxHeight();
-  const step = ph + mod.pageGapPx();
+  const first = api.read('windowFirstPage');
+  const count = api.read('windowPageCount');
+  const ph = api.read('pagePxHeight');
+  const step = ph + api.read('pageGapPx');
   syncPageCanvases(first, count, st ? st.totalPages : 1);
 
   // 帧像素与设备像素一一对应：CSS 尺寸按 devicePixelRatio 折算过（在 syncPageCanvases 里），
@@ -1176,7 +1238,7 @@ function blitFrame(st) {
   //     目标位置是"和"，不是 dx/dy —— 写成 putImageData(img, 0, 0, 0, srcY, w, ph)
   //     会把第 2 页起的内容画到画布外面（超出的部分被裁掉、画布一点没变），
   //     症状是"只有第 1 页是对的、其余页停在旧内容上"。所以 dy 要取 -srcY 抵消。
-  const dirty = JSON.parse(mod.dirtyPagesJson());
+  const dirty = api.read('dirtyPages');
   let patched = 0;
   for (const p of dirty) {
     const rec = pageCanvases.get(p);
@@ -1219,7 +1281,7 @@ function positionIme(st) {
     return;
   }
   const dpr = window.devicePixelRatio || 1;
-  const step = mod.pagePxHeight() + mod.pageGapPx();
+  const step = api.read('pagePxHeight') + api.read('pageGapPx');
   const sr = stageEl.getBoundingClientRect();
   const pr = pagesEl.getBoundingClientRect();
 
@@ -1240,7 +1302,7 @@ function positionIme(st) {
 function afterEdit(opts) {
   // 顺序有讲究：先在编辑引起的那次重绘之后把统计取下来，
   //   这才是"敲一个字写了多少像素"。若先做别的事再读，读到的就是别的账。
-  let st = JSON.parse(mod.editStatsJson());
+  let st = api.read('editStats');
 
   // 不变量：编辑之后光标必须立即可见。
   //   闪烁相位可能正好停在"隐藏"那半拍上。
@@ -1248,9 +1310,9 @@ function afterEdit(opts) {
   //     置真再重绘），所以下面这个分支正常情况下不会被走到。
   if (!st.caretVisible) {
     caretOn = true;
-    mod.showCaret(true);
+    api.write('phase', { on: true });
     presentNow();
-    st = JSON.parse(mod.editStatsJson());
+    st = api.read('editStats');
   }
 
   // 窗口对齐、上屏、刷面板、把光标滚进视口 —— 收尾只有这一处，
@@ -1269,7 +1331,7 @@ function relayoutAndBlit() {
   //   （首次装载的 layoutRan / layoutMs 被后一次 present 冲成 0）。
   syncFrameSlots();
   relayoutNow();
-  return settle(JSON.parse(mod.editStatsJson()), { scroll: false });
+  return settle(api.read('editStats'), { scroll: false });
 }
 
 /**
@@ -1281,7 +1343,7 @@ function relayoutAndBlit() {
  */
 function presentStyleChange() {
   presentNow();
-  return settle(JSON.parse(mod.editStatsJson()), { scroll: false });
+  return settle(api.read('editStats'), { scroll: false });
 }
 
 /**
@@ -1296,161 +1358,11 @@ function presentStyleChange() {
  * 上屏现已由 takeBlitBox() 的累加器保证，这里只是去掉那层冗余：一次点击不该产生两次 present。
  */
 function setCaretAndPresent(para, offset) {
-  mod.setCaret(para, offset);
+  api.write('setCaret', { para, offset });
   caretOn = true;
-  mod.showCaret(true);
+  api.write('phase', { on: true });
   presentNow();
   return afterEdit();
-}
-
-/**
- * 键盘
- */
-function onKeyDown(ev) {
-  if (!ready || busy) return;
-  // 组合期间一律不动文档。中文输入法在组合时会持续发 keydown，
-  //   若每次都去重排，画面就会又卡又闪 —— WASM 编辑器最容易在这里出问题。
-  if (composing || ev.isComposing) return;
-
-  // 撤销 / 重做：Ctrl+Z 撤、Ctrl+Y 重做，Ctrl+Shift+Z 也当重做。
-  //
-  //   这一段必须排在下面那句"带修饰键一律放行"之前 —— 否则 Ctrl+Z 会被直接交给
-  //     浏览器。本页没有可撤销的 DOM 编辑（键盘的承接层是个只读 textarea），
-  //     交给浏览器就等于这个键位没绑。
-  //
-  //   重做收两个键位：Ctrl+Y 与 Ctrl+Shift+Z。两者互不冲突，代价只是多一个判断。
-  //     比较前要转小写 —— 真键盘在 shift 按下时给的是大写 'Z'。
-  //   Cmd 一并认下：Mac 上 Command 才是惯用修饰键，写在这里免得另开一条分支。
-  //
-  //   走 wasm 的 undoEdit/redoEdit（引擎侧的 *AndRender 版）：引擎改完状态就把
-  //     重排重绘收尾好，这里只管上屏 —— 与上面的 Backspace/Enter 同一个模式。
-  //     栈空时返回 false，落到下面那条 resetBlink()，光标重新开始闪。
-  if ((ev.ctrlKey || ev.metaKey) && !ev.altKey) {
-    const k = (ev.key || '').toLowerCase();
-    if (k === 'z' || k === 'y') {
-      const redo = (k === 'y') || ev.shiftKey;
-      ev.preventDefault();
-      if (redo ? mod.redoEdit() : mod.undoEdit()) afterEdit();
-      else resetBlink();
-      return;
-    }
-    if (k === 'a') {
-      // 全选走引擎。不能让浏览器对 #ime 做原生全选 —— 那只会选中承接层里那一行
-      //   假文本（它是空的），与文档毫无关系，而且会把选区交给 DOM，
-      //   于是"选中之后打字"落到浏览器手里、文档一个字都不变。
-      //
-      // 不搬视口：全选的焦点端在文档末尾，把视口拽过去等于让屏幕整篇跳一次 ——
-      //   而换窗要重画一屏（冷字形，实测 100 ms 以上），画面因此分两拍出现
-      //   （先画当前那一窗的选区、再跳到末尾）。主流编辑器的 Ctrl+A 都保持当前视图，
-      //   用户下一步要么是"再看一眼"、要么是"直接删掉"，两者都不需要光标可见。
-      ev.preventDefault();
-      if (mod.selectAll()) afterEdit({ scroll: false });
-      else resetBlink();
-      return;
-    }
-    if (ev.key === 'Home' || ev.key === 'End') {
-      // Ctrl+Home / Ctrl+End = 文档首 / 文档末；行首行尾是裸 Home/End。
-      ev.preventDefault();
-      const ok = ev.key === 'Home' ? mod.caretToDocStart(ev.shiftKey)
-                                   : mod.caretToDocEnd(ev.shiftKey);
-      if (ok) afterEdit();
-      else resetBlink();
-      return;
-    }
-  }
-
-  if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
-
-  let changed = false;
-  let handled = true;
-
-  // 方向键按物理方向映射：横排的行内轴是水平的、块轴是竖直的，所以左右走字、上下换行。
-  //   竖排正好翻过来（行内轴竖直、块轴水平）：上下走字、左右换列。
-  //   换列往哪一边由列序定 —— 中日竖排列自右向左（左 = 下一列），蒙文列自左向右
-  //   （右 = 下一列）。只按"是竖排吗"映射，蒙文的左右就会按反。
-  //   参考行为：Chrome 在 vertical-rl 的 contenteditable 里实测就是这个（out/_vkeyref.mjs）。
-  const vert = !!(mod.caretVerticalNow && mod.caretVerticalNow());
-  const vertReversed = !!(mod.caretBlockReversedNow && mod.caretBlockReversedNow());
-  const dirLeft = vertReversed ? 1 : -1;   // 物理向左 = 行序 +1 还是 -1
-
-  switch (ev.key) {
-    case 'Backspace':
-      changed = mod.backspace();
-      break;
-    case 'Delete':
-      changed = mod.deleteForward();
-      break;
-    case 'ArrowLeft':
-      changed = vert ? mod.moveCaretVertical(dirLeft, ev.shiftKey) : mod.moveCaret(-1, ev.shiftKey);
-      break;
-    case 'ArrowRight':
-      changed = vert ? mod.moveCaretVertical(-dirLeft, ev.shiftKey) : mod.moveCaret(1, ev.shiftKey);
-      break;
-    case 'ArrowUp':
-      // 横排：沿块轴走到相邻行，列位沿行内轴保持（跨短行不丢列）。
-      changed = vert ? mod.moveCaret(-1, ev.shiftKey) : mod.moveCaretVertical(-1, ev.shiftKey);
-      break;
-    case 'ArrowDown':
-      changed = vert ? mod.moveCaret(1, ev.shiftKey) : mod.moveCaretVertical(1, ev.shiftKey);
-      break;
-    case 'Home':
-      // 走引擎的"到行首"，不要用 moveCaret(-1e9) 凑。
-      //   之所以"能用"，只是因为 moveCaretBy 走不动时会提前 break；
-      //   而且 1e9 表达的是段首段尾，Home/End 要的是行首行尾，语义并不一样。
-      changed = mod.caretToLineStart(ev.shiftKey);
-      break;
-    case 'End':
-      changed = mod.caretToLineEnd(ev.shiftKey);
-      break;
-    case 'Enter':
-      // 回车 = 分段（跨段编辑），不是"确认/提交"。
-      //   段落模型是文档流的单位，回车在光标处断段，后面那段整体继承样式。
-      //   Shift+Enter 暂时与 Enter 同义（软换行留给以后：它需要"行内换行"这种
-      //   与段落不同的东西，现在没有，就不要假装有）。
-      changed = mod.splitParagraph();
-      break;
-    case 'Tab':
-      // Tab = 缩进（编辑器语义），不是"跳到下一个控件"。
-      //   两种模式现在都是这样：文档模式的"Tab = 制表符"与表单模式的"Tab = 跳下一个可编辑
-      //     字段"都还没接（引擎侧的 tabCaret 已经就绪，目前只有探针在调）。
-      //   Shift+Tab = 反缩进（删掉光标前最多 tab_spaces 个空格）。
-      //   走 mod.indent/outdent（*AndRender 路径）：入口改状态就必须收尾，
-      //     否则宿主会拿上一次的脏矩形上屏，画布变成新旧混合体。
-      changed = ev.shiftKey ? mod.outdent() : mod.indent();
-      break;
-    default:
-      // 可打印字符（中文走 IME，这里处理 ASCII/标点/空格）
-      if (ev.key.length === 1) changed = mod.typeText(ev.key);
-      else handled = false;
-  }
-
-  if (!handled) return;
-  ev.preventDefault();          // 别让字符再落进 textarea（那里只是键盘的承接层）
-
-  if (changed) afterEdit();
-  else resetBlink();
-}
-
-function onCompositionStart() {
-  composing = true;
-  ta.value = '';
-  setStatus('输入法组合中…（此期间不触碰引擎）');
-}
-
-function onCompositionUpdate(ev) {
-  // 预编辑串先在状态栏本地预览。
-  // 把它渲染到正文位置属于档 3 —— 那时才需要"组合期间不改布局"的完整版本。
-  setStatus(`组合中：${ev.data || ''}`);
-}
-
-function onCompositionEnd(ev) {
-  composing = false;
-  const text = ev.data || ta.value || '';
-  ta.value = '';
-  if (text && ready && !busy) {
-    if (mod.typeText(text)) afterEdit();
-  }
-  setStatus('就绪');
 }
 
 /**
@@ -1485,109 +1397,18 @@ function framePointFromEvent(ev) {
 function dragExtendTo(hit) {
   if (!mod) return;
   // 行别一起搬：拖到下一行行首时焦点端也要贴着那一行，否则选区末端停在上一行行尾。
-  if (typeof hit.line === 'number' && mod.setFocusAtSideLine) {
-    mod.setFocusAtSideLine(hit.para, hit.offset, hit.side, hit.line);
-  } else if (mod.setFocusAtSide) {
-    mod.setFocusAtSide(hit.para, hit.offset, hit.side);
+  if (typeof hit.line === 'number') {
+    api.write('setFocusAtSideLine',
+              { para: hit.para, offset: hit.offset, side: hit.side, line: hit.line });
   } else {
-    return;
+    api.write('setFocusAtSide',
+              { para: hit.para, offset: hit.offset, side: hit.side });
   }
   caretOn = true;
-  mod.showCaret(true);
+  api.write('phase', { on: true });
   presentNow();
-  settle(JSON.parse(mod.editStatsJson()), { scroll: false });
+  settle(api.read('editStats'), { scroll: false });
   resetBlink();
-}
-
-/**
- * 连击计数。
- *
- * 单线程宿主挂在 mousedown 上，detail 本来有效；仍然自己数，是为了与 Worker 宿主同一条
- *   判定 —— 那边挂在 pointerdown 上，detail 恒为 0，读它三击永远不成立。两处各写一套，
- *   迟早出现"这边三击能选、那边没反应"。
- */
-function clickCountOf(ev) {
-  const now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
-  const near = clickSeq > 0 && now - clickTime <= 520 &&
-               Math.abs(ev.clientX - clickX) <= 4 && Math.abs(ev.clientY - clickY) <= 4;
-  clickSeq = near ? clickSeq + 1 : 1;
-  clickTime = now;
-  clickX = ev.clientX;
-  clickY = ev.clientY;
-  return clickSeq;
-}
-
-function onCanvasMouseDown(ev) {
-  if (!ready || busy) return;
-  // 指针捕获：在浏览器窗口之外松手时页面未必收得到 mouseup —— 那是"松开了还在拖"
-  //   的一条来源。捕获之后抬起一定回到容器上（它常驻，不像页画布会被换窗丢掉）。
-  //   捕获失败也无所谓：drag_select 那边还有 pointerup/pointercancel/dragend
-  //   与"移动时按钮已抬起"两条自愈路。
-  if (lastPointerId !== null) {
-    try { pagesEl.setPointerCapture(lastPointerId); capturedId = lastPointerId; }
-    catch (e) { /* 合成事件没有指针 */ }
-    lastPointerId = null;
-  }
-  const pt = framePointFromEvent(ev);
-  // 三击：选整格。点在哪一格的字上都算 —— 边距带那条路太窄，三击是"我要这一格"的
-  //   明确表达（Word 同一条手势）。不在表格里时照常落光标。
-  if (clickCountOf(ev) === 3 && mod.cellSelectAt) {
-    clickSeq = 0;
-    if (mod.cellSelectAt(pt.x / currentZoom, pt.y / currentZoom)) {
-      // 光标不藏起来：整格选区的插入点钉在焦点那一格的末尾（见 CaretResolver），
-      //   它是"接下来打字会落在哪"的读数，藏掉就看不见了。
-      caretOn = true;
-      presentNow();
-      afterEdit();
-      ta.focus();
-      ev.preventDefault();
-      return;
-    }
-  }
-  // hitTest 收的是文档磅坐标，而页容器上量到的是帧像素 —— 除以 zoom 换算。
-  const hit = mod.hitTest(pt.x / currentZoom, pt.y / currentZoom);
-  let onText = false;
-  if (hit !== 'null') {
-    onText = true;
-    const p = JSON.parse(hit);
-    // 格子的边距带：引擎说"这一下点在格的左边距里"，那就是"选整格"，不是落光标。
-    //   两套操作在这里分开（文字选区 / 单元格选区），后面那条定位与拖选都不走。
-    //   搬的是段号（cellPara），不是流区间：空格的内容长度为 0，流区间分不出是哪一格。
-    if (typeof p.cellPara === 'number' && mod.selectCellAtPara) {
-      mod.selectCellAtPara(p.cellPara | 0);
-      caretOn = true;
-      presentNow();
-      afterEdit();
-      ta.focus();
-      ev.preventDefault();
-      return;
-    }
-    // 连"这一下点的是哪一个位置"一起带过去。
-    //   相邻两个字段共享边界时（[反复]│[心悸]，两枚括号并排在同一列上），落点是同一个
-    //   偏移，光有偏移分不出用户点的是哪一侧；同一个偏移上还可能压着好几枚括号（相邻的
-    //   空字段就是 ][][ ），于是"字与括号之间""两个控件之间"整段都点不进去。
-    //   引擎在命中测试里已经算出了侧别（括号占位各占一格，数格子即可），这里只负责搬运。
-    //   p.field 是它的投影，只用来显示"当前在哪个字段"，搬运请用 p.side。
-    //   p.line 是行别：折行处"上一行行尾"与"下一行行首"是同一个偏移与侧别，
-    //   只有它分得开 —— 不带回去，点下一行行首会画到上一行行尾。
-    if (typeof p.side === 'number' && mod.setCaretAtSideLine) {
-      mod.setCaretAtSideLine(p.para, p.offset, p.side, p.line | 0);
-      caretOn = true;
-      mod.showCaret(true);
-      presentNow();
-      afterEdit();
-    } else {
-      setCaretAndPresent(p.para, p.offset);
-    }
-  }
-  // 定位之后再交给拖选：这一下已经把 anchor 摆在按下点，之后的移动只搬焦点端。
-  //   落在灰底上（没命中正文）时只定位不拖选 —— 从页外的空白起手不该选中任何东西。
-  //   这条路上命中是同步的，所以 begin 直接带上结论；两宿主的分工保持同形
-  //   （Worker 侧命中是往返，先 begin(false) 再 arm）。
-  if (drag) drag.begin(ev, false);
-  if (drag) drag.arm(onText);
-  ta.focus();
-  ev.preventDefault();
 }
 
 /**
@@ -1601,15 +1422,15 @@ function resetBlink() {
   caretOn = true;
   if (blinkTimer) clearInterval(blinkTimer);
   blinkTimer = setInterval(() => {
-    if (!ready || busy || composing) return;
+    if (!ready || busy || (input && input.composing)) return;
     caretOn = !caretOn;
-    mod.showCaret(caretOn);
+    api.write('phase', { on: caretOn });
     presentNow();
     // 统计必须在 present() 之后读。
     //   present 之前拿到的是上一帧的脏矩形，拿它去 putImageData 会贴错位置 ——
     //   症状是"光标走了，残影留在原地"。所以这里只读一次，且读完就用。
     //   闪烁这一拍不滚视口：它每 530ms 来一次，跟着滚会把用户正在看的地方拽走。
-    const st = settle(JSON.parse(mod.editStatsJson()), { render: false, scroll: false });
+    const st = settle(api.read('editStats'), { render: false, scroll: false });
     renderBlink(st);
   }, 530);
 }
@@ -1643,10 +1464,10 @@ let prefetchTimer = 0;
  *   对的，那时候每一拍都该留给滚动），滚动一停就先把下一页烘上。
  */
 function schedulePrefetch(dir) {
-  if (!ready || !mod || typeof mod.prewarmPageGlyphs !== 'function') return;
+  if (!ready || !mod) return;
   prefetchDir = dir < 0 ? -1 : 1;
-  prefetchNext = prefetchDir > 0 ? mod.windowFirstPage() + mod.windowPageCount()
-                                 : mod.windowFirstPage() - 1;
+  prefetchNext = prefetchDir > 0 ? api.read('windowFirstPage') + api.read('windowPageCount')
+                                 : api.read('windowFirstPage') - 1;
   prefetchLeft = PREFETCH_PAGES;
   if (prefetchTimer) clearTimeout(prefetchTimer);
   prefetchTimer = setTimeout(pumpPrefetch, PREFETCH_DELAY_MS);
@@ -1657,7 +1478,7 @@ function pumpPrefetch() {
   if (!ready || !mod || prefetchLeft <= 0) return;
   const total = Math.max(1, lastEdit ? lastEdit.totalPages : 1);
   if (prefetchNext < 0 || prefetchNext >= total) return;
-  mod.prewarmPageGlyphs(prefetchNext);
+  api.read('prewarmPage', { page: prefetchNext });
   prefetchNext += prefetchDir;
   --prefetchLeft;
 }
@@ -1698,7 +1519,7 @@ function alignAfterScroll() {
   skipRun = 0;
   if (!applyWindow()) return;
   presentNow();
-  settle(JSON.parse(mod.editStatsJson()), { scroll: false });
+  settle(api.read('editStats'), { scroll: false });
 }
 
 function onStageScroll() {
@@ -1714,7 +1535,7 @@ function onStageScroll() {
     //   所以只在真的动了的时候更新 —— 把 0 差值当下行会让来回轻推翻转方向。
     if (dirPx !== 0) scrollDir = dirPx > 0 ? 1 : -1;
     const dpr = window.devicePixelRatio || 1;
-    const step = mod.pagePxHeight() + mod.pageGapPx();
+    const step = api.read('pagePxHeight') + api.read('pageGapPx');
     const movedPages = Math.abs(dirPx) * dpr / Math.max(1, step);
     updateScrollSpeed(movedPages, t);
     if (tooFastToFollow() && skipRun < kMaxSkipRun) {
@@ -1729,7 +1550,7 @@ function onStageScroll() {
     const tWork = performance.now();
     if (!applyWindow()) return;
     presentNow();
-    const st = JSON.parse(mod.editStatsJson());
+    const st = api.read('editStats');
     settle(st, { scroll: false });
     lastScrollWorkMs = performance.now() - tWork;
     followCostMs = followCostMs === 0 ? lastScrollWorkMs
@@ -1784,7 +1605,7 @@ function renderEdit(st) {
     //   而"敲一个字"的总账 = 引擎（上面那四行）+ 上屏 + 这一行。
     ['— 宿主收尾（窗口+面板）',
       `${fmt(Math.max(0, (lastBlit.settleMs || 0) - lastBlit.totalMs))} ms`, 'hi'],
-    ['上屏页数 / 窗口页数', `${lastBlit.pages} / ${mod.windowPageCount()}`],
+    ['上屏页数 / 窗口页数', `${lastBlit.pages} / ${api.read('windowPageCount')}`],
     ['窗口', `第 ${lastBlit.windowFirst} 页起 · 帧 ${lastBlit.w} × ${lastBlit.h} px`],
     ['帧面积（=画布面积）', `${(lastBlit.framePx / 1e6).toFixed(2)} Mpx`],
     ['光标', `段 ${st.caretPara} · 偏移 ${st.caretOffset} 码点`],
@@ -1836,7 +1657,7 @@ function renderBlink(st) {
  */
 function rasterBackendLabel() {
   try {
-    return (mod && mod.rasterBackend) ? mod.rasterBackend() : '未知后端';
+    return api.read('rasterBackend');
   } catch (e) {
     return '未知后端';
   }
@@ -1863,11 +1684,11 @@ function renderLayout(st) {
                                      `（${st.paintedGlyphs} 个）` : '—'],
     ['  · 帧搬运', `${fmt(st.paintPresentMs)} ms`],
     ['字形缓存 占用 / 上限', `${kb(st.glyphCacheBytes)} / ${kb(st.glyphCacheLimit)}`],
-    ['帧尺寸', `${mod.frameWidth()} × ${mod.frameHeight()} px`],
-    ['页尺寸 / 页间隙', `${mod.pagePxWidth()} × ${mod.pagePxHeight()} / ${mod.pageGapPx()} px`],
-    ['视口窗口', `第 ${mod.windowFirstPage()} 页起 · ${mod.windowPageCount()} 页` +
+    ['帧尺寸', `${api.read('frameWidth')} × ${api.read('frameHeight')} px`],
+    ['页尺寸 / 页间隙', `${api.read('pagePxWidth')} × ${api.read('pagePxHeight')} / ${api.read('pageGapPx')} px`],
+    ['视口窗口', `第 ${api.read('windowFirstPage')} 页起 · ${api.read('windowPageCount')} 页` +
       `（${pageCanvases.size} 张页画布）`],
-    ['帧字节数', kb(mod.frameByteSize())],
+    ['帧字节数', kb(api.read('frameByteSize'))],
   ]);
 }
 
@@ -1881,7 +1702,7 @@ function runBench() {
   if (btn) btn.disabled = true;
   setStatus('引擎内循环 12 次…');
   try {
-    const r = mod.benchRelayoutPaint(12);
+    const r = api.read('bench', { runs: 12 });
     kv('benchOut', [
       ['次数', r.runs],
       ['shape 平均', `${fmt(r.shapeMs)} ms`],
@@ -1920,35 +1741,35 @@ const facade = {
   get ready() { return ready; },
   get errors() { return pageErrors.slice(); },
   get edit() { return lastEdit; },
-  get text() { return mod ? mod.documentText(0) : ''; },
+  get text() { return mod ? api.read('text', { i: 0 }) : ''; },
   // 按段取文本 + 整篇拼起来。跨段编辑的探针要核对"字符账守恒"（分段不丢不重），
   //   而 __heditor.text 只给第 0 段。
-  paragraphText(i) { return mod ? mod.documentText(i) : ''; },
+  paragraphText(i) { return mod ? api.read('text', { i }) : ''; },
   get allText() {
     if (!mod) return '';
-    const n = JSON.parse(mod.editStatsJson()).totalParagraphs;
+    const n = api.read('editStats').totalParagraphs;
     const parts = [];
-    for (let i = 0; i < n; ++i) parts.push(mod.documentText(i));
+    for (let i = 0; i < n; ++i) parts.push(api.read('text', { i }));
     return parts.join('\n');
   },
   get caret() {
     if (!mod) return null;
-    const st = JSON.parse(mod.editStatsJson());
+    const st = api.read('editStats');
     return { para: st.caretPara, offset: st.caretOffset, index: st.caretIndex,
              side: st.caretSide, page: st.caretPage,
              x: st.caretX, y: st.caretY, w: st.caretW, h: st.caretH,
              visible: st.caretVisible, docCodepoints: st.docCodepoints };
   },
-  get caretReport() { return mod ? mod.caretReport() : ''; },
+  get caretReport() { return mod ? api.read('caretReport') : ''; },
   get env() {
     return { wasmGlue: wasmBytes(), ua: navigator.userAgent, url: location.href };
   },
   // 兼容旧探针的字段名
   get fonts() { return this.env; },
   // 排版统计（= statsJson）
-  get stats() { return mod ? JSON.parse(mod.statsJson()) : null; },
+  get stats() { return mod ? api.read('stats') : null; },
   // 编辑统计（= editStatsJson）
-  get editStats() { return mod ? JSON.parse(mod.editStatsJson()) : null; },
+  get editStats() { return mod ? api.read('editStats') : null; },
   // 宿主侧上屏耗时（最近一轮的四段分解），见 lastBlit。
   //   与 editStats 并列而不是塞进去：这两笔账的来源不同（一个是 wasm 里的计时，
   //   一个是 JS 的 performance.now），合成一个对象会让探针分不清单位归属。
@@ -1958,7 +1779,7 @@ const facade = {
   //   量出来的编译与索引耗时全是 0.0x ms，看不出 O(文档) 的那一层。
   loadStressDocument(paras, chars) {
     if (!ready) return null;
-    mod.loadStressDocument(paras, chars);
+    api.engine().loadStressDocument(paras, chars);
     relayoutAndBlit();
     return this.editStats;
   },
@@ -1967,7 +1788,7 @@ const facade = {
   //   整篇同一个字时字形缓存与块缓存都会命中到失真，按需读的账量不出来。
   loadStressDocumentDiverse(paras, chars) {
     if (!ready) return null;
-    mod.loadStressDocumentDiverse(Number(paras), Number(chars));
+    api.engine().loadStressDocumentDiverse(Number(paras), Number(chars));
     relayoutAndBlit();
     return this.editStats;
   },
@@ -1976,7 +1797,7 @@ const facade = {
   //   合成文本（一批码点循环）的用字分布不像真病历，缓存账会偏，所以判据要能喂真文本。
   loadTextDocument(text, repeat) {
     if (!ready) return null;
-    mod.loadTextDocument(text, Number(repeat) || 1);
+    api.engine().loadTextDocument(text, Number(repeat) || 1);
     relayoutAndBlit();
     return this.editStats;
   },
@@ -1992,7 +1813,7 @@ const facade = {
   // 切场景并按 zoom 重排重绘（供探针用；走的是和 UI 完全相同的路径）
   //
   // 这里的 zoom 是密度（设备像素 / 磅），与引擎和 zoomLevel 同口径 —— 门面不做单位
-  //   换算，按倍数调就用 zoomToFactor。输入框那一格收的才是倍数，写回去要除以 kZoomBase。
+  //   换算，按倍数调就用 zoomToFactor。输入框那一格收的才是倍数，写回去要折成倍数。
   //
   // 返回值就是"本次全量呈现"的统计 —— 探针要拿它当增量比值的分母。
   //   分母只能是真正的全量，不能取"再 present 一次"的数字：后者本身已经是增量
@@ -2001,12 +1822,12 @@ const facade = {
     if (zoom) {
       setZoomDensity(zoom);
       syncZoomLabel();
-      mod.setZoom(currentZoom);
+      api.engine().setZoom(currentZoom);
     }
-    mod.setScenario(Number(id));
+    api.engine().setScenario(Number(id));
     presetWindowForLoad();
     relayoutNow();
-    return settle(JSON.parse(mod.editStatsJson()), { scroll: false });
+    return settle(api.read('editStats'), { scroll: false });
   },
   reset(id, zoom) { return this.run(id === undefined ? 6 : id, zoom === undefined ? baseDensity() : zoom); },
 
@@ -2016,7 +1837,7 @@ const facade = {
   zoomToFactor(factor) {
     setZoomDensity(engineZoomOf(factor));
     syncZoomLabel();
-    mod.setZoom(currentZoom);
+    api.engine().setZoom(currentZoom);
     relayoutAndBlit();
     return currentZoom;
   },
@@ -2030,64 +1851,64 @@ const facade = {
   //    探针 [2b] 的 __heditor.selfCheck() 当场量出过 9372 个像素不一致。
   //    探针钩子必须和真人路径一样把画面收尾，否则它自己就是 bug 的制造者。
   type(s) {
-    if (!ready || !mod.typeText(s)) return null;
-    return settle(JSON.parse(mod.editStatsJson()));
+    if (!ready || !api.write('type', { s })) return null;
+    return settle(api.read('editStats'));
   },
   backspace() {
-    if (!ready || !mod.backspace()) return null;
-    return settle(JSON.parse(mod.editStatsJson()));
+    if (!ready || !api.write('backspace')) return null;
+    return settle(api.read('editStats'));
   },
   deleteForward() {
-    if (!ready || !mod.deleteForward()) return null;
-    return settle(JSON.parse(mod.editStatsJson()));
+    if (!ready || !api.write('deleteForward')) return null;
+    return settle(api.read('editStats'));
   },
   // 跨段编辑：段首退格 / 段末 Delete 已经自动走合并（见引擎 backspace/deleteForward），
   //   所以这里只需要给回车与"显式合并"各一个入口。
   splitParagraph() {
-    if (!ready || !mod.splitParagraph()) return null;
-    return settle(JSON.parse(mod.editStatsJson()));
+    if (!ready || !api.write('splitParagraph')) return null;
+    return settle(api.read('editStats'));
   },
   mergeWithPreviousParagraph() {
-    if (!ready || !mod.mergeWithPreviousParagraph()) return null;
-    return settle(JSON.parse(mod.editStatsJson()));
+    if (!ready || !api.write('mergePrev')) return null;
+    return settle(api.read('editStats'));
   },
   mergeWithNextParagraph() {
-    if (!ready || !mod.mergeWithNextParagraph()) return null;
-    return settle(JSON.parse(mod.editStatsJson()));
+    if (!ready || !api.write('mergeNext')) return null;
+    return settle(api.read('editStats'));
   },
   // 返回 null 表示"光标没动"（引擎返回 false 就不重绘）——
   //   探针据此断言"已经在段首了，再左移不会重绘"。
   // extend = Shift 扩展：锚点不动，选区从锚点那一端继续长。
   move(dcp, extend) {
-    if (!ready || !mod.moveCaret(dcp || 1, !!extend)) return null;
-    return JSON.parse(mod.editStatsJson());
+    if (!ready || !api.write('move', { dcp: dcp || 1, extend: !!extend })) return null;
+    return api.read('editStats');
   },
   // 上下键（dir < 0 上 / > 0 下）、文档首尾、全选、选区读写。
   //   全部走引擎的 *AndRender 版 —— 与真人按键同一条路径，探针拿到的统计才有意义。
   vertical(dir, extend) {
-    if (!ready || !mod.moveCaretVertical(dir || 1, !!extend)) return null;
-    return JSON.parse(mod.editStatsJson());
+    if (!ready || !api.write('vertical', { dir: dir || 1, extend: !!extend })) return null;
+    return api.read('editStats');
   },
   docStart(extend) {
-    if (!ready || !mod.caretToDocStart(!!extend)) return null;
-    return JSON.parse(mod.editStatsJson());
+    if (!ready || !api.write('docStart', { extend: !!extend })) return null;
+    return api.read('editStats');
   },
   docEnd(extend) {
-    if (!ready || !mod.caretToDocEnd(!!extend)) return null;
-    return JSON.parse(mod.editStatsJson());
+    if (!ready || !api.write('docEnd', { extend: !!extend })) return null;
+    return api.read('editStats');
   },
   selectAll() {
-    if (!ready || !mod.selectAll()) return null;
-    return JSON.parse(mod.editStatsJson());
+    if (!ready || !api.write('selectAll')) return null;
+    return api.read('editStats');
   },
   setSelection(anchor, focus) {
-    if (!ready || !mod.setSelection(anchor, focus)) return null;
-    return JSON.parse(mod.editStatsJson());
+    if (!ready || !api.write('setSelection', { anchor, focus })) return null;
+    return api.read('editStats');
   },
   // 整格选区：段号来自 hit() 的 cellPara 字段（命中侧的几何结论），宿主不自己算。
   selectCellAtPara(para) {
-    if (!ready || !mod.selectCellAtPara) return null;
-    if (!mod.selectCellAtPara(para | 0)) return null;
+    if (!ready) return null;
+    if (!api.write('selectCellAtPara', { para: para | 0 })) return null;
     // 插入点在格末，保持可见（见 onCanvasMouseDown 那条说明）。
     caretOn = true;
     presentNow();
@@ -2096,8 +1917,8 @@ const facade = {
   },
   // 三击那条路：按点选整格（点在格里的任何位置都算）。返回是否真的选中了一格。
   cellSelectAt(xPt, yPt) {
-    if (!ready || !mod.cellSelectAt) return false;
-    const ok = !!mod.cellSelectAt(xPt, yPt);
+    if (!ready) return false;
+    const ok = !!api.write('cellSelectAt', { x: xPt, y: yPt });
     if (ok) {
       caretOn = true;
       presentNow();
@@ -2107,13 +1928,13 @@ const facade = {
   },
   clearSelection() {
     if (!ready) return null;
-    mod.clearSelection();
-    return JSON.parse(mod.editStatsJson());
+    api.write('clearSelection');
+    return api.read('editStats');
   },
   // 选区取证：两端（全局流位置）+ 页面坐标矩形。空选区给空 rects。
   //   是属性不是方法 —— 与 caretReport / caretLive 同一个形态，两个宿主的门面
   //   在这里必须逐字对齐（探针两边跑同一份脚本）。
-  get selection() { return mod ? JSON.parse(mod.selectionReport()) : null; },
+  get selection() { return mod ? api.read('selectionReport') : null; },
   // 拖选的诊断面：state() 说"现在在不在拖、移动过没有、自动滚动起没起"，
   //   settled() 等所有在途的命中落地（异步宿主下拖动是几次往返，不等就读会读到旧选区）。
   //   单线程宿主上命中是同步的，settled() 立刻兑现 —— 探针两边写同一句。
@@ -2126,9 +1947,9 @@ const facade = {
   //   宿主原样回传）。探针要验证"点后一个字段的开头"就必须走它，走 setCaret 是另一条路。
   setCaretAt(para, offset, field) {
     if (!ready) return null;
-    mod.setCaretAt(para, offset, field);
+    api.write('setCaretAt', { para, offset, field });
     caretOn = true;
-    mod.showCaret(true);
+    api.write('phase', { on: true });
     presentNow();
     afterEdit();
     return this.caret;
@@ -2138,9 +1959,9 @@ const facade = {
   //   探针要复现"点在两个控件之间"这类手势，得走这一个而不是 setCaretAt。
   setCaretAtSide(para, offset, side) {
     if (!ready) return null;
-    mod.setCaretAtSide(para, offset, side);
+    api.write('setCaretAtSide', { para, offset, side });
     caretOn = true;
-    mod.showCaret(true);
+    api.write('phase', { on: true });
     presentNow();
     afterEdit();
     return this.caret;
@@ -2149,9 +1970,9 @@ const facade = {
   //   探针要复现"点下一行行首"必须走这一个。
   setCaretAtSideLine(para, offset, side, line) {
     if (!ready) return null;
-    mod.setCaretAtSideLine(para, offset, side, line | 0);
+    api.write('setCaretAtSideLine', { para, offset, side, line: line | 0 });
     caretOn = true;
-    mod.showCaret(true);
+    api.write('phase', { on: true });
     presentNow();
     afterEdit();
     return this.caret;
@@ -2170,59 +1991,59 @@ const facade = {
     return this.caret;
   },
   // 只改位置不呈现 —— 仅用于需要把"改位置"和"呈现"分账的对照实验
-  setCaretOnly(para, offset) { mod.setCaret(para, offset); return this.caret; },
+  setCaretOnly(para, offset) { api.write('setCaret', { para, offset }); return this.caret; },
   // 直接问引擎的命中测试（文档磅坐标）。与 clickAt 的区别是它不落光标、不做任何换算。
-  hit(xPt, yPt) { return JSON.parse(mod.hitTest(xPt, yPt)); },
-  bench(runs) { return JSON.parse(mod.benchRelayoutPaint(runs || 12)); },
+  hit(xPt, yPt) { return api.read('hit', { x: xPt, y: yPt }); },
+  bench(runs) { return api.read('bench', { runs: runs || 12 }); },
 
   // 表单：控件是区间，边界是策略
   //
   // 这三个 setter 都走 present() 收尾 —— 和真人路径一样。
   //   只调引擎不收尾，画布就会停在旧内容上（同上，必须在同一个调用里收尾）。
-  get editMode() { return mod ? mod.editMode() : 0; },
-  get controls() { return mod ? JSON.parse(mod.controlsJson()) : null; },
+  get editMode() { return mod ? api.read('editMode') : 0; },
+  get controls() { return mod ? api.read('controls') : null; },
   // 占位槽清单：每一枚括号落在哪个偏移、是开还是闭、属于哪个字段、在哪一行。
   //   括号的排布只存在于排版结果里（区间数据看不出来），探针要钉住
   //   "两个零宽字段的括号交替成 ][][]、而不是互相嵌套" 就得读这一份。
-  get bracketSlots() { return mod ? JSON.parse(mod.bracketSlotsJson()).slots : null; },
+  get bracketSlots() { return mod ? api.read('bracketSlots') : null; },
   // 直读，不走 editStats：编辑被拒时不会 repaint，而 editStats 是在呈现时刷新的 ——
   //   走那条路读到的永远是上一拍的数字，探针按键后立刻读会差一拍。
-  get blockedEdits() { return mod ? mod.blockedEdits() : 0; },
+  get blockedEdits() { return mod ? api.read('blockedEdits') : 0; },
   setEditMode(m) {
-    mod.setEditMode(Number(m));
+    api.write('setEditMode', { mode: Number(m) });
     return this.present();
   },
   // 括号显示范围：0 = All（默认，所有字段常驻）、1 = Focused（旧行为，只显示光标所在字段）。
   // 引擎侧会自己重排（括号进文档流，占位变了），宿主只需上屏。
   setBracketScope(s) {
-    mod.setBracketScope(Number(s));
+    api.write('setBracketScope', { scope: Number(s) });
     return this.present();
   },
-  get bracketScope() { return mod ? mod.bracketScope() : 0; },
+  get bracketScope() { return mod ? api.read('bracketScope') : 0; },
   // 光标与选区的样式（色值 [r,g,b,a]，宽度单位磅）。  //   引擎只换参数、不作废底图（见 setCaretAndSelectionStyle），所以这里补一次 present
   //   就够 —— 走 setConfig 那条路会把窗口里的每一页重新光栅，取色器连续改时每一下都付。
   //   两个取值器与两个 setter 的读写形状一致，探针两边写同一句。
-  get caretStyle() { return mod ? JSON.parse(mod.caretStyleJson()) : null; },
-  get selectionStyle() { return mod ? JSON.parse(mod.selectionStyleJson()) : null; },
+  get caretStyle() { return mod ? api.read('caretStyleJson') : null; },
+  get selectionStyle() { return mod ? api.read('selectionStyleJson') : null; },
   // 宿主侧上屏那四段（取帧 / ImageData / putImageData / 摆 IME）。引擎的 paintMs 不含它 ——
   //   滚动时"一卡一下"的总时长是两段之和，分开记才知道该优化哪一边。
   get lastBlit() { return lastBlit; },
   // 预热一页的字形：不呈现、不改画面，只把 mask 光栅进缓存。返回触及的字形数。
-  prewarmPage(page) { return mod ? mod.prewarmPageGlyphs(page | 0) : 0; },
+  prewarmPage(page) { return mod ? api.read('prewarmPage', { page: page | 0 }) : 0; },
   // 部分字段缺省时按现状补全：面板往往只想改颜色，不该被迫把宽度也读一遍。
   setCaretStyle(style) {
     if (!ready) return null;
-    const cur = JSON.parse(mod.caretStyleJson());
+    const cur = api.read('caretStyleJson');
     const c = (style && style.color) || cur.color;
     const w = style && style.widthPt !== undefined ? Number(style.widthPt) : cur.widthPt;
-    mod.setCaretStyle(c[0] | 0, c[1] | 0, c[2] | 0, (c[3] === undefined ? 255 : c[3]) | 0, w);
+    api.write('caretStyle', { style: { color: [c[0] | 0, c[1] | 0, c[2] | 0, (c[3] === undefined ? 255 : c[3]) | 0], widthPt: w } });
     return presentStyleChange();
   },
   setSelectionStyle(style) {
     if (!ready) return null;
-    const cur = JSON.parse(mod.selectionStyleJson());
+    const cur = api.read('selectionStyleJson');
     const c = (style && style.color) || cur.color;
-    mod.setSelectionStyle(c[0] | 0, c[1] | 0, c[2] | 0, (c[3] === undefined ? 255 : c[3]) | 0);
+    api.write('selectionStyle', { style: { color: [c[0] | 0, c[1] | 0, c[2] | 0, (c[3] === undefined ? 255 : c[3]) | 0] } });
     return presentStyleChange();
   },
   // 用一份区间清单整批重建控件（探针用）。
@@ -2232,7 +2053,7 @@ const facade = {
   //   引擎那边一次建完（换名单 + 重建树在同一次调用里），中间态不存在，
   //   光标连侧别由引擎自己搬 —— 宿主不必再存一份。
   setFormControls(list) {
-    mod.setFormControls(list.map((it) => ({
+    api.engine().setFormControls(list.map((it) => ({
       start: it.start, end: it.end, kind: it.kind || 0,
       id: it.id || '', ro: !!it.ro,
     })));
@@ -2242,76 +2063,76 @@ const facade = {
   //   必须重排。只 present 的话，控件区间会投影到上一次布局的行盒上
   //   （实测症状：4 个字的字段被切成两块，因为它在旧几何里跨了行）。
   loadFormSample(variant) {
-    mod.loadFormSample(variant === undefined ? 0 : variant);
+    api.engine().loadFormSample(variant === undefined ? 0 : variant);
     return relayoutAndBlit();
   },
   // 帧自审：当前帧 vs "整帧重画一遍"，逐字节比。
   //   selfCheck 只能抓"上屏贴错"；这个能抓"引擎帧本身就是错的"（旧标记没擦掉）。
   //   跑完会顺带把这一帧修成真值。
-  auditFrame() { return mod ? JSON.parse(mod.auditFrame()) : null; },
+  auditFrame() { return mod ? api.read('auditFrame') : null; },
 
   // 底图自审：平移复用的底图 vs "从零全建"，逐字节比。
   //   auditFrame 比的是帧，而帧是从底图搬的 —— 底图本身错了它照样全绿。
   //   滚动换窗走的就是底图平移，所以这一条是那条路唯一的判据。
-  auditBase() { return mod && mod.auditBase ? JSON.parse(mod.auditBase()) : null; },
+  auditBase() { return mod ? api.read('auditBase') : null; },
 
   // 排版自审：增量续排的结果 vs 一次全量重排，逐字段比对（diff 必须为 0）。
   //   顺便带回两个耗时：curMs 是刚才那次增量，fullMs 是本次审计做的全量 ——
   //   分子分母同一次测量，探针拿它们算"增量是全量的百分之几"。
-  auditLayout() { return mod && mod.auditLayout ? JSON.parse(mod.auditLayout()) : null; },
+  auditLayout() { return mod ? api.read('auditLayout') : null; },
 
   // 编译自审：本轮实际编译耗时与一次整树全量编译同源对照。
   //   这是"编译这一层有没有做到增量"的唯一证据 —— 只有分子没有分母的耗时数说明不了事。
-  auditCompile() { return mod && mod.auditCompile ? JSON.parse(mod.auditCompile()) : null; },
+  auditCompile() { return mod ? api.read('auditCompile') : null; },
 
   // 字形页索引自审：二分出来的页区间 vs 全篇扫一遍的归属，逐页比（diff 必须为 0）。
   //   绘制按页二分之后必须有这一条：auditBase 是"强制全建再比"，而全建走同一条二分，
   //   两边错得一样，逐字节比照样全绿（同一个代码路径当判据必然恒绿）。
-  auditGlyphPages() { return mod && mod.auditGlyphPages ? JSON.parse(mod.auditGlyphPages()) : null; },
+  auditGlyphPages() { return mod ? api.read('auditGlyphPages') : null; },
 
   // 本轮写过哪几页（绝对页号）—— 宿主按页上屏的依据，也是"帧切页之后"取代
   //   原先那个单矩形 blitBox 的判据：一次上屏现在贴的是若干整页，不是一个矩形。
   //   （引擎的 takeBlitBox 仍在，单测 edit_test 用它钉"一次操作两次 present 的账
   //     不会互相挤掉"；宿主这条路已经不吃它了。）
-  get dirtyPages() { return mod && mod.dirtyPagesJson ? JSON.parse(mod.dirtyPagesJson()) : null; },
+  get dirtyPages() { return mod ? api.read('dirtyPages') : null; },
 
   // 给探针用的：直接摆光标可见相位（真实闪烁由定时器摆，探针要能自己定住）。
   //   存在的理由：用户的 bug 只在"光标停在隐藏那半拍"时触发 ——
   //   而所有老断言开头都调过 stopBlink()，正好把这一半概率全屏蔽掉了。
-  showCaret(on) { if (!mod) return false; mod.showCaret(!!on); return true; },
+  showCaret(on) { if (!mod) return false; api.write('phase', { on: !!on }); return true; },
 
   // Tab / Shift+Tab = 缩进 / 反缩进（走真实引擎路径，会自己收尾）
-  indent() { if (!mod.indent()) return null; return this.present(); },
-  outdent() { if (!mod.outdent()) return null; return this.present(); },
+  indent() { if (!api.write('indent')) return null; return this.present(); },
+  outdent() { if (!api.write('outdent')) return null; return this.present(); },
 
   // 返回 null = 光标没动（比如只有一个字段）
   // 注意：Tab 不再绑到它。Tab 是缩进。这个接口留着给探针/自动化用。
   focusControl(forward) {
-    if (!mod.focusControl(forward === undefined ? true : forward)) return null;
+    if (!api.write('focusControl', { forward: forward === undefined ? true : forward })) return null;
     return this.present();
   },
   // 策略版 Tab：表单模式在可编辑控件之间前进/后退，到最后一个返回 null（不消费）。
   //   与 focusControl 的区别是"不绕回第一个"且判据走可编辑集合谓词（见 engine.h）。
   //   默认键位同样不绑它 —— 裸 Tab 留给缩进，绑什么由宿主决定。
   tabCaret(backward) {
-    if (!mod.tabCaret(backward === undefined ? false : !!backward)) return null;
+    if (!api.write('tabCaret', { backward: backward === undefined ? false : !!backward })) return null;
     return this.present();
   },
-  controlAt(xPt, yPt) { return mod.controlAtPoint(xPt, yPt); },
-  describeControls() { return mod ? mod.describeControls() : ''; },
+  controlAt(xPt, yPt) { return api.read('controlAt', { x: xPt, y: yPt }); },
+  describeControls() { return mod ? api.read('describeControls') : ''; },
 
   // 删控件 / 改控件属性：结构操作的引擎入口（宿主 UI 还没接，先给探针与自动化用）。
   //   keepContent = true 是"拆壳"（字段内容留下来变成普通正文）。
   //   表单模式默认被 structureLock 拒（返回 null，不消费）；探针要删就先切文档模式。
   //   引擎侧走的是 AndRender 版，这里只负责把它上屏 —— 与 indent/outdent 同一个写法。
   removeControl(i, keepContent) {
-    if (!mod.removeControlAt(Number(i), !!keepContent)) return null;
+    if (!api.write('removeControl', { i: Number(i), keepContent: !!keepContent })) return null;
     return this.present();
   },
   // 改运行时属性：prop 0 = hidden、1 = readonly、2 = required、3 = structureLock。
   //   幂等（值没变）时引擎返回 true 但不重排重绘，这里的账也随之为"没重画"。
   setControlProp(i, prop, value) {
-    if (!mod.setControlPropAt(Number(i), Number(prop), !!value)) return null;
+    if (!api.write('setControlProp', { i: Number(i), prop: Number(prop), value: !!value })) return null;
     return this.present();
   },
 
@@ -2335,39 +2156,39 @@ const facade = {
   // 改字体块缓存的配置（字节 / 块数），并清空已有块与统计 —— 给"块大小该取多少"做实验。
   //   注意它同时会改"之后新装的脸"用的配置，所以换档之后要重装字体才干净。
   setFontCacheConfig(blockSize, maxBlocks) {
-    mod.setFontCacheConfig(Number(blockSize), Number(maxBlocks));
+    api.engine().setFontCacheConfig(Number(blockSize), Number(maxBlocks));
     return true;
   },
   // 视口锚点：探针量"按需读覆盖多少页"时用。走真实滚动路径受布局与 rAF 节流影响，
   //   直接设锚点更稳，也正好把"换窗口就要读新字形"这件事单独量出来。
   setViewportAnchor(first, count) {
-    mod.setViewportAnchor(Number(first), Number(count));
+    api.write('viewport', { first: Number(first), count: Number(count) });
     return this.present();
   },
-  undo() { if (!mod.undoEdit()) return null; return this.present(); },
-  redo() { if (!mod.redoEdit()) return null; return this.present(); },
+  undo() { if (!api.write('undo')) return null; return this.present(); },
+  redo() { if (!api.write('redo')) return null; return this.present(); },
 
   // 撤销栈的深度上限（条数，0 = 不限制）。
   //   默认 100（EngineConfig::undo_limit）—— 与 Office 系和 Quill 的 maxStack 同值。
   //   改它不动呈现，所以这里不上屏；调小时当场裁掉多余的条目。
   //   粒度是一笔编辑一步、没有时间合并，同样 100 条覆盖的输入比 Quill 短。
-  setUndoLimit(n) { mod.setUndoLimit(Number(n)); return this.undoLimit(); },
-  undoLimit() { return mod.undoLimit(); },
+  setUndoLimit(n) { api.write('setUndoLimit', { n: Number(n) }); return this.undoLimit(); },
+  undoLimit() { return api.read('undoLimit'); },
 
   // 给探针用的：把引擎当前那一帧原样拷出来
   //
-  //  必须拷一份，不能直接返回 mod.frameRgba()：那返回的是 wasm 堆上的视图，
+  //  必须拷一份，不能直接返回 api.engine().frameRgba()：那返回的是 wasm 堆上的视图，
   //    任何一次 present（哪怕只是光标闪烁的一 tick）都会把它原地覆盖。
   //    探针要拿"一个一个敲进去"和"一次性插入"这两帧做逐字节比较，
   //    不拷的话两次读到的永远是同一块内存 —— 这条断言会永远绿，且毫无意义。
   rawFrame() {
-    const v = mod.frameRgba();
+    const v = api.engine().frameRgba();
     return new Uint8ClampedArray(new Uint8ClampedArray(v.buffer, v.byteOffset, v.byteLength));
   },
-  frameW() { return mod.frameWidth(); },
+  frameW() { return api.read('frameWidth'); },
   // 引擎侧的帧槽数：切帧、自审、光标定位都按它算源行（见 frameSlotOf）。
-  frameSlots() { return mod && mod.frameSlots ? mod.frameSlots() : 0; },
-  frameH() { return mod.frameHeight(); },
+  frameSlots() { return mod ? api.read('frameSlots') : 0; },
+  frameH() { return api.read('frameHeight'); },
 
   // 按当前光标可见相位重画一次并上屏。
   //
@@ -2377,7 +2198,7 @@ const facade = {
   present() {
     if (!ready) return null;
     presentNow();
-    return settle(JSON.parse(mod.editStatsJson()));
+    return settle(api.read('editStats'));
   },
 
   // 一键自检：把屏幕上真实的像素和引擎那一帧逐字节比一遍，外加缩放/DPI 现场。
@@ -2396,13 +2217,13 @@ const facade = {
   //   页间隙不比。覆盖范围与"整篇一张画布"时相同 —— 少拼一页就等于漏检一页。
   selfCheck() {
     if (!ready) return null;
-    const w = mod.frameWidth();
-    const h = mod.frameHeight();
-    const ph = mod.pagePxHeight();
-    const step = ph + mod.pageGapPx();
-    const first = mod.windowFirstPage();
-    const count = mod.windowPageCount();
-    const F = mod.frameRgba();
+    const w = api.read('frameWidth');
+    const h = api.read('frameHeight');
+    const ph = api.read('pagePxHeight');
+    const step = ph + api.read('pageGapPx');
+    const first = api.read('windowFirstPage');
+    const count = api.read('windowPageCount');
+    const F = api.engine().frameRgba();
     let diff = 0, minx = 1e9, miny = 1e9, maxx = -1, maxy = -1;
     let comparedPages = 0;
     for (const [p, rec] of pageCanvases) {
@@ -2425,10 +2246,10 @@ const facade = {
         }
       }
     }
-    const st = JSON.parse(mod.editStatsJson());
+    const st = api.read('editStats');
     const r = pagesEl.getBoundingClientRect();
     return {
-      text: mod.documentText(0),
+      text: api.read('text', { i: 0 }),
       docCodepoints: st.docCodepoints,
       caret: { para: st.caretPara, offset: st.caretOffset, x: st.caretX, y: st.caretY,
                w: st.caretW, h: st.caretH, visible: st.caretVisible, page: st.caretPage },
@@ -2436,13 +2257,13 @@ const facade = {
       window: { first, count, comparedPages },
       pageCanvases: pageCanvases.size,
       pages: {
-        backing: [mod.pagePxWidth(), ph],
+        backing: [api.read('pagePxWidth'), ph],
         cssSize: [pagesEl.style.width, pagesEl.style.height],
         rectPx: [Math.round(r.width), Math.round(r.height)],
       },
       dpr: window.devicePixelRatio,
       zoom: currentZoom,
-      backend: mod.rasterBackend ? mod.rasterBackend() : '?',
+      backend: api.read('rasterBackend'),
       screenVsEngineDiffPx: diff,
       screenVsEngineDiffBox: diff ? [minx, miny, maxx, maxy] : null,
       repainted: { pages: st.repaintedPages, pixels: st.repaintedPixels,
@@ -2462,7 +2283,7 @@ const facade = {
   //   allOk=false 就说明确实有字段没画对，rows 里能看到是哪个、差多少。
   markCheck() {
     if (!ready || !mod) return null;
-    const cc = JSON.parse(mod.controlsJson());
+    const cc = api.read('controls');
     const f = this.rawFrame();
     const fw = this.frameW();
     const focusedOnly = this.bracketScope === 1;
@@ -2511,7 +2332,7 @@ const facade = {
   stopBlink() {
     if (blinkTimer) { clearInterval(blinkTimer); blinkTimer = null; }
     caretOn = true;
-    mod.showCaret(true);
+    api.write('phase', { on: true });
     return true;
   },
   startBlink() { resetBlink(); return true; },
@@ -2519,7 +2340,7 @@ const facade = {
   // 引擎实时光标偏移，直读不经过 editStats。
   //   editStats 是"上一次呈现"写下的账；拿它和这个比，就能判出
   //   "有没有哪个改了状态的入口忘了给自己收尾"（Tab 跳字段就栽在这上面）。
-  get caretLive() { return mod ? mod.caretOffsetLive() : -1; },
+  get caretLive() { return mod ? api.read('caretOffsetLive') : -1; },
 
   // 给探针用的 DOM 句柄（键盘路径要往真实元素上派事件，不能直接调引擎）
   get textarea() { return ta; },
@@ -2538,15 +2359,15 @@ const facade = {
   get pageCanvasList() { return [...pageCanvases.keys()].sort((a, b) => a - b); },
   // 页在帧像素下的几何 [宽, 高, 间隙]。
   get pagePx() {
-    return mod ? [mod.pagePxWidth(), mod.pagePxHeight(), mod.pageGapPx()] : null;
+    return mod ? [api.read('pagePxWidth'), api.read('pagePxHeight'), api.read('pageGapPx')] : null;
   },
   // 视口窗口现场：宿主与引擎各自认为窗口是哪几页（两者必须一致）。
   get viewport() {
     if (!mod) return null;
-    return { anchor: lastAnchor, engineFirst: mod.windowFirstPage(),
-             engineCount: mod.windowPageCount(),
+    return { anchor: lastAnchor, engineFirst: api.read('windowFirstPage'),
+             engineCount: api.read('windowPageCount'),
              desired: desiredWindow(), visible: visiblePageRange(),
-             pagePx: [mod.pagePxWidth(), mod.pagePxHeight(), mod.pageGapPx()],
+             pagePx: [api.read('pagePxWidth'), api.read('pagePxHeight'), api.read('pageGapPx')],
              canvases: pageCanvases.size, pooled: canvasPool.length };
   },
   // 同一件事的两种口径：zoomLevel 是密度（设备像素 / 磅），zoomFactor 是倍数
@@ -2579,7 +2400,7 @@ const facade = {
     if (blinkTimer) { clearInterval(blinkTimer); blinkTimer = null; }
     window.removeEventListener('error', onWindowError);
     window.removeEventListener('unhandledrejection', onUnhandledRejection);
-    if (dprQuery) { dprQuery.removeEventListener('change', onDprWatch); dprQuery = null; }
+    if (stopDprWatch) stopDprWatch();
     for (const [, rec] of pageCanvases) if (rec.el.parentNode) rec.el.parentNode.removeChild(rec.el);
     pageCanvases.clear();
     canvasPool.length = 0;
@@ -2632,6 +2453,12 @@ const readyPromise = (async () => {
   }
 })();
 
+// 门面形状暂时保持同步。
+//
+// 路 B 的"门面一律返回 Promise"不能单独落地：实测把它包成 async 之后，edit_probe
+//   有 14 项变红、整轮耗时从 42 s 涨到 158 s。原因是探针在单线程宿主上依赖
+//   "调用即生效、随后同步读值"这一形态，包成 Promise 后读到的还是上一拍。
+//   这件事必须与 host_core 合并（步 4）一起做，那时两边的事件层同时改写。
 return facade;
 }
 

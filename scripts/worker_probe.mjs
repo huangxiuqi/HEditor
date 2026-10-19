@@ -535,6 +535,65 @@ async function main() {
   const errs = await c.eval('return window.__wheditor.errors');
   chk.check('宿主与 Worker 都没有报错', errs.length === 0, j(errs));
 
+  // 命令表是两宿主共用的那一份（见 docs/一个引擎API与两种传输.md）。这一节只验
+  //   "表是完整的、能取到值、形状对"—— 语义对不对由上面那些像素与光标断言管。
+  //   少了这一节，补命令时把方法名拼错只会表现为某处 undefined，而 undefined 不会红。
+  // 放在错误面之后：最后一条会故意发一个不存在的命令，报错会进 errors。
+  chk.section('[W15] 命令表：几何读数、即时读数、构建标识');
+  {
+    const geo = await c.eval(body(
+      'const h = window.__wheditor;\n' +
+      'return {\n' +
+      '  fw: await h.ask("frameWidth"), fh: await h.ask("frameHeight"),\n' +
+      '  fb: await h.ask("frameByteSize"), fs: await h.ask("frameSlots"),\n' +
+      '  pw: await h.ask("pagePxWidth"), ph: await h.ask("pagePxHeight"),\n' +
+      '  gap: await h.ask("pageGapPx"),\n' +
+      '  wf: await h.ask("windowFirstPage"), wc: await h.ask("windowPageCount"),\n' +
+      '};'));
+    chk.check('帧几何可读（宽 / 高 / 字节数 / 槽数）',
+              geo.fw > 0 && geo.fh > 0 && geo.fb === geo.fw * geo.fh * 4 && geo.fs >= 1,
+              `帧 ${geo.fw}x${geo.fh} / ${geo.fb} B / 槽 ${geo.fs}`);
+    chk.check('页度量与窗口自洽', geo.pw > 0 && geo.ph > 0 && geo.gap >= 0 &&
+              geo.wc >= 1 && geo.wf >= 0,
+              `页 ${geo.pw}x${geo.ph} 间隙 ${geo.gap} / 窗口 ${geo.wf}+${geo.wc}`);
+  }
+  {
+    const live = await c.eval(body(
+      'const h = window.__wheditor;\n' +
+      'return {\n' +
+      '  off: await h.ask("caretOffsetLive"),\n' +
+      '  vert: await h.ask("caretVerticalNow"),\n' +
+      '  rev: await h.ask("caretBlockReversedNow"),\n' +
+      '  rep: await h.ask("selectionReport"),\n' +
+      '};'));
+    chk.check('光标即时读数可读（偏移 / 纵向 / 反向）',
+              typeof live.off === 'number' && typeof live.vert === 'boolean' &&
+              typeof live.rev === 'boolean',
+              `offset ${live.off} / vertical ${live.vert} / reversed ${live.rev}`);
+    chk.check('选区报告可用且带矩形数组',
+              !!live.rep && typeof live.rep === 'object' && Array.isArray(live.rep.rects),
+              `anchor ${live.rep && live.rep.anchor} / rects ${live.rep && live.rep.rects
+                ? live.rep.rects.length : '?'}`);
+  }
+  {
+    const meta = await c.eval(body(
+      'const h = window.__wheditor;\n' +
+      'return { stamp: await h.ask("buildStamp"), backend: await h.ask("rasterBackend") };'));
+    chk.check('构建标识与光栅后端可读',
+              typeof meta.stamp === 'string' && meta.stamp.length > 0 &&
+              typeof meta.backend === 'string' && meta.backend.length > 0,
+              `${meta.stamp} / ${meta.backend}`);
+  }
+  // 反向一半：拼错的命令名必须抛错。返回 undefined 的话，宿主侧的门面会把
+  //   "命令不存在"读成"这一下没有改动"，静默吞掉。
+  {
+    const bad = await c.eval(body(
+      'const h = window.__wheditor;\n' +
+      'try { await h.ask("noSuchCommand"); return "no-throw"; }\n' +
+      'catch (e) { return String((e && e.message) || e); }'));
+    chk.check('未知命令抛错，不返回 undefined', /未知查询/.test(bad), bad);
+  }
+
   say('');
   say(`      同一页内滚动（不换窗口）：${scroll.inWin.join(' / ')} ms`);
   say(`      跨页滚动（换窗口重光栅）：${scroll.cross.join(' / ')} ms`);
