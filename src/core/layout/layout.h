@@ -377,6 +377,7 @@ struct PlacedTable {
     uint64_t handle = 0;
     float x = 0.0f;  // 表格左边（页内坐标）
     float w = 0.0f;
+    int rows = 0;
     int cols = 0;
     std::vector<float> col_x;
     /**

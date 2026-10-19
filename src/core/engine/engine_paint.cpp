@@ -362,9 +362,13 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
                         if (right <= left) continue;
                         base_.fillRect(Rect{left, top, lw_px, bot - top}, cfg_.table_line);
                         base_.fillRect(Rect{right - lw_px, top, lw_px, bot - top}, cfg_.table_line);
+                        // 横线：上边每条都画，下边只在"表格最后一行"补。相邻两行如果各画
+                        //   自己的下边与上边，两条线错开一个像素，看起来就是加粗的一条粗线
+                        //   （这是"边框怎么这么粗"的真因）。跨页片段的切口两边都不画。
                         if (!pr.cont_top)
                             base_.fillRect(Rect{left, top, right - left, lw_px}, cfg_.table_line);
-                        if (!pr.cont_bottom)
+                        const bool last_row = (pr.row == pt.rows - 1);
+                        if (!pr.cont_bottom && last_row)
                             base_.fillRect(Rect{left, bot - lw_px, right - left, lw_px},
                                            cfg_.table_line);
                     }

@@ -1249,6 +1249,28 @@ int main() {
             expectTrue(q0 == 1 && q1 >= 2,
                        "不允许跨页断行：第二行整行挪到下一页，本页只剩第一行");
         }
+        // 九：格内多行要撑开行高 —— 一格里两个段落，下一行表格行必须让开这两行。
+        //   必须是"同一行里切格"的形状（两列）：切格时不结算上一格的内容高，只按一行算，
+        //   下一行表格行压到格内第二段上（实测两边都是 y=117）。单列表抓不到这一条 ——
+        //   它切格与切行同时发生，走的是另一条（会顺带结算的）路径。
+        {
+            constexpr uint64_t kT = 15;
+            std::vector<BlockSpec> blocks = {
+                mkCellBlock("甲", kT, 0, 0), mkCellBlock("乙", kT, 0, 0),
+                mkCellBlock("丙", kT, 0, 1), mkCellBlock("丁", kT, 1, 0),
+                mkCellBlock("戊", kT, 1, 1)};
+            LayoutTable t = mkTable(kT, 2, 2);
+            t.cells = cellsOf(2, 2);
+            const LayoutResult r = layoutDocument(lib, blocks, page, {t});
+            expectTrue(r.lines.size() == 5, "格内两段 + 另一格 + 第二行两格，共五行");
+            if (r.lines.size() == 5) {
+                // 段 1 是格 (0,0) 的第二段；段 3 是第二行第一格。
+                expectTrue(r.lines[3].block_lo_pt >= r.lines[1].block_hi_pt + pad - 0.01f,
+                           "第二行表格行在格内最后一行之下（格子被撑开）");
+                expectTrue(r.lines[3].block_lo_pt > r.lines[0].block_lo_pt + 2.0f * kSize,
+                           "第二行表格行至少让开两行的高度");
+            }
+        }
     }
 
     std::printf("\n──────────────────────────────\n");

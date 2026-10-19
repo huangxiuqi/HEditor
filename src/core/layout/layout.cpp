@@ -712,6 +712,7 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
             pt.handle = t.handle;
             pt.x = f.x;
             pt.w = w;
+            pt.rows = t.rows;
             pt.cols = cols;
             pt.col_x = f.col_x;
             pt.col_x.push_back(w);
@@ -903,6 +904,9 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
     // 进一个格：摆好行内起点、可用宽度与块轴起点。跨列的格把覆盖的列宽加起来。
     auto openCell = [&](const CellSlot& slot) {
         TableFrame& f = tstack.back();
+        // 先结算上一格：切格时 cursor_y 还停在它的末尾，晚一步就被下面的重置覆盖了。
+        //   漏这一步的症状是"格内多行不撑开行高" —— 上一格只按一行算，第二行压到下一行表格上。
+        closeCell();
         if (f.row != slot.row) {
             closeRow();
             f.row = slot.row;
