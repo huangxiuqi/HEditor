@@ -8733,6 +8733,38 @@ int main() {
             e45.relayout();
         }
 
+        // 只选一格里的一个字：这是"文字选区"，比格窄、高度是行盒 —— 与"单元格选区"
+        //   是两件事。要一个多字的格才构造得出来：单字格里 [0,1) 就是整段。
+        {
+            EditorEngine e2;
+            expectTrue(e2.init({cjkPath, mnPath, latinPath}), "引擎初始化（文字选区）");
+            e2.setConfig(c45);
+            NodeTree t2;
+            const NodeId s2 = t2.firstSectionId();
+            const NodeId tb2 = t2.appendChild(s2, NodeKind::Table);
+            const NodeId r2 = t2.appendChild(tb2, NodeKind::TableRow);
+            const NodeId c2 = t2.appendChild(r2, NodeKind::TableCell);
+            t2.setText(t2.appendChild(c2, NodeKind::TextRun), utf8ToCodepoints("甲乙丙"));
+            t2.appendChild(c2, NodeKind::ParagraphMark);
+            e2.setDocument(t2, StyleSheet{});
+            e2.relayout();
+            const LayoutResult& lay2 = e2.layout();
+            const float cw2 = lay2.lines[0].cell_hi_pt - lay2.lines[0].cell_lo_pt;
+            e2.setCaret(0, 0);
+            e2.setFocusAtSide(0, 1, 0);
+            const std::vector<PageRect> part = e2.selectionRects();
+            bool narrow = false;
+            bool short_h = false;
+            for (const PageRect& rr : part) {
+                if (rr.r_pt.w < cw2 - 10.0f) narrow = true;
+                if (rr.r_pt.h < lay2.lines[0].cell_bottom_pt - lay2.lines[0].cell_top_pt - 1.0f) {
+                    short_h = true;
+                }
+            }
+            expectTrue(narrow, "只选一格里的一个字：高亮比格窄（文字选区）");
+            expectTrue(short_h, "只选一个字：高亮高度是行盒，不是整行");
+        }
+
         // 格内编辑：增量被禁（有表格），文本必须落进第二格那一段。
         e45.setCaret(1, 1);
         expectTrue(e45.typeTextAndRender("Z"), "在表格第二格打字");
@@ -8759,6 +8791,41 @@ int main() {
         expectTrue(e45.blocks().size() == 4 && e45.blocks()[1].textUtf8() == "B",
                    "撤销之后第二格回到一个字");
         expectTrue(e45.auditLayout() == 0, "撤销之后仍与整篇重排逐字段一致");
+    }
+
+    // 表格后面那个空段落（Word 里那个 ¶）：它要能被点到、能放光标。
+    //   形状是"表格 + 只含一枚段落标记的段落"—— 示例文书里表格下面就是这个，
+    //   而它与表格最后一行只隔一个内边距，命中容易落到表格上。
+    {
+        EditorEngine e47;
+        expectTrue(e47.init({cjkPath, mnPath, latinPath}), "引擎初始化");
+        EngineConfig c47;
+        c47.zoom = 1.0f;
+        c47.page.width_pt = 300.0f;
+        c47.page.height_pt = 300.0f;
+        c47.page.margin_pt = 10.0f;
+        e47.setConfig(c47);
+        NodeTree t;
+        const NodeId s = t.firstSectionId();
+        const NodeId tb = t.appendChild(s, NodeKind::Table);
+        const NodeId row = t.appendChild(tb, NodeKind::TableRow);
+        const NodeId cell = t.appendChild(row, NodeKind::TableCell);
+        t.setText(t.appendChild(cell, NodeKind::TextRun), utf8ToCodepoints("格"));
+        t.appendChild(cell, NodeKind::ParagraphMark);
+        t.appendChild(s, NodeKind::ParagraphMark);  // 表格后的空段落
+        e47.setDocument(t, StyleSheet{});
+        e47.relayout();
+        const LayoutResult& lay = e47.layout();
+        expectTrue(lay.lines.size() == 2, "表格一行 + 空段落一行，共两个行盒");
+        if (lay.lines.size() == 2) {
+            const LineBox& empty = lay.lines[1];
+            TextPos got;
+            const bool hit = e47.hitTestPt(empty.inline_origin_pt + 2.0f,
+                                           (empty.block_lo_pt + empty.block_hi_pt) * 0.5f, &got);
+            expectTrue(hit && got.para == 1,
+                       "点表格后的空段落命中那一段（实际段 " +
+                           std::to_string(hit ? got.para : -1) + "）");
+        }
     }
 
     std::printf("\n[46] 表格：首尾边界上的删除把整张表删掉\n");

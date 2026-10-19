@@ -573,6 +573,15 @@ struct LineBox {
     float cell_hi_pt = 0.0f;
 
     /**
+     * 这一行所属格的块轴范围（页内坐标）。两者相等表示不在表格里。
+     *
+     * 选区高亮靠它：一格被整段选中时要整格反白，而行盒只盖住文字那一带 —— 显式行高
+     * （AtLeast）比内容高时，上下那两截空白也得算进高亮。排版在行高结算之后回填。
+     */
+    float cell_top_pt = 0.0f;
+    float cell_bottom_pt = 0.0f;
+
+    /**
      * 行内簇（cp 升序）
      */
     std::vector<LineCluster> clusters;

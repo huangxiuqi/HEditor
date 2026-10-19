@@ -404,6 +404,10 @@ NodeTree demoTableTree(int cjk_font_index) {
     cell(row2, "72", 1);
     cell(row2, "次/分", 1);
 
+    // 表格之后的空段落：Word 里表格后面总有一个可点的空段落（那个 ¶），
+    //   这里按同一种形状摆一份 —— 表格底边与它之间没有别的内容。
+    tree.appendChild(sec, NodeKind::ParagraphMark);
+
     para(sec, "以上为本次查体记录。");
     return tree;
 }

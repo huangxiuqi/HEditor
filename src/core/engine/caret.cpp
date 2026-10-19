@@ -688,10 +688,25 @@ std::vector<PageRect> CaretResolver::selectionRectsIn(int first_page, int count)
                 if (l_lo == lb.first_cp) x0 = std::min(x0, lb.cell_lo_pt);
                 if (l_hi == lb.last_cp) x1 = std::max(x1, lb.cell_hi_pt);
             }
+            // 表格里的两种选区是两件事，不能混：
+            //   整段被选中（这一段的首尾都进了选区）才是"单元格选区"—— 铺满整格，
+            //   宽度到格的左右边界、高度到整行的块轴范围（含显式行高多出来的空白）；
+            //   只选了一段里的一部分，仍是"文字选区"—— 只盖那几个字。
+            //   所以判断必须是一个合取，不能左右端各判各的：那样"从段首选到中间"
+            //   会被当成整格，左边界一路铺到格左边。
+            const bool whole_cell = lb.cell_hi_pt > lb.cell_lo_pt && l_lo == lb.first_cp &&
+                                    l_hi == lb.last_cp && lb.cell_bottom_pt > lb.cell_top_pt;
+            if (whole_cell) {
+                x0 = std::min(x0, lb.cell_lo_pt);
+                x1 = std::max(x1, lb.cell_hi_pt);
+                r.y = lb.cell_top_pt;
+                r.h = lb.cell_bottom_pt - lb.cell_top_pt;
+            } else {
+                r.y = lb.block_lo_pt;
+                r.h = lb.block_hi_pt - lb.block_lo_pt;
+            }
             r.x = x0;
-            r.y = lb.block_lo_pt;
             r.w = x1 - x0;
-            r.h = lb.block_hi_pt - lb.block_lo_pt;
         } else {
             r.x = lb.block_lo_pt;
             r.y = std::min(a0, a1);

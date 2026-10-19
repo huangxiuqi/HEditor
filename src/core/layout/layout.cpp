@@ -891,6 +891,13 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
                     pr.h = std::max(0.0f, bottom - pr.y);
                     pr.cont_top = (i > 0);
                     pr.cont_bottom = (i + 1 < spans.size());
+                    // 把这一片段的块轴范围回填给落在该页的行盒：选区高亮要铺满整格
+                    //   （含 AtLeast 行高多出来的那两截空白），而行盒本身只有文字那一带。
+                    for (size_t j = f.line_begin; j < res.lines.size(); ++j) {
+                        if (res.lines[j].page != pr.page) continue;
+                        res.lines[j].cell_top_pt = pr.y;
+                        res.lines[j].cell_bottom_pt = pr.y + pr.h;
+                    }
                     pt.placed.push_back(pr);
                 }
             }
