@@ -3,6 +3,7 @@
 #include <algorithm>
 
 #include "core/doc/document.h"
+#include "core/doc/format_map.h"
 #include "core/doc/table.h"
 #include "core/utils/hash.h"
 
@@ -54,16 +55,6 @@ struct PendingText {
     std::string style_ref;         // 字符样式引用
     NodeId node = kInvalidNodeId;  // 记诊断用
 };
-
-/**
- * 两个 run 的字符格式是否相同（不比区间）。
- * 逐字段比较：漏比一个字段会把两个不同格式的文本段并成一个，而合并是不可逆的静默丢格式。
- * 语言按指针比即可 —— 它来自同一份段落格式，是同一个驻留字符串。
- */
-bool sameRunFormat(const FormatRun& a, const FormatRun& b) {
-    return a.font_index == b.font_index && a.size_pt == b.size_pt && a.color == b.color &&
-           a.language == b.language && a.fallback_font_indices == b.fallback_font_indices;
-}
 
 /**
  * 一次摊平：按流顺序遍历，边累积文本边切段。
@@ -156,7 +147,13 @@ private:
         // 这一块属于哪一格。路径栈在遍历格时压/弹，落段时照抄一份 ——
         // 块的归属与它的内容在同一次落段里定下，不可能出现"内容进了这一段、归属还是上一格"。
         b.cell_path = path_;
-        if (mark != nullptr) applyParaFormat(*mark, &b);
+        if (mark != nullptr) {
+            // 段落格式的三层解析与换算在 format_map 里，投影层用的是同一份。
+            applyParaFormatToBlock(sheet_, mark->styleRef, mark->para, mark->id, &b,
+                                   [this](const CompileDiagnostic& d) {
+                                       out_.diagnostics.push_back(d);
+                                   });
+        }
         // 本段的行内对象表：进出控件边界时就地攒下（见 walk 里控件那一段），落段时一起带走。
         //   它与 cp_text 共用同一个码点坐标，同一次落段，于是不可能出现"文本进了这一段、
         //   对象却留在上一段"的错配。
@@ -175,7 +172,7 @@ private:
         const FormatRun para_default = b.wholeRun();
 
         // 段落样式链的字符格式基线：一段解析一次，本段所有文本节点共用。
-        // 诊断传 nullptr —— 这条链的问题已经由上面的 applyParaFormat 报过，而且两者是同一根
+        // 诊断传 nullptr —— 这条链的问题已经由上面的段落格式解析报过，而且两者是同一根
         // 链；再报一次只会按文本节点数重复。
         const std::string para_style = (mark != nullptr) ? mark->styleRef : std::string();
         const CharFormat base = paragraphRunBase(sheet_, para_style, nullptr);
@@ -189,12 +186,14 @@ private:
             std::vector<std::string> why;
             const CharFormat cf = resolveRunFormatFrom(sheet_, base, t.style_ref, t.marks, &why);
             for (const std::string& w : why) note(NodeKind::TextRun, t.node, w);
-            applyRunFormat(cf, t.node, &r);
+            applyCharFormatToRun(cf, t.node, &r, [this](const CompileDiagnostic& d) {
+                note(d.kind, d.node, d.detail);
+            });
 
             // 与上一个 run 的格式完全相同就并进去：相邻同格式的文本段在引擎里是一个 run。
             // 不并也对（切分不改产出，这一条在引擎侧有等价判据），但并起来让 runs 是规范的，
             // 不随模型里文本节点的切分方式变化。
-            if (!b.runs.empty() && sameRunFormat(b.runs.back(), r)) {
+            if (!b.runs.empty() && b.runs.back().sameFormat(r)) {
                 b.runs.back().cp_end = r.cp_end;
             } else {
                 b.runs.push_back(r);
@@ -211,70 +210,6 @@ private:
         }
         out_.blocks.push_back(std::move(b));
         out_.sources.push_back(BlockSource{first_id, mark_id});
-    }
-
-    /**
-     * 把解析出来的字符格式写进 run：没设置的字段保留段落默认值（未设置即继承）。
-     *
-     * 粗体、斜体、下划线在引擎输入里还没有对应字段。设了却不报出来等于静默丢格式 ——
-     * 排版看着没错、只是样式没了，比"不支持"难查得多。所以显式记诊断，不伪造成功路径。
-     */
-    void applyRunFormat(const CharFormat& cf, NodeId node, FormatRun* r) {
-        if (cf.font_index.has_value()) r->font_index = *cf.font_index;
-        if (cf.color.has_value()) r->color = *cf.color;
-        if (cf.size.has_value()) {
-            if (cf.size->kind != LengthKind::Abs) {
-                note(NodeKind::TextRun, node, "字符格式的字号必须是绝对长度");
-            } else {
-                r->size_pt = static_cast<float>(emuToPt(cf.size->abs_emu));
-            }
-        }
-        if (cf.bold.value_or(false) || cf.italic.value_or(false) || cf.underline.value_or(false)) {
-            note(NodeKind::TextRun, node,
-                 "字符格式的粗体、斜体、下划线尚未进入编译（引擎输入还没有这些字段）");
-        }
-    }
-
-    /**
-     * 段落格式 → 引擎的块级字段。
-     *
-     * 模型存的是"内联覆盖"加上一个样式引用，所以这里先按三层解析出完整格式。解析的诊断
-     * （未知样式名、继承成环）原样收进产物 —— 那两种情况都会让这一段的格式与作者以为的不一致，
-     * 不能只让它们停在解析层。
-     *
-     * 长度在这里做唯一一次换算：模型存 EMU 整数，引擎吃磅值。非绝对长度（百分比 / em /
-     * 字符数）要等排版给出参照才知道多长，编译期拒绝并记诊断 —— 静默取零会让一整段文字
-     * 凭空没了字号。
-     */
-    void applyParaFormat(const Node& mark, BlockSpec* b) {
-        std::vector<std::string> why;
-        const ParaFormat f = resolveParagraphFormat(sheet_, mark.styleRef, mark.para, &why);
-        for (const std::string& w : why) {
-            out_.diagnostics.push_back(CompileDiagnostic{mark.kind, mark.id, w});
-        }
-        b->font_index = f.font_index;
-        absToPt(f.size, "字号", mark.id, &b->size_pt);
-        b->wm = f.wm;
-        b->line_factor = f.line_factor;
-        absToPt(f.space_after, "段后距", mark.id, &b->space_after_pt);
-        b->page_break_before = f.page_break_before;
-        b->language = f.language;
-        b->color = f.color;
-        b->fallback_font_indices = f.fallback_font_indices;
-    }
-
-    /**
-     * 绝对长度 → 磅。非绝对长度记诊断并保持引擎的默认值（诊断已经让 ok() 变假，
-     * 调用方不会把这份产物当完整结果）。
-     */
-    void absToPt(const Length& len, const char* field, NodeId mark, float* out) {
-        if (len.kind != LengthKind::Abs) {
-            out_.diagnostics.push_back(
-                CompileDiagnostic{NodeKind::ParagraphMark, mark,
-                                  std::string("段落格式的") + field + "必须是绝对长度"});
-            return;
-        }
-        *out = static_cast<float>(emuToPt(len.abs_emu));
     }
 
     /**

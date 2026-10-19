@@ -160,6 +160,7 @@ add_library(heditor_core STATIC
   src/core/doc/para.cpp
   src/core/doc/invariants.cpp
   src/core/doc/compile.cpp
+  src/core/doc/format_map.cpp
   src/core/doc/char_format.cpp
   src/core/doc/para_format.cpp
   src/core/doc/style.cpp
@@ -181,6 +182,10 @@ add_library(heditor_core STATIC
   src/core/doc/transaction.cpp
   src/core/doc/revision.cpp
   src/core/doc/serialize.cpp
+  src/core/doc/record_json.cpp
+  src/core/rev/rev.cpp
+  src/core/rev/project.cpp
+  src/core/rev/serialize.cpp
   src/core/text/font.cpp
   src/core/text/font_source.cpp
   src/core/text/shaper.cpp
@@ -199,8 +204,9 @@ target_include_directories(heditor_core PUBLIC ${HEDITOR_ROOT}/src)
 target_link_libraries(heditor_core PUBLIC heditor_harfbuzz)
 
 # ── JSON（模型层序列化，1.10）────────────────────────────────────
-#   nlohmann/json 3.12.0，单头文件库、MIT。只被 src/core/doc/serialize.cpp 用，
-#   所以是 PRIVATE：nlohmann 的类型不进任何公共头，换库不影响别处的签名。
+#   nlohmann/json 3.12.0，单头文件库、MIT。被 src/core/doc/serialize.cpp 与
+#   src/core/rev/serialize.cpp 经 record_json.h 共用，所以 include 目录仍是 PRIVATE：
+#   对外交付的头（serialize.h / rev 的 serialize.h）不出现 nlohmann 的类型。
 #   取回方式与校验写在 scripts/deps_init.ps1 与 docs/依赖与工具链管理.md。
 set(HEDITOR_JSON_INCLUDE ${HEDITOR_ROOT}/third_party/nlohmann/single_include)
 if(NOT EXISTS "${HEDITOR_JSON_INCLUDE}/nlohmann/json.hpp")
@@ -392,6 +398,12 @@ else()
     target_link_libraries(heditor_model_tests PRIVATE heditor_core heditor_demo)
     heditor_target_flags(heditor_model_tests)
     add_test(NAME doc_model COMMAND heditor_model_tests)
+
+    # 不可变修订层：路径复制、结构共享、内容哈希（重构方案 D1 的第一层）。
+    add_executable(heditor_rev_tests tests/rev_test.cpp)
+    target_link_libraries(heditor_rev_tests PRIVATE heditor_core)
+    heditor_target_flags(heditor_rev_tests)
+    add_test(NAME rev_layer COMMAND heditor_rev_tests)
 
     # 诊断探针（**不进 ctest**）：打印 EditStats / EditorEngine 的尺寸与字段偏移。
     # 用途与"为什么没法自动判定"写在 tests/probe_engine_size.cpp 顶部。

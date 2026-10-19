@@ -1627,4 +1627,10 @@ void summarizeLayoutStats(LayoutResult* out) {
     out->stats.font_run_count = runs;
 }
 
+bool FormatRun::sameFormat(const FormatRun& o) const {
+    return font_index == o.font_index && size_pt == o.size_pt && color == o.color &&
+           BlockSpec::sameLanguage(language, o.language) &&
+           fallback_font_indices == o.fallback_font_indices;
+}
+
 }  // namespace heditor

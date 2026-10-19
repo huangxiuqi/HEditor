@@ -13,6 +13,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstring>
 #include <optional>
 #include <string>
 #include <vector>
@@ -86,6 +87,21 @@ struct FormatRun {
     std::vector<int> fallback_font_indices;
 
     uint32_t codepointCount() const { return cp_end - cp_begin; }
+
+    /**
+     * 除区间之外的字段全相同。相邻同格式的文本段并成一个 run 时用它作判据。
+     *
+     * 逐字段比较：漏比一个字段会把两个不同格式的文本段并成一个，而合并是不可逆的静默丢格式。
+     * 语言按内容比 —— 同一个标签在不同进程里的地址不一样，按指针比会把同一格式判成不同。
+     */
+    bool sameFormat(const FormatRun& o) const;
+
+    /**
+     * 区间与格式都相同。整段等价判据（投影与编译逐字段对齐）要用它。
+     */
+    bool operator==(const FormatRun& o) const {
+        return cp_begin == o.cp_begin && cp_end == o.cp_end && sameFormat(o);
+    }
 };
 
 /**
@@ -144,6 +160,8 @@ struct InlineObject {
      */
     InlineAtom atom = InlineAtom::None;
     uint64_t content_hash = 0;
+
+    bool operator==(const InlineObject& o) const = default;
 };
 
 /**
@@ -301,6 +319,30 @@ struct BlockSpec {
     std::vector<FormatRun> effectiveRuns() const {
         if (!runs.empty()) return runs;
         return {wholeRun()};
+    }
+
+    /**
+     * 逐字段相等：投影与编译是否给出同一份排版输入，判据就是它。
+     *
+     * 语言按内容比（理由见 FormatRun::sameFormat）。加新字段时这里不写就编不过 —— 那正是
+     * 要的：判据漏比一个字段，等于允许两条路在这一点上静默分叉。
+     */
+    bool operator==(const BlockSpec& o) const {
+        return cell_path == o.cell_path && cp_text == o.cp_text && font_index == o.font_index &&
+               size_pt == o.size_pt && wm == o.wm && line_factor == o.line_factor &&
+               space_after_pt == o.space_after_pt && page_break_before == o.page_break_before &&
+               sameLanguage(language, o.language) && color == o.color &&
+               fallback_font_indices == o.fallback_font_indices && runs == o.runs &&
+               objects == o.objects;
+    }
+
+    /**
+     * 两个驻留语言标签是否同一个。空与空相等，空与非空不等。
+     */
+    static bool sameLanguage(const char* a, const char* b) {
+        if (a == b) return true;
+        if (a == nullptr || b == nullptr) return false;
+        return std::strcmp(a, b) == 0;
     }
 };
 
