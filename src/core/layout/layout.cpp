@@ -611,6 +611,10 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
         float w = 0.0f;
         float cell_cx = 0.0f;  // 当前格的行内起点与可用宽度（进内层表时保存，回来后恢复）
         float cell_cw = 0.0f;
+        // 当前格的外框（行内轴，页内坐标）：内容区两侧各让出一层内边距。
+        //   选区反白要的是这一对 —— 用内容区反白会在左右各留一条缝。
+        float cell_box_lo = 0.0f;
+        float cell_box_hi = 0.0f;
         int row = -1;
         int cell = -1;
         float row_top = 0.0f;
@@ -938,6 +942,9 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
         f.cell = slot.cell;
         f.cell_cx = f.x + cell_x + kTableCellPaddingPt;
         f.cell_cw = std::max(1.0f, cell_w - 2.0f * kTableCellPaddingPt);
+        // 外框：格线本身的位置，跨列时按覆盖的列宽加起来。
+        f.cell_box_lo = f.x + cell_x;
+        f.cell_box_hi = f.x + cell_x + cell_w;
         cur_cx = f.cell_cx;
         cur_cw = f.cell_cw;
         cursor_y = f.row_top + kTableCellPaddingPt;
@@ -1041,10 +1048,13 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
             lb.paragraph = static_cast<int>(para_index);
             lb.line = line_total;
             lb.page = slabOfY(cursor_y);
-            // 格范围（命中用）：在格内时是这一格的左右边界；正文里保持 0，表示没有格。
+            // 格范围（命中用）：在格内时是这一格的内容区左右边界；正文里保持 0，表示没有格。
+            //   外框另记一份（选区反白铺满整格要用它，见 LineBox 的两个 box 字段）。
             if (!tstack.empty()) {
                 lb.cell_lo_pt = cur_cx;
                 lb.cell_hi_pt = cur_cx + cur_cw;
+                lb.cell_box_lo_pt = tstack.back().cell_box_lo;
+                lb.cell_box_hi_pt = tstack.back().cell_box_hi;
             }
             lb.vertical = b.wm.isVertical();
             lb.sideways = b.wm.isSideways();
@@ -1275,6 +1285,8 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
                 if (!tstack.empty()) {
                     lb.cell_lo_pt = cur_cx;
                     lb.cell_hi_pt = cur_cx + cur_cw;
+                    lb.cell_box_lo_pt = tstack.back().cell_box_lo;
+                    lb.cell_box_hi_pt = tstack.back().cell_box_hi;
                 }
                 lb.vertical = false;
                 lb.sideways = false;
@@ -1478,6 +1490,8 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
                 if (!tstack.empty()) {
                     lb.cell_lo_pt = cur_cx;
                     lb.cell_hi_pt = cur_cx + cur_cw;
+                    lb.cell_box_lo_pt = tstack.back().cell_box_lo;
+                    lb.cell_box_hi_pt = tstack.back().cell_box_hi;
                 }
                 lb.vertical = true;
                 lb.sideways = sideways;

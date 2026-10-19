@@ -18,7 +18,9 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <map>
 #include <sstream>
+#include <tuple>
 #include <unordered_map>
 
 #include "core/text/shaper.h"
@@ -340,6 +342,117 @@ std::string EditorEngine::auditBaseJson() {
     }
     o << "}";
     return o.str();
+}
+
+/**
+ * 表格结构自审：块与格这两份记录互为对照（见头文件）。
+ *
+ * 两份记录说的是同一件事：块用 cell_path 说自己属于哪一格，格用块区间说自己有哪些块。
+ *   两边都对才站得住 —— 只看一边，遇到"格还在、块没了"就查不出来。
+ */
+int EditorEngine::auditTables() const { return auditTablesDetail().total(); }
+
+std::string EditorEngine::auditTablesJson() const {
+    const TableAudit a = auditTablesDetail();
+    std::ostringstream o;
+    o << "{\"diff\":" << a.total() << ",\"cells\":" << a.cells << ",\"emptyCell\":"
+      << a.empty_cell << ",\"badRange\":" << a.bad_range << ",\"overlap\":" << a.overlap
+      << ",\"noMark\":" << a.block_without_mark << ",\"pathMismatch\":" << a.path_mismatch
+      << ",\"badSpan\":" << a.bad_span << ",\"stray\":" << a.blocks_in_no_cell
+      << ",\"firstCell\":" << a.first_cell << "}";
+    return o.str();
+}
+
+/**
+ * 表格结构自审的实现（判据见头文件的 auditTables）。
+ *
+ * 块与格两份记录逐块对照：格说"我有哪些块"，块说"我在哪一格"。嵌套表的两层会同时
+ *   认领内层那些块，那是合法重叠 —— 只有同一张表的格互相重叠才是错，跨表则要求一边
+ *   严格包含另一边（否则就是"一半重叠"，两份记录都没法用）。
+ */
+EditorEngine::TableAudit EditorEngine::auditTablesDetail() const {
+    TableAudit a;
+    const int n_blocks = static_cast<int>(blocks_.size());
+    std::vector<int> owner(static_cast<size_t>(n_blocks), -1);
+    struct Ref {
+        int table = -1;
+        int lo = 0;
+        int hi = -1;  // 闭区间
+    };
+    std::vector<Ref> refs;
+
+    for (size_t ti = 0; ti < tables_.size(); ++ti) {
+        const LayoutTable& t = tables_[ti];
+        for (const LayoutCell& c : t.cells) {
+            const int ci = static_cast<int>(refs.size());
+            ++a.cells;
+            if (c.block_count <= 0) {
+                ++a.empty_cell;
+                if (a.first_cell < 0) a.first_cell = ci;
+                refs.push_back(Ref{static_cast<int>(ti), 0, -1});
+                continue;
+            }
+            const int last_b = c.first_block + c.block_count - 1;
+            if (c.first_block < 0 || last_b >= n_blocks) {
+                ++a.bad_range;
+                if (a.first_cell < 0) a.first_cell = ci;
+                refs.push_back(Ref{static_cast<int>(ti), c.first_block, last_b});
+                continue;
+            }
+            if (c.row < 0 || c.cell < 0 || c.row + c.row_span > t.rows ||
+                c.cell + c.col_span > t.cols) {
+                ++a.bad_span;
+                if (a.first_cell < 0) a.first_cell = ci;
+            }
+            refs.push_back(Ref{static_cast<int>(ti), c.first_block, last_b});
+            for (int b = c.first_block; b <= last_b; ++b) {
+                const size_t k = static_cast<size_t>(b);
+                const int prev = owner[k];
+                if (prev < 0) {
+                    owner[k] = ci;
+                    continue;
+                }
+                const Ref& p = refs[static_cast<size_t>(prev)];
+                const Ref& n = refs[static_cast<size_t>(ci)];
+                const bool nested = (p.lo <= n.lo && p.hi >= n.hi) ||
+                                    (n.lo <= p.lo && n.hi >= p.hi);
+                if (p.table == n.table || !nested) ++a.overlap;
+                // 记最内层那一格（块数少的），后面的对照要用它。
+                if (n.hi - n.lo < p.hi - p.lo) owner[k] = ci;
+            }
+        }
+    }
+
+    // 块那一侧：cell_path 的最内层一段应当指向认领它的那一格。
+    std::map<std::tuple<uint64_t, int, int>, int> by_slot;
+    {
+        size_t ci = 0;
+        for (const LayoutTable& t : tables_) {
+            for (const LayoutCell& c : t.cells) {
+                by_slot[std::make_tuple(t.handle, c.row, c.cell)] = static_cast<int>(ci);
+                ++ci;
+            }
+        }
+    }
+    const bool marks_known = block_src_.size() == blocks_.size();
+    for (int i = 0; i < n_blocks; ++i) {
+        const size_t k = static_cast<size_t>(i);
+        const std::vector<CellSlot>& path = blocks_[k].cell_path;
+        if (path.empty()) {
+            if (owner[k] >= 0) ++a.blocks_in_no_cell;
+        } else {
+            const CellSlot& in = path.back();
+            const auto it = by_slot.find(std::make_tuple(in.table, in.row, in.cell));
+            const int want = (it == by_slot.end()) ? -1 : it->second;
+            if (want < 0 || want != owner[k]) ++a.path_mismatch;
+        }
+        // 文档最后一块可以没有结束标记（末尾未结束），格里的块不行。
+        if (owner[k] >= 0 && i + 1 < n_blocks && marks_known &&
+            block_src_[k].mark == kInvalidNodeId) {
+            ++a.block_without_mark;
+        }
+    }
+    return a;
 }
 
 /**

@@ -92,6 +92,11 @@ struct EditView {
     const std::vector<FlowPos>* block_flow = nullptr;        // 每块内容起点（全局流位置）
     const std::vector<int>* block_flow_span = nullptr;       // 每块占的流位数
     const std::vector<BlockSource>* block_src = nullptr;     // 每块的来源身份
+    /**
+     * 表格的逻辑格（每格的内容块区间）。整格删除要按格清空时用它 ——
+     * 这里是排版输入，不是排版产物，所以拿到的是编译结果里的那一份。
+     */
+    const std::vector<LayoutTable>* tables = nullptr;
     const ControlSet* controls = nullptr;
     const std::vector<NodeId>* control_node_ids = nullptr;
     const EditMode* mode = nullptr;
@@ -229,18 +234,6 @@ private:
     bool eraseAtomBeside(FlowPos cur, bool left);
 
     /**
-     * 表格边界上的删除：光标在表格第一个块的最前面时退格、最后一个块的末尾时前删，
-     * 整张表删掉。
-     *
-     * 表格是块级容器，它没有"删一个字符就缩一格"的形态 —— 能删的只有整张表。判定落在
-     * 块流上（段号 + 段内偏移）而不是流位置：表格的边界不进块流，没有能站光标的括号。
-     * 嵌套表格按最内层判（光标在内层格子里时删的是内层那张）。
-     *
-     * @return 真 = 已经删掉；假 = 光标不在本表的首/尾边界上，调用方照原路走
-     */
-    bool eraseTableBeside(FlowPos cur, bool left);
-
-    /**
      * 控件边界上的一次删除落到哪一类（四条规则见 bracketBackspace 的实现处）。
      */
     enum class BracketHit {
@@ -351,6 +344,44 @@ private:
      * 坐标过期。区间的总覆盖长度对不上时返回空：宁可整条编辑被拒，也不要删掉半截区间。
      */
     std::vector<Step> eraseFlowSteps(FlowPos from, FlowPos to) const;
+
+    /**
+     * 整格选区的删除步骤：选区覆盖到的每一格各删一次内容，合并成一批。
+     *
+     * 与 eraseFlowSteps 的差别是"不跨格边界" —— 格的结束标记（表格结构的一部分）不在
+     * 任何一格的内容区间里，于是不会被删掉；按整条区间删则必然把它卷进去，安全阀过不去，
+     * 整条编辑被拒（症状：选中几格，按 Del 没反应）。
+     */
+    std::vector<Step> eraseCellContents(FlowPos from, FlowPos to) const;
+
+    /**
+     * 被选区整张覆盖的表，整张删掉（连同表外那些纯文本段一起），不覆盖的表一张都不动。
+     *
+     * 为什么需要这条路：表格是块级容器，它的结构位（格尾、行尾）不在任何一条可删区间里，
+     *   所以按流区间删到一张表，覆盖长度永远对不上安全阀，整条编辑被拒 —— 症状就是
+     *   全选之后按 Del 什么也不发生。规则与"表格边界上退格 = 删整张表"同一条：要么整张
+     *   删，要么不碰。
+     *
+     * "覆盖"要求选区把它整个跨过去（起在表首之前或终在表尾之后），全选例外。两头都落在
+     *   表内的文字选区只是选了这张表里的字，删表比用户选的多 —— 那种情形不在这里处理。
+     *
+     * @return 空 = 选区里没有"整张被跨过去"的表，调用方照原路走
+     */
+    std::vector<Step> eraseWholeTables(FlowPos from, FlowPos to) const;
+
+    /**
+     * 两个相邻块在同一个单元格里（或都不在表格里）。
+     *
+     * 合并段落要拿它把关：格的最后一段与下一格的第一段之间隔着单元格边界，删掉那枚段落
+     * 标记不会把两段并起来，只会让前一格少一枚结束标记 —— 那一格的内容一旦删空，整格连
+     * 一个块都不剩，从此点不进去（它的行盒不存在，命中测试只能落到相邻格上）。跨格合并
+     * 因此在结构上没有意义，一律拒。
+     *
+     * 这条判据同时决定了界面上的一条规则：在格内第一段的开头按退格、末尾按前删，
+     * 什么都不发生。表格不会被这两条按键删掉 —— 光标在表内，删的是内容；要删整张表得
+     * 用选区把它整个选上（见 planEraseSelection）。
+     */
+    bool sameCellBlocks(int a, int b) const;
 
     /**
      * 把当前选区折算成"删掉这一段"的步骤（不提交）。

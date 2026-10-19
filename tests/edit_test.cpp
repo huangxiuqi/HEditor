@@ -8720,15 +8720,17 @@ int main() {
         // 选区：整格被选中时高亮铺满格宽（不是只贴着字）—— 这是"单元格选区"与
         //   "文字选区"的差别。参考 Word：一格整段选中时整格反白。
         {
-            const float cell_w = lay.lines[0].cell_hi_pt - lay.lines[0].cell_lo_pt;
+            // 反白按格的外框铺（含两侧内边距），不是内容区 —— 按内容区铺左右会留两条缝。
+            const float cell_w = lay.lines[0].cell_box_hi_pt - lay.lines[0].cell_box_lo_pt;
+            const float content_w = lay.lines[0].cell_hi_pt - lay.lines[0].cell_lo_pt;
             e45.selectAll();
             const std::vector<PageRect> rects = e45.selectionRects();
             bool full = false;
             for (const PageRect& rr : rects) {
                 if (std::fabs(rr.r_pt.w - cell_w) < 1.0f) full = true;
             }
-            expectTrue(cell_w > 10.0f && full,
-                       "全选时表格的格被整格高亮（格宽 " + std::to_string(cell_w) + "）");
+            expectTrue(cell_w > 10.0f && cell_w > content_w + 1.0f && full,
+                       "全选时表格的格被整格高亮（格外框宽 " + std::to_string(cell_w) + "）");
             e45.setCaret(0, 0);
             e45.relayout();
         }
@@ -8828,7 +8830,7 @@ int main() {
         }
     }
 
-    std::printf("\n[46] 表格：首尾边界上的删除把整张表删掉\n");
+    std::printf("\n[46] 表格：格内首尾的删除不删表\n");
     {
         EditorEngine e46;
         expectTrue(e46.init({cjkPath, mnPath, latinPath}), "引擎初始化");
@@ -8839,7 +8841,7 @@ int main() {
         c46.page.margin_pt = 10.0f;
         e46.setConfig(c46);
 
-        // 段 + 表格（1 行 1 格）+ 段：删掉表格之后前后两段都还在。
+        // 段 + 表格（1 行 1 格）+ 段。
         auto mkDoc = [&]() {
             NodeTree t;
             const NodeId s = t.firstSectionId();
@@ -8858,39 +8860,785 @@ int main() {
         e46.relayout();
         expectTrue(e46.blocks().size() == 3, "前、表格、后共三段");
 
-        // 光标在表格第一格的最前面：退格删整张表。
+        // 光标在表格第一格的最前面按退格：光标在表内，删的是内容 —— 表格不消失。
+        //   这条是用户视角的硬要求：格里的字被删空之后再按一下，不该轮到整张表。
         e46.setCaret(1, 0);
-        expectTrue(e46.backspace(), "退格删掉整张表");
-        expectTrue(e46.blocks().size() == 2 && e46.blocks()[0].textUtf8() == "前" &&
-                       e46.blocks()[1].textUtf8() == "后",
-                   "删掉之后只剩前后两段（表格的格内容一起没了）");
-        // 段数变了：要有一次重排，layout_ 才是新版的（宿主每帧都会做这一步）。
+        expectTrue(!e46.backspace(), "首格段首退格：什么都不发生");
         e46.relayout();
+        expectTrue(e46.blocks().size() == 3 && e46.blocks()[1].textUtf8() == "格",
+                   "表格与格里的字都还在");
+        expectTrue(e46.auditTables() == 0, "拒绝之后表格结构自审一致");
+
+        // 前删在表格最后一个块的末尾：同样什么都不发生（表内没有"跨出去"这一步）。
+        e46.setCaret(1, 1);
+        expectTrue(!e46.deleteForward(), "末段末尾前删：什么都不发生");
+        e46.relayout();
+        expectTrue(e46.blocks().size() == 3, "前删之后三段不变");
+
+        // 格内容删空之后再按一下：仍然什么都不发生（表还在）。
+        e46.setCaret(1, 1);
+        expectTrue(e46.backspace(), "在格内容末尾退格：删掉那个字");
+        e46.relayout();
+        expectTrue(e46.blocks().size() == 3 && e46.blocks()[1].textUtf8().empty(),
+                   "只删掉格里的那个字，表格还在");
+        e46.relayout();
+        expectTrue(!e46.backspace(), "格已经空了，再按退格：什么都不发生");
+        e46.relayout();
+        expectTrue(e46.blocks().size() == 3, "再按一下之后表格仍然在");
+        expectTrue(e46.auditTables() == 0, "删空之后再拒绝，表格结构自审仍一致");
+
+        // 删表要显式：用选区把它整个跨过去（这里从表前那一段的末尾到表后那一段的开头）。
+        const FlowPos before_table = e46.flowPosAt(0, 1);
+        const FlowPos after_table = e46.flowPosAt(2, 0);
+        expectTrue(e46.setSelection(Range{before_table, after_table}), "设一个跨过整表的选区");
+        expectTrue(e46.backspace(), "跨过整表的选区退格：执行成功");
+        e46.relayout();
+        // 这一段区间里还有"前"那一段的结束标记：它被删掉之后前后两段并成一段，
+        //   表与格内容一起消失 —— 与"删除一段连续区间"的语义一致。
+        expectTrue(e46.blocks().size() == 1 && e46.blocks()[0].textUtf8() == "前后",
+                   "删掉之后表与格内容一起没了，前后两段并成一段（实际 " +
+                       std::to_string(e46.blocks().size()) + " 块）");
         expectTrue(e46.auditLayout() == 0 && e46.auditCompile() == 0,
                    "删表之后排版与编译两份自审都是 0");
+        expectTrue(e46.auditTables() == 0, "表已经不在了，表格结构自审仍是 0");
 
         // 撤销：表格整张回来（含格里的字）。
         expectTrue(e46.undo(), "撤销");
         e46.relayout();
-        expectTrue(e46.blocks().size() == 3 && e46.blocks()[1].textUtf8() == "格",
-                   "撤销之后表格与格里的字都回来了");
-        expectTrue(e46.auditLayout() == 0 && e46.auditCompile() == 0,
-                   "撤销之后两份自审仍然是 0");
-
-        // 前删在表格最后一个块的末尾：同样删整张表。
-        e46.setCaret(1, 1);
-        expectTrue(e46.deleteForward(), "前删删掉整张表");
-        expectTrue(e46.blocks().size() == 2 && e46.blocks()[0].textUtf8() == "前" &&
-                       e46.blocks()[1].textUtf8() == "后",
-                   "前删之后同样只剩前后两段");
-
-        // 反向一半：光标在表格中间（格内容里）时，退格只删一个字符，不删表。
-        expectTrue(e46.undo(), "撤销回表格");
-        e46.relayout();
-        e46.setCaret(1, 1);
-        expectTrue(e46.backspace(), "在格内容末尾退格");
         expectTrue(e46.blocks().size() == 3 && e46.blocks()[1].textUtf8().empty(),
-                   "只删掉格里的那个字，表格还在（三段没变）");
+                   "撤销之后表格回来（格内容停在删空那一刻）");
+        expectTrue(e46.auditTables() == 0, "撤销之后表格结构自审一致");
+    }
+
+    std::printf("\n[47] 表格：文字选区与单元格选区是两条操作线\n");
+    {
+        EditorEngine e47;
+        expectTrue(e47.init({cjkPath, mnPath, latinPath}), "引擎初始化");
+        EngineConfig c47;
+        c47.zoom = 1.0f;
+        c47.page.width_pt = 300.0f;
+        c47.page.height_pt = 300.0f;
+        c47.page.margin_pt = 10.0f;
+        e47.setConfig(c47);
+
+        NodeTree t;
+        const NodeId s = t.firstSectionId();
+        const NodeId tb = t.appendChild(s, NodeKind::Table);
+        const NodeId row = t.appendChild(tb, NodeKind::TableRow);
+        // 显式行高（AtLeast）撑出一截空白：整格选区要把这一截算进去，文字选区不该算。
+        t.find(row)->row.height = Length::abs(ptToEmu(60.0));
+        t.find(row)->row.height_rule = HeightRule::AtLeast;
+        const NodeId cell = t.appendChild(row, NodeKind::TableCell);
+        t.setText(t.appendChild(cell, NodeKind::TextRun), utf8ToCodepoints("甲"));
+        t.appendChild(cell, NodeKind::ParagraphMark);
+        t.setText(t.appendChild(cell, NodeKind::TextRun), utf8ToCodepoints("乙"));
+        t.appendChild(cell, NodeKind::ParagraphMark);
+
+        e47.setDocument(t, StyleSheet{});
+        e47.relayout();
+        const LayoutResult& lay = e47.layout();
+        expectTrue(lay.lines.size() == 2, "格内两段编出两行");
+        if (lay.lines.size() == 2) {
+            const LineBox& l0 = lay.lines[0];
+            const float ymid = (l0.block_lo_pt + l0.block_hi_pt) * 0.5f;
+            TextPos got;
+            int band_para = -1;
+            // 边距带：格的外框到文字左沿之间那一条。给的是段号 —— 一格的身份是它占的
+            //   块区间，不是它的流区间（空格的内容长度是 0，流区间分不出是哪一格）。
+            const bool hit_band = e47.hitTestPt(l0.cell_lo_pt - 1.0f, ymid, &got, nullptr,
+                                                nullptr, nullptr, &band_para);
+            expectTrue(hit_band && band_para == l0.paragraph,
+                       "点在格左内边距上：命中给出这一格的段号");
+            // 反向一半：点在同一行的字上不给整格 —— 那是文字光标，不是选格。
+            int word_para = -1;
+            e47.hitTestPt(l0.inline_origin_pt + 2.0f, ymid, &got, nullptr, nullptr, nullptr,
+                          &word_para);
+            expectTrue(word_para < 0, "点在同一行的字上：不触发整格");
+
+            // 三击那条路：点在哪格里都算。
+            expectTrue(e47.selectCellAtPt(l0.inline_origin_pt + 2.0f, ymid),
+                       "三击：点在字上也选中整格");
+            expectTrue(e47.selectionIsCell(), "标记是单元格选区");
+            // 一格的内容区间：首段段首到末段段末（这一格两段）。
+            FlowPos clo = e47.flowPosAt(l0.paragraph, 0);
+            FlowPos chi = e47.flowPosAt(lay.lines[1].paragraph, 1);
+            expectTrue(chi > clo, "这一格的内容区间取得到");
+            const Range sr = e47.selection();
+            expectTrue(sr.anchor == clo && sr.focus == chi,
+                       "整格选区的两端就是这一格的内容区间");
+            // 插入点钉在格末（格内第二段的末尾），不是三击落下的那个字的位置。
+            const TextPos c47 = e47.caret();
+            expectTrue(c47.para == lay.lines[1].paragraph && c47.offset == 1,
+                       "整格选区的插入点在格末（第二段末尾），不跟着点击位置走（实际 段 " +
+                           std::to_string(c47.para) + " 偏移 " + std::to_string(c47.offset) + "）");
+            const std::vector<PageRect> rects = e47.selectionRects();
+            expectTrue(rects.size() == 1, "格内两行只画一个整格矩形（不叠着画两遍）");
+            if (rects.size() == 1) {
+                expectNear(rects[0].r_pt.x, l0.cell_box_lo_pt, 0.01, "整格选区左边界贴格外框");
+                expectNear(rects[0].r_pt.w, l0.cell_box_hi_pt - l0.cell_box_lo_pt, 0.01,
+                           "整格选区宽度是整格的外框（含两侧内边距，不是文字宽）");
+                expectTrue(l0.cell_box_lo_pt < l0.cell_lo_pt - 0.01f &&
+                               l0.cell_box_hi_pt > l0.cell_hi_pt + 0.01f,
+                           "外框比内容区宽（否则上一条测不出内边距那两侧）");
+                expectNear(rects[0].r_pt.h, l0.cell_bottom_pt - l0.cell_top_pt, 0.01,
+                           "整格选区高度含显式行高多出来的空白");
+                expectTrue(l0.cell_bottom_pt - l0.cell_top_pt >
+                               (l0.block_hi_pt - l0.block_lo_pt) + 10.0f,
+                           "显式行高确实比文字那一带高（否则上一条测不出差别）");
+            }
+
+            // 反向一半：同一对区间按文字选区设 —— 这正是"把文字一路选到最后一个字"。
+            //   旧实现靠几何猜（首尾都覆盖到了 ⇒ 整格），这一条必红。
+            expectTrue(e47.setSelection(Range{clo, chi}), "同一对区间按文字选区设");
+            expectTrue(!e47.selectionIsCell(), "按文字选：标记不是单元格选区");
+            const std::vector<PageRect> tr = e47.selectionRects();
+            float maxw = 0.0f;
+            for (const PageRect& r : tr) maxw = std::max(maxw, r.r_pt.w);
+            expectTrue(tr.size() == 2, "文字选区按行给两个矩形（实际 " +
+                                           std::to_string(tr.size()) + " 个）");
+            expectTrue(maxw < (l0.cell_box_hi_pt - l0.cell_box_lo_pt) - 1.0f,
+                       "文字选区只盖字，不涨成整格（选到最后一个字也一样）");
+        }
+    }
+
+    std::printf("\n[48] 表格：拖选跨过两格就进单元格选区\n");
+    {
+        EditorEngine e48;
+        expectTrue(e48.init({cjkPath, mnPath, latinPath}), "引擎初始化");
+        EngineConfig c48;
+        c48.zoom = 1.0f;
+        c48.page.width_pt = 320.0f;
+        c48.page.height_pt = 320.0f;
+        c48.page.margin_pt = 10.0f;
+        e48.setConfig(c48);
+
+        // 2x2：一个格一个字。跨格拖选的判据用得到"两格之间还夹着别的格"这一条。
+        NodeTree t;
+        const NodeId s = t.firstSectionId();
+        const NodeId tb = t.appendChild(s, NodeKind::Table);
+        const char* cell_text[2][2] = {{"甲", "乙"}, {"丙", "丁"}};
+        for (int r = 0; r < 2; ++r) {
+            const NodeId row = t.appendChild(tb, NodeKind::TableRow);
+            for (int ci = 0; ci < 2; ++ci) {
+                const NodeId cell = t.appendChild(row, NodeKind::TableCell);
+                t.setText(t.appendChild(cell, NodeKind::TextRun),
+                          utf8ToCodepoints(cell_text[r][ci]));
+                t.appendChild(cell, NodeKind::ParagraphMark);
+            }
+        }
+        // 表后接一段正文：用来验证"拖出表格就退回文字选区"，所以这一段必须真的存在。
+        const NodeId tail = t.appendChild(s, NodeKind::TextRun);
+        t.setText(tail, utf8ToCodepoints("尾巴"));
+        t.appendChild(s, NodeKind::ParagraphMark);
+        e48.setDocument(t, StyleSheet{});
+        e48.relayout();
+        const LayoutResult& lay = e48.layout();
+        expectTrue(lay.lines.size() >= 4, "2x2 表编出四行（实际 " +
+                                              std::to_string(lay.lines.size()) + " 行）");
+        if (lay.lines.size() >= 4) {
+            // 每格取两样东西：字上的落点（模拟拖选的起手/收手）与格内容的流区间（判据）。
+            struct CellProbe {
+                TextPos pos{};
+                int side = 0;
+                int para = -1;  // 边距带命中给出的段号（= 这一格的段）
+                FlowPos lo = -1;
+                FlowPos hi = -1;
+                float box_lo = 0.0f;  // 格外框（反白用它，含两侧内边距）
+                float box_hi = 0.0f;
+                float cell_lo = 0.0f;  // 格内容区（命中用）
+                float cell_hi = 0.0f;
+                float cell_top = 0.0f;
+                float cell_bottom = 0.0f;
+            };
+            CellProbe cp[4];
+            bool probed = true;
+            for (int k = 0; k < 4; ++k) {
+                const LineBox& lb = lay.lines[static_cast<size_t>(k)];
+                const float ymid = (lb.block_lo_pt + lb.block_hi_pt) * 0.5f;
+                TextPos p{};
+                int side = 0;
+                probed = probed && e48.hitTestPt(lb.inline_origin_pt + 2.0f, ymid, &p, nullptr,
+                                                 &side, nullptr, nullptr);
+                cp[k].pos = p;
+                cp[k].side = side;
+                int band = -1;
+                probed = probed && e48.hitTestPt(lb.cell_lo_pt - 1.0f, ymid, &p, nullptr, nullptr,
+                                                 nullptr, &band);
+                cp[k].para = band;
+                // 每格两个字、一个块：区间就是这一段的段首到段末。
+                if (band >= 0) {
+                    cp[k].lo = e48.flowPosAt(band, 0);
+                    cp[k].hi = e48.flowPosAt(band, 1);
+                }
+                cp[k].box_lo = lb.cell_box_lo_pt;
+                cp[k].box_hi = lb.cell_box_hi_pt;
+                cp[k].cell_lo = lb.cell_lo_pt;
+                cp[k].cell_hi = lb.cell_hi_pt;
+                cp[k].cell_top = lb.cell_top_pt;
+                cp[k].cell_bottom = lb.cell_bottom_pt;
+            }
+            expectTrue(probed && cp[0].lo >= 0 && cp[3].lo > cp[0].lo &&
+                           cp[0].para == 0 && cp[1].para == 1 && cp[2].para == 2 &&
+                           cp[3].para == 3,
+                       "四格的段号与流区间都取得出来（否则下面几条测不出跨格）");
+
+            // 拖选的一条（宿主按下 → 移动到另一格）：起点在第一格的字上，落点在第四格的字上。
+            e48.setCaretAtSideLine(cp[0].pos.para, cp[0].pos.offset, cp[0].side, 0);
+            e48.setFocusAtSideLine(cp[3].pos.para, cp[3].pos.offset, cp[3].side, 0);
+            expectTrue(e48.selectionIsCell(), "跨两格拖选：进入单元格选区");
+            const Range sr = e48.selection();
+            expectTrue(sr.anchor == cp[0].lo && sr.focus == cp[3].hi,
+                       "跨格选区的两端吸附到首格首与末格末（不是按下/松开的字符位置）");
+            const std::vector<PageRect> rects = e48.selectionRects();
+            expectTrue(rects.size() == 4, "跨 2x2 画四个整格矩形（实际 " +
+                                              std::to_string(rects.size()) + " 个）");
+            // 每一份都要是"整格"：宽到列左右边界、高到行上下边界。四份里有一份是文字矩形
+            //   就说明只把两端的格放大了，中间的格还是按文字画。
+            bool all_cells = rects.size() == 4;
+            for (size_t i = 0; i < rects.size() && all_cells; ++i) {
+                const Rect& r = rects[i].r_pt;
+                bool matched = false;
+                for (int k = 0; k < 4; ++k) {
+                    if (std::abs(r.x - cp[k].box_lo) < 0.01f &&
+                        std::abs(r.w - (cp[k].box_hi - cp[k].box_lo)) < 0.01f &&
+                        std::abs(r.y - cp[k].cell_top) < 0.01f &&
+                        std::abs(r.h - (cp[k].cell_bottom - cp[k].cell_top)) < 0.01f) {
+                        matched = true;
+                        break;
+                    }
+                }
+                all_cells = all_cells && matched;
+            }
+            expectTrue(all_cells, "四份矩形都是整格的外框（含两侧内边距与行高空白）");
+
+            // 插入点：整格选区时它钉在焦点那一格的末尾，不跟着鼠标在格内跑。
+            //   焦点格 = 用户最后落到的那一格（这里是第四格）。跟着 focus 走的话，鼠标在格内
+            //   每挪一个字它就挪一次，画面上就是光标跟着鼠标跑。
+            const TextPos c_end = e48.caret();
+            expectTrue(c_end.para == cp[3].pos.para && c_end.offset == 1,
+                       "整格选区的插入点在焦点那一格的末尾（实际 段 " +
+                           std::to_string(c_end.para) + " 偏移 " +
+                           std::to_string(c_end.offset) + "）");
+            // 鼠标在同一格里挪（焦点从字中间挪到格首）：选区不变，插入点也不许动。
+            e48.setFocusAtSideLine(cp[3].pos.para, 0, 0, 0);
+            const TextPos c_same = e48.caret();
+            expectTrue(e48.selectionIsCell() && c_same.para == c_end.para &&
+                           c_same.offset == c_end.offset,
+                       "同一格内移动焦点：插入点仍钉在格末");
+
+            // 反方向拖（从最后一格拖回第一格）：焦点在第一格，插入点在第一格的末尾 ——
+            //   不是"选区的起点"，也不是"鼠标落下的那个字"。
+            e48.setCaretAtSideLine(cp[3].pos.para, cp[3].pos.offset, cp[3].side, 0);
+            e48.setFocusAtSideLine(cp[0].pos.para, cp[0].pos.offset, cp[0].side, 0);
+            expectTrue(e48.selectionIsCell(), "反向跨格拖选：仍是单元格选区");
+            const TextPos c_back = e48.caret();
+            expectTrue(c_back.para == cp[0].pos.para && c_back.offset == 1,
+                       "反向拖选：插入点仍在焦点那一格（第一格）的末尾");
+            // 复位成"从第一格拖到第四格"：下面那条反向一半接着用它。
+            e48.setCaretAtSideLine(cp[0].pos.para, cp[0].pos.offset, cp[0].side, 0);
+            e48.setFocusAtSideLine(cp[3].pos.para, cp[3].pos.offset, cp[3].side, 0);
+
+            // 反向一半：拖回起手那一格 —— 退回文字选区，且只盖字。
+            e48.setFocusAtSideLine(cp[0].pos.para, cp[0].pos.offset, cp[0].side, 0);
+            expectTrue(!e48.selectionIsCell(), "拖回同一格：退回文字选区");
+            const std::vector<PageRect> tr = e48.selectionRects();
+            bool any_wide = false;
+            for (const PageRect& r : tr) {
+                if (r.r_pt.w >= (cp[0].cell_hi - cp[0].cell_lo) - 1.0f) any_wide = true;
+            }
+            expectTrue(!any_wide, "退回文字选区之后没有整格宽度的矩形");
+
+            // 拖到表格后面的正文（不在任何格里）：同样是文字选区 —— 不因为"起手在格内"
+            //   就把整行正文都按整格铺。
+            e48.setCaretAtSideLine(cp[0].pos.para, cp[0].pos.offset, cp[0].side, 0);
+            const int last_para = static_cast<int>(lay.lines.back().paragraph);
+            e48.setFocusAtSideLine(last_para, 0, 0, 0);
+            expectTrue(!e48.selectionIsCell(), "拖出表格：不是单元格选区");
+
+            // 跨格选区之后删除：删的是"选中格的内容"，删完排版审计得干净 —— 这条防的是
+            //   "选区吸附到格边界之后，删除区间跨过了格与格的段落标记，把表结构删坏"。
+            e48.setCaretAtSideLine(cp[0].pos.para, cp[0].pos.offset, cp[0].side, 0);
+            e48.setFocusAtSideLine(cp[3].pos.para, cp[3].pos.offset, cp[3].side, 0);
+            expectTrue(e48.selectionIsCell(), "删除前：跨格选区成立");
+            expectTrue(e48.backspace(), "跨格选区退格：执行成功");
+            e48.relayout();
+            expectTrue(e48.auditLayout() == 0, "跨格删除之后排版审计一致");
+        }
+    }
+
+    std::printf("\n[49] 表格：矩形选区与跨格合并的守门\n");
+    {
+        EditorEngine e49;
+        expectTrue(e49.init({cjkPath, mnPath, latinPath}), "引擎初始化");
+        EngineConfig c49;
+        c49.zoom = 1.0f;
+        c49.page.width_pt = 360.0f;
+        c49.page.height_pt = 480.0f;
+        c49.page.margin_pt = 10.0f;
+        e49.setConfig(c49);
+
+        // 3x3，每格两个字、一个块。行列都要小：跨行、跨列、斜向各一条判据。
+        NodeTree t;
+        const NodeId s = t.firstSectionId();
+        const NodeId tb = t.appendChild(s, NodeKind::Table);
+        const char* txt[3][3] = {{"a1", "a2", "a3"}, {"b1", "b2", "b3"}, {"c1", "c2", "c3"}};
+        for (int r = 0; r < 3; ++r) {
+            const NodeId row = t.appendChild(tb, NodeKind::TableRow);
+            for (int ci = 0; ci < 3; ++ci) {
+                const NodeId cell = t.appendChild(row, NodeKind::TableCell);
+                t.setText(t.appendChild(cell, NodeKind::TextRun), utf8ToCodepoints(txt[r][ci]));
+                t.appendChild(cell, NodeKind::ParagraphMark);
+            }
+        }
+        const NodeId tail = t.appendChild(s, NodeKind::TextRun);
+        t.setText(tail, utf8ToCodepoints("尾"));
+        t.appendChild(s, NodeKind::ParagraphMark);
+        e49.setDocument(t, StyleSheet{});
+        e49.relayout();
+        const LayoutResult& lay49 = e49.layout();
+        expectTrue(lay49.lines.size() == 10, "3x3 表编出九行，加表后正文一行（实际 " +
+                                                 std::to_string(lay49.lines.size()) + " 行）");
+        // 结构自审与排版自审是两把尺子：前者查块与格两份记录，后者查增量与全量。
+        expectTrue(e49.auditTables() == 0, "装载后：表格结构自审一致");
+
+        // 每一格的身份：落点（拖选起手）、整格流区间、几何。
+        struct Cell49 {
+            TextPos pos{};
+            int side = 0;
+            FlowPos lo = -1;
+            FlowPos hi = -1;
+        };
+        Cell49 cc[9];
+        bool probe_ok = lay49.lines.size() >= 9;
+        for (int k = 0; k < 9 && probe_ok; ++k) {
+            const LineBox& lb = lay49.lines[static_cast<size_t>(k)];
+            const float ymid = (lb.block_lo_pt + lb.block_hi_pt) * 0.5f;
+            TextPos p{};
+            int side = 0;
+            probe_ok = e49.hitTestPt(lb.inline_origin_pt + 1.0f, ymid, &p, nullptr, &side,
+                                     nullptr);
+            cc[k].pos = p;
+            cc[k].side = side;
+            int band = -1;
+            probe_ok = probe_ok && e49.hitTestPt(lb.cell_lo_pt - 1.0f, ymid, &p, nullptr, nullptr,
+                                                 nullptr, &band);
+            if (probe_ok && band >= 0) {
+                cc[k].lo = e49.flowPosAt(band, 0);
+                cc[k].hi = e49.flowPosAt(band, 2);
+            }
+        }
+        expectTrue(probe_ok && cc[8].lo > cc[0].lo, "九格的落点与整格流区间都取得出来");
+
+        // 选区矩形按几何认格（不靠顺序）：返回命中的格下标，升序。
+        const auto pickedCells = [&](const std::vector<PageRect>& rects) {
+            std::vector<int> hits;
+            for (const PageRect& pr : rects) {
+                for (int k = 0; k < 9; ++k) {
+                    const LineBox& lb = lay49.lines[static_cast<size_t>(k)];
+                    const float w = lb.cell_box_hi_pt - lb.cell_box_lo_pt;
+                    const float h = lb.cell_bottom_pt - lb.cell_top_pt;
+                    if (std::abs(pr.r_pt.x - lb.cell_box_lo_pt) < 0.01f &&
+                        std::abs(pr.r_pt.y - lb.cell_top_pt) < 0.01f &&
+                        std::abs(pr.r_pt.w - w) < 0.01f && std::abs(pr.r_pt.h - h) < 0.01f) {
+                        hits.push_back(k);
+                        break;
+                    }
+                }
+            }
+            std::sort(hits.begin(), hits.end());
+            return hits;
+        };
+        const auto sameSet = [](const std::vector<int>& got, std::vector<int> want) {
+            std::sort(want.begin(), want.end());
+            return got == want;
+        };
+        const auto drag = [&](int from, int to) {
+            e49.setCaretAtSideLine(cc[from].pos.para, cc[from].pos.offset, cc[from].side, 0);
+            e49.setFocusAtSideLine(cc[to].pos.para, cc[to].pos.offset, cc[to].side, 0);
+        };
+
+        // 斜向跨行跨列：只选两行两列围出来的那四格。旧实现按文档顺序取包络，第二行
+        //   的前一格与第一行的第一格会一起反白（＝一跨行就整行）。
+        drag(1, 5);
+        expectTrue(e49.selectionIsCell(), "从第一行第二格拖到第二行第三格：单元格选区");
+        std::vector<int> got = pickedCells(e49.selectionRects());
+        expectTrue(sameSet(got, {1, 2, 4, 5}),
+                   "斜向拖选只反白矩形里的四格（实际 " + std::to_string(got.size()) + " 份）");
+
+        // 反向同一块矩形：从右下拖到左上，选出来的还是那四格。
+        //   锚点被改写成"包络起点"的话，反向拖到一半就长不回去了（这是"从下往上、
+        //   从右往左选不中"的成因）。
+        drag(5, 1);
+        got = pickedCells(e49.selectionRects());
+        expectTrue(sameSet(got, {1, 2, 4, 5}),
+                   "反向斜拖（从第五格拖回第二格）：还是那四格（实际 " +
+                       std::to_string(got.size()) + " 份）");
+        // 反向逐行拖：从第三行第一列拖回第一行第一列。
+        drag(6, 0);
+        got = pickedCells(e49.selectionRects());
+        expectTrue(sameSet(got, {0, 3, 6}),
+                   "反向竖拖（从第七格拖回第一格）：一列三行（实际 " +
+                       std::to_string(got.size()) + " 份）");
+
+        // 逐步反向拖：按下只落一次锚点，之后每一步只搬焦点。这才是真实指针路径
+        //   （上面那个助手每次都重设锚点，正好把"锚点被改写成包络"这类错盖住）。
+        e49.setCaretAtSideLine(cc[6].pos.para, cc[6].pos.offset, cc[6].side, 0);
+        e49.setFocusAtSideLine(cc[3].pos.para, cc[3].pos.offset, cc[3].side, 0);
+        got = pickedCells(e49.selectionRects());
+        expectTrue(sameSet(got, {3, 6}),
+                   "逐步反向拖第一段（第三行第一列拖到第二行第一列）：两格反白（实际 " +
+                       std::to_string(got.size()) + " 份）");
+        e49.setFocusAtSideLine(cc[0].pos.para, cc[0].pos.offset, cc[0].side, 0);
+        got = pickedCells(e49.selectionRects());
+        expectTrue(sameSet(got, {0, 3, 6}),
+                   "逐步反向拖到底（拖回第一格）：仍是那一列三格（实际 " +
+                       std::to_string(got.size()) + " 份）");
+        expectTrue(e49.selectionIsCell(), "逐步反向拖到底：仍是单元格选区");
+
+        // 同列跨三行：一列三格，不是三整行。
+        drag(2, 8);
+        got = pickedCells(e49.selectionRects());
+        expectTrue(sameSet(got, {2, 5, 8}),
+                   "同列跨三行只反白那一列（实际 " + std::to_string(got.size()) + " 份）");
+
+        // 同一行：两格（行内那一支不能被矩形判据带坏）。
+        drag(0, 1);
+        got = pickedCells(e49.selectionRects());
+        expectTrue(sameSet(got, {0, 1}),
+                   "同一行拖选两格（实际 " + std::to_string(got.size()) + " 份）");
+
+        // 反向斜拖：包络还是那个矩形（方向不影响选了哪几格），插入点在焦点格末。
+        drag(5, 1);
+        got = pickedCells(e49.selectionRects());
+        expectTrue(sameSet(got, {1, 2, 4, 5}), "反向斜拖：矩形不变");
+        const TextPos caret49 = e49.caret();
+        expectTrue(caret49.para == cc[1].pos.para && caret49.offset == 2,
+                   "反向斜拖：插入点在第一格末尾（实际 段 " + std::to_string(caret49.para) +
+                       " 偏移 " + std::to_string(caret49.offset) + "）");
+
+        // 删除只清矩形里的四格：没选中的格一个字都不许动。
+        drag(1, 5);
+        expectTrue(e49.backspace(), "矩形选区退格：执行成功");
+        e49.relayout();
+        expectTrue(e49.blocks().size() == 10, "删完九格加上正文仍是十个块（每格保住自己的段落）");
+        const char* want_after[9] = {"a1", "", "", "b1", "", "", "c1", "c2", "c3"};
+        std::string bad;
+        for (int k = 0; k < 9; ++k) {
+            const std::string got_text = codepointsToUtf8(e49.blocks()[static_cast<size_t>(k)].cp_text);
+            if (got_text != want_after[k]) {
+                bad += " 第" + std::to_string(k) + "格是'" + got_text + "'";
+            }
+        }
+        expectTrue(bad.empty(), "只有矩形里的四格被清空（不符：" + bad + "）");
+        expectTrue(e49.auditLayout() == 0, "删完排版自审一致");
+        expectTrue(e49.auditTables() == 0, "删完表格结构自审一致");
+    }
+
+    std::printf("\n[50] 表格：段落合并不跨格\n");
+    {
+        EditorEngine e50;
+        expectTrue(e50.init({cjkPath, mnPath, latinPath}), "引擎初始化");
+        EngineConfig c50;
+        c50.zoom = 1.0f;
+        c50.page.width_pt = 320.0f;
+        c50.page.height_pt = 400.0f;
+        c50.page.margin_pt = 10.0f;
+        e50.setConfig(c50);
+
+        // 一格两段、另两格各一段：格内合并该发生，跨格合并不该发生。
+        NodeTree t;
+        const NodeId s = t.firstSectionId();
+        const NodeId tb = t.appendChild(s, NodeKind::Table);
+        const NodeId row = t.appendChild(tb, NodeKind::TableRow);
+        const NodeId c0 = t.appendChild(row, NodeKind::TableCell);
+        t.setText(t.appendChild(c0, NodeKind::TextRun), utf8ToCodepoints("甲"));
+        t.appendChild(c0, NodeKind::ParagraphMark);
+        t.setText(t.appendChild(c0, NodeKind::TextRun), utf8ToCodepoints("乙"));
+        t.appendChild(c0, NodeKind::ParagraphMark);
+        const NodeId c1 = t.appendChild(row, NodeKind::TableCell);
+        t.setText(t.appendChild(c1, NodeKind::TextRun), utf8ToCodepoints("丙"));
+        t.appendChild(c1, NodeKind::ParagraphMark);
+        const NodeId c2 = t.appendChild(row, NodeKind::TableCell);
+        t.setText(t.appendChild(c2, NodeKind::TextRun), utf8ToCodepoints("丁"));
+        t.appendChild(c2, NodeKind::ParagraphMark);
+        const NodeId tail = t.appendChild(s, NodeKind::TextRun);
+        t.setText(tail, utf8ToCodepoints("尾"));
+        t.appendChild(s, NodeKind::ParagraphMark);
+        e50.setDocument(t, StyleSheet{});
+        e50.relayout();
+        expectTrue(e50.blocks().size() == 5, "四段格内容加表后正文共五块（实际 " +
+                                                 std::to_string(e50.blocks().size()) + " 块）");
+        expectTrue(e50.auditTables() == 0, "装载后表格结构自审一致");
+
+        // 第二格段首退格：上一段在第一格，中间隔着单元格边界 —— 必须拒绝。
+        const LayoutResult& lay50 = e50.layout();
+        const LineBox& lb1 = lay50.lines[2];
+        TextPos p{};
+        int side = 0;
+        expectTrue(e50.hitTestPt(lb1.inline_origin_pt + 0.5f, (lb1.block_lo_pt + lb1.block_hi_pt) * 0.5f,
+                                 &p, nullptr, &side, nullptr),
+                   "第二格的行盒取得出来");
+        e50.setCaretAtSideLine(p.para, 0, side, 0);
+        const TextPos before = e50.caret();
+        expectTrue(!e50.backspace(), "第二格段首退格：拒绝（不跨格合并）");
+        e50.relayout();
+        expectTrue(e50.blocks().size() == 5, "拒绝之后块数不变");
+        expectTrue(e50.caret().para == before.para && e50.caret().offset == before.offset,
+                   "拒绝之后光标不动（不跳到上一格末尾）");
+        expectTrue(e50.auditTables() == 0, "拒绝之后表格结构自审一致");
+
+        // 格内合并仍然要做：第一格第二段的段首退格。
+        const LineBox& lb0b = e50.layout().lines[1];  // 第一格两行里的第二行
+        TextPos q{};
+        int qside = 0;
+        expectTrue(e50.hitTestPt(lb0b.inline_origin_pt + 0.5f, (lb0b.block_lo_pt + lb0b.block_hi_pt) * 0.5f,
+                                 &q, nullptr, &qside, nullptr),
+                   "第一格第二行取得出来");
+        e50.setCaretAtSideLine(q.para, 0, qside, 0);
+        expectTrue(e50.backspace(), "第一格内段首退格：合并成功");
+        e50.relayout();
+        expectTrue(e50.blocks().size() == 4, "格内合并后块数少一块（实际 " +
+                                                 std::to_string(e50.blocks().size()) + " 块）");
+        const std::string merged = codepointsToUtf8(e50.blocks()[0].cp_text);
+        expectTrue(merged == "甲乙", "合并后第一格是甲乙（实际 '" + merged + "'）");
+        expectTrue(e50.auditTables() == 0, "格内合并后表格结构自审一致");
+
+        // 第三格段首（第二格之后）：仍要拒绝，且不留半截结构。这跟"表格第一个块"那条
+        //   边界规则无关，所以能单独测到跨格合并的守门。
+        const LineBox& lb2 = e50.layout().lines[2];
+        TextPos r{};
+        int rside = 0;
+        expectTrue(e50.hitTestPt(lb2.inline_origin_pt + 0.5f, (lb2.block_lo_pt + lb2.block_hi_pt) * 0.5f,
+                                 &r, nullptr, &rside, nullptr),
+                   "第三格的行盒取得出来");
+        e50.setCaretAtSideLine(r.para, 0, rside, 0);
+        expectTrue(!e50.backspace(), "第三格段首退格：拒绝");
+        e50.relayout();
+        expectTrue(e50.blocks().size() == 4, "第二次拒绝之后块数仍不变");
+        expectTrue(e50.auditTables() == 0, "第二次拒绝之后结构自审一致");
+    }
+
+    std::printf("\n[51] 表格：全选删除与格内文字选区\n");
+    {
+        EditorEngine e51;
+        expectTrue(e51.init({cjkPath, mnPath, latinPath}), "引擎初始化");
+        EngineConfig c51;
+        c51.zoom = 1.0f;
+        c51.page.width_pt = 320.0f;
+        c51.page.height_pt = 400.0f;
+        c51.page.margin_pt = 10.0f;
+        e51.setConfig(c51);
+
+        // 正文 + 一行两格的表 + 正文。前后都有正文，全选才测得到"表外的空隙"。
+        NodeTree t;
+        const NodeId s = t.firstSectionId();
+        const NodeId head = t.appendChild(s, NodeKind::TextRun);
+        t.setText(head, utf8ToCodepoints("头"));
+        t.appendChild(s, NodeKind::ParagraphMark);
+        const NodeId tb = t.appendChild(s, NodeKind::Table);
+        const NodeId row = t.appendChild(tb, NodeKind::TableRow);
+        for (int k = 0; k < 2; ++k) {
+            const NodeId cell = t.appendChild(row, NodeKind::TableCell);
+            t.setText(t.appendChild(cell, NodeKind::TextRun),
+                      utf8ToCodepoints(k == 0 ? "甲" : "乙"));
+            t.appendChild(cell, NodeKind::ParagraphMark);
+        }
+        const NodeId tail = t.appendChild(s, NodeKind::TextRun);
+        t.setText(tail, utf8ToCodepoints("尾"));
+        t.appendChild(s, NodeKind::ParagraphMark);
+        e51.setDocument(t, StyleSheet{});
+        e51.relayout();
+        expectTrue(e51.blocks().size() == 4, "头、甲、乙、尾共四块（实际 " +
+                                                 std::to_string(e51.blocks().size()) + " 块）");
+        expectTrue(e51.auditTables() == 0, "装载后表格结构自审一致");
+
+        // 全选删除：表是块级容器，它的结构位不在任何可删区间里，所以整张表要按"删节点"走，
+        //   表外的正文仍按区间删。旧实现里这条会被安全阀整条拒掉（按 Del 毫无反应）。
+        expectTrue(e51.selectAll(), "全选");
+        expectTrue(e51.backspace(), "全选退格：执行成功");
+        e51.relayout();
+        expectTrue(e51.blocks().size() == 1, "全选删完只剩一块（实际 " +
+                                                 std::to_string(e51.blocks().size()) + " 块）");
+        expectTrue(e51.blocks()[0].cp_text.empty(), "剩下的那一块是空段落");
+        expectTrue(e51.auditTables() == 0, "全选删完表格结构自审一致（表已整张消失）");
+        expectTrue(e51.auditLayout() == 0, "全选删完排版自审一致");
+
+        // 撤销：表与正文都要回来（删节点这一步与区间删除在同一批步骤里）。
+        expectTrue(e51.canUndo(), "删完可以撤销");
+        expectTrue(e51.undo(), "撤销");
+        e51.relayout();
+        expectTrue(e51.blocks().size() == 4, "撤销之后四块都回来（实际 " +
+                                                 std::to_string(e51.blocks().size()) + " 块）");
+        const std::string back0 = codepointsToUtf8(e51.blocks()[0].cp_text);
+        const std::string back1 = codepointsToUtf8(e51.blocks()[1].cp_text);
+        expectTrue(back0 == "头" && back1 == "甲", "撤销之后正文与第一格内容都在（实际 '" +
+                                                       back0 + "' / '" + back1 + "'）");
+        expectTrue(e51.auditTables() == 0, "撤销之后表格结构自审一致");
+
+        // 格内文字选区（只盖一格里的字）：按区间删，格与表都还在。
+        const FlowPos a = e51.flowPosAt(1, 0);
+        const FlowPos b = e51.flowPosAt(1, 1);
+        expectTrue(e51.setSelection(Range{a, b}), "设一个格内文字选区");
+        expectTrue(!e51.selectionIsCell(), "它是文字选区，不是单元格选区");
+        expectTrue(e51.backspace(), "格内文字选区退格：执行成功");
+        e51.relayout();
+        expectTrue(e51.blocks().size() == 4, "格内删字之后块数不变");
+        expectTrue(e51.blocks()[1].cp_text.empty(), "第一格的字被删掉（格还在）");
+        expectTrue(e51.auditTables() == 0, "格内删字之后表格结构自审一致");
+
+        // 整张表的文字都选上了，但两头都落在表内：删表比用户选的多，拒绝。
+        //   宿主那一路拖选到这里已经是单元格选区，所以只有程序化设区间才会碰到这一形态。
+        const FlowPos e = e51.flowPosAt(1, 0);
+        const FlowPos f = e51.flowPosAt(2, 1);
+        expectTrue(e51.setSelection(Range{e, f}), "覆盖整张表的文字选区");
+        expectTrue(!e51.backspace(), "覆盖整表但两头都在表内：拒绝");
+        e51.relayout();
+        expectTrue(e51.blocks().size() == 4 && e51.blocks()[2].textUtf8() == "乙" &&
+                       e51.blocks()[1].textUtf8().empty(),
+                   "拒绝之后一格不少、第二格的字原样");
+        expectTrue(e51.auditTables() == 0, "拒绝之后表格结构自审一致");
+
+        // 反向一半：跨格的部分文字选区没有"局部删结构"的语义，必须整条拒绝，
+        //   而且一格都不许删（宁可不动，也不要删掉半格）。
+        e51.undo();
+        e51.relayout();
+        const FlowPos c = e51.flowPosAt(1, 0);
+        const FlowPos d = e51.flowPosAt(2, 0);
+        expectTrue(e51.setSelection(Range{c, d}), "跨两格的文字选区");
+        expectTrue(!e51.backspace(), "跨格文字选区退格：拒绝");
+        e51.relayout();
+        expectTrue(e51.blocks().size() == 4 && !e51.blocks()[1].cp_text.empty() &&
+                       !e51.blocks()[2].cp_text.empty(),
+                   "拒绝之后两格的字都还在");
+        expectTrue(e51.auditTables() == 0, "拒绝之后表格结构自审一致");
+
+        // 全选之后打字：删除与插入是同一个事务，撤销一次回到全选之前。
+        expectTrue(e51.selectAll(), "再全选");
+        expectTrue(e51.typeTextUtf8("X"), "全选之后打字");
+        e51.relayout();
+        expectTrue(e51.blocks().size() == 1, "打字之后只剩一块");
+        const std::string typed = e51.blocks()[0].cp_text.empty()
+                                      ? std::string()
+                                      : codepointsToUtf8(e51.blocks()[0].cp_text);
+        expectTrue(typed == "X", "剩下的是刚打的字（实际 '" + typed + "'）");
+        expectTrue(e51.auditTables() == 0, "全选打字之后表格结构自审一致");
+    }
+
+    std::printf("\n[52] 表格：内容为空的格也能被选中\n");
+    {
+        EditorEngine e52;
+        expectTrue(e52.init({cjkPath, mnPath, latinPath}), "引擎初始化");
+        EngineConfig c52;
+        c52.zoom = 1.0f;
+        c52.page.width_pt = 320.0f;
+        c52.page.height_pt = 400.0f;
+        c52.page.margin_pt = 10.0f;
+        e52.setConfig(c52);
+
+        // 段 + 一格两格的表 + 段。第一格先删空，成为"空格"。
+        NodeTree t;
+        const NodeId s = t.firstSectionId();
+        t.setText(t.appendChild(s, NodeKind::TextRun), utf8ToCodepoints("前"));
+        t.appendChild(s, NodeKind::ParagraphMark);
+        const NodeId tb = t.appendChild(s, NodeKind::Table);
+        const NodeId row = t.appendChild(tb, NodeKind::TableRow);
+        const NodeId c0 = t.appendChild(row, NodeKind::TableCell);
+        t.setText(t.appendChild(c0, NodeKind::TextRun), utf8ToCodepoints("甲"));
+        t.appendChild(c0, NodeKind::ParagraphMark);
+        const NodeId c1 = t.appendChild(row, NodeKind::TableCell);
+        t.setText(t.appendChild(c1, NodeKind::TextRun), utf8ToCodepoints("乙"));
+        t.appendChild(c1, NodeKind::ParagraphMark);
+        t.setText(t.appendChild(s, NodeKind::TextRun), utf8ToCodepoints("尾"));
+        t.appendChild(s, NodeKind::ParagraphMark);
+
+        e52.setDocument(t, StyleSheet{});
+        e52.relayout();
+        expectTrue(e52.blocks().size() == 4, "前、两格、尾共四块（实际 " +
+                                                 std::to_string(e52.blocks().size()) + " 块）");
+
+        // 把第一格删空。
+        e52.setCaret(1, 1);
+        expectTrue(e52.backspace(), "第一格里的字删掉");
+        e52.relayout();
+        expectTrue(e52.blocks().size() == 4 && e52.blocks()[1].cp_text.empty(),
+                   "第一格空了，格与表都还在");
+        expectTrue(e52.auditTables() == 0, "删空之后表格结构自审一致");
+
+        const LayoutResult& lay = e52.layout();
+        const LineBox* le = nullptr;
+        const LineBox* lf = nullptr;
+        for (const LineBox& lb : lay.lines) {
+            if (lb.paragraph == 1) le = &lb;
+            if (lb.paragraph == 2) lf = &lb;
+        }
+        expectTrue(le != nullptr && lf != nullptr, "空格与有字格都排出了行盒");
+        if (le != nullptr && lf != nullptr) {
+            const float ymid = (le->block_lo_pt + le->block_hi_pt) * 0.5f;
+            // 单击边距带：空格没有文字挡着，整格都是边距带 —— 命中给出这一格的段号。
+            TextPos hit{};
+            int band = -1;
+            const bool band_ok = e52.hitTestPt(le->cell_box_lo_pt + 0.5f, ymid, &hit, nullptr,
+                                               nullptr, nullptr, &band);
+            expectTrue(band_ok && band == 1, "点在空格的左边距上：命中给出这一格的段号");
+            // 反向一半：点空格的中间不是"选整格"，仍是落光标 —— 否则光标在空格里放不进去。
+            int mid_para = -1;
+            e52.hitTestPt((le->cell_box_lo_pt + le->cell_box_hi_pt) * 0.5f, ymid, &hit, nullptr,
+                          nullptr, nullptr, &mid_para);
+            expectTrue(mid_para < 0, "点空格的中间：不触发整格（落光标）");
+
+            // 选整格：空格在流里的长度是 0，但"选中了这一格"照样成立，反白照样铺满。
+            expectTrue(e52.selectCellAtPara(1), "按段号选中空格");
+            expectTrue(e52.selectionIsCell(), "空格选区的粒度是单元格选区");
+            expectTrue(e52.selection().empty(), "空格的内容区间长度是 0（没有字可删）");
+            const std::vector<PageRect> rects = e52.selectionRects();
+            expectTrue(rects.size() == 1, "空格也画出一个整格矩形（实际 " +
+                                              std::to_string(rects.size()) + " 个）");
+            if (rects.size() == 1) {
+                const float box_w = le->cell_box_hi_pt - le->cell_box_lo_pt;
+                const float row_h = le->cell_bottom_pt - le->cell_top_pt;
+                expectNear(rects[0].r_pt.x, le->cell_box_lo_pt, 0.01, "空格反白贴格外框左边");
+                expectNear(rects[0].r_pt.w, box_w, 0.01, "空格反白铺满格外框宽（左右没有缝）");
+                expectNear(rects[0].r_pt.h, row_h, 0.01, "空格反白铺满整行高");
+                expectTrue(box_w > (le->cell_hi_pt - le->cell_lo_pt) + 1.0f,
+                           "反白用的外框比内容区宽（两侧内边距都算进来）");
+            }
+
+            // 三击那条路：点在空格里任何位置都选中这一格。
+            e52.clearSelection();
+            expectTrue(e52.selectCellAtPt(le->inline_origin_pt + 1.0f, ymid),
+                       "三击空格：选中整格");
+            expectTrue(e52.selectionIsCell() && !e52.selectionRects().empty(),
+                       "三击空格之后有反白");
+
+            // 反向一半：点有字格的字上不是"选整格"，仍是文字光标。
+            int word_para = -1;
+            e52.hitTestPt(lf->inline_origin_pt + 1.0f, (lf->block_lo_pt + lf->block_hi_pt) * 0.5f,
+                          &hit, nullptr, nullptr, nullptr, &word_para);
+            expectTrue(word_para < 0, "点有字格的字上：不触发整格");
+
+            // 拖选：空格与有字的格一起选上 —— 两格都反白。
+            e52.setCaretAtSideLine(1, 0, 0, 0);
+            e52.setFocusAtSideLine(2, 1, 0, 0);
+            expectTrue(e52.selectionIsCell(), "从空格拖到有字的格：单元格选区");
+            expectTrue(e52.selectionRects().size() == 2,
+                       "两格各一份反白（实际 " + std::to_string(e52.selectionRects().size()) +
+                           " 份）");
+
+            // 删除：只清有字的格，空格本来就是空的，格与表的结构不动。
+            expectTrue(e52.backspace(), "跨格选区退格：执行成功");
+            e52.relayout();
+            expectTrue(e52.blocks().size() == 4 && e52.blocks()[1].cp_text.empty() &&
+                           e52.blocks()[2].cp_text.empty(),
+                       "两格都清空，块数不变（格结构一个没动）");
+            expectTrue(e52.auditTables() == 0, "跨格删除之后表格结构自审一致");
+
+            // 反向一半：单独选中空格再按退格 —— 没有内容可删，什么都不发生（表格不会被删）。
+            expectTrue(e52.selectCellAtPara(1), "再选中空格");
+            expectTrue(!e52.backspace(), "选中空格按退格：没有内容可删，拒绝");
+            e52.relayout();
+            expectTrue(e52.blocks().size() == 4, "拒绝之后四块都在（表格没被删）");
+            expectTrue(e52.auditTables() == 0, "拒绝之后表格结构自审一致");
+        }
     }
 
     std::printf("\n──────────────────────────────\n");

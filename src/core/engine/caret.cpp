@@ -375,9 +375,9 @@ size_t CaretResolver::clusterCeilAt(int para, size_t offset) const {
 }
 
 /**
- * 光标侧别（派生）= focus 的侧别，与 caret() 同源，不可能不同步。
+ * 光标侧别（派生）= 光标流位置的侧别，与 caret() 同源，不可能不同步。
  */
-int CaretResolver::caretSide() const { return sideForFlow(sel_.focus); }
+int CaretResolver::caretSide() const { return sideForFlow(caretFlow()); }
 
 int CaretResolver::caretFieldHint() const {
     if (view_.blocks->empty()) return -1;
@@ -389,6 +389,9 @@ int CaretResolver::caretFieldHint() const {
  */
 void CaretResolver::setCaretRel(int para, int rel, bool collapse, int line_aff) {
     sel_.focus = flowForRel(para, rel);
+    // 定位与扩展都按文字选区记：整格粒度只属于一次整格动作。
+    //   跨格拖选的那一份由引擎在扩展之后补上（见 EditorEngine::syncCellSelection）。
+    clearCellRange();
     if (collapse) {
         sel_.anchor = sel_.focus;
         // 列位是一串连续上下键之间的事：任何别的定位都让它从头取。
@@ -399,20 +402,28 @@ void CaretResolver::setCaretRel(int para, int rel, bool collapse, int line_aff) 
 }
 
 /**
+ * 光标的流位置：整格选区钉在焦点那一格的末尾（见 cell_caret_），其余情形就是 focus。
+ */
+FlowPos CaretResolver::caretFlow() const {
+    if (sel_cell_ && cell_caret_ >= 0) return cell_caret_;
+    return sel_.focus;
+}
+
+/**
  * 光标那一段（派生）：focus 落在哪一块。
  *
  * 不能借 flowToTextPos：那个入口的职责是"把流位置翻成文本坐标"，段间的位置会被归到相邻段
  * 端点；这里要的是"focus 归属哪一块"，段尾那个位置（段落标记所在位）必须仍算本段。
  */
-int CaretResolver::caretPara() const { return paraForFlow(sel_.focus); }
+int CaretResolver::caretPara() const { return paraForFlow(caretFlow()); }
 
 /**
- * 段内流位置（派生）= focus 减本段起点。
+ * 段内流位置（派生）= 光标流位置减本段起点。
  */
-int CaretResolver::caretRel() const { return relForFlow(sel_.focus); }
+int CaretResolver::caretRel() const { return relForFlow(caretFlow()); }
 
 /**
- * 光标位置（派生）：段号 + 段内码点偏移，由 focus 投影出来 —— 不再是独立状态。
+ * 光标位置（派生）：段号 + 段内码点偏移，由光标的流位置投影出来 —— 不是独立状态。
  */
 TextPos CaretResolver::caret() const {
     int para = caretPara();
@@ -474,6 +485,7 @@ bool CaretResolver::setSelection(Range r) {
     };
     sel_.anchor = clamp_flow(r.anchor);
     sel_.focus = clamp_flow(r.focus);
+    clearCellRange();
     vertical_goal_valid_ = false;
     // 行别同列位一个待遇：它是"点击落点"这一个动作的产物，程序化设选区不带它。
     caret_line_aff_ = 0;
@@ -485,6 +497,7 @@ bool CaretResolver::setSelection(Range r) {
  */
 void CaretResolver::clearSelection() {
     sel_.anchor = sel_.focus;
+    clearCellRange();
     vertical_goal_valid_ = false;
 }
 
@@ -499,8 +512,108 @@ bool CaretResolver::selectAll() {
     const size_t last = view_.block_flow->size() - 1;
     sel_.anchor = (*view_.block_flow)[0];
     sel_.focus = (*view_.block_flow)[last] + (*view_.block_flow_span)[last];
+    // 全选按整格铺满（只影响表格里的格，正文行盒没有格范围，走文字那一支）。
+    //   与 Word 同一条：Ctrl+A 之后表格看起来是整片反白，而不是只剩字上有颜色。
+    //   端点不吸附：全篇本来就没有"格边界"可言（见 selection() 的那一支）。
+    clearCellRange();
+    sel_cell_ = true;
     vertical_goal_valid_ = false;
     return true;
+}
+
+/**
+ * 整格选区：收的一串块区间（见 CellBlocks），流包络由它们现算。
+ *
+ * 包络只当摘要 —— 选的到底是哪几格，只能由块区间回答：空格的内容长度是 0，流区间
+ * 退化成点，而"点"与下一格的第一段共用一个流位置，分不开。
+ */
+bool CaretResolver::setCellBlocks(std::vector<CellBlocks> cells, FlowPos caret_flow) {
+    clearCellRange();
+    if (!view_.hasFlow() || view_.block_flow->empty() || cells.empty()) return false;
+    const size_t n_blocks = view_.block_flow->size();
+    // 越界的块区间丢掉（表格结构刚变过时会出现），剩下的仍是原顺序。
+    cells.erase(std::remove_if(cells.begin(), cells.end(),
+                               [n_blocks](const CellBlocks& c) {
+                                   return c.empty() || c.first < 0 ||
+                                          static_cast<size_t>(c.first) >= n_blocks ||
+                                          static_cast<size_t>(c.first + c.count) > n_blocks;
+                               }),
+                cells.end());
+    if (cells.empty()) return false;
+    std::sort(cells.begin(), cells.end(),
+              [](const CellBlocks& a, const CellBlocks& b) { return a.first < b.first; });
+    const size_t last = n_blocks - 1;
+    const FlowPos end = (*view_.block_flow)[last] + (*view_.block_flow_span)[last];
+    const auto flow_of = [this](int block) -> FlowPos {
+        return (*view_.block_flow)[static_cast<size_t>(block)];
+    };
+    const auto flow_end_of = [this](int block) -> FlowPos {
+        return (*view_.block_flow)[static_cast<size_t>(block)] +
+               (*view_.block_flow_span)[static_cast<size_t>(block)];
+    };
+    // 包络：每格取"首块起点 / 末块终点"，再取 min/max。空格两头相等，包络因此可能退化
+    //   —— 那是合法的（"选中了一个空格"这件事照样成立，只是没有内容可删）。
+    cell_lo_ = flow_of(cells.front().first);
+    cell_hi_ = flow_end_of(cells.front().first + cells.front().count - 1);
+    for (const CellBlocks& c : cells) {
+        cell_lo_ = std::min(cell_lo_, flow_of(c.first));
+        cell_hi_ = std::max(cell_hi_, flow_end_of(c.first + c.count - 1));
+    }
+    // sel_ 一个字都不动：它是用户落下的两个原值，拖选每动一下都要靠它判
+    //   "首尾还在不在同一格"（往回拖要能退回文字选区）。把它改写成包络，反向拖选
+    //   就再也长不回去 —— 锚点被搬到了最早那一格的起点上。
+    //   包络只当摘要交给 selection()（见头文件的这一段），端点吸附由调用方决定：
+    //   单格那一路（selectCellAtPara）自己先 setSelection。
+    cell_mask_.clear();
+    for (const CellBlocks& c : cells) {
+        const int lo = c.first;
+        const int hi = c.first + c.count;
+        if (!cell_mask_.empty() && lo <= cell_mask_.back().focus) {
+            cell_mask_.back().focus = std::max(cell_mask_.back().focus, hi);
+        } else {
+            cell_mask_.push_back(Range{lo, hi});
+        }
+    }
+    cell_blocks_ = std::move(cells);
+    sel_cell_ = true;
+    if (caret_flow < 0) {
+        cell_caret_ = -1;
+    } else {
+        cell_caret_ = caret_flow > end ? end : caret_flow;
+    }
+    // 整格选的插入点永远不在折行那边界上（它在格末），行别与列位都归零。
+    caret_line_aff_ = 0;
+    vertical_goal_valid_ = false;
+    return true;
+}
+
+void CaretResolver::clearCellRange() {
+    cell_lo_ = -1;
+    cell_hi_ = -1;
+    cell_blocks_.clear();
+    cell_mask_.clear();
+    cell_caret_ = -1;
+    sel_cell_ = false;
+}
+
+/**
+ * 某个块是否落在某个被选中的格里。二分找"起点不超过它的最后一份"，再看它是否还在里面。
+ * 没有逐格信息时恒真：全选那一路按包络铺满才是它的语义。
+ */
+bool CaretResolver::cellCoversPara(int para) const {
+    if (cell_mask_.empty()) return true;
+    size_t lo = 0;
+    size_t hi = cell_mask_.size();
+    while (lo < hi) {
+        const size_t mid = lo + (hi - lo) / 2;
+        if (cell_mask_[mid].anchor <= para) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    if (lo == 0) return false;
+    return para < cell_mask_[lo - 1].focus;
 }
 
 /**
@@ -612,19 +725,41 @@ std::vector<PageRect> CaretResolver::selectionRects() const {
 
 std::vector<PageRect> CaretResolver::selectionRectsIn(int first_page, int count) const {
     std::vector<PageRect> out;
-    if (sel_.empty() || !view_.hasFlow() || view_.layout->lines.empty() || view_.block_flow->empty())
-        return out;
+    if (!view_.hasFlow() || view_.layout->lines.empty() || view_.block_flow->empty()) return out;
+    // 空选区的两种来源要分开：真的什么都没有，与"选中了一个空格"。
+    //   后者在流里也是一对相等的端点（格内容是空的），但它有整格反白要画 ——
+    //   按 sel_.empty() 一律返回空，空格就永远没有一像素高亮。
+    const bool cell_sel_span = sel_cell_ && !cell_blocks_.empty();
+    if (sel_.empty() && !cell_sel_span) return out;
 
-    const FlowPos lo = sel_.begin();
-    const FlowPos hi = sel_.end();
-    const int pa_lo = paraForFlow(lo);
-    const int pa_hi = paraForFlow(hi);
+    // 渲染读的是"吸附之后"的那一对（整格时它是格边界），与编辑同源 ——
+    //   两份读数各算一次，就会出现"反白到这里、删到那里"。
+    const Range vis = selection();
+    const FlowPos lo = vis.begin();
+    const FlowPos hi = vis.end();
+    // 段范围按块区间取，不按流包络：空格的包络是个点，按它算出来只有一个段，
+    //   而矩形选中几行时包络里夹着没被选中的格（多算的那些由循环自己筛掉）。
+    int pa_lo = paraForFlow(lo);
+    int pa_hi = paraForFlow(hi);
+    if (cell_sel_span) {
+        pa_lo = cell_blocks_.front().first;
+        pa_hi = cell_blocks_.back().first + cell_blocks_.back().count - 1;
+    }
     const int n_para = static_cast<int>(view_.block_flow->size());
 
     // 行下标范围。行数组按页单调，所以限页时两端都能二分 ——
     //   不限页时遍历全篇是为了挑出真正落进选区的那几行，那是"文档行数"这个量级；
     //   而呈现每拍都走这一趟，全选时这笔开销会盖过真正要画的字。
     const int n_lines = static_cast<int>(view_.layout->lines.size());
+    // 选区的粒度（见 selectionIsCell）：整格 / 文字。整格只在一次"点格内边距带"之后成立。
+    const bool cell_sel = sel_cell_;
+    // 整格的去重账：同一格在同一页有几个行盒就带几份相同的格范围，只画第一份。
+    bool drawn_cell = false;
+    int last_cell_page = -1;
+    float last_cell_lo = 0.0f;
+    float last_cell_hi = 0.0f;
+    float last_cell_top = 0.0f;
+    float last_cell_bottom = 0.0f;
     int k_begin = 0;
     int k_end = n_lines - 1;  // 闭区间
     if (count > 0 && n_lines > 0) {
@@ -651,7 +786,46 @@ std::vector<PageRect> CaretResolver::selectionRectsIn(int first_page, int count)
         if (para < pa_lo || para > pa_hi) continue;
         if (para < 0 || para >= n_para) continue;
 
-        // 选区在本段的段内流位置区间（整段被选中时就是 [0, 本段占的位数]）。
+        // 整格选区只画选中的那几格：矩形在流里是断的，包络会多含两端行里没选中的格。
+        //   文字选区不走这条判断（它本来就按行求交）。
+        if (cell_sel && !cellCoversPara(para)) continue;
+
+        // 整格反白与文字选区在这里分开，不靠几何猜。整格这一支不读流区间：
+        //   空格的内容长度是 0，按流区间求交永远得到零宽，空格就一条高亮都画不出来。
+        //   它读的是格的几何（外框 + 整行的块轴范围），与格里有几个字无关。
+        const bool cell_row = cell_sel && lb.cell_box_hi_pt > lb.cell_box_lo_pt &&
+                              lb.cell_bottom_pt > lb.cell_top_pt;
+        Rect r;
+        if (cell_row) {
+            // 一个格的每一行盒都带着同一份格范围 —— 只画一次，否则半透明的选区叠几层，
+            //   格内行数越多颜色越深。
+            if (drawn_cell && lb.page == last_cell_page &&
+                lb.cell_box_lo_pt == last_cell_lo && lb.cell_box_hi_pt == last_cell_hi &&
+                lb.cell_top_pt == last_cell_top && lb.cell_bottom_pt == last_cell_bottom)
+                continue;
+            drawn_cell = true;
+            last_cell_page = lb.page;
+            last_cell_lo = lb.cell_box_lo_pt;
+            last_cell_hi = lb.cell_box_hi_pt;
+            last_cell_top = lb.cell_top_pt;
+            last_cell_bottom = lb.cell_bottom_pt;
+            // 反白用的是格的外框：内容区两侧各有一层内边距，按内容区铺就是"左右还留条缝"。
+            if (!lb.vertical) {
+                r.x = lb.cell_box_lo_pt;
+                r.w = lb.cell_box_hi_pt - lb.cell_box_lo_pt;
+                r.y = lb.cell_top_pt;
+                r.h = lb.cell_bottom_pt - lb.cell_top_pt;
+            } else {
+                r.x = lb.cell_top_pt;
+                r.w = lb.cell_bottom_pt - lb.cell_top_pt;
+                r.y = lb.cell_box_lo_pt;
+                r.h = lb.cell_box_hi_pt - lb.cell_box_lo_pt;
+            }
+            out.push_back(PageRect{lb.page, r});
+            continue;
+        }
+
+        // 文字选区：本段落在选区里的那一段（整段被选中时就是 [0, 本段占的位数]）。
         const FlowPos base = (*view_.block_flow)[static_cast<size_t>(para)];
         const FlowPos seg_lo = std::max(lo, base);
         const FlowPos seg_hi = std::min(hi, base + (*view_.block_flow_span)[static_cast<size_t>(para)]);
@@ -677,36 +851,11 @@ std::vector<PageRect> CaretResolver::selectionRectsIn(int first_page, int count)
 
         const float a0 = lb.inline_origin_pt + lb.offsetAtSide(l_lo, side_lo);
         const float a1 = lb.inline_origin_pt + lb.offsetAtSide(l_hi, side_hi);
-        Rect r;
         if (!lb.vertical) {
-            float x0 = std::min(a0, a1);
-            float x1 = std::max(a0, a1);
-            // 表格：选区覆盖到这一行的行首/行尾时，高亮铺到格的左右边界。
-            //   一格被整段选中时应当整格反白，而不是只贴在字上 —— 这是"单元格选区"
-            //   与"文字选区"的差别（Word 的行为）。正文里 cell_lo / cell_hi 都是 0，不动。
-            if (lb.cell_hi_pt > lb.cell_lo_pt) {
-                if (l_lo == lb.first_cp) x0 = std::min(x0, lb.cell_lo_pt);
-                if (l_hi == lb.last_cp) x1 = std::max(x1, lb.cell_hi_pt);
-            }
-            // 表格里的两种选区是两件事，不能混：
-            //   整段被选中（这一段的首尾都进了选区）才是"单元格选区"—— 铺满整格，
-            //   宽度到格的左右边界、高度到整行的块轴范围（含显式行高多出来的空白）；
-            //   只选了一段里的一部分，仍是"文字选区"—— 只盖那几个字。
-            //   所以判断必须是一个合取，不能左右端各判各的：那样"从段首选到中间"
-            //   会被当成整格，左边界一路铺到格左边。
-            const bool whole_cell = lb.cell_hi_pt > lb.cell_lo_pt && l_lo == lb.first_cp &&
-                                    l_hi == lb.last_cp && lb.cell_bottom_pt > lb.cell_top_pt;
-            if (whole_cell) {
-                x0 = std::min(x0, lb.cell_lo_pt);
-                x1 = std::max(x1, lb.cell_hi_pt);
-                r.y = lb.cell_top_pt;
-                r.h = lb.cell_bottom_pt - lb.cell_top_pt;
-            } else {
-                r.y = lb.block_lo_pt;
-                r.h = lb.block_hi_pt - lb.block_lo_pt;
-            }
-            r.x = x0;
-            r.w = x1 - x0;
+            r.x = std::min(a0, a1);
+            r.w = std::abs(a1 - a0);
+            r.y = lb.block_lo_pt;
+            r.h = lb.block_hi_pt - lb.block_lo_pt;
         } else {
             r.x = lb.block_lo_pt;
             r.y = std::min(a0, a1);

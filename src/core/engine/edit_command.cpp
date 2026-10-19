@@ -239,69 +239,6 @@ bool EditCommand::eraseAtomBeside(FlowPos cur, bool left) {
     return true;
 }
 
-/**
- * 表格边界上的删除：光标在表格第一个块的最前面时退格、最后一个块的末尾时前删，
- * 整张表删掉。
- *
- * 表格是块级容器 —— 它没有"删一个字符就缩一格"的形态，能删的只有整张表。判定落在
- * 块流上（段号 + 段内偏移）而不是流位置：表格的边界不进块流，没有能站光标的括号。
- * 嵌套表格按最内层判：光标在内层格子里时退格删的是内层那张，不是外层的。
- */
-bool EditCommand::eraseTableBeside(FlowPos cur, bool left) {
-    if (!hasFlow() || cur < 0 || blocks().empty()) return false;
-    const TextPos c = pos().caret();
-    if (c.para < 0 || c.para >= static_cast<int>(blocks().size())) return false;
-    const std::vector<CellSlot>& path = blocks()[static_cast<size_t>(c.para)].cell_path;
-    if (path.empty()) return false;
-    const uint64_t handle = path.back().table;
-    const int len = static_cast<int>(blocks()[static_cast<size_t>(c.para)].cp_text.size());
-    if (left ? (c.offset != 0) : (c.offset != static_cast<size_t>(len))) return false;
-
-    // 这一张表在块流里的连续区间：首尾两端才能删（中间那些块的两侧都是本表的内容）。
-    auto inside = [&](int i) {
-        const std::vector<CellSlot>& p = blocks()[static_cast<size_t>(i)].cell_path;
-        return !p.empty() && p.back().table == handle;
-    };
-    int first = c.para;
-    while (first > 0 && inside(first - 1)) --first;
-    int last = c.para;
-    while (last + 1 < static_cast<int>(blocks().size()) && inside(last + 1)) ++last;
-    if (left ? (c.para != first) : (c.para != last)) return false;
-
-    const Node* t = tree().find(static_cast<NodeId>(handle));
-    if (t == nullptr || t->parent == nullptr) return false;
-    int idx = -1;
-    for (size_t i = 0; i < t->parent->children.size(); ++i) {
-        if (t->parent->children[i]->id == t->id) {
-            idx = static_cast<int>(i);
-            break;
-        }
-    }
-    if (idx < 0) return false;
-
-    FlowPos lo = 0;
-    FlowPos hi = 0;
-    if (!flowIndex().intervalOf(t->id, &lo, &hi)) return false;
-    // 整块包住它必然被拒（与删控件同一条口径）：表单结构锁与只读都落在这里。
-    if (!formDegraded() && !canEditRange(tree(), mode(), Range{lo, hi}).allowed) {
-        noteBlocked();
-        return false;
-    }
-    const NodeBuild nb = makeRemoveNode(tree(), Pos{t->parent->id, idx});
-    if (!nb.ok) return false;
-
-    Transaction tx;
-    tx.label = "删除表格";
-    tx.selection_before = Range{cur, cur};
-    tx.selection_after = Range{lo, lo};
-    tx.steps.push_back(nb.step);
-    // 段数一定变（一张表至少一个块），走整树重编。
-    if (!commit(std::move(tx), c.para, ParaDelta{true})) return false;
-    // 落点 = 表格区间的起点：删掉之后光标停在这张表空出来的位置上。
-    pos().setCaretAtFlow(lo);
-    return true;
-}
-
 EditCommand::BracketHit EditCommand::bracketBackspace(FlowPos* at) {
     if (at == nullptr || !hasFlow() || controls().empty()) return BracketHit::None;
     *at = -1;
@@ -406,10 +343,6 @@ bool EditCommand::backspace() {
     //   成立，而"左边那一格是原子"比"光标贴在一枚括号上"更贴近屏幕上看到的那个东西。
     if (eraseAtomBeside(caret_before, /*left=*/true)) return true;
 
-    // 表格首尾边界上的退格（见 eraseTableBeside）。它排在这里，是为了赶在"段首退格 =
-    //   并入上一段"之前：否则表格内容会先被并进上一段，表格壳子留在原地。
-    if (eraseTableBeside(caret_before, /*left=*/true)) return true;
-
     // 控件边界上的退格（四条规则见 bracketBackspace）。这一段必须排在"段首退格 = 并入
     //   上一段"之前：控件跨段时它的闭括号落在下一段的段首，从段首那条路走会并段，
     //   而不是按括号规则处理。
@@ -456,7 +389,6 @@ bool EditCommand::deleteForward() {
 
     // 与退格左右对称：右边那一格是原子就整枚删掉。
     if (eraseAtomBeside(caret_before, /*left=*/false)) return true;
-    if (eraseTableBeside(caret_before, /*left=*/false)) return true;
 
     FlowPos at = -1;
     const BracketHit hit = bracketDeleteForward(&at);
@@ -572,6 +504,11 @@ bool EditCommand::splitParagraph() {
  */
 bool EditCommand::mergeParagraphInto(int head) {
     if (head < 0 || head + 1 >= static_cast<int>(blocks().size())) return false;
+    // 两块不在同一格：中间隔的是单元格边界，不是可删的段落标记（见 sameCellBlocks）。
+    if (!sameCellBlocks(head, head + 1)) {
+        noteBlocked();
+        return false;
+    }
 
     // 合并 = 删掉前一段的结束标记。两段的内容合成一段，而留下来的标记是后一段的 ——
     //   于是"合并之后那一段保留前一段的格式"这条约定不能白拿：要显式搬到后一段的标记上。
@@ -771,12 +708,235 @@ EditCommand::SelectionErase EditCommand::planEraseSelection() {
         plan.blocked = true;
         return plan;
     }
+    // 整格选区（吸附到格边界的那一种）：逐格清空内容，格与格之间的结构不动。
+    //   为什么不能按整条区间删：区间里夹着单元格边界，安全阀（覆盖必须刚好等于区间长）
+    //   必然过不去，于是整条编辑被拒 —— 表现就是"选中了好几格，按 Del 没反应"。
+    //   逐格清空还把"格"本身保住了：删完每格仍是空段落，表结构不变。
+    if (pos().hasCellRange() && view_.tables && !view_.tables->empty()) {
+        plan.steps = eraseCellContents(from, to);
+        if (plan.steps.empty()) {
+            noteBlocked();
+            plan.blocked = true;
+        }
+        return plan;
+    }
+    // 整张被覆盖的表：整张删（与上面同一个理由，只是粒度是"表"）。
+    plan.steps = eraseWholeTables(from, to);
+    if (!plan.steps.empty()) return plan;
     plan.steps = eraseFlowSteps(from, to);
     if (plan.steps.empty()) {
         noteBlocked();
         plan.blocked = true;
     }
     return plan;
+}
+
+/**
+ * 两个相邻块在同一个单元格里（或都不在表格里，见头文件）。
+ *
+ * 口径与引擎的 layoutCellAt 一致：包含这一段的最短块区间 = 最内层那一格。
+ */
+bool EditCommand::sameCellBlocks(int a, int b) const {
+    if (!view_.tables) return true;
+    const auto innermost = [this](int para) -> const LayoutCell* {
+        const LayoutCell* best = nullptr;
+        for (const LayoutTable& t : *view_.tables) {
+            for (const LayoutCell& c : t.cells) {
+                if (c.block_count <= 0) continue;
+                if (para < c.first_block || para >= c.first_block + c.block_count) continue;
+                if (best == nullptr || c.block_count < best->block_count) best = &c;
+            }
+        }
+        return best;
+    };
+    const LayoutCell* ca = innermost(a);
+    const LayoutCell* cb = innermost(b);
+    if (ca == nullptr && cb == nullptr) return true;
+    if (ca == nullptr || cb == nullptr) return false;
+    return ca == cb;
+}
+
+/**
+ * 整格删除：把选区覆盖到的每一格的内容各删一遍，合并成一批步骤。
+ *
+ * 按块区间删，不按流区间：一格的"内容范围"就是它占的那几段 —— 空格一个块、内容长度
+ *   为 0，按流区间算出来是一个空区间，eraseFlowSteps 会当场拒绝。空格本来就没有内容
+ *   可删，跳过它即可（格与格之间的结构一个都不动）。
+ *
+ * 嵌套表：外层格的块区间会把内层格整个包住，两层都删就会重复（坐标还对不上）。
+ *   被别的块区间严格包含的那一份丢掉，只删最内层 —— 与 layoutCellAt 的取值口径一致。
+ */
+std::vector<Step> EditCommand::eraseCellContents(FlowPos from, FlowPos to) const {
+    std::vector<Step> all;
+    if (!hasFlow() || !view_.tables) return all;
+    // 矩形选区给的是"选中了哪几格"，直接用它 —— 按包络取交集会把矩形两端那两行里没选中的
+    //   格一起删掉（跨行拖选就是整行）。只有没有逐格信息时（全选那一路）才按包络求交。
+    struct CellSpan {
+        int first;
+        int count;
+    };
+    std::vector<CellSpan> spans;
+    if (!pos().cellBlocks().empty()) {
+        for (const CaretResolver::CellBlocks& c : pos().cellBlocks())
+            spans.push_back({c.first, c.count});
+    } else {
+        const auto span_of = [this](int first_b, int count, FlowPos* lo, FlowPos* hi) -> bool {
+            const int last_b = first_b + count - 1;
+            if (first_b < 0 || count <= 0 || last_b >= static_cast<int>(blockFlow().size()) ||
+                last_b >= static_cast<int>(blockFlowSpan().size()))
+                return false;
+            *lo = blockFlow()[static_cast<size_t>(first_b)];
+            *hi = blockFlow()[static_cast<size_t>(last_b)] +
+                  blockFlowSpan()[static_cast<size_t>(last_b)];
+            return true;
+        };
+        for (const LayoutTable& t : *view_.tables) {
+            for (const LayoutCell& c : t.cells) {
+                FlowPos lo = -1;
+                FlowPos hi = -1;
+                if (!span_of(c.first_block, c.block_count, &lo, &hi)) continue;
+                // 交集判据按块看：这一格有没有段落在区间里。空格的段是零长的，
+                //   按流位置判"hi <= from"会把它判成不相交 —— 它本来也不该被删。
+                const int last_b = c.first_block + c.block_count - 1;
+                const FlowPos last_end = blockFlow()[static_cast<size_t>(last_b)] +
+                                         blockFlowSpan()[static_cast<size_t>(last_b)];
+                if (last_end <= from || lo >= to) continue;
+                spans.push_back({c.first_block, c.block_count});
+            }
+        }
+    }
+    // 去掉被严格包含的那一层（嵌套表的外层）。
+    std::vector<CellSpan> inner;
+    for (size_t i = 0; i < spans.size(); ++i) {
+        bool contained = false;
+        for (size_t j = 0; j < spans.size() && !contained; ++j) {
+            if (i == j) continue;
+            const int i_last = spans[i].first + spans[i].count;
+            const int j_last = spans[j].first + spans[j].count;
+            const bool strict = spans[j].first <= spans[i].first && j_last >= i_last &&
+                                (spans[j].first < spans[i].first || j_last > i_last);
+            contained = strict;
+        }
+        if (!contained) inner.push_back(spans[i]);
+    }
+    const auto flow_of = [this](int block) { return blockFlow()[static_cast<size_t>(block)]; };
+    for (const CellSpan& sp : inner) {
+        const int last_b = sp.first + sp.count - 1;
+        const FlowPos lo = flow_of(sp.first);
+        const FlowPos hi = flow_of(last_b) + blockFlowSpan()[static_cast<size_t>(last_b)];
+        // 空格：没有内容可删，跳过（格本来就是空的，删它不需要任何步骤）。
+        if (hi <= lo) continue;
+        const std::vector<Step> part = eraseFlowSteps(lo, hi);
+        if (part.empty()) return {};  // 有一格删不动就整条拒绝，不留半截
+        all.insert(all.end(), part.begin(), part.end());
+    }
+    if (all.empty()) return {};  // 全是空格：没有可删的内容，交给调用方按"拒绝"处理
+    // 从后往前：删右边的不会移动左边的坐标。
+    std::sort(all.begin(), all.end(), [](const Step& a, const Step& b) {
+        return stepStartFlow(a) > stepStartFlow(b);
+    });
+    return all;
+}
+
+/**
+ * 被选区整张覆盖的表整张删（见头文件），表外那些纯文本段照常按区间删。
+ *
+ * "覆盖"还要求选区把它整个跨过去（起点在表首之前或终点在表尾之后）：两头都落在表内的
+ *   文字选区只是"选了这张表里的字"，那时删表比用户选的多 —— 那种选区没有局部删结构的
+ *   语义，交给调用方按原路拒绝。全选是例外，它本来就该把表一起清掉。
+ *
+ * 只算"最外层那一张"：内层表整个落在它的区间里，删外层时一起走，再给内层发一步就会
+ *   撞上"节点已经不在了"。表与表之间的空隙按流区间删，于是全选得到的是"全篇清空"。
+ */
+std::vector<Step> EditCommand::eraseWholeTables(FlowPos from, FlowPos to) const {
+    std::vector<Step> steps;
+    if (!hasFlow() || !view_.tables || view_.tables->empty() || from >= to) return steps;
+    if (blockFlow().empty() || blockFlowSpan().empty()) return steps;
+    const FlowPos doc_begin = blockFlow()[0];
+    const size_t last_block = blockFlow().size() - 1;
+    const FlowPos doc_end = blockFlow()[last_block] + blockFlowSpan()[last_block];
+    const bool whole_doc = (from <= doc_begin && to >= doc_end);
+    struct Whole {
+        NodeId id = kInvalidNodeId;
+        FlowPos lo = 0;
+        FlowPos hi = 0;
+        bool inner = false;  // 被别的整表覆盖：不用单独发步骤
+    };
+    std::vector<Whole> wholes;
+    for (const LayoutTable& t : *view_.tables) {
+        FlowPos lo = 0;
+        FlowPos hi = 0;
+        if (!flowIndex().intervalOf(static_cast<NodeId>(t.handle), &lo, &hi)) continue;
+        // 覆盖判据按块算，不按表的节点区间：表的结构位夹在块之间，而选区两端永远落在
+        //   块内容上（全选也一样，它到不了最后那个段落标记）。按节点区间判，开头就是表格的
+        //   文档永远不会被"整张覆盖"，全选删除照样被拒。
+        int first_b = -1;
+        int last_b = -1;
+        for (const LayoutCell& c : t.cells) {
+            if (c.block_count <= 0) continue;
+            if (first_b < 0 || c.first_block < first_b) first_b = c.first_block;
+            const int b = c.first_block + c.block_count - 1;
+            if (b > last_b) last_b = b;
+        }
+        bool covered = (lo >= from && hi <= to);
+        bool spans_over = covered;
+        if (first_b >= 0 && last_b >= static_cast<int>(blockFlow().size())) continue;
+        if (first_b >= 0) {
+            const FlowPos blo = blockFlow()[static_cast<size_t>(first_b)];
+            const FlowPos bhi = blockFlow()[static_cast<size_t>(last_b)] +
+                                blockFlowSpan()[static_cast<size_t>(last_b)];
+            covered = (blo >= from && bhi <= to);
+            spans_over = covered && (from < blo || to > bhi || whole_doc);
+        }
+        if (!spans_over) continue;
+        wholes.push_back(Whole{static_cast<NodeId>(t.handle), lo, hi, false});
+    }
+    if (wholes.empty()) return steps;
+    for (Whole& w : wholes) {
+        for (const Whole& o : wholes) {
+            if (&o == &w) continue;
+            if (o.lo <= w.lo && o.hi >= w.hi) w.inner = true;
+        }
+    }
+    // 按表在流里的先后排：下面"表外的空隙"是顺着这个次序算出来的。
+    std::sort(wholes.begin(), wholes.end(),
+              [](const Whole& a, const Whole& b) { return a.lo < b.lo; });
+    // 表外的空隙：从选区起点走到第一张整表之前、两张整表之间、最后一张之后。
+    FlowPos cursor = from;
+    for (const Whole& w : wholes) {
+        if (w.inner) continue;
+        if (w.lo > cursor) {
+            const std::vector<Step> part = eraseFlowSteps(cursor, w.lo);
+            if (part.empty()) return {};  // 空隙里有删不动的东西：整条按原路退回
+            steps.insert(steps.end(), part.begin(), part.end());
+        }
+        const Node* n = tree().find(w.id);
+        if (n == nullptr || n->parent == nullptr) return {};
+        int idx = -1;
+        for (size_t i = 0; i < n->parent->children.size(); ++i) {
+            if (n->parent->children[i]->id == n->id) {
+                idx = static_cast<int>(i);
+                break;
+            }
+        }
+        if (idx < 0) return {};
+        // 整块包住它必然被拒（与删控件同一条口径）：表单结构锁与只读都落在这里。
+        if (!formDegraded() && !canEditRange(tree(), mode(), Range{w.lo, w.hi}).allowed) return {};
+        const NodeBuild nb = makeRemoveNode(tree(), Pos{n->parent->id, idx});
+        if (!nb.ok) return {};
+        steps.push_back(nb.step);
+        cursor = std::max(cursor, w.hi);
+    }
+    if (to > cursor) {
+        const std::vector<Step> part = eraseFlowSteps(cursor, to);
+        if (part.empty()) return {};
+        steps.insert(steps.end(), part.begin(), part.end());
+    }
+    // 从后往前：删右边的不会移动左边的坐标。
+    std::sort(steps.begin(), steps.end(), [](const Step& a, const Step& b) {
+        return stepStartFlow(a) > stepStartFlow(b);
+    });
+    return steps;
 }
 
 bool EditCommand::commitErase(const SelectionErase& plan, const char* label) {

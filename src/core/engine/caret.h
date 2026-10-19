@@ -93,10 +93,74 @@ public:
     };
 
     /**
-     * 选区与光标：唯一真源。caret() 是 focus 的投影，两者不是两套状态。
+     * 选区与光标：唯一真源。caret() 是它的投影（整格选区时投影到焦点那一格的末尾），
+     * 两者不是两套状态。
+     *
+     * 整格时返回的是吸附到格边界的那一对（见 setCellRange），而不是用户按下/松开的那两个
+     * 字符位置 —— 渲染与编辑都用这一个读数，于是"看到反白的格"与"删掉的格"不可能分叉。
+     * 要用户那两个原值（往回拖回原格时要靠它恢复文字选区），用 rawSelection。
      */
-    Range selection() const { return sel_; }
+    Range selection() const {
+        if (sel_cell_ && cell_lo_ >= 0 && cell_hi_ > cell_lo_) {
+            // 方向跟着用户焦点走：向前拖的焦点在后，返回值也保持"anchor 在前"；
+            //   向后拖则翻过来。begin / end 因此不变，而"删除之后光标落在哪一端"
+            //   这类读 focus 的地方看到的仍是用户拖动的那一头。
+            return sel_.focus >= sel_.anchor ? Range{cell_lo_, cell_hi_}
+                                             : Range{cell_hi_, cell_lo_};
+        }
+        return sel_;
+    }
+    /**
+     * 一格的身份：它占的块区间，段号连续、半开。
+     *
+     * 为什么格的身份不能是流区间：空格的内容长度是 0，流区间退化成一个点，而"点"没有身份 ——
+     * 空段不占流位，下一个块也起在同一个位置，于是"这一格"与"下一格的第一段"在流坐标上
+     * 是同一个数。块区间是格自己的身份证：每格至少一个块，块区间两两不重叠。
+     */
+    struct CellBlocks {
+        int first = -1;
+        int count = 0;
+        bool empty() const { return count <= 0; }
+        bool holds(int para) const { return count > 0 && para >= first && para < first + count; }
+    };
+
+    Range rawSelection() const { return sel_; }
     bool hasSelection() const { return !sel_.empty(); }
+
+    /**
+     * 整格选区覆盖的每一格（按块号升序，一格一份块区间）。
+     *
+     * 为什么不是"首格首到末格末"那一条：跨行拖选要的是矩形那一块，而矩形在流里不是区间 ——
+     * 从第二行第三列拖到第三行第五列，选区的流区间会顺带把第三行前四列包进来（文档顺序是
+     * 逐行的，一跨行就整行）。所以这里记的是"选中了哪几格"，流包络只是它们的 min/max。
+     * 空表示没有逐格信息（全选那一路），渲染与删除都退回按包络算。
+     */
+    const std::vector<CellBlocks>& cellBlocks() const { return cell_blocks_; }
+
+    /**
+     * 选区是"单元格选区"还是"文字选区"。
+     *
+     * 这两套不是同一件事的粗细两档，而是两条独立的操作线：文字选区只盖文字（拖选、Shift
+     * 扩展、程序化设区间都会落在这里），单元格选区整格反白（含内边距与显式行高多出来的
+     * 空白），只能由"整格"这个动作产生（点格内左侧的边距带、三击）。全选也按整格铺满 ——
+     * 与 Word 同一条（Ctrl+A 之后表格是整片反白）。
+     * 靠几何去猜（"选区正好覆盖了整段"⇒ 一定是整格）是不行的：把文字一路选到最后一个字
+     * 与选整格的位置一模一样，猜出来的结果就是"选到行尾就跳成整格"。
+     *
+     * 空格也成立：内容是空的（sel_ 一对相等的端点），但粒度确实是整格 —— 反白要铺满它。
+     * 与 hasSelection 分工：那一个问"有没有文字被选中"，这一个问"选的是什么粒度"。
+     */
+    bool selectionIsCell() const {
+        return sel_cell_ && (!sel_.empty() || !cell_blocks_.empty());
+    }
+
+    /**
+     * 选区是否吸附到了格边界上（跨格拖选或单格选格）。
+     *
+     * 与 selectionIsCell 的差别在"全选"：那一个为真，但端点没有吸附（全篇不是一格）。
+     * 删除要按"逐格清空"走的时候判这一个 —— 全选仍然按整篇删除。
+     */
+    bool hasCellRange() const { return sel_cell_ && !cell_blocks_.empty(); }
     /**
      * 行别：折行处同一个位置属于两行（上一行行尾 / 下一行行首），只有点击落点会带非零值。
      */
@@ -261,7 +325,8 @@ int caretPara() const;
 int caretRel() const;
 
 /**
- * 光标位置（派生）：段号 + 段内码点偏移，由 focus 投影出来 —— 不再是独立状态。
+ * 光标位置（派生）：段号 + 段内码点偏移，由光标的流位置投影出来 —— 不是独立状态。
+ * 光标的流位置通常就是 focus，整格选区例外：它是焦点那一格的末尾（见 cell_caret_）。
  */
 TextPos caret() const;
 
@@ -287,6 +352,24 @@ bool setCaretAtFlow(FlowPos flow);
  * 一端收到能到的最远处，不会让一个悬空端点把后面的几何全带偏。
  */
 bool setSelection(Range r);
+
+/**
+ * 整格选区：把这几格按"单元格选区"记下来，插入点按 caret_flow 摆。
+ *
+ * 收的是块区间而不是流区间（见 CellBlocks）：空格的内容长度为 0，流区间退化成点之后
+ * 分不出"这是哪一格"。流包络由块区间现算 —— 它只当摘要用（选区报告、撤销快照、
+ * 打字覆盖的范围），渲染与删除都按块区间走。
+ *
+ * @param caret_flow 插入点要停在哪（全局流位置）。整格选区的插入点不跟着鼠标走：它钉在
+ *   焦点那一格的末尾（由引擎算好传进来），于是鼠标在格内挪动时它一格一格地跳，而不是
+ *   逐字跟着跑。传 -1 表示退回"插入点 = focus"。
+ */
+bool setCellBlocks(std::vector<CellBlocks> cells, FlowPos caret_flow = -1);
+
+/**
+ * 取消整格吸附：退回文字选区（选区本身不动）。
+ */
+void clearCellRange();
 
 /**
  * 取消选区：anchor 收到 focus，焦点端不动 —— 光标留在原地。
@@ -371,8 +454,49 @@ bool moveCaretToDocEnd(bool extend);
 bool moveCaretVertical(int dir, bool extend);
 
 private:
+    /**
+     * 光标的流位置（见 cell_caret_）：整格选区时是焦点那一格的末尾，否则就是 focus。
+     * caretPara / caretRel / caretSide 三处派生都从这里取，光标位置因此只有一个真源。
+     */
+    FlowPos caretFlow() const;
+
     PositionView view_{};
     Range sel_{};
+    /**
+     * 选区的粒度（见 selectionIsCell）。它只活在一次"整格"动作之后，直到下一次定位或扩展。
+     *
+     * cell_lo_ / cell_hi_ 是整格时的流包络（渲染与编辑的端点摘要）；-1 表示没有吸附
+     * （文字选区或全选）。两者与 sel_cell_ 必须同时成立：sel_cell_ 为真而端点是 -1 是
+     * "全选"那一支，走的仍是 sel_ 自己（全选本来就覆盖整篇，不需要吸附）。
+     */
+    bool sel_cell_ = false;
+    FlowPos cell_lo_ = -1;
+    FlowPos cell_hi_ = -1;
+    /**
+     * 选中了哪几格（见 CellBlocks）。
+     */
+    std::vector<CellBlocks> cell_blocks_;
+    /**
+     * 上面那几份块区间合并之后的结果（升序、两两不相交、相邻的并成一份）。
+     *
+     * 渲染每过一行都要问一次"这段在一格被选中的格子里吗"，而块区间可以嵌套（外层格
+     * 包着内层表）—— 直接对 cell_blocks_ 二分会漏掉"外层格盖住、内层格没选"那种位置。
+     * 合并成不相交之后，一次二分就能答。
+     */
+    std::vector<Range> cell_mask_;
+    /**
+     * 某个块是否落在某个被选中的格里（渲染按行盒筛用）。没有逐格信息时恒真 ——
+     * 全选那一路按包络铺，没有逐格信息可筛。
+     */
+    bool cellCoversPara(int para) const;
+    /**
+     * 整格选区的插入点（全局流位置），-1 = 没有（插入点就是 focus）。
+     *
+     * 为什么与 sel_.focus 分开：拖选时 focus 是鼠标落下那一格里的任意位置，每动一下
+     * 就变一次；而整格选区的插入点应当是"焦点那一格的末尾"，格内移动不该让它逐字漂。
+     * 读 focus 的那几处（渲染、编辑、输入法定位）因此统一走 caretFlow()。
+     */
+    FlowPos cell_caret_ = -1;
     int caret_line_aff_ = 0;
     bool vertical_goal_valid_ = false;
     float vertical_goal_pt_ = 0.0f;

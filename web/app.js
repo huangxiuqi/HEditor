@@ -128,6 +128,10 @@ let blinkTimer = null;
 let drag = null;
 let lastPointerId = null;   // 最近一次 pointerdown 的指针 id（按下时用来做指针捕获）
 let capturedId = null;      // 已经捕获在页容器上的指针 id（下次按下时先放掉）
+let clickSeq = 0;           // 连击计数（三击选整格用它，见 clickCountOf）
+let clickTime = 0;
+let clickX = 0;
+let clickY = 0;
 const pageErrors = [];
 let disposed = false;
 
@@ -1495,6 +1499,24 @@ function dragExtendTo(hit) {
   resetBlink();
 }
 
+/**
+ * 连击计数。
+ *
+ * 单线程宿主挂在 mousedown 上，detail 本来有效；仍然自己数，是为了与 Worker 宿主同一条
+ *   判定 —— 那边挂在 pointerdown 上，detail 恒为 0，读它三击永远不成立。两处各写一套，
+ *   迟早出现"这边三击能选、那边没反应"。
+ */
+function clickCountOf(ev) {
+  const now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+  const near = clickSeq > 0 && now - clickTime <= 520 &&
+               Math.abs(ev.clientX - clickX) <= 4 && Math.abs(ev.clientY - clickY) <= 4;
+  clickSeq = near ? clickSeq + 1 : 1;
+  clickTime = now;
+  clickX = ev.clientX;
+  clickY = ev.clientY;
+  return clickSeq;
+}
+
 function onCanvasMouseDown(ev) {
   if (!ready || busy) return;
   // 指针捕获：在浏览器窗口之外松手时页面未必收得到 mouseup —— 那是"松开了还在拖"
@@ -1507,12 +1529,39 @@ function onCanvasMouseDown(ev) {
     lastPointerId = null;
   }
   const pt = framePointFromEvent(ev);
+  // 三击：选整格。点在哪一格的字上都算 —— 边距带那条路太窄，三击是"我要这一格"的
+  //   明确表达（Word 同一条手势）。不在表格里时照常落光标。
+  if (clickCountOf(ev) === 3 && mod.cellSelectAt) {
+    clickSeq = 0;
+    if (mod.cellSelectAt(pt.x / currentZoom, pt.y / currentZoom)) {
+      // 光标不藏起来：整格选区的插入点钉在焦点那一格的末尾（见 CaretResolver），
+      //   它是"接下来打字会落在哪"的读数，藏掉就看不见了。
+      caretOn = true;
+      presentNow();
+      afterEdit();
+      ta.focus();
+      ev.preventDefault();
+      return;
+    }
+  }
   // hitTest 收的是文档磅坐标，而页容器上量到的是帧像素 —— 除以 zoom 换算。
   const hit = mod.hitTest(pt.x / currentZoom, pt.y / currentZoom);
   let onText = false;
   if (hit !== 'null') {
     onText = true;
     const p = JSON.parse(hit);
+    // 格子的边距带：引擎说"这一下点在格的左边距里"，那就是"选整格"，不是落光标。
+    //   两套操作在这里分开（文字选区 / 单元格选区），后面那条定位与拖选都不走。
+    //   搬的是段号（cellPara），不是流区间：空格的内容长度为 0，流区间分不出是哪一格。
+    if (typeof p.cellPara === 'number' && mod.selectCellAtPara) {
+      mod.selectCellAtPara(p.cellPara | 0);
+      caretOn = true;
+      presentNow();
+      afterEdit();
+      ta.focus();
+      ev.preventDefault();
+      return;
+    }
     // 连"这一下点的是哪一个位置"一起带过去。
     //   相邻两个字段共享边界时（[反复]│[心悸]，两枚括号并排在同一列上），落点是同一个
     //   偏移，光有偏移分不出用户点的是哪一侧；同一个偏移上还可能压着好几枚括号（相邻的
@@ -2034,6 +2083,27 @@ const facade = {
   setSelection(anchor, focus) {
     if (!ready || !mod.setSelection(anchor, focus)) return null;
     return JSON.parse(mod.editStatsJson());
+  },
+  // 整格选区：段号来自 hit() 的 cellPara 字段（命中侧的几何结论），宿主不自己算。
+  selectCellAtPara(para) {
+    if (!ready || !mod.selectCellAtPara) return null;
+    if (!mod.selectCellAtPara(para | 0)) return null;
+    // 插入点在格末，保持可见（见 onCanvasMouseDown 那条说明）。
+    caretOn = true;
+    presentNow();
+    afterEdit();
+    return this.caret;
+  },
+  // 三击那条路：按点选整格（点在格里的任何位置都算）。返回是否真的选中了一格。
+  cellSelectAt(xPt, yPt) {
+    if (!ready || !mod.cellSelectAt) return false;
+    const ok = !!mod.cellSelectAt(xPt, yPt);
+    if (ok) {
+      caretOn = true;
+      presentNow();
+      afterEdit();
+    }
+    return ok;
   },
   clearSelection() {
     if (!ready) return null;

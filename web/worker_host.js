@@ -161,6 +161,30 @@ let lastPointerId = null;   // 最近一次 pointerdown 的指针 id（按下时
 let capturedId = null;      // 已经捕获在容器上的指针 id（下次按下时先放掉，见 pointerdown）
 
 /**
+ * 连击计数。
+ *
+ * pointerdown 的 detail 恒为 0 —— 规范只给 mousedown 定义了连击计数，指针事件沿用同一个
+ *   MouseEvent 字段却没人填。直接读 ev.detail 的话三击永远不成立（"三击没反应"的成因）。
+ *   这里自己数：两次按下间隔不超过 520 ms、位置差不超过 4 CSS px 算同一次连击。
+ *   阈值按手感定，与起始拖选阈值同一个量级。
+ */
+let clickSeq = 0;
+let clickTime = 0;
+let clickX = 0;
+let clickY = 0;
+
+function clickCountOf(ev) {
+  const now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+  const near = clickSeq > 0 && now - clickTime <= 520 &&
+               Math.abs(ev.clientX - clickX) <= 4 && Math.abs(ev.clientY - clickY) <= 4;
+  clickSeq = near ? clickSeq + 1 : 1;
+  clickTime = now;
+  clickX = ev.clientX;
+  clickY = ev.clientY;
+  return clickSeq;
+}
+
+/**
  * 把当前的缩放按"倍数"回写到页面上的 #zoom 输入框。
  *
  * 输入框那一格是倍数（1 = 100% = 96 dpi），引擎与门面收的是密度（设备像素 / 磅），
@@ -969,6 +993,21 @@ function onPointerDown(ev) {
   if (!pt) return;
   const xDev = pt.x;
   const yDev = pt.y;
+  // 三击：选整格。点在哪一格的字上都算（边距带那条路太窄）；点不在表格里时退回
+  //   正常的落光标。与单线程宿主同一条手势。
+  //   计数自己数（见 clickCountOf）：pointerdown 的 detail 是 0，读它三击永远不成立。
+  if (clickCountOf(ev) === 3) {
+    clickSeq = 0;
+    blinkHold();
+    // 走命令（不是查询）：选整格会重画帧，而查询只回一个值、不重贴脏页 —— 画面于是停在
+    //   旧帧上，要等下一次闪烁相位（≤530 ms）那一拍把它重贴出来，画面上就是"点了要等
+    //   一秒才选中"。changed = false（点不在表格里）时退回正常落光标。
+    trackInput(opUser('cellSelectAt', { x: xDev / zoom, y: yDev / zoom }, true)
+      .then((st) => (st ? null : placeAt(xDev, yDev))));
+    ta.focus();
+    ev.preventDefault();
+    return;
+  }
   // 页号按宿主的像素步距反算（与引擎的命中测试同一口径，见 EditorEngine::hitTestPt）：
   //   宿主把页摆在 pagePxHeight + pageGapPx 这些整数像素上，与磅值差不到一像素，
   //   但误差随页号累积 —— 用磅值折页号时，2000 段文档最后几页会偏下一整段。
@@ -1047,6 +1086,8 @@ const CMD = {
   lineEnd: (extend) => ['lineEnd', { extend: !!extend }, true],
   // 选区三个入口：两端是全局流位置（不是段内偏移）。
   selectAll: () => ['selectAll', {}, true],
+  // 整格选区：区间来自 hit 的 cell 字段。与 setSelection 的差别只在粒度。
+  selectCellAtPara: (para) => ['selectCellAtPara', { para }, true],
   setSelection: (anchor, focus) => ['setSelection', { anchor, focus }, true],
   clearSelection: () => ['clearSelection', {}, true],
   setCaret: (para, offset) => ['setCaret', { para, offset }],
@@ -1192,6 +1233,15 @@ for (const name of Object.keys(ASK)) {
 host.ask = askOp;
 
 /**
+ * 三击选整格：坐标是文档磅，与 hit 同一个口径；返回是否真的选中了一格。
+ *
+ * 走命令而不是查询（所以不在上面的 ASK 表里）：它会重画帧，而查询那条路只回一个值、
+ *   不重贴脏页 —— 画面会停在旧帧上，直到下一次闪烁相位才更新（见 onPointerDown）。
+ *   宿主只关心"成没成"，这里把 changed 折成布尔，与单线程宿主同名入口同形。
+ */
+host.cellSelectAt = async (x, y) => !!(await opUser('cellSelectAt', { x, y }, true));
+
+/**
  * 整篇文本。一次问一段太多趟，一次传整篇又要有那个口子 —— 所以逐段问再拼。
  *
  * 做成取值器，值是一个 Promise，而不是方法：单线程宿主那边 allText 就是取值器
@@ -1222,6 +1272,12 @@ Object.defineProperty(host, 'allText', {
 async function placeAt(xDev, yDev) {
   const hit = await askOp('hit', { x: xDev / zoom, y: yDev / zoom });
   if (!hit) return null;
+  // 格子的边距带：引擎在命中里给了这一格的流区间，那就是"选整格"这条操作线。
+  //   它与落光标互斥 —— 点边距带不该同时把光标摆进格里的某个字之间。
+  if (typeof hit.cellPara === 'number') {
+    await host.selectCellAtPara(hit.cellPara | 0);
+    return hit;
+  }
   if (typeof hit.side === 'number') {
     // 行别一起搬：折行处"上一行行尾"与"下一行行首"是同一个偏移与侧别，
     //   不带回去的话点下一行的行首会画到上一行行尾。

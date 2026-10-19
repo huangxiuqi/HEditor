@@ -641,6 +641,22 @@ bool moveCaretVertical(int dir, bool extend) {
  * 同一个坐标系，所以探针拿到的数与模型层的 Range 是同一把尺子。
  */
 bool selectAll() { return g_engine.selectAllAndRender(); }
+
+/**
+ * 整格选区。段号来自 hitTest 的 cellPara 字段 —— 宿主原样搬回来，不自己算几何。
+ * 与 setSelection 的区别只在粒度：它是"单元格选区"，渲染铺满整格（含内边距与显式行高）。
+ */
+bool selectCellAtPara(int para) { return g_engine.selectCellAtParaAndRender(para); }
+
+/**
+ * 按点选整格（三击）。点用文档坐标（磅），与 hitTest 同一个坐标系。
+ * 点在表格之外返回 false，宿主据此退回落光标。
+ */
+bool cellSelectAt(float x_pt, float y_pt) {
+    if (!g_engine.selectCellAtPt(x_pt, y_pt)) return false;
+    g_engine.repaint();
+    return true;
+}
 bool setSelection(int anchor, int focus) {
     return g_engine.setSelectionAndRender(
         Range{static_cast<FlowPos>(anchor), static_cast<FlowPos>(focus)});
@@ -730,10 +746,29 @@ std::string hitTest(float x_pt, float y_pt) {
     int owner = -1;
     int side = 0;
     int line_aff = 0;
-    if (!g_engine.hitTestPt(x_pt, y_pt, &p, &owner, &side, &line_aff)) return "null";
+    int cell_para = -1;
+    if (!g_engine.hitTestPt(x_pt, y_pt, &p, &owner, &side, &line_aff, &cell_para))
+        return "null";
     std::ostringstream o;
     o << "{\"para\":" << p.para << ",\"offset\":" << p.offset << ",\"field\":" << owner
-      << ",\"side\":" << side << ",\"line\":" << line_aff << "}";
+      << ",\"side\":" << side << ",\"line\":" << line_aff;
+    // cellPara：落点在某个格子的边距带上（格边框到文字左沿之间，空格则是整格）时给出
+    //   这一格的段号。宿主看到它就调 selectCellAtPara —— 那是"选整格"这条操作线，
+    //   与"落光标"不是同一件事。给段号而不是流区间：空格的内容长度为 0，它的流区间
+    //   与下一格的第一段是同一个位置，按流区间分不出是哪一格。
+    if (cell_para >= 0) {
+        o << ",\"cellPara\":" << cell_para;
+        // 顺带给出这一格的内容区间：空格的两端相等（长度 0）。判据拿它区分"有内容"与
+        //   "空格"两种整格选区；宿主不用它 —— 选格只需要段号。
+        FlowPos lo = -1;
+        FlowPos hi = -1;
+        if (g_engine.cellFlowRangeAt(cell_para, &lo, &hi)) {
+            o << ",\"cell\":[" << lo << "," << hi << "]";
+        } else {
+            o << ",\"cell\":[" << 0 << "," << 0 << "]";
+        }
+    }
+    o << "}";
     return o.str();
 }
 
@@ -1011,6 +1046,11 @@ std::string linesJson(int from_para, int to_para) {
           << ",\"v\":" << (lb.vertical ? 1 : 0) << ",\"cp\":[" << lb.first_cp << ","
           << lb.last_cp << "],\"blo\":" << lb.block_lo_pt << ",\"bhi\":" << lb.block_hi_pt
           << ",\"iorg\":" << lb.inline_origin_pt << ",\"iend\":" << lb.inline_end_pt
+          // 格范围（页内磅）：判据要拿它比"选区是不是整格"。不在表格里时两组都是 0。
+          //   clo/chi 是内容区（命中用），cxlo/cxhi 是格外框（反白用它，含两侧内边距）。
+          << ",\"clo\":" << lb.cell_lo_pt << ",\"chi\":" << lb.cell_hi_pt
+          << ",\"cxlo\":" << lb.cell_box_lo_pt << ",\"cxhi\":" << lb.cell_box_hi_pt
+          << ",\"ctop\":" << lb.cell_top_pt << ",\"cbot\":" << lb.cell_bottom_pt
           << ",\"ncl\":" << lb.clusters.size() << "}";
     }
     o << "],\"glyphs\":[";
@@ -1363,6 +1403,8 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("caretToDocEnd", &caretToDocEnd);
     emscripten::function("moveCaretVertical", &moveCaretVertical);
     emscripten::function("selectAll", &selectAll);
+    emscripten::function("selectCellAtPara", &selectCellAtPara);
+    emscripten::function("cellSelectAt", &cellSelectAt);
     emscripten::function("setSelection", &setSelection);
     emscripten::function("clearSelection", &clearSelection);
     emscripten::function("selectionReport", &selectionReport);

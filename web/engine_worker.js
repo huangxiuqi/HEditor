@@ -717,6 +717,12 @@ const WRITE = {
    * 选区三个入口。两端是全局流位置（与事务里那份快照同一把尺子），不是段内偏移。
    */
   selectAll: () => mod.selectAll(),
+  // 整格选区：段号来自 hit 的 cellPara 字段（引擎的几何结论），宿主原样搬回来。
+  selectCellAtPara: (a) => mod.selectCellAtPara(a.para | 0),
+  // 三击：按点选整格。点不在表格里返回 false，宿主退回落光标。
+  //   必须留在这里（命令表）：它会重画帧，而查询那条路不重贴脏页 —— 画面要等下一次
+  //   闪烁相位才更新，那就是"点了要等一秒才选中"。
+  cellSelectAt: (a) => mod.cellSelectAt(a.x, a.y),
   setSelection: (a) => mod.setSelection(a.anchor | 0, a.focus | 0),
   clearSelection: () => mod.clearSelection(),
   // 落光标的三个入口都要无条件把相位拉回可见，与单线程宿主的 setCaretAndPresent

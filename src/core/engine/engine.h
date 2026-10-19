@@ -228,7 +228,8 @@ public:
      *
      * 引擎从第一天起就只存这一个值（见 selection_ 的注释），此前对外只露它的 focus；
      * 下面这几个入口把它按选区露出来。空选区（两端重合）就是光标 —— 所以
-     * hasSelection() 为假时 caret() 给出的就是它的位置，两者不是两套状态。
+     * hasSelection() 为假时 caret() 给出的就是它的位置。有选区时 caret() 是插入点：
+     * 文字选区在 focus 那一端，整格选区在焦点那一格的末尾。两者始终只有一份状态。
      */
     Range selection() const { return caret_.selection(); }
     /**
@@ -256,7 +257,36 @@ public:
     bool selectAll();
 
     /**
-     * 光标位置（派生）。段号 + 段内码点偏移，由 focus 投影出来 —— 不再是独立状态。
+     * 整格选区：按"段号"选它所在的那一格（渲染整格铺满，删除逐格清空）。
+     *
+     * 收段号而不是流区间：一格的身份是它占的块区间（见 CaretResolver::CellBlocks）——
+     * 空格的内容长度为 0，流区间退化成点，与下一格的第一段共用同一个流位置，分不开。
+     * 段号来自命中（hitTestPt 的 out_cell_para），因为"哪一格"是几何问题 —— 引擎不提供
+     * 按表号行号列号选格那一层：跨页拆行时行的逻辑号与画面对不上，而用户点的是画面。
+     */
+    bool selectCellAtPara(int para);
+    /**
+     * 选区是不是"单元格选区"。文字选区与它是两条独立的操作线，靠这个标记分开 ——
+     * 不靠"选中了多少"去猜（见 CaretResolver::selectionIsCell）。
+     */
+    bool selectionIsCell() const { return caret_.selectionIsCell(); }
+    /**
+     * 选区是否吸附到了格边界上（跨格拖选、单击边距带、三击）。全选为假：它按整篇删。
+     */
+    bool hasCellRange() const { return caret_.hasCellRange(); }
+
+    /**
+     * 这一段内容所在那一格的内容区间（全局流位置，左闭右开）。不在表格里返回假。
+     *
+     * 空格的内容长度是 0（两端相等），所以它同时也是"这一格有没有字"的判据。
+     * 嵌套表格取"包含这一段的最短区间" = 最内层那一格 —— 外层格把内层表的段也算进去，
+     * 按最短挑才不会被外层截走。
+     */
+    bool cellFlowRangeAt(int para, FlowPos* lo, FlowPos* hi) const;
+
+    /**
+     * 光标位置（派生）。段号 + 段内码点偏移，由光标的流位置投影出来 —— 不是独立状态。
+     * 整格选区时它是焦点那一格的末尾（插入点不跟着鼠标在格内跑）。
      */
     TextPos caret() const;
     /**
@@ -381,6 +411,7 @@ public:
     bool moveCaretVerticalAndRender(int dir, bool extend = false);
     bool selectAllAndRender();
     bool setSelectionAndRender(Range r);
+    bool selectCellAtParaAndRender(int para);
 
     /**
      * 表单控件：文档流里的区间标注，不是矩形。模型与"区间为什么是活的"见
@@ -643,6 +674,25 @@ public:
     int auditLayout();
 
     /**
+     * 表格结构自审：块与格这两份记录是否互相撑得住，返回不符项数（0 = 一致）。
+     *
+     * 为什么不并进 auditLayout：那一条比的是"增量排版与全量排版"，两边吃的是同一份
+     *   blocks_ 与 tables_，结构本身坏了它照样全绿 —— 一格连一个块都不剩时，两边都排不出
+     *   那一格的行盒，逐字段比对完全一致。而"格没有块""块没有结束标记"这类损坏恰恰是表格
+     *   编辑最典型的失败方式：后果是那一格连行盒都没有，光标点不进去，画面上只是少了几行字。
+     *
+     * 查六条：格至少一个块；格的块区间在表内且互不重叠；格里的块都有结束标记；块的
+     *   cell_path 与格给出的区间一致（两份记录互为对照）；格行列跨度不越界；表句柄在块
+     *   路径里指同一张表。
+     */
+    int auditTables() const;
+
+    /**
+     * 同上的 JSON 版，供宿主与探针取证（含各类不符的计数与首个位置）。
+     */
+    std::string auditTablesJson() const;
+
+    /**
      * 同上的 JSON 版，供宿主取证（含两侧规模、首个不符位置与两个耗时）。
      */
     std::string auditLayoutJson();
@@ -718,17 +768,26 @@ public:
     bool caretRectPt(Rect* out) const;
     /**
      * 反查：文档坐标（磅）→ (段, 偏移) + 侧别 + 行别；点落在页间空隙时返回 false。
-     * 文档坐标就是页容器里的位置：第 0 页顶边为原点。与帧怎么摆无关 —— 帧按槽号装页
-     *   （页号 mod 槽数），拿窗口坐标或槽号来反查都会整体错位。
-     * @param out_side 落点的侧别（见 caretSide）。共享边界上"前一个字段的末尾"与"后一个
-     *   字段的开头"是同一个偏移，同一个偏移上还可能压着几枚括号，光有偏移表达不了。
-     * @param out_owner "该次点击属于哪个控件"（-1 = 判不出，kInlineOffsetOuter = 在所有
-     *   控件之外）。它是侧别的投影，供宿主显示用；搬运落点请用 out_side。
-     * @param out_line_aff 落点的行别（见 caretLineAffinity）：点下一行行首时它大于 0，
-     *   落点必须带着它回去，否则光标会画到上一行的行尾。
+     * 文档坐标以第 0 页顶边为原点，与帧怎么摆无关（帧按槽号装页，拿槽号反查会整体错位）。
+     * out_side 是落点侧别（同一偏移上可能压着几枚括号），out_owner 是它的投影，只给人看。
+     * out_line_aff 是折行处的行别：点下一行行首时大于 0，不带回去会画到上一行行尾。
+     * out_cell_para：落在格子的边距带上时给出这一格的段号（否则 -1）。
+     *   边距带 = 格边框到文字左沿之间那一条：点这里选整格，点字上是文字光标。
+     *   空格没有文字可挡，整格都是边距带 —— 点空格的任何位置都选中这一格。
+     *   给段号而不是流区间：一格的身份是它占的块区间，空格的流区间退化成一个点，
+     *   与下一格的第一段共用同一个流位置（见 CaretResolver::CellBlocks）。
      */
     bool hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* out_owner = nullptr,
-                   int* out_side = nullptr, int* out_line_aff = nullptr) const;
+                   int* out_side = nullptr, int* out_line_aff = nullptr,
+                   int* out_cell_para = nullptr) const;
+
+    /**
+     * 按点选整格（三击的入口）：点在格里的任何位置都选中这一格。
+     *
+     * 单击的"整格"只发生在格左侧的边距带上（见 hitTestPt 的 out_cell_para）—— 那是一条
+     * 独立的操作线；三击则是用户明确说"我要这一格"，点字中间也算。点不在表格里返回假。
+     */
+    bool selectCellAtPt(float x_pt_doc, float y_pt_doc);
 
     const uint8_t* frame() const { return bitmap_.data(); }
     int frameWidth() const { return bitmap_.width(); }
@@ -1152,6 +1211,56 @@ private:
      * 光标在同一/不同字段间移动都不会重排（"光标移动 = 真增量"的地基）。
      */
     void relayoutIfBracketPlanChanged(int prev_plan);
+
+    /**
+     * 这一段内容所在的最内层那一格（连它所属的表一起给出）。不在表格里返回空。
+     *
+     * 与 cellFlowRangeAt 同一把尺子（最短区间 = 最内层），只是把"哪一格"也交出去 ——
+     * 跨行拖选要按行列取矩形包络，光有流区间是取不出来的。
+     */
+    const LayoutCell* layoutCellAt(int para, const LayoutTable** table_out = nullptr) const;
+
+    /**
+     * 一格的内容流区间（左闭右开）。空格子或坐标与块表对不上时返回假。
+     */
+    bool cellFlowRangeOf(const LayoutCell& c, FlowPos* lo, FlowPos* hi) const;
+
+    /**
+     * 拖选 / Shift 扩展之后重算选区粒度：两端落在两个不同的格里就是单元格选区。
+     *
+     * 为什么放在引擎而不是宿主：这是"选区盖住了什么"的判断，与表格结构有关，而宿主手里
+     * 只有命中测试的落点。放在引擎里还有一条好处 —— 拖选、Shift 加方向键、程序化扩展
+     * 走的是同一条判定，不会出现"拖行、按方向键不行"。
+     *
+     * 两端都在同一个格（或有一端不在格内）时不吸附，仍是文字选区：格内把字选到最后一个
+     * 不该整格反白 —— 那是两套操作，不是粗细两档。
+     *
+     * 选中的是两格之间的矩形（行包络 x 列包络），不是"首格首到末格末"那条流区间：
+     * 文档顺序是逐行的，按流区间取会把两端那两行里没选中的格一起反白（跨行就整行）。
+     */
+    void syncCellSelection();
+
+    /**
+     * 表格自审的分项计数（见 auditTables）。逐项分开记是为了取证：同一条判据下，
+     * "某格没有块"与"块没有结束标记"是两种完全不同的坏法。
+     */
+    struct TableAudit {
+        int cells = 0;              // 扫过的格数
+        int empty_cell = 0;         // 一个块都没有的格（这种格没有行盒，光标进不去）
+        int bad_range = 0;          // 块的区间越出块表
+        int overlap = 0;            // 两个格认领同一块（同表）
+        int block_without_mark = 0; // 格里的块没有结束标记
+        int path_mismatch = 0;      // 块的 cell_path 与格给出的区间对不上
+        int bad_span = 0;           // 行的跨度越出表尺寸
+        int blocks_in_no_cell = 0;  // 块说自己在正文，格却认领了它
+        int first_cell = -1;        // 首个出问题的格（跨表连续编号），-1 = 没有
+        int total() const {
+            return empty_cell + bad_range + overlap + block_without_mark + path_mismatch +
+                   bad_span + blocks_in_no_cell;
+        }
+    };
+
+    TableAudit auditTablesDetail() const;
 
     EngineConfig cfg_;
     FontLibrary fonts_;

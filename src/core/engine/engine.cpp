@@ -572,6 +572,7 @@ void EditorEngine::refreshViews() {
     e.block_flow = &block_flow_;
     e.block_flow_span = &block_flow_span_;
     e.block_src = &block_src_;
+    e.tables = &tables_;
     e.controls = &controls_;
     e.control_node_ids = &control_node_ids_;
     e.mode = &mode_;
@@ -748,6 +749,67 @@ void EditorEngine::projectCaret(int para, size_t offset, int side, bool extend, 
     caret_.placeCaret(para, offset, side, extend, line_aff);
     relayoutIfBracketPlanChanged(plan_before);
     caret_.placeCaret(para, offset, side, extend, line_aff);
+    // 落点换了，粒度跟着重算 —— 扩展跨过格边界就整格，回到同一格就退回文字。
+    //   定位（非扩展）不吸附：一次点击落在字上是文字光标，清空由 placeCaret 自己做。
+    if (extend) syncCellSelection();
+}
+
+/**
+ * 拖选 / Shift 扩展之后重算选区粒度（见头文件）。
+ *
+ * 用 rawSelection：整格吸附过的端点会一直停在格边界上，拿它去判"还在不在同一格"
+ * 就永远判得出来是同一格 —— 用户把鼠标拖回来时选区不会退回文字那一支。
+ */
+void EditorEngine::syncCellSelection() {
+    const Range sel = caret_.rawSelection();
+    if (sel.empty()) {
+        caret_.clearCellRange();
+        return;
+    }
+    const LayoutTable* ta = nullptr;
+    const LayoutTable* tf = nullptr;
+    const LayoutCell* ca = layoutCellAt(caret_.paraForFlow(sel.anchor), &ta);
+    const LayoutCell* cf = layoutCellAt(caret_.paraForFlow(sel.focus), &tf);
+    if (ca == nullptr || cf == nullptr || ta != tf) {
+        caret_.clearCellRange();
+        return;
+    }
+    // 同一个格：两端区间一模一样（格的区间本身就是这两个端点）。
+    if (ca == cf) {
+        caret_.clearCellRange();
+        return;
+    }
+    // 矩形包络：行取两端格覆盖的行，列取两端格覆盖的列。合并格（跨度大于一）按它盖住的
+    //   整块算 —— 跨进合并格的行或列都算选到它。
+    const int r0 = std::min(ca->row, cf->row);
+    const int r1 = std::max(ca->row + ca->row_span - 1, cf->row + cf->row_span - 1);
+    const int c0 = std::min(ca->cell, cf->cell);
+    const int c1 = std::max(ca->cell + ca->col_span - 1, cf->cell + cf->col_span - 1);
+    // 按块区间收：一格的身份是它占的段的区间，不是它的流区间 —— 空格的内容长度为 0，
+    //   流区间退化成点，与下一格的第一段用同一个流位置，按流位置挑格会挑错。
+    std::vector<CaretResolver::CellBlocks> cells;
+    FlowPos caret_flow = -1;
+    for (const LayoutCell& c : ta->cells) {
+        const int cr1 = c.row + c.row_span - 1;
+        const int cc1 = c.cell + c.col_span - 1;
+        if (cr1 < r0 || c.row > r1 || cc1 < c0 || c.cell > c1) continue;
+        if (c.block_count <= 0) continue;
+        const int last_b = c.first_block + c.block_count - 1;
+        if (c.first_block < 0 || last_b >= static_cast<int>(block_flow_.size()) ||
+            last_b >= static_cast<int>(block_flow_span_.size()))
+            continue;
+        cells.push_back(CaretResolver::CellBlocks{c.first_block, c.block_count});
+        if (&c == cf)
+            caret_flow = block_flow_[static_cast<size_t>(last_b)] +
+                         block_flow_span_[static_cast<size_t>(last_b)];
+    }
+    // 少于两格说明两端的格在矩形里对不上（表格结构刚变过），眼下按文字选区算更安全。
+    if (cells.size() < 2) {
+        caret_.clearCellRange();
+        return;
+    }
+    // 插入点钉在焦点那一格的末尾（见 setCellBlocks 的 caret_flow）。
+    caret_.setCellBlocks(std::move(cells), caret_flow);
 }
 
 void EditorEngine::setCaret(int para, size_t offset) {
@@ -823,6 +885,28 @@ bool EditorEngine::setSelection(Range r) { return caret_.setSelection(r); }
 void EditorEngine::clearSelection() { caret_.clearSelection(); }
 
 bool EditorEngine::selectAll() { return caret_.selectAll(); }
+
+/**
+ * 按段号选一格：段的身份比流区间可靠 —— 空格的内容长度为 0，流区间是一个点，
+ * 与下一格的第一段共用同一个流位置（见 CaretResolver::CellBlocks）。
+ */
+bool EditorEngine::selectCellAtPara(int para) {
+    const LayoutCell* c = layoutCellAt(para, nullptr);
+    if (c == nullptr || c->block_count <= 0) return false;
+    const int first = c->first_block;
+    const int last_b = first + c->block_count - 1;
+    if (first < 0 || last_b >= static_cast<int>(block_flow_.size()) ||
+        last_b >= static_cast<int>(block_flow_span_.size()))
+        return false;
+    // 插入点钉在这一格的末尾（整格选区的光标不跟鼠标走）。
+    const FlowPos prev_lo = block_flow_[static_cast<size_t>(first)];
+    const FlowPos caret_flow = block_flow_[static_cast<size_t>(last_b)] +
+                              block_flow_span_[static_cast<size_t>(last_b)];
+    // 离散动作（单击边距带、三击）要把两端也落到这一格上：拖选那条路不能这么做
+    //   （锚点要留着，往回拖才退得回文字选区），所以吸附由这里做而不是 setCellBlocks。
+    if (!caret_.setSelection(Range{prev_lo, caret_flow})) return false;
+    return caret_.setCellBlocks({CaretResolver::CellBlocks{first, c->block_count}}, caret_flow);
+}
 
 EditCheck EditorEngine::policyAt(TextPos p) const { return edit_.policyAt(p); }
 
@@ -1279,6 +1363,72 @@ bool EditorEngine::setSelectionAndRender(Range r) {
     return true;
 }
 
+bool EditorEngine::selectCellAtParaAndRender(int para) {
+    if (!selectCellAtPara(para)) return false;
+    repaint();
+    return true;
+}
+
+/**
+ * 整格内容的流区间。嵌套表格取最短的那一格 = 最内层（见头文件）。
+ */
+bool EditorEngine::cellFlowRangeAt(int para, FlowPos* lo, FlowPos* hi) const {
+    const LayoutCell* c = layoutCellAt(para, nullptr);
+    if (c == nullptr) return false;
+    return cellFlowRangeOf(*c, lo, hi);
+}
+
+/**
+ * 最内层那一格：同一段可能落在好几格里（外层格包着内层表），取块数最少的那个。
+ */
+const LayoutCell* EditorEngine::layoutCellAt(int para, const LayoutTable** table_out) const {
+    const LayoutCell* best = nullptr;
+    const LayoutTable* best_table = nullptr;
+    for (const LayoutTable& t : tables_) {
+        for (const LayoutCell& c : t.cells) {
+            if (c.block_count <= 0) continue;
+            if (para < c.first_block || para >= c.first_block + c.block_count) continue;
+            if (best == nullptr || c.block_count < best->block_count) {
+                best = &c;
+                best_table = &t;
+            }
+        }
+    }
+    if (table_out != nullptr) *table_out = best_table;
+    return best;
+}
+
+/**
+ * 一格的内容区间：首块起点到末块末端。
+ */
+bool EditorEngine::cellFlowRangeOf(const LayoutCell& c, FlowPos* lo, FlowPos* hi) const {
+    if (c.block_count <= 0) return false;
+    const int first = c.first_block;
+    const int last_b = first + c.block_count - 1;
+    if (first < 0 || last_b >= static_cast<int>(block_flow_.size()) ||
+        last_b >= static_cast<int>(block_flow_span_.size()))
+        return false;
+    const FlowPos a = block_flow_[static_cast<size_t>(first)];
+    const FlowPos b = block_flow_[static_cast<size_t>(last_b)] +
+                      block_flow_span_[static_cast<size_t>(last_b)];
+    if (b <= a) return false;
+    if (lo) *lo = a;
+    if (hi) *hi = b;
+    return true;
+}
+
+/**
+ * 按点选整格（三击走这条）：点在格里的任何位置都算，不限于左侧的边距带。
+ *
+ * 与 hitTestPt 的 out_cell 分开：那一对是"单击落在边距带上"这个手势的判据（点字上不该
+ * 变成整格），三击则明确是"我要这一格"，点在哪都成立。
+ */
+bool EditorEngine::selectCellAtPt(float x_pt_doc, float y_pt_doc) {
+    TextPos p{};
+    if (!hitTestPt(x_pt_doc, y_pt_doc, &p)) return false;
+    return selectCellAtPara(p.para);
+}
+
 /**
  * 命中测试：几何的反向半边 —— 由落点反查 (段, 偏移) + 侧别 + 归属控件。
  *
@@ -1287,10 +1437,11 @@ bool EditorEngine::setSelectionAndRender(Range r) {
  */
 
 bool EditorEngine::hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* out_owner,
-                             int* out_side, int* out_line_aff) const {
+                             int* out_side, int* out_line_aff, int* out_cell_para) const {
     if (out_owner) *out_owner = -1;
     if (out_side) *out_side = 0;
     if (out_line_aff) *out_line_aff = 0;
+    if (out_cell_para) *out_cell_para = -1;
     if (!out || layout_.lines.empty()) return false;
 
     const float page_w = cfg_.page.width_pt;
@@ -1393,6 +1544,24 @@ bool EditorEngine::hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* 
     //   表象就是"点了没反应"。归属照实返回，编辑侧自己会按策略拒绝。
     if (out_owner) *out_owner = owner;
     *out = p;
+
+    // 格子的边距带：落在格内、且在文字左沿之前的那一条。点在这里是"选整格"，
+    //   点在同一行的字上仍是文字光标 —— 两套操作靠这一条几何分开，而不是靠"选了多少"。
+    //   宽度的两头取格的外框与文字左沿：外框比内容区多一层内边距，按内容区算会让
+    //   贴着格线的那一窄条点不出整格。
+    //   空格也只给左边这一窄条：整格都算边距带的话，点空格就成了"选整格"，
+    //   连光标都放不进去（用户要的是"点一下落光标，拖或三击才选格"）。
+    if (out_cell_para != nullptr && best->cell_box_hi_pt > best->cell_box_lo_pt &&
+        best->cell_bottom_pt > best->cell_top_pt) {
+        float text_start = best->inline_origin_pt;
+        for (const LineCluster& lc : best->clusters) {
+            if (!lc.placeholder) {
+                text_start += lc.inline_pt;
+                break;
+            }
+        }
+        if (ip >= best->cell_box_lo_pt && ip < text_start) *out_cell_para = best->paragraph;
+    }
     return true;
 }
 
