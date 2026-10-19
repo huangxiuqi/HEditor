@@ -161,6 +161,7 @@ add_library(heditor_core STATIC
   src/core/doc/invariants.cpp
   src/core/doc/compile.cpp
   src/core/doc/format_map.cpp
+  src/core/doc/atom_map.cpp
   src/core/doc/char_format.cpp
   src/core/doc/para_format.cpp
   src/core/doc/style.cpp
@@ -186,6 +187,7 @@ add_library(heditor_core STATIC
   src/core/rev/rev.cpp
   src/core/rev/project.cpp
   src/core/rev/serialize.cpp
+  src/core/rev/from_tree.cpp
   src/core/text/font.cpp
   src/core/text/font_source.cpp
   src/core/text/shaper.cpp

@@ -71,6 +71,24 @@ struct TableGrid {
 int headerRowCount(const NodeTree& tree, NodeId table);
 
 /**
+ * 网格推导的输入：一行里的各个格子。只有身份与跨度，没有内容。
+ *
+ * 模型层与修订层都要推网格，两边的节点类型不同，能共用的就是这一层 —— 网格规则（重叠、
+ * 空洞、跨出表尾）只写一份，两套实现不会各自演化。
+ */
+struct GridCellSpan {
+    NodeId id = kInvalidNodeId;
+    int row_span = 1;
+    int col_span = 1;
+};
+
+/**
+ * 由每行的跨度序列推出网格。这是网格规则的唯一实现。
+ */
+bool buildGridFromSpans(const std::vector<std::vector<GridCellSpan>>& rows, TableGrid* out,
+                        std::string* error);
+
+/**
  * 从跨度推导网格。失败时给出原因（重叠、空洞、合并超出表格末尾）。
  *
  * 列数由第一行自己的跨度之和定（第一行没有东西跨进来，所以它的覆盖范围就是列数），之后

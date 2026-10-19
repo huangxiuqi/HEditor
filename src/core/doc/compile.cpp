@@ -1,5 +1,7 @@
 #include "core/doc/compile.h"
 
+#include "core/doc/atom_map.h"
+
 #include <algorithm>
 
 #include "core/doc/document.h"
@@ -10,37 +12,6 @@
 namespace heditor {
 
 namespace {
-
-/**
- * 行高规则：模型层的枚举映射到引擎侧那一份。两边的值域一一对应，但引擎不认模型枚举
- * （它也不认 Length，只吃磅值），所以这一层是唯一映射点。
- */
-RowHeightRule mapHeightRule(HeightRule r) {
-    switch (r) {
-        case HeightRule::Auto:
-            return RowHeightRule::Auto;
-        case HeightRule::AtLeast:
-            return RowHeightRule::AtLeast;
-        case HeightRule::Exact:
-            return RowHeightRule::Exact;
-    }
-    return RowHeightRule::Auto;
-}
-
-/**
- * 单元格垂直对齐。原因同上：同名会撞（两个类型都在 heditor 里）。
- */
-BoxVAlign mapVAlign(CellVAlign a) {
-    switch (a) {
-        case CellVAlign::Top:
-            return BoxVAlign::Top;
-        case CellVAlign::Center:
-            return BoxVAlign::Center;
-        case CellVAlign::Bottom:
-            return BoxVAlign::Bottom;
-    }
-    return BoxVAlign::Top;
-}
 
 /**
  * 一段待解析的文本：码点 + 它在模型里的格式来源。
@@ -149,10 +120,9 @@ private:
         b.cell_path = path_;
         if (mark != nullptr) {
             // 段落格式的三层解析与换算在 format_map 里，投影层用的是同一份。
-            applyParaFormatToBlock(sheet_, mark->styleRef, mark->para, mark->id, &b,
-                                   [this](const CompileDiagnostic& d) {
-                                       out_.diagnostics.push_back(d);
-                                   });
+            applyParaFormatToBlock(
+                sheet_, mark->styleRef, mark->para, mark->id, &b,
+                [this](const CompileDiagnostic& d) { out_.diagnostics.push_back(d); });
         }
         // 本段的行内对象表：进出控件边界时就地攒下（见 walk 里控件那一段），落段时一起带走。
         //   它与 cp_text 共用同一个码点坐标，同一次落段，于是不可能出现"文本进了这一段、
@@ -206,28 +176,23 @@ private:
             if (o.kind != InlineObjectKind::Atom) continue;
             const Node* atom = tree_.find(static_cast<NodeId>(o.owner));
             if (atom == nullptr) continue;
-            resolveAtomBox(*atom, b, &o);
+            const bool is_img = (atom->kind == NodeKind::Image);
+            AtomGeometry g;
+            g.is_image = is_img;
+            g.width = is_img ? atom->image.width : atom->formula.width;
+            g.height = is_img ? atom->image.height : atom->formula.height;
+            g.px_w = is_img ? atom->image.px_w : 0;
+            g.px_h = is_img ? atom->image.px_h : 0;
+            g.dpi = is_img ? atom->image.dpi : 96;
+            g.expr_cp = is_img ? 0 : utf8ToCodepoints(atom->formula.expr).size();
+            const AtomBox box = resolveAtomBox(g, b.size_pt);
+            if (box.width_relative) note(atom->kind, atom->id, atomRelativeDiag(true));
+            if (box.height_relative) note(atom->kind, atom->id, atomRelativeDiag(false));
+            o.w_pt = box.w_pt;
+            o.h_pt = box.h_pt;
         }
         out_.blocks.push_back(std::move(b));
         out_.sources.push_back(BlockSource{first_id, mark_id});
-    }
-
-    /**
-     * 绝对长度 → 磅。Auto 与非绝对都不是编译期能换算的，返回 false 由调用方兜。
-     *
-     * 非绝对（百分比 / em / 字符位）是这一层真的做不到的事，所以显式记一条诊断 ——
-     * 静默按 Auto 处理会让"作者给了 5 厘米宽"变成"按原始像素算"，而画面看着又是合理的。
-     * Auto 是作者声明"由排版方决定"，不记。
-     */
-    bool absLenToPt(const Length& len, const Node& n, const char* field, float* out) {
-        if (len.kind == LengthKind::Auto) return false;
-        if (len.kind != LengthKind::Abs) {
-            note(n.kind, n.id,
-                 std::string("原子的") + field + "是相对长度，编译期算不出参照值，已按原始尺寸折算");
-            return false;
-        }
-        *out = static_cast<float>(emuToPt(len.abs_emu));
-        return true;
     }
 
     /**
@@ -245,21 +210,12 @@ private:
      * "作者给了 3 个字宽"变成零宽列，而画面看着又是合理的。
      */
     WidthSpec toWidthSpec(const Length& len, const Node& n, const char* field) {
-        switch (len.kind) {
-            case LengthKind::Auto:
-                return WidthSpec{};
-            case LengthKind::Abs:
-                return WidthSpec::makeAbs(static_cast<float>(emuToPt(len.abs_emu)));
-            case LengthKind::Percent:
-                return WidthSpec::makePercent(static_cast<float>(len.num) /
-                                              static_cast<float>(len.den));
-            case LengthKind::Em:
-            case LengthKind::Chars:
-                break;
+        const WidthMapping m = mapWidth(len);
+        if (m.unresolved) {
+            note(n.kind, n.id,
+                 std::string("表格的") + field + "是相对长度，编译期算不出参照值，已按自动处理");
         }
-        note(n.kind, n.id,
-             std::string("表格的") + field + "是相对长度，编译期算不出参照值，已按自动处理");
-        return WidthSpec{};
+        return m.spec;
     }
 
     /**
@@ -318,7 +274,7 @@ private:
             lr.can_split_by_page = c->row.can_split_by_page;
             lr.is_header = c->row.is_header;
             lr.page_break_before = c->row.page_break_before;
-            lr.height_rule = mapHeightRule(c->row.height_rule);
+            lr.height_rule = mapRowHeightRule(c->row.height_rule);
             const bool has_value = (c->row.height.kind != LengthKind::Auto);
             if (lr.height_rule == RowHeightRule::Auto) {
                 if (has_value) {
@@ -362,7 +318,7 @@ private:
                 lc.cell = cell_no;
                 lc.row_span = cell->cell.row_span;
                 lc.col_span = cell->cell.col_span;
-                lc.v_align = mapVAlign(cell->cell.v_align);
+                lc.v_align = mapCellVAlign(cell->cell.v_align);
                 lc.first_block = static_cast<int>(out_.blocks.size());
                 const size_t ci = out_.tables[ti].cells.size();
                 out_.tables[ti].cells.push_back(lc);
@@ -375,76 +331,6 @@ private:
             }
             ++row_no;
         }
-    }
-
-    /**
-     * 原子的内容指纹：绘制要看的那些字节（图片是资源标识，公式是表达式与后端）。
-     *
-     * 尺寸不进它 —— 尺寸改了行盒几何跟着改，行指纹自己就变了。它管的是几何看不见的那一类：
-     * 换了一张同样大的图、改了公式表达式。
-     */
-    uint64_t atomContentHash(const Node& n) {
-        uint64_t h = kFnvBasis;
-        h = fnvMix(h, static_cast<uint64_t>(n.kind == NodeKind::Image ? 1 : 2));
-        if (n.kind == NodeKind::Image) {
-            h = fnvMixCStr(h, n.image.resource_id.c_str());
-        } else {
-            h = fnvMixCStr(h, n.formula.expr.c_str());
-            h = fnvMix(h, static_cast<uint64_t>(n.formula.backend));
-        }
-        return h;
-    }
-
-    /**
-     * 定出原子盒子的显示尺寸（磅）。
-     *
-     * 优先用作者给的绝对显示尺寸；只给一边时按原始宽高比推另一边 —— 原图比例是"给了尺寸却
-     * 不给另一边"唯一说得通的解释。两边都没有时按原始像素与 DPI 折算（96 DPI 是行业惯例，
-     * 见 image_spec.h）。三条都走不通（图片既没有像素也没有显示尺寸，或者给的是编译期算不出
-     * 的相对长度）时用默认框并记诊断 —— 排版必须有一份几何，而诊断让调用方知道这不是作者
-     * 要的结果。
-     */
-    void resolveAtomBox(const Node& n, const BlockSpec& b, InlineObject* o) {
-        const bool is_img = (n.kind == NodeKind::Image);
-        const Length& lw = is_img ? n.image.width : n.formula.width;
-        const Length& lh = is_img ? n.image.height : n.formula.height;
-        const float dpi =
-            (is_img && n.image.dpi > 0) ? static_cast<float>(n.image.dpi) : 96.0f;
-        const float px_w = is_img ? static_cast<float>(n.image.px_w) : 0.0f;
-        const float px_h = is_img ? static_cast<float>(n.image.px_h) : 0.0f;
-        const bool has_px = (px_w > 0.0f && px_h > 0.0f);
-        const float nat_w = has_px ? px_w * 72.0f / dpi : 0.0f;
-        const float nat_h = has_px ? px_h * 72.0f / dpi : 0.0f;
-
-        // 默认框：图片给一个 4:3 的空框（尺寸本该来自像素或作者，走到这儿说明两者都缺），
-        //   公式按表达式的码点数估宽、高取一行。估的是框，不是公式的排版结果 ——
-        //   本期不做伪渲染（见 formula_spec.h）。
-        float def_w = 0.0f;
-        float def_h = 0.0f;
-        if (is_img) {
-            def_w = 4.0f * b.size_pt * 4.0f;
-            def_h = 4.0f * b.size_pt * 3.0f;
-        } else {
-            const size_t n_cp = utf8ToCodepoints(n.formula.expr).size();
-            def_w = 2.0f * b.size_pt + static_cast<float>(n_cp) * 0.5f * b.size_pt;
-            def_w = std::min(std::max(def_w, 4.0f * b.size_pt), 40.0f * b.size_pt);
-            def_h = b.size_pt * 2.0f;
-        }
-
-        float w = 0.0f;
-        float h = 0.0f;
-        const bool w_abs = absLenToPt(lw, n, "显示宽度", &w);
-        const bool h_abs = absLenToPt(lh, n, "显示高度", &h);
-        if (w_abs && !h_abs) {
-            h = has_px ? w * (nat_h / nat_w) : def_h;
-        } else if (!w_abs && h_abs) {
-            w = has_px ? h * (nat_w / nat_h) : def_w;
-        } else if (!w_abs && !h_abs) {
-            w = has_px ? nat_w : def_w;
-            h = has_px ? nat_h : def_h;
-        }
-        o->w_pt = (w > 0.0f) ? w : def_w;
-        o->h_pt = (h > 0.0f) ? h : def_h;
     }
 
     /**
@@ -521,7 +407,8 @@ private:
                 o.kind = InlineObjectKind::Atom;
                 o.owner = static_cast<int>(n->id);  // 绘制要靠它回树里取"框里写什么"
                 o.atom = (n->kind == NodeKind::Image) ? InlineAtom::Image : InlineAtom::Formula;
-                o.content_hash = atomContentHash(*n);
+                o.content_hash = (n->kind == NodeKind::Image) ? atomContentHash(n->image)
+                                                              : atomContentHash(n->formula);
                 obj_.push_back(o);
             }
             return;
@@ -546,8 +433,7 @@ private:
                                 n->kind == NodeKind::HeaderFooter);
         if (!supported && !flagged) {
             out_.diagnostics.push_back(CompileDiagnostic{
-                n->kind, n->id,
-                std::string("尚未进入编译的元素：") + nodeKindName(n->kind) + " 未编译"});
+                n->kind, n->id, std::string("尚未进入排版输入的元素：") + nodeKindName(n->kind)});
         }
         // 容器照常下钻，内部文本按流顺序并入当前段 —— 产物因此是"能编的那部分"，
         // 由 diagnostics 把不完整标出来（ok() 变假）。

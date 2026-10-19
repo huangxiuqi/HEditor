@@ -74,6 +74,11 @@ struct ControlSpan {
 struct Projection {
     std::vector<ProjectedBlock> blocks;
     std::vector<ControlSpan> controls;
+    /**
+     * 表格结构（出现顺序：外层在前，嵌套的内层在后）。与编译产物同一种类型：排版层认的是
+     * 它，不是修订层的节点。
+     */
+    std::vector<LayoutTable> tables;
     std::vector<CompileDiagnostic> diagnostics;
     int style_version = 0;
 

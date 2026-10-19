@@ -304,6 +304,93 @@ bool readFloat(const ordered_json& j, const char* key, float* out) {
     return parseFloatText(j[key].get<std::string>(), out);
 }
 
+ordered_json tableJson(const TableSpec& t) {
+    ordered_json j = ordered_json::object();
+    if (!t.columns.empty()) {
+        ordered_json cols = ordered_json::array();
+        for (const TableColumn& c : t.columns) {
+            ordered_json col = ordered_json::object();
+            if (!c.field_ref.empty()) col["fr"] = c.field_ref;
+            if (!c.title.empty()) col["ti"] = c.title;
+            if (!c.data_type.empty()) col["dt"] = c.data_type;
+            if (!c.editor_style.empty()) col["es"] = c.editor_style;
+            if (c.width != Length{}) col["w"] = printLength(c.width);
+            if (c.align != Align::Start) col["al"] = alignName(c.align);
+            cols.push_back(std::move(col));
+        }
+        j["cols"] = std::move(cols);
+    }
+    if (!t.grid_cols.empty()) {
+        ordered_json grid = ordered_json::array();
+        for (const Length& l : t.grid_cols) grid.push_back(printLength(l));
+        j["grid"] = std::move(grid);
+    }
+    if (t.width != Length{}) j["w"] = printLength(t.width);
+    if (t.align != Align::Start) j["al"] = alignName(t.align);
+    return j;
+}
+
+ordered_json rowJson(const RowSpec& r) {
+    ordered_json j = ordered_json::object();
+    if (!r.can_split_by_page) j["sp"] = false;
+    if (r.is_header) j["hd"] = true;
+    if (r.page_break_before) j["pb"] = true;
+    if (!(r.height == Length{})) j["ht"] = printLength(r.height);
+    if (r.height_rule != HeightRule::Auto) j["hr"] = heightRuleName(r.height_rule);
+    return j;
+}
+
+ordered_json cellJson(const CellSpec& c) {
+    ordered_json j = ordered_json::array({c.row_span, c.col_span});
+    if (c.v_align != CellVAlign::Top) j.push_back(cellVAlignName(c.v_align));
+    return j;
+}
+
+bool readCell(const ordered_json& j, const char* key, CellSpec* out) {
+    if (!j.contains(key)) return true;
+    if (!j[key].is_array() || j[key].size() < 2 || j[key].size() > 3) return false;
+    for (int i = 0; i < 2; ++i) {
+        if (!j[key][static_cast<std::size_t>(i)].is_number_integer()) return false;
+    }
+    out->row_span = j[key][0].get<int>();
+    out->col_span = j[key][1].get<int>();
+    if (j[key].size() == 3) {
+        if (!j[key][2].is_string()) return false;
+        if (!cellVAlignFromName(j[key][2].get<std::string>(), &out->v_align)) return false;
+    }
+    return true;
+}
+
+ordered_json fieldJson(const FieldSpec& f) {
+    ordered_json j = ordered_json::object();
+    if (f.kind != FieldKind::PageNumber) j["kind"] = fieldKindName(f.kind);
+    if (!f.name.empty()) j["name"] = f.name;
+    if (!f.cache.empty()) j["cache"] = f.cache;
+    return j;
+}
+
+ordered_json imageJson(const ImageSpec& im) {
+    ordered_json j = ordered_json::object();
+    if (!im.resource_id.empty()) j["res"] = im.resource_id;
+    if (im.px_w != 0) j["pw"] = im.px_w;
+    if (im.px_h != 0) j["ph"] = im.px_h;
+    if (im.dpi != 96) j["dpi"] = im.dpi;
+    if (im.width != Length{}) j["w"] = printLength(im.width);
+    if (im.height != Length{}) j["h"] = printLength(im.height);
+    if (im.anchor != ImageAnchor::Inline) j["anchor"] = imageAnchorName(im.anchor);
+    if (im.wrap != ImageWrap::None) j["wrap"] = imageWrapName(im.wrap);
+    return j;
+}
+
+ordered_json formulaJson(const FormulaSpec& f) {
+    ordered_json j = ordered_json::object();
+    if (!f.expr.empty()) j["e"] = f.expr;
+    if (f.backend != FormulaBackend::Placeholder) j["be"] = formulaBackendName(f.backend);
+    if (f.width != Length{}) j["w"] = printLength(f.width);
+    if (f.height != Length{}) j["h"] = printLength(f.height);
+    return j;
+}
+
 bool readPara(const ordered_json& j, const char* key, ParaFormatPatch* out) {
     if (!j.contains(key)) return true;
     if (!j[key].is_object()) return false;
@@ -511,6 +598,90 @@ bool readControl(const Context& ctx, const ordered_json& j, const char* key, Con
         if (!readInt(c, "vr", &index)) return ctx.fail("control.vr 不是下标");
         if (!ctx.stringAt(index, &out->validateRef)) return false;
     }
+    return true;
+}
+
+bool readTable(const ordered_json& j, const char* key, TableSpec* out) {
+    if (!j.contains(key)) return true;
+    if (!j[key].is_object()) return false;
+    const ordered_json& t = j[key];
+    if (t.contains("cols")) {
+        if (!t["cols"].is_array()) return false;
+        for (const ordered_json& cj : t["cols"]) {
+            if (!cj.is_object()) return false;
+            TableColumn col;
+            if (!readString(cj, "fr", &col.field_ref)) return false;
+            if (!readString(cj, "ti", &col.title)) return false;
+            if (!readString(cj, "dt", &col.data_type)) return false;
+            if (!readString(cj, "es", &col.editor_style)) return false;
+            if (cj.contains("w")) {
+                Length len;
+                if (!readLength(cj, "w", &len)) return false;
+                col.width = len;
+            }
+            if (!readEnum(cj, "al", alignFromName, &col.align)) return false;
+            out->columns.push_back(std::move(col));
+        }
+    }
+    if (t.contains("grid")) {
+        if (!t["grid"].is_array()) return false;
+        for (const ordered_json& item : t["grid"]) {
+            if (!item.is_string()) return false;
+            Length len;
+            if (!parseLength(item.get<std::string>(), &len)) return false;
+            out->grid_cols.push_back(len);
+        }
+    }
+    if (!readLength(t, "w", &out->width)) return false;
+    if (!readEnum(t, "al", alignFromName, &out->align)) return false;
+    return true;
+}
+
+bool readRow(const ordered_json& j, const char* key, RowSpec* out) {
+    if (!j.contains(key)) return true;
+    if (!j[key].is_object()) return false;
+    const ordered_json& r = j[key];
+    if (!readBool(r, "sp", &out->can_split_by_page)) return false;
+    if (!readBool(r, "hd", &out->is_header)) return false;
+    if (!readBool(r, "pb", &out->page_break_before)) return false;
+    if (!readLength(r, "ht", &out->height)) return false;
+    if (!readEnum(r, "hr", heightRuleFromName, &out->height_rule)) return false;
+    return true;
+}
+
+bool readField(const ordered_json& j, const char* key, FieldSpec* out) {
+    if (!j.contains(key)) return true;
+    if (!j[key].is_object()) return false;
+    const ordered_json& f = j[key];
+    if (!readEnum(f, "kind", fieldKindFromName, &out->kind)) return false;
+    if (!readString(f, "name", &out->name)) return false;
+    if (!readString(f, "cache", &out->cache)) return false;
+    return true;
+}
+
+bool readImage(const ordered_json& j, const char* key, ImageSpec* out) {
+    if (!j.contains(key)) return true;
+    if (!j[key].is_object()) return false;
+    const ordered_json& im = j[key];
+    if (!readString(im, "res", &out->resource_id)) return false;
+    if (!readInt(im, "pw", &out->px_w)) return false;
+    if (!readInt(im, "ph", &out->px_h)) return false;
+    if (!readInt(im, "dpi", &out->dpi)) return false;
+    if (!readLength(im, "w", &out->width)) return false;
+    if (!readLength(im, "h", &out->height)) return false;
+    if (!readEnum(im, "anchor", imageAnchorFromName, &out->anchor)) return false;
+    if (!readEnum(im, "wrap", imageWrapFromName, &out->wrap)) return false;
+    return true;
+}
+
+bool readFormula(const ordered_json& j, const char* key, FormulaSpec* out) {
+    if (!j.contains(key)) return true;
+    if (!j[key].is_object()) return false;
+    const ordered_json& f = j[key];
+    if (!readString(f, "e", &out->expr)) return false;
+    if (!readEnum(f, "be", formulaBackendFromName, &out->backend)) return false;
+    if (!readLength(f, "w", &out->width)) return false;
+    if (!readLength(f, "h", &out->height)) return false;
     return true;
 }
 

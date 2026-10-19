@@ -4,7 +4,8 @@
  * 判据只有一条：一次编辑之后，旧值仍然可用、且没有被改动。做到这一点之后，"改了什么"
  * 就不再需要事后推导 —— 两份修订的哈希一比，不同的子树就是损伤，而且精确到节点。
  *
- * 切片范围：文字、段落标记、内容控件。表格、域、图片、节属性留给后续切片。
+ * 切片范围：文字、段落标记、内容控件、表格（表 / 行 / 格）、图片、公式、域。节属性与
+ * 页眉页脚留给后续切片。
  * 收窄不是留占位 —— 这一层表示不了的形状根本构造不出来，makeTextDoc 只产出前两类，
  * 控件只能经 insertControl 建出来。加新节点种类时 payload 的 variant 多一支，
  * 哈希用 std::visit 且不写默认分支，漏写一支直接编不过，不会静默算出一个不完整的哈希。
@@ -26,6 +27,9 @@
 
 #include "core/doc/char_format.h"
 #include "core/doc/control_spec.h"
+#include "core/doc/field_spec.h"
+#include "core/doc/formula_spec.h"
+#include "core/doc/image_spec.h"
 #include "core/doc/node.h"
 #include "core/doc/para_format.h"
 
@@ -52,6 +56,16 @@ struct Node;
 using Ref = std::shared_ptr<const Node>;
 
 /**
+ * 节点载荷：种类决定哪一支（文本带字符属性、段落标记带段落覆盖、控件带控件记录、表格三种
+ * 节点各带自己的记录、图片与公式各带自己的记录、域带域记录，其余不带载荷）。
+ *
+ * 一支一种记录，不做"表格载荷里再套三种"：种类与载荷的对应是一条查表就能写出来的规则，
+ * 而多一层包装会让 hashNode 与落盘都要再分一次支。
+ */
+using Payload = std::variant<std::monostate, RunPayload, MarkPayload, ControlSpec, TableSpec,
+                             RowSpec, CellSpec, ImageSpec, FormulaSpec, FieldSpec>;
+
+/**
  * 一个不可变节点。构造之后不再改动，编辑一律走"换一条路径"（见 replaceNode）。
  *
  * hidden 是作者设定的默认可见性（只在呈现态生效）：它在哈希里，因为呈现态下它决定的
@@ -66,7 +80,7 @@ struct Node {
     NodeKind kind = NodeKind::TextRun;
     bool hidden = false;
     int paras = 0;
-    std::variant<std::monostate, RunPayload, MarkPayload, ControlSpec> payload;
+    Payload payload;
     std::vector<Ref> children;
     uint64_t hash_lo = 0;
     uint64_t hash_hi = 0;
@@ -125,6 +139,15 @@ private:
 };
 
 /**
+ * 一个节点自身的哈希：种类、隐藏标记、载荷，不含孩子。
+ *
+ * 完整节点哈希是"自身哈希 + 孩子哈希"，所以两者之间不需要另一份定义。损伤判定要区分
+ * "容器自己的属性变了"与"只是里面某处变了"：前者要把它覆盖的块整段算进损伤（列宽变了，
+ * 同一张表每一行的行高都可能变），后者只算变的那一块。
+ */
+void hashSelf(Hasher& h, const Node& node);
+
+/**
  * 正文那一节的子序列（本切片不分节）。没有正文时返回 nullptr。
  */
 const std::vector<Ref>* bodyOf(const Doc& doc);
@@ -140,9 +163,8 @@ const Node* findNode(const Doc& doc, NodeId id);
  * 派生量不从外面填，是不给"第二个可写真相"留口子：节点若能带着别人算好的哈希建出来，
  * 就多了一处能对不上的地方。反序列化与"从模型导出修订"用它。
  */
-Ref makeNode(NodeId id, NodeKind kind,
-             std::variant<std::monostate, RunPayload, MarkPayload, ControlSpec> payload,
-             std::vector<Ref> children, bool hidden = false);
+Ref makeNode(NodeId id, NodeKind kind, Payload payload, std::vector<Ref> children,
+             bool hidden = false);
 
 /**
  * 用一棵树与分配器水位装出一份修订；全文哈希取自根。
@@ -151,6 +173,19 @@ Ref makeNode(NodeId id, NodeKind kind,
  * 身份撞上 —— 那种撞车是静默的：改一个节点会连带改到另一个同号节点。
  */
 Doc adopt(Ref root, NodeId next_id);
+
+/**
+ * 从模型树导出一份修订：节点号原样带过来（身份跨模型同源），载荷按种类一一对应，
+ * hidden 与分配器水位一起带。
+ *
+ * 这是迁移路径，也是等价判据的桥：project(fromTree(tree)) 与 compileDocument(tree)
+ * 逐字段相同，才能说两条路是同一件事。
+ *
+ * 表示不了的形状直接拒绝、并说明原因，不做"能搬多少搬多少"：搬一半的结果是一份看起来
+ * 完整的修订 —— 它与模型不是同一份文档，而调用方没有别的办法知道。本切片拒绝多节
+ * （节的记录还没进载荷）与不认识的根。
+ */
+bool fromTree(const NodeTree& tree, Doc* out, std::string* error);
 
 /**
  * 用若干段纯文本建一份修订。空段落被保留：它由一个段落标记单独表示。

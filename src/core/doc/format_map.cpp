@@ -60,4 +60,48 @@ void applyCharFormatToRun(const CharFormat& cf, NodeId node, FormatRun* run,
     }
 }
 
+WidthMapping mapWidth(const Length& len) {
+    WidthMapping out;
+    switch (len.kind) {
+        case LengthKind::Auto:
+            return out;
+        case LengthKind::Abs:
+            out.spec = WidthSpec::makeAbs(static_cast<float>(emuToPt(len.abs_emu)));
+            return out;
+        case LengthKind::Percent:
+            out.spec =
+                WidthSpec::makePercent(static_cast<float>(len.num) / static_cast<float>(len.den));
+            return out;
+        case LengthKind::Em:
+        case LengthKind::Chars:
+            break;
+    }
+    out.unresolved = true;
+    return out;
+}
+
+RowHeightRule mapRowHeightRule(HeightRule rule) {
+    switch (rule) {
+        case HeightRule::Auto:
+            return RowHeightRule::Auto;
+        case HeightRule::AtLeast:
+            return RowHeightRule::AtLeast;
+        case HeightRule::Exact:
+            return RowHeightRule::Exact;
+    }
+    return RowHeightRule::Auto;
+}
+
+BoxVAlign mapCellVAlign(CellVAlign align) {
+    switch (align) {
+        case CellVAlign::Top:
+            return BoxVAlign::Top;
+        case CellVAlign::Center:
+            return BoxVAlign::Center;
+        case CellVAlign::Bottom:
+            return BoxVAlign::Bottom;
+    }
+    return BoxVAlign::Top;
+}
+
 }  // namespace heditor

@@ -4,7 +4,10 @@
 #include <unordered_set>
 #include <utility>
 
+#include "core/doc/atom_map.h"
 #include "core/doc/format_map.h"
+#include "core/doc/length.h"
+#include "core/doc/table.h"
 
 namespace heditor::rev {
 
@@ -35,6 +38,26 @@ public:
     }
 
 private:
+    /**
+     * 一个节点自身（不含孩子）的哈希。容器几何进块哈希与损伤判定都用它。
+     */
+    static std::pair<uint64_t, uint64_t> selfOf(const Ref& n) {
+        Hasher h;
+        hashSelf(h, *n);
+        return {h.lo(), h.hi()};
+    }
+
+    /**
+     * 进入一个"影响孩子怎么排"的容器（表格、行、格）。它的记录进这一层往里每个块的哈希：
+     * 列宽与跨度变了，块里的字一个都没动，但块要重排 —— 只比内容会让排版缓存命中旧结果。
+     */
+    void pushContainer(const Ref& n) {
+        const std::pair<uint64_t, uint64_t> h = selfOf(n);
+        containers_.push_back(h);
+    }
+
+    void popContainer() { containers_.pop_back(); }
+
     /**
      * 当前段已经累积了多少个码点 —— 行内对象的锚点就是它。run 按流顺序攒在 runs_ 里
      * （控件内部的文字也在其中），所以这个数与落段时逐段拼进去的结果一致。
@@ -83,6 +106,159 @@ private:
         out_.diagnostics.push_back(CompileDiagnostic{kind, node, detail});
     }
 
+    /**
+     * 进入一张表：填结构表里与内容无关的那一半（尺寸、列、行属性、列宽）。
+     *
+     * 网格由跨度推（规则只有 buildGridFromSpans 一份，与模型层同一实现），推不出来时记诊断、
+     * 列数按第一行的跨度之和给出：内容不能因此丢，但 ok() 已经为假。
+     */
+    void beginTable(const Ref& t) {
+        const TableSpec& ts = std::get<TableSpec>(t->payload);
+        LayoutTable lt;
+        lt.handle = static_cast<uint64_t>(t->id);
+        const WidthMapping w = mapWidth(ts.width);
+        if (w.unresolved) {
+            note(NodeKind::Table, t->id, "表格的宽度是相对长度，投影期算不出参照值，已按自动处理");
+        }
+        lt.width = w.spec;
+        switch (ts.align) {
+            case Align::Start:
+                lt.align = TableHAlign::Start;
+                break;
+            case Align::Center:
+                lt.align = TableHAlign::Center;
+                break;
+            case Align::End:
+                lt.align = TableHAlign::End;
+                break;
+        }
+
+        std::vector<const Ref*> rows;
+        for (const Ref& c : t->children) {
+            if (c->kind != NodeKind::TableRow) {
+                note(NodeKind::Table, t->id,
+                     std::string("表格的直接孩子里有") + nodeKindName(c->kind) + "，不是行");
+                continue;
+            }
+            rows.push_back(&c);
+        }
+        lt.rows = static_cast<int>(rows.size());
+
+        std::vector<std::vector<GridCellSpan>> spans;
+        spans.reserve(rows.size());
+        for (const Ref* row : rows) {
+            std::vector<GridCellSpan> line;
+            for (const Ref& cell : (*row)->children) {
+                if (cell->kind != NodeKind::TableCell) {
+                    note(NodeKind::TableRow, (*row)->id,
+                         std::string("行的直接孩子里有") + nodeKindName(cell->kind) +
+                             "，不是单元格");
+                    continue;
+                }
+                const CellSpec& cs = std::get<CellSpec>(cell->payload);
+                line.push_back(GridCellSpan{cell->id, cs.row_span, cs.col_span});
+            }
+            spans.push_back(std::move(line));
+        }
+        TableGrid grid;
+        std::string why;
+        if (buildGridFromSpans(spans, &grid, &why)) {
+            lt.cols = grid.cols;
+        } else {
+            note(NodeKind::Table, t->id, "表格结构不成立：" + why);
+            lt.cols = 0;
+            if (!spans.empty()) {
+                for (const GridCellSpan& c : spans.front()) lt.cols += c.col_span;
+            }
+        }
+        lt.col_widths.assign(static_cast<size_t>(lt.cols), WidthSpec{});
+        for (int i = 0; i < lt.cols && i < static_cast<int>(ts.grid_cols.size()); ++i) {
+            const WidthMapping cw = mapWidth(ts.grid_cols[static_cast<size_t>(i)]);
+            if (cw.unresolved) {
+                note(NodeKind::Table, t->id,
+                     "表格的列宽是相对长度，投影期算不出参照值，已按自动处理");
+            }
+            lt.col_widths[static_cast<size_t>(i)] = cw.spec;
+        }
+
+        lt.row_specs.reserve(rows.size());
+        for (const Ref* row : rows) {
+            const RowSpec& rs = std::get<RowSpec>((*row)->payload);
+            LayoutRow lr;
+            lr.can_split_by_page = rs.can_split_by_page;
+            lr.is_header = rs.is_header;
+            lr.page_break_before = rs.page_break_before;
+            lr.height_rule = mapRowHeightRule(rs.height_rule);
+            const bool has_value = (rs.height.kind != LengthKind::Auto);
+            if (lr.height_rule == RowHeightRule::Auto) {
+                if (has_value) {
+                    note(NodeKind::TableRow, (*row)->id,
+                         "行高的规则是自动，但作者给了值（值不被解释）");
+                }
+            } else if (!has_value) {
+                note(NodeKind::TableRow, (*row)->id, "行高规则要求一个值，但给的是自动");
+            } else if (rs.height.kind == LengthKind::Abs) {
+                lr.height_pt = static_cast<float>(emuToPt(rs.height.abs_emu));
+            } else {
+                note(NodeKind::TableRow, (*row)->id, "行高必须是绝对长度");
+            }
+            lt.row_specs.push_back(lr);
+        }
+        out_.tables.push_back(std::move(lt));
+    }
+
+    /**
+     * 一张表：按行按格遍历，把格里的内容投影成块。
+     *
+     * 每一格是独立的段落上下文：进格前把格外的残留落掉，格结束时落掉格内最后一段 ——
+     * 格内结尾常常没有段落标记，不落它这一格就会与下一格并成一段。
+     */
+    void walkTable(const Ref& t) {
+        beginTable(t);
+        const int ti = static_cast<int>(out_.tables.size()) - 1;
+        flushIfPending();
+        pushContainer(t);
+        int row_no = 0;
+        for (const Ref& row : t->children) {
+            if (row->kind != NodeKind::TableRow) continue;
+            pushContainer(row);
+            int cell_no = 0;
+            for (const Ref& cell : row->children) {
+                if (cell->kind != NodeKind::TableCell) continue;
+                path_.push_back(CellSlot{static_cast<uint64_t>(t->id), row_no, cell_no});
+                flushIfPending();
+                const CellSpec& cs = std::get<CellSpec>(cell->payload);
+                LayoutCell lc;
+                lc.row = row_no;
+                lc.cell = cell_no;
+                lc.row_span = cs.row_span;
+                lc.col_span = cs.col_span;
+                lc.v_align = mapCellVAlign(cs.v_align);
+                lc.first_block = static_cast<int>(out_.blocks.size());
+                const int ci = static_cast<int>(out_.tables[ti].cells.size());
+                out_.tables[ti].cells.push_back(lc);
+                pushContainer(cell);
+                for (const Ref& c : cell->children) walk(c);
+                flushIfPending();
+                popContainer();
+                out_.tables[ti].cells[static_cast<size_t>(ci)].block_count =
+                    static_cast<int>(out_.blocks.size()) - lc.first_block;
+                path_.pop_back();
+                ++cell_no;
+            }
+            popContainer();
+            ++row_no;
+        }
+        popContainer();
+    }
+
+    /**
+     * 落掉还没结束的一段（表格是块级元素，进入与离开它的时候都不该有残留）。
+     */
+    void flushIfPending() {
+        if (!runs_.empty() || !objects_.empty()) flush(nullptr);
+    }
+
     void walk(const Ref& n) {
         // 与 FlowIndex 同一口径：呈现态下隐藏的子树整棵不在流里，也就不在内容里。
         if (vp_.vis == FlowVisibility::Display && n->hidden) return;
@@ -94,6 +270,35 @@ private:
         }
         if (n->kind == NodeKind::ParagraphMark) {
             flush(n);
+            return;
+        }
+        // 行内原子：图片与公式各占一个位置、各是一个不可断的盒子。盒子几何要等块级字号
+        // （公式的默认框按字号估），所以这里只记下"这里有一枚原子"，落段时再定。
+        if (n->kind == NodeKind::Image || n->kind == NodeKind::Formula) {
+            noteFirst(n->id);
+            const bool is_img = (n->kind == NodeKind::Image);
+            const ImageSpec& img = is_img ? std::get<ImageSpec>(n->payload) : ImageSpec{};
+            const FormulaSpec& fml = is_img ? FormulaSpec{} : std::get<FormulaSpec>(n->payload);
+            InlineObject o;
+            o.cp = static_cast<uint32_t>(cpCount());
+            o.kind = InlineObjectKind::Atom;
+            o.owner = static_cast<int>(n->id);  // 绘制要靠它回节点取"框里写什么"
+            o.atom = is_img ? InlineAtom::Image : InlineAtom::Formula;
+            o.content_hash = is_img ? atomContentHash(img) : atomContentHash(fml);
+            AtomGeometry g;
+            g.is_image = is_img;
+            g.width = is_img ? img.width : fml.width;
+            g.height = is_img ? img.height : fml.height;
+            g.px_w = img.px_w;
+            g.px_h = img.px_h;
+            g.dpi = img.dpi;
+            g.expr_cp = is_img ? 0 : utf8ToCodepoints(fml.expr).size();
+            emitObject(o, n);
+            atoms_.emplace_back(objects_.size() - 1, g);
+            return;
+        }
+        if (n->kind == NodeKind::Table) {
+            walkTable(n);
             return;
         }
         // 内容控件：两个边界进内容，其余一切照旧下钻。进它写一枚起始边界、离开时写一枚结束
@@ -124,8 +329,7 @@ private:
         // 其余元素一律写成诊断：静默放过比"还没做"更危险（调用方会以为拿到了完整结果）。
         // 容器仍照常下钻，内部文本按流顺序并入当前段。
         out_.diagnostics.push_back(CompileDiagnostic{
-            n->kind, n->id,
-            std::string("尚未进入投影的元素：") + nodeKindName(n->kind) + " 未投影"});
+            n->kind, n->id, std::string("尚未进入排版输入的元素：") + nodeKindName(n->kind)});
         for (const Ref& c : n->children) walk(c);
     }
 
@@ -154,10 +358,38 @@ private:
         // 行内对象在产出时就喂进了 obj_hash_（连同产生它的节点哈希），这里把它并进来。
         h.u64(obj_hash_.lo());
         h.u64(obj_hash_.hi());
+        // 容器几何：外层表格的列宽、行高、跨度决定这一块排成什么形状，所以它们进块哈希 ——
+        // 少了这一段，"只改了列宽"会让每一块都命中排版缓存，损伤报得再对也没用。
+        h.u64(containers_.size());
+        for (const std::pair<uint64_t, uint64_t>& c : containers_) {
+            h.u64(c.first);
+            h.u64(c.second);
+        }
+        // 格路径：同一张表里两格内容相同、列宽不同，排版结果不一样，所以位置也进键。
+        h.u64(path_.size());
+        for (const CellSlot& slot : path_) {
+            h.u64(slot.table);
+            h.i64(slot.row);
+            h.i64(slot.cell);
+        }
         pb.hash = BlockHash{h.lo(), h.hi()};
         obj_hash_ = Hasher{};
 
         if (full_) {
+            // 原子的盒子在这里定：公式的默认框按段落字号估，而字号是段落属性 —— 走到原子
+            // 那一刻还看不到它。emit 那一刻只记下"这里有一枚原子"。
+            for (const std::pair<std::size_t, AtomGeometry>& a : atoms_) {
+                const AtomBox box = resolveAtomBox(a.second, pb.spec.size_pt);
+                if (box.width_relative) {
+                    note(NodeKind::Image, objects_[a.first].owner, atomRelativeDiag(true));
+                }
+                if (box.height_relative) {
+                    note(NodeKind::Image, objects_[a.first].owner, atomRelativeDiag(false));
+                }
+                objects_[a.first].w_pt = box.w_pt;
+                objects_[a.first].h_pt = box.h_pt;
+            }
+            pb.spec.cell_path = path_;
             pb.spec.objects = std::move(objects_);
             if (mark != nullptr) {
                 const MarkPayload& mp = std::get<MarkPayload>(mark->payload);
@@ -193,6 +425,7 @@ private:
         }
 
         objects_.clear();
+        atoms_.clear();
         runs_.clear();
         out_.blocks.push_back(std::move(pb));
     }
@@ -201,7 +434,13 @@ private:
     ViewParams vp_;
     bool full_;
     std::vector<Ref> runs_;              // 当前段里按流顺序攒下的 run
-    std::vector<InlineObject> objects_;  // 当前段里攒下的行内对象（控件边界）
+    std::vector<InlineObject> objects_;  // 当前段里攒下的行内对象（控件边界与原子）
+    /**
+     * 当前段里待定几何的原子：对象下标 + 它需要的输入。落段时才定得下来（要块级字号）。
+     */
+    std::vector<std::pair<std::size_t, AtomGeometry>> atoms_;
+    std::vector<CellSlot> path_;                             // 当前所在的格（空 = 正文）
+    std::vector<std::pair<uint64_t, uint64_t>> containers_;  // 外层容器的自身哈希
     NodeId cur_first_ = kInvalidNodeId;
     Hasher obj_hash_;
     Projection out_;
@@ -258,7 +497,15 @@ public:
             off += b->paras;
             return;
         }
-        // 两边都不含段落标记 ⇒ 这点差异落在某一块的内部，那一段就是它的归属。
+        // 容器自己的记录变了（列宽、行高、跨度、控件外观）：它覆盖的块整段算损伤。
+        // 这一条不能省 —— 改列宽时每一块的内容哈希都没变，只比内容会报"没有损伤"，
+        // 而整张表的行高与分页都可能跟着变。
+        if (selfDiffers(a, b)) {
+            mark(off, b->paras > 0 ? b->paras : 1);
+            off += b->paras;
+            return;
+        }
+        // 自身没变、两边都不含段落标记 ⇒ 这点差异落在某一块的内部，那一段就是它的归属。
         if (a->paras == 0 && b->paras == 0) {
             mark(off, 1);
             return;
@@ -297,6 +544,14 @@ public:
     int scanned = 0;
 
 private:
+    static bool selfDiffers(const Ref& a, const Ref& b) {
+        Hasher ha;
+        Hasher hb;
+        hashSelf(ha, *a);
+        hashSelf(hb, *b);
+        return ha.lo() != hb.lo() || ha.hi() != hb.hi();
+    }
+
     /**
      * 孩子表真的增删了才走这里。只在这一层建身份集合，不整篇建。
      *

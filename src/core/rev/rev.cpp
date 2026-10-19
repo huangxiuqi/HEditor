@@ -95,6 +95,75 @@ void hashAppearance(Hasher& h, const Appearance& a) {
 }
 
 /**
+ * 表格三类记录的哈希：表格自己是列定义与列宽，行是三个开关与行高，格是两个跨度与对齐。
+ *
+ * 这些是容器几何：它们不改任何一块的文字，却决定块排成什么样。
+ * 投影把外层的这几份哈希并进每个块的哈希，损伤定位按"自身哈希变了就整段算损伤"处理 ——
+ * 两处合起来才等于"容器几何变了，它下面所有块都要重排"。
+ */
+void hashTableColumn(Hasher& h, const TableColumn& c) {
+    h.str(c.field_ref);
+    h.str(c.title);
+    h.str(c.data_type);
+    h.str(c.editor_style);
+    hashLength(h, c.width);
+    h.u8(static_cast<uint8_t>(c.align));
+}
+
+void hashTableSpec(Hasher& h, const TableSpec& t) {
+    h.u64(t.columns.size());
+    for (const TableColumn& c : t.columns) hashTableColumn(h, c);
+    h.u64(t.grid_cols.size());
+    for (const Length& l : t.grid_cols) hashLength(h, l);
+    hashLength(h, t.width);
+    h.u8(static_cast<uint8_t>(t.align));
+}
+
+void hashRowSpec(Hasher& h, const RowSpec& r) {
+    h.u8(r.can_split_by_page ? 1 : 0);
+    h.u8(r.is_header ? 1 : 0);
+    h.u8(r.page_break_before ? 1 : 0);
+    hashLength(h, r.height);
+    h.u8(static_cast<uint8_t>(r.height_rule));
+}
+
+void hashCellSpec(Hasher& h, const CellSpec& c) {
+    h.i64(c.row_span);
+    h.i64(c.col_span);
+    h.u8(static_cast<uint8_t>(c.v_align));
+}
+
+/**
+ * 图片、公式与域记录的哈希。
+ *
+ * 域的 cache 不在里面：它是求值结果，不是作者内容。把它算进内容哈希，会让"同一份文档求值
+ * 前后"哈希不同 —— 撤销回到旧修订时对不上，而内容明明没变。它照样落盘（重新打开时先显示
+ * 已有的值），往返判据对域另做一份逐字段比对。
+ */
+void hashImageSpec(Hasher& h, const ImageSpec& im) {
+    h.str(im.resource_id);
+    h.i64(im.px_w);
+    h.i64(im.px_h);
+    h.i64(im.dpi);
+    hashLength(h, im.width);
+    hashLength(h, im.height);
+    h.u8(static_cast<uint8_t>(im.anchor));
+    h.u8(static_cast<uint8_t>(im.wrap));
+}
+
+void hashFormulaSpec(Hasher& h, const FormulaSpec& f) {
+    h.str(f.expr);
+    h.u8(static_cast<uint8_t>(f.backend));
+    hashLength(h, f.width);
+    hashLength(h, f.height);
+}
+
+void hashFieldSpec(Hasher& h, const FieldSpec& f) {
+    h.u8(static_cast<uint8_t>(f.kind));
+    h.str(f.name);
+}
+
+/**
  * 控件记录的哈希。
  *
  * ControlSpec 的相等是默认生成的（加字段自动比），哈希不会自动跟着变 —— 漏一个字段的表现是
@@ -117,39 +186,15 @@ void hashControlSpec(Hasher& h, const ControlSpec& c) {
 }
 
 /**
- * 节点的哈希：种类、隐藏标记、载荷、子节点的哈希。身份不进哈希（见文件头的说明）。
- *
- * 载荷用 std::visit 且不写默认分支 —— 加一种节点就多一支，漏写直接编不过。
+ * 节点的完整哈希：自身哈希加孩子哈希。身份不进哈希（见文件头的说明）。
  */
 void hashNode(Hasher& h, const Node& n) {
-    h.u8(static_cast<uint8_t>(n.kind));
-    h.u8(n.hidden ? 1 : 0);
+    hashSelf(h, n);
     h.u64(n.children.size());
     for (const Ref& c : n.children) {
         h.u64(c->hash_lo);
         h.u64(c->hash_hi);
     }
-    std::visit(
-        [&h](const auto& p) {
-            using T = std::decay_t<decltype(p)>;
-            if constexpr (std::is_same_v<T, std::monostate>) {
-                h.u64(0);
-            } else if constexpr (std::is_same_v<T, RunPayload>) {
-                h.u64(1);
-                h.u64(p.text.size());
-                for (uint32_t cp : p.text) h.u64(cp);
-                hashCharFormat(h, p.marks);
-                h.str(p.style);
-            } else if constexpr (std::is_same_v<T, MarkPayload>) {
-                h.u64(2);
-                hashParaPatch(h, p.para);
-                h.str(p.style);
-            } else {
-                h.u64(3);
-                hashControlSpec(h, p);
-            }
-        },
-        n.payload);
 }
 
 Ref withChildren(const Ref& node, std::vector<Ref> children) {
@@ -200,6 +245,16 @@ int flowLen(const Ref& n) {
     int sum = 0;
     for (const Ref& c : n->children) sum += flowLen(c);
     return sum;
+}
+
+/**
+ * 块级容器：它的内容自成段落序列，不从属于外面那一段。
+ *
+ * 内容控件不是（它是行内的，文字与边界都落在当前段里）；表格与它的行、格是 —— 格里的段落
+ * 与表外的段落是两段，中间没有"同一段"这回事。
+ */
+bool isBlockContainer(NodeKind kind) {
+    return kind == NodeKind::Table || kind == NodeKind::TableRow || kind == NodeKind::TableCell;
 }
 
 /**
@@ -255,6 +310,21 @@ bool locate(const std::vector<Ref>& kids, int para, int cp, std::vector<int>* pa
                 return true;
             }
             off += len;
+            continue;
+        }
+        // 块级容器（表格与它的行、格）自成段落边界：它们不从属于当前段，所以没有"在该段 cp 处
+        // 进入它"这种落点 —— 只有"这一段在它里面"，此时段号减掉容器的起点，码点本来就是段内
+        // 坐标。少了这一支，格里的段落会按"上一格累积了多少码点"去算偏移，永远错位。
+        if (isBlockContainer(n->kind)) {
+            const int marks = n->paras;
+            if (p <= para && para < p + marks) {
+                path->push_back(i);
+                const bool found = locate(n->children, para - p, cp, path, out);
+                if (!found) path->pop_back();
+                return found;
+            }
+            p += marks;
+            off = 0;
             continue;
         }
         const int len = flowLen(n);
@@ -404,9 +474,54 @@ void Hasher::str(const std::string& s) {
     for (unsigned char c : s) u64(c);
 }
 
-Ref makeNode(NodeId id, NodeKind kind,
-             std::variant<std::monostate, RunPayload, MarkPayload, ControlSpec> payload,
-             std::vector<Ref> children, bool hidden) {
+void hashSelf(Hasher& h, const Node& n) {
+    h.u8(static_cast<uint8_t>(n.kind));
+    h.u8(n.hidden ? 1 : 0);
+    // 载荷用 std::visit 且最后一支带 static_assert：加一种载荷时裸 else 会把它静默按控件
+    // 记录哈希，而这里要的是编不过。
+    std::visit(
+        [&h](const auto& p) {
+            using T = std::decay_t<decltype(p)>;
+            if constexpr (std::is_same_v<T, std::monostate>) {
+                h.u64(0);
+            } else if constexpr (std::is_same_v<T, RunPayload>) {
+                h.u64(1);
+                h.u64(p.text.size());
+                for (uint32_t cp : p.text) h.u64(cp);
+                hashCharFormat(h, p.marks);
+                h.str(p.style);
+            } else if constexpr (std::is_same_v<T, MarkPayload>) {
+                h.u64(2);
+                hashParaPatch(h, p.para);
+                h.str(p.style);
+            } else if constexpr (std::is_same_v<T, ControlSpec>) {
+                h.u64(3);
+                hashControlSpec(h, p);
+            } else if constexpr (std::is_same_v<T, TableSpec>) {
+                h.u64(4);
+                hashTableSpec(h, p);
+            } else if constexpr (std::is_same_v<T, RowSpec>) {
+                h.u64(5);
+                hashRowSpec(h, p);
+            } else if constexpr (std::is_same_v<T, CellSpec>) {
+                h.u64(6);
+                hashCellSpec(h, p);
+            } else if constexpr (std::is_same_v<T, ImageSpec>) {
+                h.u64(7);
+                hashImageSpec(h, p);
+            } else if constexpr (std::is_same_v<T, FormulaSpec>) {
+                h.u64(8);
+                hashFormulaSpec(h, p);
+            } else {
+                static_assert(std::is_same_v<T, FieldSpec>, "新增载荷要在这里加一支");
+                h.u64(9);
+                hashFieldSpec(h, p);
+            }
+        },
+        n.payload);
+}
+
+Ref makeNode(NodeId id, NodeKind kind, Payload payload, std::vector<Ref> children, bool hidden) {
     auto node = std::make_shared<Node>();
     node->id = id;
     node->kind = kind;

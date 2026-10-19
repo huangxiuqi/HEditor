@@ -86,6 +86,10 @@ std::string blockDiff(const BlockSpec& a, const BlockSpec& b) {
         if (a.objects[i].cp != b.objects[i].cp) return "objects.cp";
         if (a.objects[i].kind != b.objects[i].kind) return "objects.kind";
         if (a.objects[i].read_only != b.objects[i].read_only) return "objects.read_only";
+        if (a.objects[i].w_pt != b.objects[i].w_pt) return "objects.w_pt";
+        if (a.objects[i].h_pt != b.objects[i].h_pt) return "objects.h_pt";
+        if (a.objects[i].atom != b.objects[i].atom) return "objects.atom";
+        if (a.objects[i].content_hash != b.objects[i].content_hash) return "objects.content_hash";
     }
     return "（只有 owner 不同）";
 }
@@ -384,6 +388,318 @@ bool sameTree(const rev::Ref& a, const rev::Ref& b) {
         if (!sameTree(a->children[i], b->children[i])) return false;
     }
     return true;
+}
+
+/**
+ * 表格夹具：两行三列的布局，第一格纵向合并两行，表前后各一段正文。
+ *
+ * 两个参数是容器几何的可变项：换一套值重建一份，节点号与每个格里的内容都逐个相同，只有
+ * 表格/行/格的记录变了。这正是"容器几何变了、块的内容一个都没动"的形状。
+ *
+ * 段落号：0 是表前，1 到 5 依次是五个格（A0 / B0 / C0 / A1 / B1），6 是表后。
+ */
+rev::Doc makeTableDoc(const Length& col0, const Length& row0_height) {
+    int id = 3;  // 1 是 Document，2 是 Section
+    auto run = [&id](const std::u32string& t) {
+        return rev::makeNode(id++, NodeKind::TextRun, rev::RunPayload{cpsOf(t), CharFormat{}, {}},
+                             {});
+    };
+    auto mark = [&id]() {
+        return rev::makeNode(id++, NodeKind::ParagraphMark, rev::MarkPayload{}, {});
+    };
+    auto cell = [&](const std::u32string& t, const CellSpec& spec) {
+        return rev::makeNode(id++, NodeKind::TableCell, spec, {run(t), mark()});
+    };
+
+    TableSpec ts;
+    ts.columns.push_back(TableColumn{"patient.id", "住院号", "text", "input",
+                                     Length::abs(ptToEmu(12.0)), Align::Center});
+    ts.grid_cols = {col0, Length::abs(ptToEmu(40.0)), Length::percent(1, 2)};
+    ts.width = Length::percent(1, 1);
+    ts.align = Align::Center;
+
+    RowSpec r0;
+    r0.is_header = true;
+    r0.can_split_by_page = false;
+    r0.page_break_before = true;
+    r0.height = row0_height;
+    r0.height_rule = HeightRule::AtLeast;
+
+    CellSpec merged;
+    merged.row_span = 2;
+    merged.v_align = CellVAlign::Center;
+
+    const rev::Ref row0 =
+        rev::makeNode(id++, NodeKind::TableRow, r0,
+                      {cell(U"A0", merged), cell(U"B0", CellSpec{}), cell(U"C0", CellSpec{})});
+    const rev::Ref row1 = rev::makeNode(id++, NodeKind::TableRow, RowSpec{},
+                                        {cell(U"A1", CellSpec{}), cell(U"B1", CellSpec{})});
+    const rev::Ref table = rev::makeNode(id++, NodeKind::Table, ts, {row0, row1});
+    const rev::Ref section = rev::makeNode(2, NodeKind::Section, {},
+                                           {run(U"表前"), mark(), table, run(U"表后"), mark()});
+    return rev::adopt(rev::makeNode(1, NodeKind::Document, {}, {section}), id);
+}
+
+/**
+ * 与 makeTableDoc 逐字段相同的模型层文档。两条路（编译与投影）的产物品比对它。
+ */
+NodeTree makeTableTree(const Length& col0, const Length& row0_height) {
+    NodeTree tree;
+    const NodeId sec = tree.firstSectionId();
+    tree.setText(tree.appendChild(sec, NodeKind::TextRun), cpsOf(U"表前"));
+    tree.appendChild(sec, NodeKind::ParagraphMark);
+
+    const NodeId table = tree.appendChild(sec, NodeKind::Table);
+    Node* tn = tree.find(table);
+    tn->table.columns.push_back(TableColumn{"patient.id", "住院号", "text", "input",
+                                            Length::abs(ptToEmu(12.0)), Align::Center});
+    tn->table.grid_cols = {col0, Length::abs(ptToEmu(40.0)), Length::percent(1, 2)};
+    tn->table.width = Length::percent(1, 1);
+    tn->table.align = Align::Center;
+
+    auto add_row = [&](const RowSpec& rs) {
+        const NodeId row = tree.appendChild(table, NodeKind::TableRow);
+        tree.find(row)->row = rs;
+        return row;
+    };
+    auto add_cell = [&](NodeId row, const std::u32string& t, const CellSpec& cs) {
+        const NodeId c = tree.appendChild(row, NodeKind::TableCell);
+        tree.find(c)->cell = cs;
+        tree.setText(tree.appendChild(c, NodeKind::TextRun), cpsOf(t));
+        tree.appendChild(c, NodeKind::ParagraphMark);
+    };
+
+    RowSpec r0;
+    r0.is_header = true;
+    r0.can_split_by_page = false;
+    r0.page_break_before = true;
+    r0.height = row0_height;
+    r0.height_rule = HeightRule::AtLeast;
+    CellSpec merged;
+    merged.row_span = 2;
+    merged.v_align = CellVAlign::Center;
+
+    const NodeId row0 = add_row(r0);
+    add_cell(row0, U"A0", merged);
+    add_cell(row0, U"B0", CellSpec{});
+    add_cell(row0, U"C0", CellSpec{});
+    const NodeId row1 = add_row(RowSpec{});
+    add_cell(row1, U"A1", CellSpec{});
+    add_cell(row1, U"B1", CellSpec{});
+
+    tree.setText(tree.appendChild(sec, NodeKind::TextRun), cpsOf(U"表后"));
+    tree.appendChild(sec, NodeKind::ParagraphMark);
+    return tree;
+}
+
+/**
+ * 两套模型的节点号不同，格路径里的表格句柄没法直接比 —— 比对前把它归零。
+ */
+BlockSpec withoutTableHandle(BlockSpec b) {
+    for (CellSlot& slot : b.cell_path) slot.table = 0;
+    return b;
+}
+
+bool sameWidth(const WidthSpec& a, const WidthSpec& b) {
+    return a.kind == b.kind && a.pt == b.pt && a.ratio == b.ratio;
+}
+
+/**
+ * 两张表的结构是不是同一份（句柄归一后逐字段比）。
+ */
+bool sameTableShape(const LayoutTable& a, const LayoutTable& b) {
+    if (!sameWidth(a.width, b.width) || a.align != b.align || a.rows != b.rows ||
+        a.cols != b.cols) {
+        return false;
+    }
+    if (a.col_widths.size() != b.col_widths.size()) return false;
+    for (size_t i = 0; i < a.col_widths.size(); ++i) {
+        if (!sameWidth(a.col_widths[i], b.col_widths[i])) return false;
+    }
+    if (a.row_specs.size() != b.row_specs.size()) return false;
+    for (size_t i = 0; i < a.row_specs.size(); ++i) {
+        const LayoutRow& x = a.row_specs[i];
+        const LayoutRow& y = b.row_specs[i];
+        if (x.can_split_by_page != y.can_split_by_page || x.is_header != y.is_header ||
+            x.page_break_before != y.page_break_before || x.height_rule != y.height_rule ||
+            x.height_pt != y.height_pt) {
+            return false;
+        }
+    }
+    if (a.cells.size() != b.cells.size()) return false;
+    for (size_t i = 0; i < a.cells.size(); ++i) {
+        const LayoutCell& x = a.cells[i];
+        const LayoutCell& y = b.cells[i];
+        if (x.row != y.row || x.cell != y.cell || x.row_span != y.row_span ||
+            x.col_span != y.col_span || x.v_align != y.v_align || x.first_block != y.first_block ||
+            x.block_count != y.block_count) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
+ * 原子夹具：六段，把盒子几何的四条岔路与一枚公式、一个域都走一遍。
+ *
+ * 段落 0：文字 + 图片（只有像素）+ 文字
+ * 段落 1：图片（只给绝对宽）
+ * 段落 2：图片（只给绝对高，有像素 → 按原图比例推宽）
+ * 段落 3：图片（宽是百分比 → 相对长度，按原始尺寸折算并记诊断）
+ * 段落 4：公式（两边都 Auto → 按表达式估框）
+ * 段落 5：文字 + 域（文档属性，带缓存值）
+ *
+ * cache 单独一个参数：它是求值结果，不进内容哈希，判据要能构造出"只有它不同"的两份。
+ */
+NodeTree makeAtomTree(const std::string& cache) {
+    NodeTree tree;
+    const NodeId sec = tree.firstSectionId();
+    auto text = [&](const std::u32string& t) {
+        tree.setText(tree.appendChild(sec, NodeKind::TextRun), cpsOf(t));
+    };
+    auto end = [&]() { tree.appendChild(sec, NodeKind::ParagraphMark); };
+    auto image = [&](const ImageSpec& spec) {
+        const NodeId id = tree.appendChild(sec, NodeKind::Image);
+        tree.find(id)->image = spec;
+        return id;
+    };
+    auto formula = [&](const FormulaSpec& spec) {
+        const NodeId id = tree.appendChild(sec, NodeKind::Formula);
+        tree.find(id)->formula = spec;
+        return id;
+    };
+
+    text(U"图");
+    ImageSpec px_only;
+    px_only.resource_id = "res/a.png";
+    px_only.px_w = 200;
+    px_only.px_h = 100;
+    image(px_only);
+    text(U"后");
+    end();
+
+    ImageSpec width_only;
+    width_only.resource_id = "res/b.png";
+    width_only.width = Length::abs(ptToEmu(30.0));
+    image(width_only);
+    end();
+
+    ImageSpec height_only;
+    height_only.resource_id = "res/c.png";
+    height_only.px_w = 100;
+    height_only.px_h = 50;
+    height_only.height = Length::abs(ptToEmu(20.0));
+    image(height_only);
+    end();
+
+    ImageSpec pct;
+    pct.resource_id = "res/d.png";
+    pct.px_w = 100;
+    pct.px_h = 100;
+    pct.width = Length::percent(1, 2);
+    image(pct);
+    end();
+
+    FormulaSpec f;
+    f.expr = "x^2";
+    formula(f);
+    end();
+
+    text(U"值");
+    FieldSpec field;
+    field.kind = FieldKind::DocProperty;
+    field.name = "patient.name";
+    field.cache = cache;
+    const NodeId fid = tree.appendChild(sec, NodeKind::Field);
+    tree.find(fid)->field = field;
+    end();
+    return tree;
+}
+
+/**
+ * 两条路的诊断是不是同一份（种类、节点、文本，顺序也算）。
+ *
+ * 只比"都有诊断"是不够的：诊断是这层唯一能说明"某段内容没进产物"的通道，少一条就是
+ * 静默丢内容。
+ */
+bool sameDiags(const std::vector<CompileDiagnostic>& a, const std::vector<CompileDiagnostic>& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (a[i].kind != b[i].kind || a[i].node != b[i].node || a[i].detail != b[i].detail) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
+ * 嵌套表格夹具：外表格里两格，第一格里先是文字 "A"，再是一张两格的内表格。
+ *
+ * 段落号：0 是"前"，1 是 "A"，2 与 3 是内表格两格，4 是 "B"，5 是"后"。
+ * 结构与 makeAtomTree 同一条路子：模型树建一次，fromTree 负责搬成修订。
+ */
+NodeTree makeNestedTableTree(const Length& inner_col0) {
+    NodeTree tree;
+    const NodeId sec = tree.firstSectionId();
+    auto text = [&](NodeId parent, const std::u32string& t) {
+        tree.setText(tree.appendChild(parent, NodeKind::TextRun), cpsOf(t));
+    };
+    auto end = [&](NodeId parent) { tree.appendChild(parent, NodeKind::ParagraphMark); };
+    auto cell = [&](NodeId row, const std::u32string& t) {
+        const NodeId c = tree.appendChild(row, NodeKind::TableCell);
+        text(c, t);
+        end(c);
+        return c;
+    };
+
+    text(sec, U"前");
+    end(sec);
+
+    const NodeId outer = tree.appendChild(sec, NodeKind::Table);
+    Node* otn = tree.find(outer);
+    otn->table.grid_cols = {Length::abs(ptToEmu(50.0)), Length::abs(ptToEmu(50.0))};
+    otn->table.width = Length::percent(1, 1);
+
+    const NodeId row0 = tree.appendChild(outer, NodeKind::TableRow);
+    const NodeId cell0 = tree.appendChild(row0, NodeKind::TableCell);
+    text(cell0, U"A");
+    end(cell0);
+
+    const NodeId inner = tree.appendChild(cell0, NodeKind::Table);
+    Node* itn = tree.find(inner);
+    itn->table.grid_cols = {inner_col0, Length::abs(ptToEmu(20.0))};
+    itn->table.width = Length::percent(1, 1);
+    const NodeId irow = tree.appendChild(inner, NodeKind::TableRow);
+    cell(irow, U"i1");
+    cell(irow, U"i2");
+
+    cell(row0, U"B");
+
+    text(sec, U"后");
+    end(sec);
+    return tree;
+}
+
+/**
+ * 跨段控件夹具：控件从第一段中间开始、到第二段中间结束 —— 段落标记在控件内部。
+ *
+ * 这是"控件是一个容器，段落是它的孩子"那条语义的最小形状，也是投影与编译最容易分叉的
+ * 一处：一对边界要落在两个不同的块上，两块的文本各自都要把控件里的文字算进自己的段。
+ */
+NodeTree makeSpanningControlTree() {
+    NodeTree tree;
+    const NodeId sec = tree.firstSectionId();
+    tree.setText(tree.appendChild(sec, NodeKind::TextRun), cpsOf(U"甲"));
+    const NodeId cc = tree.appendChild(sec, NodeKind::ContentControl);
+    tree.find(cc)->control.key = "k";
+    tree.find(cc)->control.controlType = "text";
+    tree.setText(tree.appendChild(cc, NodeKind::TextRun), cpsOf(U"乙"));
+    tree.appendChild(cc, NodeKind::ParagraphMark);
+    tree.setText(tree.appendChild(cc, NodeKind::TextRun), cpsOf(U"丙"));
+    tree.appendChild(sec, NodeKind::ParagraphMark);
+    tree.setText(tree.appendChild(sec, NodeKind::TextRun), cpsOf(U"丁"));
+    tree.appendChild(sec, NodeKind::ParagraphMark);
+    return tree;
 }
 
 }  // namespace
@@ -1083,6 +1399,402 @@ int main() {
                             rev::makeNode(3, NodeKind::TextRun,
                                           rev::RunPayload{cpsOf(U"b"), CharFormat{}, {}}, {})})});
         expectTrue(!rev::serialize(rev::adopt(dup, 9)).ok, "节点号重复的修订：写不出来");
+    }
+
+    std::printf("\n[14] 表格：投影与编译逐字段相同，容器几何进块哈希\n");
+    {
+        const Length col0 = Length::abs(ptToEmu(30.0));
+        const Length row_h = Length::abs(ptToEmu(20.0));
+        const rev::Doc doc = makeTableDoc(col0, row_h);
+        NodeTree tree = makeTableTree(col0, row_h);
+        const StyleSheet sheet;
+
+        expectTrue(rev::paraCount(doc) == 7, "七段：表前、五个格、表后");
+
+        const rev::Projection pr = rev::project(doc, sheet);
+        const CompileResult cr = compileDocument(tree, FlowVisibility::Design, sheet);
+        expectTrue(pr.ok() && cr.ok(), "两条路都没有诊断");
+        expectTrue(pr.blocks.size() == cr.blocks.size(),
+                   "块数相同（投影 " + std::to_string(pr.blocks.size()) + " / 编译 " +
+                       std::to_string(cr.blocks.size()) + "）");
+
+        bool same = pr.blocks.size() == cr.blocks.size();
+        size_t bad = 0;
+        for (size_t i = 0; same && i < pr.blocks.size(); ++i) {
+            if (!sameBlock(withoutTableHandle(pr.blocks[i].spec),
+                           withoutTableHandle(cr.blocks[i]))) {
+                same = false;
+                bad = i;
+            }
+        }
+        expectTrue(same, "每一块与编译产物逐字段相同（第一处不同：第 " + std::to_string(bad) +
+                             " 块 " +
+                             (same ? std::string("无")
+                                   : blockDiff(withoutTableHandle(pr.blocks[bad].spec),
+                                               withoutTableHandle(cr.blocks[bad]))));
+
+        expectTrue(pr.tables.size() == cr.tables.size() && pr.tables.size() == 1,
+                   "表格结构数量相同，只有一张");
+        expectTrue(!pr.tables.empty() && sameTableShape(pr.tables[0], cr.tables[0]),
+                   "表格结构逐字段相同（行、列、列宽、行高、每格的块区间）");
+        expectTrue(!pr.blocks.empty() && pr.blocks[1].spec.cell_path.size() == 1 &&
+                       pr.blocks[1].spec.cell_path[0].row == 0 &&
+                       pr.blocks[1].spec.cell_path[0].cell == 0,
+                   "第一格里的块带着它的格路径");
+        expectTrue(pr.blocks[6].spec.cell_path.empty(), "表后的正文块没有格路径");
+        expectTrue(pr.controls.empty(), "表格里没有控件");
+
+        // 改一格文字：损伤只落在那一块。
+        const auto typed = rev::insertText(doc, 2, 0, U"X");
+        expectTrue(typed.ok, "格内插字：投影层能按段落号落进格");
+        const rev::Damage one = rev::damage(doc, typed.doc);
+        expectTrue(one.range.changed && one.range.lo == 2 && one.range.hi == 3,
+                   "改一格文字：损伤正好是那一块（实际 [" + std::to_string(one.range.lo) + "," +
+                       std::to_string(one.range.hi) + ")）");
+        expectTrue(typed.ok && rev::paraTexts(typed.doc)[2] == U"XB0", "字落进了第二格");
+
+        // 改列宽：内容一个都没动，但整张表都要重排。
+        const rev::Doc wide = makeTableDoc(Length::abs(ptToEmu(45.0)), row_h);
+        const std::vector<rev::BlockHash> before = rev::blockHashes(doc, FlowVisibility::Design);
+        const std::vector<rev::BlockHash> after = rev::blockHashes(wide, FlowVisibility::Design);
+        expectTrue(before.size() == after.size(), "改列宽不改块数");
+        bool outside_changed = before[0] != after[0] || before[6] != after[6];
+        bool inside_changed = true;
+        for (size_t i = 1; i < 6; ++i) {
+            inside_changed = inside_changed && before[i] != after[i];
+        }
+        expectTrue(!outside_changed && inside_changed,
+                   "改列宽：表内五块的哈希全变，表外的两块一个都没变");
+        const rev::Damage dmg = rev::damage(doc, wide);
+        const rev::BlockDamage ref = rev::diffBlocks(before, after);
+        expectTrue(dmg.range.lo == 1 && dmg.range.hi == 6,
+                   "改列宽：损伤是整张表（实际 [" + std::to_string(dmg.range.lo) + "," +
+                       std::to_string(dmg.range.hi) + ")）");
+        expectTrue(dmg.range.lo == ref.lo && dmg.range.hi == ref.hi,
+                   "改列宽：哈希下降与块哈希比对完全一致");
+
+        // 改行高：同样只动容器记录，整张表进损伤。
+        // 行高只影响那一行（三个格），不影响另一行 —— 行是这一层容器，它的范围就是自己的块。
+        const rev::Doc tall = makeTableDoc(col0, Length::abs(ptToEmu(36.0)));
+        const rev::Damage dh = rev::damage(doc, tall);
+        expectTrue(dh.range.lo == 1 && dh.range.hi == 4, "改行高：损伤是第一行的三块（实际 [" +
+                                                             std::to_string(dh.range.lo) + "," +
+                                                             std::to_string(dh.range.hi) + ")）");
+
+        // 格内分段：一格里多出一块，结构表的 block_count 跟着变。
+        const auto split = rev::splitPara(typed.doc, 2, 1);
+        expectTrue(split.ok, "格内分段");
+        const rev::Projection pr2 = rev::project(split.doc, sheet);
+        expectTrue(pr2.ok() && pr2.blocks.size() == 8, "格内分段之后多一块");
+        expectTrue(!pr2.tables.empty() && pr2.tables[0].cells.size() == 5, "结构表的格数没变");
+        expectTrue(!pr2.tables.empty() && pr2.tables[0].cells[1].block_count == 2,
+                   "第二格的块区间变成两块");
+
+        // 落盘：表格记录逐字段（列定义、列宽、行开关、行高、跨度、垂直对齐）。
+        const auto ser = rev::serialize(doc);
+        Doc back;
+        const auto de = ser.ok ? rev::deserialize(ser.text, &back) : rev::DeserializeResult{};
+        expectTrue(ser.ok && de.ok && back.lo == doc.lo && back.hi == doc.hi,
+                   "表格往返之后全文哈希相同");
+        const auto probe = [](const Doc& d) {
+            const std::vector<rev::Ref>* body = rev::bodyOf(d);
+            return (body != nullptr && body->size() > 2) ? (*body)[2] : rev::Ref{};
+        };
+        const rev::Ref a = probe(doc);
+        const rev::Ref b = probe(back);
+        expectTrue(a && b && std::get<TableSpec>(a->payload) == std::get<TableSpec>(b->payload),
+                   "表格记录逐字段相同");
+        expectTrue(a && b && !a->children.empty() && !b->children.empty() &&
+                       std::get<RowSpec>(a->children[0]->payload) ==
+                           std::get<RowSpec>(b->children[0]->payload),
+                   "行记录逐字段相同（三个开关、行高、行高规则）");
+        expectTrue(a && b && !a->children.empty() && !a->children[0]->children.empty() &&
+                       std::get<CellSpec>(a->children[0]->children[0]->payload) ==
+                           std::get<CellSpec>(b->children[0]->children[0]->payload),
+                   "单元格记录逐字段相同（两个跨度、垂直对齐）");
+    }
+
+    std::printf("\n[15] 原子与域：一条盒子算法、两条路同样的产物\n");
+    {
+        const StyleSheet sheet;
+        NodeTree tree = makeAtomTree("张三");
+        Doc doc;
+        std::string why;
+        const bool exported = rev::fromTree(tree, &doc, &why);
+        expectTrue(exported, exported ? std::string("从模型导出修订") : ("导出失败：" + why));
+
+        const CompileResult cr = compileDocument(tree, FlowVisibility::Design, sheet);
+        const rev::Projection pr = rev::project(doc, sheet);
+        expectTrue(cr.blocks.size() == 6 && pr.blocks.size() == 6,
+                   "六段（投影 " + std::to_string(pr.blocks.size()) + " / 编译 " +
+                       std::to_string(cr.blocks.size()) + "）");
+
+        bool same = cr.blocks.size() == pr.blocks.size();
+        size_t bad = 0;
+        for (size_t i = 0; same && i < cr.blocks.size(); ++i) {
+            if (!sameBlock(pr.blocks[i].spec, cr.blocks[i])) {
+                same = false;
+                bad = i;
+            }
+        }
+        expectTrue(same, "每一块与编译产物逐字段相同（含原子的宽高与内容指纹）" +
+                             (same ? std::string()
+                                   : "：第 " + std::to_string(bad) + " 块 " +
+                                         blockDiff(pr.blocks[bad].spec, cr.blocks[bad])));
+        expectTrue(sameDiags(pr.diagnostics, cr.diagnostics),
+                   "诊断逐条相同（相对长度那条、域未进排版输入那条）");
+
+        // 四枚图片的盒子：像素折算、只给宽、只给高按比例、相对宽度按原始尺寸。
+        auto box_of = [&](size_t block, size_t obj) {
+            const auto& os = pr.blocks[block].spec.objects;
+            return obj < os.size() ? os[obj] : InlineObject{};
+        };
+        expectTrue(std::abs(box_of(0, 0).w_pt - 150.0f) < 0.01f &&
+                       std::abs(box_of(0, 0).h_pt - 75.0f) < 0.01f,
+                   "只有像素：200x100 @96dpi → 150x75 pt");
+        expectTrue(std::abs(box_of(1, 0).w_pt - 30.0f) < 0.01f, "只给宽：宽度就是作者给的 30 pt");
+        expectTrue(std::abs(box_of(2, 0).h_pt - 20.0f) < 0.01f &&
+                       std::abs(box_of(2, 0).w_pt - 40.0f) < 0.01f,
+                   "只给高且有像素：按原图 2:1 推宽到 40 pt");
+        expectTrue(box_of(3, 0).atom == InlineAtom::Image && box_of(3, 0).w_pt > 0.0f,
+                   "相对宽度：按原始尺寸折算出一个正数宽，并记诊断");
+        expectTrue(box_of(4, 0).atom == InlineAtom::Formula && box_of(4, 0).h_pt > 0.0f,
+                   "公式：按表达式估出一个框");
+
+        // 内容指纹：换资源标识（尺寸可以一模一样）必须换指纹，否则行指纹看不出换了图。
+        NodeTree other = makeAtomTree("张三");
+        const NodeId sec = other.firstSectionId();
+        const Node* first_img = other.find(sec)->children[1];
+        expectTrue(first_img->kind == NodeKind::Image, "准备：第二节点的确是那张图");
+        other.find(first_img->id)->image.resource_id = "res/z.png";
+        Doc doc2;
+        expectTrue(rev::fromTree(other, &doc2, &why), "改资源标识之后仍能导出");
+        const auto h1 = rev::blockHashes(doc, FlowVisibility::Design);
+        const auto h2 = rev::blockHashes(doc2, FlowVisibility::Design);
+        expectTrue(h1.size() == h2.size() && h1[0] != h2[0] && h1[1] == h2[1],
+                   "换一张同样大的图：只有那一块的哈希变");
+
+        // 域的缓存值是派生量：只有它不同时，内容哈希必须相同。
+        NodeTree other_cache = makeAtomTree("李四");
+        Doc doc3;
+        expectTrue(rev::fromTree(other_cache, &doc3, &why), "改缓存值之后仍能导出");
+        expectTrue(doc3.lo == doc.lo && doc3.hi == doc.hi,
+                   "只改域的缓存值：全文哈希不变（求值结果不是内容）");
+        expectTrue(rev::blockHashes(doc3, FlowVisibility::Design) ==
+                       rev::blockHashes(doc, FlowVisibility::Design),
+                   "只改缓存值：块哈希一个都没变（没有块要重排）");
+
+        // 落盘：三类记录逐字段。域的 cache 不在哈希里，所以它只能靠逐字段比对。
+        const auto ser = rev::serialize(doc);
+        Doc back;
+        const auto de = ser.ok ? rev::deserialize(ser.text, &back) : rev::DeserializeResult{};
+        expectTrue(ser.ok && de.ok, "原子与域能落盘并读回来");
+        expectTrue(de.ok && back.lo == doc.lo && back.hi == doc.hi, "往返之后全文哈希相同");
+        const auto body = [](const Doc& d) -> const std::vector<rev::Ref>* {
+            return rev::bodyOf(d);
+        };
+        const std::vector<rev::Ref>* a = body(doc);
+        const std::vector<rev::Ref>* b = body(back);
+        int compared = 0;
+        int mismatched = 0;
+        if (a != nullptr && b != nullptr && a->size() == b->size()) {
+            for (size_t i = 0; i < a->size(); ++i) {
+                const rev::Node& x = *(*a)[i];
+                const rev::Node& y = *(*b)[i];
+                if (x.kind == NodeKind::Image) {
+                    ++compared;
+                    if (!(std::get<ImageSpec>(x.payload) == std::get<ImageSpec>(y.payload))) {
+                        ++mismatched;
+                    }
+                } else if (x.kind == NodeKind::Formula) {
+                    ++compared;
+                    if (!(std::get<FormulaSpec>(x.payload) == std::get<FormulaSpec>(y.payload))) {
+                        ++mismatched;
+                    }
+                } else if (x.kind == NodeKind::Field) {
+                    ++compared;
+                    if (!(std::get<FieldSpec>(x.payload) == std::get<FieldSpec>(y.payload))) {
+                        ++mismatched;
+                    }
+                }
+            }
+        }
+        expectTrue(compared == 6 && mismatched == 0,
+                   "六条原子记录逐字段读回来（图片 4 / 公式 1 / 域 1，含缓存值）");
+
+        // 多节：表示不了就要拒绝，不做"只搬第一节"。
+        NodeTree multi;
+        const NodeId s0 = multi.firstSectionId();
+        multi.appendChild(multi.rootId(), NodeKind::Section);
+        multi.setText(multi.appendChild(s0, NodeKind::TextRun), cpsOf(U"a"));
+        Doc rejected;
+        std::string why2;
+        expectTrue(!rev::fromTree(multi, &rejected, &why2) && !why2.empty(),
+                   "多节文档：导出被拒绝并说明原因");
+    }
+
+    std::printf("\n[16] 嵌套表格：格路径是序列，容器几何各管各的一段\n");
+    {
+        const StyleSheet sheet;
+        const Length inner_col = Length::abs(ptToEmu(18.0));
+        NodeTree tree = makeNestedTableTree(inner_col);
+        Doc doc;
+        std::string why;
+        expectTrue(rev::fromTree(tree, &doc, &why), "嵌套表：从模型导出修订");
+
+        const CompileResult cr = compileDocument(tree, FlowVisibility::Design, sheet);
+        const rev::Projection pr = rev::project(doc, sheet);
+        expectTrue(cr.ok() && pr.ok(), "两条路都没有诊断");
+        expectTrue(cr.blocks.size() == 6 && pr.blocks.size() == 6,
+                   "六块：前 / A / i1 / i2 / B / 后（投影 " + std::to_string(pr.blocks.size()) +
+                       "，编译 " + std::to_string(cr.blocks.size()) + "）");
+
+        bool same = cr.blocks.size() == pr.blocks.size();
+        std::string where;
+        for (size_t i = 0; same && i < cr.blocks.size(); ++i) {
+            if (!sameBlock(pr.blocks[i].spec, cr.blocks[i])) {
+                same = false;
+                where =
+                    "第 " + std::to_string(i) + " 块 " + blockDiff(pr.blocks[i].spec, cr.blocks[i]);
+            }
+        }
+        expectTrue(same, "每一块与编译产物逐字段相同" + (same ? std::string() : "：" + where));
+        expectTrue(pr.tables.size() == 2 && cr.tables.size() == 2, "两张结构表（外 + 内）");
+        expectTrue(pr.tables.size() == 2 && cr.tables.size() == 2 &&
+                       sameTableShape(pr.tables[0], cr.tables[0]) &&
+                       sameTableShape(pr.tables[1], cr.tables[1]),
+                   "两张结构表各自逐字段相同（列宽、行高、每格的块区间）");
+
+        // 格路径是"外层到内层"的序列：内表格里的块带两层，外表格另一格的块只带一层。
+        expectTrue(
+            pr.blocks[2].spec.cell_path.size() == 2 && pr.blocks[3].spec.cell_path.size() == 2,
+            "内表格的块带两层格路径");
+        expectTrue(pr.blocks[2].spec.cell_path[0].table != pr.blocks[2].spec.cell_path[1].table,
+                   "两层格路径指向两张不同的表");
+        expectTrue(pr.blocks[4].spec.cell_path.size() == 1, "外表格另一格的块只带一层");
+        expectTrue(pr.blocks[1].spec.cell_path.size() == 1 && pr.blocks[5].spec.cell_path.empty(),
+                   "格里的文字一层，表后的正文没有格路径");
+
+        // 块区间：外表格第一格含 "A" 与内表格两块，所以是三块；第二格一块。
+        expectTrue(pr.tables.size() == 2 && pr.tables[0].cells.size() == 2 &&
+                       pr.tables[0].cells[0].first_block == 1 &&
+                       pr.tables[0].cells[0].block_count == 3,
+                   "外表格第一格的块区间是 [1,4)（A 与内表格两块）");
+        expectTrue(pr.tables.size() == 2 && pr.tables[0].cells.size() == 2 &&
+                       pr.tables[0].cells[1].block_count == 1,
+                   "外表格第二格一块");
+        expectTrue(pr.tables.size() == 2 && pr.tables[1].cells.size() == 2 &&
+                       pr.tables[1].cells[0].first_block == 2 &&
+                       pr.tables[1].cells[1].first_block == 3,
+                   "内表格两格各自一块，块号接着外层的顺序走");
+
+        // 只改内层列宽：内表格两块要重排，外层那几块（前 / A / B / 后）一个都不动。
+        NodeTree wider = makeNestedTableTree(Length::abs(ptToEmu(30.0)));
+        Doc doc2;
+        expectTrue(rev::fromTree(wider, &doc2, &why), "改内层列宽之后仍能导出");
+        const auto before = rev::blockHashes(doc, FlowVisibility::Design);
+        const auto after = rev::blockHashes(doc2, FlowVisibility::Design);
+        expectTrue(before.size() == after.size() && before[0] == after[0] &&
+                       before[1] == after[1] && before[4] == after[4] && before[5] == after[5],
+                   "改内层列宽：表外的两块与外表格另一格一个都没变");
+        expectTrue(before[2] != after[2] && before[3] != after[3], "改内层列宽：内表格两块都变了");
+        const rev::Damage dmg = rev::damage(doc, doc2);
+        const rev::BlockDamage ref = rev::diffBlocks(before, after);
+        expectTrue(dmg.range.changed && dmg.range.lo == 2 && dmg.range.hi == 4,
+                   "改内层列宽：损伤只到内表格两块（实际 [" + std::to_string(dmg.range.lo) + "," +
+                       std::to_string(dmg.range.hi) + ")）");
+        expectTrue(dmg.range.lo == ref.lo && dmg.range.hi == ref.hi,
+                   "改内层列宽：哈希下降与块哈希比对一致");
+
+        // 改外层列宽：外表格覆盖的块整段算损伤 —— 内表格也在外面那一层里。
+        NodeTree outer_wider = makeNestedTableTree(inner_col);
+        Node* ot = outer_wider.find(outer_wider.firstSectionId())->children[2];
+        expectTrue(ot->kind == NodeKind::Table, "准备：节下第三个节点是外表格");
+        ot->table.grid_cols[0] = Length::abs(ptToEmu(70.0));
+        Doc doc3;
+        expectTrue(rev::fromTree(outer_wider, &doc3, &why), "改外层列宽之后仍能导出");
+        const rev::Damage dmg2 = rev::damage(doc, doc3);
+        expectTrue(dmg2.range.lo == 1 && dmg2.range.hi == 5,
+                   "改外层列宽：损伤是整张外表格（[1,5)，实际 [" + std::to_string(dmg2.range.lo) +
+                       "," + std::to_string(dmg2.range.hi) + ")）");
+
+        // 落盘：嵌套结构原样回来。
+        const auto ser = rev::serialize(doc);
+        Doc back;
+        const auto de = ser.ok ? rev::deserialize(ser.text, &back) : rev::DeserializeResult{};
+        expectTrue(ser.ok && de.ok && back.lo == doc.lo && back.hi == doc.hi,
+                   "嵌套表格往返之后全文哈希相同");
+        const rev::Projection pr2 = de.ok ? rev::project(back, sheet) : rev::Projection{};
+        expectTrue(pr2.blocks.size() == pr.blocks.size() && !pr2.tables.empty() &&
+                       sameTableShape(pr2.tables[0], pr.tables[0]),
+                   "读回来再投影：块数与外表格结构不变");
+    }
+
+    std::printf("\n[17] 跨段控件：一对边界落在两块上\n");
+    {
+        const StyleSheet sheet;
+        NodeTree tree = makeSpanningControlTree();
+        Doc doc;
+        std::string why;
+        expectTrue(rev::fromTree(tree, &doc, &why), "跨段控件：从模型导出修订");
+        expectTrue((rev::paraTexts(doc) == std::vector<std::u32string>{U"甲乙", U"丙", U"丁"}),
+                   "三段：控件里的段落标记切开了它自己的内容");
+
+        const CompileResult cr = compileDocument(tree, FlowVisibility::Design, sheet);
+        const rev::Projection pr = rev::project(doc, sheet);
+        expectTrue(cr.ok() && pr.ok(), "两条路都没有诊断");
+        bool same = cr.blocks.size() == pr.blocks.size() && pr.blocks.size() == 3;
+        std::string where;
+        for (size_t i = 0; same && i < cr.blocks.size(); ++i) {
+            if (!sameBlock(pr.blocks[i].spec, cr.blocks[i])) {
+                same = false;
+                where =
+                    "第 " + std::to_string(i) + " 块 " + blockDiff(pr.blocks[i].spec, cr.blocks[i]);
+            }
+        }
+        expectTrue(same, "每一块与编译产物逐字段相同" + (same ? std::string() : "：" + where));
+
+        expectTrue(pr.blocks.size() == 3 && pr.blocks[0].spec.objects.size() == 1 &&
+                       pr.blocks[0].spec.objects[0].kind == InlineObjectKind::ControlStart &&
+                       pr.blocks[0].spec.objects[0].cp == 1,
+                   "第一块只有开括号（锚在 1 之后）");
+        expectTrue(pr.blocks.size() == 3 && pr.blocks[1].spec.objects.size() == 1 &&
+                       pr.blocks[1].spec.objects[0].kind == InlineObjectKind::ControlEnd &&
+                       pr.blocks[1].spec.objects[0].cp == 1,
+                   "第二块只有闭括号（锚在 1 之后）");
+        expectTrue(pr.blocks.size() == 3 && pr.blocks[2].spec.objects.empty(),
+                   "第三块里没有任何边界");
+
+        expectTrue(pr.controls.size() == 1 && pr.controls[0].block == 0 && pr.controls[0].cp == 1 &&
+                       pr.controls[0].end_block == 1 && pr.controls[0].end_cp == 1,
+                   "控件表给出的跨度跨两块：块 0 的 cp 1 到块 1 的 cp 1");
+        const rev::Node* cc_node =
+            rev::bodyOf(doc) != nullptr ? (*rev::bodyOf(doc))[1].get() : nullptr;
+        expectTrue(cc_node != nullptr && cc_node->kind == NodeKind::ContentControl &&
+                       pr.controls[0].node.get() == cc_node,
+                   "跨度指向的是那个控件节点本身（不是它的某个孩子）");
+
+        // 呈现态：隐藏它，它内部的文字与两个边界一起消失；控件的段落标记也在内部，所以
+        // 前两段并成一段。树那一侧要同样地隐藏 —— 节点号在两边不同，按形状找它（节下第二个孩子）。
+        Node* model_cc = tree.find(tree.firstSectionId())->children[1];
+        expectTrue(model_cc->kind == NodeKind::ContentControl, "准备：树里那个节点是控件");
+        model_cc->hidden = true;
+        const auto hid = rev::setHidden(doc, cc_node->id, true);
+        const rev::Projection disp =
+            rev::project(hid.doc, sheet, rev::ViewParams{FlowVisibility::Display});
+        const CompileResult cdisp = compileDocument(tree, FlowVisibility::Display, sheet);
+        bool same_disp = disp.blocks.size() == cdisp.blocks.size();
+        std::string disp_where;
+        for (size_t i = 0; same_disp && i < cdisp.blocks.size(); ++i) {
+            if (!sameBlock(disp.blocks[i].spec, cdisp.blocks[i])) {
+                same_disp = false;
+                disp_where = "第 " + std::to_string(i) + " 块 " +
+                             blockDiff(disp.blocks[i].spec, cdisp.blocks[i]);
+            }
+        }
+        expectTrue(same_disp && disp.blocks.size() == 2 && disp.controls.empty(),
+                   "呈现态：隐藏之后两条路仍逐字段相同（两段），控件表为空" +
+                       (same_disp ? std::string() : "：" + disp_where));
     }
 
     std::printf("\n结果：%d 项断言，%d 项失败\n", g_checks, g_failures);

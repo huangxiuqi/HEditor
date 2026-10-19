@@ -41,4 +41,25 @@ void applyParaFormatToBlock(const StyleSheet& sheet, const std::string& style_re
 void applyCharFormatToRun(const CharFormat& cf, NodeId node, FormatRun* run,
                           const FormatDiag& diag);
 
+/**
+ * 模型长度 → 引擎宽度：Auto 保持自动，绝对长度换磅值，百分比换比例。
+ *
+ * em 与字符位在这一层算不出参照（要等字号与列宽），所以结果里带一个 unresolved 标记，
+ * 由调用方按自动处理并记一条诊断 —— 静默取零会让"作者给了 3 个字宽"变成零宽列，
+ * 而画面看着又是合理的。
+ */
+struct WidthMapping {
+    WidthSpec spec;
+    bool unresolved = false;
+};
+
+WidthMapping mapWidth(const Length& len);
+
+/**
+ * 行高规则与单元格垂直对齐到引擎枚举的映射。两边值域一一对应，但引擎不认模型枚举，
+ * 所以这是唯一映射点。
+ */
+RowHeightRule mapRowHeightRule(HeightRule rule);
+BoxVAlign mapCellVAlign(CellVAlign align);
+
 }  // namespace heditor

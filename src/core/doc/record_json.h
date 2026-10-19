@@ -22,7 +22,11 @@
 
 #include "core/doc/char_format.h"
 #include "core/doc/control_spec.h"
+#include "core/doc/field_spec.h"
+#include "core/doc/formula_spec.h"
+#include "core/doc/image_spec.h"
 #include "core/doc/para_format.h"
+#include "core/doc/table_spec.h"
 
 namespace heditor::recjson {
 
@@ -81,6 +85,27 @@ ordered_json marksJson(const CharFormat& m);
 ordered_json borderSideJson(const BorderSide& b);
 ordered_json glyphJson(const GlyphStyle& g);
 ordered_json appearanceJson(const Appearance& a, StringPool* strings);
+
+/**
+ * 表格的三类记录。列定义的字段是普通字符串（不进池）：列定义只在开启了"按列落值"的表上
+ * 出现，重复度低，进池只是多一层间接。
+ */
+ordered_json tableJson(const TableSpec& t);
+ordered_json rowJson(const RowSpec& r);
+
+/**
+ * 单元格记录写成 [row_span, col_span] 加可选的垂直对齐名：两元素是默认对齐，第三个元素
+ * 只在非默认时出现 —— 与"默认值不写"同一条，旧文本读出来就是顶端对齐。
+ */
+ordered_json cellJson(const CellSpec& c);
+
+/**
+ * 图片、公式、域三类记录。三者都是原子的记录（域本期不进排版输入），字段少、各自成组，
+ * 所以与表格那组并列而不并进控件那组。
+ */
+ordered_json imageJson(const ImageSpec& im);
+ordered_json formulaJson(const FormulaSpec& f);
+ordered_json fieldJson(const FieldSpec& f);
 ordered_json controlValueJson(const ControlValue& v);
 ordered_json controlJson(const ControlSpec& c, StringPool* strings);
 
@@ -112,6 +137,12 @@ bool readPara(const ordered_json& j, const char* key, ParaFormatPatch* out);
 bool readMarks(const ordered_json& j, const char* key, CharFormat* out);
 bool readBorderSide(const ordered_json& j, const char* key, BorderSide* out);
 bool readAppearance(const Context& ctx, const ordered_json& j, const char* key, Appearance* out);
+bool readTable(const ordered_json& j, const char* key, TableSpec* out);
+bool readRow(const ordered_json& j, const char* key, RowSpec* out);
+bool readCell(const ordered_json& j, const char* key, CellSpec* out);
+bool readImage(const ordered_json& j, const char* key, ImageSpec* out);
+bool readFormula(const ordered_json& j, const char* key, FormulaSpec* out);
+bool readField(const ordered_json& j, const char* key, FieldSpec* out);
 bool readControl(const Context& ctx, const ordered_json& j, const char* key, ControlSpec* out);
 
 }  // namespace heditor::recjson

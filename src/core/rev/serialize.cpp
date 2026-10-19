@@ -15,12 +15,11 @@ namespace heditor::rev {
 namespace {
 
 using nlohmann::ordered_json;
-using Payload = std::variant<std::monostate, RunPayload, MarkPayload, ControlSpec>;
 
 /**
- * 载荷的四个分支。哈希与落盘都按它分支，加一支时两处的 switch 都会报出来。
+ * 载荷的七个分支。种类到分支的对应是唯一一份，落盘、读盘与哈希都按它走。
  */
-enum class Alt : uint8_t { None, Run, Mark, Control };
+enum class Alt : uint8_t { None, Run, Mark, Control, Table, Row, Cell, Image, Formula, Field };
 
 /**
  * 属性键。写与读共用同一套常量：两处各写字面量，迟早有一处拼错，而拼错的表现是这个字段读回来
@@ -38,6 +37,12 @@ constexpr const char* kPara = "p";
 constexpr const char* kStyle = "st";
 constexpr const char* kMarks = "m";
 constexpr const char* kControl = "c";
+constexpr const char* kTable = "tb";
+constexpr const char* kRow = "rw";
+constexpr const char* kCell = "cs";
+constexpr const char* kImage = "im";
+constexpr const char* kFormula = "fm";
+constexpr const char* kField = "fd";
 constexpr const char* kChildren = "ch";
 
 /**
@@ -56,9 +61,21 @@ Alt altOf(const Payload& p) {
                 return Alt::Run;
             else if constexpr (std::is_same_v<T, MarkPayload>)
                 return Alt::Mark;
-            else {
-                static_assert(std::is_same_v<T, ControlSpec>, "新增载荷要在这里加一支");
+            else if constexpr (std::is_same_v<T, ControlSpec>)
                 return Alt::Control;
+            else if constexpr (std::is_same_v<T, TableSpec>)
+                return Alt::Table;
+            else if constexpr (std::is_same_v<T, RowSpec>)
+                return Alt::Row;
+            else if constexpr (std::is_same_v<T, CellSpec>)
+                return Alt::Cell;
+            else if constexpr (std::is_same_v<T, ImageSpec>)
+                return Alt::Image;
+            else if constexpr (std::is_same_v<T, FormulaSpec>)
+                return Alt::Formula;
+            else {
+                static_assert(std::is_same_v<T, FieldSpec>, "新增载荷要在这里加一支");
+                return Alt::Field;
             }
         },
         p);
@@ -79,6 +96,18 @@ Alt altForKind(NodeKind kind) {
             return Alt::Mark;
         case NodeKind::ContentControl:
             return Alt::Control;
+        case NodeKind::Table:
+            return Alt::Table;
+        case NodeKind::TableRow:
+            return Alt::Row;
+        case NodeKind::TableCell:
+            return Alt::Cell;
+        case NodeKind::Image:
+            return Alt::Image;
+        case NodeKind::Formula:
+            return Alt::Formula;
+        case NodeKind::Field:
+            return Alt::Field;
         default:
             return Alt::None;
     }
@@ -118,6 +147,28 @@ bool writeNode(const Ref& n, recjson::StringPool* strings, NodeId* max_id,
     } else if (alt == Alt::Control) {
         const ControlSpec& p = std::get<ControlSpec>(n->payload);
         if (!(p == ControlSpec{})) j[kControl] = recjson::controlJson(p, strings);
+    } else if (alt == Alt::Table) {
+        const TableSpec& p = std::get<TableSpec>(n->payload);
+        if (!(p == TableSpec{})) j[kTable] = recjson::tableJson(p);
+    } else if (alt == Alt::Row) {
+        const RowSpec& p = std::get<RowSpec>(n->payload);
+        if (!(p == RowSpec{})) j[kRow] = recjson::rowJson(p);
+    } else if (alt == Alt::Cell) {
+        const CellSpec& p = std::get<CellSpec>(n->payload);
+        if (!(p == CellSpec{})) j[kCell] = recjson::cellJson(p);
+    } else if (alt == Alt::Image) {
+        const ImageSpec& p = std::get<ImageSpec>(n->payload);
+        if (!(p == ImageSpec{})) j[kImage] = recjson::imageJson(p);
+    } else if (alt == Alt::Formula) {
+        const FormulaSpec& p = std::get<FormulaSpec>(n->payload);
+        if (!(p == FormulaSpec{})) j[kFormula] = recjson::formulaJson(p);
+    } else if (alt == Alt::Field) {
+        const FieldSpec& p = std::get<FieldSpec>(n->payload);
+        // 域记录的三项都有非零默认的可能（种类、属性名、缓存值），所以三项全默认时不写；
+        // 读回来仍是默认值，与别组的"默认值不写"同一条。
+        if (p.kind != FieldKind::PageNumber || !p.name.empty() || !p.cache.empty()) {
+            j[kField] = recjson::fieldJson(p);
+        }
     }
     if (!n->children.empty()) {
         ordered_json kids = ordered_json::array();
@@ -259,6 +310,12 @@ bool readNode(Reader& r, const ordered_json& j, int depth, Ref* out) {
     }
     if (alt != Alt::Mark && j.contains(kPara)) return r.fail("这一节点种类不带段落覆盖");
     if (alt != Alt::Control && j.contains(kControl)) return r.fail("这一节点种类不带控件记录");
+    if (alt != Alt::Table && j.contains(kTable)) return r.fail("这一节点种类不带表格记录");
+    if (alt != Alt::Row && j.contains(kRow)) return r.fail("这一节点种类不带行记录");
+    if (alt != Alt::Cell && j.contains(kCell)) return r.fail("这一节点种类不带单元格记录");
+    if (alt != Alt::Image && j.contains(kImage)) return r.fail("这一节点种类不带图片记录");
+    if (alt != Alt::Formula && j.contains(kFormula)) return r.fail("这一节点种类不带公式记录");
+    if (alt != Alt::Field && j.contains(kField)) return r.fail("这一节点种类不带域记录");
 
     if (alt == Alt::Run) {
         if (!readRunPayload(r, j, &payload)) return false;
@@ -266,6 +323,30 @@ bool readNode(Reader& r, const ordered_json& j, int depth, Ref* out) {
         if (!readMarkPayload(r, j, &payload)) return false;
     } else if (alt == Alt::Control) {
         if (!readControlPayload(r, j, &payload)) return false;
+    } else if (alt == Alt::Table) {
+        TableSpec ts;
+        if (!recjson::readTable(j, kTable, &ts)) return r.fail("表格记录读不出来");
+        payload = std::move(ts);
+    } else if (alt == Alt::Row) {
+        RowSpec rs;
+        if (!recjson::readRow(j, kRow, &rs)) return r.fail("行记录读不出来");
+        payload = std::move(rs);
+    } else if (alt == Alt::Cell) {
+        CellSpec cs;
+        if (!recjson::readCell(j, kCell, &cs)) return r.fail("单元格记录读不出来");
+        payload = std::move(cs);
+    } else if (alt == Alt::Image) {
+        ImageSpec im;
+        if (!recjson::readImage(j, kImage, &im)) return r.fail("图片记录读不出来");
+        payload = std::move(im);
+    } else if (alt == Alt::Formula) {
+        FormulaSpec fm;
+        if (!recjson::readFormula(j, kFormula, &fm)) return r.fail("公式记录读不出来");
+        payload = std::move(fm);
+    } else if (alt == Alt::Field) {
+        FieldSpec fd;
+        if (!recjson::readField(j, kField, &fd)) return r.fail("域记录读不出来");
+        payload = std::move(fd);
     }
 
     std::vector<Ref> kids;

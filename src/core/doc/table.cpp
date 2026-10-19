@@ -129,12 +129,14 @@ int headerRowCount(const NodeTree& tree, NodeId table) {
     return count;
 }
 
-bool buildGrid(const NodeTree& tree, NodeId table, TableGrid* out, std::string* error) {
-    std::vector<const Node*> rows;
-    if (!collectRows(tree, table, &rows, error)) return false;
-
+bool buildGridFromSpans(const std::vector<std::vector<GridCellSpan>>& rows, TableGrid* out,
+                        std::string* error) {
     out->rows = static_cast<int>(rows.size());
-    out->cols = rows.empty() ? 0 : rowWidth(rows.front());
+    int cols = 0;
+    if (!rows.empty()) {
+        for (const GridCellSpan& c : rows.front()) cols += c.col_span;
+    }
+    out->cols = cols;
 
     const size_t total = static_cast<size_t>(out->rows) * static_cast<size_t>(out->cols);
     out->slots.assign(total, GridCell{});
@@ -147,12 +149,12 @@ bool buildGrid(const NodeTree& tree, NodeId table, TableGrid* out, std::string* 
 
     for (int r = 0; r < out->rows; ++r) {
         int cursor = 0;
-        for (const Node* cell : rows[static_cast<size_t>(r)]->children) {
+        for (const GridCellSpan& cell : rows[static_cast<size_t>(r)]) {
             // 让过上面跨下来的格子覆盖掉的格位。
             while (cursor < out->cols && occupied(r, cursor)) ++cursor;
 
-            const int rs = cell->cell.row_span;
-            const int cs = cell->cell.col_span;
+            const int rs = cell.row_span;
+            const int cs = cell.col_span;
             if (rs < 1 || cs < 1) {
                 *error = "跨度的两个方向都必须至少是 1";
                 return false;
@@ -178,7 +180,7 @@ bool buildGrid(const NodeTree& tree, NodeId table, TableGrid* out, std::string* 
                     GridCell& slot =
                         out->slots[static_cast<size_t>(rr) * static_cast<size_t>(out->cols) +
                                    static_cast<size_t>(cc)];
-                    slot.id = cell->id;
+                    slot.id = cell.id;
                     slot.row = r;
                     slot.col = cursor;
                 }
@@ -199,6 +201,24 @@ bool buildGrid(const NodeTree& tree, NodeId table, TableGrid* out, std::string* 
         }
     }
     return true;
+}
+
+bool buildGrid(const NodeTree& tree, NodeId table, TableGrid* out, std::string* error) {
+    std::vector<const Node*> rows;
+    if (!collectRows(tree, table, &rows, error)) return false;
+
+    // 节点形状在这里收成跨度，网格规则只有 buildGridFromSpans 一份。
+    std::vector<std::vector<GridCellSpan>> spans;
+    spans.reserve(rows.size());
+    for (const Node* row : rows) {
+        std::vector<GridCellSpan> line;
+        line.reserve(row->children.size());
+        for (const Node* cell : row->children) {
+            line.push_back(GridCellSpan{cell->id, cell->cell.row_span, cell->cell.col_span});
+        }
+        spans.push_back(std::move(line));
+    }
+    return buildGridFromSpans(spans, out, error);
 }
 
 StepBatch makeInsertTableRow(NodeTree& tree, NodeId table, int at_row,
