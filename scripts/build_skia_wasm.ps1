@@ -3,6 +3,10 @@
 #
 # 产物：.toolchain/skia/src/skia-main/out/wasm/libskia.a
 #
+# Skia 的版本钉在 scripts/skia_rev.ps1（唯一来源，native 那份也从那儿取）。
+# 本脚本在树与 pin 不符时会把它挪开、按 pin 重取 —— 不做"就地换版本"，
+# 因为差量未知，而 out/ 里的产物必须跟着源码一起换。
+#
 # ─────────────────────────────────────────────────────────────
 #  这条链路为什么这么长 —— 四个坑，都记下来免得下次重踩
 # ─────────────────────────────────────────────────────────────
@@ -51,7 +55,7 @@
 #
 # 用法：
 #   powershell -ExecutionPolicy Bypass -File scripts\build_skia_wasm.ps1
-#   powershell -ExecutionPolicy Bypass -File scripts\build_skia_wasm.ps1 -Fetch     # 只补依赖
+#   powershell -ExecutionPolicy Bypass -File scripts\build_skia_wasm.ps1 -Fetch     # 只补源码与依赖
 #   powershell -ExecutionPolicy Bypass -File scripts\build_skia_wasm.ps1 -Clean     # 删掉 out/wasm 重建
 param(
     [switch]$Fetch,
@@ -79,19 +83,51 @@ foreach ($p in @($Emsdk, $Gn, $Ninja)) {
     if (-not (Test-Path $p)) { throw "缺少工具链：$p（gn / ninja / emsdk 需要先就位）" }
 }
 
-# ── 1. Skia 源码 ────────────────────────────────────────────
-if (-not (Test-Path (Join-Path $SkiaSrc 'BUILD.gn'))) {
-    $tar = Join-Path $SkiaPkg 'skia-main.tar.gz'
+# ── 1. Skia 源码（版本钉在 scripts/skia_rev.ps1）──────────────
+#   "树不在"与"树是别的版本"走同一条路：重取。不做差量替换 —— 差量未知，
+#   而 out/ 里的产物必须跟着源码一起换，留着半新半旧只会得到解释不了的报错。
+. (Join-Path $PSScriptRoot 'skia_rev.ps1')
+Say "Skia pin: $SkiaCommit ($SkiaCommitDate)"
+
+$state = Get-SkiaTreeState $SkiaSrc
+if ($state -ne 'ok') {
+    if (Test-Path $SkiaSrc) {
+        # 不删：本仓库的删除守卫会拦，而且删错了不可逆。同卷改名是一次 rename
+        #   （连 out/ 一起挪也很快），留着还能对照旧版本编出来的产物。
+        #   确认无用后由人手工删 —— 脚本不替人做不可逆的事。
+        $stale = Join-Path (Join-Path $SkiaPkg 'src') ('_stale-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+        Say "现有源码树与 pin 不符（$state），挪到 $stale"
+        Move-Item -LiteralPath $SkiaSrc -Destination $stale
+    }
+    $tar = Join-Path $SkiaPkg "skia-$SkiaCommit.tar.gz"
     if (-not (Test-Path $tar)) {
-        Say "下载 Skia 源码（约 80 MB，走 codeload）"
+        Say "下载 Skia 源码 $SkiaCommit（约 80 MB，走 codeload）"
         New-Item -ItemType Directory -Force -Path $SkiaPkg | Out-Null
-        & curl.exe -sSL --max-time 3600 -o $tar 'https://codeload.github.com/google/skia/tar.gz/refs/heads/main'
+        & curl.exe -sSL --max-time 3600 -o $tar "https://codeload.github.com/google/skia/tar.gz/$SkiaCommit"
         if ($LASTEXITCODE -ne 0) { throw "下载 Skia 源码失败" }
+    }
+    # codeload 对不存在的 commit 回一张 404 的 HTML，而 curl 的退出码仍是 0。
+    #   体积是这里唯一便宜的判据（真包 80 MB，错误页几 KB）。检查放在下载分支之外：
+    #   上一次失败留下的坏包同样会被 Test-Path 放过，而 tar 只会报"解压失败"。
+    $tarLen = (Get-Item $tar).Length
+    if ($tarLen -lt 20MB) {
+        # 改名而不是删：删除守卫会拦，而且留着（换个名字）比消失更好查。
+        Move-Item -LiteralPath $tar -Destination "$tar.bad"
+        throw "这份 tar 只有 $tarLen 字节，不是 Skia 源码（已改名 $tar.bad）：$SkiaCommit 在 codeload 上存在吗？"
     }
     Say "解压 Skia 源码"
     New-Item -ItemType Directory -Force -Path (Join-Path $SkiaPkg 'src') | Out-Null
     & tar.exe -xzf $tar -C (Join-Path $SkiaPkg 'src')
     if ($LASTEXITCODE -ne 0) { throw "解压 Skia 源码失败" }
+    # 归档顶层目录改名成 skia-main —— 下游路径全按它写死（选取规则见 skia_rev.ps1）。
+    $extracted = Find-ExtractedSkia (Join-Path $SkiaPkg 'src')
+    if (-not $extracted) { throw "解压后找不到含 BUILD.gn 的目录" }
+    Move-Item -LiteralPath $extracted.FullName -Destination $SkiaSrc
+    [System.IO.File]::WriteAllText((Join-Path $SkiaSrc '.heditor-skia-rev'),
+        "$SkiaCommit  $SkiaCommitDate`n")
+    $state = Get-SkiaTreeState $SkiaSrc
+    if ($state -ne 'ok') { throw "源码就位后仍与 pin 不符（$state）：$SkiaSrc" }
+    Say "源码就位：$SkiaCommit"
 }
 
 # ── 2. 外部依赖（DEPS 里钉住的 commit，只读归档，不碰 git）──
@@ -133,7 +169,7 @@ foreach ($name in $Deps.Keys) {
 }
 Say "外部依赖就位"
 
-if ($Fetch) { Say "-Fetch：只补依赖，到此为止"; exit 0 }
+if ($Fetch) { Say "-Fetch：只补源码与依赖，到此为止"; exit 0 }
 
 # ── 3. emsdk 挂进树内（gn 的 wasm 工具链按固定相对路径找它）──
 $EmsdkLink = Join-Path $Externals 'emsdk'
@@ -154,7 +190,7 @@ function Patch-File([string]$path, [string]$old, [string]$new, [string]$tag) {
     if ($text.Contains($marker)) { Say "已打过补丁：$tag"; return }
     if (-not $text.Contains($old)) {
         throw "补丁点找不到（$tag）：$path —— 上游可能改了结构；若该文件已被旧版脚本 patch 过，" +
-              "用 .toolchain/skia/skia-main.tar.gz 里的原版覆盖后再跑。"
+              "从 .toolchain/skia/skia-$SkiaCommit.tar.gz 里取原版覆盖后再跑。"
     }
     [System.IO.File]::WriteAllText($path, $text.Replace($old, "$marker`n$new"))
     Say "打补丁：$tag"

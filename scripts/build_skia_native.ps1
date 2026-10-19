@@ -30,9 +30,22 @@ $Lib       = Join-Path $OutDir 'skia.lib'
 
 function Say([string]$m) { Write-Host "[skia-native] $m" }
 
-foreach ($p in @($SkiaSrc, $Gn, $Ninja)) {
+foreach ($p in @($Gn, $Ninja)) {
     if (-not (Test-Path $p)) { throw "缺少工具链：$p" }
 }
+
+# ── 0. 源码树版本（钉在 scripts/skia_rev.ps1）───────────────
+#   两份库（wasm 与 native）必须出自同一棵树：宏与实现一旦分叉，症状是
+#   "两边像素不一样"或更糟的 ODR 违规 —— 而不会有任何一处报错。
+. (Join-Path $PSScriptRoot 'skia_rev.ps1')
+$state = Get-SkiaTreeState $SkiaSrc
+if ($state -ne 'ok') {
+    throw ("Skia 源码与 pin 不符（$state）：$SkiaSrc`n" +
+           "  pin = $SkiaCommit ($SkiaCommitDate)`n" +
+           "  修法：跑 scripts\build_skia_wasm.ps1 -Fetch —— 它按 pin 重取源码与外部依赖，" +
+           "不编 wasm。")
+}
+Say "Skia $SkiaCommit ($SkiaCommitDate)"
 
 # ── 1. 找 MSVC 与 Windows SDK ───────────────────────────────
 # 不走 vcvars（本机 reg.exe 被拦），按标准安装目录现找，与 gn 的 find_msvc.py 同一口径。

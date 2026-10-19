@@ -105,6 +105,10 @@ function blitFrame(px, w) {}
   —— 它会执行 git 写入命令，按下面的硬性约束只能由人运行。
 - 依赖归路（源码走 submodule、Skia 走脚本化归档）与判断标准见 `docs/依赖与工具链管理.md`。
   本工程不使用包管理器：唯一的非源码依赖面（native 侧的成品库）目前是空集。
+- **Skia 的版本是钉住的**，唯一来源 `scripts/skia_rev.ps1`（commit + 根 `BUILD.gn` 的
+  blob 哈希）。`build_skia_native.ps1` 发现源码树与 pin 不符会直接拒绝构建；要换版本
+  就改那三个常量、重取、再把两套库与全部断言重跑一遍。不要绕过它手工换一棵树 ——
+  native 与 wasm 的库必须出自同一棵树，否则宏与实现会悄悄分叉且不报错。
 - 预设写在 `CMakePresets.json`：`native` / `native-debug` / `wasm` / `wasm-debug`。
   `native` 需要先有 MSVC 工具链环境与 x64 版 Skia 静态库
   （`scripts\build_skia_native.ps1`，产物 `.toolchain/skia/.../out/win-x64/skia.lib`）。
