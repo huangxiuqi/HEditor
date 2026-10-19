@@ -370,17 +370,18 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
                         const float fyt = static_cast<float>(yt);
                         const float fh = static_cast<float>(yb - yt);
                         const float fw = static_cast<float>(xr - xl);
+                        // 线一律画在边界坐标上（右边界就是 xr、下边界就是 yb），不要往格内
+                        //   缩一格：缩了之后"本格的右边"与"邻格的左边"会落在相邻像素上，
+                        //   中间那几条列边界就成了 2 像素宽，而外框仍是 1 像素 ——
+                        //   看起来就是"竖线比横线粗"。
                         base_.fillRect(Rect{fxl, fyt, 1.0f, fh}, cfg_.table_line);
-                        base_.fillRect(Rect{static_cast<float>(xr - 1), fyt, 1.0f, fh},
+                        base_.fillRect(Rect{static_cast<float>(xr), fyt, 1.0f, fh},
                                        cfg_.table_line);
-                        // 横线：上边每条都画，下边只在"表格最后一行"补。相邻两行如果各画
-                        //   自己的下边与上边，两条 1px 线错开一格就是加粗的一条粗线。
-                        //   跨页片段的切口两边都不画。
                         if (!pr.cont_top)
                             base_.fillRect(Rect{fxl, fyt, fw, 1.0f}, cfg_.table_line);
                         const bool last_row = (pr.row == pt.rows - 1);
                         if (!pr.cont_bottom && last_row)
-                            base_.fillRect(Rect{fxl, static_cast<float>(yb - 1), fw, 1.0f},
+                            base_.fillRect(Rect{fxl, static_cast<float>(yb), fw, 1.0f},
                                            cfg_.table_line);
                     }
                 }
