@@ -822,56 +822,27 @@ int main() {
                    "页数不变时仍是增量：写入量 < 全帧的 1/100（没有退化成整帧重建）");
     }
 
-    std::printf("\n[10] 字形缓存：必须逐字节等价于直接光栅\n");
+    std::printf("\n[10] 光栅必须确定：同一文档两次渲染逐字节相同\n");
     {
-        // 同一份文档、同样的 zoom，渲染两遍：一次带缓存、一次不带。
-        //
-        // 这是缓存敢不敢上线的唯一依据。任何 glyph cache（包括 Skia 的
-        //   SkGlyphCache）都受同一条约束：覆盖率是按像素分箱算的，
-        //   亚像素相位一变就是另一份 mask。如果这条断言不成立，
-        //   那么"优化"两个字就是错的 —— 那是改了渲染。
-        auto renderDoc = [&](bool with_cache, double* glyph_ms, long long* hits, long long* misses,
-                             int* entries) -> std::vector<uint8_t> {
+        // 光栅是确定的：同一份排版结果、同一套字体与缩放，两次渲染必须给出同一串像素。
+        //   挡的是"某条路径带隐藏状态"（字形 strike、预热、共享 typeface）——
+        //   它们只能影响命不命中，不能影响画出来的东西。
+        auto renderDoc = [&]() -> std::vector<uint8_t> {
             EditorEngine e;
             if (!e.init({cjkPath, mnPath, latinPath})) return {};
             EngineConfig c = cfg;
             c.zoom = 1.5f;
             e.setConfig(c);
             loadBlocks(e, sampleDocument(0, 1, 2));
-            if (!with_cache) e.disableGlyphCache();
             e.relayout();
             e.repaint();
-            const EngineStats& s = e.stats();
-            if (glyph_ms) *glyph_ms = s.paint_glyph_ms;
-            if (hits) *hits = s.glyph_cache_hits;
-            if (misses) *misses = s.glyph_cache_misses;
-            if (entries) *entries = s.glyph_cache_entries;
             return std::vector<uint8_t>(e.frame(), e.frame() + e.frameBytes());
         };
-
-        double gms_cached = 0.0, gms_raw = 0.0;
-        long long hits = 0, misses = 0;
-        int entries = 0;
-        const std::vector<uint8_t> a = renderDoc(true, &gms_cached, &hits, &misses, &entries);
-        const std::vector<uint8_t> b = renderDoc(false, &gms_raw, nullptr, nullptr, nullptr);
-
-        std::printf(
-            "     带缓存 %zu B / 不带 %zu B；字形分段 %.3f ms vs %.3f ms；"
-            "命中 %lld / 未命中 %lld，缓存条目 %d\n",
-            a.size(), b.size(), gms_cached, gms_raw, hits, misses, entries);
+        const std::vector<uint8_t> a = renderDoc();
+        const std::vector<uint8_t> b = renderDoc();
         expectTrue(!a.empty() && a.size() == b.size(), "两次渲染的帧尺寸一致");
         expectTrue((a.size() == b.size()) && std::memcmp(a.data(), b.data(), a.size()) == 0,
-                   "缓存路径与直接光栅路径逐字节相同（缓存是纯等价变换）");
-
-        // 必须有的第三条：两遍都有墨迹。
-        //
-        //   为什么"逐字节相同"这一条不够 —— 而且本次是真栽在这上面：
-        //   覆盖率缓冲改成成员复用之后，cov 每行都被清空、搬进 mask 的那次 memcpy
-        //   却留在整个 y 循环之外，于是每一行都填上了"最后一行"的覆盖率（几乎恒为空）。
-        //   结果 mask 尺寸/位置/cacheable 全对、cov 恒为 0，一个字都画不出来；
-        //   而"逐字节相同"照样成立（两边都空，当然相等），连 PNG 的 SHA-256 都稳定。
-        //   所以"等价"必须配一条"确实有东西"才有意义。同一条纪律见 bitmap.cpp
-        //   的 rasterizeGlyph 里那段说明。
+                   "同一文档两次渲染逐字节相同（没有隐藏状态泄漏到像素里）");
         auto inkOf = [](const std::vector<uint8_t>& px) {
             size_t n = 0;
             for (size_t i = 0; i + 3 < px.size(); i += 4) {
@@ -880,19 +851,9 @@ int main() {
             return n;
         };
         const size_t ink_a = inkOf(a);
-        const size_t ink_b = inkOf(b);
-        std::printf("     墨迹像素：带缓存 %zu / 不带 %zu（占全帧 %.4f%%）\n", ink_a, ink_b,
+        std::printf("     墨迹像素：%zu（占全帧 %.4f%%）\n", ink_a,
                     100.0 * static_cast<double>(ink_a) / static_cast<double>(a.size() / 4));
-        expectTrue(ink_a > 2000 && ink_a == ink_b,
-                   "两遍渲染都真的画出了字形（墨迹像素数相同且足够多）");
-
-        // 反向两条，防"因为缓存根本没生效而假绿"
-        const int glyphs = static_cast<int>(hits + misses);
-        expectTrue(hits > 0, "缓存确实被命中过（不是「没生效所以碰巧相同」）");
-        expectTrue(glyphs > 0 && misses < glyphs,
-                   "未命中数 < 字形总数 —— 同一个字形的重复出现复用了 mask");
-        expectTrue(entries > 0 && entries < glyphs,
-                   "缓存条目数 < 字形总数 —— 去重确实发生了（亚像素相位没有散开）");
+        expectTrue(ink_a > 2000, "确实画出了字形（不是一块空白页底）");
     }
 
     std::printf("\n[11] 表单：控件是区间、边界是策略\n");

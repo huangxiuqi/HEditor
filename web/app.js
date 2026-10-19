@@ -1862,7 +1862,7 @@ function renderLayout(st) {
     ['  · 每字形', st.paintedGlyphs ? `${fmt(st.paintGlyphMs * 1000 / st.paintedGlyphs, 2)} µs` +
                                      `（${st.paintedGlyphs} 个）` : '—'],
     ['  · 帧搬运', `${fmt(st.paintPresentMs)} ms`],
-    ['字形缓存 命中 / 未命中', `${st.glyphCacheHits} / ${st.glyphCacheMisses}`],
+    ['字形缓存 占用 / 上限', `${kb(st.glyphCacheBytes)} / ${kb(st.glyphCacheLimit)}`],
     ['帧尺寸', `${mod.frameWidth()} × ${mod.frameHeight()} px`],
     ['页尺寸 / 页间隙', `${mod.pagePxWidth()} × ${mod.pagePxHeight()} / ${mod.pageGapPx()} px`],
     ['视口窗口', `第 ${mod.windowFirstPage()} 页起 · ${mod.windowPageCount()} 页` +

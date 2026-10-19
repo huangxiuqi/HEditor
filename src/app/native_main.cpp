@@ -74,7 +74,6 @@ int main(int argc, char** argv) {
     int onlyPage = -1;
     int dumpCount = 0;
     int repeat = 1;
-    bool noGlyphCache = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -95,17 +94,13 @@ int main(int argc, char** argv) {
             dumpCount = std::stoi(takeArg());
         } else if (a == "--repeat") {
             repeat = std::max(1, std::stoi(takeArg()));
-        } else if (a == "--no-glyph-cache") {
-            noGlyphCache = true;
         } else if (a == "--help" || a == "-h") {
             std::printf(
                 "用法: heditor_native [--asset-dir DIR] [--out-dir DIR] [--zoom N] [--page N]"
-                " [--demo word] [--repeat N] [--no-glyph-cache]\n"
+                " [--demo word] [--repeat N]\n"
                 "  --repeat N         进程内把\"排版+绘制\"整轮跑 N 次并报 min/中位/max。\n"
                 "                     单次数字不能用来做性能决策：实测同一个二进制连跑 6 次，\n"
-                "                       4 页 @1.5× 的绘制耗时在 135~179 ms 之间摆（±15%%）。\n"
-                "  --no-glyph-cache  关掉字形光栅缓存。用来证伪\"缓存是纯等价变换\"：\n"
-                "                     带/不带两种跑法写出的 page-*.png 必须逐字节相同。\n");
+                "                       4 页 @1.5× 的绘制耗时在 135~179 ms 之间摆（±15%%）。\n");
             return 0;
         }
     }
@@ -122,9 +117,6 @@ int main(int argc, char** argv) {
                      cjkFont.c_str(), mnFont.c_str(), latinFont.c_str());
         return 2;
     }
-
-    // 必须在 init 之后：缓存是 init 里建好后挂到两块位图上的。
-    if (noGlyphCache) engine.disableGlyphCache();
 
     EngineConfig cfg;
     cfg.zoom = zoom;
@@ -214,16 +206,10 @@ int main(int argc, char** argv) {
     std::printf("  ├ 铺面积      : %.3f ms\n", st.paint_fill_ms);
     std::printf("  ├ 字形        : %.3f ms   (共 %d 个字形)\n", st.paint_glyph_ms, st.glyph_count);
     std::printf("  └ 帧缓冲搬移  : %.3f ms\n", st.paint_present_ms);
-    {
-        // 命中率是"字形缓存有没有用"的判据，必须和耗时一起看。
-        //   命中率高而字形耗时没降 → 瓶颈不在光栅；命中率低 → 亚像素相位太散。
-        const long long hh = st.glyph_cache_hits;
-        const long long mm = st.glyph_cache_misses;
-        const double rate =
-            (hh + mm) ? 100.0 * static_cast<double>(hh) / static_cast<double>(hh + mm) : 0.0;
-        std::printf("字形缓存        : 命中 %lld / 未命中 %lld（命中率 %.1f%%），条目 %d\n", hh, mm,
-                    rate, st.glyph_cache_entries);
-    }
+    // 占用贴着上限就会被整份抹掉 —— 这是"预热了却不见变快"的成因。
+    std::printf("字形缓存        : 占用 %.1f MB / 上限 %.1f MB\n",
+                static_cast<double>(st.glyph_cache_bytes) / (1024.0 * 1024.0),
+                static_cast<double>(st.glyph_cache_limit) / (1024.0 * 1024.0));
     std::printf("帧缓冲          : %.2f MB\n",
                 static_cast<double>(engine.frameBytes()) / (1024.0 * 1024.0));
 

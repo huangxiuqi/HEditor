@@ -67,11 +67,10 @@
 `Portions of this software are copyright © The FreeType Project (https://freetype.org). All rights reserved.`
 
 > ★ **状态变更**：这一段原来写的是"本项目 POC 阶段不使用 FreeType"。
-> 自从 `HEDITOR_USE_SKIA=ON` 之后这句话**不再成立** —— Skia 的字体后端
+> 现在 Skia 是唯一的渲染实现，它的字体后端
 > （`SkFontMgr_New_Custom_Empty` / `SkTypeface_FreeType`）就是 FreeType，
-> 且它**进了包**（符号检查见 §1.3）。所以上面那句致谢是**现在就要加**的。
-> 旧的自写光栅器（`HEDITOR_USE_SKIA=OFF`）确实不需要 FreeType，但那是**非默认配置**，
-> 不能拿它来免除义务。
+> 且它**进了包**（符号检查见 §1.3）。所以上面那句致谢是**现在就要加**的，
+> 没有"不带 FreeType 的配置"可以拿来免除义务。
 
 ### 1.3 到底谁进了可执行文件 —— 用符号判定，不用依赖清单
 
@@ -84,7 +83,7 @@
 #   SkSL / FreeType / libpng / zlib / libjpeg / libwebp ...
 ```
 
-2026-10-09 实测（`HEDITOR_USE_SKIA=ON`，wasm 3,282,875 B）：
+2026-10-09 实测（wasm 交付档，3,282,875 B）：
 
 | 依赖 | 在最终 wasm 里 | 结论 |
 |---|---|---|

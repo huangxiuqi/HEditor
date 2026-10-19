@@ -14,7 +14,7 @@
     {
       "name": "native",
       "displayName": "原生 Release（验证宿主）",
-      "description": "MSVC + Ninja。要先有 MSVC 的工具链环境：从 VS 的 x64 Native Tools 命令行里跑，或者用 CMakeUserPresets.json 里的 native-local（本机 vcvars64.bat 不可用时用的那份）。",
+      "description": "MSVC + Ninja。要先有 MSVC 工具链环境与 x64 版 Skia 静态库（scripts/build_skia_native.ps1）；本机用 CMakeUserPresets.json 里的 native-local。",
       "inherits": "base",
       "binaryDir": "${sourceDir}/build/native",
       "cacheVariables": {
@@ -42,17 +42,7 @@
         "PATH": "${sourceDir}/.toolchain/emsdk/upstream/emscripten;${sourceDir}/.toolchain/emsdk;$penv{PATH}"
       },
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release",
-        "HEDITOR_USE_SKIA": "ON"
-      }
-    },
-    {
-      "name": "wasm-noskia",
-      "displayName": "WebAssembly（自写光栅后端，对照用）",
-      "inherits": "wasm",
-      "binaryDir": "${sourceDir}/build/wasm-noskia",
-      "cacheVariables": {
-        "HEDITOR_USE_SKIA": "OFF"
+        "CMAKE_BUILD_TYPE": "Release"
       }
     },
     {
@@ -71,7 +61,6 @@
     { "name": "native", "configurePreset": "native" },
     { "name": "native-debug", "configurePreset": "native-debug" },
     { "name": "wasm", "configurePreset": "wasm" },
-    { "name": "wasm-noskia", "configurePreset": "wasm-noskia" },
     { "name": "wasm-debug", "configurePreset": "wasm-debug" }
   ],
   "testPresets": [

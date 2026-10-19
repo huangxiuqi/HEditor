@@ -96,13 +96,8 @@ bool EditorEngine::init(const std::vector<std::string>& fontPaths) {
     if (fonts_.faceCount() <= 0) return false;
     base_valid_ = false;
 
-    // 帧缓冲与底图共享同一份字形缓存：同一个字形在两块图上光栅出来的
-    //   mask 一模一样，各存一份纯属浪费。而这份缓存正对着绘制成本的大头 ——
-    //   实测 4 页文档 @1.5× 的 paint 里有 91.5% 花在字形光栅上（121 µs/字形）。
-    if (!glyph_cache_) glyph_cache_ = std::make_shared<GlyphCache>();
-    bitmap_.setGlyphCache(glyph_cache_);
-    base_.setGlyphCache(glyph_cache_);
-
+    // 字形缓存在 Skia 侧是进程内一份 strike 缓存（与是哪一块 Bitmap 无关），
+    //   所以这里只需要把预算调够，没有"两块图各存一份"的问题。
     ensureRenderSetup();
     return true;
 }
@@ -120,13 +115,6 @@ void EditorEngine::ensureRenderSetup() {
     if (render_setup_done_) return;
     render_setup_done_ = true;
     base_.setGlyphCacheBudget(kGlyphCacheBudgetBytes);
-}
-
-void EditorEngine::disableGlyphCache() {
-    bitmap_.setGlyphCache(nullptr);
-    base_.setGlyphCache(nullptr);
-    glyph_cache_.reset();
-    base_valid_ = false;  // 底图要按"无缓存"的路径重建一遍
 }
 
 void EditorEngine::setConfig(const EngineConfig& cfg) {

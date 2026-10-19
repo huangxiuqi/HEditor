@@ -103,22 +103,10 @@ struct EngineStats {
     int painted_glyphs = 0;
 
     /**
-     * 字形缓存取证
-     * 这两个数字是"字形缓存到底有没有用"的唯一判据，缺一不可：
-     * 命中率高 + 耗时降   → 缓存吃掉了真正的成本；
-     * 命中率高 + 耗时没降 → 瓶颈根本不在字形光栅，别再往这儿投资；
-     * 命中率低            → 亚像素相位太散（键设计问题），
-     * 这时"再快的光栅器"能帮的也有限。
-     */
-    long long glyph_cache_hits = 0;
-    long long glyph_cache_misses = 0;
-    int glyph_cache_entries = 0;
-    /**
-     * 字形缓存的占用与上限（字节）。只有 Skia 后端报得出这两个数
-     * （它的 strike 缓存是进程内全局一份，上限可设；见 EditorEngine::init 里
-     * kGlyphCacheBudgetBytes 的说明）。它们回答的是另一类问题：
-     *   占用贴着上限 ⇒ 随时会被整份抹掉，"缓存命中率高"也就无从谈起 ——
-     *   而那正是"预热了却不见变快"的成因。
+     * 字形缓存的占用与上限（字节）。Skia 的 strike 缓存是进程内全局一份，
+     * 上限由 EditorEngine::ensureRenderSetup 设（见 kGlyphCacheBudgetBytes）。
+     * 这两个数回答的是：
+     *   占用贴着上限 ⇒ 随时会被整份抹掉，"预热了却不见变快"的成因就在这里。
      */
     size_t glyph_cache_bytes = 0;
     size_t glyph_cache_limit = 0;

@@ -168,7 +168,6 @@ int EditorEngine::prewarmPageGlyphs(int page) {
     //   各建一份 SkTypeface 就是两份互不相见的缓存：预热会静默地什么都不做
     //   （症状只是"没变快"）。
     prewarm_.shareFonts(base_);
-    prewarm_.setGlyphCache(glyph_cache_);
     prewarm_.clear(cfg_.page_fill);
 
     const float zoom = cfg_.zoom;
@@ -226,8 +225,6 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
     // 底图那份账单独清、单独读：字形是画在底图上的（帧那边只从底图搬像素过来），
     //   两块的写入量口径不同 —— 帧的记账回答"上屏搬了多少"，底图的回答"光栅画了多少"。
     base_.resetPaintedPixels();
-    // 本次呈现的缓存命中率 —— 与 paintedPixels 同一条纪律：统计只描述这一轮。
-    if (glyph_cache_) glyph_cache_->resetStats();
 
     const auto t_pre = Clock::now();
     const float zoom = cfg_.zoom;
@@ -954,12 +951,7 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
     edit_stats_.paint_ms = paint_ms;
     edit_stats_.total_ms = edit_stats_.layout_ms + edit_stats_.page_fp_ms + paint_ms;
 
-    if (glyph_cache_) {
-        stats_.glyph_cache_hits = static_cast<long long>(glyph_cache_->hits());
-        stats_.glyph_cache_misses = static_cast<long long>(glyph_cache_->misses());
-        stats_.glyph_cache_entries = static_cast<int>(glyph_cache_->entries());
-    }
-    // Skia 那一侧的预算与占用：自写后端这两个入口是空实现 / 0。
+    // 字形缓存的预算与占用（Skia 的全局 strike 缓存）。
     stats_.glyph_cache_bytes = base_.glyphCacheUsedBytes();
     stats_.glyph_cache_limit = base_.glyphCacheBudgetBytes();
 }

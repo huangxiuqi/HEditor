@@ -105,8 +105,9 @@ function blitFrame(px, w) {}
   —— 它会执行 git 写入命令，按下面的硬性约束只能由人运行。
 - 依赖归路（源码走 submodule、Skia 走脚本化归档）与判断标准见 `docs/依赖与工具链管理.md`。
   本工程不使用包管理器：唯一的非源码依赖面（native 侧的成品库）目前是空集。
-- 预设写在 `CMakePresets.json`：`native` / `native-debug` / `wasm` / `wasm-noskia`。
-  `native` 需要先有 MSVC 工具链环境（从 VS 的 x64 Native Tools 命令行跑）。
+- 预设写在 `CMakePresets.json`：`native` / `native-debug` / `wasm` / `wasm-debug`。
+  `native` 需要先有 MSVC 工具链环境与 x64 版 Skia 静态库
+  （`scripts\build_skia_native.ps1`，产物 `.toolchain/skia/.../out/win-x64/skia.lib`）。
   本机 `vcvars64.bat` 跑不起来（它内部调 `reg.exe`，被安全策略拦），所以那份环境
   摊在**不入库**的 `CMakeUserPresets.json` 里 —— 名字带 `-local` 后缀的就是它。
 - 原生：`cmake --workflow --preset native-local`（配置 + 构建 + 跑三个断言套件）。
@@ -116,11 +117,12 @@ function blitFrame(px, w) {}
 - 浏览器探针：`powershell -ExecutionPolicy Bypass -File scripts\verify_web.ps1`
   （默认跑 `scripts/edit_probe.mjs`，可用 `-Probe` 换 `stress_probe.mjs` / `web_probe.mjs`）
 - 两个宿主的分工（详见 `docs/正式化架构与迁移路线.md` 4.6）：wasm 是交付物，
-  native 只做验证宿主，承担 522 项断言与内存布局诊断。据此有三条规则：
+  native 只做验证宿主，承担三个断言套件与内存布局诊断。据此有三条规则：
   **新功能不得只在 native 上实现**，否则它从宿主变成了第二个产品；
-  跨后端的逐像素判据只在浏览器探针一侧算数；
-  光栅双实现（`bitmap.cpp` 与 `bitmap_skia.cpp`）不一致时以 Skia 那份为准，
-  不要反向改 Skia 去迁就自写后端。
+  逐像素判据只在同一构建内算数（native 与 wasm 的编译器、SIMD 与 CPU 路径不同），
+  线上那一侧仍以浏览器探针为准；
+  光栅只有一个实现 `bitmap_skia.cpp`，两侧都链接它 —— 不要再引入第二个后端，
+  跨后端像素比较没有判据意义。
 - 注释合规检查：`python scripts/lint_comments.py`（加 `-v` 打印违规原文；违规则退出码 1）。
   **违规数必须为 0，不设基线**：新写的注释一旦违规就当场改掉，不要把它记成"基线"留到以后。
   基线这种记账法只会让数字慢慢往上爬 —— 本项目就这么积到过 147 处，最后要一次性清掉。

@@ -1,115 +1,22 @@
 /**
- * 光栅目标（帧缓冲）。两个后端共用同一份接口。
+ * 光栅目标（帧缓冲）。
  *
- * 默认（不定义 HEDITOR_USE_SKIA）走 bitmap.cpp：自写扫描线光栅器加字形缓存。它现在的价值是
- * 逐字节可复现，作为 Skia 版的对照物（同一文档在两个后端下渲染，PNG 应当接近）。
- * 定义 HEDITOR_USE_SKIA 走 bitmap_skia.cpp：像素仍落在同一个 RGBA 缓冲里（frame /
- * frameBytes / copyRectFrom 的契约不变），绘制经 SkCanvas、字形经 SkFont 与 FreeType。
- * 于是手写扫描线、曲线离散化、4 倍纵向超采样以及 GlyphMask/GlyphCache 全部退役，
- * 对应的是 Skia 的 SkGlyphCache 与 SkScalerContext；换来抗锯齿质量、变体字形与
- * 路径/图像/效果等现成能力。
- *
- * 保留两套的原因：native 侧单测跑旧实现，留一把可对照的尺子。
+ * 只有一个实现 bitmap_skia.cpp：绘制经 SkCanvas、字形经 SkFont 与 FreeType，
+ * 像素落在同一块 RGBA 缓冲里（frame / frameBytes / copyRectFrom 的契约不变）。
+ * 自写扫描线光栅器已退役 —— 两套后端对同一条排版结果不可能逐像素一致，
+ * 跨后端比较没有判据意义；合成一套之后 native 单测跑的就是线上那条路径。
  */
 #pragma once
 
 #include <cstdint>
 #include <cstring>
 #include <memory>
-#include <unordered_map>
 #include <vector>
 
 #include "core/text/font.h"
 #include "core/utils/types.h"
 
 namespace heditor {
-
-/**
- * 字形光栅缓存（只有非 Skia 后端用）
- * Skia 一旦接手，这个类就只是接口占位：drawGlyph 不再查它，
- * 统计恒为 0。留着是为了让 engine.cpp 一行都不用改
- * （它要调 resetStats / hits / misses，好让 EditStats 的取证口径统一）。
- * 它存在的原因（也是 Skia 后端替掉的东西）：4 页文档 1.5 倍缩放下，绘制耗时的 91.5%
- * 是字形 —— 抽轮廓、曲线离散化（kCubicSegments=12，一个 CJK 字形可上千点）、逐扫描线
- * 遍历全部边且没有 active-edge-table，合计 121 µs/字形，而每帧都要重算一遍。
- * 去重空间很大：中文正文步进是整数像素，同一行字形的亚像素相位完全相同。
- *
- * 缓存键必须含亚像素相位：cov 由每个 span 端点按 floor() 分箱算出，pen_x = 10.3 与 10.7
- * 对同一字形得到的是两套不同的 cov，并非平移关系。Skia 的 SkScalerContext 同理。
- */
-struct GlyphMask {
-    int w = 0;
-    int h = 0;
-    int pen_ix = 0;  // 光栅时 pen_x 的整数部分
-    int pen_iy = 0;
-    int x0 = 0;  // mask 左上角的绝对设备像素 x（= 光栅时的 xa0）
-    int y0 = 0;
-    /**
-     * w*h 行主序覆盖率。与直接光栅得到的值逐位相同（不是量化后的 uint8）。
-     */
-    std::vector<float> cov;
-};
-
-class GlyphCache {
-public:
-    /**
-     * 两个判据，决定某次绘制能不能走缓存。
-     *
-     * 判据一：光栅时完全没有被画布裁剪 —— 只要 addSpan 里的 max(xa,0) /
-     * min(xb,w) 生效过，cov 的值就依赖画布尺寸，这份 mask 不可跨帧复用。
-     * 判据二：复用时目标位置完全落在画布内 —— 否则本次绘制本该裁剪，而缓存里的
-     * 值是未裁剪的。两条不满足时一律退回直接光栅，结果永远与"没有缓存"一致。
-     */
-    struct Key {
-        const void* font = nullptr;
-        uint32_t glyph_id = 0;
-        uint32_t scale_bits = 0;  // units_to_px 的位模式（精确比较，不量化）
-        uint32_t fracx_bits = 0;  // frac(pen_x) 的位模式
-        uint32_t fracy_bits = 0;
-        bool sideways = false;
-        bool operator==(const Key& o) const {
-            return font == o.font && glyph_id == o.glyph_id && scale_bits == o.scale_bits &&
-                   fracx_bits == o.fracx_bits && fracy_bits == o.fracy_bits &&
-                   sideways == o.sideways;
-        }
-    };
-    struct KeyHash {
-        size_t operator()(const Key& k) const;
-    };
-
-    /**
-     * 上限，防止异常文档（每个字形一个不重复相位）把内存撑爆。
-     * 超了就整体清空 —— 简单、不会僵住，也不需要 LRU。
-     */
-    static constexpr size_t kMaxEntries = 8192;
-
-    const GlyphMask* find(const Key& k) {
-        auto it = map_.find(k);
-        if (it == map_.end()) {
-            ++misses_;
-            return nullptr;
-        }
-        ++hits_;
-        return &it->second;
-    }
-    void insert(const Key& k, GlyphMask m) {
-        if (map_.size() >= kMaxEntries) map_.clear();
-        map_.emplace(k, std::move(m));
-    }
-
-    size_t hits() const { return hits_; }
-    size_t misses() const { return misses_; }
-    size_t entries() const { return map_.size(); }
-    void resetStats() {
-        hits_ = 0;
-        misses_ = 0;
-    }
-
-private:
-    std::unordered_map<Key, GlyphMask, KeyHash> map_;
-    size_t hits_ = 0;
-    size_t misses_ = 0;
-};
 
 class Bitmap {
 public:
@@ -248,20 +155,11 @@ public:
                     int count, float units_to_px, Color color, float rotate_deg = 0.0f);
 
     /**
-     * 多个 Bitmap（帧缓冲 bitmap_ + 底图 base_）应当共享同一份字形缓存：
-     * 同一个字形在两块图上光栅出来的 mask 是一模一样的，各存一份纯属浪费。
-     * 传 nullptr 表示不做缓存（退回每个字形现光栅）。
-     */
-    void setGlyphCache(std::shared_ptr<GlyphCache> c) { glyph_cache_ = std::move(c); }
-    GlyphCache* glyphCache() const { return glyph_cache_.get(); }
-
-    /**
      * 与另一块 Bitmap 共用字体表（Skia 侧的 SkTypeface / SkFont）。
      *
      * 为什么非共用不可：Skia 的字形缓存按 strike 规格索引，而规格里含字体对象的身份。
      *   两块 Bitmap 各建一份 SkTypeface，缓存就分成互不相见的两份 —— 往其中一份预热
      *   对另一份毫无帮助，而症状只是"没变快"，什么都看不出来。
-     * 自写后端没有字体对象（字形缓存由 setGlyphCache 共享），所以那一侧是空实现。
      */
     void shareFonts(const Bitmap& other);
 
@@ -274,15 +172,12 @@ public:
      *   —— 一旦越过 2 MB，清理就把整份缓存一次抹掉，下一个字形又从头冷光栅。
      *   对一整页上千个汉字、每页都要重光栅的滚动场景，这条等于"缓存从不起作用"；
      *   而它的症状只是"没变快"，看不出来是哪一层的问题。
-     * 自写后端有自己的 GlyphCache（按条数限容量），这两个入口在那一侧是空实现 / 0。
      */
     void setGlyphCacheBudget(size_t bytes);
     size_t glyphCacheUsedBytes() const;
     size_t glyphCacheBudgetBytes() const;
 
 private:
-    std::shared_ptr<GlyphCache> glyph_cache_;
-
     int w_ = 0;
     int h_ = 0;
     std::vector<uint8_t> px_;
@@ -290,66 +185,14 @@ private:
     size_t painted_glyphs_ = 0;  // 同一口径下的字形个数（见 paintedGlyphs）
     double glyph_bounds_ms_ = 0.0;  // 同一口径下"记账取包围盒"花掉的时间（见 glyphBoundsMs）
 
-#if defined(HEDITOR_USE_SKIA)
-
     /**
-     * Skia 后端状态。用 pimpl 有两个理由：bitmap.h 是公共头，不打开 Skia 的宿主
-     * （native 侧那几个 target）不该被迫 include Skia 的头或被其编译宏影响；
-     * 且 Skia 的 typeface/font 缓存是可增长容器，放进头里会让 Bitmap 的定义
-     * 随 Skia 版本变化（ABI 不稳）。
+     * Skia 后端状态。用 pimpl 有两个理由：bitmap.h 是公共头，每个 include 它的
+     * 编译单元不该被迫吃进 Skia 的头与它那套编译宏；且 Skia 的 typeface/font
+     * 缓存是可增长容器，放进头里会让 Bitmap 的定义随 Skia 版本变化（ABI 不稳）。
      */
     struct SkiaImpl;
     struct SkiaFonts;
     std::unique_ptr<SkiaImpl> sk_;
-
-#else
-
-    /**
-     * 自写光栅后端的状态
-     * 光栅一个字形，把覆盖率填进 out（绝对设备像素坐标），返回是否成功。
-     * *cacheable 输出"本次光栅有没有被画布裁剪过"—— 裁过的 mask 依赖画布尺寸，
-     * 不可跨帧复用（见 GlyphCache 上面那段两条判据）。
-     * 与"带缓存"的绘制路径共用同一条光栅实现 —— 两条路径算出来的必须是
-     * 同一串浮点数，否则"逐字节相同"这条判据就失去意义了。
-     * 非 const：它复用 cov_scratch_ 这个可增长的 scratch 缓冲。
-     */
-    bool rasterizeGlyph(hb_font_t* font, uint32_t glyph_id, float pen_x, float pen_y,
-                        float units_to_px, float rotate_deg, GlyphMask* out, bool* cacheable);
-
-    /**
-     * 把一份 mask 用 color 混合到目标位置（左上角绝对像素 = x0+dx, y0+dy）。
-     * 写入量照常记进 painted_px_。
-     */
-    void blitMask(const GlyphMask& m, int x0, int y0, Color color);
-
-    /**
-     * 保证 row_scratch_ 至少有 w_ 个像素（w_*4 字节）。只增长不重建。
-     */
-    void ensureRowScratch() {
-        const size_t need = static_cast<size_t>(w_) * 4;
-        if (row_scratch_.size() < need) row_scratch_.resize(need);
-    }
-
-    /**
-     * 字形光栅的覆盖率缓冲，复用。
-     * 是 drawGlyph 里的局部 vector，长度还是整帧宽度 —— 每画一个字形
-     * 就 new 一次（实测 4 页文档 1022 个字形 = 1022 次分配）。改成成员后只增长不重建。
-     * 长度恒为 ≥ w_；drawGlyph 只会用它自己的 x 窗口那一段。
-     */
-    std::vector<float> cov_scratch_;
-
-    /**
-     * 一行像素的复用缓冲（长度 = w_*4），配合 memcpy 铺面积用。
-     * 为什么必须走 memcpy： clear()/fillRect() 是
-     * for (x) { row[x*4+0]=r; row[x*4+1]=g; row[x*4+2]=b; row[x*4+3]=a; }
-     * 这种 stride-4 的逐字节标量写几乎不会被自动向量化，实测只有 ~200 MB/s，
-     * 而铺面积是绘制耗时的绝对大头（见 drawGlyph / clear 的注释）。
-     * 先造一行、再逐行 memcpy，memcpy 会被内联成 SIMD 存储，收益是数量级的。
-     * 逐字节造那一行仍然按 RGB 顺序写，不假设字节序。
-     */
-    std::vector<uint8_t> row_scratch_;
-
-#endif
 };
 
 }  // namespace heditor

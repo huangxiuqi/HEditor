@@ -1,10 +1,9 @@
 /**
- * Skia 光栅后端。定义 HEDITOR_USE_SKIA 时由它实现 Bitmap 的全部绘制入口。
+ * Skia 光栅后端：Bitmap 的唯一绘制实现。
  *
- * 对外契约不变：像素仍写在 Bitmap::px_ 里，frame / frameBytes / copyRectFrom /
- * paintedPixels 的语义全部保留，宿主感知不到换了引擎。内部换成：绘制走 SkCanvas；
- * 字形走 SkFont::drawGlyphs 加 FreeType（自写扫描线、4 倍纵向超采样、曲线离散化退役）；
- * 字形缓存交给 Skia 的 SkGlyphCache，GlyphMask 只作接口占位（见 bitmap.h）。
+ * 像素仍写在 Bitmap::px_ 里，frame / frameBytes / copyRectFrom / paintedPixels 的
+ * 语义与换后端之前一致。绘制走 SkCanvas；字形走 SkFont::drawGlyphs 加 FreeType；
+ * 字形缓存交给 Skia 的 SkGlyphCache（预算由 setGlyphCacheBudget 调）。
  *
  * 坐标与字号（最容易错的一处）：按 hb_font_set_scale(font, S, S) 的约定，
  * S = size_pt * kFontScalePerPt，设计单位 d 的设备像素为 d * S / upem * units_to_px。
@@ -12,8 +11,6 @@
  * upem*units_to_px 或 size_pt 乘 zoom）；S 从 hb_font_get_scale() 读，故不会随之失准。
  */
 #include "core/render/bitmap.h"
-
-#if defined(HEDITOR_USE_SKIA)
 
 #include "core/text/font.h"
 #include "core/text/font_source.h"
@@ -416,7 +413,6 @@ void Bitmap::shareFonts(const Bitmap& other) {
  *   再乘上亚像素横向相位（setSubpixel(true) 会把同一个字形按 1/4 px 拆成多份 mask），
  *   一页的常驻量就到 MB 量级 —— 越限之后 internalPurge 按整份 strike 删，
  *   一删全没。于是"预热过的那一页"在下一拍就可能是冷的。
- * 这条只在 Skia 后端有意义：自写后端用自己的 GlyphCache（bitmap.cpp 里是空实现）。
  */
 void Bitmap::setGlyphCacheBudget(size_t bytes) {
     if (bytes == 0) return;
@@ -628,26 +624,4 @@ void Bitmap::drawGlyphs(hb_font_t* font, const uint32_t* ids, const float* xs, c
                  SkSpan<const SkPoint>(pos.data(), count), origin, *f, p);
 }
 
-/**
- * GlyphCache 在 Skia 后端下只是接口占位（drawGlyph 不再查它）。
- * 这个哈希仍要提供，否则 bitmap.cpp 缺席时会有未定义符号 —— 将来若有人
- * 打开 HEDITOR_USE_SKIA 又去调 glyphCache()->find()，至少能链上。
- */
-size_t GlyphCache::KeyHash::operator()(const Key& k) const {
-    uint64_t h = 1469598103934665603ull;
-    auto mix = [&h](uint64_t v) {
-        h ^= v;
-        h *= 1099511628211ull;
-    };
-    mix(reinterpret_cast<uintptr_t>(k.font));
-    mix(k.glyph_id);
-    mix(k.scale_bits);
-    mix(k.fracx_bits);
-    mix(k.fracy_bits);
-    mix(k.sideways ? 1u : 0u);
-    return static_cast<size_t>(h);
-}
-
 }  // namespace heditor
-
-#endif  // defined(HEDITOR_USE_SKIA)

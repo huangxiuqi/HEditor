@@ -1,4 +1,5 @@
-﻿# 构建 wasm 版 Skia（给 HEDITOR_USE_SKIA 的引擎链接用）。
+﻿# 构建 wasm 版 Skia（给引擎链接用）。native 那份见 build_skia_native.ps1，
+# 两者同源同参数，差别只有 target 与 /MD。
 #
 # 产物：.toolchain/skia/src/skia-main/out/wasm/libskia.a
 #

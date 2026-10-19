@@ -803,14 +803,6 @@ public:
      */
     int contentBottomPx() const;
 
-    /**
-     * 诊断用：关掉字形缓存。
-     * 存在的唯一理由：让"缓存路径与直接光栅路径逐字节相同"变成一条可证伪的
-     * 断言 —— 同一个文档、同样的缩放下渲染两遍（一次带缓存、一次不带），
-     * 帧缓冲必须逐字节相等。没有这个开关，这条等价性就只能靠推理声称。
-     */
-    void disableGlyphCache();
-
     const EngineStats& stats() const { return stats_; }
     const EditStats& editStats() const { return edit_stats_; }
     const LayoutResult& layout() const { return layout_; }
@@ -1361,18 +1353,12 @@ private:
      * 预热字形用的临时靶子：一条页宽的窄带，画进去的像素随用随丢。
      *
      * 为什么不另做一条"只光栅不画"的路径：mask 进缓存这件事由绘制路径负责
-     *   （Skia 侧是它自己的 strike，自写侧是 GlyphCache）。另起一条就要再写一遍
+     *   （Skia 的 strike 只认真正走过的 drawGlyphs）。另起一条就要再写一遍
      *   缓存键的算法，而两条路径的键只要差一点，预热就毫无效果，且不会报错。
-     *   靶子够宽够高，字形不会被裁，缓存才存得下（见 rasterizeGlyph 的 uncut）。
+     *   靶子够宽够高，字形不会被裁，缓存才存得下。
      */
     Bitmap prewarm_;
 
-    /**
-     * 帧缓冲与底图共享的字形光栅缓存。见 core/render/bitmap.h 里的
-     * GlyphMask / GlyphCache 注释（为什么必须有亚像素相位、为什么两条路径
-     * 必须算出同一串浮点数）。
-     */
-    std::shared_ptr<GlyphCache> glyph_cache_;
     EngineStats stats_;
     EditStats edit_stats_;
 

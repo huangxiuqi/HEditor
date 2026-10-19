@@ -59,39 +59,41 @@ endif()
 option(HEDITOR_BUILD_TESTS "构建断言型单测" ON)
 
 # ─────────────────────────────────────────────────────────────
-#  Skia 光栅后端（可选开关）
+#  Skia 光栅后端（唯一）
 #
-#  打开后 core/render 的实现从 bitmap.cpp 换成 bitmap_skia.cpp：
-#  铺面积与字形都改由 Skia 的 SkCanvas / SkFont 落下去（见 bitmap.h 顶部）。
+#  core/render 只有一个实现 bitmap_skia.cpp：铺面积与字形都经 SkCanvas / SkFont
+#  （见 bitmap.h 顶部）。不再保留自写扫描线光栅器 —— 两套后端对同一条排版结果
+#  不可能逐像素一致，跨后端比较没有判据意义；合成一套之后 native 单测跑的就是
+#  线上那条光栅路径。
 #
-#  静态库由 scripts/build_skia_wasm.ps1 产出 —— 它是 gn + ninja + emsdk 的
-#  构建，只在 wasm 上有（native 侧要另配 MSVC 工具链，暂未做）。
-#  因此这个开关**只在 EMSCRIPTEN 下有效**，native 侧一律走自写后端，
-#  正好留下"另一把尺子"：同一份文档、同一份字体，两套后端可以对着看。
+#  静态库两份：wasm 由 scripts/build_skia_wasm.ps1 产出，x64 由
+#  scripts/build_skia_native.ps1 产出（gn + ninja + MSVC，见依赖文档）。
 # ─────────────────────────────────────────────────────────────
 set(HEDITOR_SKIA_ROOT "${HEDITOR_ROOT}/.toolchain/skia/src/skia-main" CACHE PATH "Skia 源码树")
-set(HEDITOR_SKIA_LIB "${HEDITOR_SKIA_ROOT}/out/wasm/libskia.wasm.a" CACHE FILEPATH "wasm 版 libskia（gn/ninja 产出的命名带 .wasm 中缀）")
-option(HEDITOR_USE_SKIA "用 Skia 做光栅化（仅 wasm；需先构建 libskia.a）" OFF)
+if(EMSCRIPTEN)
+  set(HEDITOR_SKIA_LIB_DEFAULT "${HEDITOR_SKIA_ROOT}/out/wasm/libskia.wasm.a")
+else()
+  set(HEDITOR_SKIA_LIB_DEFAULT "${HEDITOR_SKIA_ROOT}/out/win-x64/skia.lib")
+endif()
+set(HEDITOR_SKIA_LIB "${HEDITOR_SKIA_LIB_DEFAULT}" CACHE FILEPATH "Skia 静态库")
+# 这个变量是 CACHE，旧构建目录里可能还留着另一侧的路径（native 拿到 wasm 的 .a，
+# 链接期才会报"无效或损坏的文件"）。跨平台时纠正一次，别让它静默沿用。
+if(EMSCRIPTEN AND HEDITOR_SKIA_LIB MATCHES "skia\\.lib$")
+  set(HEDITOR_SKIA_LIB "${HEDITOR_SKIA_LIB_DEFAULT}" CACHE FILEPATH "Skia 静态库" FORCE)
+elseif(NOT EMSCRIPTEN AND HEDITOR_SKIA_LIB MATCHES "libskia\\.wasm\\.a$")
+  set(HEDITOR_SKIA_LIB "${HEDITOR_SKIA_LIB_DEFAULT}" CACHE FILEPATH "Skia 静态库" FORCE)
+endif()
 # 调试档：开断言、栈溢出检查与源码映射（见 wasm 链接参数里那一段说明）。
 option(HEDITOR_WASM_DEBUG "wasm 构建带断言/栈检查/源码映射（调试用，release 不开）" OFF)
 
-if(HEDITOR_USE_SKIA AND NOT EMSCRIPTEN)
+if(NOT EXISTS ${HEDITOR_SKIA_LIB})
   message(FATAL_ERROR
-    "HEDITOR_USE_SKIA=ON 目前只支持 wasm target（现有的 Skia 静态库是 wasm 版）。\n"
-    "native 侧请保持 OFF —— 它同时是 Skia 版的对照实现。")
+    "找不到 Skia 静态库：${HEDITOR_SKIA_LIB}\n"
+    "wasm:   powershell -ExecutionPolicy Bypass -File scripts\\build_skia_wasm.ps1\n"
+    "native: powershell -ExecutionPolicy Bypass -File scripts\\build_skia_native.ps1")
 endif()
 
-if(HEDITOR_USE_SKIA AND NOT EXISTS ${HEDITOR_SKIA_LIB})
-  message(FATAL_ERROR
-    "HEDITOR_USE_SKIA=ON 但找不到 Skia 静态库：${HEDITOR_SKIA_LIB}\n"
-    "先跑： powershell -ExecutionPolicy Bypass -File scripts\\build_skia_wasm.ps1")
-endif()
-
-if(HEDITOR_USE_SKIA)
-  set(HEDITOR_RENDER_SRC src/core/render/bitmap_skia.cpp)
-else()
-  set(HEDITOR_RENDER_SRC src/core/render/bitmap.cpp)
-endif()
+set(HEDITOR_RENDER_SRC src/core/render/bitmap_skia.cpp)
 
 # ── 编译选项：一律按 target 下发，绝不 add_compile_options / add_compile_definitions 全局 ──
 #    （全局下发会污染 add_subdirectory 进来的第三方子工程）
@@ -224,21 +226,21 @@ heditor_target_flags(heditor_core)
 #   段错误，而断言已经全过（实测：给 BlockSpec 加一个 vector 成员后，model_test 打到
 #   0.4 就崩）。这条在 2026-10-12 真的发生过：heditor_demo 当时漏挂了头依赖。
 
-if(HEDITOR_USE_SKIA)
-  # ── 与 libskia.a 对齐的编译期契约（一个都不能少）────────────────
-  #
-  # ★ 宏必须与 Skia 自己编译时**逐一对齐**：这些宏参与公共头里的类型定义
-  #   （对齐方式、是否编译 SIMD 路径、YUVA 打包格式的存在性……）。
-  #   漏一个不会报错，只会让两边对同一个结构体有两种理解 ——
-  #   症状是运行期读到脏数据或直接 trap，而且极难定位。
-  #   这份清单是从 Skia 的编译命令行（out/wasm 的 ninja 日志）里逐条抄下来的，
-  #   不是猜的。
-  # ★ 这份清单里**没有** SKVX_DISABLE_SIMD：那份 libskia 是本工程用 -msimd128
-  #   编出来的（见 scripts/build_skia_wasm.ps1 顶部坑 ⑤），Skia 侧不再定义它。
-  #   这里若凭空补上，主程序会按标量版理解 SkVx、而库里是 SIMD 版 —— 正是上面
-  #   说的"同一个结构体两种理解"，属于 ODR 违规。
+# ── 与 Skia 静态库对齐的编译期契约（一个都不能少）────────────────
+#
+# ★ 宏必须与 Skia 自己编译时**逐一对齐**：这些宏参与公共头里的类型定义
+#   （对齐方式、是否编译 SIMD 路径、YUVA 打包格式的存在性……）。
+#   漏一个不会报错，只会让两边对同一个结构体有两种理解 ——
+#   症状是运行期读到脏数据或直接 trap，而且极难定位。
+#   两份清单分别抄自 out/wasm 与 out/win-x64 的 ninja 编译命令行，不是猜的。
+# ★ 清单里**没有** SKVX_DISABLE_SIMD：wasm 那份 libskia 是用 -msimd128 编的
+#   （见 scripts/build_skia_wasm.ps1 顶部坑 ⑤），Skia 侧不再定义它。
+#   这里若凭空补上，主程序会按标量版理解 SkVx、而库里是 SIMD 版 —— 正是上面
+#   说的"同一个结构体两种理解"，属于 ODR 违规。
+# ★ native 与 wasm 的宏集合**不同**：x64 不需要 SK_FORCE_8_BYTE_ALIGNMENT，
+#   但多了 DirectWrite / GDI / AVX512 那几项。照抄另一侧会引入同样的 ODR 风险。
+if(EMSCRIPTEN)
   target_compile_definitions(heditor_core PUBLIC
-    HEDITOR_USE_SKIA=1
     SK_CODEC_DECODES_BMP
     SK_CODEC_DECODES_WBMP
     SK_ENABLE_PRECOMPILE
@@ -249,20 +251,39 @@ if(HEDITOR_USE_SKIA)
   # wasm SIMD 要对主程序也开着：Skia 的公共头（SkVx.h 等）按 __wasm_simd128__
   #   走不同实现，只有一边有就是上一条的另一种形态。连编译命令一起对齐才算数。
   target_compile_options(heditor_core PUBLIC -msimd128)
-  # Skia 的公共头是按 "include/core/xxx.h" 这种**从源码根开始**的写法互相 include 的，
-  # 所以根目录必须进 include path；另外各 public 子目录也加上，方便直接 include 文件名。
-  target_include_directories(heditor_core PUBLIC
-    ${HEDITOR_SKIA_ROOT}
-    ${HEDITOR_SKIA_ROOT}/include/core
-    ${HEDITOR_SKIA_ROOT}/include/config
-    ${HEDITOR_SKIA_ROOT}/include/effects
-    ${HEDITOR_SKIA_ROOT}/include/pathops
-    ${HEDITOR_SKIA_ROOT}/include/ports
-    ${HEDITOR_SKIA_ROOT}/include/utils
+elseif(MSVC)
+  target_compile_definitions(heditor_core PUBLIC
+    NOMINMAX
+    WIN32_LEAN_AND_MEAN
+    SK_CODEC_DECODES_BMP
+    SK_CODEC_DECODES_WBMP
+    SK_ENABLE_PRECOMPILE
+    SK_ENABLE_YUVA_PACKED_422
+    SK_DISABLE_TRACING
+    SK_ENABLE_AVX512_OPTS
+    SK_GAMMA_APPLY_TO_A8
+    SK_TYPEFACE_FACTORY_DIRECTWRITE
+    SK_FONTMGR_DIRECTWRITE_AVAILABLE
+    SK_FONTMGR_GDI_AVAILABLE
+    SK_TYPEFACE_FACTORY_FREETYPE
+    SK_FONTMGR_FREETYPE_DIRECTORY_AVAILABLE
+    SK_FONTMGR_FREETYPE_EMBEDDED_AVAILABLE
+    SK_FONTMGR_FREETYPE_EMPTY_AVAILABLE
   )
-  # 让使用者（宿主 target）也能拿到 HEDITOR_SKIA_LIB，链接时不用重复写路径
-  target_link_libraries(heditor_core INTERFACE ${HEDITOR_SKIA_LIB})
 endif()
+# Skia 的公共头是按 "include/core/xxx.h" 这种**从源码根开始**的写法互相 include 的，
+# 所以根目录必须进 include path；另外各 public 子目录也加上，方便直接 include 文件名。
+target_include_directories(heditor_core PUBLIC
+  ${HEDITOR_SKIA_ROOT}
+  ${HEDITOR_SKIA_ROOT}/include/core
+  ${HEDITOR_SKIA_ROOT}/include/config
+  ${HEDITOR_SKIA_ROOT}/include/effects
+  ${HEDITOR_SKIA_ROOT}/include/pathops
+  ${HEDITOR_SKIA_ROOT}/include/ports
+  ${HEDITOR_SKIA_ROOT}/include/utils
+)
+# 让使用者（宿主 target）也能拿到 HEDITOR_SKIA_LIB，链接时不用重复写路径
+target_link_libraries(heditor_core INTERFACE ${HEDITOR_SKIA_LIB})
 
 # ─────────────────────────────────────────────────────────────
 #  宿主
@@ -304,12 +325,10 @@ if(EMSCRIPTEN)
     -sEXPORTED_RUNTIME_METHODS=HEAPU8,HEAPU32,FS
   )
 
-  if(HEDITOR_USE_SKIA)
-    # libskia 是本工程用 -msimd128 编的，而 wasm-ld 要求所有对象文件与库的
-    #   target_features 一致 —— 少这一条会报
-    #   "linking module flags 'target_features': IDs have conflicting values"。
-    target_link_options(heditor_wasm PRIVATE -msimd128)
-  endif()
+  # libskia 是本工程用 -msimd128 编的，而 wasm-ld 要求所有对象文件与库的
+  #   target_features 一致 —— 少这一条会报
+  #   "linking module flags 'target_features': IDs have conflicting values"。
+  target_link_options(heditor_wasm PRIVATE -msimd128)
 
   # 调试档（HEDITOR_WASM_DEBUG=ON，预设 wasm-debug）：断言、栈溢出检查、源码映射。
   #   release 档一个都不带 —— 它们都要付体积与速度的代价，是排查时才需要的东西。

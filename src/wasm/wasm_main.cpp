@@ -545,9 +545,6 @@ std::string statsJson() {
     o << "\"frameWidth\":" << s.frame_width << ",";
     o << "\"frameHeight\":" << s.frame_height << ",";
     o << "\"frameBytes\":" << g_engine.frameBytes() << ",";
-    o << "\"glyphCacheHits\":" << s.glyph_cache_hits << ",";
-    o << "\"glyphCacheMisses\":" << s.glyph_cache_misses << ",";
-    o << "\"glyphCacheEntries\":" << s.glyph_cache_entries << ",";
     // 预算与占用（字节）：占用贴着上限就说明缓存随时会被整份抹掉 —— 那时
     //   "预热"与"命中"都无从谈起，而面板上只看命中率是看不出来的。
     o << "\"glyphCacheBytes\":" << s.glyph_cache_bytes << ",";
@@ -1350,13 +1347,7 @@ std::string documentText(int para) {
  * "软件光栅"，而实际跑的是另一套，排查时对着一张空白的帧去怀疑几何。
  * 把来源标在面板上，是这类"指标全绿但画面上什么都没有"唯一廉价的解药。
  */
-std::string rasterBackend() {
-#if defined(HEDITOR_USE_SKIA)
-    return "Skia（SkCanvas + FreeType）";
-#else
-    return "自写扫描线光栅器";
-#endif
-}
+std::string rasterBackend() { return "Skia（SkCanvas + FreeType）"; }
 
 }  // namespace
 
