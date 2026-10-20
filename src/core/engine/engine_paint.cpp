@@ -301,8 +301,7 @@ void EditorEngine::rasterIntoBitmap(Bitmap& target, int page_index, const float*
         }
     }
 
-    // 页位图里只有页面底色与字形 —— 表单标记（小点/方括号）不在这里画。
-    //   它们依赖光标位置，所以画在帧上；见 presentInternal 里那段说明。
+    // 页位图里有页面底色、格线、字形、原子框，最后是表单标记（见函数末尾）。
     //
     // 同一字体 / 颜色 / 朝向的字形攒成一段，一次交给光栅器（见 Bitmap::drawGlyphs）：
     //   逐字形调用时，光栅器那笔固定开销（Skia 侧要新建 paint、装配一遍字形运行）
@@ -378,6 +377,14 @@ void EditorEngine::rasterIntoBitmap(Bitmap& target, int page_index, const float*
             }
         }
         raster_fill_ms_ += msSince(t_atom0);
+    }
+
+    // 表单标记放在最后：括号要压在原子框之上（它们画在帧上时也是最后画的），
+    //   小点压在内容之上 —— 一个方块盖住几个字的角，比起被字盖掉、看着像脏点要好。
+    {
+        const auto t_mark0 = Clock::now();
+        rasterControlMarks(target, page_index, band_lo_pt, band_hi_pt);
+        raster_glyph_ms_ += msSince(t_mark0);
     }
 }
 
@@ -671,34 +678,6 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
         edit_stats_.dirty_page_count = dp;
     }
 
-    // 标记计划变了就整帧重贴。这是结构性的：标记画在帧上，擦除只能靠
-    // control_marks_prev_ 记下的矩形，一旦记漏就会永久残留。
-    //
-    //   为什么必须有它：表单标记（小点 / 方括号）是画在帧上的，
-    //     而"擦掉上一帧的标记"只能靠 control_marks_prev_ 里记下的那些矩形。
-    //     —— 这是一个脆弱前提：只要有一次记错、记漏、或者被别处的
-    //     control_marks_prev_.clear() 清掉，那个标记就会永久残留
-    //     （后续帧的擦除清单里只会有本帧要画的标记，再也碰不到它）。
-    //
-    //   用户真报过："光标离开某字段后，那个字段左边的方括号还在，
-    //     而同一帧里另一侧的括号却正常擦掉了。" —— 只残留一个，
-    //     说明不是"整块没刷新"，而是那条擦除矩形没生效。
-    //     开发机上按鼠标点击 / Tab / 程序化移动都复现不出来（33 次采样全绿），
-    //     所以这里不去猜触发条件，而是把这个脆弱前提整个拆掉：
-    //     只要"这一帧要画的标记"与"上一帧画过的"不同，就整帧重贴 ——
-    //     整帧重贴是从底图整块搬，旧标记不可能活下来。
-    //
-    //   代价：只在标记计划变化时付，而它恰好是"聚焦字段变了 / 控件变了 /
-    //     切模式了"—— 这三种情况本来就会让页变脏、本来就要整页重画，
-    //     所以这里几乎不额外增加上屏量。同字段内移动光标不触发。
-    {
-        const uint64_t sig = markPlanSignature();
-        if (sig != mark_sig_prev_) {
-            mark_sig_prev_ = sig;
-            frame_needs_full_refresh_ = true;
-        }
-    }
-
     std::vector<Rect> refresh;
 
     // 行带：把"这一页要重画"细化成"这一页的哪几行要重画"。
@@ -891,10 +870,9 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
     };
 
     // 页画布要的是"页位图上真的变了的地方"，而帧的 refresh 里还混着"只是重新落点"
-    //   的那些页（整窗重建时每一页都有一整块）。所以瞬态单独记一份：旧光标、旧标记、
-    //   选区的新旧差集，都是页上真的会变的像素。
+    //   的那些页（整窗重建时每一页都有一整块）。所以瞬态单独记一份：旧光标与选区的
+    //   新旧差集，都是页上真的会变的像素。
     const Rect caret_old = caret_rect_px_prev_;
-    std::vector<Rect> marks_old;
     std::vector<Rect> transient_dirty;
 
     const bool frame_geom_changed = (bitmap_.width() != frame_w) || (bitmap_.height() != frame_h);
@@ -913,26 +891,16 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
         for (int i = 0; i < count; ++i) refresh.push_back(pageRectOfPage(first_page + i));
         frame_needs_full_refresh_ = false;
         // 帧整窗重贴，旧瞬态在帧上没有存身之处；但页画布上的那几层还在。
-        //   旧光标、旧标记、旧选区一个都不能漏 —— 漏一个就是"光标走了、方括号还留着"，
+        //   旧光标、旧选区一个都不能漏 —— 漏一个就是"光标走了、选区还留着"，
         //   而且是永久残留（后续每一拍都只画新的那一份）。
         //   这里不再按"选区变没变"省那一份：帧重贴本就意味着整层要重铺，
         //   而 notePageDirty 会把重叠矩形并掉，代价远小于漏擦。
-        // 这条分支的漏擦目前测不出来：能触发它的两个入口（切模式、改字段属性）都会让
-        //   标记的位置或页位图跟着变，整页脏正好把它盖住。补这几行是为了不依赖那个巧合 ——
-        //   将来标记不再随排版走时，这里就是唯一的保障（见 TRAPS 134）。
-        marks_old.swap(control_marks_prev_);
         if (caret_old.w > 0.0f) transient_dirty.push_back(caret_old);
-        for (const Rect& r : marks_old) transient_dirty.push_back(r);
         for (const Rect& r : selection_rects_prev_) transient_dirty.push_back(r);
         for (const Rect& r : sel_rects) transient_dirty.push_back(r);
     } else {
         // 上一帧的光标也要擦掉 —— 它不一定落在任何脏页上
         if (caret_rect_px_prev_.w > 0.0f) refresh.push_back(caret_rect_px_prev_);
-        // 上一帧的表单标记同样要擦，而且这条是功能性的（不只是省像素）：
-        //   光标移出某个字段时，那个字段的方括号必须消失。
-        // 用 swap 而不是 clear：页画布上的覆盖层要知道"旧标记在哪儿"，才能擦掉。
-        marks_old.swap(control_marks_prev_);
-        for (const Rect& r : marks_old) refresh.push_back(r);
         // 选区按新旧差集处理：不再有的擦掉、新出现的铺底后画，交集那一大片不动。
         //   它画在帧上，而帧是增量的 —— 这一拍没被重贴的像素本来就是对的。
         //   窗口内平移时新旧各只差一页的矩形（页的槽号与窗口无关，矩形本身不变），
@@ -1012,37 +980,18 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
     // 光标
     const Rect cr = caretRectPx();
     if (cr.w > 0.0f) {
-        // 这里不再 copyRectFrom(base_, cr)。
-        //
-        //   上一帧光标已在 refresh 里擦过（caret_rect_px_prev_ 那一项），此处多余；
-        //   更要紧的是它会把落在光标矩形内的表单标记一并抹掉，而 control_marks_prev_
-        //   已把那些标记记为"画过了"，于是它们既留不下来也不会被补画，
-        //   表现为"标记渲染不更新"。当前几何下两侧括号都在光标矩形之外，所以加回去
-        //   暂时看不出差别 —— 但一旦间隙调小、字号变大或光标加宽就会开始吃标记。
+        // 这里不再 copyRectFrom(base_, cr)：上一帧光标已在 refresh 里擦过
+        //   （caret_rect_px_prev_ 那一项），此处多余。
         if (caret_visible_) bitmap_.fillRect(cr, cfg_.caret_color);
         caret_rect_px_prev_ = cr;
     } else {
         caret_rect_px_prev_ = Rect{};
     }
 
-    // 表单标记（方括号；可选的右下角小点）
-    //
-    // 画在帧上、不进底图：底图的更新判据是页指纹，而页指纹里没有标记 ——
-    //   开关括号 / 改颜色 / 开小点都不该让整页重光栅，它们是"帧上的东西"。
-    //   （5D 之后搬进页内容位图，那时这几项改由 rasterSignature 管，见方案 5D-1。）
-    //   标记与光标无关：括号常显，小点也是全控件常显 —— 见 drawControlMarks。
-    //
-    // 画在光标之后：光标和标记会在字段末尾附近贴住，
-    //   标记后画才能保证它不被光标盖掉（反过来就是上面那个 bug）。
-    // 只读不画：它是呈现与打印态，括号落进版面就印出来了。
-    if (mode_ != EditMode::ReadOnly) drawControlMarks(first_page, count);
-
     // 瞬态的"新位置"也进页脏矩形：光标擦旧画新是两个矩形，通常会在 notePageDirty
-    //   里并成一个；表单标记同理。
+    //   里并成一个。表单标记不在这里 —— 它画在页位图里（见 rasterControlMarks）。
     if (caret_old.w > 0.0f) transient_dirty.push_back(caret_old);
     if (cr.w > 0.0f) transient_dirty.push_back(cr);
-    for (const Rect& r : marks_old) transient_dirty.push_back(r);
-    for (const Rect& r : control_marks_prev_) transient_dirty.push_back(r);
 
     const auto t_overlay = Clock::now();
 
@@ -1080,18 +1029,6 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
             uni.h = y1 - uni.y;
         };
         for (const Rect& r : refresh) grow(r);
-        // 这一帧新画的表单标记也必须计入。
-        //
-        //   上面那个循环遍历的是 refresh，而 refresh 里的标记是上一帧的
-        //   （它们进 refresh 是为了被擦掉）。这一帧新画的标记是在
-        //   drawControlMarks() 之后才进 control_marks_prev_ 的，refresh 里没有。
-        //
-        //   这份 bbox 是给宿主做 putImageData(脏矩形) 用的契约 —— 它必须覆盖
-        //   这一帧实际写过的所有像素。少算了，宿主就不会更新那一块：
-        //   引擎帧是对的，画布上那块却留着上一帧的内容（新旧混合）。
-        //   平时看不出来，是因为标记一挪位置通常伴随页重画、bbox 被页矩形兜住；
-        //   但这个"兜住"是巧合，不该靠它。
-        for (const Rect& r : control_marks_prev_) grow(r);
         grow(cr);
         edit_stats_.repainted_x = any ? static_cast<int>(std::floor(uni.x)) : 0;
         edit_stats_.repainted_y = any ? static_cast<int>(std::floor(uni.y)) : 0;
@@ -1100,8 +1037,8 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
 
         // 顺带记下"这一帧写过哪几页"，口径与上面这份 bbox 完全一致：同样这几份矩形，
         //   一个都不多、一个都不少。宿主按页上屏靠的就是它 —— 页指纹只能说明
-        //   "底图哪几页变了"，而光标与表单标记画在帧上、不进底图，它们所在的那一页
-        //   同样要重贴，页指纹里却看不见。
+        //   "底图哪几页变了"，而光标画在帧上、不进底图，它所在的那一页同样要重贴，
+        //   页指纹里却看不见。
         last_dirty_pages_.clear();
         const int step = page_px_h + gap_px;
         // 帧矩形 -> 页号：先按步距折成槽号，再由槽表查出那一格装的是哪一页。
@@ -1124,7 +1061,6 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
             }
         };
         for (const Rect& r : refresh) notePage(r);
-        for (const Rect& r : control_marks_prev_) notePage(r);
         notePage(cr);
         // 页脏矩形：内容部分已在光栅调用点记过，瞬态那一半在 transient_dirty 里。
         // refresh 也一并转进来 —— 它才是"帧上真的写过哪儿"的完备清单：
@@ -1288,61 +1224,42 @@ void EditorEngine::drawAtomBox(Bitmap& target, const LineBox& lb, const LineClus
 }
 
 /**
- * 表单标记：
- * 方括号 —— 字段常显（开关关掉则一个都不显示，见 EngineConfig::show_brackets）
- * 小点   —— 独立开关，开时所有控件右下角各画一个方块，与焦点无关
- * 括号用字体里的字形而非矩形拼几何：拼出来的括号与正文不像同一套设计，
- * 而真字形与正文同粗细、同风格，且随正文字号缩放。字形无法纵向拉伸，
- * 跨行时每行各括一次。
+ * 表单标记（页内坐标，画进页位图）：方括号常显（开关关掉则一个都不显示）；小点是独立
+ * 开关，开时所有控件都画，与焦点无关。
+ * 括号用字体里的字形而非矩形拼几何：真字形与正文同粗细、同风格，随字号缩放；无法纵向
+ * 拉伸，所以跨行时每行各括一次。
  *
- * 几何全部从排版的行盒派生：位置取占位簇的 inline_pt、朝向取 bracket_side、
- * 字体与基线取行盒的 bracket_font 与 bracket_axis_pt。这样"要占位"与"要画"
- * 共用同一份数据，槽在就画得出，与那一行有没有字形无关，空字段也不例外。
+ * 几何从行盒派生：位置取占位簇的 inline_pt、朝向取 bracket_side、字体与基线取行盒的
+ * bracket_font 与 bracket_axis_pt —— 要画与要占位共用同一份数据，槽在就画得出。
+ *
+ * 画在页位图里而不是帧上：每一次变化都伴随重排或光栅签名变化（见 docs/步5-渲染层方案.md
+ * 的 5D 小节），不需要"矩形出口"；跟着内容缓存反而少一份逐帧擦除的账。
  */
-void EditorEngine::drawControlMarks(int first_page, int count) {
-    const float zoom = cfg_.zoom;
+void EditorEngine::rasterControlMarks(Bitmap& target, int page_index, const float* band_lo_pt,
+                                      const float* band_hi_pt) {
+    // 只读不画：它是呈现与打印态，括号落进版面就印出来了。
+    if (mode_ == EditMode::ReadOnly) return;
 
+    const float zoom = cfg_.zoom;
     const float units_to_px = zoom / kFontScalePerPt;
     const float dot = std::max(1.0f, cfg_.control_dot_pt * zoom);
+    const bool band = band_lo_pt && band_hi_pt;
 
-    // 括号：只过窗口内的行，不遍历整份 layout_.lines。
-    //
-    //   原先遍历全篇：2000 段文档是 4005 行，每行还要再过一遍簇（绝大多数行没有
-    //   占位簇，走的就是跳过那一支），实测每次呈现 2.0 ms —— 而"什么都没改的空转
-    //   呈现"的全部耗时恰好就是这 2.0 ms（同一条路径在 1 页文档上只有 0.00 ms）。
-    //   限窗同时也是正确性上的修正：帧坐标的 off_y 按 base_first_page_ 折算，窗口外的
-    //   行算出来是帧外坐标，画不进帧，却会被记进 control_marks_prev_，于是进 refresh
-    //   做一趟无用的搬运，还会把窗口外的页算进脏页清单与上屏框。
-    //   行数组按页单调，所以窗口的行区间两端各二分一次就够。
+    // 括号：只过这一页的行（行数组按页单调，两端二分一次），带外的行跳过。
+    //   与原子框那段同一个走法：一条带的边界就是行的块轴范围。
+    int k_begin = 0;
+    int k_end = -1;
+    caret_.linesOnPage(page_index, &k_begin, &k_end);
     const std::vector<LineBox>& lines = layout_.lines;
     const int n_lines = static_cast<int>(lines.size());
-    int k_begin = 0;
-    int k_end = n_lines - 1;
-    if (count > 0) {
-        int lo = 0, hi = -1;
-        caret_.linesOnPage(first_page, &lo, &hi);
-        int lo2 = 0, hi2 = -1;
-        caret_.linesOnPage(first_page + count - 1, &lo2, &hi2);
-        // 首页没有行时 lo 已经指向"页号更大的第一行"；末页没有行时取相邻页边界减一。
-        // 这两处的多取/少取都由下面逐行判页号兜住 —— 判据是页号，不是下标。
-        k_begin = lo;
-        k_end = (hi2 >= lo2) ? hi2 : lo2 - 1;
-    }
     for (int k = k_begin; k <= k_end && k < n_lines; ++k) {
         if (k < 0) continue;
         const LineBox& lb = lines[static_cast<size_t>(k)];
-        if (count > 0 && (lb.page < first_page || lb.page >= first_page + count)) continue;
         if (!lb.bracket_font) continue;
-        const float off_y = static_cast<float>(frameOffsetOfPage(lb.page));
+        if (band && (lb.block_hi_pt < *band_lo_pt - 1.0f || lb.block_lo_pt > *band_hi_pt + 1.0f))
+            continue;
 
         hb_font_t* hbf = lb.bracket_font->hb();
-        int sx = 0, sy = 0;
-        hb_font_get_scale(hbf, &sx, &sy);
-        // 擦除用近似矩形（字形实际轮廓比它小）。宁可大一点 ——
-        // 记小了会留下残影，记大了只是多写几十个像素。
-        const float em_px = std::max(1.0f, static_cast<float>(sx) * units_to_px);
-        const float up = em_px * 0.9f;
-        const float dn = em_px * 0.5f;
 
         for (const LineCluster& c : lb.clusters) {
             if (!c.placeholder) continue;
@@ -1371,19 +1288,15 @@ void EditorEngine::drawControlMarks(int first_page, int count) {
 
             if (!lb.vertical) {
                 // 横排：字形原点的 y 就是基线，行内轴是 x。
-                const float x = along_pt * zoom;
-                const float y = lb.bracket_axis_pt * zoom + off_y;
-                bitmap_.drawGlyph(hbf, g, x, y, units_to_px, col, 0.0f);
-                control_marks_prev_.push_back(Rect{x, y - up, adv, up + dn});
+                target.drawGlyph(hbf, g, along_pt * zoom, lb.bracket_axis_pt * zoom, units_to_px,
+                                 col, 0.0f);
             } else {
                 // 竖排：括号跟着转 90°（顺时针）。字形轮廓本身是横排形态，
                 //   [ 转过来开口朝下 —— 正好是"内容继续往下排"的意思。
                 //   不转的话括号会横躺在列里，开口方向与行内轴垂直（错的）。
                 //   旋转后 advance 沿 +y，所以位置分量是 (列内横轴笔位, 行内轴)。
-                const float x = lb.bracket_axis_pt * zoom;
-                const float y = along_pt * zoom + off_y;
-                bitmap_.drawGlyph(hbf, g, x, y, units_to_px, col, 90.0f);
-                control_marks_prev_.push_back(Rect{x - up, y, up + dn, adv});
+                target.drawGlyph(hbf, g, lb.bracket_axis_pt * zoom, along_pt * zoom, units_to_px,
+                                 col, 90.0f);
             }
         }
     }
@@ -1397,14 +1310,14 @@ void EditorEngine::drawControlMarks(int first_page, int count) {
         const Control& c = controls_.at(ci);
         const Color col = c.read_only ? cfg_.control_mark_ro : cfg_.control_mark;
         for (const ControlRect& cr : controlRects(ci)) {
-            if (count > 0 && (cr.page < first_page || cr.page >= first_page + count)) continue;
-            const float off_y = static_cast<float>(frameOffsetOfPage(cr.page));
+            if (cr.page != page_index) continue;
+            if (band &&
+                (cr.r_pt.y + cr.r_pt.h < *band_lo_pt - 1.0f || cr.r_pt.y > *band_hi_pt + 1.0f))
+                continue;
             // 小点：右下角、内缩一点
             const float x1 = (cr.r_pt.x + cr.r_pt.w) * zoom;
-            const float y1 = (cr.r_pt.y + cr.r_pt.h) * zoom + off_y;
-            const Rect box{x1 - dot, y1 - dot, dot, dot};
-            bitmap_.fillRect(box, col);
-            control_marks_prev_.push_back(box);
+            const float y1 = (cr.r_pt.y + cr.r_pt.h) * zoom;
+            target.fillRect(Rect{x1 - dot, y1 - dot, dot, dot}, col);
         }
     }
 }

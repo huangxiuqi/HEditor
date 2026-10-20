@@ -479,7 +479,7 @@ struct PlacedGlyph {
  * 画的时候挪，就把"槽"和"字形"分成了两套账 —— 括号会盖到相邻的字上，
  * 或者槽里空一条、字却已经走了。这和"括号必须进文档流"是同一条道理：
  * 凡是占画面的宽度，就必须是排版算出来的那一个。
- * 所以这里只留一个常数，排版和绘制共用它（见 engine.cpp 的 drawControlMarks）。
+ * 所以这里只留一个常数，排版和绘制共用它（见 engine_paint.cpp 的 rasterControlMarks）。
  */
 inline constexpr float kControlBracketSlotGapPt = 1.5f;
 

@@ -1191,15 +1191,16 @@ private:
     bool suffixIsHorizontalOnly(int from) const;
 
     /**
-     * 画表单标记（方括号；Focused 档下还给非聚焦字段画小点）到帧上。
+     * 画表单标记（方括号与小点）到一页的位图上 —— 页内坐标，不认帧。
+     *
      * 几何全部从排版的行盒派生（占位簇的位置 + 行盒的括号参考字体/基线）：
      * 排版说槽在哪，就画在哪 —— 空字段（一个字形都没有）也画得出来。
-     * 不进底图：见 presentInternal 里那段说明。
+     * 画在页位图里而不是帧上：判据见 docs/步5-渲染层方案.md 的 5D 小节。
      *
-     * first_page / count 是这一帧的窗口。标记只画窗口内的行：帧坐标按窗口首页折算，
-     *   窗口外的行落在帧外，画不进去也擦不着。
+     * band 非空时只画与这条带相交的行与控件 —— 与字形、原子框同一套裁剪口径。
      */
-    void drawControlMarks(int first_page, int count);
+    void rasterControlMarks(Bitmap& target, int page_index, const float* band_lo_pt,
+                            const float* band_hi_pt);
 
     /**
      * 画一枚行内原子的显式占位框到底图上。
@@ -1534,23 +1535,17 @@ private:
     float band_hi_scratch_ = 0.0f;
 
     /**
-     * relayout() 置位、presentInternal() 消费。
-     * 用它把"排版记账"和"光栅记账"分开：一次 relayout 后面可能跟很多次
-     * repaint（光标闪烁每 530ms 就一次），只有第一次该认领那笔排版成本。
-     * 表单标记"计划"的指纹（编辑模式 + 聚焦字段 + 各控件的投影矩形）。
-     * presentInternal 用它判断"这一帧要画的标记跟上一帧不一样"→ 整帧重贴。
-     * 理由（脆弱前提）写在 engine.cpp 的实现与 presentInternal 里。
-     */
-    uint64_t markPlanSignature() const;
-    uint64_t mark_sig_prev_ = 0;
-
-    /**
      * 待上屏脏矩形累加器（见 takeBlitBox 的注释）。
      */
     void noteBlitDirty(const Rect& r);
     Rect blit_acc_{};
     bool blit_acc_any_ = false;
 
+    /**
+     * relayout() 置位、presentInternal() 消费。
+     * 用它把"排版记账"和"光栅记账"分开：一次 relayout 后面可能跟很多次
+     * repaint（光标闪烁每 530ms 就一次），只有第一次该认领那笔排版成本。
+     */
     bool layout_pending_ = false;
 
     /**
@@ -1576,16 +1571,19 @@ private:
     size_t sel_pos_ = 0;
 
     /**
-     * 表单标记（小点/方括号）在帧像素下的矩形，用来在下一帧把它们擦掉。
-     * 与 caret_rect_px_prev_ 同一个思路：瞬态的东西必须记账，否则擦不干净。
+     * 上一次排版时各控件的只读位（1 = 只读）。
+     *
+     * 只读位只改括号颜色，不进块哈希 —— 页指纹看不见它。而括号现在画在页位图里
+     * （见 rasterControlMarks），所以 relayout 里比一次这个数组：变了就作废页缓存。
+     * 不比的话，"把字段改成只读"之后括号还是蓝色，直到别的原因让那一页重光栅。
      */
-    std::vector<Rect> control_marks_prev_;
+    std::vector<uint8_t> mark_readonly_prev_;
 
     /**
      * 要求下一次呈现整帧重贴（而不是只贴几个脏矩形）。
      * 用在"帧上画的东西变了、但底图没变"的时候 —— 切编辑模式、改控件集合。
-     * （底图不含控件标记，所以那两件事不会让页指纹变；不显式置位就会出现
-     * "切到只读模式后括号还在"这种残留。）
+     * （底图不含光标与选区，所以那两件事不会让页指纹变；不显式置位就会出现
+     * "切到只读模式后光标还在"这种残留。）
      */
     bool frame_needs_full_refresh_ = false;
 

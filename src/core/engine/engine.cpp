@@ -152,6 +152,12 @@ static uint64_t rasterSignature(const EngineConfig& cfg) {
     h = fnvMixColor(h, cfg.atom_border);
     h = fnvMixColor(h, cfg.atom_text);
     h = fnvMixFloat(h, cfg.atom_pad_pt);
+    // 表单标记：它们画在页位图里，改外观就是"这一页的像素变了"，而排版与页指纹都看不见。
+    h = fnvMix(h, cfg.show_brackets ? 1ULL : 0ULL);
+    h = fnvMix(h, cfg.show_control_dots ? 1ULL : 0ULL);
+    h = fnvMixColor(h, cfg.control_mark);
+    h = fnvMixColor(h, cfg.control_mark_ro);
+    h = fnvMixFloat(h, cfg.control_dot_pt);
     return h;
 }
 
@@ -1088,40 +1094,6 @@ bool EditorEngine::focusControl(bool forward) {
     setCaretByText(target);
     relayoutIfBracketPlanChanged(plan_before);
     return true;
-}
-
-/**
- * 表单标记的"计划"指纹：编辑模式 + 标记外观 + 每个控件的投影矩形。
- * 这就是 presentInternal 里"变了就整帧重贴"的判据。
- * 它必须只包含会影响标记的东西 —— 多塞了会让整帧重贴变得频繁
- * （整帧重贴本身不贵，但它会把增量重绘的账面数字冲掉），
- * 少塞了则会把陈旧标记留在画面上。
- *
- * 外观（颜色、小点开关与尺寸）必须进来：它们不改排版、不改页指纹，只改画出来的那几个
- * 像素；漏一项就是"改了颜色，旧颜色的括号还留在画面上"。小点是可配置的，这条漏项
- * 会被直接点到。
- * （5D 之后括号搬进页内容位图，这几项改由 rasterSignature 管，见方案 5D-1。）
- */
-uint64_t EditorEngine::markPlanSignature() const {
-    uint64_t h = kFnvBasis;
-    h = fnvMix(h, static_cast<uint64_t>(static_cast<int>(mode_)));
-    h = fnvMix(h, cfg_.show_brackets ? 1ULL : 0ULL);
-    h = fnvMix(h, cfg_.show_control_dots ? 1ULL : 0ULL);
-    h = fnvMixColor(h, cfg_.control_mark);
-    h = fnvMixColor(h, cfg_.control_mark_ro);
-    h = fnvMixFloat(h, cfg_.control_dot_pt);
-    for (int ci = 0; ci < controls_.size(); ++ci) {
-        const Control& c = controls_.at(ci);
-        h = fnvMix(h, c.read_only ? 1ULL : 0ULL);
-        for (const ControlRect& cr : controlRects(ci)) {
-            h = fnvMix(h, static_cast<uint64_t>(cr.page));
-            h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(quantPt(cr.r_pt.x))));
-            h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(quantPt(cr.r_pt.y))));
-            h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(quantPt(cr.r_pt.w))));
-            h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(quantPt(cr.r_pt.h))));
-        }
-    }
-    return h;
 }
 
 bool EditorEngine::indent() { return edit_.indent(); }

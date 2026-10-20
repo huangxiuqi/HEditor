@@ -107,15 +107,14 @@ void EditorEngine::computePageFingerprints(int dirty_lo, int dirty_hi) {
     //   于是"标脏"与"真值"在编码上不相交。别的页保留原值 —— 它们可能正是标脏值。
     for (int p = dirty_lo; p <= dirty_hi; ++p) page_fp_new_[static_cast<size_t>(p)] &= ~kFpDirtyBit;
 
-    // 表单控件与编辑模式刻意不进页指纹。
+    // 控件与编辑模式刻意不进页指纹。
     //
-    //   页指纹是"底图该不该重画"的判据，而底图里只有页面底色与字形 ——
-    //   控件标记（小点 / 方括号）画在帧上、不进底图（原因见 presentInternal）。
-    //   既然底图不依赖控件与模式，把它们混进来就只是无谓地重画所有页。
-    //
-    //   切模式时旧标记的清除靠 frame_needs_full_refresh_：切模式 / 改控件时置位，
-    //     下一次呈现整帧重贴，旧标记自然被覆盖。这比往指纹里塞东西更直接，
-    //     也不影响底图的增量。
+    //   页指纹算的是块哈希（文本 / 格式 / 表格结构），控件区间与模式不在这份输入里。
+    //   它们的影响由别的路带走：
+    //     显示 / 不显示括号会改占位（进文档流）→ 排版变 → 页指纹自然跟着变；
+    //     只读位只改括号颜色 → relayout 里比 mark_readonly_prev_，变了就作废页缓存；
+    //     切模式会重编译 + 整篇重排，块流本身就可能变。
+    //   把这些混进指纹只会无谓地重画所有页。
 
     computeLineFingerprints(dirty_lo, dirty_hi, !partial);
 }
@@ -300,8 +299,34 @@ void EditorEngine::relayout() {
     // 视图先摆好：下面第一件事就是夹光标，而它读的是视图（地址稳定，摆一次就够）。
     refreshViews();
 
-    // 顺序有讲究：先夹光标、再写对象表 —— 因为"哪些字段要显示括号"在 Focused 档下
-    //   由光标位置决定（见 bracketedControls），表写完才是排版的输入。
+    // 只读位只改括号颜色：它不进块哈希，页指纹看不见 —— 而括号画在页位图里
+    //   （见 rasterControlMarks），不作废页缓存就会留着旧颜色。这里比一次集合，
+    //   变了才清（清一次 = 整窗重光栅，改只读本来就是低频操作）。
+    {
+        const int nc = static_cast<int>(controls_.size());
+        bool ro_changed = (mark_readonly_prev_.size() != static_cast<size_t>(nc));
+        if (!ro_changed) {
+            for (int i = 0; i < nc; ++i) {
+                if (mark_readonly_prev_[static_cast<size_t>(i)] !=
+                    (controls_.at(i).read_only ? 1 : 0)) {
+                    ro_changed = true;
+                    break;
+                }
+            }
+        }
+        if (ro_changed) {
+            mark_readonly_prev_.assign(static_cast<size_t>(nc), 0);
+            for (int i = 0; i < nc; ++i) {
+                mark_readonly_prev_[static_cast<size_t>(i)] = controls_.at(i).read_only ? 1 : 0;
+            }
+            page_cache_.clear();
+            page_dirty_rects_.clear();  // 旧矩形描述的是旧像素
+            base_valid_ = false;
+        }
+    }
+
+    // 顺序有讲究：先夹光标、再写对象表 —— 对象表要按光标算出来的流位置落锚点，
+    //   表写完才是排版的输入。
     //
     //   这里只夹数值范围，不吸附簇：簇吸附需要簇表，而此刻尚未排版；用上一轮的簇表
     //     会把光标拉回旧簇边界，表现为"敲字后光标差一个位置"。簇吸附放在排版之后。
@@ -320,8 +345,8 @@ void EditorEngine::relayout() {
     //   "括号占位"（占宽度、不产生字形），于是断行/行盒长度/簇位置全把括号算进去
     //   —— 这就是"括号进文档流"。不显示的就不进表（规则：显示才占位）。
     //
-    // 名单仍由引擎算（bracketedControls，只有它认识"聚焦"），但它落成的是块流里的
-    //   一项，排版层拿到的是一份自足的输入：要画与要占位是同一条记录，分不开。
+    // 筛由引擎做（只有它认识编辑模式与显示开关），但它落成的是块流里的一项，
+    //   排版层拿到的是一份自足的输入：要画与要占位是同一条记录，分不开。
     syncInlineObjects();
     const int n_para = static_cast<int>(blocks().size());
 
