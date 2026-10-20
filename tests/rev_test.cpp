@@ -6,6 +6,7 @@
  * 判据必须含反向一半：新实现拒绝的操作，朴素模型也要认为它非法；哈希"应当相同"的地方
  * 相等、"应当不同"的地方不等 —— 只测相等会让一个恒返回 0 的哈希也通过。
  */
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <random>
@@ -2429,6 +2430,58 @@ int main() {
         expectTrue(to_show.range.after_blocks == static_cast<int>(b_shown.size()),
                    "显示：after_blocks 跟着呈现态多一块（实测 " +
                        std::to_string(to_show.range.after_blocks) + "）");
+    }
+
+    std::printf("\n[24] 流索引的占用只随活节点数走，不随节点号水位走\n");
+    {
+        // 节点号是递增水位：新建节点才分配新号，旧号不回收。按节点号开数组的索引会让
+        //   占用随会话长度增长，而活节点数并不增长 —— 长会话里它是一条只变差的曲线。
+        //   分段再合并：每轮都新建一个段落标记节点，水位只涨不落，段数回到原样。
+        std::vector<std::u32string> paras(20, U"段内容长度固定的占位文字。");
+        Doc d = rev::makeTextDoc(paras);
+        const NodeId id_before = d.next_id;
+        const rev::FlowIndex base(d, FlowVisibility::Display);
+
+        int rounds = 0;
+        for (int i = 0; i < 3000; ++i) {
+            const int p = i % 19;  // 最后一段没有下一段可合并
+            const rev::EditResult s = rev::splitPara(d, p, 6);
+            if (!s.ok) break;
+            const rev::EditResult m = rev::mergePara(s.doc, p);
+            if (!m.ok) break;
+            d = m.doc;
+            ++rounds;
+        }
+        const rev::FlowIndex grown(d, FlowVisibility::Display);
+
+        // 前提：水位确实涨了、编辑确实发生了。没有这两条，下面的判据在"什么都没做"时恒真。
+        expectTrue(rounds == 3000,
+                   "前提：三千轮分段+合并都成功（实际 " + std::to_string(rounds) + " 轮）");
+        expectTrue(d.next_id >= id_before + 3000, "前提：水位被推高了（" +
+                                                      std::to_string(id_before) + " → " +
+                                                      std::to_string(d.next_id) + "）");
+        expectTrue(static_cast<int>(paras.size()) == static_cast<int>(rev::paraTexts(d).size()),
+                   "前提：段数回到原样");
+
+        // 主判据折成"每活节点字节数"：水位涨、节点数涨、两者一起涨，三种情形只有一个数
+        //   能把它们分开。上界按"四个数组 + 哈希表容量不超过两倍"给。
+        const double per_node =
+            static_cast<double>(grown.allocatedBytes()) / std::max(1, grown.nodeCount());
+        expectTrue(per_node <= 96.0, "★ 每个活节点的索引开销 ≤ 96 字节（实测 " +
+                                         std::to_string(static_cast<long long>(per_node)) +
+                                         "，水位 " + std::to_string(d.next_id) + "）");
+        expectTrue(grown.allocatedBytes() < static_cast<std::size_t>(d.next_id) * 8,
+                   "★ 索引占用与节点号水位脱钩（" +
+                       std::to_string(static_cast<unsigned long long>(grown.allocatedBytes())) +
+                       " 字节，水位 " + std::to_string(d.next_id) + "）");
+
+        // 反向一半：占用确实随活节点数变，否则上面两条可以靠"恒返回一个小值"通过。
+        std::vector<std::u32string> many(400, U"段");
+        const Doc big = rev::makeTextDoc(many);
+        const std::size_t big_bytes = rev::FlowIndex(big, FlowVisibility::Display).allocatedBytes();
+        expectTrue(big_bytes > base.allocatedBytes() * 4,
+                   "反向：四百段文档的索引明显更大（" +
+                       std::to_string(static_cast<unsigned long long>(big_bytes)) + " 字节）");
     }
 
     std::printf("\n结果：%d 项断言，%d 项失败\n", g_checks, g_failures);

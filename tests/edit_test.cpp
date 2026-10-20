@@ -680,6 +680,7 @@ int main() {
     {
         e.setCaret(0, 0);
         e.repaint();
+        const EditStats beforeMove = e.editStats();
         const bool moved = e.moveCaretAndRender(1);
         const long long caretPaint = e.editStats().repainted_pixels;
 
@@ -697,17 +698,17 @@ int main() {
                    "光标移动的写入量 < 首次全量的 1/100（局部重绘不是估算，是记账）");
 
         // 记账的归属也必须干净。
-        //   光标移动没有重排，所以这三个字段必须是 0。
-        //   它们从前是在 presentInternal() 里被无条件写成满值的 —— 于是"移动一次光标"
-        //   会被上报成"重排了 12 行、布局耗时 3ms"。数字本身是真的（来自上一次重排），
-        //   归属是错的，而这种假账最容易被当成性能证据引用出去。
+        //   光标移动没有重排，所以 layout_ran 必须是 false。
+        //   排版那几个数字仍是上一轮的账 —— 它们由 relayout() 发布、呈现不改写。
+        //   断言"没被抹掉"而不是"归零"：抹零之后，排版刚算出来的账就再也读不到了
+        //   （撤销之后不呈现就读，是这条最容易踩的一格）。
         expectTrue(!e.editStats().layout_ran, "光标移动：本轮未重排（layout_ran=false）");
-        expectTrue(e.editStats().relaid_lines == 0,
-                   "光标移动：重排行数上报 0，不是上一次重排的残留");
-        expectTrue(e.editStats().layout_ms == 0.0,
-                   "光标移动：布局耗时上报 0，不是上一次重排的残留");
-        expectTrue(!e.editStats().layout_was_full,
-                   "光标移动：不能被标成「全量布局」（那会让人以为光标移动很贵）");
+        expectTrue(e.editStats().relaid_lines == beforeMove.relaid_lines,
+                   "光标移动：重排行数不被呈现抹掉（仍是上一轮排版的账）");
+        expectTrue(e.editStats().layout_ms == beforeMove.layout_ms,
+                   "光标移动：布局耗时不被呈现抹掉（同上）");
+        expectTrue(e.editStats().layout_was_full == beforeMove.layout_was_full,
+                   "光标移动：全量标记不被呈现改写");
 
         // 光标不可见时，写入量应该更小（只擦不画）
         e.showCaret(false);
@@ -10310,6 +10311,28 @@ int main() {
                        "★ 括号计划在损伤区间之外变了，撤销之后的增量仍与全量逐字段一致");
             expectTrue(eb.layout().glyphs.size() == glyphsInB,
                        "★ 字形数回到落笔之前（那个字被撤掉、括号也回到同一个字段）");
+        }
+
+        // (e) 排版账不被第二次呈现抹掉：一次编辑之后宿主常常再呈现一次（上屏收尾、
+        //   光标闪烁），第二次不该把刚算出来的账清成 0 —— 那会让"这一次编辑排了多少"
+        //   永远读不到。本轮标志按拍结算，数字按"最近一次排版"保留。
+        {
+            e.setCaret(kN / 3, 2);
+            expectTrue(e.typeTextAndRender("\xE6\xB5\x8B"), "第 40 段打一个字");
+            const EditStats first = e.editStats();
+            e.repaint();
+            const EditStats second = e.editStats();
+            expectTrue(
+                first.layout_ran && first.relaid_paragraphs > 0,
+                "打字那一拍报告了重排（relaid=" + std::to_string(first.relaid_paragraphs) + "）");
+            expectTrue(!second.layout_ran, "第二次呈现不再报告重排（本轮标志按拍结算）");
+            expectTrue(second.relaid_paragraphs == first.relaid_paragraphs &&
+                           second.reused_paragraphs == first.reused_paragraphs &&
+                           second.layout_ms == first.layout_ms,
+                       "★ 第二次呈现不抹掉排版账（reused=" +
+                           std::to_string(second.reused_paragraphs) + "）");
+            expectTrue(e.undoAndRender(), "撤掉这一笔");
+            expectTrue(blocksRestored(), "撤销之后块内容逐块回到打字之前");
         }
     }
 

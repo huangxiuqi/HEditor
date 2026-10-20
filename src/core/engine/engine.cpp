@@ -309,6 +309,13 @@ void EditorEngine::finishRebuildFromTree(FlowVisibility vis,
     const auto t_ctl0 = Clock::now();
     exportControls(controls);
     edit_stats_.rebuild_controls_ms = msSince(t_ctl0);
+
+    // 文档规模在产生处发布：它由这一轮的块流与控件集合决定，与"有没有呈现过"无关。
+    //   挂在呈现上时，撤销之后不呈现就读到旧规模 —— 而这个读数正是宿主判断滚动条与
+    //   页数的输入。段数按全量块流给：聚焦档下可见块更少，但它不是"文档有多少段"。
+    edit_stats_.total_paragraphs = static_cast<int>(blocks_full_.size());
+    edit_stats_.doc_codepoints = documentCodepoints();
+    edit_stats_.control_count = controls_.size();
 }
 
 int EditorEngine::caretSide() const { return caret_.caretSide(); }
@@ -496,7 +503,9 @@ size_t EditorEngine::frameBytes() const { return bitmap_.byteSize(); }
 
 size_t EditorEngine::documentCodepoints() const {
     size_t n = 0;
-    for (const BlockSpec& b : blocks()) n += b.cp_text.size();
+    // 按全量块流数：这是文档的码点数，不是"当前可见的码点数"。聚焦档下 blocks()
+    //   是一份筛过的副本，用它会让同一个文档在有、无聚焦时给出两个规模。
+    for (const BlockSpec& b : blocks_full_) n += b.cp_text.size();
     return n;
 }
 

@@ -1322,8 +1322,7 @@ function relayoutAndBlit() {
   if (!ready && !mod) return;
   presetWindowForLoad();
   // 槽数必须在重排重画之前报过去：帧的布局由它定，报晚了这一趟就按旧槽号画，
-  //   而 settle 里那次"发现槽数变了再补一次 present"会额外消费掉排版账
-  //   （首次装载的 layoutRan / layoutMs 被后一次 present 冲成 0）。
+  //   而 settle 里那次"发现槽数变了再补一次 present"要多画一整帧。
   syncFrameSlots();
   relayoutNow();
   return settle(api.read('editStats'), { scroll: false });

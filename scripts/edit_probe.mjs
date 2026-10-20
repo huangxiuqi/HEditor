@@ -210,12 +210,15 @@ async function main() {
   chk.section('[3] 方向键 = 真增量：不重排、0 脏页、写入量差两个数量级');
   {
     await c.eval('await window.__heditor.setCaret(0, 0); return true;');
+    const beforeMove = await c.eval('return window.__heditor.editStats;');
     await c.eval(key('ArrowRight'));
     const right = await c.eval('return { c: window.__heditor.caret, st: window.__heditor.editStats };');
     chk.check('右移后光标偏移 +1', right.c.offset === 1, `offset=${right.c.offset}`);
     chk.check(' 光标移动不重排（layoutRan=false）', right.st.layoutRan === false);
-    chk.check(' 光标移动重排行数为 0（不是上一次重排的残留）', right.st.relaidLines === 0);
-    chk.check(' 光标移动布局耗时为 0', right.st.layoutMs === 0);
+    chk.check(' 光标移动不抹掉排版账（仍是上一轮的重排行数）',
+              right.st.relaidLines === beforeMove.relaidLines,
+              `${right.st.relaidLines} / 上一轮 ${beforeMove.relaidLines}`);
+    chk.check(' 光标移动不抹掉布局耗时', right.st.layoutMs === beforeMove.layoutMs);
     chk.check(' 光标移动 0 个脏页（底图一个字都没变）', right.st.dirtyPageCount === 0);
     chk.check(' 光标移动写入量 < 全量的 1/100',
               right.st.repaintedPixels * 100 < full,

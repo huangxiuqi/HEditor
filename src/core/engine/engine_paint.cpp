@@ -890,38 +890,16 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
     // 例外是点画布带进来的归属提示：共享边界上它比"最内层"更准，走同一个
     //   focusedControlIndex（面板/探针看到的必须与实际落笔的字段一致）。
     edit_stats_.edit_mode = static_cast<int>(mode_);
-    edit_stats_.control_count = controls_.size();
     edit_stats_.caret_control = focusedControlIndex();
     edit_stats_.blocked_edits = blocked_edits_;
     edit_stats_.caret_index = caret_now.offset;
     for (int i = 0; i < caret_now.para && i < static_cast<int>(blocks().size()); ++i)
         edit_stats_.caret_index += blocks()[static_cast<size_t>(i)].cp_text.size();
-    edit_stats_.doc_codepoints = documentCodepoints();
 
-    // 只有在"这一轮真的重排过"时才上报 —— 见 layout_pending_ 的注释。
-    // 数字来自 relayout() 记下的粒度：全量时 relaid_lines 等于总行数，
-    // 增量时只数这一轮真正排过的后缀（前缀是复用的，不能算进来）。
+    // 本轮有没有重排：只有呈现这一步能回答，所以这一格仍在这里结算。数字本身由
+    //   relayout() 发布，这里不改写 —— 它们是"最近一次排版"的账，不是"这一拍"的。
     edit_stats_.layout_ran = layout_pending_;
-    edit_stats_.total_paragraphs = static_cast<int>(blocks().size());
-    edit_stats_.total_lines = layout_.stats.placed_line_count;
-    if (layout_pending_) {
-        layout_pending_ = false;
-        edit_stats_.relaid_paragraphs = last_relaid_paragraphs_;
-        edit_stats_.reused_paragraphs = last_reused_paragraphs_;
-        edit_stats_.suffix_shifted = last_suffix_shifted_;
-        edit_stats_.relaid_lines = last_relaid_lines_;
-        edit_stats_.layout_was_full = last_layout_full_;
-    } else {
-        // 没重排：行数记 0、耗时记 0。
-        // 不归零的话，光标闪烁会每 530ms 把上一次重排的 3ms 重复上报一遍。
-        edit_stats_.relaid_paragraphs = 0;
-        edit_stats_.reused_paragraphs = 0;
-        edit_stats_.suffix_shifted = false;
-        edit_stats_.relaid_lines = 0;
-        edit_stats_.layout_was_full = false;
-        edit_stats_.layout_ms = 0.0;
-        edit_stats_.page_fp_ms = 0.0;
-    }
+    if (layout_pending_) layout_pending_ = false;
 
     const auto t_end = Clock::now();
     const double paint_ms = msSince(t0);
@@ -943,7 +921,12 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
     stats_.frame_width = frame_w;
     stats_.frame_height = frame_h;
     edit_stats_.paint_ms = paint_ms;
-    edit_stats_.total_ms = edit_stats_.layout_ms + edit_stats_.page_fp_ms + paint_ms;
+    // 合计只算这一拍真正发生过的段：排版账是"最近一次"的，没有重排的这一拍不能把它加进来，
+    //   否则光标闪烁会每次多报一次排版耗时。
+    edit_stats_.total_ms = paint_ms;
+    if (edit_stats_.layout_ran) {
+        edit_stats_.total_ms += edit_stats_.layout_ms + edit_stats_.page_fp_ms;
+    }
 
     // 字形缓存的预算与占用（Skia 的全局 strike 缓存）。
     stats_.glyph_cache_bytes = base_.glyphCacheUsedBytes();

@@ -450,7 +450,17 @@ void EditorEngine::relayout() {
     // 这一轮排版的真实耗时（含截断/拼接/逐段汇总）—— 有些路径不经过
     // layoutDocumentRange（快路），那里算不出这个数，所以在这里统一收口。
     edit_stats_.layout_ms = layout_.stats.layout_ms;
-    // 排版成本只记一次：置位后由 presentInternal() 消费。
+    // 排版账在这里发布，不在呈现里：这些数字由这一轮排版决定，呈现只是把它读出去。
+    //   挂在呈现上有两处读不到 —— 排版之后、呈现之前读到的是上一轮的账；两次呈现之间
+    //   再呈现一次会把数字抹成 0，而抹掉的偏偏是刚算出来的那一份。
+    edit_stats_.layout_ran = true;
+    edit_stats_.relaid_paragraphs = last_relaid_paragraphs_;
+    edit_stats_.reused_paragraphs = last_reused_paragraphs_;
+    edit_stats_.suffix_shifted = last_suffix_shifted_;
+    edit_stats_.relaid_lines = last_relaid_lines_;
+    edit_stats_.layout_was_full = last_layout_full_;
+    edit_stats_.total_lines = layout_.stats.placed_line_count;
+    // 呈现只需消费"本轮重排过"这一次信号（见 presentInternal）。
     layout_pending_ = true;
     stats_.total_ms += msSince(t0);
 }

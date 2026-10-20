@@ -13,30 +13,37 @@ int textLenOf(const Node& n) {
     return run == nullptr ? 0 : static_cast<int>(run->text.size());
 }
 
+/**
+ * 节点号的散列。节点号按 1、2、3 递增分配，低位几乎连续，直接取模会让相邻的号挤在
+ * 同一段槽里；先混一遍高位再取模，探测长度才与"随机"一致。
+ */
+std::size_t hashId(NodeId id) {
+    std::uint64_t x = id;
+    x ^= x >> 33;
+    x *= 0xff51afd7ed558ccdULL;
+    x ^= x >> 33;
+    return static_cast<std::size_t>(x);
+}
+
 }  // namespace
 
 FlowIndex::FlowIndex(const Doc& doc, FlowVisibility vis) : vis_(vis) {
-    const size_t slots = static_cast<size_t>(doc.next_id) + 1;
-    by_id_.assign(slots, nullptr);
-    first_.assign(slots, -1);
-    span_.assign(slots, 0);
-    if (!doc.root) {
-        size_ = 0;
-        return;
-    }
+    if (!doc.root) return;
     root_ = doc.root->id;
     int cursor = 0;
     measure(doc.root, cursor, true);
     size_ = cursor;
+    buildLookup();
 }
 
 void FlowIndex::measure(const Ref& n, int& cursor, bool is_root) {
     if (vis_ == FlowVisibility::Display && n->hidden) return;
 
     const int start = cursor;
-    const size_t slot = static_cast<size_t>(n->id);
-    first_[slot] = start;
-    by_id_[slot] = n.get();
+    const int idx = static_cast<int>(nodes_.size());
+    nodes_.push_back(n.get());
+    first_.push_back(start);
+    span_.push_back(0);
 
     if (isContainer(n->kind)) {
         if (!is_root) ++cursor;
@@ -48,40 +55,71 @@ void FlowIndex::measure(const Ref& n, int& cursor, bool is_root) {
         ++cursor;
     }
 
-    span_[slot] = cursor - start;
+    span_[static_cast<std::size_t>(idx)] = cursor - start;
+}
+
+void FlowIndex::buildLookup() {
+    std::size_t cap = 16;
+    while (cap < nodes_.size() * 2) cap <<= 1;
+    lookup_.assign(cap, Entry{});
+    mask_ = cap - 1;
+    for (std::size_t i = 0; i < nodes_.size(); ++i) {
+        const NodeId id = nodes_[i]->id;
+        std::size_t slot = hashId(id) & mask_;
+        while (lookup_[slot].id != kInvalidNodeId) slot = (slot + 1) & mask_;
+        lookup_[slot].id = id;
+        lookup_[slot].idx = static_cast<int>(i);
+    }
+}
+
+int FlowIndex::indexOf(NodeId id) const {
+    if (id == kInvalidNodeId || lookup_.empty()) return -1;
+    std::size_t slot = hashId(id) & mask_;
+    while (lookup_[slot].id != kInvalidNodeId) {
+        if (lookup_[slot].id == id) return lookup_[slot].idx;
+        slot = (slot + 1) & mask_;
+    }
+    return -1;
+}
+
+std::size_t FlowIndex::allocatedBytes() const {
+    return nodes_.capacity() * sizeof(const Node*) + first_.capacity() * sizeof(int) +
+           span_.capacity() * sizeof(int) + lookup_.capacity() * sizeof(Entry);
 }
 
 int FlowIndex::contentStartOf(NodeId id) const {
-    const bool is_root = (id == root_);
-    return firstOf(id) + (is_root ? 0 : 1);
+    const int idx = indexOf(id);
+    if (idx < 0) return -1;
+    return firstAt(idx) + (id == root_ ? 0 : 1);
 }
 
 bool FlowIndex::intervalOf(NodeId id, int* first, int* end) const {
-    if (!inFlow(id)) return false;
-    const int start = firstOf(id);
-    if (first != nullptr) *first = start;
-    if (end != nullptr) *end = start + spanOf(id);
+    const int idx = indexOf(id);
+    if (idx < 0) return false;
+    if (first != nullptr) *first = firstAt(idx);
+    if (end != nullptr) *end = endAt(idx);
     return true;
 }
 
 FlowPos FlowIndex::flowAt(const Pos& pos) const {
-    const Node* n = find(pos.container);
-    if (n == nullptr || pos.offset < 0) return -1;
-    if (!inFlow(pos.container)) return -1;
+    const int idx = indexOf(pos.container);
+    if (idx < 0 || pos.offset < 0) return -1;
+    const Node* n = nodeAt(idx);
 
     if (isContainer(n->kind)) {
         const int slots = static_cast<int>(n->children.size());
         if (pos.offset > slots) return -1;
         if (pos.offset == 0) return contentStartOf(pos.container);
-        const Ref& prev = n->children[static_cast<size_t>(pos.offset) - 1];
-        if (!inFlow(prev->id)) return -1;
-        return endOf(prev->id);
+        const Ref& prev = n->children[static_cast<std::size_t>(pos.offset) - 1];
+        const int prev_idx = indexOf(prev->id);
+        if (prev_idx < 0) return -1;
+        return endAt(prev_idx);
     }
     if (isText(n->kind)) {
         if (pos.offset > textLenOf(*n)) return -1;
-        return firstOf(pos.container) + pos.offset;
+        return firstAt(idx) + pos.offset;
     }
-    return pos.offset == 0 ? firstOf(pos.container) : -1;
+    return pos.offset == 0 ? firstAt(idx) : -1;
 }
 
 Pos FlowIndex::posAt(FlowPos flow) const {
@@ -89,14 +127,16 @@ Pos FlowIndex::posAt(FlowPos flow) const {
     if (flow > size_) flow = size_;
 
     NodeId cur = root_;
-    while (cur != kInvalidNodeId) {
-        const Node* n = find(cur);
-        if (n == nullptr || !isContainer(n->kind)) break;
+    int cur_idx = indexOf(cur);
+    while (cur_idx >= 0) {
+        const Node* n = nodeAt(cur_idx);
+        if (!isContainer(n->kind)) break;
         NodeId next = kInvalidNodeId;
         for (const Ref& child : n->children) {
-            if (!inFlow(child->id)) continue;
-            const int cfirst = firstOf(child->id);
-            const int cend = endOf(child->id);
+            const int ci = indexOf(child->id);
+            if (ci < 0) continue;
+            const int cfirst = firstAt(ci);
+            const int cend = endAt(ci);
             const bool inner = (flow > cfirst && flow < cend);
             const bool leaf_head = (!isContainer(child->kind) && flow == cfirst && cfirst < cend);
             if (inner || leaf_head) {
@@ -106,19 +146,20 @@ Pos FlowIndex::posAt(FlowPos flow) const {
         }
         if (next == kInvalidNodeId) break;
         cur = next;
+        cur_idx = indexOf(cur);
     }
 
-    const Node* n = find(cur);
-    if (n == nullptr) return Pos{root_, 0};
-    if (!isContainer(n->kind)) return Pos{cur, flow - firstOf(cur)};
+    if (cur_idx < 0) return Pos{root_, 0};
+    const Node* n = nodeAt(cur_idx);
+    if (!isContainer(n->kind)) return Pos{cur, flow - firstAt(cur_idx)};
 
     if (flow == contentStartOf(cur)) return Pos{cur, 0};
     int last_slot = 0;
-    for (size_t i = 0; i < n->children.size(); ++i) {
-        const Ref& child = n->children[i];
-        if (!inFlow(child->id)) continue;
+    for (std::size_t i = 0; i < n->children.size(); ++i) {
+        const int ci = indexOf(n->children[i]->id);
+        if (ci < 0) continue;
         last_slot = static_cast<int>(i) + 1;
-        if (flow == endOf(child->id)) return Pos{cur, last_slot};
+        if (flow == endAt(ci)) return Pos{cur, last_slot};
     }
     return Pos{cur, last_slot};
 }
