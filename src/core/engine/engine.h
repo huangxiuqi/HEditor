@@ -81,6 +81,13 @@ public:
      * 排版层的输入：块流。它只有一个产处 —— 模型树编译出来的产物（见 setDocument）。
      */
     const std::vector<BlockSpec>& blocks() const { return blocks_; }
+    /**
+     * 与块流同一层的产物：表格结构（宽度、列宽、行规则、每格的跨度与块区间）。
+     *
+     * 单列一个读口是因为它与 blocks() 是两种形状：块流描述"排什么"，这里描述"框在哪"。
+     * 只比块流看不出列宽与跨度的错，正如只比表格看不出文字。
+     */
+    const std::vector<LayoutTable>& tableSpecs() const { return tables_; }
 
     /**
      * 文档装载：引擎从此持有一棵模型树，块流是它的编译产物（第十四节那条接缝）。

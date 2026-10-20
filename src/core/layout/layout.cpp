@@ -304,6 +304,103 @@ const BlockShaping* withInlineObjects(const BlockSpec& b, uint32_t n_cp, const B
     return scratch;
 }
 
+/**
+ * 断出来的一行（竖排下是一列）：簇区间与这一行自己的度量。
+ *
+ * 它刻意不含页号与 y —— 那两样是分页的产物，断行只看"装得下多少"。这条分工是排版拆成
+ * 两件事的全部内容：断行是块局部的（给定容量与簇，结果是确定的），分页是行流上的前缀和
+ * （给定每行高度与页高，页边界是确定的）。
+ */
+struct BrokenLine {
+    size_t begin = 0;  // 簇下标（含）
+    size_t end = 0;    // 簇下标（不含）
+    /**
+     * 本行的行高（竖排下是列宽）：行距与内容撑高取大，见 breakLine 里的说明。
+     */
+    float line_h = 0.0f;
+    float ascent = 0.0f;
+    float descent = 0.0f;
+    /**
+     * 本行最大字号。行盒的 size_pt 与行距都由它定；一个 run 时就是块级那套值。
+     */
+    float size_pt = 0.0f;
+};
+
+/**
+ * 从 start 起断出下一行：容量是 avail，度量取自每个簇所在的 run。
+ *
+ * 行高 = 行距（字号 × 倍数），但行里塞进比文本更高的东西（原子盒）时，撑高的是内容，
+ * 行距本身要留着：max(行距, 内容高 + 行距 - 文本高)。纯文本行两项相等 ⇒ 就是行距；
+ * 原子行 ⇒ 盒高 + 行距。只取 max(行距, 盒高) 是错的：那样盒底下面一点空隙都没有，
+ * 下一行的字紧贴着盒底排（实测相邻两行的行盒还重叠 3.5 磅）—— 看起来就是"那一行的行距
+ * 没了"。行距是段落属性，不该被行里的一枚盒子吃掉。
+ *
+ * 横排与竖排用的是同一个式子（那边叫 col_w，这边叫 line_h），所以它只有一份实现。
+ */
+BrokenLine breakLine(const BlockShaping& bs, const std::vector<LineMetric>& cluster_metric,
+                     size_t start, float avail, float block_size_pt, float line_factor) {
+    const LineSlice slice = takeLine(bs.cluster_adv_pt, bs.break_after, start, avail);
+
+    BrokenLine out;
+    out.begin = slice.begin;
+    out.end = slice.end;
+
+    float ascent = 0.0f;
+    float descent = 0.0f;
+    float max_size = 0.0f;
+    float max_box = 0.0f;
+    // 文本自己的度量（不含原子）：行距是"文本行之间的距离"，它由字号定 ——
+    // 算行高时要把它和"内容撑出来的高度"分开，见上面那段。
+    float text_ascent = 0.0f;
+    float text_descent = 0.0f;
+    for (size_t i = slice.begin; i < slice.end; ++i) {
+        ascent = std::max(ascent, cluster_metric[i].ascent_pt);
+        descent = std::max(descent, cluster_metric[i].descent_pt);
+        max_size = std::max(max_size, cluster_metric[i].size_pt);
+        max_box = std::max(max_box, cluster_metric[i].box_h_pt);
+        if (bs.clusters[i].atom == InlineAtom::None) {
+            text_ascent = std::max(text_ascent, cluster_metric[i].ascent_pt);
+            text_descent = std::max(text_descent, cluster_metric[i].descent_pt);
+        }
+    }
+    // 一个度量都取不到（取不到字体）就退回块级那套：几何必须存在。
+    if (max_size <= 0.0f && max_box <= 0.0f) {
+        ascent = bs.ascent_pt;
+        descent = bs.descent_pt;
+        max_size = block_size_pt;
+    }
+
+    float text_extent = text_ascent + text_descent;
+    if (!(text_extent > 0.0f)) text_extent = bs.ascent_pt + bs.descent_pt;
+    const float pitch = ((max_size > 0.0f) ? max_size : block_size_pt) * line_factor;
+    const float leading = std::max(0.0f, pitch - text_extent);
+
+    out.ascent = ascent;
+    out.descent = descent;
+    out.size_pt = max_size;
+    out.line_h = std::max(pitch, ascent + descent + leading);
+    return out;
+}
+
+/**
+ * 整块的断行：横排的容量是恒定的可用宽度，所以一次切完。
+ *
+ * 竖排不能这样切：一列的容量是"这一条带还能放多高"，而换带（分页）由已经排了几列决定 ——
+ * 容量随排版推进而变，只能一列一列地断（见竖排分支里的 breakLine 调用）。
+ */
+void breakBlock(const BlockShaping& bs, const std::vector<LineMetric>& cluster_metric, float width,
+                float block_size_pt, float line_factor, std::vector<BrokenLine>* out) {
+    out->clear();
+    if (bs.clusters.empty()) return;
+    size_t start = 0;
+    while (start < bs.clusters.size()) {
+        const BrokenLine line =
+            breakLine(bs, cluster_metric, start, width, block_size_pt, line_factor);
+        start = line.end;
+        out->push_back(line);
+    }
+}
+
 }  // namespace
 
 bool runsTileText(const BlockSpec& b, std::string* why) {
@@ -619,8 +716,8 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
         int cell = -1;
         float row_top = 0.0f;
         float row_content_h = 0.0f;
-        size_t line_begin = 0;   // 本行第一个行盒下标（换页时整行平移）
-        size_t glyph_begin = 0;  // 同上，字形
+        size_t line_begin = 0;    // 本行第一个行盒下标（换页时整行平移）
+        size_t glyph_begin = 0;   // 同上，字形
         size_t placed_index = 0;  // 这张表在 res.placed_tables 里的下标（绘制几何）
     };
     std::vector<TableFrame> tstack;
@@ -733,8 +830,7 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
         TableFrame& f = tstack.back();
         if (f.cell >= 0) {
             f.row_content_h = std::max(
-                f.row_content_h,
-                cursor_y - f.row_top - kTableCellPaddingPt - last_space_after);
+                f.row_content_h, cursor_y - f.row_top - kTableCellPaddingPt - last_space_after);
         }
         f.cell = -1;
     };
@@ -769,8 +865,7 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
             lb.bracket_axis_pt += dy;
             lb.page += 1;
         }
-        const int line_no =
-            (f.line_begin < res.lines.size()) ? res.lines[f.line_begin].line : 0;
+        const int line_no = (f.line_begin < res.lines.size()) ? res.lines[f.line_begin].line : 0;
         for (PlacedGlyph& g : res.glyphs) {
             if (g.line < line_no) continue;
             g.y_pt += dy;
@@ -964,6 +1059,10 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
         }
     };
 
+    // 断行结果的缓冲区：容量跨块保留。每段新建一个 vector 在 2000 段的文档上是 2000 次
+    //   分配，而这一层对"空转 present 与段数无关"是有承诺的。
+    std::vector<BrokenLine> lines;
+
     for (int para_i = from_para; para_i < to_para; ++para_i) {
         const size_t para_index = static_cast<size_t>(para_i);
         const BlockSpec& b = blocks[para_index];
@@ -1109,8 +1208,8 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
                 lb.inline_origin_pt = locY(lb.page, cursor_y);
                 lb.bracket_axis_pt = center;
                 // 竖排块在分页下吃掉本页剩余高度；连页下它占的是一条高 col_w 的横带。
-                cursor_y = cont ? (cursor_y + col_w + b.space_after_pt)
-                                : (cy + ch + b.space_after_pt);
+                cursor_y =
+                    cont ? (cursor_y + col_w + b.space_after_pt) : (cy + ch + b.space_after_pt);
             }
             res.lines.push_back(std::move(lb));
             ++line_total;
@@ -1194,15 +1293,16 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
                     cluster_metric[i] = am;
                 }
                 para_metric.size_pt = std::max(para_metric.size_pt, cluster_metric[i].size_pt);
-                para_metric.ascent_pt = std::max(para_metric.ascent_pt, cluster_metric[i].ascent_pt);
+                para_metric.ascent_pt =
+                    std::max(para_metric.ascent_pt, cluster_metric[i].ascent_pt);
                 para_metric.descent_pt =
                     std::max(para_metric.descent_pt, cluster_metric[i].descent_pt);
                 para_metric.box_h_pt = std::max(para_metric.box_h_pt, cluster_metric[i].box_h_pt);
             }
             // 一个度量都取不到（取不到字体）：退回块级那套，几何必须存在。
             if (para_metric.size_pt <= 0.0f) {
-                para_metric = LineMetric{b.size_pt, bs.ascent_pt, bs.descent_pt,
-                                         para_metric.box_h_pt};
+                para_metric =
+                    LineMetric{b.size_pt, bs.ascent_pt, bs.descent_pt, para_metric.box_h_pt};
             }
         }
 
@@ -1210,73 +1310,12 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
             // 横排。推进的是行顶（top）而不是基线：一行里可以混排字号，基线 = 行顶 +
             //   本行 ascent，而 ascent 逐行不同 —— 拿基线累加会带着上一行的 ascent 走，
             //   翻页之后落点就错了。
-            size_t start = 0;
-            float top = cursor_y;
-            float prev_line_h = block_line_h;  // 上一行的行高：本行行顶由它推进
-            bool anchor = true;                // 段首或刚翻过页：本行按 cursor_y 重新定位
-            while (start < bs.clusters.size()) {
-                const LineSlice slice = takeLine(bs.cluster_adv_pt, bs.break_after, start, cur_cw);
-
-                // 本行的行度量：取本行所有簇所在 run 的最大 ascent / descent / 字号。
-                //   一行里可以混排字号（字符格式 run），行盒高度与基线必须由本行最高的那个
-                //   决定，否则大字会溢出到相邻行上。只有一个 run 时这就是块级那套值。
-                float ascent = 0.0f;
-                float descent = 0.0f;
-                float max_size = 0.0f;
-                float max_box = 0.0f;
-                // 文本自己的度量（不含原子）：行距是"文本行之间的距离"，它由字号定 ——
-                //   算行高时要把它和"内容撑出来的高度"分开，见下面。
-                float text_ascent = 0.0f;
-                float text_descent = 0.0f;
-                for (size_t i = slice.begin; i < slice.end; ++i) {
-                    ascent = std::max(ascent, cluster_metric[i].ascent_pt);
-                    descent = std::max(descent, cluster_metric[i].descent_pt);
-                    max_size = std::max(max_size, cluster_metric[i].size_pt);
-                    max_box = std::max(max_box, cluster_metric[i].box_h_pt);
-                    if (bs.clusters[i].atom == InlineAtom::None) {
-                        text_ascent = std::max(text_ascent, cluster_metric[i].ascent_pt);
-                        text_descent = std::max(text_descent, cluster_metric[i].descent_pt);
-                    }
-                }
-                if (max_size <= 0.0f && max_box <= 0.0f) {
-                    ascent = bs.ascent_pt;
-                    descent = bs.descent_pt;
-                    max_size = b.size_pt;
-                }
-                // 行高 = 行距（字号 × 倍数），但行里塞进比文本更高的东西（原子盒）时，
-                //   撑高的是内容，行距本身要留着：max(行距, 内容高 + 行距 - 文本高)。
-                //   纯文本行两项相等 ⇒ 就是行距，与加原子之前逐字段相同；
-                //   原子行 ⇒ 盒高 + 行距。
-                //   只取 max(行距, 盒高) 是错的：那样盒底下面一点空隙都没有，下一行的字
-                //   紧贴着盒底排（实测相邻两行的行盒还重叠 3.5 磅）—— 看起来就是"那一行的
-                //   行距没了"。行距是段落属性，不该被行里的一枚盒子吃掉。
-                float text_extent = text_ascent + text_descent;
-                if (!(text_extent > 0.0f)) text_extent = bs.ascent_pt + bs.descent_pt;
-                const float pitch = ((max_size > 0.0f) ? max_size : b.size_pt) * b.line_factor;
-                const float leading = std::max(0.0f, pitch - text_extent);
-                const float line_h = std::max(pitch, ascent + descent + leading);
-
-                // 本行放不下就翻页。判定必须用本行自己的高度：上一行结束时还不知道
-                //   本行多高，拿上一行的高度估会漏判（下一行更高时溢出页底）。
-                //   连页下这一整条短路：内容一列连到底，行照样往前排（跨条带也不断）。
-                if (anchor) {
-                    // 段首那一行：本段从 cursor_y 起排。
-                    if (!cont && tstack.empty() && cursor_y + line_h > cy + ch) {
-                        ++page_index;
-                        cursor_y = cy;
-                    }
-                    top = cursor_y;
-                    anchor = false;
-                } else {
-                    top += prev_line_h;
-                    if (!cont && tstack.empty() && top + line_h > cy + ch) {
-                        ++page_index;
-                        cursor_y = cy;
-                        top = cursor_y;
-                    }
-                }
-                const float baseline = top + ascent;
-
+            // 断行一次做完：容量是这一块的可用宽度，与页无关。分页在下面按行推进 ——
+            //   两个循环各管一件事，断行的结果里没有页号，分页的循环里没有断行规则。
+            breakBlock(bs, cluster_metric, cur_cw, b.size_pt, b.line_factor, &lines);
+            // 落位：给这一行的行顶与基线，产出它的行盒与字形。它只认 y，不决定 y ——
+            //   决定 y 的是上面的翻页判据（那是分页的事）。
+            auto placeLine = [&](const BrokenLine& line, float top, float baseline) {
                 // 行盒（几何的正面半边）
                 LineBox lb;
                 lb.paragraph = static_cast<int>(para_index);
@@ -1290,20 +1329,20 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
                 }
                 lb.vertical = false;
                 lb.sideways = false;
-                lb.size_pt = (max_size > 0.0f) ? max_size : b.size_pt;
-                lb.block_lo_pt = locY(lb.page, baseline - ascent);
-                lb.block_hi_pt = locY(lb.page, baseline + descent);
+                lb.size_pt = (line.size_pt > 0.0f) ? line.size_pt : b.size_pt;
+                lb.block_lo_pt = locY(lb.page, baseline - line.ascent);
+                lb.block_hi_pt = locY(lb.page, baseline + line.descent);
                 lb.inline_origin_pt = cur_cx;
                 // 画括号用：字体与基线（横排下字形原点的 y 就是基线）。
                 // 字体必须是块的主字体（= 上面算占位槽宽那个 bracketAdvancePt 的来源），
                 //   换个字体画括号，字形 advance 就和槽宽对不上了。
                 lb.bracket_font = bs.primary;
                 lb.bracket_axis_pt = locY(lb.page, baseline);
-                lb.first_cp = bs.clusters[slice.begin].cp;
-                lb.last_cp = lastCpOf(slice.end);
+                lb.first_cp = bs.clusters[line.begin].cp;
+                lb.last_cp = lastCpOf(line.end);
                 {
                     float ax = 0.0f;
-                    for (size_t i = slice.begin; i < slice.end; ++i) {
+                    for (size_t i = line.begin; i < line.end; ++i) {
                         LineCluster lc;
                         lc.cp = bs.clusters[i].cp;
                         lc.inline_pt = ax;
@@ -1336,7 +1375,7 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
                 //   改成"每个簇开头把 pen_x 重置成 cx + ax"，两者就共用一个累加器，
                 //   结构上不可能再不一致（对普通簇是恒等变换，不改任何既有结果）。
                 float ax = 0.0f;
-                for (size_t i = slice.begin; i < slice.end; ++i) {
+                for (size_t i = line.begin; i < line.end; ++i) {
                     pen_x = cur_cx + ax;
                     for (size_t g = bs.clusters[i].g0; g < bs.clusters[i].g1; ++g) {
                         const ShapedGlyph& sg = bs.st.glyphs[g];
@@ -1368,8 +1407,37 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
                     }
                     ax += bs.cluster_adv_pt[i];
                 }
+            };
 
-                start = slice.end;
+            float top = cursor_y;
+            float prev_line_h = block_line_h;  // 上一行的行高：本行行顶由它推进
+            bool anchor = true;                // 段首或刚翻过页：本行按 cursor_y 重新定位
+            for (const BrokenLine& line : lines) {
+                const float line_h = line.line_h;
+                const float ascent = line.ascent;
+                const float descent = line.descent;
+                const float max_size = line.size_pt;
+
+                // 本行放不下就翻页。判定必须用本行自己的高度：上一行结束时还不知道
+                //   本行多高，拿上一行的高度估会漏判（下一行更高时溢出页底）。
+                //   连页下这一整条短路：内容一列连到底，行照样往前排（跨条带也不断）。
+                if (anchor) {
+                    // 段首那一行：本段从 cursor_y 起排。
+                    if (!cont && tstack.empty() && cursor_y + line_h > cy + ch) {
+                        ++page_index;
+                        cursor_y = cy;
+                    }
+                    top = cursor_y;
+                    anchor = false;
+                } else {
+                    top += prev_line_h;
+                    if (!cont && tstack.empty() && top + line_h > cy + ch) {
+                        ++page_index;
+                        cursor_y = cy;
+                        top = cursor_y;
+                    }
+                }
+                placeLine(line, top, top + line.ascent);
                 prev_line_h = line_h;
                 ++line_total;
             }
@@ -1422,59 +1490,12 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
             //   要让字身在列里居中 → 基线 x = 列中线 - (ascender - descent)/2。
             const bool sideways = bs.st.sideways;
 
-            size_t start = 0;
-            while (start < bs.clusters.size()) {
-                float avail = (cy + ch) - pen_y;
-                if (avail < para_metric.size_pt) {
-                    nextBand();
-                    avail = (cy + ch) - pen_y;
-                }
-
-                const LineSlice slice = takeLine(bs.cluster_adv_pt, bs.break_after, start, avail);
-
-                // 本列的列度量：取本列所有簇所在 run 的最大字号 / ascent / descent。
-                //   列宽与侧倒的笔位都由它定；只有一个 run 时这就是块级那套值。
-                float col_size = 0.0f;
-                float col_asc = 0.0f;
-                float col_desc = 0.0f;
-                float col_box = 0.0f;
-                float col_text_asc = 0.0f;
-                float col_text_desc = 0.0f;
-                for (size_t i = slice.begin; i < slice.end; ++i) {
-                    col_size = std::max(col_size, cluster_metric[i].size_pt);
-                    col_asc = std::max(col_asc, cluster_metric[i].ascent_pt);
-                    col_desc = std::max(col_desc, cluster_metric[i].descent_pt);
-                    col_box = std::max(col_box, cluster_metric[i].box_h_pt);
-                    if (bs.clusters[i].atom == InlineAtom::None) {
-                        col_text_asc = std::max(col_text_asc, cluster_metric[i].ascent_pt);
-                        col_text_desc = std::max(col_text_desc, cluster_metric[i].descent_pt);
-                    }
-                }
-                if (col_size <= 0.0f && col_box <= 0.0f) {
-                    col_size = b.size_pt;
-                    col_asc = bs.ascent_pt;
-                    col_desc = bs.descent_pt;
-                }
-                // 列宽同理：原子的盒高在竖排下占的是列宽（横轴），与横排下行高占的是同一个
-                //   位置关系，所以"行距要留着"这条也一样 —— 见横排那一支的说明。
-                float col_text_extent = col_text_asc + col_text_desc;
-                if (!(col_text_extent > 0.0f)) col_text_extent = bs.ascent_pt + bs.descent_pt;
-                const float col_pitch =
-                    ((col_size > 0.0f) ? col_size : b.size_pt) * b.line_factor;
-                const float col_leading = std::max(0.0f, col_pitch - col_text_extent);
-                col_w = std::max(col_pitch, col_asc + col_desc + col_leading);
-
-                // 本列在剩余宽度里放不下就换一条带。这一步只能放在"这一列的内容定下来
-                //   之后"：列宽是逐列算出来的，事先不知道。列长与列宽无关，换带之后同一段
-                //   内容仍然装得下（avail 不变），所以不必重新取。
-                //   第一列例外：放不下也照排，否则永远排不进去。
-                const float edge_after = rtl ? (next_edge - col_w) : (next_edge + col_w);
-                const bool overflow =
-                    rtl ? (edge_after < cx - 0.01f) : (edge_after > cx + cw + 0.01f);
-                if (col > 0 && overflow) nextBand();
-
-                const float col_center =
-                    rtl ? (next_edge - col_w * 0.5f) : (next_edge + col_w * 0.5f);
+            // 落位：给这一列的列心、列宽与列顶，产出它的行盒与字形。它只认几何，不决定
+            //   几何 —— 换带（分页）在上面那个判据里。
+            auto placeColumn = [&](const BrokenLine& col_line, float col_center, float col_w,
+                                   float pen_y) {
+                const float col_asc = col_line.ascent;
+                const float col_desc = col_line.descent;
                 // 列内横轴的起始笔位：直立竖排 = 列心；侧倒 = 列心减去半个字身
                 // （理由见上面那段"笔的定位"注释）。
                 // 名字里带 0：它只是"这一列的起点"，字形放置时那个 gx 会往前推进
@@ -1495,18 +1516,18 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
                 }
                 lb.vertical = true;
                 lb.sideways = sideways;
-                lb.size_pt = col_size;
+                lb.size_pt = col_line.size_pt;
                 lb.block_lo_pt = col_center - col_w * 0.5f;
                 lb.block_hi_pt = col_center + col_w * 0.5f;
                 lb.inline_origin_pt = locY(lb.page, pen_y);
                 // 画括号用：字体 + 竖排下的列内横轴起始笔位。
                 lb.bracket_font = bs.primary;
                 lb.bracket_axis_pt = gx0;
-                lb.first_cp = bs.clusters[slice.begin].cp;
-                lb.last_cp = lastCpOf(slice.end);
+                lb.first_cp = bs.clusters[col_line.begin].cp;
+                lb.last_cp = lastCpOf(col_line.end);
                 {
                     float ay = 0.0f;
-                    for (size_t i = slice.begin; i < slice.end; ++i) {
+                    for (size_t i = col_line.begin; i < col_line.end; ++i) {
                         LineCluster lc;
                         lc.cp = bs.clusters[i].cp;
                         lc.inline_pt = ay;
@@ -1531,7 +1552,7 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
                 //   竖排的行内轴是 y，所以这里重置的是 gy（gx 是列内横轴，不参与）。
                 //   横排/竖排两条路都栽在同一处 —— 占位簇没有字形，字形连加推不动它。
                 float ay = 0.0f;
-                for (size_t i = slice.begin; i < slice.end; ++i) {
+                for (size_t i = col_line.begin; i < col_line.end; ++i) {
                     gy = pen_y + ay;
                     for (size_t g = bs.clusters[i].g0; g < bs.clusters[i].g1; ++g) {
                         const ShapedGlyph& sg = bs.st.glyphs[g];
@@ -1574,8 +1595,35 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
                     }
                     ay += bs.cluster_adv_pt[i];
                 }
+            };
 
-                start = slice.end;
+            size_t start = 0;
+            while (start < bs.clusters.size()) {
+                float avail = (cy + ch) - pen_y;
+                if (avail < para_metric.size_pt) {
+                    nextBand();
+                    avail = (cy + ch) - pen_y;
+                }
+
+                // 一列一列地断：容量是这一条带剩下的高度（换带之后重算），所以这里只断
+                //   一列。列宽（竖排下的"行高"）由 breakLine 算 —— 与横排同一个式子。
+                const BrokenLine col_line =
+                    breakLine(bs, cluster_metric, start, avail, b.size_pt, b.line_factor);
+                col_w = col_line.line_h;
+
+                // 本列在剩余宽度里放不下就换一条带。这一步只能放在"这一列的内容定下来
+                //   之后"：列宽是逐列算出来的，事先不知道。列长与列宽无关，换带之后同一段
+                //   内容仍然装得下（avail 不变），所以不必重新取。
+                //   第一列例外：放不下也照排，否则永远排不进去。
+                const float edge_after = rtl ? (next_edge - col_w) : (next_edge + col_w);
+                const bool overflow =
+                    rtl ? (edge_after < cx - 0.01f) : (edge_after > cx + cw + 0.01f);
+                if (col > 0 && overflow) nextBand();
+
+                const float col_center =
+                    rtl ? (next_edge - col_w * 0.5f) : (next_edge + col_w * 0.5f);
+                placeColumn(col_line, col_center, col_w, pen_y);
+                start = col_line.end;
                 if (start < bs.clusters.size()) {
                     next_edge = rtl ? (next_edge - col_w) : (next_edge + col_w);
                     ++col;
@@ -1585,8 +1633,7 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
             line_total += col + 1;
             // 竖排块在分页下吃掉本页剩余高度（后续块另起一页）；连页下它占的是
             //   若干条长 ch 的横带，所以下一条从最后那条带的底下开始。
-            cursor_y = cont ? (region_top + ch + b.space_after_pt)
-                            : (cy + ch + b.space_after_pt);
+            cursor_y = cont ? (region_top + ch + b.space_after_pt) : (cy + ch + b.space_after_pt);
         }
 
         pi.line_end = static_cast<int>(res.lines.size());

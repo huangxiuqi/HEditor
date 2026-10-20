@@ -188,6 +188,7 @@ add_library(heditor_core STATIC
   src/core/rev/project.cpp
   src/core/rev/serialize.cpp
   src/core/rev/from_tree.cpp
+  src/core/rev/session.cpp
   src/core/text/font.cpp
   src/core/text/font_source.cpp
   src/core/text/shaper.cpp

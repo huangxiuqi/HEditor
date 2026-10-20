@@ -23,15 +23,23 @@
 #include "core/doc/section_spec.h"
 #include "core/engine/engine.h"
 #include "core/layout/layout.h"
+#include "core/rev/project.h"
+#include "core/rev/rev.h"
 #include "core/text/font.h"
 #include "core/text/shaper.h"
+#include "core/utils/hash.h"
 #include "demo/demo_documents.h"
+
+#include "block_compare.h"
 
 #ifndef HEDITOR_NATIVE_ASSET_DIR
 #define HEDITOR_NATIVE_ASSET_DIR "."
 #endif
 
 using namespace heditor;
+using heditor::rev::Doc;
+using testcmp::blockDiff;
+using testcmp::sameBlock;
 
 namespace {
 
@@ -46,6 +54,148 @@ void expectTrue(bool cond, const std::string& what) {
         ++g_failures;
         std::printf("  [FAIL] %s\n", what.c_str());
     }
+}
+
+/**
+ * 排版摘要：把一次排版的全部几何压成一个 64 位值，给"只改结构、不改结果"的重构上锁。
+ *
+ * 它补两个洞：单点几何断言覆盖不到的地方（表格行片段、跨页切点、成百行的普通段落）改了
+ * 没人看得见；而"增量 == 全量"的参照物与增量路径共用同一份代码，实现错了两边一起错
+ * （TRAPS 107）。它锁的是"重构前后逐位相同"，不是"排版是对的"。
+ *
+ * 用法上有一条硬要求：排版行为有意改变时必须重新取值，并在提交说明里写清改了什么、为什么，
+ * 否则这条锁会退化成"谁改谁重打一个数"。浮点按位入哈希（不量化）；字体指针不进哈希
+ * （跨进程地址不同），按首次出现顺序编号代替。
+ */
+struct LayoutDigest {
+    uint64_t hash = kFnvBasis;
+    int font_slots = 0;
+    std::vector<const FontInstance*> fonts;
+
+    int slot(const FontInstance* f) {
+        if (f == nullptr) return -1;
+        for (size_t i = 0; i < fonts.size(); ++i) {
+            if (fonts[i] == f) return static_cast<int>(i);
+        }
+        fonts.push_back(f);
+        ++font_slots;
+        return static_cast<int>(fonts.size()) - 1;
+    }
+    void u64(uint64_t v) { hash = fnvMix(hash, v); }
+    void i64(int64_t v) { u64(static_cast<uint64_t>(v)); }
+    void f32(float v) {
+        uint32_t bits = 0;
+        std::memcpy(&bits, &v, sizeof(bits));
+        u64(bits);
+    }
+};
+
+LayoutDigest digestOf(const LayoutResult& lay) {
+    LayoutDigest d;
+    d.i64(static_cast<int64_t>(lay.lines.size()));
+    d.i64(static_cast<int64_t>(lay.glyphs.size()));
+    d.i64(static_cast<int64_t>(lay.placed_tables.size()));
+    d.i64(lay.stats.page_count);
+    d.i64(lay.stats.glyph_count);
+    d.i64(lay.stats.placed_line_count);
+    d.i64(lay.stats.cluster_count);
+    d.i64(lay.stats.missing_glyph_count);
+
+    for (const LineBox& lb : lay.lines) {
+        d.i64(lb.paragraph);
+        d.i64(lb.line);
+        d.i64(lb.page);
+        d.u64(lb.vertical ? 1 : 0);
+        d.u64(lb.sideways ? 1 : 0);
+        d.f32(lb.size_pt);
+        d.f32(lb.block_lo_pt);
+        d.f32(lb.block_hi_pt);
+        d.f32(lb.inline_origin_pt);
+        d.f32(lb.inline_end_pt);
+        d.f32(lb.bracket_axis_pt);
+        d.i64(static_cast<int64_t>(lb.first_cp));
+        d.i64(static_cast<int64_t>(lb.last_cp));
+        d.f32(lb.cell_lo_pt);
+        d.f32(lb.cell_hi_pt);
+        d.f32(lb.cell_box_lo_pt);
+        d.f32(lb.cell_box_hi_pt);
+        d.f32(lb.cell_top_pt);
+        d.f32(lb.cell_bottom_pt);
+        d.i64(d.slot(lb.bracket_font));
+        d.i64(static_cast<int64_t>(lb.clusters.size()));
+        for (const LineCluster& c : lb.clusters) {
+            d.i64(static_cast<int64_t>(c.cp));
+            d.f32(c.inline_pt);
+            d.u64(c.placeholder ? 1 : 0);
+            d.i64(static_cast<int64_t>(c.bracket_side));
+            d.u64(c.read_only ? 1 : 0);
+            d.i64(c.owner_control);
+            d.i64(static_cast<int64_t>(c.atom));
+            d.f32(c.atom_h_pt);
+            d.u64(c.content_hash);
+        }
+    }
+    for (const PlacedGlyph& g : lay.glyphs) {
+        d.i64(static_cast<int64_t>(g.glyph_id));
+        d.i64(d.slot(g.font));
+        d.f32(g.x_pt);
+        d.f32(g.y_pt);
+        d.i64(g.page);
+        d.i64(g.line);
+        d.u64(g.vertical ? 1 : 0);
+        d.f32(g.rotate_deg);
+        d.i64(static_cast<int64_t>(g.cluster));
+        d.i64(g.paragraph);
+        d.i64(g.color.r);
+        d.i64(g.color.g);
+        d.i64(g.color.b);
+        d.i64(g.color.a);
+    }
+    for (const PlacedTable& t : lay.placed_tables) {
+        d.u64(t.handle);
+        d.f32(t.x);
+        d.f32(t.w);
+        d.i64(t.rows);
+        d.i64(t.cols);
+        d.i64(static_cast<int64_t>(t.col_x.size()));
+        for (float v : t.col_x) d.f32(v);
+        d.i64(static_cast<int64_t>(t.cells.size()));
+        for (const LayoutCell& c : t.cells) {
+            d.i64(c.row);
+            d.i64(c.cell);
+            d.i64(c.row_span);
+            d.i64(c.col_span);
+            d.i64(static_cast<int64_t>(c.v_align));
+            d.i64(c.first_block);
+            d.i64(c.block_count);
+        }
+        d.i64(static_cast<int64_t>(t.placed.size()));
+        for (const PlacedRow& r : t.placed) {
+            d.i64(r.row);
+            d.i64(r.page);
+            d.f32(r.y);
+            d.f32(r.h);
+            d.u64(r.cont_top ? 1 : 0);
+            d.u64(r.cont_bottom ? 1 : 0);
+        }
+    }
+    for (const ParaIndex& p : lay.para_index) {
+        d.i64(p.line_begin);
+        d.i64(p.line_end);
+        d.i64(p.glyph_begin);
+        d.i64(p.glyph_end);
+        d.i64(p.cluster_count);
+        d.i64(p.missing_count);
+        d.i64(p.font_run_count);
+        d.i64(p.state_at_start.page_index);
+        d.f32(p.state_at_start.cursor_y);
+        d.i64(p.state_at_start.line_total);
+    }
+    for (const std::vector<uint32_t>& starts : lay.para_cluster_starts) {
+        d.i64(static_cast<int64_t>(starts.size()));
+        for (uint32_t v : starts) d.u64(v);
+    }
+    return d;
 }
 
 template <typename A, typename B>
@@ -1162,7 +1312,8 @@ int main() {
             //   退出去之后落在控件之外，那儿的字在表单模式里本来就不可编辑 ⇒ 再退一次才被拒。
             ef.setCaret(0, 5);
             expectTrue(ef.caretSide() == 1, "光标在字段 #0 的开括号之后");
-            expectTrue(ef.backspaceAndRender(), "★ 开括号之后退格：这次按键没被吞掉（光标退了出去）");
+            expectTrue(ef.backspaceAndRender(),
+                       "★ 开括号之后退格：这次按键没被吞掉（光标退了出去）");
             expectTrue(ef.blocks()[0].cp_text.size() == len0, "长度仍然不变（一个字都没删）");
             expectTrue(ef.caret().offset == 5 && ef.caretSide() == 0,
                        "★ 光标退到了开括号左面（cp 5 侧别 0）—— 实际 " +
@@ -7237,7 +7388,8 @@ int main() {
             const TextPos after5 = e5.caret();
             expectTrue(after5 == before5,
                        "★ 前面那一段少了几位之后光标仍在 (2, 4)：换基要按段内位置重新落基（实际 (" +
-                           std::to_string(after5.para) + ", " + std::to_string(after5.offset) + ")）");
+                           std::to_string(after5.para) + ", " + std::to_string(after5.offset) +
+                           ")）");
         }
     }
 
@@ -7633,15 +7785,14 @@ int main() {
         //   （moveCaretToDocStart 走的就是它）。
         e37.moveCaretToDocStart();
         const FlowPos doc_first = e37.selection().focus;
-        expectTrue(all37.begin() == doc_first,
-                   "★ 全选起点是第一块内容起点（期望 " + std::to_string(doc_first) +
-                       "，实际 " + std::to_string(all37.begin()) + "）");
+        expectTrue(all37.begin() == doc_first, "★ 全选起点是第一块内容起点（期望 " +
+                                                   std::to_string(doc_first) + "，实际 " +
+                                                   std::to_string(all37.begin()) + "）");
         expectTrue(all37.focus > all37.anchor, "锚点在首、焦点在末");
         e37.setCaretAtFlow(all37.end());
         expectTrue(e37.caret().para == 2 && e37.caret().offset == 3,
-                   "★ 全选的末端就是最后一段的段末（实际 (" +
-                       std::to_string(e37.caret().para) + ", " +
-                       std::to_string(e37.caret().offset) + ")）");
+                   "★ 全选的末端就是最后一段的段末（实际 (" + std::to_string(e37.caret().para) +
+                       ", " + std::to_string(e37.caret().offset) + ")）");
 
         // (g) 空选区零矩形
         e37.setCaret(0, 0);
@@ -7655,15 +7806,18 @@ int main() {
                    "同一行内两字 → 一个矩形（实际 " + std::to_string(rects37.size()) + "）");
         const LineBox* lb37 = nullptr;
         for (const LineBox& lb : e37.layout().lines) {
-            if (lb.paragraph == 0) { lb37 = &lb; break; }
+            if (lb.paragraph == 0) {
+                lb37 = &lb;
+                break;
+            }
         }
         expectTrue(lb37 != nullptr, "第一段有行盒");
         if (lb37 != nullptr && rects37.size() == 1) {
             const float x0 = lb37->clusters[0].inline_pt;
             const float x1 = lb37->clusters[2].inline_pt;
             expectTrue(std::fabs(rects37[0].r_pt.w - (x1 - x0)) < 0.01f,
-                       "★ 矩形宽 = 两簇推进之和（期望 " + std::to_string(x1 - x0) +
-                           "，实际 " + std::to_string(rects37[0].r_pt.w) + "）");
+                       "★ 矩形宽 = 两簇推进之和（期望 " + std::to_string(x1 - x0) + "，实际 " +
+                           std::to_string(rects37[0].r_pt.w) + "）");
         }
 
         // (i) 跨行：矩形按行拆开，块轴范围各不同
@@ -7678,9 +7832,8 @@ int main() {
                 lo_y = std::min(lo_y, pr.r_pt.y);
                 hi_y = std::max(hi_y, pr.r_pt.y);
             }
-            expectTrue(hi_y > lo_y, "★ 折行的矩形块轴位置各不相同（最小的 " +
-                                        std::to_string(lo_y) + " < 最大的 " +
-                                        std::to_string(hi_y) + "）");
+            expectTrue(hi_y > lo_y, "★ 折行的矩形块轴位置各不相同（最小的 " + std::to_string(lo_y) +
+                                        " < 最大的 " + std::to_string(hi_y) + "）");
         }
 
         // (j) 上下键：↓↑ 回原位
@@ -7700,9 +7853,9 @@ int main() {
         expectTrue(e37.moveCaretVertical(1), "再下移（出行）");
         Rect rc37{};
         expectTrue(e37.caretRectPt(&rc37), "取落定光标的页面矩形");
-        expectTrue(std::fabs(rc37.x - ra37.x) < 1.0f,
-                   "★ 跨过短行后列位保留（起点 x " + std::to_string(ra37.x) +
-                       "，落点 x " + std::to_string(rc37.x) + "）");
+        expectTrue(std::fabs(rc37.x - ra37.x) < 1.0f, "★ 跨过短行后列位保留（起点 x " +
+                                                          std::to_string(ra37.x) + "，落点 x " +
+                                                          std::to_string(rc37.x) + "）");
 
         // (l) 文档首尾
         e37.setCaret(2, 3);
@@ -7772,19 +7925,19 @@ int main() {
         expectTrue(e38.caret().para == 0 && e38.caret().offset == 3,
                    "落点在插入的那个字之后（实际 (" + std::to_string(e38.caret().para) + ", " +
                        std::to_string(e38.caret().offset) + ")）");
-        expectTrue(paras38(e38) == 3, "★ 同段内替换不改段数（实际 " +
-                                          std::to_string(paras38(e38)) + " 段）");
+        expectTrue(paras38(e38) == 3,
+                   "★ 同段内替换不改段数（实际 " + std::to_string(paras38(e38)) + " 段）");
 
         // (b) 撤销一次：文字与选区那两端一起回来
         expectTrue(e38.undo(), "撤销");
         expectTrue(text38(e38, 0) == "零一二三四五六七八九十",
                    "★ 撤销回原文（实际 " + text38(e38, 0) + "）");
         expectTrue(e38.hasSelection(), "★ 撤销之后选区还在（不是只剩一个光标）");
-        expectTrue(e38.selection() == before38,
-                   "★ 撤销回到编辑前两端（期望 " + std::to_string(before38.anchor) + ".." +
-                       std::to_string(before38.focus) + "，实际 " +
-                       std::to_string(e38.selection().anchor) + ".." +
-                       std::to_string(e38.selection().focus) + "）");
+        expectTrue(e38.selection() == before38, "★ 撤销回到编辑前两端（期望 " +
+                                                    std::to_string(before38.anchor) + ".." +
+                                                    std::to_string(before38.focus) + "，实际 " +
+                                                    std::to_string(e38.selection().anchor) + ".." +
+                                                    std::to_string(e38.selection().focus) + "）");
         // 撤销只重编译、只标脏；要看矩形得先重排一次（宿主侧的 *AndRender 版自带这一步）。
         e38.relayout();
         expectTrue(!e38.selectionRects().empty(), "★ 回来的选区真的画得出来（有矩形）");
@@ -7801,17 +7954,16 @@ int main() {
         expectTrue(text38(e38, 0) == "零一四五六七八九十",
                    "★ 退格只删掉选中的两个字（实际 " + text38(e38, 0) +
                        "；若多删一个字会得到 零四五六七八九十）");
-        expectTrue(e38.caret().para == 0 && e38.caret().offset == 2,
-                   "落点在删除区间的起点");
+        expectTrue(e38.caret().para == 0 && e38.caret().offset == 2, "落点在删除区间的起点");
         expectTrue(paras38(e38) == 3, "同段内删除不改段数");
 
         // (e) 前删同理
         reload38(e38);
         expectTrue(selectTwo38(e38), "再选中两个字");
         expectTrue(e38.deleteForward(), "前删");
-        expectTrue(text38(e38, 0) == "零一四五六七八九十",
-                   "★ 前删也只删选区（实际 " + text38(e38, 0) +
-                       "；若多删一个字会得到 零一五六七八九十）");
+        expectTrue(
+            text38(e38, 0) == "零一四五六七八九十",
+            "★ 前删也只删选区（实际 " + text38(e38, 0) + "；若多删一个字会得到 零一五六七八九十）");
 
         // (f) 空选区时退格照旧删一个字 —— 反向一半：这条不变红，
         //     "退格只删选区"那条就没有对照，"退格什么都不做"也能让它绿。
@@ -7837,13 +7989,13 @@ int main() {
         eA.setCaret(0, 4);
         expectTrue(eA.moveCaretBy(11, true), "扩展 11 格（跨过段落标记）");
         expectTrue(eA.caret().para == 1 && eA.caret().offset == 3,
-                   "焦点落在第 1 段第 3 个字之前（实际 (" + std::to_string(eA.caret().para) +
-                       ", " + std::to_string(eA.caret().offset) + ")）");
+                   "焦点落在第 1 段第 3 个字之前（实际 (" + std::to_string(eA.caret().para) + ", " +
+                       std::to_string(eA.caret().offset) + ")）");
         expectTrue(eA.backspace(), "退格删掉跨段选区");
         expectTrue(text38(eA, 0) == "零一二三丁戊己庚辛壬癸",
                    "★ 两段并成一段、内容接得上（实际 " + text38(eA, 0) + "）");
-        expectTrue(paras38(eA) == 2, "★ 跨段删除并掉一段（3 → 2，实际 " +
-                                         std::to_string(paras38(eA)) + "）");
+        expectTrue(paras38(eA) == 2,
+                   "★ 跨段删除并掉一段（3 → 2，实际 " + std::to_string(paras38(eA)) + "）");
         expectTrue(text38(eA, 1) == "子丑寅卯", "后面那一段没受影响");
 
         // C 路：同样的结果用 11 下前删手工做出来（7 个字 + 一次段末合并 + 3 个字）。
@@ -7881,16 +8033,16 @@ int main() {
         expectTrue(e38.selectAll(), "全选");
         expectTrue(e38.typeTextUtf8("测"), "整篇替换成一个字");
         expectTrue(paras38(e38) == 1, "★ 段数收成 1（实际 " + std::to_string(paras38(e38)) + "）");
-        expectTrue(text38(e38, 0) == "测", "★ 全选再打字 = 只剩那个字（实际 " +
-                                               text38(e38, 0) + "）");
+        expectTrue(text38(e38, 0) == "测",
+                   "★ 全选再打字 = 只剩那个字（实际 " + text38(e38, 0) + "）");
         expectTrue(!e38.hasSelection(), "没有残选区");
 
         // (i) 插类的另两个入口：回车与缩进也是"先删选区再插"
         reload38(e38);
         expectTrue(selectTwo38(e38), "选中两个字");
         expectTrue(e38.splitParagraph(), "回车（带选区）");
-        expectTrue(paras38(e38) == 4, "★ 回车：先删选区再分段（3 → 4，实际 " +
-                                          std::to_string(paras38(e38)) + "）");
+        expectTrue(paras38(e38) == 4,
+                   "★ 回车：先删选区再分段（3 → 4，实际 " + std::to_string(paras38(e38)) + "）");
         expectTrue(text38(e38, 0) == "零一", "前半段（实际 " + text38(e38, 0) + "）");
         expectTrue(text38(e38, 1) == "四五六七八九十", "后半段（实际 " + text38(e38, 1) + "）");
 
@@ -7972,14 +8124,13 @@ int main() {
             const Range r = e39.selection();
             const TextPos a = at39(e39, r.anchor);
             const TextPos f = at39(e39, r.focus);
-            expectTrue(a.para == 0 && a.offset == 2,
-                       "★ anchor 停在按下点（实际 " + std::to_string(a.para) + "," +
-                           std::to_string(a.offset) + "）");
-            expectTrue(f.para == 0 && f.offset == 6,
-                       "★ focus 在拖动终点（实际 " + std::to_string(f.para) + "," +
-                           std::to_string(f.offset) + "）");
-            expectTrue(text39(e39, 0) == before39,
-                       "★ 拖动不改正文（实际 " + text39(e39, 0) + "）");
+            expectTrue(a.para == 0 && a.offset == 2, "★ anchor 停在按下点（实际 " +
+                                                         std::to_string(a.para) + "," +
+                                                         std::to_string(a.offset) + "）");
+            expectTrue(f.para == 0 && f.offset == 6, "★ focus 在拖动终点（实际 " +
+                                                         std::to_string(f.para) + "," +
+                                                         std::to_string(f.offset) + "）");
+            expectTrue(text39(e39, 0) == before39, "★ 拖动不改正文（实际 " + text39(e39, 0) + "）");
         }
 
         // (b) 反向拖：focus 跑到 anchor 前面，两端不交换（选区是带方向的）
@@ -8007,8 +8158,7 @@ int main() {
             expectTrue(a.offset == 1 && f.offset == 9, "★ 两端落在按下点与最后一次移动的落点");
         }
         expectTrue(text39(e39, 0) == "零一二三四五六七八九十" &&
-                       text39(e39, 1) == "甲乙丙丁戊己庚辛壬癸" &&
-                       text39(e39, 2) == "子丑寅卯",
+                       text39(e39, 1) == "甲乙丙丁戊己庚辛壬癸" && text39(e39, 2) == "子丑寅卯",
                    "★ 连续移动不碰正文（实际 " + text39(e39, 0) + " / " + text39(e39, 1) + " / " +
                        text39(e39, 2) + "）");
         expectTrue(static_cast<int>(e39.blocks().size()) == 3, "段数不变");
@@ -8026,9 +8176,9 @@ int main() {
         {
             const Range r = e39.selection();
             const TextPos a = at39(e39, r.anchor);
-            expectTrue(a.para == 0 && a.offset == 8,
-                       "★ 跨段拖的 anchor 在 (0, 8)（实际 " + std::to_string(a.para) + "," +
-                           std::to_string(a.offset) + "）");
+            expectTrue(a.para == 0 && a.offset == 8, "★ 跨段拖的 anchor 在 (0, 8)（实际 " +
+                                                         std::to_string(a.para) + "," +
+                                                         std::to_string(a.offset) + "）");
         }
         // 先重排再读几何：改选区只标脏，矩形要等重排之后才成立。
         e39.relayout();
@@ -8125,9 +8275,10 @@ int main() {
         e40.setConfig(c40);
         e40.relayout();
         const Scan paged40 = scan40();
-        std::printf("     分页：%d 条带，最大间距 %.2f 磅，同段行距 %.2f 磅，"
-                    "离条带底最近 %.2f 磅\n",
-                    paged40.slabs, paged40.max_step, paged40.max_pitch, paged40.min_slack);
+        std::printf(
+            "     分页：%d 条带，最大间距 %.2f 磅，同段行距 %.2f 磅，"
+            "离条带底最近 %.2f 磅\n",
+            paged40.slabs, paged40.max_step, paged40.max_pitch, paged40.min_slack);
         expectTrue(paged40.slabs >= 2, "这份文档在分页下确实跨了多条带");
         // 页底让位：跨页那两行的间距 = 页底剩下的空当 + 下边距 + 页间隙 + 上边距，
         //   所以它至少是"页间隙 + 两倍上边距"。这是分页的硬下界，连页下必须被打破。
@@ -8142,9 +8293,10 @@ int main() {
         e40.setConfig(c40);
         e40.relayout();
         const Scan cont40 = scan40();
-        std::printf("     连页：%d 条带，最大间距 %.2f 磅，同段行距 %.2f 磅，"
-                    "离条带底最近 %.2f 磅\n",
-                    cont40.slabs, cont40.max_step, cont40.max_pitch, cont40.min_slack);
+        std::printf(
+            "     连页：%d 条带，最大间距 %.2f 磅，同段行距 %.2f 磅，"
+            "离条带底最近 %.2f 磅\n",
+            cont40.slabs, cont40.max_step, cont40.max_pitch, cont40.min_slack);
         expectTrue(cont40.max_back < 0.01f, "连页下文档 y 单调不降（没有一处回跳 = 没有页底）");
         expectTrue(cont40.max_pitch <= 12.0f * 1.75f + 0.01f,
                    "连页下同段相邻两行的间距就是行距（中间没插页边距）");
@@ -8152,16 +8304,15 @@ int main() {
         //   而分页那条跨页间距的下界是 60 磅 —— 两条判据互不重叠。
         expectTrue(cont40.max_step <= cont40.max_pitch + 10.0f + 0.01f,
                    "连页下最大的那一跳就是段间距（没有页底那一跳）");
-        expectTrue(cont40.slabs < paged40.slabs,
-                   "连页下条带数比分页少（内容不再为页边距让位）");
+        expectTrue(cont40.slabs < paged40.slabs, "连页下条带数比分页少（内容不再为页边距让位）");
         expectTrue(cont40.min_slack < c40.page.margin_pt,
                    "连页下墨迹跑进了下边距那条带（页边距不再约束内容）");
 
         // 内容底边：连页下它就是滚动高度。它必须落在最后一行之下、且在条带范围内。
         const int bottom40 = e40.contentBottomPx();
         const float slab_px = (c40.page.height_pt + c40.page_gap_pt) * c40.zoom;
-        std::printf("     内容底边 %d px（最后一条带从 %.0f px 起）\n",
-                    bottom40, static_cast<double>((cont40.slabs - 1) * slab_px));
+        std::printf("     内容底边 %d px（最后一条带从 %.0f px 起）\n", bottom40,
+                    static_cast<double>((cont40.slabs - 1) * slab_px));
         expectTrue(bottom40 > static_cast<int>((cont40.slabs - 1) * slab_px),
                    "内容底边落在最后一条带里（宿主按它设滚动高度）");
     }
@@ -8239,16 +8390,16 @@ int main() {
         expectTrue(pA.offset == k && pB.offset == k,
                    "★ 行尾与下一行行首命中同一个偏移（位置确实相同，行别不是多余的）");
         expectTrue(sideA == sideB, "★ 两次点击的侧别也相同（侧别分不开这两个位置）");
-        expectTrue(affA == 0 && affB > 0,
-                   "★ 点上一行行尾报贴上一行，点下一行行首报贴下一行");
+        expectTrue(affA == 0 && affB > 0, "★ 点上一行行尾报贴上一行，点下一行行首报贴下一行");
 
         // 带行别：各自画在自己那一行。
         e41.setCaretAtSideLine(pA.para, pA.offset, sideA, affA);
         Rect rA{};
         expectTrue(e41.caretRectPt(&rA), "上一行行尾的光标矩形可查");
-        expectTrue(std::fabs(rA.y - lbA->block_lo_pt) < lbA->block_hi_pt - lbA->block_lo_pt + 0.01f &&
-                       rA.y < lbB->block_lo_pt,
-                   "★ 点上一行行尾，光标画在上一行");
+        expectTrue(
+            std::fabs(rA.y - lbA->block_lo_pt) < lbA->block_hi_pt - lbA->block_lo_pt + 0.01f &&
+                rA.y < lbB->block_lo_pt,
+            "★ 点上一行行尾，光标画在上一行");
 
         e41.setCaretAtSideLine(pB.para, pB.offset, sideB, affB);
         Rect rB{};
@@ -8324,9 +8475,8 @@ int main() {
         expectTrue(e42.outdent(), "反缩进删掉前导空格");
         expectTrue(e42.caret().offset == 0, "反缩进之后光标到了段首");
         expectTrue(e42.undo(), "撤销这一次反缩进");
-        expectTrue(e42.caret().offset == 4,
-                   "★ 反缩进撤销之后光标回到空格之后（实际 " +
-                       std::to_string(e42.caret().offset) + "）");
+        expectTrue(e42.caret().offset == 4, "★ 反缩进撤销之后光标回到空格之后（实际 " +
+                                                std::to_string(e42.caret().offset) + "）");
         expectTrue(e42.blocks()[0].cp_text.size() == len0, "撤销把空格也恢复了");
 
         // 重做仍然回到"编辑之后"那一格：两条快照各自的方向不能混。
@@ -8367,8 +8517,7 @@ int main() {
         expectTrue(e43.moveCaretVertical(1, false), "中日竖排：下一列走得动");
         Rect rl1{};
         expectTrue(e43.caretRectPt(&rl1), "下一列的光标矩形可查");
-        expectTrue(rl1.x < rl0.x - 1.0f,
-                   "★ 中日竖排的下一列在左边（列自右向左推进）");
+        expectTrue(rl1.x < rl0.x - 1.0f, "★ 中日竖排的下一列在左边（列自右向左推进）");
         // 走回来：-1 必须回到右边那一列，而且 x 与出发时那一列重合 ——
         //   两个方向都钉住，免得只把其中一个方向的符号弄对。
         expectTrue(e43.moveCaretVertical(-1, false), "中日竖排：上一列走得动");
@@ -8457,9 +8606,9 @@ int main() {
         e44.setCaret(0, 2);
         expectTrue(e44.typeTextAndRender("X"), "在第一段中间敲一个字");
         const EditStats st44 = e44.editStats();
-        expectTrue(!st44.layout_was_full && st44.reused_paragraphs >= 2,
-                   "★ 后缀里带原子也照常复用（复用 " + std::to_string(st44.reused_paragraphs) +
-                       " 段）");
+        expectTrue(
+            !st44.layout_was_full && st44.reused_paragraphs >= 2,
+            "★ 后缀里带原子也照常复用（复用 " + std::to_string(st44.reused_paragraphs) + " 段）");
         expectTrue(e44.auditLayout() == 0, "★ 增量结果与整篇重排一致");
         expectNear(atomAdv(), 72.0, 0.05, "复用之后原子占的宽度没变");
 
@@ -8520,8 +8669,7 @@ int main() {
                 }
             }
             expectTrue(got == "1:1,3:2",
-                       "★★ demoTree 按锚点落原子（段内码点 1 与 3，种类图片与公式）—— 实际 " +
-                           got);
+                       "★★ demoTree 按锚点落原子（段内码点 1 与 3，种类图片与公式）—— 实际 " + got);
         }
 
         // 原子要删得掉。它没有可寻址的内部，删它就是整枚移除 —— 退格看左边那一格、前删看
@@ -8595,9 +8743,9 @@ int main() {
             expectTrue(atomCount(es) == 0 && es.blocks()[0].textUtf8() == "甲丁",
                        "★★ 选区里的文本与原子一起删掉（只剩 甲丁）—— 实际 " +
                            es.blocks()[0].textUtf8() + " / 原子 " + std::to_string(atomCount(es)));
-            expectTrue(es.undoAndRender() && atomCount(es) == 1 &&
-                           es.blocks()[0].textUtf8() == "甲乙丙丁",
-                       "撤销把文本与原子一起装回来");
+            expectTrue(
+                es.undoAndRender() && atomCount(es) == 1 && es.blocks()[0].textUtf8() == "甲乙丙丁",
+                "撤销把文本与原子一起装回来");
         }
     }
     std::printf("\n[45] 表格：装载、格内编辑与「有表格不走增量」\n");
@@ -8647,10 +8795,9 @@ int main() {
         if (lay.lines.size() == 4 && lay.placed_tables.size() == 1 &&
             lay.placed_tables[0].col_x.size() >= 2) {
             const PlacedTable& pt = lay.placed_tables[0];
-            expectNear(lay.lines[1].inline_origin_pt, pt.x + pt.col_x[1] + kTableCellPaddingPt, 0.01,
-                       "第二格的行内起点落在第二列的起点上（不是内容区左边）");
-            expectTrue(lay.lines[2].block_lo_pt > lay.lines[0].block_lo_pt,
-                       "第二行在第一行下面");
+            expectNear(lay.lines[1].inline_origin_pt, pt.x + pt.col_x[1] + kTableCellPaddingPt,
+                       0.01, "第二格的行内起点落在第二列的起点上（不是内容区左边）");
+            expectTrue(lay.lines[2].block_lo_pt > lay.lines[0].block_lo_pt, "第二行在第一行下面");
         }
 
         // 命中测试：点第二格的字落在第 1 段 —— 格内的定位靠行盒坐标，不需要表格特例。
@@ -8658,8 +8805,8 @@ int main() {
         {
             const LineBox& lb2 = lay.lines[1];
             TextPos got;
-            const bool hit = e45.hitTestPt(lb2.inline_origin_pt + 1.0f,
-                                           lb2.block_lo_pt + 2.0f, &got);
+            const bool hit =
+                e45.hitTestPt(lb2.inline_origin_pt + 1.0f, lb2.block_lo_pt + 2.0f, &got);
             expectTrue(hit && got.para == 1, "点第二格的字命中第 1 段（实际段 " +
                                                  std::to_string(hit ? got.para : -1) + "）");
             TextPos between;
@@ -8674,8 +8821,8 @@ int main() {
             const bool hit3 = e45.hitTestPt(tail_x, lay.lines[1].block_lo_pt + 2.0f, &tail);
             expectTrue(hit3 && tail.para == 1,
                        "点第一格的后半（x=" + std::to_string(static_cast<int>(tail_x)) +
-                           "）仍命中第 1 段（实际段 " +
-                           std::to_string(hit3 ? tail.para : -1) + "）");
+                           "）仍命中第 1 段（实际段 " + std::to_string(hit3 ? tail.para : -1) +
+                           "）");
         }
 
         // 选区：整格被选中时高亮铺满格宽（不是只贴着字）—— 这是"单元格选区"与
@@ -8785,9 +8932,8 @@ int main() {
             TextPos got;
             const bool hit = e47.hitTestPt(empty.inline_origin_pt + 2.0f,
                                            (empty.block_lo_pt + empty.block_hi_pt) * 0.5f, &got);
-            expectTrue(hit && got.para == 1,
-                       "点表格后的空段落命中那一段（实际段 " +
-                           std::to_string(hit ? got.para : -1) + "）");
+            expectTrue(hit && got.para == 1, "点表格后的空段落命中那一段（实际段 " +
+                                                 std::to_string(hit ? got.para : -1) + "）");
         }
     }
 
@@ -8906,8 +9052,8 @@ int main() {
             int band_para = -1;
             // 边距带：格的外框到文字左沿之间那一条。给的是段号 —— 一格的身份是它占的
             //   块区间，不是它的流区间（空格的内容长度是 0，流区间分不出是哪一格）。
-            const bool hit_band = e47.hitTestPt(l0.cell_lo_pt - 1.0f, ymid, &got, nullptr,
-                                                nullptr, nullptr, &band_para);
+            const bool hit_band = e47.hitTestPt(l0.cell_lo_pt - 1.0f, ymid, &got, nullptr, nullptr,
+                                                nullptr, &band_para);
             expectTrue(hit_band && band_para == l0.paragraph,
                        "点在格左内边距上：命中给出这一格的段号");
             // 反向一半：点在同一行的字上不给整格 —— 那是文字光标，不是选格。
@@ -8925,8 +9071,7 @@ int main() {
             FlowPos chi = e47.flowPosAt(lay.lines[1].paragraph, 1);
             expectTrue(chi > clo, "这一格的内容区间取得到");
             const Range sr = e47.selection();
-            expectTrue(sr.anchor == clo && sr.focus == chi,
-                       "整格选区的两端就是这一格的内容区间");
+            expectTrue(sr.anchor == clo && sr.focus == chi, "整格选区的两端就是这一格的内容区间");
             // 插入点钉在格末（格内第二段的末尾），不是三击落下的那个字的位置。
             const TextPos c47 = e47.caret();
             expectTrue(c47.para == lay.lines[1].paragraph && c47.offset == 1,
@@ -8943,9 +9088,9 @@ int main() {
                            "外框比内容区宽（否则上一条测不出内边距那两侧）");
                 expectNear(rects[0].r_pt.h, l0.cell_bottom_pt - l0.cell_top_pt, 0.01,
                            "整格选区高度含显式行高多出来的空白");
-                expectTrue(l0.cell_bottom_pt - l0.cell_top_pt >
-                               (l0.block_hi_pt - l0.block_lo_pt) + 10.0f,
-                           "显式行高确实比文字那一带高（否则上一条测不出差别）");
+                expectTrue(
+                    l0.cell_bottom_pt - l0.cell_top_pt > (l0.block_hi_pt - l0.block_lo_pt) + 10.0f,
+                    "显式行高确实比文字那一带高（否则上一条测不出差别）");
             }
 
             // 反向一半：同一对区间按文字选区设 —— 这正是"把文字一路选到最后一个字"。
@@ -8955,8 +9100,8 @@ int main() {
             const std::vector<PageRect> tr = e47.selectionRects();
             float maxw = 0.0f;
             for (const PageRect& r : tr) maxw = std::max(maxw, r.r_pt.w);
-            expectTrue(tr.size() == 2, "文字选区按行给两个矩形（实际 " +
-                                           std::to_string(tr.size()) + " 个）");
+            expectTrue(tr.size() == 2,
+                       "文字选区按行给两个矩形（实际 " + std::to_string(tr.size()) + " 个）");
             expectTrue(maxw < (l0.cell_box_hi_pt - l0.cell_box_lo_pt) - 1.0f,
                        "文字选区只盖字，不涨成整格（选到最后一个字也一样）");
         }
@@ -8994,8 +9139,8 @@ int main() {
         e48.setDocument(t, StyleSheet{});
         e48.relayout();
         const LayoutResult& lay = e48.layout();
-        expectTrue(lay.lines.size() >= 4, "2x2 表编出四行（实际 " +
-                                              std::to_string(lay.lines.size()) + " 行）");
+        expectTrue(lay.lines.size() >= 4,
+                   "2x2 表编出四行（实际 " + std::to_string(lay.lines.size()) + " 行）");
         if (lay.lines.size() >= 4) {
             // 每格取两样东西：字上的落点（模拟拖选的起手/收手）与格内容的流区间（判据）。
             struct CellProbe {
@@ -9038,9 +9183,8 @@ int main() {
                 cp[k].cell_top = lb.cell_top_pt;
                 cp[k].cell_bottom = lb.cell_bottom_pt;
             }
-            expectTrue(probed && cp[0].lo >= 0 && cp[3].lo > cp[0].lo &&
-                           cp[0].para == 0 && cp[1].para == 1 && cp[2].para == 2 &&
-                           cp[3].para == 3,
+            expectTrue(probed && cp[0].lo >= 0 && cp[3].lo > cp[0].lo && cp[0].para == 0 &&
+                           cp[1].para == 1 && cp[2].para == 2 && cp[3].para == 3,
                        "四格的段号与流区间都取得出来（否则下面几条测不出跨格）");
 
             // 拖选的一条（宿主按下 → 移动到另一格）：起点在第一格的字上，落点在第四格的字上。
@@ -9051,8 +9195,8 @@ int main() {
             expectTrue(sr.anchor == cp[0].lo && sr.focus == cp[3].hi,
                        "跨格选区的两端吸附到首格首与末格末（不是按下/松开的字符位置）");
             const std::vector<PageRect> rects = e48.selectionRects();
-            expectTrue(rects.size() == 4, "跨 2x2 画四个整格矩形（实际 " +
-                                              std::to_string(rects.size()) + " 个）");
+            expectTrue(rects.size() == 4,
+                       "跨 2x2 画四个整格矩形（实际 " + std::to_string(rects.size()) + " 个）");
             // 每一份都要是"整格"：宽到列左右边界、高到行上下边界。四份里有一份是文字矩形
             //   就说明只把两端的格放大了，中间的格还是按文字画。
             bool all_cells = rects.size() == 4;
@@ -9077,15 +9221,14 @@ int main() {
             //   每挪一个字它就挪一次，画面上就是光标跟着鼠标跑。
             const TextPos c_end = e48.caret();
             expectTrue(c_end.para == cp[3].pos.para && c_end.offset == 1,
-                       "整格选区的插入点在焦点那一格的末尾（实际 段 " +
-                           std::to_string(c_end.para) + " 偏移 " +
-                           std::to_string(c_end.offset) + "）");
+                       "整格选区的插入点在焦点那一格的末尾（实际 段 " + std::to_string(c_end.para) +
+                           " 偏移 " + std::to_string(c_end.offset) + "）");
             // 鼠标在同一格里挪（焦点从字中间挪到格首）：选区不变，插入点也不许动。
             e48.setFocusAtSideLine(cp[3].pos.para, 0, 0, 0);
             const TextPos c_same = e48.caret();
-            expectTrue(e48.selectionIsCell() && c_same.para == c_end.para &&
-                           c_same.offset == c_end.offset,
-                       "同一格内移动焦点：插入点仍钉在格末");
+            expectTrue(
+                e48.selectionIsCell() && c_same.para == c_end.para && c_same.offset == c_end.offset,
+                "同一格内移动焦点：插入点仍钉在格末");
 
             // 反方向拖（从最后一格拖回第一格）：焦点在第一格，插入点在第一格的末尾 ——
             //   不是"选区的起点"，也不是"鼠标落下的那个字"。
@@ -9176,8 +9319,7 @@ int main() {
             const float ymid = (lb.block_lo_pt + lb.block_hi_pt) * 0.5f;
             TextPos p{};
             int side = 0;
-            probe_ok = e49.hitTestPt(lb.inline_origin_pt + 1.0f, ymid, &p, nullptr, &side,
-                                     nullptr);
+            probe_ok = e49.hitTestPt(lb.inline_origin_pt + 1.0f, ymid, &p, nullptr, &side, nullptr);
             cc[k].pos = p;
             cc[k].side = side;
             int band = -1;
@@ -9231,15 +9373,13 @@ int main() {
         //   从右往左选不中"的成因）。
         drag(5, 1);
         got = pickedCells(e49.selectionRects());
-        expectTrue(sameSet(got, {1, 2, 4, 5}),
-                   "反向斜拖（从第五格拖回第二格）：还是那四格（实际 " +
-                       std::to_string(got.size()) + " 份）");
+        expectTrue(sameSet(got, {1, 2, 4, 5}), "反向斜拖（从第五格拖回第二格）：还是那四格（实际 " +
+                                                   std::to_string(got.size()) + " 份）");
         // 反向逐行拖：从第三行第一列拖回第一行第一列。
         drag(6, 0);
         got = pickedCells(e49.selectionRects());
-        expectTrue(sameSet(got, {0, 3, 6}),
-                   "反向竖拖（从第七格拖回第一格）：一列三行（实际 " +
-                       std::to_string(got.size()) + " 份）");
+        expectTrue(sameSet(got, {0, 3, 6}), "反向竖拖（从第七格拖回第一格）：一列三行（实际 " +
+                                                std::to_string(got.size()) + " 份）");
 
         // 逐步反向拖：按下只落一次锚点，之后每一步只搬焦点。这才是真实指针路径
         //   （上面那个助手每次都重设锚点，正好把"锚点被改写成包络"这类错盖住）。
@@ -9251,9 +9391,8 @@ int main() {
                        std::to_string(got.size()) + " 份）");
         e49.setFocusAtSideLine(cc[0].pos.para, cc[0].pos.offset, cc[0].side, 0);
         got = pickedCells(e49.selectionRects());
-        expectTrue(sameSet(got, {0, 3, 6}),
-                   "逐步反向拖到底（拖回第一格）：仍是那一列三格（实际 " +
-                       std::to_string(got.size()) + " 份）");
+        expectTrue(sameSet(got, {0, 3, 6}), "逐步反向拖到底（拖回第一格）：仍是那一列三格（实际 " +
+                                                std::to_string(got.size()) + " 份）");
         expectTrue(e49.selectionIsCell(), "逐步反向拖到底：仍是单元格选区");
 
         // 同列跨三行：一列三格，不是三整行。
@@ -9285,7 +9424,8 @@ int main() {
         const char* want_after[9] = {"a1", "", "", "b1", "", "", "c1", "c2", "c3"};
         std::string bad;
         for (int k = 0; k < 9; ++k) {
-            const std::string got_text = codepointsToUtf8(e49.blocks()[static_cast<size_t>(k)].cp_text);
+            const std::string got_text =
+                codepointsToUtf8(e49.blocks()[static_cast<size_t>(k)].cp_text);
             if (got_text != want_after[k]) {
                 bad += " 第" + std::to_string(k) + "格是'" + got_text + "'";
             }
@@ -9336,9 +9476,10 @@ int main() {
         const LineBox& lb1 = lay50.lines[2];
         TextPos p{};
         int side = 0;
-        expectTrue(e50.hitTestPt(lb1.inline_origin_pt + 0.5f, (lb1.block_lo_pt + lb1.block_hi_pt) * 0.5f,
-                                 &p, nullptr, &side, nullptr),
-                   "第二格的行盒取得出来");
+        expectTrue(
+            e50.hitTestPt(lb1.inline_origin_pt + 0.5f, (lb1.block_lo_pt + lb1.block_hi_pt) * 0.5f,
+                          &p, nullptr, &side, nullptr),
+            "第二格的行盒取得出来");
         e50.setCaretAtSideLine(p.para, 0, side, 0);
         const TextPos before = e50.caret();
         expectTrue(!e50.backspace(), "第二格段首退格：拒绝（不跨格合并）");
@@ -9352,14 +9493,15 @@ int main() {
         const LineBox& lb0b = e50.layout().lines[1];  // 第一格两行里的第二行
         TextPos q{};
         int qside = 0;
-        expectTrue(e50.hitTestPt(lb0b.inline_origin_pt + 0.5f, (lb0b.block_lo_pt + lb0b.block_hi_pt) * 0.5f,
-                                 &q, nullptr, &qside, nullptr),
+        expectTrue(e50.hitTestPt(lb0b.inline_origin_pt + 0.5f,
+                                 (lb0b.block_lo_pt + lb0b.block_hi_pt) * 0.5f, &q, nullptr, &qside,
+                                 nullptr),
                    "第一格第二行取得出来");
         e50.setCaretAtSideLine(q.para, 0, qside, 0);
         expectTrue(e50.backspace(), "第一格内段首退格：合并成功");
         e50.relayout();
-        expectTrue(e50.blocks().size() == 4, "格内合并后块数少一块（实际 " +
-                                                 std::to_string(e50.blocks().size()) + " 块）");
+        expectTrue(e50.blocks().size() == 4,
+                   "格内合并后块数少一块（实际 " + std::to_string(e50.blocks().size()) + " 块）");
         const std::string merged = codepointsToUtf8(e50.blocks()[0].cp_text);
         expectTrue(merged == "甲乙", "合并后第一格是甲乙（实际 '" + merged + "'）");
         expectTrue(e50.auditTables() == 0, "格内合并后表格结构自审一致");
@@ -9369,9 +9511,10 @@ int main() {
         const LineBox& lb2 = e50.layout().lines[2];
         TextPos r{};
         int rside = 0;
-        expectTrue(e50.hitTestPt(lb2.inline_origin_pt + 0.5f, (lb2.block_lo_pt + lb2.block_hi_pt) * 0.5f,
-                                 &r, nullptr, &rside, nullptr),
-                   "第三格的行盒取得出来");
+        expectTrue(
+            e50.hitTestPt(lb2.inline_origin_pt + 0.5f, (lb2.block_lo_pt + lb2.block_hi_pt) * 0.5f,
+                          &r, nullptr, &rside, nullptr),
+            "第三格的行盒取得出来");
         e50.setCaretAtSideLine(r.para, 0, rside, 0);
         expectTrue(!e50.backspace(), "第三格段首退格：拒绝");
         e50.relayout();
@@ -9409,8 +9552,8 @@ int main() {
         t.appendChild(s, NodeKind::ParagraphMark);
         e51.setDocument(t, StyleSheet{});
         e51.relayout();
-        expectTrue(e51.blocks().size() == 4, "头、甲、乙、尾共四块（实际 " +
-                                                 std::to_string(e51.blocks().size()) + " 块）");
+        expectTrue(e51.blocks().size() == 4,
+                   "头、甲、乙、尾共四块（实际 " + std::to_string(e51.blocks().size()) + " 块）");
         expectTrue(e51.auditTables() == 0, "装载后表格结构自审一致");
 
         // 全选删除：表是块级容器，它的结构位不在任何可删区间里，所以整张表要按"删节点"走，
@@ -9418,8 +9561,8 @@ int main() {
         expectTrue(e51.selectAll(), "全选");
         expectTrue(e51.backspace(), "全选退格：执行成功");
         e51.relayout();
-        expectTrue(e51.blocks().size() == 1, "全选删完只剩一块（实际 " +
-                                                 std::to_string(e51.blocks().size()) + " 块）");
+        expectTrue(e51.blocks().size() == 1,
+                   "全选删完只剩一块（实际 " + std::to_string(e51.blocks().size()) + " 块）");
         expectTrue(e51.blocks()[0].cp_text.empty(), "剩下的那一块是空段落");
         expectTrue(e51.auditTables() == 0, "全选删完表格结构自审一致（表已整张消失）");
         expectTrue(e51.auditLayout() == 0, "全选删完排版自审一致");
@@ -9428,12 +9571,12 @@ int main() {
         expectTrue(e51.canUndo(), "删完可以撤销");
         expectTrue(e51.undo(), "撤销");
         e51.relayout();
-        expectTrue(e51.blocks().size() == 4, "撤销之后四块都回来（实际 " +
-                                                 std::to_string(e51.blocks().size()) + " 块）");
+        expectTrue(e51.blocks().size() == 4,
+                   "撤销之后四块都回来（实际 " + std::to_string(e51.blocks().size()) + " 块）");
         const std::string back0 = codepointsToUtf8(e51.blocks()[0].cp_text);
         const std::string back1 = codepointsToUtf8(e51.blocks()[1].cp_text);
-        expectTrue(back0 == "头" && back1 == "甲", "撤销之后正文与第一格内容都在（实际 '" +
-                                                       back0 + "' / '" + back1 + "'）");
+        expectTrue(back0 == "头" && back1 == "甲",
+                   "撤销之后正文与第一格内容都在（实际 '" + back0 + "' / '" + back1 + "'）");
         expectTrue(e51.auditTables() == 0, "撤销之后表格结构自审一致");
 
         // 格内文字选区（只盖一格里的字）：按区间删，格与表都还在。
@@ -9514,8 +9657,8 @@ int main() {
 
         e52.setDocument(t, StyleSheet{});
         e52.relayout();
-        expectTrue(e52.blocks().size() == 4, "前、两格、尾共四块（实际 " +
-                                                 std::to_string(e52.blocks().size()) + " 块）");
+        expectTrue(e52.blocks().size() == 4,
+                   "前、两格、尾共四块（实际 " + std::to_string(e52.blocks().size()) + " 块）");
 
         // 把第一格删空。
         e52.setCaret(1, 1);
@@ -9552,8 +9695,8 @@ int main() {
             expectTrue(e52.selectionIsCell(), "空格选区的粒度是单元格选区");
             expectTrue(e52.selection().empty(), "空格的内容区间长度是 0（没有字可删）");
             const std::vector<PageRect> rects = e52.selectionRects();
-            expectTrue(rects.size() == 1, "空格也画出一个整格矩形（实际 " +
-                                              std::to_string(rects.size()) + " 个）");
+            expectTrue(rects.size() == 1,
+                       "空格也画出一个整格矩形（实际 " + std::to_string(rects.size()) + " 个）");
             if (rects.size() == 1) {
                 const float box_w = le->cell_box_hi_pt - le->cell_box_lo_pt;
                 const float row_h = le->cell_bottom_pt - le->cell_top_pt;
@@ -9566,8 +9709,7 @@ int main() {
 
             // 三击那条路：点在空格里任何位置都选中这一格。
             e52.clearSelection();
-            expectTrue(e52.selectCellAtPt(le->inline_origin_pt + 1.0f, ymid),
-                       "三击空格：选中整格");
+            expectTrue(e52.selectCellAtPt(le->inline_origin_pt + 1.0f, ymid), "三击空格：选中整格");
             expectTrue(e52.selectionIsCell() && !e52.selectionRects().empty(),
                        "三击空格之后有反白");
 
@@ -9581,9 +9723,9 @@ int main() {
             e52.setCaretAtSideLine(1, 0, 0, 0);
             e52.setFocusAtSideLine(2, 1, 0, 0);
             expectTrue(e52.selectionIsCell(), "从空格拖到有字的格：单元格选区");
-            expectTrue(e52.selectionRects().size() == 2,
-                       "两格各一份反白（实际 " + std::to_string(e52.selectionRects().size()) +
-                           " 份）");
+            expectTrue(
+                e52.selectionRects().size() == 2,
+                "两格各一份反白（实际 " + std::to_string(e52.selectionRects().size()) + " 份）");
 
             // 删除：只清有字的格，空格本来就是空的，格与表的结构不动。
             expectTrue(e52.backspace(), "跨格选区退格：执行成功");
@@ -9600,6 +9742,323 @@ int main() {
             expectTrue(e52.blocks().size() == 4, "拒绝之后四块都在（表格没被删）");
             expectTrue(e52.auditTables() == 0, "拒绝之后表格结构自审一致");
         }
+    }
+
+    std::printf("\n[53] 排版摘要：重构锁（只改结构时这份摘要必须逐位相同）\n");
+    {
+        // 用例 A：六十段横排正文，混排字号 —— 覆盖断行、行距、分页与段后距。
+        //   段落够多，必然跨页；混排字号让每行的高度不同，翻页判据不能再用"上一行高度"。
+        {
+            EditorEngine ea;
+            expectTrue(ea.init({cjkPath, mnPath, latinPath}), "引擎初始化（摘要 A）");
+            EngineConfig ca;
+            ca.zoom = 1.0f;
+            ca.page.width_pt = 300.0f;
+            ca.page.height_pt = 300.0f;
+            ca.page.margin_pt = 10.0f;
+            ea.setConfig(ca);
+            std::vector<BlockSpec> blocks;
+            for (int i = 0; i < 60; ++i) {
+                BlockSpec b;
+                b.font_index = 0;
+                b.size_pt = (i % 7 == 0) ? 17.0f : 13.0f;
+                b.line_factor = 1.7f;
+                b.space_after_pt = (i % 5 == 0) ? 8.0f : 3.0f;
+                b.language = "zh";
+                b.setText(
+                    "第 " + std::to_string(i + 1) +
+                    " 段：患者诉晨起后心悸明显，持续约十分钟，休息后缓解。查体：心率 eighty-eight 次每分。");
+                blocks.push_back(std::move(b));
+            }
+            loadBlocks(ea, blocks);
+            ea.relayout();
+            const LayoutDigest da = digestOf(ea.layout());
+            std::printf("     摘要 A = 0x%016llx（%zu 行 / %zu 字形 / %d 页）\n",
+                        static_cast<unsigned long long>(da.hash), ea.layout().lines.size(),
+                        ea.layout().glyphs.size(), ea.layout().stats.page_count);
+            expectTrue(da.hash == 0xf0f0d9e785e9abc4ull, "横排多页正文的摘要未变");
+            expectTrue(ea.layout().stats.page_count >= 3, "用例 A 确实跨了多页");
+        }
+
+        // 用例 B：表格 —— 第一列合并两行，另一格的长文本撑到跨页，行片段要按页切。
+        //   这一块是排版里唯一会"回挪已落位行"的地方，也是重构锁最想盯住的地方。
+        {
+            EditorEngine eb;
+            expectTrue(eb.init({cjkPath, mnPath, latinPath}), "引擎初始化（摘要 B）");
+            EngineConfig cb;
+            cb.zoom = 1.0f;
+            cb.page.width_pt = 320.0f;
+            cb.page.height_pt = 240.0f;
+            cb.page.margin_pt = 10.0f;
+            eb.setConfig(cb);
+
+            NodeTree t;
+            const NodeId sec = t.firstSectionId();
+            auto text = [&](NodeId parent, const std::string& s8) {
+                t.setText(t.appendChild(parent, NodeKind::TextRun), utf8ToCodepoints(s8));
+            };
+            auto mark = [&](NodeId parent) { t.appendChild(parent, NodeKind::ParagraphMark); };
+
+            text(sec, "表前");
+            mark(sec);
+            const NodeId table = t.appendChild(sec, NodeKind::Table);
+            t.find(table)->table.grid_cols = {Length::abs(ptToEmu(90.0)),
+                                              Length::abs(ptToEmu(90.0))};
+            t.find(table)->table.width = Length::percent(1, 1);
+
+            const NodeId r0 = t.appendChild(table, NodeKind::TableRow);
+            const NodeId c00 = t.appendChild(r0, NodeKind::TableCell);
+            t.find(c00)->cell.row_span = 2;
+            text(c00, "合并格：跨两行");
+            mark(c00);
+            const NodeId c01 = t.appendChild(r0, NodeKind::TableCell);
+            std::string long_text;
+            for (int i = 0; i < 26; ++i) {
+                long_text +=
+                    "这一格的内容足够长，会把这一行撑得比整页还高，于是必须按行盒切开分页。";
+            }
+            text(c01, long_text);
+            mark(c01);
+
+            const NodeId r1 = t.appendChild(table, NodeKind::TableRow);
+            const NodeId c11 = t.appendChild(r1, NodeKind::TableCell);
+            text(c11, "第二行第二格");
+            mark(c11);
+
+            text(sec, "表后");
+            mark(sec);
+            eb.setDocument(t, StyleSheet{});
+            eb.relayout();
+            const LayoutDigest db = digestOf(eb.layout());
+            std::printf("     摘要 B = 0x%016llx（%zu 行 / %zu 字形 / %d 页 / %zu 表）\n",
+                        static_cast<unsigned long long>(db.hash), eb.layout().lines.size(),
+                        eb.layout().glyphs.size(), eb.layout().stats.page_count,
+                        eb.layout().placed_tables.size());
+            expectTrue(db.hash == 0x6cc491bde1299030ull, "表格跨页的摘要未变");
+            expectTrue(eb.layout().stats.page_count >= 3 && !eb.layout().placed_tables.empty() &&
+                           eb.layout().placed_tables[0].placed.size() >= 2,
+                       "用例 B 确实把一行切到了两页上");
+        }
+
+        // 用例 C：竖排 —— 直立（中日，列序从右往左）与侧倒（蒙文，顺时针 90°）各一段。
+        //   它管的是 placeColumn 那一半：列心与列顶怎么变成列盒与字形。横排的摘要一条都
+        //   覆盖不到这里（列宽逐列算、换带按剩余宽度判、字形带 rotate_deg）。
+        {
+            EditorEngine ec;
+            expectTrue(ec.init({cjkPath, mnPath, latinPath}), "引擎初始化（摘要 C）");
+            EngineConfig cc;
+            cc.zoom = 1.0f;
+            cc.page.width_pt = 300.0f;
+            cc.page.height_pt = 300.0f;
+            cc.page.margin_pt = 10.0f;
+            ec.setConfig(cc);
+            std::vector<BlockSpec> blocks;
+
+            BlockSpec upright;
+            upright.font_index = 0;
+            upright.size_pt = 16.0f;
+            upright.wm = WritingMode::VerticalRL();
+            upright.line_factor = 1.8f;
+            upright.language = "zh";
+            std::string zh;
+            for (int i = 0; i < 40; ++i) {
+                zh += "患者诉晨起后心悸，持续约十分钟，休息后缓解。";
+            }
+            upright.setText(zh);
+            blocks.push_back(std::move(upright));
+
+            BlockSpec sideways;
+            sideways.font_index = 1;  // 蒙文
+            sideways.size_pt = 20.0f;
+            sideways.wm = WritingMode::VerticalLR();
+            sideways.line_factor = 1.8f;
+            sideways.language = "mn";
+            std::string mn;
+            for (int i = 0; i < 20; ++i) {
+                mn += "\xE1\xA0\xAE\xE1\xA0\xA3\xE1\xA0\xA9\xE1\xA0\xAD\xE1\xA0\xA3\xE1\xA0\xAF";
+            }
+            sideways.setText(mn);
+            blocks.push_back(std::move(sideways));
+
+            loadBlocks(ec, blocks);
+            ec.relayout();
+            const LayoutDigest dc = digestOf(ec.layout());
+            int sideways_cols = 0;
+            for (const LineBox& l : ec.layout().lines) sideways_cols += l.sideways ? 1 : 0;
+            std::printf("     摘要 C = 0x%016llx（%zu 行 / %zu 字形 / %d 页 / 侧倒 %d 列）\n",
+                        static_cast<unsigned long long>(dc.hash), ec.layout().lines.size(),
+                        ec.layout().glyphs.size(), ec.layout().stats.page_count, sideways_cols);
+            expectTrue(dc.hash == 0x53923fb9d204873aull, "竖排的摘要未变");
+            expectTrue(ec.layout().stats.page_count >= 2 && sideways_cols > 0,
+                       "用例 C 确实跨了多页，且侧倒那一支走到了");
+        }
+    }
+
+    std::printf("\n[54] 差分：引擎每一次编辑之后，投影都与编译逐字段相同\n");
+    {
+        // 这条判据是"引擎改持修订"那个迁移的前置条件：只要 fromTree + project 在任意一串
+        //   真实编辑之后都与引擎的编译产物相同，把引擎的数据源换成修订就是机械替换，
+        //   而不是"换完再看哪里不一样"。
+        //   覆盖的是引擎自己产出的形状（控件边界、合并格、跨段控件、正文与格内的分段合并）。
+        EditorEngine e;
+        expectTrue(e.init({cjkPath, mnPath, latinPath}), "引擎初始化（差分）");
+        EngineConfig c;
+        c.zoom = 1.0f;
+        c.page.width_pt = 360.0f;
+        c.page.height_pt = 300.0f;
+        c.page.margin_pt = 12.0f;
+        e.setConfig(c);
+
+        NodeTree t;
+        const NodeId sec = t.firstSectionId();
+        auto text = [&](NodeId parent, const std::string& s8) {
+            t.setText(t.appendChild(parent, NodeKind::TextRun), utf8ToCodepoints(s8));
+        };
+        auto mark = [&](NodeId parent) { t.appendChild(parent, NodeKind::ParagraphMark); };
+
+        text(sec, "患者主诉心悸。");
+        mark(sec);
+        text(sec, "诊断：");
+        const NodeId cc = t.appendChild(sec, NodeKind::ContentControl);
+        t.find(cc)->control.key = "dx";
+        t.find(cc)->control.controlType = "text";
+        text(cc, "待填");
+        text(sec, "，已复核。");
+        mark(sec);
+
+        const NodeId table = t.appendChild(sec, NodeKind::Table);
+        t.find(table)->table.grid_cols = {Length::abs(ptToEmu(80.0)), Length::abs(ptToEmu(80.0))};
+        t.find(table)->table.width = Length::percent(1, 1);
+        const NodeId r0 = t.appendChild(table, NodeKind::TableRow);
+        const NodeId c00 = t.appendChild(r0, NodeKind::TableCell);
+        t.find(c00)->cell.row_span = 2;
+        text(c00, "合并格");
+        mark(c00);
+        const NodeId c01 = t.appendChild(r0, NodeKind::TableCell);
+        text(c01, "第一行第二格");
+        mark(c01);
+        const NodeId r1 = t.appendChild(table, NodeKind::TableRow);
+        const NodeId c11 = t.appendChild(r1, NodeKind::TableCell);
+        text(c11, "第二行第二格");
+        mark(c11);
+
+        text(sec, "表后。");
+        mark(sec);
+
+        const StyleSheet sheet;
+        e.setDocument(t, sheet);
+        e.relayout();
+
+        // 起点与终点必须真的不同 —— 否则"每一轮都相同"是两支都没动。
+        Doc start_doc;
+        std::string why0;
+        expectTrue(rev::fromTree(t, &start_doc, &why0), "起点也能导出");
+        const std::vector<std::u32string> start_text = rev::paraTexts(start_doc);
+
+        int checked = 0;
+        int mismatched = 0;
+        int skipped = 0;
+        std::string first_bad;
+        Doc doc;
+        std::string why;
+
+        for (int step = 0; step < 48; ++step) {
+            // 先对照：此刻的树（引擎编出来的）与此刻的修订（从树导出再投影）必须一致。
+            const bool exported = rev::fromTree(e.documentTree(), &doc, &why);
+            if (!exported) {
+                ++mismatched;
+                if (first_bad.empty()) first_bad = "导出失败：" + why;
+                break;
+            }
+            const rev::Projection pr = rev::project(doc, sheet);
+            const std::vector<BlockSpec>& cb = e.blocks();
+            if (pr.blocks.size() != cb.size()) {
+                ++mismatched;
+                if (first_bad.empty()) {
+                    first_bad = "第 " + std::to_string(step) + " 步：块数 " +
+                                std::to_string(pr.blocks.size()) + " vs " +
+                                std::to_string(cb.size());
+                }
+            } else {
+                for (size_t i = 0; i < cb.size(); ++i) {
+                    if (sameBlock(pr.blocks[i].spec, cb[i])) continue;
+                    ++mismatched;
+                    if (first_bad.empty()) {
+                        first_bad = "第 " + std::to_string(step) + " 步第 " + std::to_string(i) +
+                                    " 块：" + blockDiff(pr.blocks[i].spec, cb[i]);
+                    }
+                    break;
+                }
+            }
+
+            // 表格结构与块流是两种形状，必须各自比：只比块流看不出列宽与跨度的错。
+            if (pr.tables.size() != e.tableSpecs().size()) {
+                ++mismatched;
+                if (first_bad.empty()) {
+                    first_bad = "第 " + std::to_string(step) + " 步：表格数 " +
+                                std::to_string(pr.tables.size()) + " vs " +
+                                std::to_string(e.tableSpecs().size());
+                }
+            } else {
+                for (size_t i = 0; i < e.tableSpecs().size(); ++i) {
+                    if (testcmp::sameTable(pr.tables[i], e.tableSpecs()[i])) continue;
+                    ++mismatched;
+                    if (first_bad.empty()) {
+                        first_bad = "第 " + std::to_string(step) + " 步第 " + std::to_string(i) +
+                                    " 张表结构与引擎不同";
+                    }
+                    break;
+                }
+            }
+            ++checked;
+
+            const int paras = rev::paraCount(doc);
+            bool did = false;
+            switch (step % 6) {
+                case 0:
+                    did = e.insertCodepoint(0, 0, 0x7532);
+                    break;
+                case 1:
+                    e.setCaret(0, 1);
+                    did = e.splitParagraph();
+                    break;
+                case 2:
+                    e.setCaret(1, static_cast<size_t>(paras > 1 ? 1 : 0));
+                    did = e.backspace();
+                    break;
+                case 3:
+                    e.setCaret(0, 0);
+                    did = e.deleteForward();
+                    break;
+                case 4:
+                    if (paras >= 2) {
+                        e.setCaret(1, 0);
+                        did = e.mergeWithPreviousParagraph();
+                    }
+                    break;
+                default:
+                    // 表后那一段里插字：跨过表格之后的落点。
+                    e.setCaret(paras > 1 ? paras - 1 : 0, 0);
+                    did = e.typeTextUtf8("乙");
+                    break;
+            }
+            if (!did) ++skipped;
+        }
+
+        std::printf("     对照 %d 次，跳过 %d 次编辑，%zu 块\n", checked, skipped,
+                    e.blocks().size());
+        expectTrue(checked >= 40, "跑了足够多轮对照（" + std::to_string(checked) + "）");
+        expectTrue(mismatched == 0, "每一轮投影都与引擎的编译产物逐字段相同" +
+                                        (mismatched == 0 ? std::string() : "：" + first_bad));
+        expectTrue(rev::paraCount(doc) >= 2, "文档在这一串编辑之后仍有多段");
+        int in_table = 0;
+        for (const BlockSpec& b : e.blocks()) in_table += b.cell_path.empty() ? 0 : 1;
+        const bool shapes_ok =
+            e.blocks().size() >= 5 && in_table >= 2 && e.tableSpecs().size() == 1;
+        expectTrue(shapes_ok, "对照的产物不是空壳（" + std::to_string(e.blocks().size()) +
+                                  " 块，其中 " + std::to_string(in_table) + " 块在表格里，" +
+                                  std::to_string(e.tableSpecs().size()) + " 张表）");
+        expectTrue(rev::paraTexts(doc) != start_text, "这一串编辑真的改动了文档");
     }
 
     std::printf("\n──────────────────────────────\n");

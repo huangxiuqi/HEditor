@@ -18,9 +18,16 @@
 #include "core/rev/project.h"
 #include "core/rev/rev.h"
 #include "core/rev/serialize.h"
+#include "core/rev/session.h"
+
+#include "block_compare.h"
 
 using namespace heditor;
 using heditor::rev::Doc;
+using testcmp::blockDiff;
+using testcmp::sameBlock;
+using testcmp::sameObjects;
+using testcmp::sameTableShape;
 
 namespace {
 
@@ -31,67 +38,6 @@ std::vector<uint32_t> cpsOf(const std::u32string& s) {
     std::vector<uint32_t> out;
     for (char32_t c : s) out.push_back(static_cast<uint32_t>(c));
     return out;
-}
-
-/**
- * 行内对象里 owner 是节点号（身份），两边各自从 1 起分配，号码不可比；其余字段表达内容。
- * 跨模型比对因此跳过 owner —— 但"它是不是指向同一个控件"不能就这么算了，由控件表那一组
- * 判据（块号、码点跨度、只读）单独管。
- */
-bool sameObjects(const std::vector<InlineObject>& a, const std::vector<InlineObject>& b) {
-    if (a.size() != b.size()) return false;
-    for (size_t i = 0; i < a.size(); ++i) {
-        if (a[i].cp != b[i].cp || a[i].kind != b[i].kind || a[i].read_only != b[i].read_only) {
-            return false;
-        }
-        if (a[i].w_pt != b[i].w_pt || a[i].h_pt != b[i].h_pt) return false;
-        if (a[i].atom != b[i].atom || a[i].content_hash != b[i].content_hash) return false;
-    }
-    return true;
-}
-
-/**
- * 两块是不是同一份排版输入。除行内对象按上面那条口径外，其余字段交给 BlockSpec 的相等 ——
- * 它是逐字段写的，加字段漏比会编不过。
- */
-bool sameBlock(const BlockSpec& a, const BlockSpec& b) {
-    BlockSpec x = a;
-    BlockSpec y = b;
-    x.objects.clear();
-    y.objects.clear();
-    return x == y && sameObjects(a.objects, b.objects);
-}
-
-/**
- * 第一处不同的字段名，给差分判据的失败信息用。只说"不同"的断言没法查。
- */
-std::string blockDiff(const BlockSpec& a, const BlockSpec& b) {
-    if (a.cp_text != b.cp_text) return "cp_text";
-    if (a.font_index != b.font_index) return "font_index";
-    if (a.size_pt != b.size_pt) return "size_pt";
-    if (!(a.wm == b.wm)) return "wm";
-    if (a.line_factor != b.line_factor) return "line_factor";
-    if (a.space_after_pt != b.space_after_pt) return "space_after_pt";
-    if (a.page_break_before != b.page_break_before) return "page_break_before";
-    if (!BlockSpec::sameLanguage(a.language, b.language)) return "language";
-    if (!(a.color == b.color)) return "color";
-    if (a.fallback_font_indices != b.fallback_font_indices) return "fallback_font_indices";
-    if (a.cell_path != b.cell_path) return "cell_path";
-    if (a.runs.size() != b.runs.size()) return "runs.size";
-    for (size_t i = 0; i < a.runs.size(); ++i) {
-        if (!(a.runs[i] == b.runs[i])) return "runs[" + std::to_string(i) + "]";
-    }
-    if (a.objects.size() != b.objects.size()) return "objects.size";
-    for (size_t i = 0; i < a.objects.size(); ++i) {
-        if (a.objects[i].cp != b.objects[i].cp) return "objects.cp";
-        if (a.objects[i].kind != b.objects[i].kind) return "objects.kind";
-        if (a.objects[i].read_only != b.objects[i].read_only) return "objects.read_only";
-        if (a.objects[i].w_pt != b.objects[i].w_pt) return "objects.w_pt";
-        if (a.objects[i].h_pt != b.objects[i].h_pt) return "objects.h_pt";
-        if (a.objects[i].atom != b.objects[i].atom) return "objects.atom";
-        if (a.objects[i].content_hash != b.objects[i].content_hash) return "objects.content_hash";
-    }
-    return "（只有 owner 不同）";
 }
 
 void expectTrue(bool cond, const std::string& what) {
@@ -498,45 +444,6 @@ NodeTree makeTableTree(const Length& col0, const Length& row0_height) {
 BlockSpec withoutTableHandle(BlockSpec b) {
     for (CellSlot& slot : b.cell_path) slot.table = 0;
     return b;
-}
-
-bool sameWidth(const WidthSpec& a, const WidthSpec& b) {
-    return a.kind == b.kind && a.pt == b.pt && a.ratio == b.ratio;
-}
-
-/**
- * 两张表的结构是不是同一份（句柄归一后逐字段比）。
- */
-bool sameTableShape(const LayoutTable& a, const LayoutTable& b) {
-    if (!sameWidth(a.width, b.width) || a.align != b.align || a.rows != b.rows ||
-        a.cols != b.cols) {
-        return false;
-    }
-    if (a.col_widths.size() != b.col_widths.size()) return false;
-    for (size_t i = 0; i < a.col_widths.size(); ++i) {
-        if (!sameWidth(a.col_widths[i], b.col_widths[i])) return false;
-    }
-    if (a.row_specs.size() != b.row_specs.size()) return false;
-    for (size_t i = 0; i < a.row_specs.size(); ++i) {
-        const LayoutRow& x = a.row_specs[i];
-        const LayoutRow& y = b.row_specs[i];
-        if (x.can_split_by_page != y.can_split_by_page || x.is_header != y.is_header ||
-            x.page_break_before != y.page_break_before || x.height_rule != y.height_rule ||
-            x.height_pt != y.height_pt) {
-            return false;
-        }
-    }
-    if (a.cells.size() != b.cells.size()) return false;
-    for (size_t i = 0; i < a.cells.size(); ++i) {
-        const LayoutCell& x = a.cells[i];
-        const LayoutCell& y = b.cells[i];
-        if (x.row != y.row || x.cell != y.cell || x.row_span != y.row_span ||
-            x.col_span != y.col_span || x.v_align != y.v_align || x.first_block != y.first_block ||
-            x.block_count != y.block_count) {
-            return false;
-        }
-    }
-    return true;
 }
 
 /**
@@ -1795,6 +1702,167 @@ int main() {
         expectTrue(same_disp && disp.blocks.size() == 2 && disp.controls.empty(),
                    "呈现态：隐藏之后两条路仍逐字段相同（两段），控件表为空" +
                        (same_disp ? std::string() : "：" + disp_where));
+    }
+
+    std::printf("\n[18] 会话层：撤销栈是一串旧修订，不是一串逆操作\n");
+    {
+        const Doc initial = rev::makeTextDoc({U"第一段", U"第二段"});
+        rev::Session s(initial, 6);
+        Doc direct = initial;
+
+        // 同一串编辑同时走会话与原语：会话多出来的只有"记住旧值"，其余必须一模一样。
+        auto directOf = [](const Doc& d, const rev::Edit& e) {
+            switch (e.kind) {
+                case rev::Edit::Kind::InsertText:
+                    return rev::insertText(d, e.para, e.cp, e.text);
+                case rev::Edit::Kind::EraseText:
+                    return rev::eraseText(d, e.para, e.cp, e.count);
+                case rev::Edit::Kind::SplitPara:
+                    return rev::splitPara(d, e.para, e.cp);
+                case rev::Edit::Kind::MergePara:
+                    return rev::mergePara(d, e.para);
+                default:
+                    return rev::EditResult{};
+            }
+        };
+
+        std::mt19937 rng(20261020u);
+        int steps = 0;
+        int rejected = 0;
+        int mismatched = 0;
+        std::vector<Doc> timeline{initial};
+        for (int i = 0; i < 120; ++i) {
+            const std::vector<std::u32string> texts = rev::paraTexts(direct);
+            const int paras = static_cast<int>(texts.size());
+            rev::Edit e;
+            e.para = static_cast<int>(rng() % static_cast<uint32_t>(paras));
+            const int len = static_cast<int>(texts[e.para].size());
+            e.cp = static_cast<int>(rng() % static_cast<uint32_t>(len + 1));
+            const int op = static_cast<int>(rng() % 4);
+            if (op == 0) {
+                e.kind = rev::Edit::Kind::InsertText;
+                e.text = std::u32string(1, static_cast<char32_t>('a' + rng() % 26));
+            } else if (op == 1) {
+                if (len == 0) continue;
+                e.kind = rev::Edit::Kind::EraseText;
+                e.count = 1 + static_cast<int>(
+                                  rng() % static_cast<uint32_t>(len - e.cp > 0 ? len - e.cp : 1));
+            } else if (op == 2) {
+                e.kind = rev::Edit::Kind::SplitPara;
+            } else {
+                e.kind = rev::Edit::Kind::MergePara;
+            }
+
+            const rev::EditResult d = directOf(direct, e);
+            const rev::Applied a = s.apply(e);
+            if (a.ok != d.ok) {
+                ++mismatched;
+                continue;
+            }
+            if (!a.ok) {
+                ++rejected;
+                if (s.doc().lo != direct.lo || s.doc().hi != direct.hi) ++mismatched;
+                continue;
+            }
+            direct = d.doc;
+            ++steps;
+            if (!sameTree(s.doc().root, direct.root)) ++mismatched;
+            timeline.push_back(s.doc());
+        }
+        expectTrue(mismatched == 0, "同一串编辑走会话与走原语，结果逐节点相同（" +
+                                        std::to_string(steps) + " 步成功 / " +
+                                        std::to_string(rejected) + " 步被拒）");
+        expectTrue(steps > 30, "这串编辑真的推进了很多步（" + std::to_string(steps) + "）");
+
+        // 撤销到底：回到起点，且再撤一次返回 false。
+        int undone = 0;
+        while (s.undo()) ++undone;
+        expectTrue(undone == s.limit() || undone == steps,
+                   "撤销次数到顶（" + std::to_string(undone) + " 次，上限 " +
+                       std::to_string(s.limit()) + "）");
+        expectTrue(!s.canUndo() && !s.undo(), "撤到底之后再撤：返回 false");
+        bool same_as_start = sameTree(s.doc().root, timeline[timeline.size() - 1 - undone].root);
+        expectTrue(same_as_start, "撤到底之后落在本会话保留的最早一份修订上");
+
+        // 重做全回去：与直接走到终点的结果相同。
+        while (s.redo()) {
+        }
+        expectTrue(!s.canRedo() && sameTree(s.doc().root, direct.root),
+                   "全部重做之后与直接应用的结果逐节点相同");
+
+        // 撤销之后再编辑，重做栈必须清空：留着它意味着一路跳回另一条分支。
+        expectTrue(s.undo(), "准备：撤销一步");
+        const uint64_t gen_before = s.generation();
+        rev::Edit ins;
+        ins.kind = rev::Edit::Kind::InsertText;
+        ins.para = 0;
+        ins.cp = 0;
+        ins.text = U"Z";
+        expectTrue(s.apply(ins).ok, "撤销之后再编辑");
+        expectTrue(s.redoDepth() == 0 && !s.canRedo(), "编辑之后重做栈清空");
+        expectTrue(s.generation() > gen_before, "状态代号推进");
+
+        // 被拒绝/没变化的一步：状态与历史都不动。
+        //   这两条另起一个没吃满上限的会话：封顶之后深度怎么变都是同一个数，断言在那里
+        //   恒真（注入"空编辑也入栈"的错，它照样绿）。
+        rev::Session fresh(initial, 10);
+        rev::Edit seed;
+        seed.kind = rev::Edit::Kind::InsertText;
+        seed.para = 0;
+        seed.cp = 0;
+        seed.text = U"seed";
+        expectTrue(fresh.apply(seed).ok, "准备：新会话里先走一步");
+        const Doc before_bad = fresh.doc();
+        const int depth_before = fresh.undoDepth();
+
+        rev::Edit bad;
+        bad.kind = rev::Edit::Kind::MergePara;
+        bad.para = rev::paraCount(fresh.doc()) - 1;  // 最后一段没有下一段
+        const rev::Applied refused = fresh.apply(bad);
+        expectTrue(!refused.ok && !refused.error.empty(), "末段合并：被拒绝并说明原因");
+        expectTrue(fresh.doc().lo == before_bad.lo && fresh.doc().hi == before_bad.hi &&
+                       fresh.undoDepth() == depth_before,
+                   "被拒绝的一步不占撤销栈，当前修订不动");
+
+        rev::Edit noop;
+        noop.kind = rev::Edit::Kind::EraseText;
+        noop.para = 0;
+        noop.cp = 0;
+        noop.count = 0;
+        const rev::Applied nothing = fresh.apply(noop);
+        expectTrue(nothing.ok && !nothing.changed, "删 0 个码点：成功但没有变化");
+        expectTrue(fresh.undoDepth() == depth_before,
+                   "没有变化的一步不占撤销栈（深度 " + std::to_string(fresh.undoDepth()) +
+                       "，应为 " + std::to_string(depth_before) + "）");
+
+        // 上限：超出时丢最旧的一份，撤销仍然一步步往回走。
+        rev::Session small(initial, 3);
+        std::vector<Doc> seen{initial};
+        for (int i = 0; i < 6; ++i) {
+            rev::Edit e;
+            e.kind = rev::Edit::Kind::InsertText;
+            e.para = 0;
+            e.cp = 0;
+            e.text = std::u32string(1, static_cast<char32_t>('A' + i));
+            expectTrue(small.apply(e).ok, "上限用例：第 " + std::to_string(i + 1) + " 步");
+            seen.push_back(small.doc());
+        }
+        expectTrue(small.undoDepth() == 3,
+                   "撤销栈封顶在上限（" + std::to_string(small.undoDepth()) + "）");
+        int back = 0;
+        while (small.undo()) ++back;
+        expectTrue(back == 3 && sameTree(small.doc().root, seen[3].root),
+                   "撤到底落在第三份修订上（更早的两份已丢弃，但可以撤销回去）");
+
+        // 上限 0：没有历史，只能前进。
+        rev::Session none(initial, 0);
+        rev::Edit one;
+        one.kind = rev::Edit::Kind::InsertText;
+        one.para = 0;
+        one.cp = 0;
+        one.text = U"x";
+        expectTrue(none.apply(one).ok && !none.canUndo(), "上限 0：编辑成功但没有历史");
+        expectTrue(!none.undo(), "上限 0：撤销返回 false");
     }
 
     std::printf("\n结果：%d 项断言，%d 项失败\n", g_checks, g_failures);

@@ -62,14 +62,55 @@ bool sameLine(const LineBox& a, const LineBox& b) {
         !samePos(a.inline_origin_pt, b.inline_origin_pt) ||
         !samePos(a.inline_end_pt, b.inline_end_pt) || a.first_cp != b.first_cp ||
         a.last_cp != b.last_cp || a.bracket_font != b.bracket_font ||
-        !samePos(a.bracket_axis_pt, b.bracket_axis_pt) || a.clusters.size() != b.clusters.size()) {
+        !samePos(a.bracket_axis_pt, b.bracket_axis_pt) || a.clusters.size() != b.clusters.size() ||
+        !samePos(a.cell_lo_pt, b.cell_lo_pt) || !samePos(a.cell_hi_pt, b.cell_hi_pt) ||
+        !samePos(a.cell_box_lo_pt, b.cell_box_lo_pt) ||
+        !samePos(a.cell_box_hi_pt, b.cell_box_hi_pt) || !samePos(a.cell_top_pt, b.cell_top_pt) ||
+        !samePos(a.cell_bottom_pt, b.cell_bottom_pt)) {
         return false;
     }
     for (size_t i = 0; i < a.clusters.size(); ++i) {
         const LineCluster& x = a.clusters[i];
         const LineCluster& y = b.clusters[i];
         if (x.cp != y.cp || !samePos(x.inline_pt, y.inline_pt) || x.placeholder != y.placeholder ||
-            x.bracket_side != y.bracket_side || x.read_only != y.read_only) {
+            x.bracket_side != y.bracket_side || x.read_only != y.read_only ||
+            x.owner_control != y.owner_control || x.atom != y.atom ||
+            !samePos(x.atom_h_pt, y.atom_h_pt) || x.content_hash != y.content_hash) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
+ * 两张已放置的表格是否逐字段相同：位置、列边界、逻辑格、每一行片段（页、y、高、续接标记）。
+ *
+ * 它补的是"排版自审对表格是盲的"这个洞：列的几何与行片段不进 glyphs / lines，只比那两样
+ * 的话，整张表错位、行高算错、跨页片段切在错的地方，diff 都会是 0。
+ */
+bool sameTable(const PlacedTable& a, const PlacedTable& b) {
+    if (a.handle != b.handle || !samePos(a.x, b.x) || !samePos(a.w, b.w) || a.rows != b.rows ||
+        a.cols != b.cols || a.col_x.size() != b.col_x.size() || a.cells.size() != b.cells.size() ||
+        a.placed.size() != b.placed.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < a.col_x.size(); ++i) {
+        if (!samePos(a.col_x[i], b.col_x[i])) return false;
+    }
+    for (size_t i = 0; i < a.cells.size(); ++i) {
+        const LayoutCell& x = a.cells[i];
+        const LayoutCell& y = b.cells[i];
+        if (x.row != y.row || x.cell != y.cell || x.row_span != y.row_span ||
+            x.col_span != y.col_span || x.v_align != y.v_align || x.first_block != y.first_block ||
+            x.block_count != y.block_count) {
+            return false;
+        }
+    }
+    for (size_t i = 0; i < a.placed.size(); ++i) {
+        const PlacedRow& x = a.placed[i];
+        const PlacedRow& y = b.placed[i];
+        if (x.row != y.row || x.page != y.page || !samePos(x.y, y.y) || !samePos(x.h, y.h) ||
+            x.cont_top != y.cont_top || x.cont_bottom != y.cont_bottom) {
             return false;
         }
     }
@@ -94,13 +135,15 @@ struct LayoutAudit {
     int line_diff = 0;
     int para_diff = 0;
     int cluster_starts_diff = 0;
+    int table_diff = 0;
     bool stats_same = true;
     int glyph_first = -1;
     int line_first = -1;
     int para_first = -1;
 
     int total() const {
-        return glyph_diff + line_diff + para_diff + cluster_starts_diff + (stats_same ? 0 : 1);
+        return glyph_diff + line_diff + para_diff + cluster_starts_diff + table_diff +
+               (stats_same ? 0 : 1);
     }
 };
 
@@ -147,6 +190,14 @@ LayoutAudit auditLayoutPair(const LayoutResult& cur, const LayoutResult& ref) {
         static_cast<int>(cur.para_cluster_starts.size() > ref.para_cluster_starts.size()
                              ? cur.para_cluster_starts.size() - ref.para_cluster_starts.size()
                              : ref.para_cluster_starts.size() - cur.para_cluster_starts.size());
+
+    const size_t nt = std::min(cur.placed_tables.size(), ref.placed_tables.size());
+    for (size_t i = 0; i < nt; ++i) {
+        if (!sameTable(cur.placed_tables[i], ref.placed_tables[i])) ++a.table_diff;
+    }
+    a.table_diff += static_cast<int>(cur.placed_tables.size() > ref.placed_tables.size()
+                                         ? cur.placed_tables.size() - ref.placed_tables.size()
+                                         : ref.placed_tables.size() - cur.placed_tables.size());
 
     const LayoutStats& x = cur.stats;
     const LayoutStats& y = ref.stats;
@@ -310,7 +361,7 @@ std::string EditorEngine::auditBaseJson() {
     const size_t n = base_.byteSize();
     const std::vector<uint8_t> before(base_.data(), base_.data() + n);
 
-    base_valid_ = false;   // ← 强制"底图全建"
+    base_valid_ = false;  // ← 强制"底图全建"
     repaint();
 
     const uint8_t* now = base_.data();
@@ -355,8 +406,8 @@ int EditorEngine::auditTables() const { return auditTablesDetail().total(); }
 std::string EditorEngine::auditTablesJson() const {
     const TableAudit a = auditTablesDetail();
     std::ostringstream o;
-    o << "{\"diff\":" << a.total() << ",\"cells\":" << a.cells << ",\"emptyCell\":"
-      << a.empty_cell << ",\"badRange\":" << a.bad_range << ",\"overlap\":" << a.overlap
+    o << "{\"diff\":" << a.total() << ",\"cells\":" << a.cells << ",\"emptyCell\":" << a.empty_cell
+      << ",\"badRange\":" << a.bad_range << ",\"overlap\":" << a.overlap
       << ",\"noMark\":" << a.block_without_mark << ",\"pathMismatch\":" << a.path_mismatch
       << ",\"badSpan\":" << a.bad_span << ",\"stray\":" << a.blocks_in_no_cell
       << ",\"firstCell\":" << a.first_cell << "}";
@@ -414,8 +465,8 @@ EditorEngine::TableAudit EditorEngine::auditTablesDetail() const {
                 }
                 const Ref& p = refs[static_cast<size_t>(prev)];
                 const Ref& n = refs[static_cast<size_t>(ci)];
-                const bool nested = (p.lo <= n.lo && p.hi >= n.hi) ||
-                                    (n.lo <= p.lo && n.hi >= p.hi);
+                const bool nested =
+                    (p.lo <= n.lo && p.hi >= n.hi) || (n.lo <= p.lo && n.hi >= p.hi);
                 if (p.table == n.table || !nested) ++a.overlap;
                 // 记最内层那一格（块数少的），后面的对照要用它。
                 if (n.hi - n.lo < p.hi - p.lo) owner[k] = ci;
@@ -478,6 +529,7 @@ std::string EditorEngine::auditLayoutJson() {
     o << "{\"diff\":" << a.total();
     o << ",\"glyphDiff\":" << a.glyph_diff << ",\"lineDiff\":" << a.line_diff;
     o << ",\"paraDiff\":" << a.para_diff << ",\"startsDiff\":" << a.cluster_starts_diff;
+    o << ",\"tableDiff\":" << a.table_diff;
     o << ",\"statsSame\":" << (a.stats_same ? "true" : "false");
     o << ",\"first\":{\"glyph\":" << a.glyph_first << ",\"line\":" << a.line_first
       << ",\"para\":" << a.para_first << "}";
@@ -502,7 +554,7 @@ std::string EditorEngine::auditGlyphPagesJson() const {
     //   不用"逐页再全篇筛"（那是 O(页数 x 全篇)，160 页 x 8 万字形 = 一千多万次），
     //   一次扫描 O(全篇) 就够，成本从分钟级降到毫秒级。
     std::vector<int> ref(static_cast<size_t>(pages), 0);
-    int stray = 0;   // 页号落在 [0, pages) 之外的字形：那是排版自己的错，单独计数
+    int stray = 0;  // 页号落在 [0, pages) 之外的字形：那是排版自己的错，单独计数
     for (const PlacedGlyph& g : gs) {
         if (g.page < 0 || g.page >= pages) {
             ++stray;
