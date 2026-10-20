@@ -159,6 +159,20 @@ const std::vector<Ref>* bodyOf(const Doc& doc);
 const Node* findNode(const Doc& doc, NodeId id);
 
 /**
+ * 父节点。修订没有向上的指针（它是不可变树，加一条反向链就要在每次路径复制时维护两处），
+ * 所以按节点号现找。命令层用它把"某个节点"换成"某个孩子槽位"。
+ */
+const Node* parentOf(const Doc& doc, NodeId id);
+
+/**
+ * 反向桥：修订 → 模型树。节点号不保留（模型树的节点由它自己分配），内容逐字段带过去。
+ *
+ * 它只有一个用途 —— 审计：引擎产物与另一条独立路径（compileDocument）比较时，参照侧需要
+ * 一棵模型树。编辑路径不用它，否则就又回到"每条编辑造一棵树"。
+ */
+void toTree(const Doc& doc, NodeTree* out);
+
+/**
  * 建一个节点：哈希与段落数由孩子算出来，调用方给的是内容与身份，不是派生量。
  *
  * 派生量不从外面填，是不给"第二个可写真相"留口子：节点若能带着别人算好的哈希建出来，

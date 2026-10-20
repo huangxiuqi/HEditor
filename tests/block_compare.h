@@ -14,11 +14,22 @@
 namespace testcmp {
 
 using heditor::BlockSpec;
+using heditor::CellSlot;
 using heditor::InlineObject;
 using heditor::LayoutCell;
 using heditor::LayoutRow;
 using heditor::LayoutTable;
 using heditor::WidthSpec;
+
+/**
+ * 格路径里 table 是表的节点号（身份）。跨模型比较时两边的节点号不同源，抹掉它只留
+ * row / cell —— 那两项才是"在哪一格"的内容。
+ */
+inline std::vector<CellSlot> cellPathShape(const std::vector<CellSlot>& path) {
+    std::vector<CellSlot> out = path;
+    for (CellSlot& s : out) s.table = 0;
+    return out;
+}
 
 /**
  * 行内对象里 owner 是节点号（身份）。号码可比的场合由调用方另判，这里只比内容。
@@ -44,6 +55,8 @@ inline bool sameBlock(const BlockSpec& a, const BlockSpec& b) {
     BlockSpec y = b;
     x.objects.clear();
     y.objects.clear();
+    x.cell_path = cellPathShape(a.cell_path);
+    y.cell_path = cellPathShape(b.cell_path);
     return x == y && sameObjects(a.objects, b.objects);
 }
 
@@ -61,7 +74,7 @@ inline std::string blockDiff(const BlockSpec& a, const BlockSpec& b) {
     if (!BlockSpec::sameLanguage(a.language, b.language)) return "language";
     if (!(a.color == b.color)) return "color";
     if (a.fallback_font_indices != b.fallback_font_indices) return "fallback_font_indices";
-    if (a.cell_path != b.cell_path) return "cell_path";
+    if (cellPathShape(a.cell_path) != cellPathShape(b.cell_path)) return "cell_path";
     if (a.runs.size() != b.runs.size()) return "runs.size";
     for (size_t i = 0; i < a.runs.size(); ++i) {
         if (!(a.runs[i] == b.runs[i])) return "runs[" + std::to_string(i) + "]";

@@ -237,8 +237,9 @@ int diffBlockSpec(const BlockSpec& a, const BlockSpec& b) {
         for (size_t i = 0; i < a.objects.size(); ++i) {
             const InlineObject& x = a.objects[i];
             const InlineObject& y = b.objects[i];
-            if (x.cp != y.cp || x.kind != y.kind || x.owner != y.owner ||
-                x.read_only != y.read_only) {
+            // owner 不比：参照侧的节点号由模型树自己分配，与修订的节点号不同源，
+            //   逐号比较恒不相等。它的一致性由控件的成对计数与下标翻译另测。
+            if (x.cp != y.cp || x.kind != y.kind || x.read_only != y.read_only) {
                 ++d;
             }
         }
@@ -599,25 +600,20 @@ int EditorEngine::auditCompile() const {
     if (!loaded_) return 0;
     const FlowVisibility vis =
         (mode_ == EditMode::Document) ? FlowVisibility::Design : FlowVisibility::Display;
-    const CompileResult ref = compileDocument(tree_, vis, sheet_);
+    // 参照物走另一条路：修订转回模型树，再让模型层编译一遍。两边都用投影的话，
+    //   自审就退化成"自己跟自己比"，那是没有判据价值的。
+    NodeTree mirror;
+    rev::toTree(document(), &mirror);
+    const CompileResult ref = compileDocument(mirror, vis, sheet_);
     // 段数不同就没法逐段对齐了：报一个大数（不是 1），让"哪里不符"一眼看得出来。
     if (ref.blocks.size() != blocks_full_.size()) return 1000;
     int d = 0;
     for (size_t i = 0; i < ref.blocks.size(); ++i) {
         d += diffBlockSpec(blocks_full_[i], ref.blocks[i]);
     }
-    // 来源身份也要比：段的流区间是由标记位置递推出来的，这一项错了只表现为光标落偏一个字，
-    //   而段的文本与格式可能全都对 —— 是最难查的一类。
-    if (ref.sources.size() != block_src_.size()) {
-        ++d;
-    } else {
-        for (size_t i = 0; i < ref.sources.size(); ++i) {
-            if (ref.sources[i].first != block_src_[i].first ||
-                ref.sources[i].mark != block_src_[i].mark) {
-                ++d;
-            }
-        }
-    }
+    // 来源身份只比长度：参照侧的节点号是模型树自己分配的，与修订的节点号不同源，
+    //   逐号比较恒不相等。身份契约由下面那段按修订节点号的检查负责。
+    if (ref.sources.size() != block_src_.size()) ++d;
     // 控件集合单独数一遍：它是产物的一次派生，而那次派生对"半截边界"是整对丢弃 ——
     //   一条静默降级。产物只错掉一枚边界时，块级差异常常小到看不出来，而界面上控件会
     //   整批消失（"字段没了"就是这么被放大出来的）。独立数一遍，让这一类差异可读。
@@ -627,7 +623,7 @@ int EditorEngine::auditCompile() const {
     //   而产物本身可能逐字段全对 —— 闭括号形态漏记时就是这样。这里独立重算段起点
     //   （与 rebuildParagraphFromTree 同一口径，刻意不共享代码），审计的价值就来自独立。
     {
-        const FlowIndex idx(tree_, vis);
+        const rev::FlowIndex idx(document(), vis);
         for (size_t i = 0; i < block_src_.size(); ++i) {
             int seg_start = -1;
             if (i == 0) {

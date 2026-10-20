@@ -26,15 +26,16 @@
 #include "core/doc/compile.h"
 #include "core/doc/control.h"
 #include "core/doc/document.h"
-#include "core/doc/edit_capability.h"
 #include "core/doc/edit_mode.h"
 #include "core/doc/flow.h"
 #include "core/doc/node.h"
 #include "core/doc/range.h"
 #include "core/doc/steps.h"
-#include "core/doc/transaction.h"
 #include "core/engine/caret.h"
 #include "core/layout/layout.h"
+#include "core/rev/capability.h"
+#include "core/rev/flow.h"
+#include "core/rev/rev.h"
 
 namespace heditor {
 
@@ -63,10 +64,11 @@ class EditHost {
 public:
     virtual ~EditHost() = default;
     /**
-     * 把一条事务交出去。返回 false 表示这一步没做成（事务没落盘、产物没重建），
+     * 把一批步骤交出去。返回 false 表示这一步没做成（步骤没落地、产物没重建），
      * 命令层据此中止整条编辑 —— 与"用户按的那一下没生效"同一口径。
      */
-    virtual bool commitEdit(Transaction tx, int dirty_para, ParaDelta delta) = 0;
+    virtual bool commitSteps(std::vector<Step> steps, int dirty_para, ParaDelta delta,
+                             Range selection_before, Range selection_after) = 0;
 };
 
 /**
@@ -77,8 +79,11 @@ public:
  * 可写的。谁把某个容器换成了另一个对象（move 走、重新 new 一个），这里就是唯一的失效点。
  */
 struct EditView {
-    EditHost* host = nullptr;    // 事务的出口（引擎）
-    NodeTree* tree = nullptr;    // 写口：所有编辑都落到这棵树上
+    EditHost* host = nullptr;  // 步骤的出口（引擎）
+    /**
+     * 文档（只读）。命令层只从它读"落点处是什么"，写一律经 EditHost 落成新修订。
+     */
+    const rev::Doc* doc = nullptr;
     CaretResolver* caret = nullptr;  // 写口：落点与选区
     /**
      * 流索引（树 → 流位置）。没持树时它为空。
@@ -86,12 +91,12 @@ struct EditView {
      * 持的是 optional 的地址而不是它内容的地址：流索引是"重建时 emplace 进去"的，第一次
      * 重建之前它还没建，取内容的地址会拿到空指针并一直空下去（见 TRAPS 81）。
      */
-    const std::optional<FlowIndex>* flow = nullptr;
-    const std::vector<BlockSpec>* blocks = nullptr;          // 段文本与筛过的行内对象表
-    const std::vector<BlockSpec>* blocks_full = nullptr;     // 未按显示名单筛过的对象表
-    const std::vector<FlowPos>* block_flow = nullptr;        // 每块内容起点（全局流位置）
-    const std::vector<int>* block_flow_span = nullptr;       // 每块占的流位数
-    const std::vector<BlockSource>* block_src = nullptr;     // 每块的来源身份
+    const std::optional<rev::FlowIndex>* flow = nullptr;
+    const std::vector<BlockSpec>* blocks = nullptr;       // 段文本与筛过的行内对象表
+    const std::vector<BlockSpec>* blocks_full = nullptr;  // 未按显示名单筛过的对象表
+    const std::vector<FlowPos>* block_flow = nullptr;     // 每块内容起点（全局流位置）
+    const std::vector<int>* block_flow_span = nullptr;    // 每块占的流位数
+    const std::vector<BlockSource>* block_src = nullptr;  // 每块的来源身份
     /**
      * 表格的逻辑格（每格的内容块区间）。整格删除要按格清空时用它 ——
      * 这里是排版输入，不是排版产物，所以拿到的是编译结果里的那一份。
@@ -151,11 +156,11 @@ public:
      * 禁用态提示，判据拿它把"能不能编辑"与"光标能不能到"分开 —— 表单模式下 setCaret 会把
      * 光标投影进最近的字段，"控件之外"那个位置根本到不了，只有直接问它才问得到。
      */
-    EditCheck policyAt(TextPos p) const;
+    rev::EditCheck policyAt(TextPos p) const;
     /**
      * 删除区间 [a, b) 的判定。跨段删除一律拒（档 1 的删除不跨段，段落标记的删除走合并）。
      */
-    EditCheck policyErase(TextPos a, TextPos b) const;
+    rev::EditCheck policyErase(TextPos a, TextPos b) const;
 
     /**
      * 删除一个控件。keep_content 为真时拆壳留内容（那一段字符变成普通正文），为假时连
@@ -181,10 +186,10 @@ public:
      * 不可定位，整篇排版都得作废。
      */
     enum class PropResult {
-        Failed,      // 没改成（不是控件、读不出旧值、提交失败）
-        Unchanged,   // 幂等：值本来就等于要设的值
-        Changed,     // 改了，段结构没变
-        Structural   // 改了，而且改的是呈现态的流结构
+        Failed,     // 没改成（不是控件、读不出旧值、提交失败）
+        Unchanged,  // 幂等：值本来就等于要设的值
+        Changed,    // 改了，段结构没变
+        Structural  // 改了，而且改的是呈现态的流结构
     };
     PropResult setControlProp(int index, ControlProp prop, bool value);
 
@@ -194,7 +199,7 @@ private:
      * 名字不叫 caret 是因为它同时还要提供 TextPos（pos().caret()），两者同名会打架。
      */
     CaretResolver& pos() const { return *view_.caret; }
-    NodeTree& tree() const { return *view_.tree; }
+    const rev::Doc& doc() const { return *view_.doc; }
     const std::vector<BlockSpec>& blocks() const { return *view_.blocks; }
     const std::vector<BlockSpec>& blocksFull() const { return *view_.blocks_full; }
     const std::vector<FlowPos>& blockFlow() const { return *view_.block_flow; }
@@ -205,7 +210,7 @@ private:
     EditMode mode() const { return *view_.mode; }
     int tabSpaces() const { return *view_.tab_spaces; }
     bool hasFlow() const { return view_.flow != nullptr && view_.flow->has_value(); }
-    const FlowIndex& flowIndex() const { return **view_.flow; }
+    const rev::FlowIndex& flowIndex() const { return **view_.flow; }
     /**
      * 记一笔"这一下被策略拒了"。
      */
@@ -213,10 +218,13 @@ private:
         if (view_.blocked_edits != nullptr) ++*view_.blocked_edits;
     }
     /**
-     * 把事务交出去 —— 重建产物是持有者的事。
+     * 把一批步骤交出去 —— 落地与重建产物是持有者的事。
+     *
+     * 选区快照随步骤一起给出：修订只记内容、不记光标，而撤销要回到"按下去之前"的那个位置。
      */
-    bool commit(Transaction tx, int dirty_para, ParaDelta delta) const {
-        return view_.host != nullptr && view_.host->commitEdit(std::move(tx), dirty_para, delta);
+    bool commit(std::vector<Step> steps, int dirty_para, ParaDelta delta) const {
+        return view_.host != nullptr && view_.host->commitSteps(std::move(steps), dirty_para, delta,
+                                                                pending_before_, pending_after_);
     }
 
     /**
@@ -419,6 +427,13 @@ private:
      * 已有样式"这条约定的最小实现；左边没有文本节点时返回空标记（= 全继承）。
      */
     CharFormat marksAtFlow(FlowPos at, std::string* style_ref) const;
+
+    /**
+     * 提交要记的两份选区。撤销与重做都靠它摆回光标。一条编辑可以提交多次（分段之后
+     * 再改段落格式），此时以最后一次给出的两份值为准。
+     */
+    Range pending_before_{};
+    Range pending_after_{};
 
     EditView view_{};
 };

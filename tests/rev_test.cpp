@@ -15,10 +15,17 @@
 
 #include "core/doc/compile.h"
 #include "core/doc/document.h"
+#include "core/doc/flow.h"
+#include "core/doc/steps.h"
+#include "core/doc/transaction.h"
+#include "core/rev/flow.h"
 #include "core/rev/project.h"
 #include "core/rev/rev.h"
 #include "core/rev/serialize.h"
 #include "core/rev/session.h"
+#include "core/rev/steps.h"
+
+#include "demo/demo_documents.h"
 
 #include "block_compare.h"
 
@@ -1954,6 +1961,154 @@ int main() {
         expectTrue(a != nullptr && b != nullptr && a->kind == NodeKind::Section &&
                        std::get<SectionSpec>(b->payload).sameAs(std::get<SectionSpec>(a->payload)),
                    "第二节的页面设置逐字段读回来（分页行为、页边距）");
+    }
+
+    std::printf("\n[20] 步骤应用：同一批步骤，模型层与修订层得到同一份文档\n");
+    {
+        const StyleSheet sheet;
+        NodeTree model = makeSpanningControlTree();
+        UndoStack stack(model);
+        Doc doc;
+        std::string why;
+        expectTrue(rev::fromTree(model, &doc, &why), "基础文档导出成修订");
+
+        int path_mismatch = 0;
+        int batch_index = 0;
+        auto applyBoth = [&](const std::vector<Step>& steps) {
+            if (steps.empty()) return;
+            ++batch_index;
+            Transaction tx;
+            tx.steps = steps;
+            const StepResult a = stack.commit(tx);
+            const rev::EditResult b = rev::applySteps(doc, steps);
+            if (a.ok != b.ok) {
+                ++path_mismatch;
+                std::printf("      第 %d 批：模型 %s（%s）/ 修订 %s（%s）\n", batch_index,
+                            a.ok ? "成功" : "失败", a.error.c_str(), b.ok ? "成功" : "失败",
+                            b.error.c_str());
+            }
+            if (!a.ok || !b.ok) return;
+            doc = b.doc;
+            Doc mirror;
+            if (!rev::fromTree(model, &mirror, &why)) {
+                ++path_mismatch;
+                return;
+            }
+            if (!sameText(rev::paraTexts(mirror), rev::paraTexts(doc))) {
+                ++path_mismatch;
+                std::printf("      第 %d 批：文本 模型 %s / 修订 %s\n", batch_index,
+                            dump(rev::paraTexts(mirror)).c_str(),
+                            dump(rev::paraTexts(doc)).c_str());
+            }
+        };
+
+        // 段首、段中、文末各插一个字再删掉：三种落点覆盖 run 内部与容器边界。
+        for (int round = 0; round < 3; ++round) {
+            const FlowIndex idx(model, FlowVisibility::Design);
+            const int at = round == 0 ? 0 : (round == 1 ? 1 : idx.size());
+            InsertText ins;
+            ins.at = at;
+            ins.cps = {static_cast<uint32_t>(U'a') + static_cast<uint32_t>(round)};
+            applyBoth({Step{ins}});
+            applyBoth(makeDeleteTextSteps(model, at, at + 1));
+        }
+
+        // 分段再并段：标记插入与移除。坐标取文档中部，避开控件边界。
+        int split_at = -1;
+        {
+            const FlowIndex idx(model, FlowVisibility::Design);
+            split_at = idx.size() / 2;
+            InsertParaMark ins;
+            ins.at = split_at;
+            applyBoth({Step{ins}});
+        }
+        {
+            const ParaMarkBuild rm = makeRemoveParaMark(model, split_at);
+            if (rm.ok) applyBoth({rm.step});
+        }
+
+        // 改第一枚段落标记的格式：按节点号寻址，不经流位置。
+        {
+            NodeId mark = kInvalidNodeId;
+            for (int i = 0;
+                 i < model.find(model.rootId())->children.size() && mark == kInvalidNodeId; ++i) {
+                const Node* sec = model.find(model.rootId())->children[static_cast<size_t>(i)];
+                for (const Node* c : sec->children) {
+                    if (isParagraphMark(c->kind)) {
+                        mark = c->id;
+                        break;
+                    }
+                }
+            }
+            if (mark != kInvalidNodeId) {
+                SetParaMarkFormat s;
+                s.id = mark;
+                s.para.line_factor = 1.5f;
+                s.styleRef = "quote";
+                applyBoth({Step{s}});
+            }
+        }
+
+        expectTrue(path_mismatch == 0, "每一批步骤两条路都成功，且段落文本逐步相同");
+
+        Doc mirror;
+        expectTrue(rev::fromTree(model, &mirror, &why), "最终文档再导出一次");
+        const rev::Projection a = rev::project(mirror, sheet);
+        const rev::Projection b = rev::project(doc, sheet);
+        bool same_blocks = a.blocks.size() == b.blocks.size();
+        for (size_t i = 0; same_blocks && i < a.blocks.size(); ++i) {
+            same_blocks = sameBlock(a.blocks[i].spec, b.blocks[i].spec);
+        }
+        expectTrue(same_blocks, "最终产物逐块逐字段相同（含跨段控件的两段）");
+        expectTrue(a.tables.size() == b.tables.size(), "表格结构数量相同");
+        expectTrue(rev::paraCount(doc) == rev::paraCount(mirror), "段落数相同");
+
+        // 反向一半：一条越界步骤必须被拒，且不返回"看起来没变"的文档。
+        const rev::EditResult bad = rev::applySteps(doc, {Step{RemoveParaMark{9999, {}, {}}}});
+        expectTrue(!bad.ok && !bad.doc.root, "越界步骤被拒，且不带回半途的文档");
+    }
+
+    std::printf("\n[21] 演示文书：投影的段起点与编译一致（引擎的块流全靠这一项）\n");
+    {
+        const StyleSheet sheet;
+        auto check = [&](const NodeTree& tree, const char* label) {
+            Doc doc;
+            std::string why;
+            const bool exported = rev::fromTree(tree, &doc, &why);
+            expectTrue(exported, std::string(label) + "：导出成修订");
+            if (!exported) return;
+            const rev::Projection pr = rev::project(doc, sheet);
+            const CompileResult cr = compileDocument(tree, FlowVisibility::Design, sheet);
+            bool same_blocks = pr.blocks.size() == cr.blocks.size();
+            for (size_t i = 0; same_blocks && i < cr.blocks.size(); ++i) {
+                same_blocks = testcmp::sameBlock(pr.blocks[i].spec, cr.blocks[i]);
+            }
+            expectTrue(same_blocks, std::string(label) + "：块逐字段相同");
+
+            const rev::FlowIndex ri(doc, FlowVisibility::Design);
+            const FlowIndex mi(tree, FlowVisibility::Design);
+            int bad = 0;
+            for (size_t i = 0; i < cr.sources.size() && i < pr.blocks.size(); ++i) {
+                int r_first = -1;
+                int m_first = -1;
+                if (!ri.intervalOf(pr.blocks[i].source.first, &r_first, nullptr)) ++bad;
+                if (!mi.intervalOf(cr.sources[i].first, &m_first, nullptr)) ++bad;
+                if (r_first != m_first) ++bad;
+                int r_mark = -1;
+                int m_mark = -1;
+                if (!ri.intervalOf(pr.blocks[i].source.mark, &r_mark, nullptr)) ++bad;
+                if (!mi.intervalOf(cr.sources[i].mark, &m_mark, nullptr)) ++bad;
+                if (r_mark != m_mark) ++bad;
+                if (bad != 0) {
+                    std::printf("      第 %zu 段：投影 first=%d mark=%d / 编译 first=%d mark=%d\n",
+                                i, r_first, r_mark, m_first, m_mark);
+                    break;
+                }
+            }
+            expectTrue(bad == 0, std::string(label) + "：每段的 first / mark 流位置一致");
+        };
+        check(demoTree(sampleDocument(0, 0), {}), "样本文书");
+        check(demoTableTree(0), "表格文书");
     }
 
     std::printf("\n结果：%d 项断言，%d 项失败\n", g_checks, g_failures);

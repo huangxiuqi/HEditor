@@ -16,6 +16,7 @@
 #include <string>
 #include <vector>
 
+#include "core/doc/steps.h"
 #include "core/rev/rev.h"
 
 namespace heditor::rev {
@@ -83,6 +84,12 @@ public:
     Applied apply(const Edit& edit);
 
     /**
+     * 提交一批步骤。一次编辑可以有多条步骤（分段后再改段落格式、删选区与插入合并），
+     * 用户按下的是一下，撤销也该是一下 —— 所以整批算一步，旧修订只压一份。
+     */
+    Applied applySteps(const std::vector<Step>& steps);
+
+    /**
      * 回到上一份修订。没有历史时返回 false（不动状态）。
      */
     bool undo();
@@ -91,6 +98,14 @@ public:
      * 回到撤销掉的那一份。与 undo 对称。
      */
     bool redo();
+
+    /**
+     * 调小上限时当场裁掉多余的（丢最旧的），不必等下一次提交。
+     *
+     * 0 表示不留历史；这与"不限制"不是一回事，调用方若把 0 当"不限制"用，
+     * 要在它自己那一层换成一个足够大的数。
+     */
+    void setLimit(int limit);
 
     bool canUndo() const { return !undo_.empty(); }
     bool canRedo() const { return !redo_.empty(); }

@@ -9963,45 +9963,45 @@ int main() {
         std::string why;
 
         for (int step = 0; step < 48; ++step) {
-            // 先对照：此刻的树（引擎编出来的）与此刻的修订（从树导出再投影）必须一致。
-            const bool exported = rev::fromTree(e.documentTree(), &doc, &why);
-            if (!exported) {
-                ++mismatched;
-                if (first_bad.empty()) first_bad = "导出失败：" + why;
-                break;
-            }
-            const rev::Projection pr = rev::project(doc, sheet);
+            // 先对照：引擎的产物与"修订转回模型树、再让模型层编译一遍"必须逐字段相同。
+            //   参照侧刻意走另一条路（compileDocument）；两边都用投影的话，自审就退化成
+            //   "自己跟自己比"，而那正是这条判据存在的理由。
+            NodeTree mirror;
+            rev::toTree(e.document(), &mirror);
+            const CompileResult ref = compileDocument(mirror, FlowVisibility::Design, sheet);
+            doc = e.document();
             const std::vector<BlockSpec>& cb = e.blocks();
-            if (pr.blocks.size() != cb.size()) {
+            if (ref.blocks.size() != cb.size()) {
                 ++mismatched;
                 if (first_bad.empty()) {
                     first_bad = "第 " + std::to_string(step) + " 步：块数 " +
-                                std::to_string(pr.blocks.size()) + " vs " +
+                                std::to_string(ref.blocks.size()) + " vs " +
                                 std::to_string(cb.size());
                 }
             } else {
                 for (size_t i = 0; i < cb.size(); ++i) {
-                    if (sameBlock(pr.blocks[i].spec, cb[i])) continue;
+                    if (sameBlock(ref.blocks[i], cb[i])) continue;
                     ++mismatched;
                     if (first_bad.empty()) {
                         first_bad = "第 " + std::to_string(step) + " 步第 " + std::to_string(i) +
-                                    " 块：" + blockDiff(pr.blocks[i].spec, cb[i]);
+                                    " 块：" + blockDiff(ref.blocks[i], cb[i]);
                     }
                     break;
                 }
             }
 
             // 表格结构与块流是两种形状，必须各自比：只比块流看不出列宽与跨度的错。
-            if (pr.tables.size() != e.tableSpecs().size()) {
+            if (ref.tables.size() != e.tableSpecs().size()) {
                 ++mismatched;
                 if (first_bad.empty()) {
                     first_bad = "第 " + std::to_string(step) + " 步：表格数 " +
-                                std::to_string(pr.tables.size()) + " vs " +
+                                std::to_string(ref.tables.size()) + " vs " +
                                 std::to_string(e.tableSpecs().size());
                 }
             } else {
                 for (size_t i = 0; i < e.tableSpecs().size(); ++i) {
-                    if (testcmp::sameTable(pr.tables[i], e.tableSpecs()[i])) continue;
+                    // 只比形状：参照侧的表句柄是模型树自己分配的，与修订的节点号不同源。
+                    if (testcmp::sameTableShape(ref.tables[i], e.tableSpecs()[i])) continue;
                     ++mismatched;
                     if (first_bad.empty()) {
                         first_bad = "第 " + std::to_string(step) + " 步第 " + std::to_string(i) +
@@ -10051,6 +10051,7 @@ int main() {
         expectTrue(mismatched == 0, "每一轮投影都与引擎的编译产物逐字段相同" +
                                         (mismatched == 0 ? std::string() : "：" + first_bad));
         expectTrue(rev::paraCount(doc) >= 2, "文档在这一串编辑之后仍有多段");
+        (void)why;
         int in_table = 0;
         for (const BlockSpec& b : e.blocks()) in_table += b.cell_path.empty() ? 0 : 1;
         const bool shapes_ok =

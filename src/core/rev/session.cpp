@@ -6,6 +6,8 @@
  */
 #include "core/rev/session.h"
 
+#include "core/rev/steps.h"
+
 namespace heditor::rev {
 
 namespace {
@@ -36,6 +38,12 @@ EditResult run(const Doc& doc, const Edit& e, NodeId* created) {
 }  // namespace
 
 Session::Session(Doc doc, int limit) : doc_(std::move(doc)), limit_(limit < 0 ? 0 : limit) {}
+
+void Session::setLimit(int limit) {
+    limit_ = limit < 0 ? 0 : limit;
+    if (limit_ <= 0) return;
+    while (static_cast<int>(undo_.size()) > limit_) undo_.erase(undo_.begin());
+}
 
 void Session::pushUndo(Doc doc) {
     undo_.push_back(std::move(doc));
@@ -69,6 +77,28 @@ Applied Session::apply(const Edit& edit) {
     ++generation_;
     out.ok = true;
     out.created = created;
+    out.changed = true;
+    return out;
+}
+
+Applied Session::applySteps(const std::vector<Step>& steps) {
+    Applied out;
+    if (steps.empty()) {
+        out.ok = true;
+        return out;
+    }
+    // 限定到命名空间：Session 自己的 applySteps 会把同名函数藏起来。
+    const EditResult r = ::heditor::rev::applySteps(doc_, steps);
+    if (!r.ok) {
+        out.error = r.error;
+        return out;
+    }
+    out.ok = true;
+    if (r.doc.lo == doc_.lo && r.doc.hi == doc_.hi) return out;
+    pushUndo(doc_);
+    doc_ = r.doc;
+    redo_.clear();
+    ++generation_;
     out.changed = true;
     return out;
 }

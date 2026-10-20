@@ -13,6 +13,8 @@
 
 #include "core/engine/engine.h"
 
+#include "core/rev/project.h"
+
 #include "core/text/writing_mode.h"
 #include "core/utils/hash.h"
 #include "core/utils/time.h"
@@ -131,9 +133,8 @@ void EditorEngine::setConfig(const EngineConfig& cfg) {
     want.continuous = cfg.continuous;
     // 只有连页才需要条带高度。分页下留 0，排版按 slabHeightPt 的回退值算（页高）；
     //   这样改页间隙不会牵动分页的"要不要重排"判据 —— 那个改动只影响落点，不影响断行。
-    want.slab_pt = cfg.continuous
-                       ? want.height_pt + (cfg.page_gap_pt > 0.0f ? cfg.page_gap_pt : 0.0f)
-                       : 0.0f;
+    want.slab_pt =
+        cfg.continuous ? want.height_pt + (cfg.page_gap_pt > 0.0f ? cfg.page_gap_pt : 0.0f) : 0.0f;
     // 页度量改了整篇的断行位置都会变，没有可定位的影响面 → 整篇标脏。
     const bool page_changed = (want != cfg_.page);
     cfg_ = cfg;
@@ -147,7 +148,7 @@ void EditorEngine::setConfig(const EngineConfig& cfg) {
     if (page_changed) markAllLayoutDirty();
     if (plan_changed || page_changed) relayout();
     // 撤销上限不影响呈现，只影响栈能留多长 —— 调小的话当场裁掉多余的（不必等下一次提交）。
-    if (undo_) undo_->setLimit(cfg_.undo_limit);
+    if (session_) session_->setLimit(undoLimit());
     refreshViews();
 }
 
@@ -164,13 +165,25 @@ void EditorEngine::setCaretAndSelectionStyle(const Color& caret, float caret_wid
  */
 void EditorEngine::setDocument(const NodeTree& tree, const StyleSheet& sheet) {
     refreshViews();
-    tree_.assignFrom(tree);
+    rev::Doc doc;
+    std::string why;
+    if (!rev::fromTree(tree, &doc, &why)) {
+        // 表示不了的形状拒绝装载：装一半的结果是一份看起来完整的修订，而它与模型不是同一份
+        // 文档，调用方没有别的办法知道。宁可停在"没有装载"这个明确状态上。
+        loaded_ = false;
+        session_.reset();
+        blocks_.clear();
+        blocks_full_.clear();
+        block_src_.clear();
+        tables_.clear();
+        flow_.reset();
+        return;
+    }
     sheet_ = sheet;
+    session_.emplace(std::move(doc), cfg_.undo_limit);
     loaded_ = true;
-    // 撤销栈在建栈时就绑定了 tree_ 的地址，而 assignFrom 只换内容、不换对象 —— 所以
-    //   换文档时旧栈必须整个丢掉：它记的步骤属于上一份文档，坐标在新文档上毫无意义。
-    undo_ = std::make_unique<UndoStack>(tree_);
-    undo_->setLimit(cfg_.undo_limit);
+    sel_history_.clear();
+    sel_pos_ = 0;
     setCaretByText(TextPos{0, 0});
     caret_rect_px_prev_ = Rect{};
     base_valid_ = false;
@@ -181,8 +194,13 @@ void EditorEngine::setDocument(const NodeTree& tree, const StyleSheet& sheet) {
     frame_needs_full_refresh_ = true;
 }
 
+const rev::Doc& EditorEngine::document() const {
+    static const rev::Doc kEmpty;
+    return session_ ? session_->doc() : kEmpty;
+}
+
 FlowVisibility EditorEngine::flowVisibility() const {
-    // 隐藏控件的可见性口径与编译同一处取值：文档模式是设计态（隐藏的照常参与流，
+    // 隐藏控件的可见性口径与投影同一处取值：文档模式是设计态（隐藏的照常参与流，
     //   否则作者没法把它选中改回来），表单与只读是呈现态（整棵摘除、不占流位置）。
     return (mode_ == EditMode::Document) ? FlowVisibility::Design : FlowVisibility::Display;
 }
@@ -192,110 +210,28 @@ void EditorEngine::rebuildFromTree() {
     //   容器都是成员、不换对象，所以地址现在取和最后取一样。
     refreshViews();
     edit_stats_.rebuild_path = 0;
+    edit_stats_.rebuild_reject = 0;
     const FlowVisibility vis = flowVisibility();
     const auto t_compile0 = Clock::now();
-    CompileResult res = compileDocument(tree_, vis, sheet_);
-    blocks_full_ = std::move(res.blocks);
-    block_src_ = std::move(res.sources);
-    tables_ = std::move(res.tables);
+    const rev::Projection res = rev::project(document(), sheet_, rev::ViewParams{vis});
+    blocks_full_.clear();
+    block_src_.clear();
+    blocks_full_.reserve(res.blocks.size());
+    block_src_.reserve(res.blocks.size());
+    for (const rev::ProjectedBlock& b : res.blocks) {
+        blocks_full_.push_back(b.spec);
+        block_src_.push_back(b.source);
+    }
+    tables_ = res.tables;
     edit_stats_.rebuild_compile_ms = msSince(t_compile0);
     finishRebuildFromTree(vis);
-}
-
-bool EditorEngine::rebuildParagraphFromTree(int para) {
-    if (!compileParagraphInto(para)) return false;
-    edit_stats_.rebuild_path = 1;
-    edit_stats_.rebuild_reject = 0;
-    finishRebuildFromTree(flowVisibility());
-    return true;
-}
-
-bool EditorEngine::compileParagraphInto(int para) {
-    // 条件先判完再动手：任何一条不满足就原样返回 false，由调用方退回全量 ——
-    //   半途改一半再失败会留下"这一段按新树、别处按旧树"的产物，那种错最难查。
-    if (para < 0) return false;
-    if (para >= static_cast<int>(block_src_.size())) return false;
-    if (para >= static_cast<int>(blocks_full_.size())) return false;
-    // 有表格时一律退回整树重编：单段编译只走一个容器的一截子节点，不经过表格、行、格
-    //   这三层，编出来的块没有单元格路径 —— 排版就会把格里的字当正文摆到页面上。
-    if (!tables_.empty()) return false;
-    const Node* mark = tree_.find(block_src_[static_cast<size_t>(para)].mark);
-    if (mark == nullptr || !isParagraphMark(mark->kind) || mark->parent == nullptr) return false;
-    const Node* container = mark->parent;
-    int mark_idx = -1;
-    for (size_t i = 0; i < container->children.size(); ++i) {
-        if (container->children[i]->id == mark->id) {
-            mark_idx = static_cast<int>(i);
-            break;
-        }
-    }
-    if (mark_idx < 0) return false;
-
-    // 内容区间 = 上一枚段落标记之后 到 本段标记。区间里出现节边界或嵌套的段落标记时，
-    //   这一段的产物依赖区间之外的状态（段数、分节强制分页），退回全量。
-    int begin = 0;
-    for (int i = mark_idx - 1; i >= 0; --i) {
-        const Node* sib = container->children[static_cast<size_t>(i)];
-        if (isParagraphMark(sib->kind)) {
-            begin = i + 1;
-            break;
-        }
-        if (sib->kind == NodeKind::Section || subtreeHasParagraphMark(sib)) return false;
-    }
-    // 分节强制分页是"进入第二节及以后"时才落在那一段上的一位，区间编译看不到上一节。
-    if (begin == 0 && container->kind == NodeKind::Section &&
-        container->id != tree_.firstSectionId()) {
-        return false;
-    }
-
-    // 段的流起点必须与容器内这段区间的起点重合。
-    //
-    //   为什么非判不可：在控件内容里回车时，段落标记落在控件内部（跨段控件是正常形态），
-    //   而这一段的内容其实起自控件之外 —— 段首那枚边界可能是前一段的控件在这里结束的
-    //   闭括号，它属于容器之外的兄弟。只编"容器内这一截子节点"，产物就成了半个段落：
-    //   段首的边界丢掉，block_src_ / block_flow_ 又被这半个产物覆盖，之后每一次编辑都按
-    //   错的坐标算、控件集合也空掉，界面上表现为退格删一个字、前面一串字连同控件一起不见。
-    //
-    //   用流位置判而不是看"第一个内容元素的归属"：归属是 block_src_ 记下来的，记法漏掉
-    //   一种形态判据当场失效（闭括号就没被记过）。流位置是段与区间各自的权威口径，
-    //   与来源身份怎么记无关。
-    if (!flow_.has_value()) return false;
-    if (begin < 0 || begin >= static_cast<int>(container->children.size())) return false;
-    int seg_start = -1;
-    if (para == 0) {
-        // 段 0 前面可能有节边界，它的第一个内容元素才是权威起点。
-        if (!flow_->intervalOf(block_src_[0].first, &seg_start, nullptr)) return false;
-    } else {
-        // 段的起点 = 上一枚段落标记之后那一位（标记位置是段区间的权威，见 finishRebuildFromTree）。
-        int prev_end = 0;
-        if (!flow_->intervalOf(block_src_[static_cast<size_t>(para) - 1].mark, nullptr,
-                               &prev_end)) {
-            return false;
-        }
-        seg_start = prev_end;
-    }
-    int range_start = -1;
-    if (!flow_->intervalOf(container->children[static_cast<size_t>(begin)]->id, &range_start,
-                           nullptr)) {
-        return false;
-    }
-    if (seg_start < 0 || range_start < 0 || seg_start != range_start) return false;
-
-    const FlowVisibility vis = flowVisibility();
-    const auto t_compile0 = Clock::now();
-    CompileResult part = compileChildRange(tree_, container->id, begin, mark_idx, vis, sheet_);
-    if (part.blocks.size() != 1 || part.sources.size() != 1) return false;
-    blocks_full_[static_cast<size_t>(para)] = std::move(part.blocks[0]);
-    block_src_[static_cast<size_t>(para)] = part.sources[0];
-    edit_stats_.rebuild_compile_ms += msSince(t_compile0);
-    return true;
 }
 
 void EditorEngine::finishRebuildFromTree(FlowVisibility vis) {
     const auto t_index0 = Clock::now();
     // 流索引与块起点一起重建：两者是同一份文档的两种说法，分两次建就会出现
     //   "块按新树、流位置按旧树"的错配，而那种错配只表现为光标落偏一个字，很难查。
-    flow_.emplace(tree_, vis);
+    flow_.emplace(document(), vis);
     edit_stats_.rebuild_flow_ms = msSince(t_index0);
     const auto t_pos0 = Clock::now();
 
@@ -369,89 +305,6 @@ void EditorEngine::finishRebuildFromTree(FlowVisibility vis) {
     edit_stats_.rebuild_controls_ms = msSince(t_ctl0);
 }
 
-/**
- * 分段之后的局部重建（说明见 engine.h 的同名声明）。
- *
- * 找新标记的办法：在原标记所在容器里往回找最近的一枚段落标记 —— 它就是新插入的那一枚
- *   （插入点落在段的内容中间，两者之间隔着段的后半内容）。只有"事务确实只插了一枚段落
- *   标记"时才成立，所以下面用两条判据锁住形状：它的流区间末尾必须与原标记的区间起点
- *   重合，且它必须落在原段的区间之内。控件内分段、跨容器插入都会被挡下并退回全量。
- */
-bool EditorEngine::rebuildAfterSplit(int at, int* reject_out) {
-    auto reject = [&](int code) {
-        if (reject_out != nullptr) *reject_out = code;
-        return false;
-    };
-    if (at < 0) return reject(1);
-    if (block_src_.size() != blocks_full_.size()) return reject(2);
-    if (at + 1 > static_cast<int>(block_src_.size())) return reject(3);
-    if (at >= static_cast<int>(block_flow_.size())) return reject(4);
-
-    // 段 at 的原结束标记归新段：新插入的那枚在它前面，被它结束的是前半段。
-    const NodeId mark_b = block_src_[static_cast<size_t>(at)].mark;
-    const Node* mb = tree_.find(mark_b);
-    if (mb == nullptr || !isParagraphMark(mb->kind) || mb->parent == nullptr) return reject(5);
-    const Node* container = mb->parent;
-    int idx = -1;
-    for (size_t i = 0; i < container->children.size(); ++i) {
-        if (container->children[i]->id == mark_b) {
-            idx = static_cast<int>(i);
-            break;
-        }
-    }
-    if (idx <= 0) return reject(6);
-    // 新标记 = 原标记之前最近的那一枚段落标记。
-    //   插入点落在段的内容中间，所以两者之间隔着段的后半内容 —— 不是紧邻的兄弟。
-    //   往回找第一枚段落标记即可；它是不是"贴着原标记的那一枚"由下面的区间判据锁住
-    //   （控件内分段那一类会让两者区间不相接，当场退回全量）。
-    const Node* mark_a = nullptr;
-    for (int i = idx - 1; i >= 0; --i) {
-        const Node* sib = container->children[static_cast<size_t>(i)];
-        if (sib != nullptr && isParagraphMark(sib->kind)) {
-            mark_a = sib;
-            break;
-        }
-    }
-    if (mark_a == nullptr) return reject(7);
-
-    // 流索引必须先按新树重建：区间定位全靠它，而旧索引里没有新插入的那枚标记。
-    //   这一笔与"整树重编"无关，是局部重建自己的固定成本（2000 段实测约 0.9 ms）。
-    const FlowVisibility vis = flowVisibility();
-    const auto t_index0 = Clock::now();
-    flow_.emplace(tree_, vis);
-    edit_stats_.rebuild_flow_ms = msSince(t_index0);
-
-    // 形状判据：新标记必须整个落在原段 at 的区间之内 —— 起点不早于段起点，末尾不晚于原
-    //   标记的起点。插入点在段的内容中间，所以两者之间本就隔着段的后半内容，不能要求它们
-    //   首尾相接（那是我按"插入点总在段尾"想出来的条件，与真实形状不符）。
-    int a_first = 0;
-    int a_end = 0;
-    int b_first = 0;
-    int b_end = 0;
-    if (!flow_->intervalOf(mark_a->id, &a_first, &a_end)) return reject(8);
-    if (!flow_->intervalOf(mark_b, &b_first, &b_end)) return reject(9);
-    if (a_end > b_first) return reject(10);
-    if (a_first < block_flow_[static_cast<size_t>(at)]) return reject(11);
-
-    // 数组对齐到新树：段 at+1 是新增的那一段，先占位（它的首个内容元素由下面的局部
-    //   编译填对）；段 at 改由新标记结束。其余段落下标整体后移一位，内容原样不动。
-    BlockSource placeholder;
-    placeholder.mark = mark_b;
-    block_src_.insert(block_src_.begin() + at + 1, placeholder);
-    blocks_full_.insert(blocks_full_.begin() + at + 1, BlockSpec{});
-    block_src_[static_cast<size_t>(at)].mark = mark_a->id;
-
-    // 两段各编一次。任何一段编不成，调用方会退回整树重建 —— 那条路把 blocks_full_ 与
-    //   block_src_ 整体换掉，所以上面这几处改动不会留下半截产物。
-    if (!compileParagraphInto(at)) return reject(12);
-    if (!compileParagraphInto(at + 1)) return reject(13);
-
-    finishRebuildFromTree(vis);
-    edit_stats_.rebuild_path = 2;
-    if (reject_out != nullptr) *reject_out = 0;
-    return true;
-}
-
 int EditorEngine::caretSide() const { return caret_.caretSide(); }
 
 int EditorEngine::caretFieldHint() const { return caret_.caretFieldHint(); }
@@ -506,21 +359,21 @@ void EditorEngine::exportControlsFromBlocks() {
 
     for (int owner : order) {
         const Boundary& b = acc[owner];
-        // 两枚边界必须成对：编译产的是一个开一个闭。少了任何一枚都说明这棵子树有一半
-        //   没进产物（例如被一个只记诊断的元素包着），那样的区间只会误导策略 ——
-        //   整对丢掉，宁可少一个控件，也不要一个只有半截的区间。
+        // 两枚边界必须成对：产的是一个开一个闭。少了任何一枚都说明这棵子树有一半没进产物
+        //   （例如被一个只记诊断的元素包着），那样的区间只会误导策略 —— 整对丢掉。
         if (!b.has_start || !b.has_end) continue;
         Control c;
         c.range.start = b.start;
         c.range.end = b.end;
         c.read_only = b.read_only;
-        // 业务标识与种类是节点上的数据，不在边界里 —— 从树取。
-        //   标签刻意不填：第七节里标签是内容（它自己是文本节点），渲染时从内容取；
-        //   旧表示的 label 是调用方自填的显示名，编译产物里没有对应物。
-        const Node* n = tree_.find(static_cast<NodeId>(owner));
+        // 业务标识与种类是节点上的数据，不在边界里 —— 从文档取。标签刻意不填：它是内容。
+        const rev::Node* n = rev::findNode(document(), static_cast<NodeId>(owner));
         if (n != nullptr) {
-            c.id = n->control.key;
-            c.kind = controlKindFromBusinessType(n->control.controlType);
+            const auto* spec = std::get_if<ControlSpec>(&n->payload);
+            if (spec != nullptr) {
+                c.id = spec->key;
+                c.kind = controlKindFromBusinessType(spec->controlType);
+            }
         }
         const int index = controls_.add(c);
         owner_index_[owner] = index;
@@ -532,9 +385,9 @@ void EditorEngine::exportControlsFromBlocks() {
 /**
  * 把两份视图摆给它们各自的类：位置解析读 PositionView，命令层读 EditView。
  *
- * 视图里存的是这些容器的地址，而容器都是引擎的成员、不换对象（重建是 assign、重排是就地
- * 改），所以摆一次之后地址一直有效；四个收口点（init / setDocument / 重建之后 / 重排之后）
- * 各摆一次是保守做法。
+ * 视图里存的是这些容器的地址，而容器都是引擎的成员、不换对象，所以摆一次之后地址一直有效；
+ * 四个收口点（init / setDocument / 重建之后 / 重排之后）各摆一次是保守做法。文档本身是
+ * session_ 的成员，换修订只换内容、不换对象 —— 地址同样稳定。
  */
 void EditorEngine::refreshViews() {
     PositionView v;
@@ -552,7 +405,7 @@ void EditorEngine::refreshViews() {
 
     EditView e;
     e.host = this;
-    e.tree = &tree_;
+    e.doc = &document();
     e.caret = &caret_;
     e.flow = &flow_;
     e.blocks = &blocks_;
@@ -569,63 +422,62 @@ void EditorEngine::refreshViews() {
     edit_.setView(e);
 }
 
-bool EditorEngine::commitEdit(Transaction tx, int dirty_para, ParaDelta delta) {
-    if (!loaded_) return false;  // 没装载过文档：没有树可依，也就没有可提交的事务
-    const StepResult r = undo_->commit(std::move(tx));
-    if (!r.ok) return false;
+/**
+ * 撤销上限：配置里的 0 表示"不限制"，而会话层的 0 表示"不留历史"。两者不能直接对应，
+ * 所以在这里换成一个足够大的数 —— 0 的语义属于对外约定，不该为了内部实现改掉。
+ */
+int EditorEngine::undoLimit() const { return cfg_.undo_limit > 0 ? cfg_.undo_limit : 1000000; }
 
-    // 树变了：块流、流索引、块起点、来源身份、控件集合一次重建。分两次建就会留下
-    //   "块按新树、位置按旧树"的错配，而那种错配只表现为光标落偏一个字。
-    //
-    // 三条路的取舍：段数没变时只重编被改的那一段；分段只重编被劈开的两段（其余段落的
-    //   产物按段号平移）；形状不认识时整树重编。前两条比整树便宜一个数量级 ——
-    //   2000 段实测整树 8.5 ms、只编一段 0.10 ms，而它们是每次按键都要付的一笔。
-    //
-    // 计时先归零：它是"这一轮重建产物花了多少"，而局部路径会连编两段并累加。
-    edit_stats_.rebuild_compile_ms = 0.0;
-    edit_stats_.rebuild_reject = 0;
-    if (!delta.changed) {
-        if (!rebuildParagraphFromTree(dirty_para)) rebuildFromTree();
-    } else if (delta.at >= 0 && delta.inserted == 1) {
-        int reject = 0;
-        if (!rebuildAfterSplit(delta.at, &reject)) {
-            rebuildFromTree();
-            // 退回全量之后再把原因写回去：它记的是"局部路径为什么没接住"，
-            //   而全量路径没有这个信息，不该把它清成 0。
-            edit_stats_.rebuild_reject = reject;
-        }
-    } else {
-        rebuildFromTree();
-    }
+bool EditorEngine::commitSteps(std::vector<Step> steps, int dirty_para, ParaDelta delta,
+                               Range selection_before, Range selection_after) {
+    (void)delta;  // 段数的形状不再需要单独判断：产物整篇投影一次，增量在排版层做。
+    if (!loaded_ || !session_) return false;
+    const rev::Applied r = session_->applySteps(steps);
+    if (!r.ok) return false;
+    if (!r.changed) return true;  // 什么都没改：不占撤销栈，也不白跑一次重建
+    recordSelection(selection_before, selection_after);
+    rebuildFromTree();
     markLayoutDirty(dirty_para);
     return true;
 }
 
+void EditorEngine::recordSelection(Range before, Range after) {
+    // 分支之后原先那条"未来"已经不成立：截断到当前位置再压新的。
+    if (sel_pos_ < sel_history_.size()) sel_history_.resize(sel_pos_);
+    sel_history_.push_back(SelectionRecord{before, after});
+    ++sel_pos_;
+    const int limit = undoLimit();
+    if (static_cast<int>(sel_history_.size()) > limit) {
+        const size_t drop = sel_history_.size() - static_cast<size_t>(limit);
+        sel_history_.erase(sel_history_.begin(), sel_history_.begin() + drop);
+        sel_pos_ = sel_pos_ >= drop ? sel_pos_ - drop : 0;
+    }
+}
+
 bool EditorEngine::undo() {
-    if (!loaded_) return false;  // 没装载过文档：没有事务栈
-    Range restore;
-    const StepResult r = undo_->undo(&restore);
-    if (!r.ok) return false;
+    if (!loaded_ || !session_) return false;
+    if (!session_->undo()) return false;
     rebuildFromTree();
-    // 撤销会改到哪一段是不可定位的（事务可能跨段），所以整篇重排 —— 与"编辑只影响一段"
-    //   不同，撤销的单位是用户按下去的那一下，不是文档位置。
+    // 撤销会改到哪一段是不可定位的（一批步骤可能跨段），所以整篇重排。
     markAllLayoutDirty();
-    // 恢复的是整个区间，不是只看焦点端：事务里那两份快照本来就是 Range（锚点是不动的
-    //   那一端，它决定了 Shift 下一次从哪端继续长）。只摆 focus 的症状是"撤销之后
-    //   选中内容回来了，但选区没了"。
-    setSelection(restore);
+    // 恢复的是整个区间，不是只看焦点端：撤销前那一对快照本来就是 Range。
+    if (sel_pos_ > 0 && sel_pos_ <= sel_history_.size()) {
+        --sel_pos_;
+        setSelection(sel_history_[sel_pos_].before);
+    }
     frame_needs_full_refresh_ = true;
     return true;
 }
 
 bool EditorEngine::redo() {
-    if (!loaded_) return false;  // 同上
-    Range restore;
-    const StepResult r = undo_->redo(&restore);
-    if (!r.ok) return false;
+    if (!loaded_ || !session_) return false;
+    if (!session_->redo()) return false;
     rebuildFromTree();
     markAllLayoutDirty();
-    setSelection(restore);
+    if (sel_pos_ < sel_history_.size()) {
+        setSelection(sel_history_[sel_pos_].after);
+        ++sel_pos_;
+    }
     frame_needs_full_refresh_ = true;
     return true;
 }
@@ -688,7 +540,8 @@ std::vector<EditorEngine::PageRect> EditorEngine::selectionRectsVisible() const 
     return selectionRectsIn(vp_first_page_, vp_count_);
 }
 
-std::vector<EditorEngine::PageRect> EditorEngine::selectionRectsIn(int first_page, int count) const {
+std::vector<EditorEngine::PageRect> EditorEngine::selectionRectsIn(int first_page,
+                                                                   int count) const {
     return caret_.selectionRectsIn(first_page, count);
 }
 
@@ -696,9 +549,7 @@ std::vector<EditorEngine::PageRect> EditorEngine::selectionRectsIn(int first_pag
  * 选区矩形（帧像素坐标）。与 caretRectPx 同一套换算：先乘 zoom，再加"窗口首页之下的
  * 那几页"的累加偏移。宽高为 0 的（空行的那个插入点）在这里丢掉 —— 画不出来。
  */
-std::vector<Rect> EditorEngine::selectionRectsPx() const {
-    return selectionRectsPxIn(0, 0);
-}
+std::vector<Rect> EditorEngine::selectionRectsPx() const { return selectionRectsPxIn(0, 0); }
 
 std::vector<Rect> EditorEngine::selectionRectsPxIn(int first_page, int count) const {
     std::vector<Rect> out;
@@ -888,17 +739,17 @@ bool EditorEngine::selectCellAtPara(int para) {
         return false;
     // 插入点钉在这一格的末尾（整格选区的光标不跟鼠标走）。
     const FlowPos prev_lo = block_flow_[static_cast<size_t>(first)];
-    const FlowPos caret_flow = block_flow_[static_cast<size_t>(last_b)] +
-                              block_flow_span_[static_cast<size_t>(last_b)];
+    const FlowPos caret_flow =
+        block_flow_[static_cast<size_t>(last_b)] + block_flow_span_[static_cast<size_t>(last_b)];
     // 离散动作（单击边距带、三击）要把两端也落到这一格上：拖选那条路不能这么做
     //   （锚点要留着，往回拖才退得回文字选区），所以吸附由这里做而不是 setCellBlocks。
     if (!caret_.setSelection(Range{prev_lo, caret_flow})) return false;
     return caret_.setCellBlocks({CaretResolver::CellBlocks{first, c->block_count}}, caret_flow);
 }
 
-EditCheck EditorEngine::policyAt(TextPos p) const { return edit_.policyAt(p); }
+rev::EditCheck EditorEngine::policyAt(TextPos p) const { return edit_.policyAt(p); }
 
-EditCheck EditorEngine::policyErase(TextPos a, TextPos b) const {
+rev::EditCheck EditorEngine::policyErase(TextPos a, TextPos b) const {
     return edit_.policyErase(a, b);
 }
 
@@ -962,9 +813,7 @@ bool EditorEngine::insertTextUtf8(int para, size_t offset, const std::string& ut
     return edit_.insertTextUtf8(para, offset, utf8);
 }
 
-bool EditorEngine::typeTextUtf8(const std::string& utf8) {
-    return edit_.typeTextUtf8(utf8);
-}
+bool EditorEngine::typeTextUtf8(const std::string& utf8) { return edit_.typeTextUtf8(utf8); }
 
 bool EditorEngine::backspace() { return edit_.backspace(); }
 
@@ -972,13 +821,9 @@ bool EditorEngine::deleteForward() { return edit_.deleteForward(); }
 
 bool EditorEngine::splitParagraph() { return edit_.splitParagraph(); }
 
-bool EditorEngine::mergeWithPreviousParagraph() {
-    return edit_.mergeWithPreviousParagraph();
-}
+bool EditorEngine::mergeWithPreviousParagraph() { return edit_.mergeWithPreviousParagraph(); }
 
-bool EditorEngine::mergeWithNextParagraph() {
-    return edit_.mergeWithNextParagraph();
-}
+bool EditorEngine::mergeWithNextParagraph() { return edit_.mergeWithNextParagraph(); }
 
 bool EditorEngine::typeTextAndRender(const std::string& utf8) {
     if (!typeTextUtf8(utf8)) return false;
@@ -1272,7 +1117,7 @@ bool EditorEngine::tabCaret(bool backward) {
     if (!flow_.has_value()) return false;
     const FlowPos from = flowPosAtSide(caret().para, caret().offset, caretSide());
     if (from < 0) return false;
-    const TabStop stop = tabFrom(tree_, mode_, from, backward);
+    const rev::TabStop stop = rev::tabFrom(document(), mode_, from, backward);
     // handled 为假 = 已经没有下一个（上一个）可编辑控件了：放行给宿主，不绕回第一个。
     if (!stop.handled) return false;
     // 目标落在控件的内容起点上，共享边界上"前一个控件的末尾"与"这个控件的开头"是
@@ -1397,8 +1242,8 @@ bool EditorEngine::cellFlowRangeOf(const LayoutCell& c, FlowPos* lo, FlowPos* hi
         last_b >= static_cast<int>(block_flow_span_.size()))
         return false;
     const FlowPos a = block_flow_[static_cast<size_t>(first)];
-    const FlowPos b = block_flow_[static_cast<size_t>(last_b)] +
-                      block_flow_span_[static_cast<size_t>(last_b)];
+    const FlowPos b =
+        block_flow_[static_cast<size_t>(last_b)] + block_flow_span_[static_cast<size_t>(last_b)];
     if (b <= a) return false;
     if (lo) *lo = a;
     if (hi) *hi = b;
@@ -1489,9 +1334,8 @@ bool EditorEngine::hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* 
         //   表象是"点第二格的字，光标跳到第一格"。正文里同一 y 不会有两条行盒，
         //   所以这一条在无表格时不会改变任何选择。
         const float a0 = (lb.cell_hi_pt > lb.cell_lo_pt) ? lb.cell_lo_pt : lb.inline_origin_pt;
-        const float a1 = (lb.cell_hi_pt > lb.cell_lo_pt)
-                             ? lb.cell_hi_pt
-                             : (lb.inline_origin_pt + lb.inline_end_pt);
+        const float a1 = (lb.cell_hi_pt > lb.cell_lo_pt) ? lb.cell_hi_pt
+                                                         : (lb.inline_origin_pt + lb.inline_end_pt);
         const float ipos = lb.vertical ? y_pt_doc : x_pt_doc;
         const float dx = (ipos < a0) ? (a0 - ipos) : (ipos > a1 ? ipos - a1 : 0.0f);
         if (d < best_d - 0.01f || (std::fabs(d - best_d) <= 0.01f && dx < best_dx)) {
@@ -1505,12 +1349,11 @@ bool EditorEngine::hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* 
     // 行内轴：找最近的插入点。势力范围与簇边界的口径在 hitTestInLine 里（上下键也走它）。
     //   竖排的行内轴是 y，页内位置要按"选中那一行自己的页号"折 —— 跨条带时它与
     //   点击位置的页号可以差一条带。
-    const float ip = best->vertical
-                         ? (cont ? (y_pt_doc * zoom -
-                                    static_cast<float>(best->page) * static_cast<float>(step_px)) /
-                                       zoom
-                                 : local_y)
-                         : x_pt_doc;
+    const float ip = best->vertical ? (cont ? (y_pt_doc * zoom - static_cast<float>(best->page) *
+                                                                     static_cast<float>(step_px)) /
+                                                  zoom
+                                            : local_y)
+                                    : x_pt_doc;
     uint32_t cp = 0;
     int side = 0;
     caret_.hitTestInLine(*best, ip, &cp, &side);

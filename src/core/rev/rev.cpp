@@ -1,5 +1,7 @@
 #include "core/rev/rev.h"
 
+#include "core/rev/internal.h"
+
 #include <algorithm>
 #include <cstring>
 #include <functional>
@@ -8,7 +10,11 @@
 
 namespace heditor::rev {
 
-namespace {
+/**
+ * 模块内部工具。用命名空间而不是匿名命名空间，是因为步骤层要复用同一份路径复制与定位：
+ * 两处各写一份的话，"改一段"就会有两条构造路径，哈希迟早对不上。
+ */
+namespace detail {
 
 void hashLength(Hasher& h, const Length& v) {
     h.u8(static_cast<uint8_t>(v.kind));
@@ -300,30 +306,8 @@ bool isBlockContainer(NodeKind kind) {
 }
 
 /**
- * 段落内容在流里的落点。
- *
- * InRun 落在某个 run 内部；BeforeChild 落在两项之间（段首、控件之前、段末标记之前）。
- * 只有这两种：容器内部不是另一种落点，只是 path 更长 —— 见 Site。
+ * 段落内容在流里的落点：定义在 internal.h，本体与步骤层共用。
  */
-enum class SiteKind : uint8_t { InRun, BeforeChild };
-
-/**
- * (段号, 段内码点) 落在哪儿。
- *
- * 流顺序按深度优先：容器内部的文字就是那一段的文字，内部的段落标记一样切段。位置可能有两种
- * 落法（上一段末尾与下一段开头是同一处边界），这里取"靠前的那一个"—— 两种落法对文本结果
- * 等价，但必须定死一种，否则同一份编辑会产出两棵不同的树，哈希也就对不上了。
- *
- * path 既是递归栈也是结果：从正文那一节往下走到"落点所在的那一层孩子表"的下标链
- * （空 = 就是节的直接孩子）。成功时栈里留着整条链，失败时逐层弹干净。
- * 有了它，容器内部与顶层就是同一种落点：改的永远是某一层孩子表里的某处，改动再沿路径换回去。
- * 没有"容器内另行处理"的分支 —— 那种分支要把位置语义写两遍，两份迟早对不上。
- */
-struct Site {
-    SiteKind kind = SiteKind::BeforeChild;
-    int child = -1;
-    int off = 0;
-};
 
 bool locate(const std::vector<Ref>& kids, int para, int cp, std::vector<int>* path, Site* out) {
     int p = 0;
@@ -497,7 +481,13 @@ void collectParas(const Ref& n, std::u32string* cur, std::vector<std::u32string>
     for (const Ref& c : n->children) collectParas(c, cur, out);
 }
 
-}  // namespace
+}  // namespace detail
+
+/**
+ * 本文件后半是公开实现。逐处写 detail:: 只会让"这是内部工具"变成噪声；命名空间仍在，
+ * 跨文件仍认 detail，这里只是省掉同一文件内的限定。
+ */
+using namespace detail;
 
 void Hasher::f32(float v) {
     uint32_t bits = 0;
@@ -597,9 +587,10 @@ const std::vector<Ref>* bodyOf(const Doc& doc) {
 const Node* findNode(const Doc& doc, NodeId id) {
     if (!doc.root) return nullptr;
     const Node* found = nullptr;
-    // 显式栈：深层嵌套的文档不该把递归深度交给调用栈。
+    // 显式栈：深层嵌套的文档不该把递归深度交给调用栈。根也要在栈里 —— 流位置 0 常常
+    //   落在根上（各节之前），少了它，按节点号找根的调用一律拿到空指针。
     std::vector<const Node*> stack;
-    for (const Ref& c : doc.root->children) stack.push_back(c.get());
+    stack.push_back(doc.root.get());
     while (!stack.empty() && found == nullptr) {
         const Node* n = stack.back();
         stack.pop_back();
@@ -610,6 +601,21 @@ const Node* findNode(const Doc& doc, NodeId id) {
         for (const Ref& c : n->children) stack.push_back(c.get());
     }
     return found;
+}
+
+const Node* parentOf(const Doc& doc, NodeId id) {
+    if (!doc.root) return nullptr;
+    std::vector<const Node*> stack;
+    stack.push_back(doc.root.get());
+    while (!stack.empty()) {
+        const Node* n = stack.back();
+        stack.pop_back();
+        for (const Ref& c : n->children) {
+            if (c->id == id) return n;
+            stack.push_back(c.get());
+        }
+    }
+    return nullptr;
 }
 
 Doc makeTextDoc(const std::vector<std::u32string>& paragraphs) {

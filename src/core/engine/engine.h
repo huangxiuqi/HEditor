@@ -20,16 +20,18 @@
 #include "core/doc/compile.h"
 #include "core/doc/control.h"
 #include "core/doc/document.h"
-#include "core/doc/edit_capability.h"
 #include "core/doc/edit_mode.h"
 #include "core/doc/flow.h"
-#include "core/doc/transaction.h"
 #include "core/engine/caret.h"
 #include "core/engine/edit_command.h"
 #include "core/engine/engine_config.h"
 #include "core/engine/engine_stats.h"
 #include "core/layout/layout.h"
 #include "core/render/bitmap.h"
+#include "core/rev/capability.h"
+#include "core/rev/flow.h"
+#include "core/rev/rev.h"
+#include "core/rev/session.h"
 #include "core/text/font.h"
 #include "core/text/writing_mode.h"
 
@@ -99,9 +101,9 @@ public:
      */
     void setDocument(const NodeTree& tree, const StyleSheet& sheet);
     /**
-     * 持有中的模型树。引擎只认这一条装载入口，所以它一直有效。
+     * 持有中的文档。引擎只认这一条装载入口，所以它一直有效（未装载时是一份空修订）。
      */
-    const NodeTree& documentTree() const { return tree_; }
+    const rev::Doc& document() const;
 
     /**
      * 段落坐标与模型流位置的桥接 —— 第十四节那条接缝的另一半。
@@ -540,12 +542,12 @@ public:
      * 撤销之后按事务记的编辑前选区恢复光标（选区在模型坐标里，经桥换回段坐标）。
      * 没装载过文档时没有事务栈，四个入口一律返回 false，不假装能做。
      */
-    bool canUndo() const { return undo_ != nullptr && undo_->canUndo(); }
-    bool canRedo() const { return undo_ != nullptr && undo_->canRedo(); }
+    bool canUndo() const { return session_ && session_->canUndo(); }
+    bool canRedo() const { return session_ && session_->canRedo(); }
     bool undo();
     bool redo();
     bool undoAndRender();
-    bool redoAndRender();     /**
+    bool redoAndRender(); /**
      * 文档坐标（磅）落在哪个控件上（取最内层）。-1 = 没有。
      * 它走的是 hitTestPt 的同一份几何，所以"视觉上在框里"与
      * "逻辑上在控件里"永远一致。
@@ -849,14 +851,13 @@ public:
      * "最内层含端点"归一次。不另收归属提示 —— 那是"控件下标"这套说话方式，只有
      * 区间判定需要它，而落点判定已经改说侧别了。
      */
-    EditCheck policyAt(TextPos p) const;
+    rev::EditCheck policyAt(TextPos p) const;
     /**
      * 删除区间 [a, b) 的判定。跨段删除一律拒（档 1 的删除不跨段，段落标记的删除走合并）。
      */
-    EditCheck policyErase(TextPos a, TextPos b) const;
+    rev::EditCheck policyErase(TextPos a, TextPos b) const;
 
 private:
-
     /**
      * 从持有的树重新编译出块流，并把控件集合从产物的边界里导出来。
      * 隐藏控件的可见性口径按当前编辑模式取（见 setDocument 的说明）。
@@ -864,38 +865,7 @@ private:
     void rebuildFromTree();
 
     /**
-     * 只重编译一段（增量）。条件不满足时返回 false，由调用方退回全量。
-     *
-     * 为什么值得单开一条路：整树编译是 O(文档)，3000 段实测约 1.8ms —— 而那是每次按键
-     * 都要付的一笔。条件刻意保守：段数变了、内容区间里嵌着段落标记或节边界、
-     * 或者是非首节的第一段（分节强制分页是跨段状态），一律退回全量。
-     * 返回 false 时状态一个字节都没改 —— 先判条件再动手。
-     */
-    bool rebuildParagraphFromTree(int para);
-
-    /**
-     * 编译一段并写入产物，不做收尾。
-     *
-     * 收尾（流索引、段流区间递推、块流副本、控件视图）留给调用方：分段要连编两段，
-     * 每段各收尾一次就把那三笔白付两遍。返回 false 时产物一个字节都没改。
-     */
-    bool compileParagraphInto(int para);
-
-    /**
-     * 分段之后的局部重建：只重编被劈开的那两段，其余段的产物按段号平移。
-     *
-     * 为什么值得单开：分段必然让段数加一，而段数变化此前一律走整树编译 —— 2000 段实测
-     * 8.5 ms，而只编一段只要 0.10 ms。受影响的只有两段：段 at 换了结束标记，
-     * 段 at+1 是新增的那一段；其余段的产物一个字节都没变，只是段号整体后移一位。
-     * 返回 false 表示这个形状不支持局部重建，由调用方退回全量；reject_out 给出被否决的
-     *   判据编号（0 = 通过），用来回答"为什么没走增量" —— 退回全量会把产物整体换掉，
-     *   如果连原因也一起清掉，这个改动就没法归因了。
-     */
-    bool rebuildAfterSplit(int at, int* reject_out);
-
-    /**
-     * 重建的收尾：流索引、段的流区间递推、块流副本、控件视图。两个入口共用 ——
-     * 分两处写就会留下"这一半按新树、那一半按旧树"的错配，而那种错配只表现为光标落偏。
+     * 重建的收尾：流索引、段的流区间递推、块流副本、控件视图。
      */
     void finishRebuildFromTree(FlowVisibility vis);
 
@@ -905,18 +875,24 @@ private:
      */
     FlowVisibility flowVisibility() const;
     /**
-     * 命令层的出口（EditHost）：在树上提交一个事务，然后把块流按新树重编译一次。
+     * 命令层的出口（EditHost）：把一批步骤落到修订上，再把产物按新修订重算一次。
      *
-     * 重编译是必须的而不是图省事：块流、流索引、块起点、来源身份、控件集合全是树的派生量，
-     * 少重建任何一个，下一轮就会拿旧树的位置去对新树的块（症状是光标落偏一个字、控件区间
-     * 慢一拍）。脏区只标到 dirty_para —— 同一段内的编辑不影响它前面的段，增量因此照旧成立；
-     * 段数变化时禁止后缀复用，理由见那个成员的说明。
-     *
-     * delta 说明段数是怎么变的：形状认识（某一段之后插入或删除整段）就走局部重建，
-     * 不认识就整树重编。这个判断放在这里而不是调用方：重建那几条路各自退守的写法
-     * 已经够多，再散到八处调用点去就没人能保证一致了。
+     * 重编译是必须的而不是图省事：块流、流索引、块起点、来源身份、控件集合全是修订的派生量，
+     * 少重建任何一个，下一轮就会拿旧修订的位置去对新修订的块。失败时状态一个字节都不动 ——
+     * 会话层保证"被拒的编辑不占撤销栈"，这里再保证产物不跟着半途改。
      */
-    bool commitEdit(Transaction tx, int dirty_para, ParaDelta delta) override;
+    bool commitSteps(std::vector<Step> steps, int dirty_para, ParaDelta delta,
+                     Range selection_before, Range selection_after) override;
+
+    /**
+     * 撤销上限（会话要的那个数）。配置里的 0 是"不限制"，与"不留历史"不是一回事。
+     */
+    int undoLimit() const;
+
+    /**
+     * 记下这一批步骤对应的两份选区，并与撤销栈同步裁剪。
+     */
+    void recordSelection(Range before, Range after);
     /**
      * 段内相对流位置 → 全局流位置（夹到本段跨度内）。setCaretRel 与重编译落基共用 ——
      * 夹取规则只此一处，两处各写一份就会出现"落基时允许而写入时不允许"这种半截宽度。
@@ -1029,7 +1005,7 @@ private:
     /**
      * 光标矩形（帧像素坐标）。caret_visible 为 false 或找不到行盒时返回零矩形。
      */
-    Rect caretRectPx() const;    /**
+    Rect caretRectPx() const; /**
      * 光标所在页（绝对页号；-1 = 找不到行盒）。
      * 窗口化之后这是必需的一个数：帧只装窗口内的页，光标不在窗口里就既画不出来、
      * 也点不中它 —— 宿主拿它决定窗口该锚在哪。
@@ -1244,15 +1220,15 @@ private:
      * "某格没有块"与"块没有结束标记"是两种完全不同的坏法。
      */
     struct TableAudit {
-        int cells = 0;              // 扫过的格数
-        int empty_cell = 0;         // 一个块都没有的格（这种格没有行盒，光标进不去）
-        int bad_range = 0;          // 块的区间越出块表
-        int overlap = 0;            // 两个格认领同一块（同表）
-        int block_without_mark = 0; // 格里的块没有结束标记
-        int path_mismatch = 0;      // 块的 cell_path 与格给出的区间对不上
-        int bad_span = 0;           // 行的跨度越出表尺寸
-        int blocks_in_no_cell = 0;  // 块说自己在正文，格却认领了它
-        int first_cell = -1;        // 首个出问题的格（跨表连续编号），-1 = 没有
+        int cells = 0;               // 扫过的格数
+        int empty_cell = 0;          // 一个块都没有的格（这种格没有行盒，光标进不去）
+        int bad_range = 0;           // 块的区间越出块表
+        int overlap = 0;             // 两个格认领同一块（同表）
+        int block_without_mark = 0;  // 格里的块没有结束标记
+        int path_mismatch = 0;       // 块的 cell_path 与格给出的区间对不上
+        int bad_span = 0;            // 行的跨度越出表尺寸
+        int blocks_in_no_cell = 0;   // 块说自己在正文，格却认领了它
+        int first_cell = -1;         // 首个出问题的格（跨表连续编号），-1 = 没有
         int total() const {
             return empty_cell + bad_range + overlap + block_without_mark + path_mismatch +
                    bad_span + blocks_in_no_cell;
@@ -1266,9 +1242,10 @@ private:
     std::vector<BlockSpec> blocks_;
 
     /**
-     * 文档模型树与样式表（setDocument 装载）。blocks_ 与 blocks_full_ 都是它的编译产物。
+     * 文档（唯一真相）：一份修订加一条历史。blocks_ 与 blocks_full_ 都是它的投影产物，
+     * 没有第二份可写的树 —— 编辑只产步骤，产物每轮由新修订重算。
      */
-    NodeTree tree_;
+    std::optional<rev::Session> session_;
     StyleSheet sheet_;
     /**
      * 装载过文档没有（setDocument 置位）。没装载过时没有树、没有流、也没有事务栈 ——
@@ -1303,7 +1280,7 @@ private:
      * 它是派生量：树一改就过期，所以只在重建块流时一起重建，不单独维护。用 optional
      * 而不是常驻对象，是因为 FlowIndex 没有默认构造 —— 它一造出来就要一棵树。
      */
-    std::optional<FlowIndex> flow_;
+    std::optional<rev::FlowIndex> flow_;
     /**
      * 每块内容起点的流位置，与 blocks_full_ 同长同序。取自 BlockSource::first 那枚元素在
      * 流里的起点（见 compile.h）—— 空段取的是它自己的结束标记，"标记之前"就是内容起点。
@@ -1528,10 +1505,17 @@ private:
     EditMode mode_ = EditMode::Document;
     long long blocked_edits_ = 0;
     /**
-     * 撤销栈。setDocument 装载时建（它持的是 tree_ 的引用，而 tree_ 的地址在整个生命
-     * 周期里不变）。编辑是一条条事务，撤销就是按事务逆序应用逆操作。
+     * 每一份修订对应的两份选区快照（编辑前 / 编辑后）。历史本体在 session_ 里，
+     * 这里只补它记不了的那一半 —— 撤销与重做都要把光标摆回按下去之前的位置。
+     *
+     * 与 session_ 的撤销栈同步裁剪：超上限时丢最旧的，与"丢更早的状态"同一口径。
      */
-    std::unique_ptr<UndoStack> undo_;
+    struct SelectionRecord {
+        Range before;
+        Range after;
+    };
+    std::vector<SelectionRecord> sel_history_;
+    size_t sel_pos_ = 0;
 
     /**
      * 表单标记（小点/方括号）在帧像素下的矩形，用来在下一帧把它们擦掉。

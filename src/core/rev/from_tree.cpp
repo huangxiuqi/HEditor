@@ -1,8 +1,11 @@
 /**
  * 模型树 → 修订：迁移路径与等价判据的桥。
  *
- * 它是这一层唯一一处以"模型层"为输入的文件，所以依赖方向写在这里而不是 rev.h 里：
+ * 它是这一层唯一一处与"模型层"互转的文件，所以依赖方向写在这里而不是 rev.h 之外：
  * rev 的其余部分不认识 NodeTree，将来把模型层换掉时只需要删掉这一个文件。
+ *
+ * 两个方向都只用于边界：装载（模型 → 修订）与审计（修订 → 模型，给独立参照物）。
+ * 编辑路径一个方向都不走 —— 走了就又成了"每条编辑造一棵树"。
  */
 #include <functional>
 #include <string>
@@ -57,6 +60,60 @@ Payload payloadOf(const ModelNode& n) {
 }
 
 }  // namespace
+
+void toTree(const Doc& doc, NodeTree* out) {
+    if (out == nullptr || !doc.root) return;
+    // 模型树构造时自带 Document → Section 骨架。先清干净，再按修订的形状重建：
+    //   留着骨架会让"修订里没有节"的文档在参照侧多出一段。
+    while (out->find(out->rootId())->children.size() > 0) out->eraseChild(out->rootId(), 0);
+
+    std::function<void(const Node&, NodeId)> build = [&](const Node& n, NodeId parent) {
+        NodeId id = parent;
+        if (&n != doc.root.get()) {
+            id = out->appendChild(parent, n.kind);
+            if (id == kInvalidNodeId) return;
+            ModelNode* m = out->find(id);
+            m->hidden = n.hidden;
+            switch (n.kind) {
+                case NodeKind::TextRun: {
+                    const auto& rp = std::get<RunPayload>(n.payload);
+                    m->text = rp.text;
+                    m->marks = rp.marks;
+                    m->styleRef = rp.style;
+                    break;
+                }
+                case NodeKind::ParagraphMark: {
+                    const auto& mp = std::get<MarkPayload>(n.payload);
+                    m->para = mp.para;
+                    m->styleRef = mp.style;
+                    break;
+                }
+                case NodeKind::ContentControl:
+                    m->control = std::get<ControlSpec>(n.payload);
+                    break;
+                case NodeKind::Table:
+                    m->table = std::get<TableSpec>(n.payload);
+                    break;
+                case NodeKind::TableRow:
+                    m->row = std::get<RowSpec>(n.payload);
+                    break;
+                case NodeKind::TableCell:
+                    m->cell = std::get<CellSpec>(n.payload);
+                    break;
+                case NodeKind::Section:
+                    m->section = std::get<SectionSpec>(n.payload);
+                    break;
+                case NodeKind::Field:
+                    m->field = std::get<FieldSpec>(n.payload);
+                    break;
+                default:
+                    break;
+            }
+        }
+        for (const Ref& c : n.children) build(*c, id);
+    };
+    build(*doc.root, out->rootId());
+}
 
 bool fromTree(const NodeTree& tree, Doc* out, std::string* error) {
     const ModelNode* root = tree.find(tree.rootId());

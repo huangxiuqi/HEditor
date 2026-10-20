@@ -26,6 +26,7 @@
 #include "core/doc/node_id.h"
 #include "core/doc/range.h"
 #include "core/layout/layout.h"
+#include "core/rev/flow.h"
 #include "core/utils/types.h"
 
 namespace heditor {
@@ -48,14 +49,14 @@ struct PositionView {
      * 持的是 optional 的地址而不是它内容的地址：流索引是"重建时 emplace 进去"的，
      * 第一次重建之前它还没建，取内容的地址会拿到空指针并一直空下去。
      */
-    const std::optional<FlowIndex>* flow = nullptr;
+    const std::optional<rev::FlowIndex>* flow = nullptr;
     const ControlSet* controls = nullptr;
     const std::vector<NodeId>* control_node_ids = nullptr;
     const std::unordered_map<int, int>* owner_index = nullptr;  // 节点 id → 控件下标
-    const LayoutResult* layout = nullptr;  // 行盒
+    const LayoutResult* layout = nullptr;                       // 行盒
 
     bool hasFlow() const { return flow != nullptr && flow->has_value(); }
-    const FlowIndex& flowIndex() const { return **flow; }
+    const rev::FlowIndex& flowIndex() const { return **flow; }
 };
 
 /**
@@ -150,9 +151,7 @@ public:
      * 空格也成立：内容是空的（sel_ 一对相等的端点），但粒度确实是整格 —— 反白要铺满它。
      * 与 hasSelection 分工：那一个问"有没有文字被选中"，这一个问"选的是什么粒度"。
      */
-    bool selectionIsCell() const {
-        return sel_cell_ && (!sel_.empty() || !cell_blocks_.empty());
-    }
+    bool selectionIsCell() const { return sel_cell_ && (!sel_.empty() || !cell_blocks_.empty()); }
 
     /**
      * 选区是否吸附到了格边界上（跨格拖选或单格选格）。
@@ -198,17 +197,17 @@ public:
      */
     void rebaseSelection(int anchor_para, int anchor_rel, int focus_para, int focus_rel);
 
-/**
+    /**
  * 边界括号的统计。侧别与流位置都从它推出来 —— 两者是同一件事的两种说法：
  * 流位置 = 码点偏移 + 排在它前面的边界数 + 侧别。
  */
-const std::vector<InlineObject>& objectsFor(int para) const;
+    const std::vector<InlineObject>& objectsFor(int para) const;
 
-BracketCounts bracketCountsAt(int para, size_t cp) const;
+    BracketCounts bracketCountsAt(int para, size_t cp) const;
 
-int relAt(int para, size_t cp, int side) const;
+    int relAt(int para, size_t cp, int side) const;
 
-/**
+    /**
  * 文本码点区间 [a, b) 在流里占的那一段（段内相对，半开）。
  *
  * 括号不是文本：它们只占位置、不进这个区间。所以起点是"a 那个字自己的位置"（＝跨过这个
@@ -218,9 +217,9 @@ int relAt(int para, size_t cp, int side) const;
  * 判定（policyErase）与实际删除（eraseOnTree）共用它：两处一旦分叉，就会出现
  * "判据说能删、真删却越界"这种只在边界上冒出来的错。
  */
-bool textSpanAt(int para, size_t a, size_t b, int* from, int* to) const;
+    bool textSpanAt(int para, size_t a, size_t b, int* from, int* to) const;
 
-/**
+    /**
  * 不带侧别时的默认侧别。
  *
  * 规则是"最内层含端点" —— 与编辑归属同一条：区间树里包含这个
@@ -231,13 +230,13 @@ bool textSpanAt(int para, size_t a, size_t b, int* from, int* to) const;
  * 归属那套（区间包含 + 嵌套深度 + 下标次序）才是既有判据钉住的答案，两条口径必须同源。
  * 控件集合为空时没有可归的地方，停在所有括号之前。
  */
-int defaultSideAt(int para, size_t cp) const;
+    int defaultSideAt(int para, size_t cp) const;
 
-int sideFromHint(int para, size_t cp, int hint) const;
+    int sideFromHint(int para, size_t cp, int hint) const;
 
-int hintFromRel(int para, int rel) const;
+    int hintFromRel(int para, int rel) const;
 
-/**
+    /**
  * 跨段控件的归属补判：段内对象表里只有本段那一半边界，所以控件从上一段跨进来时
  * 找不到配对的开括号，hintFromRel 会判成"在所有控件之外"。这里用控件集合的跨段区间补上：
  * 把段内相对流位置换成全局流位置，与每个控件的内容区间 (起始边界, 结束边界] 比，
@@ -247,97 +246,97 @@ int hintFromRel(int para, int rel) const;
  * 那一半"里，而它在段内看起来只是孤零零一枚结束边界 —— 不兜的话，"当前字段"会显示成
  * 紧挨着的下一个控件，界面显示的就成了"回车之后光标跑进第三个控件"。
  */
-int hintFromCrossSegment(int para, int rel) const;
+    int hintFromCrossSegment(int para, int rel) const;
 
-/**
+    /**
  * 某个位置（不是光标）的侧别：按"最内层含端点"归一次，归不到就是"所有控件之外"。
  * 删除区间的两个端点、诊断打印这类没有侧别信息的入口走它。
  */
-int sideForPos(TextPos p) const;
+    int sideForPos(TextPos p) const;
 
-FlowPos flowPosAtSide(int para, size_t cp_offset, int side) const;
+    FlowPos flowPosAtSide(int para, size_t cp_offset, int side) const;
 
-FlowPos flowPosAt(int para, size_t cp_offset, int owner_hint) const;
+    FlowPos flowPosAt(int para, size_t cp_offset, int owner_hint) const;
 
-int cpOffsetInBlock(int para, int rel) const;
+    int cpOffsetInBlock(int para, int rel) const;
 
-bool flowToTextPos(FlowPos flow, TextPos* out) const;
+    bool flowToTextPos(FlowPos flow, TextPos* out) const;
 
-/**
+    /**
  * 段内相对流位置 → 全局流位置（夹到本段跨度内）。
  *
  * 夹取只做范围收缩，不做簇吸附（簇表要排版之后才有，见 relayout 里的说明）。
  * 上界取 view_.block_flow_span（流索引给的权威段长）而不是显示名单筛过的那张对象表的长度：
  * 前者是树的口径，后者随聚焦档变化，拿它当上界会在换档时把光标往回拉。
  */
-FlowPos flowForRel(int para, int rel) const;
+    FlowPos flowForRel(int para, int rel) const;
 
-/**
+    /**
  * 任意流位置落在哪一块（派生）。view_.block_flow 单调，二分取最后一个起点不超过它的块。
  * caretPara 是它在 focus 上的特例 —— 选区另一端的段号也走这里。
  */
-int paraForFlow(FlowPos f) const;
+    int paraForFlow(FlowPos f) const;
 
-/**
+    /**
  * 任意流位置的段内流位置（派生）= 它减本段起点。
  */
-int relForFlow(FlowPos f) const;
+    int relForFlow(FlowPos f) const;
 
-/**
+    /**
  * 任意流位置的侧别（派生）：段内流位置减去"这个偏移在流里占的起点"就是跨过的边界枚数。
  * 没有"存着的侧别"可以失配，所以既不需要失效标记，也不需要拿边界枚数去卡它。
  */
-int sideForFlow(FlowPos f) const;
+    int sideForFlow(FlowPos f) const;
 
-size_t snapToCluster(int para, size_t offset) const;
+    size_t snapToCluster(int para, size_t offset) const;
 
-/**
+    /**
  * 下一个簇边界：大于 offset 的最小簇起点；没有（或这一段没有簇表）就返回 offset。
  *
  * 与 snapToCluster 配成一对（那个是"<= offset 的最大簇起点"）。前删要用它找"下一个可删
  * 边界"—— 删一个簇而不是删一个码点，否则 e + U+0301 会被拆开，留下一个孤立的组合重音。
  */
-size_t clusterCeilAt(int para, size_t offset) const;
+    size_t clusterCeilAt(int para, size_t offset) const;
 
-/**
+    /**
  * 光标侧别（派生）= focus 的侧别，与 caret() 同源，不可能不同步。
  */
-int caretSide() const;
+    int caretSide() const;
 
-int caretFieldHint() const;
+    int caretFieldHint() const;
 
-/**
+    /**
  * 唯一写入点：段内流位置。其余入口都只是把它换算成全局流位置再调这里。
  */
-void setCaretRel(int para, int rel, bool collapse = true, int line_aff = 0);
+    void setCaretRel(int para, int rel, bool collapse = true, int line_aff = 0);
 
-/**
+    /**
  * 光标那一段（派生）：focus 落在哪一块。
  *
  * 不能借 flowToTextPos：那个入口的职责是"把流位置翻成文本坐标"，段间的位置会被归到相邻段
  * 端点；这里要的是"focus 归属哪一块"，段尾那个位置（段落标记所在位）必须仍算本段。
  */
-int caretPara() const;
+    int caretPara() const;
 
-/**
+    /**
  * 段内流位置（派生）= focus 减本段起点。
  */
-int caretRel() const;
+    int caretRel() const;
 
-/**
+    /**
  * 光标位置（派生）：段号 + 段内码点偏移，由光标的流位置投影出来 —— 不是独立状态。
  * 光标的流位置通常就是 focus，整格选区例外：它是焦点那一格的末尾（见 cell_caret_）。
  */
-TextPos caret() const;
+    TextPos caret() const;
 
-/**
+    /**
  * 按对外坐标（段, 段内码点偏移）写光标，侧别按"最内层含端点"投影一次。
  * 这是文本坐标投影到流位置的唯一约定，只给"没有侧别信息"的入口用（宿主程序化定位、
  * 排版收口）；编辑路径一律走 setCaretAtFlow / setCaretRel —— 侧别由操作自己算出来。
  */
-void setCaretByText(TextPos p);
+    void setCaretByText(TextPos p);
 
-/**
+    /**
  * 把光标摆到一个流位置上（绝对）。位置与侧别一次算准 —— 不猜、不查区间。
  *
  * 编辑路径全用它：删除后的落点是删除区间的起点、插入后是插入区间的终点、Tab 的目标、
@@ -345,15 +344,15 @@ void setCaretByText(TextPos p);
  * 猜错的表象就是"删一个字光标跳一格"：删完"天"，落点会被猜成 ]中 之前，
  * 而它该在 ]中 之后（＝被删那个字所在的位置）。
  */
-bool setCaretAtFlow(FlowPos flow);
+    bool setCaretAtFlow(FlowPos flow);
 
-/**
+    /**
  * 程序化设选区（宿主恢复、探针摆位）。两端各自夹到文档流的合法范围内 —— 越界的那
  * 一端收到能到的最远处，不会让一个悬空端点把后面的几何全带偏。
  */
-bool setSelection(Range r);
+    bool setSelection(Range r);
 
-/**
+    /**
  * 整格选区：把这几格按"单元格选区"记下来，插入点按 caret_flow 摆。
  *
  * 收的是块区间而不是流区间（见 CellBlocks）：空格的内容长度为 0，流区间退化成点之后
@@ -364,27 +363,27 @@ bool setSelection(Range r);
  *   焦点那一格的末尾（由引擎算好传进来），于是鼠标在格内挪动时它一格一格地跳，而不是
  *   逐字跟着跑。传 -1 表示退回"插入点 = focus"。
  */
-bool setCellBlocks(std::vector<CellBlocks> cells, FlowPos caret_flow = -1);
+    bool setCellBlocks(std::vector<CellBlocks> cells, FlowPos caret_flow = -1);
 
-/**
+    /**
  * 取消整格吸附：退回文字选区（选区本身不动）。
  */
-void clearCellRange();
+    void clearCellRange();
 
-/**
+    /**
  * 取消选区：anchor 收到 focus，焦点端不动 —— 光标留在原地。
  */
-void clearSelection();
+    void clearSelection();
 
-/**
+    /**
  * 全选：文档首到文档末。
  *
  * 末端是"最后一块的段内末端"（块起点 + 本块占的位数），而不是下一块之前那个段落标记
  * 所在的位置 —— 段落标记不属于任何一段的内容，够不到它。
  */
-bool selectAll();
+    bool selectAll();
 
-/**
+    /**
  * 找到包含该位置的行盒。
  *
  * 折行处有两个候选：上一行的末尾与下一行的开头是同一个位置（偏移与侧别都一样），
@@ -392,66 +391,66 @@ bool selectAll();
  * 不选的话点下一行行首会画到上一行行尾，连按两下 Down 也会"原地不动"（当前行取成
  * 上一行，Down 落到下一行，位置与光标一模一样）。
  */
-const LineBox* findLineFor(const TextPos& pos, int aff = 0) const;
+    const LineBox* findLineFor(const TextPos& pos, int aff = 0) const;
 
-bool caretRectFor(const TextPos& pos, int* page_out, Rect* out) const;
+    bool caretRectFor(const TextPos& pos, int* page_out, Rect* out) const;
 
-bool caretRectPt(Rect* out) const;
+    bool caretRectPt(Rect* out) const;
 
-int caretPage() const;
+    int caretPage() const;
 
-/**
+    /**
  * 光标是否落在竖排的段里。宿主据此把方向键按物理方向映射 —— 竖排的行内轴是竖直的，
  * 上下走字、左右换列（见 keyToOp）。
  */
-bool caretVertical() const;
+    bool caretVertical() const;
 
-/**
+    /**
  * 光标所在段的列序：中日竖排列自右向左（反向），蒙文竖排列自左向右。
  * 取自段自己的书写模式，不从行盒推 —— 行盒上的 sideways 只是"字形要不要转"，
  * 与列序是两件事，拿它代用会在将来加"侧倒但列序反向"的组合时静默出错。
  */
-bool caretBlockReversed() const;
+    bool caretBlockReversed() const;
 
-/**
+    /**
  * 在某一行里按"沿行内轴的页面坐标"（横排 x / 竖排 y）命中插入点。
  *
  * 每个插入点的势力范围是它到相邻插入点的中点；落在某个簇的后半段时，落点是下一个簇的
  * 首码点 —— 这就是"字素不可切分"的正确语义（点 e+U+0301 的右半边，光标跑到它后面，
  * 而不是钻进它内部）。hitTestPt 与上下键共用它，免得两份实现分头长出不同的势力范围。
  */
-void hitTestInLine(const LineBox& lb, float inline_page_pt, uint32_t* cp_out,
-                                 int* side_out) const;
+    void hitTestInLine(const LineBox& lb, float inline_page_pt, uint32_t* cp_out,
+                       int* side_out) const;
 
-/**
+    /**
  * 光标沿行内轴的页面坐标 —— 上下键的列位就是它。找不到行盒返回 0。
  */
-float caretInlineAxisPt() const;
+    float caretInlineAxisPt() const;
 
-bool moveCaretBy(int dcp, bool extend);
+    bool moveCaretBy(int dcp, bool extend);
 
-bool moveCaretToLineStart(bool extend);
+    bool moveCaretToLineStart(bool extend);
 
-bool moveCaretToLineEnd(bool extend);
+    bool moveCaretToLineEnd(bool extend);
 
-/**
+    /**
  * 到文档首 / 文档末（Ctrl+Home / Ctrl+End）。
  *
  * 落点用流位置给（块起点 / 块起点 + 本块占的位数），不走文本坐标 —— 段末那个位置在
  * 文本坐标里与"下一段段首"是同一个偏移，翻回来会跑到下一段去。
  */
-bool moveCaretToDocStart(bool extend);
+    bool moveCaretToDocStart(bool extend);
 
-bool moveCaretToDocEnd(bool extend);
+    bool moveCaretToDocEnd(bool extend);
 
-/**
+    /**
  * 上下键：沿块轴走到相邻行，列位沿行内轴保持。
  *
  * 实现是"当前行盒在全局行数组里的下标 ±1 → 在目标行上按列位做一次行内命中"，不新增
  * 排版接口 —— 行盒数组本来就是按块轴排好的。到文档首/末时停在原地（返回假），但列位
  * 留着，于是"按到头上、再按回来"落的是同一个列位。
  */
-bool moveCaretVertical(int dir, bool extend);
+    bool moveCaretVertical(int dir, bool extend);
 
 private:
     /**

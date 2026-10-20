@@ -31,23 +31,151 @@ FlowPos stepStartFlow(const Step& s) {
  * 读控件的运行时属性。四个分居两处：hidden 在节点上（呈现态的流位置换算要看它），
  * 其余三个在控件数据里。
  */
-bool readPropValue(const Node* n, ControlProp p, bool* out) {
+bool readPropValue(const rev::Node* n, ControlProp p, bool* out) {
     if (n == nullptr || n->kind != NodeKind::ContentControl || out == nullptr) return false;
+    const auto* spec = std::get_if<ControlSpec>(&n->payload);
+    if (spec == nullptr) return false;
     switch (p) {
         case ControlProp::Hidden:
             *out = n->hidden;
             return true;
         case ControlProp::Readonly:
-            *out = n->control.readonly;
+            *out = spec->readonly;
             return true;
         case ControlProp::Required:
-            *out = n->control.required;
+            *out = spec->required;
             return true;
         case ControlProp::StructureLock:
-            *out = n->control.structureLock;
+            *out = spec->structureLock;
             return true;
     }
     return false;
+}
+
+}  // namespace
+
+namespace {
+
+/**
+ * 一枚原子整枚删掉：按流位置寻址。原子没有可寻址的内部，它在流里只占自己那一格。
+ */
+NodeBuild removeAtomStep(const rev::Doc& doc, const rev::FlowIndex& idx, FlowPos at) {
+    NodeBuild out;
+    if (at < 0 || at >= idx.size()) {
+        out.error = "删除原子：流位置越界";
+        return out;
+    }
+    const Pos p = idx.posAt(at);
+    const rev::Node* n = rev::findNode(doc, p.container);
+    if (n == nullptr || !isAtom(n->kind) || p.offset != 0) {
+        out.error = "删除原子：该位置上没有原子";
+        return out;
+    }
+    RemoveNode r;
+    r.at_flow = at;
+    out.step = Step{r};
+    out.ok = true;
+    return out;
+}
+
+/**
+ * 删一枚段落标记。格式与样式引用从文档里读出来带上 —— 撤销要靠它还原，手填一份等于把
+ * "这一段长什么样"记两遍。
+ */
+ParaMarkBuild removeMarkStep(const rev::Doc& doc, const rev::FlowIndex& idx, FlowPos at) {
+    ParaMarkBuild out;
+    if (at < 0 || at >= idx.size()) {
+        out.error = "删除段落标记：流位置越界";
+        return out;
+    }
+    const Pos p = idx.posAt(at);
+    const rev::Node* n = rev::findNode(doc, p.container);
+    if (n == nullptr || !isParagraphMark(n->kind) || p.offset != 0) {
+        out.error = "删除段落标记：该位置上没有段落标记";
+        return out;
+    }
+    const auto* mp = std::get_if<rev::MarkPayload>(&n->payload);
+    if (mp == nullptr) {
+        out.error = "删除段落标记：载荷不是段落标记";
+        return out;
+    }
+    RemoveParaMark s;
+    s.at = at;
+    s.para = mp->para;
+    s.styleRef = mp->style;
+    out.step = Step{s};
+    out.ok = true;
+    return out;
+}
+
+/**
+ * 删一个流区间：同层且只含文本与段落标记时一条 DeleteRange 就够。
+ *
+ * 区间里出现整块元素或跨层时返回空，由调用方另走结构步骤（删原子、删整表）。
+ */
+std::vector<Step> deleteWholeRange(const rev::Doc& doc, const rev::FlowIndex& idx, FlowPos from,
+                                   FlowPos to) {
+    if (from >= to) return {};
+    if (from < 0 || to > idx.size()) return {};
+    const Pos b = idx.posAt(from);
+    const rev::Node* bn = rev::findNode(doc, b.container);
+    if (bn == nullptr) return {};
+    const rev::Node* parent = isContainer(bn->kind) ? bn : rev::parentOf(doc, bn->id);
+    if (parent == nullptr) return {};
+
+    // 覆盖总和必须恰好等于区间长：跨层（区间伸出了这一层的孩子表）或中间有洞时
+    //   不满足，宁可返回空让调用方另走结构步骤，也不要发出半截区间 —— 那一类症状是
+    //   "选中了整张表，只删掉第一格的字"。
+    int covered = 0;
+    for (const rev::Ref& c : parent->children) {
+        int f = 0;
+        int e = 0;
+        if (!idx.intervalOf(c->id, &f, &e)) continue;
+        if (e <= from || f >= to) continue;
+        if (!isText(c->kind) && !isParagraphMark(c->kind)) return {};
+        covered += (e < to ? e : to) - (f > from ? f : from);
+    }
+    if (covered != to - from) return {};
+
+    DeleteRange s;
+    s.begin = from;
+    s.end = to;
+    return {Step{s}};
+}
+
+/**
+ * 按文本节点切分的删除步骤：每个被区间盖到的 run 各发一条，原子与段落标记不产生步骤
+ * （它们由调用方另发结构步骤）。从后往前发 —— 删右边不会移动左边的坐标。
+ *
+ * 逐节点跳跃而不是逐位问 posAt：后者每次都要从根下降、每层线性扫孩子，整篇删除是亿级。
+ */
+std::vector<Step> deleteTextSteps(const rev::Doc& doc, const rev::FlowIndex& idx, FlowPos from,
+                                  FlowPos to) {
+    std::vector<Step> out;
+    if (from < 0 || to <= from || to > idx.size()) return out;
+    std::vector<std::pair<FlowPos, FlowPos>> segs;
+    FlowPos p = from;
+    while (p < to) {
+        const Pos np = idx.posAt(p);
+        const rev::Node* n = rev::findNode(doc, np.container);
+        int nf = 0;
+        int ne = 0;
+        if (n == nullptr || !isText(n->kind) || !idx.intervalOf(n->id, &nf, &ne) || ne <= p) {
+            ++p;  // 容器边界、段落标记、原子：这一位不产生步骤
+            continue;
+        }
+        const int seg_to = (ne < to) ? ne : to;
+        if (seg_to > p) segs.push_back({p, seg_to});
+        p = ne;
+    }
+    out.reserve(segs.size());
+    for (size_t i = segs.size(); i-- > 0;) {
+        DeleteRange s;
+        s.begin = segs[i].first;
+        s.end = segs[i].second;
+        out.push_back(Step{s});
+    }
+    return out;
 }
 
 }  // namespace
@@ -55,28 +183,28 @@ bool readPropValue(const Node* n, ControlProp p, bool* out) {
  * 落点判定：走模型层的能力表（树 + 流位置）。
  * 六个编辑入口与四个光标入口都调它，免得十来处各写一遍。
  */
-EditCheck EditCommand::policyAt(TextPos p) const {
-    if (formDegraded()) return EditCheck{true, ""};
+rev::EditCheck EditCommand::policyAt(TextPos p) const {
+    if (formDegraded()) return rev::EditCheck{true, ""};
     // 侧别由位置自己推（光标这一处用光标自己的侧别，见 sideForPos）——
     //   不从控件下标反推：同一个偏移上可能压着好几枚括号，反推会猜错。
     const FlowPos f = pos().flowPosAtSide(p.para, p.offset, pos().sideForPos(p));
-    if (f < 0) return EditCheck{false, "落点不在文档流里"};
-    return canEditAt(tree(), mode(), f);
+    if (f < 0) return rev::EditCheck{false, "落点不在文档流里"};
+    return rev::canEditAt(doc(), mode(), f);
 }
 
-EditCheck EditCommand::policyErase(TextPos a, TextPos b) const {
+rev::EditCheck EditCommand::policyErase(TextPos a, TextPos b) const {
     // 档 1 的删除不跨段；段落标记的删除走合并那条路（另有判定）。
-    if (a.para != b.para) return EditCheck{false, "删除区间跨段"};
-    if (formDegraded()) return EditCheck{true, ""};
+    if (a.para != b.para) return rev::EditCheck{false, "删除区间跨段"};
+    if (formDegraded()) return rev::EditCheck{true, ""};
     // 区间 = "这段文本码点自己占的那一段"，与实际删除（eraseOnTree）同一把尺子。
     //   端点取错侧就会被判成越出控件而拒掉，表象是"删到只剩一个字就删不动了"；
     //   取宽了又会把相邻的括号圈进来，表象是"删完光标跳一格"。
     int rel_from = 0;
     int rel_to = 0;
     if (!pos().textSpanAt(a.para, a.offset, b.offset, &rel_from, &rel_to))
-        return EditCheck{false, "删除区间不在文档流里"};
+        return rev::EditCheck{false, "删除区间不在文档流里"};
     const FlowPos base = blockFlow()[static_cast<size_t>(a.para)];
-    return canEditRange(tree(), mode(), Range{base + rel_from, base + rel_to});
+    return rev::canEditRange(doc(), mode(), Range{base + rel_from, base + rel_to});
 }
 
 /**
@@ -133,13 +261,14 @@ bool EditCommand::insertCodepoints(int para, size_t offset, const std::vector<ui
     s.cps = cps;
     // 沿用落点左侧的字符格式：否则在粗体字中间敲出来的字不是粗的。
     s.marks = marksAtFlow(at_flow, &s.styleRef);
-    Transaction tx;
-    tx.label = "输入";
-    tx.selection_before = Range{at_flow, at_flow};
+    std::vector<Step> steps;
+    pending_before_ = Range{};
+    pending_after_ = Range{};
+    pending_before_ = Range{at_flow, at_flow};
     const FlowPos after = at_flow + static_cast<FlowPos>(cps.size());
-    tx.selection_after = Range{after, after};
-    tx.steps.push_back(Step{s});
-    if (!commit(std::move(tx), para, ParaDelta{})) {
+    pending_after_ = Range{after, after};
+    steps.push_back(Step{s});
+    if (!commit(std::move(steps), para, ParaDelta{})) {
         noteBlocked();
         return false;
     }
@@ -168,7 +297,8 @@ bool EditCommand::controlFlowSpan(int index, FlowPos* lo, FlowPos* hi) const {
     if (index < 0 || index >= static_cast<int>(controlNodeIds().size())) return false;
     int first = -1;
     int end = -1;
-    if (!flowIndex().intervalOf(controlNodeIds()[static_cast<size_t>(index)], &first, &end)) return false;
+    if (!flowIndex().intervalOf(controlNodeIds()[static_cast<size_t>(index)], &first, &end))
+        return false;
     if (lo != nullptr) *lo = first;
     if (hi != nullptr) *hi = end;
     return true;
@@ -219,22 +349,23 @@ bool EditCommand::eraseAtomBeside(FlowPos cur, bool left) {
     const FlowPos f = left ? (cur - 1) : cur;
     if (f < 0 || f >= flowIndex().size()) return false;
     const Pos p = flowIndex().posAt(f);
-    const Node* n = tree().find(p.container);
+    const rev::Node* n = rev::findNode(doc(), p.container);
     if (n == nullptr || !isAtom(n->kind) || p.offset != 0) return false;
-    if (!formDegraded() && !canEditRange(tree(), mode(), Range{f, f + 1}).allowed) {
+    if (!formDegraded() && !rev::canEditRange(doc(), mode(), Range{f, f + 1}).allowed) {
         noteBlocked();
         return false;
     }
-    const NodeBuild nb = makeRemoveAtom(tree(), flowIndex(), f);
+    const NodeBuild nb = removeAtomStep(doc(), flowIndex(), f);
     if (!nb.ok) return false;
-    Transaction tx;
-    tx.label = "删除原子";
+    std::vector<Step> steps;
+    pending_before_ = Range{};
+    pending_after_ = Range{};
     // 撤销恢复的是"按键之前光标在哪"（与删控件同一条）：记成原子自己那一格的话，撤销之后
     //   光标会落到原子前面，而按键之前它在后面。
-    tx.selection_before = Range{cur, cur};
-    tx.selection_after = Range{f, f};
-    tx.steps.push_back(nb.step);
-    if (!commit(std::move(tx), pos().paraForFlow(f), ParaDelta{})) return false;
+    pending_before_ = Range{cur, cur};
+    pending_after_ = Range{f, f};
+    steps.push_back(nb.step);
+    if (!commit(std::move(steps), pos().paraForFlow(f), ParaDelta{})) return false;
     pos().setCaretAtFlow(f);
     return true;
 }
@@ -361,7 +492,8 @@ bool EditCommand::backspace() {
 
     // 段首退格 = 并入上一段（跨段编辑）。策略拒绝时返回 false，与其它被拒编辑同一口径：
     //   宿主据此判断"没变"，光标也不会动。按括号规则搬过光标的那一下同样算变过。
-    if (p.offset == 0) return mergeWithPreviousParagraph() || caret_before != pos().selection().focus;
+    if (p.offset == 0)
+        return mergeWithPreviousParagraph() || caret_before != pos().selection().focus;
 
     // 往回删一个簇，不是删一个码点。
     //   e + U+0301 会被一次删掉；只删 U+0301 会留下一个孤立的组合重音。
@@ -455,12 +587,14 @@ bool EditCommand::splitParagraph() {
     const NodeId mark_a = (p.para < static_cast<int>(blockSrc().size()))
                               ? blockSrc()[static_cast<size_t>(p.para)].mark
                               : kInvalidNodeId;
-    const Node* mk = tree().find(mark_a);
+    const rev::Node* mk = rev::findNode(doc(), mark_a);
     ParaFormatPatch patch;
     std::string style_ref;
-    if (mk != nullptr && isParagraphMark(mk->kind)) {
-        patch = mk->para;
-        style_ref = mk->styleRef;
+    if (mk != nullptr) {
+        if (const auto* mp = std::get_if<rev::MarkPayload>(&mk->payload)) {
+            patch = mp->para;
+            style_ref = mp->style;
+        }
     }
     // 位置由 (偏移, 侧别) 给出，不从控件下标反推。
     //   反推在空控件处会猜错侧别，于是标记插到了别的控件里（"回车之后光标跑进第三个控件"）。
@@ -469,15 +603,16 @@ bool EditCommand::splitParagraph() {
         noteBlocked();
         return consumed;
     }
-    Transaction tx;
-    tx.label = "分段";
-    tx.selection_before = Range{at_flow, at_flow};
-    tx.selection_after = Range{at_flow + 1, at_flow + 1};
+    std::vector<Step> steps;
+    pending_before_ = Range{};
+    pending_after_ = Range{};
+    pending_before_ = Range{at_flow, at_flow};
+    pending_after_ = Range{at_flow + 1, at_flow + 1};
     InsertParaMark s;
     s.at = at_flow;
     s.para = patch;
     s.styleRef = style_ref;
-    tx.steps.push_back(Step{s});
+    steps.push_back(Step{s});
     if (mk != nullptr && isParagraphMark(mk->kind) &&
         blocksFull()[static_cast<size_t>(p.para)].page_break_before) {
         SetParaMarkFormat clear_pbb;
@@ -487,9 +622,9 @@ bool EditCommand::splitParagraph() {
         clear_pbb.styleRef = style_ref;
         clear_pbb.before = patch;
         clear_pbb.beforeStyleRef = style_ref;
-        tx.steps.push_back(Step{clear_pbb});
+        steps.push_back(Step{clear_pbb});
     }
-    if (!commit(std::move(tx), p.para, ParaDelta{true, p.para, 1})) {
+    if (!commit(std::move(steps), p.para, ParaDelta{true, p.para, 1})) {
         noteBlocked();
         return consumed;
     }
@@ -514,37 +649,42 @@ bool EditCommand::mergeParagraphInto(int head) {
     //   于是"合并之后那一段保留前一段的格式"这条约定不能白拿：要显式搬到后一段的标记上。
     const NodeId mark_a = blockSrc()[static_cast<size_t>(head)].mark;
     const NodeId mark_b = blockSrc()[static_cast<size_t>(head + 1)].mark;
-    const Node* ma = tree().find(mark_a);
+    const rev::Node* ma = rev::findNode(doc(), mark_a);
     FlowPos at_a = 0;
     if (ma == nullptr || !flowIndex().intervalOf(mark_a, &at_a, nullptr)) return false;
 
     // 权限按"这枚段落标记能不能被删"判：区间 [at_a, at_a + 1) 就是标记自己那一位。
     //   判的是标记那一位可不可编辑，不是光标落在哪 —— 光标在字段外、标记在字段内时能合。
     //   安全阀（表单退化成文档模式）先过一遍，退化的情形该放行。
-    if (!formDegraded() && !canEditRange(tree(), mode(), Range{at_a, at_a + 1}).allowed) {
+    if (!formDegraded() && !rev::canEditRange(doc(), mode(), Range{at_a, at_a + 1}).allowed) {
         noteBlocked();
         return false;
     }
 
-    Transaction tx;
-    tx.label = "合并";
-    tx.selection_before = Range{at_a, at_a};
-    tx.selection_after = Range{at_a, at_a};
+    std::vector<Step> steps;
+    pending_before_ = Range{};
+    pending_after_ = Range{};
+    pending_before_ = Range{at_a, at_a};
+    pending_after_ = Range{at_a, at_a};
 
-    const ParaMarkBuild rm = makeRemoveParaMark(tree(), at_a);
+    const ParaMarkBuild rm = removeMarkStep(doc(), flowIndex(), at_a);
     if (!rm.ok) return false;
+    const auto* ma_pl = std::get_if<rev::MarkPayload>(&ma->payload);
+    if (ma_pl == nullptr) return false;
 
     if (mark_b != kInvalidNodeId) {
-        const Node* mb = tree().find(mark_b);
+        const rev::Node* mb = rev::findNode(doc(), mark_b);
         if (mb == nullptr) return false;
+        const auto* mb_pl = std::get_if<rev::MarkPayload>(&mb->payload);
+        if (mb_pl == nullptr) return false;
         SetParaMarkFormat keep;
         keep.id = mark_b;
-        keep.para = ma->para;
-        keep.styleRef = ma->styleRef;
-        keep.before = mb->para;
-        keep.beforeStyleRef = mb->styleRef;
-        tx.steps.push_back(Step{keep});
-        tx.steps.push_back(rm.step);
+        keep.para = ma_pl->para;
+        keep.styleRef = ma_pl->style;
+        keep.before = mb_pl->para;
+        keep.beforeStyleRef = mb_pl->style;
+        steps.push_back(Step{keep});
+        steps.push_back(rm.step);
     } else {
         // 后一段是末尾那一段、没有结束标记：删掉前一段的标记之后，合并出来的那一段就没有
         //   标记了 —— 它会按默认段落格式编译，前一段的格式静默丢掉。所以补一枚标记在末尾，
@@ -554,12 +694,12 @@ bool EditCommand::mergeParagraphInto(int head) {
                                    blockFlowSpan()[static_cast<size_t>(head + 1)];
         InsertParaMark ins;
         ins.at = mapPos(rm.step, end_before, Assoc::After);
-        ins.para = ma->para;
-        ins.styleRef = ma->styleRef;
-        tx.steps.push_back(rm.step);
-        tx.steps.push_back(Step{ins});
+        ins.para = ma_pl->para;
+        ins.styleRef = ma_pl->style;
+        steps.push_back(rm.step);
+        steps.push_back(Step{ins});
     }
-    if (!commit(std::move(tx), head, ParaDelta{true})) {
+    if (!commit(std::move(steps), head, ParaDelta{true})) {
         noteBlocked();
         return false;
     }
@@ -606,17 +746,17 @@ bool EditCommand::eraseOnTree(TextPos a, TextPos b, const char* label, bool care
     if (from < 0 || to < 0 || from >= to) return false;
     // 按文本节点切分着删（见 makeDeleteTextSteps）：区间级那套"端点向外扩到结构单元边界"
     //   的规则在这里正好帮倒忙 —— 删控件里的一个字会被理解成删掉整个控件的内容。
-    std::vector<Step> steps = makeDeleteTextSteps(tree(), from, to);
+    std::vector<Step> steps = deleteWholeRange(doc(), flowIndex(), from, to);
+    if (steps.empty()) steps = deleteTextSteps(doc(), flowIndex(), from, to);
     if (steps.empty()) return false;
-    Transaction tx;
-    tx.label = label;
+    pending_before_ = Range{};
+    pending_after_ = Range{};
     // 撤销恢复的是"删除之前光标在哪"：退格与反缩进的光标在右端（被删的字在它左边），
     //   前删在左端。两处都写成左端的话，退格一次再撤销，光标会落到被恢复那个字的前面。
     const FlowPos caret_before = caret_at_end ? to : from;
-    tx.selection_before = Range{caret_before, caret_before};
-    tx.selection_after = Range{from, from};
-    tx.steps = std::move(steps);
-    if (!commit(std::move(tx), a.para, ParaDelta{})) return false;
+    pending_before_ = Range{caret_before, caret_before};
+    pending_after_ = Range{from, from};
+    if (!commit(std::move(steps), a.para, ParaDelta{})) return false;
     // 落点 = 删除区间的起点，也就是被删掉那段文本所在的位置。这个流位置本来就算出来了，
     //   直接摆过去即可 —— 只留一个码点偏移、再由"最内层含端点"猜回侧别的话，
     //   删完一个字光标会落到相邻括号的另一侧（"跳了一格"）。
@@ -631,11 +771,11 @@ std::vector<Step> EditCommand::eraseFlowSteps(FlowPos from, FlowPos to) const {
     //   按节点切分要发几千步，每一步在提交时都要重建一次流索引（O(节点数)）——
     //   2000 段整篇删除实测几秒，其中一多半在这一项上。
     if (hasFlow()) {
-        steps = makeDeleteRangeOneStep(tree(), flowIndex(), from, to);
+        steps = deleteWholeRange(doc(), flowIndex(), from, to);
         if (!steps.empty()) return steps;
     }
     // 文本那一条：按"所属文本节点"切分，落在段落标记、容器边界与原子上的位置不产生步骤。
-    steps = makeDeleteTextSteps(tree(), from, to);
+    steps = deleteTextSteps(doc(), flowIndex(), from, to);
     // 段落标记那一条：标记各占一个流位置，要么整覆盖要么不覆盖。
     //   它不能用 makeDeleteRange 顶替：那条按结构取区间，会把端点向外扩到控件边界
     //   （见 makeDeleteTextSteps 的说明），而这里要的正是"只删掉这一位"。
@@ -647,7 +787,7 @@ std::vector<Step> EditCommand::eraseFlowSteps(FlowPos from, FlowPos to) const {
         for (size_t k = 1; k < blockFlow().size(); ++k) {
             const FlowPos p = blockFlow()[k] - 1;
             if (p < from || p >= to) continue;
-            const ParaMarkBuild mb = makeRemoveParaMark(tree(), flowIndex(), p);
+            const ParaMarkBuild mb = removeMarkStep(doc(), flowIndex(), p);
             if (mb.ok) steps.push_back(mb.step);
         }
     }
@@ -664,18 +804,16 @@ std::vector<Step> EditCommand::eraseFlowSteps(FlowPos from, FlowPos to) const {
             const std::vector<InlineObject>& objs = blocks()[p].objects;
             for (size_t i = 0; i < objs.size(); ++i) {
                 if (objs[i].kind != InlineObjectKind::Atom) continue;
-                const FlowPos f = base + static_cast<FlowPos>(objs[i].cp) +
-                                  static_cast<FlowPos>(i);
+                const FlowPos f = base + static_cast<FlowPos>(objs[i].cp) + static_cast<FlowPos>(i);
                 if (f < from || f >= to) continue;
-                const NodeBuild nb = makeRemoveAtom(tree(), flowIndex(), f);
+                const NodeBuild nb = removeAtomStep(doc(), flowIndex(), f);
                 if (nb.ok) steps.push_back(nb.step);
             }
         }
     }
     // 从后往前：删右边的不会移动左边的坐标，于是每步的坐标都是它自己那一刻的坐标。
-    std::sort(steps.begin(), steps.end(), [](const Step& a, const Step& b) {
-        return stepStartFlow(a) > stepStartFlow(b);
-    });
+    std::sort(steps.begin(), steps.end(),
+              [](const Step& a, const Step& b) { return stepStartFlow(a) > stepStartFlow(b); });
     // 安全阀：两批步骤加起来必须刚好覆盖整个区间。差一位都说明区间里有东西是这套可编辑
     //   集合处理不了的（节边界、控件边界），此时宁可整条编辑被拒，也不要删掉半截区间 ——
     //   半截区间的症状是"选中的字还剩一个没删掉"，很难归因。
@@ -703,7 +841,7 @@ EditCommand::SelectionErase EditCommand::planEraseSelection() {
     if (from >= to) return plan;
     // 判定与实际删除同一把尺子：判的是整个区间能不能编辑，删的是同一个区间。
     //   跨段的区间在这里第一次被放行 —— 档 1 的 policyErase 只管同段。
-    if (!formDegraded() && !canEditRange(tree(), mode(), Range{from, to}).allowed) {
+    if (!formDegraded() && !rev::canEditRange(doc(), mode(), Range{from, to}).allowed) {
         noteBlocked();
         plan.blocked = true;
         return plan;
@@ -832,9 +970,8 @@ std::vector<Step> EditCommand::eraseCellContents(FlowPos from, FlowPos to) const
     }
     if (all.empty()) return {};  // 全是空格：没有可删的内容，交给调用方按"拒绝"处理
     // 从后往前：删右边的不会移动左边的坐标。
-    std::sort(all.begin(), all.end(), [](const Step& a, const Step& b) {
-        return stepStartFlow(a) > stepStartFlow(b);
-    });
+    std::sort(all.begin(), all.end(),
+              [](const Step& a, const Step& b) { return stepStartFlow(a) > stepStartFlow(b); });
     return all;
 }
 
@@ -910,21 +1047,14 @@ std::vector<Step> EditCommand::eraseWholeTables(FlowPos from, FlowPos to) const 
             if (part.empty()) return {};  // 空隙里有删不动的东西：整条按原路退回
             steps.insert(steps.end(), part.begin(), part.end());
         }
-        const Node* n = tree().find(w.id);
-        if (n == nullptr || n->parent == nullptr) return {};
-        int idx = -1;
-        for (size_t i = 0; i < n->parent->children.size(); ++i) {
-            if (n->parent->children[i]->id == n->id) {
-                idx = static_cast<int>(i);
-                break;
-            }
-        }
-        if (idx < 0) return {};
+        int lo = -1;
+        if (!flowIndex().intervalOf(w.id, &lo, nullptr)) return {};
         // 整块包住它必然被拒（与删控件同一条口径）：表单结构锁与只读都落在这里。
-        if (!formDegraded() && !canEditRange(tree(), mode(), Range{w.lo, w.hi}).allowed) return {};
-        const NodeBuild nb = makeRemoveNode(tree(), Pos{n->parent->id, idx});
-        if (!nb.ok) return {};
-        steps.push_back(nb.step);
+        if (!formDegraded() && !rev::canEditRange(doc(), mode(), Range{w.lo, w.hi}).allowed)
+            return {};
+        RemoveNode r;
+        r.at_flow = lo;
+        steps.push_back(Step{r});
         cursor = std::max(cursor, w.hi);
     }
     if (to > cursor) {
@@ -933,9 +1063,8 @@ std::vector<Step> EditCommand::eraseWholeTables(FlowPos from, FlowPos to) const 
         steps.insert(steps.end(), part.begin(), part.end());
     }
     // 从后往前：删右边的不会移动左边的坐标。
-    std::sort(steps.begin(), steps.end(), [](const Step& a, const Step& b) {
-        return stepStartFlow(a) > stepStartFlow(b);
-    });
+    std::sort(steps.begin(), steps.end(),
+              [](const Step& a, const Step& b) { return stepStartFlow(a) > stepStartFlow(b); });
     return steps;
 }
 
@@ -944,13 +1073,14 @@ bool EditCommand::commitErase(const SelectionErase& plan, const char* label) {
     // 段数变了就得禁掉后缀复用：跨段删除删掉段落标记，后一段的起点整体前移，
     //   "第 k 段还是同一段"这件事不再成立。同段内删除照旧只标脏那一段。
     const bool cross = pos().paraForFlow(plan.at) != pos().paraForFlow(plan.before.end() - 1);
-    Transaction tx;
-    tx.label = label;
-    tx.selection_before = plan.before;
-    tx.selection_after = Range{plan.at, plan.at};
-    tx.steps = plan.steps;
-    if (!commit(std::move(tx), pos().paraForFlow(plan.at),
-                      cross ? ParaDelta{true} : ParaDelta{})) {
+    std::vector<Step> steps;
+    pending_before_ = Range{};
+    pending_after_ = Range{};
+    pending_before_ = plan.before;
+    pending_after_ = Range{plan.at, plan.at};
+    steps = plan.steps;
+    if (!commit(std::move(steps), pos().paraForFlow(plan.at),
+                cross ? ParaDelta{true} : ParaDelta{})) {
         noteBlocked();
         return false;
     }
@@ -979,16 +1109,17 @@ bool EditCommand::replaceSelectionWithText(const std::vector<uint32_t>& cps) {
     s.marks = marksAtFlow(s.at, &s.styleRef);
 
     const FlowPos after = plan.at + static_cast<FlowPos>(cps.size());
-    Transaction tx;
-    tx.label = "输入";
-    tx.selection_before = plan.before;
-    tx.selection_after = Range{after, after};
-    tx.steps = plan.steps;
-    tx.steps.push_back(Step{s});
+    std::vector<Step> steps;
+    pending_before_ = Range{};
+    pending_after_ = Range{};
+    pending_before_ = plan.before;
+    pending_after_ = Range{after, after};
+    steps = plan.steps;
+    steps.push_back(Step{s});
 
     const bool cross = pos().paraForFlow(plan.at) != pos().paraForFlow(plan.before.end() - 1);
-    if (!commit(std::move(tx), pos().paraForFlow(plan.at),
-                      cross ? ParaDelta{true} : ParaDelta{})) {
+    if (!commit(std::move(steps), pos().paraForFlow(plan.at),
+                cross ? ParaDelta{true} : ParaDelta{})) {
         noteBlocked();
         return false;
     }
@@ -1000,19 +1131,24 @@ CharFormat EditCommand::marksAtFlow(FlowPos at, std::string* style_ref) const {
     if (style_ref != nullptr) style_ref->clear();
     if (!hasFlow()) return CharFormat{};
     const Pos p = flowIndex().posAt(at);
-    const Node* n = tree().find(p.container);
+    const rev::Node* n = rev::findNode(doc(), p.container);
     if (n == nullptr) return CharFormat{};
     if (isText(n->kind)) {
-        if (style_ref != nullptr) *style_ref = n->styleRef;
-        return n->marks;
+        const auto* run = std::get_if<rev::RunPayload>(&n->payload);
+        if (run == nullptr) return CharFormat{};
+        if (style_ref != nullptr) *style_ref = run->style;
+        return run->marks;
     }
     // 落在容器里（含"文本之前"的空位置）：看前一个孩子是不是文本 —— 打字接在已有文字
     //   后面是最常见的一种，沿用它的标记才不会在粗体字后面敲出一个不粗的字。
     if (isContainer(n->kind) && p.offset > 0) {
-        const Node* prev = n->children[static_cast<size_t>(p.offset) - 1];
-        if (prev != nullptr && isText(prev->kind)) {
-            if (style_ref != nullptr) *style_ref = prev->styleRef;
-            return prev->marks;
+        const rev::Ref& prev = n->children[static_cast<size_t>(p.offset) - 1];
+        if (prev && isText(prev->kind)) {
+            const auto* run = std::get_if<rev::RunPayload>(&prev->payload);
+            if (run != nullptr) {
+                if (style_ref != nullptr) *style_ref = run->style;
+                return run->marks;
+            }
         }
     }
     return CharFormat{};
@@ -1028,12 +1164,14 @@ bool EditCommand::removeControl(int index, bool keep_content, FlowPos caret_befo
     if (!hasFlow()) return false;
     if (index < 0 || index >= controls().size()) return false;
     const NodeId id = controlNodeIds()[static_cast<size_t>(index)];
-    const Node* c = tree().find(id);
-    if (c == nullptr || c->kind != NodeKind::ContentControl || c->parent == nullptr) return false;
-    const NodeId parent_id = c->parent->id;
+    const rev::Node* c = rev::findNode(doc(), id);
+    if (c == nullptr || c->kind != NodeKind::ContentControl) return false;
+    const rev::Node* parent = rev::parentOf(doc(), id);
+    if (parent == nullptr) return false;
+    const NodeId parent_id = parent->id;
     int idx = -1;
-    for (size_t i = 0; i < c->parent->children.size(); ++i) {
-        if (c->parent->children[i]->id == id) {
+    for (size_t i = 0; i < parent->children.size(); ++i) {
+        if (parent->children[i]->id == id) {
             idx = static_cast<int>(i);
             break;
         }
@@ -1041,7 +1179,7 @@ bool EditCommand::removeControl(int index, bool keep_content, FlowPos caret_befo
     if (idx < 0) return false;
 
     // 结构操作的门：表单模式默认被 structureLock 锁住，文档模式放行（作者在设计表单）。
-    if (!formDegraded() && !canDoStructureOp(tree(), mode(), id).allowed) {
+    if (!formDegraded() && !rev::canDoStructureOp(doc(), mode(), id).allowed) {
         noteBlocked();
         return false;
     }
@@ -1050,13 +1188,13 @@ bool EditCommand::removeControl(int index, bool keep_content, FlowPos caret_befo
     int hi = -1;
     if (!flowIndex().intervalOf(id, &lo, &hi)) return false;
 
-    Transaction tx;
-    tx.label = keep_content ? "删除控件（保留内容）" : "删除控件";
+    std::vector<Step> steps;
+    pending_before_ = Range{};
+    pending_after_ = Range{};
     // 撤销恢复的是"删除之前光标在哪"：键盘那一路把原位置传进来（它可能在控件里、也可能
     //   在控件之前），不传时按"选中整个控件"记 —— 那是显式删控件按钮的叙事。
-    tx.selection_before =
-        (caret_before >= 0) ? Range{caret_before, caret_before} : Range{lo, hi};
-    tx.selection_after = Range{lo, lo};
+    pending_before_ = (caret_before >= 0) ? Range{caret_before, caret_before} : Range{lo, hi};
+    pending_after_ = Range{lo, lo};
 
     if (keep_content) {
         // 拆壳：内容上提、节点移除。两个 span 的差就是节点自己那两枚边界。
@@ -1065,21 +1203,21 @@ bool EditCommand::removeControl(int index, bool keep_content, FlowPos caret_befo
         u.at_flow = lo;
         u.span_before = hi - lo;
         u.span_after = hi - lo - 2;
-        u.node = captureSubtree(tree(), id);
+        u.node = NodeSpec{};
         u.detached = id;
-        tx.steps.push_back(Step{u});
+        steps.push_back(Step{u});
     } else {
         RemoveNode r;
         r.at = Pos{parent_id, idx};
         r.at_flow = lo;
-        r.removed = captureSubtree(tree(), id);
+        r.removed = NodeSpec{};
         r.detached = id;
-        tx.steps.push_back(Step{r});
+        steps.push_back(Step{r});
     }
 
     const int dirty = controls().at(index).range.start.para;
     // 段数可能变（控件里的段落标记没了，或者上提之后换了容器），所以走全量重编译。
-    if (!commit(std::move(tx), dirty, ParaDelta{true})) {
+    if (!commit(std::move(steps), dirty, ParaDelta{true})) {
         noteBlocked();
         return false;
     }
@@ -1092,7 +1230,7 @@ EditCommand::PropResult EditCommand::setControlProp(int index, ControlProp prop,
     if (index < 0 || index >= controls().size()) return PropResult::Failed;
     const NodeId id = controlNodeIds()[static_cast<size_t>(index)];
     bool before = false;
-    if (!readPropValue(tree().find(id), prop, &before)) return PropResult::Failed;
+    if (!readPropValue(rev::findNode(doc(), id), prop, &before)) return PropResult::Failed;
     // 幂等：没变就不提交 —— 撤销栈里多一条什么都没做的记录只会让人困惑。
     if (before == value) return PropResult::Unchanged;
 
@@ -1102,13 +1240,14 @@ EditCommand::PropResult EditCommand::setControlProp(int index, ControlProp prop,
     s.value = value;
     s.before = before;
 
-    Transaction tx;
-    tx.label = "改控件属性";
-    tx.steps.push_back(Step{s});
+    std::vector<Step> steps;
+    pending_before_ = Range{};
+    pending_after_ = Range{};
+    steps.push_back(Step{s});
     // hidden 改呈现态的流结构（整棵摘除），其余三项不改结构。
     const bool structural = (prop == ControlProp::Hidden);
     const int dirty = controls().at(index).range.start.para;
-    if (!commit(std::move(tx), dirty, structural ? ParaDelta{true} : ParaDelta{}))
+    if (!commit(std::move(steps), dirty, structural ? ParaDelta{true} : ParaDelta{}))
         return PropResult::Failed;
     return structural ? PropResult::Structural : PropResult::Changed;
 }

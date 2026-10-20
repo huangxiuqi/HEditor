@@ -1,16 +1,21 @@
-#include "core/doc/edit_capability.h"
+#include "core/rev/capability.h"
 
 #include <string>
 #include <vector>
 
-namespace heditor {
+namespace heditor::rev {
+
 namespace {
 
-/**
- * 该模式用哪套可见性。编辑态是设计态，隐藏的控件照常参与流；表单与只读下整棵摘除。
- */
 FlowVisibility visibilityOf(EditMode mode) {
     return mode == EditMode::Document ? FlowVisibility::Design : FlowVisibility::Display;
+}
+
+/**
+ * 内容控件的记录。种类不是控件时返回空指针 —— 调用方都在判过种类之后才取。
+ */
+const ControlSpec* controlOf(const Node& n) {
+    return n.kind == NodeKind::ContentControl ? std::get_if<ControlSpec>(&n.payload) : nullptr;
 }
 
 /**
@@ -28,58 +33,57 @@ bool strictlyInside(const FlowIndex& idx, NodeId id, FlowPos pos) {
 }
 
 /**
- * 收集严格包住 pos 的全部内容控件，从外到内。
- *
- * 一路按"哪个孩子严格包含 pos"下降，每遇到一个内容控件就记下再继续往里找：嵌套控件要全部
- * 收齐，可编辑集合是它们的交集。遇到文本或原子就停（它们没有孩子）。
+ * 收集严格包住 pos 的全部内容控件，从外到内。嵌套控件要全部收齐，可编辑集合是它们的交集。
  */
-void collectControlsAt(const NodeTree& tree, const FlowIndex& idx, FlowPos pos,
+void collectControlsAt(const Doc& doc, const FlowIndex& idx, FlowPos pos,
                        std::vector<const Node*>* out) {
-    NodeId cur = tree.rootId();
-    while (true) {
-        const Node* n = tree.find(cur);
+    NodeId cur = doc.root ? doc.root->id : kInvalidNodeId;
+    while (cur != kInvalidNodeId) {
+        const Node* n = findNode(doc, cur);
         if (n == nullptr || !isContainer(n->kind)) return;
-        const Node* next = nullptr;
-        for (const Node* c : n->children) {
+        NodeId next = kInvalidNodeId;
+        for (const Ref& c : n->children) {
             if (strictlyInside(idx, c->id, pos)) {
-                next = c;
+                next = c->id;
                 break;
             }
         }
-        if (next == nullptr) return;
-        if (next->kind == NodeKind::ContentControl) out->push_back(next);
-        cur = next->id;
+        if (next == kInvalidNodeId) return;
+        const Node* nc = findNode(doc, next);
+        if (nc == nullptr) return;
+        if (nc->kind == NodeKind::ContentControl) out->push_back(nc);
+        cur = next;
     }
 }
 
 /**
- * 按前序收集树里的全部内容控件。
+ * 按前序收集文档里的全部内容控件。
  */
-void collectAllControls(const NodeTree& tree, NodeId id, std::vector<const Node*>* out) {
-    const Node* n = tree.find(id);
-    if (n == nullptr) return;
-    if (n->kind == NodeKind::ContentControl) out->push_back(n);
-    for (const Node* c : n->children) collectAllControls(tree, c->id, out);
+void collectAllControls(const Ref& n, std::vector<const Node*>* out) {
+    if (!n) return;
+    if (n->kind == NodeKind::ContentControl) out->push_back(n.get());
+    for (const Ref& c : n->children) collectAllControls(c, out);
 }
 
 /**
- * 控件在回执里的名字：有 key 用 key，没有就用节点 id，保证能指到具体的那一个。
+ * 控件在回执里的名字：有 key 用 key，没有就用节点号，保证能指到具体的那一个。
  */
 std::string controlName(const Node& n) {
-    if (!n.control.key.empty()) return "key=" + n.control.key;
+    const ControlSpec* spec = controlOf(n);
+    if (spec != nullptr && !spec->key.empty()) return "key=" + spec->key;
     return "id=" + std::to_string(n.id);
 }
 
 /**
- * 已经知道模式是表单、已经建好索引时，位置是否可编辑。三个公开入口共用它，
- * 免得每个都重建一次索引、也免得三处口径各写一遍。
+ * 已经知道模式是表单、已经建好索引时，位置是否可编辑。三个公开入口共用它。
  */
-EditCheck editableAt(const NodeTree& tree, const FlowIndex& idx, FlowPos pos) {
+EditCheck editableAt(const Doc& doc, const FlowIndex& idx, FlowPos pos) {
     std::vector<const Node*> chain;
-    collectControlsAt(tree, idx, pos, &chain);
+    collectControlsAt(doc, idx, pos, &chain);
     if (chain.empty()) return EditCheck{false, "落点不在任何可编辑控件内"};
     for (const Node* c : chain) {
-        if (c->control.readonly) {
+        const ControlSpec* spec = controlOf(*c);
+        if (spec != nullptr && spec->readonly) {
             return EditCheck{false, "落点在只读控件（" + controlName(*c) + "）内"};
         }
     }
@@ -88,40 +92,41 @@ EditCheck editableAt(const NodeTree& tree, const FlowIndex& idx, FlowPos pos) {
 
 }  // namespace
 
-EditCheck canEditAt(const NodeTree& tree, EditMode mode, FlowPos pos) {
+EditCheck canEditAt(const Doc& doc, EditMode mode, FlowPos pos) {
     if (mode == EditMode::Document) return EditCheck{true, ""};
     if (mode == EditMode::ReadOnly) return EditCheck{false, "只读模式：不接受编辑"};
+    if (!doc.root) return EditCheck{false, "文档为空"};
 
-    const FlowIndex idx(tree, visibilityOf(mode));
+    const FlowIndex idx(doc, visibilityOf(mode));
     if (pos < 0 || pos > idx.size()) return EditCheck{false, "位置越界"};
-    return editableAt(tree, idx, pos);
+    return editableAt(doc, idx, pos);
 }
 
-EditCheck canEditRange(const NodeTree& tree, EditMode mode, Range range) {
+EditCheck canEditRange(const Doc& doc, EditMode mode, Range range) {
     if (mode == EditMode::Document) return EditCheck{true, ""};
     if (mode == EditMode::ReadOnly) return EditCheck{false, "只读模式：不接受编辑"};
-    if (range.empty()) return canEditAt(tree, mode, range.anchor);
+    if (range.empty()) return canEditAt(doc, mode, range.anchor);
+    if (!doc.root) return EditCheck{false, "文档为空"};
 
-    const FlowIndex idx(tree, visibilityOf(mode));
+    const FlowIndex idx(doc, visibilityOf(mode));
     const FlowPos b = range.begin();
     const FlowPos e = range.end();
     if (b < 0 || e > idx.size()) return EditCheck{false, "位置越界"};
 
-    // 两端都要落在集合内。终点用 e（区间覆盖的最后一个位置之后那一位）：删除的右端点就落在
-    // 那里，它若在集合外，说明该编辑要越出控件。
-    const EditCheck at_begin = editableAt(tree, idx, b);
+    const EditCheck at_begin = editableAt(doc, idx, b);
     if (!at_begin.allowed) return at_begin;
-    const EditCheck at_end = editableAt(tree, idx, e);
+    const EditCheck at_end = editableAt(doc, idx, e);
     if (!at_end.allowed) return at_end;
 
     // 区间内部不能整块包住一个只读控件。只查两端漏掉"跨过只读控件"，而它恰好能删掉只读控件
     // 的全部内容（含它的一对边界），把 readonly 绕开。
     std::vector<const Node*> all;
-    collectAllControls(tree, tree.rootId(), &all);
+    collectAllControls(doc.root, &all);
     int f = 0;
     int end = 0;
     for (const Node* c : all) {
-        if (!c->control.readonly) continue;
+        const ControlSpec* spec = controlOf(*c);
+        if (spec == nullptr || !spec->readonly) continue;
         if (!idx.intervalOf(c->id, &f, &end)) continue;  // 不在流里（隐藏），本就删不到
         if (f >= b && end <= e) {
             return EditCheck{false, "区间整块包住只读控件（" + controlName(*c) + "）"};
@@ -130,10 +135,11 @@ EditCheck canEditRange(const NodeTree& tree, EditMode mode, Range range) {
     return EditCheck{true, ""};
 }
 
-FlowPos stepEditable(const NodeTree& tree, EditMode mode, FlowPos from, int dir) {
+FlowPos stepEditable(const Doc& doc, EditMode mode, FlowPos from, int dir) {
     if (dir == 0) return from;
     const int step = dir > 0 ? 1 : -1;
-    const FlowIndex idx(tree, visibilityOf(mode));
+    if (!doc.root) return from;
+    const FlowIndex idx(doc, visibilityOf(mode));
 
     if (mode != EditMode::Form) {
         const FlowPos t = from + step;
@@ -143,18 +149,19 @@ FlowPos stepEditable(const NodeTree& tree, EditMode mode, FlowPos from, int dir)
     }
 
     for (FlowPos q = from + step; q >= 0 && q <= idx.size(); q += step) {
-        if (editableAt(tree, idx, q).allowed) return q;
+        if (editableAt(doc, idx, q).allowed) return q;
     }
     return from;
 }
 
-TabStop tabFrom(const NodeTree& tree, EditMode mode, FlowPos from, bool backward) {
+TabStop tabFrom(const Doc& doc, EditMode mode, FlowPos from, bool backward) {
     // 文档模式与只读模式都不消费：前者要把 Tab 当制表符，后者要放行给宿主。
     if (mode != EditMode::Form) return TabStop{false, from, kInvalidNodeId};
+    if (!doc.root) return TabStop{false, from, kInvalidNodeId};
 
-    const FlowIndex idx(tree, visibilityOf(mode));
+    const FlowIndex idx(doc, visibilityOf(mode));
     std::vector<const Node*> all;
-    collectAllControls(tree, tree.rootId(), &all);
+    collectAllControls(doc.root, &all);
 
     FlowPos best = -1;
     NodeId best_owner = kInvalidNodeId;
@@ -163,7 +170,7 @@ TabStop tabFrom(const NodeTree& tree, EditMode mode, FlowPos from, bool backward
         if (start < 0) continue;  // 隐藏，不在流里
         // 可编辑控件的判据就是"内容起点在可编辑集合内"：只读控件、以及只读控件里的可编辑
         // 控件，都在这里被同一个谓词挡掉，不必另写一套嵌套判定。
-        if (!editableAt(tree, idx, start).allowed) continue;
+        if (!editableAt(doc, idx, start).allowed) continue;
         int e = 0;
         if (!idx.intervalOf(c->id, nullptr, &e)) continue;
         // 前进取"内容起点在当前位之后"的；后退取"整个控件都在当前位之前"的。后者排除了光标
@@ -179,36 +186,37 @@ TabStop tabFrom(const NodeTree& tree, EditMode mode, FlowPos from, bool backward
     return TabStop{true, best, best_owner};
 }
 
-EditCheck canDoStructureOp(const NodeTree& tree, EditMode mode, NodeId id) {
+EditCheck canDoStructureOp(const Doc& doc, EditMode mode, NodeId id) {
     if (mode == EditMode::Document) return EditCheck{true, ""};
     if (mode == EditMode::ReadOnly) return EditCheck{false, "只读模式：不接受结构操作"};
 
-    const Node* n = tree.find(id);
+    const Node* n = findNode(doc, id);
     if (n == nullptr) return EditCheck{false, "节点不存在"};
     if (n->kind != NodeKind::ContentControl) {
         return EditCheck{false, std::string("结构操作只对控件开放：") + nodeKindName(n->kind)};
     }
-    if (n->control.structureLock) {
+    const ControlSpec* spec = controlOf(*n);
+    if (spec != nullptr && spec->structureLock) {
         return EditCheck{false, "控件结构被锁住（" + controlName(*n) + "）"};
     }
     return EditCheck{true, ""};
 }
 
-EditCheck canEditStep(const NodeTree& tree, EditMode mode, const Step& step) {
+EditCheck canEditStep(const Doc& doc, EditMode mode, const Step& step) {
     if (mode == EditMode::Document) return EditCheck{true, ""};
     if (mode == EditMode::ReadOnly) return EditCheck{false, "只读模式：不接受编辑"};
 
     // 内容级步骤：落在哪个区间就按可编辑集合判。
-    if (const auto* s = std::get_if<InsertText>(&step)) return canEditAt(tree, mode, s->at);
+    if (const auto* s = std::get_if<InsertText>(&step)) return canEditAt(doc, mode, s->at);
     if (const auto* s = std::get_if<InsertFragment>(&step)) {
-        return canEditRange(tree, mode, Range{s->at, s->at + s->content.span()});
+        return canEditRange(doc, mode, Range{s->at, s->at + s->content.span()});
     }
     if (const auto* s = std::get_if<DeleteRange>(&step)) {
-        return canEditRange(tree, mode, Range{s->begin, s->end});
+        return canEditRange(doc, mode, Range{s->begin, s->end});
     }
-    if (const auto* s = std::get_if<InsertParaMark>(&step)) return canEditAt(tree, mode, s->at);
+    if (const auto* s = std::get_if<InsertParaMark>(&step)) return canEditAt(doc, mode, s->at);
     if (const auto* s = std::get_if<RemoveParaMark>(&step)) {
-        return canEditRange(tree, mode, Range{s->at, s->at + 1});
+        return canEditRange(doc, mode, Range{s->at, s->at + 1});
     }
 
     // 节点级步骤：表单模式下只允许对声明可删的控件做，其余元素属于编辑态的内容。
@@ -223,26 +231,25 @@ EditCheck canEditStep(const NodeTree& tree, EditMode mode, const Step& step) {
         return EditCheck{true, ""};
     }
     if (const auto* s = std::get_if<RemoveNode>(&step)) {
-        const Node* c = tree.find(s->at.container);
+        const Node* c = findNode(doc, s->at.container);
         if (c == nullptr || !isContainer(c->kind))
             return EditCheck{false, "删除节点：目标不是容器"};
         if (s->at.offset < 0 || s->at.offset >= static_cast<int>(c->children.size())) {
             return EditCheck{false, "删除节点：槽位没有孩子"};
         }
-        return canDoStructureOp(tree, mode, c->children[static_cast<size_t>(s->at.offset)]->id);
+        return canDoStructureOp(doc, mode, c->children[static_cast<size_t>(s->at.offset)]->id);
     }
-    // 拆壳（UnwrapNode）也是"把这个节点从结构里拿掉"，与 RemoveNode 同一个门：
-    //   它少掉的正是节点自己那两枚边界，内容与身份都还在。
+    // 拆壳（UnwrapNode）也是"把这个节点从结构里拿掉"，与 RemoveNode 同一个门。
     if (const auto* s = std::get_if<UnwrapNode>(&step)) {
-        const Node* c = tree.find(s->at.container);
-        if (c == nullptr || !isContainer(c->kind)) return EditCheck{false, "拆开节点：目标不是容器"};
+        const Node* c = findNode(doc, s->at.container);
+        if (c == nullptr || !isContainer(c->kind))
+            return EditCheck{false, "拆开节点：目标不是容器"};
         if (s->at.offset < 0 || s->at.offset >= static_cast<int>(c->children.size())) {
             return EditCheck{false, "拆开节点：槽位没有孩子"};
         }
-        return canDoStructureOp(tree, mode, c->children[static_cast<size_t>(s->at.offset)]->id);
+        return canDoStructureOp(doc, mode, c->children[static_cast<size_t>(s->at.offset)]->id);
     }
-    // 包一层（WrapNode）是"新造一个容器"，与 InsertNode 同一个门 —— 门挂在被包裹出来的
-    //   那个节点上（结构锁默认锁住，于是表单模式默认拒绝）。
+    // 包一层（WrapNode）是"新造一个容器"，与 InsertNode 同一个门。
     if (const auto* s = std::get_if<WrapNode>(&step)) {
         if (s->node.kind != NodeKind::ContentControl) {
             return EditCheck{false, std::string("表单模式只允许包裹控件，不接受：") +
@@ -257,7 +264,7 @@ EditCheck canEditStep(const NodeTree& tree, EditMode mode, const Step& step) {
     // 改属性是"运行时状态与策略"，由宿主回填与业务逻辑发起（第七节），不受表单模式的落点判定
     // 限制 —— 只读模式在上面已经挡住了。这里只保证目标确实是个控件。
     if (const auto* s = std::get_if<SetControlProp>(&step)) {
-        const Node* n = tree.find(s->id);
+        const Node* n = findNode(doc, s->id);
         if (n == nullptr) return EditCheck{false, "改属性：目标不存在"};
         if (n->kind != NodeKind::ContentControl) {
             return EditCheck{false,
@@ -266,7 +273,7 @@ EditCheck canEditStep(const NodeTree& tree, EditMode mode, const Step& step) {
         return EditCheck{true, ""};
     }
     if (const auto* s = std::get_if<SetControlValue>(&step)) {
-        const Node* n = tree.find(s->id);
+        const Node* n = findNode(doc, s->id);
         if (n == nullptr) return EditCheck{false, "改值：目标不存在"};
         if (n->kind != NodeKind::ContentControl) {
             return EditCheck{false,
@@ -274,11 +281,9 @@ EditCheck canEditStep(const NodeTree& tree, EditMode mode, const Step& step) {
         }
         return EditCheck{true, ""};
     }
-    // 改跨度是结构操作：它改的是表格的形状，不是某个格子里的内容。它的开关按第九节的说法
-    // 挂在被操作的元素上（表格 / 行 / 单元格），而那个开关要等表格自己成为控件才有地方挂，
-    // 所以现在按"默认锁住"处理：表单模式拒绝，与控件结构的默认一致。
+    // 改跨度是结构操作：它改的是表格的形状，不是某个格子里的内容。
     if (const auto* s = std::get_if<SetTableCellSpan>(&step)) {
-        const Node* n = tree.find(s->id);
+        const Node* n = findNode(doc, s->id);
         if (n == nullptr || n->kind != NodeKind::TableCell) {
             return EditCheck{false, "改跨度：目标不是单元格"};
         }
@@ -291,4 +296,4 @@ EditCheck canEditStep(const NodeTree& tree, EditMode mode, const Step& step) {
     return EditCheck{false, "未知步骤"};
 }
 
-}  // namespace heditor
+}  // namespace heditor::rev

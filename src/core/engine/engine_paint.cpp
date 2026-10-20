@@ -103,18 +103,15 @@ void EditorEngine::lineBand(int k, float* lo, float* hi) const {
            sameRow(ls[static_cast<size_t>(last + 1)], lb)) {
         ++last;
     }
-    const bool first_on_page =
-        (first == 0) || (ls[static_cast<size_t>(first - 1)].page != lb.page);
-    const bool last_on_page =
-        (last + 1 >= static_cast<int>(ls.size())) ||
-        (ls[static_cast<size_t>(last + 1)].page != lb.page);
-    *lo = first_on_page
-              ? 0.0f
-              : (ls[static_cast<size_t>(first - 1)].block_hi_pt + lb.block_lo_pt) * 0.5f;
-    *hi = last_on_page
-              ? static_cast<float>(pagePxHeight()) / cfg_.zoom
-              : (ls[static_cast<size_t>(last)].block_hi_pt +
-                 ls[static_cast<size_t>(last + 1)].block_lo_pt) * 0.5f;
+    const bool first_on_page = (first == 0) || (ls[static_cast<size_t>(first - 1)].page != lb.page);
+    const bool last_on_page = (last + 1 >= static_cast<int>(ls.size())) ||
+                              (ls[static_cast<size_t>(last + 1)].page != lb.page);
+    *lo = first_on_page ? 0.0f
+                        : (ls[static_cast<size_t>(first - 1)].block_hi_pt + lb.block_lo_pt) * 0.5f;
+    *hi = last_on_page ? static_cast<float>(pagePxHeight()) / cfg_.zoom
+                       : (ls[static_cast<size_t>(last)].block_hi_pt +
+                          ls[static_cast<size_t>(last + 1)].block_lo_pt) *
+                             0.5f;
 }
 
 void EditorEngine::snapshotLineGeometry() {
@@ -307,13 +304,11 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
             const int pg_top = static_cast<int>(std::floor(off_y));
             const int pg_bot = static_cast<int>(std::ceil(off_y + static_cast<float>(page_px_h)));
             if (pg_top > bg_top)
-                base_.fillRect(Rect{0.0f, static_cast<float>(bg_top),
-                                    static_cast<float>(page_px_w),
+                base_.fillRect(Rect{0.0f, static_cast<float>(bg_top), static_cast<float>(page_px_w),
                                     static_cast<float>(pg_top - bg_top)},
                                cfg_.background);
             if (bg_bot > pg_bot)
-                base_.fillRect(Rect{0.0f, static_cast<float>(pg_bot),
-                                    static_cast<float>(page_px_w),
+                base_.fillRect(Rect{0.0f, static_cast<float>(pg_bot), static_cast<float>(page_px_w),
                                     static_cast<float>(bg_bot - pg_bot)},
                                cfg_.background);
             base_.fillRect(
@@ -374,8 +369,7 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
                         base_.fillRect(Rect{fxl, fyt, 1.0f, fh}, cfg_.table_line);
                         base_.fillRect(Rect{static_cast<float>(xr), fyt, 1.0f, fh},
                                        cfg_.table_line);
-                        if (!pr.cont_top)
-                            base_.fillRect(Rect{fxl, fyt, fw, 1.0f}, cfg_.table_line);
+                        if (!pr.cont_top) base_.fillRect(Rect{fxl, fyt, fw, 1.0f}, cfg_.table_line);
                         const bool last_row = (pr.row == pt.rows - 1);
                         if (!pr.cont_bottom && last_row)
                             base_.fillRect(Rect{fxl, static_cast<float>(yb), fw, 1.0f},
@@ -447,8 +441,8 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
             for (int li = lb_lo; li <= lb_hi && li < n_lines; ++li) {
                 if (li < 0) continue;
                 const LineBox& lb = layout_.lines[static_cast<size_t>(li)];
-                if (band && (lb.block_hi_pt < *band_lo_pt - 1.0f ||
-                             lb.block_lo_pt > *band_hi_pt + 1.0f)) {
+                if (band &&
+                    (lb.block_hi_pt < *band_lo_pt - 1.0f || lb.block_lo_pt > *band_hi_pt + 1.0f)) {
                     continue;
                 }
                 for (size_t ci = 0; ci < lb.clusters.size(); ++ci) {
@@ -594,8 +588,8 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
         for (int i = 0; i < count; ++i) {
             const int page = first_page + i;
             const int slot = slotOfPage(page);
-            const bool stale =
-                slot >= static_cast<int>(slot_page_.size()) || slot_page_[static_cast<size_t>(slot)] != page;
+            const bool stale = slot >= static_cast<int>(slot_page_.size()) ||
+                               slot_page_[static_cast<size_t>(slot)] != page;
             if (stale) {
                 ++dirty;
                 paintPageIntoBase(page);
@@ -984,10 +978,16 @@ void EditorEngine::drawAtomBox(const LineBox& lb, const LineCluster& c, float a1
     if (hbf == nullptr) return;
     // 框里写什么：图片写资源标识，公式写表达式；两者都空就写一个说明性的词 ——
     //   空框看不出是哪一种原子，而"看不出"正是这一层要避免的。
-    const Node* n = tree_.find(static_cast<NodeId>(c.owner_control));
+    const rev::Node* n = rev::findNode(document(), static_cast<NodeId>(c.owner_control));
     std::string label;
     if (n != nullptr) {
-        label = (c.atom == InlineAtom::Formula) ? n->formula.expr : n->image.resource_id;
+        if (c.atom == InlineAtom::Formula) {
+            const auto* f = std::get_if<FormulaSpec>(&n->payload);
+            if (f != nullptr) label = f->expr;
+        } else {
+            const auto* im = std::get_if<ImageSpec>(&n->payload);
+            if (im != nullptr) label = im->resource_id;
+        }
     }
     if (label.empty()) label = (c.atom == InlineAtom::Formula) ? "公式" : "图片";
 

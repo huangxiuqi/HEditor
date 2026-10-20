@@ -154,7 +154,6 @@ add_library(heditor_core STATIC
   src/core/doc/document.cpp
   src/core/doc/control.cpp
   src/core/doc/edit_mode.cpp
-  src/core/doc/edit_capability.cpp
   src/core/doc/node.cpp
   src/core/doc/flow.cpp
   src/core/doc/para.cpp
@@ -189,6 +188,9 @@ add_library(heditor_core STATIC
   src/core/rev/serialize.cpp
   src/core/rev/from_tree.cpp
   src/core/rev/session.cpp
+  src/core/rev/flow.cpp
+  src/core/rev/steps.cpp
+  src/core/rev/capability.cpp
   src/core/text/font.cpp
   src/core/text/font_source.cpp
   src/core/text/shaper.cpp
@@ -404,7 +406,7 @@ else()
 
     # 不可变修订层：路径复制、结构共享、内容哈希（重构方案 D1 的第一层）。
     add_executable(heditor_rev_tests tests/rev_test.cpp)
-    target_link_libraries(heditor_rev_tests PRIVATE heditor_core)
+    target_link_libraries(heditor_rev_tests PRIVATE heditor_core heditor_demo)
     heditor_target_flags(heditor_rev_tests)
     add_test(NAME rev_layer COMMAND heditor_rev_tests)
 

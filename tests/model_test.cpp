@@ -29,7 +29,6 @@
 #include "core/doc/compile.h"
 #include "core/doc/control_api.h"
 #include "core/doc/control_index.h"
-#include "core/doc/edit_capability.h"
 #include "core/doc/field_spec.h"
 #include "core/doc/flow.h"
 #include "core/doc/fragment.h"
@@ -47,6 +46,8 @@
 #include "core/doc/table.h"
 #include "core/doc/transaction.h"
 #include "core/doc/validation.h"
+#include "core/rev/capability.h"
+#include "core/rev/rev.h"
 #include "core/utils/units.h"
 #include "demo/demo_documents.h"
 
@@ -1145,9 +1146,9 @@ void checkCompileControlObjects() {
                        o[2].kind == InlineObjectKind::ControlEnd && o[2].cp == 1,
                    "(h) 控件里的原子进对象表（两枚边界 + 原子，锚点在同一条码点轴上）—— 实际 " +
                        objText(o));
-        expectTrue(o.size() == 3 && o[1].atom == InlineAtom::Image &&
-                       o[1].owner == static_cast<int>(img),
-                   "(h) 原子记下自己的种类与节点 id（绘制靠它回树里取框里写什么）");
+        expectTrue(
+            o.size() == 3 && o[1].atom == InlineAtom::Image && o[1].owner == static_cast<int>(img),
+            "(h) 原子记下自己的种类与节点 id（绘制靠它回树里取框里写什么）");
         expectTrue(o.size() == 3 && o[1].w_pt > 71.9f && o[1].w_pt < 72.1f && o[1].h_pt > 35.9f &&
                        o[1].h_pt < 36.1f,
                    "(h) 盒宽高按原始像素与 DPI 折算（96x48 px / 96 dpi = 72x36 磅）");
@@ -2522,26 +2523,40 @@ void checkBoundaryPositions() {
 /**
  * 1.4：可编辑集合。表单模式下它是交集 —— 包住这个位置的每一层内容控件都允许，位置才可编辑。
  */
+/**
+ * 策略层只认修订：这里把模型树搬一次。搬不动就直接失败 —— 装载本身是一条独立的判据。
+ */
+rev::Doc toDoc(const NodeTree& tree, const char* label) {
+    rev::Doc doc;
+    std::string why;
+    if (!rev::fromTree(tree, &doc, &why)) {
+        std::printf("      策略用例 %s 导出失败：%s\n", label, why.c_str());
+        return rev::Doc{};
+    }
+    return doc;
+}
+
 void checkEditableSet() {
     const NodeTree tree = makeFormTree();
+    const rev::Doc d = toDoc(tree, "checkEditableSet");
     const FlowIndex idx(tree, FlowVisibility::Design);
     const int last = idx.size();
 
     bool all = true;
     for (int f = 0; f <= last; ++f) {
-        if (!canEditAt(tree, EditMode::Document, f).allowed) all = false;
+        if (!rev::canEditAt(d, EditMode::Document, f).allowed) all = false;
     }
     expectTrue(all, "1.4 / 可编辑集合：文档模式全部位置可编辑");
 
     bool none = true;
     for (int f = 0; f <= last; ++f) {
-        if (canEditAt(tree, EditMode::ReadOnly, f).allowed) none = false;
+        if (rev::canEditAt(d, EditMode::ReadOnly, f).allowed) none = false;
     }
     expectTrue(none, "1.4 / 可编辑集合：只读模式全部位置不可编辑");
 
     std::string got;
     for (int f = 0; f <= last; ++f) {
-        if (canEditAt(tree, EditMode::Form, f).allowed) got += std::to_string(f) + " ";
+        if (rev::canEditAt(d, EditMode::Form, f).allowed) got += std::to_string(f) + " ";
     }
     expectTrue(got == "4 5 6 ",
                "1.4 / 可编辑集合：表单模式只有可编辑控件的内容可编辑（实得 " + got + "）");
@@ -2553,14 +2568,15 @@ void checkEditableSet() {
     expectTrue(tree.find(name)->control.readonly, "1.4 / 可编辑集合：只读控件自身标着只读（对照）");
     expectTrue(!tree.find(inner)->control.readonly,
                "1.4 / 可编辑集合（交集）：内层控件自身是可编辑的（只看它会判成可编辑）");
-    expectTrue(!canEditAt(tree, EditMode::Form, 18).allowed &&
-                   !canEditAt(tree, EditMode::Form, 19).allowed,
+    expectTrue(!rev::canEditAt(d, EditMode::Form, 18).allowed &&
+                   !rev::canEditAt(d, EditMode::Form, 19).allowed,
                "1.4 / 可编辑集合（交集）：只读外层里的可编辑控件位置仍不可编辑");
-    expectTrue(!canEditAt(tree, EditMode::Form, 2).allowed,
+    expectTrue(!rev::canEditAt(d, EditMode::Form, 2).allowed,
                "1.4 / 可编辑集合：控件之外的静态文字不可编辑");
-    expectTrue(!canEditAt(tree, EditMode::Form, 3).allowed,
+    expectTrue(!rev::canEditAt(d, EditMode::Form, 3).allowed,
                "1.4 / 可编辑集合：控件起始边界（控件之前）不可编辑");
-    expectTrue(!canEditAt(tree, EditMode::Form, 7).allowed, "1.4 / 可编辑集合：段落标记处不可编辑");
+    expectTrue(!rev::canEditAt(d, EditMode::Form, 7).allowed,
+               "1.4 / 可编辑集合：段落标记处不可编辑");
 
     // 隐藏的控件在表单模式下整棵摘除，位置根本不在流里，也就谈不上可编辑。
     {
@@ -2569,11 +2585,12 @@ void checkEditableSet() {
         const NodeId chief = t.find(s)->children[1]->id;
         t.find(chief)->hidden = true;
         const FlowIndex disp(t, FlowVisibility::Display);
+        const rev::Doc t_doc = toDoc(t, "checkEditableSet/hidden");
         expectTrue(disp.flowAt(Pos{chief, 0}) < 0,
                    "1.4 / 可编辑集合：隐藏控件在表单模式下滑除，位置不可寻址");
         bool any = false;
         for (int f = 0; f <= disp.size(); ++f) {
-            if (canEditAt(t, EditMode::Form, f).allowed) any = true;
+            if (rev::canEditAt(t_doc, EditMode::Form, f).allowed) any = true;
         }
         expectTrue(!any, "1.4 / 可编辑集合：隐藏控件摘除后，表单模式无任何可编辑位置");
     }
@@ -2585,22 +2602,23 @@ void checkEditableSet() {
  */
 void checkFormNavigation() {
     const NodeTree tree = makeFormTree();
+    const rev::Doc d = toDoc(tree, "checkFormNavigation");
 
-    expectTrue(stepEditable(tree, EditMode::Form, 2, +1) == 4,
+    expectTrue(rev::stepEditable(d, EditMode::Form, 2, +1) == 4,
                "1.4 / 方向键：控件之外往右跳到最近的可编辑位置（跳过控件起始边界）");
-    expectTrue(stepEditable(tree, EditMode::Form, 4, +1) == 5 &&
-                   stepEditable(tree, EditMode::Form, 5, +1) == 6,
+    expectTrue(rev::stepEditable(d, EditMode::Form, 4, +1) == 5 &&
+                   rev::stepEditable(d, EditMode::Form, 5, +1) == 6,
                "1.4 / 方向键：控件内容里逐位前进");
-    expectTrue(stepEditable(tree, EditMode::Form, 6, +1) == 6,
+    expectTrue(rev::stepEditable(d, EditMode::Form, 6, +1) == 6,
                "1.4 / 方向键：控件末尾往右停在原地，不跳出可编辑集合");
-    expectTrue(stepEditable(tree, EditMode::Form, 6, -1) == 5, "1.4 / 方向键：反向同理");
-    expectTrue(stepEditable(tree, EditMode::Form, 20, -1) == 6,
+    expectTrue(rev::stepEditable(d, EditMode::Form, 6, -1) == 5, "1.4 / 方向键：反向同理");
+    expectTrue(rev::stepEditable(d, EditMode::Form, 20, -1) == 6,
                "1.4 / 方向键：从只读区往左跳回最近的可编辑位置");
 
     std::vector<int> reached{4};
     FlowPos cur = 4;
     for (int i = 0; i < 8; ++i) {
-        const FlowPos next = stepEditable(tree, EditMode::Form, cur, +1);
+        const FlowPos next = rev::stepEditable(d, EditMode::Form, cur, +1);
         if (next == cur) break;
         cur = next;
         reached.push_back(cur);
@@ -2608,8 +2626,8 @@ void checkFormNavigation() {
     expectTrue((reached == std::vector<int>{4, 5, 6}),
                "1.4 / 方向键：可编辑集合的每个位置都能到达");
 
-    expectTrue(stepEditable(tree, EditMode::Document, 2, +1) == 3 &&
-                   stepEditable(tree, EditMode::ReadOnly, 2, +1) == 3,
+    expectTrue(rev::stepEditable(d, EditMode::Document, 2, +1) == 3 &&
+                   rev::stepEditable(d, EditMode::ReadOnly, 2, +1) == 3,
                "1.4 / 方向键：文档与只读模式是相邻一步（落点不受限）");
 }
 
@@ -2618,38 +2636,39 @@ void checkFormNavigation() {
  */
 void checkTabStops() {
     const NodeTree tree = makeFormTabTree();
+    const rev::Doc d = toDoc(tree, "checkTabStops");
 
-    expectTrue(tabFrom(tree, EditMode::Form, 0, false).handled &&
-                   tabFrom(tree, EditMode::Form, 0, false).target == 2,
+    expectTrue(rev::tabFrom(d, EditMode::Form, 0, false).handled &&
+                   rev::tabFrom(d, EditMode::Form, 0, false).target == 2,
                "1.4 / Tab：表单模式落到第一个可编辑控件的起点");
-    expectTrue(tabFrom(tree, EditMode::Form, 3, false).handled &&
-                   tabFrom(tree, EditMode::Form, 3, false).target == 12,
+    expectTrue(rev::tabFrom(d, EditMode::Form, 3, false).handled &&
+                   rev::tabFrom(d, EditMode::Form, 3, false).target == 12,
                "1.4 / Tab：跳过中间的只读控件，落到下一个可编辑控件");
-    expectTrue(!tabFrom(tree, EditMode::Form, 12, false).handled,
+    expectTrue(!rev::tabFrom(d, EditMode::Form, 12, false).handled,
                "1.4 / Tab：末个可编辑控件之后放行给宿主");
-    expectTrue(tabFrom(tree, EditMode::Form, 13, true).handled &&
-                   tabFrom(tree, EditMode::Form, 13, true).target == 2,
+    expectTrue(rev::tabFrom(d, EditMode::Form, 13, true).handled &&
+                   rev::tabFrom(d, EditMode::Form, 13, true).target == 2,
                "1.4 / Tab：Shift+Tab 退回上一个可编辑控件");
-    expectTrue(!tabFrom(tree, EditMode::Form, 2, true).handled,
+    expectTrue(!rev::tabFrom(d, EditMode::Form, 2, true).handled,
                "1.4 / Tab：没有上一个可编辑控件时放行");
-    expectTrue(!tabFrom(tree, EditMode::Document, 0, false).handled,
+    expectTrue(!rev::tabFrom(d, EditMode::Document, 0, false).handled,
                "1.4 / Tab：文档模式不消费 —— Tab 在那里是制表符");
-    expectTrue(!tabFrom(tree, EditMode::ReadOnly, 0, false).handled,
+    expectTrue(!rev::tabFrom(d, EditMode::ReadOnly, 0, false).handled,
                "1.4 / Tab：只读模式放行，让焦点落到编辑器之外");
 
     // 目标必须带上它所属的控件：目标落在控件的内容起点上，而共享边界上"前一个控件的末尾"
     //   与"这个控件的开头"是同一个位置 —— 只给位置，调用方按"最内层"重推会推成前一个控件
     //   （只读时更糟：Tab 跳过去之后一个字都打不进去）。
     {
-        const TabStop first = tabFrom(tree, EditMode::Form, 0, false);
-        const TabStop second = tabFrom(tree, EditMode::Form, 3, false);
+        const rev::TabStop first = rev::tabFrom(d, EditMode::Form, 0, false);
+        const rev::TabStop second = rev::tabFrom(d, EditMode::Form, 3, false);
         const Node* c1 = tree.find(first.owner);
         const Node* c2 = tree.find(second.owner);
         expectTrue(c1 != nullptr && c1->kind == NodeKind::ContentControl && c2 != nullptr &&
                        c2->kind == NodeKind::ContentControl && first.owner != second.owner,
                    "1.4 / Tab：目标带上归属（两次落点分属两个不同的内容控件）");
-        expectTrue(!tabFrom(tree, EditMode::Form, 12, false).handled &&
-                       tabFrom(tree, EditMode::Form, 12, false).owner == kInvalidNodeId,
+        expectTrue(!rev::tabFrom(d, EditMode::Form, 12, false).handled &&
+                       rev::tabFrom(d, EditMode::Form, 12, false).owner == kInvalidNodeId,
                    "1.4 / Tab：放行时不给归属（kInvalidNodeId），不猜一个控件出来");
     }
 }
@@ -2659,40 +2678,42 @@ void checkTabStops() {
  */
 void checkEditRangeGate() {
     const NodeTree tree = makeFormTree();
+    const rev::Doc d = toDoc(tree, "checkEditRangeGate");
 
-    expectTrue(canEditRange(tree, EditMode::Form, Range{4, 6}).allowed,
+    expectTrue(rev::canEditRange(d, EditMode::Form, Range{4, 6}).allowed,
                "1.4 / 编辑区间：整段落在可编辑控件内容里，允许");
 
-    const EditCheck out = canEditRange(tree, EditMode::Form, Range{2, 5});
+    const rev::EditCheck out = rev::canEditRange(d, EditMode::Form, Range{2, 5});
     expectTrue(!out.allowed && !out.reason.empty(),
                "1.4 / 编辑区间：起点在控件之外被拒并给原因（" + out.reason + "）");
 
-    const EditCheck into_readonly = canEditRange(tree, EditMode::Form, Range{5, 11});
+    const rev::EditCheck into_readonly = rev::canEditRange(d, EditMode::Form, Range{5, 11});
     expectTrue(!into_readonly.allowed && into_readonly.reason.find("只读") != std::string::npos,
                "1.4 / 编辑区间：跨进只读控件被拒，原因点名只读（" + into_readonly.reason + "）");
 
-    expectTrue(!canEditRange(tree, EditMode::Form, Range{3, 7}).allowed,
+    expectTrue(!rev::canEditRange(d, EditMode::Form, Range{3, 7}).allowed,
                "1.4 / 编辑区间：整块覆盖控件（含它的一对边界）被拒");
 
-    const EditCheck inner = canEditRange(tree, EditMode::Form, Range{18, 20});
+    const rev::EditCheck inner = rev::canEditRange(d, EditMode::Form, Range{18, 20});
     expectTrue(!inner.allowed && inner.reason.find("只读") != std::string::npos,
                "1.4 / 编辑区间（交集）：只读外层内的可编辑控件区间被拒（" + inner.reason + "）");
 
-    expectTrue(canEditRange(tree, EditMode::Document, Range{2, 20}).allowed,
+    expectTrue(rev::canEditRange(d, EditMode::Document, Range{2, 20}).allowed,
                "1.4 / 编辑区间：文档模式放行");
-    expectTrue(!canEditRange(tree, EditMode::ReadOnly, Range{4, 6}).allowed,
+    expectTrue(!rev::canEditRange(d, EditMode::ReadOnly, Range{4, 6}).allowed,
                "1.4 / 编辑区间：只读模式一律拒绝");
-    expectTrue(canEditRange(tree, EditMode::Form, Range{5, 5}).allowed &&
-                   !canEditRange(tree, EditMode::Form, Range{12, 12}).allowed,
+    expectTrue(rev::canEditRange(d, EditMode::Form, Range{5, 5}).allowed &&
+                   !rev::canEditRange(d, EditMode::Form, Range{12, 12}).allowed,
                "1.4 / 编辑区间：空区间（光标）等同落点判定");
 
     // 区间两端都落在可编辑的外层控件里，但中间整块包住了只读内层 —— 这条闸门堵的是
     // "跨过只读控件就能删掉它的内容"这个绕开只读的口子。
     const NodeTree nested = makeFormNestedTree();
-    const EditCheck wrap = canEditRange(nested, EditMode::Form, Range{3, 6});
+    const rev::Doc nested_doc = toDoc(nested, "checkEditRangeGate/nested");
+    const rev::EditCheck wrap = rev::canEditRange(nested_doc, EditMode::Form, Range{3, 6});
     expectTrue(!wrap.allowed && wrap.reason.find("包住") != std::string::npos,
                "1.4 / 编辑区间：整块包住只读控件被拒（" + wrap.reason + "）");
-    expectTrue(canEditRange(nested, EditMode::Form, Range{2, 3}).allowed,
+    expectTrue(rev::canEditRange(nested_doc, EditMode::Form, Range{2, 3}).allowed,
                "1.4 / 编辑区间：只覆盖只读控件之前的那一段，允许（对照）");
 }
 
@@ -2701,11 +2722,12 @@ void checkEditRangeGate() {
  */
 void checkStructureOps() {
     const NodeTree tree = makeFormTree();
+    const rev::Doc d = toDoc(tree, "checkStructureOps");
     const NodeId sec = tree.firstSectionId();
     const NodeId text = tree.find(sec)->children[0]->id;
     const NodeId chief = tree.find(sec)->children[1]->id;
 
-    const EditCheck locked = canDoStructureOp(tree, EditMode::Form, chief);
+    const rev::EditCheck locked = rev::canDoStructureOp(d, EditMode::Form, chief);
     expectTrue(!locked.allowed && locked.reason.find("锁") != std::string::npos,
                "1.4 / 结构操作：表单模式默认被拒（" + locked.reason + "）");
 
@@ -2713,14 +2735,15 @@ void checkStructureOps() {
     const NodeId sec2 = open.firstSectionId();
     const NodeId chief2 = open.find(sec2)->children[1]->id;
     open.find(chief2)->control.structureLock = false;
-    expectTrue(canDoStructureOp(open, EditMode::Form, chief2).allowed,
+    const rev::Doc open_doc = toDoc(open, "checkStructureOps/open");
+    expectTrue(rev::canDoStructureOp(open_doc, EditMode::Form, chief2).allowed,
                "1.4 / 结构操作：控件声明可删（structureLock = false）后才允许");
 
-    expectTrue(canDoStructureOp(tree, EditMode::Document, chief).allowed,
+    expectTrue(rev::canDoStructureOp(d, EditMode::Document, chief).allowed,
                "1.4 / 结构操作：文档模式放行（作者在设计表单）");
-    expectTrue(!canDoStructureOp(tree, EditMode::ReadOnly, chief).allowed,
+    expectTrue(!rev::canDoStructureOp(d, EditMode::ReadOnly, chief).allowed,
                "1.4 / 结构操作：只读模式一律拒绝");
-    const EditCheck not_ctrl = canDoStructureOp(tree, EditMode::Form, text);
+    const rev::EditCheck not_ctrl = rev::canDoStructureOp(d, EditMode::Form, text);
     expectTrue(!not_ctrl.allowed && not_ctrl.reason.find("控件") != std::string::npos,
                "1.4 / 结构操作：目标不是控件时被拒（" + not_ctrl.reason + "）");
 }
@@ -2944,32 +2967,35 @@ void checkNodeStepRejects() {
  */
 void checkNodeStepGate() {
     NodeTree tree = makeEditTree();
+    const rev::Doc d = toDoc(tree, "checkNodeStepGate");
     const NodeId sec = tree.firstSectionId();
     const NodeBuild b = makeRemoveNode(tree, Pos{sec, 3});  // 控件默认 structureLock = true
 
-    const EditCheck form = canEditStep(tree, EditMode::Form, b.step);
+    const rev::EditCheck form = rev::canEditStep(d, EditMode::Form, b.step);
     expectTrue(!form.allowed && form.reason.find("锁") != std::string::npos,
                "1.2 / 节点级权限：表单模式默认拒绝删除控件（" + form.reason + "）");
-    expectTrue(canEditStep(tree, EditMode::Document, b.step).allowed,
+    expectTrue(rev::canEditStep(d, EditMode::Document, b.step).allowed,
                "1.2 / 节点级权限：文档模式放行");
-    expectTrue(!canEditStep(tree, EditMode::ReadOnly, b.step).allowed,
+    expectTrue(!rev::canEditStep(d, EditMode::ReadOnly, b.step).allowed,
                "1.2 / 节点级权限：只读模式拒绝");
 
     tree.find(tree.find(sec)->children[3]->id)->control.structureLock = false;
-    expectTrue(canEditStep(tree, EditMode::Form, b.step).allowed,
+    // 改的是树，判据读的是修订 —— 改完必须重新搬一次，否则测的是改之前那一份。
+    const rev::Doc unlocked = toDoc(tree, "checkNodeStepGate/unlocked");
+    expectTrue(rev::canEditStep(unlocked, EditMode::Form, b.step).allowed,
                "1.2 / 节点级权限：控件声明可删之后表单模式放行");
 
     NodeSpec img;
     img.kind = NodeKind::Image;
     const NodeBuild ib = makeInsertNode(tree, Pos{sec, 1}, img);
-    const EditCheck bad = canEditStep(tree, EditMode::Form, ib.step);
+    const rev::EditCheck bad = rev::canEditStep(d, EditMode::Form, ib.step);
     expectTrue(!bad.allowed && bad.reason.find("只允许插入控件") != std::string::npos,
                "1.2 / 节点级权限：表单模式不接受插入图片（" + bad.reason + "）");
 
     InsertText it;
     it.at = 3;  // 落在控件之外的文本里
     it.cps = cps({0x41});
-    const EditCheck content = canEditStep(tree, EditMode::Form, Step{it});
+    const rev::EditCheck content = rev::canEditStep(d, EditMode::Form, Step{it});
     expectTrue(!content.allowed && content.reason.find("控件") != std::string::npos,
                "1.2 / 节点级权限：内容级步骤仍按落点判，控件之外被拒（" + content.reason + "）");
 }
@@ -4841,9 +4867,8 @@ void checkTableCompile() {
                    "阶段 5 / 编译：2x2 每格一段，结构表一张");
         if (r.tables.size() == 1) {
             const LayoutTable& lt = r.tables[0];
-            expectTrue(lt.handle == table && lt.rows == 2 && lt.cols == 2 &&
-                           lt.cells.size() == 4 && lt.row_specs.size() == 2 &&
-                           lt.col_widths.size() == 2,
+            expectTrue(lt.handle == table && lt.rows == 2 && lt.cols == 2 && lt.cells.size() == 4 &&
+                           lt.row_specs.size() == 2 && lt.col_widths.size() == 2,
                        "阶段 5 / 编译：行、列、格、行属性、列宽的数量与派生网格一致");
         }
         bool path_ok = (r.blocks.size() == 4);
@@ -4885,9 +4910,9 @@ void checkTableCompile() {
         if (r.tables.size() == 1 && r.tables[0].cells.size() == 2) {
             expectTrue(r.tables[0].cells[0].block_count == 0,
                        "阶段 5 / 编译：空格记 0 个块（不是记成没有这一格）");
-            expectTrue(r.tables[0].cells[1].block_count == 2 &&
-                           r.tables[0].cells[1].first_block == 0,
-                       "阶段 5 / 编译：第二格从第 0 块起、占两块");
+            expectTrue(
+                r.tables[0].cells[1].block_count == 2 && r.tables[0].cells[1].first_block == 0,
+                "阶段 5 / 编译：第二格从第 0 块起、占两块");
         }
     }
     // 合并单元格：跨度不改网格列数，跨两列的格只有一条记录。
@@ -4927,8 +4952,7 @@ void checkTableCompile() {
                            std::abs(lt.width.ratio - 0.5f) < 1e-6f &&
                            lt.align == TableHAlign::Center,
                        "阶段 5 / 编译：表宽百分比与对齐映射过去");
-            expectTrue(lt.col_widths.size() == 2 &&
-                           lt.col_widths[0].kind == WidthSpec::Kind::Abs &&
+            expectTrue(lt.col_widths.size() == 2 && lt.col_widths[0].kind == WidthSpec::Kind::Abs &&
                            std::abs(lt.col_widths[0].pt - 60.0f) < 1e-4f &&
                            lt.col_widths[1].kind == WidthSpec::Kind::Auto,
                        "阶段 5 / 编译：列宽绝对换磅、自动仍是自动");

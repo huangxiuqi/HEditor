@@ -20,7 +20,6 @@
 
 #include "core/doc/control_index.h"
 #include "core/doc/control_spec.h"
-#include "core/doc/edit_capability.h"
 #include "core/doc/node.h"
 #include "core/doc/transaction.h"
 
