@@ -848,12 +848,6 @@ void checkInvariantCounterexamples() {
 }
 
 /**
- * 0.4：把一份 BlockSpec 列表搬进树 —— 每段一个 TextRun 加一个结束标记，段落格式挂在标记上。
- *
- * 这是 0.4 的对照构造：同一份内容用"现有 BlockSpec 路径"与"树"两条路表达，再断言编译结果
- * 与前者逐字段一致。字段逐个搬而不是整体塞进节点，因为段落格式本来就该由样式/控件设置。
- */
-/**
  * 没有样式的样式表。它的文档默认值就是各字段的默认值，所以"三层解析"的结果与"完全没有样式"
  * 一致 —— 0.4 那条"两条路逐字段一致"的判据因此可以在不带样式的前提下继续成立。
  */
@@ -880,6 +874,12 @@ std::string paraKey(const ParaFormatPatch& p) {
     return s;
 }
 
+/**
+ * 0.4：把一份 BlockSpec 列表搬进树 —— 每段一个 TextRun 加一个结束标记，段落格式挂在标记上。
+ *
+ * 这是 0.4 的对照构造：同一份内容用"现有 BlockSpec 路径"与"树"两条路表达，再断言编译结果
+ * 与前者逐字段一致。字段逐个搬而不是整体塞进节点，因为段落格式本来就该由样式/控件设置。
+ */
 NodeTree treeFromBlocks(const std::vector<BlockSpec>& blocks) {
     NodeTree tree;
     const NodeId sec = tree.firstSectionId();
@@ -2521,9 +2521,6 @@ void checkBoundaryPositions() {
 }
 
 /**
- * 1.4：可编辑集合。表单模式下它是交集 —— 包住这个位置的每一层内容控件都允许，位置才可编辑。
- */
-/**
  * 策略层只认修订：这里把模型树搬一次。搬不动就直接失败 —— 装载本身是一条独立的判据。
  */
 rev::Doc toDoc(const NodeTree& tree, const char* label) {
@@ -2536,6 +2533,9 @@ rev::Doc toDoc(const NodeTree& tree, const char* label) {
     return doc;
 }
 
+/**
+ * 1.4：可编辑集合。表单模式下它是交集 —— 包住这个位置的每一层内容控件都允许，位置才可编辑。
+ */
 void checkEditableSet() {
     const NodeTree tree = makeFormTree();
     const rev::Doc d = toDoc(tree, "checkEditableSet");

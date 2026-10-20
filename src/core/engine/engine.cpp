@@ -35,14 +35,6 @@ namespace heditor {
 namespace {
 
 /**
- * 业务类型字符串 → 旧表示的三种控件种类。
- *
- * 两者层次不同：controlType 是开放的（宿主可以注册一种新的），ControlKind 是封闭的三档 ——
- * 只够表达"值怎么校验、怎么显示"这一层，界面上的差别（复选、下拉、日期浮层）要等控件类型
- * 注册表落地。认不出来的类型回落到文本：宁可当一个普通文本框，也不要让一个没登记的类型
- * 变成一个"打不进去"的字段。空串同理（没写类型的控件就是文本框）。
- */
-/**
  * 这棵子树里有没有段落标记。
  *
  * 增量编译要判"这一段的内容区间是不是干净的"：区间里若嵌着段落标记，那些标记本身
@@ -56,6 +48,14 @@ bool subtreeHasParagraphMark(const Node* n) {
     return false;
 }
 
+/**
+ * 业务类型字符串 → 旧表示的三种控件种类。
+ *
+ * 两者层次不同：controlType 是开放的（宿主可以注册一种新的），ControlKind 是封闭的三档 ——
+ * 只够表达"值怎么校验、怎么显示"这一层，界面上的差别（复选、下拉、日期浮层）要等控件类型
+ * 注册表落地。认不出来的类型回落到文本：宁可当一个普通文本框，也不要让一个没登记的类型
+ * 变成一个"打不进去"的字段。空串同理（没写类型的控件就是文本框）。
+ */
 ControlKind controlKindFromBusinessType(const std::string& type) {
     if (type == "number") return ControlKind::NumberField;
     if (type == "date") return ControlKind::DateField;

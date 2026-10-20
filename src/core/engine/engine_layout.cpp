@@ -794,7 +794,6 @@ void EditorEngine::syncInlineObjects() {
         }
     }
     // 名单覆盖了全部控件：不筛。blocks_ 不存东西，排版直接吃 blocks_full_（同一份）。
-    // 名单覆盖了全部控件：不筛。blocks_ 不存东西，排版直接吃 blocks_full_（同一份）。
     if (keep.size() >= control_node_ids_.size()) {
         blocks_.clear();
         filter_active_ = false;

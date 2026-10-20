@@ -57,11 +57,6 @@ constexpr const char* kFormula = "fm";
 using Strings = recjson::StringPool;
 
 /**
- * 行记录。三个开关里 can_split_by_page 的默认是真，所以只在关掉时写；
- * 另外两个默认是假，只在打开时写。行高与规则各自只在非默认时写。
- */
-
-/**
  * 一个节点的条目。只写与默认不同的字段，孩子个数永远写（它是结构）。
  */
 ordered_json nodeJson(const Node& n, Strings* kinds, Strings* strings) {
@@ -185,10 +180,6 @@ private:
     std::vector<std::string> strings_;
     NodeId next_id_ = 1;
 };
-
-/**
- * 行记录。键与 rowJson 一一对应；缺键即默认值（can_split_by_page 缺键是 true）。
- */
 
 /**
  * 一个节点的全部字段（结构之外的部分）。返回 false 时 error 已写明位置。

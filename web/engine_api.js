@@ -386,19 +386,14 @@ function push(ts, opName, changed) { sendState(ts, opName, render(opName), chang
 /* 装载 */
 
 /**
- * 换文档：必须走 relayoutAndPaint，不能只 present。
+ * 全量重排重绘的公共收尾。
  *
- * present 只画不排 —— 装载之后排版还一次都没跑过，此时 present 画出来是一片空白
- *   （症状是首帧 ink 为 0、totalPages 恒为 1，而后面每次编辑看起来都正常，
- *   因为编辑走的是引擎里的 *AndRender 版本，那条路自己会收尾）。
- */
-/**
- * 全量重排重绘的公共收尾。锚点必须先钉住、再排 —— 与单线程宿主的 presetWindowForLoad
- *   同一口径：排版按视口窗口走，锚点没设时窗口是"只有第 0 页"，算出来的 totalPages
- *   跟着不对。
- * 而且锚点不能事后留空：留空会让随后的 retarget 把"窗口从无到有"判成换窗，
- *   于是在全量之外再 present 一次 —— 后一次只重画一个光标，首次全量那笔账
- *   （探针的分母）就被冲掉了。
+ * present 只画不排 —— 装载之后排版一次都没跑过时，present 出来是一片空白（首帧 ink 为 0、
+ * totalPages 恒为 1；编辑走 *AndRender 版本会自己收尾，所以只有首帧露）。
+ *
+ * 锚点必须先钉住、再排 —— 与单线程宿主的 presetWindowForLoad 同一口径。锚点也不能事后留空：
+ * 留空会让随后的 retarget 把"窗口从无到有"判成换窗，于是在全量之外再 present 一次 ——
+ * 后一次只重画一个光标，首次全量那笔账（探针的分母）就被冲掉了。
  */
 function paintFull() {
   // 换文档、换缩放、换页度量、重设窗口锚点：页像素尺寸或页面内容整体变了，

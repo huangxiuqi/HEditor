@@ -330,6 +330,10 @@ ordered_json tableJson(const TableSpec& t) {
     return j;
 }
 
+/**
+ * 行记录。三个开关里 can_split_by_page 的默认是真，所以只在关掉时写；
+ * 另外两个默认是假，只在打开时写。行高与规则各自只在非默认时写。
+ */
 ordered_json rowJson(const RowSpec& r) {
     ordered_json j = ordered_json::object();
     if (!r.can_split_by_page) j["sp"] = false;
@@ -637,6 +641,9 @@ bool readTable(const ordered_json& j, const char* key, TableSpec* out) {
     return true;
 }
 
+/**
+ * 行记录。键与 rowJson 一一对应；缺键即默认值（can_split_by_page 缺键是 true）。
+ */
 bool readRow(const ordered_json& j, const char* key, RowSpec* out) {
     if (!j.contains(key)) return true;
     if (!j[key].is_object()) return false;

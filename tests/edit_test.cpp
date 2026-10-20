@@ -5592,10 +5592,11 @@ int main() {
             const std::vector<uint8_t> pre_frame(b.frame(), b.frame() + b.frameBytes());
             expectTrue(b.typeTextAndRender("\xE6\xB5\x8B"), "持树的引擎能编辑");
             expectTrue(b.canUndo(),
-                       "★ 落笔之后引擎仍持树（编辑落在树上，于是留下一笔可撤销的事务）");
+                       "★ 落笔之后修订里有了这段文字（编辑落在修订上，于是留下一笔可撤销的历史）");
             expectTrue(b.blocks()[0].cp_text.size() == 8 && b.blocks()[0].runs.size() == 1,
                        "★ 编辑之后字符格式仍在（新字并入原 run，文本长到 8 个码点）");
-            expectTrue(b.canUndo(), "★ 树上编辑留下了可撤销的事务（引擎自己持 UndoStack）");
+            expectTrue(b.canUndo(),
+                       "★ 编辑之后留了一笔可撤销的历史（历史由会话持有，每格是一份旧修订）");
             a.setCaret(0, 7);
             a.typeTextAndRender("\xE6\xB5\x8B");
             bool same3 = a.frameBytes() == b.frameBytes();
