@@ -224,6 +224,14 @@ async function main() {
               right.st.repaintedPixels * 100 < full,
               `${right.st.repaintedPixels} vs ${full}（${(100 * right.st.repaintedPixels / full).toFixed(4)}%）`);
 
+    // 上屏面积：引擎在 present 里算出的脏矩形，必须真的落到宿主的 putImageData 上。
+    //   这一条挡的是"引擎给了矩形、宿主还是整页贴"——那种情况下像素判据全都照样绿，
+    //   只有这个数看得出来。整页约 1.1 Mpx，一次光标移动是几十像素。
+    const blit3 = await c.eval('return window.__heditor.blitStats;');
+    chk.check('★ 光标移动的上屏面积是几十像素，不是整页（宿主按脏矩形贴）',
+              typeof blit3.px === 'number' && blit3.px > 0 && blit3.px < 2000,
+              `px=${blit3.px}`);
+
     // 段首再左移：引擎应当返回 false（没动就不该重绘）
     await c.eval('await window.__heditor.setCaret(0, 0); return true;');
     const at0 = await c.eval('return await window.__heditor.move(-1);');
@@ -1290,7 +1298,9 @@ async function main() {
       const audit = await c.eval('return await window.__heditor.auditFrame();');
       chk.check(' 跳字段之后：屏幕==引擎帧、且引擎帧==整帧重画',
                 post.screenVsEngineDiffPx === 0 && audit && audit.diff === 0,
-                `屏幕差 ${post.screenVsEngineDiffPx} px，帧自审差 ${audit ? audit.diff : '?'} px`);
+                `屏幕差 ${post.screenVsEngineDiffPx} px，帧自审差 ${audit ? audit.diff : '?'} px` +
+                `，盒=${JSON.stringify(post.screenVsEngineDiffBox)}` +
+                `，上屏=${JSON.stringify(await c.eval('return window.__heditor.blitStats;'))}`);
       const mk2 = await c.eval('return await window.__heditor.markCheck();');
       chk.check(' 跳字段后每个字段的括号都还在（All 档常驻；markCheck 自检）',
                 !!mk2 && mk2.allOk === true && mk2.bracketScope === 0,
@@ -1423,11 +1433,13 @@ async function main() {
         { clientX: r.left + (cr0.x + 2) * sx, clientY: r.top + (cr0.y + 2) * sy,
           bubbles: true, cancelable: true }));
       if (window.__heditor.quiesce) await window.__heditor.quiesce();  // 异步宿主：命中+落光标要走往返
+      const sc2 = await H.selfCheck();
       return { pageBefore: cr0.page, pageAfter: H.caret.page,
                before, after: stage.scrollTop,
                stepCss: (H.pagePx[1] + H.pagePx[2]) / dpr,
                wf: H.editStats.windowFirstPage, caretY: cr0.y,
-               frameDiff: (await H.selfCheck()).screenVsEngineDiffPx };
+               frameDiff: sc2.screenVsEngineDiffPx, box: sc2.screenVsEngineDiffBox,
+               caretNow: H.caret, blit: H.blitStats };
     `);
     chk.check('★ 点第二页光标所在那一行：页不变、滚动量小于半页（不乱滚）',
               clickP2.pageBefore >= 1 && clickP2.pageAfter === clickP2.pageBefore &&
@@ -1437,7 +1449,8 @@ async function main() {
                 `（半页 ${(clickP2.stepCss / 2).toFixed(0)}）` +
                 ` ｜ 窗口首页 ${clickP2.wf}，光标帧内 y=${clickP2.caretY}`);
     chk.check(' 点第二页之后屏幕 == 引擎帧', clickP2.frameDiff === 0,
-              `差 ${clickP2.frameDiff} px`);
+              `差 ${clickP2.frameDiff} px，盒=${JSON.stringify(clickP2.box)}` +
+              `，上屏=${JSON.stringify(clickP2.blit)}`);
 
     // 滚到下面几页：窗口必须跟着可见页走，可见页必须有画布。
     //   这一格坏在"窗口被光标页钉住"——把光标页无条件并进窗口、再从 min 那一端起算，

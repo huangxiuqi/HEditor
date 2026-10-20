@@ -310,10 +310,11 @@ function render(opName) {
     st = JSON.parse(mod.editStatsJson());
   }
   // 窗口换了要整窗重贴；没换就只贴脏页 —— 这正是"一页一张画布"省下来的那部分。
-  // 窗口换了：传 null 让 blitPages 只贴"槽过期"的那几页（就是新进窗口的页）。
+  // 窗口换了：blitPages 自己会看槽过期（新进窗口的页）与还欠着的脏矩形，
+  //   这里不再替它挑页 —— 那两件事的判据在引擎与槽表里，宿主重算一遍只会不同步。
   //   内容整体作废（换缩放/换页度量/换文档）不在这里判 —— paintFull 已经把槽表全置空，
   //   于是这一趟无论传什么都会整窗重贴。
-  host.blitPages(moved || slotsChanged ? null : JSON.parse(mod.dirtyPagesJson()));
+  host.blitPages();
   return st;
 }
 
@@ -340,10 +341,11 @@ function sendState(ts, label, stats, changed, workMs) {
     // 打包那一段（构造 + 克隆）的近期均值与峰值。宿主只读不判 —— 它只为把
     //   "往返减 work"那段缺口拆成两半，好知道时间花在打包上还是花在路上。
     packAvgMs: packAvg(), packMaxMs: packMax,
-    // 这一拍重贴了几页画布、花了多少毫秒。挪窗时贴的是全窗，而真正需要新像素的只有
-    //   新露出来那一页 —— 其余页的画布在文档流里位置没动、像素本来就是对的。这两数
-    //   相减就是"白贴"的量，宿主只读不判。
-    blitMs: blit.ms, blitPages: blit.pages,
+    // 这一拍重贴了几页画布、传了多少像素、花了多少毫秒。挪窗时贴的是全窗，而真正需要
+    //   新像素的只有新露出来那一页 —— 其余页的画布在文档流里位置没动、像素本来就是对的。
+    //   px 是"实际 putImageData 的面积"：按脏矩形贴之后它应该比 pages × 页面积小两三个
+    //   数量级（光标移动一次几十像素），这是"上屏没有整页搬"的唯一直接证据。
+    blitMs: blit.ms, blitPages: blit.pages, blitPx: blit.px,
     // 这一下到底有没有真的改动。宿主门面的契约是"没改 => 返回 null"（对照单线程宿主
     //   app.js 里 if (!mod.X()) return null; return this.present();），
     //   引擎那一步的返回值就是它，必须一路带到主线程。
@@ -664,6 +666,11 @@ const READ = {
    *   而不是整页 —— 那一条的判据在 edit_probe / edit_test [58]。
    */
   pageDirtyRects: (a) => JSON.parse(mod.pageDirtyRectsJson(a.page | 0)),
+  /**
+   * 还欠着脏矩形的页号。宿主按它决定贴哪几页 —— 不能用 dirtyPages：
+   *   那一份是"本拍写过哪几页"，而矩形是累积的，两者不同步就会永久漏贴几块。
+   */
+  pageDirtyPages: () => JSON.parse(mod.pageDirtyPagesJson()),
   text: (a) => mod.documentText(a.i | 0),
   /**
    * 整帧里"非白"的像素数。主线程读不到画布（所有权在 Worker 这边），所以"帧上到底
@@ -813,6 +820,10 @@ const READ = {
    *   "有页还没拿到画布"和"画错了"是两件事，混在一起会让人查错方向。
    */
   selfCheck: () => {
+    // 先把欠着的上屏贴完，再比。否则比的是"帧已经前进了一拍、画布还停在上一拍"，
+    //   而那不是贴图逻辑的错 —— 是两次操作之间的时序（闪烁拍 present 之后、blit 之前）。
+    //   诊断接口要回答的是"贴得对不对"，不是"凑不凑巧"。
+    host.blitPages();
     const fw = mod.frameWidth();
     const fh = mod.frameHeight();
     const ph = mod.pagePxHeight();
@@ -1051,7 +1062,7 @@ function view(m) {
   //   这里本来就整窗重贴，槽数变过时正是它需要的。
   syncFrameSlots();
   mod.present();
-  host.blitPages(null);
+  host.blitPages();
   schedulePrewarm(scrollY - prevScrollY);
   return { moved: true, scrolled, workMs: performance.now() - tWork };
 }
@@ -1079,7 +1090,7 @@ function relayout() {
   syncFrameSlots();
   mod.relayoutAndPaint();
   host.invalidateSlots();
-  host.blitPages(null);
+  host.blitPages();
 }
 
 /**

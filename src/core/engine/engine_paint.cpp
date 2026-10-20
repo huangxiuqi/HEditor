@@ -399,18 +399,6 @@ Rect rectUnion(const Rect& a, const Rect& b) {
     return Rect{x0, y0, x1 - x0, y1 - y0};
 }
 
-/**
- * 两份矩形清单逐项相同（顺序也算）：判选区这一拍动没动。
- */
-bool rectListSame(const std::vector<Rect>& a, const std::vector<Rect>& b) {
-    if (a.size() != b.size()) return false;
-    for (size_t i = 0; i < a.size(); ++i) {
-        if (a[i].x != b[i].x || a[i].y != b[i].y || a[i].w != b[i].w || a[i].h != b[i].h)
-            return false;
-    }
-    return true;
-}
-
 }  // namespace
 
 bool EditorEngine::pageBitmapFresh(int page) const {
@@ -550,6 +538,26 @@ std::vector<Rect> EditorEngine::takePageDirtyRects(int page) {
     out.swap(it->second);
     page_dirty_rects_.erase(it);
     return out;
+}
+
+/**
+ * 有累积脏矩形的页号（升序）。与 takePageDirtyRects 的分工见头文件。
+ */
+std::string EditorEngine::pageDirtyPagesJson() const {
+    std::vector<int> pages;
+    pages.reserve(page_dirty_rects_.size());
+    for (const auto& kv : page_dirty_rects_) {
+        if (!kv.second.empty()) pages.push_back(kv.first);
+    }
+    std::sort(pages.begin(), pages.end());
+    std::ostringstream o;
+    o << "[";
+    for (size_t i = 0; i < pages.size(); ++i) {
+        if (i != 0) o << ",";
+        o << pages[i];
+    }
+    o << "]";
+    return o.str();
 }
 
 std::string EditorEngine::takePageDirtyRectsJson(int page) {
@@ -904,13 +912,19 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
         refresh.clear();
         for (int i = 0; i < count; ++i) refresh.push_back(pageRectOfPage(first_page + i));
         frame_needs_full_refresh_ = false;
-        // 帧整窗重贴，旧标记自然没了；但页画布上的覆盖层还在，所以要留一份。
+        // 帧整窗重贴，旧瞬态在帧上没有存身之处；但页画布上的那几层还在。
+        //   旧光标、旧标记、旧选区一个都不能漏 —— 漏一个就是"光标走了、方括号还留着"，
+        //   而且是永久残留（后续每一拍都只画新的那一份）。
+        //   这里不再按"选区变没变"省那一份：帧重贴本就意味着整层要重铺，
+        //   而 notePageDirty 会把重叠矩形并掉，代价远小于漏擦。
+        // 这条分支的漏擦目前测不出来：能触发它的两个入口（切模式、改字段属性）都会让
+        //   标记的位置或页位图跟着变，整页脏正好把它盖住。补这几行是为了不依赖那个巧合 ——
+        //   将来标记不再随排版走时，这里就是唯一的保障（见 TRAPS 134）。
         marks_old.swap(control_marks_prev_);
-        // 选区整份变过才通知页画布。没变时它们像素一样，传了也是白传 ——
-        //   而全选一份是几千条矩形，白传的代价不小。
-        if (!rectListSame(selection_rects_prev_, sel_rects)) {
-            for (const Rect& r : sel_rects) transient_dirty.push_back(r);
-        }
+        if (caret_old.w > 0.0f) transient_dirty.push_back(caret_old);
+        for (const Rect& r : marks_old) transient_dirty.push_back(r);
+        for (const Rect& r : selection_rects_prev_) transient_dirty.push_back(r);
+        for (const Rect& r : sel_rects) transient_dirty.push_back(r);
     } else {
         // 上一帧的光标也要擦掉 —— 它不一定落在任何脏页上
         if (caret_rect_px_prev_.w > 0.0f) refresh.push_back(caret_rect_px_prev_);
@@ -1112,8 +1126,14 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
         for (const Rect& r : refresh) notePage(r);
         for (const Rect& r : control_marks_prev_) notePage(r);
         notePage(cr);
-        // 页脏矩形：内容部分已在光栅调用点记过，这里补瞬态那一半。
+        // 页脏矩形：内容部分已在光栅调用点记过，瞬态那一半在 transient_dirty 里。
+        // refresh 也一并转进来 —— 它才是"帧上真的写过哪儿"的完备清单：
+        //   瞬态是按"谁画的"记的，某个入口漏记一次，画布上就永久留一块旧像素；
+        //   refresh 是按"帧上写了哪儿"记的，擦除也过它，所以它不会漏。
+        //   代价是整帧重贴（跳字段、切模式、窗口平移）那一拍退回整页上传 ——
+        //   那些拍本来就要重铺整层，与改动前同价。纯编辑仍只传几十像素。
         for (const Rect& r : transient_dirty) noteTransientDirty(r, first_page, count);
+        for (const Rect& r : refresh) noteTransientDirty(r, first_page, count);
         std::sort(last_dirty_pages_.begin(), last_dirty_pages_.end());
 
         // 同时累积进"待上屏"—— 宿主上屏必须用它，不能用上面这几个"本轮"数字。

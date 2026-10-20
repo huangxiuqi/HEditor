@@ -501,6 +501,12 @@ int pageGapPx() { return g_engine.pageGapPx(); }
 std::string pageDirtyRectsJson(int page) { return g_engine.takePageDirtyRectsJson(page); }
 
 /**
+ * 还欠着脏矩形的页号（升序）。宿主用它决定这一拍要贴哪几页 ——
+ *   不能用 dirtyPages（那是"本拍写过哪几页"，矩形却是累积的）。
+ */
+std::string pageDirtyPagesJson() { return g_engine.pageDirtyPagesJson(); }
+
+/**
  * 本次呈现写过的页（绝对页号，升序）。宿主据此决定哪几张页画布要重贴。
  */
 std::string dirtyPagesJson() {
@@ -1479,6 +1485,7 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("frameRgba", &frameRgba);
     emscripten::function("pageRgba", &pageRgba);
     emscripten::function("pageDirtyRectsJson", &pageDirtyRectsJson);
+    emscripten::function("pageDirtyPagesJson", &pageDirtyPagesJson);
 
     emscripten::function("setViewportAnchor", &setViewportAnchor);
     emscripten::function("windowFirstPage", &windowFirstPage);

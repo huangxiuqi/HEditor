@@ -106,26 +106,31 @@ function ctxOfPage(p) {
 /**
  * 把窗口帧里第 p 页那一段贴到它自己的画布上。
  *
- * 源是 wasm 线性内存上的整帧，用子数组视图取那几行连成一张小图 —— 不做拷贝。
- *   刻意不用 putImageData 的脏矩形重载：那个重载的目标位置口径（是否叠加 dirtyX/dirtyY）
- *   在实现之间容易踩错，两参数形式没有歧义。
+ * rects 为空 = 整页贴：槽里装的还是别的页（窗口刚平移进来），画布上那一份不属于这一页。
+ * rects 非空 = 只贴这几块（页内像素坐标，来自引擎的 pageDirtyRects）：
+ *   光标移动一次只有几条几十像素的矩形，而整页是 1 Mpx —— 差三个数量级。
+ *
+ * 源是 wasm 线性内存上的整帧，用子数组视图取那一页的行 —— 不做拷贝。
+ *   putImageData(img, dx, dy, dirtyX, dirtyY, dw, dh) 的目标位置是 (dx + dirtyX, dy + dirtyY)，
+ *   所以取 dy = -srcY 就把帧坐标折回了页内坐标（与 app.js 的 blitFrame 同一口径）。
  */
-function blitPage(p) {
+function blitPage(p, rects) {
   const c = ctxOfPage(p);
-  if (!c) return false;
+  if (!c) return 0;
   const e = api.engine();
   const fw = e.frameWidth();
   const ph = e.pagePxHeight();
   const step = ph + e.pageGapPx();
   const first = e.windowFirstPage();
   const local = p - first;
-  if (local < 0 || local >= e.windowPageCount()) return false;
-  if (fw <= 0 || ph <= 0) return false;
+  if (local < 0 || local >= e.windowPageCount()) return 0;
+  if (fw <= 0 || ph <= 0) return 0;
   const fv = e.frameRgba();
   if (c.canvas.width !== fw || c.canvas.height !== ph) {
     // 改尺寸会清空画布，所以尺寸变了必定整块重画。
     c.canvas.width = fw;
     c.canvas.height = ph;
+    rects = null;
   }
   // 源行按帧槽号算（页号 mod 引擎的槽数），不是"窗口内第几页"。
   //   槽表变了以后这就是唯一正确的算法；本地那个 local 只用来判"这一页在不在窗口里"。
@@ -133,8 +138,29 @@ function blitPage(p) {
   const srcY = (fs > 0 ? ((p % fs) + fs) % fs : local) * step;
   const img = new ImageData(
     new Uint8ClampedArray(fv.buffer, fv.byteOffset + srcY * fw * 4, fw * ph * 4), fw, ph);
-  c.putImageData(img, 0, 0);
-  return true;
+  if (!rects || !rects.length) {
+    c.putImageData(img, 0, 0);
+    // 整页贴过了，这一页的矩形就没有意义了 —— 留着下一拍只会白贴一次。
+    e.pageDirtyRectsJson(p);
+    return fw * ph;
+  }
+  let px = 0;
+  for (const r of rects) {
+    if (!(r.w > 0) || !(r.h > 0)) continue;
+    // 逐块拷成一张小图，再用两参数形式贴到页内坐标。
+    //   六参数形式的语义是"目标 = (dx + dirtyX, dy + dirtyY)"，跨页时必须给负的 dy；
+    //   负 dy 在 OffscreenCanvas 上会把那一块裁错（贴完仍差同样多像素，而普通 canvas
+    //   上同一个表达式是对的）。这里没有非用六参数不可的理由 —— 一块几十像素的拷贝
+    //   比"猜实现"便宜。
+    const small = new ImageData(r.w, r.h);
+    for (let y = 0; y < r.h; ++y) {
+      const off = fv.byteOffset + ((srcY + r.y + y) * fw + r.x) * 4;
+      small.data.set(new Uint8ClampedArray(fv.buffer, off, r.w * 4), y * r.w * 4);
+    }
+    c.putImageData(small, r.x, r.y);
+    px += r.w * r.h;
+  }
+  return px;
 }
 
 /**
@@ -146,15 +172,15 @@ function blitPage(p) {
  *   实测一屏五页 1.1 ms（out/_blitprobe.mjs），与分页模式的一页一贴相当。
  */
 function blitPageContinuous(p) {
-  if (!viewCtx) return false;
+  if (!viewCtx) return 0;
   const e = api.engine();
   const vh = api.viewSize().h;
   const fw = e.frameWidth();
   const ph = e.pagePxHeight();
   const step = ph + e.pageGapPx();
-  if (fw <= 0 || ph <= 0) return false;
+  if (fw <= 0 || ph <= 0) return 0;
   const dy = p * step - api.scrollY();
-  if (dy + ph <= 0 || dy >= vh) return false;  // 整页在视口之外
+  if (dy + ph <= 0 || dy >= vh) return 0;  // 整页在视口之外
   if (viewCtx.canvas.width !== fw || viewCtx.canvas.height !== vh) {
     viewCtx.canvas.width = fw;
     viewCtx.canvas.height = vh;
@@ -166,7 +192,7 @@ function blitPageContinuous(p) {
   const img = new ImageData(
     new Uint8ClampedArray(fv.buffer, fv.byteOffset + srcY * fw * 4, fw * ph * 4), fw, ph);
   viewCtx.putImageData(img, 0, dy);
-  return true;
+  return fw * ph;
 }
 
 /**
@@ -181,38 +207,63 @@ function blitPageContinuous(p) {
  */
 let blitLastMs = 0;
 let blitLastPages = 0;
-function blitPages(only) {
+let blitLastPx = 0;
+function blitPages() {
   const tBlit = performance.now();
   const e = api.engine();
   if (!e) return 0;
   const first = e.windowFirstPage();
   const count = e.windowPageCount();
   let n = 0;
+  let px = 0;
   if (continuous) {
     // 连页模式：目标 y 随滚动变，所以每拍都重贴（不看槽过期与脏页）。
     //   先清一遍：视口内可能露出"没有页"的地方（文档首尾之外），而那些像素
     //   还留着上一拍的内容。clearRect 写的是透明，页容器的底色因此透得出来。
     if (viewCtx) viewCtx.clearRect(0, 0, viewCtx.canvas.width, api.viewSize().h);
-    for (let p = first; p < first + count; ++p) if (blitPageContinuous(p)) ++n;
+    for (let p = first; p < first + count; ++p) {
+      const got = blitPageContinuous(p);
+      if (got > 0) {
+        ++n;
+        px += got;
+      }
+    }
     blitLastMs = performance.now() - tBlit;
     blitLastPages = n;
+    blitLastPx = px;
     return n;
   }
+  // 要贴哪几页由"还欠着脏矩形"决定，不是"这一拍写过哪几页"。矩形是累积的：
+  //   某一拍的 present 可能根本没被消费（窗口平移、槽重建、页面不可见），那一拍的
+  //   矩形会留到这一拍。按本拍清单贴就会永久漏掉那几块 —— 屏幕上留几十像素的旧光标。
+  const pending = JSON.parse(e.pageDirtyPagesJson());
   for (let p = first; p < first + count; ++p) {
     const s = slotOf(p);
-    // 两个理由之一成立就要贴：这一页的内容刚变（在 only 里），或者它落的那个槽
-    //   装的还是别的页（窗口平移进来的新页、或内容整体作废）。
+    // 两个理由之一成立就要贴：这一页还欠着像素，或者它落的那个槽装的还是别的页
+    //   （窗口平移进来的新页、或内容整体作废）。
     //   两者都不成立时它已经是对的 —— 窗口平移的绝大多数槽都属于这一档。
     const stale = slotPage[s] !== p;
-    const dirty = only ? only.includes(p) : false;
+    const dirty = pending.includes(p);
     if (!stale && !dirty) continue;
-    if (blitPage(p)) {
+    // 槽里是别的页 ⇒ 整页贴（画布上那一份不属于这一页）。
+    // 只是这一页变了 ⇒ 按引擎给的矩形贴：光标一次移动只有几十像素，
+    //   而整页是 1 Mpx。报脏却给不出矩形时退回整页 —— 宁可多传，
+    //   不能让画布上留着上一拍的像素（那种错只在切页之后显形）。
+    let rects = null;
+    if (!stale && dirty) {
+      rects = JSON.parse(e.pageDirtyRectsJson(p));
+      if (!rects.length) rects = null;
+    }
+    const got = blitPage(p, rects);
+    if (got > 0) {
       slotPage[s] = p;
       ++n;
+      px += got;
     }
   }
   blitLastMs = performance.now() - tBlit;
   blitLastPages = n;
+  blitLastPx = px;
   return n;
 }
 
@@ -248,7 +299,7 @@ const host = {
   canvasCount: () => slotCtx.reduce((n, c) => n + (c ? 1 : 0), 0),
   invalidateSlots,
   blitPages,
-  blitStats: () => ({ ms: blitLastMs, pages: blitLastPages }),
+  blitStats: () => ({ ms: blitLastMs, pages: blitLastPages, px: blitLastPx }),
 
   /**
    * 某个槽的画布到了：记下它，把那一槽贴出来。
@@ -263,7 +314,7 @@ const host = {
     // 新来的槽内容未知，先作废，再让 blitPages 把该在它上面的那一页贴上去。
     //   刚启动时八个槽陆续到达，每来一个都会把已到齐的那几页补一遍，自然收敛。
     slotPage[m.slot | 0] = -1;
-    blitPages(null);
+    blitPages();
   },
 
   /**
@@ -318,7 +369,7 @@ async function handle(m) {
       //   近 0 说明队列是空的（慢是因为这一下真的贵），差得远说明 Worker 在补课。
       const r = api.view(m);
       if (!r.moved) {
-        if (continuous && r.scrolled) blitPages(null);
+        if (continuous && r.scrolled) blitPages();
         return void post({ t: 'ack', ts: m.ts, workMs: r.workMs });
       }
       return void api.state(m.ts, 'view', JSON.parse(api.engine().editStatsJson()), undefined,

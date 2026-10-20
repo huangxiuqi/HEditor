@@ -193,6 +193,7 @@ const mirror = {
   text0: '', controls: null, blockedEdits: 0, dirtyPages: [], caretReport: '',
   selection: null, caretStyle: null, selectionStyle: null,
   caretLive: -1, heapMB: 0, fontMode: 'full', stateSeq: 0, lastLabel: '', lastMs: 0,
+  blitPages: 0, blitPx: 0,
 };
 const host = { ready: false, errors, mirror, pageCanvasCount: 0 };
 
@@ -333,7 +334,7 @@ const viewDiag = {
   // 状态回推的账：按 label 分类计数，外加文档正文那一格的体量（它是最大的一笔，
   //   且每推一份就重来一次）。主线程只读不判。
   label: Object.create(null), textMax: 0, textSum: 0,
-  packAvg: 0, packMax: 0, rtt: [], work: [], handle: [], blit: [], blitPages: [],
+  packAvg: 0, packMax: 0, rtt: [], work: [], handle: [], blit: [], blitPages: [], blitPx: [],
 };
 const kViewDiagMax = 512;
 function pushSample(arr, v) {
@@ -453,6 +454,7 @@ function viewSettled(m) {
   }
   pushSample(viewDiag.blit, typeof m.blitMs === 'number' ? m.blitMs : -1);
   pushSample(viewDiag.blitPages, typeof m.blitPages === 'number' ? m.blitPages : -1);
+  pushSample(viewDiag.blitPx, typeof m.blitPx === 'number' ? m.blitPx : -1);
   ++viewDiag.settled;
   if (m.ts !== viewTs) return;       // 放行过的那条旧消息：销账即可，门闩归新的那条
   viewInFlight = false;
@@ -794,6 +796,8 @@ function onState(m) {
   mirror.controls = m.controls;
   mirror.blockedEdits = m.blockedEdits;
   mirror.dirtyPages = m.dirtyPages;
+  mirror.blitPages = typeof m.blitPages === 'number' ? m.blitPages : 0;
+  mirror.blitPx = typeof m.blitPx === 'number' ? m.blitPx : 0;
   mirror.caretReport = m.caretReport;
   mirror.selection = m.selection || mirror.selection;
   // 样式现状：与 selection 同一条路（随 state 推过来），所以宿主侧读它也是同步的。
@@ -1271,7 +1275,8 @@ Object.defineProperties(host, {
   editMode: { get: () => mode },
   edit: { get: () => mirror.stats },
   blitStats: {
-    get: () => ({ stateMs: mirror.lastMs, label: mirror.lastLabel, seq: mirror.stateSeq }),
+    get: () => ({ stateMs: mirror.lastMs, label: mirror.lastLabel, seq: mirror.stateSeq,
+                  pages: mirror.blitPages, px: mirror.blitPx }),
   },
   textarea: { get: () => ta },
   // 页画布：每页一张。元素本身已经交出去了（主线程拿不到上下文），
@@ -1409,6 +1414,7 @@ host.viewDiag = () => ({
   packAvg: viewDiag.packAvg, packMax: viewDiag.packMax,
   rtt: viewDiag.rtt.slice(), work: viewDiag.work.slice(), handle: viewDiag.handle.slice(),
   blit: viewDiag.blit.slice(), blitPages: viewDiag.blitPages.slice(),
+  blitPx: viewDiag.blitPx.slice(),
 });
 
 host.setScroll = (cssPx) => {

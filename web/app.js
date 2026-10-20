@@ -220,7 +220,7 @@ let dead = false;
  */
 let lastBlit = { frameMs: 0, imageMs: 0, putMs: 0, imeMs: 0, totalMs: 0,
                  full: true, w: 0, h: 0, boxW: 0, boxH: 0, framePx: 0,
-                 pages: 0, windowFirst: 0 };
+                 pages: 0, px: 0, windowFirst: 0 };
 
 /**
  * 每页一张画布。
@@ -279,7 +279,10 @@ function pageCanvasFor(page) {
   let rec = pageCanvases.get(page);
   if (!rec) {
     const el = canvasPool.pop() || document.createElement('canvas');
-    rec = { el, g: el.getContext('2d', { alpha: false }) };
+    // fresh：这张画布还没有被贴过（新分配，或刚改过尺寸被清空）。
+    //   它必须整页贴一次，与"这一页欠不欠脏矩形"无关 —— 窗口平移进来的页内容没变，
+    //   引擎那边没有矩形，而画布是空白的。
+    rec = { el, g: el.getContext('2d', { alpha: false }), fresh: true };
     pageCanvases.set(page, rec);
     pagesEl.appendChild(el);
   }
@@ -340,8 +343,10 @@ function syncPageCanvases(first, count, total) {
   for (let p = first; p < first + count; ++p) {
     const rec = pageCanvasFor(p);
     if (rec.el.width !== pw || rec.el.height !== ph) {
+      // 改尺寸会清空画布 —— 与新建同一种状态。
       rec.el.width = pw;
       rec.el.height = ph;
+      rec.fresh = true;
     }
     const cssW = (pw / dpr) + 'px';
     const cssH = (ph / dpr) + 'px';
@@ -1233,13 +1238,43 @@ function blitFrame(st) {
   //     目标位置是"和"，不是 dx/dy —— 写成 putImageData(img, 0, 0, 0, srcY, w, ph)
   //     会把第 2 页起的内容画到画布外面（超出的部分被裁掉、画布一点没变），
   //     症状是"只有第 1 页是对的、其余页停在旧内容上"。所以 dy 要取 -srcY 抵消。
-  const dirty = api.read('dirtyPages');
+  // 贴哪几页：看"还欠着脏矩形"的页，不看 dirtyPages（本拍写过哪几页）。
+  //   矩形是累积的 —— 某一拍的 present 可能没被消费（窗口平移、画布刚建），
+  //   那一拍的矩形会留到这一拍；按本拍清单贴就会永久漏掉那几十像素。
+  // 贴哪几页：看"还欠着脏矩形"的页，不看 dirtyPages（本拍写过哪几页）。
+  //   矩形是累积的 —— 某一拍的 present 可能没被消费（窗口平移、画布刚建），
+  //   那一拍的矩形会留到这一拍；按本拍清单贴就会永久漏掉那几十像素。
+  const dirty = api.read('pageDirtyPages');
   let patched = 0;
-  for (const p of dirty) {
+  let px = 0;
+  for (let p = first; p < first + count; ++p) {
     const rec = pageCanvases.get(p);
     if (!rec) continue;
     const srcY = frameSlotOf(p) * step;
-    rec.g.putImageData(img, 0, -srcY, 0, srcY, w, ph);
+    if (rec.fresh) {
+      // 空白画布：整页贴。一并把这一页的矩形读掉 —— 整页已经贴过，
+      //   留着只会在下一拍白贴一次。
+      rec.fresh = false;
+      api.read('pageDirtyRects', { page: p });
+      rec.g.putImageData(img, 0, -srcY, 0, srcY, w, ph);
+      px += w * ph;
+      ++patched;
+      continue;
+    }
+    if (!dirty.includes(p)) continue;
+    // 按引擎给的脏矩形贴：光标移动一次只有几十像素，而整页是一百多万。
+    //   矩形是"读后清零"的累积器，所以必须在 present 之后、贴图之前读。
+    const rects = api.read('pageDirtyRects', { page: p });
+    if (!rects.length) {
+      // 报了脏却给不出矩形：退回整页。宁可多传，不能让画布停上一拍的像素上。
+      rec.g.putImageData(img, 0, -srcY, 0, srcY, w, ph);
+      px += w * ph;
+    } else {
+      for (const r of rects) {
+        rec.g.putImageData(img, 0, -srcY, r.x, srcY + r.y, r.w, r.h);
+        px += r.w * r.h;
+      }
+    }
     ++patched;
   }
   const t3 = performance.now();
@@ -1250,7 +1285,7 @@ function blitFrame(st) {
   lastBlit = {
     frameMs: t1 - t0, imageMs: t2 - t1, putMs: t3 - t2, imeMs: t4 - t3,
     totalMs: t4 - t0, full: patched >= count, w, h, boxW: w, boxH: ph,
-    framePx: w * h, pages: patched, windowFirst: first,
+    framePx: w * h, pages: patched, px, windowFirst: first,
   };
 }
 
@@ -1600,6 +1635,7 @@ function renderEdit(st) {
     ['— 宿主收尾（窗口+面板）',
       `${fmt(Math.max(0, (lastBlit.settleMs || 0) - lastBlit.totalMs))} ms`, 'hi'],
     ['上屏页数 / 窗口页数', `${lastBlit.pages} / ${api.read('windowPageCount')}`],
+    ['上屏面积（本轮）', `${((lastBlit.px || 0) / 1e3).toFixed(1)} kpx`, 'hi'],
     ['窗口', `第 ${lastBlit.windowFirst} 页起 · 帧 ${lastBlit.w} × ${lastBlit.h} px`],
     ['帧面积（=画布面积）', `${(lastBlit.framePx / 1e6).toFixed(2)} Mpx`],
     ['光标', `段 ${st.caretPara} · 偏移 ${st.caretOffset} 码点`],
