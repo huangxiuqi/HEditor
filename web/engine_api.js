@@ -657,6 +657,13 @@ const READ = {
    *   把"某个入口忘了收尾"这类断言直接盖掉）。
    */
   ping: () => 1,
+  /**
+   * 一页的脏矩形（页内像素坐标），读后清零。
+   *
+   * 5B 的按页接口：宿主按它决定 putImageData 哪几块。光标移动只应该给出两三个小矩形，
+   *   而不是整页 —— 那一条的判据在 edit_probe / edit_test [58]。
+   */
+  pageDirtyRects: (a) => JSON.parse(mod.pageDirtyRectsJson(a.page | 0)),
   text: (a) => mod.documentText(a.i | 0),
   /**
    * 整帧里"非白"的像素数。主线程读不到画布（所有权在 Worker 这边），所以"帧上到底
@@ -785,6 +792,9 @@ const READ = {
   undoLimit: () => mod.undoLimit(),
   auditFrame: () => JSON.parse(mod.auditFrame()),
   auditBase: () => JSON.parse(mod.auditBase()),
+  // 页自审：第 p 页的缓存 vs 从零光栅。帧与底图两条自审读的都是缓存，
+  //   缓存本身写错时它们照样全绿 —— 这一条是那一层的唯一参照物。
+  auditPage: (a) => JSON.parse(mod.auditPage(a.page | 0)),
   auditLayout: () => (mod.auditLayout ? JSON.parse(mod.auditLayout()) : null),
   auditCompile: () => (mod.auditCompile ? JSON.parse(mod.auditCompile()) : null),
   auditGlyphPages: () => (mod.auditGlyphPages ? JSON.parse(mod.auditGlyphPages()) : null),

@@ -376,6 +376,10 @@ std::string EditorEngine::auditBaseJson() {
     const size_t n = base_.byteSize();
     const std::vector<uint8_t> before(base_.data(), base_.data() + n);
 
+    // 页缓存整份丢掉：底图的"从零全建"必须连页位图一起算。
+    //   留着缓存的话，全建只是把同一批页位图又搬一遍，比出来的是"搬运的确定性"，
+    //   而不是"光栅的确定性" —— 页位图本身错了这一条照样全绿。
+    page_cache_.clear();
     base_valid_ = false;  // ← 强制"底图全建"
     repaint();
 
@@ -401,6 +405,68 @@ std::string EditorEngine::auditBaseJson() {
         }
     }
     o << "{\"diff\":" << diff << ",\"frameW\":" << bw << ",\"frameH\":" << bh;
+    if (diff > 0) {
+        o << ",\"box\":[" << minx << "," << miny << "," << maxx << "," << maxy << "]";
+    } else {
+        o << ",\"box\":null";
+    }
+    o << "}";
+    return o.str();
+}
+
+/**
+ * 页自审：缓存里的第 p 页 == 从零光栅同一页的结果吗？
+ *
+ * 参照物刻意绕开缓存。auditFrameJson 与 auditBaseJson 读的都是缓存里的像素，
+ *   缓存本身错了它们照样全绿；而"两条路径都错得一样"正是最难查的一种（与
+ *   auditGlyphPagesJson 同一条理由）。这里让同一份 rasterIntoBitmap 画到一块
+ *   临时位图上：写进缓存是更新，写进临时位图是取证。
+ *
+ * 副作用：只读，不动缓存、不动计时账（光栅计时与字形计数先存后还）。
+ * 页不在缓存里（还没画过，或被淘汰）时返回 diff = -1，不做假绿。
+ */
+std::string EditorEngine::auditPageJson(int page) {
+    const int pw = pagePxWidth();
+    const int ph = pagePxHeight();
+    const auto it = page_cache_.find(page);
+    if (it == page_cache_.end() || !it->second.valid || it->second.px.width() != pw ||
+        it->second.px.height() != ph) {
+        return "{\"diff\":-1,\"cached\":0}";
+    }
+    Bitmap ref(pw, ph);
+    ref.shareFonts(base_);
+    const int saved_glyphs = raster_glyphs_;
+    const double saved_bounds = raster_glyph_bounds_ms_;
+    const double saved_fill = raster_fill_ms_;
+    const double saved_glyph = raster_glyph_ms_;
+    rasterIntoBitmap(ref, page, nullptr, nullptr);
+    raster_glyphs_ = saved_glyphs;
+    raster_glyph_bounds_ms_ = saved_bounds;
+    raster_fill_ms_ = saved_fill;
+    raster_glyph_ms_ = saved_glyph;
+
+    const uint8_t* a = it->second.px.data();
+    const uint8_t* b = ref.data();
+    long long diff = 0;
+    int minx = 1 << 30;
+    int miny = 1 << 30;
+    int maxx = -1;
+    int maxy = -1;
+    for (int y = 0; y < ph; ++y) {
+        for (int x = 0; x < pw; ++x) {
+            const size_t off =
+                (static_cast<size_t>(y) * static_cast<size_t>(pw) + static_cast<size_t>(x)) * 4u;
+            if (a[off] == b[off] && a[off + 1] == b[off + 1] && a[off + 2] == b[off + 2]) continue;
+            ++diff;
+            if (x < minx) minx = x;
+            if (x > maxx) maxx = x;
+            if (y < miny) miny = y;
+            if (y > maxy) maxy = y;
+        }
+    }
+    std::ostringstream o;
+    o << "{\"diff\":" << diff << ",\"w\":" << pw << ",\"h\":" << ph << ",\"page\":" << page
+      << ",\"cached\":1";
     if (diff > 0) {
         o << ",\"box\":[" << minx << "," << miny << "," << maxx << "," << maxy << "]";
     } else {

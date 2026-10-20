@@ -691,6 +691,17 @@ public:
     std::string auditBaseJson();
 
     /**
+     * 页自审：把第 @p page 页从零光栅一遍，与缓存里那一份逐字节比，返回
+     * {"diff":N,"w":..,"h":..,"box":[x0,y0,x1,y1],"cached":0|1}。
+     *
+     * 为什么要有这一条：页缓存一旦写错，"增量帧 == 整帧重画"照样可能全绿 ——
+     *   两条路径读的是同一份缓存。这里的参照物是"绕过缓存重新光栅"，
+     *   与 auditLayout 用"不用缓存的全量重排"当参照是同一个手法。
+     * 页不在缓存里（被淘汰）时返回 diff = -1，不做假绿。
+     */
+    std::string auditPageJson(int page);
+
+    /**
      * 排版自审：用"不用缓存的全量重排"做一份对照，与当前排版结果逐字段比对，
      * 返回不符项数（0 = 一致）。
      * 理由与 auditFrameJson 相同：增量的正确性由"与全量一致"定义，
@@ -821,6 +832,26 @@ public:
     size_t frameBytes() const;
 
     /**
+     * 第 page 页的像素（页内坐标，RGBA），零拷贝视图。
+     *
+     * 只在"这一页在缓存里、且缓存里的像素还作数"时给得出来；否则返回 0 / nullptr。
+     *   它刻意不在内部补一次光栅：那会把字形账算到一次读命令头上，而账是"这一拍排了多少"的
+     *   证据。调用方（宿主）在 present 之后读它 —— 窗口内该光栅的页那时都已经光栅过了。
+     */
+    size_t pageBytes(int page) const;
+    const uint8_t* pagePixels(int page) const;
+
+    /**
+     * 自上次取走以来写过这一页的矩形（页内像素坐标）。读后清零。
+     *
+     * 口径是"页位图上真的变了的地方"：内容重光栅（整页或行带）+ 瞬态（光标 / 选区 / 表单
+     *   标记）的新旧矩形。帧的 rebuild 不算 —— 帧重建只改落点，页像素一个字节都没动，
+     *   把它算进来会让"换窗"退化成整窗重传。
+     */
+    std::vector<Rect> takePageDirtyRects(int page);
+    std::string takePageDirtyRectsJson(int page);
+
+    /**
      * 内容底边（帧像素）：最后一行墨迹的底，再加一个下边距。
      *
      * 连页模式下宿主拿它当滚动高度 —— 分页下滚动高度是"页数 x 步距"（页是实在的），
@@ -947,6 +978,78 @@ private:
      * 统一呈现入口。内部按"页指纹是否变了"决定重建底图的哪几页。
      */
     void presentInternal(int first_page, int count, bool force_full);
+
+    /**
+     * 一页的光栅结果：页内坐标（原点 = 页左上角），不含页间隙。
+     *
+     * 按页缓存而不是只留整窗底图：底图是"窗口"的形状，换窗就整块作废，
+     *   于是滚过一页要把窗口里每一页的字形重画一遍（3 页约 30 ms），而那些页的
+     *   内容一个字节都没变。按页存之后，换窗只剩"把缓存里的页搬进槽"这一笔 memcpy。
+     * fp 记的是光栅时那一版页指纹（哨兵值也算一版，见 kFpDirtyBit）：
+     *   与 page_fp_new_ 相等就说明这一页的像素还作数，不必重画。
+     */
+    struct PageBitmap {
+        Bitmap px;
+        uint64_t fp = 0;
+        /**
+         * 这一份像素是在哪一版"光栅配置"下画的。
+         *
+         * 页指纹只哈希字形等内容，看不见页面底色 / 边框 / 缩放 / 页度量这些"画出来是什么"
+         *   的输入。把它们的哈希记在这里，比一次就是不新鲜 —— 新增一个光栅配置项时只要把它
+         *   加进 rasterSignature()，所有页自动失效，不必再维护一张"记得清缓存"的清单。
+         */
+        uint64_t raster_sig = 0;
+        bool valid = false;
+    };
+    /**
+     * 页缓存。容量按"窗口页数 + 2"条，超出时按离窗口最远淘汰。
+     *
+     * 只多留两条：这一阶段整窗底图还在，缓存的每一页都是净增内存（96 dpi 一页 3.6 MB），
+     *   两条余量够"滚回来一页"不重光栅，再多只是占内存。整窗底图收口之后可以放宽。
+     */
+    std::unordered_map<int, PageBitmap> page_cache_;
+    /**
+     * 光栅配置的签名（见 PageBitmap::raster_sig）。由 setConfig 写入。
+     */
+    uint64_t raster_sig_ = 0;
+    /**
+     * 每页待上屏的脏矩形（页内像素坐标），"自上次取走以来"累积。
+     */
+    std::unordered_map<int, std::vector<Rect>> page_dirty_rects_;
+    void notePageDirty(int page, const Rect& r);
+    void noteTransientDirty(const Rect& r, int first_page, int count);
+    /**
+     * 缓存里这一页的像素还作数吗：有条目、有指纹、尺寸对得上、指纹与本次排版相同。
+     * 没有指纹（页号超出指纹数组）一律返回假 —— 不敢断言"作数"的时候就重画。
+     */
+    bool pageBitmapFresh(int page) const;
+    /**
+     * 一页的光栅本体（页内坐标）。band 非空时只画那一条横带。
+     * 与 rasterPageInto 分开是为了让页自审能绕过缓存画到一块临时位图上。
+     */
+    void rasterIntoBitmap(Bitmap& target, int page, const float* band_lo_pt,
+                          const float* band_hi_pt);
+    /**
+     * 把这一页光栅进缓存，并记下它对应哪一版指纹。
+     */
+    void rasterPageInto(int page, const float* band_lo_pt, const float* band_hi_pt);
+    /**
+     * 把缓存里这一页的 [y0, y1) 像素带搬进整窗底图的槽位置。
+     * 页不在缓存里（或被淘汰）时什么也不做 —— 调用方必须先 rasterPageInto。
+     */
+    void blitPageIntoBase(int page, int y0, int y1);
+    /**
+     * 缓存淘汰：窗口内的页一律留下，窗口外按距离由远及近释放到容量以内。
+     */
+    void trimPageCache(int first_page, int count);
+    /**
+     * 本拍光栅出来的账。按页光栅之后字形不再画进整窗底图，所以这几个数由
+     * rasterIntoBitmap 累加，呈现末尾一次性上报；自审路径会先存后还，不污染它们。
+     */
+    int raster_glyphs_ = 0;
+    double raster_glyph_bounds_ms_ = 0.0;
+    double raster_fill_ms_ = 0.0;
+    double raster_glyph_ms_ = 0.0;
     /**
      * 页指纹：本次 relayout 的结果 / 已画进底图的那一版。
      *
@@ -1127,10 +1230,12 @@ private:
      * 几何全部从行盒的占位簇派生：沿行内轴的两端取簇的 inline_pt 与下一个簇的 inline_pt，
      * 底边坐在行盒的基线上，高度取簇自带的盒高。于是"占了位"与"画了框"共用同一份数据。
      *
+     * @param target 光栅目标（页位图）
      * @param a1_pt 框在行内轴上的末端（页内磅）；a0 由 c.inline_pt 与行盒的 inline_origin 给
-     * @param off_y 这一页在帧里的纵向偏移（帧像素）
+     * @param off_y 这一页在目标里的纵向偏移（像素）
      */
-    void drawAtomBox(const LineBox& lb, const LineCluster& c, float a1_pt, float off_y);
+    void drawAtomBox(Bitmap& target, const LineBox& lb, const LineCluster& c, float a1_pt,
+                     float off_y);
 
     /**
      * 光标 / 编辑模式动过之后调用：括号占位计划变了就重排。

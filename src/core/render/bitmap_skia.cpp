@@ -99,7 +99,10 @@ public:
     }
 
     bool isAtEnd() const override { return pos_ >= src_.size(); }
-    bool rewind() override { pos_ = 0; return true; }
+    bool rewind() override {
+        pos_ = 0;
+        return true;
+    }
     size_t getPosition() const override { return static_cast<size_t>(pos_); }
 
     bool seek(size_t position) override {
@@ -419,13 +422,9 @@ void Bitmap::setGlyphCacheBudget(size_t bytes) {
     SkGraphics::SetFontCacheLimit(bytes);
 }
 
-size_t Bitmap::glyphCacheUsedBytes() const {
-    return SkGraphics::GetFontCacheUsed();
-}
+size_t Bitmap::glyphCacheUsedBytes() const { return SkGraphics::GetFontCacheUsed(); }
 
-size_t Bitmap::glyphCacheBudgetBytes() const {
-    return SkGraphics::GetFontCacheLimit();
-}
+size_t Bitmap::glyphCacheBudgetBytes() const { return SkGraphics::GetFontCacheLimit(); }
 
 /**
  * 铺面积
@@ -524,6 +523,40 @@ void Bitmap::copyRectFrom(const Bitmap& src, const Rect& r) {
         const size_t off = off0 + static_cast<size_t>(y - y0) * static_cast<size_t>(w_) * 4u;
         std::memcpy(px_.data() + off, src.px_.data() + off, row_bytes);
     }
+}
+
+/**
+ * 页位图 -> 帧的搬运。与 copyRectFrom 同一套纪律（不过 Skia、memcpy 原文照搬），
+ *   区别只在"源与目标不同尺寸、原点不同"，所以两侧各自裁剪一次。
+ */
+void Bitmap::blitFrom(const Bitmap& src, const Rect& r, int dst_x, int dst_y) {
+    if (src.w_ <= 0 || src.h_ <= 0 || w_ <= 0 || h_ <= 0) return;
+    int sx0 = std::max(0, static_cast<int>(std::floor(r.x)));
+    int sy0 = std::max(0, static_cast<int>(std::floor(r.y)));
+    int sx1 = std::min(src.w_, static_cast<int>(std::ceil(r.x + r.w)));
+    int sy1 = std::min(src.h_, static_cast<int>(std::ceil(r.y + r.h)));
+    // 目标侧越界：把多出来的那一截从源侧切掉，而不是把落点夹进来 ——
+    //   夹落点会把整块内容平移，画面上是"那一页整体错位"，比不画更难查。
+    if (dst_x < 0) {
+        sx0 -= dst_x;
+        dst_x = 0;
+    }
+    if (dst_y < 0) {
+        sy0 -= dst_y;
+        dst_y = 0;
+    }
+    const int cw = std::min(sx1 - sx0, w_ - dst_x);
+    const int ch = std::min(sy1 - sy0, h_ - dst_y);
+    if (cw <= 0 || ch <= 0) return;
+    painted_px_ += static_cast<size_t>(cw) * static_cast<size_t>(ch);
+    const size_t src_row = static_cast<size_t>(src.w_) * 4u;
+    const size_t dst_row = static_cast<size_t>(w_) * 4u;
+    const size_t n = static_cast<size_t>(cw) * 4u;
+    const uint8_t* sp =
+        src.px_.data() + static_cast<size_t>(sy0) * src_row + static_cast<size_t>(sx0) * 4u;
+    uint8_t* dp =
+        px_.data() + static_cast<size_t>(dst_y) * dst_row + static_cast<size_t>(dst_x) * 4u;
+    for (int y = 0; y < ch; ++y, sp += src_row, dp += dst_row) std::memcpy(dp, sp, n);
 }
 
 /**

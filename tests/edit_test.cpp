@@ -898,8 +898,11 @@ int main() {
         //   frame_h 与宽高都没变 → 换窗判据全不成立 → h2 == h1，新页不可见。
         expectTrue(h2 > h1, "帧缓冲高度跟随页数增长（修复前这里恒等 → 新页不可见）");
         expectTrue(e5.editStats().total_pages == 2, "本次呈现覆盖 2 页");
-        expectTrue(e5.editStats().repainted_pages == 2,
-                   "页数变了 → 整帧重建，2 页都重画（不是只贴第 1 页）");
+        // 有页位图缓存之后"重画了几页"不再恒等于窗口页数：第 0 页的字一个都没动，
+        //   它的像素直接复用（这正是缓存要省的那笔）；要守的是新页真的被光栅进去了。
+        expectTrue(e5.editStats().repainted_pages >= 1 &&
+                       e5.auditPageJson(1).find("\"cached\":1") != std::string::npos,
+                   "新页被光栅进缓存（第 1 页内容没变，直接复用）");
 
         // 更硬的一条：最后一页的区域里必须真的画出了字（暗像素），
         // 而不只是一块空白页底 —— 否则"帧变高了"也可能是块白板。
@@ -10334,6 +10337,237 @@ int main() {
             expectTrue(e.undoAndRender(), "撤掉这一笔");
             expectTrue(blocksRestored(), "撤销之后块内容逐块回到打字之前");
         }
+    }
+
+    std::printf("\n[57] 页位图：每页与从零光栅一致，换窗只搬不画\n");
+    {
+        // 5A 的判据。帧自审与底图自审读的都是页缓存，缓存本身写错时两条照样全绿 ——
+        //   这里的参照物是"绕过缓存把同一页重新光栅一遍"，与 auditLayout 拿全量排版
+        //   当参照是同一个手法。另有一条计数器判据：换窗时只有新进来的那一页被光栅。
+        const std::vector<std::string> fonts57 = {cjkPath, mnPath, latinPath};
+        EditorEngine e57;
+        expectTrue(e57.init(fonts57), "引擎初始化（页位图）");
+        EngineConfig c57;
+        c57.zoom = 1.0f;
+        c57.page.width_pt = 340.0f;
+        c57.page.height_pt = 300.0f;
+        c57.page.margin_pt = 12.0f;
+        e57.setConfig(c57);
+
+        NodeTree t57;
+        const NodeId sec57 = t57.firstSectionId();
+        for (int i = 0; i < 240; ++i) {
+            t57.setText(t57.appendChild(sec57, NodeKind::TextRun),
+                        utf8ToCodepoints("第" + std::to_string(i) + "段：页位图与槽的判据。"));
+            t57.appendChild(sec57, NodeKind::ParagraphMark);
+        }
+        const StyleSheet sheet57;
+        e57.setDocument(t57, sheet57);
+        e57.relayout();
+        e57.setViewportAnchor(0, 4);
+        e57.repaint();
+        expectTrue(e57.editStats().total_pages >= 5,
+                   "前提：文档至少五页（" + std::to_string(e57.editStats().total_pages) + "）");
+
+        auto pageClean = [&](int p) {
+            const std::string a = e57.auditPageJson(p);
+            return a.find("\"diff\":0") != std::string::npos &&
+                   a.find("\"cached\":1") != std::string::npos;
+        };
+        int clean = 0;
+        for (int p = 0; p < 4; ++p) {
+            if (pageClean(p)) ++clean;
+        }
+        expectTrue(clean == 4,
+                   "窗口内四页都与从零光栅逐字节一致（" + std::to_string(clean) + "/4）");
+        expectTrue(e57.auditPageJson(9999).find("\"diff\":-1") != std::string::npos,
+                   "没有缓存的页不做假绿（diff = -1）");
+
+        // 换窗一页：前三页的像素一个字节都没动，只有新进来的第 4 页要光栅。
+        //   这一条是 5A 的收益本身 —— 旧口径下换窗要把整窗每页的字形重画一遍。
+        e57.setViewportAnchor(1, 4);
+        e57.repaint();
+        expectTrue(e57.editStats().repainted_pages == 1,
+                   "换窗只光栅新进来的那一页（实际 " +
+                       std::to_string(e57.editStats().repainted_pages) + " 页）");
+        clean = 0;
+        for (int p = 1; p <= 4; ++p) {
+            if (pageClean(p)) ++clean;
+        }
+        expectTrue(clean == 4, "换窗之后四页仍与从零光栅一致（" + std::to_string(clean) + "/4）");
+
+        // 反向一半：底图自审把缓存整份丢掉再全建，这时四页都必须重新光栅。
+        //   少了这一条，"只光栅一页"可以靠"计数器恒报 1"通过。
+        const std::string ab57 = e57.auditBaseJson();
+        expectTrue(ab57.find("\"diff\":0") != std::string::npos,
+                   "底图全建之后与增量结果逐字节一致：" + ab57);
+        expectTrue(e57.editStats().repainted_pages == 4,
+                   "缓存清空之后四页都重新光栅（实际 " +
+                       std::to_string(e57.editStats().repainted_pages) + " 页）");
+
+        // 打字之后再审一次：行带重画是增量的，而缓存里的那一页必须仍等于从零光栅。
+        //   这一条盯的是"带算错了、带外的旧像素留下了"——帧自审也能抓，但它读的是同一份缓存。
+        e57.setViewportAnchor(0, 4);
+        e57.repaint();
+        expectTrue(e57.insertCodepoint(0, 1, 0x7532), "第 0 段插一个字");
+        e57.relayout();
+        e57.repaint();
+        clean = 0;
+        for (int p = 0; p < 4; ++p) {
+            if (pageClean(p)) ++clean;
+        }
+        expectTrue(clean == 4,
+                   "行带重画之后四页仍与从零光栅一致（" + std::to_string(clean) + "/4）");
+
+        // 配置类改动不在页指纹里（指纹只哈希字形），靠 setConfig 整份作废缓存。
+        //   漏掉那一条的症状是"改了底色屏幕不变"；参照物仍是"从零光栅"——
+        //   缓存没作废时，从零光栅用的是新底色，两边立刻对不上。
+        EngineConfig c57b = c57;
+        c57b.page_fill = Color::rgb(250, 250, 240);
+        e57.setConfig(c57b);
+        e57.relayout();
+        e57.repaint();
+        clean = 0;
+        for (int p = 0; p < 4; ++p) {
+            if (pageClean(p)) ++clean;
+        }
+        expectTrue(clean == 4, "改页面底色之后四页仍与从零光栅一致（缓存已整份作废）");
+    }
+
+    std::printf("\n[58] 按页接口：pageRgba 与 pageDirtyRects，光栅签名\n");
+    {
+        // 5B 的判据。两件事分开验：页视图与帧对应块逐字节相同（接口本身对不对），
+        //   以及"一次光标移动的脏矩形只有几十像素"（增量到底有没有落到页上）。
+        //   第二条是这一刀的意义：此前宿主按页上屏，光标动一下要传整页 1 Mpx。
+        const std::vector<std::string> fonts58 = {cjkPath, mnPath, latinPath};
+        EditorEngine e58;
+        expectTrue(e58.init(fonts58), "引擎初始化（按页接口）");
+        EngineConfig c58;
+        c58.zoom = 1.0f;
+        c58.page.width_pt = 340.0f;
+        c58.page.height_pt = 300.0f;
+        c58.page.margin_pt = 12.0f;
+        e58.setConfig(c58);
+
+        NodeTree t58;
+        const NodeId sec58 = t58.firstSectionId();
+        for (int i = 0; i < 240; ++i) {
+            t58.setText(t58.appendChild(sec58, NodeKind::TextRun),
+                        utf8ToCodepoints("第" + std::to_string(i) + "段：按页接口与脏矩形。"));
+            t58.appendChild(sec58, NodeKind::ParagraphMark);
+        }
+        e58.setDocument(t58, StyleSheet{});
+        e58.relayout();
+        e58.setViewportAnchor(0, 4);
+        e58.repaint();
+
+        const int pw = e58.pagePxWidth();
+        const int ph = e58.pagePxHeight();
+        const int fw = e58.frameWidth();
+        const int slots = std::max(1, e58.frameSlots());
+        const int step = ph + e58.pageGapPx();
+        expectTrue(e58.editStats().total_pages >= 5,
+                   "前提：文档至少五页（" + std::to_string(e58.editStats().total_pages) + "）");
+
+        // (a) 页视图 == 帧里那一块。帧是现成的参照物，而页视图是新接口 ——
+        //   这一条钉的是"零拷贝视图指对了地方、长度也对"。
+        //   前提是先藏光标：页位图里没有瞬态，帧里有一条光标，不藏就永远差那一块。
+        //   藏/显各来一拍，留下的脏矩形在下面统一取走。
+        e58.showCaret(false);
+        e58.repaint();
+        int same58 = 0;
+        std::string bad58;
+        const size_t want_n = static_cast<size_t>(pw) * static_cast<size_t>(ph) * 4;
+        for (int p = 0; p < 4; ++p) {
+            const size_t n = e58.pageBytes(p);
+            if (n != want_n) {
+                bad58 += " p" + std::to_string(p) + ":n=" + std::to_string(n);
+                continue;
+            }
+            const int off = (((p % slots) + slots) % slots) * step;
+            const uint8_t* src =
+                e58.frame() + static_cast<size_t>(off) * static_cast<size_t>(fw) * 4;
+            if (std::memcmp(e58.pagePixels(p), src, n) == 0) {
+                ++same58;
+                continue;
+            }
+            size_t d = 0;
+            while (d < n && e58.pagePixels(p)[d] == src[d]) ++d;
+            bad58 += " p" + std::to_string(p) + ":diff@" + std::to_string(d);
+        }
+        expectTrue(same58 == 4, "四页的 pageRgba 与帧对应块逐字节相同（" + std::to_string(same58) +
+                                    "/4" + bad58 + "）");
+        expectTrue(e58.pageBytes(9999) == 0, "没有缓存的页给空视图（不造假绿）");
+
+        // 光标放回来，再把前面几拍攒下的脏矩形取走；下面只看增量。
+        e58.showCaret(true);
+        e58.repaint();
+        for (int p = 0; p < 4; ++p) e58.takePageDirtyRects(p);
+
+        // (b) 光标移动：两个小矩形（擦旧、画新），不是整页。
+        e58.setCaret(0, 1);
+        e58.repaint();
+        const int cp = e58.editStats().caret_page;
+        const std::vector<Rect> caret_rects = e58.takePageDirtyRects(cp);
+        float caret_area = 0.0f;
+        for (const Rect& r : caret_rects) caret_area += r.w * r.h;
+        const int off_cp = (((cp % slots) + slots) % slots) * step;
+        const float cx = static_cast<float>(e58.editStats().caret_x_px);
+        const float cy = static_cast<float>(e58.editStats().caret_y_px - off_cp);
+        const float cw = static_cast<float>(e58.editStats().caret_w_px);
+        const float ch = static_cast<float>(e58.editStats().caret_h_px);
+        bool caret_covered = false;
+        for (const Rect& r : caret_rects) {
+            if (cx >= r.x - 1.0f && cx + cw <= r.x + r.w + 1.0f && cy >= r.y - 1.0f &&
+                cy + ch <= r.y + r.h + 1.0f) {
+                caret_covered = true;
+            }
+        }
+        expectTrue(!caret_rects.empty(), "光标移动之后这一页有脏矩形");
+        expectTrue(caret_area < 400.0f, "★ 光标移动的上传面积是几十像素，不是整页（" +
+                                            std::to_string(static_cast<int>(caret_area)) +
+                                            " px²）");
+        expectTrue(caret_covered, "脏矩形覆盖了光标矩形（擦旧 + 画新）");
+        expectTrue(e58.takePageDirtyRects(cp).empty(), "脏矩形读后清零（第二次为空）");
+
+        // (c) 打字：行带级，不是整页；页像素仍与从零光栅一致。
+        expectTrue(e58.insertCodepoint(0, 1, 0x7532), "第 0 段插一个字");
+        e58.relayout();
+        e58.repaint();
+        const std::vector<Rect> type_rects = e58.takePageDirtyRects(0);
+        float type_area = 0.0f;
+        for (const Rect& r : type_rects) type_area += r.w * r.h;
+        expectTrue(type_area > 0.0f && type_area < static_cast<float>(pw) * ph * 0.25f,
+                   "打字的上传面积是一行带，不是整页（" +
+                       std::to_string(static_cast<int>(type_area)) + " px²）");
+        const std::string ap58 = e58.auditPageJson(0);
+        expectTrue(ap58.find("\"diff\":0") != std::string::npos,
+                   "打字之后页位图仍与从零光栅一致：" + ap58);
+
+        // (d) 光栅签名：改底色 → 所有页失效（若靠 setConfig 里手写清单，
+        //   漏一项就是"改了底色屏幕不变"）。反向一半：同样配置再来一次，一页都不重画。
+        EngineConfig c58b = c58;
+        c58b.page_fill = Color::rgb(250, 250, 240);
+        e58.setConfig(c58b);
+        e58.relayout();
+        e58.repaint();
+        expectTrue(e58.editStats().repainted_pages == 4,
+                   "改页面底色之后窗口内四页全部重光栅（光栅签名变了，实际 " +
+                       std::to_string(e58.editStats().repainted_pages) + " 页）");
+        int clean58 = 0;
+        for (int p = 0; p < 4; ++p) {
+            const std::string a = e58.auditPageJson(p);
+            if (a.find("\"diff\":0") != std::string::npos) ++clean58;
+        }
+        expectTrue(clean58 == 4,
+                   "改底色之后四页仍与从零光栅一致（" + std::to_string(clean58) + "/4）");
+
+        e58.setConfig(c58b);
+        e58.relayout();
+        e58.repaint();
+        expectTrue(e58.editStats().repainted_pages == 0,
+                   "同样的配置再设一次，一页都不重光栅（签名不是每次 setConfig 都变，实际 " +
+                       std::to_string(e58.editStats().repainted_pages) + " 页）");
     }
 
     std::printf("\n──────────────────────────────\n");

@@ -119,6 +119,37 @@ void EditorEngine::ensureRenderSetup() {
     base_.setGlyphCacheBudget(kGlyphCacheBudgetBytes);
 }
 
+/**
+ * "页位图上画出来是什么"这组配置的签名。
+ *
+ * 页指纹只哈希字形等内容；页面底色、边框、格线、原子框、缩放、页度量这些一个都不在里面。
+ *   把它们混成一个签名记进 PageBitmap，签名一变所有页自动失效 —— 新增光栅配置项时只要
+ *   加进这里，不必再维护一张"记得清缓存"的清单（TRAPS 128 的正解）。
+ * 与排版无关的项刻意不收：页间隙只影响落点、背景色只影响帧、光标/选区色只影响瞬态层。
+ */
+static uint64_t rasterSignature(const EngineConfig& cfg) {
+    const auto mixColor = [](uint64_t h, const Color& c) {
+        return fnvMix(h, (static_cast<uint64_t>(c.r) << 24) | (static_cast<uint64_t>(c.g) << 16) |
+                             (static_cast<uint64_t>(c.b) << 8) | static_cast<uint64_t>(c.a));
+    };
+    uint64_t h = kFnvBasis;
+    h = fnvMixFloat(h, cfg.zoom);
+    h = fnvMixFloat(h, cfg.page.width_pt);
+    h = fnvMixFloat(h, cfg.page.height_pt);
+    h = fnvMixFloat(h, cfg.page.margin_pt);
+    h = fnvMixFloat(h, cfg.page.slab_pt);
+    h = fnvMix(h, cfg.page.continuous ? 1ULL : 0ULL);
+    h = mixColor(h, cfg.page_fill);
+    h = mixColor(h, cfg.page_border);
+    h = fnvMix(h, cfg.draw_page_border ? 1ULL : 0ULL);
+    h = mixColor(h, cfg.table_line);
+    h = mixColor(h, cfg.atom_fill);
+    h = mixColor(h, cfg.atom_border);
+    h = mixColor(h, cfg.atom_text);
+    h = fnvMixFloat(h, cfg.atom_pad_pt);
+    return h;
+}
+
 void EditorEngine::setConfig(const EngineConfig& cfg) {
     // 改"显示括号的范围"会改变占位（括号进文档流）→ 必须重排。
     //   不重排的话括号会按新档画、正文却按旧档排 —— 画的用的还是旧的簇坐标，
@@ -142,6 +173,13 @@ void EditorEngine::setConfig(const EngineConfig& cfg) {
     if (cfg_.zoom < 0.25f) cfg_.zoom = 0.25f;
     if (cfg_.zoom > 8.0f) cfg_.zoom = 8.0f;
     if (cfg_.caret_width_pt < kMinCaretWidthPt) cfg_.caret_width_pt = kMinCaretWidthPt;
+    // 光栅签名一变，所有页的像素都不再作数（判据在 pageBitmapFresh）。
+    //   这里不再逐项比对再清缓存：那张清单漏一项就是"改了底色屏幕不变"（TRAPS 128）。
+    const uint64_t sig = rasterSignature(cfg_);
+    if (sig != raster_sig_) {
+        raster_sig_ = sig;
+        page_dirty_rects_.clear();  // 旧矩形描述的是旧像素，作废
+    }
     base_valid_ = false;  // 缩放/页度量变了，底图作废
     caret_rect_px_prev_ = Rect{};
     if (plan_changed) markLayoutDirtyForBrackets();
@@ -178,6 +216,7 @@ void EditorEngine::setDocument(const NodeTree& tree, const StyleSheet& sheet) {
         block_src_.clear();
         tables_.clear();
         flow_.reset();
+        page_dirty_rects_.clear();
         return;
     }
     sheet_ = sheet;
@@ -189,6 +228,7 @@ void EditorEngine::setDocument(const NodeTree& tree, const StyleSheet& sheet) {
     setCaretByText(TextPos{0, 0});
     caret_rect_px_prev_ = Rect{};
     base_valid_ = false;
+    page_dirty_rects_.clear();
     rebuildFromTree();
     // 整份文档换了：段数与内容都可能全变，没有可复用的前缀。
     markAllLayoutDirty();

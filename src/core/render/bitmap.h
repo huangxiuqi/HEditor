@@ -91,6 +91,17 @@ public:
     void copyRectFrom(const Bitmap& src, const Rect& r);
 
     /**
+     * 把 src 的 src_rect 区域搬到本图的 (dst_x, dst_y)：源与目标是不同尺寸的两块图。
+     *
+     * 与 copyRectFrom 的分工：那个是"两块同尺寸、同一坐标贴回去"（帧 = 底图）；
+     *   这个是"页位图 -> 帧的某个槽"这种源小、目标大且原点不同的搬运。
+     * 落点必须是整数像素：页在帧里的位置由槽号乘步距定，本来就是整数，
+     *   这里不做任何采样 —— 一旦按浮点落点插值，字就先糊一层。
+     * 越界按目标裁剪（窗口最后一槽可能贴着帧底），源侧也按自身范围裁剪。
+     */
+    void blitFrom(const Bitmap& src, const Rect& src_rect, int dst_x, int dst_y);
+
+    /**
      * 真实写入量取证
      * 为什么必须由光栅器自己记账，而不是让上层"估算脏矩形面积"：
      * 估算是意图，记账是事实。两者在不一致的实现里会差出量级，
@@ -181,8 +192,8 @@ private:
     int w_ = 0;
     int h_ = 0;
     std::vector<uint8_t> px_;
-    size_t painted_px_ = 0;      // 自上次 resetPaintedPixels() 以来实际写入的像素数
-    size_t painted_glyphs_ = 0;  // 同一口径下的字形个数（见 paintedGlyphs）
+    size_t painted_px_ = 0;         // 自上次 resetPaintedPixels() 以来实际写入的像素数
+    size_t painted_glyphs_ = 0;     // 同一口径下的字形个数（见 paintedGlyphs）
     double glyph_bounds_ms_ = 0.0;  // 同一口径下"记账取包围盒"花掉的时间（见 glyphBoundsMs）
 
     /**

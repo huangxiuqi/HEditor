@@ -456,6 +456,19 @@ val frameRgba() {
 }
 
 /**
+ * 一页的像素（页内坐标，RGBA），零拷贝视图。
+ *
+ * 页不在缓存里或已过期时给一个空视图 —— 与"整帧"不同，它不负责补一次光栅：
+ *   补光栅会把字形账算到一次读命令头上，而账是"这一拍排了多少"的证据。宿主在
+ *   present 之后读它，那时窗口内该光栅的页都已经光栅过了。
+ */
+val pageRgba(int page) {
+    const size_t n = g_engine.pageBytes(page);
+    if (n == 0) return val(emscripten::typed_memory_view(static_cast<size_t>(0), g_engine.frame()));
+    return val(emscripten::typed_memory_view(n, g_engine.pagePixels(page)));
+}
+
+/**
  * 视口锚点：帧只装 [first, first+count) 这几页。count <= 0 表示整篇。
  * 宿主按"可见页 ± 1"设它，帧高于是与文档长度无关 —— 帧高就是画布高度，
  * 而画布越大浏览器每帧要重新合成的图层越大（见 EditorEngine::setViewportAnchor）。
@@ -478,6 +491,14 @@ int windowPageCount() { return g_engine.windowPageCount(); }
 int pagePxWidth() { return g_engine.pagePxWidth(); }
 int pagePxHeight() { return g_engine.pagePxHeight(); }
 int pageGapPx() { return g_engine.pageGapPx(); }
+
+/**
+ * 一页的脏矩形（页内像素坐标），读后清零。
+ *
+ * 宿主按这张清单决定 putImageData 哪几块：光标移动只传几十像素，不再是整页 1 Mpx。
+ * 内容重光栅与瞬态（光标 / 选区 / 标记）都算在里面，帧的重建不算 —— 那只是落点变了。
+ */
+std::string pageDirtyRectsJson(int page) { return g_engine.takePageDirtyRectsJson(page); }
 
 /**
  * 本次呈现写过的页（绝对页号，升序）。宿主据此决定哪几张页画布要重贴。
@@ -915,8 +936,8 @@ bool focusControl(bool forward) { return g_engine.focusControlAndRender(forward)
 bool tabCaret(bool backward) { return g_engine.tabCaretAndRender(backward); }
 
 /**
- * Tab / Shift+Tab = 缩进 / 反缩进（不是跳字段）。
- * 走 *AndRender：入口改状态就必须自己收尾，理由见 engine.cpp 里那段说明。
+ * 帧自审：这一帧 vs "整帧重画一遍"，逐字节比对（0 = 一致）。
+ * 它只能抓上屏与增量擦除的错，抓不到页位图本身写错（见 auditPage）。
  */
 std::string auditFrame() { return g_engine.auditFrameJson(); }
 
@@ -925,6 +946,12 @@ std::string auditFrame() { return g_engine.auditFrameJson(); }
  * 与 auditFrame 的分工见 engine.h：那一条比帧，帧是从底图搬的，盖不住底图本身出错。
  */
 std::string auditBase() { return g_engine.auditBaseJson(); }
+
+/**
+ * 页自审：缓存里第 p 页 vs 从零光栅同一页，逐字节比对（0 = 一致）。
+ * 绕开缓存当参照：帧与底图两条自审读的都是缓存，缓存错了它们照样全绿。
+ */
+std::string auditPage(int page) { return g_engine.auditPageJson(page); }
 
 /**
  * 排版自审：增量结果 vs 全量重排，逐字段比对（0 = 一致）。
@@ -959,6 +986,10 @@ std::string takeBlitBoxJson() {
     return o.str();
 }
 
+/**
+ * Tab / Shift+Tab = 缩进 / 反缩进（不是跳字段）。
+ * 走 *AndRender：入口改状态就必须自己收尾，理由见 engine.cpp 里那段说明。
+ */
 bool indentText() { return g_engine.indentAndRender(); }
 bool outdentText() { return g_engine.outdentAndRender(); }
 int controlAtPoint(float x_pt, float y_pt) { return g_engine.controlAtPt(x_pt, y_pt); }
@@ -1424,6 +1455,7 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("tabCaret", &tabCaret);
     emscripten::function("auditFrame", &auditFrame);
     emscripten::function("auditBase", &auditBase);
+    emscripten::function("auditPage", &auditPage);
     emscripten::function("auditLayout", &auditLayout);
     emscripten::function("auditGlyphPages", &auditGlyphPages);
     emscripten::function("auditCompile", &auditCompile);
@@ -1445,6 +1477,8 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("frameHeight", &frameHeight);
     emscripten::function("frameByteSize", &frameByteSize);
     emscripten::function("frameRgba", &frameRgba);
+    emscripten::function("pageRgba", &pageRgba);
+    emscripten::function("pageDirtyRectsJson", &pageDirtyRectsJson);
 
     emscripten::function("setViewportAnchor", &setViewportAnchor);
     emscripten::function("windowFirstPage", &windowFirstPage);
