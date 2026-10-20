@@ -172,6 +172,7 @@ void EditorEngine::setDocument(const NodeTree& tree, const StyleSheet& sheet) {
         // 文档，调用方没有别的办法知道。宁可停在"没有装载"这个明确状态上。
         loaded_ = false;
         session_.reset();
+        proj_hist_ = rev::BlockHistory{};
         blocks_.clear();
         blocks_full_.clear();
         block_src_.clear();
@@ -181,6 +182,7 @@ void EditorEngine::setDocument(const NodeTree& tree, const StyleSheet& sheet) {
     }
     sheet_ = sheet;
     session_.emplace(std::move(doc), cfg_.undo_limit);
+    proj_hist_ = rev::BlockHistory{};
     loaded_ = true;
     sel_history_.clear();
     sel_pos_ = 0;
@@ -205,24 +207,28 @@ FlowVisibility EditorEngine::flowVisibility() const {
     return (mode_ == EditMode::Document) ? FlowVisibility::Design : FlowVisibility::Display;
 }
 
-void EditorEngine::rebuildFromTree() {
+void EditorEngine::rebuildFromTree(const rev::BlockDamage* dmg) {
     // 视图先摆好：下面这一段就要用位置解析（落基、控件导出），而它读的是视图。
     //   容器都是成员、不换对象，所以地址现在取和最后取一样。
+    // 块流换了一份：上一轮那份"筛过括号"的副本已经对不上了，先作废。
+    //   下一次排版会按新的名单重筛（见 syncInlineObjects），在那之前 blocks() 读全量那份。
+    filter_active_ = false;
     refreshViews();
     edit_stats_.rebuild_path = 0;
     edit_stats_.rebuild_reject = 0;
     const FlowVisibility vis = flowVisibility();
     const auto t_compile0 = Clock::now();
-    const rev::Projection res = rev::project(document(), sheet_, rev::ViewParams{vis});
-    blocks_full_.clear();
+    // 增量投影：blocks_full_ 既是上一轮的块流、也是这一轮的输出 —— 没变的块原地不动
+    //   （不重算、不拷贝），只有损伤区间那一段被新物化的块替换。
+    rev::Projection res = rev::project(document(), sheet_, rev::ViewParams{vis}, &blocks_full_,
+                                       proj_hist_.keys.empty() ? nullptr : &proj_hist_, dmg);
+    edit_stats_.rebuild_reused = res.reused;
+    proj_hist_.style_version = res.style_version;
+    proj_hist_.keys = std::move(res.keys);
     block_src_.clear();
-    blocks_full_.reserve(res.blocks.size());
-    block_src_.reserve(res.blocks.size());
-    for (const rev::ProjectedBlock& b : res.blocks) {
-        blocks_full_.push_back(b.spec);
-        block_src_.push_back(b.source);
-    }
-    tables_ = res.tables;
+    block_src_.reserve(proj_hist_.keys.size());
+    for (const rev::BlockKey& k : proj_hist_.keys) block_src_.push_back(k.source);
+    tables_ = std::move(res.tables);
     edit_stats_.rebuild_compile_ms = msSince(t_compile0);
     finishRebuildFromTree(vis);
 }
@@ -298,7 +304,6 @@ void EditorEngine::finishRebuildFromTree(FlowVisibility vis) {
 
     edit_stats_.rebuild_flowpos_ms = msSince(t_pos0);
     const auto t_copy0 = Clock::now();
-    blocks_ = blocks_full_;
     edit_stats_.rebuild_copy_ms = msSince(t_copy0);
     const auto t_ctl0 = Clock::now();
     exportControlsFromBlocks();
@@ -335,9 +340,9 @@ void EditorEngine::exportControlsFromBlocks() {
     };
     std::unordered_map<int, Boundary> acc;
     std::vector<int> order;  // owner 首见顺序 = 流顺序（对象按锚点单调不减地排在产物里）
-    for (size_t i = 0; i < blocks_.size(); ++i) {
+    for (size_t i = 0; i < blocks_full_.size(); ++i) {
         const int para = static_cast<int>(i);
-        for (const InlineObject& o : blocks_[i].objects) {
+        for (const InlineObject& o : blocks_full_[i].objects) {
             auto it = acc.find(o.owner);
             if (it == acc.end()) {
                 order.push_back(o.owner);
@@ -391,7 +396,7 @@ void EditorEngine::exportControlsFromBlocks() {
  */
 void EditorEngine::refreshViews() {
     PositionView v;
-    v.blocks = &blocks_;
+    v.blocks = &blocks();
     v.blocks_full = &blocks_full_;
     v.block_flow = &block_flow_;
     v.block_flow_span = &block_flow_span_;
@@ -408,7 +413,7 @@ void EditorEngine::refreshViews() {
     e.doc = &document();
     e.caret = &caret_;
     e.flow = &flow_;
-    e.blocks = &blocks_;
+    e.blocks = &blocks();
     e.blocks_full = &blocks_full_;
     e.block_flow = &block_flow_;
     e.block_flow_span = &block_flow_span_;
@@ -430,13 +435,17 @@ int EditorEngine::undoLimit() const { return cfg_.undo_limit > 0 ? cfg_.undo_lim
 
 bool EditorEngine::commitSteps(std::vector<Step> steps, int dirty_para, ParaDelta delta,
                                Range selection_before, Range selection_after) {
-    (void)delta;  // 段数的形状不再需要单独判断：产物整篇投影一次，增量在排版层做。
+    (void)delta;  // 段数的形状不再需要单独判断：投影自己按损伤区间增量，排版层另有一份。
     if (!loaded_ || !session_) return false;
+    // 旧修订与旧产物一一对应：投影复用要按它们的差算损伤区间。Doc 是不可变的，
+    //   拷贝只是一个引用计数（未改的子树与新的那份共享）。
+    const rev::Doc before = session_->doc();
     const rev::Applied r = session_->applySteps(steps);
     if (!r.ok) return false;
     if (!r.changed) return true;  // 什么都没改：不占撤销栈，也不白跑一次重建
+    const rev::Damage dmg = rev::damage(before, session_->doc());
     recordSelection(selection_before, selection_after);
-    rebuildFromTree();
+    rebuildFromTree(&dmg.range);
     markLayoutDirty(dirty_para);
     return true;
 }
@@ -456,8 +465,10 @@ void EditorEngine::recordSelection(Range before, Range after) {
 
 bool EditorEngine::undo() {
     if (!loaded_ || !session_) return false;
+    const rev::Doc before = session_->doc();
     if (!session_->undo()) return false;
-    rebuildFromTree();
+    const rev::Damage dmg = rev::damage(before, session_->doc());
+    rebuildFromTree(&dmg.range);
     // 撤销会改到哪一段是不可定位的（一批步骤可能跨段），所以整篇重排。
     markAllLayoutDirty();
     // 恢复的是整个区间，不是只看焦点端：撤销前那一对快照本来就是 Range。
@@ -471,8 +482,10 @@ bool EditorEngine::undo() {
 
 bool EditorEngine::redo() {
     if (!loaded_ || !session_) return false;
+    const rev::Doc before = session_->doc();
     if (!session_->redo()) return false;
-    rebuildFromTree();
+    const rev::Damage dmg = rev::damage(before, session_->doc());
+    rebuildFromTree(&dmg.range);
     markAllLayoutDirty();
     if (sel_pos_ < sel_history_.size()) {
         setSelection(sel_history_[sel_pos_].after);
@@ -500,7 +513,7 @@ size_t EditorEngine::frameBytes() const { return bitmap_.byteSize(); }
 
 size_t EditorEngine::documentCodepoints() const {
     size_t n = 0;
-    for (const BlockSpec& b : blocks_) n += b.cp_text.size();
+    for (const BlockSpec& b : blocks()) n += b.cp_text.size();
     return n;
 }
 
@@ -706,13 +719,13 @@ void EditorEngine::setFocusAtSideLine(int para, size_t offset, int side, int lin
  * LineBox::kInlineOffsetOuter 说"贴外侧"。这里把它翻成侧别。
  */
 void EditorEngine::setCaretAt(int para, size_t offset, int field) {
-    if (blocks_.empty()) {
+    if (blocks().empty()) {
         setCaretAtSide(para, offset, -1);
         return;
     }
     int p = para;
     if (p < 0) p = 0;
-    if (p >= static_cast<int>(blocks_.size())) p = static_cast<int>(blocks_.size()) - 1;
+    if (p >= static_cast<int>(blocks().size())) p = static_cast<int>(blocks().size()) - 1;
     const size_t at = caret_.snapToCluster(p, offset);
     setCaretAtSide(p, at, caret_.sideFromHint(p, at, field));
 }
@@ -1106,7 +1119,7 @@ bool EditorEngine::focusControlAndRender(bool forward) {
 }
 
 bool EditorEngine::tabCaret(bool backward) {
-    if (blocks_.empty()) return false;
+    if (blocks().empty()) return false;
     // 文档模式与只读模式都不消费 Tab：后者要放行给宿主（吞掉会把键盘用户困在编辑器里），
     //   前者的 Tab 该是制表符 —— 但那一步还没落地（排版层没有制表位），所以文档模式现在
     //   由宿主当缩进处理，见 EngineConfig::tab_spaces。

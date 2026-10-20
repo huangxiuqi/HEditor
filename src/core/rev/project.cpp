@@ -21,8 +21,25 @@ namespace {
  */
 class Walker {
 public:
-    Walker(const StyleSheet* sheet, const ViewParams& vp, bool full)
-        : sheet_(sheet), vp_(vp), full_(full) {}
+    Walker(const StyleSheet* sheet, const ViewParams& vp, bool full, std::vector<BlockSpec>* blocks,
+           const BlockHistory* prev, const BlockDamage* dmg, int style_version)
+        : sheet_(sheet), vp_(vp), full_(full), blocks_(blocks), prev_(prev) {
+        style_version_ = style_version;
+        if (blocks_ == nullptr) return;
+        if (prev_ == nullptr || dmg == nullptr || !dmg->changed) return;
+        // 样式表版本不同：块哈希一样、格式却要重新解析 —— 搬过来就是旧格式。
+        if (prev_->style_version != style_version_) return;
+        // 上一轮的身份账必须与块流同长，否则"第几块"这个坐标无处可落 —— 宁可全量。
+        if (prev_->keys.size() != blocks_->size()) return;
+        if (dmg->lo < 0 || dmg->hi < dmg->lo || dmg->hi > dmg->after_blocks) return;
+        plan_.lo = dmg->lo;
+        plan_.hi = dmg->hi;
+        plan_.before_blocks = static_cast<int>(blocks_->size());
+        plan_.after_blocks = dmg->after_blocks;
+        plan_.active = true;
+        fresh_.reserve(blocks_->size());
+        out_.keys.reserve(blocks_->size());
+    }
 
     Projection run(const Doc& doc) {
         // 从根的孩子表走：每一节都在里面。段落号在节之间连续，投影按流顺序攒块，
@@ -34,7 +51,45 @@ public:
             // 一段都产不出来，控件边界于是凭空消失。
             if (!runs_.empty() || !objects_.empty()) flush(nullptr);
         }
-        out_.style_version = (sheet_ != nullptr) ? sheet_->version() : 0;
+        out_.style_version = style_version_;
+        if (blocks_ == nullptr) {
+            out_.blocks = std::move(fresh_);
+            out_.keys = std::move(fresh_keys_);
+            return std::move(out_);
+        }
+        if (plan_.active) {
+            // 坐标与实际物化的块数对不上 ⇒ 这一轮不能按区间拼。整篇重来一次（不带复用），
+            //   内容一定正确，只是慢一回。宁可慢，也不要把块拼到错位置。
+            if (static_cast<int>(fresh_.size()) != plan_.hi - plan_.lo) {
+                plan_.active = false;
+                fresh_.clear();
+                fresh_keys_.clear();
+                block_index_ = 0;
+                out_ = Projection{};
+                out_.style_version = style_version_;
+                if (doc.root != nullptr) {
+                    for (const Ref& c : doc.root->children) walk(c);
+                    if (!runs_.empty() || !objects_.empty()) flush(nullptr);
+                }
+            }
+        }
+        if (plan_.active) {
+            // 原地更新：区间之外的块与身份一个字都不动，只把中段换掉。
+            //   旧块流里要删的那一段与 after 的区间长度不同 —— 两边块数差 shift，
+            //   所以旧区间的右端是 hi - shift（分段时少删一块、合并时多删一块）。
+            const int shift = plan_.after_blocks - plan_.before_blocks;
+            const int old_lo = plan_.lo;
+            const int old_hi = std::max(old_lo, plan_.hi - shift);
+            blocks_->erase(blocks_->begin() + old_lo, blocks_->begin() + old_hi);
+            blocks_->insert(blocks_->begin() + old_lo, std::make_move_iterator(fresh_.begin()),
+                            std::make_move_iterator(fresh_.end()));
+            out_.keys = prev_->keys;
+            out_.keys.erase(out_.keys.begin() + old_lo, out_.keys.begin() + old_hi);
+            out_.keys.insert(out_.keys.begin() + old_lo, fresh_keys_.begin(), fresh_keys_.end());
+        } else {
+            *blocks_ = std::move(fresh_);
+            out_.keys = std::move(fresh_keys_);
+        }
         return std::move(out_);
     }
 
@@ -235,7 +290,7 @@ private:
                 lc.row_span = cs.row_span;
                 lc.col_span = cs.col_span;
                 lc.v_align = mapCellVAlign(cs.v_align);
-                lc.first_block = static_cast<int>(out_.blocks.size());
+                lc.first_block = block_index_;
                 const int ci = static_cast<int>(out_.tables[ti].cells.size());
                 out_.tables[ti].cells.push_back(lc);
                 pushContainer(cell);
@@ -243,7 +298,7 @@ private:
                 flushIfPending();
                 popContainer();
                 out_.tables[ti].cells[static_cast<size_t>(ci)].block_count =
-                    static_cast<int>(out_.blocks.size()) - lc.first_block;
+                    block_index_ - lc.first_block;
                 path_.pop_back();
                 ++cell_no;
             }
@@ -320,14 +375,14 @@ private:
             const int owner = static_cast<int>(n->id);
             ControlSpan span;
             span.node = n;
-            span.block = static_cast<int>(out_.blocks.size());
+            span.block = block_index_;
             span.cp = cpCount();
             noteFirst(n->id);
             emitObject(InlineObject{static_cast<uint32_t>(cpCount()),
                                     InlineObjectKind::ControlStart, owner, spec.readonly},
                        n);
             for (const Ref& c : n->children) walk(c);
-            span.end_block = static_cast<int>(out_.blocks.size());
+            span.end_block = block_index_;
             span.end_cp = cpCount();
             noteFirst(n->id);
             emitObject(InlineObject{static_cast<uint32_t>(cpCount()), InlineObjectKind::ControlEnd,
@@ -350,12 +405,39 @@ private:
     }
 
     /**
+     * 试着从上一轮搬这一块。返回 true 表示已搬进产物。
+     *
+     * 坐标只用来定位，不当作正确性依据：区间给的是"上一轮第几块与之对应"，
+     *   搬之前还要比内容哈希与来源身份。坐标报偏了最多是少搬一块（这一块重新物化），
+     *   不会把旧内容顶上去 —— 那种失效会静默地让画面停在旧内容上，而内容判据全绿。
+     *
+     * 区间之内一律不复用：那里本来就是"要重算"的那一段。
+     */
+    bool canReuse(const BlockHash& hash, NodeId mark, NodeId first) {
+        if (!plan_.active || blocks_ == nullptr || prev_ == nullptr) return false;
+        const bool in_prefix = block_index_ < plan_.lo;
+        if (!in_prefix && block_index_ < plan_.hi) return false;
+        const int shift = plan_.after_blocks - plan_.before_blocks;
+        const int src = in_prefix ? block_index_ : block_index_ - shift;
+        if (src < 0 || src >= static_cast<int>(blocks_->size())) return false;
+        const BlockKey& k = prev_->keys[static_cast<size_t>(src)];
+        // 两半都要过：内容没变（哈希）、身份没换（同一枚标记与同一个首个内容节点）。
+        //   只比哈希会把"内容相同的另一段"搬过来，于是来源身份错位、光标落偏一个字。
+        if (!(k.hash == hash)) return false;
+        if (k.source.mark != mark || k.source.first != first) return false;
+        // 命中之后什么都不用做：块与身份就留在调用方的块流里，遍历结束只替换中段。
+        ++out_.reused;
+        return true;
+    }
+
+    /**
      * 落一段。mark 为空表示这一段没有结束标记（末尾未结束），用默认段落格式。
      */
     void flush(const Ref& mark) {
-        ProjectedBlock pb;
-        pb.source.mark = (mark != nullptr) ? mark->id : kInvalidNodeId;
-        pb.source.first = (cur_first_ != kInvalidNodeId) ? cur_first_ : pb.source.mark;
+        // 身份与哈希先用局部变量算，块本身等到"确定要物化"时才构造 —— 复用路径上
+        //   构造一个 BlockSpec 再丢掉，等于把省下来的那一份又花回去一半。
+        const NodeId mark_id = (mark != nullptr) ? mark->id : kInvalidNodeId;
+        const NodeId first_id = (cur_first_ != kInvalidNodeId) ? cur_first_ : mark_id;
         cur_first_ = kInvalidNodeId;
 
         // 块哈希只从贡献这个块的节点与对象算。节点哈希本身已经是内容哈希，所以"改一段"只
@@ -388,8 +470,23 @@ private:
             h.i64(slot.row);
             h.i64(slot.cell);
         }
-        pb.hash = BlockHash{h.lo(), h.hi()};
+        const BlockHash hash{h.lo(), h.hi()};
         obj_hash_ = Hasher{};
+
+        // 增量复用：坐标给出"与上一轮哪一块对应"，哈希与来源身份确认"它真的没变"。
+        //   分节强制分页这一位不在块哈希里，所以那一块不复用。
+        if (!pending_section_break_ && canReuse(hash, mark_id, first_id)) {
+            objects_.clear();
+            atoms_.clear();
+            runs_.clear();
+            ++block_index_;
+            return;
+        }
+
+        ProjectedBlock pb;
+        pb.source.mark = mark_id;
+        pb.source.first = first_id;
+        pb.hash = hash;
 
         if (full_) {
             // 原子的盒子在这里定：公式的默认框按段落字号估，而字号是段落属性 —— 走到原子
@@ -449,7 +546,9 @@ private:
         objects_.clear();
         atoms_.clear();
         runs_.clear();
-        out_.blocks.push_back(std::move(pb));
+        fresh_.push_back(std::move(pb.spec));
+        fresh_keys_.push_back(BlockKey{pb.hash, pb.source});
+        ++block_index_;
     }
 
     const StyleSheet* sheet_;
@@ -468,21 +567,59 @@ private:
     NodeId cur_first_ = kInvalidNodeId;
     Hasher obj_hash_;
     Projection out_;
+
+    /**
+     * 调用方持有的块流：既是被复用的上一轮，也是这一轮的输出。
+     */
+    std::vector<BlockSpec>* blocks_ = nullptr;
+    /**
+     * 上一轮的身份账与样式表版本。空表示全量投影。
+     */
+    const BlockHistory* prev_ = nullptr;
+    /**
+     * 这一轮物化出来的块（只有损伤区间那一段）。
+     */
+    std::vector<BlockSpec> fresh_;
+    std::vector<BlockKey> fresh_keys_;
+    int style_version_ = 0;
+    /**
+     * 损伤区间与两边的块数。active 为假时整篇物化。
+     */
+    struct Plan {
+        int lo = 0;
+        int hi = 0;
+        int before_blocks = 0;
+        int after_blocks = 0;
+        bool active = false;
+    } plan_;
+    /**
+     * 正在攒第几块（按产物顺序）。复用与否只由它落在 lo/hi 的哪一侧决定。
+     */
+    int block_index_ = 0;
 };
 
 }  // namespace
 
-Projection project(const Doc& doc, const StyleSheet& sheet, const ViewParams& params) {
-    return Walker(&sheet, params, true).run(doc);
+Projection project(const Doc& doc, const StyleSheet& sheet, const ViewParams& params,
+                   std::vector<BlockSpec>* blocks, const BlockHistory* prev,
+                   const BlockDamage* dmg) {
+    const int v = sheet.version();
+    return Walker(&sheet, params, true, blocks, prev, dmg, v).run(doc);
+}
+
+Projection project(const Doc& doc, const StyleSheet& sheet, const ViewParams& params,
+                   std::vector<BlockSpec>* blocks) {
+    const int v = sheet.version();
+    return Walker(&sheet, params, true, blocks, nullptr, nullptr, v).run(doc);
 }
 
 std::vector<BlockHash> blockHashes(const Doc& doc, FlowVisibility vis) {
     ViewParams vp;
     vp.vis = vis;
-    const Projection p = Walker(nullptr, vp, false).run(doc);
+    const Projection p = Walker(nullptr, vp, false, nullptr, nullptr, nullptr, 0).run(doc);
     std::vector<BlockHash> out;
-    out.reserve(p.blocks.size());
-    for (const ProjectedBlock& b : p.blocks) out.push_back(b.hash);
+    out.reserve(p.keys.size());
+    for (const BlockKey& k : p.keys) out.push_back(k.hash);
     return out;
 }
 
@@ -498,7 +635,9 @@ BlockDamage diffBlocks(const std::vector<BlockHash>& before, const std::vector<B
     for (int i = 0; !changed && i < n; ++i) {
         if (!(before[i] == after[i])) changed = true;
     }
-    return BlockDamage{p, m - s, changed};
+    BlockDamage out{p, m - s, changed};
+    out.after_blocks = m;
+    return out;
 }
 
 namespace {
@@ -617,7 +756,11 @@ private:
                 continue;
             }
             if (in_x.count(y[j]->id) == 0) {
-                mark(off, y[j]->paras > 0 ? y[j]->paras : 1);
+                // 插入。插进来的若是段落标记，它结束的就是"当前这一块" —— 而当前块的
+                //   起点可能在 off 之前（walk 对内容叶子只标块、不结算 off），所以这里
+                //   连当前块一起标两格。多报一块只会多物化一块，漏报会让新段沿用旧内容。
+                const int span = (y[j]->paras > 0) ? y[j]->paras : 1;
+                mark(off, y[j]->kind == NodeKind::ParagraphMark ? span + 1 : span);
                 off += y[j]->paras;
                 ++j;
                 continue;
@@ -627,6 +770,19 @@ private:
         }
     }
 };
+
+/**
+ * 文档流的最后一个叶子是不是"内容"。是的话，末尾就有一段没有结束标记 —— 投影会给它补
+ * 一块，而 paras 不计这一块。叶子是段落标记、或者整棵树只有空容器时，都不补。
+ */
+bool endsOpen(const Ref& n) {
+    const Ref* cur = &n;
+    while (cur != nullptr && !(*cur)->children.empty()) cur = &(*cur)->children.back();
+    if (cur == nullptr) return false;
+    const NodeKind k = (*cur)->kind;
+    return k == NodeKind::TextRun || k == NodeKind::Image || k == NodeKind::Formula ||
+           k == NodeKind::ContentControl;
+}
 
 }  // namespace
 
@@ -641,10 +797,16 @@ Damage damage(const Doc& before, const Doc& after) {
     w.walk(before.root, after.root, off);
     out.visited = w.visited;
     out.scanned = w.scanned;
-    out.range.changed = w.any || (before.root->paras != after.root->paras);
+    out.range.after_blocks = off;
+    // 末尾那一段没有结束标记时，投影在遍历结束后补一块，而 paras 不计它。坐标要跟着补，
+    //   否则按区间搬块会把最后一块搬到它前面去（判据 [22] 的"末尾开放"形状守着）。
+    const bool open = endsOpen(after.root);
+    if (open) ++out.range.after_blocks;
+    out.range.changed =
+        w.any || (before.root->paras != after.root->paras) || (endsOpen(before.root) != open);
     // 区间夹到 after 的块数：尾部删段时"落点"会落在末尾之外，而调用方要重排的块不存在。
-    out.range.lo = std::min(w.lo, off);
-    out.range.hi = std::min(w.hi, off);
+    out.range.lo = std::min(w.lo, out.range.after_blocks);
+    out.range.hi = std::min(w.hi + ((open && w.any) ? 1 : 0), out.range.after_blocks);
     return out;
 }
 

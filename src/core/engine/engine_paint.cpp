@@ -894,15 +894,15 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
     edit_stats_.caret_control = focusedControlIndex();
     edit_stats_.blocked_edits = blocked_edits_;
     edit_stats_.caret_index = caret_now.offset;
-    for (int i = 0; i < caret_now.para && i < static_cast<int>(blocks_.size()); ++i)
-        edit_stats_.caret_index += blocks_[static_cast<size_t>(i)].cp_text.size();
+    for (int i = 0; i < caret_now.para && i < static_cast<int>(blocks().size()); ++i)
+        edit_stats_.caret_index += blocks()[static_cast<size_t>(i)].cp_text.size();
     edit_stats_.doc_codepoints = documentCodepoints();
 
     // 只有在"这一轮真的重排过"时才上报 —— 见 layout_pending_ 的注释。
     // 数字来自 relayout() 记下的粒度：全量时 relaid_lines 等于总行数，
     // 增量时只数这一轮真正排过的后缀（前缀是复用的，不能算进来）。
     edit_stats_.layout_ran = layout_pending_;
-    edit_stats_.total_paragraphs = static_cast<int>(blocks_.size());
+    edit_stats_.total_paragraphs = static_cast<int>(blocks().size());
     edit_stats_.total_lines = layout_.stats.placed_line_count;
     if (layout_pending_) {
         layout_pending_ = false;

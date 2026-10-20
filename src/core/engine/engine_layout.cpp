@@ -248,8 +248,8 @@ void EditorEngine::glyphRangeOnPage(int page, int* begin, int* end) const {
     const std::vector<PlacedGlyph>& gs = layout_.glyphs;
     const auto b = std::lower_bound(gs.begin(), gs.end(), page,
                                     [](const PlacedGlyph& g, int p) { return g.page < p; });
-    const auto e = std::upper_bound(b, gs.end(), page,
-                                    [](int p, const PlacedGlyph& g) { return p < g.page; });
+    const auto e =
+        std::upper_bound(b, gs.end(), page, [](int p, const PlacedGlyph& g) { return p < g.page; });
     *begin = static_cast<int>(b - gs.begin());
     *end = static_cast<int>(e - gs.begin());
 }
@@ -305,11 +305,10 @@ void EditorEngine::relayout() {
     //
     //   这里只夹数值范围，不吸附簇：簇吸附需要簇表，而此刻尚未排版；用上一轮的簇表
     //     会把光标拉回旧簇边界，表现为"敲字后光标差一个位置"。簇吸附放在排版之后。
-    if (!blocks_.empty()) {
+    if (!blocks().empty()) {
         int para = caret_.caretPara();
-        if (para >= static_cast<int>(blocks_.size()))
-            para = static_cast<int>(blocks_.size()) - 1;
-        const size_t len = blocks_[static_cast<size_t>(para)].cp_text.size();
+        if (para >= static_cast<int>(blocks().size())) para = static_cast<int>(blocks().size()) - 1;
+        const size_t len = blocks()[static_cast<size_t>(para)].cp_text.size();
         const CaretResolver::BracketCounts bc = caret_.bracketCountsAt(para, len);
         const int span = static_cast<int>(len) + bc.before + bc.closes + bc.opens;
         if (caret_.caretRel() > span) caret_.setCaretRel(para, span);
@@ -324,7 +323,7 @@ void EditorEngine::relayout() {
     // 名单仍由引擎算（bracketedControls，只有它认识"聚焦"），但它落成的是块流里的
     //   一项，排版层拿到的是一份自足的输入：要画与要占位是同一条记录，分不开。
     syncInlineObjects();
-    const int n_para = static_cast<int>(blocks_.size());
+    const int n_para = static_cast<int>(blocks().size());
 
     // 四档决策，从严到宽：整篇都脏或没有脏段走全量（前者影响面不可定位，后者是保守
     // 回退）；只重排脏段、后缀原样搬回（trySpliceOnly，要求后缀的行结构没变）；
@@ -338,8 +337,7 @@ void EditorEngine::relayout() {
     //   这一下当成普通编辑，而 layout_ 里全是带表格时排出来的行盒。
     const bool had_tables = !layout_.placed_tables.empty();
     const bool can_resume = tables_.empty() && !had_tables && !must_full && from > 0 &&
-                            from < n_para &&
-                            layout_.para_index.size() > static_cast<size_t>(from);
+                            from < n_para && layout_.para_index.size() > static_cast<size_t>(from);
 
     last_reused_paragraphs_ = 0;
     last_suffix_shifted_ = false;
@@ -372,8 +370,8 @@ void EditorEngine::relayout() {
             layout_.para_index[static_cast<size_t>(from)].state_at_start;
         const int prefix_lines = layout_.para_index[static_cast<size_t>(from)].line_begin;
         truncateLayoutAt(from);
-        layoutDocumentRangeWithTables(fonts_, blocks_, cfg_.page, tables_, from, n_para, resume_state, &shaping_cache_,
-                            &layout_);
+        layoutDocumentRangeWithTables(fonts_, blocks(), cfg_.page, tables_, from, n_para,
+                                      resume_state, &shaping_cache_, &layout_);
         last_relaid_paragraphs_ = n_para - from;
         last_relaid_lines_ = layout_.stats.placed_line_count - prefix_lines;
         last_layout_full_ = false;
@@ -398,8 +396,8 @@ void EditorEngine::relayout() {
         }
     } else {
         layout_ = LayoutResult{};
-        layoutDocumentRangeWithTables(fonts_, blocks_, cfg_.page, tables_, 0, n_para, freshReflowState(cfg_.page),
-                            &shaping_cache_, &layout_);
+        layoutDocumentRangeWithTables(fonts_, blocks(), cfg_.page, tables_, 0, n_para,
+                                      freshReflowState(cfg_.page), &shaping_cache_, &layout_);
         last_relaid_paragraphs_ = n_para;
         last_relaid_lines_ = layout_.stats.placed_line_count;
         last_layout_full_ = true;
@@ -426,7 +424,7 @@ void EditorEngine::relayout() {
     // 光标吸附到簇边界 —— 编辑可能让段落变短。吸附只改码点偏移，侧别跟着走
     //   （rel 是唯一真源，见 setCaretRel）：已经落在簇边界上就一个字都别碰，
     //   否则按"最内层"重投影一次。
-    if (!blocks_.empty()) {
+    if (!blocks().empty()) {
         const TextPos cp = caret();
         const size_t snapped = caret_.snapToCluster(cp.para, cp.offset);
         if (snapped != cp.offset) setCaretByText(TextPos{cp.para, snapped});
@@ -450,7 +448,7 @@ EditorEngine::SuffixReuse EditorEngine::trySuffixReuse(int from, int* page_lo, i
     // 有表格时不做后缀复用：理由与 can_resume 那一条相同 —— 搬回来的后缀带着旧的页号与
     //   块轴位置，而表格让"这一段落在哪一页的哪一格"不再是三个标量能续上的。
     if (!tables_.empty() || !layout_.placed_tables.empty()) return SuffixReuse::None;
-    const int n_para = static_cast<int>(blocks_.size());
+    const int n_para = static_cast<int>(blocks().size());
     const int n_old = static_cast<int>(layout_.para_index.size());
     // 段数增量：这一次编辑把旧 [from, from + m_old) 段换成了新 [from, from + m_new) 段，
     //   m_new - m_old 恒等于它（回车分段 +1、退格合并 -1、段内敲字 0）。
@@ -467,7 +465,7 @@ EditorEngine::SuffixReuse EditorEngine::trySuffixReuse(int from, int* page_lo, i
     //   属于它自己那一段 —— 前面某一段的编辑既不移它的锚点，也不改它的盒宽高。把原子
     //   也当成"端点会动"的占位，会让"每段都有一张图"的文档整篇失去后缀复用。
     for (int p = from + 1; p < n_para; ++p) {
-        for (const InlineObject& o : blocks_[static_cast<size_t>(p)].objects) {
+        for (const InlineObject& o : blocks()[static_cast<size_t>(p)].objects) {
             if (o.kind != InlineObjectKind::Atom) return SuffixReuse::None;
         }
     }
@@ -486,8 +484,9 @@ EditorEngine::SuffixReuse EditorEngine::trySuffixReuse(int from, int* page_lo, i
     if (from + m_new > n_para || from + m_old >= n_old) return SuffixReuse::None;
 
     LayoutResult scratch;
-    const ReflowState after = layoutDocumentRangeWithTables(fonts_, blocks_, cfg_.page, tables_, from, from + m_new,
-                                                  resume, &shaping_cache_, &scratch);
+    const ReflowState after =
+        layoutDocumentRangeWithTables(fonts_, blocks(), cfg_.page, tables_, from, from + m_new,
+                                      resume, &shaping_cache_, &scratch);
 
     // 脏区新旧两版的段范围 → 行/字形范围。段在数组里是连续排列的，两端各取一次就是整段。
     const ParaIndex& old_last = layout_.para_index[static_cast<size_t>(from + m_old - 1)];
@@ -632,8 +631,8 @@ EditorEngine::SuffixReuse EditorEngine::trySuffixReuse(int from, int* page_lo, i
 
 bool EditorEngine::suffixIsHorizontalOnly(int from) const {
     // from 就是后缀的第一段（含）；后缀整体平移只对横排成立，见 shiftSuffixBlockAxis。
-    for (int p = from; p < static_cast<int>(blocks_.size()); ++p) {
-        if (blocks_[static_cast<size_t>(p)].wm.isVertical()) return false;
+    for (int p = from; p < static_cast<int>(blocks().size()); ++p) {
+        if (blocks()[static_cast<size_t>(p)].wm.isVertical()) return false;
     }
     return true;
 }
@@ -641,7 +640,7 @@ bool EditorEngine::suffixIsHorizontalOnly(int from) const {
 bool EditorEngine::shiftSuffixBlockAxis(int from, size_t first_glyph, const ReflowState& after) {
     const float cy = cfg_.page.margin_pt;
     const float ch = cfg_.page.contentHeightPt();
-    const int n_para = static_cast<int>(blocks_.size());
+    const int n_para = static_cast<int>(blocks().size());
 
     std::vector<PlacedGlyph>& gs = layout_.glyphs;  // 校验与改写共用这一份
 
@@ -661,7 +660,7 @@ bool EditorEngine::shiftSuffixBlockAxis(int from, size_t first_glyph, const Refl
         size_t g = first_glyph;
         // from 就是后缀的第一段（脏区可能占不止一段，所以调用方另给了 first_glyph）
         for (int p = from; p < n_para; ++p) {
-            const BlockSpec& b = blocks_[static_cast<size_t>(p)];
+            const BlockSpec& b = blocks()[static_cast<size_t>(p)];
             // 续排锚点：每一段都要更新成新的位置，否则以后从这一段续排会拿着过期
             // 状态（页号 / 块轴位置 / 行号都变了）。与主循环一致：在空段判定与翻页
             // 之前记录。
@@ -794,6 +793,15 @@ void EditorEngine::syncInlineObjects() {
             keep.push_back(control_node_ids_[static_cast<size_t>(ci)]);
         }
     }
+    // 名单覆盖了全部控件：不筛。blocks_ 不存东西，排版直接吃 blocks_full_（同一份）。
+    // 名单覆盖了全部控件：不筛。blocks_ 不存东西，排版直接吃 blocks_full_（同一份）。
+    if (keep.size() >= control_node_ids_.size()) {
+        blocks_.clear();
+        filter_active_ = false;
+        return;
+    }
+    filter_active_ = true;
+    blocks_ = blocks_full_;
     const size_t n = std::min(blocks_.size(), blocks_full_.size());
     for (size_t p = 0; p < n; ++p) {
         const std::vector<InlineObject>& src = blocks_full_[p].objects;

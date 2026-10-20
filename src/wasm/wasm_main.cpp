@@ -295,8 +295,7 @@ void rebuildDocument(bool keep_caret) {
     if (keep_caret) {
         for (const BlockSpec& b : g_engine.blocks()) text_before += b.textUtf8();
     }
-    g_engine.setDocument(g_table_demo ? demoTableTree(g_cjk_font)
-                                      : demoTree(g_blocks, g_fields),
+    g_engine.setDocument(g_table_demo ? demoTableTree(g_cjk_font) : demoTree(g_blocks, g_fields),
                          StyleSheet{});
     if (!keep_caret) return;
     std::string text_after;
@@ -434,7 +433,8 @@ std::string selectionStyleJson() {
  */
 int prewarmPageGlyphs(int page) { return g_engine.prewarmPageGlyphs(page); }
 
-void relayoutAndPaint() {    g_engine.relayout();
+void relayoutAndPaint() {
+    g_engine.relayout();
     g_engine.repaint();
 }
 
@@ -744,8 +744,7 @@ std::string hitTest(float x_pt, float y_pt) {
     int side = 0;
     int line_aff = 0;
     int cell_para = -1;
-    if (!g_engine.hitTestPt(x_pt, y_pt, &p, &owner, &side, &line_aff, &cell_para))
-        return "null";
+    if (!g_engine.hitTestPt(x_pt, y_pt, &p, &owner, &side, &line_aff, &cell_para)) return "null";
     std::ostringstream o;
     o << "{\"para\":" << p.para << ",\"offset\":" << p.offset << ",\"field\":" << owner
       << ",\"side\":" << side << ",\"line\":" << line_aff;
@@ -774,8 +773,7 @@ std::string hitTest(float x_pt, float y_pt) {
  * 宿主不要自己拼这两个数：它只该原样搬运引擎算出来的结论。
  */
 void setCaretAtSideLine(int para, int offset, int side, int line_aff) {
-    g_engine.setCaretAtSideLine(para, static_cast<size_t>(offset < 0 ? 0 : offset), side,
-                                line_aff);
+    g_engine.setCaretAtSideLine(para, static_cast<size_t>(offset < 0 ? 0 : offset), side, line_aff);
 }
 
 /**
@@ -799,8 +797,7 @@ void setFocusAtSide(int para, int offset, int side) {
  * 拖到下一行行首时也要贴着那一行，否则选区末端的矩形停在上一行行尾。
  */
 void setFocusAtSideLine(int para, int offset, int side, int line_aff) {
-    g_engine.setFocusAtSideLine(para, static_cast<size_t>(offset < 0 ? 0 : offset), side,
-                                line_aff);
+    g_engine.setFocusAtSideLine(para, static_cast<size_t>(offset < 0 ? 0 : offset), side, line_aff);
 }
 
 /**
@@ -1040,9 +1037,10 @@ std::string linesJson(int from_para, int to_para) {
         if (!first) o << ",";
         first = false;
         o << "{\"para\":" << lb.paragraph << ",\"line\":" << lb.line << ",\"page\":" << lb.page
-          << ",\"v\":" << (lb.vertical ? 1 : 0) << ",\"cp\":[" << lb.first_cp << ","
-          << lb.last_cp << "],\"blo\":" << lb.block_lo_pt << ",\"bhi\":" << lb.block_hi_pt
-          << ",\"iorg\":" << lb.inline_origin_pt << ",\"iend\":" << lb.inline_end_pt
+          << ",\"v\":" << (lb.vertical ? 1 : 0) << ",\"cp\":[" << lb.first_cp << "," << lb.last_cp
+          << "],\"blo\":" << lb.block_lo_pt << ",\"bhi\":" << lb.block_hi_pt
+          << ",\"iorg\":" << lb.inline_origin_pt << ",\"iend\":"
+          << lb.inline_end_pt
           // 格范围（页内磅）：判据要拿它比"选区是不是整格"。不在表格里时两组都是 0。
           //   clo/chi 是内容区（命中用），cxlo/cxhi 是格外框（反白用它，含两侧内边距）。
           << ",\"clo\":" << lb.cell_lo_pt << ",\"chi\":" << lb.cell_hi_pt
@@ -1080,12 +1078,12 @@ std::string bracketSlotsJson() {
               << (c.read_only ? "true" : "false")
               // 占位簇上记的是产生端的句柄（持树时是控件节点 id），宿主要的是控件下标 ——
               //   差这一道翻译，报出来的归属就与 controls.items 的下标对不上。
-              << ",\"owner\":" << g_engine.controlIndexOfOwner(c.owner_control)
+              << ",\"owner\":"
+              << g_engine.controlIndexOfOwner(c.owner_control)
               // 行内原子也在这张表里（它同样是"占了一个槽的占位簇"）：kind 0 不是原子，
               //   1 是图片、2 是公式。判据靠它区分"槽是括号还是原子" —— 两者的
               //   side / owner 都是 0 与 -1，光看那两个字段分不开。
-              << ",\"atom\":" << static_cast<int>(c.atom)
-              << ",\"h\":" << c.atom_h_pt
+              << ",\"atom\":" << static_cast<int>(c.atom) << ",\"h\":" << c.atom_h_pt
               << ",\"x\":" << (lb.inline_origin_pt + c.inline_pt) << "}";
         }
     }
@@ -1122,7 +1120,6 @@ void loadStressDocumentImpl(int paras, int chars, bool diverse) {
     if (paras < 1) paras = 1;
     if (chars < 1) chars = 1;
 
-
     std::vector<BlockSpec> blocks;
     for (int i = 0; i < paras; ++i) {
         std::string text;
@@ -1155,9 +1152,7 @@ void loadStressDocument(int paras, int chars) { loadStressDocumentImpl(paras, ch
 /**
  * 同上，但每段用一批不同的常用字 —— 给"字形集合要有规模"的判据用。
  */
-void loadStressDocumentDiverse(int paras, int chars) {
-    loadStressDocumentImpl(paras, chars, true);
-}
+void loadStressDocumentDiverse(int paras, int chars) { loadStressDocumentImpl(paras, chars, true); }
 
 /**
  * 用一段真实文本造文档：按换行切段，每段一个块，整体重复 repeat 遍。
@@ -1274,6 +1269,7 @@ std::string editStatsJson() {
     o << "\"framePixels\":" << (static_cast<long long>(e.frame_w) * e.frame_h) << ",";
     o << "\"layoutMs\":" << e.layout_ms << ",";
     o << "\"rebuildCompileMs\":" << e.rebuild_compile_ms << ",";
+    o << "\"rebuildReused\":" << e.rebuild_reused << ",";
     o << "\"rebuildFlowMs\":" << e.rebuild_flow_ms << ",";
     o << "\"rebuildFlowPosMs\":" << e.rebuild_flowpos_ms << ",";
     o << "\"rebuildCopyMs\":" << e.rebuild_copy_ms << ",";
@@ -1454,8 +1450,7 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("setViewportAnchor", &setViewportAnchor);
     emscripten::function("windowFirstPage", &windowFirstPage);
     emscripten::function("frameSlots", &frameSlots);
-    emscripten::function("setFrameSlots",
-                         +[](int n) { g_engine.setFrameSlots(n); });
+    emscripten::function("setFrameSlots", +[](int n) { g_engine.setFrameSlots(n); });
     emscripten::function("windowPageCount", &windowPageCount);
     emscripten::function("pagePxWidth", &pagePxWidth);
     emscripten::function("pagePxHeight", &pagePxHeight);

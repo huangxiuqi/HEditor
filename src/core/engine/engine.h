@@ -30,6 +30,7 @@
 #include "core/render/bitmap.h"
 #include "core/rev/capability.h"
 #include "core/rev/flow.h"
+#include "core/rev/project.h"
 #include "core/rev/rev.h"
 #include "core/rev/session.h"
 #include "core/text/font.h"
@@ -82,7 +83,11 @@ public:
     /**
      * 排版层的输入：块流。它只有一个产处 —— 模型树编译出来的产物（见 setDocument）。
      */
-    const std::vector<BlockSpec>& blocks() const { return blocks_; }
+    /**
+     * 排版输入。名单覆盖全部控件时它就是 blocks_full_（同一份，不拷贝）；
+     * 只有真的筛掉了某些括号时才有另一份。
+     */
+    const std::vector<BlockSpec>& blocks() const { return filter_active_ ? blocks_ : blocks_full_; }
     /**
      * 与块流同一层的产物：表格结构（宽度、列宽、行规则、每格的跨度与块区间）。
      *
@@ -862,7 +867,7 @@ private:
      * 从持有的树重新编译出块流，并把控件集合从产物的边界里导出来。
      * 隐藏控件的可见性口径按当前编辑模式取（见 setDocument 的说明）。
      */
-    void rebuildFromTree();
+    void rebuildFromTree(const rev::BlockDamage* dmg = nullptr);
 
     /**
      * 重建的收尾：流索引、段的流区间递推、块流副本、控件视图。
@@ -1239,6 +1244,9 @@ private:
 
     EngineConfig cfg_;
     FontLibrary fonts_;
+    /**
+     * 筛过括号的那一份，只在 filter_active_ 为真时有效。
+     */
     std::vector<BlockSpec> blocks_;
 
     /**
@@ -1248,16 +1256,29 @@ private:
     std::optional<rev::Session> session_;
     StyleSheet sheet_;
     /**
+     * 上一轮每块的身份（内容哈希 + 来源）与样式表版本，与 blocks_full_ 同长同序。
+     *
+     * 它只是"上一轮的账"，不是第二个真相：块本身就在 blocks_full_ 里，投影按损伤区间
+     * 原地保留区间之外的那些 —— 所以既没有第二份块流，也没有整份拷贝。装载新文档时清掉。
+     */
+    rev::BlockHistory proj_hist_;
+    /**
      * 装载过文档没有（setDocument 置位）。没装载过时没有树、没有流、也没有事务栈 ——
      * 编辑入口一律拒绝，审计入口报"没有可比的东西"，而不是拿一棵空树去编出 0 段来。
      */
     bool loaded_ = false;
     /**
-     * 编译的完整产物。"按要显示括号的名单筛一遍"这一处读它 —— blocks_ 是筛过之后的
-     * 副本。筛是破坏性的（对象表会被删项），而名单会来回变（Focused 档与 All 档之间切），
-     * 没有这份原件，被删掉的边界就回不来了。
+     * 块流（唯一一份）：投影就地更新它，排版也吃它。
+     *
+     * "按要显示括号的名单筛一遍"是破坏性的（对象表会被删项），而名单会来回变，所以
+     * 只有真的需要筛时才把筛过的结果放进 blocks_ —— 名单覆盖全部控件时 blocks_ 是空的，
+     * blocks() 直接给这一份，不存在副本。
      */
     std::vector<BlockSpec> blocks_full_;
+    /**
+     * 筛过括号的块流。只为"名单真的排除了某些控件"而存在，其余时候为空。
+     */
+    bool filter_active_ = false;
     /**
      * 表格结构（编译产物的一种投影，与 blocks_full_ 同源）。排版吃它来按格布局；
      * 它也是"这张表跨了几页、格线画在哪"的输入。没有表格时为空。

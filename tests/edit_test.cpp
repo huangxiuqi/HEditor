@@ -10062,6 +10062,49 @@ int main() {
         expectTrue(rev::paraTexts(doc) != start_text, "这一串编辑真的改动了文档");
     }
 
+    std::printf("\n[55] 增量投影：一次编辑之后只有改动的那一块重算\n");
+    {
+        // 这条判据盯的是"退步会不会无声地回来"：耗时会被更快的机器掩盖，复用块数不会。
+        //   它也是 [54] 的另一半 —— 那边保证"产物对"，这边保证"没有整篇重算"。
+        EditorEngine e;
+        expectTrue(e.init({cjkPath, mnPath, latinPath}), "引擎初始化（增量投影）");
+        EngineConfig c;
+        c.zoom = 1.0f;
+        c.page.width_pt = 360.0f;
+        c.page.height_pt = 300.0f;
+        c.page.margin_pt = 12.0f;
+        e.setConfig(c);
+
+        NodeTree t;
+        const NodeId sec = t.firstSectionId();
+        for (int i = 0; i < 6; ++i) {
+            t.setText(t.appendChild(sec, NodeKind::TextRun),
+                      utf8ToCodepoints("第" + std::to_string(i) + "段内容"));
+            t.appendChild(sec, NodeKind::ParagraphMark);
+        }
+        const StyleSheet sheet;
+        e.setDocument(t, sheet);
+        e.relayout();
+        const int blocks = static_cast<int>(e.blocks().size());
+        expectTrue(blocks == 6, "六段六块");
+        expectTrue(e.editStats().rebuild_reused == 0, "装载那一轮没有上一轮可复用");
+
+        expectTrue(e.insertCodepoint(2, 1, 0x7532), "第 2 段插一个字");
+        expectTrue(e.editStats().rebuild_reused == blocks - 1,
+                   "只有改动的那一块重算，其余 " + std::to_string(blocks - 1) + " 块整块搬（实际 " +
+                       std::to_string(e.editStats().rebuild_reused) + "）");
+
+        expectTrue(e.insertCodepoint(3, 1, 0x4e59), "换一段再插一个字");
+        expectTrue(e.editStats().rebuild_reused == blocks - 1, "连打字：复用数不退化");
+
+        // 撤销：修订回到上一份，块内容与上一轮相同 —— 投影这一层不因为"方向反了"就整篇重算。
+        //   排版仍是全量（撤销会改动任意段），那是另一笔账，这条只钉投影。
+        expectTrue(e.undo(), "撤销成功");
+        expectTrue(e.editStats().rebuild_reused == blocks - 1,
+                   "撤销之后同样只重算被改过的那一块（实际 " +
+                       std::to_string(e.editStats().rebuild_reused) + "）");
+    }
+
     std::printf("\n──────────────────────────────\n");
     std::printf("共 %d 项断言，失败 %d 项\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

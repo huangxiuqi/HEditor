@@ -45,15 +45,35 @@ struct BlockHash {
 };
 
 /**
- * 一个投影出来的块：排版输入、来源身份、内容哈希。
- *
- * 三者放在一条记录里而不是三条平行的数组：平行数组的长短与次序靠调用方维持，那是"两个数组
- * 错位一格"这类缺陷的产地。
+ * 一个投影出来的块：排版输入、来源身份、内容哈希。只在投影内部当临时载体 ——
+ * 产物里的块流由调用方持有（见 project 的 blocks 参数），不再拷进一个 parallel 的数组。
  */
 struct ProjectedBlock {
     BlockSpec spec;
     BlockSource source;
     BlockHash hash;
+};
+
+/**
+ * 一块的身份：内容哈希与来源。与块流同长同序。
+ *
+ * 它是"下一轮能否复用"的全部依据，只有 32 字节 —— 块本身（BlockSpec）留在调用方持有的
+ * 块流里，不跟着复制一份。
+ */
+struct BlockKey {
+    BlockHash hash;
+    BlockSource source;
+};
+
+/**
+ * 上一轮块流的身份账：版本号 + 每块的 Key。
+ *
+ * 版本号必须一起给：块哈希只算作者内容，而解析出来的格式还依赖样式表 —— 只比哈希的话，
+ * 换了样式之后搬过来的就是旧格式，而哈希一模一样，任何内容判据都看不出来。
+ */
+struct BlockHistory {
+    int style_version = 0;
+    std::vector<BlockKey> keys;
 };
 
 /**
@@ -70,9 +90,26 @@ struct ControlSpan {
 
 /**
  * 一次投影的全部产物。
+ *
+ * 块流不在里面：它由调用方持有并原地更新（见 project 的 blocks 参数）。这里只留"与块同长
+ * 同序的身份账"以及控件、表格、诊断 —— 这样"投影产物"与"引擎的块流"不必是同一种表示，
+ * 也就不存在两份拷贝。
  */
 struct Projection {
-    std::vector<ProjectedBlock> blocks;
+    std::vector<BlockKey> keys;
+    /**
+     * 块流。调用方给了 blocks 参数时这里为空 —— 块流在调用方手里，两边是同一份；
+     * 没给时才装在这里（测试与审计的便捷入口）。
+     */
+    std::vector<BlockSpec> blocks;
+    /**
+     * 本轮从上一轮搬过来的块数（没有给 prev 时恒 0）。
+     *
+     * 它是"增量真的发生了"的判据：只报耗时的话，机器变快就能让一条本该红的判据变绿。
+     * 复用是按"同一枚段落标记 + 同一份内容哈希"认的，所以这个数还顺带说明"哪一段的
+     * 身份没换"。
+     */
+    int reused = 0;
     std::vector<ControlSpan> controls;
     /**
      * 表格结构（出现顺序：外层在前，嵌套的内层在后）。与编译产物同一种类型：排版层认的是
@@ -86,18 +123,7 @@ struct Projection {
 };
 
 /**
- * 把一份修订投影成引擎输入。sheet 提供样式链（空表等于"全部用默认值"）。
- */
-Projection project(const Doc& doc, const StyleSheet& sheet, const ViewParams& params = {});
-
-/**
- * 只要每块的内容哈希，不要排版输入。开销与块数成正比、与文本长度无关 —— 增量排版每轮先用
- * 它算出"哪几块变了"，再对变了的块调 project。
- */
-std::vector<BlockHash> blockHashes(const Doc& doc, FlowVisibility vis);
-
-/**
- * 两次投影之间需要重新布局的块区间 [lo, hi)。
+ * 一次投影里的损伤区间：[lo, hi) 按 after 的块序。
  *
  * 做法是掐掉相同的头与相同的尾，中间那段全算损伤。它是"以多报换简单"：散落的多次编辑会让
  * 中间一段里未变的块也被重排一次，但绝不会漏报 —— 漏报才是会让画面停在旧内容上的那种错。
@@ -113,11 +139,48 @@ struct BlockDamage {
      */
     bool changed = false;
 
+    /**
+     * after 的块数，也是区间坐标的分母：区间之后的第 k 块，在上一轮里是第 k - (m - n) 块。
+     *
+     * 判据 [22] 把它与投影出来的块数逐例比对：两者一旦不等，按区间搬块就会错位，
+     * 而错位只表现为"画面停在旧内容上"。
+     */
+    int after_blocks = 0;
+
     bool empty() const { return !changed; }
     int count() const { return hi - lo; }
 };
 
 BlockDamage diffBlocks(const std::vector<BlockHash>& before, const std::vector<BlockHash>& after);
+
+/**
+ * 把一份修订投影成引擎输入。sheet 提供样式链（空表等于"全部用默认值"）。
+ *
+ * blocks 既是上一轮的块流（就地保留区间之外的块），也是这一轮的输出：中段 [lo, hi)
+ * 被替换成新物化的块，其余原地不动。所以这里没有"产出一份新的块流"，也就没有整份
+ * 拷贝 —— 调用方（引擎）拿到的就是它自己的那一份。
+ *
+ * prev 是上一轮的身份账（与 blocks 同长同序）与样式表版本；dmg 给出"哪一段要重算"。
+ * 三条作废条件：样式表版本变了（块哈希只算内容，格式却依赖样式表）、dmg 为空、
+ * prev 与 blocks 长度不符。作废时整篇物化，reused 为 0。省下来的是"每块算哈希 +
+ * 物化"，不是整棵树的遍历：孩子表是 vector，找到损伤位置仍要扫过前面的孩子
+ * （damage 的 scanned 就是这个下限的计数）。
+ */
+Projection project(const Doc& doc, const StyleSheet& sheet, const ViewParams& params,
+                   std::vector<BlockSpec>* blocks, const BlockHistory* prev,
+                   const BlockDamage* dmg);
+
+/**
+ * 只要块流、不要控件与表格的便捷入口（测试与审计用）。块流从空开始，整篇物化。
+ */
+Projection project(const Doc& doc, const StyleSheet& sheet, const ViewParams& params = {},
+                   std::vector<BlockSpec>* blocks = nullptr);
+
+/**
+ * 只要每块的内容哈希，不要排版输入。开销与块数成正比、与文本长度无关 —— 排版层每轮先用
+ * 它算出"哪几块变了"（见 diffBlocks），再决定重排哪几段。
+ */
+std::vector<BlockHash> blockHashes(const Doc& doc, FlowVisibility vis);
 
 /**
  * 两份修订之间哪几块要重排，由哈希下降直接算出。

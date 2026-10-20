@@ -64,8 +64,8 @@ struct EngineStats {
      * 所以"加像素吞吐"（GPU、更快的 fill/memcpy）在这里是打空的；
      * 必须先把这三段分开，才知道钱到底花在哪一段。
      */
-    double paint_fill_ms = 0.0;     // 铺面积：页间隙背景 + 页底 + 页边框
-    double paint_glyph_ms = 0.0;    // 字形：hb 抽轮廓 + 扫描线光栅（或命中字形缓存后只做 blit）
+    double paint_fill_ms = 0.0;   // 铺面积：页间隙背景 + 页底 + 页边框
+    double paint_glyph_ms = 0.0;  // 字形：hb 抽轮廓 + 扫描线光栅（或命中字形缓存后只做 blit）
     /**
      * 字形那一段里"只为记账取包围盒"花掉的时间。
      *
@@ -88,12 +88,12 @@ struct EngineStats {
      * 六段两两首尾相接，并起来正好是 paint_ms；写底图那两段（铺面积、字形）
      *   包在 paint_swap_ms 里面，不是与它并列。
      */
-    double paint_pre_ms = 0.0;     // 入口准备：字形缓存预算 + 两份记账清零 + 几何取值
-    double paint_swap_ms = 0.0;    // 换窗判断与页循环：写底图、平移复用、新露那条带
-    double paint_blit_ms = 0.0;    // 帧贴回：把脏矩形从底图搬进帧
-    double paint_overlay_ms = 0.0; // 覆盖层：选区混合、光标填充、表单标记
-    double paint_ledger_ms = 0.0;  // 记账：脏矩形并集、脏页清单、待上屏框
-    double paint_report_ms = 0.0;  // 上报：光标数字、表单归属、排版与文档统计
+    double paint_pre_ms = 0.0;      // 入口准备：字形缓存预算 + 两份记账清零 + 几何取值
+    double paint_swap_ms = 0.0;     // 换窗判断与页循环：写底图、平移复用、新露那条带
+    double paint_blit_ms = 0.0;     // 帧贴回：把脏矩形从底图搬进帧
+    double paint_overlay_ms = 0.0;  // 覆盖层：选区混合、光标填充、表单标记
+    double paint_ledger_ms = 0.0;   // 记账：脏矩形并集、脏页清单、待上屏框
+    double paint_report_ms = 0.0;   // 上报：光标数字、表单归属、排版与文档统计
     /**
      * 本轮光栅到底图的字形个数。与 paint_glyph_ms 配对：一个说花了多久、
      * 一个说画了几个字 —— 判"字形光栅贵不贵"要看两者的商，
@@ -158,9 +158,16 @@ struct EditStats {
      * 合成一个就分不清该优化谁。
      */
     double rebuild_compile_ms = 0.0;
-    double rebuild_flow_ms = 0.0;      // FlowIndex 重建（按节点记流位置）
-    double rebuild_flowpos_ms = 0.0;   // 段的流区间递推
-    double rebuild_copy_ms = 0.0;      // 块流副本（排版吃的 blocks_ 那一份）
+    /**
+     * 本轮有多少块是从上一轮整块搬过来的（不重算文本与格式）。
+     *
+     * 报它而不是只报耗时：耗时会被更快的机器掩盖，这个数不会 —— "一次编辑之后 1999 块
+     * 原样复用"是结构判据，"投影用了 0.4 ms"只是这一次的运气。
+     */
+    int rebuild_reused = 0;
+    double rebuild_flow_ms = 0.0;     // FlowIndex 重建（按节点记流位置）
+    double rebuild_flowpos_ms = 0.0;  // 段的流区间递推
+    double rebuild_copy_ms = 0.0;     // 块流副本（排版吃的 blocks_ 那一份）
     /**
      * 这一轮产物是怎么重建的，以及局部路径被否决的原因。
      *

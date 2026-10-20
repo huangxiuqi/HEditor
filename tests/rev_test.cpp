@@ -751,7 +751,7 @@ int main() {
 
         const auto proj = rev::project(d, StyleSheet{}, {});
         expectTrue(proj.ok() && proj.blocks.size() == 1, "投影产出一块、没有诊断");
-        const auto& objs = proj.blocks[0].spec.objects;
+        const auto& objs = proj.blocks[0].objects;
         expectTrue(objs.size() == 2 && objs[0].kind == InlineObjectKind::ControlStart &&
                        objs[0].cp == 3 && objs[1].kind == InlineObjectKind::ControlEnd &&
                        objs[1].cp == 5,
@@ -766,11 +766,11 @@ int main() {
         const rev::Projection design = rev::project(rh.doc, StyleSheet{}, {});
         const rev::Projection display =
             rev::project(rh.doc, StyleSheet{}, rev::ViewParams{FlowVisibility::Display});
-        expectTrue(design.blocks.size() == 1 && design.blocks[0].spec.cp_text.size() == 5 &&
-                       design.blocks[0].spec.objects.size() == 2,
+        expectTrue(design.blocks.size() == 1 && design.blocks[0].cp_text.size() == 5 &&
+                       design.blocks[0].objects.size() == 2,
                    "编辑态：隐藏控件照常参与投影（作者要能选中它改回来）");
-        expectTrue(display.blocks.size() == 1 && display.blocks[0].spec.cp_text.size() == 3 &&
-                       display.blocks[0].spec.objects.empty() && display.controls.empty(),
+        expectTrue(display.blocks.size() == 1 && display.blocks[0].cp_text.size() == 3 &&
+                       display.blocks[0].objects.empty() && display.controls.empty(),
                    "呈现态：隐藏的控件整棵摘除，文字与边界都不在了");
 
         const auto rsame = rev::setHidden(rh.doc, cc, true);
@@ -814,10 +814,10 @@ int main() {
                    "块数一致（三段三块）");
         bool same_spec = pr.blocks.size() == cr.blocks.size();
         for (size_t i = 0; same_spec && i < pr.blocks.size(); ++i) {
-            if (!sameBlock(pr.blocks[i].spec, cr.blocks[i])) {
+            if (!sameBlock(pr.blocks[i], cr.blocks[i])) {
                 same_spec = false;
                 std::printf("      第 %zu 块不同：%s\n", i,
-                            blockDiff(pr.blocks[i].spec, cr.blocks[i]).c_str());
+                            blockDiff(pr.blocks[i], cr.blocks[i]).c_str());
             }
         }
         expectTrue(same_spec, "逐块 BlockSpec 逐字段相同（文本、runs、行内对象、块级格式）");
@@ -826,7 +826,7 @@ int main() {
         // 确实是一个段落标记"—— 来源身份指错地方时这条会红。
         bool source_ok = pr.blocks.size() == cr.sources.size();
         for (size_t i = 0; source_ok && i < pr.blocks.size(); ++i) {
-            const rev::Node* rm = rev::findNode(rdoc, pr.blocks[i].source.mark);
+            const rev::Node* rm = rev::findNode(rdoc, pr.keys[i].source.mark);
             const Node* cm = tree.find(cr.sources[i].mark);
             if (rm == nullptr || cm == nullptr || rm->kind != NodeKind::ParagraphMark ||
                 cm->kind != NodeKind::ParagraphMark) {
@@ -848,10 +848,10 @@ int main() {
             rev::project(rh.doc, sheet, rev::ViewParams{FlowVisibility::Display});
         bool same_hidden = cd.blocks.size() == pd.blocks.size();
         for (size_t i = 0; same_hidden && i < cd.blocks.size(); ++i) {
-            if (!sameBlock(pd.blocks[i].spec, cd.blocks[i])) {
+            if (!sameBlock(pd.blocks[i], cd.blocks[i])) {
                 same_hidden = false;
                 std::printf("      呈现态第 %zu 块不同：%s\n", i,
-                            blockDiff(pd.blocks[i].spec, cd.blocks[i]).c_str());
+                            blockDiff(pd.blocks[i], cd.blocks[i]).c_str());
             }
         }
         expectTrue(same_hidden, "呈现态：隐藏控件之后两条路仍逐字段相同");
@@ -1108,10 +1108,10 @@ int main() {
             const rev::Projection pr = rev::project(inside, sheet, {});
             bool same = pr.ok() && cr.ok() && pr.blocks.size() == cr.blocks.size();
             for (size_t i = 0; same && i < pr.blocks.size(); ++i) {
-                if (!sameBlock(pr.blocks[i].spec, cr.blocks[i])) {
+                if (!sameBlock(pr.blocks[i], cr.blocks[i])) {
                     same = false;
                     std::printf("      第 %zu 块不同：%s\n", i,
-                                blockDiff(pr.blocks[i].spec, cr.blocks[i]).c_str());
+                                blockDiff(pr.blocks[i], cr.blocks[i]).c_str());
                 }
             }
             expectTrue(same, "控件内部打字：投影与编译逐字段相同");
@@ -1146,10 +1146,10 @@ int main() {
             const CompileResult cr = compileDocument(tree, FlowVisibility::Design, sheet);
             bool same = cr.ok() && pr.blocks.size() == cr.blocks.size();
             for (size_t i = 0; same && i < pr.blocks.size(); ++i) {
-                if (!sameBlock(pr.blocks[i].spec, cr.blocks[i])) {
+                if (!sameBlock(pr.blocks[i], cr.blocks[i])) {
                     same = false;
                     std::printf("      跨段第 %zu 块不同：%s\n", i,
-                                blockDiff(pr.blocks[i].spec, cr.blocks[i]).c_str());
+                                blockDiff(pr.blocks[i], cr.blocks[i]).c_str());
                 }
             }
             expectTrue(same, "跨段控件：投影与编译逐字段相同（含两块各自的行内对象）");
@@ -1336,8 +1336,7 @@ int main() {
         bool same = pr.blocks.size() == cr.blocks.size();
         size_t bad = 0;
         for (size_t i = 0; same && i < pr.blocks.size(); ++i) {
-            if (!sameBlock(withoutTableHandle(pr.blocks[i].spec),
-                           withoutTableHandle(cr.blocks[i]))) {
+            if (!sameBlock(withoutTableHandle(pr.blocks[i]), withoutTableHandle(cr.blocks[i]))) {
                 same = false;
                 bad = i;
             }
@@ -1345,18 +1344,17 @@ int main() {
         expectTrue(same, "每一块与编译产物逐字段相同（第一处不同：第 " + std::to_string(bad) +
                              " 块 " +
                              (same ? std::string("无")
-                                   : blockDiff(withoutTableHandle(pr.blocks[bad].spec),
+                                   : blockDiff(withoutTableHandle(pr.blocks[bad]),
                                                withoutTableHandle(cr.blocks[bad]))));
 
         expectTrue(pr.tables.size() == cr.tables.size() && pr.tables.size() == 1,
                    "表格结构数量相同，只有一张");
         expectTrue(!pr.tables.empty() && sameTableShape(pr.tables[0], cr.tables[0]),
                    "表格结构逐字段相同（行、列、列宽、行高、每格的块区间）");
-        expectTrue(!pr.blocks.empty() && pr.blocks[1].spec.cell_path.size() == 1 &&
-                       pr.blocks[1].spec.cell_path[0].row == 0 &&
-                       pr.blocks[1].spec.cell_path[0].cell == 0,
+        expectTrue(!pr.blocks.empty() && pr.blocks[1].cell_path.size() == 1 &&
+                       pr.blocks[1].cell_path[0].row == 0 && pr.blocks[1].cell_path[0].cell == 0,
                    "第一格里的块带着它的格路径");
-        expectTrue(pr.blocks[6].spec.cell_path.empty(), "表后的正文块没有格路径");
+        expectTrue(pr.blocks[6].cell_path.empty(), "表后的正文块没有格路径");
         expectTrue(pr.controls.empty(), "表格里没有控件");
 
         // 改一格文字：损伤只落在那一块。
@@ -1447,7 +1445,7 @@ int main() {
         bool same = cr.blocks.size() == pr.blocks.size();
         size_t bad = 0;
         for (size_t i = 0; same && i < cr.blocks.size(); ++i) {
-            if (!sameBlock(pr.blocks[i].spec, cr.blocks[i])) {
+            if (!sameBlock(pr.blocks[i], cr.blocks[i])) {
                 same = false;
                 bad = i;
             }
@@ -1455,13 +1453,13 @@ int main() {
         expectTrue(same, "每一块与编译产物逐字段相同（含原子的宽高与内容指纹）" +
                              (same ? std::string()
                                    : "：第 " + std::to_string(bad) + " 块 " +
-                                         blockDiff(pr.blocks[bad].spec, cr.blocks[bad])));
+                                         blockDiff(pr.blocks[bad], cr.blocks[bad])));
         expectTrue(sameDiags(pr.diagnostics, cr.diagnostics),
                    "诊断逐条相同（相对长度那条、域未进排版输入那条）");
 
         // 四枚图片的盒子：像素折算、只给宽、只给高按比例、相对宽度按原始尺寸。
         auto box_of = [&](size_t block, size_t obj) {
-            const auto& os = pr.blocks[block].spec.objects;
+            const auto& os = pr.blocks[block].objects;
             return obj < os.size() ? os[obj] : InlineObject{};
         };
         expectTrue(std::abs(box_of(0, 0).w_pt - 150.0f) < 0.01f &&
@@ -1572,10 +1570,9 @@ int main() {
         bool same = cr.blocks.size() == pr.blocks.size();
         std::string where;
         for (size_t i = 0; same && i < cr.blocks.size(); ++i) {
-            if (!sameBlock(pr.blocks[i].spec, cr.blocks[i])) {
+            if (!sameBlock(pr.blocks[i], cr.blocks[i])) {
                 same = false;
-                where =
-                    "第 " + std::to_string(i) + " 块 " + blockDiff(pr.blocks[i].spec, cr.blocks[i]);
+                where = "第 " + std::to_string(i) + " 块 " + blockDiff(pr.blocks[i], cr.blocks[i]);
             }
         }
         expectTrue(same, "每一块与编译产物逐字段相同" + (same ? std::string() : "：" + where));
@@ -1586,13 +1583,12 @@ int main() {
                    "两张结构表各自逐字段相同（列宽、行高、每格的块区间）");
 
         // 格路径是"外层到内层"的序列：内表格里的块带两层，外表格另一格的块只带一层。
-        expectTrue(
-            pr.blocks[2].spec.cell_path.size() == 2 && pr.blocks[3].spec.cell_path.size() == 2,
-            "内表格的块带两层格路径");
-        expectTrue(pr.blocks[2].spec.cell_path[0].table != pr.blocks[2].spec.cell_path[1].table,
+        expectTrue(pr.blocks[2].cell_path.size() == 2 && pr.blocks[3].cell_path.size() == 2,
+                   "内表格的块带两层格路径");
+        expectTrue(pr.blocks[2].cell_path[0].table != pr.blocks[2].cell_path[1].table,
                    "两层格路径指向两张不同的表");
-        expectTrue(pr.blocks[4].spec.cell_path.size() == 1, "外表格另一格的块只带一层");
-        expectTrue(pr.blocks[1].spec.cell_path.size() == 1 && pr.blocks[5].spec.cell_path.empty(),
+        expectTrue(pr.blocks[4].cell_path.size() == 1, "外表格另一格的块只带一层");
+        expectTrue(pr.blocks[1].cell_path.size() == 1 && pr.blocks[5].cell_path.empty(),
                    "格里的文字一层，表后的正文没有格路径");
 
         // 块区间：外表格第一格含 "A" 与内表格两块，所以是三块；第二格一块。
@@ -1666,24 +1662,22 @@ int main() {
         bool same = cr.blocks.size() == pr.blocks.size() && pr.blocks.size() == 3;
         std::string where;
         for (size_t i = 0; same && i < cr.blocks.size(); ++i) {
-            if (!sameBlock(pr.blocks[i].spec, cr.blocks[i])) {
+            if (!sameBlock(pr.blocks[i], cr.blocks[i])) {
                 same = false;
-                where =
-                    "第 " + std::to_string(i) + " 块 " + blockDiff(pr.blocks[i].spec, cr.blocks[i]);
+                where = "第 " + std::to_string(i) + " 块 " + blockDiff(pr.blocks[i], cr.blocks[i]);
             }
         }
         expectTrue(same, "每一块与编译产物逐字段相同" + (same ? std::string() : "：" + where));
 
-        expectTrue(pr.blocks.size() == 3 && pr.blocks[0].spec.objects.size() == 1 &&
-                       pr.blocks[0].spec.objects[0].kind == InlineObjectKind::ControlStart &&
-                       pr.blocks[0].spec.objects[0].cp == 1,
+        expectTrue(pr.blocks.size() == 3 && pr.blocks[0].objects.size() == 1 &&
+                       pr.blocks[0].objects[0].kind == InlineObjectKind::ControlStart &&
+                       pr.blocks[0].objects[0].cp == 1,
                    "第一块只有开括号（锚在 1 之后）");
-        expectTrue(pr.blocks.size() == 3 && pr.blocks[1].spec.objects.size() == 1 &&
-                       pr.blocks[1].spec.objects[0].kind == InlineObjectKind::ControlEnd &&
-                       pr.blocks[1].spec.objects[0].cp == 1,
+        expectTrue(pr.blocks.size() == 3 && pr.blocks[1].objects.size() == 1 &&
+                       pr.blocks[1].objects[0].kind == InlineObjectKind::ControlEnd &&
+                       pr.blocks[1].objects[0].cp == 1,
                    "第二块只有闭括号（锚在 1 之后）");
-        expectTrue(pr.blocks.size() == 3 && pr.blocks[2].spec.objects.empty(),
-                   "第三块里没有任何边界");
+        expectTrue(pr.blocks.size() == 3 && pr.blocks[2].objects.empty(), "第三块里没有任何边界");
 
         expectTrue(pr.controls.size() == 1 && pr.controls[0].block == 0 && pr.controls[0].cp == 1 &&
                        pr.controls[0].end_block == 1 && pr.controls[0].end_cp == 1,
@@ -1706,10 +1700,10 @@ int main() {
         bool same_disp = disp.blocks.size() == cdisp.blocks.size();
         std::string disp_where;
         for (size_t i = 0; same_disp && i < cdisp.blocks.size(); ++i) {
-            if (!sameBlock(disp.blocks[i].spec, cdisp.blocks[i])) {
+            if (!sameBlock(disp.blocks[i], cdisp.blocks[i])) {
                 same_disp = false;
-                disp_where = "第 " + std::to_string(i) + " 块 " +
-                             blockDiff(disp.blocks[i].spec, cdisp.blocks[i]);
+                disp_where =
+                    "第 " + std::to_string(i) + " 块 " + blockDiff(disp.blocks[i], cdisp.blocks[i]);
             }
         }
         expectTrue(same_disp && disp.blocks.size() == 2 && disp.controls.empty(),
@@ -1909,11 +1903,11 @@ int main() {
                        std::to_string(cr.blocks.size()) + "）");
         bool same = pr.blocks.size() == cr.blocks.size();
         for (size_t i = 0; same && i < cr.blocks.size(); ++i) {
-            same = sameBlock(pr.blocks[i].spec, cr.blocks[i]);
+            same = sameBlock(pr.blocks[i], cr.blocks[i]);
         }
         expectTrue(same, "每一块与编译产物逐字段相同");
-        expectTrue(pr.blocks.size() == 2 && !pr.blocks[0].spec.page_break_before &&
-                       pr.blocks[1].spec.page_break_before,
+        expectTrue(pr.blocks.size() == 2 && !pr.blocks[0].page_break_before &&
+                       pr.blocks[1].page_break_before,
                    "分节分页落在第二节的第一段上（不是每一段）");
 
         // 连续分节：不该有段前分页。这一条证明上面那一位确实来自节的记录。
@@ -1924,11 +1918,10 @@ int main() {
         const CompileResult cont_cr = compileDocument(cont_tree, FlowVisibility::Design, sheet);
         bool cont_same = cont_pr.blocks.size() == cont_cr.blocks.size();
         for (size_t i = 0; cont_same && i < cont_cr.blocks.size(); ++i) {
-            cont_same = sameBlock(cont_pr.blocks[i].spec, cont_cr.blocks[i]);
+            cont_same = sameBlock(cont_pr.blocks[i], cont_cr.blocks[i]);
         }
-        expectTrue(
-            cont_same && cont_pr.blocks.size() == 2 && !cont_pr.blocks[1].spec.page_break_before,
-            "连续分节：没有段前分页，两条路仍相同");
+        expectTrue(cont_same && cont_pr.blocks.size() == 2 && !cont_pr.blocks[1].page_break_before,
+                   "连续分节：没有段前分页，两条路仍相同");
 
         // 跨节编辑：段号在节之间连续，第 1 段落在第二节里。
         const auto typed = rev::insertText(doc, 1, 0, U"X");
@@ -2057,7 +2050,7 @@ int main() {
         const rev::Projection b = rev::project(doc, sheet);
         bool same_blocks = a.blocks.size() == b.blocks.size();
         for (size_t i = 0; same_blocks && i < a.blocks.size(); ++i) {
-            same_blocks = sameBlock(a.blocks[i].spec, b.blocks[i].spec);
+            same_blocks = sameBlock(a.blocks[i], b.blocks[i]);
         }
         expectTrue(same_blocks, "最终产物逐块逐字段相同（含跨段控件的两段）");
         expectTrue(a.tables.size() == b.tables.size(), "表格结构数量相同");
@@ -2081,7 +2074,7 @@ int main() {
             const CompileResult cr = compileDocument(tree, FlowVisibility::Design, sheet);
             bool same_blocks = pr.blocks.size() == cr.blocks.size();
             for (size_t i = 0; same_blocks && i < cr.blocks.size(); ++i) {
-                same_blocks = testcmp::sameBlock(pr.blocks[i].spec, cr.blocks[i]);
+                same_blocks = testcmp::sameBlock(pr.blocks[i], cr.blocks[i]);
             }
             expectTrue(same_blocks, std::string(label) + "：块逐字段相同");
 
@@ -2091,12 +2084,12 @@ int main() {
             for (size_t i = 0; i < cr.sources.size() && i < pr.blocks.size(); ++i) {
                 int r_first = -1;
                 int m_first = -1;
-                if (!ri.intervalOf(pr.blocks[i].source.first, &r_first, nullptr)) ++bad;
+                if (!ri.intervalOf(pr.keys[i].source.first, &r_first, nullptr)) ++bad;
                 if (!mi.intervalOf(cr.sources[i].first, &m_first, nullptr)) ++bad;
                 if (r_first != m_first) ++bad;
                 int r_mark = -1;
                 int m_mark = -1;
-                if (!ri.intervalOf(pr.blocks[i].source.mark, &r_mark, nullptr)) ++bad;
+                if (!ri.intervalOf(pr.keys[i].source.mark, &r_mark, nullptr)) ++bad;
                 if (!mi.intervalOf(cr.sources[i].mark, &m_mark, nullptr)) ++bad;
                 if (r_mark != m_mark) ++bad;
                 if (bad != 0) {
@@ -2109,6 +2102,221 @@ int main() {
         };
         check(demoTree(sampleDocument(0, 0), {}), "样本文书");
         check(demoTableTree(0), "表格文书");
+    }
+
+    std::printf("\n[22] 增量投影：没改到的块整块搬，产物与全量逐字段相同\n");
+    {
+        const StyleSheet sheet;
+        const Doc base = rev::makeTextDoc({U"甲甲", U"乙乙", U"丙丙", U"丁丁"});
+        // 块流由调用方持有：project 就地更新它，所以每次比较都拿"块流 + 身份账"两样。
+        std::vector<BlockSpec> b0;
+        const rev::Projection p0 = rev::project(base, sheet, {}, &b0);
+        const rev::BlockHistory h0{p0.style_version, p0.keys};
+        expectTrue(b0.size() == 4 && p0.reused == 0, "基线四块，且没有上一轮可复用");
+
+        // 逐块比：内容、哈希、来源身份三样都要相同。只比内容看不出"块搬对了但身份错位"
+        //   —— 那一种的症状是光标落偏一个字，而内容断言全绿。
+        auto sameTo = [](const std::vector<BlockSpec>& a, const std::vector<rev::BlockKey>& ka,
+                         const std::vector<BlockSpec>& b, const std::vector<rev::BlockKey>& kb) {
+            if (a.size() != b.size() || ka.size() != a.size() || kb.size() != b.size())
+                return false;
+            for (size_t i = 0; i < a.size(); ++i) {
+                if (!testcmp::sameBlock(a[i], b[i])) return false;
+                if (!(ka[i].hash == kb[i].hash)) return false;
+                if (ka[i].source.first != kb[i].source.first) return false;
+                if (ka[i].source.mark != kb[i].source.mark) return false;
+            }
+            return true;
+        };
+        auto firstDiff = [](const std::vector<BlockSpec>& a, const std::vector<BlockSpec>& b) {
+            if (a.size() != b.size()) {
+                return std::string("块数 ") + std::to_string(a.size()) + " vs " +
+                       std::to_string(b.size());
+            }
+            for (size_t i = 0; i < a.size(); ++i) {
+                if (testcmp::sameBlock(a[i], b[i])) continue;
+                return "第 " + std::to_string(i) + " 块：" + testcmp::blockDiff(a[i], b[i]);
+            }
+            return std::string();
+        };
+
+        // 改第 2 段一个字符：那一块的哈希变了，其余三块应当整块搬来。
+        const auto r = rev::insertText(base, 1, 1, U"X");
+        const rev::Damage dmg1 = rev::damage(base, r.doc);
+        std::vector<BlockSpec> c1 = b0;
+        const rev::Projection inc1 = rev::project(r.doc, sheet, {}, &c1, &h0, &dmg1.range);
+        std::vector<BlockSpec> b1;
+        const rev::Projection p1 = rev::project(r.doc, sheet, {}, &b1);
+        const rev::BlockHistory h1{p1.style_version, p1.keys};
+        expectTrue(inc1.reused == 3, "改一段之后另外三块整块搬来");
+        expectTrue(sameTo(c1, inc1.keys, b1, p1.keys),
+                   "增量产物与全量逐字段相同（含来源身份）" + firstDiff(c1, b1));
+
+        // 段首插一段：块数变了，而其余各段的身份没变，所以只有新段要算。
+        const auto sp = rev::splitPara(r.doc, 0, 0);
+        const rev::Damage dmg2 = rev::damage(r.doc, sp.doc);
+        std::vector<BlockSpec> c2 = b1;
+        const rev::Projection inc2 = rev::project(sp.doc, sheet, {}, &c2, &h1, &dmg2.range);
+        std::vector<BlockSpec> b2;
+        const rev::Projection p2 = rev::project(sp.doc, sheet, {}, &b2);
+        const rev::BlockHistory h2{p2.style_version, p2.keys};
+        expectTrue(inc2.reused == 3,
+                   "段首插一段：原四块里三块整块搬，只有被拆的那一块换了节点号要重算（实际 " +
+                       std::to_string(inc2.reused) + "）");
+        expectTrue(c2.size() == 5 && b2.size() == 5,
+                   "插入之后是五块：增量与全量同数，块数变化没有让后缀整体重算");
+        expectTrue(sameTo(c2, inc2.keys, b2, p2.keys),
+                   "块数变化之后增量仍与全量逐字段相同" + firstDiff(c2, b2));
+
+        // 段中分段：一个 run 被拆成两半 + 一枚新标记。坐标最容易错的分支 ——
+        //   段首分段只插标记、不拆 run，测不到它。
+        for (int cut = 1; cut <= 2; ++cut) {
+            const auto sm = rev::splitPara(base, 0, cut);
+            if (!sm.ok) continue;
+            const rev::Damage dm = rev::damage(base, sm.doc);
+            std::vector<BlockSpec> cm = b0;
+            const rev::Projection incm = rev::project(sm.doc, sheet, {}, &cm, &h0, &dm.range);
+            std::vector<BlockSpec> bm;
+            const rev::Projection pm = rev::project(sm.doc, sheet, {}, &bm);
+            const std::string tag = "段中分段(第 0 段第 " + std::to_string(cut) + " 位)";
+            expectTrue(cm.size() == bm.size(), tag + "：块数相同（增量 " +
+                                                   std::to_string(cm.size()) + " / 全量 " +
+                                                   std::to_string(bm.size()) + "）");
+            expectTrue(sameTo(cm, incm.keys, bm, pm.keys),
+                       tag + "：增量与全量逐字段相同 " + firstDiff(cm, bm));
+        }
+
+        // 反向一半：删掉一段。被删的那一块不能"复活"，其余照旧复用。
+        const auto mg = rev::mergePara(sp.doc, 0);
+        const rev::Damage dmg3 = rev::damage(sp.doc, mg.doc);
+        std::vector<BlockSpec> c3 = b2;
+        const rev::Projection inc3 = rev::project(mg.doc, sheet, {}, &c3, &h2, &dmg3.range);
+        std::vector<BlockSpec> b3;
+        const rev::Projection p3 = rev::project(mg.doc, sheet, {}, &b3);
+        expectTrue(sameTo(c3, inc3.keys, b3, p3.keys),
+                   "合并两段之后增量与全量相同" + firstDiff(c3, b3));
+
+        // 样式表版本变了：块哈希一模一样（哈希只算作者内容），格式却要重新解析。
+        //   版本不判就是"改了样式但屏幕上没变"，而任何内容判据都是绿的。
+        //   这里改文档默认格式：每一段的产物都会变，而一个码点都没动。
+        StyleSheet styled = sheet;
+        ParaFormatPatch dp;
+        dp.space_after = Length::abs(ptToEmu(12.0));
+        CharFormat dr;
+        dr.bold = true;
+        styled.setDocDefaults(dp, dr);
+        // 上一轮取 base 的块流、损伤取 base→r.doc：三者自洽，于是"只有样式版本变了"
+        //   成为唯一变量 —— 不复用必须是版本判断的结果，而不是别的原因让它退回全量。
+        std::vector<BlockSpec> c4 = b0;
+        const rev::Projection inc4 = rev::project(r.doc, styled, {}, &c4, &h0, &dmg1.range);
+        std::vector<BlockSpec> b4;
+        const rev::Projection p4 = rev::project(r.doc, styled, {}, &b4);
+        expectTrue(inc4.reused == 0, "样式表版本变了：一块都不复用（否则搬来的是旧格式）");
+        expectTrue(sameTo(c4, inc4.keys, b4, p4.keys),
+                   "样式表版本变了之后产物仍与全量相同" + firstDiff(c4, b4));
+        expectTrue(!testcmp::sameBlock(b4[0], b1[0]),
+                   "这条判据的前提成立：换默认格式确实改变了产物");
+
+        // 增量必须真的省。同一份文档、同一次测量里比"全量"与"增量"，比值不受机器快慢影响。
+        {
+            std::vector<std::u32string> many(2000, U"一段用于测量的文字，内容长度与真实文书接近。");
+            const Doc big = rev::makeTextDoc(many);
+            const auto big_edit = rev::insertText(big, 1000, 3, U"X");
+            std::vector<BlockSpec> big_blocks;
+            const rev::Projection big_full = rev::project(big, sheet, {}, &big_blocks);
+            const rev::BlockHistory big_hist{big_full.style_version, big_full.keys};
+            const rev::Damage dmg_big = rev::damage(big, big_edit.doc);
+            const auto t0 = std::chrono::steady_clock::now();
+            std::vector<BlockSpec> a_blocks;
+            const rev::Projection a = rev::project(big_edit.doc, sheet, {}, &a_blocks);
+            const auto t1 = std::chrono::steady_clock::now();
+            std::vector<BlockSpec> cb = big_blocks;
+            const rev::Projection b =
+                rev::project(big_edit.doc, sheet, {}, &cb, &big_hist, &dmg_big.range);
+            const auto t2 = std::chrono::steady_clock::now();
+            const double full_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+            const double incr_ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
+            std::printf("      2000 段：全量 %.3f ms / 增量 %.3f ms（复用 %d 块）\n", full_ms,
+                        incr_ms, b.reused);
+            expectTrue(b.reused == 1999, "2000 段改一段：其余 1999 块整块搬");
+            expectTrue(sameTo(cb, b.keys, a_blocks, a.keys), "2000 段：增量与全量逐字段相同");
+            expectTrue(incr_ms * 2 < full_ms, "增量投影不到全量的一半（实测 " +
+                                                  std::to_string(incr_ms) + " vs " +
+                                                  std::to_string(full_ms) + " ms）");
+        }
+
+        // 按区间搬块的前提：damage 的坐标必须与投影的块号同一套。它对不上时，按区间搬
+        //   会把块搬到错位置 —— 症状是"画面停在旧内容上"，而内容断言全绿。
+        //   两半：分母（after_blocks）与不漏报（区间包含逐段比哈希得到的损伤）。
+        {
+            auto ledgerOf = [&](const Doc& d) {
+                return rev::blockHashes(d, FlowVisibility::Design);
+            };
+            auto checkShape = [&](const Doc& start, const char* label) {
+                Doc cur = start;
+                int bad_count = 0;
+                int bad_cover = 0;
+                for (int k = 0; k < 12; ++k) {
+                    const Doc before = cur;
+                    switch (k % 4) {
+                        case 0: {
+                            const auto r2 = rev::insertText(cur, 0, 0, U"Z");
+                            if (r2.ok) cur = r2.doc;
+                            break;
+                        }
+                        case 1: {
+                            const auto r2 = rev::splitPara(cur, 0, 0);
+                            if (r2.ok) cur = r2.doc;
+                            break;
+                        }
+                        case 2: {
+                            const auto r2 = rev::eraseText(cur, 0, 0, 1);
+                            if (r2.ok) cur = r2.doc;
+                            break;
+                        }
+                        default: {
+                            const auto r2 = rev::mergePara(cur, 0);
+                            if (r2.ok) cur = r2.doc;
+                            break;
+                        }
+                    }
+                    const rev::Damage d = rev::damage(before, cur);
+                    std::vector<BlockSpec> tmp;
+                    rev::project(cur, sheet, {}, &tmp);
+                    if (d.range.after_blocks != static_cast<int>(tmp.size())) ++bad_count;
+                    const rev::BlockDamage h = rev::diffBlocks(ledgerOf(before), ledgerOf(cur));
+                    const bool covered =
+                        h.empty() ? !d.range.changed
+                                  : (d.range.changed && d.range.lo <= h.lo && d.range.hi >= h.hi);
+                    if (!covered) ++bad_cover;
+                }
+                expectTrue(bad_count == 0, std::string(label) + "：damage 的块数与投影逐例相等");
+                expectTrue(bad_cover == 0, std::string(label) + "：damage 的区间不漏报");
+            };
+            checkShape(rev::makeTextDoc({U"甲甲", U"乙乙", U"丙丙", U"丁丁", U"戊戊"}), "五段文本");
+            checkShape(rev::makeTextDoc({U"单段"}), "单段");
+            checkShape(rev::makeTextDoc({}), "空文档");
+            // 末尾没有结束标记：投影会给它补一块，而 paras 不计 —— 坐标最容易差 1 的形状。
+            {
+                NodeTree open;
+                const NodeId osec = open.firstSectionId();
+                open.setText(open.appendChild(osec, NodeKind::TextRun),
+                             utf8ToCodepoints("没有结束标记"));
+                Doc open_doc;
+                std::string open_why;
+                expectTrue(rev::fromTree(open, &open_doc, &open_why), "末尾开放的树导出成功");
+                std::vector<BlockSpec> ob;
+                rev::project(open_doc, sheet, {}, &ob);
+                expectTrue(ob.size() == 1, "末尾开放：投影补出最后那一块（paras 不计它）");
+                checkShape(open_doc, "末尾开放");
+            }
+            {
+                Doc tbl_doc;
+                std::string tbl_why;
+                expectTrue(rev::fromTree(demoTableTree(0), &tbl_doc, &tbl_why), "表格文书导出成功");
+                checkShape(tbl_doc, "表格文书");
+            }
+        }
     }
 
     std::printf("\n结果：%d 项断言，%d 项失败\n", g_checks, g_failures);

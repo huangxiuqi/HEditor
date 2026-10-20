@@ -424,7 +424,7 @@ std::string EditorEngine::auditTablesJson() const {
  */
 EditorEngine::TableAudit EditorEngine::auditTablesDetail() const {
     TableAudit a;
-    const int n_blocks = static_cast<int>(blocks_.size());
+    const int n_blocks = static_cast<int>(blocks().size());
     std::vector<int> owner(static_cast<size_t>(n_blocks), -1);
     struct Ref {
         int table = -1;
@@ -486,10 +486,10 @@ EditorEngine::TableAudit EditorEngine::auditTablesDetail() const {
             }
         }
     }
-    const bool marks_known = block_src_.size() == blocks_.size();
+    const bool marks_known = block_src_.size() == blocks().size();
     for (int i = 0; i < n_blocks; ++i) {
         const size_t k = static_cast<size_t>(i);
-        const std::vector<CellSlot>& path = blocks_[k].cell_path;
+        const std::vector<CellSlot>& path = blocks()[k].cell_path;
         if (path.empty()) {
             if (owner[k] >= 0) ++a.blocks_in_no_cell;
         } else {
@@ -513,17 +513,17 @@ EditorEngine::TableAudit EditorEngine::auditTablesDetail() const {
  * 或者"前缀多留了一段"，两者都只差几行 —— 看总数看不出来，看内容才看得见。
  */
 int EditorEngine::auditLayout() {
-    if (blocks_.empty()) return 0;
-    const LayoutResult ref = layoutDocument(fonts_, blocks_, cfg_.page, tables_);
+    if (blocks().empty()) return 0;
+    const LayoutResult ref = layoutDocument(fonts_, blocks(), cfg_.page, tables_);
     return auditLayoutPair(layout_, ref).total();
 }
 
 std::string EditorEngine::auditLayoutJson() {
     std::ostringstream o;
-    if (blocks_.empty()) return "{\"diff\":0,\"note\":\"empty\"}";
+    if (blocks().empty()) return "{\"diff\":0,\"note\":\"empty\"}";
 
     const auto t0 = Clock::now();
-    const LayoutResult ref = layoutDocument(fonts_, blocks_, cfg_.page, tables_);
+    const LayoutResult ref = layoutDocument(fonts_, blocks(), cfg_.page, tables_);
     const double full_ms = msSince(t0);
     const LayoutAudit a = auditLayoutPair(layout_, ref);
 
