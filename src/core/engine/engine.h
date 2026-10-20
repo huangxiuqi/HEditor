@@ -870,9 +870,11 @@ private:
     void rebuildFromTree(const rev::BlockDamage* dmg = nullptr);
 
     /**
-     * 重建的收尾：流索引、段的流区间递推、块流副本、控件视图。
+     * 重建的收尾：流索引、段的流区间递推、控件视图。
+     *
+     * 控件跨度由投影给（它走树时记下的），不在这里重扫对象表 —— 见 exportControls。
      */
-    void finishRebuildFromTree(FlowVisibility vis);
+    void finishRebuildFromTree(FlowVisibility vis, const std::vector<rev::ControlSpan>& controls);
 
     /**
      * 隐藏控件的可见性口径。编译与流索引必须同源（非编辑模式下隐藏的子树整棵摘除），
@@ -886,8 +888,8 @@ private:
      * 少重建任何一个，下一轮就会拿旧修订的位置去对新修订的块。失败时状态一个字节都不动 ——
      * 会话层保证"被拒的编辑不占撤销栈"，这里再保证产物不跟着半途改。
      */
-    bool commitSteps(std::vector<Step> steps, int dirty_para, ParaDelta delta,
-                     Range selection_before, Range selection_after) override;
+    bool commitSteps(std::vector<Step> steps, int dirty_para, Range selection_before,
+                     Range selection_after) override;
 
     /**
      * 撤销上限（会话要的那个数）。配置里的 0 是"不限制"，与"不留历史"不是一回事。
@@ -904,15 +906,14 @@ private:
      */
 
     /**
-     * 从块流的行内对象表导出控件集合：按 owner 配对起始与结束两枚边界，
-     * 得到控件的 (起, 止) 区间。
+     * 从投影给出的跨度建控件集合。
      *
-     * 为什么不从树直接遍历：编译已经把边界写进产物了（第五刀），而产物就是这一层
-     * 拿到的全部输入 —— 再从树走一遍等于把"哪一段、第几个码点"重算一次，两处一旦
-     * 分叉就会出现"排版按产物画括号、策略按另一套区间判可编辑"的错配。
-     * 没有配对的那一枚整体丢掉：宁可少一个控件，也不要一个区间反了的控件。
+     * 跨度是投影走树时记下的（起止块号与段内码点，见 rev::ControlSpan），业务标识与锁定态
+     * 就在节点载荷里 —— 所以这一层不再扫块流的对象表，也不再对每个控件 findNode 一次。
+     * 两边各算一遍的代价不只是慢：区间一旦分叉，界面上只表现为"某个字段锁不住"或"括号画在
+     * 别处"，而两份产物各自看都"对"。
      */
-    void exportControlsFromBlocks();
+    void exportControls(const std::vector<rev::ControlSpan>& spans);
     /**
      * 块内流偏移 → 段内码点偏移（flowToTextPos 的其中一段）。落在边界位上时归到那个
      * 边界锚着的码点 —— 于是桥的两端互逆，不会因为中间隔着括号而越走越偏。

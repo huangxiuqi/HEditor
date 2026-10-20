@@ -5225,11 +5225,16 @@ int main() {
             // 验的就成了"删不动"，而不是对象表的顺序。
             loadControls(
                 e, {mkCtl(5, 7, "k1", true), mkCtl(7, 9, "k2", false), mkCtl(9, 11, "k3", false)});
+            // 控件表不再是"扫对象表再配对"出来的，而是投影给的跨度；审计那一侧仍从产物
+            //   重算一遍区间与顺序 —— 两边必须逐项相同，否则"第几个字段"这张表就换了。
+            expectTrue(e.auditCompile() == 0, "控件审计：装载之后控件表与产物边界逐项相同");
             e.setCaret(0, 9);
             // 两次退格分开写：写进断言条件里的话，第一下失败就短路，看不出是第几下没成。
             const bool bs1 = e.backspaceAndRender();
             const bool bs2 = e.backspaceAndRender();
             expectTrue(bs1 && bs2, "产生端：把中间那个字段删成零宽（边界上于是有四项）");
+            expectTrue(e.auditCompile() == 0,
+                       "★ 控件审计：删成零宽之后区间与顺序仍逐项相同（三连字段不能换位）");
 
             // 表的读法：cp、开闭、owner、只读各一位，一眼能看出顺序对不对。
             // owner 那一列是对外下标：产物里存的是控件节点 id，比之前翻一次。

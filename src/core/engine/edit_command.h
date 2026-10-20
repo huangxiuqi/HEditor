@@ -40,22 +40,7 @@
 namespace heditor {
 
 /**
- * 段数变化的结构形状。
- *
- * 只有"在某一段之后插入或删除若干整段"能走局部重建 —— 分段与合并是这种形状；控件结构
- * 操作（隐藏、删控件）会让段的边界整体重排，形状无从表达，只能整树重编。
- *
- * 它由命令层产出（命令最清楚这一步改了几段）、由引擎消费（重建那几条路怎么退守）。
- * 定义放在这里而不是引擎里：命令层要构造它，而它不该反过来 include 引擎头。
- */
-struct ParaDelta {
-    bool changed = false;  // 段数变了没有
-    int at = -1;           // 变化点：插入或删除发生在第 at 段之后
-    int inserted = 0;      // 正数 = 插入几段
-};
-
-/**
- * 命令层交事务的出口。引擎实现它：把事务落到树上，再把编译产物重建出来。
+ * 命令层交步骤的出口。引擎实现它：把整批步骤落到修订上，再把产物按新修订重算出来。
  *
  * 为什么是接口而不是回调：引擎就是唯一实现，而编辑是每次按键都要走的一步，虚调用比
  * std::function 少一层间接，也不必每次重排都重建一次闭包。
@@ -67,8 +52,8 @@ public:
      * 把一批步骤交出去。返回 false 表示这一步没做成（步骤没落地、产物没重建），
      * 命令层据此中止整条编辑 —— 与"用户按的那一下没生效"同一口径。
      */
-    virtual bool commitSteps(std::vector<Step> steps, int dirty_para, ParaDelta delta,
-                             Range selection_before, Range selection_after) = 0;
+    virtual bool commitSteps(std::vector<Step> steps, int dirty_para, Range selection_before,
+                             Range selection_after) = 0;
 };
 
 /**
@@ -222,8 +207,8 @@ private:
      *
      * 选区快照随步骤一起给出：修订只记内容、不记光标，而撤销要回到"按下去之前"的那个位置。
      */
-    bool commit(std::vector<Step> steps, int dirty_para, ParaDelta delta) const {
-        return view_.host != nullptr && view_.host->commitSteps(std::move(steps), dirty_para, delta,
+    bool commit(std::vector<Step> steps, int dirty_para) const {
+        return view_.host != nullptr && view_.host->commitSteps(std::move(steps), dirty_para,
                                                                 pending_before_, pending_after_);
     }
 

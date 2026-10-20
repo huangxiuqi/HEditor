@@ -268,7 +268,7 @@ bool EditCommand::insertCodepoints(int para, size_t offset, const std::vector<ui
     const FlowPos after = at_flow + static_cast<FlowPos>(cps.size());
     pending_after_ = Range{after, after};
     steps.push_back(Step{s});
-    if (!commit(std::move(steps), para, ParaDelta{})) {
+    if (!commit(std::move(steps), para)) {
         noteBlocked();
         return false;
     }
@@ -365,7 +365,7 @@ bool EditCommand::eraseAtomBeside(FlowPos cur, bool left) {
     pending_before_ = Range{cur, cur};
     pending_after_ = Range{f, f};
     steps.push_back(nb.step);
-    if (!commit(std::move(steps), pos().paraForFlow(f), ParaDelta{})) return false;
+    if (!commit(std::move(steps), pos().paraForFlow(f))) return false;
     pos().setCaretAtFlow(f);
     return true;
 }
@@ -624,7 +624,7 @@ bool EditCommand::splitParagraph() {
         clear_pbb.beforeStyleRef = style_ref;
         steps.push_back(Step{clear_pbb});
     }
-    if (!commit(std::move(steps), p.para, ParaDelta{true, p.para, 1})) {
+    if (!commit(std::move(steps), p.para)) {
         noteBlocked();
         return consumed;
     }
@@ -699,7 +699,7 @@ bool EditCommand::mergeParagraphInto(int head) {
         steps.push_back(rm.step);
         steps.push_back(Step{ins});
     }
-    if (!commit(std::move(steps), head, ParaDelta{true})) {
+    if (!commit(std::move(steps), head)) {
         noteBlocked();
         return false;
     }
@@ -756,7 +756,7 @@ bool EditCommand::eraseOnTree(TextPos a, TextPos b, const char* label, bool care
     const FlowPos caret_before = caret_at_end ? to : from;
     pending_before_ = Range{caret_before, caret_before};
     pending_after_ = Range{from, from};
-    if (!commit(std::move(steps), a.para, ParaDelta{})) return false;
+    if (!commit(std::move(steps), a.para)) return false;
     // 落点 = 删除区间的起点，也就是被删掉那段文本所在的位置。这个流位置本来就算出来了，
     //   直接摆过去即可 —— 只留一个码点偏移、再由"最内层含端点"猜回侧别的话，
     //   删完一个字光标会落到相邻括号的另一侧（"跳了一格"）。
@@ -1070,17 +1070,13 @@ std::vector<Step> EditCommand::eraseWholeTables(FlowPos from, FlowPos to) const 
 
 bool EditCommand::commitErase(const SelectionErase& plan, const char* label) {
     if (plan.steps.empty()) return false;
-    // 段数变了就得禁掉后缀复用：跨段删除删掉段落标记，后一段的起点整体前移，
-    //   "第 k 段还是同一段"这件事不再成立。同段内删除照旧只标脏那一段。
-    const bool cross = pos().paraForFlow(plan.at) != pos().paraForFlow(plan.before.end() - 1);
     std::vector<Step> steps;
     pending_before_ = Range{};
     pending_after_ = Range{};
     pending_before_ = plan.before;
     pending_after_ = Range{plan.at, plan.at};
     steps = plan.steps;
-    if (!commit(std::move(steps), pos().paraForFlow(plan.at),
-                cross ? ParaDelta{true} : ParaDelta{})) {
+    if (!commit(std::move(steps), pos().paraForFlow(plan.at))) {
         noteBlocked();
         return false;
     }
@@ -1117,9 +1113,7 @@ bool EditCommand::replaceSelectionWithText(const std::vector<uint32_t>& cps) {
     steps = plan.steps;
     steps.push_back(Step{s});
 
-    const bool cross = pos().paraForFlow(plan.at) != pos().paraForFlow(plan.before.end() - 1);
-    if (!commit(std::move(steps), pos().paraForFlow(plan.at),
-                cross ? ParaDelta{true} : ParaDelta{})) {
+    if (!commit(std::move(steps), pos().paraForFlow(plan.at))) {
         noteBlocked();
         return false;
     }
@@ -1217,7 +1211,7 @@ bool EditCommand::removeControl(int index, bool keep_content, FlowPos caret_befo
 
     const int dirty = controls().at(index).range.start.para;
     // 段数可能变（控件里的段落标记没了，或者上提之后换了容器），所以走全量重编译。
-    if (!commit(std::move(steps), dirty, ParaDelta{true})) {
+    if (!commit(std::move(steps), dirty)) {
         noteBlocked();
         return false;
     }
@@ -1247,8 +1241,7 @@ EditCommand::PropResult EditCommand::setControlProp(int index, ControlProp prop,
     // hidden 改呈现态的流结构（整棵摘除），其余三项不改结构。
     const bool structural = (prop == ControlProp::Hidden);
     const int dirty = controls().at(index).range.start.para;
-    if (!commit(std::move(steps), dirty, structural ? ParaDelta{true} : ParaDelta{}))
-        return PropResult::Failed;
+    if (!commit(std::move(steps), dirty)) return PropResult::Failed;
     return structural ? PropResult::Structural : PropResult::Changed;
 }
 

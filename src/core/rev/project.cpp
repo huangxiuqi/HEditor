@@ -373,22 +373,26 @@ private:
         if (n->kind == NodeKind::ContentControl) {
             const ControlSpec& spec = std::get<ControlSpec>(n->payload);
             const int owner = static_cast<int>(n->id);
-            ControlSpan span;
-            span.node = n;
-            span.block = block_index_;
-            span.cp = cpCount();
+            // 进控件时就占一个槽：跨度要等孩子走完才知道末尾，但顺序必须按进入的先后定 ——
+            //   离开时才 push 的话，嵌套时内层会排到外层前面，而对外下标是"第几个字段"，
+            //   它得是文档顺序（与对象表里 ControlStart 的出现顺序同一套）。槽里存下标而不是
+            //   引用：孩子里还有控件，push 会让 vector 搬家。
+            const size_t slot = out_.controls.size();
+            out_.controls.push_back(ControlSpan{});
+            out_.controls[slot].node = n;
+            out_.controls[slot].block = block_index_;
+            out_.controls[slot].cp = cpCount();
             noteFirst(n->id);
             emitObject(InlineObject{static_cast<uint32_t>(cpCount()),
                                     InlineObjectKind::ControlStart, owner, spec.readonly},
                        n);
             for (const Ref& c : n->children) walk(c);
-            span.end_block = block_index_;
-            span.end_cp = cpCount();
+            out_.controls[slot].end_block = block_index_;
+            out_.controls[slot].end_cp = cpCount();
             noteFirst(n->id);
             emitObject(InlineObject{static_cast<uint32_t>(cpCount()), InlineObjectKind::ControlEnd,
                                     owner, spec.readonly},
                        n);
-            out_.controls.push_back(std::move(span));
             return;
         }
         // 结构外壳：文档、节、页眉页脚只提供层级，边界不进内容，下去即可（与编译同一口径）。

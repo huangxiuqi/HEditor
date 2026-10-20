@@ -258,33 +258,47 @@ int diffBlockSpec(const BlockSpec& a, const BlockSpec& b) {
 }
 
 /**
- * 产物里"成对的控件边界"个数。
+ * 产物里"成对的控件边界"给出的区间，按 ControlStart 的出现顺序（= 文档顺序）。
  *
- * 口径与 exportControlsFromBlocks 一致：按 owner 聚合两枚边界，只有成对的才算一个控件。
- * 半截边界在那里会被整对丢掉 —— 静默降级，所以审计必须独立数一遍，否则那一类差异
- * 只剩块级那点小数，看不出"控件整批消失"。
+ * 独立口径：控件集合本身是投影给的跨度（见 exportControls），两边是否一致不能自己证明
+ * 自己 —— 所以这里从产物重算一遍。半截边界在导出那一侧会被整对丢掉，是静默降级；只数个数
+ * 也看不出"区间钉错了段"或"顺序换了"，而换了序等于换了"第几个字段"这张表。
  */
-int pairedControlCount(const std::vector<BlockSpec>& blocks) {
+std::vector<ControlRange> pairedControlRanges(const std::vector<BlockSpec>& blocks) {
     struct Pair {
+        TextPos start{};
+        TextPos end{};
         bool has_start = false;
         bool has_end = false;
     };
     std::unordered_map<int, Pair> acc;
-    for (const BlockSpec& b : blocks) {
-        for (const InlineObject& o : b.objects) {
-            Pair& p = acc[o.owner];
+    std::vector<int> order;
+    for (size_t i = 0; i < blocks.size(); ++i) {
+        const int para = static_cast<int>(i);
+        for (const InlineObject& o : blocks[i].objects) {
+            auto it = acc.find(o.owner);
+            if (it == acc.end()) {
+                order.push_back(o.owner);
+                it = acc.emplace(o.owner, Pair{}).first;
+            }
+            Pair& p = it->second;
+            const TextPos at{para, static_cast<size_t>(o.cp)};
             if (o.kind == InlineObjectKind::ControlStart) {
+                p.start = at;
                 p.has_start = true;
             } else {
+                p.end = at;
                 p.has_end = true;
             }
         }
     }
-    int n = 0;
-    for (const auto& kv : acc) {
-        if (kv.second.has_start && kv.second.has_end) ++n;
+    std::vector<ControlRange> out;
+    for (int owner : order) {
+        const Pair& p = acc[owner];
+        if (!p.has_start || !p.has_end) continue;
+        out.push_back(ControlRange{p.start, p.end});
     }
-    return n;
+    return out;
 }
 
 }  // namespace
@@ -617,7 +631,17 @@ int EditorEngine::auditCompile() const {
     // 控件集合单独数一遍：它是产物的一次派生，而那次派生对"半截边界"是整对丢弃 ——
     //   一条静默降级。产物只错掉一枚边界时，块级差异常常小到看不出来，而界面上控件会
     //   整批消失（"字段没了"就是这么被放大出来的）。独立数一遍，让这一类差异可读。
-    if (pairedControlCount(ref.blocks) != controls_.size()) ++d;
+    {
+        const std::vector<ControlRange> want = pairedControlRanges(ref.blocks);
+        if (want.size() != static_cast<size_t>(controls_.size())) {
+            ++d;
+        } else {
+            for (size_t i = 0; i < want.size(); ++i) {
+                const Control& got = controls_.at(static_cast<int>(i));
+                if (got.range.start != want[i].start || got.range.end != want[i].end) ++d;
+            }
+        }
+    }
     // 来源身份的契约也要盯住：sources 的 first 是"这一段第一枚吃进内容的元素"，所以段的
     //   流起点必须落在这个元素的区间里。这一条破了，任何靠 first 判归属的判据都会跟着失效，
     //   而产物本身可能逐字段全对 —— 闭括号形态漏记时就是这样。这里独立重算段起点

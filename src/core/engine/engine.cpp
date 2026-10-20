@@ -230,10 +230,11 @@ void EditorEngine::rebuildFromTree(const rev::BlockDamage* dmg) {
     for (const rev::BlockKey& k : proj_hist_.keys) block_src_.push_back(k.source);
     tables_ = std::move(res.tables);
     edit_stats_.rebuild_compile_ms = msSince(t_compile0);
-    finishRebuildFromTree(vis);
+    finishRebuildFromTree(vis, res.controls);
 }
 
-void EditorEngine::finishRebuildFromTree(FlowVisibility vis) {
+void EditorEngine::finishRebuildFromTree(FlowVisibility vis,
+                                         const std::vector<rev::ControlSpan>& controls) {
     const auto t_index0 = Clock::now();
     // 流索引与块起点一起重建：两者是同一份文档的两种说法，分两次建就会出现
     //   "块按新树、流位置按旧树"的错配，而那种错配只表现为光标落偏一个字，很难查。
@@ -306,7 +307,7 @@ void EditorEngine::finishRebuildFromTree(FlowVisibility vis) {
     const auto t_copy0 = Clock::now();
     edit_stats_.rebuild_copy_ms = msSince(t_copy0);
     const auto t_ctl0 = Clock::now();
-    exportControlsFromBlocks();
+    exportControls(controls);
     edit_stats_.rebuild_controls_ms = msSince(t_ctl0);
 }
 
@@ -326,63 +327,36 @@ bool EditorEngine::flowToTextPos(FlowPos flow, TextPos* out) const {
     return caret_.flowToTextPos(flow, out);
 }
 
-void EditorEngine::exportControlsFromBlocks() {
+/**
+ * 从投影给出的跨度建控件集合。
+ *
+ * 跨度是投影走树时记下的（起止块号与段内码点），业务标识与锁定态就在节点载荷里 ——
+ * 所以这一层不再扫块流的对象表，也不再对每个控件 findNode 一次。少的不只是一遍线性查找：
+ * 过去区间算两次（产物一次、这里一次），两份一旦分叉，界面上只表现为"某个字段锁不住"或
+ * "括号画在别处"，而两份产物各自看都"对"。
+ */
+void EditorEngine::exportControls(const std::vector<rev::ControlSpan>& spans) {
     controls_.clear();
     owner_index_.clear();
     control_node_ids_.clear();
 
-    struct Boundary {
-        TextPos start{};
-        TextPos end{};
-        bool has_start = false;
-        bool has_end = false;
-        bool read_only = false;
-    };
-    std::unordered_map<int, Boundary> acc;
-    std::vector<int> order;  // owner 首见顺序 = 流顺序（对象按锚点单调不减地排在产物里）
-    for (size_t i = 0; i < blocks_full_.size(); ++i) {
-        const int para = static_cast<int>(i);
-        for (const InlineObject& o : blocks_full_[i].objects) {
-            auto it = acc.find(o.owner);
-            if (it == acc.end()) {
-                order.push_back(o.owner);
-                it = acc.emplace(o.owner, Boundary{}).first;
-            }
-            Boundary& b = it->second;
-            const TextPos at{para, static_cast<size_t>(o.cp)};
-            if (o.kind == InlineObjectKind::ControlStart) {
-                b.start = at;
-                b.has_start = true;
-            } else {
-                b.end = at;
-                b.has_end = true;
-            }
-            // 两枚边界的只读位同源（编译一次读定），取或只是让"配不成对"的那一半也能留下痕迹。
-            b.read_only = b.read_only || o.read_only;
-        }
-    }
-
-    for (int owner : order) {
-        const Boundary& b = acc[owner];
-        // 两枚边界必须成对：产的是一个开一个闭。少了任何一枚都说明这棵子树有一半没进产物
-        //   （例如被一个只记诊断的元素包着），那样的区间只会误导策略 —— 整对丢掉。
-        if (!b.has_start || !b.has_end) continue;
+    // 插入顺序就是对外下标顺序（controls()[i]、setControlProp(i, ...)）。跨度按文档顺序给
+    //   （见 rev::ControlSpan 的说明），所以这里照原序建，不重排 —— 换一种排法就等于把
+    //   "第几个字段"换成"按区间排第几个"，而两者在嵌套与零宽字段上不是同一个答案。
+    for (const rev::ControlSpan& s : spans) {
+        if (s.node == nullptr || s.block < 0 || s.end_block < 0) continue;
         Control c;
-        c.range.start = b.start;
-        c.range.end = b.end;
-        c.read_only = b.read_only;
-        // 业务标识与种类是节点上的数据，不在边界里 —— 从文档取。标签刻意不填：它是内容。
-        const rev::Node* n = rev::findNode(document(), static_cast<NodeId>(owner));
-        if (n != nullptr) {
-            const auto* spec = std::get_if<ControlSpec>(&n->payload);
-            if (spec != nullptr) {
-                c.id = spec->key;
-                c.kind = controlKindFromBusinessType(spec->controlType);
-            }
+        c.range.start = TextPos{s.block, static_cast<size_t>(s.cp)};
+        c.range.end = TextPos{s.end_block, static_cast<size_t>(s.end_cp)};
+        // 标签刻意不填：它是内容。标识、种类与锁定态是节点上的数据。
+        if (const auto* spec = std::get_if<ControlSpec>(&s.node->payload)) {
+            c.id = spec->key;
+            c.kind = controlKindFromBusinessType(spec->controlType);
+            c.read_only = spec->readonly;
         }
         const int index = controls_.add(c);
-        owner_index_[owner] = index;
-        control_node_ids_.push_back(static_cast<NodeId>(owner));
+        owner_index_[static_cast<int>(s.node->id)] = index;
+        control_node_ids_.push_back(s.node->id);
     }
     controls_.normalize();
 }
@@ -433,9 +407,8 @@ void EditorEngine::refreshViews() {
  */
 int EditorEngine::undoLimit() const { return cfg_.undo_limit > 0 ? cfg_.undo_limit : 1000000; }
 
-bool EditorEngine::commitSteps(std::vector<Step> steps, int dirty_para, ParaDelta delta,
-                               Range selection_before, Range selection_after) {
-    (void)delta;  // 段数的形状不再需要单独判断：投影自己按损伤区间增量，排版层另有一份。
+bool EditorEngine::commitSteps(std::vector<Step> steps, int dirty_para, Range selection_before,
+                               Range selection_after) {
     if (!loaded_ || !session_) return false;
     // 旧修订与旧产物一一对应：投影复用要按它们的差算损伤区间。Doc 是不可变的，
     //   拷贝只是一个引用计数（未改的子树与新的那份共享）。
@@ -888,7 +861,7 @@ bool EditorEngine::mergeWithNextParagraphAndRender() {
  * "类型加可编辑性"（Control / ControlSet），以及在表单模式下把这段文字的几何画成
  * "字段"的样子（controlRects）。这正是选区间模型而不是矩形模型换来的。
  *
- * 控件集合没有独立的写入口：它是编译产物的派生结果（见 exportControlsFromBlocks），
+ * 控件集合没有独立的写入口：它是投影产物的派生结果（见 exportControls），
  * 换一份字段名单 = 换一棵树 = 重新装载一次文档。
  */
 
