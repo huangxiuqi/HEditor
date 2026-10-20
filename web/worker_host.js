@@ -939,7 +939,8 @@ const CMD = {
   redo: () => ['redo', {}, true],
   setUndoLimit: (n) => ['setUndoLimit', { n }],
   setEditMode: (m) => { mode = Number(m) | 0; return ['setEditMode', { mode }]; },
-  setBracketScope: (s) => ['setBracketScope', { scope: Number(s) | 0 }],
+  setShowBrackets: (on) => ['setShowBrackets', { on: !!on }],
+  setShowControlDots: (on) => ['setShowControlDots', { on: !!on }],
   // 光标与选区的样式。参数整块递过去，缺的字段由 Worker 侧按现状补 —— 与单线程宿主
   //   门面同一套补全规则。返回的是 editStats（那边 setEditMode 也是），不是样式本身。
   setCaretStyle: (style) => ['caretStyle', { style: style || {} }],

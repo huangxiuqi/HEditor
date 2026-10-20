@@ -893,18 +893,33 @@ void setEditMode(int mode) { g_engine.setEditMode(editModeFromCode(mode)); }
 int editMode() { return static_cast<int>(g_engine.editMode()); }
 
 /**
- * 表单括号的显示范围：0 = All（默认，所有字段常驻括号）、1 = Focused（旧行为：
- * 只有光标所在字段显示括号，其余画小点）。
- * 改它会改变占位（括号进文档流），所以 setConfig 内部会重排 —— 宿主不必
- * 自己再排一次；下一次 present 的脏矩形自然会覆盖被挪动的正文。
+ * 显示 / 不显示表单括号（默认显示）。
+ *
+ * 括号进文档流（占宽度），所以改它会重排 —— setConfig 内部已经做了，宿主不必自己
+ * 再排一次；下一次 present 的脏矩形自然会覆盖被挪动的正文。
+ *
+ * 只有"全显示 / 全不显示"两档：不做"只显示光标所在字段"那一档 —— 它会让跨字段
+ * 移动光标变成整行重排，与"括号常显"的口径也打架。
  */
-void setBracketScope(int scope) {
+void setShowBrackets(bool on) {
     EngineConfig c = g_cfg;
-    c.form_brackets = (scope == 1) ? FormBracketScope::Focused : FormBracketScope::All;
+    c.show_brackets = on;
     g_cfg = c;
     applyConfig();
 }
-int bracketScope() { return static_cast<int>(g_cfg.form_brackets); }
+bool showBrackets() { return g_cfg.show_brackets; }
+
+/**
+ * 小点（控件右下角的方块）。独立开关，开启时所有控件都画，与焦点无关。
+ * 它不占宽度、不进文档流，所以改它不重排 —— 只让页位图重光栅（见 rasterSignature）。
+ */
+void setShowControlDots(bool on) {
+    EngineConfig c = g_cfg;
+    c.show_control_dots = on;
+    g_cfg = c;
+    applyConfig();
+}
+bool showControlDots() { return g_cfg.show_control_dots; }
 
 /**
  * 删控件：拆壳（保留内容）或连内容一起删。走 AndRender 版 —— 宿主一次调用就收尾，
@@ -1453,8 +1468,10 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("setFormControls", &setFormControls);
     emscripten::function("setEditMode", &setEditMode);
     emscripten::function("editMode", &editMode);
-    emscripten::function("setBracketScope", &setBracketScope);
-    emscripten::function("bracketScope", &bracketScope);
+    emscripten::function("setShowBrackets", &setShowBrackets);
+    emscripten::function("showBrackets", &showBrackets);
+    emscripten::function("setShowControlDots", &setShowControlDots);
+    emscripten::function("showControlDots", &showControlDots);
     emscripten::function("removeControlAt", &removeControlAt);
     emscripten::function("setControlPropAt", &setControlPropAt);
     emscripten::function("focusControl", &focusControl);

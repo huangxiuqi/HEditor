@@ -260,7 +260,7 @@ const PRESENT_ALWAYS = new Set([
   'present', 'blinkPhase', 'viewport',
   'setCaret', 'setCaretAt', 'setCaretAtSide', 'setFocusAtSide',
   'setCaretAtSideLine', 'setFocusAtSideLine',
-  'setEditMode', 'setBracketScope', 'setViewportAnchor',
+  'setEditMode', 'setShowBrackets', 'setShowControlDots', 'setViewportAnchor',
   // 样式那两条：与 setEditMode 同档 —— 引擎只换参数（见 setCaretAndSelectionStyle），
   //   没有这层收尾的话帧上留的还是旧颜色。
   'caretStyle', 'selectionStyle',
@@ -579,7 +579,8 @@ const WRITE = {
   setUndoLimit: (a) => mod.setUndoLimit(a.n | 0),
 
   setEditMode: (a) => mod.setEditMode(a.mode | 0),
-  setBracketScope: (a) => mod.setBracketScope(a.scope | 0),
+  setShowBrackets: (a) => mod.setShowBrackets(!!a.on),
+  setShowControlDots: (a) => mod.setShowControlDots(!!a.on),
   /**
    * 光标与选区的样式。缺的字段按现状补 —— 与单线程宿主门面同一套补全规则，
    *   两处不能各写一套（面板只改颜色时，宽度必须原样保留）。
@@ -795,7 +796,8 @@ const READ = {
   prewarmPage: (a) => mod.prewarmPageGlyphs(a.page | 0),
   dirtyPages: () => JSON.parse(mod.dirtyPagesJson()),
   editMode: () => mod.editMode(),
-  bracketScope: () => mod.bracketScope(),
+  showBrackets: () => mod.showBrackets(),
+  showControlDots: () => mod.showControlDots(),
   undoLimit: () => mod.undoLimit(),
   auditFrame: () => JSON.parse(mod.auditFrame()),
   auditBase: () => JSON.parse(mod.auditBase()),
@@ -935,12 +937,12 @@ const READ = {
   /**
    * 每个可编辑字段的左括号在帧上到底画了没有（扫左缘那一列里的"括号蓝"）。
    *   判据与探针一致：偏蓝够远 + 够亮 + 红通道 > 45（把光标色排除掉）。
+   *   括号常显之后每个可编辑字段都必须有；"只画聚焦字段"那一档已经删了。
    */
   markCheck: () => {
     const cc = JSON.parse(mod.controlsJson());
     const f = mod.frameRgba();
     const fw = mod.frameWidth();
-    const focusedOnly = mod.bracketScope() === 1;
     const near = (r, g, b) => r > 45 && b - r > 60 && b > 140;
     const rows = [];
     for (let ci = 0; ci < cc.items.length; ++ci) {
@@ -955,14 +957,10 @@ const READ = {
         if (x < lo || x > hi) continue;
         if (near(f[i], f[i + 1], f[i + 2])) ++n;
       }
-      const focused = ci === cc.caret;
-      rows.push({
-        control: ci, focused, leftEdgePx: n,
-        ok: focusedOnly ? (focused ? n > 0 : n === 0) : n > 0,
-      });
+      rows.push({ control: ci, focused: ci === cc.caret, leftEdgePx: n, ok: n > 0 });
     }
     return {
-      mode: cc.mode, bracketScope: mod.bracketScope(), count: cc.count,
+      mode: cc.mode, showBrackets: mod.showBrackets(), count: cc.count,
       caretControl: cc.caret, zoom: zoomLevel, rows,
       allOk: rows.every((r) => r.ok),
     };

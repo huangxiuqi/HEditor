@@ -1172,7 +1172,7 @@ int main() {
                        "文档模式（设计态）也占位 —— 看不见字段的边界，作者就无从增删改");
             expectTrue(std::fabs(end_in - end_doc) < 0.01f,
                        "表单模式占位量与文档模式一模一样"
-                       "（括号范围由 form_brackets 决定，不随编辑模式变）");
+                       "（括号只有显示/不显示两档，不随编辑模式变）");
             expectTrue(
                 std::fabs(end_ro - end_none) < 0.01f,
                 "只读模式不占位（括号不画就不该占宽度 —— 那样会凭空多出一段空隙，谁也没要）");
@@ -1213,7 +1213,7 @@ int main() {
             const float x_san0 = glyphX(ef, 9);   // 三 —— 字段之后，该让 2 个括号
             const float x_per0 = glyphX(ef, 16);  // 。 —— 行尾，该让 2 个括号
 
-            // 默认档（FormBracketScope::All）下两个字段都占位 ——
+            // 括号常显档下两个字段都占位 ——
             //   所以 #0 之后 +2 槽、#1 之后 +4 槽。这正是"括号一直显示"的代价：
             //   正文被多推开一对括号。不要再按"只有聚焦字段占位"去写期望值。
             loadControls(ef, {mk(5, 9, "k1", false), mk(12, 16, "k2", false)});
@@ -1279,7 +1279,7 @@ int main() {
             expectTrue(x_doc - x_fan0 > 1.0f,
                        "文档模式也占位：字形让开一个括号槽（设计态看不见边界就无从增删改）");
             expectTrue(std::fabs(x_doc - x_form) < 0.01f,
-                       "文档与表单占位量逐像素一致（括号范围由 form_brackets 定，与模式无关）");
+                       "文档与表单占位量逐像素一致（括号只有显示/不显示两档，与模式无关）");
             expectTrue(std::fabs(x_ro - x_fan0) < 0.01f,
                        "只读模式回到无表单基线的位置：不画就不占宽度");
         }
@@ -1615,39 +1615,24 @@ int main() {
                        "光标停在字段末尾时右括号仍在（重叠时画序错了会被抹掉），"
                        "光标离开该字段后它也在（常驻）");
 
-            // (f5) Focused 档回归：非聚焦字段回到"只有右下角小点"
-            //
-            //   这一档是旧行为，也是被真机验证过的那一版，不能因为换了默认值就失修。
-            //   判据和旧版一致：聚焦字段的左缘外侧有括号，其余字段为空。
+            // (f5) 小点：独立开关，与光标无关 —— 开时所有控件右下角各一个方块。
+            //   它不占宽度（不进文档流），所以开关不该重排，只改帧上的像素。
+            //   判据取"帧逐字节"：开 → 帧变了且字形数不变；关 → 逐字节回到开之前
+            //   （有残留就说明它不是"画上去就不管"，而是真的擦干净了）。
             {
-                EngineConfig cf = ef.config();
-                cf.form_brackets = FormBracketScope::Focused;
-                ef.setConfig(cf);
+                const std::vector<uint8_t> base = snapshot(ef);
+                const int glyphs_before = ef.stats().glyph_count;
+                EngineConfig cd = ef.config();
+                cd.show_control_dots = true;
+                ef.setConfig(cd);
+                const std::vector<uint8_t> dots = snapshot(ef);
+                expectTrue(dots != base, "开小点：帧上真的多了东西（每个控件右下角一个方块）");
+                expectTrue(ef.stats().glyph_count == glyphs_before,
+                           "小点不产生字形（它是一块填充，不是排版产物）");
 
-                // 窗口必须按帧分别算：Focused 档下光标进出字段会让整行重排，
-                //   控件矩形跟着平移一个括号宽 —— 拿上一帧的窗口去数，量到的就是
-                //   旁边那块像素。
-                ef.setCaret(0, 6);  // 在 #0 里
-                const std::vector<uint8_t> f = snapshot(ef);
-                const size_t a0 = inkIn(f, bandLeft(0));
-                const size_t a1 = inkIn(f, bandLeft(1));
-
-                ef.setCaret(0, 13);  // 在 #1 里 → 标记该换边
-                const std::vector<uint8_t> g = snapshot(ef);
-                const size_t b0 = inkIn(g, bandLeft(0));
-                const size_t b1 = inkIn(g, bandLeft(1));
-
-                std::printf(
-                    "     Focused 档：光标在 #0 → #0=%zu／#1=%zu ；"
-                    "光标在 #1 → #0=%zu／#1=%zu\n",
-                    a0, a1, b0, b1);
-                expectTrue(a0 > 0 && a1 == 0,
-                           "Focused 档：光标在 #0 → 只有 #0 有括号，#1 左缘为空（只有小点）");
-                expectTrue(b0 == 0 && b1 > 0, "Focused 档：光标移到 #1 → 括号跟着搬过去");
-
-                EngineConfig ca = ef.config();
-                ca.form_brackets = FormBracketScope::All;  // 回默认档，后面几节都按它
-                ef.setConfig(ca);
+                cd.show_control_dots = false;
+                ef.setConfig(cd);
+                expectTrue(snapshot(ef) == base, "关小点：帧逐字节回到开之前（没有残留）");
             }
 
             // 穷尽不变式：光标走遍每一个可停位置，每一步都检查每个字段的括号 ——
@@ -1859,10 +1844,9 @@ int main() {
         //  所以判据不是"第一次写了多少"，而是"两次读之间引擎一共写过多少"。
         //  下面按真实顺序把这条路走一遍。
         //
-        //  这一节显式用 Focused 档：它要量的是"第一次 present 写了整帧"那条路径，
-        //     而"换字段 → 括号占位换位置 → 整行重排"只在 Focused 档成立。
-        //     （默认的 All 档下换字段根本不重排，那是括号常驻带来的收益，
-        //      它的对照断言在后面那段，别把两者混起来。）
+        //  这一节要"第一次 present 写满整窗"，好和第二次的小矩形形成对比。
+        //     用什么制造这一次大写入不影响结论：关括号会让占位消失、整篇重排，
+        //     与换字段是同一类事件（排版输入变了，帧必须整窗重贴）。
         EditorEngine eg;
         if (!eg.init({cjkPath, mnPath, latinPath})) {
             std::fprintf(stderr, "字体加载失败\n");
@@ -1870,7 +1854,6 @@ int main() {
         }
         EngineConfig cg;
         cg.zoom = 1.5f;
-        cg.form_brackets = FormBracketScope::Focused;
         eg.setConfig(cg);
 
         BlockSpec bg;
@@ -1903,9 +1886,11 @@ int main() {
         eg.repaint();
         const Rect small_box = eg.takeBlitBox();
 
-        // 换字段（= 鼠标点「加重一天」）：
-        //    聚焦字段变 → 括号占位换位置 → 整行文字重排。
-        eg.setCaret(0, 14);
+        // 制造"第一次 present 很大"：
+        //    关掉括号 → 占位消失 → 整篇重排、帧整窗重贴。
+        EngineConfig co = eg.config();
+        co.show_brackets = false;
+        eg.setConfig(co);
         eg.repaint();                          // 第一次 present
         const EditStats st1 = eg.editStats();  // 宿主此刻读到的账
 
@@ -1945,30 +1930,27 @@ int main() {
         expectTrue(after.w == 0.0f || after.h == 0.0f,
                    "takeBlitBox() 是读后清零的（否则宿主每次都会重贴整帧）");
 
-        // 对照：默认档（All）下换字段不重排，上屏量必须远小于整帧。
+        // 对照：换字段不重排，上屏量必须远小于整帧。
         //
-        //   这条钉死的是"括号常驻"带来的真正好处：占位集合与光标无关，
-        //   于是"点一下另一个字段"不再引发整行重排（Focused 档下会），
-        //   上屏量从"整帧"掉到"一块小矩形"。
+        //   这条钉死的是"括号常显"带来的真正好处：占位集合与光标无关，
+        //   于是"点一下另一个字段"不引发重排，上屏量从"整帧"掉到"一块小矩形"。
         //   判据取"远小于整帧"而不是某个精确像素数：精确值随字体/字号变。
         {
             EngineConfig ca = eg.config();
-            ca.form_brackets = FormBracketScope::All;
-            eg.setConfig(ca);  // 切档会重排（占位集合变了）
+            ca.show_brackets = true;  // 上面为了制造整帧重贴关掉了，这里开回来
+            eg.setConfig(ca);         // 开括号会重排（占位回来了）
             eg.setCaret(0, 6);
             eg.repaint();
             (void)eg.takeBlitBox();
 
-            eg.setCaret(0, 14);  // 换到另一个字段 —— All 档下排版不动
+            eg.setCaret(0, 14);  // 换到另一个字段 —— 排版不动
             eg.repaint();
             const Rect cross = eg.takeBlitBox();
-            std::printf("     ⑤ All 档换字段：上屏盒 %d×%d px（整帧 %d×%d）\n",
-                        static_cast<int>(cross.w), static_cast<int>(cross.h), eg.frameWidth(),
-                        eg.frameHeight());
+            std::printf("     ⑤ 换字段：上屏盒 %d×%d px（整帧 %d×%d）\n", static_cast<int>(cross.w),
+                        static_cast<int>(cross.h), eg.frameWidth(), eg.frameHeight());
             expectTrue(cross.w > 0.0f && cross.h > 0.0f, "⑤ 换字段确实写了点什么（光标）");
             expectTrue(cross.w < eg.frameWidth() / 2 && cross.h < eg.frameHeight() / 2,
-                       "默认档下换字段不再整帧重贴（占位与光标无关 → 排版不动），"
-                       "而 Focused 档下同样动作会写整帧（见 ② 的账）");
+                       "换字段不再整帧重贴（占位与光标无关 → 排版不动）");
         }
     }
 
@@ -5262,22 +5244,8 @@ int main() {
                        "★ 产生端定序：表是 [5<0R 7>0R 7<1- 7>1- 7<2- 9>2-]（实际 " + got + "）");
             expectTrue(objectsOrdered(e.blocks()[0], nullptr), "产生端产出的表满足不变量");
 
-            // 换档：Focused 只放聚焦字段的边界 —— 表里"少了几项"必须真的少。
-            EngineConfig efc = ec;
-            efc.form_brackets = FormBracketScope::Focused;
-            e.setCaret(0, 6);  // 落在 k1 [5,7) 里
-            e.setConfig(efc);
-            e.relayout();
-            const std::vector<InlineObject>& focused = e.blocks()[0].objects;
-            expectTrue(focused.size() == 2 && focused[0].cp == 5 &&
-                           e.controlIndexOfOwner(focused[0].owner) == 0 &&
-                           focused[0].kind == InlineObjectKind::ControlStart &&
-                           focused[1].cp == 7 && focused[1].kind == InlineObjectKind::ControlEnd,
-                       "Focused 档：表里只剩聚焦字段的两项（实际 " + census(focused) +
-                           "，聚焦=" + std::to_string(e.focusedControlIndex()) +
-                           "，光标=" + std::to_string(e.caret().offset) + "/" +
-                           std::to_string(e.caretSide()) + "）");
-            expectTrue(e.auditLayout() == 0, "换档之后增量与全量逐字段一致（表变了就必须重排）");
+            // "换档只放聚焦字段"那一段随 Focused 档一起删了（2026-10-20）：现在只有
+            //   "全部或没有"两档，没有"表里少几项"这种中间态。下面验"没有"那一档。
 
             // 只读模式：括号根本不画，表就该是空的（不画却还占宽度是最坏的形态）。
             e.setEditMode(EditMode::ReadOnly);
@@ -5384,7 +5352,6 @@ int main() {
         //     证伪"持树只是把首次编译的结果存了一份"。
         EngineConfig ec25;
         ec25.zoom = 1.0f;
-        ec25.form_brackets = FormBracketScope::All;
         const std::vector<std::string> fonts25 = {cjkPath, mnPath, latinPath};
 
         // 形状：一段文字「住院号甲乙丙丁」，一个只读控件包住中间两个字（码点 3..5）。
@@ -10258,14 +10225,14 @@ int main() {
                 "★ 没有多画一行、也没有多画一段（尾巴被截掉了）");
         }
 
-        // (d) 聚焦档的括号：撤销把光标搬回旧位置，"哪个字段显示括号"也跟着变 —— 而占位
-        //   变化可能落在损伤区间之外（那一段的块哈希一个字没变）。这是损伤区间之外
-        //   唯一必须另算的账，漏了的表现是"撤销之后另一个字段的括号还留在版面上"。
+        // (d) 括号开关：关掉 → 全篇占位消失；打开 → 全篇占位回来。
+        //   这是"排版输入整篇翻转"的场景，也是后缀复用那条纪律的判据所在 ——
+        //   脏区右端只要算错，auditLayout（增量 vs 全量）立刻红。
+        //   覆盖面比"两个字段之间挪"更宽：这里是全篇 8 段一起翻。
         {
             EditorEngine eb;
-            expectTrue(eb.init(fonts56), "引擎初始化（撤销 + 括号计划）");
+            expectTrue(eb.init(fonts56), "引擎初始化（括号开关）");
             EngineConfig cb = c56;
-            cb.form_brackets = FormBracketScope::Focused;
             eb.setConfig(cb);
             std::vector<BlockSpec> bf = make56(8);
             for (int i = 0; i < 8; ++i) bf[i].setText("第" + std::to_string(i) + "段甲乙丙丁");
@@ -10281,7 +10248,7 @@ int main() {
             eb.setEditMode(EditMode::Form);
             eb.relayout();
 
-            // 占位簇数：聚焦档下只有光标所在那一个字段有括号（一对）。
+            // 占位簇数：常显档下两个字段各有一对。
             auto placeholders = [](const EditorEngine& en, int para) {
                 int n = 0;
                 for (const LineBox& lb : en.layout().lines) {
@@ -10293,27 +10260,22 @@ int main() {
                 return n;
             };
 
-            eb.setCaret(5, 2);  // 聚焦第二个字段
-            expectTrue(placeholders(eb, 5) == 2 && placeholders(eb, 0) == 0,
-                       "聚焦到第二个字段之后括号在它上面（还没落笔）");
-            const size_t glyphsInB = eb.layout().glyphs.size();
-            expectTrue(eb.typeTextAndRender("X"), "在第 5 段（字段 fb 里）打一个字");
+            expectTrue(placeholders(eb, 0) == 2 && placeholders(eb, 5) == 2,
+                       "括号常显：两个字段各一对占位");
 
-            eb.setCaret(0, 2);  // 聚焦换到第一个字段：括号要从第 5 段挪到第 0 段
-            expectTrue(placeholders(eb, 0) == 2 && placeholders(eb, 5) == 0,
-                       "聚焦换字段之后占位真的挪了（否则下面那条判据没有判别力）");
-            eb.repaint();  // 换字段本身也是一次增量：脏区是那两个字段的凸包，不是"从这里到末尾"
-            expectTrue(eb.editStats().reused_paragraphs > 0,
-                       "换字段只重排两个字段之间的那一段（复用 " +
-                           std::to_string(eb.editStats().reused_paragraphs) + " 段）");
+            EngineConfig off = eb.config();
+            off.show_brackets = false;  // 不占位 → 正文回流（setConfig 内部会重排）
+            eb.setConfig(off);
+            expectTrue(placeholders(eb, 0) == 0 && placeholders(eb, 5) == 0,
+                       "★ 关掉括号之后全篇一个占位都不剩");
+            expectTrue(eb.auditLayout() == 0, "★ 全篇占位消失之后增量仍与全量逐字段一致");
 
-            expectTrue(eb.undoAndRender(), "撤销第 5 段那一笔");
-            expectTrue(placeholders(eb, 5) == 2 && placeholders(eb, 0) == 0,
-                       "★ 撤销之后括号回到第 5 段（损伤区间之外的那一段也重排了）");
-            expectTrue(eb.auditLayout() == 0,
-                       "★ 括号计划在损伤区间之外变了，撤销之后的增量仍与全量逐字段一致");
-            expectTrue(eb.layout().glyphs.size() == glyphsInB,
-                       "★ 字形数回到落笔之前（那个字被撤掉、括号也回到同一个字段）");
+            EngineConfig on = eb.config();
+            on.show_brackets = true;
+            eb.setConfig(on);
+            expectTrue(placeholders(eb, 0) == 2 && placeholders(eb, 5) == 2,
+                       "★ 再打开，两处占位都回来了");
+            expectTrue(eb.auditLayout() == 0, "★ 再打开之后增量仍与全量逐字段一致");
         }
 
         // (e) 排版账不被第二次呈现抹掉：一次编辑之后宿主常常再呈现一次（上屏收尾、

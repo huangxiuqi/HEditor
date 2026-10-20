@@ -433,7 +433,7 @@ public:
      * 控件本身不参与断行/分页，参与排版的是它的括号：要显示括号的字段会在自己的
      * 边界落成一项"行内对象"（见 BlockSpec::objects），排版据此插入占位簇（占宽度、
      * 不产生字形，见 layout.h）。因此挂控件、改控件范围不必重排（正文没变），而改显示
-     * 括号的范围（form_brackets）必须重排 —— 对象表变了，排版输入就变了。
+     * 括号的显示开关必须重排 —— 对象表变了，排版输入就变了。
      *
      * 结构与绘制共用同一份落点：括号画在哪由占位簇的几何给出（owner_control 指回
      * 控件），不再两边各记一套 —— "占位一次、不占位一次"那类不一致没有立足处。
@@ -450,9 +450,8 @@ public:
      * 由光标位置与侧别推出来（见 caretFieldHint）；推不出来时（光标落在所有控件之外）
      * 回落成"最内层含端点"—— 与编辑归属同一口径。
      *
-     * 这条回落不只是为了好看：bracketedControls() 在聚焦档下要问它，而边界对象表
-     * 又是由 bracketedControls() 决定的 —— 少了回落，首次排版前会互相等成死结
-     * （一个括号都排不出来，于是更推不出归属）。
+     * 这条回落不只是为了好看：光标落在段落末尾、或刚跳完字段时，光标的"侧别"推不出
+     * 归属，而编辑命令与面板都要一个确定的字段下标（见 edit_command 的归属口径）。
      */
     int focusedControlIndex() const {
         const int hint = caretFieldHint();
@@ -486,59 +485,30 @@ public:
     }
 
     /**
-     * 要显示括号（= 要在排版里占宽度）的控件下标 —— 产生端的名单，只有引擎认识
-     * 「聚焦」与编辑模式。syncInlineObjects() 按它决定往对象表里写哪些边界。
-     * 空 = 一个占位都不插，排版与"没有表单"逐字节一致。
+     * 要不要在排版里给控件边界留占位（= 显示括号）。
      *
-     * 文档与表单都要（前者是设计态：看不见字段就无从增删改），只有只读不画 ——
-     * 它是呈现与打印态，括号落进版面就印出来了。
+     * 只有两档：全部或没有。只读模式不占 —— 它是呈现与打印态，括号落进版面就印出来了；
+     * 没有控件时自然也没有占位（空文档与"没有表单"逐字节一致）。
      */
-    std::vector<int> bracketedControls() const {
-        std::vector<int> out;
-        if (mode_ == EditMode::ReadOnly || controls_.empty()) return out;
-        if (cfg_.form_brackets == FormBracketScope::All) {
-            out.reserve(static_cast<size_t>(controls_.size()));
-            for (int i = 0; i < controls_.size(); ++i) {
-                out.push_back(i);
-            }
-            return out;
-        }
-        const int f = focusedControlIndex();
-        if (f >= 0) out.push_back(f);
-        return out;
+    bool bracketsOn() const {
+        return mode_ != EditMode::ReadOnly && cfg_.show_brackets && !controls_.empty();
     }
 
     /**
      * 「括号占位计划」的指纹：变了就必须重排（占位进文档流，集合一变排版就变）。
-     * 编码：-1 = 没有占位；-2 = 全部控件（All 档）；>= 0 = 那一个控件（Focused 档）。
-     * 为什么 All 档返回常数：占位集合与光标无关 → 光标跨字段移动不再重排
-     * （Focused 档下那是一次整行重排，是"显示才占位"的真实代价）。
-     * 为什么不能用 focusedControlIndex() 代替它：只读模式下下标着同一份文档、括号根本不画，
-     * 却会照样把正文推开一截 —— 凭空多出来的空隙，谁也没要。
-     */
-    int bracketPlanId() const {
-        if (mode_ == EditMode::ReadOnly || controls_.empty()) return -1;
-        if (cfg_.form_brackets == FormBracketScope::All) return -2;
-        return focusedControlIndex();
-    }
-
-    /**
-     * 括号占位计划的身份：档位 + 聚焦的是哪个字段（节点 id，不是下标）。
+     * 编码：-1 = 没有占位；0 = 全部控件都占位。
      *
-     * 只比 bracketPlanId() 不够：控件表换过之后同一个下标可能指向另一个字段 —— 撤销删掉
-     * 一个控件时，它后面的字段整体前移，下标相同而字段不同，括号就落到了别的段上，
-     * 而那时块哈希一个字没变（损伤区间报不到那里）。节点 id 是身份，下标只是名次。
+     * 用 int 而不是 bool 是因为调用点全是"记一下、操作完再比一下"（十余处），
+     * 比较值的形状跟着改没有收益。占位集合与光标无关 —— 光标跨字段移动不重排，
+     * 这是括号常显换来的。
      */
-    std::pair<int, int> bracketPlanKey() const {
-        const int plan = bracketPlanId();
-        return {plan, plan >= 0 ? slotOwnerOf(plan) : 0};
-    }
+    int bracketPlanId() const { return bracketsOn() ? 0 : -1; }
 
     /**
      * 把控件边界写进块流的行内对象表 —— 元素流在引擎侧的落点，也是排版层唯一的
      * 括号来源（layoutDocument 不再收控件集合）。幂等，每次 relayout 之前调用。
      *
-     * 产出端暂时还是引擎：只有它知道编辑模式与 form_brackets，也就知道哪些字段要
+     * 产出端暂时还是引擎：只有它知道编辑模式与显示开关，也就知道哪些字段要
      * 显示括号。等编译层能把内容控件直接编成行内对象，这里就退化成一次过滤。
      */
     void syncInlineObjects();

@@ -1025,12 +1025,12 @@ void EditorEngine::presentInternal(int first_page, int count, bool force_full) {
         caret_rect_px_prev_ = Rect{};
     }
 
-    // 表单标记（方括号；Focused 档下另有小点）
+    // 表单标记（方括号；可选的右下角小点）
     //
-    // 画在帧上、不进底图：底图的更新判据是页指纹，而页指纹里没有
-    //   光标也没有标记（光标一动就重画整页，增量就失去意义了）。
-    //   注意这不等于"标记依赖光标"：默认档（All）下括号是常驻的、
-    //     与光标无关，只有 Focused 档的小点/括号才跟着光标走。见 drawControlMarks。
+    // 画在帧上、不进底图：底图的更新判据是页指纹，而页指纹里没有标记 ——
+    //   开关括号 / 改颜色 / 开小点都不该让整页重光栅，它们是"帧上的东西"。
+    //   （5D 之后搬进页内容位图，那时这几项改由 rasterSignature 管，见方案 5D-1。）
+    //   标记与光标无关：括号常显，小点也是全控件常显 —— 见 drawControlMarks。
     //
     // 画在光标之后：光标和标记会在字段末尾附近贴住，
     //   标记后画才能保证它不被光标盖掉（反过来就是上面那个 bug）。
@@ -1289,8 +1289,8 @@ void EditorEngine::drawAtomBox(Bitmap& target, const LineBox& lb, const LineClus
 
 /**
  * 表单标记：
- * 方括号 —— 字段常驻（默认全部字段；Focused 档下只有光标所在的那个）
- * 小点   —— 只有 Focused 档才画，给"光标不在"的字段（右下角一个方块）
+ * 方括号 —— 字段常显（开关关掉则一个都不显示，见 EngineConfig::show_brackets）
+ * 小点   —— 独立开关，开时所有控件右下角各画一个方块，与焦点无关
  * 括号用字体里的字形而非矩形拼几何：拼出来的括号与正文不像同一套设计，
  * 而真字形与正文同粗细、同风格，且随正文字号缩放。字形无法纵向拉伸，
  * 跨行时每行各括一次。
@@ -1388,17 +1388,12 @@ void EditorEngine::drawControlMarks(int first_page, int count) {
         }
     }
 
-    // All 档到这儿就结束了：所有字段常驻括号，没有小点。
-    if (cfg_.form_brackets == FormBracketScope::All) return;
+    // 小点是独立开关，与括号无关：关着就到这儿结束。
+    if (!cfg_.show_control_dots) return;
 
-    // 小点（Focused 档：光标不在的字段）
-    //
-    // 用 include_end = true：光标停在字段末尾也算"在这个字段里" ——
-    // 否则刚打到最后一个字时括号会突然消失，而那一刻正是最需要看到边界的时候。
-    const int focused = controls_.empty() ? -1 : controls_.innermostAt(caret(), true);
-
+    // 开启时所有控件都画 —— 不区分焦点。它只表示"这里有一个字段"，
+    //   不表示"光标不在这里"，所以这里既没有 innermostAt，也没有"跳过聚焦的那个"。
     for (int ci = 0; ci < controls_.size(); ++ci) {
-        if (ci == focused) continue;
         const Control& c = controls_.at(ci);
         const Color col = c.read_only ? cfg_.control_mark_ro : cfg_.control_mark;
         for (const ControlRect& cr : controlRects(ci)) {

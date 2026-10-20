@@ -1242,7 +1242,7 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
         // 括号占位：把块流的行内对象插成占位簇（实现见 withInlineObjects）。
         //   占位簇不产生字形、只占 advance，于是下面的断行容量、行末位置、每个簇的行内
         //   位置、光标与命中测试全都自动把括号算进去 —— 这就是"括号进文档流"的全部内容。
-        //   哪些对象在这张表里，由产生端决定（引擎按模式与 form_brackets 落成对象表），
+        //   哪些对象在这张表里，由产生端决定（引擎按模式与显示开关落成对象表），
         //   排版层不认识「聚焦」：表里有就占位。默认全部控件常显，故对象表与光标无关，
         //   光标移动不引起重排。para_cluster_starts 在此之前已生成，按约定不含占位簇。
         shaped = withInlineObjects(b, n_cp, shaped, &scratch);

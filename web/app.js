@@ -2043,13 +2043,19 @@ const facade = {
     api.write('setEditMode', { mode: Number(m) });
     return this.present();
   },
-  // 括号显示范围：0 = All（默认，所有字段常驻）、1 = Focused（旧行为，只显示光标所在字段）。
-  // 引擎侧会自己重排（括号进文档流，占位变了），宿主只需上屏。
-  setBracketScope(s) {
-    api.write('setBracketScope', { scope: Number(s) });
+  // 显示 / 不显示表单括号（默认显示）。括号进文档流，引擎自己会重排，宿主只需上屏。
+  setShowBrackets(on) {
+    api.write('setShowBrackets', { on: !!on });
     return this.present();
   },
-  get bracketScope() { return mod ? api.read('bracketScope') : 0; },
+  get showBrackets() { return mod ? api.read('showBrackets') : true; },
+  // 小点：控件右下角的方块。独立开关，开启时所有控件都画；它不占宽度、不进文档流，
+  //   所以引擎不重排，只让页位图重光栅 —— 但宿主仍要上屏一次。
+  setShowControlDots(on) {
+    api.write('setShowControlDots', { on: !!on });
+    return this.present();
+  },
+  get showControlDots() { return mod ? api.read('showControlDots') : false; },
   // 光标与选区的样式（色值 [r,g,b,a]，宽度单位磅）。  //   引擎只换参数、不作废底图（见 setCaretAndSelectionStyle），所以这里补一次 present
   //   就够 —— 走 setConfig 那条路会把窗口里的每一页重新光栅，取色器连续改时每一下都付。
   //   两个取值器与两个 setter 的读写形状一致，探针两边写同一句。
@@ -2306,9 +2312,9 @@ const facade = {
   // 给用户的取证入口。是"有时括号渲染不更新" —— 这类间歇性
   //   问题在开发机上复现不出来，所以把判据做成一调用，让他在出问题的那台机器上量。
   //
-  // 判据（默认档 All）：每个可编辑字段的左缘外侧都必须有括号墨迹，
-  //   与光标在哪无关（括号常驻）。Focused 档（scope=1）下才退回旧判据：
-  //   聚焦字段有括号、其余为空。
+  // 判据（括号常显）：每个可编辑字段的左缘外侧都必须有括号墨迹，
+  //   与光标在哪无关。旧的 Focused 档（只画聚焦字段、其余留小点）已经删掉，
+  //   所以这里没有"非聚焦字段该为空"那一支。
   //   用法：F12 控制台 →  __heditor.markCheck()   把返回的对象发出来。
   //   allOk=false 就说明确实有字段没画对，rows 里能看到是哪个、差多少。
   markCheck() {
@@ -2316,7 +2322,6 @@ const facade = {
     const cc = api.read('controls');
     const f = this.rawFrame();
     const fw = this.frameW();
-    const focusedOnly = this.bracketScope === 1;
     // 与探针同一条判据：偏蓝够远 + 够亮 + 红通道 > 45（把光标色排除掉）
     const near = (r, g, b) => r > 45 && b - r > 60 && b > 140;
     const rows = [];
@@ -2332,17 +2337,11 @@ const facade = {
         if (x < lo || x > hi) continue;
         if (near(f[i], f[i + 1], f[i + 2])) ++n;
       }
-      const focused = ci === cc.caret;
-      rows.push({
-        control: ci,
-        focused,
-        leftEdgePx: n,
-        ok: focusedOnly ? (focused ? n > 0 : n === 0) : n > 0,
-      });
+      rows.push({ control: ci, focused: ci === cc.caret, leftEdgePx: n, ok: n > 0 });
     }
     return {
       mode: cc.mode,
-      bracketScope: this.bracketScope,
+      showBrackets: this.showBrackets,
       count: cc.count,
       caretControl: cc.caret,
       zoom: currentZoom,

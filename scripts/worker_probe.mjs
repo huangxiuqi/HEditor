@@ -214,7 +214,7 @@ async function main() {
   chk.check('重做回到打字后的文本', undo.t3 === undo.t1, `${j(undo.t2)} -> ${j(undo.t3)}`);
   chk.check('撤销上限可读', typeof undo.limit === 'number', String(undo.limit));
 
-  chk.section('[W5] 表单模式：控件清单、字段跳转、括号范围');
+  chk.section('[W5] 表单模式：控件清单、字段跳转、括号开关');
   const form = await c.eval(body(
     'const h = window.__wheditor;' +
     'await h.loadFormSample(0);' +
@@ -224,21 +224,21 @@ async function main() {
     'const slots0 = ((await h.bracketSlots) || []).length;' +
     'await h.focusControl(true);' +
     'const caretAfterTab = h.controls.caret;' +
-    'await h.setBracketScope(1);' +
-    'const mark1 = await h.markCheck();' +
-    'await h.setBracketScope(0);' +
-    'const mark0 = await h.markCheck();' +
-    'return { doc, inForm, slots0, caretAfterTab, mark0, mark1, blocked: h.blockedEdits };'));
+    'const markOn = await h.markCheck();' +
+    'await h.setShowBrackets(false);' +
+    'const markOff = await h.markCheck();' +
+    'await h.setShowBrackets(true);' +
+    'return { doc, inForm, slots0, caretAfterTab, markOn, markOff, blocked: h.blockedEdits };'));
   chk.check('表单样例带出了可编辑控件', form.doc.controls > 0, `${form.doc.controls} 个`);
   chk.check('切到表单模式后模式位跟着变', form.inForm === 1, `mode=${form.inForm}`);
   chk.check('括号占位槽非空（排布来自排版结果）', form.slots0 > 0, `${form.slots0} 槽`);
   chk.check('跳字段把光标移到某个控件上', typeof form.caretAfterTab === 'number',
             `caret=${form.caretAfterTab}`);
-  chk.check('全部范围：每个可编辑字段的左括号都画了', form.mark0.allOk === true,
-            `${form.mark0.rows.length} 行 / 不符 ${form.mark0.rows.filter((r) => !r.ok).length}`);
-  chk.check('仅焦点范围：最多只有一个字段画括号',
-            form.mark1.rows.filter((r) => r.leftEdgePx > 0).length <= 1,
-            `画了 ${form.mark1.rows.filter((r) => r.leftEdgePx > 0).length} 个`);
+  chk.check('括号常显：每个可编辑字段的左括号都画了', form.markOn.allOk === true,
+            `${form.markOn.rows.length} 行 / 不符 ${form.markOn.rows.filter((r) => !r.ok).length}`);
+  chk.check('关掉括号：一个字段的括号都不剩',
+            form.markOff.rows.filter((r) => r.leftEdgePx > 0).length === 0,
+            `还剩 ${form.markOff.rows.filter((r) => r.leftEdgePx > 0).length} 个`);
 
   chk.section('[W6] 审计与不变式');
   const audit = await c.eval(body(

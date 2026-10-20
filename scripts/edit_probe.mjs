@@ -902,36 +902,54 @@ async function main() {
                   (ord.blueHi < ord.grayLo ? '' : '  ← 顺序反了，就是截图里的 `[]`'));
       }
 
-      // ⭐ 运行期切换显示范围：__heditor.setBracketScope(0|1)
+      // ⭐ 运行期开关括号：__heditor.setShowBrackets(false|true)
       //
-      //   这条测的是"改配置也要重排"：括号进文档流，显示范围一变占位就变，
-      //     正文得跟着挪。只重绘不重排的话，括号会按新档画、正文却按旧档排 ——
+      //   这条测的是"改配置也要重排"：括号进文档流，显示与否一变占位就变，
+      //     正文得跟着挪。只重绘不重排的话，括号会按新的开关画、正文却按旧口径排 ——
       //     表象是括号盖在字上/槽里空一条，而且从数字上看不出来。
-      //   判据取"切档前后同一个字段的竖带"，加上屏幕/帧一致。
+      //   判据取"开关前后同一个字段的竖带"，加上屏幕/帧一致。
       {
         await c.eval('return await window.__heditor.loadFormSample(0);');
         await c.eval('return await window.__heditor.stopBlink();');
         await c.eval('return await window.__heditor.setCaret(0, 6);');   // 光标在 #0
         await c.eval('await window.__heditor.present(); return true;');
-        const all0 = await c.eval(bandAt(await rectX(0)));
-        const all2 = await c.eval(bandAt(await rectX(2)));
+        const on0 = await c.eval(bandAt(await rectX(0)));
+        const on2 = await c.eval(bandAt(await rectX(2)));
 
-        await c.eval('return await window.__heditor.setBracketScope(1);');   // → Focused
-        const foc0 = await c.eval(bandAt(await rectX(0)));
-        const foc2 = await c.eval(bandAt(await rectX(2)));
+        await c.eval('return await window.__heditor.setShowBrackets(false);');   // 括号全关
+        const off0 = await c.eval(bandAt(await rectX(0)));
+        const off2 = await c.eval(bandAt(await rectX(2)));
         const scSw = await c.eval('return await window.__heditor.selfCheck();');
         const auSw = await c.eval('return await window.__heditor.auditFrame();');
 
-        await c.eval('return await window.__heditor.setBracketScope(0);');   // → 回 All
+        await c.eval('return await window.__heditor.setShowBrackets(true);');    // 再打开
         const back0 = await c.eval(bandAt(await rectX(0)));
         const back2 = await c.eval(bandAt(await rectX(2)));
 
-        chk.check(' setBracketScope：All（两个都在）→ Focused（只有光标所在的 #0）→ All（又都在）',
-                  all0 > 0 && all2 > 0 && foc0 > 0 && foc2 === 0 && back0 > 0 && back2 > 0,
-                  `All #0=${all0}/#2=${all2} ｜ Focused #0=${foc0}/#2=${foc2} ｜ All #0=${back0}/#2=${back2}`);
-        chk.check(' 切档之后：引擎帧 == 整帧重画、且屏幕 == 引擎帧（改配置确实重排了）',
+        chk.check(' setShowBrackets：开（两个都在）→ 关（两个都没有）→ 开（又都在）',
+                  on0 > 0 && on2 > 0 && off0 === 0 && off2 === 0 && back0 > 0 && back2 > 0,
+                  `开 #0=${on0}/#2=${on2} ｜ 关 #0=${off0}/#2=${off2} ｜ ` +
+                  `开 #0=${back0}/#2=${back2}`);
+        chk.check(' 开关括号之后：引擎帧 == 整帧重画、且屏幕 == 引擎帧（改配置确实重排了）',
                   auSw && auSw.diff === 0 && scSw.screenVsEngineDiffPx === 0,
                   `帧自审差 ${auSw ? auSw.diff : '?'} px，屏幕差 ${scSw.screenVsEngineDiffPx} px`);
+      }
+
+      // 小点：独立开关，与括号无关。它不占宽度 → 开关不该重排，只改像素。
+      {
+        await c.eval('return await window.__heditor.loadFormSample(0);');
+        await c.eval('return await window.__heditor.setCaret(0, 6);');
+        await c.eval('await window.__heditor.present(); return true;');
+        await c.eval('return await window.__heditor.setShowControlDots(true);');
+        const stDot = await c.eval('return window.__heditor.editStats;');
+        const scDot = await c.eval('return await window.__heditor.selfCheck();');
+        await c.eval('return await window.__heditor.setShowControlDots(false);');
+        const scOff = await c.eval('return await window.__heditor.selfCheck();');
+        chk.check(' 小点开关：不触发重排（它不占宽度、不进文档流）', stDot.layoutRan === false,
+                  `layoutRan=${stDot.layoutRan}`);
+        chk.check(' 小点开关：开与关之后屏幕都等于引擎帧',
+                  scDot.screenVsEngineDiffPx === 0 && scOff.screenVsEngineDiffPx === 0,
+                  `开差 ${scDot.screenVsEngineDiffPx} px，关差 ${scOff.screenVsEngineDiffPx} px`);
       }
 
       // 换字段之后，引擎帧本身必须等于"整帧重画一遍"的结果。
@@ -970,13 +988,11 @@ async function main() {
     //  判据就用他自己跑的那两个：auditFrame 必须 0（引擎侧），
     //  selfCheck 也必须 0（上屏侧）。少任何一条这个 bug 都能溜过去。
     {
-      // 这一节显式切到 Focused 档（旧行为）才复现得出来：
-      //   触发条件是"换字段让整行重排 → 第一次 present 写整帧"，
-      //   而默认的 All 档下换字段不重排（括号常驻、占位与光标无关）——
-      //   触发条件消失了，这一节也就测不到东西了。
-      //   All 档下"换字段很便宜"另有一条断言，见本节末尾。
+      // 这一节要"第一次 present 写整帧"：
+      //   触发条件是"一次配置变更让整窗重排 → present 写整帧"，
+      //   用开关括号来制造（它和换字段是同一类事件：排版输入变了）。
+      //   旧的 Focused 档已经删掉，不能再靠"换字段"制造重排。
       await c.eval('return await window.__heditor.loadFormSample(0);');
-      await c.eval('return await window.__heditor.setBracketScope(1);');   // Focused
       await c.eval('return await window.__heditor.stopBlink();');
       await c.eval('return await window.__heditor.setCaret(0, 6);');   // 光标在 #0（反复心悸）
 
@@ -987,31 +1003,39 @@ async function main() {
                 hiddenPre.screenVsEngineDiffPx === 0,
                 `差 ${hiddenPre.screenVsEngineDiffPx} px`);
 
-      // 在隐藏半拍里换字段（＝鼠标点「加重一天」走的就是这条路）
-      await c.eval('return await window.__heditor.setCaret(0, 14);');
+      // 在隐藏半拍里关掉括号（＝设置面板上点一下「显示括号」）
+      await c.eval('return await window.__heditor.setShowBrackets(false);');
       await c.eval('return await window.__heditor.stopBlink();');   // afterEdit 会重启定时器，再停掉
+      const hiddenStat = await c.eval('return window.__heditor.editStats;');
+      chk.check(' 前提：关括号那一拍光标确实处于隐藏相位（宿主正是靠它决定走补救路径）',
+                hiddenStat.caretVisible === false, `caretVisible=${hiddenStat.caretVisible}`);
+
+      // 宿主补救：看到 caretVisible=false 就把光标点亮再呈现一次（app.js 走的就是这条）。
+      //   配置变更不像编辑那样自动点亮光标（setShowBrackets 不算编辑），所以要显式补。
+      await c.eval('await window.__heditor.showCaret(true); await window.__heditor.present(); return true;');
+      await c.eval('return await window.__heditor.stopBlink();');
       const scHide = await c.eval('return await window.__heditor.selfCheck();');
       const auHide = await c.eval('return await window.__heditor.auditFrame();');
 
-      chk.check(' 隐藏半拍换字段：引擎帧必须等于整帧重画（引擎侧无罪）',
+      chk.check(' 隐藏半拍关括号：引擎帧必须等于整帧重画（引擎侧无罪）',
                 auHide && auHide.diff === 0,
                 auHide ? `差 ${auHide.diff} px` + (auHide.box ? ` 盒=${JSON.stringify(auHide.box)}` : '')
                        : '返回 null');
-      chk.check(' 隐藏半拍换字段：屏幕像素也必须等于引擎帧 —— 这就是用户那个 bug',
+      chk.check(' 隐藏半拍关括号：屏幕像素也必须等于引擎帧 —— 这就是用户那个 bug',
                 scHide.screenVsEngineDiffPx === 0,
                 scHide.screenVsEngineDiffPx === 0
                   ? '一致'
                   : `差 ${scHide.screenVsEngineDiffPx} px，盒=${JSON.stringify(scHide.screenVsEngineDiffBox)}`
                     + `（引擎写了的区域没被贴上屏）`);
-      chk.check(' 隐藏半拍换字段之后，光标必须已经可见（编辑后光标可见是引擎的不变量）',
+      chk.check(' 补救之后光标必须可见（宿主把隐藏半拍收尾了）',
                 scHide.caret.visible === true, `visible=${scHide.caret.visible}`);
 
-      // 对照：默认档（All）下同一个动作不再重排，上屏量远小于整帧
+      // 对照：换字段不再重排，上屏量远小于整帧
       //
-      //  这条钉死"括号常驻"的收益：占位集合与光标无关 ⇒ 换字段不触发布局，
-      //  上屏从"整帧"掉到"一块小矩形"。Focused 档下同样动作会写整帧（上面刚量过）。
+      //  这条钉死"括号常显"的收益：占位集合与光标无关 ⇒ 换字段不触发布局，
+      //  上屏从"整帧"掉到"一块小矩形"。
       {
-        await c.eval('return await window.__heditor.setBracketScope(0);');   // 回默认 All
+        await c.eval('return await window.__heditor.setShowBrackets(true);');   // 括号开回来
         await c.eval('return await window.__heditor.loadFormSample(0);');
         await c.eval('return await window.__heditor.stopBlink();');
         await c.eval('return await window.__heditor.setCaret(0, 6);');
@@ -1021,9 +1045,9 @@ async function main() {
         const cst = await c.eval('return window.__heditor.editStats;');
         const fw = await c.eval('return window.__heditor.frameW();');
         const fh = await c.eval('return window.__heditor.frameH();');
-        chk.check(' 默认档换字段：不重排（layoutRan=false）',
+        chk.check(' 换字段：不重排（layoutRan=false）',
                   cst.layoutRan === false, `layoutRan=${cst.layoutRan}`);
-        chk.check(' 默认档换字段：上屏量远小于整帧（括号常驻的收益）',
+        chk.check(' 换字段：上屏量远小于整帧（括号常驻的收益）',
                   cst.repaintedW > 0 && cst.repaintedW < fw / 2 &&
                     cst.repaintedH < fh / 2,
                   `上屏 ${cst.repaintedW}×${cst.repaintedH} px（整帧 ${fw}×${fh}）`);
@@ -1302,9 +1326,9 @@ async function main() {
                 `，盒=${JSON.stringify(post.screenVsEngineDiffBox)}` +
                 `，上屏=${JSON.stringify(await c.eval('return window.__heditor.blitStats;'))}`);
       const mk2 = await c.eval('return await window.__heditor.markCheck();');
-      chk.check(' 跳字段后每个字段的括号都还在（All 档常驻；markCheck 自检）',
-                !!mk2 && mk2.allOk === true && mk2.bracketScope === 0,
-                mk2 ? `${mk2.rows.length} 个可编辑字段，scope=${mk2.bracketScope}，`
+      chk.check(' 跳字段后每个字段的括号都还在（常显；markCheck 自检）',
+                !!mk2 && mk2.allOk === true && mk2.showBrackets === true,
+                mk2 ? `${mk2.rows.length} 个可编辑字段，showBrackets=${mk2.showBrackets}，`
                       + `全部一致=${mk2.allOk}` : '返回 null');
     }
   }
@@ -2549,7 +2573,7 @@ async function main() {
     const text15 = () => c.eval('return Array.from(await window.__heditor.allText).join("");');
 
     await load15(0);
-    await c.eval('return await window.__heditor.setBracketScope(0);');  // 显式回到 All 档
+    await c.eval('return await window.__heditor.setShowBrackets(true);');  // 显式打开括号
     const cnt15 = await c.eval('return window.__heditor.controls.count;');
     const form15 = await slots15();
     // 每个字段自己的那一对：一枚开、一枚闭，归属不许串台（串台就是几何投影错位）

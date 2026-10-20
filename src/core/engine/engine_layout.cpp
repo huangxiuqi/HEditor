@@ -839,39 +839,27 @@ void EditorEngine::truncateLayoutAt(int para) {
 }
 
 /**
- * 把"要显示括号的那些字段"的边界写进块流的行内对象表（元素流的过渡形态）。
+ * 把"要显示括号"这件事落成块流的行内对象表（元素流的过渡形态）。
  *
  * 边界本身不在这里产：编译层按树的遍历顺序给每个内容控件都产一对（次序规则见
  * compile.cpp —— 同一处边界上闭括号先、开括号后，空控件的一对紧挨着，所以产出端没有
- * 排序步骤）。这里只剩筛名单：只有引擎认识编辑模式与 form_brackets，也就知道哪些字段
- * 要显示括号。排版层从此只吃块流，"要画"与"要占位"是同一条记录，分不开。
+ * 排序步骤）。这里只剩筛：显示范围只有"全部或没有"两档（见 EngineConfig::show_brackets），
+ * 于是要么原样吃，要么把控件边界全部去掉、只留原子。排版层从此只吃块流，
+ * "要画"与"要占位"是同一条记录，分不开。
  *
  * 筛是破坏性的（对象表会被删项），所以原件留在 blocks_full_ 里 —— 名单会来回变
- * （Focused 档与 All 档之间切），没有那份原件，被删掉的边界就回不来了。
+ * （切只读、开关括号），没有那份原件，被删掉的边界就回不来了。
  */
 void EditorEngine::syncInlineObjects() {
-    // 边界已经在产物里（编译对所有内容控件都产边界，不区分显示与否）——
-    //   这一处于是只剩"按要显示括号的名单筛一遍"：不显示的字段连占位都不要。
-    //   "显示才占位"这条规则没变，变的是分工：产边界在编译层（第五刀），
-    //   决定显示哪些留在这里（只有引擎认识编辑模式与聚焦）。
-    //
-    //   只改 objects、不整段拷回：这条路径该做的事只有"按名单筛"，别的字段不归它管。
-    //   （编辑已经改在树上，所以 blocks_ 与 blocks_full_ 现在同源 —— 整段拷回也等价，
-    //   但那样一来"筛名单"就顺带重写了别的字段，将来任何一处增量修改都会被它静默抹掉。）
-    std::vector<NodeId> keep;
-    const std::vector<int> bracketed = bracketedControls();
-    keep.reserve(bracketed.size());
-    for (int ci : bracketed) {
-        if (ci >= 0 && ci < static_cast<int>(control_node_ids_.size())) {
-            keep.push_back(control_node_ids_[static_cast<size_t>(ci)]);
-        }
-    }
-    // 名单覆盖了全部控件：不筛。blocks_ 不存东西，排版直接吃 blocks_full_（同一份）。
-    if (keep.size() >= control_node_ids_.size()) {
+    // 全部显示：不筛。blocks_ 不存东西，排版直接吃 blocks_full_（同一份）。
+    //   这条分支现在是常态（括号常显），所以它值得放在最前面短路。
+    if (bracketsOn()) {
         blocks_.clear();
         filter_active_ = false;
         return;
     }
+    // 一个都不显示（只读、或开关关掉）：控件边界全部去掉，只留原子。
+    //   原子是内容，不随"显示括号"的开关变 —— 它要么在文档里、要么不在。
     filter_active_ = true;
     blocks_ = blocks_full_;
     const size_t n = std::min(blocks_.size(), blocks_full_.size());
@@ -879,16 +867,8 @@ void EditorEngine::syncInlineObjects() {
         const std::vector<InlineObject>& src = blocks_full_[p].objects;
         std::vector<InlineObject>& dst = blocks_[p].objects;
         dst.clear();
-        for (const InlineObject& o : src) {
-            // 原子是内容，不在"显示哪些括号"的名单里 —— 它照常进。
-            //   名单管的是控件边界（聚焦档下只显示光标所在字段的括号），原子没有这种
-            //   随光标变化的显示策略：它要么在文档里、要么不在，与编辑模式无关。
-            if (o.kind == InlineObjectKind::Atom) {
-                dst.push_back(o);
-                continue;
-            }
-            const NodeId owner = static_cast<NodeId>(o.owner);
-            if (std::find(keep.begin(), keep.end(), owner) != keep.end()) dst.push_back(o);
+        for (const InlineObject& e : src) {
+            if (e.kind == InlineObjectKind::Atom) dst.push_back(e);
         }
     }
 }

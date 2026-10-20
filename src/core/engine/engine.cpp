@@ -120,6 +120,15 @@ void EditorEngine::ensureRenderSetup() {
 }
 
 /**
+ * 把颜色混进一个 FNV 值。两处签名（光栅外观、表单标记计划）共用同一套编码，
+ * 免得同一个颜色在两个地方算出两种哈希。
+ */
+static uint64_t fnvMixColor(uint64_t h, const Color& c) {
+    return fnvMix(h, (static_cast<uint64_t>(c.r) << 24) | (static_cast<uint64_t>(c.g) << 16) |
+                         (static_cast<uint64_t>(c.b) << 8) | static_cast<uint64_t>(c.a));
+}
+
+/**
  * "页位图上画出来是什么"这组配置的签名。
  *
  * 页指纹只哈希字形等内容；页面底色、边框、格线、原子框、缩放、页度量这些一个都不在里面。
@@ -128,10 +137,6 @@ void EditorEngine::ensureRenderSetup() {
  * 与排版无关的项刻意不收：页间隙只影响落点、背景色只影响帧、光标/选区色只影响瞬态层。
  */
 static uint64_t rasterSignature(const EngineConfig& cfg) {
-    const auto mixColor = [](uint64_t h, const Color& c) {
-        return fnvMix(h, (static_cast<uint64_t>(c.r) << 24) | (static_cast<uint64_t>(c.g) << 16) |
-                             (static_cast<uint64_t>(c.b) << 8) | static_cast<uint64_t>(c.a));
-    };
     uint64_t h = kFnvBasis;
     h = fnvMixFloat(h, cfg.zoom);
     h = fnvMixFloat(h, cfg.page.width_pt);
@@ -139,24 +144,24 @@ static uint64_t rasterSignature(const EngineConfig& cfg) {
     h = fnvMixFloat(h, cfg.page.margin_pt);
     h = fnvMixFloat(h, cfg.page.slab_pt);
     h = fnvMix(h, cfg.page.continuous ? 1ULL : 0ULL);
-    h = mixColor(h, cfg.page_fill);
-    h = mixColor(h, cfg.page_border);
+    h = fnvMixColor(h, cfg.page_fill);
+    h = fnvMixColor(h, cfg.page_border);
     h = fnvMix(h, cfg.draw_page_border ? 1ULL : 0ULL);
-    h = mixColor(h, cfg.table_line);
-    h = mixColor(h, cfg.atom_fill);
-    h = mixColor(h, cfg.atom_border);
-    h = mixColor(h, cfg.atom_text);
+    h = fnvMixColor(h, cfg.table_line);
+    h = fnvMixColor(h, cfg.atom_fill);
+    h = fnvMixColor(h, cfg.atom_border);
+    h = fnvMixColor(h, cfg.atom_text);
     h = fnvMixFloat(h, cfg.atom_pad_pt);
     return h;
 }
 
 void EditorEngine::setConfig(const EngineConfig& cfg) {
-    // 改"显示括号的范围"会改变占位（括号进文档流）→ 必须重排。
-    //   不重排的话括号会按新档画、正文却按旧档排 —— 画的用的还是旧的簇坐标，
+    // 开 / 关括号会改变占位（括号进文档流）→ 必须重排。
+    //   不重排的话括号会按新的开关画、正文却按旧的口径排 —— 画的用的还是旧的簇坐标，
     //   表象是括号盖住字/槽里空一条，而且看不出来是哪一边错了。
     //   （其它配置项不动排版结构：zoom / 页度量只影响几何，底图作废就够了 ——
     //     宿主改那两项之后本来就会立刻重排重绘。）
-    const bool plan_changed = (cfg.form_brackets != cfg_.form_brackets);
+    const bool plan_changed = (cfg.show_brackets != cfg_.show_brackets);
     // 连页标志与条带高度是引擎从"页度量 + 页间隙"装配出来的，排版层只认 PageMetrics。
     //   必须在比较之前装配 —— 否则切模式时 PageMetrics 没变，判不出"要重排"，
     //   画面上就成了"分页的排版 + 连页的落点"（内容按旧断点排，却按新条带贴）。
@@ -489,7 +494,7 @@ void EditorEngine::recordSelection(Range before, Range after) {
 
 bool EditorEngine::undo() {
     if (!loaded_ || !session_) return false;
-    const std::pair<int, int> plan_before = bracketPlanKey();
+    const int plan_before = bracketPlanId();
     const rev::Doc before = session_->doc();
     if (!session_->undo()) return false;
     const rev::Damage dmg = rev::damage(before, session_->doc(), flowVisibility());
@@ -501,16 +506,16 @@ bool EditorEngine::undo() {
         --sel_pos_;
         setSelection(sel_history_[sel_pos_].before);
     }
-    // 聚焦档下"哪几个字段显示括号"由光标决定：撤销把光标搬回旧位置，占位可能落在损伤
-    //   区间之外（那些段的块哈希一个字没变，损伤报不到）。计划变了就从最靠前的控件段起重排。
-    if (bracketPlanKey() != plan_before) markLayoutDirtyForBrackets();
+    // 撤销可能把"有没有控件"整体改掉（撤销删掉最后一个控件、或把只读控件撤回来），
+    //   那样占位集合整个翻转，而损伤区间只报块内容 —— 计划变了就整体重排。
+    if (bracketPlanId() != plan_before) markLayoutDirtyForBrackets();
     frame_needs_full_refresh_ = true;
     return true;
 }
 
 bool EditorEngine::redo() {
     if (!loaded_ || !session_) return false;
-    const std::pair<int, int> plan_before = bracketPlanKey();
+    const int plan_before = bracketPlanId();
     const rev::Doc before = session_->doc();
     if (!session_->redo()) return false;
     const rev::Damage dmg = rev::damage(before, session_->doc(), flowVisibility());
@@ -520,7 +525,7 @@ bool EditorEngine::redo() {
         setSelection(sel_history_[sel_pos_].after);
         ++sel_pos_;
     }
-    if (bracketPlanKey() != plan_before) markLayoutDirtyForBrackets();
+    if (bracketPlanId() != plan_before) markLayoutDirtyForBrackets();
     frame_needs_full_refresh_ = true;
     return true;
 }
@@ -1086,22 +1091,25 @@ bool EditorEngine::focusControl(bool forward) {
 }
 
 /**
- * 表单标记的"计划"指纹：编辑模式 + （Focused 档下的）聚焦字段 + 每个控件的投影矩形。
+ * 表单标记的"计划"指纹：编辑模式 + 标记外观 + 每个控件的投影矩形。
  * 这就是 presentInternal 里"变了就整帧重贴"的判据。
  * 它必须只包含会影响标记的东西 —— 多塞了会让整帧重贴变得频繁
  * （整帧重贴本身不贵，但它会把增量重绘的账面数字冲掉），
  * 少塞了则会把陈旧标记留在画面上。
- * All 档（默认）下括号与光标无关，所以不把聚焦字段塞进去：
- * 塞了的话光标每跨一次字段就整帧重贴一次 —— 那正是"光标移动 = 真增量"
- * 最想避免的开销，而且换不来任何画面差异（这么写是量出来的，
- * 不是推出来的：记号里多一项，跨字段时的 repainted_pixels 会立刻跳起来）。
+ *
+ * 外观（颜色、小点开关与尺寸）必须进来：它们不改排版、不改页指纹，只改画出来的那几个
+ * 像素；漏一项就是"改了颜色，旧颜色的括号还留在画面上"。小点是可配置的，这条漏项
+ * 会被直接点到。
+ * （5D 之后括号搬进页内容位图，这几项改由 rasterSignature 管，见方案 5D-1。）
  */
 uint64_t EditorEngine::markPlanSignature() const {
     uint64_t h = kFnvBasis;
     h = fnvMix(h, static_cast<uint64_t>(static_cast<int>(mode_)));
-    if (cfg_.form_brackets == FormBracketScope::Focused) {
-        h = fnvMix(h, static_cast<uint64_t>(static_cast<int64_t>(focusedControlIndex() + 1)));
-    }
+    h = fnvMix(h, cfg_.show_brackets ? 1ULL : 0ULL);
+    h = fnvMix(h, cfg_.show_control_dots ? 1ULL : 0ULL);
+    h = fnvMixColor(h, cfg_.control_mark);
+    h = fnvMixColor(h, cfg_.control_mark_ro);
+    h = fnvMixFloat(h, cfg_.control_dot_pt);
     for (int ci = 0; ci < controls_.size(); ++ci) {
         const Control& c = controls_.at(ci);
         h = fnvMix(h, c.read_only ? 1ULL : 0ULL);
