@@ -420,7 +420,10 @@ bool EditorEngine::commitSteps(std::vector<Step> steps, int dirty_para, Range se
     const rev::Damage dmg = rev::damage(before, session_->doc(), vis);
     recordSelection(selection_before, selection_after);
     rebuildFromTree(&dmg.range);
-    markLayoutDirty(dirty_para);
+    // 起点取两者更早的那个：dirty_para 是命令层按编辑计划算的落点，damage.lo 是内容上
+    //   第一处真实差异 —— 计划可能比差异更早（保守），反过来不该发生，取小就是安全的。
+    //   右端只有损伤区间知道，交给后缀复用当"被换掉几段"。
+    markLayoutDirtyRange(std::min(dirty_para, dmg.range.lo), dmg.range.hi);
     return true;
 }
 
@@ -439,32 +442,38 @@ void EditorEngine::recordSelection(Range before, Range after) {
 
 bool EditorEngine::undo() {
     if (!loaded_ || !session_) return false;
+    const std::pair<int, int> plan_before = bracketPlanKey();
     const rev::Doc before = session_->doc();
     if (!session_->undo()) return false;
     const rev::Damage dmg = rev::damage(before, session_->doc(), flowVisibility());
     rebuildFromTree(&dmg.range);
-    // 撤销会改到哪一段是不可定位的（一批步骤可能跨段），所以整篇重排。
-    markAllLayoutDirty();
+    // 撤销改到哪一段由损伤区间回答：两份修订一减就是它，不必整篇重排。
+    markLayoutDirtyForDamage(dmg.range);
     // 恢复的是整个区间，不是只看焦点端：撤销前那一对快照本来就是 Range。
     if (sel_pos_ > 0 && sel_pos_ <= sel_history_.size()) {
         --sel_pos_;
         setSelection(sel_history_[sel_pos_].before);
     }
+    // 聚焦档下"哪几个字段显示括号"由光标决定：撤销把光标搬回旧位置，占位可能落在损伤
+    //   区间之外（那些段的块哈希一个字没变，损伤报不到）。计划变了就从最靠前的控件段起重排。
+    if (bracketPlanKey() != plan_before) markLayoutDirtyForBrackets();
     frame_needs_full_refresh_ = true;
     return true;
 }
 
 bool EditorEngine::redo() {
     if (!loaded_ || !session_) return false;
+    const std::pair<int, int> plan_before = bracketPlanKey();
     const rev::Doc before = session_->doc();
     if (!session_->redo()) return false;
     const rev::Damage dmg = rev::damage(before, session_->doc(), flowVisibility());
     rebuildFromTree(&dmg.range);
-    markAllLayoutDirty();
+    markLayoutDirtyForDamage(dmg.range);
     if (sel_pos_ < sel_history_.size()) {
         setSelection(sel_history_[sel_pos_].after);
         ++sel_pos_;
     }
+    if (bracketPlanKey() != plan_before) markLayoutDirtyForBrackets();
     frame_needs_full_refresh_ = true;
     return true;
 }

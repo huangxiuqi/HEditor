@@ -10143,11 +10143,174 @@ int main() {
         expectTrue(e.editStats().rebuild_reused == blocks - 1, "连打字：复用数不退化");
 
         // 撤销：修订回到上一份，块内容与上一轮相同 —— 投影这一层不因为"方向反了"就整篇重算。
-        //   排版仍是全量（撤销会改动任意段），那是另一笔账，这条只钉投影。
+        //   排版那一半（撤销的脏区间从哪来）见 [56]。
         expectTrue(e.undo(), "撤销成功");
         expectTrue(e.editStats().rebuild_reused == blocks - 1,
                    "撤销之后同样只重算被改过的那一块（实际 " +
                        std::to_string(e.editStats().rebuild_reused) + "）");
+    }
+
+    std::printf("\n[56] 撤销走增量：损伤区间就是排版脏区间\n");
+    {
+        // 撤销的排版脏区间只能从损伤区间来 —— 它没有命令层算出的落点，而两份修订一减就
+        //   得到一个块区间：区间左边一个字没变、右边一个字没变，中间那段必须重排，后缀
+        //   照常搬回。四条判据：内容逐块回到编辑之前、增量真的发生、增量与全量逐字段一致、
+        //   以及"损伤区间之外还变了什么"（括号占位）也不能漏。
+        EngineConfig c56;
+        c56.zoom = 1.0f;
+        c56.page.width_pt = 340.0f;
+        c56.page.height_pt = 300.0f;
+        c56.page.margin_pt = 12.0f;
+        const std::vector<std::string> fonts56 = {cjkPath, mnPath, latinPath};
+        const int kN = 120;
+
+        auto make56 = [&](int n) {
+            std::vector<BlockSpec> blocks;
+            for (int i = 0; i < n; ++i) {
+                BlockSpec b;
+                b.size_pt = 12.0f;
+                b.line_factor = 1.6f;
+                b.space_after_pt = 4.0f;
+                b.language = "zh";
+                b.setText("第 " + std::to_string(i + 1) +
+                          " 段：随访记录占位，用来把版面撑到多页 —— 撤销才有后缀可复用。");
+                blocks.push_back(std::move(b));
+            }
+            return blocks;
+        };
+
+        EditorEngine e;
+        expectTrue(e.init(fonts56), "引擎初始化（撤销增量）");
+        e.setConfig(c56);
+        loadBlocks(e, make56(kN));
+        e.relayout();
+        expectTrue(static_cast<int>(e.blocks().size()) == kN, "一百二十段装好了");
+        expectTrue(e.layout().stats.page_count >= 3, "用例跨了多页（撤销才有多页后缀可复用）");
+        const rev::Doc baseDoc = e.document();
+        const size_t baseLines = e.layout().lines.size();
+        const size_t baseGlyphs = e.layout().glyphs.size();
+        // 撤销之后"内容逐块回到编辑之前"：块哈希把文本、字符格式、段落格式、行内对象与
+        //   容器几何都算进去，于是这一个数就够。比摘要强的地方是它不看排版路径 —— 增量
+        //   排版的浮点累加次序与全量不同，坐标会差 1e-6 那一档，而内容不该差。
+        auto blocksRestored = [&]() {
+            return !rev::damage(baseDoc, e.document(), FlowVisibility::Display).range.changed;
+        };
+
+        // (a) 中间一段打一个字再撤销：脏区是那一段，后缀原样搬回。
+        {
+            e.setCaret(kN / 2, 2);
+            expectTrue(e.typeTextAndRender("\xE6\xB5\x8B"), "第 60 段打一个字");
+            const EditStats typed = e.editStats();
+            expectTrue(!typed.layout_was_full && typed.reused_paragraphs > 0,
+                       "打字本身是增量的（复用 " + std::to_string(typed.reused_paragraphs) +
+                           " 段）—— 这条是下面那条的基线");
+
+            expectTrue(e.undoAndRender(), "撤销这一笔");
+            const EditStats st = e.editStats();
+            expectTrue(!st.layout_was_full,
+                       "★ 撤销不是整篇重排（relaid=" + std::to_string(st.relaid_paragraphs) +
+                           " reused=" + std::to_string(st.reused_paragraphs) + "）");
+            expectTrue(st.reused_paragraphs > 0,
+                       "★ 撤销之后后缀被复用（" + std::to_string(st.reused_paragraphs) + " 段）");
+            expectTrue(st.relaid_paragraphs <= 2,
+                       "撤一次只重排脏的那一段（" + std::to_string(st.relaid_paragraphs) + " 段）");
+            expectTrue(e.auditLayout() == 0, "★ 撤销之后的增量排版与全量逐字段一致");
+            expectTrue(blocksRestored(), "★ 撤销之后块内容逐块回到打字之前");
+            expectTrue(
+                e.layout().lines.size() == baseLines && e.layout().glyphs.size() == baseGlyphs,
+                "行数与字形数回到打字之前（没有留下重复的一段）");
+        }
+
+        // (b) 一次删掉五段再撤销：脏区宽过一段 —— 后缀复用必须知道到底换掉了几段。
+        //   撤销没有命令层算的落点，只有损伤区间的两个端点。
+        {
+            const FlowPos f1 = e.flowPosAt(kN / 2 - 2, 0);
+            const FlowPos f2 = e.flowPosAt(kN / 2 + 3, 0);
+            expectTrue(e.setSelectionAndRender(Range{f1, f2}), "选中跨五段的区间");
+            expectTrue(e.backspaceAndRender(), "删掉这五段");
+            expectTrue(static_cast<int>(e.blocks().size()) == kN - 5, "段数少了五段");
+            expectTrue(e.undoAndRender(), "撤销这次删除");
+            expectTrue(static_cast<int>(e.blocks().size()) == kN, "★ 五段都回来了");
+            expectTrue(e.auditLayout() == 0, "★ 跨段撤销之后增量仍与全量逐字段一致");
+            expectTrue(blocksRestored(), "★ 跨段撤销之后块内容逐块回到删除之前");
+            expectTrue(
+                e.layout().lines.size() == baseLines && e.layout().glyphs.size() == baseGlyphs,
+                "行数与字形数回到删除之前");
+        }
+
+        // (c) 末尾分段再撤销：损伤区间的右端落在文档末尾之外（lo == hi == 块数）。
+        //   那时没有"新的脏段"，但旧排版多出来的尾巴必须截掉 —— 否则最后一段会画两遍。
+        {
+            const int last = static_cast<int>(e.blocks().size()) - 1;
+            e.setCaret(last, e.blocks()[static_cast<size_t>(last)].cp_text.size());
+            expectTrue(e.splitParagraphAndRender(), "在末段末尾回车，多出一段");
+            expectTrue(static_cast<int>(e.blocks().size()) == kN + 1, "段数 +1");
+            expectTrue(e.undoAndRender(), "撤销这次分段");
+            expectTrue(static_cast<int>(e.blocks().size()) == kN, "★ 段数退回来了");
+            expectTrue(e.auditLayout() == 0, "★ 末尾撤销之后增量仍与全量一致");
+            expectTrue(blocksRestored(), "★ 末尾撤销之后块内容逐块回到分段之前");
+            expectTrue(
+                e.layout().lines.size() == baseLines && e.layout().glyphs.size() == baseGlyphs,
+                "★ 没有多画一行、也没有多画一段（尾巴被截掉了）");
+        }
+
+        // (d) 聚焦档的括号：撤销把光标搬回旧位置，"哪个字段显示括号"也跟着变 —— 而占位
+        //   变化可能落在损伤区间之外（那一段的块哈希一个字没变）。这是损伤区间之外
+        //   唯一必须另算的账，漏了的表现是"撤销之后另一个字段的括号还留在版面上"。
+        {
+            EditorEngine eb;
+            expectTrue(eb.init(fonts56), "引擎初始化（撤销 + 括号计划）");
+            EngineConfig cb = c56;
+            cb.form_brackets = FormBracketScope::Focused;
+            eb.setConfig(cb);
+            std::vector<BlockSpec> bf = make56(8);
+            for (int i = 0; i < 8; ++i) bf[i].setText("第" + std::to_string(i) + "段甲乙丙丁");
+            Control fa;
+            fa.range.start = TextPos{0, 2};
+            fa.range.end = TextPos{0, 4};
+            fa.id = "fa";
+            Control fb;
+            fb.range.start = TextPos{5, 2};
+            fb.range.end = TextPos{5, 4};
+            fb.id = "fb";
+            loadBlocks(eb, bf, {fa, fb});
+            eb.setEditMode(EditMode::Form);
+            eb.relayout();
+
+            // 占位簇数：聚焦档下只有光标所在那一个字段有括号（一对）。
+            auto placeholders = [](const EditorEngine& en, int para) {
+                int n = 0;
+                for (const LineBox& lb : en.layout().lines) {
+                    if (lb.paragraph != para) continue;
+                    for (const LineCluster& c : lb.clusters) {
+                        if (c.placeholder) ++n;
+                    }
+                }
+                return n;
+            };
+
+            eb.setCaret(5, 2);  // 聚焦第二个字段
+            expectTrue(placeholders(eb, 5) == 2 && placeholders(eb, 0) == 0,
+                       "聚焦到第二个字段之后括号在它上面（还没落笔）");
+            const size_t glyphsInB = eb.layout().glyphs.size();
+            expectTrue(eb.typeTextAndRender("X"), "在第 5 段（字段 fb 里）打一个字");
+
+            eb.setCaret(0, 2);  // 聚焦换到第一个字段：括号要从第 5 段挪到第 0 段
+            expectTrue(placeholders(eb, 0) == 2 && placeholders(eb, 5) == 0,
+                       "聚焦换字段之后占位真的挪了（否则下面那条判据没有判别力）");
+            eb.repaint();  // 换字段本身也是一次增量：脏区是那两个字段的凸包，不是"从这里到末尾"
+            expectTrue(eb.editStats().reused_paragraphs > 0,
+                       "换字段只重排两个字段之间的那一段（复用 " +
+                           std::to_string(eb.editStats().reused_paragraphs) + " 段）");
+
+            expectTrue(eb.undoAndRender(), "撤销第 5 段那一笔");
+            expectTrue(placeholders(eb, 5) == 2 && placeholders(eb, 0) == 0,
+                       "★ 撤销之后括号回到第 5 段（损伤区间之外的那一段也重排了）");
+            expectTrue(eb.auditLayout() == 0,
+                       "★ 括号计划在损伤区间之外变了，撤销之后的增量仍与全量逐字段一致");
+            expectTrue(eb.layout().glyphs.size() == glyphsInB,
+                       "★ 字形数回到落笔之前（那个字被撤掉、括号也回到同一个字段）");
+        }
     }
 
     std::printf("\n──────────────────────────────\n");

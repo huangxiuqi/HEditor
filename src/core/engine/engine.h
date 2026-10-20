@@ -523,6 +523,18 @@ public:
     }
 
     /**
+     * 括号占位计划的身份：档位 + 聚焦的是哪个字段（节点 id，不是下标）。
+     *
+     * 只比 bracketPlanId() 不够：控件表换过之后同一个下标可能指向另一个字段 —— 撤销删掉
+     * 一个控件时，它后面的字段整体前移，下标相同而字段不同，括号就落到了别的段上，
+     * 而那时块哈希一个字没变（损伤区间报不到那里）。节点 id 是身份，下标只是名次。
+     */
+    std::pair<int, int> bracketPlanKey() const {
+        const int plan = bracketPlanId();
+        return {plan, plan >= 0 ? slotOwnerOf(plan) : 0};
+    }
+
+    /**
      * 把控件边界写进块流的行内对象表 —— 元素流在引擎侧的落点，也是排版层唯一的
      * 括号来源（layoutDocument 不再收控件集合）。幂等，每次 relayout 之前调用。
      *
@@ -996,8 +1008,20 @@ private:
     /**
      * 标记"从第 para 段起需要重排"（取最小值，一次操作跨多段也只需一次标记）。
      * 凡是改段内容或改段数的入口都要调它，否则增量会拿旧前缀去接新后缀。
+     *
+     * 它只说起点：右端当成"一直脏到末尾"。知道右端时用 markLayoutDirtyRange。
      */
     void markLayoutDirty(int para);
+
+    /**
+     * 标记 [lo, hi) 这一段需要重排。hi 是新版（重排后）块坐标里的右端、不含。
+     *
+     * 右端不是可有可无的细节：后缀复用要知道"被换掉的是几段"才能把后缀接回去。没有右端时
+     * 它只能按前后段数差反推，而那个反推假定一次提交只在一处动段落标记 —— 撤销一批跨段的
+     * 编辑不满足（一批步骤可以是"删选区 + 插入 + 改格式"，损伤区间比段数差宽得多）。
+     * 多报右端是安全的（多排几段没变的内容），少报会让后缀断在错的地方，而错位是静默的。
+     */
+    void markLayoutDirtyRange(int lo, int hi);
 
     /**
      * 全量记号：段数、页度量、控件集合这类"影响面不可定位"的改动用它。
@@ -1006,8 +1030,17 @@ private:
      */
     void markAllLayoutDirty() {
         layout_dirty_from_ = 0;
+        layout_dirty_to_ = -1;
         layout_needs_full_ = true;
     }
+
+    /**
+     * 按损伤区间标脏：从区间起点排起，右端给后缀复用当"被换掉几段"用。
+     *
+     * 区间右端可能落在文档末尾之外（尾部整段删掉时 lo == hi == 块数）：那时没有"新的脏段"，
+     * 但旧排版多出来的尾巴必须截掉 —— 从最后一段起排就把它截掉了。
+     */
+    void markLayoutDirtyForDamage(const rev::BlockDamage& dmg);
 
     /**
      * 括号占位计划变了（编辑模式切换、控件集合替换）时标脏。
@@ -1045,13 +1078,14 @@ private:
      * 二是后缀纯横排 —— 只有块轴起点变了，于是每行只是"平移 + 改页码"。段数变化（回车分段 /
      * 退格合并）几乎总落到第二级：段落边界一变就多让或少让一次段间距，后缀必然整体下移。
      *
+     * @param dirty_count 脏区在新版里占几段（由脏区间的右端给出，见 markLayoutDirtyRange）。
      * @param page_lo,page_hi 出参：脏区新旧两版覆盖的页区间，供页指纹只重算这几页，-1 = 整篇。
      * @param relaid_paragraphs 出参：脏区在新版里占几段。
      * @param all_pages_changed 出参：Shifted 那一级专用 —— 后缀在的每一页都变了，直接标脏。
      * @return None 时后缀未被动过（调用方可以安全地走续排），其余两种排版已完成。
      */
-    SuffixReuse trySuffixReuse(int from, int* page_lo, int* page_hi, int* relaid_paragraphs,
-                               bool* all_pages_changed);
+    SuffixReuse trySuffixReuse(int from, int dirty_count, int* page_lo, int* page_hi,
+                               int* relaid_paragraphs, bool* all_pages_changed);
 
     /**
      * 后缀整体平移：把 [from, 末段] 的每一行沿块轴挪到新的位置，并重编页码与全局行号，
@@ -1104,6 +1138,12 @@ private:
      * 光标在同一/不同字段间移动都不会重排（"光标移动 = 真增量"的地基）。
      */
     void relayoutIfBracketPlanChanged(int prev_plan);
+
+    /**
+     * 占位计划从 prev 换到 cur 时标脏（prev / cur 是 bracketPlanId 的取值）。
+     * 两个字段各自的段跨度取凸包；不是具体字段时退回 markLayoutDirtyForBrackets。
+     */
+    void markLayoutDirtyForBracketPlans(int prev, int cur);
 
     /**
      * 这一段内容所在的最内层那一格（连它所属的表一起给出）。不在表格里返回空。
@@ -1241,10 +1281,21 @@ private:
     ShapingCache shaping_cache_;
 
     /**
-     * 需要重排的最小段下标；>= blocks_.size() 表示没有脏段。
-     * 只有一个数就够，因为排版是"前缀保留 + 后缀重排"：要重排的段必然连成一段后缀。
+     * 需要重排的最小段下标；>= blocks().size() 表示没有脏段。
+     * 前后两个数构成一个半开区间：前缀原样保留，后缀由 trySuffixReuse 试着搬回，
+     * 中间 [from, to) 这一段必须重排。
      */
     int layout_dirty_from_ = 0;
+
+    /**
+     * 脏区间的右端（不含，按重排后的块坐标）。-1 = 不知道有多长。
+     *
+     * 为什么要它：撤销没有命令层算出的落点，只有两份修订相减得到的块区间 —— 区间知道
+     * 自己到哪儿结束。没有右端时 trySuffixReuse 只能按段数差反推"被换掉几段"，而那个
+     * 反推假定一次提交只在一处动段落标记；一批跨段的编辑（删选区 + 插入 + 改格式）
+     * 会让反推偏窄，后缀就从错的地方接上去，症状是"撤销之后后半篇整体错位"。
+     */
+    int layout_dirty_to_ = -1;
 
     /**
      * 整篇都脏（换文档、改页度量、页度量变化）。与"从第 0 段起脏"不同：

@@ -341,6 +341,15 @@ void EditorEngine::relayout() {
 
     last_reused_paragraphs_ = 0;
     last_suffix_shifted_ = false;
+    // 脏区在新版里占几段：右端已知就照实报（提交与撤销都从损伤区间拿到了右端）；
+    //   未知时按段数差反推 —— 那要求一次操作只在一处动段落标记，是提交路径的老口径。
+    int dirty_count = 1;
+    if (layout_dirty_to_ >= 0) {
+        dirty_count = std::max(1, layout_dirty_to_ - from);
+    } else {
+        dirty_count = 1 + std::max(0, n_para - static_cast<int>(layout_.para_index.size()));
+    }
+    if (from + dirty_count > n_para) dirty_count = n_para - from;
     const auto t_layout0 = Clock::now();  // 只量排版本身：拼接/续排/全量三种走法都算
     // 需要重算页指纹的页区间（-1 = 整篇），由后缀复用那条路带回来：
     // 它知道脏段新旧两版占了哪几页 —— 那才是"内容真的变了的页"，
@@ -351,8 +360,15 @@ void EditorEngine::relayout() {
     int relaid_paras = 1;
     // 后缀整体平移：后缀在的每一页内容都跟着挪了 —— 这个答案已知，不必再去哈希它们。
     bool pages_known_changed = false;
-    if (!must_full && from >= 0 && from < n_para) {
-        reuse = trySuffixReuse(from, &fp_lo, &fp_hi, &relaid_paras, &pages_known_changed);
+    // 只有"脏区到哪儿结束"是已知的，后缀复用才成立：它把 [from + dirty_count, 末尾) 整段
+    //   原样搬回来，等于断言"那之后一个字都没变"。markLayoutDirty 只给起点（"从这里起全脏"），
+    //   那个断言就不成立 —— 括号占位就是活例子：聚焦档下换一个字段会挪走旧字段的括号，
+    //   而它在脏区起点之后；后缀的空格宽度变了、行盒宽度却没变，续排状态比对看不出来，
+    //   搬回来的就是带着旧括号的旧行盒。
+    const bool splice_ok = (layout_dirty_to_ >= 0);
+    if (!must_full && splice_ok && from >= 0 && from < n_para) {
+        reuse =
+            trySuffixReuse(from, dirty_count, &fp_lo, &fp_hi, &relaid_paras, &pages_known_changed);
     }
     if (reuse != SuffixReuse::None) {
         const ParaIndex& head = layout_.para_index[static_cast<size_t>(from)];
@@ -404,6 +420,7 @@ void EditorEngine::relayout() {
         fp_lo = -1;  // 整篇重排：没有"没变过的页"可言
     }
     layout_dirty_from_ = n_para;  // 已重排到末尾，没有脏段了
+    layout_dirty_to_ = n_para;
     layout_needs_full_ = false;
 
     // 这一轮排版的耗时。只算排版本身（拼接/续排/全量三种走法都算），
@@ -438,8 +455,8 @@ void EditorEngine::relayout() {
     stats_.total_ms += msSince(t0);
 }
 
-EditorEngine::SuffixReuse EditorEngine::trySuffixReuse(int from, int* page_lo, int* page_hi,
-                                                       int* relaid_paragraphs,
+EditorEngine::SuffixReuse EditorEngine::trySuffixReuse(int from, int dirty_count, int* page_lo,
+                                                       int* page_hi, int* relaid_paragraphs,
                                                        bool* all_pages_changed) {
     *page_lo = -1;
     *page_hi = -1;
@@ -450,9 +467,14 @@ EditorEngine::SuffixReuse EditorEngine::trySuffixReuse(int from, int* page_lo, i
     if (!tables_.empty() || !layout_.placed_tables.empty()) return SuffixReuse::None;
     const int n_para = static_cast<int>(blocks().size());
     const int n_old = static_cast<int>(layout_.para_index.size());
-    // 段数增量：这一次编辑把旧 [from, from + m_old) 段换成了新 [from, from + m_new) 段，
-    //   m_new - m_old 恒等于它（回车分段 +1、退格合并 -1、段内敲字 0）。
+    // 段数增量：这一次编辑把旧 [from, from + m_old) 段换成了新 [from, from + m_new) 段。
+    //   新版那一段有多长由调用方给（损伤区间的右端），旧版那一段由总段数差反推：
+    //   m_old = n_old - n_para + m_new —— 两侧的尾巴因此对齐到同一段。
+    //     （旧写法把 m_new 当成 1 + max(0, d_para)，等于假定"一次只在一处动段落标记"；
+    //      撤销一批跨段步骤时那个假定不成立，后缀会从错的地方接上去。）
     const int d_para = n_para - n_old;
+    const int m_new = dirty_count;
+    const int m_old = n_old - n_para + m_new;
     // 没有后缀可搬（脏区已经是最后一段），就没什么可省的 —— 交给常规路径。
     if (from < 0 || from + 1 >= n_para) return SuffixReuse::None;
 
@@ -474,13 +496,9 @@ EditorEngine::SuffixReuse EditorEngine::trySuffixReuse(int from, int* page_lo, i
     // 脏区自己的续排锚点来自上一轮（前缀一个字都没动）。第 0 段没有前缀，用全篇起点。
     const ReflowState resume = (from == 0) ? freshReflowState(cfg_.page) : old_first.state_at_start;
 
-    // 脏区在新旧两版里各占几段。段数没变时各占一段；段数变了时，窄的那一侧恒为一段 ——
-    //   段落数的变化只可能来自插入或删除一枚段落标记，而一枚标记只牵动它所在的那一段
-    //   （插入：1 段拆成 2 段；删除：2 段并回 1 段；粘进来 k 段就是 1 段拆成 k+1 段）。
-    //   哪一侧是"1"由段数增量的符号决定。
-    const int m_new = 1 + std::max(0, d_para);
-    const int m_old = 1 + std::max(0, -d_para);
-    // 新版要够长；旧版也要还有"下一段"可以拿来对照。
+    // 两端都要还有"下一段"可以拿来对照：新版要够长，旧版也要留得下一段后缀。
+    //   m_old <= 0 说明两侧尾巴对不齐（段数差比脏区还宽），那不是后缀能复用的形状。
+    if (m_old <= 0) return SuffixReuse::None;
     if (from + m_new > n_para || from + m_old >= n_old) return SuffixReuse::None;
 
     LayoutResult scratch;
@@ -722,7 +740,52 @@ bool EditorEngine::shiftSuffixBlockAxis(int from, size_t first_glyph, const Refl
 
 void EditorEngine::markLayoutDirty(int para) {
     if (para < 0) para = 0;
-    if (layout_dirty_from_ > para) layout_dirty_from_ = para;
+    // 空区间用 "from >= to（且 to 已知）" 表示，见 relayout 的收尾。
+    const bool empty = (layout_dirty_to_ >= 0 && layout_dirty_from_ >= layout_dirty_to_);
+    if (!empty && layout_dirty_to_ >= 0 && para >= layout_dirty_from_ && para < layout_dirty_to_) {
+        return;
+    }
+    if (empty || para < layout_dirty_from_) layout_dirty_from_ = para;
+    // 只给起点：右端从此未知，后缀复用退回"按段数差反推"。
+    layout_dirty_to_ = -1;
+}
+
+/**
+ * 损伤区间 -> 排版脏区间。
+ *
+ * 撤销与重做只有这个区间可用（没有命令层算的落点），而它恰好够用：区间左边一个字没变、
+ * 右边一个字没变，中间那段必须重排。
+ */
+void EditorEngine::markLayoutDirtyForDamage(const rev::BlockDamage& dmg) {
+    const int n = static_cast<int>(blocks().size());
+    if (n <= 0) {
+        markAllLayoutDirty();
+        return;
+    }
+    // 右端夹进文档：尾部整段删掉时 lo == hi == 块数，此时没有"新的脏段"，但旧排版多出来
+    //   的尾巴必须截掉 —— 从最后一段起排一遍就把它截掉了（代价一段，安全）。
+    const int lo = std::min(dmg.lo, n - 1);
+    markLayoutDirtyRange(lo, std::min(dmg.hi, n));
+}
+
+void EditorEngine::markLayoutDirtyRange(int lo, int hi) {
+    if (lo < 0) lo = 0;
+    if (hi < lo) hi = lo;
+    const bool empty = (layout_dirty_to_ >= 0 && layout_dirty_from_ >= layout_dirty_to_);
+    if (empty) {
+        layout_dirty_from_ = lo;
+        layout_dirty_to_ = hi;
+        return;
+    }
+    if (layout_dirty_to_ < 0) {
+        // 已经有一片"到末尾"的脏区：右端不会因为这一次而变具体。
+        if (lo < layout_dirty_from_) layout_dirty_from_ = lo;
+        return;
+    }
+    // 两段取并集；中间那道缝一并重排 —— 后缀复用要求"从起点到最后一次改动之间全都是
+    //   重排过的"，留缝就等于把缝里的旧行盒接在新后缀前面（保守即正确，多排的代价有限）。
+    layout_dirty_from_ = std::min(layout_dirty_from_, lo);
+    layout_dirty_to_ = std::max(layout_dirty_to_, hi);
 }
 
 int EditorEngine::minControlParagraph() const {
@@ -820,9 +883,44 @@ void EditorEngine::syncInlineObjects() {
     }
 }
 
+/**
+ * 括号占位从 prev 换到 cur：脏区就是那两个字段各自占的段（凸包）。
+ *
+ * 为什么不从"最靠前的控件段"起一直排到末尾：聚焦档下换字段是常事，而从第一个字段排到
+ * 末尾等于整篇重排。两个字段各自的跨度在控件表里是已知的，取凸包就够 —— 中间那段一并
+ * 重排，因为排版只有"一段连续脏区"这个形状，而后缀复用要求区间连续。
+ *
+ * 任何一边不是具体字段（-1 没有占位，-2 全部）时退回保守口径：那不是换了一个字段，
+ * 而是占位集合整个换了形状（切档、切编辑模式），脏区无从定位。
+ */
+void EditorEngine::markLayoutDirtyForBracketPlans(int prev, int cur) {
+    const int n = controls_.size();
+    const Control* a = (prev >= 0 && prev < n) ? &controls_.at(prev) : nullptr;
+    const Control* b = (cur >= 0 && cur < n) ? &controls_.at(cur) : nullptr;
+    if (prev == -2 || cur == -2 || (prev >= 0 && a == nullptr) || (cur >= 0 && b == nullptr)) {
+        markLayoutDirtyForBrackets();
+        return;
+    }
+    int lo = -1;
+    int hi = -1;
+    for (const Control* c : {a, b}) {
+        if (c == nullptr || c->range.start.para < 0) continue;
+        const int s = c->range.start.para;
+        const int e = std::max(s, c->range.end.para);
+        lo = (lo < 0) ? s : std::min(lo, s);
+        hi = (hi < 0) ? e + 1 : std::max(hi, e + 1);
+    }
+    if (lo < 0) {
+        markLayoutDirtyForBrackets();
+        return;
+    }
+    markLayoutDirtyRange(lo, hi);
+}
+
 void EditorEngine::relayoutIfBracketPlanChanged(int prev_plan) {
-    if (bracketPlanId() == prev_plan) return;
-    markLayoutDirtyForBrackets();
+    const int plan = bracketPlanId();
+    if (plan == prev_plan) return;
+    markLayoutDirtyForBracketPlans(prev_plan, plan);
     relayout();
 }
 
