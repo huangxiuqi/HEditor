@@ -562,6 +562,13 @@ Ref makeNode(NodeId id, NodeKind kind, Payload payload, std::vector<Ref> childre
     int paras = (node->kind == NodeKind::ParagraphMark) ? 1 : 0;
     for (const Ref& c : node->children) paras += c->paras;
     node->paras = paras;
+    // 呈现态的那一份：隐藏子树整棵不产生块，所以它自己记 0，孩子也不必再数。
+    int paras_display = 0;
+    if (!node->hidden) {
+        paras_display = (node->kind == NodeKind::ParagraphMark) ? 1 : 0;
+        for (const Ref& c : node->children) paras_display += c->paras_display;
+    }
+    node->paras_display = paras_display;
     Hasher h;
     hashNode(h, *node);
     node->hash_lo = h.lo();

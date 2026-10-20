@@ -16,6 +16,7 @@
 #include <string>
 #include <vector>
 
+#include "core/doc/flow.h"
 #include "core/doc/steps.h"
 #include "core/rev/rev.h"
 
@@ -86,8 +87,10 @@ public:
     /**
      * 提交一批步骤。一次编辑可以有多条步骤（分段后再改段落格式、删选区与插入合并），
      * 用户按下的是一下，撤销也该是一下 —— 所以整批算一步，旧修订只压一份。
+     *
+     * vis 是步骤坐标的可见性口径（见 rev::applySteps）：会话不替调用方猜模式。
      */
-    Applied applySteps(const std::vector<Step>& steps);
+    Applied applySteps(const std::vector<Step>& steps, FlowVisibility vis);
 
     /**
      * 回到上一份修订。没有历史时返回 false（不动状态）。

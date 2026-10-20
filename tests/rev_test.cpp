@@ -923,14 +923,14 @@ int main() {
 
         // 同一份修订：根一个节点就判完。
         const Doc same = rev::makeTextDoc(base);
-        const rev::Damage none = rev::damage(same, same);
+        const rev::Damage none = rev::damage(same, same, FlowVisibility::Design);
         expectTrue(!none.range.changed, "同一份修订：没有损伤");
         expectTrue(none.visited == 1, "同一份修订：只比较了根一个节点（整篇没变是 O(1)）");
 
         // 段内改字（块数不变）：与块哈希比对逐字段一致。
         const Doc d0 = rev::makeTextDoc(base);
         const Doc d1 = rev::insertText(d0, 2, 1, U"X").doc;
-        const rev::Damage inplace = rev::damage(d0, d1);
+        const rev::Damage inplace = rev::damage(d0, d1, FlowVisibility::Design);
         const rev::BlockDamage ref = rev::diffBlocks(rev::blockHashes(d0, FlowVisibility::Design),
                                                      rev::blockHashes(d1, FlowVisibility::Design));
         expectTrue(inplace.range.changed && ref.changed, "段内改字：两边都判为有损伤");
@@ -940,12 +940,12 @@ int main() {
 
         // 空编辑：没有变化，一步剪掉。
         const Doc noop = rev::insertText(d0, 0, 0, U"").doc;
-        const rev::Damage dn = rev::damage(d0, noop);
+        const rev::Damage dn = rev::damage(d0, noop, FlowVisibility::Design);
         expectTrue(!dn.range.changed && dn.visited == 1, "空编辑：没有损伤，且只看了根节点");
 
         // 结构改动：分段多一块、合并少一块，两者都只动一块。
         const Doc sp = rev::splitPara(d0, 0, 0).doc;
-        const rev::Damage ds = rev::damage(d0, sp);
+        const rev::Damage ds = rev::damage(d0, sp, FlowVisibility::Design);
         // cp=0 分段时模型会丢掉原 run、再建一个内容相同的新 run（新节点号），于是"删一个、
         //   插一个"被分别记成两块。多报的那一块内容与旧块完全相同，重排时命中块缓存 ——
         //   这里不为它加"按哈希跨位配对"的启发式：那类规则的价值只有一次缓存查询，
@@ -955,7 +955,7 @@ int main() {
                        std::to_string(ds.range.hi) + ")）");
 
         const Doc mg = rev::mergePara(d0, 1).doc;
-        const rev::Damage dm = rev::damage(d0, mg);
+        const rev::Damage dm = rev::damage(d0, mg, FlowVisibility::Design);
         const rev::BlockDamage rm = rev::diffBlocks(rev::blockHashes(d0, FlowVisibility::Design),
                                                     rev::blockHashes(mg, FlowVisibility::Design));
         expectTrue(dm.range.lo == 1 && dm.range.hi == 2, "合并两段：只有合并后的那一块（实际 [" +
@@ -970,7 +970,7 @@ int main() {
         const rev::BlockDamage re =
             rev::diffBlocks(rev::blockHashes(d0, FlowVisibility::Design),
                             rev::blockHashes(empty, FlowVisibility::Design));
-        const rev::Damage de = rev::damage(d0, empty);
+        const rev::Damage de = rev::damage(d0, empty, FlowVisibility::Design);
         expectTrue(de.range.changed && de.range.lo == re.lo && de.range.hi == re.hi,
                    "整篇删空：区间与块哈希比对一致（空区间，但标记为变了）");
 
@@ -1008,7 +1008,7 @@ int main() {
                     rev::blockHashes(cur, FlowVisibility::Design);
                 const std::vector<rev::BlockHash> ha =
                     rev::blockHashes(r.doc, FlowVisibility::Design);
-                const rev::Damage got = rev::damage(cur, r.doc);
+                const rev::Damage got = rev::damage(cur, r.doc, FlowVisibility::Design);
                 const bool count_same = hb.size() == ha.size();
                 if (count_same) {
                     ++compared;
@@ -1035,8 +1035,8 @@ int main() {
             const Doc b1 = rev::insertText(a1, 399, 1, U"X").doc;
             const Doc a2 = rev::makeTextDoc(long_doc);
             const Doc b2 = rev::insertText(a2, 399, 1, U"X").doc;
-            const rev::Damage m1 = rev::damage(a1, b1);
-            const rev::Damage m2 = rev::damage(a2, b2);
+            const rev::Damage m1 = rev::damage(a1, b1, FlowVisibility::Design);
+            const rev::Damage m2 = rev::damage(a2, b2, FlowVisibility::Design);
             expectTrue(m1.range.lo == 399 && m1.range.hi == 400,
                        "400 段改最后一段：区间正好是第 399 块");
             expectTrue(m1.visited == m2.visited,
@@ -1048,7 +1048,8 @@ int main() {
             using clock = std::chrono::steady_clock;
             int sink = 0;
             const auto t0 = clock::now();
-            for (int k = 0; k < 200; ++k) sink += rev::damage(a1, b1).visited;
+            for (int k = 0; k < 200; ++k)
+                sink += rev::damage(a1, b1, FlowVisibility::Design).visited;
             const auto t1 = clock::now();
             for (int k = 0; k < 200; ++k) {
                 sink += rev::diffBlocks(rev::blockHashes(a1, FlowVisibility::Design),
@@ -1156,7 +1157,7 @@ int main() {
         }
 
         // 损伤：分段之后两块都要重排。
-        const rev::Damage dm = rev::damage(inside, crossed);
+        const rev::Damage dm = rev::damage(inside, crossed, FlowVisibility::Design);
         expectTrue(dm.range.changed && dm.range.lo == 0 && dm.range.hi == 2,
                    "控件内分段：损伤覆盖两块（实际 [" + std::to_string(dm.range.lo) + "," +
                        std::to_string(dm.range.hi) + ")）");
@@ -1196,7 +1197,8 @@ int main() {
         expectTrue(rev::paraCount(back) == rev::paraCount(doc), "段落数相同");
         expectTrue(rev::paraTexts(back) == rev::paraTexts(doc), "逐段文字相同");
         expectTrue(sameTree(doc.root, back.root), "节点身份、种类、隐藏标记、段落数、哈希逐个相同");
-        expectTrue(rev::damage(doc, back).range.empty(), "两份修订之间没有损伤（没有块要重排）");
+        expectTrue(rev::damage(doc, back, FlowVisibility::Design).range.empty(),
+                   "两份修订之间没有损伤（没有块要重排）");
 
         const auto again = rev::serialize(back);
         expectTrue(again.ok && again.text == ser.text, "再写一遍字节完全相同（写端是确定的）");
@@ -1360,7 +1362,7 @@ int main() {
         // 改一格文字：损伤只落在那一块。
         const auto typed = rev::insertText(doc, 2, 0, U"X");
         expectTrue(typed.ok, "格内插字：投影层能按段落号落进格");
-        const rev::Damage one = rev::damage(doc, typed.doc);
+        const rev::Damage one = rev::damage(doc, typed.doc, FlowVisibility::Design);
         expectTrue(one.range.changed && one.range.lo == 2 && one.range.hi == 3,
                    "改一格文字：损伤正好是那一块（实际 [" + std::to_string(one.range.lo) + "," +
                        std::to_string(one.range.hi) + ")）");
@@ -1378,7 +1380,7 @@ int main() {
         }
         expectTrue(!outside_changed && inside_changed,
                    "改列宽：表内五块的哈希全变，表外的两块一个都没变");
-        const rev::Damage dmg = rev::damage(doc, wide);
+        const rev::Damage dmg = rev::damage(doc, wide, FlowVisibility::Design);
         const rev::BlockDamage ref = rev::diffBlocks(before, after);
         expectTrue(dmg.range.lo == 1 && dmg.range.hi == 6,
                    "改列宽：损伤是整张表（实际 [" + std::to_string(dmg.range.lo) + "," +
@@ -1389,7 +1391,7 @@ int main() {
         // 改行高：同样只动容器记录，整张表进损伤。
         // 行高只影响那一行（三个格），不影响另一行 —— 行是这一层容器，它的范围就是自己的块。
         const rev::Doc tall = makeTableDoc(col0, Length::abs(ptToEmu(36.0)));
-        const rev::Damage dh = rev::damage(doc, tall);
+        const rev::Damage dh = rev::damage(doc, tall, FlowVisibility::Design);
         expectTrue(dh.range.lo == 1 && dh.range.hi == 4, "改行高：损伤是第一行的三块（实际 [" +
                                                              std::to_string(dh.range.lo) + "," +
                                                              std::to_string(dh.range.hi) + ")）");
@@ -1614,7 +1616,7 @@ int main() {
                        before[1] == after[1] && before[4] == after[4] && before[5] == after[5],
                    "改内层列宽：表外的两块与外表格另一格一个都没变");
         expectTrue(before[2] != after[2] && before[3] != after[3], "改内层列宽：内表格两块都变了");
-        const rev::Damage dmg = rev::damage(doc, doc2);
+        const rev::Damage dmg = rev::damage(doc, doc2, FlowVisibility::Design);
         const rev::BlockDamage ref = rev::diffBlocks(before, after);
         expectTrue(dmg.range.changed && dmg.range.lo == 2 && dmg.range.hi == 4,
                    "改内层列宽：损伤只到内表格两块（实际 [" + std::to_string(dmg.range.lo) + "," +
@@ -1629,7 +1631,7 @@ int main() {
         ot->table.grid_cols[0] = Length::abs(ptToEmu(70.0));
         Doc doc3;
         expectTrue(rev::fromTree(outer_wider, &doc3, &why), "改外层列宽之后仍能导出");
-        const rev::Damage dmg2 = rev::damage(doc, doc3);
+        const rev::Damage dmg2 = rev::damage(doc, doc3, FlowVisibility::Design);
         expectTrue(dmg2.range.lo == 1 && dmg2.range.hi == 5,
                    "改外层列宽：损伤是整张外表格（[1,5)，实际 [" + std::to_string(dmg2.range.lo) +
                        "," + std::to_string(dmg2.range.hi) + ")）");
@@ -1928,7 +1930,8 @@ int main() {
         expectTrue(typed.ok && (rev::paraTexts(typed.doc) ==
                                 std::vector<std::u32string>{U"第一节", U"X第二节"}),
                    "第 1 段落在第二节里（跨节编辑按段号走）");
-        expectTrue(rev::damage(doc, typed.doc).range.lo == 1, "损伤定位落在第二块");
+        expectTrue(rev::damage(doc, typed.doc, FlowVisibility::Design).range.lo == 1,
+                   "损伤定位落在第二块");
 
         // 页面设置：进内容哈希（改页边距就是改这份文档），但投影不消费它 —— 块哈希不变。
         NodeTree moved = buildTree(SectionBreak::NextPage, Length::abs(ptToEmu(3.0)));
@@ -1973,7 +1976,7 @@ int main() {
             Transaction tx;
             tx.steps = steps;
             const StepResult a = stack.commit(tx);
-            const rev::EditResult b = rev::applySteps(doc, steps);
+            const rev::EditResult b = rev::applySteps(doc, steps, FlowVisibility::Design);
             if (a.ok != b.ok) {
                 ++path_mismatch;
                 std::printf("      第 %d 批：模型 %s（%s）/ 修订 %s（%s）\n", batch_index,
@@ -2057,7 +2060,8 @@ int main() {
         expectTrue(rev::paraCount(doc) == rev::paraCount(mirror), "段落数相同");
 
         // 反向一半：一条越界步骤必须被拒，且不返回"看起来没变"的文档。
-        const rev::EditResult bad = rev::applySteps(doc, {Step{RemoveParaMark{9999, {}, {}}}});
+        const rev::EditResult bad =
+            rev::applySteps(doc, {Step{RemoveParaMark{9999, {}, {}}}}, FlowVisibility::Design);
         expectTrue(!bad.ok && !bad.doc.root, "越界步骤被拒，且不带回半途的文档");
     }
 
@@ -2142,7 +2146,7 @@ int main() {
 
         // 改第 2 段一个字符：那一块的哈希变了，其余三块应当整块搬来。
         const auto r = rev::insertText(base, 1, 1, U"X");
-        const rev::Damage dmg1 = rev::damage(base, r.doc);
+        const rev::Damage dmg1 = rev::damage(base, r.doc, FlowVisibility::Design);
         std::vector<BlockSpec> c1 = b0;
         const rev::Projection inc1 = rev::project(r.doc, sheet, {}, &c1, &h0, &dmg1.range);
         std::vector<BlockSpec> b1;
@@ -2154,7 +2158,7 @@ int main() {
 
         // 段首插一段：块数变了，而其余各段的身份没变，所以只有新段要算。
         const auto sp = rev::splitPara(r.doc, 0, 0);
-        const rev::Damage dmg2 = rev::damage(r.doc, sp.doc);
+        const rev::Damage dmg2 = rev::damage(r.doc, sp.doc, FlowVisibility::Design);
         std::vector<BlockSpec> c2 = b1;
         const rev::Projection inc2 = rev::project(sp.doc, sheet, {}, &c2, &h1, &dmg2.range);
         std::vector<BlockSpec> b2;
@@ -2173,7 +2177,7 @@ int main() {
         for (int cut = 1; cut <= 2; ++cut) {
             const auto sm = rev::splitPara(base, 0, cut);
             if (!sm.ok) continue;
-            const rev::Damage dm = rev::damage(base, sm.doc);
+            const rev::Damage dm = rev::damage(base, sm.doc, FlowVisibility::Design);
             std::vector<BlockSpec> cm = b0;
             const rev::Projection incm = rev::project(sm.doc, sheet, {}, &cm, &h0, &dm.range);
             std::vector<BlockSpec> bm;
@@ -2188,7 +2192,7 @@ int main() {
 
         // 反向一半：删掉一段。被删的那一块不能"复活"，其余照旧复用。
         const auto mg = rev::mergePara(sp.doc, 0);
-        const rev::Damage dmg3 = rev::damage(sp.doc, mg.doc);
+        const rev::Damage dmg3 = rev::damage(sp.doc, mg.doc, FlowVisibility::Design);
         std::vector<BlockSpec> c3 = b2;
         const rev::Projection inc3 = rev::project(mg.doc, sheet, {}, &c3, &h2, &dmg3.range);
         std::vector<BlockSpec> b3;
@@ -2225,7 +2229,7 @@ int main() {
             std::vector<BlockSpec> big_blocks;
             const rev::Projection big_full = rev::project(big, sheet, {}, &big_blocks);
             const rev::BlockHistory big_hist{big_full.style_version, big_full.keys};
-            const rev::Damage dmg_big = rev::damage(big, big_edit.doc);
+            const rev::Damage dmg_big = rev::damage(big, big_edit.doc, FlowVisibility::Design);
             const auto t0 = std::chrono::steady_clock::now();
             std::vector<BlockSpec> a_blocks;
             const rev::Projection a = rev::project(big_edit.doc, sheet, {}, &a_blocks);
@@ -2240,9 +2244,12 @@ int main() {
                         incr_ms, b.reused);
             expectTrue(b.reused == 1999, "2000 段改一段：其余 1999 块整块搬");
             expectTrue(sameTo(cb, b.keys, a_blocks, a.keys), "2000 段：增量与全量逐字段相同");
-            expectTrue(incr_ms * 2 < full_ms, "增量投影不到全量的一半（实测 " +
-                                                  std::to_string(incr_ms) + " vs " +
-                                                  std::to_string(full_ms) + " ms）");
+            // 耗时只记录、不断言：机器有负载时同一份代码会从 0.5 翻到 0.9 ms（2026-10-20
+            //   实测两次翻红），阈值判据在"省了多少"上没有判别力。省没省由结构量钉住：
+            //   复用 1999 块、只有 1 块落在损伤区间里 —— 与机器快慢无关。
+            expectTrue(dmg_big.range.count() == 1, "2000 段改一段：损伤区间只覆盖 1 块（实测 " +
+                                                       std::to_string(dmg_big.range.count()) +
+                                                       " 块）");
         }
 
         // 按区间搬块的前提：damage 的坐标必须与投影的块号同一套。它对不上时，按区间搬
@@ -2280,7 +2287,7 @@ int main() {
                             break;
                         }
                     }
-                    const rev::Damage d = rev::damage(before, cur);
+                    const rev::Damage d = rev::damage(before, cur, FlowVisibility::Design);
                     std::vector<BlockSpec> tmp;
                     rev::project(cur, sheet, {}, &tmp);
                     if (d.range.after_blocks != static_cast<int>(tmp.size())) ++bad_count;
@@ -2317,6 +2324,111 @@ int main() {
                 checkShape(tbl_doc, "表格文书");
             }
         }
+    }
+
+    std::printf("\n[23] 可见性：步骤坐标与损伤块数按同一个口径\n");
+    {
+        // 隐藏控件把呈现态的流位整体前移。下面这串文书两种口径分别是：
+        //   呈现态 0 节首 | 1 A | 2 A | 3 B | 4 B | 5 段落标记
+        //   设计态 0 节首 | 1 A | 2 A | 3 控件起 | 4 X | 5 X | 6 控件止 | 7 B | 8 B | 9 标记
+        // 同一个整数 4 在两种口径下是两个落点：呈现态是"两个 B 之间"，设计态是隐藏控件里面。
+        Doc d = rev::makeTextDoc({U"AABB"});
+        NodeId cc = kInvalidNodeId;
+        rev::EditResult r = rev::insertControl(d, 0, 2, ControlSpec{}, U"XX", &cc);
+        expectTrue(r.ok, "可见性：控件插入成功");
+        d = r.doc;
+        r = rev::setHidden(d, cc, true);
+        expectTrue(r.ok, "可见性：控件隐藏成功");
+        d = r.doc;
+
+        const rev::FlowIndex dis(d, FlowVisibility::Display);
+        const rev::FlowIndex des(d, FlowVisibility::Design);
+        expectTrue(dis.size() == 7 && des.size() == 11,
+                   "两种可见性的流位数不同（呈现态 7、设计态 11）");
+
+        Step st = InsertText{};
+        std::get<InsertText>(st).at = 4;  // 呈现态：两个 B 之间
+        std::get<InsertText>(st).cps = {static_cast<uint32_t>(U'Z')};
+        const rev::EditResult shown = rev::applySteps(d, {st}, FlowVisibility::Display);
+        expectTrue(shown.ok && rev::paraTexts(shown.doc)[0] == U"AAXXBZB",
+                   "★ 呈现态位置 4 落在 BB 里（不是落进隐藏控件）");
+        // 反向：同一个整数按设计态读，落点就变成隐藏控件内部 —— 字会"打进去但看不见"。
+        //   这一条钉的是"口径必须随坐标一起传"，不是"某个实现细节"。
+        const rev::EditResult lost = rev::applySteps(d, {st}, FlowVisibility::Design);
+        std::string lost_text = lost.ok ? std::string() : ("拒:" + lost.error);
+        if (lost.ok) {
+            const std::u32string t = rev::paraTexts(lost.doc)[0];
+            lost_text.assign(t.begin(), t.end());
+        }
+        expectTrue(lost.ok && rev::paraTexts(lost.doc)[0] == U"AAZXXBB",
+                   "反向：同一个整数按设计态读落进隐藏控件的内容起点（实际 " + lost_text + "）");
+    }
+    {
+        // 损伤的块数：隐藏控件里含段落标记时，呈现态只有一块，设计态有两块。
+        Doc d = rev::makeTextDoc({U"AABB"});
+        NodeId cc = kInvalidNodeId;
+        d = rev::insertControl(d, 0, 2, ControlSpec{}, U"XXYY", &cc).doc;
+        d = rev::splitPara(d, 0, 4).doc;  // 段落标记落进控件内部
+        d = rev::setHidden(d, cc, true).doc;
+
+        const StyleSheet sheet;
+        std::vector<BlockSpec> vis;
+        std::vector<BlockSpec> des;
+        rev::project(d, sheet, rev::ViewParams{FlowVisibility::Display}, &vis);
+        rev::project(d, sheet, rev::ViewParams{FlowVisibility::Design}, &des);
+        expectTrue(vis.size() == 1 && des.size() == 2,
+                   "隐藏控件里的段落标记：呈现态 1 块、设计态 2 块");
+
+        const Doc d1 = rev::insertText(d, 0, 0, U"Z").doc;
+        const rev::Damage dm = rev::damage(d, d1, FlowVisibility::Display);
+        expectTrue(dm.range.after_blocks == static_cast<int>(vis.size()),
+                   "★ 呈现态的 damage.after_blocks 等于呈现态的块数");
+        const rev::Damage dm_des = rev::damage(d, d1, FlowVisibility::Design);
+        expectTrue(dm_des.range.after_blocks == static_cast<int>(des.size()),
+                   "反向：设计态的 damage 仍按设计态数块");
+
+        // 端到端：按这个损伤区间增量投影，块数必须与全量相同。
+        //   after_blocks 报大了会把 shift 算成 +1，旧区间右端变 0 ⇒ 一块不删再插一块。
+        std::vector<BlockSpec> live;
+        rev::BlockHistory hist;
+        {
+            const rev::Projection p0 =
+                rev::project(d, sheet, rev::ViewParams{FlowVisibility::Display}, &live);
+            hist.keys = p0.keys;
+            hist.style_version = p0.style_version;
+        }
+        const rev::Projection p1 = rev::project(d1, sheet, rev::ViewParams{FlowVisibility::Display},
+                                                &live, &hist, &dm.range);
+        expectTrue(live.size() == vis.size(), "★ 增量投影之后的块数与全量相同（不然块被搬重）");
+        expectTrue(p1.reused + (dm.range.hi - dm.range.lo) >= 1, "增量真的发生了");
+    }
+
+    {
+        // 可见性切换：隐藏/显示一个含段落标记的控件，损伤的块数要跟着换口径。
+        //   这一对最容易错在"按设计态数了呈现态的块"—— 隐藏时多报一块，按区间搬块就会
+        //   把后面那块往前挪错位。
+        Doc d = rev::makeTextDoc({U"AABB"});
+        NodeId cc = kInvalidNodeId;
+        d = rev::insertControl(d, 0, 2, ControlSpec{}, U"XXYY", &cc).doc;
+        d = rev::splitPara(d, 0, 4).doc;
+        const Doc shown = d;
+        const Doc hidden = rev::setHidden(shown, cc, true).doc;
+
+        const StyleSheet sheet;
+        std::vector<BlockSpec> b_shown;
+        std::vector<BlockSpec> b_hidden;
+        rev::project(shown, sheet, rev::ViewParams{FlowVisibility::Display}, &b_shown);
+        rev::project(hidden, sheet, rev::ViewParams{FlowVisibility::Display}, &b_hidden);
+        expectTrue(b_shown.size() == 2 && b_hidden.size() == 1, "隐藏前后：呈现态 2 块 → 1 块");
+
+        const rev::Damage to_hide = rev::damage(shown, hidden, FlowVisibility::Display);
+        expectTrue(to_hide.range.after_blocks == static_cast<int>(b_hidden.size()),
+                   "隐藏：after_blocks 跟着呈现态少一块（实测 " +
+                       std::to_string(to_hide.range.after_blocks) + "）");
+        const rev::Damage to_show = rev::damage(hidden, shown, FlowVisibility::Display);
+        expectTrue(to_show.range.after_blocks == static_cast<int>(b_shown.size()),
+                   "显示：after_blocks 跟着呈现态多一块（实测 " +
+                       std::to_string(to_show.range.after_blocks) + "）");
     }
 
     std::printf("\n结果：%d 项断言，%d 项失败\n", g_checks, g_failures);

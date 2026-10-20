@@ -185,6 +185,10 @@ std::vector<BlockHash> blockHashes(const Doc& doc, FlowVisibility vis);
 /**
  * 两份修订之间哪几块要重排，由哈希下降直接算出。
  *
+ * vis 是块坐标的可见性口径，必须由调用方给：呈现态下隐藏子树不产生块，同一个下标在两种
+ * 可见性下指向不同的块。它与投影的 ViewParams::vis 必须是同一个值 —— 一个数走不到两处
+ * （TRAPS 124）。
+ *
  * 与 diffBlocks 的分工：那个比的是两条已经算好的块哈希 —— 要先把整篇投影一遍，代价 O(块数)；
  * 这个从根往下走，哈希相同的子树一步剪掉、连进都不进，也不需要物化任何 BlockSpec。
  *
@@ -207,6 +211,6 @@ struct Damage {
     int scanned = 0;
 };
 
-Damage damage(const Doc& before, const Doc& after);
+Damage damage(const Doc& before, const Doc& after, FlowVisibility vis);
 
 }  // namespace heditor::rev

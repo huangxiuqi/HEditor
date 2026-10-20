@@ -75,12 +75,24 @@ using Payload = std::variant<std::monostate, RunPayload, MarkPayload, ControlSpe
  * paras 是这棵子树里的段落标记数（顺序统计量）。它由内容唯一确定，所以不进哈希，但必须
  * 在构造时算好：比较两份修订时要靠它把"哪一棵子树变了"直接换成一端块区间，否则每层都得
  * 重新数一遍子树。这是顺序统计量树的标量版，只到"多少块"这一档，不做到"第几块"。
+ *
+ * 块数随可见性变，所以统计量有两个（paras / paras_display）：呈现态下隐藏子树不产生块。
+ * 一个数走不到两处 —— 谁要块数，谁就得说清按哪种可见性数。
  */
 struct Node {
     NodeId id = kInvalidNodeId;
     NodeKind kind = NodeKind::TextRun;
     bool hidden = false;
     int paras = 0;
+    /**
+     * 呈现态（Display）下这棵子树里有几个段落标记 —— 与 paras 是两个数，不是一个。
+     *
+     * 隐藏的子树整棵不在呈现态的流里，它里面的段落标记也就不产生块。损伤判定按"哪种可见性"
+     * 数块，必须读对应的那一个：两者混用会让 after_blocks 与投影的块数不等，按区间搬块时
+     * shift 算错，表现是段落重复（见 TRAPS 124）。它同样不进哈希 —— 由 hidden 与内容唯一
+     * 确定，不是新的作者意图。
+     */
+    int paras_display = 0;
     Payload payload;
     std::vector<Ref> children;
     uint64_t hash_lo = 0;

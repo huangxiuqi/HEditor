@@ -12,6 +12,7 @@
 
 #include <vector>
 
+#include "core/doc/flow.h"
 #include "core/doc/steps.h"
 #include "core/rev/rev.h"
 
@@ -22,8 +23,12 @@ namespace heditor::rev {
  *
  * 步骤的坐标是它自己应用那一刻的坐标：前一步改了长度，后一步的绝对流位置就过期了。
  * 批次由命令层负责映射（见 pushMappedStep），这里只按顺序照做。
+ *
+ * vis 是这批步骤的流位置按哪种可见性算出来的，必须由调用方给：呈现态下隐藏子树整棵不在
+ * 流里，同一个整数在两种可见性下是两个落点。省略它不是"默认文档模式"，而是把口径丢了 ——
+ * 所以没有默认值（TRAPS 123）。
  */
-EditResult applySteps(const Doc& doc, const std::vector<Step>& steps);
+EditResult applySteps(const Doc& doc, const std::vector<Step>& steps, FlowVisibility vis);
 
 /**
  * 规范化：删掉空 run、合并相邻同字符属性的 run。与模型层的 normalizeDocument 同一条规则，

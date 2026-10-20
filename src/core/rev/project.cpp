@@ -654,22 +654,34 @@ namespace {
  */
 class DamageWalker {
 public:
+    explicit DamageWalker(FlowVisibility vis) : vis_(vis) {}
+
+    /**
+     * 这棵子树在给定可见性下产生几块。paras 与 paras_display 是两个数，按 vis 取。
+     */
+    int vp(const Ref& n) const {
+        return (vis_ == FlowVisibility::Display) ? n->paras_display : n->paras;
+    }
+
     void walk(const Ref& a, const Ref& b, int& off) {
         ++visited;
+        // 两边都不可见：里面的内容怎么变都不产生块。少了这一条，哈希下降会走进隐藏子树，
+        //   把它内部的变化记成"某一块的损伤" —— 而那一块在呈现态根本不存在。
+        if (vis_ == FlowVisibility::Display && a->hidden && b->hidden) return;
         if (a == b || (a->hash_lo == b->hash_lo && a->hash_hi == b->hash_hi)) {
-            off += b->paras;
+            off += vp(b);
             return;
         }
         // 容器自己的记录变了（列宽、行高、跨度、控件外观）：它覆盖的块整段算损伤。
         // 这一条不能省 —— 改列宽时每一块的内容哈希都没变，只比内容会报"没有损伤"，
         // 而整张表的行高与分页都可能跟着变。
         if (selfDiffers(a, b)) {
-            mark(off, b->paras > 0 ? b->paras : 1);
-            off += b->paras;
+            mark(off, vp(b) > 0 ? vp(b) : 1);
+            off += vp(b);
             return;
         }
         // 自身没变、两边都不含段落标记 ⇒ 这点差异落在某一块的内部，那一段就是它的归属。
-        if (a->paras == 0 && b->paras == 0) {
+        if (vp(a) == 0 && vp(b) == 0) {
             mark(off, 1);
             return;
         }
@@ -707,6 +719,8 @@ public:
     int scanned = 0;
 
 private:
+    FlowVisibility vis_ = FlowVisibility::Design;
+
     static bool selfDiffers(const Ref& a, const Ref& b) {
         Hasher ha;
         Hasher hb;
@@ -733,14 +747,14 @@ private:
             ++scanned;
             if (i >= x.size()) {
                 // 插入：它自己带来的块都算损伤，位置就在当前 off。
-                mark(off, y[j]->paras > 0 ? y[j]->paras : 1);
-                off += y[j]->paras;
+                mark(off, vp(y[j]) > 0 ? vp(y[j]) : 1);
+                off += vp(y[j]);
                 ++j;
                 continue;
             }
             if (j >= y.size()) {
                 // 删除：它占的块没了，位置在当前 off（后面的块会往前挪一格）。
-                mark(off, x[i]->paras > 0 ? x[i]->paras : 1);
+                mark(off, vp(x[i]) > 0 ? vp(x[i]) : 1);
                 ++i;
                 continue;
             }
@@ -751,7 +765,7 @@ private:
                 continue;
             }
             if (in_y.count(x[i]->id) == 0) {
-                mark(off, x[i]->paras > 0 ? x[i]->paras : 1);
+                mark(off, vp(x[i]) > 0 ? vp(x[i]) : 1);
                 ++i;
                 continue;
             }
@@ -759,40 +773,53 @@ private:
                 // 插入。插进来的若是段落标记，它结束的就是"当前这一块" —— 而当前块的
                 //   起点可能在 off 之前（walk 对内容叶子只标块、不结算 off），所以这里
                 //   连当前块一起标两格。多报一块只会多物化一块，漏报会让新段沿用旧内容。
-                const int span = (y[j]->paras > 0) ? y[j]->paras : 1;
+                const int span = (vp(y[j]) > 0) ? vp(y[j]) : 1;
                 mark(off, y[j]->kind == NodeKind::ParagraphMark ? span + 1 : span);
-                off += y[j]->paras;
+                off += vp(y[j]);
                 ++j;
                 continue;
             }
-            mark(off, x[i]->paras > 0 ? x[i]->paras : 1);
+            mark(off, vp(x[i]) > 0 ? vp(x[i]) : 1);
             ++i;
         }
     }
 };
 
 /**
+ * 给定可见性下，文档流的最后一个叶子。呈现态跳过隐藏子树 —— 一棵隐藏的子树即使长在末尾，
+ * 它的内容也不在流里，末尾由它前面那个可见元素决定。
+ *
+ * 返回空表示"这棵子树在流里没有任何可见叶子"（整棵被隐藏，或只剩空容器）。
+ */
+const Node* lastVisibleLeaf(const Ref& n, bool display) {
+    for (auto it = n->children.rbegin(); it != n->children.rend(); ++it) {
+        if (display && (*it)->hidden) continue;
+        if (const Node* r = lastVisibleLeaf(*it, display)) return r;
+    }
+    return n->children.empty() ? n.get() : nullptr;
+}
+
+/**
  * 文档流的最后一个叶子是不是"内容"。是的话，末尾就有一段没有结束标记 —— 投影会给它补
  * 一块，而 paras 不计这一块。叶子是段落标记、或者整棵树只有空容器时，都不补。
  */
-bool endsOpen(const Ref& n) {
-    const Ref* cur = &n;
-    while (cur != nullptr && !(*cur)->children.empty()) cur = &(*cur)->children.back();
-    if (cur == nullptr) return false;
-    const NodeKind k = (*cur)->kind;
+bool endsOpen(const Ref& n, FlowVisibility vis) {
+    const Node* leaf = lastVisibleLeaf(n, vis == FlowVisibility::Display);
+    if (leaf == nullptr) return false;
+    const NodeKind k = leaf->kind;
     return k == NodeKind::TextRun || k == NodeKind::Image || k == NodeKind::Formula ||
            k == NodeKind::ContentControl;
 }
 
 }  // namespace
 
-Damage damage(const Doc& before, const Doc& after) {
+Damage damage(const Doc& before, const Doc& after, FlowVisibility vis) {
     Damage out;
     if (!before.root || !after.root) {
         out.range.changed = (before.root != after.root);
         return out;
     }
-    DamageWalker w;
+    DamageWalker w(vis);
     int off = 0;
     w.walk(before.root, after.root, off);
     out.visited = w.visited;
@@ -800,10 +827,14 @@ Damage damage(const Doc& before, const Doc& after) {
     out.range.after_blocks = off;
     // 末尾那一段没有结束标记时，投影在遍历结束后补一块，而 paras 不计它。坐标要跟着补，
     //   否则按区间搬块会把最后一块搬到它前面去（判据 [22] 的"末尾开放"形状守着）。
-    const bool open = endsOpen(after.root);
+    const bool open = endsOpen(after.root, vis);
     if (open) ++out.range.after_blocks;
+    const int before_blocks =
+        (vis == FlowVisibility::Display) ? before.root->paras_display : before.root->paras;
+    const int after_blocks =
+        (vis == FlowVisibility::Display) ? after.root->paras_display : after.root->paras;
     out.range.changed =
-        w.any || (before.root->paras != after.root->paras) || (endsOpen(before.root) != open);
+        w.any || (before_blocks != after_blocks) || (endsOpen(before.root, vis) != open);
     // 区间夹到 after 的块数：尾部删段时"落点"会落在末尾之外，而调用方要重排的块不存在。
     out.range.lo = std::min(w.lo, out.range.after_blocks);
     out.range.hi = std::min(w.hi + ((open && w.any) ? 1 : 0), out.range.after_blocks);

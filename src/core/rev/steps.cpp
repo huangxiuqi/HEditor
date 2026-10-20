@@ -98,6 +98,10 @@ Ref fromSpec(const NodeSpec& s, NodeId* next, std::string* error) {
 struct Ctx {
     Doc doc;
     std::string error;
+    /**
+     * 这批步骤的流位置按哪种可见性算。整批同一个口径：批次内部不会换模式。
+     */
+    FlowVisibility vis = FlowVisibility::Design;
 };
 
 bool fail(Ctx* c, std::string why) {
@@ -140,7 +144,7 @@ bool replaceOne(Ctx* c, NodeId id, Payload payload, bool hidden) {
  * 只有流位置能活过它。切分会改文档，所以这里吃的是可写的 Ctx。
  */
 bool slotAtFlow(Ctx* c, FlowPos flow, NodeId* container, int* slot) {
-    FlowIndex idx(c->doc, FlowVisibility::Design);
+    FlowIndex idx(c->doc, c->vis);
     if (flow < 0 || flow > idx.size()) return fail(c, "流位置越界");
     const Pos p = idx.posAt(flow);
     const Node* n = findNode(c->doc, p.container);
@@ -163,7 +167,7 @@ bool slotAtFlow(Ctx* c, FlowPos flow, NodeId* container, int* slot) {
         kids.erase(kids.begin() + self);
         kids.insert(kids.begin() + self, repl.begin(), repl.end());
         if (!rewrite(c, path, std::move(kids))) return false;
-        idx = FlowIndex(c->doc, FlowVisibility::Design);
+        idx = FlowIndex(c->doc, c->vis);
     }
 
     const Pos q = idx.posAt(flow);
@@ -191,7 +195,7 @@ bool slotAtFlow(Ctx* c, FlowPos flow, NodeId* container, int* slot) {
 bool insertRunAt(Ctx* c, FlowPos at, const std::vector<uint32_t>& cps, const CharFormat& marks,
                  const std::string& style) {
     if (cps.empty()) return true;
-    FlowIndex idx(c->doc, FlowVisibility::Design);
+    FlowIndex idx(c->doc, c->vis);
     if (at < 0 || at > idx.size()) return fail(c, "插入位置越界");
     const Pos p = idx.posAt(at);
     const Node* n = findNode(c->doc, p.container);
@@ -280,7 +284,7 @@ bool insertRunAt(Ctx* c, FlowPos at, const std::vector<uint32_t>& cps, const Cha
  * 把一枚段落标记插到流位置 at 上。落在 run 中间时先把 run 切开。
  */
 bool insertMarkAt(Ctx* c, FlowPos at, const ParaFormatPatch& para, const std::string& style) {
-    FlowIndex idx(c->doc, FlowVisibility::Design);
+    FlowIndex idx(c->doc, c->vis);
     if (at < 0 || at > idx.size()) return fail(c, "分段位置越界");
     const Pos p = idx.posAt(at);
     const Node* n = findNode(c->doc, p.container);
@@ -387,7 +391,7 @@ bool collectCovers(const Doc& doc, const FlowIndex& idx, FlowPos begin, FlowPos 
  */
 bool eraseFlowRange(Ctx* c, FlowPos begin, FlowPos end) {
     if (begin >= end) return true;
-    const FlowIndex idx(c->doc, FlowVisibility::Design);
+    const FlowIndex idx(c->doc, c->vis);
     if (begin < 0 || end > idx.size()) return fail(c, "删除区间越界");
 
     std::vector<Cover> covers;
@@ -436,7 +440,7 @@ bool eraseFlowRange(Ctx* c, FlowPos begin, FlowPos end) {
 }
 
 bool removeParaMarkAt(Ctx* c, FlowPos at) {
-    const FlowIndex idx(c->doc, FlowVisibility::Design);
+    const FlowIndex idx(c->doc, c->vis);
     if (at < 0 || at >= idx.size()) return fail(c, "删除段落标记：流位置越界");
     const Pos p = idx.posAt(at);
     const Node* n = findNode(c->doc, p.container);
@@ -666,8 +670,8 @@ Doc normalize(const Doc& doc) {
     return adopt(std::move(root), doc.next_id);
 }
 
-EditResult applySteps(const Doc& doc, const std::vector<Step>& steps) {
-    Ctx c{doc, {}};
+EditResult applySteps(const Doc& doc, const std::vector<Step>& steps, FlowVisibility vis) {
+    Ctx c{doc, {}, vis};
     for (const Step& step : steps) {
         if (!applyOne(&c, step)) {
             EditResult r;

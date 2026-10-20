@@ -81,14 +81,14 @@ Applied Session::apply(const Edit& edit) {
     return out;
 }
 
-Applied Session::applySteps(const std::vector<Step>& steps) {
+Applied Session::applySteps(const std::vector<Step>& steps, FlowVisibility vis) {
     Applied out;
     if (steps.empty()) {
         out.ok = true;
         return out;
     }
     // 限定到命名空间：Session 自己的 applySteps 会把同名函数藏起来。
-    const EditResult r = ::heditor::rev::applySteps(doc_, steps);
+    const EditResult r = ::heditor::rev::applySteps(doc_, steps, vis);
     if (!r.ok) {
         out.error = r.error;
         return out;

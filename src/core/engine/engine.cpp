@@ -440,10 +440,11 @@ bool EditorEngine::commitSteps(std::vector<Step> steps, int dirty_para, ParaDelt
     // 旧修订与旧产物一一对应：投影复用要按它们的差算损伤区间。Doc 是不可变的，
     //   拷贝只是一个引用计数（未改的子树与新的那份共享）。
     const rev::Doc before = session_->doc();
-    const rev::Applied r = session_->applySteps(steps);
+    const FlowVisibility vis = flowVisibility();
+    const rev::Applied r = session_->applySteps(steps, vis);
     if (!r.ok) return false;
     if (!r.changed) return true;  // 什么都没改：不占撤销栈，也不白跑一次重建
-    const rev::Damage dmg = rev::damage(before, session_->doc());
+    const rev::Damage dmg = rev::damage(before, session_->doc(), vis);
     recordSelection(selection_before, selection_after);
     rebuildFromTree(&dmg.range);
     markLayoutDirty(dirty_para);
@@ -467,7 +468,7 @@ bool EditorEngine::undo() {
     if (!loaded_ || !session_) return false;
     const rev::Doc before = session_->doc();
     if (!session_->undo()) return false;
-    const rev::Damage dmg = rev::damage(before, session_->doc());
+    const rev::Damage dmg = rev::damage(before, session_->doc(), flowVisibility());
     rebuildFromTree(&dmg.range);
     // 撤销会改到哪一段是不可定位的（一批步骤可能跨段），所以整篇重排。
     markAllLayoutDirty();
@@ -484,7 +485,7 @@ bool EditorEngine::redo() {
     if (!loaded_ || !session_) return false;
     const rev::Doc before = session_->doc();
     if (!session_->redo()) return false;
-    const rev::Damage dmg = rev::damage(before, session_->doc());
+    const rev::Damage dmg = rev::damage(before, session_->doc(), flowVisibility());
     rebuildFromTree(&dmg.range);
     markAllLayoutDirty();
     if (sel_pos_ < sel_history_.size()) {

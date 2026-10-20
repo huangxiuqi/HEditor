@@ -7391,6 +7391,45 @@ int main() {
                            std::to_string(after5.para) + ", " + std::to_string(after5.offset) +
                            ")）");
         }
+
+        // (g) 隐藏字段之后的编辑落点：流位置在呈现态与设计态下不是同一个数。
+        //   判据是"字打在了哪里"：字段隐藏之后可见文本是 AACC；光标停在第二个 C 之前打字，
+        //   字必须落在那里。修复前这个整数被按设计态解释，落点退进隐藏字段 —— 字打进去了、
+        //   屏幕上却什么都没变（呈现态不画隐藏字段的内容）。
+        {
+            std::vector<BlockSpec> b6(1);
+            b6[0].setText("AABBCC");
+            std::vector<DemoFieldSpec> f6(1);
+            f6[0].para = 0;
+            f6[0].so = 2;
+            f6[0].eo = 4;  // 字段包住 "BB"
+            f6[0].key = "k6";
+
+            // 只含 ASCII，按码点直接拼成字符串就够，不必引 UTF-8 转换。
+            auto text6 = [](const EditorEngine& e, int para) {
+                std::string out;
+                for (uint32_t c : e.blocks()[para].cp_text) out.push_back(static_cast<char>(c));
+                return out;
+            };
+
+            EditorEngine e6;
+            expectTrue(e6.init({cjkPath}), "可见性：字体加载成功");
+            EngineConfig ec6;
+            ec6.zoom = 1.0f;
+            e6.setConfig(ec6);
+            e6.setDocument(demoTree(b6, f6), StyleSheet{});
+            e6.setEditMode(EditMode::Form);
+            e6.relayout();
+            expectTrue(e6.setControlProp(0, ControlProp::Hidden, true),
+                       "可见性：把 BB 那个字段隐藏");
+            e6.relayout();
+            expectTrue(text6(e6, 0) == "AACC",
+                       "可见性：字段隐藏后可见文本是 AACC（实际 " + text6(e6, 0) + "）");
+            e6.setCaret(0, 3);  // 第二个 C 之前
+            expectTrue(e6.typeTextUtf8("Z"), "可见性：在隐藏字段之后打字成功");
+            expectTrue(text6(e6, 0) == "AACZC",
+                       "★ 字落在光标处，没有落进隐藏字段（实际 " + text6(e6, 0) + "）");
+        }
     }
 
     std::printf("\n[35] 控件边界上的退格与前删：进控件删内容，空控件才删控件\n");
