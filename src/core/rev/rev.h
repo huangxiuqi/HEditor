@@ -4,8 +4,8 @@
  * 判据只有一条：一次编辑之后，旧值仍然可用、且没有被改动。做到这一点之后，"改了什么"
  * 就不再需要事后推导 —— 两份修订的哈希一比，不同的子树就是损伤，而且精确到节点。
  *
- * 切片范围：文字、段落标记、内容控件、表格（表 / 行 / 格）、图片、公式、域。节属性与
- * 页眉页脚留给后续切片。
+ * 切片范围：文字、段落标记、内容控件、表格（表 / 行 / 格）、图片、公式、域、节的页面设置。
+ * 页眉页脚的内容（HeaderFooter 子树）按容器下钻，本层不解释它。
  * 收窄不是留占位 —— 这一层表示不了的形状根本构造不出来，makeTextDoc 只产出前两类，
  * 控件只能经 insertControl 建出来。加新节点种类时 payload 的 variant 多一支，
  * 哈希用 std::visit 且不写默认分支，漏写一支直接编不过，不会静默算出一个不完整的哈希。
@@ -32,6 +32,7 @@
 #include "core/doc/image_spec.h"
 #include "core/doc/node.h"
 #include "core/doc/para_format.h"
+#include "core/doc/section_spec.h"
 
 namespace heditor::rev {
 
@@ -57,13 +58,13 @@ using Ref = std::shared_ptr<const Node>;
 
 /**
  * 节点载荷：种类决定哪一支（文本带字符属性、段落标记带段落覆盖、控件带控件记录、表格三种
- * 节点各带自己的记录、图片与公式各带自己的记录、域带域记录，其余不带载荷）。
+ * 节点各带自己的记录、图片与公式各带自己的记录、域带域记录、节带页面设置，其余不带载荷）。
  *
  * 一支一种记录，不做"表格载荷里再套三种"：种类与载荷的对应是一条查表就能写出来的规则，
  * 而多一层包装会让 hashNode 与落盘都要再分一次支。
  */
 using Payload = std::variant<std::monostate, RunPayload, MarkPayload, ControlSpec, TableSpec,
-                             RowSpec, CellSpec, ImageSpec, FormulaSpec, FieldSpec>;
+                             RowSpec, CellSpec, ImageSpec, FormulaSpec, FieldSpec, SectionSpec>;
 
 /**
  * 一个不可变节点。构造之后不再改动，编辑一律走"换一条路径"（见 replaceNode）。
@@ -182,8 +183,8 @@ Doc adopt(Ref root, NodeId next_id);
  * 逐字段相同，才能说两条路是同一件事。
  *
  * 表示不了的形状直接拒绝、并说明原因，不做"能搬多少搬多少"：搬一半的结果是一份看起来
- * 完整的修订 —— 它与模型不是同一份文档，而调用方没有别的办法知道。本切片拒绝多节
- * （节的记录还没进载荷）与不认识的根。
+ * 完整的修订 —— 它与模型不是同一份文档，而调用方没有别的办法知道。本切片拒绝不认识的根
+ * 与"非文档 / 非节"的子节点。
  */
 bool fromTree(const NodeTree& tree, Doc* out, std::string* error);
 

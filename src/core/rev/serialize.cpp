@@ -19,7 +19,19 @@ using nlohmann::ordered_json;
 /**
  * 载荷的七个分支。种类到分支的对应是唯一一份，落盘、读盘与哈希都按它走。
  */
-enum class Alt : uint8_t { None, Run, Mark, Control, Table, Row, Cell, Image, Formula, Field };
+enum class Alt : uint8_t {
+    None,
+    Run,
+    Mark,
+    Control,
+    Table,
+    Row,
+    Cell,
+    Image,
+    Formula,
+    Field,
+    Section,
+};
 
 /**
  * 属性键。写与读共用同一套常量：两处各写字面量，迟早有一处拼错，而拼错的表现是这个字段读回来
@@ -43,6 +55,7 @@ constexpr const char* kCell = "cs";
 constexpr const char* kImage = "im";
 constexpr const char* kFormula = "fm";
 constexpr const char* kField = "fd";
+constexpr const char* kSection = "sec";
 constexpr const char* kChildren = "ch";
 
 /**
@@ -73,9 +86,11 @@ Alt altOf(const Payload& p) {
                 return Alt::Image;
             else if constexpr (std::is_same_v<T, FormulaSpec>)
                 return Alt::Formula;
-            else {
-                static_assert(std::is_same_v<T, FieldSpec>, "新增载荷要在这里加一支");
+            else if constexpr (std::is_same_v<T, FieldSpec>)
                 return Alt::Field;
+            else {
+                static_assert(std::is_same_v<T, SectionSpec>, "新增载荷要在这里加一支");
+                return Alt::Section;
             }
         },
         p);
@@ -108,6 +123,8 @@ Alt altForKind(NodeKind kind) {
             return Alt::Formula;
         case NodeKind::Field:
             return Alt::Field;
+        case NodeKind::Section:
+            return Alt::Section;
         default:
             return Alt::None;
     }
@@ -169,6 +186,10 @@ bool writeNode(const Ref& n, recjson::StringPool* strings, NodeId* max_id,
         if (p.kind != FieldKind::PageNumber || !p.name.empty() || !p.cache.empty()) {
             j[kField] = recjson::fieldJson(p);
         }
+    } else if (alt == Alt::Section) {
+        const SectionSpec& p = std::get<SectionSpec>(n->payload);
+        // 节记录的默认值是"一节 A4 纵向、页边距 2cm、连续分节"，全默认时不写。
+        if (!p.sameAs(SectionSpec{})) j[kSection] = recjson::sectionJson(p);
     }
     if (!n->children.empty()) {
         ordered_json kids = ordered_json::array();
@@ -316,6 +337,7 @@ bool readNode(Reader& r, const ordered_json& j, int depth, Ref* out) {
     if (alt != Alt::Image && j.contains(kImage)) return r.fail("这一节点种类不带图片记录");
     if (alt != Alt::Formula && j.contains(kFormula)) return r.fail("这一节点种类不带公式记录");
     if (alt != Alt::Field && j.contains(kField)) return r.fail("这一节点种类不带域记录");
+    if (alt != Alt::Section && j.contains(kSection)) return r.fail("这一节点种类不带节记录");
 
     if (alt == Alt::Run) {
         if (!readRunPayload(r, j, &payload)) return false;
@@ -347,6 +369,10 @@ bool readNode(Reader& r, const ordered_json& j, int depth, Ref* out) {
         FieldSpec fd;
         if (!recjson::readField(j, kField, &fd)) return r.fail("域记录读不出来");
         payload = std::move(fd);
+    } else if (alt == Alt::Section) {
+        SectionSpec sec;
+        if (!recjson::readSection(j, kSection, &sec)) return r.fail("节记录读不出来");
+        payload = std::move(sec);
     }
 
     std::vector<Ref> kids;
@@ -437,12 +463,17 @@ DeserializeResult deserialize(const std::string& text, Doc* out) {
         result.error = "根节点没有建出来";
         return result;
     }
-    // 本切片不分节：正文那一节是 bodyOf 与 withLeafChildren 的唯一入口，多一节会被静默忽略，
-    // 所以在这里就拒掉，而不是等编辑时只改到第一节。
-    if (root->kind != NodeKind::Document || root->children.size() != 1 ||
-        root->children.front()->kind != NodeKind::Section) {
-        result.error = "根必须是 Document，其下正好一节";
+    // 根下只许有节，且至少一节：段落号在节之间连续，定位与编辑按根的孩子表走，
+    // 混进别的种类会让"第几段"与"第几节"两套编号对不上。
+    if (root->kind != NodeKind::Document || root->children.empty()) {
+        result.error = "根必须是 Document，其下至少一节";
         return result;
+    }
+    for (const Ref& c : root->children) {
+        if (c->kind != NodeKind::Section) {
+            result.error = std::string("文档的直接孩子里有") + nodeKindName(c->kind) + "，不是节";
+            return result;
+        }
     }
 
     NodeId next = 0;

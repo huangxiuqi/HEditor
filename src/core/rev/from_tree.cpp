@@ -48,6 +48,8 @@ Payload payloadOf(const ModelNode& n) {
             return n.formula;
         case NodeKind::Field:
             return n.field;
+        case NodeKind::Section:
+            return n.section;
         default:
             break;
     }
@@ -64,12 +66,6 @@ bool fromTree(const NodeTree& tree, Doc* out, std::string* error) {
     }
     if (root->kind != NodeKind::Document) {
         *error = std::string("模型的根是") + nodeKindName(root->kind) + "，不是文档";
-        return false;
-    }
-    // 多节要连节的记录（纸张、页边距、分节分页）一起搬，本切片的载荷里还没有它。
-    // 只搬第一节会得到一份"后面几节凭空消失"的修订，而它看起来是完整的。
-    if (tree.sectionCount() > 1) {
-        *error = "多节文档尚未进修订载荷（投影只认第一节）";
         return false;
     }
 

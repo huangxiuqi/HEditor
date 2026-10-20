@@ -134,6 +134,47 @@ void hashCellSpec(Hasher& h, const CellSpec& c) {
 }
 
 /**
+ * 节记录的哈希：页面设置里每一样都会改排版（纸张、页边距、分节分页、页码重编、书写方向），
+ * 所以全部进内容哈希。
+ *
+ * 页眉页脚的 root 是身份（指向本节的子树），不进哈希 —— 那棵子树本身是节的子节点，
+ * 它的内容已经在节哈希里了。distance 与 linked 是记录本身，进。
+ */
+void hashSectionSpec(Hasher& h, const SectionSpec& sec) {
+    h.u8(static_cast<uint8_t>(sec.paper.name));
+    h.u8(static_cast<uint8_t>(sec.paper.orient));
+    hashLength(h, sec.paper.width);
+    hashLength(h, sec.paper.height);
+    hashLength(h, sec.margins.top);
+    hashLength(h, sec.margins.bottom);
+    hashLength(h, sec.margins.left);
+    hashLength(h, sec.margins.right);
+    hashLength(h, sec.gutter.size);
+    h.u8(static_cast<uint8_t>(sec.gutter.side));
+    h.u8(sec.mirror_margins ? 1 : 0);
+    h.u8(static_cast<uint8_t>(sec.break_kind));
+    h.u8(static_cast<uint8_t>(sec.valign));
+    h.u8(static_cast<uint8_t>(sec.writing_mode.inline_axis));
+    h.u8(static_cast<uint8_t>(sec.writing_mode.block_flow));
+    h.u8(static_cast<uint8_t>(sec.writing_mode.orientation));
+    h.u8(static_cast<uint8_t>(sec.numbering.format));
+    h.i64(sec.numbering.start);
+    h.u8(sec.numbering.restart ? 1 : 0);
+    for (int v = 0; v < kHeaderFooterVariantCount; ++v) {
+        hashLength(h, sec.headers[v].distance);
+        h.u8(sec.headers[v].linked_to_previous ? 1 : 0);
+        hashLength(h, sec.footers[v].distance);
+        h.u8(sec.footers[v].linked_to_previous ? 1 : 0);
+    }
+    // 属性袋按序遍历：std::map 本身有序，所以两个相等的袋子哈希相同。
+    h.u64(sec.extra.size());
+    for (const auto& kv : sec.extra) {
+        h.str(kv.first);
+        h.str(kv.second);
+    }
+}
+
+/**
  * 图片、公式与域记录的哈希。
  *
  * 域的 cache 不在里面：它是求值结果，不是作者内容。把它算进内容哈希，会让"同一份文档求值
@@ -254,7 +295,8 @@ int flowLen(const Ref& n) {
  * 与表外的段落是两段，中间没有"同一段"这回事。
  */
 bool isBlockContainer(NodeKind kind) {
-    return kind == NodeKind::Table || kind == NodeKind::TableRow || kind == NodeKind::TableCell;
+    return kind == NodeKind::Table || kind == NodeKind::TableRow || kind == NodeKind::TableCell ||
+           kind == NodeKind::Section;
 }
 
 /**
@@ -388,7 +430,8 @@ bool markOf(const std::vector<Ref>& kids, int para, std::vector<int>* path, int*
  * 越界不该发生，但这一层读的是别人的指针，宁可返回空也不越界读。
  */
 const std::vector<Ref>* kidsAt(const Doc& doc, const std::vector<int>& path) {
-    const std::vector<Ref>* layer = bodyOf(doc);
+    if (!doc.root) return nullptr;
+    const std::vector<Ref>* layer = &doc.root->children;
     if (layer == nullptr) return nullptr;
     for (int idx : path) {
         if (idx < 0 || idx >= static_cast<int>(layer->size())) return nullptr;
@@ -422,17 +465,10 @@ Ref applyAtPath(const Ref& node, const std::vector<int>& path, size_t k,
  * 编辑本身不关心自己在第几层。
  */
 Ref withLeafChildren(const Doc& doc, const std::vector<int>& path, std::vector<Ref> kids) {
-    const Ref& section = doc.root->children.front();
-    if (path.empty()) {
-        Ref updated = withChildren(section, std::move(kids));
-        return withChildren(doc.root, {std::move(updated)});
-    }
-    // 路径的每一格都是"那一层孩子表里的下标"，起点是正文那一节而不是根：根下面只有一节，
-    // 把根也算进路径会让 path 与 locate 的口径差一层。
+    // 路径的每一格都是"那一层孩子表里的下标"，起点是根：第一格是节，往后才是节里的内容。
     // 捕获的是引用：路径是一条链，fn 只会被调用一次，挪走孩子表之后不再读它。
-    Ref updated = applyAtPath(section, path, 0,
-                              [&kids](const Ref& n) { return withChildren(n, std::move(kids)); });
-    return withChildren(doc.root, {std::move(updated)});
+    return applyAtPath(doc.root, path, 0,
+                       [&kids](const Ref& n) { return withChildren(n, std::move(kids)); });
 }
 
 Ref runNode(NodeId id, std::vector<uint32_t> text, const CharFormat& marks,
@@ -512,10 +548,13 @@ void hashSelf(Hasher& h, const Node& n) {
             } else if constexpr (std::is_same_v<T, FormulaSpec>) {
                 h.u64(8);
                 hashFormulaSpec(h, p);
-            } else {
-                static_assert(std::is_same_v<T, FieldSpec>, "新增载荷要在这里加一支");
+            } else if constexpr (std::is_same_v<T, FieldSpec>) {
                 h.u64(9);
                 hashFieldSpec(h, p);
+            } else {
+                static_assert(std::is_same_v<T, SectionSpec>, "新增载荷要在这里加一支");
+                h.u64(10);
+                hashSectionSpec(h, p);
             }
         },
         n.payload);
@@ -556,12 +595,11 @@ const std::vector<Ref>* bodyOf(const Doc& doc) {
 }
 
 const Node* findNode(const Doc& doc, NodeId id) {
-    const std::vector<Ref>* body = bodyOf(doc);
-    if (!body) return nullptr;
+    if (!doc.root) return nullptr;
     const Node* found = nullptr;
     // 显式栈：深层嵌套的文档不该把递归深度交给调用栈。
     std::vector<const Node*> stack;
-    for (const Ref& c : *body) stack.push_back(c.get());
+    for (const Ref& c : doc.root->children) stack.push_back(c.get());
     while (!stack.empty() && found == nullptr) {
         const Node* n = stack.back();
         stack.pop_back();
@@ -586,7 +624,7 @@ Doc makeTextDoc(const std::vector<std::u32string>& paragraphs) {
         }
         kids.push_back(makeNode(next++, NodeKind::ParagraphMark, MarkPayload{}, {}));
     }
-    Ref section = makeNode(next++, NodeKind::Section, {}, std::move(kids));
+    Ref section = makeNode(next++, NodeKind::Section, SectionSpec{}, std::move(kids));
     Ref root = makeNode(next++, NodeKind::Document, {}, {std::move(section)});
     return adopt(std::move(root), next);
 }
@@ -595,10 +633,9 @@ int paraCount(const Doc& doc) { return doc.root ? doc.root->paras : 0; }
 
 std::vector<std::u32string> paraTexts(const Doc& doc) {
     std::vector<std::u32string> out;
-    const std::vector<Ref>* body = bodyOf(doc);
-    if (!body) return out;
+    if (!doc.root) return out;
     std::u32string cur;
-    for (const Ref& c : *body) collectParas(c, &cur, &out);
+    for (const Ref& c : doc.root->children) collectParas(c, &cur, &out);
     // 末尾没有结束标记的那一段：有内容就落一段。
     if (!cur.empty()) out.push_back(std::move(cur));
     return out;
@@ -610,11 +647,12 @@ EditResult insertText(const Doc& doc, int para, int cp, const std::u32string& te
     if (cp < 0) return fail("码点偏移为负");
     if (text.empty()) return EditResult{true, doc, {}};
 
-    const std::vector<Ref>* body = bodyOf(doc);
-    if (!body) return fail("文档没有正文");
+    if (!doc.root || doc.root->children.empty()) return fail("文档没有正文");
     std::vector<int> path;
     Site site;
-    if (!locate(*body, para, cp, &path, &site)) return fail("码点偏移越界");
+    // 起点是根的孩子表（各节都在里面）：节是块级容器，段落号在节之间连续，
+    //   于是"第几段"与"第几节"是两件事，定位只认前者。
+    if (!locate(doc.root->children, para, cp, &path, &site)) return fail("码点偏移越界");
     const std::vector<Ref>* layer = kidsAt(doc, path);
     if (layer == nullptr) return fail("落点路径失效");
     std::vector<Ref> kids = *layer;
@@ -644,11 +682,12 @@ EditResult eraseText(const Doc& doc, int para, int cp, int count) {
     if (cp < 0 || count < 0) return fail("偏移或长度为负");
     if (count == 0) return EditResult{true, doc, {}};
 
-    const std::vector<Ref>* body = bodyOf(doc);
-    if (!body) return fail("文档没有正文");
+    if (!doc.root || doc.root->children.empty()) return fail("文档没有正文");
     std::vector<int> path;
     Site site;
-    if (!locate(*body, para, cp, &path, &site)) return fail("码点偏移越界");
+    // 起点是根的孩子表（各节都在里面）：节是块级容器，段落号在节之间连续，
+    //   于是"第几段"与"第几节"是两件事，定位只认前者。
+    if (!locate(doc.root->children, para, cp, &path, &site)) return fail("码点偏移越界");
     const std::vector<Ref>* layer = kidsAt(doc, path);
     if (layer == nullptr) return fail("落点路径失效");
     std::vector<Ref> kids = *layer;
@@ -688,11 +727,12 @@ EditResult splitPara(const Doc& doc, int para, int cp) {
     if (para < 0 || para >= paraCount(doc)) return fail("段落越界");
     if (cp < 0) return fail("码点偏移为负");
 
-    const std::vector<Ref>* body = bodyOf(doc);
-    if (!body) return fail("文档没有正文");
+    if (!doc.root || doc.root->children.empty()) return fail("文档没有正文");
     std::vector<int> path;
     Site site;
-    if (!locate(*body, para, cp, &path, &site)) return fail("码点偏移越界");
+    // 起点是根的孩子表（各节都在里面）：节是块级容器，段落号在节之间连续，
+    //   于是"第几段"与"第几节"是两件事，定位只认前者。
+    if (!locate(doc.root->children, para, cp, &path, &site)) return fail("码点偏移越界");
     const std::vector<Ref>* layer = kidsAt(doc, path);
     if (layer == nullptr) return fail("落点路径失效");
     std::vector<Ref> kids = *layer;
@@ -723,11 +763,10 @@ EditResult mergePara(const Doc& doc, int para) {
     if (!doc.root) return fail("空文档");
     if (para < 0 || para + 1 >= paraCount(doc)) return fail("没有下一段可合并");
 
-    const std::vector<Ref>* body = bodyOf(doc);
-    if (!body) return fail("文档没有正文");
+    if (!doc.root || doc.root->children.empty()) return fail("文档没有正文");
     std::vector<int> path;
     int at = -1;
-    if (!markOf(*body, para, &path, &at)) return fail("段落标记丢失");
+    if (!markOf(doc.root->children, para, &path, &at)) return fail("段落标记丢失");
     const std::vector<Ref>* layer = kidsAt(doc, path);
     if (layer == nullptr) return fail("落点路径失效");
     std::vector<Ref> kids = *layer;
@@ -743,11 +782,12 @@ EditResult insertControl(const Doc& doc, int para, int cp, const ControlSpec& sp
     if (para < 0 || para >= paraCount(doc)) return fail("段落越界");
     if (cp < 0) return fail("码点偏移为负");
 
-    const std::vector<Ref>* body = bodyOf(doc);
-    if (!body) return fail("文档没有正文");
+    if (!doc.root || doc.root->children.empty()) return fail("文档没有正文");
     std::vector<int> path;
     Site site;
-    if (!locate(*body, para, cp, &path, &site)) return fail("码点偏移越界");
+    // 起点是根的孩子表（各节都在里面）：节是块级容器，段落号在节之间连续，
+    //   于是"第几段"与"第几节"是两件事，定位只认前者。
+    if (!locate(doc.root->children, para, cp, &path, &site)) return fail("码点偏移越界");
     const std::vector<Ref>* layer = kidsAt(doc, path);
     if (layer == nullptr) return fail("落点路径失效");
     std::vector<Ref> kids = *layer;

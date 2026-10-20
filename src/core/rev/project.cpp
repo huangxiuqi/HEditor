@@ -25,9 +25,10 @@ public:
         : sheet_(sheet), vp_(vp), full_(full) {}
 
     Projection run(const Doc& doc) {
-        const std::vector<Ref>* body = bodyOf(doc);
-        if (body != nullptr) {
-            for (const Ref& c : *body) walk(c);
+        // 从根的孩子表走：每一节都在里面。段落号在节之间连续，投影按流顺序攒块，
+        //   所以"跳过第二节"不会报错，只会少几块 —— 只走第一节是静默丢内容。
+        if (doc.root != nullptr) {
+            for (const Ref& c : doc.root->children) walk(c);
             // 结尾还没有结束标记的那一段：累积过文本、或只攒下过控件边界的，都要落成一段，
             // 用默认段落格式。少了后半个条件，"控件从文档开头就开、内容为空"那种文书会连
             // 一段都产不出来，控件边界于是凭空消失。
@@ -297,6 +298,15 @@ private:
             atoms_.emplace_back(objects_.size() - 1, g);
             return;
         }
+        if (n->kind == NodeKind::Section) {
+            // 第一节前面没有节，它的分页行为无意义；从第二节起，非连续节把下一个段落标上
+            //   段前分页。标记只落地一次（见 flush）。
+            if (sections_seen_ > 0) {
+                const SectionSpec& sec = std::get<SectionSpec>(n->payload);
+                if (sec.break_kind != SectionBreak::Continuous) pending_section_break_ = true;
+            }
+            ++sections_seen_;
+        }
         if (n->kind == NodeKind::Table) {
             walkTable(n);
             return;
@@ -324,6 +334,12 @@ private:
                                     owner, spec.readonly},
                        n);
             out_.controls.push_back(std::move(span));
+            return;
+        }
+        // 结构外壳：文档、节、页眉页脚只提供层级，边界不进内容，下去即可（与编译同一口径）。
+        if (n->kind == NodeKind::Section || n->kind == NodeKind::Document ||
+            n->kind == NodeKind::HeaderFooter) {
+            for (const Ref& c : n->children) walk(c);
             return;
         }
         // 其余元素一律写成诊断：静默放过比"还没做"更危险（调用方会以为拿到了完整结果）。
@@ -423,6 +439,12 @@ private:
                 }
             }
         }
+        // 分节强制分页：标记只在下一个段落上落地一次，与段落自己的段前分页是或的关系。
+        //   必须放在段落格式落地之后 —— 那一步会按段落覆盖面把这一位重置成作者的取值。
+        if (pending_section_break_) {
+            pb.spec.page_break_before = true;
+            pending_section_break_ = false;
+        }
 
         objects_.clear();
         atoms_.clear();
@@ -439,6 +461,8 @@ private:
      * 当前段里待定几何的原子：对象下标 + 它需要的输入。落段时才定得下来（要块级字号）。
      */
     std::vector<std::pair<std::size_t, AtomGeometry>> atoms_;
+    int sections_seen_ = 0;                                  // 走过几节（第一节的分页行为无意义）
+    bool pending_section_break_ = false;                     // 分节强制分页还没落到段上
     std::vector<CellSlot> path_;                             // 当前所在的格（空 = 正文）
     std::vector<std::pair<uint64_t, uint64_t>> containers_;  // 外层容器的自身哈希
     NodeId cur_first_ = kInvalidNodeId;

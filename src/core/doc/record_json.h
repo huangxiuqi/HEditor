@@ -26,6 +26,7 @@
 #include "core/doc/formula_spec.h"
 #include "core/doc/image_spec.h"
 #include "core/doc/para_format.h"
+#include "core/doc/section_spec.h"
 #include "core/doc/table_spec.h"
 
 namespace heditor::recjson {
@@ -132,6 +133,17 @@ bool readEnum(const ordered_json& j, const char* key, bool (*from)(const std::st
     if (!j[key].is_string()) return false;
     return from(j[key].get<std::string>(), out);
 }
+
+/**
+ * 节记录（纸张、页边距、分页行为、页码、页眉页脚引用）。
+ *
+ * 模型层与修订层都要存它：节是唯一会让页度量在文档中途变化的机制，只搬结构不搬记录
+ * 会让"多节文档"变成"几节共用第一节的页面设置"。
+ */
+ordered_json sectionJson(const SectionSpec& sec);
+bool readSection(const ordered_json& j, const char* key, SectionSpec* out);
+ordered_json headerFooterJson(const HeaderFooter& hf);
+bool readHeaderFooter(const ordered_json& arr, int variant, HeaderFooter* out);
 
 bool readPara(const ordered_json& j, const char* key, ParaFormatPatch* out);
 bool readMarks(const ordered_json& j, const char* key, CharFormat* out);

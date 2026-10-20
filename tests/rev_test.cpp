@@ -381,7 +381,7 @@ rev::Doc makeTableDoc(const Length& col0, const Length& row0_height) {
     const rev::Ref row1 = rev::makeNode(id++, NodeKind::TableRow, RowSpec{},
                                         {cell(U"A1", CellSpec{}), cell(U"B1", CellSpec{})});
     const rev::Ref table = rev::makeNode(id++, NodeKind::Table, ts, {row0, row1});
-    const rev::Ref section = rev::makeNode(2, NodeKind::Section, {},
+    const rev::Ref section = rev::makeNode(2, NodeKind::Section, SectionSpec{},
                                            {run(U"表前"), mark(), table, run(U"表后"), mark()});
     return rev::adopt(rev::makeNode(1, NodeKind::Document, {}, {section}), id);
 }
@@ -1178,7 +1178,8 @@ int main() {
         const Doc doc = rev::setHidden(placed.doc, control, true).doc;
 
         const auto ser = rev::serialize(doc);
-        expectTrue(ser.ok && !ser.text.empty(), "序列化成功且非空");
+        expectTrue(ser.ok && !ser.text.empty(),
+                   ser.ok ? std::string("序列化成功且非空") : ("序列化失败：" + ser.error));
         Doc back;
         const auto de = rev::deserialize(ser.text, &back);
         expectTrue(de.ok, de.ok ? std::string("反序列化成功") : ("反序列化失败：" + de.error));
@@ -1216,7 +1217,7 @@ int main() {
         mark.para.fallback_font_indices = {2, 5};
         mark.style = "正文";
         const rev::Ref rich_section =
-            rev::makeNode(2, NodeKind::Section, {},
+            rev::makeNode(2, NodeKind::Section, SectionSpec{},
                           {rev::makeNode(10, NodeKind::TextRun, run, {}),
                            rev::makeNode(11, NodeKind::ParagraphMark, mark, {})});
         const Doc rich = rev::adopt(rev::makeNode(1, NodeKind::Document, {}, {rich_section}), 12);
@@ -1300,7 +1301,7 @@ int main() {
         // 反向：写端也不交出一份读不回来的文件。号重复的树只能在 makeNode 这一层造出来。
         const rev::Ref dup = rev::makeNode(
             1, NodeKind::Document, {},
-            {rev::makeNode(2, NodeKind::Section, {},
+            {rev::makeNode(2, NodeKind::Section, SectionSpec{},
                            {rev::makeNode(3, NodeKind::TextRun,
                                           rev::RunPayload{cpsOf(U"a"), CharFormat{}, {}}, {}),
                             rev::makeNode(3, NodeKind::TextRun,
@@ -1529,15 +1530,20 @@ int main() {
         expectTrue(compared == 6 && mismatched == 0,
                    "六条原子记录逐字段读回来（图片 4 / 公式 1 / 域 1，含缓存值）");
 
-        // 多节：表示不了就要拒绝，不做"只搬第一节"。
+        // 多节：两节的内容都要在，不是"只搬第一节"。
         NodeTree multi;
         const NodeId s0 = multi.firstSectionId();
-        multi.appendChild(multi.rootId(), NodeKind::Section);
+        const NodeId s1 = multi.appendChild(multi.rootId(), NodeKind::Section);
         multi.setText(multi.appendChild(s0, NodeKind::TextRun), cpsOf(U"a"));
-        Doc rejected;
+        multi.appendChild(s0, NodeKind::ParagraphMark);
+        multi.setText(multi.appendChild(s1, NodeKind::TextRun), cpsOf(U"b"));
+        multi.appendChild(s1, NodeKind::ParagraphMark);
+        Doc two;
         std::string why2;
-        expectTrue(!rev::fromTree(multi, &rejected, &why2) && !why2.empty(),
-                   "多节文档：导出被拒绝并说明原因");
+        expectTrue(rev::fromTree(multi, &two, &why2), "多节文档：导出成功");
+        expectTrue(rev::paraCount(two) == 2 &&
+                       (rev::paraTexts(two) == std::vector<std::u32string>{U"a", U"b"}),
+                   "两节的段落都在（不是只搬第一节）");
     }
 
     std::printf("\n[16] 嵌套表格：格路径是序列，容器几何各管各的一段\n");
@@ -1863,6 +1869,91 @@ int main() {
         one.text = U"x";
         expectTrue(none.apply(one).ok && !none.canUndo(), "上限 0：编辑成功但没有历史");
         expectTrue(!none.undo(), "上限 0：撤销返回 false");
+    }
+
+    std::printf("\n[19] 多节：分节分页、跨节编辑、页面设置往返\n");
+    {
+        const StyleSheet sheet;
+        // 两节：第一节一段，第二节从新页开始。
+        auto buildTree = [](SectionBreak kind, const Length& left_margin) {
+            NodeTree t;
+            const NodeId s0 = t.firstSectionId();
+            t.setText(t.appendChild(s0, NodeKind::TextRun), cpsOf(U"第一节"));
+            t.appendChild(s0, NodeKind::ParagraphMark);
+            const NodeId s1 = t.appendChild(t.rootId(), NodeKind::Section);
+            t.find(s1)->section.break_kind = kind;
+            if (left_margin != Length{}) t.find(s1)->section.margins.left = left_margin;
+            t.setText(t.appendChild(s1, NodeKind::TextRun), cpsOf(U"第二节"));
+            t.appendChild(s1, NodeKind::ParagraphMark);
+            return t;
+        };
+
+        NodeTree tree = buildTree(SectionBreak::NextPage, Length{});
+        Doc doc;
+        std::string why;
+        expectTrue(rev::fromTree(tree, &doc, &why), "两节文档导出成修订");
+        expectTrue(rev::paraCount(doc) == 2, "两段（每节一段）");
+
+        const rev::Projection pr = rev::project(doc, sheet);
+        const CompileResult cr = compileDocument(tree, FlowVisibility::Design, sheet);
+        expectTrue(pr.ok() && cr.ok(), "两条路都没有诊断");
+        expectTrue(pr.blocks.size() == 2 && cr.blocks.size() == 2,
+                   "两块（投影 " + std::to_string(pr.blocks.size()) + " / 编译 " +
+                       std::to_string(cr.blocks.size()) + "）");
+        bool same = pr.blocks.size() == cr.blocks.size();
+        for (size_t i = 0; same && i < cr.blocks.size(); ++i) {
+            same = sameBlock(pr.blocks[i].spec, cr.blocks[i]);
+        }
+        expectTrue(same, "每一块与编译产物逐字段相同");
+        expectTrue(pr.blocks.size() == 2 && !pr.blocks[0].spec.page_break_before &&
+                       pr.blocks[1].spec.page_break_before,
+                   "分节分页落在第二节的第一段上（不是每一段）");
+
+        // 连续分节：不该有段前分页。这一条证明上面那一位确实来自节的记录。
+        NodeTree cont_tree = buildTree(SectionBreak::Continuous, Length{});
+        Doc cont_doc;
+        expectTrue(rev::fromTree(cont_tree, &cont_doc, &why), "连续分节版本导出");
+        const rev::Projection cont_pr = rev::project(cont_doc, sheet);
+        const CompileResult cont_cr = compileDocument(cont_tree, FlowVisibility::Design, sheet);
+        bool cont_same = cont_pr.blocks.size() == cont_cr.blocks.size();
+        for (size_t i = 0; cont_same && i < cont_cr.blocks.size(); ++i) {
+            cont_same = sameBlock(cont_pr.blocks[i].spec, cont_cr.blocks[i]);
+        }
+        expectTrue(
+            cont_same && cont_pr.blocks.size() == 2 && !cont_pr.blocks[1].spec.page_break_before,
+            "连续分节：没有段前分页，两条路仍相同");
+
+        // 跨节编辑：段号在节之间连续，第 1 段落在第二节里。
+        const auto typed = rev::insertText(doc, 1, 0, U"X");
+        expectTrue(typed.ok && (rev::paraTexts(typed.doc) ==
+                                std::vector<std::u32string>{U"第一节", U"X第二节"}),
+                   "第 1 段落在第二节里（跨节编辑按段号走）");
+        expectTrue(rev::damage(doc, typed.doc).range.lo == 1, "损伤定位落在第二块");
+
+        // 页面设置：进内容哈希（改页边距就是改这份文档），但投影不消费它 —— 块哈希不变。
+        NodeTree moved = buildTree(SectionBreak::NextPage, Length::abs(ptToEmu(3.0)));
+        Doc moved_doc;
+        expectTrue(rev::fromTree(moved, &moved_doc, &why), "改页边距之后导出");
+        expectTrue(moved_doc.lo != doc.lo || moved_doc.hi != doc.hi,
+                   "改页边距改了全文哈希（页面设置是内容）");
+        expectTrue(rev::blockHashes(moved_doc, FlowVisibility::Design) ==
+                       rev::blockHashes(doc, FlowVisibility::Design),
+                   "块哈希一位不动（页边距不改变块的内容，排版由页度量参数决定）");
+
+        // 落盘：节记录逐字段读回来。
+        const auto ser = rev::serialize(moved_doc);
+        Doc back;
+        const auto de = ser.ok ? rev::deserialize(ser.text, &back) : rev::DeserializeResult{};
+        expectTrue(ser.ok && de.ok && back.lo == moved_doc.lo && back.hi == moved_doc.hi,
+                   "两节文档往返之后全文哈希相同");
+        const auto sec_of = [](const Doc& d, size_t i) -> const rev::Node* {
+            return (d.root && d.root->children.size() > i) ? d.root->children[i].get() : nullptr;
+        };
+        const rev::Node* a = sec_of(moved_doc, 1);
+        const rev::Node* b = sec_of(back, 1);
+        expectTrue(a != nullptr && b != nullptr && a->kind == NodeKind::Section &&
+                       std::get<SectionSpec>(b->payload).sameAs(std::get<SectionSpec>(a->payload)),
+                   "第二节的页面设置逐字段读回来（分页行为、页边距）");
     }
 
     std::printf("\n结果：%d 项断言，%d 项失败\n", g_checks, g_failures);
