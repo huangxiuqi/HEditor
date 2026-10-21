@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "core/engine/engine.h"
+#include "core/engine/payload_schema.h"
 #include "core/utils/utf8.h"
 #include "demo/demo_documents.h"
 
@@ -410,7 +411,7 @@ std::string caretStyleJson() {
     o << "{\"color\":[" << static_cast<int>(c.caret_color.r) << ","
       << static_cast<int>(c.caret_color.g) << "," << static_cast<int>(c.caret_color.b) << ","
       << static_cast<int>(c.caret_color.a) << "],\"widthPt\":" << c.caret_width_pt << "}";
-    return o.str();
+    return pk::checked(pk::caret_style::kSpec, o.str());
 }
 
 /**
@@ -421,7 +422,7 @@ std::string selectionStyleJson() {
     std::ostringstream o;
     o << "{\"color\":[" << static_cast<int>(s.r) << "," << static_cast<int>(s.g) << ","
       << static_cast<int>(s.b) << "," << static_cast<int>(s.a) << "]}";
-    return o.str();
+    return pk::checked(pk::selection_style::kSpec, o.str());
 }
 
 /**
@@ -578,7 +579,7 @@ std::string statsJson() {
     o << "\"glyphCacheLimit\":" << s.glyph_cache_limit << ",";
     o << "\"zoom\":" << s.zoom;
     o << "}";
-    return o.str();
+    return pk::checked(pk::stats::kSpec, o.str());
 }
 
 /**
@@ -618,7 +619,7 @@ std::string benchRelayoutPaint(int runs) {
     o << "\"paintMs\":" << paint / n << ",";
     o << "\"totalMs\":" << total / n;
     o << "}";
-    return o.str();
+    return pk::checked(pk::bench_relayout_paint::kSpec, o.str());
 }
 
 std::string shapeReport(int font_index, float size_pt, const std::string& text, int wm_code,
@@ -637,6 +638,14 @@ std::string shapeReport(int font_index, float size_pt, const std::string& text, 
  * 让宿主"改一次、问一次"就是两次跨界，而这两次之间有依赖。
  */
 bool typeText(const std::string& utf8) { return g_engine.typeTextAndRender(utf8); }
+
+/**
+ * 在指定位置插入一段文本（模板填充）。与 typeText 一样自带重排与重绘，
+ *   所以命令表里它的呈现归属是 'self'。
+ */
+bool insertTextAt(int para, int offset, const std::string& utf8) {
+    return g_engine.insertTextAndRender(para, static_cast<size_t>(offset), utf8);
+}
 bool backspaceText() { return g_engine.backspaceAndRender(); }
 bool deleteForwardText() { return g_engine.deleteForwardAndRender(); }
 /**
@@ -752,7 +761,7 @@ std::string selectionReport() {
           << ",\"h\":" << rects[i].r_pt.h << "}";
     }
     o << "]}";
-    return o.str();
+    return pk::checked(pk::selection_report::kSpec, o.str());
 }
 
 /**
@@ -771,7 +780,8 @@ std::string hitTest(float x_pt, float y_pt) {
     int side = 0;
     int line_aff = 0;
     int cell_para = -1;
-    if (!g_engine.hitTestPt(x_pt, y_pt, &p, &owner, &side, &line_aff, &cell_para)) return "null";
+    if (!g_engine.hitTestPt(x_pt, y_pt, &p, &owner, &side, &line_aff, &cell_para))
+        return pk::checked(pk::hit_test::kSpec, "null");
     std::ostringstream o;
     o << "{\"para\":" << p.para << ",\"offset\":" << p.offset << ",\"field\":" << owner
       << ",\"side\":" << side << ",\"line\":" << line_aff;
@@ -792,7 +802,7 @@ std::string hitTest(float x_pt, float y_pt) {
         }
     }
     o << "}";
-    return o.str();
+    return pk::checked(pk::hit_test::kSpec, o.str());
 }
 
 /**
@@ -1043,7 +1053,7 @@ std::string controlsJson() {
         o << "]}";
     }
     o << "]}";
-    return o.str();
+    return pk::checked(pk::controls::kSpec, o.str());
 }
 
 /**
@@ -1087,7 +1097,7 @@ std::string linesJson(int from_para, int to_para) {
           << ",\"cl\":" << pg.cluster << ",\"x\":" << pg.x_pt << ",\"y\":" << pg.y_pt << "}";
     }
     o << "]}";
-    return o.str();
+    return pk::checked(pk::lines::kSpec, o.str());
 }
 
 /**
@@ -1126,7 +1136,7 @@ std::string bracketSlotsJson() {
         }
     }
     o << "]}";
-    return o.str();
+    return pk::checked(pk::bracket_slots::kSpec, o.str());
 }
 
 /**
@@ -1381,7 +1391,7 @@ std::string editStatsJson() {
     o << "\"caretControl\":" << e.caret_control << ",";
     o << "\"blockedEdits\":" << e.blocked_edits;
     o << "}";
-    return o.str();
+    return pk::checked(pk::edit_stats::kSpec, o.str());
 }
 
 /**
@@ -1442,6 +1452,7 @@ EMSCRIPTEN_BINDINGS(heditor) {
 
     // 档 1：编辑与光标
     emscripten::function("typeText", &typeText);
+    emscripten::function("insertTextAt", &insertTextAt);
     emscripten::function("backspace", &backspaceText);
     emscripten::function("deleteForward", &deleteForwardText);
     emscripten::function("splitParagraph", &splitParagraph);

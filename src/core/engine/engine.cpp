@@ -933,6 +933,13 @@ bool EditorEngine::insertTextUtf8(int para, size_t offset, const std::string& ut
     return edit_.insertTextUtf8(para, offset, utf8);
 }
 
+bool EditorEngine::insertTextAndRender(int para, size_t offset, const std::string& utf8) {
+    if (!insertTextUtf8(para, offset, utf8)) return false;
+    relayout();
+    repaintAfterEdit();
+    return true;
+}
+
 bool EditorEngine::typeTextUtf8(const std::string& utf8) { return edit_.typeTextUtf8(utf8); }
 
 bool EditorEngine::backspace() { return edit_.backspace(); }

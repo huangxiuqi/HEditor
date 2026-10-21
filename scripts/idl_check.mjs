@@ -27,7 +27,6 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
 
-/* ── 源文本工具 ── */
 
 /**
  * 去掉注释，但保留换行（行号要对得上）。
@@ -69,7 +68,9 @@ function stripComments(src) {
 
 const lineOf = (text, index) => text.slice(0, index).split('\n').length;
 
-/** 抓某个名字在源码里的每次出现（去注释后），回 [{line, text}]。 */
+/**
+ * 抓某个名字在源码里的每次出现（去注释后），回 [{line, text}]。
+ */
 function occurrences(code, re) {
   const hits = [];
   let m;
@@ -78,7 +79,6 @@ function occurrences(code, re) {
   return hits;
 }
 
-/* ── 读协议表（执行引擎侧那一份，不复制） ── */
 
 const apiSrc = read('web/engine_api.js');
 globalThis.self = globalThis;
@@ -91,7 +91,6 @@ const apiCode = stripComments(apiSrc);
 const problems = [];
 const note = (where, msg) => problems.push({ where, msg });
 
-/* ── 一、协议表自己成立 ── */
 
 const KIND = new Set(['w', 'r', 's', 'q']);
 const RENDER = new Set(['self', 'host', 'none']);
@@ -110,7 +109,6 @@ for (const [name, kind, calls, render] of IDL.commands) {
   if (kind !== 'w' && render === 'host') note('协议表', `${name}：只有写命令才会要求宿主补呈现`);
 }
 
-/* ── 二、导出全覆盖 ── */
 
 const cpp = read('src/wasm/wasm_main.cpp');
 const exports = new Set([...cpp.matchAll(/emscripten::function\("([A-Za-z0-9_]+)"/g)].map((m) => m[1]));
@@ -134,7 +132,6 @@ for (const [n, info] of outside) {
 const orphans = [...exports].filter((e) => !calledBy.has(e) && !outside.has(e));
 for (const e of orphans) note('src/wasm/wasm_main.cpp', `导出 ${e} 没有任何登记：加一条命令，或写进 OUTSIDE 并说明原因`);
 
-/* ── 三、实现表与协议表一致 ── */
 
 for (const [table, kind] of [['WRITE', 'w'], ['READ', 'r'], ['SILENT', 's']]) {
   const m = apiCode.match(new RegExp('const ' + table + " = collect\\('" + kind + "', \\{([\\s\\S]*?)\\n\\}\\);"));
@@ -150,7 +147,6 @@ if (!/const PRESENT_ALWAYS = IDL\.presentAlways\(\);/.test(apiCode)) {
   note('web/engine_api.js', 'PRESENT_ALWAYS 不再是派生的了 —— 不要把手抄名单加回来');
 }
 
-/* ── 四、engine_api 里的 mod.X 不越界 ── */
 
 const MODULE_PROPS = new Set(['FS', 'HEAPU8', 'HEAPF32', 'HEAP32']);  // 模块属性，不是导出
 const known = new Set([...calledBy.keys(), ...outside.keys(), ...MODULE_PROPS]);
@@ -163,7 +159,6 @@ for (const hit of occurrences(apiCode, /\bmod\.([A-Za-z_][A-Za-z0-9_]*)/)) {
   }
 }
 
-/* ── 五、调用点不越界 ── */
 
 const kindOf = new Map(IDL.commands.map((c) => [c[0], c[1]]));
 function checkCalls(file, re, wantKinds, label) {
@@ -180,7 +175,6 @@ checkCalls('web/app.js', /api\.write\('([A-Za-z0-9_]+)'/, ['w', 's'], '写命令
 checkCalls('web/app.js', /api\.read\('([A-Za-z0-9_]+)'/, ['r', 'q'], '读命令');
 checkCalls('web/host_core.js', /env\.write\('([A-Za-z0-9_]+)'/, ['w', 's'], '写命令');
 
-/* ── 六、两条边界纪律 ── */
 
 for (const file of ['web/app.js', 'web/engine_worker.js']) {
   for (const hit of occurrences(stripComments(read(file)), /\bmod\./)) {
@@ -223,7 +217,6 @@ for (const key of shellHits.keys()) {
   }
 }
 
-/* ── 报告 ── */
 
 const byKindCount = (k) => IDL.byKind(k).length;
 const present = IDL.presentAlways();

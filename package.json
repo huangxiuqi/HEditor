@@ -1,0 +1,17 @@
+{
+  "name": "heditor",
+  "version": "0.0.0",
+  "private": true,
+  "description": "HEditor —— 文档引擎（wasm）与外部 API 层",
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite",
+    "typecheck": "tsc --noEmit -p .",
+    "check": "python scripts/gen_payloads.py --check && python scripts/gen_public_members.py --check && node scripts/idl_check.mjs && node scripts/api_check.mjs && npm run typecheck"
+  },
+  "devDependencies": {
+    "typescript": "5.6",
+    "vite": "^5.4.21"
+  }
+}

@@ -204,6 +204,8 @@ add_library(heditor_core STATIC
   src/core/engine/engine_paint.cpp
   src/core/engine/engine_audit.cpp
   src/core/engine/engine_diag.cpp
+  # 载荷契约的运行时校验（键表见 payload_schema.gen.h，由 scripts/gen_payloads.py 生成）。
+  src/core/engine/payload_schema.cpp
 )
 target_include_directories(heditor_core PUBLIC ${HEDITOR_ROOT}/src)
 target_link_libraries(heditor_core PUBLIC heditor_harfbuzz)
@@ -301,6 +303,72 @@ target_link_libraries(heditor_core INTERFACE ${HEDITOR_SKIA_LIB})
 # ─────────────────────────────────────────────────────────────
 if(EMSCRIPTEN)
 
+  # ── tsc：wasm 层类型声明的唯一来源，硬依赖 ──
+  #
+  # 链接时带 --emit-tsd，emcc 会调 tsc 把 106 个导出（含 Embind）写成一份 .d.ts。
+  #   emcc 自己按这个顺序找：<emscripten>/node_modules/.bin/tsc，然后 PATH；都没有就
+  #   exit_with_error。我们按同一顺序先找一遍，只为把这件事从链接期挪到 configure 期 ——
+  #   链接期报错会留下一份**没优化完**的 heditor.wasm（实测 4.66 MB vs 4.02 MB），
+  #   文件在那儿、大小也像回事，最容易被人拿去做性能账。
+  #
+  # unset(... CACHE)：find_program 默认把结果存进缓存。删掉 tsc 之后再 configure 仍然绿，
+  #   直到链接才红 —— 那正是要避免的那条路。
+  unset(HEDITOR_TSC CACHE)
+  # 先按路径显式取：.bin 里同时有 tsc（POSIX shell 脚本）与 tsc.cmd，而 find_program
+  #   在 Windows 上会把 "tsc.cmd" 这名当成"基名 tsc + 已知扩展"，命中的可能是那个
+  #   **没有扩展名**的 shell 脚本（实测：藏掉 tsc.cmd 之后它仍然报找到了 tsc）。
+  #   所以不靠 find_program 猜，直接看文件在不在。
+  set(HEDITOR_TSC "")
+  # 用 CMAKE_HOST_WIN32 而不是 WIN32：后者描述的是**目标**系统，交叉编译到 Emscripten 时
+  #   它是假的（实测），于是会去取那个 POSIX shell 脚本 `tsc`，在 Windows 上跑不起来。
+  if(CMAKE_HOST_WIN32)
+    set(HEDITOR_TSC_CANDIDATES "${EMSCRIPTEN_ROOT_PATH}/node_modules/.bin/tsc.cmd")
+  else()
+    set(HEDITOR_TSC_CANDIDATES "${EMSCRIPTEN_ROOT_PATH}/node_modules/.bin/tsc")
+  endif()
+  foreach(cand IN LISTS HEDITOR_TSC_CANDIDATES)
+    if(EXISTS "${cand}")
+      set(HEDITOR_TSC "${cand}")
+    endif()
+  endforeach()
+  if(NOT HEDITOR_TSC)
+    # 回落：PATH 上的那份（与 emcc 的查找顺序一致）。
+    #   必须先 unset 这个普通变量：find_program 见到"已定义且非 NOTFOUND"就直接返回，
+    #   空串也算已定义 —— 不清掉的话这一步永远搜不到东西。
+    unset(HEDITOR_TSC)
+    find_program(HEDITOR_TSC NAMES tsc)
+    if(CMAKE_HOST_WIN32 AND HEDITOR_TSC AND NOT HEDITOR_TSC MATCHES "\\.(cmd|exe|bat)$")
+      # npm 的 .bin 里同时放着 tsc（POSIX shell 脚本）与 tsc.cmd。PATH 命中的若是前者，
+      #   Python 的 shutil.which 也会"找到"它，但 Windows 执行不了 —— 与其留到链接期
+      #   变成一句语焉不详的失败，不如在这里就当作没找到。
+      unset(HEDITOR_TSC)
+    endif()
+  endif()
+  if(NOT HEDITOR_TSC)
+    message(FATAL_ERROR
+      "wasm 构建需要 TypeScript 的 tsc（emcc --emit-tsd 用它生成 wasm 层声明），但没找到。\n"
+      "emcc 的查找顺序是 <emsdk>/upstream/emscripten/node_modules/.bin 与 PATH。\n"
+      "修法：跑 scripts/deps_tsc.ps1（内容见 scripts/README.md 的\"工具链\"一节）。")
+  endif()
+  # 版本从 typescript 的 package.json 读，不去执行 tsc：Windows 上 .cmd 要经 cmd.exe，
+  #   execute_process 直接调它拿不到输出（这也是上面必须点名 .cmd 的同一条根因）。
+  #   从 PATH 找到、旁边没有 package.json 的，版本记 unknown，只提示不拦。
+  get_filename_component(_tsc_bin_dir "${HEDITOR_TSC}" DIRECTORY)
+  get_filename_component(_tsc_mod_dir "${_tsc_bin_dir}" DIRECTORY)
+  set(HEDITOR_TSC_VERSION "unknown")
+  if(EXISTS "${_tsc_mod_dir}/typescript/package.json")
+    file(READ "${_tsc_mod_dir}/typescript/package.json" _tsc_pkg)
+    string(REGEX MATCH "\"version\"[ \t]*:[ \t]*\"([0-9]+\\.[0-9]+\\.[0-9]+)\"" _ "${_tsc_pkg}")
+    if(CMAKE_MATCH_1)
+      set(HEDITOR_TSC_VERSION "${CMAKE_MATCH_1}")
+    endif()
+  endif()
+  if(NOT HEDITOR_TSC_VERSION STREQUAL "unknown" AND HEDITOR_TSC_VERSION VERSION_LESS 5.0)
+    message(FATAL_ERROR "tsc 版本过低（${HEDITOR_TSC_VERSION}）："
+                        "--emitDeclarationOnly 在 5.0 之前行为不稳")
+  endif()
+  message(STATUS "wasm 声明文件由 tsc ${HEDITOR_TSC_VERSION} 生成（${HEDITOR_TSC}）")
+
   add_executable(heditor_wasm src/wasm/wasm_main.cpp)
   target_link_libraries(heditor_wasm PRIVATE heditor_core heditor_demo)
   target_compile_definitions(heditor_wasm PRIVATE HEDITOR_BUILD_STAMP="${HEDITOR_BUILD_STAMP}")
@@ -334,6 +402,10 @@ if(EMSCRIPTEN)
     #   默认的 -sFILESYSTEM=0 会让 fopen 直接失败，所以这里必须放开。
     -sFORCE_FILESYSTEM=1
     -sEXPORTED_RUNTIME_METHODS=HEAPU8,HEAPU32,FS
+    # wasm 层声明的产出点。★ 必须给**绝对路径**：emcc 里是
+    #   os.path.join(dirname(js_target), filename)，相对路径会落到 build/wasm/web/ 下，
+    #   而 src/ 与 tsc 要找的是源码树里的 web/types/。
+    --emit-tsd=${CMAKE_SOURCE_DIR}/web/types/wasm.gen.d.ts
   )
 
   # libskia 是本工程用 -msimd128 编的，而 wasm-ld 要求所有对象文件与库的

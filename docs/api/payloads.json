@@ -1,0 +1,814 @@
+{
+  "_note": "由 scripts/gen_payloads.py 从 C++ 写出代码抽出，勿手改。",
+  "_rule": "keys 的顺序 = 写出顺序；kind 只有 num/str/bool/arr/obj 五类，不区分 int 与小数位；optional 表示该键写在 if 里、可能不出现。",
+  "payloads": {
+    "caretStyle": {
+      "cxx": "caretStyleJson",
+      "file": "src/wasm/wasm_main.cpp",
+      "keys": [
+        {
+          "name": "color",
+          "kind": "arr"
+        },
+        {
+          "name": "widthPt",
+          "kind": "num"
+        }
+      ]
+    },
+    "selectionStyle": {
+      "cxx": "selectionStyleJson",
+      "file": "src/wasm/wasm_main.cpp",
+      "keys": [
+        {
+          "name": "color",
+          "kind": "arr"
+        }
+      ]
+    },
+    "stats": {
+      "cxx": "statsJson",
+      "file": "src/wasm/wasm_main.cpp",
+      "keys": [
+        {
+          "name": "pageCount",
+          "kind": "num"
+        },
+        {
+          "name": "glyphCount",
+          "kind": "num"
+        },
+        {
+          "name": "placedLines",
+          "kind": "num"
+        },
+        {
+          "name": "clusters",
+          "kind": "num"
+        },
+        {
+          "name": "faces",
+          "kind": "num"
+        },
+        {
+          "name": "fontInstances",
+          "kind": "num"
+        },
+        {
+          "name": "fontRunCount",
+          "kind": "num"
+        },
+        {
+          "name": "missingGlyphCount",
+          "kind": "num"
+        },
+        {
+          "name": "fontCacheHits",
+          "kind": "num"
+        },
+        {
+          "name": "fontCacheMisses",
+          "kind": "num"
+        },
+        {
+          "name": "fontStorageReads",
+          "kind": "num"
+        },
+        {
+          "name": "fontStorageBytes",
+          "kind": "num"
+        },
+        {
+          "name": "fontIoMs",
+          "kind": "num"
+        },
+        {
+          "name": "fontResidentBytes",
+          "kind": "num"
+        },
+        {
+          "name": "fontStorageFailures",
+          "kind": "num"
+        },
+        {
+          "name": "fontStorageEofs",
+          "kind": "num"
+        },
+        {
+          "name": "shapeMs",
+          "kind": "num"
+        },
+        {
+          "name": "layoutMs",
+          "kind": "num"
+        },
+        {
+          "name": "pageFpMs",
+          "kind": "num"
+        },
+        {
+          "name": "paintMs",
+          "kind": "num"
+        },
+        {
+          "name": "paintFillMs",
+          "kind": "num"
+        },
+        {
+          "name": "paintGlyphMs",
+          "kind": "num"
+        },
+        {
+          "name": "paintGlyphBoundsMs",
+          "kind": "num"
+        },
+        {
+          "name": "paintedGlyphs",
+          "kind": "num"
+        },
+        {
+          "name": "paintPresentMs",
+          "kind": "num"
+        },
+        {
+          "name": "paintPreMs",
+          "kind": "num"
+        },
+        {
+          "name": "paintSwapMs",
+          "kind": "num"
+        },
+        {
+          "name": "paintTransientMs",
+          "kind": "num"
+        },
+        {
+          "name": "paintOverlayMs",
+          "kind": "num"
+        },
+        {
+          "name": "paintLedgerMs",
+          "kind": "num"
+        },
+        {
+          "name": "paintReportMs",
+          "kind": "num"
+        },
+        {
+          "name": "totalMs",
+          "kind": "num"
+        },
+        {
+          "name": "frameWidth",
+          "kind": "num"
+        },
+        {
+          "name": "frameHeight",
+          "kind": "num"
+        },
+        {
+          "name": "frameBytes",
+          "kind": "num"
+        },
+        {
+          "name": "glyphCacheBytes",
+          "kind": "num"
+        },
+        {
+          "name": "glyphCacheLimit",
+          "kind": "num"
+        },
+        {
+          "name": "zoom",
+          "kind": "num"
+        }
+      ]
+    },
+    "benchRelayoutPaint": {
+      "cxx": "benchRelayoutPaint",
+      "file": "src/wasm/wasm_main.cpp",
+      "keys": [
+        {
+          "name": "runs",
+          "kind": "num"
+        },
+        {
+          "name": "shapeMs",
+          "kind": "num"
+        },
+        {
+          "name": "layoutMs",
+          "kind": "num"
+        },
+        {
+          "name": "paintMs",
+          "kind": "num"
+        },
+        {
+          "name": "totalMs",
+          "kind": "num"
+        }
+      ]
+    },
+    "selectionReport": {
+      "cxx": "selectionReport",
+      "file": "src/wasm/wasm_main.cpp",
+      "keys": [
+        {
+          "name": "anchor",
+          "kind": "obj"
+        },
+        {
+          "name": "focus",
+          "kind": "obj"
+        },
+        {
+          "name": "empty",
+          "kind": "bool"
+        },
+        {
+          "name": "rects",
+          "kind": "arr"
+        }
+      ]
+    },
+    "hitTest": {
+      "cxx": "hitTest",
+      "file": "src/wasm/wasm_main.cpp",
+      "partial": true,
+      "keys": [
+        {
+          "name": "para",
+          "kind": "num"
+        },
+        {
+          "name": "offset",
+          "kind": "num"
+        },
+        {
+          "name": "field",
+          "kind": "num"
+        },
+        {
+          "name": "side",
+          "kind": "num"
+        },
+        {
+          "name": "line",
+          "kind": "num"
+        },
+        {
+          "name": "cellPara",
+          "kind": "num",
+          "optional": true
+        },
+        {
+          "name": "cell",
+          "kind": "arr",
+          "optional": true
+        }
+      ]
+    },
+    "controls": {
+      "cxx": "controlsJson",
+      "file": "src/wasm/wasm_main.cpp",
+      "keys": [
+        {
+          "name": "mode",
+          "kind": "num"
+        },
+        {
+          "name": "count",
+          "kind": "num"
+        },
+        {
+          "name": "caret",
+          "kind": "num"
+        },
+        {
+          "name": "items",
+          "kind": "arr"
+        }
+      ]
+    },
+    "lines": {
+      "cxx": "linesJson",
+      "file": "src/wasm/wasm_main.cpp",
+      "keys": [
+        {
+          "name": "lines",
+          "kind": "arr"
+        },
+        {
+          "name": "glyphs",
+          "kind": "arr"
+        }
+      ]
+    },
+    "bracketSlots": {
+      "cxx": "bracketSlotsJson",
+      "file": "src/wasm/wasm_main.cpp",
+      "keys": [
+        {
+          "name": "slots",
+          "kind": "arr"
+        }
+      ]
+    },
+    "editStats": {
+      "cxx": "editStatsJson",
+      "file": "src/wasm/wasm_main.cpp",
+      "keys": [
+        {
+          "name": "layoutRan",
+          "kind": "bool"
+        },
+        {
+          "name": "relaidLines",
+          "kind": "num"
+        },
+        {
+          "name": "totalLines",
+          "kind": "num"
+        },
+        {
+          "name": "relaidParagraphs",
+          "kind": "num"
+        },
+        {
+          "name": "reusedParagraphs",
+          "kind": "num"
+        },
+        {
+          "name": "suffixShifted",
+          "kind": "bool"
+        },
+        {
+          "name": "totalParagraphs",
+          "kind": "num"
+        },
+        {
+          "name": "layoutWasFull",
+          "kind": "bool"
+        },
+        {
+          "name": "dirtyPageCount",
+          "kind": "num"
+        },
+        {
+          "name": "repaintedPages",
+          "kind": "num"
+        },
+        {
+          "name": "totalPages",
+          "kind": "num"
+        },
+        {
+          "name": "windowPages",
+          "kind": "num"
+        },
+        {
+          "name": "windowFirstPage",
+          "kind": "num"
+        },
+        {
+          "name": "bandY0",
+          "kind": "num"
+        },
+        {
+          "name": "bandY1",
+          "kind": "num"
+        },
+        {
+          "name": "repaintedPixels",
+          "kind": "num"
+        },
+        {
+          "name": "repaintedX",
+          "kind": "num"
+        },
+        {
+          "name": "repaintedY",
+          "kind": "num"
+        },
+        {
+          "name": "repaintedW",
+          "kind": "num"
+        },
+        {
+          "name": "repaintedH",
+          "kind": "num"
+        },
+        {
+          "name": "frameW",
+          "kind": "num"
+        },
+        {
+          "name": "frameH",
+          "kind": "num"
+        },
+        {
+          "name": "framePixels",
+          "kind": "num"
+        },
+        {
+          "name": "layoutMs",
+          "kind": "num"
+        },
+        {
+          "name": "rebuildCompileMs",
+          "kind": "num"
+        },
+        {
+          "name": "rebuildReused",
+          "kind": "num"
+        },
+        {
+          "name": "rebuildFlowMs",
+          "kind": "num"
+        },
+        {
+          "name": "rebuildFlowPosMs",
+          "kind": "num"
+        },
+        {
+          "name": "rebuildCopyMs",
+          "kind": "num"
+        },
+        {
+          "name": "rebuildControlsMs",
+          "kind": "num"
+        },
+        {
+          "name": "rebuildPath",
+          "kind": "num"
+        },
+        {
+          "name": "rebuildReject",
+          "kind": "num"
+        },
+        {
+          "name": "pageFpMs",
+          "kind": "num"
+        },
+        {
+          "name": "paintMs",
+          "kind": "num"
+        },
+        {
+          "name": "totalMs",
+          "kind": "num"
+        },
+        {
+          "name": "caretPara",
+          "kind": "num"
+        },
+        {
+          "name": "caretOffset",
+          "kind": "num"
+        },
+        {
+          "name": "glyphCount",
+          "kind": "num"
+        },
+        {
+          "name": "missingGlyphCount",
+          "kind": "num"
+        },
+        {
+          "name": "fontCacheHits",
+          "kind": "num"
+        },
+        {
+          "name": "fontCacheMisses",
+          "kind": "num"
+        },
+        {
+          "name": "fontStorageReads",
+          "kind": "num"
+        },
+        {
+          "name": "fontStorageBytes",
+          "kind": "num"
+        },
+        {
+          "name": "fontIoMs",
+          "kind": "num"
+        },
+        {
+          "name": "fontResidentBytes",
+          "kind": "num"
+        },
+        {
+          "name": "fontStorageFailures",
+          "kind": "num"
+        },
+        {
+          "name": "fontStorageEofs",
+          "kind": "num"
+        },
+        {
+          "name": "caretIndex",
+          "kind": "num"
+        },
+        {
+          "name": "docCodepoints",
+          "kind": "num"
+        },
+        {
+          "name": "caretSide",
+          "kind": "num"
+        },
+        {
+          "name": "caretVertical",
+          "kind": "bool"
+        },
+        {
+          "name": "caretBlockReversed",
+          "kind": "bool"
+        },
+        {
+          "name": "caretPage",
+          "kind": "num"
+        },
+        {
+          "name": "caretVisible",
+          "kind": "bool"
+        },
+        {
+          "name": "caretX",
+          "kind": "num"
+        },
+        {
+          "name": "caretY",
+          "kind": "num"
+        },
+        {
+          "name": "caretW",
+          "kind": "num"
+        },
+        {
+          "name": "caretH",
+          "kind": "num"
+        },
+        {
+          "name": "editMode",
+          "kind": "num"
+        },
+        {
+          "name": "controlCount",
+          "kind": "num"
+        },
+        {
+          "name": "caretControl",
+          "kind": "num"
+        },
+        {
+          "name": "blockedEdits",
+          "kind": "num"
+        }
+      ]
+    },
+    "diff": {
+      "cxx": "diffJson",
+      "file": "src/core/engine/engine_audit.cpp",
+      "keys": [
+        {
+          "name": "diff",
+          "kind": "num"
+        },
+        {
+          "name": "frameW",
+          "kind": "num"
+        },
+        {
+          "name": "frameH",
+          "kind": "num"
+        },
+        {
+          "name": "box",
+          "kind": "num",
+          "optional": true
+        }
+      ]
+    },
+    "auditPage": {
+      "cxx": "auditPageJson",
+      "file": "src/core/engine/engine_audit.cpp",
+      "partial": true,
+      "keys": [
+        {
+          "name": "diff",
+          "kind": "num"
+        },
+        {
+          "name": "w",
+          "kind": "num"
+        },
+        {
+          "name": "h",
+          "kind": "num"
+        },
+        {
+          "name": "page",
+          "kind": "num"
+        },
+        {
+          "name": "cached",
+          "kind": "num"
+        },
+        {
+          "name": "box",
+          "kind": "num",
+          "optional": true
+        }
+      ]
+    },
+    "auditTables": {
+      "cxx": "auditTablesJson",
+      "file": "src/core/engine/engine_audit.cpp",
+      "keys": [
+        {
+          "name": "diff",
+          "kind": "num"
+        },
+        {
+          "name": "cells",
+          "kind": "num"
+        },
+        {
+          "name": "emptyCell",
+          "kind": "num"
+        },
+        {
+          "name": "badRange",
+          "kind": "num"
+        },
+        {
+          "name": "overlap",
+          "kind": "num"
+        },
+        {
+          "name": "noMark",
+          "kind": "num"
+        },
+        {
+          "name": "pathMismatch",
+          "kind": "num"
+        },
+        {
+          "name": "badSpan",
+          "kind": "num"
+        },
+        {
+          "name": "stray",
+          "kind": "num"
+        },
+        {
+          "name": "firstCell",
+          "kind": "num"
+        }
+      ]
+    },
+    "auditLayout": {
+      "cxx": "auditLayoutJson",
+      "file": "src/core/engine/engine_audit.cpp",
+      "partial": true,
+      "keys": [
+        {
+          "name": "note",
+          "kind": "num"
+        },
+        {
+          "name": "diff",
+          "kind": "num"
+        },
+        {
+          "name": "glyphDiff",
+          "kind": "num"
+        },
+        {
+          "name": "lineDiff",
+          "kind": "num"
+        },
+        {
+          "name": "paraDiff",
+          "kind": "num"
+        },
+        {
+          "name": "startsDiff",
+          "kind": "num"
+        },
+        {
+          "name": "tableDiff",
+          "kind": "num"
+        },
+        {
+          "name": "statsSame",
+          "kind": "bool"
+        },
+        {
+          "name": "first",
+          "kind": "obj"
+        },
+        {
+          "name": "glyphs",
+          "kind": "num"
+        },
+        {
+          "name": "lines",
+          "kind": "num"
+        },
+        {
+          "name": "paras",
+          "kind": "num"
+        },
+        {
+          "name": "relaidParagraphs",
+          "kind": "num"
+        },
+        {
+          "name": "relaidLines",
+          "kind": "num"
+        },
+        {
+          "name": "layoutWasFull",
+          "kind": "bool"
+        },
+        {
+          "name": "curMs",
+          "kind": "num"
+        },
+        {
+          "name": "fullMs",
+          "kind": "num"
+        }
+      ]
+    },
+    "auditGlyphPages": {
+      "cxx": "auditGlyphPagesJson",
+      "file": "src/core/engine/engine_audit.cpp",
+      "keys": [
+        {
+          "name": "diff",
+          "kind": "num"
+        },
+        {
+          "name": "pages",
+          "kind": "num"
+        },
+        {
+          "name": "glyphs",
+          "kind": "num"
+        },
+        {
+          "name": "badPages",
+          "kind": "num"
+        },
+        {
+          "name": "firstBadPage",
+          "kind": "num"
+        },
+        {
+          "name": "missing",
+          "kind": "num"
+        },
+        {
+          "name": "extra",
+          "kind": "num"
+        },
+        {
+          "name": "stray",
+          "kind": "num"
+        }
+      ]
+    },
+    "auditCompile": {
+      "cxx": "auditCompileJson",
+      "file": "src/core/engine/engine_audit.cpp",
+      "partial": true,
+      "keys": [
+        {
+          "name": "note",
+          "kind": "num"
+        },
+        {
+          "name": "diff",
+          "kind": "num"
+        },
+        {
+          "name": "paras",
+          "kind": "num"
+        },
+        {
+          "name": "curMs",
+          "kind": "num"
+        },
+        {
+          "name": "fullMs",
+          "kind": "num"
+        }
+      ]
+    }
+  }
+}

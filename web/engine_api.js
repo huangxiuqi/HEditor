@@ -20,21 +20,15 @@
 /**
  * 宿主与引擎之间的每一个动词，一条一行：[命令名, 类别, 调的 wasm 导出, 呈现归属]。
  *
- * 类别 —— 'w' 写（跑完收尾并回推状态）｜'r' 读（只回值）｜'s' 静默写（改状态但不上屏、
- *   不回推）｜'q' 查询，但在 askOp 里特判（rawFrame：帧太大，要转移所有权而不是克隆）。
- * 呈现归属 —— 'self' 引擎在库里就排完画完了｜'host' 引擎只改状态，宿主必须补一次 present
- *   ｜'none' 根本不碰画面。
+ * 类别：'w' 写（跑完收尾并回推状态），'r' 读（只回值），'s' 静默写（改状态但不上屏、
+ *   不回推），'q' 查询但在 askOp 里特判（rawFrame 帧太大，要转移所有权而不是克隆）。
+ * 呈现归属：'self' 引擎在库里就排完画完，'host' 引擎只改状态、宿主补一次 present，
+ *   'none' 根本不碰画面。
  *
- * ★ 呈现归属是账本的一部分，不是风格选择：多补一次 present 会把这一拍的重画统计冲成
- *   "只画了一个光标"（探针拿那笔账当分母，产品面板也读它）；少补一次，画面停在上一拍。
- *   它只能由"这条命令调的是不是 *AndRender"决定，而这件事只有读代码的人知道 —— 所以它
- *   写在这张表里，不写在另一份手抄清单里。原来那份叫 PRESENT_ALWAYS，二十三条里有一条
- *   根本不是命令名（setViewportAnchor），另有八条调的就是 *AndRender，每次都被白白
- *   重画一遍（undo / redo / indent / outdent / focusControl / tabCaret / removeControl /
- *   setControlProp）。
- *
- * ★ 这张表与三张实现表由 collect() 对账：少一条、多一条都在造 API 的时候抛出 ——
- *   两个方向都拦，"改了引擎面忘了登记"不再表现成探针里某个数字悄悄变了。
+ * 呈现归属是账本的一部分而不是风格选择：多补一次 present 会把这一拍的重画统计冲成
+ *   "只画了一个光标"（探针拿那笔账当分母），少补一次画面就停在上一拍。它由"这条命令
+ *   调的是不是 *AndRender"决定，所以只能写在表里，不能另抄一份清单。
+ * 这张表与三张实现表由 collect() 对账：少一条、多一条都在造 API 时抛出。
  */
 const COMMANDS = [
   // 呈现与装载：整份换文档，引擎自己重排重画
@@ -52,6 +46,7 @@ const COMMANDS = [
   ['setFormControls',       'w', ['setFormControls'],                                     'self'],
 
   // 编辑：*AndRender 系在库里就排完画完了，宿主不要再画一遍
+  ['insertText',            'w', ['insertTextAt'],                                           'self'],
   ['type',                  'w', ['typeText'],                                            'self'],
   ['backspace',             'w', ['backspace'],                                           'self'],
   ['deleteForward',         'w', ['deleteForward'],                                       'self'],
@@ -183,7 +178,7 @@ const OUTSIDE = [
   ['shapeReport',      'diag',  '单段整形报告（手工诊断）；目前没有任何调用方'],
 ];
 
-/** 按类别取命令名。 */
+// 按类别取命令名。
 function idlByKind(kind) {
   return COMMANDS.filter((c) => c[1] === kind).map((c) => c[0]);
 }
@@ -192,7 +187,7 @@ const IDL = {
   commands: COMMANDS,
   outside: OUTSIDE,
   byKind: idlByKind,
-  /** 要宿主补一次 present 的命令名。派生，不维护。 */
+  // 要宿主补一次 present 的命令名。派生，不维护。
   presentAlways: () => new Set(COMMANDS.filter((c) => c[3] === 'host').map((c) => c[0])),
 };
 
@@ -200,7 +195,7 @@ const IDL = {
  * 把实现表按协议表"套"起来：IDL 里有、实现里没有（或反过来）当场抛。
  *
  * 两个方向都要拦：只拦一个方向的话，"删了一条命令忘删实现"会留一个永远跑不到的体；
- *   而"加了一条忘登记"会静默地当未知命令 —— 宿主那边只看到一句 `未知命令 x`。
+ *   而"加了一条忘登记"会静默地当未知命令 —— 宿主那边只看到一句 未知命令 x。
  */
 function collect(kind, impl) {
   const want = idlByKind(kind);
@@ -213,7 +208,7 @@ function collect(kind, impl) {
   return impl;
 }
 
-/** 引擎自己不画的那些命令 —— 派生自协议表的第四列，不另维护。 */
+// 引擎自己不画的那些命令 —— 派生自协议表的第四列，不另维护。
 const PRESENT_ALWAYS = IDL.presentAlways();
 
 /**
@@ -447,13 +442,6 @@ function retarget(st) {
 /* 呈现收尾 */
 
 /**
- * 什么时候补一次呈现：窗口换了，或者命令自己不会画（见协议表的第四列）。
- *
- * 这一节原来还带一份手抄的名单（PRESENT_ALWAYS）—— 它已经并进协议表了：名单与实现
- *   分两处维护，迟早对不上，而它对不上的症状是"某条命令多画一次、账被冲成零"。
- */
-
-/**
  * 收尾：必要时呈现一次，然后把脏页重贴上去，返回这一拍的账。
  *
  * 呈现的条件是"引擎没画（见 PRESENT_ALWAYS）或窗口换了" —— 与 app.js 的 settle 同一
@@ -683,6 +671,7 @@ const WRITE = collect('w', {
   }),
   fonts: async (a) => { await installFonts(a.mode || 'full'); paintFull(); },
 
+  insertText: (a) => mod.insertTextAt(a.para | 0, a.offset | 0, a.s),
   type: (a) => mod.typeText(a.s),
   backspace: () => mod.backspace(),
   deleteForward: () => mod.deleteForward(),

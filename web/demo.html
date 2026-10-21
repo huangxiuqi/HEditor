@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HEditor · 公开 API 示例</title>
+<!-- 必须显式声明 icon：不写的话浏览器会去请求 /favicon.ico，404 会污染"无 console 错误"的判据。 -->
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    --bg: #f4f5f7; --panel: #fff; --ink: #1b1f24; --dim: #5b6572; --line: #d8dde4;
+    --accent: #1f6feb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #14171a; --panel: #1c2024; --ink: #e6e9ee; --dim: #9aa4b0; --line: #2c3238; }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg); color: var(--ink);
+    font: 14px/1.5 -apple-system, "Segoe UI", "Noto Sans SC", sans-serif;
+    display: flex; flex-direction: column;
+  }
+  header {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  header h1 { font-size: 14px; margin: 0 12px 0 0; font-weight: 600; }
+  button {
+    font: inherit; padding: 4px 10px; border: 1px solid var(--line);
+    background: transparent; color: inherit; border-radius: 6px; cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  #status { margin-left: auto; color: var(--dim); font-variant-numeric: tabular-nums; }
+  #ed { flex: 1; min-height: 0; }
+  #ed .heditor-body { height: 100%; overflow: auto; background: var(--bg); }
+</style>
+</head>
+<body>
+<header>
+  <h1>HEditor</h1>
+  <button data-act="load">载入示例</button>
+  <button data-act="type">插入一句</button>
+  <button data-act="undo">撤销</button>
+  <button data-act="redo">重做</button>
+  <button data-act="zoomIn">放大</button>
+  <button data-act="zoomOut">缩小</button>
+  <button data-act="toggleMode">切连页</button>
+  <button data-act="save">保存</button>
+  <span id="status">启动中…</span>
+</header>
+<div id="ed"></div>
+
+<!--
+  ★ 这一页只加载两个脚本：库产物 + 本页自己的示例代码。
+    没有 engine_api.js / app.js / wasm 胶水，也没有 window.__heditor ——
+    那些全在库里面（§11 闸 1）。
+-->
+<script src="dist/heditor.iife.js"></script>
+<script src="demo.js"></script>
+</body>
+</html>

@@ -407,6 +407,11 @@ public:
      * 编辑入口：坐标是 (段, 段内码点偏移)，落地前吸附到字素簇边界。
      */
     bool insertTextUtf8(int para, size_t offset, const std::string& utf8);
+    /**
+     * 插入并收尾（重排 + 重绘），与 typeTextAndRender 同一条路 —— 外部 API 的
+     * insertText(pos, text) 用它：模板填充要"一次调用、一个撤销步、画面立刻更新"。
+     */
+    bool insertTextAndRender(int para, size_t offset, const std::string& utf8);
     bool insertCodepoints(int para, size_t offset, const std::vector<uint32_t>& cps);
     bool insertCodepoint(int para, size_t offset, uint32_t cp);
     /**

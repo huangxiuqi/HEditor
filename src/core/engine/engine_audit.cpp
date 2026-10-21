@@ -6,6 +6,7 @@
  */
 
 #include "core/engine/engine.h"
+#include "core/engine/payload_schema.h"
 
 #include "core/text/writing_mode.h"
 #include "core/utils/hash.h"
@@ -354,7 +355,7 @@ std::string diffJson(const BitmapDiff& d, int w, int h) {
         o << ",\"box\":null";
     }
     o << "}";
-    return o.str();
+    return pk::checked(pk::diff::kSpec, o.str());
 }
 
 }  // namespace
@@ -375,7 +376,7 @@ std::string diffJson(const BitmapDiff& d, int w, int h) {
 std::string EditorEngine::auditFrameJson() {
     const int fw = frameWidth();
     const int fh = frameHeight();
-    if (fw <= 0 || fh <= 0) return "{\"diff\":-1,\"box\":null}";
+    if (fw <= 0 || fh <= 0) return pk::checked(pk::diff::kSpec, "{\"diff\":-1,\"box\":null}");
 
     // 参照物与现况都现场拼：现况那一份不能复用缓存的导出图 ——
     //   那正是要审的东西（它可能与页位图对不上）。
@@ -388,7 +389,7 @@ std::string EditorEngine::auditFrameJson() {
 
     Bitmap after;
     assembleWindow(true, &after);
-    return diffJson(diffBitmaps(before, after), fw, fh);
+    return pk::checked(pk::diff::kSpec, diffJson(diffBitmaps(before, after), fw, fh));
 }
 
 /**
@@ -400,7 +401,7 @@ std::string EditorEngine::auditFrameJson() {
 std::string EditorEngine::auditBaseJson() {
     const int fw = frameWidth();
     const int fh = frameHeight();
-    if (fw <= 0 || fh <= 0) return "{\"diff\":-1,\"box\":null}";
+    if (fw <= 0 || fh <= 0) return pk::checked(pk::diff::kSpec, "{\"diff\":-1,\"box\":null}");
 
     Bitmap before;
     assembleWindow(false, &before);
@@ -411,7 +412,7 @@ std::string EditorEngine::auditBaseJson() {
 
     Bitmap after;
     assembleWindow(false, &after);
-    return diffJson(diffBitmaps(before, after), fw, fh);
+    return pk::checked(pk::diff::kSpec, diffJson(diffBitmaps(before, after), fw, fh));
 }
 
 /**
@@ -431,7 +432,7 @@ std::string EditorEngine::auditPageJson(int page) {
     const auto it = page_cache_.find(page);
     if (it == page_cache_.end() || !it->second.valid || it->second.px.width() != pw ||
         it->second.px.height() != ph) {
-        return "{\"diff\":-1,\"cached\":0}";
+        return pk::checked(pk::audit_page::kSpec, "{\"diff\":-1,\"cached\":0}");
     }
     Bitmap ref(pw, ph);
     ref.shareFonts(font_owner_);
@@ -473,7 +474,7 @@ std::string EditorEngine::auditPageJson(int page) {
         o << ",\"box\":null";
     }
     o << "}";
-    return o.str();
+    return pk::checked(pk::audit_page::kSpec, o.str());
 }
 
 /**
@@ -492,7 +493,7 @@ std::string EditorEngine::auditTablesJson() const {
       << ",\"noMark\":" << a.block_without_mark << ",\"pathMismatch\":" << a.path_mismatch
       << ",\"badSpan\":" << a.bad_span << ",\"stray\":" << a.blocks_in_no_cell
       << ",\"firstCell\":" << a.first_cell << "}";
-    return o.str();
+    return pk::checked(pk::audit_tables::kSpec, o.str());
 }
 
 /**
@@ -600,7 +601,8 @@ int EditorEngine::auditLayout() {
 
 std::string EditorEngine::auditLayoutJson() {
     std::ostringstream o;
-    if (blocks().empty()) return "{\"diff\":0,\"note\":\"empty\"}";
+    if (blocks().empty())
+        return pk::checked(pk::audit_layout::kSpec, "{\"diff\":0,\"note\":\"empty\"}");
 
     const auto t0 = Clock::now();
     const LayoutResult ref = layoutDocument(fonts_, blocks(), cfg_.page, tables_);
@@ -623,7 +625,7 @@ std::string EditorEngine::auditLayoutJson() {
     // 全量重排 —— 分母与分子同源，不掺历史数字。
     o << ",\"curMs\":" << layout_.stats.layout_ms << ",\"fullMs\":" << full_ms;
     o << "}";
-    return o.str();
+    return pk::checked(pk::audit_layout::kSpec, o.str());
 }
 
 std::string EditorEngine::auditGlyphPagesJson() const {
@@ -672,7 +674,7 @@ std::string EditorEngine::auditGlyphPagesJson() const {
     o << ",\"badPages\":" << bad_pages << ",\"firstBadPage\":" << first_bad;
     o << ",\"missing\":" << missing << ",\"extra\":" << extra << ",\"stray\":" << stray;
     o << "}";
-    return o.str();
+    return pk::checked(pk::audit_glyph_pages::kSpec, o.str());
 }
 
 int EditorEngine::auditCompile() const {
@@ -758,7 +760,8 @@ int EditorEngine::auditCompile() const {
 }
 
 std::string EditorEngine::auditCompileJson() {
-    if (!loaded_) return "{\"diff\":0,\"note\":\"not-loaded\"}";
+    if (!loaded_)
+        return pk::checked(pk::audit_compile::kSpec, "{\"diff\":0,\"note\":\"not-loaded\"}");
     const auto t0 = Clock::now();
     const int d = auditCompile();
     const double full_ms = msSince(t0);
@@ -769,7 +772,7 @@ std::string EditorEngine::auditCompileJson() {
     //   整树全量编译 —— 两者同源，所以"增量省了多少"是一个可当场证伪的比值。
     o << "{\"diff\":" << d << ",\"paras\":" << blocks_full_.size()
       << ",\"curMs\":" << edit_stats_.rebuild_compile_ms << ",\"fullMs\":" << full_ms << "}";
-    return o.str();
+    return pk::checked(pk::audit_compile::kSpec, o.str());
 }
 
 }  // namespace heditor

@@ -1,0 +1,44 @@
+// 由 scripts/gen_public_members.py 从 web/types/editor.d.ts 生成，勿手改。
+//
+// 用途：guard.ts 的白名单（未知成员一律抛），以及 api_check.mjs 的成员对拍。
+
+/** 契约里的公开成员（不含 diag —— 它由 debug 开关控制）。 */
+export const PUBLIC_MEMBERS: readonly string[] = [
+  'open',
+  'setText',
+  'text',
+  'paragraph',
+  'paragraphs',
+  'save',
+  'insertText',
+  'type',
+  'deleteBackward',
+  'deleteForward',
+  'splitParagraph',
+  'mergeParagraph',
+  'undo',
+  'redo',
+  'setIndent',
+  'caret',
+  'setCaret',
+  'moveCaret',
+  'select',
+  'selectAll',
+  'clearSelection',
+  'selection',
+  'focusControl',
+  'setControlProp',
+  'form',
+  'geometry',
+  'scrollTo',
+  'setZoom',
+  'configure',
+  'config',
+  'on',
+  'flush',
+  'destroy',
+  'element',
+];
+
+/** 只有 createEditor({ debug: true }) 时才在实例上。 */
+export const DIAG_MEMBER = 'diag';

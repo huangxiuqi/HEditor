@@ -2526,6 +2526,13 @@ const readyPromise = (async () => {
 //   有 14 项变红、整轮耗时从 42 s 涨到 158 s。原因是探针在单线程宿主上依赖
 //   "调用即生效、随后同步读值"这一形态，包成 Promise 后读到的还是上一拍。
 //   这件事必须与 host_core 合并（步 4）一起做，那时两边的事件层同时改写。
+// 内部隐藏通道：公开层（web/src）实现 open/insertText/geometry 这类"旧门面没有的方法"
+//   时要拿命令表实例。不可枚举，所以 Object.keys(facade) 与探针的成员对拍都看不见它；
+//   scripts/api_check.mjs 禁止 demo 使用 __api。等 C 步把这些方法搬进 src/，它就消失。
+// 必须是 getter：createEditor 返回时引擎还在装载（api 仍是 null），
+//   写成 { value: api } 会把那一刻的 null 固化下来 —— 实测症状是"等就绪之后仍然拿到 null"。
+Object.defineProperty(facade, '__api', { get: () => api, enumerable: false });
+
 return facade;
 }
 
