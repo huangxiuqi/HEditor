@@ -1231,6 +1231,19 @@ private:
     int tableAlignedFrom(int from) const;
 
     /**
+     * 脏区右端对齐到整张表的末尾：右端落在表里（或者后缀首段已经又落回同一张表）时，
+     * 把脏区扩到那张最外层表的最后一段之后。
+     *
+     * 表的行高要等一整行的所有格都排完才结算，所以"排到一半的表"是个中间态 ——
+     * 既不能平移（行片段还没结算），也不能把后缀接在它后面。脏区只要擦着表，就得把整张表
+     * 包进来。左端由 tableAlignedFrom 对齐，两端一起构成"表永远整张在脏区一侧"这条不变式。
+     *
+     * @param to 脏区右端（新版块坐标，不含）；< 0 或 >= 块数时原样返回（那是"排到末尾"）。
+     * @return 右端的新值；没有表格输入时原样返回。
+     */
+    int tableAlignedTo(int to) const;
+
+    /**
      * 把 layout_ 截断到第 para 段之前：丢掉 [para, ...) 的行盒、字形与切片，
      * 保留 [0, para) 原样，供 layoutDocumentRange 从 para 续排。
      * para <= 0 时清空整个结果。
@@ -1251,40 +1264,38 @@ private:
     };
 
     /**
-     * 后缀复用：只重排脏区，然后试着不动后缀。
+     * 后缀复用：只重排脏区，然后试着不动后缀。判据两级 —— 同状态（后缀逐位相同，整块搬回）
+     * 与纯横排平移（只有块轴起点变）。后缀里可以包着表，但表只能整张在脏区里或整张在复用区里：
+     * 遇到第一张表就把复用截断在表头，剩下的从那张表续排（表的行高靠结算、跨页靠切片）。
      *
-     * 两级判据从严到宽：一是同状态 —— 后缀的断页、行号与坐标都与上一轮逐位相同，整块搬回；
-     * 二是后缀纯横排 —— 只有块轴起点变了，于是每行只是"平移 + 改页码"。段数变化（回车分段 /
-     * 退格合并）几乎总落到第二级：段落边界一变就多让或少让一次段间距，后缀必然整体下移。
-     *
-     * @param dirty_count 脏区在新版里占几段（由脏区间的右端给出，见 markLayoutDirtyRange）。
-     * @param page_lo,page_hi 出参：脏区新旧两版覆盖的页区间，供页指纹只重算这几页，-1 = 整篇。
-     * @param relaid_paragraphs 出参：脏区在新版里占几段。
-     * @param all_pages_changed 出参：Shifted 那一级专用 —— 后缀在的每一页都变了，直接标脏。
-     * @return None 时后缀未被动过（调用方可以安全地走续排），其余两种排版已完成。
+     * @param dirty_count 脏区在新版里占几段（右端见 markLayoutDirtyRange）
+     * @param page_lo,page_hi 出参：脏区新旧两版覆盖的页区间（-1 = 整篇）
+     * @param relaid_paragraphs 出参：脏区在新版里占几段
+     * @param cut 出参：复用只到第 cut 段之前（后缀第一张表，或段数）；cut_state 是那儿的锚点
+     * @param all_pages_changed 出参：Shifted 专用 —— 后缀在的每一页都变了
+     * @return None 时后缀未被动过（调用方可以安全走续排），其余两种排版已完成
      */
     SuffixReuse trySuffixReuse(int from, int dirty_count, int* page_lo, int* page_hi,
-                               int* relaid_paragraphs, bool* all_pages_changed);
+                               int* relaid_paragraphs, int* cut, ReflowState* cut_state,
+                               bool* all_pages_changed);
 
     /**
-     * 后缀整体平移：把 [from, 末段] 的每一行沿块轴挪到新的位置，并重编页码与全局行号，
-     * 字形跟着它的行一起挪。断行结果（每行的簇与行内位置）完全不重算。
+     * 后缀整体平移：把 [from, to) 的每一行沿块轴挪到新的位置，并重编页码与全局行号，字形跟着
+     * 它的行一起挪，断行结果（簇与行内位置）完全不重算 —— 横排的块轴推进是一条纯折线（每行
+     * 占字号乘行距、段间让出 space_after_pt、放不下就换页），知道起点的续排状态就唯一确定。
      *
-     * @param from 后缀的第一段（含）；段数变化时它与脏区首段相差不止一（脏区可能占几段）。
-     * @param first_glyph 后缀的第一个字形在 glyphs 里的下标（脏区的字形之后）。
-     *
-     * 为什么可以这样做：横排的块轴推进是一条纯折线 —— 每行占 blocks[p].size_pt *
-     * line_factor、段间再让出 space_after_pt，放不下就换页。所以只要知道后缀开始时的那一个
-     * 续排状态（页号 + cursor_y + 行号），整个后缀的新位置就被唯一确定；这条规则与
-     * layoutDocumentRange 横排分支里的断页判据同源，分叉会被 auditLayout 抓住。
-     * 竖排段不吃这条规则，所以后缀里出现竖排就返回 false。
+     * @param from 后缀的第一段（含）；段数变化时它与脏区首段相差不止一
+     * @param first_glyph 后缀的第一个字形在 glyphs 里的下标（脏区的字形之后）
+     * @param to 平移的上界（不含）：后缀里的第一张表，或段数
+     * @param end_state 出参：走到 to 时的续排状态；to < 段数时调用方拿它从那儿的表续排
      */
-    bool shiftSuffixBlockAxis(int from, size_t first_glyph, const ReflowState& after);
+    bool shiftSuffixBlockAxis(int from, size_t first_glyph, int to, const ReflowState& after,
+                              ReflowState* end_state);
 
     /**
-     * 后缀（[from+1, 末段]）里有没有竖排段 —— 竖排不能走平移复用。
+     * [from, to) 里有没有竖排段 —— 竖排不能走平移复用。
      */
-    bool suffixIsHorizontalOnly(int from) const;
+    bool suffixIsHorizontalOnly(int from, int to) const;
 
     /**
      * 画表单标记（方括号与小点）到一页的位图上 —— 页内坐标，不认帧。

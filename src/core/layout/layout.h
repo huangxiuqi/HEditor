@@ -597,6 +597,20 @@ struct LineBox {
     float block_hi_pt = 0.0f;
 
     /**
+     * 横排行盒自己的纵向度量：基线以上、以下各多少，以及沿块轴推进多少（行高）。
+     *
+     * 排版时由 breakLine 定下（ascent / descent / line_h），增量平移必须拿它们原样重算，
+     * 不能用 block_hi - block_lo 或 size_pt * line_factor 反推：反推出来的是另一个数
+     * （差一个末位），而判据是"增量与从零重排逐位相同"。行高也不等于 size_pt * line_factor ——
+     * 一行里有比文字更高的行内原子时它更大（见 breakLine 的 line_h）。
+     *
+     * 竖排的列盒不维护这三个值：列沿块轴的推进是列宽，由换带规则算，不是这三样。
+     */
+    float ascent_pt = 0.0f;
+    float descent_pt = 0.0f;
+    float advance_pt = 0.0f;
+
+    /**
      * 行内轴的起点（横排 = 基线起始 x；竖排 = 列顶 y），页面坐标（磅）。
      */
     float inline_origin_pt = 0.0f;

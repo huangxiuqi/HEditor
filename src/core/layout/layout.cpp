@@ -1208,6 +1208,9 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
                 lb.page = slabOfY(cursor_y);
                 lb.block_lo_pt = locY(lb.page, cursor_y);
                 lb.block_hi_pt = locY(lb.page, cursor_y + (ascent_eff + descent));
+                lb.ascent_pt = ascent_eff;
+                lb.descent_pt = descent;
+                lb.advance_pt = line_h;
                 lb.inline_origin_pt = cur_cx;
                 lb.bracket_axis_pt = locY(lb.page, cursor_y + ascent_eff);
                 cursor_y += line_h + b.space_after_pt;
@@ -1347,8 +1350,13 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
                 lb.vertical = false;
                 lb.sideways = false;
                 lb.size_pt = (line.size_pt > 0.0f) ? line.size_pt : b.size_pt;
-                lb.block_lo_pt = locY(lb.page, baseline - line.ascent);
+                // 行顶就是 top：写成 (top + ascent) - ascent 会多一次舍入，而"行顶"是后面
+                //   增量平移唯一能逐位复现的锚点（见 LineBox::ascent_pt 的说明）。
+                lb.block_lo_pt = locY(lb.page, top);
                 lb.block_hi_pt = locY(lb.page, baseline + line.descent);
+                lb.ascent_pt = line.ascent;
+                lb.descent_pt = line.descent;
+                lb.advance_pt = line.line_h;
                 lb.inline_origin_pt = cur_cx;
                 // 画括号用：字体与基线（横排下字形原点的 y 就是基线）。
                 // 字体必须是块的主字体（= 上面算占位槽宽那个 bracketAdvancePt 的来源），

@@ -9806,6 +9806,12 @@ int main() {
 
     std::printf("\n[53] 排版摘要：重构锁（只改结构时这份摘要必须逐位相同）\n");
     {
+        // 2026-10-21 重取 A/B（0xf0f0d9e785e9abc4 / 0xa56d8ebd65233e40 →
+        //   0x3179bff04e53281d / 0x219fbbbb929318d0）：行盒的上边从"基线 - ascent"
+        //   改成直接记行顶（layout.cpp 的 placeLine）。这是有意改口径，不是重构改坏：
+        //   后缀复用要拿行顶重建整行，"先加 ascent 再减 ascent"多一次舍入，从别处推不回来。
+        //   行数 / 字形数 / 页数一字未变（180/3231/17 与 157/927/15），只有个别行的
+        //   上边差一个末位 —— 肉眼与像素判据都看不见，逐位对拍看得见。
         // 用例 A：六十段横排正文，混排字号 —— 覆盖断行、行距、分页与段后距。
         //   段落够多，必然跨页；混排字号让每行的高度不同，翻页判据不能再用"上一行高度"。
         {
@@ -9836,7 +9842,7 @@ int main() {
             std::printf("     摘要 A = 0x%016llx（%zu 行 / %zu 字形 / %d 页）\n",
                         static_cast<unsigned long long>(da.hash), ea.layout().lines.size(),
                         ea.layout().glyphs.size(), ea.layout().stats.page_count);
-            expectTrue(da.hash == 0xf0f0d9e785e9abc4ull, "横排多页正文的摘要未变");
+            expectTrue(da.hash == 0x3179bff04e53281dull, "横排多页正文的摘要未变");
             expectTrue(ea.layout().stats.page_count >= 3, "用例 A 确实跨了多页");
         }
 
@@ -9900,7 +9906,7 @@ int main() {
             //   改成"表顶"（见 layout.cpp 的 cursor_before_switch）。原值是错的：从它续排
             //   会把整张表下移一个内边距，[61] 的"表里编辑"正是这么红的。摘要含这个字段，
             //   所以它跟着变 —— 这是有意改口径，不是重构改坏了。
-            expectTrue(db.hash == 0xa56d8ebd65233e40ull, "表格跨页的摘要未变");
+            expectTrue(db.hash == 0x219fbbbb929318d0ull, "表格跨页的摘要未变");
             expectTrue(eb.layout().stats.page_count >= 3 && !eb.layout().placed_tables.empty() &&
                            eb.layout().placed_tables[0].placed.size() >= 2,
                        "用例 B 确实把一行切到了两页上");
@@ -10876,35 +10882,45 @@ int main() {
         EditorEngine fresh;
         expectTrue(fresh.init({cjkPath, mnPath, latinPath}), "参照引擎初始化");
         fresh.setConfig(c61);
-        auto sameAsFull = [&](const std::string& label) {
-            const auto saved = e61.saveDocument();
+        auto sameAsFullFor = [&](EditorEngine& e, const std::string& label) {
+            const auto saved = e.saveDocument();
             const bool opened = saved.ok && fresh.loadDocument(saved.text).ok;
             fresh.relayout();
-            const uint64_t got = digestOf(e61.layout()).hash;
+            const uint64_t got = digestOf(e.layout()).hash;
             const uint64_t want = digestOf(fresh.layout()).hash;
             expectTrue(opened && got == want, label + "：增量结果与从零重排逐位相同（" +
                                                   std::to_string(got) + " vs " +
                                                   std::to_string(want) + "）");
-            expectTrue(e61.auditTables() == 0, label + "：表格结构自审一致");
+            expectTrue(e.auditTables() == 0, label + "：表格结构自审一致");
         };
+        auto sameAsFull = [&](const std::string& label) { sameAsFullFor(e61, label); };
 
         // 表格中间那一格。
         const int cell_para = in_table[in_table.size() / 2];
         e61.setCaret(cell_para, 1);
         expectTrue(e61.typeTextAndRender("改"), "表格中间那一格敲一个字");
         expectTrue(!e61.editStats().layout_was_full, "表里编辑：没有退回整篇重排");
-        expectTrue(e61.editStats().relaid_paragraphs < n_para,
-                   "表里编辑：只重排了一部分（" +
-                       std::to_string(e61.editStats().relaid_paragraphs) + " / " +
-                       std::to_string(n_para) + " 段）");
-        std::printf("     一次敲键：全量 %.2f ms → 增量 %.2f ms（重排 %d / %d 段）\n", full_ms,
-                    e61.editStats().layout_ms, e61.editStats().relaid_paragraphs, n_para);
+        // 脏区两端都对齐到整张表（tableAlignedFrom / tableAlignedTo），于是重排的正好是那九格，
+        //   表后三十段整段搬回。旧版这里重排 39 段（从表头一直到末尾）。
+        expectTrue(e61.editStats().relaid_paragraphs == 9,
+                   "表里编辑：只重排了那张表（" +
+                       std::to_string(e61.editStats().relaid_paragraphs) + " 段）");
+        // 反向一半：没有这条，"把后缀复用关掉"也能全绿 —— 那就等于没做。
+        expectTrue(e61.editStats().reused_paragraphs == n_para - 9 - 8,
+                   "表里编辑：表后那三十段是原样搬回来的（复用 " +
+                       std::to_string(e61.editStats().reused_paragraphs) + " 段）");
+        std::printf("     一次敲键：全量 %.2f ms → 增量 %.2f ms（重排 %d / %d 段，复用 %d 段）\n",
+                    full_ms, e61.editStats().layout_ms, e61.editStats().relaid_paragraphs, n_para,
+                    e61.editStats().reused_paragraphs);
         sameAsFull("表里编辑");
 
-        // 表格之前：截断要把那张表的旧几何一起丢掉，否则续排会排出两份表。
+        // 表格之前：脏区右端扩到表尾（表不能只排一半），后缀从表后接上。
         e61.setCaret(2, 1);
         expectTrue(e61.typeTextAndRender("前"), "表前那一段敲一个字");
         expectTrue(!e61.editStats().layout_was_full, "表前编辑：没有退回整篇重排");
+        expectTrue(e61.editStats().reused_paragraphs > 0,
+                   "表前编辑：表后那段是搬回来的（复用 " +
+                       std::to_string(e61.editStats().reused_paragraphs) + " 段）");
         expectTrue(e61.layout().placed_tables.size() == 1, "表前编辑：仍然只有一张表（没有重影）");
         sameAsFull("表前编辑");
 
@@ -10913,8 +10929,9 @@ int main() {
         e61.setCaret(after_table, 1);
         expectTrue(e61.typeTextAndRender("后"), "表后那一段敲一个字");
         expectTrue(!e61.editStats().layout_was_full, "表后编辑：没有退回整篇重排");
-        expectTrue(e61.editStats().relaid_paragraphs <= n_para - after_table,
-                   "表后编辑：只重排了后面那一段起（" +
+        // 表后有表也一样：后缀里没有表，整段搬回 —— 只重排被改的那一段。
+        expectTrue(e61.editStats().relaid_paragraphs == 1,
+                   "表后编辑：只重排了被改的那一段（" +
                        std::to_string(e61.editStats().relaid_paragraphs) + " 段）");
         sameAsFull("表后编辑");
 
@@ -10927,6 +10944,100 @@ int main() {
         expectTrue(e61.layout().placed_tables.empty(), "删表之后没有残留的表几何");
         expectTrue(e61.auditTables() == 0, "删表之后表格结构自审一致");
         sameAsFull("删表之后");
+
+        // 两张表：改第一张表的时候，后缀里还剩着第二张表 —— 复用只能走到它的表头（cut），
+        //   其余从那张表续排。这一条盯的是"平移不能穿过表"这条边界，以及截断之后
+        //   段号/行号/行片段有没有接错（接错的症状是第二张表重影或整段上移一行）。
+        NodeTree t61c;
+        {
+            const NodeId sec = t61c.firstSectionId();
+            auto putText = [&](NodeId parent, const std::string& s8) {
+                t61c.setText(t61c.appendChild(parent, NodeKind::TextRun), utf8ToCodepoints(s8));
+            };
+            auto putMark = [&](NodeId parent) {
+                t61c.appendChild(parent, NodeKind::ParagraphMark);
+            };
+            auto putTable = [&](int rows, int cols) {
+                const NodeId table = t61c.appendChild(sec, NodeKind::Table);
+                t61c.find(table)->table.grid_cols = {Length::abs(ptToEmu(88.0)),
+                                                     Length::abs(ptToEmu(88.0))};
+                t61c.find(table)->table.width = Length::percent(1, 1);
+                for (int r = 0; r < rows; ++r) {
+                    const NodeId row = t61c.appendChild(table, NodeKind::TableRow);
+                    for (int c = 0; c < cols; ++c) {
+                        const NodeId cell = t61c.appendChild(row, NodeKind::TableCell);
+                        putText(cell, "格" + std::to_string(r) + std::to_string(c) + "：查体");
+                        putMark(cell);
+                    }
+                }
+            };
+            for (int i = 0; i < 6; ++i) {
+                putText(sec, "表前第 " + std::to_string(i) + " 段：患者诉晨起后心悸。");
+                putMark(sec);
+            }
+            putTable(2, 2);
+            for (int i = 0; i < 20; ++i) {
+                putText(sec, "两表之间第 " + std::to_string(i) + " 段：复查心电图。");
+                putMark(sec);
+            }
+            putTable(2, 2);
+            for (int i = 0; i < 20; ++i) {
+                putText(sec, "表后第 " + std::to_string(i) + " 段：继续观察。");
+                putMark(sec);
+            }
+        }
+
+        EditorEngine e62;
+        expectTrue(e62.init({cjkPath, mnPath, latinPath}), "引擎初始化（两张表）");
+        e62.setConfig(c61);
+        e62.setDocument(t61c, StyleSheet{});
+        e62.relayout();
+        e62.repaint();
+        const int n62 = static_cast<int>(e62.blocks().size());
+        std::vector<int> cells62;
+        for (int p = 0; p < n62; ++p) {
+            if (!e62.blocks()[static_cast<size_t>(p)].cell_path.empty()) cells62.push_back(p);
+        }
+        expectTrue(cells62.size() == 8 && e62.layout().placed_tables.size() == 2,
+                   "两表文档：八格 / 两张表（" + std::to_string(cells62.size()) + " 格，" +
+                       std::to_string(e62.layout().placed_tables.size()) + " 表）");
+
+        // 第一张表的第二格：只敲一个字，表高不变 ⇒ 后缀开始时的状态逐位相同，
+        //   于是第二张表也原样复用（不需要截断）。
+        e62.setCaret(cells62[1], 1);
+        expectTrue(e62.typeTextAndRender("改"), "第一张表里敲一个字");
+        expectTrue(!e62.editStats().layout_was_full, "两表·表里编辑：没有退回整篇重排");
+        expectTrue(e62.editStats().relaid_paragraphs == 4,
+                   "两表·表里编辑：只重排了第一张表（" +
+                       std::to_string(e62.editStats().relaid_paragraphs) + " 段）");
+        expectTrue(e62.editStats().reused_paragraphs > 0,
+                   "两表·表里编辑：后面（含第二张表）是搬回来的（复用 " +
+                       std::to_string(e62.editStats().reused_paragraphs) + " 段）");
+        sameAsFullFor(e62, "两表·表里编辑");
+
+        // 同一个格再敲一长串：格内换行 ⇒ 表变高 ⇒ 后缀整体下移，复用必须在第二张表之前截断。
+        expectTrue(e62.typeTextAndRender("双肺呼吸音清未闻及干湿啰音"), "再敲一串把格撑成两行");
+        expectTrue(!e62.editStats().layout_was_full, "两表·表变高：没有退回整篇重排");
+        expectTrue(e62.editStats().reused_paragraphs > 0,
+                   "两表·表变高：表与第二张表之间那截是搬回来的（复用 " +
+                       std::to_string(e62.editStats().reused_paragraphs) + " 段）");
+        expectTrue(e62.editStats().relaid_paragraphs > 4 && e62.editStats().relaid_paragraphs < n62,
+                   "两表·表变高：从第二张表续排（重排 " +
+                       std::to_string(e62.editStats().relaid_paragraphs) + " / " +
+                       std::to_string(n62) + " 段）");
+        expectTrue(e62.layout().placed_tables.size() == 2,
+                   "两表·表变高：两张表各一份几何（没有重影）");
+        sameAsFullFor(e62, "两表·表变高");
+
+        // 在第一张表的格里回车（段数 +1）：脏区还是那张表，但段号从此整体平移，
+        //   后缀里那张表要按新段号重排（cut 那一路）。这一条盯的是截断之后段表/行盒/格映射
+        //   有没有接错 —— 排版摘要只看行盒与字形，表几何要靠 auditLayout 的 tableDiff。
+        e62.setCaret(cells62[1], 1);
+        expectTrue(e62.splitParagraphAndRender(), "第一张表的格内回车");
+        expectTrue(!e62.editStats().layout_was_full, "两表·分段：没有退回整篇重排");
+        expectTrue(e62.layout().placed_tables.size() == 2, "两表·分段：还是两张表");
+        expectTrue(e62.auditLayout() == 0, "两表·分段：增量排版与全量逐项一致（含表格几何）");
+        sameAsFullFor(e62, "两表·分段");
     }
 
     // [62] 位置划分：每块只装内容，空隙只装边界。

@@ -347,8 +347,11 @@ void EditorEngine::relayout() {
     //   脏区在表之后时表在前缀里，一个字节都不用动；脏区在表之前时表随后缀一起重排。
     //   （旧版有表格、新版删掉了的情况也走这条路：截断会把那张表的几何一起丢掉，
     //   见 truncateLayoutAt。）
-    // 后缀复用仍然拦表格 —— 它假定"后缀只沿块轴平移"，而表格的行高由格内容结算、
-    //   整行放不下时还要回挪，不是行盒累加能算出来的（见 trySuffixReuse）。
+    // 右端同理对齐到表尾：排到一半的表是个中间态（行高还没结算），既不能平移也不能接后缀。
+    //   to < 0 表示右端未知（markLayoutDirty 只给了起点），那时本来也不试后缀复用。
+    const int to = (layout_dirty_to_ >= 0) ? tableAlignedTo(layout_dirty_to_) : -1;
+    // 后缀复用现在也收表格：平移只走到后缀里第一张表为止，剩下的从那张表续排
+    //   （表不是行盒折线能算出来的东西，见 trySuffixReuse 的 cut）。
     const bool can_resume = !must_full && from > 0 && from < n_para &&
                             layout_.para_index.size() > static_cast<size_t>(from);
 
@@ -357,8 +360,8 @@ void EditorEngine::relayout() {
     // 脏区在新版里占几段：右端已知就照实报（提交与撤销都从损伤区间拿到了右端）；
     //   未知时按段数差反推 —— 那要求一次操作只在一处动段落标记，是提交路径的老口径。
     int dirty_count = 1;
-    if (layout_dirty_to_ >= 0) {
-        dirty_count = std::max(1, layout_dirty_to_ - from);
+    if (to >= 0) {
+        dirty_count = std::max(1, to - from);
     } else {
         dirty_count = 1 + std::max(0, n_para - static_cast<int>(layout_.para_index.size()));
     }
@@ -373,24 +376,46 @@ void EditorEngine::relayout() {
     int relaid_paras = 1;
     // 后缀整体平移：后缀在的每一页内容都跟着挪了 —— 这个答案已知，不必再去哈希它们。
     bool pages_known_changed = false;
+    // 复用只覆盖到第 cut 段之前（后缀里遇到了表）：剩下的从 cut 续排。
+    int cut = n_para;
+    ReflowState cut_state;
     // 只有"脏区到哪儿结束"是已知的，后缀复用才成立：它把 [from + dirty_count, 末尾) 整段
     //   原样搬回来，等于断言"那之后一个字都没变"。markLayoutDirty 只给起点（"从这里起全脏"），
     //   那个断言就不成立 —— 括号占位就是活例子：聚焦档下换一个字段会挪走旧字段的括号，
     //   而它在脏区起点之后；后缀的空格宽度变了、行盒宽度却没变，续排状态比对看不出来，
     //   搬回来的就是带着旧括号的旧行盒。
-    const bool splice_ok = (layout_dirty_to_ >= 0);
+    const bool splice_ok = (to >= 0);
     if (!must_full && splice_ok && from >= 0 && from < n_para) {
-        reuse =
-            trySuffixReuse(from, dirty_count, &fp_lo, &fp_hi, &relaid_paras, &pages_known_changed);
+        reuse = trySuffixReuse(from, dirty_count, &fp_lo, &fp_hi, &relaid_paras, &cut, &cut_state,
+                               &pages_known_changed);
     }
     if (reuse != SuffixReuse::None) {
-        const ParaIndex& head = layout_.para_index[static_cast<size_t>(from)];
-        const ParaIndex& tail = layout_.para_index[static_cast<size_t>(from + relaid_paras - 1)];
+        // 段表的下标先取出来：cut 那一路会 truncate + 续排，段表可能重新分配。
+        const int head_line_begin = layout_.para_index[static_cast<size_t>(from)].line_begin;
+        const int tail_line_end =
+            layout_.para_index[static_cast<size_t>(from + relaid_paras - 1)].line_end;
         last_relaid_paragraphs_ = relaid_paras;
-        last_reused_paragraphs_ = n_para - relaid_paras - from;
+        last_reused_paragraphs_ = cut - relaid_paras - from;
         last_suffix_shifted_ = (reuse == SuffixReuse::Shifted);
-        last_relaid_lines_ = tail.line_end - head.line_begin;
+        last_relaid_lines_ = tail_line_end - head_line_begin;
         last_layout_full_ = false;
+        if (cut < n_para) {
+            // 复用只到后缀里的第一张表：那张表与它之后的内容从表头续排。
+            //   截断连表的旧几何一起丢（first_block >= cut），续排重新 openTable 只留一份。
+            const int old_cut_page = firstPageOfParagraph(cut);
+            truncateLayoutAt(cut);
+            layoutDocumentRangeWithTables(fonts_, blocks(), cfg_.page, tables_, cut, n_para,
+                                          cut_state, &shaping_cache_, &layout_);
+            last_relaid_paragraphs_ = relaid_paras + (n_para - cut);
+            last_relaid_lines_ = layout_.stats.placed_line_count - head_line_begin;
+            // 从 cut 起是重排过的：页数可能变，指纹只能从"新旧两版里更靠前的那一页"起标脏。
+            const int new_cut_page = firstPageOfParagraph(cut);
+            int lo = fp_lo;
+            if (old_cut_page >= 0 && (lo < 0 || old_cut_page < lo)) lo = old_cut_page;
+            if (new_cut_page >= 0 && (lo < 0 || new_cut_page < lo)) lo = new_cut_page;
+            pages_known_changed = true;
+            fp_lo = lo;
+        }
     } else if (can_resume) {
         // 脏段在旧版里落在哪一页 —— 截断会把这一段从段表里摘掉，所以先读。
         const int old_first_page = firstPageOfParagraph(from);
@@ -480,16 +505,14 @@ void EditorEngine::relayout() {
 
 EditorEngine::SuffixReuse EditorEngine::trySuffixReuse(int from, int dirty_count, int* page_lo,
                                                        int* page_hi, int* relaid_paragraphs,
+                                                       int* cut, ReflowState* cut_state,
                                                        bool* all_pages_changed) {
     *page_lo = -1;
     *page_hi = -1;
     *relaid_paragraphs = 1;
+    *cut = static_cast<int>(blocks().size());
+    *cut_state = ReflowState{};
     *all_pages_changed = false;
-    // 有表格时不做后缀复用：这一条把后缀整段沿块轴平移，而表格的行高由格内容结算
-    //   （内边距、最小行高、整行放不下时整行回挪、跨页拆分行都在里面），不是"行盒字号
-    //   乘行距"能累加出来的。平移量算错不会崩，只会让表格越错越远 ——
-    //   退到续排（从脏段重排到末尾），那一趟与全量走同一条路。
-    if (!tables_.empty() || !layout_.placed_tables.empty()) return SuffixReuse::None;
     const int n_para = static_cast<int>(blocks().size());
     const int n_old = static_cast<int>(layout_.para_index.size());
     // 段数增量：这一次编辑把旧 [from, from + m_old) 段换成了新 [from, from + m_new) 段。
@@ -525,6 +548,20 @@ EditorEngine::SuffixReuse EditorEngine::trySuffixReuse(int from, int dirty_count
     //   m_old <= 0 说明两侧尾巴对不齐（段数差比脏区还宽），那不是后缀能复用的形状。
     if (m_old <= 0) return SuffixReuse::None;
     if (from + m_new > n_para || from + m_old >= n_old) return SuffixReuse::None;
+
+    // 后缀里遇到第一张表就在表头截断：复用只搬回 [from + m_new, cut)。
+    //   表不能平移（行高要等一整行的格排完才结算、放不下整行回挪、跨页按行盒切片），
+    //   所以它要么整张在脏区里、要么整张在复用区里 —— 脏区两端已经对齐到表
+    //   （tableAlignedFrom / tableAlignedTo），这条不变式是那两处给的。
+    //   剩下的部分从 cut 续排，那一趟与全量重排同构。
+    int cut_at = n_para;
+    for (const LayoutTable& t : tables_) {
+        for (const LayoutCell& c : t.cells) {
+            if (c.first_block >= from + m_new) cut_at = std::min(cut_at, c.first_block);
+        }
+    }
+    // 表正好从后缀的第一段起（或压在边界上）：没有可复用的一段，交给续排。
+    if (cut_at <= from + m_new) return SuffixReuse::None;
 
     LayoutResult scratch;
     const ReflowState after =
@@ -573,6 +610,34 @@ EditorEngine::SuffixReuse EditorEngine::trySuffixReuse(int from, int dirty_count
     layout_.glyphs.insert(layout_.glyphs.begin() + old_glyph_lo,
                           scratch.glyphs.begin() + new_glyph_lo,
                           scratch.glyphs.begin() + new_glyph_hi);
+
+    // 表格的绘制几何一起换：脏区里的表（整张都在脏区里）换成 scratch 这一轮刚排出来的那一份，
+    //   后面的表段号跟着平移。不换的话，脏区那张表要么没有几何（画不出来），要么留着旧的一份
+    //   （同一张表两份几何 = 重影，而像素判据只在整帧对拍里看得见）。
+    //   placed_tables 按 first_block 单调（外层的表先 open，它的首段必不大于内层的），
+    //   所以两端各二分一次就圈出"脏区里的那些表"。
+    {
+        auto byFirstBlock = [](const PlacedTable& t, int p) { return t.first_block < p; };
+        const auto lo_it = std::lower_bound(layout_.placed_tables.begin(),
+                                            layout_.placed_tables.end(), from, byFirstBlock);
+        const auto hi_it =
+            std::lower_bound(lo_it, layout_.placed_tables.end(), from + m_old, byFirstBlock);
+        std::vector<PlacedTable> merged;
+        merged.reserve(layout_.placed_tables.size() + scratch.placed_tables.size());
+        merged.insert(merged.end(), layout_.placed_tables.begin(), lo_it);
+        merged.insert(merged.end(), scratch.placed_tables.begin(), scratch.placed_tables.end());
+        for (auto it = hi_it; it != layout_.placed_tables.end(); ++it) {
+            PlacedTable t = *it;
+            t.first_block += d_para;
+            // 格自己的 first_block 也要跟着走：命中测试与单元格选区都按它把段映射回格
+            //   （见 layoutCellAt），只挪表头那一个数会让整张表的格都指向上一段。
+            //   走到这里的表通常只剩"整段复用 + 段数变了"那一条（Shifted 那一路会在 cut 处
+            //   把它们整张丢掉再续排），但少挪一个数就是静默错位，所以照挪不误。
+            for (LayoutCell& c : t.cells) c.first_block += d_para;
+            merged.push_back(std::move(t));
+        }
+        layout_.placed_tables = std::move(merged);
+    }
 
     // 段号整体平移：脏区之后那些段的段号全变了，而行盒与字形都把段号记在字段里，
     //   而光标几何、审计都按它找行 —— 不跟着改，光标会落到别的段上（静默错位）。
@@ -660,9 +725,12 @@ EditorEngine::SuffixReuse EditorEngine::trySuffixReuse(int from, int dirty_count
     //   后缀必然整体下移 —— 那不是"同状态"，而是"纯平移"。
     //   段表已经挪好槽位、行盒与字形的段号也已经重编过，平移那一趟按新段号走即可。
     if (u_lo < 0) return SuffixReuse::None;
-    if (!suffixIsHorizontalOnly(from + m_new)) return SuffixReuse::None;
-    if (!shiftSuffixBlockAxis(from + m_new, static_cast<size_t>(old_glyph_lo + new_glyphs), after))
+    // 平移只走到 cut：那里是第一张表，表的行片段不是折线能推出来的。
+    if (!suffixIsHorizontalOnly(from + m_new, cut_at)) return SuffixReuse::None;
+    if (!shiftSuffixBlockAxis(from + m_new, static_cast<size_t>(old_glyph_lo + new_glyphs), cut_at,
+                              after, cut_state))
         return SuffixReuse::None;
+    *cut = cut_at;
     *page_lo = u_lo;
     *page_hi = std::max(0, layout_.stats.page_count - 1);
     // 后缀整体挪位 ⇒ 它在的每一页内容都变了。这个结论不必靠哈希去问：
@@ -672,20 +740,25 @@ EditorEngine::SuffixReuse EditorEngine::trySuffixReuse(int from, int dirty_count
     return SuffixReuse::Shifted;
 }
 
-bool EditorEngine::suffixIsHorizontalOnly(int from) const {
-    // from 就是后缀的第一段（含）；后缀整体平移只对横排成立，见 shiftSuffixBlockAxis。
-    for (int p = from; p < static_cast<int>(blocks().size()); ++p) {
+bool EditorEngine::suffixIsHorizontalOnly(int from, int to) const {
+    // from 就是后缀的第一段（含），to 是第一张表的位置；整体平移只对横排成立。
+    for (int p = from; p < to; ++p) {
         if (blocks()[static_cast<size_t>(p)].wm.isVertical()) return false;
     }
     return true;
 }
 
-bool EditorEngine::shiftSuffixBlockAxis(int from, size_t first_glyph, const ReflowState& after) {
+bool EditorEngine::shiftSuffixBlockAxis(int from, size_t first_glyph, int to,
+                                        const ReflowState& after, ReflowState* end_state) {
     const float cy = cfg_.page.margin_pt;
     const float ch = cfg_.page.contentHeightPt();
-    const int n_para = static_cast<int>(blocks().size());
 
     std::vector<PlacedGlyph>& gs = layout_.glyphs;  // 校验与改写共用这一份
+    // 走完 to 之后该停在哪个字形：to 是后缀里的第一张表时，它那一段的行与字形都还没动过。
+    const size_t glyph_end = (to < static_cast<int>(layout_.para_index.size()))
+                                 ? static_cast<size_t>(std::max(
+                                       0, layout_.para_index[static_cast<size_t>(to)].glyph_begin))
+                                 : gs.size();
 
     // 沿着"行槽折线"走一遍：每行占 lb.size_pt * line_factor（行盒自己的字号），
     // 段间让出 space_after_pt，放不下就换页 —— 与 layoutDocumentRange 横排分支同一套规则。
@@ -695,14 +768,15 @@ bool EditorEngine::shiftSuffixBlockAxis(int from, size_t first_glyph, const Refl
     // 先空跑一遍（apply=false）做校验，通过了再真改。理由：这一趟边走边写
     //   layout_，一旦中途发现"字形与行号对不上"就已经改了一半 —— 那时既不能
     //   继续（结果错）也不能退出（数据已经脏了）。校验与修改必须是两趟。
-    int final_page = after.page_index;  // 出参：走完最后落在哪一页
+    int final_page = after.page_index;  // 走完最后落在哪一页
+    ReflowState end;                    // 走完 to 时的续排状态（cut 那一路要用它接着排）
     auto walk = [&](bool apply) -> bool {
         float s = after.cursor_y;
         int page = after.page_index;
         int line_no = after.line_total;
         size_t g = first_glyph;
         // from 就是后缀的第一段（脏区可能占不止一段，所以调用方另给了 first_glyph）
-        for (int p = from; p < n_para; ++p) {
+        for (int p = from; p < to; ++p) {
             const BlockSpec& b = blocks()[static_cast<size_t>(p)];
             // 续排锚点：每一段都要更新成新的位置，否则以后从这一段续排会拿着过期
             // 状态（页号 / 块轴位置 / 行号都变了）。与主循环一致：在空段判定与翻页
@@ -721,27 +795,33 @@ bool EditorEngine::shiftSuffixBlockAxis(int from, size_t first_glyph, const Refl
             for (int L = pi.line_begin; L < pi.line_end; ++L) {
                 LineBox& lb = layout_.lines[static_cast<size_t>(L)];
                 // 行高按行盒自己的字号算（见上面那段说明）：一行里可以混排字号。
-                const float lh = lb.size_pt * b.line_factor;
+                const float lh = lb.advance_pt;
                 if (s + lh > cy + ch) {
                     ++page;
                     s = cy;
                 }
-                const float dy = s - lb.block_lo_pt;
+                // 行的三个纵向字段用行盒自己记的度量重算，公式与 placeLine 同源：
+                //   基线 = 行顶 + ascent，上边 = 行顶，下边 = 基线 + descent。
+                //   不写"老坐标 + 大增量"：那会多一次重新结合，跨页几页的平移（比如删掉
+                //   一张占半页的表）会在末位差一个 ulp，而判据是逐位对拍。
+                const float old_axis = lb.bracket_axis_pt;
+                const float axis = s + lb.ascent_pt;
                 // 字形与它的行一一对应：两边都是按行序追加的，并行往前走即可
                 // （某行可能一个字形都没有 —— 全是占位槽的行 —— 指针不动就是对的）。
+                //   字形纵坐标相对基线不变，所以按"新基线 - 到基线的距离"重算，不做增量加法。
                 const int old_line = lb.line;
                 while (g < gs.size() && gs[g].line == old_line) {
                     if (apply) {
-                        gs[g].y_pt += dy;
+                        gs[g].y_pt = axis - (old_axis - gs[g].y_pt);
                         gs[g].page = page;
                         gs[g].line = line_no;
                     }
                     ++g;
                 }
                 if (apply) {
-                    lb.block_lo_pt += dy;
-                    lb.block_hi_pt += dy;
-                    lb.bracket_axis_pt += dy;  // 横排下它就是基线，跟着行一起挪
+                    lb.bracket_axis_pt = axis;  // 横排下它就是基线
+                    lb.block_lo_pt = s;
+                    lb.block_hi_pt = axis + lb.descent_pt;
                     lb.page = page;
                     lb.line = line_no;
                 }
@@ -750,16 +830,20 @@ bool EditorEngine::shiftSuffixBlockAxis(int from, size_t first_glyph, const Refl
             }
             s += b.space_after_pt;
         }
-        // 字形必须正好走完：多一个少一个都说明行号与字形对不上 —— 宁可整篇重排，
+        // 字形必须正好走到 to 的边界：多一个少一个都说明行号与字形对不上 —— 宁可整篇重排，
         // 也不要留下错位的排版（错位是静默的，只在画面上表现为"某个字串行了"）。
         final_page = page;
-        return g == gs.size();
+        end = ReflowState{page, s, line_no};
+        return g == glyph_end;
     };
     if (!walk(/*apply=*/false)) return false;
     walk(/*apply=*/true);
 
-    layout_.stats.page_count = final_page + 1;
+    // 页数只在"走完整篇"时才能定：to 是表头时，页数要由后面的续排接着算。
+    if (to >= static_cast<int>(layout_.para_index.size()))
+        layout_.stats.page_count = final_page + 1;
     summarizeLayoutStats(&layout_);
+    *end_state = end;
     return true;
 }
 
@@ -845,6 +929,28 @@ int EditorEngine::tableAlignedFrom(int from) const {
     }
     // 表格输入里找不到这张表（投影与排版输入不同步）：不动起点，交给续排照常处理。
     return from;
+}
+
+int EditorEngine::tableAlignedTo(int to) const {
+    if (tables_.empty()) return to;
+    const int n = static_cast<int>(blocks().size());
+    if (to <= 0 || to >= n) return to;
+    int end = to;
+    // 两侧都要看：to-1 是最后一个脏段（可能还在表里），to 是后缀首段（可能已经是同一张表的
+    //   下一格）。任一侧落在表里，就得扩到那张最外层表的末尾 —— 表只排一半是个中间态。
+    for (int probe = to - 1; probe <= to; ++probe) {
+        if (probe < 0 || probe >= n) continue;
+        const std::vector<CellSlot>& path = blocks()[static_cast<size_t>(probe)].cell_path;
+        if (path.empty()) continue;
+        const uint64_t handle = path.front().table;
+        for (const LayoutTable& t : tables_) {
+            if (t.handle != handle) continue;
+            for (const LayoutCell& c : t.cells) {
+                end = std::max(end, c.first_block + c.block_count);
+            }
+        }
+    }
+    return std::min(end, n);
 }
 
 void EditorEngine::truncateLayoutAt(int para) {
