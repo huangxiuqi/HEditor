@@ -203,8 +203,7 @@ void EditorEngine::markPagesChangedFrom(int first_page) {
         return (v == base) ? (v ^ 1ull) : v;
     };
     for (int p = first; p < n; ++p) {
-        const uint64_t base =
-            (p < page_fp_base_count_) ? page_fp_in_base_[static_cast<size_t>(p)] : 0;
+        const uint64_t base = (p < page_fp_prev_count_) ? page_fp_prev_[static_cast<size_t>(p)] : 0;
         page_fp_new_[static_cast<size_t>(p)] = dirty_value(base);
     }
 
@@ -218,8 +217,7 @@ void EditorEngine::markPagesChangedFrom(int first_page) {
     caret_.linesOnPage(first, &lo, &hi);
     (void)hi;
     for (int k = lo; k < n_lines; ++k) {
-        const uint64_t base =
-            (k < line_fp_base_count_) ? line_fp_in_base_[static_cast<size_t>(k)] : 0;
+        const uint64_t base = (k < line_fp_prev_count_) ? line_fp_prev_[static_cast<size_t>(k)] : 0;
         line_fp_new_[static_cast<size_t>(k)] = dirty_value(base);
     }
 }
@@ -266,34 +264,6 @@ int EditorEngine::contentBottomPx() const {
     return static_cast<int>(std::ceil((bottom_pt + cfg_.page.margin_pt) * cfg_.zoom));
 }
 
-/**
- * 第 page 页在帧内的首行偏移。
- *
- * 唯一的"页 -> 帧内位置"算法。原先同一个算式散在七处，改布局时漏掉一处就只表现为
- *   某一层偏几页（例如光标对了、表单括号偏一页），而其余全对 —— 那种错最难查。
- *
- * 布局是"按页号分槽"：位置由页号直接决定，与窗口开在哪里无关。于是窗口平移时
- *   重叠页的像素一行都不用搬（改前每次换窗要把底图与帧各 memmove 一遍，实测 11 ms）。
- * 前提是"任意连续 count 页的槽号互不相同"，它由"槽数 >= 窗口页数"保证；调用方
- *   （presentInternal）会夹住这一条。
- */
-int EditorEngine::frameOffsetOfPage(int page) const {
-    const int step = pagePxHeight() + pageGapPx();
-    // 槽数还没被设过（宿主没接这条门面，例如 native 单测与审计）：
-    //   退回"帧就是这一窗的条带"，即改动前的算法。那时帧里第 0 行就是窗口首页。
-    if (frame_slot_count_ <= 0) return (page - base_first_page_) * step;
-    return slotOfPage(page) * step;
-}
-
-void EditorEngine::setFrameSlots(int n) {
-    if (n <= 0 || n == frame_slot_count_) return;
-    frame_slot_count_ = n;
-    // 槽数是取模的模数：一变，所有页的槽号全都变，帧里的内容整体作废。
-    //   下一次呈现会走"底图全建"那一支，把新布局重新画一遍。
-    base_valid_ = false;
-    slot_page_.assign(static_cast<size_t>(n), -1);
-}
-
 void EditorEngine::relayout() {
     const auto t0 = Clock::now();
     // 视图先摆好：下面第一件事就是夹光标，而它读的是视图（地址稳定，摆一次就够）。
@@ -321,7 +291,6 @@ void EditorEngine::relayout() {
             }
             page_cache_.clear();
             page_dirty_rects_.clear();  // 旧矩形描述的是旧像素
-            base_valid_ = false;
         }
     }
 

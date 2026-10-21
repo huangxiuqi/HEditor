@@ -125,9 +125,10 @@ std::string EditorEngine::describeCaret() const {
     if (caretRectPt(&r))
         os << "  光标矩形(页面磅): x=" << r.x << " y=" << r.y << " w=" << r.w << " h=" << r.h
            << "\n";
-    const Rect px = caretRectPx();
-    os << "  光标矩形(帧像素): x=" << px.x << " y=" << px.y << " w=" << px.w << " h=" << px.h
-       << "\n";
+    int pg = -1;
+    const Rect px = caretRectPx(&pg);
+    os << "  光标矩形(页内像素): 第 " << pg << " 页 x=" << px.x << " y=" << px.y << " w=" << px.w
+       << " h=" << px.h << "\n";
     return os.str();
 }
 

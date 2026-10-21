@@ -37,7 +37,9 @@
   .ed #stage { position: absolute; inset: 0; overflow-y: auto; overflow-x: hidden;
                background: #e9eaec; display: flex; justify-content: center;
                align-items: flex-start; }
-  .ed #pages { position: relative; flex: none; }
+  /* overflow: hidden —— Worker 侧两种视图模式共用一套页容器，连页下最后一页会伸出
+     内容底边，不裁就会多出一整页的滚动空白（分页下恰好等于末页底边，裁不到东西）。 */
+  .ed #pages { position: relative; flex: none; overflow: hidden; }
   .ed #pages canvas { position: absolute; left: 0; display: block;
                       box-shadow: 0 1px 3px rgba(0,0,0,.18); }
   /* 一页一张画布的 Worker 形态：画布直接摆在滚动容器里，靠 #spacer 撑出全文高度。 */
@@ -110,7 +112,7 @@
     //   输入层，所以它必须在滚动容器内部；Worker 那一侧按"坐标减去滚动位移"摆，
     //   所以它必须是滚动容器的兄弟覆盖层。这不是风格差异，摆错了候选框就会飘。
     const body = kind === 'worker'
-      ? `<div class="body"><div id="stage"><div id="spacer"></div></div>` +
+      ? `<div class="body"><div id="stage"><div id="spacer"></div><div id="pages"></div></div>` +
         `<div class="ovl"><textarea id="ime" rows="1" spellcheck="false"></textarea></div></div>`
       : `<div class="body"><div id="stage"><div id="pages"></div>` +
         `<textarea id="ime" rows="1" spellcheck="false"></textarea></div></div>`;

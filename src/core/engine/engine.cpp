@@ -96,7 +96,6 @@ bool EditorEngine::init(const std::vector<std::string>& fontPaths) {
         if (fonts_.addFace(p) < 0) return false;
     }
     if (fonts_.faceCount() <= 0) return false;
-    base_valid_ = false;
 
     // 字形缓存在 Skia 侧是进程内一份 strike 缓存（与是哪一块 Bitmap 无关），
     //   所以这里只需要把预算调够，没有"两块图各存一份"的问题。
@@ -116,12 +115,15 @@ bool EditorEngine::init(const std::vector<std::string>& fontPaths) {
 void EditorEngine::ensureRenderSetup() {
     if (render_setup_done_) return;
     render_setup_done_ = true;
-    base_.setGlyphCacheBudget(kGlyphCacheBudgetBytes);
+    // 字体表先立起来：其余位图都 shareFonts(font_owner_)，而 reset(0,0) 正是
+    //   建出那份共享表的最小代价（一像素都不分配）。
+    font_owner_.reset(0, 0);
+    font_owner_.setGlyphCacheBudget(kGlyphCacheBudgetBytes);
 }
 
 /**
- * 把颜色混进一个 FNV 值。两处签名（光栅外观、表单标记计划）共用同一套编码，
- * 免得同一个颜色在两个地方算出两种哈希。
+ * 把颜色混进一个 FNV 值。光栅签名与页面底色共用同一套编码 —— 同一个颜色在两个地方
+ * 算出两种哈希，排查时就会以为改的不是同一项。
  */
 static uint64_t fnvMixColor(uint64_t h, const Color& c) {
     return fnvMix(h, (static_cast<uint64_t>(c.r) << 24) | (static_cast<uint64_t>(c.g) << 16) |
@@ -191,8 +193,6 @@ void EditorEngine::setConfig(const EngineConfig& cfg) {
         raster_sig_ = sig;
         page_dirty_rects_.clear();  // 旧矩形描述的是旧像素，作废
     }
-    base_valid_ = false;  // 缩放/页度量变了，底图作废
-    caret_rect_px_prev_ = Rect{};
     if (plan_changed) markLayoutDirtyForBrackets();
     if (page_changed) markAllLayoutDirty();
     if (plan_changed || page_changed) relayout();
@@ -237,14 +237,10 @@ void EditorEngine::setDocument(const NodeTree& tree, const StyleSheet& sheet) {
     sel_history_.clear();
     sel_pos_ = 0;
     setCaretByText(TextPos{0, 0});
-    caret_rect_px_prev_ = Rect{};
-    base_valid_ = false;
     page_dirty_rects_.clear();
     rebuildFromTree();
     // 整份文档换了：段数与内容都可能全变，没有可复用的前缀。
     markAllLayoutDirty();
-    // 控件集合随之变了 → 帧上的标记与上一帧不是一回事，下一次呈现整帧重贴。
-    frame_needs_full_refresh_ = true;
 }
 
 const rev::Doc& EditorEngine::document() const {
@@ -515,7 +511,6 @@ bool EditorEngine::undo() {
     // 撤销可能把"有没有控件"整体改掉（撤销删掉最后一个控件、或把只读控件撤回来），
     //   那样占位集合整个翻转，而损伤区间只报块内容 —— 计划变了就整体重排。
     if (bracketPlanId() != plan_before) markLayoutDirtyForBrackets();
-    frame_needs_full_refresh_ = true;
     return true;
 }
 
@@ -532,7 +527,6 @@ bool EditorEngine::redo() {
         ++sel_pos_;
     }
     if (bracketPlanId() != plan_before) markLayoutDirtyForBrackets();
-    frame_needs_full_refresh_ = true;
     return true;
 }
 
@@ -550,7 +544,17 @@ bool EditorEngine::redoAndRender() {
     return true;
 }
 
-size_t EditorEngine::frameBytes() const { return bitmap_.byteSize(); }
+size_t EditorEngine::frameBytes() const { return ensureFrameExport(); }
+
+const uint8_t* EditorEngine::frame() const {
+    ensureFrameExport();
+    return frame_export_.data();
+}
+
+int EditorEngine::frameHeight() const {
+    const int step = pagePxHeight() + pageGapPx();
+    return std::max(1, win_page_count_) * step;
+}
 
 size_t EditorEngine::documentCodepoints() const {
     size_t n = 0;
@@ -566,17 +570,23 @@ size_t EditorEngine::documentCodepoints() const {
 
 bool EditorEngine::caretRectPt(Rect* out) const { return caret_.caretRectPt(out); }
 
-Rect EditorEngine::caretRectPx() const {
-    int page = 0;
+/**
+ * 光标矩形（页内像素）。窗口偏移由宿主按 (页号 x 步距) 自己加 —— 引擎这一侧只认页内坐标，
+ * 于是同一个光标在窗口挪动前后给出的是同一个矩形。旧版在这里加 off_y，使这个值随
+ * "窗口首页落在哪个槽"变化，宿主只能再减回去（两处口径必须配对，改一处就整体错位）。
+ */
+Rect EditorEngine::caretRectPx(int* page) const {
+    int p = 0;
     Rect r{};
-    if (!caret_.caretRectFor(caret(), &page, &r)) return Rect{};
+    if (page != nullptr) *page = -1;
+    if (!caret_.caretRectFor(caret(), &p, &r)) return Rect{};
     const float zoom = cfg_.zoom;
-    const float off_y = static_cast<float>(frameOffsetOfPage(page));
     Rect px;
     px.x = std::floor(r.x * zoom);
-    px.y = std::floor(r.y * zoom + off_y);
+    px.y = std::floor(r.y * zoom);
     px.w = std::max(1.0f, std::ceil(r.w * zoom));
     px.h = std::max(1.0f, std::ceil(r.h * zoom));
+    if (page != nullptr) *page = p;
     return px;
 }
 
@@ -602,24 +612,26 @@ std::vector<EditorEngine::PageRect> EditorEngine::selectionRectsIn(int first_pag
 }
 
 /**
- * 选区矩形（帧像素坐标）。与 caretRectPx 同一套换算：先乘 zoom，再加"窗口首页之下的
- * 那几页"的累加偏移。宽高为 0 的（空行的那个插入点）在这里丢掉 —— 画不出来。
+ * 选区矩形（页内像素坐标）。与 caretRectPx 同一套换算（乘 zoom），但不加任何窗口偏移 ——
+ * 页号随矩形一起给出，落点由读的一方按 (页号 x 步距) 加。
+ * 宽高为 0 的（空行的那个插入点）在这里丢掉 —— 画不出来。
  */
-std::vector<Rect> EditorEngine::selectionRectsPx() const { return selectionRectsPxIn(0, 0); }
+std::vector<PageRect> EditorEngine::selectionRectsPx() const { return selectionRectsPxIn(0, 0); }
 
-std::vector<Rect> EditorEngine::selectionRectsPxIn(int first_page, int count) const {
-    std::vector<Rect> out;
+std::vector<PageRect> EditorEngine::selectionRectsPxIn(int first_page, int count) const {
+    std::vector<PageRect> out;
     const std::vector<PageRect> prs = selectionRectsIn(first_page, count);
     if (prs.empty()) return out;
     const float zoom = cfg_.zoom;
+    out.reserve(prs.size());
     for (const PageRect& pr : prs) {
-        const float off_y = static_cast<float>(frameOffsetOfPage(pr.page));
-        Rect px;
-        px.x = std::floor(pr.r_pt.x * zoom);
-        px.y = std::floor(pr.r_pt.y * zoom + off_y);
-        px.w = std::ceil(pr.r_pt.w * zoom);
-        px.h = std::ceil(pr.r_pt.h * zoom);
-        if (px.w <= 0.0f || px.h <= 0.0f) continue;
+        PageRect px;
+        px.page = pr.page;
+        px.r_pt.x = std::floor(pr.r_pt.x * zoom);
+        px.r_pt.y = std::floor(pr.r_pt.y * zoom);
+        px.r_pt.w = std::ceil(pr.r_pt.w * zoom);
+        px.r_pt.h = std::ceil(pr.r_pt.h * zoom);
+        if (px.r_pt.w <= 0.0f || px.r_pt.h <= 0.0f) continue;
         out.push_back(px);
     }
     return out;
@@ -949,13 +961,6 @@ void EditorEngine::setEditMode(EditMode m) {
     // 切模式会改变占位集合本身（只读模式一个都不占，文档与表单都要占），
     //   所以这里可能也要重排（Focused 档下还有"光标被夹进最近字段"这一层）。
     relayoutIfBracketPlanChanged(plan_before);
-
-    // 切模式只影响帧上的标记（画 / 不画），底图一个字都不变 ——
-    //   所以不动页指纹，只要求下一次整帧重贴。
-    //   如果哪天标记改回"画进底图"，这里必须换成重算页指纹 ——
-    //     否则切到只读模式后括号会残留，而"内容没变 → 跳过重画"会让它一直在。
-    //     对应的断言是单测里"切到只读模式后一个像素都不剩"那一条。
-    frame_needs_full_refresh_ = true;
 }
 
 int EditorEngine::controlAtPt(float x_pt_doc, float y_pt_doc) const {

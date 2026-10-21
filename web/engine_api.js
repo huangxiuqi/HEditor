@@ -10,7 +10,7 @@
 //   这样同一份代码能跑在 Worker 里，也能跑在主线程里。
 //
 // 通道（与 web/engine_worker.js、未来的 transport_worker.js 的约定）：
-//   下行：boot / pageCanvas / viewCanvas / view / do（改状态）/ ask（要返回值）
+//   下行：boot / pageCanvas / viewMode / view / do（改状态）/ ask（要返回值）
 //   上行：ready / state / ack / reply / error
 (function () {
 'use strict';
@@ -21,7 +21,7 @@
  * @param {object} cfg 传输与呈现钩子
  * @param {function} cfg.post 上行发送；worker 侧是 postMessage，主线程侧是直接回调
  * @param {object} cfg.host 画布钩子，见文件头的三条分叉
- * @returns {object} boot / do / ask / view / pageCanvas / viewCanvas / state / relayout
+ * @returns {object} boot / do / ask / view / pageCanvas / viewMode / state / relayout
  */
 function createEngineApi(cfg) {
 const post = cfg.post;
@@ -118,8 +118,6 @@ function geom(st) {
     // 槽数的上限（与文档位置无关，只随视口与页度量变）。宿主按它建槽、再把自己实际
     //   建了几个报回来（pageCanvas.slots）—— 一个数、一个来源，两侧不会分叉。
     maxWindowPages: maxWindowPages(),
-    // 引擎侧的帧槽数（宿主切帧按它算源行）。它必须等于上面那个上限 —— 同一个数。
-    frameSlots: mod.frameSlots ? mod.frameSlots() : 0,
     // 这一侧实际在用的槽数，供诊断读。它必须等于宿主报回来的那个值。
     slots: host.slotCount(),
     pagesReady: host.pagesMissing() === 0,
@@ -278,34 +276,10 @@ const PRESENT_ALWAYS = new Set([
 // 自己钉锚点的运算：不要再让 retarget 按可见范围改回来（见 WRITE.viewport 的说明）。
 const KEEP_ANCHOR = new Set(['viewport']);
 
-/**
- * 把"帧槽数"报给引擎。它等于窗口页数上限，与画布槽数是同一个数（同一个来源）。
- *
- * 引擎侧的帧按"页号 mod 槽数"布局，槽数一变所有页的位置都变 ⇒ 引擎会把帧整体作废、
- *   下一趟整窗重画。所以这里返回"是否变过"，调用方据此强制一次 present ——
- *   否则帧还是旧布局，而贴图已经按新槽号取源行，结果是每一页都贴错位置。
- *
- * 它与画布槽数可以不等，这是有意的：画布槽建了就不回收（已转移的画布不能再转移
- *   第二次，缩回去再涨就得新建加首画），所以那个数是"历史最大"；而帧槽只是内存，
- *   跟着窗口页数上限走就行。blitPage 用两个槽号分别取"源行"与"目标画布"，各自自洽。
- */
-let frameSlotsSent = 0;
-function syncFrameSlots() {
-  if (!mod || typeof mod.setFrameSlots !== 'function') return false;
-  const n = maxWindowPages();
-  if (n <= 0 || n === frameSlotsSent) return false;
-  frameSlotsSent = n;
-  mod.setFrameSlots(n);
-  return true;
-}
-
 function render(opName) {
   let st = JSON.parse(mod.editStatsJson());
   const moved = KEEP_ANCHOR.has(opName) ? false : retarget(st);
-  // 槽数变了必须重画：帧的布局整体换了（引擎那边会把帧作废），不 present 就会拿
-  //   新槽号去取旧布局的源行 —— 每一页都贴错位置。
-  const slotsChanged = syncFrameSlots();
-  if (moved || slotsChanged || PRESENT_ALWAYS.has(opName)) {
+  if (moved || PRESENT_ALWAYS.has(opName)) {
     mod.present();
     st = JSON.parse(mod.editStatsJson());
   }
@@ -413,8 +387,6 @@ function paintFull() {
   //   事件、再发一条视口消息回来 —— 与正在滚动的用户（或外部脚本）来回打架，
   //   窗口跟着反复变、画布反复建与丢。实测症状：跨页滚动后某一页始终没有画布。
   scrollReset = true;
-  // 槽数要在重排重画之前报过去：帧的布局由它决定，报晚了这一趟就按旧槽号画。
-  syncFrameSlots();
   const n = maxWindowPages();
   mod.setViewportAnchor(0, n);
   lastAnchor = '0:' + n;
@@ -699,13 +671,12 @@ const READ = {
     const fw = mod.frameWidth();
     const ph = mod.pagePxHeight();
     const step = ph + mod.pageGapPx();
-    const fs = (mod.frameSlots ? mod.frameSlots() : 0) | 0;
     const first = mod.windowFirstPage();
     const count = mod.windowPageCount();
     const out = [];
     for (let p = first; p < first + count; ++p) {
-      const slot = fs > 0 ? ((p % fs) + fs) % fs : p - first;
-      const base = slot * step;
+      // 导出图里第 k 页（相对窗口首页）落在 k x 步距 —— 槽那套编号已经删掉。
+      const base = (p - first) * step;
       const ink = [];
       const sel = [];
       const selDeep = [];
@@ -764,7 +735,6 @@ const READ = {
   frameWidth: () => mod.frameWidth(),
   frameHeight: () => mod.frameHeight(),
   frameByteSize: () => mod.frameByteSize(),
-  frameSlots: () => (mod.frameSlots ? mod.frameSlots() : 0),
   pagePxWidth: () => mod.pagePxWidth(),
   pagePxHeight: () => mod.pagePxHeight(),
   pageGapPx: () => mod.pageGapPx(),
@@ -828,88 +798,43 @@ const READ = {
     host.blitPages();
     const fw = mod.frameWidth();
     const fh = mod.frameHeight();
+    const pw = mod.pagePxWidth();
     const ph = mod.pagePxHeight();
-    const step = ph + mod.pageGapPx();
     const first = mod.windowFirstPage();
     const count = mod.windowPageCount();
-    const fv = mod.frameRgba();
-    const continuous = host.isContinuous();
-    const viewCtx = host.viewCtx();
     let diff = 0;
     let compared = 0;
     let missing = 0;
     let sizeBad = 0;
     let comparedPages = 0;
+    let diffPage = -1;
     let minx = 1e9;
     let miny = 1e9;
     let maxx = -1;
     let maxy = -1;
-    // 连页模式没有页画布，屏上那一份是视口画布：逐字节比的是"视口画布 vs 帧"。
-    //   帧仍是源（引擎的产物），视口画布是它按文档坐标贴出来的那一份 —— 目标 y 算错、
-    //   或者压根没贴上（画布没转移成功），这里都会报出来。
-    //   这一支不是可有可无的：没有它，连页下每一页都会被记成"缺画布"，diff 恒为 0 ——
-    //   看着全绿，实际一个字节都没比过。
-    if (continuous) {
-      if (!viewCtx) {
-        missing = count;
-      } else if (viewCtx.canvas.width !== fw || viewCtx.canvas.height !== viewH) {
-        sizeBad = 1;
-      } else {
-        const V = viewCtx.getImageData(0, 0, fw, viewH).data;
-        const fs = (mod.frameSlots ? mod.frameSlots() : 0) | 0;
-        for (let p = first; p < first + count; ++p) {
-          // 页在视口里的落点：目标 y = 页号 x 步距 - 滚动量（与 blitPageContinuous 同式）。
-          const dy = p * step - scrollY;
-          const y0 = Math.max(0, -dy);
-          const y1 = Math.min(ph, viewH - dy);
-          if (y1 <= y0) continue;                 // 这一页整页在视口外，没得比
-          ++comparedPages;
-          const srcY = (fs > 0 ? ((p % fs) + fs) % fs : p - first) * step;
-          for (let y = y0; y < y1; ++y) {
-            const j0 = (srcY + y) * fw * 4;
-            const k0 = (dy + y) * fw * 4;
-            for (let x = 0; x < fw; ++x) {
-              const j = j0 + x * 4;
-              const k = k0 + x * 4;
-              ++compared;
-              if (V[k] !== fv[j] || V[k + 1] !== fv[j + 1] || V[k + 2] !== fv[j + 2]) {
-                ++diff;
-                if (x < minx) minx = x;
-                if (x > maxx) maxx = x;
-                const yy = dy + y;
-                if (yy < miny) miny = yy;
-                if (yy > maxy) maxy = yy;
-              }
-            }
-          }
-        }
-      }
-    } else {
-      for (let p = first; p < first + count; ++p) {
-        const c = host.ctxOfPage(p);
-        if (!c) { ++missing; continue; }
-        if (c.canvas.width !== fw || c.canvas.height !== ph) { ++sizeBad; continue; }
-        ++comparedPages;
-        const D = c.getImageData(0, 0, fw, ph).data;
-        // 帧里的偏移按帧槽号算（引擎的槽数），不是"窗口内第几页"。
-        //   这两套槽号可以不等（画布槽只增、帧槽跟着窗口页数上限走），所以这里必须
-        //   与 blitPage 用同一个来源 —— 用画布槽号会把整段比错位置（实测差 17%）。
-        const fs = (mod.frameSlots ? mod.frameSlots() : 0) | 0;
-        const local = (fs > 0 ? ((p % fs) + fs) % fs : p - first);
-        const base = local * step * fw * 4;
-        for (let i = 0; i + 3 < D.length; i += 4) {
-          const j = base + i;
-          if (j + 3 >= fv.length) break;
-          if (D[i] !== fv[j] || D[i + 1] !== fv[j + 1] || D[i + 2] !== fv[j + 2]) {
-            ++diff;
-            const q = i >> 2, x = q % fw, y = (q - x) / fw + local * step;
-            if (x < minx) minx = x;
-            if (x > maxx) maxx = x;
-            if (y < miny) miny = y;
-            if (y > maxy) maxy = y;
-          }
-        }
-        compared += D.length / 4;
+    // 一页一张画布，源就是这一页自己的导出像素（内容 + 瞬态）。
+    //   页摆在哪儿是宿主的账（页号 x 步距），与画布里的像素无关 —— 所以这里没有槽、
+    //   没有偏移，比的是同一页的同一块：任何差额都只能是"贴错了"。
+    for (let p = first; p < first + count; ++p) {
+      const c = host.ctxOfPage(p);
+      if (!c) { ++missing; continue; }
+      if (c.canvas.width !== pw || c.canvas.height !== ph) { ++sizeBad; continue; }
+      const src = mod.pageRgba(p);
+      if (src.length !== pw * ph * 4) { ++sizeBad; continue; }
+      ++comparedPages;
+      const D = c.getImageData(0, 0, pw, ph).data;
+      compared += pw * ph;
+      for (let i = 0; i + 3 < D.length; i += 4) {
+        if (D[i] === src[i] && D[i + 1] === src[i + 1] && D[i + 2] === src[i + 2]) continue;
+        ++diff;
+        if (diffPage < 0) diffPage = p;
+        const q = i >> 2;
+        const x = q % pw;
+        const y = (q - x) / pw;
+        if (x < minx) minx = x;
+        if (x > maxx) maxx = x;
+        if (y < miny) miny = y;
+        if (y > maxy) maxy = y;
       }
     }
     const st = JSON.parse(mod.editStatsJson());
@@ -1056,9 +981,6 @@ function view(m) {
   if (!retarget(JSON.parse(mod.editStatsJson()))) {
     return { moved: false, scrolled, workMs: performance.now() - tWork };
   }
-  // 滚动这一路也会遇到视口变化（窗口被拉高/拉矮），所以槽数同样要在画之前报过去。
-  //   这里本来就整窗重贴，槽数变过时正是它需要的。
-  syncFrameSlots();
   mod.present();
   host.blitPages();
   schedulePrewarm(scrollY - prevScrollY);
@@ -1074,18 +996,18 @@ function pageCanvas(m) {
 }
 
 /**
- * 视图模式切换（分页 / 连页）：宿主已换好画布，这里改引擎的排版形状并整窗重贴。
+ * 视图模式切换（分页 / 连页）：改引擎的排版形状（页间隙 + 连页标志）并重排重画。
+ * 两种模式共用同一套"一页一张画布"，所以这条消息不再带画布 —— 它只是配置变更。
  */
-function viewCanvas(m) {
+function viewMode(m) {
   host.setViewMode(m);
-  sendState(m.ts, 'viewCanvas', JSON.parse(mod.editStatsJson()));
+  sendState(m.ts, 'viewMode', JSON.parse(mod.editStatsJson()));
 }
 
 /**
  * 换页度量与重排（给宿主的 resize / dpr 变化用）。
  */
 function relayout() {
-  syncFrameSlots();
   mod.relayoutAndPaint();
   host.invalidateSlots();
   host.blitPages();
@@ -1132,7 +1054,7 @@ function attach(engine) {
 }
 
 return {
-  boot, do: doOp, ask: askOp, view, pageCanvas, viewCanvas, relayout, sendState, geom,
+  boot, do: doOp, ask: askOp, view, pageCanvas, viewMode, relayout, sendState, geom,
   attach, read, write,
   // 引擎句柄：只给宿主取帧视图与装载用，不要拿它绕过命令表。
   engine: () => mod,

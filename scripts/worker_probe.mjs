@@ -87,8 +87,22 @@ async function main() {
     'for (const cv of els) {' +
     '  try { cv.getContext("2d"); allTransferred = false; } catch (e) { why = e.name; }' +
     '}' +
+    // 可见性：画布背衬里有像素不等于屏幕上看得见。容器被裁掉（零宽 / 零高）、
+    //   被别的层盖住，像素判据全是绿的，屏幕上却一片空白 —— 这里按页中心点
+    //   命中谁来看，它同时抓裁剪与层级两件事。
+    'let visible = 0; const hidden = [];' +
+    'for (const cv of els) {' +
+    '  if (getComputedStyle(cv).display === "none") continue;' +
+    '  const r = cv.getBoundingClientRect();' +
+    '  if (r.width < 2 || r.height < 2) { hidden.push("零尺寸"); continue; }' +
+    '  const at = document.elementFromPoint(Math.round(r.x + r.width / 2),' +
+    '                                       Math.round(r.y + Math.min(r.height / 2, 40)));' +
+    '  if (at === cv) ++visible;' +
+    '  else hidden.push(at ? (at.id || at.tagName) : "视口外");' +
+    '}' +
     'return { pages: h.pageCanvasList, els: els.length, allTransferred, why,' +
     '         window: [h.geom.first, h.geom.count], pagePx: h.pagePx,' +
+    '         visible, hidden,' +
     '         aliased: window.__heditor === window.__wheditor };');
   chk.check('引擎在 Worker 里起来了', !!info, `boot ${info.bootMs.toFixed(0)} ms`);
   chk.check('帧共享 wasm 线性内存（零拷贝）', info.zeroCopyFrame === true, j(info.zeroCopyFrame));
@@ -101,6 +115,11 @@ async function main() {
             struct.pages.length === struct.window[1] &&
             struct.pages[0] === struct.window[0],
             `窗口 ${j(struct.window)} / 页画布 ${j(struct.pages)}`);
+  // 像素一致（下面那几条）只证明"画布背衬画对了"，不证明它被摆在了看得见的地方。
+  chk.check('每一张页画布在屏幕上都真的可见（没被容器裁掉、没被别的层盖住）',
+            struct.visible === struct.pages.length,
+            `${struct.visible} / ${struct.pages.length} 可见` +
+            (struct.hidden.length ? `，不可见：${j(struct.hidden)}` : ''));
   chk.check('两套门面名字指向同一个宿主（__heditor 是别名）',
             struct.aliased === true, j(struct.aliased));
   chk.check('字体在 Worker 里自己装载（20 MB 量级）',
@@ -545,14 +564,14 @@ async function main() {
       'const h = window.__wheditor;\n' +
       'return {\n' +
       '  fw: await h.ask("frameWidth"), fh: await h.ask("frameHeight"),\n' +
-      '  fb: await h.ask("frameByteSize"), fs: await h.ask("frameSlots"),\n' +
+      '  fb: await h.ask("frameByteSize"),\n' +
       '  pw: await h.ask("pagePxWidth"), ph: await h.ask("pagePxHeight"),\n' +
       '  gap: await h.ask("pageGapPx"),\n' +
       '  wf: await h.ask("windowFirstPage"), wc: await h.ask("windowPageCount"),\n' +
       '};'));
-    chk.check('帧几何可读（宽 / 高 / 字节数 / 槽数）',
-              geo.fw > 0 && geo.fh > 0 && geo.fb === geo.fw * geo.fh * 4 && geo.fs >= 1,
-              `帧 ${geo.fw}x${geo.fh} / ${geo.fb} B / 槽 ${geo.fs}`);
+    chk.check('窗口几何可读（宽 / 高 / 字节数）',
+              geo.fw > 0 && geo.fh > 0 && geo.fb === geo.fw * geo.fh * 4,
+              `窗口 ${geo.fw}x${geo.fh} / ${geo.fb} B`);
     chk.check('页度量与窗口自洽', geo.pw > 0 && geo.ph > 0 && geo.gap >= 0 &&
               geo.wc >= 1 && geo.wf >= 0,
               `页 ${geo.pw}x${geo.ph} 间隙 ${geo.gap} / 窗口 ${geo.wf}+${geo.wc}`);

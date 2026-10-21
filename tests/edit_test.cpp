@@ -1875,19 +1875,54 @@ int main() {
         };
 
         loadControls(eg, {TC(5, 9, "k1"), TC(12, 16, "k2")});
+
+        /**
+         * 待上屏的并集：把窗口内各页累积的脏矩形取出来（读后清零），给出面积与并集盒。
+         *
+         * 它就是宿主真正要贴的东西。整窗帧撤销之后，"欠着没贴"这件事落在页上，
+         *   所以判据从 takeBlitBox（帧上的一个盒）改成"按页取矩形"——
+         *   口径与被测的那条路完全一致：宿主读的就是这几个数。
+         */
+        auto drainDirty = [](EditorEngine& e, float* bw, float* bh) -> long long {
+            long long area = 0;
+            float x0 = 1e9f;
+            float y0 = 1e9f;
+            float x1 = -1e9f;
+            float y1 = -1e9f;
+            const int first = e.windowFirstPage();
+            const int step = e.pagePxHeight() + e.pageGapPx();
+            for (int p = first; p < first + e.windowPageCount(); ++p) {
+                for (const Rect& r : e.takePageDirtyRects(p)) {
+                    if (r.w <= 0.0f || r.h <= 0.0f) continue;
+                    area += static_cast<long long>(std::ceil(r.w)) *
+                            static_cast<long long>(std::ceil(r.h));
+                    const float wy = static_cast<float>((p - first) * step) + r.y;
+                    x0 = std::min(x0, r.x);
+                    y0 = std::min(y0, wy);
+                    x1 = std::max(x1, r.x + r.w);
+                    y1 = std::max(y1, wy + r.h);
+                }
+            }
+            if (bw != nullptr) *bw = (x1 > x0) ? (x1 - x0) : 0.0f;
+            if (bh != nullptr) *bh = (y1 > y0) ? (y1 - y0) : 0.0f;
+            return area;
+        };
+
         eg.setEditMode(EditMode::Form);
         eg.setCaret(0, 6);  // 光标在 #0（反复心悸）
         eg.repaint();
-        (void)eg.takeBlitBox();  // 把之前的账清零，下面量的才是这一串
+        (void)drainDirty(eg, nullptr, nullptr);  // 把之前的账清零，下面量的才是这一串
 
         // 把闪烁相位摆到"隐藏"：这条路径只在隐藏半拍触发
         //    （若开头调了 stopBlink()，这一半概率就被屏蔽掉了）
         eg.showCaret(false);
         eg.repaint();
-        const Rect small_box = eg.takeBlitBox();
+        float small_w = 0.0f;
+        float small_h = 0.0f;
+        (void)drainDirty(eg, &small_w, &small_h);
 
         // 制造"第一次 present 很大"：
-        //    关掉括号 → 占位消失 → 整篇重排、帧整窗重贴。
+        //    关掉括号 → 占位消失 → 整篇重排 → 窗口内每一页都重光栅。
         EngineConfig co = eg.config();
         co.show_brackets = false;
         eg.setConfig(co);
@@ -1899,16 +1934,19 @@ int main() {
         eg.showCaret(true);
         eg.repaint();  // 第二次 present
         const EditStats st2 = eg.editStats();
-        const Rect box = eg.takeBlitBox();  // 宿主真正该贴的区域
+        float box_w = 0.0f;
+        float box_h = 0.0f;
+        const long long box_area = drainDirty(eg, &box_w, &box_h);
 
-        std::printf("     隐藏相位那次 present：%d×%d px\n", static_cast<int>(small_box.w),
-                    static_cast<int>(small_box.h));
-        std::printf("     换字段后第一次 present 的本轮账：%d×%d px（整帧 %d×%d）\n",
+        std::printf("     隐藏相位那次 present：%d×%d px\n", static_cast<int>(small_w),
+                    static_cast<int>(small_h));
+        std::printf("     换字段后第一次 present 的本轮账：%d×%d px（窗口 %d×%d）\n",
                     st1.repainted_w, st1.repainted_h, eg.frameWidth(), eg.frameHeight());
         std::printf("     补救时第二次 present 的本轮账：%d×%d px\n", st2.repainted_w,
                     st2.repainted_h);
-        std::printf("     待上屏并集：%d×%d px ｜ 走了补救路径=%d\n", static_cast<int>(box.w),
-                    static_cast<int>(box.h), took_rescue ? 1 : 0);
+        std::printf("     待上屏并集：%d×%d px（%lld px²）｜ 走了补救路径=%d\n",
+                    static_cast<int>(box_w), static_cast<int>(box_h), box_area,
+                    took_rescue ? 1 : 0);
 
         expectTrue(took_rescue,
                    "前提成立：光标在隐藏半拍时，第一次 present 的 caretVisible 为 false "
@@ -1916,41 +1954,45 @@ int main() {
         expectTrue(st2.repainted_w < st1.repainted_w,
                    "补救那次 present 的本轮脏矩形确实小得多 "
                    "（这就是宿主被误导的地方：拿它上屏会漏掉第一次 present）");
-        // 帧按页号分槽之后，"覆盖整帧"这句话要改成"覆盖窗口内那几页"：帧高 = 槽数 x 步距
-        //   （含没被使用的空槽），而空槽永远不会被上屏 —— 宿主是按页贴的。
+        // 并集必须盖住窗口内那几页的整段高度 —— 少算了，画布就停在旧排版上：
+        //   引擎是对的、屏幕是旧的。
         const int win_px_h = eg.editStats().window_pages * eg.pagePxHeight();
-        expectTrue(box.w == eg.frameWidth() && box.h >= win_px_h,
-                   "但 takeBlitBox() 给出的并集必须覆盖窗口内那几页（第一次 present 的功劳）"
-                   "—— 少算了，画布就会停在旧排版上：引擎帧对、屏幕是旧的");
-        expectTrue(small_box.w < eg.frameWidth(),
-                   "对照：隐藏相位那次 present 自己远不是整帧 —— 所以并集只能靠累加器");
+        expectTrue(box_w == static_cast<float>(eg.frameWidth()) && box_h >= win_px_h,
+                   "但累积的页脏矩形并集必须覆盖窗口内那几页（第一次 present 的功劳）"
+                   "—— 少算了，画布就会停在旧排版上：引擎对、屏幕是旧的");
+        expectTrue(small_w < static_cast<float>(eg.frameWidth()),
+                   "对照：隐藏相位那次 present 远不是整页 —— 所以并集只能靠累积");
 
-        // 读完即清零：下一次没写任何东西时，盒子必须是空的
-        const Rect after = eg.takeBlitBox();
-        expectTrue(after.w == 0.0f || after.h == 0.0f,
-                   "takeBlitBox() 是读后清零的（否则宿主每次都会重贴整帧）");
+        // 读完即清零：下一次没写任何东西时，必须是空的
+        float after_w = 0.0f;
+        float after_h = 0.0f;
+        (void)drainDirty(eg, &after_w, &after_h);
+        expectTrue(after_w == 0.0f && after_h == 0.0f,
+                   "页脏矩形是读后清零的（否则宿主每次都会重贴整页）");
 
-        // 对照：换字段不重排，上屏量必须远小于整帧。
+        // 对照：换字段不重排，上屏量必须远小于整页。
         //
         //   这条钉死的是"括号常显"带来的真正好处：占位集合与光标无关，
-        //   于是"点一下另一个字段"不引发重排，上屏量从"整帧"掉到"一块小矩形"。
-        //   判据取"远小于整帧"而不是某个精确像素数：精确值随字体/字号变。
+        //   于是"点一下另一个字段"不引发重排，上屏量从"整页"掉到"一小块"。
+        //   判据取"远小于整页"而不是某个精确像素数：精确值随字体/字号变。
         {
             EngineConfig ca = eg.config();
-            ca.show_brackets = true;  // 上面为了制造整帧重贴关掉了，这里开回来
+            ca.show_brackets = true;  // 上面为了制造整页重光栅关掉了，这里开回来
             eg.setConfig(ca);         // 开括号会重排（占位回来了）
             eg.setCaret(0, 6);
             eg.repaint();
-            (void)eg.takeBlitBox();
+            (void)drainDirty(eg, nullptr, nullptr);
 
             eg.setCaret(0, 14);  // 换到另一个字段 —— 排版不动
             eg.repaint();
-            const Rect cross = eg.takeBlitBox();
-            std::printf("     ⑤ 换字段：上屏盒 %d×%d px（整帧 %d×%d）\n", static_cast<int>(cross.w),
-                        static_cast<int>(cross.h), eg.frameWidth(), eg.frameHeight());
-            expectTrue(cross.w > 0.0f && cross.h > 0.0f, "⑤ 换字段确实写了点什么（光标）");
-            expectTrue(cross.w < eg.frameWidth() / 2 && cross.h < eg.frameHeight() / 2,
-                       "换字段不再整帧重贴（占位与光标无关 → 排版不动）");
+            float cross_w = 0.0f;
+            float cross_h = 0.0f;
+            const long long cross_area = drainDirty(eg, &cross_w, &cross_h);
+            std::printf("     ⑤ 换字段：上屏并集 %d×%d px（%lld px²）\n", static_cast<int>(cross_w),
+                        static_cast<int>(cross_h), cross_area);
+            expectTrue(cross_area > 0, "⑤ 换字段确实重贴了点什么（光标）");
+            expectTrue(cross_area < static_cast<long long>(eg.frameWidth()) * eg.pagePxHeight() / 4,
+                       "换字段不再整页重贴（占位与光标无关 → 排版不动）");
         }
     }
 
@@ -2692,12 +2734,16 @@ int main() {
         auto compare = [&](const char* label, const std::vector<Control>& ctrl, EditMode mode,
                            bool allow_aa_noise) {
             long long max_ch = 0;
-            const long long diff = frameDiffAgainstFresh(a, fonts16, ctrl, mode, &max_ch);
+            int box[4] = {-1, -1, -1, -1};
+            const long long diff = frameDiffAgainstFresh(a, fonts16, ctrl, mode, &max_ch, box);
             const long long total_px = static_cast<long long>(a.frameBytes() / 4);
             const bool ok = allow_aa_noise ? (diff >= 0 && diff * 100000 <= total_px && max_ch <= 1)
                                            : (diff == 0);
-            std::printf("     %s：帧差 %lld 像素（最大通道差 %lld，阈值 %s）\n", label, diff,
-                        max_ch, allow_aa_noise ? "≤十万分之一像素且通道差≤1" : "0");
+            std::printf(
+                "     %s：帧差 %lld 像素（最大通道差 %lld，盒 x %d~%d / y %d~%d，窗口 %d 页，"
+                "共 %d 页，阈值 %s）\n",
+                label, diff, max_ch, box[0], box[2], box[1], box[3], a.editStats().window_pages,
+                a.editStats().total_pages, allow_aa_noise ? "≤十万分之一像素且通道差≤1" : "0");
             expectTrue(ok,
                        std::string("★ ") +
                            (allow_aa_noise ? "增量上屏 ≈ 从零上屏（平移的坐标末位差只翻抗锯齿）："
@@ -10426,7 +10472,6 @@ int main() {
         const int pw = e58.pagePxWidth();
         const int ph = e58.pagePxHeight();
         const int fw = e58.frameWidth();
-        const int slots = std::max(1, e58.frameSlots());
         const int step = ph + e58.pageGapPx();
         expectTrue(e58.editStats().total_pages >= 5,
                    "前提：文档至少五页（" + std::to_string(e58.editStats().total_pages) + "）");
@@ -10446,7 +10491,9 @@ int main() {
                 bad58 += " p" + std::to_string(p) + ":n=" + std::to_string(n);
                 continue;
             }
-            const int off = (((p % slots) + slots) % slots) * step;
+            // 导出图里页的位置 = (页号 - 窗口首页) x 步距。槽那套编号已经删掉，
+            //   这个换算就是"窗口顺序"本身，没有第二个说法。
+            const int off = (p - e58.windowFirstPage()) * step;
             const uint8_t* src =
                 e58.frame() + static_cast<size_t>(off) * static_cast<size_t>(fw) * 4;
             if (std::memcmp(e58.pagePixels(p), src, n) == 0) {
@@ -10473,9 +10520,10 @@ int main() {
         const std::vector<Rect> caret_rects = e58.takePageDirtyRects(cp);
         float caret_area = 0.0f;
         for (const Rect& r : caret_rects) caret_area += r.w * r.h;
-        const int off_cp = (((cp % slots) + slots) % slots) * step;
+        // caret_x / caret_y 现在是页内像素（页号另给），不必再减槽偏移 ——
+        //   旧口径下要减的那一项正是"跨层坐标没带口径"的产物。
         const float cx = static_cast<float>(e58.editStats().caret_x_px);
-        const float cy = static_cast<float>(e58.editStats().caret_y_px - off_cp);
+        const float cy = static_cast<float>(e58.editStats().caret_y_px);
         const float cw = static_cast<float>(e58.editStats().caret_w_px);
         const float ch = static_cast<float>(e58.editStats().caret_h_px);
         bool caret_covered = false;

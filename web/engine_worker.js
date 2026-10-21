@@ -48,11 +48,11 @@ const kSlotCount = 8;
 let slotN = kSlotCount;
 
 /**
- * 连页模式：一个视口画布，页按文档坐标贴（页间隙同时设成 0，页首尾相接）。
- *   与分页模式的差别只有"贴到哪儿" —— 源行仍按帧槽号取，帧的摆法与画布几张无关。
+ * 连页模式：与分页同一套贴图，区别只有页间隙 = 0（页首尾相接，看起来是一整条）。
+ *   页画布本身就摆在 (页号 x 步距) 上，滚动由浏览器搬像素，引擎一次都不用被叫醒 ——
+ *   这正是删掉"视口画布 + 每拍按滚动量重贴"那条支线换来的东西。
  */
 let continuous = false;
-let viewCtx = null;
 
 // 页号 -> 槽号。取模处理负页号，所以先加一轮再取。
 function slotOf(p) {
@@ -104,45 +104,37 @@ function ctxOfPage(p) {
 /* 上屏 */
 
 /**
- * 把窗口帧里第 p 页那一段贴到它自己的画布上。
+ * 把第 p 页"画到画布上应该是什么"贴到它自己的画布上。
  *
- * rects 为空 = 整页贴：槽里装的还是别的页（窗口刚平移进来），画布上那一份不属于这一页。
+ * rects 为空 = 整页贴：这张画布是新的（刚建、或刚改过尺寸），内容未知。
  * rects 非空 = 只贴这几块（页内像素坐标，来自引擎的 pageDirtyRects）：
  *   光标移动一次只有几条几十像素的矩形，而整页是 1 Mpx —— 差三个数量级。
  *
- * 源是 wasm 线性内存上的整帧，用子数组视图取那一页的行 —— 不做拷贝。
- *   putImageData(img, dx, dy, dirtyX, dirtyY, dw, dh) 的目标位置是 (dx + dirtyX, dy + dirtyY)，
- *   所以取 dy = -srcY 就把帧坐标折回了页内坐标（与 app.js 的 blitFrame 同一口径）。
+ * 源是 wasm 线性内存上这一页的导出像素（内容 + 瞬态，见 pageRgba），坐标就是页内坐标 ——
+ *   所以这里没有"帧槽偏移"要折：页号对上，矩形对上的就是那一块。
  */
 function blitPage(p, rects) {
   const c = ctxOfPage(p);
   if (!c) return 0;
   const e = api.engine();
-  const fw = e.frameWidth();
+  const pw = e.pagePxWidth();
   const ph = e.pagePxHeight();
-  const step = ph + e.pageGapPx();
-  const first = e.windowFirstPage();
-  const local = p - first;
-  if (local < 0 || local >= e.windowPageCount()) return 0;
-  if (fw <= 0 || ph <= 0) return 0;
-  const fv = e.frameRgba();
-  if (c.canvas.width !== fw || c.canvas.height !== ph) {
+  if (pw <= 0 || ph <= 0) return 0;
+  const src = e.pageRgba(p);
+  if (src.length !== pw * ph * 4) return 0;
+  if (c.canvas.width !== pw || c.canvas.height !== ph) {
     // 改尺寸会清空画布，所以尺寸变了必定整块重画。
-    c.canvas.width = fw;
+    c.canvas.width = pw;
     c.canvas.height = ph;
     rects = null;
   }
-  // 源行按帧槽号算（页号 mod 引擎的槽数），不是"窗口内第几页"。
-  //   槽表变了以后这就是唯一正确的算法；本地那个 local 只用来判"这一页在不在窗口里"。
-  const fs = (e.frameSlots ? e.frameSlots() : 0) | 0;
-  const srcY = (fs > 0 ? ((p % fs) + fs) % fs : local) * step;
-  const img = new ImageData(
-    new Uint8ClampedArray(fv.buffer, fv.byteOffset + srcY * fw * 4, fw * ph * 4), fw, ph);
   if (!rects || !rects.length) {
-    c.putImageData(img, 0, 0);
+    c.putImageData(
+        new ImageData(new Uint8ClampedArray(src.buffer, src.byteOffset, src.length), pw, ph), 0,
+        0);
     // 整页贴过了，这一页的矩形就没有意义了 —— 留着下一拍只会白贴一次。
     e.pageDirtyRectsJson(p);
-    return fw * ph;
+    return pw * ph;
   }
   let px = 0;
   for (const r of rects) {
@@ -154,45 +146,13 @@ function blitPage(p, rects) {
     //   比"猜实现"便宜。
     const small = new ImageData(r.w, r.h);
     for (let y = 0; y < r.h; ++y) {
-      const off = fv.byteOffset + ((srcY + r.y + y) * fw + r.x) * 4;
-      small.data.set(new Uint8ClampedArray(fv.buffer, off, r.w * 4), y * r.w * 4);
+      const off = src.byteOffset + ((r.y + y) * pw + r.x) * 4;
+      small.data.set(new Uint8ClampedArray(src.buffer, off, r.w * 4), y * r.w * 4);
     }
     c.putImageData(small, r.x, r.y);
     px += r.w * r.h;
   }
   return px;
-}
-
-/**
- * 连页模式：一个视口画布，页按文档坐标贴到它上面（同时页间隙设成 0，页首尾相接）。
- *
- * 与分页模式的差别只有"贴到哪儿"：源行仍按帧槽号取（帧怎么摆与画布几张无关），
- *   目标 y = 页号 x 步距 - 滚动量。超出画布的部分由 putImageData 自己裁掉。
- * 代价是"每拍都要贴"：滚动 1 像素，每页的目标 y 都变了，槽过期那套判据在这里不适用。
- *   实测一屏五页 1.1 ms（out/_blitprobe.mjs），与分页模式的一页一贴相当。
- */
-function blitPageContinuous(p) {
-  if (!viewCtx) return 0;
-  const e = api.engine();
-  const vh = api.viewSize().h;
-  const fw = e.frameWidth();
-  const ph = e.pagePxHeight();
-  const step = ph + e.pageGapPx();
-  if (fw <= 0 || ph <= 0) return 0;
-  const dy = p * step - api.scrollY();
-  if (dy + ph <= 0 || dy >= vh) return 0;  // 整页在视口之外
-  if (viewCtx.canvas.width !== fw || viewCtx.canvas.height !== vh) {
-    viewCtx.canvas.width = fw;
-    viewCtx.canvas.height = vh;
-  }
-  const fv = e.frameRgba();
-  const fs = (e.frameSlots ? e.frameSlots() : 0) | 0;
-  const local = p - e.windowFirstPage();
-  const srcY = (fs > 0 ? ((p % fs) + fs) % fs : local) * step;
-  const img = new ImageData(
-    new Uint8ClampedArray(fv.buffer, fv.byteOffset + srcY * fw * 4, fw * ph * 4), fw, ph);
-  viewCtx.putImageData(img, 0, dy);
-  return fw * ph;
 }
 
 /**
@@ -216,23 +176,6 @@ function blitPages() {
   const count = e.windowPageCount();
   let n = 0;
   let px = 0;
-  if (continuous) {
-    // 连页模式：目标 y 随滚动变，所以每拍都重贴（不看槽过期与脏页）。
-    //   先清一遍：视口内可能露出"没有页"的地方（文档首尾之外），而那些像素
-    //   还留着上一拍的内容。clearRect 写的是透明，页容器的底色因此透得出来。
-    if (viewCtx) viewCtx.clearRect(0, 0, viewCtx.canvas.width, api.viewSize().h);
-    for (let p = first; p < first + count; ++p) {
-      const got = blitPageContinuous(p);
-      if (got > 0) {
-        ++n;
-        px += got;
-      }
-    }
-    blitLastMs = performance.now() - tBlit;
-    blitLastPages = n;
-    blitLastPx = px;
-    return n;
-  }
   // 要贴哪几页由"还欠着脏矩形"决定，不是"这一拍写过哪几页"。矩形是累积的：
   //   某一拍的 present 可能根本没被消费（窗口平移、槽重建、页面不可见），那一拍的
   //   矩形会留到这一拍。按本拍清单贴就会永久漏掉那几块 —— 屏幕上留几十像素的旧光标。
@@ -267,13 +210,17 @@ function blitPages() {
   return n;
 }
 
-// 这一窗里还有几页没有画布（宿主还没把该槽的 canvas 交过来）。
+// 这一窗里还有几页没有画布（宿主还没把该页落的那个槽的 canvas 交过来）。
+//   按页数、不按槽数：槽数可以大于窗口页数（那是"历史最大值"），空槽不算缺画布。
 function pagesMissing() {
   const e = api.engine();
   if (!e) return 0;
+  const first = e.windowFirstPage();
   const count = e.windowPageCount();
   let n = 0;
-  for (let s = 0; s < count; ++s) if (!slotCtx[s]) ++n;
+  for (let p = first; p < first + count; ++p) {
+    if (!ctxOfPage(p)) ++n;
+  }
   return n;
 }
 
@@ -295,7 +242,6 @@ const host = {
   pagesMissing,
   ctxOfPage,
   isContinuous: () => continuous,
-  viewCtx: () => viewCtx,
   canvasCount: () => slotCtx.reduce((n, c) => n + (c ? 1 : 0), 0),
   invalidateSlots,
   blitPages,
@@ -318,10 +264,10 @@ const host = {
   },
 
   /**
-   * 视图模式与它的页间隙。连页：宿主建一张视口画布交过来（间隙 0 = 页首尾相接）；
-   *   回分页：不带画布（间隙回到 14），这里把连页标志与画布一起丢掉。
-   *   间隙跟着模式走是有意的 —— 它是"页的落点"这件事的一半，两套模式是两套落点，
-   *   分开传会让中间那一拍出现"连页的间隙 + 分页的画布"这种不存在的组合。
+   * 视图模式与它的页间隙。连页 = 间隙 0（页首尾相接）+ 引擎按连页排版；
+   *   回分页 = 间隙 14。两套模式共用同一套"一页一张画布"，区别只有步距。
+   *   间隙跟着模式走是有意的 —— 它是"页的落点"这件事的一半，分两路传会让中间那一拍
+   *   出现"连页的间隙 + 分页的落点"这种不存在的组合。
    */
   setViewMode(m) {
     const e = api.engine();
@@ -331,11 +277,6 @@ const host = {
     //   所以必须与页间隙一起设下去 —— 只设间隙的话，排版还是分页的，只是页首尾
     //   相接（内容照样在页底断开），那正是"看着像连页、其实还有页"的来源。
     if (e.setContinuous) e.setContinuous(continuous);
-    viewCtx = null;
-    if (continuous && m.canvas) {
-      viewCtx = m.canvas.getContext('2d');
-      if (!viewCtx) throw new Error('OffscreenCanvas 拿不到 2d 上下文');
-    }
     // 切模式会把帧的布局与页的落点整套换掉（间隙 0 与 14 是两套），所以这里要
     //   重排 + 重画帧，再作废槽表重贴 —— 三件缺一不可：
     //   间隙一改步距就变，而帧缓冲里还是上一套布局的像素。只作废槽表重贴的话，
@@ -363,15 +304,14 @@ async function handle(m) {
     if (m.t === 'boot') return void await handleBoot(m);
     if (!api) throw new Error('引擎尚未 boot');
     if (m.t === 'pageCanvas') return void api.pageCanvas(m);
-    if (m.t === 'viewCanvas') return void api.viewCanvas(m);
+    if (m.t === 'viewMode') return void api.viewMode(m);
     if (m.t === 'view') {
       // 自报这一下花了多少毫秒。宿主拿它和"发出→收到回话"的往返比：差值是排队等待，
       //   近 0 说明队列是空的（慢是因为这一下真的贵），差得远说明 Worker 在补课。
       const r = api.view(m);
-      if (!r.moved) {
-        if (continuous && r.scrolled) blitPages();
-        return void post({ t: 'ack', ts: m.ts, workMs: r.workMs });
-      }
+      // 没换窗口 = 没有新内容要贴：页画布的位置是固定的 (页号 x 步距)，
+      //   滚动是浏览器搬像素（连页与分页在这一层已经没有区别）。
+      if (!r.moved) return void post({ t: 'ack', ts: m.ts, workMs: r.workMs });
       return void api.state(m.ts, 'view', JSON.parse(api.engine().editStatsJson()), undefined,
                             r.workMs);
     }

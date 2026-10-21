@@ -64,10 +64,26 @@ const $ = (id) => root.querySelector('#' + id) || document.getElementById(id);
 
 const stageEl = $('stage');
 const spacerEl = $('spacer');
+const pagesEl = $('pages');
 const ta = $('ime');
 const statEl = chrome ? $('stats') : null;
 const barEl = chrome ? $('bar') : null;
 const statusEl = chrome ? $('status') : null;
+
+/**
+ * 页画布容器必须存在，且统一钉成"铺满滚动容器的绝对定位层"。
+ *
+ * 里面的画布全是绝对定位、按 (页号 x 步距) 摆，所以容器自己不参与内容尺寸 ——
+ *   若它还是流内元素（多实例页给的 flex 项样式），宽度按内容收缩成 0，overflow: hidden
+ *   会把每一页都裁没：画布背衬里的像素是对的，屏幕上一片空白，像素判据照绿。
+ * 钉成绝对定位同时消掉另一件事：多实例页的舞台是 flex 居中，流内的容器会被整体平移，
+ *   而画布坐标是相对它的 left 算的，居中会让所有页横向偏半个舞台。
+ */
+if (!pagesEl) throw new Error('Worker 宿主缺少页画布容器 #pages');
+pagesEl.style.position = 'absolute';
+pagesEl.style.top = '0';
+pagesEl.style.left = '0';
+pagesEl.style.right = '0';
 
 // 状态栏（与单线程宿主同形）：组合期间在这里本地预览预编辑串。
 function setStatus(text) {
@@ -477,7 +493,7 @@ function acquireCanvas() {
   el.className = 'pg';
   el.style.position = 'absolute';
   el.style.display = 'block';
-  stageEl.appendChild(el);
+  pagesEl.appendChild(el);
   return el;
 }
 
@@ -498,50 +514,6 @@ function sendPageCanvas(slot, el, gm, slots) {
 }
 
 /**
- * 连页模式的视口画布：整个视口一张画布，内容按滚动位置重贴（见 Worker 侧的 blitPageContinuous）。
- *
- * 它挂在页容器外面（stage 的父级），因为放在滚动内容里就会随内容一起滚 ——
- *   那样"贴"这件事在屏幕上根本看不出来。指针事件仍由页容器接（这张画布 pointer-events: none），
- *   而页号在连页模式下由坐标反算（见 onPointerDown）—— 这里没有"页画布"可以问。
- */
-let viewCanvas = null;
-let viewContinuous = false;
-
-function syncViewCanvas(gm) {
-  const dpr = gm.dpr || 1;
-  const vs = viewSize();
-  const host = stageEl.parentElement;
-  const sr = stageEl.getBoundingClientRect();
-  const hr = host.getBoundingClientRect();
-  if (!viewCanvas) {
-    viewCanvas = document.createElement('canvas');
-    viewCanvas.style.position = 'absolute';
-    viewCanvas.style.zIndex = '1';
-    viewCanvas.style.pointerEvents = 'none';
-    host.appendChild(viewCanvas);
-    // 只交一次：之后换窗、改尺寸都在这张上做（OffscreenCanvas 交出去就收不回来）。
-    //   转移列表必须带上，理由与 sendPageCanvas 那条一样 —— 不带会抛 DataCloneError
-    //   （OffscreenCanvas 不能按值克隆），而这一处抛在"状态到达"的路上，会被宿主当成
-    //   致命错误整页停用（横幅：宿主处理引擎状态时抛异常）。
-    const off = viewCanvas.transferControlToOffscreen();
-    post({ t: 'viewCanvas', ts: now(), continuous: true, gap: 0, dpr, canvas: off }, [off]);
-  }
-  const w = Math.round(gm.pageW / dpr);
-  const h = Math.round(vs.viewH / dpr);
-  const left = Math.round((vs.viewW - gm.pageW) / 2 / dpr);
-  const top = Math.round(sr.top - hr.top);
-  const px = (v) => v + 'px';
-  if (viewCanvas.style.width !== px(w)) viewCanvas.style.width = px(w);
-  if (viewCanvas.style.height !== px(h)) viewCanvas.style.height = px(h);
-  if (viewCanvas.style.left !== px(left)) viewCanvas.style.left = px(left);
-  if (viewCanvas.style.top !== px(top)) viewCanvas.style.top = px(top);
-  lastPageX = Math.max(0, Math.round((vs.viewW - gm.pageW) / 2));
-  // 连页模式没有页画布：这两张表按空报，探针据此走"读不到像素"的分支。
-  pageCanvases.clear();
-  host.pageCanvasCount = 0;
-}
-
-/**
  * 让槽与"当前窗口"对齐：第 p 页永远用第 p 模槽数 个槽。
  *
  * 为什么按模取而不是"窗口里第几个位置"：后者在窗口平移时会让每个槽都换一页，
@@ -553,7 +525,6 @@ function syncViewCanvas(gm) {
  * 八个槽一次建齐（首帧那一趟），此后元素与背衬全留着，换窗只是改几行 style。
  */
 function syncPageCanvases(gm) {
-  if (viewContinuous) return syncViewCanvas(gm);
   const dpr = gm.dpr || 1;
   const first = gm.first;
   const count = gm.count;
@@ -692,6 +663,9 @@ function syncSpacer(st, gm) {
     ? Math.max(1, Math.round((gm.contentPx || 0) / dprNow()))
     : Math.max(1, (total * gm.pageStep - gm.gap) / dprNow());
   if (spacerEl.style.height !== h + 'px') spacerEl.style.height = h + 'px';
+  // 页容器与滚动内容同高：画布挂在它里面，overflow: hidden 把连页下最后一页多出来的
+  //   那一截裁掉（否则滚动条会多出一整页空白）。分页下两者恰好相等，裁不到东西。
+  if (pagesEl.style.height !== h + 'px') pagesEl.style.height = h + 'px';
 
   // 页纸底：让"还没渲染出来的页"也是一张白纸，而不是什么都没有。
   //   为什么必须有、为什么用 CSS 而不是多建画布，与单线程宿主的 syncPageBackdrop
@@ -717,16 +691,6 @@ function syncSpacer(st, gm) {
   }
 }
 
-/**
- * 帧槽号：页在帧内的位置由引擎的槽数决定（页号 mod 槽数）。
- *   与单线程宿主的 frameSlotOf 同一口径 —— 光标坐标里的 y 含的就是这个槽偏移。
- */
-function frameSlotOf(page) {
-  const n = host.frameSlots();
-  if (n <= 0) return 0;
-  return ((page % n) + n) % n;
-}
-
 function positionIme(st, gm) {
   const inWindow = st.caretPage >= gm.first && st.caretPage < gm.first + gm.count;
   if (!st.caretW || !inWindow) {
@@ -736,14 +700,10 @@ function positionIme(st, gm) {
   }
   const lineH = Math.max(12, Math.round(st.caretH / dprNow()));
   ta.style.left = Math.round((lastPageX + st.caretX) / dprNow()) + 'px';
-  // caretY 是"帧内的 y"，含的是槽偏移（第 caretPage 页落在哪个槽），不是"窗口里排第几页"。
-  //   所以文档坐标 = 页号 x 步距 + 页内 y，而页内 y = caretY - 槽偏移。写成"窗口首页 x 步距
-  //   + caretY"在窗口首页不是槽数整数倍时会把框摆到别的页上去（与命中测试那次同类）。
-  //   连页与分页在这里是同一个式子：分页下画布在文档流里、连页下视口画布不动而内容按
-  //   滚动量贴，两者都等价于"文档坐标减滚动量"。
-  const local = st.caretY - frameSlotOf(st.caretPage) * gm.pageStep;
+  // caretY 是页内 y（引擎只给页内坐标，页号另给）：文档坐标 = 页号 x 步距 + 页内 y，
+  //   再减滚动量。一条式子管两种视图模式 —— 页画布在文档流里，滚动由浏览器搬。
   ta.style.top =
-    Math.round((st.caretPage * gm.pageStep + local) / dprNow() - stageEl.scrollTop) + 'px';
+      Math.round((st.caretPage * gm.pageStep + st.caretY) / dprNow() - stageEl.scrollTop) + 'px';
   ta.style.width = Math.max(24, Math.round((gm.pageW - st.caretX) / dprNow())) + 'px';
   ta.style.height = lineH + 'px';
   ta.style.lineHeight = lineH + 'px';
@@ -1102,14 +1062,19 @@ function placeAt(xDev, yDev) {
 }
 
 /**
- * 切换视图模式：分页（一页一张画布，默认）与连页（一个视口画布）。
+ * 当前是不是连页模式。两种模式共用"一页一张画布"，它只影响页间隙、页纸底与滚动高度
+ *   （见 syncSpacer），以及发给 Worker 的排版形状（连页不在页底断行）。
+ */
+let viewContinuous = false;
+
+/**
+ * 切换视图模式：分页（页间留 14 磅）与连页（页首尾相接）。
  *
- * 两条路的差别只有"贴到哪儿"（见 syncViewCanvas 与 Worker 侧的 blitPageContinuous），
- *   引擎那一侧完全不动 —— 帧、槽、增量重画、字形二分、编译增量都是按文档算的，
- *   与画布几张无关。页间隙随之切换：连页要 0（页首尾相接），分页回到 14 磅。
+ * 两种模式共用同一套"一页一张画布"，差别只有页间隙与引擎的排版形状（连页不在页底断行）。
+ *   连页因此不需要第二张画布，滚动也不再需要重新贴 —— 页画布钉在 (页号 x 步距) 上，
+ *   浏览器自己搬像素。
  *
- * 切换必须重来一遍画布：OffscreenCanvas 交出去就收不回来，所以每次切换都把旧的丢掉、
- *   让下一次 syncPageCanvases 按新模式重新建。
+ * 画布仍要重建一遍：OffscreenCanvas 交出去收不回来，而步距变了，同一批槽要清空重来。
  */
 host.setViewMode = function setViewMode(mode) {
   const want = mode === 'continuous';
@@ -1118,15 +1083,9 @@ host.setViewMode = function setViewMode(mode) {
   for (const cv of slotCanvases) cv.remove();
   slotCanvases.length = 0;
   pageCanvases.clear();
-  if (viewCanvas) {
-    viewCanvas.remove();
-    viewCanvas = null;
-  }
-  // 回分页要显式说一声：Worker 那边还留着连页标志与视口画布，不说它就会继续往一张
-  //   已经从 DOM 里摘掉的画布上贴 —— 表现是切回去之后画面停在最后一拍。
-  //   连页方向不用在这里说：画布那条消息（syncViewCanvas）带着标志与间隙一起过去。
-  //   间隙与模式同源（连页 0 = 页首尾相接，分页 14），所以它跟着这条消息走。
-  if (!want) post({ t: 'viewCanvas', ts: now(), continuous: false, gap: 14 });
+  // 间隙与模式同源（连页 0 = 页首尾相接，分页 14），所以它跟着模式一起过去。
+  //   两个方向都要发：Worker 那边留着上一次的模式，不说它就会按旧间隙算页的落点。
+  post({ t: 'viewMode', ts: now(), continuous: want, gap: want ? 0 : 14 });
   viewFireAndForget();
 };
 Object.defineProperty(host, 'viewMode',
@@ -1311,7 +1270,6 @@ Object.defineProperties(host, {
 host.frameW = () => (mirror.geom ? mirror.geom.frameW : 0);
 // 引擎侧的帧槽数：切帧（blitPage / selfCheck / 光标定位）按它算源行。
 //   由 worker 从引擎读回、随 geom 报来 —— 宿主不自己算，两侧必须是同一个数。
-host.frameSlots = () => (mirror.geom ? (mirror.geom.frameSlots | 0) : 0);
 host.frameH = () => (mirror.geom ? mirror.geom.frameH : 0);
 
 /**

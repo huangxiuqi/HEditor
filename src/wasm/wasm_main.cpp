@@ -451,14 +451,20 @@ int frameWidth() { return g_engine.frameWidth(); }
 int frameHeight() { return g_engine.frameHeight(); }
 size_t frameByteSize() { return g_engine.frameBytes(); }
 
+/**
+ * 窗口导出图（内容 + 瞬态，窗口顺序拼一张）。给探针与诊断用：
+ * 它现场拼一次，宿主上屏走的是 pageRgba / pageDirtyRects —— 那条路不需要窗口帧。
+ */
 val frameRgba() {
     return val(emscripten::typed_memory_view(g_engine.frameBytes(), g_engine.frame()));
 }
 
 /**
- * 一页的像素（页内坐标，RGBA），零拷贝视图。
+ * 一页"画到画布上应该是什么"（页内坐标，RGBA），零拷贝视图：内容 + 这一页的瞬态。
  *
- * 页不在缓存里或已过期时给一个空视图 —— 与"整帧"不同，它不负责补一次光栅：
+ * 宿主把它整页或按脏矩形贴到该页的画布上 —— 页的位置由宿主按 (页号 x 步距) 定，
+ *   引擎不再有槽，也不再拼"窗口帧"给宿主用。
+ * 页不在缓存里或已过期时给一个空视图 —— 它不负责补一次光栅：
  *   补光栅会把字形账算到一次读命令头上，而账是"这一拍排了多少"的证据。宿主在
  *   present 之后读它，那时窗口内该光栅的页都已经光栅过了。
  */
@@ -469,11 +475,10 @@ val pageRgba(int page) {
 }
 
 /**
- * 视口锚点：帧只装 [first, first+count) 这几页。count <= 0 表示整篇。
- * 宿主按"可见页 ± 1"设它，帧高于是与文档长度无关 —— 帧高就是画布高度，
- * 而画布越大浏览器每帧要重新合成的图层越大（见 EditorEngine::setViewportAnchor）。
+ * 视口锚点：呈现只保证 [first, first+count) 这几页是新鲜的。count <= 0 表示整篇。
+ * 宿主按"可见页 ± 余量"设它 —— 窗口越短，每拍要维护的页位图越少、脏矩形也越少。
  *
- * 不调它 = 整篇帧。长文档上差别是一个量级：2000 段实测每实例堆 82.6 MB（窗口 3 页）
+ * 不调它 = 整篇。长文档上差别是一个量级：2000 段实测每实例堆 82.6 MB（窗口 3 页）
  * 对 1031.6 MB（整篇），装载 115 ms 对 1583 ms。数字与拆解见该函数的注释。
  */
 void setViewportAnchor(int first_page, int page_count) {
@@ -482,11 +487,6 @@ void setViewportAnchor(int first_page, int page_count) {
 
 int windowFirstPage() { return g_engine.windowFirstPage(); }
 
-/**
- * 帧槽数：页在帧内的行偏移 = (页号 mod 槽数) x 步距。宿主切帧用它算源行，
- *   所以两侧必须是同一个数 —— 它由 worker 按窗口页数上限设一次，宿主读回同一个值。
- */
-int frameSlots() { return g_engine.frameSlots(); }
 int windowPageCount() { return g_engine.windowPageCount(); }
 int pagePxWidth() { return g_engine.pagePxWidth(); }
 int pagePxHeight() { return g_engine.pagePxHeight(); }
@@ -993,21 +993,6 @@ std::string auditGlyphPages() { return g_engine.auditGlyphPagesJson(); }
 std::string auditCompile() { return g_engine.auditCompileJson(); }
 
 /**
- * 上屏矩形：宿主必须用它，不能用 editStats 的 repaintedX/Y/W/H。
- * 前者是"自上次上屏以来写过哪些区域"（读后清零），后者是"这一轮写了多少"。
- * 一次用户操作可能触发两次 present（见 afterEdit 那条补救路径），
- * 用后一轮的账上屏会把前一轮整个丢掉 —— 症状正是
- * "光标走了、文字没动、方括号还留在原地"。
- */
-std::string takeBlitBoxJson() {
-    const Rect r = g_engine.takeBlitBox();
-    std::ostringstream o;
-    o << "{\"x\":" << static_cast<int>(r.x) << ",\"y\":" << static_cast<int>(r.y)
-      << ",\"w\":" << static_cast<int>(r.w) << ",\"h\":" << static_cast<int>(r.h) << "}";
-    return o.str();
-}
-
-/**
  * Tab / Shift+Tab = 缩进 / 反缩进（不是跳字段）。
  * 走 *AndRender：入口改状态就必须自己收尾，理由见 engine.cpp 里那段说明。
  */
@@ -1482,7 +1467,6 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("auditLayout", &auditLayout);
     emscripten::function("auditGlyphPages", &auditGlyphPages);
     emscripten::function("auditCompile", &auditCompile);
-    emscripten::function("takeBlitBox", &takeBlitBoxJson);
     emscripten::function("indent", &indentText);
     emscripten::function("outdent", &outdentText);
     emscripten::function("controlAtPoint", &controlAtPoint);
@@ -1506,8 +1490,6 @@ EMSCRIPTEN_BINDINGS(heditor) {
 
     emscripten::function("setViewportAnchor", &setViewportAnchor);
     emscripten::function("windowFirstPage", &windowFirstPage);
-    emscripten::function("frameSlots", &frameSlots);
-    emscripten::function("setFrameSlots", +[](int n) { g_engine.setFrameSlots(n); });
     emscripten::function("windowPageCount", &windowPageCount);
     emscripten::function("pagePxWidth", &pagePxWidth);
     emscripten::function("pagePxHeight", &pagePxHeight);

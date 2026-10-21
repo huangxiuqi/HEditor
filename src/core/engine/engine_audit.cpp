@@ -303,52 +303,52 @@ std::vector<ControlRange> pairedControlRanges(const std::vector<BlockSpec>& bloc
 
 }  // namespace
 
+namespace {
+
 /**
- * 帧自审：这一帧 == "整帧重画一遍" 的结果吗？
- * 为什么不满足于"画布 == 引擎帧"（selfCheck）：
- * 那个判据只能抓"上屏贴错"。如果引擎帧本身就是错的（比如某个旧标记
- * 没被擦掉），画布忠实反映了它，两边当然相等 —— 判据全绿而屏幕是错的。
- * 这正是"光标走了、旧方括号还在"那类问题一直没被抓住的原因之一。
- * 这里用的是和单测 [10]（字形缓存等价性）同一个套路：
- * 增量路径的结果，必须逐字节等于从零重来的结果。
- * "从零重来"由 frame_needs_full_refresh_ 强制：底图整块重建、
- * 整帧从底图搬、再画标记与光标 —— 那就是这一帧的"真值"。
- * 副作用（有意为之）：跑完这一帧就处于真值状态，因此它同时也是自愈手段。
- * 所以它对用户也安全：出问题时跑一次，画面立刻正确，同时拿到取证数据。
+ * 两块同尺寸位图逐像素比（只比 RGB —— alpha 恒为不透明，不参与判断）。
+ * 返回差像素数；bbox 在 diff > 0 时给出。
  */
-std::string EditorEngine::auditFrameJson() {
-    const int fw = frameWidth();
-    const int fh = frameHeight();
-    std::ostringstream o;
-    if (fw <= 0 || fh <= 0) return "{\"diff\":-1,\"box\":null}";
-
-    const size_t n = frameBytes();
-    const std::vector<uint8_t> before(frame(), frame() + n);
-
-    frame_needs_full_refresh_ = true;  // ← 强制"从零重来"
-    repaint();
-
-    const uint8_t* now = frame();
+struct BitmapDiff {
     long long diff = 0;
-    int minx = 1 << 30, miny = 1 << 30, maxx = -1, maxy = -1;
-    for (int y = 0; y < fh; ++y) {
-        for (int x = 0; x < fw; ++x) {
+    int minx = 1 << 30;
+    int miny = 1 << 30;
+    int maxx = -1;
+    int maxy = -1;
+};
+
+BitmapDiff diffBitmaps(const Bitmap& a, const Bitmap& b) {
+    BitmapDiff d;
+    const int w = a.width();
+    const int h = a.height();
+    if (w != b.width() || h != b.height()) {
+        d.diff = -1;
+        return d;
+    }
+    const uint8_t* pa = a.data();
+    const uint8_t* pb = b.data();
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
             const size_t off =
-                (static_cast<size_t>(y) * static_cast<size_t>(fw) + static_cast<size_t>(x)) * 4u;
-            if (before[off] == now[off] && before[off + 1] == now[off + 1] &&
-                before[off + 2] == now[off + 2]) {
+                (static_cast<size_t>(y) * static_cast<size_t>(w) + static_cast<size_t>(x)) * 4u;
+            if (pa[off] == pb[off] && pa[off + 1] == pb[off + 1] && pa[off + 2] == pb[off + 2]) {
                 continue;
             }
-            ++diff;
-            if (x < minx) minx = x;
-            if (x > maxx) maxx = x;
-            if (y < miny) miny = y;
-            if (y > maxy) maxy = y;
+            ++d.diff;
+            if (x < d.minx) d.minx = x;
+            if (x > d.maxx) d.maxx = x;
+            if (y < d.miny) d.miny = y;
+            if (y > d.maxy) d.maxy = y;
         }
     }
-    o << "{\"diff\":" << diff << ",\"frameW\":" << fw << ",\"frameH\":" << fh;
-    if (diff > 0) {
-        o << ",\"box\":[" << minx << "," << miny << "," << maxx << "," << maxy << "]";
+    return d;
+}
+
+std::string diffJson(const BitmapDiff& d, int w, int h) {
+    std::ostringstream o;
+    o << "{\"diff\":" << d.diff << ",\"frameW\":" << w << ",\"frameH\":" << h;
+    if (d.diff > 0) {
+        o << ",\"box\":[" << d.minx << "," << d.miny << "," << d.maxx << "," << d.maxy << "]";
     } else {
         o << ",\"box\":null";
     }
@@ -356,62 +356,62 @@ std::string EditorEngine::auditFrameJson() {
     return o.str();
 }
 
+}  // namespace
+
 /**
- * 底图自审：把底图按"从零全建"重来一遍，与现在这一份逐字节比。
+ * 帧自审：现在这份画面 == "从零重画一遍"的结果吗？
  *
- * 与 auditFrameJson 的分工：那一条比的是帧，而帧是从底图搬的 ——
- *   底图错了，帧与"整帧重贴"照样一致，两条都绿、画面却是错的。
- *   换窗时的"平移复用重叠页"只动底图，正是这一条要看的对象。
+ * 为什么不满足于"画布 == 引擎画面"（selfCheck）：那个判据只能抓"上屏贴错"。如果引擎
+ *   画出来的本身就错了（旧光标没擦、某页的带重画错位），画布忠实反映了它，两边当然
+ *   相等 —— 判据全绿而屏幕是错的。这里用的是和单测 [10]（字形缓存等价性）同一个套路：
+ *   增量路径的结果，必须逐字节等于从零重来的结果。
  *
- * 做法：把 base_valid_ 置假再 repaint()，就会走"底图全建"那一支。
- *   同一窗口、同一布局、同一字形缓存下，全建是确定性的，所以两边必须逐字节相同。
- * 副作用（与 auditFrameJson 同一条纪律）：跑完底图就是真值，本身也是自愈手段。
+ * "从零重来"= 整份页缓存丢掉 + 重光栅 + 重拼。页缓存是唯一的像素缓存，所以这一条
+ *   同时覆盖"光栅确定性"与"拼装 / 瞬态确定性"。
+ * 副作用（有意为之）：跑完画面就处于真值状态，因此它同时也是自愈手段 ——
+ *   出问题时跑一次，画面立刻正确，同时拿到取证数据。
  */
-std::string EditorEngine::auditBaseJson() {
-    const int bw = base_.width();
-    const int bh = base_.height();
-    std::ostringstream o;
-    if (bw <= 0 || bh <= 0 || !base_valid_) return "{\"diff\":-1,\"box\":null}";
+std::string EditorEngine::auditFrameJson() {
+    const int fw = frameWidth();
+    const int fh = frameHeight();
+    if (fw <= 0 || fh <= 0) return "{\"diff\":-1,\"box\":null}";
 
-    const size_t n = base_.byteSize();
-    const std::vector<uint8_t> before(base_.data(), base_.data() + n);
+    // 参照物与现况都现场拼：现况那一份不能复用缓存的导出图 ——
+    //   那正是要审的东西（它可能与页位图对不上）。
+    Bitmap before;
+    assembleWindow(true, &before);
 
-    // 页缓存整份丢掉：底图的"从零全建"必须连页位图一起算。
-    //   留着缓存的话，全建只是把同一批页位图又搬一遍，比出来的是"搬运的确定性"，
-    //   而不是"光栅的确定性" —— 页位图本身错了这一条照样全绿。
     page_cache_.clear();
-    base_valid_ = false;  // ← 强制"底图全建"
+    page_dirty_rects_.clear();
     repaint();
 
-    const uint8_t* now = base_.data();
-    long long diff = 0;
-    int minx = 1 << 30;
-    int miny = 1 << 30;
-    int maxx = -1;
-    int maxy = -1;
-    for (int y = 0; y < bh; ++y) {
-        for (int x = 0; x < bw; ++x) {
-            const size_t off =
-                (static_cast<size_t>(y) * static_cast<size_t>(bw) + static_cast<size_t>(x)) * 4u;
-            if (before[off] == now[off] && before[off + 1] == now[off + 1] &&
-                before[off + 2] == now[off + 2]) {
-                continue;
-            }
-            ++diff;
-            if (x < minx) minx = x;
-            if (x > maxx) maxx = x;
-            if (y < miny) miny = y;
-            if (y > maxy) maxy = y;
-        }
-    }
-    o << "{\"diff\":" << diff << ",\"frameW\":" << bw << ",\"frameH\":" << bh;
-    if (diff > 0) {
-        o << ",\"box\":[" << minx << "," << miny << "," << maxx << "," << maxy << "]";
-    } else {
-        o << ",\"box\":null";
-    }
-    o << "}";
-    return o.str();
+    Bitmap after;
+    assembleWindow(true, &after);
+    return diffJson(diffBitmaps(before, after), fw, fh);
+}
+
+/**
+ * 内容自审：不含瞬态的拼装 == 从零重来吗？
+ *
+ * 与帧自审分工：两条都差 ⇒ 内容画错了；这一条绿而帧自审差 ⇒ 瞬态叠错了。
+ *   旧版这一条叫"底图自审"，比的是整窗底图（按槽搬运的产物）；底图撤销之后它的对象
+ *   变成"页位图按窗口拼起来"的那一层，判据形状不变（清缓存、重画、逐字节比）。
+ */
+std::string EditorEngine::auditBaseJson() {
+    const int fw = frameWidth();
+    const int fh = frameHeight();
+    if (fw <= 0 || fh <= 0) return "{\"diff\":-1,\"box\":null}";
+
+    Bitmap before;
+    assembleWindow(false, &before);
+
+    page_cache_.clear();
+    page_dirty_rects_.clear();
+    repaint();
+
+    Bitmap after;
+    assembleWindow(false, &after);
+    return diffJson(diffBitmaps(before, after), fw, fh);
 }
 
 /**
@@ -434,7 +434,7 @@ std::string EditorEngine::auditPageJson(int page) {
         return "{\"diff\":-1,\"cached\":0}";
     }
     Bitmap ref(pw, ph);
-    ref.shareFonts(base_);
+    ref.shareFonts(font_owner_);
     const int saved_glyphs = raster_glyphs_;
     const double saved_bounds = raster_glyph_bounds_ms_;
     const double saved_fill = raster_fill_ms_;

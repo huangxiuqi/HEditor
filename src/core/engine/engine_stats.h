@@ -185,17 +185,17 @@ struct EditStats {
     double rebuild_controls_ms = 0.0;  // 控件视图导出
 
     /**
-     * 上屏粒度：本次真正重画的页数，以及文档总页数。
+     * 上屏粒度：本次真正重光栅的页数，以及文档总页数。
      *
-     * total_pages 是文档页数，不是帧里那几页 —— 帧只装视口窗口（见
-     * EditorEngine::setViewportAnchor），而"脏页 / 总页"这个比值的分母必须是整篇，
-     * 否则它会恒等于 1，读起来像"只有一页脏"。帧里那几页看 window_pages。
+     * total_pages 是文档页数，不是窗口里那几页 —— 呈现只保证视口窗口内的页是新鲜的
+     * （见 EditorEngine::setViewportAnchor），而"脏页 / 总页"这个比值的分母必须是整篇，
+     * 否则它会恒等于 1，读起来像"只有一页脏"。窗口里那几页看 window_pages。
      */
     int repainted_pages = 0;
     int total_pages = 0;
     /**
-     * 本次重画的那条行带（帧像素、页内 y；band_y1 < 0 = 本轮没走行带路径）。
-     * 与 repainted_pixels 一起看：后者说"写了多少"，这两个说"写的是哪一条"。
+     * 本次重画的那条行带（页内像素 y；band_y1 < 0 = 本轮没走行带路径）。
+     * 与 repainted_pixels 一起看：后者说"要传多少"，这两个说"传的是哪一条"。
      * 页粒度重画时它就是整页（y0=0、y1=页高）。
      */
     int band_y0 = -1;
@@ -206,7 +206,10 @@ struct EditStats {
     int window_pages = 0;
     int window_first_page = 0;
     /**
-     * 本次真正写过的像素数（由 Bitmap 记账，非上层估算），以及写入区域的包围盒（设备像素）。
+     * 本次要上屏的像素数（各页脏矩形面积之和，合并之后的），以及它们在窗口坐标下的包围盒。
+     *
+     * 口径是"宿主得重传多少"，与 pageDirtyRects 完全一致 —— 旧版记的是"帧缓冲写了多少次"，
+     * 那个数随渲染目标一起消失了。上界仍然成立：它证明的是"真的没写整页"。
      */
     long long repainted_pixels = 0;
     int repainted_x = 0;

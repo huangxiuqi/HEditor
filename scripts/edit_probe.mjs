@@ -337,8 +337,13 @@ async function main() {
     const outside = await c.eval(`
       const cv = window.__heditor.canvas, r = cv.getBoundingClientRect();
       const sy = r.height / cv.height;
+      // caret.y 是页内像素（页号另给），画布代理的 rect 是窗口坐标：
+      //   窗口内 y = (光标页 - 窗口首页) x 步距 + 页内 y。
+      const H = window.__heditor;
+      const step = H.pagePx[1] + H.pagePx[2];
+      const wy = (H.caret.page - H.editStats.windowFirstPage) * step + H.caret.y;
       cv.dispatchEvent(new MouseEvent('mousedown',
-        { clientX: r.left - 50, clientY: r.top + (window.__heditor.caret.y + 5) * sy,
+        { clientX: r.left - 50, clientY: r.top + (wy + 5) * sy,
           bubbles: true, cancelable: true }));
       if (window.__heditor.quiesce) await window.__heditor.quiesce();  // 异步宿主：命中+落光标要走往返
       return window.__heditor.caret.offset;`);
@@ -830,12 +835,15 @@ async function main() {
           const st = window.__heditor.editStats;
           const f = await window.__heditor.rawFrame();
           const fw = window.__heditor.frameW();
+          const H2 = window.__heditor;
+          const winY = (st.caretPage - H2.editStats.windowFirstPage) * (H2.pagePx[1] + H2.pagePx[2]) +
+                       st.caretY;
           const mark = (r, g, b) => r > 45 && b - r > 60 && b > 140;   // 光标色 r=31 被排除
           const cx = st.caretX;
           let left = 0, right = 0;
           for (let i = 0; i + 3 < f.length; i += 4) {
             const p = i >> 2, x = p % fw, y = (p - x) / fw;
-            if (y < st.caretY || y >= st.caretY + st.caretH) continue;
+            if (y < winY || y >= winY + st.caretH) continue;
             if (!mark(f[i], f[i + 1], f[i + 2])) continue;
             if (x < cx - 3 && x > cx - ${Math.ceil(slotPx + 4)}) ++left;
             if (x > cx + 3 && x < cx + ${Math.ceil(slotPx + 4)}) ++right;
@@ -1074,11 +1082,14 @@ async function main() {
           const st = window.__heditor.editStats;
           const f = await window.__heditor.rawFrame();
           const fw = window.__heditor.frameW();
+          const H2 = window.__heditor;
+          const winY = (st.caretPage - H2.editStats.windowFirstPage) * (H2.pagePx[1] + H2.pagePx[2]) +
+                       st.caretY;
           const near = ${MARK};   // 标记亮蓝；光标色 r=31 被排除
           let bracketX = -1;
           for (let i = 0; i + 3 < f.length; i += 4) {
             const p = i >> 2, x = p % fw, y = (p - x) / fw;
-            if (y < st.caretY || y >= st.caretY + st.caretH) continue;
+            if (y < winY || y >= winY + st.caretH) continue;
             if (!near(f[i], f[i + 1], f[i + 2])) continue;
             if (x > bracketX) bracketX = x;
           }
@@ -1453,8 +1464,11 @@ async function main() {
       const before = stage.scrollTop;
       const cv = H.canvas, r = cv.getBoundingClientRect();
       const sx = r.width / cv.width, sy = r.height / cv.height;
+      // 画布代理的 rect 是"窗口帧"的坐标，而 cr0.y 是页内 y —— 加上页号偏移才是窗口内 y。
+      const step = H.pagePx[1] + H.pagePx[2];
+      const wy0 = (cr0.page - H.editStats.windowFirstPage) * step + cr0.y;
       cv.dispatchEvent(new MouseEvent('mousedown',
-        { clientX: r.left + (cr0.x + 2) * sx, clientY: r.top + (cr0.y + 2) * sy,
+        { clientX: r.left + (cr0.x + 2) * sx, clientY: r.top + (wy0 + 2) * sy,
           bubbles: true, cancelable: true }));
       if (window.__heditor.quiesce) await window.__heditor.quiesce();  // 异步宿主：命中+落光标要走往返
       const sc2 = await H.selfCheck();

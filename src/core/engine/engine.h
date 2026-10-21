@@ -51,12 +51,11 @@ public:
     /**
      * 只改光标与选区的样式（颜色、光标宽度）。
      *
-     * 为什么不复用 setConfig：那一处会作废底图，而底图全建要把窗口里的每一页重新光栅
-     *   （3 页约 32 ms）。样式由界面上的取色器连续改时，每一下都付这笔钱。
-     *   底图的内容与样式无关 —— 光标与选区都画在帧上，见 presentInternal。
+     * 为什么不复用 setConfig：那一处会作废页缓存，而页缓存重建要把窗口里的每一页重新
+     *   光栅（3 页约 32 ms）。样式由界面上的取色器连续改时，每一下都付这笔钱。
+     *   页位图里没有光标与选区 —— 它们是导出时叠上去的瞬态，所以样式改了只需再呈现一次。
      *
-     * 不动底图，也不清 caret_rect_px_prev_ 与 selection_rects_prev_：那两份正是下一次
-     *   呈现用来把旧样式的像素从帧上擦掉的依据，清了就会在帧上留下旧颜色。
+     *   调用方改完要呈现一次（引擎不自己重绘）。
      *   调用方改完要呈现一次（引擎不自己重绘）。
      */
     void setCaretAndSelectionStyle(const Color& caret, float caret_width_pt,
@@ -101,7 +100,7 @@ public:
      * 字符格式因此仍只有一个产处（投影），引擎不自己拼。
      *
      * 隐藏控件的可见性口径与投影同一处取值（见 rebuildFromTree），所以 setEditMode 必须重建。
-     * 装载会复位光标、作废底图并整篇标脏。
+     * 装载会复位光标、作废页缓存并整篇标脏。
      */
     void setDocument(const NodeTree& tree, const StyleSheet& sheet);
     /**
@@ -134,11 +133,11 @@ public:
     /**
      * 重排版：从 layout_dirty_from_ 起的段重排，之前的段原样复用（续排契约见
      * core/layout/layout.h）。没有脏段时按全量处理 —— 宁可多排一次，也不拿旧前缀
-     * 去接新后缀。底图内容随之作废，呈现时按页指纹增量重画。
+     * 去接新后缀。页的内容随之作废，呈现时按页指纹增量重画。
      */
     void relayout();
     /**
-     * 全量：底图 + 光标一次性提交到帧缓冲。
+     * 全量：保证窗口内每页的内容新鲜，再按当前窗口导出像素。
      */
     void repaint();
     /**
@@ -160,28 +159,23 @@ public:
     void setViewportAnchor(int first_page, int page_count);
 
     /**
-     * 本次呈现覆盖到的页（绝对页号，升序去重）。
-     * 宿主据此决定"哪几张页画布要重贴" —— 它比"脏页数"更准：光标与表单标记
-     * 画在帧上而不进底图，它们所在的那一页同样要重贴，而页指纹里没有这两样。
+     * 本拍写过（有脏矩形）的页（绝对页号，升序去重）。
+     * 宿主据 pageDirtyPagesJson 决定贴哪几页；这一份是"本拍写过什么"的读数，
+     * 供面板与探针用 —— 两者的区别见 pageDirtyPagesJson 的注释。
      */
     const std::vector<int>& dirtyPages() const { return last_dirty_pages_; }
     /**
-     * 帧当前覆盖的首页（= 宿主算页偏移与命中换算的基准）。
+     * 本次呈现覆盖的首页（= 宿主算页偏移与命中换算的基准）。
+     *
+     * 这是"当前窗口"的唯一读数。它由 presentInternal 按视口锚点落定 ——
+     *   不再有"帧槽"这一层：窗口就是 [win_first_page_, win_first_page_ + win_page_count_)，
+     *   每页各有一张自己的位图，页在画布上的位置是 (页号 x 步距)，与窗口开在哪无关。
      */
-    int windowFirstPage() const { return base_first_page_; }
+    int windowFirstPage() const { return win_first_page_; }
     /**
-     * 帧槽数：页在帧内的行偏移 = (页号 mod 槽数) x 步距。由宿主侧算好传进来
-     *   （它等于窗口页数上限 maxWindowPages，与宿主的画布槽数是同一个数）。
-     * 为什么不是引擎自己算：引擎不知道视口尺寸；而两侧各算一次会分叉 ——
-     *   画布槽那边实测出过分叉（宿主按"已建槽数"只增、引擎按"当前几何"可减，
-     *   视口从很高变矮时槽号整体错位、画布上是别的页）。
+     * 本次呈现覆盖的页数。
      */
-    void setFrameSlots(int n);
-    int frameSlots() const { return frame_slot_count_; }
-    /**
-     * 帧当前覆盖的页数。宿主按它把窗口位图切成几块贴给页画布。
-     */
-    int windowPageCount() const { return base_page_count_; }
+    int windowPageCount() const { return win_page_count_; }
 
     /**
      * 页在帧像素下的几何。宿主用它把"第 k 张页画布 + 页内 y"换算成帧坐标，
@@ -649,14 +643,13 @@ public:
     std::string auditFrameJson();
 
     /**
-     * 底图自审：把底图按"从零全建"重来一遍，与现在这一份逐字节比，返回
+     * 内容自审：不含瞬态的窗口拼装 == 从零重来吗？返回
      * {"diff":N,"frameW":..,"frameH":..,"box":[x0,y0,x1,y1]}。
      *
-     * 为什么必须单独有一条（auditFrameJson 盖不住）：帧是从底图搬过来的，
-     *   底图本身错了，帧与"整帧重贴"当然一致 —— 两条都绿，画面却是错的。
-     *   而"换窗时平移复用重叠页"这条优化只动底图，正是这一条要看的对象。
-     *   判据：同一窗口下，平移复用得到的底图必须与全建逐字节相同。
-     * 跑完顺便把底图修成真值（与 auditFrameJson 同一口径：自审不掩盖问题）。
+     * 与 auditFrameJson 分工：两条都差 ⇒ 内容画错了；只有帧那条差 ⇒ 瞬态叠错了。
+     *   旧版这条叫"底图自审"，比的是按槽搬运的整窗底图；底图撤销之后它改比
+     *   "页位图按窗口拼起来"的那一层，判据形状不变（清页缓存 → 重画 → 逐字节比）。
+     * 跑完顺便把画面修成真值（与 auditFrameJson 同一口径：自审不掩盖问题）。
      */
     std::string auditBaseJson();
 
@@ -708,7 +701,7 @@ public:
      * 字形页索引自审：逐页验"二分出来的区间"与"全篇筛一遍"是否给出同一批字形。
      *
      * 为什么要单开一条：绘制侧改成按页二分之后，auditBaseJson 变得盖不住它了 ——
-     *   那条是"强制底图全建再与现在比"，而全建走的是同一条二分路径，两边错得一样，
+     *   那条是"强制从零重画再与现在比"，而重画走的是同一条二分路径，两边错得一样，
      *   逐字节比照样全绿（这正是本条存在的理由：同一个代码路径当判据必然恒绿）。
      * 判据取双向：区间内每个字形的 page 必须等于该页（不漏），并且全篇里属于该页的
      *   字形数必须等于区间长度（不多不少）—— 只查前者会漏掉"区间里混进别页"，
@@ -731,19 +724,6 @@ public:
      * 这是"增量到底省了多少"的唯一证据 —— 没有分母的耗时数说明不了任何事。
      */
     std::string auditCompileJson();
-
-    /**
-     * 上屏契约：引擎写过的区域累积到宿主读取为止，读后清零。
-     *
-     * 与 EditStats 的 repaintedX/Y/W/H 不同：那是"本轮写了多少"（面板用），这里要的是
-     * "自上次上屏以来写过哪些区域"。一次用户操作可能触发两次 present（见
-     * repaintAfterEdit），用后一轮的脏矩形上屏会丢掉前一轮的整帧重绘，此时引擎帧正确、
-     * 画布却是旧的（auditFrame 差 0、selfCheck 差上千像素，正是这个形状）。
-     * 累加器让"引擎写了、宿主没贴"在结构上不可能发生，也不再依赖每个调用点都用对
-     * 那一轮的账。代价是并集可能大于严格必要：多贴几个矩形只是性能问题，漏贴是
-     * 正确性问题。
-     */
-    Rect takeBlitBox();  // 读并清零；无待上屏时返回 w/h = 0
 
     /**
      * 编辑类入口的统一收尾：先让光标回到可见相位，再重绘。
@@ -775,7 +755,7 @@ public:
     bool caretRectPt(Rect* out) const;
     /**
      * 反查：文档坐标（磅）→ (段, 偏移) + 侧别 + 行别；点落在页间空隙时返回 false。
-     * 文档坐标以第 0 页顶边为原点，与帧怎么摆无关（帧按槽号装页，拿槽号反查会整体错位）。
+     * 文档坐标以第 0 页顶边为原点 —— 与"窗口开在哪一页"无关，也与画布怎么摆无关。
      * out_side 是落点侧别（同一偏移上可能压着几枚括号），out_owner 是它的投影，只给人看。
      * out_line_aff 是折行处的行别：点下一行行首时大于 0，不带回去会画到上一行行尾。
      * out_cell_para：落在格子的边距带上时给出这一格的段号（否则 -1）。
@@ -796,17 +776,47 @@ public:
      */
     bool selectCellAtPt(float x_pt_doc, float y_pt_doc);
 
-    const uint8_t* frame() const { return bitmap_.data(); }
-    int frameWidth() const { return bitmap_.width(); }
-    int frameHeight() const { return bitmap_.height(); }
+    /**
+     * 窗口导出图：把窗口内各页的"内容 + 瞬态"按窗口顺序拼成一张，供宿主 / 探针 / 单测读。
+     *
+     * 它不是渲染目标 —— 渲染只写页位图（见 PageBitmap），这里是一次读请求时现场拼的
+     *   派生视图（第一次读时拼一次，下一次 present 作废重拼）。所以它没有槽、没有增量，
+     *   也不可能与页位图分叉：内容全部来自页位图，瞬态全部来自同一份矩形。
+     * 保留它是为了让"扫一遍画面"这类判据（像素断言、markCheck、inkRows）不必认识页。
+     */
+    const uint8_t* frame() const;
+    /**
+     * 窗口的横向像素：与页同宽（页在窗口里只纵向排列）。
+     */
+    int frameWidth() const { return pagePxWidth(); }
+    /**
+     * 窗口的纵向像素：窗口页数 x 步距（末页之后那一格页间隙也留着，与旧帧同形）。
+     */
+    int frameHeight() const;
     size_t frameBytes() const;
 
     /**
-     * 第 page 页的像素（页内坐标，RGBA），零拷贝视图。
+     * 窗口导出图拼一次（见 frame 的说明）。返回它的字节数。
+     * 只在导出图被 presentInternal 作废之后才真的重拼 —— 拼的是页位图的副本。
+     */
+    size_t ensureFrameExport() const;
+    /**
+     * 把窗口内各页拼进 @p out。@p with_transient 为假时只拼内容（审计用）。
+     */
+    void assembleWindow(bool with_transient, Bitmap* out) const;
+
+    /**
+     * 第 page 页"画到画布上应该是什么"的像素（页内坐标，RGBA），零拷贝视图。
      *
+     * 内容是纯的（页位图只由文档与光栅配置决定），光标与选区是瞬态 —— 后者不写进页位图，
+     *   而是在这里合成出来：把页位图拷进一张单页的导出图，再叠上这一页的瞬态矩形。
+     *   于是"要擦掉旧光标"这件事不需要任何记账：下一次导出从干净的页位图重来一遍，
+     *   旧光标自然不存在。这是删掉整窗帧之后仍然只有一个可写真相的原因。
+     *
+     * 页上没有瞬态时直接给页位图本身（零拷贝，一页 3.5 MB 的拷贝能省就省）。
      * 只在"这一页在缓存里、且缓存里的像素还作数"时给得出来；否则返回 0 / nullptr。
-     *   它刻意不在内部补一次光栅：那会把字形账算到一次读命令头上，而账是"这一拍排了多少"的
-     *   证据。调用方（宿主）在 present 之后读它 —— 窗口内该光栅的页那时都已经光栅过了。
+     *   它刻意不在内部补一次光栅：那会把字形账算到一次读命令头上，而账是"这一拍排了多少"
+     *   的证据。调用方（宿主）在 present 之后读它 —— 窗口内该光栅的页那时都已经光栅过了。
      */
     size_t pageBytes(int page) const;
     const uint8_t* pagePixels(int page) const;
@@ -814,8 +824,8 @@ public:
     /**
      * 自上次取走以来写过这一页的矩形（页内像素坐标）。读后清零。
      *
-     * 口径是"页位图上真的变了的地方"：内容重光栅（整页或行带）+ 瞬态（光标 / 选区 / 表单
-     *   标记）的新旧矩形。帧的 rebuild 不算 —— 帧重建只改落点，页像素一个字节都没动，
+     * 口径是"这一页上画出来的东西真的变了的地方"：内容重光栅（整页或行带）+ 瞬态
+     *   （光标 / 选区）的新旧矩形。窗口平移不算 —— 页像素一个字节都没动，只是落点变了，
      *   把它算进来会让"换窗"退化成整窗重传。
      */
     std::vector<Rect> takePageDirtyRects(int page);
@@ -825,9 +835,9 @@ public:
      * 有累积脏矩形的页号（升序）。读后不清，清零发生在 takePageDirtyRects。
      *
      * 与 dirtyPages() 的区别：那一份是"这一拍写过哪几页"，这一份是"还欠哪几页没贴"。
-     *   矩形是累积的 —— 某一拍的 present 可能根本没被宿主消费（窗口平移、槽重建、
-     *   页面不可见），那些矩形会留到下一拍。按本拍清单贴就会永久漏掉那几块，
-     *   症状是屏幕上留几十像素的旧光标 / 旧括号。
+     *   矩形是累积的 —— 某一拍的 present 可能根本没被宿主消费（窗口平移、页面不可见），
+     *   那些矩形会留到下一拍。按本拍清单贴就会永久漏掉那几块，
+     *   症状是屏幕上留几十像素的旧光标。
      */
     std::string pageDirtyPagesJson() const;
 
@@ -933,38 +943,56 @@ private:
      */
     void exportControls(const std::vector<rev::ControlSpan>& spans);
     /**
-     * 选区矩形（帧像素坐标，与 caretRectPx 同口径）。只取落在页范围
+     * 选区矩形（页内像素坐标，与 caretRectPxOf 同口径）。只取落在页范围
      * 页范围 [first_page, first_page + count) 里的那部分；count <= 0 表示不限页。
+     * 页内坐标 + 页号是这一层唯一的口径：窗口位置由宿主按 (页号 x 步距) 加回去，
+     *   引擎不再产生任何"窗口内偏移"（那种数一旦跨层就会与窗口首页的取值挂钩）。
      */
-    std::vector<Rect> selectionRectsPxIn(int first_page, int count) const;
+    std::vector<PageRect> selectionRectsPxIn(int first_page, int count) const;
     /**
-     * 整篇的选区矩形（帧像素坐标）。判据/取证用它，呈现不要用 —— 用 selectionRectsPxIn。
+     * 整篇的选区矩形（页内像素坐标）。判据/取证用它，呈现不要用 —— 用 selectionRectsPxIn。
      */
-    std::vector<Rect> selectionRectsPx() const;
+    std::vector<PageRect> selectionRectsPx() const;
     /**
      * 把"文本坐标 + 侧别"投影成 rel 并摆好（含重排）。side < 0 = 按"最内层含端点"投影。
      * extend 为真时不动锚点（Shift+Home/End 用）。line_aff 见 caretLineAffinity。
      */
     void projectCaret(int para, size_t offset, int side, bool extend = false, int line_aff = 0);
     /**
-     * 光标矩形（帧像素坐标）。caret_visible 为 false 或找不到行盒时返回零矩形。
+     * 光标矩形（页内像素坐标，出参 @p page 给它是哪一页）。caret_visible 为 false
+     * 或找不到行盒时返回零矩形、@p page = -1。
      */
-    Rect caretRectPx() const; /**
-     * 光标所在页（绝对页号；-1 = 找不到行盒）。
-     * 窗口化之后这是必需的一个数：帧只装窗口内的页，光标不在窗口里就既画不出来、
-     * 也点不中它 —— 宿主拿它决定窗口该锚在哪。
-     */
+    Rect caretRectPx(int* page) const;
     /**
-     * 统一呈现入口。内部按"页指纹是否变了"决定重建底图的哪几页。
+     * 光标所在页（绝对页号；-1 = 找不到行盒）。
+     * 窗口化之后这是必需的一个数：宿主拿它决定窗口该锚在哪、输入法框摆在哪。
      */
-    void presentInternal(int first_page, int count, bool force_full);
+    int caretPage() const { return caret_.caretPage(); }
+    /**
+     * 统一呈现入口：按窗口逐页光栅 + 记瞬态矩形，不产生整窗帧。
+     */
+    void presentInternal(int first_page, int count);
 
+    /**
+     * 一页上叠的瞬态：选区矩形（可以有多条）+ 光标矩形（最多一条）。
+     *
+     * 分成两份而不是混在一个数组里：导出时选区混色在下、光标实心在上，顺序由类型定，
+     *   而不是由"谁最后被 push 进数组"定 —— 后者只要有一处 push 顺序变了，
+     *   光标就会被半透明地再混一次，而那种错只在重叠的几个像素上看得出。
+     */
+    struct PageTransient {
+        std::vector<Rect> sel;
+        Rect caret{};
+    };
+    /**
+     * 这一页现在该叠哪些瞬态（页内像素坐标）。presentInternal 按页算差集、导出按页取用。
+     */
+    void collectTransient(int page, PageTransient* out) const;
     /**
      * 一页的光栅结果：页内坐标（原点 = 页左上角），不含页间隙。
      *
-     * 按页缓存而不是只留整窗底图：底图是"窗口"的形状，换窗就整块作废，
-     *   于是滚过一页要把窗口里每一页的字形重画一遍（3 页约 30 ms），而那些页的
-     *   内容一个字节都没变。按页存之后，换窗只剩"把缓存里的页搬进槽"这一笔 memcpy。
+     * 按页缓存是唯一的像素缓存：换窗、换缩放都不作废它（作废的判据是页指纹与
+     *   光栅签名），于是滚过一页不会把已经画好的页重画一遍（一页约 8~9 ms）。
      * fp 记的是光栅时那一版页指纹（哨兵值也算一版，见 kFpDirtyBit）：
      *   与 page_fp_new_ 相等就说明这一页的像素还作数，不必重画。
      */
@@ -979,13 +1007,20 @@ private:
          *   加进 rasterSignature()，所有页自动失效，不必再维护一张"记得清缓存"的清单。
          */
         uint64_t raster_sig = 0;
+        /**
+         * 上一次导出时叠在这一页上的瞬态（页内像素坐标：选区 + 光标）。
+         *
+         * 它只是"上一次记过哪几块"的账，用来算新旧差集 —— 像素本身不在页位图里，
+         *   所以没有"擦"这一步：下一次导出从干净的页位图重来。
+         */
+        PageTransient transient;
         bool valid = false;
     };
     /**
      * 页缓存。容量按"窗口页数 + 2"条，超出时按离窗口最远淘汰。
      *
-     * 只多留两条：这一阶段整窗底图还在，缓存的每一页都是净增内存（96 dpi 一页 3.6 MB），
-     *   两条余量够"滚回来一页"不重光栅，再多只是占内存。整窗底图收口之后可以放宽。
+     * 整窗底图撤销之后它是唯一的像素缓存（96 dpi 一页 3.6 MB），所以余量不再放宽：
+     *   窗口内的页一律留着，窗口外只留两条，够"滚回来一页"不重光栅。
      */
     std::unordered_map<int, PageBitmap> page_cache_;
     /**
@@ -997,7 +1032,6 @@ private:
      */
     std::unordered_map<int, std::vector<Rect>> page_dirty_rects_;
     void notePageDirty(int page, const Rect& r);
-    void noteTransientDirty(const Rect& r, int first_page, int count);
     /**
      * 缓存里这一页的像素还作数吗：有条目、有指纹、尺寸对得上、指纹与本次排版相同。
      * 没有指纹（页号超出指纹数组）一律返回假 —— 不敢断言"作数"的时候就重画。
@@ -1014,16 +1048,16 @@ private:
      */
     void rasterPageInto(int page, const float* band_lo_pt, const float* band_hi_pt);
     /**
-     * 把缓存里这一页的 [y0, y1) 像素带搬进整窗底图的槽位置。
-     * 页不在缓存里（或被淘汰）时什么也不做 —— 调用方必须先 rasterPageInto。
+     * 这一页"画到画布上应该是什么"：有瞬态时把内容 + 瞬态合成进一页的导出图。
+     * 返回 nullptr 表示这一页拿不出来（不在缓存里或已过期）。
      */
-    void blitPageIntoBase(int page, int y0, int y1);
+    const uint8_t* pageDisplayPixels(int page) const;
     /**
      * 缓存淘汰：窗口内的页一律留下，窗口外按距离由远及近释放到容量以内。
      */
     void trimPageCache(int first_page, int count);
     /**
-     * 本拍光栅出来的账。按页光栅之后字形不再画进整窗底图，所以这几个数由
+     * 本拍光栅出来的账。字形只画进页位图，所以这几个数由
      * rasterIntoBitmap 累加，呈现末尾一次性上报；自审路径会先存后还，不污染它们。
      */
     int raster_glyphs_ = 0;
@@ -1031,7 +1065,7 @@ private:
     double raster_fill_ms_ = 0.0;
     double raster_glyph_ms_ = 0.0;
     /**
-     * 页指纹：本次 relayout 的结果 / 已画进底图的那一版。
+     * 页指纹：本次 relayout 的结果 / 已画成像素的那一版。
      *
      * 只重算受影响页（@p dirty_lo 到 @p dirty_hi，含端点）：没有脏页信息时
      * 传 -1 走整篇重算。增量成立的前提是"没动过的页，字形一个字节都没动" ——
@@ -1044,7 +1078,7 @@ private:
      */
     void computeLineFingerprints(int dirty_lo, int dirty_hi, bool full);
     /**
-     * 把 [first_page, 末页) 直接标成"与底图那一版不同"，不去哈希。
+     * 把 [first_page, 末页) 直接标成"与已画那一版不同"，不去哈希。
      *
      * 用在后缀整体平移那一级：后缀的每一行都沿块轴挪了位，于是它在的每一页内容都变了 ——
      * 这个答案在进这里之前就已经确定，再把几百页的字形哈希一遍纯属白花
@@ -1053,8 +1087,8 @@ private:
      */
     void markPagesChangedFrom(int first_page);
     /**
-     * 把当前行指纹与行盒几何存成"底图里那一版"。
-     * 与 page_fp_in_base_ 同一时机调用：底图变了就要跟着换。
+     * 把当前行指纹与行盒几何存成"已画进页位图的那一版"。
+     * 与 page_fp_prev_ 同一时机调用：页像素变了就要跟着换。
      */
     void snapshotLineGeometry();
     /**
@@ -1062,15 +1096,6 @@ private:
      * 见 engine_paint.cpp 的实现注释（为什么不能用行盒自己的 block_lo/hi）。
      */
     void lineBand(int k, float* lo, float* hi) const;
-    /**
-     * 第 @p page 页在帧内的首行偏移（行）。
-     *
-     * 一维布局下就是 (页号 - 底图首页) x 步距。页在帧里的位置只有这一个算法 ——
-     *   原先同一个算式散在七处（页矩形、画入底图、只重贴一条带、表单括号、焦点小点、
-     *   光标矩形、控件矩形），改布局时漏掉任何一处都只表现为"某一层偏几页"，而其余全对。
-     * 帧改造（按页号分槽，见 out/_design_slotframe.md）只需要换这一个函数的实现。
-     */
-    int frameOffsetOfPage(int page) const;
     /**
      * 第 @p page 页上的字形下标区间（半开区间 [begin, end)）；这一页没有字形时两者相等。
      *
@@ -1194,7 +1219,7 @@ private:
      * 画表单标记（方括号与小点）到一页的位图上 —— 页内坐标，不认帧。
      *
      * 几何全部从排版的行盒派生（占位簇的位置 + 行盒的括号参考字体/基线）：
-     * 排版说槽在哪，就画在哪 —— 空字段（一个字形都没有）也画得出来。
+     * 排版说占位在哪，就画在哪 —— 空字段（一个字形都没有）也画得出来。
      * 画在页位图里而不是帧上：判据见 docs/步5-渲染层方案.md 的 5D 小节。
      *
      * band 非空时只画与这条带相交的行与控件 —— 与字形、原子框同一套裁剪口径。
@@ -1203,9 +1228,9 @@ private:
                             const float* band_hi_pt);
 
     /**
-     * 画一枚行内原子的显式占位框到底图上。
+     * 画一枚行内原子的显式占位框到页位图上。
      *
-     * 与表单标记分开：原子是页面内容（它是流里的一项，进页指纹与行指纹），所以画在底图里、
+     * 与表单标记分开：原子是页面内容（它是流里的一项，进页指纹与行指纹），所以画进页位图、
      * 不随光标状态擦除；标记是瞬态的，画在帧上。
      *
      * 几何全部从行盒的占位簇派生：沿行内轴的两端取簇的 inline_pt 与下一个簇的 inline_pt，
@@ -1401,8 +1426,14 @@ private:
     int last_relaid_lines_ = 0;
     bool last_layout_full_ = true;
 
-    Bitmap bitmap_;  // 给宿主的帧（= 底图 + 光标）
-    Bitmap base_;    // 底图（无光标）—— 局部重绘的全部依据就是这个缓存
+    /**
+     * 字体表的持有者：0x0，一像素都不画。
+     *
+     * Skia 的字形缓存按 strike 规格索引，规格里含字体对象的身份 —— 每块位图各建一份
+     *   字体表，缓存就分成互不相见的两份，往其中一份预热对另一份毫无帮助，而症状只是
+     *   "没变快"。整窗底图撤销之后由它当这个锚点，其余位图一律 shareFonts(font_owner_)。
+     */
+    Bitmap font_owner_;
 
     /**
      * 预热字形用的临时靶子：一条页宽的窄带，画进去的像素随用随丢。
@@ -1451,37 +1482,15 @@ private:
      */
     EditCommand edit_;
     bool caret_visible_ = true;
-    /**
-     * 上一帧画过的选区矩形（帧像素）。下次呈现先按它擦掉 —— 与 caret_rect_px_prev_
-     * 同一个理由：选区画在帧上、不进底图，不擦就会留下上一帧的一片蓝。
-     */
-    std::vector<Rect> selection_rects_prev_;
 
     /**
-     * 底图当前显示的范围与有效性
+     * 本次呈现的窗口（见 windowFirstPage / windowPageCount）。
+     *
+     * 它取代了旧的"底图首页 + 槽表"：每页各有一张位图，页在画布上的位置由页号直接定，
+     *   于是"窗口开到哪"只影响"这一拍要保证哪几页是新鲜的"，不再影响任何像素的落点。
      */
-    int base_first_page_ = 0;
-    /**
-     * 帧槽数（页号取模的模数），0 = 还没被设过。
-     *   它一变，所有页的槽号都跟着变，所以帧里的内容整体作废（见 setFrameSlots）。
-     */
-    int frame_slot_count_ = 0;
-    /**
-     * 槽 -> 该槽当前画着哪一页（-1 = 未知）。它是"要不要重画"的第二个判据：
-     *   页指纹只说明"这一页的内容变了"，而窗口平移/换缩放会让某个槽里装的换成别的页 ——
-     *   那件事页指纹看不见，必须由这张表回答。
-     */
-    std::vector<int> slot_page_;
-    /**
-     * 页号 -> 槽号。取模处理负页号，所以先加一轮再取。
-     */
-    int slotOfPage(int page) const {
-        const int n = frame_slot_count_;
-        if (n <= 0) return 0;
-        return ((page % n) + n) % n;
-    }
-    int base_page_count_ = 0;
-    bool base_valid_ = false;
+    int win_first_page_ = 0;
+    int win_page_count_ = 0;
 
     /**
      * 视口锚点（见 setViewportAnchor）。count <= 0 = 整篇。
@@ -1495,15 +1504,15 @@ private:
     std::vector<int> last_dirty_pages_;
 
     /**
-     * 页内容指纹：本次 relayout 的结果 / 已画进底图的那一版。
+     * 页内容指纹：本次 relayout 的结果 / 已画成像素的那一版。
      *
      * 真指纹一律清掉 kFpDirtyBit —— 那一位留给"已知变了"的哨兵（markPagesChangedFrom），
      * 于是"这一页变了没有"永远只有一个判据：new != base。
      */
     std::vector<uint64_t> page_fp_new_;
-    std::vector<uint64_t> page_fp_in_base_;
+    std::vector<uint64_t> page_fp_prev_;
     int page_fp_new_count_ = 0;
-    int page_fp_base_count_ = 0;
+    int page_fp_prev_count_ = 0;
 
     /**
      * 行内容指纹：与页指纹同源、同一把尺子，只是分桶到行（下标 = LineBox::line）。
@@ -1516,16 +1525,16 @@ private:
      * 也算变了 —— 那是"后缀整体平移"那一类。
      */
     std::vector<uint64_t> line_fp_new_;
-    std::vector<uint64_t> line_fp_in_base_;
-    int line_fp_base_count_ = 0;
+    std::vector<uint64_t> line_fp_prev_;
+    int line_fp_prev_count_ = 0;
 
     /**
-     * 底图里每一行的块轴范围（页内磅），按行下标。
+     * 已画进页位图的那一版里，每一行的块轴范围（页内磅），按行下标。
      * 重画一条行带时要靠它算"擦到哪儿"：上边界取新旧两版里更靠上的那个，
      * 否则行往下挪之后旧墨迹会留在原地（幽灵字）。下边界同理取更靠下的。
      */
-    std::vector<float> line_lo_in_base_;
-    std::vector<float> line_hi_in_base_;
+    std::vector<float> line_lo_prev_;
+    std::vector<float> line_hi_prev_;
 
     /**
      * 本次重画那条行带的页内磅范围（computeBand 写、paintPageIntoBase 读）。
@@ -1535,11 +1544,16 @@ private:
     float band_hi_scratch_ = 0.0f;
 
     /**
-     * 待上屏脏矩形累加器（见 takeBlitBox 的注释）。
+     * 导出用的两块临时位图（都只在真被读到时才分配）。
+     *
+     * page_export_：一页大小，"内容 + 瞬态"的合成落点；
+     * frame_export_：窗口大小，把各页拼起来给"扫画面"那类判据用。
+     * 它们是派生物、不是第二个真相：下一次 present 就作废，重拼时唯一的数据源是页位图。
      */
-    void noteBlitDirty(const Rect& r);
-    Rect blit_acc_{};
-    bool blit_acc_any_ = false;
+    mutable Bitmap page_export_;
+    mutable int page_export_page_ = -1;
+    mutable Bitmap frame_export_;
+    mutable bool frame_export_valid_ = false;
 
     /**
      * relayout() 置位、presentInternal() 消费。
@@ -1578,16 +1592,6 @@ private:
      * 不比的话，"把字段改成只读"之后括号还是蓝色，直到别的原因让那一页重光栅。
      */
     std::vector<uint8_t> mark_readonly_prev_;
-
-    /**
-     * 要求下一次呈现整帧重贴（而不是只贴几个脏矩形）。
-     * 用在"帧上画的东西变了、但底图没变"的时候 —— 切编辑模式、改控件集合。
-     * （底图不含光标与选区，所以那两件事不会让页指纹变；不显式置位就会出现
-     * "切到只读模式后光标还在"这种残留。）
-     */
-    bool frame_needs_full_refresh_ = false;
-
-    Rect caret_rect_px_prev_{};  // 上一帧光标矩形（帧像素）
 };
 
 }  // namespace heditor

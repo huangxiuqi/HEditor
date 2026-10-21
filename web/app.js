@@ -601,13 +601,9 @@ function scrollCaretIntoView(st) {
   //   拿它算绝对位置会滚到一个毫无关系的地方 —— 直接按页算到那一页的页首。
   const inWindow = st.caretPage >= st.windowFirstPage &&
                    st.caretPage < st.windowFirstPage + st.windowPages;
-  // caretY 是"帧内的 y"，它含的是槽偏移（第 caretPage 页落在哪个槽），不是
-  //   "在窗口里排第几页"（见 EditorEngine::caretRectPx 的 off_y 与 frameSlotOf）。
-  //   所以文档坐标 = 页号 x 步距 + 页内 y，而页内 y = caretY - 槽偏移。
-  //   写成 caretY 直接加页号会算两遍偏移（滚动后光标坐标跑到别的页去，屏幕跟着乱滚）。
-  const top = inWindow
-    ? (st.caretPage * step + (st.caretY - frameSlotOf(st.caretPage) * step)) / dpr
-    : (st.caretPage * step) / dpr;
+  // caretY 是页内 y（引擎只给页内坐标，页号另给），文档坐标 = 页号 x 步距 + 页内 y。
+  //   旧口径下它含一个槽偏移、要在这里减掉 —— 那个减号就是"跨层坐标没带口径"的补丁。
+  const top = inWindow ? (st.caretPage * step + st.caretY) / dpr : (st.caretPage * step) / dpr;
   const bot = top + Math.max(12, st.caretH / dpr);
   const pad = 18;
   const viewTop = stageEl.scrollTop;
@@ -617,35 +613,9 @@ function scrollCaretIntoView(st) {
 }
 
 /**
- * 帧槽号：页在帧内的位置由引擎的槽数决定（页号 mod 槽数）。
- *   切帧、自审、光标滚动定位三处都按它算，不再用"页号 - 窗口首页"。
- */
-function frameSlotOf(page) {
-  const n = mod ? api.read('frameSlots') : 0;
-  if (n <= 0) return 0;
-  return ((page % n) + n) % n;
-}
-
-/**
- * 把"帧槽数"报给引擎（等于窗口页数上限，与 worker 宿主同一个来源）。
- * 返回是否变过 —— 变过就意味着帧的布局整体换了，调用方必须重画一次再上屏。
- */
-let frameSlotsSent = 0;
-function syncFrameSlots() {
-  if (!mod || typeof api.engine().setFrameSlots !== 'function') return false;
-  const n = maxWindowPages();
-  if (n <= 0 || n === frameSlotsSent) return false;
-  frameSlotsSent = n;
-  api.engine().setFrameSlots(n);
-  return true;
-}
-
-/**
- * 呈现一次。画之前先把帧槽数报给引擎 —— 帧的布局由它决定，顺序反了就会拿新槽号
- *   去取旧布局的源行（每一页都贴错位置）。幂等：槽数没变时它只是一次比较。
+ * 呈现一次。
  */
 function presentNow() {
-  syncFrameSlots();
   // 命令表里的 present 是"空操作 + 由传输层统一收尾"（Worker 侧 push 会 present）。
   //   in-thread 没有收尾层，所以这里必须直调引擎 —— 换成 api.write('present') 会
   //   什么都不做，症状是帧停在上一拍、而所有读数看起来都正常。
@@ -653,10 +623,9 @@ function presentNow() {
 }
 
 /**
- * 重排并呈现。同上，槽数要排在重排之前 —— 帧尺寸是重排时按槽数算出来的。
+ * 重排并呈现。
  */
 function relayoutNow() {
-  syncFrameSlots();
   api.engine().relayoutAndPaint();
 }
 
@@ -677,13 +646,6 @@ function settle(st, opts) {
   if (st) lastEdit = st;
   if (o.scroll !== false) scrollCaretIntoView(st);
   if (applyWindow()) {
-    presentNow();
-    st = api.read('editStats');
-    lastEdit = st;
-  }
-  // 槽数变了要再画一次：帧的布局整体换了（引擎那边已把帧作废），不重画就会拿
-  //   新槽号去取旧布局的源行 —— 每一页都贴错位置。
-  if (syncFrameSlots()) {
     presentNow();
     st = api.read('editStats');
     lastEdit = st;
@@ -1197,50 +1159,28 @@ async function boot() {
 }
 
 /**
- * 上屏：把窗口位图按页切片，贴进各页画布。
+ * 上屏：把窗口内每一页的导出像素贴到它自己的画布上。
  *
- * 四段计时写进 lastBlit：取帧 / 构造 ImageData / putImageData / 摆 IME。
+ * 四段计时写进 lastBlit：构造 ImageData / putImageData / 摆 IME。
  * 分段的理由与引擎的 paint_fill/glyph/present 同一条：只有分开记，
  * 才知道该优化哪一段，而不是笼统地说"上屏慢"。
  *
- * 切片的做法是 putImageData 的源矩形：位图是整张窗口帧，源 y 取"该页在窗口里的
- * 偏移"，于是不需要在 JS 里再拷一份。页与页之间的间隙不贴 —— 宿主没有它的画布，
- * 它只是引擎帧上的背景色。
+ * 源是引擎那一页的 pageRgba（内容 + 瞬态，页内坐标）。页在画布上摆在哪由宿主按
+ *   (页号 x 步距) 定 —— 引擎不再产出"窗口帧"，所以这里没有槽偏移、没有整帧切片，
+ *   贴的矩形就是引擎报的矩形。
  */
 function blitFrame(st) {
   const t0 = performance.now();
-  const w = api.read('frameWidth');
-  const h = api.read('frameHeight');
-  const view = api.engine().frameRgba();
-  if (view.byteLength !== w * h * 4) {
-    throw new Error(`帧长度不符：${view.byteLength} ≠ ${w}×${h}×4`);
-  }
-  const t1 = performance.now();
-
+  const pw = api.read('pagePxWidth');
+  const ph = api.read('pagePxHeight');
   const first = api.read('windowFirstPage');
   const count = api.read('windowPageCount');
-  const ph = api.read('pagePxHeight');
-  const step = ph + api.read('pageGapPx');
   syncPageCanvases(first, count, st ? st.totalPages : 1);
 
   // 帧像素与设备像素一一对应：CSS 尺寸按 devicePixelRatio 折算过（在 syncPageCanvases 里），
   // 浏览器因此不做任何重采样。引擎那边的 zoom 才是"分辨率"的唯一旋钮，DPI 不该再叠一层。
-  const img = new ImageData(
-    new Uint8ClampedArray(view.buffer, view.byteOffset, view.byteLength), w, h);
-  const t2 = performance.now();
+  const t1 = performance.now();
 
-  // 只贴引擎报过的脏页。口径与引擎那份 bbox 完全一致（同一批矩形算出来的），
-  //   所以不会出现"引擎画了、画布没更新"。光标与表单标记画在帧上而不进底图，
-  //   它们所在的那一页也在清单里 —— 这正是"页指纹"给不出的信息。
-  //
-  //   源矩形与目标位置：putImageData(img, dx, dy, dirtyX, dirtyY, dw, dh) 把
-  //     ImageData 上 (dirtyX, dirtyY) 那一块画到画布的 (dx + dirtyX, dy + dirtyY)。
-  //     目标位置是"和"，不是 dx/dy —— 写成 putImageData(img, 0, 0, 0, srcY, w, ph)
-  //     会把第 2 页起的内容画到画布外面（超出的部分被裁掉、画布一点没变），
-  //     症状是"只有第 1 页是对的、其余页停在旧内容上"。所以 dy 要取 -srcY 抵消。
-  // 贴哪几页：看"还欠着脏矩形"的页，不看 dirtyPages（本拍写过哪几页）。
-  //   矩形是累积的 —— 某一拍的 present 可能没被消费（窗口平移、画布刚建），
-  //   那一拍的矩形会留到这一拍；按本拍清单贴就会永久漏掉那几十像素。
   // 贴哪几页：看"还欠着脏矩形"的页，不看 dirtyPages（本拍写过哪几页）。
   //   矩形是累积的 —— 某一拍的 present 可能没被消费（窗口平移、画布刚建），
   //   那一拍的矩形会留到这一拍；按本拍清单贴就会永久漏掉那几十像素。
@@ -1250,42 +1190,54 @@ function blitFrame(st) {
   for (let p = first; p < first + count; ++p) {
     const rec = pageCanvases.get(p);
     if (!rec) continue;
-    const srcY = frameSlotOf(p) * step;
-    if (rec.fresh) {
+    const fresh = rec.fresh;
+    if (!fresh && !dirty.includes(p)) continue;
+    const src = api.engine().pageRgba(p);
+    if (src.length !== pw * ph * 4) continue;
+    if (fresh) {
       // 空白画布：整页贴。一并把这一页的矩形读掉 —— 整页已经贴过，
       //   留着只会在下一拍白贴一次。
       rec.fresh = false;
       api.read('pageDirtyRects', { page: p });
-      rec.g.putImageData(img, 0, -srcY, 0, srcY, w, ph);
-      px += w * ph;
+      rec.g.putImageData(
+          new ImageData(new Uint8ClampedArray(src.buffer, src.byteOffset, src.length), pw, ph), 0,
+          0);
+      px += pw * ph;
       ++patched;
       continue;
     }
-    if (!dirty.includes(p)) continue;
     // 按引擎给的脏矩形贴：光标移动一次只有几十像素，而整页是一百多万。
     //   矩形是"读后清零"的累积器，所以必须在 present 之后、贴图之前读。
     const rects = api.read('pageDirtyRects', { page: p });
     if (!rects.length) {
       // 报了脏却给不出矩形：退回整页。宁可多传，不能让画布停上一拍的像素上。
-      rec.g.putImageData(img, 0, -srcY, 0, srcY, w, ph);
-      px += w * ph;
+      rec.g.putImageData(
+          new ImageData(new Uint8ClampedArray(src.buffer, src.byteOffset, src.length), pw, ph), 0,
+          0);
+      px += pw * ph;
     } else {
       for (const r of rects) {
-        rec.g.putImageData(img, 0, -srcY, r.x, srcY + r.y, r.w, r.h);
+        // 逐块拷成小图再按页内坐标贴：块只有几十像素，拷贝比"给整页建视图"便宜。
+        const small = new ImageData(r.w, r.h);
+        for (let y = 0; y < r.h; ++y) {
+          const off = src.byteOffset + ((r.y + y) * pw + r.x) * 4;
+          small.data.set(new Uint8ClampedArray(src.buffer, off, r.w * 4), y * r.w * 4);
+        }
+        rec.g.putImageData(small, r.x, r.y);
         px += r.w * r.h;
       }
     }
     ++patched;
   }
-  const t3 = performance.now();
+  const t2 = performance.now();
 
   positionIme(st);
-  const t4 = performance.now();
+  const t3 = performance.now();
 
   lastBlit = {
-    frameMs: t1 - t0, imageMs: t2 - t1, putMs: t3 - t2, imeMs: t4 - t3,
-    totalMs: t4 - t0, full: patched >= count, w, h, boxW: w, boxH: ph,
-    framePx: w * h, pages: patched, px, windowFirst: first,
+    frameMs: t1 - t0, imageMs: t2 - t1, putMs: t3 - t2,
+    totalMs: t3 - t0, full: patched >= count, w: pw, h: ph, boxW: pw, boxH: ph,
+    framePx: pw * ph, pages: patched, px, windowFirst: first,
   };
 }
 
@@ -1316,9 +1268,8 @@ function positionIme(st) {
   const pr = pagesEl.getBoundingClientRect();
 
   const left = pr.left - sr.left + stageEl.scrollLeft + st.caretX / dpr;
-  // 与 scrollCaretIntoView 同一口径：帧里的 caretY 含的是槽偏移，折回文档坐标要减掉它。
-  const top = pr.top - sr.top + stageEl.scrollTop +
-              (st.caretPage * step + (st.caretY - frameSlotOf(st.caretPage) * step)) / dpr;
+  // 与 scrollCaretIntoView 同一口径：页内 y + 页号 x 步距 = 文档坐标。
+  const top = pr.top - sr.top + stageEl.scrollTop + (st.caretPage * step + st.caretY) / dpr;
   const lineH = Math.max(12, Math.round(st.caretH / dpr));
 
   ta.style.left = Math.round(left) + 'px';
@@ -1356,9 +1307,6 @@ function afterEdit(opts) {
 function relayoutAndBlit() {
   if (!ready && !mod) return;
   presetWindowForLoad();
-  // 槽数必须在重排重画之前报过去：帧的布局由它定，报晚了这一趟就按旧槽号画，
-  //   而 settle 里那次"发现槽数变了再补一次 present"要多画一整帧。
-  syncFrameSlots();
   relayoutNow();
   return settle(api.read('editStats'), { scroll: false });
 }
@@ -1383,8 +1331,8 @@ function presentStyleChange() {
  * 呈现前先把闪烁相位摆到可见，理由与引擎的 repaintAfterEdit() 相同：否则
  * editStats.caretVisible 为 false，afterEdit() 会判定"刚才那次重绘把光标画成隐的"，
  * 再 present 一次并把上屏矩形换成那一轮的（那一轮只写了光标与标记那几小块），
- * 于是引擎帧正确而画布停在旧排版上。
- * 上屏现已由 takeBlitBox() 的累加器保证，这里只是去掉那层冗余：一次点击不该产生两次 present。
+ * 于是引擎正确而画布停在旧排版上。
+ * 上屏已由"页脏矩形是累积的、读后清零"保证，这里只是去掉那层冗余：一次点击不该两次 present。
  */
 function setCaretAndPresent(para, offset) {
   api.write('setCaret', { para, offset });
@@ -2126,10 +2074,10 @@ const facade = {
   //   两边错得一样，逐字节比照样全绿（同一个代码路径当判据必然恒绿）。
   auditGlyphPages() { return mod ? api.read('auditGlyphPages') : null; },
 
-  // 本轮写过哪几页（绝对页号）—— 宿主按页上屏的依据，也是"帧切页之后"取代
-  //   原先那个单矩形 blitBox 的判据：一次上屏现在贴的是若干整页，不是一个矩形。
-  //   （引擎的 takeBlitBox 仍在，单测 edit_test 用它钉"一次操作两次 present 的账
-  //     不会互相挤掉"；宿主这条路已经不吃它了。）
+  // 本轮写过哪几页（绝对页号）—— 宿主按页上屏的依据，取代了原先那个单矩形 blitBox：
+  //   一次上屏现在贴的是若干页上的若干矩形，不是一个矩形。
+  //   （"一次操作两次 present 的账不会互相挤掉"由累积的页脏矩形保证，
+  //     单测 edit_test 用"按页 drain 出来的并集"钉它。）
   get dirtyPages() { return mod ? api.read('dirtyPages') : null; },
 
   // 给探针用的：直接摆光标可见相位（真实闪烁由定时器摆，探针要能自己定住）。
@@ -2222,8 +2170,6 @@ const facade = {
     return new Uint8ClampedArray(new Uint8ClampedArray(v.buffer, v.byteOffset, v.byteLength));
   },
   frameW() { return api.read('frameWidth'); },
-  // 引擎侧的帧槽数：切帧、自审、光标定位都按它算源行（见 frameSlotOf）。
-  frameSlots() { return mod ? api.read('frameSlots') : 0; },
   frameH() { return api.read('frameHeight'); },
 
   // 按当前光标可见相位重画一次并上屏。
@@ -2253,33 +2199,30 @@ const facade = {
   //   页间隙不比。覆盖范围与"整篇一张画布"时相同 —— 少拼一页就等于漏检一页。
   selfCheck() {
     if (!ready) return null;
-    const w = api.read('frameWidth');
-    const h = api.read('frameHeight');
+    const pw = api.read('pagePxWidth');
     const ph = api.read('pagePxHeight');
-    const step = ph + api.read('pageGapPx');
     const first = api.read('windowFirstPage');
     const count = api.read('windowPageCount');
-    const F = api.engine().frameRgba();
     let diff = 0, minx = 1e9, miny = 1e9, maxx = -1, maxy = -1;
     let comparedPages = 0;
+    let compared = 0;
+    let diffPage = -1;
     for (const [p, rec] of pageCanvases) {
-      const local = p - first;
-      if (local < 0 || local >= count) continue;
+      if (p < first || p >= first + count) continue;
+      const src = api.engine().pageRgba(p);
+      if (src.length !== pw * ph * 4) continue;
       ++comparedPages;
-      const g = rec.g;
-      const S = g.getImageData(0, 0, w, ph).data;
-      const base = frameSlotOf(p) * step * w * 4;
+      const S = rec.g.getImageData(0, 0, pw, ph).data;
+      compared += pw * ph;
       for (let i = 0; i + 3 < S.length; i += 4) {
-        const j = base + i;
-        if (j + 3 >= F.length) break;
-        if (S[i] !== F[j] || S[i + 1] !== F[j + 1] || S[i + 2] !== F[j + 2]) {
-          ++diff;
-          const q = i >> 2, x = q % w, y = (q - x) / w + local * step;
-          if (x < minx) minx = x;
-          if (x > maxx) maxx = x;
-          if (y < miny) miny = y;
-          if (y > maxy) maxy = y;
-        }
+        if (S[i] === src[i] && S[i + 1] === src[i + 1] && S[i + 2] === src[i + 2]) continue;
+        ++diff;
+        if (diffPage < 0) diffPage = p;
+        const q = i >> 2, x = q % pw, y = (q - x) / pw;
+        if (x < minx) minx = x;
+        if (x > maxx) maxx = x;
+        if (y < miny) miny = y;
+        if (y > maxy) maxy = y;
       }
     }
     const st = api.read('editStats');
@@ -2289,7 +2232,7 @@ const facade = {
       docCodepoints: st.docCodepoints,
       caret: { para: st.caretPara, offset: st.caretOffset, x: st.caretX, y: st.caretY,
                w: st.caretW, h: st.caretH, visible: st.caretVisible, page: st.caretPage },
-      framePx: [w, h],
+      framePx: [api.read('frameWidth'), api.read('frameHeight')],
       window: { first, count, comparedPages },
       pageCanvases: pageCanvases.size,
       pages: {
@@ -2301,6 +2244,7 @@ const facade = {
       zoom: currentZoom,
       backend: api.read('rasterBackend'),
       screenVsEngineDiffPx: diff,
+      screenVsEngineDiffPage: diffPage,
       screenVsEngineDiffBox: diff ? [minx, miny, maxx, maxy] : null,
       repainted: { pages: st.repaintedPages, pixels: st.repaintedPixels,
                    w: st.repaintedW, h: st.repaintedH },
