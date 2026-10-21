@@ -15,6 +15,10 @@
 param(
     [int]$Port = 8781,
     [int]$DebugPort = 9222,
+    # 探针：可以给一条，也可以给一串（逗号分隔）。每条后面可以带 @页面，
+    #   例如 "scripts/edit_probe.mjs@index.html,scripts/worker_probe.mjs@worker.html"。
+    #   一串的好处只有一条但很大：静态服务与 Chrome 只起一次 —— 每次起一轮要 8~10 s
+    #   （起服务、等调试端口、页面 boot、收进程），十轮就是一分半，而它量不到任何东西。
     [string]$Probe = 'scripts\edit_probe.mjs',
     # 产物档：wasm（交付）或 wasm-debug（断言 + 栈检查 + 源码映射）。预设见 CMakePresets.json。
     #   ★ 这是**预设名**，传进页面时要换成产物目录 build\<预设>\web —— 页面的 ?wasm=
@@ -133,18 +137,49 @@ try {
     #   直接 `2>&1 | Tee-Object` 时，PowerShell 会把原生进程的 stderr 包成
     #   NativeCommandError，堆栈和真正的错误信息会被截断成一行看不出所以然的东西 ——
     #   探针失败时最需要看到的就是那段信息。
-    Write-Host "[verify] 跑探针"
+    # ── 跑探针（一条或一串，共用同一个服务与浏览器）──
+    #
+    # 每个探针自己 Page.navigate，互不影响；省下的是每轮 8~10 s 的起停开销
+    #   （起服务、等调试端口、页面 boot、收进程）—— 短探针的九成时间都是它。
+    $jobs = @()
+    foreach ($item in $Probe.Split(',')) {
+        $one = $item.Trim()
+        if (-not $one) { continue }
+        $page = $Page
+        $file = $one
+        $at = $one.IndexOf('@')
+        if ($at -ge 0) { $file = $one.Substring(0, $at); $page = $one.Substring($at + 1) }
+        $jobs += [pscustomobject]@{ File = $file; Page = $page }
+    }
+
+    $exit = 0
+    $results = @()
+    # 探针默认会自己 Browser.close；批量跑时改由这里的 finally 统一收（按 profile 杀进程树）。
+    $env:HEDITOR_KEEP_BROWSER = '1'
     Push-Location $Root
     try {
-        $probeOut = & $node $Probe --port $DebugPort `
-                        --url "http://127.0.0.1:$Port/web/${Page}?wasm=build/${Wasm}/web" 2>&1 |
-                    ForEach-Object { $_.ToString() }
-        $exit = $LASTEXITCODE
-        $probeOut | Tee-Object -FilePath $log
+        foreach ($j in $jobs) {
+            Write-Host "[verify] 跑探针 $($j.File) @ $($j.Page)"
+            $t0 = Get-Date
+            $probeOut = & $node $j.File --port $DebugPort `
+                            --url "http://127.0.0.1:$Port/web/$($j.Page)?wasm=build/$Wasm/web" 2>&1 |
+                        ForEach-Object { $_.ToString() }
+            $code = $LASTEXITCODE
+            $dt = [math]::Round(((Get-Date) - $t0).TotalSeconds, 1)
+            $tag = [System.IO.Path]::GetFileNameWithoutExtension($j.File) + '@' + $j.Page
+            $probeOut | Tee-Object -FilePath $log -Append
+            if ($code -ne 0) { $exit = $code }
+            Write-Host "[verify]   $tag 退出码 $code / ${dt}s"
+            $results += [pscustomobject]@{ Tag = $tag; Code = $code; Seconds = $dt }
+        }
     } finally {
         Pop-Location
+        Remove-Item Env://HEDITOR_KEEP_BROWSER -ErrorAction SilentlyContinue
     }
-    Write-Host "[verify] 探针退出码 $exit"
+    Write-Host "[verify] ── 本轮汇总 ──"
+    foreach ($r in $results) {
+        Write-Host ("[verify]   {0,-34} 退出码 {1}  {2,6} s" -f $r.Tag, $r.Code, $r.Seconds)
+    }
 } finally {
     if (-not $KeepAlive) {
         # ★ 按 user-data-dir 精确回收 Chrome 的整棵进程树。

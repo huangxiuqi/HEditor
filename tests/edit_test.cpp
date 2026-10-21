@@ -1,3 +1,9 @@
+// getenv 读的是本套件自己的两个环境变量（分片开关），不是外部输入。
+// MSVC 会报 C4996（"unsafe"），这里只对它关掉 —— 换成 _dupenv_s 要多一次分配，
+// 而且只在 Windows 上编译得过，反而让分片开关变成平台相关的东西。
+#ifdef _MSC_VER
+#define _CRT_SECURE_NO_WARNINGS
+#endif
 /**
  * 档 1 的可证伪断言：文档模型、光标几何、命中测试、增量呈现。
  * 这一批断言和整形那批的性质不同。
@@ -453,6 +459,26 @@ LayoutResult layoutBlocksOnly(const std::vector<std::string>& fontPaths,
     return layoutDocument(lib, blocks, PageMetrics{});
 }
 
+/**
+ * 只跑点名的几节：HEDITOR_TEST_ONLY="15,29" 就只跑 15 与 29。
+ *
+ * 为什么不是"分片并行"：量过了，这台机器上四片并行只快 20%（整跑 50 s → bash 并行 39 s、
+ *   起进程那套 54 s），因为单节是内存与光栅重活，多进程互相抢带宽；而分片还要求
+ *   "节之间没有隐含依赖"，多一层要维护的假设。真正常用的是另一件事：改哪节跑哪节，
+ *   一秒出结果，最后再整跑一次。
+ *
+ * 判据：不设变量时逐节全跑，与没有这个开关时逐条相同（整跑 1529 条不许变）。
+ */
+bool runSection(int n) {
+    static const std::string only = [] {
+        const char* v = std::getenv("HEDITOR_TEST_ONLY");
+        return std::string(v ? v : "");
+    }();
+    if (only.empty()) return true;
+    const std::string list = "," + only + ",";
+    return list.find("," + std::to_string(n) + ",") != std::string::npos;
+}
+
 }  // namespace
 
 int main() {
@@ -463,8 +489,8 @@ int main() {
         joinPath(HEDITOR_NATIVE_ASSET_DIR, "fonts/NotoSansMongolian-Regular.ttf");
     const std::string latinPath = joinPath(HEDITOR_NATIVE_ASSET_DIR, "fonts/NotoSans-Latin-VF.ttf");
 
-    std::printf("[1] 码点工具：UTF-8 ↔ 码点往返\n");
-    {
+    if (runSection(1)) std::printf("[1] 码点工具：UTF-8 ↔ 码点往返\n");
+    if (runSection(1)) {
         const std::string s = "10\xE2\x81\xB9/\xC3\xA9\xE4\xB8\xAD";  // 10⁹/é中
         const std::vector<uint32_t> cps = utf8ToCodepoints(s);
         std::printf("     \"10⁹/é中\" = %zu 字节 → %zu 码点\n", s.size(), cps.size());
@@ -484,8 +510,8 @@ int main() {
         expectTrue(hasFffd, "确有 U+FFFD 被写入");
     }
 
-    std::printf("\n[2] 编辑原语与簇吸附的边界\n");
-    {
+    if (runSection(2)) std::printf("\n[2] 编辑原语与簇吸附的边界\n");
+    if (runSection(2)) {
         std::vector<uint32_t> buf{'a', 'b', 'c'};
         textbuf::insertAt(buf, 99, std::vector<uint32_t>{'z'});
         expectTrue(buf.size() == 4 && buf.back() == 'z',
@@ -546,8 +572,8 @@ int main() {
                 static_cast<double>(framePixels) / 1e6, static_cast<double>(fullPaint) / 1e6);
     expectTrue(fullPaint > framePixels / 2, "首次呈现确实是全量（写入量 ≥ 半帧）");
 
-    std::printf("\n[3] 敲字：文档真的变了、光标跟着走\n");
-    {
+    if (runSection(3)) std::printf("\n[3] 敲字：文档真的变了、光标跟着走\n");
+    if (runSection(3)) {
         const size_t cpsBefore = e.editStats().doc_codepoints;
         e.setCaret(0, 3);
         expectTrue(e.caret().offset == 3, "光标设到段内偏移 3");
@@ -594,8 +620,8 @@ int main() {
         expectTrue(e.caret().offset == 3, "退格后光标回到插入点之前");
     }
 
-    std::printf("\n[4] 字素簇不可切分：e + U+0301 是一个字符，不是一个半\n");
-    {
+    if (runSection(4)) std::printf("\n[4] 字素簇不可切分：e + U+0301 是一个字符，不是一个半\n");
+    if (runSection(4)) {
         EditorEngine e2;
         expectTrue(e2.init({cjkPath, mnPath, latinPath}), "引擎初始化");
         e2.setConfig(cfg);
@@ -638,8 +664,9 @@ int main() {
         expectTrue(e2.caret().offset == 0, "退格后光标在段首");
     }
 
-    std::printf("\n[5] 几何正反查互逆：正查出的光标矩形，反查必须回到同一位置\n");
-    {
+    if (runSection(5))
+        std::printf("\n[5] 几何正反查互逆：正查出的光标矩形，反查必须回到同一位置\n");
+    if (runSection(5)) {
         const std::vector<uint32_t>& starts = e.layout().para_cluster_starts[0];
         int total = 0, ok = 0;
         for (size_t i = 0; i < starts.size(); ++i) {
@@ -677,8 +704,8 @@ int main() {
                    "纵向落到没有内容的远处页面 → 命中失败（不猜）");
     }
 
-    std::printf("\n[6] 光标移动 = 真增量：写入量与全帧差两个数量级\n");
-    {
+    if (runSection(6)) std::printf("\n[6] 光标移动 = 真增量：写入量与全帧差两个数量级\n");
+    if (runSection(6)) {
         e.setCaret(0, 0);
         e.repaint();
         const EditStats beforeMove = e.editStats();
@@ -727,8 +754,8 @@ int main() {
         expectTrue(!e.moveCaretBy(1), "已在段末，向右移动返回 false");
     }
 
-    std::printf("\n[7] 竖排（蒙文侧倒）的光标几何：横条、沿列向下\n");
-    {
+    if (runSection(7)) std::printf("\n[7] 竖排（蒙文侧倒）的光标几何：横条、沿列向下\n");
+    if (runSection(7)) {
         EditorEngine e3;
         expectTrue(e3.init({cjkPath, mnPath, latinPath}), "引擎初始化");
         e3.setConfig(cfg);
@@ -781,8 +808,8 @@ int main() {
         expectTrue(hit && back.offset == starts[0], "竖排的命中反查同样回到原位置");
     }
 
-    std::printf("\n[8] 连字「ff」不得合并：一个字母就是一格\n");
-    {
+    if (runSection(8)) std::printf("\n[8] 连字「ff」不得合并：一个字母就是一格\n");
+    if (runSection(8)) {
         // 这条断言守的是删除语义，不是排版美观。
         //   HarfBuzz 默认开 liga/clig，"ff"/"fi" 会被合成一个连字字形，
         //   两个码点的 cluster 也被归并成一个 —— 簇表里第二个 f 的起点就此消失，
@@ -835,8 +862,8 @@ int main() {
                    "连退三次各删 1 个码点：6 → 3（ff/fi 若被合并，这里会变成 6 → 2）");
     }
 
-    std::printf("\n[9] 页数增长时帧缓冲必须跟着长（否则新页永远看不见）\n");
-    {
+    if (runSection(9)) std::printf("\n[9] 页数增长时帧缓冲必须跟着长（否则新页永远看不见）\n");
+    if (runSection(9)) {
         // 现场还原：文档正好填满一页，光标停在页尾，再敲一个字 → 内容溢到第 2 页。
         //   修复前 repaint() 把帧范围锁在"底图已经画过多少页"上，
         //   于是 page_count 变成 2 而 frame_h 不动 → 第 2 页永远不进帧，
@@ -976,8 +1003,8 @@ int main() {
                    "页数不变时仍是增量：写入量 < 全帧的 1/100（没有退化成整帧重建）");
     }
 
-    std::printf("\n[10] 光栅必须确定：同一文档两次渲染逐字节相同\n");
-    {
+    if (runSection(10)) std::printf("\n[10] 光栅必须确定：同一文档两次渲染逐字节相同\n");
+    if (runSection(10)) {
         // 光栅是确定的：同一份排版结果、同一套字体与缩放，两次渲染必须给出同一串像素。
         //   挡的是"某条路径带隐藏状态"（字形 strike、预热、共享 typeface）——
         //   它们只能影响命不命中，不能影响画出来的东西。
@@ -1010,8 +1037,8 @@ int main() {
         expectTrue(ink_a > 2000, "确实画出了字形（不是一块空白页底）");
     }
 
-    std::printf("\n[11] 表单：控件是区间、边界是策略\n");
-    {
+    if (runSection(11)) std::printf("\n[11] 表单：控件是区间、边界是策略\n");
+    if (runSection(11)) {
         //  "患者主诉：反复心悸三天，加重一天。"
         //   0患 1者 2主 3诉 4： 5反 6复 7心 8悸 9三 10天 11， 12加 13重 14一 15天 16。
         //   K1 = [5,9)   "反复心悸"  可编辑
@@ -1828,8 +1855,8 @@ int main() {
         }
     }
 
-    std::printf("\n[12] 上屏契约：引擎写过的区域必须累积到宿主读取为止\n");
-    {
+    if (runSection(12)) std::printf("\n[12] 上屏契约：引擎写过的区域必须累积到宿主读取为止\n");
+    if (runSection(12)) {
         //  这一节存在的理由：一次操作触发两次 present 时，若宿主拿后一次的脏矩形
         //  上屏，前一次的全帧重绘就丢了。症状是引擎帧完全正确（auditFrame 差 0）、
         //  画布却是旧的（selfCheck 差上千像素），也就是"光标走了、文字没动、
@@ -1994,8 +2021,8 @@ int main() {
         }
     }
 
-    std::printf("\n[13] 光标在字段两端必须落在括号之内\n");
-    {
+    if (runSection(13)) std::printf("\n[13] 光标在字段两端必须落在括号之内\n");
+    if (runSection(13)) {
         //光标停在「重」上（字段最后一个字），再按一次右方向键，
         //  光标直接跳到 ] 的右边 —— 中间那个"在 ] 之内"的位置被跳过了，
         //  看起来像光标从字里蹿出了框外。
@@ -2086,8 +2113,8 @@ int main() {
         }
     }
 
-    std::printf("\n[14] 相邻字段的括号顺序是 `][`，不是 `[]`\n");
-    {
+    if (runSection(14)) std::printf("\n[14] 相邻字段的括号顺序是 `][`，不是 `[]`\n");
+    if (runSection(14)) {
         //  （截图里是 心悸[]三天）：两个字段紧挨着时，前一个字段的
         //  右括号画到了后一个字段左括号的右边 —— 顺序反了。
         //
@@ -2191,8 +2218,8 @@ int main() {
         }
     }
 
-    std::printf("\n[15] 增量排版：脏段之后重排、前缀原样复用（档 2）\n");
-    {
+    if (runSection(15)) std::printf("\n[15] 增量排版：脏段之后重排、前缀原样复用（档 2）\n");
+    if (runSection(15)) {
         EditorEngine e;
         if (!e.init({cjkPath, mnPath, latinPath})) {
             std::fprintf(stderr, "字体加载失败\n");
@@ -2690,8 +2717,9 @@ int main() {
         }
     }
 
-    std::printf("\n[16] 增量上屏 == 从零上屏：整帧逐字节比（含脏页集合对不对）\n");
-    {
+    if (runSection(16))
+        std::printf("\n[16] 增量上屏 == 从零上屏：整帧逐字节比（含脏页集合对不对）\n");
+    if (runSection(16)) {
         // 为什么需要这一节：auditFrame() 比的是"帧 vs 从底图整块重贴"，抓的是上屏漏贴。
         //   但如果底图自己就漏画了（页指纹判错、某个变了的页没被重画），
         //   帧与底图会一起错，auditFrame 照样是 0 —— 那一类只有拿
@@ -2783,8 +2811,9 @@ int main() {
         }
     }
 
-    std::printf("\n[17] 跨段编辑：回车分段 / 段首退格合并 / 段末 Delete 合并\n");
-    {
+    if (runSection(17))
+        std::printf("\n[17] 跨段编辑：回车分段 / 段首退格合并 / 段末 Delete 合并\n");
+    if (runSection(17)) {
         const std::vector<std::string> fonts17{cjkPath, mnPath, latinPath};
         auto mkBlocks = [](const std::vector<std::string>& texts) {
             std::vector<BlockSpec> v;
@@ -3304,8 +3333,8 @@ int main() {
         }
     }
 
-    std::printf("\n[18] 相邻字段共享边界：打字、删空都不许把括号画错位\n");
-    {
+    if (runSection(18)) std::printf("\n[18] 相邻字段共享边界：打字、删空都不许把括号画错位\n");
+    if (runSection(18)) {
         //  报过的现象：两个相邻控件，在第一个控件末尾打一个字，括号又变成 []
         //  （截图：患者主诉：[反悸[▏]三天]，[加重一天]。「▏」是光标）。
         //
@@ -3832,8 +3861,9 @@ int main() {
         }
     }
 
-    std::printf("\n[19] 点击归属：共享边界上点的是哪一个字段（含三层嵌套样例）\n");
-    {
+    if (runSection(19))
+        std::printf("\n[19] 点击归属：共享边界上点的是哪一个字段（含三层嵌套样例）\n");
+    if (runSection(19)) {
         // 背景：相邻两个字段共享边界时（[反复][心悸]，两枚括号并排在同一列），
         //   "前一个字段的末尾"与"后一个字段的开头"是同一个偏移。光看偏移，
         //   归属只能按"最内层、同深度取下标小者"来定 —— 恒定给前一个字段。
@@ -4097,8 +4127,9 @@ int main() {
         }
     }
 
-    std::printf("\n[21] 控件边界总覆盖：相邻 / 嵌套 / 换行 / 删除 / 添加 / 光标\n");
-    {
+    if (runSection(21))
+        std::printf("\n[21] 控件边界总覆盖：相邻 / 嵌套 / 换行 / 删除 / 添加 / 光标\n");
+    if (runSection(21)) {
         // 控件边界这件事按六类边界条件系统过一遍。判据只用两种互相独立的证据：
         //   结构性证据：区间端点、区间树的 depth 与 parent、占位槽的边序与归属；
         //   几何性证据：控件投影出的内容框、光标矩形、帧上括号的像素列。
@@ -4676,8 +4707,8 @@ int main() {
         }
     }
 
-    std::printf("\n[22] 分节强制分页：模型编译产物落到引擎，增量与全量一致\n");
-    {
+    if (runSection(22)) std::printf("\n[22] 分节强制分页：模型编译产物落到引擎，增量与全量一致\n");
+    if (runSection(22)) {
         EditorEngine e;
         if (!e.init({cjkPath, mnPath, latinPath})) {
             std::fprintf(stderr, "字体加载失败\n");
@@ -4726,8 +4757,9 @@ int main() {
                    "★ 分页之前编辑之后，页数与增量结果仍与全量一致");
     }
 
-    std::printf("\n[23] 字符格式 run：块级字段升为 run 之后，旧路径等价、按 run 取值\n");
-    {
+    if (runSection(23))
+        std::printf("\n[23] 字符格式 run：块级字段升为 run 之后，旧路径等价、按 run 取值\n");
+    if (runSection(23)) {
         // 这一段验的是引擎输入的一次形状替换：字符格式从"一段一套"升为"一串 run"。
         //   它是替换、不是新功能，所以第一判据必须是等价 —— run 要能原样表达旧形状，
         //   否则迁移期没人敢用。两条独立的等价判据：
@@ -5176,8 +5208,8 @@ int main() {
         }
     }
 
-    std::printf("\n[24] 行内对象：块流自足，排版层不再收外部括号名单\n");
-    {
+    if (runSection(24)) std::printf("\n[24] 行内对象：块流自足，排版层不再收外部括号名单\n");
+    if (runSection(24)) {
         // 这一段验的是引擎输入的一次形状替换：控件边界从"排版接口的一个参数"搬进块流
         //   本身（BlockSpec::objects）。它是元素流在引擎输入侧的落点，也是"括号进文档流"
         //   那句话的结构化形态。三层判据缺一不可：
@@ -5381,8 +5413,9 @@ int main() {
         }
     }
 
-    std::printf("\n[25] 引擎接文档模型：树 → 编译 → 引擎，两种建树方式逐项一致\n");
-    {
+    if (runSection(25))
+        std::printf("\n[25] 引擎接文档模型：树 → 编译 → 引擎，两种建树方式逐项一致\n");
+    if (runSection(25)) {
         // 这一段验的是引擎输入的来源：块流不再由调用方拼好递进来，而是由模型树编译产出。
         //   它也是控件这条链第一次由文档模型驱动 —— 边界的锚点、只读位、哪些字段显示括号，
         //   全部只有一个产处。六条判据（对照物是"同一份文档的另一种建树方式"）：
@@ -5669,8 +5702,8 @@ int main() {
         }
     }
 
-    std::printf("\n[26] 段落身份与流位置桥接：(段, 偏移) 与模型流位置\n");
-    {
+    if (runSection(26)) std::printf("\n[26] 段落身份与流位置桥接：(段, 偏移) 与模型流位置\n");
+    if (runSection(26)) {
         // 这一节验的是"编辑改在树上落笔"之前最后一块地基。引擎对外说 (段, 段内码点偏移)，
         //   模型层说流位置；两者之间隔着控件边界与节边界，不能靠算式互换 —— 节有起止两位、
         //   控件的开闭括号各占一位，而段的码点里没有它们。所以换算只认一个权威：
@@ -5808,8 +5841,9 @@ int main() {
         }
     }
 
-    std::printf("\n[27] 树上编辑：删除 / 分段 / 合并落到树上（两种建树方式逐字段逐页一致）\n");
-    {
+    if (runSection(27))
+        std::printf("\n[27] 树上编辑：删除 / 分段 / 合并落到树上（两种建树方式逐字段逐页一致）\n");
+    if (runSection(27)) {
         // 这一节验的是"编辑改在树上落笔"本身。三类判据：
         //   其一，同一份文档的两种建树方式（块流 + 字段区间交给 demoTree，与逐节点手工建）
         //     产出同一份块流与同一帧；做同样的编辑之后仍然一致 —— 这一条同时压住 demoTree
@@ -6078,8 +6112,9 @@ int main() {
         }
     }
 
-    std::printf("\n[28] 编辑判定只看落点（能力表）：两种建树给出的允许/拒绝逐位一致\n");
-    {
+    if (runSection(28))
+        std::printf("\n[28] 编辑判定只看落点（能力表）：两种建树给出的允许/拒绝逐位一致\n");
+    if (runSection(28)) {
         // 这一节验的是编辑权限的判据：它只看"落点（流位置 + 侧别）"，不看文档是谁装进来的 ——
         //   同一个落点在两种建树方式（逐节点手建 / 块流 + 字段区间）上得到同一个结论。
         //   四类判据：
@@ -6263,8 +6298,9 @@ int main() {
         }
     }
 
-    std::printf("\n[29] 演示页装载：源块流 → 树 → 编译回来逐字段相同，且演示场景的边界都在\n");
-    {
+    if (runSection(29))
+        std::printf("\n[29] 演示页装载：源块流 → 树 → 编译回来逐字段相同，且演示场景的边界都在\n");
+    if (runSection(29)) {
         // 这一节是"装载这层壳"的保真判据。(a) 是往返：(源块流 + 字段名单) 进树之后必须原样
         //   编译回来 —— 少搬一个字段就是一次静默的显示回归（demoTree 的 applyBlockFormat 逐字段
         //   搬、appendTextRuns 按 run 切，两处都是为此存在的）；(b) 起是演示场景里的各类边界：
@@ -6915,8 +6951,9 @@ int main() {
         }
     }
 
-    std::printf("\n[30] 增量编译：单段重编译的产物必须与整树全量编译逐字段一致\n");
-    {
+    if (runSection(30))
+        std::printf("\n[30] 增量编译：单段重编译的产物必须与整树全量编译逐字段一致\n");
+    if (runSection(30)) {
         // 增量最容易错的不是"少编了什么"，而是"只重编译了一段、别处的来源身份跟着动了" ——
         //   那种错只表现为光标落偏一个字，段数与每段文本全都对得上。所以对照物必须是
         //   整树全量编译（auditCompile），而不是"看起来对"。
@@ -6968,8 +7005,9 @@ int main() {
         expectTrue(e.auditCompile() == 0, "★ 合并之后（走全量）：产物与整树全量编译一致");
     }
 
-    std::printf("\n[31] 在控件内容里回车（控件因此跨段）之后编辑：不许把整段与控件一起弄丢\n");
-    {
+    if (runSection(31))
+        std::printf("\n[31] 在控件内容里回车（控件因此跨段）之后编辑：不许把整段与控件一起弄丢\n");
+    if (runSection(31)) {
         // 现象：三连可编辑字段里把光标放到「天」后面回车，再把光标放到「悸」后面
         //   退格，结果「患者主诉：反复心悸」九个字与三个控件整个消失，只剩一行「三天」。
         // 根因：回车把段落标记插进了控件内部（跨段控件是正常形态，见 compile.h 的 BlockSource），
@@ -7059,8 +7097,9 @@ int main() {
                                                      std::to_string(e.focusedControlIndex()));
     }
 
-    std::printf("\n[32] 两枚段落标记都落进控件内部之后，段内编辑不许丢段首的边界\n");
-    {
+    if (runSection(32))
+        std::printf("\n[32] 两枚段落标记都落进控件内部之后，段内编辑不许丢段首的边界\n");
+    if (runSection(32)) {
         // 现象：三连可编辑字段里「天」后回车、再「悸」后回车，然后把光标放到「天」后面
         //   退格 —— 第二段段首的两枚控件边界成对消失（前一个字段的闭括号、后一个字段的
         //   开括号都没了），控件集合里跟着少两个。
@@ -7133,8 +7172,9 @@ int main() {
         }
     }
 
-    std::printf("\n[33] 枚举：切点落进控件内部之后，段内编辑的产物必须与全量一致\n");
-    {
+    if (runSection(33))
+        std::printf("\n[33] 枚举：切点落进控件内部之后，段内编辑的产物必须与全量一致\n");
+    if (runSection(33)) {
         // 同类问题都是同一句话：某一段的内容起点落在它的结束标记所属容器之外，而增量编译
         //   只编容器内那一截。靠人列举形态总会漏（闭括号形态就是这么漏掉的），所以这里把
         //   位置穷举一遍：先枚举回车落在每一个 (码点偏移, 侧别) 上，再枚举切完之后每一段
@@ -7231,8 +7271,9 @@ int main() {
                                         std::to_string(layout_bad) + " 次）");
     }
 
-    std::printf("\n[34] 删控件与改控件属性：引擎命令走树的提交，审计与撤销都对得上\n");
-    {
+    if (runSection(34))
+        std::printf("\n[34] 删控件与改控件属性：引擎命令走树的提交，审计与撤销都对得上\n");
+    if (runSection(34)) {
         // 用户提出的运维问题："编辑模式下不显示控件边界了，我都不知道哪块是控件，
         //   之后删除控件、编辑控件怎么操作？"
         // 这一节管后半句：引擎先给出命令（宿主 UI 稍后接）。两条命令都只动树，改完交给
@@ -7453,8 +7494,9 @@ int main() {
         }
     }
 
-    std::printf("\n[35] 控件边界上的退格与前删：进控件删内容，空控件才删控件\n");
-    {
+    if (runSection(35))
+        std::printf("\n[35] 控件边界上的退格与前删：进控件删内容，空控件才删控件\n");
+    if (runSection(35)) {
         // 四条规则（从左到右的书写方向，参照 DCWriterLite 的 Backspace / Delete）：
         //   退格 光标在闭括号右面：控件有内容 ⇒ 光标进控件，删掉左边那一项；空 ⇒ 删控件
         //   退格 光标在开括号右面：控件有内容 ⇒ 光标退到开括号左面，不删；空 ⇒ 删控件
@@ -7737,8 +7779,8 @@ int main() {
         }
     }
 
-    std::printf("\n[36] 撤销上限：配置项真的落到了栈上，超出时丢最旧的\n");
-    {
+    if (runSection(36)) std::printf("\n[36] 撤销上限：配置项真的落到了栈上，超出时丢最旧的\n");
+    if (runSection(36)) {
         //  上限是 EngineConfig 的一项（默认 100 —— 与 Office 系和 Quill 的 maxStack 同值）。
         //  这一节管的是"配置那一项真的转到了 UndoStack 上"：只测 UndoStack 自己的上限
         //  （model_test 1.3 那两条）测不出引擎漏转发 —— 那种情况下它照样全绿。
@@ -7784,8 +7826,8 @@ int main() {
         expectTrue(e36.undoAndRender(), "上限 0 时那一笔照样能撤");
     }
 
-    std::printf("\n[37] 选区与移动族：真源、扩展、上下键与矩形\n");
-    {
+    if (runSection(37)) std::printf("\n[37] 选区与移动族：真源、扩展、上下键与矩形\n");
+    if (runSection(37)) {
         // 这一节管的是"选区是引擎里的一等状态，不是宿主自己记的两对数"：扩展移动只动
         //   focus（anchor 留在原处）、别的定位一律把选区折叠、上下键跨短行保住列位，
         //   以及选区最终能不能落到矩形上 —— 看不见的选区等于没有。
@@ -7935,8 +7977,8 @@ int main() {
         expectTrue(!e37.hasSelection(), "★ 编辑之后选区被清掉了（没有残留）");
     }
 
-    std::printf("\n[38] 编辑入口吃掉选区：替换、只删选区、跨段删除与撤销\n");
-    {
+    if (runSection(38)) std::printf("\n[38] 编辑入口吃掉选区：替换、只删选区、跨段删除与撤销\n");
+    if (runSection(38)) {
         // 这一节管的是"选中之后按下任何一个编辑键"。四条口径：
         //   插类入口（打字、缩进、回车）是"先删掉选区，再在原地插"；
         //   删类入口（退格、前删、合并、反缩进）是"删掉选区就完事"，不再多吃一个字；
@@ -8139,8 +8181,9 @@ int main() {
         expectTrue(paras38(e38) == 3, "段数不变（没有真的合并）");
     }
 
-    std::printf("\n[39] 拖选只搬焦点端：anchor 不动、方向可反、拖回原位收成空\n");
-    {
+    if (runSection(39))
+        std::printf("\n[39] 拖选只搬焦点端：anchor 不动、方向可反、拖回原位收成空\n");
+    if (runSection(39)) {
         // 这一节钉引擎侧那一个入口（宿主侧的按下与移动由探针 [20] 走真鼠标事件管）。
         // 三条口径：拖动只改选区不改正文；anchor 是按下点、focus 是当前点且可前可后；
         // focus 回到按下点就是空选区 —— 最后这条是反向的一半，没有它"什么都不做"也能全绿。
@@ -8261,8 +8304,8 @@ int main() {
                    "★ 拖选的落点与按下定位同一条投影（侧别也一起透传）");
     }
 
-    std::printf("\n[40] 连页模式：排版不在页底断开，内容一列连到底\n");
-    {
+    if (runSection(40)) std::printf("\n[40] 连页模式：排版不在页底断开，内容一列连到底\n");
+    if (runSection(40)) {
         // 一条判据要能证伪，就得有反向的一半：同一个文档、同一套页度量，
         //   分页下必须在页底让位（行盒的文档 y 会回跳、墨迹够不到下边距），
         //   连页下必须不让位（y 单调不降、墨迹跑进下边距那条带）。
@@ -8377,8 +8420,8 @@ int main() {
                    "内容底边落在最后一条带里（宿主按它设滚动高度）");
     }
 
-    std::printf("\n[41] 折行处的行首与行尾是两个位置（光标行别）\n");
-    {
+    if (runSection(41)) std::printf("\n[41] 折行处的行首与行尾是两个位置（光标行别）\n");
+    if (runSection(41)) {
         // 一条折行的段落里，上一行的末尾与下一行的开头是同一个位置：偏移一样、侧别一样。
         //   只按位置找行，找回来的必然是上一行 —— 于是"点下一行的行首"变成"光标跳到上一行
         //   行尾"。这一节就是把那个自由度（行别）钉住，而且三个断言互相证伪：
@@ -8484,8 +8527,8 @@ int main() {
         expectTrue(e41.caretLineAffinity() == 0, "普通定位把行别清回 0");
     }
 
-    std::printf("\n[42] 撤销把光标放回编辑之前的位置\n");
-    {
+    if (runSection(42)) std::printf("\n[42] 撤销把光标放回编辑之前的位置\n");
+    if (runSection(42)) {
         // 撤销恢复的是事务里那一对快照（selection_before / selection_after）。
         //   删除类操作的 before 该记"删除之前光标在哪"：退格与反缩进的光标在区间右端，
         //   前删在左端。三处都记左端的话，退格一次再撤销，光标会落到被恢复那个字的前面。
@@ -8544,8 +8587,8 @@ int main() {
         expectTrue(e42.caret().offset == 0, "重做之后光标回到编辑之后的落点");
     }
 
-    std::printf("\n[43] 竖排的列序：中日从右往左、蒙文从左往右\n");
-    {
+    if (runSection(43)) std::printf("\n[43] 竖排的列序：中日从右往左、蒙文从左往右\n");
+    if (runSection(43)) {
         // 方向键在竖排下是"换列"，而"下一列在哪一边"由列序定。宿主的键位表只认两件事：
         //   竖不竖排、列序反不反向 —— 这一节把这两个结论钉在引擎侧，而且用"下一列的 x
         //   往哪边走"做判据（不是只读标志位：标志位对了、算出来的位置反了照样是错的）。
@@ -8601,8 +8644,9 @@ int main() {
                    "★ 蒙文竖排的下一列在右边（与中日竖排相反，左右键的方向必须跟着翻）");
     }
 
-    std::printf("\n[44] 行内原子：不可断的盒子进流之后，增量排版仍与全量一致\n");
-    {
+    if (runSection(44))
+        std::printf("\n[44] 行内原子：不可断的盒子进流之后，增量排版仍与全量一致\n");
+    if (runSection(44)) {
         // 阶段 4 的判据是"断行处不可分割；增量与全量一致"。断行那一半在 shaping_test 里
         //   （它直接看行盒）；这一节管后一半：原子进了引擎的块流之后，改别的段落、改它自己
         //   所在的段落、换一枚更大的原子，增量排版都必须与整篇重排逐字段相同。
@@ -8808,8 +8852,8 @@ int main() {
                 "撤销把文本与原子一起装回来");
         }
     }
-    std::printf("\n[45] 表格：装载、格内编辑与「有表格不走增量」\n");
-    {
+    if (runSection(45)) std::printf("\n[45] 表格：装载、格内编辑与「有表格不走增量」\n");
+    if (runSection(45)) {
         EditorEngine e45;
         expectTrue(e45.init({cjkPath, mnPath, latinPath}), "引擎初始化");
         EngineConfig c45;
@@ -8997,8 +9041,8 @@ int main() {
         }
     }
 
-    std::printf("\n[46] 表格：格内首尾的删除不删表\n");
-    {
+    if (runSection(46)) std::printf("\n[46] 表格：格内首尾的删除不删表\n");
+    if (runSection(46)) {
         EditorEngine e46;
         expectTrue(e46.init({cjkPath, mnPath, latinPath}), "引擎初始化");
         EngineConfig c46;
@@ -9077,8 +9121,8 @@ int main() {
         expectTrue(e46.auditTables() == 0, "撤销之后表格结构自审一致");
     }
 
-    std::printf("\n[47] 表格：文字选区与单元格选区是两条操作线\n");
-    {
+    if (runSection(47)) std::printf("\n[47] 表格：文字选区与单元格选区是两条操作线\n");
+    if (runSection(47)) {
         EditorEngine e47;
         expectTrue(e47.init({cjkPath, mnPath, latinPath}), "引擎初始化");
         EngineConfig c47;
@@ -9167,8 +9211,8 @@ int main() {
         }
     }
 
-    std::printf("\n[48] 表格：拖选跨过两格就进单元格选区\n");
-    {
+    if (runSection(48)) std::printf("\n[48] 表格：拖选跨过两格就进单元格选区\n");
+    if (runSection(48)) {
         EditorEngine e48;
         expectTrue(e48.init({cjkPath, mnPath, latinPath}), "引擎初始化");
         EngineConfig c48;
@@ -9330,8 +9374,8 @@ int main() {
         }
     }
 
-    std::printf("\n[49] 表格：矩形选区与跨格合并的守门\n");
-    {
+    if (runSection(49)) std::printf("\n[49] 表格：矩形选区与跨格合并的守门\n");
+    if (runSection(49)) {
         EditorEngine e49;
         expectTrue(e49.init({cjkPath, mnPath, latinPath}), "引擎初始化");
         EngineConfig c49;
@@ -9495,8 +9539,8 @@ int main() {
         expectTrue(e49.auditTables() == 0, "删完表格结构自审一致");
     }
 
-    std::printf("\n[50] 表格：段落合并不跨格\n");
-    {
+    if (runSection(50)) std::printf("\n[50] 表格：段落合并不跨格\n");
+    if (runSection(50)) {
         EditorEngine e50;
         expectTrue(e50.init({cjkPath, mnPath, latinPath}), "引擎初始化");
         EngineConfig c50;
@@ -9582,8 +9626,8 @@ int main() {
         expectTrue(e50.auditTables() == 0, "第二次拒绝之后结构自审一致");
     }
 
-    std::printf("\n[51] 表格：全选删除与格内文字选区\n");
-    {
+    if (runSection(51)) std::printf("\n[51] 表格：全选删除与格内文字选区\n");
+    if (runSection(51)) {
         EditorEngine e51;
         expectTrue(e51.init({cjkPath, mnPath, latinPath}), "引擎初始化");
         EngineConfig c51;
@@ -9688,8 +9732,8 @@ int main() {
         expectTrue(e51.auditTables() == 0, "全选打字之后表格结构自审一致");
     }
 
-    std::printf("\n[52] 表格：内容为空的格也能被选中\n");
-    {
+    if (runSection(52)) std::printf("\n[52] 表格：内容为空的格也能被选中\n");
+    if (runSection(52)) {
         EditorEngine e52;
         expectTrue(e52.init({cjkPath, mnPath, latinPath}), "引擎初始化");
         EngineConfig c52;
@@ -9804,8 +9848,8 @@ int main() {
         }
     }
 
-    std::printf("\n[53] 排版摘要：重构锁（只改结构时这份摘要必须逐位相同）\n");
-    {
+    if (runSection(53)) std::printf("\n[53] 排版摘要：重构锁（只改结构时这份摘要必须逐位相同）\n");
+    if (runSection(53)) {
         // 2026-10-21 重取 A/B（0xf0f0d9e785e9abc4 / 0xa56d8ebd65233e40 →
         //   0x3179bff04e53281d / 0x219fbbbb929318d0）：行盒的上边从"基线 - ascent"
         //   改成直接记行顶（layout.cpp 的 placeLine）。这是有意改口径，不是重构改坏：
@@ -9966,8 +10010,8 @@ int main() {
         }
     }
 
-    std::printf("\n[54] 差分：引擎每一次编辑之后，投影都与编译逐字段相同\n");
-    {
+    if (runSection(54)) std::printf("\n[54] 差分：引擎每一次编辑之后，投影都与编译逐字段相同\n");
+    if (runSection(54)) {
         // 这条判据是"引擎改持修订"那个迁移的前置条件：只要 fromTree + project 在任意一串
         //   真实编辑之后都与引擎的编译产物相同，把引擎的数据源换成修订就是机械替换，
         //   而不是"换完再看哪里不一样"。
@@ -10134,8 +10178,8 @@ int main() {
         expectTrue(rev::paraTexts(doc) != start_text, "这一串编辑真的改动了文档");
     }
 
-    std::printf("\n[55] 增量投影：一次编辑之后只有改动的那一块重算\n");
-    {
+    if (runSection(55)) std::printf("\n[55] 增量投影：一次编辑之后只有改动的那一块重算\n");
+    if (runSection(55)) {
         // 这条判据盯的是"退步会不会无声地回来"：耗时会被更快的机器掩盖，复用块数不会。
         //   它也是 [54] 的另一半 —— 那边保证"产物对"，这边保证"没有整篇重算"。
         EditorEngine e;
@@ -10177,8 +10221,8 @@ int main() {
                        std::to_string(e.editStats().rebuild_reused) + "）");
     }
 
-    std::printf("\n[56] 撤销走增量：损伤区间就是排版脏区间\n");
-    {
+    if (runSection(56)) std::printf("\n[56] 撤销走增量：损伤区间就是排版脏区间\n");
+    if (runSection(56)) {
         // 撤销的排版脏区间只能从损伤区间来 —— 它没有命令层算出的落点，而两份修订一减就
         //   得到一个块区间：区间左边一个字没变、右边一个字没变，中间那段必须重排，后缀
         //   照常搬回。四条判据：内容逐块回到编辑之前、增量真的发生、增量与全量逐字段一致、
@@ -10357,8 +10401,8 @@ int main() {
         }
     }
 
-    std::printf("\n[57] 页位图：每页与从零光栅一致，换窗只搬不画\n");
-    {
+    if (runSection(57)) std::printf("\n[57] 页位图：每页与从零光栅一致，换窗只搬不画\n");
+    if (runSection(57)) {
         // 5A 的判据。帧自审与底图自审读的都是页缓存，缓存本身写错时两条照样全绿 ——
         //   这里的参照物是"绕过缓存把同一页重新光栅一遍"，与 auditLayout 拿全量排版
         //   当参照是同一个手法。另有一条计数器判据：换窗时只有新进来的那一页被光栅。
@@ -10452,8 +10496,8 @@ int main() {
         expectTrue(clean == 4, "改页面底色之后四页仍与从零光栅一致（缓存已整份作废）");
     }
 
-    std::printf("\n[58] 按页接口：pageRgba 与 pageDirtyRects，光栅签名\n");
-    {
+    if (runSection(58)) std::printf("\n[58] 按页接口：pageRgba 与 pageDirtyRects，光栅签名\n");
+    if (runSection(58)) {
         // 5B 的判据。两件事分开验：页视图与帧对应块逐字节相同（接口本身对不对），
         //   以及"一次光标移动的脏矩形只有几十像素"（增量到底有没有落到页上）。
         //   第二条是这一刀的意义：此前宿主按页上屏，光标动一下要传整页 1 Mpx。
@@ -10590,8 +10634,8 @@ int main() {
                        std::to_string(e58.editStats().repainted_pages) + " 页）");
     }
 
-    std::printf("\n[59] 连页接缝：分带渲染 == 整带渲染（逐字节）\n");
-    {
+    if (runSection(59)) std::printf("\n[59] 连页接缝：分带渲染 == 整带渲染（逐字节）\n");
+    if (runSection(59)) {
         // 连页把内容切成固定高度的条带，行就必然会跨接缝。判据不是"看着对不对"，
         //   而是"同一份文档切成 N 带、拼起来，与切成一条整带逐字节相同" ——
         //   整带没有接缝，是天然的参照物：接缝处少画半行、画重半行、两侧对不齐，
@@ -10710,8 +10754,9 @@ int main() {
     // 判据的形状：存盘 → 换一个新引擎打开 → 整帧逐字节相同。它比"逐字段比对"强，
     //   因为任何参与绘制的字段没落盘都会落到像素上（与 [54] 同一条思路）。
     // 另一半是反向：坏文件 / 版本不符必须被拒，且拒绝之后现场一个字节都没动。
-    std::printf("\n[60] 保存 / 打开：JSON 往返（整帧逐字节相同，坏文件不动现场）\n");
-    {
+    if (runSection(60))
+        std::printf("\n[60] 保存 / 打开：JSON 往返（整帧逐字节相同，坏文件不动现场）\n");
+    if (runSection(60)) {
         EngineConfig c60;
         c60.page.width_pt = 420.0f;
         c60.page.height_pt = 300.0f;
@@ -10820,8 +10865,8 @@ int main() {
     //   (a) 没有退回整篇重排（layout_was_full 为假，且只重排了一部分）；
     //   (b) 增量产出的排版与"同内容从零重排"逐位相同（摘要），表格结构自审为 0。
     // 只有 (a) 会退化成"把增量关掉也全绿"（那就等于没做），只有 (b) 看不出有没有省下功夫。
-    std::printf("\n[61] 表格走进增量：表里改一个字，不退回整篇重排\n");
-    {
+    if (runSection(61)) std::printf("\n[61] 表格走进增量：表里改一个字，不退回整篇重排\n");
+    if (runSection(61)) {
         EngineConfig c61;
         c61.zoom = 1.0f;
         c61.page.width_pt = 320.0f;
@@ -11049,8 +11094,8 @@ int main() {
     //
     // 末尾那几位按文档形状数：最后一段在表外且带标记时，它之后是"标记一位 + 出节一位"；
     //   以表格结尾时还要加上出格、出行、出表（最后一段带标记的话再加它自己那一位）。
-    std::printf("\n[62] 位置划分：每块只装内容，空隙只装边界\n");
-    {
+    if (runSection(62)) std::printf("\n[62] 位置划分：每块只装内容，空隙只装边界\n");
+    if (runSection(62)) {
         auto checkPartition = [&](EditorEngine* e, const std::string& what, int tail) {
             const int n = static_cast<int>(e->blocks().size());
             int total = 0;

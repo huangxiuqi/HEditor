@@ -3787,7 +3787,9 @@ async function main() {
   console.log(`截图： ${join(OUT, 'edit-scene.png')}`);
   console.log(`明细： ${join(OUT, 'edit-probe.json')}`);
 
-  await c.send('Browser.close').catch(() => {});
+  // 批量验证时由 scripts/verify_web.ps1 统一收浏览器（它按 profile 杀整棵进程树）。
+  //   这里各自关一次的话，一条命令跑十个探针就只能跑第一个：第二个连不上 9222。
+  if (!process.env.HEDITOR_KEEP_BROWSER) await c.send('Browser.close').catch(() => {});
   process.exit(chk.failures ? 1 : 0);
 }
 

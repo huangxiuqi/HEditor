@@ -269,13 +269,12 @@ const host = {
    *   出现"连页的间隙 + 分页的落点"这种不存在的组合。
    */
   setViewMode(m) {
-    const e = api.engine();
-    if (typeof m.gap === 'number' && e.setPageGap) e.setPageGap(m.gap);
     continuous = !!m.continuous;
-    // 引擎侧的连页标志：它改的是排版的形状（页底断行、显式分页符、竖排吃页尾），
-    //   所以必须与页间隙一起设下去 —— 只设间隙的话，排版还是分页的，只是页首尾
-    //   相接（内容照样在页底断开），那正是"看着像连页、其实还有页"的来源。
-    if (e.setContinuous) e.setContinuous(continuous);
+    // 引擎侧那两个配置（页间隙 + 连页标志）由 api.setViewMode 成套设下去 ——
+    //   它们必须一起生效：只设间隙的话排版还是分页的，只是页首尾相接（内容照样在
+    //   页底断开），那正是"看着像连页、其实还有页"的来源。
+    //   这一层不碰引擎导出：薄壳只认 api.*，那是"一种引擎、两种传输"的边界。
+    api.setViewMode(m);
     // 切模式会把排版的形状与页的落点整套换掉（间隙 0 与 14 是两套），所以这里要
     //   重排 + 重光栅页位图，再作废槽表重贴 —— 三件缺一不可：
     //   间隙一改步距就变，而页位图里还是上一套布局的像素。只作废槽表重贴的话，
@@ -311,8 +310,7 @@ async function handle(m) {
       // 没换窗口 = 没有新内容要贴：页画布的位置是固定的 (页号 x 步距)，
       //   滚动是浏览器搬像素（连页与分页在这一层已经没有区别）。
       if (!r.moved) return void post({ t: 'ack', ts: m.ts, workMs: r.workMs });
-      return void api.state(m.ts, 'view', JSON.parse(api.engine().editStatsJson()), undefined,
-                            r.workMs);
+      return void api.state(m.ts, 'view', r.stats, undefined, r.workMs);
     }
     if (m.t === 'do') return void await api.do(m);
     if (m.t === 'ask') return void await api.ask(m);

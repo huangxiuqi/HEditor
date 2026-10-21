@@ -15,6 +15,207 @@
 (function () {
 'use strict';
 
+/* 协议表 */
+
+/**
+ * 宿主与引擎之间的每一个动词，一条一行：[命令名, 类别, 调的 wasm 导出, 呈现归属]。
+ *
+ * 类别 —— 'w' 写（跑完收尾并回推状态）｜'r' 读（只回值）｜'s' 静默写（改状态但不上屏、
+ *   不回推）｜'q' 查询，但在 askOp 里特判（rawFrame：帧太大，要转移所有权而不是克隆）。
+ * 呈现归属 —— 'self' 引擎在库里就排完画完了｜'host' 引擎只改状态，宿主必须补一次 present
+ *   ｜'none' 根本不碰画面。
+ *
+ * ★ 呈现归属是账本的一部分，不是风格选择：多补一次 present 会把这一拍的重画统计冲成
+ *   "只画了一个光标"（探针拿那笔账当分母，产品面板也读它）；少补一次，画面停在上一拍。
+ *   它只能由"这条命令调的是不是 *AndRender"决定，而这件事只有读代码的人知道 —— 所以它
+ *   写在这张表里，不写在另一份手抄清单里。原来那份叫 PRESENT_ALWAYS，二十三条里有一条
+ *   根本不是命令名（setViewportAnchor），另有八条调的就是 *AndRender，每次都被白白
+ *   重画一遍（undo / redo / indent / outdent / focusControl / tabCaret / removeControl /
+ *   setControlProp）。
+ *
+ * ★ 这张表与三张实现表由 collect() 对账：少一条、多一条都在造 API 的时候抛出 ——
+ *   两个方向都拦，"改了引擎面忘了登记"不再表现成探针里某个数字悄悄变了。
+ */
+const COMMANDS = [
+  // 呈现与装载：整份换文档，引擎自己重排重画
+  // 实现是空的：render() 认这个名字去补一次 mod.present()
+  ['present',               'w', ['present'],                                             'host'],
+  ['scenario',              'w', ['setScenario'],                                         'self'],
+  ['reset',                 'w', ['setZoom', 'setScenario'],                              'self'],
+  ['zoom',                  'w', ['setZoom'],                                             'self'],
+  ['stress',                'w', ['loadStressDocument'],                                  'self'],
+  ['stressDiverse',         'w', ['loadStressDocumentDiverse'],                           'self'],
+  ['textDoc',               'w', ['loadTextDocument'],                                    'self'],
+  ['formSample',            'w', ['loadFormSample'],                                      'self'],
+  ['loadDocument',          'w', ['loadDocument'],                                        'self'],
+  ['fonts',                 'w', ['loadFont', 'loadFontFromFile', 'setFontRoles'],        'self'],
+  ['setFormControls',       'w', ['setFormControls'],                                     'self'],
+
+  // 编辑：*AndRender 系在库里就排完画完了，宿主不要再画一遍
+  ['type',                  'w', ['typeText'],                                            'self'],
+  ['backspace',             'w', ['backspace'],                                           'self'],
+  ['deleteForward',         'w', ['deleteForward'],                                       'self'],
+  ['splitParagraph',        'w', ['splitParagraph'],                                      'self'],
+  ['mergePrev',             'w', ['mergeWithPreviousParagraph'],                          'self'],
+  ['mergeNext',             'w', ['mergeWithNextParagraph'],                              'self'],
+  ['move',                  'w', ['moveCaret'],                                           'self'],
+  ['vertical',              'w', ['moveCaretVertical'],                                   'self'],
+  ['docStart',              'w', ['caretToDocStart'],                                     'self'],
+  ['docEnd',                'w', ['caretToDocEnd'],                                       'self'],
+  ['lineStart',             'w', ['caretToLineStart'],                                    'self'],
+  ['lineEnd',               'w', ['caretToLineEnd'],                                      'self'],
+  ['indent',                'w', ['indent'],                                              'self'],
+  ['outdent',               'w', ['outdent'],                                             'self'],
+  ['tabCaret',              'w', ['tabCaret'],                                            'self'],
+  ['undo',                  'w', ['undoEdit'],                                            'self'],
+  ['redo',                  'w', ['redoEdit'],                                            'self'],
+  ['removeControl',         'w', ['removeControlAt'],                                     'self'],
+  ['setControlProp',        'w', ['setControlPropAt'],                                    'self'],
+  ['focusControl',          'w', ['focusControl'],                                        'self'],
+
+  // 选区与光标：选区的几条自己收尾；落光标、拖选、闪烁只改状态，要宿主补呈现
+  ['selectAll',             'w', ['selectAll'],                                           'self'],
+  ['selectCellAtPara',      'w', ['selectCellAtPara'],                                    'self'],
+  ['cellSelectAt',          'w', ['cellSelectAt'],                                        'self'],
+  ['setSelection',          'w', ['setSelection'],                                        'self'],
+  ['clearSelection',        'w', ['clearSelection'],                                      'self'],
+  ['setCaret',              'w', ['setCaret', 'showCaret'],                               'host'],
+  ['setCaretAt',            'w', ['setCaretAt', 'showCaret'],                             'host'],
+  ['setCaretAtSide',        'w', ['setCaretAtSide', 'showCaret'],                         'host'],
+  ['setCaretAtSideLine',    'w', ['setCaretAtSideLine', 'showCaret'],                     'host'],
+  ['setFocusAtSideLine',    'w', ['setFocusAtSideLine', 'showCaret'],                     'host'],
+  ['setFocusAtSide',        'w', ['setFocusAtSide', 'showCaret'],                         'host'],
+  ['blinkPhase',            'w', ['showCaret'],                                           'host'],
+  ['viewport',              'w', ['setViewportAnchor'],                                   'host'],
+
+  // 配置：改参数；改到画面的那几条（模式 / 括号 / 小点 / 光标色）要补呈现
+  ['setEditMode',           'w', ['setEditMode'],                                         'host'],  // 会重编译整篇，但不重绘
+  ['setShowBrackets',       'w', ['setShowBrackets'],                                     'host'],  // 会重排（括号占宽度）
+  ['setShowControlDots',    'w', ['setShowControlDots'],                                  'host'],  // 不重排，只改光栅签名
+  ['caretStyle',            'w', ['caretStyleJson', 'setCaretStyle'],                     'host'],
+  ['selectionStyle',        'w', ['selectionStyleJson', 'setSelectionStyle'],             'host'],
+  ['setUndoLimit',          'w', ['setUndoLimit'],                                        'none'],
+  ['setFontCacheConfig',    'w', ['setFontCacheConfig'],                                  'none'],
+
+  // 静默写：改引擎状态，但不上屏也不回推（门面的 showCaret / stopBlink）
+  ['phase',                 's', ['showCaret'],                                           'none'],
+
+  // 查询：文档与结构
+  ['ping',                  'r', [],                                                      'none'],  // 排空屏障：什么都不算，只回一个值
+  ['text',                  'r', ['documentText'],                                        'none'],
+  ['serialize',             'r', ['serializeDocument'],                                   'none'],
+  ['hit',                   'r', ['hitTest'],                                             'none'],
+  ['controlAt',             'r', ['controlAtPoint'],                                      'none'],
+  ['describeControls',      'r', ['describeControls'],                                    'none'],
+  ['controls',              'r', ['controlsJson'],                                        'none'],
+  ['bracketSlots',          'r', ['bracketSlotsJson'],                                    'none'],
+  ['lines',                 'r', ['linesJson'],                                           'none'],
+  ['blockedEdits',          'r', ['blockedEdits'],                                        'none'],
+  ['editMode',              'r', ['editMode'],                                            'none'],
+  ['showBrackets',          'r', ['showBrackets'],                                        'none'],
+  ['showControlDots',       'r', ['showControlDots'],                                     'none'],
+  ['undoLimit',             'r', ['undoLimit'],                                           'none'],
+
+  // 查询：几何
+  ['frameWidth',            'r', ['frameWidth'],                                          'none'],
+  ['frameHeight',           'r', ['frameHeight'],                                         'none'],
+  ['frameByteSize',         'r', ['frameByteSize'],                                       'none'],
+  ['pagePxWidth',           'r', ['pagePxWidth'],                                         'none'],
+  ['pagePxHeight',          'r', ['pagePxHeight'],                                        'none'],
+  ['pageGapPx',             'r', ['pageGapPx'],                                           'none'],
+  ['windowFirstPage',       'r', ['windowFirstPage'],                                     'none'],
+  ['windowPageCount',       'r', ['windowPageCount'],                                     'none'],
+
+  // 查询：光标与选区
+  ['caretOffsetLive',       'r', ['caretOffsetLive'],                                     'none'],
+  ['caretVerticalNow',      'r', ['caretVerticalNow'],                                    'none'],
+  ['caretBlockReversedNow', 'r', ['caretBlockReversedNow'],                               'none'],
+  ['selectionReport',       'r', ['selectionReport'],                                     'none'],
+  ['caretStyleJson',        'r', ['caretStyleJson'],                                      'none'],
+  ['selectionStyleJson',    'r', ['selectionStyleJson'],                                  'none'],
+  ['caretReport',           'r', ['caretReport'],                                         'none'],
+
+  // 查询：像素与账本
+  ['ink',                   'r', ['frameRgba'],                                           'none'],
+  ['inkRows',               'r', ['frameRgba', 'frameWidth', 'pageGapPx', 'pagePxHeight', 'windowFirstPage', 'windowPageCount'], 'none'],
+  ['frameDigest',           'r', ['frameRgba'],                                           'none'],
+  ['stats',                 'r', ['statsJson'],                                           'none'],
+  ['editStats',             'r', ['editStatsJson'],                                       'none'],
+  ['dirtyPages',            'r', ['dirtyPagesJson'],                                      'none'],
+  ['pageDirtyRects',        'r', ['pageDirtyRectsJson'],                                  'none'],
+  ['pageDirtyPages',        'r', ['pageDirtyPagesJson'],                                  'none'],
+  ['prewarmPage',           'r', ['prewarmPageGlyphs'],                                   'none'],
+  ['heap',                  'r', [],                                                      'none'],  // 读的是模块属性 HEAPU8，不是导出
+  ['buildStamp',            'r', ['buildStamp'],                                          'none'],
+  ['rasterBackend',         'r', ['rasterBackend'],                                       'none'],
+  ['bench',                 'r', ['benchRelayoutPaint'],                                  'none'],
+
+  // 查询：自审与诊断
+  ['auditFrame',            'r', ['auditFrame'],                                          'none'],
+  ['auditBase',             'r', ['auditBase'],                                           'none'],
+  ['auditPage',             'r', ['auditPage'],                                           'none'],
+  ['auditLayout',           'r', ['auditLayout'],                                         'none'],
+  ['auditCompile',          'r', ['auditCompile'],                                        'none'],
+  ['auditGlyphPages',       'r', ['auditGlyphPages'],                                     'none'],
+  ['selfCheck',             'r', ['documentText', 'editStatsJson', 'frameHeight', 'frameWidth', 'pagePxHeight', 'pagePxWidth', 'pageRgba', 'rasterBackend', 'windowFirstPage', 'windowPageCount'], 'none'],
+  ['markCheck',             'r', ['controlsJson', 'frameRgba', 'frameWidth', 'showBrackets'], 'none'],
+
+  // 问答特判：帧太大，要转移所有权而不是结构化克隆（见 askOp 里的 rawFrame 分支）
+  ['rawFrame',              'q', ['frameRgba'],                                           'none'],
+];
+
+/**
+ * 不经过命令表的导出。每一条都要说清为什么 —— 这份清单同时是"漏了一个导出"的探测器：
+ *   谁在 wasm 侧新增了一个导出却忘了登记，scripts/idl_check.mjs 会把名字打出来。
+ *
+ * kind 只作分类：glue = wasm 堆与字节搬运，host = 宿主自己发起的装载与呈现，
+ *   state = 只喂状态对象，diag = 手工诊断。
+ */
+const OUTSIDE = [
+  ['allocBuffer',      'glue',  '字体的字节从 JS 搬进 wasm 堆'],
+  ['freeBuffer',       'glue',  '同上'],
+  ['relayoutAndPaint', 'host',  '整篇重排重画：paintFull 与 relayout 用它换文档、换缩放、换页度量'],
+  ['setPageMetrics',   'host',  '页度量只在装载时定一次（app.js 与 boot），没有运行期入口'],
+  ['setPageGap',       'host',  '页间隙：由 api.setViewMode 与连页标志一起设'],
+  ['setContinuous',    'host',  '连页标志：同上（改的是排版形状，不是一份配置）'],
+  ['contentPx',        'state', 'geom() 报的内容底边（连页拿它当滚动高度）'],
+  ['relayout',         'diag',  '只排版不画（手工诊断）；目前没有任何调用方'],
+  ['shapeReport',      'diag',  '单段整形报告（手工诊断）；目前没有任何调用方'],
+];
+
+/** 按类别取命令名。 */
+function idlByKind(kind) {
+  return COMMANDS.filter((c) => c[1] === kind).map((c) => c[0]);
+}
+
+const IDL = {
+  commands: COMMANDS,
+  outside: OUTSIDE,
+  byKind: idlByKind,
+  /** 要宿主补一次 present 的命令名。派生，不维护。 */
+  presentAlways: () => new Set(COMMANDS.filter((c) => c[3] === 'host').map((c) => c[0])),
+};
+
+/**
+ * 把实现表按协议表"套"起来：IDL 里有、实现里没有（或反过来）当场抛。
+ *
+ * 两个方向都要拦：只拦一个方向的话，"删了一条命令忘删实现"会留一个永远跑不到的体；
+ *   而"加了一条忘登记"会静默地当未知命令 —— 宿主那边只看到一句 `未知命令 x`。
+ */
+function collect(kind, impl) {
+  const want = idlByKind(kind);
+  const missing = want.filter((n) => !Object.prototype.hasOwnProperty.call(impl, n));
+  const extra = Object.keys(impl).filter((n) => want.indexOf(n) < 0);
+  if (missing.length || extra.length) {
+    throw new Error('协议表与实现不一致（' + kind + '）：缺 [' + missing.join(', ') +
+                    ']，多 [' + extra.join(', ') + ']');
+  }
+  return impl;
+}
+
+/** 引擎自己不画的那些命令 —— 派生自协议表的第四列，不另维护。 */
+const PRESENT_ALWAYS = IDL.presentAlways();
+
 /**
  * 造一份引擎 API。
  *
@@ -246,27 +447,11 @@ function retarget(st) {
 /* 呈现收尾 */
 
 /**
- * 引擎自己不会画的那几个入口：改完要主动呈现一次。
+ * 什么时候补一次呈现：窗口换了，或者命令自己不会画（见协议表的第四列）。
  *
- * 为什么必须逐条列出来（这不是风格问题）：present() 会把 edit_stats_ 覆盖成
- *   "这一下重画了多少"。引擎的 *AndRender 系入口（typeText / backspace / moveCaret /
- *   undoEdit ...）在库里就把重排重绘收尾好了，那笔账正是"编辑这一下的代价"——再
- *   present 一次就把它冲掉，只剩一个光标。探针拿这笔账当分母（"整页重画 ≥ 半帧"、
- *   "光标移动 < 全量的 1/100"），产品面板也用；所以多做一次 present 是静默的失真。
- *   对照单线程宿主 app.js：settle() 只在窗口变了才 present，move() 则完全不 present，
- *   而 setCaret / setEditMode / undo ... 这些是自己 return this.present() 的。
+ * 这一节原来还带一份手抄的名单（PRESENT_ALWAYS）—— 它已经并进协议表了：名单与实现
+ *   分两处维护，迟早对不上，而它对不上的症状是"某条命令多画一次、账被冲成零"。
  */
-const PRESENT_ALWAYS = new Set([
-  'present', 'blinkPhase', 'viewport',
-  'setCaret', 'setCaretAt', 'setCaretAtSide', 'setFocusAtSide',
-  'setCaretAtSideLine', 'setFocusAtSideLine',
-  'setEditMode', 'setShowBrackets', 'setShowControlDots', 'setViewportAnchor',
-  // 样式那两条：与 setEditMode 同档 —— 引擎只换参数（见 setCaretAndSelectionStyle），
-  //   没有这层收尾的话帧上留的还是旧颜色。
-  'caretStyle', 'selectionStyle',
-  'undo', 'redo', 'indent', 'outdent', 'focusControl', 'tabCaret',
-  'removeControl', 'setControlProp',
-]);
 
 /**
  * 收尾：必要时呈现一次，然后把脏页重贴上去，返回这一拍的账。
@@ -468,7 +653,7 @@ async function boot(m) {
 /* 运算表 */
 
 // 改状态的运算。跑完一律收尾（present + 重贴 + 回推 state）。
-const WRITE = {
+const WRITE = collect('w', {
   // 什么都不改，只收尾。给宿主的 present() 用 —— 它就是"重画并回推"。
   present: () => {},
   scenario: (a) => loadScenario(a.id, a.zoom),
@@ -617,7 +802,7 @@ const WRITE = {
     mod.setViewportAnchor(a.first | 0, a.count | 0);
     lastAnchor = (a.first | 0) + ':' + (a.count | 0);
   },
-};
+});
 
 /**
  * 只改引擎状态、不做收尾的运算（不回推 state、不重画）。
@@ -629,12 +814,12 @@ const WRITE = {
  *   错误的分母照绿（这是最难发现的一类失真）。
  * ⇒ 门面 showCaret / stopBlink 走这张表；闪烁那一拍走 WRITE.blinkPhase（那个要呈现）。
  */
-const SILENT = {
+const SILENT = collect('s', {
   phase: (a) => mod.showCaret(!!a.on),
-};
+});
 
 // 要返回值的查询。
-const READ = {
+const READ = collect('r', {
   /**
    * 排空屏障：什么都不算，立刻回一个值。
    *
@@ -908,7 +1093,7 @@ const READ = {
       allOk: rows.every((r) => r.ok),
     };
   },
-};
+});
 
 /**
  * 每轮换窗之后往前预热一页的字形，且要等 90 ms 没有新的视口消息才动手。
@@ -1002,7 +1187,24 @@ function view(m) {
   mod.present();
   host.blitPages();
   schedulePrewarm(scrollY - prevScrollY);
-  return { moved: true, scrolled, workMs: performance.now() - tWork };
+  // 把这一拍的状态一起带回去：薄壳要拿它回推，而"读一次 editStats 再拼一份 state"
+  //   是两件应该留在一侧的事 —— 让薄壳伸手读引擎，那条边界就又有第二个入口了。
+  return { moved: true, scrolled, workMs: performance.now() - tWork,
+           stats: JSON.parse(mod.editStatsJson()) };
+}
+
+/**
+ * 视图模式的两个配置：页间隙与连页标志。
+ *
+ * 它们是"页的落点"这一件事的两半（间隙决定步距，连页标志决定排版在不在页底断行），
+ *   所以必须成套设下去 —— 分两路传，中间那一拍就会出现"连页的间隙 + 分页的落点"
+ *   这种不存在的组合。薄壳（engine_worker）只调这一条，不碰引擎的导出。
+ *
+ * @param {object} m { gap?: number, continuous?: boolean }
+ */
+function setViewMode(m) {
+  if (typeof m.gap === 'number') mod.setPageGap(m.gap);
+  mod.setContinuous(!!m.continuous);
 }
 
 /**
@@ -1072,7 +1274,8 @@ function attach(engine) {
 }
 
 return {
-  boot, do: doOp, ask: askOp, view, pageCanvas, viewMode, relayout, sendState, geom,
+  boot, do: doOp, ask: askOp, view, pageCanvas, viewMode, setViewMode, relayout, sendState,
+  geom,
   attach, read, write,
   // 引擎句柄：只给宿主取帧视图与装载用，不要拿它绕过命令表。
   engine: () => mod,
@@ -1085,5 +1288,5 @@ return {
 }
 
 // importScripts 与 <script> 都走这里。两侧各取一次，互不影响。
-self.__heditorEngineApi = { createEngineApi };
+self.__heditorEngineApi = { createEngineApi, IDL };
 })();
