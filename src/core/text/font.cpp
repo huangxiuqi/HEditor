@@ -8,6 +8,7 @@
 #include <cmath>
 #include <fstream>
 #include <iterator>
+#include <vector>
 
 namespace heditor {
 
@@ -69,7 +70,36 @@ bool FontFace::buildFromData(const std::string& name) {
         }
         return false;
     }
+    readNames();
     return true;
+}
+
+namespace {
+
+/**
+ * 从 name 表读一个名字。HB_LANGUAGE_INVALID 的意思不是"不查语言"，而是"按英文优先"：
+ * OpenType 规定每个名字至少有一份英文记录，族名与 PostScript 名都在其中。
+ */
+std::string nameOfId(hb_face_t* face, hb_ot_name_id_t id) {
+    unsigned int size = 0;
+    const unsigned int need = hb_ot_name_get_utf8(face, id, HB_LANGUAGE_INVALID, &size, nullptr);
+    if (need == 0) return {};
+    std::vector<char> buf(static_cast<size_t>(need) + 1, '\0');
+    unsigned int cap = need + 1;
+    const unsigned int got = hb_ot_name_get_utf8(face, id, HB_LANGUAGE_INVALID, &cap, buf.data());
+    if (got == 0) return {};
+    return std::string(buf.data(), got);
+}
+
+}  // namespace
+
+void FontFace::readNames() {
+    if (!face_) return;
+    ps_name_ = nameOfId(face_, HB_OT_NAME_ID_POSTSCRIPT_NAME);
+    // 排版族名（ID 16）优先：它是不带字重后缀的那一个（"Noto Sans SC"），
+    //   ID 1 在有 ID 16 的字体里带的是"族 + 字重"的老式写法。
+    family_name_ = nameOfId(face_, HB_OT_NAME_ID_TYPOGRAPHIC_FAMILY);
+    if (family_name_.empty()) family_name_ = nameOfId(face_, HB_OT_NAME_ID_FONT_FAMILY);
 }
 
 unsigned FontFace::glyphCount() const { return face_ ? hb_face_get_glyph_count(face_) : 0u; }

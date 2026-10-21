@@ -188,8 +188,8 @@ bool readNodeFields(const Reader& r, const ordered_json& entry, NodeTree* out, N
     Node* n = out->find(id);
     if (n == nullptr) return r.fail("节点没有建出来");
     if (!readBool(entry, kHidden, &n->hidden)) return r.fail("hidden 不是布尔");
-    if (!readPara(entry, kPara, &n->para)) return r.fail("段落格式读不出来");
-    if (!readMarks(entry, kMarks, &n->marks)) return r.fail("字符属性读不出来");
+    if (!readPara(r, entry, kPara, &n->para)) return r.fail("段落格式读不出来");
+    if (!readMarks(r, entry, kMarks, &n->marks)) return r.fail("字符属性读不出来");
     if (!readControl(r, entry, kControl, &n->control)) return false;
     if (!readTable(entry, kTable, &n->table)) return r.fail("表格记录读不出来");
     if (!recjson::readField(entry, kField, &n->field)) return r.fail("域记录读不出来");

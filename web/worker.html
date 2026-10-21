@@ -97,6 +97,11 @@
     <button id="btnUndo">撤销</button>
     <button id="btnRedo">重做</button>
     <button id="btnSelf">自检</button>
+    <!-- 保存 / 打开：文件就是引擎给的 JSON 文本，宿主不解析也不改写。
+         openFile 藏起来，由"打开…"代点 —— 原生 file 控件的样式改不动。 -->
+    <button id="btnSave">保存</button>
+    <button id="btnOpen">打开…</button>
+    <input id="openFile" type="file" accept=".json,application/json" hidden>
     <span id="status">就绪</span>
   </div>
   <div id="wrap">
@@ -171,6 +176,45 @@
         window.__lastSelfCheck = r;
         q('bar').textContent =
           `自检：画布与帧不同 ${r.diff} px / 共 ${r.compared}（比例 ${r.ratio.toFixed(6)}）`;
+      });
+
+      // 保存 / 打开。与单线程宿主那一对按钮同一套动作，差别只有 await ——
+      //   引擎在 Worker 那侧，两件事都要走一次往返。
+      q('btnSave').addEventListener('click', async () => {
+        try {
+          const text = await h().saveDocument();
+          if (!text) { q('status').textContent = '还没有装载文档，没东西可保存'; return; }
+          const d = new Date();
+          const p = (n) => String(n).padStart(2, '0');
+          const stamp = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-` +
+                        `${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+          const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `heditor-${stamp}.json`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          setTimeout(() => URL.revokeObjectURL(url), 1000);
+          q('status').textContent = `已保存 ${(text.length / 1024).toFixed(1)} KB`;
+        } catch (e) {
+          q('status').textContent = `保存失败：${(e && e.message) || e}`;
+        }
+      });
+      q('btnOpen').addEventListener('click', () => q('openFile').click());
+      q('openFile').addEventListener('change', async () => {
+        const f = q('openFile').files && q('openFile').files[0];
+        q('openFile').value = '';   // 同一个文件连开两次也要触发 change
+        if (!f) return;
+        try {
+          const text = await f.text();
+          await h().loadDocument(text);
+          q('status').textContent =
+            `已打开 ${f.name}（${(text.length / 1024).toFixed(1)} KB）`;
+        } catch (e) {
+          // 引擎解析失败时一个字节都没动，这里只把原因显示出来。
+          q('status').textContent = `打开失败：${(e && e.message) || e}`;
+        }
       });
     })();
   </script>

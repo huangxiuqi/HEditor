@@ -1,12 +1,15 @@
 #include "core/rev/serialize.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <type_traits>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <variant>
 #include <vector>
 
+#include "core/doc/document.h"
 #include "core/doc/record_json.h"
 #include "nlohmann/json.hpp"
 
@@ -40,6 +43,7 @@ enum class Alt : uint8_t {
 constexpr const char* kV = "v";
 constexpr const char* kNext = "next";
 constexpr const char* kStrings = "s";
+constexpr const char* kFonts = "fonts";
 constexpr const char* kRoot = "root";
 constexpr const char* kId = "id";
 constexpr const char* kKind = "k";
@@ -130,6 +134,56 @@ Alt altForKind(NodeKind kind) {
     }
 }
 
+/**
+ * 字体表的键：非负十进制整数。只认这一种写法 —— 键是"第几号字体"的身份，允许 "+1"/" 1"
+ * 只会让同一份表有两种合法写法。
+ */
+bool parseIndexKey(const std::string& s, int* out) {
+    if (s.empty()) return false;
+    int v = 0;
+    for (char ch : s) {
+        if (ch < '0' || ch > '9') return false;
+        v = v * 10 + (ch - '0');
+        if (v > 1000000) return false;
+    }
+    *out = v;
+    return true;
+}
+
+/**
+ * 文本转 UTF-8。非法码点（代理区 / 越界）当场报错，不替换成 U+FFFD —— 写端替换一个字符，
+ * 读回来就是另一份文本，而所有字段都"看起来正常"。宁可整份写不出去。
+ */
+bool textToUtf8(const std::vector<uint32_t>& cps, std::string* out, std::string* error) {
+    for (uint32_t cp : cps) {
+        if (cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) {
+            *error = "文本里有非法码点 " + std::to_string(cp);
+            return false;
+        }
+    }
+    *out = codepointsToUtf8(cps);
+    return true;
+}
+
+/**
+ * 这棵子树用到哪些字体下标。字体表只列点过名的那些：把整个库写进文件，等于把装载环境
+ * 一起打包（系统字体几十上百张，与这份文档无关）。
+ */
+void collectFonts(const Ref& n, std::unordered_set<int>* out) {
+    const Alt alt = altOf(n->payload);
+    if (alt == Alt::Run) {
+        const RunPayload& p = std::get<RunPayload>(n->payload);
+        if (p.marks.font_index.has_value()) out->insert(*p.marks.font_index);
+    } else if (alt == Alt::Mark) {
+        const MarkPayload& p = std::get<MarkPayload>(n->payload);
+        if (p.para.font_index.has_value()) out->insert(*p.para.font_index);
+        if (p.para.fallback_font_indices.has_value()) {
+            for (int index : *p.para.fallback_font_indices) out->insert(index);
+        }
+    }
+    for (const Ref& c : n->children) collectFonts(c, out);
+}
+
 bool writeNode(const Ref& n, recjson::StringPool* strings, NodeId* max_id,
                std::unordered_set<NodeId>* seen, ordered_json* out, std::string* error) {
     const Alt alt = altOf(n->payload);
@@ -154,7 +208,14 @@ bool writeNode(const Ref& n, recjson::StringPool* strings, NodeId* max_id,
     if (n->hidden) j[kHidden] = true;
     if (alt == Alt::Run) {
         const RunPayload& p = std::get<RunPayload>(n->payload);
-        if (!p.text.empty()) j[kText] = p.text;
+        if (!p.text.empty()) {
+            std::string utf8;
+            if (!textToUtf8(p.text, &utf8, error)) {
+                *error = "节点 " + std::to_string(n->id) + "：" + *error;
+                return false;
+            }
+            j[kText] = std::move(utf8);
+        }
         if (!p.marks.empty()) j[kMarks] = recjson::marksJson(p.marks);
         if (!p.style.empty()) j[kStyle] = strings->add(p.style);
     } else if (alt == Alt::Mark) {
@@ -223,8 +284,8 @@ bool readNodeId(const ordered_json& j, const char* key, NodeId* out) {
 }
 
 /**
- * 读端环境：字符串池 + 错误串 + 已见节点号。重复的节点号必须拒掉 —— 那种树里改一个节点会
- * 连带改到另一个同号节点，而且是静默的。
+ * 读端环境：字符串池 + 字体映射 + 错误串 + 已见节点号。重复的节点号必须拒掉 —— 那种树里改一个
+ * 节点会连带改到另一个同号节点，而且是静默的。
  */
 class Reader : public recjson::Context {
 public:
@@ -241,7 +302,21 @@ public:
         return false;
     }
 
+    /**
+     * 文件里的下标换成本机的。没写字体表（v1 或手改过的文件）时映射是空的，下标原样保留 ——
+     * 那正是 v1 的语义。
+     */
+    int mapFontIndex(int index) const override {
+        if (font_map_.empty()) return index;
+        const auto it = font_map_.find(index);
+        return it == font_map_.end() ? index : it->second;
+    }
+
     std::vector<std::string> strings_;
+    /**
+     * 文件下标 → 本机下标。只给文件里点过名的那些下标建条目。
+     */
+    std::unordered_map<int, int> font_map_;
     std::unordered_set<NodeId> seen_;
     NodeId max_id_ = 0;
 
@@ -269,8 +344,18 @@ bool readChildren(Reader& r, const ordered_json& j, int depth, std::vector<Ref>*
 
 bool readRunPayload(Reader& r, const ordered_json& j, Payload* out) {
     RunPayload p;
-    if (!recjson::readU32Array(j, kText, &p.text)) return r.fail("文本不是码点数组");
-    if (!recjson::readMarks(j, kMarks, &p.marks)) return r.fail("字符属性读不出来");
+    // v2 写字符串，v1 写码点数组。按类型分派而不是按版本号分派：两份文件混在一起时，
+    //   类型是自证的，版本号只是一个声明。非法 UTF-8 一律拒掉（它读回来会变成别的文本）。
+    if (j.contains(kText)) {
+        if (j[kText].is_string()) {
+            const std::string utf8 = j[kText].get<std::string>();
+            if (!recjson::isValidUtf8(utf8)) return r.fail("文本不是合法 UTF-8");
+            p.text = utf8ToCodepoints(utf8);
+        } else if (!recjson::readU32Array(j, kText, &p.text)) {
+            return r.fail("文本既不是 UTF-8 字符串，也不是码点数组");
+        }
+    }
+    if (!recjson::readMarks(r, j, kMarks, &p.marks)) return r.fail("字符属性读不出来");
     if (j.contains(kStyle)) {
         int index = 0;
         if (!recjson::readInt(j, kStyle, &index)) return r.fail("字符样式引用不是下标");
@@ -282,7 +367,7 @@ bool readRunPayload(Reader& r, const ordered_json& j, Payload* out) {
 
 bool readMarkPayload(Reader& r, const ordered_json& j, Payload* out) {
     MarkPayload p;
-    if (!recjson::readPara(j, kPara, &p.para)) return r.fail("段落覆盖读不出来");
+    if (!recjson::readPara(r, j, kPara, &p.para)) return r.fail("段落覆盖读不出来");
     if (j.contains(kStyle)) {
         int index = 0;
         if (!recjson::readInt(j, kStyle, &index)) return r.fail("段落样式引用不是下标");
@@ -383,7 +468,7 @@ bool readNode(Reader& r, const ordered_json& j, int depth, Ref* out) {
 
 }  // namespace
 
-SerializeResult serialize(const Doc& doc) {
+SerializeResult serialize(const Doc& doc, const SerializeOptions& opt) {
     SerializeResult result;
     if (!doc.root) {
         result.error = "空文档";
@@ -403,6 +488,26 @@ SerializeResult serialize(const Doc& doc) {
     j[kV] = kRevFormatVersion;
     j[kNext] = doc.next_id;
     if (!strings.list().empty()) j[kStrings] = strings.list();
+    // 字体表：下标 → 文件名。写不出来的时候就当这一侧不认识字体库（文件里没有这一项，
+    //   读回来退化成 v1 的"下标即下标"），不因此让整份文档存不下去。
+    if (opt.font_ref) {
+        std::unordered_set<int> used;
+        collectFonts(doc.root, &used);
+        if (!used.empty()) {
+            std::vector<int> sorted(used.begin(), used.end());
+            std::sort(sorted.begin(), sorted.end());
+            ordered_json fonts = ordered_json::object();
+            for (int index : sorted) {
+                const FontRef ref = opt.font_ref(index);
+                ordered_json entry = ordered_json::object();
+                if (!ref.postscript.empty()) entry["ps"] = ref.postscript;
+                if (!ref.family.empty()) entry["family"] = ref.family;
+                if (!ref.file.empty()) entry["file"] = ref.file;
+                if (!entry.empty()) fonts[std::to_string(index)] = std::move(entry);
+            }
+            if (!fonts.empty()) j[kFonts] = std::move(fonts);
+        }
+    }
     j[kRoot] = std::move(root);
 
     // 先自查一遍再写：库对非法 UTF-8 的处理是抛异常或终止进程（wasm 关掉了异常），
@@ -413,7 +518,7 @@ SerializeResult serialize(const Doc& doc) {
     return result;
 }
 
-DeserializeResult deserialize(const std::string& text, Doc* out) {
+DeserializeResult deserialize(const std::string& text, Doc* out, const DeserializeOptions& opt) {
     DeserializeResult result;
     if (out == nullptr) {
         result.error = "目标修订为空";
@@ -433,12 +538,54 @@ DeserializeResult deserialize(const std::string& text, Doc* out) {
         result.error = "缺少版本号";
         return result;
     }
-    if (doc[kV].get<int>() != kRevFormatVersion) {
-        result.error = "版本号不是 " + std::to_string(kRevFormatVersion);
+    const int version = doc[kV].get<int>();
+    if (version < kMinReadableVersion || version > kRevFormatVersion) {
+        result.error = "版本号 " + std::to_string(version) + " 不在可读范围（" +
+                       std::to_string(kMinReadableVersion) + "~" +
+                       std::to_string(kRevFormatVersion) + "）";
         return result;
     }
 
     Reader reader(&result.error);
+    // 字体表：文件说的"第几号是哪张脸"换成本机的下标。文件没带（v1）或某一侧没有这张脸
+    //   时，那一个下标原样保留 —— 前者是 v1 的语义，后者交给回退链。
+    if (doc.contains(kFonts)) {
+        if (!doc[kFonts].is_object()) {
+            result.error = "字体表不是对象";
+            return result;
+        }
+        for (const auto& [key, item] : doc[kFonts].items()) {
+            FontRef ref;
+            if (item.is_string()) {
+                // v2 的形态：值是文件名。照旧当"只认识文件名的那一侧"读。
+                ref.file = item.get<std::string>();
+            } else if (item.is_object()) {
+                if (!recjson::readString(item, "ps", &ref.postscript)) {
+                    result.error = "字体表里的 ps 不是字符串";
+                    return result;
+                }
+                if (!recjson::readString(item, "family", &ref.family)) {
+                    result.error = "字体表里的 family 不是字符串";
+                    return result;
+                }
+                if (!recjson::readString(item, "file", &ref.file)) {
+                    result.error = "字体表里的 file 不是字符串";
+                    return result;
+                }
+            } else {
+                result.error = "字体表里有既不是对象也不是字符串的项";
+                return result;
+            }
+            int index = 0;
+            if (!parseIndexKey(key, &index)) {
+                result.error = "字体表的键不是下标：" + key;
+                return result;
+            }
+            if (!opt.resolve_font) continue;
+            const int local = opt.resolve_font(ref);
+            if (local >= 0) reader.font_map_[index] = local;
+        }
+    }
     if (doc.contains(kStrings)) {
         if (!doc[kStrings].is_array()) {
             result.error = "字符串表不是数组";

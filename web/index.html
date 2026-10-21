@@ -156,6 +156,11 @@
   <button id="paint" class="primary" disabled>重绘</button>
   <button id="focus" disabled>聚焦输入</button>
   <button id="bench" disabled>引擎内循环 12 次</button>
+  <!-- 保存 / 打开：文件就是引擎给的 JSON 文本，宿主不解析也不改写。
+       openFile 藏起来，由"打开…"按钮代点 —— 原生 file 控件的样式改不动。 -->
+  <button id="saveDoc" disabled>保存</button>
+  <button id="openDoc" disabled>打开…</button>
+  <input id="openFile" type="file" accept=".json,application/json" hidden>
   <select id="editMode" disabled>
     <option value="0">编辑模式：文档</option>
     <option value="1">编辑模式：表单</option>

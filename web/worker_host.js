@@ -915,6 +915,9 @@ const CMD = {
   loadStressDocument: (paras, chars) => ['stress', { paras, chars }],
   loadStressDocumentDiverse: (paras, chars) => ['stressDiverse', { paras, chars }],
   loadTextDocument: (text, repeat) => ['textDoc', { text, repeat }],
+  // 打开一份保存过的文档。与 loadTextDocument 同一档（整份换成新文档，窗口归零）；
+  //   失败会在这里 reject —— 调用方必须接住，否则是一条未处理的异步失败。
+  loadDocument: (text) => ['loadDocument', { text: String(text || '') }],
   run: (id, z) => {
     scenario = Number(id);
     if (z) { setZoomDensity(z); syncZoomInput(); }
@@ -997,6 +1000,8 @@ for (const name of ['setCaret', 'setCaretAt', 'setCaretAtSide', 'setCaretAtSideL
 // 要返回值的查询：一律返回 Promise。
 const ASK = {
   paragraphText: (i) => ['text', { i: i | 0 }],
+  // 保存：整份文档的 JSON 文本。走查询而不是命令 —— 保存不该呈现、不该有副作用。
+  serialize: () => ['serialize', {}],
   hit: (x, y) => ['hit', { x, y }],
   controlAt: (x, y) => ['controlAt', { x, y }],
   describeControls: () => ['describeControls', {}],
@@ -1026,6 +1031,9 @@ for (const name of Object.keys(ASK)) {
   };
 }
 host.ask = askOp;
+// 保存：与单线程宿主的 saveDocument() 同一件事，形状是 Promise（引擎在 Worker 那侧）。
+//   走查询那条路：保存不改状态、不呈现，也不该贴任何像素。
+host.saveDocument = () => askOp('serialize', {});
 
 /**
  * 三击选整格：坐标是文档磅，与 hit 同一个口径；返回是否真的选中了一格。

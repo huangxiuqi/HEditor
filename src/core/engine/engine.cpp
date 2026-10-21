@@ -69,6 +69,19 @@ constexpr float kMinCaretWidthPt = 0.4f;
  */
 constexpr size_t kGlyphCacheBudgetBytes = 48u * 1024u * 1024u;
 
+/**
+ * 字体文件名：去掉目录。
+ *
+ * 字体身份的最后一级（前两级是 PostScript 名与族名，见 saveDocument）—— 文件名可以改，
+ * 所以它排在最后。取文件名而不是路径：绝对路径换台机器就失效，而且路径里常带用户名；
+ * 同一次装载里 full 与 lazy 两条路给引擎的名字不同（一个文件名、一个 MEMFS 路径），
+ * 取 basename 之后两边落到同一个标识上。
+ */
+std::string fontIdOf(const std::string& path) {
+    const size_t sep = path.find_last_of("/\\");
+    return sep == std::string::npos ? path : path.substr(sep + 1);
+}
+
 }  // namespace
 
 /**
@@ -196,6 +209,27 @@ void EditorEngine::setCaretAndSelectionStyle(const Color& caret, float caret_wid
 }
 
 /**
+ * 一份修订装上之后的公共收尾（装载与打开共用）。
+ *
+ * 顺序不能变：会话先换（下面每一步都读 document()），再投影、最后整篇标脏。
+ *   页缓存与脏矩形一起清：它们描述的是上一份文档的像素，页号相同不代表内容相同，
+ *   而"哪个页号对应哪段内容"正是换文档时唯一不能沿用的东西。
+ */
+void EditorEngine::installDocument(rev::Doc doc) {
+    session_.emplace(std::move(doc), cfg_.undo_limit);
+    proj_hist_ = rev::BlockHistory{};
+    loaded_ = true;
+    sel_history_.clear();
+    sel_pos_ = 0;
+    setCaretByText(TextPos{0, 0});
+    page_cache_.clear();
+    page_dirty_rects_.clear();
+    rebuildFromTree();
+    // 整份文档换了：段数与内容都可能全变，没有可复用的前缀。
+    markAllLayoutDirty();
+}
+
+/**
  * 文档装载：模型树那条路（第十四节的接缝）。
  */
 void EditorEngine::setDocument(const NodeTree& tree, const StyleSheet& sheet) {
@@ -213,20 +247,58 @@ void EditorEngine::setDocument(const NodeTree& tree, const StyleSheet& sheet) {
         block_src_.clear();
         tables_.clear();
         flow_.reset();
+        page_cache_.clear();
         page_dirty_rects_.clear();
         return;
     }
     sheet_ = sheet;
-    session_.emplace(std::move(doc), cfg_.undo_limit);
-    proj_hist_ = rev::BlockHistory{};
-    loaded_ = true;
-    sel_history_.clear();
-    sel_pos_ = 0;
-    setCaretByText(TextPos{0, 0});
-    page_dirty_rects_.clear();
-    rebuildFromTree();
-    // 整份文档换了：段数与内容都可能全变，没有可复用的前缀。
-    markAllLayoutDirty();
+    installDocument(std::move(doc));
+}
+
+rev::SerializeResult EditorEngine::saveDocument() const {
+    if (!session_) return rev::SerializeResult{false, std::string(), "没有装载文档"};
+    rev::SerializeOptions opt;
+    // 身份按稳定性排：PostScript 名（OpenType 里唯一性有规范保证）→ 族名（给人看）→
+    //   文件名（可以改，所以排在最后）。文件改名不该让一份文档指向另一张脸。
+    opt.font_ref = [this](int index) -> rev::FontRef {
+        const FontFace* face = fonts_.face(index);
+        if (face == nullptr) return rev::FontRef{};
+        return rev::FontRef{face->postScriptName(), face->familyName(), fontIdOf(face->path())};
+    };
+    return rev::serialize(session_->doc(), opt);
+}
+
+rev::DeserializeResult EditorEngine::loadDocument(const std::string& text) {
+    rev::DeserializeOptions opt;
+    // 与写端同一个顺序找本机那张脸。都找不到就返回 -1（读者保留文件里的原下标，交给
+    //   回退链），而不是"随便挑一张" —— 挑错字体比缺字体更难发现。
+    opt.resolve_font = [this](const rev::FontRef& ref) -> int {
+        for (int i = 0; i < fonts_.faceCount(); ++i) {
+            const FontFace* face = fonts_.face(i);
+            if (face == nullptr) continue;
+            if (!ref.postscript.empty() && face->postScriptName() == ref.postscript) return i;
+        }
+        for (int i = 0; i < fonts_.faceCount(); ++i) {
+            const FontFace* face = fonts_.face(i);
+            if (face != nullptr && !ref.family.empty() && face->familyName() == ref.family)
+                return i;
+        }
+        if (!ref.file.empty()) {
+            for (int i = 0; i < fonts_.faceCount(); ++i) {
+                const FontFace* face = fonts_.face(i);
+                if (face != nullptr && fontIdOf(face->path()) == ref.file) return i;
+            }
+        }
+        return -1;
+    };
+    rev::Doc doc;
+    rev::DeserializeResult r = rev::deserialize(text, &doc, opt);
+    // 读坏了就地返回：session_ / 光标 / 页缓存一个字节都没动，调用方拿到的失败
+    //   与"这一趟没发生"是同一件事（rev::deserialize 的契约）。
+    if (!r.ok) return r;
+    // sheet_ 不动：命名样式表属于宿主的配置，不属于文件（v1 的文件里没有样式表）。
+    installDocument(std::move(doc));
+    return r;
 }
 
 const rev::Doc& EditorEngine::document() const {

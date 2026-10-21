@@ -68,14 +68,30 @@ public:
     unsigned glyphCount() const;
 
     /**
+     * 字体自己说的名字（OpenType name 表）。
+     *
+     * 存进文档的字体标识必须比文件名稳：文件可以改名，字体本身不能。PostScript 名
+     * （name ID 6）是 OpenType 里唯一性有规范保证的那一个，所以它当标识，族名只给人看。
+     * 骨架模式也读得到 —— name 表很小，按需装载时留在骨架里（见 FontSource::inSkeleton）。
+     */
+    const std::string& postScriptName() const { return ps_name_; }
+    const std::string& familyName() const { return family_name_; }
+
+    /**
      * 按需模式的数据源；整份装载时为空。render 层靠它按需取字节。
      */
     FontSource* source() const { return source_.get(); }
 
 private:
     bool buildFromData(const std::string& name);
+    /**
+     * 读 OpenType name 表里的两个名字。失败时留空串（有些子集化的字体把这几个 ID 剥掉了）。
+     */
+    void readNames();
 
     std::string path_;
+    std::string ps_name_;
+    std::string family_name_;
     std::vector<uint8_t> data_;
     hb_blob_t* blob_ = nullptr;
     hb_face_t* face_ = nullptr;

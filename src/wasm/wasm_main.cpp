@@ -1220,6 +1220,33 @@ void loadTextDocument(const std::string& text, int repeat) {
 }
 
 /**
+ * 保存：当前文档 → JSON 文本（格式见 rev::serialize）。
+ *
+ * 失败只可能是"还没装载文档"，那时返回空串 —— 不返回一段半截 JSON：
+ *   宿主拿空串就知道没存成，而半截 JSON 会被写进文件、下次打开才炸。
+ */
+std::string serializeDocument() {
+    const rev::SerializeResult r = g_engine.saveDocument();
+    return r.ok ? r.text : std::string();
+}
+
+/**
+ * 打开：JSON 文本 → 当前文档。返回空串 = 成功，否则是给人看的原因。
+ *
+ * 解析失败时引擎一个字节都不动（rev::deserialize 的契约），所以这里的失败
+ *   不会把用户手上那份文档弄丢 —— 宿主把这句话显示出来就够了。
+ * 成功之后要把 demo 那份"装载底稿"同步过来：后续改控件会按它重建，
+ *   不同步的话用户打开的文件会被装载时那份旧底稿覆盖回去。
+ */
+std::string loadDocument(const std::string& text) {
+    const rev::DeserializeResult r = g_engine.loadDocument(text);
+    if (!r.ok) return r.error;
+    syncBlocksFromEngine();
+    g_fields.clear();
+    return std::string();
+}
+
+/**
  * 一处演示数据，覆盖表单的四条关键语义（区间之外是没有控件的普通正文）：
  * variant 0（短文档）：[5,9)「反复心悸」可编辑 ｜ [9,11)「三天」只读 ｜ [12,16)「加重一天」可编辑
  * → 0..4、11、16..17 打不进字；从 8 往右移跨过只读的 9~11 落到 12。
@@ -1480,6 +1507,10 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("loadStressDocument", &loadStressDocument);
     emscripten::function("loadStressDocumentDiverse", &loadStressDocumentDiverse);
     emscripten::function("loadTextDocument", &loadTextDocument);
+    // 保存 / 打开：文档进出的唯一一条路（阶段 6 的落点）。序列化不经过宿主拼字符串 ——
+    //   格式由 rev::serialize 一份实现说了算，宿主只搬字节。
+    emscripten::function("serializeDocument", &serializeDocument);
+    emscripten::function("loadDocument", &loadDocument);
 
     emscripten::function("frameWidth", &frameWidth);
     emscripten::function("frameHeight", &frameHeight);

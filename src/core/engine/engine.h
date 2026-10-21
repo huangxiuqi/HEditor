@@ -32,6 +32,7 @@
 #include "core/rev/flow.h"
 #include "core/rev/project.h"
 #include "core/rev/rev.h"
+#include "core/rev/serialize.h"
 #include "core/rev/session.h"
 #include "core/text/font.h"
 #include "core/text/writing_mode.h"
@@ -107,6 +108,29 @@ public:
      * 持有中的文档。引擎只认这一条装载入口，所以它一直有效（未装载时是一份空修订）。
      */
     const rev::Doc& document() const;
+
+    /**
+     * 保存：把当前修订写成 JSON 文本（格式见 rev::serialize）。
+     *
+     * 存的是"形状与身份"，不存任何派生量 —— 打开时重新投影、重排、重光栅，像素必然回到
+     * 保存时的样子（判据就是这么写的：存盘 → 新引擎 → 打开 → 整帧逐字节相同）。
+     *
+     * 文件里只有文档树：命名样式表（StyleSheet）与二进制资源都还没有进文件 —— 产品至今
+     * 没有"新建命名样式"的入口，样式表恒为空，所以这不丢信息；等样式编辑落地时要带版本号
+     * 加进同一份文件，不能在 v1 里改它们的含义。
+     */
+    rev::SerializeResult saveDocument() const;
+
+    /**
+     * 打开：JSON 文本 → 修订 → 装上（与 setDocument(tree) 同一套收尾）。
+     *
+     * 失败（版本不符 / 结构坏了 / 节点号重复）时引擎一个字节都不动：先解析到局部变量，
+     * 成功了才碰会话。调用方拿到的 error 是给人看的一句话，不是异常路径的副产品。
+     *
+     * 打开会复位光标、清空撤销栈、作废页缓存并整篇标脏 —— 与装载同一口径：
+     * 历史里那些旧修订属于"上一份文档"，留着只会让撤销把两份文件混在一起。
+     */
+    rev::DeserializeResult loadDocument(const std::string& text);
 
     /**
      * 段落坐标与模型流位置的桥接 —— 第十四节那条接缝的另一半。
@@ -857,6 +881,11 @@ public:
     const EditStats& editStats() const { return edit_stats_; }
     const LayoutResult& layout() const { return layout_; }
     FontLibrary& fonts() { return fonts_; }
+    /**
+     * 只读视图。保存要用它：saveDocument() const 里得把字体下标翻成文件名，而那份查询
+     * 不改库里的任何东西。
+     */
+    const FontLibrary& fonts() const { return fonts_; }
 
     /**
      * 诊断用：把一串文本的整形结果摊成可读文本（字形 id / 推进 / cluster），
@@ -899,6 +928,12 @@ public:
     rev::EditCheck policyErase(TextPos a, TextPos b) const;
 
 private:
+    /**
+     * 一份修订装上之后的公共收尾：换会话、复位光标、清页缓存、投影、整篇标脏。
+     * 装载（模型树）与打开（JSON）两条路都走它 —— 两条路的收尾必须是同一份。
+     */
+    void installDocument(rev::Doc doc);
+
     /**
      * 按当前修订重算产物：投影出块流与控件跨度，再把流索引、位置与控件视图带上。
      * 隐藏控件的可见性口径按当前编辑模式取（见 flowVisibility）。

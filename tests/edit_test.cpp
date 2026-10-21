@@ -10693,6 +10693,115 @@ int main() {
         compareStitched("全选");
     }
 
+    // [60] 保存 / 打开。
+    //
+    // 判据的形状：存盘 → 换一个新引擎打开 → 整帧逐字节相同。它比"逐字段比对"强，
+    //   因为任何参与绘制的字段没落盘都会落到像素上（与 [54] 同一条思路）。
+    // 另一半是反向：坏文件 / 版本不符必须被拒，且拒绝之后现场一个字节都没动。
+    std::printf("\n[60] 保存 / 打开：JSON 往返（整帧逐字节相同，坏文件不动现场）\n");
+    {
+        EngineConfig c60;
+        c60.page.width_pt = 420.0f;
+        c60.page.height_pt = 300.0f;
+        c60.page.margin_pt = 24.0f;
+
+        std::vector<BlockSpec> b60;
+        for (int i = 0; i < 5; ++i) {
+            BlockSpec b;
+            b.size_pt = 12.0f;
+            b.wm = WritingMode::HorizontalTB();
+            b.line_factor = 1.5f;
+            b.language = "zh";
+            b.color = Color::rgb(24, 24, 24);
+            b.setText("保存第 " + std::to_string(i) + " 段：ABC 存取往返要逐字节回到原样");
+            b60.push_back(std::move(b));
+        }
+        // 带一个控件：控件的边界是树里的节点，不是块流上的两个数字 ——
+        //   这是"存形状"与"存文本"的分水岭。
+        Control k60;
+        k60.range.start = TextPos{1, 3};
+        k60.range.end = TextPos{1, 9};
+        k60.id = "k60";
+        k60.read_only = false;
+
+        const std::vector<std::string> fonts60 = {cjkPath, mnPath, latinPath};
+        EditorEngine a;
+        expectTrue(a.init(fonts60), "引擎初始化（保存 / 打开）");
+        loadBlocks(a, b60, {k60});
+        a.setConfig(c60);
+        a.relayout();
+        a.repaint();
+
+        const auto saved = a.saveDocument();
+        expectTrue(saved.ok && !saved.text.empty(),
+                   saved.ok ? ("保存成功（" + std::to_string(saved.text.size()) + " 字节）")
+                            : ("保存失败：" + saved.error));
+        expectTrue(!saved.text.empty() && saved.text.front() == '{', "存出来的是一份 JSON 对象");
+        // 文件要自己解释自己：文字是可读的 UTF-8（不是码点数组），字体给的是文件名
+        //   （不是一个库下标）。
+        expectTrue(saved.text.find("\"t\":\"保存第 0 段") != std::string::npos,
+                   "文字按 UTF-8 写进文件（打开文件就看得到内容）");
+        expectTrue(saved.text.find("\"fonts\":{") != std::string::npos &&
+                       saved.text.find("\"ps\":\"Noto") != std::string::npos &&
+                       saved.text.find("NotoSansSC-VF.ttf") != std::string::npos,
+                   "字体表里有真名字：PostScript 名当身份，文件名兜底");
+
+        // 先编辑一笔：历史与光标都被推离装载态，再打开应当把它们全部收回去。
+        a.setCaret(0, 5);
+        expectTrue(a.typeTextAndRender("\xE6\xB5\x8B"), "准备：保存之后又敲了一个字");  // 测
+        expectTrue(a.canUndo(), "准备：这一笔进了撤销栈");
+
+        const auto loaded = a.loadDocument(saved.text);
+        expectTrue(loaded.ok, loaded.ok ? std::string("打开成功") : ("打开失败：" + loaded.error));
+        expectTrue(!a.canUndo(), "打开之后撤销栈是空的（历史不属于这一份文档）");
+        expectTrue(a.blocks().size() == b60.size(), "段数回到文件里那一份");
+        // 打开只标脏（与装载同一口径），收尾归调用方 —— 判据要自己排一次。
+        a.relayout();
+        a.repaint();
+
+        EditorEngine b;
+        expectTrue(b.init(fonts60), "第二个引擎初始化（打开）");
+        b.setConfig(c60);
+        const auto loaded2 = b.loadDocument(saved.text);
+        expectTrue(loaded2.ok, "同一个文件在新引擎里也能打开");
+        b.relayout();
+        b.repaint();
+        bool same_text = b.blocks().size() == a.blocks().size();
+        for (size_t i = 0; same_text && i < b.blocks().size(); ++i) {
+            same_text = b.blocks()[i].textUtf8() == a.blocks()[i].textUtf8();
+        }
+        expectTrue(same_text, "逐段文字相同");
+
+        a.setCaret(0, 0);
+        b.setCaret(0, 0);
+        expectTrue(frameDiffBetween(a, b) == 0,
+                   "整帧逐字节相同（存盘 → 新引擎 → 打开，含控件括号与光标）");
+
+        const auto again = b.saveDocument();
+        expectTrue(again.ok && again.text == saved.text, "再存一遍字节完全相同（写端是确定的）");
+
+        // 打开之后还能继续编辑，而且编辑是落在文件那一份上。
+        b.setCaret(0, 5);
+        expectTrue(b.typeTextAndRender("\xE6\xB5\x8B"), "打开之后能继续编辑");
+        expectTrue(b.saveDocument().text != saved.text, "编辑之后存出来的文本变了");
+
+        // 反向一半：坏文件被拒，且现场（文字 / 像素 / 历史）一个字节都没动。
+        const std::string before_bad = b.saveDocument().text;
+        const bool undo_before_bad = b.canUndo();
+        std::vector<uint8_t> pix_before(b.frame(), b.frame() + b.frameBytes());
+        const auto bad1 = b.loadDocument("{ \xE8\xBF\x99\xE4\xB8\x8D\xE6\x98\xAF json");
+        expectTrue(!bad1.ok && !bad1.error.empty(), "坏 JSON 被拒绝且带原因");
+        const auto bad2 = b.loadDocument("{\"v\":99}");
+        expectTrue(!bad2.ok, "版本不符被拒绝（不猜着读）");
+        const auto bad3 = b.loadDocument("");
+        expectTrue(!bad3.ok, "空文件被拒绝");
+        expectTrue(b.saveDocument().text == before_bad, "拒绝之后文档一个字节都没动");
+        expectTrue(b.canUndo() == undo_before_bad, "拒绝之后撤销栈没动");
+        expectTrue(pix_before.size() == b.frameBytes() &&
+                       std::memcmp(pix_before.data(), b.frame(), pix_before.size()) == 0,
+                   "拒绝之后像素一个字节都没动");
+    }
+
     std::printf("\n──────────────────────────────\n");
     std::printf("共 %d 项断言，失败 %d 项\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

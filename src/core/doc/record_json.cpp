@@ -1,5 +1,6 @@
 #include "core/doc/record_json.h"
 
+#include <charconv>
 #include <cstdio>
 #include <cstdlib>
 
@@ -17,9 +18,11 @@ int StringPool::add(const std::string& s) {
 }
 
 std::string floatText(float v) {
+    // 最短表示而不是 %.9g：同一个 float 的十进制文本只有一种，而且是最短的那一种。
+    //   往返成立由 to_chars 保证（它取的是能唯一还原这个 float 的最短串）。
     char buf[32];
-    std::snprintf(buf, sizeof(buf), "%.9g", static_cast<double>(v));
-    return buf;
+    const auto res = std::to_chars(buf, buf + sizeof(buf), v);
+    return std::string(buf, res.ptr);
 }
 
 bool parseFloatText(const std::string& text, float* out) {
@@ -395,14 +398,14 @@ ordered_json formulaJson(const FormulaSpec& f) {
     return j;
 }
 
-bool readPara(const ordered_json& j, const char* key, ParaFormatPatch* out) {
+bool readPara(const Context& ctx, const ordered_json& j, const char* key, ParaFormatPatch* out) {
     if (!j.contains(key)) return true;
     if (!j[key].is_object()) return false;
     const ordered_json& p = j[key];
     if (p.contains("fi")) {
         int v = 0;
         if (!readInt(p, "fi", &v)) return false;
-        out->font_index = v;
+        out->font_index = ctx.mapFontIndex(v);
     }
     if (p.contains("sz")) {
         Length len;
@@ -442,12 +445,14 @@ bool readPara(const ordered_json& j, const char* key, ParaFormatPatch* out) {
     if (p.contains("fb")) {
         std::vector<int> fb;
         if (!readIntArray(p, "fb", &fb)) return false;
-        out->fallback_font_indices = fb;
+        // 回退链也是一串字体下标，与主字体同一个映射。
+        for (int& index : fb) index = ctx.mapFontIndex(index);
+        out->fallback_font_indices = std::move(fb);
     }
     return true;
 }
 
-bool readMarks(const ordered_json& j, const char* key, CharFormat* out) {
+bool readMarks(const Context& ctx, const ordered_json& j, const char* key, CharFormat* out) {
     if (!j.contains(key)) return true;
     if (!j[key].is_object()) return false;
     const ordered_json& m = j[key];
@@ -469,7 +474,7 @@ bool readMarks(const ordered_json& j, const char* key, CharFormat* out) {
     if (m.contains("fi")) {
         int v = 0;
         if (!readInt(m, "fi", &v)) return false;
-        out->font_index = v;
+        out->font_index = ctx.mapFontIndex(v);
     }
     if (m.contains("sz")) {
         Length len;

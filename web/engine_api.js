@@ -83,7 +83,9 @@ async function installFonts(mode) {
     } else {
       const ptr = mod.allocBuffer(buf.length);
       mod.HEAPU8.set(buf, ptr);
-      ex = mod.loadFont(f.label, ptr, buf.length);
+      // 传文件名而不是 label：字体身份要跨装载方式稳定 —— 保存时引擎把它写进文件的字体表，
+      //   两条路各写一个名字的话，"换一种装载方式存一次盘"就成了两份不同的文件。
+      ex = mod.loadFont(f.path.split('/').pop(), ptr, buf.length);
       mod.freeBuffer(ptr);
     }
     if (ex < 0) throw new Error('字体解析失败: ' + f.path);
@@ -483,6 +485,17 @@ const WRITE = {
   stressDiverse: (a) => loadBlocks(() => mod.loadStressDocumentDiverse(a.paras | 0, a.chars | 0)),
   textDoc: (a) => loadBlocks(() => mod.loadTextDocument(a.text, (a.repeat | 0) || 1)),
   formSample: (a) => loadBlocks(() => mod.loadFormSample(a.variant | 0)),
+  /**
+   * 打开一份保存过的文档（JSON 文本）。
+   *
+   * 走 loadBlocks 而不是普通 present：换的是整份文档 —— 页数、页度量、窗口锚点全变了，
+   *   与 textDoc / stress 同一档。失败时引擎一个字节都没动，所以这里直接抛给宿主显示，
+   *   不 paintFull（画面上仍是失败前那份，什么都不用做）。
+   */
+  loadDocument: (a) => loadBlocks(() => {
+    const err = mod.loadDocument(a.text || '');
+    if (err) throw new Error(err);
+  }),
   fonts: async (a) => { await installFonts(a.mode || 'full'); paintFull(); },
 
   type: (a) => mod.typeText(a.s),
@@ -644,6 +657,12 @@ const READ = {
    */
   pageDirtyPages: () => JSON.parse(mod.pageDirtyPagesJson()),
   text: (a) => mod.documentText(a.i | 0),
+  /**
+   * 保存：当前文档 → JSON 文本。空串 = 没装载文档（引擎只有这一种失败）。
+   *
+   * 走查询而不是命令：它不改任何状态，也不该触发一次呈现 —— 保存不该有副作用。
+   */
+  serialize: () => mod.serializeDocument(),
   /**
    * 整帧里"非白"的像素数。主线程读不到画布（所有权在 Worker 这边），所以"帧上到底
    *   有没有字"这个判据只能在这里数 —— 与单线程版探针的口径一致（任一通道 < 200 算一个）。

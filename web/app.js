@@ -797,7 +797,7 @@ async function loadFonts(mode) {
     } else {
       const ptr = api.engine().allocBuffer(buf.length);  // ① 在 wasm 堆里要一块地
       api.engine().HEAPU8.set(buf, ptr);                 // ② 字节穿边界（alloc 之后才读 HEAPU8）
-      idx = api.engine().loadFont(f.label, ptr, buf.length);  // ③ wasm 侧解析
+      idx = api.engine().loadFont(f.path.split('/').pop(), ptr, buf.length);  // ③ wasm 侧解析
       api.engine().freeBuffer(ptr);
     }
     if (idx < 0) throw new Error(`字体解析失败：${f.path}（${mode}）`);
@@ -969,6 +969,26 @@ async function boot() {
   if (benchBtn) {
     benchBtn.disabled = false;
     benchBtn.addEventListener('click', runBench);
+  }
+
+  // 保存 / 打开。文件就是引擎序列化的 JSON 文本，宿主不解析也不改写 ——
+  //   格式只有 rev::serialize 一份实现说了算（打开时由 rev::deserialize 校验）。
+  const saveBtn = chrome ? $('saveDoc') : null;
+  if (saveBtn) {
+    saveBtn.disabled = false;
+    saveBtn.addEventListener('click', saveDocumentToFile);
+  }
+  const openBtn = chrome ? $('openDoc') : null;
+  const openFile = chrome ? $('openFile') : null;
+  if (openBtn && openFile) {
+    openBtn.disabled = false;
+    openBtn.addEventListener('click', () => openFile.click());
+    openFile.addEventListener('change', async () => {
+      const f = openFile.files && openFile.files[0];
+      // 清空 value：同一个文件连开两次也要触发 change（浏览器只在值变了时发事件）。
+      openFile.value = '';
+      await openDocumentFromFile(f);
+    });
   }
 
   // 表单：模式切换 + 样例
@@ -1307,6 +1327,59 @@ function relayoutAndBlit() {
   presetWindowForLoad();
   relayoutNow();
   return settle(api.read('editStats'), { scroll: false });
+}
+
+/**
+ * 保存：当前文档 → 下载一个 .json 文件。
+ *
+ * 文件内容就是引擎序列化的那份 JSON 文本，宿主不解析、不改写、不补字段 ——
+ *   格式只有 rev::serialize 一份实现说了算。空串只表示"还没装载文档"。
+ */
+function saveDocumentToFile() {
+  if (!mod) return false;
+  const text = api.read('serialize');
+  if (!text) {
+    setStatus('还没有装载文档，没东西可保存', true);
+    return false;
+  }
+  // 文件名带本地时间：连续存两次不会互相覆盖，也一眼看出是哪一版。
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  const stamp = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-` +
+                `${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+  const blob = new Blob([text], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `heditor-${stamp}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  // 回收要等下载真的开始：立刻 revoke 在部分浏览器上会得到一个空文件。
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  setStatus(`已保存 ${(text.length / 1024).toFixed(1)} KB`);
+  return true;
+}
+
+/**
+ * 打开：读文件 → 整份换成它。
+ *
+ * 失败时引擎一个字节都没动（rev::deserialize 的契约），所以这里不用回滚任何东西，
+ *   只把原因显示出来 —— 用户手上那份文档还在。
+ */
+async function openDocumentFromFile(file) {
+  if (!file || !mod) return false;
+  try {
+    const text = await file.text();
+    api.write('loadDocument', { text });
+    relayoutAndBlit();
+    ta.focus();
+    setStatus(`已打开 ${file.name}（${(text.length / 1024).toFixed(1)} KB）`);
+    return true;
+  } catch (e) {
+    setStatus(`打开失败：${(e && e.message) || e}`, true);
+    return false;
+  }
 }
 
 /**
@@ -1783,6 +1856,21 @@ const facade = {
     return this.editStats;
   },
 
+  // 保存：整份文档 → JSON 文本（空串 = 还没装载）。走查询，不改状态、不呈现。
+  saveDocument() {
+    if (!ready || !mod) return '';
+    return api.read('serialize');
+  },
+
+  // 打开：整份换成文本里那份。与 loadTextDocument 同一套收尾（窗口归零 + 重排 + 上屏）。
+  //   失败直接抛给调用方 —— 引擎一个字节都没动，界面该做的是把原因显示出来。
+  loadDocument(text) {
+    if (!ready) return null;
+    api.write('loadDocument', { text: String(text || '') });
+    relayoutAndBlit();
+    return this.editStats;
+  },
+
   // 真病历样例：从文件读、清洗后按段落建文档。页面下拉与探针都走这一条，
   //   清洗逻辑只此一份。repeat 用来把语料重复放大到长文档规模。
   async loadMedicalSample(repeat) {
@@ -2174,6 +2262,9 @@ const facade = {
   },
   frameW() { return api.read('frameWidth'); },
   frameH() { return api.read('frameHeight'); },
+  // 帧指纹（FNV-1a，只算 RGB）。与 Worker 宿主同名同义：判"两拍画出来是不是一模一样"。
+  //   搬整帧回去比太贵（一份可达几十 MB），指纹在这一侧算完只回一个数。
+  frameDigest() { return ready && mod ? api.read('frameDigest') : 0; },
 
   // 按当前光标可见相位重画一次并上屏。
   //

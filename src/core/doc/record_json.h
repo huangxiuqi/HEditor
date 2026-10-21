@@ -58,10 +58,20 @@ public:
     virtual ~Context() = default;
     virtual bool stringAt(int index, std::string* out) const = 0;
     virtual bool fail(const std::string& what) const = 0;
+
+    /**
+     * 文件里的字体下标换成本进程里的下标。
+     *
+     * 默认恒等：模型层那份格式不带字体表，下标就是下标。修订层带字体表时会改写这一处，
+     * 让"文件说的第 2 号字体"落到"本机库里的第 3 号"。只在读的时候换 —— 写端不反向
+     * 映射，它按当前下标查名字。
+     */
+    virtual int mapFontIndex(int index) const { return index; }
 };
 
 /**
- * 浮点的十进制文本。9 位有效数字是 float 的往返充分条件，所以写出去再读回来是同一个值。
+ * 浮点的十进制文本。最短往返表示（to_chars）：写出去再读回来是同一个 float，
+ * 且没有多余的尾数（1.85 写成 "1.85"，不是 "1.85000002"）。
  */
 std::string floatText(float v);
 bool parseFloatText(const std::string& text, float* out);
@@ -145,8 +155,8 @@ bool readSection(const ordered_json& j, const char* key, SectionSpec* out);
 ordered_json headerFooterJson(const HeaderFooter& hf);
 bool readHeaderFooter(const ordered_json& arr, int variant, HeaderFooter* out);
 
-bool readPara(const ordered_json& j, const char* key, ParaFormatPatch* out);
-bool readMarks(const ordered_json& j, const char* key, CharFormat* out);
+bool readPara(const Context& ctx, const ordered_json& j, const char* key, ParaFormatPatch* out);
+bool readMarks(const Context& ctx, const ordered_json& j, const char* key, CharFormat* out);
 bool readBorderSide(const ordered_json& j, const char* key, BorderSide* out);
 bool readAppearance(const Context& ctx, const ordered_json& j, const char* key, Appearance* out);
 bool readTable(const ordered_json& j, const char* key, TableSpec* out);

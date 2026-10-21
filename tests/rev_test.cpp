@@ -1290,7 +1290,7 @@ int main() {
             const bool kept = target.root == doc.root;
             expectTrue(!r.ok && !r.error.empty() && kept, what);
         };
-        rejects(R"({"v":2,"next":9,"root":{}})", "版本号不对：拒绝");
+        rejects(R"({"v":3,"next":9,"root":{}})", "版本号不对：拒绝");
         rejects("not json", "不是 JSON：拒绝");
         rejects(R"({"v":1,"next":9})", "缺少根节点：拒绝");
         rejects(R"({"v":1,"next":9,"root":{"id":1,"k":"Nope"}})", "不认识的种类名：拒绝");
@@ -1317,6 +1317,127 @@ int main() {
                             rev::makeNode(3, NodeKind::TextRun,
                                           rev::RunPayload{cpsOf(U"b"), CharFormat{}, {}}, {})})});
         expectTrue(!rev::serialize(rev::adopt(dup, 9)).ok, "节点号重复的修订：写不出来");
+
+        // v2 的两处"让文件自己解释自己"。
+        //   文本：v1 把内存表示（码点数组）直接写进文件，打开看到的是 [24739,32773,...]；
+        //     v2 写字符串。两条都要钉：写端必须是字符串，读端必须仍然认得 v1 的数组
+        //     （上面那些 "v":1 的用例走的正是那条路）。
+        //   字体：v1 只有 fi 这种库下标，换台机器就是另一个字体；v2 带一张 "下标 → 文件名"。
+        expectTrue(ser.text.find("\"t\":[") == std::string::npos, "文本不再写成码点数组");
+        expectTrue(ser.text.find("\"t\":\"") != std::string::npos, "文本写成 UTF-8 字符串");
+        // 正面的一半：v1 的文件（数组）读得回来，而且读成同一段文字。上面那些 "v":1 的用例
+        //   都是拒绝路径，只能说明"它走到了节点解析"，说明不了"它能读对"。
+        Doc v1_back;
+        const auto v1_read = rev::deserialize(
+            R"({"v":1,"next":5,"root":{"id":1,"k":"Document","ch":[{"id":2,"k":"Section","ch":[)"
+            R"({"id":3,"k":"TextRun","t":[25105,20204]},{"id":4,"k":"ParagraphMark","p":{}}]}]}})",
+            &v1_back);
+        expectTrue(v1_read.ok, v1_read.ok ? std::string("v1 的文件读得进来")
+                                          : ("v1 的文件读不进来：" + v1_read.error));
+        expectTrue(v1_read.ok && rev::paraTexts(v1_back) == std::vector<std::u32string>{U"我们"},
+                   "v1 的码点数组还原成同一段文字");
+        expectTrue(rich_ser.text.find("\"lf\":\"1.25\"") != std::string::npos,
+                   "浮点写最短表示（1.25 而不是 1.25000000）");
+
+        rev::SerializeOptions with_fonts;
+        // 三样都给：PostScript 名当身份、族名给人看、文件名排在最后。
+        with_fonts.font_ref = [](int index) {
+            const std::string n = std::to_string(index);
+            return rev::FontRef{"FacePS" + n + "-Regular", "Face Family " + n,
+                                "face-" + n + ".ttf"};
+        };
+        const auto named = rev::serialize(rich, with_fonts);
+        expectTrue(named.ok && named.text.find("\"fonts\":{") != std::string::npos,
+                   "字体表跟着文件走（下标 → 字体身份）");
+        expectTrue(named.text.find("\"3\":{\"ps\":\"FacePS3-Regular\",\"family\":\"Face Family 3\","
+                                   "\"file\":\"face-3.ttf\"}") != std::string::npos,
+                   "字体表写的是对象：PostScript 名 + 族名 + 文件名");
+        expectTrue(named.text.find("\"5\":") != std::string::npos, "回退链里的字体也进表（5 号）");
+        expectTrue(named.text.find("\"0\":") == std::string::npos,
+                   "没用到 0 号就不写它（字体表不打包整个库）");
+
+        // 换一台机器：文件里的 3 号在这边是 40 号。映射必须一路走到载荷里，
+        //   只在顶层换个数字、载荷里还是 3，等于没做。
+        rev::DeserializeOptions remap;
+        remap.resolve_font = [](const rev::FontRef& ref) -> int {
+            if (ref.postscript == "FacePS3-Regular") return 40;
+            if (ref.postscript == "FacePS7-Regular") return 41;
+            if (ref.postscript == "FacePS5-Regular") return 42;
+            return -1;
+        };
+        Doc named_back;
+        expectTrue(rev::deserialize(named.text, &named_back, remap).ok, "带字体表的文件读得回来");
+        const rev::Node* remapped = rev::findNode(named_back, 10);
+        expectTrue(
+            remapped != nullptr && std::get<rev::RunPayload>(remapped->payload).marks.font_index ==
+                                       std::optional<int>(40),
+            "字符属性的字体下标按 PostScript 名换成本机的（3 → 40）");
+        const rev::Node* remapped_mark = rev::findNode(named_back, 11);
+        if (remapped_mark != nullptr) {
+            const auto& mp = std::get<rev::MarkPayload>(remapped_mark->payload);
+            expectTrue(mp.para.font_index == std::optional<int>(41),
+                       "段落覆盖的字体下标同样映射（7 → 41）");
+            expectTrue(mp.para.fallback_font_indices == std::vector<int>({2, 42}),
+                       "回退链逐项映射，不认识的那一项原样留着（2 不动，5 → 42）");
+        }
+
+        // 三级匹配：文件改名之后，靠族名仍要能认回同一张脸；族名也没了才落到文件名。
+        //   这一条正是"文件名不是身份"的理由 —— 它只是最后一级。
+        rev::DeserializeOptions by_family;
+        by_family.resolve_font = [](const rev::FontRef& ref) -> int {
+            return ref.family == "Face Family 3" ? 50 : -1;
+        };
+        Doc family_back;
+        const rev::Node* family_run = nullptr;
+        if (rev::deserialize(named.text, &family_back, by_family).ok) {
+            family_run = rev::findNode(family_back, 10);
+        }
+        expectTrue(family_run != nullptr &&
+                       std::get<rev::RunPayload>(family_run->payload).marks.font_index ==
+                           std::optional<int>(50),
+                   "PostScript 名不认识时按族名认（文件改名不影响）");
+
+        rev::DeserializeOptions by_file;
+        by_file.resolve_font = [](const rev::FontRef& ref) -> int {
+            return ref.file == "face-3.ttf" ? 60 : -1;
+        };
+        Doc file_back;
+        const rev::Node* file_run = nullptr;
+        if (rev::deserialize(named.text, &file_back, by_file).ok) {
+            file_run = rev::findNode(file_back, 10);
+        }
+        expectTrue(
+            file_run != nullptr && std::get<rev::RunPayload>(file_run->payload).marks.font_index ==
+                                       std::optional<int>(60),
+            "前两级都不认识才落到文件名（最后一级）");
+
+        // v2 的字体表是"下标 → 文件名字符串"，读端照样认（按类型分派，不看版本号）。
+        const std::string v2_fonts =
+            R"({"v":2,"next":5,"fonts":{"0":"NotoSansSC-VF.ttf"},"root":{"id":1,"k":"Document",)"
+            R"("ch":[{"id":2,"k":"Section","ch":[{"id":3,"k":"TextRun","t":"x","m":{"fi":0}},)"
+            R"({"id":4,"k":"ParagraphMark"}]}]}})";
+        rev::DeserializeOptions v2_remap;
+        v2_remap.resolve_font = [](const rev::FontRef& ref) -> int {
+            return ref.file == "NotoSansSC-VF.ttf" ? 70 : -1;
+        };
+        Doc v2_fonts_back;
+        const bool v2_fonts_ok = rev::deserialize(v2_fonts, &v2_fonts_back, v2_remap).ok;
+        const rev::Node* v2_run = v2_fonts_ok ? rev::findNode(v2_fonts_back, 3) : nullptr;
+        expectTrue(
+            v2_run != nullptr && std::get<rev::RunPayload>(v2_run->payload).marks.font_index ==
+                                     std::optional<int>(70),
+            "v2 的字体表（值是文件名字符串）仍然读得进来");
+
+        // 写端不交出读不回来的文本：非法码点（代理区）当场失败，不替换成 U+FFFD。
+        const rev::Ref lone = rev::makeNode(
+            1, NodeKind::Document, {},
+            {rev::makeNode(2, NodeKind::Section, SectionSpec{},
+                           {rev::makeNode(3, NodeKind::TextRun,
+                                          rev::RunPayload{{0x41, 0xD800}, CharFormat{}, {}}, {}),
+                            rev::makeNode(4, NodeKind::ParagraphMark, rev::MarkPayload{}, {})})});
+        const auto lone_ser = rev::serialize(rev::adopt(lone, 9));
+        expectTrue(!lone_ser.ok && lone_ser.error.find("非法码点") != std::string::npos,
+                   "文本里有孤立代理时写不出去（不悄悄换成 U+FFFD）");
     }
 
     std::printf("\n[14] 表格：投影与编译逐字段相同，容器几何进块哈希\n");
