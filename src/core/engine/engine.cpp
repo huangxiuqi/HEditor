@@ -245,6 +245,7 @@ void EditorEngine::setDocument(const NodeTree& tree, const StyleSheet& sheet) {
         blocks_.clear();
         blocks_full_.clear();
         block_src_.clear();
+        block_extents_.clear();
         tables_.clear();
         flow_.reset();
         page_cache_.clear();
@@ -333,6 +334,7 @@ void EditorEngine::rebuildFromTree(const rev::BlockDamage* dmg) {
     block_src_.clear();
     block_src_.reserve(proj_hist_.keys.size());
     for (const rev::BlockKey& k : proj_hist_.keys) block_src_.push_back(k.source);
+    block_extents_ = std::move(res.extents);
     tables_ = std::move(res.tables);
     edit_stats_.rebuild_compile_ms = msSince(t_compile0);
     finishRebuildFromTree(vis, res.controls);
@@ -343,11 +345,11 @@ void EditorEngine::finishRebuildFromTree(FlowVisibility vis,
     const auto t_index0 = Clock::now();
     // 流索引与块起点一起重建：两者是同一份文档的两种说法，分两次建就会出现
     //   "块按新树、流位置按旧树"的错配，而那种错配只表现为光标落偏一个字，很难查。
+    //   块起点本身不再由这一侧推算 —— 投影走树时已经连同内容一起数出来了（见下面）。
     flow_.emplace(document(), vis);
     edit_stats_.rebuild_flow_ms = msSince(t_index0);
     const auto t_pos0 = Clock::now();
 
-    const size_t n = blocks_full_.size();
     // 光标与块起点是同一套坐标的两半，所以重建块起点时必须一起重算光标：光标存的是全局
     //   流位置，而这个下标只有配上 block_flow_ 才读得出"段与段内位置"。基一换，光标的数字
     //   没变、含义却变了 —— 前面某一段变长之后，它会静默漂到相邻位置。
@@ -361,50 +363,10 @@ void EditorEngine::finishRebuildFromTree(FlowVisibility vis,
     const int rebase_rel = caret_.caretRel();
     const int rebase_anchor_para = caret_.paraForFlow(caret_.selection().anchor);
     const int rebase_anchor_rel = caret_.relForFlow(caret_.selection().anchor);
-    block_flow_.assign(n, 0);
-    block_flow_span_.assign(n, 0);
-    // 段与段之间由段落标记分隔，所以段的流区间只该由标记位置推：段 i 的内容是
-    //   [段 i 起点, 标记位置)，段 i+1 的起点 = 标记之后那一位。标记位置是权威
-    //   （FlowIndex 给的），递推出来的区间于是与流严丝合缝。
-    //
-    // 不能拿"首个内容元素所属节点的区间起点"当段起点：段落被控件从中间切开时
-    //   （在控件内容里回车），那个节点是控件本身，而控件的区间起点在上一段里 ——
-    //   算出来偏前若干位，于是 setCaretAtFlow 拿到一个偏小的段起点、rel 偏大、
-    //   侧别落到别的控件上。表象就是"回车之后光标跑进了下一个控件"。
-    FlowPos start = 0;
-    // 段 0 的起点不能硬编 0：它前面可能有节边界（节有起止两位），所以首段第一个
-    //   内容元素的区间起点才是权威。段 0 的 first 一定落在本段内（首段没有"从中间
-    //   开始"的情形），所以它的区间起点就是段起点。
-    if (n > 0 && !block_src_.empty()) {
-        int first = -1;
-        if (flow_->intervalOf(block_src_[0].first, &first, nullptr) && first >= 0) start = first;
-    }
-    for (size_t i = 0; i < n; ++i) {
-        // 上一条递推出的起点与本块第一枚内容元素的区间起点之间可能隔着容器边界 ——
-        //   表格的格边界就是两位（离开上一格、进入这一格）。取两者的较大值：
-        //   控件从中间切开的场景里 first 是控件节点、起点偏前，递推值更大，取它；
-        //   表格场景里格边界在递推值之后，first 的起点更大，取它。
-        //   少了这一步，表格里的第二块起流位置会停在格边界上，光标与编辑一律落偏。
-        int first_lo = -1;
-        if (!block_src_.empty() && i < block_src_.size() &&
-            flow_->intervalOf(block_src_[i].first, &first_lo, nullptr) && first_lo > start) {
-            start = first_lo;
-        }
-        int mark_first = -1;
-        int mark_end = -1;
-        if (i < block_src_.size() &&
-            flow_->intervalOf(block_src_[i].mark, &mark_first, &mark_end) && mark_first >= start) {
-            block_flow_[i] = start;
-            block_flow_span_[i] = mark_first - start;
-            start = mark_first + 1;
-            continue;
-        }
-        // 标记查不到（不该发生）：退回推定值，至少保证区间单调不重叠。
-        block_flow_[i] = start;
-        block_flow_span_[i] =
-            static_cast<int>(blocks_full_[i].cp_text.size() + blocks_full_[i].objects.size());
-        start = block_flow_[i] + block_flow_span_[i] + 1;
-    }
+    // 绝对位置在这里由局部量累加出来：投影给的 span（本块几位）与 gap（前面那道边界几位）。
+    //   没有"第二遍算法"要调和，也就没有两处 max —— 表格的格边界是 gap=2 这个事实，
+    //   而不是"两个读数取较大值"得出的结论。
+    buildBlockFlow();
     // 新基写完了才落基（见上面那段说明）。两端一起落。
     caret_.rebaseSelection(rebase_anchor_para, rebase_anchor_rel, rebase_para, rebase_rel);
 
@@ -423,6 +385,21 @@ void EditorEngine::finishRebuildFromTree(FlowVisibility vis,
     edit_stats_.control_count = controls_.size();
 }
 
+void EditorEngine::buildBlockFlow() {
+    const size_t n = block_extents_.size();
+    block_flow_.assign(n, 0);
+    block_flow_span_.assign(n, 0);
+    // gap 是"这一块之前那道界占几位"，所以先跨过去再记起点：普通段界一位（段落标记），
+    //   表格格边界两位（出上一格 + 进这一格），正文第一段前面则是节边界。
+    FlowPos cursor = 0;
+    for (size_t i = 0; i < n; ++i) {
+        cursor += block_extents_[i].gap;
+        block_flow_[i] = cursor;
+        block_flow_span_[i] = block_extents_[i].span;
+        cursor += block_extents_[i].span;
+    }
+}
+
 int EditorEngine::caretSide() const { return caret_.caretSide(); }
 
 int EditorEngine::caretFieldHint() const { return caret_.caretFieldHint(); }
@@ -437,6 +414,18 @@ FlowPos EditorEngine::flowPosAt(int para, size_t cp_offset, int owner_hint) cons
 
 bool EditorEngine::flowToTextPos(FlowPos flow, TextPos* out) const {
     return caret_.flowToTextPos(flow, out);
+}
+
+FlowPos EditorEngine::flowSize() const { return flow_ ? flow_->size() : 0; }
+
+FlowPos EditorEngine::blockFlowStart(int para) const {
+    if (para < 0 || para >= static_cast<int>(block_flow_.size())) return 0;
+    return block_flow_[static_cast<size_t>(para)];
+}
+
+int EditorEngine::blockFlowSpan(int para) const {
+    if (para < 0 || para >= static_cast<int>(block_flow_span_.size())) return 0;
+    return block_flow_span_[static_cast<size_t>(para)];
 }
 
 /**

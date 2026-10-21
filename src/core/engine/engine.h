@@ -153,6 +153,19 @@ public:
      * —— 模型里的位置只有"内容上"的，没有"段间"的。不持树时返回 false。
      */
     bool flowToTextPos(FlowPos flow, TextPos* out) const;
+    /**
+     * 流的总长度（最后一个合法位置 + 1）。它是流索引给的，与块流那边数出来的前缀和是
+     * 两份独立的口径 —— 判据拿两者对拍（见 edit_test 的"位置划分"那一节）。
+     */
+    FlowPos flowSize() const;
+    /**
+     * 第 para 块内容起点的流位置 / 它占的位数。越界时给 0。
+     *
+     * 对外只给这两个读数，不给数组：调用方拿数组就会有人按下标扫一遍，那是 O(n) 的隐藏
+     * 代价；而"块的位置"本来就该由这一对读数表达。
+     */
+    FlowPos blockFlowStart(int para) const;
+    int blockFlowSpan(int para) const;
 
     /**
      * 重排版：从 layout_dirty_from_ 起的段重排，之前的段原样复用（续排契约见
@@ -941,11 +954,19 @@ private:
     void rebuildFromTree(const rev::BlockDamage* dmg = nullptr);
 
     /**
-     * 重建的收尾：流索引、段的流区间递推、控件视图。
+     * 重建的收尾：流索引、块位置的前缀和、控件视图。
      *
      * 控件跨度由投影给（它走树时记下的），不在这里重扫对象表 —— 见 exportControls。
      */
     void finishRebuildFromTree(FlowVisibility vis, const std::vector<rev::ControlSpan>& controls);
+
+    /**
+     * 由 block_extents_ 累加出 block_flow_ / block_flow_span_。
+     *
+     * 只是把局部量加起来，不做任何查询、也没有第二种说法要调和 —— 表格的格边界表现为
+     * 那一个 gap 等于 2，而不是"两个算法给出不同答案时取较大值"。
+     */
+    void buildBlockFlow();
 
     /**
      * 隐藏控件的可见性口径。编译与流索引必须同源（非编辑模式下隐藏的子树整棵摘除），
@@ -1419,13 +1440,24 @@ private:
      */
     std::optional<rev::FlowIndex> flow_;
     /**
-     * 每块内容起点的流位置，与 blocks_full_ 同长同序。取自 BlockSource::first 那枚元素在
-     * 流里的起点（见 compile.h）—— 空段取的是它自己的结束标记，"标记之前"就是内容起点。
+     * 每块的局部尺寸，与 blocks_full_ 同长同序，是投影走树时数出来的（见 rev::BlockExtent）。
+     *
+     * 它是位置的唯一来源：下面那两个数组都是它的前缀和。写进这里的只有"这一块多长"与
+     * "它前面那道界多宽"—— 两个局部量。上游变长不会让下游的任何数字过期，因为下游本来
+     * 就没存绝对数。
+     */
+    std::vector<rev::BlockExtent> block_extents_;
+    /**
+     * 每块内容起点的流位置（全局），与 blocks_full_ 同长同序。
+     *
+     * 它是 block_extents_ 的前缀和 —— 纯派生，每轮重建时整份重算（一次加法循环）。之所以
+     * 还要物化成数组而不是每次都现累加：光标定位要二分（paraForFlow）、命中测试要随机
+     * 读，O(log n) 次随机访问不能变成 O(n log n)。
      */
     std::vector<FlowPos> block_flow_;
     /**
      * 每块内容在流里占的位数：文本码点数 + 控件边界数。段间那个段落标记不在这里 ——
-     * 它是段与段之间的位置，不属于任何一段的内容。
+     * 它是段与段之间的位置，不属于任何一段的内容。与 block_extents_[i].span 同一个数。
      */
     std::vector<int> block_flow_span_;
     /**

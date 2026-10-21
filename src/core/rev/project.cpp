@@ -7,6 +7,7 @@
 #include "core/doc/atom_map.h"
 #include "core/doc/format_map.h"
 #include "core/doc/length.h"
+#include "core/doc/node.h"
 #include "core/doc/table.h"
 
 namespace heditor::rev {
@@ -39,6 +40,7 @@ public:
         plan_.active = true;
         fresh_.reserve(blocks_->size());
         out_.keys.reserve(blocks_->size());
+        out_.extents.reserve(blocks_->size());
     }
 
     Projection run(const Doc& doc) {
@@ -65,6 +67,9 @@ public:
                 fresh_.clear();
                 fresh_keys_.clear();
                 block_index_ = 0;
+                flow_ = 0;
+                block_start_ = 0;
+                prev_end_ = 0;
                 out_ = Projection{};
                 out_.style_version = style_version_;
                 if (doc.root != nullptr) {
@@ -144,9 +149,15 @@ private:
 
     /**
      * 记下本块第一个吃进内容的元素 —— 只在"这一块还没有过任何内容"时生效。
+     *
+     * 同时钉住这一块的起点：内容的第一位在哪儿，块就从哪儿开始。这一步与流游标是同一件事的
+     * 两半 —— 游标给出"现在走到第几位"，这里把它记成"这一块的第一位"。
      */
     void noteFirst(NodeId id) {
-        if (cur_first_ == kInvalidNodeId && runs_.empty() && objects_.empty()) cur_first_ = id;
+        if (cur_first_ == kInvalidNodeId && runs_.empty() && objects_.empty()) {
+            cur_first_ = id;
+            block_start_ = flow_;
+        }
     }
 
     /**
@@ -274,15 +285,18 @@ private:
         const int ti = static_cast<int>(out_.tables.size()) - 1;
         flushIfPending();
         pushContainer(t);
+        ++flow_;  // 进表：容器的一端
         int row_no = 0;
         for (const Ref& row : t->children) {
             if (row->kind != NodeKind::TableRow) continue;
             pushContainer(row);
+            ++flow_;  // 进行
             int cell_no = 0;
             for (const Ref& cell : row->children) {
                 if (cell->kind != NodeKind::TableCell) continue;
                 path_.push_back(CellSlot{static_cast<uint64_t>(t->id), row_no, cell_no});
                 flushIfPending();
+                ++flow_;  // 进格
                 const CellSpec& cs = std::get<CellSpec>(cell->payload);
                 LayoutCell lc;
                 lc.row = row_no;
@@ -297,15 +311,18 @@ private:
                 for (const Ref& c : cell->children) walk(c);
                 flushIfPending();
                 popContainer();
+                ++flow_;  // 出格：格边界是两位，这是其中第二位
                 out_.tables[ti].cells[static_cast<size_t>(ci)].block_count =
                     block_index_ - lc.first_block;
                 path_.pop_back();
                 ++cell_no;
             }
             popContainer();
+            ++flow_;  // 出行
             ++row_no;
         }
         popContainer();
+        ++flow_;  // 出表
     }
 
     /**
@@ -321,11 +338,13 @@ private:
 
         if (n->kind == NodeKind::TextRun) {
             noteFirst(n->id);
+            flow_ += static_cast<int>(std::get<RunPayload>(n->payload).text.size());
             runs_.push_back(n);
             return;
         }
         if (n->kind == NodeKind::ParagraphMark) {
             flush(n);
+            ++flow_;  // 标记自己占一位，它是块与块之间那道界
             return;
         }
         // 行内原子：图片与公式各占一个位置、各是一个不可断的盒子。盒子几何要等块级字号
@@ -351,6 +370,7 @@ private:
             g.expr_cp = is_img ? 0 : utf8ToCodepoints(fml.expr).size();
             emitObject(o, n);
             atoms_.emplace_back(objects_.size() - 1, g);
+            ++flow_;  // 原子占一位
             return;
         }
         if (n->kind == NodeKind::Section) {
@@ -386,6 +406,7 @@ private:
             emitObject(InlineObject{static_cast<uint32_t>(cpCount()),
                                     InlineObjectKind::ControlStart, owner, spec.readonly},
                        n);
+            ++flow_;  // 进控件：这一位就是上面那枚起始边界
             for (const Ref& c : n->children) walk(c);
             out_.controls[slot].end_block = block_index_;
             out_.controls[slot].end_cp = cpCount();
@@ -393,19 +414,27 @@ private:
             emitObject(InlineObject{static_cast<uint32_t>(cpCount()), InlineObjectKind::ControlEnd,
                                     owner, spec.readonly},
                        n);
+            ++flow_;  // 出控件：结束边界
             return;
         }
         // 结构外壳：文档、节、页眉页脚只提供层级，边界不进内容，下去即可（与编译同一口径）。
+        //   但节与页眉页脚在流里仍是容器 —— 它们的两端各占一位，与 FlowIndex 同一口径。
         if (n->kind == NodeKind::Section || n->kind == NodeKind::Document ||
             n->kind == NodeKind::HeaderFooter) {
+            const bool boundary = (n->kind != NodeKind::Document);
+            if (boundary) ++flow_;
             for (const Ref& c : n->children) walk(c);
+            if (boundary) ++flow_;
             return;
         }
         // 其余元素一律写成诊断：静默放过比"还没做"更危险（调用方会以为拿到了完整结果）。
         // 容器仍照常下钻，内部文本按流顺序并入当前段。
         out_.diagnostics.push_back(CompileDiagnostic{
             n->kind, n->id, std::string("尚未进入排版输入的元素：") + nodeKindName(n->kind)});
+        const bool boundary = isContainer(n->kind);
+        if (boundary) ++flow_;
         for (const Ref& c : n->children) walk(c);
+        if (boundary) ++flow_;
     }
 
     /**
@@ -440,9 +469,24 @@ private:
     void flush(const Ref& mark) {
         // 身份与哈希先用局部变量算，块本身等到"确定要物化"时才构造 —— 复用路径上
         //   构造一个 BlockSpec 再丢掉，等于把省下来的那一份又花回去一半。
+        const bool had_content = (cur_first_ != kInvalidNodeId);
         const NodeId mark_id = (mark != nullptr) ? mark->id : kInvalidNodeId;
-        const NodeId first_id = (cur_first_ != kInvalidNodeId) ? cur_first_ : mark_id;
+        const NodeId first_id = had_content ? cur_first_ : mark_id;
         cur_first_ = kInvalidNodeId;
+
+        // 流的两个局部量：本块占几位、它前面那道边界占几位。绝对位置由调用方累加，这里
+        //   一个绝对数都不写 —— 写了就得在上游变长之后平移，那是另一套需要维护的账。
+        //   空段（只有标记、没有内容）的起点就是自己的标记，与块流起点的老口径一致。
+        if (!had_content) block_start_ = flow_;
+        BlockExtent extent;
+        extent.span = flow_ - block_start_;
+        extent.gap = block_start_ - prev_end_;
+        out_.extents.push_back(extent);
+        // 上一块内容的末尾就是标记那一位（标记属于两块之间的界，不属于任何一块），
+        //   所以这里记 flow_ 而不是 flow_+1 —— 加了 1 就等于把标记吞进下一块的 gap 起点，
+        //   下一块的 gap 会变成 0。
+        prev_end_ = flow_;
+        block_start_ = flow_ + (mark != nullptr ? 1 : 0);
 
         // 块哈希只从贡献这个块的节点与对象算。节点哈希本身已经是内容哈希，所以"改一段"只
         // 改动那一段的块哈希 —— 增量排版据此判断损伤，不需要任何人上报改了什么。
@@ -569,6 +613,22 @@ private:
     std::vector<CellSlot> path_;                             // 当前所在的格（空 = 正文）
     std::vector<std::pair<uint64_t, uint64_t>> containers_;  // 外层容器的自身哈希
     NodeId cur_first_ = kInvalidNodeId;
+    /**
+     * 流游标：投影自己数的"现在走到第几位"，与 FlowIndex::measure 同一套展开规则 ——
+     *   容器两端各一位、文本按码点、原子与标记各一位、根不占位、呈现态下隐藏子树整棵不占。
+     *
+     * 位置在这里产生，而不是事后再拿节点去流索引里查一遍：走的是同一次遍历，两种说法
+     *   从源头上就没有分叉的机会。
+     */
+    int flow_ = 0;
+    /**
+     * 当前这一块内容的第一位。noteFirst 钉住；空段在 flush 里钉成它自己那枚标记。
+     */
+    int block_start_ = 0;
+    /**
+     * 上一块内容末尾那一位（它的标记之前）。两块之差就是中间那道界占了几位。
+     */
+    int prev_end_ = 0;
     Hasher obj_hash_;
     Projection out_;
 

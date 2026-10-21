@@ -10929,6 +10929,136 @@ int main() {
         sameAsFull("删表之后");
     }
 
+    // [62] 位置划分：每块只装内容，空隙只装边界。
+    //
+    // 两条都是"划分"的性质，不依赖实现怎么算：每一块的起点必须回读到自己的段首；
+    //   全篇位数守恒 —— 块长加边界宽，再加末尾那几位，正好是流的总长。
+    // 参照物只能来自另一条路：光标、选区、命中全读同一份 block_flow_，它们之间怎么对拍
+    //   都自洽（一起错也一起"对"）。流总长由流索引给，与块流不是同一个来路。
+    //
+    // 末尾那几位按文档形状数：最后一段在表外且带标记时，它之后是"标记一位 + 出节一位"；
+    //   以表格结尾时还要加上出格、出行、出表（最后一段带标记的话再加它自己那一位）。
+    std::printf("\n[62] 位置划分：每块只装内容，空隙只装边界\n");
+    {
+        auto checkPartition = [&](EditorEngine* e, const std::string& what, int tail) {
+            const int n = static_cast<int>(e->blocks().size());
+            int total = 0;
+            int bad_start = 0;
+            int bad_gap = 0;
+            FlowPos prev_end = 0;
+            for (int i = 0; i < n; ++i) {
+                const FlowPos start = e->blockFlowStart(i);
+                const int span = e->blockFlowSpan(i);
+                TextPos tp{-1, 0};
+                if (!e->flowToTextPos(start, &tp) || tp.para != i || tp.offset != 0) ++bad_start;
+                const int gap = (i == 0) ? start : start - prev_end;
+                if (i > 0 && gap < 1) ++bad_gap;
+                total += span + gap;
+                prev_end = start + span;
+            }
+            expectTrue(bad_start == 0, what + "：每块的起点都回读到自己的段首（" +
+                                           std::to_string(bad_start) + " 处不对）");
+            expectTrue(bad_gap == 0,
+                       what + "：块与块之间至少隔一位（" + std::to_string(bad_gap) + " 处为 0）");
+            expectTrue(total + tail == e->flowSize(),
+                       what + "：块长与边界宽加起来正好是流的总长（" + std::to_string(total) +
+                           " + " + std::to_string(tail) + " vs " + std::to_string(e->flowSize()) +
+                           "）");
+        };
+        auto makeText = [](NodeTree* t, NodeId parent, const std::string& s) {
+            t->setText(t->appendChild(parent, NodeKind::TextRun), utf8ToCodepoints(s));
+        };
+
+        // 文档甲：正文、一个在表单模式下隐藏的控件、一个空段、末段。
+        NodeTree a62;
+        {
+            const NodeId sec = a62.firstSectionId();
+            makeText(&a62, sec, "患者诉心悸三天");
+            a62.appendChild(sec, NodeKind::ParagraphMark);
+            const NodeId cc = a62.appendChild(sec, NodeKind::ContentControl);
+            Node* cn = a62.find(cc);
+            cn->hidden = true;
+            cn->control.key = "note";
+            cn->control.controlType = "text";
+            makeText(&a62, cc, "隐藏字段");
+            makeText(&a62, sec, "可见正文");
+            a62.appendChild(sec, NodeKind::ParagraphMark);
+            a62.appendChild(sec, NodeKind::ParagraphMark);
+            makeText(&a62, sec, "末段");
+            a62.appendChild(sec, NodeKind::ParagraphMark);
+        }
+
+        // 文档乙：表格在中间，末段落在表外。
+        NodeTree b62;
+        {
+            const NodeId sec = b62.firstSectionId();
+            makeText(&b62, sec, "表前一");
+            b62.appendChild(sec, NodeKind::ParagraphMark);
+            const NodeId table = b62.appendChild(sec, NodeKind::Table);
+            b62.find(table)->table.grid_cols = {Length::abs(ptToEmu(80.0)),
+                                                Length::abs(ptToEmu(80.0))};
+            b62.find(table)->table.width = Length::percent(1, 1);
+            for (int r = 0; r < 2; ++r) {
+                const NodeId row = b62.appendChild(table, NodeKind::TableRow);
+                for (int c = 0; c < 2; ++c) {
+                    const NodeId cell = b62.appendChild(row, NodeKind::TableCell);
+                    makeText(&b62, cell, "格" + std::to_string(r) + std::to_string(c));
+                    b62.appendChild(cell, NodeKind::ParagraphMark);
+                }
+            }
+            makeText(&b62, sec, "表后一");
+            b62.appendChild(sec, NodeKind::ParagraphMark);
+        }
+
+        // 文档丙：以表格结尾，最后一段落在最后一格里（末尾边界最长的一条路）。
+        NodeTree t62c;
+        {
+            const NodeId sec = t62c.firstSectionId();
+            makeText(&t62c, sec, "开头");
+            t62c.appendChild(sec, NodeKind::ParagraphMark);
+            const NodeId table = t62c.appendChild(sec, NodeKind::Table);
+            t62c.find(table)->table.grid_cols = {Length::abs(ptToEmu(80.0))};
+            t62c.find(table)->table.width = Length::percent(1, 1);
+            const NodeId row = t62c.appendChild(table, NodeKind::TableRow);
+            const NodeId cell = t62c.appendChild(row, NodeKind::TableCell);
+            makeText(&t62c, cell, "格里最后一段");
+            t62c.appendChild(cell, NodeKind::ParagraphMark);
+        }
+
+        EngineConfig c62;
+        c62.zoom = 1.0f;
+        c62.page.width_pt = 320.0f;
+        c62.page.height_pt = 240.0f;
+        c62.page.margin_pt = 12.0f;
+
+        EditorEngine ea;
+        expectTrue(ea.init({cjkPath, mnPath, latinPath}), "引擎初始化（位置划分·正文）");
+        ea.setConfig(c62);
+        ea.setDocument(a62, StyleSheet{});
+        ea.relayout();
+        checkPartition(&ea, "正文（文档模式）", 2);
+        ea.setEditMode(EditMode::Form);
+        checkPartition(&ea, "正文（表单模式，隐藏控件整棵摘除）", 2);
+
+        EditorEngine eb;
+        expectTrue(eb.init({cjkPath, mnPath, latinPath}), "引擎初始化（位置划分·表格）");
+        eb.setConfig(c62);
+        eb.setDocument(b62, StyleSheet{});
+        eb.relayout();
+        checkPartition(&eb, "表格在中间", 2);
+        // 表里改一个字之后再看一遍：位置是每轮重算的，改完就该仍然成立。
+        eb.setCaret(2, 1);
+        expectTrue(eb.typeTextAndRender("改"), "表里敲一个字");
+        checkPartition(&eb, "表格在中间（表里改过之后）", 2);
+
+        EditorEngine ec;
+        expectTrue(ec.init({cjkPath, mnPath, latinPath}), "引擎初始化（位置划分·以表结尾）");
+        ec.setConfig(c62);
+        ec.setDocument(t62c, StyleSheet{});
+        ec.relayout();
+        checkPartition(&ec, "以表格结尾", 5);
+    }
+
     std::printf("\n──────────────────────────────\n");
     std::printf("共 %d 项断言，失败 %d 项\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

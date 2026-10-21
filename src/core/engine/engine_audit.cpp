@@ -735,6 +735,24 @@ int EditorEngine::auditCompile() const {
                 ++d;
             }
         }
+        // 块区间与流索引对拍：带标记的块，内容末尾必须正好落在自己那枚标记的起点上。
+        //   这一条是独立参照物 —— block_flow_ 由投影的游标累加而来，标记位置由流索引数出，
+        //   两条路算同一个数。格边界少算一位、上游变长没跟上，都会在这里现形，而只看
+        //   "段起点不越过首元素末尾"那一条是看不出来的。
+        if (block_flow_.size() != block_src_.size() ||
+            block_flow_span_.size() != block_src_.size()) {
+            ++d;
+        } else {
+            for (size_t i = 0; i < block_src_.size(); ++i) {
+                if (block_src_[i].mark == kInvalidNodeId) continue;
+                int mark_first = -1;
+                if (!idx.intervalOf(block_src_[i].mark, &mark_first, nullptr)) {
+                    ++d;
+                    continue;
+                }
+                if (block_flow_[i] + block_flow_span_[i] != mark_first) ++d;
+            }
+        }
     }
     return d;
 }

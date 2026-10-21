@@ -170,7 +170,7 @@ struct EditStats {
      */
     int rebuild_reused = 0;
     double rebuild_flow_ms = 0.0;     // FlowIndex 重建（按节点记流位置）
-    double rebuild_flowpos_ms = 0.0;  // 段的流区间递推
+    double rebuild_flowpos_ms = 0.0;  // 块位置的前缀和（局部量累加成绝对位置）
     double rebuild_copy_ms = 0.0;     // 块流副本（排版吃的 blocks_ 那一份）
     /**
      * 这一轮产物是怎么重建的，以及局部路径被否决的原因。
