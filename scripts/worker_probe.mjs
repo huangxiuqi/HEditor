@@ -105,7 +105,9 @@ async function main() {
     '         visible, hidden,' +
     '         aliased: window.__heditor === window.__wheditor };');
   chk.check('引擎在 Worker 里起来了', !!info, `boot ${info.bootMs.toFixed(0)} ms`);
-  chk.check('帧共享 wasm 线性内存（零拷贝）', info.zeroCopyFrame === true, j(info.zeroCopyFrame));
+  // "帧零拷贝"那一格随帧一起删了：帧不再跨线程（页画布按页交出去），而
+  //   frameRgba() 是 typed_memory_view，那个判据恒真 —— 恒真的断言等于没有，
+  //   代价却是启动时拼一次窗口导出图（一次 4~80 MB）。
   // 已转移控制权的画布在主线程 getContext 会抛（不是返回 null）—— 这是"像素确实
   //   不归主线程管"最硬的一条结构性判据：不是宿主不去读，而是读不到。
   chk.check('页画布一页一张，且每一张都已交出去（getContext 直接抛）',

@@ -370,8 +370,9 @@ long long frameDiffBetween(EditorEngine& a, EditorEngine& b) {
     if (a.frameBytes() != b.frameBytes()) return -1;
     const uint8_t* fa = a.frame();
     const uint8_t* fb = b.frame();
+    const size_t n = a.frameBytes();
     long long diff = 0;
-    for (size_t k = 0; k + 3 < a.frameBytes(); k += 4) {
+    for (size_t k = 0; k + 3 < n; k += 4) {
         if (fa[k] == fb[k] && fa[k + 1] == fb[k + 1] && fa[k + 2] == fb[k + 2]) continue;
         ++diff;
     }
@@ -873,8 +874,7 @@ int main() {
         std::printf("     临界字数 = %d（第 %d 个字把文档推到了第 2 页）\n", n_crit, n_crit);
         expectTrue(n_crit > 1, "搜到了跨页临界点");
 
-        // 刚好一页，并且真的呈现一次 —— 只有 repaint 过 base_valid_ 才为真，
-        // 而这条 bug 只在 base_valid_ 为真之后才暴露。
+        // 刚好一页，并且真的呈现一次 —— 这条 bug 只在"窗口已经量过一遍"之后才暴露。
         probe.cp_text.assign(static_cast<size_t>(n_crit - 1), 0x6D4B);
         loadBlocks(e5, {probe});
         e5.relayout();
@@ -894,8 +894,8 @@ int main() {
         std::printf("     %d 字 → %d 页，帧高 %d px\n", n_crit, pages2, h2);
         expectTrue(pages2 == 2, "这一个字把文档推到了第 2 页");
 
-        // 核心断言。修复前 count 锁在 base_page_count_（=1），
-        //   frame_h 与宽高都没变 → 换窗判据全不成立 → h2 == h1，新页不可见。
+        // 核心断言。修复前窗口页数锁在"上一拍量到的页数"（=1）上，
+        //   帧高与宽高都没变 → 换窗判据全不成立 → h2 == h1，新页不可见。
         expectTrue(h2 > h1, "帧缓冲高度跟随页数增长（修复前这里恒等 → 新页不可见）");
         expectTrue(e5.editStats().total_pages == 2, "本次呈现覆盖 2 页");
         // 有页位图缓存之后"重画了几页"不再恒等于窗口页数：第 0 页的字一个都没动，

@@ -210,7 +210,8 @@ int main(int argc, char** argv) {
     std::printf("字形缓存        : 占用 %.1f MB / 上限 %.1f MB\n",
                 static_cast<double>(st.glyph_cache_bytes) / (1024.0 * 1024.0),
                 static_cast<double>(st.glyph_cache_limit) / (1024.0 * 1024.0));
-    std::printf("窗口导出图      : %.2f MB\n",
+    // 这是"要导出的话多大"，不是常驻占用：导出图只在真被 frame() 读到时才拼。
+    std::printf("窗口导出图尺寸  : %.2f MB（按需拼）\n",
                 static_cast<double>(engine.frameBytes()) / (1024.0 * 1024.0));
 
     std::printf("\n=== 整形诊断（中文，横排）===\n%s",

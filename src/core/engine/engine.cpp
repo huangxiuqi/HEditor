@@ -35,20 +35,6 @@ namespace heditor {
 namespace {
 
 /**
- * 这棵子树里有没有段落标记。
- *
- * 增量编译要判"这一段的内容区间是不是干净的"：区间里若嵌着段落标记，那些标记本身
- * 就切出别的段，这一段的产物于是依赖区间之外的段边界 —— 那种情况退回全量。
- */
-bool subtreeHasParagraphMark(const Node* n) {
-    if (isParagraphMark(n->kind)) return true;
-    for (const Node* c : n->children) {
-        if (subtreeHasParagraphMark(c)) return true;
-    }
-    return false;
-}
-
-/**
  * 业务类型字符串 → 旧表示的三种控件种类。
  *
  * 两者层次不同：controlType 是开放的（宿主可以注册一种新的），ControlKind 是封闭的三档 ——
@@ -544,7 +530,12 @@ bool EditorEngine::redoAndRender() {
     return true;
 }
 
-size_t EditorEngine::frameBytes() const { return ensureFrameExport(); }
+size_t EditorEngine::frameBytes() const {
+    // 尺寸是算出来的，不是"拼出来之后数一数"。这一条是给 statsJson 用的：它每一份状态
+    //   都带这个数，而拼一次窗口导出图（2000 段 / 6 页窗口在 dpr 2 下实测 83 MB）比
+    //   整个呈现还贵。把"问大小"与"要像素"分开，问大小就只剩两次乘法。
+    return static_cast<size_t>(frameWidth()) * static_cast<size_t>(frameHeight()) * 4u;
+}
 
 const uint8_t* EditorEngine::frame() const {
     ensureFrameExport();

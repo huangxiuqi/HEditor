@@ -105,8 +105,6 @@ const apiHost = {
   slotCount: () => 0,
   pagesMissing: () => 0,
   ctxOfPage: () => null,
-  isContinuous: () => false,
-  viewCtx: () => null,
   canvasCount: () => 0,
   invalidateSlots: () => {},
   blitPages: () => 0,
@@ -209,26 +207,26 @@ const report = {
 let dead = false;
 
 /**
- * 宿主侧上屏耗时（最近一轮的四段分解）。
+ * 宿主侧上屏耗时（最近一轮的三段分解）。
  *
- * 引擎的 paint_ms 只算到"帧缓冲组装完"。帧缓冲跨到 JS 之后还有三段钱：
- * 取视图、构造 ImageData、putImageData。面板此前完全没有这三个数，
- * 于是"页面卡"只能看到引擎那一半，另一半是盲区 —— 而这一段恰好是唯一
- * 随帧面积走的部分（画布是整篇大小的单张位图，脏矩形只决定源数据偏移，
- * 不决定浏览器要把多大的图层重新合成）。
+ * 引擎的 paint_ms 只算到"页位图写完"。像素跨到宿主之后还有三段钱：
+ * 对齐页画布、贴页（构造 ImageData + putImageData）、摆 IME。
+ * 于是"页面卡"只能看到引擎那一半，另一半是盲区 —— 而贴页那一段恰好是
+ * 唯一随贴的面积走的部分（画布是一页一张，脏矩形决定 putImageData 传多少像素，
+ * 也决定浏览器要重合成多大一块图层）。
  * 记"最近一轮"而不是累加：面板每次读的都是刚发生的一轮。
  */
-let lastBlit = { frameMs: 0, imageMs: 0, putMs: 0, imeMs: 0, totalMs: 0,
+let lastBlit = { alignMs: 0, blitMs: 0, imeMs: 0, totalMs: 0,
                  full: true, w: 0, h: 0, boxW: 0, boxH: 0, framePx: 0,
                  pages: 0, px: 0, windowFirst: 0 };
 
 /**
  * 每页一张画布。
  *
- * 帧从"整篇一张位图"改成"窗口一张"之后，宿主这边也要跟着切：把窗口位图按页切成
- * 若干块，每块贴进它自己那张画布。这样改哪一页就只重合成那一页 —— 而"整篇一张"时
- * 哪怕只改 1 页，浏览器也要把整张 18 Mpx 的图层重新合成一遍（实测多花整整一个
- * vsync，见 scripts/diag_perf.mjs）。
+ * 引擎里已经没有"整篇 / 整窗一张位图"了（渲染只写页位图），宿主这边也就照页切：
+ * 每页一块画布，改哪一页就只重合成那一页 —— 而"整篇一张"时哪怕只改 1 页，浏览器
+ * 也要把整张 18 Mpx 的图层重新合成一遍（实测多花整整一个 vsync，见
+ * scripts/diag_perf.mjs）。
  *
  * 只保留窗口内的页：画布是宿主侧唯一持有像素的地方，留几张就等于留多少内存，
  * 也是"整篇 3000 段"不再撑爆内存的原因。
@@ -361,7 +359,7 @@ function syncPageCanvases(first, count, total) {
  * 视口窗口：帧只装"看得见的那几页"（再留一两页余量），并尽量把光标页并进来。
  *
  * 光标那一页要尽量进来：帧只装窗口内的页，光标不在窗口里就既画不出来、也点不中。
- * 窗口一变就整帧重建（底图按新范围重光栅，实测 3 页约 30 ms），所以锚点只在真的
+ * 窗口一变就整窗重光栅（按新范围重画那几页，实测 3 页约 30 ms），所以锚点只在真的
  * 盖不住"必须装下的那几页"时才挪 —— 见 applyWindow 的滞回。
  *
  * 长度封顶 maxWindowPages() 页：光标页与可见页可能隔得很远（用户把屏幕滚到别处去了），
@@ -542,7 +540,7 @@ function targetWindow(req, total) {
  *   而换窗那一拍有 48~67 ms，合成器在这期间继续往前滚 —— 露出来的地方必然空白。
  *   多留这一页，触发时前方就还剩约一页（83 ms @12000 px/s）可以垫。
  *   实测（scripts/diag_selperf.mjs 的 O 段）这条把"可见页没有画布的帧"从 8~9% 压到 0。
- * 没有滞回的话，光标一路往下打字、可见页一格一格地换，每换一格就整帧重建一次，
+ * 没有滞回的话，光标一路往下打字、可见页一格一格地换，每换一格就整窗重光栅一次，
  * 手感就是"每隔十几个字卡一下"。
  */
 function applyWindow() {
@@ -651,7 +649,7 @@ function settle(st, opts) {
     lastEdit = st;
   }
   const t1 = performance.now();
-  blitFrame(st);
+  blitPages(st);
   const t2 = performance.now();
   if (o.render !== false) {
     renderEdit(st);
@@ -1161,7 +1159,7 @@ async function boot() {
 /**
  * 上屏：把窗口内每一页的导出像素贴到它自己的画布上。
  *
- * 四段计时写进 lastBlit：构造 ImageData / putImageData / 摆 IME。
+ * 三段计时写进 lastBlit：对齐页画布 / 贴页（构造 ImageData + putImageData）/ 摆 IME。
  * 分段的理由与引擎的 paint_fill/glyph/present 同一条：只有分开记，
  * 才知道该优化哪一段，而不是笼统地说"上屏慢"。
  *
@@ -1169,7 +1167,7 @@ async function boot() {
  *   (页号 x 步距) 定 —— 引擎不再产出"窗口帧"，所以这里没有槽偏移、没有整帧切片，
  *   贴的矩形就是引擎报的矩形。
  */
-function blitFrame(st) {
+function blitPages(st) {
   const t0 = performance.now();
   const pw = api.read('pagePxWidth');
   const ph = api.read('pagePxHeight');
@@ -1235,7 +1233,7 @@ function blitFrame(st) {
   const t3 = performance.now();
 
   lastBlit = {
-    frameMs: t1 - t0, imageMs: t2 - t1, putMs: t3 - t2,
+    alignMs: t1 - t0, blitMs: t2 - t1, imeMs: t3 - t2,
     totalMs: t3 - t0, full: patched >= count, w: pw, h: ph, boxW: pw, boxH: ph,
     framePx: pw * ph, pages: patched, px, windowFirst: first,
   };
@@ -1572,11 +1570,12 @@ function renderEdit(st) {
     ['— pageFp', `${fmt(st.pageFpMs)} ms`],
     ['— paint', `${fmt(st.paintMs)} ms`],
     ['— 合计', `${fmt(st.totalMs)} ms`],
-    // 引擎那四行只算到帧缓冲组装完。跨界与上屏是另外的账，分开记的理由：
-    //   该优化哪一边完全取决于钱在哪一段 —— putImageData 的代价随画布面积走，
-    //   取帧与 ImageData 构造都是常数级，而它们加起来可能比引擎那一段还大。
-    ['— 上屏取帧', `${fmt(lastBlit.frameMs)} ms`],
-    ['— putImageData', `${fmt(lastBlit.putMs)} ms`, 'hi'],
+    // 引擎那四行只算到页位图写完。跨界与上屏是另外的账，分开记的理由：
+    //   该优化哪一边完全取决于钱在哪一段 —— putImageData 的代价随贴的面积走，
+    //   而"对齐页画布"与"摆 IME"是常数级，它们加起来也可能比引擎那一段还大。
+    ['— 对齐页画布', `${fmt(lastBlit.alignMs)} ms`],
+    ['— 贴页（构造 + put）', `${fmt(lastBlit.blitMs)} ms`, 'hi'],
+    ['— 摆 IME', `${fmt(lastBlit.imeMs)} ms`],
     ['— 上屏合计', `${fmt(lastBlit.totalMs)} ms`, 'hi'],
     // 宿主收尾 = 窗口对齐 + 滚动 + 面板刷新。它不含上屏那几段（那几行在上面），
     //   而"敲一个字"的总账 = 引擎（上面那四行）+ 上屏 + 这一行。
@@ -1584,8 +1583,10 @@ function renderEdit(st) {
       `${fmt(Math.max(0, (lastBlit.settleMs || 0) - lastBlit.totalMs))} ms`, 'hi'],
     ['上屏页数 / 窗口页数', `${lastBlit.pages} / ${api.read('windowPageCount')}`],
     ['上屏面积（本轮）', `${((lastBlit.px || 0) / 1e3).toFixed(1)} kpx`, 'hi'],
-    ['窗口', `第 ${lastBlit.windowFirst} 页起 · 帧 ${lastBlit.w} × ${lastBlit.h} px`],
-    ['帧面积（=画布面积）', `${(lastBlit.framePx / 1e6).toFixed(2)} Mpx`],
+    // 这两格报的是"一页"的几何：w/h/framePx 取自 pagePxWidth/Height（每页一张画布）。
+    //   窗口整体的尺寸在上面"窗口尺寸"那一行（frameWidth/Height = 页宽 x 窗口步距）。
+    ['窗口', `第 ${lastBlit.windowFirst} 页起 · 页 ${lastBlit.w} × ${lastBlit.h} px`],
+    ['页面积（=单张画布面积）', `${(lastBlit.framePx / 1e6).toFixed(2)} Mpx`],
     ['光标', `段 ${st.caretPara} · 偏移 ${st.caretOffset} 码点`],
     ['光标矩形', `${st.caretX},${st.caretY} ${st.caretW}×${st.caretH} px`],
     ['全文码点数', st.docCodepoints],
@@ -1666,7 +1667,9 @@ function renderLayout(st) {
     ['页尺寸 / 页间隙', `${api.read('pagePxWidth')} × ${api.read('pagePxHeight')} / ${api.read('pageGapPx')} px`],
     ['视口窗口', `第 ${api.read('windowFirstPage')} 页起 · ${api.read('windowPageCount')} 页` +
       `（${pageCanvases.size} 张页画布）`],
-    ['窗口导出图', kb(api.read('frameByteSize'))],
+    // 这一格是"窗口导出图有多大"，不是"占了多少内存"：导出图只在真被读到时才拼
+    //   （探针的 rawFrame / markCheck），平时一块都不占。真要读常驻内存看上面的字形缓存。
+    ['窗口像素量', kb(api.read('frameByteSize'))],
   ]);
 }
 
@@ -1822,7 +1825,7 @@ const facade = {
 
   // 直接调引擎（绕开键盘），走和真人编辑相同的上屏步骤。
   //
-  //  这里必须 blitFrame，不能只调引擎。
+  //  这里必须 blitPages，不能只调引擎。
   //    只调引擎的话，画布还停在旧内容上，而引擎内部已经画完了 ——
   //    紧接着任何一次"只有光标脏"的 present（比如闪烁 tick）只会贴光标那一小块，
   //    画布于是永远停在旧文字上，症状是"光标往后走、插入处的字不动、两个叠在一起"。

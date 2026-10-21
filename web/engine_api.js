@@ -133,7 +133,7 @@ function geom(st) {
  * 按当前滚动位置决定窗口。返回 true 表示窗口变了（调用方要重排重画）。
  *
  * 滞回（与单线程宿主的 applyWindow 同一口径）：现有窗口只要还盖得住"看得见的那几页"，
- *   就一个字都不动。没有这一层的话，滚动每跨一条页边界就整帧重光栅（一页约 13 ms）；
+ *   就一个字都不动。没有这一层的话，滚动每跨一条页边界就整窗重光栅（一页约 13 ms）；
  *   有了它，同一页内的滚动连一次重贴都不需要 —— 浏览器把画布搬走就行。
  */
 // 看得见的那几页（设备像素下的滚动位置与视口高度）。
@@ -450,7 +450,6 @@ async function boot(m) {
     t: 'ready', bootMs, fontMs, fontBytes, fontMode,
     glueBytes: glueBytesInWorker(),
     heapMB: mod.HEAPU8.length / 1048576,
-    zeroCopyFrame: mod.frameRgba().buffer === mod.HEAPU8.buffer,
   });
   try {
     // 页度量要先设再装载：它会让整篇重排，排在装载之前只会排这一次。
@@ -719,7 +718,7 @@ const READ = {
    *
    * 判据用它回答"同一份逻辑状态重画一次，像素是不是一个字都没变" —— 增量绘制最容易犯的
    *   错是"重画时把叠加式的效果又叠了一遍"（选区混色就是这么变深的）。整帧搬回去比太贵
-   *   （8 MB 一份），指纹在这一侧算完只回一个数。
+   *   （一份就是窗口像素 x 4，dpr 2 下可达 80 MB），指纹在这一侧算完只回一个数。
    */
   frameDigest: () => {
     const v = mod.frameRgba();
@@ -943,9 +942,9 @@ async function doOp(m) {
 }
 
 async function askOp(m) {
-  // rawFrame 要单独走：帧是 8 MB 量级，按值结构化克隆会白拷一份；拷到新 buffer
-  //   再转移所有权过去是 O(1)。探针要拿它做逐字节比对，所以必须是一份快照
-  //   （wasm 堆上那个视图任何一次 present 都会被原地覆盖）。
+  // rawFrame 要单独走：帧是窗口像素 x 4（dpr 2 下可达 80 MB），按值结构化克隆会白拷
+  //   两份；拷到新 buffer 再转移所有权过去是 O(1)。探针要拿它做逐字节比对，所以
+  //   必须是一份快照（wasm 堆上那个视图任何一次 present 都会被原地覆盖）。
   if (m.name === 'rawFrame') {
     const v = mod.frameRgba();
     const copy = new Uint8ClampedArray(v.length);

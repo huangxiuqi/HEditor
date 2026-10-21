@@ -49,7 +49,7 @@ return (function () {
       totalParas: st.totalParagraphs, full: st.layoutWasFull,
       dirtyPages: st.dirtyPageCount, repaintedPages: st.repaintedPages,
       pixels: st.repaintedPixels, framePx: st.framePixels,
-      blitFrame: bl.frameMs, blitImage: bl.imageMs, blitPut: bl.putMs, blitTotal: bl.totalMs,
+      blitAlign: bl.alignMs, blitBlit: bl.blitMs, blitIme: bl.imeMs, blitTotal: bl.totalMs,
       blitFull: bl.full, boxW: bl.boxW, boxH: bl.boxH,
     });
   }
@@ -113,7 +113,7 @@ return (function () {
     dirtyPages: st.dirtyPageCount, repaintedPages: st.repaintedPages,
     pixels: st.repaintedPixels, framePx: st.framePixels, totalPages: st.totalPages,
     glyphs: ss.paintedGlyphs,
-    blitPut: bl.putMs, blitTotal: bl.totalMs, blitFull: bl.full,
+    blitIme: bl.imeMs, blitTotal: bl.totalMs, blitFull: bl.full,
   });
 })()`;
 
@@ -140,7 +140,7 @@ return (function () {
     windowPages: st.windowPages, bandY0: st.bandY0, bandY1: st.bandY1,
     pixels: st.repaintedPixels, framePx: st.framePixels, totalPages: st.totalPages,
     glyphs: ss.paintedGlyphs,
-    blitPut: bl.putMs, blitTotal: bl.totalMs, blitFull: bl.full,
+    blitIme: bl.imeMs, blitTotal: bl.totalMs, blitFull: bl.full,
   });
 })()`;
 
@@ -383,7 +383,7 @@ async function main() {
         const t0 = performance.now();
         H.present();
         const d = performance.now() - t0;
-        rows.push({ d, pixels: H.editStats.repaintedPixels, put: H.blitStats.putMs,
+        rows.push({ d, pixels: H.editStats.repaintedPixels, ime: H.blitStats.imeMs,
                     blit: H.blitStats.totalMs, full: H.blitStats.full });
       }
       return JSON.stringify(rows);`));

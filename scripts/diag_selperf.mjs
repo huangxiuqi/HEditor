@@ -417,14 +417,14 @@ return (async () => {
       const y = g.cy + 12 * (i + 1);
       await mouse('mouseMoved', g.midX + ((i % 2) ? 24 : -24), y, 1);
       await sleep(0);
-      // 两套宿主的账形状不同：单线程给 settleMs / putMs（它自己上屏），
+      // 两套宿主的账形状不同：单线程给 settleMs / alignMs / imeMs（它自己上屏），
       //   Worker 给 stateMs（那一拍在 Worker 里花的时间）。都读，按名字认领。
       const r = JSON.parse(await run(`
         const H = window.__heditor;
         const bl = H.blitStats || {}, st = H.editStats, ss = H.stats;
         const sel = H.selection || {}, dg = H.drag || {};
         return JSON.stringify({ settle: bl.settleMs, win: bl.windowMs,
-          frame: bl.frameMs, image: bl.imageMs, put: bl.putMs, blit: bl.totalMs,
+          align: bl.alignMs, blitMs: bl.blitMs, ime: bl.imeMs, blit: bl.totalMs,
           pages: bl.pages, stateMs: bl.stateMs, seq: bl.seq,
           paint: st.paintMs, layout: st.layoutMs, pageFp: st.pageFpMs,
           repainted: st.repaintedPages, windowPages: st.windowPages,
@@ -867,7 +867,7 @@ return (async () => {
               fHits: st.fontCacheHits || 0, fMiss: st.fontCacheMisses || 0,
               fReads: st.fontStorageReads || 0, fMs: Math.round(st.fontIoMs || 0),
               blit: Math.round((H.lastBlit || {}).totalMs || 0),
-              put: Math.round((H.lastBlit || {}).putMs || 0) });
+              ime: Math.round((H.lastBlit || {}).imeMs || 0) });
             if (ts - t0 < ${ms}) requestAnimationFrame(tick);
             else resolve(rows);
           };

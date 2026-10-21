@@ -532,7 +532,7 @@ function syncPageCanvases(gm) {
 
   // 槽数 = 窗口页数上限，由 worker 算好随几何报来（见那里的 maxWindowPages）。
   //   不用"max(8, 视口装得下几页)"：那个下限 8 既大于窗口页数（本机窗口 5 页，白占 3 个槽），
-  //   又与引擎的口径无关 —— 引擎的帧槽将来用的是同一个上限，两边必须是同一个数。
+  //   又与 window 侧的口径无关 —— 槽号按模取，槽数一变所有页都换槽，所以这个数只能有一个。
   //   窗口页数本来就是由这个上限截出来的，所以它一定装得下当前窗口；
   //   仍取 max(上限, 当前页数) 作下限 —— 门面允许外部把窗口页数指到上限之外（探针会如此），
   //   那时槽少了会让两页共用一个槽、那几页永远缺画布。
@@ -725,7 +725,10 @@ function paintPanel() {
     ['上屏', `${st.paintMs.toFixed(2)} ms`],
     ['Worker 堆', mirror.heapMB.toFixed(1) + ' MB'],
     ['字体模式', mirror.fontMode],
-    ['上一拍', mirror.lastLabel + ' ' + mirror.lastMs.toFixed(2) + ' ms'],
+    // 这一格是端到端往返，不是 Worker 的渲染耗时：从主线程发出这条命令，到主线程
+    //   收到它推回来的状态（含构造那份状态、结构化克隆、跨线程、受理）。渲染那一段
+    //   看上面两行（排版 / 上屏）。视口消息的 state 不更新它 —— 它们没有挂起条目。
+    ['上一拍（往返）', mirror.lastLabel + ' ' + mirror.lastMs.toFixed(2) + ' ms'],
   ];
   statEl.innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
 }
@@ -802,9 +805,11 @@ function handleMessage(m) {
     //   变成静默挂起，而这个页面是拿来验证的 —— 挂住等于什么都没验到。
     host.ready = true;
     if (barEl) {
+      // "帧零拷贝"那一格删掉了：帧不再跨线程，页画布按页交出去，这一格恒为真。
+      //   它唯一的作用是让启动那一趟拼一次窗口导出图（一次 4~80 MB），白花钱。
       barEl.textContent =
         `引擎在 Worker 里 · 启动 ${m.bootMs.toFixed(0)} ms（字体 ${m.fontMs.toFixed(0)} ms）· ` +
-        `帧零拷贝 ${m.zeroCopyFrame} · 一页一张画布`;
+        `一页一张画布`;
     }
     host.readyWallMs = now() - bootLead;
     return;
@@ -1266,10 +1271,10 @@ Object.defineProperties(host, {
 
 /* 宿主自己的动作 */
 
-// 帧尺寸（设备像素）。与单线程宿主一致地做成方法（见上面那段说明）。
+// 窗口帧尺寸（设备像素）。与单线程宿主一致地做成方法。
+//   它是"导出图的形状"（窗口页数 x 步距），探针换算坐标要用；引擎只把它算出来，
+//   不为此分配像素 —— 真读 frame() 时才拼一次。
 host.frameW = () => (mirror.geom ? mirror.geom.frameW : 0);
-// 引擎侧的帧槽数：切帧（blitPage / selfCheck / 光标定位）按它算源行。
-//   由 worker 从引擎读回、随 geom 报来 —— 宿主不自己算，两侧必须是同一个数。
 host.frameH = () => (mirror.geom ? mirror.geom.frameH : 0);
 
 /**
@@ -1331,7 +1336,7 @@ host.quiesce = async () => {
 
 /**
  * 引擎当前那一帧的一份拷贝（探针用）。
- *   拷贝由 Worker 侧做，然后转移 buffer 过来（O(1)，不白拷 8 MB）。
+ *   拷贝由 Worker 侧做，然后转移 buffer 过来（O(1)，不白拷一份窗口像素）。
  *   必须是快照：wasm 堆上那个视图任何一次 present 都会把它原地覆盖，
  *   两次读到的永远是同一块内存 —— 逐字节比对会永远绿且毫无意义。
  */

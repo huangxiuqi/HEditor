@@ -790,6 +790,12 @@ public:
      * 窗口的纵向像素：窗口页数 x 步距（末页之后那一格页间隙也留着，导出图因此整格对齐）。
      */
     int frameHeight() const;
+    /**
+     * 窗口导出图的大小（字节）。
+     *
+     * 只做乘法，不拼图：调用方（statsJson 每份状态都带一格）问的是"多大"，
+     *   不是"给我像素"。要像素走 frame()，那一条才真的按需拼一次。
+     */
     size_t frameBytes() const;
 
     /**
@@ -1536,7 +1542,7 @@ private:
     std::vector<float> line_hi_prev_;
 
     /**
-     * 本次重画那条行带的页内磅范围（computeBand 写、paintPageIntoBase 读）。
+     * 本次重画那条行带的页内磅范围（computeBand 写、rasterIntoBitmap 读）。
      * 放成员是为了不把两个 float 在 lambda 之间传来传去。
      */
     float band_lo_scratch_ = 0.0f;
