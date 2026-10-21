@@ -1388,10 +1388,12 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
                         //   HarfBuzz 原样写进 y_offset，所以进屏幕坐标（y 向下）要取负。
                         //   x_offset 是 x 向右，无需变号。
                         pg.x_pt = pen_x + sg.x_offset * usToPt;
-                        // 字形自己的条带：一行可以跨条带，而"跨过去的那几个字"必须落进
-                        //   后一条带 —— 所以页号按字形自己的块轴位置取，不跟行盒走。
-                        //   跟行盒走的话，跨条带的尾字会被画到行盒所在那一条带的框外。
-                        const int gpage = slabOfY(pen_y);
+                        // 横排的整行共用一个基线，所以字形跟行盒同属一条带：一条带里的
+                        //   内容就是从"行顶在这一带"的那一行起。按基线取页号会让跨接缝的
+                        //   那一行整行落进下一带、页内 y 为负 —— 上半截被位图裁掉，
+                        //   而上一带里没有它，接缝处就成了"半行字"。
+                        //   越过带底的那一截由 rasterIntoBitmap 的接缝补画。
+                        const int gpage = lb.page;
                         pg.y_pt = locY(gpage, pen_y - sg.y_offset * usToPt);
                         pg.color = runColorAt(sg.cluster);
                         pg.page = gpage;

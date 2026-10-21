@@ -85,15 +85,20 @@ void EditorEngine::computePageFingerprints(int dirty_lo, int dirty_hi) {
     // 而页号只增不减），所以"页号落在 [dirty_lo, dirty_hi]"的字形是一段连续区间，
     // 二分就能定位。它成立的前提是排版永远按段序追加 ——
     // 单测 [15] 里有一条断言专门钉住它（一旦有人打乱追加顺序，这里会静默算错）。
+    // 连页的接缝：越过带底的字形在下一条带里也有一份像素（见 rasterIntoBitmap 的
+    //   接缝补画），所以它的哈希要同时混进两条带。只混一条的话，改了这一行只会重画
+    //   上一带，下一带留着旧的半行。
+    const bool cont = cfg_.page.continuous;
+    const float slab_pt = cfg_.page.slabHeightPt();
+    // 起点往前挪一页：dirty_lo 自己那一带也可能有上一带的溢出（那一页本身不在
+    //   重算范围里，所以只把溢出混进去，不动它的指纹）。
+    const int scan_lo = (partial && cont && dirty_lo > 0) ? dirty_lo - 1 : dirty_lo;
     const std::vector<PlacedGlyph>& gs = layout_.glyphs;
-    const auto gb = std::lower_bound(gs.begin(), gs.end(), dirty_lo,
+    const auto gb = std::lower_bound(gs.begin(), gs.end(), scan_lo,
                                      [](const PlacedGlyph& g, int page) { return g.page < page; });
     const auto ge = std::upper_bound(gb, gs.end(), dirty_hi,
                                      [](int page, const PlacedGlyph& g) { return page < g.page; });
-    for (auto it = gb; it != ge; ++it) {
-        const PlacedGlyph& g = *it;
-        if (g.page < 0 || g.page >= n) continue;
-        uint64_t h = page_fp_new_[static_cast<size_t>(g.page)];
+    auto mixGlyph = [](uint64_t h, const PlacedGlyph& g) {
         h = fnvMix(h, g.glyph_id);
         h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(quantPt(g.x_pt))));
         h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(quantPt(g.y_pt))));
@@ -101,7 +106,19 @@ void EditorEngine::computePageFingerprints(int dirty_lo, int dirty_hi) {
         h = fnvMix(h, g.cluster);
         h = fnvMix(h, static_cast<uint64_t>(g.color.r) | (static_cast<uint64_t>(g.color.g) << 8) |
                           (static_cast<uint64_t>(g.color.b) << 16));
-        page_fp_new_[static_cast<size_t>(g.page)] = h;
+        return h;
+    };
+    for (auto it = gb; it != ge; ++it) {
+        const PlacedGlyph& g = *it;
+        if (g.page < 0 || g.page >= n) continue;
+        if (g.page >= dirty_lo)
+            page_fp_new_[static_cast<size_t>(g.page)] =
+                mixGlyph(page_fp_new_[static_cast<size_t>(g.page)], g);
+        const int next = g.page + 1;
+        if (cont && next >= dirty_lo && next < n && next <= dirty_hi && g.y_pt > slab_pt - 1.0f) {
+            page_fp_new_[static_cast<size_t>(next)] =
+                mixGlyph(page_fp_new_[static_cast<size_t>(next)], g);
+        }
     }
     // 真指纹一律清掉哨兵位（见 kFpDirtyBit）：这一位只在 markPagesChangedFrom 里置起来，
     //   于是"标脏"与"真值"在编码上不相交。别的页保留原值 —— 它们可能正是标脏值。
@@ -181,12 +198,12 @@ void EditorEngine::computeLineFingerprints(int dirty_lo, int dirty_hi, bool full
 }
 
 /**
- * 把 [first_page, 末页) 直接标成"与底图那一版不同"，不去哈希（见声明处的说明）。
+ * 把 [first_page, 末页) 直接标成"与已画那一版不同"，不去哈希（见声明处的说明）。
  *
  * 标脏值的高位恒置：真指纹一律清掉那一位，所以它与任何真指纹都不可能相等 ——
  * 这不是"大概率不同"，而是编码上就不相交。
  *
- * 低位还要按底图那一版翻一下：present 之后底图也会变成标脏值，下一次标脏若写回
+ * 低位还要按已画那一版翻一下：present 之后"已画"也会变成标脏值，下一次标脏若写回
  *   同一个值，判据读出来就是"没变"，那一页从此不再重画（症状：连续换行只有第一次
  *   把文档推下去，之后屏幕不动）。
  * 行指纹同一把尺子、同一批页：那些页上的每一行都跟着挪了，行带要覆盖整页。
@@ -197,7 +214,7 @@ void EditorEngine::markPagesChangedFrom(int first_page) {
     page_fp_new_.resize(static_cast<size_t>(n), kFnvBasis);
     page_fp_new_count_ = n;
     // 标脏值：高位恒置（真指纹一律清它，所以它不可能等于真指纹），
-    //   低位按底图那一版翻一下 —— 这一下是必须的，见下面那段注释。
+    //   低位按已画那一版翻一下 —— 这一下是必须的，见下面那段注释。
     auto dirty_value = [](uint64_t base) {
         const uint64_t v = kFnvBasis | kFpDirtyBit;
         return (v == base) ? (v ^ 1ull) : v;

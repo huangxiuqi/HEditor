@@ -1,7 +1,7 @@
 /**
  * Skia 光栅后端：Bitmap 的唯一绘制实现。
  *
- * 像素仍写在 Bitmap::px_ 里，frame / frameBytes / copyRectFrom / paintedPixels 的
+ * 像素仍写在 Bitmap::px_ 里，frame / frameBytes / paintedPixels 的
  * 语义与换后端之前一致。绘制走 SkCanvas；字形走 SkFont::drawGlyphs 加 FreeType；
  * 字形缓存交给 Skia 的 SkGlyphCache（预算由 setGlyphCacheBudget 调）。
  *
@@ -497,37 +497,8 @@ void Bitmap::blendRect(const Rect& r, Color c) {
 }
 
 /**
- * 这块不过 Skia，是刻意的：copyRectFrom 是"把一块像素原样搬回去"，
- * 是缓冲到缓冲的拷贝，不是绘制。Skia 能做这件事的只有 drawImage（要先建
- * SkImage、走采样器），既比 memcpy 慢又语义更弱（采样器可能引入插值）。
- * 局部重绘靠它，路径上要的是确定性。
- */
-void Bitmap::copyRectFrom(const Bitmap& src, const Rect& r) {
-    if (src.w_ != w_ || src.h_ != h_) return;
-    const int x0 = std::max(0, static_cast<int>(std::floor(r.x)));
-    const int y0 = std::max(0, static_cast<int>(std::floor(r.y)));
-    const int x1 = std::min(w_, static_cast<int>(std::ceil(r.x + r.w)));
-    const int y1 = std::min(h_, static_cast<int>(std::ceil(r.y + r.h)));
-    if (x1 <= x0 || y1 <= y0) return;
-    painted_px_ += static_cast<size_t>(x1 - x0) * static_cast<size_t>(y1 - y0);
-    const size_t off0 =
-        (static_cast<size_t>(y0) * static_cast<size_t>(w_) + static_cast<size_t>(x0)) * 4u;
-    if (x0 == 0 && x1 == w_) {
-        // 整幅宽：行与行在内存里首尾相接，一次 memcpy 就是整块（见 bitmap.cpp 同名处）。
-        std::memcpy(px_.data() + off0, src.px_.data() + off0,
-                    static_cast<size_t>(x1 - x0) * 4u * static_cast<size_t>(y1 - y0));
-        return;
-    }
-    const size_t row_bytes = static_cast<size_t>(x1 - x0) * 4u;
-    for (int y = y0; y < y1; ++y) {
-        const size_t off = off0 + static_cast<size_t>(y - y0) * static_cast<size_t>(w_) * 4u;
-        std::memcpy(px_.data() + off, src.px_.data() + off, row_bytes);
-    }
-}
-
-/**
- * 页位图 -> 帧的搬运。与 copyRectFrom 同一套纪律（不过 Skia、memcpy 原文照搬），
- *   区别只在"源与目标不同尺寸、原点不同"，所以两侧各自裁剪一次。
+ * 页位图 -> 导出图的搬运：不过 Skia，memcpy 原文照搬（drawImage 要先建 SkImage、
+ *   走采样器，既慢又可能插值）。源小、目标大且原点不同，所以两侧各自裁剪一次。
  */
 void Bitmap::blitFrom(const Bitmap& src, const Rect& r, int dst_x, int dst_y) {
     if (src.w_ <= 0 || src.h_ <= 0 || w_ <= 0 || h_ <= 0) return;

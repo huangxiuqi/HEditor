@@ -1763,10 +1763,9 @@ int main() {
                            "前置：文档与控件矩形都回到原样（后面几节依赖它）");
             }
 
-            // 这两条（画出来 / 擦干净）同时钉死一个容易漏掉的失效点：
-            //   标记画在帧上、不进底图，切模式时底图一个字都不变。
-            //   如果忘了置 frame_needs_full_refresh_，切回文档模式后括号会残留
-            //   —— 表象是"随机不刷新"，从代码上极难看出来的那种。
+            // 这两条（画出来 / 擦干净）同时钉死一个失效点：标记画在页内容里，切模式
+            //   要让那几页的内容重算。漏掉这一步，切回文档模式后括号会留在原处 ——
+            //   表象是"随机不刷新"，从代码上极难看出来的那种。
         }
 
         // (g) 区间 → 矩形：单行 1 块、跨行多块、命中测试
@@ -1879,8 +1878,7 @@ int main() {
         /**
          * 待上屏的并集：把窗口内各页累积的脏矩形取出来（读后清零），给出面积与并集盒。
          *
-         * 它就是宿主真正要贴的东西。整窗帧撤销之后，"欠着没贴"这件事落在页上，
-         *   所以判据从 takeBlitBox（帧上的一个盒）改成"按页取矩形"——
+         * 它就是宿主真正要贴的东西："欠着没贴"这件事落在页上，所以判据是"按页取矩形"，
          *   口径与被测的那条路完全一致：宿主读的就是这几个数。
          */
         auto drainDirty = [](EditorEngine& e, float* bw, float* bh) -> long long {
@@ -10578,6 +10576,121 @@ int main() {
         expectTrue(e58.editStats().repainted_pages == 0,
                    "同样的配置再设一次，一页都不重光栅（签名不是每次 setConfig 都变，实际 " +
                        std::to_string(e58.editStats().repainted_pages) + " 页）");
+    }
+
+    std::printf("\n[59] 连页接缝：分带渲染 == 整带渲染（逐字节）\n");
+    {
+        // 连页把内容切成固定高度的条带，行就必然会跨接缝。判据不是"看着对不对"，
+        //   而是"同一份文档切成 N 带、拼起来，与切成一条整带逐字节相同" ——
+        //   整带没有接缝，是天然的参照物：接缝处少画半行、画重半行、两侧对不齐，
+        //   都会在这里露出来。
+        //
+        // 为什么必须带像素判据：行盒、页号、指纹都是"归属层"的事实，它们全对而接缝
+        //   处缺半行是完全可能的（字形按基线归带、上半截落在负 y 被裁掉就是这样）。
+        const std::vector<std::string> fonts59 = {cjkPath, mnPath, latinPath};
+        EditorEngine e59;
+        expectTrue(e59.init(fonts59), "引擎初始化（接缝）");
+
+        NodeTree t59;
+        const NodeId sec59 = t59.firstSectionId();
+        for (int i = 0; i < 60; ++i) {
+            t59.setText(t59.appendChild(sec59, NodeKind::TextRun),
+                        utf8ToCodepoints("第" + std::to_string(i) + "段：接缝处的字形必须完整。"));
+            t59.appendChild(sec59, NodeKind::ParagraphMark);
+        }
+        const StyleSheet sheet59;
+        e59.setDocument(t59, sheet59);
+
+        EngineConfig c59;
+        c59.zoom = 1.0f;  // 1 磅 = 1 像素：拼图与整带用的是同一把尺子
+        c59.page.width_pt = 320.0f;
+        c59.page.height_pt = 150.0f;  // 故意矮：几十条带，接缝足够多
+        c59.page.margin_pt = 20.0f;
+        c59.page_gap_pt = 0.0f;
+        // 连页开关在 EngineConfig 上；page.continuous 与 page.slab_pt 由 setConfig 装配
+        //   （见 EditorEngine::setConfig），直接在 page 上置位不会生效。
+        c59.continuous = true;
+        e59.setConfig(c59);
+        e59.relayout();
+        e59.repaint();
+
+        const int slabs = std::max(1, e59.editStats().total_pages);
+        const int pw = e59.pagePxWidth();
+        const int ph = e59.pagePxHeight();
+        const size_t page_bytes = static_cast<size_t>(pw) * static_cast<size_t>(ph) * 4u;
+        std::vector<uint8_t> tiled(page_bytes * static_cast<size_t>(slabs), 0);
+        int stitched = 0;
+        for (int p = 0; p < slabs; ++p) {
+            const uint8_t* src = e59.pagePixels(p);
+            if (src == nullptr) continue;
+            std::memcpy(tiled.data() + static_cast<size_t>(p) * page_bytes, src, page_bytes);
+            ++stitched;
+        }
+        expectTrue(stitched == slabs, "每条带都拿得到像素（" + std::to_string(stitched) + "/" +
+                                          std::to_string(slabs) + "）");
+
+        auto capture = [&]() {
+            int n = 0;
+            for (int p = 0; p < slabs; ++p) {
+                const uint8_t* src = e59.pagePixels(p);
+                if (src == nullptr) continue;
+                std::memcpy(tiled.data() + static_cast<size_t>(p) * page_bytes, src, page_bytes);
+                ++n;
+            }
+            return n;
+        };
+
+        // 参照物：同一条文档、同样宽度，但高到一整条带装得下（没有接缝）。
+        EngineConfig big59 = c59;
+        big59.page.height_pt = 6000.0f;
+        auto toBig = [&]() {
+            e59.setConfig(big59);
+            e59.relayout();
+            e59.repaint();
+        };
+        auto toTiled = [&]() {
+            e59.setConfig(c59);
+            e59.relayout();
+            e59.repaint();
+        };
+        toBig();
+        expectTrue(e59.editStats().total_pages == 1,
+                   "整带版本确实只有一条带（" + std::to_string(e59.editStats().total_pages) + "）");
+
+        auto compareStitched = [&](const char* label) {
+            const uint8_t* ref = e59.pagePixels(0);
+            if (ref == nullptr) {
+                expectTrue(false, std::string(label) + "：整带版本拿不到像素");
+                return;
+            }
+            const int ref_h = e59.pagePxHeight();
+            const int rows = std::min(ref_h, ph * slabs);
+            long long diff = 0;
+            int first_bad = -1;
+            for (int y = 0; y < rows; ++y) {
+                const uint8_t* a = tiled.data() + static_cast<size_t>(y) * pw * 4u;
+                const uint8_t* b = ref + static_cast<size_t>(y) * pw * 4u;
+                if (std::memcmp(a, b, static_cast<size_t>(pw) * 4u) == 0) continue;
+                ++diff;
+                if (first_bad < 0) first_bad = y;
+            }
+            std::printf("     %s：比了 %d 行（%d 条带 x %d 行），差 %lld 行%s\n", label, rows,
+                        slabs, ph, diff,
+                        first_bad >= 0 ? ("，首行 " + std::to_string(first_bad)).c_str() : "");
+            expectTrue(diff == 0, std::string(label) + "：分带与整带逐字节相同");
+        };
+        compareStitched("纯内容");
+
+        // 选一整篇：选区矩形同样会跨接缝，两带各画自己那半 —— 与内容同一条规则。
+        //   这一条不可省：内容对、选区只画一半，屏幕上就是"字完整、高亮断一截"。
+        toTiled();
+        e59.selectAll();
+        e59.repaint();
+        expectTrue(capture() == slabs, "带选区时每条带仍拿得到像素");
+        toBig();
+        e59.selectAll();
+        e59.repaint();
+        compareStitched("全选");
     }
 
     std::printf("\n──────────────────────────────\n");

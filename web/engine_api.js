@@ -139,7 +139,7 @@ function geom(st) {
 // 看得见的那几页（设备像素下的滚动位置与视口高度）。
 //   这里用的是"报了提前量的位置"（scrollY + scrollLead）：提前量只该影响"先装哪几页"，
 //   让窗口朝滚动方向多留一点，不要等滚到了才开始装。它不能影响"画在哪儿" ——
-//   连页模式下内容落点是按真实滚动位置算的（见 blitPageContinuous）。
+//   页的落点由页号直接定（页号 x 步距），与滚动无关。
 function visibleRange(st) {
   const total = Math.max(1, Number(st.totalPages) || 1);
   const step = mod.pagePxHeight() + mod.pageGapPx();

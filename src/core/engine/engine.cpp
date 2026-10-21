@@ -167,8 +167,8 @@ void EditorEngine::setConfig(const EngineConfig& cfg) {
     // 开 / 关括号会改变占位（括号进文档流）→ 必须重排。
     //   不重排的话括号会按新的开关画、正文却按旧的口径排 —— 画的用的还是旧的簇坐标，
     //   表象是括号盖住字/槽里空一条，而且看不出来是哪一边错了。
-    //   （其它配置项不动排版结构：zoom / 页度量只影响几何，底图作废就够了 ——
-    //     宿主改那两项之后本来就会立刻重排重绘。）
+    //   （其它配置项不动排版结构：zoom / 页度量只影响几何，光栅签名一变页位图就作废
+    //     —— 宿主改那两项之后本来就会立刻重排重绘。）
     const bool plan_changed = (cfg.show_brackets != cfg_.show_brackets);
     // 连页标志与条带高度是引擎从"页度量 + 页间隙"装配出来的，排版层只认 PageMetrics。
     //   必须在比较之前装配 —— 否则切模式时 PageMetrics 没变，判不出"要重排"，
@@ -1125,8 +1125,7 @@ bool EditorEngine::focusControlAndRender(bool forward) {
     //
     //   focusControl 会跨字段移动光标，导致占位变化与整行重排。若只改状态，
     //   JS 侧紧接着读 editStatsJson() 拿到的是上一次呈现留下的账（脏矩形属于上一次
-    //   事件），用它 putImageData 只会贴上画布一小块，形成"引擎帧是新的、画布是新旧
-    //   混合"。
+    //   事件），用它贴只会覆盖画布的一小块，形成"引擎里的页是新的、画布是新旧混合"。
     //
     //   规矩（整个 wasm 接口面都遵守）：凡是会改引擎状态的入口，返回宿主前必须把
     //   画面收尾。typeText/backspace/moveCaret
@@ -1171,13 +1170,13 @@ bool EditorEngine::tabCaretAndRender(bool backward) {
 bool EditorEngine::moveCaretAndRender(int dcp, bool extend) {
     if (!moveCaretBy(dcp, extend)) return false;
     // 光标移动不重排 —— 这就是增量的意义：
-    //   底图一个字都没变，只需要把两个小矩形贴回去。
+    //   页位图一个字都没变，只需要把两个小矩形标脏。
     //
     // 这里用裸 repaint()，刻意不把光标拉成可见（repaintAfterEdit 才会）。
     //   理由：移动光标不是编辑，光标该继续按自己的相位闪；把它强行点亮会让
     //   "按着方向键"时看不出闪烁。而"隐藏相位 + 宿主补救一次 present"这条
-    //   双 present 路径现在是安全的 —— 上屏走 takeBlitBox() 的累加器，
-    //   第二次的小盒子挤不掉第一次的账（见 takeBlitBox 的注释、单测 [12]）。
+    //   双 present 路径是安全的 —— 页脏矩形累积到宿主读走为止，第二次的矩形
+    //   挤不掉第一次的账（见 pageDirtyRects 的注释、单测 [12]）。
     //   顺带一条：单测里"光标隐藏时写入量更小（只擦不画）"这条断言，
     //   量的正是这条路径 —— 把它改成 repaintAfterEdit 会让它失去意义。
     repaint();
@@ -1295,8 +1294,8 @@ bool EditorEngine::selectCellAtPt(float x_pt_doc, float y_pt_doc) {
 /**
  * 命中测试：几何的反向半边 —— 由落点反查 (段, 偏移) + 侧别 + 归属控件。
  *
- * 收的是文档坐标：命中测试问的是"文档里的哪个位置"，与帧怎么摆无关。帧按槽号装页
- *   （页号 mod 槽数），拿窗口坐标或槽号去反查都会让页归属整体错位。
+ * 收的是文档坐标：命中测试问的是"文档里的哪个位置"，与窗口开在哪一页无关。
+ *   拿窗口内坐标去反查会让页归属整体错位（页在文档里的位置 = 页号 x 步距）。
  */
 
 bool EditorEngine::hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* out_owner,
@@ -1333,8 +1332,8 @@ bool EditorEngine::hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* 
     //   连页下按文档像素比：一行可以跨条带，它跨过去的那一段落在下一条带里，
     //   而那个位置的页号已经不是行盒的页号 —— 按页号筛会把这一点判给下一条带上
     //   离得最近的另一行（每跨一条带就有一条这样的窄带点不中）。
-    //   比的是"渲染位置"（页号 x 像素步距 + 页内磅 x zoom），与宿主把页摆在哪、
-    //   与帧里的槽号都无关 —— 与绘制用的是同一套映射。
+    //   比的是"渲染位置"（页号 x 像素步距 + 页内磅 x zoom），与宿主把页摆在哪无关 ——
+    //   与绘制用的是同一套映射。
     const bool cont = cfg_.page.continuous;
     const LineBox* best = nullptr;
     float best_d = 1e30f;

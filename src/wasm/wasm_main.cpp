@@ -378,8 +378,8 @@ uint8_t channelClamp(int v) { return static_cast<uint8_t>(v < 0 ? 0 : (v > 255 ?
 /**
  * 光标样式：颜色与宽度。色值是各通道 0~255，宽度单位是磅。
  *
- * 走引擎的 setCaretAndSelectionStyle 而不是 applyConfig：后者会作废底图，
- *   而底图全建要把窗口里的每一页重新光栅（3 页约 32 ms）—— 取色器连续改时每一下都付。
+ * 走引擎的 setCaretAndSelectionStyle 而不是 applyConfig：后者会改光栅签名，
+ *   页位图整份作废，窗口里每一页都要重新光栅（3 页约 32 ms）—— 取色器连续改时每一下都付。
  * 不在这里呈现：与 setZoom 同一档，由宿主决定何时上屏（两个宿主的门面都会补一次 present）。
  */
 void setCaretStyle(int r, int g, int b, int a, float width_pt) {
@@ -551,7 +551,7 @@ std::string statsJson() {
     o << "\"pageFpMs\":" << s.page_fp_ms << ",";
     o << "\"paintMs\":" << s.paint_ms << ",";
     // 三段的用途是判"该优化哪一段"：铺面积走 memcpy、字形走扫描线光栅、
-    //   帧搬运走 copyRectFrom。合成一个 paintMs 就只能得出"绘制慢"。
+    //   其余是记账与差分。合成一个 paintMs 就只能得出"绘制慢"。
     o << "\"paintFillMs\":" << s.paint_fill_ms << ",";
     o << "\"paintGlyphMs\":" << s.paint_glyph_ms << ",";
     // 含在 paintGlyphMs 里的一笔：只为记账取字形包围盒。它不画像素，
@@ -559,12 +559,12 @@ std::string statsJson() {
     o << "\"paintGlyphBoundsMs\":" << s.paint_glyph_bounds_ms << ",";
     o << "\"paintedGlyphs\":" << s.painted_glyphs << ",";
     o << "\"paintPresentMs\":" << s.paint_present_ms << ",";
-    // 残差那五段的分解。残差 = 总耗时减掉铺面积与字形，它装的是入口准备、换窗与页循环的
-    //   杂项、帧贴回、上屏记账、光标与上报 —— 合成一个数就只能猜该动哪一块。
-    //   注意写底图那两段（铺面积、字形）包在 paintSwapMs 里面，不是与它并列。
+    // 残差那五段的分解。残差 = 总耗时减掉铺面积与字形，它装的是入口准备、内容光栅的
+    //   杂项、瞬态差分、脏矩形记账、光标与上报 —— 合成一个数就只能猜该动哪一块。
+    //   注意写页位图那两段（铺面积、字形）包在 paintSwapMs 里面，不是与它并列。
     o << "\"paintPreMs\":" << s.paint_pre_ms << ",";
     o << "\"paintSwapMs\":" << s.paint_swap_ms << ",";
-    o << "\"paintBlitMs\":" << s.paint_blit_ms << ",";
+    o << "\"paintTransientMs\":" << s.paint_transient_ms << ",";
     o << "\"paintOverlayMs\":" << s.paint_overlay_ms << ",";
     o << "\"paintLedgerMs\":" << s.paint_ledger_ms << ",";
     o << "\"paintReportMs\":" << s.paint_report_ms << ",";
@@ -963,8 +963,9 @@ bool tabCaret(bool backward) { return g_engine.tabCaretAndRender(backward); }
 std::string auditFrame() { return g_engine.auditFrameJson(); }
 
 /**
- * 底图自审：平移复用得到的底图 vs 从零全建，逐字节比对（0 = 一致）。
- * 与 auditFrame 的分工见 engine.h：那一条比帧，帧是从底图搬的，盖不住底图本身出错。
+ * 内容自审：页位图按窗口拼起来 vs 从零重画，逐字节比对（0 = 一致）。
+ * 与 auditFrame 的分工见 engine.h：那一条比"内容 + 瞬态"，只有内容那一层错时
+ *   两条都红；拼装本身错时也只有这一条查得出来。
  */
 std::string auditBase() { return g_engine.auditBaseJson(); }
 

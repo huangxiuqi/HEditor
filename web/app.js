@@ -1652,7 +1652,7 @@ function renderLayout(st) {
       st.missingGlyphCount === 0 ? 'ok' : 'warn'],
     ['— shape', `${fmt(st.shapeMs)} ms`],
     ['— paint（' + rasterBackendLabel() + '）', `${fmt(st.paintMs)} ms`],
-    // 绘制三段：铺面积 / 字形 / 帧搬运。分开报的理由与引擎里那三个字段一致 ——
+    // 绘制三段：铺面积 / 字形 / 呈现其余。分开报的理由与引擎里那三个字段一致 ——
     //   它们各自对应一种完全不同的优化手段，合成一个数就只能得出"绘制慢"。
     ['  · 铺面积', `${fmt(st.paintFillMs)} ms`],
     ['  · 字形', `${fmt(st.paintGlyphMs)} ms`, 'hi'],
@@ -1660,13 +1660,13 @@ function renderLayout(st) {
     //   几百个字形 1 ms（1~3 µs/个）是正常量级；上了 10 µs/个 才是光栅本身的问题。
     ['  · 每字形', st.paintedGlyphs ? `${fmt(st.paintGlyphMs * 1000 / st.paintedGlyphs, 2)} µs` +
                                      `（${st.paintedGlyphs} 个）` : '—'],
-    ['  · 帧搬运', `${fmt(st.paintPresentMs)} ms`],
+    ['  · 呈现其余', `${fmt(st.paintPresentMs)} ms`],
     ['字形缓存 占用 / 上限', `${kb(st.glyphCacheBytes)} / ${kb(st.glyphCacheLimit)}`],
-    ['帧尺寸', `${api.read('frameWidth')} × ${api.read('frameHeight')} px`],
+    ['窗口尺寸', `${api.read('frameWidth')} × ${api.read('frameHeight')} px`],
     ['页尺寸 / 页间隙', `${api.read('pagePxWidth')} × ${api.read('pagePxHeight')} / ${api.read('pageGapPx')} px`],
     ['视口窗口', `第 ${api.read('windowFirstPage')} 页起 · ${api.read('windowPageCount')} 页` +
       `（${pageCanvases.size} 张页画布）`],
-    ['帧字节数', kb(api.read('frameByteSize'))],
+    ['窗口导出图', kb(api.read('frameByteSize'))],
   ]);
 }
 

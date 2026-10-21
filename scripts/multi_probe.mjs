@@ -123,6 +123,26 @@ async function main() {
             `${own.aPages} / ${own.bPages} / ${own.cPages} 页`);
   chk.check('初始内容相同（同一场景，作为后面的对照基线）', own.sameText === true);
 
+  // 画布"画了"不等于"看得见"：页容器若按内容收缩成零宽（子元素全是绝对定位），
+  //   overflow: hidden 会把每一页裁没，而像素判据全绿。这里比容器与画布的尺寸，
+  //   与视口位置无关 —— elementFromPoint 那条在长页面上会被滚动位置干扰。
+  const visible = await cdp.eval(
+    `const hs = [${A}, ${B}, ${C}];` +
+    'const out = [];' +
+    'for (const h of hs) {' +
+    '  const box = h.container.querySelector("#pages");' +
+    '  const cv = [...h.container.querySelectorAll("#pages canvas")]' +
+    '      .find((e) => getComputedStyle(e).display !== "none");' +
+    '  if (!box || !cv) { out.push("缺容器或缺画布"); continue; }' +
+    '  const br = box.getBoundingClientRect(), cr = cv.getBoundingClientRect();' +
+    '  out.push(br.width >= cr.width - 1 && br.height >= cr.height - 1 && cr.width >= 2' +
+    '           ? "ok" : "bbox " + Math.round(br.width) + "x" + Math.round(br.height) +' +
+    '             " < canvas " + Math.round(cr.width) + "x" + Math.round(cr.height));' +
+    '}' +
+    'return out;');
+  chk.check('每一份的页容器都装得下它的页画布（没被裁掉）',
+            visible.every((v) => v === 'ok'), JSON.stringify(visible));
+
   console.log('\n[P3] 改 A 不动 B 与 C');
   const typeA = await cdp.eval(
     `const a = ${A}, b = ${B}, c = ${C};` +

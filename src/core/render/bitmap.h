@@ -1,8 +1,8 @@
 /**
- * 光栅目标（帧缓冲）。
+ * 光栅目标（一张 RGBA 位图：页位图、导出图、审计参照都是它）。
  *
  * 只有一个实现 bitmap_skia.cpp：绘制经 SkCanvas、字形经 SkFont 与 FreeType，
- * 像素落在同一块 RGBA 缓冲里（frame / frameBytes / copyRectFrom 的契约不变）。
+ * 像素落在同一块 RGBA 缓冲里（frame / frameBytes 的契约不变）。
  * 自写扫描线光栅器已退役 —— 两套后端对同一条排版结果不可能逐像素一致，
  * 跨后端比较没有判据意义；合成一套之后 native 单测跑的就是线上那条路径。
  */
@@ -41,38 +41,6 @@ public:
     void strokeRect(const Rect& r, Color c, float thickness);
 
     /**
-     * 整幅按行平移 dy 像素（dy > 0 向下、< 0 向上），露出来的那一条填零。
-     *
-     * 为什么要有它：视口窗口整体挪 k 页时，帧与底图里重叠的那几页像素其实是同一批，
-     *   只是位置变了。搬一次 memmove 就能把它们留住，而重新光栅一遍要付整页的
-     *   字形钱（3 页量到 32 ms，其中字形 15 ms）。露出来的那一条是垃圾，
-     *   调用方必须紧接着把它写掉（贴新页），不能直接上屏。
-     * 实现放头文件是因为它与光栅后端无关（只是搬字节），而两个后端只有一个会被
-     *   编进目标 —— 放在 .cpp 里会出现"native 有、wasm 没有"的链接失败。
-     * 记账（painted_px_）不动：它搬的是像素、不是"画"像素。
-     */
-    void shiftVertical(int dy) {
-        if (dy == 0 || w_ <= 0 || h_ <= 0) return;
-        const size_t row_bytes = static_cast<size_t>(w_) * 4u;
-        uint8_t* p = px_.data();
-        if (dy >= h_ || dy <= -h_) {
-            std::memset(p, 0, row_bytes * static_cast<size_t>(h_));
-            return;
-        }
-        if (dy > 0) {
-            std::memmove(p + row_bytes * static_cast<size_t>(dy), p,
-                         row_bytes * static_cast<size_t>(h_ - dy));
-            std::memset(p, 0, row_bytes * static_cast<size_t>(dy));
-        } else {
-            const int d = -dy;
-            std::memmove(p, p + row_bytes * static_cast<size_t>(d),
-                         row_bytes * static_cast<size_t>(h_ - d));
-            std::memset(p + row_bytes * static_cast<size_t>(h_ - d), 0,
-                        row_bytes * static_cast<size_t>(d));
-        }
-    }
-
-    /**
      * 按 c.a 的透明度把颜色混进 r 覆盖的区域（保留底下已经画好的内容）。
      *
      * 与 fillRect 分开的理由只有一条：选区是盖在文字上的，实心填充会把字一起抹掉，
@@ -83,19 +51,10 @@ public:
     void blendRect(const Rect& r, Color c);
 
     /**
-     * 把 src 中 r 覆盖的区域原样拷贝到本图的同一位置。
-     * 用途：帧缓冲 = 底图（base）+ 光标。光标移动时只需把"旧光标矩形"和
-     * "新光标矩形"两块从底图贴回来，再画新光标 —— 这就是局部重绘的全部机制。
-     * 尺寸不一致时直接不动（宁可不画，也不能写错行跨度）。
-     */
-    void copyRectFrom(const Bitmap& src, const Rect& r);
-
-    /**
      * 把 src 的 src_rect 区域搬到本图的 (dst_x, dst_y)：源与目标是不同尺寸的两块图。
      *
-     * 与 copyRectFrom 的分工：那个是"两块同尺寸、同一坐标贴回去"（帧 = 底图）；
-     *   这个是"页位图 -> 帧的某个槽"这种源小、目标大且原点不同的搬运。
-     * 落点必须是整数像素：页在帧里的位置由槽号乘步距定，本来就是整数，
+     * 用途：页位图 -> 导出图这种"源小、目标大且原点不同"的搬运。
+     * 落点必须是整数像素：页在导出图里的位置由页号乘步距定，本来就是整数，
      *   这里不做任何采样 —— 一旦按浮点落点插值，字就先糊一层。
      * 越界按目标裁剪（窗口最后一槽可能贴着帧底），源侧也按自身范围裁剪。
      */

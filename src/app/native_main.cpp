@@ -183,7 +183,7 @@ int main(int argc, char** argv) {
         std::printf("  --- paint 三段分解 ---\n");
         report("铺面积", pf);
         report("字形", pg);
-        report("帧缓冲搬移", pp);
+        report("呈现其余", pp);
     } else {
         std::printf("\n（提示：加 --repeat 15 再跑，单次计时在噪声里）\n");
     }
@@ -205,12 +205,12 @@ int main(int argc, char** argv) {
                 st.frame_width, st.frame_height);
     std::printf("  ├ 铺面积      : %.3f ms\n", st.paint_fill_ms);
     std::printf("  ├ 字形        : %.3f ms   (共 %d 个字形)\n", st.paint_glyph_ms, st.glyph_count);
-    std::printf("  └ 帧缓冲搬移  : %.3f ms\n", st.paint_present_ms);
+    std::printf("  └ 呈现其余    : %.3f ms   (脏矩形记账 + 瞬态差分)\n", st.paint_present_ms);
     // 占用贴着上限就会被整份抹掉 —— 这是"预热了却不见变快"的成因。
     std::printf("字形缓存        : 占用 %.1f MB / 上限 %.1f MB\n",
                 static_cast<double>(st.glyph_cache_bytes) / (1024.0 * 1024.0),
                 static_cast<double>(st.glyph_cache_limit) / (1024.0 * 1024.0));
-    std::printf("帧缓冲          : %.2f MB\n",
+    std::printf("窗口导出图      : %.2f MB\n",
                 static_cast<double>(engine.frameBytes()) / (1024.0 * 1024.0));
 
     std::printf("\n=== 整形诊断（中文，横排）===\n%s",

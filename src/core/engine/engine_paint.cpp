@@ -1,9 +1,8 @@
 /**
  * 呈现：保证窗口内每页的内容新鲜，记下这一拍要上屏的矩形，并按需导出像素。
  *
- * 没有整窗帧了：渲染只写页位图（内容），光标与选区是导出时才叠上去的瞬态。
- *   于是"局部重绘"这件事退化成"页位图变了哪一块"，宿主按页上的矩形贴 ——
- *   不再有"帧/底图两份像素、靠搬矩形保持同步"的那套机器。
+ * 渲染只写页位图（内容），光标与选区是导出时才叠上去的瞬态。于是"局部重绘"
+ *   退化成"页位图变了哪一块"，宿主按页上的矩形贴：没有第二份像素要跟着同步。
  * 表单标记（方括号、小点）画在页位图里，与正文共用同一份行盒几何 —— 见 rasterControlMarks。
  */
 
@@ -240,14 +239,24 @@ void EditorEngine::rasterIntoBitmap(Bitmap& target, int page_index, const float*
     }
     raster_fill_ms_ += msSince(t_fill0);
 
+    // 连页接缝：行按"行顶所在的条带"归属，一行最多跨一条边界，所以溢出只朝下流。
+    //   上一条带的末行越过带底的那一截，要在本带的顶部再画一遍 —— 两条带各画自己
+    //   看得见的那半，拼起来才是完整的一行。分页模式下不会发生（断页把行整个挪走）。
+    const bool cont = cfg_.page.continuous;
+    const float slab_pt = cfg_.page.slabHeightPt();
+    const float spill_dy = -slab_pt * zoom;
+    const bool spill = cont && page_index > 0;
+
     // 表格格线：画在页位图里（它不随光标变），在字形之前 —— 线压不到字上。
     //   每个格只画自己的外框，于是合并格内部不会多出几条线；跨页处按片段的
     //   cont_top / cont_bottom 跳过切口那条边，看起来是裁开的而不是分出一条线。
-    if (!layout_.placed_tables.empty()) {
+    auto emitTables = [&](int page, float dy, bool spill_only) {
+        if (layout_.placed_tables.empty()) return;
         for (const PlacedTable& pt : layout_.placed_tables) {
             for (const PlacedRow& pr : pt.placed) {
-                if (pr.page != page_index) continue;
-                const float top = pr.y * zoom;
+                if (pr.page != page) continue;
+                if (spill_only && !(pr.y + pr.h > slab_pt)) continue;
+                const float top = pr.y * zoom + dy;
                 const float bot = top + pr.h * zoom;
                 if (bot <= top) continue;
                 int row_seen = -1;
@@ -291,7 +300,7 @@ void EditorEngine::rasterIntoBitmap(Bitmap& target, int page_index, const float*
                 }
             }
         }
-    }
+    };
 
     // 页位图里有页面底色、格线、字形、原子框，最后是表单标记（见函数末尾）。
     //
@@ -299,65 +308,68 @@ void EditorEngine::rasterIntoBitmap(Bitmap& target, int page_index, const float*
     //   逐字形调用时，光栅器那笔固定开销（Skia 侧要新建 paint、装配一遍字形运行）
     //   全摊在一个字上 —— 整页重画变成 10 ms 量级就是这么来的。
     //   段内的次序不能动：它就是绘制次序，重叠字形靠它决定压盖。
-    std::vector<uint32_t> run_ids;
-    std::vector<float> run_x;
-    std::vector<float> run_y;
-    const auto t_glyph0 = Clock::now();
-    hb_font_t* run_font = nullptr;
-    Color run_color{};
-    float run_rot = 0.0f;
-    auto flush_run = [&]() {
-        if (run_ids.empty()) return;
-        target.drawGlyphs(run_font, run_ids.data(), run_x.data(), run_y.data(),
-                          static_cast<int>(run_ids.size()), units_to_px, run_color, run_rot);
-        run_ids.clear();
-        run_x.clear();
-        run_y.clear();
+    auto emitGlyphs = [&](int page, float dy, bool spill_only) {
+        std::vector<uint32_t> run_ids;
+        std::vector<float> run_x;
+        std::vector<float> run_y;
+        hb_font_t* run_font = nullptr;
+        Color run_color{};
+        float run_rot = 0.0f;
+        auto flush_run = [&]() {
+            if (run_ids.empty()) return;
+            target.drawGlyphs(run_font, run_ids.data(), run_x.data(), run_y.data(),
+                              static_cast<int>(run_ids.size()), units_to_px, run_color, run_rot);
+            run_ids.clear();
+            run_x.clear();
+            run_y.clear();
+        };
+        // 只过这一页的字形区间（二分，见 glyphRangeOnPage）。
+        //   整篇遍历 + 判页号：2000 段文档约 8 万个字形，每画一页都要过一遍，
+        //   反推约 2 ms/页 —— 比真正画这一页的字形（742 个约 0.9 ms）还贵。
+        int gb = 0;
+        int ge = 0;
+        glyphRangeOnPage(page, &gb, &ge);
+        for (int k = gb; k < ge; ++k) {
+            const PlacedGlyph& pg = layout_.glyphs[static_cast<size_t>(k)];
+            if (!pg.font) continue;
+            // 接缝那一趟只取越过带底的字形；其余情况取整页。
+            if (spill_only && !(pg.y_pt > slab_pt - 1.0f)) continue;
+            // 画带时按字形的纵向位置筛：行盒的块轴范围就是它的 ascent/descent，
+            //   所以"落在带内"就是"属于这条带"。带向外扩了 1 像素，相邻带在中线相接。
+            //   接缝那一趟要按平移之后的坐标筛（它画在本带的顶部）。
+            const float y_pt = pg.y_pt + dy / zoom;
+            if (band && (y_pt < *band_lo_pt - 1.0f || y_pt > *band_hi_pt + 1.0f)) continue;
+            hb_font_t* f = pg.font->hb();
+            if (!run_ids.empty() &&
+                (f != run_font || pg.color != run_color || pg.rotate_deg != run_rot)) {
+                flush_run();
+            }
+            if (run_ids.empty()) {
+                run_font = f;
+                run_color = pg.color;
+                run_rot = pg.rotate_deg;
+            }
+            run_ids.push_back(pg.glyph_id);
+            run_x.push_back(pg.x_pt * zoom);
+            run_y.push_back(pg.y_pt * zoom + dy);
+        }
+        flush_run();
     };
-    // 只过这一页的字形区间（二分，见 glyphRangeOnPage）。
-    //   整篇遍历 + 判页号：2000 段文档约 8 万个字形，每画一页都要过一遍，
-    //   反推约 2 ms/页 —— 比真正画这一页的字形（742 个约 0.9 ms）还贵。
-    int gb = 0;
-    int ge = 0;
-    glyphRangeOnPage(page_index, &gb, &ge);
-    for (int k = gb; k < ge; ++k) {
-        const PlacedGlyph& pg = layout_.glyphs[static_cast<size_t>(k)];
-        if (!pg.font) continue;
-        // 画带时按字形的纵向位置筛：行盒的块轴范围就是它的 ascent/descent，
-        //   所以"落在带内"就是"属于这条带"。带向外扩了 1 像素，相邻带在中线相接。
-        if (band && (pg.y_pt < *band_lo_pt - 1.0f || pg.y_pt > *band_hi_pt + 1.0f)) continue;
-        hb_font_t* f = pg.font->hb();
-        if (!run_ids.empty() &&
-            (f != run_font || pg.color != run_color || pg.rotate_deg != run_rot)) {
-            flush_run();
-        }
-        if (run_ids.empty()) {
-            run_font = f;
-            run_color = pg.color;
-            run_rot = pg.rotate_deg;
-        }
-        run_ids.push_back(pg.glyph_id);
-        run_x.push_back(pg.x_pt * zoom);
-        run_y.push_back(pg.y_pt * zoom);
-    }
-    flush_run();
-    raster_glyph_ms_ += msSince(t_glyph0);
 
     // 行内原子的占位框。与字形一样只过这一页的行（行数组按页单调，两端二分一次），
     //   也照样按行带筛：一条带的边界就是行的块轴范围，框不会跨出它自己那一行。
-    {
-        const auto t_atom0 = Clock::now();
+    auto emitAtoms = [&](int page, float dy, bool spill_only) {
         int lb_lo = 0;
         int lb_hi = -1;
-        caret_.linesOnPage(page_index, &lb_lo, &lb_hi);
+        caret_.linesOnPage(page, &lb_lo, &lb_hi);
         const int n_lines = static_cast<int>(layout_.lines.size());
         for (int li = lb_lo; li <= lb_hi && li < n_lines; ++li) {
             if (li < 0) continue;
             const LineBox& lb = layout_.lines[static_cast<size_t>(li)];
-            if (band &&
-                (lb.block_hi_pt < *band_lo_pt - 1.0f || lb.block_lo_pt > *band_hi_pt + 1.0f)) {
-                continue;
-            }
+            if (spill_only && !(lb.block_hi_pt > slab_pt)) continue;
+            const float lo_pt = lb.block_lo_pt + dy / zoom;
+            const float hi_pt = lb.block_hi_pt + dy / zoom;
+            if (band && (hi_pt < *band_lo_pt - 1.0f || lo_pt > *band_hi_pt + 1.0f)) continue;
             for (size_t ci = 0; ci < lb.clusters.size(); ++ci) {
                 const LineCluster& c = lb.clusters[ci];
                 if (c.atom == InlineAtom::None) continue;
@@ -365,17 +377,29 @@ void EditorEngine::rasterIntoBitmap(Bitmap& target, int page_index, const float*
                 const float a1 = (ci + 1 < lb.clusters.size())
                                      ? lb.inline_origin_pt + lb.clusters[ci + 1].inline_pt
                                      : lb.inline_origin_pt + lb.inline_end_pt;
-                drawAtomBox(target, lb, c, a1, 0.0f);
+                drawAtomBox(target, lb, c, a1, dy);
             }
         }
-        raster_fill_ms_ += msSince(t_atom0);
-    }
+    };
 
-    // 表单标记放在最后：括号要压在原子框之上（它们画在帧上时也是最后画的），
+    const auto t_glyph0 = Clock::now();
+    emitTables(page_index, 0.0f, false);
+    emitGlyphs(page_index, 0.0f, false);
+    emitAtoms(page_index, 0.0f, false);
+    if (spill) {
+        emitTables(page_index - 1, spill_dy, true);
+        emitGlyphs(page_index - 1, spill_dy, true);
+        emitAtoms(page_index - 1, spill_dy, true);
+    }
+    raster_glyph_ms_ += msSince(t_glyph0);
+
+    // 表单标记放在最后：括号要压在原子框之上（它是内容的最后一层），
     //   小点压在内容之上 —— 一个方块盖住几个字的角，比起被字盖掉、看着像脏点要好。
     {
         const auto t_mark0 = Clock::now();
-        rasterControlMarks(target, page_index, band_lo_pt, band_hi_pt);
+        rasterControlMarks(target, page_index, band_lo_pt, band_hi_pt, 0.0f, false);
+        if (spill)
+            rasterControlMarks(target, page_index - 1, band_lo_pt, band_hi_pt, spill_dy, true);
         raster_glyph_ms_ += msSince(t_mark0);
     }
 }
@@ -441,7 +465,6 @@ void EditorEngine::trimPageCache(int first_page, int count) {
     // 窗口内一页都不丢：它们是下一拍很可能还要用的，而且页位图就是导出像素的唯一来源 ——
     //   丢了这一段，窗口里就有几页拿不出像素。
     //   注意别在这里做"整篇窗口就整份清掉"那种省内存的优化：它会让导出图变成一片背景色。
-    //   （窗口大到那个程度时，旧版的整窗底图本来也是这么大，内存并不更差。）
     const std::size_t cap = static_cast<std::size_t>(std::max(count + 2, 4));
     if (page_cache_.size() <= cap) return;
     std::vector<std::pair<int, int>> far;  // (距离, 页号)
@@ -840,7 +863,7 @@ void EditorEngine::presentInternal(int first_page, int count) {
     stats_.paint_present_ms = std::max(0.0, paint_ms - raster_fill_ms_ - raster_glyph_ms_);
     stats_.paint_pre_ms = spanMs(t0, t_pre);
     stats_.paint_swap_ms = spanMs(t_pre, t_swap);
-    stats_.paint_blit_ms = spanMs(t_swap, t_blit);
+    stats_.paint_transient_ms = spanMs(t_swap, t_blit);
     stats_.paint_overlay_ms = spanMs(t_blit, t_overlay);
     stats_.paint_ledger_ms = spanMs(t_overlay, t_ledger);
     stats_.paint_report_ms = spanMs(t_ledger, Clock::now());
@@ -876,6 +899,26 @@ void EditorEngine::collectTransient(int page, PageTransient* out) const {
     int cp = -1;
     const Rect cr = caretRectPx(&cp);
     if (cp == page && caret_visible_ && cr.w > 0.0f && cr.h > 0.0f) out->caret = cr;
+
+    // 连页接缝：上一条带里越过带底的选区与光标，在本带顶部还有一半。
+    //   两带各画自己那半，与内容的补画是同一条规则 —— 否则接缝上会出现
+    //   "字补上了、底色高亮只到一半"。
+    if (!cfg_.page.continuous || page <= 0) return;
+    const float slab_px = cfg_.page.slabHeightPt() * cfg_.zoom;
+    const float ph = static_cast<float>(pagePxHeight());
+    for (const PageRect& pr : selectionRectsPxIn(page - 1, 1)) {
+        const float bot = pr.r_pt.y + pr.r_pt.h;
+        if (bot <= slab_px) continue;
+        const float y0 = std::max(0.0f, pr.r_pt.y - slab_px);
+        const float y1 = std::min(ph, bot - slab_px);
+        if (y1 > y0) out->sel.push_back(Rect{pr.r_pt.x, y0, pr.r_pt.w, y1 - y0});
+    }
+    if (cp == page - 1 && caret_visible_ && cr.w > 0.0f && cr.h > 0.0f && out->caret.w <= 0.0f) {
+        const float bot = cr.y + cr.h;
+        const float y0 = std::max(0.0f, cr.y - slab_px);
+        const float y1 = std::min(ph, bot - slab_px);
+        if (bot > slab_px && y1 > y0) out->caret = Rect{cr.x, y0, cr.w, y1 - y0};
+    }
 }
 
 /**
@@ -1047,7 +1090,7 @@ void EditorEngine::drawAtomBox(Bitmap& target, const LineBox& lb, const LineClus
  * 的 5D 小节），不需要"矩形出口"；跟着内容缓存反而少一份逐帧擦除的账。
  */
 void EditorEngine::rasterControlMarks(Bitmap& target, int page_index, const float* band_lo_pt,
-                                      const float* band_hi_pt) {
+                                      const float* band_hi_pt, float dy_px, bool spill_only) {
     // 只读不画：它是呈现与打印态，括号落进版面就印出来了。
     if (mode_ == EditMode::ReadOnly) return;
 
@@ -1055,6 +1098,8 @@ void EditorEngine::rasterControlMarks(Bitmap& target, int page_index, const floa
     const float units_to_px = zoom / kFontScalePerPt;
     const float dot = std::max(1.0f, cfg_.control_dot_pt * zoom);
     const bool band = band_lo_pt && band_hi_pt;
+    // 接缝那一趟：只画越过带底的那一截（见 rasterIntoBitmap），坐标整体上移一个带高。
+    const float slab_pt = cfg_.page.slabHeightPt();
 
     // 括号：只过这一页的行（行数组按页单调，两端二分一次），带外的行跳过。
     //   与原子框那段同一个走法：一条带的边界就是行的块轴范围。
@@ -1067,8 +1112,10 @@ void EditorEngine::rasterControlMarks(Bitmap& target, int page_index, const floa
         if (k < 0) continue;
         const LineBox& lb = lines[static_cast<size_t>(k)];
         if (!lb.bracket_font) continue;
-        if (band && (lb.block_hi_pt < *band_lo_pt - 1.0f || lb.block_lo_pt > *band_hi_pt + 1.0f))
-            continue;
+        if (spill_only && !(lb.block_hi_pt > slab_pt)) continue;
+        const float lo_pt = lb.block_lo_pt + dy_px / zoom;
+        const float hi_pt = lb.block_hi_pt + dy_px / zoom;
+        if (band && (hi_pt < *band_lo_pt - 1.0f || lo_pt > *band_hi_pt + 1.0f)) continue;
 
         hb_font_t* hbf = lb.bracket_font->hb();
 
@@ -1099,15 +1146,15 @@ void EditorEngine::rasterControlMarks(Bitmap& target, int page_index, const floa
 
             if (!lb.vertical) {
                 // 横排：字形原点的 y 就是基线，行内轴是 x。
-                target.drawGlyph(hbf, g, along_pt * zoom, lb.bracket_axis_pt * zoom, units_to_px,
-                                 col, 0.0f);
+                target.drawGlyph(hbf, g, along_pt * zoom, lb.bracket_axis_pt * zoom + dy_px,
+                                 units_to_px, col, 0.0f);
             } else {
                 // 竖排：括号跟着转 90°（顺时针）。字形轮廓本身是横排形态，
                 //   [ 转过来开口朝下 —— 正好是"内容继续往下排"的意思。
                 //   不转的话括号会横躺在列里，开口方向与行内轴垂直（错的）。
                 //   旋转后 advance 沿 +y，所以位置分量是 (列内横轴笔位, 行内轴)。
-                target.drawGlyph(hbf, g, lb.bracket_axis_pt * zoom, along_pt * zoom, units_to_px,
-                                 col, 90.0f);
+                target.drawGlyph(hbf, g, lb.bracket_axis_pt * zoom, along_pt * zoom + dy_px,
+                                 units_to_px, col, 90.0f);
             }
         }
     }
@@ -1122,12 +1169,13 @@ void EditorEngine::rasterControlMarks(Bitmap& target, int page_index, const floa
         const Color col = c.read_only ? cfg_.control_mark_ro : cfg_.control_mark;
         for (const ControlRect& cr : controlRects(ci)) {
             if (cr.page != page_index) continue;
-            if (band &&
-                (cr.r_pt.y + cr.r_pt.h < *band_lo_pt - 1.0f || cr.r_pt.y > *band_hi_pt + 1.0f))
-                continue;
+            if (spill_only && !(cr.r_pt.y + cr.r_pt.h > slab_pt)) continue;
+            const float lo_pt = cr.r_pt.y + dy_px / zoom;
+            const float hi_pt = cr.r_pt.y + cr.r_pt.h + dy_px / zoom;
+            if (band && (hi_pt < *band_lo_pt - 1.0f || lo_pt > *band_hi_pt + 1.0f)) continue;
             // 小点：右下角、内缩一点
             const float x1 = (cr.r_pt.x + cr.r_pt.w) * zoom;
-            const float y1 = (cr.r_pt.y + cr.r_pt.h) * zoom;
+            const float y1 = (cr.r_pt.y + cr.r_pt.h) * zoom + dy_px;
             target.fillRect(Rect{x1 - dot, y1 - dot, dot, dot}, col);
         }
     }
