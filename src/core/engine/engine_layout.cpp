@@ -340,15 +340,17 @@ void EditorEngine::relayout() {
     // 回退）；只重排脏段、后缀原样搬回（trySpliceOnly，要求后缀的行结构没变）；
     // 前缀保留加从脏段续排（常规增量）；其余情况全量。
     const bool must_full = layout_needs_full_ || layout_dirty_from_ >= n_para;
-    const int from = layout_dirty_from_;
-    // 有表格时不做任何增量：续排与后缀复用都假定"排版状态只有页号、块轴位置、行数三个标量"，
-    //   而表格外的状态还有"当前在第几行第几格的哪一页片段"。从中间续排会丢掉那份上下文，
-    //   产出的位置与全量重排不一致 —— 退回整篇重排，正确优先。
-    // 旧版有表格、新版没有（删掉整张表）同样要走全量：那时 tables_ 已经空了，只看它会把
-    //   这一下当成普通编辑，而 layout_ 里全是带表格时排出来的行盒。
-    const bool had_tables = !layout_.placed_tables.empty();
-    const bool can_resume = tables_.empty() && !had_tables && !must_full && from > 0 &&
-                            from < n_para && layout_.para_index.size() > static_cast<size_t>(from);
+    // 脏区起点先对齐到表格边界：落在表里就从这张表的起始段重排（见 tableAlignedFrom）。
+    //   对齐之后，"从 from 续排"与"整篇重排"在表格这一段上走的是同一条路。
+    const int from = tableAlignedFrom(layout_dirty_from_);
+    // 表格不再拦续排：脏区在表里时 from 已对齐到那张表的起始段，格上下文从零重建；
+    //   脏区在表之后时表在前缀里，一个字节都不用动；脏区在表之前时表随后缀一起重排。
+    //   （旧版有表格、新版删掉了的情况也走这条路：截断会把那张表的几何一起丢掉，
+    //   见 truncateLayoutAt。）
+    // 后缀复用仍然拦表格 —— 它假定"后缀只沿块轴平移"，而表格的行高由格内容结算、
+    //   整行放不下时还要回挪，不是行盒累加能算出来的（见 trySuffixReuse）。
+    const bool can_resume = !must_full && from > 0 && from < n_para &&
+                            layout_.para_index.size() > static_cast<size_t>(from);
 
     last_reused_paragraphs_ = 0;
     last_suffix_shifted_ = false;
@@ -483,8 +485,10 @@ EditorEngine::SuffixReuse EditorEngine::trySuffixReuse(int from, int dirty_count
     *page_hi = -1;
     *relaid_paragraphs = 1;
     *all_pages_changed = false;
-    // 有表格时不做后缀复用：理由与 can_resume 那一条相同 —— 搬回来的后缀带着旧的页号与
-    //   块轴位置，而表格让"这一段落在哪一页的哪一格"不再是三个标量能续上的。
+    // 有表格时不做后缀复用：这一条把后缀整段沿块轴平移，而表格的行高由格内容结算
+    //   （内边距、最小行高、整行放不下时整行回挪、跨页拆分行都在里面），不是"行盒字号
+    //   乘行距"能累加出来的。平移量算错不会崩，只会让表格越错越远 ——
+    //   退到续排（从脏段重排到末尾），那一趟与全量走同一条路。
     if (!tables_.empty() || !layout_.placed_tables.empty()) return SuffixReuse::None;
     const int n_para = static_cast<int>(blocks().size());
     const int n_old = static_cast<int>(layout_.para_index.size());
@@ -824,6 +828,25 @@ void EditorEngine::markLayoutDirtyForBrackets() {
     if (lo >= 0) markLayoutDirty(lo);
 }
 
+int EditorEngine::tableAlignedFrom(int from) const {
+    if (tables_.empty()) return from;
+    const int n = static_cast<int>(blocks().size());
+    if (from <= 0 || from >= n) return from;
+    const std::vector<CellSlot>& path = blocks()[static_cast<size_t>(from)].cell_path;
+    if (path.empty()) return from;
+    // 由最外层表定起点：内层表的行高并进外层格的内容高，只从内层重排算不出外层那一行
+    //   该多高（"等所有格排完才结算"是行的性质，不是格的）。
+    const uint64_t handle = path.front().table;
+    for (const LayoutTable& t : tables_) {
+        if (t.handle != handle) continue;
+        int lo = from;
+        for (const LayoutCell& c : t.cells) lo = std::min(lo, c.first_block);
+        return lo;
+    }
+    // 表格输入里找不到这张表（投影与排版输入不同步）：不动起点，交给续排照常处理。
+    return from;
+}
+
 void EditorEngine::truncateLayoutAt(int para) {
     if (para <= 0) {
         layout_ = LayoutResult{};
@@ -847,6 +870,13 @@ void EditorEngine::truncateLayoutAt(int para) {
     layout_.glyphs.resize(glyph_cut);
     layout_.para_index.resize(k);
     layout_.para_cluster_starts.resize(k);
+    // 表格的绘制几何一起截：起始段 >= para 的那些属于被丢掉的那一半。留下来的话，
+    //   续排重新 openTable 会再 push 一条，同一张表就有两份几何（一份是旧的，
+    //   绘制时两张都画 —— 症状是表格重影，而像素判据只在"整帧对拍"里才看得见）。
+    layout_.placed_tables.erase(
+        std::remove_if(layout_.placed_tables.begin(), layout_.placed_tables.end(),
+                       [para](const PlacedTable& t) { return t.first_block >= para; }),
+        layout_.placed_tables.end());
 }
 
 /**

@@ -811,6 +811,12 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
         {
             PlacedTable pt;
             pt.handle = t.handle;
+            // 起始段 = 所有格里最小的 first_block。表的位置由列定义定，但"它从第几段开始"
+            //   是格 → 段的映射给的，两者一起构成这张表的身份。
+            pt.first_block = t.cells.empty() ? 0 : t.cells.front().first_block;
+            for (const LayoutCell& c : t.cells) {
+                pt.first_block = std::min(pt.first_block, c.first_block);
+            }
             pt.x = f.x;
             pt.w = w;
             pt.rows = t.rows;
@@ -1071,6 +1077,13 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
         // 表格上下文切换：让 tstack 与这一块的 cell_path 对齐。逐层比对前缀，不同的层
         //   从内往外关、再按需从外往内开。表结构缺失（句柄找不到）时这一块按正文排 ——
         //   宁可位置不对，也不要拿一张错表去排。
+        //
+        // 切换之前先记下块轴位置：表起点（最外层表刚打开的那一块）的续排锚点必须是
+        //   "表顶"，而 openTable/openCell 会把 cursor_y 推进到格内第一行 —— 用它当锚点的话，
+        //   从表起点续排会把整张表下移一个内边距（与全量重排差一个 padding，[61] 抓到的
+        //   就是这个）。其余块不受影响：它们的 cursor_y 在切换前后是同一个值。
+        const float cursor_before_switch = cursor_y;
+        bool opened_outer = false;
         {
             const std::vector<CellSlot>& path = b.cell_path;
             size_t keep = 0;
@@ -1083,6 +1096,7 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
                 const LayoutTable* t = tableByHandle(path[d].table);
                 if (t == nullptr) break;
                 openTable(*t, cursor_y);
+                if (d == 0) opened_outer = true;
             }
             if (!path.empty() && path.size() == tstack.size()) {
                 const TableFrame& f = tstack.back();
@@ -1095,7 +1109,10 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
         last_space_after = b.space_after_pt;
 
         // 续排锚点必须在任何提前返回之前记录，空段也记，否则「从第 k 段续排」在空段上无定义。
-        pi.state_at_start = ReflowState{page_index, cursor_y, line_total};
+        //   表起点那一段用切换之前的块轴位置（见上面 cursor_before_switch）：从表起点续排
+        //   要落在表顶，不是格内第一行。
+        pi.state_at_start =
+            ReflowState{page_index, opened_outer ? cursor_before_switch : cursor_y, line_total};
         pi.line_begin = static_cast<int>(res.lines.size());
         pi.glyph_begin = static_cast<int>(res.glyphs.size());
         pi.cluster_count = 0;

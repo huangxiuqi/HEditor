@@ -417,6 +417,12 @@ struct PlacedRow {
  */
 struct PlacedTable {
     uint64_t handle = 0;
+    /**
+     * 这张表在块流里的起始段。增量排版据此判断"这一段的变更要不要连整张表一起重排"，
+     * 以及"截断到第 k 段时，哪些表的几何要一起丢掉"（见 EditorEngine::truncateLayoutAt）。
+     * 它是表自己的属性（列定义与格 → 段映射的产物），与位置无关。
+     */
+    int first_block = 0;
     float x = 0.0f;  // 表格左边（页内坐标）
     float w = 0.0f;
     int rows = 0;
@@ -853,8 +859,7 @@ struct LayoutResult {
  * 已知边界：只处理同一段内的边界，端点跨段的控件拿不到占位（控件矩形与命中测试已支持跨段）。
  */
 LayoutResult layoutDocument(FontLibrary& lib, const std::vector<BlockSpec>& blocks,
-                            const PageMetrics& page,
-                            const std::vector<LayoutTable>& tables = {});
+                            const PageMetrics& page, const std::vector<LayoutTable>& tables = {});
 
 /**
  * 续排入口：把 [from_para, to_para) 排入 @p out，返回结束时的续排状态。

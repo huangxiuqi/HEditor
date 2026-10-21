@@ -89,8 +89,9 @@ bool sameLine(const LineBox& a, const LineBox& b) {
  * 的话，整张表错位、行高算错、跨页片段切在错的地方，diff 都会是 0。
  */
 bool sameTable(const PlacedTable& a, const PlacedTable& b) {
-    if (a.handle != b.handle || !samePos(a.x, b.x) || !samePos(a.w, b.w) || a.rows != b.rows ||
-        a.cols != b.cols || a.col_x.size() != b.col_x.size() || a.cells.size() != b.cells.size() ||
+    if (a.handle != b.handle || a.first_block != b.first_block || !samePos(a.x, b.x) ||
+        !samePos(a.w, b.w) || a.rows != b.rows || a.cols != b.cols ||
+        a.col_x.size() != b.col_x.size() || a.cells.size() != b.cells.size() ||
         a.placed.size() != b.placed.size()) {
         return false;
     }

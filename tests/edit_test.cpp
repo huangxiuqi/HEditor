@@ -9894,7 +9894,13 @@ int main() {
                         static_cast<unsigned long long>(db.hash), eb.layout().lines.size(),
                         eb.layout().glyphs.size(), eb.layout().stats.page_count,
                         eb.layout().placed_tables.size());
-            expectTrue(db.hash == 0x6cc491bde1299030ull, "表格跨页的摘要未变");
+            // 2026-10-21 重取：0x6cc491bde1299030 → 0xa56d8ebd65233e40。
+            //   几何一个字节没变（行 157 / 字形 927 / 页 15 与旧值相同），变的是
+            //   ParaIndex::state_at_start.cursor_y —— 表起点那一段的续排锚点从"格内第一行"
+            //   改成"表顶"（见 layout.cpp 的 cursor_before_switch）。原值是错的：从它续排
+            //   会把整张表下移一个内边距，[61] 的"表里编辑"正是这么红的。摘要含这个字段，
+            //   所以它跟着变 —— 这是有意改口径，不是重构改坏了。
+            expectTrue(db.hash == 0xa56d8ebd65233e40ull, "表格跨页的摘要未变");
             expectTrue(eb.layout().stats.page_count >= 3 && !eb.layout().placed_tables.empty() &&
                            eb.layout().placed_tables[0].placed.size() >= 2,
                        "用例 B 确实把一行切到了两页上");
@@ -10800,6 +10806,127 @@ int main() {
         expectTrue(pix_before.size() == b.frameBytes() &&
                        std::memcmp(pix_before.data(), b.frame(), pix_before.size()) == 0,
                    "拒绝之后像素一个字节都没动");
+    }
+
+    // [61] 表格走进增量。
+    //
+    // 判据的形状：在表里 / 表前 / 表后各改一个字，每一轮都要满足两条 ——
+    //   (a) 没有退回整篇重排（layout_was_full 为假，且只重排了一部分）；
+    //   (b) 增量产出的排版与"同内容从零重排"逐位相同（摘要），表格结构自审为 0。
+    // 只有 (a) 会退化成"把增量关掉也全绿"（那就等于没做），只有 (b) 看不出有没有省下功夫。
+    std::printf("\n[61] 表格走进增量：表里改一个字，不退回整篇重排\n");
+    {
+        EngineConfig c61;
+        c61.zoom = 1.0f;
+        c61.page.width_pt = 320.0f;
+        c61.page.height_pt = 280.0f;
+        c61.page.margin_pt = 12.0f;
+
+        NodeTree t61;
+        const NodeId sec = t61.firstSectionId();
+        auto text = [&](NodeId parent, const std::string& s8) {
+            t61.setText(t61.appendChild(parent, NodeKind::TextRun), utf8ToCodepoints(s8));
+        };
+        auto mark = [&](NodeId parent) { t61.appendChild(parent, NodeKind::ParagraphMark); };
+
+        // 表前八段、3x3 表格（九格各一段）、表后三十段：三段距离都够远，
+        //   "重排到末尾"与"整篇重排"的段落数才分得开。
+        for (int i = 0; i < 8; ++i) {
+            text(sec, "表前第 " + std::to_string(i) + " 段：患者诉晨起后心悸，休息后缓解。");
+            mark(sec);
+        }
+        const NodeId table = t61.appendChild(sec, NodeKind::Table);
+        t61.find(table)->table.grid_cols = {Length::abs(ptToEmu(88.0)), Length::abs(ptToEmu(88.0)),
+                                            Length::abs(ptToEmu(88.0))};
+        t61.find(table)->table.width = Length::percent(1, 1);
+        for (int r = 0; r < 3; ++r) {
+            const NodeId row = t61.appendChild(table, NodeKind::TableRow);
+            for (int c = 0; c < 3; ++c) {
+                const NodeId cell = t61.appendChild(row, NodeKind::TableCell);
+                text(cell, "格" + std::to_string(r) + std::to_string(c) + "：查体记录");
+                mark(cell);
+            }
+        }
+        for (int i = 0; i < 30; ++i) {
+            text(sec, "表后第 " + std::to_string(i) + " 段：复查心电图与电解质。");
+            mark(sec);
+        }
+
+        EditorEngine e61;
+        expectTrue(e61.init({cjkPath, mnPath, latinPath}), "引擎初始化（表格增量）");
+        e61.setConfig(c61);
+        e61.setDocument(t61, StyleSheet{});
+        e61.relayout();
+        e61.repaint();
+        // 只打印，不做断言：耗时的绝对值随机器变，判据只认"走了哪条路"。
+        const double full_ms = e61.editStats().layout_ms;
+
+        const int n_para = static_cast<int>(e61.blocks().size());
+        std::vector<int> in_table;
+        for (int p = 0; p < n_para; ++p) {
+            if (!e61.blocks()[static_cast<size_t>(p)].cell_path.empty()) in_table.push_back(p);
+        }
+        expectTrue(n_para > 40 && in_table.size() == 9,
+                   "文档形状：表前 8 段 + 九格 + 表后 30 段（" + std::to_string(n_para) + " 段，" +
+                       std::to_string(in_table.size()) + " 格）");
+        expectTrue(e61.layout().placed_tables.size() == 1, "排出了一张表");
+
+        // 参照物：一个新引擎，走与增量完全不同的入口（打开文件 → 全量重排）。
+        //   不能拿"同一个引擎再 relayout 一次"当参照 —— 那条路与增量共用后半段代码。
+        EditorEngine fresh;
+        expectTrue(fresh.init({cjkPath, mnPath, latinPath}), "参照引擎初始化");
+        fresh.setConfig(c61);
+        auto sameAsFull = [&](const std::string& label) {
+            const auto saved = e61.saveDocument();
+            const bool opened = saved.ok && fresh.loadDocument(saved.text).ok;
+            fresh.relayout();
+            const uint64_t got = digestOf(e61.layout()).hash;
+            const uint64_t want = digestOf(fresh.layout()).hash;
+            expectTrue(opened && got == want, label + "：增量结果与从零重排逐位相同（" +
+                                                  std::to_string(got) + " vs " +
+                                                  std::to_string(want) + "）");
+            expectTrue(e61.auditTables() == 0, label + "：表格结构自审一致");
+        };
+
+        // 表格中间那一格。
+        const int cell_para = in_table[in_table.size() / 2];
+        e61.setCaret(cell_para, 1);
+        expectTrue(e61.typeTextAndRender("改"), "表格中间那一格敲一个字");
+        expectTrue(!e61.editStats().layout_was_full, "表里编辑：没有退回整篇重排");
+        expectTrue(e61.editStats().relaid_paragraphs < n_para,
+                   "表里编辑：只重排了一部分（" +
+                       std::to_string(e61.editStats().relaid_paragraphs) + " / " +
+                       std::to_string(n_para) + " 段）");
+        std::printf("     一次敲键：全量 %.2f ms → 增量 %.2f ms（重排 %d / %d 段）\n", full_ms,
+                    e61.editStats().layout_ms, e61.editStats().relaid_paragraphs, n_para);
+        sameAsFull("表里编辑");
+
+        // 表格之前：截断要把那张表的旧几何一起丢掉，否则续排会排出两份表。
+        e61.setCaret(2, 1);
+        expectTrue(e61.typeTextAndRender("前"), "表前那一段敲一个字");
+        expectTrue(!e61.editStats().layout_was_full, "表前编辑：没有退回整篇重排");
+        expectTrue(e61.layout().placed_tables.size() == 1, "表前编辑：仍然只有一张表（没有重影）");
+        sameAsFull("表前编辑");
+
+        // 表格之后：前缀（含整张表）一个字节都不用动。
+        const int after_table = in_table.back() + 5;
+        e61.setCaret(after_table, 1);
+        expectTrue(e61.typeTextAndRender("后"), "表后那一段敲一个字");
+        expectTrue(!e61.editStats().layout_was_full, "表后编辑：没有退回整篇重排");
+        expectTrue(e61.editStats().relaid_paragraphs <= n_para - after_table,
+                   "表后编辑：只重排了后面那一段起（" +
+                       std::to_string(e61.editStats().relaid_paragraphs) + " 段）");
+        sameAsFull("表后编辑");
+
+        // 删掉整张表：上一轮有表、这一轮没有。截断按"起始段 >= from"丢几何，
+        //   这条路径要是不对，表现是表没了但它的行片段还画在页上。
+        const FlowPos before_table = e61.flowPosAt(0, 1);
+        const FlowPos after_all = e61.flowPosAt(in_table.back() + 1, 0);
+        expectTrue(e61.setSelection(Range{before_table, after_all}), "设一个跨过整表的选区");
+        expectTrue(e61.backspaceAndRender(), "跨过整表的选区退格");
+        expectTrue(e61.layout().placed_tables.empty(), "删表之后没有残留的表几何");
+        expectTrue(e61.auditTables() == 0, "删表之后表格结构自审一致");
+        sameAsFull("删表之后");
     }
 
     std::printf("\n──────────────────────────────\n");

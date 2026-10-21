@@ -1201,9 +1201,21 @@ private:
     int minControlParagraph() const;
 
     /**
+     * 脏区起点对齐到表格边界：from 落在某张表里时，返回这张表（最外层）的起始段。
+     *
+     * 表格的行高要等一整行的所有格都排完才结算，格内还可能嵌着表 —— 从中途续排会丢掉
+     * "已经排到第几行、这一行已经多高"这些上下文，产出的几何与全量重排不一致。从表的
+     * 起始段续排则是自然的：表上下文从零建立，与全量走同一条路。
+     */
+    int tableAlignedFrom(int from) const;
+
+    /**
      * 把 layout_ 截断到第 para 段之前：丢掉 [para, ...) 的行盒、字形与切片，
      * 保留 [0, para) 原样，供 layoutDocumentRange 从 para 续排。
      * para <= 0 时清空整个结果。
+     *
+     * 表格的绘制几何一起丢：起始段 >= para 的那些 PlacedTable 属于被丢掉的那一半。
+     * 不丢的话，续排重新 openTable 会再 push 一条，同一张表就有两份几何（一份是旧的）。
      */
     void truncateLayoutAt(int para);
 
