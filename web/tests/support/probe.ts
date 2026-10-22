@@ -1,15 +1,11 @@
 // 探针的场地：Playwright 负责浏览器生命周期，这一层只补探针自己的三件事。
 //
 // 三件事都不该由每个 spec 重复一遍：打开示例页并等到就绪、把一段代码包成异步 IIFE
-// 再求值、求值之后等宿主排空。第三条是 Worker 传输的必要条件：门面是异步的，
-//   不排空就拿到上一拍的镜像，断言会拿旧值判定，看起来只是某条莫名红了。
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-
+// 再求值（并拼上读数前言）、求值之后等宿主排空。第三条是 Worker 传输的必要条件：
+//   门面是异步的，不排空就拿到上一拍的镜像，断言会拿旧值判定，看起来只是某条莫名红了。
 import { expect, test as base, type CDPSession, type Page } from '@playwright/test';
 
-// 仓库根：从本文件往上三级（support/ → tests/ → web/ → 仓库）。
-const REPO = fileURLToPath(new URL('../../..', import.meta.url)).replace(/[\\/]+$/, '');
+import { PRELUDE } from './readings';
 
 // 传输口径。库有两个：页面线程内同步执行，或整条引擎放进 Worker。
 export type Transport = 'inline' | 'worker';
@@ -32,8 +28,6 @@ export type OpenOptions = {
   query?: Record<string, string>;
   // 视口；不传就用配置里的 1500x1200。
   viewport?: { width: number; height: number };
-  // 注入迁移垫片（旧门面名 window.__heditor 挂到新公开面上），编辑探针用。
-  adapter?: boolean;
 };
 
 // 按文件名打开探针页的函数，由 fixture 注入。
@@ -48,16 +42,16 @@ type BootWindow = Window & {
 // 求值后的排空表达式：把页面上所有编辑器实例的待发消息推完。
 const DRAIN = `(async () => {
   const w = window;
-  const handles = [w.__demo, w.__demoA, w.__demoB, w.__heditor].filter(Boolean);
+  const handles = [w.__demo, w.__demoA, w.__demoB].filter(Boolean);
   // 已销毁的实例在读到它的一刻就会抛，排空不是判据，逐个别吞掉。
   for (const h of handles) {
     try {
       if (typeof h.flush === 'function') await h.flush();
-      else if (typeof h.quiesce === 'function') await h.quiesce();
     } catch (e) { /* 已销毁 */ }
   }
   return true;
 })()`;
+
 
 // 带探针选项与 open 工厂的 test，写法与普通 Playwright 测试相同。
 export const test = base.extend<
@@ -101,19 +95,15 @@ export class ProbePage {
     pageBase: string;
   }): Promise<ProbePage> {
     if (opts.viewport) await page.setViewportSize(opts.viewport);
-    // 垫片必须早于导航注入：它自己等 __demoReady，再把旧门面名挂到公开面上。
-    if (opts.adapter) {
-      await page.addInitScript({ path: join(REPO, 'web', 'tests', 'support', 'lib_adapter.js') });
-    }
     // debug 不给默认值：页面对它是 has 判断，给了 '0' 也算开。诊断面的判据要求它缺席。
     const params = new URLSearchParams({ transport: opts.transport, ...opts.query });
     const url = opts.pageBase + opts.file + '?' + params.toString();
     await page.goto(url);
     await page.waitForFunction(() => {
-      const w = window as BootWindow & { __heditor?: { ready?: boolean } };
-      // 垫片要等它自己把 __heditor 挂上；普通页面等到 __demoReady 就够了。
-      return w.__demoReady === true || !!w.__demoStartError || !!w.__heditor?.ready;
+      const w = window as BootWindow;
+      return w.__demoReady === true || !!w.__demoStartError;
     }, undefined, { timeout: 90_000 });
+
     const failed = await page.evaluate(() => (window as BootWindow).__demoStartError);
     if (failed) throw new Error('页面启动失败：' + failed);
     return new ProbePage(page, url);
@@ -123,12 +113,30 @@ export class ProbePage {
    * 在页面里求值，求完把宿主的待发消息推完。
    *
    * 代码片段用 return 交回结果，包进异步 IIFE 之后 await 与 return 都能直接写。
+   * 这一条不拼读数前言：公开面契约的判据（demo）与错误面判据要在"没有诊断面"的
+   *   页面上跑，前言会去读公开面下的 diag，那就当场抛。
    *
    * @param body 函数体源码，按旧探针的写法
    * @returns 该片段的返回值
    */
   async ev<T = any>(body: string): Promise<T> {
-    const out = (await this.page.evaluate('(async () => {\n' + body + '\n})()')) as T;
+    return this.run<T>('(async () => {\n' + body + '\n})()');
+  }
+
+  /**
+   * 同 ev，但在前面拼上读数前言（H / D / CARET / SEL / FRAME / ZOOM / TYPE / MOVE / LOAD）。
+   *
+   * 只有需要诊断面的判据能用：页面要带 debug=1 打开，否则公开面下的 diag 是空。
+   *
+   * @param body 函数体源码
+   * @returns 该片段的返回值
+   */
+  async read<T = any>(body: string): Promise<T> {
+    return this.run<T>('(async () => {\n' + PRELUDE + '\n' + body + '\n})()');
+  }
+
+  private async run<T>(src: string): Promise<T> {
+    const out = (await this.page.evaluate(src)) as T;
     await this.page.evaluate(DRAIN);
     return out;
   }

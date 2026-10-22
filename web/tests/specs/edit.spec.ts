@@ -4,7 +4,7 @@
 // 本身 —— 键盘路径真的改了文档、增量是真的增量、偏移单位是码点并吸附字素簇、
 // 输入法组合期间不碰引擎、控件区间的边界策略、长文档只重排脏段之后的后缀。
 //
-// 这里跑的是迁移垫片上的旧门面名（window.__heditor），读数口径与旧探针逐条对应：
+// 判据走的是公开面（window.__demo）与它的诊断面（.diag），读数摊平在 support/readings.ts：
 // 断言名、分节标题、取证字段都没改，便于对着旧日志复核。三十六节是一条累积状态的
 // 叙事，所以它们在一个 test 里顺序执行；分节标题只打进日志，没有包成 test.step ——
 // 包一层只是换个括号，报告里多一层嵌套，选择粒度还是整份文件。
@@ -34,7 +34,7 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
  * @returns 页面内执行片段
  */
 const key = (k: string, extra = '') => `
-  window.__heditor.textarea.dispatchEvent(
+  IME().dispatchEvent(
     new KeyboardEvent('keydown', { key: ${JSON.stringify(k)}, bubbles: true,
                                    cancelable: true ${extra} }));
   return true;`;
@@ -51,9 +51,9 @@ const key = (k: string, extra = '') => `
  * @returns 那次全量呈现的账
  */
 async function resetAndGetFullBaseline(probe: ProbePage) {
-  return probe.ev(`
-    const s = await window.__heditor.reset(6, ${ZOOM});
-    await window.__heditor.stopBlink();
+  return probe.read(`
+    const s = await LOAD.reset(6, ${ZOOM});
+    await D.stopBlink();
     return s;`);
 }
 
@@ -62,7 +62,6 @@ test.describe('编辑面', () => {
     const probe = await open('index.html', {
       query: { debug: '1' },
       viewport: { width: 1500, height: 1200 },
-      adapter: true,
     });
 
     const consoleErrors: string[] = [];
@@ -98,25 +97,25 @@ test.describe('编辑面', () => {
     // 参照是窗口内那几页，不是整个帧：帧按页号分槽之后，帧高 = 槽数 x 步距，
     //   而槽数可以多于窗口页数（多出来的是空槽）—— 拿 framePixels 当分母，判据会
     //   随槽数一起松掉。
-    const pageH0 = await probe.ev('return window.__heditor.pagePx[1];');
+    const pageH0 = await probe.read('return D.pagePx().h;');
     const winPx = st.windowPages * st.frameW * pageH0;
     check('整页重画写入 ≥ 半窗（窗口内几页，不是整个帧）',
               st.repaintedPixels > winPx / 2,
               `${st.repaintedPixels} / ${winPx}`);
-    check('初始文档与预期一致', (await probe.ev(CP_LEN + 'return cplen(window.__heditor.text);'))
+    check('初始文档与预期一致', (await probe.read(CP_LEN + 'return cplen(H.paragraph(0));'))
               === Array.from(S6).length);
   }
   const full = state.baseline.repaintedPixels;
 
   log.section('[2] 键盘路径：派真实 keydown，文档要变、光标要走（单段文档仍整页重画）');
   {
-    const b = await probe.ev(CP_LEN + 'return { n: cplen(window.__heditor.text), o: window.__heditor.caret.offset };');
-    await probe.ev(key('心'));
-    const a = await probe.ev(CP_LEN + `return { n: cplen(window.__heditor.text), o: window.__heditor.caret.offset,
-                                              st: window.__heditor.editStats };`);
+    const b = await probe.read(CP_LEN + 'return { n: cplen(H.paragraph(0)), o: CARET().offset };');
+    await probe.read(key('心'));
+    const a = await probe.read(CP_LEN + `return { n: cplen(H.paragraph(0)), o: CARET().offset,
+                                              st: D.editStats() };`);
     check('文档码点数 +1', a.n === b.n + 1, `${b.n} → ${a.n}`);
     check('光标停在新字之后（不是字前、也不是跳段首）', a.o === b.o + 1, `${b.o} → ${a.o}`);
-    check('插入的就是那个字', (await probe.ev('return window.__heditor.text.includes("心");')) === true);
+    check('插入的就是那个字', (await probe.read('return H.paragraph(0).includes("心");')) === true);
     check(' 单段文档：敲字仍是全量重排（脏段就是第一段）',
               a.st.layoutRan === true && a.st.layoutWasFull === true);
     check(' 单段文档：敲字仍是整页重画（所在页内容变了）',
@@ -136,45 +135,45 @@ test.describe('编辑面', () => {
     // 顺序也要小心：下面"该吞的吞"那一条会真的敲进一个 z。
     //   探针自己制造的状态变化必须显式收掉，否则后面每一条断言都被带偏
     //   （否则多出来的 z 会让"退格恢复原样"跟着失败）。
-    const beforeMod = await probe.ev(CP_LEN + 'return cplen(window.__heditor.text);');
+    const beforeMod = await probe.read(CP_LEN + 'return cplen(H.paragraph(0));');
 
     let modSwallowed = 0;
     for (const m of ['ctrlKey', 'altKey', 'metaKey']) {
-      const r = await probe.ev(`
+      const r = await probe.read(`
         const e = new KeyboardEvent('keydown',
           { key: 'x', ${m}: true, bubbles: true, cancelable: true });
-        return window.__heditor.textarea.dispatchEvent(e);`);
+        return IME().dispatchEvent(e);`);
       if (r === false) ++modSwallowed;
     }
     check('Ctrl/Alt/Meta 组合不被吞（否则 Ctrl+C 之类会被吃掉）', modSwallowed === 0,
               `被吞 ${modSwallowed} / 3`);
-    const afterMod = await probe.ev(CP_LEN + 'return cplen(window.__heditor.text);');
+    const afterMod = await probe.read(CP_LEN + 'return cplen(H.paragraph(0));');
     check('带 Ctrl/Alt/Meta 的按键不落字', afterMod === beforeMod,
               `${beforeMod} → ${afterMod}`);
 
-    const swallow = await probe.ev(`
+    const swallow = await probe.read(`
       const e = new KeyboardEvent('keydown', { key: 'z', bubbles: true, cancelable: true });
-      return window.__heditor.textarea.dispatchEvent(e);   // false = 被 preventDefault
+      return IME().dispatchEvent(e);   // false = 被 preventDefault
     `);
     check('普通可打印字符的 keydown 被宿主吞掉（不落进 textarea）', swallow === false);
-    const afterSwallow = await probe.ev(CP_LEN + 'return cplen(window.__heditor.text);');
+    const afterSwallow = await probe.read(CP_LEN + 'return cplen(H.paragraph(0));');
     check(' 但字确实进了文档一次（"吞掉 keydown" 和 "不落字" 是两回事）',
               afterSwallow === beforeMod + 1, `${beforeMod} → ${afterSwallow}`);
 
     // 收尾：退格两次，把 z 和前面那个 心 都收掉
-    await probe.ev(key('Backspace'));
-    await probe.ev(key('Backspace'));
-    const back = await probe.ev(CP_LEN + 'return { n: cplen(window.__heditor.text), o: window.__heditor.caret.offset };');
+    await probe.read(key('Backspace'));
+    await probe.read(key('Backspace'));
+    const back = await probe.read(CP_LEN + 'return { n: cplen(H.paragraph(0)), o: CARET().offset };');
     check('两次退格把文档恢复原样', back.n === b.n && back.o === b.o,
               `${back.n} / offset ${back.o}（期望 ${b.n} / ${b.o}）`);
   }
 
   log.section('[3] 方向键 = 真增量：不重排、0 脏页、写入量差两个数量级');
   {
-    await probe.ev('await window.__heditor.setCaret(0, 0); return true;');
-    const beforeMove = await probe.ev('return window.__heditor.editStats;');
-    await probe.ev(key('ArrowRight'));
-    const right = await probe.ev('return { c: window.__heditor.caret, st: window.__heditor.editStats };');
+    await probe.read('await H.setCaret({ para: 0, offset: 0 }); return true;');
+    const beforeMove = await probe.read('return D.editStats();');
+    await probe.read(key('ArrowRight'));
+    const right = await probe.read('return { c: CARET(), st: D.editStats() };');
     check('右移后光标偏移 +1', right.c.offset === 1, `offset=${right.c.offset}`);
     check(' 光标移动不重排（layoutRan=false）', right.st.layoutRan === false);
     check(' 光标移动不抹掉排版账（仍是上一轮的重排行数）',
@@ -189,37 +188,37 @@ test.describe('编辑面', () => {
     // 上屏面积：引擎在 present 里算出的脏矩形，必须真的落到宿主的 putImageData 上。
     //   这一条挡的是"引擎给了矩形、宿主还是整页贴"——那种情况下像素判据全都照样绿，
     //   只有这个数看得出来。整页约 1.1 Mpx，一次光标移动是几十像素。
-    const blit3 = await probe.ev('return window.__heditor.blitStats;');
+    const blit3 = await probe.read('return D.blitStats();');
     check('★ 光标移动的上屏面积是几十像素，不是整页（宿主按脏矩形贴）',
               typeof blit3.px === 'number' && blit3.px > 0 && blit3.px < 2000,
               `px=${blit3.px}`);
 
     // 段首再左移：引擎应当返回 false（没动就不该重绘）
-    await probe.ev('await window.__heditor.setCaret(0, 0); return true;');
-    const at0 = await probe.ev('return await window.__heditor.move(-1);');
+    await probe.read('await H.setCaret({ para: 0, offset: 0 }); return true;');
+    const at0 = await probe.read('return await MOVE(-1);');
     check('已在段首，向左移动不重绘（返回 null）', at0 === null);
 
     // Home / End
-    await probe.ev(key('End'));
-    const atEnd = await probe.ev('return window.__heditor.caret.offset;');
-    const len = await probe.ev(CP_LEN + 'return cplen(window.__heditor.text);');
+    await probe.read(key('End'));
+    const atEnd = await probe.read('return CARET().offset;');
+    const len = await probe.read(CP_LEN + 'return cplen(H.paragraph(0));');
     check('End 走到段末', atEnd === len, `${atEnd} / 段长 ${len}`);
-    await probe.ev(key('Home'));
-    check('Home 回到段首', (await probe.ev('return window.__heditor.caret.offset;')) === 0);
+    await probe.read(key('Home'));
+    check('Home 回到段首', (await probe.read('return CARET().offset;')) === 0);
   }
 
   log.section('[4] 画布点选 = 命中测试往返：正查找出的光标 x，反查必须回到同一个偏移');
   {
-    const len = await probe.ev(CP_LEN + 'return cplen(window.__heditor.text);');
-    await probe.ev('await window.__heditor.setCaret(0, 0); return true;');
-    const g0 = await probe.ev('return window.__heditor.caret;');
-    const z = await probe.ev('return window.__heditor.zoomLevel;');
+    const len = await probe.read(CP_LEN + 'return cplen(H.paragraph(0));');
+    await probe.read('await H.setCaret({ para: 0, offset: 0 }); return true;');
+    const g0 = await probe.read('return CARET();');
+    const z = await probe.read('return ZOOM();');
 
     // 画出来的光标矩形（的东西）应当逐个右移
     const xs = [];
     for (let o = 0; o <= len; ++o) {
-      await probe.ev(`await window.__heditor.setCaret(0, ${o}); return true;`);
-      xs.push(await probe.ev('return window.__heditor.caret.x;'));
+      await probe.read(`await H.setCaret({ para: 0, offset: ${o} }); return true;`);
+      xs.push(await probe.read('return CARET().x;'));
     }
     let mono = true;
     for (let i = 1; i < xs.length; ++i) if (xs[i] <= xs[i - 1]) mono = false;
@@ -236,8 +235,8 @@ test.describe('编辑面', () => {
     //
     //   控件报告里 行内起点 + 本偏移的沿轴位置 才是插入点在帧磅坐标下的位置。
     const repOf = async (o: any) => {
-      await probe.ev(`await window.__heditor.setCaret(0, ${o}); return true;`);
-      return probe.ev('return window.__heditor.caretReport;');
+      await probe.read(`await H.setCaret({ para: 0, offset: ${o} }); return true;`);
+      return probe.read('return D.caretReport();');
     };
     const rep0 = await repOf(0);
     const mOrigin = /行内起点=([-\d.]+) pt/.exec(rep0);
@@ -260,17 +259,17 @@ test.describe('编辑面', () => {
     // 在每个插入点处派真实 mousedown，看落点是否就是那个偏移
     let ok = 0;
     for (let o = 0; o <= len; ++o) {
-      const hit = await probe.ev(`
-        const cv = window.__heditor.canvas, r = cv.getBoundingClientRect();
+      const hit = await probe.read(`
+        const cv = FRAME(), r = cv.getBoundingClientRect();
         const sx = r.width / cv.width, sy = r.height / cv.height;
-        const zz = window.__heditor.zoomLevel;
+        const zz = ZOOM();
         // 帧磅 → 帧像素（× zoom）→ 客户端像素（× CSS 缩放）
         const clientX = r.left + (${absPt[o] + 0.2} * zz) * sx;
         const clientY = r.top + ${g0.y + g0.h / 2} * sy;
         cv.dispatchEvent(new MouseEvent('mousedown',
           { clientX, clientY, bubbles: true, cancelable: true }));
-        if (window.__heditor.quiesce) await window.__heditor.quiesce();  // 异步宿主：命中+落光标要走往返，读之前必须先排空
-        return window.__heditor.caret.offset;`);
+        await H.flush();  // 异步宿主：命中+落光标要走往返，读之前必须先排空
+        return CARET().offset;`);
       if (hit === o) ++ok;
     }
     check(` ${len + 1} 个插入点，点画布反查全部回到原位置（画光标与点选共用同一份行盒几何）`,
@@ -284,8 +283,8 @@ test.describe('编辑面', () => {
     const bad = [];
     for (let o = 0; o < len; ++o) {
       const mid = (absPt[o] + absPt[o + 1]) / 2;
-      const left = await probe.ev(`return await window.__heditor.hit(${mid - 0.2}, ${yPt});`);
-      const right = await probe.ev(`return await window.__heditor.hit(${mid + 0.2}, ${yPt});`);
+      const left = await probe.read(`return await D.hit(${mid - 0.2}, ${yPt});`);
+      const right = await probe.read(`return await D.hit(${mid + 0.2}, ${yPt});`);
       if (left && right && left.offset === o && right.offset === o + 1) ++bok;
       else bad.push(`o=${o}: 左→${left ? left.offset : 'null'} 右→${right ? right.offset : 'null'}`);
     }
@@ -295,36 +294,35 @@ test.describe('编辑面', () => {
     // 点在画布左边界之外：命中必须失败，而不是胡乱给一个位置。
     // （注意：页内的空白不算失败 —— hitTestPt 的语义是"取同页最近的一行"，
     //   所以"点页面底部空白光标会跳到第一行"是正确行为，不该拿来断言。）
-    await probe.ev('await window.__heditor.setCaret(0, 5); return true;');
-    const outside = await probe.ev(`
-      const cv = window.__heditor.canvas, r = cv.getBoundingClientRect();
+    await probe.read('await H.setCaret({ para: 0, offset: 5 }); return true;');
+    const outside = await probe.read(`
+      const cv = FRAME(), r = cv.getBoundingClientRect();
       const sy = r.height / cv.height;
       // caret.y 是页内像素（页号另给），画布代理的 rect 是窗口坐标：
       //   窗口内 y = (光标页 - 窗口首页) x 步距 + 页内 y。
-      const H = window.__heditor;
-      const step = H.pagePx[1] + H.pagePx[2];
-      const wy = (H.caret.page - H.editStats.windowFirstPage) * step + H.caret.y;
+      const step = D.pagePx().h + D.pagePx().gap;
+      const wy = (CARET().page - D.editStats().windowFirstPage) * step + CARET().y;
       cv.dispatchEvent(new MouseEvent('mousedown',
         { clientX: r.left - 50, clientY: r.top + (wy + 5) * sy,
           bubbles: true, cancelable: true }));
-      if (window.__heditor.quiesce) await window.__heditor.quiesce();  // 异步宿主：命中+落光标要走往返
-      return window.__heditor.caret.offset;`);
+      await H.flush();  // 异步宿主：命中+落光标要走往返
+      return CARET().offset;`);
     check('点画布左边界之外 → 命中失败，光标停在原地（不猜）', outside === 5,
               `offset=${outside}`);
   }
 
   log.section('[5] 偏移单位是码点、且吸附到字素簇（经 WASM 边界验证）');
   {
-    await probe.ev('await window.__heditor.setCaret(0, 0); return true;');
-    await probe.ev('return await window.__heditor.type("e");');
-    await probe.ev('return await window.__heditor.type("\\u0301");');   // 组合重音 U+0301
-    const st = await probe.ev(CP_LEN + `return { n: cplen(window.__heditor.text),
-                                               o: window.__heditor.caret.offset };`);
+    await probe.read('await H.setCaret({ para: 0, offset: 0 }); return true;');
+    await probe.read('return await TYPE("e");');
+    await probe.read('return await TYPE("\\u0301");');   // 组合重音 U+0301
+    const st = await probe.read(CP_LEN + `return { n: cplen(H.paragraph(0)),
+                                               o: CARET().offset };`);
     check('e 类序列：插入 2 个码点，光标偏移 = 2（偏移数的是码点）', st.o === 2, `offset=${st.o}`);
 
     const posOf = async (o: any) => {
-      await probe.ev(`await window.__heditor.setCaret(0, ${o}); return true;`);
-      const rep = await probe.ev('return window.__heditor.caretReport;');
+      await probe.read(`await H.setCaret({ para: 0, offset: ${o} }); return true;`);
+      const rep = await probe.read('return D.caretReport();');
       const m = /本偏移的沿轴位置=([-\d.]+) pt/.exec(rep);
       return m ? Number(m[1]) : NaN;
     };
@@ -333,11 +331,11 @@ test.describe('编辑面', () => {
               Math.abs(p1 - p0) < 1e-6, `pos(0)=${p0} pos(1)=${p1}`);
     check('偏移 2 已经是下一个簇 → 位置前进', p2 > p0, `pos(2)=${p2}`);
 
-    const cps = await probe.ev(CP_LEN + 'return cplen(window.__heditor.text);');
-    await probe.ev('await window.__heditor.setCaret(0, 2); return true;');
-    await probe.ev('return await window.__heditor.backspace();');
-    const after = await probe.ev(CP_LEN + `return { n: cplen(window.__heditor.text),
-                                                 o: window.__heditor.caret.offset };`);
+    const cps = await probe.read(CP_LEN + 'return cplen(H.paragraph(0));');
+    await probe.read('await H.setCaret({ para: 0, offset: 2 }); return true;');
+    await probe.read('return await H.deleteBackward();');
+    const after = await probe.read(CP_LEN + `return { n: cplen(H.paragraph(0)),
+                                                 o: CARET().offset };`);
     check(' 一次退格删掉 2 个码点（删的是簇，不是码点；否则会留下孤立的组合重音）',
               after.n === cps - 2 && after.o === 0, `${cps} → ${after.n}，offset=${after.o}`);
   }
@@ -349,19 +347,19 @@ test.describe('编辑面', () => {
     //   原生单测（edit_test.cpp 的 [8]）验的是引擎内部的簇表；而"用户按了两次 f 键"
     //   这条路上还多了一层宿主事件分发 —— 万一宿主把两次 keydown 合并、或者
     //   textarea 的 value 攒了一串才 commit，簇表再对也没用。所以这里必须
-    //   派真实的 KeyboardEvent，而不是调 window.__heditor.type()。
+    //   派真实的 KeyboardEvent，而不是调 TYPE()。
     //
     //   为什么偏偏是 f：liga 连字表里 ff / fi / fl / ffi / ffl 全是以 f 开头的，
     //   而中文测试一个都盖不到 —— 这正是这个 bug 能活到现在的原因。
-    await probe.ev(`await window.__heditor.reset(6, ${ZOOM}); await window.__heditor.stopBlink(); return true;`);
-    await probe.ev('await window.__heditor.setCaret(0, 0); return true;');
+    await probe.read(`await LOAD.reset(6, ${ZOOM}); await D.stopBlink(); return true;`);
+    await probe.read('await H.setCaret({ para: 0, offset: 0 }); return true;');
 
-    const b = await probe.ev(CP_LEN + 'return cplen(window.__heditor.text);');
-    await probe.ev(key('f'));
-    await probe.ev(key('f'));
-    const a = await probe.ev(CP_LEN + `return { n: cplen(window.__heditor.text),
-                                               t: window.__heditor.text,
-                                               o: window.__heditor.caret.offset };`);
+    const b = await probe.read(CP_LEN + 'return cplen(H.paragraph(0));');
+    await probe.read(key('f'));
+    await probe.read(key('f'));
+    const a = await probe.read(CP_LEN + `return { n: cplen(H.paragraph(0)),
+                                               t: H.paragraph(0),
+                                               o: CARET().offset };`);
     check('两次按 f → 文档 +2 个码点', a.n === b + 2, `${b} → ${a.n}`);
     check('两个 f 都真的写进了文本', Array.from(a.t).slice(0, 2).join('') === 'ff',
               JSON.stringify(Array.from(a.t).slice(0, 4).join('')));
@@ -371,8 +369,8 @@ test.describe('编辑面', () => {
     //   连字一旦把 ff 合成一个簇，解析器给出的簇表里就没有偏移 1 的起点，
     //   光标会被吸附回 0 → 这两次取值相等。用 caretReport 的沿轴位置直接比。
     const posOf = async (o: any) => {
-      await probe.ev(`await window.__heditor.setCaret(0, ${o}); return true;`);
-      const rep = await probe.ev('return window.__heditor.caretReport;');
+      await probe.read(`await H.setCaret({ para: 0, offset: ${o} }); return true;`);
+      const rep = await probe.read('return D.caretReport();');
       const m = /本偏移的沿轴位置=([-\d.]+) pt/.exec(rep);
       return m ? Number(m[1]) : NaN;
     };
@@ -380,61 +378,61 @@ test.describe('编辑面', () => {
     check(' 偏移 1（两个 f 之间）是合法插入点，位置严格前移（连字一合并这里就相等）',
               q1 > q0 + 1e-6, `pos(0)=${q0} pos(1)=${q1}`);
 
-    await probe.ev('await window.__heditor.setCaret(0, 2); return true;');
-    await probe.ev(key('Backspace'));
-    const d = await probe.ev(CP_LEN + `return { n: cplen(window.__heditor.text),
-                                               o: window.__heditor.caret.offset };`);
+    await probe.read('await H.setCaret({ para: 0, offset: 2 }); return true;');
+    await probe.read(key('Backspace'));
+    const d = await probe.read(CP_LEN + `return { n: cplen(H.paragraph(0)),
+                                               o: CARET().offset };`);
     check(' 一次退格只删掉一个 f（连字一合并这里会一下少两个）',
               d.n === a.n - 1 && d.o === 1, `${a.n} → ${d.n}，offset=${d.o}`);
 
     // Delete 走的是另一条分支（clusterCeil），也得守。
     // 必须先把光标移回 0：退格之后光标停在 1，而 1 处是原文第一个字，
     //   在那儿按 Delete 删掉的是"患"而不是剩余的那个 f —— 那测的就不是连字了。
-    await probe.ev('await window.__heditor.setCaret(0, 0); return true;');
-    await probe.ev(key('Delete'));
-    const fwd = await probe.ev(CP_LEN + `return { n: cplen(window.__heditor.text),
-                                                 o: window.__heditor.caret.offset };`);
+    await probe.read('await H.setCaret({ para: 0, offset: 0 }); return true;');
+    await probe.read(key('Delete'));
+    const fwd = await probe.read(CP_LEN + `return { n: cplen(H.paragraph(0)),
+                                                 o: CARET().offset };`);
     check(' Delete 也只删掉了那一个 f', fwd.n === d.n - 1 && fwd.o === 0,
               `${d.n} → ${fwd.n}，offset=${fwd.o}`);
 
     // 收尾：把文档恢复成 reset 后的原样，后面几节才不会被这一节带偏
-    await probe.ev(`await window.__heditor.reset(6, ${ZOOM}); await window.__heditor.stopBlink(); return true;`);
-    const restored = await probe.ev(CP_LEN + 'return cplen(window.__heditor.text);');
+    await probe.read(`await LOAD.reset(6, ${ZOOM}); await D.stopBlink(); return true;`);
+    const restored = await probe.read(CP_LEN + 'return cplen(H.paragraph(0));');
     check('收尾：文档已恢复（后续小节的起点干净）', restored === Array.from(S6).length,
               `${restored} / ${Array.from(S6).length}`);
   }
 
   log.section('[6] IME：组合期间一次都不碰引擎，只有 commit 才落文档');
   {
-    await probe.ev('await window.__heditor.setCaret(0, 0); return true;');
-    const before = await probe.ev(CP_LEN + `return { n: cplen(window.__heditor.text), t: window.__heditor.text };`);
+    await probe.read('await H.setCaret({ para: 0, offset: 0 }); return true;');
+    const before = await probe.read(CP_LEN + `return { n: cplen(H.paragraph(0)), t: H.paragraph(0) };`);
 
-    await probe.ev(`
-      window.__heditor.textarea.dispatchEvent(
+    await probe.read(`
+      IME().dispatchEvent(
         new CompositionEvent('compositionstart', { bubbles: true }));
       return true;`);
     // 组合更新来多少次都不该动文档
     for (const d of ['n', 'ni', 'ni3']) {
-      await probe.ev(`
-        window.__heditor.textarea.dispatchEvent(
+      await probe.read(`
+        IME().dispatchEvent(
           new CompositionEvent('compositionupdate', { bubbles: true, data: ${JSON.stringify(d)} }));
         return true;`);
     }
-    const mid = await probe.ev(CP_LEN + 'return { n: cplen(window.__heditor.text), t: window.__heditor.text };');
+    const mid = await probe.read(CP_LEN + 'return { n: cplen(H.paragraph(0)), t: H.paragraph(0) };');
     check(' 组合期间（3 次 compositionupdate）文档一个字都没变',
               mid.n === before.n && mid.t === before.t, `${before.n} → ${mid.n}`);
 
-    await probe.ev(`
-      window.__heditor.textarea.dispatchEvent(
+    await probe.read(`
+      IME().dispatchEvent(
         new CompositionEvent('compositionend', { bubbles: true, data: '\\u4f60' }));
       return true;`);
-    const after = await probe.ev(CP_LEN + `return { n: cplen(window.__heditor.text),
-                                                  t: window.__heditor.text,
-                                                  o: window.__heditor.caret.offset };`);
+    const after = await probe.read(CP_LEN + `return { n: cplen(H.paragraph(0)),
+                                                  t: H.paragraph(0),
+                                                  o: CARET().offset };`);
     check('commit 后文档 +1 码点', after.n === before.n + 1, `${before.n} → ${after.n}`);
     check('commit 落下的就是那个字（你）', after.t.startsWith('你') && after.t.length > 0);
     check('commit 后光标停在新字之后', after.o === 1, `offset=${after.o}`);
-    check('状态栏已退出"组合中"', (await probe.ev('return document.getElementById("status").textContent;'))
+    check('状态栏已退出"组合中"', (await probe.read('return document.getElementById("status").textContent;'))
               .indexOf('组合中') < 0);
   }
 
@@ -458,19 +456,19 @@ test.describe('编辑面', () => {
     const AT = 8;   // 「患者主诉：反复心」之后（8 个码点）
 
     // 同刻读 canvas 与引擎帧并逐字节比较。
-    //   帧切成一页一张画布之后，这件事交给 __heditor.selfCheck()：它按页读、按页比，
+    //   帧切成一页一张画布之后，这件事交给 diag.selfCheck()：它按页读、按页比，
     //   口径与"整篇一张画布"时相同 —— 屏幕上每一页的像素都必须等于引擎那一帧，
     //   页与页之间的间隙不比（宿主没有它的画布，它只是引擎帧上的背景色）。
-    const screenVsFrame = () => probe.ev(`
-      const sc = await window.__heditor.selfCheck();
+    const screenVsFrame = () => probe.read(`
+      const sc = await D.selfCheck();
       const b = sc.screenVsEngineDiffBox || [0, 0, 0, 0];
       return { diff: sc.screenVsEngineDiffPx, w: sc.framePx[0], h: sc.framePx[1],
                minx: b[0], miny: b[1], maxx: b[2], maxy: b[3] };
     `);
 
-    const resetTo = async () => probe.ev(`
-      await window.__heditor.reset(6, ${ZOOM});
-      await window.__heditor.setCaret(0, ${AT});
+    const resetTo = async () => probe.read(`
+      await LOAD.reset(6, ${ZOOM});
+      await H.setCaret({ para: 0, offset: ${AT} });
       return true;`);
 
     // A：逐个真按键，闪烁开着，按 ~110ms 的真人节奏
@@ -478,8 +476,8 @@ test.describe('编辑面', () => {
     const perKey = [];
     const drift = [];
     for (let i = 0; i < RUN.length; ++i) {
-      await probe.ev(key(RUN[i]));
-      perKey.push(await probe.ev('return window.__heditor.editStats;'));
+      await probe.read(key(RUN[i]));
+      perKey.push(await probe.read('return D.editStats();'));
       // 每一次按键都查，不是抽样。
       //   "光标走了、文字没动"这种症状只在某一次贴错；抽样会把漏掉。
       drift.push(await screenVsFrame());
@@ -487,22 +485,22 @@ test.describe('编辑面', () => {
     }
     const worstDrift = drift.reduce((m, d) => Math.max(m, d.diff), 0);
     const worstBox = drift.find((d) => d.diff === worstDrift) || {};
-    const textA = await probe.ev('return window.__heditor.text;');
+    const textA = await probe.read('return H.paragraph(0);');
     // 定格成确定的相位再取 A 帧，否则和 B 帧的差异里混着闪烁
-    await probe.ev(`await window.__heditor.stopBlink(); await window.__heditor.present(); return true;`);
-    await probe.ev('window.__frameA = await window.__heditor.rawFrame(); return true;');
+    await probe.read(`await D.stopBlink(); await D.present(); return true;`);
+    await probe.read('window.__frameA = await D.rawFrame(); return true;');
     await probe.shot('typing-state');
 
     // B：同样的文档，一次性插入，同样定格
     await resetTo();
-    await probe.ev(`return await window.__heditor.type(${JSON.stringify(RUN)});`);
-    const textB = await probe.ev('return window.__heditor.text;');
-    await probe.ev(`await window.__heditor.stopBlink(); await window.__heditor.present(); return true;`);
+    await probe.read(`return await TYPE(${JSON.stringify(RUN)});`);
+    const textB = await probe.read('return H.paragraph(0);');
+    await probe.read(`await D.stopBlink(); await D.present(); return true;`);
 
-    const d = await probe.ev(`
+    const d = await probe.read(`
       const A = window.__frameA;
-      const B = await window.__heditor.rawFrame();
-      const w = window.__heditor.frameW();
+      const B = await D.rawFrame();
+      const w = D.frameW();
       const n = Math.min(A.length, B.length);
       let diff = 0, minx = 1e9, miny = 1e9, maxx = -1, maxy = -1;
       for (let i = 0; i + 3 < n; i += 4) {
@@ -513,7 +511,7 @@ test.describe('编辑面', () => {
           if (y < miny) miny = y; if (y > maxy) maxy = y;
         }
       }
-      return { diff, w, h: window.__heditor.frameH(), minx, miny, maxx, maxy,
+      return { diff, w, h: D.frameH(), minx, miny, maxx, maxy,
                lenA: A.length, lenB: B.length };
     `);
 
@@ -542,8 +540,8 @@ test.describe('编辑面', () => {
               `最大那次 ${maxPx} vs 整页 ${full}`);
 
     // 把给用户用的取证接口也当场跑一遍 —— 它要是抛异常，用户那边就白跑一趟。
-    const sc = await probe.ev('return await window.__heditor.selfCheck();');
-    check(' 自检接口可用且当场判为一致（__heditor.selfCheck()）',
+    const sc = await probe.read('return await D.selfCheck();');
+    check(' 自检接口可用且当场判为一致（diag.selfCheck()）',
               !!sc && sc.screenVsEngineDiffPx === 0 && Array.isArray(sc.framePx),
               sc ? `屏幕与引擎帧差 ${sc.screenVsEngineDiffPx} px，帧 ${sc.framePx.join('×')}，` +
                    `dpr=${sc.dpr}，窗口 第${sc.window.first}页起 ${sc.window.count} 页` +
@@ -573,7 +571,7 @@ test.describe('编辑面', () => {
     const MARK = `(r, g, b) => r > 45 && b - r > 60 && b > 140`;
     const inkMark = `
       const mark = ${MARK};   // 光标色 r=31 被排除
-      const f = await window.__heditor.rawFrame();
+      const f = await D.rawFrame();
       let n = 0;
       for (let i = 0; i + 3 < f.length; i += 4) {
         if (mark(f[i], f[i+1], f[i+2])) ++n;
@@ -595,8 +593,8 @@ test.describe('编辑面', () => {
     const bandAt = (cxPt: any) => `
       return (async function () {
         const near = ${MARK};
-        const f = await window.__heditor.rawFrame();
-        const fw = window.__heditor.frameW();
+        const f = await D.rawFrame();
+        const fw = D.frameW();
         const lo = ${Math.round((cxPt - 10) * 1.5)}, hi = ${Math.round((cxPt - 1) * 1.5)};
         let n = 0;
         for (let i = 0; i + 3 < f.length; i += 4) {
@@ -614,8 +612,8 @@ test.describe('编辑面', () => {
     // 提到这一节的最外层：下面好几个子块都要用它（含"空字段"那块）。
     const bracketSlotPx = (4.055 + 1.5) * ZOOM;
 
-    await probe.ev('return await window.__heditor.loadFormSample(0);');
-    const ct = await probe.ev('return window.__heditor.controls;');
+    await probe.read('return await LOAD.form(0);');
+    const ct = await probe.read('return D.controls();');
     check('载入表单样例：3 个控件、已切到表单模式',
               ct.count === 3 && ct.mode === 1, `count=${ct.count} mode=${ct.mode}`);
 
@@ -634,8 +632,8 @@ test.describe('编辑面', () => {
     {
       const lastInkLeft = `
         return (async function () {
-          const f = await window.__heditor.rawFrame();
-          const W = window.__heditor.frameW(), H = window.__heditor.frameH();
+          const f = await D.rawFrame();
+          const W = D.frameW(), H = D.frameH();
           const at = (x, y) => { const i = (y * W + x) * 4; return [f[i], f[i+1], f[i+2]]; };
           const dark = (r, g, b) => r < 120 && g < 120 && b < 120;
           const rows = [];
@@ -674,15 +672,15 @@ test.describe('编辑面', () => {
       //   这条数字同时钉死了"默认档 = 全部字段占位"：改回 Focused 档会变成 2 个槽。
       const expectSlots = 6;
 
-      await probe.ev(`await window.__heditor.reset(6, ${ZOOM}); await window.__heditor.stopBlink(); return true;`);
-      await probe.ev('await window.__heditor.present(); return true;');
-      const base = await probe.ev(lastInkLeft);
+      await probe.read(`await LOAD.reset(6, ${ZOOM}); await D.stopBlink(); return true;`);
+      await probe.read('await D.present(); return true;');
+      const base = await probe.read(lastInkLeft);
 
-      await probe.ev('return await window.__heditor.loadFormSample(0);');
-      await probe.ev('return await window.__heditor.stopBlink();');
-      await probe.ev('return await window.__heditor.setCaret(0, 6);');
-      await probe.ev('await window.__heditor.present(); return true;');
-      const form = await probe.ev(lastInkLeft);
+      await probe.read('return await LOAD.form(0);');
+      await probe.read('return await D.stopBlink();');
+      await probe.read('return await H.setCaret({ para: 0, offset: 6 });');
+      await probe.read('await D.present(); return true;');
+      const form = await probe.read(lastInkLeft);
 
       // 比的是右缘（最右墨迹列），不是左缘。
       //   量出来过：无表单时最后一组墨迹列是 [402,427]，带表单时是 [441,446] ——
@@ -711,7 +709,7 @@ test.describe('编辑面', () => {
                 `${((expectSlots - 1)*bracketSlotPx).toFixed(1)}~${((expectSlots + 1)*bracketSlotPx).toFixed(1)}）`);
     }
 
-    const markForm = await probe.ev(inkMark);
+    const markForm = await probe.read(inkMark);
     check(' 表单模式下标记真的画出来了（亮蓝像素，像素证据）',
               markForm > 50, `${markForm} px`);
 
@@ -729,17 +727,17 @@ test.describe('编辑面', () => {
     //   但"不随光标动"本身就是要验的东西 —— 缓存矩形等于把它假设掉。
     if (ct.count >= 3) {
       const rectX = async (i: any) => {
-        const cc = await probe.ev('return window.__heditor.controls;');
+        const cc = await probe.read('return D.controls();');
         return cc.items[i] && cc.items[i].rects[0] ? cc.items[i].rects[0].x : 0;
       };
 
-      await probe.ev('return await window.__heditor.setCaret(0, 6);');  // 在 #0 里
-      const a0 = await probe.ev(bandAt(await rectX(0)));
-      const a2 = await probe.ev(bandAt(await rectX(2)));
+      await probe.read('return await H.setCaret({ para: 0, offset: 6 });');  // 在 #0 里
+      const a0 = await probe.read(bandAt(await rectX(0)));
+      const a2 = await probe.read(bandAt(await rectX(2)));
 
-      await probe.ev('return await window.__heditor.setCaret(0, 13);');  // 在 #2 里
-      const b0 = await probe.ev(bandAt(await rectX(0)));
-      const b2 = await probe.ev(bandAt(await rectX(2)));
+      await probe.read('return await H.setCaret({ para: 0, offset: 13 });');  // 在 #2 里
+      const b0 = await probe.read(bandAt(await rectX(0)));
+      const b2 = await probe.read(bandAt(await rectX(2)));
 
       check(' 光标在 #0 时，#0 与 #2 的左括号都在（常驻，不看光标）',
                 a0 > 0 && a2 > 0, `#0 左缘 ${a0} px / #2 左缘 ${a2} px`);
@@ -749,11 +747,11 @@ test.describe('编辑面', () => {
 
       // [诊断] 把 #0 那一行的蓝色列打出来 —— 用来核对"竖带窗口是否真的框住了括号"。
       {
-        const d = await probe.ev(`
-          const f = await window.__heditor.rawFrame();
-          const fw = window.__heditor.frameW();
+        const d = await probe.read(`
+          const f = await D.rawFrame();
+          const fw = D.frameW();
           const near = ${MARK};
-          const it = window.__heditor.controls.items[0];
+          const it = D.controls().items[0];
           const r0 = it.rects[0];
           const cols = new Set();
           for (let i = 0; i + 3 < f.length; i += 4) {
@@ -779,13 +777,13 @@ test.describe('编辑面', () => {
       //     左括号在它左边、右括号在它在右边（间隙各 1.5pt）。
       //     光标自己的颜色（r=31）被 mark 判据排除，不会污染计数。
       {
-        await probe.ev('return await window.__heditor.loadFormSample(0);');
-        await probe.ev('return await window.__heditor.stopBlink();');
-        await probe.ev('return await window.__heditor.setCaret(0, 9);');   // complaint [5,9) 的末尾
-        for (let i = 0; i < 4; ++i) await probe.ev(key('Backspace'));  // 真实键盘删光它
-        await probe.ev('await window.__heditor.present(); return true;');
+        await probe.read('return await LOAD.form(0);');
+        await probe.read('return await D.stopBlink();');
+        await probe.read('return await H.setCaret({ para: 0, offset: 9 });');   // complaint [5,9) 的末尾
+        for (let i = 0; i < 4; ++i) await probe.read(key('Backspace'));  // 真实键盘删光它
+        await probe.read('await D.present(); return true;');
 
-        const cc = await probe.ev('return window.__heditor.controls;');
+        const cc = await probe.read('return D.controls();');
         const k0 = cc.items[0];
         const emptyRect = k0 && (!k0.rects || k0.rects.length === 0);
         check('⭐ 前置：字段内容被删空后，它投影不出矩形'
@@ -793,12 +791,11 @@ test.describe('编辑面', () => {
                   emptyRect, `rects=${JSON.stringify(k0 && k0.rects)}`);
 
         const slotPx = bracketSlotPx;
-        const empty = await probe.ev(`
-          const st = window.__heditor.editStats;
-          const f = await window.__heditor.rawFrame();
-          const fw = window.__heditor.frameW();
-          const H2 = window.__heditor;
-          const winY = (st.caretPage - H2.editStats.windowFirstPage) * (H2.pagePx[1] + H2.pagePx[2]) +
+        const empty = await probe.read(`
+          const st = D.editStats();
+          const f = await D.rawFrame();
+          const fw = D.frameW();
+          const winY = (st.caretPage - D.editStats().windowFirstPage) * (D.pagePx().h + D.pagePx().gap) +
                        st.caretY;
           const mark = (r, g, b) => r > 45 && b - r > 60 && b > 140;   // 光标色 r=31 被排除
           const cx = st.caretX;
@@ -821,8 +818,8 @@ test.describe('编辑面', () => {
 
         // 引擎帧 / 屏幕也要一致：的是"屏幕上没有括号"，
         //   所以只查帧还不够 —— 上屏那一步漏了照样是他报的现象。
-        const scEmpty = await probe.ev('return await window.__heditor.selfCheck();');
-        const auEmpty = await probe.ev('return await window.__heditor.auditFrame();');
+        const scEmpty = await probe.read('return await D.selfCheck();');
+        const auEmpty = await probe.read('return await D.auditFrame();');
         check(' 删空字段后：引擎帧 == 整帧重画', auEmpty && auEmpty.diff === 0,
                   auEmpty ? `差 ${auEmpty.diff} px` : 'null');
         check(' 删空字段后：屏幕 == 引擎帧（括号真的在屏幕上）',
@@ -837,15 +834,15 @@ test.describe('编辑面', () => {
       //  表单样例正好就是这一对：complaint[5,9)（可编辑→亮蓝）+ duration[9,11)
       //  （只读→灰）—— 所以"谁在左"可以用颜色直接读出来，不必猜字形。
       {
-        await probe.ev('return await window.__heditor.loadFormSample(0);');
-        await probe.ev('return await window.__heditor.stopBlink();');
-        await probe.ev('return await window.__heditor.setCaret(0, 6);');
-        await probe.ev('await window.__heditor.present(); return true;');
+        await probe.read('return await LOAD.form(0);');
+        await probe.read('return await D.stopBlink();');
+        await probe.read('return await H.setCaret({ para: 0, offset: 6 });');
+        await probe.read('await D.present(); return true;');
 
-        const ord = await probe.ev(`
-          const f = await window.__heditor.rawFrame();
-          const fw = window.__heditor.frameW();
-          const cc = window.__heditor.controls;
+        const ord = await probe.read(`
+          const f = await D.rawFrame();
+          const fw = D.frameW();
+          const cc = D.controls();
           const A = cc.items[0], B = cc.items[1];      // complaint / duration(只读)
           const slotPx = ${bracketSlotPx};
           const x0 = Math.round((A.rects[0].x + A.rects[0].w) * 1.5) - 2;
@@ -872,29 +869,29 @@ test.describe('编辑面', () => {
                   (ord.blueHi < ord.grayLo ? '' : '  ← 顺序反了，就是截图里的 `[]`'));
       }
 
-      // ⭐ 运行期开关括号：__heditor.setShowBrackets(false|true)
+      // ⭐ 运行期开关括号：configure({ showBrackets: false|true })
       //
       //   这条测的是"改配置也要重排"：括号进文档流，显示与否一变占位就变，
       //     正文得跟着挪。只重绘不重排的话，括号会按新的开关画、正文却按旧口径排 ——
       //     表象是括号盖在字上/槽里空一条，而且从数字上看不出来。
       //   判据取"开关前后同一个字段的竖带"，加上屏幕/帧一致。
       {
-        await probe.ev('return await window.__heditor.loadFormSample(0);');
-        await probe.ev('return await window.__heditor.stopBlink();');
-        await probe.ev('return await window.__heditor.setCaret(0, 6);');   // 光标在 #0
-        await probe.ev('await window.__heditor.present(); return true;');
-        const on0 = await probe.ev(bandAt(await rectX(0)));
-        const on2 = await probe.ev(bandAt(await rectX(2)));
+        await probe.read('return await LOAD.form(0);');
+        await probe.read('return await D.stopBlink();');
+        await probe.read('return await H.setCaret({ para: 0, offset: 6 });');   // 光标在 #0
+        await probe.read('await D.present(); return true;');
+        const on0 = await probe.read(bandAt(await rectX(0)));
+        const on2 = await probe.read(bandAt(await rectX(2)));
 
-        await probe.ev('return await window.__heditor.setShowBrackets(false);');   // 括号全关
-        const off0 = await probe.ev(bandAt(await rectX(0)));
-        const off2 = await probe.ev(bandAt(await rectX(2)));
-        const scSw = await probe.ev('return await window.__heditor.selfCheck();');
-        const auSw = await probe.ev('return await window.__heditor.auditFrame();');
+        await probe.read('return await SET_BRACKETS(false);');   // 括号全关
+        const off0 = await probe.read(bandAt(await rectX(0)));
+        const off2 = await probe.read(bandAt(await rectX(2)));
+        const scSw = await probe.read('return await D.selfCheck();');
+        const auSw = await probe.read('return await D.auditFrame();');
 
-        await probe.ev('return await window.__heditor.setShowBrackets(true);');    // 再打开
-        const back0 = await probe.ev(bandAt(await rectX(0)));
-        const back2 = await probe.ev(bandAt(await rectX(2)));
+        await probe.read('return await SET_BRACKETS(true);');    // 再打开
+        const back0 = await probe.read(bandAt(await rectX(0)));
+        const back2 = await probe.read(bandAt(await rectX(2)));
 
         check(' setShowBrackets：开（两个都在）→ 关（两个都没有）→ 开（又都在）',
                   on0 > 0 && on2 > 0 && off0 === 0 && off2 === 0 && back0 > 0 && back2 > 0,
@@ -907,14 +904,14 @@ test.describe('编辑面', () => {
 
       // 小点：独立开关，与括号无关。它不占宽度 → 开关不该重排，只改像素。
       {
-        await probe.ev('return await window.__heditor.loadFormSample(0);');
-        await probe.ev('return await window.__heditor.setCaret(0, 6);');
-        await probe.ev('await window.__heditor.present(); return true;');
-        await probe.ev('return await window.__heditor.setShowControlDots(true);');
-        const stDot = await probe.ev('return window.__heditor.editStats;');
-        const scDot = await probe.ev('return await window.__heditor.selfCheck();');
-        await probe.ev('return await window.__heditor.setShowControlDots(false);');
-        const scOff = await probe.ev('return await window.__heditor.selfCheck();');
+        await probe.read('return await LOAD.form(0);');
+        await probe.read('return await H.setCaret({ para: 0, offset: 6 });');
+        await probe.read('await D.present(); return true;');
+        await probe.read('return await SET_DOTS(true);');
+        const stDot = await probe.read('return D.editStats();');
+        const scDot = await probe.read('return await D.selfCheck();');
+        await probe.read('return await SET_DOTS(false);');
+        const scOff = await probe.read('return await D.selfCheck();');
         check(' 小点开关：不触发重排（它不占宽度、不进文档流）', stDot.layoutRan === false,
                   `layoutRan=${stDot.layoutRan}`);
         check(' 小点开关：开与关之后屏幕都等于引擎帧',
@@ -933,7 +930,7 @@ test.describe('编辑面', () => {
       //   为什么需要它而不是只靠 selfCheck（画布 vs 引擎帧）：
       //     如果引擎帧自己就是错的（旧标记没擦掉），画布忠实反映了它，
       //     selfCheck 两边一起错、判据照样绿。实测就是这样漏掉的。
-      const aud = await probe.ev('return await window.__heditor.auditFrame();');
+      const aud = await probe.read('return await D.auditFrame();');
       check(' 换字段后引擎帧 == 整帧重画（帧自审，逐字节）—— 覆盖"该消失却没消失"',
                 aud && aud.diff === 0,
                 aud ? `差 ${aud.diff} px` + (aud.box ? ` 盒=${JSON.stringify(aud.box)}` : '')
@@ -962,30 +959,30 @@ test.describe('编辑面', () => {
       //   触发条件是"一次配置变更让整窗重排 → present 写整帧"，
       //   用开关括号来制造（它和换字段是同一类事件：排版输入变了）。
       //   旧的 Focused 档已经删掉，不能再靠"换字段"制造重排。
-      await probe.ev('return await window.__heditor.loadFormSample(0);');
-      await probe.ev('return await window.__heditor.stopBlink();');
-      await probe.ev('return await window.__heditor.setCaret(0, 6);');   // 光标在 #0（反复心悸）
+      await probe.read('return await LOAD.form(0);');
+      await probe.read('return await D.stopBlink();');
+      await probe.read('return await H.setCaret({ para: 0, offset: 6 });');   // 光标在 #0（反复心悸）
 
       // 把相位摆到"隐藏"，并且让引擎的账也进入隐藏态
-      await probe.ev('await window.__heditor.showCaret(false); await window.__heditor.present(); return true;');
-      const hiddenPre = await probe.ev('return await window.__heditor.selfCheck();');
+      await probe.read('await D.showCaret(false); await D.present(); return true;');
+      const hiddenPre = await probe.read('return await D.selfCheck();');
       check('前置：把闪烁相位摆到「光标隐藏」之后，屏幕仍等于引擎帧',
                 hiddenPre.screenVsEngineDiffPx === 0,
                 `差 ${hiddenPre.screenVsEngineDiffPx} px`);
 
       // 在隐藏半拍里关掉括号（＝设置面板上点一下「显示括号」）
-      await probe.ev('return await window.__heditor.setShowBrackets(false);');
-      await probe.ev('return await window.__heditor.stopBlink();');   // afterEdit 会重启定时器，再停掉
-      const hiddenStat = await probe.ev('return window.__heditor.editStats;');
+      await probe.read('return await SET_BRACKETS(false);');
+      await probe.read('return await D.stopBlink();');   // afterEdit 会重启定时器，再停掉
+      const hiddenStat = await probe.read('return D.editStats();');
       check(' 前提：关括号那一拍光标确实处于隐藏相位（宿主正是靠它决定走补救路径）',
                 hiddenStat.caretVisible === false, `caretVisible=${hiddenStat.caretVisible}`);
 
       // 宿主补救：看到 caretVisible=false 就把光标点亮再呈现一次（app.js 走的就是这条）。
       //   配置变更不像编辑那样自动点亮光标（setShowBrackets 不算编辑），所以要显式补。
-      await probe.ev('await window.__heditor.showCaret(true); await window.__heditor.present(); return true;');
-      await probe.ev('return await window.__heditor.stopBlink();');
-      const scHide = await probe.ev('return await window.__heditor.selfCheck();');
-      const auHide = await probe.ev('return await window.__heditor.auditFrame();');
+      await probe.read('await D.showCaret(true); await D.present(); return true;');
+      await probe.read('return await D.stopBlink();');
+      const scHide = await probe.read('return await D.selfCheck();');
+      const auHide = await probe.read('return await D.auditFrame();');
 
       check(' 隐藏半拍关括号：引擎帧必须等于整帧重画（引擎侧无罪）',
                 auHide && auHide.diff === 0,
@@ -1005,16 +1002,16 @@ test.describe('编辑面', () => {
       //  这条钉死"括号常显"的收益：占位集合与光标无关 ⇒ 换字段不触发布局，
       //  上屏从"整帧"掉到"一块小矩形"。
       {
-        await probe.ev('return await window.__heditor.setShowBrackets(true);');   // 括号开回来
-        await probe.ev('return await window.__heditor.loadFormSample(0);');
-        await probe.ev('return await window.__heditor.stopBlink();');
-        await probe.ev('return await window.__heditor.setCaret(0, 6);');
-        await probe.ev('await window.__heditor.present(); return true;');
+        await probe.read('return await SET_BRACKETS(true);');   // 括号开回来
+        await probe.read('return await LOAD.form(0);');
+        await probe.read('return await D.stopBlink();');
+        await probe.read('return await H.setCaret({ para: 0, offset: 6 });');
+        await probe.read('await D.present(); return true;');
 
-        await probe.ev('return await window.__heditor.setCaret(0, 14);');      // 换字段
-        const cst = await probe.ev('return window.__heditor.editStats;');
-        const fw = await probe.ev('return window.__heditor.frameW();');
-        const fh = await probe.ev('return window.__heditor.frameH();');
+        await probe.read('return await H.setCaret({ para: 0, offset: 14 });');      // 换字段
+        const cst = await probe.read('return D.editStats();');
+        const fw = await probe.read('return D.frameW();');
+        const fh = await probe.read('return D.frameH();');
         check(' 换字段：不重排（layoutRan=false）',
                   cst.layoutRan === false, `layoutRan=${cst.layoutRan}`);
         check(' 换字段：上屏量远小于整帧（括号常驻的收益）',
@@ -1033,19 +1030,18 @@ test.describe('编辑面', () => {
       //    要求光标的右边缘在它左边。不去拿控件矩形的几何数字比 ——
       //    这一整类 bug 的教训就是"几何元数据 ≠ 绘制结果"，两边必须分别量。
       {
-        await probe.ev('return await window.__heditor.loadFormSample(0);');
-        await probe.ev('return await window.__heditor.stopBlink();');
+        await probe.read('return await LOAD.form(0);');
+        await probe.read('return await D.stopBlink();');
         // 表单样例：complaint[5,9) / duration[9,11) 只读 / aggravate[12,16)
         // aggravate 是最右一个可编辑字段 → 它行内最右的标记墨迹就是它的 ]。
-        await probe.ev('return await window.__heditor.setCaret(0, 16);');   // 「天」右边、`]` 左边
-        await probe.ev('await window.__heditor.present(); return true;');
+        await probe.read('return await H.setCaret({ para: 0, offset: 16 });');   // 「天」右边、`]` 左边
+        await probe.read('await D.present(); return true;');
 
-        const cmp = await probe.ev(`
-          const st = window.__heditor.editStats;
-          const f = await window.__heditor.rawFrame();
-          const fw = window.__heditor.frameW();
-          const H2 = window.__heditor;
-          const winY = (st.caretPage - H2.editStats.windowFirstPage) * (H2.pagePx[1] + H2.pagePx[2]) +
+        const cmp = await probe.read(`
+          const st = D.editStats();
+          const f = await D.rawFrame();
+          const fw = D.frameW();
+          const winY = (st.caretPage - D.editStats().windowFirstPage) * (D.pagePx().h + D.pagePx().gap) +
                        st.caretY;
           const near = ${MARK};   // 标记亮蓝；光标色 r=31 被排除
           let bracketX = -1;
@@ -1075,22 +1071,22 @@ test.describe('编辑面', () => {
     //  判据是逐步的：一次只跨一枚簇（括号占位也算一格），到文档末尾就停住。
     //    只看终点抓不到"投影式移动"：投影也能给出一个看着合法的终点。
     {
-      await probe.ev('return await window.__heditor.loadFormSample(0);');
-      await probe.ev('return await window.__heditor.stopBlink();');
-      await probe.ev('return await window.__heditor.setCaret(0, 12);');   // #2 = aggravate [12,16)
+      await probe.read('return await LOAD.form(0);');
+      await probe.read('return await D.stopBlink();');
+      await probe.read('return await H.setCaret({ para: 0, offset: 12 });');   // #2 = aggravate [12,16)
 
-      await probe.ev(key('ArrowLeft'));                          //  真实键盘
-      const afterLeft = await probe.ev('return window.__heditor.caret;');
+      await probe.read(key('ArrowLeft'));                          //  真实键盘
+      const afterLeft = await probe.read('return CARET();');
       check('★ 在 #2 起点按左方向键：先退到 [ 之前（括号占一格，不瞬移）',
                 afterLeft.offset === 12 && afterLeft.side === 0,
                 `12 → ${afterLeft.offset}/${afterLeft.side}`);
 
       // 右走 6 步：13 14 15 16 16(跨 ]) 17（到文档末尾就停住），单步跨度恒为 1
-      await probe.ev('return await window.__heditor.setCaret(0, 12);');
+      await probe.read('return await H.setCaret({ para: 0, offset: 12 });');
       const seq = [];
       for (let i = 0; i < 6; ++i) {
-        await probe.ev(key('ArrowRight'));
-        seq.push((await probe.ev('return window.__heditor.caret;')).offset);
+        await probe.read(key('ArrowRight'));
+        seq.push((await probe.read('return CARET();')).offset);
       }
       let worst = 0;
       let prev = 12;
@@ -1103,14 +1099,14 @@ test.describe('编辑面', () => {
     }
 
       // 同一件事用"敲字"再走一遍（这条路径由打字触发）
-      await probe.ev('return await window.__heditor.loadFormSample(0);');
-      await probe.ev('return await window.__heditor.stopBlink();');
-      await probe.ev('return await window.__heditor.setCaret(0, 6);');
-      await probe.ev('await window.__heditor.showCaret(false); await window.__heditor.present(); return true;');
-      await probe.ev(key('x'));                     //  真实键盘路径
-      await probe.ev('return await window.__heditor.stopBlink();');
-      const scType = await probe.ev('return await window.__heditor.selfCheck();');
-      const auType = await probe.ev('return await window.__heditor.auditFrame();');
+      await probe.read('return await LOAD.form(0);');
+      await probe.read('return await D.stopBlink();');
+      await probe.read('return await H.setCaret({ para: 0, offset: 6 });');
+      await probe.read('await D.showCaret(false); await D.present(); return true;');
+      await probe.read(key('x'));                     //  真实键盘路径
+      await probe.read('return await D.stopBlink();');
+      const scType = await probe.read('return await D.selfCheck();');
+      const auType = await probe.read('return await D.auditFrame();');
       check(' 隐藏半拍敲字：引擎帧自审必须 0',
                 auType && auType.diff === 0,
                 auType ? `差 ${auType.diff} px` : '返回 null');
@@ -1123,23 +1119,23 @@ test.describe('编辑面', () => {
 
     // 只读模式：这是"策略生效"最干净的可观测形式
     //   （表单模式下光标被 clamp 在可编辑字段内，反而没法用普通按键走到"区间外"）
-    await probe.ev('return await window.__heditor.setEditMode(2);');
-    const txt0 = await probe.ev('return window.__heditor.text;');
-    const blk0 = await probe.ev('return window.__heditor.blockedEdits;');
-    for (const ch of 'abc') await probe.ev(key(ch));
-    const txt1 = await probe.ev('return window.__heditor.text;');
-    const blk1 = await probe.ev('return window.__heditor.blockedEdits;');
+    await probe.read('return await SET_MODE(2);');
+    const txt0 = await probe.read('return H.paragraph(0);');
+    const blk0 = await probe.read('return D.blockedEdits();');
+    for (const ch of 'abc') await probe.read(key(ch));
+    const txt1 = await probe.read('return H.paragraph(0);');
+    const blk1 = await probe.read('return D.blockedEdits();');
     check(' 只读模式：按键全被拒、文本一字不变、被拒次数 +3',
               txt1 === txt0 && blk1 === blk0 + 3,
               `被拒 ${blk1 - blk0} 次，文本${txt1 === txt0 ? '未变' : '变了'}`);
 
     // 表单模式：可编辑字段内能打进去，且区间跟着变长
-    await probe.ev('return await window.__heditor.loadFormSample(0);');
-    await probe.ev('return await window.__heditor.setCaret(0, 6);');
-    const len0 = await probe.ev('return Array.from(window.__heditor.text).length;');
-    await probe.ev(key('测'));
-    const len1 = await probe.ev('return Array.from(window.__heditor.text).length;');
-    const ct2 = await probe.ev('return window.__heditor.controls;');
+    await probe.read('return await LOAD.form(0);');
+    await probe.read('return await H.setCaret({ para: 0, offset: 6 });');
+    const len0 = await probe.read('return Array.from(H.paragraph(0)).length;');
+    await probe.read(key('测'));
+    const len1 = await probe.read('return Array.from(H.paragraph(0)).length;');
+    const ct2 = await probe.read('return D.controls();');
     check(' 表单模式：字段内按键成功，且字段区间跟着变长（9 → 10）',
               len1 === len0 + 1 && ct2.items[0].end[1] === 10,
               `码点 ${len0} → ${len1}，字段 #0 end=${ct2.items[0].end[1]}`);
@@ -1147,19 +1143,19 @@ test.describe('编辑面', () => {
     // 只读模式：标记必须一个像素都不剩。
     //   文档模式与表单模式都画括号（编辑态要一眼看出哪块是控件），只有只读不画 ——
     //   它是要印出来的呈现态，画上去就印出来了。三档的这一条口径见 [15]。
-    await probe.ev('return await window.__heditor.setEditMode(2);');
-    const roMark = await probe.ev(inkMark);
+    await probe.read('return await SET_MODE(2);');
+    const roMark = await probe.read(inkMark);
     check('★ 只读模式：标记一个像素都不剩', roMark === 0, `${roMark} px`);
 
     // 文档模式：标记照常画出来（不再是"只有表单模式才看得见控件边界"）
-    await probe.ev('return await window.__heditor.setEditMode(0);');
-    const docMark = await probe.ev(inkMark);
+    await probe.read('return await SET_MODE(0);');
+    const docMark = await probe.read(inkMark);
     check('★ 文档模式：标记照常出现（编辑态看得见哪块是控件）', docMark > 0,
               `${docMark} px`);
 
     // 切回表单模式后标记仍在（证明不是"切走一次就再也不画"）
-    await probe.ev('return await window.__heditor.setEditMode(1);');
-    const backMark = await probe.ev(inkMark);
+    await probe.read('return await SET_MODE(1);');
+    const backMark = await probe.read(inkMark);
     check(' 切回表单模式：标记也没有丢', backMark > 0, `${backMark} px`);
 
     // 穷尽不变式（在这一侧尤其重要：native 用的是自写光栅器，
@@ -1175,9 +1171,9 @@ test.describe('编辑面', () => {
     //
     // 整个循环放在一次 eval 里：否则 18 次 setCaret × N 个字段 = 几十次跨界，
     // 每次还要拷一份 4.5 MB 的帧，慢到没法用。
-    const exh = await probe.ev(`
+    const exh = await probe.read(`
       const near = ${MARK};
-      const total = Array.from(window.__heditor.text).length;
+      const total = Array.from(H.paragraph(0)).length;
       let checked = 0, bad = 0, firstBad = '';
       // 每字段的 min/max 存成对象（{ci: [lo, hi]}），不能存数组：
       //   只读字段会被跳过 → 稀疏数组在跨进程回传时被序列化成 null
@@ -1185,10 +1181,10 @@ test.describe('编辑面', () => {
       //    看不到是哪一行 —— 因为整段是 eval 的字符串）。
       const seen = {};
       for (let off = 0; off <= total; ++off) {
-        await window.__heditor.setCaret(0, off);
-        const cc = window.__heditor.controls;
-        const f = await window.__heditor.rawFrame();
-        const fw = window.__heditor.frameW();
+        await H.setCaret({ para: 0, offset: off });
+        const cc = D.controls();
+        const f = await D.rawFrame();
+        const fw = D.frameW();
         for (let ci = 0; ci < cc.items.length; ++ci) {
           const it = cc.items[ci];
           if (it.ro || !it.rects.length) continue;
@@ -1219,8 +1215,8 @@ test.describe('编辑面', () => {
               pf.map((p) => `#${p.ci} ${p.lo}~${p.hi}`).join(' ｜ '));
 
     // 给用户用的取证接口也当场跑一遍 —— 它要是抛异常，用户那边就白跑了。
-    const mk = await probe.ev('return await window.__heditor.markCheck();');
-    check(' 用户自检接口可用且当场判为一致（__heditor.markCheck()）',
+    const mk = await probe.read('return await D.markCheck();');
+    check(' 用户自检接口可用且当场判为一致（diag.markCheck()）',
               !!mk && mk.allOk === true && Array.isArray(mk.rows) && mk.rows.length >= 1,
               mk ? `${mk.rows.length} 个可编辑字段，全部一致=${mk.allOk}` : '返回 null');
 
@@ -1229,7 +1225,7 @@ test.describe('编辑面', () => {
     //   语义纠偏：Tab 在编辑器里是缩进。绑成"跳到下一个控件"是表单/网页里
     //     字段之间的约定，放到正文编辑器里会把肌肉记忆打断（用户明确纠正过）。
     //     字段之间用鼠标点、或者方向键（光标本来就会跨字段）。
-    //   改完之后"跳字段"只剩程序化入口 __heditor.focusControl（探针/自动化用），
+    //   改完之后"跳字段"只剩程序化入口 focusControl（探针/自动化用），
     //     下面单独验它还在。
     //
     //   这一段的核心判据是"真实按键 → 屏幕像素 == 引擎帧"。它抓的是这一类：
@@ -1237,24 +1233,24 @@ test.describe('编辑面', () => {
     //     脏矩形去上屏，画布变成"旧内容 + 局部新内容"的混合体
     //     （的"光标走了、旧括号还在"）。
     {
-      await probe.ev('return await window.__heditor.loadFormSample(0);');
-      await probe.ev('return await window.__heditor.setCaret(0, 6);');   // k1 内
-      await probe.ev('await window.__heditor.stopBlink(); await window.__heditor.present(); return true;');
+      await probe.read('return await LOAD.form(0);');
+      await probe.read('return await H.setCaret({ para: 0, offset: 6 });');   // k1 内
+      await probe.read('await D.stopBlink(); await D.present(); return true;');
 
-      const beforeTab = await probe.ev('return await window.__heditor.selfCheck();');
+      const beforeTab = await probe.read('return await D.selfCheck();');
       check('前置：按 Tab 之前屏幕与引擎帧一致（否则下面的判据没意义）',
                 beforeTab.screenVsEngineDiffPx === 0, `差 ${beforeTab.screenVsEngineDiffPx} px`);
 
-      const nBefore = await probe.ev('return Array.from(window.__heditor.text).length;');
-      await probe.ev(key('Tab'));                              //  真实键盘路径
-      const nAfter = await probe.ev('return Array.from(window.__heditor.text).length;');
-      const postTab = await probe.ev('return await window.__heditor.selfCheck();');
-      const liveOff = await probe.ev('return window.__heditor.caretLive;');
-      const auditTab = await probe.ev('return await window.__heditor.auditFrame();');
+      const nBefore = await probe.read('return Array.from(H.paragraph(0)).length;');
+      await probe.read(key('Tab'));                              //  真实键盘路径
+      const nAfter = await probe.read('return Array.from(H.paragraph(0)).length;');
+      const postTab = await probe.read('return await D.selfCheck();');
+      const liveOff = await probe.read('return D.caretLive();');
+      const auditTab = await probe.read('return await D.auditFrame();');
 
       check(' 真实 Tab 键 = 缩进：文档 +4 个码点，且是 4 个空格',
                 nAfter === nBefore + 4 &&
-                  (await probe.ev('return window.__heditor.text.slice(6, 10) === "    ";')),
+                  (await probe.read('return H.paragraph(0).slice(6, 10) === "    ";')),
                 `码点 ${nBefore} → ${nAfter}`);
       check(' Tab 之后光标停在新插入的空格之后（offset=10）',
                 postTab.caret.offset === 10, `offset=${postTab.caret.offset}`);
@@ -1274,31 +1270,31 @@ test.describe('编辑面', () => {
                          : '返回 null');
 
       // Shift+Tab 反缩进
-      await probe.ev(key('Tab', ', shiftKey: true'));
-      const nBack = await probe.ev('return Array.from(window.__heditor.text).length;');
+      await probe.read(key('Tab', ', shiftKey: true'));
+      const nBack = await probe.read('return Array.from(H.paragraph(0)).length;');
       check(' Shift+Tab = 反缩进：把 4 个空格删回来',
                 nBack === nBefore, `码点 ${nAfter} → ${nBack}`);
     }
 
     // 程序化跳字段（探针/自动化入口，不再绑键盘）
     {
-      await probe.ev('return await window.__heditor.loadFormSample(0);');
-      await probe.ev('return await window.__heditor.setCaret(0, 5);');
-      const f1 = await probe.ev('return await window.__heditor.focusControl(true);');
-      const c1 = await probe.ev('return window.__heditor.caret;');
-      const f2 = await probe.ev('return await window.__heditor.focusControl(true);');
-      const c2 = await probe.ev('return window.__heditor.caret;');
-      check(' __heditor.focusControl（程序化跳字段）：12 → 5 绕回第一个字段',
+      await probe.read('return await LOAD.form(0);');
+      await probe.read('return await H.setCaret({ para: 0, offset: 5 });');
+      const f1 = await probe.read('await H.focusControl("next"); return D.editStats();');
+      const c1 = await probe.read('return CARET();');
+      const f2 = await probe.read('await H.focusControl("next"); return D.editStats();');
+      const c2 = await probe.read('return CARET();');
+      check(' focusControl（程序化跳字段）：12 → 5 绕回第一个字段',
                 !!f1 && !!f2 && c1.offset === 12 && c2.offset === 5,
                 `${c1.offset} → ${c2.offset}`);
-      const post = await probe.ev('return await window.__heditor.selfCheck();');
-      const audit = await probe.ev('return await window.__heditor.auditFrame();');
+      const post = await probe.read('return await D.selfCheck();');
+      const audit = await probe.read('return await D.auditFrame();');
       check(' 跳字段之后：屏幕==引擎帧、且引擎帧==整帧重画',
                 post.screenVsEngineDiffPx === 0 && audit && audit.diff === 0,
                 `屏幕差 ${post.screenVsEngineDiffPx} px，帧自审差 ${audit ? audit.diff : '?'} px` +
                 `，盒=${JSON.stringify(post.screenVsEngineDiffBox)}` +
-                `，上屏=${JSON.stringify(await probe.ev('return window.__heditor.blitStats;'))}`);
-      const mk2 = await probe.ev('return await window.__heditor.markCheck();');
+                `，上屏=${JSON.stringify(await probe.read('return D.blitStats();'))}`);
+      const mk2 = await probe.read('return await D.markCheck();');
       check(' 跳字段后每个字段的括号都还在（常显；markCheck 自检）',
                 !!mk2 && mk2.allOk === true && mk2.showBrackets === true,
                 mk2 ? `${mk2.rows.length} 个可编辑字段，showBrackets=${mk2.showBrackets}，`
@@ -1313,7 +1309,7 @@ test.describe('编辑面', () => {
     //   段数不写死：那张文书是演示数据，随时可能被调大调小，而这一节要钉的是
     //   "重排了几段、复用了几段"这个结构，不是那个数本身。
     const DIRTY = 150;
-    const base = await probe.ev('return await window.__heditor.run(7, 1.0);');
+    const base = await probe.read('return await LOAD.scenario(7, 1.0);');
     check('长文档载入（段数 ≥ 200）', base.totalParagraphs >= 200,
               `${base.totalParagraphs} 段 / ${base.totalLines} 行`);
     check('首次排版是全量（整篇都脏）', base.layoutWasFull === true);
@@ -1321,9 +1317,9 @@ test.describe('编辑面', () => {
                        fullMs: base.layoutMs };
 
     // 在脏段中间敲一个字（走真实键盘路径）
-    await probe.ev(`return await window.__heditor.setCaret(${DIRTY}, 5);`);
-    await probe.ev(key('测'));
-    const st = await probe.ev('return window.__heditor.editStats;');
+    await probe.read(`return await H.setCaret({ para: ${DIRTY}, offset: 5 });`);
+    await probe.read(key('测'));
+    const st = await probe.read('return D.editStats();');
     check('★ 敲字后是增量排版（不是全量）', st.layoutWasFull === false,
               `重排 ${st.relaidParagraphs} 段 / 复用 ${st.reusedParagraphs} 段 / 共 ${st.totalParagraphs} 段`);
     // 行结构没变 → 快路：只重排脏段自己，后缀整块搬回（一个字节都不动）。
@@ -1344,7 +1340,7 @@ test.describe('编辑面', () => {
               `增量 ${st.layoutMs.toFixed(3)} ms vs 首次全量 ${state.longDoc.fullMs.toFixed(3)} ms`);
 
     // 排版自审：增量结果与"不用缓存的全量重排"逐字段比 —— 必须完全相同
-    const au = await probe.ev('return await window.__heditor.auditLayout();');
+    const au = await probe.read('return await D.auditLayout();');
     check('★★ 增量结果与全量重排逐字段一致（auditLayout diff 0）',
               !!au && au.diff === 0,
               au ? `diff ${au.diff}（字形 ${au.glyphDiff}、行 ${au.lineDiff}、段 ${au.paraDiff}、` +
@@ -1367,10 +1363,10 @@ test.describe('编辑面', () => {
     }
 
     // 上屏与帧自审：长文档里编辑之后，屏幕 == 引擎帧，且引擎帧 == 整帧重画
-    const sc = await probe.ev('return await window.__heditor.selfCheck();');
+    const sc = await probe.read('return await D.selfCheck();');
     check('长文档编辑后：屏幕 == 引擎帧', sc.screenVsEngineDiffPx === 0,
               `差 ${sc.screenVsEngineDiffPx} px`);
-    const af = await probe.ev('return await window.__heditor.auditFrame();');
+    const af = await probe.read('return await D.auditFrame();');
     check('长文档编辑后：引擎帧 == 整帧重画', af && af.diff === 0,
               af ? `差 ${af.diff} px` : 'null');
 
@@ -1379,10 +1375,10 @@ test.describe('编辑面', () => {
 
     // 后缀平移复用：撑出一行之后，后缀的断行结果照样复用（只挪坐标）。
     //
-    // 40 个汉字足以撑出至少一行。走 __heditor.type（直连引擎）而不是键盘逐字派发：
+    // 40 个汉字足以撑出至少一行。走 type()（直连引擎）而不是键盘逐字派发：
     //   键盘路径上面已经验过，这里要的是"一次插入 40 个字"把行结构撑变。
-    const widened = await probe.ev(
-      `return await window.__heditor.type(${JSON.stringify('测'.repeat(40))});`);
+    const widened = await probe.read(
+      `return await TYPE(${JSON.stringify('测'.repeat(40))});`);
     check('★ 撑出一行 → 后缀整体平移复用（重排 1 段）',
               !!widened && widened.suffixShifted === true && widened.relaidParagraphs === 1,
               widened ? `重排 ${widened.relaidParagraphs} 段 / 复用 ${widened.reusedParagraphs} 段 / ` +
@@ -1392,12 +1388,12 @@ test.describe('编辑面', () => {
                 widened.totalParagraphs - 150,
               widened ? `${widened.relaidParagraphs} + ${widened.reusedParagraphs} = ` +
                 `${widened.totalParagraphs} - 150` : 'null');
-    const auShift = await probe.ev('return await window.__heditor.auditLayout();');
+    const auShift = await probe.read('return await D.auditLayout();');
     check('★★ 平移复用的排版与全量逐字段一致（auditLayout diff 0）',
               !!auShift && auShift.diff === 0,
               auShift ? `diff ${auShift.diff}（字形 ${auShift.glyphDiff}、行 ${auShift.lineDiff}、` +
                 `段 ${auShift.paraDiff}）` : 'null');
-    const scShift = await probe.ev('return await window.__heditor.selfCheck();');
+    const scShift = await probe.read('return await D.selfCheck();');
     check('平移之后屏幕 == 引擎帧', scShift.screenVsEngineDiffPx === 0,
               `差 ${scShift.screenVsEngineDiffPx} px`);
 
@@ -1418,28 +1414,28 @@ test.describe('编辑面', () => {
     //   这一格坏在"caretY 是窗口帧内的 y"被当成了页内 y —— 页偏移算了两遍，
     //   光标坐标落到下一页去，屏幕跟着往下冲，随后窗口重算又滚一次。
     //   取点选在"光标当前所在的那一行"：它一定看得见，所以根本不该把页面挪走。
-    const clickP2 = await probe.ev(`
-      const H = window.__heditor;
-      const stage = document.getElementById('stage');
+    const clickP2 = await probe.read(`
+      const stage = EL('#stage');
       const dpr = window.devicePixelRatio || 1;
-      const cr0 = await H.setCaret(20, 5);      // 第 20 段在 16 页的那一份里是第二页
+      await H.setCaret({ para: 20, offset: 5 });   // 第 20 段在 16 页的那一份里是第二页
+      const cr0 = CARET();                      // 光标要页号与页内 y，公开面一次给全
       const before = stage.scrollTop;
-      const cv = H.canvas, r = cv.getBoundingClientRect();
+      const cv = FRAME(), r = cv.getBoundingClientRect();
       const sx = r.width / cv.width, sy = r.height / cv.height;
       // 画布代理的 rect 是"窗口帧"的坐标，而 cr0.y 是页内 y —— 加上页号偏移才是窗口内 y。
-      const step = H.pagePx[1] + H.pagePx[2];
-      const wy0 = (cr0.page - H.editStats.windowFirstPage) * step + cr0.y;
+      const step = D.pagePx().h + D.pagePx().gap;
+      const wy0 = (cr0.page - D.editStats().windowFirstPage) * step + cr0.y;
       cv.dispatchEvent(new MouseEvent('mousedown',
         { clientX: r.left + (cr0.x + 2) * sx, clientY: r.top + (wy0 + 2) * sy,
           bubbles: true, cancelable: true }));
-      if (window.__heditor.quiesce) await window.__heditor.quiesce();  // 异步宿主：命中+落光标要走往返
-      const sc2 = await H.selfCheck();
-      return { pageBefore: cr0.page, pageAfter: H.caret.page,
+      await H.flush();  // 异步宿主：命中+落光标要走往返
+      const sc2 = await D.selfCheck();
+      return { pageBefore: cr0.page, pageAfter: CARET().page,
                before, after: stage.scrollTop,
-               stepCss: (H.pagePx[1] + H.pagePx[2]) / dpr,
-               wf: H.editStats.windowFirstPage, caretY: cr0.y,
+               stepCss: (D.pagePx().h + D.pagePx().gap) / dpr,
+               wf: D.editStats().windowFirstPage, caretY: cr0.y,
                frameDiff: sc2.screenVsEngineDiffPx, box: sc2.screenVsEngineDiffBox,
-               caretNow: H.caret, blit: H.blitStats };
+               caretNow: CARET(), blit: D.blitStats() };
     `);
     check('★ 点第二页光标所在那一行：页不变、滚动量小于半页（不乱滚）',
               clickP2.pageBefore >= 1 && clickP2.pageAfter === clickP2.pageBefore &&
@@ -1457,12 +1453,11 @@ test.describe('编辑面', () => {
     //   用户把屏幕滚到别处之后窗口仍锁在光标那几页：可见页没进窗口 ⇒ 一片空白，
     //   而且算出的锚点与上一轮相同 ⇒ applyWindow 返回 false、连 present 都不做。
     //   症状正是"滚动时下面的画布不生成，点一下才出来"（点击把光标带到那一页）。
-    const scrollWin = JSON.parse(await probe.ev(`
+    const scrollWin = JSON.parse(await probe.read(`
       return (async function () {
-        const H = window.__heditor;
-        const stage = document.getElementById('stage');
+        const stage = EL('#stage');
         const dpr = window.devicePixelRatio || 1;
-        const step = (H.pagePx[1] + H.pagePx[2]) / dpr;
+        const step = (D.pagePx().h + D.pagePx().gap) / dpr;
         const wait = () => new Promise((r) => requestAnimationFrame(
           () => requestAnimationFrame(r)));
         // 跳页之后要给窗口一个对齐的机会：滚动快过"渲染能力"时宿主会主动放弃追窗口
@@ -1476,7 +1471,7 @@ test.describe('编辑面', () => {
           stage.scrollTop = p * step;
           await settle();
           await wait();
-          const vp = H.viewport;
+          const vp = VIEWPORT();
           rows.push({ want: p, first: vp.engineFirst, count: vp.engineCount,
                       canvases: vp.canvases, visFirst: vp.visible.first,
                       visLast: vp.visible.last });
@@ -1496,7 +1491,7 @@ test.describe('编辑面', () => {
           //   Worker 传输下这一拍要跨线程往返，只等两帧在机器有负载时会读到换窗前的账。
           await settle();
           await wait();
-          const st = H.editStats;
+          const st = D.editStats();
           shiftSteps.push({ page: k, first: st.windowFirstPage, pages: st.windowPages,
                             repainted: st.repaintedPages, bands: st.bandY1 >= 0 });
         }
@@ -1530,16 +1525,16 @@ test.describe('编辑面', () => {
     //   最容易错的三种：搬错行、上一帧的光标/标记/选区跟着搬走变成幽灵、指纹没重新对齐。
     //   为什么不能用 auditFrame 顶替：那一条比的是帧，而帧是从底图搬的 ——
     //   底图整个错了，帧与"整帧重贴"照样一致，两条都绿而画面是错的。
-    const abScroll = await probe.ev('return await window.__heditor.auditBase();');
+    const abScroll = await probe.read('return await D.auditBase();');
     check('★★ 滚动换窗之后底图 == 从零全建（逐字节）',
               !!abScroll && abScroll.diff === 0,
               abScroll ? `差 ${abScroll.diff} px` +
                 (abScroll.diff > 0 ? `（框 ${JSON.stringify(abScroll.box)}）` : '') : 'null');
-    const afScroll = await probe.ev('return await window.__heditor.auditFrame();');
+    const afScroll = await probe.read('return await D.auditFrame();');
     check('★★ 滚动换窗之后引擎帧 == 整帧重画（逐字节）',
               !!afScroll && afScroll.diff === 0,
               afScroll ? `差 ${afScroll.diff} px` : 'null');
-    const scScroll = await probe.ev('return await window.__heditor.selfCheck();');
+    const scScroll = await probe.read('return await D.selfCheck();');
     check('滚动换窗之后屏幕 == 引擎帧', scScroll.screenVsEngineDiffPx === 0,
               `差 ${scScroll.screenVsEngineDiffPx} px`);
   }
@@ -1548,15 +1543,15 @@ test.describe('编辑面', () => {
   {
     // 用真实的 Enter 按键走一遍（不是直接调引擎）—— 键盘路径与引擎路径是两处接线，
     //   只测引擎会漏掉"宿主没把 Enter 接上"这类问题。
-    await probe.ev('return await window.__heditor.run(6, 1.0);');
-    await probe.ev('return await window.__heditor.stopBlink();');
-    const before = await probe.ev('return window.__heditor.editStats;');
-    const textBefore = await probe.ev('return window.__heditor.allText;');
-    await probe.ev('return await window.__heditor.setCaret(0, 5);');
-    await probe.ev(key('Enter'));
+    await probe.read('return await LOAD.scenario(6, 1.0);');
+    await probe.read('return await D.stopBlink();');
+    const before = await probe.read('return D.editStats();');
+    const textBefore = await probe.read('return H.text();');
+    await probe.read('return await H.setCaret({ para: 0, offset: 5 });');
+    await probe.read(key('Enter'));
 
-    const after = await probe.ev('return window.__heditor.editStats;');
-    const textAfter = await probe.ev('return window.__heditor.allText;');
+    const after = await probe.read('return D.editStats();');
+    const textAfter = await probe.read('return H.text();');
     state.splits = { parasBefore: before.totalParagraphs, parasAfter: after.totalParagraphs };
     check('★ 真实回车让段数 +1', after.totalParagraphs === before.totalParagraphs + 1,
               `${before.totalParagraphs} → ${after.totalParagraphs} 段`);
@@ -1569,32 +1564,32 @@ test.describe('编辑面', () => {
               `重排 ${after.relaidParagraphs} 段 / 复用 ${after.reusedParagraphs} 段`);
 
     // 排版与上屏两个自审都要过：分段走的是"前缀复用 + 从脏段续排"，最容易错的是段号错位
-    const auSplit = await probe.ev('return await window.__heditor.auditLayout();');
+    const auSplit = await probe.read('return await D.auditLayout();');
     check('★★ 分段之后增量排版 == 全量重排（逐字段）',
               !!auSplit && auSplit.diff === 0,
               auSplit ? `diff ${auSplit.diff}（字形 ${auSplit.glyphDiff}、行 ${auSplit.lineDiff}、` +
                 `段 ${auSplit.paraDiff}）` : 'null');
-    const scSplit = await probe.ev('return await window.__heditor.selfCheck();');
+    const scSplit = await probe.read('return await D.selfCheck();');
     check('分段之后屏幕 == 引擎帧', scSplit.screenVsEngineDiffPx === 0,
               `差 ${scSplit.screenVsEngineDiffPx} px`);
-    const afSplit = await probe.ev('return await window.__heditor.auditFrame();');
+    const afSplit = await probe.read('return await D.auditFrame();');
     check('分段之后引擎帧 == 整帧重画', afSplit && afSplit.diff === 0,
               afSplit ? `差 ${afSplit.diff} px` : 'null');
 
     // 段首退格并回去（同一个往返：文档要么回到原样，要么至少段数 -1）
-    await probe.ev('return await window.__heditor.setCaret(1, 0);');
-    await probe.ev(key('Backspace'));
-    const merged = await probe.ev('return window.__heditor.editStats;');
+    await probe.read('return await H.setCaret({ para: 1, offset: 0 });');
+    await probe.read(key('Backspace'));
+    const merged = await probe.read('return D.editStats();');
     check('★ 段首退格把两段并回去（段数 -1）',
               merged.totalParagraphs === after.totalParagraphs - 1,
               `${after.totalParagraphs} → ${merged.totalParagraphs} 段`);
     check('★ 合并之后光标落在合并点上', merged.caretPara === 0 && merged.caretOffset === 5,
               `段 ${merged.caretPara} 偏移 ${merged.caretOffset}`);
-    const auMerge = await probe.ev('return await window.__heditor.auditLayout();');
+    const auMerge = await probe.read('return await D.auditLayout();');
     check('★★ 合并之后增量排版 == 全量重排（逐字段）', !!auMerge && auMerge.diff === 0,
               auMerge ? `diff ${auMerge.diff}` : 'null');
     check('合并之后文档回到分段之前的字符数',
-              (await probe.ev('return window.__heditor.allText;')).length === textBefore.length,
+              (await probe.read('return H.text();')).length === textBefore.length,
               `回到 ${textBefore.length} 字符`);
 
     // 把缩放还回去：[9] 与本节的 run(7/6, 1.0) 只是为了让长文档的窗口页数可控，
@@ -1603,7 +1598,7 @@ test.describe('编辑面', () => {
     //   只有依赖"文档有多高"的小节会失真：拖选出可视区那一节就是这样，文档矮了
     //   三分之一，自动滚动很快滚到底，"还在继续滚"于是永远量不出来。
     //   判据必须自己钉住前提，不靠前一节留下的状态。
-    await probe.ev(`return await window.__heditor.run(6, ${ZOOM});`);
+    await probe.read(`return await LOAD.scenario(6, ${ZOOM});`);
   }
 
   log.section('[11] 相邻字段共享边界上打字：字进前一个字段，括号仍是 `][`');
@@ -1615,9 +1610,9 @@ test.describe('编辑面', () => {
     //  —— A 的终点 >= at 右移（字进 A），B 的起点要 > at 才右移（于是原地不动）——
     //  结果一个字同时落进两个控件：A=[5,10)、B=[9,12) 重叠，B 的左括号于是被画到
     //  A 右括号的左边。native 侧的结构性判据见单测 [18]，这里补的是"真实按键路径"。
-    await probe.ev('return await window.__heditor.loadFormSample(0);');
-    await probe.ev('return await window.__heditor.stopBlink();');
-    const b11 = await probe.ev('return window.__heditor.controls;');
+    await probe.read('return await LOAD.form(0);');
+    await probe.read('return await D.stopBlink();');
+    const b11 = await probe.read('return D.controls();');
     state.boundary = { before: b11.items.map((it: any) => [...it.start, ...it.end]) };
 
     check('前置：字段 #0 的末尾与 #1 的开头是同一个位置（共享边界）',
@@ -1626,14 +1621,14 @@ test.describe('编辑面', () => {
               `#0 [${b11.items[0].start[1]},${b11.items[0].end[1]}) ｜` +
                 ` #1 [${b11.items[1].start[1]},${b11.items[1].end[1]})`);
 
-    // 光标停在这个边界上，然后派一个真实按键（不是 __heditor.type，见 [4] 的说明）
-    await probe.ev(`return await window.__heditor.setCaret(0, ${b11.items[0].end[1]});`);
-    const cc11 = await probe.ev('return window.__heditor.controls;');
+    // 光标停在这个边界上，然后派一个真实按键（不是 type()，见 [4] 的说明）
+    await probe.read(`return await H.setCaret({ para: 0, offset: ${b11.items[0].end[1]} });`);
+    const cc11 = await probe.read('return D.controls();');
     check('光标停在边界上时归前一个字段（末尾算在区间内）', cc11.caret === 0,
               `caret-control=${cc11.caret}`);
-    await probe.ev(key('诊'));
+    await probe.read(key('诊'));
 
-    const a11 = await probe.ev('return window.__heditor.controls;');
+    const a11 = await probe.read('return D.controls();');
     state.boundary.after = a11.items.map((it: any) => [...it.start, ...it.end]);
     const e0 = a11.items[0].end[1], s1 = a11.items[1].start[1];
     check('★ 字进了 #0（#0 变长），#1 整体右移 —— 两段区间不重叠',
@@ -1653,26 +1648,26 @@ test.describe('编辑面', () => {
               right0 > 0 && left1 > 0 && right0 <= left1 + 0.01,
               `#0 右缘 ${right0.toFixed(2)} pt ≤ #1 左缘 ${left1.toFixed(2)} pt`);
 
-    const au11 = await probe.ev('return await window.__heditor.auditLayout();');
+    const au11 = await probe.read('return await D.auditLayout();');
     check('★★ 边界上打字之后增量排版 == 全量重排（逐字段）',
               !!au11 && au11.diff === 0,
               au11 ? `diff ${au11.diff}（字形 ${au11.glyphDiff}、行 ${au11.lineDiff}、` +
                 `段 ${au11.paraDiff}）` : 'null');
-    const sc11 = await probe.ev('return await window.__heditor.selfCheck();');
+    const sc11 = await probe.read('return await D.selfCheck();');
     check('边界上打字之后屏幕 == 引擎帧', sc11.screenVsEngineDiffPx === 0,
               `差 ${sc11.screenVsEngineDiffPx} px`);
 
-    await probe.ev('return await window.__heditor.setCaret(0, 10);');
-    await probe.ev('await window.__heditor.present(); return true;');
+    await probe.read('return await H.setCaret({ para: 0, offset: 10 });');
+    await probe.read('await D.present(); return true;');
     await sleep(150);
     await probe.shot('shared-boundary');
 
     // 三连可编辑字段（演示样例 variant 2）：三条边界两侧都可写 —— 前两个样例的边界
     //   一侧是只读的，只能在一个方向试。这里在边界上打字、再把中间那个删空，
     //   看区间和矩形会不会互相穿过。
-    await probe.ev('return await window.__heditor.loadFormSample(2);');
-    await probe.ev('return await window.__heditor.stopBlink();');
-    const v3 = await probe.ev('return window.__heditor.controls;');
+    await probe.read('return await LOAD.form(2);');
+    await probe.read('return await D.stopBlink();');
+    const v3 = await probe.read('return D.controls();');
     state.chain3 = { before: v3.items.map((it: any) => [...it.start, ...it.end]) };
     check('三连样例：3 个字段都紧挨着（两条共享边界）',
               v3.count === 3 && v3.items.every((it: any) => !it.ro) &&
@@ -1680,9 +1675,9 @@ test.describe('编辑面', () => {
                 v3.items[1].end[1] === v3.items[2].start[1],
               v3.items.map((it: any) => `[${it.start[1]},${it.end[1]})`).join(' '));
 
-    await probe.ev('return await window.__heditor.setCaret(0, 7);');  // 第一条共享边界
-    await probe.ev(key('痛'));
-    const v3b = await probe.ev('return window.__heditor.controls;');
+    await probe.read('return await H.setCaret({ para: 0, offset: 7 });');  // 第一条共享边界
+    await probe.read(key('痛'));
+    const v3b = await probe.read('return D.controls();');
     state.chain3.afterType = v3b.items.map((it: any) => [...it.start, ...it.end]);
     // 字进前一个字段、后两个整体右移；三段首尾相接就是"不穿过"的最强形式
     const chain = (r: any) =>
@@ -1695,12 +1690,12 @@ test.describe('编辑面', () => {
     // 把中间那个删空：它变成零宽的空字段，边界上与"左字段的闭 + 右字段的开"并列。
     //   这里重新载入一次样例，拿回干净的三连区间（[5,7) [7,9) [9,11)）—— 上面那一步
     //   已经往左字段里打过字，它变长成了 [5,8)，量出来的就不是这条边界了。
-    await probe.ev('return await window.__heditor.loadFormSample(2);');
-    await probe.ev('return await window.__heditor.stopBlink();');
-    await probe.ev('return await window.__heditor.setCaret(0, 9);');
-    await probe.ev(key('Backspace'));
-    await probe.ev(key('Backspace'));
-    const v3c = await probe.ev('return window.__heditor.controls;');
+    await probe.read('return await LOAD.form(2);');
+    await probe.read('return await D.stopBlink();');
+    await probe.read('return await H.setCaret({ para: 0, offset: 9 });');
+    await probe.read(key('Backspace'));
+    await probe.read(key('Backspace'));
+    const v3c = await probe.read('return D.controls();');
     state.chain3.afterEmpty = v3c.items.map((it: any) => [...it.start, ...it.end]);
     const mid = v3c.items[1];
     const right = v3c.items[2];
@@ -1713,17 +1708,17 @@ test.describe('编辑面', () => {
     //   表现就是"中间的控件删掉最后一个字之后光标再也进不去、字也打不进去"。
     //   注意顺序：这一段必须在"往左字段里打字"之前做，否则左字段已经变长（[5,8)），
     //   量出来的边界就不是 [5,7] 那一处了。
-    const caretAt = await probe.ev('return window.__heditor.caret.offset;');
+    const caretAt = await probe.read('return CARET().offset;');
     check('★ 光标停在那个零宽字段的位置上（位置归属没被左邻居抢走）',
               caretAt === mid.start[1], `光标 ${caretAt}，空字段 ${mid.start[1]}`);
     // 方向键一次一格 —— 括号也是格（占位簇各占一枚），所以共享边界 ][ 要按两下：
     //   一格一格地走过"字与开括号之间""两枚括号之间"那些位置，不许整段跳过去。
-    await probe.ev('return await window.__heditor.setCaret(0, 5);');
+    await probe.read('return await H.setCaret({ para: 0, offset: 5 });');
     const walk = [];
     for (let i = 0; i < 5; ++i) {
-      await probe.ev(key('ArrowRight'));
-      const a = await probe.ev(`
-        const q = window.__heditor.caret;
+      await probe.read(key('ArrowRight'));
+      const a = await probe.read(`
+        const q = CARET();
         return { o: q.offset, s: q.side };`);
       walk.push(`${a.o}/${a.s}`);
     }
@@ -1732,23 +1727,23 @@ test.describe('编辑面', () => {
               JSON.stringify(walk) === JSON.stringify(['6/0', '7/0', '7/1', '7/2', '7/3']),
               `落点 ${walk.join(' ')}`);
     // 回到那个零宽字段的位置上：打字应该进它自己，左右两个字段不许被撑大
-    await probe.ev('return await window.__heditor.setCaret(0, 7);');
-    await probe.ev(key('痛'));
-    const v3d = await probe.ev('return window.__heditor.controls;');
+    await probe.read('return await H.setCaret({ para: 0, offset: 7 });');
+    await probe.read(key('痛'));
+    const v3d = await probe.read('return D.controls();');
     state.chain3.afterFill = v3d.items.map((it: any) => [...it.start, ...it.end]);
     check('★ 在空字段的位置上打字 → 字进它自己（左右两个字段都没被撑大）',
               v3d.items[1].start[1] === 7 && v3d.items[1].end[1] === 8 &&
                 v3d.items[0].end[1] === 7 && v3d.items[2].start[1] === 8,
               v3d.items.map((it: any) => `[${it.start[1]},${it.end[1]})`).join(' '));
 
-    const au3 = await probe.ev('return await window.__heditor.auditLayout();');
+    const au3 = await probe.read('return await D.auditLayout();');
     check('★★ 三连样例的每一步增量排版都等于全量重排', !!au3 && au3.diff === 0,
               au3 ? `diff ${au3.diff}` : 'null');
-    const sc3 = await probe.ev('return await window.__heditor.selfCheck();');
+    const sc3 = await probe.read('return await D.selfCheck();');
     check('三连样例：屏幕 == 引擎帧', sc3.screenVsEngineDiffPx === 0,
               `差 ${sc3.screenVsEngineDiffPx} px`);
-    await probe.ev('return await window.__heditor.setCaret(0, 7);');
-    await probe.ev('await window.__heditor.present(); return true;');
+    await probe.read('return await H.setCaret({ para: 0, offset: 7 });');
+    await probe.read('await D.present(); return true;');
     await sleep(150);
     await probe.shot('three-adjacent-fields');
   }
@@ -1759,13 +1754,13 @@ test.describe('编辑面', () => {
     //   这一格坏在"点画布 → 命中测试 → 归属"这条链上，而合成 MouseEvent 与真实点击
     //   走的虽然都是同一个监听器，但只有真实事件连坐标换算、命中、dpr 一起过一遍。
     //   之前所有探针都用合成事件，所以这格一直没被钉住。
-    await probe.ev('return await window.__heditor.loadFormSample(2);');
-    await probe.ev('return await window.__heditor.stopBlink();');
-    const geo = await probe.ev(`
-      const cv = window.__heditor.canvas, r = cv.getBoundingClientRect();
-      const c0 = window.__heditor.controls.items[0].rects[0];
+    await probe.read('return await LOAD.form(2);');
+    await probe.read('return await D.stopBlink();');
+    const geo = await probe.read(`
+      const cv = FRAME(), r = cv.getBoundingClientRect();
+      const c0 = D.controls().items[0].rects[0];
       return { left: r.left, top: r.top, sx: r.width / cv.width, sy: r.height / cv.height,
-               zoom: window.__heditor.zoomLevel, y: c0.y + c0.h / 2 };`);
+               zoom: ZOOM(), y: c0.y + c0.h / 2 };`);
     const click = async (xPt: any, yPt: any) => {
       const x = geo.left + xPt * geo.zoom * geo.sx;
       const y = geo.top + yPt * geo.zoom * geo.sy;
@@ -1777,8 +1772,8 @@ test.describe('编辑面', () => {
 
     // 控件自己投影出来的内容框（磅）：点框内任意一点都必须归它自己。
     //   这就是用户眼里的"我点的是这个框"。
-    const boxes = await probe.ev(`
-      const cs = window.__heditor.controls;
+    const boxes = await probe.read(`
+      const cs = D.controls();
       return cs.items.map((it, i) => (it.rects || []).map(q => ({ i, x: q.x, w: q.w, y: q.y })))
         .flat();`);
     let probed = 0;
@@ -1786,7 +1781,7 @@ test.describe('编辑面', () => {
     for (const b of boxes) {
       for (let x = b.x + 1; x <= b.x + b.w - 1; x += 2) {
         await click(x, geo.y);
-        const st = await probe.ev('return window.__heditor.controls.caret;');
+        const st = await probe.read('return D.controls().caret;');
         ++probed;
         if (st !== b.i) wrong.push(`x=${Math.round(x)}→字段${st}(应${b.i})`);
       }
@@ -1797,16 +1792,16 @@ test.describe('编辑面', () => {
               `采样 ${probed} 点，错的 ${wrong.length} 个 ${wrong.slice(0, 3).join(' ')}`);
 
     // 落笔也跟着归属走：点中间字段的开头再打字，字必须进中间那个字段。
-    await probe.ev('return await window.__heditor.loadFormSample(2);');
-    await probe.ev('return await window.__heditor.stopBlink();');
-    const midBox = await probe.ev(`
-      const q = window.__heditor.controls.items[1].rects[0];
+    await probe.read('return await LOAD.form(2);');
+    await probe.read('return await D.stopBlink();');
+    const midBox = await probe.read(`
+      const q = D.controls().items[1].rects[0];
       return { x: q.x, y: q.y, w: q.w, h: q.h };`);
     await click(midBox.x + 1, geo.y);
-    const ownerAtStart = await probe.ev('return window.__heditor.controls.caret;');
-    const caretAtStart = await probe.ev('return window.__heditor.caret.offset;');
-    await probe.ev(key('痛'));
-    const v12 = await probe.ev('return window.__heditor.controls;');
+    const ownerAtStart = await probe.read('return D.controls().caret;');
+    const caretAtStart = await probe.read('return CARET().offset;');
+    await probe.read(key('痛'));
+    const v12 = await probe.read('return D.controls();');
     state.clickOwner.afterType = v12.items.map((it: any) => [...it.start, ...it.end]);
     check('★ 真实点击中间字段的开头 → 光标停在那里且归属它',
               ownerAtStart === 1 && caretAtStart === 7,
@@ -1815,19 +1810,19 @@ test.describe('编辑面', () => {
               v12.items[0].end[1] === 7 && v12.items[1].end[1] === 10,
               v12.items.map((it: any) => `[${it.start[1]},${it.end[1]})`).join(' '));
 
-    const au12 = await probe.ev('return await window.__heditor.auditLayout();');
+    const au12 = await probe.read('return await D.auditLayout();');
     check('★★ 点击 + 打字之后增量排版 == 全量重排', !!au12 && au12.diff === 0,
               au12 ? `diff ${au12.diff}` : 'null');
-    const sc12 = await probe.ev('return await window.__heditor.selfCheck();');
+    const sc12 = await probe.read('return await D.selfCheck();');
     check('点击之后屏幕 == 引擎帧', sc12.screenVsEngineDiffPx === 0,
               `差 ${sc12.screenVsEngineDiffPx} px`);
   }
 
   log.section('[13] 三层嵌套可编辑字段（演示样例 variant 3）');
   {
-    await probe.ev('return await window.__heditor.loadFormSample(3);');
-    await probe.ev('return await window.__heditor.stopBlink();');
-    const n = await probe.ev('return window.__heditor.controls;');
+    await probe.read('return await LOAD.form(3);');
+    await probe.read('return await D.stopBlink();');
+    const n = await probe.read('return D.controls();');
     state.nested = { before: n.items.map((it: any) => [...it.start, ...it.end]) };
     check('三层嵌套：深度 0/1/2，父链 外→中→内',
               n.count === 3 && n.items.every((it: any) => !it.ro) && n.items[0].depth === 0 &&
@@ -1836,10 +1831,10 @@ test.describe('编辑面', () => {
               n.items.map((it: any) => `#${it.depth}p${it.parent}[${it.start[1]},${it.end[1]})`).join(' '));
 
     // 归属取最内层：在内层中间打字，三层一起变长（父子区间不许互相穿过）。
-    await probe.ev('return await window.__heditor.setCaret(0, 8);');
-    const ownerN = await probe.ev('return window.__heditor.controls.caret;');
-    await probe.ev(key('痛'));
-    const n2 = await probe.ev('return window.__heditor.controls;');
+    await probe.read('return await H.setCaret({ para: 0, offset: 8 });');
+    const ownerN = await probe.read('return D.controls().caret;');
+    await probe.read(key('痛'));
+    const n2 = await probe.read('return D.controls();');
     state.nested.afterType = n2.items.map((it: any) => [...it.start, ...it.end]);
     check('★ 光标在内层里打的字归最内层（不是外层）', ownerN === 2, `归属 ${ownerN}`);
     check('★ 内层变长 → 中/外层一起变长（区间不许互相穿过）',
@@ -1851,16 +1846,16 @@ test.describe('编辑面', () => {
               n2.items[2].end[1] === n2.items[2].start[1] + 3,
               `内层 = [${n2.items[2].start[1]},${n2.items[2].end[1]})，打进了 1 个字`);
 
-    const au13 = await probe.ev('return await window.__heditor.auditLayout();');
+    const au13 = await probe.read('return await D.auditLayout();');
     check('★★ 嵌套样例增量排版 == 全量重排（括号占位嵌套时最容易错位）',
               !!au13 && au13.diff === 0, au13 ? `diff ${au13.diff}` : 'null');
-    const sc13 = await probe.ev('return await window.__heditor.selfCheck();');
+    const sc13 = await probe.read('return await D.selfCheck();');
     check('嵌套样例：屏幕 == 引擎帧', sc13.screenVsEngineDiffPx === 0,
               `差 ${sc13.screenVsEngineDiffPx} px`);
 
-    await probe.ev('return await window.__heditor.loadFormSample(3);');
-    await probe.ev('return await window.__heditor.setCaret(0, 8);');
-    await probe.ev('await window.__heditor.present(); return true;');
+    await probe.read('return await LOAD.form(3);');
+    await probe.read('return await H.setCaret({ para: 0, offset: 8 });');
+    await probe.read('await D.present(); return true;');
     await sleep(150);
     await probe.shot('nested-three-levels');
   }
@@ -1873,13 +1868,13 @@ test.describe('编辑面', () => {
     //  "坐标换算 → 命中 → 归属 → 落笔"这条链的接缝上，而引擎 API 把接缝绕过去了。
     //
     //  括号的排布只存在于排版结果里（区间数据看不出来：][][] 与 [[ ]] 的区间
-    //  一模一样），所以用 __heditor.bracketSlots 把槽清单读出来核对：每一枚括号的
+    //  一模一样），所以用 diag.bracketSlots() 把槽清单读出来核对：每一枚括号的
     //  偏移、开闭、归属、所在行、行内 x 都在里面。
     // 换算因子读门面的 zoomLevel（密度：设备像素 / 磅）。不要读 #zoom 输入框 ——
     //   那一格是倍数（1 = 100% = 96 dpi），两者差 4 / 3，读错就是整片点不准。
-    const zoomNow = async () => probe.ev('return window.__heditor.zoomLevel;');
-    const geo = async () => probe.ev(`
-      const cv = window.__heditor.canvas, r = cv.getBoundingClientRect();
+    const zoomNow = async () => probe.read('return ZOOM();');
+    const geo = async () => probe.read(`
+      const cv = FRAME(), r = cv.getBoundingClientRect();
       return { left: r.left, top: r.top, sx: r.width / cv.width, sy: r.height / cv.height };`);
     // 帧磅 → CSS 像素：与页面 onCanvasMouseDown 里那套换算同源（先乘 zoom 再乘缩放比）
     const clickPt = async (g: any, xPt: any, yPt: any, z: any) => {
@@ -1892,18 +1887,18 @@ test.describe('编辑面', () => {
       //   "上一个点的结果"恰好差一个簇，看起来就像引擎在边界上算错了一格。
       //   排队排空之后再读，两边才可比。
       await sleep(8);
-      await probe.ev('if (window.__heditor.quiesce) await window.__heditor.quiesce(); return true;');
+      await probe.read('await H.flush(); return true;');
     };
     const load = async (v: any) => {
-      await probe.ev(`return await window.__heditor.loadFormSample(${v});`);
-      await probe.ev('return await window.__heditor.stopBlink();');
+      await probe.read(`return await LOAD.form(${v});`);
+      await probe.read('return await D.stopBlink();');
     };
-    const caretOf = () => probe.ev(`
-      const q = window.__heditor.caret;
-      return { o: q.offset, s: q.side, f: window.__heditor.controls.caret };`);
-    const items = () => probe.ev('return window.__heditor.controls.items.map(i => [i.start[1], i.end[1]]);');
-    const slotsOf = (cp: any) => probe.ev(`
-      return (await window.__heditor.bracketSlots || [])
+    const caretOf = () => probe.read(`
+      const q = CARET();
+      return { o: q.offset, s: q.side, f: D.controls().caret };`);
+    const items = () => probe.read('return D.controls().items.map(i => [i.start[1], i.end[1]]);');
+    const slotsOf = (cp: any) => probe.read(`
+      return (await D.bracketSlots() || [])
         .filter(s => s.para === 0 && s.cp === ${cp})
         .map(s => ({ side: s.side, owner: s.owner, ro: s.ro, line: s.line, x: s.x }));`);
     // BracketSide：1 = 开，2 = 闭（枚举在 layout.h）
@@ -1912,19 +1907,19 @@ test.describe('编辑面', () => {
     //   覆盖，所以归属必须是最内层 —— 也就是这个字段自己。
     //   不用"第一个字的中点"：相邻字段共享边界时，槽带把两个字的几何挤在一起，
     //   量出来的中点可能落到里层字段的框里（判据本身就不可靠，见 [19]）。
-    const fieldSpot = (ci: any) => probe.ev(`
-      const q = window.__heditor.controls.items[${ci}].rects[0];
+    const fieldSpot = (ci: any) => probe.read(`
+      const q = D.controls().items[${ci}].rects[0];
       return { x: q.x + 2, y: q.y + q.h / 2 };`);
 
     // 某个控件在某偏移上的"内侧"插入点（帧磅）。
     //   caret.x / caret.w 是帧像素（乘过 zoom），除以 zoom 换成帧磅；x 是光标矩形的左缘，
     //   插入点还要再往右半个光标宽 —— 少算这半个，点选位置就会落在括号格的正中偏左。
     const innerCaretPt = async (cp: any, ci: any) => {
-      const r = JSON.parse(await probe.ev(`
-        await window.__heditor.setCaretAt(0, ${cp}, ${ci});
-        const q = window.__heditor.caret;
+      const r = JSON.parse(await probe.read(`
+        await D.setCaretAt(0, ${cp}, ${ci});
+        const q = CARET();
         return JSON.stringify({ x: q.x, w: q.w,
-                                z: window.__heditor.zoomLevel });`));
+                                z: ZOOM() });`));
       return r.x / r.z + (r.w / r.z) * 0.5;
     };
     // 点"某字段开括号的内侧"那一格：落在括号与它后面那个字之间、靠右的一小段。
@@ -1938,8 +1933,8 @@ test.describe('编辑面', () => {
     log.section('[14.1] 相邻单共享边界：点 ] 归前一个、点 [ 归后一个（variant 0）');
     {
       await load(0);
-      const y = await probe.ev(`
-        const q = window.__heditor.controls.items[0].rects[0];
+      const y = await probe.read(`
+        const q = D.controls().items[0].rects[0];
         return q.y + q.h / 2;`);
       const g = await geo();
       const z = await zoomNow();
@@ -1962,9 +1957,9 @@ test.describe('编辑面', () => {
                 b.o === 9 && b.f === 1, `offset ${b.o} 归属 ${b.f}`);
 
       // 只读字段里打字必须被拒，而且要记账
-      const blk0 = await probe.ev('return window.__heditor.blockedEdits;');
-      await probe.ev(key('痛'));
-      const blk1 = await probe.ev('return window.__heditor.blockedEdits;');
+      const blk0 = await probe.read('return D.blockedEdits();');
+      await probe.read(key('痛'));
+      const blk1 = await probe.read('return D.blockedEdits();');
       const it0 = await items();
       check('★ 在只读字段里打字被拒，且记了账',
                 blk1 === blk0 + 1 && JSON.stringify(it0[1]) === '[9,11]',
@@ -1972,11 +1967,11 @@ test.describe('编辑面', () => {
 
       // 点前一个字段的闭括号再打字：字进前一个字段
       await clickPt(g, s9[0].x + pitch * 0.5, y, z);
-      await probe.ev(key('痛'));
+      await probe.read(key('痛'));
       const it1 = await items();
       check('★ 点 ] 之后真实按键 → 字进前一个字段，后一个整体右移',
                 JSON.stringify(it1) === '[[5,10],[10,12],[13,17]]', JSON.stringify(it1));
-      const au = await probe.ev('return await window.__heditor.auditLayout();');
+      const au = await probe.read('return await D.auditLayout();');
       check('★★ 点选 + 打字之后增量排版等于全量重排', !!au && au.diff === 0,
                 au ? `diff ${au.diff}` : 'null');
     }
@@ -1984,8 +1979,8 @@ test.describe('编辑面', () => {
     log.section('[14.2] 相邻双共享边界（三连）：两条边界都是 ][，落笔跟着归属（variant 2）');
     {
       await load(2);
-      const y = await probe.ev(`
-        const q = window.__heditor.controls.items[0].rects[0];
+      const y = await probe.read(`
+        const q = D.controls().items[0].rects[0];
         return q.y + q.h / 2;`);
       const g = await geo();
       const z = await zoomNow();
@@ -1999,7 +1994,7 @@ test.describe('编辑面', () => {
       const a = await caretOf();
       check('★ 真实鼠标点中间那个字段的开括号 → 归属 1', a.o === 7 && a.f === 1,
                 `offset ${a.o} 归属 ${a.f}`);
-      await probe.ev(key('痛'));
+      await probe.read(key('痛'));
       const it1 = await items();
       check('★ 接着打字 → 字进中间那个字段，左邻居一个字都没变',
                 JSON.stringify(it1) === '[[5,7],[7,10],[10,12]]', JSON.stringify(it1));
@@ -2010,26 +2005,26 @@ test.describe('编辑面', () => {
       const b = await caretOf();
       check('★ 同一条边界上点 ] → 归属 0', b.o === 7 && b.f === 0,
                 `offset ${b.o} 归属 ${b.f}`);
-      await probe.ev(key('痛'));
+      await probe.read(key('痛'));
       const it2 = await items();
       check('★ 接着打字 → 字进前一个字段，后两个整体右移',
                 JSON.stringify(it2) === '[[5,8],[8,10],[10,12]]', JSON.stringify(it2));
 
       // 真实方向键：一次一格 —— 括号也占一格，所以共享边界 ][ 要按两下。
-      await probe.ev('return await window.__heditor.setCaret(0, 5);');
+      await probe.read('return await H.setCaret({ para: 0, offset: 5 });');
       const walk = [];
       for (let k = 0; k < 6; ++k) {
-        await probe.ev(key('ArrowRight'));
+        await probe.read(key('ArrowRight'));
         const a = await caretOf();
         walk.push(`${a.o}/${a.s}`);
       }
       check('★ 真实方向键一次一格（括号占格：][ 边界要按两下）',
                 JSON.stringify(walk) === JSON.stringify(['6/0', '7/0', '8/0', '8/1', '8/2', '9/0']),
                 `落点 ${walk.join(' ')}`);
-      await probe.ev('return await window.__heditor.setCaret(0, 12);');
+      await probe.read('return await H.setCaret({ para: 0, offset: 12 });');
       const back = [];
       for (let k = 0; k < 4; ++k) {
-        await probe.ev(key('ArrowLeft'));
+        await probe.read(key('ArrowLeft'));
         const a = await caretOf();
         back.push(`${a.o}/${a.s}`);
       }
@@ -2039,22 +2034,22 @@ test.describe('编辑面', () => {
 
       // 归属随位置换人（重新载入样例，让偏移回到干净的三连区间）
       await load(2);
-      await probe.ev('return await window.__heditor.setCaret(0, 7);');
+      await probe.read('return await H.setCaret({ para: 0, offset: 7 });');
       const f7 = (await caretOf()).f;
-      await probe.ev(key('ArrowRight'));
+      await probe.read(key('ArrowRight'));
       const mid = await caretOf();
-      await probe.ev(key('ArrowRight'));
+      await probe.read(key('ArrowRight'));
       const inB = await caretOf();
       check('★ 跨过共享边界归属依次换人（#0 → 括号之间 → #1）',
                 f7 === 0 && mid.s === 1 && inB.o === 7 && inB.f === 1,
                 `7→${f7} ｜ 中间 ${mid.o}/${mid.s}→归 ${mid.f} ｜ 再一步→${inB.o}/${inB.f}`);
 
       // Home / End 是行首行尾，不是字段首尾
-      const ncp = await probe.ev('return window.__heditor.caret.docCodepoints;');
-      await probe.ev('return await window.__heditor.setCaret(0, 9);');
-      await probe.ev(key('Home'));
+      const ncp = await probe.read('return CARET().docCodepoints;');
+      await probe.read('return await H.setCaret({ para: 0, offset: 9 });');
+      await probe.read(key('Home'));
       const h = (await caretOf()).o;
-      await probe.ev(key('End'));
+      await probe.read(key('End'));
       const e2 = (await caretOf()).o;
       check('★ 真实 Home/End 到行首行尾（不是字段首尾）', h === 0 && e2 === ncp,
                 `Home→${h} End→${e2}（文档 ${ncp} 个码点）`);
@@ -2063,8 +2058,8 @@ test.describe('编辑面', () => {
     log.section('[14.3] 删除文字：真实退格把后两个字段删空，括号必须交替成 ][][]（variant 2）');
     {
       await load(2);
-      const y = await probe.ev(`
-        const q = window.__heditor.controls.items[0].rects[0];
+      const y = await probe.read(`
+        const q = D.controls().items[0].rects[0];
         return q.y + q.h / 2;`);
       const g = await geo();
       const z = await zoomNow();
@@ -2073,8 +2068,8 @@ test.describe('编辑面', () => {
         for (let guard = 0; guard < 8; ++guard) {
           const cur = await items();
           if (cur[ci][0] === cur[ci][1]) break;
-          await probe.ev(`return await window.__heditor.setCaretAt(0, ${cur[ci][1]}, ${ci});`);
-          await probe.ev(key('Backspace'));
+          await probe.read(`return await D.setCaretAt(0, ${cur[ci][1]}, ${ci});`);
+          await probe.read(key('Backspace'));
         }
       }
       const it = await items();
@@ -2089,9 +2084,9 @@ test.describe('编辑面', () => {
 
       // 颜色跟着字段走：把 #2 标成只读，它那一对括号必须变灰且排在右侧。
       //   只读标记只有建控件时给得进去，所以整份重建一次（区间不变，只翻 ro）。
-      await probe.ev(`
-        const it2 = window.__heditor.controls.items;
-        return await window.__heditor.setFormControls(it2.map((x, i) => ({
+      await probe.read(`
+        const it2 = D.controls().items;
+        return await LOAD.controls(it2.map((x, i) => ({
           start: x.start, end: x.end, kind: 0, id: x.id, ro: i === 2 })));`);
       const sr = await slotsOf(7);
       check('★ 只读字段的一对括号变灰（左三枚可编辑、右两枚只读）',
@@ -2099,7 +2094,7 @@ test.describe('编辑面', () => {
                 sr.map((q2: any) => (q2.ro ? 1 : 0)).join(''));
 
       // 删空之后那个零宽字段还得能进、能打：真实鼠标点它那一对 ([ ]) 里的 [ 位置
-      await probe.ev(key('痛'));  // 先确认当前光标（应停在 #1 的零宽位置上）
+      await probe.read(key('痛'));  // 先确认当前光标（应停在 #1 的零宽位置上）
       const cur = await items();
       check('★ 删空之后光标仍停在那个零宽字段上，字进它自己（左右邻居没被撑大）',
                 JSON.stringify(cur) === '[[5,7],[7,8],[8,8]]', JSON.stringify(cur));
@@ -2110,8 +2105,8 @@ test.describe('编辑面', () => {
         for (let guard = 0; guard < 8; ++guard) {
           const k = await items();
           if (k[ci][0] === k[ci][1]) break;
-          await probe.ev(`return await window.__heditor.setCaretAt(0, ${k[ci][1]}, ${ci});`);
-          await probe.ev(key('Backspace'));
+          await probe.read(`return await D.setCaretAt(0, ${k[ci][1]}, ${ci});`);
+          await probe.read(key('Backspace'));
         }
       }
       const s2 = await slotsOf(7);
@@ -2120,11 +2115,11 @@ test.describe('编辑面', () => {
       const at2 = await caretOf();
       check('★ 真实鼠标点最右那枚 [（#2 的开括号）→ 归属 2',
                 at2.o === 7 && at2.f === 2, `offset ${at2.o} 归属 ${at2.f}`);
-      await probe.ev(key('痛'));
+      await probe.read(key('痛'));
       const it3 = await items();
       check('★ 接着打字 → 字进 #2 自己（#1 还是零宽）',
                 JSON.stringify(it3) === '[[5,7],[7,7],[7,8]]', JSON.stringify(it3));
-      const au3 = await probe.ev('return await window.__heditor.auditLayout();');
+      const au3 = await probe.read('return await D.auditLayout();');
       check('★★ 删空与回填的每一步增量排版都等于全量重排', !!au3 && au3.diff === 0,
                 au3 ? `diff ${au3.diff}` : 'null');
     }
@@ -2132,8 +2127,8 @@ test.describe('编辑面', () => {
     log.section('[14.4] 嵌套：三层各自点得进、内层优先、删空后仍是最内层（variant 3）');
     {
       await load(3);
-      const y = await probe.ev(`
-        const q = window.__heditor.controls.items[0].rects[0];
+      const y = await probe.read(`
+        const q = D.controls().items[0].rects[0];
         return q.y + q.h / 2;`);
       const g = await geo();
       const z = await zoomNow();
@@ -2155,8 +2150,8 @@ test.describe('编辑面', () => {
                 owners.join(' ') === '0 1 2', owners.join(' '));
 
       // 真实按键在内层打字：外中内三层一起变长
-      await probe.ev('return await window.__heditor.setCaretAt(0, 8, 2);');
-      await probe.ev(key('痛'));
+      await probe.read('return await D.setCaretAt(0, 8, 2);');
+      await probe.read(key('痛'));
       const it = await items();
       check('★ 真实按键在内层打字 → 外中内三层一起变长（区间不许互相穿过）',
                 JSON.stringify(it) === '[[5,12],[6,11],[7,10]]', JSON.stringify(it));
@@ -2165,28 +2160,28 @@ test.describe('编辑面', () => {
       for (let guard = 0; guard < 6; ++guard) {
         const cur = await items();
         if (cur[2][0] === cur[2][1]) break;
-        await probe.ev(`return await window.__heditor.setCaretAt(0, ${cur[2][1]}, 2);`);
-        await probe.ev(key('Backspace'));
+        await probe.read(`return await D.setCaretAt(0, ${cur[2][1]}, 2);`);
+        await probe.read(key('Backspace'));
       }
       const it2 = await items();
       const s7b = await slotsOf(7);
       check('★ 删空的内层画成一对相邻的 []，仍嵌在中层的边界之内',
                 JSON.stringify(it2) === '[[5,9],[6,8],[7,7]]' && sidesOf(s7b) === '[]',
                 `${JSON.stringify(it2)} ｜ 7:${sidesOf(s7b)}`);
-      await probe.ev('return await window.__heditor.setCaret(0, 7);');
+      await probe.read('return await H.setCaret({ para: 0, offset: 7 });');
       const f7 = (await caretOf()).f;
-      await probe.ev(key('痛'));
+      await probe.read(key('痛'));
       const it3 = await items();
       check('★ 真实按键在删空的内层上打字 → 字进它自己，外中两层一起外推',
                 f7 === 2 && JSON.stringify(it3) === '[[5,10],[6,9],[7,8]]',
                 `归属 ${f7} ｜ ${JSON.stringify(it3)}`);
-      const au4 = await probe.ev('return await window.__heditor.auditLayout();');
+      const au4 = await probe.read('return await D.auditLayout();');
       check('★★ 嵌套的每一步增量排版都等于全量重排', !!au4 && au4.diff === 0,
                 au4 ? `diff ${au4.diff}` : 'null');
 
       await load(3);
-      await probe.ev('return await window.__heditor.setCaretAt(0, 8, 2);');
-      await probe.ev('await window.__heditor.present(); return true;');
+      await probe.read('return await D.setCaretAt(0, 8, 2);');
+      await probe.read('await D.present(); return true;');
       await sleep(150);
       await probe.shot('boundary-nested');
     }
@@ -2194,7 +2189,7 @@ test.describe('编辑面', () => {
     log.section('[14.5] 换行：跨行字段的两个括号落在不同行，嵌套的只读内层点得进打不进（variant 1）');
     {
       await load(1);
-      const cc = await probe.ev('return window.__heditor.controls;');
+      const cc = await probe.read('return D.controls();');
       check('长字段跨行（矩形块 > 1），只读小字段嵌在它里面',
                 cc.items[0].rects.length >= 2 && cc.items[1].depth === 1 && cc.items[1].ro,
                 `#0 块数 ${cc.items[0].rects.length} ｜ #1 depth ${cc.items[1].depth} ro ${cc.items[1].ro}`);
@@ -2209,9 +2204,9 @@ test.describe('编辑面', () => {
       const mB = await fieldSpot(1);
       await clickPt(g, mB.x, mB.y, z);
       const inB = await caretOf();
-      const blk0 = await probe.ev('return window.__heditor.blockedEdits;');
-      await probe.ev(key('痛'));
-      const blk1 = await probe.ev('return window.__heditor.blockedEdits;');
+      const blk0 = await probe.read('return D.blockedEdits();');
+      await probe.read(key('痛'));
+      const blk1 = await probe.read('return D.blockedEdits();');
       const itb = await items();
       check('★ 点嵌套里的只读内层 → 归属是内层、打字被拒（外层可编辑也改不动它）',
                 inB.f === 1 && blk1 === blk0 + 1 && JSON.stringify(itb[1]) === '[20,26]',
@@ -2220,11 +2215,11 @@ test.describe('编辑面', () => {
       const mA = await fieldSpot(0);
       await clickPt(g, mA.x, mA.y, z);
       const inA = await caretOf();
-      await probe.ev(key('痛'));
+      await probe.read(key('痛'));
       const ita = await items();
       check('★ 点外层（不在内层框里）→ 归属 0，字进外层、内层整体右移',
                 inA.f === 0 && JSON.stringify(ita) === '[[5,61],[21,27]]', JSON.stringify(ita));
-      const au5 = await probe.ev('return await window.__heditor.auditLayout();');
+      const au5 = await probe.read('return await D.auditLayout();');
       check('★★ 跨行字段编辑之后增量排版等于全量重排', !!au5 && au5.diff === 0,
                 au5 ? `diff ${au5.diff}` : 'null');
     }
@@ -2232,15 +2227,15 @@ test.describe('编辑面', () => {
     log.section('[14.6] 真实鼠标横扫：命中测试说什么，点击就落在什么上（含无死区）');
     {
       await load(2);
-      const y = await probe.ev(`
-        const q = window.__heditor.controls.items[0].rects[0];
+      const y = await probe.read(`
+        const q = D.controls().items[0].rects[0];
         return q.y + q.h / 2;`);
       const g = await geo();
       const z = await zoomNow();
-      const lo = await probe.ev(
-        'return Math.min(...window.__heditor.controls.items.map(i => i.rects[0].x));');
-      const hi = await probe.ev(
-        'return Math.max(...window.__heditor.controls.items.map(i => i.rects[0].x + i.rects[0].w));');
+      const lo = await probe.read(
+        'return Math.min(...D.controls().items.map(i => i.rects[0].x));');
+      const hi = await probe.read(
+        'return Math.max(...D.controls().items.map(i => i.rects[0].x + i.rects[0].w));');
       let probed = 0;
       let mismatch = 0;
       let nonmono = 0;
@@ -2268,7 +2263,7 @@ test.describe('编辑面', () => {
       const yq = quantizedY();
       for (let x = lo - 4; x <= hi + 4; x += 1) {
         const pt = quantizedPt(x);
-        const h = await probe.ev(`return await window.__heditor.hit(${pt.toFixed(3)}, ${yq.toFixed(3)});`);
+        const h = await probe.read(`return await D.hit(${pt.toFixed(3)}, ${yq.toFixed(3)});`);
         if (!h || h.offset > 17) continue;
         await clickPt(g, x, y, z);
         const st = await caretOf();
@@ -2308,17 +2303,17 @@ test.describe('编辑面', () => {
       let drawnBad = 0;
       const drawnWorst = [];
       for (let ci = 0; ci < 3; ++ci) {
-        const a = await probe.ev(`return window.__heditor.controls.items[${ci}].start[1];`);
-        const b = await probe.ev(`return window.__heditor.controls.items[${ci}].end[1];`);
+        const a = await probe.read(`return D.controls().items[${ci}].start[1];`);
+        const b = await probe.read(`return D.controls().items[${ci}].end[1];`);
         for (let k = a; k < b; ++k) {
-          const m = await probe.ev(`
-            await window.__heditor.setCaretAt(0, ${k}, ${ci});
-            const c1 = window.__heditor.caret;
-            await window.__heditor.setCaretAt(0, ${k + 1}, ${ci});
-            const c2 = window.__heditor.caret;
+          const m = await probe.read(`
+            await D.setCaretAt(0, ${k}, ${ci});
+            const c1 = CARET();
+            await D.setCaretAt(0, ${k + 1}, ${ci});
+            const c2 = CARET();
             return { x: (c1.x + c2.x) / 2, y: c2.y + c2.h / 2, w: Math.abs(c2.x - c1.x) };`);
           await clickPt(g, m.x / z, m.y / z, z);
-          const st = await probe.ev('return window.__heditor.caret;');
+          const st = await probe.read('return CARET();');
           ++drawnProbed;
           const off = Math.abs(st.x - m.x);
           if (off > m.w / 2 + 2 || st.offset < a || st.offset > b) {
@@ -2334,10 +2329,10 @@ test.describe('编辑面', () => {
                 drawnProbed === 6 && drawnBad === 0,
                 `${drawnProbed} 个字，偏的 ${drawnBad} 个 ${drawnWorst.join(' ')}`);
 
-      const sc = await probe.ev('return await window.__heditor.selfCheck();');
+      const sc = await probe.read('return await D.selfCheck();');
       check('横扫之后屏幕 == 引擎帧', sc.screenVsEngineDiffPx === 0,
                 `差 ${sc.screenVsEngineDiffPx} px`);
-      await probe.ev('await window.__heditor.present(); return true;');
+      await probe.read('await D.present(); return true;');
       await sleep(150);
       await probe.shot('boundary-three-adjacent');
     }
@@ -2347,8 +2342,8 @@ test.describe('编辑面', () => {
       // 同一个偏移在控件边界上对应两个位置（flow.h：控件之前与进入控件），而括号占位簇
       //   的势力范围按左右半边分。判据落在可证伪的数字上：点左半边，光标必须画在括号【之外】。
       await load(3);
-      const y = await probe.ev(`
-        const q = window.__heditor.controls.items[0].rects[0];
+      const y = await probe.read(`
+        const q = D.controls().items[0].rects[0];
         return q.y + q.h / 2;`);
       const g = await geo();
       const z = await zoomNow();
@@ -2357,7 +2352,7 @@ test.describe('编辑面', () => {
 
       await clickPt(g, s6[0].x + 0.5, y, z);  // 中层开括号那一格的左半边
       const a = await caretOf();
-      const ax = await probe.ev('return window.__heditor.caret.x;');
+      const ax = await probe.read('return CARET().x;');
       check('★★ 点开括号的左半边 → 光标落在括号之前（不是被贴回括号之内）',
                 a.o === 6 && ax / z < s6[0].x + 1.0,
                 `偏移 ${a.o} ｜ 光标 x=${(ax / z).toFixed(2)} ｜ 括号左缘 ${s6[0].x.toFixed(2)}`);
@@ -2366,11 +2361,11 @@ test.describe('编辑面', () => {
       // 落在它左边半磅：那里既是闭括号那一格的右半边（"括号之后"），也紧贴天 的左半边。
       await clickPt(g, afterPt - 0.5, y, z);
       const b = await caretOf();
-      const bx = await probe.ev('return window.__heditor.caret.x;');
+      const bx = await probe.read('return CARET().x;');
       check('★★ 点闭括号的右半边 → 光标落在括号之后（字与闭括号之间）',
                 b.o === 10 && bx / z > s10[0].x + 1.0,
                 `偏移 ${b.o} ｜ 光标 x=${(bx / z).toFixed(2)} ｜ 括号左缘 ${s10[0].x.toFixed(2)}`);
-      const sc7 = await probe.ev('return await window.__heditor.selfCheck();');
+      const sc7 = await probe.read('return await D.selfCheck();');
       check('点括号外侧之后屏幕 == 引擎帧', sc7.screenVsEngineDiffPx === 0,
                 `差 ${sc7.screenVsEngineDiffPx} px`);
     }
@@ -2381,33 +2376,33 @@ test.describe('编辑面', () => {
       //   会一步跳到「悸」后面 —— 都是"整段跳过括号那一格"。
       // 判据是像素上的位移：一格 = 一枚括号的宽度（约 5.5pt），跳一整段 = 一个字 + 括号。
       await load(3);
-      await probe.ev('return await window.__heditor.stopBlink();');
+      await probe.read('return await D.stopBlink();');
       const z = await zoomNow();
 
       // 先看开括号那一侧：外层 [ 之后（＝反字前面）→ 按一下左键，只该退到 [ 之前
-      await probe.ev('return await window.__heditor.setCaretAtSide(0, 5, 1);');
-      const x1 = (await probe.ev('return window.__heditor.caret.x;')) / z;
-      await probe.ev(key('ArrowLeft'));
+      await probe.read('return await H.setCaret({ para: 0, offset: 5 }, { side: (1) > 0 ? "after" : "before" });');
+      const x1 = (await probe.read('return CARET().x;')) / z;
+      await probe.read(key('ArrowLeft'));
       const a1 = await caretOf();
-      const x0 = (await probe.ev('return window.__heditor.caret.x;')) / z;
+      const x0 = (await probe.read('return CARET().x;')) / z;
       check('★★ 反字前按左键 → 只退一格到左括号之前（不是一步跳到冒号前）',
                 a1.o === 5 && a1.s === 0 && (x1 - x0) > 2 && (x1 - x0) < 12,
                 `偏移 ${a1.o} 侧别 ${a1.s} ｜ 光标 x ${x1.toFixed(2)} → ${x0.toFixed(2)}` +
                   `（退 ${(x1 - x0).toFixed(2)} pt）`);
 
       // 闭括号那一侧同样：中层 ] 之后（＝天字前面）→ 按一下左键，只该退到 ] 之前
-      await probe.ev('return await window.__heditor.setCaretAtSide(0, 10, 1);');
-      const y1 = (await probe.ev('return window.__heditor.caret.x;')) / z;
-      await probe.ev(key('ArrowLeft'));
+      await probe.read('return await H.setCaret({ para: 0, offset: 10 }, { side: (1) > 0 ? "after" : "before" });');
+      const y1 = (await probe.read('return CARET().x;')) / z;
+      await probe.read(key('ArrowLeft'));
       const a2 = await caretOf();
-      const y0 = (await probe.ev('return window.__heditor.caret.x;')) / z;
+      const y0 = (await probe.read('return CARET().x;')) / z;
       check('★★ 天字前按左键 → 只退一格到闭括号之前（不是一步跳到悸字后面）',
                 a2.o === 10 && a2.s === 0 && (y1 - y0) > 2 && (y1 - y0) < 12,
                 `偏移 ${a2.o} 侧别 ${a2.s} ｜ 光标 x ${y1.toFixed(2)} → ${y0.toFixed(2)}` +
                   `（退 ${(y1 - y0).toFixed(2)} pt）`);
 
       // 再按一下才跨过「三」那一格（一次一格，不跳）
-      await probe.ev(key('ArrowLeft'));
+      await probe.read(key('ArrowLeft'));
       const a3 = await caretOf();
       check('★ 再按一下才退到「三」之前（一次一格，不跳格）', a3.o === 9,
                 `偏移 ${a3.o} 侧别 ${a3.s}`);
@@ -2415,7 +2410,7 @@ test.describe('编辑面', () => {
       // 反向：从「三」前按右键，依次是 三 之前 → 三 之后（＝] 之前）→ ] 之后
       const seq = [];
       for (let i = 0; i < 3; ++i) {
-        await probe.ev(key('ArrowRight'));
+        await probe.read(key('ArrowRight'));
         const r = await caretOf();
         seq.push(`${r.o}/${r.s}`);
       }
@@ -2432,12 +2427,12 @@ test.describe('编辑面', () => {
       // 判据落在 (偏移, 侧别) 上 —— 侧别就是"这个偏移上跨过了几枚括号"，是落点的完整身份；
       //   再加一条像素证据：光标要落在 ]中 之后，不是它之前。
       await load(3);
-      await probe.ev('return await window.__heditor.setCaret(0, 11);');
-      await probe.ev(key('Backspace'));
+      await probe.read('return await H.setCaret({ para: 0, offset: 11 });');
+      await probe.read(key('Backspace'));
       const a = await caretOf();
       const s10 = await slotsOf(10);
       const z9 = await zoomNow();
-      const ax = (await probe.ev('return window.__heditor.caret.x;')) / z9;
+      const ax = (await probe.read('return CARET().x;')) / z9;
       check('★★ 嵌套删「天」→ 落点＝「天」原来的位置（cp 10 跨过 ]中，侧别 1）',
                 a.o === 10 && a.s === 1 && s10.length === 2 && ax > s10[0].x + 1,
                 `落点 ${a.o}/${a.s} ｜ 光标 x=${ax.toFixed(2)} ｜ cp10 两枚 ] 的 x=` +
@@ -2446,10 +2441,10 @@ test.describe('编辑面', () => {
       await load(2);
       // 删控件是结构操作：表单模式默认被 structureLock 锁住（[16](c) 是它的对照），
       //   这一段要验"空控件被删掉"，所以切文档模式。
-      await probe.ev('return await window.__heditor.setEditMode(0);');
-      await probe.ev('return await window.__heditor.setCaret(0, 11);');
+      await probe.read('return await SET_MODE(0);');
+      await probe.read('return await H.setCaret({ para: 0, offset: 11 });');
       for (let i = 0; i < 3; ++i) {
-        await probe.ev(key('Backspace'));
+        await probe.read(key('Backspace'));
         await sleep(20);
       }
       const b0 = await caretOf();
@@ -2457,12 +2452,12 @@ test.describe('编辑面', () => {
       check('★★ 三连：第三个字段删空之后再退一格，删掉的是这个空控件（落点＝它原来那一格）',
                 b0.o === 9 && b0.s === 1 && JSON.stringify(it0) === '[[5,7],[7,9]]',
                 `落点 ${b0.o}/${b0.s} ｜ ${JSON.stringify(it0)}`);
-      await probe.ev(key('Backspace'));
+      await probe.read(key('Backspace'));
       await sleep(20);
       const b = await caretOf();
       check('★★ 再退一格删「悸」→ 落点＝第一个字段末尾（cp 8 侧别 0），不许进别的控件',
                 b.o === 8 && b.s === 0, `落点 ${b.o}/${b.s}`);
-      await probe.ev(key('痛'));
+      await probe.read(key('痛'));
       const it = await items();
       check('★ 接着打字进的是第二个字段（不是别的控件）',
                 JSON.stringify(it) === '[[5,7],[7,9]]', JSON.stringify(it));
@@ -2480,27 +2475,27 @@ test.describe('编辑面', () => {
       // 判据三层：文本（只少了「悸」）、控件区间（三条都还在，跨段那条的终点落在第二段）、
       //   以及屏幕 == 引擎帧 —— 半截产物会当场把括号画错。
       await load(2);
-      await probe.ev('return await window.__heditor.setCaret(0, 11);');
-      await probe.ev(key('Enter'));
+      await probe.read('return await H.setCaret({ para: 0, offset: 11 });');
+      await probe.read(key('Enter'));
       await sleep(30);
-      const p1 = Array.from(await probe.ev('return window.__heditor.allText;')).join('');
+      const p1 = Array.from(await probe.read('return H.text();')).join('');
       check('回车在字段内容里分段：两段的文本都对（字段因此跨段）',
                 p1 === '患者主诉：反复心悸三天\n，加重一天。', JSON.stringify(p1));
-      await probe.ev('return await window.__heditor.setCaret(0, 9);');
-      await probe.ev(key('Backspace'));
+      await probe.read('return await H.setCaret({ para: 0, offset: 9 });');
+      await probe.read(key('Backspace'));
       await sleep(30);
-      const p2 = Array.from(await probe.ev('return window.__heditor.allText;')).join('');
+      const p2 = Array.from(await probe.read('return H.text();')).join('');
       check('★★ 退格只删掉「悸」一个字（曾经把前面九个字与所有控件整批抹掉）',
                 p2 === '患者主诉：反复心三天\n，加重一天。', JSON.stringify(p2));
-      const it2 = await probe.ev(`
-        return JSON.stringify(window.__heditor.controls.items
+      const it2 = await probe.read(`
+        return JSON.stringify(D.controls().items
           .map(i => [i.start[0], i.start[1], i.end[0], i.end[1]]));`);
       check('★★ 三个控件都还在，且跨段那条的终点落在第二段第 0 位',
                 it2 === '[[0,5,0,7],[0,7,0,8],[0,8,1,0]]', it2);
-      const au = await probe.ev('return await window.__heditor.auditCompile();');
+      const au = await probe.read('return await D.auditCompile();');
       check('★ 产物与整树全量编译逐字段一致（diff 0）', !!au && au.diff === 0,
                 au ? `diff ${au.diff}` : 'null');
-      const sc = await probe.ev('return await window.__heditor.selfCheck();');
+      const sc = await probe.read('return await D.selfCheck();');
       check('★ 屏幕 == 引擎帧（半截产物会把括号画丢/画错）',
                 sc.screenVsEngineDiffPx === 0, `差 ${sc.screenVsEngineDiffPx} px`);
       await probe.shot('ctl-split-then-backspace');
@@ -2514,27 +2509,27 @@ test.describe('编辑面', () => {
       //   没把它记进这段的来源身份，而增量重编译的形状判据正是靠那个身份判的。
       // 判据三层：文本与三条区间、产物与整树全量一致、屏幕 == 引擎帧。
       await load(2);
-      await probe.ev('return await window.__heditor.setCaret(0, 11);');
-      await probe.ev(key('Enter'));
+      await probe.read('return await H.setCaret({ para: 0, offset: 11 });');
+      await probe.read(key('Enter'));
       await sleep(30);
-      await probe.ev('return await window.__heditor.setCaret(0, 9);');
-      await probe.ev(key('Enter'));
+      await probe.read('return await H.setCaret({ para: 0, offset: 9 });');
+      await probe.read(key('Enter'));
       await sleep(30);
-      await probe.ev('return await window.__heditor.setCaret(1, 2);');
-      await probe.ev(key('Backspace'));
+      await probe.read('return await H.setCaret({ para: 1, offset: 2 });');
+      await probe.read(key('Backspace'));
       await sleep(30);
-      const p3 = Array.from(await probe.ev('return window.__heditor.allText;')).join('');
+      const p3 = Array.from(await probe.read('return H.text();')).join('');
       check('★★ 退格只删掉「天」一个字（曾经把第二段的控件边界整对抹掉）',
                 p3 === '患者主诉：反复心悸\n三\n，加重一天。', JSON.stringify(p3));
-      const it3 = await probe.ev(`
-        return JSON.stringify(window.__heditor.controls.items
+      const it3 = await probe.read(`
+        return JSON.stringify(D.controls().items
           .map(i => [i.start[0], i.start[1], i.end[0], i.end[1]]));`);
       check('★★ 三个控件都还在，后两条各自跨到下一段段首',
                 it3 === '[[0,5,0,7],[0,7,1,0],[1,0,2,0]]', it3);
-      const au3 = await probe.ev('return await window.__heditor.auditCompile();');
+      const au3 = await probe.read('return await D.auditCompile();');
       check('★ 产物与整树全量编译逐字段一致（diff 0）', !!au3 && au3.diff === 0,
                 au3 ? `diff ${au3.diff}` : 'null');
-      const sc3 = await probe.ev('return await window.__heditor.selfCheck();');
+      const sc3 = await probe.read('return await D.selfCheck();');
       check('★ 屏幕 == 引擎帧', sc3.screenVsEngineDiffPx === 0,
                 `差 ${sc3.screenVsEngineDiffPx} px`);
       await probe.shot('ctl-split-twice-then-backspace');
@@ -2548,20 +2543,20 @@ test.describe('编辑面', () => {
     //  判据落在占位槽清单上：占位与不占位的区别是"正文有没有被推开"，画的都是同一对括号，
     //  截图分不出来。槽清单里每枚括号的偏移、开闭、归属、所在行都在，这是唯一看得见它的地方。
     const load15 = async (v: any) => {
-      await probe.ev(`return await window.__heditor.loadFormSample(${v});`);
-      await probe.ev('return await window.__heditor.stopBlink();');
+      await probe.read(`return await LOAD.form(${v});`);
+      await probe.read('return await D.stopBlink();');
     };
-    const slots15 = () => probe.ev('return (await window.__heditor.bracketSlots || []).length;');
-    const text15 = () => probe.ev('return Array.from(await window.__heditor.allText).join("");');
+    const slots15 = () => probe.read('return (await D.bracketSlots() || []).length;');
+    const text15 = () => probe.read('return Array.from(await H.text()).join("");');
 
     await load15(0);
-    await probe.ev('return await window.__heditor.setShowBrackets(true);');  // 显式打开括号
-    const cnt15 = await probe.ev('return window.__heditor.controls.count;');
+    await probe.read('return await SET_BRACKETS(true);');  // 显式打开括号
+    const cnt15 = await probe.read('return D.controls().count;');
     const form15 = await slots15();
     // 每个字段自己的那一对：一枚开、一枚闭，归属不许串台（串台就是几何投影错位）
-    const owned15 = await probe.ev(`
+    const owned15 = await probe.read(`
       const m = {};
-      for (const s of (await window.__heditor.bracketSlots || [])) {
+      for (const s of (await D.bracketSlots() || [])) {
         m[s.owner] = m[s.owner] || { open: 0, close: 0 };
         if (s.side === 1) m[s.owner].open++; else m[s.owner].close++;
       }
@@ -2576,7 +2571,7 @@ test.describe('编辑面', () => {
               JSON.stringify(owned15));
 
     const tForm15 = await text15();
-    await probe.ev('return await window.__heditor.setEditMode(0);');  // 文档模式
+    await probe.read('return await SET_MODE(0);');  // 文档模式
     const doc15 = await slots15();
     state.docBrackets.doc = doc15;
     check('★ 文档模式：括号照常占位（不再"编辑模式下什么都看不见"）',
@@ -2585,22 +2580,22 @@ test.describe('编辑面', () => {
               (await text15()) === tForm15, JSON.stringify(await text15()));
 
     // All 档下括号常驻：光标跨字段移动不改变占位集合，也不该重排（这是 All 档的意义）
-    await probe.ev('return await window.__heditor.setCaret(0, 6);');
+    await probe.read('return await H.setCaret({ para: 0, offset: 6 });');
     check('文档模式：光标跨字段移动不改变占位集合（All 档括号常驻）',
               (await slots15()) === cnt15 * 2, `${await slots15()} 槽`);
 
-    await probe.ev('return await window.__heditor.setEditMode(2);');  // 只读
+    await probe.read('return await SET_MODE(2);');  // 只读
     const ro15 = await slots15();
     check('★ 只读模式：一个括号都不占、也不画（它是要印出来的呈现态）',
               ro15 === 0, `${ro15} 槽`);
     check('只读模式：正文也没变（"不占位"不等于"删了字"）',
               (await text15()) === tForm15, JSON.stringify(await text15()));
 
-    await probe.ev('return await window.__heditor.setEditMode(0);');
-    const sc15 = await probe.ev('return await window.__heditor.selfCheck();');
+    await probe.read('return await SET_MODE(0);');
+    const sc15 = await probe.read('return await D.selfCheck();');
     check('★ 三档来回切之后屏幕 == 引擎帧（标记改了、底图没改，靠整帧重贴收口）',
               sc15.screenVsEngineDiffPx === 0, `差 ${sc15.screenVsEngineDiffPx} px`);
-    await probe.ev('await window.__heditor.present(); return true;');
+    await probe.read('await D.present(); return true;');
     await sleep(150);
     await probe.shot('brackets-in-document-mode');
   }
@@ -2613,17 +2608,17 @@ test.describe('编辑面', () => {
     //  闭括号（退的是控件内容里那一项）。任何"按码点偏移猜"的实现都过不了下面 (a)/(b) 这一对。
     //  结构操作要文档模式：表单模式默认被 structureLock 锁住，(c) 那一条正是它的对照。
     const load16 = async (v: any) => {
-      await probe.ev(`return await window.__heditor.loadFormSample(${v});`);
-      await probe.ev('return await window.__heditor.stopBlink();');
+      await probe.read(`return await LOAD.form(${v});`);
+      await probe.read('return await D.stopBlink();');
     };
-    const text16 = () => probe.ev('return Array.from(await window.__heditor.allText).join("");');
-    const ids16 = () => probe.ev('return window.__heditor.controls.items.map(i => i.id);');
-    const n16 = () => probe.ev('return window.__heditor.controls.count;');
-    const blocked16 = () => probe.ev('return window.__heditor.blockedEdits;');
-    const side16 = () => probe.ev('return window.__heditor.caret.side;');
+    const text16 = () => probe.read('return Array.from(await H.text()).join("");');
+    const ids16 = () => probe.read('return D.controls().items.map(i => i.id);');
+    const n16 = () => probe.read('return D.controls().count;');
+    const blocked16 = () => probe.read('return D.blockedEdits();');
+    const side16 = () => probe.read('return CARET().side;');
 
     await load16(2);
-    await probe.ev('return await window.__heditor.setEditMode(0);');
+    await probe.read('return await SET_MODE(0);');
     const base16 = { t: await text16(), ids: await ids16() };
     state.removeControl = { base: base16 };
     check('前置：三连可编辑字段 part1 / part2 / part3',
@@ -2631,9 +2626,9 @@ test.describe('编辑面', () => {
               JSON.stringify(base16.ids));
 
     // (a) 对照组：侧别 0 —— 还在 part2 的内容里，退格删的是「悸」这个字
-    await probe.ev('return await window.__heditor.setCaretAtSide(0, 9, 0);');
+    await probe.read('return await H.setCaret({ para: 0, offset: 9 }, { side: (0) > 0 ? "after" : "before" });');
     check('前置：侧别 0 是 part2 的内容末尾', (await side16()) === 0, `侧别 ${await side16()}`);
-    await probe.ev(key('Backspace'));
+    await probe.read(key('Backspace'));
     check('★ 侧别 0（内容末尾）退格删的是「悸」，控件一个都没少',
               (await n16()) === 3 && (await text16()) === '患者主诉：反复心三天，加重一天。',
               `${await n16()} 个字段 ｜ ${JSON.stringify(await text16())}`);
@@ -2641,10 +2636,10 @@ test.describe('编辑面', () => {
     // (b) 侧别 1 —— 已经跨过 part2 的闭括号：按规则先进 part2 删掉它内容里的最后一项，
     //   控件本身要等它空了才删得掉（"删一个字符或空控件"）。
     await load16(2);
-    await probe.ev('return await window.__heditor.setEditMode(0);');
-    await probe.ev('return await window.__heditor.setCaretAtSide(0, 9, 1);');
+    await probe.read('return await SET_MODE(0);');
+    await probe.read('return await H.setCaret({ para: 0, offset: 9 }, { side: (1) > 0 ? "after" : "before" });');
     check('前置：侧别 1 是 part2 的闭括号之后', (await side16()) === 1, `侧别 ${await side16()}`);
-    await probe.ev(key('Backspace'));
+    await probe.read(key('Backspace'));
     state.removeControl.afterBackspace = { ids: await ids16(), t: await text16() };
     check('★★ 闭括号之后退格：进 part2 删掉「悸」，控件一个都没少',
               JSON.stringify(await ids16()) === '["part1","part2","part3"]' &&
@@ -2652,23 +2647,23 @@ test.describe('编辑面', () => {
               `${JSON.stringify(await ids16())} ｜ ${JSON.stringify(await text16())}`);
     check('★ 光标进到了 part2 里（内容末尾，侧别 0）', (await side16()) === 0,
               `侧别 ${await side16()}`);
-    const lv16 = await probe.ev('return await window.__heditor.auditLayout();');
+    const lv16 = await probe.read('return await D.auditLayout();');
     check('★★ 删字之后增量排版 == 全量重排', !!lv16 && lv16.diff === 0,
               lv16 ? `diff ${lv16.diff}` : 'null');
-    const sc16 = await probe.ev('return await window.__heditor.selfCheck();');
+    const sc16 = await probe.read('return await D.selfCheck();');
     check('★ 删字之后屏幕 == 引擎帧（括号与占位都得跟着走）',
               sc16.screenVsEngineDiffPx === 0, `差 ${sc16.screenVsEngineDiffPx} px`);
 
     // part2 的内容删光（两下）之后光标停在它内部 ⇒ 第三下删掉的是这个空控件本身
-    await probe.ev(key('Backspace'));
-    await probe.ev(key('Backspace'));
+    await probe.read(key('Backspace'));
+    await probe.read(key('Backspace'));
     state.removeControl.afterBackspace2 = { ids: await ids16(), t: await text16() };
     check('★★ 空控件上再退一格：删掉的是 part2 这个控件（不是字）',
               JSON.stringify(await ids16()) === '["part1","part3"]', JSON.stringify(await ids16()));
     // 区间不许被撑大：part2 整个消失之后 part1 / part3 各守自己的位置。
     //   单列这一条是因为"删掉一个字段、前一个字段把它吞了"也能让上面那条全绿，
     //   视觉上就是区间被撑大，不量区间看不出来。
-    const rng16 = await probe.ev('return window.__heditor.controls.items.map(i => [i.start[1], i.end[1]]);');
+    const rng16 = await probe.read('return D.controls().items.map(i => [i.start[1], i.end[1]]);');
     state.removeControl.ranges = rng16;
     check('★★ 剩下两个字段的区间仍是 [5,7) 与 [7,9)（前一个字段没把它吞进去）',
               JSON.stringify(rng16) === '[[5,7],[7,9]]', JSON.stringify(rng16));
@@ -2679,26 +2674,26 @@ test.describe('编辑面', () => {
     // 撤销要把控件整棵装回去，而且光标回到按键之前那一格 —— 不是"选中整个控件"
     //   （那样撤销之后光标会落到闭括号右边，屏幕上还留着一圈选区）。
     check('★★ 撤销把 part2 装回来（空的、还在原来那一格），光标归位且不留选区',
-              (await probe.ev('return await window.__heditor.undo() ? 1 : 0;')) === 1 &&
+              (await probe.read('return await H.undo() ? 1 : 0;')) === 1 &&
                 JSON.stringify(await ids16()) === '["part1","part2","part3"]' &&
                 (await text16()) === '患者主诉：反复三天，加重一天。' &&
-                (await probe.ev('return window.__heditor.selection.empty ? 1 : 0;')) === 1 &&
-                JSON.stringify(await probe.ev(
-                  'return window.__heditor.controls.items.map(i => [i.start[1], i.end[1]]);')) ===
+                (await probe.read('return SEL().empty ? 1 : 0;')) === 1 &&
+                JSON.stringify(await probe.read(
+                  'return D.controls().items.map(i => [i.start[1], i.end[1]]);')) ===
                   '[[5,7],[7,7],[7,9]]',
               JSON.stringify(await ids16()) + ' ｜ 侧别 ' + (await side16()));
 
     // (c) 表单模式：结构被 structureLock 锁住 —— 删字那一下照样生效，删控件那一下被拒
     await load16(2);
     const b16 = await blocked16();
-    await probe.ev('return await window.__heditor.setCaretAtSide(0, 9, 1);');
-    await probe.ev(key('Backspace'));
+    await probe.read('return await H.setCaret({ para: 0, offset: 9 }, { side: (1) > 0 ? "after" : "before" });');
+    await probe.read(key('Backspace'));
     check('★ 表单模式：闭括号之后退格照样进 part2 删掉「悸」（删的是内容，不是结构）',
               (await n16()) === 3 && (await text16()) === '患者主诉：反复心三天，加重一天。' &&
                 (await blocked16()) === b16,
               `${await n16()} 个字段 ｜ ${JSON.stringify(await text16())}`);
-    await probe.ev(key('Backspace'));
-    await probe.ev(key('Backspace'));
+    await probe.read(key('Backspace'));
+    await probe.read(key('Backspace'));
     check('★ 空控件上那一下被结构锁拒了：控件还在、按键没被吞掉（光标退了出去）',
               (await n16()) === 3 && (await text16()) === '患者主诉：反复三天，加重一天。',
               `${await n16()} 个字段 ｜ ${JSON.stringify(await text16())}`);
@@ -2707,23 +2702,23 @@ test.describe('编辑面', () => {
 
     // (d) 引擎命令：连内容一起删（keep_content = false）
     await load16(2);
-    await probe.ev('return await window.__heditor.setEditMode(0);');
-    const rm16 = await probe.ev('return await window.__heditor.removeControl(1, false) ? 1 : 0;');
+    await probe.read('return await SET_MODE(0);');
+    const rm16 = await probe.read('return await D.removeControl(1, false) ? 1 : 0;');
     check('★ 引擎命令 removeControl(1,false)：连内容一起删',
               rm16 === 1 && JSON.stringify(await ids16()) === '["part1","part3"]' &&
                 (await text16()) === '患者主诉：反复三天，加重一天。',
               `${JSON.stringify(await ids16())} ｜ ${JSON.stringify(await text16())}`);
     check('★ 撤销把它整棵装回来',
-              (await probe.ev('return await window.__heditor.undo() ? 1 : 0;')) === 1 &&
+              (await probe.read('return await H.undo() ? 1 : 0;')) === 1 &&
                 JSON.stringify(await ids16()) === JSON.stringify(base16.ids) &&
                 (await text16()) === base16.t,
               JSON.stringify(await ids16()));
 
     // (e) 锁是逐控件的：表单模式里给 part2 开锁之后它删得掉，没开锁的 part1 仍被拒
     await load16(2);
-    const unlock16 = await probe.ev('return await window.__heditor.setControlProp(1, 3, false) ? 1 : 0;');
-    const rmLocked16 = await probe.ev('return await window.__heditor.removeControl(0, true) ? 1 : 0;');
-    const rmOpen16 = await probe.ev('return await window.__heditor.removeControl(1, true) ? 1 : 0;');
+    const unlock16 = await probe.read('return await H.setControlProp(1, 3, false) ? 1 : 0;');
+    const rmLocked16 = await probe.read('return await D.removeControl(0, true) ? 1 : 0;');
+    const rmOpen16 = await probe.read('return await D.removeControl(1, true) ? 1 : 0;');
     check('★ 表单模式：开锁的那个删得掉、没开锁的仍被拒（锁挂在控件自己身上）',
               unlock16 === 1 && rmLocked16 === 0 && rmOpen16 === 1 &&
                 JSON.stringify(await ids16()) === '["part1","part3"]',
@@ -2732,13 +2727,13 @@ test.describe('编辑面', () => {
 
     // (f) 属性入口幂等：拿同一个值再设一次，撤销栈上不留记录
     await load16(2);
-    await probe.ev('return await window.__heditor.setEditMode(0);');
-    await probe.ev('return await window.__heditor.setControlProp(0, 3, false);');  // 锁 → 开：记一条
+    await probe.read('return await SET_MODE(0);');
+    await probe.read('return await H.setControlProp(0, 3, false);');  // 锁 → 开：记一条
     const before16 = await text16();
-    await probe.ev('return await window.__heditor.setControlProp(0, 3, false);');  // 再设一次：不记
+    await probe.read('return await H.setControlProp(0, 3, false);');  // 再设一次：不记
     check('★ 属性入口幂等：同一个值设两次只留一条撤销记录',
-              (await probe.ev('return await window.__heditor.undo() ? 1 : 0;')) === 1 &&
-                (await probe.ev('return await window.__heditor.undo() ? 1 : 0;')) === 0 &&
+              (await probe.read('return await H.undo() ? 1 : 0;')) === 1 &&
+                (await probe.read('return await H.undo() ? 1 : 0;')) === 0 &&
                 (await text16()) === before16,
               JSON.stringify(await text16()));
 
@@ -2748,23 +2743,23 @@ test.describe('编辑面', () => {
     //   （键盘的承接层是个只读 textarea），漏给浏览器只会让 Ctrl+Z 表现成"按了没反应"。
     //   这也是 [2] 段那条"Ctrl/Alt/Meta 一律不吞"的例外，例外必须写进判据里。
     await load16(2);
-    await probe.ev('return await window.__heditor.setEditMode(0);');
+    await probe.read('return await SET_MODE(0);');
     const L16 = (await text16()).length;
-    await probe.ev(`return await window.__heditor.setCaret(0, ${L16});`);
-    await probe.ev(key('X'));
-    await probe.ev(key('Y'));
+    await probe.read(`return await H.setCaret({ para: 0, offset: ${L16} });`);
+    await probe.read(key('X'));
+    await probe.read(key('Y'));
     const typed16 = await text16();
     check('前置：真实按键敲进两个字（各是一笔事务）',
               typed16 === base16.t + 'XY', JSON.stringify(typed16));
 
-    const ctrl = (k: any, extra = '') => probe.ev(`
+    const ctrl = (k: any, extra = '') => probe.read(`
       const e = new KeyboardEvent('keydown',
         { key: ${JSON.stringify(k)}, ${extra}bubbles: true, cancelable: true });
-      return window.__heditor.textarea.dispatchEvent(e);   // false = 被 preventDefault
+      return IME().dispatchEvent(e);   // false = 被 preventDefault
     `);
     // 摆前置状态一律用门面 undo()，不借上一条键位判据的结果 —— 判据要各自承重：
     //   若靠上一条把状态摆好，键位整段没绑时"重做回原样"照样是通过的。
-    const undoFacade = () => probe.ev('return await window.__heditor.undo() ? 1 : 0;');
+    const undoFacade = () => probe.read('return await H.undo() ? 1 : 0;');
 
     // 撤销粒度 = 一笔编辑一步，不做合并：敲进去两个字符就要撤两次。
     check('★ Ctrl+Z 被宿主吞掉（不吞 = 这个键位等于没绑）',
@@ -2806,29 +2801,29 @@ test.describe('编辑面', () => {
     //   maxStack 同值）。这条走的是 setUndoLimit → wasm → EngineConfig → UndoStack 一整条线，
     //   任何一环断了这里都会露出来。
     check('默认撤销上限 100（Office 系与 Quill 的 maxStack 同值）',
-              (await probe.ev('return await window.__heditor.undoLimit();')) === 100,
-              String(await probe.ev('return await window.__heditor.undoLimit();')));
+              (await probe.read('return await H.config().undoLimit;')) === 100,
+              String(await probe.read('return await H.config().undoLimit;')));
 
     await load16(2);
-    await probe.ev('return await window.__heditor.setEditMode(0);');
-    await probe.ev('return await window.__heditor.setUndoLimit(2);');
-    await probe.ev(`return await window.__heditor.setCaret(0, ${L16});`);
-    for (const ch of ['X', 'Y', 'Z']) await probe.ev(key(ch));
+    await probe.read('return await SET_MODE(0);');
+    await probe.read('return await UNDO_LIMIT(2);');
+    await probe.read(`return await H.setCaret({ para: 0, offset: ${L16} });`);
+    for (const ch of ['X', 'Y', 'Z']) await probe.read(key(ch));
     check('前置：敲进三个字符', (await text16()) === base16.t + 'XYZ',
               JSON.stringify(await text16()));
 
     let undoneH = 0;
-    while (await probe.ev('return await window.__heditor.undo() ? 1 : 0;')) ++undoneH;
+    while (await probe.read('return await H.undo() ? 1 : 0;')) ++undoneH;
     check('★ 上限 2：三笔只撤得动两次', undoneH === 2, String(undoneH));
     check('★ 丢的是最旧的 —— 第一个字符撤不回去了',
               (await text16()) === base16.t + 'X', JSON.stringify(await text16()));
     // 还原成默认，免得影响后面的判据。
-    check('还原成默认上限', (await probe.ev('return await window.__heditor.setUndoLimit(100);')) === 100);
+    check('还原成默认上限', (await probe.read('return await UNDO_LIMIT(100);')) === 100);
   }
 
   log.section('[7] 无页面异常 / 无 console 错误');
   {
-    state.pageErrors = await probe.ev('return window.__heditor.errors;');
+    state.pageErrors = await probe.read('return D.errors();');
     state.consoleErrors = consoleErrors;
     check('无 page error', state.pageErrors.length === 0, JSON.stringify(state.pageErrors));
     check('无 console error', state.consoleErrors.length === 0,
@@ -2839,27 +2834,27 @@ test.describe('编辑面', () => {
   {
     // 整份装载时这六个数应当全是零 —— 没有数据源，也就没有按需读的账。
     //   这一条同时是"按需这条路没被误开"的判据。
-    const full = await probe.ev('return window.__heditor.editStats;');
+    const full = await probe.read('return D.editStats();');
     check('整份装载时按需的账全为零（没有数据源）',
               Number(full.fontStorageReads) === 0 && Number(full.fontResidentBytes) === 0 &&
                 Number(full.fontCacheHits) === 0,
               `reads=${full.fontStorageReads} resident=${full.fontResidentBytes}`);
 
-    const switched = await probe.ev('return await window.__heditor.reloadFonts("lazy");');
+    const switched = await probe.read('return await D.reloadFonts("lazy");');
     check('能切到按需装载（字体写进 MEMFS，引擎按路径装）',
               !!(switched && switched.mode === 'lazy'), JSON.stringify(switched && switched.mode));
 
     // 三个数要在真实排版上量：装 2000 段并把它排一遍。
     //   用 diverse 那一个入口 —— stress 文档整篇是同一个字，字形集合只有一个，
     //   字形缓存与块缓存都会命中到失真（量出来的数完全不反映真文档）。
-    await probe.ev('await window.__heditor.loadStressDocumentDiverse(2000, 20); return true;');
-    await probe.ev('return await window.__heditor.present();');
+    await probe.read('await LOAD.stressDiverse(2000, 20); return true;');
+    await probe.read('return await D.present();');
     // 再换几个窗口位置。只量"当前窗口那 3 页"会低估浏览成本 —— 换到新区域
     //   要读它自己的字形。这里直接设视口锚点（比模拟滚动稳），前中后各一次。
     for (const first of [0, 25, 50]) {
-      await probe.ev(`return await window.__heditor.setViewportAnchor(${first}, 3);`);
+      await probe.read(`return await D.setViewportAnchor(${first}, 3);`);
     }
-    const st = await probe.ev('return window.__heditor.editStats;');
+    const st = await probe.read('return D.editStats();');
 
     const hits = Number(st.fontCacheHits);
     const misses = Number(st.fontCacheMisses);
@@ -2919,21 +2914,20 @@ test.describe('编辑面', () => {
     //   只数第一页那几行也正是判据名字里的"同一页"：帧是窗口大的，按整帧数会掺进
     //   "窗口盖着哪几页"，那个数随窗口策略变，测的就成了窗口在哪而不是字画没画出来。
     const INK = `
-      const H = window.__heditor;
-      const f = await H.rawFrame();
-      const rows = H.frameW() * H.pagePx[1] * 4;
+      const f = await D.rawFrame();
+      const rows = D.frameW() * D.pagePx().h * 4;
       let n = 0;
       for (let i = 0; i + 3 < rows; i += 4) {
         if (f[i] < 200 || f[i+1] < 200 || f[i+2] < 200) ++n;
       }
       return n;
     `;
-    await probe.ev('return await window.__heditor.setViewportAnchor(0, 3);');
-    const inkLazy = await probe.ev(INK);
-    await probe.ev('return await window.__heditor.reloadFonts("full");');
-    await probe.ev('await window.__heditor.loadStressDocumentDiverse(2000, 20); return true;');
-    await probe.ev('return await window.__heditor.setViewportAnchor(0, 3);');
-    const inkFull = await probe.ev(INK);
+    await probe.read('return await D.setViewportAnchor(0, 3);');
+    const inkLazy = await probe.read(INK);
+    await probe.read('return await D.reloadFonts("full");');
+    await probe.read('await LOAD.stressDiverse(2000, 20); return true;');
+    await probe.read('return await D.setViewportAnchor(0, 3);');
+    const inkFull = await probe.read(INK);
     state.inkCompare = { lazy: inkLazy, full: inkFull };
     check('按需模式下帧上有字', inkLazy > 1000, `${inkLazy} px`);
     check(`按需与整份渲染同一页的墨迹一致（${inkLazy} vs ${inkFull}）`,
@@ -2950,11 +2944,11 @@ test.describe('编辑面', () => {
     const rows = [];
     for (const bs of [4096, 16384, 65536]) {
       const blocks = Math.floor(CAP / bs);
-      await probe.ev(`return await window.__heditor.setFontCacheConfig(${bs}, ${blocks});`);
-      await probe.ev('return await window.__heditor.reloadFonts("lazy");');
-      await probe.ev('await window.__heditor.loadStressDocumentDiverse(2000, 20); return true;');
-      await probe.ev('return await window.__heditor.present();');
-      const s = await probe.ev('return window.__heditor.editStats;');
+      await probe.read(`return await D.setFontCacheConfig(${bs}, ${blocks});`);
+      await probe.read('return await D.reloadFonts("lazy");');
+      await probe.read('await LOAD.stressDiverse(2000, 20); return true;');
+      await probe.read('return await D.present();');
+      const s = await probe.read('return D.editStats();');
       const hits = Number(s.fontCacheHits);
       const misses = Number(s.fontCacheMisses);
       rows.push({
@@ -2988,15 +2982,15 @@ test.describe('编辑面', () => {
   log.section('[19] 真病历文本：用字更分散，缓存账更紧');
   {
     // 真文本由门面读文件并清洗（清洗逻辑只此一份，页面下拉用的是同一条路）。
-    const textInfo = await probe.ev('return await window.__heditor.loadMedicalSample(1);');
+    const textInfo = await probe.read('return await LOAD.medical(1);');
     console.log(`     病历文本：${textInfo.paragraphs} 段 / ${textInfo.chars} 字`);
     // 这一条查的是页面自己的下拉：旧宿主页把场景做成了 UI，库不带 UI。
     //   在库页面上跳过它（而不是为了它给库加一个 select —— 那是把页面塞进库）。
-    if (await probe.ev('return !!(window.__heditor && window.__heditor.isLib);')) {
+    if (await probe.read('return !!(window.__demo && window.__demo.diag);')) {
       log.note('页面下拉里有真病历这一项：库页面没有场景下拉，跳过');
     } else {
       check('页面下拉里有真病历这一项（场景入了 UI，不只是探针能用）',
-                await probe.ev(`return [...document.querySelectorAll('#scenario option')]
+                await probe.read(`return [...document.querySelectorAll('#scenario option')]
                                 .some((o) => o.value === '8');`), 'id=8');
     }
 
@@ -3012,11 +3006,11 @@ test.describe('编辑面', () => {
     for (const v of VARIANTS) {
       const bs = v.kb * 1024;
       const blocks = Math.floor((v.capMB * 1024 * 1024) / bs);
-      await probe.ev(`return await window.__heditor.setFontCacheConfig(${bs}, ${blocks});`);
-      await probe.ev('return await window.__heditor.reloadFonts("lazy");');
-      await probe.ev('return await window.__heditor.loadMedicalSample(7);');
-      await probe.ev('return await window.__heditor.present();');
-      const s = await probe.ev('return window.__heditor.editStats;');
+      await probe.read(`return await D.setFontCacheConfig(${bs}, ${blocks});`);
+      await probe.read('return await D.reloadFonts("lazy");');
+      await probe.read('return await LOAD.medical(7);');
+      await probe.read('return await D.present();');
+      const s = await probe.read('return D.editStats();');
       const hits = Number(s.fontCacheHits);
       const misses = Number(s.fontCacheMisses);
       rows.push({
@@ -3059,36 +3053,36 @@ test.describe('编辑面', () => {
     // 这一节判的是"用户按键这一路"：全部派真实 keydown，不走门面调用 ——
     //   门面调用绕过的正是要判的那一段（宿主把 key + 修饰键翻译成引擎命令）。
     // 文档换成长段：上下键与"跨行拆矩形"必须真的跨行，一行装得下的文档测不出来。
-    await probe.ev(
-      'await window.__heditor.loadTextDocument(' +
+    await probe.read(
+      'await LOAD.text(' +
       JSON.stringify('甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉戌亥') +
       ', 3); return true;');
 
     // (a) 装载之后没有选区 —— 反向一半：没有选区就没有要画的东西
-    const s0 = await probe.ev('return window.__heditor.selection;');
+    const s0 = await probe.read('return SEL();');
     check('装载之后没有选区（两端重合）', !!s0 && s0.empty === true, JSON.stringify(s0));
     check('★ 空选区零矩形（反向：没选区就没东西可画）',
               !!s0 && s0.rects.length === 0, JSON.stringify(s0 && s0.rects));
 
     // (b) Shift+右：选区从锚点那一端长
-    await probe.ev('await window.__heditor.setCaret(0, 0); return true;');
-    const anchor0 = await probe.ev('return window.__heditor.selection.anchor;');
-    await probe.ev(key('ArrowRight', ', shiftKey: true'));
-    await probe.ev(key('ArrowRight', ', shiftKey: true'));
-    const s1 = await probe.ev('return window.__heditor.selection;');
+    await probe.read('await H.setCaret({ para: 0, offset: 0 }); return true;');
+    const anchor0 = await probe.read('return SEL().anchor;');
+    await probe.read(key('ArrowRight', ', shiftKey: true'));
+    await probe.read(key('ArrowRight', ', shiftKey: true'));
+    const s1 = await probe.read('return SEL();');
     check('★ Shift+右 之后有选区', s1.empty === false, JSON.stringify(s1));
     check('★ 锚点留在起点没动', s1.anchor === anchor0, `anchor=${s1.anchor} 原=${anchor0}`);
     check('焦点端前进两格', s1.focus === anchor0 + 2, `focus=${s1.focus}`);
 
     // (c) 连续扩展：锚点还是那一个（不是"每次重新起头"）
-    await probe.ev(key('ArrowRight', ', shiftKey: true'));
-    const s2 = await probe.ev('return window.__heditor.selection;');
+    await probe.read(key('ArrowRight', ', shiftKey: true'));
+    const s2 = await probe.read('return SEL();');
     check('★ 连续 Shift+右 锚点仍不动', s2.anchor === anchor0, `anchor=${s2.anchor}`);
     check('焦点端再前进一格', s2.focus === s1.focus + 1, `focus=${s2.focus}`);
 
     // (d) Shift+左：反向扩展，锚点仍不动
-    await probe.ev(key('ArrowLeft', ', shiftKey: true'));
-    const s3 = await probe.ev('return window.__heditor.selection;');
+    await probe.read(key('ArrowLeft', ', shiftKey: true'));
+    const s3 = await probe.read('return SEL();');
     check('★ 反向扩展锚点也不动', s3.anchor === anchor0, `anchor=${s3.anchor}`);
     check('焦点端回退一格', s3.focus === s2.focus - 1, `focus=${s3.focus}`);
 
@@ -3112,7 +3106,7 @@ test.describe('编辑面', () => {
     //   所以门限取 r >= 170：实心填充的 r 是 178，仍然算"偏蓝"，
     //   两条才能各自只钉一件事，而不是一起红。
     const scanExpr = `
-      const f = await window.__heditor.rawFrame();
+      const f = await D.rawFrame();
       let ink = 0, blue = 0;
       for (let i = 0; i + 3 < f.length; i += 4) {
         const r = f[i], g = f[i + 1], b = f[i + 2];
@@ -3120,59 +3114,59 @@ test.describe('编辑面', () => {
         if (b - r >= 8 && r >= 170) ++blue;
       }
       return { ink, blue };`;
-    await probe.ev(
-      'await window.__heditor.setCaret(0, 0); await window.__heditor.stopBlink(); return true;');
-    const pxNo = await probe.ev(scanExpr);
-    await probe.ev(key('ArrowRight', ', shiftKey: true'));
-    await probe.ev(key('ArrowRight', ', shiftKey: true'));
-    const pxSel = await probe.ev(scanExpr);
+    await probe.read(
+      'await H.setCaret({ para: 0, offset: 0 }); await D.stopBlink(); return true;');
+    const pxNo = await probe.read(scanExpr);
+    await probe.read(key('ArrowRight', ', shiftKey: true'));
+    await probe.read(key('ArrowRight', ', shiftKey: true'));
+    const pxSel = await probe.read(scanExpr);
     const dBlue = Number(pxSel.blue) - Number(pxNo.blue);
     const dInk = Number(pxSel.ink) - Number(pxNo.ink);
     check('★ 选区真的画进了帧（偏蓝的像素数变多）', dBlue >= 200,
               `有选区 ${pxSel.blue} vs 无选区 ${pxNo.blue}（差 ${dBlue}）`);
     check('★ 涂上去的是混合不是实心（纸面没被压暗）', dInk <= 50,
               `有选区 ${pxSel.ink} vs 无选区 ${pxNo.ink}（差 ${dInk}）`);
-    const stSel = await probe.ev('return window.__heditor.editStats;');
+    const stSel = await probe.read('return D.editStats();');
     check('这一拍确实重画过（不是"只算了矩形没画"）', Number(stSel.repaintedPixels) > 0,
               `${stSel.repaintedPixels}`);
 
     // (f) 裸方向键把选区折叠
-    await probe.ev(key('ArrowRight'));
-    const s4 = await probe.ev('return window.__heditor.selection;');
+    await probe.read(key('ArrowRight'));
+    const s4 = await probe.read('return SEL();');
     check('★ 裸方向键把选区折叠（不留看不见的选区）', s4.empty === true, JSON.stringify(s4));
 
     // (g) Ctrl+A 全选
-    await probe.ev('await window.__heditor.setCaret(0, 0); return true;');
-    await probe.ev(key('a', ', ctrlKey: true'));
-    const sa = await probe.ev('return window.__heditor.selection;');
+    await probe.read('await H.setCaret({ para: 0, offset: 0 }); return true;');
+    await probe.read(key('a', ', ctrlKey: true'));
+    const sa = await probe.read('return SEL();');
     check('★ Ctrl+A 全选（走真事件）', sa.empty === false, JSON.stringify(sa));
     check('★ 全选跨行 ⇒ 多个矩形（整篇确实被选中）', sa.rects.length >= 2,
               `rects=${sa.rects.length}`);
 
     // (h) 上下键：↓↑ 回原位
-    await probe.ev('await window.__heditor.setCaret(0, 0); return true;');
-    const cb = await probe.ev('return window.__heditor.caret;');
-    await probe.ev(key('ArrowDown'));
-    const cd = await probe.ev('return window.__heditor.caret;');
+    await probe.read('await H.setCaret({ para: 0, offset: 0 }); return true;');
+    const cb = await probe.read('return CARET();');
+    await probe.read(key('ArrowDown'));
+    const cd = await probe.read('return CARET();');
     check('★ ↓ 走到了别的行（位置变了）', !(cd.para === cb.para && cd.offset === cb.offset),
               `${JSON.stringify(cb)} → ${JSON.stringify(cd)}`);
-    await probe.ev(key('ArrowUp'));
-    const cu = await probe.ev('return window.__heditor.caret;');
+    await probe.read(key('ArrowUp'));
+    const cu = await probe.read('return CARET();');
     check('★ ↓↑ 回到原位', cu.para === cb.para && cu.offset === cb.offset,
               `${JSON.stringify(cb)} → ${JSON.stringify(cu)}`);
 
     // (i) Shift+↓ 扩展（与 Shift+左右 共用同一个 collapse 口径）
-    await probe.ev(key('ArrowDown', ', shiftKey: true'));
-    const sd = await probe.ev('return window.__heditor.selection;');
+    await probe.read(key('ArrowDown', ', shiftKey: true'));
+    const sd = await probe.read('return SEL();');
     check('★ Shift+↓ 扩展出选区', sd.empty === false, JSON.stringify(sd));
 
     // (j) 文档首尾：Ctrl+Home / Ctrl+End（裸 Home/End 是行首行尾，见 [3]）
-    const tp = await probe.ev('return window.__heditor.editStats.totalParagraphs;');
-    await probe.ev(key('End', ', ctrlKey: true'));
-    const ce = await probe.ev('return window.__heditor.caret;');
+    const tp = await probe.read('return D.editStats().totalParagraphs;');
+    await probe.read(key('End', ', ctrlKey: true'));
+    const ce = await probe.read('return CARET();');
     check('Ctrl+End 落在最后一段', ce.para === Number(tp) - 1, `para=${ce.para} 共 ${tp} 段`);
-    await probe.ev(key('Home', ', ctrlKey: true'));
-    const chh = await probe.ev('return window.__heditor.caret;');
+    await probe.read(key('Home', ', ctrlKey: true'));
+    const chh = await probe.read('return CARET();');
     check('Ctrl+Home 回到第一段段首', chh.para === 0 && chh.offset === 0,
               JSON.stringify(chh));
   }
@@ -3182,14 +3176,14 @@ test.describe('编辑面', () => {
     // 与 [18] 同一条纪律：全走真 keydown（含 Ctrl+A / Ctrl+Z / Ctrl+Y），
     //   不走门面调用 —— 门面调用绕过的正是"宿主把按键翻译成引擎命令"那一段。
     const DOC19 = '零一二三四五六七八九十';
-    const load19 = () => probe.ev(
-      'await window.__heditor.loadTextDocument(' + JSON.stringify(DOC19) + ', 3); return true;');
+    const load19 = () => probe.read(
+      'await LOAD.text(' + JSON.stringify(DOC19) + ', 3); return true;');
     // 从 (0, 2) 起 Shift+右 两格 = 选中第 2、3 两个字。
     const selectTwo19 = async () => {
-      await probe.ev('await window.__heditor.setCaret(0, 2); return true;');
-      await probe.ev(key('ArrowRight', ', shiftKey: true'));
-      await probe.ev(key('ArrowRight', ', shiftKey: true'));
-      return probe.ev('return window.__heditor.selection;');
+      await probe.read('await H.setCaret({ para: 0, offset: 2 }); return true;');
+      await probe.read(key('ArrowRight', ', shiftKey: true'));
+      await probe.read(key('ArrowRight', ', shiftKey: true'));
+      return probe.read('return SEL();');
     };
 
     // (a) 选中再打字 = 原文 − 选区 + 新字
@@ -3197,17 +3191,17 @@ test.describe('编辑面', () => {
     const s19 = await selectTwo19();
     check('★ Shift+右 选中两个字（走真事件）',
               s19.empty === false && s19.focus === s19.anchor + 2, JSON.stringify(s19));
-    await probe.ev(key('测'));
-    const t19 = await probe.ev('return window.__heditor.paragraphText(0);');
+    await probe.read(key('测'));
+    const t19 = await probe.read('return H.paragraph(0);');
     check('★ 选中再打字 = 原文 − 选区 + 新字', t19 === '零一测四五六七八九十', t19);
-    const r19 = await probe.ev('return window.__heditor.selection;');
+    const r19 = await probe.read('return SEL();');
     check('★ 替换之后没有残选区（反向：不许留一条看不见的选区）', r19.empty === true,
               JSON.stringify(r19));
 
     // (b) 撤销一次：文字与选区的两端一起回来
-    await probe.ev(key('z', ', ctrlKey: true'));
-    const u19 = await probe.ev(
-      'return { t: await window.__heditor.paragraphText(0), s: window.__heditor.selection };');
+    await probe.read(key('z', ', ctrlKey: true'));
+    const u19 = await probe.read(
+      'return { t: await H.paragraph(0), s: SEL() };');
     check('★ 撤销把文字还回来了', u19.t === DOC19, u19.t);
     check('★ 撤销回到编辑前两端（不是只剩一个光标）',
               u19.s.empty === false && u19.s.anchor === s19.anchor && u19.s.focus === s19.focus,
@@ -3216,85 +3210,85 @@ test.describe('编辑面', () => {
               `rects=${u19.s.rects.length}`);
 
     // (c) 重做：替换那一下整套回来
-    await probe.ev(key('y', ', ctrlKey: true'));
-    const re19 = await probe.ev(
-      'return { t: await window.__heditor.paragraphText(0), s: window.__heditor.selection };');
+    await probe.read(key('y', ', ctrlKey: true'));
+    const re19 = await probe.read(
+      'return { t: await H.paragraph(0), s: SEL() };');
     check('★ 重做回到替换之后', re19.t === '零一测四五六七八九十', re19.t);
     check('重做之后没有选区', re19.s.empty === true, JSON.stringify(re19.s));
 
     // (d) 退格在选区非空时只删选区，不再往前多删一个字
     await load19();
     await selectTwo19();
-    await probe.ev(key('Backspace'));
-    const b19 = await probe.ev('return window.__heditor.paragraphText(0);');
+    await probe.read(key('Backspace'));
+    const b19 = await probe.read('return H.paragraph(0);');
     check('★ 退格只删掉选中的两个字（不多吃一个字）', b19 === '零一四五六七八九十', b19);
 
     // (e) 反向一半：没有选区时退格照旧删一个字。
     //     没有这一条，"退格什么都不做"也能让上面那条绿。
     await load19();
-    await probe.ev('await window.__heditor.setCaret(0, 3); return true;');
-    await probe.ev(key('Backspace'));
-    const b19b = await probe.ev('return window.__heditor.paragraphText(0);');
+    await probe.read('await H.setCaret({ para: 0, offset: 3 }); return true;');
+    await probe.read(key('Backspace'));
+    const b19b = await probe.read('return H.paragraph(0);');
     check('★ 空选区时退格照旧删一个字', b19b === '零一三四五六七八九十', b19b);
 
     // (f) 前删同理
     await load19();
     await selectTwo19();
-    await probe.ev(key('Delete'));
-    const d19 = await probe.ev('return window.__heditor.paragraphText(0);');
+    await probe.read(key('Delete'));
+    const d19 = await probe.read('return H.paragraph(0);');
     check('★ 前删也只删选区', d19 === '零一四五六七八九十', d19);
 
     // (g) 跨段：选区跨过段落标记，退格把两段并起来
     await load19();
-    await probe.ev('await window.__heditor.setCaret(0, 8); return true;');
-    for (let i = 0; i < 5; ++i) await probe.ev(key('ArrowRight', ', shiftKey: true'));
-    const x19 = await probe.ev('return window.__heditor.selection;');
+    await probe.read('await H.setCaret({ para: 0, offset: 8 }); return true;');
+    for (let i = 0; i < 5; ++i) await probe.read(key('ArrowRight', ', shiftKey: true'));
+    const x19 = await probe.read('return SEL();');
     check('★ 选区跨过了段落标记（焦点进了下一段）', x19.empty === false, JSON.stringify(x19));
-    await probe.ev(key('Backspace'));
-    const xa = await probe.ev(
-      'return { t: await window.__heditor.allText,' +
-      '         n: window.__heditor.editStats.totalParagraphs };');
+    await probe.read(key('Backspace'));
+    const xa = await probe.read(
+      'return { t: await H.text(),' +
+      '         n: D.editStats().totalParagraphs };');
     check('★ 跨段退格把两段并成一段、内容接得上',
               xa.t === '零一二三四五六七一二三四五六七八九十\n零一二三四五六七八九十', xa.t);
     check('★ 段数少了一段（3 → 2）', Number(xa.n) === 2, `${xa.n}`);
 
     // (h) Ctrl+A 再退格：整篇删空，只剩一个空段
     await load19();
-    await probe.ev(key('a', ', ctrlKey: true'));
-    await probe.ev(key('Backspace'));
-    const e19 = await probe.ev(
-      'return { t: await window.__heditor.allText,' +
-      '         n: window.__heditor.editStats.totalParagraphs,' +
-      '         s: window.__heditor.selection };');
+    await probe.read(key('a', ', ctrlKey: true'));
+    await probe.read(key('Backspace'));
+    const e19 = await probe.read(
+      'return { t: await H.text(),' +
+      '         n: D.editStats().totalParagraphs,' +
+      '         s: SEL() };');
     check('★ Ctrl+A 再退格把整篇删空（只剩一个空段）',
               e19.t === '' && Number(e19.n) === 1, `${JSON.stringify(e19.t)} / ${e19.n} 段`);
     check('删空之后没有残选区', e19.s.empty === true, JSON.stringify(e19.s));
 
     // (i) 全选再打字 = 整篇只剩那个字
     await load19();
-    await probe.ev(key('a', ', ctrlKey: true'));
-    await probe.ev(key('测'));
-    const f19 = await probe.ev(
-      'return { t: await window.__heditor.allText,' +
-      '         n: window.__heditor.editStats.totalParagraphs };');
+    await probe.read(key('a', ', ctrlKey: true'));
+    await probe.read(key('测'));
+    const f19 = await probe.read(
+      'return { t: await H.text(),' +
+      '         n: D.editStats().totalParagraphs };');
     check('★ 全选再打字 = 整篇只剩那个字', f19.t === '测' && Number(f19.n) === 1,
               `${JSON.stringify(f19.t)} / ${f19.n} 段`);
 
     // (j) 回车（带选区）：先删掉选区，再在落点分段
     await load19();
     await selectTwo19();
-    await probe.ev(key('Enter'));
-    const g19 = await probe.ev(
-      'return { p0: await window.__heditor.paragraphText(0),' +
-      '         p1: await window.__heditor.paragraphText(1),' +
-      '         n: window.__heditor.editStats.totalParagraphs };');
+    await probe.read(key('Enter'));
+    const g19 = await probe.read(
+      'return { p0: await H.paragraph(0),' +
+      '         p1: await H.paragraph(1),' +
+      '         n: D.editStats().totalParagraphs };');
     check('★ 回车（带选区）：先删选区再分段（3 → 4 段）', Number(g19.n) === 4, `${g19.n}`);
     check('前半段是选区之前的内容', g19.p0 === '零一', g19.p0);
     check('后半段是选区之后的内容', g19.p1 === '四五六七八九十', g19.p1);
 
     // 收尾：把文档换回去，别把这一节的痕迹留给后面的节
-    await probe.ev(
-      'await window.__heditor.loadTextDocument(' + JSON.stringify(S6) + ', 1); return true;');
+    await probe.read(
+      'await LOAD.text(' + JSON.stringify(S6) + ', 1); return true;');
   }
 
   log.section('[20] 拖选：按下、移动、抬起（真鼠标事件）');
@@ -3308,17 +3302,17 @@ test.describe('编辑面', () => {
     // 本节自己钉住缩放：坐标换算读的是实时的实际缩放（自洽），但 (i) 那一节还依赖
     //   "文档有多高"（自动滚动要跑得够久），那是缩放决定的。不钉住的话，前一节把
     //   缩放留在别的值上，这一节就在另一种高度下跑，红项看起来像拖选坏了。
-    await probe.ev(`return await window.__heditor.reset(6, ${ZOOM});`);
-    await probe.ev('return await window.__heditor.stopBlink();');
+    await probe.read(`return await LOAD.reset(6, ${ZOOM});`);
+    await probe.read('return await D.stopBlink();');
 
     const DOC20 = '零一二三四五六七八九十';
-    const load20 = () => probe.ev(
-      'await window.__heditor.loadTextDocument(' + JSON.stringify(DOC20) + ', 3); return true;');
+    const load20 = () => probe.read(
+      'await LOAD.text(' + JSON.stringify(DOC20) + ', 3); return true;');
 
     // 光标几何 -> 客户端坐标。geo 每次现取：换文档、换窗口都会动。
-    const geo20 = async () => probe.ev(`
-      const cv = window.__heditor.canvas, r = cv.getBoundingClientRect();
-      const s = document.getElementById('stage').getBoundingClientRect();
+    const geo20 = async () => probe.read(`
+      const cv = FRAME(), r = cv.getBoundingClientRect();
+      const s = EL('#stage').getBoundingClientRect();
       return { left: r.left, top: r.top, sx: r.width / cv.width, sy: r.height / cv.height,
                stageTop: s.top, stageBottom: s.bottom, stageRight: s.right, stageMidX: (s.left + s.right) / 2 };`);
 
@@ -3347,21 +3341,21 @@ test.describe('编辑面', () => {
         await sleep(20);
       }
       await mouse('mouseReleased', to);
-      await probe.ev('return await window.__heditor.dragSettled();');
+      await probe.read('return await D.dragSettled();');
       await sleep(30);
     };
-    const sel20 = () => probe.ev('return window.__heditor.selection;');
-    const caret20 = () => probe.ev('return window.__heditor.caret;');
+    const sel20 = () => probe.read('return SEL();');
+    const caret20 = () => probe.read('return CARET();');
 
     // (a) 量两个端点：文档末尾一个点、文档开头一个点。端点用键盘把光标摆过去再量，
     //     量完把选区收回来（setCaret 会清掉 anchor），免得量测本身影响了待测的手势。
     await load20();
     const g20 = await geo20();
-    await probe.ev('await window.__heditor.setCaret(0, 0); return true;');
-    await probe.ev(key('End', ', ctrlKey: true, shiftKey: true'));
+    await probe.read('await H.setCaret({ para: 0, offset: 0 }); return true;');
+    await probe.read(key('End', ', ctrlKey: true, shiftKey: true'));
     const ref20 = await sel20();                       // 键盘扩到文档末尾的答案
     const caretEnd = await caret20();
-    await probe.ev('await window.__heditor.setCaret(0, 0); return true;');
+    await probe.read('await H.setCaret({ para: 0, offset: 0 }); return true;');
     const caretStart = await caret20();
     check('★ 参考值：Ctrl+Shift+End 扩到文档末尾（真 keydown）',
               ref20.empty === false && Number(ref20.focus) > Number(ref20.anchor),
@@ -3394,7 +3388,7 @@ test.describe('编辑面', () => {
               `${c20b.para},${c20b.offset}（末段长 ${DOC20.length}）`);
 
     // (d) 反向拖：从末尾按下、拖回开头 —— 两端不交换（选区带方向）
-    await probe.ev('await window.__heditor.setCaret(0, 0); return true;');
+    await probe.read('await H.setCaret({ para: 0, offset: 0 }); return true;');
     const g20d = await geo20();
     await dragGesture(toClient(g20d, caretEnd, 2, caretEnd.h / 2),
                       toClient(g20d, caretStart, 1, caretStart.h / 2));
@@ -3411,7 +3405,7 @@ test.describe('编辑面', () => {
     await sleep(20);
     await mouse('mouseMoved', back);
     await mouse('mouseReleased', back);
-    await probe.ev('return await window.__heditor.dragSettled();');
+    await probe.read('return await D.dragSettled();');
     const s20d = await sel20();
     check('★ 拖出去再拖回来收成空选区', s20d.empty === true, JSON.stringify(s20d));
 
@@ -3423,19 +3417,19 @@ test.describe('编辑面', () => {
 
     // (g) 拖选之后打字 = 选区被吃掉（与第 5 刀接上：拖出来的与键盘扩出来的是同一件东西）
     await load20();
-    await probe.ev('await window.__heditor.setCaret(0, 0); return true;');
+    await probe.read('await H.setCaret({ para: 0, offset: 0 }); return true;');
     const g20g = await geo20();
     const cs20 = await caret20();
-    await probe.ev('await window.__heditor.setCaret(0, 0); return true;');
-    await probe.ev(key('End', ', ctrlKey: true, shiftKey: true'));
+    await probe.read('await H.setCaret({ para: 0, offset: 0 }); return true;');
+    await probe.read(key('End', ', ctrlKey: true, shiftKey: true'));
     const ce20 = await caret20();
-    await probe.ev('await window.__heditor.setCaret(0, 0); return true;');
+    await probe.read('await H.setCaret({ para: 0, offset: 0 }); return true;');
     await dragGesture(toClient(g20g, cs20, 1, cs20.h / 2),
                       toClient(g20g, ce20, 2, ce20.h / 2));
-    await probe.ev(key('测'));
-    const g20h = await probe.ev(
-      'return { t: await window.__heditor.allText,' +
-      '         n: window.__heditor.editStats.totalParagraphs };');
+    await probe.read(key('测'));
+    const g20h = await probe.read(
+      'return { t: await H.text(),' +
+      '         n: D.editStats().totalParagraphs };');
     check('★ 拖选之后打字：整篇被替换成一个字', g20h.t === '测' && Number(g20h.n) === 1,
               `${JSON.stringify(g20h.t)} / ${g20h.n} 段`);
 
@@ -3449,11 +3443,11 @@ test.describe('编辑面', () => {
               JSON.stringify(s20f));
 
     // (i) 拖出可视区：指针停在容器下缘之外，容器自己滚起来、选区继续长
-    await probe.ev('await window.__heditor.loadStressDocument(200, 20); return true;');
+    await probe.read('await LOAD.stress(200, 20); return true;');
     // 显式回到文档顶部：这一节要的是"往下还有得滚"，视口停在哪一层不该由前面的节决定。
-    await probe.ev('document.getElementById("stage").scrollTop = 0; return true;');
+    await probe.read('EL("#stage").scrollTop = 0; return true;');
     await sleep(250);
-    await probe.ev('await window.__heditor.setCaret(0, 0); return true;');
+    await probe.read('await H.setCaret({ para: 0, offset: 0 }); return true;');
     const g20j = await geo20();
     const cj = await caret20();
     const fromJ = toClient(g20j, cj, 1, cj.h / 2);
@@ -3464,8 +3458,8 @@ test.describe('编辑面', () => {
     //
     // 第一条必须钉"接近 0"，不能只写"离底部还远"：top 接近上限时"离底部还远"照样
     //   成立，整节就会在已经滚到底的状态下跑，两次读数自然一模一样。
-    const room = await probe.ev(`
-      const s = document.getElementById('stage');
+    const room = await probe.read(`
+      const s = EL('#stage');
       return { top: s.scrollTop, max: s.scrollHeight - s.clientHeight };`);
     check('前置：视口钉在文档顶部、下面还有可滚余量，按下点在容器内',
               Number(room.top) <= 50 && Number(room.max) > 1000 &&
@@ -3477,13 +3471,13 @@ test.describe('编辑面', () => {
     //   dragSettled 等的是自动滚动停下来（滚到两端、或指针回到框内），而自动滚动
     //   一直把 raf 挂满，所以 await 它等于等到滚到底；那时量到的 j0 已经是终值，
     //   j1 自然一模一样，"还在继续滚"就量不出来了。
-    const readStage = () => probe.ev(`
-      const s = document.getElementById('stage');
+    const readStage = () => probe.read(`
+      const s = EL('#stage');
       return { top: s.scrollTop, max: s.scrollHeight - s.clientHeight,
                scrollH: s.scrollHeight, clientH: s.clientHeight,
-               zoom: window.__heditor.zoomLevel,
-               sel: window.__heditor.selection,
-               drag: window.__heditor.drag };`);
+               zoom: ZOOM(),
+               sel: SEL(),
+               drag: D.dragState() };`);
 
     await mouse('mousePressed', fromJ);
     await mouse('mouseMoved', outJ);
@@ -3492,7 +3486,7 @@ test.describe('编辑面', () => {
     await sleep(900);                                   // 继续滚、继续长
     const j1 = await readStage();
     await mouse('mouseReleased', outJ);
-    await probe.ev('return await window.__heditor.dragSettled();');
+    await probe.read('return await D.dragSettled();');
 
     // 诊断面本身也要有内容：拖动中它必须说"在拖、已经移动过、发过若干次焦点端搬运"。
     check('★ 拖动中的诊断读数：在拖、移动过、搬过焦点端',
@@ -3511,7 +3505,7 @@ test.describe('编辑面', () => {
     check('★ 这一节没滚到底（滚到底是靠自动滚动、不是被别的东西拽过去）',
               Number(j1.top) < Number(j1.max),
               `${j1.top} / ${j1.max}`);
-    const d20 = await probe.ev('return window.__heditor.drag;');
+    const d20 = await probe.read('return D.dragState();');
     check('★ 抬手之后拖选收尾（诊断面回到不在拖）', d20 && d20.active === false,
               JSON.stringify(d20));
 
@@ -3524,22 +3518,22 @@ test.describe('编辑面', () => {
     //   Chrome 用它自己的按钮状态覆盖那个字段（实测读到的还是 1，于是那条移动把选区
     //   又扩了一格）。被测的只是"onMove 读到按钮已抬起就收尾"这一条，
     //   坐标换算与命中都不在它里面，所以合成事件在这里是恰当的刺激而不是绕过接线。
-    await probe.ev('await window.__heditor.loadStressDocument(200, 20); return true;');
-    await probe.ev('document.getElementById("stage").scrollTop = 0; return true;');
+    await probe.read('await LOAD.stress(200, 20); return true;');
+    await probe.read('EL("#stage").scrollTop = 0; return true;');
     await sleep(250);
-    await probe.ev('await window.__heditor.setCaret(0, 0); return true;');
+    await probe.read('await H.setCaret({ para: 0, offset: 0 }); return true;');
     const g20k = await geo20();
     const ck20 = await caret20();
     const pk20 = toClient(g20k, ck20, 1, ck20.h / 2);
     const outK = { x: g20k.stageMidX, y: g20k.stageBottom + 30 };
     // 页内派一条移动事件（按钮位可指定）—— 见上面为什么必须合成。
-    const synthMove = (x: any, y: any, buttons: any) => probe.ev(
+    const synthMove = (x: any, y: any, buttons: any) => probe.read(
       'window.dispatchEvent(new MouseEvent("mousemove", { clientX: ' + Math.round(x) +
       ', clientY: ' + Math.round(y) + ', buttons: ' + buttons +
       ', bubbles: true, cancelable: true })); return true;');
-    const readK = () => probe.ev(
-      'const s = document.getElementById("stage");' +
-      'return { drag: window.__heditor.drag, top: s.scrollTop };');
+    const readK = () => probe.read(
+      'const s = EL("#stage");' +
+      'return { drag: D.dragState(), top: s.scrollTop };');
     await mouse('mousePressed', pk20);
     await mouse('mouseMoved', outK);                      // 拖到容器外：自动滚动起来
     await sleep(300);
@@ -3561,25 +3555,25 @@ test.describe('编辑面', () => {
 
     // (k) pointercancel 也要收尾：触摸被识别成滚动、或笔被系统抢走时只剩这一个信号。
     await load20();
-    await probe.ev('await window.__heditor.setCaret(0, 0); return true;');
+    await probe.read('await H.setCaret({ para: 0, offset: 0 }); return true;');
     const g20m = await geo20();
     const cm20 = await caret20();
     await mouse('mousePressed', toClient(g20m, cm20, 1, cm20.h / 2));
     await mouse('mouseMoved', { x: g20m.stageMidX, y: g20m.stageTop + 120 });
     await sleep(60);
-    const m0 = await probe.ev('return window.__heditor.drag;');
-    await probe.ev('window.dispatchEvent(new PointerEvent("pointercancel",' +
+    const m0 = await probe.read('return D.dragState();');
+    await probe.read('window.dispatchEvent(new PointerEvent("pointercancel",' +
                  ' { bubbles: true, cancelable: true })); return true;');
     await sleep(60);
-    const m1 = await probe.ev('return window.__heditor.drag;');
+    const m1 = await probe.read('return D.dragState();');
     check('★ pointercancel 也收尾（触摸/笔被系统接管）',
               m0 && m0.active === true && m1 && m1.active === false,
               `${JSON.stringify(m0)} → ${JSON.stringify(m1)}`);
     await mouse('mouseReleased', { x: g20m.stageMidX, y: g20m.stageTop + 120 });
 
     // 收尾：把文档换回去，别把这一节的痕迹留给后面的节
-    await probe.ev(
-      'await window.__heditor.loadTextDocument(' + JSON.stringify(S6) + ', 1); return true;');
+    await probe.read(
+      'await LOAD.text(' + JSON.stringify(S6) + ', 1); return true;');
   }
 
   // 光标与选区的样式：宿主可配置的参数
@@ -3589,36 +3583,35 @@ test.describe('编辑面', () => {
   //   在正面也全绿，而那条路每一拍都要把窗口里的每一页重新光栅。所以两条缺一不可。
   log.section('[21] 光标与选区的样式：可配置的参数');
   {
-    await probe.ev(
-      'await window.__heditor.loadTextDocument(' + JSON.stringify(S6) + ', 1); return true;');
-    await probe.ev('await window.__heditor.setCaret(0, 0); return true;');
-    await probe.ev('return await window.__heditor.stopBlink();');
+    await probe.read(
+      'await LOAD.text(' + JSON.stringify(S6) + ', 1); return true;');
+    await probe.read('await H.setCaret({ para: 0, offset: 0 }); return true;');
+    await probe.read('return await D.stopBlink();');
 
     // 采样点取光标矩形中心偏下 3 px：一定在光标内，又躲开上缘的取整边界。
     //   读的是引擎帧（rawFrame 是快照），不是画布 —— 两个宿主的画布形状不同。
     const FRAME_PIX = `
-      const H = window.__heditor;
-      const f = await H.rawFrame();
-      const w = H.frameW(), h = H.frameH();
-      const cr = H.caret;
+      const f = await D.rawFrame();
+      const w = D.frameW(), h = D.frameH();
+      const cr = CARET();
       const x = cr.x + Math.max(0, Math.floor(cr.w / 2));
       const y = cr.y + Math.min(3, Math.max(0, cr.h - 1));
       if (!(x >= 0 && y >= 0 && x < w && y < h)) return null;
       const i = (y * w + x) * 4;
       return [f[i], f[i + 1], f[i + 2], f[i + 3]];`;
-    const frameArea = await probe.ev('return window.__heditor.frameW() * window.__heditor.frameH();');
+    const frameArea = await probe.read('return D.frameW() * D.frameH();');
 
-    const defCaret = await probe.ev('return window.__heditor.caretStyle;');
-    const defSel = await probe.ev('return window.__heditor.selectionStyle;');
-    const p0 = await probe.ev(FRAME_PIX);
+    const defCaret = await probe.read('return H.config().caretStyle;');
+    const defSel = await probe.read('return H.config().selectionStyle;');
+    const p0 = await probe.read(FRAME_PIX);
     check('默认光标色就是配置里那一份（31,111,235）',
               !!p0 && p0[0] === 31 && p0[1] === 111 && p0[2] === 235,
               `采样 ${JSON.stringify(p0)}，配置 ${JSON.stringify(defCaret.color)}`);
 
-    const st1 = await probe.ev(
-      'return await window.__heditor.setCaretStyle({ color: [220, 20, 60, 255] });');
-    const p1 = await probe.ev(FRAME_PIX);
-    const back1 = await probe.ev('return window.__heditor.caretStyle;');
+    const st1 = await probe.read(
+      'return await CARET_STYLE({ color: [220, 20, 60, 255] });');
+    const p1 = await probe.read(FRAME_PIX);
+    const back1 = await probe.read('return H.config().caretStyle;');
     check('改光标色：帧上那个像素变成新颜色（不只是改了参数）',
               !!p1 && p1[0] === 220 && p1[1] === 20 && p1[2] === 60 &&
               !!p0 && (p0[0] !== p1[0] || p0[1] !== p1[1] || p0[2] !== p1[2]),
@@ -3633,22 +3626,21 @@ test.describe('编辑面', () => {
     //   先切到另一个场景再切回来：run(同 id) 那一步在"这个场景已经装着"时是空操作，
     //   读回来的会变成上一拍（改样式那一拍）的 186 px —— 那样参考臂就恒等于被测对象，
     //   判据恒红。换文档是保证这一拍真的是整篇重排重绘的唯一稳当办法。
-    const fullPix = await probe.ev(`
-      await window.__heditor.setCaretStyle({ color: [31, 111, 235, 255] });
-      await window.__heditor.run(7, ${ZOOM});
-      const s = await window.__heditor.run(6, ${ZOOM});
+    const fullPix = await probe.read(`
+      await CARET_STYLE({ color: [31, 111, 235, 255] });
+      await LOAD.scenario(7, ${ZOOM});
+      const s = await LOAD.scenario(6, ${ZOOM});
       return s.repaintedPixels;`);
     // 分母是窗口内几页的像素，不是整个帧：帧按页号分槽之后帧高 = 槽数 x 步距，
     //   槽数可以多于窗口页数（多出来的是空槽，永远不写），拿 frameArea 当分母会让这条
     //   判据随槽数一起松掉（空槽越多越松，最后恒真）。
-    const winArea = await probe.ev(`
-      const H = window.__heditor;
-      const st = H.editStats || {};
-      return (st.windowPages || 1) * H.frameW() * H.pagePx[1];`);
+    const winArea = await probe.read(`
+      const st = D.editStats() || {};
+      return (st.windowPages || 1) * D.frameW() * D.pagePx().h;`);
     check('参考臂：整篇重排重绘确实写了大半个窗口（否则下面那条判据是恒真的）',
               fullPix > winArea * 0.5, `写 ${fullPix} / 窗口 ${winArea} px（帧 ${frameArea}）`);
-    const st2 = await probe.ev(
-      'return await window.__heditor.setCaretStyle({ color: [0, 128, 0, 255] });');
+    const st2 = await probe.read(
+      'return await CARET_STYLE({ color: [0, 128, 0, 255] });');
     check('★ 改样式那一拍的写入量比整篇重绘少一个量级以上（没有整窗重光栅）',
               st2.repaintedPixels * 10 < fullPix,
               `改样式写 ${st2.repaintedPixels} px，整篇重绘写 ${fullPix} px，` +
@@ -3659,22 +3651,21 @@ test.describe('编辑面', () => {
               `layoutRan ${st1.layoutRan} / ${st2.layoutRan}`);
 
     // 宽度下限：引擎把它夹到 0.4 —— 读回来必须是夹过的那一份，不是递进去的那一份。
-    await probe.ev('return await window.__heditor.setCaretStyle({ widthPt: 0.1 });');
-    const wClamp = await probe.ev('return window.__heditor.caretStyle;');
+    await probe.read('return await CARET_STYLE({ widthPt: 0.1 });');
+    const wClamp = await probe.read('return H.config().caretStyle;');
     check('光标宽度下限被夹到 0.4 磅（递 0.1 进去）', wClamp.widthPt === 0.4,
               `读回 ${wClamp.widthPt}`);
-    await probe.ev('return await window.__heditor.setCaretStyle({ widthPt: 3 });');
-    const wSet = await probe.ev('return window.__heditor.caretStyle;');
+    await probe.read('return await CARET_STYLE({ widthPt: 3 });');
+    const wSet = await probe.read('return H.config().caretStyle;');
     check(' 宽度在范围内的取值原样保留（不是恒被夹到下限）', wSet.widthPt === 3,
               `读回 ${wSet.widthPt}`);
 
     // 宽度参数确实改变了画出来的东西：数整帧上等于光标色的像素，那个面积就是光标的
     //   可见大小。只读回 widthPt 只能证明引擎存下了这个数，证明不了它被画出来 ——
     //   而"存下来但没画"正是这类参数最常见的失败方式。
-    const caretArea = async (w: any) => probe.ev(`
-      const H = window.__heditor;
-      await H.setCaretStyle({ color: [0, 128, 0, 255], widthPt: ${w} });
-      const f = await H.rawFrame();
+    const caretArea = async (w: any) => probe.read(`
+      await CARET_STYLE({ color: [0, 128, 0, 255], widthPt: ${w} });
+      const f = await D.rawFrame();
       let n = 0;
       for (let i = 0; i + 3 < f.length; i += 4) {
         if (f[i] === 0 && f[i + 1] === 128 && f[i + 2] === 0) ++n;
@@ -3687,8 +3678,8 @@ test.describe('编辑面', () => {
               `0.4 磅 ${areaThin} px，6 磅 ${areaThick} px`);
 
     // 通道越界：递进去 300 / -5，必须夹到 255 / 0 而不是回绕。
-    await probe.ev('return await window.__heditor.setSelectionStyle({ color: [300, -5, 0, 0] });');
-    const cClamp = await probe.ev('return window.__heditor.selectionStyle;');
+    await probe.read('return await SEL_STYLE({ color: [300, -5, 0, 0] });');
+    const cClamp = await probe.read('return H.config().selectionStyle;');
     check('色通道越界被夹到 0~255（不回绕）',
               JSON.stringify(cClamp.color) === JSON.stringify([255, 0, 0, 0]),
               JSON.stringify(cClamp.color));
@@ -3698,45 +3689,43 @@ test.describe('编辑面', () => {
     //
     // 单位：selection.rects 的 x/y/w/h 是页面磅（另带 page），而帧是帧像素 ——
     //   两套单位混用只在 zoom=1 时是恒等，取中心点会取到行外去（读回一片白）。见名词对照。
-    const selPix = await probe.ev(`
-      const H = window.__heditor;
-      await H.setSelectionStyle({ color: [255, 0, 0, 255] });
+    const selPix = await probe.read(`
+      await SEL_STYLE({ color: [255, 0, 0, 255] });
       await H.selectAll();
-      const f = await H.rawFrame();
-      const w = H.frameW(), h = H.frameH();
-      const z = H.stats.zoom;
-      const step = H.pagePx[1] + H.pagePx[2];
-      const first = H.editStats.windowFirstPage;
-      const r = H.selection.rects[0];
+      const f = await D.rawFrame();
+      const w = D.frameW(), h = D.frameH();
+      const z = D.stats().zoom;
+      const step = D.pagePx().h + D.pagePx().gap;
+      const first = D.editStats().windowFirstPage;
+      const r = SEL().rects[0];
       const x = Math.floor((r.x + r.w / 2) * z);
       const y = Math.floor((r.page - first) * step + (r.y + r.h / 2) * z);
       const i = (y * w + x) * 4;
-      return { px: [f[i], f[i + 1], f[i + 2], f[i + 3]], n: H.selection.rects.length,
+      return { px: [f[i], f[i + 1], f[i + 2], f[i + 3]], n: SEL().rects.length,
                at: [x, y], inFrame: x >= 0 && y >= 0 && x < w && y < h, z, step, first };`);
     check('改选区色：选区矩形内那个像素就是新颜色',
               selPix.inFrame && selPix.n > 0 &&
               JSON.stringify(selPix.px) === JSON.stringify([255, 0, 0, 255]),
               `${selPix.n} 条矩形，取 ${JSON.stringify(selPix.at)}（zoom ${selPix.z}）` +
               ` 得到 ${JSON.stringify(selPix.px)}`);
-    const selBack = await probe.ev(`
-      const H = window.__heditor;
-      await H.setSelectionStyle({ color: ${JSON.stringify(defSel.color)} });
-      const f = await H.rawFrame();
-      const i = (${selPix.at[1]} * H.frameW() + ${selPix.at[0]}) * 4;
+    const selBack = await probe.read(`
+      await SEL_STYLE({ color: ${JSON.stringify(defSel.color)} });
+      const f = await D.rawFrame();
+      const i = (${selPix.at[1]} * D.frameW() + ${selPix.at[0]}) * 4;
       return [f[i], f[i + 1], f[i + 2], f[i + 3]];`);
     check(' 换回默认的半透明色之后同一点不再是纯红（说明上一条读的是真像素）',
               !(selBack[0] === 255 && selBack[1] === 0 && selBack[2] === 0),
               `读回 ${JSON.stringify(selBack)}`);
 
     // 收尾：把两处样式恢复成引擎的默认值，别把这一节的痕迹留给后面的节和截图。
-    await probe.ev(
-      'await window.__heditor.setCaretStyle({ color: ' + JSON.stringify(defCaret.color) +
+    await probe.read(
+      'await CARET_STYLE({ color: ' + JSON.stringify(defCaret.color) +
       ', widthPt: ' + defCaret.widthPt + ' });' +
-      'await window.__heditor.setSelectionStyle({ color: ' + JSON.stringify(defSel.color) +
+      'await SEL_STYLE({ color: ' + JSON.stringify(defSel.color) +
       ' });' +
-      'await window.__heditor.clearSelection(); return true;');
-    const restored = await probe.ev(
-      'return { c: window.__heditor.caretStyle, s: window.__heditor.selectionStyle };');
+      'await H.clearSelection(); return true;');
+    const restored = await probe.read(
+      'return { c: H.config().caretStyle, s: H.config().selectionStyle };');
     check('收尾：两处样式已恢复成默认',
               JSON.stringify(restored.c.color) === JSON.stringify(defCaret.color) &&
               JSON.stringify(restored.s.color) === JSON.stringify(defSel.color),
@@ -3746,7 +3735,7 @@ test.describe('编辑面', () => {
   // 收尾：载入表单样例 + 恢复闪烁，截一张给人看
   //   刻意停在表单模式（而不是纯文档场景）：截图要能一眼看出
   //     "字段的边界长什么样、只读的那个是灰的"。文档模式也画括号，只有只读模式不画。
-  await probe.ev('await window.__heditor.loadFormSample(0); await window.__heditor.startBlink(); return true;');
+  await probe.read('await LOAD.form(0); await D.startBlink(); return true;');
   await sleep(400);
   await probe.shot('edit-scene');
 

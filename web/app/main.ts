@@ -100,6 +100,8 @@ async function boot(): Promise<void> {
     throw e;
   });
 
+  // 页面创建的实例只能这样交给页面外的脚本：evaluate 在页面里跑，拿不到模块引用。
+  //   它同时是测试的唯一入口（web/tests/support/readings.ts 的前言里读一次），改名字要同步。
   window.__demo = editor;
   window.__demoState = { changes: 0, transport };
   editor.on('change', () => {

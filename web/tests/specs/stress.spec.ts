@@ -6,15 +6,15 @@
 //   画布贴得对不对？selfCheck。顺序要紧：auditFrame 会把这一帧修成真值，
 //     必须先跑 selfCheck。
 //
-// 这里跑的是迁移垫片上的旧门面名（window.__heditor），与编辑探针同一套读数。
+// 读数走公开面（window.__demo）与它的诊断面，摊平在 support/readings.ts。
 import { check } from '../support/check';
 import { test } from '../support/probe';
 
 // 在页面上点某个"帧磅坐标"（走真实的 mousedown，就是用户点画布那条路）。
 const CLICK_AT_PT = (xPt: number, yPt: number) => `
-  const cv = window.__heditor.canvas;
+  const cv = FRAME();
   const r = cv.getBoundingClientRect();
-  const z = window.__heditor.zoomLevel;
+  const z = ZOOM();
   const x = r.left + (${xPt} * z) * (r.width / cv.width);
   const y = r.top + (${yPt} * z) * (r.height / cv.height);
   const ev = new MouseEvent('mousedown', { clientX: x, clientY: y, bubbles: true, cancelable: true, button: 0 });
@@ -23,13 +23,13 @@ const CLICK_AT_PT = (xPt: number, yPt: number) => `
 
 // 每一步的取证：先画布自审，再引擎帧自审，最后取记账。
 const SNAP = `
-  const sc = await window.__heditor.selfCheck();
+  const sc = await D.selfCheck();
   // 顺序要紧：auditFrame 会把这一帧修成真值，放在 selfCheck 之后跑，
   //   否则它会顺带把上屏错误也"治好"，selfCheck 就再也抓不到上屏问题了。
-  const au = await window.__heditor.auditFrame();
-  const st = window.__heditor.editStats;
-  const ct = window.__heditor.controls;
-  const c = window.__heditor.caret;
+  const au = await D.auditFrame();
+  const st = D.editStats();
+  const ct = D.controls();
+  const c = CARET();
   return { screen: sc.screenVsEngineDiffPx, screenBox: sc.screenVsEngineDiffBox,
            frame: au.diff, frameBox: au.box,
            caretBox: [c.x, c.y, c.x + c.w, c.y + c.h],
@@ -54,13 +54,12 @@ test.describe('交互压力', () => {
     const p = await open('index.html', {
       query: { debug: '1' },
       viewport: { width: 1500, height: 1200 },
-      adapter: true,
     });
 
     // 停表：闪烁相位会让"当前帧 vs 整帧重画"的比对自带竞态 —— 增量帧里画的是上一拍的
     //   光标，整帧重画画的是这一拍的，差出来的正是那 1x27 px 的光标矩形。
     //   闪烁本身由 diag.spec 第十一节判（2.4 s 内既亮过也灭过），这里要的是内容一致。
-    await p.ev('window.__heditor.stopBlink(); await window.__heditor.loadFormSample(0); return true;');
+    await p.read('D.stopBlink(); await LOAD.form(0); return true;');
 
     // 采样的点击点（帧磅坐标）：行首 / 冒号 / 三个字段内 / 只读字段 / 行尾。
     const pts: [number, number, string][] = [
@@ -91,10 +90,10 @@ test.describe('交互压力', () => {
       !!a && a.length === 4 && a.every((v, i) => Math.abs(v - b[i]) <= 1);
 
     const audit = async (label: string): Promise<Audit> => {
-      let s = await p.ev<Audit>(SNAP);
+      let s = await p.read<Audit>(SNAP);
       if (s.frame > 0 && sameBox(s.frameBox, s.caretBox)) {
-        await p.ev('await window.__heditor.present(); return true;');
-        s = await p.ev<Audit>(SNAP);
+        await p.read('await D.present(); return true;');
+        s = await p.read<Audit>(SNAP);
       }
       steps += 1;
       if (s.screen > 0 || s.frame > 0) {
@@ -111,7 +110,7 @@ test.describe('交互压力', () => {
 
     const runCase = async (label: string, waitMs: number) => {
       for (const [x, y, name] of pts) {
-        await p.ev(CLICK_AT_PT(x, y));
+        await p.read(CLICK_AT_PT(x, y));
         if (waitMs) await p.page.waitForTimeout(waitMs);
         const s = await audit('[' + label + '] 点「' + name + '」(' + x + ',' + y + ') wait=' + waitMs + 'ms');
         if (s.screen > 0 || s.frame > 0) await p.shot('stress-' + label + '-' + steps);
@@ -130,8 +129,8 @@ test.describe('交互压力', () => {
       ['ArrowRight', 'ArrowRight'], ['ArrowRight', 'ArrowRight'], ['ArrowLeft', 'ArrowLeft'],
       ['Tab', 'Tab'], ['Tab', 'Tab'], ['a', 'a'], ['Backspace', 'Backspace'],
     ];
-    const press = (k: string) => p.ev(`
-      window.__heditor.textarea.dispatchEvent(
+    const press = (k: string) => p.read(`
+      IME().dispatchEvent(
         new KeyboardEvent('keydown', { key: ${JSON.stringify(k)}, bubbles: true, cancelable: true }));
       return true;`);
 
@@ -143,9 +142,9 @@ test.describe('交互压力', () => {
           await audit('[键盘第' + (round + 1) + '轮] 按 ' + label);
         }
         // 轮末切一次模式再切回来（模式参与占位/标记）。
-        await p.ev('await window.__heditor.setEditMode(0); return true;');
+        await p.read('await SET_MODE(0); return true;');
         await audit('[切到文档模式]');
-        await p.ev('await window.__heditor.setEditMode(1); return true;');
+        await p.read('await SET_MODE(1); return true;');
         await audit('[切回表单模式]');
       }
     });

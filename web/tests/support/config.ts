@@ -68,7 +68,10 @@ export function makeConfig(mode: TestMode): PlaywrightTestConfig<ProbeOptions> {
       baseURL: 'http://' + host + ':' + port,
       channel: 'chrome',
       headless: true,
-      // 视口与 DPR 是判据的一部分：一批断言是绝对像素账，改了它们就不是同一个基线。
+      // 视口与 DPR 钉死：判据是按这个视口写的，换视口就是换一份基线。
+      //   DPR 多钉一层是因为鼠标与拖选的坐标换算在 DPR=1 时最简 —— 实测 DPR=2 时
+      //   帧自审与"屏幕==引擎帧"仍然成立（光栅在 wasm 里，与宿主 DPR 无关），
+      //   但那一批"磅 → 屏幕像素"的换算会错位，不是判据的账。
       viewport: { width: 1500, height: 1200 },
       deviceScaleFactor: 1,
       trace: 'retain-on-failure',
