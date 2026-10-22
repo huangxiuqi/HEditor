@@ -345,7 +345,10 @@ let scrollY = 0;
 //   scrollY 算，两者混用会让连页的内容跑到滚动位置前面去（停稳再弹回来）。
 let scrollLead = 0;
 let lastAnchor = '';
-let scrollReset = false;   // 引擎自己归零过滚动位置，要通知宿主追平
+let scrollReset = false;   // 引擎自己归零过滚动位置，要通知宿主追平（随 state 送出去）
+// in-thread 宿主没有 state 通道：它直接调 takeScrollReset()。两个标记分开，
+//   因为 sendState 打包时会把上面那个清掉 —— 合成一个的话，宿主永远读到 false。
+let scrollResetHost = false;
 let bootMs = 0;
 let fontMs = 0;
 let fontBytes = 0;
@@ -692,6 +695,7 @@ function paintFull() {
   //   事件、再发一条视口消息回来 —— 与正在滚动的用户（或外部脚本）来回打架，
   //   窗口跟着反复变、画布反复建与丢。实测症状：跨页滚动后某一页始终没有画布。
   scrollReset = true;
+  scrollResetHost = true;
   const n = maxWindowPages();
   mod.setViewportAnchor(0, n);
   lastAnchor = '0:' + n;
@@ -717,6 +721,10 @@ function loadScenario(id: any, zoom: any) {
 function loadBlocks(fn: any) {
   fn();
   paintFull();
+  // 必须回一个"有改动"：装载命令换的是整份文档，而调用方（库的 edit()）按这个布尔
+  //   决定要不要走收尾 —— 回 undefined 的后果是"画面换了、收尾没跑"（滚动位置不追平、
+  //   光标事件不发），屏幕上看着正常，读数全停在上一份文档上。
+  return true;
 }
 
 /**
@@ -1452,8 +1460,8 @@ return {
    * 装载类命令把滚动位置归零了：读一次就清（宿主按它追平 scrollTop）。
    */
   takeScrollReset: () => {
-    const v = scrollReset;
-    scrollReset = false;
+    const v = scrollResetHost;
+    scrollResetHost = false;
     return v;
   },
   // 引擎句柄：只给宿主取帧视图与装载用，不要拿它绕过命令表。

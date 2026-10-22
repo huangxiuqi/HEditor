@@ -3030,9 +3030,15 @@ async function main() {
     // 真文本由门面读文件并清洗（清洗逻辑只此一份，页面下拉用的是同一条路）。
     const textInfo = await c.eval('return await window.__heditor.loadMedicalSample(1);');
     console.log(`     病历文本：${textInfo.paragraphs} 段 / ${textInfo.chars} 字`);
-    chk.check('页面下拉里有真病历这一项（场景入了 UI，不只是探针能用）',
-              await c.eval(`return [...document.querySelectorAll('#scenario option')]
-                              .some((o) => o.value === '8');`), 'id=8');
+    // 这一条查的是页面自己的下拉：旧宿主页把场景做成了 UI，库不带 UI。
+    //   在库页面上跳过它（而不是为了它给库加一个 select —— 那是把页面塞进库）。
+    if (await c.eval('return !!(window.__heditor && window.__heditor.isLib);')) {
+      chk.note('页面下拉里有真病历这一项：库页面没有场景下拉，跳过');
+    } else {
+      chk.check('页面下拉里有真病历这一项（场景入了 UI，不只是探针能用）',
+                await c.eval(`return [...document.querySelectorAll('#scenario option')]
+                                .some((o) => o.value === '8');`), 'id=8');
+    }
 
     // 四个档位：块大小与常驻上限各变一次 —— 真文本的工作集比合成文本大，
     //   所以除了"块多大"，还要看"上限给多少"。

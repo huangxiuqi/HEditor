@@ -27,6 +27,15 @@
     const e = () => window.__demo;
     const d = () => window.__demo.diag;
 
+    /**
+     * 装载类调用之后把焦点放回承接层。
+     *
+     * 旧页面里那是工具栏按钮的职责（每次装载完都 ta.focus()）；探针的"真实按键"
+     *   走 CDP，没有焦点就一个键都到不了输入层。库本身不在装载时抢焦点 ——
+     *   那是产品语义，只有诊断面提供 focus。
+     */
+    const focused = (p) => Promise.resolve(p).then((r) => { d().focus(); return r; });
+
     /** 旧门面的 caret 是扁平的（para/offset/x/y/w/h + 全文码点数）。 */
     const flatCaret = () => {
       const c = e().caret();
@@ -40,11 +49,21 @@
         w: c.rect.w,
         h: c.rect.h,
         visible: c.visible,
+        // 侧别：同一偏移上压着好几枚括号时，光标挂在哪一侧（旧门面从 editStats 读）。
+        side: st.caretSide,
         docCodepoints: st.docCodepoints,
       };
     };
 
     window.__heditor = {
+      /**
+       * 这一份门面下面挂着的是库页面而不是旧宿主页。
+       *
+       * 有几条断言查的是**页面自己的 UI**（场景下拉里有没有某一项）—— 那是旧页面的
+       *   东西，库不带 UI。探针按这个标记跳过它们，而不是把 UI 塞进库。
+       */
+      isLib: true,
+
       /* ── 状态读数 ── */
       get ready() { return true; },
       get errors() { return d().errors(); },
@@ -62,7 +81,9 @@
       get controls() { return d().controls(); },
       get fonts() { return d().env(); },
       get blitStats() { return d().blitStats(); },
-      get zoomLevel() { return e().config().zoom; },
+      // 旧门面的 zoomLevel 是**密度**（设备像素 / 磅），探针拿它把磅折成 CSS 像素。
+      //   新库的 config().zoom 是倍数（1 = 100%），换算关系与装载时写进引擎的一致。
+      get zoomLevel() { return e().config().zoom * (4 / 3) * (window.devicePixelRatio || 1); },
       undoLimit() { return e().config().undoLimit; },
       get showBrackets() { return e().config().showBrackets; },
       get showControlDots() { return e().config().showControlDots; },
@@ -73,14 +94,19 @@
         const p = d().pagePx();
         return [p.w, p.h, p.gap];
       },
-      get selection() { return e().selection(); },
+      // 旧门面的两段是**全局流位置**（数字），不是 {段号, 段内偏移} —— 探针整套
+      //   断言都在比较数字。新库对外给段内位置，raw 载荷里才有流位置。
+      get selection() {
+        const r = d().selectionRaw() || {};
+        return { anchor: r.anchor, focus: r.focus, empty: !!r.empty, rects: r.rects || [] };
+      },
       // 旧门面的窗口读数。新库没有帧，窗口就是 geometry().window，
       //   可见页范围按滚动位置与页步距算（滚动不动窗口时就靠它）。
       get viewport() {
         const g = e().geometry();
         const dpr = window.devicePixelRatio || 1;
         const step = (g.page.h + g.gap) / dpr;
-        const sc = document.querySelector('#ed .heditor-body');
+        const sc = document.querySelector('#ed #stage');
         const top = sc ? sc.scrollTop : 0;
         const h = sc ? sc.clientHeight : 0;
         return {
@@ -93,19 +119,19 @@
           },
         };
       },
-      get drag() { return null; },
-      dragSettled() { return Promise.resolve(); },
+      get drag() { return d().dragState(); },
+      dragSettled() { return d().dragSettled(); },
       quiesce() { return e().flush(); },
 
       /* ── 文档装载 ── */
-      run(id, zoom) { return d().loadScenario(id, zoom); },
-      reset(id, zoom) { return d().reset(id, zoom); },
-      loadTextDocument(text, repeat) { return e().setText(text, { repeat }); },
-      loadStressDocument(paras, chars) { return d().stress(paras, chars); },
-      loadStressDocumentDiverse(paras, chars) { return d().stressDiverse(paras, chars); },
-      loadFormSample(variant) { return d().loadFormSample(variant); },
-      loadMedicalSample(repeat) { return d().loadMedicalSample(repeat); },
-      setFormControls(list) { return d().setFormControls(list); },
+      run(id, zoom) { return focused(d().loadScenario(id, zoom)); },
+      reset(id, zoom) { return focused(d().reset(id, zoom)); },
+      loadTextDocument(text, repeat) { return focused(e().setText(text, { repeat })); },
+      loadStressDocument(paras, chars) { return focused(d().stress(paras, chars)); },
+      loadStressDocumentDiverse(paras, chars) { return focused(d().stressDiverse(paras, chars)); },
+      loadFormSample(variant) { return focused(d().loadFormSample(variant)); },
+      loadMedicalSample(repeat) { return focused(d().loadMedicalSample(repeat)); },
+      setFormControls(list) { return focused(d().setFormControls(list)); },
 
       /* ── 编辑 ── */
       // 旧 type 返回那一次的 editStats（探针要读 relaidParagraphs / suffixShifted）。
@@ -118,9 +144,12 @@
       undo() { return e().undo(); },
       redo() { return e().redo(); },
       // 旧收"移动几个码点"，新收步进：只覆盖 ±1（探针里唯一的用法就是 -1）。
-      move(dcp) {
+      async move(dcp) {
         if (dcp !== 1 && dcp !== -1) missing('move(' + dcp + ')');
-        return e().moveCaret(dcp < 0 ? 'left' : 'right');
+        const before = d().caretLive();
+        await e().moveCaret(dcp < 0 ? 'left' : 'right');
+        // 旧门面：引擎没动就返回 null（"不重绘"就是从这个 null 读出来的）。
+        return d().caretLive() === before ? null : d().editStats();
       },
       selectAll() { return e().selectAll(); },
       clearSelection() { return e().clearSelection(); },
@@ -153,18 +182,27 @@
       },
       setShowBrackets(on) { return e().configure({ showBrackets: !!on }); },
       setShowControlDots(on) { return e().configure({ showControlDots: !!on }); },
-      setUndoLimit(n) { return e().configure({ undoLimit: Number(n) }); },
-      // 旧 setter 允许只给一个字段，新 configure 是整份替换：这里补全。
-      setCaretStyle(style) {
-        const cur = e().config().caretStyle;
-        return e().configure({ caretStyle: Object.assign({}, cur, style || {}) });
+      async setUndoLimit(n) {
+        const cfg = await e().configure({ undoLimit: Number(n) });
+        return cfg.undoLimit;
       },
-      setSelectionStyle(style) {
+      // 旧 setter 允许只给一个字段，新 configure 是整份替换：这里补全。
+      //   返回值是那一拍的 editStats（探针拿它读 layoutRan / dirtyPageCount / repaintedPixels）。
+      async setCaretStyle(style) {
+        const cur = e().config().caretStyle;
+        await e().configure({ caretStyle: Object.assign({}, cur, style || {}) });
+        return d().editStats();
+      },
+      async setSelectionStyle(style) {
         const cur = e().config().selectionStyle;
-        return e().configure({ selectionStyle: Object.assign({}, cur, style || {}) });
+        await e().configure({ selectionStyle: Object.assign({}, cur, style || {}) });
+        return d().editStats();
       },
       setControlProp(i, prop, value) { return e().setControlProp(i, prop, !!value); },
-      focusControl(forward) { return e().focusControl(forward ? 'next' : 'prev'); },
+      async focusControl(forward) {
+        await e().focusControl(forward ? 'next' : 'prev');
+        return d().editStats();
+      },
       removeControl(i, keep) { return d().removeControl(i, keep); },
 
       /* ── 字体与窗口 ── */

@@ -15,7 +15,7 @@ import type {
 } from './types';
 import { createDomHost, type ChangeSource, type DomHost, type EngineLink } from './host/dom';
 import type { CanvasStore } from './host/pages';
-import { cleanMarkdownLines, then1, type Args } from './input/keymap';
+import { cleanMarkdownLines, then1, type Args, type ZoomControl } from './input/keymap';
 import { createInline, defaultFonts, type AssetPaths } from './transport/inline';
 import { createWorker } from './transport/worker';
 import { guard } from './guard';
@@ -94,7 +94,7 @@ const DEFAULT_CONFIG: EditorConfig = {
   input: true,
   showBrackets: true,
   showControlDots: false,
-  undoLimit: 0,
+  undoLimit: 100,
   caretStyle: { color: [0, 0, 0, 255], widthPt: 1 },
   selectionStyle: { color: [31, 111, 235, 64] },
 };
@@ -213,6 +213,10 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
 
   await starter();
 
+  // 引擎自己的默认值不必等于库的默认值（撤销上限在引擎里是 0 = 不限，库给 100 条
+  //   有界栈）。装载时把两者对齐一次，之后 configure 只推变化项。
+  await Promise.resolve(then1(link.write('setUndoLimit', { n: config.undoLimit }), () => undefined));
+
   // 读写
 
   const edit = (name: string, args?: Args): Promise<boolean> => {
@@ -291,9 +295,12 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       }
     },
 
-    async setText(text) {
+    async setText(text, opts) {
       alive();
-      await edit('textDoc', { text: String(text ?? '') });
+      // repeat 是契约里写着的（大文档压测要一次铺几千段），漏传的后果是"设置了没效果"：
+      //   调用方拿到 1 段，而它按 300 段算的判据全落在错的分母上。
+      const repeat = Math.max(1, Math.trunc(Number(opts?.repeat ?? 1)) || 1);
+      await edit('textDoc', { text: String(text ?? ''), repeat });
     },
 
     text() {
@@ -495,7 +502,7 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       const g = this.geometry();
       const y = target.y ?? (target.page ?? 0) * (g.page.h + g.gap);
       const scroller =
-        opts.container.querySelector<HTMLElement>('.heditor-body') ?? opts.container;
+        opts.container.querySelector<HTMLElement>('#stage') ?? opts.container;
       scroller.scrollTop = y;
       await Promise.resolve(then1(link.view(y * g.dpr), () => dom.finish()));
     },
@@ -542,6 +549,14 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
         if (JSON.stringify(next[key]) !== JSON.stringify(config[key])) {
           (changed as Record<string, unknown>)[key] = next[key];
         }
+      }
+      // mode 与 undoLimit 无代价且幂等：只要调用方提到，就真的推一次。JS 侧那份配置
+      //   是影子，而诊断面（装载样例、setControlProp 之类）会绕过它直接改引擎 ——
+      //   影子落后于引擎时，"设成文档模式"如果按差集算就是空操作，表现是
+      //   "一个字都打不进去"。这两条便宜到不必省。
+      if (patch.mode !== undefined && changed.mode === undefined) changed.mode = next.mode;
+      if (patch.undoLimit !== undefined && changed.undoLimit === undefined) {
+        changed.undoLimit = next.undoLimit;
       }
       if (Object.keys(changed).length === 0) return { ...config };
 
@@ -590,6 +605,14 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       for (const run of steps) await Promise.resolve(run());
 
       Object.assign(config, next);
+      // 样式由引擎夹取（光标宽度下限、颜色通道），读回来才是"生效值" ——
+      //   契约写的是返回夹取后的配置，在 JS 里再抄一份夹取规则就会与引擎分叉。
+      if (changed.caretStyle !== undefined) {
+        config.caretStyle = link.read('caretStyleJson') as typeof config.caretStyle;
+      }
+      if (changed.selectionStyle !== undefined) {
+        config.selectionStyle = link.read('selectionStyleJson') as typeof config.selectionStyle;
+      }
       emitter.emit('configchange', { changed, config: { ...config } });
       return { ...config };
     },
@@ -625,7 +648,7 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       if (!opts.debug) {
         throw new TypeError('diag 只在 createEditor({ debug: true }) 时可用');
       }
-      return makeDiag(link, dom, assets, pageErrors);
+      return makeDiag(link, dom, assets, pageErrors, () => syncConfigFromEngine(link, config, dom.zoom));
     },
   };
 
@@ -668,6 +691,27 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
 // 诊断面
 
 /**
+ * 把引擎那一侧的模式与缩放读回库的配置影子。
+ *
+ * 诊断面能绕过 configure 直接改引擎（装载表单样例就自带表单模式），而对外读的
+ *   config() 读的是影子。不同步的后果不是"显示错了"，是下一次 configure 按过期的
+ *   差集算成空操作 —— 表现是"设了文档模式还是一个键都打不进去"。
+ */
+function syncConfigFromEngine(link: EngineLink, cfg: EditorConfig, zoom: ZoomControl): void {
+  const code = Number(link.read('editMode'));
+  cfg.mode = code === 1 ? 'form' : code === 2 ? 'readOnly' : 'document';
+  const st = link.read('stats') as { zoom?: number } | null;
+  const density = Number(st?.zoom ?? 0);
+  if (density > 0) {
+    cfg.zoom = density / ((4 / 3) * (window.devicePixelRatio || 1));
+    // 命中把设备像素折成磅时除的就是这个密度。它只跟着 configure 走过，而诊断面
+    //   能直接改引擎的 zoom —— 不同步的症状不是"显示大小不对"，是点击落点整体偏：
+    //   除错了倍数，点同一个像素会落到右边或左边的一格上。
+    zoom.set(density);
+  }
+}
+
+/**
  * diag 是"debug 开关下的公开面"：成员不承诺稳定，所以参数与返回暂时是 unknown。
  * 这里只做转发，不加工 —— 加工会把"引擎报了什么"变成对它的猜测。
  *
@@ -680,6 +724,7 @@ function makeDiag(
   dom: DomHost,
   assets: AssetPaths,
   errors: string[],
+  syncConfig: () => void,
 ): Diag {
   const read = (name: string, args?: Args): unknown => link.read(name, args);
 
@@ -689,11 +734,19 @@ function makeDiag(
   const settleAs = async (name: string, args: Args): Promise<unknown> => {
     await Promise.resolve(link.write(name, args));
     await Promise.resolve(link.settle(name));
+    // 装载与设置类命令会直接改引擎的编辑模式与缩放（样例自带表单模式、场景带缩放），
+    //   而库那份配置是影子 —— 不同步回来的话，下一次 configure 会按过期的差集算，
+    //   于是"切成文档模式"变成空操作。
+    syncConfig();
     return read('editStats');
   };
 
   return {
     stats: () => read('stats'),
+    // 选区两端在引擎里是全局流位置，对外是 {段号, 段内偏移}；诊断要的是前者。
+    selectionRaw: () => read('selectionReport'),
+    dragState: () => (dom.drag ? dom.drag.state() : null),
+    dragSettled: () => (dom.drag ? dom.drag.settled() : Promise.resolve()),
     editStats: () => read('editStats'),
     edit: () => read('editStats'),
     auditFrame: () => read('auditFrame'),
@@ -733,8 +786,9 @@ function makeDiag(
       heapMB: Number(read('heap') ?? 0) / 1048576,
     }),
     fonts: () => read('stats'),
-    blitStats: () => ({ ms: 0, pages: 0, px: 0 }),
+    blitStats: () => dom.blitStats(),
     lastBlit: () => null,
+    focus: () => dom.focus(),
     clickAt: async (pt) => {
       const { x, y } = pt as { x: number; y: number };
       await Promise.resolve(dom.input.placeAt({ x, y }));
@@ -744,9 +798,11 @@ function makeDiag(
       dom.finish();
     },
     removeControl: async (index: number, keepContent?: boolean) => {
-      await Promise.resolve(link.write('removeControl', { i: index, keepContent: !!keepContent }));
-      dom.finish();
-      return true;
+      // 返回值必须是引擎的判定：表单模式里被 structureLock 拦下的删除是失败，
+      //   硬写 true 会让"锁住了没删掉"看起来像"删掉了"。
+      const ok = await Promise.resolve(link.write('removeControl', { i: index, keepContent: !!keepContent }));
+      if (ok) dom.finish();
+      return !!ok;
     },
 
     // 装载

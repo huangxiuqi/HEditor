@@ -178,6 +178,10 @@ export interface DomHost {
    */
   focus(): void;
   /**
+   * 上一次贴图的账（毫秒 / 页数 / 写入像素）：判据拿它证明"按脏矩形贴"。
+   */
+  blitStats(): { ms: number; pages: number; px: number };
+  /**
    * 重启闪烁（回到可见相位）。
    */
   startBlink(): void;
@@ -196,13 +200,16 @@ export interface DomHost {
  * 造编辑器需要的 DOM 骨架。
  *
  * 三段是硬要求：滚动舞台（stage）、页容器（pages）、承接层（ime）。
- *   承接层必须是一个真的可聚焦 textarea：canvas 收不到键盘，也收不到合成事件。
+ *   滚动发生在 stage 自己身上，外面那层 body 只负责撑满容器 —— 老页面的 stage 就是
+ *   滚动容器，多套一层之后"容器有多高"这件事有了两个答案（外层是视口、内层是内容），
+ *   而自动滚动、坐标换算、探针都要用到它。承接层必须是一个真的可聚焦 textarea：
+ *   canvas 收不到键盘，也收不到合成事件。
  */
 export function ensureMarkup(container: HTMLElement): void {
   if (container.querySelector('#stage')) return;
   container.innerHTML = [
-    '<div class="heditor-body" style="position:relative;height:100%;overflow:auto">',
-    '  <div id="stage" style="position:relative">',
+    '<div class="heditor-body" style="position:relative;height:100%">',
+    '  <div id="stage" style="position:relative;height:100%;overflow:auto">',
     '    <div id="pages"></div>',
     '    <textarea id="ime" rows="1" spellcheck="false"',
     '      style="position:absolute;left:0;top:0;width:1px;height:1em;opacity:0;',
@@ -226,7 +233,7 @@ export function createDomHost(o: DomHostOptions): DomHost {
   const ta = root.querySelector<HTMLTextAreaElement>('#ime')!;
 
   const link = o.link;
-  const scroller = body;
+  const scroller = stageEl;
   const zoom = createZoom({ base: 4 / 3 });
   const pages: CanvasStore = o.canvasStore ? o.canvasStore(pagesEl) : new PageCanvases(pagesEl);
   if (pages instanceof PageCanvases) {
@@ -392,8 +399,26 @@ export function createDomHost(o: DomHostOptions): DomHost {
    *     第 15 页时会把窗口拉成整篇。
    *   先对窗口再上屏 —— 反过来的话第一次上屏会把帧贴到错的页上。
    */
+  // 事件处理器里发起的异步链：没人 await 它，拒绝必须在这里收掉。典型场景是销毁那一拍
+  //   还在途的视口消息 —— 它注定被拒，而浏览器只会把它记成一条 uncaught（用户看不见，
+  //   探针的"无 console 错误"却会红）。非销毁态的失败照样报到错误面，那是用户该看见的。
+  function fireAndForget(p: Maybe<any>): void {
+    if (!p || typeof (p as Promise<any>).then !== 'function') return;
+    (p as Promise<any>).catch((e) => {
+      if (disposed) return;
+      o.onPageError?.('异步收尾失败：' + String((e as Error)?.message ?? e));
+    });
+  }
+
   function afterEdit(opName: string, source: ChangeSource): Maybe<boolean> {
     if (disposed) return false;
+    // 装载类命令会把引擎里的滚动位置归零（那是引擎自己的状态），宿主这边必须跟着追平：
+    //   不追平的话，页面停在旧的 scrollTop 上，而文档已经从头排了 —— 症状是"新文档
+    //   打开后光标在页面顶上、屏幕却停在半路"，之后所有按坐标算的判据全偏。
+    if (link.takeScrollReset()) {
+      scroller.scrollTop = 0;
+      lastScrollTop = 0;
+    }
     const st0 = link.read('editStats');
     scrollCaretIntoView(st0);
     return then1(link.settle(opName), (st) => {
@@ -613,9 +638,11 @@ export function createDomHost(o: DomHostOptions): DomHost {
       if (top === lastScrollTop) return;
       lastScrollTop = top;
       // 滚动不重排：窗口没变就什么都不做，画布摆在文档流里，浏览器已经把像素搬走了。
-      then1(link.view(top * dpr()), (r: any) => {
-        if (r && r.moved) finish();
-      });
+      fireAndForget(
+        then1(link.view(top * dpr()), (r: any) => {
+          if (r && r.moved) finish();
+        }),
+      );
     });
   }
   scroller.addEventListener('scroll', onScroll, { passive: true });
@@ -666,6 +693,7 @@ export function createDomHost(o: DomHostOptions): DomHost {
     finish,
     afterEdit,
     scrollCaretIntoView,
+    blitStats: () => ({ ms: blitMs, pages: blitPages, px: blitPx }),
     startBlink: () => resetBlink(),
     stopBlink() {
       if (blinkTimer) {

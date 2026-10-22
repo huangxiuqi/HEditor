@@ -169,6 +169,7 @@ var __heditorEngineApiExports = function(exports) {
     let scrollLead = 0;
     let lastAnchor = "";
     let scrollReset = false;
+    let scrollResetHost = false;
     let bootMs = 0;
     let fontMs = 0;
     let fontBytes = 0;
@@ -407,6 +408,7 @@ var __heditorEngineApiExports = function(exports) {
       host.invalidateSlots();
       scrollY = 0;
       scrollReset = true;
+      scrollResetHost = true;
       const n = maxWindowPages();
       mod.setViewportAnchor(0, n);
       lastAnchor = "0:" + n;
@@ -424,6 +426,7 @@ var __heditorEngineApiExports = function(exports) {
     function loadBlocks(fn) {
       fn();
       paintFull();
+      return true;
     }
     function glueBytesInWorker() {
       let n = 0;
@@ -1070,8 +1073,8 @@ var __heditorEngineApiExports = function(exports) {
        * 装载类命令把滚动位置归零了：读一次就清（宿主按它追平 scrollTop）。
        */
       takeScrollReset: () => {
-        const v = scrollReset;
-        scrollReset = false;
+        const v = scrollResetHost;
+        scrollResetHost = false;
         return v;
       },
       // 引擎句柄：只给宿主取帧视图与装载用，不要拿它绕过命令表。

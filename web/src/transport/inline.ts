@@ -81,7 +81,7 @@ export function createInline(opts: InlineOptions): {
 
   const dpr = (): number => window.devicePixelRatio || opts.dpr || 1;
   const viewSize = (): { w: number; h: number } => {
-    const el = container.querySelector<HTMLElement>('.heditor-body') ?? container;
+    const el = container.querySelector<HTMLElement>('#stage') ?? container;
     return {
       w: Math.max(1, Math.round(el.clientWidth * dpr())),
       h: Math.max(1, Math.round(el.clientHeight * dpr())),

@@ -327,6 +327,22 @@ export interface Diag {
    */
   loadMedicalSample(repeat?: number): Promise<unknown>;
   /**
+   * 把焦点放回承接层：装载之后要让真实键盘能打进文档。
+   */
+  focus(): void;
+  /**
+   * 选区的原始载荷：两端是全局流位置（对外 API 用的是段内位置），外加页面矩形。
+   */
+  selectionRaw(): unknown;
+  /**
+   * 拖选状态：在拖、动过、搬过几次焦点端、是否在自动滚动。
+   */
+  dragState(): unknown;
+  /**
+   * 在途的命中都回来才 resolve。
+   */
+  dragSettled(): Promise<void>;
+  /**
    * 整批重建控件（区间树的父子关系是全局性质，只能整棵换）。
    */
   setFormControls(list: Array<{ start: number; end: number; kind?: number; id?: string; ro?: boolean }>): Promise<unknown>;

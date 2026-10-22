@@ -680,7 +680,7 @@ demo/
 | A3 ✅ | **载荷契约**：`gen_payloads.py` + `payloads.json` + `pk::checked` 接进 16 个写出函数 | 16 份 / 176 键；`--check` 绿；改一个键 → `--check` 红（已实测）；不重生成直接跑 → 报"载荷 auditPage 的键与契约不符（第 1 个）"（已实测） |
 | B ✅ | `package.json` + vite + `web/src/`（公开层）+ `web/demo.html` | `tsc --noEmit` 0 错；`api_check.mjs` 通过；`demo_probe` 22 项全绿 |
 | C ✅ | 把 `app.js` / `worker_host.js` 的必要部分搬进 `src/`：`engine/api.ts`（命令表真源）、`input/`（键位 / 连击 / 拖选）、`host/`（DOM 骨架 / 画布 / 滚动）、`transport/`（inline + worker 壳）、`editor.ts` | `tsc --strict` 0 错；`idl_check` 绿（协议表 107 条 / wasm 导出 110 个）；`demo_probe` 22 项 × 2 传输；**新增 `input_probe` 25 项 × 2 传输，两条传输的 `TRAIL` 逐位相同**；旧页面 `edit_probe` 369 × 2、`worker_probe` 74 一字未变 |
-| D | 探针迁到 `diag`；`__heditor` 变成 `createEditor` 的返回值 | 探针条数不变；旧成员清零 |
+| D（进行中） | 探针迁到 `diag`：`edit_probe --lib` 在新库的 demo 页上跑同一份 369 条断言，中间隔一层迁移垫片（`scripts/lib_adapter.js`） | inline：**368 条全绿**；worker 传输还差一段（见下） |
 | D2 ✅ | **契约搬家**：`web/types/editor.d.ts` → `web/src/types.ts`；`web/dist/index.d.ts` 改由 `npm run build:types`（`tsc --emitDeclarationOnly`）生成 | 成员集合逐条相同（`public_members.gen.ts` 34 项 + `diag`，`--check` 绿）；`dist/index.d.ts` 只有 `createEditor` 与类型重导出，`dist/editor.d.ts` 只有函数签名 |
 | E ✅ | `web/demo.html` + `demo_probe.mjs` | demo 里 `window.__heditor === undefined`；未知成员抛；`createEditor` 已被撤掉 |
 
@@ -717,6 +717,22 @@ C 步收尾时又改了四处，都是被"它必须真的能用"逼出来的：
   主线程只剩槽画布与转移。
 - **`flush()` 有了真语义**：等所有在途 do / ask 收到回话（`EngineLink.flush`）。原先
   `await Promise.resolve()` 是空转，于是 Worker 模式下 `await flush()` 之后读到的还是上一拍的几何。
+
+D 步的 `--lib` 模式（2026-10-22）：垫片把旧门面名翻成公开面 + `diag`，**一条断言都不改**，
+先在库页面上跑，再拿旧页面当对照物。落差从 103 红一路降到 0，中间照出六个真问题：
+
+| 症状 | 根因 |
+| --- | --- |
+| 表单样例装载后一个键都打不进去 | 装载器把引擎切成表单模式，而库的 `config.mode` 影子还是 document —— `configure` 按差集算成空操作 |
+| 点一个像素，落点整体右偏一格 | `diag` 改引擎 zoom 之后，宿主的 `zoom.density` 没跟着改；命中的密度折算用了旧值 |
+| 装载之后页面停在旧的滚动位置 | `scrollReset` 只有一个标记，`sendState` 打包时就清掉了，in-thread 宿主永远读到 false |
+| `setText(text, {repeat})` 只出 1 段 | 契约里有 `repeat`，实现没传 |
+| 装载命令的收尾（滚动归零 / 光标事件）不跑 | `loadBlocks` 回 `undefined`，而 `edit()` 按返回值决定要不要收尾 |
+| `diag.removeControl` 永远回 true | 硬编码，引擎拒绝了也报成功 |
+
+剩下的缺口是 **worker 传输**（46 条），集中在三处：贴图账（`px=0`，像素在另一条线程上贴）、
+页面窗口（点第二页会把窗口拉到第 9 页）、以及若干像素取证。这三处都是"账在那边、读数在这边"，
+要按 `state` 把账推过来，而不是在本机重算。
 
 C 步抓到的两个真 bug（都不是新代码引入的，是判据缺席）：
 

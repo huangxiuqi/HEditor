@@ -236,11 +236,11 @@ await reset();
 chk.section('五、滚动与缩放');
 await reset();
 {
-  const st0 = await ev(`return document.querySelector('#ed .heditor-body').scrollTop`);
+  const st0 = await ev(`return document.querySelector('#ed #stage').scrollTop`);
   await cdp.send('Input.dispatchMouseEvent',
                  { type: 'mouseWheel', x: 400, y: 400, deltaX: 0, deltaY: 240 });
   await sleep(120);
-  const st1 = await ev(`return document.querySelector('#ed .heditor-body').scrollTop`);
+  const st1 = await ev(`return document.querySelector('#ed #stage').scrollTop`);
   chk.check('滚轮改变了滚动位置', st1 > st0, `${st0} → ${st1}`);
   const after = await snap('wheel');
   chk.check('滚动不改文档', after.text.includes('第一行 abc'), after.text.split('\n')[0]);
