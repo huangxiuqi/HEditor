@@ -42,6 +42,10 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CPP = ['src/**/*.h', 'src/**/*.hpp', 'src/**/*.cpp', 'tests/*.cpp']
 JS = ['scripts/*.mjs', 'web/*.js']
 
+# 构建产物没有手写注释，按源码规范查它只会查出别人的压缩格式。
+#   web/engine_api.js 的真源是 web/src/engine/api.ts（vite.engine.config.ts 打出来的）。
+SKIP = {'web/engine_api.js'}
+
 R4 = re.compile(
     '原来|以前|上一版|这一版|第一版|第二版|早先|曾经|当时|那天|一开始|起初|最初|'
     '(?<!自)上次|踩过|踩到|真踩|实测过|实测：|用户报的|用户看到|用户原话|用户实测|'
@@ -254,6 +258,8 @@ def main():
     files = sorted(set(files))
     all_bad = []
     for f in files:
+        if os.path.relpath(f, ROOT).replace('\\', '/') in SKIP:
+            continue
         all_bad += check_file(f, verbose, f.endswith(('.h', '.hpp', '.cpp')))
     for m in all_bad:
         print(m)

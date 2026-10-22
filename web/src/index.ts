@@ -9,4 +9,4 @@
  *   那就是"111 个成员"的 TS 版（见 docs/外部API设计.md §10.3）。
  */
 export { createEditor } from './editor';
-export type * from '../types/editor';
+export type * from './types';

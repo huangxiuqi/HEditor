@@ -65,6 +65,11 @@ export interface BenchRelayoutPaint {
   totalMs: number;
 }
 
+export interface FlowTextPos {
+  para: number;
+  offset: number;
+}
+
 export interface SelectionReport {
   anchor: Record<string, unknown>;
   focus: Record<string, unknown>;
@@ -237,6 +242,7 @@ export interface Payloads {
   selectionStyle: SelectionStyle;
   stats: Stats;
   benchRelayoutPaint: BenchRelayoutPaint;
+  flowTextPos: FlowTextPos;
   selectionReport: SelectionReport;
   hitTest: HitTest;
   controls: Controls;

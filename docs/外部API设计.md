@@ -353,9 +353,15 @@ C++ 的 16 个写出函数（wasm_main / engine_audit / engine_diag / engine_pai
 
 | 阶段 | 契约在哪 | 谁保证实现不越界 |
 | --- | --- | --- |
-| 迁移期（B–C） | `web/types/editor.d.ts`（手写）+ JSDoc `@typedef` | `tsc --noEmit`；实现对象的类型必须**推断**出来 |
-| 重写后（D） | `src/types.ts` 的 `export interface Editor` | `createEditor(): Promise<Editor>` 显式返回类型 |
-| 发布 | `dist/index.d.ts`（生成） | `src/index.ts` **只导出契约，不导出实现** |
+| 迁移期（B–C，已过） | `web/types/editor.d.ts`（手写）+ JSDoc `@typedef` | `tsc --noEmit`；实现对象的类型必须**推断**出来 |
+| 现在（D2 已落） | `web/src/types.ts` 的 `export interface Editor` | `createEditor(): Promise<Editor>` 显式返回类型 |
+| 发布 | `web/dist/index.d.ts`（`npm run build:types` 生成） | `src/index.ts` **只导出契约，不导出实现** |
+
+落地结果：`web/types/editor.d.ts` 已删除，`web/src/{editor,index,transport/inline}.ts` 的引用
+全部指向 `./types`；`gen_public_members.py` 与 `api_check.mjs` 的契约路径改成 `web/src/types.ts`。
+生成的 `web/dist/index.d.ts` 只有两行实质内容 —— `export { createEditor }` 与
+`export type * from './types'`；`web/dist/editor.d.ts` 只有 `createEditor` 的签名。
+搬前搬后公开成员集合逐条相同：`public_members.gen.ts` 仍是 34 项 + `diag`，`--check` 绿。
 
 **决定性的不是"手写还是生成"，是导出什么。** TypeScript 里 `export` 就是公开面：
 
@@ -410,6 +416,8 @@ JSDoc 写这两行，重写后换成 TS 版 —— 内容一样。
 
 **搬家那一次要有判据**：契约从 `web/types/editor.d.ts` 搬进 `src/types.ts` 时，`api_check.mjs`
 必须证明**搬前搬后的公开成员集合逐条相同**（顺序 + 名字 + 参数个数）。否则"搬家"就成了偷偷改契约。
+实测：搬家后重跑 `gen_public_members.py --check` 一次就绿（34 项 + `diag`，与搬前逐条相同），
+这条判据因此是同一次执行里给出的，不是事后补的说明。
 
 **契约会不会被顺手改？** 会。所以 `src/types.ts` 顶部写死一条"这个文件只写承诺"，再加一条快照
 判据：公开成员的有序列表 + 签名哈希，改动即红、要改必须显式更新常量 —— 与 `edit_test` 的摘要
@@ -657,13 +665,13 @@ demo/
 
 | 步 | 做什么 | 判据 |
 | --- | --- | --- |
-| A ✅ | 契约 `web/types/editor.d.ts` + 本设计 | `tsc --strict` 0 错（已过） |
+| A ✅ | 契约 + 本设计（当时在 `web/types/editor.d.ts`，D2 已搬进 `src/types.ts`） | `tsc --strict` 0 错（已过） |
 | A2 ✅ | **构建与类型**：tsc 进 CMake（§12）、`--emit-tsd`、`.gitignore`、`scripts/deps_tsc.ps1` | 构建产出 `web/types/wasm.gen.d.ts`（14231 字节 / 107 个导出）；**藏起 tsc.cmd 后 configure 退出码 1**（已实测） |
 | A3 ✅ | **载荷契约**：`gen_payloads.py` + `payloads.json` + `pk::checked` 接进 16 个写出函数 | 16 份 / 176 键；`--check` 绿；改一个键 → `--check` 红（已实测）；不重生成直接跑 → 报"载荷 auditPage 的键与契约不符（第 1 个）"（已实测） |
 | B ✅ | `package.json` + vite + `web/src/`（公开层）+ `web/demo.html` | `tsc --noEmit` 0 错；`api_check.mjs` 通过；`demo_probe` 22 项全绿 |
-| C | 把 `app.js` / `worker_host.js` 的必要部分搬进 `src/`（一次一个模块），输入层进库，`transport: 'worker'` 接通 | 每搬一个跑一遍探针；去掉 `private` 之前必须自包含；两个宿主共用一个 `Editor` 实现 |
+| C ✅ | 把 `app.js` / `worker_host.js` 的必要部分搬进 `src/`：`engine/api.ts`（命令表真源）、`input/`（键位 / 连击 / 拖选）、`host/`（DOM 骨架 / 画布 / 滚动）、`transport/`（inline + worker 壳）、`editor.ts` | `tsc --strict` 0 错；`idl_check` 绿（协议表 107 条 / wasm 导出 110 个）；`demo_probe` 22 项 × 2 传输；**新增 `input_probe` 25 项 × 2 传输，两条传输的 `TRAIL` 逐位相同**；旧页面 `edit_probe` 369 × 2、`worker_probe` 74 一字未变 |
 | D | 探针迁到 `diag`；`__heditor` 变成 `createEditor` 的返回值 | 探针条数不变；旧成员清零 |
-| D2 | **契约搬家**：`web/types/editor.d.ts` → `src/types.ts`；`dist/index.d.ts` 改由 `tsc --declaration` 生成 | `api_check.mjs` 证明搬前搬后成员集合逐条相同；`dist` 里不出现实现类的任何成员 |
+| D2 ✅ | **契约搬家**：`web/types/editor.d.ts` → `web/src/types.ts`；`web/dist/index.d.ts` 改由 `npm run build:types`（`tsc --emitDeclarationOnly`）生成 | 成员集合逐条相同（`public_members.gen.ts` 34 项 + `diag`，`--check` 绿）；`dist/index.d.ts` 只有 `createEditor` 与类型重导出，`dist/editor.d.ts` 只有函数签名 |
 | E ✅ | `web/demo.html` + `demo_probe.mjs` | demo 里 `window.__heditor === undefined`；未知成员抛；`createEditor` 已被撤掉 |
 
 A2/A3 排在最前面的理由：它们**不改任何运行行为**，却决定了后面每一步的判据能不能红。
@@ -687,6 +695,29 @@ B 落地时与设计有三处出入，都是被现实逼出来的：
 与 `editor.d.ts` 逐条比，多一个少一个都红。它拦的正是"实现偷偷多长出一个方法"——这一条现在
 没有，所以 111 个成员才长得出来。
 
+C 步收尾时又改了四处，都是被"它必须真的能用"逼出来的：
+
+- **`ChangeEvent.json` 从属性改成方法**（`json(): Promise<string>`）。属性写法有两个问题：
+  `JSON.stringify(ev)` 会顺带把 2000 段 / 55 ms 的序列化算进最糟的一拍；Worker 传输里同步读
+  根本不可能（一次往返）。同一个版本仍只序列化一次（闭包缓存）。
+- **`engine_api.js` 从源码变成产物**。真源是 `web/src/engine/api.ts`，由 `vite.engine.config.ts`
+  打成经典脚本给旧页面与经典 Worker 的 `importScripts` 用。`idl_check` 因此改成"IDL 读产物、
+  表格与 `mod.X` 扫源码"，另加一条"产物比源码旧就报红"。
+- **`transport` 两条都通了**，默认仍是 `'inline'`。Worker 壳在 `web/dist/heditor_worker.js`，
+  主线程只剩槽画布与转移。
+- **`flush()` 有了真语义**：等所有在途 do / ask 收到回话（`EngineLink.flush`）。原先
+  `await Promise.resolve()` 是空转，于是 Worker 模式下 `await flush()` 之后读到的还是上一拍的几何。
+
+C 步抓到的两个真 bug（都不是新代码引入的，是判据缺席）：
+
+| 症状 | 根因 | 判据 |
+| --- | --- | --- |
+| 单击落得准、拖选掉到下一行 | 输入层自己除密度、拖选没除（1.33 倍） | `input_probe` 拖选那节 |
+| Worker 模式单击不落光标、拖选永远空 | `read()` 的 default 把必经命令 `hit` 吞成 `null` | 同上，且只在 `transport: 'worker'` 上红 |
+
+两条都是 **API 面全绿**时存在的：`e.type()` 走命令层，碰不到输入层。这也是 `input_probe`
+存在的理由 —— 它发的是真实键盘 / 鼠标 / 合成事件，不调 API。
+
 ---
 
 ## 15. 功能缺口（不是接口问题，是实现没有）
@@ -699,6 +730,7 @@ B 落地时与设计有三处出入，都是被现实逼出来的：
 | **查找 / 替换** | 没有 | 长文档 |
 | **运行期改页度量** | `setPageMetrics` 只在装载路径 | 套打、信纸 |
 | **多实例共享字体字节** | 每个实例各读 16.9 MB | 多实例页 |
+| **双击选词** | `clickCountOf` 只判三击（选整格），seq=2 照常落光标。旧宿主也没有 | 常规文字编辑 |
 
 前三条挡的是"这算不算编辑器"这个判断本身：**不能复制粘贴、不能插图、不能加粗，就不算编辑器。**
 它们都是引擎侧的工作，与 API 层并行，别指望 API 层绕过。

@@ -1,4 +1,4 @@
-// 由 scripts/gen_public_members.py 从 web/types/editor.d.ts 生成，勿手改。
+// 由 scripts/gen_public_members.py 从 web/src/types.ts 生成，勿手改。
 //
 // 用途：guard.ts 的白名单（未知成员一律抛），以及 api_check.mjs 的成员对拍。
 

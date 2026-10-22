@@ -1,4 +1,4 @@
-"""从契约 `web/types/editor.d.ts` 生成公开成员名单，给运行期的白名单闸用。
+"""从契约 `web/src/types.ts` 生成公开成员名单，给运行期的白名单闸用。
 
 为什么要生成：`web/src/guard.ts` 那个 Proxy 要一份"哪些键是公开的"清单。手抄一份就等于
 第二份真相 —— 契约加了个方法、白名单忘了加，症状是"文档里写了、调用时抛不是公开 API"，
@@ -16,7 +16,7 @@ import re
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SRC = 'web/types/editor.d.ts'
+SRC = 'web/src/types.ts'
 OUT = 'web/src/public_members.gen.ts'
 
 # diag 由 debug 开关控制，不在默认白名单里 —— 它单独一个常量，guard 按模式加。
@@ -40,7 +40,7 @@ def members():
 def render(names):
     pub = [n for n in names if n not in CONDITIONAL]
     out = [
-        '// 由 scripts/gen_public_members.py 从 web/types/editor.d.ts 生成，勿手改。',
+        '// 由 scripts/gen_public_members.py 从 web/src/types.ts 生成，勿手改。',
         '//',
         '// 用途：guard.ts 的白名单（未知成员一律抛），以及 api_check.mjs 的成员对拍。',
         '',

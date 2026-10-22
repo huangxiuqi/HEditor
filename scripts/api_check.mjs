@@ -4,7 +4,7 @@
 //
 // 四条规则：
 //   一、demo 里不许出现内部标识符（内部工厂、命令表、wasm 堆、胶水）。
-//   二、editor.X 的 X 必须在 web/types/editor.d.ts 的 Editor 接口里。
+//   二、editor.X 的 X 必须在 web/src/types.ts 的 Editor 接口里。
 //   三、HEditor.X 的 X 必须是库真正导出的（只有 createEditor）。
 //   四、demo 里不许自己接键盘/指针/合成事件 —— 输入层在库里。
 //
@@ -14,7 +14,7 @@ import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-const CONTRACT = 'web/types/editor.d.ts';
+const CONTRACT = 'web/src/types.ts';
 const MEMBERS_LIST = 'web/src/public_members.gen.ts';
 const DEMO_FILES = ['web/demo.html', 'web/demo.js'];
 
@@ -147,6 +147,20 @@ if (existsSync(join(ROOT, MEMBERS_LIST))) {
   for (const n of listed) if (!want.has(n)) note(MEMBERS_LIST, `多了 ${n}（契约里没有）`);
 } else {
   note(MEMBERS_LIST, '文件不存在 —— 先跑 python scripts/gen_public_members.py');
+}
+
+// 三、发布声明只暴露契约。
+//   写给使用者的那份 .d.ts 由 tsc 生成，判据是"生成结果里只有入口与类型"——
+//   实现类的成员一旦漏进来，TS 会把它们当成公开面（与 JS 侧 111 个成员同一种病）。
+const DTS = 'web/dist/index.d.ts';
+if (!existsSync(join(ROOT, DTS))) {
+  note(DTS, '不存在 —— 先跑 npm run build:types');
+} else {
+  const dts = read(DTS);
+  if (!/export \{ createEditor \}/.test(dts)) note(DTS, '入口不再是 createEditor');
+  if (!/export type \* from '\.\/types'/.test(dts)) note(DTS, '不再重导出契约类型');
+  // 声明文件里出现 class 说明有个实现被导出了（对象字面量实现不会产出 class）。
+  if (/\bclass\b/.test(code(dts))) note(DTS, '声明里出现了 class —— 实现被导出了');
 }
 
 if (problems.length) {

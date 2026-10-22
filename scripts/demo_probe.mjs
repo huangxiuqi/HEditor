@@ -30,7 +30,10 @@ const opt = (name, def) => {
   return i >= 0 && argv[i + 1] ? argv[i + 1] : def;
 };
 const PORT = Number(opt('port', '9222'));
-const URL_ = opt('url', 'http://127.0.0.1:8781/web/demo.html');
+const TRANSPORT = opt('transport', 'inline');
+const URL_BASE = opt('url', 'http://127.0.0.1:8781/web/demo.html');
+// 传输由查询参数选（demo.js 认 ?transport=worker）。带在最后，别覆盖页面自己的查询串。
+const URL_ = URL_BASE + (URL_BASE.includes('?') ? '&' : '?') + 'transport=' + TRANSPORT;
 
 const list = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json();
 const page = list.find((t) => t.type === 'page');
@@ -56,17 +59,19 @@ chk.section('一、内部全局都没了');
   const r = await ev(`
     const out = {};
     out.heditor = typeof window.__heditor;
+    out.createEditor = typeof window.createEditor;
     out.createWorkerEditor = typeof window.createWorkerEditor;
     out.wasmFactory = typeof window.CreateHEditor;
     // 注意：不能写 typeof window.createEditor —— typeof 也会求值，getter 会当场抛。
+    // typeof 也会求值：这里能安全写，是因为内部工厂已经不在了（C 步撤掉了脚本注入）。
     out.readThrows = false;
     try { window.createEditor; } catch (e) { out.readThrows = e instanceof TypeError; }
     return out;`);
   chk.check('window.__heditor 不存在', r.heditor === 'undefined', r.heditor);
-  chk.check('window.createWorkerEditor 已被撤掉', r.createWorkerEditor === 'undefined', r.createWorkerEditor);
-  chk.check('读 window.createEditor 抛 TypeError（不是 undefined）', r.readThrows === true,
-            String(r.readThrows));
-  chk.note(`wasm 工厂全局：${r.wasmFactory}（迁移期还在，C 步之后消失）`);
+  chk.check('window.createWorkerEditor 不存在', r.createWorkerEditor === 'undefined', r.createWorkerEditor);
+  chk.check('window.createEditor 不存在（内部工厂不再挂全局）',
+            r.createEditor === 'undefined' || r.readThrows === true,
+            r.readThrows ? '读它就抛（旧宿主的 getter）' : 'undefined');
 }
 
 chk.section('二、实例上只有契约成员');
@@ -110,14 +115,15 @@ chk.section('四、change 事件');
   const r = await ev(`
     const e = window.__demo;
     const seen = [];
-    const off = e.on('change', (c) => seen.push({ source: c.source, version: c.version,
-                                                  textLen: c.text.length, json: c.json.length }));
+    const off = e.on('change', async (c) => seen.push({ source: c.source, version: c.version,
+                                                        textLen: c.text.length,
+                                                        json: (await c.json()).length }));
     await e.type('X');
     off();
     await e.type('Y');
     return { seen };`);
   chk.check('on(change) 收到了一次', r.seen.length === 1, JSON.stringify(r.seen));
-  chk.check('载荷里带 json（惰性读也拿得到）', r.seen[0].json > 100, String(r.seen[0].json));
+  chk.check('载荷里带 json（调方法才序列化）', r.seen[0].json > 100, String(r.seen[0].json));
   chk.check('version 是递增的数', Number.isFinite(r.seen[0].version), String(r.seen[0].version));
 }
 

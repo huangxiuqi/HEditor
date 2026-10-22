@@ -210,6 +210,21 @@
         }
       ]
     },
+    "flowTextPos": {
+      "cxx": "flowTextPosJson",
+      "file": "src/wasm/wasm_main.cpp",
+      "partial": true,
+      "keys": [
+        {
+          "name": "para",
+          "kind": "num"
+        },
+        {
+          "name": "offset",
+          "kind": "num"
+        }
+      ]
+    },
     "selectionReport": {
       "cxx": "selectionReport",
       "file": "src/wasm/wasm_main.cpp",

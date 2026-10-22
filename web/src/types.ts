@@ -1,7 +1,8 @@
 /**
- * HEditor 外部 API 契约（手写，v2）。
+ * HEditor 外部 API 契约（真源）。
  *
- * 这份文件是"给使用者看的形状"，不是实现的副产物：实现可以搬、可以重写，契约要稳。
+ * 实现就在同目录的 editor.ts 里，与这份契约共用同一套类型 —— 不再有一份手写的
+ *   `.d.ts` 与实现并行维护：`web/dist/index.d.ts` 由 `tsc --declaration` 从这份文件生成。
  * 设计说明见 docs/外部API设计.md。
  *
  * 四条约定：
@@ -162,12 +163,13 @@ export interface ChangeEvent {
   /** 整篇纯文本（段间 \n）。引擎里本来就坐着，几乎零成本。 */
   text: string;
   /**
-   * 带格式的整篇 JSON。**惰性 getter**：读它才序列化，同一版本只算一次。
+   * 带格式的整篇 JSON。**方法**而不是属性：调它才序列化，同一版本只算一次。
    *
-   * 2000 段文档序列化一次约 55 ms —— 每次 change 都读会直接卡住键盘。
-   * 大文档请只标脏，debounce 之后调 `await editor.save()`。
+   * 2000 段文档序列化一次约 55 ms（Worker 传输还多一次往返）—— 每次 change 都读会
+   *   直接卡住键盘。写成方法是为了让"读它"显式：属性会被 JSON.stringify(ev) 顺带算出来，
+   *   而那正好是最糟的一拍。大文档请只标脏，debounce 之后调 `await editor.save()`。
    */
-  readonly json: string;
+  json(): Promise<string>;
 }
 
 /** 事件表。on() 的键集就是这六个。 */

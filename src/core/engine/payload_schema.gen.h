@@ -98,6 +98,14 @@ inline constexpr KeySpec kKeys[] = {
 inline constexpr PayloadSpec kSpec{"benchRelayoutPaint", kKeys, static_cast<int>(std::size(kKeys)), false};
 }  // namespace bench_relayout_paint
 
+namespace flow_text_pos {
+inline constexpr KeySpec kKeys[] = {
+    {"para", "num", false},
+    {"offset", "num", false},
+};
+inline constexpr PayloadSpec kSpec{"flowTextPos", kKeys, static_cast<int>(std::size(kKeys)), true};
+}  // namespace flow_text_pos
+
 namespace selection_report {
 inline constexpr KeySpec kKeys[] = {
     {"anchor", "obj", false},

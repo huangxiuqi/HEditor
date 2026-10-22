@@ -690,6 +690,33 @@ bool cellSelectAt(float x_pt, float y_pt) {
     g_engine.repaint();
     return true;
 }
+/**
+ * 段内位置 -> 全局流位置（码点）。
+ *
+ * 选区两端（setSelection）收的是全局流位置，而外部 API 收的是 { 段号, 段内偏移 }：
+ *   两者之间的换算只在引擎里做 —— 段间分隔符算不算一个位置、表格格里怎么数，
+ *   这些口径不该由宿主猜（猜错了只在跨段选区上显形）。
+ */
+int flowIndexAt(int para, int offset) {
+    if (offset < 0) offset = 0;
+    return static_cast<int>(g_engine.flowPosAt(para, static_cast<size_t>(offset)));
+}
+
+/**
+ * 全局流位置 -> { 段号, 段内偏移 }。
+ *
+ * 与 flowIndexAt 是同一件事的两个方向。选区两端在引擎里是流位置（setSelection 收的
+ *   就是它），而外部 API 收的是段内位置 —— 这个换算只能由引擎做：段间分隔符算不算
+ *   一个位置、表格格里怎么数，宿主猜不出来。
+ */
+std::string flowTextPosJson(int flow) {
+    TextPos p{};
+    if (!g_engine.flowToTextPos(static_cast<FlowPos>(flow), &p)) return "null";
+    std::ostringstream o;
+    o << "{\"para\":" << p.para << ",\"offset\":" << p.offset << "}";
+    return pk::checked(pk::flow_text_pos::kSpec, o.str());
+}
+
 bool setSelection(int anchor, int focus) {
     return g_engine.setSelectionAndRender(
         Range{static_cast<FlowPos>(anchor), static_cast<FlowPos>(focus)});
@@ -1196,7 +1223,23 @@ void loadStressDocumentDiverse(int paras, int chars) { loadStressDocumentImpl(pa
  * 量出来的缓存账会偏。文本由宿主读进来并清洗掉 markdown 记号后传进来。
  */
 void loadTextDocument(const std::string& text, int repeat) {
-    if (text.empty()) return;
+    // 空串 = 新建一份"只有一个空段落"的文档。
+    //   这条必须有：空串若什么都不做，"清空文档"在引擎里就没有入口 ——
+    //   setText('') 只能静默保留旧内容，而那是没法向使用者解释的一种语义。
+    if (text.empty()) {
+        g_blocks.assign(1, BlockSpec{});
+        BlockSpec& only = g_blocks.front();
+        only.font_index = g_cjk_font;
+        only.size_pt = 12.0f;
+        only.wm = WritingMode::HorizontalTB();
+        only.line_factor = 1.5f;
+        only.language = "zh";
+        only.color = Color::rgb(24, 24, 24);
+        only.setText(std::string());
+        g_fields.clear();
+        rebuildDocument(false);
+        return;
+    }
     if (repeat < 1) repeat = 1;
 
     std::vector<std::string> paras;
@@ -1411,6 +1454,23 @@ std::string documentText(int para) {
 }
 
 /**
+ * 整篇文本（段间 \n）。
+ *
+ * 与 documentText 分开，不是图省事：宿主每敲一个字都要一份全文（change 事件要带它），
+ *   而"逐段取再拼"要 N 次跨界调用 —— 2000 段时那一圈是毫秒级的，还是每拍。
+ *   这一条在引擎里拼完只回一个字符串。
+ */
+std::string documentTextAll() {
+    const auto& blocks = g_engine.blocks();
+    std::string out;
+    for (size_t i = 0; i < blocks.size(); ++i) {
+        if (i) out.push_back('\n');
+        out += blocks[i].textUtf8();
+    }
+    return out;
+}
+
+/**
  * 当前帧到底是哪一套光栅器画出来的。
  * 为什么值得专门暴露一个入口：这两个后端的输出在"帧尺寸、重画页数、写入像素数、
  * 甚至两遍渲染逐字节相等"这些指标上完全一样 —— 就是因为面板上写死了
@@ -1468,6 +1528,8 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("selectCellAtPara", &selectCellAtPara);
     emscripten::function("cellSelectAt", &cellSelectAt);
     emscripten::function("setSelection", &setSelection);
+    emscripten::function("flowIndexAt", &flowIndexAt);
+    emscripten::function("flowTextPosJson", &flowTextPosJson);
     emscripten::function("clearSelection", &clearSelection);
     emscripten::function("selectionReport", &selectionReport);
     emscripten::function("setCaret", &setCaret);
@@ -1485,6 +1547,7 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("editStatsJson", &editStatsJson);
     emscripten::function("caretReport", &caretReport);
     emscripten::function("documentText", &documentText);
+    emscripten::function("documentTextAll", &documentTextAll);
     emscripten::function("undoEdit", &undoEdit);
     emscripten::function("redoEdit", &redoEdit);
 

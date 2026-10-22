@@ -11,123 +11,48 @@ import type {
   Geometry,
   Pos,
   Selection,
-  SelectionStyle,
   SetCaretOptions,
-} from '../types/editor';
-import type { EngineApi, LegacyHost } from './globals';
+} from './types';
+import { createDomHost, type ChangeSource, type DomHost, type EngineLink } from './host/dom';
+import type { CanvasStore } from './host/pages';
+import { then1, type Args } from './input/keymap';
+import { createInline, defaultFonts, type AssetPaths } from './transport/inline';
+import { createWorker } from './transport/worker';
 import { guard } from './guard';
 
-/* ────────────────────────── 迁移期的脚本装载 ────────────────────────── */
+/* ────────────────────────── 素材地址 ────────────────────────── */
 
 /**
- * 旧宿主的脚本。顺序是硬要求：host_core 与 engine_api 都必须在 app.js 之前，
- *   前者是输入层（app.js 一加载就取它的工厂），后者是命令表。
+ * 库自己的地址。打包成 IIFE 时靠 `document.currentScript` 推；ESM 下退回落 document.baseURI。
+ *
+ * 都在"页面所在地"与"库所在地"之间二选一，而不是猜仓库结构：使用者的目录布局与这里
+ *   无关，所以 `assets` 里的每一项都能单独覆盖。
  */
-const LEGACY_SCRIPTS = [
-  'host_error.js',
-  'drag_select.js',
-  'wasm_feature.js',
-  'host_core.js',
-  'engine_api.js',
-  'app.js',
-];
-
-/** 本模块自己的地址 —— 打包成 IIFE 时靠它推出旧脚本目录。 */
 const SELF_SRC: string =
   (document.currentScript instanceof HTMLScriptElement && document.currentScript.src) || '';
 
-let loadOnce: Promise<{ create: (c: HTMLElement, o?: { chrome?: boolean }) => LegacyHost }> | null =
-  null;
-
-function baseUrl(opts: EditorOptions): string {
-  if (opts.assets?.base) return opts.assets.base;
-  if (SELF_SRC) return new URL('../', SELF_SRC).href;
-  return new URL('./', location.href).href;
-}
-
-function injectScript(src: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const el = document.createElement('script');
-    el.src = src;
-    el.onload = () => resolve();
-    el.onerror = () => reject(new Error(`加载脚本失败：${src}`));
-    document.head.appendChild(el);
-  });
+function selfDir(): string {
+  if (SELF_SRC) return new URL('.', SELF_SRC).href;
+  return new URL('.', document.baseURI).href;
 }
 
 /**
- * 装载旧宿主。只装一次（模块级 promise）。
+ * 素材地址。
  *
- * 为什么要关 `__heditorAutoBoot`：那些脚本见到页面上有 `#stage` 就会自己造一个实例并挂到
- *   `window.__heditor` 上。那样一来同一个容器上会有两个实例，而且外部拿到了内部门面 ——
- *   §11 的闸 1 正是要断掉这条路。所以先关自动启动，由库自己调工厂。
+ * 默认布局是"库产物在 web/dist/、页面在 web/、wasm 在 build/wasm/web/"。这不是约定，
+ *   只是本仓库开发时的摆法 —— 产品里三项都该显式给（`assets.glue` / `assets.wasm` / `assets.base`）。
  */
-function loadLegacy(
-  opts: EditorOptions,
-): Promise<{ create: (c: HTMLElement, o?: { chrome?: boolean }) => LegacyHost }> {
-  if (loadOnce) return loadOnce;
-  loadOnce = (async () => {
-    window.__heditorAutoBoot = false;
-    const base = baseUrl(opts);
-    for (const name of LEGACY_SCRIPTS) {
-      await injectScript(new URL(name, base).href);
-    }
-    const create = window.createEditor;
-    if (!create) {
-      throw new Error('旧宿主没有导出 createEditor —— 脚本装上了但没跑起来？');
-    }
-    // 闸 1：把内部工厂从 window 上撤掉。库自己攥着引用，外部拿不到 ——
-    //   留着的话 demo 页只要写 `window.createEditor(...)` 就能再造一个「内部门面」。
-    delete window.createEditor;
-    delete window.createWorkerEditor;
-    Object.defineProperty(window, 'createEditor', {
-      configurable: false,
-      get() {
-        throw new TypeError('createEditor 是内部工厂，已经收起来了；用 HEditor.createEditor');
-      },
-    });
-    return { create };
-  })();
-  return loadOnce;
+function resolveAssets(opts: EditorOptions): AssetPaths {
+  const a = opts.assets ?? {};
+  // 默认布局：库在 `web/dist/`，素材在仓库根下（`assets/`、`build/wasm/web/`）。
+  //   所以默认 base 是"库目录往上两级"。这不是约定，只是本仓库开发时的摆法 ——
+  //   产品里三项都该显式给。
+  const base = a.base ? new URL(a.base, document.baseURI).href : new URL('../../', selfDir()).href;
+  const glue = a.glue ? new URL(a.glue, document.baseURI).href : new URL('build/wasm/web/heditor.js', base).href;
+  // Worker 壳与库产物同一目录（`web/dist/heditor_worker.js`）。
+  const worker = new URL('heditor_worker.js', selfDir()).href;
+  return { glue, base, worker, bust: '', fonts: defaultFonts(base, opts.fonts) };
 }
-
-/* ────────────────────────── 标记 ────────────────────────── */
-
-/**
- * 造编辑器需要的 DOM 骨架。
- *
- * 迁移期这份标记还必须与旧宿主对齐（它按 id 找元素）。等 C 步把它们搬进 src/ 之后，
- *   标记由库自己拥有，这段与 app.js 的耦合才会断。
- */
-function ensureMarkup(container: HTMLElement): void {
-  if (container.querySelector('#stage')) return;
-  container.innerHTML = [
-    '<div class="heditor-body" style="position:relative;height:100%;overflow:auto">',
-    '  <div id="stage" style="position:relative">',
-    '    <div id="pages"></div>',
-    '    <textarea id="ime" rows="1" spellcheck="false"',
-    '      style="position:absolute;left:0;top:0;width:1px;height:1em;opacity:0;',
-    '             border:0;padding:0;resize:none;overflow:hidden"></textarea>',
-    '  </div>',
-    '</div>',
-  ].join('\n');
-}
-
-/* ────────────────────────── 段落与形状 ────────────────────────── */
-
-type ControlsPayload = {
-  items?: Array<{ kind?: string; label?: string; ro?: boolean; i?: number }>;
-  caret?: number;
-};
-
-type SelectionPayload = {
-  anchor?: Pos;
-  focus?: Pos;
-  empty?: boolean;
-  rects?: Array<{ page?: number; x?: number; y?: number; w?: number; h?: number }>;
-};
-
-type EditStatsPayload = { totalPages?: number; caretPara?: number };
 
 /* ────────────────────────── 事件 ────────────────────────── */
 
@@ -151,7 +76,7 @@ class Emitter {
   }
 }
 
-/* ────────────────────────── 工厂 ────────────────────────── */
+/* ────────────────────────── 默认配置 ────────────────────────── */
 
 const DEFAULT_CONFIG: EditorConfig = {
   zoom: 1,
@@ -165,65 +90,152 @@ const DEFAULT_CONFIG: EditorConfig = {
   selectionStyle: { color: [31, 111, 235, 64] },
 };
 
+/** 页间隙（磅）：分页档用它，连页档是 0。 */
+const kPageGapPt = 14;
+
+/* ────────────────────────── 工厂 ────────────────────────── */
+
 /**
- * 造一个编辑器。返回时已就绪（排版跑完、首帧画完）。
+ * 造一个编辑器。返回时已就绪（排版跑完、首帧画完、输入层已接上）。
  *
- * 这一版只接了 `transport: 'inline'`（主线程）。Worker 那条要等 C 步把输入层搬进库 ——
- *   现在强行接只会得到"消息表在两边各写一份"的老问题。
+ * 两个传输共用这一份实现：差别只有"结果何时到"（同步值 / Promise）与"片元在哪贴"
+ *   （这里 / Worker），两者都收在 EngineLink 里。
  */
 export async function createEditor(opts: EditorOptions): Promise<Editor> {
   if (!opts || !(opts.container instanceof HTMLElement)) {
     throw new TypeError('createEditor({ container }) 需要一个 HTMLElement');
   }
+  if (opts.container.childElementCount > 0 && !opts.container.querySelector('#stage')) {
+    // 不清空别人的内容：只提示。要复用一块已有标记的容器就让它带着 #stage 进来。
+    throw new TypeError('container 里已经有内容了：请传一个空元素（或带 #stage 的那一份）');
+  }
   const transport = opts.transport ?? 'inline';
-  if (transport !== 'inline') {
-    throw new Error("transport: 'worker' 还没接入（见 docs/外部API设计.md §14 的 C 步）");
+  if (transport !== 'inline' && transport !== 'worker') {
+    throw new TypeError("transport 只能是 'inline' 或 'worker'");
   }
 
-  const legacy = await loadLegacy(opts);
-  ensureMarkup(opts.container);
-  const host = legacy.create(opts.container, { chrome: !!opts.chrome });
-  if (!host) throw new Error('旧宿主返回了空实例');
-  await host.whenReady;
-
-  const api = host.__api;
-  if (!api) {
-    const errs = (host.errors ?? []).join(' | ');
-    throw new Error(
-      `旧宿主没有暴露命令表（就绪=${host.ready}）${errs ? '：' + errs : '；也没有页面错误'}`,
-    );
-  }
-
+  const assets = resolveAssets(opts);
   const emitter = new Emitter();
   const config: EditorConfig = { ...DEFAULT_CONFIG, ...(opts.config ?? {}) };
   let version = 0;
   let disposed = false;
+  let lastStats: any = null;
 
   const alive = (): void => {
     if (disposed) throw new Error('编辑器已销毁');
   };
 
-  /** 改完一次之后统一收尾：版本号 +1，发一次 change。 */
-  const afterWrite = (changed: boolean, source: 'user' | 'api'): boolean => {
-    if (!changed) return false;
-    ++version;
-    emitter.emit('change', makeChange(host, source, version));
-    return true;
+  let link: EngineLink;
+  let dom: DomHost;
+  let starter: () => Promise<void>;
+  let destroyer: () => void;
+
+  if (transport === 'inline') {
+    const t = createInline({
+      container: opts.container,
+      assets,
+      dpr: window.devicePixelRatio || 1,
+      zoom: config.zoom * (4 / 3) * (window.devicePixelRatio || 1),
+      empty: true,
+    });
+    link = t.link;
+    dom = createDomHost(hostOptions(link));
+    starter = () => t.start(dom);
+    destroyer = () => t.destroy();
+  } else {
+    const t = createWorker({
+      container: opts.container,
+      assets,
+      dpr: window.devicePixelRatio || 1,
+      zoom: config.zoom * (4 / 3) * (window.devicePixelRatio || 1),
+      empty: true,
+      makeHost: (l, store) => createDomHost(hostOptions(l, store)),
+    });
+    link = t.link;
+    dom = t.host;
+    starter = () => t.start();
+    destroyer = () => t.destroy();
+  }
+
+  /** 宿主用的选项。link 显式传进来 —— 它由传输造，宿主的回调不能靠闭包去猜。 */
+  function hostOptions(
+    l: EngineLink,
+    store?: (pagesEl: HTMLElement) => CanvasStore,
+  ): Parameters<typeof createDomHost>[0] {
+    return {
+      container: opts.container,
+      link: l,
+      input: config.input !== false,
+      canvasStore: store,
+      readOnly: () => config.readOnly,
+      status: (text, isErr) => {
+        if (isErr) emitter.emit('error', { message: text, fatal: false });
+      },
+      onEdit: (changed: boolean, source: ChangeSource) => {
+        if (!changed || disposed) return;
+        ++version;
+        emitter.emit('change', makeChange(source, version));
+      },
+      onCaret: () => {
+        if (!disposed) emitter.emit('caret', caretOf(l));
+      },
+      onSelection: () => {
+        if (!disposed) emitter.emit('selection', selectionOf(l));
+      },
+      onRender: (pages: number, ms: number) => {
+        if (!disposed) emitter.emit('render', { pages, ms });
+      },
+      onPageError: (message: string) => {
+        if (!disposed) emitter.emit('error', { message, fatal: false });
+      },
+    };
+  }
+
+  await starter();
+
+  /* ────────────── 读写 ────────────── */
+
+  const edit = (name: string, args?: Args): Promise<boolean> => {
+    alive();
+    if (config.readOnly) return Promise.resolve(false);
+    return Promise.resolve(then1(link.write(name, args), (changed) => {
+      if (!changed) return false;
+      return then1(dom.afterEdit(name, 'api'), () => true);
+    }) as boolean | Promise<boolean>);
   };
 
-  const write = (name: string, args?: Record<string, unknown>): boolean => {
-    alive();
-    return api.write(name, args);
-  };
+  function caretOf(l: EngineLink): Caret {
+    const st = l.read('editStats') ?? {};
+    return {
+      pos: { para: st.caretPara ?? 0, offset: st.caretOffset ?? 0 },
+      page: st.caretPage ?? 0,
+      rect: { x: st.caretX ?? 0, y: st.caretY ?? 0, w: st.caretW ?? 0, h: st.caretH ?? 0 },
+      visible: !!st.caretVisible,
+    };
+  }
 
-  /**
-   * 编辑类入口的统一闸。只读时返回 false，**不代表出错** —— 与"这次编辑被引擎拒绝"
-   *   是同一种语义（见设计文档 §9 的错误三分）。
-   */
-  const canEdit = (): boolean => {
-    alive();
-    return !config.readOnly;
-  };
+  function selectionOf(l: EngineLink): Selection {
+    const raw = (l.read('selectionReport') ?? {}) as {
+      anchor?: number;
+      focus?: number;
+      empty?: boolean;
+      rects?: Array<{ page?: number; x?: number; y?: number; w?: number; h?: number }>;
+    };
+    const dpr = window.devicePixelRatio || 1;
+    const rects = (raw.rects ?? []).map((r) => ({
+      page: r.page ?? 0,
+      x: (r.x ?? 0) / dpr,
+      y: (r.y ?? 0) / dpr,
+      w: (r.w ?? 0) / dpr,
+      h: (r.h ?? 0) / dpr,
+    }));
+    const at = (flow: number | undefined): Pos => {
+      if (flow === undefined) return { para: 0, offset: 0 };
+      const p = l.read('flowTextPos', { flow }) as Pos | null;
+      return p && typeof p.para === 'number' ? p : { para: 0, offset: 0 };
+    };
+    return { anchor: at(raw.anchor), focus: at(raw.focus), empty: !!raw.empty, rects, cells: null };
+  }
 
   const editor: Editor = {
     /* ── 内容 ── */
@@ -233,216 +245,188 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       const text = String(data ?? '');
       const looksJson = text.trimStart().startsWith('{');
       if (o?.format === 'json' || (o?.format !== 'text' && looksJson)) {
-        host.loadDocument(text); // 失败会抛，引擎状态不变
+        await edit('loadDocument', { text });
       } else {
-        host.loadTextDocument(text);
+        await edit('textDoc', { text });
       }
-      ++version;
-      emitter.emit('change', makeChange(host, 'api', version));
     },
 
-    async setText(text, o) {
+    async setText(text) {
       alive();
-      host.loadTextDocument(String(text ?? ''), o?.repeat ?? 1);
-      ++version;
-      emitter.emit('change', makeChange(host, 'api', version));
+      await edit('textDoc', { text: String(text ?? '') });
     },
 
     text() {
       alive();
-      return host.allText;
+      return String(link.read('textAll') ?? '');
     },
 
     paragraph(i) {
       alive();
-      return host.paragraphText(i);
+      return String(link.read('text', { i }) ?? '');
     },
 
     paragraphs() {
       alive();
-      return host.allText.split('\n');
+      return String(link.read('textAll') ?? '').split('\n');
     },
 
     async save() {
       alive();
-      return host.saveDocument();
+      return String((await Promise.resolve(link.serialize())) ?? '');
     },
 
     async insertText(pos, text) {
-      if (!canEdit()) return false;
-      return afterWrite(
-        write('insertText', { para: pos.para, offset: pos.offset, s: String(text) }),
-        'api',
-      );
+      return edit('insertText', { para: pos.para, offset: pos.offset, s: String(text) });
     },
 
     /* ── 编辑 ── */
 
     async type(text) {
-      if (!canEdit()) return false;
-      return afterWrite(!!host.type(String(text)), 'api');
+      return edit('type', { s: String(text) });
     },
 
     async deleteBackward(n = 1) {
-      if (!canEdit()) return false;
       let changed = false;
       for (let i = 0; i < Math.max(1, n); ++i) {
-        if (!host.backspace()) break;
+        if (!(await edit('backspace'))) break;
         changed = true;
       }
-      return afterWrite(changed, 'api');
+      return changed;
     },
 
     async deleteForward(n = 1) {
-      if (!canEdit()) return false;
       let changed = false;
       for (let i = 0; i < Math.max(1, n); ++i) {
-        if (!host.deleteForward()) break;
+        if (!(await edit('deleteForward'))) break;
         changed = true;
       }
-      return afterWrite(changed, 'api');
+      return changed;
     },
 
     async splitParagraph() {
-      if (!canEdit()) return false;
-      return afterWrite(!!host.splitParagraph(), 'api');
+      return edit('splitParagraph');
     },
 
     async mergeParagraph(dir = 'prev') {
-      if (!canEdit()) return false;
-      const ok =
-        dir === 'next' ? !!host.mergeWithNextParagraph() : !!host.mergeWithPreviousParagraph();
-      return afterWrite(ok, 'api');
+      return edit(dir === 'next' ? 'mergeNext' : 'mergePrev');
     },
 
     async undo() {
-      if (!canEdit()) return false;
-      return afterWrite(!!host.undo(), 'api');
+      return edit('undo');
     },
 
     async redo() {
-      if (!canEdit()) return false;
-      return afterWrite(!!host.redo(), 'api');
+      return edit('redo');
     },
 
     async setIndent(levels) {
-      if (!canEdit()) return false;
       const n = Math.abs(Math.trunc(levels));
       let changed = false;
       for (let i = 0; i < n; ++i) {
-        const r = levels > 0 ? host.indent() : host.outdent();
-        if (!r) break;
+        if (!(await edit(levels > 0 ? 'indent' : 'outdent'))) break;
         changed = true;
       }
-      return afterWrite(changed, 'api');
+      return changed;
     },
 
     /* ── 光标与选区 ── */
 
     caret() {
       alive();
-      const c = host.caret;
-      const pos = { para: c?.para ?? 0, offset: c?.offset ?? 0 };
-      return {
-        pos,
-        page: c?.page ?? 0,
-        rect: { x: c?.x ?? 0, y: c?.y ?? 0, w: c?.w ?? 0, h: c?.h ?? 0 },
-        visible: !!c?.visible,
-      } satisfies Caret;
+      return caretOf(link);
     },
 
     async setCaret(pos, o?: SetCaretOptions) {
       alive();
-      host.setCaretAtSideLine(
-        pos.para,
-        pos.offset,
-        o?.side === 'after' ? 1 : 0,
-        o?.line === 'last' ? 1 : 0,
-      );
+      if (o?.side) {
+        await edit('setCaretAtSideLine', {
+          para: pos.para,
+          offset: pos.offset,
+          side: o.side === 'after' ? 1 : 0,
+          line: o.line === 'last' ? 1 : 0,
+        });
+        return;
+      }
+      await edit('setCaret', { para: pos.para, offset: pos.offset });
     },
 
     async moveCaret(step: CaretStep) {
       alive();
       switch (step) {
         case 'left':
-          host.move(-1);
+          await edit('move', { dcp: -1 });
           break;
         case 'right':
-          host.move(1);
+          await edit('move', { dcp: 1 });
           break;
         case 'up':
-          host.vertical(-1);
+          await edit('vertical', { dir: -1 });
           break;
         case 'down':
-          host.vertical(1);
+          await edit('vertical', { dir: 1 });
           break;
         case 'docStart':
-          host.docStart();
+          await edit('docStart');
           break;
         case 'docEnd':
-          host.docEnd();
+          await edit('docEnd');
           break;
         case 'lineStart':
-          write('lineStart');
-          host.present();
+          await edit('lineStart');
           break;
         case 'lineEnd':
-          write('lineEnd');
-          host.present();
+          await edit('lineEnd');
           break;
       }
     },
 
     async select(anchor, focus) {
       alive();
-      host.setSelection(anchor, focus);
+      if (config.readOnly) return;
+      // 段内位置 -> 流位置的换算在引擎里（selectPos）；宿主不碰这个口径。
+      await Promise.resolve(
+        then1(
+          link.write('selectPos', {
+            anchorPara: anchor.para,
+            anchorOffset: anchor.offset,
+            focusPara: focus.para,
+            focusOffset: focus.offset,
+          }),
+          () => dom.afterEdit('selectPos', 'api'),
+        ),
+      );
     },
 
     async selectAll() {
-      alive();
-      host.selectAll();
+      await edit('selectAll');
     },
 
     async clearSelection() {
-      alive();
-      host.clearSelection();
+      await edit('clearSelection');
     },
 
-    selection(): Selection {
+    selection() {
       alive();
-      const raw = (api.read('selectionReport') ?? {}) as SelectionPayload;
-      const rects = (raw.rects ?? []).map((r) => ({
-        page: r.page ?? 0,
-        x: r.x ?? 0,
-        y: r.y ?? 0,
-        w: r.w ?? 0,
-        h: r.h ?? 0,
-      }));
-      return {
-        anchor: raw.anchor ?? { para: 0, offset: 0 },
-        focus: raw.focus ?? { para: 0, offset: 0 },
-        empty: !!raw.empty,
-        rects,
-        cells: null,
-      };
+      return selectionOf(link);
     },
 
     /* ── 控件 ── */
 
     async focusControl(dir = 'next') {
-      alive();
-      write('focusControl', { forward: dir === 'next' });
-      host.present();
+      await edit('focusControl', { forward: dir === 'next' });
     },
 
     async setControlProp(index, prop, value) {
-      if (!canEdit()) return false;
-      return afterWrite(!!host.setControlProp(index, prop, value), 'api');
+      return edit('setControlProp', { i: index, prop, value });
     },
 
     form(): ControlSummary[] {
       alive();
-      const raw = (api.read('controls') ?? {}) as ControlsPayload;
+      const raw = (link.read('controls') ?? {}) as {
+        items?: Array<{ kind?: string; label?: string; ro?: boolean; i?: number }>;
+        caret?: number;
+      };
       const items = raw.items ?? [];
       const focused = raw.caret ?? -1;
       return items.map((it, index) => ({
@@ -458,29 +442,28 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
 
     geometry(): Geometry {
       alive();
-      const px = host.pagePx ?? [0, 0, 0];
-      const st = (api.read('editStats') ?? {}) as EditStatsPayload;
-      const pages = st.totalPages ?? 0;
-      const first = Number(api.read('windowFirstPage') ?? 0);
-      const count = Number(api.read('windowPageCount') ?? 0);
+      const g = link.geom();
+      const dpr = g.dpr || 1;
+      const pages = Math.max(1, Math.round(g.totalPages));
+      const step = g.ph + g.gap;
       return {
-        page: { w: px[0], h: px[1] },
-        gap: px[2],
+        page: { w: g.pw / dpr, h: g.ph / dpr },
+        gap: g.gap / dpr,
         pages,
-        scrollHeight: pages * (px[1] + px[2]),
-        window: { first, count },
-        dpr: window.devicePixelRatio || 1,
+        scrollHeight: Math.max(1, (pages * step - g.gap) / dpr),
+        window: { first: g.first, count: g.count },
+        dpr,
       };
     },
 
     async scrollTo(target) {
       alive();
-      const g = editor.geometry();
+      const g = this.geometry();
       const y = target.y ?? (target.page ?? 0) * (g.page.h + g.gap);
       const scroller =
         opts.container.querySelector<HTMLElement>('.heditor-body') ?? opts.container;
       scroller.scrollTop = y;
-      host.present();
+      await Promise.resolve(then1(link.view(y * g.dpr), () => dom.finish()));
     },
 
     async setZoom(zoom) {
@@ -523,23 +506,53 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       }
       if (Object.keys(changed).length === 0) return { ...config };
 
-      // 只做最贵的那一档：先重排类，再重绘类，最后无代价类。
-      if (changed.zoom !== undefined) host.zoomToFactor(next.zoom);
-      if (changed.pageMode !== undefined) {
-        const eng = api.engine();
-        const setContinuous = eng['setContinuous'] as ((on: boolean) => void) | undefined;
-        const setPageGap = eng['setPageGap'] as ((px: number) => void) | undefined;
-        setContinuous?.(next.pageMode === 'continuous');
-        // 分页模式的页间隙取当前页度量的那一份（连页时为 0）。
-        setPageGap?.(next.pageMode === 'continuous' ? 0 : (host.pagePx?.[2] ?? 12));
-        // 重排一次：连页标志改的是排版形状，不重排就还是旧页的落点。
-        host.zoomToFactor(host.zoomFactor);
+      // 一次 configure 只做最贵的那一档：先重排类，再重绘类，最后无代价类。
+      //   顺序不能反：重排会把页位图整体作废，之后的重绘才有意义。
+      const steps: Array<() => Promise<unknown> | unknown> = [];
+
+      if (changed.zoom !== undefined) {
+        const dpr = window.devicePixelRatio || 1;
+        const density = next.zoom * (4 / 3) * dpr;
+        dom.zoom.set(density);
+        steps.push(() => settleAfter('zoom', { zoom: density, dpr }));
       }
-      if (changed.showBrackets !== undefined) host.setShowBrackets(next.showBrackets);
-      if (changed.showControlDots !== undefined) host.setShowControlDots(next.showControlDots);
-      if (changed.undoLimit !== undefined) host.setUndoLimit(next.undoLimit);
-      if (changed.caretStyle !== undefined) host.setCaretStyle(next.caretStyle);
-      if (changed.selectionStyle !== undefined) host.setSelectionStyle(next.selectionStyle);
+      if (changed.pageMode !== undefined) {
+        const continuous = next.pageMode === 'continuous';
+        steps.push(() =>
+          Promise.resolve(
+            then1(link.setViewMode(continuous ? 0 : kPageGapPt, continuous), () =>
+              settleAfter('viewMode'),
+            ),
+          ),
+        );
+      }
+      if (changed.showBrackets !== undefined) {
+        steps.push(() => settleAfter('setShowBrackets', { on: next.showBrackets }));
+      }
+      if (changed.showControlDots !== undefined) {
+        steps.push(() => settleAfter('setShowControlDots', { on: next.showControlDots }));
+      }
+      if (changed.undoLimit !== undefined) {
+        steps.push(() => settleAfter('setUndoLimit', { n: next.undoLimit }));
+      }
+      if (changed.caretStyle !== undefined) {
+        steps.push(() => settleAfter('caretStyle', { style: next.caretStyle }));
+      }
+      if (changed.selectionStyle !== undefined) {
+        steps.push(() => settleAfter('selectionStyle', { style: next.selectionStyle }));
+      }
+      if (changed.readOnly !== undefined) {
+        // 只读由引擎判定（ReadOnly 档），不是 UI 提示：JS 侧的 canEdit 只是省一次调用。
+        steps.push(() =>
+          Promise.resolve(
+            then1(link.write('setEditMode', { mode: next.readOnly ? 2 : 0 }), () =>
+              settleAfter('setEditMode', {}),
+            ),
+          ),
+        );
+      }
+
+      for (const run of steps) await Promise.resolve(run());
 
       Object.assign(config, next);
       emitter.emit('configchange', { changed, config: { ...config } });
@@ -558,14 +571,15 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
     },
 
     async flush() {
-      await Promise.resolve();
+      alive();
+      await link.flush();
     },
 
     async destroy() {
       if (disposed) return;
       disposed = true;
-      host.dispose?.();
-      opts.container.innerHTML = '';
+      destroyer();
+      dom.destroy();
     },
 
     get element() {
@@ -576,33 +590,42 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       if (!opts.debug) {
         throw new TypeError('diag 只在 createEditor({ debug: true }) 时可用');
       }
-      return makeDiag(host, api);
+      return makeDiag(link, dom);
     },
   };
+
+  /** 一次配置类命令的收尾：写完就 present + 贴页（与 doOp 的口径同一条）。 */
+  function settleAfter(opName: string, args?: Args): Promise<unknown> | unknown {
+    if (args) link.write(opName, args);
+    return then1(link.settle(opName), (st) => {
+      lastStats = st ?? link.read('editStats');
+      dom.finish(lastStats);
+      return st;
+    });
+  }
+
+  /**
+   * 变更事件。`json` 是方法而不是属性：2000 段序列化一次约 55 ms（Worker 模式下还是一次
+   *   往返），所以"读它才算"必须是显式的 —— 属性写法会让 `JSON.stringify(ev)` 顺带把它
+   *   算一遍，而那正好是最糟的一拍。同一个版本只算一次（闭包缓存）。
+   */
+  function makeChange(source: ChangeSource, v: number): ChangeEvent {
+    let cached: string | undefined;
+    return {
+      source,
+      version: v,
+      get text() {
+        return String(link.read('textAll') ?? '');
+      },
+      async json() {
+        if (cached === undefined) cached = String((await Promise.resolve(link.serialize())) ?? '');
+        return cached;
+      },
+    };
+  }
 
   if (opts.config) await editor.configure(opts.config);
   return guard(editor, !!opts.debug) as Editor;
-}
-
-/* ────────────────────────── 变更事件 ────────────────────────── */
-
-/**
- * `json` 是惰性 getter：2000 段文档序列化一次约 55 ms，每次按键都算会卡住键盘。
- * 同一个版本只算一次（用闭包缓存）。
- */
-function makeChange(host: LegacyHost, source: 'user' | 'api', version: number): ChangeEvent {
-  let cached: string | undefined;
-  return {
-    source,
-    version,
-    get text() {
-      return host.allText;
-    },
-    get json() {
-      if (cached === undefined) cached = host.saveDocument();
-      return cached;
-    },
-  };
 }
 
 /* ────────────────────────── 诊断面 ────────────────────────── */
@@ -611,8 +634,8 @@ function makeChange(host: LegacyHost, source: 'user' | 'api', version: number): 
  * diag 是"debug 开关下的公开面"：成员不承诺稳定，所以参数与返回暂时是 unknown。
  * 这里只做转发，不加工 —— 加工会把"引擎报了什么"变成"我们以为引擎报了什么"。
  */
-function makeDiag(host: LegacyHost, api: EngineApi): Diag {
-  const read = (name: string): unknown => api.read(name);
+function makeDiag(link: EngineLink, dom: DomHost): Diag {
+  const read = (name: string, args?: Args): unknown => link.read(name, args);
   return {
     stats: () => read('stats'),
     editStats: () => read('editStats'),
@@ -623,43 +646,50 @@ function makeDiag(host: LegacyHost, api: EngineApi): Diag {
     auditLayout: () => read('auditLayout'),
     auditCompile: () => read('auditCompile'),
     auditGlyphPages: () => read('auditGlyphPages'),
-    selfCheck: () => host.present(),
-    markCheck: () => host.present(),
-    rawFrame: () => null,
+    selfCheck: () => String(read('selfCheck') ?? ''),
+    markCheck: () => read('markCheck'),
+    rawFrame: () => read('rawFrame'),
     frameDigest: () => String(read('frameDigest') ?? ''),
     frameW: () => Number(read('frameWidth') ?? 0),
     frameH: () => Number(read('frameHeight') ?? 0),
-    present: () => void host.present(),
+    present: () => void dom.repaint(),
     controls: () => read('controls'),
     bracketSlots: () => read('bracketSlots'),
-    hit: (x, y) => api.read('hit', { x, y }),
-    controlAt: (x, y) => api.read('controlAt', { x, y }),
+    hit: (x: number, y: number) => read('hit', { x, y }),
+    controlAt: (x: number, y: number) => read('controlAt', { x, y }),
     describeControls: () => String(read('describeControls') ?? ''),
     blockedEdits: () => Number(read('blockedEdits') ?? 0),
     dirtyPages: () => (read('dirtyPages') as number[]) ?? [],
     pagePx: () => {
-      const px = host.pagePx ?? [0, 0, 0];
-      return { w: px[0], h: px[1], gap: px[2] };
+      const g = link.geom();
+      return { w: g.pw, h: g.ph, gap: g.gap };
     },
-    pageCanvases: () => null,
-    pageCanvasList: () => [],
-    prewarmPage: (page: number) => void api.read('prewarmPage', { page }),
+    pageCanvases: () => dom.pagesEl.querySelectorAll('canvas').length,
+    pageCanvasList: () => [...dom.pagesEl.querySelectorAll('canvas')],
+    prewarmPage: (page: number) => void read('prewarmPage', { page }),
     bench: () => read('bench'),
     caretReport: () => String(read('caretReport') ?? ''),
     caretLive: () => Number(read('caretOffsetLive') ?? -1),
-    env: () => read('stats'),
+    env: () => ({
+      ua: navigator.userAgent,
+      url: location.href,
+      dpr: window.devicePixelRatio || 1,
+      heapMB: Number(read('heap') ?? 0) / 1048576,
+    }),
     fonts: () => read('stats'),
     blitStats: () => ({ ms: 0, pages: 0, px: 0 }),
     lastBlit: () => null,
-    clickAt: async () => {
-      throw new Error('diag.clickAt 还没接（它要的是画布坐标，等输入层进库）');
+    clickAt: async (pt) => {
+      const { x, y } = pt as { x: number; y: number };
+      await Promise.resolve(dom.input.placeAt({ x, y }));
     },
-    selectCell: async () => {
-      throw new Error('diag.selectCell 还没接');
+    selectCell: async (pos: Pos) => {
+      await Promise.resolve(link.write('selectCellAtPara', { para: pos.para }));
+      dom.finish();
     },
     removeControl: async (index: number) => {
-      api.write('removeControl', { i: index });
-      host.present();
+      await Promise.resolve(link.write('removeControl', { i: index }));
+      dom.finish();
       return true;
     },
   };

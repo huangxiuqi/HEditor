@@ -26,7 +26,7 @@ export function guard<T extends object>(target: T, debug: boolean): T {
       }
       if (!allowed.has(key)) {
         throw new TypeError(
-          `${key} 不是公开 API —— 能调的只有 web/types/editor.d.ts 里那 ${PUBLIC_MEMBERS.length} 个成员`,
+          `${key} 不是公开 API —— 能调的只有 web/src/types.ts 里那 ${PUBLIC_MEMBERS.length} 个成员`,
         );
       }
       return Reflect.get(t, key, receiver);

@@ -80,13 +80,25 @@ function occurrences(code, re) {
 }
 
 
+// IDL 从产物里取（那是浏览器真正跑的那一份），表格与 mod.X 的扫描对着源码 ——
+//   源码是 TS，跑不进 vm；产物是构建出来的，扫它会被压缩/换引号干扰。
 const apiSrc = read('web/engine_api.js');
+const apiTs = read('web/src/engine/api.ts');
 globalThis.self = globalThis;
 vm.runInThisContext(apiSrc, { filename: 'web/engine_api.js' });
 const factory = globalThis.__heditorEngineApi;
 if (!factory || !factory.IDL) throw new Error('engine_api.js 没挂上 IDL');
 const IDL = factory.IDL;
-const apiCode = stripComments(apiSrc);
+const apiCode = stripComments(apiTs);
+const API_TS = 'web/src/engine/api.ts';
+
+// 产物比源码旧：扫描源码、跑产物，两边说的就不是一回事了。这条只报不修 ——
+//   它要的是"先 npm run build:engine"，而不是让判据自己去构建。
+if (fs.statSync(path.join(ROOT, 'web/engine_api.js')).mtimeMs <
+    fs.statSync(path.join(ROOT, 'web/src/engine/api.ts')).mtimeMs) {
+  problems.push({ where: 'web/engine_api.js',
+                  msg: '产物比 web/src/engine/api.ts 旧 —— 先 npm run build:engine' });
+}
 
 const problems = [];
 const note = (where, msg) => problems.push({ where, msg });
@@ -135,16 +147,16 @@ for (const e of orphans) note('src/wasm/wasm_main.cpp', `导出 ${e} 没有任�
 
 for (const [table, kind] of [['WRITE', 'w'], ['READ', 'r'], ['SILENT', 's']]) {
   const m = apiCode.match(new RegExp('const ' + table + " = collect\\('" + kind + "', \\{([\\s\\S]*?)\\n\\}\\);"));
-  if (!m) { note('web/engine_api.js', `${table} 不再走 collect('${kind}', …) 了 —— 对账那条线断了`); continue; }
+  if (!m) { note(API_TS, `${table} 不再走 collect('${kind}', …) 了 —— 对账那条线断了`); continue; }
   const keys = new Set([...m[1].matchAll(/^ {2}([A-Za-z_][A-Za-z0-9_]*): /gm)].map((x) => x[1]));
   const want = new Set(IDL.byKind(kind));
-  for (const k of want) if (!keys.has(k)) note('web/engine_api.js', `${table} 缺 ${k}（协议表里有）`);
-  for (const k of keys) if (!want.has(k)) note('web/engine_api.js', `${table} 多 ${k}（协议表里没有）`);
+  for (const k of want) if (!keys.has(k)) note(API_TS, `${table} 缺 ${k}（协议表里有）`);
+  for (const k of keys) if (!want.has(k)) note(API_TS, `${table} 多 ${k}（协议表里没有）`);
 }
 
 // 派生这件事本身也要钉住：手抄的名单一旦被重新塞回来，这条会红。
 if (!/const PRESENT_ALWAYS = IDL\.presentAlways\(\);/.test(apiCode)) {
-  note('web/engine_api.js', 'PRESENT_ALWAYS 不再是派生的了 —— 不要把手抄名单加回来');
+  note(API_TS, 'PRESENT_ALWAYS 不再是派生的了 —— 不要把手抄名单加回来');
 }
 
 
@@ -153,9 +165,9 @@ const known = new Set([...calledBy.keys(), ...outside.keys(), ...MODULE_PROPS]);
 for (const hit of occurrences(apiCode, /\bmod\.([A-Za-z_][A-Za-z0-9_]*)/)) {
   const name = hit.text.slice(4);
   if (!exports.has(name) && !MODULE_PROPS.has(name)) {
-    note('web/engine_api.js', `第 ${hit.line} 行：mod.${name} 不是 wasm 导出`);
+    note(API_TS, `第 ${hit.line} 行：mod.${name} 不是 wasm 导出`);
   } else if (!known.has(name)) {
-    note('web/engine_api.js', `第 ${hit.line} 行：mod.${name} 没在协议表里登记`);
+    note(API_TS, `第 ${hit.line} 行：mod.${name} 没在协议表里登记`);
   }
 }
 

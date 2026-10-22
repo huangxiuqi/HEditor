@@ -23,16 +23,21 @@ function show(text) {
 }
 
 (async () => {
+  // 传输由地址决定：默认同线程（不依赖 Worker，控制台里最好查），?transport=worker
+  //   换成引擎在另一条线程上跑 —— 两条路共用同一份 Editor 实现。
+  const transport = new URLSearchParams(location.search).get('transport') === 'worker'
+    ? 'worker'
+    : 'inline';
   const editor = await HEditor.createEditor({
     container: el,
-    transport: 'inline',
+    transport,
     chrome: true,
   });
   window.__demo = editor;
 
   await editor.setText(DEMO_TEXT);
   // 探针要读的两个数（产品页不需要这一行）：变更次数与就绪标志。
-  window.__demoState = { changes: 0 };
+  window.__demoState = { changes: 0, transport };
   editor.on('change', () => {
     ++window.__demoState.changes;
     const g = editor.geometry();
