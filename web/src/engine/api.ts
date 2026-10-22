@@ -6,10 +6,10 @@
 // 边界：本文件不碰 document、不碰 DOM、不碰 OffscreenCanvas。凡是要碰画布的地方
 //   都走 cfg.host 的钩子（ctxOfPage / blitPages / invalidateSlots ...），由宿主实现。
 //   这样同一份代码能跑在 Worker 里，也能跑在主线程里。
-// 通道（与 web/engine_worker.js、未来的 transport_worker.js 的约定）：
+// 通道（与 transport/worker_main.ts 的约定）：
 //   下行：boot / pageCanvas / viewMode / view / do（改状态）/ ask（要返回值）
 //   上行：ready / state / ack / reply / error
-// 移植自 web/engine_api.js（C 步，见 docs/外部API设计.md §14）。
+// 同线程那一侧（transport/inline.ts）不经过消息：它直接把同一份表当函数调。
 
 // 类型：只封边界，不重抄导出面
 
@@ -1589,10 +1589,5 @@ return {
   state: (ts, label, stats, changed, workMs) => sendState(ts, label, stats, changed, workMs),
 };
 }
-
-// importScripts 与 <script> 都走这里。两侧各取一次，互不影响。
-(globalThis as unknown as { __heditorEngineApi: unknown }).__heditorEngineApi = {
-  createEngineApi, IDL,
-};
 
 export { createEngineApi, IDL };

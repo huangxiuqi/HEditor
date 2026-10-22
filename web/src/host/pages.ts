@@ -393,7 +393,11 @@ export class SlotCanvases implements CanvasStore {
     }
     for (let s = 0; s < this.slots.length; ++s) {
       const el = this.slots[s];
-      if (!used.has(s) && el.style.display !== 'none') el.style.display = 'none';
+      if (used.has(s)) continue;
+      if (el.style.display !== 'none') el.style.display = 'none';
+      // 页号一起摘掉：槽里的像素还在（下一次复用时整页重贴或按脏矩形补），但它此刻
+      //   不属于任何一页 —— 留着上一个页号会让"这张画布显示的是哪一页"这个读数说谎。
+      if (el.dataset.page !== undefined) delete el.dataset.page;
     }
   }
 
