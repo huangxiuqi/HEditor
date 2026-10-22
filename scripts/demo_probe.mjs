@@ -136,16 +136,18 @@ chk.section('五、configure');
     let badKey = '';
     try { await e.configure({ zom: 1 }); } catch (err) { badKey = err.message; }
     let readOnlyWrite = null;
-    await e.configure({ readOnly: true });
+    await e.configure({ mode: 'readOnly' });
     readOnlyWrite = await e.type('nope');
-    await e.configure({ readOnly: false });
-    return { zoom: got.zoom, clamped: clamped.zoom, readOnlyWrite,
+    const modeShown = e.config().mode;
+    await e.configure({ mode: 'document' });
+    return { zoom: got.zoom, clamped: clamped.zoom, readOnlyWrite, modeShown,
              cfgZoom: e.config().zoom, badKey };`);
   chk.check('configure 返回生效后的值', r.zoom === 1.25, String(r.zoom));
   chk.check('越界被夹取到 2.25', r.clamped === 2.25, String(r.clamped));
   chk.check('config() 与返回值一致', r.cfgZoom === 2.25, String(r.cfgZoom));
   chk.check('拼错的键同步抛', r.badKey.includes('未知配置项'), r.badKey);
   chk.check('只读时编辑返回 false', r.readOnlyWrite === false, String(r.readOnlyWrite));
+  chk.check('mode 读回三档里的只读', r.modeShown === 'readOnly', String(r.modeShown));
 }
 
 chk.section('六、销毁');

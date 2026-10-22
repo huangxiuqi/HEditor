@@ -15,7 +15,7 @@ import type {
 } from './types';
 import { createDomHost, type ChangeSource, type DomHost, type EngineLink } from './host/dom';
 import type { CanvasStore } from './host/pages';
-import { then1, type Args } from './input/keymap';
+import { cleanMarkdownLines, then1, type Args } from './input/keymap';
 import { createInline, defaultFonts, type AssetPaths } from './transport/inline';
 import { createWorker } from './transport/worker';
 import { guard } from './guard';
@@ -78,10 +78,17 @@ class Emitter {
 
 /* ────────────────────────── 默认配置 ────────────────────────── */
 
+/** 编辑模式 -> 引擎的整数。顺序与 EditMode 枚举一致。 */
+const MODE_CODE: Record<EditorConfig['mode'], number> = {
+  document: 0,
+  form: 1,
+  readOnly: 2,
+};
+
 const DEFAULT_CONFIG: EditorConfig = {
   zoom: 1,
   pageMode: 'paged',
-  readOnly: false,
+  mode: 'document',
   input: true,
   showBrackets: true,
   showControlDots: false,
@@ -120,6 +127,9 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
   let version = 0;
   let disposed = false;
   let lastStats: any = null;
+  // 页面级错误历史（diag.errors 读它）。与 error 事件同源 —— 事件是"发生的那一刻"，
+  //   这份是"发生过哪些"：探针在收尾时才读，那时事件早就过去了。
+  const pageErrors: string[] = [];
 
   const alive = (): void => {
     if (disposed) throw new Error('编辑器已销毁');
@@ -167,9 +177,11 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       link: l,
       input: config.input !== false,
       canvasStore: store,
-      readOnly: () => config.readOnly,
+      readOnly: () => config.mode === 'readOnly',
       status: (text, isErr) => {
-        if (isErr) emitter.emit('error', { message: text, fatal: false });
+        if (!isErr) return;
+        pageErrors.push(text);
+        emitter.emit('error', { message: text, fatal: false });
       },
       onEdit: (changed: boolean, source: ChangeSource) => {
         if (!changed || disposed) return;
@@ -186,7 +198,9 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
         if (!disposed) emitter.emit('render', { pages, ms });
       },
       onPageError: (message: string) => {
-        if (!disposed) emitter.emit('error', { message, fatal: false });
+        if (disposed) return;
+        pageErrors.push(message);
+        emitter.emit('error', { message, fatal: false });
       },
     };
   }
@@ -197,11 +211,31 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
 
   const edit = (name: string, args?: Args): Promise<boolean> => {
     alive();
-    if (config.readOnly) return Promise.resolve(false);
+    if (config.mode === 'readOnly') return Promise.resolve(false);
     return Promise.resolve(then1(link.write(name, args), (changed) => {
       if (!changed) return false;
       return then1(dom.afterEdit(name, 'api'), () => true);
     }) as boolean | Promise<boolean>);
+  };
+
+  /**
+   * 光标 / 选区类命令的收尾：只上屏，不算内容变更。
+   *
+   * 不能走 edit()：它按引擎返回值判断"有没有改动"，而这批命令的实现返回 undefined
+   *   （改的是光标，不是文档）。走 edit() 的后果是"引擎里光标动了、画面与账都没动" ——
+   *   实测 setCaret 之后 caret().pos.offset 永远是 0，而打字却落在正确位置。
+   */
+  const caretOp = (name: string, args?: Args): Promise<void> => {
+    alive();
+    return Promise.resolve(
+      then1(link.write(name, args), () =>
+        then1(link.settle(name), (st) => {
+          const stats = (st as { stats?: unknown } | null)?.stats;
+          dom.finish((stats ?? link.read('editStats')) as never);
+          return undefined;
+        }),
+      ),
+    ) as Promise<void>;
   };
 
   function caretOf(l: EngineLink): Caret {
@@ -340,7 +374,7 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
     async setCaret(pos, o?: SetCaretOptions) {
       alive();
       if (o?.side) {
-        await edit('setCaretAtSideLine', {
+        await caretOp('setCaretAtSideLine', {
           para: pos.para,
           offset: pos.offset,
           side: o.side === 'after' ? 1 : 0,
@@ -348,7 +382,7 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
         });
         return;
       }
-      await edit('setCaret', { para: pos.para, offset: pos.offset });
+      await caretOp('setCaret', { para: pos.para, offset: pos.offset });
     },
 
     async moveCaret(step: CaretStep) {
@@ -367,43 +401,37 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
           await edit('vertical', { dir: 1 });
           break;
         case 'docStart':
-          await edit('docStart');
+          await caretOp('docStart');
           break;
         case 'docEnd':
-          await edit('docEnd');
+          await caretOp('docEnd');
           break;
         case 'lineStart':
-          await edit('lineStart');
+          await caretOp('lineStart');
           break;
         case 'lineEnd':
-          await edit('lineEnd');
+          await caretOp('lineEnd');
           break;
       }
     },
 
     async select(anchor, focus) {
-      alive();
-      if (config.readOnly) return;
+      // 只读只是"不许改文档"，光标与选区照样能动 —— 所以这里不看 readOnly。
       // 段内位置 -> 流位置的换算在引擎里（selectPos）；宿主不碰这个口径。
-      await Promise.resolve(
-        then1(
-          link.write('selectPos', {
-            anchorPara: anchor.para,
-            anchorOffset: anchor.offset,
-            focusPara: focus.para,
-            focusOffset: focus.offset,
-          }),
-          () => dom.afterEdit('selectPos', 'api'),
-        ),
-      );
+      await caretOp('selectPos', {
+        anchorPara: anchor.para,
+        anchorOffset: anchor.offset,
+        focusPara: focus.para,
+        focusOffset: focus.offset,
+      });
     },
 
     async selectAll() {
-      await edit('selectAll');
+      await caretOp('selectAll');
     },
 
     async clearSelection() {
-      await edit('clearSelection');
+      await caretOp('clearSelection');
     },
 
     selection() {
@@ -490,7 +518,12 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
         }
         next.pageMode = patch.pageMode;
       }
-      if (patch.readOnly !== undefined) next.readOnly = !!patch.readOnly;
+      if (patch.mode !== undefined) {
+        if (patch.mode !== 'document' && patch.mode !== 'form' && patch.mode !== 'readOnly') {
+          throw new TypeError("mode 只能是 'document' / 'form' / 'readOnly'");
+        }
+        next.mode = patch.mode;
+      }
       if (patch.input !== undefined) next.input = !!patch.input;
       if (patch.showBrackets !== undefined) next.showBrackets = !!patch.showBrackets;
       if (patch.showControlDots !== undefined) next.showControlDots = !!patch.showControlDots;
@@ -541,15 +574,11 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       if (changed.selectionStyle !== undefined) {
         steps.push(() => settleAfter('selectionStyle', { style: next.selectionStyle }));
       }
-      if (changed.readOnly !== undefined) {
-        // 只读由引擎判定（ReadOnly 档），不是 UI 提示：JS 侧的 canEdit 只是省一次调用。
-        steps.push(() =>
-          Promise.resolve(
-            then1(link.write('setEditMode', { mode: next.readOnly ? 2 : 0 }), () =>
-              settleAfter('setEditMode', {}),
-            ),
-          ),
-        );
+      if (changed.mode !== undefined) {
+        // 三档都要落到引擎：只读要引擎的 ReadOnly 才保证"光标可动、一个字都不许改"，
+        //   表单要引擎拿可编辑性判定归属；宿主侧那个 edit() 只保护库自己的方法，
+        //   键盘走输入层，绕得过去（实测：只改 config 时按键照样改文档）。
+        steps.push(() => settleAfter('setEditMode', { mode: MODE_CODE[next.mode] }));
       }
 
       for (const run of steps) await Promise.resolve(run());
@@ -590,7 +619,7 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       if (!opts.debug) {
         throw new TypeError('diag 只在 createEditor({ debug: true }) 时可用');
       }
-      return makeDiag(link, dom);
+      return makeDiag(link, dom, assets, pageErrors);
     },
   };
 
@@ -633,9 +662,27 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
 /**
  * diag 是"debug 开关下的公开面"：成员不承诺稳定，所以参数与返回暂时是 unknown。
  * 这里只做转发，不加工 —— 加工会把"引擎报了什么"变成"我们以为引擎报了什么"。
+ *
+ * 三类例外都不是加工，而是补上收尾：
+ *   · 装载类要等重排重绘落地，返回值是那一拍的 editStats（探针拿它当分母）；
+ *   · 定位类要 present，否则画面停在旧位置；
+ *   · 闪烁与相位只动状态，绝不 present —— 呈现会把上一次全量呈现的账冲成"只画了个光标"。
  */
-function makeDiag(link: EngineLink, dom: DomHost): Diag {
+function makeDiag(
+  link: EngineLink,
+  dom: DomHost,
+  assets: AssetPaths,
+  errors: string[],
+): Diag {
   const read = (name: string, args?: Args): unknown => link.read(name, args);
+
+  /** 装载类收尾：写完等一次收尾，返回那一拍的账。 */
+  const settleAs = async (name: string, args: Args): Promise<unknown> => {
+    await Promise.resolve(link.write(name, args));
+    await Promise.resolve(link.settle(name));
+    return read('editStats');
+  };
+
   return {
     stats: () => read('stats'),
     editStats: () => read('editStats'),
@@ -646,10 +693,10 @@ function makeDiag(link: EngineLink, dom: DomHost): Diag {
     auditLayout: () => read('auditLayout'),
     auditCompile: () => read('auditCompile'),
     auditGlyphPages: () => read('auditGlyphPages'),
-    selfCheck: () => String(read('selfCheck') ?? ''),
+    selfCheck: () => read('selfCheck'),
     markCheck: () => read('markCheck'),
     rawFrame: () => read('rawFrame'),
-    frameDigest: () => String(read('frameDigest') ?? ''),
+    frameDigest: () => Number(read('frameDigest') ?? 0),
     frameW: () => Number(read('frameWidth') ?? 0),
     frameH: () => Number(read('frameHeight') ?? 0),
     present: () => void dom.repaint(),
@@ -687,10 +734,53 @@ function makeDiag(link: EngineLink, dom: DomHost): Diag {
       await Promise.resolve(link.write('selectCellAtPara', { para: pos.para }));
       dom.finish();
     },
-    removeControl: async (index: number) => {
-      await Promise.resolve(link.write('removeControl', { i: index }));
+    removeControl: async (index: number, keepContent?: boolean) => {
+      await Promise.resolve(link.write('removeControl', { i: index, keepContent: !!keepContent }));
       dom.finish();
       return true;
     },
+
+    /* ── 装载 ── */
+
+    loadScenario: (id, zoom) => settleAs('scenario', { id, zoom }),
+    reset: (id, zoom) => settleAs('reset', { id: id === undefined ? 6 : id, zoom }),
+    stress: (paras, chars) => settleAs('stress', { paras, chars }),
+    stressDiverse: (paras, chars) => settleAs('stressDiverse', { paras, chars }),
+    loadFormSample: (variant) => settleAs('formSample', { variant: variant ?? 0 }),
+    loadMedicalSample: async (repeat) => {
+      // 病历正文是一份可替换的文件（服务端下发那条路），不编进产物。
+      const res = await fetch(new URL('assets/samples/medical-records.md', assets.base));
+      if (!res.ok) throw new Error(`病历样例读取失败：HTTP ${res.status}`);
+      const text = cleanMarkdownLines(await res.text());
+      return settleAs('textDoc', { text, repeat: Math.max(1, repeat || 1) });
+    },
+    setFormControls: (list) => settleAs('setFormControls', { list }),
+
+    /* ── 光标与相位 ── */
+
+    setCaretAt: (para, offset, field) => settleAs('setCaretAt', { para, offset, field }),
+    setCaretOnly: (para, offset) => link.write('setCaret', { para, offset }),
+    showCaret: (on) => link.write('phase', { on: !!on }),
+    startBlink: () => dom.startBlink(),
+    stopBlink: () => dom.stopBlink(),
+
+    /* ── 字体与窗口 ── */
+
+    reloadFonts: async (mode) => {
+      const m = mode === 'lazy' ? 'lazy' : 'full';
+      await Promise.resolve(link.write('fonts', { mode: m }));
+      await Promise.resolve(link.settle('fonts'));
+      // 字体字节的账在 editStats 里（按需读发生在排版之后，快照会漏掉大头）。
+      const st = read('editStats') as { fontStorageBytes?: number; fontResidentBytes?: number } | null;
+      return {
+        mode: m,
+        bytes: Number((m === 'lazy' ? st?.fontStorageBytes : st?.fontResidentBytes) ?? 0),
+      };
+    },
+    setFontCacheConfig: (blockSize, maxBlocks) =>
+      link.write('setFontCacheConfig', { blockSize, blocks: maxBlocks }),
+    setViewportAnchor: (first, count) => settleAs('viewport', { first, count }),
+
+    errors: () => errors.slice(),
   };
 }

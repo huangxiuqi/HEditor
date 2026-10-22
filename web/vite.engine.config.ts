@@ -14,7 +14,7 @@ import { defineConfig } from 'vite';
  */
 export default defineConfig({
   build: {
-    outDir: 'web',
+    outDir: '.',
     emptyOutDir: false,
     target: 'es2020',
     minify: false,
@@ -27,7 +27,7 @@ export default defineConfig({
       },
     },
     lib: {
-      entry: 'web/src/engine/api.ts',
+      entry: 'src/engine/api.ts',
       name: '__heditorEngineApiExports',
       formats: ['iife'],
       fileName: () => 'engine_api.js',

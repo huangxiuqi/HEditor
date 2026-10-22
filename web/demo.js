@@ -25,13 +25,14 @@ function show(text) {
 (async () => {
   // 传输由地址决定：默认同线程（不依赖 Worker，控制台里最好查），?transport=worker
   //   换成引擎在另一条线程上跑 —— 两条路共用同一份 Editor 实现。
-  const transport = new URLSearchParams(location.search).get('transport') === 'worker'
-    ? 'worker'
-    : 'inline';
+  const q = new URLSearchParams(location.search);
+  const transport = q.get('transport') === 'worker' ? 'worker' : 'inline';
   const editor = await HEditor.createEditor({
     container: el,
     transport,
     chrome: true,
+    // debug 打开的是诊断面（diag）：它不承诺稳定，只给探针与内部验证台。
+    debug: q.has('debug'),
   });
   window.__demo = editor;
 

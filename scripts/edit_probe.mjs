@@ -14,7 +14,7 @@
 //
 // 用法（先起服务 + 带 --remote-debugging-port 的 Chrome）：
 //   node scripts/edit_probe.mjs --port 9222 --url http://localhost:8781/web/index.html
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -33,6 +33,9 @@ const PORT = Number(opt('port', '9222'));
 const URL_ = opt('url', 'http://localhost:8781/web/index.html');
 const OUT = join(ROOT, opt('out-dir', 'out/web'));
 const ZOOM = Number(opt('zoom', '1.5'));
+// --lib：跑在新库的 demo 页上。页面启动后由迁移垫片把旧门面名翻成公开面 + diag，
+//   断言一条不改 —— 这样红/绿只反映"新库能不能替代旧宿主"，不掺杂改写本身的手误。
+const LIB = argv.includes('--lib') || /demo\.html/.test(URL_);
 
 const S6 = '患者主诉：反复心悸三天，加重一天。';
 
@@ -55,6 +58,11 @@ async function boot() {
   await conn.send('Emulation.setDeviceMetricsOverride',
                   { width: 1500, height: 1200, deviceScaleFactor: 1, mobile: false });
   console.log('→ 打开', URL_);
+  if (LIB) {
+    // 注入必须早于 navigate：垫片自己等 __demoReady，再挂上 window.__heditor。
+    const src = readFileSync(join(HERE, 'lib_adapter.js'), 'utf8');
+    await conn.send('Page.addScriptToEvaluateOnNewDocument', { source: src });
+  }
   await conn.send('Page.navigate', { url: URL_ });
   const ms = await conn.waitFor('return !!(window.__heditor && window.__heditor.ready)',
                                'window.__heditor.ready');

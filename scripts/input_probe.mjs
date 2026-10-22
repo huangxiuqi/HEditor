@@ -51,6 +51,8 @@ const ev = (body) => cdp.eval('return (async () => {\n' + body + '\n})();');
 // 每一步之后取一份状态。两串状态相同 = 输入层与传输无关。
 const trail = [];
 const snap = async (label) => {
+  // Worker 传输下按键是往返：不等排空就读，读到的是上一拍（30 ms 的睡眠时对时错）。
+  await ev(`await window.__demo.flush();`);
   const s = await ev(`
     const e = window.__demo;
     const c = e.caret();

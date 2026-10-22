@@ -41,6 +41,8 @@ interface Mirror {
   dirtyPages: number[];
   caretReport: string;
   caretLive: number;
+  caretVertical: boolean;
+  caretBlockReversed: boolean;
   caretStyle: any;
   selectionStyle: any;
   heapMB: number;
@@ -68,6 +70,8 @@ export function createWorker(opts: WorkerOptions): {
     dirtyPages: [],
     caretReport: '',
     caretLive: -1,
+    caretVertical: false,
+    caretBlockReversed: false,
     caretStyle: null,
     selectionStyle: null,
     heapMB: 0,
@@ -212,9 +216,10 @@ export function createWorker(opts: WorkerOptions): {
           return null;
         }
         default:
-          // 其余读命令（审计、帧摘要……）在 worker 模式下要么没有镜像、要么是一次往返。
-          //   给 null 而不是抛：diag 的成员"不承诺稳定"，而抛会把整条诊断路径变成不能用。
-          return null;
+          // 其余读命令（审计、帧摘要、控件表……）没有本地镜像，走一次真往返。
+          //   不能返回 null：诊断面在 worker 传输下会整体变成"读到 null 也算成功"，
+          //   而 diag 的每个成员只做转发 —— 它没有别的地方能发现自己是空的。
+          return ask(name, args);
       }
     },
     write(name: string, args?: Args) {
@@ -300,6 +305,8 @@ export function createWorker(opts: WorkerOptions): {
     if (m.dirtyPages) mirror.dirtyPages = m.dirtyPages;
     if (typeof m.caretReport === 'string') mirror.caretReport = m.caretReport;
     if (typeof m.caretLive === 'number') mirror.caretLive = m.caretLive;
+    if (typeof m.caretVertical === 'boolean') mirror.caretVertical = m.caretVertical;
+    if (typeof m.caretBlockReversed === 'boolean') mirror.caretBlockReversed = m.caretBlockReversed;
     if (m.caretStyle) mirror.caretStyle = m.caretStyle;
     if (m.selectionStyle) mirror.selectionStyle = m.selectionStyle;
     if (typeof m.heapMB === 'number') mirror.heapMB = m.heapMB;

@@ -112,6 +112,10 @@ export interface DomHost {
   setBusy(on: boolean): void;
   /** 视觉焦点：IME 与键盘都落在承接层上。 */
   focus(): void;
+  /** 重启闪烁（回到可见相位）。 */
+  startBlink(): void;
+  /** 停表：光标常亮，且不重绘 —— 探针读"上一次全量"的账之前必须先停。 */
+  stopBlink(): void;
   /** 卡片尺寸变了：重新报视口（引擎按它算窗口）。 */
   resize(): Maybe<any>;
   destroy(): void;
@@ -583,6 +587,17 @@ export function createDomHost(o: DomHostOptions): DomHost {
     finish,
     afterEdit,
     scrollCaretIntoView,
+    startBlink: () => resetBlink(),
+    stopBlink() {
+      if (blinkTimer) {
+        clearInterval(blinkTimer);
+        blinkTimer = 0;
+      }
+      caretOn = true;
+      // 只写相位、不 present：present 会把 edit_stats 覆盖成"只重画了个光标"，
+      //   而调用方紧接着要读的往往是上一次全量呈现的账。
+      writeOp('phase', { on: true });
+    },
     pointAt,
     hitAt,
     focus: () => ta.focus(),

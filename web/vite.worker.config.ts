@@ -11,12 +11,12 @@ import { defineConfig } from 'vite';
  */
 export default defineConfig({
   build: {
-    outDir: 'web/dist',
+    outDir: 'dist',
     emptyOutDir: false,
     target: 'es2020',
     minify: false,
     lib: {
-      entry: 'web/src/transport/worker_main.ts',
+      entry: 'src/transport/worker_main.ts',
       name: '__heditorWorker',
       formats: ['iife'],
       fileName: () => 'heditor_worker.js',

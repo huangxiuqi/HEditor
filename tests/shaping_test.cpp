@@ -854,30 +854,38 @@ int main() {
                 cut.write(reinterpret_cast<const char*>(whole.data()),
                           static_cast<std::streamsize>(std::min(keep, whole.size())));
             }
-            FontSource truncated;
-            const bool cut_open = truncated.open(cut_path);
-            expectTrue(cut_open, "截断成 1 MB 的副本还能解析表目录（所以后面读到的是真失败）");
-            if (cut_open) {
-                const size_t cut_fail_before = truncated.cache().readFailures();
-                const size_t cut_eof_before = truncated.cache().eofReads();
-                // 把文件再砍到 4 KB。存储记的尺寸仍是 1 MB，于是 512 KB 处的读
-                //   落在记录范围内、却读不到 —— 这正是"失败"而不是"文件尾"。
-                {
-                    std::ofstream shrink(cut_path, std::ios::binary | std::ios::trunc);
-                    shrink.write(reinterpret_cast<const char*>(whole.data()), 4096);
+            // 作用域不是随手加的：Windows 上不能删除一个还开着句柄的文件，而 FontSource
+            //   直到析构才关句柄。把它留在外层，"删掉临时文件"那一步会失败且返回值没人看 ——
+            //   每跑一次就留一个 4 KB 的残骸（本目录下曾有 _font_truncate_probe.bin）。
+            bool cut_removed = false;
+            {
+                FontSource truncated;
+                const bool cut_open = truncated.open(cut_path);
+                expectTrue(cut_open, "截断成 1 MB 的副本还能解析表目录（所以后面读到的是真失败）");
+                if (cut_open) {
+                    const size_t cut_fail_before = truncated.cache().readFailures();
+                    const size_t cut_eof_before = truncated.cache().eofReads();
+                    // 把文件再砍到 4 KB。存储记的尺寸仍是 1 MB，于是 512 KB 处的读
+                    //   落在记录范围内、却读不到 —— 这正是"失败"而不是"文件尾"。
+                    {
+                        std::ofstream shrink(cut_path, std::ios::binary | std::ios::trunc);
+                        shrink.write(reinterpret_cast<const char*>(whole.data()), 4096);
+                    }
+                    std::vector<uint8_t> lost(4096, 0);
+                    size_t lost_got = 0;
+                    const FontRead lr =
+                        truncated.readAt(512u * 1024u, lost.data(), lost.size(), &lost_got);
+                    expectTrue(lr == FontRead::Error,
+                               "文件被截断后的读是失败（不是文件尾）");
+                    expectTrue(truncated.cache().readFailures() == cut_fail_before + 1,
+                               "真失败会让 readFailures 加一 —— 这个计数不是死代码");
+                    expectTrue(truncated.cache().eofReads() == cut_eof_before,
+                               "真失败一次都不进 eofReads（两个计数互不串台）");
                 }
-                std::vector<uint8_t> lost(4096, 0);
-                size_t lost_got = 0;
-                const FontRead lr =
-                    truncated.readAt(512u * 1024u, lost.data(), lost.size(), &lost_got);
-                expectTrue(lr == FontRead::Error,
-                           "文件被截断后的读是失败（不是文件尾）");
-                expectTrue(truncated.cache().readFailures() == cut_fail_before + 1,
-                           "真失败会让 readFailures 加一 —— 这个计数不是死代码");
-                expectTrue(truncated.cache().eofReads() == cut_eof_before,
-                           "真失败一次都不进 eofReads（两个计数互不串台）");
+                // 句柄在这里关闭（truncated 析构）。
             }
-            std::remove(cut_path.c_str());
+            cut_removed = std::remove(cut_path.c_str()) == 0;
+            expectTrue(cut_removed, "临时文件删掉了（删不掉就是每跑一次留一份残骸）");
 
             // 与它对照：没打开的存储同样是失败，且返回的字节数是零。
             FontStorage unopened;

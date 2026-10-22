@@ -10,11 +10,11 @@ import { defineConfig } from 'vite';
  */
 export default defineConfig({
   build: {
-    outDir: 'web/dist',
+    outDir: 'dist',
     emptyOutDir: true,
     target: 'es2020',
     lib: {
-      entry: 'web/src/index.ts',
+      entry: 'src/index.ts',
       name: 'HEditor',
       formats: ['es', 'iife'],
       fileName: (format) => (format === 'es' ? 'heditor.mjs' : 'heditor.iife.js'),

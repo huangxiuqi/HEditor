@@ -614,6 +614,9 @@ function sendState(ts: number, label: string, stats: any, changed?: boolean, wor
     // 引擎实时光标偏移（直读，不经过 editStats 那本账）。宿主拿它和 editStats 里的
     //   光标位置比，就能判出"有没有哪个改了状态的入口忘了给自己收尾"。
     caretLive: mod.caretOffsetLive(),
+    // 键位映射要同步读这两个：Worker 少一次往返，方向键就不会按错分支。
+    caretVertical: !!mod.caretVerticalNow(),
+    caretBlockReversed: !!mod.caretBlockReversedNow(),
     // 排版那本账（statsJson）与编辑那本账（editStatsJson）在单线程宿主上是两个入口，
     //   上面那个 stats 走的是编辑那本（宿主的内部逻辑要它：光标矩形、脏页、重画像素）。
     //   这里必须把排版那本也推过去 —— 否则主线程的 stats 会与 editStats 指向同一个对象，
@@ -1375,6 +1378,14 @@ function settle(opName: string, m: Args): { moved: boolean; scrolled: boolean; s
  * @returns {*} 命令结果；未知命令抛错
  */
 function read(name: any, args: any) {
+  // rawFrame 不在 READ 表里：它要拷一份（wasm 堆上的视图下一次 present 就被覆盖），
+  //   与 askOp 里那条特判是同一件事。inline 的 read 少了它，diag.rawFrame 直接抛。
+  if (name === 'rawFrame') {
+    const v = mod.frameRgba();
+    const copy = new Uint8ClampedArray(v.length);
+    copy.set(v);
+    return copy;
+  }
   const fn = READ[name];
   if (!fn) throw new Error('未知读取 ' + name);
   return fn(args || {});

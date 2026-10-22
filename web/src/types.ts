@@ -75,8 +75,14 @@ export interface EditorConfig {
   /** 倍数，1 = 100%（96 dpi）。引擎内部收的是密度（4/3 基准），换算只在接缝上做。 */
   zoom: number;
   pageMode: 'paged' | 'continuous';
-  /** 只读：编辑类方法返回 false，不发 change。 */
-  readOnly: boolean;
+  /**
+   * 编辑模式。三档都是产品语义，不是探针口径：
+   *   document —— 随便改（默认）；
+   *   form     —— 光标自由，但只有可编辑控件里的字改得动（填表）；
+   *   readOnly —— 光标自由，一个字都不许改（预览）。
+   * 只读时库的编辑方法直接返回 false；真正的拒绝仍由引擎判定（blockedEdits 记账）。
+   */
+  mode: 'document' | 'form' | 'readOnly';
   /** 是否由库内部接管键盘/指针/IME。默认 true；false 只给"自己驱动"的自动化宿主。 */
   input: boolean;
   /** 段落标记括号。会改变行宽，**要重排**。 */
@@ -203,7 +209,7 @@ export interface Diag {
   selfCheck(): unknown;
   markCheck(): unknown;
   rawFrame(): unknown;
-  frameDigest(): string;
+  frameDigest(): number;
   frameW(): number;
   frameH(): number;
   present(): void;
@@ -229,8 +235,50 @@ export interface Diag {
   clickAt(pt: { x: number; y: number }): Promise<void>;
   /** 选中 pos 所在单元格（自动化用）。 */
   selectCell(pos: Pos): Promise<void>;
-  /** 删控件（自动化用；产品里由输入层选中 + Delete 完成）。 */
-  removeControl(index: number): Promise<boolean>;
+  /** 删控件；keepContent = true 是拆壳（内容留下来变成普通正文）。 */
+  removeControl(index: number, keepContent?: boolean): Promise<boolean>;
+
+  /* ── 装载：内置场景与压力文档 ── */
+
+  /** 装载内置场景（id 同旧宿主：6 单段演示、7 多段长文）。zoom 是密度，不是倍数。 */
+  loadScenario(id: number, zoom?: number): Promise<unknown>;
+  /** 回到默认场景。 */
+  reset(id?: number, zoom?: number): Promise<unknown>;
+  /** 造 N 段、每段 M 字的压力文档（整篇同一个字）。 */
+  stress(paras: number, chars: number): Promise<unknown>;
+  /** 同上，但每段字不同；量字形缓存要用它，否则全命中失真。 */
+  stressDiverse(paras: number, chars: number): Promise<unknown>;
+  /** 表单样例（控件区间与只读标记都在里面）。 */
+  loadFormSample(variant?: number): Promise<unknown>;
+  /** 病历样例：读 assets/samples/medical-records.md，清洗后按段落建文档。 */
+  loadMedicalSample(repeat?: number): Promise<unknown>;
+  /** 整批重建控件（区间树的父子关系是全局性质，只能整棵换）。 */
+  setFormControls(list: Array<{ start: number; end: number; kind?: number; id?: string; ro?: boolean }>): Promise<unknown>;
+
+  /* ── 光标与相位：复现手势、定格一帧 ── */
+
+  /** 带归属的定位（field 是控件序号）：复现"点后一个字段的开头"。 */
+  setCaretAt(para: number, offset: number, field?: number): Promise<unknown>;
+  /** 只改位置、不呈现 —— 给"改位置"与"呈现"分账的对照实验。 */
+  setCaretOnly(para: number, offset: number): unknown;
+  /** 直接设定光标可见相位（不重绘）。 */
+  showCaret(on: boolean): unknown;
+  /** 重启闪烁（回到可见相位）。 */
+  startBlink(): void;
+  /** 停表：光标常亮，也不重绘。 */
+  stopBlink(): void;
+
+  /* ── 字体与窗口 ── */
+
+  /** 重装字体；mode = 'lazy' 走 MEMFS 按需读，'full' 整份交给引擎。 */
+  reloadFonts(mode?: 'full' | 'lazy'): Promise<{ mode: string; bytes: number }>;
+  /** 字体块缓存配置（字节 / 块数）。改完要重装字体才干净。 */
+  setFontCacheConfig(blockSize: number, maxBlocks: number): unknown;
+  /** 直接设窗口锚点（绕过滚动事件），量"换窗口要读多少字形"。 */
+  setViewportAnchor(first: number, count: number): unknown;
+
+  /** 页面级错误历史（与 error 事件同源，按发生顺序）。 */
+  errors(): string[];
 }
 
 /**

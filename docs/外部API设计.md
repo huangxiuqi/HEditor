@@ -25,7 +25,7 @@
 
 | 场景 | 典型宿主 | 用到的成员 |
 | --- | --- | --- |
-| **A 只读展示** | 合同预览、报告归档页 | `createEditor` `open` `geometry` `scrollTo` `configure({readOnly})` `on('error')` `destroy` |
+| **A 只读展示** | 合同预览、报告归档页 | `createEditor` `open` `geometry` `scrollTo` `configure({mode:'readOnly'})` `on('error')` `destroy` |
 | **B 表单填写** | 病历、审批单、报关单 | `open` `focusControl` `setControlProp` `form` `on('change')` `save` `destroy` |
 | **C 富文本编辑** | 笔记、工单、模板 | `open` `setText` `type` `deleteBackward/Forward` `splitParagraph` `mergeParagraph` `undo/redo` `setIndent` `caret` `setCaret` `moveCaret` `select` `selectAll` `selection` `insertText` `on('change'/'selection'/'caret')` `save` |
 | **D 数据填充** | 批量生成合同、套打 | `open` `insertText(pos, text)` `setControlProp` `save` |
@@ -81,7 +81,7 @@ const editor = await createEditor({
   transport: 'worker',            // 'worker' | 'inline'
   assets: { glue?, wasm? },       // 资源定位，默认按当前脚本地址推
   fonts: [...],                   // 不传用内置默认
-  config: { readOnly: true },     // 初始配置
+  config: { mode: 'readOnly' },   // 初始配置
   chrome: false,                  // 是否画工具条
 });
 
@@ -206,7 +206,7 @@ setText(text: string, opts?: { repeat?: number }): Promise<void>   // 明确用�
 | 类别 | 项 | 为什么 |
 | --- | --- | --- |
 | 构造期固定 | `container` `transport` `assets` `fonts` | 换容器要重建 DOM；换传输要重建 Worker；字体装一次最贵 |
-| 运行期可改 | `zoom` `pageMode` `readOnly` `input` `showBrackets` `showControlDots` `undoLimit` `caretStyle` `selectionStyle` | 有明确语义，代价可分级 |
+| 运行期可改 | `zoom` `pageMode` `mode` `input` `showBrackets` `showControlDots` `undoLimit` `caretStyle` `selectionStyle` | 有明确语义，代价可分级 |
 | 只读 | `pages` `geometry` `caret` `selection` | 从引擎状态推出来 |
 
 ### 7.2 一个入口，不是 14 个 setter
@@ -226,7 +226,11 @@ const c = editor.config();     // 生效后的值（越界已夹取）
 | 标签 | 项 |
 | --- | --- |
 | `none` | `undoLimit` |
-| `paint` | `readOnly` `input` `showControlDots` `caretStyle` `selectionStyle` |
+| `paint` | `mode` `input` `showControlDots` `caretStyle` `selectionStyle` |
+
+`mode` 是三档而不是 `readOnly: boolean`：`document` / `form` / `readOnly`。表单模式（光标自由、
+只有可编辑控件里的字改得动）是填表这个场景的主路径，布尔值表达不了它。三档都要落到引擎
+（`setEditMode 0/1/2`）—— 宿主侧那道拦截只保护库自己的方法，键盘走输入层，绕得过去（实测过）。
 | `relayout` | `zoom` `pageMode` `showBrackets` |
 | `reload` | `fonts`（构造期） |
 
@@ -611,10 +615,16 @@ vite 不做类型检查（只擦除类型），所以 `npm run build` 之后必�
 ### 13.2 目录
 
 ```
-package.json          exports / types / files / sideEffects / private（见 13.4）
-                      scripts: build / dev / typecheck（tsc --noEmit）/ check（四条判据）
-tsconfig.json         strict，noEmit（类型检查与构建分开；include 只有 src 与 types）
-vite.config.ts        build.lib + dts 插件 + wasm 拷贝 + dev 中间件
+web/                  前端工具链全在这里，仓库根只留 CMake 与 src/ tests/ scripts/
+  package.json        exports / types / files / sideEffects / private（见 13.4）
+                      scripts: build / dev / typecheck / check（四条判据）
+  tsconfig.json       strict，noEmit（类型检查与构建分开；include 只有 src 与 types）
+  tsconfig.build.json 声明产物：src/index.ts -> dist/*.d.ts
+  vite.config.ts      build.lib -> dist/（ESM + IIFE）
+  vite.engine.config.ts  src/engine/api.ts -> engine_api.js（经典脚本，给旧页面）
+  vite.worker.config.ts  src/transport/worker_main.ts -> dist/heditor_worker.js
+
+（下面这些在 web/src/ 下）
 src/
   index.ts            createEditor 与类型出口
   editor.ts           Editor 实现（编排，不含 DOM 细节）
