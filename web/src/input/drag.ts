@@ -1,9 +1,7 @@
 // 拖选：按下、移动、抬起这一条链，两套传输共用一份。
-//
 // 为什么共享：这条链里有三处容易分叉的地方 —— 起始阈值、边缘自动滚动的节拍、
 //   以及异步宿主下"同一时刻只允许一次命中测试在飞"的合并。各写一份，迟早会出现
 //   "单线程能选、Worker 上选不动"这类只在一边复现的偏差。
-//
 // 宿主注入三件事（按下时的定位由宿主自己做，模块只管"按下之后"），模块不碰引擎门面：
 //   pointAt(cx, cy)   客户端坐标 -> 文档设备像素
 //   hitAt(x, y)       命中：返回 {para, offset, side}；同步值或 Promise 都收
@@ -11,11 +9,17 @@
 // 另加一个滚动容器（container），边缘自动滚动用它。
 import type { Hit } from './keymap';
 
-/** 起始阈值（CSS 像素）：超过它才算真的在拖。没有它，手抖一像素就多出一格选区。 */
+/**
+ * 起始阈值（CSS 像素）：超过它才算真的在拖。没有它，手抖一像素就多出一格选区。
+ */
 const THRESHOLD_CSS = 3;
-/** 边缘自动滚动的内缩：留一点，不要正好停在容器边框上。 */
+/**
+ * 边缘自动滚动的内缩：留一点，不要正好停在容器边框上。
+ */
 const EDGE_INSET_CSS = 6;
-/** 每帧滚动量（CSS 像素）：越界 RAMP_CSS 达到上限。再快就看不清选到哪了。 */
+/**
+ * 每帧滚动量（CSS 像素）：越界 RAMP_CSS 达到上限。再快就看不清选到哪了。
+ */
 const MAX_SCROLL_CSS = 24;
 const RAMP_CSS = 60;
 
@@ -29,24 +33,36 @@ const RAMP_CSS = 60;
 const END_EVENTS = ['mouseup', 'pointerup', 'pointercancel', 'dragend', 'drop'];
 
 export interface DragPoint {
-  /** 文档设备像素。 */
+  /**
+   * 文档设备像素。
+   */
   x: number;
   y: number;
 }
 
 export interface DragSelectOptions {
-  /** 滚动容器：边缘自动滚动改的是它的 scrollTop。 */
+  /**
+   * 滚动容器：边缘自动滚动改的是它的 scrollTop。
+   */
   container: HTMLElement;
-  /** 客户端坐标 -> 文档设备像素。 */
+  /**
+   * 客户端坐标 -> 文档设备像素。
+   */
   pointAt(clientX: number, clientY: number): DragPoint;
-  /** 命中；同步值或 Promise 都收。 */
+  /**
+   * 命中；同步值或 Promise 都收。
+   */
   hitAt(x: number, y: number): Hit | null | Promise<Hit | null>;
-  /** 移动时的焦点端搬运（只动 focus）。 */
+  /**
+   * 移动时的焦点端搬运（只动 focus）。
+   */
   extendTo(hit: Hit): void;
   thresholdCss?: number;
 }
 
-/** 拖选状态读数（探针与状态栏用）。 */
+/**
+ * 拖选状态读数（探针与状态栏用）。
+ */
 export interface DragState {
   active: boolean;
   armed: boolean;
@@ -63,7 +79,9 @@ export interface DragSelect {
   end(): void;
   arm(on: boolean): void;
   state(): DragState;
-  /** 全部在途的命中都回来了才 resolve。 */
+  /**
+   * 全部在途的命中都回来了才 resolve。
+   */
   settled(): Promise<void>;
 }
 

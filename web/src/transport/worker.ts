@@ -1,9 +1,7 @@
 // Worker 传输：引擎在另一条线程上，主线程只持镜像与画布。
-//
-// 与同线程传输的区别只有两处，都收在 EngineLink 里：
-//   · 结果何时到：命令返回 Promise（worker 推回 state 才 resolve）；
-//   · 片元在哪贴：画布 transfer 给 worker，那一侧自己贴（pixels 恒为 null）。
-//
+// 与同线程传输的区别只有两处，都收在 EngineLink 里：结果何时到（命令返回 Promise，
+//   worker 推回 state 才 resolve）与片元在哪贴（画布 transfer 给 worker，那一侧自己贴；
+//   pixels 恒为 null）。
 // 镜像（mirror）是"同步查询"的代价：caret / selection / geometry / text 都是同步读，
 //   而跨线程读只能异步 —— 所以 worker 每一拍把这几样随状态一起推过来（见 api 的
 //   sendState）。推的都是小对象，省掉的是每拍一次 200 µs 的往返。
@@ -18,17 +16,21 @@ export interface WorkerOptions {
   container: HTMLElement;
   assets: AssetPaths;
   dpr: number;
-  /** 密度（设备像素 / 磅）。 */
+  /**
+   * 密度（设备像素 / 磅）。
+   */
   zoom: number;
   empty?: boolean;
   /**
    * 宿主由这一侧造（它需要 link 与画布存储，而两者都由这一侧造）。
-   * 画布存储必须延迟到宿主建好标记之后再造 —— 它要往 `#pages` 里塞元素。
+   * 画布存储必须延迟到宿主建好标记之后再造 —— 它要往 #pages 里塞元素。
    */
   makeHost(link: EngineLink, canvasStore: (pagesEl: HTMLElement) => CanvasStore): DomHost;
 }
 
-/** worker 推回来的那一份状态（只列主线程要用的）。 */
+/**
+ * worker 推回来的那一份状态（只列主线程要用的）。
+ */
 interface Mirror {
   ready: boolean;
   stats: any;
@@ -106,9 +108,8 @@ export function createWorker(opts: WorkerOptions): {
     };
   };
 
-  /** 把还在等的调用当场拒掉：出错的那一拍不会再有 state / ack 回来。 */
   /**
-   * 在途清空时唤醒的等待者（`flush` 用）。
+   * 在途清空时唤醒的等待者（flush 用）。
    *
    * 为什么不轮询：flush 的语义是"等队列排空"，轮询要么多等一拍、要么漏掉刚刚
    *   落地的那一批。这里由回话的处理点直接唤醒，条件一成立就是当前这一拍。
@@ -121,6 +122,9 @@ export function createWorker(opts: WorkerOptions): {
     for (const fn of w) fn();
   }
 
+  /**
+   * 把还在等的调用当场拒掉：出错的那一拍不会再有 state / ack 回来。
+   */
   function rejectPending(reason: string): void {
     const e = new Error(reason);
     for (const [id, p] of [...pending]) {
@@ -186,6 +190,13 @@ export function createWorker(opts: WorkerOptions): {
           return mirror.caretReport;
         case 'caretOffsetLive':
           return mirror.caretLive;
+        // 这两个是键位映射的热读，必须是同步布尔：hot() 拿它分支，而 ask 返回的
+        //   Promise 恒为真 —— 少了这两条，Worker 下方向键全部按竖排文档处理
+        //   （左右变成上下，位移读数为零），而 API 的 moveCaret 照样正常。
+        case 'caretVerticalNow':
+          return mirror.caretVertical;
+        case 'caretBlockReversedNow':
+          return mirror.caretBlockReversed;
         case 'caretStyleJson':
           return mirror.caretStyle;
         case 'selectionStyleJson':
@@ -204,7 +215,7 @@ export function createWorker(opts: WorkerOptions): {
           return mirror.geom?.count ?? 0;
         case 'hit':
           // 命中是输入层的必经之路，不是诊断：少了它，Worker 模式下单击不落光标、
-          //   拖选永远是空的。它必须是一次真往返（`ask`），不能落进下面的 default。
+          //   拖选永远是空的。它必须是一次真往返（ask），不能落进下面的 default。
           return ask('hit', args);
         case 'flowTextPos': {
           // 两端位置随 selection 一起推过来；别的流位置没有镜像，只能给 null。
@@ -275,7 +286,7 @@ export function createWorker(opts: WorkerOptions): {
     },
   };
 
-  /* ────────────── 画布（按槽 transfer） ────────────── */
+  // 画布（按槽 transfer）
 
   let store: SlotCanvases | null = null;
   const host = opts.makeHost(link, (pagesEl) => {
@@ -291,7 +302,7 @@ export function createWorker(opts: WorkerOptions): {
     return s;
   });
 
-  /* ────────────── 消息 ────────────── */
+  // 消息
 
   function onState(m: Args): void {
     if (disposed) return;
@@ -323,7 +334,7 @@ export function createWorker(opts: WorkerOptions): {
     // 画布集合跟着窗口走：新进窗口的页要先建槽再转移，缺这一步那几页永远是空白。
     host.syncPages();
     host.finish(mirror.stats);
-    // **普通写的回话点是这里**，不是 ack：一次写只推一条 state，`ts` 挂在它上面。
+    // 普通写的回话点是这里，不是 ack：一次写只推一条 state，ts 挂在它上面。
     //   唤醒放在 finish 之后 —— flush 的语义是"连这一拍的状态都落地了"，早一点唤醒
     //   就会读到上一拍的几何（缩放后页宽还是旧值）。
     maybeIdle();
@@ -386,7 +397,9 @@ export function createWorker(opts: WorkerOptions): {
     onWorkerError({ where: 'worker.onerror', message: e.message || String(e) });
   };
 
-  /** 等 worker 报 ready（它先报 ready 再装载 —— 否则装载里一抛异常宿主就永远等不到）。 */
+  /**
+   * 等 worker 报 ready（它先报 ready 再装载 —— 否则装载里一抛异常宿主就永远等不到）。
+   */
   function waitReady(): Promise<void> {
     return new Promise((resolve, reject) => {
       const t0 = performance.now();

@@ -1,11 +1,8 @@
 // 浏览器宿主：标记、页画布、输入接线、光标与 IME 的位置、滚动跟随。
-//
-// 这一份是两套传输（同线程 / Worker）**共有**的那一半 —— 上一版把它拆成了
-//   app.js 与 worker_host.js 两份，于是"点了没反应"这类问题要在两处各查一遍。
-//   差别只剩三处，全部收进 EngineLink：结果何时到（同步值还是 Promise）、
-//   片元在哪贴（这里 / Worker）、状态从哪读（引擎 / 镜像）。
-//
-// 一条纪律照旧：宿主不持有文档，也不做任何字符索引。偏移的单位在引擎里是码点，
+// 这一份是两套传输（同线程 / Worker）共有的那一半。分成两份的写法会让"点了没反应"
+//   这类问题要在两处各查一遍；差别只剩三处，全部收进 EngineLink：结果何时到
+//   （同步值还是 Promise）、片元在哪贴（这里 / Worker）、状态从哪读（引擎 / 镜像）。
+// 一条纪律：宿主不持有文档，也不做任何字符索引。偏移的单位在引擎里是码点，
 //   而 JS 字符串是 UTF-16 码元，JS 侧只要碰过 offset 算术，错就只在中文/上标/emoji
 //   上出现，而英文测试全过。
 import { armDprWatch, createZoom, then1, type Args, type Maybe, type ZoomControl } from '../input/keymap';
@@ -13,37 +10,61 @@ import { createDragSelect, type DragSelect } from '../input/drag';
 import { createInput, type InputLayer } from '../input/input';
 import { PageCanvases, type CanvasStore, type PageGeometry } from './pages';
 
-/** 一次读取的几何：页度量 + 窗口 + 总页数（都是设备像素，除 dpr）。 */
+/**
+ * 一次读取的几何：页度量 + 窗口 + 总页数（都是设备像素，除 dpr）。
+ */
 export interface HostView extends PageGeometry {
   totalPages: number;
-  /** 窗口首页。 */
+  /**
+   * 窗口首页。
+   */
   first: number;
-  /** 窗口页数。 */
+  /**
+   * 窗口页数。
+   */
   count: number;
 }
 
-/** 传输层交出来的引擎入口。同步宿主返回同步值，Worker 宿主返回 Promise / 镜像。 */
+/**
+ * 传输层交出来的引擎入口。同步宿主返回同步值，Worker 宿主返回 Promise / 镜像。
+ */
 export interface EngineLink {
-  /** 读命令。Worker 侧读的是主线程镜像，所以是同步的。 */
+  /**
+   * 读命令。Worker 侧读的是主线程镜像，所以是同步的。
+   */
   read(name: string, args?: Args): any;
-  /** 写命令的**引擎那一步**（不含收尾）；返回"有没有改动"。 */
+  /**
+   * 写命令的引擎那一步（不含收尾）；返回"有没有改动"。
+   */
   write(name: string, args?: Args): Maybe<boolean>;
-  /** 一次写之后的收尾：对窗口 → 必要时呈现 → 贴脏页。Worker 侧是空实现。 */
+  /**
+   * 一次写之后的收尾：对窗口 → 必要时呈现 → 贴脏页。Worker 侧是空实现。
+   */
   settle(opName: string): Maybe<any>;
-  /** 视口位置（设备像素）。窗口跟着可见页走，滚动本身不重排。 */
+  /**
+   * 视口位置（设备像素）。窗口跟着可见页走，滚动本身不重排。
+   */
   view(scrollY: number): Maybe<any>;
-  /** 几何快照。 */
+  /**
+   * 几何快照。
+   */
   geom(): HostView;
-  /** 分页 / 连页与页间隙（成套设，见 engine api 的 setViewMode）。 */
+  /**
+   * 分页 / 连页与页间隙（成套设，见 engine api 的 setViewMode）。
+   */
   setViewMode(gap: number, continuous: boolean): Maybe<any>;
-  /** 引擎把滚动位置归零了（装载类操作）—— 宿主跟着追平一次。 */
+  /**
+   * 引擎把滚动位置归零了（装载类操作）—— 宿主跟着追平一次。
+   */
   takeScrollReset(): boolean;
   /**
    * 某一页的导出像素（内容 + 瞬态，页内坐标）。
    *   Worker 传输返回 null：像素在那一侧贴，主线程根本没有这块内存。
    */
   pixels(page: number): Uint8ClampedArray | null;
-  /** 整份序列化成 JSON 文本。同线程直接读，Worker 是一次往返。 */
+  /**
+   * 整份序列化成 JSON 文本。同线程直接读，Worker 是一次往返。
+   */
   serialize(): Maybe<string>;
   /**
    * 等队列排空。
@@ -59,24 +80,42 @@ export type ChangeSource = 'user' | 'api';
 export interface DomHostOptions {
   container: HTMLElement;
   link: EngineLink;
-  /** 是否由库接管键盘 / 指针 / IME。默认 true；false 只给"自己驱动"的自动化宿主。 */
+  /**
+   * 是否由库接管键盘 / 指针 / IME。默认 true；false 只给"自己驱动"的自动化宿主。
+   */
   input?: boolean;
-  /** 只读时编辑命令由引擎拦（ReadOnly 档），宿主只用来提示状态。 */
+  /**
+   * 只读时编辑命令由引擎拦（ReadOnly 档），宿主只用来提示状态。
+   */
   readOnly(): boolean;
-  /** 状态栏（产品页没有这一格，实现里就什么都不做）。 */
+  /**
+   * 状态栏（产品页没有这一格，实现里就什么都不做）。
+   */
   status?(text: string, isErr?: boolean): void;
-  /** 一次编辑真的改了内容。 */
+  /**
+   * 一次编辑真的改了内容。
+   */
   onEdit?(changed: boolean, source: ChangeSource): void;
-  /** 光标 / 选区变了（每拍收尾时发一次，宿主侧按"值变了才发"去重）。 */
+  /**
+   * 光标 / 选区变了（每拍收尾时发一次，宿主侧按"值变了才发"去重）。
+   */
   onCaret?(): void;
   onSelection?(): void;
-  /** 呈现完成：这一拍重画了几页、花了多少毫秒（宿主侧计时）。 */
+  /**
+   * 呈现完成：这一拍重画了几页、花了多少毫秒（宿主侧计时）。
+   */
   onRender?(pages: number, ms: number): void;
-  /** 一页画布建好（Worker 传输在这里 transferControlToOffscreen）。 */
+  /**
+   * 一页画布建好（Worker 传输在这里 transferControlToOffscreen）。
+   */
   onPageCanvas?(page: number, el: HTMLCanvasElement): void;
-  /** 画布存储的造法。默认按页建销；Worker 传输换成按槽复用。 */
+  /**
+   * 画布存储的造法。默认按页建销；Worker 传输换成按槽复用。
+   */
   canvasStore?(pagesEl: HTMLElement): CanvasStore;
-  /** 页面级异常（脚本错误、未处理的异步失败）。 */
+  /**
+   * 页面级异常（脚本错误、未处理的异步失败）。
+   */
   onPageError?(message: string): void;
 }
 
@@ -85,38 +124,70 @@ export interface DomHost {
   readonly pagesEl: HTMLElement;
   readonly ta: HTMLTextAreaElement;
   readonly zoom: ZoomControl;
-  /** 把画布集合对齐到当前窗口，并按脏页贴一遍。返回贴了几页。 */
+  /**
+   * 把画布集合对齐到当前窗口，并按脏页贴一遍。返回贴了几页。
+   */
   blitPages(): number;
-  /** 只把画布集合对齐到当前窗口（Worker 侧贴图，这一侧只管建与摆）。 */
+  /**
+   * 只把画布集合对齐到当前窗口（Worker 侧贴图，这一侧只管建与摆）。
+   */
   syncPages(): void;
-  /** 内容整体作废（换缩放 / 换页度量 / 换文档）：所有页下次整页贴。 */
+  /**
+   * 内容整体作废（换缩放 / 换页度量 / 换文档）：所有页下次整页贴。
+   */
   invalidatePages(): void;
-  /** 只是一次重贴（配置类命令改的是光栅签名，不是内容）。 */
+  /**
+   * 只是一次重贴（配置类命令改的是光栅签名，不是内容）。
+   */
   repaint(): Maybe<any>;
-  /** 收尾：对齐窗口、贴页、摆 IME、发事件。 */
+  /**
+   * 收尾：对齐窗口、贴页、摆 IME、发事件。
+   */
   finish(st?: any): void;
-  /** 一次编辑的完整收尾（滚动 → 对窗口 → 上屏）。 */
+  /**
+   * 一次编辑的完整收尾（滚动 → 对窗口 → 上屏）。
+   */
   afterEdit(opName: string, source: ChangeSource): Maybe<boolean>;
-  /** 把光标滚进视口（装载、程序化定位之后用）。 */
+  /**
+   * 把光标滚进视口（装载、程序化定位之后用）。
+   */
   scrollCaretIntoView(st?: any): void;
-  /** 文档坐标（页内设备像素）换算。 */
+  /**
+   * 文档坐标（页内设备像素）换算。
+   */
   pointAt(clientX: number, clientY: number): { x: number; y: number };
-  /** 交给输入层的命中（已折成磅）。 */
+  /**
+   * 交给输入层的命中（已折成磅）。
+   */
   hitAt(xPt: number, yPt: number): Maybe<any>;
-  /** 输入层（自动化宿主可以 takeInput 之后自己驱动）。 */
+  /**
+   * 输入层（自动化宿主可以 takeInput 之后自己驱动）。
+   */
   readonly input: InputLayer;
   readonly drag: DragSelect | null;
-  /** 启动之后调一次：输入层与滚动从此开始工作。 */
+  /**
+   * 启动之后调一次：输入层与滚动从此开始工作。
+   */
   start(): void;
-  /** 传输层在途状态（Worker 的往返期间同理）。 */
+  /**
+   * 传输层在途状态（Worker 的往返期间同理）。
+   */
   setBusy(on: boolean): void;
-  /** 视觉焦点：IME 与键盘都落在承接层上。 */
+  /**
+   * 视觉焦点：IME 与键盘都落在承接层上。
+   */
   focus(): void;
-  /** 重启闪烁（回到可见相位）。 */
+  /**
+   * 重启闪烁（回到可见相位）。
+   */
   startBlink(): void;
-  /** 停表：光标常亮，且不重绘 —— 探针读"上一次全量"的账之前必须先停。 */
+  /**
+   * 停表：光标常亮，且不重绘 —— 探针读"上一次全量"的账之前必须先停。
+   */
   stopBlink(): void;
-  /** 卡片尺寸变了：重新报视口（引擎按它算窗口）。 */
+  /**
+   * 卡片尺寸变了：重新报视口（引擎按它算窗口）。
+   */
   resize(): Maybe<any>;
   destroy(): void;
 }
@@ -124,7 +195,7 @@ export interface DomHost {
 /**
  * 造编辑器需要的 DOM 骨架。
  *
- * 三段是硬要求：滚动舞台（`stage`）、页容器（`pages`）、承接层（`ime`）。
+ * 三段是硬要求：滚动舞台（stage）、页容器（pages）、承接层（ime）。
  *   承接层必须是一个真的可聚焦 textarea：canvas 收不到键盘，也收不到合成事件。
  */
 export function ensureMarkup(container: HTMLElement): void {
@@ -177,7 +248,7 @@ export function createDomHost(o: DomHostOptions): DomHost {
   let blitPages = 0;
   let blitPx = 0;
 
-  /* ────────────── 几何 ────────────── */
+  // 几何
 
   const view = (): HostView => link.geom();
 
@@ -230,7 +301,7 @@ export function createDomHost(o: DomHostOptions): DomHost {
     return patched;
   }
 
-  /* ────────────── IME 与滚动 ────────────── */
+  // IME 与滚动
 
   /**
    * 把承接键盘的 textarea 摆到光标处。
@@ -286,9 +357,11 @@ export function createDomHost(o: DomHostOptions): DomHost {
     else if (bot > viewBot) scroller.scrollTop = bot - scroller.clientHeight + pad * 2;
   }
 
-  /* ────────────── 收尾 ────────────── */
+  // 收尾
 
-  /** 收尾：对齐窗口、贴页、摆 IME、发事件。同一次状态可以重复来（Worker 会多拍）。 */
+  /**
+   * 收尾：对齐窗口、贴页、摆 IME、发事件。同一次状态可以重复来（Worker 会多拍）。
+   */
   function finish(st?: any): void {
     if (disposed) return;
     const s = st ?? link.read('editStats');
@@ -330,11 +403,13 @@ export function createDomHost(o: DomHostOptions): DomHost {
     });
   }
 
-  /* ────────────── 输入 ────────────── */
+  // 输入
 
   let drag: DragSelect | null = null;
 
-  /** 文档坐标（设备像素）：基准取页容器 —— 它的顶边就是文档第 0 页的顶边。 */
+  /**
+   * 文档坐标（设备像素）：基准取页容器 —— 它的顶边就是文档第 0 页的顶边。
+   */
   function pointAt(clientX: number, clientY: number): { x: number; y: number } {
     const r = pagesEl.getBoundingClientRect();
     const d = dpr();
@@ -344,16 +419,18 @@ export function createDomHost(o: DomHostOptions): DomHost {
   /**
    * 设备像素 -> 引擎的文档坐标（磅）。
    *
-   * **只在这里折算一次**。这条口径以前分在两处：输入层的 placeAt 自己除了 zoom，
-   *   拖选的 hitAt 没除 —— 96 dpi 下差 1.33 倍，症状是"单击落得准、拖选落到下一行"，
-   *   而且只在非 1.0 密度下显形（density 默认就带 4/3）。同一条规则写两遍就会分叉。
+   * 只在这里折算一次。同一条规则写两遍就会分叉：输入层与拖选各自除一次密度，
+   *   漏掉的那一处差 1.33 倍（96 dpi 的 density 就带 4/3），症状是"单击落得准、
+   *   拖选落到下一行"，而且只在非 1.0 密度下显形。
    */
   const docPt = (xPx: number, yPx: number): { x: number; y: number } => ({
     x: xPx / zoom.density,
     y: yPx / zoom.density,
   });
 
-  /** 命中：收**设备像素**（与 drag 的 pointAt 同一口径），内部折算成文档坐标。 */
+  /**
+   * 命中：收设备像素（与 drag 的 pointAt 同一口径），内部折算成文档坐标。
+   */
   const hitAt = (xPx: number, yPx: number): Maybe<any> => {
     const p = docPt(xPx, yPx);
     return read('hit', { x: p.x, y: p.y });
@@ -401,7 +478,7 @@ export function createDomHost(o: DomHostOptions): DomHost {
         pagesEl.setPointerCapture(lastPointerId);
         capturedId = lastPointerId;
       } catch {
-        /* 合成事件没有指针 */
+        // 合成事件没有指针
       }
       lastPointerId = null;
     },
@@ -441,7 +518,7 @@ export function createDomHost(o: DomHostOptions): DomHost {
       caretOn = true;
       void afterEdit('cellSelectAt', 'user');
     },
-    status: (text) => o.status?.(text),
+    status: (text, isErr) => o.status?.(text, isErr),
   });
 
   /**
@@ -475,7 +552,9 @@ export function createDomHost(o: DomHostOptions): DomHost {
     }, 530);
   }
 
-  /** 只呈现一次（不重排）：闪烁、样式变更、显式 present 都走它。 */
+  /**
+   * 只呈现一次（不重排）：闪烁、样式变更、显式 present 都走它。
+   */
   function repaint(): Maybe<any> {
     writeOp('present', {});
     return then1(link.settle('present'), (st) => {
@@ -505,7 +584,7 @@ export function createDomHost(o: DomHostOptions): DomHost {
       try {
         pagesEl.releasePointerCapture(capturedId);
       } catch {
-        /* 已经没了 */
+        // 已经没了
       }
       capturedId = null;
     }
@@ -520,7 +599,7 @@ export function createDomHost(o: DomHostOptions): DomHost {
   });
   }
 
-  /* ────────────── 滚动与视口 ────────────── */
+  // 滚动与视口
 
   let scrollRaf = 0;
   let lastScrollTop = 0;
@@ -544,7 +623,7 @@ export function createDomHost(o: DomHostOptions): DomHost {
   const stopDprWatch = armDprWatch((next) => {
     if (!ready || disposed) return;
     if (next === zoom.dpr) return;
-    // 倍数不变、密度按新屏幕重算：用户看到的是同一个百分比。
+    // 倍数不变、密度按新屏幕重算：屏幕上仍是同一个百分比。
     //   反推倍数必须用 storedDpr（旧屏幕），不能用新 DPR —— 那会读到一个平白缩掉
     //   一半的假倍数，照它写回去等于空操作。
     const factor = zoom.factorOf(zoom.density);
@@ -566,7 +645,7 @@ export function createDomHost(o: DomHostOptions): DomHost {
   window.addEventListener('error', onWindowError);
   window.addEventListener('unhandledrejection', onRejection);
 
-  /* ────────────── 对外 ────────────── */
+  // 对外
 
   const host: DomHost = {
     stage: stageEl,

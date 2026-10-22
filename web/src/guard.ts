@@ -3,14 +3,11 @@ import { DIAG_MEMBER, PUBLIC_MEMBERS } from './public_members.gen';
 /**
  * 公开面的白名单闸。
  *
- * 为什么是 Proxy 而不是"约定"：约定在 JS 里等于没有 —— 使用者只要写 `editor.auditFrame`
- *   就能拿到诊断面，而那份形状不承诺稳定。这里让它当场抛，错误消息直接说清能调什么。
+ * 为什么是 Proxy 而不是约定：约定在 JS 里等于没有 —— 使用者只要写 editor.auditFrame
+ *   就能拿到诊断面，而那份形状不承诺稳定。这里让它当场抛，并说清能调什么。
  *
- * 四类键必须放行，否则守卫会把正常用法也拦掉：
- *   · `then` —— `await editor` 会先读它探测 thenable；
- *   · `toJSON` —— `JSON.stringify(editor)`；
- *   · `constructor` —— 有些库会读它做类型判断；
- *   · Symbol —— 迭代协议、`Symbol.toStringTag` 之类。
+ * 四类键必须放行，否则守卫会把正常用法也拦掉：then（await 探测 thenable）、toJSON
+ *   （JSON.stringify）、constructor（类型判断）、Symbol（迭代协议）。
  *
  * @param target 实现对象
  * @param debug  是否带 diag（只有 createEditor({ debug: true }) 才有）

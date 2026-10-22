@@ -1066,7 +1066,9 @@ var __heditorEngineApiExports = function(exports) {
       attach,
       read,
       write,
-      /** 装载类命令把滚动位置归零了：读一次就清（宿主按它追平 scrollTop）。 */
+      /**
+       * 装载类命令把滚动位置归零了：读一次就清（宿主按它追平 scrollTop）。
+       */
       takeScrollReset: () => {
         const v = scrollReset;
         scrollReset = false;

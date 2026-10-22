@@ -8,10 +8,11 @@
     "build": "npm run build:engine && vite build && npm run build:types && npm run build:worker",
     "dev": "vite",
     "typecheck": "tsc --noEmit -p .",
-    "check": "npm run build:engine && npm run build:types && python ../scripts/gen_payloads.py --check && python ../scripts/gen_public_members.py --check && node ../scripts/idl_check.mjs && node ../scripts/api_check.mjs && npm run typecheck",
+    "check": "npm run build:engine && npm run build:types && python ../scripts/gen_payloads.py --check && python ../scripts/gen_public_members.py --check && python ../scripts/lint_comments.py && node ../scripts/idl_check.mjs && node ../scripts/api_check.mjs && npm run typecheck",
     "build:engine": "vite build --config vite.engine.config.ts",
     "build:worker": "vite build --config vite.worker.config.ts",
-    "build:types": "tsc -p tsconfig.build.json"
+    "build:types": "tsc -p tsconfig.build.json",
+    "lint:comments": "python ../scripts/lint_comments.py"
   },
   "devDependencies": {
     "typescript": "5.6",

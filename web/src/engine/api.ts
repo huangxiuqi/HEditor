@@ -1,62 +1,87 @@
 // 引擎侧：命令表、状态、窗口计算。两侧宿主共用这一份。
-//
 // 为什么单独成文件：worker 宿主与单线程宿主的差别只有三处（帧去哪、结果何时到、
 //   输入层怎么挂），引擎访问面本身没有差别。命令名、状态归属、窗口滞回这三样只要
 //   各写一遍，两个宿主就会从"同构"漂成"两套"—— 实测两边的命令名交集只有 35 个，
 //   而 app.js 直调了 96 个方法。收成一份之后，新增引擎能力只动这张表。
-//
 // 边界：本文件不碰 document、不碰 DOM、不碰 OffscreenCanvas。凡是要碰画布的地方
 //   都走 cfg.host 的钩子（ctxOfPage / blitPages / invalidateSlots ...），由宿主实现。
 //   这样同一份代码能跑在 Worker 里，也能跑在主线程里。
-//
 // 通道（与 web/engine_worker.js、未来的 transport_worker.js 的约定）：
 //   下行：boot / pageCanvas / viewMode / view / do（改状态）/ ask（要返回值）
 //   上行：ready / state / ack / reply / error
-/* 移植自 web/engine_api.js（C 步，见 docs/外部API设计.md §14）。 */
+// 移植自 web/engine_api.js（C 步，见 docs/外部API设计.md §14）。
 
-/* 类型：只封边界，不重抄导出面 */
+// 类型：只封边界，不重抄导出面
 
 /**
  * wasm 模块实例。
  *
- * 为什么不逐个写出签名：那 107 个导出的真源是 C++ 侧与 `emcc --emit-tsd` 生成的
- *   `web/types/wasm.gen.d.ts`（§10.2）。在这里手抄一遍就是第三份，而且它会静默过期。
+ * 为什么不逐个写出签名：那 107 个导出的真源是 C++ 侧与 emcc --emit-tsd 生成的
+ *   web/types/wasm.gen.d.ts（§10.2）。在这里手抄一遍就是第三份，而且它会静默过期。
  *   所以本文件内部一律按"引擎句柄"用，边界上的类型由生成物提供。
  */
 type Mod = any;
 
-/** 一条命令的参数：键名由命令表那一列与调用方约定，不在这里建模。 */
+/**
+ * 一条命令的参数：键名由命令表那一列与调用方约定，不在这里建模。
+ */
 export type Args = Record<string, any>;
 
-/** 命令实现：返回"有没有改动"、一份结果，或装载类的 Promise。 */
+/**
+ * 命令实现：返回"有没有改动"、一份结果，或装载类的 Promise。
+ */
 type Cmd = (a: Args) => any;
 
-/** 引擎侧要宿主提供的呈现钩子（worker 壳与主线程宿主各一份实现）。 */
+/**
+ * 引擎侧要宿主提供的呈现钩子（worker 壳与主线程宿主各一份实现）。
+ */
 export interface EngineHostHooks {
-  /** 把还欠着的脏页贴到页画布上，返回贴了几页。 */
+  /**
+   * 把还欠着的脏页贴到页画布上，返回贴了几页。
+   */
   blitPages(): number;
-  /** 最近一次贴页的账：毫秒 / 页数 / 像素。 */
+  /**
+   * 最近一次贴页的账：毫秒 / 页数 / 像素。
+   */
   blitStats(): { ms: number; pages: number; px: number };
-  /** 内容整体作废（换缩放 / 换页度量 / 换文档）：所有槽都要重贴。 */
+  /**
+   * 内容整体作废（换缩放 / 换页度量 / 换文档）：所有槽都要重贴。
+   */
   invalidateSlots(): void;
-  /** 主线程报来的一张页画布（worker 侧登记槽位）。 */
+  /**
+   * 主线程报来的一张页画布（worker 侧登记槽位）。
+   */
   addCanvas(m: Args): void;
-  /** 切分页 / 连页与页间隙。 */
+  /**
+   * 切分页 / 连页与页间隙。
+   */
   setViewMode(m: Args): void;
-  /** 已经建好几个槽。 */
+  /**
+   * 已经建好几个槽。
+   */
   slotCount(): number;
-  /** 还欠几页画布（0 = 窗口内每页都有画布）。 */
+  /**
+   * 还欠几页画布（0 = 窗口内每页都有画布）。
+   */
   pagesMissing(): number;
-  /** 某一页的画布上下文（worker 侧贴图用）。 */
+  /**
+   * 某一页的画布上下文（worker 侧贴图用）。
+   */
   ctxOfPage(page: number): any;
-  /** 已经建好几张画布。 */
+  /**
+   * 已经建好几张画布。
+   */
   canvasCount(): number;
-  /** 装载胶水层并返回工厂（worker 用 importScripts，主线程用 <script>）。 */
+  /**
+   * 装载胶水层并返回工厂（worker 用 importScripts，主线程用 <script>）。
+   */
   loadGlue(url: string, exportName: string): Promise<unknown>;
 }
 
 export interface EngineApiConfig {
-  /** 上行发送。worker 侧是 postMessage，主线程侧是直接丢弃（in-thread 自己取返回值）。 */
+  /**
+   * 上行发送。worker 侧是 postMessage，主线程侧是直接丢弃（in-thread 自己取返回值）。
+   */
   post(msg: Args, transfer?: Transferable[]): void;
   host: EngineHostHooks;
 }
@@ -64,11 +89,10 @@ export interface EngineApiConfig {
 /**
  * 命令表实例。
  *
- * 两套入口，用途不同、不能混：
- *   · `read` / `write` —— in-thread 宿主用。只跑引擎那一步，收尾（present / 重贴 / 回推）
- *     留在宿主侧，因为同步宿主靠"调用即生效"当对照物。
- *   · `do` / `ask` / `view` / `pageCanvas` / `viewMode` —— worker 壳用。跑完自己收尾并回推。
- * `engine()` 只给装载与取像素视图，不要拿它绕过命令表。
+ * 两套入口用途不同、不能混：read / write 给 in-thread 宿主，只跑引擎那一步，收尾
+ *   （present / 重贴 / 回推）留在宿主侧，因为同步宿主靠"调用即生效"当对照物；
+ *   do / ask / view / pageCanvas / viewMode 给 worker 壳，跑完自己收尾并回推。
+ * engine() 只给装载与取像素视图，不要拿它绕过命令表。
  */
 export interface EngineApi {
   boot(m: Args): Promise<void>;
@@ -82,9 +106,13 @@ export interface EngineApi {
   sendState(ts: number, label: string, stats: any, changed?: boolean, workMs?: number): void;
   geom(st?: any): Args;
   attach(engine: Mod): void;
-  /** in-thread 的收尾（滚动 → 窗口 → present → 贴页）。 */
+  /**
+   * in-thread 的收尾（滚动 → 窗口 → present → 贴页）。
+   */
   settle(opName: string, m: Args): { moved: boolean; scrolled: boolean; stats: any };
-  /** 装载类命令把滚动位置归零了：读一次就清。 */
+  /**
+   * 装载类命令把滚动位置归零了：读一次就清。
+   */
   takeScrollReset(): boolean;
   read(name: string, args?: Args): any;
   write(name: string, args?: Args): any;
@@ -94,7 +122,7 @@ export interface EngineApi {
   state(ts: number, label: string, stats: any, changed?: boolean, workMs?: number): void;
 }
 
-/* 协议表 */
+// 协议表
 
 /**
  * 宿主与引擎之间的每一个动词，一条一行：[命令名, 类别, 调的 wasm 导出, 呈现归属]。
@@ -332,7 +360,7 @@ const kPageWidthPt = 595.276;
 const kPageHeightPt = 841.89;
 const kPageMarginPt = 56.7;
 
-/* 字体 */
+// 字体
 
 async function fetchFont(path: string): Promise<Uint8Array> {
   const res = await fetch(path);
@@ -376,7 +404,7 @@ async function installFonts(mode: string): Promise<number> {
   return bytes;
 }
 
-/* 几何 */
+// 几何
 
 function geom(st: any) {
   const ph = mod.pagePxHeight();
@@ -521,7 +549,7 @@ function retarget(st: any) {
   return true;
 }
 
-/* 呈现收尾 */
+// 呈现收尾
 
 /**
  * 收尾：必要时呈现一次，然后把脏页重贴上去，返回这一拍的账。
@@ -637,7 +665,7 @@ function sendState(ts: number, label: string, stats: any, changed?: boolean, wor
 
 function push(ts: any, opName: any, changed: any) { sendState(ts, opName, render(opName), changed); }
 
-/* 装载 */
+// 装载
 
 /**
  * 全量重排重绘的公共收尾。
@@ -652,7 +680,6 @@ function push(ts: any, opName: any, changed: any) { sendState(ts, opName, render
 function paintFull() {
   // 换文档、换缩放、换页度量、重设窗口锚点：页像素尺寸或页面内容整体变了，
   //   每个槽里装的都可能是上一份的像素，所以槽表整体作废、这一趟整窗重贴。
-  //
   // 这一条必须显式：paintFull 自己先把窗口锚点设好了，随后 render() 里的 retarget
   //   会判"窗口没动"。按页号建销的那一版里，这一趟总有一批新画布陆续到达、各自把
   //   那一页贴一次，于是"整窗都换过页"被顺带补齐了；改成按槽复用之后画布不再新建，
@@ -751,7 +778,7 @@ async function boot(m: any) {
   }
 }
 
-/* 运算表 */
+// 运算表
 
 // 改状态的运算。跑完一律收尾（present + 重贴 + 回推 state）。
 const WRITE = collect('w', {
@@ -1242,7 +1269,7 @@ function pumpPrewarm() {
   --pfLeft;
 }
 
-/* 消息入口 */
+// 消息入口
 
 async function doOp(m: any) {
   // 静默档先查：它只改引擎状态，什么都不回推（对照单线程宿主的 stopBlink/showCaret）。
@@ -1348,7 +1375,7 @@ function relayout() {
 /**
  * in-thread 的一次收尾：滚动位置落地 → 决定窗口 → 必要时 present → 贴脏页。
  *
- * 与 worker 侧 `view` + `push` 同一口径，区别只有两点：同步，且把"先滚再对窗口"
+ * 与 worker 侧 view + push 同一口径，区别只有两点：同步，且把"先滚再对窗口"
  *   这条顺序做进一次调用里（顺序反了窗口就按旧的滚动位置算 —— 光标在第 0 页而屏幕
  *   停在第 15 页时，窗口会被拉成整篇）。
  *
@@ -1421,7 +1448,9 @@ return {
   boot, do: doOp, ask: askOp, view, pageCanvas, viewMode, setViewMode, relayout, sendState,
   geom, settle,
   attach, read, write,
-  /** 装载类命令把滚动位置归零了：读一次就清（宿主按它追平 scrollTop）。 */
+  /**
+   * 装载类命令把滚动位置归零了：读一次就清（宿主按它追平 scrollTop）。
+   */
   takeScrollReset: () => {
     const v = scrollReset;
     scrollReset = false;

@@ -1,10 +1,8 @@
 // 同线程传输：引擎就在这一页上。
-//
 // 这一份只做三件事，别让它长回来：
 //   一、把胶水脚本按地址装进来（一次，多个实例共用同一份模块工厂）；
 //   二、造命令表实例，把"贴页"这条钩子接到宿主上；
 //   三、把 EngineLink 的六个动词映到命令表上 —— 同步值，不是 Promise。
-//
 // 为什么坚持同步：单线程宿主是"调用即生效"的对照物。把这里改成 await 一层，
 //   输入事件处理完就不再是"已经生效"，探针的同步假设连带失效（实测 edit_probe
 //   14 项红、耗时 42 → 158 s）。
@@ -13,16 +11,26 @@ import type { DomHost, EngineLink, HostView } from '../host/dom';
 import type { Args } from '../input/keymap';
 import type { FontSource } from '../types';
 
-/** 素材地址：胶水、字体、wasm。 */
+/**
+ * 素材地址：胶水、字体、wasm。
+ */
 export interface AssetPaths {
-  /** 胶水脚本的绝对地址（heditor.js）。 */
+  /**
+   * 胶水脚本的绝对地址（heditor.js）。
+   */
   glue: string;
-  /** 缓存戳（`?v=` 之后那一串），会一路带到 wasm 的 locateFile。 */
+  /**
+   * 缓存戳（?v= 之后那一串），会一路带到 wasm 的 locateFile。
+   */
   bust?: string;
   fonts: Array<{ role: string; path: string; label?: string }>;
-  /** 产物目录（相对地址按它解析）。 */
+  /**
+   * 产物目录（相对地址按它解析）。
+   */
   base: string;
-  /** Worker 壳的地址（`transport: 'worker'` 用）。 */
+  /**
+   * Worker 壳的地址（transport: 'worker' 用）。
+   */
   worker?: string;
 }
 
@@ -30,13 +38,19 @@ export interface InlineOptions {
   container: HTMLElement;
   assets: AssetPaths;
   dpr: number;
-  /** 密度（设备像素 / 磅）。 */
+  /**
+   * 密度（设备像素 / 磅）。
+   */
   zoom: number;
-  /** 初始文档：true = 一份空文档（库的默认），false = 演示场景。 */
+  /**
+   * 初始文档：true = 一份空文档（库的默认），false = 演示场景。
+   */
   empty?: boolean;
 }
 
-/** 胶水脚本只注入一次：多个实例各要一个引擎，但脚本本身只该装一遍。 */
+/**
+ * 胶水脚本只注入一次：多个实例各要一个引擎，但脚本本身只该装一遍。
+ */
 const gluePromises = new Map<string, Promise<void>>();
 
 function loadScript(src: string): Promise<void> {
@@ -172,7 +186,9 @@ export function createInline(opts: InlineOptions): {
   };
 }
 
-/** 字体清单：默认三份 Noto（正文 / 蒙文 / 拉丁），路径相对产物目录。 */
+/**
+ * 字体清单：默认三份 Noto（正文 / 蒙文 / 拉丁），路径相对产物目录。
+ */
 export function defaultFonts(base: string, list?: FontSource[]): Array<{ role: string; path: string }> {
   const src = list && list.length
     ? list.map((f, i) => ({ role: f.role ?? ['cjk', 'mongol', 'latin'][i] ?? 'cjk', path: f.url }))

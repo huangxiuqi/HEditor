@@ -50,10 +50,12 @@ bool insertTextUtf8(int para, size_t offset, const std::string& utf8);
 也不是规范的块注释，两边的读者都会误判它的用途。单行说明用 `//`；
 需要块注释的地方（声明处）展开成三行 —— `/**`、` * 说明`、` */`。
 
-### JavaScript
+### JavaScript / TypeScript
 
 顶层函数与导出对象的方法使用 JSDoc；函数内的局部变量与行内说明用 `//`。
-同样禁用 markdown 记号与 emoji，同样不写单行块注释（`/** 说明 */` 要展开成三行）：
+同样禁用 markdown 记号与 emoji，同样不写单行块注释（`/** 说明 */` 要展开成三行）。
+TypeScript 与 JS 同一套要求：`web/src/**/*.ts` 里的 JSDoc 会原样进 `dist/*.d.ts`，
+写坏了直接给使用者看。
 
 ```js
 /**
@@ -128,6 +130,8 @@ function blitFrame(px, w) {}
   光栅只有一个实现 `bitmap_skia.cpp`，两侧都链接它 —— 不要再引入第二个后端，
   跨后端像素比较没有判据意义。
 - 注释合规检查：`python scripts/lint_comments.py`（加 `-v` 打印违规原文；违规则退出码 1）。
+  扫描 src 与 tests 的 C/C++、scripts 的 .mjs、web 根下的 .js/.ts 与 web/src 下的 .ts；
+  `cd web && npm run check` 里也调它，所以前端那一侧漏不过去。
   **违规数必须为 0，不设基线**：新写的注释一旦违规就当场改掉，不要把它记成"基线"留到以后。
   基线这种记账法只会让数字慢慢往上爬 —— 本项目就这么积到过 147 处，最后要一次性清掉。
   共 12 条规则，写在脚本文件头：反引号、装饰分隔线、markdown 强调、流水账用语、

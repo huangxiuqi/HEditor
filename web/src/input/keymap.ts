@@ -1,36 +1,51 @@
 // 输入层的判定部分：键位映射、命中归宿、连击计数、缩放口径、屏幕像素比跟随。
-//
 // 这些函数决定的是"这一下算哪条命令"，与"谁持有画布、结果何时到"无关 ——
-//   后者从环境对象进来（见 ./input.ts）。两条纪律照旧：
-//     · 这里不出现引擎句柄，也不出现具体画布元素 —— 一旦出现，两个宿主又各有一套；
-//     · 写入一律按"同步值或 Promise"处理（then1），不把同步宿主逼成微任务：
-//       单线程宿主靠"调用即生效"作为对照物，那条性质不能为了统一形状而丢掉。
+//   后者从环境对象进来（见 ./input.ts）。两条纪律：这里不出现引擎句柄，也不出现
+//   具体画布元素 —— 一旦出现，两个宿主又各有一套；写入一律按"同步值或 Promise"
+//   处理（then1），不把同步宿主逼成微任务，因为单线程宿主靠"调用即生效"当对照物，
+//   那条性质不能为了统一形状而丢掉。
 
-/** 同步值或 Promise。两套传输共用一套判定，差别只在返回的是哪一种。 */
+/**
+ * 同步值或 Promise。两套传输共用一套判定，差别只在返回的是哪一种。
+ */
 export type Maybe<T> = T | Promise<T>;
 
-/** 命令参数：键名由命令表那一列与调用方约定，这里不逐个建模。 */
+/**
+ * 命令参数：键名由命令表那一列与调用方约定，这里不逐个建模。
+ */
 export type Args = Record<string, any>;
 
-/** 热读：方向键怎么映射取决于当前段是横排还是竖排、竖排列序朝哪边。 */
+/**
+ * 热读：方向键怎么映射取决于当前段是横排还是竖排、竖排列序朝哪边。
+ */
 export interface HotState {
   vertical?: boolean;
   blockReversed?: boolean;
 }
 
-/** 引擎的命中结果（`hitTest` 的载荷）。字段有值就代表那一种归宿。 */
+/**
+ * 引擎的命中结果（hitTest 的载荷）。字段有值就代表那一种归宿。
+ */
 export interface Hit {
   para: number;
   offset: number;
-  /** 相邻字段共享边界时要靠它分辨点的是哪一侧。 */
+  /**
+   * 相邻字段共享边界时要靠它分辨点的是哪一侧。
+   */
   side?: number;
-  /** 折行处同一个偏移压着两行，要带行别。 */
+  /**
+   * 折行处同一个偏移压着两行，要带行别。
+   */
   line?: number;
-  /** 点在格子边距带上：这一下表达的是"选整格"。 */
+  /**
+   * 点在格子边距带上：这一下表达的是"选整格"。
+   */
   cellPara?: number;
 }
 
-/** 落光标（可带侧别 / 行别）。 */
+/**
+ * 落光标（可带侧别 / 行别）。
+ */
 export interface CaretAction {
   kind: 'caret';
   para: number;
@@ -39,16 +54,22 @@ export interface CaretAction {
   line?: number;
 }
 
-/** 选整格：点的是格子边距带。 */
+/**
+ * 选整格：点的是格子边距带。
+ */
 export interface CellAction {
   kind: 'cell';
   para: number;
 }
 
-/** 命中之后的两条去向。 */
+/**
+ * 命中之后的两条去向。
+ */
 export type HitAction = CellAction | CaretAction;
 
-/** 连击计数状态，由调用方持有。 */
+/**
+ * 连击计数状态，由调用方持有。
+ */
 export interface ClickState {
   seq: number;
   time: number;
@@ -228,19 +249,33 @@ export function hitToAction(hit: Hit | null | undefined): HitAction | null {
   return act;
 }
 
-/** 缩放口径的两个读数。 */
+/**
+ * 缩放口径的两个读数。
+ */
 export interface ZoomControl {
-  /** 当前密度（设备像素 / 磅）。 */
+  /**
+   * 当前密度（设备像素 / 磅）。
+   */
   readonly density: number;
-  /** 现有密度是按哪个屏幕算的。换屏判断要跟它比，不要跟当下 DPR 比。 */
+  /**
+   * 现有密度是按哪个屏幕算的。换屏判断要跟它比，不要跟当下 DPR 比。
+   */
   readonly dpr: number;
-  /** 当下屏幕的基准密度：倍数 1 对应的密度。 */
+  /**
+   * 当下屏幕的基准密度：倍数 1 对应的密度。
+   */
   base(): number;
-  /** 倍数转密度。 */
+  /**
+   * 倍数转密度。
+   */
   ofFactor(f: number): number;
-  /** 密度转倍数。 */
+  /**
+   * 密度转倍数。
+   */
   factorOf(d: number): number;
-  /** 改密度。返回新密度，宿主只管把它存进自己的变量。 */
+  /**
+   * 改密度。返回新密度，宿主只管把它存进自己的变量。
+   */
   set(d: number): number;
 }
 

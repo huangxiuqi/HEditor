@@ -1,14 +1,14 @@
 // 页画布表：文档里每页一张 canvas，按 (页号 x 步距) 绝对定位。
-//
 // 为什么一页一张而不是整篇一张：
 //   引擎里已经没有"整窗帧"了（5D-2），渲染只写页位图；宿主这边照页切之后，改一页就只
 //   重合成那一页。整篇一张时哪怕只改一个字，浏览器也要把整张 18 Mpx 的图层重新合成
 //   一遍（实测多花整整一个 vsync，见 scripts/diag_perf.mjs）。
-//
 // 只保留窗口内的页：画布是宿主侧唯一持有像素的地方，留几张就等于留多少内存 ——
 //   也是"整篇 3000 段"不再撑爆内存的原因。
 
-/** 一页画布：元素、上下文、以及"还没被贴过"的标志。 */
+/**
+ * 一页画布：元素、上下文、以及"还没被贴过"的标志。
+ */
 export interface PageRec {
   el: HTMLCanvasElement;
   g: CanvasRenderingContext2D | null;
@@ -20,23 +20,35 @@ export interface PageRec {
   fresh: boolean;
 }
 
-/** 贴页所需的几何（设备像素，与引擎同一口径）。 */
+/**
+ * 贴页所需的几何（设备像素，与引擎同一口径）。
+ */
 export interface PageGeometry {
-  /** 页宽 / 页高（设备像素）。 */
+  /**
+   * 页宽 / 页高（设备像素）。
+   */
   pw: number;
   ph: number;
-  /** 页间隙（设备像素）。 */
+  /**
+   * 页间隙（设备像素）。
+   */
   gap: number;
-  /** 屏幕像素比：CSS 尺寸 = 设备像素 / dpr。 */
+  /**
+   * 屏幕像素比：CSS 尺寸 = 设备像素 / dpr。
+   */
   dpr: number;
 }
 
 export class PageCanvases {
   private readonly pagesEl: HTMLElement;
   private readonly map = new Map<number, PageRec>();
-  /** 卸下来的画布留着复用：留住元素就是留住那份已实体化的 backing store。 */
+  /**
+   * 卸下来的画布留着复用：留住元素就是留住那份已实体化的 backing store。
+   */
   private readonly pool: HTMLCanvasElement[] = [];
-  /** 一页画布建好时通知对端（worker 传输在这里 transfer）。 */
+  /**
+   * 一页画布建好时通知对端（worker 传输在这里 transfer）。
+   */
   onCreated: ((page: number, el: HTMLCanvasElement) => void) | null = null;
 
   constructor(pagesEl: HTMLElement) {
@@ -127,7 +139,9 @@ export class PageCanvases {
     }
   }
 
-  /** 整页贴一张（新页 / 报脏但给不出矩形时的退路）。 */
+  /**
+   * 整页贴一张（新页 / 报脏但给不出矩形时的退路）。
+   */
   blitAll(page: number, src: Uint8ClampedArray, pw: number, ph: number): number {
     const rec = this.map.get(page);
     if (!rec || !rec.g) return 0;
@@ -170,7 +184,9 @@ export class PageCanvases {
     return px;
   }
 
-  /** 内容整体作废：所有页下次都要整页贴。 */
+  /**
+   * 内容整体作废：所有页下次都要整页贴。
+   */
   invalidate(): void {
     for (const rec of this.map.values()) rec.fresh = true;
   }
@@ -182,7 +198,9 @@ export class PageCanvases {
   }
 }
 
-/** 画布存储：同线程按页建销，Worker 按槽复用。宿主只认这五个动作。 */
+/**
+ * 画布存储：同线程按页建销，Worker 按槽复用。宿主只认这五个动作。
+ */
 export interface CanvasStore {
   readonly size: number;
   get(page: number): PageRec | undefined;
@@ -195,7 +213,7 @@ export interface CanvasStore {
 /**
  * 按槽复用的画布集合（Worker 传输用）。
  *
- * 为什么不能按页建：`transferControlToOffscreen` 是一次性的，交出去的画布收不回来。
+ * 为什么不能按页建：transferControlToOffscreen 是一次性的，交出去的画布收不回来。
  *   按页建销意味着每次换窗都要新建一批元素、转移一批、在新背衬上首画一次；
  *   槽的个数有硬上限（窗口页数上限 ≤ 8），把元素与背衬钉在槽上就都能复用 ——
  *   换窗只是"哪个槽画哪一页"变了，元素一个不建、一个不删。
@@ -209,7 +227,9 @@ export class SlotCanvases implements CanvasStore {
   private readonly slots: HTMLCanvasElement[] = [];
   private readonly byPage = new Map<number, PageRec>();
   private nSlots: number;
-  /** 一槽画布第一次建好时通知对端（这里 transfer）。 */
+  /**
+   * 一槽画布第一次建好时通知对端（这里 transfer）。
+   */
   onCreated: ((slot: number, el: HTMLCanvasElement, slots: number) => void) | null = null;
 
   constructor(pagesEl: HTMLElement, nSlots: number) {

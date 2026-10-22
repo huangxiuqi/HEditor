@@ -1,5 +1,4 @@
 // 输入层：键盘、快捷键、IME、指针按下的判定与提交。
-//
 // 环境对象（两套传输的差异全部从这里进来）：
 //   isReady() / isBusy() / ta / hot()           就绪、忙、承接层、{ vertical, blockReversed }
 //   write(name, args) / hit(xPt, yPt)           发命令、命中；返回布尔/对象或 Promise
@@ -25,26 +24,36 @@ import {
 export interface InputEnv {
   isReady(): boolean;
   isBusy?(): boolean;
-  /** 承接键盘与合成的 textarea。 */
+  /**
+   * 承接键盘与合成的 textarea。
+   */
   ta: HTMLTextAreaElement;
-  /** 热读：竖排 / 列序（决定方向键映射）。 */
+  /**
+   * 热读：竖排 / 列序（决定方向键映射）。
+   */
   hot(): HotState;
   write(name: string, args?: Args): Maybe<any>;
-  /** 命中。收**设备像素**（宿主内部折算成文档坐标，与拖选同一口径）。 */
+  /**
+   * 命中。收设备像素（宿主内部折算成文档坐标，与拖选同一口径）。
+   */
   hit(xPx: number, yPx: number): Maybe<Hit | null>;
-  /** 设备像素 -> 文档坐标。写类命令（如 cellSelectAt）要自己传坐标时用它。 */
+  /**
+   * 设备像素 -> 文档坐标。写类命令（如 cellSelectAt）要自己传坐标时用它。
+   */
   docPt(pt: { x: number; y: number }): { x: number; y: number };
   pointOf(ev: { clientX: number; clientY: number }): { x: number; y: number } | null;
   capturePointer(): void;
   beginDrag(ev: { clientX: number; clientY: number }): void;
-  /** 拖选控制器（宿主造的）；没有就不拖。 */
+  /**
+   * 拖选控制器（宿主造的）；没有就不拖。
+   */
   drag?: { arm(on: boolean): void };
   focus(): void;
   commit(changed: boolean): void;
   place(act: CaretAction): Maybe<any>;
   selectCellPara(para: number): Maybe<any>;
   cellSelected(): void;
-  status(text: string): void;
+  status(text: string, isErr?: boolean): void;
   onChain?(p: Maybe<any>): void;
 }
 
@@ -63,9 +72,23 @@ export function createInput(env: InputEnv): InputLayer {
   const click: ClickState = { seq: 0, time: 0, x: 0, y: 0 };
   let composing = false;
   const isBusy = (): boolean => (typeof env.isBusy === 'function' ? env.isBusy() : false);
+  /**
+   * 把一串异步动作登记给宿主（测试可以等它），并保证拒绝不会变成未处理的 Promise。
+   *
+   * 调用方是 DOM 事件处理器：它不留句柄，返回值也没人 await。中途一条命令失败
+   *   （最典型的是销毁时在途的那几条被拒），浏览器只在控制台留一条 uncaught ——
+   *   用户看不见，而探针会把整份判据判红。这里统一降级成状态栏与 error 事件。
+   */
   const keep = (p: Maybe<any>): Maybe<any> => {
-    if (typeof env.onChain === 'function') env.onChain(p);
-    return p;
+    const guarded =
+      p && typeof (p as Promise<any>).then === 'function'
+        ? (p as Promise<any>).catch((e) => {
+            const msg = String((e && (e as Error).message) || e);
+            env.status('输入处理失败：' + msg, true);
+          })
+        : p;
+    if (typeof env.onChain === 'function') env.onChain(guarded);
+    return guarded;
   };
   const beginDrag = (ev: { clientX: number; clientY: number }): void => {
     if (typeof env.beginDrag === 'function') env.beginDrag(ev);
@@ -76,7 +99,6 @@ export function createInput(env: InputEnv): InputLayer {
 
   // 命中之后的两条去向：定位、以及"这一下要不要起拖选"。
   // 落在正文之外时不起手 —— 从页外空白拖起不该选中任何东西。
-  //
   // 定位这一步必须等：异步宿主的落光标是一次往返，不等它，clickAt 这类入口会在
   // 光标还没摆好时就 resolve，调用方读到的光标是上一拍的。
   const placeAt = (pt: { x: number; y: number }): Maybe<Hit | null> =>

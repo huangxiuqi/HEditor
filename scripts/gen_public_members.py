@@ -44,14 +44,18 @@ def render(names):
         '//',
         '// 用途：guard.ts 的白名单（未知成员一律抛），以及 api_check.mjs 的成员对拍。',
         '',
-        '/** 契约里的公开成员（不含 diag —— 它由 debug 开关控制）。 */',
+        '/**',
+        ' * 契约里的公开成员（不含 diag —— 它由 debug 开关控制）。',
+        ' */',
         'export const PUBLIC_MEMBERS: readonly string[] = [',
     ]
     for n in pub:
         out.append("  '%s'," % n)
     out.append('];')
     out.append('')
-    out.append("/** 只有 createEditor({ debug: true }) 时才在实例上。 */")
+    out.append('/**')
+    out.append(' * 只有 createEditor({ debug: true }) 时才在实例上。')
+    out.append(' */')
     out.append("export const DIAG_MEMBER = 'diag';")
     out.append('')
     return '\n'.join(out)

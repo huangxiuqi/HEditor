@@ -1,13 +1,10 @@
 // Worker 侧壳：槽、画布、消息。引擎语义全在 engine/api.ts 里。
-//
 // 这个文件只做三件事，别让它长回来：
 //   一、按槽摆画布并接收宿主转移过来的 OffscreenCanvas（像素不跨线程）；
 //   二、把槽里的像素贴到画布上（blit），并报出贴了几页、花了多少毫秒；
 //   三、把消息转发给命令表：boot / do / ask / view / pageCanvas / viewMode。
-//
 // 引擎状态、命令表、窗口滞回、上行状态对象都在 api.ts —— 那一份同时给同线程宿主用。
 // 这里出现一个 mod.xxx 就说明边界破了。
-//
 // 槽号 = 页号模槽数。槽是画布的"座位"：transferControlToOffscreen 是一次性的，
 //   交出去的画布收不回来，而"一页一张、随窗口建销"会让每一次换窗都新建一批元素、
 //   转移一批、在新背衬上首画一次。槽数有硬上限（窗口页数上限，至多 8），把元素与
@@ -21,9 +18,13 @@ declare const self: {
 };
 declare function importScripts(...urls: string[]): void;
 
-/** 页在窗口里的座位。槽数由宿主说了算（它建了几个槽就交过来几条画布）。 */
+/**
+ * 页在窗口里的座位。槽数由宿主说了算（它建了几个槽就交过来几条画布）。
+ */
 const slotCtx: Array<OffscreenCanvasRenderingContext2D | null> = [];
-/** 每一槽当前画着哪一页（-1 = 空，或内容已整体失效）。 */
+/**
+ * 每一槽当前画着哪一页（-1 = 空，或内容已整体失效）。
+ */
 const slotPage: number[] = [];
 let slotN = 8;
 let continuous = false;
@@ -33,13 +34,17 @@ function slotOf(p: number): number {
   return ((p % slotN) + slotN) % slotN;
 }
 
-/** 内容整体作废（换缩放、换页度量、换文档）：所有槽都要重贴。 */
+/**
+ * 内容整体作废（换缩放、换页度量、换文档）：所有槽都要重贴。
+ */
 function invalidateSlots(): void {
   slotPage.length = slotN;
   slotPage.fill(-1);
 }
 
-/** 槽数换成宿主报来的值。变了就整体作废 —— 槽数一变，所有页的槽号都跟着变。 */
+/**
+ * 槽数换成宿主报来的值。变了就整体作废 —— 槽数一变，所有页的槽号都跟着变。
+ */
 function setSlotCount(n: number): boolean {
   const v = n | 0;
   if (v <= 0 || v === slotN) return false;
@@ -62,7 +67,7 @@ function ctxOfPage(p: number): OffscreenCanvasRenderingContext2D | null {
   return slotCtx[slotOf(p)] ?? null;
 }
 
-/* 上屏 */
+// 上屏
 
 let blitLastMs = 0;
 let blitLastPages = 0;
@@ -156,7 +161,9 @@ function blitPages(): number {
   return n;
 }
 
-/** 这一窗里还有几页没有画布（宿主还没把该页落的那个槽的 canvas 交过来）。 */
+/**
+ * 这一窗里还有几页没有画布（宿主还没把该页落的那个槽的 canvas 交过来）。
+ */
 function pagesMissing(): number {
   const e = api?.engine();
   if (!e) return 0;
@@ -167,7 +174,7 @@ function pagesMissing(): number {
   return n;
 }
 
-/* 传输 */
+// 传输
 
 const post = (msg: unknown, transfer?: Transferable[]): void => self.postMessage(msg, transfer ?? []);
 
@@ -184,7 +191,9 @@ const host = {
   blitPages,
   blitStats: () => ({ ms: blitLastMs, pages: blitLastPages, px: blitLastPx }),
 
-  /** 某个槽的画布到了：记下它，把那一槽贴出来。槽只建一次，之后换窗不会再收到同一个槽。 */
+  /**
+   * 某个槽的画布到了：记下它，把那一槽贴出来。槽只建一次，之后换窗不会再收到同一个槽。
+   */
   addCanvas(m: Args): void {
     const off = m.canvas as OffscreenCanvas;
     const c = off.getContext('2d', { alpha: false });
@@ -207,7 +216,7 @@ const host = {
   },
 };
 
-/* 消息入口 */
+// 消息入口
 
 async function handleBoot(m: Args): Promise<void> {
   api = createEngineApi({ post, host });

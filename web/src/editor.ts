@@ -20,13 +20,13 @@ import { createInline, defaultFonts, type AssetPaths } from './transport/inline'
 import { createWorker } from './transport/worker';
 import { guard } from './guard';
 
-/* ────────────────────────── 素材地址 ────────────────────────── */
+// 素材地址
 
 /**
- * 库自己的地址。打包成 IIFE 时靠 `document.currentScript` 推；ESM 下退回落 document.baseURI。
+ * 库自己的地址。打包成 IIFE 时靠 document.currentScript 推；ESM 下退回落 document.baseURI。
  *
  * 都在"页面所在地"与"库所在地"之间二选一，而不是猜仓库结构：使用者的目录布局与这里
- *   无关，所以 `assets` 里的每一项都能单独覆盖。
+ *   无关，所以 assets 里的每一项都能单独覆盖。
  */
 const SELF_SRC: string =
   (document.currentScript instanceof HTMLScriptElement && document.currentScript.src) || '';
@@ -40,21 +40,21 @@ function selfDir(): string {
  * 素材地址。
  *
  * 默认布局是"库产物在 web/dist/、页面在 web/、wasm 在 build/wasm/web/"。这不是约定，
- *   只是本仓库开发时的摆法 —— 产品里三项都该显式给（`assets.glue` / `assets.wasm` / `assets.base`）。
+ *   只是本仓库开发时的摆法 —— 产品里三项都该显式给（assets.glue / assets.wasm / assets.base）。
  */
 function resolveAssets(opts: EditorOptions): AssetPaths {
   const a = opts.assets ?? {};
-  // 默认布局：库在 `web/dist/`，素材在仓库根下（`assets/`、`build/wasm/web/`）。
+  // 默认布局：库在 web/dist/，素材在仓库根下（assets/、build/wasm/web/）。
   //   所以默认 base 是"库目录往上两级"。这不是约定，只是本仓库开发时的摆法 ——
   //   产品里三项都该显式给。
   const base = a.base ? new URL(a.base, document.baseURI).href : new URL('../../', selfDir()).href;
   const glue = a.glue ? new URL(a.glue, document.baseURI).href : new URL('build/wasm/web/heditor.js', base).href;
-  // Worker 壳与库产物同一目录（`web/dist/heditor_worker.js`）。
+  // Worker 壳与库产物同一目录（web/dist/heditor_worker.js）。
   const worker = new URL('heditor_worker.js', selfDir()).href;
   return { glue, base, worker, bust: '', fonts: defaultFonts(base, opts.fonts) };
 }
 
-/* ────────────────────────── 事件 ────────────────────────── */
+// 事件
 
 class Emitter {
   private map = new Map<string, Set<(ev: never) => void>>();
@@ -76,9 +76,11 @@ class Emitter {
   }
 }
 
-/* ────────────────────────── 默认配置 ────────────────────────── */
+// 默认配置
 
-/** 编辑模式 -> 引擎的整数。顺序与 EditMode 枚举一致。 */
+/**
+ * 编辑模式 -> 引擎的整数。顺序与 EditMode 枚举一致。
+ */
 const MODE_CODE: Record<EditorConfig['mode'], number> = {
   document: 0,
   form: 1,
@@ -97,10 +99,12 @@ const DEFAULT_CONFIG: EditorConfig = {
   selectionStyle: { color: [31, 111, 235, 64] },
 };
 
-/** 页间隙（磅）：分页档用它，连页档是 0。 */
+/**
+ * 页间隙（磅）：分页档用它，连页档是 0。
+ */
 const kPageGapPt = 14;
 
-/* ────────────────────────── 工厂 ────────────────────────── */
+// 工厂
 
 /**
  * 造一个编辑器。返回时已就绪（排版跑完、首帧画完、输入层已接上）。
@@ -167,7 +171,9 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
     destroyer = () => t.destroy();
   }
 
-  /** 宿主用的选项。link 显式传进来 —— 它由传输造，宿主的回调不能靠闭包去猜。 */
+  /**
+   * 宿主用的选项。link 显式传进来 —— 它由传输造，宿主的回调不能靠闭包去猜。
+   */
   function hostOptions(
     l: EngineLink,
     store?: (pagesEl: HTMLElement) => CanvasStore,
@@ -207,7 +213,7 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
 
   await starter();
 
-  /* ────────────── 读写 ────────────── */
+  // 读写
 
   const edit = (name: string, args?: Args): Promise<boolean> => {
     alive();
@@ -272,7 +278,7 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
   }
 
   const editor: Editor = {
-    /* ── 内容 ── */
+    // 内容
 
     async open(data, o) {
       alive();
@@ -314,7 +320,7 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       return edit('insertText', { para: pos.para, offset: pos.offset, s: String(text) });
     },
 
-    /* ── 编辑 ── */
+    // 编辑
 
     async type(text) {
       return edit('type', { s: String(text) });
@@ -364,7 +370,7 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       return changed;
     },
 
-    /* ── 光标与选区 ── */
+    // 光标与选区
 
     caret() {
       alive();
@@ -439,7 +445,7 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       return selectionOf(link);
     },
 
-    /* ── 控件 ── */
+    // 控件
 
     async focusControl(dir = 'next') {
       await edit('focusControl', { forward: dir === 'next' });
@@ -466,7 +472,7 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       }));
     },
 
-    /* ── 视图 ── */
+    // 视图
 
     geometry(): Geometry {
       alive();
@@ -498,7 +504,7 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       await editor.configure({ zoom });
     },
 
-    /* ── 配置 ── */
+    // 配置
 
     async configure(patch) {
       alive();
@@ -576,8 +582,8 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       }
       if (changed.mode !== undefined) {
         // 三档都要落到引擎：只读要引擎的 ReadOnly 才保证"光标可动、一个字都不许改"，
-        //   表单要引擎拿可编辑性判定归属；宿主侧那个 edit() 只保护库自己的方法，
-        //   键盘走输入层，绕得过去（实测：只改 config 时按键照样改文档）。
+        //   表单要引擎拿可编辑性判定归属。宿主侧那个 edit() 只保护库自己的方法，
+        //   键盘走输入层，只改 config 拦不住它。
         steps.push(() => settleAfter('setEditMode', { mode: MODE_CODE[next.mode] }));
       }
 
@@ -592,7 +598,7 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       return Object.freeze({ ...config });
     },
 
-    /* ── 事件与生命周期 ── */
+    // 事件与生命周期
 
     on(event, cb) {
       alive();
@@ -623,7 +629,9 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
     },
   };
 
-  /** 一次配置类命令的收尾：写完就 present + 贴页（与 doOp 的口径同一条）。 */
+  /**
+   * 一次配置类命令的收尾：写完就 present + 贴页（与 doOp 的口径同一条）。
+   */
   function settleAfter(opName: string, args?: Args): Promise<unknown> | unknown {
     if (args) link.write(opName, args);
     return then1(link.settle(opName), (st) => {
@@ -634,8 +642,8 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
   }
 
   /**
-   * 变更事件。`json` 是方法而不是属性：2000 段序列化一次约 55 ms（Worker 模式下还是一次
-   *   往返），所以"读它才算"必须是显式的 —— 属性写法会让 `JSON.stringify(ev)` 顺带把它
+   * 变更事件。json 是方法而不是属性：2000 段序列化一次约 55 ms（Worker 模式下还是一次
+   *   往返），所以"读它才算"必须是显式的 —— 属性写法会让 JSON.stringify(ev) 顺带把它
    *   算一遍，而那正好是最糟的一拍。同一个版本只算一次（闭包缓存）。
    */
   function makeChange(source: ChangeSource, v: number): ChangeEvent {
@@ -657,16 +665,15 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
   return guard(editor, !!opts.debug) as Editor;
 }
 
-/* ────────────────────────── 诊断面 ────────────────────────── */
+// 诊断面
 
 /**
  * diag 是"debug 开关下的公开面"：成员不承诺稳定，所以参数与返回暂时是 unknown。
- * 这里只做转发，不加工 —— 加工会把"引擎报了什么"变成"我们以为引擎报了什么"。
+ * 这里只做转发，不加工 —— 加工会把"引擎报了什么"变成对它的猜测。
  *
- * 三类例外都不是加工，而是补上收尾：
- *   · 装载类要等重排重绘落地，返回值是那一拍的 editStats（探针拿它当分母）；
- *   · 定位类要 present，否则画面停在旧位置；
- *   · 闪烁与相位只动状态，绝不 present —— 呈现会把上一次全量呈现的账冲成"只画了个光标"。
+ * 三类例外都不是加工，而是补上收尾：装载类要等重排重绘落地，返回值是那一拍的
+ *   editStats（探针拿它当分母）；定位类要 present，否则画面停在旧位置；闪烁与相位
+ *   只动状态、绝不 present —— 呈现会把上一次全量呈现的账冲成"只画了个光标"。
  */
 function makeDiag(
   link: EngineLink,
@@ -676,7 +683,9 @@ function makeDiag(
 ): Diag {
   const read = (name: string, args?: Args): unknown => link.read(name, args);
 
-  /** 装载类收尾：写完等一次收尾，返回那一拍的账。 */
+  /**
+   * 装载类收尾：写完等一次收尾，返回那一拍的账。
+   */
   const settleAs = async (name: string, args: Args): Promise<unknown> => {
     await Promise.resolve(link.write(name, args));
     await Promise.resolve(link.settle(name));
@@ -740,7 +749,7 @@ function makeDiag(
       return true;
     },
 
-    /* ── 装载 ── */
+    // 装载
 
     loadScenario: (id, zoom) => settleAs('scenario', { id, zoom }),
     reset: (id, zoom) => settleAs('reset', { id: id === undefined ? 6 : id, zoom }),
@@ -756,7 +765,7 @@ function makeDiag(
     },
     setFormControls: (list) => settleAs('setFormControls', { list }),
 
-    /* ── 光标与相位 ── */
+    // 光标与相位
 
     setCaretAt: (para, offset, field) => settleAs('setCaretAt', { para, offset, field }),
     setCaretOnly: (para, offset) => link.write('setCaret', { para, offset }),
@@ -764,7 +773,7 @@ function makeDiag(
     startBlink: () => dom.startBlink(),
     stopBlink: () => dom.stopBlink(),
 
-    /* ── 字体与窗口 ── */
+    // 字体与窗口
 
     reloadFonts: async (mode) => {
       const m = mode === 'lazy' ? 'lazy' : 'full';
