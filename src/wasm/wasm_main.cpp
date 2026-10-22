@@ -19,6 +19,7 @@
 
 #include "core/engine/engine.h"
 #include "core/engine/payload_schema.h"
+#include "core/rev/fragment.h"
 #include "core/utils/utf8.h"
 #include "demo/demo_documents.h"
 
@@ -1300,6 +1301,39 @@ std::string loadDocument(const std::string& text) {
 }
 
 /**
+ * 复制：返回剪贴板载荷（{"f": 片段, "t": 纯文本} 或 {"e": 原因}）。
+ *
+ * 它是查询而不是命令：不改进文档、不上屏。宿主把它整份写进系统剪贴板的两个类型 ——
+ *   自家格式给本编辑器（跨实例也行），纯文本给别的应用。
+ */
+std::string copySelection() {
+    const ClipCopy c = g_engine.copySelection();
+    return rev::clipboardPayload(c.fragment, c.text, c.error);
+}
+
+/**
+ * 粘贴片段：空串 = 成功，否则是给人看的原因。
+ *
+ * 片段是从剪贴板读回来的字符串，这一层不解释它 —— 解析、校验、建节点全在引擎里，
+ *   host 只搬字节。这样"能粘成什么样"只有一个真相。
+ */
+std::string pasteFragment(const std::string& text) {
+    return g_engine.pasteFragmentAndRender(text);
+}
+
+/**
+ * 粘贴纯文本：从别的应用粘过来的文字走这条（按行拆段）。
+ */
+std::string pastePlainText(const std::string& text) {
+    return g_engine.pastePlainTextAndRender(text);
+}
+
+/**
+ * 删掉选区（剪切的后一半）。没有选区时返回 false。
+ */
+bool deleteSelectionCommand() { return g_engine.deleteSelectionAndRender(); }
+
+/**
  * 一处演示数据，覆盖表单的四条关键语义（区间之外是没有控件的普通正文）：
  * variant 0（短文档）：[5,9)「反复心悸」可编辑 ｜ [9,11)「三天」只读 ｜ [12,16)「加重一天」可编辑
  * → 0..4、11、16..17 打不进字；从 8 往右移跨过只读的 9~11 落到 12。
@@ -1585,6 +1619,13 @@ EMSCRIPTEN_BINDINGS(heditor) {
     //   格式由 rev::serialize 一份实现说了算，宿主只搬字节。
     emscripten::function("serializeDocument", &serializeDocument);
     emscripten::function("loadDocument", &loadDocument);
+    // 剪贴板：复制是查询（不动文档），粘贴与删除是命令（自带重排与呈现）。
+    //   自家格式只在本编辑器之间流转，纯文本给别的应用 —— 两条路都在引擎里落定，
+    //   宿主不解释片段的内容。
+    emscripten::function("copySelection", &copySelection);
+    emscripten::function("pasteFragment", &pasteFragment);
+    emscripten::function("pastePlainText", &pastePlainText);
+    emscripten::function("deleteSelection", &deleteSelectionCommand);
 
     emscripten::function("frameWidth", &frameWidth);
     emscripten::function("frameHeight", &frameHeight);

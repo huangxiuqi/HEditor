@@ -50,6 +50,23 @@ type Config = {
 type Destroyed = { threw: string; empty: number };
 
 test.describe('示例页的公开面', () => {
+  test('页画布与定位祖先的约定（两条传输同一条）', async ({ open }) => {
+    // 这条钉的是"画布不参与文档流"。两个画布集合（同线程按页建销、Worker 按槽复用）
+    //   一旦哪边漏了定位，画布就会随文档流堆叠：style.top 失效、换窗时改流高度触发
+    //   浏览器的滚动锚定（滚轮往下滚自己弹回来）。让它在构造约定上就红。
+    const p = await open('index.html', { viewport: { width: 1280, height: 900 } });
+    const r = await p.ev<{ count: number; loose: string[]; pagesPos: string }>(`
+      const e = window.__demo;
+      const pagesEl = e.element.querySelector('#pages');
+      const cs = [...e.element.querySelectorAll('#pages canvas')];
+      const loose = cs.filter((c) => getComputedStyle(c).position !== 'absolute')
+        .map((c) => c.dataset.page ?? '?');
+      return { count: cs.length, loose, pagesPos: getComputedStyle(pagesEl).position };`);
+    check('页容器里有画布', r.count > 0, String(r.count));
+    check('★ 每张页画布都是绝对定位', r.loose.length === 0, r.loose.join(','));
+    check('★ #pages 是定位祖先（不是 static）', r.pagesPos !== 'static', r.pagesPos);
+  });
+
   test('只有契约成员，六组行为按契约工作', async ({ open }) => {
     const p = await open('index.html', { viewport: { width: 1280, height: 900 } });
 

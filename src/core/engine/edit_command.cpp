@@ -1294,4 +1294,104 @@ bool EditCommand::outdent() {
                        /*caret_at_end=*/true);
 }
 
+bool EditCommand::hasBlockLevel(const std::vector<NodeSpec>& nodes) {
+    for (const NodeSpec& n : nodes) {
+        if (n.kind == NodeKind::Table) return true;
+    }
+    return false;
+}
+
+bool EditCommand::startsParagraph(FlowPos at) const {
+    if (!hasFlow()) return true;
+    const Pos p = flowIndex().posAt(at);
+    const rev::Node* n = rev::findNode(doc(), p.container);
+    if (n == nullptr) return true;
+    // 落在一个文本节点内部：它前面还有字，当然不是段首。
+    if (isText(n->kind)) return p.offset == 0;
+    if (!isContainer(n->kind)) return true;
+    if (p.offset <= 0) return true;
+    if (p.offset > static_cast<int>(n->children.size())) return true;
+    return isParagraphMark(n->children[static_cast<size_t>(p.offset - 1)]->kind);
+}
+
+bool EditCommand::endsParagraph(FlowPos at) const {
+    if (!hasFlow()) return true;
+    const Pos p = flowIndex().posAt(at);
+    const rev::Node* n = rev::findNode(doc(), p.container);
+    if (n == nullptr) return true;
+    if (isText(n->kind)) {
+        // 文本节点内部：右边还有字。落点正好在末尾时按"容器里的下一个兄弟"判，
+        // 那正是下面那一步要做的事，所以这里只区分"中间"与"末尾"。
+        const auto* run = std::get_if<rev::RunPayload>(&n->payload);
+        return run != nullptr && p.offset >= static_cast<int>(run->text.size());
+    }
+    if (!isContainer(n->kind)) return true;
+    if (p.offset >= static_cast<int>(n->children.size())) return true;
+    return isParagraphMark(n->children[static_cast<size_t>(p.offset)]->kind);
+}
+
+bool EditCommand::deleteSelection() {
+    const SelectionErase plan = planEraseSelection();
+    if (plan.blocked) return false;
+    if (plan.steps.empty()) return false;
+    return commitErase(plan, "删除选区");
+}
+
+bool EditCommand::pasteNodes(const std::vector<NodeSpec>& nodes) {
+    if (nodes.empty() || !hasFlow()) return false;
+    // 落点判定与打字同一条：表单模式下控件之外落不进去，被拒时与"按下的那一下没发生"同一口径。
+    if (!policyAt(pos().caret()).allowed) {
+        noteBlocked();
+        return false;
+    }
+    const SelectionErase plan = planEraseSelection();
+    if (plan.blocked) return false;
+
+    // 没有选区时落点就是光标；有选区时 plan.at 已经是区间起点（删除之后光标也落在那里）。
+    const TextPos caret = pos().caret();
+    const FlowPos at = plan.steps.empty()
+                           ? pos().flowPosAtSide(caret.para, caret.offset, pos().sideForPos(caret))
+                           : plan.at;
+    if (at < 0) {
+        noteBlocked();
+        return false;
+    }
+
+    std::vector<Step> steps = plan.steps;
+    FlowPos cur = at;
+    // 块级元素（表格）不在段落内部：它前面后面要是没有段落标记，就各补一枚。
+    //   不补的话表格会插在一段文字中间 —— 编译与流索引对"段"的假设当场不成立。
+    const bool block = hasBlockLevel(nodes);
+    if (block && !startsParagraph(cur)) {
+        InsertParaMark pm;
+        pm.at = cur;
+        steps.push_back(Step{pm});
+        ++cur;
+    }
+    for (const NodeSpec& spec : nodes) {
+        InsertNode in;
+        in.at_flow = cur;
+        in.at = flowIndex().posAt(cur);
+        in.subtree = spec;
+        steps.push_back(Step{in});
+        cur += static_cast<FlowPos>(spec.span());
+    }
+    if (block && !endsParagraph(cur)) {
+        InsertParaMark pm;
+        pm.at = cur;
+        steps.push_back(Step{pm});
+        ++cur;
+    }
+
+    pending_before_ = plan.steps.empty() ? Range{at, at} : plan.before;
+    pending_after_ = Range{cur, cur};
+    if (!commit(std::move(steps), pos().paraForFlow(at))) {
+        noteBlocked();
+        return false;
+    }
+    // 落点 = 片段的末尾（与打字把光标摆在插入内容之后同一口径）。
+    pos().setCaretAtFlow(cur);
+    return true;
+}
+
 }  // namespace heditor

@@ -309,6 +309,27 @@ public:
      */
     PropResult setControlProp(int index, ControlProp prop, bool value);
 
+    /**
+     * 粘贴一段片段：选区先删掉，再按流顺序把每个节点插到落点上。
+     *
+     * 与打字同一个口径 —— 用户按的是一下，撤销也该是一下：删除与插入合成一次提交。
+     * 片段里的块级元素（表格）进不了段落内部，所以它前面后面各补一枚段落标记，
+     * 让它自成段；本来就落在段首 / 段尾时不补，避免多出空段落。
+     *
+     * 一个节点一条 InsertNode 步骤（而不是一棵大树一条）：片段里可能既有文字又有表格，
+     * 它们本来就按流顺序排列，"第几项插到哪个位置"由前一项的跨度累加决定，不需要一棵假根。
+     *
+     * @param nodes 片段内容（按流顺序）
+     * @return true = 粘上了
+     */
+    bool pasteNodes(const std::vector<NodeSpec>& nodes);
+
+    /**
+     * 删掉当前选区。没有选区时返回 false —— 按下的那一下没有可做的动作。
+     * @return true = 删掉了
+     */
+    bool deleteSelection();
+
 private:
 
     /**
@@ -617,6 +638,27 @@ private:
      * 再改段落格式），此时以最后一次给出的两份值为准。
      */
     Range pending_before_{};
+
+    /**
+     * 片段里有没有块级元素。块级元素自成段落，粘贴要自己把段落断开。
+     * @param nodes 片段内容
+     * @return true = 含表格
+     */
+    static bool hasBlockLevel(const std::vector<NodeSpec>& nodes);
+
+    /**
+     * 流位置 at 处是不是"段落开头"（紧邻左边的是一枚段落标记，或它就在容器内容起点）。
+     * @param at 流位置
+     * @return true = 已经是段首
+     */
+    bool startsParagraph(FlowPos at) const;
+
+    /**
+     * 流位置 at 处是不是"段落结尾"（紧邻右边的是一枚段落标记，或它已经在容器内容末尾）。
+     * @param at 流位置
+     * @return true = 已经是段尾
+     */
+    bool endsParagraph(FlowPos at) const;
 
     /**
      * 这一批步骤提交之后光标该在哪（随步骤一起交给宿主）。

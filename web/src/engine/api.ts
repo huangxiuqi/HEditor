@@ -319,6 +319,12 @@ const COMMANDS: Array<[string, string, string[], string]> = [
   ['textAll',               'r', ['documentTextAll'],                                   'none'],
   ['text',                  'r', ['documentText'],                                        'none'],
   ['serialize',             'r', ['serializeDocument'],                                   'none'],
+  // 复制是查询（不改状态、不上屏）；粘贴与删选区是命令（自带重排与呈现）。
+  //   剪贴板载荷由引擎给，宿主只把它写进系统剪贴板 —— 片段的格式不在 JS 里重建。
+  ['copy',                  'r', ['copySelection'],                                       'none'],
+  ['paste',                 'w', ['pasteFragment'],                                       'self'],
+  ['pasteText',             'w', ['pastePlainText'],                                      'self'],
+  ['deleteSelection',       'w', ['deleteSelection'],                                     'self'],
   ['hit',                   'r', ['hitTest'],                                             'none'],
   ['controlAt',             'r', ['controlAtPoint'],                                      'none'],
   ['describeControls',      'r', ['describeControls'],                                    'none'],
@@ -644,15 +650,19 @@ function retarget(st: any) {
   const needFirst = Math.max(0, req.first - (scrollDir < 0 ? look : 0));
   const needLast = Math.min(total - 1,
                             req.first + req.count - 1 + (scrollDir > 0 ? look : 0));
-  const cur = lastAnchor.split(':').map(Number);
-  // 滞回：现有窗口只要盖得住"要求 + 滚动方向上 1 页提前量"就不动。判据与单线程宿主的
-  //   applyWindow 逐条相同 —— 特别是不许再加"现有窗口不能超过总页数"那一条：装载时会
-  //   先把窗口钉成 (0, 上限) 再排版，而单页文档的总页数是 1 ⇒ 多那一条会把"钉好的窗口"
-  //   判成换窗，于是全量重排之外再 present 一次（那次只重画一个光标），首次全量那笔账
-  //   被冲掉。判据取"要求"（加提前量）而不是"目标窗口"：目标带余量还随可见页挪，
+  // 判据必须取"引擎这一刻真的装着哪个窗口"，不能用上一次请求过的锚点：引擎呈现时会把
+  //   越界锚点夹回文档范围内（repaint 里的 clamp），而请求值不会跟着变。两者一分叉，
+  //   滞回就一直拿着那个夹之前的数判"盖得住"，窗口于是永久停住 —— 症状是连续粘贴把
+  //   文档撑长之后，容器高度一路涨到几十页、末尾那一段永远没有画布（TRAPS 186）。
+  //   windowFirstPage / windowPageCount 是上一次 present 的落点，正是"现有窗口"本身。
+  // 仍然不许再加"现有窗口不能超过总页数"那一条：装载时先把窗口钉成 (0, 上限) 再排版，
+  //   而单页文档的总页数是 1 ⇒ 多那一条会把"钉好的窗口"判成换窗，于是全量重排之外
+  //   再 present 一次（那次只重画一个光标），首次全量那笔账被冲掉。
+  // 判据取"要求"（加提前量）而不是"目标窗口"：目标带余量还随可见页挪，
   //   拿它当判据等于要求窗口永远精确居中，一滚就动、滞回形同虚设。
-  if (cur.length === 2 && Number.isFinite(cur[0]) && Number.isFinite(cur[1]) &&
-      cur[0] <= needFirst && needLast <= cur[0] + cur[1] - 1) {
+  const curFirst = mod.windowFirstPage();
+  const curCount = mod.windowPageCount();
+  if (curCount > 0 && curFirst <= needFirst && needLast <= curFirst + curCount - 1) {
     return false;   // 现有窗口还盖得住
   }
   const w = targetWindow(req, total, maxWindowPages());
@@ -937,6 +947,23 @@ const WRITE = collect('w', {
 
   insertText: (a) => mod.insertTextAt(a.para | 0, a.offset | 0, a.s),
   type: (a) => mod.typeText(a.s),
+  /**
+   * 粘贴：片段（自家格式）与纯文本各一条，两条都自带重排与呈现。
+   *
+   * 失败时引擎回一句给人看的原因（不是异常）：片段可能来自旧版本、也可能被别的应用
+   *   改坏，这属于用户输入，不是本层的 bug。原因原样回给调用方。
+   */
+  paste: (a) => {
+    const why = mod.pasteFragment(a.s || '');
+    if (why) throw new Error(why);
+    return true;
+  },
+  pasteText: (a) => {
+    const why = mod.pastePlainText(a.s || '');
+    if (why) throw new Error(why);
+    return true;
+  },
+  deleteSelection: () => mod.deleteSelection(),
   backspace: () => mod.backspace(),
   deleteForward: () => mod.deleteForward(),
   splitParagraph: () => mod.splitParagraph(),
@@ -1109,6 +1136,13 @@ const READ = collect('r', {
    * 走查询而不是命令：它不改任何状态，也不该触发一次呈现 —— 保存不该有副作用。
    */
   serialize: () => mod.serializeDocument(),
+  /**
+   * 复制选区：回一份剪贴板载荷（{"f": 片段, "t": 纯文本} 或 {"e": 原因}）。
+   *
+   * 走查询而不是命令：复制不改文档、也不该触发一次呈现 —— 与保存同一条道理。
+   *   片段的格式只有引擎知道，这一层原样搬字节，不解析。
+   */
+  copy: () => mod.copySelection(),
   /**
    * 整帧里"非白"的像素数。主线程读不到画布（所有权在 Worker 这边），所以"帧上到底
    *   有没有字"这个判据只能在这里数 —— 与单线程版探针的口径一致（任一通道 < 200 算一个）。

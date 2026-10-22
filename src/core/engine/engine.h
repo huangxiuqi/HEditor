@@ -39,6 +39,44 @@
 
 namespace heditor {
 
+/**
+ * 一次复制的结果：片段文本、它的纯文本投影、实际取用的流区间。
+ *
+ * 区间可能比选区宽：端点落在容器内部时整块一起复制（半个控件粘不回去）。剪切要删的正是
+ * 这一段，所以两个值必须一起交出来，不能各算一次。
+ */
+struct ClipCopy {
+    /**
+     * 片段 JSON 文本（跨实例的通道）。
+     */
+    std::string fragment;
+
+    /**
+     * 这一段的纯文本投影（系统剪贴板的 text/plain）。
+     */
+    std::string text;
+
+    /**
+     * 实际取用的流区间起点。
+     */
+    FlowPos lo = 0;
+
+    /**
+     * 实际取用区间的终点（不含）。
+     */
+    FlowPos hi = 0;
+
+    /**
+     * 取到了没有。
+     */
+    bool ok = false;
+
+    /**
+     * 失败原因（没有选中内容、写不出片段）。
+     */
+    std::string error;
+};
+
 class EditorEngine : private EditHost {
 public:
 
@@ -172,6 +210,68 @@ public:
      * @return 成功与否与给人看的一句话（失败时引擎一个字节都不动）
      */
     rev::DeserializeResult loadDocument(const std::string& text);
+
+    /**
+     * 复制：把当前选区取成一段可移植的片段（格式见 rev::fragment）。
+     *
+     * 取的是结构而不是文字：控件、表格、图片、公式连同各自的记录一起带走，粘贴回来是同一段
+     * 内容，不是"一段长得像的文字"。片段自带字符串表与字体表，所以跨实例、跨标签页都成立 ——
+     * 那边不需要知道这一边的节点号，也不需要字体装载顺序一致。
+     *
+     * 端点落在容器（控件、表格、行、格）内部时整块一起复制，effective 区间随之扩到那块的
+     * 两端；剪切要删的正是这一段，所以两个区间都交给调用方。
+     *
+     * @return 片段文本（JSON）、纯文本投影、实际取用区间与失败原因
+     */
+    ClipCopy copySelection() const;
+
+    /**
+     * 粘贴片段：解析后按 InsertNode 插到光标处，选区先删掉（一次编辑一次撤销）。
+     *
+     * 落点判定与打字同一条（表单模式下控件之外落不进去）。失败时引擎一个字节都不动 ——
+     * 片段读坏了、或者落点不接受这些内容，都返回原因而不是"粘了一半"。
+     *
+     * @param text 片段 JSON 文本（来自 copySelection 或另一个实例的剪贴板）
+     * @return 空串 = 成功；否则是给人看的原因
+     */
+    std::string pasteFragment(const std::string& text);
+
+    /**
+     * 粘贴纯文本：按 CRLF / CR / LF 切成段落，每段一个文本节点，段落之间插段落标记。
+     *
+     * 给"从别的应用粘文字"这条通用做法用。字符格式留空表示全继承落点处已有格式，
+     * 与输入沿用邻居格式同一条约定。
+     *
+     * @param utf8 纯文本
+     * @return 空串 = 成功；否则是给人看的原因
+     */
+    std::string pastePlainText(const std::string& utf8);
+
+    /**
+     * 删掉当前选区（剪切的后一半，也是"选中之后按 Del"的那一条）。
+     * @return true = 删掉了
+     */
+    bool deleteSelection();
+
+    /**
+     * 粘贴片段并收尾（重排 + 呈现）。与别的编辑入口同一口径：宿主一次调用就完事。
+     * @param text 片段 JSON 文本
+     * @return 空串 = 成功；否则是给人看的原因
+     */
+    std::string pasteFragmentAndRender(const std::string& text);
+
+    /**
+     * 粘贴纯文本并收尾。
+     * @param utf8 纯文本
+     * @return 空串 = 成功；否则是给人看的原因
+     */
+    std::string pastePlainTextAndRender(const std::string& utf8);
+
+    /**
+     * 删除选区并收尾。
+     * @return true = 删掉了
+     */
+    bool deleteSelectionAndRender();
 
     /**
      * 段落坐标与模型流位置的桥接 —— 第十四节那条接缝的另一半。
@@ -1652,6 +1752,19 @@ private:
      * 记下这一批步骤对应的两份选区，并与撤销栈同步裁剪。
      */
     void recordSelection(Range before, Range after);
+
+    /**
+     * 写出去时的字体身份。保存文档与复制片段共用一份 —— 两处各写一遍，等于让"同一张脸"
+     * 有了两种说法，而两边看起来都成功。
+     * @return 字体下标到字体身份的回调
+     */
+    rev::SerializeOptions fontWriteOptions() const;
+
+    /**
+     * 读进来时的字体反查，与 fontWriteOptions 同一个顺序（PostScript 名 → 族名 → 文件名）。
+     * @return 字体身份到本机下标的回调
+     */
+    rev::DeserializeOptions fontReadOptions() const;
 
     /**
      * 从投影给出的跨度建控件集合。

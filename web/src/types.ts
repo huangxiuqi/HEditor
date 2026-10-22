@@ -880,6 +880,28 @@ export interface Editor {
    */
   redo(): Promise<boolean>;
 
+  // 剪贴板（与 Ctrl+C / Ctrl+X / Ctrl+V 同一条路）
+
+  /**
+   * 复制选区到系统剪贴板。片段里带样式、控件与表格，粘回本编辑器时是同一段内容。
+   * @returns 复制成了没有（选区为空时 false，剪贴板内容不变）
+   */
+  copy(): Promise<boolean>;
+
+  /**
+   * 剪切：复制成功之后才删选区。
+   * @returns 复制并删掉了没有
+   */
+  cut(): Promise<boolean>;
+
+  /**
+   * 粘贴：自家片段优先（保样式、控件、表格），其次纯文本（按行拆段）。
+   *
+   * 需要浏览器授权读剪贴板（键盘粘贴不需要）；被拒时返回 false。
+   * @returns 粘上了没有
+   */
+  paste(): Promise<boolean>;
+
   /**
    * 增减缩进层级（正数加深，负数变浅）。
    * @param levels 正数加深，负数变浅（绝对值是层级数）

@@ -329,6 +329,9 @@ export function createWorker(opts: WorkerOptions): {
     serialize() {
       return ask('serialize').then((v) => String(v ?? ''));
     },
+    copy() {
+      return ask('copy').then((v) => String(v ?? ''));
+    },
     async flush() {
       // 排空 = 连"在途命令的续体又发出去的那一条"也等完。
       //

@@ -304,9 +304,16 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       then1(link.write(name, args), () =>
         then1(link.settle(name), (st) => {
           const stats = (st as { stats?: unknown } | null)?.stats ?? link.read('editStats');
-          if (reveal) dom.scrollCaretIntoView(stats as never);
-          dom.finish(stats as never);
-          return undefined;
+          // 与宿主 afterEdit 同一口径：滚动要先把位置交给引擎（可能换窗），收尾再按
+          //   新窗口建画布 —— 顺序颠倒就是"这一拍贴的是旧窗口那几页"。
+          if (!reveal) {
+            dom.finish(stats as never);
+            return undefined;
+          }
+          return then1(dom.scrollCaretIntoView(stats as never), () => {
+            dom.finish();
+            return undefined;
+          });
         }),
       ),
     ) as Promise<void>;
@@ -429,6 +436,35 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
 
     async redo() {
       return edit('redo');
+    },
+
+    /**
+     * 复制选区到系统剪贴板。选区为空时返回 false。
+     *
+     * 走的是与 Ctrl+C 同一条路：引擎产出的片段原样进剪贴板，所以跨实例、跨标签页粘回来
+     * 仍是同一段内容（样式、控件、表格都在片段里）。
+     */
+    async copy() {
+      alive();
+      return dom.copy();
+    },
+
+    /**
+     * 剪切：先复制，成功之后再删 —— 复制失败时内容还在，用户不会白丢一段。
+     */
+    async cut() {
+      alive();
+      return dom.cut();
+    },
+
+    /**
+     * 粘贴：自家格式优先，其次纯文本（按行拆段）。
+     *
+     * 读系统剪贴板需要浏览器授权（键盘那条不需要）；被拒时返回 false 并在状态栏说明。
+     */
+    async paste() {
+      alive();
+      return dom.paste();
     },
 
     async setIndent(levels) {

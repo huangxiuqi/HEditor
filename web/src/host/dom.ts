@@ -8,6 +8,13 @@
 import { armDprWatch, createZoom, then1, type Args, type Maybe, type ZoomControl } from '../input/keymap';
 import { createDragSelect, type DragSelect } from '../input/drag';
 import { createInput, type InputLayer } from '../input/input';
+import {
+  FRAGMENT_MIME,
+  parseClipPayload,
+  readSystemClipboard,
+  writeToDataTransfer,
+  writeToSystemClipboard,
+} from './clipboard';
 import { PageCanvases, type CanvasStore, type PageGeometry } from './pages';
 
 /**
@@ -85,6 +92,14 @@ export interface EngineLink {
    * 整份序列化成 JSON 文本。同线程直接读，Worker 是一次往返。
    */
   serialize(): Maybe<string>;
+
+  /**
+   * 复制选区，回一份剪贴板载荷（{f, t} 或 {e} 的 JSON 文本）。
+   *
+   * 同线程是同步值（copy 事件里必须当场拿到，否则浏览器已经把剪贴板写完了）；
+   * Worker 是一条往返，调用方只能等 —— 那时改用 ClipboardItem 写系统剪贴板。
+   */
+  copy(): Maybe<string>;
 
   /**
    * 等队列排空。
@@ -209,10 +224,28 @@ export interface DomHost {
   afterEdit(opName: string, source: ChangeSource): Maybe<boolean>;
 
   /**
+   * 复制选区到系统剪贴板（选区为空时返回 false，剪贴板内容不变）。
+   * @returns 复制成了没有
+   */
+  copy(): Promise<boolean>;
+
+  /**
+   * 剪切：复制成功后删掉选区。
+   * @returns 复制并删掉了没有
+   */
+  cut(): Promise<boolean>;
+
+  /**
+   * 粘贴：自家片段优先（保样式、控件、表格），其次纯文本。
+   * @returns 粘上了没有
+   */
+  paste(): Promise<boolean>;
+
+  /**
    * 把光标滚进视口（装载、程序化定位之后用）。
    * @param st 这一拍的账；不传就现读
    */
-  scrollCaretIntoView(st?: any): void;
+  scrollCaretIntoView(st?: any): Maybe<boolean>;
 
   /**
    * 把滚动位置归零（引擎换过文档时它自己已经把滚动位置清了，宿主跟着追平）。
@@ -296,7 +329,10 @@ export function ensureMarkup(container: HTMLElement): void {
   container.innerHTML = [
     '<div class="heditor-body" style="position:relative;height:100%">',
     '  <div id="stage" style="position:relative;height:100%;overflow:auto">',
-    '    <div id="pages"></div>',
+    // 页容器必须是定位祖先：画布按"页号 × 步距"绝对定位，定位基准只能是这里。
+    //   少了这条，画布会相对 #stage（它也是 relative）定位 —— 而 #stage 是滚动容器，
+    //   画布于是固定在可视区不随滚动走；退化成 static 更糟（见 PageCanvases.canvasFor）。
+    '    <div id="pages" style="position:relative"></div>',
     '    <textarea id="ime" rows="1" spellcheck="false"',
     '      style="position:absolute;left:0;top:0;width:1px;height:1em;opacity:0;',
     '             border:0;padding:0;resize:none;overflow:hidden"></textarea>',
@@ -325,6 +361,9 @@ export function createDomHost(o: DomHostOptions): DomHost {
 
   const link = o.link;
   const scroller = stageEl;
+  // 页容器必须是定位祖先（见 ensureMarkup）。旧骨架是库升级前造的，这里补一次 ——
+  //   幂等，只在真的是 static 时写。
+  if (getComputedStyle(pagesEl).position === 'static') pagesEl.style.position = 'relative';
   const zoom = createZoom({ base: 4 / 3 });
   const pages: CanvasStore = o.canvasStore ? o.canvasStore(pagesEl) : new PageCanvases(pagesEl);
   if (pages instanceof PageCanvases) {
@@ -345,6 +384,9 @@ export function createDomHost(o: DomHostOptions): DomHost {
   let blitMs = 0;
   let blitPages = 0;
   let blitPx = 0;
+  // 窗口自愈的在途标志与"补过哪一处滚动位置"（见 healWindow）。
+  let healing = false;
+  let healedFor = -1;
 
   /**
    * 这一拍的上屏账。谁贴的图就由谁记 —— Worker 传输在对面贴，这里读对面推来的数。
@@ -451,12 +493,23 @@ export function createDomHost(o: DomHostOptions): DomHost {
   /**
    * 把光标滚进视口。只在真的看不见时才动 scrollTop —— 每次编辑都居中会把用户正在
    *   看的地方拽走，那比"光标偶尔跑到屏幕外"更难受。
+   *
+   * 顺序有两条硬约束（连续粘贴把文档撑长时全靠它们）：
+   *   一、先让滚动高度跟上这一拍的总页数。Worker 传输下 pages.sync 只在 finish 里跑，
+   *     而滚动发生在它之前 —— 容器还按上一拍的页数算高度，赋值 scrollTop 会被浏览器
+   *     夹在旧底边上。夹过之后值根本没变、不会再派发 scroll 事件，窗口于是永久停在
+   *     旧位置：症状是"pages 很高、末尾一段没有画布"（TRAPS 186）。sync 是幂等的。
+   *   二、改完当场把位置交给引擎，不等 scroll 事件 —— 理由同上：被夹住时值没变，
+   *     浏览器不会派发事件，而"最后一下粘贴"之后也不会再有下一拍来补。
+   * @param st 这一拍的状态读数（省略则现读）
+   * @returns 有没有产生视口变化
    */
-  function scrollCaretIntoView(st?: any): void {
+  function scrollCaretIntoView(st?: any): Maybe<boolean> {
     const s = st ?? link.read('editStats');
 
-    if (!s || s.windowPages === undefined) return;
+    if (!s || s.windowPages === undefined) return false;
     const g = view();
+    pages.sync(g.first, g.count, g.totalPages, g);
     const step = g.ph + g.gap;
     const inWindow =
       s.caretPage >= s.windowFirstPage && s.caretPage < s.windowFirstPage + s.windowPages;
@@ -465,13 +518,62 @@ export function createDomHost(o: DomHostOptions): DomHost {
       : (s.caretPage * step) / dpr();
     const bot = top + Math.max(12, s.caretH / dpr());
     const pad = 18;
-    const viewTop = scroller.scrollTop;
+    const before = scroller.scrollTop;
+    const viewTop = before;
     const viewBot = viewTop + scroller.clientHeight - 2 * pad;
     if (top < viewTop + pad) scroller.scrollTop = Math.max(0, top - pad);
     else if (bot > viewBot) scroller.scrollTop = bot - scroller.clientHeight + pad * 2;
+    return nudgeViewport(before);
+  }
+
+  /**
+   * 程序化改过 scrollTop 之后，当场把新位置告诉引擎。
+   *
+   * 与 onScroll 那条路互为补充，不是重复：onScroll 靠浏览器派发事件，而"值没变"
+   *   （被旧高度夹住）或"上一拍 rAF 还没跑"时它什么都不会发。这里先把 lastScrollTop
+   *   记成新值，onScroll 之后读到同一个值就不会再发第二遍。
+   * @param before 改动之前的 scrollTop
+   * @returns 发出了视口变化没有
+   */
+  function nudgeViewport(before: number): Maybe<boolean> {
+    const top = scroller.scrollTop;
+    if (top === before) return false;
+    lastScrollTop = top;
+    return then1(link.view(top * dpr()), () => true);
   }
 
   // 收尾
+
+  /**
+   * 自愈：可见页不在窗口里，就补一条视口消息。
+   *
+   * 为什么必须有这一层：窗口换不换是引擎按"它这一刻的总页数"算的，而总页数、滚动位置、
+   *   容器高度分属三拍 —— 连续粘贴把文档一次撑长几页时，换窗请求可能带着上一拍的总页数
+   *   出发，算出来的窗口被夹在旧范围里；而 scrollTop 之后没再变，onScroll 也就不会发
+   *   第二条。结果正是"容器一直涨、末尾那一段永远没有画布"（TRAPS 186）。
+   *   同一个滚动位置只补一次，避免"引擎夹住 → 再补 → 再夹"的循环；真正滚动之后
+   *   onScroll 会把 healedFor 放开。
+   * @param g 这一拍的几何（窗口、页步距与屏幕像素比）
+   */
+  function healWindow(g: HostView): void {
+    if (healing || disposed || g.count <= 0) return;
+    const step = g.ph + g.gap;
+    if (step <= 0) return;
+    const top = Math.round(scroller.scrollTop);
+    if (top === healedFor) return;
+    const d = dpr();
+    const visFirst = Math.floor((top * d) / step);
+    const visLast = Math.floor((top * d + scroller.clientHeight * d - 1) / step);
+    if (g.first <= visFirst && visLast <= g.first + g.count - 1) return;
+    healedFor = top;
+    healing = true;
+    fireAndForget(
+      then1(link.view(top * d), () => {
+        healing = false;
+        finish();
+      }),
+    );
+  }
 
   /**
    * 收尾：对齐窗口、贴页、摆 IME、发事件。同一次状态可以重复来（Worker 会多拍）。
@@ -488,6 +590,7 @@ export function createDomHost(o: DomHostOptions): DomHost {
     // 画布集合跟着窗口走。同线程侧这条在 blitPages 里已经跑过（写 style 是幂等的，
     //   没变就不写）；Worker 侧是唯一的建画布时机 —— 建好一张就 transfer 一张。
     pages.sync(g.first, g.count, g.totalPages, g);
+    healWindow(g);
     positionIme(s);
     const caretKey = s ? `${s.caretPara}:${s.caretOffset}:${s.caretPage}:${s.caretVisible}` : '';
     if (caretKey !== lastCaretKey) {
@@ -535,14 +638,111 @@ export function createDomHost(o: DomHostOptions): DomHost {
       // 滚动必须在 settle 之后：settle 之前读到的 editStats 还是上一拍的（它只在
       //   present 时刷新）。拿旧读数决定滚动方向，多页文档上点第二页会把视口拽回
       //   上一次编辑所在的那一页 —— 看起来就是"点一下页面乱跳、光标不见了"。
-      scrollCaretIntoView(s);
-      finish(s);
-      // 计时器在这里重新起：相位从"可见"开始，530 ms 后翻到隐藏。放在 finish 里会
-      //   被每一份状态重置（Worker 每拍都推一份），于是永远停在可见那一拍。
-      resetBlink();
-      o.onEdit?.(true, source);
-      return true;
+      // 滚动与收尾之间还要等一次视口消息：滚动之后引擎可能得换窗，而 finish 是按
+      //   "引擎这一刻的窗口"建画布、贴页的。不等的话这一拍贴的是旧窗口那几页，
+      //   新窗口要等下一拍 —— 连续粘贴时就是每一拍都落后一点，越粘差距越大。
+      return then1(scrollCaretIntoView(s), () => {
+        finish();
+        // 计时器在这里重新起：相位从"可见"开始，530 ms 后翻到隐藏。放在 finish 里会
+        //   被每一份状态重置（Worker 每拍都推一份），于是永远停在可见那一拍。
+        resetBlink();
+        o.onEdit?.(true, source);
+        return true;
+      });
     });
+  }
+
+  // 剪贴板
+
+  /**
+   * 跑一条可能抛的写命令：失败转成状态栏提示，不把异常留给事件处理器。
+   *
+   * paste 那条命令在"片段读不下去"时抛出（那是用户输入坏了，不是 bug），
+   *   同步传输会当场抛，Worker 传输会拒绝 —— 两条路都得收成同一句提示。
+   * @param name 命令名
+   * @param args 参数
+   * @returns 有没有改动
+   */
+  function tryWrite(name: string, args?: Args): Maybe<boolean> {
+    const failed = (e: unknown): false => {
+      o.status?.(`${name} 失败：${String((e as Error)?.message || e)}`, true);
+      return false;
+    };
+    try {
+      const r = writeOp(name, args);
+      return r && typeof (r as Promise<boolean>).then === 'function'
+        ? (r as Promise<boolean>).catch(failed)
+        : r;
+    } catch (e) {
+      return failed(e);
+    }
+  }
+
+  /**
+   * 把引擎给的载荷写进系统剪贴板。
+   *
+   * 两条路走的是同一个载荷，差别只在"写进哪里"：事件里的 DataTransfer 只能同步写，
+   *   所以同线程传输（copy 查询当场返回值）优先走它；Worker 传输要等一趟往返，
+   *   那时事件已经结束，只能写 navigator.clipboard。
+   * @param dt copy / cut 事件里的 clipboardData（程序化调用时为 null）
+   * @returns 写成了没有
+   */
+  function copyToClipboard(dt: DataTransfer | null): Maybe<boolean> {
+    const raw = link.copy();
+    // 载荷是同步回来的（同线程传输）才能写进事件的 DataTransfer —— 那个对象只在事件
+    //   处理器的这一次调用里可写，异步回来之后再 setData 不会报错，但剪贴板是空的。
+    const sync = !(raw && typeof (raw as Promise<string>).then === 'function');
+    return then1(raw, (v: string) => {
+      const parsed = parseClipPayload(v);
+      if (!parsed.payload) {
+        o.status?.(parsed.error || '没有选中内容', true);
+        return false;
+      }
+      const p = parsed.payload;
+      const write = dt && sync ? writeToDataTransfer(dt, p) : writeToSystemClipboard(p);
+      return then1(write as Maybe<boolean>, (ok: boolean) => {
+        if (!ok) o.status?.('写不进系统剪贴板', true);
+        return ok;
+      });
+    });
+  }
+
+  /**
+   * 剪切：复制成功之后才删 —— 反过来会让"复制失败但内容已经没了"变成一次数据丢失。
+   * @param dt cut 事件里的 clipboardData
+   * @returns 复制并删掉了没有
+   */
+  function cutToClipboard(dt: DataTransfer | null): Maybe<boolean> {
+    return then1(copyToClipboard(dt), (ok: boolean) => {
+      if (!ok) return false;
+      return then1(tryWrite('deleteSelection'), (changed: boolean) =>
+        changed ? afterEdit('deleteSelection', 'user') : false,
+      );
+    });
+  }
+
+  /**
+   * 粘贴一份自家格式的片段。
+   * @param fragment 片段 JSON 文本
+   * @param source 改动来自哪条路
+   * @returns 粘上了没有
+   */
+  function pasteFragmentText(fragment: string, source: ChangeSource): Maybe<boolean> {
+    return then1(tryWrite('paste', { s: fragment }), (done: boolean) =>
+      done ? afterEdit('paste', source) : false,
+    );
+  }
+
+  /**
+   * 粘贴纯文本（别的应用来的文字，或自家格式丢失时的退路）。
+   * @param text 纯文本
+   * @param source 改动来自哪条路
+   * @returns 粘上了没有
+   */
+  function pastePlainText(text: string, source: ChangeSource): Maybe<boolean> {
+    return then1(tryWrite('pasteText', { s: text }), (done: boolean) =>
+      done ? afterEdit('pasteText', source) : false,
+    );
   }
 
   // 输入
@@ -551,6 +751,9 @@ export function createDomHost(o: DomHostOptions): DomHost {
 
   /**
    * 文档坐标（设备像素）：基准取页容器 —— 它的顶边就是文档第 0 页的顶边。
+   * @param clientX 客户端横坐标
+   * @param clientY 客户端纵坐标
+   * @returns 文档坐标（设备像素）
    */
   function pointAt(clientX: number, clientY: number): { x: number; y: number } {
     const r = pagesEl.getBoundingClientRect();
@@ -718,6 +921,29 @@ export function createDomHost(o: DomHostOptions): DomHost {
   ta.addEventListener('compositionstart', () => input.onCompositionStart());
   ta.addEventListener('compositionupdate', (ev) => input.onCompositionUpdate(ev));
   ta.addEventListener('compositionend', (ev) => void input.onCompositionEnd(ev));
+  // 剪贴板：C / V / X 不经过 keydown 判定，交给浏览器自己的 copy / cut / paste 事件 ——
+  //   粘贴的数据只在事件同步执行期间读得到，那一刻不读就永远读不到了。
+  //   三个事件一律拦掉默认行为：放行的话承接层会收到那行假文本（复制走的是它），
+  //   或把别处来的文字塞进 textarea 与输入法组合搅在一起。
+  ta.addEventListener('copy', (ev) => {
+    if (!ready || disposed) return;
+    ev.preventDefault();
+    void copyToClipboard(ev.clipboardData);
+  });
+  ta.addEventListener('cut', (ev) => {
+    if (!ready || disposed) return;
+    ev.preventDefault();
+    void cutToClipboard(ev.clipboardData);
+  });
+  ta.addEventListener('paste', (ev) => {
+    if (!ready || disposed || !ev.clipboardData) return;
+    const dt = ev.clipboardData;
+    const fragment = dt.getData(FRAGMENT_MIME);
+    const text = dt.getData('text/plain');
+    ev.preventDefault();
+    if (fragment) void pasteFragmentText(fragment, 'user');
+    else if (text) void pastePlainText(text, 'user');
+  });
   // 鼠标挂在滚动容器上而不是某一张画布：画布随窗口建与丢，逐张挂监听会在换窗时漏挂；
   //   委托给容器就没有那个缺口。合成 MouseEvent（探针）没有配套的 pointerdown，
   //   所以"按下"这一条必须挂在 mousedown 上。
@@ -759,6 +985,8 @@ export function createDomHost(o: DomHostOptions): DomHost {
       const top = scroller.scrollTop;
       if (top === lastScrollTop) return;
       lastScrollTop = top;
+      // 位置真的变了：允许自愈在这一处再补一次（见 healWindow）。
+      healedFor = -1;
       // 滚动不重排：窗口没变就什么都不做，画布摆在文档流里，浏览器已经把像素搬走了。
       fireAndForget(
         then1(link.view(top * dpr()), (r: any) => {
@@ -814,6 +1042,26 @@ export function createDomHost(o: DomHostOptions): DomHost {
     repaint,
     finish,
     afterEdit,
+    copy: async () => !!(await Promise.resolve(copyToClipboard(null))),
+    cut: async () => !!(await Promise.resolve(cutToClipboard(null))),
+    /**
+     * 程序化粘贴：先读系统剪贴板，再按"自家片段优先、否则纯文本"落进文档。
+     *
+     * 与键盘那次粘贴的差别只有一处：这里的数据要经 navigator.clipboard.read()，需要浏览器
+     *   授权；键盘那条由 paste 事件把数据直接送进来，不需要。
+     * @returns 粘上了没有
+     */
+    paste: async () => {
+      const clip = await readSystemClipboard();
+      if (!clip) {
+        o.status?.('读不到系统剪贴板（浏览器未授权）', true);
+        return false;
+      }
+      if (clip.fragment) return !!(await Promise.resolve(pasteFragmentText(clip.fragment, 'api')));
+      if (clip.text) return !!(await Promise.resolve(pastePlainText(clip.text, 'api')));
+      o.status?.('剪贴板里没有可粘贴的文字', true);
+      return false;
+    },
     scrollCaretIntoView,
     resetScroll: applyScrollReset,
     blitStats,

@@ -13,6 +13,7 @@
 
 #include "core/engine/engine.h"
 
+#include "core/rev/fragment.h"
 #include "core/rev/project.h"
 
 #include "core/text/writing_mode.h"
@@ -256,8 +257,7 @@ void EditorEngine::setDocument(const NodeTree& tree, const StyleSheet& sheet) {
     installDocument(std::move(doc));
 }
 
-rev::SerializeResult EditorEngine::saveDocument() const {
-    if (!session_) return rev::SerializeResult{false, std::string(), "没有装载文档"};
+rev::SerializeOptions EditorEngine::fontWriteOptions() const {
     rev::SerializeOptions opt;
     // 身份按稳定性排：PostScript 名（OpenType 里唯一性有规范保证）→ 族名（给人看）→
     //   文件名（可以改，所以排在最后）。文件改名不该让一份文档指向另一张脸。
@@ -266,10 +266,10 @@ rev::SerializeResult EditorEngine::saveDocument() const {
         if (face == nullptr) return rev::FontRef{};
         return rev::FontRef{face->postScriptName(), face->familyName(), fontIdOf(face->path())};
     };
-    return rev::serialize(session_->doc(), opt);
+    return opt;
 }
 
-rev::DeserializeResult EditorEngine::loadDocument(const std::string& text) {
+rev::DeserializeOptions EditorEngine::fontReadOptions() const {
     rev::DeserializeOptions opt;
     // 与写端同一个顺序找本机那张脸。都找不到就返回 -1（读者保留文件里的原下标，交给
     //   回退链），而不是"随便挑一张" —— 挑错字体比缺字体更难发现。
@@ -292,8 +292,17 @@ rev::DeserializeResult EditorEngine::loadDocument(const std::string& text) {
         }
         return -1;
     };
+    return opt;
+}
+
+rev::SerializeResult EditorEngine::saveDocument() const {
+    if (!session_) return rev::SerializeResult{false, std::string(), "没有装载文档"};
+    return rev::serialize(session_->doc(), fontWriteOptions());
+}
+
+rev::DeserializeResult EditorEngine::loadDocument(const std::string& text) {
     rev::Doc doc;
-    rev::DeserializeResult r = rev::deserialize(text, &doc, opt);
+    rev::DeserializeResult r = rev::deserialize(text, &doc, fontReadOptions());
     // 读坏了就地返回：session_ / 光标 / 页缓存一个字节都没动，调用方拿到的失败
     //   与"这一趟没发生"是同一件事（rev::deserialize 的契约）。
     if (!r.ok) return r;
@@ -301,6 +310,102 @@ rev::DeserializeResult EditorEngine::loadDocument(const std::string& text) {
     installDocument(std::move(doc));
     return r;
 }
+
+ClipCopy EditorEngine::copySelection() const {
+    ClipCopy out;
+    if (!session_) {
+        out.error = "没有装载文档";
+        return out;
+    }
+    if (!caret_.hasSelection()) {
+        out.error = "没有选中内容";
+        return out;
+    }
+    const Range sel = caret_.selection();
+    const rev::ClipCapture cap =
+        rev::captureRange(session_->doc(), flowVisibility(), sel.begin(), sel.end());
+    if (!cap.ok) {
+        out.error = cap.error;
+        return out;
+    }
+    const rev::ClipWriteResult w = rev::writeFragment(cap.nodes, fontWriteOptions());
+    if (!w.ok) {
+        out.error = w.error;
+        return out;
+    }
+    out.fragment = w.text;
+    out.text = cap.text;
+    out.lo = cap.lo;
+    out.hi = cap.hi;
+    out.ok = true;
+    return out;
+}
+
+std::string EditorEngine::pasteFragment(const std::string& text) {
+    if (!session_) return "没有装载文档";
+    const rev::ClipReadResult r = rev::readFragment(text, fontReadOptions());
+    if (!r.ok) return r.error;
+    if (!edit_.pasteNodes(r.nodes)) return "粘贴失败：落点不接受这段内容";
+    return std::string();
+}
+
+std::string EditorEngine::pastePlainText(const std::string& utf8) {
+    if (!session_) return "没有装载文档";
+    std::vector<NodeSpec> nodes;
+    std::string line;
+    const auto flush = [&nodes, &line]() {
+        if (!line.empty()) {
+            NodeSpec run;
+            run.kind = NodeKind::TextRun;
+            run.text = utf8ToCodepoints(line);
+            nodes.push_back(std::move(run));
+        }
+        line.clear();
+    };
+    for (size_t i = 0; i < utf8.size(); ++i) {
+        const char c = utf8[i];
+        if (c != '\n' && c != '\r') {
+            line.push_back(c);
+            continue;
+        }
+        // CRLF 是两个字符一个换行：吃掉紧随的 LF，否则会多出一个空段落。
+        if (c == '\r' && i + 1 < utf8.size() && utf8[i + 1] == '\n') ++i;
+        flush();
+        NodeSpec mark;
+        mark.kind = NodeKind::ParagraphMark;
+        nodes.push_back(std::move(mark));
+    }
+    flush();
+    if (nodes.empty()) return "没有可粘贴的文本";
+    if (!edit_.pasteNodes(nodes)) return "粘贴失败：落点不接受这段内容";
+    return std::string();
+}
+
+bool EditorEngine::deleteSelection() { return edit_.deleteSelection(); }
+
+std::string EditorEngine::pasteFragmentAndRender(const std::string& text) {
+    const std::string err = pasteFragment(text);
+    if (!err.empty()) return err;
+    relayout();
+    repaintAfterEdit();
+    return std::string();
+}
+
+std::string EditorEngine::pastePlainTextAndRender(const std::string& utf8) {
+    const std::string err = pastePlainText(utf8);
+    if (!err.empty()) return err;
+    relayout();
+    repaintAfterEdit();
+    return std::string();
+}
+
+bool EditorEngine::deleteSelectionAndRender() {
+    if (!deleteSelection()) return false;
+    relayout();
+    repaintAfterEdit();
+    return true;
+}
+
 
 const rev::Doc& EditorEngine::document() const {
     static const rev::Doc kEmpty;

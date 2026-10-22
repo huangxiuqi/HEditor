@@ -20,7 +20,10 @@ const DEMO_TEXT = [
 ].join('\n');
 
 const params = new URLSearchParams(location.search);
-const transport = params.get('transport') === 'worker' ? 'worker' : 'inline';
+// 默认走 Worker：它就是"引擎跑在另一条线程上"的那一档，产品里该按它验。要复现
+//   同线程那条路显式写 ?transport=inline —— 两条路的差别只在"命令是在事件处理器里
+//   同步跑完，还是一次往返之后跑完"，很多时序问题只在其中一条上显形。
+const transport = params.get('transport') === 'inline' ? 'inline' : 'worker';
 // 探针用 ?glue= 造"产物不存在"这种真实配置错误。产品页不会有这一行。
 const glue = params.get('glue');
 // Worker 壳是构建产物（经典 worker，要 importScripts 装胶水），开发模式下也用构建好的那一份。

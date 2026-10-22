@@ -7,6 +7,24 @@
 //   也是"整篇 3000 段"不再撑爆内存的原因。
 
 /**
+ * 页画布的元素约定：定位与层叠只在这里定一次。
+ *
+ * 为什么收成一个函数：宿主有两个画布集合（同线程按页建销、Worker 按槽复用），而
+ *   "这张 canvas 怎么摆"对两者是同一件事。分头写的结果必然是一边有一边漏 —— 漏的那
+ *   一侧画布参与文档流，style.top 完全失效（页间距丢失、逐页漂移），换窗时 remove /
+ *   appendChild 会改变流的高度，浏览器据此做滚动锚定、把 scrollTop 拽回去（TRAPS 189）。
+ *
+ * 幂等：对已经设过的元素再调一次不产生任何写入（池里捞回来的那些都走这条路）。
+ * @param el 一张页画布
+ */
+function stylePageCanvas(el: HTMLCanvasElement): void {
+  if (el.className !== 'pg') el.className = 'pg';
+  if (el.style.position !== 'absolute') el.style.position = 'absolute';
+  if (el.style.left !== '0px') el.style.left = '0';
+  if (el.style.display !== 'block') el.style.display = 'block';
+}
+
+/**
  * 一页画布：元素、上下文、以及"还没被贴过"的标志。
  */
 export interface PageRec {
@@ -92,34 +110,15 @@ export class PageCanvases {
     let rec = this.map.get(page);
     if (!rec) {
       const el = this.pool.pop() ?? document.createElement('canvas');
+      // 元素约定只有一处（stylePageCanvas）。池里捞回来的也过一遍 —— 幂等，且能兜住
+      //   旧版本造出来的元素（样式是会话内共享的 DOM，升级后重建实例不该带着旧约定）。
+      stylePageCanvas(el);
       rec = { el, g: el.getContext('2d', { alpha: false }), fresh: true };
       this.map.set(page, rec);
       this.pagesEl.appendChild(el);
       if (this.onCreated) this.onCreated(page, el);
     }
     return rec;
-  }
-
-  /**
-   * 页纸底：让"还没渲染出来的页"也是一张白纸，而不是什么都没有。
-   *
-   * 为什么必须有：甩滚时引擎追不上（一页在屏幕上只停留十几毫秒，而渲染一页要几十
-   * 毫秒），画布只存在于窗口覆盖的页上，于是可见区域里既没有字也没有画布 —— 看到的
-   * 就是"滚动时一片空白、停下来才刷出来"，而那片空白看起来像坏了。
-   * 为什么用 CSS 而不是多建画布：这张图是纯渐变，浏览器自己画，主线程零成本；
-   * 多建画布要么白占几十 MB 背衬，要么还得为它跑一次 putImageData。
-   * @param geom 页度量（页高与步距）
-   */
-  private syncBackdrop(geom: PageGeometry): void {
-    const h = Math.round(geom.ph / geom.dpr);
-    const s = Math.round((geom.ph + geom.gap) / geom.dpr);
-    const img =
-      `linear-gradient(to bottom, #ffffff 0 ${h}px,` + ` rgba(255,255,255,0) ${h}px ${s}px)`;
-    if (this.pagesEl.style.backgroundImage !== img) {
-      this.pagesEl.style.backgroundImage = img;
-      this.pagesEl.style.backgroundSize = `100% ${s}px`;
-      this.pagesEl.style.backgroundRepeat = 'repeat-y';
-    }
   }
 
   /**
@@ -139,7 +138,9 @@ export class PageCanvases {
     const h = (Math.max(1, total) * step - gap) / dpr + 'px';
     if (this.pagesEl.style.width !== w) this.pagesEl.style.width = w;
     if (this.pagesEl.style.height !== h) this.pagesEl.style.height = h;
-    this.syncBackdrop(geom);
+    // 容器不画"纸底"：那片白纸是假象 —— 页没画布时它把"这里什么都没有"伪装成
+    //   "一张空白页"，查问题时看不出是缺画布还是真空白（2026-10-22 就被它误导过）。
+    //   真白纸由引擎的页位图给（页位图是 alpha:false 的不透明画布），缺画布就该露出底色。
 
     for (const [p, rec] of this.map) {
       if (p < first || p >= first + count) {
@@ -333,9 +334,8 @@ export class SlotCanvases implements CanvasStore {
    */
   private acquire(): HTMLCanvasElement {
     const el = document.createElement('canvas');
-    el.className = 'pg';
-    el.style.position = 'absolute';
-    el.style.display = 'block';
+    // 与 PageCanvases 共用同一处元素约定 —— 两个实现各自写一遍就是漏改的来源。
+    stylePageCanvas(el);
     this.pagesEl.appendChild(el);
     return el;
   }

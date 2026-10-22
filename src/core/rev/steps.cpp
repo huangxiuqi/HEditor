@@ -84,6 +84,12 @@ Ref fromSpec(const NodeSpec& s, NodeId* next, std::string* error) {
         case NodeKind::Field:
             payload = s.field;
             break;
+        case NodeKind::Image:
+            payload = s.image;
+            break;
+        case NodeKind::Formula:
+            payload = s.formula;
+            break;
         case NodeKind::Section:
             // 节的页面设置装不进 NodeSpec（它引用同文件里的页眉页脚根），所以搬不过来。
             *error = "子树里含节：节记录不在 NodeSpec 里";

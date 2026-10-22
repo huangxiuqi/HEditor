@@ -19,6 +19,8 @@
 
 #include "core/doc/char_format.h"
 #include "core/doc/control_spec.h"
+#include "core/doc/formula_spec.h"
+#include "core/doc/image_spec.h"
 #include "core/doc/node.h"
 #include "core/doc/para_format.h"
 #include "core/doc/table_spec.h"
@@ -84,6 +86,17 @@ struct NodeSpec {
      * 域记录（仅域）。
      */
     FieldSpec field;
+
+    /**
+     * 图片记录（仅图片）。没有它，摘下一棵含图片的子树再挂回去就只剩一个空图 ——
+     * 撤销一次删除图片，恢复出来的是一张没有资源标识的图。
+     */
+    ImageSpec image;
+
+    /**
+     * 公式记录（仅公式）。
+     */
+    FormulaSpec formula;
 
     /**
      * 子节点，顺序就是流顺序。

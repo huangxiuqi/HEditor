@@ -20,6 +20,7 @@
 #include "core/doc/steps.h"
 #include "core/doc/transaction.h"
 #include "core/rev/flow.h"
+#include "core/rev/fragment.h"
 #include "core/rev/project.h"
 #include "core/rev/rev.h"
 #include "core/rev/serialize.h"
@@ -2603,6 +2604,113 @@ int main() {
         expectTrue(big_bytes > base.allocatedBytes() * 4,
                    "反向：四百段文档的索引明显更大（" +
                        std::to_string(static_cast<unsigned long long>(big_bytes)) + " 字节）");
+    }
+
+    std::printf("\n[25] 剪贴板片段：取、写、读、插回\n");
+    {
+        // 取整篇：控件不能被摊平成文字，否则"复制一段带控件的文字"粘回来控件就没了。
+        Doc a;
+        std::string why;
+        expectTrue(rev::fromTree(makeSpanningControlTree(), &a, &why), "前提：控件文书装得进修订");
+        const rev::FlowIndex idx(a, FlowVisibility::Design);
+        const rev::ClipCapture cap = rev::captureRange(a, FlowVisibility::Design, 0, idx.size());
+        expectTrue(cap.ok, "取整篇成功（" + cap.error + "）");
+        bool has_control = false;
+        for (const NodeSpec& s : cap.nodes) {
+            if (s.kind == NodeKind::ContentControl) has_control = true;
+        }
+        expectTrue(has_control, "★ 片段里保留着控件节点（不是被摊平成文字）");
+        expectTrue(cap.lo == 0 && cap.hi == idx.size(), "整篇的取用区间就是整条流");
+
+        // 段落标记折成换行：控件内部的段落标记也要出现在纯文本投影里。
+        //   每段一枚段落标记，所以每段之后都有一个换行（含最后一段）。
+        const std::vector<std::u32string> src_paras = rev::paraTexts(a);
+        std::vector<uint32_t> joined;
+        for (size_t i = 0; i < src_paras.size(); ++i) {
+            const std::vector<uint32_t> cps(src_paras[i].begin(), src_paras[i].end());
+            joined.insert(joined.end(), cps.begin(), cps.end());
+            joined.push_back(U'\n');
+        }
+        expectTrue(utf8ToCodepoints(cap.text) == joined,
+                   "★ 纯文本投影等于逐段文本以换行结尾相连（实测 " +
+                       std::to_string(utf8ToCodepoints(cap.text).size()) + " 个码点，期望 " +
+                       std::to_string(joined.size()) + "）");
+
+        const rev::ClipWriteResult w1 = rev::writeFragment(cap.nodes);
+        const rev::ClipWriteResult w2 = rev::writeFragment(cap.nodes);
+        expectTrue(w1.ok, "片段写得出来（" + w1.error + "）");
+        expectTrue(w1.text == w2.text, "同一份内容写两遍，字节完全相同");
+        const rev::ClipReadResult r = rev::readFragment(w1.text);
+        expectTrue(r.ok, "读得回来（" + r.error + "）");
+        const rev::ClipWriteResult w3 = rev::writeFragment(r.nodes);
+        expectTrue(w3.ok && w3.text == w1.text, "★ 读回来再写一遍，字节完全相同（往返闭合）");
+
+        // 插进另一份空文档：整份内容原样过去 —— 这是"跨实例复制"的最小形状。
+        Doc empty = rev::makeTextDoc({});
+        std::vector<Step> steps;
+        FlowPos cur = 0;
+        for (const NodeSpec& s : r.nodes) {
+            InsertNode in;
+            in.at_flow = cur;
+            in.subtree = s;
+            steps.push_back(Step{in});
+            cur += static_cast<FlowPos>(s.span());
+        }
+        const rev::EditResult pasted = rev::applySteps(empty, steps, FlowVisibility::Design);
+        expectTrue(pasted.ok, "★ 片段插进空文档成功（" + pasted.error + "）");
+        expectTrue(rev::paraCount(pasted.doc) == rev::paraCount(a),
+                   "粘出来的段数与来源相同（" + std::to_string(rev::paraCount(pasted.doc)) +
+                       " vs " + std::to_string(rev::paraCount(a)) + "）");
+        expectTrue(sameText(rev::paraTexts(pasted.doc), src_paras),
+                   "粘出来的逐段文本与来源相同");
+        const rev::Projection proj = rev::project(pasted.doc, StyleSheet{}, {});
+        expectTrue(proj.controls.size() == 1, "粘出来的文档里控件还在（" +
+                                                  std::to_string(proj.controls.size()) + " 个）");
+
+        // 取半段文字：文本按码点截断，标记随节点带走。
+        //   流位置 0 是节的开边界，所以 [1, 3) 盖住的是头两个码点。
+        const Doc plain = rev::makeTextDoc({U"甲乙丙丁"});
+        const rev::ClipCapture part = rev::captureRange(plain, FlowVisibility::Design, 1, 3);
+        expectTrue(part.ok, "取中间两个字（" + part.error + "）");
+        expectTrue(part.nodes.size() == 1 && part.nodes[0].kind == NodeKind::TextRun,
+                   "半段文字取出来是一个文本节点（实际 " + std::to_string(part.nodes.size()) +
+                       " 个）");
+        expectTrue(part.nodes[0].text.size() == 2, "截断到两个码点（实测 " +
+                                                       std::to_string(part.nodes[0].text.size()) +
+                                                       "）");
+        expectTrue(part.text == "甲乙", "截出来的正是那两个码点（实测 " + part.text + "）");
+
+        // 空区间与越界：不产出一个"看起来成功"的空片段。
+        const rev::ClipCapture none = rev::captureRange(a, FlowVisibility::Design, 2, 2);
+        expectTrue(!none.ok && !none.error.empty(), "空区间被拒并给出原因（" + none.error + "）");
+
+        // 表格整块：端点落在表内时向外扩到整张表的两端。
+        Doc tbl;
+        std::string tbl_why;
+        expectTrue(rev::fromTree(demoTableTree(0), &tbl, &tbl_why), "前提：表格文书装得进修订");
+        const rev::FlowIndex ti(tbl, FlowVisibility::Design);
+        int tf = 0;
+        int te = 0;
+        NodeId table_id = kInvalidNodeId;
+        for (const rev::Ref& c : tbl.root->children.front()->children) {
+            if (c->kind != NodeKind::Table) continue;
+            table_id = c->id;
+            ti.intervalOf(c->id, &tf, &te);
+        }
+        expectTrue(table_id != kInvalidNodeId && te > tf + 2, "前提：表格在流里有区间");
+        // 从表格内部一格开始取：取用区间必须扩到整张表。
+        const rev::ClipCapture half = rev::captureRange(tbl, FlowVisibility::Design, tf + 3, te - 1);
+        expectTrue(half.ok, "从表格内部取一段（" + half.error + "）");
+        expectTrue(half.lo <= tf && half.hi >= te,
+                   "★ 取用区间扩到整张表（" + std::to_string(half.lo) + ".." +
+                       std::to_string(half.hi) + "，表 " + std::to_string(tf) + ".." +
+                       std::to_string(te) + "）");
+        bool has_table = false;
+        for (const NodeSpec& s : half.nodes) {
+            if (s.kind == NodeKind::Table) has_table = true;
+        }
+        expectTrue(has_table, "扩出来的片段里有整张表");
+        expectTrue(!half.text.empty(), "表格的纯文本投影非空（有字）");
     }
 
     std::printf("\n结果：%d 项断言，%d 项失败\n", g_checks, g_failures);

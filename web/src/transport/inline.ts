@@ -173,6 +173,8 @@ export function createInline(opts: InlineOptions): {
     takeScrollReset: () => api?.takeScrollReset() ?? false,
     pixels: (page: number) => (api ? (api.engine().pageRgba(page) as Uint8ClampedArray) : null),
     serialize: () => String(api?.read('serialize') ?? ''),
+    // 复制是查询：同步拿到载荷，copy / cut 事件里才能当场写进 DataTransfer。
+    copy: () => String(api?.read('copy') ?? ''),
     // 同线程里每条命令都是当场跑完的，队列本来就没有积压。
     flush: () => Promise.resolve(),
   };

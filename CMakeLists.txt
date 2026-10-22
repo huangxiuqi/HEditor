@@ -190,6 +190,7 @@ add_library(heditor_core STATIC
   src/core/rev/session.cpp
   src/core/rev/flow.cpp
   src/core/rev/steps.cpp
+  src/core/rev/fragment.cpp
   src/core/rev/capability.cpp
   src/core/text/font.cpp
   src/core/text/font_source.cpp
