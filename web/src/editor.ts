@@ -16,6 +16,7 @@ import type {
 import { createDomHost, type ChangeSource, type DomHost, type EngineLink } from './host/dom';
 import type { CanvasStore } from './host/pages';
 import { cleanMarkdownLines, then1, type Args, type ZoomControl } from './input/keymap';
+import { assertSimd, simdProbeBytes, simdSupported } from './engine/simd';
 import { createInline, defaultFonts, type AssetPaths } from './transport/inline';
 import { createWorker } from './transport/worker';
 import { guard } from './guard';
@@ -125,12 +126,16 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
     throw new TypeError("transport 只能是 'inline' 或 'worker'");
   }
 
+  // 装载之前先确认这台浏览器能跑这份产物。放在这里而不是各个传输里：它判的是
+  //   "这份 wasm 能不能实例化"，与引擎在哪条线程上无关；而失败时唯一的目击者是
+  //   createEditor 的调用方 —— 让它拿到带标题与下一步的拒绝，而不是一条 CompileError。
+  assertSimd();
+
   const assets = resolveAssets(opts);
   const emitter = new Emitter();
   const config: EditorConfig = { ...DEFAULT_CONFIG, ...(opts.config ?? {}) };
   let version = 0;
   let disposed = false;
-  let lastStats: any = null;
   // 页面级错误历史（diag.errors 读它）。与 error 事件同源 —— 事件是"发生的那一刻"，
   //   这份是"发生过哪些"：探针在收尾时才读，那时事件早就过去了。
   const pageErrors: string[] = [];
@@ -163,7 +168,7 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       dpr: window.devicePixelRatio || 1,
       zoom: config.zoom * (4 / 3) * (window.devicePixelRatio || 1),
       empty: true,
-      makeHost: (l, store) => createDomHost(hostOptions(l, store)),
+      makeHost: (l, store, remoteBlit) => createDomHost(hostOptions(l, store, remoteBlit)),
     });
     link = t.link;
     dom = t.host;
@@ -177,12 +182,14 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
   function hostOptions(
     l: EngineLink,
     store?: (pagesEl: HTMLElement) => CanvasStore,
+    remoteBlit?: () => { ms: number; pages: number; px: number },
   ): Parameters<typeof createDomHost>[0] {
     return {
       container: opts.container,
       link: l,
       input: config.input !== false,
       canvasStore: store,
+      blitStats: remoteBlit,
       readOnly: () => config.mode === 'readOnly',
       status: (text, isErr) => {
         if (!isErr) return;
@@ -234,14 +241,19 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
    * 不能走 edit()：它按引擎返回值判断"有没有改动"，而这批命令的实现返回 undefined
    *   （改的是光标，不是文档）。走 edit() 的后果是"引擎里光标动了、画面与账都没动" ——
    *   实测 setCaret 之后 caret().pos.offset 永远是 0，而打字却落在正确位置。
+   *
+   * reveal = "把光标滚进视野"。它只属于"我要看这个位置"的那几个入口（程序化定位、
+   *   行首行尾、文档首尾）；选区类（select / selectAll / clearSelection）不做 ——
+   *   选区可以在任何地方，把视口拽到焦点端是另一回事。
    */
-  const caretOp = (name: string, args?: Args): Promise<void> => {
+  const caretOp = (name: string, args?: Args, reveal = false): Promise<void> => {
     alive();
     return Promise.resolve(
       then1(link.write(name, args), () =>
         then1(link.settle(name), (st) => {
-          const stats = (st as { stats?: unknown } | null)?.stats;
-          dom.finish((stats ?? link.read('editStats')) as never);
+          const stats = (st as { stats?: unknown } | null)?.stats ?? link.read('editStats');
+          if (reveal) dom.scrollCaretIntoView(stats as never);
+          dom.finish(stats as never);
           return undefined;
         }),
       ),
@@ -395,7 +407,7 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
         });
         return;
       }
-      await caretOp('setCaret', { para: pos.para, offset: pos.offset });
+      await caretOp('setCaret', { para: pos.para, offset: pos.offset }, true);
     },
 
     async moveCaret(step: CaretStep) {
@@ -414,16 +426,16 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
           await edit('vertical', { dir: 1 });
           break;
         case 'docStart':
-          await caretOp('docStart');
+          await caretOp('docStart', undefined, true);
           break;
         case 'docEnd':
-          await caretOp('docEnd');
+          await caretOp('docEnd', undefined, true);
           break;
         case 'lineStart':
-          await caretOp('lineStart');
+          await caretOp('lineStart', undefined, true);
           break;
         case 'lineEnd':
-          await caretOp('lineEnd');
+          await caretOp('lineEnd', undefined, true);
           break;
       }
     },
@@ -607,11 +619,17 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       Object.assign(config, next);
       // 样式由引擎夹取（光标宽度下限、颜色通道），读回来才是"生效值" ——
       //   契约写的是返回夹取后的配置，在 JS 里再抄一份夹取规则就会与引擎分叉。
+      //   读是异步的传输下必须先等到值：拿到一个 Promise 写进配置影子，之后每一次
+      //   config() 都把它当对象读（widthPt 是 undefined），而那正是"夹取没生效"的样子。
       if (changed.caretStyle !== undefined) {
-        config.caretStyle = link.read('caretStyleJson') as typeof config.caretStyle;
+        config.caretStyle = (await Promise.resolve(
+          link.read('caretStyleJson'),
+        )) as typeof config.caretStyle;
       }
       if (changed.selectionStyle !== undefined) {
-        config.selectionStyle = link.read('selectionStyleJson') as typeof config.selectionStyle;
+        config.selectionStyle = (await Promise.resolve(
+          link.read('selectionStyleJson'),
+        )) as typeof config.selectionStyle;
       }
       emitter.emit('configchange', { changed, config: { ...config } });
       return { ...config };
@@ -656,12 +674,18 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
    * 一次配置类命令的收尾：写完就 present + 贴页（与 doOp 的口径同一条）。
    */
   function settleAfter(opName: string, args?: Args): Promise<unknown> | unknown {
-    if (args) link.write(opName, args);
-    return then1(link.settle(opName), (st) => {
-      lastStats = st ?? link.read('editStats');
-      dom.finish(lastStats);
-      return st;
-    });
+    // 写必须等它落地再收尾。Worker 传输下 write 是一次往返，而 settle 在那一侧是同步的
+    //   （收尾已经在 doOp 里做完了）—— 不等 write 就等于"配置还没生效就去读生效值"，
+    //   症状是每次读回的都是上一次的样式，而调用方以为只是"夹取规则不对"。
+    return then1(args ? link.write(opName, args) : null, () =>
+      then1(link.settle(opName), (st) => {
+        // settle 回的是"收尾结果"（{ moved, scrolled, stats }），不是 stats 本身。
+        //   两种传输必须同形 —— 少了这一层解包，收尾拿到的是包装对象，光标位置与页号
+        //   全是 undefined（IME 被收成一像素），而 editStats 看上去仍然是对的。
+        dom.finish((st as { stats?: unknown } | null)?.stats ?? link.read('editStats'));
+        return st;
+      }),
+    );
   }
 
   /**
@@ -697,18 +721,28 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
  *   config() 读的是影子。不同步的后果不是"显示错了"，是下一次 configure 按过期的
  *   差集算成空操作 —— 表现是"设了文档模式还是一个键都打不进去"。
  */
-function syncConfigFromEngine(link: EngineLink, cfg: EditorConfig, zoom: ZoomControl): void {
-  const code = Number(link.read('editMode'));
-  cfg.mode = code === 1 ? 'form' : code === 2 ? 'readOnly' : 'document';
-  const st = link.read('stats') as { zoom?: number } | null;
-  const density = Number(st?.zoom ?? 0);
-  if (density > 0) {
-    cfg.zoom = density / ((4 / 3) * (window.devicePixelRatio || 1));
-    // 命中把设备像素折成磅时除的就是这个密度。它只跟着 configure 走过，而诊断面
-    //   能直接改引擎的 zoom —— 不同步的症状不是"显示大小不对"，是点击落点整体偏：
-    //   除错了倍数，点同一个像素会落到右边或左边的一格上。
-    zoom.set(density);
-  }
+function syncConfigFromEngine(
+  link: EngineLink,
+  cfg: EditorConfig,
+  zoom: ZoomControl,
+): Promise<void> | void {
+  // 两条读都是"引擎现在是什么"，在 Worker 传输下是往返 —— 必须等到值再写影子，
+  //   否则 Number(Promise) 是 NaN，配置影子被写成"文档模式 + 原始缩放"，
+  //   而它下一拍又会被当成差集的基准。
+  return then1(link.read('editMode'), (code) =>
+    then1(link.read('stats'), (st) => {
+      const c = Number(code);
+      cfg.mode = c === 1 ? 'form' : c === 2 ? 'readOnly' : 'document';
+      const density = Number((st as { zoom?: number } | null)?.zoom ?? 0);
+      if (density > 0) {
+        cfg.zoom = density / ((4 / 3) * (window.devicePixelRatio || 1));
+        // 命中把设备像素折成磅时除的就是这个密度。它只跟着 configure 走过，而诊断面
+        //   能直接改引擎的 zoom —— 不同步的症状不是"显示大小不对"，是点击落点整体偏：
+        //   除错了倍数，点同一个像素会落到右边或左边的一格上。
+        zoom.set(density);
+      }
+    }),
+  );
 }
 
 /**
@@ -729,6 +763,18 @@ function makeDiag(
   const read = (name: string, args?: Args): unknown => link.read(name, args);
 
   /**
+   * 读一个标量并把形状钉住（数字 / 字符串 / 数组）。
+   *
+   * Worker 传输下 read 是往返，直接 Number(...) / String(...) 得到的是对 Promise 的
+   *   NaN 与 "[object Promise]" —— 而且它们能一路流进判据里，看起来只是"这个字段
+   *   没有值"。then1 把同步值与 Promise 折成一条链，两种传输共用一个写法。
+   */
+  const num = (name: string, args?: Args, fallback = 0): number | Promise<number> =>
+    then1(read(name, args), (v) => (v === undefined || v === null ? fallback : Number(v)));
+  const str = (name: string, args?: Args): string | Promise<string> =>
+    then1(read(name, args), (v) => String(v ?? ''));
+
+  /**
    * 装载类收尾：写完等一次收尾，返回那一拍的账。
    */
   const settleAs = async (name: string, args: Args): Promise<unknown> => {
@@ -737,7 +783,7 @@ function makeDiag(
     // 装载与设置类命令会直接改引擎的编辑模式与缩放（样例自带表单模式、场景带缩放），
     //   而库那份配置是影子 —— 不同步回来的话，下一次 configure 会按过期的差集算，
     //   于是"切成文档模式"变成空操作。
-    syncConfig();
+    await Promise.resolve(syncConfig());
     return read('editStats');
   };
 
@@ -758,15 +804,16 @@ function makeDiag(
     selfCheck: () => read('selfCheck'),
     markCheck: () => read('markCheck'),
     rawFrame: () => read('rawFrame'),
-    frameDigest: () => Number(read('frameDigest') ?? 0),
-    frameW: () => Number(read('frameWidth') ?? 0),
-    frameH: () => Number(read('frameHeight') ?? 0),
+    frameDigest: () => num('frameDigest'),
+    frameW: () => num('frameWidth'),
+    frameH: () => num('frameHeight'),
     present: () => void dom.repaint(),
     controls: () => read('controls'),
     bracketSlots: () => read('bracketSlots'),
     hit: (x: number, y: number) => read('hit', { x, y }),
     controlAt: (x: number, y: number) => read('controlAt', { x, y }),
-    describeControls: () => String(read('describeControls') ?? ''),
+    describeControls: () => str('describeControls'),
+    // 下面三条读的是随状态推过来的镜像：两种传输都是同步值。
     blockedEdits: () => Number(read('blockedEdits') ?? 0),
     dirtyPages: () => (read('dirtyPages') as number[]) ?? [],
     pagePx: () => {
@@ -775,7 +822,14 @@ function makeDiag(
     },
     pageCanvases: () => dom.pagesEl.querySelectorAll('canvas').length,
     pageCanvasList: () => [...dom.pagesEl.querySelectorAll('canvas')],
-    prewarmPage: (page: number) => void read('prewarmPage', { page }),
+    prewarmPage: (page: number) => {
+      // 预热是"捎带的一件事"，不是命令：Worker 传输下它是一次异步往返，没人等它，
+      //   拒掉的话会变成未处理的 Promise（页面级错误面会红）。这里只收掉拒绝。
+      const p = read('prewarmPage', { page });
+      if (p && typeof (p as Promise<unknown>).catch === 'function') {
+        (p as Promise<unknown>).catch(() => undefined);
+      }
+    },
     bench: () => read('bench'),
     caretReport: () => String(read('caretReport') ?? ''),
     caretLive: () => Number(read('caretOffsetLive') ?? -1),
@@ -783,6 +837,7 @@ function makeDiag(
       ua: navigator.userAgent,
       url: location.href,
       dpr: window.devicePixelRatio || 1,
+      // heap 是随状态推过来的镜像，两种传输都是同步读。
       heapMB: Number(read('heap') ?? 0) / 1048576,
     }),
     fonts: () => read('stats'),
@@ -836,7 +891,10 @@ function makeDiag(
       await Promise.resolve(link.write('fonts', { mode: m }));
       await Promise.resolve(link.settle('fonts'));
       // 字体字节的账在 editStats 里（按需读发生在排版之后，快照会漏掉大头）。
-      const st = read('editStats') as { fontStorageBytes?: number; fontResidentBytes?: number } | null;
+      const st = (await Promise.resolve(read('editStats'))) as {
+        fontStorageBytes?: number;
+        fontResidentBytes?: number;
+      } | null;
       return {
         mode: m,
         bytes: Number((m === 'lazy' ? st?.fontStorageBytes : st?.fontResidentBytes) ?? 0),
@@ -845,6 +903,10 @@ function makeDiag(
     setFontCacheConfig: (blockSize, maxBlocks) =>
       link.write('setFontCacheConfig', { blockSize, blocks: maxBlocks }),
     setViewportAnchor: (first, count) => settleAs('viewport', { first, count }),
+
+    // 能力探测的现场：supported 是库的判断，probe 是那段探针字节本身（判据可以
+    //   自己跑一次 validate、再检查里面有没有 v128 指令，而不必只信这个结论）。
+    simd: () => ({ supported: simdSupported(), probe: Array.from(simdProbeBytes()) }),
 
     errors: () => errors.slice(),
   };

@@ -45,7 +45,7 @@ import glob
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 CPP = ['src/**/*.h', 'src/**/*.hpp', 'src/**/*.cpp', 'tests/*.cpp']
-JS = ['scripts/*.mjs', 'web/*.js', 'web/*.ts', 'web/src/**/*.ts']
+JS = ['scripts/*.mjs', 'scripts/*.js', 'web/*.js', 'web/*.ts', 'web/src/**/*.ts']
 
 # 构建产物没有手写注释，按源码规范查它只会查出别人的压缩格式。
 #   web/engine_api.js 的真源是 web/src/engine/api.ts（vite.engine.config.ts 打出来的）。

@@ -124,6 +124,9 @@ export class PageCanvases {
     }
     for (let p = first; p < first + count; ++p) {
       const rec = this.canvasFor(p);
+      // 页号的唯一读写口：诊断（自审要按页号找那一张画布）与指针归属都按它认页。
+      const pStr = String(p);
+      if (rec.el.dataset.page !== pStr) rec.el.dataset.page = pStr;
       if (rec.el.width !== pw || rec.el.height !== ph) {
         // 改尺寸会清空画布 —— 与新建同一种状态。
         rec.el.width = pw;

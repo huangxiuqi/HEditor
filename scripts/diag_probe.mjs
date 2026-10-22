@@ -176,21 +176,45 @@ chk.section('六、错误历史与既有诊断');
     const d = window.__demo.diag;
     const errs = d.errors();
     const au = await d.auditFrame();
-    const sc = d.selfCheck();
+    // 必须 await：Worker 传输下它是一次往返，不 await 拿到的是 Promise ——
+    //   而 Promise 也是 object，于是"返回取证对象"这条会以空值恒真。
+    const sc = await d.selfCheck();
     const px = d.pagePx();
     const bk = d.bracketSlots();
     return { isArr: Array.isArray(errs), n: errs.length, diff: au && au.diff,
-             sel: !!(sc && typeof sc === 'object'), px, hasBrackets: bk !== undefined };`);
+             sel: !!sc && sc.compared > 0, compared: sc && sc.compared,
+             diffPx: sc && sc.screenVsEngineDiffPx, px, hasBrackets: bk !== undefined };`);
   chk.check('errors() 是数组', r.isArr === true, String(r.n));
   // auditFrame 的载荷是 { diff, box }：diff = 0 表示"帧与从零重画逐字节相同"。
   chk.check('auditFrame 自审通过（diff = 0）', r.diff === 0, String(r.diff));
-  chk.check('selfCheck 返回取证对象', r.sel === true);
+  // compared > 0 是这一条的反向一半：没有它，缺画布时 diff 恒 0 也算过。
+  chk.check('selfCheck 真的比了像素且屏幕与引擎一致',
+            r.sel === true && r.diffPx === 0, `compared=${r.compared}，差 ${r.diffPx} px`);
   chk.check('pagePx 是页度量', r.px && r.px.w > 0 && r.px.h > 0,
             JSON.stringify(r.px));
   chk.check('bracketSlots 可读', r.hasBrackets === true);
 }
 
-chk.section('七、没有 console 错误');
+chk.section('七、能力探测：WebAssembly SIMD');
+{
+  const r = await ev(`
+    const d = window.__demo.diag;
+    const s = d.simd();
+    const bytes = new Uint8Array(s.probe);
+    // 判据自己跑一次 validate，并确认里面真的有一条 SIMD 指令（0xFD 前缀）——
+    //   只信 supported 的话，"探针被常量折叠成空壳"与"环境真支持"分不开。
+    let valid = false;
+    try { valid = WebAssembly.validate(bytes) === true; } catch (e) { valid = false; }
+    return { supported: s.supported, valid, len: bytes.length,
+             hasSimdOp: bytes.includes(0xFD) };`);
+  chk.check('探测结论是"支持"，且探针字节自己 validate 也是 true',
+            r.supported === true && r.valid === true,
+            `supported=${r.supported} valid=${r.valid}`);
+  chk.check('探针字节里真的有一条 SIMD 指令（不是被折叠掉的空壳）',
+            r.len > 100 && r.hasSimdOp === true, `${r.len} 字节，含 0xFD=${r.hasSimdOp}`);
+}
+
+chk.section('八、没有 console 错误');
 {
   const errs = cdp.consoleErrors.filter((t) => !/favicon/i.test(t));
   chk.check('没有 console 错误', errs.length === 0, errs.slice(0, 2).join(' | '));

@@ -1,11 +1,11 @@
 // 迁移垫片：把旧门面（window.__heditor）翻译成新库的公开面 + diag。
 //
-// 这是**探针专用的兼容层**，不是产品代码：
-//   · 它只存在于探针注入里（edit_probe --lib），库产物里没有这个文件；
-//   · 每个成员只做一次翻译，翻译漏了会当场抛（不会静默返回 undefined）；
-//   · 它的存在是为了让 369 条断言先跑起来找差异，而不是把旧门面复活。
+// 这是探针专用的兼容层，不是产品代码：
+//   一、它只存在于探针注入里（edit_probe --lib），库产物里没有这个文件；
+//   二、每个成员只做一次翻译，翻译漏了会当场抛（不会静默返回 undefined）；
+//   三、它的存在是为了让 369 条断言先跑起来找差异，而不是把旧门面复活。
 //
-// 三条与旧门面**故意不同**的地方，都在注释里标了，需要改断言而不是改这里：
+// 三条与旧门面故意不同的地方，都在注释里标了，需要改断言而不是改这里：
 //   caret / selection 的形状、setEditMode(1)、ask。
 (function () {
   'use strict';
@@ -36,7 +36,7 @@
      */
     const focused = (p) => Promise.resolve(p).then((r) => { d().focus(); return r; });
 
-    /** 旧门面的 caret 是扁平的（para/offset/x/y/w/h + 全文码点数）。 */
+    // 旧门面的 caret 是扁平的（para/offset/x/y/w/h + 全文码点数）。
     const flatCaret = () => {
       const c = e().caret();
       const st = d().editStats() || {};
@@ -55,16 +55,52 @@
       };
     };
 
+    /**
+     * 旧门面里的 canvas 是帧（窗口那一整块），不是某一页的画布。
+     *
+     * 旧的两个宿主都给它套了一层代理：几何按"窗口帧在屏幕上占的那块区域"算（顶边是
+     *   窗口首页的顶边），事件转发给页容器。探针的整条坐标链都建立在这个口径上 ——
+     *   它把 r.top 当"窗口首页的顶边"，再按页号加偏移。
+     * 新库没有"帧元素"（帧在本轮里已经是页位图的读视图），页画布也按槽复用、DOM 顺序
+     *   与窗口顺序无关，所以这里必须把那个代理重建出来，而不是把某一张页画布交出去。
+     */
+    const frameProxy = () => {
+      const pagesEl = () => document.querySelector('#ed #pages');
+      return {
+        get width() { return d().frameW(); },
+        get height() { return d().frameH(); },
+        get style() { return pagesEl().style; },
+        getBoundingClientRect() {
+          const el = pagesEl();
+          const r = el.getBoundingClientRect();
+          const g = e().geometry();
+          const dpr = window.devicePixelRatio || 1;
+          const step = g.page.h + g.gap;
+          const top = r.top + g.window.first * step;
+          const width = this.width / dpr;
+          const height = this.height / dpr;
+          return {
+            left: r.left, top, right: r.left + width, bottom: top + height,
+            width, height, x: r.left, y: top,
+          };
+        },
+        dispatchEvent(ev) { return pagesEl().dispatchEvent(ev); },
+        addEventListener(...a) { return pagesEl().addEventListener(...a); },
+        getContext() { return null; },
+      };
+    };
+    const frameCanvas = frameProxy();
+
     window.__heditor = {
       /**
        * 这一份门面下面挂着的是库页面而不是旧宿主页。
        *
-       * 有几条断言查的是**页面自己的 UI**（场景下拉里有没有某一项）—— 那是旧页面的
+       * 有几条断言查的是页面自己的 UI（场景下拉里有没有某一项）—— 那是旧页面的
        *   东西，库不带 UI。探针按这个标记跳过它们，而不是把 UI 塞进库。
        */
       isLib: true,
 
-      /* ── 状态读数 ── */
+      // 状态读数
       get ready() { return true; },
       get errors() { return d().errors(); },
       // 旧 text 只给第 0 段（整篇叫 allText）。
@@ -81,7 +117,7 @@
       get controls() { return d().controls(); },
       get fonts() { return d().env(); },
       get blitStats() { return d().blitStats(); },
-      // 旧门面的 zoomLevel 是**密度**（设备像素 / 磅），探针拿它把磅折成 CSS 像素。
+      // 旧门面的 zoomLevel 是密度（设备像素 / 磅），探针拿它把磅折成 CSS 像素。
       //   新库的 config().zoom 是倍数（1 = 100%），换算关系与装载时写进引擎的一致。
       get zoomLevel() { return e().config().zoom * (4 / 3) * (window.devicePixelRatio || 1); },
       undoLimit() { return e().config().undoLimit; },
@@ -94,7 +130,7 @@
         const p = d().pagePx();
         return [p.w, p.h, p.gap];
       },
-      // 旧门面的两段是**全局流位置**（数字），不是 {段号, 段内偏移} —— 探针整套
+      // 旧门面的两段是全局流位置（数字），不是 {段号, 段内偏移} —— 探针整套
       //   断言都在比较数字。新库对外给段内位置，raw 载荷里才有流位置。
       get selection() {
         const r = d().selectionRaw() || {};
@@ -123,7 +159,7 @@
       dragSettled() { return d().dragSettled(); },
       quiesce() { return e().flush(); },
 
-      /* ── 文档装载 ── */
+      // 文档装载
       run(id, zoom) { return focused(d().loadScenario(id, zoom)); },
       reset(id, zoom) { return focused(d().reset(id, zoom)); },
       loadTextDocument(text, repeat) { return focused(e().setText(text, { repeat })); },
@@ -133,8 +169,8 @@
       loadMedicalSample(repeat) { return focused(d().loadMedicalSample(repeat)); },
       setFormControls(list) { return focused(d().setFormControls(list)); },
 
-      /* ── 编辑 ── */
-      // 旧 type 返回那一次的 editStats（探针要读 relaidParagraphs / suffixShifted）。
+      // 编辑
+      // 旧 type 的返回值是本次编辑的 editStats（探针要读 relaidParagraphs / suffixShifted）。
       async type(s) {
         const ok = await e().type(s);
         return ok ? d().editStats() : null;
@@ -154,7 +190,7 @@
       selectAll() { return e().selectAll(); },
       clearSelection() { return e().clearSelection(); },
 
-      /* ── 光标 ── */
+      // 光标
       // 旧三个 setCaret* 都返回扁平 caret（探针拿 cr.page / cr.x 算窗口坐标）。
       async setCaret(para, offset) {
         await e().setCaret({ para, offset });
@@ -175,7 +211,7 @@
       clickAt(x, y) { return d().clickAt({ x, y }); },
       hit(x, y) { return d().hit(x, y); },
 
-      /* ── 配置 ── */
+      // 配置
       // 旧门面收整数（0 文档 / 1 表单 / 2 只读），公开面收三个名字。
       setEditMode(m) {
         return e().configure({ mode: ['document', 'form', 'readOnly'][Number(m)] || 'document' });
@@ -205,18 +241,18 @@
       },
       removeControl(i, keep) { return d().removeControl(i, keep); },
 
-      /* ── 字体与窗口 ── */
+      // 字体与窗口
       reloadFonts(mode) { return d().reloadFonts(mode); },
       setFontCacheConfig(a, b) { return d().setFontCacheConfig(a, b); },
       setViewportAnchor(first, count) { return d().setViewportAnchor(first, count); },
 
-      /* ── 闪烁与呈现 ── */
+      // 闪烁与呈现
       present() { return d().present(); },
       showCaret(on) { return d().showCaret(on); },
       startBlink() { return d().startBlink(); },
       stopBlink() { return d().stopBlink(); },
 
-      /* ── 自审与诊断 ── */
+      // 自审与诊断
       auditFrame() { return d().auditFrame(); },
       auditBase() { return d().auditBase(); },
       auditLayout() { return d().auditLayout(); },
@@ -230,11 +266,11 @@
       bench(runs) { return d().bench(runs); },
       prewarmPage(p) { return d().prewarmPage(p); },
 
-      /* ── 宿主 DOM（探针自己派真实事件用） ── */
-      get canvas() { return document.querySelector('#pages canvas'); },
+      // 宿主 DOM（探针自己派真实事件用）
+      get canvas() { return frameCanvas; },
       get textarea() { return document.getElementById('ime'); },
 
-      /* ── 错误面：新库没有泛 ask，探针要测"未知命令必须抛"得走 diag ── */
+      // 错误面：新库没有泛 ask，探针要测"未知命令必须抛"得走 diag
       ask() { return missing('ask（新库没有泛命令入口）'); },
     };
   });

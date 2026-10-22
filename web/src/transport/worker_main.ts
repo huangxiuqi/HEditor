@@ -178,6 +178,16 @@ function pagesMissing(): number {
 
 const post = (msg: unknown, transfer?: Transferable[]): void => self.postMessage(msg, transfer ?? []);
 
+/**
+ * 装载之前就到岸的画布。
+ *
+ * 宿主先建槽再 boot（首帧就要贴页），所以 pageCanvas 一定早于 boot 到达。早到的那几条
+ *   在引擎建好之前无处登记，只能排在一边 —— 直接丢掉的表现是整片空白：槽表永远是空的，
+ *   每一页都没有画布，而引擎那侧一切正常（帧有墨迹、自审的 compared 恒为 0，于是
+ *   "屏幕 == 引擎帧"这类判据全部以空集通过）。
+ */
+let earlyCanvases: Args[] = [];
+
 const host = {
   async loadGlue(url: string, exportName: string): Promise<unknown> {
     importScripts(url);
@@ -221,11 +231,18 @@ const host = {
 async function handleBoot(m: Args): Promise<void> {
   api = createEngineApi({ post, host });
   await api.boot(m);
+  // 早到的画布在引擎就绪之后补登记：它们带的是已经转移过来的 OffscreenCanvas，
+  //   在这里丢掉就再也拿不回来了（页面那一侧没有第二次转移的机会）。
+  const early = earlyCanvases;
+  earlyCanvases = [];
+  for (const pc of early) api.pageCanvas(pc);
 }
 
 async function handle(m: Args): Promise<void> {
   try {
     if (m.t === 'boot') return void (await handleBoot(m));
+    // pageCanvas 是唯一允许早于 boot 的消息：见 earlyCanvases 的说明。
+    if (m.t === 'pageCanvas' && !api) return void earlyCanvases.push(m);
     if (!api) throw new Error('引擎尚未 boot');
     if (m.t === 'pageCanvas') return void api.pageCanvas(m);
     if (m.t === 'viewMode') return void api.viewMode(m);

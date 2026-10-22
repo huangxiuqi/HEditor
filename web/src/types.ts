@@ -251,7 +251,12 @@ export interface EditorEvents {
  *
  * 参数与返回暂为 unknown：它们对应引擎内部的账本载荷（19 份 / 245 个键），
  * 形状由 schema 生成到 payloads.gen.d.ts 之后再把这里换成具体类型。
+ *
+ * 带 Direct 的那几个是"每次都真的问引擎一次"的读：同线程传输下是同步值，
+ * Worker 传输下是一次往返。调用方写成 await，两种传输都对（await 普通值是恒等）。
  */
+type Direct<T> = T | Promise<T>;
+
 export interface Diag {
   stats(): unknown;
   editStats(): unknown;
@@ -265,15 +270,15 @@ export interface Diag {
   selfCheck(): unknown;
   markCheck(): unknown;
   rawFrame(): unknown;
-  frameDigest(): number;
-  frameW(): number;
-  frameH(): number;
+  frameDigest(): Direct<number>;
+  frameW(): Direct<number>;
+  frameH(): Direct<number>;
   present(): void;
   controls(): unknown;
   bracketSlots(): unknown;
   hit(x: number, y: number): unknown;
   controlAt(x: number, y: number): unknown;
-  describeControls(): string;
+  describeControls(): Direct<string>;
   blockedEdits(): number;
   dirtyPages(): number[];
   pagePx(): { w: number; h: number; gap: number };
@@ -389,6 +394,11 @@ export interface Diag {
    * 页面级错误历史（与 error 事件同源，按发生顺序）。
    */
   errors(): string[];
+  /**
+   * 能力探测现场：supported 是库的判断；probe 是那段含 v128 的探针字节本身
+   * （判据可以拿它自己跑一次 validate，再查里面有没有 SIMD 指令）。
+   */
+  simd(): unknown;
 }
 
 /**

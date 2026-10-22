@@ -24,8 +24,13 @@ export interface WorkerOptions {
   /**
    * 宿主由这一侧造（它需要 link 与画布存储，而两者都由这一侧造）。
    * 画布存储必须延迟到宿主建好标记之后再造 —— 它要往 #pages 里塞元素。
+   * 第三个参数是远端的贴图账（账在 Worker 那边，宿主自己记只会记到零）。
    */
-  makeHost(link: EngineLink, canvasStore: (pagesEl: HTMLElement) => CanvasStore): DomHost;
+  makeHost(
+    link: EngineLink,
+    canvasStore: (pagesEl: HTMLElement) => CanvasStore,
+    blitStats: () => { ms: number; pages: number; px: number },
+  ): DomHost;
 }
 
 /**
@@ -49,6 +54,14 @@ interface Mirror {
   selectionStyle: any;
   heapMB: number;
   scrollReset: boolean;
+  /**
+   * 这一拍 Worker 贴了几页、写了多少像素、花了多少毫秒。
+   *
+   * 账在贴图那一侧 —— 主线程没有 putImageData 可记。不推过来的话 blitStats 恒为
+   *   {0,0,0}，而"按脏矩形贴"的判据正是靠它：一个恒报 0 的计数器让"上屏面积只有
+   *   几十像素"与"贴了整页"看起来一样。
+   */
+  blit: { ms: number; pages: number; px: number };
 }
 
 export function createWorker(opts: WorkerOptions): {
@@ -78,6 +91,7 @@ export function createWorker(opts: WorkerOptions): {
     selectionStyle: null,
     heapMB: 0,
     scrollReset: false,
+    blit: { ms: 0, pages: 0, px: 0 },
   };
 
   const workerUrl = assets.worker ?? new URL('heditor_worker.js', document.baseURI).href;
@@ -209,6 +223,16 @@ export function createWorker(opts: WorkerOptions): {
           return mirror.geom?.pageH ?? 0;
         case 'pageGapPx':
           return mirror.geom?.gap ?? 0;
+        // 帧视图的两条几何读数由几何算得，不是引擎里存的第二份真相：
+        //   宽 = 页宽，高 = 窗口页数 x 步距（含末尾那道间隙，与引擎的 frameHeight 同式）。
+        //   它们必须是同步值 —— 读数方按"帧坐标"扫像素（循环上界就是它），给一个
+        //   Promise 会让循环一次都不跑，于是"帧上有字"变成恒零而没有任何异常。
+        case 'frameWidth':
+          return mirror.geom?.pageW ?? 0;
+        case 'frameHeight': {
+          const g = mirror.geom;
+          return g ? Number(g.count ?? 1) * (Number(g.pageH ?? 0) + Number(g.gap ?? 0)) : 0;
+        }
         case 'windowFirstPage':
           return mirror.geom?.first ?? 0;
         case 'windowPageCount':
@@ -238,7 +262,10 @@ export function createWorker(opts: WorkerOptions): {
     },
     settle() {
       // Worker 侧已经在 doOp 的收尾里 present + 贴页 + 回推，这一侧没有收尾可做。
-      return true;
+      // 返回值必须与同线程那一份同形（{ stats } 而不是 true）：调用方拿的是 st.stats，
+      //   给一个布尔会让收尾拿到 true 当状态读 —— 光标位置、页号全是 undefined，
+      //   IME 被收成一像素，而账（editStats）看上去还是对的。
+      return { moved: true, scrolled: false, stats: mirror.stats };
     },
     view(scrollY: number) {
       const vs = viewSize();
@@ -273,16 +300,20 @@ export function createWorker(opts: WorkerOptions): {
       return ask('serialize').then((v) => String(v ?? ''));
     },
     async flush() {
-      // 有在途就等它们全部收到回话。ack / reply 由 Worker 处理完那条消息之后才发，
-      //   而两条 postMessage 是 FIFO —— 回话到了，它前面那条命令连同推回来的 state
-      //   都已经派发过了。
-      if (pending.size || pendingReply.size) {
-        await new Promise<void>((r) => idleWaiters.push(r));
+      // 排空 = 连"在途命令的续体又发出去的那一条"也等完。
+      //
+      //   只等当前在途那几条是不够的：命中 → reply 到了之后才决定"要不要落光标"，
+      //   而那一条写是在 reply 的回调里（微任务）才发出去的。等在途清空的那一刻
+      //   队列确实是空的，可下一微任务就会再塞一条进来 —— 于是 flush 返回时
+      //   光标还没落位，调用方读到的是上一拍（这条曾被读成"点击根本不落光标"）。
+      //   做法是"空一拍再看一次"：宏任务跑完时，续体已经把它要发的那条发出去了。
+      for (let round = 0; round < 64; ++round) {
+        if (pending.size || pendingReply.size) {
+          await new Promise<void>((r) => idleWaiters.push(r));
+        }
+        await new Promise<void>((r) => setTimeout(r, 0));
+        if (!pending.size && !pendingReply.size) return;
       }
-      // 再让出一拍。state 与 ack 是两条独立消息：同一条命令的回话到达时，若 Worker
-      //   侧的发送顺序有变，最后一次 state 可能还在队列里。这一拍让它先跑完 ——
-      //   少了它就出现"await flush() 之后读到上一拍的几何"（缩放后页宽还是旧值）。
-      await new Promise<void>((r) => setTimeout(r, 0));
     },
   };
 
@@ -300,7 +331,7 @@ export function createWorker(opts: WorkerOptions): {
     };
     store = s;
     return s;
-  });
+  }, () => mirror.blit);
 
   // 消息
 
@@ -322,6 +353,9 @@ export function createWorker(opts: WorkerOptions): {
     if (m.selectionStyle) mirror.selectionStyle = m.selectionStyle;
     if (typeof m.heapMB === 'number') mirror.heapMB = m.heapMB;
     if (m.scrollReset) mirror.scrollReset = true;
+    if (typeof m.blitPx === 'number') {
+      mirror.blit = { ms: Number(m.blitMs ?? 0), pages: Number(m.blitPages ?? 0), px: m.blitPx };
+    }
 
     if (m.ts) {
       const p = pending.get(m.ts as number);

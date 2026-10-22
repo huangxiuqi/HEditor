@@ -89,9 +89,14 @@ export function createInline(opts: InlineOptions): {
   };
 
   /**
-   * 呈现钩子。真正干活的只有贴页那一条 —— 其余三条是 worker 侧的概念
+   * 呈现钩子。真正干活的只有贴页那一条 —— 另外三条是 worker 侧的概念
    *   （槽、缺页、画布到达），同线程这一侧不成立，所以显式给空实现而不是 null：
    *   万一以后误调，报的是"这里没有槽"而不是一个空引用。
+   *
+   * 但 ctxOfPage / canvasCount 不是 worker 独有的：自审（api.selfCheck）要按页号拿到
+   *   那一页的画布来逐点比"屏幕"与"引擎导出像素"。同线程侧给空实现的话，自审比的是
+   *   零页 —— 而"差 0 像素"在零页上恒成立，那条判据就变成了恒真的装饰。
+   *   这里按页号找元素：同线程侧一页一张，窗口外的页已经从 DOM 里摘掉了。
    */
   const hooks: EngineHostHooks = {
     blitPages: () => dom?.blitPages() ?? 0,
@@ -101,8 +106,11 @@ export function createInline(opts: InlineOptions): {
     setViewMode: () => {},
     slotCount: () => 0,
     pagesMissing: () => 0,
-    ctxOfPage: () => null,
-    canvasCount: () => 0,
+    ctxOfPage: (page: number) => {
+      const el = dom?.pagesEl.querySelector<HTMLCanvasElement>(`canvas[data-page="${page}"]`);
+      return el ? el.getContext('2d', { alpha: false }) : null;
+    },
+    canvasCount: () => dom?.pagesEl.querySelectorAll('canvas').length ?? 0,
     loadGlue: async (url, exportName) => {
       await loadScript(url);
       const f = (window as unknown as Record<string, unknown>)[exportName];

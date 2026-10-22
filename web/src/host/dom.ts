@@ -117,6 +117,12 @@ export interface DomHostOptions {
    * 页面级异常（脚本错误、未处理的异步失败）。
    */
   onPageError?(message: string): void;
+  /**
+   * 贴图的账由谁说。默认是这一侧自己记的（同线程宿主贴图）；Worker 传输传一个
+   *   "读远端账"的函数进来 —— 那边 putImageData 一次也没在这条线程上跑过，
+   *   自己记只会得到一串恒零。
+   */
+  blitStats?(): { ms: number; pages: number; px: number };
 }
 
 export interface DomHost {
@@ -255,6 +261,12 @@ export function createDomHost(o: DomHostOptions): DomHost {
   let blitPages = 0;
   let blitPx = 0;
 
+  /**
+   * 这一拍的上屏账。谁贴的图就由谁记 —— Worker 传输在对面贴，这里读对面推来的数。
+   */
+  const blitStats = (): { ms: number; pages: number; px: number } =>
+    o.blitStats?.() ?? { ms: blitMs, pages: blitPages, px: blitPx };
+
   // 几何
 
   const view = (): HostView => link.geom();
@@ -387,7 +399,7 @@ export function createDomHost(o: DomHostOptions): DomHost {
       lastSelKey = selKey;
       o.onSelection?.();
     }
-    o.onRender?.(blitPages, blitMs);
+    o.onRender?.(blitStats().pages, blitStats().ms);
     resetBlink();
   }
 
@@ -693,7 +705,7 @@ export function createDomHost(o: DomHostOptions): DomHost {
     finish,
     afterEdit,
     scrollCaretIntoView,
-    blitStats: () => ({ ms: blitMs, pages: blitPages, px: blitPx }),
+    blitStats,
     startBlink: () => resetBlink(),
     stopBlink() {
       if (blinkTimer) {
