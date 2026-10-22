@@ -86,7 +86,6 @@ const members = contractMembers();
 const FORBIDDEN = [
   '__heditor',
   '__api',
-  '__heditorEngineApi',
   'CreateHEditor',
   'HEAPU8',
   'HEAPU32',

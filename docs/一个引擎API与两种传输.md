@@ -117,6 +117,10 @@ web/engine_worker.js     worker 薄壳：importScripts + 转发          （约 
 名字说明：`transport_inline.js` 在路 A 下其实不承担传输，它只负责装载 wasm 与字体、
 建出 `engine_api` 实例、暴露同步入口。叫 transport 是为了路 B 下不换文件名（5.2）。
 
+落点（TS 改造之后，文件名按这一份走）：`engine_api` 就是 `web/src/engine/api.ts`，没有
+构建产物；`host_core` 拆成 `src/host/*` 与 `src/input/*`；两条传输是
+`src/transport/{inline,worker}.ts`，worker 壳是 `src/transport/worker_main.ts`。
+
 ## 4. 引擎 API 的接口
 
 ### 4.1 命令表

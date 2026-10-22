@@ -620,8 +620,8 @@ web/                  前端工具链全在这里，仓库根只留 CMake 与 sr
                       scripts: build / dev / typecheck / check（四条判据）
   tsconfig.json       strict，noEmit（类型检查与构建分开；include 只有 src 与 types）
   tsconfig.build.json 声明产物：src/index.ts -> dist/*.d.ts
-  vite.config.ts      build.lib -> dist/（ESM + IIFE）
-  vite.engine.config.ts  src/engine/api.ts -> engine_api.js（经典脚本，给旧页面）
+  vite.lib.config.ts  build.lib -> dist/（ESM + IIFE）
+  vite.config.ts      示例页（index.html / multi.html）-> dist-app/
   vite.worker.config.ts  src/transport/worker_main.ts -> dist/heditor_worker.js
 
 （下面这些在 web/src/ 下）
@@ -710,9 +710,10 @@ C 步收尾时又改了四处，都是被"它必须真的能用"逼出来的：
 - **`ChangeEvent.json` 从属性改成方法**（`json(): Promise<string>`）。属性写法有两个问题：
   `JSON.stringify(ev)` 会顺带把 2000 段 / 55 ms 的序列化算进最糟的一拍；Worker 传输里同步读
   根本不可能（一次往返）。同一个版本仍只序列化一次（闭包缓存）。
-- **`engine_api.js` 从源码变成产物**。真源是 `web/src/engine/api.ts`，由 `vite.engine.config.ts`
-  打成经典脚本给旧页面与经典 Worker 的 `importScripts` 用。`idl_check` 因此改成"IDL 读产物、
-  表格与 `mod.X` 扫源码"，另加一条"产物比源码旧就报红"。
+- **`engine_api.js` 整个收掉了**。它先是从源码变成产物（`vite.engine.config.ts` 打经典脚本，
+  给旧页面与经典 Worker 的 `importScripts`），旧页面与旧 Worker 删除之后只剩 `idl_check`
+  在读它；于是那一条也改成直接把 `web/src/engine/api.ts` 转译执行 —— 源码树里不再有
+  构建出来的 JS，`build:engine` 这一步随之取消。真源始终只有 `api.ts` 一份。
 - **`transport` 两条都通了**，默认仍是 `'inline'`。Worker 壳在 `web/dist/heditor_worker.js`，
   主线程只剩槽画布与转移。
 - **`flush()` 有了真语义**：等所有在途 do / ask 收到回话（`EngineLink.flush`）。原先

@@ -202,7 +202,9 @@ chk.section('七、页画布：一页一张、都在窗口里、都真的可见'
     const d = window.__demo.diag;
     await d.reset(6, 1.5);
     const g = window.__demo.geometry();
-    const els = d.pageCanvasList();
+    // Worker 传输按槽复用（槽数固定，窗口之外的槽挂 display:none），所以这里只看
+    //   此刻真的在显示画布 —— "一页一张"在两种传输下都成立，槽数是实现细节。
+    const els = d.pageCanvasList().filter((el) => el.style.display !== 'none');
     const pages = els.map((el) => Number(el.dataset.page)).sort((a, b) => a - b);
     // 每张画布的中心点命中的必须还是它自己：容器被裁掉、被别的层盖住时这一条会红。
     const hidden = [];

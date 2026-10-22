@@ -22,7 +22,6 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -81,25 +80,27 @@ function occurrences(code, re) {
 }
 
 
-// IDL 从产物里取（那是浏览器真正跑的那一份），表格与 mod.X 的扫描对着源码 ——
-//   源码是 TS，跑不进 vm；产物是构建出来的，扫它会被压缩/换引号干扰。
-const apiSrc = read('web/engine_api.js');
+// IDL 从真源直接跑出来：把 api.ts 转成 CJS 再执行一次。
+//
+// 为什么不读构建产物：那要多一条"先构建、再核对"的顺序约定，而约定会忘。目录里那条
+//   mtime 检查本身就是个例子：它在 problems 声明之前引用它，一触发就抛 ReferenceError
+//   （"产物过期"变成崩溃）。api.ts 零 import，转译之后直接可以执行 —— 核对的到底是
+//   不是当前源码，不再靠约定。
 const apiTs = read('web/src/engine/api.ts');
-globalThis.self = globalThis;
-vm.runInThisContext(apiSrc, { filename: 'web/engine_api.js' });
-const factory = globalThis.__heditorEngineApi;
-if (!factory || !factory.IDL) throw new Error('engine_api.js 没挂上 IDL');
-const IDL = factory.IDL;
 const apiCode = stripComments(apiTs);
 const API_TS = 'web/src/engine/api.ts';
 
-// 产物比源码旧：扫描源码、跑产物，两边说的就不是一回事了。这条只报不修 ——
-//   它要的是"先 npm run build:engine"，而不是让判据自己去构建。
-if (fs.statSync(path.join(ROOT, 'web/engine_api.js')).mtimeMs <
-    fs.statSync(path.join(ROOT, 'web/src/engine/api.ts')).mtimeMs) {
-  problems.push({ where: 'web/engine_api.js',
-                  msg: '产物比 web/src/engine/api.ts 旧 —— 先 npm run build:engine' });
-}
+const tsUrl = new URL('file://' + path.join(ROOT, 'web/node_modules/typescript/lib/typescript.js')
+  .replace(/\\/g, '/')).href;
+const ts = await import(tsUrl).then((m) => m.default ?? m);
+const compiled = ts.transpileModule(apiTs, {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
+  fileName: 'api.ts',
+}).outputText;
+const apiModule = { exports: {} };
+new Function('module', 'exports', compiled)(apiModule, apiModule.exports);
+const IDL = apiModule.exports.IDL;
+if (!IDL) throw new Error('web/src/engine/api.ts 没有导出 IDL');
 
 const problems = [];
 const note = (where, msg) => problems.push({ where, msg });

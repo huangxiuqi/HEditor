@@ -47,9 +47,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CPP = ['src/**/*.h', 'src/**/*.hpp', 'src/**/*.cpp', 'tests/*.cpp']
 JS = ['scripts/*.mjs', 'scripts/*.js', 'web/*.js', 'web/*.ts', 'web/src/**/*.ts']
 
-# 构建产物没有手写注释，按源码规范查它只会查出别人的压缩格式。
-#   web/engine_api.js 的真源是 web/src/engine/api.ts（vite.engine.config.ts 打出来的）。
-SKIP = {'web/engine_api.js'}
+# 构建产物没有手写注释，按源码规范查它只会查出别人的压缩格式。眼下源码树里没有
+#   这样的文件（web/dist 与 web/dist-app 都不在扫描范围里），留着这个集合给将来。
+SKIP = set()
 
 R4 = re.compile(
     '原来|以前|上一版|这一版|第一版|第二版|早先|曾经|当时|那天|一开始|起初|最初|'
