@@ -122,3 +122,39 @@ Playwright 的 `expect(locator)` 与 `expect.poll` 都会重试 —— 一个把
 
 `scripts/lint_comments.py` 的扫描列表已加 `web/tests/**/*.ts`：新目录若不在列表里，
 这批代码的注释就无人检查，而它已经有六百多行。
+
+## 八、迁移完成（2026-10-22）
+
+八份探针全部迁到 `web/tests/specs/`，旧入口删除。判据条数与旧探针逐项相等：
+
+| 旧探针 | 条数 | 新 spec | 条数 |
+| --- | --- | --- | --- |
+| `demo_probe` | 23 | `demo.spec.ts` | 23 |
+| `multi_probe` | 11 | `multi.spec.ts` | 11 |
+| `saveload_probe` | 11 | `saveload.spec.ts` | 11 |
+| `input_probe` | 25 | `input.spec.ts` | 25 |
+| `diag_probe` | 39 | `diag.spec.ts` | 39 |
+| `error_probe` | 19 | `error.spec.ts` | 19 |
+| `stress_probe` | 0（打印不一致） | `stress.spec.ts` | 69 步 + 1 条总判 |
+| `edit_probe` | 367 处调用（运行时 368） | `edit.spec.ts` | 367 处调用 |
+
+`edit` 是机械迁移：`c.eval` 换 `probe.ev`、`chk.check` 换 `check`、`report` 换 `state`，
+其余代码与注释原样保留。改了四处才跑得起来：页面变量从 `p` 改名 `probe`（`p` 在几十个
+局部块里是坐标点，直接换名字会互相遮蔽）、`ev` 的泛型默认 `any`（原代码不写类型）、
+模板字符串里被误注入的 `: any`、以及 `CDPSession.send` 要 `bind`（提出来调用丢 `this`）。
+
+删除：`scripts/` 下八份 `*_probe.mjs` 与 `verify_web.ps1`。保留三样，各有理由：
+`cdp.mjs` 仍被十八个一次性诊断脚本引用（它们不属于验收面，也不该被这次改动搞坏）；
+`web/tests/support/lib_adapter.js` 是编辑与压力 spec 依赖的迁移垫片；
+`scripts/probe_serialization_size.py` 与 `probe_encoding_formats.py` 是模型层的分析工具，
+与浏览器测试无关。
+
+迁移里两处判据口径要交代，两处都不放宽：
+
+`stress` 的帧差有一处恰好等于新光标矩形（56 px = 2x28）。成因是光标从不可见转为可见时，
+增量帧与整帧重画差出一个光标，内容层完全一致。判据对"帧差只落在光标矩形上"补一次
+`present` 再问一遍，补完仍差就照算不一致。
+
+逐页滚动的"平移复用"原先要求重画页数严格大于 0。页位图有内容指纹缓存之后，滚进窗口的页
+可能整页命中缓存、重画数为 0 —— 那是比部分重画更省的复用，不是没复用。判据改成"重画页数
+小于窗口页数"，整窗重建（重画数等于窗口页数）仍会红。

@@ -47,6 +47,9 @@ export function makeConfig(mode: TestMode): PlaywrightTestConfig<ProbeOptions> {
     testDir: './tests/specs',
     fullyParallel: true,
     forbidOnly: !!process.env.CI,
+    // 输入探针把每一步写成一条轨迹，两只 project 各写一份；开跑前清、收尾比对。
+    globalSetup: './tests/support/global_setup.ts',
+    globalTeardown: './tests/support/global_teardown.ts',
     // 并行度默认 2：每个 worker 各自编译一份 wasm、各自解析中文字体，开满核不一定更快。
     workers: Number(process.env.HEDITOR_TEST_WORKERS ?? 2),
     timeout: 180_000,
@@ -56,7 +59,11 @@ export function makeConfig(mode: TestMode): PlaywrightTestConfig<ProbeOptions> {
       ['json', { outputFile: join(ROOT, 'out/web/pw-results.json') }],
       ['html', { outputFolder: join(ROOT, 'out/web/pw-report'), open: 'never' }],
     ],
-    outputDir: join(ROOT, 'out/web/pw-artifacts'),
+    // 每次运行一个自己的产物目录。理由不是洁癖：Playwright 开跑前会整目录删除，
+    //   而本机的安全删除守卫对单次超过 50 个目标的批量删除会拒绝执行 —— 同一目录复用
+    //   几十轮之后，测试还没开始就被守卫拦在门外。
+    outputDir: join(ROOT, 'out/web/pw-runs', process.env.HEDITOR_TEST_RUN ??
+      new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14)),
     use: {
       baseURL: 'http://' + host + ':' + port,
       channel: 'chrome',
