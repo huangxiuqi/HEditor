@@ -261,7 +261,77 @@ chk.section('九、能力探测：WebAssembly SIMD');
             r.len > 100 && r.hasSimdOp === true, `${r.len} 字节，含 0xFD=${r.hasSimdOp}`);
 }
 
-chk.section('十、没有 console 错误');
+chk.section('十、多页点击：落点跟着点走，视口不跟着跑');
+{
+  const r = await ev(`
+    const H = window.__demo, d = H.diag;
+    await d.loadScenario(7, 1.0);
+    d.stopBlink();
+    await H.setCaret({ para: 0, offset: 0 });
+    await d.present();
+    await H.flush();
+    const stage = document.querySelector('#stage');
+    const pagesEl = document.querySelector('#pages');
+    const px = d.pagePx();
+    const dpr = window.devicePixelRatio || 1;
+    const step = px.h + px.gap;
+    const rows = [];
+    for (const page of [1, 3]) {
+      // 把目标页滚到视口里（滚动本身不是判据），再在页内 (140, 160) 处按一下。
+      stage.scrollTop = Math.round((page * step) / dpr - 100);
+      await new Promise((res) => setTimeout(res, 260));
+      await H.flush();
+      const pr = pagesEl.getBoundingClientRect();
+      const clientX = pr.left + 140;
+      const clientY = pr.top + (page * step) / dpr + 160;
+      const el = document.elementFromPoint(clientX, clientY);
+      const before = stage.scrollTop;
+      el.dispatchEvent(new MouseEvent('mousedown', {
+        clientX, clientY, bubbles: true, cancelable: true, button: 0,
+      }));
+      await H.flush();
+      await new Promise((res) => setTimeout(res, 140));
+      await H.flush();
+      const c = H.caret();
+      // 落点与点击点的差：光标矩形是行盒顶，只要求落在点上面那一行以内。
+      const z = H.config().zoom * (4 / 3) * dpr;
+      rows.push({ page, caretPage: c.page, before, after: stage.scrollTop,
+                  dy: Math.abs(c.rect.y - (160 * dpr) / z), line: c.rect.h });
+    }
+    return rows;`);
+  const bad = r.filter((x) => x.caretPage !== x.page);
+  chk.check('点在第二页/第四页，光标落在那一页', bad.length === 0,
+            JSON.stringify(r.map((x) => [x.page, x.caretPage])));
+  const jumped = r.filter((x) => Math.abs(x.after - x.before) > 2);
+  // 视口被拽走一次，多页文档上就是"点一下页面乱跳、光标看不见"。
+  chk.check('点击不动视口（scrollTop 不变）', jumped.length === 0,
+            JSON.stringify(r.map((x) => [x.before, x.after])));
+  const off = r.filter((x) => x.dy > x.line);
+  chk.check('落点在点击的那一行上（不差出一行）', off.length === 0,
+            JSON.stringify(r.map((x) => [x.dy, x.line])));
+}
+
+chk.section('十一、光标闪烁：点完一直闪，不是亮一下就灭');
+{
+  const r = await ev(`
+    const H = window.__demo;
+    await H.setCaret({ para: 0, offset: 0 });
+    await H.flush();
+    const seen = [];
+    for (let i = 0; i < 20; ++i) {
+      await new Promise((res) => setTimeout(res, 120));
+      seen.push(H.caret() && H.caret().visible ? 1 : 0);
+    }
+    const text = seen.join('');
+    return { text, flips: text.replace(/(.)\\1*/g, (m) => m[0]).length,
+             hasOn: seen.includes(1), hasOff: seen.includes(0) };`);
+  // 530 ms 一拍、2.4 s 里至少两轮半；取"既有亮也有灭、且至少翻两次"这一点，
+  //   不给精确节拍 —— 定时器在负载下会晚，判据不该跟着抖。
+  chk.check('2.4 秒内光标既亮过也灭过', r.hasOn && r.hasOff, r.text);
+  chk.check('至少翻转两次（不是亮一下就灭）', r.flips >= 3, `翻转 ${r.flips} 次：${r.text}`);
+}
+
+chk.section('十二、没有 console 错误');
 {
   const errs = cdp.consoleErrors.filter((t) => !/favicon/i.test(t));
   chk.check('没有 console 错误', errs.length === 0, errs.slice(0, 2).join(' | '));

@@ -172,6 +172,15 @@ export function createWorker(opts: WorkerOptions): {
     maybeIdle();
   }
 
+  /**
+   * 等队列排空：在途的写与查询都收到了回话，且那一条的状态已经落到镜像上。
+   * @returns 排空时 resolve
+   */
+  function whenIdle(): Promise<void> {
+    if (!pending.size && !pendingReply.size) return Promise.resolve();
+    return new Promise<void>((r) => idleWaiters.push(r));
+  }
+
   function waitOp(name: string, msg: Args): Promise<any> {
     if (dead) return Promise.reject(new Error(`引擎已不可用，命令 ${name} 未发送`));
     const id = ++opSeq;
@@ -278,11 +287,14 @@ export function createWorker(opts: WorkerOptions): {
     write(name: string, args?: Args) {
       return waitOp(name, { t: 'do', name, args: args ?? {} }).then((m) => !!m?.changed);
     },
-    settle() {
-      // Worker 侧已经在 doOp 的收尾里 present + 贴页 + 回推，这一侧没有收尾可做。
-      // 返回值必须与同线程那一份同形（{ stats } 而不是 true）：调用方拿的是 st.stats，
-      //   给一个布尔会让收尾拿到 true 当状态读 —— 光标位置、页号全是 undefined，
-      //   IME 被收成一像素，而账（editStats）看上去还是对的。
+    async settle() {
+      // Worker 侧已经在 doOp 的收尾里 present + 贴页 + 回推，这一侧没有收尾可做 ——
+      //   但要等那一拍的回推到达：write 是排队 + 回推 state，不等的话这里拿到的是
+      //   上一拍的镜像（光标位置、页号、窗口全是旧的）。上层拿它决定"要不要滚视口"
+      //   与"IME 摆哪"，多页文档上点第二页就会被拽回上一次编辑所在的那一页。
+      // 返回值与同线程那一份同形（{ stats } 而不是 true）：调用方拿的是 st.stats，
+      //   给一个布尔会让收尾拿到 true 当状态读 —— 光标位置、页号全是 undefined。
+      await whenIdle();
       return { moved: true, scrolled: false, stats: mirror.stats };
     },
     view(scrollY: number) {
@@ -370,7 +382,13 @@ export function createWorker(opts: WorkerOptions): {
     if (m.caretStyle) mirror.caretStyle = m.caretStyle;
     if (m.selectionStyle) mirror.selectionStyle = m.selectionStyle;
     if (typeof m.heapMB === 'number') mirror.heapMB = m.heapMB;
-    if (m.scrollReset) mirror.scrollReset = true;
+    // 引擎把滚动位置归零了：当场应用，不停在镜像里等下一次 finish。
+    //   留在镜像里会被"下一次任意一拍"消费 —— 用户已经滚到第十页时来一份状态，视口
+    //   被拽回顶部（多页文档上就是"点一下就乱跳"）。这里用掉即清，宿主侧不会再看到它。
+    if (m.scrollReset) {
+      host.resetScroll();
+      mirror.scrollReset = false;
+    }
     if (typeof m.blitPx === 'number') {
       mirror.blit = { ms: Number(m.blitMs ?? 0), pages: Number(m.blitPages ?? 0), px: m.blitPx };
     }

@@ -215,6 +215,11 @@ export interface DomHost {
   scrollCaretIntoView(st?: any): void;
 
   /**
+   * 把滚动位置归零（引擎换过文档时它自己已经把滚动位置清了，宿主跟着追平）。
+   */
+  resetScroll(): void;
+
+  /**
    * 文档坐标（页内设备像素）换算。
    * @param clientX 客户端横坐标
    * @param clientY 客户端纵坐标
@@ -435,11 +440,21 @@ export function createDomHost(o: DomHostOptions): DomHost {
   }
 
   /**
+   * 把滚动位置归零，并让滚动监听不再把这一下当成用户滚动（否则会白发一条视口消息，
+   *   引擎与用户来回抢同一个 scrollTop）。
+   */
+  function applyScrollReset(): void {
+    scroller.scrollTop = 0;
+    lastScrollTop = 0;
+  }
+
+  /**
    * 把光标滚进视口。只在真的看不见时才动 scrollTop —— 每次编辑都居中会把用户正在
    *   看的地方拽走，那比"光标偶尔跑到屏幕外"更难受。
    */
   function scrollCaretIntoView(st?: any): void {
     const s = st ?? link.read('editStats');
+
     if (!s || s.windowPages === undefined) return;
     const g = view();
     const step = g.ph + g.gap;
@@ -463,6 +478,11 @@ export function createDomHost(o: DomHostOptions): DomHost {
    */
   function finish(st?: any): void {
     if (disposed) return;
+    // 引擎自己归零过滚动位置（换文档、诊断装载）：这一拍把页面追平。
+    //   必须在这里消费，不能只在 afterEdit 里 —— 装载与诊断装载走的是 settle + finish，
+    //   标记于是挂到下一次编辑才生效：多页文档上点一下，视口被那次"迟到的归零"拽回
+    //   第 0 页（症状是"点第二页，页面跳回顶上、光标不见了"）。
+    if (link.takeScrollReset()) applyScrollReset();
     const s = st ?? link.read('editStats');
     const g = view();
     // 画布集合跟着窗口走。同线程侧这条在 blitPages 里已经跑过（写 style 是幂等的，
@@ -480,7 +500,6 @@ export function createDomHost(o: DomHostOptions): DomHost {
       o.onSelection?.();
     }
     o.onRender?.(blitStats().pages, blitStats().ms);
-    resetBlink();
   }
 
   /**
@@ -504,17 +523,23 @@ export function createDomHost(o: DomHostOptions): DomHost {
 
   function afterEdit(opName: string, source: ChangeSource): Maybe<boolean> {
     if (disposed) return false;
-    // 装载类命令会把引擎里的滚动位置归零（那是引擎自己的状态），宿主这边必须跟着追平：
-    //   不追平的话，页面停在旧的 scrollTop 上，而文档已经从头排了 —— 症状是"新文档
-    //   打开后光标在页面顶上、屏幕却停在半路"，之后所有按坐标算的判据全偏。
-    if (link.takeScrollReset()) {
-      scroller.scrollTop = 0;
-      lastScrollTop = 0;
-    }
-    const st0 = link.read('editStats');
-    scrollCaretIntoView(st0);
-    return then1(link.settle(opName), (st) => {
-      finish(st ?? link.read('editStats'));
+    // 编辑之后光标必须当场可见：相位要在 settle 之前写 —— settle 里的 present 才会把
+    //   它画出来（present 之后再写只能等下一拍）。
+    caretOn = true;
+    writeOp('phase', { on: true });
+    return then1(link.settle(opName), (r: any) => {
+      // settle 回的是 { moved, scrolled, stats }（两种传输同形，见 EngineLink.settle）。
+      //   stats 里才是这一拍的光标读数 —— 少了这层解包，IME 与"滚进视野"读到的都是
+      //   undefined：输入法框塌成一像素，而"滚进视野"按上一次的位置算。
+      const s = r?.stats ?? link.read('editStats');
+      // 滚动必须在 settle 之后：settle 之前读到的 editStats 还是上一拍的（它只在
+      //   present 时刷新）。拿旧读数决定滚动方向，多页文档上点第二页会把视口拽回
+      //   上一次编辑所在的那一页 —— 看起来就是"点一下页面乱跳、光标不见了"。
+      scrollCaretIntoView(s);
+      finish(s);
+      // 计时器在这里重新起：相位从"可见"开始，530 ms 后翻到隐藏。放在 finish 里会
+      //   被每一份状态重置（Worker 每拍都推一份），于是永远停在可见那一拍。
+      resetBlink();
       o.onEdit?.(true, source);
       return true;
     });
@@ -603,7 +628,12 @@ export function createDomHost(o: DomHostOptions): DomHost {
     get drag() {
       return drag ?? undefined;
     },
-    focus: () => ta.focus(),
+        // preventScroll 不是可选的：承接层是一个绝对定位在文档里的 textarea，焦点一给它，
+    //   浏览器就会把滚动容器滚到它当前所在的位置 —— 而它此刻还停在上一次光标那里。
+    //   Worker 传输下"落光标"是异步的，focus 先发生，于是点第二页时视口先被拽回上一次
+    //   光标所在的页（多页文档上就是"点一下乱跳"）。焦点不需要顺带滚视口：滚视口由
+    //   scrollCaretIntoView 按落点算。
+    focus: () => ta.focus({ preventScroll: true }),
     commit: (changed) => {
       if (!changed) {
         resetBlink();
@@ -674,8 +704,8 @@ export function createDomHost(o: DomHostOptions): DomHost {
    */
   function repaint(): Maybe<any> {
     writeOp('present', {});
-    return then1(link.settle('present'), (st) => {
-      finish(st ?? link.read('editStats'));
+    return then1(link.settle('present'), (r: any) => {
+      finish(r?.stats ?? link.read('editStats'));
     });
   }
 
@@ -785,6 +815,7 @@ export function createDomHost(o: DomHostOptions): DomHost {
     finish,
     afterEdit,
     scrollCaretIntoView,
+    resetScroll: applyScrollReset,
     blitStats,
     startBlink: () => resetBlink(),
     stopBlink() {
@@ -799,10 +830,16 @@ export function createDomHost(o: DomHostOptions): DomHost {
     },
     pointAt,
     hitAt,
-    focus: () => ta.focus(),
+        // preventScroll 不是可选的：承接层是一个绝对定位在文档里的 textarea，焦点一给它，
+    //   浏览器就会把滚动容器滚到它当前所在的位置 —— 而它此刻还停在上一次光标那里。
+    //   Worker 传输下"落光标"是异步的，focus 先发生，于是点第二页时视口先被拽回上一次
+    //   光标所在的页（多页文档上就是"点一下乱跳"）。焦点不需要顺带滚视口：滚视口由
+    //   scrollCaretIntoView 按落点算。
+    focus: () => ta.focus({ preventScroll: true }),
     start() {
       ready = true;
       lastScrollTop = scroller.scrollTop;
+      resetBlink();
     },
     setBusy(on: boolean) {
       busy = on;
