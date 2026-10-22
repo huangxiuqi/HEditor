@@ -40,40 +40,54 @@ export interface EngineHostHooks {
    * 把还欠着的脏页贴到页画布上，返回贴了几页。
    */
   blitPages(): number;
+
   /**
    * 最近一次贴页的账：毫秒 / 页数 / 像素。
    */
   blitStats(): { ms: number; pages: number; px: number };
+
   /**
    * 内容整体作废（换缩放 / 换页度量 / 换文档）：所有槽都要重贴。
    */
   invalidateSlots(): void;
+
   /**
    * 主线程报来的一张页画布（worker 侧登记槽位）。
+   * @param m 画布消息
    */
   addCanvas(m: Args): void;
+
   /**
    * 切分页 / 连页与页间隙。
+   * @param m 视图模式消息（gap 与 continuous）
    */
   setViewMode(m: Args): void;
+
   /**
    * 已经建好几个槽。
    */
   slotCount(): number;
+
   /**
    * 还欠几页画布（0 = 窗口内每页都有画布）。
    */
   pagesMissing(): number;
+
   /**
    * 某一页的画布上下文（worker 侧贴图用）。
+   * @param page 页号
    */
   ctxOfPage(page: number): any;
+
   /**
    * 已经建好几张画布。
    */
   canvasCount(): number;
+
   /**
    * 装载胶水层并返回工厂（worker 用 importScripts，主线程用 <script>）。
+   * @param url 胶水脚本地址
+   * @param exportName 工厂的全局名
    */
   loadGlue(url: string, exportName: string): Promise<unknown>;
 }
@@ -81,6 +95,8 @@ export interface EngineHostHooks {
 export interface EngineApiConfig {
   /**
    * 上行发送。worker 侧是 postMessage，主线程侧是直接丢弃（in-thread 自己取返回值）。
+   * @param msg 要发的消息
+   * @param transfer 要转移所有权的对象
    */
   post(msg: Args, transfer?: Transferable[]): void;
   host: EngineHostHooks;
@@ -95,30 +111,125 @@ export interface EngineApiConfig {
  * engine() 只给装载与取像素视图，不要拿它绕过命令表。
  */
 export interface EngineApi {
+  /**
+   * 装载引擎并排出首帧。
+   * @param m boot 消息（胶水地址、字体、视口、缩放）
+   */
   boot(m: Args): Promise<void>;
+
+  /**
+   * 执行一条写命令（含收尾与状态回推）。
+   * @param m do 消息（命令名与参数）
+   */
   do(m: Args): Promise<void>;
+
+  /**
+   * 执行一条读命令，回一条 reply。
+   * @param m ask 消息（查询名与参数）
+   */
   ask(m: Args): Promise<void>;
+
+  /**
+   * 视口变化：落滚动位置、按需换窗、必要时呈现并重贴。
+   * @param m 视口消息（scrollY、视口尺寸、提前量）
+   */
   view(m: Args): { moved: boolean; scrolled: boolean; workMs: number; stats?: any };
+
+  /**
+   * 一页画布到达：登记并补贴那一页。
+   * @param m 画布消息（槽号、槽数、OffscreenCanvas）
+   */
   pageCanvas(m: Args): void;
+
+  /**
+   * 切换分页 / 连页（含重排与重贴）。
+   * @param m 视图模式消息
+   */
   viewMode(m: Args): void;
+
+  /**
+   * 成套设置页间隙与连页标志（分两路设会出现不存在的组合）。
+   * @param m 视图模式消息
+   */
   setViewMode(m: Args): void;
+
+  /**
+   * 只重排重画（给宿主的 resize 与 dpr 变化用）。
+   */
   relayout(): void;
+
+  /**
+   * 把这一拍的状态推给宿主。
+   * @param ts 回话序号（0 = 不与某个调用配对）
+   * @param label 这一拍的来源（命令名）
+   * @param stats 编辑那本账
+   * @param changed 文档内容有没有变
+   * @param workMs 这一下在引擎侧花了多少毫秒
+   */
   sendState(ts: number, label: string, stats: any, changed?: boolean, workMs?: number): void;
+
+  /**
+   * 几何快照（页度量、窗口、槽数上限）。
+   * @param st 这一拍的账，可空
+   */
   geom(st?: any): Args;
+
+  /**
+   * 把已装好的引擎实例交给命令表。
+   * @param engine wasm 模块实例
+   */
   attach(engine: Mod): void;
+
   /**
    * in-thread 的收尾（滚动 → 窗口 → present → 贴页）。
+   * @param opName 刚跑完的命令名
+   * @param m 滚动位置与视口尺寸
    */
   settle(opName: string, m: Args): { moved: boolean; scrolled: boolean; stats: any };
+
   /**
    * 装载类命令把滚动位置归零了：读一次就清。
    */
   takeScrollReset(): boolean;
+
+  /**
+   * 直接执行一条读命令，返回原值。
+   * @param name 查询名
+   * @param args 参数
+   */
   read(name: string, args?: Args): any;
+
+  /**
+   * 直接执行一条写命令，返回引擎那一步的结果。
+   * @param name 命令名
+   * @param args 参数
+   */
   write(name: string, args?: Args): any;
+
+  /**
+   * 引擎句柄（装载与取帧视图用，不要拿它绕过命令表）。
+   */
   engine(): Mod;
+
+  /**
+   * 当前滚动位置（设备像素）。
+   */
   scrollY(): number;
+
+  /**
+   * 视口尺寸（设备像素）。
+   * @returns 宽与高
+   */
   viewSize(): { w: number; h: number };
+
+  /**
+   * 推一份状态（给薄壳用，与 sendState 同一条路）。
+   * @param ts 回话序号
+   * @param label 来源
+   * @param stats 编辑那本账
+   * @param changed 内容有没有变
+   * @param workMs 引擎侧耗时
+   */
   state(ts: number, label: string, stats: any, changed?: boolean, workMs?: number): void;
 }
 
@@ -750,9 +861,14 @@ async function boot(m: any) {
   if (typeof factory !== 'function') {
     throw new Error('胶水层没导出 ' + (m.exportName || 'CreateHEditor'));
   }
+  const wasmPath = String(m.wasm || '');
   const base = m.glue.replace(/[^/]*$/, '');
   // bust 一路带到 wasm：只给胶水加戳、不给 wasm 加，就会出现"新胶水配旧 wasm"。
-  mod = await factory({ locateFile: (p: string) => base + p + (m.bust || '') });
+  // wasm 可以显式给（assets.wasm）：开发服务器的根不是仓库根时，胶水按自己的目录推会落空。
+  mod = await factory({
+    locateFile: (p: string) =>
+      wasmPath && /\.wasm$/.test(p) ? wasmPath : base + p + (m.bust || ''),
+  });
   dpr = m.dpr || 1;
   viewW = m.viewW || 1;
   viewH = m.viewH || 1;

@@ -21,8 +21,19 @@
 namespace heditor {
 
 struct CharFormat {
+    /**
+     * 加粗；没设置表示继承。
+     */
     std::optional<bool> bold;
+
+    /**
+     * 斜体。
+     */
     std::optional<bool> italic;
+
+    /**
+     * 下划线。
+     */
     std::optional<bool> underline;
 
     /**
@@ -35,11 +46,15 @@ struct CharFormat {
      */
     std::optional<Length> size;
 
+    /**
+     * 字色。
+     */
     std::optional<Color> color;
 
     /**
      * 一个属性都没设置吗。规范化靠它判断"标记集合是否相同"，编译靠它判断"有没有被丢掉的
      * 字符样式"。
+     * @return true = 一个属性都没设置（等于"全部继承"）
      */
     bool empty() const {
         return !bold.has_value() && !italic.has_value() && !underline.has_value() &&
@@ -58,6 +73,9 @@ struct CharFormat {
  *
  * 样式链的三层解析就是它按"从根到叶"的顺序叠加，内联 marks 最后叠一次。放在这一层而不是
  * 样式层，是因为它只认这六个字段，与样式表没有关系。
+ * @param under 下层（被覆盖）
+ * @param over 上层（设置了的覆盖下层）
+ * @return 合并结果
  */
 CharFormat mergeCharFormat(const CharFormat& under, const CharFormat& over);
 

@@ -45,8 +45,19 @@ enum class ShapingDirection {
 };
 
 struct WritingMode {
+    /**
+     * 行内轴（水平 / 竖直）。
+     */
     InlineAxis inline_axis = InlineAxis::Horizontal;
+
+    /**
+     * 块推进方向，决定列序。
+     */
     BlockFlow block_flow = BlockFlow::TopToBottom;
+
+    /**
+     * 字形取向（正立 / 侧倒）。
+     */
     TextOrientation orientation = TextOrientation::Mixed;
 
     /**
@@ -57,15 +68,21 @@ struct WritingMode {
      */
     bool operator==(const WritingMode& o) const = default;
 
+    /**
+     * 是不是竖排。
+     * @return true = 行内轴是竖直的
+     */
     bool isVertical() const { return inline_axis == InlineAxis::Vertical; }
 
     /**
      * 列序是否反向（中日竖排为 true：第一列在最右）
+     * @return true = 列序反向（第一列在最右）
      */
     bool isBlockReversed() const { return block_flow == BlockFlow::RightToLeft; }
 
     /**
      * 字形是否由本实现旋转（而不是交给 HarfBuzz 的竖排变体字形）
+     * @return true = 字形由布局层旋转，而不是取竖排变体字形
      */
     bool isSideways() const {
         return isVertical() && orientation == TextOrientation::SidewaysRight;
@@ -80,6 +97,7 @@ struct WritingMode {
      * 变体取向也不是"整段旋转"。
      * 正确做法：横排整形取得连写形态与 hmtx 推进，再由布局/渲染层把每个字形顺时针
      * 旋转 90°（PlacedGlyph::rotate_deg）；与 CSS 的 vertical-lr 加 sideways-rl 同路。
+     * @return 交给 HarfBuzz 的整形方向
      */
     ShapingDirection shapingDirection() const {
         return (isVertical() && !isSideways()) ? ShapingDirection::TopToBottom
@@ -88,9 +106,14 @@ struct WritingMode {
 
     /**
      * 布局层要施加的顺时针旋转角（度）。侧倒 = 90°，其余 = 0°。
+     * @return 布局层要施加的顺时针旋转角（度）
      */
     float glyphRotationDeg() const { return isSideways() ? 90.0f : 0.0f; }
 
+    /**
+     * CSS 里的写法模式名。
+     * @return horizontal-tb / vertical-rl / vertical-lr
+     */
     const char* name() const {
         if (!isVertical()) return "horizontal-tb";
         return isBlockReversed() ? "vertical-rl" : "vertical-lr";
@@ -98,6 +121,7 @@ struct WritingMode {
 
     /**
      * 中文/英文横排
+     * @return 中文 / 英文横排
      */
     static WritingMode HorizontalTB() {
         return WritingMode{InlineAxis::Horizontal, BlockFlow::TopToBottom, TextOrientation::Mixed};
@@ -105,6 +129,7 @@ struct WritingMode {
 
     /**
      * 中日竖排：列序从右往左，字形正立
+     * @return 中日竖排（列序从右往左，字形正立）
      */
     static WritingMode VerticalRL() {
         return WritingMode{InlineAxis::Vertical, BlockFlow::RightToLeft, TextOrientation::Upright};
@@ -112,6 +137,7 @@ struct WritingMode {
 
     /**
      * 蒙文竖排：列序从左往右，字形侧倒
+     * @return 蒙文竖排（列序从左往右，字形侧倒）
      */
     static WritingMode VerticalLR() {
         return WritingMode{InlineAxis::Vertical, BlockFlow::LeftToRight,

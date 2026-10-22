@@ -16,21 +16,33 @@ export interface WorkerOptions {
   container: HTMLElement;
   assets: AssetPaths;
   dpr: number;
+
   /**
    * 密度（设备像素 / 磅）。
    */
   zoom: number;
   empty?: boolean;
+
   /**
    * 宿主由这一侧造（它需要 link 与画布存储，而两者都由这一侧造）。
    * 画布存储必须延迟到宿主建好标记之后再造 —— 它要往 #pages 里塞元素。
    * 第三个参数是远端的贴图账（账在 Worker 那边，宿主自己记只会记到零）。
+   * @param link 传输层交出来的入口
+   * @param canvasStore 画布存储的造法
+   * @param blitStats 读远端贴图账
    */
   makeHost(
     link: EngineLink,
     canvasStore: (pagesEl: HTMLElement) => CanvasStore,
     blitStats: () => { ms: number; pages: number; px: number },
   ): DomHost;
+
+  /**
+   * 引擎整条不可用了（Worker 崩溃、装载失败）。创建期的失败以 createEditor 拒绝的形式
+   * 到达调用方；这里管"起来之后才死"——那时没有 Promise 可拒，只剩这个回调。
+   * @param message 失败原因（已格式化）
+   */
+  onFatal?(message: string): void;
 }
 
 /**
@@ -54,6 +66,7 @@ interface Mirror {
   selectionStyle: any;
   heapMB: number;
   scrollReset: boolean;
+
   /**
    * 这一拍 Worker 贴了几页、写了多少像素、花了多少毫秒。
    *
@@ -64,6 +77,11 @@ interface Mirror {
   blit: { ms: number; pages: number; px: number };
 }
 
+/**
+ * 造 Worker 传输：引擎在另一条线程上，主线程只持镜像与画布。
+ * @param opts 容器、素材、缩放与造宿主的方法
+ * @returns link（异步）、host、start 与 destroy
+ */
 export function createWorker(opts: WorkerOptions): {
   link: EngineLink;
   host: DomHost;
@@ -381,6 +399,7 @@ export function createWorker(opts: WorkerOptions): {
     // boot 失败与 Worker 自身出错 = 整条不可用；其余是那一条命令失败，引擎还活着。
     dead = where === 'worker.onerror' || /^boot/.test(where);
     rejectPending(`Worker 报错 ${where}：${brief}`);
+    if (dead) opts.onFatal?.(`引擎已不可用（${where}）：${brief}`);
   }
 
   worker.onmessage = (ev: MessageEvent): void => {
@@ -452,12 +471,15 @@ export function createWorker(opts: WorkerOptions): {
     host,
     async start(): Promise<void> {
       const vs = viewSize();
-      // 槽要先建出来再 boot：boot 里首帧就要贴页，画布到得越早越好。
-      host.syncPages();
+      // 槽不在这里建：起来之前每页都没有内容，先摆一排空白页画布等于在失败页上画了
+      //   一堆"看起来像是文档"的白块。第一次状态（只有 boot 成功排完版才会发）到达时
+      //   由 onState 的 syncPages 建槽，那一拍之后画布才会被贴。
       post({
         t: 'boot',
         ts: 0,
         glue: assets.glue,
+        // wasm 显式给了就按它取（开发服务器的根不是仓库根时靠这一条）。
+        wasm: assets.wasm ?? '',
         bust: assets.bust ?? '',
         exportName: 'CreateHEditor',
         fonts: assets.fonts,

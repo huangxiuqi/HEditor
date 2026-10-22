@@ -8,7 +8,6 @@
 #include <chrono>
 
 namespace heditor {
-
 /**
  * 单调时钟。用 steady_clock 而不是 system_clock：后者会被对时改动往回跳，
  * 一次往回跳能让耗时变成负数。

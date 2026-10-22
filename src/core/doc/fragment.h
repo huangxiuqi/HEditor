@@ -21,7 +21,6 @@
 #include "core/doc/range.h"
 
 namespace heditor {
-
 /**
  * 片段里的一段。
  */
@@ -31,10 +30,25 @@ enum class PieceKind : uint8_t {
 };
 
 struct Piece {
+    /**
+     * 这一片是文本还是段落标记。
+     */
     PieceKind kind = PieceKind::Text;
-    std::vector<uint32_t> cps;  // 仅 Text
-    CharFormat marks;           // 仅 Text
-    ParaFormatPatch para;       // 仅 ParaMark
+
+    /**
+     * 码点（仅文本片）。
+     */
+    std::vector<uint32_t> cps;
+
+    /**
+     * 字符格式（仅文本片）。
+     */
+    CharFormat marks;
+
+    /**
+     * 段落格式（仅段落标记片）。
+     */
+    ParaFormatPatch para;
 
     /**
      * 样式引用：文本片段里是字符样式，段落标记片段里是段落样式（第六节）。
@@ -44,14 +58,27 @@ struct Piece {
 
     /**
      * 这一段占几个流位置：文本按码点数，段落标记占一个。
+     * @return 占几个流位置（文本按码点数，段落标记占一个）
      */
     int span() const;
 };
 
 struct Fragment {
+    /**
+     * 片段内容，按流顺序。
+     */
     std::vector<Piece> pieces;
 
+    /**
+     * 片段一共占几个流位置。
+     * @return 流位置个数
+     */
     int span() const;
+
+    /**
+     * 片段是空的。
+     * @return true = 没有内容
+     */
     bool empty() const { return pieces.empty(); }
 };
 
@@ -59,10 +86,25 @@ struct Fragment {
  * 区间覆盖到的一个直接子节点：节点本身，以及被覆盖的那一段（流坐标）。
  */
 struct Cover {
+    /**
+     * 被覆盖的直接子节点。
+     */
     NodeId node = kInvalidNodeId;
-    FlowPos first = 0;  // 该节点自己的流起点
-    FlowPos from = 0;   // 被覆盖部分的起点
-    FlowPos to = 0;     // 被覆盖部分的终点（开）
+
+    /**
+     * 这个节点自己的流起点。
+     */
+    FlowPos first = 0;
+
+    /**
+     * 被覆盖部分的起点。
+     */
+    FlowPos from = 0;
+
+    /**
+     * 被覆盖部分的终点（开）。
+     */
+    FlowPos to = 0;
 };
 
 /**
@@ -72,6 +114,11 @@ struct Cover {
  * 支持、先被拒掉。于是调用方拿到的是同一层的孩子，不需要跨层处理。
  *
  * 有元素既不是文本也不是段落标记时返回 false 并写明是哪一个 —— 不静默截断。
+ * @param tree 文档树
+ * @param range 区间
+ * @param out 写回覆盖清单
+ * @param error 写回失败原因（区间里有不支持的节点）
+ * @return true = 覆盖到的都是文本与段落标记
  */
 bool collectCovers(const NodeTree& tree, const Range& range, std::vector<Cover>* out,
                    std::string* error);
@@ -81,6 +128,12 @@ bool collectCovers(const NodeTree& tree, const Range& range, std::vector<Cover>*
  *
  * 批量删除时每一步都要取一次覆盖清单，而建一次索引是 O(节点数) —— 四千步的批次就是
  *   几千次全树遍历。索引必须与 tree 同一口径。
+ * @param tree 文档树
+ * @param range 区间
+ * @param out 写回覆盖清单
+ * @param error 写回失败原因（区间里有不支持的节点）
+ * @return true = 覆盖到的都是文本与段落标记
+ * @param idx 调用方建好的流索引（Design 口径）
  */
 bool collectCovers(const NodeTree& tree, const FlowIndex& idx, const Range& range,
                    std::vector<Cover>* out, std::string* error);
@@ -89,8 +142,19 @@ bool collectCovers(const NodeTree& tree, const FlowIndex& idx, const Range& rang
  * 提取结果。失败时 fragment 为空、error 写明原因。
  */
 struct ExtractResult {
+    /**
+     * 取出来的片段。
+     */
     Fragment fragment;
+
+    /**
+     * 取到了没有。
+     */
     bool ok = false;
+
+    /**
+     * 失败原因（区间里有不支持的节点）。
+     */
     std::string error;
 };
 
@@ -98,6 +162,9 @@ struct ExtractResult {
  * 取区间（纯读，不产生步骤）。
  *
  * 内部先做端点规范化，于是片段永远良构：不可能切在控件中间，也不会留下落单的边界。
+ * @param tree 文档树
+ * @param range 区间
+ * @return 片段；区间不合法时为空并带原因
  */
 ExtractResult extractRange(const NodeTree& tree, Range range);
 

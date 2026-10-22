@@ -9,7 +9,6 @@
 #pragma once
 
 namespace heditor {
-
 /**
  * 三档模式。取值显式写出，宿主按整数传参时含义不会随枚举顺序改变。
  */

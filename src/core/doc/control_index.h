@@ -28,33 +28,56 @@ namespace heditor {
 
 class ControlIndex {
 public:
+
     /**
      * 重建两张表（一次前序遍历）。这份实现是正确性的基线：增量维护的结果必须与它逐项相同。
+     * @param tree 文档
      */
     void rebuild(const NodeTree& tree);
 
     /**
      * 一步编辑之后维护索引。返回 false 表示这一步的效果跟不上（步骤里没记下被增删子树的身份），
      * 调用方必须重建。
+     * @param tree 文档（增量维护要读被增删子树）
+     * @param step 刚应用的步骤
+     * @return false = 跟不上，调用方必须重建
      */
     bool onStep(const NodeTree& tree, const Step& step);
 
+    /**
+     * 这个 id 是控件吗。
+     * @param id 节点 id
+     * @return true = 是控件
+     */
     bool has(NodeId id) const { return key_of_.find(id) != key_of_.end(); }
+
+    /**
+     * 索引里有几个控件。
+     * @return 控件数
+     */
     int size() const { return static_cast<int>(key_of_.size()); }
 
     /**
      * 某个 id 的业务编码。不是控件时返回 nullptr。
+     * @param id 节点 id
+     * @return 业务编码；不是控件时为 nullptr
      */
     const std::string* keyOf(NodeId id) const;
 
     /**
      * 同一个 key 的全部控件，按文档顺序（重建口径）。没有时返回空表 —— 返回引用而不是拷贝，
      * 因为批量设值会对每个 key 都问一次。
+     * @param key 业务编码
+     * @return 同 key 的控件，按文档顺序；没有时为空表
      */
     const std::vector<NodeId>& byKey(const std::string& key) const;
 
 private:
     std::unordered_map<NodeId, std::string> key_of_;
+
+    /**
+     * 编码到控件的反查，值按文档顺序。
+     */
     std::unordered_map<std::string, std::vector<NodeId>> by_key_;
 };
 
@@ -63,6 +86,8 @@ private:
  *
  * 它是自由函数而不是 ControlIndex 的成员：这件事与索引无关，还没有索引的地方（构建索引之前、
  * 校验索引是否与重建一致）也要用。
+ * @param tree 文档
+ * @return 全部控件节点号，按文档顺序
  */
 std::vector<NodeId> controlIds(const NodeTree& tree);
 

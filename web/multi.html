@@ -2,148 +2,29 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<!-- 空 favicon：不然浏览器会去要 /favicon.ico 并回一个 404（两个演示页都有这一行）。 -->
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HEditor · 两个实例同页</title>
 <link rel="icon" href="data:,">
-<title>HEditor · 同页多实例</title>
+<link rel="stylesheet" href="/app/style.css">
 <style>
-  html, body { margin: 0; height: 100%; background: #f2f3f5; color: #1d1d1f;
-               font: 13px/1.6 "Segoe UI", "Microsoft YaHei", sans-serif; }
-  header { padding: 8px 14px; background: #1f2937; color: #e5e7eb; }
-  header b { font-weight: 600; }
-  header span { color: #9ca3af; }
-  #list { display: flex; flex-direction: column; height: calc(100% - 38px); }
-  /* 每个实例一块，纵向平分。容器必须是 position:relative：
-     错误横幅是绝对定位的，它会落在自己这一块里而不是跑到页面顶上（多实例页面上
-     能不能分清"是哪一个实例坏了"就取决于这一条）。 */
-  .ed { position: relative; flex: 1 1 0; min-height: 0; display: flex; flex-direction: column;
-        border-top: 1px solid #d1d5db; }
-  .ed .bar { display: flex; align-items: center; gap: 10px; padding: 3px 10px; flex: none;
-             background: #e5e7eb; border-bottom: 1px solid #d1d5db; flex-wrap: wrap; }
-  .ed .bar .tag { font-weight: 600; color: #374151; }
-  .ed .bar select, .ed .bar input, .ed .bar button { font: inherit; padding: 1px 6px;
-             border: 1px solid #cbd5e1; border-radius: 6px; background: #fff; }
-  .ed .bar button { cursor: pointer; }
-  .ed .bar #status { color: #4b5563; }
-  /* Worker 宿主的消息条（启动结果与报错写进来）。它按 id 查找，所以只有 Worker 那一路需要它；
-     单线程宿主的 app.js 不碰这个元素，给它一份只会永远停在初始文案上。 */
-  .ed .msg { flex: none; padding: 2px 10px; background: #f3f4f6; color: #4b5563;
-             border-bottom: 1px solid #e5e7eb; font: 11px/1.5 Consolas, "Courier New", monospace;
-             white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .ed .msg.err { color: #b91c1c; font-weight: 600; }
-  .ed .body { position: relative; flex: 1 1 0; min-height: 0; }
-  /* 舞台的 flex 居中只对单线程那一侧起作用：它把画布容器 #pages 当普通流内元素摆，
-     水平居中得由页面的 CSS 给（Worker 那一侧自己算画布左边距，与这里无关，它的画布
-     全是绝对定位，居中样式落不到它们身上）。 */
-  .ed #stage { position: absolute; inset: 0; overflow-y: auto; overflow-x: hidden;
-               background: #e9eaec; display: flex; justify-content: center;
-               align-items: flex-start; }
-  /* overflow: hidden —— Worker 侧两种视图模式共用一套页容器，连页下最后一页会伸出
-     内容底边，不裁就会多出一整页的滚动空白（分页下恰好等于末页底边，裁不到东西）。 */
-  .ed #pages { position: relative; flex: none; overflow: hidden; }
-  .ed #pages canvas { position: absolute; left: 0; display: block;
-                      box-shadow: 0 1px 3px rgba(0,0,0,.18); }
-  /* 一页一张画布的 Worker 形态：画布直接摆在滚动容器里，靠 #spacer 撑出全文高度。 */
-  .ed .pg { display: block; }
-  .ed #spacer { position: absolute; top: 0; left: 0; width: 1px; }
-  .ed .ovl { position: absolute; inset: 0; pointer-events: none; }
-  /* 输入层：pointer-events 必须是 none（它被撑成"从光标到页右缘"那么宽去承接输入法，
-     若允许吃指针，光标那一行的整条横带都点不进画布）。 */
-  .ed #ime { position: absolute; z-index: 2; pointer-events: none; border: 0; outline: 0;
-             padding: 0; margin: 0; background: transparent; color: transparent;
-             caret-color: transparent; resize: none; overflow: hidden; white-space: pre; }
+  /* 两栏并排：这一页要证明的是"两个实例互不干扰"，所以必须同时看得见。 */
+  main {
+    flex: 1;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1px;
+    background: var(--line);
+  }
+  main > div { min-width: 0; background: var(--bg); }
 </style>
 </head>
 <body>
-<header>
-  <b>同页多实例</b>
-  <span>两个单线程实例（A、B）+ 一个 Worker 实例（C）：各有一份引擎与画布，
-        某一个坏了或拆掉都不影响其余的。</span>
-</header>
-
-<div id="list">
-  <section class="ed" id="ed-a"></section>
-  <section class="ed" id="ed-b"></section>
-  <section class="ed" id="ed-c"></section>
-</div>
-
-<script>window.__heditorAutoBoot = false;</script>
-<script src="host_error.js"></script>
-<script src="drag_select.js"></script>
-<!-- WebAssembly SIMD 能力探测：与另两张页同一份，必须在两个主脚本之前。 -->
-<script src="wasm_feature.js"></script>
-<!-- 引擎命令表：app.js 的单线程实例也走它，必须在前。 -->
-<script src="engine_api.js"></script>
-<!-- 两宿主的共享输入层：两个主脚本都会在加载时就取它。 -->
-<script src="host_core.js"></script>
-<script src="app.js"></script>
-<script src="worker_host.js"></script>
-<script>
-// 两个宿主都不自动启动，由这一页自己造实例。
-(function () {
-  const SCEN = [
-    [0, '完整样例'], [1, '蒙文竖排 vertical-lr'], [2, '中文竖排 vertical-rl'],
-    [3, '中文长文本'], [4, '中英混排 + 回退'], [5, '蒙文竖排对照'],
-    [6, '可编辑（敲字 / 光标）'], [7, '长文档 200 段'], [8, '真病历样例'],
-  ];
-  const CASES = [
-    { id: 'ed-a', kind: 'in-thread', tag: 'A · 单线程' },
-    { id: 'ed-b', kind: 'in-thread', tag: 'B · 单线程' },
-    { id: 'ed-c', kind: 'worker', tag: 'C · 引擎在 Worker' },
-  ];
-
-  /**
-   * 每个实例的标记。
-   *
-   * 里面的 id 在页面上重复出现：两个宿主查找元素时都限定在自己的容器内，所以重复的 id
-   *   不会互相抢；id 取成与演示页同一套，是为了让这三个实例的标记与两个演示页逐条对应。
-   *   形态按宿主分：单线程那侧有 pages（宿主自持画布），Worker 那侧有 spacer 与消息条
-   *   bar（画布交给 Worker，滚动高度靠占位块撑）。
-   */
-  function markup(kind, tag) {
-    const opts = SCEN.map(([v, l]) => `<option value="${v}">${l}</option>`).join('');
-    const toolbar = `<div class="bar"><span class="tag">${tag}</span>` +
-      `<select id="scenario">${opts}</select>` +
-      // 缩放这一格是倍数（1 = 100% = 96 dpi）：1.125 倍 = 引擎的 1.5，这批用例的基准档。
-      `<label>zoom <input id="zoom" type="number" step="0.0625" min="0.375" max="2.25" ` +
-      `value="1.125" style="width:56px"></label>` +
-      `<span id="status">准备中…</span></div>`;
-    const bar = kind === 'worker' ? toolbar + `<div class="msg" id="bar">启动中…</div>` : toolbar;
-    // 两种宿主的输入层挂法不同，标记也就不同：单线程那一侧按"滚动位移加在坐标上"摆
-    //   输入层，所以它必须在滚动容器内部；Worker 那一侧按"坐标减去滚动位移"摆，
-    //   所以它必须是滚动容器的兄弟覆盖层。这不是风格差异，摆错了候选框就会飘。
-    const body = kind === 'worker'
-      ? `<div class="body"><div id="stage"><div id="spacer"></div><div id="pages"></div></div>` +
-        `<div class="ovl"><textarea id="ime" rows="1" spellcheck="false"></textarea></div></div>`
-      : `<div class="body"><div id="stage"><div id="pages"></div>` +
-        `<textarea id="ime" rows="1" spellcheck="false"></textarea></div></div>`;
-    return bar + body;
-  }
-
-  const editors = {};
-  for (const c of CASES) {
-    const el = document.getElementById(c.id);
-    el.innerHTML = markup(c.kind, c.tag);
-    const inst = c.kind === 'worker'
-      ? window.createWorkerEditor(el, { chrome: true })
-      : window.createEditor(el, { chrome: true });
-    // Worker 宿主的门面只做引擎与传输，演示工具条由页面接（单线程那侧自己接了）。
-    if (c.kind === 'worker') {
-      const sc = el.querySelector('#scenario');
-      const zm = el.querySelector('#zoom');
-      sc.addEventListener('change', (e) => {
-        const id = Number(e.target.value);
-        // 缩放从门面读（密度），不从输入框读 —— 输入框那一格是倍数，两者差 4 / 3。
-        if (id === 8) inst.loadMedicalSample(1); else inst.run(id, inst.zoomLevel);
-      });
-      zm.addEventListener('change', (e) => inst.zoomToFactor(Number(e.target.value)));
-    }
-    editors[c.id] = inst;
-  }
-
-  // 探针与手工调试的入口。
-  window.__editors = editors;
-  window.__edCases = CASES;
-})();
-</script>
+<header id="bar"></header>
+<main>
+  <div id="ed-a"></div>
+  <div id="ed-b"></div>
+</main>
+<script type="module" src="/app/multi.ts"></script>
 </body>
 </html>

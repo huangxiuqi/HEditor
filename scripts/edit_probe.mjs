@@ -33,9 +33,11 @@ const PORT = Number(opt('port', '9222'));
 const URL_ = opt('url', 'http://localhost:8781/web/index.html');
 const OUT = join(ROOT, opt('out-dir', 'out/web'));
 const ZOOM = Number(opt('zoom', '1.5'));
-// --lib：跑在新库的 demo 页上。页面启动后由迁移垫片把旧门面名翻成公开面 + diag，
+// --lib：跑在新库的示例页上。页面启动后由迁移垫片把旧门面名翻成公开面 + diag，
 //   断言一条不改 —— 这样红/绿只反映"新库能不能替代旧宿主"，不掺杂改写本身的手误。
-const LIB = argv.includes('--lib') || /demo\.html/.test(URL_);
+// 示例页有两个地址：构建出来的 web/dist-app/index.html（静态服务器）与
+//   Vite 开发服务器的 /index.html（源码直连）。两者都算 --lib。
+const LIB = argv.includes('--lib') || /demo\.html|dist-app|:5173/.test(URL_);
 
 const S6 = '患者主诉：反复心悸三天，加重一天。';
 

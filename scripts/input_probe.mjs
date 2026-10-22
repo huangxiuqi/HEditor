@@ -25,7 +25,7 @@ const opt = (name, def) => {
 };
 const PORT = Number(opt('port', '9222'));
 const TRANSPORT = opt('transport', 'inline');
-const URL_BASE = opt('url', 'http://127.0.0.1:8781/web/demo.html');
+const URL_BASE = opt('url', 'http://127.0.0.1:8781/web/dist-app/index.html');
 const URL_ = URL_BASE + (URL_BASE.includes('?') ? '&' : '?') + 'transport=' + TRANSPORT;
 
 const list = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json();

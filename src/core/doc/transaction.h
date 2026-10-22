@@ -26,17 +26,31 @@
 #include "core/doc/steps.h"
 
 namespace heditor {
-
 /**
  * 一次可撤销的编辑单位。
  *
  * 步骤按顺序应用，每步的坐标是它自己那一步开始时的状态：逆序应用逆操作正好回到原处。
  */
 struct Transaction {
+    /**
+     * 这一笔的全部步骤（按顺序应用，撤销按逆序应用逆操作）。
+     */
     std::vector<Step> steps;
+
+    /**
+     * 编辑前的选区（撤销回到它）。
+     */
     Range selection_before;
+
+    /**
+     * 编辑后的选区（重做回到它）。
+     */
     Range selection_after;
-    std::string label;  // 提交说明，撤销菜单显示用
+
+    /**
+     * 提交说明，撤销菜单显示用。
+     */
+    std::string label;
 };
 
 /**
@@ -51,35 +65,68 @@ public:
      *
      * 调小时立刻按上限裁剪（丢最旧的），不必等下一次提交 —— 否则"把上限调小"要等到用户再敲
      * 一下才生效，那一刻栈还超着限。
+     * @param limit 最多留几条（0 或负数表示不限制）
      */
     void setLimit(int limit);
+
+    /**
+     * 撤销栈的深度上限。
+     * @return 上限（0 或负数表示不限制）
+     */
     int limit() const { return limit_; }
 
     /**
      * 提交一个事务：应用步骤、规范化一次、压栈（超出上限时丢最旧的），并清空重做栈。
      *
      * 中途有步骤失败时整个事务作废：已经应用的按逆序撤回，文档与栈都回到提交前。
+     * @param tx 事务（按值收下，提交之后归栈）
+     * @return 结果；中途失败时整笔作废、文档回到提交前
      */
     StepResult commit(Transaction tx);
 
     /**
      * 撤销一个事务，并把该事务的编辑前选区写进 restore。没有可撤销的事务时返回失败。
+     * @param restore 写回编辑前选区
+     * @return 结果；没有可撤销的事务时失败
      */
     StepResult undo(Range* restore);
 
     /**
      * 重做，并把编辑后选区写进 restore。
+     * @param restore 写回编辑后选区
+     * @return 结果；没有可重做的事务时失败
      */
     StepResult redo(Range* restore);
 
+    /**
+     * 有没有可撤销的事务。
+     * @return true = 撤销栈非空
+     */
     bool canUndo() const { return !done_.empty(); }
+
+    /**
+     * 有没有可重做的。
+     * @return true = 重做栈非空
+     */
     bool canRedo() const { return !undone_.empty(); }
+
+    /**
+     * 撤销栈里的事务数。
+     * @return 条数
+     */
     int undoDepth() const { return static_cast<int>(done_.size()); }
+
+    /**
+     * 重做栈里的事务数。
+     * @return 条数
+     */
     int redoDepth() const { return static_cast<int>(undone_.size()); }
 
 private:
+
     /**
      * 按逆序撤回若干个已应用的步骤。
+     * @param applied 已经应用的步骤（按应用顺序给，这里逆序撤回）
      */
     void revert(const std::vector<Step>& applied);
 
@@ -88,10 +135,25 @@ private:
      */
     void trim();
 
+    /**
+     * 被编辑的树（不持有）。
+     */
     NodeTree& tree_;
+
+    /**
+     * 已提交的事务，越靠后越新。
+     */
     std::vector<Transaction> done_;
+
+    /**
+     * 撤销掉的事务，重做按它回去。
+     */
     std::vector<Transaction> undone_;
-    int limit_ = 0;  // 0 = 不限制
+
+    /**
+     * 撤销栈的上限。0 表示不限制。
+     */
+    int limit_ = 0;
 };
 
 }  // namespace heditor

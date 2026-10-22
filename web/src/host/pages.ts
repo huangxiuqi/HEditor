@@ -12,6 +12,7 @@
 export interface PageRec {
   el: HTMLCanvasElement;
   g: CanvasRenderingContext2D | null;
+
   /**
    * 还没贴过（新分配，或刚改过尺寸被清空）。
    *   它必须整页贴一次，与"这一页欠不欠脏矩形"无关 —— 窗口平移进来的页内容没变，
@@ -29,10 +30,12 @@ export interface PageGeometry {
    */
   pw: number;
   ph: number;
+
   /**
    * 页间隙（设备像素）。
    */
   gap: number;
+
   /**
    * 屏幕像素比：CSS 尺寸 = 设备像素 / dpr。
    */
@@ -42,10 +45,12 @@ export interface PageGeometry {
 export class PageCanvases {
   private readonly pagesEl: HTMLElement;
   private readonly map = new Map<number, PageRec>();
+
   /**
    * 卸下来的画布留着复用：留住元素就是留住那份已实体化的 backing store。
    */
   private readonly pool: HTMLCanvasElement[] = [];
+
   /**
    * 一页画布建好时通知对端（worker 传输在这里 transfer）。
    */
@@ -59,14 +64,30 @@ export class PageCanvases {
     return this.map.size;
   }
 
+  /**
+   * 当前持有的页。
+   *
+   * @returns 页号与记录的二元组（不保证顺序）
+   */
   list(): Array<[number, PageRec]> {
     return [...this.map.entries()];
   }
 
+  /**
+   * 按页号取记录。
+   *
+   * @param page 页号
+   * @returns 记录；这一页不在窗口里时为 undefined
+   */
   get(page: number): PageRec | undefined {
     return this.map.get(page);
   }
 
+  /**
+   * 按页号取记录，没有就建一张。
+   * @param page 页号
+   * @returns 该页的记录（没有就新建一张）
+   */
   private canvasFor(page: number): PageRec {
     let rec = this.map.get(page);
     if (!rec) {
@@ -87,6 +108,7 @@ export class PageCanvases {
    * 就是"滚动时一片空白、停下来才刷出来"，而那片空白看起来像坏了。
    * 为什么用 CSS 而不是多建画布：这张图是纯渐变，浏览器自己画，主线程零成本；
    * 多建画布要么白占几十 MB 背衬，要么还得为它跑一次 putImageData。
+   * @param geom 页度量（页高与步距）
    */
   private syncBackdrop(geom: PageGeometry): void {
     const h = Math.round(geom.ph / geom.dpr);
@@ -103,6 +125,10 @@ export class PageCanvases {
   /**
    * 把画布集合调整成"窗口内每页一张"，并摆好位置与尺寸。
    * 位置用绝对页号算（不是窗口内下标）—— 这样滚动换窗口时画布不会跟着漂。
+   * @param first 窗口首页
+   * @param count 窗口页数
+   * @param total 总页数
+   * @param geom 页度量
    */
   sync(first: number, count: number, total: number, geom: PageGeometry): void {
     const { pw, ph, gap, dpr } = geom;
@@ -144,6 +170,11 @@ export class PageCanvases {
 
   /**
    * 整页贴一张（新页 / 报脏但给不出矩形时的退路）。
+   * @param page 页号
+   * @param src 导出像素（页内坐标）
+   * @param pw 页宽（设备像素）
+   * @param ph 页高（设备像素）
+   * @returns 写入的像素数
    */
   blitAll(page: number, src: Uint8ClampedArray, pw: number, ph: number): number {
     const rec = this.map.get(page);
@@ -162,6 +193,12 @@ export class PageCanvases {
    * 按脏矩形贴。光标移动一次只有几十像素，而整页是一百多万。
    *
    * 逐块拷成小图再按页内坐标贴：块只有几十像素，拷贝比"给整页建视图"便宜。
+   * @param page 页号
+   * @param src 导出像素（页内坐标）
+   * @param pw 页宽（设备像素）
+   * @param ph 页高（设备像素）
+   * @param rects 脏矩形（页内像素）
+   * @returns 写入的像素数
    */
   blitRects(
     page: number,
@@ -194,6 +231,9 @@ export class PageCanvases {
     for (const rec of this.map.values()) rec.fresh = true;
   }
 
+  /**
+   * 丢掉全部画布并清空容器。
+   */
   destroy(): void {
     for (const rec of this.map.values()) rec.el.remove();
     this.map.clear();
@@ -206,10 +246,35 @@ export class PageCanvases {
  */
 export interface CanvasStore {
   readonly size: number;
+
+  /**
+   * 按页号取记录。
+   * @param page 页号
+   */
   get(page: number): PageRec | undefined;
+
+  /**
+   * 当前持有的页（页号与记录）。
+   */
   list(): Array<[number, PageRec]>;
+
+  /**
+   * 把画布集合对齐到窗口，并摆好位置与尺寸。
+   * @param first 窗口首页
+   * @param count 窗口页数
+   * @param total 总页数（算滚动高度用）
+   * @param geom 页度量
+   */
   sync(first: number, count: number, total: number, geom: PageGeometry): void;
+
+  /**
+   * 内容整体作废：所有页下次整页贴。
+   */
   invalidate(): void;
+
+  /**
+   * 丢掉全部画布并清空容器。
+   */
   destroy(): void;
 }
 
@@ -230,6 +295,7 @@ export class SlotCanvases implements CanvasStore {
   private readonly slots: HTMLCanvasElement[] = [];
   private readonly byPage = new Map<number, PageRec>();
   private nSlots: number;
+
   /**
    * 一槽画布第一次建好时通知对端（这里 transfer）。
    */
@@ -244,14 +310,27 @@ export class SlotCanvases implements CanvasStore {
     return this.byPage.size;
   }
 
+  /**
+   * 取这一页现在落在哪个槽。
+   * @param page 页号
+   * @returns 记录；不在窗口里时为 undefined
+   */
   get(page: number): PageRec | undefined {
     return this.byPage.get(page);
   }
 
+  /**
+   * 当前窗口里每页落在哪个槽。
+   * @returns 页号与记录的二元组
+   */
   list(): Array<[number, PageRec]> {
     return [...this.byPage.entries()];
   }
 
+  /**
+   * 造一个槽元素并挂进容器。
+   * @returns 新元素
+   */
   private acquire(): HTMLCanvasElement {
     const el = document.createElement('canvas');
     el.className = 'pg';
@@ -261,11 +340,19 @@ export class SlotCanvases implements CanvasStore {
     return el;
   }
 
-  invalidate(): void {
-    // 槽里的像素属于哪一页没有变，变的是"那一页现在该是什么" —— 由 Worker 侧重贴，
-    //   这一侧不作废任何东西。留着这个方法是为了与 PageCanvases 同形。
-  }
+  /**
+   * 内容整体作废。槽里的像素属于哪一页没有变，变的是那一页现在该是什么，所以这一侧
+   *   不作废任何东西（重贴由 Worker 侧做）。留着这个方法是为了与 PageCanvases 同形。
+   */
+  invalidate(): void {}
 
+  /**
+   * 让槽与当前窗口对齐（第 p 页永远用第 p 模槽数 个槽）。
+   * @param first 窗口首页
+   * @param count 窗口页数
+   * @param total 总页数
+   * @param geom 页度量
+   */
   sync(first: number, count: number, total: number, geom: PageGeometry): void {
     const { pw, ph, gap, dpr } = geom;
     const step = ph + gap;
@@ -310,6 +397,9 @@ export class SlotCanvases implements CanvasStore {
     }
   }
 
+  /**
+   * 拆掉所有槽元素。
+   */
   destroy(): void {
     for (const el of this.slots) el.remove();
     this.slots.length = 0;

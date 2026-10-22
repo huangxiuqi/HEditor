@@ -25,23 +25,58 @@
 #include "core/rev/rev.h"
 
 namespace heditor::rev {
-
 /**
  * 一次判定的回执。不允许时给出原因，说明是哪一层挡住的 —— 越界交互要靠它反馈，
  * 静默拒绝会让"点了没反应"变成 bug。
  */
 struct EditCheck {
+    /**
+     * 允不允许。
+     */
     bool allowed = false;
+
+    /**
+     * 不允许的原因（给界面做禁用态提示）。
+     */
     std::string reason;
 };
 
+/**
+ * 某个位置能不能落编辑（表单模式下要落在可编辑集合内）。
+ * @param doc 修订
+ * @param mode 编辑模式
+ * @param pos 流位置
+ * @return 允许不允许，不允许时带原因
+ */
 EditCheck canEditAt(const Doc& doc, EditMode mode, FlowPos pos);
 
+/**
+ * 一个区间能不能整段删掉（两端都要在可编辑集合内）。
+ * @param doc 修订
+ * @param mode 编辑模式
+ * @param range 区间
+ * @return 允许不允许，不允许时带原因
+ */
 EditCheck canEditRange(const Doc& doc, EditMode mode, Range range);
 
 /**
  * 方向键普通移动一步。表单模式下若相邻位置落在可编辑集合外，就沿该方向找到最近的可编辑
  * 位置；找不到则原地不动。
+ * @param doc 修订
+ * @param mode 编辑模式
+ * @param from 当前位置
+ * @param dir 方向（负 = 向前）
+ * @return 最近的可编辑位置；找不到时为原地
+ * @param doc 修订
+ * @param mode 编辑模式
+ * @param from 当前位置
+ * @param dir 方向（负 = 向前）
+ * @return 最近的可编辑位置；找不到时为原地
+ * @param doc 修订
+ * @param mode 编辑模式
+ * @param from 当前位置
+ * @param dir 方向（负 = 向前）
+ * @return 最近的可编辑位置；找不到时为原地
  */
 FlowPos stepEditable(const Doc& doc, EditMode mode, FlowPos from, int dir);
 
@@ -49,8 +84,16 @@ FlowPos stepEditable(const Doc& doc, EditMode mode, FlowPos from, int dir);
  * Tab 的目标。
  */
 struct TabStop {
-    bool handled = false;  // 编辑器是否消费这次 Tab
-    FlowPos target = 0;    // handled 为真时的目标位置
+    /**
+     * 编辑器消费了这个 Tab 没有。
+     */
+    bool handled = false;
+
+    /**
+     * handled 为真时的目标位置。
+     */
+    FlowPos target = 0;
+
     /**
      * 目标所属的控件。共享边界上"前一个控件的末尾"与"这个控件的开头"是同一个码点偏移，
      * 只给位置的话调用方再推一次归属会推成前一个控件。
@@ -58,17 +101,37 @@ struct TabStop {
     NodeId owner = kInvalidNodeId;
 };
 
+/**
+ * Tab 从当前位置去哪儿（到最后一个可编辑控件就放行，不绕回）。
+ * @param doc 修订
+ * @param mode 编辑模式
+ * @param from 当前位置
+ * @param backward true = Shift+Tab（往前找）
+ * @return 消费没有、目标位置与归属
+ */
 TabStop tabFrom(const Doc& doc, EditMode mode, FlowPos from, bool backward);
 
 /**
  * 结构操作（删除控件自身这类）能不能做。文档模式放行，只读模式一律拒绝，
  * 表单模式要求控件显式开放（structureLock 为 false）。
+ * @param doc 修订
+ * @param mode 编辑模式
+ * @param id 控件节点号
+ * @return 允许不允许，不允许时带原因
+ * @param doc 修订
+ * @param mode 编辑模式
+ * @param id 控件节点号
+ * @return 允许不允许，不允许时带原因
  */
 EditCheck canDoStructureOp(const Doc& doc, EditMode mode, NodeId id);
 
 /**
  * 一个具体步骤能不能做。把落点判定接到步骤上，于是"改一个字"与"删掉一个控件"共用同一套
  * 权限。步骤本身只回答"结构上能不能应用"，权限与它分开，两件事互不代替。
+ * @param doc 修订
+ * @param mode 编辑模式
+ * @param step 一步编辑
+ * @return 允许不允许，不允许时带原因
  */
 EditCheck canEditStep(const Doc& doc, EditMode mode, const Step& step);
 

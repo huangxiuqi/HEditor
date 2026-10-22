@@ -29,14 +29,17 @@ export interface HotState {
 export interface Hit {
   para: number;
   offset: number;
+
   /**
    * 相邻字段共享边界时要靠它分辨点的是哪一侧。
    */
   side?: number;
+
   /**
    * 折行处同一个偏移压着两行，要带行别。
    */
   line?: number;
+
   /**
    * 点在格子边距带上：这一下表达的是"选整格"。
    */
@@ -83,6 +86,9 @@ export interface ClickState {
  * 不用 Promise.resolve 包一层：那会把同步宿主也推进微任务，于是"输入事件处理完
  *   就已生效"这条性质消失，探针的同步假设连带失效（一轮下来耗时数倍、增量断言变红）。
  *   同步值当场回调，Promise 才等 —— 两个宿主的执行时序各自保持原样。
+   * @param v 同步值或 Promise
+   * @param fn 拿到值之后做什么
+   * @returns 同步值或 Promise（与输入同形）
  */
 export function then1<V, R>(v: Maybe<V>, fn: (v: V) => Maybe<R>): Maybe<R> {
   return v && typeof (v as Promise<V>).then === 'function'
@@ -95,6 +101,9 @@ export function then1<V, R>(v: Maybe<V>, fn: (v: V) => Maybe<R>): Maybe<R> {
  *
  * 单线程宿主的 mousedown 本来带 detail，仍然自己数：另一侧挂在 pointerdown 上，
  * detail 恒为 0。两处各判一套，迟早出现"这边三击能选、那边没反应"。
+   * @param ev 带客户端坐标的事件
+   * @param st 连击计数状态（调用方持有）
+   * @returns 这是第几击（1 起）
  */
 export function clickCountOf(ev: { clientX: number; clientY: number }, st: ClickState): number {
   const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
@@ -115,6 +124,8 @@ export function clickCountOf(ev: { clientX: number; clientY: number }, st: Click
  *
  * 病历样例走的是"服务端下发一份文本"，两份实现一旦分叉，同一份样例在两个宿主上
  * 会排出不同段数 —— 而段落数是探针的基准量之一。
+   * @param raw 原始文本
+   * @returns 每段一行的纯文本
  */
 export function cleanMarkdownLines(raw: string): string {
   return raw
@@ -137,6 +148,8 @@ export function cleanMarkdownLines(raw: string): string {
  * 判据取 devicePixelRatio 本身，不取 resize 事件：拖窗口大小也会来 resize，
  * 那时 DPR 没变，重排一遍纯属白花。媒体查询按 Ndppx 精确匹配，每变一次要重挂，
  * 否则下一次不再触发。
+   * @param onChange 屏幕像素比变了要做什么
+   * @returns 拆掉监听的函数
  */
 export function armDprWatch(onChange: (dpr: number) => void): () => void {
   let q: MediaQueryList | null = null;
@@ -158,15 +171,15 @@ export function armDprWatch(onChange: (dpr: number) => void): () => void {
 }
 
 /**
- * 键位到命令。
+ * 键位到命令。null 表示这个键放行给浏览器。
  *
- * ctx.vertical / ctx.blockReversed 由宿主的热读给出（单线程读引擎、异步宿主读镜像）。
- * 返回 [命令名, 参数] 或 null；null 表示放行给浏览器。
+ * ctx 是宿主的热读（单线程读引擎、异步宿主读镜像）：方向键按物理方向映射 —— 横排左右
+ *   走字、上下换行，竖排翻过来；换列往哪边由列序定（中日竖排自右向左、蒙文自左向右），
+ *   只按"是竖排吗"映射会把蒙文的左右按反。
  *
- * 方向键按物理方向映射：横排的行内轴是水平的、块轴是竖直的，所以左右走字、上下换行。
- * 竖排正好翻过来：上下走字、左右换列。换列往哪一边由列序定 —— 中日竖排列自右向左
- * （左 = 下一列），蒙文列自左向右（右 = 下一列）。只按"是竖排吗"映射，蒙文的左右
- * 就会按反。参考行为是 Chrome 在 vertical-rl 的 contenteditable 里的实测结果。
+ * @param ev 键盘事件
+ * @param ctx 热读（竖排、列序）
+ * @returns 命令与参数；不认识的键返回 null
  */
 export function keyToOp(ev: KeyboardEvent, ctx?: HotState): [string, Args] | null {
   if ((ev.ctrlKey || ev.metaKey) && !ev.altKey) {
@@ -237,6 +250,8 @@ export function keyToOp(ev: KeyboardEvent, ctx?: HotState): [string, Args] | nul
  *   line 与 side 同时给 —— 折行处"上一行行尾"与"下一行行首"是同一个偏移与侧别，
  *               不带行别，点下一行行首会画到上一行行尾。
  * 搬的是段号而不是流区间：空格的内容长度为 0，流区间分不出是哪一格。
+   * @param hit 命中结果
+   * @returns 落点动作；落不进正文时返回 null
  */
 export function hitToAction(hit: Hit | null | undefined): HitAction | null {
   if (!hit) return null;
@@ -257,24 +272,38 @@ export interface ZoomControl {
    * 当前密度（设备像素 / 磅）。
    */
   readonly density: number;
+
   /**
    * 现有密度是按哪个屏幕算的。换屏判断要跟它比，不要跟当下 DPR 比。
    */
   readonly dpr: number;
+
   /**
    * 当下屏幕的基准密度：倍数 1 对应的密度。
    */
   base(): number;
+
   /**
    * 倍数转密度。
+   *
+   * @param f 倍数（1 = 100%）
+   * @returns 密度（设备像素 / 磅）
    */
   ofFactor(f: number): number;
+
   /**
    * 密度转倍数。
+   *
+   * @param d 密度（设备像素 / 磅）
+   * @returns 倍数（1 = 100%）
    */
   factorOf(d: number): number;
+
   /**
    * 改密度。返回新密度，宿主只管把它存进自己的变量。
+   *
+   * @param d 密度（设备像素 / 磅）
+   * @returns 记下来的密度
    */
   set(d: number): number;
 }
@@ -289,6 +318,8 @@ export interface ZoomControl {
  *   storedDpr 现有这个密度是按哪个屏幕算出来的。反推倍数用它 —— 换屏那一拍两者不同，
  *             拿新 DPR 去除会读到一个平白缩掉一半的假倍数，照它反推回去等于空操作。
  * 所以 set(density) 要同时把 storedDpr 记成"算这一刻用的那个屏幕"。
+   * @param opts 基准密度与 dpr 的取值方式
+   * @returns 密度 / 倍数的换算器
  */
 export function createZoom(opts?: { base?: number; dpr?: () => number }): ZoomControl {
   const base = opts?.base ?? 4 / 3;
@@ -305,12 +336,30 @@ export function createZoom(opts?: { base?: number; dpr?: () => number }): ZoomCo
     base(): number {
       return base * liveDpr();
     },
+    /**
+     * 倍数 -> 密度。
+     *
+     * @param f 倍数（1 = 100%）
+     * @returns 密度（设备像素 / 磅）
+     */
     ofFactor(f: number): number {
       return Number(f) * base * liveDpr();
     },
+    /**
+     * 密度 -> 倍数。
+     *
+     * @param d 密度（设备像素 / 磅）
+     * @returns 倍数（1 = 100%）
+     */
     factorOf(d: number): number {
       return Number(d) / (base * storedDpr);
     },
+    /**
+     * 记下新的密度（同时刷新记住的 dpr）。
+     *
+     * @param d 密度（设备像素 / 磅）
+     * @returns 记下来的密度
+     */
     set(d: number): number {
       storedDpr = liveDpr();
       density = Number(d);

@@ -22,12 +22,14 @@ export interface EngineApi {
 export interface LegacyHost {
   whenReady: Promise<unknown>;
   ready: boolean;
+
   /**
    * 页面级异常（旧宿主收集的）。装不上时这里才有内容。
    */
   readonly errors?: string[];
   readonly allText: string;
   readonly zoomFactor: number;
+
   /**
    * [页宽, 页高, 页间隙]，CSS 像素。
    */
@@ -65,6 +67,7 @@ export interface LegacyHost {
   zoomToFactor(factor: number): unknown;
   present(): unknown;
   dispose?(): void;
+
   /**
    * 内部隐藏通道（不可枚举），见 app.js 里 defineProperty 那一段。
    */
@@ -78,6 +81,7 @@ declare global {
      */
     createEditor?: (container: HTMLElement, opts?: { chrome?: boolean }) => LegacyHost;
     createWorkerEditor?: (container: HTMLElement, opts?: { chrome?: boolean }) => LegacyHost;
+
     /**
      * 页面自动启动开关：库要把实例攥在自己手里，所以先关掉它。
      */

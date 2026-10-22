@@ -18,7 +18,6 @@
 #include "core/rev/rev.h"
 
 namespace heditor::rev {
-
 /**
  * 落盘格式的版本号。
  *
@@ -40,13 +39,31 @@ inline constexpr int kRevFormatVersion = 3;
 inline constexpr int kMinReadableVersion = 1;
 
 struct SerializeResult {
+    /**
+     * 写成功了没有。
+     */
     bool ok = false;
+
+    /**
+     * JSON 文本。
+     */
     std::string text;
+
+    /**
+     * 失败原因。
+     */
     std::string error;
 };
 
 struct DeserializeResult {
+    /**
+     * 读成功了没有。
+     */
     bool ok = false;
+
+    /**
+     * 是哪一处读不下去。
+     */
     std::string error;
 };
 
@@ -58,8 +75,19 @@ struct DeserializeResult {
  * 读端按同样的顺序找。
  */
 struct FontRef {
+    /**
+     * PostScript 名（唯一性有规范保证）。
+     */
     std::string postscript;
+
+    /**
+     * 族名（同一族可能有多张，只作次选）。
+     */
     std::string family;
+
+    /**
+     * 文件名（可以改，排在最后）。
+     */
     std::string file;
 };
 
@@ -70,6 +98,8 @@ struct FontRef {
 struct SerializeOptions {
     /**
      * 字体下标 → 字体身份。空则表示这一侧不认识字体库，文件里就不带字体表。
+     * @param int 字体库下标
+     * @return 这张脸在文件里的身份
      */
     std::function<FontRef(int)> font_ref;
 };
@@ -87,11 +117,18 @@ struct DeserializeOptions {
 
 /**
  * 写成 JSON 文本（无空白）。节点种类与枚举按名字写，文本写 UTF-8，浮点写最短十进制。
+ * @param doc 修订
+ * @param opt 写出去要知道的事实
+ * @return JSON 文本；写不出来时带原因
  */
 SerializeResult serialize(const Doc& doc, const SerializeOptions& opt = {});
 
 /**
  * 从 JSON 文本重建修订。成功时 next_id 取自文件，节点号原样保留。
+ * @param text JSON 文本
+ * @param out 写回的修订
+ * @param opt 打开时要知道的事实
+ * @return 结果；失败时 out 不动
  */
 DeserializeResult deserialize(const std::string& text, Doc* out,
                               const DeserializeOptions& opt = {});

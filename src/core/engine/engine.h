@@ -41,12 +41,28 @@ namespace heditor {
 
 class EditorEngine : private EditHost {
 public:
+
     /**
-     * fontPaths 的顺序决定字体索引
+     * 装载字体并建库。路径顺序决定字体索引 —— 字体链与文档里的字号都按它说话。
+     *
+     * @param fontPaths 字体文件路径（顺序即字体索引）
+     * @return true = 全部装上了
      */
     bool init(const std::vector<std::string>& fontPaths);
 
+    /**
+     * 整份换配置。与逐项设的区别是它一次算清"哪些派生量要跟着变"：
+     * 页度量变了整篇重排，光栅配置变了整份页缓存作废，两者都是不可定位的影响面。
+     *
+     * @param cfg 新的配置（整份替换）
+     */
     void setConfig(const EngineConfig& cfg);
+
+    /**
+     * 当前配置（引擎夹取之后的生效值）。宿主读回来的就是这个 —— 它不必再抄一份夹取规则。
+     *
+     * @return 生效中的配置
+     */
     const EngineConfig& config() const { return cfg_; }
 
     /**
@@ -57,7 +73,10 @@ public:
      *   页位图里没有光标与选区 —— 它们是导出时叠上去的瞬态，所以样式改了只需再呈现一次。
      *
      *   调用方改完要呈现一次（引擎不自己重绘）。
-     *   调用方改完要呈现一次（引擎不自己重绘）。
+     *
+     * @param caret 光标颜色
+     * @param caret_width_pt 光标条宽度（磅）
+     * @param selection 选区颜色
      */
     void setCaretAndSelectionStyle(const Color& caret, float caret_width_pt,
                                    const Color& selection);
@@ -70,26 +89,37 @@ public:
      *   在换窗那一拍里做完，于是"滚动时那几页还没画出来"。把这笔钱挪到当前画面还
      *   够用的空闲帧里先付掉，换窗就只剩铺底色与脏矩形记账。
      * 返回本次预热触及的字形数（0 = 这一页没有字形或还没排版）。
+     *
+     * @param page 页号
+     * @return 本次预热触及的字形数（0 = 没有字形或还没排版）
      */
     int prewarmPageGlyphs(int page);
 
     /**
      * 页度量：断行依赖内容宽度，所以改它必须整篇重排（影响面不可定位）。
+     *
+     * @param page 页度量（页宽、页高、页边距）
      */
     void setPage(const PageMetrics& page) {
         if (page != cfg_.page) markAllLayoutDirty();
         cfg_.page = page;
     }
+
     /**
      * 排版输入。名单覆盖全部控件时它就是 blocks_full_（同一份，不拷贝）；
      * 只有真的筛掉了某些括号时才有另一份。
+     *
+     * @return 块流（名单覆盖全部控件时就是唯一那一份，不拷贝）
      */
     const std::vector<BlockSpec>& blocks() const { return filter_active_ ? blocks_ : blocks_full_; }
+
     /**
      * 与块流同一层的产物：表格结构（宽度、列宽、行规则、每格的跨度与块区间）。
      *
      * 单列一个读口是因为它与 blocks() 是两种形状：块流描述"排什么"，这里描述"框在哪"。
      * 只比块流看不出列宽与跨度的错，正如只比表格看不出文字。
+     *
+     * @return 表格结构（宽度、列宽、行规则、每格的跨度与块区间）
      */
     const std::vector<LayoutTable>& tableSpecs() const { return tables_; }
 
@@ -102,10 +132,16 @@ public:
      *
      * 隐藏控件的可见性口径与投影同一处取值（见 rebuildFromTree），所以 setEditMode 必须重建。
      * 装载会复位光标、作废页缓存并整篇标脏。
+     *
+     * @param tree 模型树
+     * @param sheet 样式表
      */
     void setDocument(const NodeTree& tree, const StyleSheet& sheet);
+
     /**
      * 持有中的文档。引擎只认这一条装载入口，所以它一直有效（未装载时是一份空修订）。
+     *
+     * @return 持有中的修订（未装载时是一份空修订）
      */
     const rev::Doc& document() const;
 
@@ -118,6 +154,8 @@ public:
      * 文件里只有文档树：命名样式表（StyleSheet）与二进制资源都还没有进文件 —— 产品至今
      * 没有"新建命名样式"的入口，样式表恒为空，所以这不丢信息；等样式编辑落地时要带版本号
      * 加进同一份文件，不能在 v1 里改它们的含义。
+     *
+     * @return 文档 JSON 文本与失败原因
      */
     rev::SerializeResult saveDocument() const;
 
@@ -129,6 +167,9 @@ public:
      *
      * 打开会复位光标、清空撤销栈、作废页缓存并整篇标脏 —— 与装载同一口径：
      * 历史里那些旧修订属于"上一份文档"，留着只会让撤销把两份文件混在一起。
+     *
+     * @param text 文档 JSON 文本
+     * @return 成功与否与给人看的一句话（失败时引擎一个字节都不动）
      */
     rev::DeserializeResult loadDocument(const std::string& text);
 
@@ -142,29 +183,59 @@ public:
      *
      * owner_hint 是宿主与探针的说话方式（它们只认控件下标）：同一处边界上"控件之前 /
      * 进入控件"是两个位置，提示把它投影成一个控件下标。引擎内部一律说侧别，见 flowPosAtSide。
+     *
+     * @param para 段号（块下标）
+     * @param cp_offset 段内码点偏移
+     * @param owner_hint 归属提示（控件下标；-1 = 没有）
+     * @return 全局流位置；没装载过时为 -1
      */
     FlowPos flowPosAt(int para, size_t cp_offset, int owner_hint = -1) const;
+
     /**
      * 桥接的底层：位置 = (段, 码点偏移, 侧别)。侧别见 caretSide 的注释。
+     *
+     * @param para 段号（块下标）
+     * @param cp_offset 段内码点偏移
+     * @param side 侧别（这一处跨过了几枚括号；小于 0 = 没有信息）
+     * @return 全局流位置
      */
     FlowPos flowPosAtSide(int para, size_t cp_offset, int side) const;
+
     /**
      * 反向：流位置 → (段, 段内码点偏移)。落在段间（段落标记、节边界）上时归到相邻段的端点上
      * —— 模型里的位置只有"内容上"的，没有"段间"的。不持树时返回 false。
+     *
+     * @param flow 全局流位置
+     * @param out 写回值
+     * @return true = 翻得出来（不持树时为 false）
      */
     bool flowToTextPos(FlowPos flow, TextPos* out) const;
+
     /**
      * 流的总长度（最后一个合法位置 + 1）。它是流索引给的，与块流那边数出来的前缀和是
      * 两份独立的口径 —— 判据拿两者对拍（见 edit_test 的"位置划分"那一节）。
+     *
+     * @return 流的总长度（最后一个合法位置 + 1）
      */
     FlowPos flowSize() const;
+
     /**
      * 第 para 块内容起点的流位置 / 它占的位数。越界时给 0。
      *
      * 对外只给这两个读数，不给数组：调用方拿数组就会有人按下标扫一遍，那是 O(n) 的隐藏
      * 代价；而"块的位置"本来就该由这一对读数表达。
+     *
+     * @param para 段号（块下标）
+     * @return 块内容起点的流位置；越界时为 0
      */
     FlowPos blockFlowStart(int para) const;
+
+    /**
+     * 第 para 块在流里占几个位置（= 文本码点数 + 控件边界数）。
+     *
+     * @param para 段号（块下标）
+     * @return 位数；越界时为 0
+     */
     int blockFlowSpan(int para) const;
 
     /**
@@ -173,12 +244,17 @@ public:
      * 去接新后缀。页的内容随之作废，呈现时按页指纹增量重画。
      */
     void relayout();
+
     /**
      * 全量：保证窗口内每页的内容新鲜，再按当前窗口导出像素。
      */
     void repaint();
+
     /**
      * 只渲染 [first_page, first_page+count) 这几页（连续视图）。
+     *
+     * @param first_page 窗口首页
+     * @param count 要画的页数
      */
     void paintPageRange(int first_page, int count);
 
@@ -188,6 +264,9 @@ public:
      * 页位图按页缓存，窗口外只留两条 —— 所以不设锚点时（整篇），缓存与光栅量都按
      *   文档页数走；长文档上是内存与装载耗时的双重放大。产品宿主按"可见页 ± 余量"设它，
      *   单测与探针不设（整篇），两种情形下页像素本身逐字节相同。
+     *
+     * @param first_page 窗口首页
+     * @param page_count 锚定的页数（<= 0 = 整篇）
      */
     void setViewportAnchor(int first_page, int page_count);
 
@@ -195,27 +274,49 @@ public:
      * 本拍写过（有脏矩形）的页（绝对页号，升序去重）。
      * 宿主据 pageDirtyPagesJson 决定贴哪几页；这一份是"本拍写过什么"的读数，
      * 供面板与探针用 —— 两者的区别见 pageDirtyPagesJson 的注释。
+     *
+     * @return 本拍写过脏矩形的页号（升序去重）
      */
     const std::vector<int>& dirtyPages() const { return last_dirty_pages_; }
+
     /**
      * 本次呈现覆盖的首页（= 宿主算页偏移与命中换算的基准）。
      *
      * 这是"当前窗口"的唯一读数。它由 presentInternal 按视口锚点落定 ——
      *   不再有"帧槽"这一层：窗口就是 [win_first_page_, win_first_page_ + win_page_count_)，
      *   每页各有一张自己的位图，页在画布上的位置是 (页号 x 步距)，与窗口开在哪无关。
+     *
+     * @return 窗口首页（宿主算页偏移与命中换算的基准）
      */
     int windowFirstPage() const { return win_first_page_; }
+
     /**
      * 本次呈现覆盖的页数。
+     *
+     * @return 窗口页数
      */
     int windowPageCount() const { return win_page_count_; }
 
     /**
      * 页在设备像素下的几何。宿主用它给页画布定位、把页内坐标换成文档坐标。
      * 三者都是 cfg_ 与 zoom 的纯函数。
+     *
+     * @return 页宽（设备像素）
      */
     int pagePxWidth() const;
+
+    /**
+     * 页高（设备像素）。
+     *
+     * @return 页高
+     */
     int pagePxHeight() const;
+
+    /**
+     * 页间隙（设备像素）。连页模式下它是 0。
+     *
+     * @return 间隙
+     */
     int pageGapPx() const;
 
     /**
@@ -225,41 +326,98 @@ public:
      * 引擎内部的真源是一对全局流位置（selection_ 的 anchor 与 focus，见它的注释），
      * 段号与段内流位置都由 focus 投影出来。下面这些入口都是"把别的坐标系翻成它"，
      * 对外接口一个字没变。
+     *
+     * @param para 段号（块下标）
+     * @param offset 段内码点偏移
      */
     void setCaret(int para, size_t offset);
+
+    /**
+     * 按文本坐标定位（重载）。
+     *
+     * @param p 文本坐标
+     */
     void setCaret(TextPos p) { setCaret(p.para, p.offset); }
+
     /**
      * 带"归属"的定位：点画布时用户点的是某个字段的括号，位置本身（共享边界上的
      * 那个偏移）分不出是哪一侧，于是把结论一起带进来。归属是侧别的投影，见 setCaretAtSide。
+     *
+     * @param para 段号（块下标）
+     * @param offset 段内码点偏移
+     * @param field 落点归属（控件下标）
      */
     void setCaretAt(int para, size_t offset, int field);
+
+    /**
+     * 带归属的定位（重载）。
+     *
+     * @param p 文本坐标
+     * @param field 落点归属（控件下标）
+     */
     void setCaretAt(TextPos p, int field) { setCaretAt(p.para, p.offset, field); }
+
     /**
      * 带侧别的定位：点击（宿主把 hitTestPt 量到的侧别带回来）与文档重建后搬回光标走它。
      * 侧别见 caretSide 的注释。
+     *
+     * @param para 段号（块下标）
+     * @param offset 段内码点偏移
+     * @param side 侧别（这一处跨过了几枚括号；小于 0 = 没有信息）
      */
     void setCaretAtSide(int para, size_t offset, int side);
+
+    /**
+     * 带侧别的定位（重载）。
+     *
+     * @param p 文本坐标
+     * @param side 侧别（这一处跨过了几枚括号；小于 0 = 没有信息）
+     */
     void setCaretAtSide(TextPos p, int side) { setCaretAtSide(p.para, p.offset, side); }
+
     /**
      * 带侧别与行别的定位（点击落点）。
      *
      * 行别说的是"折行处贴哪一行"：一行排满折到下一行时，上一行的末尾与下一行的开头
      * 是同一个位置（偏移与侧别都一样），光凭位置分不开。默认贴上一行行尾；点下一行的
      * 行首时点明贴下一行，光标才画在点的地方。行别见 caretLineAffinity。
+     *
+     * @param para 段号（块下标）
+     * @param offset 段内码点偏移
+     * @param side 侧别（这一处跨过了几枚括号；小于 0 = 没有信息）
+     * @param line_aff 行别（0 = 贴上一行，大于 0 = 贴下一行）
      */
     void setCaretAtSideLine(int para, size_t offset, int side, int line_aff);
+
+    /**
+     * 拖选时的焦点端定位：只搬 focus，anchor 不动。
+     *
+     * @param para 段号（块下标）
+     * @param offset 段内码点偏移
+     * @param side 侧别（这一处跨过了几枚括号；小于 0 = 没有信息）
+     * @param line_aff 行别（0 = 贴上一行，大于 0 = 贴下一行）
+     */
     void setFocusAtSideLine(int para, size_t offset, int side, int line_aff);
+
     /**
      * 拖选：把焦点端搬到点击位置，anchor 端不动。
      *
      * 与 setCaretAtSide 只差收尾方式：那边两端一起摆到新位置（定位），这边只动 focus。
      * 按下时宿主先用 setCaretAtSide 定位，于是 anchor 落在按下点；拖动过程中的每一次
      * 移动都走这里，选区就是从按下点到当前位置那一段。侧别的含义与 setCaretAtSide 相同。
+     *
+     * @param para 段号（块下标）
+     * @param offset 段内码点偏移
+     * @param side 侧别（这一处跨过了几枚括号；小于 0 = 没有信息）
      */
     void setFocusAtSide(int para, size_t offset, int side);
+
     /**
      * 把光标摆到一个流位置上（绝对）。编辑路径全用它：删除后的落点是删除区间的起点、
      * 插入后是插入区间的终点、Tab 的目标、撤销恢复的位置，它们都已经是流位置。
+     *
+     * @param flow 全局流位置
+     * @return true = 摆好了
      */
     bool setCaretAtFlow(FlowPos flow);
 
@@ -270,29 +428,42 @@ public:
      * 下面这几个入口把它按选区露出来。空选区（两端重合）就是光标 —— 所以
      * hasSelection() 为假时 caret() 给出的就是它的位置。有选区时 caret() 是插入点：
      * 文字选区在 focus 那一端，整格选区在焦点那一格的末尾。两者始终只有一份状态。
+     *
+     * @return 选区（整格时是吸附到格边界的那一对）
      */
     Range selection() const { return caret_.selection(); }
+
     /**
      * 选区非空：两端不重合。它判的是"有没有选中东西"，不是"光标在不在"。
+     *
+     * @return true = 两端不重合（有文字被选中）
      */
     bool hasSelection() const { return caret_.hasSelection(); }
+
     /**
      * 程序化设选区（宿主恢复、探针摆位）。两端各自夹到文档流的合法范围内。
      * 传空区间就等于定位。
      *
      * 这里不做端点规范化（外扩到控件边界）：那是"要取出片段"时才需要的性质
      * （见 range.h 的 normalizeRange），而拖选出来的端点本来就该停在用户指的地方。
+     *
+     * @param r 选区（一对流位置）
+     * @return true = 摆好了
      */
     bool setSelection(Range r);
+
     /**
      * 取消选区：anchor 收到 focus，焦点端不动 —— 光标留在原地。
      */
     void clearSelection();
+
     /**
      * 全选：文档首到文档末。
      *
      * 末端的口径是"最后一块的段内末端"，不是最后一块之后：段间那个段落标记不属于
      * 任何一段的内容，够不到它。
+     *
+     * @return true = 选好了
      */
     bool selectAll();
 
@@ -303,15 +474,24 @@ public:
      * 空格的内容长度为 0，流区间退化成点，与下一格的第一段共用同一个流位置，分不开。
      * 段号来自命中（hitTestPt 的 out_cell_para），因为"哪一格"是几何问题 —— 引擎不提供
      * 按表号行号列号选格那一层：跨页拆行时行的逻辑号与画面对不上，而用户点的是画面。
+     *
+     * @param para 段号（块下标）
+     * @return true = 选好了
      */
     bool selectCellAtPara(int para);
+
     /**
      * 选区是不是"单元格选区"。文字选区与它是两条独立的操作线，靠这个标记分开 ——
      * 不靠"选中了多少"去猜（见 CaretResolver::selectionIsCell）。
+     *
+     * @return true = 选的是整格
      */
     bool selectionIsCell() const { return caret_.selectionIsCell(); }
+
     /**
      * 选区是否吸附到了格边界上（跨格拖选、单击边距带、三击）。全选为假：它按整篇删。
+     *
+     * @return true = 端点已经吸附到格边界
      */
     bool hasCellRange() const { return caret_.hasCellRange(); }
 
@@ -321,19 +501,30 @@ public:
      * 空格的内容长度是 0（两端相等），所以它同时也是"这一格有没有字"的判据。
      * 嵌套表格取"包含这一段的最短区间" = 最内层那一格 —— 外层格把内层表的段也算进去，
      * 按最短挑才不会被外层截走。
+     *
+     * @param para 段号（块下标）
+     * @param lo 写回区间起点（全局流位置）
+     * @param hi 写回区间终点（不含）
+     * @return true = 这一段在表格里
      */
     bool cellFlowRangeAt(int para, FlowPos* lo, FlowPos* hi) const;
 
     /**
      * 光标位置（派生）。段号 + 段内码点偏移，由光标的流位置投影出来 —— 不是独立状态。
      * 整格选区时它是焦点那一格的末尾（插入点不跟着鼠标在格内跑）。
+     *
+     * @return 光标位置（段号 + 段内码点偏移）
      */
     TextPos caret() const;
+
     /**
      * 光标当前的归属（-1 = 不在任何控件里；LineBox::kInlineOffsetOuter = 在所有控件之外）。
      * 由 focus 投影出来的段内流位置直接查，不是独立状态。
+     *
+     * @return 控件下标；-1 = 不在任何控件里
      */
     int caretFieldHint() const;
+
     /**
      * 光标的侧别（派生）：在它那个码点偏移上跨过了几枚边界括号（0 = 在所有括号之前）。
      * 与 caret() 合起来才是光标的完整位置 —— 同一个偏移上可能有好几个插入点
@@ -341,8 +532,11 @@ public:
      * 它是段内流位置与码点偏移的差，而两者都由 focus 投影 —— 这一路没有中间状态，
      * 所以不可能与光标位置不同步。这就是它取代 caret_side_ 与 caret_side_at_ 那两个
      * 字段的理由（那两个字面量天然可能失配，才需要失效标记兜）。
+     *
+     * @return 光标侧别（这一处跨过了几枚括号）
      */
     int caretSide() const;
+
     /**
      * 光标当前的行别：折行处贴上一行行尾（0）还是贴下一行行首（1）。
      *
@@ -353,25 +547,37 @@ public:
      * 它不是文档状态：任何不带行别的定位都会把它清成 0（贴上一行），与上下键的列位
      * 同一待遇（见 vertical_goal_valid_）。写完字之后光标本来就该贴在前一个字后面，
      * 而那个位置在上一行的末尾。
+     *
+     * @return 行别（0 = 贴上一行，大于 0 = 贴下一行）
      */
     int caretLineAffinity() const { return caret_.lineAffinity(); }
+
     /**
      * 光标是否落在竖排的段里（宿主据此把方向键按物理方向映射，见 keyToOp）。
+     *
+     * @return true = 光标所在段是竖排
      */
     bool caretVertical() const;
+
     /**
      * 光标所在段的列序是否反向（中日竖排为真：第一列在最右；蒙文为假：第一列在最左）。
      *
      * 方向键要用它：竖排下左右是换列，而"下一列在哪一边"由列序决定 ——
      * 中日竖排往左换列，蒙文往右换列。只按"是竖排吗"映射会把蒙文的左右按反。
+     *
+     * @return true = 列序反向（第一列在最右）
      */
     bool caretBlockReversed() const;
+
     /**
      * 按对外坐标（段, 段内码点偏移）写光标，侧别按"最内层含端点"投影一次。
      * 这是文本坐标投影到流位置的唯一约定 —— 只给"没有侧别信息"的入口用（宿主程序化定位、
      * 排版收口）；编辑路径一律走 setCaretAtFlow / setCaretRel，侧别由操作自己算出来。
+     *
+     * @param p 文本坐标
      */
     void setCaretByText(TextPos p);
+
     /**
      * 按"用户感知字符"（簇）移动。dcp > 0 向后、< 0 向前。
      * 返回 true 表示光标真的动了（没动就别重绘）。
@@ -379,56 +585,153 @@ public:
      * extend 为真时锚点不动：Shift+方向 是从锚点那一端继续扩展，而不是每次重新起头。
      * 锚点不需要"进入扩展态"这样一个额外状态 —— 第一次按 Shift 时它自然就是那时的
      * 光标位置（此前所有非扩展移动都把两端收到一起）。
+     *
+     * @param dcp 走几个字（负 = 向前）
+     * @param extend true = 扩展选区（锚点不动）
+     * @return true = 位置变了
      */
     bool moveCaretBy(int dcp, bool extend = false);
+
     /**
      * 到行首/行尾，不是段首/段尾 —— 这才是 Home/End 该有的语义。
+     *
+     * @param extend true = 扩展选区（锚点不动）
+     * @return true = 位置变了
      */
     bool moveCaretToLineStart(bool extend = false);
+
+    /**
+     * 到所在行的行尾（End 的语义，不是段尾）。
+     *
+     * @param extend true = 扩展选区（锚点不动）
+     * @return true = 位置变了
+     */
     bool moveCaretToLineEnd(bool extend = false);
+
     /**
      * 到文档首 / 文档末（Ctrl+Home / Ctrl+End）。
      *
      * 与行首行尾分开：段与行是两个概念，而"整篇的开头"还要再退过节点边界。
+     *
+     * @param extend true = 扩展选区（锚点不动）
+     * @return true = 位置变了
      */
     bool moveCaretToDocStart(bool extend = false);
+
+    /**
+     * 到文档末（Ctrl+End）。落点用流位置给，段末那个位置不会翻到下一段去。
+     *
+     * @param extend true = 扩展选区（锚点不动）
+     * @return true = 位置变了
+     */
     bool moveCaretToDocEnd(bool extend = false);
+
     /**
      * 上下键：沿块轴走到相邻行，列位沿行内轴保持。
      *
      * dir < 0 向上、> 0 向下。跨短行时列位不丢（列位在第一次按时取自光标当前的行内
      * 坐标，之后连续按都沿用）。列位是会话状态不是文档状态，任何非扩展的定位都会清掉它
      * （见 setCaretRel）—— 不清的症状是"鼠标点去别处，再按上还跳回那一列"。
+     *
+     * @param dir 方向（负 = 向上 / 向左）
+     * @param extend true = 扩展选区（锚点不动）
+     * @return true = 位置变了
      */
     bool moveCaretVertical(int dir, bool extend = false);
+
+    /**
+     * 光标闪不闪的开关。关掉之后导出图里没有光标，页像素本身不受影响。
+     *
+     * @param on true = 画光标，false = 不画
+     */
     void showCaret(bool on);
 
     /**
      * 编辑入口：坐标是 (段, 段内码点偏移)，落地前吸附到字素簇边界。
+     *
+     * @param para 段号（块下标）
+     * @param offset 段内码点偏移
+     * @param utf8 要插入的文本
+     * @return true = 插进去了
      */
     bool insertTextUtf8(int para, size_t offset, const std::string& utf8);
+
     /**
      * 插入并收尾（重排 + 重绘），与 typeTextAndRender 同一条路 —— 外部 API 的
      * insertText(pos, text) 用它：模板填充要"一次调用、一个撤销步、画面立刻更新"。
+     *
+     * @param para 段号（块下标）
+     * @param offset 段内码点偏移
+     * @param utf8 要插入的文本
+     * @return true = 插进去了
      */
     bool insertTextAndRender(int para, size_t offset, const std::string& utf8);
+
+    /**
+     * 在指定位置插入一串码点。
+     *
+     * @param para 段号（块下标）
+     * @param offset 段内码点偏移
+     * @param cps 要插入的码点
+     * @return true = 插进去了
+     */
     bool insertCodepoints(int para, size_t offset, const std::vector<uint32_t>& cps);
+
+    /**
+     * 在指定位置插入一个码点。
+     *
+     * @param para 段号（块下标）
+     * @param offset 段内码点偏移
+     * @param cp 一个码点
+     * @return true = 插进去了
+     */
     bool insertCodepoint(int para, size_t offset, uint32_t cp);
+
     /**
      * 在光标处插字 / 删字（删除按簇，不是按码点）
+     *
+     * @param utf8 要插入的文本
+     * @return true = 插进去了
      */
     bool typeTextUtf8(const std::string& utf8);
+
+    /**
+     * 退格：删光标左边一个字簇。段首时并进前一段。
+     *
+     * @return true = 删了
+     */
     bool backspace();
+
+    /**
+     * 前删：删光标右边一个字簇。段末时并进下一段。
+     *
+     * @return true = 删了
+     */
     bool deleteForward();
+
     /**
      * 跨段编辑。
      *
      * 回车在光标处把这一段拆成两段；新段整体继承原段的样式，只把 page_break_before
      * 清掉（段落分隔符不该附带一次翻页）。段首退格、段末 Delete 分别合并前后段 ——
      * 它们是 backspace() / deleteForward() 的自然延伸，不是另外的编辑命令。
+     *
+     * @return true = 拆了
      */
     bool splitParagraph();
+
+    /**
+     * 把这一段并进前一段（段首退格的延伸）。
+     *
+     * @return true = 并了
+     */
     bool mergeWithPreviousParagraph();
+
+    /**
+     * 把下一段并进这一段（段末 Delete 的延伸）。
+     *
+     * @return true = 并了
+     */
     bool mergeWithNextParagraph();
 
     /**
@@ -436,45 +739,155 @@ public:
      * 为什么要把三步合成一次调用：这三步之间没有任何需要宿主参与的信息。
      * 让宿主分别调三次，就是三次跨界 + 三次对象封送 —— 那才是 WASM 的减速带。
      * 组合在 C++ 里，宿主一次调用拿到"有没有变"和一组统计。
+     *
+     * @param utf8 要插入的文本
+     * @return true = 插进去了
      */
     bool typeTextAndRender(const std::string& utf8);
+
+    /**
+     * 退格 + 重排 + 呈现。
+     *
+     * @return true = 删了
+     */
     bool backspaceAndRender();
+
+    /**
+     * 前删 + 重排 + 呈现。
+     *
+     * @return true = 删了
+     */
     bool deleteForwardAndRender();
+
+    /**
+     * 分段 + 重排 + 呈现。
+     *
+     * @return true = 拆了
+     */
     bool splitParagraphAndRender();
+
+    /**
+     * 并进前一段 + 重排 + 呈现。
+     *
+     * @return true = 并了
+     */
     bool mergeWithPreviousParagraphAndRender();
+
+    /**
+     * 并进下一段 + 重排 + 呈现。
+     *
+     * @return true = 并了
+     */
     bool mergeWithNextParagraphAndRender();
+
+    /**
+     * 按簇移动 + 收尾重绘。
+     *
+     * @param dcp 走几个字（负 = 向前）
+     * @param extend true = 扩展选区（锚点不动）
+     * @return true = 位置变了
+     */
     bool moveCaretAndRender(int dcp, bool extend = false);
+
     /**
      * Home / End：到行首 / 行尾。
      *
      * 不用 moveCaret(±1e9) 实现：那样依赖 moveCaretBy 走不动时提前 break，且语义不同。
+     *
+     * @param extend true = 扩展选区（锚点不动）
+     * @return true = 位置变了
      */
     bool moveCaretToLineStartAndRender(bool extend = false);
+
+    /**
+     * 到行尾 + 收尾重绘。
+     *
+     * @param extend true = 扩展选区（锚点不动）
+     * @return true = 位置变了
+     */
     bool moveCaretToLineEndAndRender(bool extend = false);
+
+    /**
+     * 到文档首 + 收尾重绘。
+     *
+     * @param extend true = 扩展选区（锚点不动）
+     * @return true = 位置变了
+     */
     bool moveCaretToDocStartAndRender(bool extend = false);
+
+    /**
+     * 到文档末 + 收尾重绘。
+     *
+     * @param extend true = 扩展选区（锚点不动）
+     * @return true = 位置变了
+     */
     bool moveCaretToDocEndAndRender(bool extend = false);
+
+    /**
+     * 上下移动 + 收尾重绘。
+     *
+     * @param dir 方向（负 = 向上 / 向左）
+     * @param extend true = 扩展选区（锚点不动）
+     * @return true = 位置变了
+     */
     bool moveCaretVerticalAndRender(int dir, bool extend = false);
+
+    /**
+     * 全选 + 收尾重绘。
+     *
+     * @return true = 选好了
+     */
     bool selectAllAndRender();
+
+    /**
+     * 设选区 + 收尾重绘。
+     *
+     * @param r 选区（一对流位置）
+     * @return true = 摆好了
+     */
     bool setSelectionAndRender(Range r);
+
+    /**
+     * 选整格 + 收尾重绘。
+     *
+     * @param para 段号（块下标）
+     * @return true = 选好了
+     */
     bool selectCellAtParaAndRender(int para);
 
     /**
-     * 表单控件：文档流里的区间标注，不是矩形。模型与"区间为什么是活的"见
-     * core/doc/control.h 顶部。
+     * 控件集合。表单控件是文档流里的区间标注，不是矩形（模型见 core/doc/control.h）。
      *
-     * 控件本身不参与断行/分页，参与排版的是它的括号：要显示括号的字段会在自己的
-     * 边界落成一项"行内对象"（见 BlockSpec::objects），排版据此插入占位簇（占宽度、
-     * 不产生字形，见 layout.h）。因此挂控件、改控件范围不必重排（正文没变），而改显示
-     * 括号的显示开关必须重排 —— 对象表变了，排版输入就变了。
+     * 控件本身不参与断行/分页，参与排版的是它的括号：要显示括号的字段会在自己的边界
+     *   落成一项行内对象（见 BlockSpec::objects），排版据此插入占位簇。于是挂控件、改
+     *   控件范围不必重排（正文没变），而改括号的显示开关必须重排 —— 对象表变了。
+     * 结构与绘制共用同一份落点：括号画在哪由占位簇的几何给出（owner_control 指回控件），
+     *   不再两边各记一套。
      *
-     * 结构与绘制共用同一份落点：括号画在哪由占位簇的几何给出（owner_control 指回
-     * 控件），不再两边各记一套 —— "占位一次、不占位一次"那类不一致没有立足处。
+     * @return 控件集合（可写入口；其余地方走 setControlProp）
      */
-
     ControlSet& controls() { return controls_; }
+
+    /**
+     * 控件集合（只读）。
+     *
+     * @return 控件集合（只读）
+     */
     const ControlSet& controls() const { return controls_; }
 
+    /**
+     * 换编辑模式。模式决定光标能落在哪、哪些命令可用，以及隐藏控件在流里可不可见，
+     * 所以它一变就要重建流与排版。
+     *
+     * @param m 目标编辑模式
+     */
     void setEditMode(EditMode m);
+
+    /**
+     * 当前编辑模式。
+     *
+     * @return 当前编辑模式
+     */
     EditMode editMode() const { return mode_; }
 
     /**
@@ -484,6 +897,8 @@ public:
      *
      * 这条回落不只是为了好看：光标落在段落末尾、或刚跳完字段时，光标的"侧别"推不出
      * 归属，而编辑命令与面板都要一个确定的字段下标（见 edit_command 的归属口径）。
+     *
+     * @return 控件下标；-1 = 不在任何控件里
      */
     int focusedControlIndex() const {
         const int hint = caretFieldHint();
@@ -497,6 +912,9 @@ public:
      * owner 是控件的节点 id（第五刀：序号会在插入之后整体平移，而节点 id 是身份）。
      * 对外（宿主、探针、既有判据）的口径始终是下标，所以"拿下标去和占位簇的
      * owner_control 比"的地方都要先过这里 —— 宿主报"这枚括号归谁"正是其中一处。
+     *
+     * @param owner 产生端句柄（持树时是控件节点号）
+     * @return 控件下标；找不到为 -1
      */
     int controlIndexOfOwner(int owner) const {
         const auto it = owner_index_.find(owner);
@@ -509,6 +927,9 @@ public:
      * caretRectFor 拿它把光标归属（下标）换成句柄再去问排版 —— 比反了的表现是"共享边界上
      * 光标画到另一侧去"，位置差一格，只有像素级判据看得出来。
      * 负数（没有归属、贴外侧哨兵）原样传下去：它们在排版侧是同一种含义的另一种取值。
+     *
+     * @param control_index 控件下标
+     * @return owner 句柄（节点号）；越界为 -1
      */
     int slotOwnerOf(int control_index) const {
         if (control_index < 0) return control_index;
@@ -521,6 +942,8 @@ public:
      *
      * 只有两档：全部或没有。只读模式不占 —— 它是呈现与打印态，括号落进版面就印出来了；
      * 没有控件时自然也没有占位（空文档与"没有表单"逐字节一致）。
+     *
+     * @return true = 排版里要给控件边界留占位
      */
     bool bracketsOn() const {
         return mode_ != EditMode::ReadOnly && cfg_.show_brackets && !controls_.empty();
@@ -533,6 +956,8 @@ public:
      * 用 int 而不是 bool 是因为调用点全是"记一下、操作完再比一下"（十余处），
      * 比较值的形状跟着改没有收益。占位集合与光标无关 —— 光标跨字段移动不重排，
      * 这是括号常显换来的。
+     *
+     * @return 占位计划的指纹（-1 = 没有占位，0 = 全部控件都占位）
      */
     int bracketPlanId() const { return bracketsOn() ? 0 : -1; }
 
@@ -550,6 +975,8 @@ public:
      *
      * 用 getter 直读成员，不走 EditStats：被拒时不触发 repaint，而 EditStats 要等下一次
      * 呈现才刷新，走它会差一拍。
+     *
+     * @return 累计被策略拒掉的编辑次数
      */
     long long blockedEdits() const { return blocked_edits_; }
 
@@ -560,16 +987,54 @@ public:
      * 不是重放出来的近似。两份修订一减就得到损伤区间，投影据此只重算那一段。
      * 修订不记光标，所以撤销栈旁边另有一份选区快照、与它同步裁剪（见 recordSelection）。
      * 没装载过文档时没有会话，四个入口一律返回 false，不假装能做。
+     *
+     * @return true = 能撤销
      */
     bool canUndo() const { return session_ && session_->canUndo(); }
+
+    /**
+     * 有没有可重做的一步。
+     *
+     * @return true = 能重做
+     */
     bool canRedo() const { return session_ && session_->canRedo(); }
+
+    /**
+     * 撤销一步：把上一份修订拿回来（不是反向应用逆操作）。
+     *
+     * @return true = 撤了一步
+     */
     bool undo();
+
+    /**
+     * 重做一步：把被撤销的那份修订拿回来。
+     *
+     * @return true = 重做了一步
+     */
     bool redo();
+
+    /**
+     * 撤销 + 重排 + 呈现。
+     *
+     * @return true = 撤了一步
+     */
     bool undoAndRender();
-    bool redoAndRender(); /**
+
+    /**
+     * 重做 + 重排 + 呈现。
+     *
+     * @return true = 重做了一步
+     */
+    bool redoAndRender();
+
+    /**
      * 文档坐标（磅）落在哪个控件上（取最内层）。-1 = 没有。
      * 它走的是 hitTestPt 的同一份几何，所以"视觉上在框里"与
      * "逻辑上在控件里"永远一致。
+     *
+     * @param x_pt_doc 文档坐标 x（磅）
+     * @param y_pt_doc 文档坐标 y（磅）
+     * @return 控件下标；-1 = 没有
      */
     int controlAtPt(float x_pt_doc, float y_pt_doc) const;
 
@@ -584,7 +1049,15 @@ public:
      * 控件矩形的原名。改名只是把"页号 + 页面矩形"从控件里提出来，调用点不必动。
      */
     using ControlRect = PageRect;
+
+    /**
+     * 一个控件覆盖的页面矩形（可能跨页拆分）。
+     *
+     * @param index 控件下标
+     * @return 页面矩形（页号 + 页面坐标磅矩形）
+     */
     std::vector<ControlRect> controlRects(int index) const;
+
     /**
      * 选区 → 页面坐标矩形（跨行拆、跨页分段）。空选区是空的 —— 没有选区就没有要画的。
      *
@@ -596,18 +1069,26 @@ public:
      *   画不到也擦不着（量到的是单线程宿主 present 从 3.6 ms 涨到 9.8 ms，
      *   Worker 宿主每拍状态消息里那一份 197 KB）。
      *   限页之后这两笔都只随"看得见的行数"走，与选区多大无关。
+     *
+     * @param first_page 窗口首页
+     * @param count 这一批要保证新鲜的页数
+     * @return 落在窗口内的选区矩形
      */
     std::vector<PageRect> selectionRectsIn(int first_page, int count) const;
 
     /**
      * 整篇的选区矩形。判据与审计用它（要看"选区到底盖了多少行"），
      * 呈现与状态推送不要用它 —— 用 selectionRectsIn。
+     *
+     * @return 整篇的选区矩形（判据与审计用）
      */
     std::vector<PageRect> selectionRects() const;
 
     /**
      * 当前视口窗口内的选区矩形。宿主取证入口用它，口径与"这一帧画了什么"一致。
      * 视口没钉过（vp_count_ <= 0）时限页失效，退化成整篇。
+     *
+     * @return 当前视口窗口内的选区矩形
      */
     std::vector<PageRect> selectionRectsVisible() const;
 
@@ -629,12 +1110,21 @@ public:
      * 删除控件 + 重排 + 呈现的组合入口（理由同上面那组 AndRender）。
      * 宿主侧一次调用就收尾，不必自己记得再排一次 —— 漏掉那一步的症状是
      * "控件没了但括号还在画布上"。
+     *
+     * @param index 控件下标
+     * @param keep_content true = 拆壳留内容
+     * @return true = 删掉了
      */
     bool removeControlAndRender(int index, bool keep_content);
 
     /**
      * 改控件的一个运行时属性（hidden / readonly / required / structureLock）。
      * 与 removeControl 同一套策略门；设计期属性（类型、格式、选项）不走这里。
+     *
+     * @param index 控件下标
+     * @param prop 要改的运行时属性
+     * @param value 新值
+     * @return true = 改成了（幂等时也成立）
      */
     bool setControlProp(int index, ControlProp prop, bool value);
 
@@ -642,12 +1132,20 @@ public:
      * 改控件属性 + 重排 + 呈现的组合入口。hidden 会改呈现态的流结构（整棵摘除），
      * 所以这一次重排不能省。幂等（值没变）时它和 setControlProp 一样返回 true，
      * 但不会白跑一次重排与重绘。
+     *
+     * @param index 控件下标
+     * @param prop 要改的运行时属性
+     * @param value 新值
+     * @return true = 改成了
      */
     bool setControlPropAndRender(int index, ControlProp prop, bool value);
 
     /**
      * Tab / Shift+Tab：把光标移到下一个（上一个）可编辑控件的起点。
      * 到头会绕回第一个 —— 表单里 Tab 就该是循环的。
+     *
+     * @param forward true = 下一个控件，false = 上一个
+     * @return true = 落到了一个控件上
      */
     bool focusControl(bool forward);
 
@@ -658,10 +1156,17 @@ public:
      * 与 focusControl 的差别不只是循环与否：focusControl 认的是控件集合的区间起点，
      * 而 tabFrom 认的是"内容起点落在可编辑集合内"这个谓词 —— 于是"只读控件里嵌的
      * 可编辑控件"不会成为落点，反之亦然，两处口径不会各说各话。
+     *
+     * @param backward true = 反向（Shift+Tab）
+     * @return true = 光标动了（到头时为 false，不消费这个 Tab）
      */
     bool tabCaret(bool backward);
+
     /**
      * 同上，带收尾重绘。
+     *
+     * @param backward true = 反向（Shift+Tab）
+     * @return true = 光标动了
      */
     bool tabCaretAndRender(bool backward);
 
@@ -669,6 +1174,9 @@ public:
      * 跨字段移动光标必须用这一个（Tab / Shift+Tab 走的就是它）。
      * focusControl 只改状态、不重绘，而宿主随后会拿上一次呈现的脏矩形去上屏，
      * 画布于是成了新旧混合体；收尾重绘不可省，理由见 engine.cpp 的实现。
+     *
+     * @param forward true = 下一个控件，false = 上一个
+     * @return true = 落到了一个控件上
      */
     bool focusControlAndRender(bool forward);
 
@@ -677,6 +1185,8 @@ public:
      * {"diff":N,"frameW":..,"frameH":..,"box":[x0,y0,x1,y1]}。
      * diff > 0 就等于"增量路径漏掉了什么"（典型：某个旧表单标记没擦干净）。
      * 跑完顺便把这一帧修成真值。理由见 engine.cpp 的实现。
+     *
+     * @return {"diff":N,"frameW":..,"frameH":..,"box":[x0,y0,x1,y1]}
      */
     std::string auditFrameJson();
 
@@ -689,6 +1199,8 @@ public:
      *   拼装本身错（页落到错的槽、窗口顺序反了）只有这一条照得出来 —— 帧自审读的
      *   是同一份拼装，两边会一起错。
      * 跑完顺便把画面修成真值（与 auditFrameJson 同一口径：自审不掩盖问题）。
+     *
+     * @return 同上形状的 JSON（不含瞬态的那一层）
      */
     std::string auditBaseJson();
 
@@ -700,6 +1212,9 @@ public:
      *   两条路径读的是同一份缓存。这里的参照物是"绕过缓存重新光栅"，
      *   与 auditLayout 用"不用缓存的全量重排"当参照是同一个手法。
      * 页不在缓存里（被淘汰）时返回 diff = -1，不做假绿。
+     *
+     * @param page 页号
+     * @return {"diff":N,"w":..,"h":..,"box":[..],"cached":0|1}；页不在缓存里时 diff = -1
      */
     std::string auditPageJson(int page);
 
@@ -709,6 +1224,8 @@ public:
      * 理由与 auditFrameJson 相同：增量的正确性由"与全量一致"定义，
      * 而不是由"看起来对"定义。逐字段而不是只比行数：增量最典型的错法是
      * "少排了一段"或"前缀多留了一段"，两者都只差几行。
+     *
+     * @return 不符项数（0 = 一致）
      */
     int auditLayout();
 
@@ -723,16 +1240,22 @@ public:
      * 查六条：格至少一个块；格的块区间在表内且互不重叠；格里的块都有结束标记；块的
      *   cell_path 与格给出的区间一致（两份记录互为对照）；格行列跨度不越界；表句柄在块
      *   路径里指同一张表。
+     *
+     * @return 不符项数（0 = 一致）
      */
     int auditTables() const;
 
     /**
      * 同上的 JSON 版，供宿主与探针取证（含各类不符的计数与首个位置）。
+     *
+     * @return 各项计数与首个出问题的格
      */
     std::string auditTablesJson() const;
 
     /**
      * 同上的 JSON 版，供宿主取证（含两侧规模、首个不符位置与两个耗时）。
+     *
+     * @return 两侧规模、首个不符位置与两个耗时
      */
     std::string auditLayoutJson();
 
@@ -746,6 +1269,8 @@ public:
      *   字形数必须等于区间长度（不多不少）—— 只查前者会漏掉"区间里混进别页"，
      *   只查后者会漏掉"区间错位但长度对"。
      * 没有比对对象时返回空结果（diff 0、checked 0），不做假绿。
+     *
+     * @return 逐页的比对结果（diff 与 checked）
      */
     std::string auditGlyphPagesJson() const;
 
@@ -755,12 +1280,16 @@ public:
      * 与 auditLayout 同一个理由：编译这一层的增量的正确性由"与全量一致"定义。
      * 只比段数看不出来 —— 增量最典型的错法是"某一段的产物还是旧的"，
      * 而段数、行数全都对得上。没装载过文档时返回 0：那时没有可比的东西。
+     *
+     * @return 不符项数（0 = 一致；没装载过时为 0）
      */
     int auditCompile() const;
 
     /**
      * 同上的 JSON 版：给出本轮实际编译耗时与一次全量编译耗时，两者同源。
      * 这是"增量到底省了多少"的唯一证据 —— 没有分母的耗时数说明不了任何事。
+     *
+     * @return 本轮编译耗时与一次全量编译的耗时
      */
     std::string auditCompileJson();
 
@@ -776,22 +1305,48 @@ public:
      * Tab 缩进：在光标处插入 tab_spaces 个空格，走与敲字相同的策略与重排路径。
      * Shift+Tab 反缩进：删掉光标前最多 tab_spaces 个连续空格。
      * 不做"跳到下一个字段"：Tab 在正文编辑器里表示缩进，换字段用鼠标点。
+     *
+     * @return true = 插了
      */
     bool indentAndRender();
+
+    /**
+     * 反缩进 + 重排 + 呈现。
+     *
+     * @return true = 删了
+     */
     bool outdentAndRender();
+
+    /**
+     * 在光标处插入 tab_spaces 个空格（缩进）。
+     *
+     * @return true = 插了
+     */
     bool indent();
+
+    /**
+     * 删掉光标前最多 tab_spaces 个连续空格（反缩进）。
+     *
+     * @return true = 删了
+     */
     bool outdent();
 
     /**
      * 诊断：把模式、控件树、每个控件的区间与矩形块数摊平。
+     *
+     * @return 可读文本
      */
     std::string describeControls() const;
 
     /**
      * 几何：同一份行盒几何的正反查
      * 正查：(段, 偏移) → 页面坐标下的光标矩形（磅）
+     *
+     * @param out 写回值
+     * @return true = 找到了行盒
      */
     bool caretRectPt(Rect* out) const;
+
     /**
      * 反查：文档坐标（磅）→ (段, 偏移) + 侧别 + 行别；点落在页间空隙时返回 false。
      * 文档坐标以第 0 页顶边为原点 —— 与"窗口开在哪一页"无关，也与画布怎么摆无关。
@@ -802,6 +1357,15 @@ public:
      *   空格没有文字可挡，整格都是边距带 —— 点空格的任何位置都选中这一格。
      *   给段号而不是流区间：一格的身份是它占的块区间，空格的流区间退化成一个点，
      *   与下一格的第一段共用同一个流位置（见 CaretResolver::CellBlocks）。
+     *
+     * @param x_pt_doc 文档坐标 x（磅）
+     * @param y_pt_doc 文档坐标 y（磅）
+     * @param out 写回值
+     * @param out_owner 写回落点归属（控件下标）
+     * @param out_side 写回落点侧别
+     * @param out_line_aff 写回行别
+     * @param out_cell_para 写回这一格的段号（不在格内为 -1）
+     * @return true = 点落在正文上（页间空隙为 false）
      */
     bool hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* out_owner = nullptr,
                    int* out_side = nullptr, int* out_line_aff = nullptr,
@@ -812,6 +1376,10 @@ public:
      *
      * 单击的"整格"只发生在格左侧的边距带上（见 hitTestPt 的 out_cell_para）—— 那是一条
      * 独立的操作线；三击则是用户明确说"我要这一格"，点字中间也算。点不在表格里返回假。
+     *
+     * @param x_pt_doc 文档坐标 x（磅）
+     * @param y_pt_doc 文档坐标 y（磅）
+     * @return true = 选好了（点不在表格里为 false）
      */
     bool selectCellAtPt(float x_pt_doc, float y_pt_doc);
 
@@ -822,48 +1390,71 @@ public:
      *   派生视图（第一次读时拼一次，下一次 present 作废重拼）。所以它没有槽、没有增量，
      *   也不可能与页位图分叉：内容全部来自页位图，瞬态全部来自同一份矩形。
      * 保留它是为了让"扫一遍画面"这类判据（像素断言、markCheck、inkRows）不必认识页。
+     *
+     * @return 窗口导出图的像素（第一次读时现场拼）
      */
     const uint8_t* frame() const;
+
     /**
      * 窗口的横向像素：与页同宽（页在窗口里只纵向排列）。
+     *
+     * @return 窗口的横向像素（与页同宽）
      */
     int frameWidth() const { return pagePxWidth(); }
+
     /**
      * 窗口的纵向像素：窗口页数 x 步距（末页之后那一格页间隙也留着，导出图因此整格对齐）。
+     *
+     * @return 窗口的纵向像素（窗口页数 x 步距）
      */
     int frameHeight() const;
+
     /**
      * 窗口导出图的大小（字节）。
      *
      * 只做乘法，不拼图：调用方（statsJson 每份状态都带一格）问的是"多大"，
      *   不是"给我像素"。要像素走 frame()，那一条才真的按需拼一次。
+     *
+     * @return 窗口导出图的大小（字节）
      */
     size_t frameBytes() const;
 
     /**
      * 窗口导出图拼一次（见 frame 的说明）。返回它的字节数。
      * 只在导出图被 presentInternal 作废之后才真的重拼 —— 拼的是页位图的副本。
+     *
+     * @return 窗口导出图的字节数（必要时重拼一次）
      */
     size_t ensureFrameExport() const;
+
     /**
      * 把窗口内各页拼进 @p out。@p with_transient 为假时只拼内容（审计用）。
+     *
+     * @param with_transient true = 连光标与选区一起拼
+     * @param out 拼到这里
      */
     void assembleWindow(bool with_transient, Bitmap* out) const;
 
     /**
      * 第 page 页"画到画布上应该是什么"的像素（页内坐标，RGBA），零拷贝视图。
      *
-     * 内容是纯的（页位图只由文档与光栅配置决定），光标与选区是瞬态 —— 后者不写进页位图，
-     *   而是在这里合成出来：把页位图拷进一张单页的导出图，再叠上这一页的瞬态矩形。
-     *   于是"要擦掉旧光标"这件事不需要任何记账：下一次导出从干净的页位图重来一遍，
-     *   旧光标自然不存在：可写的只有页位图这一份真相。
+     * 内容（页位图）是纯的，光标与选区是瞬态 —— 后者不写进页位图，而是在这里现场合成：
+     *   把页位图拷进单页导出图，再叠上这一页的瞬态矩形。于是"擦旧光标"不需要记账，
+     *   下一次导出从干净的页位图重来，可写的只有页位图这一份真相。
+     * 页上没有瞬态时直接给页位图本身（省掉一页 3.5 MB 的拷贝）。只在"这一页在缓存里、
+     *   且像素还作数"时给得出来；刻意不在内部补光栅 —— 那会把字形账算到一次读命令头上。
      *
-     * 页上没有瞬态时直接给页位图本身（零拷贝，一页 3.5 MB 的拷贝能省就省）。
-     * 只在"这一页在缓存里、且缓存里的像素还作数"时给得出来；否则返回 0 / nullptr。
-     *   它刻意不在内部补一次光栅：那会把字形账算到一次读命令头上，而账是"这一拍排了多少"
-     *   的证据。调用方（宿主）在 present 之后读它 —— 窗口内该光栅的页那时都已经光栅过了。
+     * @param page 页号
+     * @return 这一页的字节数；拿不出来时为 0
      */
     size_t pageBytes(int page) const;
+
+    /**
+     * 与 pageBytes 同一份像素的指针（见那一条的说明）。
+     *
+     * @param page 页号
+     * @return RGBA 像素；拿不出来时为 nullptr
+     */
     const uint8_t* pagePixels(int page) const;
 
     /**
@@ -872,8 +1463,18 @@ public:
      * 口径是"这一页上画出来的东西真的变了的地方"：内容重光栅（整页或行带）+ 瞬态
      *   （光标 / 选区）的新旧矩形。窗口平移不算 —— 页像素一个字节都没动，只是落点变了，
      *   把它算进来会让"换窗"退化成整窗重传。
+     *
+     * @param page 页号
+     * @return 自上次取走以来写过这一页的矩形（读后清零）
      */
     std::vector<Rect> takePageDirtyRects(int page);
+
+    /**
+     * takePageDirtyRects 的 JSON 版（宿主与探针取证用）。
+     *
+     * @param page 页号
+     * @return 矩形数组的 JSON
+     */
     std::string takePageDirtyRectsJson(int page);
 
     /**
@@ -883,6 +1484,8 @@ public:
      *   矩形是累积的 —— 某一拍的 present 可能根本没被宿主消费（窗口平移、页面不可见），
      *   那些矩形会留到下一拍。按本拍清单贴就会永久漏掉那几块，
      *   症状是屏幕上留几十像素的旧光标。
+     *
+     * @return 还欠着没贴的页号（升序，读后不清）
      */
     std::string pageDirtyPagesJson() const;
 
@@ -892,38 +1495,80 @@ public:
      * 连页模式下宿主拿它当滚动高度 —— 分页下滚动高度是"页数 x 步距"（页是实在的），
      *   连页下没有页可数，只有内容。分页下这个值同样成立（页号 x 条带高 + 行底），
      *   只是没人用它。
+     *
+     * @return 内容底边（窗口像素）
      */
     int contentBottomPx() const;
 
+    /**
+     * 排版与呈现的账（上一次 relayout / present 的结果）。
+     *
+     * @return 排版与呈现的账
+     */
     const EngineStats& stats() const { return stats_; }
+
+    /**
+     * 编辑那一侧的账（文档规模、重排段数、上屏面积、光标读数）。
+     *
+     * @return 编辑那一侧的账
+     */
     const EditStats& editStats() const { return edit_stats_; }
+
+    /**
+     * 排版产物（行盒、字形、每段切片）。审计与判据读它。
+     *
+     * @return 排版产物
+     */
     const LayoutResult& layout() const { return layout_; }
+
+    /**
+     * 字体库（可写）：装载字体走这一条。
+     *
+     * @return 字体库（可写）
+     */
     FontLibrary& fonts() { return fonts_; }
+
     /**
      * 只读视图。保存要用它：saveDocument() const 里得把字体下标翻成文件名，而那份查询
      * 不改库里的任何东西。
+     *
+     * @return 字体库（只读）
      */
     const FontLibrary& fonts() const { return fonts_; }
 
     /**
      * 诊断用：把一串文本的整形结果摊成可读文本（字形 id / 推进 / cluster），
      * 让"整形到底有没有发生"这件事可被断言，而不是只看能不能编译。
+     *
+     * @param font_index 字体索引
+     * @param size_pt 字号（磅）
+     * @param text 要整形的文本
+     * @param wm 书写模式
+     * @param language 语言标签（HarfBuzz 的 language）
+     * @return 可读文本（字形 id / 推进 / cluster）
      */
     std::string describeShaping(int font_index, float size_pt, const std::string& text,
                                 const WritingMode& wm, const char* language);
 
     /**
      * 诊断用：把当前光标的行盒几何、簇表、命中结果摊成可读文本。
+     *
+     * @return 可读文本
      */
     std::string describeCaret() const;
 
     /**
      * 页坐标 -> 设备像素坐标
+     *
+     * @param pt 磅值
+     * @return 设备像素
      */
     float ptToPx(float pt) const { return pt * cfg_.zoom; }
 
     /**
      * 全文码点总数（不含块间分隔）
+     *
+     * @return 全文码点数
      */
     size_t documentCodepoints() const;
 
@@ -938,14 +1583,23 @@ public:
      * 落点的侧别由位置自己推（见 sideForPos）：光标那一处用光标自己的侧别，别处按
      * "最内层含端点"归一次。不另收归属提示 —— 那是"控件下标"这套说话方式，只有
      * 区间判定需要它，而落点判定已经改说侧别了。
+     *
+     * @param p 文本坐标
+     * @return 允许不允许，不允许时带原因
      */
     rev::EditCheck policyAt(TextPos p) const;
+
     /**
      * 删除区间 [a, b) 的判定。跨段删除一律拒（档 1 的删除不跨段，段落标记的删除走合并）。
+     *
+     * @param a 区间起点（含）
+     * @param b 区间终点（不含）
+     * @return 允许不允许，不允许时带原因
      */
     rev::EditCheck policyErase(TextPos a, TextPos b) const;
 
 private:
+
     /**
      * 一份修订装上之后的公共收尾：换会话、复位光标、清页缓存、投影、整篇标脏。
      * 装载（模型树）与打开（JSON）两条路都走它 —— 两条路的收尾必须是同一份。
@@ -978,6 +1632,7 @@ private:
      * 所以只在这里取一次，两个入口都用它。
      */
     FlowVisibility flowVisibility() const;
+
     /**
      * 命令层的出口（EditHost）：把一批步骤落到修订上，再把产物按新修订重算一次。
      *
@@ -997,6 +1652,7 @@ private:
      * 记下这一批步骤对应的两份选区，并与撤销栈同步裁剪。
      */
     void recordSelection(Range before, Range after);
+
     /**
      * 从投影给出的跨度建控件集合。
      *
@@ -1006,6 +1662,7 @@ private:
      * 别处"，而两份产物各自看都"对"。
      */
     void exportControls(const std::vector<rev::ControlSpan>& spans);
+
     /**
      * 选区矩形（页内像素坐标，与 caretRectPxOf 同口径）。只取落在页范围
      * 页范围 [first_page, first_page + count) 里的那部分；count <= 0 表示不限页。
@@ -1013,25 +1670,30 @@ private:
      *   引擎不再产生任何"窗口内偏移"（那种数一旦跨层就会与窗口首页的取值挂钩）。
      */
     std::vector<PageRect> selectionRectsPxIn(int first_page, int count) const;
+
     /**
      * 整篇的选区矩形（页内像素坐标）。判据/取证用它，呈现不要用 —— 用 selectionRectsPxIn。
      */
     std::vector<PageRect> selectionRectsPx() const;
+
     /**
      * 把"文本坐标 + 侧别"投影成 rel 并摆好（含重排）。side < 0 = 按"最内层含端点"投影。
      * extend 为真时不动锚点（Shift+Home/End 用）。line_aff 见 caretLineAffinity。
      */
     void projectCaret(int para, size_t offset, int side, bool extend = false, int line_aff = 0);
+
     /**
      * 光标矩形（页内像素坐标，出参 @p page 给它是哪一页）。caret_visible 为 false
      * 或找不到行盒时返回零矩形、@p page = -1。
      */
     Rect caretRectPx(int* page) const;
+
     /**
      * 光标所在页（绝对页号；-1 = 找不到行盒）。
      * 窗口化之后这是必需的一个数：宿主拿它决定窗口该锚在哪、输入法框摆在哪。
      */
     int caretPage() const { return caret_.caretPage(); }
+
     /**
      * 统一呈现入口：按窗口逐页光栅 + 记瞬态矩形，不产生整窗帧。
      */
@@ -1045,9 +1707,17 @@ private:
      *   光标就会被半透明地再混一次，而那种错只在重叠的几个像素上看得出。
      */
     struct PageTransient {
+        /**
+         * 这一页上的选区矩形（页内像素坐标）。
+         */
         std::vector<Rect> sel;
+
+        /**
+         * 这一页上的光标矩形（最多一条）。
+         */
         Rect caret{};
     };
+
     /**
      * 这一页现在该叠哪些瞬态（页内像素坐标）。presentInternal 按页算差集、导出按页取用。
      */
@@ -1061,8 +1731,16 @@ private:
      *   与 page_fp_new_ 相等就说明这一页的像素还作数，不必重画。
      */
     struct PageBitmap {
+        /**
+         * 页像素（页内坐标，不含页间隙）。
+         */
         Bitmap px;
+
+        /**
+         * 光栅时那一版页指纹。
+         */
         uint64_t fp = 0;
+
         /**
          * 这一份像素是在哪一版"光栅配置"下画的。
          *
@@ -1071,6 +1749,7 @@ private:
          *   加进 rasterSignature()，所有页自动失效，不必再维护一张"记得清缓存"的清单。
          */
         uint64_t raster_sig = 0;
+
         /**
          * 上一次导出时叠在这一页上的瞬态（页内像素坐标：选区 + 光标）。
          *
@@ -1078,8 +1757,13 @@ private:
          *   所以没有"擦"这一步：下一次导出从干净的页位图重来。
          */
         PageTransient transient;
+
+        /**
+         * 这一格装着页没有（没有就不用比对指纹）。
+         */
         bool valid = false;
     };
+
     /**
      * 页缓存。容量按"窗口页数 + 2"条，超出时按离窗口最远淘汰。
      *
@@ -1087,47 +1771,75 @@ private:
      *   一律留着，窗口外只留两条，够"滚回来一页"不重光栅。
      */
     std::unordered_map<int, PageBitmap> page_cache_;
+
     /**
      * 光栅配置的签名（见 PageBitmap::raster_sig）。由 setConfig 写入。
      */
     uint64_t raster_sig_ = 0;
+
     /**
      * 每页待上屏的脏矩形（页内像素坐标），"自上次取走以来"累积。
      */
     std::unordered_map<int, std::vector<Rect>> page_dirty_rects_;
+
+    /**
+     * 记一笔"这一页上的这块变了"（累积到 takePageDirtyRects 被取走为止）。
+     *
+     * @param page 页号
+     * @param r 页内像素矩形
+     */
     void notePageDirty(int page, const Rect& r);
+
     /**
      * 缓存里这一页的像素还作数吗：有条目、有指纹、尺寸对得上、指纹与本次排版相同。
      * 没有指纹（页号超出指纹数组）一律返回假 —— 不敢断言"作数"的时候就重画。
      */
     bool pageBitmapFresh(int page) const;
+
     /**
      * 一页的光栅本体（页内坐标）。band 非空时只画那一条横带。
      * 与 rasterPageInto 分开是为了让页自审能绕过缓存画到一块临时位图上。
      */
     void rasterIntoBitmap(Bitmap& target, int page, const float* band_lo_pt,
                           const float* band_hi_pt);
+
     /**
      * 把这一页光栅进缓存，并记下它对应哪一版指纹。
      */
     void rasterPageInto(int page, const float* band_lo_pt, const float* band_hi_pt);
+
     /**
      * 这一页"画到画布上应该是什么"：有瞬态时把内容 + 瞬态合成进一页的导出图。
      * 返回 nullptr 表示这一页拿不出来（不在缓存里或已过期）。
      */
     const uint8_t* pageDisplayPixels(int page) const;
+
     /**
      * 缓存淘汰：窗口内的页一律留下，窗口外按距离由远及近释放到容量以内。
      */
     void trimPageCache(int first_page, int count);
+
     /**
      * 本拍光栅出来的账。字形只画进页位图，所以这几个数由
      * rasterIntoBitmap 累加，呈现末尾一次性上报；自审路径会先存后还，不污染它们。
      */
     int raster_glyphs_ = 0;
+
+    /**
+     * 本拍"取字形包围盒"花掉的毫秒（记账用，不进像素）。
+     */
     double raster_glyph_bounds_ms_ = 0.0;
+
+    /**
+     * 本拍铺面积花掉的毫秒。
+     */
     double raster_fill_ms_ = 0.0;
+
+    /**
+     * 本拍画字形花掉的毫秒。
+     */
     double raster_glyph_ms_ = 0.0;
+
     /**
      * 页指纹：本次 relayout 的结果 / 已画成像素的那一版。
      *
@@ -1136,11 +1848,13 @@ private:
      * 它由排版那侧的前缀复用保证，而不是靠这里猜。
      */
     void computePageFingerprints(int dirty_lo = -1, int dirty_hi = -1);
+
     /**
      * 行指纹：与页指纹同一次遍历里算出来，只是分桶到行（见 line_fp_new_）。
      * @p dirty_lo / @p dirty_hi 是脏页范围，与页指纹同一口径；同样只重算落在这几页里的行。
      */
     void computeLineFingerprints(int dirty_lo, int dirty_hi, bool full);
+
     /**
      * 把 [first_page, 末页) 直接标成"与已画那一版不同"，不去哈希。
      *
@@ -1150,16 +1864,19 @@ private:
      * 页数变多时新页也落在 [first_page, 末页) 里，一并标脏，不必退回整篇重算。
      */
     void markPagesChangedFrom(int first_page);
+
     /**
      * 把当前行指纹与行盒几何存成"已画进页位图的那一版"。
      * 与 page_fp_prev_ 同一时机调用：页像素变了就要跟着换。
      */
     void snapshotLineGeometry();
+
     /**
      * 行带边界：第 k 行独占的块轴区间（页内磅），上下都取与相邻行盒的中线。
      * 见 engine_paint.cpp 的实现注释（为什么不能用行盒自己的 block_lo/hi）。
      */
     void lineBand(int k, float* lo, float* hi) const;
+
     /**
      * 第 @p page 页上的字形下标区间（半开区间 [begin, end)）；这一页没有字形时两者相等。
      *
@@ -1170,11 +1887,16 @@ private:
      *   单调性是推理 + 运行期审计（auditGlyphPagesJson）双重保证的，不是假设。
      */
     void glyphRangeOnPage(int page, int* begin, int* end) const;
+
     /**
      * 第 p 段的第一行落在哪一页；这一段没有行盒时返回 -1。
      * 截断之前读一次、重排之后再读一次，就能框出"这一轮可能动到的最靠前那一页"。
      */
     int firstPageOfParagraph(int p) const;
+
+    /**
+     * 把排版结果里的规模数搬进 stats_（页数、行数、字形数、段数）。
+     */
     void syncStatsFromLayout();
 
     /**
@@ -1378,25 +2100,78 @@ private:
      * "某格没有块"与"块没有结束标记"是两种完全不同的坏法。
      */
     struct TableAudit {
-        int cells = 0;               // 扫过的格数
-        int empty_cell = 0;          // 一个块都没有的格（这种格没有行盒，光标进不去）
-        int bad_range = 0;           // 块的区间越出块表
-        int overlap = 0;             // 两个格认领同一块（同表）
-        int block_without_mark = 0;  // 格里的块没有结束标记
-        int path_mismatch = 0;       // 块的 cell_path 与格给出的区间对不上
-        int bad_span = 0;            // 行的跨度越出表尺寸
-        int blocks_in_no_cell = 0;   // 块说自己在正文，格却认领了它
-        int first_cell = -1;         // 首个出问题的格（跨表连续编号），-1 = 没有
+        /**
+         * 扫过的格数。
+         */
+        int cells = 0;
+
+        /**
+         * 一个块都没有的格（这种格没有行盒，光标进不去）。
+         */
+        int empty_cell = 0;
+
+        /**
+         * 块的区间越出块表。
+         */
+        int bad_range = 0;
+
+        /**
+         * 两个格认领同一块（同表）。
+         */
+        int overlap = 0;
+
+        /**
+         * 格里的块没有结束标记。
+         */
+        int block_without_mark = 0;
+
+        /**
+         * 块的 cell_path 与格给出的区间对不上。
+         */
+        int path_mismatch = 0;
+
+        /**
+         * 跨度越出表的尺寸。
+         */
+        int bad_span = 0;
+
+        /**
+         * 块说自己在正文，格却认领了它。
+         */
+        int blocks_in_no_cell = 0;
+
+        /**
+         * 首个出问题的格（跨表连续编号）；-1 = 没有。
+         */
+        int first_cell = -1;
+
+        /**
+         * 各类不符之和。
+         * @return 不符合项总数
+         */
         int total() const {
             return empty_cell + bad_range + overlap + block_without_mark + path_mismatch +
                    bad_span + blocks_in_no_cell;
         }
     };
 
+    /**
+     * 表格自审的分项计数（见 auditTables 的六条）。
+     *
+     * @return 各项计数与首个出问题的格
+     */
     TableAudit auditTablesDetail() const;
 
+    /**
+     * 生效中的配置（整份替换由 setConfig 做）。
+     */
     EngineConfig cfg_;
+
+    /**
+     * 字体库（字体链、字脸与字形缓存）。
+     */
     FontLibrary fonts_;
+
     /**
      * 筛过括号的那一份，只在 filter_active_ 为真时有效。
      */
@@ -1407,7 +2182,12 @@ private:
      * 没有第二份可写的树 —— 编辑只产步骤，产物每轮由新修订重算。
      */
     std::optional<rev::Session> session_;
+
+    /**
+     * 装载时给的样式表（命名段样式 / 字符样式）。
+     */
     StyleSheet sheet_;
+
     /**
      * 上一轮每块的身份（内容哈希 + 来源）与样式表版本，与 blocks_full_ 同长同序。
      *
@@ -1415,11 +2195,13 @@ private:
      * 原地保留区间之外的那些 —— 所以既没有第二份块流，也没有整份拷贝。装载新文档时清掉。
      */
     rev::BlockHistory proj_hist_;
+
     /**
      * 装载过文档没有（setDocument 置位）。没装载过时没有树、没有流、也没有事务栈 ——
      * 编辑入口一律拒绝，审计入口报"没有可比的东西"，而不是拿一棵空树去编出 0 段来。
      */
     bool loaded_ = false;
+
     /**
      * 块流（唯一一份）：投影就地更新它，排版也吃它。
      *
@@ -1428,19 +2210,23 @@ private:
      * blocks() 直接给这一份，不存在副本。
      */
     std::vector<BlockSpec> blocks_full_;
+
     /**
      * 筛过括号的块流。只为"名单真的排除了某些控件"而存在，其余时候为空。
      */
     bool filter_active_ = false;
+
     /**
      * 表格结构（编译产物的一种投影，与 blocks_full_ 同源）。排版吃它来按格布局；
      * 它也是"这张表跨了几页、格线画在哪"的输入。没有表格时为空。
      */
     std::vector<LayoutTable> tables_;
+
     /**
      * 控件集合下标 → 控件的节点 id（导出时按同一顺序建）。
      */
     std::vector<NodeId> control_node_ids_;
+
     /**
      * 产物的 owner（节点 id）→ 控件集合下标。导出时一并建好，命中测试与编辑归属
      * 靠它把句柄翻译成本层对外的口径。
@@ -1455,6 +2241,7 @@ private:
      * 而不是常驻对象，是因为 FlowIndex 没有默认构造 —— 它一造出来就要一棵树。
      */
     std::optional<rev::FlowIndex> flow_;
+
     /**
      * 每块的局部尺寸，与 blocks_full_ 同长同序，是投影走树时数出来的（见 rev::BlockExtent）。
      *
@@ -1463,6 +2250,7 @@ private:
      * 就没存绝对数。
      */
     std::vector<rev::BlockExtent> block_extents_;
+
     /**
      * 每块内容起点的流位置（全局），与 blocks_full_ 同长同序。
      *
@@ -1471,17 +2259,22 @@ private:
      * 读，O(log n) 次随机访问不能变成 O(n log n)。
      */
     std::vector<FlowPos> block_flow_;
+
     /**
      * 每块内容在流里占的位数：文本码点数 + 控件边界数。段间那个段落标记不在这里 ——
      * 它是段与段之间的位置，不属于任何一段的内容。与 block_extents_[i].span 同一个数。
      */
     std::vector<int> block_flow_span_;
+
     /**
      * 每块的来源身份（编译给出，与 blocks_full_ 同长同序）。编辑要在树上落笔时靠它找到
      * "这一段是哪一棵子树里的那一段、被哪枚标记结束"。
      */
     std::vector<BlockSource> block_src_;
 
+    /**
+     * 当前排版产物（行盒、字形、每段切片、页数）。
+     */
     LayoutResult layout_;
 
     /**
@@ -1518,12 +2311,25 @@ private:
      * 上一次 relayout 的粒度，由 presentInternal 上报到 EditStats。
      */
     int last_relaid_paragraphs_ = 0;
+
+    /**
+     * 上一次 relayout 里后缀原样复用的段数。
+     */
     int last_reused_paragraphs_ = 0;
+
     /**
      * 后缀是被"平移复用"的（见 SuffixReuse::Shifted）—— presentInternal 上报用。
      */
     bool last_suffix_shifted_ = false;
+
+    /**
+     * 上一次 relayout 真正重排的行数。
+     */
     int last_relaid_lines_ = 0;
+
+    /**
+     * 上一次 relayout 是全量还是增量。
+     */
     bool last_layout_full_ = true;
 
     /**
@@ -1545,7 +2351,14 @@ private:
      */
     Bitmap prewarm_;
 
+    /**
+     * 排版与呈现的账（由 syncStatsFromLayout 与呈现各写一半）。
+     */
     EngineStats stats_;
+
+    /**
+     * 编辑那一侧的账（文档规模、重排段数、上屏面积、光标读数）。
+     */
     EditStats edit_stats_;
 
     /**
@@ -1558,6 +2371,10 @@ private:
      *   所以放在那儿是唯一保证生效的位置。
      */
     void ensureRenderSetup();
+
+    /**
+     * 与光栅后端有关的那些"只设一次"的参数设过了没有。
+     */
     bool render_setup_done_ = false;
 
     /**
@@ -1574,6 +2391,7 @@ private:
      * 引擎这一层只留"读文档产物"与"协调重排"（见 projectCaret 与移动族的转发）。
      */
     CaretResolver caret_;
+
     /**
      * 命令层：一次编辑怎么变成一条事务（插入、删除、分段、合并、缩进、结构操作）。
      *
@@ -1581,6 +2399,10 @@ private:
      * "视图的持有者"，编辑本身的做法（策略、步骤、撤销快照、光标落点）全在它里面。
      */
     EditCommand edit_;
+
+    /**
+     * 光标这一拍画不画（闪烁相位与 showCaret 共同决定）。
+     */
     bool caret_visible_ = true;
 
     /**
@@ -1590,12 +2412,20 @@ private:
      *   "这一拍要保证哪几页是新鲜的"，不影响任何像素的落点。
      */
     int win_first_page_ = 0;
+
+    /**
+     * 本次呈现覆盖的页数（见 windowPageCount）。
+     */
     int win_page_count_ = 0;
 
     /**
      * 视口锚点（见 setViewportAnchor）。count <= 0 = 整篇。
      */
     int vp_first_page_ = 0;
+
+    /**
+     * 视口锚点钉了几页（<= 0 = 没钉，按整篇）。
+     */
     int vp_count_ = 0;
 
     /**
@@ -1610,8 +2440,20 @@ private:
      * 于是"这一页变了没有"永远只有一个判据：new != base。
      */
     std::vector<uint64_t> page_fp_new_;
+
+    /**
+     * 已经画成像素的那一版页指纹。
+     */
     std::vector<uint64_t> page_fp_prev_;
+
+    /**
+     * 本次排版算出来的页指数。
+     */
     int page_fp_new_count_ = 0;
+
+    /**
+     * 已画那一版的页指数。
+     */
     int page_fp_prev_count_ = 0;
 
     /**
@@ -1625,7 +2467,15 @@ private:
      * 也算变了 —— 那是"后缀整体平移"那一类。
      */
     std::vector<uint64_t> line_fp_new_;
+
+    /**
+     * 已经画成像素的那一版行指纹。
+     */
     std::vector<uint64_t> line_fp_prev_;
+
+    /**
+     * 已画那一版的行数（行指纹数组的规模）。
+     */
     int line_fp_prev_count_ = 0;
 
     /**
@@ -1634,6 +2484,10 @@ private:
      * 否则行往下挪之后旧墨迹会留在原地（幽灵字）。下边界同理取更靠下的。
      */
     std::vector<float> line_lo_prev_;
+
+    /**
+     * 已画那一版每一行的块轴下界（页内磅）。
+     */
     std::vector<float> line_hi_prev_;
 
     /**
@@ -1641,6 +2495,10 @@ private:
      * 放成员是为了不把两个 float 在 lambda 之间传来传去。
      */
     float band_lo_scratch_ = 0.0f;
+
+    /**
+     * 本次重画那条行带的上界（页内磅）。
+     */
     float band_hi_scratch_ = 0.0f;
 
     /**
@@ -1651,8 +2509,20 @@ private:
      * 它们是派生物、不是第二个真相：下一次 present 就作废，重拼时唯一的数据源是页位图。
      */
     mutable Bitmap page_export_;
+
+    /**
+     * 单页导出图当前装的是哪一页（-1 = 没装）。
+     */
     mutable int page_export_page_ = -1;
+
+    /**
+     * 窗口导出图（读时现场拼，present 作废）。
+     */
     mutable Bitmap frame_export_;
+
+    /**
+     * 窗口导出图还作不作数。
+     */
     mutable bool frame_export_valid_ = false;
 
     /**
@@ -1669,7 +2539,15 @@ private:
      * 控件这一侧的口径而不是文档：同一棵树切到不同模式，块流与可见性都可能跟着变。
      */
     ControlSet controls_;
+
+    /**
+     * 当前编辑模式（见 setEditMode）。
+     */
     EditMode mode_ = EditMode::Document;
+
+    /**
+     * 累计被策略拒掉的编辑次数。
+     */
     long long blocked_edits_ = 0;
     /**
      * 每一份修订对应的两份选区快照（编辑前 / 编辑后）。历史本体在 session_ 里，
@@ -1678,10 +2556,25 @@ private:
      * 与 session_ 的撤销栈同步裁剪：超上限时丢最旧的，与"丢更早的状态"同一口径。
      */
     struct SelectionRecord {
+        /**
+         * 编辑前的选区。
+         */
         Range before;
+
+        /**
+         * 编辑后的选区。
+         */
         Range after;
     };
+
+    /**
+     * 每一份修订对应的两份选区快照（与撤销栈同步裁剪）。
+     */
     std::vector<SelectionRecord> sel_history_;
+
+    /**
+     * 当前处在哪一格历史（与 session_ 的撤销位置同步）。
+     */
     size_t sel_pos_ = 0;
 
     /**

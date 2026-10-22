@@ -41,6 +41,7 @@ let cached: boolean | null = null;
  *
  * validate 对语法不合法与"指令不被支持"都返回 false 且不抛，但 WebAssembly 整个缺失的
  *   老引擎会在读属性时就抛，所以整段包住。
+ * @returns true = 这份引擎能在这台浏览器上跑
  */
 export function simdSupported(): boolean {
   if (cached !== null) return cached;
@@ -79,6 +80,7 @@ export function assertSimd(): void {
 /**
  * 探针字节（诊断面用）：判据可以拿它自己跑一次 validate，并检查里面真的有一条 SIMD
  *   指令（0xFD 前缀），而不必只信 simdSupported 那个结论。
+ * @returns 探针字节的一份拷贝
  */
 export function simdProbeBytes(): Uint8Array {
   return SIMD_PROBE.slice();

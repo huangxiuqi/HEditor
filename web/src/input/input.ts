@@ -22,52 +22,154 @@ import {
 } from './keymap';
 
 export interface InputEnv {
+  /**
+   * 引擎与宿主都就绪了没有。
+   */
   isReady(): boolean;
+
+  /**
+   * 有在途命令时输入要先让路（异步宿主用）。
+   */
   isBusy?(): boolean;
+
   /**
    * 承接键盘与合成的 textarea。
    */
   ta: HTMLTextAreaElement;
+
   /**
    * 热读：竖排 / 列序（决定方向键映射）。
    */
   hot(): HotState;
+
+  /**
+   * 发一条命令。
+   * @param name 命令名
+   * @param args 参数
+   */
   write(name: string, args?: Args): Maybe<any>;
+
   /**
    * 命中。收设备像素（宿主内部折算成文档坐标，与拖选同一口径）。
+   * @param xPx 文档横坐标（设备像素）
+   * @param yPx 文档纵坐标（设备像素）
    */
   hit(xPx: number, yPx: number): Maybe<Hit | null>;
+
   /**
    * 设备像素 -> 文档坐标。写类命令（如 cellSelectAt）要自己传坐标时用它。
+   * @param pt 设备像素坐标
    */
   docPt(pt: { x: number; y: number }): { x: number; y: number };
+
+  /**
+   * 客户端坐标折成文档设备像素（落在页外返回 null）。
+   * @param ev 带客户端坐标的事件
+   */
   pointOf(ev: { clientX: number; clientY: number }): { x: number; y: number } | null;
+
+  /**
+   * 把当前按下绑到页容器上（拖出边界也继续收）。
+   */
   capturePointer(): void;
+
+  /**
+   * 起手一次拖选。
+   * @param ev 按下的客户端坐标
+   */
   beginDrag(ev: { clientX: number; clientY: number }): void;
+
   /**
    * 拖选控制器（宿主造的）；没有就不拖。
    */
   drag?: { arm(on: boolean): void };
+
+  /**
+   * 把焦点交给承接层。
+   */
   focus(): void;
+
+  /**
+   * 一次按键 / 合成的收尾。
+   * @param changed 内容有没有真的变
+   */
   commit(changed: boolean): void;
+
+  /**
+   * 落光标（含侧别与行别）。
+   * @param act 命中折出来的落点
+   */
   place(act: CaretAction): Maybe<any>;
+
+  /**
+   * 选中 para 所在的整格。
+   * @param para 段落号
+   */
   selectCellPara(para: number): Maybe<any>;
+
+  /**
+   * 整格选区的收尾（重画之后不再起拖）。
+   */
   cellSelected(): void;
+
+  /**
+   * 状态栏。
+   * @param text 要说的话
+   * @param isErr true = 这是一次失败
+   */
   status(text: string, isErr?: boolean): void;
+
+  /**
+   * 把在途链登记给宿主（测试可以等它）。
+   * @param p 那条链
+   */
   onChain?(p: Maybe<any>): void;
 }
 
 export interface InputLayer {
+  /**
+   * 键盘按下。
+   * @param ev 键盘事件
+   */
   onKeyDown(ev: KeyboardEvent): Maybe<any>;
+
+  /**
+   * 输入法开始组合：这一段时间不碰引擎。
+   */
   onCompositionStart(): void;
+
+  /**
+   * 组合串更新（只更新状态栏预览）。
+   * @param ev 组合事件
+   */
   onCompositionUpdate(ev: CompositionEvent): void;
+
+  /**
+   * 组合结束：一次提交进文档。
+   * @param ev 组合事件
+   */
   onCompositionEnd(ev: CompositionEvent): Maybe<any>;
+
+  /**
+   * 指针按下：命中、落光标、起拖选。
+   * @param ev 鼠标事件
+   */
   onPointerDown(ev: MouseEvent): Maybe<any>;
+
+  /**
+   * 按设备像素坐标落光标（自动化入口与按下共用这一条）。
+   * @param pt 文档坐标（设备像素）
+   */
   placeAt(pt: { x: number; y: number }): Maybe<Hit | null>;
   readonly clickState: ClickState;
   readonly composing: boolean;
 }
 
+/**
+ * 造输入层。
+ * @param env 宿主注入的环境（读写、命中、坐标换算、收尾）
+ * @returns 键盘 / 合成 / 指针三个入口
+ */
 export function createInput(env: InputEnv): InputLayer {
   const click: ClickState = { seq: 0, time: 0, x: 0, y: 0 };
   let composing = false;

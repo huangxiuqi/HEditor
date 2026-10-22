@@ -28,27 +28,54 @@ class FontLibrary;
  * 合并时得靠 g.cluster += byte_begin 硬接，能work全靠"两边边界恰好都落在码点起点上"）。
  */
 struct FontRun {
+    /**
+     * 区间起点（含）。
+     */
     size_t cp_begin = 0;
-    size_t cp_end = 0;    // 不含
-    int face_index = -1;  // 命中的字体索引；-1 表示 chain 全都不支持（会用 chain[0] 出豆腐块）
+
+    /**
+     * 区间终点（不含）。
+     */
+    size_t cp_end = 0;
+
+    /**
+     * 命中的字体索引；-1 表示回退链全都不支持（会用 chain[0] 出豆腐块）。
+     */
+    int face_index = -1;
 };
 
 /**
  * 该码点本身是否要求一个独立字形。
  * 返回 false 的码点必须"跟随前一个码点的字体"——否则会把组合标记/变体选择符
  * 与它的基字拆到两个字体里，连写与定位会散架（蒙文尤其致命）。
+ * @param cp 码点
+ * @return true = 这个码点要自己的字形（组合标记跟前面的字体）
  */
 bool needsOwnGlyph(uint32_t cp);
 
 /**
  * 把码点数组按"chain 中第一个能提供字形的字体"切段。
  * chain[0] 是主字体。chain 为空时返回"整段都归 face_index=-1"。
+ * @param lib 字体库
+ * @param cps 码点
+ * @param count 码点个数
+ * @param chain 字体回退链
+ * @param size_pt 字号（磅）
+ * @return 按字体切开的一段段码点区间
  */
 std::vector<FontRun> itemizeByFont(FontLibrary& lib, const uint32_t* cps, size_t count,
                                    const std::vector<int>& chain, float size_pt);
 
 /**
  * 便捷重载：UTF-8 进，内部转码点。仅供诊断路径使用。
+ * @param lib 字体库
+ * @param chain 字体回退链
+ * @param size_pt 字号（磅）
+ * @return 按字体切开的一段段码点区间
+ * @param lib 字体库
+ * @param utf8 UTF-8 文本
+ * @param chain 字体回退链
+ * @param size_pt 字号（磅）
  */
 std::vector<FontRun> itemizeByFont(FontLibrary& lib, std::string_view utf8,
                                    const std::vector<int>& chain, float size_pt);

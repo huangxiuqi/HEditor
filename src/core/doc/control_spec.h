@@ -23,7 +23,6 @@
 #include "core/utils/types.h"
 
 namespace heditor {
-
 /**
  * 值形态：约束这个控件装的是什么值（见 docs/文档模型设计.md 第七节）。
  *
@@ -41,11 +40,16 @@ enum class ValueShape : uint8_t {
 
 /**
  * 种类名，用于诊断与报告。
+ * @param shape 值形态
+ * @return 名字
  */
 const char* valueShapeName(ValueShape shape);
 
 /**
  * 值形态名 → 值形态。不认识的名字返回 false。序列化按名字落盘（理由见 nodeKindFromName）。
+ * @param name 名字
+ * @param out 写回值形态
+ * @return true = 名字认识
  */
 bool valueShapeFromName(const std::string& name, ValueShape* out);
 
@@ -64,6 +68,8 @@ enum class ControlProp : uint8_t {
 
 /**
  * 属性名，用于诊断与报告。
+ * @param prop 属性
+ * @return 名字
  */
 const char* controlPropName(ControlProp prop);
 
@@ -79,8 +85,19 @@ enum class Overflow : uint8_t {
     Spill = 2,   // 框宽不变，超出部分照常绘制
 };
 
+/**
+ * 超出档的名字，用于诊断与落盘。
+ * @param o 档位
+ * @return 名字
+ */
 const char* overflowName(Overflow o);
 
+/**
+ * 名字转超出档。
+ * @param name 名字
+ * @param out 写回档位
+ * @return true = 名字认识
+ */
 bool overflowFromName(const std::string& name, Overflow* out);
 
 /**
@@ -93,8 +110,19 @@ enum class Underline : uint8_t {
     BlankOnly = 2,  // 仅空白处画（表单填写的经典做法）
 };
 
+/**
+ * 下划线档的名字。
+ * @param u 档位
+ * @return 名字
+ */
 const char* underlineName(Underline u);
 
+/**
+ * 名字转下划线档。
+ * @param name 名字
+ * @param out 写回档位
+ * @return true = 名字认识
+ */
 bool underlineFromName(const std::string& name, Underline* out);
 
 /**
@@ -102,8 +130,19 @@ bool underlineFromName(const std::string& name, Underline* out);
  */
 enum class Align : uint8_t { Start = 0, Center = 1, End = 2 };
 
+/**
+ * 对齐方式的名字。
+ * @param a 对齐
+ * @return 名字
+ */
 const char* alignName(Align a);
 
+/**
+ * 名字转对齐方式。
+ * @param name 名字
+ * @param out 写回对齐
+ * @return true = 名字认识
+ */
 bool alignFromName(const std::string& name, Align* out);
 
 /**
@@ -111,8 +150,19 @@ bool alignFromName(const std::string& name, Align* out);
  */
 enum class BorderStyle : uint8_t { Solid = 0, Dashed = 1, Dotted = 2 };
 
+/**
+ * 线型的名字。
+ * @param s 线型
+ * @return 名字
+ */
 const char* borderStyleName(BorderStyle s);
 
+/**
+ * 名字转线型。
+ * @param name 名字
+ * @param out 写回线型
+ * @return true = 名字认识
+ */
 bool borderStyleFromName(const std::string& name, BorderStyle* out);
 
 /**
@@ -120,7 +170,14 @@ bool borderStyleFromName(const std::string& name, BorderStyle* out);
  * 或只画左右边（栏位分隔），统一边框表达不了这两种。
  */
 struct BorderSide {
+    /**
+     * 这一边画不画。
+     */
     bool on = false;
+
+    /**
+     * 线型（实线 / 虚线 / 点线）。
+     */
     BorderStyle style = BorderStyle::Solid;
 
     /**
@@ -128,15 +185,34 @@ struct BorderSide {
      * 换成磅由编译做一次换算（与段落格式同一个口径）。
      */
     Length width = Length::abs(ptToEmu(0.5));
+
+    /**
+     * 线的颜色。
+     */
     Color color = Color::rgb(0, 0, 0);
 
     bool operator==(const BorderSide& o) const = default;
 };
 
 struct Border {
+    /**
+     * 左边。
+     */
     BorderSide left;
+
+    /**
+     * 右边。
+     */
     BorderSide right;
+
+    /**
+     * 上边。
+     */
     BorderSide top;
+
+    /**
+     * 下边。
+     */
     BorderSide bottom;
 
     bool operator==(const Border& o) const = default;
@@ -149,10 +225,29 @@ struct Border {
  * 模型只存怎么画所需的数据，不存绘制指令；真正画它的是引擎（会上纸的内容必须由引擎绘制）。
  */
 struct GlyphStyle {
+    /**
+     * 图元名（内置名或宿主注册的配方名）；空表示不画。
+     */
     std::string kind;
+
+    /**
+     * 线宽。
+     */
     Length width = Length::abs(ptToEmu(0.75));
+
+    /**
+     * 图元尺寸。
+     */
     Length size;
+
+    /**
+     * 描边色。
+     */
     Color color = Color::rgb(0, 0, 0);
+
+    /**
+     * 填充色。
+     */
     Color fill = Color::rgb(0, 0, 0);
 
     bool operator==(const GlyphStyle& o) const = default;
@@ -169,14 +264,49 @@ struct GlyphStyle {
  * 模型只存"用哪套样式"，不存怎么画。
  */
 struct Appearance {
-    Length width;  // 固定宽度；Auto 表示按内容
+    /**
+     * 固定宽度；Auto 表示按内容。
+     */
+    Length width;
+
+    /**
+     * 值超出固定宽度时怎么处理。
+     */
     Overflow overflow = Overflow::Expand;
+
+    /**
+     * 控件下划线画在哪一档。
+     */
     Underline underline = Underline::None;
+
+    /**
+     * 四边边框。
+     */
     Border border;
+
+    /**
+     * 边上的图元（如必填星号）；kind 为空表示不画。
+     */
     GlyphStyle glyph;
+
+    /**
+     * 内容在控件里的对齐。
+     */
     Align align = Align::Start;
+
+    /**
+     * 提示文字（值为空时画它，不当值取出来）。
+     */
     std::string placeholder;
+
+    /**
+     * 外观样式引用。
+     */
     std::string styleRef;
+
+    /**
+     * 校验不通过时用的样式引用。
+     */
     std::string invalidStyleRef;
 
     bool operator==(const Appearance& o) const = default;
@@ -190,9 +320,20 @@ struct Appearance {
  * 更好写也更好读；多出来的那几个字段是空串与空数组，代价可以忽略。
  */
 struct ControlValue {
-    bool flag = false;               // Bool
-    std::string text;                // Text 的内容、Enum 的选项值、Resource 的资源 id
-    std::vector<std::string> items;  // List
+    /**
+     * Bool 的值。
+     */
+    bool flag = false;
+
+    /**
+     * Enum 的选项值、Resource 的资源 id（Text 形态读内容，不用它）。
+     */
+    std::string text;
+
+    /**
+     * List 选中的选项值集合。
+     */
+    std::vector<std::string> items;
 
     bool operator==(const ControlValue& o) const = default;
 };

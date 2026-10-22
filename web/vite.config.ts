@@ -1,22 +1,73 @@
-import { defineConfig } from 'vite';
+import { createReadStream, existsSync, statSync } from 'node:fs';
+import { extname, join, normalize } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { defineConfig, type Plugin } from 'vite';
 
 /**
- * 只打包 web/src/（公开层）。旧的宿主脚本与 emscripten 胶水不进 bundle ——
- * 它们由库在运行期按地址加载（assets.base），这样 wasm 构建与前端构建互不牵连。
- *
- * 两种产物：ESM（heditor.mjs）给 npm 包用，import { createEditor } from 'heditor'；
- *   IIFE（heditor.iife.js）给 <script> 直接用，全局名 HEditor。
+ * 开发服务器的根是 web/（页面与源码都在这一层），但运行期要取两处"仓库根"的东西：
+ *   build/wasm/web/*  引擎胶水与 wasm
+ *   assets/fonts/*    三份字体
+ * 它们不在 web/ 下面，静态服务器不会发。这一个中间件把它们从仓库根发出去 ——
+ *   比把 wasm 拷进 web/ 更诚实：这些文件的位置是构建产物的约定，不该为开发模式复制一份。
  */
-export default defineConfig({
+const REPO = fileURLToPath(new URL('..', import.meta.url));
+
+const MIME: Record<string, string> = {
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.wasm': 'application/wasm',
+  '.ttf': 'font/ttf',
+  '.otf': 'font/otf',
+  '.json': 'application/json; charset=utf-8',
+  '.md': 'text/markdown; charset=utf-8',
+};
+
+function repoServe(): Plugin {
+  return {
+    name: 'heditor-repo-serve',
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        const url = (req.url ?? '').split('?')[0];
+        if (!/^\/(build|assets)\//.test(url)) return next();
+        const file = join(REPO, normalize(decodeURIComponent(url)));
+        if (!file.startsWith(REPO) || !existsSync(file) || !statSync(file).isFile()) return next();
+        res.setHeader('Content-Type', MIME[extname(file)] ?? 'application/octet-stream');
+        createReadStream(file).pipe(res);
+      });
+    },
+  };
+}
+
+/**
+ * 示例页的开发/构建配置。
+ *
+ * 开发（npm run dev）：Vite 直接按源码编译 web/src，改一行就热更，不用先构建产物。
+ * 构建（npm run build:app）：吐到 web/dist-app/。它仍然在运行期按地址取 build/wasm/web/
+ *   与 assets/，所以静态服务器的根必须是仓库根（探针就是这么跑的）。
+ */
+export default defineConfig(({ command }) => ({
+  root: fileURLToPath(new URL('.', import.meta.url)),
+  // 示例页没有 public/ 目录：素材都在仓库根，由上面的中间件与静态服务器负责。
+  publicDir: false,
+  // base 只在构建时是 /web/dist-app/（产物放在 web/ 下面、由仓库根的静态服务器发）。
+  //   开发时必须留在 /，否则 dev server 把页面也挂到那个前缀上，路径与源码里的绝对
+  //   引用（/app/main.ts）对不上。
+  base: command === 'build' ? '/web/dist-app/' : '/',
+  server: {
+    port: 5173,
+    strictPort: true,
+  },
+  plugins: [repoServe()],
   build: {
-    outDir: 'dist',
+    outDir: 'dist-app',
     emptyOutDir: true,
     target: 'es2020',
-    lib: {
-      entry: 'src/index.ts',
-      name: 'HEditor',
-      formats: ['es', 'iife'],
-      fileName: (format) => (format === 'es' ? 'heditor.mjs' : 'heditor.iife.js'),
+    rollupOptions: {
+      // 两个入口：示例页与"同页两个实例"。后者是多实例的唯一验收面。
+      input: {
+        index: fileURLToPath(new URL('index.html', import.meta.url)),
+        multi: fileURLToPath(new URL('multi.html', import.meta.url)),
+      },
     },
   },
-});
+}));

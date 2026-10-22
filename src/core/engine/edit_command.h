@@ -38,7 +38,6 @@
 #include "core/rev/rev.h"
 
 namespace heditor {
-
 /**
  * 命令层交步骤的出口。引擎实现它：把整批步骤落到修订上，再把产物按新修订重算出来。
  *
@@ -48,9 +47,15 @@ namespace heditor {
 class EditHost {
 public:
     virtual ~EditHost() = default;
+
     /**
      * 把一批步骤交出去。返回 false 表示这一步没做成（步骤没落地、产物没重建），
      * 命令层据此中止整条编辑 —— 与"用户按的那一下没生效"同一口径。
+     * @param steps 这一批步骤
+     * @param dirty_para 起始脏段（-1 = 整篇重排）
+     * @param selection_before 编辑前的选区
+     * @param selection_after 编辑后的选区
+     * @return false = 这一步没做成（步骤没落地、产物没重建）
      */
     virtual bool commitSteps(std::vector<Step> steps, int dirty_para, Range selection_before,
                              Range selection_after) = 0;
@@ -64,12 +69,21 @@ public:
  * 可写的。谁把某个容器换成了另一个对象（move 走、重新 new 一个），这里就是唯一的失效点。
  */
 struct EditView {
-    EditHost* host = nullptr;  // 步骤的出口（引擎）
+    /**
+     * 步骤的出口（引擎）。
+     */
+    EditHost* host = nullptr;
+
     /**
      * 文档（只读）。命令层只从它读"落点处是什么"，写一律经 EditHost 落成新修订。
      */
     const rev::Doc* doc = nullptr;
-    CaretResolver* caret = nullptr;  // 写口：落点与选区
+
+    /**
+     * 落点与选区的写口。
+     */
+    CaretResolver* caret = nullptr;
+
     /**
      * 流索引（树 → 流位置）。没持树时它为空。
      *
@@ -77,21 +91,62 @@ struct EditView {
      * 重建之前它还没建，取内容的地址会拿到空指针并一直空下去（见 TRAPS 81）。
      */
     const std::optional<rev::FlowIndex>* flow = nullptr;
-    const std::vector<BlockSpec>* blocks = nullptr;       // 段文本与筛过的行内对象表
-    const std::vector<BlockSpec>* blocks_full = nullptr;  // 未按显示名单筛过的对象表
-    const std::vector<FlowPos>* block_flow = nullptr;     // 每块内容起点（全局流位置）
-    const std::vector<int>* block_flow_span = nullptr;    // 每块占的流位数
-    const std::vector<BlockSource>* block_src = nullptr;  // 每块的来源身份
+
+    /**
+     * 段文本与筛过的行内对象表。
+     */
+    const std::vector<BlockSpec>* blocks = nullptr;
+
+    /**
+     * 未按显示名单筛过的对象表。
+     */
+    const std::vector<BlockSpec>* blocks_full = nullptr;
+
+    /**
+     * 每块内容起点（全局流位置）。
+     */
+    const std::vector<FlowPos>* block_flow = nullptr;
+
+    /**
+     * 每块占几个流位置。
+     */
+    const std::vector<int>* block_flow_span = nullptr;
+
+    /**
+     * 每块的来源身份（节点号与种类）。
+     */
+    const std::vector<BlockSource>* block_src = nullptr;
+
     /**
      * 表格的逻辑格（每格的内容块区间）。整格删除要按格清空时用它 ——
      * 这里是排版输入，不是排版产物，所以拿到的是编译结果里的那一份。
      */
     const std::vector<LayoutTable>* tables = nullptr;
+
+    /**
+     * 编译产物里的控件集合（区间树）。
+     */
     const ControlSet* controls = nullptr;
+
+    /**
+     * 控件下标到节点号的映射。
+     */
     const std::vector<NodeId>* control_node_ids = nullptr;
+
+    /**
+     * 编辑模式（文档 / 表单 / 只读）。
+     */
     const EditMode* mode = nullptr;
+
+    /**
+     * 一个 Tab 折成几个空格。
+     */
     const int* tab_spaces = nullptr;
-    long long* blocked_edits = nullptr;  // 被拒编辑的计数（诊断量，宿主会读）
+
+    /**
+     * 被拒编辑的计数（诊断量，宿主会读）。
+     */
+    long long* blocked_edits = nullptr;
 };
 
 /**
@@ -107,30 +162,88 @@ public:
 
     /**
      * 编辑入口：坐标是 (段, 段内码点偏移)，落地前吸附到字素簇边界。
+     * @param para 段号
+     * @param offset 段内码点偏移
+     * @param cps 要插入的码点
+     * @return true = 插进去了
      */
     bool insertCodepoints(int para, size_t offset, const std::vector<uint32_t>& cps);
+
+    /**
+     * 插入一个码点。与插入一串的那条同一条路，只是参数少一个。
+     *
+     * @param para 段号（块下标）
+     * @param offset 段内码点偏移
+     * @param cp 一个码点
+     * @return true = 插进去了
+     */
     bool insertCodepoint(int para, size_t offset, uint32_t cp);
+
+    /**
+     * 按 UTF-8 文本插入（落点先吸附到簇边界）。
+     *
+     * @param para 段号（块下标）
+     * @param offset 段内码点偏移
+     * @param utf8 要插入的文本
+     * @return true = 插进去了
+     */
     bool insertTextUtf8(int para, size_t offset, const std::string& utf8);
+
     /**
      * 在光标处插字 / 删字（删除按簇，不是按码点）
+     * @param utf8 要插入的文本
+     * @return true = 插进去了
      */
     bool typeTextUtf8(const std::string& utf8);
+
+    /**
+     * 退格：删光标左边一个字簇。段首时退成合并前一段（见 mergeWithPreviousParagraph）。
+     *
+     * @return true = 删了
+     */
     bool backspace();
+
+    /**
+     * 前删：删光标右边一个字簇。段末时退成合并后一段。
+     *
+     * @return true = 删了
+     */
     bool deleteForward();
+
     /**
      * 跨段编辑：回车在光标处把这一段拆成两段；段首退格、段末 Delete 分别合并前后段 ——
      * 它们是 backspace() / deleteForward() 的自然延伸，不是另外的编辑命令。
+     * @return true = 拆了
      */
     bool splitParagraph();
+
+    /**
+     * 把这一段并进前一段：段落标记被删掉，光标落到接缝处。
+     *
+     * @return true = 并了
+     */
     bool mergeWithPreviousParagraph();
+
+    /**
+     * 把下一段并进这一段：段落标记被删掉，光标位置不动。
+     *
+     * @return true = 并了
+     */
     bool mergeWithNextParagraph();
 
     /**
      * Tab 缩进：在光标处插入 tab_spaces 个空格，走与敲字相同的策略与重排路径。
      * Shift+Tab 反缩进：删掉光标前最多 tab_spaces 个连续空格。
      * 不做"跳到下一个字段"：Tab 在正文编辑器里表示缩进，换字段用鼠标点。
+     * @return true = 缩进了
      */
     bool indent();
+
+    /**
+     * 反缩进：删掉光标前最多 tab_spaces 个连续空格。前面不是空格时什么都不做。
+     *
+     * @return true = 删了
+     */
     bool outdent();
 
     /**
@@ -140,10 +253,16 @@ public:
      * 是结构上的事实，不是一条要另外维护的约定。对外也开放（引擎原样转出去）：宿主拿它做
      * 禁用态提示，判据拿它把"能不能编辑"与"光标能不能到"分开 —— 表单模式下 setCaret 会把
      * 光标投影进最近的字段，"控件之外"那个位置根本到不了，只有直接问它才问得到。
+     * @param p 文本坐标
+     * @return 允许不允许，不允许时带原因
      */
     rev::EditCheck policyAt(TextPos p) const;
+
     /**
      * 删除区间 [a, b) 的判定。跨段删除一律拒（档 1 的删除不跨段，段落标记的删除走合并）。
+     * @param a 区间起点
+     * @param b 区间终点（不含）
+     * @return 允许不允许，不允许时带原因
      */
     rev::EditCheck policyErase(TextPos a, TextPos b) const;
 
@@ -159,6 +278,10 @@ public:
      * @param caret_before 删除之前光标在哪（流位置）。撤销恢复的就是它 —— 键盘那一路必须传
      *                     进来：不传（-1）时按"选中整个控件"记，撤销会把控件重新选中，光标
      *                     随之落到它的闭括号之后。
+     * @param index 控件下标
+     * @param keep_content true = 拆壳留内容
+     * @param caret_before 删除前光标在哪（流位置）
+     * @return true = 删掉了
      */
     bool removeControl(int index, bool keep_content, FlowPos caret_before = -1);
 
@@ -176,32 +299,93 @@ public:
         Changed,    // 改了，段结构没变
         Structural  // 改了，而且改的是呈现态的流结构
     };
+
+    /**
+     *
+     * @param index 控件下标
+     * @param prop 要改的运行时属性
+     * @param value 新值
+     * @return 四档结果（见 PropResult）
+     */
     PropResult setControlProp(int index, ControlProp prop, bool value);
 
 private:
+
     /**
      * 位置解析器（光标与选区的真源）：命令算落点、摆光标、查簇边界都经过它。
      * 名字不叫 caret 是因为它同时还要提供 TextPos（pos().caret()），两者同名会打架。
      */
     CaretResolver& pos() const { return *view_.caret; }
+
+    /**
+     * 当前修订（视图里的那一份，只读）。
+     */
     const rev::Doc& doc() const { return *view_.doc; }
+
+    /**
+     * 筛过的块流（按显示名单滤掉部分括号）。
+     */
     const std::vector<BlockSpec>& blocks() const { return *view_.blocks; }
+
+    /**
+     * 未筛过的块流。编辑要在树上落笔时读它 —— 滤过的副本里没有那些对象。
+     */
     const std::vector<BlockSpec>& blocksFull() const { return *view_.blocks_full; }
+
+    /**
+     * 每块内容起点的流位置（二分定位用）。
+     */
     const std::vector<FlowPos>& blockFlow() const { return *view_.block_flow; }
+
+    /**
+     * 每块占几个流位置（流索引给的权威段长）。
+     */
     const std::vector<int>& blockFlowSpan() const { return *view_.block_flow_span; }
+
+    /**
+     * 每块的来源身份（哪棵子树、被哪枚标记结束）。
+     */
     const std::vector<BlockSource>& blockSrc() const { return *view_.block_src; }
+
+    /**
+     * 控件集合（区间树）。
+     */
     const ControlSet& controls() const { return *view_.controls; }
+
+    /**
+     * 控件下标到节点号的映射。
+     */
     const std::vector<NodeId>& controlNodeIds() const { return *view_.control_node_ids; }
+
+    /**
+     * 编辑模式（决定策略走哪一档）。
+     */
     EditMode mode() const { return *view_.mode; }
+
+    /**
+     * 一个 Tab 折成几个空格。
+     */
     int tabSpaces() const { return *view_.tab_spaces; }
+
+    /**
+     * 视图里有没有流索引（没持树时没有）。
+     *
+     * @return true = 有流索引
+     */
     bool hasFlow() const { return view_.flow != nullptr && view_.flow->has_value(); }
+
+    /**
+     * 流索引（hasFlow 为真时才可用）。
+     */
     const rev::FlowIndex& flowIndex() const { return **view_.flow; }
+
     /**
      * 记一笔"这一下被策略拒了"。
      */
     void noteBlocked() const {
         if (view_.blocked_edits != nullptr) ++*view_.blocked_edits;
     }
+
     /**
      * 把一批步骤交出去 —— 落地与重建产物是持有者的事。
      *
@@ -240,9 +424,24 @@ private:
      * 选区被编辑入口"吃掉"时折算出来的一份删除计划（见 planEraseSelection）。
      */
     struct SelectionErase {
+        /**
+         * 折算出来的删除步骤（未提交）。
+         */
         std::vector<Step> steps;
+
+        /**
+         * 删除之前的选区，撤销要回到它。
+         */
         Range before{};
+
+        /**
+         * 删除区间起点的流位置，删完光标落这里。
+         */
         FlowPos at = 0;
+
+        /**
+         * 策略拒绝了删除动作（调用方中止整条编辑）。
+         */
         bool blocked = false;
     };
 
@@ -418,8 +617,15 @@ private:
      * 再改段落格式），此时以最后一次给出的两份值为准。
      */
     Range pending_before_{};
+
+    /**
+     * 这一批步骤提交之后光标该在哪（随步骤一起交给宿主）。
+     */
     Range pending_after_{};
 
+    /**
+     * 只读输入（见 EditView）。引擎在重建文档与重排之后摆一次。
+     */
     EditView view_{};
 };
 

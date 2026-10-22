@@ -20,21 +20,42 @@
 #include "core/text/writing_mode.h"
 
 namespace heditor {
-
 /**
  * 纸张名称。尺寸由名称与方向推出来（见 paperSize），所以名称与方向是存下来的那份，
  * 宽高是算出来的那份。内置几种常用规格，其余走自定义。
  */
 enum class PaperName : uint8_t { A4 = 0, A5 = 1, B5 = 2, Letter = 3, Legal = 4, Custom = 5 };
 
+/**
+ * 纸张名称的名字（落盘与诊断用）。
+ * @param name 纸张名称
+ * @return 名字
+ */
 const char* paperNameName(PaperName name);
 
+/**
+ * 名字转纸张名称。
+ * @param text 名字
+ * @param out 写回纸张名称
+ * @return true = 名字认识
+ */
 bool paperNameFromName(const std::string& text, PaperName* out);
 
 enum class Orientation : uint8_t { Portrait = 0, Landscape = 1 };
 
+/**
+ * 方向的名字。
+ * @param o 方向
+ * @return 名字
+ */
 const char* orientationName(Orientation o);
 
+/**
+ * 名字转方向。
+ * @param text 名字
+ * @param out 写回方向
+ * @return true = 名字认识
+ */
 bool orientationFromName(const std::string& text, Orientation* out);
 
 /**
@@ -42,9 +63,24 @@ bool orientationFromName(const std::string& text, Orientation* out);
  * 其余名称下宽高由规格推出、这两个字段不参与。
  */
 struct Paper {
+    /**
+     * 纸张名称。尺寸由它加方向推出来（见 paperSize）。
+     */
     PaperName name = PaperName::A4;
+
+    /**
+     * 方向（纵向 / 横向）。
+     */
     Orientation orient = Orientation::Portrait;
+
+    /**
+     * 自定义纸张的宽；其余名称下不参与。
+     */
     Length width;
+
+    /**
+     * 自定义纸张的高；其余名称下不参与。
+     */
     Length height;
 
     bool operator==(const Paper& o) const = default;
@@ -55,12 +91,24 @@ struct Paper {
  * EMU，不如给一个可识别的空值让调用方处理，而不是猜一个。
  */
 struct PaperSizeEmu {
+    /**
+     * 纸宽（EMU）；推不出来时为 0。
+     */
     Emu width = 0;
+
+    /**
+     * 纸高（EMU）；推不出来时为 0。
+     */
     Emu height = 0;
 
     bool operator==(const PaperSizeEmu& o) const = default;
 };
 
+/**
+ * 按名称与方向推出纸张尺寸（EMU）。
+ * @param paper 纸张
+ * @return 宽高；自定义纸张的宽高不是绝对长度时为零尺寸
+ */
 PaperSizeEmu paperSize(const Paper& paper);
 
 /**
@@ -68,9 +116,24 @@ PaperSizeEmu paperSize(const Paper& paper);
  * 默认与引擎当前的默认边距一致（2 厘米），于是没有写节属性的文档排版结果不变。
  */
 struct SectionMargins {
+    /**
+     * 上边距。
+     */
     Length top = Length::abs(cmToEmu(2.0));
+
+    /**
+     * 下边距。
+     */
     Length bottom = Length::abs(cmToEmu(2.0));
+
+    /**
+     * 左边距。
+     */
     Length left = Length::abs(cmToEmu(2.0));
+
+    /**
+     * 右边距。
+     */
     Length right = Length::abs(cmToEmu(2.0));
 
     bool operator==(const SectionMargins& o) const = default;
@@ -82,7 +145,14 @@ struct SectionMargins {
 struct Gutter {
     enum class Side : uint8_t { Left = 0, Top = 1 };
 
+    /**
+     * 装订线宽度。
+     */
     Length size;
+
+    /**
+     * 装订线在哪一侧。
+     */
     Side side = Side::Left;
 
     bool operator==(const Gutter& o) const = default;
@@ -101,8 +171,19 @@ enum class SectionBreak : uint8_t {
     EvenPage = 3,
 };
 
+/**
+ * 分节方式的名字。
+ * @param b 分节方式
+ * @return 名字
+ */
 const char* sectionBreakName(SectionBreak b);
 
+/**
+ * 名字转分节方式。
+ * @param text 名字
+ * @param out 写回分节方式
+ * @return true = 名字认识
+ */
 bool sectionBreakFromName(const std::string& text, SectionBreak* out);
 
 /**
@@ -110,8 +191,19 @@ bool sectionBreakFromName(const std::string& text, SectionBreak* out);
  */
 enum class VerticalAlign : uint8_t { Top = 0, Center = 1, Bottom = 2, Both = 3 };
 
+/**
+ * 垂直分布的名字。
+ * @param a 分布
+ * @return 名字
+ */
 const char* verticalAlignName(VerticalAlign a);
 
+/**
+ * 名字转垂直分布。
+ * @param text 名字
+ * @param out 写回分布
+ * @return true = 名字认识
+ */
 bool verticalAlignFromName(const std::string& text, VerticalAlign* out);
 
 enum class PageNumberFormat : uint8_t {
@@ -121,8 +213,19 @@ enum class PageNumberFormat : uint8_t {
     Chinese = 3,
 };
 
+/**
+ * 页码格式的名字。
+ * @param f 格式
+ * @return 名字
+ */
 const char* pageNumberFormatName(PageNumberFormat f);
 
+/**
+ * 名字转页码格式。
+ * @param text 名字
+ * @param out 写回格式
+ * @return true = 名字认识
+ */
 bool pageNumberFormatFromName(const std::string& text, PageNumberFormat* out);
 
 /**
@@ -130,8 +233,19 @@ bool pageNumberFormatFromName(const std::string& text, PageNumberFormat* out);
  * 否则接着上一节累加。
  */
 struct PageNumbering {
+    /**
+     * 页码格式。
+     */
     PageNumberFormat format = PageNumberFormat::Arabic;
+
+    /**
+     * 起始页码（restart 为真时生效）。
+     */
     int start = 1;
+
+    /**
+     * 本节是否重新编号。
+     */
     bool restart = false;
 
     bool operator==(const PageNumbering& o) const = default;
@@ -157,10 +271,25 @@ inline constexpr int kHeaderFooterVariantCount = 3;
  * 页边距以内。
  */
 struct HeaderFooter {
+    /**
+     * 内容片段的根（装块级内容的容器）；无效值表示这一组没有内容。
+     */
     NodeId root = kInvalidNodeId;
+
+    /**
+     * 距页边界的距离（页眉距上边、页脚距下边）。
+     */
     Length distance;
+
+    /**
+     * 链接到前一节：继承它的页眉页脚。
+     */
     bool linked_to_previous = true;
 
+    /**
+     * 这一组有没有内容。
+     * @return true = 没有内容（root 无效）
+     */
     bool empty() const { return root == kInvalidNodeId; }
 
     bool operator==(const HeaderFooter& o) const = default;
@@ -176,26 +305,94 @@ struct HeaderFooter {
  * 需要比较时用 sameAs，它逐字段比清楚。
  */
 struct SectionSpec {
+    /**
+     * 纸张与方向。
+     */
     Paper paper;
+
+    /**
+     * 四边页边距。
+     */
     SectionMargins margins;
+
+    /**
+     * 装订线（只存住，不参与排版）。
+     */
     Gutter gutter;
+
+    /**
+     * 镜像页边距（只存住，不参与排版）。
+     */
     bool mirror_margins = false;
+
+    /**
+     * 本节相对前一节的分页行为。
+     */
     SectionBreak break_kind = SectionBreak::Continuous;
+
+    /**
+     * 内容在页面上的垂直分布（只存住，不参与排版）。
+     */
     VerticalAlign valign = VerticalAlign::Top;
+
+    /**
+     * 这一节的书写模式（横排 / 竖排与列序）。
+     */
     WritingMode writing_mode = WritingMode::HorizontalTB();
+
+    /**
+     * 页码格式与重新编号。
+     */
     PageNumbering numbering;
+
+    /**
+     * 页眉：首页、奇数页、偶数页三组。
+     */
     HeaderFooter headers[kHeaderFooterVariantCount];
+
+    /**
+     * 页脚：首页、奇数页、偶数页三组。
+     */
     HeaderFooter footers[kHeaderFooterVariantCount];
+
+    /**
+     * 属性袋：引擎不认识的页面设置原样存住、原样写出。
+     */
     std::map<std::string, std::string> extra;
 
+    /**
+     * 按变体取页眉（可写）。
+     * @param v 变体（首页 / 奇数页 / 偶数页）
+     * @return 那一组页眉
+     */
     HeaderFooter& header(HfVariant v) { return headers[static_cast<int>(v)]; }
+
+    /**
+     * 按变体取页眉（只读）。
+     * @param v 变体（首页 / 奇数页 / 偶数页）
+     * @return 那一组页眉
+     */
     const HeaderFooter& header(HfVariant v) const { return headers[static_cast<int>(v)]; }
+
+    /**
+     * 按变体取页脚（可写）。
+     * @param v 变体（首页 / 奇数页 / 偶数页）
+     * @return 那一组页脚
+     */
     HeaderFooter& footer(HfVariant v) { return footers[static_cast<int>(v)]; }
+
+    /**
+     * 按变体取页脚（只读）。
+     * @param v 变体（首页 / 奇数页 / 偶数页）
+     * @return 那一组页脚
+     */
     const HeaderFooter& footer(HfVariant v) const { return footers[static_cast<int>(v)]; }
 
     /**
      * 逐字段比较，含属性袋与书写模式的三个分量。给的是这张表的名字，不是按值相等的替身：
      * 属性袋里多一个键、书写模式差一个分量，都要能比出来。
+     * @param o 另一份节记录
+     * @return true = 逐字段相同（含属性袋与书写模式）
      */
     bool sameAs(const SectionSpec& o) const;
 };

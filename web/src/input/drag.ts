@@ -45,16 +45,24 @@ export interface DragSelectOptions {
    * 滚动容器：边缘自动滚动改的是它的 scrollTop。
    */
   container: HTMLElement;
+
   /**
    * 客户端坐标 -> 文档设备像素。
+   * @param clientX 客户端横坐标
+   * @param clientY 客户端纵坐标
    */
   pointAt(clientX: number, clientY: number): DragPoint;
+
   /**
    * 命中；同步值或 Promise 都收。
+   * @param x 文档横坐标（磅）
+   * @param y 文档纵坐标（磅）
    */
   hitAt(x: number, y: number): Hit | null | Promise<Hit | null>;
+
   /**
    * 移动时的焦点端搬运（只动 focus）。
+   * @param hit 命中的落点与侧别
    */
   extendTo(hit: Hit): void;
   thresholdCss?: number;
@@ -75,10 +83,30 @@ export interface DragState {
 }
 
 export interface DragSelect {
+  /**
+   * 按下之后调它开始一次拖选。
+   * @param ev 按下的客户端坐标
+   * @param armed 直接进入可拖状态（三击退回落光标时要显式给 false）
+   */
   begin(ev: { clientX: number; clientY: number }, armed?: boolean): void;
+
+  /**
+   * 收尾：拆监听、停自动滚动（可重复调用）。
+   */
   end(): void;
+
+  /**
+   * 允许 / 禁止该次按下发展成拖选。
+   * @param on 是否允许
+   */
   arm(on: boolean): void;
+
+  /**
+   * 拖选状态读数。
+   * @returns 在拖、动过、搬过几次焦点端、是否在自动滚动
+   */
   state(): DragState;
+
   /**
    * 全部在途的命中都回来了才 resolve。
    */
@@ -103,6 +131,8 @@ interface Live {
  * begin 由宿主的按下处理调用（命中与定位都由宿主做完，这里只管"按下之后"）；
  * 之后的移动与抬起由模块挂在 window 上 —— 指针离开画布、离开滚动容器都要继续收，
  * 挂在画布上会在拖出边界时断掉。
+   * @param opts 容器、坐标换算、命中与焦点端搬运
+   * @returns 拖选控制器
  */
 export function createDragSelect(opts: DragSelectOptions): DragSelect {
   const container = opts.container;

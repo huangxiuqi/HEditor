@@ -22,7 +22,6 @@
 #include "core/doc/length.h"
 
 namespace heditor {
-
 /**
  * 单元格内文字的垂直对齐（Word 的 w:vAlign，挂在 w:tcPr 上而不是样式里）。
  *
@@ -51,7 +50,14 @@ enum class HeightRule : uint8_t {
  * 两个跨度都至少是 1（0 或负数不是可表达的跨度，步骤层会拒绝）。
  */
 struct CellSpec {
+    /**
+     * 纵向跨度（至少 1）。
+     */
     int row_span = 1;
+
+    /**
+     * 横向跨度（至少 1）。
+     */
     int col_span = 1;
 
     /**
@@ -92,6 +98,10 @@ struct RowSpec {
      * 判据要求它们不打架）。
      */
     Length height;
+
+    /**
+     * 行高规则：Auto 按内容、AtLeast 下限、Exact 固定。
+     */
     HeightRule height_rule = HeightRule::Auto;
 
     bool operator==(const RowSpec& o) const = default;
@@ -104,7 +114,14 @@ struct RowSpec {
  * 含义。"它指向业务系统的哪个数据元素"是宿主自己的映射表 —— 换一套业务系统不影响文档。
  */
 struct TableColumn {
+    /**
+     * 列上绑的业务字段（不透明字符串，由宿主解释）。
+     */
     std::string field_ref;
+
+    /**
+     * 列标题。
+     */
     std::string title;
 
     /**
@@ -118,7 +135,14 @@ struct TableColumn {
      */
     std::string editor_style;
 
+    /**
+     * 列宽。
+     */
     Length width;
+
+    /**
+     * 这一列内容的对齐。
+     */
     Align align = Align::Start;
 
     bool operator==(const TableColumn& o) const = default;
@@ -156,6 +180,7 @@ struct TableSpec {
 
     /**
      * 这张表是否带列定义。带列定义就有"数据行不许合并"这条约束。
+     * @return true = 这张表带列定义
      */
     bool hasColumns() const { return !columns.empty(); }
 
@@ -168,10 +193,32 @@ struct TableSpec {
 /**
  * 行高规则与单元格垂直对齐的文本形式。序列化与宿主共用同一份名字，
  * 两边各写一遍必然分叉（一个写 "atLeast"、另一个写 "at_least"）。
+ * @param rule 行高规则
+ * @return 名字
  */
 const char* heightRuleName(HeightRule rule);
+
+/**
+ * 名字转行高规则。
+ * @param name 名字
+ * @param out 写回规则
+ * @return true = 名字认识
+ */
 bool heightRuleFromName(const std::string& name, HeightRule* out);
+
+/**
+ * 格内垂直对齐的名字。
+ * @param align 对齐
+ * @return 名字
+ */
 const char* cellVAlignName(CellVAlign align);
+
+/**
+ * 名字转格内垂直对齐。
+ * @param name 名字
+ * @param out 写回对齐
+ * @return true = 名字认识
+ */
 bool cellVAlignFromName(const std::string& name, CellVAlign* out);
 
 }  // namespace heditor

@@ -24,7 +24,6 @@
 #include "core/doc/steps.h"
 
 namespace heditor {
-
 /**
  * 一条修订的状态。三态而不是布尔：待定与已拒绝都不是"已生效"，而已接受的修订已经与基线
  * 不可区分 —— 撤销菜单、界面的删除线呈现与落盘都要按这三种状态分开处理。
@@ -35,6 +34,11 @@ enum class RevisionState : uint8_t {
     Rejected = 2,  // 已拒绝：展开时跳过
 };
 
+/**
+ * 修订状态的名字。
+ * @param state 状态
+ * @return 名字
+ */
 const char* revisionStateName(RevisionState state);
 
 /**
@@ -44,9 +48,24 @@ const char* revisionStateName(RevisionState state);
  * 所以坐标天然对得上；只有前面某条修订被拒绝时，才要把后面的坐标穿过它的逆步骤搬回来。
  */
 struct Revision {
+    /**
+     * 被记录的那一步（坐标是记录它那一刻的文档里的坐标）。
+     */
     Step step;
+
+    /**
+     * 作者。
+     */
     std::string author;
+
+    /**
+     * 时间戳（原样存住，不解释格式）。
+     */
     std::string time;
+
+    /**
+     * 这条修订的状态。
+     */
     RevisionState state = RevisionState::Pending;
 };
 
@@ -54,6 +73,8 @@ struct Revision {
  * 这个步骤能不能作为一条修订记录。只认内容级的五个步骤（插入文本、插入片段、删除区间、
  * 插入段落标记、删除段落标记）—— 它们的位置全是流位置，能被映射搬动。结构步骤的位置含
  * Pos（槽位），搬不动，硬记下来只会在拒绝别的修订时错位，所以显式拒绝。
+ * @param step 步骤
+ * @return true = 内容级步骤（位置能被映射搬动）
  */
 bool isRevisionStep(const Step& step);
 
@@ -65,11 +86,17 @@ bool isRevisionStep(const Step& step);
  */
 class RevisionLog {
 public:
+
     /**
      * 把当前文档记为基线，并清空全部修订。
+     * @param tree 当前文档（记成基线）
      */
     void reset(const NodeTree& tree);
 
+    /**
+     * 有没有基线。
+     * @return true = 基线已经记过
+     */
     bool hasBaseline() const { return has_baseline_; }
 
     /**
@@ -77,6 +104,10 @@ public:
      *
      * 它不应用步骤：工作文档由调用方改（与撤销栈同一条路），这里只记。分开的好处是
      * "记了什么"与"文档现在什么样"是两件事，展开时能各自独立地验。
+     * @param step 那一步（只接受内容级步骤）
+     * @param author 作者
+     * @param time 时间戳
+     * @return 结果；结构步骤会失败并给原因
      */
     StepResult record(const Step& step, const std::string& author, const std::string& time);
 
@@ -85,12 +116,35 @@ public:
      *
      * 已接受的修订不能再被拒绝（它已经与基线不可区分），所以 reject 会挡掉它；反过来，
      * 接受一条已拒绝的修订是允许的，等于撤回拒绝。
+     * @param index 第几条（0 起）
+     * @return 结果；已拒绝的可以接受，已接受的不能拒绝
      */
     StepResult accept(std::size_t index);
+
+    /**
+     * 拒绝一条修订：展开时跳过它。
+     * @param index 第几条（0 起）
+     * @return 结果；已接受的挡掉并给原因
+     */
     StepResult reject(std::size_t index);
 
+    /**
+     * 全部修订（按记录顺序）。
+     * @return 修订数组
+     */
     const std::vector<Revision>& revisions() const { return log_; }
+
+    /**
+     * 修订条数。
+     * @return 条数
+     */
     int count() const { return static_cast<int>(log_.size()); }
+
+    /**
+     * 某个状态下的修订条数。
+     * @param state 状态
+     * @return 条数
+     */
     int count(RevisionState state) const;
 
     /**
@@ -102,14 +156,28 @@ public:
      * 前面某条修订被拒绝时，后面修订的坐标要穿过它的逆步骤搬回来（mapStepPositions，
      * 位置正好落在被恢复内容的插入点上时留在左边）。搬不动或某步应用不了时返回失败并写明
      * 是哪一条 —— 半个展开结果比"展开失败"难查得多。
+     * @param out 展开结果写到这里（先清空）
+     * @return 结果；某一步应用不了时写明是第几条
      */
     StepResult expand(NodeTree& out) const;
 
+    /**
+     * 基线（一份独立的树值拷贝）。
+     * @return 基线
+     */
     const NodeTree& baseline() const { return baseline_; }
 
 private:
     NodeTree baseline_;
+
+    /**
+     * 基线记过没有。
+     */
     bool has_baseline_ = false;
+
+    /**
+     * 修订记录，按记录顺序。
+     */
     std::vector<Revision> log_;
 };
 

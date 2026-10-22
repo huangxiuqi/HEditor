@@ -18,14 +18,24 @@
 #include "core/doc/node.h"
 
 namespace heditor {
-
 /**
  * 规范化的改动读数。第二次跑必须全是 0。
  */
 struct NormalizeResult {
-    int merged = 0;   // 合并掉的文本节点个数（合并一次减少一个节点）
-    int removed = 0;  // 清理掉的空文本节点个数
+    /**
+     * 合并掉的文本节点个数（合并一次减一个节点）。
+     */
+    int merged = 0;
 
+    /**
+     * 清理掉的空文本节点个数。
+     */
+    int removed = 0;
+
+    /**
+     * 这一轮有没有改动。
+     * @return true = 合并或清理过
+     */
     bool changed() const { return merged > 0 || removed > 0; }
 };
 
@@ -34,6 +44,8 @@ struct NormalizeResult {
  *
  * 会改树结构，用到了 NodeTree 的两条改动路径之一的 eraseChild。派生索引
  * （FlowIndex / ParagraphIndex）在这之后一律失效，调用方要重建 —— 与任何编辑动作同一口径。
+ * @param tree 文档树
+ * @return 合并与清理的计数
  */
 NormalizeResult normalizeDocument(NodeTree& tree);
 

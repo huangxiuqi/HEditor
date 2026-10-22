@@ -25,7 +25,6 @@
 #include "core/doc/node.h"
 
 namespace heditor {
-
 /**
  * 落盘格式的版本号。读到别的版本一律拒绝，不做"尽力而为"的迁移 —— 猜着读会把一份新文件
  * 读成一份看起来正常的旧结构。
@@ -38,13 +37,26 @@ inline constexpr int kSerializeFormatVersion = 1;
  * 两条路都不该走到，所以宁可在这里返回失败并说明原因。
  */
 struct SerializeResult {
+    /**
+     * 写成功了没有。
+     */
     bool ok = false;
+
+    /**
+     * JSON 文本（无空白）。
+     */
     std::string text;
+
+    /**
+     * 失败原因（某个字符串不是合法 UTF-8）。
+     */
     std::string error;
 };
 
 /**
  * 把文档写成 JSON 文本（无空白）。
+ * @param tree 文档树
+ * @return JSON 文本；写不出来时带原因
  */
 SerializeResult serializeDocument(const NodeTree& tree);
 
@@ -53,12 +65,22 @@ SerializeResult serializeDocument(const NodeTree& tree);
  * 并且 out 不动 —— 读坏了就什么都不改，不交出一棵半截的树。
  */
 struct DeserializeResult {
+    /**
+     * 读成功了没有。
+     */
     bool ok = false;
+
+    /**
+     * 是哪一处读不下去（键名、节点下标、枚举名）。
+     */
     std::string error;
 };
 
 /**
  * 从 JSON 文本重建文档。out 会被整体替换（先清成空文档再按记录装回去，节点 id 原样保留）。
+ * @param text JSON 文本
+ * @param out 写回的文档（先清空）
+ * @return 结果；失败时 out 不动
  */
 DeserializeResult deserializeDocument(const std::string& text, NodeTree* out);
 

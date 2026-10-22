@@ -12,7 +12,6 @@
 #include <vector>
 
 namespace heditor {
-
 /**
  * FNV-1a 64 位偏移基数。
  */

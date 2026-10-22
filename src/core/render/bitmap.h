@@ -20,24 +20,95 @@ namespace heditor {
 
 class Bitmap {
 public:
+
+    /**
+     * 造一块空位图（0 x 0）。
+     */
     Bitmap();
+
+    /**
+     * 按尺寸造一块位图，像素清零。
+     * @param w 宽（设备像素）
+     * @param h 高（设备像素）
+     */
     explicit Bitmap(int w, int h);
+
+    /**
+     * 释放像素与后端状态。
+     */
     ~Bitmap();
     Bitmap(const Bitmap&) = delete;
     Bitmap& operator=(const Bitmap&) = delete;
+
+    /**
+     * 移动构造：接管对方的像素与后端状态，对方置空。
+     * @param other 被移动的对象
+     */
     Bitmap(Bitmap&& other) noexcept;
+
+    /**
+     * 移动赋值：先释放自己的，再接管对方的。
+     * @param other 被移动的对象
+     * @return *this
+     */
     Bitmap& operator=(Bitmap&& other) noexcept;
 
+    /**
+     * 改尺寸并按新尺寸清空。
+     * @param w 宽（设备像素）
+     * @param h 高（设备像素）
+     */
     void reset(int w, int h);
+
+    /**
+     * 整块填成一种颜色。
+     * @param c 颜色
+     */
     void clear(Color c);
 
+    /**
+     * 位图宽度。
+     * @return 宽（设备像素）
+     */
     int width() const { return w_; }
+
+    /**
+     * 位图高度。
+     * @return 高（设备像素）
+     */
     int height() const { return h_; }
+
+    /**
+     * 像素数据的字节数（宽 x 高 x 4）。
+     * @return 字节数
+     */
     size_t byteSize() const { return px_.size(); }
+
+    /**
+     * 像素数据（RGBA，行优先）。
+     * @return 可写指针
+     */
     uint8_t* data() { return px_.data(); }
+
+    /**
+     * 像素数据（只读）。
+     * @return 只读指针
+     */
     const uint8_t* data() const { return px_.data(); }
 
+    /**
+     * 实心填充一个矩形。
+     * @param r 矩形（设备像素）
+     * @param c 颜色
+     */
     void fillRect(const Rect& r, Color c);
+
+    /**
+     * 画一个矩形边框。
+     * @param r 矩形（设备像素）
+     * @param c 颜色
+     * @param thickness 线宽（设备像素）
+     */
     void strokeRect(const Rect& r, Color c, float thickness);
 
     /**
@@ -47,6 +118,8 @@ public:
      * 而"选中之后字还看得见、只是泛蓝"才是选区的样子。混合按整数算并四舍五入，
      * 不同路径（缓存 / 直接光栅）走的是同一段代码，所以帧仍然逐字节可比。
      * 结果的 alpha 保持不透明：位图是最终画面，不是图层。
+     * @param r 矩形（设备像素）
+     * @param c 颜色（用它的 alpha 决定混合比例）
      */
     void blendRect(const Rect& r, Color c);
 
@@ -57,6 +130,10 @@ public:
      * 落点必须是整数像素：页在导出图里的位置由页号乘步距定，本来就是整数，
      *   这里不做任何采样 —— 一旦按浮点落点插值，字就先糊一层。
      * 越界按目标裁剪（窗口最后一槽可能贴着帧底），源侧也按自身范围裁剪。
+     * @param src 源位图
+     * @param src_rect 源图里要搬的区域（设备像素）
+     * @param dst_x 落点左上角 x
+     * @param dst_y 落点左上角 y
      */
     void blitFrom(const Bitmap& src, const Rect& src_rect, int dst_x, int dst_y);
 
@@ -70,8 +147,13 @@ public:
      * 所以它可能略大于 w×h，这是设计如此 —— 见 engine.cpp 记账处的两条恒等式。
      * 用途决定了口径：它要证明的是"真的没写整页"，而写入次数是上界，
      * 上界都小两个数量级，结论才硬。
+     * @return 写入次数（上界，不是去重后的面积）
      */
     size_t paintedPixels() const { return painted_px_; }
+
+    /**
+     * 把写入量取证的三项计数清零（每次提交前调一次）。
+     */
     void resetPaintedPixels() {
         painted_px_ = 0;
         painted_glyphs_ = 0;
@@ -85,6 +167,7 @@ public:
      *   而取包围盒在 Skia 侧要逐字形进一遍字形缓存（自写后端不记包围盒，恒为 0）。
      * 单列这一项的理由：它和"画字"混在同一个 drawGlyphs 里，合成一个数就永远分不清
      *   "字形贵"与"记账贵"—— 而这两者的修法正好相反（一个要动光栅，一个要动记账口径）。
+     * @return 毫秒（只算"取包围盒"那一笔）
      */
     double glyphBoundsMs() const { return glyph_bounds_ms_; }
 
@@ -94,6 +177,7 @@ public:
      * 与 paintedPixels 配对使用：一个说"写了多少像素"，一个说"画了几个字"。
      * 判"字形光栅贵不贵"要看它们的商（每字形多少微秒）——
      *   只看总耗时是分不出"字多"与"每个字贵"的，而这两者的修法完全不同。
+     * @return 字形个数（写入次数口径）
      */
     size_t paintedGlyphs() const { return painted_glyphs_; }
 
@@ -104,6 +188,13 @@ public:
      * rotate_deg     绕字形原点顺时针旋转的角度。0=正立；90=侧倒（蒙文竖排）。
      * 旋转必须在这里做：字体的轮廓是横排形态，
      * "整段侧倒"属于呈现层，不属于整形层。
+     * @param font 字体实例
+     * @param glyph_id 字形下标
+     * @param pen_x 字形原点 x（设备像素）
+     * @param pen_y 字形原点 y（设备像素）
+     * @param units_to_px scale 单位到像素的换算系数
+     * @param color 颜色
+     * @param rotate_deg 绕原点顺时针旋转的角度
      */
     void drawGlyph(hb_font_t* font, uint32_t glyph_id, float pen_x, float pen_y, float units_to_px,
                    Color color, float rotate_deg = 0.0f);
@@ -120,6 +211,14 @@ public:
      * 数组里的次序就是绘制次序，重叠的字形（组合符、括号贴内容）靠它决定压盖。
      * rotate_deg != 0（侧倒竖排）时本实现退化成逐字形 —— 旋转是每个字形各绕自己的
      * 原点转，一次调用表达不了，而那条路很少见。
+     * @param font 字体实例
+     * @param ids 字形下标数组
+     * @param xs 原点 x 数组
+     * @param ys 原点 y 数组
+     * @param count 字形个数
+     * @param units_to_px 换算系数
+     * @param color 颜色
+     * @param rotate_deg 旋转角度（非 0 时退化成逐字形）
      */
     void drawGlyphs(hb_font_t* font, const uint32_t* ids, const float* xs, const float* ys,
                     int count, float units_to_px, Color color, float rotate_deg = 0.0f);
@@ -130,6 +229,7 @@ public:
      * 为什么非共用不可：Skia 的字形缓存按 strike 规格索引，而规格里含字体对象的身份。
      *   两块 Bitmap 各建一份 SkTypeface，缓存就分成互不相见的两份 —— 往其中一份预热
      *   对另一份毫无帮助，而症状只是"没变快"，什么都看不出来。
+     * @param other 另一块位图
      */
     void shareFonts(const Bitmap& other);
 
@@ -142,26 +242,71 @@ public:
      *   —— 一旦越过 2 MB，清理就把整份缓存一次抹掉，下一个字形又从头冷光栅。
      *   对一整页上千个汉字、每页都要重光栅的滚动场景，这条等于"缓存从不起作用"；
      *   而它的症状只是"没变快"，看不出来是哪一层的问题。
+     * @param bytes 预算字节数（0 = 不动，用后端默认值）
      */
     void setGlyphCacheBudget(size_t bytes);
+
+    /**
+     * 字形 mask 缓存当前占用。
+     * @return 字节数
+     */
     size_t glyphCacheUsedBytes() const;
+
+    /**
+     * 字形 mask 缓存当前的预算。
+     * @return 字节数（0 = 用后端默认值）
+     */
     size_t glyphCacheBudgetBytes() const;
 
 private:
-    int w_ = 0;
-    int h_ = 0;
-    std::vector<uint8_t> px_;
-    size_t painted_px_ = 0;         // 自上次 resetPaintedPixels() 以来实际写入的像素数
-    size_t painted_glyphs_ = 0;     // 同一口径下的字形个数（见 paintedGlyphs）
-    double glyph_bounds_ms_ = 0.0;  // 同一口径下"记账取包围盒"花掉的时间（见 glyphBoundsMs）
 
     /**
-     * Skia 后端状态。用 pimpl 有两个理由：bitmap.h 是公共头，每个 include 它的
-     * 编译单元不该被迫吃进 Skia 的头与它那套编译宏；且 Skia 的 typeface/font
-     * 缓存是可增长容器，放进头里会让 Bitmap 的定义随 Skia 版本变化（ABI 不稳）。
+     * 宽（设备像素）。
+     */
+    int w_ = 0;
+
+    /**
+     * 高（设备像素）。
+     */
+    int h_ = 0;
+
+    /**
+     * 像素数据（RGBA，行优先）。
+     */
+    std::vector<uint8_t> px_;
+
+    /**
+     * 自上次重置以来实际写入的像素数。
+     */
+    size_t painted_px_ = 0;
+
+    /**
+     * 同一口径下的字形个数。
+     */
+    size_t painted_glyphs_ = 0;
+
+    /**
+     * 同一口径下"记账取包围盒"花掉的时间。
+     */
+    double glyph_bounds_ms_ = 0.0;
+
+    /**
+     * Skia 后端的实现（定义在 bitmap_skia.cpp）。
+     *
+     * 用 pimpl 有两个理由：bitmap.h 是公共头，每个 include 它的编译单元不该被迫吃进
+     *   Skia 的头与它那套编译宏；且 Skia 的 typeface/font 缓存是可增长容器，放进头里
+     *   会让 Bitmap 的定义随 Skia 版本变化（ABI 不稳）。
      */
     struct SkiaImpl;
+
+    /**
+     * 两块位图共享的字体表（SkTypeface / SkFont）。
+     */
     struct SkiaFonts;
+
+    /**
+     * 后端状态；纯粹的空位图（0 x 0）时为空。
+     */
     std::unique_ptr<SkiaImpl> sk_;
 };
 

@@ -1,19 +1,19 @@
 // 错误降级探针：验"失败会变成页面上看得见的东西"。
 //
-// 要证伪的事：宿主此前的失败只有 errors 数组知道（数组只有探针会读），页面上要么空白、
-//   要么停在一个看起来能输入、实际打不进字的编辑器上。这里按三档取证：
+// 要证伪的事：引擎的失败只有错误事件与内部数组知道，而事件不一定有人监听。于是失败在
+//   页面上完全看不见 —— 页面要么空白、要么停在一个看起来能输入、实际打不进字的编辑器上。
+//   这里按三档取证：
 //
 //   正常态：页面上不该有任何错误界面（反向一半 —— 没有这一半，"永远显示横幅"也能算过）。
-//   单次失败：出现自动消失的提示条，且编辑器随后仍然可用（不是所有失败都该致命）。
-//   致命失败：出现常驻横幅、元素真的可见、容器被标记不可用，且此后的操作不再假装成功。
+//   降级：一次页面级失败出现会自动消失的提示条，且编辑器随后仍然可用（不是所有失败都该致命）。
+//   致命：出现常驻横幅、元素真的可见、容器被标记不可用，且此后不再有一份"看起来能用"的编辑器。
 //
-// 致命那一档用 ?wasm= 指向一个不存在的产物目录来造：这是真实会发生的配置错误，
-//   不需要往产品代码里塞测试开关。两宿主都受影响（单线程那边是胶水脚本加载失败，
-//   Worker 那边是 importScripts 失败）。
+// 致命那一档用 ?glue= 指向一个不存在的产物来造：这是真实会发生的配置错误，不需要往
+//   产品代码里塞测试开关。两条传输都受影响（同线程是胶水脚本加载失败，Worker 是
+//   importScripts 失败）。
 //
-// 两宿主通吃，用法：
-//   scripts\verify_web.ps1 -Probe scripts\error_probe.mjs                    # 单线程宿主
-//   scripts\verify_web.ps1 -Probe scripts\error_probe.mjs -Page worker.html  # Worker 宿主
+// 两条传输通吃：URL 带 transport=worker 即走 Worker。
+//   node scripts/error_probe.mjs --url http://127.0.0.1:8781/web/demo.html
 import { CDP, Checks } from './cdp.mjs';
 
 const argv = process.argv.slice(2);
@@ -23,7 +23,7 @@ const opt = (name, def) => {
 };
 
 const PORT = Number(opt('port', '9222'));
-const URL_ = opt('url', 'http://127.0.0.1:8781/web/index.html');
+const URL_ = opt('url', 'http://127.0.0.1:8781/web/dist-app/index.html');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const chk = new Checks('错误降级');
@@ -41,10 +41,10 @@ async function findTarget() {
   throw new Error(`连不上 Chrome 调试端口 ${PORT}`);
 }
 
-// 把 URL 的 wasm 参数换成别的值（用来造"产物不存在"）。
-function withWasm(url, value) {
+// 把 URL 的某个参数换成别的值（用来造"产物不存在"）。
+function withParam(url, key, value) {
   const u = new URL(url);
-  u.searchParams.set('wasm', value);
+  u.searchParams.set(key, value);
   return u.href;
 }
 
@@ -53,22 +53,24 @@ async function main() {
   const cdp = await CDP.connect(target.webSocketDebuggerUrl);
   await cdp.send('Page.enable');
   await cdp.send('Runtime.enable');
+  await cdp.send('Log.enable');
   await cdp.disableHttpCache();
 
   const RAW = cdp.eval.bind(cdp);
   const asBody = (b) => 'return (async () => {\n' + b + '\n})();';
   cdp.eval = async (expr) => {
     const r = await RAW(asBody(expr));
-    await RAW('const H = window.__heditor;' +
-              'return H && H.quiesce ? H.quiesce().then(() => true) : true;');
+    // 异步宿主：读之前先让队列排空（与 edit_probe 同一口径）。
+    await RAW('const H = window.__demo;' +
+              'return H && H.flush ? H.flush().then(() => true) : true;').catch(() => true);
     return r;
   };
 
-  const waitReady = async (wantReady) => {
+  const ready = async () => {
     for (let i = 0; i < 120; i++) {
-      const st = await cdp.eval(
-        'const H = window.__heditor; return H ? !!H.ready : false;').catch(() => false);
-      if (st === wantReady) return true;
+      const st = await cdp.eval('return !!(window.__demo && window.__demoReady);')
+        .catch(() => false);
+      if (st === true) return true;
       await sleep(400);
     }
     return false;
@@ -76,113 +78,103 @@ async function main() {
 
   console.log('→ 打开', URL_);
   await cdp.send('Page.navigate', { url: URL_ });
-  const ready = await waitReady(true);
-  console.log(`→ 页面就绪 ${ready}`);
-
-  const probe = async (body) => cdp.eval(body);
+  const ok = await ready();
+  console.log(`→ 页面就绪 ${ok}`);
+  const probe = (body) => cdp.eval(body);
 
   // 第一档：正常态
 
   console.log('\n[E1] 正常态：不该有任何错误界面');
   const normal = await probe(
-    'const h = window.__heditor;' +
-    'return { ready: !!h.ready, fatal: h.hostErrors.fatalActive,' +
-    '         entries: h.hostErrors.entries.length,' +
+    'const h = window.__demo;' +
+    'return { ready: !!h, startError: window.__demoStartError || "",' +
+    '         entries: h ? h.diag.errors().length : -1,' +
     '         banner: !!document.querySelector("[data-host-error=\\"fatal\\"]"),' +
-    '         toast: !!document.querySelector("[data-host-error=\\"warn\\"]") };');
-  check('启动成功（前置条件）', normal.ready, JSON.stringify(normal));
-  check('没有致命横幅', !normal.fatal && !normal.banner);
+    '         toast: !!document.querySelector("[data-host-error=\\"warn\\"]"),' +
+    '         marked: document.querySelectorAll("[data-host-fatal=\\"1\\"]").length };');
+  check('启动成功（前置条件）', ok && normal.ready === true, JSON.stringify(normal));
+  check('没有致命横幅', !normal.banner && normal.marked === 0);
   check('没有提示条残留', !normal.toast);
   check('降级记账为空（反向一半）', normal.entries === 0, `entries=${normal.entries}`);
+  const bootErrors = cdp.consoleErrors.filter((t) => !/favicon/i.test(t));
+  check('启动过程没有 console 错误', bootErrors.length === 0, bootErrors.slice(0, 2).join(' | '));
 
-  // 第二档：单次操作失败
+  // 第二档：单次失败（页面级异常 → 降级提示，编辑器继续可用）
 
   console.log('\n[E2] 单次失败：提示一次，编辑器继续可用');
-  const isWorker = await probe('return !!window.__wheditor;');
-  // 两宿主各自找一个真实可达的单次失败：
-  //   Worker 宿主：查询表里没有的名字（引擎抛"未知查询"，只影响这一条）。
-  //   单线程宿主：真病历样例读不到（把那条 fetch 换成 500，走工具条那条真实路径）。
-  const spot = isWorker
-    ? await probe(
-        'let msg = "";' +
-        'try { await window.__heditor.ask("__no_such_query__"); } catch (e) { msg = String(e.message); }' +
-        'return { msg: msg.slice(0, 80), kind: "unknown-query" };')
-    : await probe(
-        'const orig = window.fetch;' +
-        'window.fetch = (u, o) => String(u).includes("medical-records")' +
-        '  ? Promise.resolve(new Response("", { status: 500 })) : orig(u, o);' +
-        'const sel = document.getElementById("scenario");' +
-        'sel.value = "8";' +
-        'sel.dispatchEvent(new Event("change"));' +
-        'await new Promise((r) => setTimeout(r, 600));' +
-        'window.fetch = orig;' +
-        'return { msg: "scenario 8 fetch 500", kind: "sample-500" };');
-  console.log(`     造法：${spot.kind}`);
+  const before = await probe('return window.__demo.text().length;');
+  await probe(
+    // 造一次真实的页面级失败：未捕获异常走 window.onerror。宿主把这类失败记成"降级"
+    //   而不是致命，因为引擎还活着 —— 它只说明页面上别处有 bug。
+    'setTimeout(() => { throw new Error("error_probe 故意抛的一次失败"); }, 0);' +
+    'return true;');
+  await sleep(120);
   const afterOp = await probe(
-    'const h = window.__heditor;' +
-    'return { fatal: h.hostErrors.fatalActive, dead: h.hostErrors.dead,' +
-    '         warns: h.hostErrors.entries.filter((e) => e.level === "warn").length,' +
-    '         last: (h.hostErrors.entries.slice(-1)[0] || {}).text || "",' +
-    '         toast: !!document.querySelector("[data-host-error=\\"warn\\"]") };');
-  check('记下了一条降级（warn）', afterOp.warns >= 1, `warns=${afterOp.warns}：${afterOp.last}`);
-  check('没有升级成致命', !afterOp.fatal);
-  check('引擎没有被标死', afterOp.dead === false);
+    'const h = window.__demo;' +
+    'return { entries: h.diag.errors(),' +
+    '         toast: !!document.querySelector("[data-host-error=\\"warn\\"]"),' +
+    '         banner: !!document.querySelector("[data-host-error=\\"fatal\\"]"),' +
+    '         role: (document.querySelector("[data-host-error=\\"warn\\"]") || {}).getAttribute' +
+    '           ? document.querySelector("[data-host-error=\\"warn\\"]").getAttribute("role") : "" };');
+  check('记下了一条降级', afterOp.entries.length >= 1,
+        `entries=${afterOp.entries.length}：${(afterOp.entries[0] || '').slice(0, 60)}`);
+  check('没有升级成致命', !afterOp.banner);
   check('页面上有提示条', afterOp.toast === true,
         'DOM 里应存在 [data-host-error="warn"]');
-  // 反向一半：失败之后编辑器必须还能用。只看"没有致命"不够 —— 引擎可能已经
-  //   失效而没有任何标志位反映出来。
+  check('提示条是无障碍可见的（role=status）', afterOp.role === 'status', afterOp.role);
+  // 反向一半：失败之后编辑器必须还能用。只看"没有致命"不够 ——
+  //   引擎可能已经失效而没有任何标志位反映出来。
   const alive = await probe(
-    'const h = window.__heditor;' +
-    'await h.present();' +
-    'return { pages: h.editStats ? h.editStats.totalPages : -1,' +
-    '         chars: h.text.length };');
-  check('失败之后编辑器仍然可用', alive.pages >= 1 && alive.chars > 0, JSON.stringify(alive));
+    `const h = window.__demo;
+     await h.type('活');
+     return { pages: h.geometry().pages, len: h.text().length };`);
+  check('失败之后编辑器仍然可用', alive.pages >= 1 && alive.len === before + 1,
+        `页 ${alive.pages}，字数 ${before} → ${alive.len}`);
 
   // 第三档：致命失败
 
   console.log('\n[E3] 致命失败：常驻横幅 + 不再假装可用');
-  const badUrl = withWasm(URL_, 'build/__missing__/web/');
+  const badUrl = withParam(URL_, 'glue', 'build/__missing__/web/heditor.js');
   console.log('→ 打开', badUrl);
   await cdp.send('Page.navigate', { url: badUrl });
-  // 等"启动失败"落定：这里等的是 ready 一直不来的那个状态，所以给足时间再看。
-  await sleep(2500);
+  // 等"启动失败"落定：这里等的是 createEditor 拒绝之后的那份横幅。
+  for (let i = 0; i < 40; ++i) {
+    const seen = await probe(
+      'return !!(window.__demoStartError || document.querySelector("[data-host-error=\\"fatal\\"]"));')
+      .catch(() => false);
+    if (seen) break;
+    await sleep(250);
+  }
+  await sleep(300);
   const fatal = await probe(
-    'const h = window.__heditor;' +
     'const el = document.querySelector("[data-host-error=\\"fatal\\"]");' +
     'const r = el ? el.getBoundingClientRect() : null;' +
-    'return { ready: h ? !!h.ready : false,' +
-    '         fatalActive: h ? h.hostErrors.fatalActive : false,' +
-    '         dead: h ? h.hostErrors.dead : false,' +
+    'const host = document.getElementById("ed");' +
+    'return { editor: !!window.__demo,' +
+    '         startError: window.__demoStartError || "",' +
+    '         hasBanner: !!el,' +
     '         title: el ? el.querySelector(".he-t").textContent : "",' +
     '         detail: el ? el.querySelector(".he-d").textContent : "",' +
+    '         hint: el ? el.querySelector(".he-h").textContent : "",' +
     '         role: el ? el.getAttribute("role") : "",' +
     '         rect: r ? [Math.round(r.width), Math.round(r.height)] : null,' +
     '         style: el ? getComputedStyle(el).display : "",' +
     '         retry: !!document.querySelector("[data-host-error=\\"fatal\\"] button[data-he-retry]"),' +
-    '         marks: document.querySelectorAll("[data-host-fatal=\\"1\\"]").length };');
+    '         marked: host ? host.getAttribute("data-host-fatal") : null,' +
+    '         canvases: document.querySelectorAll("#pages canvas").length };');
   console.log(`     横幅：${fatal.title} / ${fatal.detail}`);
-  check('引擎确实没起来（前置条件）', fatal.ready === false);
-  check('出现致命横幅', fatal.fatalActive === true);
+  check('引擎确实没起来（前置条件）', fatal.editor === false && !!fatal.startError,
+        `editor=${fatal.editor} startError=${String(fatal.startError).slice(0, 60)}`);
+  check('出现致命横幅', fatal.hasBanner === true);
   check('横幅在 DOM 里且真的可见',
-        fatal.rect && fatal.rect[0] > 0 && fatal.rect[1] > 0 && fatal.style !== 'none',
+        !!fatal.rect && fatal.rect[0] > 0 && fatal.rect[1] > 0 && fatal.style !== 'none',
         `rect=${JSON.stringify(fatal.rect)} display=${fatal.style}`);
-  check('横幅是无障碍可见的（role=alert）', fatal.role === 'alert');
+  check('横幅是无障碍可见的（role=alert）', fatal.role === 'alert', fatal.role);
   check('横幅带失败原因', fatal.detail.length > 0, fatal.detail.slice(0, 60));
-  check('容器被标成不可用', fatal.marks >= 1, `标记 ${fatal.marks} 处`);
+  check('横幅带下一步（提示）', fatal.hint.length > 0, fatal.hint.slice(0, 40));
+  check('容器被标成不可用', fatal.marked === '1', String(fatal.marked));
   check('给了恢复入口（重试按钮）', fatal.retry === true);
-  check('宿主记录引擎已不可用', fatal.dead === true);
-
-  const notPretending = await probe(
-    'const h = window.__heditor;' +
-    'const stats = h.stats;' +
-    'let rejected = false;' +
-    'try { await h.present(); } catch (e) { rejected = true; }' +
-    'return { stats, rejected, isWorker: !!window.__wheditor };');
-  check('不再假装有内容（stats 为空）', notPretending.stats === null);
-  check('此后的操作不再假装成功',
-        notPretending.isWorker ? notPretending.rejected === true : notPretending.stats === null,
-        notPretending.isWorker ? `命令被当场拒掉：rejected=${notPretending.rejected}`
-                               : '这一侧引擎没起来，任何取内容都只能拿到空');
+  check('不再假装有内容（一页画布都没有）', fatal.canvases === 0, `${fatal.canvases} 张`);
 
   console.log('');
   console.log('──────────────────────────────');

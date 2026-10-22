@@ -14,16 +14,37 @@
 namespace heditor {
 
 struct Range {
+    /**
+     * 不动的那一端。
+     */
     FlowPos anchor = 0;
+
+    /**
+     * 跟着光标走的那一端。
+     */
     FlowPos focus = 0;
 
     /**
      * 左右两端。方向不进这两个函数 —— 它们只回答"覆盖了哪一段"。
+     * @return 靠前的那一端
      */
     FlowPos begin() const { return anchor < focus ? anchor : focus; }
+
+    /**
+     * 靠后的那一端。
+     * @return 较大的流位置
+     */
     FlowPos end() const { return anchor < focus ? focus : anchor; }
+
+    /**
+     * 选区是空的（两端重合）。
+     * @return true = 两端相等
+     */
     bool empty() const { return anchor == focus; }
 
+    /**
+     * 两个选区相同（两端都对得上，含方向）。
+     */
     bool operator==(const Range& o) const { return anchor == o.anchor && focus == o.focus; }
 };
 
@@ -39,6 +60,9 @@ struct Range {
  * 放到单位终点。
  *
  * 坐标口径是编辑态（Design）：编辑动作都发生在编辑态。
+ * @param tree 文档树
+ * @param range 区间
+ * @return 端点外扩到不可半分单位的边界之后的区间
  */
 Range normalizeRange(const NodeTree& tree, Range range);
 

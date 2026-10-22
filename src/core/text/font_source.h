@@ -18,13 +18,23 @@
 #include <vector>
 
 namespace heditor {
-
 /**
  * SFNT 表目录里的一项。
  */
 struct SfntTable {
+    /**
+     * 四字节标签（大端拼成的 uint32，见 tagOf）。
+     */
     uint32_t tag = 0;
+
+    /**
+     * 表数据在文件里的偏移。
+     */
     uint32_t offset = 0;
+
+    /**
+     * 表数据的字节数。
+     */
     uint32_t length = 0;
 };
 
@@ -38,17 +48,45 @@ struct SfntTable {
 class SfntDirectory {
 public:
     bool parse(const uint8_t* header, size_t n);
+
+    /**
+     * 按标签查表。
+     * @param tag 四字节标签
+     * @return 目录项；没有这张表时为 nullptr
+     */
     const SfntTable* find(uint32_t tag) const;
+
+    /**
+     * 目录里有几张表。
+     * @return 表数
+     */
     size_t count() const { return tables_.size(); }
+
+    /**
+     * 整个目录（按文件里的顺序）。
+     * @return 目录项数组
+     */
     const std::vector<SfntTable>& tables() const { return tables_; }
+
+    /**
+     * SFNT 版本号（0x00010000 或 OTTO）。
+     * @return 版本
+     */
     uint32_t version() const { return version_; }
+
     /**
      * 把四字节 tag 拼成 uint32（大端序，与文件里的表示一致）。
+     * @param s4 四个字节（不需要以 0 结尾）
+     * @return 大端序拼成的 uint32
      */
     static uint32_t tagOf(const char* s4);
 
 private:
     std::vector<SfntTable> tables_;
+
+    /**
+     * SFNT 版本号。
+     */
     uint32_t version_ = 0;
 };
 
@@ -79,18 +117,43 @@ public:
     FontStorage(const FontStorage&) = delete;
     FontStorage& operator=(const FontStorage&) = delete;
 
+    /**
+     * 打开文件（只读）。
+     * @param path 文件路径
+     * @return true = 打开成功
+     */
     bool open(const std::string& path);
+
     /**
      * 读一段字节。请求越过文件尾时先夹到可读范围，交出能读的那部分并返回 Eof；
      * 只有夹过之后仍然短读（文件被截断、I/O 出错）才返回 Error。
      * got 可选，写回实际读到的字节数 —— 返回 Eof 时它与 len 的差就是缺的字节。
+     * @param off 文件偏移
+     * @param dst 目标缓冲
+     * @param len 想读多少字节
+     * @param got 实际读到的字节数（可为 nullptr）
+     * @return Ok / Eof（越过文件尾）/ Error
      */
     FontRead readAt(uint64_t off, void* dst, size_t len, size_t* got = nullptr) const;
+
+    /**
+     * 文件大小。
+     * @return 字节数
+     */
     uint64_t size() const { return size_; }
+
+    /**
+     * 打开成功没有。
+     * @return true = 文件可读
+     */
     bool valid() const { return file_ != nullptr; }
 
 private:
     std::FILE* file_ = nullptr;
+
+    /**
+     * 文件大小（打开时量一次）。
+     */
     uint64_t size_ = 0;
 };
 
@@ -103,6 +166,7 @@ private:
  */
 class FontBlockCache {
 public:
+
     /**
      * 块大小与块数决定常驻上限。默认 4 KB x 1024 块（上限 4 MB）。
      *
@@ -112,17 +176,34 @@ public:
      * 原因是字形在 glyf 里按字形号连续、而一段文本用到的字形号是散的：块越大，
      * 一次读进来用不到的部分越多。真文本的工作集约 3 MB，上限取 4 MB 留余量。
      * 切到真磁盘后这张表要重测。
+     * @param block_size 块大小（字节）
+     * @param max_blocks 最多几块
      */
     FontBlockCache(size_t block_size = 4u * 1024u, size_t max_blocks = 1024u);
 
     /**
      * 带缓存的读。语义与 FontStorage::readAt 一致：越过文件尾返回 Eof（不是错误），
      * 并且把 eofReads 与 readFailures 分开累计。
+     * @param src 存储层
+     * @param off 文件偏移
+     * @param dst 目标缓冲
+     * @param len 想读多少字节
+     * @param got 实际读到的字节数（可为 nullptr）
+     * @return Ok / Eof / Error
      */
     FontRead read(const FontStorage& src, uint64_t off, void* dst, size_t len,
                   size_t* got = nullptr);
+
+    /**
+     * 丢掉全部块（统计不清）。
+     */
     void clear();
+
+    /**
+     * 统计清零（命中 / 未命中 / 落存储的次数与字节、IO 毫秒）。
+     */
     void resetStats();
+
     /**
      * 换一套缓存配置（块大小与块数）并清空已有块与统计。
      *
@@ -131,50 +212,161 @@ public:
      * 块越大，落存储的次数越少，但一次读进来的字节里用不到的部分越多 —— 字形在 glyf 里
      * 按字形号连续，而一段文本用到的字形号是散的，所以块读的空间效率取决于块有多大。
      * 要在这两者之间挑，就得能改它、并且量出来。
+     *
+     * @param block_size 块大小（字节）
+     * @param max_blocks 最多几块
      */
     void configure(size_t block_size, size_t max_blocks);
+
     /**
      * 当前常驻的字节数（已装入的块之和），不是上限。
+     * @return 已装入的块之和（字节）
      */
     size_t residentBytes() const;
 
+    /**
+     * 块命中次数（要的块已经在缓存里）。
+     *
+     * @return 命中次数
+     */
     size_t hits() const { return hits_; }
+
+    /**
+     * 块未命中次数（要落存储去读）。
+     *
+     * @return 未命中次数
+     */
     size_t misses() const { return misses_; }
+
+    /**
+     * 落到存储上读的次数。
+     *
+     * @return 次数
+     */
     size_t storageReads() const { return storage_reads_; }
+
+    /**
+     * 从存储读进来的累计字节。
+     *
+     * @return 字节数
+     */
     size_t storageBytes() const { return storage_bytes_; }
+
+    /**
+     * 存储读花掉的累计毫秒。
+     *
+     * @return 毫秒
+     */
     double ioMs() const { return io_ms_; }
+
+    /**
+     * 块大小（字节）。
+     *
+     * @return 字节数
+     */
     size_t blockSize() const { return block_size_; }
+
     /**
      * 常驻上限（块大小乘块数）。residentBytes 是当前实际装入的量，不会超过它。
+     *
+     * @return 字节数
      */
     size_t capacityBytes() const { return block_size_ * blocks_.size(); }
+
     /**
      * 真失败的次数。文件尾的短读不计在这里，见 eofReads。
+     * @return 真失败的次数
      */
     size_t readFailures() const { return read_failures_; }
+
     /**
      * 因请求越过文件尾而短读的次数。这是正常终止，不是失败。
+     * @return 越过文件尾的短读次数
      */
     size_t eofReads() const { return eof_reads_; }
 
 private:
     struct Block {
+        /**
+         * 块数据。
+         */
         std::vector<uint8_t> data;
+
+        /**
+         * 块号（偏移除以块大小）。
+         */
         uint64_t id = 0;
+
+        /**
+         * 最近一次使用的时钟，淘汰时选最小的。
+         */
         uint64_t stamp = 0;
+
+        /**
+         * 这一格装上块了没有（未用的格子不算淘汰候选）。
+         */
         bool used = false;
     };
+
+    /**
+     * 取一块：命中就刷新时钟，未命中就读进来（满了按最久未用淘汰）。
+     * @param src 存储层
+     * @param block_id 块号
+     *
+     * @param src 存储层
+     * @param block_id 块号
+     * @return 块；读失败为 nullptr
+     */
     Block* fetch(const FontStorage& src, uint64_t block_id);
 
+    /**
+     * 块格子（容量固定，按最久未用淘汰）。
+     */
     std::vector<Block> blocks_;
+
+    /**
+     * 块大小（字节）。
+     */
     size_t block_size_ = 0;
+
+    /**
+     * 单调时钟，每次命中或装入都前进一格。
+     */
     uint64_t clock_ = 0;
+
+    /**
+     * 块命中次数。
+     */
     size_t hits_ = 0;
+
+    /**
+     * 块未命中次数。
+     */
     size_t misses_ = 0;
+
+    /**
+     * 落存储的次数。
+     */
     size_t storage_reads_ = 0;
+
+    /**
+     * 落存储读进来的字节数。
+     */
     size_t storage_bytes_ = 0;
+
+    /**
+     * 真失败的次数（文件尾的短读不算）。
+     */
     size_t read_failures_ = 0;
+
+    /**
+     * 越过文件尾的短读次数。
+     */
     size_t eof_reads_ = 0;
+
+    /**
+     * 存储读花掉的累计毫秒。
+     */
     double io_ms_ = 0.0;
 };
 
@@ -188,18 +380,45 @@ private:
  */
 class FontSource {
 public:
+
     /**
      * 打开文件并解析表目录（只读开头一小段）。
+     * @param path 文件路径
+     * @return true = 打开并解析成功
      */
     bool open(const std::string& path);
 
+    /**
+     * 打开时的路径。
+     * @return 路径
+     */
     const std::string& path() const { return path_; }
+
+    /**
+     * 文件大小。
+     * @return 字节数
+     */
     uint64_t size() const { return storage_.size(); }
+
+    /**
+     * 表目录。
+     * @return 目录
+     */
     const SfntDirectory& dir() const { return dir_; }
+
+    /**
+     * 块缓存（只读，统计从这里读）。
+     * @return 缓存
+     */
     const FontBlockCache& cache() const { return cache_; }
 
     /**
      * 按需读（经过块缓存）。上游要同步契约，所以这里也是同步的。
+     * @param off 文件偏移
+     * @param dst 目标缓冲
+     * @param len 想读多少字节
+     * @param got 实际读到的字节数（可为 nullptr）
+     * @return Ok / Eof / Error
      */
     FontRead readAt(uint64_t off, void* dst, size_t len, size_t* got = nullptr) {
         return cache_.read(storage_, off, dst, len, got);
@@ -207,6 +426,8 @@ public:
 
     /**
      * 转发给块缓存的配置入口（给"块大小该取多少"的实验用）。
+     * @param block_size 块大小（字节）
+     * @param max_blocks 最多几块
      */
     void configureCache(size_t block_size, size_t max_blocks) {
         cache_.configure(block_size, max_blocks);
@@ -214,18 +435,34 @@ public:
 
     /**
      * 拼一张只含小表的骨架字体。会经过块缓存，因此会改动统计。
+     * @param out 骨架字节写到这里（追加）
+     * @return true = 拼好了
      */
     bool buildSkeleton(std::vector<uint8_t>* out);
 
     /**
      * 某张表是否收进骨架。排除的是大表与位图/彩色字形表。
+     * @param tag 四字节标签
+     * @return true = 这张表收进骨架
      */
     static bool inSkeleton(uint32_t tag);
 
 private:
     std::string path_;
+
+    /**
+     * 只读文件。
+     */
     FontStorage storage_;
+
+    /**
+     * 表目录（打开时解析一次）。
+     */
     SfntDirectory dir_;
+
+    /**
+     * 块缓存，两条读路径共用。
+     */
     FontBlockCache cache_;
 };
 

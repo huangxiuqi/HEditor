@@ -18,7 +18,6 @@
 #include "core/doc/length.h"
 
 namespace heditor {
-
 /**
  * 公式的排版后端。本期的唯一取值是 Placeholder：显式占位框，不做伪渲染。
  * 加一档就是加一个真正会排版公式的后端（例如 MathML 或自写的盒模型），
@@ -30,9 +29,17 @@ enum class FormulaBackend : uint8_t {
 
 /**
  * 名字与枚举的互换。落盘只写名字，理由同 image_spec.h。
+ * @param b 后端
+ * @return 名字
  */
 const char* formulaBackendName(FormulaBackend b);
 
+/**
+ * 名字转公式后端。
+ * @param name 名字
+ * @param out 写回后端
+ * @return true = 名字认识
+ */
 bool formulaBackendFromName(const std::string& name, FormulaBackend* out);
 
 struct FormulaSpec {
@@ -42,12 +49,19 @@ struct FormulaSpec {
      */
     std::string expr;
 
+    /**
+     * 用哪个排版后端（本期只有占位）。
+     */
     FormulaBackend backend = FormulaBackend::Placeholder;
 
     /**
      * 显示尺寸。Auto = 按表达式估一个框（见文件头）。
      */
     Length width;
+
+    /**
+     * 显示高度。
+     */
     Length height;
 
     bool operator==(const FormulaSpec&) const = default;

@@ -26,9 +26,21 @@
 namespace heditor {
 
 struct PageMetrics {
-    float width_pt = 595.276f;  // A4 宽（磅）
-    float height_pt = 841.89f;  // A4 高（磅）
-    float margin_pt = 56.7f;    // 默认 2cm
+    /**
+     * 页宽（磅）。含左右页边距，正文可用宽度见 contentWidthPt()。
+     */
+    float width_pt = 595.276f;
+
+    /**
+     * 页高（磅）。含上下页边距。
+     */
+    float height_pt = 841.89f;
+
+    /**
+     * 四边页边距（磅）。默认 2cm。
+     */
+    float margin_pt = 56.7f;
+
     /**
      * 连页（不分页）：排版不在页底断开，内容一列连到底。
      *
@@ -38,20 +50,38 @@ struct PageMetrics {
      *   漏掉任何一条都会留下"某一处还在翻页"的接缝。
      */
     bool continuous = false;
+
     /**
      * 连页下条带的高度（磅）= 页高 + 页间隙。分页下不用它（页高自己就是约束）。
      */
     float slab_pt = 841.89f;
 
+    /**
+     * A4 页度量。
+     * @param margin_pt_ 四边页边距（磅）
+     * @return 页宽页高取 A4、边距取给定值的度量
+     */
     static PageMetrics A4(float margin_pt_ = 56.7f) {
         PageMetrics p;
         p.margin_pt = margin_pt_;
         return p;
     }
+
+    /**
+     * 正文可用宽度（页宽减两侧边距）。断行的可用范围就是它。
+     * @return 可用宽度（磅）
+     */
     float contentWidthPt() const { return width_pt - 2.0f * margin_pt; }
+
+    /**
+     * 正文可用高度（页高减上下边距）。
+     * @return 可用高度（磅）
+     */
     float contentHeightPt() const { return height_pt - 2.0f * margin_pt; }
+
     /**
      * 连页下的条带高度：给 0 或负值时退回页高（永远不能返回 0，它是除数）。
+     * @return 条带高度（磅），恒为正
      */
     float slabHeightPt() const { return slab_pt > 0.0f ? slab_pt : height_pt; }
 
@@ -65,6 +95,10 @@ struct PageMetrics {
         return width_pt == o.width_pt && height_pt == o.height_pt && margin_pt == o.margin_pt &&
                continuous == o.continuous && slab_pt == o.slab_pt;
     }
+
+    /**
+     * 不等 = 精确相等取反。
+     */
     bool operator!=(const PageMetrics& o) const { return !(*this == o); }
 };
 
@@ -78,14 +112,45 @@ struct PageMetrics {
  * 样式表。区间是否合法由 runsTileText 判定。
  */
 struct FormatRun {
+    /**
+     * 区间起点（含），段内码点下标。
+     */
     uint32_t cp_begin = 0;
-    uint32_t cp_end = 0;  // 不含
+
+    /**
+     * 区间终点（不含）。与 cp_begin 一起构成半开区间。
+     */
+    uint32_t cp_end = 0;
+
+    /**
+     * 这一段用哪个字体（FontLibrary 里的下标）。
+     */
     int font_index = 0;
+
+    /**
+     * 字号（磅）。
+     */
     float size_pt = 12.0f;
+
+    /**
+     * 字色。
+     */
     Color color = Color::rgb(24, 24, 24);
+
+    /**
+     * 语言标签（如 zh / mn），整形时用来选 OpenType 语言系统。按内容比，不按指针比。
+     */
     const char* language = nullptr;
+
+    /**
+     * 这一段自己的回退链：font_index 之后依次尝试。空 = 关闭回退。
+     */
     std::vector<int> fallback_font_indices;
 
+    /**
+     * 这一段覆盖几个码点。
+     * @return 码点数（cp_end - cp_begin）
+     */
     uint32_t codepointCount() const { return cp_end - cp_begin; }
 
     /**
@@ -93,6 +158,8 @@ struct FormatRun {
      *
      * 逐字段比较：漏比一个字段会把两个不同格式的文本段并成一个，而合并是不可逆的静默丢格式。
      * 语言按内容比 —— 同一个标签在不同进程里的地址不一样，按指针比会把同一格式判成不同。
+     * @param o 另一段
+     * @return true = 除区间外逐字段相同
      */
     bool sameFormat(const FormatRun& o) const;
 
@@ -142,15 +209,34 @@ enum class InlineAtom : uint8_t {
  * 控件边界的宽度不在这里（排版层按字体现算）；原子的宽高必须给，它是盒子全部的几何。
  */
 struct InlineObject {
-    uint32_t cp = 0;  // 锚点：段内码点下标（可等于段长，表示段尾）
+    /**
+     * 锚点：段内码点下标（可等于段长，表示段尾）。
+     */
+    uint32_t cp = 0;
+
+    /**
+     * 这是控件边界还是原子。
+     */
     InlineObjectKind kind = InlineObjectKind::ControlStart;
-    int owner = -1;          // 不透明句柄，>-1 的才画括号
-    bool read_only = false;  // 只读控件的括号画灰色
+
+    /**
+     * 不透明句柄（编译层给节点 id）；>-1 的才画括号。
+     */
+    int owner = -1;
+
+    /**
+     * 只读控件的括号画灰色。
+     */
+    bool read_only = false;
 
     /**
      * 盒子的显示尺寸（磅）。控件边界恒为 0，原子必须为正。
      */
     float w_pt = 0.0f;
+
+    /**
+     * 盒高（磅）。控件边界恒为 0，原子必须为正。
+     */
     float h_pt = 0.0f;
 
     /**
@@ -159,6 +245,10 @@ struct InlineObject {
      * 两者都只在 kind == Atom 时有意义。
      */
     InlineAtom atom = InlineAtom::None;
+
+    /**
+     * 内容指纹。尺寸没变而内容变了（换了一张同样大的图）在几何上看不出来，行指纹只能靠它。
+     */
     uint64_t content_hash = 0;
 
     bool operator==(const InlineObject& o) const = default;
@@ -171,9 +261,20 @@ struct InlineObject {
  * 同一个分工 —— 引擎拿它回宿主换"这是哪张表"，自己不认识节点 id 的空间。
  */
 struct CellSlot {
+    /**
+     * 表的身份（编译层填模型节点 id，排版层不解释）。
+     */
     uint64_t table = 0;
-    int row = 0;   // 逻辑行号（在该表的行序列里的下标）
-    int cell = 0;  // 逻辑格号（在该行里的下标）
+
+    /**
+     * 逻辑行号（在该表行序列里的下标）。
+     */
+    int row = 0;
+
+    /**
+     * 逻辑格号（在该行里的下标）。
+     */
+    int cell = 0;
 
     bool operator==(const CellSlot& o) const = default;
 };
@@ -207,22 +308,51 @@ enum class TableHAlign : uint8_t { Start, Center, End };
  */
 struct WidthSpec {
     enum class Kind : uint8_t { Auto, Abs, Percent } kind = Kind::Auto;
-    float pt = 0.0f;     // Abs：磅
-    float ratio = 0.0f;  // Percent：0..1
 
+    /**
+     * Kind == Abs 时的宽度（磅）；其余情况无意义。
+     */
+    float pt = 0.0f;
+
+    /**
+     * Kind == Percent 时的比例（0..1），相对内容区宽度。
+     */
+    float ratio = 0.0f;
+
+    /**
+     * 造一个自动宽度。
+     * @return 自动宽（宽度由内容与格宽推）
+     */
     static WidthSpec makeAuto() { return WidthSpec{}; }
+
+    /**
+     * 造一个绝对宽度。
+     * @param v 宽度（磅）
+     * @return 绝对宽度
+     */
     static WidthSpec makeAbs(float v) {
         WidthSpec w;
         w.kind = Kind::Abs;
         w.pt = v;
         return w;
     }
+
+    /**
+     * 造一个相对宽度。
+     * @param r 比例（0..1，相对内容区宽度）
+     * @return 相对宽度
+     */
     static WidthSpec makePercent(float r) {
         WidthSpec w;
         w.kind = Kind::Percent;
         w.ratio = r;
         return w;
     }
+
+    /**
+     * 是不是自动宽度。
+     * @return true = 宽度由排版按内容推
+     */
     bool isAuto() const { return kind == Kind::Auto; }
 };
 
@@ -245,13 +375,44 @@ struct BlockSpec {
      */
     std::vector<uint32_t> cp_text;
 
+    /**
+     * 主字体（FontLibrary 里的下标）。
+     */
     int font_index = 0;
+
+    /**
+     * 字号（磅）。
+     */
     float size_pt = 12.0f;
+
+    /**
+     * 书写模式（横排 / 竖排、列序方向）。断行沿哪个轴由它决定。
+     */
     WritingMode wm = WritingMode::HorizontalTB();
-    float line_factor = 1.6f;  // 行高 / 列宽 = size_pt * line_factor
+
+    /**
+     * 行高倍数：行高 = size_pt * line_factor（竖排时是列宽）。
+     */
+    float line_factor = 1.6f;
+
+    /**
+     * 段后距（磅）。
+     */
     float space_after_pt = 10.0f;
+
+    /**
+     * 这一段之前强制分页。
+     */
     bool page_break_before = false;
-    const char* language = nullptr;  // 例如 "mn" / "zh"
+
+    /**
+     * 语言标签（整形时选 OpenType 语言系统）。按内容比，不按指针。
+     */
+    const char* language = nullptr;
+
+    /**
+     * 默认字色。runs 为空或 run 没覆盖到的部分用它。
+     */
     Color color = Color::rgb(24, 24, 24);
 
     /**
@@ -286,18 +447,35 @@ struct BlockSpec {
      * 换文本会清掉 runs：旧区间是按旧文本的码点下标算的，留着必然铺不满，
      * 于是静默失效。清掉是回到"整段一个 run"的等价情形，属性由块级字段给出。
      * objects 同样要清：它的 cp 锚点也是按旧文本算的，留着会把括号摆到别处去。
+     * @param utf8 新的段落文本（UTF-8）
      */
     void setText(const std::string& utf8) {
         cp_text = utf8ToCodepoints(utf8);
         runs.clear();
         objects.clear();
     }
+
+    /**
+     * 段落文本的 UTF-8 表示（拷出一份）。
+     * @return UTF-8 文本
+     */
     std::string textUtf8() const { return codepointsToUtf8(cp_text); }
+
+    /**
+     * 这段有几个码点。
+     * @return 码点数
+     */
     size_t codepointCount() const { return cp_text.size(); }
+
+    /**
+     * 是不是空段。
+     * @return true = 一个码点都没有
+     */
     bool empty() const { return cp_text.empty(); }
 
     /**
      * 整段一个 run，属性取块级字段。空段给一个空区间（不是空序列）。
+     * @return 覆盖整段的那个 run
      */
     FormatRun wholeRun() const {
         FormatRun r;
@@ -315,6 +493,7 @@ struct BlockSpec {
      * 实际生效的 run 序列：runs 非空时就是它，为空时合成一个覆盖全段的 run。
      * 排版层只读这一个入口，于是"整段一个 run"与"显式一个 run"走同一条代码路径 ——
      * 这正是等价判据成立的原因。
+     * @return 实际生效的 run 序列（空段也非空）
      */
     std::vector<FormatRun> effectiveRuns() const {
         if (!runs.empty()) return runs;
@@ -338,6 +517,9 @@ struct BlockSpec {
 
     /**
      * 两个驻留语言标签是否同一个。空与空相等，空与非空不等。
+     * @param a 语言标签
+     * @param b 语言标签
+     * @return true = 同为 nullptr 或内容相同
      */
     static bool sameLanguage(const char* a, const char* b) {
         if (a == b) return true;
@@ -353,12 +535,39 @@ struct BlockSpec {
  * 排版层要按"一个空段落占一行"处理，不能当成这一格没有内容。
  */
 struct LayoutCell {
+    /**
+     * 逻辑行号（在表的行序列里的下标）。
+     */
     int row = 0;
+
+    /**
+     * 逻辑格号（在该行里的下标）。
+     */
     int cell = 0;
+
+    /**
+     * 占几行（合并行）。1 = 不合并。
+     */
     int row_span = 1;
+
+    /**
+     * 占几列（合并列）。1 = 不合并。
+     */
     int col_span = 1;
+
+    /**
+     * 格内垂直对齐。
+     */
     BoxVAlign v_align = BoxVAlign::Top;
+
+    /**
+     * 这一格的内容在 blocks 里的起始下标。
+     */
     int first_block = 0;
+
+    /**
+     * 这一格有几个块。0 表示空段（仍占一行）。
+     */
     int block_count = 0;
 };
 
@@ -366,14 +575,29 @@ struct LayoutCell {
  * 一行的排版输入。三个开关都在行上（Word 的 w:trPr），行高也在。
  */
 struct LayoutRow {
+    /**
+     * 允许这一行跨页拆开（Word 的 w:cantSplit 取反）。
+     */
     bool can_split_by_page = true;
+
+    /**
+     * 标题行：跨页时在每页重复。
+     */
     bool is_header = false;
+
+    /**
+     * 这一行之前强制分页。
+     */
     bool page_break_before = false;
 
     /**
      * 行高的绝对值。空表示没有绝对值（规则为 Auto，或者模型给的是编译期算不出的相对长度）。
      */
     std::optional<float> height_pt;
+
+    /**
+     * 行高规则：Auto 按内容、AtLeast 取下限、Exact 固定。
+     */
     RowHeightRule height_rule = RowHeightRule::Auto;
 };
 
@@ -384,14 +608,45 @@ struct LayoutRow {
  * col_widths 的长度恒为 cols：显式列宽可能比网格短，短的部分补自动。
  */
 struct LayoutTable {
+    /**
+     * 表的身份（编译层给，原样带回 PlacedTable::handle）。
+     */
     uint64_t handle = 0;
+
+    /**
+     * 整表宽度。
+     */
     WidthSpec width;
+
+    /**
+     * 表在内容区里的水平位置（只在表宽小于可用宽度时生效）。
+     */
     TableHAlign align = TableHAlign::Start;
+
+    /**
+     * 派生网格的行数（由跨度推出来）。
+     */
     int rows = 0;
+
+    /**
+     * 派生网格的列数。
+     */
     int cols = 0;
+
+    /**
+     * 列宽，长度恒为 cols。显式列宽比网格短时，短的部分补自动。
+     */
     std::vector<WidthSpec> col_widths;
-    std::vector<LayoutRow> row_specs;  // 长度恒为 rows
-    std::vector<LayoutCell> cells;     // 逻辑格，按行列顺序
+
+    /**
+     * 每行的开关与行高，长度恒为 rows。
+     */
+    std::vector<LayoutRow> row_specs;
+
+    /**
+     * 逻辑格（含跨度），按行列顺序。
+     */
+    std::vector<LayoutCell> cells;
 };
 
 /**
@@ -402,11 +657,34 @@ struct LayoutTable {
  * 光看矩形分不出"行的顶边"与"上一片段被我接着的那条切口"。
  */
 struct PlacedRow {
+    /**
+     * 逻辑行号（在这张表的行序列里的下标）。
+     */
     int row = 0;
+
+    /**
+     * 这一片段落在第几页。
+     */
     int page = 0;
-    float y = 0.0f;  // 行顶（页内坐标）
+
+    /**
+     * 行顶（页内坐标，磅）。
+     */
+    float y = 0.0f;
+
+    /**
+     * 这一片段的高（磅）。
+     */
     float h = 0.0f;
+
+    /**
+     * 上边接着别处（绘制跳过这条边，跨页处看起来是裁开的）。
+     */
     bool cont_top = false;
+
+    /**
+     * 下边接着别处（同上）。
+     */
     bool cont_bottom = false;
 };
 
@@ -416,23 +694,52 @@ struct PlacedRow {
  * 它只是绘制与命中用的几何投影，不是排版输入 —— 排版输入是 LayoutTable。
  */
 struct PlacedTable {
+    /**
+     * 表的身份，与 LayoutTable::handle 同一个值。
+     */
     uint64_t handle = 0;
+
     /**
      * 这张表在块流里的起始段。增量排版据此判断"这一段的变更要不要连整张表一起重排"，
      * 以及"截断到第 k 段时，哪些表的几何要一起丢掉"（见 EditorEngine::truncateLayoutAt）。
      * 它是表自己的属性（列定义与格 → 段映射的产物），与位置无关。
      */
     int first_block = 0;
-    float x = 0.0f;  // 表格左边（页内坐标）
+
+    /**
+     * 表格左边（页内坐标，磅）。
+     */
+    float x = 0.0f;
+
+    /**
+     * 表格总宽（磅）。
+     */
     float w = 0.0f;
+
+    /**
+     * 行数。
+     */
     int rows = 0;
+
+    /**
+     * 列数。
+     */
     int cols = 0;
+
+    /**
+     * 列边界，相对表格左边，长度 cols+1。
+     */
     std::vector<float> col_x;
+
     /**
      * 逻辑格（含跨度）。绘制要靠它算每个格自己的框 —— 只画格的外框，合并格内部就不会
      * 多出几条线，而"哪些列边界被跨过"这件事也不必另存一份掩码。
      */
     std::vector<LayoutCell> cells;
+
+    /**
+     * 这一张表的行片段（跨页拆开的一行每页各一条）。
+     */
     std::vector<PlacedRow> placed;
 };
 
@@ -440,6 +747,9 @@ struct PlacedTable {
  * runs 是否恰好铺满 [0, cp_text.size())：升序、首尾相接、无空洞、无重叠、区间非空。
  * runs 为空时恒真（等价情形，属性由块级字段给出）。
  * 返回 false 时把第一处不合法的原因写进 why；why 可以为空指针。
+ * @param b 待检的块
+ * @param why 写回第一处不合法的原因（可为 nullptr）
+ * @return true = runs 恰好铺满文本（升序、首尾相接、无空洞、无重叠）
  */
 bool runsTileText(const BlockSpec& b, std::string* why);
 
@@ -447,6 +757,9 @@ bool runsTileText(const BlockSpec& b, std::string* why);
  * 在已解析出的 run 序列里找覆盖该码点的那个；越界或序列为空返回 nullptr。
  * 线性扫描：run 的数量就是"一段里格式变化的次数"，真实文档里是个位数。
  * 入参是调用方自己持有的序列（effectiveRuns 的返回值是按值给的，不能取它的引用）。
+ * @param runs run 序列（调用方自己持有的那份）
+ * @param cp 段内码点下标
+ * @return 覆盖这个码点的 run；越界或序列为空为 nullptr
  */
 const FormatRun* runCovering(const std::vector<FormatRun>& runs, uint32_t cp);
 
@@ -455,6 +768,9 @@ const FormatRun* runCovering(const std::vector<FormatRun>& runs, uint32_t cp);
  * 为什么必须判而不是"约定一下"：排版层按数组顺序线性插槽，顺序一坏，括号的层级
  * 就画错（][ 变 [] ），而画面看上去仍然"有括号"，不容易发现。
  * 返回 false 时把第一处不合法的原因写进 why；why 可以为空指针。
+ * @param b 待检的块
+ * @param why 写回第一处不合法的原因（可为 nullptr）
+ * @return true = objects 按 cp 非降且不越过段长
  */
 bool objectsOrdered(const BlockSpec& b, std::string* why);
 
@@ -462,21 +778,61 @@ bool objectsOrdered(const BlockSpec& b, std::string* why);
  * 已定位的字形。x/y 是"字形原点"在页面坐标系里的位置（页面左上为原点，单位磅）。
  */
 struct PlacedGlyph {
+    /**
+     * 字形下标（字体里的 glyph id）。
+     */
     uint32_t glyph_id = 0;
+
+    /**
+     * 画出这个字形的字体实例。
+     */
     const FontInstance* font = nullptr;
+
+    /**
+     * 字形原点的 x（页面坐标，磅）。
+     */
     float x_pt = 0.0f;
+
+    /**
+     * 字形原点的 y（页面坐标，磅）。
+     */
     float y_pt = 0.0f;
+
+    /**
+     * 这个字形的颜色（来自覆盖它的那个 run）。
+     */
     Color color = Color::rgb(0, 0, 0);
+
+    /**
+     * 落在第几页。
+     */
     int page = 0;
-    int line = 0;  // 横排=行号；竖排=列号
+
+    /**
+     * 横排 = 行号；竖排 = 列号。与 LineBox::line 对齐。
+     */
+    int line = 0;
+
+    /**
+     * 是不是竖排。绘制按它选轴。
+     */
     bool vertical = false;
+
     /**
      * 渲染时要绕 (x_pt, y_pt) 顺时针旋转的角度。蒙文竖排 = 90，
      * 表示"横排成型 + 整段侧倒"，详见 WritingMode::isSideways()。
      */
     float rotate_deg = 0.0f;
-    uint32_t cluster = 0;  // 段内码点下标（与文档偏移同一把尺子）
-    int paragraph = 0;     // 所属块下标 —— 会话期定位时要靠它回到文档
+
+    /**
+     * 段内码点下标（与文档偏移同一把尺子）。
+     */
+    uint32_t cluster = 0;
+
+    /**
+     * 所属块下标 —— 会话期定位时要靠它回到文档。
+     */
+    int paragraph = 0;
 };
 
 /**
@@ -509,8 +865,15 @@ enum class BracketSide : uint8_t { None = 0, Open = 1, Close = 2 };
  * 反向查询（磅坐标 → 码点偏移）由引擎层在 LineBox 数组上做。
  */
 struct LineCluster {
-    uint32_t cp = 0;         // 簇首的段内码点下标
-    float inline_pt = 0.0f;  // 相对行首的沿行内轴偏移（磅）
+    /**
+     * 簇首的段内码点下标。
+     */
+    uint32_t cp = 0;
+
+    /**
+     * 相对行首的沿行内轴偏移（磅）。
+     */
+    float inline_pt = 0.0f;
 
     /**
      * 这个簇是"表单括号的占位"：只占 advance，没有字形。
@@ -582,11 +945,34 @@ struct LineCluster {
  * 而且三种书写轴各写一遍 = 六份互相不一致的实现。
  */
 struct LineBox {
+    /**
+     * 所属块下标。
+     */
     int paragraph = 0;
-    int line = 0;  // 全局行/列号，与 PlacedGlyph::line 对齐
+
+    /**
+     * 全局行/列号，与 PlacedGlyph::line 对齐。
+     */
+    int line = 0;
+
+    /**
+     * 落在第几页。
+     */
     int page = 0;
+
+    /**
+     * 是不是竖排。
+     */
     bool vertical = false;
+
+    /**
+     * 是不是侧倒（蒙文竖排：横排成型后整段转 90 度）。
+     */
     bool sideways = false;
+
+    /**
+     * 这一行的主字号（磅）。
+     */
     float size_pt = 12.0f;
 
     /**
@@ -594,6 +980,10 @@ struct LineBox {
      * 横排：block_lo = 基线 - ascent，block_hi = 基线 + descent。
      */
     float block_lo_pt = 0.0f;
+
+    /**
+     * 块轴范围的上界（页面坐标，磅）。
+     */
     float block_hi_pt = 0.0f;
 
     /**
@@ -607,13 +997,22 @@ struct LineBox {
      * 竖排的列盒不维护这三个值：列沿块轴的推进是列宽，由换带规则算，不是这三样。
      */
     float ascent_pt = 0.0f;
+
+    /**
+     * 基线以下多少（磅）。
+     */
     float descent_pt = 0.0f;
+
+    /**
+     * 沿块轴推进多少（行高，磅）。
+     */
     float advance_pt = 0.0f;
 
     /**
      * 行内轴的起点（横排 = 基线起始 x；竖排 = 列顶 y），页面坐标（磅）。
      */
     float inline_origin_pt = 0.0f;
+
     /**
      * 行末位置，相对行首（磅）。
      */
@@ -623,6 +1022,10 @@ struct LineBox {
      * 本行覆盖的段内码点区间 [first_cp, last_cp)
      */
     uint32_t first_cp = 0;
+
+    /**
+     * 本行的结束偏移（不含）。
+     */
     uint32_t last_cp = 0;
 
     /**
@@ -632,6 +1035,10 @@ struct LineBox {
      * 就会跳到下一格。格范围是这一格的宽度，与文字多长无关。
      */
     float cell_lo_pt = 0.0f;
+
+    /**
+     * 格内容区在行内轴上的上界（页内坐标）。
+     */
     float cell_hi_pt = 0.0f;
 
     /**
@@ -642,6 +1049,10 @@ struct LineBox {
      * 整格，留一条内边距的空隙就是"选区的左右还有缝"。
      */
     float cell_box_lo_pt = 0.0f;
+
+    /**
+     * 格外框在行内轴上的上界（页内坐标）。
+     */
     float cell_box_hi_pt = 0.0f;
 
     /**
@@ -651,6 +1062,10 @@ struct LineBox {
      * （AtLeast）比内容高时，上下那两截空白也得算进高亮。排版在行高结算之后回填。
      */
     float cell_top_pt = 0.0f;
+
+    /**
+     * 格的块轴下界（页内坐标）。
+     */
     float cell_bottom_pt = 0.0f;
 
     /**
@@ -671,6 +1086,7 @@ struct LineBox {
      * 行盒里存着字体与基线，这种情况才画得出来。
      */
     const FontInstance* bracket_font = nullptr;
+
     /**
      * 横排：字形原点的 y（= 基线）；竖排：字形原点的 x（列心 / 侧倒笔位），
      * 也就是与 PlacedGlyph::x_pt 同一把尺子。
@@ -689,6 +1105,8 @@ struct LineBox {
     /**
      * 本偏移上第一枚簇在 clusters 里的下标；本行没有这个偏移的簇时返回 clusters.size()。
      * 同一偏移上的簇必然连续：占位括号在前、真实簇在后（见 layout.cpp 的 emitSlot）。
+     * @param cp 段内码点下标
+     * @return 第一枚簇的下标；本行没有这个偏移时为 clusters.size()
      */
     size_t firstClusterAt(uint32_t cp) const {
         for (size_t i = 0; i < clusters.size(); ++i)
@@ -698,6 +1116,8 @@ struct LineBox {
 
     /**
      * 本偏移上占位括号的枚数 —— 也就是这个偏移的侧别上限。
+     * @param cp 段内码点下标
+     * @return 这个偏移上占位括号的枚数（侧别上限）
      */
     int bracketCountAt(uint32_t cp) const {
         int n = 0;
@@ -709,14 +1129,13 @@ struct LineBox {
     /**
      * (码点偏移, 侧别) → 相对行首的沿行内轴位置（磅）。侧别 = 在这个偏移上跨过了几枚簇。
      *
-     * 为什么偏移本身不够：同一个偏移上可能压着好几枚括号，于是"控件之前 / 进入控件 /
-     * 内容末尾 / 控件之后"是好几个互不相同的插入点（flow.h 定的四个流位置）。偏移把这个
-     * 分量丢掉了，只剩一个数 —— "字与开括号之间""两个相邻控件之间"这些位置于是根本表达
-     * 不出来：点不进去，方向键也整段跳过去。
-     *
-     * 补回来的那个分量排版侧本来就记着：括号占位各占一枚簇，所以侧别就是"数格子"。
-     * 取值 0 = 所有括号之前；逐枚数下去；到 bracketCountAt(cp) 就是本偏移上所有括号之后，
-     * 也就是紧随其后那个真实簇的位置（本偏移没有真实簇时是行末）。
+     * 偏移本身不够：同一个偏移上可能压着好几枚括号，"控件之前 / 进入控件 / 内容末尾 /
+     *   控件之后"是好几个互不相同的插入点（flow.h 的四个流位置），偏移把这个分量丢了。
+     * 补回来的那个分量排版侧本来就记着：括号占位各占一枚簇，侧别就是"数格子"。取值 0 =
+     *   所有括号之前；逐枚数下去；到 bracketCountAt(cp) 就是本偏移上所有括号之后。
+     * @param cp 段内码点下标
+     * @param side 跨过几枚括号（0 = 全部之前）
+     * @return 相对行首的沿行内轴位置（磅）
      */
     float offsetAtSide(uint32_t cp, int side) const {
         if (clusters.empty()) return 0.0f;
@@ -749,14 +1168,32 @@ struct LineBox {
  * 该等价性由 EditorEngine::auditLayout() 用一次全量重排当场校验。
  */
 struct ReflowState {
-    int page_index = 0;     // 本段的起始页号
-    float cursor_y = 0.0f;  // 本段首行的块轴起点（磅）
-    int line_total = 0;     // 本段之前的累计行数（全局行号从此续起）
+    /**
+     * 本段的起始页号。
+     */
+    int page_index = 0;
 
+    /**
+     * 本段首行的块轴起点（磅）。
+     */
+    float cursor_y = 0.0f;
+
+    /**
+     * 本段之前的累计行数（全局行号从此续起）。
+     */
+    int line_total = 0;
+
+    /**
+     * 精确相等。1ulp 的差异也算不同 —— 它会改变后续落行。
+     */
     bool operator==(const ReflowState& o) const {
         // 精确比较：1ulp 的差异也可能改变后续落行，必须重排后缀。
         return page_index == o.page_index && line_total == o.line_total && cursor_y == o.cursor_y;
     }
+
+    /**
+     * 不等 = 精确相等取反。
+     */
     bool operator!=(const ReflowState& o) const { return !(*this == o); }
 };
 
@@ -775,14 +1212,45 @@ inline ReflowState freshReflowState(const PageMetrics& page) {
  * 否则「第 k 段」在两个模块里会指向不同的东西。
  */
 struct ParaIndex {
-    int line_begin = 0;          // lines 中的起始下标
-    int line_end = 0;            // lines 中的结束下标（不含）
-    int glyph_begin = 0;         // glyphs 中的起始下标
-    int glyph_end = 0;           // glyphs 中的结束下标（不含）
-    int cluster_count = 0;       // 本段整形出的簇数（仅统计，不参与几何）
-    int missing_count = 0;       // 本段跑完回退链仍为 .notdef 的字形数
-    int font_run_count = 0;      // 本段切出的字体 run 数
-    ReflowState state_at_start;  // 本段开始时的续排状态，增量从这里续排
+    /**
+     * lines 中的起始下标。
+     */
+    int line_begin = 0;
+
+    /**
+     * lines 中的结束下标（不含）。
+     */
+    int line_end = 0;
+
+    /**
+     * glyphs 中的起始下标。
+     */
+    int glyph_begin = 0;
+
+    /**
+     * glyphs 中的结束下标（不含）。
+     */
+    int glyph_end = 0;
+
+    /**
+     * 本段整形出的簇数（仅统计，不参与几何）。
+     */
+    int cluster_count = 0;
+
+    /**
+     * 本段跑完回退链仍为 .notdef 的字形数。
+     */
+    int missing_count = 0;
+
+    /**
+     * 本段切出的字体 run 数。
+     */
+    int font_run_count = 0;
+
+    /**
+     * 本段开始时的续排状态，增量从这里续排。
+     */
+    ReflowState state_at_start;
 };
 
 /**
@@ -794,55 +1262,111 @@ struct ParaIndex {
 class ShapingCache {
 public:
     ShapingCache();
+
+    /**
+     * 释放实现（缓存里那份 HarfBuzz 结果）。
+     */
     ~ShapingCache();
     ShapingCache(const ShapingCache&) = delete;
     ShapingCache& operator=(const ShapingCache&) = delete;
 
+    /**
+     * 清空缓存（换字体或改配置之后）。
+     */
     void clear();
 
     /**
      * 已缓存的段落数。
+     * @return 已缓存的段落数
      */
     size_t size() const;
+
     /**
      * 累计命中次数（增量跳过了多少次整形）。
+     * @return 命中次数
      */
     long long hits() const;
+
     /**
      * 累计未命中次数（真正跑过 HarfBuzz 的次数）。
+     * @return 未命中次数
      */
     long long misses() const;
 
-    struct Impl;  // 定义在 layout.cpp
+    /**
+     * 实现（定义在 layout.cpp，避免使用者被拖进 shaper.h）。
+     */
+    struct Impl;
 
 private:
     friend struct ShapingCacheAccess;
+
+    /**
+     * 实现（定义在 layout.cpp）。
+     */
     Impl* impl_ = nullptr;
 };
 
 struct LayoutStats {
+    /**
+     * 排出来的总页数。
+     */
     int page_count = 0;
+
+    /**
+     * 字形总数。
+     */
     int glyph_count = 0;
-    int placed_line_count = 0;  // 横排=行数，竖排=列数
+
+    /**
+     * 落位过的行数（竖排是列数）。
+     */
+    int placed_line_count = 0;
+
+    /**
+     * 字素簇总数。
+     */
     int cluster_count = 0;
+
     /**
      * 跑完整条回退链之后仍然是 .notdef 的字形数。
      * 非 0 就说明文档里有字体链覆盖不到的码点 —— 这是可证伪的"缺字"指标。
      */
     int missing_glyph_count = 0;
-    int font_run_count = 0;  // 回退切出的 run 总数（=1 表示整块单字体）
+
+    /**
+     * 回退切出的 run 总数（=1 表示整块单字体）。
+     */
+    int font_run_count = 0;
+
+    /**
+     * 整形耗时（毫秒）。
+     */
     double shape_ms = 0.0;
+
+    /**
+     * 排版耗时（毫秒）。
+     */
     double layout_ms = 0.0;
 };
 
 struct LayoutResult {
+    /**
+     * 字形，按 (块, 簇) 顺序。
+     */
     std::vector<PlacedGlyph> glyphs;
+
+    /**
+     * 行盒，按 (块, 行) 顺序。
+     */
     std::vector<LineBox> lines;
+
     /**
      * 每段在 glyphs / lines 里的切片 + 该段的续排锚点（见 ParaIndex）。
      * 增量排版靠它做"截断前缀 / 搬回后缀"；也靠它把统计从每段拼回来。
      */
     std::vector<ParaIndex> para_index;
+
     /**
      * 每个块一份：簇起点的段内码点下标（升序），末尾追加段长作为哨兵。
      * 编辑操作靠它把偏移吸附到"用户感知字符"的边界（退格删一个簇，
@@ -856,6 +1380,10 @@ struct LayoutResult {
      * 空表与"这段代码不存在"逐字节相同。
      */
     std::vector<PlacedTable> placed_tables;
+
+    /**
+     * 这一轮排版的账。
+     */
     LayoutStats stats;
 };
 
@@ -871,6 +1399,11 @@ struct LayoutResult {
  * 它由产生块流的那一侧落成对象表。于是"要画"和"要占位"在结构上不可能不一致。
  *
  * 已知边界：只处理同一段内的边界，端点跨段的控件拿不到占位（控件矩形与命中测试已支持跨段）。
+ * @param lib 字体库
+ * @param blocks 块流（排版输入）
+ * @param page 页度量
+ * @param tables 表格结构（空 = 没有表格）
+ * @return 字形、行盒、每段切片与这一轮的账
  */
 LayoutResult layoutDocument(FontLibrary& lib, const std::vector<BlockSpec>& blocks,
                             const PageMetrics& page, const std::vector<LayoutTable>& tables = {});
@@ -882,10 +1415,16 @@ LayoutResult layoutDocument(FontLibrary& lib, const std::vector<BlockSpec>& bloc
  * state 必须是第 from_para 段开始时的续排状态（见 ParaIndex::state_at_start），
  * 传错不崩溃但与全量排版不一致，这正是 auditLayout() 要抓的错误；返回值是第
  * to_para 段开始时的续排状态，可直接作为下一次续排的入参。
- *
- * @param cache 段级整形缓存；传 nullptr 表示不使用缓存（每次都真整形），用于对照路径与
- *              单测中的全量基准。
- * @note 返回时 out.stats 的汇总量按 para_index 逐段重算，复用前缀也不会得到半篇的数字；
+ * @param lib 字体库
+ * @param blocks 块流
+ * @param page 页度量
+ * @param from_para 起始段（含）
+ * @param to_para 结束段（不含）
+ * @param state 第 from_para 段开始时的续排状态
+ * @param cache 段级整形缓存；nullptr = 不用缓存（对照路径与单测的全量基准）
+ * @param out 结果写到这里（前缀原样保留）
+ * @return 第 to_para 段开始时的续排状态
+ * @note 返回时 out.stats 按 para_index 逐段重算，复用前缀也不会得到半篇的数字；
  *       shape_ms 例外，只计本轮真正跑过的整形。
  */
 ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& blocks,
@@ -898,6 +1437,16 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
  *
  * 表格只支持横排：竖排文档里的表格块仍按整页宽排（明确的边界，不做静默的错误布局）。
  * tables 为空时与不带表格的那条入口逐字节相同（所有现有调用点走的就是这条路）。
+ * @param lib 字体库
+ * @param blocks 块流
+ * @param page 页度量
+ * @param tables 表格结构（空 = 没有表格）
+ * @param from_para 起始段（含）
+ * @param to_para 结束段（不含）
+ * @param state 起始续排状态
+ * @param cache 段级整形缓存；nullptr = 不用缓存
+ * @param out 结果写到这里
+ * @return 第 to_para 段开始时的续排状态
  */
 ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<BlockSpec>& blocks,
                                           const PageMetrics& page,
@@ -913,6 +1462,7 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
  * 报出不同的字形数/行数（数字是真的，归属却错了）。page_count / shape_ms / layout_ms
  * 不在这里：它们要么由调用方按自己的语义填（拼接路径的页数来自后缀的旧值），
  * 要么是耗时。
+ * @param out 要汇总的排版结果（就地写 stats）
  */
 void summarizeLayoutStats(LayoutResult* out);
 

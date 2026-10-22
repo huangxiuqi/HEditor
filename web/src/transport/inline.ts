@@ -19,15 +19,23 @@ export interface AssetPaths {
    * 胶水脚本的绝对地址（heditor.js）。
    */
   glue: string;
+
+  /**
+   * wasm 的绝对地址；空 = 由胶水按自己的目录推。
+   */
+  wasm?: string;
+
   /**
    * 缓存戳（?v= 之后那一串），会一路带到 wasm 的 locateFile。
    */
   bust?: string;
   fonts: Array<{ role: string; path: string; label?: string }>;
+
   /**
    * 产物目录（相对地址按它解析）。
    */
   base: string;
+
   /**
    * Worker 壳的地址（transport: 'worker' 用）。
    */
@@ -38,10 +46,12 @@ export interface InlineOptions {
   container: HTMLElement;
   assets: AssetPaths;
   dpr: number;
+
   /**
    * 密度（设备像素 / 磅）。
    */
   zoom: number;
+
   /**
    * 初始文档：true = 一份空文档（库的默认），false = 演示场景。
    */
@@ -70,6 +80,11 @@ function loadScript(src: string): Promise<void> {
   return p;
 }
 
+/**
+ * 造同线程传输：引擎就在这一页上，命令同步生效。
+ * @param opts 容器、素材、缩放与初始文档
+ * @returns link（同步）、start 与 destroy
+ */
 export function createInline(opts: InlineOptions): {
   link: EngineLink;
   start(dom: DomHost): Promise<void>;
@@ -170,6 +185,8 @@ export function createInline(opts: InlineOptions): {
       const vs = viewSize();
       await api.boot({
         glue: assets.glue,
+        // wasm 显式给了就按它取（开发服务器的根不是仓库根时靠这一条）。
+        wasm: assets.wasm ?? '',
         bust: assets.bust ?? '',
         exportName: 'CreateHEditor',
         fonts: assets.fonts,
@@ -196,6 +213,9 @@ export function createInline(opts: InlineOptions): {
 
 /**
  * 字体清单：默认三份 Noto（正文 / 蒙文 / 拉丁），路径相对产物目录。
+   * @param base 产物目录
+   * @param list 调用方给的清单
+   * @returns 角色与绝对地址
  */
 export function defaultFonts(base: string, list?: FontSource[]): Array<{ role: string; path: string }> {
   const src = list && list.length

@@ -21,7 +21,6 @@
 #include "core/doc/length.h"
 
 namespace heditor {
-
 /**
  * 定位方式。本期内联；浮动两档先留位 —— 它改的是断行核心，不是加一个字段。
  */
@@ -41,11 +40,32 @@ enum class ImageWrap : uint8_t {
 /**
  * 名字与枚举的互换。落盘只写名字（第六节：格式里的枚举用字符串），
  * 于是加一档不改格式、旧文件读得回来。
+ * @param a 浮动方式
+ * @return 名字
  */
 const char* imageAnchorName(ImageAnchor a);
+
+/**
+ * 绕排方式的名字。
+ * @param w 绕排方式
+ * @return 名字
+ */
 const char* imageWrapName(ImageWrap w);
 
+/**
+ * 名字转浮动方式。
+ * @param name 名字
+ * @param out 写回方式
+ * @return true = 名字认识
+ */
 bool imageAnchorFromName(const std::string& name, ImageAnchor* out);
+
+/**
+ * 名字转绕排方式。
+ * @param name 名字
+ * @param out 写回方式
+ * @return true = 名字认识
+ */
 bool imageWrapFromName(const std::string& name, ImageWrap* out);
 
 struct ImageSpec {
@@ -60,7 +80,15 @@ struct ImageSpec {
      * 显示尺寸的 Auto 档由它们折算。
      */
     int px_w = 0;
+
+    /**
+     * 原始像素高。
+     */
     int px_h = 0;
+
+    /**
+     * 原始像素的 DPI。
+     */
     int dpi = 96;
 
     /**
@@ -68,9 +96,20 @@ struct ImageSpec {
      * 保持原始宽高比。两边的换算都只发生一次，在编译层（见 compile.cpp）。
      */
     Length width;
+
+    /**
+     * 显示高度（Auto 表示按比例推）。
+     */
     Length height;
 
+    /**
+     * 浮动还是随文。
+     */
     ImageAnchor anchor = ImageAnchor::Inline;
+
+    /**
+     * 文字怎么绕排。
+     */
     ImageWrap wrap = ImageWrap::None;
 
     bool operator==(const ImageSpec&) const = default;

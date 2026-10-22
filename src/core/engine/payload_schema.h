@@ -6,7 +6,6 @@
 #include "payload_schema.gen.h"
 
 namespace pk {
-
 /**
  * 校验一份载荷的顶层键，然后把原字符串原样返回。
  *

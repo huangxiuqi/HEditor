@@ -17,7 +17,6 @@
 #include "core/rev/rev.h"
 
 namespace heditor::rev {
-
 /**
  * 把一批步骤按顺序落到 doc 上，最后按模型层同一套规则规范化一次。
  *

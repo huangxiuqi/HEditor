@@ -31,17 +31,33 @@ class NodeTree;
  */
 enum class FieldKind : uint8_t { PageNumber = 0, PageCount = 1, PrintDate = 2, DocProperty = 3 };
 
+/**
+ * 域种类的名字。
+ * @param kind 种类
+ * @return 名字
+ */
 const char* fieldKindName(FieldKind kind);
 
+/**
+ * 名字转域种类。
+ * @param name 名字
+ * @param out 写回种类
+ * @return true = 名字认识
+ */
 bool fieldKindFromName(const std::string& name, FieldKind* out);
 
 /**
  * 这个种类的域是不是本次排版的结果。是则它的值依赖上一轮排版，页脚同时写页码与总页数时
  * 正是这一条让它有循环风险 —— 所以它是"哪一类域需要迭代"的唯一判据。
+ * @param kind 域种类
+ * @return true = 这类域的值来自排版结果（页码 / 总页数）
  */
 bool isLayoutResult(FieldKind kind);
 
 struct FieldSpec {
+    /**
+     * 域的种类。
+     */
     FieldKind kind = FieldKind::PageNumber;
 
     /**
@@ -63,9 +79,24 @@ struct FieldSpec {
  * 页码与总页数由排版填进来（那是本次排版的结果）。
  */
 struct FieldContext {
+    /**
+     * 这一页的页码。
+     */
     int page_number = 0;
+
+    /**
+     * 文档总页数。
+     */
     int page_count = 0;
+
+    /**
+     * 打印日期（由宿主给，模型没有时钟）。
+     */
     std::string print_date;
+
+    /**
+     * 文档属性表。
+     */
     std::map<std::string, std::string> doc_properties;
 };
 
@@ -73,6 +104,9 @@ struct FieldContext {
  * 一个域在给定上下文里的值。四种取值都只依赖上下文，所以对同一份上下文重复调用得到同一个
  * 结果 —— 求值幂等的前提。DocProperty 在属性表里查不到时给空串：属性缺失是常规状态，
  * 不猜也不报错。
+ * @param field 域记录
+ * @param ctx 求值上下文
+ * @return 值（属性查不到时为空串）
  */
 std::string fieldValue(const FieldSpec& field, const FieldContext& ctx);
 
@@ -81,7 +115,14 @@ std::string fieldValue(const FieldSpec& field, const FieldContext& ctx);
  * 幂等判据看的就是第二次求值的 updated 为 0。
  */
 struct FieldEvalResult {
+    /**
+     * 看到的域个数。
+     */
     int examined = 0;
+
+    /**
+     * 缓存值真的变了的个数（第二次求值应为 0）。
+     */
     int updated = 0;
 };
 
@@ -90,6 +131,9 @@ struct FieldEvalResult {
  *
  * 它不接收事务、也不返回编辑步骤，所以在结构上不可能往撤销栈里塞东西。正文按树顺序走，
  * 页眉页脚的片段由节的记录引用、不在正文流里，所以另外按记录里的根逐个走一遍。
+ * @param tree 文档树
+ * @param ctx 求值上下文
+ * @return 看了几个域、几个缓存值真的变了
  */
 FieldEvalResult evaluateFields(NodeTree& tree, const FieldContext& ctx);
 

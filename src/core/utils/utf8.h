@@ -8,7 +8,6 @@
 #include <string_view>
 
 namespace heditor {
-
 /**
  * 把一个码点按 UTF-8 追加到 out。非法码点（代理区、超过 U+10FFFF）写成 U+FFFD ——
  * 与 decodeUtf8 的容错口径对称：坏数据读进来是替换字符，写出去也不产出非法序列。

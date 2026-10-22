@@ -1,0 +1,59 @@
+/* 示例页的样式。只服务这一页（库自己注入骨架与错误面的样式，不依赖这份）。 */
+
+:root {
+  --bg: #f4f5f7;
+  --panel: #fff;
+  --ink: #1b1f24;
+  --dim: #5b6572;
+  --line: #d8dde4;
+  --accent: #1f6feb;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171a;
+    --panel: #1c2024;
+    --ink: #e6e9ee;
+    --dim: #9aa4b0;
+    --line: #2c3238;
+  }
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font: 14px/1.5 -apple-system, "Segoe UI", "Noto Sans SC", sans-serif;
+  display: flex;
+  flex-direction: column;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+
+header h1 { font-size: 14px; margin: 0 12px 0 0; font-weight: 600; }
+
+button {
+  font: inherit;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: inherit;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+button:hover { border-color: var(--accent); color: var(--accent); }
+
+#status { margin-left: auto; color: var(--dim); font-variant-numeric: tabular-nums; }
+
+#ed { flex: 1; min-height: 0; }
+#ed .heditor-body { height: 100%; }
+#ed #stage { height: 100%; overflow: auto; background: var(--bg); }

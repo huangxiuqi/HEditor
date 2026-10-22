@@ -28,14 +28,24 @@
 #include "core/layout/layout.h"
 
 namespace heditor {
-
 /**
  * 一条编译诊断：这里有一段内容没被编译，以及为什么。
  */
 struct CompileDiagnostic {
-    NodeKind kind = NodeKind::TextRun;  // 不支持的元素种类
-    NodeId node = kInvalidNodeId;       // 该元素在树里的 id，便于定位
-    std::string detail;                 // 人可读原因
+    /**
+     * 不支持的元素种类。
+     */
+    NodeKind kind = NodeKind::TextRun;
+
+    /**
+     * 该元素在树里的 id，便于定位。
+     */
+    NodeId node = kInvalidNodeId;
+
+    /**
+     * 人可读的失败原因。
+     */
+    std::string detail;
 };
 
 /**
@@ -52,7 +62,14 @@ struct CompileDiagnostic {
  * 都是它自己那一段真实吃到的那两个元素。
  */
 struct BlockSource {
+    /**
+     * 本块吃到的第一个在流里占位的元素。
+     */
     NodeId first = kInvalidNodeId;
+
+    /**
+     * 本块的结束标记；无效值表示末尾那段还没被标记结束。
+     */
     NodeId mark = kInvalidNodeId;
 };
 
@@ -67,11 +84,30 @@ struct BlockSource {
  * 排版按格取内容，光标按块找格。
  */
 struct CompileResult {
+    /**
+     * 块流，按流顺序。
+     */
     std::vector<BlockSpec> blocks;
+
+    /**
+     * 没被编译的元素与原因。
+     */
     std::vector<CompileDiagnostic> diagnostics;
+
+    /**
+     * 每块的来源身份，与 blocks 同长同序。
+     */
     std::vector<BlockSource> sources;
+
+    /**
+     * 表格结构（外层在前，嵌套的内层在后）。
+     */
     std::vector<LayoutTable> tables;
 
+    /**
+     * 产物完整吗（没有诊断）。
+     * @return true = 没有诊断
+     */
     bool ok() const { return diagnostics.empty(); }
 };
 
@@ -82,6 +118,10 @@ struct CompileResult {
  * sheet 是样式表：段落上挂的是"样式引用 + 内联覆盖"，这里按三层解析出完整格式再写进
  * 引擎输入（第六节）。没有样式表也要传一张空表 —— 空表的文档默认值就是各字段的默认值，
  * 于是"传空表"与"完全不解析样式"逐字段相同。
+ * @param tree 文档树
+ * @param vis 可见性口径
+ * @param sheet 样式表
+ * @return 块流、来源身份、表格与诊断
  */
 CompileResult compileDocument(const NodeTree& tree, FlowVisibility vis, const StyleSheet& sheet);
 
@@ -91,6 +131,11 @@ CompileResult compileDocument(const NodeTree& tree, FlowVisibility vis, const St
  * 它与正文共用同一个编译过程（同一套块级节点、同一套三层解析），差别只在入口 —— 片段根
  * 不在正文流里、也不会遇到节，所以没有分节强制分页这一项。root 不是容器或不存在时返回
  * 空产物（blocks 为空、诊断也为空），调用方拿不到内容就是拿不到，不伪造一段空段落。
+ * @param tree 文档树
+ * @param root 片段根的节点号
+ * @param vis 可见性口径
+ * @param sheet 样式表
+ * @return 这一棵子树的编译结果
  */
 CompileResult compileFragment(const NodeTree& tree, NodeId root, FlowVisibility vis,
                               const StyleSheet& sheet);
@@ -104,6 +149,13 @@ CompileResult compileFragment(const NodeTree& tree, NodeId root, FlowVisibility 
  * 那两样都会让"这一段的产物"依赖区间之外的状态（分节强制分页、段数）。
  *
  * 产出的 blocks 与 sources 仍按流顺序，且只覆盖这个区间里的段落。
+ * @param tree 文档树
+ * @param container 容器节点号
+ * @param begin 起始槽位（含）
+ * @param end 结束槽位（不含）
+ * @param vis 可见性口径
+ * @param sheet 样式表
+ * @return 这一段孩子的编译结果
  */
 CompileResult compileChildRange(const NodeTree& tree, NodeId container, int begin, int end,
                                 FlowVisibility vis, const StyleSheet& sheet);

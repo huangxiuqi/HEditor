@@ -14,7 +14,11 @@
 namespace heditor {
 
 struct EngineConfig {
+    /**
+     * 页面度量：页宽、页高、页边距（磅）。装载时由宿主改写，改它要整篇重排。
+     */
     PageMetrics page = PageMetrics::A4();
+
     /**
      * Tab 的缩进宽度（空格数）。
      *
@@ -39,8 +43,16 @@ struct EngineConfig {
      */
     int undo_limit = 100;
 
-    float zoom = 2.0f;  // 设备像素 / 磅。2.0 ≈ 144dpi
+    /**
+     * 设备像素 / 磅。2.0 约等于 144 dpi。
+     */
+    float zoom = 2.0f;
+
+    /**
+     * 页间隙（磅）。连页模式下由宿主设成 0，让条带首尾相接。
+     */
     float page_gap_pt = 14.0f;
+
     /**
      * 连页模式：排版不分页，内容一列连到底。
      *
@@ -49,17 +61,43 @@ struct EngineConfig {
      * 宿主配合的两件事：页间隙设成 0（条带首尾相接）、滚动高度取内容总高而不是页数乘步距。
      */
     bool continuous = false;
+
+    /**
+     * 编辑器底色（页与页之间的那一圈）。
+     */
     Color background = Color::rgb(238, 240, 243);
+
+    /**
+     * 页纸底色。
+     */
     Color page_fill = Color::rgb(255, 255, 255);
+
+    /**
+     * 页框颜色；是否画由 draw_page_border 决定。
+     */
     Color page_border = Color::rgb(206, 212, 218);
+
+    /**
+     * 光标颜色。
+     */
     Color caret_color = Color::rgb(31, 111, 235);
+
     /**
      * 选区底色。alpha 故意不是 255：它盖在文字上，实心填充会把字一起抹掉。
      * 混过之后白底大约落在浅蓝那一带、字仍是深色 —— 这才是"选中"该有的样子。
      */
     Color selection_color = Color{178, 214, 255, 90};
+
+    /**
+     * 光标线宽（磅）。下限 0.4，宿主设更小时按 0.4 画。
+     */
     float caret_width_pt = 1.4f;
+
+    /**
+     * 画不画页框。它只影响光栅，不重排。
+     */
     bool draw_page_border = true;
+
     /**
      * 表格格线，纯黑。宽度固定为一个设备像素（见绘制处）—— 线宽不做成配置项：
      * 它一旦跟着缩放变粗，跨页拼接处的两条半像素线就会显出来。
@@ -78,8 +116,16 @@ struct EngineConfig {
      * 标记画进页位图：它跟着编辑模式变，切模式要让这几页的内容重算。
      */
     bool show_brackets = true;
-    Color control_mark = Color::rgb(56, 139, 253);      // 可编辑：亮蓝
-    Color control_mark_ro = Color::rgb(168, 168, 168);  // 只读：灰（否则看着能改）
+
+    /**
+     * 可编辑控件的括号颜色（亮蓝）。
+     */
+    Color control_mark = Color::rgb(56, 139, 253);
+
+    /**
+     * 只读控件的括号颜色（灰）。用灰色是因为亮蓝会让只读字段看着能改。
+     */
+    Color control_mark_ro = Color::rgb(168, 168, 168);
 
     /**
      * 小点：控件右下角的一个小方块。
@@ -88,7 +134,11 @@ struct EngineConfig {
      * "这里有一个字段"，不表示"光标不在这里"。尺寸是磅值，跟着缩放走。
      */
     bool show_control_dots = false;
-    float control_dot_pt = 3.0f;  // 小点边长（磅）
+
+    /**
+     * 小点边长（磅），跟着缩放走。
+     */
+    float control_dot_pt = 3.0f;
 
     /**
      * 行内原子的占位框。
@@ -100,8 +150,17 @@ struct EngineConfig {
      * 底色调得很浅：它是页面内容的一部分（画在页位图里），重了会盖过正文的灰度。
      */
     Color atom_fill = Color::rgb(246, 248, 250);
+
+    /**
+     * 原子占位框的边框颜色。
+     */
     Color atom_border = Color::rgb(174, 186, 199);
+
+    /**
+     * 原子占位框里文字的颜色。
+     */
     Color atom_text = Color::rgb(110, 122, 135);
+
     /**
      * 框里文字左右各留的边距（磅）。
      */

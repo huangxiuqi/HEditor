@@ -29,7 +29,6 @@
 #include "core/doc/table_spec.h"
 
 namespace heditor {
-
 /**
  * 位置映射"贴哪一边"：位置正好落在插入或删除的边界上时归左边还是右边。
  *
@@ -41,8 +40,19 @@ enum class Assoc : uint8_t { Before, After };
  * 在文本位置插入码点序列（普通输入）。
  */
 struct InsertText {
+    /**
+     * 插入位置（流位置）。
+     */
     FlowPos at = 0;
+
+    /**
+     * 要插入的码点。
+     */
     std::vector<uint32_t> cps;
+
+    /**
+     * 这些码点的字符格式（标记）。
+     */
     CharFormat marks;
 
     /**
@@ -56,7 +66,14 @@ struct InsertText {
  * 把一段片段插回。它既是删除的逆操作，也是粘贴。
  */
 struct InsertFragment {
+    /**
+     * 插回的位置（流位置）。
+     */
     FlowPos at = 0;
+
+    /**
+     * 片段内容（文本与段落标记交错）。
+     */
     Fragment content;
 };
 
@@ -64,8 +81,19 @@ struct InsertFragment {
  * 删除一个区间。构造时就带着取出来的片段，逆操作靠它还原。
  */
 struct DeleteRange {
+    /**
+     * 区间起点（含）。
+     */
     FlowPos begin = 0;
+
+    /**
+     * 区间终点（不含）。
+     */
     FlowPos end = 0;
+
+    /**
+     * 取出来的片段，逆操作靠它还原。
+     */
     Fragment removed;
 };
 
@@ -73,7 +101,14 @@ struct DeleteRange {
  * 在位置处插入段落标记（回车分段）。
  */
 struct InsertParaMark {
+    /**
+     * 在哪插入段落标记（流位置）。
+     */
     FlowPos at = 0;
+
+    /**
+     * 新段的段落格式（补丁）。
+     */
     ParaFormatPatch para;
 
     /**
@@ -87,8 +122,19 @@ struct InsertParaMark {
  * 删除位置处的段落标记（段首退格与段末删除都是它，合并是它的结果）。
  */
 struct RemoveParaMark {
+    /**
+     * 删哪一枚段落标记（流位置）。
+     */
     FlowPos at = 0;
+
+    /**
+     * 标记上的段落格式，逆操作要还原它。
+     */
     ParaFormatPatch para;
+
+    /**
+     * 标记上的段落样式引用。
+     */
     std::string styleRef;
 };
 
@@ -104,10 +150,29 @@ struct RemoveParaMark {
  * before 与 beforeStyleRef 记下原值，逆操作因此自足；一次只改一枚标记，批量的形状由事务表达。
  */
 struct SetParaMarkFormat {
+    /**
+     * 改哪一枚段落标记。
+     */
     NodeId id = kInvalidNodeId;
+
+    /**
+     * 新的段落格式（补丁）。
+     */
     ParaFormatPatch para;
+
+    /**
+     * 新的段落样式引用。
+     */
     std::string styleRef;
+
+    /**
+     * 改之前的段落格式（逆操作自足）。
+     */
     ParaFormatPatch before;
+
+    /**
+     * 改之前的样式引用。
+     */
     std::string beforeStyleRef;
 };
 
@@ -120,9 +185,24 @@ struct SetParaMarkFormat {
  * 现成子树，apply 会按 subtree 现建一棵（身份不保持，序列化还原时走这条路）。
  */
 struct InsertNode {
+    /**
+     * 插入位置（节点级坐标）。
+     */
     Pos at;
+
+    /**
+     * 同一个位置的流坐标，位置映射用它。
+     */
     FlowPos at_flow = 0;
+
+    /**
+     * 子树的内容与结构（序列化与校验用）。
+     */
     NodeSpec subtree;
+
+    /**
+     * 物化好的子树在池里的根 id；kInvalid = apply 时现建一棵。
+     */
     NodeId detached = kInvalidNodeId;
 };
 
@@ -133,9 +213,24 @@ struct InsertNode {
  * 原样挂回）。两者记的是同一棵子树：前者说明"删了什么"，后者说明"它现在在哪"。
  */
 struct RemoveNode {
+    /**
+     * 删除位置（节点级坐标）。
+     */
     Pos at;
+
+    /**
+     * 同一个位置的流坐标。
+     */
     FlowPos at_flow = 0;
+
+    /**
+     * 删掉的内容与结构（序列化与校验用）。
+     */
     NodeSpec removed;
+
+    /**
+     * 摘下后留在池里的根 id，撤销靠它原样挂回。
+     */
     NodeId detached = kInvalidNodeId;
 };
 
@@ -152,11 +247,34 @@ struct RemoveNode {
  * 必要时把被合并的文本节点切回来。
  */
 struct UnwrapNode {
+    /**
+     * 被拆开节点的位置（节点级坐标）。
+     */
     Pos at;
+
+    /**
+     * 同一个位置的流坐标（权威：槽位按它当场重算）。
+     */
     FlowPos at_flow = 0;
+
+    /**
+     * 容器自身占的流长度（两枚边界）。
+     */
     int span_before = 0;
+
+    /**
+     * 内容占的流长度。
+     */
     int span_after = 0;
-    NodeSpec node;  // 被拆开那个节点离开时的快照（子节点仍活在树里，这一份只用来校验与定位）
+
+    /**
+     * 被拆开那个节点离开时的快照（校验与定位用）。
+     */
+    NodeSpec node;
+
+    /**
+     * 节点在池里的根 id。
+     */
     NodeId detached = kInvalidNodeId;
 };
 
@@ -172,11 +290,34 @@ struct UnwrapNode {
  * 同样以流位置为准，不用槽位下标：被合并的文本节点要在这一刻切回来，区间才重新有边界。
  */
 struct WrapNode {
+    /**
+     * 包装位置（节点级坐标）。
+     */
     Pos at;
+
+    /**
+     * 内容起点的流坐标（两枚边界已不在，比 UnwrapNode 前移一格）。
+     */
     FlowPos at_flow = 0;
+
+    /**
+     * 容器自身占的流长度。
+     */
     int span_before = 0;
+
+    /**
+     * 内容占的流长度（被收进容器的那个区间）。
+     */
     int span_after = 0;
+
+    /**
+     * 被收进容器的那些孩子与容器的形状。
+     */
     NodeSpec node;
+
+    /**
+     * 逆操作要挂回的那个容器 id。
+     */
     NodeId detached = kInvalidNodeId;
 };
 
@@ -190,9 +331,24 @@ struct WrapNode {
  * （重建派生索引），不是"把某个位置搬到别处"，所以不在这层表达。
  */
 struct SetControlProp {
+    /**
+     * 改哪个控件。
+     */
     NodeId id = kInvalidNodeId;
+
+    /**
+     * 改哪一项属性。
+     */
     ControlProp prop = ControlProp::Readonly;
+
+    /**
+     * 新值。
+     */
     bool value = false;
+
+    /**
+     * 原值（逆操作自足）。
+     */
     bool before = false;
 };
 
@@ -206,8 +362,19 @@ struct SetControlProp {
  * 位置映射是恒等：这一步不改流位置，也不改流结构（值与属性都不占位置）。
  */
 struct SetControlValue {
+    /**
+     * 改哪个控件。
+     */
     NodeId id = kInvalidNodeId;
+
+    /**
+     * 新的值。
+     */
     ControlValue value;
+
+    /**
+     * 原值（逆操作自足）。
+     */
     ControlValue before;
 };
 
@@ -218,8 +385,19 @@ struct SetControlValue {
  * 位置映射是恒等：跨度不改流位置，也不改流结构。
  */
 struct SetTableCellSpan {
+    /**
+     * 改哪一格。
+     */
     NodeId id = kInvalidNodeId;
+
+    /**
+     * 新的跨度。
+     */
     CellSpec span;
+
+    /**
+     * 改之前的跨度（逆操作自足）。
+     */
     CellSpec before;
 };
 
@@ -231,7 +409,14 @@ using Step = std::variant<InsertText, InsertFragment, DeleteRange, InsertParaMar
  * 步骤的执行结果。失败时给出原因 —— 位置越界、类型不符都要显式说出来，不静默不做。
  */
 struct StepResult {
+    /**
+     * 成了没有。
+     */
     bool ok = false;
+
+    /**
+     * 失败原因（位置越界、类型不符）。
+     */
     std::string error;
 };
 
@@ -239,8 +424,19 @@ struct StepResult {
  * 删除步骤的构造结果。
  */
 struct DeleteBuild {
+    /**
+     * 构造出来的步骤；ok 为 false 时无效。
+     */
     Step step;
+
+    /**
+     * 构造成功没有。
+     */
     bool ok = false;
+
+    /**
+     * 失败原因。
+     */
     std::string error;
 };
 
@@ -250,6 +446,9 @@ struct DeleteBuild {
  * 它按结构取区间：端点落在不可半分单位（控件、表格、链接）内部时向外扩到那个单位的
  * 边界，于是取出来的片段永远良构、不会把边界切成两半。按结构取区间（选中一段、剪切、
  * 删除一个结构单元）走它；按码点编辑走下面的 makeDeleteTextSteps。
+ * @param tree 文档树
+ * @param range 区间
+ * @return 步骤（失败时带原因）
  */
 DeleteBuild makeDeleteRange(const NodeTree& tree, Range range);
 
@@ -264,6 +463,10 @@ DeleteBuild makeDeleteRange(const NodeTree& tree, Range range);
  *
  * 覆盖到的位置若不落在任何文本上（容器边界、段落标记、原子）不产生步骤；跨越它们由切分
  * 自然处理成多条步骤。区间越界或与文档对不上时返回空序列。
+ * @param tree 文档树
+ * @param from 区间起点
+ * @param to 区间终点（不含）
+ * @return 一组删除步骤（从后往前排）
  */
 std::vector<Step> makeDeleteTextSteps(const NodeTree& tree, FlowPos from, FlowPos to);
 
@@ -276,6 +479,11 @@ std::vector<Step> makeDeleteTextSteps(const NodeTree& tree, FlowPos from, FlowPo
  *   整篇删除时步骤数从四千降到一，而每一步在提交时都要重建一次流索引（O(节点数)）。
  *
  * 区间里有别的东西（控件、原子、容器边界）时返回空 —— 调用方退回按节点切分那条路。
+ * @param tree 文档树
+ * @param idx 流索引
+ * @param from 区间起点
+ * @param to 区间终点（不含）
+ * @return 一条删除步骤；区间里有别的东西时为空
  */
 std::vector<Step> makeDeleteRangeOneStep(const NodeTree& tree, const FlowIndex& idx,
                                          FlowPos from, FlowPos to);
@@ -287,11 +495,28 @@ std::vector<Step> makeDeleteRangeOneStep(const NodeTree& tree, const FlowIndex& 
  * 样"记两遍，两处不一致时撤销会还原出另一个格式。
  */
 struct ParaMarkBuild {
+    /**
+     * 构造出来的步骤；ok 为 false 时无效。
+     */
     Step step;
+
+    /**
+     * 构造成功没有。
+     */
     bool ok = false;
+
+    /**
+     * 失败原因。
+     */
     std::string error;
 };
 
+/**
+ * 同上，只是不带流索引：这一条自己建一次索引。
+ * @param tree 文档树
+ * @param at 段落标记的位置
+ * @return 步骤（带标记上的格式与样式，逆操作靠它）
+ */
 ParaMarkBuild makeRemoveParaMark(const NodeTree& tree, FlowPos at);
 
 /**
@@ -299,6 +524,14 @@ ParaMarkBuild makeRemoveParaMark(const NodeTree& tree, FlowPos at);
  *
  * 批量删除时每个段落标记都要问一次，而建一次索引是 O(节点数) —— 整篇删除就成了
  *   O(段数 x 节点数)。索引必须与 tree 同一口径，且是 Design（编辑态）。
+ * @param tree 文档树
+ * @param idx 流索引
+ * @param at 段落标记的位置
+ * @return 步骤（带标记上的格式与样式，逆操作靠它）
+ * @param tree 文档树
+ * @param idx 流索引
+ * @param at 段落标记的位置
+ * @return 步骤（带标记上的格式与样式，逆操作靠它）
  */
 ParaMarkBuild makeRemoveParaMark(const NodeTree& tree, const FlowIndex& idx, FlowPos at);
 
@@ -308,6 +541,8 @@ ParaMarkBuild makeRemoveParaMark(const NodeTree& tree, const FlowIndex& idx, Flo
  * 批次的约定是"一次把所有步骤建出来"，而每步的坐标属于它自己开始的那一刻 —— 前面某一步
  * 改了文档长度，后面几步记的绝对流位置与流位置就过期了（步骤层会判"步骤过期了"）。
  * 方向键走一步不会有这个问题，批量设值与表格行列操作都会。
+ * @param out 收步骤的容器
+ * @param step 要收的步骤（坐标会被映射到当下）
  */
 void pushMappedStep(std::vector<Step>* out, Step step);
 
@@ -315,19 +550,37 @@ void pushMappedStep(std::vector<Step>* out, Step step);
  * 节点级步骤的构造结果。
  */
 struct NodeBuild {
+    /**
+     * 构造出来的步骤；ok 为 false 时无效。
+     */
     Step step;
+
+    /**
+     * 构造成功没有。
+     */
     bool ok = false;
+
+    /**
+     * 失败原因。
+     */
     std::string error;
 };
 
 /**
  * 构造"插入一棵子树"的步骤：先把 spec 物化成一棵摘下的子树（身份就此定下），再把
  * "插到哪里"记进去。于是应用与撤销只是把它挂上、拿下，同一个节点的 id 在往返中不变。
+ * @param tree 文档树
+ * @param at 插入位置
+ * @param spec 子树
+ * @return 步骤（子树已物化，身份就此定下）
  */
 NodeBuild makeInsertNode(NodeTree& tree, const Pos& at, const NodeSpec& spec);
 
 /**
  * 构造"删除一个子节点"的步骤：记下它的内容（captureSubtree）与身份（它自己就是池里的那个节点）。
+ * @param tree 文档树
+ * @param at 删除位置
+ * @return 步骤（带内容与身份）
  */
 NodeBuild makeRemoveNode(const NodeTree& tree, const Pos& at);
 
@@ -338,27 +591,43 @@ NodeBuild makeRemoveNode(const NodeTree& tree, const Pos& at);
  * 流位置寻址、只认原子 —— 原子在流里整枚占一格，删它只有整枚移除这一种做法，而它的槽位活不过
  * 一次规范化（相邻同标记的文本节点会被合并、槽位整体前移，见 slotForFlow），所以寻址只能落在
  * 流位置上。段落标记另有一种步骤（RemoveParaMark），文本按码点删 —— 三类各占一条路。
+ * @param tree 文档树
+ * @param idx 流索引
+ * @param at 原子的流位置
+ * @return 步骤（整枚移除）
  */
 NodeBuild makeRemoveAtom(const NodeTree& tree, const FlowIndex& idx, FlowPos at);
 
 /**
  * 这个步骤现在能应用吗。applyStep 先跑它，所以失败时文档一定没被动过。
+ * @param tree 文档树
+ * @param step 步骤
+ * @return 能不能应用；不能时带原因
  */
 StepResult canApply(const NodeTree& tree, const Step& step);
 
 /**
  * 同上，复用调用方已建好的流索引。applyStep 每一步都要跑一次判据，两边各建一次索引
  *   等于把每步的成本翻倍 —— 一批四千步的删除里那就是几千次全树遍历。
+ * @param tree 文档树
+ * @param step 步骤
+ * @return 能不能应用；不能时带原因
+ * @param idx 调用方建好的流索引
  */
 StepResult canApply(const NodeTree& tree, const FlowIndex& idx, const Step& step);
 
 /**
  * 应用步骤。
+ * @param tree 文档树
+ * @param step 步骤
+ * @return 结果；失败时文档没被动过
  */
 StepResult applyStep(NodeTree& tree, const Step& step);
 
 /**
  * 逆步骤。由步骤本身算出来，不必再读文档。
+ * @param step 步骤
+ * @return 逆步骤
  */
 Step invertStep(const Step& step);
 
@@ -367,6 +636,10 @@ Step invertStep(const Step& step);
  *
  * 位于被删区间内部的位置没有原像（那段内容已经不在），一律塌到区间起点；这一条是单向的。
  * 其余位置都能与逆步骤的映射精确往返，前提是两个方向用同一个 assoc。
+ * @param step 那一步
+ * @param pos 编辑前的位置
+ * @param assoc 落在边界上时贴哪一边
+ * @return 编辑后的位置
  */
 FlowPos mapPos(const Step& step, FlowPos pos, Assoc assoc);
 
@@ -376,6 +649,10 @@ FlowPos mapPos(const Step& step, FlowPos pos, Assoc assoc);
  * 用在"一条步骤的坐标是在含某次编辑的文档里记下的，而那次编辑后来不生效了"这种场合：
  * 把坐标穿过那次编辑的逆步骤，就回到了不含它的坐标。只覆盖内容级的五个步骤 —— 结构步骤
  * （节点级）的位置含 Pos，单靠流位置映射搬不动，返回 false 让调用方显式处理，不静默照搬。
+ * @param target 要搬坐标的步骤（就地改写）
+ * @param mapped_by 坐标要穿过的那一步
+ * @param assoc 贴哪一边
+ * @return true = 搬好了；false = 结构步骤，搬不动
  */
 bool mapStepPositions(Step* target, const Step& mapped_by, Assoc assoc);
 

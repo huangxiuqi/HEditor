@@ -441,8 +441,11 @@ var __heditorEngineApiExports = function(exports) {
       if (typeof factory !== "function") {
         throw new Error("胶水层没导出 " + (m.exportName || "CreateHEditor"));
       }
+      const wasmPath = String(m.wasm || "");
       const base = m.glue.replace(/[^/]*$/, "");
-      mod = await factory({ locateFile: (p) => base + p + (m.bust || "") });
+      mod = await factory({
+        locateFile: (p) => wasmPath && /\.wasm$/.test(p) ? wasmPath : base + p + (m.bust || "")
+      });
       dpr = m.dpr || 1;
       viewW = m.viewW || 1;
       viewH = m.viewH || 1;

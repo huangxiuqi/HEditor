@@ -9,8 +9,10 @@ build/
 # 验证产物：探针 JSON、截图、日志、_scratch。全部可以重跑探针再生成。
 out/
 
-# 验证台前端的"打包输出"（目前没用到，留着给将来）
+# 前端的打包输出：库产物（web/dist/，vite.lib.config.ts）与示例页（web/dist-app/，
+#   vite.config.ts）。都能用 npm run build / build:app 重建。
 web/dist/
+web/dist-app/
 
 # wasm 层声明：emcc --emit-tsd 的产物，与 build/ 同理 —— 它是 wasm 的镜像，
 #   而且要一次 wasm 构建才有。

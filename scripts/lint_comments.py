@@ -160,6 +160,7 @@ def check_file(path, verbose, cpp):
     lines = src.split('\n')
     rel = os.path.relpath(path, ROOT).replace('\\', '/')
     block_len = 0
+    prose_len = 0        # 块里的正文行数（不含 @param 这类标签行）
     hdr = False          # 当前块是不是文件头（文件开头的第一个块注释）
     stack = []           # 'func' / 'block'，只在 C/C++ 维护
     state = 0
@@ -177,6 +178,7 @@ def check_file(path, verbose, cpp):
 
         if text is None:
             block_len = 0
+            prose_len = 0
             hdr = False
             if cpp:
                 code, state = strip_code(line, state)
@@ -192,6 +194,10 @@ def check_file(path, verbose, cpp):
         if block_len == 0 and not any(l.strip() for l in lines[:i]):
             hdr = True
         block_len += 1
+        # R8 数的是"正文"：@param / @return / @note / @see 是清单，不是散文 ——
+        #   参数多的接口否则只能少写文档，而那正好反过来。
+        if not re.match(r'^\s*(?:\*|//)\s*@(param|return|returns|note|see)\b', line):
+            prose_len += 1
         n = i + 1
         if '`' in text:
             bad(n, 'R1', '注释里的反引号')
@@ -216,8 +222,8 @@ def check_file(path, verbose, cpp):
         if line.strip().startswith('/**') and '*/' in line:
             bad(n, 'R12', '单行的 /** ... */ 形态')
         limit = 20 if (i - block_len + 1 == 0 or hdr) else 12
-        if block_len == limit + 1 and re.match(r'^\s*(/\*\*|\*)', line):
-            bad(n, 'R8', '块注释超过 %d 行' % limit)
+        if prose_len == limit + 1 and re.match(r'^\s*(/\*\*|\*)', line):
+            bad(n, 'R8', '块注释正文超过 %d 行（@param 这类标签行不计）' % limit)
 
         # R9：C/C++ 里"声明处"的注释块必须是块注释。只判一段 // 注释的**末行**
         # （一段里报一次即可），且必须紧贴后面的声明（允许中间空一行），且不在函数体内。

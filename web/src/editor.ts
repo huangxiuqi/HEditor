@@ -13,7 +13,8 @@ import type {
   Selection,
   SetCaretOptions,
 } from './types';
-import { createDomHost, type ChangeSource, type DomHost, type EngineLink } from './host/dom';
+import { createDomHost, ensureMarkup, type ChangeSource, type DomHost, type EngineLink } from './host/dom';
+import { createErrorSurface, type ErrorSurface } from './host/errors';
 import type { CanvasStore } from './host/pages';
 import { cleanMarkdownLines, then1, type Args, type ZoomControl } from './input/keymap';
 import { assertSimd, simdProbeBytes, simdSupported } from './engine/simd';
@@ -50,9 +51,12 @@ function resolveAssets(opts: EditorOptions): AssetPaths {
   //   产品里三项都该显式给。
   const base = a.base ? new URL(a.base, document.baseURI).href : new URL('../../', selfDir()).href;
   const glue = a.glue ? new URL(a.glue, document.baseURI).href : new URL('build/wasm/web/heditor.js', base).href;
-  // Worker 壳与库产物同一目录（web/dist/heditor_worker.js）。
-  const worker = new URL('heditor_worker.js', selfDir()).href;
-  return { glue, base, worker, bust: '', fonts: defaultFonts(base, opts.fonts) };
+  // wasm 默认由胶水按自己的目录推；显式给了就按它取（换 CDN、多版本并存时用）。
+  const wasm = a.wasm ? new URL(a.wasm, document.baseURI).href : '';
+  // Worker 壳默认与库产物同一目录（web/dist/heditor_worker.js），也可以显式给 ——
+  //   示例页与探针用的是后一条（它们的页面不在库产物那一层）。
+  const worker = a.worker ? new URL(a.worker, document.baseURI).href : new URL('heditor_worker.js', selfDir()).href;
+  return { glue, base, worker, wasm, bust: '', fonts: defaultFonts(base, opts.fonts) };
 }
 
 // 事件
@@ -60,6 +64,12 @@ function resolveAssets(opts: EditorOptions): AssetPaths {
 class Emitter {
   private map = new Map<string, Set<(ev: never) => void>>();
 
+  /**
+   * 订阅一个事件。
+   * @param event 事件名
+   * @param cb 回调
+   * @returns 退订函数
+   */
   on<K extends keyof EditorEvents>(event: K, cb: (ev: EditorEvents[K]) => void): () => void {
     let set = this.map.get(event);
     if (!set) {
@@ -70,6 +80,11 @@ class Emitter {
     return () => set?.delete(cb as (ev: never) => void);
   }
 
+  /**
+   * 发一次事件（没有监听者时什么都不做）。
+   * @param event 事件名
+   * @param ev 事件载荷
+   */
   emit<K extends keyof EditorEvents>(event: K, ev: EditorEvents[K]): void {
     const set = this.map.get(event);
     if (!set) return;
@@ -112,6 +127,8 @@ const kPageGapPt = 14;
  *
  * 两个传输共用这一份实现：差别只有"结果何时到"（同步值 / Promise）与"片元在哪贴"
  *   （这里 / Worker），两者都收在 EngineLink 里。
+   * @param opts 挂载点、传输、素材、初始配置
+   * @returns 已就绪的编辑器实例（排版跑完、首帧画完、输入层已接上）
  */
 export async function createEditor(opts: EditorOptions): Promise<Editor> {
   if (!opts || !(opts.container instanceof HTMLElement)) {
@@ -149,6 +166,31 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
   let starter: () => Promise<void>;
   let destroyer: () => void;
 
+  // 失败要看得见：这一层挂在 .heditor-body 上（绝对定位需要一个定位过的祖先），所以先把
+  //   标记建出来。两档的分界见 host/errors.ts 的文件头。
+  ensureMarkup(opts.container);
+  const surface: ErrorSurface = createErrorSurface({
+    mount: opts.container.querySelector<HTMLElement>('.heditor-body')!,
+    // 标在调用方给的容器上（不是库自己建的 .heditor-body）：页面 CSS 认的是它。
+    mark: opts.container,
+  });
+
+  /**
+   * 报一次失败：记账 + 上屏 + 事件。三处同源，少一处就会有一类失败只在某一个入口可见。
+   */
+  const reportError = (
+    message: string,
+    fatal: boolean,
+    info?: { detail?: string; hint?: string },
+  ): void => {
+    if (disposed) return;
+    pageErrors.push(message);
+    // 恢复入口由调用方给（库不能重启自己），只在致命那一档才用得上。
+    if (fatal) surface.fatal(message, { ...info, retry: opts.onFatalRetry });
+    else surface.warn(message);
+    emitter.emit('error', { message, fatal });
+  };
+
   if (transport === 'inline') {
     const t = createInline({
       container: opts.container,
@@ -169,6 +211,11 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       zoom: config.zoom * (4 / 3) * (window.devicePixelRatio || 1),
       empty: true,
       makeHost: (l, store, remoteBlit) => createDomHost(hostOptions(l, store, remoteBlit)),
+      // 起来之后才死的那一类：没有 Promise 可拒，只剩"让用户看见"。
+      onFatal: (message) => reportError(message, true, {
+        detail: message,
+        hint: '这一页的编辑器已经不可用；重新加载页面会重建引擎。',
+      }),
     });
     link = t.link;
     dom = t.host;
@@ -192,9 +239,7 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       blitStats: remoteBlit,
       readOnly: () => config.mode === 'readOnly',
       status: (text, isErr) => {
-        if (!isErr) return;
-        pageErrors.push(text);
-        emitter.emit('error', { message: text, fatal: false });
+        if (isErr) reportError(text, false);
       },
       onEdit: (changed: boolean, source: ChangeSource) => {
         if (!changed || disposed) return;
@@ -210,15 +255,22 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       onRender: (pages: number, ms: number) => {
         if (!disposed) emitter.emit('render', { pages, ms });
       },
-      onPageError: (message: string) => {
-        if (disposed) return;
-        pageErrors.push(message);
-        emitter.emit('error', { message, fatal: false });
-      },
+      onPageError: (message: string) => reportError(message, false),
     };
   }
 
-  await starter();
+  try {
+    await starter();
+  } catch (e) {
+    // 启动失败必须同时做两件事：页面上看得见（横幅），调用方拿得到（拒绝）。
+    //   只拒绝的话，那些不写 catch 的页面会停在空白容器上 —— 而那是这类失败最常见的形态。
+    const err = e as Error & { heditorTitle?: string; heditorHint?: string };
+    reportError(err?.heditorTitle ?? '编辑器启动失败', true, {
+      detail: String(err?.message ?? e),
+      hint: err?.heditorHint ?? '这一页的编辑器已经不可用；重新加载页面会重建引擎。',
+    });
+    throw e;
+  }
 
   // 引擎自己的默认值不必等于库的默认值（撤销上限在引擎里是 0 = 不限，库给 100 条
   //   有界栈）。装载时把两者对齐一次，之后 configure 只推变化项。
@@ -653,6 +705,9 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
 
     async destroy() {
       if (disposed) return;
+      // 先抹错误面：destroy 之后容器会被清空，横幅留着就成了"页面上有一块说编辑器坏了、
+      //   可编辑器已经不在"的残迹。
+      surface.clear();
       disposed = true;
       destroyer();
       dom.destroy();

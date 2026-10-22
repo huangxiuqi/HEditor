@@ -26,7 +26,6 @@
 #include "core/doc/node.h"
 
 namespace heditor {
-
 /**
  * 段落的容器内序号：1 起。0 留给"没有"（沿用 kInvalidNodeId 那套"0 是无效"的约定）。
  */
@@ -51,17 +50,23 @@ public:
      * 该容器的标记下标数组（升序）。容器不在流里（被隐藏的子树，或根本不是容器）时
      * 返回 nullptr —— 与"容器在流里但没有标记"（返回一个空数组）是两件事，
      * 前者表示这个容器现在没有段落结构可言。
+     * @param container 容器
+     * @return 标记下标数组；容器不在流里时为 nullptr
      */
     const std::vector<int>* marksOf(NodeId container) const;
 
     /**
      * 标记个数。不在流里返回 -1。
+     * @param container 容器
+     * @return 标记个数；不在流里为 -1
      */
     int markCount(NodeId container) const;
 
     /**
      * 段落数：含至少一个元素的段的个数。内容末尾还有未被标记结束的内容时，它也算一段
      * （最后一段）。空容器是 0 段。不在流里返回 -1。
+     * @param container 容器
+     * @return 段落数；不在流里为 -1
      */
     int paragraphCount(NodeId container) const;
 
@@ -69,18 +74,30 @@ public:
      * 第 at 个槽位所属段落的序号（1 起）。at 取 [0, 子节点数]，取子节点数时得到的是
      * "内容末尾那个位置"所属的段落 —— 内容末尾若已经被标记结束，它比段落数大 1，
      * 因为那个位置属于"还没开始写的下一段"。越界或不在流里返回 0。
+     * @param container 容器
+     * @param at 槽位（0..子节点数）
+     * @return 段落序号（1 起）；越界或不在流里为 0
      */
     ParaNo paragraphNoIn(NodeId container, int at) const;
 
     /**
      * 第 no 段占用的子下标范围 [begin, end)。no 越界、容器不在流里、或该段其实是空的
      * （内容末尾已被标记结束，那个"下一段"还没有内容）时返回 false。
+     * @param container 容器
+     * @param no 段落序号（1 起）
+     * @param begin 写回起始子下标
+     * @param end 写回结束子下标（不含）
+     * @return true = 这一段有内容
      */
     bool paragraphRange(NodeId container, ParaNo no, int* begin, int* end) const;
 
     /**
      * 第 no 段的结束标记。该段没有结束标记（最后一段还没写标记）时返回 kInvalidNodeId；
      * no 越界或容器不在流里时返回 kInvalidNodeId 并让 ok 为 false。
+     * @param container 容器
+     * @param no 段落序号（1 起）
+     * @param ok 写回"序号合法吗"（可为 nullptr）
+     * @return 结束标记；没有标记或序号越界为 kInvalidNodeId
      */
     NodeId markOfParagraph(NodeId container, ParaNo no, bool* ok = nullptr) const;
 
@@ -88,30 +105,58 @@ public:
      * 增删之后的增量维护。返回 false 表示该通知对不上本类的数据（容器不在流里、
      * 或传进来的节点 id 查不到），调用方应视为"要么该重建、要么参数传错了"，
      * 而不是当成无事发生。呈现态下被隐藏的节点不在流里，数组不受影响，这时返回 true。
+     * @param container 容器
+     * @param at 槽位
+     * @param inserted 新节点的 id（判它在呈现态下是否隐藏、是不是标记）
+     * @return false = 这条通知对不上本类的数据（该重建或参数传错）
      */
     bool onInsert(NodeId container, int at, NodeId inserted);
+
+    /**
+     * 删掉之后的增量维护。
+     * @param container 容器
+     * @param at 槽位
+     * @param erased 被删节点的 id（判它在呈现态下是否隐藏）
+     * @return false = 这条通知对不上本类的数据（该重建或参数传错）
+     */
     bool onErase(NodeId container, int at, NodeId erased);
 
     /**
      * 本类当前记账的容器（升序）。供"整体逐项比对"与不变量检查使用 ——
      * 没有它就只能抽查单个容器，而增量维护要证明的是整张表与重建的结果一致。
+     * @return 记账的容器 id，升序
      */
     std::vector<NodeId> containers() const;
 
     /**
      * 重新扫描建表（与构造同一套逻辑）。整体重建的调用方用它，不必新建对象。
+     * @param tree 树
+     * @param vis 可见性口径
      */
     void rebuild(const NodeTree& tree, FlowVisibility vis);
 
 private:
     void scan(NodeId id);
+
     /**
      * 把 id 这棵子树的记账项全部删掉（被摘下的子树仍可遍历，链还在）。
+     * @param id 被摘下的子树的根
      */
     void drop(NodeId id);
 
+    /**
+     * 被索引的树（不持有）。
+     */
     const NodeTree* tree_ = nullptr;
+
+    /**
+     * 记账时用的可见性口径。
+     */
     FlowVisibility vis_ = FlowVisibility::Design;
+
+    /**
+     * 每个容器的标记下标数组（升序）；不在流里的容器没有键。
+     */
     std::unordered_map<NodeId, std::vector<int>> marks_;
 };
 

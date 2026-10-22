@@ -1,7 +1,7 @@
 // 协议核对：宿主与引擎之间的接口面，四个地方必须说的是同一件事。
 //
-// 要证伪的事：wasm 导出（C++）、命令表（engine_api.js）、调用点（app.js / host_core.js）、
-//   薄壳（engine_worker.js）各写各的。"改了一边忘了另一边"既不会编译失败，也不会立刻报错：
+// 要证伪的事：wasm 导出（C++）、命令表（engine/api.ts）、调用点（editor.ts / host/dom.ts）、
+//   薄壳（transport/worker_main.ts）各写各的。"改了一边忘了另一边"既不会编译失败，也不会立刻报错：
 //   它表现成探针里某条断言的数字变了、某个按钮按了没反应、或者一条永远跑不到的分支。
 //
 // 核对六条：
@@ -11,9 +11,10 @@
 //   三、实现表与协议表一致：WRITE / READ / SILENT 的键集合必须等于表里对应类别的名字。
 //      （运行时 collect() 也拦一遍；这里是让它在打开浏览器之前就红。）
 //   四、engine_api 里的 mod.X 都在登记范围之内（打错一个名字不会静默变成 undefined 调用）。
-//   五、调用点不越界：app.js 与 host_core.js 写的命令名必须在表里，且读/写类别要对。
-//   六、两条边界纪律：app.js 与 engine_worker.js 的代码里不许出现 mod. 字面量；
-//      engine_worker 伸手拿引擎只允许那两条（连页的两个配置），别的一律走命令表。
+//   五、调用点不越界：editor.ts / host/dom.ts / input/input.ts 写的命令名必须在表里，
+//      且读/写类别要对。
+//   六、边界纪律：库里的宿主与传输层不许出现 mod. 字面量 —— 只有 engine/api.ts 能摸
+//      引擎对象，其余一律走命令表。
 //
 // 用法（不需要 Chrome、不需要构建产物）：
 //   node scripts/idl_check.mjs
@@ -183,14 +184,18 @@ function checkCalls(file, re, wantKinds, label) {
     }
   }
 }
-checkCalls('web/app.js', /api\.write\('([A-Za-z0-9_]+)'/, ['w', 's'], '写命令');
-checkCalls('web/app.js', /api\.read\('([A-Za-z0-9_]+)'/, ['r', 'q'], '读命令');
-checkCalls('web/host_core.js', /env\.write\('([A-Za-z0-9_]+)'/, ['w', 's'], '写命令');
+checkCalls('web/src/editor.ts', /link\.write\('([A-Za-z0-9_]+)'/, ['w', 's'], '写命令');
+checkCalls('web/src/editor.ts', /link\.read\('([A-Za-z0-9_]+)'/, ['r', 'q'], '读命令');
+checkCalls('web/src/host/dom.ts', /link\.read\('([A-Za-z0-9_]+)'/, ['r', 'q'], '读命令');
+checkCalls('web/src/host/dom.ts', /link\.write\('([A-Za-z0-9_]+)'/, ['w', 's'], '写命令');
+checkCalls('web/src/input/input.ts', /env\.write\('([A-Za-z0-9_]+)'/, ['w', 's'], '写命令');
 
 
-for (const file of ['web/app.js', 'web/engine_worker.js']) {
+for (const file of ['web/src/editor.ts', 'web/src/transport/worker_main.ts',
+                    'web/src/host/dom.ts', 'web/src/input/input.ts']) {
   for (const hit of occurrences(stripComments(read(file)), /\bmod\./)) {
-    note(file, `第 ${hit.line} 行：出现了 mod. —— 这一层只能走 api.read / api.write / api.engine()`);
+    note(file, `第 ${hit.line} 行：出现了 mod. —— 这一层只能走 link.read / link.write / api` +
+               `.engine()`);
   }
 }
 
@@ -208,24 +213,32 @@ const SHELL_MAY_REACH = new Set([
   'pageRgba',                                     // 一页的导出像素（内容 + 瞬态）
   'pageDirtyPagesJson', 'pageDirtyRectsJson',     // 欠着的脏页与脏矩形
 ]);
-const shellCode = stripComments(read('web/engine_worker.js'));
-const aliases = new Set();
-for (const m of shellCode.matchAll(/([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*api\.engine\(\)/g)) {
-  aliases.add(m[1]);
-}
+const SHELL_FILES = ['web/src/transport/worker_main.ts', 'web/src/transport/inline.ts'];
 const shellHits = new Map();
-for (const a of aliases) {
-  const rx = new RegExp('(?<![A-Za-z0-9_$.])' + a.replace(/\$/g, '\\$') +
-                        '\\.([A-Za-z_][A-Za-z0-9_]*)', 'g');
-  for (const m of shellCode.matchAll(rx)) {
-    if (!exports.has(m[1])) continue;             // e.stack / e.canvas 之类，不是导出
-    shellHits.set(lineOf(shellCode, m.index) + ':' + m[1], m[1]);
+for (const file of SHELL_FILES) {
+  const code = stripComments(read(file));
+  // 两种拿法都要认：先别名（const e = api.engine()）再从别名上取，以及直接点着取。
+  const aliases = new Set();
+  for (const m of code.matchAll(/([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*api\??\.engine\(\)/g)) {
+    aliases.add(m[1]);
+  }
+  const take = (idx, name) => {
+    if (!exports.has(name)) return;               // e.stack / e.canvas 之类，不是导出
+    shellHits.set(file + ':' + (lineOf(code, idx) + 1) + ':' + name, name);
+  };
+  for (const a of aliases) {
+    const rx = new RegExp('(?<![A-Za-z0-9_$.])' + a.replace(/\$/g, '\\$') +
+                          '\\.([A-Za-z_][A-Za-z0-9_]*)', 'g');
+    for (const m of code.matchAll(rx)) take(m.index, m[1]);
+  }
+  for (const m of code.matchAll(/api\??\.engine\(\)\.([A-Za-z_][A-Za-z0-9_]*)/g)) {
+    take(m.index, m[1]);
   }
 }
 for (const key of shellHits.keys()) {
-  const [line, name] = key.split(':');
+  const [file, line, name] = key.split(':');
   if (!SHELL_MAY_REACH.has(name)) {
-    note('web/engine_worker.js', `第 ${line} 行：薄壳拿了 ${name} —— 贴图之外不该碰引擎`);
+    note(file, `第 ${line} 行：薄壳拿了 ${name} —— 贴图之外不该碰引擎`);
   }
 }
 

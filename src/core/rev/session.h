@@ -21,7 +21,6 @@
 #include "core/rev/rev.h"
 
 namespace heditor::rev {
-
 /**
  * 一步已经算好的编辑：与 rev 的原语一一对应，不带任何落点判断。
  *
@@ -42,13 +41,44 @@ struct Edit {
         SetHidden,
     };
 
+    /**
+     * 这是哪一种编辑。
+     */
     Kind kind = Kind::InsertText;
-    int para = 0;                  // 段号
-    int cp = 0;                    // 段内码点位置
-    int count = 0;                 // 删除的码点数
-    std::u32string text;           // 插入的文本 / 控件内容
-    ControlSpec control;           // 控件记录（InsertControl）
-    NodeId node = kInvalidNodeId;  // 被隐藏的节点（SetHidden）
+
+    /**
+     * 段号（编辑态）。
+     */
+    int para = 0;
+
+    /**
+     * 段内码点位置。
+     */
+    int cp = 0;
+
+    /**
+     * 删掉几个码点。
+     */
+    int count = 0;
+
+    /**
+     * 插入的文本，或控件的内容。
+     */
+    std::u32string text;
+
+    /**
+     * 控件记录（InsertControl 用）。
+     */
+    ControlSpec control;
+
+    /**
+     * 被隐藏的节点（SetHidden 用）。
+     */
+    NodeId node = kInvalidNodeId;
+
+    /**
+     * 隐藏还是取消隐藏。
+     */
     bool hidden = false;
 };
 
@@ -57,10 +87,25 @@ struct Edit {
  * 变化"必须分得开，否则调用方会把失败当成成功继续往下走。
  */
 struct Applied {
+    /**
+     * 成了没有。
+     */
     bool ok = false;
+
+    /**
+     * 失败原因（会话状态没动）。
+     */
     std::string error;
-    NodeId created = kInvalidNodeId;  // InsertControl 造出来的控件节点号
-    bool changed = false;             // 修订换了（哈希不同）；失败时为 false
+
+    /**
+     * InsertControl 造出来的控件节点号。
+     */
+    NodeId created = kInvalidNodeId;
+
+    /**
+     * 修订换了没有（哈希不同）；失败时为 false。
+     */
+    bool changed = false;
 };
 
 /**
@@ -74,6 +119,10 @@ class Session {
 public:
     explicit Session(Doc doc, int limit = 100);
 
+    /**
+     * 当前修订（不可变）。
+     * @return 当前修订
+     */
     const Doc& doc() const { return doc_; }
 
     /**
@@ -81,6 +130,8 @@ public:
      *
      * 重做栈清空是必须的：分支之后原先那条"未来"已经不成立了，留着它意味着一次重做会跳回
      * 一条与当前状态无关的修订上 —— 画面看着正常，内容却是别的分支。
+     * @param edit 已经算好的那一步
+     * @return 提交结果（失败时会话状态没动）
      */
     Applied apply(const Edit& edit);
 
@@ -89,16 +140,21 @@ public:
      * 用户按下的是一下，撤销也该是一下 —— 所以整批算一步，旧修订只压一份。
      *
      * vis 是步骤坐标的可见性口径（见 rev::applySteps）：会话不替调用方猜模式。
+     * @param steps 一批步骤（整批算一步撤销）
+     * @param vis 步骤坐标的可见性口径
+     * @return 提交结果
      */
     Applied applySteps(const std::vector<Step>& steps, FlowVisibility vis);
 
     /**
      * 回到上一份修订。没有历史时返回 false（不动状态）。
+     * @return true = 退回到上一份修订；没有历史时为 false
      */
     bool undo();
 
     /**
      * 回到撤销掉的那一份。与 undo 对称。
+     * @return true = 回到撤销掉的那一份
      */
     bool redo();
 
@@ -107,13 +163,38 @@ public:
      *
      * 0 表示不留历史；这与"不限制"不是一回事，调用方若把 0 当"不限制"用，
      * 要在它自己那一层换成一个足够大的数。
+     * @param limit 最多保留几份旧修订（0 = 不留历史）
      */
     void setLimit(int limit);
 
+    /**
+     * 有没有可撤销的历史。
+     * @return true = 撤销栈非空
+     */
     bool canUndo() const { return !undo_.empty(); }
+
+    /**
+     * 有没有可重做的。
+     * @return true = 重做栈非空
+     */
     bool canRedo() const { return !redo_.empty(); }
+
+    /**
+     * 撤销栈里有几份旧修订。
+     * @return 份数
+     */
     int undoDepth() const { return static_cast<int>(undo_.size()); }
+
+    /**
+     * 重做栈里有几份。
+     * @return 份数
+     */
     int redoDepth() const { return static_cast<int>(redo_.size()); }
+
+    /**
+     * 撤销栈的上限。
+     * @return 最多保留几份
+     */
     int limit() const { return limit_; }
 
     /**
@@ -121,16 +202,36 @@ public:
      *
      * 宿主靠它判"要不要重画"，而不是靠哈希 —— 一次撤销回到旧修订时哈希本来就该回到旧值，
      * 拿哈希当代号会让"撤销之后画面没更新"。它只保证单调，不保证连续到某一步。
+     * @return 状态代号（只保证单调）
      */
     uint64_t generation() const { return generation_; }
 
 private:
     void pushUndo(Doc doc);
 
+    /**
+     * 当前修订。
+     */
     Doc doc_;
+
+    /**
+     * 旧修订（越靠后越新），撤销就是把它取回来。
+     */
     std::vector<Doc> undo_;
+
+    /**
+     * 撤销掉的修订，重做按它回去。
+     */
     std::vector<Doc> redo_;
+
+    /**
+     * 撤销栈的上限（0 = 不留历史）。
+     */
     int limit_ = 100;
+
+    /**
+     * 状态代号，每次修订真的换了就 +1。
+     */
     uint64_t generation_ = 0;
 };
 

@@ -25,9 +25,10 @@ param(
     #   收的是目录（相对仓库根），不是预设名。当成预设名传过去会去取 <仓库根>\wasm\heditor.js
     #   （不存在），症状是"页面永远不 ready、探针等待超时"，看不出跟参数有关。
     [string]$Wasm = 'wasm',
-    # 跑哪个宿主页：index.html（单线程，验收基准）或 worker.html（引擎在 Worker 里）。
+    # 跑哪个页面：dist-app/index.html（示例页，验收基准）或 dist-app/multi.html（多实例）。
+    #   地址带 ?transport=worker 就让示例页把引擎放进 Worker。
     #   两宿主并存，所以同一份探针必须两边都能跑 —— 这个开关就是那条路。
-    [string]$Page = 'index.html',
+    [string]$Page = 'dist-app/index.html',
     [switch]$KeepAlive
 )
 

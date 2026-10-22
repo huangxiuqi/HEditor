@@ -23,7 +23,6 @@
 #include "core/utils/types.h"
 
 namespace heditor {
-
 /**
  * 段落格式。只对段落结束标记（ParagraphMark）有意义，其余种类读它没有定义。
  *
@@ -31,6 +30,9 @@ namespace heditor {
  * 结束标记的那一段"直接用默认格式编译，不需要再引一层文档默认格式（1.6 的样式表才需要）。
  */
 struct ParaFormat {
+    /**
+     * 主字体（FontLibrary 里的下标）。
+     */
     int font_index = 0;
 
     /**
@@ -39,6 +41,9 @@ struct ParaFormat {
      */
     Length size = Length::abs(ptToEmu(12.0));
 
+    /**
+     * 书写模式（横排 / 竖排与列序）。
+     */
     WritingMode wm = WritingMode::HorizontalTB();
 
     /**
@@ -53,6 +58,9 @@ struct ParaFormat {
      */
     Length space_after = Length::abs(ptToEmu(10.0));
 
+    /**
+     * 这一段之前强制分页。
+     */
     bool page_break_before = false;
 
     /**
@@ -63,7 +71,14 @@ struct ParaFormat {
      */
     const char* language = nullptr;
 
+    /**
+     * 默认字色。
+     */
     Color color = Color::rgb(24, 24, 24);
+
+    /**
+     * 字体回退链（在主字体之后依次尝试）。
+     */
     std::vector<int> fallback_font_indices;
 };
 
@@ -79,18 +94,54 @@ struct ParaFormat {
  * 从下层继承的值上取消掉。
  */
 struct ParaFormatPatch {
+    /**
+     * 覆盖主字体；没设置表示继承。
+     */
     std::optional<int> font_index;
+
+    /**
+     * 覆盖字号（必须是绝对长度）。
+     */
     std::optional<Length> size;
+
+    /**
+     * 覆盖书写模式。
+     */
     std::optional<WritingMode> wm;
+
+    /**
+     * 覆盖行距倍数。
+     */
     std::optional<float> line_factor;
+
+    /**
+     * 覆盖段后距。
+     */
     std::optional<Length> space_after;
+
+    /**
+     * 覆盖"段前分页"。
+     */
     std::optional<bool> page_break_before;
+
+    /**
+     * 覆盖语言标签。外层是 optional、内层才是裸指针：nullptr 表示"指定为空"，与"这一层没说"是两件事。
+     */
     std::optional<const char*> language;
+
+    /**
+     * 覆盖字色。
+     */
     std::optional<Color> color;
+
+    /**
+     * 覆盖回退链。
+     */
     std::optional<std::vector<int>> fallback_font_indices;
 
     /**
      * 一个字段都没设置吗。规范化与诊断靠它判断"这一段有没有内联覆盖"。
+     * @return true = 一个字段都没设置（没有内联覆盖）
      */
     bool empty() const {
         return !font_index.has_value() && !size.has_value() && !wm.has_value() &&
@@ -104,12 +155,17 @@ struct ParaFormatPatch {
 
 /**
  * 把 patch 里已设置的字段盖到 base 上。base 是上一层（样式链或默认值）算出来的结果。
+ * @param patch 覆盖
+ * @param base 被覆盖的完整格式（就地改写）
  */
 void applyParaFormatPatch(const ParaFormatPatch& patch, ParaFormat* base);
 
 /**
  * 逐字段合并两个 patch：over 里设置了的覆盖 under，没设置的保留 under 的。
  * 样式链的解析就是它按"从根到叶"的顺序叠加。
+ * @param under 下层
+ * @param over 上层（设置了的覆盖下层）
+ * @return 合并结果
  */
 ParaFormatPatch mergeParaFormatPatch(const ParaFormatPatch& under, const ParaFormatPatch& over);
 
@@ -119,6 +175,8 @@ ParaFormatPatch mergeParaFormatPatch(const ParaFormatPatch& under, const ParaFor
  * ParaFormat 的 language 是裸指针（引擎侧的 BlockSpec 也用它），所以标签必须活过任何一次
  * 编译。从文件读回来时字符串是临时的，只能靠驻留把它钉住 —— 这也是"驻留字符串"这个约定
  * 在序列化（1.10）这一侧的唯一落点。空标签返回 nullptr（表示不指定语言）。
+ * @param tag 语言标签
+ * @return 静态生存期的指针；空标签为 nullptr
  */
 const char* internLanguage(const std::string& tag);
 

@@ -8,7 +8,18 @@
 namespace heditor {
 
 struct Color {
+    /**
+     * 四个通道：红、绿、蓝、不透明度（0~255）。
+     */
     uint8_t r = 0, g = 0, b = 0, a = 255;
+
+    /**
+     * 造一个不透明颜色。
+     * @param r_ 红
+     * @param g_ 绿
+     * @param b_ 蓝
+     * @return 不透明度 255 的颜色
+     */
     static Color rgb(uint8_t r_, uint8_t g_, uint8_t b_) { return Color{r_, g_, b_, 255}; }
 
     /**
@@ -19,10 +30,16 @@ struct Color {
 };
 
 struct Point {
+    /**
+     * 横坐标与纵坐标（磅）。
+     */
     float x = 0.0f, y = 0.0f;
 };
 
 struct Rect {
+    /**
+     * 矩形：左上角与宽高（磅）。
+     */
     float x = 0.0f, y = 0.0f, w = 0.0f, h = 0.0f;
 };
 
@@ -34,7 +51,14 @@ struct Rect {
  * 既有的 EditorEngine::PageRect 调用点不必动。
  */
 struct PageRect {
+    /**
+     * 页号（0 起）。
+     */
     int page = 0;
+
+    /**
+     * 页内矩形（页面坐标，磅）。
+     */
     Rect r_pt{};
 };
 

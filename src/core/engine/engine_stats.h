@@ -11,17 +11,46 @@
 namespace heditor {
 
 struct EngineStats {
+    /**
+     * 排出来的总页数。断行结果的分母，也是宿主该建几页画布的依据。
+     */
     int page_count = 0;
+
+    /**
+     * 本次排版产出的字形总数。字形缓存与光栅耗时的分母。
+     */
     int glyph_count = 0;
+
+    /**
+     * 落位过的行数（跨页拆开的两半各算一行）。
+     */
     int placed_line_count = 0;
+
+    /**
+     * 字素簇总数。行盒推进与命中测试都按簇算，不按码点。
+     */
     int cluster_count = 0;
+
+    /**
+     * 装进来的字脸数（一个字体文件可以有多张脸）。
+     */
     int face_count = 0;
+
+    /**
+     * FreeType 里的实例数。可变字体一份脸可以有多个实例。
+     */
     int font_instance_count = 0;
+
     /**
      * 字体回退取证：跑完整条链后仍是 .notdef 的字形数 / 切出的 run 数。
      */
     int missing_glyph_count = 0;
+
+    /**
+     * 切出来的 run 数。频繁切换字体会让它暴涨，形状耗时跟着涨。
+     */
     int font_run_count = 0;
+
     /**
      * 字体按需读的账：命中、未命中、落存储的次数与字节、存储耗时、当前常驻。
      *
@@ -29,11 +58,32 @@ struct EngineStats {
      * 字形数；常驻字节是这条路换来的收益（整份装载时恒为零，因为没有数据源）。
      */
     long long font_cache_hits = 0;
+
+    /**
+     * 块缓存的未命中次数。它为零只有一种可能：根本没按需读过。
+     */
     long long font_cache_misses = 0;
+
+    /**
+     * 落到存储上读了几次。按需装载时它应当远小于字形数。
+     */
     long long font_storage_reads = 0;
+
+    /**
+     * 从存储读进来的累计字节。常驻字节不该超过它。
+     */
     long long font_storage_bytes = 0;
+
+    /**
+     * 存储读花掉的毫秒。判"每页读多少毫秒"的分子。
+     */
     double font_io_ms = 0.0;
+
+    /**
+     * 当前常驻的字体块字节。按需装载的收益就是它小一个量级。
+     */
     long long font_resident_bytes = 0;
+
     /**
      * 存储读真失败的次数。与 font_storage_eofs 分开：文件尾的短读不算失败。
      *
@@ -41,13 +91,27 @@ struct EngineStats {
      * 字体读不到在页面上只表现为某些字不出现，而从任何统计里都看不出来。
      */
     long long font_storage_failures = 0;
+
     /**
      * 因请求越过文件尾而短读的次数（正常终止，不是失败）。
      */
     long long font_storage_eofs = 0;
+
+    /**
+     * 整形耗时（取字形 + 排 run）。
+     */
     double shape_ms = 0.0;
+
+    /**
+     * 排版耗时：断行、落位、页指纹与控件视图都在里面。
+     */
     double layout_ms = 0.0;
+
+    /**
+     * 呈现耗时：内容光栅与瞬态合成。
+     */
     double paint_ms = 0.0;
+
     /**
      * 页指纹记账的耗时（每次重排后都要算一遍）。
      *
@@ -57,15 +121,23 @@ struct EngineStats {
      * 而不是随文档大小走。
      */
     double page_fp_ms = 0.0;
+
     /**
+     * 铺面积：页间隙背景、页底、页边框。
+     *
      * 绘制的三段分解。存在的理由：它是"要不要引入 GPU / 第三方光栅器"的判据。
      * 实测（4 页、1022 字形、帧面积从 0.51 Mpx 到 8.12 Mpx 共 16 倍）：
      * paint 只从 110 ms 涨到 173 ms（1.57 倍）—— 成本不随面积走。
      * 所以"加像素吞吐"（GPU、更快的 fill/memcpy）在这里是打空的；
      * 必须先把这三段分开，才知道钱到底花在哪一段。
      */
-    double paint_fill_ms = 0.0;   // 铺面积：页间隙背景 + 页底 + 页边框
-    double paint_glyph_ms = 0.0;  // 字形：hb 抽轮廓 + 扫描线光栅（或命中字形缓存后只做 blit）
+    double paint_fill_ms = 0.0;
+
+    /**
+     * 字形那一段：抽轮廓、扫描线光栅，或命中字形缓存后只拷像素。
+     */
+    double paint_glyph_ms = 0.0;
+
     /**
      * 字形那一段里"只为记账取包围盒"花掉的时间。
      *
@@ -74,26 +146,51 @@ struct EngineStats {
      * 自写后端不取包围盒，恒为 0。
      */
     double paint_glyph_bounds_ms = 0.0;
-    double paint_present_ms = 0.0;  // 呈现里除铺面积与字形之外的全部（paint_ms 减那两段）
 
     /**
-     * 上面那一笔的六段分解。它是"paint 减掉铺面积与字形"，所以只是个残差 ——
-     * 残差里装着六件不相干的事，合成一个数看不出该动哪一块，只能分开量。
-     *
-     * 分开量之后答案很干净：2000 段文档上那 2.0 ms 全落在"记账"那一段（空转呈现
-     *   时铺面积、字形、瞬态差分都是 0.00），根因是表单标记遍历 layout_.lines 全篇
-     *   （4005 行、每行再过一遍簇），与窗口无关 —— 1 页文档同一条路径只有 0.00 ms。
-     *   读代码挑嫌疑犯会挑中 snapshotLineGeometry，加判据重编之后那个数纹丝不动；
-     *   所以先插计时点分开量，别读代码猜。
-     * 六段两两首尾相接，并起来正好是 paint_ms；写页位图那两段（铺面积、字形）
-     *   包在 paint_swap_ms 里面，不是与它并列。
+     * 呈现里除铺面积与字形之外的全部（清页、页框、页位图合成）。
      */
-    double paint_pre_ms = 0.0;        // 入口准备：字形缓存预算 + 两份记账清零 + 几何取值
-    double paint_swap_ms = 0.0;       // 内容：逐页判新鲜、行带二分、整页或行带光栅
-    double paint_transient_ms = 0.0;  // 瞬态差分：选区与光标的新旧矩形比对，落成脏矩形
-    double paint_overlay_ms = 0.0;    // 记账：脏矩形面积、窗口并集盒、脏页清单
-    double paint_ledger_ms = 0.0;     // 上报：光标数字、表单归属、编辑统计
-    double paint_report_ms = 0.0;     // 收尾：两份统计的合成与发布
+    double paint_present_ms = 0.0;
+
+    /**
+     * 入口准备：字形缓存预算、两份记账清零、几何取值。
+     *
+     * 上面那一笔的六段分解。它是"paint 减掉铺面积与字形"，所以只是个残差 —— 残差里
+     * 装着六件不相干的事，合成一个数看不出该动哪一块，只能分开量。
+     * 分开量之后答案很干净：2000 段文档上那 2.0 ms 全落在"记账"那一段（空转呈现时铺面积、
+     * 字形、瞬态差分都是 0.00），根因是表单标记遍历 layout_.lines 全篇（4005 行、每行再过
+     * 一遍簇），与窗口无关 —— 1 页文档同一条路径只有 0.00 ms。读代码挑嫌疑犯会挑中
+     * snapshotLineGeometry，加判据重编之后那个数纹丝不动；先插计时点分开量，别读代码猜。
+     * 六段两两首尾相接，并起来正好是 paint_ms；写页位图那两段（铺面积、字形）包在
+     * paint_swap_ms 里面，不是与它并列。
+     */
+    double paint_pre_ms = 0.0;
+
+    /**
+     * 内容那一段：逐页判新鲜、行带二分、整页或行带光栅。
+     */
+    double paint_swap_ms = 0.0;
+
+    /**
+     * 瞬态差分：选区与光标的新旧矩形比对，落成脏矩形。
+     */
+    double paint_transient_ms = 0.0;
+
+    /**
+     * 记账：脏矩形面积、窗口并集盒、脏页清单。
+     */
+    double paint_overlay_ms = 0.0;
+
+    /**
+     * 上报：光标数字、表单归属、编辑统计。
+     */
+    double paint_ledger_ms = 0.0;
+
+    /**
+     * 收尾：两份统计的合成与发布。
+     */
+    double paint_report_ms = 0.0;
+
     /**
      * 本轮光栅的字形个数。与 paint_glyph_ms 配对：一个说花了多久、
      * 一个说画了几个字 —— 判"字形光栅贵不贵"要看两者的商，
@@ -109,10 +206,30 @@ struct EngineStats {
      *   占用贴着上限 ⇒ 随时会被整份抹掉，"预热了却不见变快"的成因就在这里。
      */
     size_t glyph_cache_bytes = 0;
+
+    /**
+     * 字形缓存的上限（字节）。命中率长期偏低时先看它是不是太小。
+     */
     size_t glyph_cache_limit = 0;
+
+    /**
+     * 这一轮的总耗时（形状 + 排版 + 呈现 + 页指纹）。
+     */
     double total_ms = 0.0;
+
+    /**
+     * 帧宽（设备像素）。宿主按它算坐标系。
+     */
     int frame_width = 0;
+
+    /**
+     * 帧高（设备像素）= 窗口页数 x 步距。
+     */
     int frame_height = 0;
+
+    /**
+     * 当前的密度（设备像素 / 磅）。
+     */
     float zoom = 1.0f;
 };
 
@@ -138,8 +255,17 @@ struct EditStats {
      * layout_ran 为 false 时，这些数字描述的是上一轮 —— 它们不是假账，只是不属于这一拍。
      */
     bool layout_ran = false;
+
+    /**
+     * 这一轮真的重排了几段。增量排版的核心读数。
+     */
     int relaid_paragraphs = 0;
-    int reused_paragraphs = 0;  // 后缀被复用的段数（没重排）
+
+    /**
+     * 后缀被复用的段数（没重排，整块搬回）。
+     */
+    int reused_paragraphs = 0;
+
     /**
      * 后缀是平移复用的（不是原样搬回）：行结构变了，于是后缀整体沿块轴挪了位置、
      * 页码与全局行号重编过，但断行结果与字形的行内位置一个字节都没重算。
@@ -147,11 +273,31 @@ struct EditStats {
      * 但它们的位置变了"，面板据此解释"为什么脏页比 1 多"。
      */
     bool suffix_shifted = false;
+
+    /**
+     * 文档总段数。重排段数与复用段数的分母。
+     */
     int total_paragraphs = 0;
+
+    /**
+     * 这一轮重排了几行。行结构没变时应当只有脏段那几行。
+     */
     int relaid_lines = 0;
+
+    /**
+     * 文档总行数（落位之后的行数）。
+     */
     int total_lines = 0;
+
+    /**
+     * 这一轮是全量重排还是增量。判"首次排版"与"增量失效"都看它。
+     */
     bool layout_was_full = false;
-    int dirty_page_count = 0;  // 内容指纹变了、需要重画的页数
+
+    /**
+     * 内容指纹变了、需要重画的页数。
+     */
+    int dirty_page_count = 0;
 
     /**
      * 重建树产物（每次提交都做）的耗时拆分。
@@ -162,6 +308,7 @@ struct EditStats {
      * 合成一个就分不清该优化谁。
      */
     double rebuild_compile_ms = 0.0;
+
     /**
      * 本轮有多少块是从上一轮整块搬过来的（不重算文本与格式）。
      *
@@ -169,9 +316,22 @@ struct EditStats {
      * 原样复用"是结构判据，"投影用了 0.4 ms"只是这一次的运气。
      */
     int rebuild_reused = 0;
-    double rebuild_flow_ms = 0.0;     // FlowIndex 重建（按节点记流位置）
-    double rebuild_flowpos_ms = 0.0;  // 块位置的前缀和（局部量累加成绝对位置）
-    double rebuild_copy_ms = 0.0;     // 块流副本（排版吃的 blocks_ 那一份）
+
+    /**
+     * FlowIndex 重建的耗时（按节点记流位置）。
+     */
+    double rebuild_flow_ms = 0.0;
+
+    /**
+     * 块位置前缀和的耗时（局部量累加成绝对位置）。
+     */
+    double rebuild_flowpos_ms = 0.0;
+
+    /**
+     * 块流副本的耗时（排版吃的那一份 blocks_）。
+     */
+    double rebuild_copy_ms = 0.0;
+
     /**
      * 这一轮产物是怎么重建的，以及局部路径被否决的原因。
      *
@@ -181,8 +341,16 @@ struct EditStats {
      * reject 是分段局部重建里第几条判据否决的（0 = 没有否决），编号与实现里的顺序一致。
      */
     int rebuild_path = 0;
+
+    /**
+     * 投影时被拒绝重用的块数。非零说明增量在退化，要查原因。
+     */
     int rebuild_reject = 0;
-    double rebuild_controls_ms = 0.0;  // 控件视图导出
+
+    /**
+     * 控件视图导出的耗时。
+     */
+    double rebuild_controls_ms = 0.0;
 
     /**
      * 上屏粒度：本次真正重光栅的页数，以及文档总页数。
@@ -192,19 +360,34 @@ struct EditStats {
      * 否则它会恒等于 1，读起来像"只有一页脏"。窗口里那几页看 window_pages。
      */
     int repainted_pages = 0;
+
+    /**
+     * 这一侧的页数（与 EngineStats::page_count 同源）。
+     */
     int total_pages = 0;
+
     /**
      * 本次重画的那条行带（页内像素 y；band_y1 < 0 = 本轮没走行带路径）。
      * 与 repainted_pixels 一起看：后者说"要传多少"，这两个说"传的是哪一条"。
      * 页粒度重画时它就是整页（y0=0、y1=页高）。
      */
     int band_y0 = -1;
+
+    /**
+     * 行带的下边界（页内像素）；-1 = 这一拍没有行带。
+     */
     int band_y1 = -1;
+
     /**
      * 帧（= 宿主那张画布）覆盖的页数，以及它的首页。
      */
     int window_pages = 0;
+
+    /**
+     * 这一拍装着的第一页。与宿主认为的窗口首页必须一致。
+     */
     int window_first_page = 0;
+
     /**
      * 本次要上屏的像素数（各页脏矩形面积之和，合并之后的），以及它们在窗口坐标下的包围盒。
      *
@@ -212,11 +395,35 @@ struct EditStats {
      * 那个数随渲染目标一起消失了。上界仍然成立：它证明的是"真的没写整页"。
      */
     long long repainted_pixels = 0;
+
+    /**
+     * 这一拍重画区域的左边缘（设备像素）。
+     */
     int repainted_x = 0;
+
+    /**
+     * 这一拍重画区域的上边缘。
+     */
     int repainted_y = 0;
+
+    /**
+     * 重画区域的宽。与 repainted_pixels 一起判"上屏面积"。
+     */
     int repainted_w = 0;
+
+    /**
+     * 重画区域的高。
+     */
     int repainted_h = 0;
+
+    /**
+     * 帧宽（设备像素），与 EngineStats::frame_width 同一口径。
+     */
     int frame_w = 0;
+
+    /**
+     * 帧高（设备像素）。
+     */
     int frame_h = 0;
 
     /**
@@ -228,49 +435,96 @@ struct EditStats {
      * 最近一次的，直接相加会让光标闪烁每 530ms 重复上报一次排版耗时。
      */
     double layout_ms = 0.0;
+
+    /**
+     * 页指纹的耗时。它不随排版长短变化，混进 layout_ms 会误判增量收益。
+     */
     double page_fp_ms = 0.0;
+
+    /**
+     * 这一侧排版花掉的毫秒（编辑账自己的口径）。
+     */
     double paint_ms = 0.0;
+
+    /**
+     * 这一侧的总耗时。
+     */
     double total_ms = 0.0;
 
     /**
      * 光标位置与文档规模（逻辑坐标，与视觉行列无关）。
      */
     int caret_para = 0;
-    size_t caret_offset = 0;  // 段内码点偏移
+
+    /**
+     * 段内码点偏移（不是 UTF-16 码元）。
+     */
+    size_t caret_offset = 0;
+
     /**
      * 光标所在页（绝对页号；-1 = 找不到行盒）。
      * 帧只装窗口内的页之后，这是"光标在不在此刻的窗口里"的唯一判据 ——
      * 不在窗口里则光标画不出来、点也点不中，宿主据此挪窗口。
      */
     int caret_page = -1;
-    size_t caret_index = 0;  // 全文码点下标
+
+    /**
+     * 全文码点下标。
+     */
+    size_t caret_index = 0;
+
     /**
      * 光标侧别：在这个偏移上跨过了几枚边界括号（0 = 在所有括号之前）。
      * 与 caret_offset 合起来才是光标的完整位置 —— 同一个偏移上有好几个插入点。
      */
     int caret_side = 0;
+
     /**
      * 光标是否落在竖排的段里。方向键的物理映射由它决定：竖排的行内轴是竖直的，
      * 上下走字、左右换列（见宿主的 keyToOp）。
      */
     bool caret_vertical = false;
+
     /**
      * 光标所在段的列序是否反向（中日竖数列自右向左为真，蒙文为假）。
      * 方向键的左右换列靠它定方向：两种竖排的列序相反，只按"竖排"映射会把蒙文按反。
      */
     bool caret_block_reversed = false;
+
+    /**
+     * 全文码点数。偏移的合法上界。
+     */
     size_t doc_codepoints = 0;
+
+    /**
+     * 这一拍光标画没画出来（闪烁相位决定）。
+     */
     bool caret_visible = false;
+
     /**
      * 光标在帧像素坐标下的矩形。宿主据此摆 IME 候选框、
      * 或把原生 textarea 覆盖层挪到光标处（档 3）。
      */
     int caret_x_px = 0;
+
+    /**
+     * 光标在页内的纵坐标（设备像素）。
+     */
     int caret_y_px = 0;
+
+    /**
+     * 光标矩形的宽（设备像素）。
+     */
     int caret_w_px = 0;
+
+    /**
+     * 光标矩形的高（设备像素）。
+     */
     int caret_h_px = 0;
 
     /**
+     * 编辑模式：0 = 文档、1 = 表单、2 = 只读。
+     *
      * 表单（区间标注 + 编辑策略）
      * blocked_edits 是累计值，其余是本轮快照。
      * 它存在的理由：策略生效时编辑会静默返回 false，
@@ -278,9 +532,21 @@ struct EditStats {
      * 有了这个计数，"按了 5 次键一个字没进去"就有了一个可断言的说法：
      * 文档长度不变 且 blocked_edits += 5。
      */
-    int edit_mode = 0;  // 0=文档模式 1=表单模式 2=只读模式
+    int edit_mode = 0;
+
+    /**
+     * 控件数（表单字段）。
+     */
     int control_count = 0;
-    int caret_control = -1;  // 光标最内层所在的控件；-1 = 不在任何控件内
+
+    /**
+     * 光标最内层所在的控件；-1 = 不在任何控件里。
+     */
+    int caret_control = -1;
+
+    /**
+     * 被拒绝的编辑次数。只读档与锁定控件都会让它涨。
+     */
     long long blocked_edits = 0;
 };
 

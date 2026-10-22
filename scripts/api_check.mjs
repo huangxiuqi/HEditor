@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const CONTRACT = 'web/src/types.ts';
 const MEMBERS_LIST = 'web/src/public_members.gen.ts';
-const DEMO_FILES = ['web/demo.html', 'web/demo.js'];
+const DEMO_FILES = ['web/index.html', 'web/multi.html', 'web/app/main.ts', 'web/app/multi.ts', 'web/app/ui.ts'];
 
 const problems = [];
 const note = (where, msg) => problems.push(`${where}: ${msg}`);

@@ -21,7 +21,6 @@
 #include "core/utils/units.h"
 
 namespace heditor {
-
 /**
  * 长度的性质。Em 与 Chars 刻意分开：中文全角字是 1 em，但数字与字母是半角（约 0.5 em），
  * "3 个字符宽"在数字字段上会算成一半。Chars 表示"n 个全角字符位"，
@@ -39,6 +38,9 @@ enum class LengthKind : uint8_t {
  * 长度值。字段按种类取用，与 Node 的 children / text 是同一个约定。
  */
 struct Length {
+    /**
+     * 长度的性质，决定下面哪些字段有意义。
+     */
     LengthKind kind = LengthKind::Auto;
 
     /**
@@ -52,33 +54,60 @@ struct Length {
      * 落盘与比较因此不经过浮点。其余种类不用这两个字段。
      */
     int32_t num = 0;
+
+    /**
+     * 分母。恒为正，约分之后的结果。
+     */
     int32_t den = 1;
 
+    /**
+     * 造一个绝对长度。
+     * @param e 长度（EMU）
+     * @return 绝对长度
+     */
     static Length abs(Emu e);
 
     /**
      * 比例。分母为 0 不是可表达的比例，返回自动值（没有数值可表达）—— 不猜一个分母，
      * 也不返回一个用 0 做除法的值。调用方要区分"用户写了 auto"与"分母算错了"，
      * 得自己保证分母非零；文本形式里的 pct:1/0 是被显式拒绝的。
+     * @param num 分子
+     * @param den 分母（为 0 时返回自动值）
+     * @return 比例；分母为 0 时是自动值
      */
     static Length percent(int32_t num, int32_t den);
 
     /**
      * 相对字号的倍数。按千分位取整（1.6 倍存成 8/5，1/3 倍只能到 333/1000），
      * 因为存的是整数比而不是浮点。更多位数没有实际用途：倍数来自用户输入。
+     * @param multiple 倍数（1 = 一个字号）
+     * @return 相对字号的长度（按千分位取整）
      */
     static Length em(double multiple);
 
     /**
      * n 个全角字符位，同样按千分位取整。
+     * @param count 全角字符位数
+     * @return 字符位长度（按千分位取整）
      */
     static Length chars(double count);
 
+    /**
+     * 造一个自动值（由内容或参照方决定）。
+     * @return 自动值（没有数值可以表达）
+     */
     static Length automatic();
 
+    /**
+     * 长度相等：种类与四个字段都相同。
+     */
     bool operator==(const Length& o) const {
         return kind == o.kind && abs_emu == o.abs_emu && num == o.num && den == o.den;
     }
+
+    /**
+     * 不等 = 相等取反。
+     */
     bool operator!=(const Length& o) const { return !(*this == o); }
 };
 
@@ -94,12 +123,17 @@ struct Length {
  * 为什么不写成 2.54cm 这种可读形式：EMU 换算成磅常常是无限小数（12700 含因子 127），
  * 有限位数会丢精度，而这一层要的是 parse(print(x)) == x。给用户看的显示形式（厘米两位
  * 小数）是视图层的事，不在这里。
+ * @param len 长度
+ * @return 前缀形式的文本（abs: / pct: / em: / chars: / auto）
  */
 std::string printLength(const Length& len);
 
 /**
  * 文本形式 → 长度。任何不符合上面语法的输入都返回 false，不猜、不截断、不夹取 ——
  * 静默纠正会把"文件坏了"变成"读出来一个别的值"。
+ * @param text 文本形式
+ * @param out 写回长度
+ * @return true = 语法合法（不认识就拒绝，不做推断）
  */
 bool parseLength(const std::string& text, Length* out);
 

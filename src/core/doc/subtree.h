@@ -24,24 +24,70 @@
 #include "core/doc/table_spec.h"
 
 namespace heditor {
-
 /**
  * 一棵子树的描述。字段与 Node 一一对应，只有两处例外：不带 id 与 parent，也不带节记录
  * （SectionSpec 里的页眉页脚引用是本文件内的节点 id，搬进一份可移植的值里没有意义；
  * 整棵节的搬运要等序列化那一步把片段解析成内容）。
  */
 struct NodeSpec {
+    /**
+     * 节点种类。
+     */
     NodeKind kind = NodeKind::TextRun;
+
+    /**
+     * 作者设定的默认可见性。
+     */
     bool hidden = false;
-    std::vector<uint32_t> text;  // 仅文本节点
-    ParaFormatPatch para;        // 仅段落标记
-    std::string styleRef;        // 仅段落标记与文本节点
-    CharFormat marks;            // 仅文本节点
-    ControlSpec control;         // 仅内容控件
-    CellSpec cell;               // 仅单元格
-    RowSpec row;                 // 仅表格行
-    TableSpec table;             // 仅表格
-    FieldSpec field;             // 仅域
+
+    /**
+     * 码点（仅文本节点）。
+     */
+    std::vector<uint32_t> text;
+
+    /**
+     * 段落格式覆盖（仅段落标记）。
+     */
+    ParaFormatPatch para;
+
+    /**
+     * 样式引用（段落标记与文本节点）。
+     */
+    std::string styleRef;
+
+    /**
+     * 字符格式（仅文本节点）。
+     */
+    CharFormat marks;
+
+    /**
+     * 控件记录（仅内容控件）。
+     */
+    ControlSpec control;
+
+    /**
+     * 单元格记录（仅单元格）。
+     */
+    CellSpec cell;
+
+    /**
+     * 行记录（仅表格行）。
+     */
+    RowSpec row;
+
+    /**
+     * 表格记录（仅表格）。
+     */
+    TableSpec table;
+
+    /**
+     * 域记录（仅域）。
+     */
+    FieldSpec field;
+
+    /**
+     * 子节点，顺序就是流顺序。
+     */
     std::vector<NodeSpec> children;
 
     /**
@@ -50,12 +96,16 @@ struct NodeSpec {
      *
      * 它让位置映射不必再读文档 —— 步骤只要带着子树就能算出自己移动了多少位置，
      * 这正是 mapPos 只吃步骤、不吃树的前提。
+     * @return 占几个流位置（与 FlowIndex 同一口径）
      */
     int span() const;
 };
 
 /**
  * 把树里的一棵子树拷成 NodeSpec（递归，含全部格式字段）。
+ * @param tree 文档树
+ * @param id 子树根
+ * @return 可移植的描述（不带 id 与 parent）
  */
 NodeSpec captureSubtree(const NodeTree& tree, NodeId id);
 
@@ -64,6 +114,11 @@ NodeSpec captureSubtree(const NodeTree& tree, NodeId id);
  * 建成一棵摘下的子树（不挂在树上），返回新子树的根 id。建不出来时返回 kInvalidNodeId。
  *
  * 递归过程不校验子节点约束：调用方先问 acceptsChild，或让不变量检查器去报。
+ * @param tree 文档树
+ * @param parent 挂到哪个节点下
+ * @param at 槽位
+ * @param spec 描述
+ * @return 新子树的根 id；失败为 kInvalidNodeId
  */
 NodeId materializeSubtree(NodeTree& tree, NodeId parent, int at, const NodeSpec& spec);
 

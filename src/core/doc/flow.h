@@ -25,16 +25,29 @@
 #include "core/doc/node.h"
 
 namespace heditor {
-
 /**
  * 节点级位置。offset 的含义由 container 的种类决定：
  * 容器里是子节点槽位序号（0 到 children.size()），文本节点里是码点下标。
  */
 struct Pos {
+    /**
+     * 容器（或文本节点）的 id。
+     */
     NodeId container = kInvalidNodeId;
+
+    /**
+     * 容器里是子节点槽位；文本节点里是码点下标。
+     */
     int offset = 0;
 
+    /**
+     * 两个节点级位置相同（容器与偏移都相等）。
+     */
     bool operator==(const Pos& o) const { return container == o.container && offset == o.offset; }
+
+    /**
+     * 不等 = 相等取反。
+     */
     bool operator!=(const Pos& o) const { return !(*this == o); }
 };
 
@@ -61,16 +74,21 @@ public:
 
     /**
      * 流位置的个数 = 最后一个合法位置 + 1。
+     * @return 流位置个数
      */
     int size() const { return size_; }
 
     /**
      * 流位置 → 节点级位置。入参会被夹到 [0, size()]。
+     * @param flow 流位置（会被夹到 [0, size()]）
+     * @return 对应的节点级位置
      */
     Pos posAt(FlowPos flow) const;
 
     /**
      * 节点级位置 → 流位置。容器或槽位不存在、或 offset 越界时返回 -1。
+     * @param pos 节点级位置
+     * @return 流位置；容器或槽位不存在、offset 越界时为 -1
      */
     FlowPos flowAt(const Pos& pos) const;
 
@@ -80,6 +98,8 @@ public:
      * 而 flowAt 的 -1 分不清"越界"与"不在流里"。
      *
      * 越界的 id（不是这棵树的节点）同样判不在流里：只有数组成员才谈得上位置。
+     * @param id 节点 id
+     * @return true = 这个节点当前在流里
      */
     bool inFlow(NodeId id) const {
         const size_t i = static_cast<size_t>(id);
@@ -90,31 +110,64 @@ public:
      * 节点占用的流位置区间 [first, end)。不在流里时返回 false。
      * 用返回值表达"不在流里"而不抛异常：调用方多半是拿它做判断，
      * 异常会让"节点被摘除"从常规状态变成需要捕获的意外。
+     * @param id 节点 id
+     * @param first 写回区间起点
+     * @param end 写回区间终点（不含）
+     * @return true = 在流里
      */
     bool intervalOf(NodeId id, int* first, int* end) const;
 
 private:
+
     /**
      * 递归算出这个节点的展开起点与跨度，cursor 是"下一个可用流位置"。
      *
      * 直接吃节点指针而不是 id：重建要按节点走一遍全树，而 find(id) 本身是一次哈希查找 ——
      * 拿 id 递归等于每个节点多付一次哈希，3000 段的文档里这一项与编译同量级。
+     * @param n 节点
+     * @param cursor 下一个可用流位置（进出一趟）
+     * @param is_root 是不是根（根没有边界）
      */
     void measure(const Node* n, int& cursor, bool is_root);
 
+    /**
+     * 节点的展开起点（流位置）。
+     * @param id 节点
+     * @return 起点
+     */
     int firstOf(NodeId id) const { return first_[static_cast<size_t>(id)]; }
+
+    /**
+     * 节点的展开跨度（占几个流位置）。
+     * @param id 节点
+     * @return 跨度
+     */
     int spanOf(NodeId id) const { return span_[static_cast<size_t>(id)]; }
+
     /**
      * 节点展开之后的位置（= 第一个"不属于它"的流位置）。
+     * @param id 节点
+     * @return 展开之后的位置（第一个不属于它的流位置）
      */
     int endOf(NodeId id) const { return firstOf(id) + spanOf(id); }
+
     /**
      * 容器内容开头。根没有起始边界，所以不加那一位。
+     * @param id 容器
+     * @return 内容开头的流位置（根不加起始边界那一位）
      */
     int contentStartOf(NodeId id) const;
 
+    /**
+     * 被索引的树（不持有）。
+     */
     const NodeTree* tree_ = nullptr;
+
+    /**
+     * 展开时用的可见性口径。
+     */
     FlowVisibility vis_ = FlowVisibility::Design;
+
     /**
      * 位置表按节点 id 直接下标，既不缓存在节点上，也不走哈希表。
      *
@@ -128,7 +181,15 @@ private:
      * 被隐藏的子树），inFlow 就是问"这一格不是 -1"。
      */
     std::vector<int> first_;
+
+    /**
+     * 每个节点占几个流位置；不在流里的留 0。
+     */
     std::vector<int> span_;
+
+    /**
+     * 流位置个数。
+     */
     int size_ = 0;
 };
 

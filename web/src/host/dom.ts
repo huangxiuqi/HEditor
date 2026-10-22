@@ -15,10 +15,12 @@ import { PageCanvases, type CanvasStore, type PageGeometry } from './pages';
  */
 export interface HostView extends PageGeometry {
   totalPages: number;
+
   /**
    * 窗口首页。
    */
   first: number;
+
   /**
    * 窗口页数。
    */
@@ -31,41 +33,59 @@ export interface HostView extends PageGeometry {
 export interface EngineLink {
   /**
    * 读命令。Worker 侧读的是主线程镜像，所以是同步的。
+   * @param name 读命令名
+   * @param args 参数
    */
   read(name: string, args?: Args): any;
+
   /**
    * 写命令的引擎那一步（不含收尾）；返回"有没有改动"。
+   * @param name 写命令名
+   * @param args 参数
    */
   write(name: string, args?: Args): Maybe<boolean>;
+
   /**
    * 一次写之后的收尾：对窗口 → 必要时呈现 → 贴脏页。Worker 侧是空实现。
+   * @param opName 刚跑完的命令名（决定要不要补呈现）
    */
   settle(opName: string): Maybe<any>;
+
   /**
    * 视口位置（设备像素）。窗口跟着可见页走，滚动本身不重排。
+   * @param scrollY 滚动位置（设备像素）
    */
   view(scrollY: number): Maybe<any>;
+
   /**
    * 几何快照。
    */
   geom(): HostView;
+
   /**
    * 分页 / 连页与页间隙（成套设，见 engine api 的 setViewMode）。
+   * @param gap 页间隙（磅，连页时是 0）
+   * @param continuous 是否连页
    */
   setViewMode(gap: number, continuous: boolean): Maybe<any>;
+
   /**
    * 引擎把滚动位置归零了（装载类操作）—— 宿主跟着追平一次。
    */
   takeScrollReset(): boolean;
+
   /**
    * 某一页的导出像素（内容 + 瞬态，页内坐标）。
    *   Worker 传输返回 null：像素在那一侧贴，主线程根本没有这块内存。
+   * @param page 页号
    */
   pixels(page: number): Uint8ClampedArray | null;
+
   /**
    * 整份序列化成 JSON 文本。同线程直接读，Worker 是一次往返。
    */
   serialize(): Maybe<string>;
+
   /**
    * 等队列排空。
    *
@@ -80,43 +100,67 @@ export type ChangeSource = 'user' | 'api';
 export interface DomHostOptions {
   container: HTMLElement;
   link: EngineLink;
+
   /**
    * 是否由库接管键盘 / 指针 / IME。默认 true；false 只给"自己驱动"的自动化宿主。
    */
   input?: boolean;
+
   /**
    * 只读时编辑命令由引擎拦（ReadOnly 档），宿主只用来提示状态。
    */
   readOnly(): boolean;
+
   /**
    * 状态栏（产品页没有这一格，实现里就什么都不做）。
+   * @param text 这句话要说什么
+   * @param isErr true = 这是一次失败（要上提示条）
    */
   status?(text: string, isErr?: boolean): void;
+
   /**
    * 一次编辑真的改了内容。
+   * @param changed 内容有没有真的变
+   * @param source 改动来自哪条路
    */
   onEdit?(changed: boolean, source: ChangeSource): void;
+
   /**
    * 光标 / 选区变了（每拍收尾时发一次，宿主侧按"值变了才发"去重）。
    */
   onCaret?(): void;
+
+  /**
+   * 选区变了（每拍收尾时发一次，宿主侧按值去重）。
+   */
   onSelection?(): void;
+
   /**
    * 呈现完成：这一拍重画了几页、花了多少毫秒（宿主侧计时）。
+   * @param pages 这一拍重画了几页
+   * @param ms 贴图花了多少毫秒
    */
   onRender?(pages: number, ms: number): void;
+
   /**
    * 一页画布建好（Worker 传输在这里 transferControlToOffscreen）。
+   * @param page 页号
+   * @param el 刚建好的画布元素
    */
   onPageCanvas?(page: number, el: HTMLCanvasElement): void;
+
   /**
    * 画布存储的造法。默认按页建销；Worker 传输换成按槽复用。
+   * @param pagesEl 页容器（画布要挂进去）
    */
   canvasStore?(pagesEl: HTMLElement): CanvasStore;
+
   /**
    * 页面级异常（脚本错误、未处理的异步失败）。
+   * @param message 异常原文
    */
   onPageError?(message: string): void;
+
   /**
    * 贴图的账由谁说。默认是这一侧自己记的（同线程宿主贴图）；Worker 传输传一个
    *   "读远端账"的函数进来 —— 那边 putImageData 一次也没在这条线程上跑过，
@@ -130,75 +174,105 @@ export interface DomHost {
   readonly pagesEl: HTMLElement;
   readonly ta: HTMLTextAreaElement;
   readonly zoom: ZoomControl;
+
   /**
    * 把画布集合对齐到当前窗口，并按脏页贴一遍。返回贴了几页。
    */
   blitPages(): number;
+
   /**
    * 只把画布集合对齐到当前窗口（Worker 侧贴图，这一侧只管建与摆）。
    */
   syncPages(): void;
+
   /**
    * 内容整体作废（换缩放 / 换页度量 / 换文档）：所有页下次整页贴。
    */
   invalidatePages(): void;
+
   /**
    * 只是一次重贴（配置类命令改的是光栅签名，不是内容）。
    */
   repaint(): Maybe<any>;
+
   /**
    * 收尾：对齐窗口、贴页、摆 IME、发事件。
+   * @param st 这一拍的账；不传就现读
    */
   finish(st?: any): void;
+
   /**
    * 一次编辑的完整收尾（滚动 → 对窗口 → 上屏）。
+   * @param opName 刚跑完的命令名
+   * @param source 改动来自哪条路
    */
   afterEdit(opName: string, source: ChangeSource): Maybe<boolean>;
+
   /**
    * 把光标滚进视口（装载、程序化定位之后用）。
+   * @param st 这一拍的账；不传就现读
    */
   scrollCaretIntoView(st?: any): void;
+
   /**
    * 文档坐标（页内设备像素）换算。
+   * @param clientX 客户端横坐标
+   * @param clientY 客户端纵坐标
    */
   pointAt(clientX: number, clientY: number): { x: number; y: number };
+
   /**
    * 交给输入层的命中（已折成磅）。
+   * @param xPt 文档横坐标（设备像素）
+   * @param yPt 文档纵坐标（设备像素）
    */
   hitAt(xPt: number, yPt: number): Maybe<any>;
+
   /**
    * 输入层（自动化宿主可以 takeInput 之后自己驱动）。
    */
   readonly input: InputLayer;
   readonly drag: DragSelect | null;
+
   /**
    * 启动之后调一次：输入层与滚动从此开始工作。
    */
   start(): void;
+
   /**
    * 传输层在途状态（Worker 的往返期间同理）。
+   * @param on 是否在途
    */
   setBusy(on: boolean): void;
+
   /**
    * 视觉焦点：IME 与键盘都落在承接层上。
    */
   focus(): void;
+
   /**
    * 上一次贴图的账（毫秒 / 页数 / 写入像素）：判据拿它证明"按脏矩形贴"。
    */
   blitStats(): { ms: number; pages: number; px: number };
+
   /**
    * 重启闪烁（回到可见相位）。
    */
   startBlink(): void;
+
   /**
    * 停表：光标常亮，且不重绘 —— 探针读"上一次全量"的账之前必须先停。
    */
   stopBlink(): void;
+
   /**
    * 卡片尺寸变了：重新报视口（引擎按它算窗口）。
    */
   resize(): Maybe<any>;
+
+  /**
+   * 拆掉输入层、定时器与标记（容器清空）。
+   */
   destroy(): void;
 }
 
@@ -210,6 +284,7 @@ export interface DomHost {
  *   滚动容器，多套一层之后"容器有多高"这件事有了两个答案（外层是视口、内层是内容），
  *   而自动滚动、坐标换算、探针都要用到它。承接层必须是一个真的可聚焦 textarea：
  *   canvas 收不到键盘，也收不到合成事件。
+   * @param container 挂载点（已有 #stage 就直接返回）
  */
 export function ensureMarkup(container: HTMLElement): void {
   if (container.querySelector('#stage')) return;
@@ -225,6 +300,11 @@ export function ensureMarkup(container: HTMLElement): void {
   ].join('\n');
 }
 
+/**
+ * 造宿主：标记、页画布、输入接线、滚动跟随。
+ * @param o 容器、link 与各回调
+ * @returns 宿主句柄（输入层、拖选、贴页与收尾都在上面）
+ */
 export function createDomHost(o: DomHostOptions): DomHost {
   const root = o.container;
   ensureMarkup(root);

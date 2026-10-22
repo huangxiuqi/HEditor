@@ -8,8 +8,9 @@
 // 这一份把 2026-10-22 补进去的 17 个成员逐条跑一遍：装载 7、光标 2、闪烁 3、
 //   字体 2、窗口 1、错误 1。两条传输各跑一遍（diag 的转发在 Worker 上是一次往返）。
 //
-// 用法：scripts\verify_web.ps1 -Probe scripts\diag_probe.mjs@demo.html
-//       node scripts/diag_probe.mjs --port 9333 --transport worker
+// 用法：node scripts/diag_probe.mjs --port 9333 --transport worker
+//       页面默认是构建出来的示例页（web/dist-app/index.html）；换 Vite 开发服务器就传
+//       --url http://127.0.0.1:5173/index.html。
 import { CDP, Checks, sleep } from './cdp.mjs';
 
 const die = (e) => {
@@ -26,7 +27,7 @@ const opt = (name, def) => {
 };
 const PORT = Number(opt('port', '9222'));
 const TRANSPORT = opt('transport', 'inline');
-const URL_BASE = opt('url', 'http://127.0.0.1:8781/web/demo.html');
+const URL_BASE = opt('url', 'http://127.0.0.1:8781/web/dist-app/index.html');
 const URL_ = URL_BASE
   + (URL_BASE.includes('?') ? '&' : '?')
   + 'transport=' + TRANSPORT + '&debug=1';
@@ -195,7 +196,51 @@ chk.section('六、错误历史与既有诊断');
   chk.check('bracketSlots 可读', r.hasBrackets === true);
 }
 
-chk.section('七、能力探测：WebAssembly SIMD');
+chk.section('七、页画布：一页一张、都在窗口里、都真的可见');
+{
+  const r = await ev(`
+    const d = window.__demo.diag;
+    await d.reset(6, 1.5);
+    const g = window.__demo.geometry();
+    const els = d.pageCanvasList();
+    const pages = els.map((el) => Number(el.dataset.page)).sort((a, b) => a - b);
+    // 每张画布的中心点命中的必须还是它自己：容器被裁掉、被别的层盖住时这一条会红。
+    const hidden = [];
+    for (const el of els) {
+      const q = el.getBoundingClientRect();
+      const hit = document.elementFromPoint(q.left + q.width / 2, q.top + q.height / 2);
+      if (hit !== el) hidden.push(Number(el.dataset.page));
+    }
+    return { n: els.length, want: g.window.count, pages, hidden,
+             first: g.window.first };`);
+  chk.check('页画布张数 == 窗口页数', r.n === r.want, `${r.n} / ${r.want}`);
+  chk.check('每张画布都标着页号，且从窗口首页开始',
+            r.pages.every((p, i) => p === r.first + i), JSON.stringify(r.pages));
+  chk.check('每张画布在屏幕上都真的可见（没被裁掉、没被盖住）',
+            r.hidden.length === 0, `看不见的页：${JSON.stringify(r.hidden)}`);
+}
+
+chk.section('八、场景装载：页数与字形数随内容变');
+{
+  const r = await ev(`
+    const d = window.__demo.diag;
+    const rows = [];
+    for (const id of [6, 7]) {
+      const st = await d.loadScenario(id, 1.0);
+      const lay = d.stats();
+      rows.push({ id, pages: st.totalPages, glyphs: lay.glyphCount, paras: st.totalParagraphs });
+    }
+    return rows;`);
+  // 单段演示与多段长文：页数与字形数都必须跟着变（恒等说明参数没接上）。
+  chk.check('场景 6 是单页', r[0].pages >= 1 && r[0].paras <= 4,
+            `${r[0].pages} 页 / ${r[0].paras} 段`);
+  chk.check('场景 7 是多页长文', r[1].pages > 1 && r[1].paras > 200,
+            `${r[1].pages} 页 / ${r[1].paras} 段`);
+  chk.check('字形数是正数且随场景变', r[0].glyphs > 0 && r[1].glyphs > r[0].glyphs,
+            `${r[0].glyphs} → ${r[1].glyphs}`);
+}
+
+chk.section('九、能力探测：WebAssembly SIMD');
 {
   const r = await ev(`
     const d = window.__demo.diag;
@@ -214,7 +259,7 @@ chk.section('七、能力探测：WebAssembly SIMD');
             r.len > 100 && r.hasSimdOp === true, `${r.len} 字节，含 0xFD=${r.hasSimdOp}`);
 }
 
-chk.section('八、没有 console 错误');
+chk.section('十、没有 console 错误');
 {
   const errs = cdp.consoleErrors.filter((t) => !/favicon/i.test(t));
   chk.check('没有 console 错误', errs.length === 0, errs.slice(0, 2).join(' | '));

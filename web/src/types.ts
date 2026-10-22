@@ -16,7 +16,14 @@
  * 文档内位置。offset 是段内码点序号（0 起）。
  */
 export interface Pos {
+  /**
+   * 段号（0 起）。
+   */
   para: number;
+
+  /**
+   * 段内码点序号（0 起；不是 UTF-16 码元，星平面字符算一个）。
+   */
   offset: number;
 }
 
@@ -24,10 +31,29 @@ export interface Pos {
  * 一块页面矩形（CSS 像素，页内相对坐标）。
  */
 export interface Rect {
+  /**
+   * 页号（0 起，全篇连续编号）。
+   */
   page: number;
+
+  /**
+   * 左边缘（页内横坐标）。
+   */
   x: number;
+
+  /**
+   * 上边缘（页内纵坐标）。
+   */
   y: number;
+
+  /**
+   * 宽。
+   */
   w: number;
+
+  /**
+   * 高。
+   */
   h: number;
 }
 
@@ -37,9 +63,24 @@ export type RGBA = [number, number, number, number];
  * 光标：位置 + 落在哪一页 + 页内矩形。
  */
 export interface Caret {
+  /**
+   * 位置（段号 + 段内偏移）。
+   */
   pos: Pos;
+
+  /**
+   * 光标落在哪一页。
+   */
   page: number;
+
+  /**
+   * 页内矩形：x/y 是插入点，w 是粗，h 是行高。
+   */
   rect: { x: number; y: number; w: number; h: number };
+
+  /**
+   * 这一拍画没画出来（闪烁相位决定）。
+   */
   visible?: boolean;
 }
 
@@ -47,10 +88,26 @@ export interface Caret {
  * 选区：两端位置 + 每页上的矩形（跨页会是多条）。
  */
 export interface Selection {
+  /**
+   * 起点：按下鼠标那一端，拖选过程中不动。
+   */
   anchor: Pos;
+
+  /**
+   * 焦点端：跟着指针或 Shift 移动的那一端。
+   */
   focus: Pos;
+
+  /**
+   * 两端相同（没有真的选中东西）。
+   */
   empty: boolean;
+
+  /**
+   * 每页上的矩形，跨页会是多条；空选区是空数组。
+   */
   rects: Rect[];
+
   /**
    * 单元格选区时给出格区间；文字选区为 null。
    */
@@ -61,20 +118,53 @@ export interface Selection {
  * 视口与页度量（CSS 像素）。
  */
 export interface Geometry {
+  /**
+   * 页宽 / 页高。
+   */
   page: { w: number; h: number };
+
+  /**
+   * 页间隙（连页档是 0）。
+   */
   gap: number;
+
+  /**
+   * 总页数（至少 1）。
+   */
   pages: number;
+
+  /**
+   * 滚动内容高度（总页数 x 步距减掉末尾那道间隙）。
+   */
   scrollHeight: number;
+
+  /**
+   * 引擎当前装着的窗口：首页号与页数。它与可见页不是一回事，带着滚动方向的余量。
+   */
   window: { first: number; count: number };
+
+  /**
+   * 屏幕像素比。
+   */
   dpr: number;
 }
 
 export interface CaretStyle {
+  /**
+   * 颜色（RGBA，0~255；越界由引擎夹取）。
+   */
   color: RGBA;
+
+  /**
+   * 线宽（磅）。下限 0.4，低于它按 0.4 算。
+   */
   widthPt: number;
 }
 
 export interface SelectionStyle {
+  /**
+   * 选区色；半透明混色，alpha 决定深浅。
+   */
   color: RGBA;
 }
 
@@ -88,7 +178,12 @@ export interface EditorConfig {
    * 倍数，1 = 100%（96 dpi）。引擎内部收的是密度（4/3 基准），换算只在接缝上做。
    */
   zoom: number;
+
+  /**
+   * 分页 / 连页。连页时页间隙为 0，排版不在页底断行。
+   */
   pageMode: 'paged' | 'continuous';
+
   /**
    * 编辑模式。三档都是产品语义，不是探针口径：
    *   document —— 随便改（默认）；
@@ -97,23 +192,35 @@ export interface EditorConfig {
    * 只读时库的编辑方法直接返回 false；真正的拒绝仍由引擎判定（blockedEdits 记账）。
    */
   mode: 'document' | 'form' | 'readOnly';
+
   /**
    * 是否由库内部接管键盘/指针/IME。默认 true；false 只给"自己驱动"的自动化宿主。
    */
   input: boolean;
+
   /**
    * 段落标记括号。会改变行宽，要重排。
    */
   showBrackets: boolean;
+
   /**
    * 控件小点。只改光栅签名，不重排。
    */
   showControlDots: boolean;
+
   /**
    * 撤销栈深度，0 = 不限。
    */
   undoLimit: number;
+
+  /**
+   * 光标样式。改它只重绘，不重排。
+   */
   caretStyle: CaretStyle;
+
+  /**
+   * 选区样式。改它只重绘，不重排。
+   */
   selectionStyle: SelectionStyle;
 }
 
@@ -121,8 +228,22 @@ export interface EditorConfig {
  * 资源定位。不传时按当前脚本地址推（ESM 下可用；UMD 下必须显式给）。
  */
 export interface Assets {
+  /**
+   * 胶水脚本（heditor.js）的绝对地址。
+   */
   glue?: string;
+
+  /**
+   * wasm 的地址；不传按胶水同目录 + 同名推。
+   */
   wasm?: string;
+
+  /**
+   * Worker 壳的地址；不传按库产物同目录推（web/dist/heditor_worker.js）。
+   * 页面与库不在同一层时（开发服务器、示例页的构建产物）必须显式给。
+   */
+  worker?: string;
+
   /**
    * 迁移期：旧宿主脚本（app.js 等）所在目录。默认按本库脚本的地址推（../）。
    * C 步把它们搬进 src/ 之后这一项会删掉。
@@ -135,10 +256,12 @@ export interface FontSource {
    * font-face 名（同时是三级匹配的第一级）。
    */
   family: string;
+
   /**
    * 取字体的地址（相对或绝对）。
    */
   url: string;
+
   /**
    * 角色：正文 / 界面 / 等宽。不传按顺序补位。
    */
@@ -149,18 +272,36 @@ export interface FontSource {
  * 构造期参数：只管"挂在哪、怎么配"，内容走 open() / setText()。
  */
 export interface EditorOptions {
+  /**
+   * 挂载点。必须是空元素（或带着本库的 #stage 标记），库往里建骨架。
+   */
   container: HTMLElement;
+
   /**
    * 默认 'worker'。'inline' 在主线程跑（测试环境、或不允许 Worker 的宿主）。
    */
   transport?: 'worker' | 'inline';
+
+  /**
+   * 素材地址覆盖（胶水 / wasm / 字体），不传按库的地址推。
+   */
   assets?: Assets;
+
+  /**
+   * 字体清单；不传用内置的三份 Noto。
+   */
   fonts?: FontSource[];
+
+  /**
+   * 初始配置（等价于创建之后调一次 configure）。
+   */
   config?: Partial<EditorConfig>;
+
   /**
    * 是否画工具条。默认 false：产品页只给舞台。
    */
   chrome?: boolean;
+
   /**
    * 诊断面开关。默认 false：实例上没有 diag，访问会抛。
    *
@@ -168,6 +309,14 @@ export interface EditorOptions {
    * 而不是靠一句"不承诺稳定"的注释。
    */
   debug?: boolean;
+
+  /**
+   * 引擎彻底不可用时给用户的出口（通常就是 location.reload）。
+   *
+   * 库自己不能重启引擎：重启要重建实例、重装素材，而那是调用方的账。给了这一个，
+   *   致命横幅上就有一个重试按钮；不给就只剩说明 —— 一条没有出口的失败提示是死胡同。
+   */
+  onFatalRetry?: () => void;
 }
 
 /**
@@ -188,6 +337,7 @@ export interface SetCaretOptions {
    * 落在字符前还是后（点击落在字的左半边还是右半边）。
    */
   side?: 'before' | 'after';
+
   /**
    * 同一段里有多行时落第几行。
    */
@@ -198,10 +348,29 @@ export interface SetCaretOptions {
  * 表单里的一个控件（form() 的精简视图）。
  */
 export interface ControlSummary {
+  /**
+   * 序号（0 起，按文档顺序）。
+   */
   index: number;
+
+  /**
+   * 控件种类（引擎的种类号原样给出）。
+   */
   kind: string;
+
+  /**
+   * 标签（控件名或占位文字）。
+   */
   label: string;
+
+  /**
+   * 当前值；结构化控件才填，普通文本字段是 null。
+   */
   value: unknown;
+
+  /**
+   * 光标是否在这个控件里。
+   */
   focused: boolean;
 }
 
@@ -209,15 +378,21 @@ export interface ControlSummary {
  * 内容变更。
  */
 export interface ChangeEvent {
+  /**
+   * 改动来自哪条路：真实输入（键盘、指针、IME、剪贴板）还是库的方法。
+   */
   source: 'user' | 'api';
+
   /**
    * 内容版本，每次变更 +1。可用来跳过重复处理。
    */
   version: number;
+
   /**
    * 整篇纯文本（段间 \n）。引擎里本来就坐着，几乎零成本。
    */
   text: string;
+
   /**
    * 带格式的整篇 JSON。方法而不是属性：调它才序列化，同一版本只算一次。
    *
@@ -232,17 +407,34 @@ export interface ChangeEvent {
  * 事件表。on() 的键集就是这六个。
  */
 export interface EditorEvents {
+  /**
+   * 内容变了（每次提交一次，含撤销与重做）。
+   */
   change: ChangeEvent;
+
+  /**
+   * 选区变了（两端或矩形变了才发）。
+   */
   selection: Selection;
+
+  /**
+   * 光标变了（段内位置、页号或可见性变了才发）。
+   */
   caret: Caret;
+
   /**
    * 呈现完成。pages = 这一拍重画的页数。
    */
   render: { pages: number; ms: number };
+
   /**
    * 生效值真的变了才发（设成同一个值不发）。
    */
   configchange: { changed: Partial<EditorConfig>; config: EditorConfig };
+
+  /**
+   * 失败：fatal = 引擎整条不可用。降级也会发，同时上一条提示条。
+   */
   error: { message: string; fatal: boolean };
 }
 
@@ -258,50 +450,198 @@ export interface EditorEvents {
 type Direct<T> = T | Promise<T>;
 
 export interface Diag {
+  /**
+   * 排版那本账：页数、行数、各阶段耗时。
+   */
   stats(): unknown;
+
+  /**
+   * 编辑那本账：本拍重画像素、脏页、排版账、光标矩形。
+   */
   editStats(): unknown;
+
+  /**
+   * 同 editStats；保留给"读一次编辑账"的老写法。
+   */
   edit(): unknown;
+
+  /**
+   * 帧自审：当前帧与从零重画逐字节比，diff = 0 表示一致。
+   */
   auditFrame(): unknown;
+
+  /**
+   * 底图自审：页位图与从零光栅比。
+   */
   auditBase(): unknown;
+
+  /**
+   * 某页的缓存与从零光栅比。参数：page（页号）。
+   */
   auditPage(): unknown;
+
+  /**
+   * 增量排版与全量重排逐字段比。
+   */
   auditLayout(): unknown;
+
+  /**
+   * 模型重新编译一遍，与引擎里那一份逐字段比。
+   */
   auditCompile(): unknown;
+
+  /**
+   * 字形页归属的自审（分段与分页两套口径）。
+   */
   auditGlyphPages(): unknown;
+
+  /**
+   * 每页画布上的像素与引擎导出像素逐点比：屏幕 == 引擎帧。
+   */
   selfCheck(): unknown;
+
+  /**
+   * 每个可编辑字段的左括号在帧上画了没有（扫左缘那一列）。
+   */
   markCheck(): unknown;
+
+  /**
+   * 帧的一份快照（RGBA），拷出来之后不受后续呈现影响。
+   */
   rawFrame(): unknown;
+
+  /**
+   * 帧指纹（FNV-1a，只算 RGB 三通道）。
+   */
   frameDigest(): Direct<number>;
+
+  /**
+   * 帧宽（设备像素）。
+   */
   frameW(): Direct<number>;
+
+  /**
+   * 帧高（设备像素）= 窗口页数 x 步距。
+   */
   frameH(): Direct<number>;
+
+  /**
+   * 呈现一次（不重排）。
+   */
   present(): void;
+
+  /**
+   * 控件表：区间、只读、矩形、当前焦点。
+   */
   controls(): unknown;
+
+  /**
+   * 括号槽清单：每枚括号的位置、侧别、属于哪个控件。
+   */
   bracketSlots(): unknown;
+
+  /**
+   * 命中测试：文档坐标（磅）折成段内位置与控件归属。
+   * @param x 横坐标（磅）
+   * @param y 纵坐标（磅）
+   */
   hit(x: number, y: number): unknown;
+
+  /**
+   * 某个点上压着哪个控件（-1 = 不在任何控件里）。
+   * @param x 横坐标（磅）
+   * @param y 纵坐标（磅）
+   */
   controlAt(x: number, y: number): unknown;
+
+  /**
+   * 控件表的人读版，给调试输出用。
+   */
   describeControls(): Direct<string>;
+
+  /**
+   * 被拒绝的编辑次数（引擎那本账）。
+   */
   blockedEdits(): number;
+
+  /**
+   * 本拍写过哪几页。
+   */
   dirtyPages(): number[];
+
+  /**
+   * 页度量（设备像素）：宽、高、间隙。
+   */
   pagePx(): { w: number; h: number; gap: number };
+
+  /**
+   * 页画布张数。
+   */
   pageCanvases(): unknown;
+
+  /**
+   * 页画布元素列表（按页号升序）。
+   */
   pageCanvasList(): unknown;
+
+  /**
+   * 预热某一页的字形（滚动方向上提前一页）。
+   * @param page 页号
+   */
   prewarmPage(page: number): void;
+
+  /**
+   * 重排重绘的基准：重复若干次，回报每阶段耗时。
+   */
   bench(): unknown;
+
+  /**
+   * 光标的一点表：行内起点、本偏移的沿轴位置、侧别。
+   */
   caretReport(): string;
+
+  /**
+   * 引擎里的光标偏移（直读，不经过 editStats 那本账）。
+   */
   caretLive(): number;
+
+  /**
+   * 运行环境：UA、地址、dpr、wasm 堆占用。
+   */
   env(): unknown;
+
+  /**
+   * 字体装载的账：模式、字节数、缺字计数。
+   */
   fonts(): unknown;
+
+  /**
+   * 最近一次贴图的账：毫秒、页数、实际写入的像素面积。
+   */
   blitStats(): { ms: number; pages: number; px: number };
+
+  /**
+   * 旧宿主的"上一条贴图"；新库不维护，恒 null（判据改用 blitStats）。
+   */
   lastBlit(): unknown;
+
   /**
    * 按坐标点一下（自动化用；产品面不该用它替代 setCaret）。
+   * @param pt 文档坐标（设备像素）
    */
   clickAt(pt: { x: number; y: number }): Promise<void>;
+
   /**
    * 选中 pos 所在单元格（自动化用）。
+   * @param pos 格内任一个位置
    */
   selectCell(pos: Pos): Promise<void>;
+
   /**
    * 删控件；keepContent = true 是拆壳（内容留下来变成普通正文）。
+   * @param index 控件序号
+   * @param keepContent true = 拆壳，内容留下变成普通正文
+   * @returns 引擎的判定（锁定状态下删不掉会返回 false）
    */
   removeControl(index: number, keepContent?: boolean): Promise<boolean>;
 
@@ -309,46 +649,67 @@ export interface Diag {
 
   /**
    * 装载内置场景（id 同旧宿主：6 单段演示、7 多段长文）。zoom 是密度，不是倍数。
+   * @param id 场景号
+   * @param zoom 密度（设备像素 / 磅），不是倍数
    */
   loadScenario(id: number, zoom?: number): Promise<unknown>;
+
   /**
    * 回到默认场景。
+   * @param id 场景号，默认 6
+   * @param zoom 密度，默认沿用引擎当前值
    */
   reset(id?: number, zoom?: number): Promise<unknown>;
+
   /**
    * 造 N 段、每段 M 字的压力文档（整篇同一个字）。
+   * @param paras 段数
+   * @param chars 每段字数
    */
   stress(paras: number, chars: number): Promise<unknown>;
+
   /**
    * 同上，但每段字不同；量字形缓存要用它，否则全命中失真。
+   * @param paras 段数
+   * @param chars 每段字数
    */
   stressDiverse(paras: number, chars: number): Promise<unknown>;
+
   /**
    * 表单样例（控件区间与只读标记都在里面）。
+   * @param variant 样例档位（0 单字段、2 相邻、3 嵌套）
    */
   loadFormSample(variant?: number): Promise<unknown>;
+
   /**
    * 病历样例：读 assets/samples/medical-records.md，清洗后按段落建文档。
+   * @param repeat 正文重复几遍
    */
   loadMedicalSample(repeat?: number): Promise<unknown>;
+
   /**
    * 把焦点放回承接层：装载之后要让真实键盘能打进文档。
    */
   focus(): void;
+
   /**
    * 选区的原始载荷：两端是全局流位置（对外 API 用的是段内位置），外加页面矩形。
    */
   selectionRaw(): unknown;
+
   /**
    * 拖选状态：在拖、动过、搬过几次焦点端、是否在自动滚动。
    */
   dragState(): unknown;
+
   /**
    * 在途的命中都回来才 resolve。
    */
   dragSettled(): Promise<void>;
+
   /**
    * 整批重建控件（区间树的父子关系是全局性质，只能整棵换）。
+   * @param list 每个控件的区间与属性
    */
   setFormControls(list: Array<{ start: number; end: number; kind?: number; id?: string; ro?: boolean }>): Promise<unknown>;
 
@@ -356,20 +717,30 @@ export interface Diag {
 
   /**
    * 带归属的定位（field 是控件序号）：复现"点后一个字段的开头"。
+   * @param para 段号
+   * @param offset 段内偏移
+   * @param field 控件序号（-1 = 不在控件里）
    */
   setCaretAt(para: number, offset: number, field?: number): Promise<unknown>;
+
   /**
    * 只改位置、不呈现 —— 给"改位置"与"呈现"分账的对照实验。
+   * @param para 段号
+   * @param offset 段内偏移
    */
   setCaretOnly(para: number, offset: number): unknown;
+
   /**
    * 直接设定光标可见相位（不重绘）。
+   * @param on 可见相位
    */
   showCaret(on: boolean): unknown;
+
   /**
    * 重启闪烁（回到可见相位）。
    */
   startBlink(): void;
+
   /**
    * 停表：光标常亮，也不重绘。
    */
@@ -379,14 +750,22 @@ export interface Diag {
 
   /**
    * 重装字体；mode = 'lazy' 走 MEMFS 按需读，'full' 整份交给引擎。
+   * @param mode 装载模式，默认 full
+   * @returns mode 与实际占用的字节数
    */
   reloadFonts(mode?: 'full' | 'lazy'): Promise<{ mode: string; bytes: number }>;
+
   /**
    * 字体块缓存配置（字节 / 块数）。改完要重装字体才干净。
+   * @param blockSize 块大小（字节）
+   * @param maxBlocks 最多几块
    */
   setFontCacheConfig(blockSize: number, maxBlocks: number): unknown;
+
   /**
    * 直接设窗口锚点（绕过滚动事件），量"换窗口要读多少字形"。
+   * @param first 首页号
+   * @param count 页数
    */
   setViewportAnchor(first: number, count: number): unknown;
 
@@ -394,6 +773,7 @@ export interface Diag {
    * 页面级错误历史（与 error 事件同源，按发生顺序）。
    */
   errors(): string[];
+
   /**
    * 能力探测现场：supported 是库的判断；probe 是那段含 v128 的探针字节本身
    * （判据可以拿它自己跑一次 validate，再查里面有没有 SIMD 指令）。
@@ -411,55 +791,144 @@ export interface Editor {
 
   /**
    * 打开一份文档。首字符 { 且能解析出版本头按 JSON，否则按纯文本；失败时引擎状态不变。
+   * @param data 文档内容（JSON 或纯文本）
+   * @param opts 显式指定按哪种格式解析
    */
   open(data: string, opts?: { format?: 'json' | 'text' }): Promise<void>;
+
   /**
    * 用纯文本重置。repeat 复用同一段（压测用）。
+   * @param text 段文本（段间用 \n 分段）
+   * @param opts repeat = 把这段重复几遍
    */
   setText(text: string, opts?: { repeat?: number }): Promise<void>;
+
   /**
    * 整篇文本（段间 \n）。
    */
   text(): string;
+
   /**
    * 第 i 段的文本；越界返回空串。
+   * @param i 段号（0 起）
    */
   paragraph(i: number): string;
+
   /**
    * 整篇分段。
    */
   paragraphs(): string[];
+
   /**
    * 序列化成 JSON 文本。
    */
   save(): Promise<string>;
+
   /**
    * 在指定位置插入一段文本（模板填充），进撤销栈。
+   * @param pos 插入位置
+   * @param text 要插入的文本
+   * @returns 有没有改动
    */
   insertText(pos: Pos, text: string): Promise<boolean>;
 
   // 编辑（返回"有没有改动"）
 
+  /**
+   * 打一段字（走与键盘同一条命令，一次提交）。
+   * @param text 要插入的文本
+   * @returns 有没有改动
+   */
   type(text: string): Promise<boolean>;
+
+  /**
+   * 向前删（退格）。
+   * @param n 删几次，默认 1
+   * @returns 有没有改动
+   */
   deleteBackward(n?: number): Promise<boolean>;
+
+  /**
+   * 向后删（Delete）。
+   * @param n 删几次，默认 1
+   * @returns 有没有改动
+   */
   deleteForward(n?: number): Promise<boolean>;
+
+  /**
+   * 在光标处断段。
+   * @returns 有没有改动
+   */
   splitParagraph(): Promise<boolean>;
+
+  /**
+   * 与相邻段合并。
+   * @param dir 与哪一侧合并，默认 prev
+   * @returns 有没有改动
+   */
   mergeParagraph(dir?: 'prev' | 'next'): Promise<boolean>;
+
+  /**
+   * 撤销一步。
+   * @returns 有没有改动（栈空时 false）
+   */
   undo(): Promise<boolean>;
+
+  /**
+   * 重做一步。
+   * @returns 有没有改动（没有可重做的时 false）
+   */
   redo(): Promise<boolean>;
+
   /**
    * 增减缩进层级（正数加深，负数变浅）。
+   * @param levels 正数加深，负数变浅（绝对值是层级数）
+   * @returns 有没有改动
    */
   setIndent(levels: number): Promise<boolean>;
 
   // 光标与选区（程序化定位）
 
+  /**
+   * 当前光标。
+   * @returns 位置、页号与页内矩形（同步读镜像）
+   */
   caret(): Caret;
+
+  /**
+   * 程序化定位，并把光标滚进视野。
+   * @param pos 目标位置
+   * @param opts 侧别与行别（折行处同一个偏移压着两行）
+   */
   setCaret(pos: Pos, opts?: SetCaretOptions): Promise<void>;
+
+  /**
+   * 按档位移动光标。
+   * @param step 往哪儿走
+   */
   moveCaret(step: CaretStep): Promise<void>;
+
+  /**
+   * 设置选区（不滚动：选区可以在任何地方）。
+   * @param anchor 起点
+   * @param focus 焦点端
+   */
   select(anchor: Pos, focus: Pos): Promise<void>;
+
+  /**
+   * 全选。
+   */
   selectAll(): Promise<void>;
+
+  /**
+   * 取消选区（焦点端不动）。
+   */
   clearSelection(): Promise<void>;
+
+  /**
+   * 当前选区。
+   * @returns 两端位置与每页矩形（同步读镜像）
+   */
   selection(): Selection;
 
   // 控件（表单）
@@ -467,23 +936,42 @@ export interface Editor {
   /**
    * 聚焦下一个 / 上一个控件。不是按序号：引擎的焦点只有"往前走/往回走"这一种操作，
    * 按序号聚焦得先知道每个控件的可编辑性（只读的会被跳过），那是引擎的判定不是宿主的。
+   * @param dir 往前走还是往回走
    */
   focusControl(dir?: 'next' | 'prev'): Promise<void>;
+
   /**
    * 改控件属性。prop 是引擎的属性号（见 ControlProp），value 目前只有布尔。
+   * @param index 控件序号
+   * @param prop 属性号（见 ControlProp）
+   * @param value 目标值
+   * @returns 有没有改动（被锁住的控件返回 false）
    */
   setControlProp(index: number, prop: number, value: boolean): Promise<boolean>;
+
+  /**
+   * 控件清单。
+   * @returns 按文档顺序的控件（只读视图）
+   */
   form(): ControlSummary[];
 
   // 视图
 
+  /**
+   * 视口与页度量。
+   * @returns 页宽高、间隙、页数、窗口（同步读镜像）
+   */
   geometry(): Geometry;
+
   /**
    * 滚到某页或某个纵向位置（CSS 像素）。
+   * @param target page 走页号，y 走纵向位置（给了 y 就用 y）
    */
   scrollTo(target: { page?: number; y?: number }): Promise<void>;
+
   /**
    * 转发 configure({ zoom })，为可读性保留。
+   * @param zoom 倍数（1 = 100%），越界夹到 0.375~2.25
    */
   setZoom(zoom: number): Promise<void>;
 
@@ -491,21 +979,32 @@ export interface Editor {
 
   /**
    * 唯一配置写入口：一次调用 = 一次原子提交，只做最贵的那一档代价。
-   * 返回生效后的完整配置（越界会被夹取）；拼错的键同步抛 TypeError。
+   * @param patch 要改的项（不认识的键同步抛 TypeError）
+   * @returns 生效后的完整配置（越界值由引擎夹取）
    */
   configure(patch: Partial<EditorConfig>): Promise<EditorConfig>;
+
+  /**
+   * 当前配置。
+   * @returns 生效值的只读快照
+   */
   config(): Readonly<EditorConfig>;
 
   // 事件与生命周期
 
   /**
    * 订阅；返回退订函数。
+   * @param event 事件名
+   * @param cb 回调
+   @returns 退订函数
    */
   on<K extends keyof EditorEvents>(event: K, cb: (ev: EditorEvents[K]) => void): () => void;
+
   /**
    * 等队列排空（批量 fire-and-forget 之后用它一次，比逐个 await 便宜）。
    */
   flush(): Promise<void>;
+
   /**
    * 收起定时器、释放 Worker、移除 DOM。之后所有调用 reject。
    */
@@ -515,6 +1014,7 @@ export interface Editor {
    * 宿主要的那一个 DOM 入口（内部画布/输入层不对外）。
    */
   readonly element: HTMLElement;
+
   /**
    * 诊断面。只有 createEditor({ debug: true }) 时存在；否则访问抛 TypeError。
    * 探针与审计用，产品代码不该依赖它。
@@ -524,6 +1024,8 @@ export interface Editor {
 
 /**
  * 造一个编辑器。返回时已就绪（排版跑完、首帧画完、输入层已接上）。
+ * @param opts 挂载点、传输、素材、初始配置
+ * @returns 已就绪的编辑器实例
  */
 export declare function createEditor(opts: EditorOptions): Promise<Editor>;
 

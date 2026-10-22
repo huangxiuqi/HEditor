@@ -11,6 +11,7 @@ import { DIAG_MEMBER, PUBLIC_MEMBERS } from './public_members.gen';
  *
  * @param target 实现对象
  * @param debug  是否带 diag（只有 createEditor({ debug: true }) 才有）
+ * @returns 同一个对象，但只放行白名单上的成员
  */
 export function guard<T extends object>(target: T, debug: boolean): T {
   const allowed = new Set<string>(PUBLIC_MEMBERS);
