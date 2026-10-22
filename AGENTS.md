@@ -130,6 +130,10 @@ function blitFrame(px, w) {}
 - 原生渲染出图（验证台要用）：`build/native/heditor_native.exe --out-dir out`。
 - 浏览器探针：`powershell -ExecutionPolicy Bypass -File scripts\verify_web.ps1`
   （默认跑 `scripts/edit_probe.mjs`，可用 `-Probe` 换 `stress_probe.mjs` / `web_probe.mjs`）
+- 浏览器端测试（Playwright，TS）：`cd web && npm test`。默认跑 Vite 源码直连，
+  改一行就能测，只有 Worker 壳需要预先构建（`pretest` 会做，不到一秒）；
+  `npm run test:dist` 跑构建产物，那是验收基准。配置在 `web/playwright.config.ts`
+  与 `web/tests/support/config.ts`，判据在 `web/tests/specs/`。
 - 两个宿主的分工（详见 `docs/正式化架构与迁移路线.md` 4.6）：wasm 是交付物，
   native 只做验证宿主，承担三个断言套件与内存布局诊断。据此有三条规则：
   **新功能不得只在 native 上实现**，否则它从宿主变成了第二个产品；

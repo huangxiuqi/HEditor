@@ -45,7 +45,8 @@ import glob
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 CPP = ['src/**/*.h', 'src/**/*.hpp', 'src/**/*.cpp', 'tests/*.cpp']
-JS = ['scripts/*.mjs', 'scripts/*.js', 'web/*.js', 'web/*.ts', 'web/src/**/*.ts']
+JS = ['scripts/*.mjs', 'scripts/*.js', 'web/*.js', 'web/*.ts', 'web/src/**/*.ts',
+      'web/tests/**/*.ts']
 
 # 构建产物没有手写注释，按源码规范查它只会查出别人的压缩格式。眼下源码树里没有
 #   这样的文件（web/dist 与 web/dist-app 都不在扫描范围里），留着这个集合给将来。
