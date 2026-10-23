@@ -17,8 +17,8 @@ declare global {
   }
 }
 
-const TEXT_A = ['实例 A（inline）', '', '这一栏的编辑不该影响右边。'].join('\n');
-const TEXT_B = ['实例 B（worker）', '', '这一栏的引擎在另一条线程上跑。'].join('\n');
+const TEXT_A = ['实例 A：左边这一栏', '', '这一栏的编辑不该影响右边。'].join('\n');
+const TEXT_B = ['实例 B：右边这一栏', '', '这一栏有自己的引擎与画布。'].join('\n');
 
 const chrome = mountChrome(document.getElementById('bar')!, 'HEditor · 两个实例', []);
 
@@ -26,29 +26,25 @@ const chrome = mountChrome(document.getElementById('bar')!, 'HEditor · 两个�
  * 造一个实例并把示例文本放进去。
  *
  * @param id 容器元素 id
- * @param transport 传输方式
  * @param text 初始文本
  * @returns 编辑器实例
  */
-async function make(id: string, transport: 'inline' | 'worker', text: string): Promise<Editor> {
+async function make(id: string, text: string): Promise<Editor> {
   const container = document.getElementById(id)!;
   const editor = await createEditor({
     container,
-    transport,
     chrome: true,
     debug: new URLSearchParams(location.search).has('debug'),
     // Worker 壳是构建产物，位置从页面往上找（与示例页同一口径）。
-    assets: transport === 'worker'
-      ? { worker: new URL('../dist/heditor_worker.js', new URL('.', location.href)).href }
-      : undefined,
+    assets: { worker: new URL('../dist/heditor_worker.js', new URL('.', location.href)).href },
   });
   await editor.setText(text);
   return editor;
 }
 
 async function boot(): Promise<void> {
-  const a = await make('ed-a', 'inline', TEXT_A);
-  const b = await make('ed-b', 'worker', TEXT_B);
+  const a = await make('ed-a', TEXT_A);
+  const b = await make('ed-b', TEXT_B);
 
   window.__demoA = a;
   window.__demoB = b;

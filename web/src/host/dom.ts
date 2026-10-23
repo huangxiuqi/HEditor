@@ -15,7 +15,7 @@ import {
   writeToDataTransfer,
   writeToSystemClipboard,
 } from './clipboard';
-import { PageCanvases, type CanvasStore, type PageGeometry } from './pages';
+import { type CanvasStore, type PageGeometry } from './pages';
 
 /**
  * 一次读取的几何：页度量 + 窗口 + 总页数（都是设备像素，除 dpr）。
@@ -80,13 +80,6 @@ export interface EngineLink {
    * 引擎把滚动位置归零了（装载类操作）—— 宿主跟着追平一次。
    */
   takeScrollReset(): boolean;
-
-  /**
-   * 某一页的导出像素（内容 + 瞬态，页内坐标）。
-   *   Worker 传输返回 null：像素在那一侧贴，主线程根本没有这块内存。
-   * @param page 页号
-   */
-  pixels(page: number): Uint8ClampedArray | null;
 
   /**
    * 整份序列化成 JSON 文本。同线程直接读，Worker 是一次往返。
@@ -158,17 +151,10 @@ export interface DomHostOptions {
   onRender?(pages: number, ms: number): void;
 
   /**
-   * 一页画布建好（Worker 传输在这里 transferControlToOffscreen）。
-   * @param page 页号
-   * @param el 刚建好的画布元素
-   */
-  onPageCanvas?(page: number, el: HTMLCanvasElement): void;
-
-  /**
-   * 画布存储的造法。默认按页建销；Worker 传输换成按槽复用。
+   * 画布存储的造法（槽复用，见 pages.ts）。
    * @param pagesEl 页容器（画布要挂进去）
    */
-  canvasStore?(pagesEl: HTMLElement): CanvasStore;
+  canvasStore(pagesEl: HTMLElement): CanvasStore;
 
   /**
    * 页面级异常（脚本错误、未处理的异步失败）。
@@ -177,11 +163,10 @@ export interface DomHostOptions {
   onPageError?(message: string): void;
 
   /**
-   * 贴图的账由谁说。默认是这一侧自己记的（同线程宿主贴图）；Worker 传输传一个
-   *   "读远端账"的函数进来 —— 那边 putImageData 一次也没在这条线程上跑过，
-   *   自己记只会得到一串恒零。
+   * 贴图的账从哪里读。像素由 Worker 贴，这条线程上一次 putImageData 都没跑过 ——
+   *   自己记只会得到一串恒零，而"按脏矩形贴"的判据正是靠这个计数器。
    */
-  blitStats?(): { ms: number; pages: number; px: number };
+  blitStats(): { ms: number; pages: number; px: number };
 }
 
 export interface DomHost {
@@ -189,11 +174,6 @@ export interface DomHost {
   readonly pagesEl: HTMLElement;
   readonly ta: HTMLTextAreaElement;
   readonly zoom: ZoomControl;
-
-  /**
-   * 把画布集合对齐到当前窗口，并按脏页贴一遍。返回贴了几页。
-   */
-  blitPages(): number;
 
   /**
    * 只把画布集合对齐到当前窗口（Worker 侧贴图，这一侧只管建与摆）。
@@ -365,10 +345,7 @@ export function createDomHost(o: DomHostOptions): DomHost {
   //   幂等，只在真的是 static 时写。
   if (getComputedStyle(pagesEl).position === 'static') pagesEl.style.position = 'relative';
   const zoom = createZoom({ base: 4 / 3 });
-  const pages: CanvasStore = o.canvasStore ? o.canvasStore(pagesEl) : new PageCanvases(pagesEl);
-  if (pages instanceof PageCanvases) {
-    pages.onCreated = (page, el) => o.onPageCanvas?.(page, el);
-  }
+  const pages: CanvasStore = o.canvasStore(pagesEl);
 
   const read = (name: string, args?: Args): any => link.read(name, args);
   const dpr = (): number => window.devicePixelRatio || 1;
@@ -381,71 +358,18 @@ export function createDomHost(o: DomHostOptions): DomHost {
   let lastCaretKey = '';
   let lastSelKey = '';
   let pendingOp = '';
-  let blitMs = 0;
-  let blitPages = 0;
-  let blitPx = 0;
   // 窗口自愈的在途标志与"补过哪一处滚动位置"（见 healWindow）。
   let healing = false;
   let healedFor = -1;
 
   /**
-   * 这一拍的上屏账。谁贴的图就由谁记 —— Worker 传输在对面贴，这里读对面推来的数。
+   * 这一拍的上屏账。像素在 Worker 侧贴，这条线程只转发对面推来的数。
    */
-  const blitStats = (): { ms: number; pages: number; px: number } =>
-    o.blitStats?.() ?? { ms: blitMs, pages: blitPages, px: blitPx };
+  const blitStats = (): { ms: number; pages: number; px: number } => o.blitStats();
 
   // 几何
 
   const view = (): HostView => link.geom();
-
-  /**
-   * 把画布集合对齐到窗口并贴脏页。
-   *
-   * 贴哪几页看"还欠着脏矩形"的页，不看 dirtyPages（本拍写过哪几页）：
-   *   矩形是累积的 —— 某一拍的 present 可能没被消费（窗口平移、画布刚建），那一拍的
-   *   矩形会留到这一拍；按本拍清单贴就会永久漏掉那几十像素。
-   */
-  function blitPagesFromEngine(): number {
-    const t0 = performance.now();
-    const g = view();
-    pages.sync(g.first, g.count, g.totalPages, g);
-    const dirty = read('pageDirtyPages') as number[] | null;
-    const dirtySet = new Set(dirty ?? []);
-    let patched = 0;
-    let px = 0;
-    for (let p = g.first; p < g.first + g.count; ++p) {
-      const rec = pages.get(p);
-      if (!rec) continue;
-      const fresh = rec.fresh;
-      if (!fresh && !dirtySet.has(p)) continue;
-      const src = link.pixels(p);
-      if (!src || src.length !== g.pw * g.ph * 4) continue;
-      // 这里有像素可贴 ⇒ 画布存储一定是按页建销的那一种（Worker 传输的 pixels 恒为 null）。
-      const page = pages as PageCanvases;
-      if (fresh) {
-        // 空白画布：整页贴。一并把这一页的矩形读掉 —— 整页已经贴过，
-        //   留着只会在下一拍白贴一次。
-        read('pageDirtyRects', { page: p });
-        px += page.blitAll(p, src, g.pw, g.ph);
-        ++patched;
-        continue;
-      }
-      // 按引擎给的脏矩形贴：光标移动一次只有几十像素，而整页是一百多万。
-      //   矩形是"读后清零"的累积器，所以必须在 present 之后、贴图之前读。
-      const rects = (read('pageDirtyRects', { page: p }) ?? []) as Array<{
-        x: number;
-        y: number;
-        w: number;
-        h: number;
-      }>;
-      px += page.blitRects(p, src, g.pw, g.ph, rects);
-      ++patched;
-    }
-    blitMs = performance.now() - t0;
-    blitPages = patched;
-    blitPx = px;
-    return patched;
-  }
 
   // IME 与滚动
 
@@ -587,8 +511,7 @@ export function createDomHost(o: DomHostOptions): DomHost {
     if (link.takeScrollReset()) applyScrollReset();
     const s = st ?? link.read('editStats');
     const g = view();
-    // 画布集合跟着窗口走。同线程侧这条在 blitPages 里已经跑过（写 style 是幂等的，
-    //   没变就不写）；Worker 侧是唯一的建画布时机 —— 建好一张就 transfer 一张。
+    // 画布集合跟着窗口走。这是唯一的建画布时机 —— 建好一张就 transfer 一张。
     pages.sync(g.first, g.count, g.totalPages, g);
     healWindow(g);
     positionIme(s);
@@ -1033,7 +956,6 @@ export function createDomHost(o: DomHostOptions): DomHost {
     get drag() {
       return drag;
     },
-    blitPages: blitPagesFromEngine,
     syncPages: () => {
       const g = view();
       pages.sync(g.first, g.count, g.totalPages, g);

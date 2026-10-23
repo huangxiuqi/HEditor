@@ -214,7 +214,7 @@ const SHELL_MAY_REACH = new Set([
   'pageRgba',                                     // 一页的导出像素（内容 + 瞬态）
   'pageDirtyPagesJson', 'pageDirtyRectsJson',     // 欠着的脏页与脏矩形
 ]);
-const SHELL_FILES = ['web/src/transport/worker_main.ts', 'web/src/transport/inline.ts'];
+const SHELL_FILES = ['web/src/transport/worker_main.ts'];
 const shellHits = new Map();
 for (const file of SHELL_FILES) {
   const code = stripComments(read(file));

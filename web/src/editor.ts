@@ -18,7 +18,7 @@ import { createErrorSurface, type ErrorSurface } from './host/errors';
 import type { CanvasStore } from './host/pages';
 import { cleanMarkdownLines, then1, type Args, type ZoomControl } from './input/keymap';
 import { assertSimd, simdProbeBytes, simdSupported } from './engine/simd';
-import { createInline, defaultFonts, type AssetPaths } from './transport/inline';
+import { defaultFonts, type AssetPaths } from './transport/assets';
 import { createWorker } from './transport/worker';
 import { guard } from './guard';
 
@@ -138,14 +138,9 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
     // 不清空别人的内容：只提示。要复用一块已有标记的容器就让它带着 #stage 进来。
     throw new TypeError('container 里已经有内容了：请传一个空元素（或带 #stage 的那一份）');
   }
-  const transport = opts.transport ?? 'inline';
-  if (transport !== 'inline' && transport !== 'worker') {
-    throw new TypeError("transport 只能是 'inline' 或 'worker'");
-  }
-
-  // 装载之前先确认这台浏览器能跑这份产物。放在这里而不是各个传输里：它判的是
-  //   "这份 wasm 能不能实例化"，与引擎在哪条线程上无关；而失败时唯一的目击者是
-  //   createEditor 的调用方 —— 让它拿到带标题与下一步的拒绝，而不是一条 CompileError。
+  // 装载之前先确认这台浏览器能跑这份产物。它判的是"这份 wasm 能不能实例化"，与引擎
+  //   在哪条线程上无关；而失败时唯一的目击者是 createEditor 的调用方 —— 让它拿到带
+  //   标题与下一步的拒绝，而不是一条 CompileError。
   assertSimd();
 
   const assets = resolveAssets(opts);
@@ -191,45 +186,31 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
     emitter.emit('error', { message, fatal });
   };
 
-  if (transport === 'inline') {
-    const t = createInline({
-      container: opts.container,
-      assets,
-      dpr: window.devicePixelRatio || 1,
-      zoom: config.zoom * (4 / 3) * (window.devicePixelRatio || 1),
-      empty: true,
-    });
-    link = t.link;
-    dom = createDomHost(hostOptions(link));
-    starter = () => t.start(dom);
-    destroyer = () => t.destroy();
-  } else {
-    const t = createWorker({
-      container: opts.container,
-      assets,
-      dpr: window.devicePixelRatio || 1,
-      zoom: config.zoom * (4 / 3) * (window.devicePixelRatio || 1),
-      empty: true,
-      makeHost: (l, store, remoteBlit) => createDomHost(hostOptions(l, store, remoteBlit)),
-      // 起来之后才死的那一类：没有 Promise 可拒，只剩"让用户看见"。
-      onFatal: (message) => reportError(message, true, {
-        detail: message,
-        hint: '这一页的编辑器已经不可用；重新加载页面会重建引擎。',
-      }),
-    });
-    link = t.link;
-    dom = t.host;
-    starter = () => t.start();
-    destroyer = () => t.destroy();
-  }
+  const transport = createWorker({
+    container: opts.container,
+    assets,
+    dpr: window.devicePixelRatio || 1,
+    zoom: config.zoom * (4 / 3) * (window.devicePixelRatio || 1),
+    empty: true,
+    makeHost: (l, store, remoteBlit) => createDomHost(hostOptions(l, store, remoteBlit)),
+    // 起来之后才死的那一类：没有 Promise 可拒，只剩"让用户看见"。
+    onFatal: (message) => reportError(message, true, {
+      detail: message,
+      hint: '这一页的编辑器已经不可用；重新加载页面会重建引擎。',
+    }),
+  });
+  link = transport.link;
+  dom = transport.host;
+  starter = () => transport.start();
+  destroyer = () => transport.destroy();
 
   /**
    * 宿主用的选项。link 显式传进来 —— 它由传输造，宿主的回调不能靠闭包去猜。
    */
   function hostOptions(
     l: EngineLink,
-    store?: (pagesEl: HTMLElement) => CanvasStore,
-    remoteBlit?: () => { ms: number; pages: number; px: number },
+    store: (pagesEl: HTMLElement) => CanvasStore,
+    remoteBlit: () => { ms: number; pages: number; px: number },
   ): Parameters<typeof createDomHost>[0] {
     return {
       container: opts.container,

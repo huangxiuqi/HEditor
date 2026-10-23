@@ -7,13 +7,8 @@ import { expect, test as base, type CDPSession, type Page } from '@playwright/te
 
 import { PRELUDE } from './readings';
 
-// 传输口径。库有两个：页面线程内同步执行，或整条引擎放进 Worker。
-export type Transport = 'inline' | 'worker';
-
-// 配置里可以覆盖的探针选项，由 projects 分别赋值。
+// 配置里可以覆盖的探针选项。
 export type ProbeOptions = {
-  // 传输方式，两个 project 各取一个值。
-  transport: Transport;
   // wasm 产物目录，相对仓库根。
   wasmDir: string;
   // 页面根路径：构建产物在 /web/dist-app/，Vite 源码直连在 /。
@@ -57,12 +52,10 @@ const DRAIN = `(async () => {
 export const test = base.extend<
   ProbeOptions & { open: OpenPage }
 >({
-  transport: ['inline', { option: true }],
   wasmDir: ['build/wasm/web', { option: true }],
   pageBase: ['/web/dist-app/', { option: true }],
-  open: async ({ page, transport, pageBase }, use) => {
-    await use((file, more) =>
-      ProbePage.open(page, { file, pageBase, transport, ...more }));
+  open: async ({ page, pageBase }, use) => {
+    await use((file, more) => ProbePage.open(page, { file, pageBase, ...more }));
   },
 });
 
@@ -87,16 +80,13 @@ export class ProbePage {
    * 打开示例页并等到宿主报就绪。
    *
    * @param page Playwright 页面
-   * @param opts 页面文件名、页面根路径与传输方式
+   * @param opts 页面文件名与页面根路径
    * @returns 就绪的探针页对象
    */
-  static async open(page: Page, opts: OpenOptions & {
-    transport: Transport;
-    pageBase: string;
-  }): Promise<ProbePage> {
+  static async open(page: Page, opts: OpenOptions & { pageBase: string }): Promise<ProbePage> {
     if (opts.viewport) await page.setViewportSize(opts.viewport);
     // debug 不给默认值：页面对它是 has 判断，给了 '0' 也算开。诊断面的判据要求它缺席。
-    const params = new URLSearchParams({ transport: opts.transport, ...opts.query });
+    const params = new URLSearchParams(opts.query ?? {});
     const url = opts.pageBase + opts.file + '?' + params.toString();
     await page.goto(url);
     await page.waitForFunction(() => {

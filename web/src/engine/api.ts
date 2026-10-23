@@ -1,15 +1,11 @@
-// 引擎侧：命令表、状态、窗口计算。两侧宿主共用这一份。
-// 为什么单独成文件：worker 宿主与单线程宿主的差别只有三处（帧去哪、结果何时到、
-//   输入层怎么挂），引擎访问面本身没有差别。命令名、状态归属、窗口滞回这三样只要
-//   各写一遍，两个宿主就会从"同构"漂成"两套"—— 实测两边的命令名交集只有 35 个，
-//   而 app.js 直调了 96 个方法。收成一份之后，新增引擎能力只动这张表。
-// 边界：本文件不碰 document、不碰 DOM、不碰 OffscreenCanvas。凡是要碰画布的地方
-//   都走 cfg.host 的钩子（ctxOfPage / blitPages / invalidateSlots ...），由宿主实现。
-//   这样同一份代码能跑在 Worker 里，也能跑在主线程里。
+// 引擎侧：命令表、状态、窗口计算。这一份就是引擎语义本身。
+//
+// 边界：本文件不碰 document、不碰 DOM、不碰 OffscreenCanvas。凡是要碰画布的地方都走
+//   cfg.host 的钩子（ctxOfPage / blitPages / invalidateSlots ...），由宿主实现 ——
+//   引擎于是只认"页位图 + 槽"，不认它跑在哪条线程上。
 // 通道（与 transport/worker_main.ts 的约定）：
 //   下行：boot / pageCanvas / viewMode / view / do（改状态）/ ask（要返回值）
 //   上行：ready / state / ack / reply / error
-// 同线程那一侧（transport/inline.ts）不经过消息：它直接把同一份表当函数调。
 
 // 类型：只封边界，不重抄导出面
 
@@ -1564,7 +1560,7 @@ function settle(opName: string, m: Args): { moved: boolean; scrolled: boolean; s
  */
 function read(name: any, args: any) {
   // rawFrame 不在 READ 表里：它要拷一份（wasm 堆上的视图下一次 present 就被覆盖），
-  //   与 askOp 里那条特判是同一件事。inline 的 read 少了它，diag.rawFrame 直接抛。
+  //   与 askOp 里那条特判是同一件事。少了它，diag.rawFrame 直接抛。
   if (name === 'rawFrame') {
     const v = mod.frameRgba();
     const copy = new Uint8ClampedArray(v.length);

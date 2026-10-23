@@ -1,18 +1,15 @@
-// 页画布表：文档里每页一张 canvas，按 (页号 x 步距) 绝对定位。
-// 为什么一页一张而不是整篇一张：
-//   引擎里已经没有"整窗帧"了（5D-2），渲染只写页位图；宿主这边照页切之后，改一页就只
-//   重合成那一页。整篇一张时哪怕只改一个字，浏览器也要把整张 18 Mpx 的图层重新合成
-//   一遍（实测多花整整一个 vsync）。
-// 只保留窗口内的页：画布是宿主侧唯一持有像素的地方，留几张就等于留多少内存 ——
-//   也是"整篇 3000 段"不再撑爆内存的原因。
+// 页画布：窗口内每页一张 canvas，按 (页号 x 步距) 绝对定位，由 Worker 按槽复用。
+//
+// 为什么不是整篇一张：引擎里没有"整窗帧"，渲染只写页位图；宿主照页切之后，改一页就只
+//   重合成那一页。整篇一张时哪怕只改一个字，浏览器也要把整张 18 Mpx 的图层重新合成一遍。
+// 为什么只保留窗口内那几页：画布是主线程唯一持有像素的地方，留几张就等于留多少内存。
 
 /**
  * 页画布的元素约定：定位与层叠只在这里定一次。
  *
- * 为什么收成一个函数：宿主有两个画布集合（同线程按页建销、Worker 按槽复用），而
- *   "这张 canvas 怎么摆"对两者是同一件事。分头写的结果必然是一边有一边漏 —— 漏的那
- *   一侧画布参与文档流，style.top 完全失效（页间距丢失、逐页漂移），换窗时 remove /
- *   appendChild 会改变流的高度，浏览器据此做滚动锚定、把 scrollTop 拽回去（TRAPS 189）。
+ * 元素约定只写一次：漏了它，画布就参与文档流 —— style.top 完全失效（页间距丢失、
+ *   逐页漂移），换窗时 appendChild 会改变流的高度，浏览器据此做滚动锚定、把 scrollTop
+ *   拽回去（TRAPS 189）。
  *
  * 幂等：对已经设过的元素再调一次不产生任何写入（池里捞回来的那些都走这条路）。
  * @param el 一张页画布
@@ -29,7 +26,6 @@ function stylePageCanvas(el: HTMLCanvasElement): void {
  */
 export interface PageRec {
   el: HTMLCanvasElement;
-  g: CanvasRenderingContext2D | null;
 
   /**
    * 还没贴过（新分配，或刚改过尺寸被清空）。
@@ -60,190 +56,8 @@ export interface PageGeometry {
   dpr: number;
 }
 
-export class PageCanvases {
-  private readonly pagesEl: HTMLElement;
-  private readonly map = new Map<number, PageRec>();
-
-  /**
-   * 卸下来的画布留着复用：留住元素就是留住那份已实体化的 backing store。
-   */
-  private readonly pool: HTMLCanvasElement[] = [];
-
-  /**
-   * 一页画布建好时通知对端（worker 传输在这里 transfer）。
-   */
-  onCreated: ((page: number, el: HTMLCanvasElement) => void) | null = null;
-
-  constructor(pagesEl: HTMLElement) {
-    this.pagesEl = pagesEl;
-  }
-
-  get size(): number {
-    return this.map.size;
-  }
-
-  /**
-   * 当前持有的页。
-   *
-   * @returns 页号与记录的二元组（不保证顺序）
-   */
-  list(): Array<[number, PageRec]> {
-    return [...this.map.entries()];
-  }
-
-  /**
-   * 按页号取记录。
-   *
-   * @param page 页号
-   * @returns 记录；这一页不在窗口里时为 undefined
-   */
-  get(page: number): PageRec | undefined {
-    return this.map.get(page);
-  }
-
-  /**
-   * 按页号取记录，没有就建一张。
-   * @param page 页号
-   * @returns 该页的记录（没有就新建一张）
-   */
-  private canvasFor(page: number): PageRec {
-    let rec = this.map.get(page);
-    if (!rec) {
-      const el = this.pool.pop() ?? document.createElement('canvas');
-      // 元素约定只有一处（stylePageCanvas）。池里捞回来的也过一遍 —— 幂等，且能兜住
-      //   旧版本造出来的元素（样式是会话内共享的 DOM，升级后重建实例不该带着旧约定）。
-      stylePageCanvas(el);
-      rec = { el, g: el.getContext('2d', { alpha: false }), fresh: true };
-      this.map.set(page, rec);
-      this.pagesEl.appendChild(el);
-      if (this.onCreated) this.onCreated(page, el);
-    }
-    return rec;
-  }
-
-  /**
-   * 把画布集合调整成"窗口内每页一张"，并摆好位置与尺寸。
-   * 位置用绝对页号算（不是窗口内下标）—— 这样滚动换窗口时画布不会跟着漂。
-   * @param first 窗口首页
-   * @param count 窗口页数
-   * @param total 总页数
-   * @param geom 页度量
-   */
-  sync(first: number, count: number, total: number, geom: PageGeometry): void {
-    const { pw, ph, gap, dpr } = geom;
-    const step = ph + gap;
-    // 只在真的变了才写 style：写一次就触发一次样式重算与布局，
-    //   而这一段每拍都跑（敲一个字就跑一次），没变还写就是白付这笔钱。
-    const w = pw / dpr + 'px';
-    const h = (Math.max(1, total) * step - gap) / dpr + 'px';
-    if (this.pagesEl.style.width !== w) this.pagesEl.style.width = w;
-    if (this.pagesEl.style.height !== h) this.pagesEl.style.height = h;
-    // 容器不画"纸底"：那片白纸是假象 —— 页没画布时它把"这里什么都没有"伪装成
-    //   "一张空白页"，查问题时看不出是缺画布还是真空白（2026-10-22 就被它误导过）。
-    //   真白纸由引擎的页位图给（页位图是 alpha:false 的不透明画布），缺画布就该露出底色。
-
-    for (const [p, rec] of this.map) {
-      if (p < first || p >= first + count) {
-        rec.el.remove();
-        this.map.delete(p);
-        if (this.pool.length < 8) this.pool.push(rec.el);
-      }
-    }
-    for (let p = first; p < first + count; ++p) {
-      const rec = this.canvasFor(p);
-      // 页号的唯一读写口：诊断（自审要按页号找那一张画布）与指针归属都按它认页。
-      const pStr = String(p);
-      if (rec.el.dataset.page !== pStr) rec.el.dataset.page = pStr;
-      if (rec.el.width !== pw || rec.el.height !== ph) {
-        // 改尺寸会清空画布 —— 与新建同一种状态。
-        rec.el.width = pw;
-        rec.el.height = ph;
-        rec.fresh = true;
-      }
-      const cssW = pw / dpr + 'px';
-      const cssH = ph / dpr + 'px';
-      if (rec.el.style.width !== cssW) rec.el.style.width = cssW;
-      if (rec.el.style.height !== cssH) rec.el.style.height = cssH;
-      const top = (p * step) / dpr + 'px';
-      if (rec.el.style.top !== top) rec.el.style.top = top;
-    }
-  }
-
-  /**
-   * 整页贴一张（新页 / 报脏但给不出矩形时的退路）。
-   * @param page 页号
-   * @param src 导出像素（页内坐标）
-   * @param pw 页宽（设备像素）
-   * @param ph 页高（设备像素）
-   * @returns 写入的像素数
-   */
-  blitAll(page: number, src: Uint8ClampedArray, pw: number, ph: number): number {
-    const rec = this.map.get(page);
-    if (!rec || !rec.g) return 0;
-    if (src.length !== pw * ph * 4) return 0;
-    rec.g.putImageData(
-      new ImageData(new Uint8ClampedArray(src.buffer, src.byteOffset, src.length), pw, ph),
-      0,
-      0,
-    );
-    rec.fresh = false;
-    return pw * ph;
-  }
-
-  /**
-   * 按脏矩形贴。光标移动一次只有几十像素，而整页是一百多万。
-   *
-   * 逐块拷成小图再按页内坐标贴：块只有几十像素，拷贝比"给整页建视图"便宜。
-   * @param page 页号
-   * @param src 导出像素（页内坐标）
-   * @param pw 页宽（设备像素）
-   * @param ph 页高（设备像素）
-   * @param rects 脏矩形（页内像素）
-   * @returns 写入的像素数
-   */
-  blitRects(
-    page: number,
-    src: Uint8ClampedArray,
-    pw: number,
-    ph: number,
-    rects: Array<{ x: number; y: number; w: number; h: number }>,
-  ): number {
-    const rec = this.map.get(page);
-    if (!rec || !rec.g) return 0;
-    let px = 0;
-    for (const r of rects) {
-      if (r.w <= 0 || r.h <= 0) continue;
-      const small = new ImageData(r.w, r.h);
-      for (let y = 0; y < r.h; ++y) {
-        const off = src.byteOffset + ((r.y + y) * pw + r.x) * 4;
-        small.data.set(new Uint8ClampedArray(src.buffer, off, r.w * 4), y * r.w * 4);
-      }
-      rec.g.putImageData(small, r.x, r.y);
-      px += r.w * r.h;
-    }
-    rec.fresh = false;
-    return px;
-  }
-
-  /**
-   * 内容整体作废：所有页下次都要整页贴。
-   */
-  invalidate(): void {
-    for (const rec of this.map.values()) rec.fresh = true;
-  }
-
-  /**
-   * 丢掉全部画布并清空容器。
-   */
-  destroy(): void {
-    for (const rec of this.map.values()) rec.el.remove();
-    this.map.clear();
-    this.pool.length = 0;
-  }
-}
-
 /**
- * 画布存储：同线程按页建销，Worker 按槽复用。宿主只认这五个动作。
+ * 画布存储：按槽复用，宿主只认这几个动作。
  */
 export interface CanvasStore {
   readonly size: number;
@@ -334,7 +148,6 @@ export class SlotCanvases implements CanvasStore {
    */
   private acquire(): HTMLCanvasElement {
     const el = document.createElement('canvas');
-    // 与 PageCanvases 共用同一处元素约定 —— 两个实现各自写一遍就是漏改的来源。
     stylePageCanvas(el);
     this.pagesEl.appendChild(el);
     return el;
@@ -342,7 +155,7 @@ export class SlotCanvases implements CanvasStore {
 
   /**
    * 内容整体作废。槽里的像素属于哪一页没有变，变的是那一页现在该是什么，所以这一侧
-   *   不作废任何东西（重贴由 Worker 侧做）。留着这个方法是为了与 PageCanvases 同形。
+   *   不作废任何东西 —— 重贴由 Worker 侧做。
    */
   invalidate(): void {}
 
@@ -379,7 +192,7 @@ export class SlotCanvases implements CanvasStore {
       const el = this.slots[s];
       if (!el) continue;
       used.add(s);
-      this.byPage.set(p, { el, g: null, fresh: false });
+      this.byPage.set(p, { el, fresh: false });
       const pStr = String(p);
       if (el.dataset.page !== pStr) el.dataset.page = pStr;
       if (el.style.display === 'none') el.style.display = 'block';

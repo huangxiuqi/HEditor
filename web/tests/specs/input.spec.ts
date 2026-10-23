@@ -4,11 +4,7 @@
 //   而用户真正用的是键盘、指针、输入法 —— 这三条路在库里的入口是键位映射与命中归宿。
 //   API 面全绿时输入层仍可能没接上。
 //
-// 两条传输各跑一遍，每一步的状态打成一条轨迹；两条轨迹必须逐位相同 ——
-//   输入层与传输无关。这件事由 globalTeardown 在两份轨迹都写完之后判，不靠人眼 diff。
-import { writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-
+// 每一步的状态打成一条轨迹，失败时作为附件留档。
 import { check } from '../support/check';
 import { expect, test } from '../support/probe';
 
@@ -24,11 +20,8 @@ type Step = {
   focus: { para: number; offset: number };
 };
 
-// 轨迹留档目录：仓库根的 out/web，两只 project 写不同文件名。
-const OUT = join(process.cwd(), '..', 'out', 'web');
-
 test.describe('输入层', () => {
-  test('真实键鼠与输入法都接上了，且与传输无关', async ({ page, open, transport }) => {
+  test('真实键鼠与输入法都接上了', async ({ page, open }) => {
     const errors: string[] = [];
     page.on('console', (m) => {
       if (m.type() === 'error') errors.push(m.text());
@@ -251,9 +244,6 @@ test.describe('输入层', () => {
       check('没有 console 错误', real.length === 0, real.slice(0, 2).join(' | '));
     });
 
-    // 轨迹留档：跨传输的逐位比对在 globalTeardown 里做。
-    writeFileSync(join(OUT, 'trail-' + transport + '.json'),
-                  JSON.stringify(trail, null, 2), 'utf8');
     await test.info().attach('trail', {
       body: JSON.stringify(trail.map(
         (t) => [t.label, t.para, t.off, t.empty, t.anchor.offset, t.focus.offset])),

@@ -83,7 +83,7 @@ Playwright 的 `expect(locator)` 与 `expect.poll` 都会重试 —— 一个把
 
 - **不要 big-bang 重写。** 368 条里有大量"反向一半"（"改过之后确实变了，否则下面那条恒真"），
   翻译时最先丢的就是这类前置校验，而丢掉之后报告依然全绿。
-- **不要为 Playwright 改产品语义。** `?glue=` 造致命档、`?transport=` 切传输、
+- **不要为 Playwright 改产品语义。** `?glue=` 造致命档、
   `?wasm=` 指产物目录，这些是页面契约，不该为了框架改成 `page.route` 注入。
 - **不要信"并行能省一半"。** 先在第二期跑一次 `workers: 4` 量墙钟，再决定 CI 上开几个。
 - **不要把 `channel: 'chrome'` 换成下载的 Chromium。** 光栅产物、字体回退、滚动条宽度

@@ -20,10 +20,6 @@ const DEMO_TEXT = [
 ].join('\n');
 
 const params = new URLSearchParams(location.search);
-// 默认走 Worker：它就是"引擎跑在另一条线程上"的那一档，产品里该按它验。要复现
-//   同线程那条路显式写 ?transport=inline —— 两条路的差别只在"命令是在事件处理器里
-//   同步跑完，还是一次往返之后跑完"，很多时序问题只在其中一条上显形。
-const transport = params.get('transport') === 'inline' ? 'inline' : 'worker';
 // 探针用 ?glue= 造"产物不存在"这种真实配置错误。产品页不会有这一行。
 const glue = params.get('glue');
 // Worker 壳是构建产物（经典 worker，要 importScripts 装胶水），开发模式下也用构建好的那一份。
@@ -36,7 +32,7 @@ declare global {
   interface Window {
     __demo?: Editor;
     __demoReady?: boolean;
-    __demoState?: { changes: number; transport: string };
+    __demoState?: { changes: number };
     __demoStartError?: string;
   }
 }
@@ -86,14 +82,13 @@ const chrome = mountChrome(document.getElementById('bar')!, 'HEditor', actions);
 async function boot(): Promise<void> {
   editor = await createEditor({
     container: stage,
-    transport,
     chrome: true,
     // debug 打开的是诊断面（diag）：它不承诺稳定，只给探针与内部验证台。
     debug: params.has('debug'),
     assets: {
       ...(glue ? { glue } : {}),
       // Worker 壳必须是经典 worker（importScripts），所以开发模式下也用构建好的那一份。
-      ...(transport === 'worker' ? { worker: workerShell } : {}),
+      worker: workerShell,
     },
     // 引擎起不来时给用户一条出路：库不重启自己，重启这一页是页面的账。
     onFatalRetry: () => location.reload(),
@@ -106,7 +101,7 @@ async function boot(): Promise<void> {
   // 页面创建的实例只能这样交给页面外的脚本：evaluate 在页面里跑，拿不到模块引用。
   //   它同时是测试的唯一入口（web/tests/support/readings.ts 的前言里读一次），改名字要同步。
   window.__demo = editor;
-  window.__demoState = { changes: 0, transport };
+  window.__demoState = { changes: 0 };
   editor.on('change', () => {
     const n = ++window.__demoState!.changes;
     const g = editor.geometry();

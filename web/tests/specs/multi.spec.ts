@@ -37,7 +37,7 @@ test.describe('多实例', () => {
     });
     page.on('pageerror', (e) => errors.push('uncaught: ' + e.message));
 
-    // 这一页两个引擎各自带传输，不随 project 走：A 固定同线程，B 固定 Worker。
+    // 这一页有两个独立实例，各自一个 Worker 引擎。
     const p = await open('multi.html', {
       query: { debug: '1' },
       viewport: { width: 1500, height: 1000 },

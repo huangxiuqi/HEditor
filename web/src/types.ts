@@ -278,11 +278,6 @@ export interface EditorOptions {
   container: HTMLElement;
 
   /**
-   * 默认 'worker'。'inline' 在主线程跑（测试环境、或不允许 Worker 的宿主）。
-   */
-  transport?: 'worker' | 'inline';
-
-  /**
    * 素材地址覆盖（胶水 / wasm / 字体），不传按库的地址推。
    */
   assets?: Assets;

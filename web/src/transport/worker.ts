@@ -8,7 +8,7 @@
 import type { DomHost, EngineLink, HostView } from '../host/dom';
 import { SlotCanvases, type CanvasStore } from '../host/pages';
 import type { Args } from '../input/keymap';
-import type { AssetPaths } from './inline';
+import type { AssetPaths } from './assets';
 
 const CALL_TIMEOUT_MS = 15000;
 
@@ -322,9 +322,6 @@ export function createWorker(opts: WorkerOptions): {
       const v = mirror.scrollReset;
       mirror.scrollReset = false;
       return v;
-    },
-    pixels() {
-      return null;
     },
     serialize() {
       return ask('serialize').then((v) => String(v ?? ''));

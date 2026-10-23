@@ -78,7 +78,6 @@ L2 与 L2' 的分界是本版的核心：**判定进库，像素归属留在传�
 ```ts
 const editor = await createEditor({
   container: el,                  // 只管挂在哪
-  transport: 'worker',            // 'worker' | 'inline'
   assets: { glue?, wasm? },       // 资源定位，默认按当前脚本地址推
   fonts: [...],                   // 不传用内置默认
   config: { mode: 'readOnly' },   // 初始配置
@@ -167,8 +166,8 @@ setText(text: string, opts?: { repeat?: number }): Promise<void>   // 明确用�
 
 `on(event, cb)` · `flush()` · `destroy()` · `element` · `diag`
 
-`flush()` 只在 `transport: 'worker'` 时有用（in-thread 上是已 resolve 的 Promise）：
-批量 fire-and-forget 之后用它一次，比每个方法都 `await` 便宜。
+`flush()` 等所有在途命令的回话落地：批量 fire-and-forget 之后用它一次，比每个方法都
+`await` 便宜。
 
 ---
 
@@ -206,7 +205,7 @@ setText(text: string, opts?: { repeat?: number }): Promise<void>   // 明确用�
 
 | 类别 | 项 | 为什么 |
 | --- | --- | --- |
-| 构造期固定 | `container` `transport` `assets` `fonts` | 换容器要重建 DOM；换传输要重建 Worker；字体装一次最贵 |
+| 构造期固定 | `container` `assets` `fonts` | 换容器要重建 DOM；换 Worker 壳要重建引擎；字体装一次最贵 |
 | 运行期可改 | `zoom` `pageMode` `mode` `input` `showBrackets` `showControlDots` `undoLimit` `caretStyle` `selectionStyle` | 有明确语义，代价可分级 |
 | 只读 | `pages` `geometry` `caret` `selection` | 从引擎状态推出来 |
 
@@ -606,7 +605,7 @@ npm install --prefix .toolchain/emsdk/upstream/emscripten typescript@5.6 --no-au
 ### 13.1 目标
 
 - `npm run build` → `dist/`：ESM + UMD + `.d.ts` + `heditor.wasm`（从 CMake 产物拷）。
-- `npm run dev` → 开发服务器：`demo/index.html?transport=worker|inline` 直接跑，改 `src/` 热更新。
+- `npm run dev` → 开发服务器：`index.html` 直接跑，改 `src/` 热更新。
 - `demo/` 与现在的 `web/index.html` 同构 —— 探针可以原样指过去，判据不用重写。
 - **demo 页只加载 `heditor.js` 一个脚本**（§11 闸 1）；它不再知道 wasm、胶水、命令表的存在。
 
@@ -715,8 +714,11 @@ C 步收尾时又改了四处，都是被"它必须真的能用"逼出来的：
   给旧页面与经典 Worker 的 `importScripts`），旧页面与旧 Worker 删除之后只剩 `idl_check`
   在读它；于是那一条也改成直接把 `web/src/engine/api.ts` 转译执行 —— 源码树里不再有
   构建出来的 JS，`build:engine` 这一步随之取消。真源始终只有 `api.ts` 一份。
-- **`transport` 两条都通了**，示例页默认 `'worker'`（2026-10-22 起；要复现同线程那条路
-  显式写 `?transport=inline`）。Worker 壳在 `web/dist/heditor_worker.js`，主线程只剩槽画布与转移。
+- **引擎只跑在 Worker 里**（`createEditor` 不再有 `transport` 选项）。同线程那一档已删除：
+  它唯一的独占能力是"在 copy 事件里同步写 DataTransfer"，而 Worker 侧退化成
+  `navigator.clipboard.write` 只差一次往返；反过来，字体的真按需读盘（同步 `fread` 落到
+  OPFS）只有 Worker 能做 —— 两条都留等于永远缺一半能力，还要各自维护一套画布与贴图。
+  壳在 `web/dist/heditor_worker.js`，主线程只剩槽画布与转移。
 - **`flush()` 有了真语义**：等所有在途 do / ask 收到回话（`EngineLink.flush`）。原先
   `await Promise.resolve()` 是空转，于是 Worker 模式下 `await flush()` 之后读到的还是上一拍的几何。
 
@@ -743,7 +745,7 @@ C 步抓到的两个真 bug（都不是新代码引入的，是判据缺席）�
 | 症状 | 根因 | 判据 |
 | --- | --- | --- |
 | 单击落得准、拖选掉到下一行 | 输入层自己除密度、拖选没除（1.33 倍） | `input_probe` 拖选那节 |
-| Worker 模式单击不落光标、拖选永远空 | `read()` 的 default 把必经命令 `hit` 吞成 `null` | 同上，且只在 `transport: 'worker'` 上红 |
+| Worker 模式单击不落光标、拖选永远空 | `read()` 的 default 把必经命令 `hit` 吞成 `null` | 同上 |
 
 两条都是 **API 面全绿**时存在的：`e.type()` 走命令层，碰不到输入层。这也是 `input_probe`
 存在的理由 —— 它发的是真实键盘 / 鼠标 / 合成事件，不调 API。
