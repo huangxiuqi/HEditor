@@ -13,6 +13,8 @@ type Boot = {
   tb: string;
   stages: number;
   canvases: number;
+  skeletonIds: number;
+  scoped: boolean;
 };
 
 // 第二、三节的读数。
@@ -50,14 +52,24 @@ test.describe('多实例', () => {
           both: !!a && !!b,
           diff: a !== b,
           ta: a.text(), tb: b.text(),
-          stages: document.querySelectorAll('#stage').length,
-          canvases: document.querySelectorAll('#pages canvas').length,
+          stages: document.querySelectorAll('.heditor-stage').length,
+          canvases: document.querySelectorAll('.heditor-pages canvas').length,
+          // 骨架按类名认、按容器作用域找：同页两个实例各有一份，id 在这里只会撞。
+          skeletonIds: document.querySelectorAll('#stage, #pages, #ime').length,
+          scoped: !!a.element.querySelector('.heditor-stage')
+            && !!b.element.querySelector('.heditor-stage')
+            && a.element.querySelector('.heditor-stage')
+              !== b.element.querySelector('.heditor-stage'),
         };`);
       check('两个实例都拿到了', r.both === true && r.diff === true);
       check('各自装着自己的文本', r.ta.startsWith('实例 A') && r.tb.startsWith('实例 B'),
             r.ta.slice(0, 6) + ' / ' + r.tb.slice(0, 6));
-      check('两套骨架同时存在（两组 #stage、至少两张页画布）',
+      check('两套骨架同时存在（两组 .heditor-stage、至少两张页画布）',
             r.stages === 2 && r.canvases >= 2, r.stages + ' 组 / ' + r.canvases + ' 张');
+      // 两份骨架若都带 #stage，按文档去查就只会拿到第一个实例的那一份 —— 第二个实例
+      //   于是静默操作了第一个的舞台（滚动、换算全错，而症状是"看起来在动"）。
+      check('骨架不带 id（同页两个实例不会撞）', r.skeletonIds === 0, r.skeletonIds + ' 个');
+      check('两个实例各看各的舞台', r.scoped === true);
     });
 
     await test.step('独立：往 A 敲字不动 B', async () => {

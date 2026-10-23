@@ -4179,28 +4179,31 @@ void checkCompileRuns() {
                    "接缝 / 未知字符样式：三个节点引用同一个未知样式只报一条诊断（实际 " +
                        std::to_string(r.diagnostics.size()) + " 条）");
     }
-    // 粗体、斜体、下划线在引擎输入里还没有字段：设了就记诊断，不静默丢。
-    //   反向一半同样重要：显式设成 false 就是引擎的默认行为，不该报。
+    // 粗体、斜体、下划线落到 run 的字段上：加粗是 weight=700，另两个是标记位。
+    //   三态照抄 —— 显式 false 也要写回默认值，它不能被解析成"继承"。
     {
         NodeTree tree;
         const NodeId sec = tree.firstSectionId();
         const NodeId t = tree.appendChild(sec, NodeKind::TextRun);
         tree.setText(t, cps({0x61}));
         tree.find(t)->marks.bold = true;
+        tree.find(t)->marks.italic = true;
+        tree.find(t)->marks.underline = true;
         tree.appendChild(sec, NodeKind::ParagraphMark);
 
         const CompileResult r = compileDocument(tree, FlowVisibility::Design, noStyles());
-        expectTrue(!r.ok() && r.diagnostics.size() == 1 &&
-                       r.diagnostics[0].detail.find("粗体") != std::string::npos,
-                   "接缝 / 未支持属性：粗体记一条诊断，不静默丢（实际 " +
-                       std::to_string(r.diagnostics.size()) + " 条）");
+        expectTrue(r.ok(), "接缝 / 字符样式：粗斜下划线不再记诊断（已经进编译）");
         expectTrue(r.blocks.size() == 1 && r.blocks[0].runs.size() == 1 &&
-                       r.blocks[0].runs[0].size_pt == 12.0f,
-                   "接缝 / 未支持属性：其余字段照常解析（字号仍是段落默认的 12 磅）");
+                       r.blocks[0].runs[0].weight == kWeightBold &&
+                       r.blocks[0].runs[0].italic && r.blocks[0].runs[0].underline,
+                   "接缝 / 字符样式：三个属性都落到 run 上");
+        expectTrue(r.blocks[0].runs[0].size_pt == 12.0f,
+                   "接缝 / 字符样式：其余字段照常解析（字号仍是段落默认的 12 磅）");
 
         tree.find(t)->marks.bold = false;
         const CompileResult r2 = compileDocument(tree, FlowVisibility::Design, noStyles());
-        expectTrue(r2.ok(), "接缝 / 未支持属性：显式 bold=false 不报诊断（它就是引擎的默认行为）");
+        expectTrue(r2.ok() && r2.blocks[0].runs[0].weight == kWeightRegular,
+                   "接缝 / 字符样式：显式 bold=false 写回正文字重（不是继承）");
     }
     // 非绝对的字符字号：算不出磅值，记诊断并保留段落默认字号（不是取零）。
     {

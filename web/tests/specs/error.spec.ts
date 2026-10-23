@@ -112,15 +112,15 @@ test.describe('错误降级', () => {
         return { editor: !!window.__demo,
                  startError: window.__demoStartError || '',
                  hasBanner: !!el,
-                 title: el ? el.querySelector('.he-t').textContent : '',
-                 detail: el ? el.querySelector('.he-d').textContent : '',
-                 hint: el ? el.querySelector('.he-h').textContent : '',
+                 title: el ? el.querySelector('.heditor-error__title').textContent : '',
+                 detail: el ? el.querySelector('.heditor-error__detail').textContent : '',
+                 hint: el ? el.querySelector('.heditor-error__hint').textContent : '',
                  role: el ? el.getAttribute('role') : '',
                  rect: box ? [Math.round(box.width), Math.round(box.height)] : null,
                  style: el ? getComputedStyle(el).display : '',
                  retry: !!document.querySelector('[data-host-error="fatal"] button[data-he-retry]'),
                  marked: host ? host.getAttribute('data-host-fatal') : null,
-                 canvases: document.querySelectorAll('#pages canvas').length };`);
+                 canvases: document.querySelectorAll('.heditor-pages canvas').length };`);
       check('引擎确实没起来（前置条件）', r.editor === false && !!r.startError,
             'editor=' + r.editor + ' startError=' + String(r.startError).slice(0, 60));
       check('出现致命横幅', r.hasBanner === true);

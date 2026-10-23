@@ -372,6 +372,8 @@ if(EMSCRIPTEN)
 
   add_executable(heditor_wasm src/wasm/wasm_main.cpp)
   target_link_libraries(heditor_wasm PRIVATE heditor_core heditor_demo)
+  # wasm 壳也要读写载荷 JSON（格式补丁、片段），而 heditor_core 的 include 是 PRIVATE。
+  target_include_directories(heditor_wasm PRIVATE ${HEDITOR_JSON_INCLUDE})
   target_compile_definitions(heditor_wasm PRIVATE HEDITOR_BUILD_STAMP="${HEDITOR_BUILD_STAMP}")
   heditor_target_flags(heditor_wasm)
   set_target_properties(heditor_wasm PROPERTIES OUTPUT_NAME "heditor" SUFFIX ".js")

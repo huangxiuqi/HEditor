@@ -695,6 +695,20 @@ StepResult canApply(const NodeTree& tree, const FlowIndex& idx, const Step& step
                        }
                        r.ok = true;
                    },
+                   [&](const SetRunMarks& s) {
+                       const Node* n = tree.find(s.id);
+                       if (n == nullptr || n->kind != NodeKind::TextRun) {
+                           r.error = "改字符格式：目标不是文本节点";
+                           return;
+                       }
+                       // 与段落格式同一条守卫：记的原值要与文档当前值一致，否则这一步
+                       //   是在与别的编辑抢同一个节点（或者被重放到了别的文档上）。
+                       if (!(n->marks == s.before) || n->styleRef != s.beforeStyleRef) {
+                           r.error = "改字符格式：当前值与步骤记的原值不符（步骤过期了）";
+                           return;
+                       }
+                       r.ok = true;
+                   },
                    [&](const InsertNode& s) {
                        // 判据落在流位置上：槽位下标活不过一次规范化（相邻同标记的文本节点
                        //   会被并成一个，后面的槽位整体前移）—— 与 UnwrapNode 同一条。
@@ -946,6 +960,12 @@ StepResult applyStep(NodeTree& tree, const Step& step) {
                 n->para = s.para;
                 n->styleRef = s.styleRef;
             },
+            [&](const SetRunMarks& s) {
+                Node* n = tree.find(s.id);
+                if (n == nullptr) return;
+                n->marks = s.marks;
+                n->styleRef = s.styleRef;
+            },
             [&](const InsertNode& s) {
                 // 槽位按流位置当场重算，必要时把文本节点切开：撤销"删掉一个节点"时，那两段
                 //   相邻的文字已被规范化并成一个节点，步骤里记下的槽位下标不再指向它
@@ -1066,6 +1086,15 @@ Step invertStep(const Step& step) {
                               x.para = s.before;
                               x.styleRef = s.beforeStyleRef;
                               x.before = s.para;
+                              x.beforeStyleRef = s.styleRef;
+                              return Step{x};
+                          },
+                          [](const SetRunMarks& s) -> Step {
+                              SetRunMarks x;
+                              x.id = s.id;
+                              x.marks = s.before;
+                              x.styleRef = s.beforeStyleRef;
+                              x.before = s.marks;
                               x.beforeStyleRef = s.styleRef;
                               return Step{x};
                           },
@@ -1195,8 +1224,9 @@ FlowPos mapPos(const Step& step, FlowPos pos, Assoc assoc) {
                           [&](const SetControlValue&) -> FlowPos { return pos; },
                           // 跨度不改流位置，也不改流结构：它改的是"这一格覆盖多少格位"。
                           [&](const SetTableCellSpan&) -> FlowPos { return pos; },
-                          // 段落格式同理：改的是标记上的数据，位置一个都不动。
+                          // 段落格式与字符格式同理：改的是节点上的数据，位置一个都不动。
                           [&](const SetParaMarkFormat&) -> FlowPos { return pos; },
+                          [&](const SetRunMarks&) -> FlowPos { return pos; },
                       },
                       step);
 }
@@ -1207,7 +1237,8 @@ bool mapStepPositions(Step* target, const Step& mapped_by, Assoc assoc) {
     if (std::holds_alternative<SetControlProp>(*target) ||
         std::holds_alternative<SetControlValue>(*target) ||
         std::holds_alternative<SetTableCellSpan>(*target) ||
-        std::holds_alternative<SetParaMarkFormat>(*target)) {
+        std::holds_alternative<SetParaMarkFormat>(*target) ||
+        std::holds_alternative<SetRunMarks>(*target)) {
         return true;
     }
     if (auto* s = std::get_if<InsertText>(target)) {

@@ -321,6 +321,11 @@ const COMMANDS: Array<[string, string, string[], string]> = [
   ['paste',                 'w', ['pasteFragment'],                                       'self'],
   ['pasteText',             'w', ['pastePlainText'],                                      'self'],
   ['deleteSelection',       'w', ['deleteSelection'],                                     'self'],
+  // 格式补丁：载荷是"只含要改的字段"的 JSON，键名与落盘同一套。
+  ['charFormat',            'w', ['applyCharFormat'],                                    'self'],
+  ['paraFormat',            'w', ['applyParaFormat'],                                    'self'],
+  ['charFormatAt',          'r', ['charFormatAt'],                                       'none'],
+  ['paraFormatAt',          'r', ['paraFormatAt'],                                       'none'],
   ['hit',                   'r', ['hitTest'],                                             'none'],
   ['controlAt',             'r', ['controlAtPoint'],                                      'none'],
   ['describeControls',      'r', ['describeControls'],                                    'none'],
@@ -960,6 +965,20 @@ const WRITE = collect('w', {
     return true;
   },
   deleteSelection: () => mod.deleteSelection(),
+  // 三条命令的回执都是字符串：空 = 改了，'noop' = 格式本来就一样，其余 = 原因。
+  //   与 paste 同一口径 —— wasm 侧关掉了异常，错误只能用返回值带出来。
+  charFormat: (a) => {
+    const why = mod.applyCharFormat(a.s || '{}');
+    if (why === 'noop') return false;
+    if (why) throw new Error(why);
+    return true;
+  },
+  paraFormat: (a) => {
+    const why = mod.applyParaFormat(a.s || '{}');
+    if (why === 'noop') return false;
+    if (why) throw new Error(why);
+    return true;
+  },
   backspace: () => mod.backspace(),
   deleteForward: () => mod.deleteForward(),
   splitParagraph: () => mod.splitParagraph(),
@@ -1245,6 +1264,16 @@ const READ = collect('r', {
   // 样式现状：写入口是 caretStyle / selectionStyle（缺字段按现状补），读是这两条。
   caretStyleJson: () => JSON.parse(mod.caretStyleJson()),
   selectionStyleJson: () => JSON.parse(mod.selectionStyleJson()),
+
+  /**
+   * 光标处的字符格式（三态：字段缺席 = 继承，false = 显式取消）。
+   *
+   * 与上面两条不同：那两条是宿主自己的光标外观，这两条是文档内容上的标记 —— 工具栏
+   *   回显要用它。走查询而不是命令：读格式不该改任何状态，也不该触发一次呈现。
+   * 读写用同一把尺子：format 写、formatAt 读，位置都是光标所在的段与偏移。
+   */
+  charFormatAt: () => JSON.parse(mod.charFormatAt()),
+  paraFormatAt: () => JSON.parse(mod.paraFormatAt()),
 
   // 构建与后端标识：诊断面板与探针报告要用。
   buildStamp: () => (typeof mod.buildStamp === 'function' ? mod.buildStamp() : ''),

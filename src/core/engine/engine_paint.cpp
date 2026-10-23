@@ -315,13 +315,35 @@ void EditorEngine::rasterIntoBitmap(Bitmap& target, int page_index, const float*
         hb_font_t* run_font = nullptr;
         Color run_color{};
         float run_rot = 0.0f;
+        bool run_italic = false;
         auto flush_run = [&]() {
             if (run_ids.empty()) return;
             target.drawGlyphs(run_font, run_ids.data(), run_x.data(), run_y.data(),
-                              static_cast<int>(run_ids.size()), units_to_px, run_color, run_rot);
+                              static_cast<int>(run_ids.size()), units_to_px, run_color, run_rot,
+                              run_italic);
             run_ids.clear();
             run_x.clear();
             run_y.clear();
+        };
+        // 下划线按"同一行同一段的连续字形"合成一条线：逐字形画会让每个字之间留一条
+        //   抗锯齿缝，看起来是一串短划。段与段之间靠 underline 标记断开（同一行里
+        //   下划线文本中间夹一段非下划线，线必须断在交界处）。
+        int ul_line = -1;
+        float ul_x0 = 0.0f;
+        float ul_x1 = 0.0f;
+        float ul_y = 0.0f;
+        float ul_size = 0.0f;
+        Color ul_color{};
+        auto flush_ul = [&]() {
+            if (ul_line < 0) return;
+            if (ul_x1 > ul_x0) {
+                // 位置与厚度都按这一段的字号算：线落在基线下方约 0.12 em，粗约 0.055 em，
+                //   再细会碎、再粗会像删除线。
+                const float thick = std::max(1.0f, ul_size * zoom * 0.055f);
+                const float y = (ul_y + ul_size * 0.12f) * zoom + dy;
+                target.fillRect(Rect{ul_x0 * zoom, y, (ul_x1 - ul_x0) * zoom, thick}, ul_color);
+            }
+            ul_line = -1;
         };
         // 只过这一页的字形区间（二分，见 glyphRangeOnPage）。
         //   整篇遍历 + 判页号：2000 段文档约 8 万个字形，每画一页都要过一遍，
@@ -339,21 +361,46 @@ void EditorEngine::rasterIntoBitmap(Bitmap& target, int page_index, const float*
             //   接缝那一趟要按平移之后的坐标筛（它画在本带的顶部）。
             const float y_pt = pg.y_pt + dy / zoom;
             if (band && (y_pt < *band_lo_pt - 1.0f || y_pt > *band_hi_pt + 1.0f)) continue;
+            // 下划线：同一行内，本字形的起点就是上一段的右端；换行或遇到不带下划线的
+            //   字形时把上一段合上。
+            if (ul_line >= 0) {
+                if (pg.line != ul_line) {
+                    flush_ul();
+                } else {
+                    ul_x1 = pg.x_pt;
+                }
+            }
+            if (pg.underline) {
+                if (ul_line < 0) {
+                    ul_line = pg.line;
+                    ul_x0 = pg.x_pt;
+                    ul_y = pg.y_pt;
+                    ul_size = pg.size_pt;
+                    ul_color = pg.color;
+                }
+                // 右端取值：行末那个字形后面没有"下一个起点"，按 0.6 em 收，
+                //   宁可短一点也不压到后面的字。
+                ul_x1 = pg.x_pt + pg.size_pt * 0.6f;
+            } else {
+                flush_ul();
+            }
             hb_font_t* f = pg.font->hb();
-            if (!run_ids.empty() &&
-                (f != run_font || pg.color != run_color || pg.rotate_deg != run_rot)) {
+            if (!run_ids.empty() && (f != run_font || pg.color != run_color ||
+                                     pg.rotate_deg != run_rot || pg.italic != run_italic)) {
                 flush_run();
             }
             if (run_ids.empty()) {
                 run_font = f;
                 run_color = pg.color;
                 run_rot = pg.rotate_deg;
+                run_italic = pg.italic;
             }
             run_ids.push_back(pg.glyph_id);
             run_x.push_back(pg.x_pt * zoom);
             run_y.push_back(pg.y_pt * zoom + dy);
         }
         flush_run();
+        flush_ul();
     };
 
     // 行内原子的占位框。与字形一样只过这一页的行（行数组按页单调，两端二分一次），

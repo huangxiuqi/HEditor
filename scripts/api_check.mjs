@@ -9,14 +9,30 @@
 //   四、demo 里不许自己接键盘/指针/合成事件 —— 输入层在库里。
 //
 // 用法：node scripts/api_check.mjs
-import { readFileSync, readdirSync, existsSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const CONTRACT = 'web/src/types.ts';
 const MEMBERS_LIST = 'web/src/public_members.gen.ts';
-const DEMO_FILES = ['web/index.html', 'web/multi.html', 'web/app/main.ts', 'web/app/multi.ts', 'web/app/ui.ts'];
+// 示例页要扫的文件：两个页面 + web/app 下的全部 TS（组件拆成多份之后，列名字一定会漏）。
+const DEMO_FILES = ['web/index.html', 'web/multi.html', ...appFiles('web/app')];
+
+/**
+ * 一个目录下的全部 TS 文件（递归）。
+ * @param dir 相对仓库根的目录
+ * @returns 相对路径列表
+ */
+function appFiles(dir) {
+  const out = [];
+  for (const name of readdirSync(join(ROOT, dir))) {
+    const rel = dir + '/' + name;
+    if (statSync(join(ROOT, rel)).isDirectory()) out.push(...appFiles(rel));
+    else if (rel.endsWith('.ts')) out.push(rel);
+  }
+  return out;
+}
 
 const problems = [];
 const note = (where, msg) => problems.push(`${where}: ${msg}`);

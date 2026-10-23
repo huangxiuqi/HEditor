@@ -13,6 +13,8 @@
 
 #include "core/engine/engine.h"
 
+#include "core/doc/record_json.h"
+
 #include "core/rev/fragment.h"
 #include "core/rev/project.h"
 
@@ -397,6 +399,53 @@ std::string EditorEngine::pastePlainTextAndRender(const std::string& utf8) {
     relayout();
     repaintAfterEdit();
     return std::string();
+}
+
+bool EditorEngine::applyCharFormatAndRender(const CharFormat& patch) {
+    if (!session_) return false;
+    // 幂等：格式没变时命令层不提交，这里也不要重排 —— 撤销栈与画面都该一动不动。
+    if (!edit_.applyCharFormat(patch)) return false;
+    relayout();
+    repaintAfterEdit();
+    return true;
+}
+
+bool EditorEngine::applyParaFormatAndRender(const ParaFormatPatch& patch) {
+    if (!session_) return false;
+    if (!edit_.applyParaFormat(patch)) return false;
+    relayout();
+    repaintAfterEdit();
+    return true;
+}
+
+std::string EditorEngine::charFormatAtJson() const {
+    if (!session_) return "{}";
+    // 键名与写入那条命令同一套，但尺寸给"磅数"而不是 Length 的文本形式 ——
+    //   读与写对称，界面才不用解析两种表示。
+    const CharFormat m = edit_.charFormatAtCaret();
+    nlohmann::ordered_json j = nlohmann::ordered_json::object();
+    if (m.bold) j["b"] = *m.bold;
+    if (m.italic) j["i"] = *m.italic;
+    if (m.underline) j["u"] = *m.underline;
+    if (m.font_index) j["fi"] = *m.font_index;
+    if (m.size && m.size->kind == LengthKind::Abs)
+        j["sz"] = static_cast<double>(emuToPt(m.size->abs_emu));
+    if (m.color) j["col"] = {m.color->r, m.color->g, m.color->b};
+    return j.dump();
+}
+
+std::string EditorEngine::paraFormatAtJson() const {
+    if (!session_) return "{}";
+    const ParaFormatPatch p = edit_.paraFormatAtCaret();
+    nlohmann::ordered_json j = nlohmann::ordered_json::object();
+    if (p.font_index) j["fi"] = *p.font_index;
+    if (p.size && p.size->kind == LengthKind::Abs)
+        j["sz"] = static_cast<double>(emuToPt(p.size->abs_emu));
+    if (p.line_factor) j["lf"] = *p.line_factor;
+    if (p.space_after && p.space_after->kind == LengthKind::Abs)
+        j["sa"] = static_cast<double>(emuToPt(p.space_after->abs_emu));
+    if (p.page_break_before) j["pbb"] = *p.page_break_before;
+    return j.dump();
 }
 
 bool EditorEngine::deleteSelectionAndRender() {

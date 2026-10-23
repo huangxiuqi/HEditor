@@ -5,6 +5,11 @@
 // 为什么只保留窗口内那几页：画布是主线程唯一持有像素的地方，留几张就等于留多少内存。
 
 /**
+ * 页画布的类名（BEM：heditor-pages 这个块的元素）。
+ */
+const PAGE_CLASS = 'heditor-pages__canvas';
+
+/**
  * 页画布的元素约定：定位与层叠只在这里定一次。
  *
  * 元素约定只写一次：漏了它，画布就参与文档流 —— style.top 完全失效（页间距丢失、
@@ -15,7 +20,7 @@
  * @param el 一张页画布
  */
 function stylePageCanvas(el: HTMLCanvasElement): void {
-  if (el.className !== 'pg') el.className = 'pg';
+  if (el.className !== PAGE_CLASS) el.className = PAGE_CLASS;
   if (el.style.position !== 'absolute') el.style.position = 'absolute';
   if (el.style.left !== '0px') el.style.left = '0';
   if (el.style.display !== 'block') el.style.display = 'block';

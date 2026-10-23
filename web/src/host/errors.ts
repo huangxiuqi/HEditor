@@ -98,9 +98,9 @@ function ensureStyle(doc: Document): void {
     '[data-host-error="fatal"]{position:absolute;z-index:20;left:12px;right:12px;top:12px;',
     'padding:10px 12px;border:1px solid #b54708;border-left-width:4px;border-radius:6px;',
     'background:#fff8f1;color:#1b1f24;box-shadow:0 2px 8px rgba(0,0,0,.16)}',
-    '[data-host-error="fatal"] .he-t{font-weight:600;color:#b54708}',
-    '[data-host-error="fatal"] .he-d{margin-top:4px;white-space:pre-wrap;word-break:break-word}',
-    '[data-host-error="fatal"] .he-h{margin-top:6px;color:#5b6572}',
+    '[data-host-error="fatal"] .heditor-error__title{font-weight:600;color:#b54708}',
+    '[data-host-error="fatal"] .heditor-error__detail{margin-top:4px;white-space:pre-wrap;word-break:break-word}',
+    '[data-host-error="fatal"] .heditor-error__hint{margin-top:6px;color:#5b6572}',
     '[data-host-error="warn"]{position:absolute;z-index:19;left:12px;right:12px;bottom:12px;',
     'padding:6px 10px;border:1px solid #d8dde4;border-left:4px solid #b54708;border-radius:6px;',
     'background:rgba(255,255,255,.97);color:#1b1f24;box-shadow:0 1px 4px rgba(0,0,0,.12)}',
@@ -180,8 +180,8 @@ export function createErrorSurface(targets: SurfaceTargets): ErrorSurface {
         banner = doc.createElement('div');
         banner.setAttribute('data-host-error', 'fatal');
         banner.setAttribute('role', 'alert');
-        banner.innerHTML = '<div class="he-t"></div><div class="he-d"></div>' +
-                           '<div class="he-h"></div>';
+        banner.innerHTML = '<div class="heditor-error__title"></div><div class="heditor-error__detail"></div>' +
+                           '<div class="heditor-error__hint"></div>';
         rootOf().appendChild(banner);
       }
       // 按钮只在"调用方给了恢复方式"时才出现：凭空给一个点了没反应的按钮比不给更糟。
@@ -197,10 +197,10 @@ export function createErrorSurface(targets: SurfaceTargets): ErrorSurface {
       } else if (oldBtn) {
         oldBtn.remove();
       }
-      banner.querySelector('.he-t')!.textContent =
+      banner.querySelector('.heditor-error__title')!.textContent =
         entry.count > 1 ? `${entry.text}（${entry.count} 次）` : entry.text;
-      banner.querySelector('.he-d')!.textContent = entry.detail || info?.detail || '';
-      banner.querySelector('.he-h')!.textContent = info?.hint ?? '';
+      banner.querySelector('.heditor-error__detail')!.textContent = entry.detail || info?.detail || '';
+      banner.querySelector('.heditor-error__hint')!.textContent = info?.hint ?? '';
       mark.setAttribute('data-host-fatal', '1');
     });
   }

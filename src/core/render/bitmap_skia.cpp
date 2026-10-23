@@ -554,11 +554,20 @@ void Bitmap::drawGlyph(hb_font_t* font, uint32_t glyph_id, float pen_x, float pe
  *   侧倒时包围盒按旋转后的朝向算，所以宽高对调。
  */
 void Bitmap::drawGlyphs(hb_font_t* font, const uint32_t* ids, const float* xs, const float* ys,
-                        int count, float units_to_px, Color color, float rotate_deg) {
+                        int count, float units_to_px, Color color, float rotate_deg, bool italic) {
     if (!font || !ids || !xs || !ys || count <= 0 || w_ <= 0 || h_ <= 0 || !sk_ || !sk_->canvas)
         return;
-    const SkFont* f = sk_->fontFor(font, units_to_px);
-    if (!f) return;
+    const SkFont* base = sk_->fontFor(font, units_to_px);
+    if (!base) return;
+    // 合成斜体的倾斜量：约 12 度，与字处理软件的默认值同一档。
+    //   倾斜不改 advance，所以排版宽度与绘制位置一致；这也是"合成"的定义。
+    SkFont skewed;
+    const SkFont* f = base;
+    if (italic) {
+        skewed = *base;
+        skewed.setSkewX(-0.2f);
+        f = &skewed;
+    }
     painted_glyphs_ += static_cast<size_t>(count);
 
     const bool sideways = isSideways(rotate_deg);

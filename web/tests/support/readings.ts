@@ -16,11 +16,11 @@ export const PRELUDE = `
   const H = window.__demo;
   const D = window.__demo.diag;
   // 宿主骨架全部从公开面的 element 里找，不认页面容器叫什么 id ——
-  //   #stage / #pages / #ime 是库自己造的（src/host/dom.ts 的 ensureMarkup），
+  //   .heditor-stage / .heditor-pages / .heditor-ime 是库自己造的（src/host/dom.ts 的 ensureMarkup），
   //   外层容器是页面的，测试不该知道它叫 #ed。
   const EL = (sel) => H.element.querySelector(sel);
   // 承接层：键盘与合成事件都落在这个 textarea 上。
-  const IME = () => EL('#ime');
+  const IME = () => EL('.heditor-ime');
   const MODES = ['document', 'form', 'readOnly'];
   // 扁平光标：段号 + 段内偏移 + 页号 + 页内插入点矩形 + 侧别 + 全文码点数。
   const CARET = () => {
@@ -40,12 +40,12 @@ export const PRELUDE = `
   // 缩放密度：设备像素 / 磅。界面收倍数，这里按装载时写进引擎的那套换算折回去。
   const ZOOM = () => H.config().zoom * (4 / 3) * (H.geometry().dpr || 1);
   // 窗口与可见页：引擎装着的窗口来自 geometry，可见页按滚动位置与页步距算 ——
-  //   滚动没动窗口时（还在余量内）两者会不一样，判据要能分别看。滚动在 #stage 上，
+  //   滚动没动窗口时（还在余量内）两者会不一样，判据要能分别看。滚动在 .heditor-stage 上，
   //   它由库的骨架提供，不是页面的滚动容器。
   const VIEWPORT = () => {
     const g = H.geometry();
     const step = g.page.h + g.gap;
-    const sc = EL('#stage');
+    const sc = EL('.heditor-stage');
     const top = sc ? sc.scrollTop : 0;
     const h = sc ? sc.clientHeight : 0;
     return {
@@ -60,7 +60,7 @@ export const PRELUDE = `
   // 帧：窗口那一整块在屏幕上占的矩形（顶边是窗口首页的顶边）。
   //   库没有帧元素（帧是本轮页位图的读视图），可整条坐标链都是按"帧在屏幕上那块"建立的。
   const FRAME = () => {
-    const pages = EL('#pages');
+    const pages = EL('.heditor-pages');
     const r = pages.getBoundingClientRect();
     const g = H.geometry();
     const top = r.top + g.window.first * (g.page.h + g.gap);

@@ -232,17 +232,18 @@ void FontLibrary::setCacheConfig(size_t block_size, size_t max_blocks) {
     }
 }
 
-FontInstance* FontLibrary::instance(int face_index, float size_pt) {
+FontInstance* FontLibrary::instance(int face_index, float size_pt, float weight) {
     const FontFace* f = face(face_index);
     if (!f) return nullptr;
 
     const int key_size = static_cast<int>(std::lround(size_pt * 4.0f));
-    const auto key = std::make_pair(face_index, key_size);
+    const int key_weight = static_cast<int>(std::lround(weight * 4.0f));
+    const auto key = std::make_tuple(face_index, key_size, key_weight);
     auto it = cache_.find(key);
     if (it != cache_.end()) return it->second;
 
     auto inst = std::make_unique<FontInstance>();
-    if (!inst->init(const_cast<hb_face_t*>(f->face()), size_pt)) return nullptr;
+    if (!inst->init(const_cast<hb_face_t*>(f->face()), size_pt, weight)) return nullptr;
     FontInstance* raw = inst.get();
     instances_.push_back(std::move(inst));
     cache_.emplace(key, raw);

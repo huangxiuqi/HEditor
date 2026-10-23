@@ -146,7 +146,7 @@ test.describe('剪贴板', () => {
       await e.select({ para: 0, offset: 0 }, { para: 0, offset: 2 });
       return true;`);
     // 焦点交给承接层：copy / cut / paste 三个事件只挂在它身上。
-    await p.page.locator('#ime').focus();
+    await p.page.locator('.heditor-ime').focus();
     await p.page.keyboard.press('Control+c');
     // Worker 传输的复制是一次往返，写剪贴板在它回来之后 —— 等一小会儿再粘。
     await p.page.waitForTimeout(300);
@@ -154,7 +154,7 @@ test.describe('剪贴板', () => {
       const e = ${D};
       await e.setCaret({ para: 0, offset: 4 });
       return true;`);
-    await p.page.locator('#ime').focus();
+    await p.page.locator('.heditor-ime').focus();
     await p.page.keyboard.press('Control+v');
     await p.page.waitForTimeout(300);
     const after = await p.ev<string>(`return ${D}.text();`);
@@ -198,12 +198,12 @@ test.describe('剪贴板', () => {
         await e.paste();
         await e.flush();
         const g = e.geometry();
-        const stage = e.element.querySelector('#stage');
+        const stage = e.element.querySelector('.heditor-stage');
         const step = g.page.h + g.gap;
         const top = stage.scrollTop;
         const first = Math.floor(top / step);
         const last = Math.floor((top + stage.clientHeight - 1) / step);
-        const have = new Set([...e.element.querySelectorAll('#pages canvas')]
+        const have = new Set([...e.element.querySelectorAll('.heditor-pages canvas')]
           .filter((c) => c.dataset.page !== undefined)
           .map((c) => Number(c.dataset.page)));
         for (let q = first; q <= last; ++q) if (!have.has(q)) bad.push(k + ':无画布' + q);
@@ -231,25 +231,25 @@ test.describe('剪贴板', () => {
       await e.setCaret({ para: 0, offset: 2 });
       for (let k = 0; k < 40; ++k) { await e.paste(); await e.flush(); }
       return true;`);
-    const box = await page.locator('#stage').boundingBox();
-    if (!box) throw new Error('没有 #stage');
+    const box = await page.locator('.heditor-stage').boundingBox();
+    if (!box) throw new Error('没有 .heditor-stage');
     await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
     const tops: number[] = [];
     for (let i = 0; i < 6; ++i) {
       await page.mouse.wheel(0, 500);
       await page.waitForTimeout(140);
-      tops.push(await p.ev<number>(`return Math.round(document.querySelector('#stage').scrollTop);`));
+      tops.push(await p.ev<number>(`return Math.round(document.querySelector('.heditor-stage').scrollTop);`));
     }
     const state = await p.read<any>(`
       const e = window.__demo;
-      const st = e.element.querySelector('#stage');
+      const st = e.element.querySelector('.heditor-stage');
       const g = e.geometry();
       const step = g.page.h + g.gap;
       const top = st.scrollTop;
       const visFirst = Math.floor(top / step);
       const visLast = Math.floor((top + st.clientHeight - 1) / step);
       const byPage = new Map();
-      for (const el of e.element.querySelectorAll('#pages canvas')) {
+      for (const el of e.element.querySelectorAll('.heditor-pages canvas')) {
         if (el.dataset.page !== undefined) byPage.set(Number(el.dataset.page), el);
       }
       const absent = [], blank = [];

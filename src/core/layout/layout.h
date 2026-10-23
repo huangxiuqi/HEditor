@@ -103,6 +103,12 @@ struct PageMetrics {
 };
 
 /**
+ * 两个字重档：正文与加粗。可变字体的 wght 轴上有更细的档位，工具栏暂时只用到这两档。
+ */
+constexpr float kWeightRegular = 400.0f;
+constexpr float kWeightBold = 700.0f;
+
+/**
  * 一段"字符格式相同"的连续码点区间（升序、首尾相接，恰好铺满段落文本）。
  * 名字沿用 OOXML 的 run（w:r：a region of text with a common set of properties）。
  * 它切的是字符格式，与字体回退切出的 FontRun（切的是哪个字体画得出这个字）是两把
@@ -131,6 +137,24 @@ struct FormatRun {
      * 字号（磅）。
      */
     float size_pt = 12.0f;
+
+    /**
+     * 字重（可变字体的 wght 轴）。加粗就是 700，正文是 400。
+     *
+     * 它进实例缓存键：同一字号下 400 与 700 是两份 FontInstance，度量与字形都跟着变，
+     *   排版宽度才与绘制一致。用"绘制时再加粗"的做法时字宽不变，相邻字会压在一起。
+     */
+    float weight = kWeightRegular;
+
+    /**
+     * 斜体：字体没有斜体面时由绘制层做合成倾斜（与字处理软件同一档做法）。
+     */
+    bool italic = false;
+
+    /**
+     * 下划线：由绘制层按行进画线，不参与排版度量。
+     */
+    bool underline = false;
 
     /**
      * 字色。
@@ -802,6 +826,21 @@ struct PlacedGlyph {
      * 这个字形的颜色（来自覆盖它的那个 run）。
      */
     Color color = Color::rgb(0, 0, 0);
+
+    /**
+     * 斜体：绘制层做合成倾斜。字宽不变，与字处理软件的合成斜体同一档。
+     */
+    bool italic = false;
+
+    /**
+     * 下划线：绘制层按行进画线，不参与排版。
+     */
+    bool underline = false;
+
+    /**
+     * 这个字形自己的字号（磅）：下划线的位置与粗细按它算。
+     */
+    float size_pt = 12.0f;
 
     /**
      * 落在第几页。

@@ -310,6 +310,44 @@ public:
     PropResult setControlProp(int index, ControlProp prop, bool value);
 
     /**
+     * 对选区应用一份字符格式补丁（粗体、斜体、下划线、字体、字号、字色）。
+     *
+     * 只改"补丁里设置了的字段"，没设置的保持原样 —— 这是与样式层三态继承同一套语义：
+     *   工具栏按下"加粗"时只该动 bold，不该连带把字号写死成当前值。
+     * 幂等：整段格式本来就等于目标值时返回 false，不往撤销栈里塞空记录。
+     * 空选区返回 false：落点之后要打的新字沿用哪份格式，是另一件事（见 marksAtFlow）。
+     *
+     * @param patch 只含要改的字段
+     * @return true = 至少有一个文本节点的标记变了
+     */
+    bool applyCharFormat(const CharFormat& patch);
+
+    /**
+     * 对选区覆盖的段落应用一份段落格式补丁（字体、字号、行距、段后距、分页）。
+     *
+     * 段落与选区的相交判定：选区从段中某处到另一段段首时，后一段不算被覆盖 ——
+     *   那正是"选中到行首"与"选中到上一行末"的区别。
+     * @param patch 只含要改的字段
+     * @return true = 至少有一枚段落标记变了
+     */
+    bool applyParaFormat(const ParaFormatPatch& patch);
+
+    /**
+     * 光标所在位置的字符标记（工具栏回显用）。
+     *
+     * 返回的是"这个节点上写了什么"，不含样式层与段落默认值 —— 界面只需要知道
+     *   "这一处有没有显式加粗"，而"看起来是不是粗的"由排版结果回答。
+     * @return 标记；光标不在任何文本节点上时为空标记
+     */
+    CharFormat charFormatAtCaret() const;
+
+    /**
+     * 光标所在段落的格式覆盖（工具栏回显用）。
+     * @return 段落补丁；光标不在任何段落里时为空补丁
+     */
+    ParaFormatPatch paraFormatAtCaret() const;
+
+    /**
      * 粘贴一段片段：选区先删掉，再按流顺序把每个节点插到落点上。
      *
      * 与打字同一个口径 —— 用户按的是一下，撤销也该是一下：删除与插入合成一次提交。

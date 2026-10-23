@@ -629,9 +629,11 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
                 const size_t begin = fr.cp_begin + r.cp_begin;
                 const size_t end = fr.cp_begin + r.cp_end;
                 if (end <= begin) continue;
+                // 字重也要跟 run 走：粗体的字形与度量都来自 700 那一份实例，
+                //   沿用 400 就等于"排版按细体、画出来也是细体"。
                 FontInstance* rf = font;
                 if (r.face_index >= 0) {
-                    FontInstance* hit = lib.instance(r.face_index, fr.size_pt);
+                    FontInstance* hit = lib.instance(r.face_index, fr.size_pt, fr.weight);
                     if (hit) rf = hit;
                 }
                 // 用 shapeTextRange 传整串指针加 [begin, end)：HarfBuzz 以区间起点为基准编号
@@ -1281,6 +1283,17 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
             const FormatRun* r = runCovering(fruns, cp);
             return r != nullptr ? r->color : b.color;
         };
+        // 斜体与下划线同颜色一样不进整形指纹（它们不改字形与推进），只能在摆字形时现取。
+        auto stampRunMarks = [&fruns, &b](uint32_t cp, PlacedGlyph* pg) {
+            const FormatRun* r = runCovering(fruns, cp);
+            if (r == nullptr) {
+                pg->size_pt = b.size_pt;
+                return;
+            }
+            pg->italic = r->italic;
+            pg->underline = r->underline;
+            pg->size_pt = r->size_pt;
+        };
 
         // 每个簇的行度量：整段算一次，横排的行循环里按行取最大值。
         //   按"簇所在 run 自己的字体与字号"取 —— 只有一个 run 时这就是块级那套值，
@@ -1297,7 +1310,8 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
                     const int fi = (r != nullptr) ? r->font_index : b.font_index;
                     m = LineMetric{};
                     m.size_pt = (r != nullptr) ? r->size_pt : b.size_pt;
-                    if (FontInstance* f = lib.instance(fi, m.size_pt)) {
+                    if (FontInstance* f =
+                            lib.instance(fi, m.size_pt, r != nullptr ? r->weight : 400.0f)) {
                         m.ascent_pt = f->ascenderPt();
                         m.descent_pt = f->descenderPt();
                     }
@@ -1421,6 +1435,7 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
                         const int gpage = lb.page;
                         pg.y_pt = locY(gpage, pen_y - sg.y_offset * usToPt);
                         pg.color = runColorAt(sg.cluster);
+                        stampRunMarks(sg.cluster, &pg);
                         pg.page = gpage;
                         pg.line = line_total;
                         pg.vertical = false;
@@ -1602,6 +1617,7 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
                         }
                         const int gpage = slabOfY(gy);
                         pg.color = runColorAt(sg.cluster);
+                        stampRunMarks(sg.cluster, &pg);
                         pg.page = gpage;
                         pg.line = line_no;
                         pg.vertical = true;
@@ -1702,7 +1718,8 @@ void summarizeLayoutStats(LayoutResult* out) {
 }
 
 bool FormatRun::sameFormat(const FormatRun& o) const {
-    return font_index == o.font_index && size_pt == o.size_pt && color == o.color &&
+    return font_index == o.font_index && size_pt == o.size_pt && weight == o.weight &&
+           italic == o.italic && underline == o.underline && color == o.color &&
            BlockSpec::sameLanguage(language, o.language) &&
            fallback_font_indices == o.fallback_font_indices;
 }

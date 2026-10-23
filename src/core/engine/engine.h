@@ -274,6 +274,32 @@ public:
     bool deleteSelectionAndRender();
 
     /**
+     * 对选区应用字符格式并收尾。
+     * @param patch 只含要改的字段
+     * @return true = 至少有一个文本节点的标记变了
+     */
+    bool applyCharFormatAndRender(const CharFormat& patch);
+
+    /**
+     * 对选区覆盖的段落应用段落格式并收尾。
+     * @param patch 只含要改的字段
+     * @return true = 至少有一枚段落标记变了
+     */
+    bool applyParaFormatAndRender(const ParaFormatPatch& patch);
+
+    /**
+     * 光标处的字符标记（工具栏回显），JSON 文本。
+     * @return 标记的 JSON（可能为空对象）
+     */
+    std::string charFormatAtJson() const;
+
+    /**
+     * 光标所在段落的格式覆盖（工具栏回显），JSON 文本。
+     * @return 段落补丁的 JSON（可能为空对象）
+     */
+    std::string paraFormatAtJson() const;
+
+    /**
      * 段落坐标与模型流位置的桥接 —— 第十四节那条接缝的另一半。
      *
      * 引擎对外一直说 (段, 段内码点偏移)，模型层说流位置；两者不能靠算式互换 —— 控件与节这些

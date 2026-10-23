@@ -3,12 +3,12 @@
 //
 // 这一份是"外部使用者"的样板：只允许用 createEditor 与实例上的方法。
 //   不许出现 window.__heditor / api.read / mod / HEAPU8 / FS，也不许自己接键盘指针 ——
-//   输入层在库里。判据：node scripts/api_check.mjs（静态）+ scripts/demo_probe.mjs（运行时）。
+//   输入层在库里。判据：node scripts/api_check.mjs（静态）+ web/tests 下那几份用例。
 //
 // 与库的边界只有三处：createEditor 的选项、实例方法、事件。
 import { createEditor } from '../src/index';
-import type { Editor } from '../src/index';
-import { mountChrome, type Action } from './ui';
+import type { CharFormatPatch, Editor, ParaFormatPatch } from '../src/index';
+import { mountChrome, type Chrome, type Group, type Tab } from './ui';
 
 const DEMO_TEXT = [
   'HEditor 示例文档',
@@ -17,6 +17,8 @@ const DEMO_TEXT = [
   '引擎（wasm）、命令表、输入层、画布与滚动都在库里面 —— 页面拿到的是一个编辑器对象。',
   '',
   '可以试试：点画布落光标、敲字、Ctrl+Z 撤销、拖选。这些都没有在本文件里写一行事件处理。',
+  '',
+  '上面那排按钮全部走公开面：格式走 format / paragraphFormat，回显走 formatAt。',
 ].join('\n');
 
 const params = new URLSearchParams(location.search);
@@ -24,7 +26,7 @@ const params = new URLSearchParams(location.search);
 const glue = params.get('glue');
 // Worker 壳是构建产物（经典 worker，要 importScripts 装胶水），开发模式下也用构建好的那一份。
 // 它是从页面所在目录往上找 dist/：开发时页面在 web/（根），构建时在 web/dist-app/ —— 两种
-// 摆法下 "上一级 + dist" 都指向 web/dist/heditor_worker.js。
+// 摆法下"上一级 + dist"都指向 web/dist/heditor_worker.js。
 const workerShell = new URL('../dist/heditor_worker.js', new URL('.', location.href)).href;
 
 /** 页面与库之间只有这一个句柄，探针也用它。 */
@@ -40,44 +42,258 @@ declare global {
 const stage = document.getElementById('ed')!;
 
 let editor: Editor;
-let pageMode: 'paged' | 'continuous' = 'paged';
+let chrome: Chrome;
 
-const actions: Action[] = [
-  { label: '载入示例', act: 'load', run: () => editor.setText(DEMO_TEXT) },
-  { label: '插入一句', act: 'type', run: () => editor.type('（从这里开始编辑）') },
-  { label: '撤销', act: 'undo', run: () => editor.undo() },
-  { label: '重做', act: 'redo', run: () => editor.redo() },
-  {
-    label: '放大',
-    act: 'zoomIn',
-    run: () => editor.setZoom(Math.min(2.25, editor.config().zoom + 0.125)),
-  },
-  {
-    label: '缩小',
-    act: 'zoomOut',
-    run: () => editor.setZoom(Math.max(0.375, editor.config().zoom - 0.125)),
-  },
-  {
-    label: '切连页',
-    act: 'toggleMode',
-    run: () => {
-      pageMode = pageMode === 'paged' ? 'continuous' : 'paged';
-      return editor.configure({ pageMode });
-    },
-  },
-  {
-    label: '保存',
-    act: 'save',
-    run: async () => {
-      const json = await editor.save();
-      // 示例里只把结果放到控制台；产品里该做的是下载或上传。
-      console.log('save:', json.length, 'bytes');
-      chrome.say(`已序列化 ${json.length} 字节`);
-    },
-  },
-];
+/** 字号候选；"增大/减小"就在这一列上走，界面上只给固定档位。 */
+const SIZES = [9, 10, 10.5, 12, 14, 16, 18, 22, 24, 36, 48];
 
-const chrome = mountChrome(document.getElementById('bar')!, 'HEditor', actions);
+/**
+ * 页面缓存的那份格式，供工具条同步回显。
+ *
+ * 工具条的回显闭包是同步的（一次光标移动不该变成七八个来回），所以格式由这一侧一次读全，
+ *   读完叫一声 refresh。
+ */
+let mark: CharFormatPatch = {};
+let para: ParaFormatPatch = {};
+
+/** 动作的键：三个开关型字符格式。 */
+type MarkKey = 'bold' | 'italic' | 'underline';
+
+/**
+ * 读一次格式并刷新工具条。
+ */
+async function syncFormat(): Promise<void> {
+  const [m, p] = await Promise.all([editor.formatAt(), editor.paragraphFormatAt()]);
+  mark = m;
+  para = p;
+  chrome.refresh();
+}
+
+/**
+ * 切换一个开关型字符格式。
+ * @param key 哪个开关
+ */
+async function toggle(key: MarkKey): Promise<void> {
+  await editor.format({ [key]: !mark[key] });
+}
+
+/**
+ * 按档位放大或缩小字号：取当前字号在候选列上的下一个（上一个）。
+ * @param dir 1 = 变大，-1 = 变小
+ */
+async function stepSize(dir: number): Promise<void> {
+  const cur = mark.size ?? 14;
+  const next = dir > 0
+    ? SIZES.find((s) => s > cur) ?? SIZES[SIZES.length - 1]
+    : [...SIZES].reverse().find((s) => s < cur) ?? SIZES[0];
+  await editor.format({ size: next });
+}
+
+/**
+ * 改缩放倍数（夹在库的上下限里）。
+ * @param z 目标倍数
+ */
+async function zoomTo(z: number): Promise<void> {
+  await editor.setZoom(z);
+  chrome.refresh();
+}
+
+/**
+ * 保存：序列化当前文档，把长度写到状态栏。
+ */
+async function saveNow(): Promise<void> {
+  const json = await editor.save();
+  chrome.say(`已序列化 ${json.length} 字节`);
+}
+
+/**
+ * 造一个"字体颜色"按钮要用的取色器。
+ *
+ * 用浏览器自己的取色器而不是画一个调色板：这一条是示例，重点在"公开面能把颜色写进去"，
+ *   而自绘调色板要处理键盘、焦点与关闭时机，与这一页要示范的东西无关。
+ * @returns 点一下就会弹出取色器的入口
+ */
+function makeColorPicker(): () => void {
+  const input = document.createElement('input');
+  input.type = 'color';
+  input.value = '#000000';
+  input.style.display = 'none';
+  document.body.appendChild(input);
+  input.addEventListener('change', () => {
+    const at = (i: number): number => Number.parseInt(input.value.slice(i, i + 2), 16);
+    void editor.format({ color: [at(1), at(3), at(5)] });
+  });
+  return () => input.click();
+}
+
+/**
+ * 这一页的动作表：三个页签，全部落在公开面上。
+ * @returns 页签表
+ */
+function makeTabs(): Tab[] {
+  const pickColor = makeColorPicker();
+
+  const doc: Group = {
+    label: '文档',
+    items: [
+      { act: 'load', label: '载入示例', icon: 'doc', big: true, run: () => editor.setText(DEMO_TEXT) },
+      { act: 'save', label: '保存', icon: 'save', big: true, run: () => saveNow() },
+    ],
+  };
+
+  const clipboard: Group = {
+    label: '剪贴板',
+    items: [
+      { act: 'paste', label: '粘贴', icon: 'paste', big: true, run: () => editor.paste() },
+      {
+        items: [
+          { act: 'cut', label: '剪切', icon: 'cut', run: () => editor.cut() },
+          { act: 'copy', label: '复制', icon: 'copy', run: () => editor.copy() },
+        ],
+      },
+    ],
+  };
+
+  const font: Group = {
+    label: '字体',
+    items: [
+      {
+        act: 'font',
+        label: '字体',
+        wide: true,
+        options: [
+          { value: '', text: '—' },
+          { value: '0', text: '思源黑体' },
+          { value: '1', text: '蒙古文' },
+          { value: '2', text: '拉丁' },
+        ],
+        value: () => (mark.font === undefined ? '' : String(mark.font)),
+        run: (v) => (v ? editor.format({ font: Number(v) }) : undefined),
+      },
+      {
+        act: 'size',
+        label: '字号',
+        options: [{ value: '', text: '—' }].concat(SIZES.map((s) => ({ value: String(s), text: String(s) }))),
+        value: () => (mark.size === undefined ? '' : String(mark.size)),
+        run: (v) => (v ? editor.format({ size: Number(v) }) : undefined),
+      },
+      { act: 'grow', label: '增大字号', icon: 'grow-font', run: () => stepSize(1) },
+      { act: 'shrink', label: '减小字号', icon: 'shrink-font', run: () => stepSize(-1) },
+      { act: 'bold', label: '加粗', icon: 'bold', on: () => !!mark.bold, run: () => toggle('bold') },
+      {
+        act: 'italic',
+        label: '斜体',
+        icon: 'italic',
+        on: () => !!mark.italic,
+        run: () => toggle('italic'),
+      },
+      {
+        act: 'underline',
+        label: '下划线',
+        icon: 'underline',
+        on: () => !!mark.underline,
+        run: () => toggle('underline'),
+      },
+      { act: 'color', label: '字体颜色', icon: 'color', run: pickColor },
+    ],
+  };
+
+  const paragraph: Group = {
+    label: '段落',
+    items: [
+      {
+        act: 'line',
+        label: '行距',
+        icon: 'line-spacing',
+        options: [
+          { value: '', text: '—' },
+          { value: '1', text: '1.0' },
+          { value: '1.25', text: '1.25' },
+          { value: '1.5', text: '1.5' },
+          { value: '1.75', text: '1.75' },
+          { value: '2', text: '2.0' },
+          { value: '3', text: '3.0' },
+        ],
+        value: () => (para.lineFactor === undefined ? '' : String(para.lineFactor)),
+        run: (v) => (v ? editor.paragraphFormat({ lineFactor: Number(v) }) : undefined),
+      },
+      {
+        act: 'after',
+        label: '段后',
+        icon: 'paragraph',
+        options: [
+          { value: '', text: '—' },
+          { value: '0', text: '0' },
+          { value: '6', text: '6 磅' },
+          { value: '12', text: '12 磅' },
+          { value: '18', text: '18 磅' },
+        ],
+        value: () => (para.spaceAfter === undefined ? '' : String(para.spaceAfter)),
+        run: (v) => (v ? editor.paragraphFormat({ spaceAfter: Number(v) }) : undefined),
+      },
+      { act: 'outdent', label: '减少缩进', icon: 'outdent', run: () => editor.setIndent(-1) },
+      { act: 'indent', label: '增加缩进', icon: 'indent', run: () => editor.setIndent(1) },
+    ],
+  };
+
+  // 撤销与重做是一对，样式必须一样：一个带文字一个大图标，读起来像两个不同级别的动作。
+  const edit: Group = {
+    label: '编辑',
+    items: [
+      { act: 'undo', label: '撤销', icon: 'undo', big: true, run: () => editor.undo() },
+      { act: 'redo', label: '重做', icon: 'redo', big: true, run: () => editor.redo() },
+      { act: 'all', label: '全选', icon: 'select-all', run: () => editor.selectAll() },
+    ],
+  };
+
+  const show: Group = {
+    label: '显示',
+    items: [
+      {
+        act: 'paged',
+        label: '分页',
+        icon: 'paged',
+        on: () => editor.config().pageMode === 'paged',
+        run: () => editor.configure({ pageMode: 'paged' }),
+      },
+      {
+        act: 'continuous',
+        label: '连页',
+        icon: 'continuous',
+        on: () => editor.config().pageMode === 'continuous',
+        run: () => editor.configure({ pageMode: 'continuous' }),
+      },
+    ],
+  };
+
+  const zoom: Group = {
+    label: '缩放',
+    items: [
+      { act: 'zoom-out', label: '缩小', icon: 'zoom-out', run: () => zoomTo(editor.config().zoom - 0.125) },
+      { act: 'zoom-in', label: '放大', icon: 'zoom-in', run: () => zoomTo(editor.config().zoom + 0.125) },
+      { act: 'zoom-reset', label: '100%', icon: 'zoom-reset', run: () => zoomTo(1) },
+    ],
+  };
+
+  const insert: Group = {
+    label: '文本',
+    items: [
+      {
+        act: 'type',
+        label: '插入一句',
+        icon: 'type',
+        big: true,
+        run: () => editor.type('（从这里开始编辑）'),
+      },
+    ],
+  };
+
+  return [
+    { label: '开始', groups: [doc, clipboard, font, paragraph, edit] },
+    { label: '插入', groups: [insert] },
+    { label: '视图', groups: [show, zoom] },
+  ];
+}
 
 async function boot(): Promise<void> {
   editor = await createEditor({
@@ -102,13 +318,22 @@ async function boot(): Promise<void> {
   //   它同时是测试的唯一入口（web/tests/support/readings.ts 的前言里读一次），改名字要同步。
   window.__demo = editor;
   window.__demoState = { changes: 0 };
+
+  await editor.setText(DEMO_TEXT);
+  chrome.bind(editor);
+
+  const touch = (): void => {
+    void syncFormat();
+  };
+  editor.on('caret', touch);
+  editor.on('selection', touch);
   editor.on('change', () => {
     const n = ++window.__demoState!.changes;
     const g = editor.geometry();
     chrome.say(`${editor.paragraphs().length} 段 · ${g.pages} 页 · 变更 ${n} 次`);
   });
 
-  await editor.setText(DEMO_TEXT);
+  await syncFormat();
   const g = editor.geometry();
   chrome.say(`${editor.paragraphs().length} 段 · ${g.pages} 页 · 就绪`);
 
@@ -118,5 +343,9 @@ async function boot(): Promise<void> {
   // 热更时先把编辑器收掉，避免同一块容器上叠两个实例。
   if (import.meta.hot) import.meta.hot.dispose(() => void editor.destroy());
 }
+
+// 工具条必须在实例之前挂好：动作闭包引用 editor 与 chrome，真正按下去时才读到它们。
+const tabs = makeTabs();
+chrome = mountChrome(document.getElementById('bar')!, 'HEditor', tabs);
 
 void boot();

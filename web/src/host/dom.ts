@@ -16,6 +16,7 @@ import {
   writeToSystemClipboard,
 } from './clipboard';
 import { type CanvasStore, type PageGeometry } from './pages';
+import { imeOf, pagesOf, PART_IME, PART_PAGES, PART_STAGE, stageOf } from './parts';
 
 /**
  * 一次读取的几何：页度量 + 窗口 + 总页数（都是设备像素，除 dpr）。
@@ -302,23 +303,39 @@ export interface DomHost {
  *   滚动容器，多套一层之后"容器有多高"这件事有了两个答案（外层是视口、内层是内容），
  *   而自动滚动、坐标换算、探针都要用到它。承接层必须是一个真的可聚焦 textarea：
  *   canvas 收不到键盘，也收不到合成事件。
-   * @param container 挂载点（已有 #stage 就直接返回）
+ *
+ * 三段按类名标识，不按 id：同页可以挂几个实例，而 id 只能有一个（见 host/parts.ts）。
+ * @param container 挂载点（已经有舞台就直接返回）
  */
 export function ensureMarkup(container: HTMLElement): void {
-  if (container.querySelector('#stage')) return;
+  if (stageOf(container)) return;
   container.innerHTML = [
     '<div class="heditor-body" style="position:relative;height:100%">',
-    '  <div id="stage" style="position:relative;height:100%;overflow:auto">',
+    `  <div class="${PART_STAGE}" style="position:relative;height:100%;overflow:auto">`,
     // 页容器必须是定位祖先：画布按"页号 × 步距"绝对定位，定位基准只能是这里。
-    //   少了这条，画布会相对 #stage（它也是 relative）定位 —— 而 #stage 是滚动容器，
+    //   少了这条，画布会相对舞台（它也是 relative）定位 —— 而舞台是滚动容器，
     //   画布于是固定在可视区不随滚动走；退化成 static 更糟（见 PageCanvases.canvasFor）。
-    '    <div id="pages" style="position:relative"></div>',
-    '    <textarea id="ime" rows="1" spellcheck="false"',
+    `    <div class="${PART_PAGES}" style="position:relative"></div>`,
+    `    <textarea class="${PART_IME}" rows="1" spellcheck="false"`,
     '      style="position:absolute;left:0;top:0;width:1px;height:1em;opacity:0;',
     '             border:0;padding:0;resize:none;overflow:hidden"></textarea>',
     '  </div>',
     '</div>',
   ].join('\n');
+}
+
+/**
+ * 取一段骨架，缺了就报一句能看懂的话。
+ *
+ * 不用"先收集缺失清单再抛"：那样拿到的是 T | null，后面每一处都得加感叹号 ——
+ *   而收窄结果进不了回调（这些元素在回调里也要用）。这里直接返回非空值。
+ * @param el 找到的元素（可能为空）
+ * @param part 这一段的名字（报错用）
+ * @returns 同一个元素，类型上保证非空
+ */
+function needPart<T extends HTMLElement>(el: T | null, part: string): T {
+  if (!el) throw new Error(`容器里缺少 ${part}，无法建立编辑器`);
+  return el;
 }
 
 /**
@@ -329,20 +346,16 @@ export function ensureMarkup(container: HTMLElement): void {
 export function createDomHost(o: DomHostOptions): DomHost {
   const root = o.container;
   ensureMarkup(root);
-  const missing = ['#stage', '#pages', '#ime'].filter((id) => !root.querySelector(id));
-  if (missing.length) {
-    throw new Error(`容器里缺少 ${missing.join(' / ')}，无法建立编辑器`);
-  }
+  const stageEl = needPart(stageOf(root), PART_STAGE);
+  const pagesEl = needPart(pagesOf(root), PART_PAGES);
+  const ta = needPart(imeOf(root), PART_IME);
   // 上面那次检查是为了给出一句能看懂的话；这里的断言是给类型看的。
   const body = root.querySelector<HTMLElement>('.heditor-body')!;
-  const stageEl = root.querySelector<HTMLElement>('#stage')!;
-  const pagesEl = root.querySelector<HTMLElement>('#pages')!;
-  const ta = root.querySelector<HTMLTextAreaElement>('#ime')!;
 
   const link = o.link;
   const scroller = stageEl;
-  // 页容器必须是定位祖先（见 ensureMarkup）。旧骨架是库升级前造的，这里补一次 ——
-  //   幂等，只在真的是 static 时写。
+  // 页容器必须是定位祖先（见 ensureMarkup）。调用方自己递进来的那份骨架不一定写了这条
+  //   （容器可以带着现成标记进来），补一次 —— 幂等，只在真的是 static 时写。
   if (getComputedStyle(pagesEl).position === 'static') pagesEl.style.position = 'relative';
   const zoom = createZoom({ base: 4 / 3 });
   const pages: CanvasStore = o.canvasStore(pagesEl);

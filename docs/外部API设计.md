@@ -106,7 +106,7 @@ setText(text: string, opts?: { repeat?: number }): Promise<void>   // 明确用�
 
 ---
 
-## 5. 方法表（36 个方法 + 2 个只读属性）
+## 5. 方法表（40 个方法 + 2 个只读属性）
 
 ### 5.1 内容
 
@@ -131,7 +131,25 @@ setText(text: string, opts?: { repeat?: number }): Promise<void>   // 明确用�
 | `setIndent(levels)` | 正数加深、负数变浅（现在只能 ±1，必须连点） |
 | `copy()` / `cut()` / `paste()` | 系统剪贴板；片段带样式、控件、表格（见 15.1） |
 
-### 5.3 光标与选区（程序化定位）
+### 5.3 格式（选中即改，回显走查询）
+
+| 签名 | 备注 |
+| --- | --- |
+| `format(patch)` | 字符格式：`bold` / `italic` / `underline` / `font` / `size`（磅）/ `color`（`[r,g,b]`）；只写补丁里出现的键 |
+| `paragraphFormat(patch)` | 段落格式：`font` / `size` / `lineFactor` / `spaceAfter`（磅）/ `pageBreakBefore` |
+| `formatAt()` | 光标处的字符格式；字段**缺席 = 继承**，`false` = 显式取消 |
+| `paragraphFormatAt()` | 光标所在段落的格式覆盖 |
+
+三条约定：一是**三态**（缺席 / `true` / `false`），所以"取消加粗"必须写 `false`，不能省字段 ——
+省字段是"别动它"。二是**幂等**：值本来就一样时返回 `false`，不产生撤销记录，所以
+"点两下 B"之后一次撤销就回到加粗之前。三是**只改相交的文本节点**，不是整段：选区里的两个字
+加粗不会连带整段。
+
+回显与动作分开：`formatAt()` 是同步形状的查询（Worker 下是一次往返，`await` 之后拿到补丁），
+界面在光标 / 选区 / 内容事件之后读一次，再决定按钮点亮与否。读写用同一套键名（`b/i/u/fi/sz/col`
+与 `lf/sa/pbb`），与落盘那份是同一套 —— 界面不需要为"显示"再学一种表示。
+
+### 5.4 光标与选区（程序化定位）
 
 | 签名 | 备注 |
 | --- | --- |
@@ -141,7 +159,7 @@ setText(text: string, opts?: { repeat?: number }): Promise<void>   // 明确用�
 | `select(anchor, focus)` / `selectAll()` / `clearSelection()` | |
 | `selection()` | 同步读，含跨页矩形与单元格区间 |
 
-### 5.4 控件（表单）
+### 5.5 控件（表单）
 
 | 签名 | 备注 |
 | --- | --- |
@@ -152,7 +170,7 @@ setText(text: string, opts?: { repeat?: number }): Promise<void>   // 明确用�
 `removeControl` 不进产品面：现实里删控件是编辑态动作，由输入层负责（选中控件 + Delete）；
 程序化删控件只在测试里出现 → `diag`。
 
-### 5.5 视图与配置
+### 5.6 视图与配置
 
 | 签名 | 备注 |
 | --- | --- |
@@ -162,7 +180,7 @@ setText(text: string, opts?: { repeat?: number }): Promise<void>   // 明确用�
 | `configure(patch)` | 唯一配置写入口（§7） |
 | `config()` | 只读快照 |
 
-### 5.6 生命周期与事件
+### 5.7 生命周期与事件
 
 `on(event, cb)` · `flush()` · `destroy()` · `element` · `diag`
 
@@ -668,6 +686,30 @@ demo/
 这段过渡期正是 §11 闸 1 的压力点：内部脚本是 classic script，注入之后会挂到 `window` 上。
 处置是"用完就拆"—— 入口记下引用后 `delete`、再把同名属性改成会抛的 getter。等 `src/` 把
 它们吸收完，这一步自然消失（那时 window 上本来就什么也没有）。
+
+### 13.5 示例页的外壳：组件与图标
+
+示例页的顶部功能区与底部状态栏拆成一件组件一个文件（`web/app/ui/`）：
+
+| 文件 | 管什么 |
+| --- | --- |
+| `types.ts` | 描述层：按钮 / 下拉框 / 竖排按钮列 / 组 / 页签 / 组件 / 外壳 |
+| `icons.ts` | 按文件名取图标（`import.meta.glob('?raw')`，加一个图标不用改代码） |
+| `button.ts` `choice.ts` `stack.ts` `group.ts` | 按钮、下拉框、竖排按钮列、一排动作 + 组名 |
+| `ribbon.ts` | 页签条与面板（全部面板都在 DOM 里，切页签只改一个类） |
+| `statusbar.ts` | 底部状态栏（状态文字 + 缩放） |
+| `chrome.ts` | 装配：摆位置、连回调、把 refresh 转发下去 |
+
+两条约定：
+
+- **刷新是重读回显，不是重建 DOM**。重建会丢焦点与按下态，而光标每移动一次都要刷一遍。
+- **描述与渲染分开**。加一个按钮只改动作表（`main.ts`），不动 DOM 与事件 —— 动作表同时是
+  "这一页能做什么"的清单，没有浏览器也能读。
+
+图标是 `web/app/icons/*.svg`，一个图形一个文件，同一套画法：16×16 视窗、内容占 2..14、
+描边 1.25（加粗那一个 2.2）、圆头圆角、一律不填充、颜色只有 `currentColor`。
+统一口径不是洁癖 —— 一排图标里混着填充与细线时，总有几个看着比别的"重"，而那种不齐
+在 16 px 上比在 40 px 上更明显。
 
 ---
 

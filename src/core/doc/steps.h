@@ -177,6 +177,39 @@ struct SetParaMarkFormat {
 };
 
 /**
+ * 改一个文本节点的字符标记（粗体、斜体、下划线、字体、字号、字色）。
+ *
+ * 与 SetParaMarkFormat 同形，记下改之前的值让逆操作自足。载荷里不带文本：文本由 id
+ *   指向的节点自己持有，带一份就是同一个内容两个真相。
+ */
+struct SetRunMarks {
+    /**
+     * 改哪个文本节点。
+     */
+    NodeId id = kInvalidNodeId;
+
+    /**
+     * 新的字符标记。
+     */
+    CharFormat marks;
+
+    /**
+     * 新的字符样式引用。
+     */
+    std::string styleRef;
+
+    /**
+     * 改之前的字符标记（逆操作自足）。
+     */
+    CharFormat before;
+
+    /**
+     * 改之前的样式引用。
+     */
+    std::string beforeStyleRef;
+};
+
+/**
  * 插入一棵子树（控件、图片、表格这类整块内容）。节点级坐标用 Pos（第四节：节点级 API 用 Pos），
  * 同时记下它对应的流位置供位置映射使用；两者对不上时 canApply 会拒掉，所以这份冗余不会被误信。
  *
@@ -402,8 +435,8 @@ struct SetTableCellSpan {
 };
 
 using Step = std::variant<InsertText, InsertFragment, DeleteRange, InsertParaMark, RemoveParaMark,
-                          SetParaMarkFormat, InsertNode, RemoveNode, UnwrapNode, WrapNode,
-                          SetControlProp, SetControlValue, SetTableCellSpan>;
+                          SetParaMarkFormat, SetRunMarks, InsertNode, RemoveNode, UnwrapNode,
+                          WrapNode, SetControlProp, SetControlValue, SetTableCellSpan>;
 
 /**
  * 步骤的执行结果。失败时给出原因 —— 位置越界、类型不符都要显式说出来，不静默不做。

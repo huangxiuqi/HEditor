@@ -17,6 +17,8 @@
 #include <string>
 #include <vector>
 
+#include "core/doc/para_format.h"
+#include "core/doc/record_json.h"
 #include "core/engine/engine.h"
 #include "core/engine/payload_schema.h"
 #include "core/rev/fragment.h"
@@ -1328,6 +1330,95 @@ std::string pastePlainText(const std::string& text) {
     return g_engine.pastePlainTextAndRender(text);
 }
 
+
+/**
+ * 工具栏递过来的字符格式补丁：键名与落盘（record_json 的 marksJson）同一套。
+ *
+ * 尺寸收"磅数"而不是 Length 对象：调用方是界面，写内部表示只会把它泄漏到 UI 层。
+ * 这一层没有异常（wasm 构建关掉了），失败走返回串 —— 与 pastFragment 同一口径。
+ * @param text JSON 文本
+ * @param out 解析结果
+ * @return 空串 = 成功；否则是给人看的原因
+ */
+std::string parseCharPatch(const std::string& text, CharFormat* out) {
+    const nlohmann::ordered_json j = nlohmann::ordered_json::parse(text, nullptr, false);
+    if (j.is_discarded() || !j.is_object()) return "字符格式必须是一个 JSON 对象";
+    if (j.contains("b") && j["b"].is_boolean()) out->bold = j["b"].get<bool>();
+    if (j.contains("i") && j["i"].is_boolean()) out->italic = j["i"].get<bool>();
+    if (j.contains("u") && j["u"].is_boolean()) out->underline = j["u"].get<bool>();
+    if (j.contains("fi") && j["fi"].is_number_integer()) out->font_index = j["fi"].get<int>();
+    if (j.contains("sz") && j["sz"].is_number())
+        out->size = Length::abs(ptToEmu(j["sz"].get<double>()));
+    if (j.contains("col")) {
+        const auto& c = j["col"];
+        if (!c.is_array() || c.size() < 3) return "col 必须是 [r,g,b]";
+        out->color = Color::rgb(c[0].get<int>(), c[1].get<int>(), c[2].get<int>());
+    }
+    return std::string();
+}
+
+/**
+ * 段落格式补丁：fi（字体）/ sz（字号磅）/ lf（行距倍数）/ sa（段后距磅）/ pbb（段前分页）。
+ * @param text JSON 文本
+ * @param out 解析结果
+ * @return 空串 = 成功；否则是给人看的原因
+ */
+std::string parseParaPatch(const std::string& text, ParaFormatPatch* out) {
+    const nlohmann::ordered_json j = nlohmann::ordered_json::parse(text, nullptr, false);
+    if (j.is_discarded() || !j.is_object()) return "段落格式必须是一个 JSON 对象";
+    if (j.contains("fi") && j["fi"].is_number_integer()) out->font_index = j["fi"].get<int>();
+    if (j.contains("sz") && j["sz"].is_number())
+        out->size = Length::abs(ptToEmu(j["sz"].get<double>()));
+    if (j.contains("lf") && j["lf"].is_number()) out->line_factor = j["lf"].get<float>();
+    if (j.contains("sa") && j["sa"].is_number())
+        out->space_after = Length::abs(ptToEmu(j["sa"].get<double>()));
+    if (j.contains("pbb") && j["pbb"].is_boolean()) out->page_break_before = j["pbb"].get<bool>();
+    return std::string();
+}
+
+/**
+ * 对选区应用字符格式（粗体 / 斜体 / 下划线 / 字体 / 字号 / 字色）。
+ *
+ * 返回串是三态：空 = 改了；noop = 格式本来就一样（不提交、不进撤销栈）；
+ *   其余 = 解析失败的原因。
+ * @param text 补丁 JSON
+ * @return 见上
+ */
+std::string applyCharFormat(const std::string& text) {
+    CharFormat patch;
+    std::string why = parseCharPatch(text, &patch);
+    if (!why.empty()) return why;
+    if (!g_engine.applyCharFormatAndRender(patch)) return "noop";
+    syncBlocksFromEngine();
+    return std::string();
+}
+
+/**
+ * 光标处的字符标记（工具栏回显）：键名与落盘同一套。
+ * @return JSON 文本
+ */
+std::string charFormatAt() { return g_engine.charFormatAtJson(); }
+
+/**
+ * 光标所在段落的格式覆盖（工具栏回显）。
+ * @return JSON 文本
+ */
+std::string paraFormatAt() { return g_engine.paraFormatAtJson(); }
+
+/**
+ * 对选区覆盖的段落应用段落格式（字体 / 字号 / 行距 / 段后距 / 段前分页）。
+ * @param text 补丁 JSON
+ * @return 空 = 改了；noop = 没变；其余 = 原因
+ */
+std::string applyParaFormat(const std::string& text) {
+    ParaFormatPatch patch;
+    std::string why = parseParaPatch(text, &patch);
+    if (!why.empty()) return why;
+    if (!g_engine.applyParaFormatAndRender(patch)) return "noop";
+    syncBlocksFromEngine();
+    return std::string();
+}
+
 /**
  * 删掉选区（剪切的后一半）。没有选区时返回 false。
  */
@@ -1626,6 +1717,10 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("pasteFragment", &pasteFragment);
     emscripten::function("pastePlainText", &pastePlainText);
     emscripten::function("deleteSelection", &deleteSelectionCommand);
+    emscripten::function("applyCharFormat", &applyCharFormat);
+    emscripten::function("applyParaFormat", &applyParaFormat);
+    emscripten::function("charFormatAt", &charFormatAt);
+    emscripten::function("paraFormatAt", &paraFormatAt);
 
     emscripten::function("frameWidth", &frameWidth);
     emscripten::function("frameHeight", &frameHeight);

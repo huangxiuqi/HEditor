@@ -7,6 +7,7 @@
 //   sendState）。推的都是小对象，省掉的是每拍一次 200 µs 的往返。
 import type { DomHost, EngineLink, HostView } from '../host/dom';
 import { SlotCanvases, type CanvasStore } from '../host/pages';
+import { stageOf } from '../host/parts';
 import type { Args } from '../input/keymap';
 import type { AssetPaths } from './assets';
 
@@ -25,7 +26,7 @@ export interface WorkerOptions {
 
   /**
    * 宿主由这一侧造（它需要 link 与画布存储，而两者都由这一侧造）。
-   * 画布存储必须延迟到宿主建好标记之后再造 —— 它要往 #pages 里塞元素。
+   * 画布存储必须延迟到宿主建好标记之后再造 —— 它要往页容器里塞元素。
    * 第三个参数是远端的贴图账（账在 Worker 那边，宿主自己记只会记到零）。
    * @param link 传输层交出来的入口
    * @param canvasStore 画布存储的造法
@@ -133,7 +134,7 @@ export function createWorker(opts: WorkerOptions): {
   };
 
   const viewSize = (): { w: number; h: number } => {
-    const el = container.querySelector<HTMLElement>('#stage') ?? container;
+    const el = stageOf(container) ?? container;
     return {
       w: Math.max(1, Math.round(el.clientWidth * dpr())),
       h: Math.max(1, Math.round(el.clientHeight * dpr())),

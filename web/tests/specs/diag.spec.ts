@@ -239,8 +239,8 @@ test.describe('诊断面', () => {
         await H.setCaret({ para: 0, offset: 0 });
         await d.present();
         await H.flush();
-        const stage = document.querySelector('#stage');
-        const pagesEl = document.querySelector('#pages');
+        const stage = document.querySelector('.heditor-stage');
+        const pagesEl = document.querySelector('.heditor-pages');
         const px = d.pagePx();
         const dpr = window.devicePixelRatio || 1;
         const step = px.h + px.gap;

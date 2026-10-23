@@ -10,6 +10,7 @@
 #include "core/doc/subtree.h"
 
 #include <algorithm>
+#include <functional>
 #include <variant>
 
 namespace heditor {
@@ -1243,6 +1244,161 @@ EditCommand::PropResult EditCommand::setControlProp(int index, ControlProp prop,
     const int dirty = controls().at(index).range.start.para;
     if (!commit(std::move(steps), dirty)) return PropResult::Failed;
     return structural ? PropResult::Structural : PropResult::Changed;
+}
+
+CharFormat EditCommand::charFormatAtCaret() const {
+    CharFormat out;
+    if (!hasFlow()) return out;
+    const FlowPos at = pos().selection().begin();
+    const rev::FlowIndex& idx = flowIndex();
+    bool found = false;
+    std::function<void(const rev::Ref&)> walk = [&](const rev::Ref& n) {
+        if (!n || found) return;
+        if (n->kind == NodeKind::TextRun) {
+            int f = 0;
+            int e = 0;
+            if (idx.intervalOf(n->id, &f, &e) && f <= at && at <= e) {
+                out = std::get<rev::RunPayload>(n->payload).marks;
+                found = true;
+                return;
+            }
+        }
+        for (const rev::Ref& c : n->children) walk(c);
+    };
+    walk(doc().root);
+    return out;
+}
+
+ParaFormatPatch EditCommand::paraFormatAtCaret() const {
+    ParaFormatPatch out;
+    if (!hasFlow()) return out;
+    const FlowPos at = pos().selection().begin();
+    const rev::FlowIndex& idx = flowIndex();
+    // 段落 = [上一枚标记之后, 本枚标记]：按流位置顺序找第一个盖住光标的标记。
+    FlowPos seg_lo = 0;
+    std::function<void(const rev::Ref&)> walk = [&](const rev::Ref& n) {
+        if (!n) return;
+        if (isParagraphMark(n->kind)) {
+            int f = 0;
+            int e = 0;
+            if (idx.intervalOf(n->id, &f, &e)) {
+                if (seg_lo <= at && at <= f) out = std::get<rev::MarkPayload>(n->payload).para;
+                seg_lo = f + 1;
+            }
+        }
+        for (const rev::Ref& c : n->children) walk(c);
+    };
+    walk(doc().root);
+    return out;
+}
+
+/**
+ * 对选区应用字符格式补丁。
+ *
+ * 作用面取"与选区相交的文本节点"，不是"整段"：字符格式本来就按节点存，
+ *   把整段都改掉会让"只选中两个字加粗"变成整段加粗。
+ */
+bool EditCommand::applyCharFormat(const CharFormat& patch) {
+    if (patch.empty() || !hasFlow() || !pos().hasSelection()) return false;
+    const Range sel = pos().selection();
+    const FlowPos from = sel.begin();
+    const FlowPos to = sel.end();
+    if (from >= to) return false;
+
+    const rev::FlowIndex& idx = flowIndex();
+    std::vector<Step> steps;
+    // 走修订树而不是流索引的下标接口：这里要的是"节点号 + 标记"，而流索引只对外
+    //   给位置换算与区间，节点对象是它的内部表示。
+    std::function<void(const rev::Ref&)> walk = [&](const rev::Ref& n) {
+        if (!n) return;
+        if (n->kind == NodeKind::TextRun) {
+            int f = 0;
+            int e = 0;
+            if (idx.intervalOf(n->id, &f, &e) && e > from && f < to) {
+                // 修订层的节点把字符标记装在载荷里（与模型层的字段布局不同）。
+                const auto& rp = std::get<rev::RunPayload>(n->payload);
+                const CharFormat next = mergeCharFormat(rp.marks, patch);
+                // 幂等：格式本来就等于目标值就不提交，撤销栈里不该出现什么都没做的记录。
+                if (!(next == rp.marks)) {
+                    SetRunMarks s;
+                    s.id = n->id;
+                    s.marks = next;
+                    s.styleRef = rp.style;
+                    s.before = rp.marks;
+                    s.beforeStyleRef = rp.style;
+                    steps.push_back(Step{s});
+                }
+            }
+        }
+        for (const rev::Ref& c : n->children) walk(c);
+    };
+    walk(doc().root);
+    if (steps.empty()) return false;
+    // 撤销之后选区要回来：改的是格式，用户还会接着改别的格式。
+    pending_before_ = sel;
+    pending_after_ = sel;
+    return commit(std::move(steps), pos().caret().para);
+}
+
+/**
+ * 对选区覆盖的段落应用段落格式补丁。
+ *
+ * 段落的流区间是"上一枚标记之后到本枚标记（含）"，于是选区与本段相交的判据就是
+ *   区间相交 —— 这比按段号算少一处特例：选区停在下一段段首时，那一段的区间
+ *   起点等于选区终点，开区间判定自然把它排除在外。
+ */
+bool EditCommand::applyParaFormat(const ParaFormatPatch& patch) {
+    if (!hasFlow()) return false;
+    const Range sel = pos().selection();
+    const FlowPos lo = sel.begin();
+    const FlowPos hi = sel.empty() ? sel.begin() + 1 : sel.end();
+
+    const rev::FlowIndex& idx = flowIndex();
+    struct MarkHit {
+        FlowPos at = 0;
+        NodeId id = kInvalidNodeId;
+        ParaFormatPatch para;
+        std::string styleRef;
+    };
+    std::vector<MarkHit> marks;
+    std::function<void(const rev::Ref&)> walk = [&](const rev::Ref& n) {
+        if (!n) return;
+        if (isParagraphMark(n->kind)) {
+            int f = 0;
+            int e = 0;
+            if (idx.intervalOf(n->id, &f, &e)) {
+                const auto& mp = std::get<rev::MarkPayload>(n->payload);
+                marks.push_back(MarkHit{f, n->id, mp.para, mp.style});
+            }
+        }
+        for (const rev::Ref& c : n->children) walk(c);
+    };
+    walk(doc().root);
+    std::sort(marks.begin(), marks.end(),
+              [](const MarkHit& a, const MarkHit& b) { return a.at < b.at; });
+
+    std::vector<Step> steps;
+    FlowPos seg_lo = 0;
+    for (const MarkHit& m : marks) {
+        const FlowPos seg_hi = m.at + 1;
+        if (seg_lo < hi && lo < seg_hi) {
+            const ParaFormatPatch next = mergeParaFormatPatch(m.para, patch);
+            if (!(next == m.para)) {
+                SetParaMarkFormat s;
+                s.id = m.id;
+                s.para = next;
+                s.styleRef = m.styleRef;
+                s.before = m.para;
+                s.beforeStyleRef = m.styleRef;
+                steps.push_back(Step{s});
+            }
+        }
+        seg_lo = seg_hi;
+    }
+    if (steps.empty()) return false;
+    pending_before_ = sel;
+    pending_after_ = sel;
+    return commit(std::move(steps), pos().caret().para);
 }
 
 /**

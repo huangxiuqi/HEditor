@@ -604,6 +604,14 @@ bool applyOne(Ctx* c, const Step& step) {
                 const Node* n = findNode(c->doc, s.id);
                 if (n == nullptr || !isParagraphMark(n->kind)) return fail(c, "目标不是段落标记");
                 return replaceOne(c, s.id, MarkPayload{s.para, s.styleRef}, n->hidden);
+            } else if constexpr (std::is_same_v<T, SetRunMarks>) {
+                const Node* n = findNode(c->doc, s.id);
+                if (n == nullptr || n->kind != NodeKind::TextRun) {
+                    return fail(c, "目标不是文本节点");
+                }
+                // 文本由节点自己持有：替换时只换标记与样式引用，正文原样搬过去。
+                const auto& rp = std::get<RunPayload>(n->payload);
+                return replaceOne(c, s.id, RunPayload{rp.text, s.marks, s.styleRef}, n->hidden);
             } else if constexpr (std::is_same_v<T, InsertNode>) {
                 return insertNodeAtFlow(c, s.at_flow, s.subtree);
             } else if constexpr (std::is_same_v<T, RemoveNode>) {

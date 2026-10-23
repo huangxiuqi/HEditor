@@ -7,6 +7,9 @@
   --dim: #5b6572;
   --line: #d8dde4;
   --accent: #1f6feb;
+  --hover: #eef2f8;
+  --on: #dbe8fd;
+  --on-line: #a8c6f6;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -16,6 +19,10 @@
     --ink: #e6e9ee;
     --dim: #9aa4b0;
     --line: #2c3238;
+    --accent: #6ea8ff;
+    --hover: #242a30;
+    --on: #2b3d55;
+    --on-line: #3f5b80;
   }
 }
 
@@ -29,31 +36,211 @@ body {
   flex-direction: column;
 }
 
-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--line);
+#ed { flex: 1; min-height: 0; }
+#ed .heditor-body { height: 100%; }
+#ed .heditor-stage { height: 100%; overflow: auto; background: var(--bg); }
+
+/* 顶部功能区：一条页签 + 一行分组，照 Word 那一套摆（组名在组的下面）。 */
+
+.heditor-ribbon {
+  flex: none;
   background: var(--panel);
+  border-bottom: 1px solid var(--line);
 }
 
-header h1 { font-size: 14px; margin: 0 12px 0 0; font-weight: 600; }
+.heditor-ribbon__head {
+  display: flex;
+  align-items: flex-end;
+  gap: 14px;
+  padding: 4px 10px 0;
+}
 
-button {
-  font: inherit;
-  padding: 4px 10px;
-  border: 1px solid var(--line);
+.heditor-ribbon__name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--dim);
+  padding-bottom: 5px;
+  white-space: nowrap;
+}
+
+.heditor-ribbon__tabs { display: flex; gap: 2px; }
+
+.heditor-ribbon__tab {
+  border: 0;
+  padding: 3px 14px 5px;
+  border-radius: 6px 6px 0 0;
   background: transparent;
-  color: inherit;
-  border-radius: 6px;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
   cursor: pointer;
 }
 
-button:hover { border-color: var(--accent); color: var(--accent); }
+.heditor-ribbon__tab:hover { background: var(--hover); color: var(--accent); }
+.heditor-ribbon__tab--active { background: var(--on); color: var(--accent); font-weight: 600; }
 
-#status { margin-left: auto; color: var(--dim); font-variant-numeric: tabular-nums; }
+/* 固定一个最小高度：每页签的项数不一样，不钉住的话切页签会把下面的文档顶来顶去。 */
+.heditor-ribbon__body { padding: 2px 6px 3px; min-height: 76px; }
 
-#ed { flex: 1; min-height: 0; }
-#ed .heditor-body { height: 100%; }
-#ed #stage { height: 100%; overflow: auto; background: var(--bg); }
+.heditor-ribbon__pane { display: none; align-items: stretch; }
+.heditor-ribbon__pane--active { display: flex; }
+
+.heditor-ribbon__group {
+  display: flex;
+  flex-direction: column;
+  padding: 2px 6px 0;
+}
+
+/* 一行的高度钉死：有大按钮的组是 56（54 + 间隔），没有大按钮的组也要占同样高 ——
+   否则组名会一行高一、一行低，整排看过去是斜的。 */
+.heditor-ribbon__items {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 1;
+  min-height: 56px;
+}
+
+.heditor-ribbon__stack {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.heditor-ribbon__caption {
+  font-size: 11px;
+  color: var(--dim);
+  text-align: center;
+  padding: 1px 0 2px;
+  white-space: nowrap;
+}
+
+.heditor-ribbon__sep {
+  width: 1px;
+  background: var(--line);
+  margin: 4px 3px 15px;
+}
+
+.heditor-ribbon__button {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  min-width: 26px;
+  height: 27px;
+  padding: 0 4px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.1;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.heditor-ribbon__button svg { width: 16px; height: 16px; display: block; }
+
+.heditor-ribbon__button--big {
+  height: 54px;
+  min-width: 44px;
+  padding: 3px 6px;
+}
+
+.heditor-ribbon__button--big svg { width: 22px; height: 22px; }
+
+.heditor-ribbon__button:hover { background: var(--hover); border-color: var(--line); }
+.heditor-ribbon__button--on { background: var(--on); border-color: var(--on-line); }
+.heditor-ribbon__button:active { background: var(--on); }
+
+/* 下拉框与图标按钮同一行：图标（可选）+ 值。名字走悬停提示，不进版面。 */
+.heditor-ribbon__choice {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 4px;
+  padding: 0 3px;
+  font-size: 11px;
+  color: var(--dim);
+}
+
+.heditor-ribbon__choice-icon {
+  display: flex;
+  color: var(--dim);
+}
+
+.heditor-ribbon__choice-icon svg { width: 16px; height: 16px; display: block; }
+
+.heditor-ribbon__choice select {
+  font: inherit;
+  font-size: 12px;
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 2px 3px;
+  min-width: 56px;
+  height: 24px;
+}
+
+.heditor-ribbon__choice--wide select { min-width: 88px; }
+
+/* 底部状态栏：左边一行状态，右边缩放（减 / 滑块 / 加 / 百分比）。 */
+
+.heditor-status {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 3px 12px;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+  font-size: 12px;
+  color: var(--dim);
+}
+
+.heditor-status__text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.heditor-status__right {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.heditor-status__step {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.heditor-status__step:hover { background: var(--hover); border-color: var(--line); }
+.heditor-status__step svg { width: 16px; height: 16px; display: block; }
+
+.heditor-status__range {
+  width: 104px;
+  accent-color: var(--accent);
+}
+
+.heditor-status__pct {
+  min-width: 38px;
+  text-align: right;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}

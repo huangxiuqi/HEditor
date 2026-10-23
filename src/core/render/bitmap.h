@@ -219,9 +219,11 @@ public:
      * @param units_to_px 换算系数
      * @param color 颜色
      * @param rotate_deg 旋转角度（非 0 时退化成逐字形）
+     * @param italic 斜体：对这批字形做合成倾斜（字体没有斜体面时的通用做法）
      */
     void drawGlyphs(hb_font_t* font, const uint32_t* ids, const float* xs, const float* ys,
-                    int count, float units_to_px, Color color, float rotate_deg = 0.0f);
+                    int count, float units_to_px, Color color, float rotate_deg = 0.0f,
+                    bool italic = false);
 
     /**
      * 与另一块 Bitmap 共用字体表（Skia 侧的 SkTypeface / SkFont）。

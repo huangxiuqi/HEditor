@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <map>
+#include <tuple>
 #include <memory>
 #include <string>
 #include <utility>
@@ -399,12 +400,16 @@ public:
     const std::string& facePath(int index) const;
 
     /**
-     * 取（或创建）指定字号下的实例。失败返回 nullptr。
+     * 取（或创建）指定字号与字重下的实例。失败返回 nullptr。
+     *
+     * 字重进缓存键：同一个字号下 400 与 700 是两份实例（可变字体的 wght 轴不同），
+     *   合成粗体那种"绘制时再加粗"的做法做不到字宽跟着变，排版与字形就会错位。
      * @param face_index 字体索引
      * @param size_pt 字号（磅）
+     * @param weight 字重（可变字体用；静态字体上无副作用）
      * @return 实例；失败为 nullptr
      */
-    FontInstance* instance(int face_index, float size_pt);
+    FontInstance* instance(int face_index, float size_pt, float weight = 400.0f);
 
     /**
      * 缓存里的实例数。
@@ -425,9 +430,9 @@ private:
     std::vector<std::unique_ptr<FontInstance>> instances_;
 
     /**
-     * key: (face_index, 字号 * 4 取整) —— 允许 0.25pt 粒度
+     * key: (face_index, 字号 * 4 取整, 字重 * 4 取整) —— 都是 0.25 粒度
      */
-    std::map<std::pair<int, int>, FontInstance*> cache_;
+    std::map<std::tuple<int, int, int>, FontInstance*> cache_;
 
     /**
      * 新装的按需脸用这套块缓存配置（setCacheConfig 会改它，见那里的说明）。

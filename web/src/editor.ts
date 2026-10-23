@@ -2,6 +2,7 @@ import type {
   Caret,
   CaretStep,
   ChangeEvent,
+  CharFormatPatch,
   ControlSummary,
   Diag,
   Editor,
@@ -9,6 +10,7 @@ import type {
   EditorEvents,
   EditorOptions,
   Geometry,
+  ParaFormatPatch,
   Pos,
   Selection,
   SetCaretOptions,
@@ -16,6 +18,7 @@ import type {
 import { createDomHost, ensureMarkup, type ChangeSource, type DomHost, type EngineLink } from './host/dom';
 import { createErrorSurface, type ErrorSurface } from './host/errors';
 import type { CanvasStore } from './host/pages';
+import { stageOf } from './host/parts';
 import { cleanMarkdownLines, then1, type Args, type ZoomControl } from './input/keymap';
 import { assertSimd, simdProbeBytes, simdSupported } from './engine/simd';
 import { defaultFonts, type AssetPaths } from './transport/assets';
@@ -134,9 +137,9 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
   if (!opts || !(opts.container instanceof HTMLElement)) {
     throw new TypeError('createEditor({ container }) 需要一个 HTMLElement');
   }
-  if (opts.container.childElementCount > 0 && !opts.container.querySelector('#stage')) {
-    // 不清空别人的内容：只提示。要复用一块已有标记的容器就让它带着 #stage 进来。
-    throw new TypeError('container 里已经有内容了：请传一个空元素（或带 #stage 的那一份）');
+  if (opts.container.childElementCount > 0 && !stageOf(opts.container)) {
+    // 不清空别人的内容：只提示。要复用一块已有标记的容器就让它带着舞台进来。
+    throw new TypeError('container 里已经有内容了：请传一个空元素（或带 heditor-stage 的那一份）');
   }
   // 装载之前先确认这台浏览器能跑这份产物。它判的是"这份 wasm 能不能实例化"，与引擎
   //   在哪条线程上无关；而失败时唯一的目击者是 createEditor 的调用方 —— 让它拿到带
@@ -258,6 +261,96 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
   await Promise.resolve(then1(link.write('setUndoLimit', { n: config.undoLimit }), () => undefined));
 
   // 读写
+
+  /**
+   * 字符格式补丁 → 引擎的键名（与落盘同一套：b / i / u / fi / sz / col）。
+   *
+   * 转换放在这一层而不是让调用方写引擎键名：公开面用的是可读名，
+   *   换个内部键名不该改到使用者的代码。
+   * @param patch 公开面的补丁
+   * @returns 引擎认识的载荷
+   */
+  function charPatchJson(patch: CharFormatPatch): Record<string, unknown> {
+    const out: Record<string, unknown> = {};
+    if (patch.bold !== undefined) out.b = patch.bold;
+    if (patch.italic !== undefined) out.i = patch.italic;
+    if (patch.underline !== undefined) out.u = patch.underline;
+    if (patch.font !== undefined) out.fi = patch.font;
+    if (patch.size !== undefined) out.sz = patch.size;
+    if (patch.color !== undefined) out.col = patch.color;
+    return out;
+  }
+
+  /**
+   * 段落格式补丁 → 引擎键名（fi / sz / lf / sa / pbb）。
+   * @param patch 公开面的补丁
+   * @returns 引擎认识的载荷
+   */
+  function paraPatchJson(patch: ParaFormatPatch): Record<string, unknown> {
+    const out: Record<string, unknown> = {};
+    if (patch.font !== undefined) out.fi = patch.font;
+    if (patch.size !== undefined) out.sz = patch.size;
+    if (patch.lineFactor !== undefined) out.lf = patch.lineFactor;
+    if (patch.spaceAfter !== undefined) out.sa = patch.spaceAfter;
+    if (patch.pageBreakBefore !== undefined) out.pbb = patch.pageBreakBefore;
+    return out;
+  }
+
+  /**
+   * 把引擎给的格式读数读成对象。
+   *
+   * 两种形状都要收：读命令在协议表里已经把 JSON 解析成对象了（api.ts 那几条读都这么写），
+   *   而同线程宿主给的是原样的 JSON 文本。只认其中一种的后果不是"少几个字段"，而是
+   *   整条工具栏永远回显成"没有格式"—— 回显只是点亮按钮，它不会因为读不到而报错。
+   * 坏数据当空对象：为一次坏包抛异常会把整条工具栏打死。
+   * @param raw 对象或 JSON 文本
+   * @returns 对象（解析失败时为空对象）
+   */
+  function parseJsonObject(raw: unknown): Record<string, any> {
+    if (raw && typeof raw === 'object') return raw as Record<string, any>;
+    if (typeof raw !== 'string' || !raw) return {};
+    try {
+      const v = JSON.parse(raw);
+      return v && typeof v === 'object' ? v : {};
+    } catch {
+      return {};
+    }
+  }
+
+  /**
+   * 引擎的字符标记 → 公开面的补丁。
+   * @param raw 引擎给的读数（对象或 JSON 文本）
+   * @returns 只含出现过字段的补丁
+   */
+  function charPatchOf(raw: unknown): CharFormatPatch {
+    const o = parseJsonObject(raw);
+    const out: CharFormatPatch = {};
+    if (typeof o.b === 'boolean') out.bold = o.b;
+    if (typeof o.i === 'boolean') out.italic = o.i;
+    if (typeof o.u === 'boolean') out.underline = o.u;
+    if (typeof o.fi === 'number') out.font = o.fi;
+    if (typeof o.sz === 'number') out.size = o.sz;
+    if (Array.isArray(o.col) && o.col.length >= 3) {
+      out.color = [Number(o.col[0]), Number(o.col[1]), Number(o.col[2])];
+    }
+    return out;
+  }
+
+  /**
+   * 引擎的段落补丁 → 公开面的补丁。
+   * @param raw 引擎给的读数（对象或 JSON 文本）
+   * @returns 只含出现过字段的补丁
+   */
+  function paraPatchOf(raw: unknown): ParaFormatPatch {
+    const o = parseJsonObject(raw);
+    const out: ParaFormatPatch = {};
+    if (typeof o.fi === 'number') out.font = o.fi;
+    if (typeof o.sz === 'number') out.size = o.sz;
+    if (typeof o.lf === 'number') out.lineFactor = o.lf;
+    if (typeof o.sa === 'number') out.spaceAfter = o.sa;
+    if (typeof o.pbb === 'boolean') out.pageBreakBefore = o.pbb;
+    return out;
+  }
 
   const edit = (name: string, args?: Args): Promise<boolean> => {
     alive();
@@ -448,6 +541,24 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       return dom.paste();
     },
 
+    async format(patch) {
+      return edit('charFormat', { s: JSON.stringify(charPatchJson(patch)) });
+    },
+
+    async paragraphFormat(patch) {
+      return edit('paraFormat', { s: JSON.stringify(paraPatchJson(patch)) });
+    },
+
+    async formatAt() {
+      const raw = await Promise.resolve(link.read('charFormatAt'));
+      return charPatchOf(raw);
+    },
+
+    async paragraphFormatAt() {
+      const raw = await Promise.resolve(link.read('paraFormatAt'));
+      return paraPatchOf(raw);
+    },
+
     async setIndent(levels) {
       const n = Math.abs(Math.trunc(levels));
       let changed = false;
@@ -583,7 +694,7 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       const g = this.geometry();
       const y = target.y ?? (target.page ?? 0) * (g.page.h + g.gap);
       const scroller =
-        opts.container.querySelector<HTMLElement>('#stage') ?? opts.container;
+        stageOf(opts.container) ?? opts.container;
       scroller.scrollTop = y;
       await Promise.resolve(then1(link.view(y * g.dpr), () => dom.finish()));
     },

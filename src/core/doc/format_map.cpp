@@ -53,11 +53,11 @@ void applyCharFormatToRun(const CharFormat& cf, NodeId node, FormatRun* run,
             run->size_pt = static_cast<float>(emuToPt(cf.size->abs_emu));
         }
     }
-    if (cf.bold.value_or(false) || cf.italic.value_or(false) || cf.underline.value_or(false)) {
-        diag(CompileDiagnostic{
-            NodeKind::TextRun, node,
-            "字符格式的粗体、斜体、下划线尚未进入编译（引擎输入还没有这些字段）"});
-    }
+    // 三态照抄：没设置就沿用基底（段落默认），设置成 false 也要写下去 ——
+    //   否则"取消加粗"会被解析成"继承"，而继承的值可能是粗的。
+    if (cf.bold.has_value()) run->weight = *cf.bold ? kWeightBold : kWeightRegular;
+    if (cf.italic.has_value()) run->italic = *cf.italic;
+    if (cf.underline.has_value()) run->underline = *cf.underline;
 }
 
 WidthMapping mapWidth(const Length& len) {

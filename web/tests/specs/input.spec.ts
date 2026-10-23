@@ -55,7 +55,7 @@ test.describe('输入层', () => {
 
     // 第一页画布在屏幕上的位置（页内坐标加它就是视口坐标）。
     const pageBox = () => p.ev<{ x: number; y: number; w: number; h: number } | null>(`
-      const c = document.querySelector('#pages canvas');
+      const c = document.querySelector('.heditor-pages canvas');
       if (!c) return null;
       const r = c.getBoundingClientRect();
       return { x: r.left, y: r.top, w: r.width, h: r.height };`);
@@ -114,8 +114,8 @@ test.describe('输入层', () => {
       check('点击后光标仍在这一段', after.para === 0, 'para=' + after.para);
       check('点击位置在段首右侧，偏移变大', after.off > 0, 'off=' + after.off);
       const ta = await p.ev<string | undefined>(
-        'return document.activeElement && document.activeElement.id');
-      check('键盘承接层拿到了焦点', ta === 'ime', String(ta));
+        'return document.activeElement && document.activeElement.className');
+      check('键盘承接层拿到了焦点', ta === 'heditor-ime', String(ta));
     });
 
     await test.step('二、真实键盘', async () => {
@@ -204,7 +204,7 @@ test.describe('输入层', () => {
       await reset();
       const r = await p.ev<{ text: string; off: number }>(`
         const e = window.__demo;
-        const ta = document.getElementById('ime');
+        const ta = e.element.querySelector('.heditor-ime');
         ta.focus();
         ta.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
         ta.dispatchEvent(new CompositionEvent('compositionupdate', { bubbles: true, data: 'ni' }));
@@ -220,11 +220,11 @@ test.describe('输入层', () => {
 
     await test.step('五、滚动与缩放', async () => {
       await reset();
-      const st0 = await p.ev<number>("return document.querySelector('#ed #stage').scrollTop");
+      const st0 = await p.ev<number>("return document.querySelector('#ed .heditor-stage').scrollTop");
       await p.send('Input.dispatchMouseEvent',
                    { type: 'mouseWheel', x: 400, y: 400, deltaX: 0, deltaY: 240 });
       await page.waitForTimeout(120);
-      const st1 = await p.ev<number>("return document.querySelector('#ed #stage').scrollTop");
+      const st1 = await p.ev<number>("return document.querySelector('#ed .heditor-stage').scrollTop");
       check('滚轮改变了滚动位置', st1 > st0, st0 + ' 变 ' + st1);
       const after = await snap('wheel');
       check('滚动不改文档', after.text.includes('第一行 abc'), after.text.split('\n')[0]);

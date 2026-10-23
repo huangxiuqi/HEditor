@@ -1415,7 +1415,7 @@ test.describe('编辑面', () => {
     //   光标坐标落到下一页去，屏幕跟着往下冲，随后窗口重算又滚一次。
     //   取点选在"光标当前所在的那一行"：它一定看得见，所以根本不该把页面挪走。
     const clickP2 = await probe.read(`
-      const stage = EL('#stage');
+      const stage = EL('.heditor-stage');
       const dpr = window.devicePixelRatio || 1;
       await H.setCaret({ para: 20, offset: 5 });   // 第 20 段在 16 页的那一份里是第二页
       const cr0 = CARET();                      // 光标要页号与页内 y，公开面一次给全
@@ -1455,7 +1455,7 @@ test.describe('编辑面', () => {
     //   症状正是"滚动时下面的画布不生成，点一下才出来"（点击把光标带到那一页）。
     const scrollWin = JSON.parse(await probe.read(`
       return (async function () {
-        const stage = EL('#stage');
+        const stage = EL('.heditor-stage');
         const dpr = window.devicePixelRatio || 1;
         const step = (D.pagePx().h + D.pagePx().gap) / dpr;
         const wait = () => new Promise((r) => requestAnimationFrame(
@@ -3312,7 +3312,7 @@ test.describe('编辑面', () => {
     // 光标几何 -> 客户端坐标。geo 每次现取：换文档、换窗口都会动。
     const geo20 = async () => probe.read(`
       const cv = FRAME(), r = cv.getBoundingClientRect();
-      const s = EL('#stage').getBoundingClientRect();
+      const s = EL('.heditor-stage').getBoundingClientRect();
       return { left: r.left, top: r.top, sx: r.width / cv.width, sy: r.height / cv.height,
                stageTop: s.top, stageBottom: s.bottom, stageRight: s.right, stageMidX: (s.left + s.right) / 2 };`);
 
@@ -3445,7 +3445,7 @@ test.describe('编辑面', () => {
     // (i) 拖出可视区：指针停在容器下缘之外，容器自己滚起来、选区继续长
     await probe.read('await LOAD.stress(200, 20); return true;');
     // 显式回到文档顶部：这一节要的是"往下还有得滚"，视口停在哪一层不该由前面的节决定。
-    await probe.read('EL("#stage").scrollTop = 0; return true;');
+    await probe.read('EL(".heditor-stage").scrollTop = 0; return true;');
     await sleep(250);
     await probe.read('await H.setCaret({ para: 0, offset: 0 }); return true;');
     const g20j = await geo20();
@@ -3459,7 +3459,7 @@ test.describe('编辑面', () => {
     // 第一条必须钉"接近 0"，不能只写"离底部还远"：top 接近上限时"离底部还远"照样
     //   成立，整节就会在已经滚到底的状态下跑，两次读数自然一模一样。
     const room = await probe.read(`
-      const s = EL('#stage');
+      const s = EL('.heditor-stage');
       return { top: s.scrollTop, max: s.scrollHeight - s.clientHeight };`);
     check('前置：视口钉在文档顶部、下面还有可滚余量，按下点在容器内',
               Number(room.top) <= 50 && Number(room.max) > 1000 &&
@@ -3472,7 +3472,7 @@ test.describe('编辑面', () => {
     //   一直把 raf 挂满，所以 await 它等于等到滚到底；那时量到的 j0 已经是终值，
     //   j1 自然一模一样，"还在继续滚"就量不出来了。
     const readStage = () => probe.read(`
-      const s = EL('#stage');
+      const s = EL('.heditor-stage');
       return { top: s.scrollTop, max: s.scrollHeight - s.clientHeight,
                scrollH: s.scrollHeight, clientH: s.clientHeight,
                zoom: ZOOM(),
@@ -3519,7 +3519,7 @@ test.describe('编辑面', () => {
     //   又扩了一格）。被测的只是"onMove 读到按钮已抬起就收尾"这一条，
     //   坐标换算与命中都不在它里面，所以合成事件在这里是恰当的刺激而不是绕过接线。
     await probe.read('await LOAD.stress(200, 20); return true;');
-    await probe.read('EL("#stage").scrollTop = 0; return true;');
+    await probe.read('EL(".heditor-stage").scrollTop = 0; return true;');
     await sleep(250);
     await probe.read('await H.setCaret({ para: 0, offset: 0 }); return true;');
     const g20k = await geo20();
@@ -3532,7 +3532,7 @@ test.describe('编辑面', () => {
       ', clientY: ' + Math.round(y) + ', buttons: ' + buttons +
       ', bubbles: true, cancelable: true })); return true;');
     const readK = () => probe.read(
-      'const s = EL("#stage");' +
+      'const s = EL(".heditor-stage");' +
       'return { drag: D.dragState(), top: s.scrollTop };');
     await mouse('mousePressed', pk20);
     await mouse('mouseMoved', outK);                      // 拖到容器外：自动滚动起来

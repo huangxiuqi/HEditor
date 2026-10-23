@@ -273,7 +273,8 @@ export interface FontSource {
  */
 export interface EditorOptions {
   /**
-   * 挂载点。必须是空元素（或带着本库的 #stage 标记），库往里建骨架。
+   * 挂载点。必须是空元素，或带着本库骨架（heditor-stage / heditor-pages / heditor-ime）
+   * 的那一份；库不认 id —— 同一页可以挂几个实例。
    */
   container: HTMLElement;
 
@@ -777,9 +778,76 @@ export interface Diag {
 }
 
 /**
+ * 字符格式补丁：只给要改的字段，没给的一律保持不变。
+ *
+ * 语义与文档模型里的三态一致 —— 按下"加粗"只该动 bold，不该连带把字号写死。
+ */
+export interface CharFormatPatch {
+  /**
+   * 加粗。字重走可变字体的 wght 轴（700），字宽会跟着变。
+   */
+  bold?: boolean;
+
+  /**
+   * 斜体。字体没有斜体面时由绘制层做合成倾斜。
+   */
+  italic?: boolean;
+
+  /**
+   * 下划线。
+   */
+  underline?: boolean;
+
+  /**
+   * 字体下标（见 fonts 清单的顺序）。
+   */
+  font?: number;
+
+  /**
+   * 字号（磅）。
+   */
+  size?: number;
+
+  /**
+   * 字色，[r, g, b]。
+   */
+  color?: [number, number, number];
+}
+
+/**
+ * 段落格式补丁：只给要改的字段。
+ */
+export interface ParaFormatPatch {
+  /**
+   * 段落主字体下标。
+   */
+  font?: number;
+
+  /**
+   * 段落字号（磅）。
+   */
+  size?: number;
+
+  /**
+   * 行距倍数（行高 = 字号 x 倍数）。
+   */
+  lineFactor?: number;
+
+  /**
+   * 段后距（磅）。
+   */
+  spaceAfter?: number;
+
+  /**
+   * 段前分页。
+   */
+  pageBreakBefore?: boolean;
+}
+
+/**
  * 编辑器实例。
  *
- * 33 个方法 + element / diag 两个只读属性。分组只为可读，实例上是平铺的。
+ * 40 个方法 + element / diag 两个只读属性。分组只为可读，实例上是平铺的。
  */
 export interface Editor {
   // 内容
@@ -903,6 +971,38 @@ export interface Editor {
    * @returns 有没有改动
    */
   setIndent(levels: number): Promise<boolean>;
+
+  /**
+   * 对选区应用字符格式。
+   *
+   * 需要非空选区：空选区没有可改的字符。返回 false 有两种情形 —— 命令没执行（只读模式）
+   *   与格式本来就等于目标值（幂等，不占撤销栈）。
+   * @param patch 只含要改的字段
+   * @returns 是否真的改了
+   */
+  format(patch: CharFormatPatch): Promise<boolean>;
+
+  /**
+   * 对选区覆盖的段落应用段落格式；空选区时作用于光标所在的那一段。
+   * @param patch 只含要改的字段
+   * @returns 是否真的改了
+   */
+  paragraphFormat(patch: ParaFormatPatch): Promise<boolean>;
+
+  /**
+   * 读光标处的字符标记（工具栏回显）。
+   *
+   * 只报"这一处写了什么"，不含样式层与段落默认值：界面据此点亮按钮，
+   *   而"看起来是不是粗的"由排版结果回答。
+   * @returns 只含已显式设置的字段
+   */
+  formatAt(): Promise<CharFormatPatch>;
+
+  /**
+   * 读光标所在段落的格式覆盖（工具栏回显）。
+   * @returns 只含已显式设置的字段
+   */
+  paragraphFormatAt(): Promise<ParaFormatPatch>;
 
   // 光标与选区（程序化定位）
 
