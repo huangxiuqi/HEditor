@@ -803,14 +803,17 @@ std::string selectionReport() {
  * line 是行别（见引擎的 caretLineAffinity）：折行处"上一行行尾"与"下一行行首"是同一个
  *   偏移与侧别，只有它分得开；宿主必须原样带回去（setCaretAtSideLine），
  *   否则点下一行行首会画到上一行行尾。
+ * clamp 非零时把落在页外/页间空隙的点夹到最近的页边再算：拖选那一路用 —— 指针拖出画布
+ *   之后仍要能选，单击那一路不夹（点在灰底上本来就不该挪光标）。
  */
-std::string hitTest(float x_pt, float y_pt) {
+std::string hitTest(float x_pt, float y_pt, int clamp) {
     TextPos p{};
     int owner = -1;
     int side = 0;
     int line_aff = 0;
     int cell_para = -1;
-    if (!g_engine.hitTestPt(x_pt, y_pt, &p, &owner, &side, &line_aff, &cell_para))
+    if (!g_engine.hitTestPt(x_pt, y_pt, &p, &owner, &side, &line_aff, &cell_para,
+                            clamp != 0))
         return pk::checked(pk::hit_test::kSpec, "null");
     std::ostringstream o;
     o << "{\"para\":" << p.para << ",\"offset\":" << p.offset << ",\"field\":" << owner
@@ -1324,7 +1327,7 @@ std::string loadDocument(const std::string& text) {
  */
 std::string copySelection() {
     const ClipCopy c = g_engine.copySelection();
-    return rev::clipboardPayload(c.fragment, c.text, c.error);
+    return rev::clipboardPayload(c.fragment, c.text, c.error, c.html);
 }
 
 /**

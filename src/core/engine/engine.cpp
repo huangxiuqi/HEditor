@@ -343,6 +343,7 @@ ClipCopy EditorEngine::copySelection() const {
     }
     out.fragment = w.text;
     out.text = cap.text;
+    out.html = w.html;
     out.lo = cap.lo;
     out.hi = cap.hi;
     out.ok = true;
@@ -443,16 +444,25 @@ std::string EditorEngine::charFormatAtJson(bool effective) const {
 
 std::string EditorEngine::effectiveFormatAtJson() const {
     nlohmann::ordered_json j = nlohmann::ordered_json::object();
-    const TextPos at = caret();
+    // 落点：空选区取光标；有选区取选区起点。取光标（也就是 focus）的左邻居不行 ——
+    //   focus 在哪一头取决于从哪个方向划的，从左往右选与从右往左选就会读出两份不同的
+    //   格式（一边是一段自己的，一边是段外那个字）。
+    const Range sel = selection();
+    TextPos at = caret();
+    if (!sel.empty()) {
+        TextPos begin{-1, 0};
+        if (flowToTextPos(sel.begin(), &begin) && begin.para >= 0) at = begin;
+    }
     const std::vector<BlockSpec>& bs = blocks();
     if (at.para < 0 || at.para >= static_cast<int>(bs.size())) return j.dump();
     const BlockSpec& blk = bs[static_cast<size_t>(at.para)];
     const std::vector<FormatRun> runs = blk.effectiveRuns();
     if (runs.empty()) return j.dump();
-    // 取落点左边那个字：与"接着敲字会沿用哪一份格式"同一个约定（段首没有左边，
-    //   取第一个字）。于是工具栏上的字体字号、与敲出来的字的字体字号，永远是同一份。
+    // 空选区取落点左边那个字（与"接着敲字会沿用哪一份格式"同一个约定，段首取第一个字）；
+    //   有选区取选中的第一个字 —— 工具栏要报的是"这一段文字是什么样"，不是它左边是什么样。
+    const int len = static_cast<int>(blk.cp_text.size());
     const int cp = static_cast<int>(at.offset);
-    const int probe = cp > 0 ? cp - 1 : 0;
+    const int probe = sel.empty() ? (cp > 0 ? cp - 1 : 0) : std::min(cp, std::max(0, len - 1));
     const FormatRun* hit = nullptr;
     for (const FormatRun& r : runs) {
         if (static_cast<int>(r.cp_begin) <= probe && probe < static_cast<int>(r.cp_end)) {
@@ -1561,7 +1571,8 @@ bool EditorEngine::selectCellAtPt(float x_pt_doc, float y_pt_doc) {
  */
 
 bool EditorEngine::hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* out_owner,
-                             int* out_side, int* out_line_aff, int* out_cell_para) const {
+                             int* out_side, int* out_line_aff, int* out_cell_para,
+                             bool clamp) const {
     if (out_owner) *out_owner = -1;
     if (out_side) *out_side = 0;
     if (out_line_aff) *out_line_aff = 0;
@@ -1583,10 +1594,18 @@ bool EditorEngine::hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* 
         //   表象就是"最后几页点哪都偏下"。乘 zoom 折成设备像素再取页号，两边就一致。
         const float y_px = y_pt_doc * zoom;
         page = std::max(0, static_cast<int>(std::floor(y_px / static_cast<float>(step_px))));
-        const float local_px = y_px - static_cast<float>(page) * static_cast<float>(step_px);
-        // 落在页间空隙里，或者横向出了页外 —— 没有"这一页的哪一行"可言
-        if (local_px < 0.0f || local_px > static_cast<float>(page_px_h)) return false;
-        if (x_pt_doc < 0.0f || x_pt_doc > page_w) return false;
+        float local_px = y_px - static_cast<float>(page) * static_cast<float>(step_px);
+        // 落在页间空隙里，或者横向出了页外 —— 没有"这一页的哪一行"可言。
+        //   拖选那一路允许夹取：指针拖出画布之后仍要能选，落在缝里就按最近的那条边算，
+        //   否则"拖到页外选区就不动了"。单击那一路不夹：点在灰底上本来就不该挪光标。
+        if (clamp) {
+            local_px = std::max(0.0f, std::min(local_px, static_cast<float>(page_px_h)));
+            if (x_pt_doc < 0.0f) x_pt_doc = 0.0f;
+            if (x_pt_doc > page_w) x_pt_doc = page_w;
+        } else {
+            if (local_px < 0.0f || local_px > static_cast<float>(page_px_h)) return false;
+            if (x_pt_doc < 0.0f || x_pt_doc > page_w) return false;
+        }
         local_y = local_px / zoom;
     }
 

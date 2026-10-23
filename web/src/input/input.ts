@@ -120,6 +120,12 @@ export interface InputEnv {
   status(text: string, isErr?: boolean): void;
 
   /**
+   * 输入法组合串的显示：组合中画在光标处，结束收起。
+   * @param text 组合中的串；空串 = 收起
+   */
+  preedit?(text: string): void;
+
+  /**
    * 把在途链登记给宿主（测试可以等它）。
    * @param p 那条链
    */
@@ -236,17 +242,19 @@ export function createInput(env: InputEnv): InputLayer {
   function onCompositionStart(): void {
     composing = true;
     env.ta.value = '';
-    env.status('输入法组合中…（此期间不触碰引擎）');
+    env.preedit?.('');
   }
 
   function onCompositionUpdate(ev: CompositionEvent): void {
-    // 预编辑串先在状态栏本地预览。渲染进正文需要"组合期间不改布局"的完整版本，
-    // 现在没有那一档。
-    env.status('组合中：' + (ev.data || ''));
+    // 组合串画在光标处：承接层是透明的 textarea，浏览器画在它里面的字用户看不见，
+    //   而中文输入法在选字阶段屏幕上就什么都没有。正文仍等组合结束一次落地 ——
+    //   组合期间改布局会让候选框跟着跳。
+    env.preedit?.(ev.data || '');
   }
 
   function onCompositionEnd(ev: CompositionEvent): Maybe<any> {
     composing = false;
+    env.preedit?.('');
     const text = ev.data || env.ta.value || '';
     env.ta.value = '';
     const ready = env.isReady() && !isBusy();

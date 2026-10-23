@@ -1287,7 +1287,8 @@ const READ = collect('r', {
   stats: () => JSON.parse(mod.statsJson()),
   editStats: () => JSON.parse(mod.editStatsJson()),
   caretReport: () => mod.caretReport(),
-  hit: (a) => JSON.parse(mod.hitTest(a.x, a.y)),
+  // clamp：拖选那一路把落在页外/页间的点夹到最近的页边（否则拖出画布选区就不动了）。
+  hit: (a) => JSON.parse(mod.hitTest(a.x, a.y, a.clamp ? 1 : 0)),
   controlAt: (a) => mod.controlAtPoint(a.x, a.y),
   describeControls: () => mod.describeControls(),
   controls: () => JSON.parse(mod.controlsJson()),

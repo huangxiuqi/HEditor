@@ -90,9 +90,10 @@ struct EngineConfig {
     Color page_border = Color::rgb(206, 212, 218);
 
     /**
-     * 光标颜色。
+     * 光标颜色。黑色：编辑区的光标是插入点，不是强调色 —— 蓝色与选区的高亮撞在一起，
+     * 也让人误以为那是"当前格式"的指示。
      */
-    Color caret_color = Color::rgb(31, 111, 235);
+    Color caret_color = Color::rgb(0, 0, 0);
 
     /**
      * 选区底色。alpha 故意不是 255：它盖在文字上，实心填充会把字一起抹掉。
@@ -103,7 +104,7 @@ struct EngineConfig {
     /**
      * 光标线宽（磅）。下限 0.4，宿主设更小时按 0.4 画。
      */
-    float caret_width_pt = 1.4f;
+    float caret_width_pt = 1.0f;
 
     /**
      * 画不画页框。它只影响光栅，不重排。

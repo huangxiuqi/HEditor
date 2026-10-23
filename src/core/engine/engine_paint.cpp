@@ -339,7 +339,7 @@ void EditorEngine::rasterIntoBitmap(Bitmap& target, int page_index, const float*
             if (ul_x1 > ul_x0) {
                 // 位置与厚度都按这一段的字号算：线落在基线下方约 0.12 em，粗约 0.055 em，
                 //   再细会碎、再粗会像删除线。
-                const float thick = std::max(1.0f, ul_size * zoom * 0.055f);
+                const float thick = std::max(1.0f, ul_size * zoom * 0.042f);
                 const float y = (ul_y + ul_size * 0.12f) * zoom + dy;
                 target.fillRect(Rect{ul_x0 * zoom, y, (ul_x1 - ul_x0) * zoom, thick}, ul_color);
             }
@@ -1235,9 +1235,23 @@ void EditorEngine::rasterEditingMarks(Bitmap& target, int page_index, const floa
                 const uint32_t ch = text[c.cp];
                 if (ch == 0x20 || ch == 0x3000) {
                     const float cx = (a0 + a1) * 0.5f;
+                    // 半角空格画中点，全角空格画空心小方块：两者的占位差四倍，同一个点
+                    //   放在全角格里会显得那一格是空的（与字处理软件的画法也一致）。
+                    const bool full = (ch == 0x3000);
+                    const float s0 = full ? std::max(3.0f, lb.size_pt * 0.42f * zoom) : 0.0f;
                     if (!lb.vertical) {
-                        target.fillRect(Rect{cx * zoom - d * 0.5f, mid * zoom + dy_px, d, d},
-                                        cfg_.mark_color);
+                        if (full) {
+                            const float x0 = cx * zoom - s0 * 0.5f;
+                            const float y0 = mid * zoom + dy_px - s0 * 0.5f;
+                            const float st = std::max(1.0f, s0 * 0.12f);
+                            target.fillRect(Rect{x0, y0, s0, st}, cfg_.mark_color);
+                            target.fillRect(Rect{x0, y0 + s0 - st, s0, st}, cfg_.mark_color);
+                            target.fillRect(Rect{x0, y0, st, s0}, cfg_.mark_color);
+                            target.fillRect(Rect{x0 + s0 - st, y0, st, s0}, cfg_.mark_color);
+                        } else {
+                            target.fillRect(Rect{cx * zoom - d * 0.5f, mid * zoom + dy_px, d, d},
+                                            cfg_.mark_color);
+                        }
                     } else {
                         // 竖排：行内轴是 y、块轴是 x，中点跟着换轴（方块不必转）。
                         target.fillRect(Rect{mid * zoom, cx * zoom + dy_px - d * 0.5f, d, d},

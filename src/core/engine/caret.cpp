@@ -851,16 +851,22 @@ std::vector<PageRect> CaretResolver::selectionRectsIn(int first_page, int count)
 
         const float a0 = lb.inline_origin_pt + lb.offsetAtSide(l_lo, side_lo);
         const float a1 = lb.inline_origin_pt + lb.offsetAtSide(l_hi, side_hi);
+        // 零宽的选区要有宽度：选中一个空段（或一段的段落标记）时，选的是一枚不占字符的
+        //   位置，两端落在同一个偏移上 —— 按几何算就是零宽，而零宽的矩形在导出与合成时
+        //   会被当作"没有选区"丢掉，于是"能选中、看不见"。给一个字符宽的窄条，宽度取自
+        //   这一行的字号（与那枚标记本身的大小同一档）。
+        float width = std::abs(a1 - a0);
+        if (l_lo == l_hi) width = lb.size_pt * 0.35f;
         if (!lb.vertical) {
             r.x = std::min(a0, a1);
-            r.w = std::abs(a1 - a0);
+            r.w = width;
             r.y = lb.block_lo_pt;
             r.h = lb.block_hi_pt - lb.block_lo_pt;
         } else {
             r.x = lb.block_lo_pt;
             r.y = std::min(a0, a1);
             r.w = lb.block_hi_pt - lb.block_lo_pt;
-            r.h = std::abs(a1 - a0);
+            r.h = width;
         }
         out.push_back(PageRect{lb.page, r});
     }

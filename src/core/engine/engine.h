@@ -57,6 +57,11 @@ struct ClipCopy {
     std::string text;
 
     /**
+     * 这一段的 HTML（系统剪贴板的 text/html，带字符格式）。
+     */
+    std::string html;
+
+    /**
      * 实际取用的流区间起点。
      */
     FlowPos lo = 0;
@@ -1504,11 +1509,12 @@ public:
      * @param out_side 写回落点侧别
      * @param out_line_aff 写回行别
      * @param out_cell_para 写回这一格的段号（不在格内为 -1）
-     * @return true = 点落在正文上（页间空隙为 false）
+     * @param clamp 落在页外或页间空隙时是否夹到最近的页边（拖选那一路要，单击那一路不要）
+     * @return true = 点落在正文上（页间空隙且不夹时为 false）
      */
     bool hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* out_owner = nullptr,
                    int* out_side = nullptr, int* out_line_aff = nullptr,
-                   int* out_cell_para = nullptr) const;
+                   int* out_cell_para = nullptr, bool clamp = false) const;
 
     /**
      * 按点选整格（三击的入口）：点在格里的任何位置都选中这一格。

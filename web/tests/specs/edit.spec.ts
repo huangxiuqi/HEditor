@@ -3604,8 +3604,8 @@ test.describe('编辑面', () => {
     const defCaret = await probe.read('return H.config().caretStyle;');
     const defSel = await probe.read('return H.config().selectionStyle;');
     const p0 = await probe.read(FRAME_PIX);
-    check('默认光标色就是配置里那一份（31,111,235）',
-              !!p0 && p0[0] === 31 && p0[1] === 111 && p0[2] === 235,
+    check('默认光标色就是配置里那一份（0,0,0）',
+              !!p0 && p0[0] === 0 && p0[1] === 0 && p0[2] === 0,
               `采样 ${JSON.stringify(p0)}，配置 ${JSON.stringify(defCaret.color)}`);
 
     const st1 = await probe.read(

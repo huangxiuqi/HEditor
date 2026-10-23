@@ -185,6 +185,32 @@ test.describe('输入层', () => {
       check('焦点在锚点右侧', sel.focus.offset > sel.anchor.offset,
             sel.anchor.offset + ' 变 ' + sel.focus.offset);
 
+      // 拖出画布：指针跑到页外之后仍要能继续选。命中在页外本来没有"哪一行"，
+      //   不夹取时焦点端不动，表现是"拖到边上选区停住"。判据取"焦点端比页内那一点更靠后"。
+      await reset();
+      const p0 = await caretPoint(10);
+      const box = await p.ev<{ left: number; top: number; width: number }>(`
+        const r = document.querySelector('.heditor-pages').getBoundingClientRect();
+        return { left: r.left, top: r.top, width: r.width };`);
+      await mouse('mousePressed', p0.x, p0.y);
+      await mouse('mouseMoved', p0.x + 40, p0.y, { buttons: 1 });
+      await mouse('mouseMoved', box.left + box.width + 160, p0.y + 4, { buttons: 1 });
+      await mouse('mouseReleased', box.left + box.width + 160, p0.y + 4);
+      const out = await snap('drag-outside');
+      check('★ 拖出页外之后选区仍在延长（没有被夹停）',
+            out.empty === false && out.focus.offset > out.anchor.offset,
+            JSON.stringify([out.anchor, out.focus]));
+
+      // 空段也要有选区效果：空段里没有一个字，几何上是零宽，但选中的是那枚段落标记。
+      await reset();
+      const rects = await p.ev<number>(`
+        const e = window.__demo;
+        await e.setText('甲\\n\\n乙');
+        await e.select({ para: 1, offset: 0 }, { para: 1, offset: 1 });
+        await e.flush();
+        return e.selection().rects.length;`);
+      check('★ 选中空段：选区矩形不是空的（看得见高亮）', rects > 0, String(rects));
+
       // 双击选词：库里没有这条，旧宿主也没有 —— 这是产品缺口，不是回归。
       //   记成 note，别把判据钉在一个还没实现的行为上。
       await reset();

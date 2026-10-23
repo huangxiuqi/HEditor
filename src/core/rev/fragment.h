@@ -91,6 +91,14 @@ struct ClipWriteResult {
     std::string text;
 
     /**
+     * HTML 文本：给系统剪贴板的 text/html。
+     *
+     * 它不是段内往返的通道（那是上面的 JSON），只为"粘到别的应用里还带着格式"而存在 ——
+     *   只写纯文本的话，粘进 Word 或浏览器就是一段裸字。
+     */
+    std::string html;
+
+    /**
      * 失败原因（某个字符串不是合法 UTF-8、或某个节点种类装不进 NodeSpec）。
      */
     std::string error;
@@ -137,7 +145,7 @@ struct ClipReadResult {
 ClipReadResult readFragment(const std::string& text, const DeserializeOptions& opt = {});
 
 /**
- * 系统剪贴板上的那一份载荷：{"f": 片段, "t": 纯文本}，失败时是 {"e": 原因}。
+ * 系统剪贴板上的那一份载荷：{"f": 片段, "t": 纯文本, "h": HTML}，失败时是 {"e": 原因}。
  *
  * 为什么给一层信封：一次复制要同时交出两样东西（自家格式与纯文本投影），而 DOM 事件里
  * 拿数据是同步的 —— 两趟往返在 Worker 传输上会把"用户按 Ctrl+C"拖成两次异步等待，
@@ -145,9 +153,10 @@ ClipReadResult readFragment(const std::string& text, const DeserializeOptions& o
  * @param fragment 片段 JSON 文本（空表示失败）
  * @param text 纯文本投影
  * @param error 失败原因（非空时信封里只有这一项）
+ * @param html 带格式的 HTML（别的应用读的那一份，可为空）
  * @return 载荷 JSON 文本
  */
 std::string clipboardPayload(const std::string& fragment, const std::string& text,
-                             const std::string& error = {});
+                             const std::string& error, const std::string& html);
 
 }  // namespace heditor::rev

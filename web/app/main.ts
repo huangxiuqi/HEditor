@@ -361,7 +361,11 @@ function makeTabs(): Tab[] {
         value: () => editor.config().showMarks,
         run: (v) => {
           if (!v) return;
-          void editor.configure({ showMarks: v as 'none' | 'paragraph' | 'all' });
+          // 配完重读一遍回显：configure 不触发 caret / change，不主动刷新的话工具条会
+          //   停在上一档（下拉框显示的与实际生效的不一致）。
+          void editor
+            .configure({ showMarks: v as 'none' | 'paragraph' | 'all' })
+            .then(() => chrome.refresh());
         },
       },
       {
@@ -473,9 +477,13 @@ void boot();
 //   已经建好的那个实例 —— 页面会继续用旧白名单，症状是"调了个新加的方法，报它不是
 //   公开 API"，看着像代码错了。示例页是给人看的，重载一次比留着旧状态省事。
 if (import.meta.hot) {
+  // 库与外壳的每一处都在实例化那一刻把闭包捕获下来：宿主的事件处理器、剪贴板模块里的
+  //   状态、白名单、协议表 —— 热更只换模块，换不掉已经建好的那个实例。于是页面会
+  //   "看着是新的代码、跑的却是旧的"（改了粘贴逻辑却毫无变化，正是这一条）。
+  //   代价是一次重载，收益是"改了就能验"；示例页是给人看的，重载不心疼。
   import.meta.hot.on('vite:beforeUpdate', (payload) => {
     const files = (payload?.updates ?? []).map((u) => String(u?.path ?? ''));
-    if (files.some((f) => /public_members\.gen|guard\.ts|src\/types\.ts|engine\/api\.ts/.test(f))) {
+    if (files.some((f) => /(^|\/)src\/|(^|\/)app\//.test(f))) {
       location.reload();
     }
   });

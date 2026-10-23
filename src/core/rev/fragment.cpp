@@ -207,6 +207,123 @@ void collectFonts(const NodeSpec& s, std::unordered_set<int>* out) {
     for (const NodeSpec& kid : s.children) collectFonts(kid, out);
 }
 
+/**
+ * HTML 文本转义（只处理会破坏结构的五个字符）。
+ * @param utf8 原文
+ * @return 可放进 HTML 文本节点的串
+ */
+std::string escapeHtml(const std::string& utf8) {
+    std::string out;
+    out.reserve(utf8.size());
+    for (char c : utf8) {
+        switch (c) {
+            case '&': out += "&amp;"; break;
+            case '<': out += "&lt;"; break;
+            case '>': out += "&gt;"; break;
+            case '"': out += "&quot;"; break;
+            default: out += c;
+        }
+    }
+    return out;
+}
+
+/**
+ * 字符格式 → 内联 CSS。没有要表达的格式时给空串。
+ *
+ * 只写"粘贴到别的应用里还看得见的"那几项：粗细、斜体、下划线、字号、字色、字体。
+ *   字体按 PostScript 名写，别的应用认不出就退回它自己的默认字体 —— 比不带强。
+ * @param m 字符格式
+ * @param opt 字体身份回调
+ * @return CSS 声明串（分号分隔）
+ */
+std::string runStyleOf(const CharFormat& m, const SerializeOptions& opt) {
+    std::string css;
+    auto add = [&css](const std::string& decl) {
+        if (!css.empty()) css += ';';
+        css += decl;
+    };
+    if (m.bold.has_value()) add(std::string("font-weight:") + (*m.bold ? "700" : "400"));
+    if (m.italic.has_value()) add(std::string("font-style:") + (*m.italic ? "italic" : "normal"));
+    if (m.underline.has_value()) {
+        add(std::string("text-decoration:") + (*m.underline ? "underline" : "none"));
+    }
+    if (m.font_index.has_value() && opt.font_ref) {
+        const FontRef ref = opt.font_ref(*m.font_index);
+        if (!ref.postscript.empty()) add("font-family:'" + ref.postscript + "'");
+    }
+    if (m.size.has_value() && m.size->kind == LengthKind::Abs) {
+        const double pt = emuToPt(m.size->abs_emu);
+        add("font-size:" + recjson::floatText(pt) + "pt");
+    }
+    if (m.color.has_value()) {
+        char buf[16] = {0};
+        std::snprintf(buf, sizeof(buf), "#%02x%02x%02x", m.color->r, m.color->g, m.color->b);
+        add(std::string("color:") + buf);
+    }
+    return css;
+}
+
+/**
+ * 把一个子树写成 HTML。
+ *
+ * 结构照最常见的写法：段落 p、表格 table/tr/td，控件与域只留内容（它们的边界在 HTML 里
+ *   没有对应物）。段落按"内容到了才开、段落标记到了才关"处理，于是空段是一个空的 p。
+ * @param s 子树
+ * @param out 输出缓冲
+ * @param open_para 当前有没有开着的段落（跨调用保持）
+ * @param opt 字体身份回调
+ */
+void appendHtml(const NodeSpec& s, std::string* out, bool* open_para,
+                const SerializeOptions& opt) {
+    if (isText(s.kind)) {
+        const std::string text = escapeHtml(codepointsToUtf8(s.text));
+        if (text.empty()) return;
+        if (!*open_para) {
+            *out += "<p>";
+            *open_para = true;
+        }
+        const std::string css = runStyleOf(s.marks, opt);
+        if (css.empty()) {
+            *out += text;
+        } else {
+            *out += "<span style=\"" + css + "\">" + text + "</span>";
+        }
+        return;
+    }
+    if (isParagraphMark(s.kind)) {
+        if (!*open_para) *out += "<p>";
+        *out += "</p>";
+        *open_para = false;
+        return;
+    }
+    if (s.kind == NodeKind::Table) {
+        *out += "<table>";
+        for (const NodeSpec& row : s.children) appendHtml(row, out, open_para, opt);
+        *out += "</table>";
+        return;
+    }
+    if (s.kind == NodeKind::TableRow) {
+        *out += "<tr>";
+        for (const NodeSpec& cell : s.children) appendHtml(cell, out, open_para, opt);
+        *out += "</tr>";
+        return;
+    }
+    if (s.kind == NodeKind::TableCell) {
+        // 格里自成一串段落：进来先收掉外层可能开着的段落，出去时关掉自己开的那一个。
+        if (*open_para) {
+            *out += "</p>";
+            *open_para = false;
+        }
+        *out += "<td>";
+        bool open_cell = false;
+        for (const NodeSpec& kid : s.children) appendHtml(kid, out, &open_cell, opt);
+        if (open_cell) *out += "</p>";
+        *out += "</td>";
+        return;
+    }
+    for (const NodeSpec& kid : s.children) appendHtml(kid, out, open_para, opt);
+}
+
 ordered_json nodeJsonOf(const NodeSpec& s, recjson::StringPool* strings) {
     ordered_json j = ordered_json::object();
     j["k"] = nodeKindName(s.kind);
@@ -341,7 +458,7 @@ bool parseNode(const ClipContext& ctx, const ordered_json& j, NodeSpec* out, std
 }  // namespace
 
 std::string clipboardPayload(const std::string& fragment, const std::string& text,
-                             const std::string& error) {
+                             const std::string& error, const std::string& html) {
     ordered_json j = ordered_json::object();
     if (!error.empty() || fragment.empty()) {
         j["e"] = error.empty() ? std::string("没有选中内容") : error;
@@ -349,6 +466,9 @@ std::string clipboardPayload(const std::string& fragment, const std::string& tex
     }
     j["f"] = fragment;
     j["t"] = text;
+    // HTML 是给"别的应用"的那一份：只带纯文本的话，粘到 Word / 浏览器里就是一段
+    //   没有格式的字。它不进自定义 MIME，段内往返仍然走 f。
+    if (!html.empty()) j["h"] = html;
     return j.dump();
 }
 
@@ -404,6 +524,11 @@ ClipWriteResult writeFragment(const std::vector<NodeSpec>& nodes, const Serializ
             return result;
         }
         arr.push_back(nodeJsonOf(s, &strings));
+    }
+    {
+        bool open_para = false;
+        for (const NodeSpec& s : nodes) appendHtml(s, &result.html, &open_para, opt);
+        if (open_para) result.html += "</p>";
     }
     ordered_json j = ordered_json::object();
     j[kV] = kFragmentVersion;

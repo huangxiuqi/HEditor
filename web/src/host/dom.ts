@@ -11,12 +11,23 @@ import { createInput, type InputLayer } from '../input/input';
 import {
   FRAGMENT_MIME,
   parseClipPayload,
+  fragmentInHtml,
+  latestPayload,
   readSystemClipboard,
+  recallPayload,
   writeToDataTransfer,
   writeToSystemClipboard,
 } from './clipboard';
 import { type CanvasStore, type PageGeometry } from './pages';
-import { imeOf, pagesOf, PART_IME, PART_PAGES, PART_STAGE, stageOf } from './parts';
+import {
+  imeOf,
+  pagesOf,
+  PART_IME,
+  PART_PAGES,
+  PART_PREEDIT,
+  PART_STAGE,
+  stageOf,
+} from './parts';
 
 /**
  * 一次读取的几何：页度量 + 窗口 + 总页数（都是设备像素，除 dpr）。
@@ -315,10 +326,19 @@ export function ensureMarkup(container: HTMLElement): void {
     // 页容器必须是定位祖先：画布按"页号 × 步距"绝对定位，定位基准只能是这里。
     //   少了这条，画布会相对舞台（它也是 relative）定位 —— 而舞台是滚动容器，
     //   画布于是固定在可视区不随滚动走；退化成 static 更糟（见 PageCanvases.canvasFor）。
-    `    <div class="${PART_PAGES}" style="position:relative"></div>`,
+    // 左右自动外边距 + 定宽把页摆到正中（宽度由 pages.sync 按页宽写）；上下留出边距，
+    //   页与窗口边框之间才有呼吸空间。cursor:text 覆盖整个页面区域 —— 那里就是正文。
+    // 只留上边距：下边距会在文档末尾多出一段可滚的空白，而"最后一页之后还有一页"
+    //   会让窗口算出一个不存在的页号（判据与治疗都指向同一条）。左右交给 auto。
+    `    <div class="${PART_PAGES}"` +
+      ` style="position:relative;margin:16px auto 0;cursor:text"></div>`,
     `    <textarea class="${PART_IME}" rows="1" spellcheck="false"`,
     '      style="position:absolute;left:0;top:0;width:1px;height:1em;opacity:0;',
     '             border:0;padding:0;resize:none;overflow:hidden"></textarea>',
+    // 预编辑层：输入法组合中的字没有别的地方显示（承接层是透明的）。
+    `    <div class="${PART_PREEDIT}"` +
+      ' style="position:absolute;left:0;top:0;display:none;white-space:pre;' +
+      'pointer-events:none;color:#1a1a1a;border-bottom:1px solid #1f6feb"></div>',
     '  </div>',
     '</div>',
   ].join('\n');
@@ -351,6 +371,7 @@ export function createDomHost(o: DomHostOptions): DomHost {
   const ta = needPart(imeOf(root), PART_IME);
   // 上面那次检查是为了给出一句能看懂的话；这里的断言是给类型看的。
   const body = root.querySelector<HTMLElement>('.heditor-body')!;
+  const preeditEl = root.querySelector<HTMLElement>('.' + PART_PREEDIT);
 
   const link = o.link;
   const scroller = stageEl;
@@ -362,6 +383,27 @@ export function createDomHost(o: DomHostOptions): DomHost {
 
   const read = (name: string, args?: Args): any => link.read(name, args);
   const dpr = (): number => window.devicePixelRatio || 1;
+
+  /**
+   * 这个实例的身份。剪贴板缓存靠它判断"是不是我自己刚写出去的那一份" ——
+   *   文本相等不等于同源（别处复制来同样的字，格式可能完全不同）。
+   */
+  const instanceId =
+    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : 'h' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+
+  /**
+   * scrollTop 折算成"文档第 0 页顶边之上的偏移"（CSS 像素）。
+   *
+   * 页容器在滚动内容里带着外边距（骨架里的上下边距），scrollTop = 0 时页顶还没到视口顶。
+   *   直接拿 scrollTop 当文档纵坐标会整体少算这一段：窗口算出来落后一截，边缘那一页
+   *   于是判成"不在窗口里"，表现是滚到底之后最后可见的那一页没有画布。
+   * @returns 文档坐标下的滚动偏移（可能为负，表示顶部边距还没滚完）
+   */
+  function docScrollTop(): number {
+    return scroller.scrollTop - pagesEl.offsetTop;
+  }
 
   let disposed = false;
   let ready = false;
@@ -443,6 +485,7 @@ export function createDomHost(o: DomHostOptions): DomHost {
    */
   function scrollCaretIntoView(st?: any): Maybe<boolean> {
     const s = st ?? link.read('editStats');
+    lastState = s;
 
     if (!s || s.windowPages === undefined) return false;
     const g = view();
@@ -476,7 +519,7 @@ export function createDomHost(o: DomHostOptions): DomHost {
     const top = scroller.scrollTop;
     if (top === before) return false;
     lastScrollTop = top;
-    return then1(link.view(top * dpr()), () => true);
+    return then1(link.view(docScrollTop() * dpr()), () => true);
   }
 
   // 收尾
@@ -496,7 +539,7 @@ export function createDomHost(o: DomHostOptions): DomHost {
     if (healing || disposed || g.count <= 0) return;
     const step = g.ph + g.gap;
     if (step <= 0) return;
-    const top = Math.round(scroller.scrollTop);
+    const top = Math.round(docScrollTop());
     if (top === healedFor) return;
     const d = dpr();
     const visFirst = Math.floor((top * d) / step);
@@ -629,7 +672,7 @@ export function createDomHost(o: DomHostOptions): DomHost {
     //   处理器的这一次调用里可写，异步回来之后再 setData 不会报错，但剪贴板是空的。
     const sync = !(raw && typeof (raw as Promise<string>).then === 'function');
     return then1(raw, (v: string) => {
-      const parsed = parseClipPayload(v);
+      const parsed = parseClipPayload(v, instanceId);
       if (!parsed.payload) {
         o.status?.(parsed.error || '没有选中内容', true);
         return false;
@@ -712,9 +755,9 @@ export function createDomHost(o: DomHostOptions): DomHost {
   /**
    * 命中：收设备像素（与 drag 的 pointAt 同一口径），内部折算成文档坐标。
    */
-  const hitAt = (xPx: number, yPx: number): Maybe<any> => {
+  const hitAt = (xPx: number, yPx: number, clamp?: boolean): Maybe<any> => {
     const p = docPt(xPx, yPx);
-    return read('hit', { x: p.x, y: p.y });
+    return read('hit', clamp ? { x: p.x, y: p.y, clamp: 1 } : { x: p.x, y: p.y });
   };
 
   // 拖选的移动端：搬焦点端，不搬 anchor。走"不滚视口"那一档：拖动过程中每拍都把
@@ -739,6 +782,43 @@ export function createDomHost(o: DomHostOptions): DomHost {
   function writeOp(name: string, args?: Args): Maybe<boolean> {
     pendingOp = name;
     return link.write(name, args);
+  }
+
+  // 最近一次状态：预编辑层要按光标位置摆（组合事件不带坐标）。
+  let lastState: any = null;
+
+  /**
+   * 输入法组合串的显示。
+   *
+   * 承接层是透明的 textarea，浏览器画在它里面的组合串用户看不见 —— 中文输入法在选字
+   *   阶段屏幕上就什么都没有。这一层把组合串画在光标处，与字处理软件的做法一致；
+   *   组合结束就收起（正文由引擎按最终文本一次落地）。
+   * @param text 组合中的串；空串表示收起来
+   */
+  function showPreedit(text: string): void {
+    if (!preeditEl) return;
+    if (!text) {
+      if (preeditEl.style.display !== 'none') preeditEl.style.display = 'none';
+      return;
+    }
+    const st = lastState;
+    const inWindow =
+      st && st.caretPage >= st.windowFirstPage && st.caretPage < st.windowFirstPage + st.windowPages;
+    if (!st || !inWindow) return;
+    const g = view();
+    const sr = stageEl.getBoundingClientRect();
+    const pr = pagesEl.getBoundingClientRect();
+    const step = g.ph + g.gap;
+    const left = pr.left - sr.left + scroller.scrollLeft + st.caretX / dpr();
+    const top = pr.top - sr.top + scroller.scrollTop + (st.caretPage * step + st.caretY) / dpr();
+    const lineH = Math.max(12, Math.round(st.caretH / dpr()));
+    preeditEl.textContent = text;
+    preeditEl.style.left = Math.round(left) + 'px';
+    preeditEl.style.top = Math.round(top) + 'px';
+    preeditEl.style.height = lineH + 'px';
+    preeditEl.style.lineHeight = lineH + 'px';
+    preeditEl.style.fontSize = Math.max(10, Math.round(lineH * 0.62)) + 'px';
+    if (preeditEl.style.display !== 'block') preeditEl.style.display = 'block';
   }
 
   const input = createInput({
@@ -805,6 +885,7 @@ export function createDomHost(o: DomHostOptions): DomHost {
       void afterEdit('cellSelectAt', 'user');
     },
     status: (text, isErr) => o.status?.(text, isErr),
+    preedit: (text) => showPreedit(text),
   });
 
   /**
@@ -876,8 +957,18 @@ export function createDomHost(o: DomHostOptions): DomHost {
     const dt = ev.clipboardData;
     const fragment = dt.getData(FRAGMENT_MIME);
     const text = dt.getData('text/plain');
+    // 片段也藏在 text/html 里：自定义 MIME 过不了剪贴板时，标准类型还能把它带过来
+    //   （跨实例、跨浏览器都走这一条）。
+    const inHtml = fragment ? null : fragmentInHtml(dt.getData('text/html'));
     ev.preventDefault();
-    if (fragment) void pasteFragmentText(fragment, 'user');
+    if (fragment || inHtml) {
+      void pasteFragmentText(fragment || inHtml || '', 'user');
+      return;
+    }
+    // 剪贴板里只剩纯文本时，先查这段文本有没有对应的自家片段（浏览器不保证自定义
+    //   类型穿过剪贴板）。文本相等就按片段粘，样式与控件都不丢。
+    const memo = text ? recallPayload(text, instanceId) : null;
+    if (memo) void pasteFragmentText(memo.fragment, 'user');
     else if (text) void pastePlainText(text, 'user');
   });
   // 鼠标挂在滚动容器上而不是某一张画布：画布随窗口建与丢，逐张挂监听会在换窗时漏挂；
@@ -903,7 +994,14 @@ export function createDomHost(o: DomHostOptions): DomHost {
   drag = createDragSelect({
     container: scroller,
     pointAt,
-    hitAt,
+    // 拖选用夹取那一档：指针拖出画布（左右出页、上下进页间空隙）之后仍要能继续选。
+    //   夹的是"设备的文档坐标"，与 pointAt 同一把尺子；单击那一路不夹 —— 点在页外
+    //   本来就没有落点（那一条另有判据）。
+    hitAt: (x, y) => {
+      const w = Math.max(0, pagesEl.clientWidth * dpr() - 1);
+      const h = Math.max(0, pagesEl.clientHeight * dpr() - 1);
+      return hitAt(Math.min(Math.max(x, 0), w), Math.min(Math.max(y, 0), h), true);
+    },
     extendTo: dragExtendTo,
   });
   }
@@ -925,7 +1023,7 @@ export function createDomHost(o: DomHostOptions): DomHost {
       healedFor = -1;
       // 滚动不重排：窗口没变就什么都不做，画布摆在文档流里，浏览器已经把像素搬走了。
       fireAndForget(
-        then1(link.view(top * dpr()), (r: any) => {
+        then1(link.view(docScrollTop() * dpr()), (r: any) => {
           if (r && r.moved) finish();
         }),
       );
@@ -989,11 +1087,21 @@ export function createDomHost(o: DomHostOptions): DomHost {
     paste: async () => {
       const clip = await readSystemClipboard();
       if (!clip) {
+        // 读整条被拒（没有 clipboard-read 授权）：用最近一次写出去的那一份 ——
+        //   编辑器内的"复制 → 粘贴"本来就不该依赖权限。
+        const memo = latestPayload(instanceId);
+        if (memo) return !!(await Promise.resolve(pasteFragmentText(memo.fragment, 'api')));
         o.status?.('读不到系统剪贴板（浏览器未授权）', true);
         return false;
       }
       if (clip.fragment) return !!(await Promise.resolve(pasteFragmentText(clip.fragment, 'api')));
-      if (clip.text) return !!(await Promise.resolve(pastePlainText(clip.text, 'api')));
+      const inHtml = clip.html ? fragmentInHtml(clip.html) : null;
+      if (inHtml) return !!(await Promise.resolve(pasteFragmentText(inHtml, 'api')));
+      if (clip.text) {
+        const memo = recallPayload(clip.text, instanceId);
+        if (memo) return !!(await Promise.resolve(pasteFragmentText(memo.fragment, 'api')));
+        return !!(await Promise.resolve(pastePlainText(clip.text, 'api')));
+      }
       o.status?.('剪贴板里没有可粘贴的文字', true);
       return false;
     },
@@ -1028,7 +1136,7 @@ export function createDomHost(o: DomHostOptions): DomHost {
       busy = on;
     },
     resize() {
-      return then1(link.view(scroller.scrollTop * dpr()), () => finish());
+      return then1(link.view(docScrollTop() * dpr()), () => finish());
     },
     destroy() {
       if (disposed) return;

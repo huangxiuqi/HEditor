@@ -11352,13 +11352,13 @@ int main() {
         c64.page.margin_pt = 12.0f;
         const std::vector<std::string> fonts64 = {cjkPath, mnPath, latinPath};
 
-        // 形状：两段。第一段中间有一个半角空格（"全部"档下要看见中点），
+        // 形状：两段。第一段中间有两个连续的空格（"全部"档下每一格都要有自己的中点），
         //   第二段是空段（段落标记落在行首）。
         NodeTree t64;
         {
             const NodeId sec = t64.firstSectionId();
             const NodeId t = t64.appendChild(sec, NodeKind::TextRun);
-            t64.setText(t, utf8ToCodepoints("甲乙 丙"));
+            t64.setText(t, utf8ToCodepoints("甲乙  丙"));
             t64.appendChild(sec, NodeKind::ParagraphMark);
             t64.appendChild(sec, NodeKind::ParagraphMark);
         }
@@ -11440,7 +11440,7 @@ int main() {
                        std::to_string(ink_para) + "）");
         expectTrue(sameGeometry(geom_off, e64.layout()),
                    "★ 三档的行盒与字形坐标逐位相同（标记不进版面：不占宽度、不改断行）");
-        expectTrue(e64.blocks()[0].cp_text == utf8ToCodepoints("甲乙 丙") &&
+        expectTrue(e64.blocks()[0].cp_text == utf8ToCodepoints("甲乙  丙") &&
                        e64.blocks().size() == 2,
                    "正文与段数一个都没变（标记不是内容）");
 
@@ -11461,6 +11461,98 @@ int main() {
         e64.repaint();
         expectTrue(e64.auditCompile() == 0 && e64.auditLayout() == 0,
                    "切换档位之后增量与全量仍然逐字段一致");
+    }
+
+    if (runSection(65))
+        std::printf("\n[65] 编辑器内复制粘贴：样式跟着回来，高度不变\n");
+    if (runSection(65)) {
+        // 判据两半：粘回来的字必须还是粗的、还是 20 磅（片段带标记）；全选粘一遍之后
+        //   段数与总高必须一模一样（片段不许多带一个段落标记，也不许把段落格式抹掉）。
+        EngineConfig c65;
+        c65.zoom = 1.0f;
+        c65.page.width_pt = 320.0f;
+        c65.page.height_pt = 240.0f;
+        c65.page.margin_pt = 12.0f;
+        const std::vector<std::string> fonts65 = {cjkPath, mnPath, latinPath};
+
+        NodeTree t65;
+        {
+            const NodeId sec = t65.firstSectionId();
+            for (int i = 0; i < 3; ++i) {
+                const NodeId t = t65.appendChild(sec, NodeKind::TextRun);
+                t65.setText(t, utf8ToCodepoints("第" + std::to_string(i) + "段"));
+                t65.appendChild(sec, NodeKind::ParagraphMark);
+            }
+        }
+
+        EditorEngine e65;
+        if (!e65.init(fonts65)) {
+            std::fprintf(stderr, "字体加载失败\n");
+            return 2;
+        }
+        e65.setConfig(c65);
+        e65.setDocument(t65, StyleSheet{});
+        e65.relayout();
+        e65.repaint();
+
+        // 把第一段整段改成粗体 20 磅，再全选复制。
+        e65.setSelection(Range{e65.flowPosAt(0, 0), e65.flowPosAt(0, 3)});
+        CharFormat big;
+        big.bold = true;
+        big.size = Length::abs(ptToEmu(20.0));
+        e65.applyCharFormatAndRender(big);
+        e65.relayout();
+        e65.repaint();
+
+        e65.selectAll();
+        const ClipCopy cap = e65.copySelection();
+        expectTrue(cap.ok && !cap.fragment.empty(), "全选复制拿得到片段");
+        expectTrue(cap.html.find("<span") != std::string::npos,
+                   "剪贴板载荷里带 HTML 样式（给别的应用那一份）");
+
+        const int paras_before = static_cast<int>(e65.blocks().size());
+        auto textOf = [&]() {
+            std::string out;
+            for (size_t i = 0; i < e65.blocks().size(); ++i) {
+                if (i) out.push_back('\n');
+                out += e65.blocks()[i].textUtf8();
+            }
+            return out;
+        };
+        const std::string text_before = textOf();
+        const float h_before = e65.layout().lines.empty()
+                                   ? 0.0f
+                                   : e65.layout().lines.back().block_hi_pt;
+
+        // 全选状态下粘贴：整篇被这一份片段替换掉。内容、段数、总高都不该变。
+        e65.selectAll();
+        expectTrue(e65.pasteFragment(cap.fragment).empty(), "全选状态粘回这一份片段");
+        e65.relayout();
+        e65.repaint();
+
+        const int paras_after = static_cast<int>(e65.blocks().size());
+        const std::string text_after = textOf();
+        const float h_after = e65.layout().lines.empty()
+                                  ? 0.0f
+                                  : e65.layout().lines.back().block_hi_pt;
+        expectTrue(text_after == text_before,
+                   "★ 正文一字未变（多带一个段落标记会让末尾多一行空段）");
+        expectTrue(paras_after == paras_before,
+                   "★ 段数不变（" + std::to_string(paras_before) + " → " +
+                       std::to_string(paras_after) + "）");
+        expectTrue(std::abs(h_after - h_before) < 0.01f,
+                   "★ 总高不变（" + std::to_string(h_before) + " → " + std::to_string(h_after) +
+                       " 磅）");
+
+        // 样式：粘回来的第一段还是粗体 20 磅。
+        e65.setSelection(Range{e65.flowPosAt(0, 0), e65.flowPosAt(0, 3)});
+        const std::string eff = e65.charFormatAtJson(true);
+        expectTrue(eff.find("\"b\":true") != std::string::npos,
+                   "★ 粘回来的字还是粗的（" + eff + "）");
+        expectTrue(eff.find("\"sz\":20") != std::string::npos,
+                   "★ 粘回来的字还是 20 磅（" + eff + "）");
+        expectTrue(e65.auditCompile() == 0 && e65.auditLayout() == 0,
+                   "这一轮之后增量与全量仍然逐字段一致");
     }
 
     std::printf("\n──────────────────────────────\n");

@@ -157,20 +157,25 @@ test.describe('示例页的公开面', () => {
     const off = await setMarks('none');
     const all = await setMarks('all');
 
+    // 走工具栏那一条：改下拉框 → change → configure → 外壳重读回显。
     const after = await p.ev<any>(`
       const e = window.__demo;
+      const sel = document.querySelector('select[data-act="marks"]');
+      sel.value = 'paragraph';
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 300));
       return { mode: e.config().showMarks, paras: e.paragraphs().length,
-               rect: JSON.stringify(e.caret().rect),
-               toolbar: document.querySelector('select[data-act="marks"]')?.value ?? '' };`);
+               rect: JSON.stringify(e.caret().rect), toolbar: sel.value };`);
 
     check('默认档是"只显示段落标记"', state.mode === 'paragraph', String(state.mode));
     check('★ 关掉标记：画面真的变了', withPara !== off, '两拍一模一样');
     check('★ 全部档比段落档多出空格里的中点', all !== withPara, '两拍一模一样');
-    check('档位读得回来', after.mode === 'all', String(after.mode));
+    check('档位读得回来（工具栏改档也走 configure）', after.mode === 'paragraph',
+          String(after.mode));
     check('★ 切三档都不动版面（段数与光标矩形逐次相同）',
           after.paras === state.paras && after.rect === state.rect,
           JSON.stringify({ paras: [state.paras, after.paras], rect: [state.rect, after.rect] }));
-    check('工具栏那一格回显当前档位', after.toolbar === 'all', after.toolbar);
+    check('工具栏那一格回显当前档位', after.toolbar === 'paragraph', after.toolbar);
   });
 
   test('只有契约成员，六组行为按契约工作', async ({ open }) => {

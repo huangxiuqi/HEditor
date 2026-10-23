@@ -20,6 +20,12 @@ export const PART_PAGES = 'heditor-pages';
 export const PART_IME = 'heditor-ime';
 
 /**
+ * 输入法预编辑串的显示层：组合中的字画在这里（承接层是透明的，浏览器画在它里面的
+ * 组合串用户看不见）。它不是骨架的必要部分，找不到就当"没有这一层"。
+ */
+export const PART_PREEDIT = 'heditor-preedit';
+
+/**
  * 找舞台（滚动容器）。
  * @param root 作用域（通常就是挂载点，绝不传 document）
  * @returns 元素；没有就为 null

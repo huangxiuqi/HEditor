@@ -189,6 +189,9 @@ export class SlotCanvases implements CanvasStore {
 
     const w = Math.round(pw / dpr) + 'px';
     const ch = Math.round(ph / dpr) + 'px';
+    // 页容器与页同宽：左外边距自动（骨架里设的 auto）才能把页摆正。宽度不写的话容器宽度
+    //   由绝对定位的画布撑不出来，居中就无从谈起。
+    if (this.pagesEl.style.width !== w) this.pagesEl.style.width = w;
     this.byPage.clear();
     const used = new Set<number>();
     for (let i = 0; i < count; ++i) {

@@ -41,6 +41,36 @@ test.describe('剪贴板', () => {
     check('控件数量没变（纯文字粘贴不该造出控件）', r.controls === 0, String(r.controls));
   });
 
+  test('编辑器内复制粘贴：样式跟着回来，段数不变', async ({ open }) => {
+    // 浏览器不保证自定义类型穿过剪贴板（paste 事件只给标准类型、clipboard.read 没授权
+    //   时整条拒绝），于是"复制带样式的一段、粘回自己"会退化成纯文本 —— 样式没了，
+    //   末段还多出一行空段。这条判据钉的是"编辑器内往返不依赖权限"。
+    const p = await open('index.html', { query: { debug: '1' } });
+    const r = await p.ev<any>(`
+      const e = window.__demo;
+      await e.setText('甲乙\\n丙丁');
+      await e.select({ para: 0, offset: 0 }, { para: 0, offset: 2 });
+      await e.format({ bold: true, size: 20 });
+      await e.select({ para: 0, offset: 0 }, { para: 0, offset: 2 });
+      const copied = await e.copy();
+      await new Promise((r) => setTimeout(r, 150));
+      const before = { paras: e.paragraphs().length, text: e.text() };
+      await e.setCaret({ para: 1, offset: 2 });
+      const pasted = await e.paste();
+      await e.flush();
+      await e.select({ para: 1, offset: 2 }, { para: 1, offset: 3 });
+      await e.flush();
+      const eff = await e.formatAt({ effective: true });
+      return { copied, pasted, before, after: { paras: e.paragraphs().length, text: e.text() }, eff };`);
+    check('复制成功', r.copied === true, String(r.copied));
+    check('粘贴成功（读不到剪贴板也不该失败）', r.pasted === true, String(r.pasted));
+    check('★ 粘进来的字还带粗体', r.eff.bold === true, JSON.stringify(r.eff));
+    check('★ 粘进来的字还是 20 磅', r.eff.size === 20, String(r.eff.size));
+    check('★ 段数不变（没有多出一行空段）', r.after.paras === r.before.paras,
+          JSON.stringify([r.before.paras, r.after.paras]));
+  });
+
+
   test('空选区复制：返回 false，剪贴板内容不变', async ({ open }) => {
     const p = await open('index.html', { query: { debug: '1' } });
     const r = await p.ev<{ first: boolean; second: boolean; text: string }>(`
@@ -243,11 +273,14 @@ test.describe('剪贴板', () => {
     const state = await p.read<any>(`
       const e = window.__demo;
       const st = e.element.querySelector('.heditor-stage');
+      const pages = e.element.querySelector('.heditor-pages');
       const g = e.geometry();
       const step = g.page.h + g.gap;
-      const top = st.scrollTop;
-      const visFirst = Math.floor(top / step);
-      const visLast = Math.floor((top + st.clientHeight - 1) / step);
+      // 页容器在滚动内容里带着外边距：文档坐标 = scrollTop 减去它在内容里的偏移
+      //   （宿主那一侧由 docScrollTop 做同一件事，判据必须用同一个折算）。
+      const top = st.scrollTop - pages.offsetTop;
+      const visFirst = Math.max(0, Math.floor(top / step));
+      const visLast = Math.max(0, Math.floor((top + st.clientHeight - 1) / step));
       const byPage = new Map();
       for (const el of e.element.querySelectorAll('.heditor-pages canvas')) {
         if (el.dataset.page !== undefined) byPage.set(Number(el.dataset.page), el);
@@ -290,5 +323,31 @@ test.describe('剪贴板', () => {
     check('A 复制成功', r.ok, String(r.ok));
     check('★ B 粘到了 A 的那一段内容（跨实例）', r.b === '实例乙：实例甲的文', r.b);
     check('A 自己的文档没被改动', r.a === '实例甲的文字', r.a);
+
+    // 跨实例也要带样式：片段不能只靠"最近一份载荷"（那只活在一个页面里），它还得随
+    //   text/html 一起走 —— 这一条直接验那条载体（片段藏进 HTML，再原样取回来）。
+    const carrier = await p.ev<{ same: boolean; hasAttr: boolean }>(`
+      const m = await import('/src/host/clipboard.ts');
+      const frag = '{"v":3,"n":[{"k":"t","t":"甲乙"}]}';
+      const html = m.embedFragment('<p>甲乙</p>', frag);
+      return { same: m.fragmentInHtml(html) === frag, hasAttr: html.includes('data-heditor-fragment') };`);
+    check('★ 片段能藏进 text/html 并原样取回（跨浏览器靠它）', carrier.same === true,
+          JSON.stringify(carrier));
+    check('HTML 里确实带了那个属性', carrier.hasAttr === true, String(carrier.hasAttr));
+
+    // 缓存只认"本实例写的那一份"：文本相等但来源不同（别处复制来同样的字）不该用缓存 ——
+    //   否则拿旧格式覆盖新内容。判据直接问那个模块。
+    const originRule = await p.ev<any>(`
+      const m = await import('/src/host/clipboard.ts');
+      const dt = new DataTransfer();
+      m.writeToDataTransfer(dt, { fragment: '{"v":3}', text: '甲乙', html: '<p>甲乙</p>',
+                                  origin: 'A' });
+      return { same: m.recallPayload('甲乙', 'A') !== null,
+               other: m.recallPayload('甲乙', 'B') === null,
+               latestSame: m.latestPayload('A') !== null,
+               latestOther: m.latestPayload('B') === null };`);
+    check('★ 同源：缓存命中', originRule.same === true, JSON.stringify(originRule));
+    check('★ 异源：文本相同也不认（不拿旧格式覆盖新内容）', originRule.other === true,
+          JSON.stringify(originRule));
   });
 });
