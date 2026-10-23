@@ -442,8 +442,12 @@ void EditorEngine::rasterIntoBitmap(Bitmap& target, int page_index, const float*
 
     // 表单标记放在最后：括号要压在原子框之上（它是内容的最后一层），
     //   小点压在内容之上 —— 一个方块盖住几个字的角，比起被字盖掉、看着像脏点要好。
+    //   编辑标记先画：它是注释性的浅灰，被括号或小点压住不心疼。
     {
         const auto t_mark0 = Clock::now();
+        rasterEditingMarks(target, page_index, band_lo_pt, band_hi_pt, 0.0f, false);
+        if (spill)
+            rasterEditingMarks(target, page_index - 1, band_lo_pt, band_hi_pt, spill_dy, true);
         rasterControlMarks(target, page_index, band_lo_pt, band_hi_pt, 0.0f, false);
         if (spill)
             rasterControlMarks(target, page_index - 1, band_lo_pt, band_hi_pt, spill_dy, true);
@@ -1121,6 +1125,143 @@ void EditorEngine::drawAtomBox(Bitmap& target, const LineBox& lb, const LineClus
     if (!ids.empty()) {
         target.drawGlyphs(hbf, ids.data(), xs.data(), ys.data(), static_cast<int>(ids.size()),
                           units_to_px, cfg_.atom_text, rot);
+    }
+}
+
+/**
+ * 换行符标记（形如 ↵）：一横、左端一枚实心箭头、右端向上折一竖。
+ *
+ * 用矩形与三角形拼，不借字体字形：这三份字体里都没有 U+21B5，箭头也只有中文字体才有
+ * 一字不差的 U+2190 —— 借字形会在缺字的那一行静默消失。尺寸按这一行的字号算，于是
+ * 缩放与字号一起变。
+ * @param target 目标位图
+ * @param along 行末位置（磅，行内轴）
+ * @param cross 基线（磅，块轴）
+ * @param size_pt 这一行的字号（磅）
+ * @param zoom 设备像素 / 磅
+ * @param vertical 竖排：整枚标记转 90 度
+ * @param color 颜色
+ * @param dy_px 整笔的纵向平移（连页接缝补画那半截时是负的带高）
+ */
+void drawBreakMark(Bitmap& target, float along, float cross, float size_pt, float zoom,
+                   bool vertical, Color color, float dy_px) {
+    // 尺寸与落点都取整到设备像素：连页接缝那一趟是同一枚标记整体上移一个带高再画一次，
+    //   两趟必须落到同一批像素上（判据是逐字节相同）。取整之前算，两趟会差出半像素的
+    //   抗锯齿覆盖率 —— 差的正好是带边界那两行。
+    const float t = std::round(std::max(1.0f, size_pt * 0.065f * zoom));  // 笔画宽度
+    const float w = std::round(size_pt * 0.58f * zoom);                   // 横笔长度
+    const float h = std::round(size_pt * 0.28f * zoom);                   // 竖笔高度
+    const float head = std::round(size_pt * 0.28f * zoom);                // 箭头长度
+    const float half = std::round(size_pt * 0.15f * zoom);                // 箭头半高
+    // 平移量在缩放与取整之后加：先除 zoom 再乘回来会引入末位误差，而判据是逐字节比。
+    const float a0 = std::round(along * zoom + size_pt * 0.06f * zoom);
+    // 横笔抬到字高中段（0.28 em）：贴着基线画会显得沉在字底，与字处理软件里那一枚
+    //   标记的位置也不同 —— 它大致落在 x 高度上沿那一带。
+    const float bar_lo = std::round(cross * zoom - size_pt * 0.28f * zoom) + dy_px;
+    const float right = a0 + w;
+    const float mid = bar_lo + t * 0.5f;
+    if (!vertical) {
+        target.fillRect(Rect{a0, bar_lo, w, t}, color);
+        target.fillRect(Rect{right - t, bar_lo - h, t, h + t}, color);
+        target.fillTriangle(a0, mid, a0 + head, mid - half - t * 0.3f, a0 + head,
+                            mid + half + t * 0.3f, color);
+    } else {
+        // 竖排：整枚转 90 度 —— 行内轴变 y、块轴变 x。
+        target.fillRect(Rect{bar_lo, a0, t, w}, color);
+        target.fillRect(Rect{bar_lo - h, right - t, h + t, t}, color);
+        target.fillTriangle(mid, a0, mid - half - t * 0.3f, a0 + head,
+                            mid + half + t * 0.3f, a0 + head, color);
+    }
+}
+
+/**
+ * 不可见字符标记（页内坐标，画进页位图）：段落标记、空格的中点、制表符的箭头。
+ *
+ * 只画进位图、不占宽度 —— 标记是版面之外的一层注释，断行、命中、光标落点都不认它，
+ * 所以开关它只需要重光栅（签名里混了档位与颜色，见 rasterSignature）。
+ *
+ * 几何全部从行盒派生：段落标记坐在"这一段的最后一行"的行末（段内码点数 == 行盒的
+ * last_cp），空格的中点坐在该簇的 inline_pt 与下一簇的 inline_pt 之间。字体与基线取
+ * 行盒的 bracket_font / bracket_axis_pt —— 那是块主字体，标记的粗细与风格才跟正文一致。
+ */
+void EditorEngine::rasterEditingMarks(Bitmap& target, int page_index, const float* band_lo_pt,
+                                      const float* band_hi_pt, float dy_px, bool spill_only) {
+    // 档位与只读态的合成判断（只读是呈现态，标记会被印出来，与表单括号同一条）。
+    if (!marksShown()) return;
+    const MarksMode mode = cfg_.marks;
+
+    const float zoom = cfg_.zoom;
+    const float units_to_px = zoom / kFontScalePerPt;
+    const float slab_pt = cfg_.page.slabHeightPt();
+    const bool band = band_lo_pt && band_hi_pt;
+    const std::vector<BlockSpec>& bs = blocks();
+    const bool dot_mode = (mode == MarksMode::All);
+
+    int k_begin = 0;
+    int k_end = -1;
+    caret_.linesOnPage(page_index, &k_begin, &k_end);
+    const std::vector<LineBox>& lines = layout_.lines;
+    const int n_lines = static_cast<int>(lines.size());
+    for (int k = k_begin; k <= k_end && k < n_lines; ++k) {
+        if (k < 0) continue;
+        const LineBox& lb = lines[static_cast<size_t>(k)];
+        if (!lb.bracket_font) continue;
+        if (spill_only && !(lb.block_hi_pt > slab_pt)) continue;
+        const float lo_pt = lb.block_lo_pt + dy_px / zoom;
+        const float hi_pt = lb.block_hi_pt + dy_px / zoom;
+        if (band && (hi_pt < *band_lo_pt - 1.0f || lo_pt > *band_hi_pt + 1.0f)) continue;
+
+        hb_font_t* hbf = lb.bracket_font->hb();
+        const float x0 = lb.inline_origin_pt;
+        const float x1 = lb.inline_origin_pt + lb.inline_end_pt;
+        const float axis = lb.bracket_axis_pt;
+        if (lb.paragraph < 0 || lb.paragraph >= static_cast<int>(bs.size())) continue;
+        const std::vector<uint32_t>& text = bs[static_cast<size_t>(lb.paragraph)].cp_text;
+
+        // 空格与制表符：每个簇各画一枚，位置取簇的起点、宽度取到下一簇的起点。
+        //   簇的 cp 是段内码点下标（不是码点本身），要拿它回块流里查那一个字。
+        if (dot_mode) {
+            // 中点的边长与纵向位置按这一行的字号算：太小看不见，太大就成了脏点。
+            const float d = std::max(1.0f, lb.size_pt * 0.09f * zoom);
+            const float mid = axis - lb.size_pt * 0.30f;
+            for (size_t ci = 0; ci < lb.clusters.size(); ++ci) {
+                const LineCluster& c = lb.clusters[ci];
+                if (c.placeholder || c.atom != InlineAtom::None) continue;
+                if (c.cp >= static_cast<uint32_t>(text.size())) continue;
+                const float a0 = x0 + c.inline_pt;
+                const float a1 =
+                    (ci + 1 < lb.clusters.size()) ? x0 + lb.clusters[ci + 1].inline_pt : x1;
+                if (!(a1 > a0)) continue;
+                const uint32_t ch = text[c.cp];
+                if (ch == 0x20 || ch == 0x3000) {
+                    const float cx = (a0 + a1) * 0.5f;
+                    if (!lb.vertical) {
+                        target.fillRect(Rect{cx * zoom - d * 0.5f, mid * zoom + dy_px, d, d},
+                                        cfg_.mark_color);
+                    } else {
+                        // 竖排：行内轴是 y、块轴是 x，中点跟着换轴（方块不必转）。
+                        target.fillRect(Rect{mid * zoom, cx * zoom + dy_px - d * 0.5f, d, d},
+                                        cfg_.mark_color);
+                    }
+                } else if (ch == 0x09) {
+                    // 制表符用右箭头字形；字体里没有这一枚就跳过，不画半个箭头。
+                    hb_codepoint_t g = 0;
+                    if (!hb_font_get_nominal_glyph(hbf, 0x2192, &g) || !g) continue;
+                    if (!lb.vertical) {
+                        target.drawGlyph(hbf, g, a0 * zoom, axis * zoom + dy_px, units_to_px,
+                                         cfg_.mark_color, 0.0f);
+                    } else {
+                        target.drawGlyph(hbf, g, axis * zoom, a0 * zoom + dy_px, units_to_px,
+                                         cfg_.mark_color, 90.0f);
+                    }
+                }
+            }
+        }
+
+        // 段落标记只画在这一段的最后一行：段内码点数 == 行盒的 last_cp。
+        //   空段（码点 0 个）的最后一行就是它唯一那一行，标记落在行首。
+        if (lb.last_cp != static_cast<uint32_t>(text.size())) continue;
+        drawBreakMark(target, x1, axis, lb.size_pt, zoom, lb.vertical, cfg_.mark_color, dy_px);
     }
 }
 

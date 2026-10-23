@@ -11340,6 +11340,129 @@ int main() {
                    "这几笔编辑之后增量与全量仍然逐字段一致");
     }
 
+    if (runSection(64)) std::printf("\n[64] 编辑标记：只画进页位图，不动排版\n");
+    if (runSection(64)) {
+        // 三条判据：关掉之后像素真的少了（标记不是空开关）；开出"全部"之后又多出
+        //   空格里的中点；三种档位的行盒与字形坐标逐位相同（标记不是内容，不进版面）。
+        //   反向一半在最后：关回去的像素必须与从未打开时逐字节相同。
+        EngineConfig c64;
+        c64.zoom = 1.0f;
+        c64.page.width_pt = 320.0f;
+        c64.page.height_pt = 240.0f;
+        c64.page.margin_pt = 12.0f;
+        const std::vector<std::string> fonts64 = {cjkPath, mnPath, latinPath};
+
+        // 形状：两段。第一段中间有一个半角空格（"全部"档下要看见中点），
+        //   第二段是空段（段落标记落在行首）。
+        NodeTree t64;
+        {
+            const NodeId sec = t64.firstSectionId();
+            const NodeId t = t64.appendChild(sec, NodeKind::TextRun);
+            t64.setText(t, utf8ToCodepoints("甲乙 丙"));
+            t64.appendChild(sec, NodeKind::ParagraphMark);
+            t64.appendChild(sec, NodeKind::ParagraphMark);
+        }
+
+        EditorEngine e64;
+        if (!e64.init(fonts64)) {
+            std::fprintf(stderr, "字体加载失败\n");
+            return 2;
+        }
+        e64.setConfig(c64);
+        e64.setDocument(t64, StyleSheet{});
+        e64.relayout();
+        e64.repaint();
+
+        // 比页位图，不比帧：帧里叠着光标与选区那一层瞬态，它跟标记无关，混进来就是
+        //   把两件事的账记在一处（只读模式下光标不画，一关就把"标记没画"盖过去了）。
+        auto snap = [&]() {
+            const size_t n = e64.pageBytes(0);
+            return std::vector<uint8_t>(e64.pagePixels(0), e64.pagePixels(0) + n);
+        };
+        // 两帧之间差多少个像素：按 RGBA 四字节一组比，比"差多少字节"更接近肉眼看到的变化。
+        auto diffPx = [&](const std::vector<uint8_t>& a, const std::vector<uint8_t>& b) {
+            if (a.size() != b.size()) return -1;
+            int n = 0;
+            for (size_t i = 0; i + 3 < a.size(); i += 4) {
+                if (a[i] != b[i] || a[i + 1] != b[i + 1] || a[i + 2] != b[i + 2] ||
+                    a[i + 3] != b[i + 3])
+                    ++n;
+            }
+            return n;
+        };
+        auto setMarks = [&](MarksMode m) {
+            EngineConfig c = e64.config();
+            c.marks = m;
+            e64.setConfig(c);
+            e64.relayout();
+            e64.repaint();
+        };
+        // 版面几何：行盒的四个位置量、码点区间与每个字形的原点，全部逐位比。
+        auto sameGeometry = [&](const LayoutResult& a, const LayoutResult& b) {
+            if (a.lines.size() != b.lines.size() || a.glyphs.size() != b.glyphs.size()) return false;
+            for (size_t i = 0; i < a.lines.size(); ++i) {
+                const LineBox& x = a.lines[i];
+                const LineBox& y = b.lines[i];
+                if (x.paragraph != y.paragraph || x.page != y.page) return false;
+                if (x.block_lo_pt != y.block_lo_pt || x.block_hi_pt != y.block_hi_pt) return false;
+                if (x.inline_origin_pt != y.inline_origin_pt) return false;
+                if (x.inline_end_pt != y.inline_end_pt) return false;
+                if (x.first_cp != y.first_cp || x.last_cp != y.last_cp) return false;
+            }
+            for (size_t i = 0; i < a.glyphs.size(); ++i) {
+                if (a.glyphs[i].x_pt != b.glyphs[i].x_pt || a.glyphs[i].y_pt != b.glyphs[i].y_pt)
+                    return false;
+            }
+            return true;
+        };
+
+        expectTrue(e64.config().marks == MarksMode::Paragraph,
+                   "默认档 = 只显示段落标记（段落边界是编辑时最该看见的）");
+
+        const std::vector<uint8_t> with_para = snap();
+        setMarks(MarksMode::None);
+        const LayoutResult geom_off = e64.layout();
+        const std::vector<uint8_t> bare = snap();
+        const int ink_para = diffPx(with_para, bare);
+
+        setMarks(MarksMode::All);
+        const std::vector<uint8_t> all = snap();
+        const int ink_all = diffPx(all, bare);
+        const int ink_space = diffPx(all, with_para);
+
+        expectTrue(ink_para > 0,
+                   "★ 段落标记真的画了墨迹（关掉之后少了 " + std::to_string(ink_para) + " 个像素）");
+        expectTrue(ink_space > 0,
+                   "★ 全部标记档多出空格里的中点（比段落档多 " + std::to_string(ink_space) +
+                       " 个像素）");
+        expectTrue(ink_all > ink_para,
+                   "全部档的墨迹多于段落档（" + std::to_string(ink_all) + " > " +
+                       std::to_string(ink_para) + "）");
+        expectTrue(sameGeometry(geom_off, e64.layout()),
+                   "★ 三档的行盒与字形坐标逐位相同（标记不进版面：不占宽度、不改断行）");
+        expectTrue(e64.blocks()[0].cp_text == utf8ToCodepoints("甲乙 丙") &&
+                       e64.blocks().size() == 2,
+                   "正文与段数一个都没变（标记不是内容）");
+
+        // 反向一半：关回去的像素必须与从未打开时逐字节相同 —— 开关不是累加的。
+        setMarks(MarksMode::None);
+        expectTrue(diffPx(snap(), bare) == 0, "★ 再关掉：帧逐字节回到没有标记的那一版");
+
+        // 只读是呈现态：标记不画（与表单括号同一条）—— 画了会被印出来。
+        setMarks(MarksMode::All);
+        e64.setEditMode(EditMode::ReadOnly);
+        e64.relayout();
+        e64.repaint();
+        const int ink_readonly = diffPx(snap(), bare);
+        expectTrue(ink_readonly == 0, "★ 只读模式下不画标记（页位图等于关掉标记那一版，差 " +
+                                          std::to_string(ink_readonly) + " 个像素）");
+        e64.setEditMode(EditMode::Document);
+        e64.relayout();
+        e64.repaint();
+        expectTrue(e64.auditCompile() == 0 && e64.auditLayout() == 0,
+                   "切换档位之后增量与全量仍然逐字段一致");
+    }
+
     std::printf("\n──────────────────────────────\n");
     std::printf("共 %d 项断言，失败 %d 项\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

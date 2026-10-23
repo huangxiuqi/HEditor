@@ -2177,6 +2177,29 @@ private:
     bool suffixIsHorizontalOnly(int from, int to) const;
 
     /**
+     * 画不可见字符标记（段落标记、空格里的中点、制表符箭头）到一页的位图上。
+     *
+     * 只画进页位图、不占宽度：标记不是内容，改档位只让像素变（见 rasterSignature），
+     *   断行、光标落点、命中与流位置一个都不动 —— 这也是它可以随手开关的前提。
+     *
+     * 几何从行盒派生：段落标记坐在"这一段的最后一行"的行末（段内码点数 == 行盒的
+     *   last_cp），空格的中点坐在该簇 inline_pt 与下一簇 inline_pt 的中点。字体与基线取
+     *   行盒的 bracket_font / bracket_axis_pt（块主字体），所以标记的粗细风格跟正文一致。
+     * band 与 spill_only 的语义与 rasterControlMarks 相同。
+     */
+    void rasterEditingMarks(Bitmap& target, int page_index, const float* band_lo_pt,
+                            const float* band_hi_pt, float dy_px, bool spill_only);
+
+    /**
+     * 编辑标记此刻画不画：档位不是"不显示"，而且不在只读态（只读是呈现态，标记会被印出来）。
+     *
+     * 光栅签名混的是这一位而不是档位 —— 切只读不改内容，只有签名能让页位图作废。
+     */
+    bool marksShown() const {
+        return cfg_.marks != MarksMode::None && mode_ != EditMode::ReadOnly;
+    }
+
+    /**
      * 画表单标记（方括号与小点）到一页的位图上 —— 页内坐标，不认帧。
      *
      * 几何全部从排版的行盒派生（占位簇的位置 + 行盒的括号参考字体/基线）：

@@ -209,6 +209,15 @@ export interface EditorConfig {
   showControlDots: boolean;
 
   /**
+   * 不可见字符标记：'none' 全不显示，'paragraph' 只显示段落标记，'all' 连空格与制表符
+   * 一起显示（空格里画中点、制表符画箭头）。默认 'paragraph'。
+   *
+   * 标记是版面之外的一层注释：不占宽度、不进流位置、不影响断行与命中，所以只改光栅签名、
+   * 不重排。只读模式下不画 —— 那是呈现态，标记会被印出来。
+   */
+  showMarks: 'none' | 'paragraph' | 'all';
+
+  /**
    * 撤销栈深度，0 = 不限。
    */
   undoLimit: number;

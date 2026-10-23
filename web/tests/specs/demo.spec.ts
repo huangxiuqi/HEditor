@@ -5,6 +5,8 @@
 //
 // 六节与旧 demo_probe 逐条对应：内部全局、实例成员、公开方法、change 事件、
 //   configure 的夹取与未知键、销毁后的拒绝。
+import { createHash } from 'node:crypto';
+
 import { check } from '../support/check';
 import { test } from '../support/probe';
 
@@ -109,6 +111,66 @@ test.describe('示例页的公开面', () => {
     check('字体那一格写的不是空档位', r.before.fontText !== '—', r.before.fontText);
     check('点下拉框之前焦点在它身上', r.hadFocus === true);
     check('★ 点一下下拉框不会把焦点抢回编辑器', r.keptFocus === true, r.focusTag);
+  });
+
+  test('编辑标记：默认画段落标记，三档都能切，只改像素不动版面', async ({ open }) => {
+    // 判据是像素：标记不进内容（不占宽度、不改断行），所以「有没有画」只能靠画面回答；
+    //   而「没动版面」要另外量 —— 段数与光标矩形必须逐次相同。
+    const p = await open('index.html', { viewport: { width: 1280, height: 900 } });
+    await p.ev(`const e = window.__demo;
+      await e.setText('甲乙 丙\\n丁');
+      // 光标是瞬态、会闪：设成全透明，截图里只剩内容像素。
+      await e.configure({ caretStyle: Object.assign({}, e.config().caretStyle, { color: [0, 0, 0, 0] }) });
+      await e.setCaret({ para: 0, offset: 0 });
+      await e.flush();`);
+
+    const clip = await p.ev<any>(`
+      const pg = document.querySelector('.heditor-pages').getBoundingClientRect();
+      return { x: pg.left, y: pg.top, width: 220, height: 110 };`);
+
+    /**
+     * 拍一张并算摘要：只比"这一拍和上一拍是不是同一张"。
+     * @returns 截图的摘要
+     */
+    const shot = async (): Promise<string> => {
+      const buf = await p.page.screenshot({ clip });
+      return createHash('sha1').update(buf).digest('hex');
+    };
+    /**
+     * 切一档标记，等呈现落地再拍。
+     * @param mode 档位
+     * @returns 这一档的画面摘要
+     */
+    const setMarks = async (mode: string): Promise<string> => {
+      await p.ev(`await window.__demo.configure({ showMarks: '${mode}' }); await window.__demo.flush();`);
+      await p.page.waitForTimeout(300);
+      return shot();
+    };
+
+    const state = await p.ev<any>(`
+      const e = window.__demo;
+      const rect = () => JSON.stringify(e.caret().rect);
+      const before = { mode: e.config().showMarks, paras: e.paragraphs().length, rect: rect() };
+      return before;`);
+
+    const withPara = await shot();  // 默认：只显示段落标记
+    const off = await setMarks('none');
+    const all = await setMarks('all');
+
+    const after = await p.ev<any>(`
+      const e = window.__demo;
+      return { mode: e.config().showMarks, paras: e.paragraphs().length,
+               rect: JSON.stringify(e.caret().rect),
+               toolbar: document.querySelector('select[data-act="marks"]')?.value ?? '' };`);
+
+    check('默认档是"只显示段落标记"', state.mode === 'paragraph', String(state.mode));
+    check('★ 关掉标记：画面真的变了', withPara !== off, '两拍一模一样');
+    check('★ 全部档比段落档多出空格里的中点', all !== withPara, '两拍一模一样');
+    check('档位读得回来', after.mode === 'all', String(after.mode));
+    check('★ 切三档都不动版面（段数与光标矩形逐次相同）',
+          after.paras === state.paras && after.rect === state.rect,
+          JSON.stringify({ paras: [state.paras, after.paras], rect: [state.rect, after.rect] }));
+    check('工具栏那一格回显当前档位', after.toolbar === 'all', after.toolbar);
   });
 
   test('只有契约成员，六组行为按契约工作', async ({ open }) => {

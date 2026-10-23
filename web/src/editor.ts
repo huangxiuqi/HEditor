@@ -106,6 +106,15 @@ const MODE_CODE: Record<EditorConfig['mode'], number> = {
   readOnly: 2,
 };
 
+/**
+ * 编辑标记档位 -> 引擎的整数。顺序与 MarksMode 枚举一致。
+ */
+const MARKS_CODE: Record<EditorConfig['showMarks'], number> = {
+  none: 0,
+  paragraph: 1,
+  all: 2,
+};
+
 const DEFAULT_CONFIG: EditorConfig = {
   zoom: 1,
   pageMode: 'paged',
@@ -113,6 +122,7 @@ const DEFAULT_CONFIG: EditorConfig = {
   input: true,
   showBrackets: true,
   showControlDots: false,
+  showMarks: 'paragraph',
   undoLimit: 100,
   caretStyle: { color: [0, 0, 0, 255], widthPt: 1 },
   selectionStyle: { color: [31, 111, 235, 64] },
@@ -750,6 +760,13 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       if (patch.input !== undefined) next.input = !!patch.input;
       if (patch.showBrackets !== undefined) next.showBrackets = !!patch.showBrackets;
       if (patch.showControlDots !== undefined) next.showControlDots = !!patch.showControlDots;
+      if (patch.showMarks !== undefined) {
+        const m = patch.showMarks;
+        if (m !== 'none' && m !== 'paragraph' && m !== 'all') {
+          throw new TypeError("showMarks 只能是 'none' / 'paragraph' / 'all'");
+        }
+        next.showMarks = m;
+      }
       if (patch.undoLimit !== undefined) next.undoLimit = Math.max(0, Math.trunc(patch.undoLimit));
       if (patch.caretStyle !== undefined) next.caretStyle = patch.caretStyle;
       if (patch.selectionStyle !== undefined) next.selectionStyle = patch.selectionStyle;
@@ -795,6 +812,9 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       }
       if (changed.showControlDots !== undefined) {
         steps.push(() => settleAfter('setShowControlDots', { on: next.showControlDots }));
+      }
+      if (changed.showMarks !== undefined) {
+        steps.push(() => settleAfter('setShowMarks', { mode: MARKS_CODE[next.showMarks] }));
       }
       if (changed.undoLimit !== undefined) {
         steps.push(() => settleAfter('setUndoLimit', { n: next.undoLimit }));

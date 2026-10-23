@@ -351,6 +351,20 @@ function makeTabs(): Tab[] {
     label: '显示',
     items: [
       {
+        act: 'marks',
+        label: '编辑标记',
+        options: [
+          { value: 'none', text: '不显示' },
+          { value: 'paragraph', text: '段落标记' },
+          { value: 'all', text: '全部标记' },
+        ],
+        value: () => editor.config().showMarks,
+        run: (v) => {
+          if (!v) return;
+          void editor.configure({ showMarks: v as 'none' | 'paragraph' | 'all' });
+        },
+      },
+      {
         act: 'paged',
         label: '分页',
         icon: 'paged',

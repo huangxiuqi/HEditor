@@ -37,6 +37,8 @@
 #include "include/core/SkGraphics.h"
 #include "include/core/SkImageInfo.h"
 #include "include/core/SkPaint.h"
+#include "include/core/SkPath.h"
+#include "include/core/SkPathBuilder.h"
 #include "include/core/SkPoint.h"
 #include "include/core/SkRect.h"
 #include "include/core/SkSpan.h"
@@ -457,6 +459,36 @@ void Bitmap::fillRect(const Rect& r, Color c) {
     sk_->canvas->drawRect(SkRect::MakeLTRB(static_cast<SkScalar>(x0), static_cast<SkScalar>(y0),
                                            static_cast<SkScalar>(x1), static_cast<SkScalar>(y1)),
                           p);
+}
+
+void Bitmap::fillTriangle(float x0, float y0, float x1, float y1, float x2, float y2, Color c) {
+    const float min_x = std::min({x0, x1, x2});
+    const float max_x = std::max({x0, x1, x2});
+    const float min_y = std::min({y0, y1, y2});
+    const float max_y = std::max({y0, y1, y2});
+    if (max_x <= 0.0f || max_y <= 0.0f || min_x >= static_cast<float>(w_) ||
+        min_y >= static_cast<float>(h_))
+        return;
+    // 记账按包围盒的一半：三个顶点的覆盖率拿不回来（Skia 不回传像素级结果），这是上界
+    //   估计。它只进"这一拍写了多少像素"的账，不进任何逐像素判据。
+    painted_px_ += static_cast<size_t>((max_x - min_x) * (max_y - min_y) * 0.5f);
+    if (!sk_ || !sk_->canvas) return;
+
+    // SkPath 没有可变接口，路径靠 SkPathBuilder 攒起来再取。
+    SkPathBuilder builder;
+    builder.moveTo(x0, y0);
+    builder.lineTo(x1, y1);
+    builder.lineTo(x2, y2);
+    builder.close();
+    const SkPath path = builder.detach();
+    SkPaint p;
+    p.setColor(toSk(c));
+    // 顶点由调用方对齐到整数像素，所以关掉抗锯齿：边缘本来就落在像素格上，开 AA 只会
+    //   引入半透明边；更要紧的是同一枚图形放在"整带画布"与"分带画布"上，AA 的覆盖率
+    //   会因画布高度不同而差一两个色阶，而连页接缝的判据是逐字节相同。
+    p.setAntiAlias(false);
+    p.setBlendMode(SkBlendMode::kSrcOver);
+    sk_->canvas->drawPath(path, p);
 }
 
 void Bitmap::strokeRect(const Rect& r, Color c, float thickness) {

@@ -962,6 +962,20 @@ void setShowControlDots(bool on) {
 bool showControlDots() { return g_cfg.show_control_dots; }
 
 /**
+ * 不可见字符标记的档位：0 不显示 / 1 只显示段落标记 / 2 连空格与制表符一起显示。
+ *
+ * 标记不占宽度、不进流位置，改它不重排 —— 只让页位图重光栅（见 rasterSignature）。
+ * 档位越界时按"只显示段落标记"处理：它是默认档，也是"看得见段落边界"这一档。
+ */
+void setShowMarks(int mode) {
+    EngineConfig c = g_cfg;
+    c.marks = (mode < 0 || mode > 2) ? MarksMode::Paragraph : static_cast<MarksMode>(mode);
+    g_cfg = c;
+    applyConfig();
+}
+int showMarks() { return static_cast<int>(g_cfg.marks); }
+
+/**
  * 删控件：拆壳（保留内容）或连内容一起删。走 AndRender 版 —— 宿主一次调用就收尾，
  * 不必自己记得再排一次（漏掉那步的症状是"控件没了但画布上括号还在"）。
  * 表单模式默认被 structureLock 拒（返回 false），探针要删就得先切文档模式。
@@ -1684,6 +1698,8 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("setShowBrackets", &setShowBrackets);
     emscripten::function("showBrackets", &showBrackets);
     emscripten::function("setShowControlDots", &setShowControlDots);
+    emscripten::function("setShowMarks", &setShowMarks);
+    emscripten::function("showMarks", &showMarks);
     emscripten::function("showControlDots", &showControlDots);
     emscripten::function("removeControlAt", &removeControlAt);
     emscripten::function("setControlPropAt", &setControlPropAt);

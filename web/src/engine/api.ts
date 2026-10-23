@@ -302,6 +302,7 @@ const COMMANDS: Array<[string, string, string[], string]> = [
   ['setEditMode',           'w', ['setEditMode'],                                         'host'],  // 会重编译整篇，但不重绘
   ['setShowBrackets',       'w', ['setShowBrackets'],                                     'host'],  // 会重排（括号占宽度）
   ['setShowControlDots',    'w', ['setShowControlDots'],                                  'host'],  // 不重排，只改光栅签名
+  ['setShowMarks',          'w', ['setShowMarks'],                                        'host'],  // 编辑标记：不重排，只改光栅签名
   ['caretStyle',            'w', ['caretStyleJson', 'setCaretStyle'],                     'host'],
   ['selectionStyle',        'w', ['selectionStyleJson', 'setSelectionStyle'],             'host'],
   ['setUndoLimit',          'w', ['setUndoLimit'],                                        'none'],
@@ -336,6 +337,7 @@ const COMMANDS: Array<[string, string, string[], string]> = [
   ['editMode',              'r', ['editMode'],                                            'none'],
   ['showBrackets',          'r', ['showBrackets'],                                        'none'],
   ['showControlDots',       'r', ['showControlDots'],                                     'none'],
+  ['showMarks',             'r', ['showMarks'],                                           'none'],
   ['undoLimit',             'r', ['undoLimit'],                                           'none'],
 
   // 查询：几何
@@ -1051,6 +1053,7 @@ const WRITE = collect('w', {
   setEditMode: (a) => mod.setEditMode(a.mode | 0),
   setShowBrackets: (a) => mod.setShowBrackets(!!a.on),
   setShowControlDots: (a) => mod.setShowControlDots(!!a.on),
+  setShowMarks: (a) => mod.setShowMarks(a.mode | 0),
   /**
    * 光标与选区的样式。缺的字段按现状补 —— 与单线程宿主门面同一套补全规则，
    *   两处不能各写一套（面板只改颜色时，宽度必须原样保留）。
@@ -1295,6 +1298,7 @@ const READ = collect('r', {
   editMode: () => mod.editMode(),
   showBrackets: () => mod.showBrackets(),
   showControlDots: () => mod.showControlDots(),
+  showMarks: () => mod.showMarks(),
   undoLimit: () => mod.undoLimit(),
   auditFrame: () => JSON.parse(mod.auditFrame()),
   auditBase: () => JSON.parse(mod.auditBase()),

@@ -112,6 +112,22 @@ public:
     void strokeRect(const Rect& r, Color c, float thickness);
 
     /**
+     * 实心填充一个三角形（顶点是设备像素）。
+     *
+     * 只为"字形里根本没有的图形"而存在（编辑标记里换行符的箭头）。顶点必须由调用方
+     * 对齐到整数像素：实现不开抗锯齿，因为分带与整带的画布高度不同会让 AA 的覆盖率差出
+     * 一两个色阶，而连页接缝的判据是逐字节相同。
+     * @param x0 第一个顶点的 x
+     * @param y0 第一个顶点的 y
+     * @param x1 第二个顶点的 x
+     * @param y1 第二个顶点的 y
+     * @param x2 第三个顶点的 x
+     * @param y2 第三个顶点的 y
+     * @param c 颜色
+     */
+    void fillTriangle(float x0, float y0, float x1, float y1, float x2, float y2, Color c);
+
+    /**
      * 按 c.a 的透明度把颜色混进 r 覆盖的区域（保留底下已经画好的内容）。
      *
      * 与 fillRect 分开的理由只有一条：选区是盖在文字上的，实心填充会把字一起抹掉，

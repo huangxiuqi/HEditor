@@ -252,7 +252,7 @@ setText(text: string, opts?: { repeat?: number }): Promise<void>   // 明确用�
 | 类别 | 项 | 为什么 |
 | --- | --- | --- |
 | 构造期固定 | `container` `assets` `fonts` | 换容器要重建 DOM；换 Worker 壳要重建引擎；字体装一次最贵 |
-| 运行期可改 | `zoom` `pageMode` `mode` `input` `showBrackets` `showControlDots` `undoLimit` `caretStyle` `selectionStyle` | 有明确语义，代价可分级 |
+| 运行期可改 | `zoom` `pageMode` `mode` `input` `showBrackets` `showControlDots` `showMarks` `undoLimit` `caretStyle` `selectionStyle` | 有明确语义，代价可分级 |
 | 只读 | `pages` `geometry` `caret` `selection` | 从引擎状态推出来 |
 
 ### 7.2 一个入口，不是 14 个 setter
@@ -272,7 +272,7 @@ const c = editor.config();     // 生效后的值（越界已夹取）
 | 标签 | 项 |
 | --- | --- |
 | `none` | `undoLimit` |
-| `paint` | `mode` `input` `showControlDots` `caretStyle` `selectionStyle` |
+| `paint` | `mode` `input` `showControlDots` `showMarks` `caretStyle` `selectionStyle` |
 
 `mode` 是三档而不是 `readOnly: boolean`：`document` / `form` / `readOnly`。表单模式（光标自由、
 只有可编辑控件里的字改得动）是填表这个场景的主路径，布尔值表达不了它。三档都要落到引擎
@@ -284,6 +284,22 @@ const c = editor.config();     // 生效后的值（越界已夹取）
 
 类型不符 / 枚举越界 / `NaN` / 未声明的键 / 只读项 → **同步抛**（入队之前）。
 数值越界（`zoom: 100`）→ 夹取，返回值里给生效后的数。
+
+---
+
+### 7.5 编辑标记（不可见字符）
+
+`showMarks` 三档：`'none'` 全不显示、`'paragraph'` 只显示段落标记（默认）、`'all'` 连空格与
+制表符一起显示（空格里画中点、制表符画箭头）。标记画成 ↵ 的形状（一横 + 左端箭头 + 右端
+上折一竖），位置在每一段最后一行的行末。
+
+三条约束，都写进了实现：标记**不占宽度**（不进流位置、不改断行，于是开关它只重光栅）；
+**不进页内容指纹**（它不是内容），所以档位与"只读态画不画"都混进了光栅签名 ——
+签名是"这一页像素还作不作数"的唯一判据，漏一项就是"改档位屏幕不动"；
+**只读模式不画**（那是呈现态，标记会被印出来，与表单括号同一条）。
+形状用矩形与三角形拼、不借字体字形：这三份字体里都没有 U+21B5，借字形会在缺字的行上
+静默消失；顶点对齐到整数像素并且不开抗锯齿 —— 分带与整带的画布高度不同，AA 的覆盖率会
+差出一两个色阶，而连页接缝的判据是逐字节相同。
 
 ---
 

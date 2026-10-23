@@ -140,7 +140,7 @@ static uint64_t fnvMixColor(uint64_t h, const Color& c) {
  *   加进这里，不必再维护一张"记得清缓存"的清单（TRAPS 128 的正解）。
  * 与排版无关的项刻意不收：页间隙只影响落点、背景色只影响帧、光标/选区色只影响瞬态层。
  */
-static uint64_t rasterSignature(const EngineConfig& cfg) {
+static uint64_t rasterSignature(const EngineConfig& cfg, bool marks_shown) {
     uint64_t h = kFnvBasis;
     h = fnvMixFloat(h, cfg.zoom);
     h = fnvMixFloat(h, cfg.page.width_pt);
@@ -162,6 +162,12 @@ static uint64_t rasterSignature(const EngineConfig& cfg) {
     h = fnvMixColor(h, cfg.control_mark);
     h = fnvMixColor(h, cfg.control_mark_ro);
     h = fnvMixFloat(h, cfg.control_dot_pt);
+    // 编辑标记：同样是"画在页位图里、排版看不见"的一层，改档位就是这一页的像素变了。
+    //   混的是"此刻画不画"而不是档位本身 —— 只读态不画，而它不进页内容指纹（内容没变），
+    //   两处都不管的话，切到只读之后缓存会把"画了标记的那一版像素"一直贴下去。
+    h = fnvMix(h, marks_shown ? 1ULL : 0ULL);
+    h = fnvMix(h, static_cast<uint64_t>(cfg.marks));
+    h = fnvMixColor(h, cfg.mark_color);
     return h;
 }
 
@@ -190,7 +196,7 @@ void EditorEngine::setConfig(const EngineConfig& cfg) {
     if (cfg_.caret_width_pt < kMinCaretWidthPt) cfg_.caret_width_pt = kMinCaretWidthPt;
     // 光栅签名一变，所有页的像素都不再作数（判据在 pageBitmapFresh）。
     //   这里不再逐项比对再清缓存：那张清单漏一项就是"改了底色屏幕不变"（TRAPS 128）。
-    const uint64_t sig = rasterSignature(cfg_);
+    const uint64_t sig = rasterSignature(cfg_, marksShown());
     if (sig != raster_sig_) {
         raster_sig_ = sig;
         page_dirty_rects_.clear();  // 旧矩形描述的是旧像素，作废
@@ -1197,6 +1203,15 @@ void EditorEngine::setEditMode(EditMode m) {
     if (mode_ == m) return;
     const int plan_before = bracketPlanId();
     mode_ = m;
+    // 编辑标记只读不画，而只读未必改内容（隐藏字段一个都没有时页面指纹不动）。
+    //   所以照"光栅签名是唯一判据"那条（TRAPS 128）重算一次：该作废就作废。
+    {
+        const uint64_t sig = rasterSignature(cfg_, marksShown());
+        if (sig != raster_sig_) {
+            raster_sig_ = sig;
+            page_dirty_rects_.clear();
+        }
+    }
 
     // 切模式要重编译，而且整篇重排：隐藏控件的可见性口径随模式变（文档模式是设计态、
     //   表单与只读是呈现态），所以块流本身可能变 —— 隐藏字段的子树被摘除或放回，段数都可能
