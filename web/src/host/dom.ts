@@ -338,7 +338,8 @@ export function ensureMarkup(container: HTMLElement): void {
     // 预编辑层：输入法组合中的字没有别的地方显示（承接层是透明的）。
     `    <div class="${PART_PREEDIT}"` +
       ' style="position:absolute;left:0;top:0;display:none;white-space:pre;' +
-      'pointer-events:none;color:#1a1a1a;border-bottom:1px solid #1f6feb"></div>',
+      'pointer-events:none;color:#1a1a1a;background:#fff;' +
+      'box-shadow:0 0 0 1px #d8e0ea;border-bottom:1px solid #1f6feb"></div>',
     '  </div>',
     '</div>',
   ].join('\n');

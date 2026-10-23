@@ -142,6 +142,26 @@ void EditorEngine::computePageFingerprints(int dirty_lo, int dirty_hi) {
     //   把这些混进指纹只会无谓地重画所有页。
 
     computeLineFingerprints(dirty_lo, dirty_hi, !partial);
+
+    // 行结构也进页指纹。
+    //
+    //   上面那份输入只有字形，而画在页上的东西不止字形：段落标记由行盒给出几何，一个
+    //   字形都不占。于是"在文档末尾回车建一个空段"这种改动在像素上看得见、在指纹上
+    //   看不见 —— 页被判成新鲜，一次都不重光栅，那枚标记永远不出现（TRAPS 195 同族：
+    //   页指纹必须覆盖绘制层的全部输入）。
+    //   行指纹正是"这一行画出来的全部输入"，按页混进来补上这一段；顺序敏感，所以
+    //   增删一条行、两条行换序都会改变页指纹，不必再单独混行数。
+    //   只混重算范围内的页：范围外的页要保留上一轮的指纹，再混一次会让它永远不新鲜。
+    {
+        const std::vector<LineBox>& lines = layout_.lines;
+        const size_t n_lines = std::min(lines.size(), line_fp_new_.size());
+        for (size_t li = 0; li < n_lines; ++li) {
+            const int p = lines[li].page;
+            if (p < dirty_lo || p > dirty_hi || p < 0 || p >= n) continue;
+            page_fp_new_[static_cast<size_t>(p)] =
+                fnvMix(page_fp_new_[static_cast<size_t>(p)], line_fp_new_[li]);
+        }
+    }
 }
 
 /**
@@ -178,6 +198,10 @@ void EditorEngine::computeLineFingerprints(int dirty_lo, int dirty_hi, bool full
         mixf(lb.block_hi_pt);
         mixf(lb.inline_origin_pt);
         mixf(lb.inline_end_pt);
+        // 标记的粗细与基线：段落标记的笔画按字号算，位置按 bracket_axis_pt 算 ——
+        //   行盒的长宽可能一点不动（行高由 line_factor 与块字号压着），而标记画出来变了。
+        mixf(lb.size_pt);
+        mixf(lb.bracket_axis_pt);
         h = fnvMix(h, static_cast<uint64_t>(lb.page));
         h = fnvMix(h, static_cast<uint64_t>(lb.paragraph));
         h = fnvMix(h, static_cast<uint64_t>(lb.first_cp));

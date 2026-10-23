@@ -339,9 +339,14 @@ void EditorEngine::rasterIntoBitmap(Bitmap& target, int page_index, const float*
             if (ul_x1 > ul_x0) {
                 // 位置与厚度都按这一段的字号算：线落在基线下方约 0.12 em，粗约 0.055 em，
                 //   再细会碎、再粗会像删除线。
-                const float thick = std::max(1.0f, ul_size * zoom * 0.042f);
-                const float y = (ul_y + ul_size * 0.12f) * zoom + dy;
-                target.fillRect(Rect{ul_x0 * zoom, y, (ul_x1 - ul_x0) * zoom, thick}, ul_color);
+                // 粗细按字号算，并且取整到整像素：不取整时 1.28 px 会横跨两行像素，
+                //   看上去比实际粗一倍（而且大字号小字号都是两行，看着像"粗细固定"）。
+                const float thick = std::max(1.0f, std::round(ul_size * zoom * 0.04f));
+                // 位置比 Word 再低一点点：贴着字底会把相邻字的底部连成一条。
+                const float y = std::round((ul_y + ul_size * 0.14f) * zoom + dy);
+                const float x0 = std::round(ul_x0 * zoom);
+                const float x1 = std::round(ul_x1 * zoom);
+                if (x1 > x0) target.fillRect(Rect{x0, y, x1 - x0, thick}, ul_color);
             }
             ul_line = -1;
         };
@@ -361,16 +366,11 @@ void EditorEngine::rasterIntoBitmap(Bitmap& target, int page_index, const float*
             //   接缝那一趟要按平移之后的坐标筛（它画在本带的顶部）。
             const float y_pt = pg.y_pt + dy / zoom;
             if (band && (y_pt < *band_lo_pt - 1.0f || y_pt > *band_hi_pt + 1.0f)) continue;
-            // 下划线：同一行内，本字形的起点就是上一段的右端；换行或遇到不带下划线的
-            //   字形时把上一段合上。
-            if (ul_line >= 0) {
-                if (pg.line != ul_line) {
-                    flush_ul();
-                } else {
-                    ul_x1 = pg.x_pt;
-                }
-            }
+            // 下划线：同一行内把连续带下划线的字形合成一条；换行或遇到不带下划线的
+            //   字形时把上一段合上。右端取这个字形自己的 advance —— 按 0.6 em 估的话，
+            //   行末那个汉字（1 em 宽）总会短掉四成。
             if (pg.underline) {
+                if (ul_line >= 0 && pg.line != ul_line) flush_ul();
                 if (ul_line < 0) {
                     ul_line = pg.line;
                     ul_x0 = pg.x_pt;
@@ -378,9 +378,8 @@ void EditorEngine::rasterIntoBitmap(Bitmap& target, int page_index, const float*
                     ul_size = pg.size_pt;
                     ul_color = pg.color;
                 }
-                // 右端取值：行末那个字形后面没有"下一个起点"，按 0.6 em 收，
-                //   宁可短一点也不压到后面的字。
-                ul_x1 = pg.x_pt + pg.size_pt * 0.6f;
+                const float adv = pg.advance_pt > 0.0f ? pg.advance_pt : pg.size_pt * 0.6f;
+                ul_x1 = pg.x_pt + adv;
             } else {
                 flush_ul();
             }

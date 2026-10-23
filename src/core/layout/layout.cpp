@@ -1447,6 +1447,7 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
                         pg.line = line_total;
                         pg.vertical = false;
                         pg.rotate_deg = 0.0f;
+                        pg.advance_pt = sg.x_advance * usToPt;
                         pg.cluster = sg.cluster;
                         pg.paragraph = static_cast<int>(para_index);
                         res.glyphs.push_back(pg);
@@ -1612,6 +1613,7 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
                             pg.x_pt = gx + sg.y_offset * usToPt;
                             pg.y_pt = gy + sg.x_offset * usToPt;
                             pg.rotate_deg = 90.0f;
+                            pg.advance_pt = sg.y_advance * usToPt;
                         } else {
                             // 非侧倒走 HarfBuzz 的 TTB：它已自行减掉竖排原点
                             // （hb-ot-shape.cc: subtract_glyph_v_origins）。

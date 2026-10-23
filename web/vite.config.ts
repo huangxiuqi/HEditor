@@ -32,6 +32,10 @@ function repoServe(): Plugin {
         const file = join(REPO, normalize(decodeURIComponent(url)));
         if (!file.startsWith(REPO) || !existsSync(file) || !statSync(file).isFile()) return next();
         res.setHeader('Content-Type', MIME[extname(file)] ?? 'application/octet-stream');
+        // 引擎胶水与 wasm 是固定文件名，浏览器与 Worker 会照常缓存 —— 改了 C++ 重新构建
+        //   之后页面还跑旧的，表现是"改了没反应，而产物时间戳是新的"。开发服务器这两个
+        //   目录一律不许缓存；生产由调用方给 bust（见 editor.ts 的 assets.bust）。
+        res.setHeader('Cache-Control', 'no-store');
         createReadStream(file).pipe(res);
       });
     },

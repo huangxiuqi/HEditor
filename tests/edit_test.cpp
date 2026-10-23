@@ -11555,6 +11555,284 @@ int main() {
                    "这一轮之后增量与全量仍然逐字段一致");
     }
 
+    if (runSection(66))
+        std::printf("\n[66] 空段跨选有高亮 / 选区格式求交（三态缺席）\n");
+    if (runSection(66)) {
+        EngineConfig c66;
+        c66.zoom = 1.0f;
+        c66.page.width_pt = 320.0f;
+        c66.page.height_pt = 240.0f;
+        c66.page.margin_pt = 12.0f;
+        const std::vector<std::string> fonts66 = {cjkPath, mnPath, latinPath};
+        NodeTree t66;
+        {
+            const NodeId sec = t66.firstSectionId();
+            const NodeId a = t66.appendChild(sec, NodeKind::TextRun);
+            t66.setText(a, utf8ToCodepoints("甲乙"));
+            t66.appendChild(sec, NodeKind::ParagraphMark);
+            t66.appendChild(sec, NodeKind::ParagraphMark);
+            const NodeId b = t66.appendChild(sec, NodeKind::TextRun);
+            t66.setText(b, utf8ToCodepoints("丙丁"));
+            t66.appendChild(sec, NodeKind::ParagraphMark);
+        }
+        EditorEngine e66;
+        if (!e66.init(fonts66)) {
+            std::fprintf(stderr, "字体加载失败\n");
+            return 2;
+        }
+        e66.setConfig(c66);
+        e66.setDocument(t66, StyleSheet{});
+        e66.relayout();
+        e66.repaint();
+
+        e66.setSelection(Range{e66.flowPosAt(0, 0), e66.flowPosAt(0, 2)});
+        CharFormat b;
+        b.bold = true;
+        e66.applyCharFormatAndRender(b);
+
+        // 跨选过空段：三行都要有矩形，中间那一条是高 17 磅、宽约 0.35 em 的窄条。
+        e66.setSelection(Range{e66.flowPosAt(0, 1), e66.flowPosAt(2, 1)});
+        const std::vector<EditorEngine::PageRect> rr = e66.selectionRects();
+        expectTrue(rr.size() == 3, "★ 跨选过空段：三条矩形都在（实际 " +
+                                       std::to_string(rr.size()) + " 条）");
+        bool has_narrow = false;
+        for (const auto& pr : rr) {
+            if (pr.r_pt.w > 0.0f && pr.r_pt.w < 6.0f && pr.r_pt.h > 10.0f) has_narrow = true;
+        }
+        expectTrue(has_narrow, "★ 空段那一条是窄条（段落标记的宽度），不是一个零宽矩形");
+
+        // 求交：选区跨出加粗那一段，加粗这一项必须缺席（Word 的工具栏在这里会灭掉）。
+        e66.setSelection(Range{e66.flowPosAt(0, 1), e66.flowPosAt(2, 1)});
+        const std::string mixed = e66.effectiveFormatAtJson();
+        expectTrue(mixed.find("\"b\"") == std::string::npos,
+                   "★ 跨出加粗段之后加粗项缺席（" + mixed + "）");
+        expectTrue(mixed.find("\"sz\"") != std::string::npos,
+                   "字号两边一致，仍然要报（" + mixed + "）");
+        // 反向一半：只选加粗那两个字，加粗项必须回来。
+        e66.setSelection(Range{e66.flowPosAt(0, 0), e66.flowPosAt(0, 2)});
+        const std::string bold_only = e66.effectiveFormatAtJson();
+        expectTrue(bold_only.find("\"b\":true") != std::string::npos,
+                   "★ 只选加粗段：加粗项报 true（" + bold_only + "）");
+        expectTrue(e66.auditCompile() == 0 && e66.auditLayout() == 0,
+                   "这一段之后增量与全量仍然逐字段一致");
+
+        // 末尾：正向选到文档最末，最后一段也要有矩形。那枚段落标记占流里一位、不属于
+        //   任何一块的内容，靠流区间选不到 —— 由 selectionRectsIn 按方向补上（见 [67]）。
+        e66.setSelection(Range{e66.flowPosAt(0, 0), e66.flowPosAt(2, 2)});
+        const auto all = e66.selectionRects();
+        expectTrue(all.size() == 3, "★ 选到文档末尾：三条矩形都在（含最后一段）");
+
+        // 末尾回车新建空段：行盒必须要能画那枚标记（有字体、size 正常、行末为 0）。
+        e66.setCaret(2, 2);
+        e66.splitParagraphAndRender();
+        // 判据落在"页位图 == 从零重光栅"上，不比帧像素：帧里混着光标与选区，
+        //   光标挪一格就能让两次读数不同，而新空段的标记一像素都没画。
+        expectTrue(e66.auditPageJson(0).find("\"diff\":0") != std::string::npos,
+                   "★ 回车之后页位图与从零重光栅逐字节一致（新空段的标记在位图里）");
+        const LineBox& born = e66.layout().lines.back();
+        expectTrue(e66.blocks().size() == 4 && born.paragraph == 3,
+                   "回车之后多出第 4 段，末行就是它");
+        expectTrue(born.bracket_font != nullptr && born.last_cp == 0 && born.inline_end_pt == 0.0f,
+                   "★ 新建空段的行盒具备画标记的条件（字体在、码点数 0、行末 0）");
+        expectTrue(e66.auditCompile() == 0 && e66.auditLayout() == 0,
+                   "回车之后增量与全量仍然逐字段一致");
+    }
+
+    if (runSection(67)) {
+        std::printf("\n[67] 空段标记与文档末选区\n");
+        EngineConfig c67;
+        c67.zoom = 1.0f;
+        c67.page.width_pt = 320.0f;
+        c67.page.height_pt = 240.0f;
+        c67.page.margin_pt = 12.0f;
+        const std::vector<std::string> fonts67 = {cjkPath, mnPath, latinPath};
+        NodeTree t67;
+        {
+            const NodeId sec = t67.firstSectionId();
+            const NodeId a = t67.appendChild(sec, NodeKind::TextRun);
+            t67.setText(a, utf8ToCodepoints("甲乙"));
+            t67.appendChild(sec, NodeKind::ParagraphMark);
+            const NodeId b = t67.appendChild(sec, NodeKind::TextRun);
+            t67.setText(b, utf8ToCodepoints("丙丁"));
+            t67.appendChild(sec, NodeKind::ParagraphMark);
+        }
+        EditorEngine e67;
+        if (!e67.init(fonts67)) {
+            std::fprintf(stderr, "字体加载失败\n");
+            return 2;
+        }
+        e67.setConfig(c67);
+        e67.setDocument(t67, StyleSheet{});
+        e67.relayout();
+        e67.repaint();
+
+        // 场景一：末尾连按三次回车。只多出三个行盒，一个字形都没多 —— 页指纹若只认
+        //   字形，这几行会被判成"没变过"，那三枚标记一次都不重光栅。
+        for (int i = 0; i < 3; ++i) {
+            const int last = static_cast<int>(e67.blocks().size()) - 1;
+            e67.setCaret(last, e67.blocks()[static_cast<size_t>(last)].cp_text.size());
+            e67.splitParagraphAndRender();
+        }
+        // 光标挪回文档首：下面数墨迹时，瞬态不会落进末段那一格。
+        e67.setCaret(0, 0);
+        e67.repaint();
+
+        const int pw67 = e67.pagePxWidth();
+        const int ph67 = e67.pagePxHeight();
+        const uint8_t* px67 = e67.pagePixels(0);
+        auto inkIn = [&](float x, float y, float w, float h) {
+            const int x0 = std::max(0, static_cast<int>(std::floor(x)) - 1);
+            const int x1 = std::min(pw67, static_cast<int>(std::ceil(x + w)) + 1);
+            const int y0 = std::max(0, static_cast<int>(std::floor(y)));
+            const int y1 = std::min(ph67, static_cast<int>(std::ceil(y + h)));
+            int n = 0;
+            for (int yy = y0; yy < y1; ++yy) {
+                for (int xx = x0; xx < x1; ++xx) {
+                    const size_t o = (static_cast<size_t>(yy) * static_cast<size_t>(pw67) +
+                                      static_cast<size_t>(xx)) * 4u;
+                    if (px67[o] < 200 && px67[o + 1] < 200 && px67[o + 2] < 200) ++n;
+                }
+            }
+            return n;
+        };
+        std::vector<int> ink67;
+        for (size_t i = 0; i < e67.layout().lines.size(); ++i) {
+            const LineBox& lb = e67.layout().lines[i];
+            const float slot_x = lb.inline_origin_pt + lb.inline_end_pt;
+            ink67.push_back(
+                inkIn(slot_x, lb.block_lo_pt, lb.size_pt * 0.7f, lb.block_hi_pt - lb.block_lo_pt));
+        }
+        expectTrue(
+            e67.layout().lines.size() == 5,
+            "回车三次之后有五条行盒（实际 " + std::to_string(e67.layout().lines.size()) + "）");
+        expectTrue(ink67.size() == 5 && ink67[2] > 0 && ink67[3] > 0 && ink67[4] > 0,
+                   "★ 三个新空段的段落标记都画进了页位图（实际墨迹 " +
+                       std::to_string(ink67.size() == 5 ? ink67[4] : -1) + " 像素）");
+        expectTrue(e67.auditPageJson(0).find("\"diff\":0") != std::string::npos,
+                   "★ 页位图 == 从零重光栅（" + e67.auditPageJson(0) + "）");
+
+        // 场景二：正向选到文档末（从上往下拖 = anchor 在首、focus 在末）。
+        //   末段那枚标记在流里占一位却不属于任何一块的内容，要按"正向选到末位"补上。
+        const int last67 = static_cast<int>(e67.blocks().size()) - 1;
+        e67.selectAll();
+        const std::vector<EditorEngine::PageRect> fwd67 = e67.selectionRects();
+        expectTrue(fwd67.size() == 5, "★ 正向选到文档末：五段各一条矩形（含末段，实际 " +
+                                          std::to_string(fwd67.size()) + " 条）");
+        if (fwd67.size() == 5) {
+            const LineBox& tail67 = e67.layout().lines.back();
+            expectTrue(
+                fwd67[4].r_pt.w > 0.0f && fwd67[4].r_pt.w <= tail67.size_pt * 0.4f + 0.01f,
+                "★ 末段那一条就是那枚标记的窄条（宽 " + std::to_string(fwd67[4].r_pt.w) + " 磅）");
+        }
+
+        // 反向一半：锚点在文档末、焦点在首。末段的标记不在选区里 —— 与字处理软件一致，
+        //   反过来选也高亮末段，就成了"方向不影响选中范围"的另一套语义。
+        const FlowPos end67 = e67.flowPosAt(last67, 0);
+        e67.setSelection(Range{end67, 0});
+        const std::vector<EditorEngine::PageRect> back67 = e67.selectionRects();
+        expectTrue(back67.size() == 4, "★ 反向选到文档末：末段没有那一条（实际 " +
+                                           std::to_string(back67.size()) + " 条）");
+
+        // 场景三：末段有字。正向全选时末行那一条要比正文宽出一枚标记，否则"选到文档末"
+        //   与"选到正文末"在屏幕上没有区别。
+        NodeTree t68;
+        {
+            const NodeId sec = t68.firstSectionId();
+            const NodeId a = t68.appendChild(sec, NodeKind::TextRun);
+            t68.setText(a, utf8ToCodepoints("甲乙"));
+            t68.appendChild(sec, NodeKind::ParagraphMark);
+        }
+        EditorEngine e68;
+        if (!e68.init(fonts67)) {
+            std::fprintf(stderr, "字体加载失败\n");
+            return 2;
+        }
+        e68.setConfig(c67);
+        e68.setDocument(t68, StyleSheet{});
+        e68.relayout();
+        e68.repaint();
+        e68.selectAll();
+        const std::vector<EditorEngine::PageRect> one68 = e68.selectionRects();
+        const float tail_w68 =
+            e68.layout().lines.back().inline_end_pt + e68.layout().lines.back().size_pt * 0.35f;
+        expectTrue(
+            one68.size() == 1 && std::fabs(one68[0].r_pt.w - tail_w68) < 0.2f,
+            "★ 末段有字：末行那一条宽出行末一枚标记（期望 " + std::to_string(tail_w68) + "，实际 " +
+                (one68.empty() ? std::string("无") : std::to_string(one68[0].r_pt.w)) + "）");
+        expectTrue(e67.auditCompile() == 0 && e67.auditLayout() == 0 &&
+                       e68.auditCompile() == 0 && e68.auditLayout() == 0,
+                   "这一段之后增量与全量仍然逐字段一致");
+
+        // 场景四：竖排。标记与选区窄条都换到块轴上（列盒左右），是另一段加法 ——
+        //   横排那一份过了不能代表这里。
+        {
+            BlockSpec v0;
+            v0.font_index = 0;
+            v0.size_pt = 12.0f;
+            v0.wm = WritingMode::VerticalLR();
+            v0.line_factor = 1.6f;
+            v0.setText("甲乙");
+            BlockSpec v1 = v0;
+            v1.setText("丙丁");
+            EditorEngine ev;
+            expectTrue(ev.init(fonts67), "竖排引擎初始化");
+            ev.setConfig(c67);
+            loadBlocks(ev, {v0, v1});
+            ev.relayout();
+            ev.repaint();
+            for (int i = 0; i < 2; ++i) {
+                const int last = static_cast<int>(ev.blocks().size()) - 1;
+                ev.setCaret(last, ev.blocks()[static_cast<size_t>(last)].cp_text.size());
+                ev.splitParagraphAndRender();
+            }
+            ev.setCaret(0, 0);
+            ev.repaint();
+
+            const int pwv = ev.pagePxWidth();
+            const int phv = ev.pagePxHeight();
+            int marked = 0;
+            for (const LineBox& lb : ev.layout().lines) {
+                // 竖排段各占一列、每列一整页（块轴吃掉本页剩余宽度），所以逐行取它自己那一页。
+                const uint8_t* pxv = ev.pagePixels(lb.page);
+                if (pxv == nullptr) continue;
+                // 竖排：行内轴是 y，标记坐在列底（inline_origin + inline_end）那一带上。
+                const int y0 = std::max(0, static_cast<int>(std::floor(lb.inline_origin_pt +
+                                                                       lb.inline_end_pt)));
+                const int y1 = std::min(phv, static_cast<int>(std::ceil(
+                                                  lb.inline_origin_pt + lb.inline_end_pt +
+                                                  lb.size_pt * 0.8f)));
+                const int x0 = std::max(0, static_cast<int>(std::floor(lb.block_lo_pt)) - 1);
+                const int x1 = std::min(pwv, static_cast<int>(std::ceil(lb.block_hi_pt)) + 1);
+                int n = 0;
+                for (int yy = y0; yy < y1; ++yy) {
+                    for (int xx = x0; xx < x1; ++xx) {
+                        const size_t o = (static_cast<size_t>(yy) * static_cast<size_t>(pwv) +
+                                          static_cast<size_t>(xx)) * 4u;
+                        if (pxv[o] < 200 && pxv[o + 1] < 200 && pxv[o + 2] < 200) ++n;
+                    }
+                }
+                if (n > 0) ++marked;
+            }
+            expectTrue(ev.layout().lines.size() == 4 && marked == 4,
+                       "★ 竖排：回车新生的两列也画出了段落标记（" + std::to_string(marked) + " / " +
+                           std::to_string(ev.layout().lines.size()) + " 列有墨迹）");
+            ev.selectAll();
+            const std::vector<EditorEngine::PageRect> fwdv = ev.selectionRects();
+            expectTrue(fwdv.size() == 4, "★ 竖排：正向选到文档末，末列也有矩形（实际 " +
+                                             std::to_string(fwdv.size()) + " 条）");
+            if (!fwdv.empty()) {
+                const EditorEngine::PageRect& tailv = fwdv.back();
+                expectTrue(tailv.r_pt.h > 0.0f && tailv.r_pt.w > 0.0f,
+                           "★ 竖排末列那一条是竖直的窄条（" + std::to_string(tailv.r_pt.w) + " × " +
+                               std::to_string(tailv.r_pt.h) + "）");
+            }
+            expectTrue(ev.auditPageJson(0).find("\"diff\":0") != std::string::npos,
+                       "竖排页位图 == 从零重光栅（" + ev.auditPageJson(0) + "）");
+            expectTrue(ev.auditCompile() == 0 && ev.auditLayout() == 0,
+                       "竖排这一路增量与全量也逐字段一致");
+        }
+    }
+
     std::printf("\n──────────────────────────────\n");
     std::printf("共 %d 项断言，失败 %d 项\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

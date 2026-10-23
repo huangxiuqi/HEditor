@@ -747,6 +747,19 @@ std::vector<PageRect> CaretResolver::selectionRectsIn(int first_page, int count)
     }
     const int n_para = static_cast<int>(view_.block_flow->size());
 
+    // 文档末那一枚段落标记：它在流里占一位，却不属于任何一块的内容（块跨度只数内容，
+    //   标记夹在两块之间），按流区间求交永远选不到它 —— 末段就成了"选中了、一条高亮
+    //   都没有"。正向扩选到末位时它算被选中，与字处理软件同一条；反向选到末位时锚点
+    //   停在标记之前，不补。
+    const LineBox* tail_line = view_.layout->lines.empty() ? nullptr : &view_.layout->lines.back();
+    bool tail_mark = false;
+    if (tail_line != nullptr && !sel_.empty() && sel_.anchor < sel_.focus) {
+        const size_t last_block = view_.block_flow->size() - 1;
+        const FlowPos doc_end =
+            (*view_.block_flow)[last_block] + (*view_.block_flow_span)[last_block];
+        tail_mark = hi >= doc_end;
+    }
+
     // 行下标范围。行数组按页单调，所以限页时两端都能二分 ——
     //   不限页时遍历全篇是为了挑出真正落进选区的那几行，那是"文档行数"这个量级；
     //   而呈现每拍都走这一趟，全选时这笔开销会盖过真正要画的字。
@@ -829,7 +842,29 @@ std::vector<PageRect> CaretResolver::selectionRectsIn(int first_page, int count)
         const FlowPos base = (*view_.block_flow)[static_cast<size_t>(para)];
         const FlowPos seg_lo = std::max(lo, base);
         const FlowPos seg_hi = std::min(hi, base + (*view_.block_flow_span)[static_cast<size_t>(para)]);
-        if (seg_hi <= seg_lo) continue;
+        if (seg_hi <= seg_lo) {
+            // 空段（只有一个段落标记、块跨度是 0）：标记本身落在选区里就要有一条高亮 ——
+            //   否则"选中了空行"在屏幕上一个像素都没有。跨选到空行是最常见的那条路。
+            //   文档末那一段的标记位在内容区间之外（见上面的 tail_mark），正向选到末位
+            //   时由 tail_mark 补上这一条。
+            if (lo <= base && (base < hi || (tail_mark && &lb == tail_line))) {
+                Rect m;
+                const float w = lb.size_pt * 0.35f;
+                if (!lb.vertical) {
+                    m.x = lb.inline_origin_pt;
+                    m.w = w;
+                    m.y = lb.block_lo_pt;
+                    m.h = lb.block_hi_pt - lb.block_lo_pt;
+                } else {
+                    m.x = lb.block_lo_pt;
+                    m.w = lb.block_hi_pt - lb.block_lo_pt;
+                    m.y = lb.inline_origin_pt;
+                    m.h = w;
+                }
+                out.push_back(PageRect{lb.page, m});
+            }
+            continue;
+        }
 
         const int off_lo = cpOffsetInBlock(para, static_cast<int>(seg_lo - base));
         const int off_hi = cpOffsetInBlock(para, static_cast<int>(seg_hi - base));
@@ -850,7 +885,10 @@ std::vector<PageRect> CaretResolver::selectionRectsIn(int first_page, int count)
         if (l_hi == sel_hi && seg_hi == hi) side_hi = sideForFlow(hi);
 
         const float a0 = lb.inline_origin_pt + lb.offsetAtSide(l_lo, side_lo);
-        const float a1 = lb.inline_origin_pt + lb.offsetAtSide(l_hi, side_hi);
+        float a1 = lb.inline_origin_pt + lb.offsetAtSide(l_hi, side_hi);
+        // 末段的段落标记并进这一条：另推一条会与它首尾相接甚至重叠，而半透明的选区
+        //   叠两次就是一道深色缝。
+        if (tail_mark && &lb == tail_line) a1 += lb.size_pt * 0.35f;
         // 零宽的选区要有宽度：选中一个空段（或一段的段落标记）时，选的是一枚不占字符的
         //   位置，两端落在同一个偏移上 —— 按几何算就是零宽，而零宽的矩形在导出与合成时
         //   会被当作"没有选区"丢掉，于是"能选中、看不见"。给一个字符宽的窄条，宽度取自

@@ -444,43 +444,102 @@ std::string EditorEngine::charFormatAtJson(bool effective) const {
 
 std::string EditorEngine::effectiveFormatAtJson() const {
     nlohmann::ordered_json j = nlohmann::ordered_json::object();
-    // 落点：空选区取光标；有选区取选区起点。取光标（也就是 focus）的左邻居不行 ——
-    //   focus 在哪一头取决于从哪个方向划的，从左往右选与从右往左选就会读出两份不同的
-    //   格式（一边是一段自己的，一边是段外那个字）。
     const Range sel = selection();
-    TextPos at = caret();
-    if (!sel.empty()) {
-        TextPos begin{-1, 0};
-        if (flowToTextPos(sel.begin(), &begin) && begin.para >= 0) at = begin;
-    }
     const std::vector<BlockSpec>& bs = blocks();
-    if (at.para < 0 || at.para >= static_cast<int>(bs.size())) return j.dump();
-    const BlockSpec& blk = bs[static_cast<size_t>(at.para)];
-    const std::vector<FormatRun> runs = blk.effectiveRuns();
-    if (runs.empty()) return j.dump();
-    // 空选区取落点左边那个字（与"接着敲字会沿用哪一份格式"同一个约定，段首取第一个字）；
-    //   有选区取选中的第一个字 —— 工具栏要报的是"这一段文字是什么样"，不是它左边是什么样。
-    const int len = static_cast<int>(blk.cp_text.size());
-    const int cp = static_cast<int>(at.offset);
-    const int probe = sel.empty() ? (cp > 0 ? cp - 1 : 0) : std::min(cp, std::max(0, len - 1));
-    const FormatRun* hit = nullptr;
-    for (const FormatRun& r : runs) {
-        if (static_cast<int>(r.cp_begin) <= probe && probe < static_cast<int>(r.cp_end)) {
-            hit = &r;
-            break;
+    if (bs.empty()) return j.dump();
+
+    // 覆盖哪些 run：空选区就是落点那一处（取落点左边那个字，与"接着敲字沿用哪一份"
+    //   同一个约定）；有选区就是整段区间覆盖到的每一个 run。
+    std::vector<const FormatRun*> covered;
+    std::vector<FormatRun> owned;  // effectiveRuns 是值返回，先接住再取地址
+    std::vector<std::vector<FormatRun>> all_runs;
+    int p_lo = 0;
+    int p_hi = 0;
+    uint32_t cp_lo = 0;
+    uint32_t cp_hi = 0;
+    if (sel.empty()) {
+        const TextPos at = caret();
+        if (at.para < 0 || at.para >= static_cast<int>(bs.size())) return j.dump();
+        p_lo = p_hi = at.para;
+        const uint32_t len = static_cast<uint32_t>(bs[static_cast<size_t>(at.para)].cp_text.size());
+        const uint32_t cp = static_cast<uint32_t>(at.offset);
+        cp_lo = cp > 0 ? cp - 1 : 0;
+        cp_hi = std::min(cp_lo + 1, len);
+        if (len == 0) cp_hi = 0;
+    } else {
+        TextPos a{-1, 0};
+        TextPos b{-1, 0};
+        if (!flowToTextPos(sel.begin(), &a) || !flowToTextPos(sel.end(), &b)) return j.dump();
+        if (a.para < 0 || b.para < 0) return j.dump();
+        p_lo = a.para;
+        p_hi = b.para;
+        cp_lo = static_cast<uint32_t>(a.offset);
+        cp_hi = static_cast<uint32_t>(b.offset);
+    }
+    all_runs.reserve(static_cast<size_t>(p_hi - p_lo + 1));
+    for (int p = p_lo; p <= p_hi && p < static_cast<int>(bs.size()); ++p) {
+        const BlockSpec& blk = bs[static_cast<size_t>(p)];
+        all_runs.push_back(blk.effectiveRuns());
+        const std::vector<FormatRun>& runs = all_runs.back();
+        if (runs.empty()) continue;
+        const uint32_t len = static_cast<uint32_t>(blk.cp_text.size());
+        const uint32_t lo = (p == p_lo) ? cp_lo : 0;
+        const uint32_t hi = (p == p_hi) ? cp_hi : len;
+        if (p == p_lo && p == p_hi && sel.empty()) {
+            // 空选区：只要落点那一个字所在的 run。
+            for (const FormatRun& r : runs) {
+                if (r.cp_begin <= lo && (lo < r.cp_end || len == 0)) {
+                    covered.push_back(&r);
+                    break;
+                }
+            }
+            if (covered.empty()) covered.push_back(&runs.back());
+            continue;
+        }
+        if (hi <= lo) continue;  // 空段里没有可读的字
+        for (const FormatRun& r : runs) {
+            if (r.cp_end <= lo || r.cp_begin >= hi) continue;
+            covered.push_back(&r);
         }
     }
-    // 空段（run 的区间是零宽）与"落点越过最后一个 run 的尾部"：取最后一个，它就是
-    //   这一段接着写会用的那一份。
-    if (hit == nullptr) hit = &runs.back();
+    if (covered.empty()) {
+        // 选区只落在段落标记上（这一段的字一个都没覆盖到）：报这一段的第一个 run ——
+        //   与"在这一段里接着敲字会用哪一份"一致。
+        for (const std::vector<FormatRun>& runs : all_runs) {
+            if (!runs.empty()) {
+                covered.push_back(&runs.front());
+                break;
+            }
+        }
+        if (covered.empty()) return j.dump();
+    }
+
+    // 逐项求交：选区里只要有一种值不同，这一项就不报（缺席 = 没有统一的值）。
+    //   这正是字处理软件的行为 —— 跨出一种格式，那个按钮就灭掉；同一套规则左右对称，
+    //   与"从哪一头开始划"无关。
+    const FormatRun* f0 = covered.front();
+    bool same_b = true;
+    bool same_i = true;
+    bool same_u = true;
+    bool same_fi = true;
+    bool same_sz = true;
+    bool same_col = true;
+    for (const FormatRun* r : covered) {
+        if ((r->weight >= 600.0f) != (f0->weight >= 600.0f)) same_b = false;
+        if (r->italic != f0->italic) same_i = false;
+        if (r->underline != f0->underline) same_u = false;
+        if (r->font_index != f0->font_index) same_fi = false;
+        if (r->size_pt != f0->size_pt) same_sz = false;
+        if (!(r->color == f0->color)) same_col = false;
+    }
     // 加粗没有独立字段，它是可变字体的 wght 轴：写入那一侧 true 落成 700。
     //   600 及以上算粗（半粗也读作粗），这样"样式层设了 semi-bold"不会被报成不粗。
-    j["b"] = hit->weight >= 600.0f;
-    j["i"] = hit->italic;
-    j["u"] = hit->underline;
-    j["fi"] = hit->font_index;
-    j["sz"] = static_cast<double>(hit->size_pt);
-    j["col"] = {hit->color.r, hit->color.g, hit->color.b};
+    if (same_b) j["b"] = f0->weight >= 600.0f;
+    if (same_i) j["i"] = f0->italic;
+    if (same_u) j["u"] = f0->underline;
+    if (same_fi) j["fi"] = f0->font_index;
+    if (same_sz) j["sz"] = static_cast<double>(f0->size_pt);
+    if (same_col) j["col"] = {f0->color.r, f0->color.g, f0->color.b};
     return j.dump();
 }
 
