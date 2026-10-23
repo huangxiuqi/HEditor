@@ -350,6 +350,41 @@ export interface SetCaretOptions {
 }
 
 /**
+ * 插入内容控件（表单字段）的选项。全部可省：省掉时是一个文本字段。
+ */
+export interface ControlInsertOptions {
+  /**
+   * 业务类型（text / date / checkbox …）。默认 text。
+   */
+  type?: string;
+
+  /**
+   * 业务编码。同一个编码可以绑多个控件，按编码批量设值会一起改。
+   */
+  key?: string;
+
+  /**
+   * 控件内容。文本类控件的值就是它，也是插进去之后光标停的地方。
+   */
+  label?: string;
+
+  /**
+   * 只读：内容不可编辑。
+   */
+  readonly?: boolean;
+
+  /**
+   * 必填：提交校验用；隐藏的控件不参与。
+   */
+  required?: boolean;
+
+  /**
+   * 值形态（决定值放内容里还是属性上）。默认 text。
+   */
+  shape?: 'text' | 'bool' | 'enum' | 'list' | 'resource';
+}
+
+/**
  * 表单里的一个控件（form() 的精简视图）。
  */
 export interface ControlSummary {
@@ -903,6 +938,25 @@ export interface Editor {
    * @returns 有没有改动
    */
   insertText(pos: Pos, text: string): Promise<boolean>;
+
+  /**
+   * 在当前段之后插一张空表格，光标落进第一格（接着打字就是填这一格）。
+   *
+   * 表格是块级元素，只能落在两段之间；当前段的内容保持不变，表格自成一段段位。
+   * 只在文档模式可用 —— 表单模式在填值、只读模式不许改，两者都不该长出新的表。
+   * @param opts rows 行数、cols 每行格数、header 首行是否作为标题行
+   * @returns 有没有插进去（模式不对或行列越界时 false，文档不动）
+   */
+  insertTable(opts: { rows: number; cols: number; header?: boolean }): Promise<boolean>;
+
+  /**
+   * 在光标处插一个内容控件（表单字段），光标落进它的内容末尾。
+   *
+   * 控件是行内容器：它不切断段落，落点就是光标处。只在文档模式可用（理由同上）。
+   * @param opts 类型 / 业务编码 / 内容 / 只读 / 必填 / 值形态
+   * @returns 有没有插进去（模式不对时 false，文档不动）
+   */
+  insertControl(opts?: ControlInsertOptions): Promise<boolean>;
 
   // 编辑（返回"有没有改动"）
 

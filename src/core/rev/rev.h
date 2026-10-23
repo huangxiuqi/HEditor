@@ -212,6 +212,7 @@ struct EditResult {
  */
 class Hasher {
 public:
+
     void u64(uint64_t v) {
         lo_ = (lo_ ^ v) * 1099511628211ull;
         hi_ = (hi_ ^ (v + 0x9E3779B97F4A7C15ull)) * 14029467366897019727ull;
@@ -255,6 +256,7 @@ public:
     uint64_t hi() const { return hi_; }
 
 private:
+
     uint64_t lo_ = 1469598103934665603ull;
 
     /**

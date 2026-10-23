@@ -79,6 +79,7 @@ struct StyleDef {
  */
 class StyleSheet {
 public:
+
     const ParaFormatPatch& docDefaultsPara() const { return doc_defaults_para_; }
 
     /**
@@ -137,6 +138,7 @@ public:
     int version() const { return version_; }
 
 private:
+
     ParaFormatPatch doc_defaults_para_;
 
     /**
@@ -229,6 +231,7 @@ CharFormat resolveRunFormatFrom(const StyleSheet& sheet, const CharFormat& base,
  */
 class StyleCache {
 public:
+
     explicit StyleCache(const StyleSheet& sheet);
 
     /**

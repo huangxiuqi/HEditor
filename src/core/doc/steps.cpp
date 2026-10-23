@@ -490,8 +490,8 @@ std::vector<Step> makeDeleteTextSteps(const NodeTree& tree, FlowPos from, FlowPo
     return out;
 }
 
-std::vector<Step> makeDeleteRangeOneStep(const NodeTree& tree, const FlowIndex& idx,
-                                         FlowPos from, FlowPos to) {
+std::vector<Step> makeDeleteRangeOneStep(const NodeTree& tree, const FlowIndex& idx, FlowPos from,
+                                         FlowPos to) {
     std::vector<Step> out;
     if (from < 0 || to <= from || to > idx.size()) return out;
     Fragment frag;

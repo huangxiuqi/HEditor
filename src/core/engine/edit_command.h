@@ -46,6 +46,7 @@ namespace heditor {
  */
 class EditHost {
 public:
+
     virtual ~EditHost() = default;
 
     /**
@@ -158,6 +159,7 @@ struct EditView {
  */
 class EditCommand {
 public:
+
     void setView(const EditView& v) { view_ = v; }
 
     /**
@@ -286,6 +288,31 @@ public:
     bool removeControl(int index, bool keep_content, FlowPos caret_before = -1);
 
     /**
+     * 在光标所在段的后面插一张空表格（表在块级，不能落在段落内部）。
+     *
+     * 只在文档模式放行：插入结构是设计动作，表单模式在填值、只读模式不许改，两者都不该
+     * 长出新的表。光标落进第一格，落点之后接着打字就是填第一格。
+     *
+     * @param rows 行数
+     * @param cols 每行的格数
+     * @param header true = 首行是标题行（跨页时重复）
+     * @return true = 插进去了
+     */
+    bool insertTable(int rows, int cols, bool header);
+
+    /**
+     * 在光标处插一个内容控件（表单字段）。label 是控件里的初始内容，也是它的"值"。
+     *
+     * 控件是行内容器：它不切断段落，落在光标处就是落在光标处。光标摆到控件内容末尾，
+     * 接着打字就填进这个字段。只在文档模式放行（理由同 insertTable）。
+     *
+     * @param spec 控件记录（种类、业务编码、只读与必填）
+     * @param label 控件内容
+     * @return true = 插进去了
+     */
+    bool insertControl(const ControlSpec& spec, const std::string& label);
+
+    /**
      * 改控件的一个运行时属性。幂等：值没变就不提交 —— 撤销栈里多一条什么都没做的记录
      * 只会让人困惑。
      *
@@ -371,6 +398,37 @@ public:
     bool deleteSelection();
 
 private:
+
+    /**
+     * 表格里第一格内容的流偏移：表的起始边界一位、行的起始边界一位、格的起始边界一位。
+     * 空表的每格只有一枚段落标记，结构是固定的，所以这个偏移可以当场算出来。
+     */
+    static constexpr FlowPos kFirstTableCellOffset = 3;
+
+    /**
+     * 第 para 段结束之后的节点级位置 —— 表格能落脚的地方（块与块之间）。
+     *
+     * 有结束标记时取标记的下一个槽位；末尾那段还没被分段时它没有标记，落点是它所属容器的
+     * 末尾（那种段只可能是文档最后一块）。
+     *
+     * @param para 段号
+     * @param out 写回位置
+     * @return true = 位置可定
+     */
+    bool posAfterParagraph(int para, Pos* out) const;
+
+    /**
+     * 在流位置 at 插一棵子树，并把光标摆到 focus。
+     *
+     * at 必须是块边界：表格这类块级元素落进段落内部，编译与流索引对"段"的假设当场不成立。
+     * 调用方负责把 at 算对（见 posAfterParagraph）。
+     *
+     * @param at 插入位置（流位置）
+     * @param spec 子树
+     * @param focus 插完之后光标落在哪（流位置）
+     * @return true = 插进去了
+     */
+    bool commitInsert(FlowPos at, const NodeSpec& spec, FlowPos focus);
 
     /**
      * 位置解析器（光标与选区的真源）：命令算落点、摆光标、查簇边界都经过它。

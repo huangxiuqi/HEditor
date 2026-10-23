@@ -44,6 +44,7 @@ using ParaNo = int;
  */
 class ParagraphIndex {
 public:
+
     explicit ParagraphIndex(const NodeTree& tree, FlowVisibility vis);
 
     /**
@@ -136,6 +137,7 @@ public:
     void rebuild(const NodeTree& tree, FlowVisibility vis);
 
 private:
+
     void scan(NodeId id);
 
     /**

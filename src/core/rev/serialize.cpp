@@ -289,6 +289,7 @@ bool readNodeId(const ordered_json& j, const char* key, NodeId* out) {
  */
 class Reader : public recjson::Context {
 public:
+
     explicit Reader(std::string* err) : err_(err) {}
 
     bool stringAt(int index, std::string* out) const override {
@@ -321,6 +322,7 @@ public:
     NodeId max_id_ = 0;
 
 private:
+
     std::string* err_ = nullptr;
 };
 

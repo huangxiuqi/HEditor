@@ -117,6 +117,7 @@ void flatten(const NodeTree& tree, NodeId id, Strings* kinds, Strings* strings,
  */
 class Reader : public recjson::Context {
 public:
+
     bool bind(const ordered_json& root, std::string* error) {
         err_ = error;
         if (!root.is_object()) return fail("顶层不是对象");
@@ -165,6 +166,7 @@ public:
     }
 
 private:
+
     bool readStringArray(const ordered_json& arr, std::vector<std::string>* out) {
         for (const ordered_json& item : arr) {
             if (!item.is_string()) return false;

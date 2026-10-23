@@ -39,6 +39,7 @@ using nlohmann::ordered_json;
  */
 class StringPool {
 public:
+
     int add(const std::string& s);
 
     /**
@@ -48,6 +49,7 @@ public:
     const std::vector<std::string>& list() const { return list_; }
 
 private:
+
     std::vector<std::string> list_;
 
     /**
@@ -64,6 +66,7 @@ private:
  */
 class Context {
 public:
+
     virtual ~Context() = default;
 
     /**

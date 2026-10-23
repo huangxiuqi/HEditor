@@ -136,6 +136,16 @@ test.describe('工具栏', () => {
       btn('type').click();
       out.type = await until(() => e.text().includes('（从这里开始编辑）'));
 
+      // 插入：一张表（3x3 = 9 格，段数该多 9）与一个表单字段（清单该多一个）。
+      await reset();
+      const paras0 = e.paragraphs().length;
+      btn('table').click();
+      out.table = await until(() => e.paragraphs().length >= paras0 + 9);
+
+      await reset();
+      btn('field').click();
+      out.field = await until(() => e.form().length === 1);
+
       // 视图：分页 / 连页 / 三档缩放。
       btn('paged').click();
       out.paged = await until(() => e.config().pageMode === 'paged');
@@ -160,7 +170,7 @@ test.describe('工具栏', () => {
     const want = [
       'paste', 'copy', 'cut', 'font', 'size', 'grow', 'shrink', 'bold', 'italic', 'underline',
       'color', 'line', 'after', 'indent', 'outdent', 'undo', 'redo', 'all', 'load', 'save',
-      'type', 'paged', 'continuous', 'zoomIn', 'zoomOut', 'zoomReset', 'alive',
+      'type', 'table', 'field', 'paged', 'continuous', 'zoomIn', 'zoomOut', 'zoomReset', 'alive',
     ];
     for (const k of want) check(`★ ${k} 点下去有反应`, r[k] === true, String(r[k]));
     // 点完这一圈之后，引擎自己的两份自审必须干净：编译出来的是最新文档，排出来的是
@@ -299,6 +309,21 @@ test.describe('公开面', () => {
       out.setControlProp = await e.setControlProp(0, 0, true);
       out.focusControl = await e.focusControl('next');
 
+      // 插入结构：表格与字段都走 InsertNode，段数与控件清单该立刻跟上。
+      await e.setCaret({ para: 0, offset: 0 });
+      out.insertTable = await e.insertTable({ rows: 2, cols: 2 });
+      await settle();
+      out.afterTable = e.paragraphs().length;
+      await e.setText('控件');
+      await e.setCaret({ para: 0, offset: 2 });
+      out.insertControl = await e.insertControl({ type: 'text', key: 'k', label: '值' });
+      await settle();
+      out.afterControl = e.text();
+      out.controlCount = e.form().length;
+      // 后续几条断言按"纯文本没有控件"写的，插完之后恢复回那一份。
+      await e.setText('纯文本没有控件');
+      await settle();
+
       // 视图与配置
       out.geometry = e.geometry();
       await e.scrollTo({ page: 0 });
@@ -381,6 +406,11 @@ test.describe('公开面', () => {
           String(r.setControlProp));
     check('focusControl 不抛错', r.focusControl === undefined || r.focusControl !== null,
           String(r.focusControl));
+    check('★ insertTable 落成一张 2x2 的表（段数 +4）',
+          r.insertTable === true && r.afterTable === 5, String(r.afterTable));
+    check('★ insertControl 落成一个字段，文字接在光标处',
+          r.insertControl === true && r.afterControl === '控件值' && r.controlCount === 1,
+          JSON.stringify(r.afterControl) + ' / ' + String(r.controlCount));
 
     check('geometry 有页宽与页数', r.geometry.page.w > 0 && r.geometry.pages >= 1,
           JSON.stringify(r.geometry.page));

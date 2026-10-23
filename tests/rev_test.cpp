@@ -2661,23 +2661,21 @@ int main() {
         expectTrue(rev::paraCount(pasted.doc) == rev::paraCount(a),
                    "粘出来的段数与来源相同（" + std::to_string(rev::paraCount(pasted.doc)) +
                        " vs " + std::to_string(rev::paraCount(a)) + "）");
-        expectTrue(sameText(rev::paraTexts(pasted.doc), src_paras),
-                   "粘出来的逐段文本与来源相同");
+        expectTrue(sameText(rev::paraTexts(pasted.doc), src_paras), "粘出来的逐段文本与来源相同");
         const rev::Projection proj = rev::project(pasted.doc, StyleSheet{}, {});
-        expectTrue(proj.controls.size() == 1, "粘出来的文档里控件还在（" +
-                                                  std::to_string(proj.controls.size()) + " 个）");
+        expectTrue(proj.controls.size() == 1,
+                   "粘出来的文档里控件还在（" + std::to_string(proj.controls.size()) + " 个）");
 
         // 取半段文字：文本按码点截断，标记随节点带走。
         //   流位置 0 是节的开边界，所以 [1, 3) 盖住的是头两个码点。
         const Doc plain = rev::makeTextDoc({U"甲乙丙丁"});
         const rev::ClipCapture part = rev::captureRange(plain, FlowVisibility::Design, 1, 3);
         expectTrue(part.ok, "取中间两个字（" + part.error + "）");
-        expectTrue(part.nodes.size() == 1 && part.nodes[0].kind == NodeKind::TextRun,
-                   "半段文字取出来是一个文本节点（实际 " + std::to_string(part.nodes.size()) +
-                       " 个）");
-        expectTrue(part.nodes[0].text.size() == 2, "截断到两个码点（实测 " +
-                                                       std::to_string(part.nodes[0].text.size()) +
-                                                       "）");
+        expectTrue(
+            part.nodes.size() == 1 && part.nodes[0].kind == NodeKind::TextRun,
+            "半段文字取出来是一个文本节点（实际 " + std::to_string(part.nodes.size()) + " 个）");
+        expectTrue(part.nodes[0].text.size() == 2,
+                   "截断到两个码点（实测 " + std::to_string(part.nodes[0].text.size()) + "）");
         expectTrue(part.text == "甲乙", "截出来的正是那两个码点（实测 " + part.text + "）");
 
         // 空区间与越界：不产出一个"看起来成功"的空片段。
@@ -2699,7 +2697,8 @@ int main() {
         }
         expectTrue(table_id != kInvalidNodeId && te > tf + 2, "前提：表格在流里有区间");
         // 从表格内部一格开始取：取用区间必须扩到整张表。
-        const rev::ClipCapture half = rev::captureRange(tbl, FlowVisibility::Design, tf + 3, te - 1);
+        const rev::ClipCapture half =
+            rev::captureRange(tbl, FlowVisibility::Design, tf + 3, te - 1);
         expectTrue(half.ok, "从表格内部取一段（" + half.error + "）");
         expectTrue(half.lo <= tf && half.hi >= te,
                    "★ 取用区间扩到整张表（" + std::to_string(half.lo) + ".." +

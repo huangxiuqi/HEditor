@@ -499,9 +499,8 @@ int main() {
         const float small_pt = 12.0f;
         const float factor = 1.6f;
 
-        const LayoutResult r =
-            layoutDocument(lib, {mkVertical(WritingMode::VerticalRL(), 4, 4, big_pt, small_pt)},
-                           page);
+        const LayoutResult r = layoutDocument(
+            lib, {mkVertical(WritingMode::VerticalRL(), 4, 4, big_pt, small_pt)}, page);
         std::vector<const LineBox*> cols;
         for (const LineBox& lb : r.lines)
             if (lb.vertical) cols.push_back(&lb);
@@ -529,8 +528,7 @@ int main() {
         expectTrue(bad_w == 0, "每一列的列宽都等于本列字号 × 行距（逐列算，不是整段最大）");
         expectTrue(bad_box == 0, "所有列都落在内容框里（列位按前缀和推进，没有越界）");
         std::printf("     大字列宽 %.2f pt，小字列宽 %.2f pt\n", big_w, small_w);
-        expectTrue(big_w > small_w + 1.0f,
-                   "大字列真的比小字列宽（取整段最大字号时两者会相等）");
+        expectTrue(big_w > small_w + 1.0f, "大字列真的比小字列宽（取整段最大字号时两者会相等）");
 
         int overlap = 0;
         int order_bad = 0;
@@ -549,9 +547,8 @@ int main() {
         expectTrue(order_bad == 0, "中日竖排：列号小的更靠右（列序方向没被前缀和带反）");
 
         // 反向一半：整段一个字号 ⇒ 所有列宽相等，且等于那个字号 × 行距。
-        const LayoutResult r1 =
-            layoutDocument(lib, {mkVertical(WritingMode::VerticalRL(), 8, 0, small_pt, 0.0f)},
-                           page);
+        const LayoutResult r1 = layoutDocument(
+            lib, {mkVertical(WritingMode::VerticalRL(), 8, 0, small_pt, 0.0f)}, page);
         std::vector<float> widths;
         for (const LineBox& lb : r1.lines) {
             if (!lb.vertical) continue;
@@ -559,14 +556,12 @@ int main() {
         }
         std::sort(widths.begin(), widths.end());
         widths.erase(std::unique(widths.begin(), widths.end()), widths.end());
-        expectTrue(widths.size() == 1 &&
-                       std::fabs(widths.front() - small_pt * factor) < 0.05f,
+        expectTrue(widths.size() == 1 && std::fabs(widths.front() - small_pt * factor) < 0.05f,
                    "整段一个字号：所有列宽相等且等于字号 × 行距（与逐列算之前逐字段相同）");
 
         // 列序的正面判据也要有一份：蒙文（LTR）的第一列在最左，中日（RTL）在最右。
-        const LayoutResult rl =
-            layoutDocument(lib, {mkVertical(WritingMode::VerticalLR(), 4, 4, big_pt, small_pt)},
-                           page);
+        const LayoutResult rl = layoutDocument(
+            lib, {mkVertical(WritingMode::VerticalLR(), 4, 4, big_pt, small_pt)}, page);
         float lr_first_lo = 1e9f;
         float rl_first_hi = -1e9f;
         for (const LineBox& lb : rl.lines) {
@@ -659,9 +654,10 @@ int main() {
             // 反向一半：把盒高压到 6 磅（比一行 19.2 矮）⇒ 行盒回落到字号 x 行距。
             const LayoutResult r_small =
                 layoutDocument(lib, {mkPara("汉字汉字", {mkAtom(2, box_w, 6.0f)}, 12.0f)}, page);
-            const float small_h = r_small.lines.empty()
-                                      ? 0.0f
-                                      : (r_small.lines[0].block_hi_pt - r_small.lines[0].block_lo_pt);
+            const float small_h =
+                r_small.lines.empty()
+                    ? 0.0f
+                    : (r_small.lines[0].block_hi_pt - r_small.lines[0].block_lo_pt);
             expectTrue(small_h > 0.0f && small_h < line_h - 1.0f,
                        "盒高变小之后行盒跟着变矮（高度不是从字号来的，实际 " +
                            std::to_string(small_h) + "）");
@@ -704,12 +700,11 @@ int main() {
             }
         }
         expectTrue(saw_atom && wide_empty == 0 && wide_lines >= 3,
-                   "超宽原子独占一行，且不是空行（行数 " + std::to_string(wide_lines) +
-                       "，空行 " + std::to_string(wide_empty) + "）");
+                   "超宽原子独占一行，且不是空行（行数 " + std::to_string(wide_lines) + "，空行 " +
+                       std::to_string(wide_empty) + "）");
 
         // 反向一半：没有原子时这一段的排版与加原子之前逐字段相同（空表 = 一个都不插）。
-        const LayoutResult r_plain =
-            layoutDocument(lib, {mkPara("汉字汉字", {}, 12.0f)}, page);
+        const LayoutResult r_plain = layoutDocument(lib, {mkPara("汉字汉字", {}, 12.0f)}, page);
         expectTrue(r_plain.lines.size() == 1 && r_plain.lines[0].clusters.size() == 4,
                    "对象表为空时行里只有四个字（没有凭空多出占位簇）");
 
@@ -769,18 +764,17 @@ int main() {
 
         // 骨架自己得是一份合法 SFNT：能被 HarfBuzz 打开，且字形数与原字体一致。
         //   这一条是"骨架没拼坏"的直接判据 —— 表目录偏移算错就会在这里露出来。
-        hb_blob_t* skel_blob =
-            hb_blob_create(reinterpret_cast<const char*>(skeleton.data()),
-                           static_cast<unsigned>(skeleton.size()), HB_MEMORY_MODE_READONLY,
-                           nullptr, nullptr);
+        hb_blob_t* skel_blob = hb_blob_create(reinterpret_cast<const char*>(skeleton.data()),
+                                              static_cast<unsigned>(skeleton.size()),
+                                              HB_MEMORY_MODE_READONLY, nullptr, nullptr);
         hb_face_t* skel_face = hb_face_create(skel_blob, 0);
         const unsigned skel_glyphs = skel_face ? hb_face_get_glyph_count(skel_face) : 0;
         const unsigned full_glyphs = lib.face(cjk)->glyphCount();
         if (skel_face) hb_face_destroy(skel_face);
         hb_blob_destroy(skel_blob);
         expectTrue(skel_glyphs == full_glyphs && full_glyphs > 0,
-                   "骨架是合法 SFNT 且字形数与原字体一致（" + std::to_string(skel_glyphs) +
-                       " vs " + std::to_string(full_glyphs) + "）");
+                   "骨架是合法 SFNT 且字形数与原字体一致（" + std::to_string(skel_glyphs) + " vs " +
+                       std::to_string(full_glyphs) + "）");
 
         // 按需读与整份读逐字节相同：偏移算术与块缓存的正确性都在这一条上。
         std::ifstream in(cjkPath, std::ios::binary);
@@ -792,8 +786,7 @@ int main() {
         const uint64_t offsets[] = {0, 1, 12, 63, 64, 4095, 4096, 65535, 65536, 65537};
         for (uint64_t off : offsets) {
             if (off >= whole.size()) continue;
-            const size_t n =
-                std::min<size_t>(96, whole.size() - static_cast<size_t>(off));
+            const size_t n = std::min<size_t>(96, whole.size() - static_cast<size_t>(off));
             std::vector<uint8_t> got(n, 0);
             if (src.readAt(off, got.data(), n) != FontRead::Ok ||
                 !std::equal(got.begin(), got.end(), whole.begin() + static_cast<size_t>(off))) {
@@ -822,14 +815,13 @@ int main() {
             size_t got_n = 0;
             const FontRead r = src.readAt(tail_start, probe.data(), probe.size(), &got_n);
             expectTrue(r == FontRead::Eof, "越过文件尾的读是文件尾，不是失败");
-            expectTrue(got_n == 4, "越过文件尾的读只交出可读的那 4 字节（实得 " +
-                                       std::to_string(got_n) + "）");
+            expectTrue(got_n == 4,
+                       "越过文件尾的读只交出可读的那 4 字节（实得 " + std::to_string(got_n) + "）");
             bool untouched = true;
             for (size_t i = 4; i < probe.size(); ++i) {
                 if (probe[i] != 0xAB) untouched = false;
             }
-            expectTrue(untouched &&
-                           std::equal(probe.begin(), probe.begin() + 4, whole.end() - 4),
+            expectTrue(untouched && std::equal(probe.begin(), probe.begin() + 4, whole.end() - 4),
                        "可读那 4 字节等于文件尾，其后的缓冲一个字节都没被写");
 
             // 起点直接落在文件尾之后：零字节可读，同样是文件尾而不是失败。
@@ -839,8 +831,7 @@ int main() {
                        "起点在文件尾之后的读也是文件尾，交出零字节");
 
             // 这两条是分开计数的核心判据：文件尾只进 eofReads，不进 readFailures。
-            expectTrue(src.cache().eofReads() == eof_before + 2,
-                       "两次越尾读都记进了 eofReads");
+            expectTrue(src.cache().eofReads() == eof_before + 2, "两次越尾读都记进了 eofReads");
             expectTrue(src.cache().readFailures() == fail_before,
                        "文件尾的短读一次都没记进 readFailures");
 
@@ -875,8 +866,7 @@ int main() {
                     size_t lost_got = 0;
                     const FontRead lr =
                         truncated.readAt(512u * 1024u, lost.data(), lost.size(), &lost_got);
-                    expectTrue(lr == FontRead::Error,
-                               "文件被截断后的读是失败（不是文件尾）");
+                    expectTrue(lr == FontRead::Error, "文件被截断后的读是失败（不是文件尾）");
                     expectTrue(truncated.cache().readFailures() == cut_fail_before + 1,
                                "真失败会让 readFailures 加一 —— 这个计数不是死代码");
                     expectTrue(truncated.cache().eofReads() == cut_eof_before,
@@ -891,10 +881,10 @@ int main() {
             FontStorage unopened;
             std::vector<uint8_t> buf(4, 0);
             size_t unopened_got = 7;
-            expectTrue(unopened.readAt(0, buf.data(), buf.size(), &unopened_got) ==
-                               FontRead::Error &&
-                           unopened_got == 0,
-                       "没打开的存储读是失败，交出零字节");
+            expectTrue(
+                unopened.readAt(0, buf.data(), buf.size(), &unopened_got) == FontRead::Error &&
+                    unopened_got == 0,
+                "没打开的存储读是失败，交出零字节");
 
             std::printf("     存储读：文件尾 %zu 次，失败 %zu 次\n", src.cache().eofReads(),
                         src.cache().readFailures());
@@ -953,14 +943,12 @@ int main() {
                     static_cast<double>(c.storageBytes()) / 1024.0, c.ioMs());
         expectTrue(c.misses() > 0 && c.storageReads() == c.misses(),
                    "拼骨架确实落了存储，且落存储次数等于未命中次数");
-        expectTrue(c.storageBytes() >= skeleton.size(),
-                   "从存储搬进来的字节不少于骨架本身");
+        expectTrue(c.storageBytes() >= skeleton.size(), "从存储搬进来的字节不少于骨架本身");
         // 常驻不可能超过累计读进来的字节，也不可能超过块数乘块大小。
-        expectTrue(c.residentBytes() <= c.storageBytes(),
-                   "常驻不超过累计从存储读入的字节");
-        expectTrue(c.residentBytes() <= c.capacityBytes(),
-                   "常驻不超过块数乘块大小（上限 " +
-                       std::to_string(c.capacityBytes() / 1024) + " KB）");
+        expectTrue(c.residentBytes() <= c.storageBytes(), "常驻不超过累计从存储读入的字节");
+        expectTrue(
+            c.residentBytes() <= c.capacityBytes(),
+            "常驻不超过块数乘块大小（上限 " + std::to_string(c.capacityBytes() / 1024) + " KB）");
     }
 
     std::printf("\n[按需] 按需脸与全量脸的整形结果逐字段相同\n");
@@ -1087,8 +1075,8 @@ int main() {
             constexpr uint64_t kT = 8;
             // 20 个汉字 = 240 磅；格宽 = 280 - 8 = 272 也装得下 —— 所以缩成两列，
             //   让格宽只有 136，15 个汉字必断行。
-            std::vector<BlockSpec> blocks = {mkCellBlock(
-                "一二三四五六七八九十一二三四五", kT, 0, 0)};
+            std::vector<BlockSpec> blocks = {
+                mkCellBlock("一二三四五六七八九十一二三四五", kT, 0, 0)};
             LayoutTable t = mkTable(kT, 1, 2);
             t.cells = cellsOf(1, 2);
             const LayoutResult r = layoutDocument(lib, blocks, page, {t});
@@ -1178,8 +1166,9 @@ int main() {
                            "不传结构表：按正文排，起点是内容区左边");
                 expectNear(without.lines[1].inline_origin_pt, cx, 0.01,
                            "不传结构表：第二格也按正文排（不起新列）");
-                expectTrue(with.lines[1].inline_origin_pt > without.lines[1].inline_origin_pt + 1.0f,
-                           "传了结构表：第二格才起新列");
+                expectTrue(
+                    with.lines[1].inline_origin_pt > without.lines[1].inline_origin_pt + 1.0f,
+                    "传了结构表：第二格才起新列");
             }
         }
         // 七：整行放不下时整行换页，两个格一起走。
@@ -1254,8 +1243,7 @@ int main() {
                 if (lb.page == 0) ++q0;
                 if (lb.page == 1) ++q1;
             }
-            expectTrue(q0 == 1 && q1 >= 2,
-                       "不允许跨页断行：第二行整行挪到下一页，本页只剩第一行");
+            expectTrue(q0 == 1 && q1 >= 2, "不允许跨页断行：第二行整行挪到下一页，本页只剩第一行");
         }
         // 九：格内多行要撑开行高 —— 一格里两个段落，下一行表格行必须让开这两行。
         //   必须是"同一行里切格"的形状（两列）：切格时不结算上一格的内容高，只按一行算，

@@ -11307,7 +11307,8 @@ int main() {
         // (a) 左边界敲字：沿用左边那一段（12 磅），不是右边那一段（14 磅）。
         e63.setCaret(0, 1);
         expectTrue(e63.typeTextAndRender("X"), "在格式段的左边界敲一个字");
-        expectTrue(e63.blocks()[0].cp_text == utf8ToCodepoints("aXbcd"), "左边界敲字：文本接在中间");
+        expectTrue(e63.blocks()[0].cp_text == utf8ToCodepoints("aXbcd"),
+                   "左边界敲字：文本接在中间");
         expectTrue(szAt(1) == 120,
                    "★ 左边界敲出来的字是 12 磅（沿用左边那一段，不是右边格式段的 14 磅）");
         expectTrue(szAt(2) == 140, "格式段自己没被带跑，仍是 14 磅");
@@ -11322,7 +11323,8 @@ int main() {
         expectTrue(e63.typeTextAndRender("Y"), "在格式段的右边界敲一个字");
         expectTrue(szAt(4) == 140,
                    "★ 右边界敲出来的字是 14 磅（接着左边格式段往下写），不是 12 磅");
-        expectTrue(e63.blocks()[0].cp_text == utf8ToCodepoints("aXybYcd"), "右边界敲字：文本接在中间");
+        expectTrue(e63.blocks()[0].cp_text == utf8ToCodepoints("aXybYcd"),
+                   "右边界敲字：文本接在中间");
 
         // (d) 段尾：左边是普通字，沿用 12 磅（这一条在改规则之前就是对的，留作对照）。
         e63.setCaret(0, 7);
@@ -11335,7 +11337,8 @@ int main() {
         const FlowPos ex = e63.flowPosAt(0, 4);
         expectTrue(e63.setSelection(Range{ew, ex}), "选中格式段（现在在「aXybYcdZ」的第 4 格）");
         expectTrue(e63.typeTextAndRender("W"), "打字盖住格式段");
-        expectTrue(szAt(3) == 140, "★ 打字盖住格式段沿用 14 磅（取选区第一个字，不是左邻居的 12 磅）");
+        expectTrue(szAt(3) == 140,
+                   "★ 打字盖住格式段沿用 14 磅（取选区第一个字，不是左邻居的 12 磅）");
         expectTrue(e63.auditCompile() == 0 && e63.auditLayout() == 0,
                    "这几笔编辑之后增量与全量仍然逐字段一致");
     }
@@ -11399,7 +11402,8 @@ int main() {
         };
         // 版面几何：行盒的四个位置量、码点区间与每个字形的原点，全部逐位比。
         auto sameGeometry = [&](const LayoutResult& a, const LayoutResult& b) {
-            if (a.lines.size() != b.lines.size() || a.glyphs.size() != b.glyphs.size()) return false;
+            if (a.lines.size() != b.lines.size() || a.glyphs.size() != b.glyphs.size())
+                return false;
             for (size_t i = 0; i < a.lines.size(); ++i) {
                 const LineBox& x = a.lines[i];
                 const LineBox& y = b.lines[i];
@@ -11430,19 +11434,17 @@ int main() {
         const int ink_all = diffPx(all, bare);
         const int ink_space = diffPx(all, with_para);
 
-        expectTrue(ink_para > 0,
-                   "★ 段落标记真的画了墨迹（关掉之后少了 " + std::to_string(ink_para) + " 个像素）");
-        expectTrue(ink_space > 0,
-                   "★ 全部标记档多出空格里的中点（比段落档多 " + std::to_string(ink_space) +
-                       " 个像素）");
-        expectTrue(ink_all > ink_para,
-                   "全部档的墨迹多于段落档（" + std::to_string(ink_all) + " > " +
-                       std::to_string(ink_para) + "）");
+        expectTrue(ink_para > 0, "★ 段落标记真的画了墨迹（关掉之后少了 " +
+                                     std::to_string(ink_para) + " 个像素）");
+        expectTrue(ink_space > 0, "★ 全部标记档多出空格里的中点（比段落档多 " +
+                                      std::to_string(ink_space) + " 个像素）");
+        expectTrue(ink_all > ink_para, "全部档的墨迹多于段落档（" + std::to_string(ink_all) +
+                                           " > " + std::to_string(ink_para) + "）");
         expectTrue(sameGeometry(geom_off, e64.layout()),
                    "★ 三档的行盒与字形坐标逐位相同（标记不进版面：不占宽度、不改断行）");
-        expectTrue(e64.blocks()[0].cp_text == utf8ToCodepoints("甲乙  丙") &&
-                       e64.blocks().size() == 2,
-                   "正文与段数一个都没变（标记不是内容）");
+        expectTrue(
+            e64.blocks()[0].cp_text == utf8ToCodepoints("甲乙  丙") && e64.blocks().size() == 2,
+            "正文与段数一个都没变（标记不是内容）");
 
         // 反向一半：关回去的像素必须与从未打开时逐字节相同 —— 开关不是累加的。
         setMarks(MarksMode::None);
@@ -11463,8 +11465,7 @@ int main() {
                    "切换档位之后增量与全量仍然逐字段一致");
     }
 
-    if (runSection(65))
-        std::printf("\n[65] 编辑器内复制粘贴：样式跟着回来，高度不变\n");
+    if (runSection(65)) std::printf("\n[65] 编辑器内复制粘贴：样式跟着回来，高度不变\n");
     if (runSection(65)) {
         // 判据两半：粘回来的字必须还是粗的、还是 20 磅（片段带标记）；全选粘一遍之后
         //   段数与总高必须一模一样（片段不许多带一个段落标记，也不许把段落格式抹掉）。
@@ -11520,9 +11521,8 @@ int main() {
             return out;
         };
         const std::string text_before = textOf();
-        const float h_before = e65.layout().lines.empty()
-                                   ? 0.0f
-                                   : e65.layout().lines.back().block_hi_pt;
+        const float h_before =
+            e65.layout().lines.empty() ? 0.0f : e65.layout().lines.back().block_hi_pt;
 
         // 全选状态下粘贴：整篇被这一份片段替换掉。内容、段数、总高都不该变。
         e65.selectAll();
@@ -11532,17 +11532,15 @@ int main() {
 
         const int paras_after = static_cast<int>(e65.blocks().size());
         const std::string text_after = textOf();
-        const float h_after = e65.layout().lines.empty()
-                                  ? 0.0f
-                                  : e65.layout().lines.back().block_hi_pt;
+        const float h_after =
+            e65.layout().lines.empty() ? 0.0f : e65.layout().lines.back().block_hi_pt;
         expectTrue(text_after == text_before,
                    "★ 正文一字未变（多带一个段落标记会让末尾多一行空段）");
-        expectTrue(paras_after == paras_before,
-                   "★ 段数不变（" + std::to_string(paras_before) + " → " +
-                       std::to_string(paras_after) + "）");
-        expectTrue(std::abs(h_after - h_before) < 0.01f,
-                   "★ 总高不变（" + std::to_string(h_before) + " → " + std::to_string(h_after) +
-                       " 磅）");
+        expectTrue(paras_after == paras_before, "★ 段数不变（" + std::to_string(paras_before) +
+                                                    " → " + std::to_string(paras_after) + "）");
+        expectTrue(
+            std::abs(h_after - h_before) < 0.01f,
+            "★ 总高不变（" + std::to_string(h_before) + " → " + std::to_string(h_after) + " 磅）");
 
         // 样式：粘回来的第一段还是粗体 20 磅。
         e65.setSelection(Range{e65.flowPosAt(0, 0), e65.flowPosAt(0, 3)});
@@ -11555,8 +11553,7 @@ int main() {
                    "这一轮之后增量与全量仍然逐字段一致");
     }
 
-    if (runSection(66))
-        std::printf("\n[66] 空段跨选有高亮 / 选区格式求交（三态缺席）\n");
+    if (runSection(66)) std::printf("\n[66] 空段跨选有高亮 / 选区格式求交（三态缺席）\n");
     if (runSection(66)) {
         EngineConfig c66;
         c66.zoom = 1.0f;
@@ -11593,8 +11590,8 @@ int main() {
         // 跨选过空段：三行都要有矩形，中间那一条是高 17 磅、宽约 0.35 em 的窄条。
         e66.setSelection(Range{e66.flowPosAt(0, 1), e66.flowPosAt(2, 1)});
         const std::vector<EditorEngine::PageRect> rr = e66.selectionRects();
-        expectTrue(rr.size() == 3, "★ 跨选过空段：三条矩形都在（实际 " +
-                                       std::to_string(rr.size()) + " 条）");
+        expectTrue(rr.size() == 3,
+                   "★ 跨选过空段：三条矩形都在（实际 " + std::to_string(rr.size()) + " 条）");
         bool has_narrow = false;
         for (const auto& pr : rr) {
             if (pr.r_pt.w > 0.0f && pr.r_pt.w < 6.0f && pr.r_pt.h > 10.0f) has_narrow = true;
@@ -11689,7 +11686,8 @@ int main() {
             for (int yy = y0; yy < y1; ++yy) {
                 for (int xx = x0; xx < x1; ++xx) {
                     const size_t o = (static_cast<size_t>(yy) * static_cast<size_t>(pw67) +
-                                      static_cast<size_t>(xx)) * 4u;
+                                      static_cast<size_t>(xx)) *
+                                     4u;
                     if (px67[o] < 200 && px67[o + 1] < 200 && px67[o + 2] < 200) ++n;
                 }
             }
@@ -11759,8 +11757,8 @@ int main() {
             one68.size() == 1 && std::fabs(one68[0].r_pt.w - tail_w68) < 0.2f,
             "★ 末段有字：末行那一条宽出行末一枚标记（期望 " + std::to_string(tail_w68) + "，实际 " +
                 (one68.empty() ? std::string("无") : std::to_string(one68[0].r_pt.w)) + "）");
-        expectTrue(e67.auditCompile() == 0 && e67.auditLayout() == 0 &&
-                       e68.auditCompile() == 0 && e68.auditLayout() == 0,
+        expectTrue(e67.auditCompile() == 0 && e67.auditLayout() == 0 && e68.auditCompile() == 0 &&
+                       e68.auditLayout() == 0,
                    "这一段之后增量与全量仍然逐字段一致");
 
         // 场景四：竖排。标记与选区窄条都换到块轴上（列盒左右），是另一段加法 ——
@@ -11796,18 +11794,19 @@ int main() {
                 const uint8_t* pxv = ev.pagePixels(lb.page);
                 if (pxv == nullptr) continue;
                 // 竖排：行内轴是 y，标记坐在列底（inline_origin + inline_end）那一带上。
-                const int y0 = std::max(0, static_cast<int>(std::floor(lb.inline_origin_pt +
-                                                                       lb.inline_end_pt)));
-                const int y1 = std::min(phv, static_cast<int>(std::ceil(
-                                                  lb.inline_origin_pt + lb.inline_end_pt +
-                                                  lb.size_pt * 0.8f)));
+                const int y0 = std::max(
+                    0, static_cast<int>(std::floor(lb.inline_origin_pt + lb.inline_end_pt)));
+                const int y1 =
+                    std::min(phv, static_cast<int>(std::ceil(
+                                      lb.inline_origin_pt + lb.inline_end_pt + lb.size_pt * 0.8f)));
                 const int x0 = std::max(0, static_cast<int>(std::floor(lb.block_lo_pt)) - 1);
                 const int x1 = std::min(pwv, static_cast<int>(std::ceil(lb.block_hi_pt)) + 1);
                 int n = 0;
                 for (int yy = y0; yy < y1; ++yy) {
                     for (int xx = x0; xx < x1; ++xx) {
                         const size_t o = (static_cast<size_t>(yy) * static_cast<size_t>(pwv) +
-                                          static_cast<size_t>(xx)) * 4u;
+                                          static_cast<size_t>(xx)) *
+                                         4u;
                         if (pxv[o] < 200 && pxv[o + 1] < 200 && pxv[o + 2] < 200) ++n;
                     }
                 }
@@ -11831,6 +11830,199 @@ int main() {
             expectTrue(ev.auditCompile() == 0 && ev.auditLayout() == 0,
                        "竖排这一路增量与全量也逐字段一致");
         }
+    }
+
+    if (runSection(68)) {
+        std::printf("\n[68] 插入表格：块级落点、第一格光标、撤销与自审\n");
+        EngineConfig c68;
+        c68.zoom = 1.0f;
+        c68.page.width_pt = 320.0f;
+        c68.page.height_pt = 420.0f;
+        c68.page.margin_pt = 12.0f;
+        const std::vector<std::string> fonts68 = {cjkPath, mnPath, latinPath};
+
+        NodeTree t68;
+        {
+            const NodeId sec = t68.firstSectionId();
+            const NodeId a = t68.appendChild(sec, NodeKind::TextRun);
+            t68.setText(a, utf8ToCodepoints("甲乙丙丁"));
+            t68.appendChild(sec, NodeKind::ParagraphMark);
+            const NodeId b = t68.appendChild(sec, NodeKind::TextRun);
+            t68.setText(b, utf8ToCodepoints("第二段"));
+            t68.appendChild(sec, NodeKind::ParagraphMark);
+        }
+        EditorEngine e68;
+        if (!e68.init(fonts68)) {
+            std::fprintf(stderr, "字体加载失败\n");
+            return 2;
+        }
+        e68.setConfig(c68);
+        e68.setDocument(t68, StyleSheet{});
+        e68.relayout();
+        e68.repaint();
+        expectTrue(e68.blocks().size() == 2, "装载之后两段");
+
+        // 光标停在第 0 段中间：表格落在这一段之后，不能把这一段切成两半。
+        e68.setCaret(0, 2);
+        expectTrue(e68.insertTableAndRender(2, 3, true), "插入 2x3 表格（首行是标题行）");
+        expectTrue(e68.blocks().size() == 8,
+                   "段数 = 2 段正文 + 6 格（实际 " + std::to_string(e68.blocks().size()) + "）");
+        expectTrue(e68.blocks()[0].textUtf8() == "甲乙丙丁",
+                   "第 0 段内容没被表格切开（实际 " + e68.blocks()[0].textUtf8() + "）");
+        expectTrue(e68.blocks()[7].textUtf8() == "第二段",
+                   "原第 1 段后移到第 7 段（实际 " + e68.blocks()[7].textUtf8() + "）");
+
+        // 表格结构：一张表、两行、三列，从第 1 段开始，每格一段。
+        const LayoutResult& lay68 = e68.layout();
+        expectTrue(lay68.placed_tables.size() == 1,
+                   "产物里有一张表（实际 " + std::to_string(lay68.placed_tables.size()) + "）");
+        bool shape_ok = false;
+        if (lay68.placed_tables.size() == 1) {
+            const PlacedTable& pt = lay68.placed_tables[0];
+            shape_ok = pt.rows == 2 && pt.cols == 3 && pt.first_block == 1 && pt.cells.size() == 6;
+        }
+        expectTrue(shape_ok, "表是 2 行 3 列 6 格，起始段是第 1 段");
+        expectTrue(!lay68.placed_tables.empty() && lay68.placed_tables[0].col_x.size() == 4 &&
+                       lay68.placed_tables[0].col_x[3] > lay68.placed_tables[0].col_x[2],
+                   "列边界按格数平分（4 个边界、递增）");
+
+        // 光标落进第一格：接着打字就是填这一格，而不是落在表之前后。
+        const TextPos after68 = e68.caret();
+        bool in_first_cell = after68.para == 1;
+        if (in_first_cell) {
+            const std::vector<CellSlot>& path68 = e68.blocks()[1].cell_path;
+            in_first_cell = path68.size() == 1 && path68[0].row == 0 && path68[0].cell == 0;
+        }
+        expectTrue(in_first_cell, "★ 光标落在第一格（段号 " + std::to_string(after68.para) + "）");
+
+        // 格内打字：段数不变、文字进得去。
+        expectTrue(e68.typeTextAndRender("甲"), "第一格里打一个字");
+        expectTrue(e68.blocks().size() == 8, "格内打字不改段数");
+        expectTrue(e68.blocks()[1].textUtf8() == "甲",
+                   "字进了第一格（实际 " + e68.blocks()[1].textUtf8() + "）");
+
+        // 两张表能共存：第二张插在光标所在段（第一格）之后，成为嵌套表或相邻块。
+        e68.setCaret(0, 0);
+        expectTrue(e68.insertTableAndRender(1, 2, false), "再插一张 1x2 表格");
+        expectTrue(
+            e68.layout().placed_tables.size() == 2,
+            "两张表的几何都在（实际 " + std::to_string(e68.layout().placed_tables.size()) + "）");
+
+        // 参数越界不落地：回来之后段数与表数都不动。
+        const size_t blocks_before68 = e68.blocks().size();
+        expectTrue(!e68.insertTableAndRender(0, 3, false), "rows = 0 被拒");
+        expectTrue(!e68.insertTableAndRender(3, 0, false), "cols = 0 被拒");
+        expectTrue(e68.blocks().size() == blocks_before68, "被拒时文档一个字节都没动");
+
+        // 表单模式是填值态：不该长出新的表。
+        e68.setEditMode(EditMode::Form);
+        expectTrue(!e68.insertTableAndRender(2, 2, false), "表单模式下插入表格被拒");
+        e68.setEditMode(EditMode::Document);
+
+        // 撤销回到插入之前：两张表都没了，正文回到两段。
+        expectTrue(e68.undo() && e68.undo() && e68.undo(), "撤销三次（两张表 + 一个格内字符）");
+        e68.relayout();
+        expectTrue(e68.layout().placed_tables.empty(), "撤销之后一张表都不剩");
+        expectTrue(e68.blocks().size() == 2 && e68.blocks()[0].textUtf8() == "甲乙丙丁",
+                   "正文回到插入之前（实际 " + std::to_string(e68.blocks().size()) + " 段）");
+
+        // 重做回到三张表都在的状态，并且增量与全量、编译与全量都逐字段一致。
+        expectTrue(e68.redo() && e68.redo() && e68.redo(), "重做三次");
+        e68.relayout();
+        e68.repaint();
+        expectTrue(e68.auditCompile() == 0, "插入表格之后编译自审为 0");
+        expectTrue(e68.auditLayout() == 0, "插入表格之后排版自审为 0");
+        expectTrue(e68.auditPageJson(0).find("\"diff\":0") != std::string::npos,
+                   "插入表格之后页位图 == 从零重光栅");
+    }
+
+    if (runSection(69)) {
+        std::printf("\n[69] 插入控件：行内落点、区间、取值与撤销\n");
+        EngineConfig c69;
+        c69.zoom = 1.0f;
+        c69.page.width_pt = 320.0f;
+        c69.page.height_pt = 420.0f;
+        c69.page.margin_pt = 12.0f;
+        const std::vector<std::string> fonts69 = {cjkPath, mnPath, latinPath};
+
+        NodeTree t69;
+        {
+            const NodeId sec = t69.firstSectionId();
+            const NodeId a = t69.appendChild(sec, NodeKind::TextRun);
+            t69.setText(a, utf8ToCodepoints("甲乙丙丁"));
+            t69.appendChild(sec, NodeKind::ParagraphMark);
+        }
+        EditorEngine e69;
+        if (!e69.init(fonts69)) {
+            std::fprintf(stderr, "字体加载失败\n");
+            return 2;
+        }
+        e69.setConfig(c69);
+        e69.setDocument(t69, StyleSheet{});
+        e69.relayout();
+        e69.repaint();
+        expectTrue(e69.controls().size() == 0, "装载之后没有控件");
+
+        ControlSpec spec69;
+        spec69.key = "patient_name";
+        spec69.controlType = "text";
+        e69.setCaret(0, 2);
+        expectTrue(e69.insertControlAndRender(spec69, "张三"), "在第 2 个字后面插一个控件");
+        expectTrue(e69.controls().size() == 1,
+                   "控件集合里有一个（实际 " + std::to_string(e69.controls().size()) + "）");
+        expectTrue(e69.blocks()[0].textUtf8() == "甲乙张三丙丁",
+                   "控件不切断段落（实际 " + e69.blocks()[0].textUtf8() + "）");
+        expectTrue(e69.blocks().size() == 1, "控件不产生新段");
+
+        // 区间就是标签那一段文字：起止都落在同一个段落里。
+        bool range_ok = false;
+        if (e69.controls().size() == 1) {
+            const ControlRange& cr = e69.controls().at(0).range;
+            range_ok = cr.start.para == 0 && cr.start.offset == 2 && cr.end.para == 0 &&
+                       cr.end.offset == 4;
+        }
+        expectTrue(range_ok, "控件区间盖住标签（2 到 4）");
+        expectTrue(e69.controls().size() == 1 && e69.controls().at(0).id == "patient_name",
+                   "控件带着业务编码");
+
+        // 光标在控件内容末尾：接着打字就是填这个字段。
+        const TextPos caret69 = e69.caret();
+        expectTrue(caret69.para == 0 && caret69.offset == 4,
+                   "光标在控件内容末尾（实际 " + std::to_string(caret69.offset) + "）");
+        expectTrue(e69.typeTextAndRender("丰"), "接着打一个字");
+        expectTrue(e69.blocks()[0].textUtf8() == "甲乙张三丰丙丁",
+                   "字进了控件（实际 " + e69.blocks()[0].textUtf8() + "）");
+
+        // 空标签的控件：区间零宽，也照样能被数到。
+        e69.setCaret(0, 0);
+        ControlSpec empty69;
+        empty69.key = "blank";
+        expectTrue(e69.insertControlAndRender(empty69, ""), "插一个空标签控件");
+        expectTrue(e69.controls().size() == 2,
+                   "两个控件（实际 " + std::to_string(e69.controls().size()) + "）");
+        // 只读模式不许改结构。
+        e69.setEditMode(EditMode::ReadOnly);
+        expectTrue(!e69.insertControlAndRender(spec69, "不该出现"), "只读模式下插入控件被拒");
+        e69.setEditMode(EditMode::Document);
+
+        // 撤销一步步退：先退空标签控件、再退那个字、最后退第一个控件 —— 三步之后是纯文本。
+        expectTrue(e69.undo(), "撤销一次（空标签控件）");
+        expectTrue(e69.controls().size() == 1 && e69.blocks()[0].textUtf8() == "甲乙张三丰丙丁",
+                   "撤销之后剩一个控件、文字不动（实际 " + e69.blocks()[0].textUtf8() + "）");
+        expectTrue(e69.undo(), "再撤销一次（格内那个字）");
+        expectTrue(e69.blocks()[0].textUtf8() == "甲乙张三丙丁",
+                   "那个字退掉了（实际 " + e69.blocks()[0].textUtf8() + "）");
+        expectTrue(
+            e69.undo() && e69.controls().size() == 0 && e69.blocks()[0].textUtf8() == "甲乙丙丁",
+            "第三次撤销回到纯文本（实际 " + e69.blocks()[0].textUtf8() + "、" +
+                std::to_string(e69.controls().size()) + " 个控件）");
+        // 重做把控件装回来：撤销靠旧修订、重做靠同一棵树挂回，两条路都要通。
+        expectTrue(e69.redo() && e69.controls().size() == 1,
+                   "重做把控件装回来（实际 " + std::to_string(e69.controls().size()) + "）");
+        e69.relayout();
+        e69.repaint();
+        expectTrue(e69.auditCompile() == 0, "插入控件之后编译自审为 0");
+        expectTrue(e69.auditLayout() == 0, "插入控件之后排版自审为 0");
     }
 
     std::printf("\n──────────────────────────────\n");

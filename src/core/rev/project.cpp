@@ -22,6 +22,7 @@ namespace {
  */
 class Walker {
 public:
+
     Walker(const StyleSheet* sheet, const ViewParams& vp, bool full, std::vector<BlockSpec>* blocks,
            const BlockHistory* prev, const BlockDamage* dmg, int style_version)
         : sheet_(sheet), vp_(vp), full_(full), blocks_(blocks), prev_(prev) {
@@ -99,6 +100,7 @@ public:
     }
 
 private:
+
     /**
      * 一个节点自身（不含孩子）的哈希。容器几何进块哈希与损伤判定都用它。
      */
@@ -718,6 +720,7 @@ namespace {
  */
 class DamageWalker {
 public:
+
     explicit DamageWalker(FlowVisibility vis) : vis_(vis) {}
 
     /**
@@ -783,6 +786,7 @@ public:
     int scanned = 0;
 
 private:
+
     FlowVisibility vis_ = FlowVisibility::Design;
 
     static bool selfDiffers(const Ref& a, const Ref& b) {

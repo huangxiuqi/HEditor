@@ -69,7 +69,8 @@ int CaretResolver::slotOwnerOf(int control_index) const {
     return static_cast<int>((*view_.control_node_ids)[static_cast<size_t>(control_index)]);
 }
 
-void CaretResolver::rebaseSelection(int anchor_para, int anchor_rel, int focus_para, int focus_rel) {
+void CaretResolver::rebaseSelection(int anchor_para, int anchor_rel, int focus_para,
+                                    int focus_rel) {
     setCaretRel(focus_para, focus_rel);
     sel_.anchor = flowForRel(anchor_para, anchor_rel);
 }
@@ -252,14 +253,16 @@ int CaretResolver::sideForPos(TextPos p) const {
 }
 
 FlowPos CaretResolver::flowPosAtSide(int para, size_t cp_offset, int side) const {
-    if (!view_.hasFlow() || para < 0 || para >= static_cast<int>(view_.block_flow->size())) return -1;
+    if (!view_.hasFlow() || para < 0 || para >= static_cast<int>(view_.block_flow->size()))
+        return -1;
     if (cp_offset > (*view_.blocks_full)[static_cast<size_t>(para)].cp_text.size())
         cp_offset = (*view_.blocks_full)[static_cast<size_t>(para)].cp_text.size();
     return (*view_.block_flow)[static_cast<size_t>(para)] + relAt(para, cp_offset, side);
 }
 
 FlowPos CaretResolver::flowPosAt(int para, size_t cp_offset, int owner_hint) const {
-    if (!view_.hasFlow() || para < 0 || para >= static_cast<int>(view_.block_flow->size())) return -1;
+    if (!view_.hasFlow() || para < 0 || para >= static_cast<int>(view_.block_flow->size()))
+        return -1;
     if (cp_offset > (*view_.blocks_full)[static_cast<size_t>(para)].cp_text.size())
         cp_offset = (*view_.blocks_full)[static_cast<size_t>(para)].cp_text.size();
     return flowPosAtSide(para, cp_offset, sideFromHint(para, cp_offset, owner_hint));
@@ -297,7 +300,8 @@ bool CaretResolver::flowToTextPos(FlowPos flow, TextPos* out) const {
         return true;
     }
     const size_t last = view_.block_flow->size() - 1;
-    if (out != nullptr) *out = TextPos{static_cast<int>(last), (*view_.blocks_full)[last].cp_text.size()};
+    if (out != nullptr)
+        *out = TextPos{static_cast<int>(last), (*view_.blocks_full)[last].cp_text.size()};
     return true;
 }
 
@@ -367,7 +371,8 @@ size_t CaretResolver::snapToCluster(int para, size_t offset) const {
 }
 
 size_t CaretResolver::clusterCeilAt(int para, size_t offset) const {
-    if (para < 0 || para >= static_cast<int>(view_.layout->para_cluster_starts.size())) return offset;
+    if (para < 0 || para >= static_cast<int>(view_.layout->para_cluster_starts.size()))
+        return offset;
     const std::vector<uint32_t>& starts =
         view_.layout->para_cluster_starts[static_cast<size_t>(para)];
     if (starts.empty()) return offset;
@@ -446,7 +451,8 @@ void CaretResolver::setCaretByText(TextPos p) {
     }
     int para = p.para;
     if (para < 0) para = 0;
-    if (para >= static_cast<int>(view_.blocks->size())) para = static_cast<int>(view_.blocks->size()) - 1;
+    if (para >= static_cast<int>(view_.blocks->size()))
+        para = static_cast<int>(view_.blocks->size()) - 1;
     size_t off = p.offset;
     const size_t len = (*view_.blocks)[static_cast<size_t>(para)].cp_text.size();
     if (off > len) off = len;
@@ -719,9 +725,7 @@ bool CaretResolver::caretBlockReversed() const {
  * 空行给的是零宽矩形（调用方按宽高为 0 丢掉）：选中一个空段落时它下面那一行确实只有
  * 一个插入点，没有宽度可言。
  */
-std::vector<PageRect> CaretResolver::selectionRects() const {
-    return selectionRectsIn(0, 0);
-}
+std::vector<PageRect> CaretResolver::selectionRects() const { return selectionRectsIn(0, 0); }
 
 std::vector<PageRect> CaretResolver::selectionRectsIn(int first_page, int count) const {
     std::vector<PageRect> out;
@@ -806,15 +810,15 @@ std::vector<PageRect> CaretResolver::selectionRectsIn(int first_page, int count)
         // 整格反白与文字选区在这里分开，不靠几何猜。整格这一支不读流区间：
         //   空格的内容长度是 0，按流区间求交永远得到零宽，空格就一条高亮都画不出来。
         //   它读的是格的几何（外框 + 整行的块轴范围），与格里有几个字无关。
-        const bool cell_row = cell_sel && lb.cell_box_hi_pt > lb.cell_box_lo_pt &&
-                              lb.cell_bottom_pt > lb.cell_top_pt;
+        const bool cell_row =
+            cell_sel && lb.cell_box_hi_pt > lb.cell_box_lo_pt && lb.cell_bottom_pt > lb.cell_top_pt;
         Rect r;
         if (cell_row) {
             // 一个格的每一行盒都带着同一份格范围 —— 只画一次，否则半透明的选区叠几层，
             //   格内行数越多颜色越深。
-            if (drawn_cell && lb.page == last_cell_page &&
-                lb.cell_box_lo_pt == last_cell_lo && lb.cell_box_hi_pt == last_cell_hi &&
-                lb.cell_top_pt == last_cell_top && lb.cell_bottom_pt == last_cell_bottom)
+            if (drawn_cell && lb.page == last_cell_page && lb.cell_box_lo_pt == last_cell_lo &&
+                lb.cell_box_hi_pt == last_cell_hi && lb.cell_top_pt == last_cell_top &&
+                lb.cell_bottom_pt == last_cell_bottom)
                 continue;
             drawn_cell = true;
             last_cell_page = lb.page;
@@ -841,7 +845,8 @@ std::vector<PageRect> CaretResolver::selectionRectsIn(int first_page, int count)
         // 文字选区：本段落在选区里的那一段（整段被选中时就是 [0, 本段占的位数]）。
         const FlowPos base = (*view_.block_flow)[static_cast<size_t>(para)];
         const FlowPos seg_lo = std::max(lo, base);
-        const FlowPos seg_hi = std::min(hi, base + (*view_.block_flow_span)[static_cast<size_t>(para)]);
+        const FlowPos seg_hi =
+            std::min(hi, base + (*view_.block_flow_span)[static_cast<size_t>(para)]);
         if (seg_hi <= seg_lo) {
             // 空段（只有一个段落标记、块跨度是 0）：标记本身落在选区里就要有一条高亮 ——
             //   否则"选中了空行"在屏幕上一个像素都没有。跨选到空行是最常见的那条路。
@@ -919,7 +924,7 @@ std::vector<PageRect> CaretResolver::selectionRectsIn(int first_page, int count)
  * 而不是钻进它内部）。hitTestPt 与上下键共用它，免得两份实现分头长出不同的势力范围。
  */
 void CaretResolver::hitTestInLine(const LineBox& lb, float inline_page_pt, uint32_t* cp_out,
-                                 int* side_out) const {
+                                  int* side_out) const {
     const float rel = inline_page_pt - lb.inline_origin_pt;
     const size_t n = lb.clusters.size();
 
@@ -961,7 +966,8 @@ bool CaretResolver::moveCaretBy(int dcp, bool extend) {
     if (view_.blocks->empty() || dcp == 0) return false;
 
     int para = caretPara();
-    if (para >= static_cast<int>(view_.blocks->size())) para = static_cast<int>(view_.blocks->size()) - 1;
+    if (para >= static_cast<int>(view_.blocks->size()))
+        para = static_cast<int>(view_.blocks->size()) - 1;
     int rel = caretRel();
     // 本段最后一个流位置 = 段长 + 本段边界枚数（＝ relAt(len, 全部边界)）。
     const auto span_of = [&](int q) {

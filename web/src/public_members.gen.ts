@@ -13,6 +13,8 @@ export const PUBLIC_MEMBERS: readonly string[] = [
   'paragraphs',
   'save',
   'insertText',
+  'insertTable',
+  'insertControl',
   'type',
   'deleteBackward',
   'deleteForward',

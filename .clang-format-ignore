@@ -5,3 +5,5 @@ third_party/*
 build/*
 out/*
 assets/*
+# 生成物：形状由生成器决定，格式化之后 gen_payloads.py --check 会当场判"契约与 C++ 不一致"。
+src/core/engine/payload_schema.gen.h

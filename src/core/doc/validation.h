@@ -101,6 +101,7 @@ struct BeginResult {
  */
 class ChangeGate {
 public:
+
     explicit ChangeGate(ControlApi& api);
 
     /**
@@ -175,6 +176,7 @@ public:
     void sweepStale();
 
 private:
+
     struct Candidate {
         /**
          * 这一次等待的令牌。

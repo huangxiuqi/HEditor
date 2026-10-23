@@ -162,6 +162,7 @@ struct Control {
  */
 class ControlSet {
 public:
+
     void clear();
 
     /**
@@ -227,6 +228,7 @@ public:
     std::vector<int> overlapping(const ControlRange& r) const;
 
 private:
+
     std::vector<Control> items_;
 
     /**

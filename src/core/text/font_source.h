@@ -47,6 +47,7 @@ struct SfntTable {
  */
 class SfntDirectory {
 public:
+
     bool parse(const uint8_t* header, size_t n);
 
     /**
@@ -82,6 +83,7 @@ public:
     static uint32_t tagOf(const char* s4);
 
 private:
+
     std::vector<SfntTable> tables_;
 
     /**
@@ -112,6 +114,7 @@ enum class FontRead {
  */
 class FontStorage {
 public:
+
     ~FontStorage();
     FontStorage() = default;
     FontStorage(const FontStorage&) = delete;
@@ -149,6 +152,7 @@ public:
     bool valid() const { return file_ != nullptr; }
 
 private:
+
     std::FILE* file_ = nullptr;
 
     /**
@@ -286,6 +290,7 @@ public:
     size_t eofReads() const { return eof_reads_; }
 
 private:
+
     struct Block {
         /**
          * 块数据。
@@ -448,6 +453,7 @@ public:
     static bool inSkeleton(uint32_t tag);
 
 private:
+
     std::string path_;
 
     /**

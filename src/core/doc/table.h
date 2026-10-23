@@ -174,6 +174,34 @@ struct StepBatch {
 };
 
 /**
+ * 新建表格的行列上限。它不是排版限制，而是"多打一个零"的挡板：行列相乘就是段数，
+ * 200 x 50 已经是一万段，再往上排版与撤销栈会先把内存吃掉。
+ */
+constexpr int kMaxNewTableRows = 200;
+
+/**
+ * 新建表格的列数上限（理由同 kMaxNewTableRows）。
+ */
+constexpr int kMaxNewTableCols = 50;
+
+/**
+ * 造一张空表格的子树描述：rows 行、每行 cols 格、每格一枚段落标记。
+ *
+ * 空格也要有标记。块流与流位置都按段落标记递推，没有标记的格在流里一位都不占 ——
+ * 于是"点进这一格"没有可落的位置，表格的行列操作也算不出它属于哪一段。
+ *
+ * 不写列宽与列定义：宽度 Auto 撑满内容区，列宽由排版按格数平分（见 layout 的 openTable），
+ * 这是"刚插进来的表"该有的形状。要指定列宽请在此之后改表格记录。
+ *
+ * @param rows 行数，取值 [1, kMaxNewTableRows]
+ * @param cols 每行的格数，取值 [1, kMaxNewTableCols]
+ * @param header true = 首行标成标题行（跨页时在每页顶端重复）
+ * @param out 写回子树描述
+ * @return true = 参数可表达；false = 行列越界或 out 为空
+ */
+bool makeEmptyTableSpec(int rows, int cols, bool header, NodeSpec* out);
+
+/**
  * 在 at_row 处插入一行（取 [0, 行数]，等于行数就是追加）。
  *
  * cells 是这一行的单元格描述，跨度之和必须等于列数（否则新行与网格对不上）。

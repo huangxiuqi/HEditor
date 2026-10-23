@@ -812,8 +812,7 @@ std::string hitTest(float x_pt, float y_pt, int clamp) {
     int side = 0;
     int line_aff = 0;
     int cell_para = -1;
-    if (!g_engine.hitTestPt(x_pt, y_pt, &p, &owner, &side, &line_aff, &cell_para,
-                            clamp != 0))
+    if (!g_engine.hitTestPt(x_pt, y_pt, &p, &owner, &side, &line_aff, &cell_para, clamp != 0))
         return pk::checked(pk::hit_test::kSpec, "null");
     std::ostringstream o;
     o << "{\"para\":" << p.para << ",\"offset\":" << p.offset << ",\"field\":" << owner
@@ -994,6 +993,41 @@ bool removeControlAt(int index, bool keep_content) {
 bool setControlPropAt(int index, int prop, bool value) {
     if (prop < 0 || prop > 3) return false;
     return g_engine.setControlPropAndRender(index, static_cast<ControlProp>(prop), value);
+}
+
+/**
+ * 插一张空表格：rows 行、每行 cols 格，header 把首行标成标题行。
+ *
+ * 表格落在光标所在段之后（块级元素不进段落内部），光标随之落进第一格。只在文档模式
+ * 放行 —— 表单模式在填值、只读模式不许改，两者都不该长出新表。
+ */
+bool insertTableAt(int rows, int cols, bool header) {
+    return g_engine.insertTableAndRender(rows, cols, header);
+}
+
+/**
+ * 插一个内容控件（表单字段），落在光标处，label 是它的初始内容。
+ *
+ * opts 的键都可省：type 是业务类型（默认 text）、key 是业务编码、label 是内容、
+ * ro 是只读、req 是必填、shape 是值形态（0 文本 / 1 布尔 / 2 枚举 / 3 列表 / 4 资源）。
+ * 只在文档模式放行（理由同上）。
+ */
+bool insertControlAt(val opts) {
+    const val o = (opts.isUndefined() || opts.isNull()) ? val::object() : opts;
+    ControlSpec spec;
+    if (!o["type"].isUndefined()) spec.controlType = o["type"].as<std::string>();
+    if (!o["key"].isUndefined()) spec.key = o["key"].as<std::string>();
+    if (!o["ro"].isUndefined()) spec.readonly = o["ro"].as<bool>();
+    if (!o["req"].isUndefined()) spec.required = o["req"].as<bool>();
+    if (!o["shape"].isUndefined()) {
+        const int shape = o["shape"].as<int>();
+        if (shape >= 0 && shape <= 4) spec.valueShape = static_cast<ValueShape>(shape);
+    }
+    // 空类型名会让宿主的分类型回显没有着落，而文本字段是唯一不需要作者声明的种类。
+    if (spec.controlType.empty()) spec.controlType = "text";
+    const std::string label =
+        o["label"].isUndefined() ? std::string() : o["label"].as<std::string>();
+    return g_engine.insertControlAndRender(spec, label);
 }
 
 /**
@@ -1336,9 +1370,7 @@ std::string copySelection() {
  * 片段是从剪贴板读回来的字符串，这一层不解释它 —— 解析、校验、建节点全在引擎里，
  *   host 只搬字节。这样"能粘成什么样"只有一个真相。
  */
-std::string pasteFragment(const std::string& text) {
-    return g_engine.pasteFragmentAndRender(text);
-}
+std::string pasteFragment(const std::string& text) { return g_engine.pasteFragmentAndRender(text); }
 
 /**
  * 粘贴纯文本：从别的应用粘过来的文字走这条（按行拆段）。
@@ -1346,7 +1378,6 @@ std::string pasteFragment(const std::string& text) {
 std::string pastePlainText(const std::string& text) {
     return g_engine.pastePlainTextAndRender(text);
 }
-
 
 /**
  * 工具栏递过来的字符格式补丁：键名与落盘（record_json 的 marksJson）同一套。
@@ -1706,6 +1737,8 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("showControlDots", &showControlDots);
     emscripten::function("removeControlAt", &removeControlAt);
     emscripten::function("setControlPropAt", &setControlPropAt);
+    emscripten::function("insertTableAt", &insertTableAt);
+    emscripten::function("insertControlAt", &insertControlAt);
     emscripten::function("focusControl", &focusControl);
     emscripten::function("tabCaret", &tabCaret);
     emscripten::function("auditFrame", &auditFrame);

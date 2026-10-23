@@ -280,6 +280,9 @@ const COMMANDS: Array<[string, string, string[], string]> = [
   ['redo',                  'w', ['redoEdit'],                                            'self'],
   ['removeControl',         'w', ['removeControlAt'],                                     'self'],
   ['setControlProp',        'w', ['setControlPropAt'],                                    'self'],
+  // 插入结构：表格与控件都落成 InsertNode，撤销与增量排版跟着走现成那条路。
+  ['insertTable',           'w', ['insertTableAt'],                                       'self'],
+  ['insertControl',         'w', ['insertControlAt'],                                     'self'],
   ['focusControl',          'w', ['focusControl'],                                        'self'],
 
   // 选区与光标：选区的几条自己收尾；落光标、拖选、闪烁只改状态，要宿主补呈现
@@ -1093,6 +1096,16 @@ const WRITE = collect('w', {
   focusControl: (a) => mod.focusControl(a.forward === undefined ? true : !!a.forward),
   removeControl: (a) => mod.removeControlAt(a.i | 0, !!a.keepContent),
   setControlProp: (a) => mod.setControlPropAt(a.i | 0, a.prop | 0, !!a.value),
+  /**
+   * 插一张空表格。引擎只在文档模式放行，模式不对时返回 false 且文档不动 ——
+   *   与"按下的那一下没发生"同一口径，宿主据此提示而不用先自己判模式。
+   */
+  insertTable: (a) => mod.insertTableAt(a.rows | 0, a.cols | 0, !!a.header),
+  /**
+   * 插一个内容控件。opts 的键与契约里的 ControlInsertOptions 一一对应（门面已把
+   *   shape 折成整数、readonly / required 折成 ro / req），这里原样交给引擎。
+   */
+  insertControl: (a) => mod.insertControlAt(a.opts || {}),
   setFontCacheConfig: (a) => mod.setFontCacheConfig(a.blockSize | 0, a.blocks | 0),
 
   /**

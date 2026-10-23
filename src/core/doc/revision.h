@@ -168,6 +168,7 @@ public:
     const NodeTree& baseline() const { return baseline_; }
 
 private:
+
     NodeTree baseline_;
 
     /**

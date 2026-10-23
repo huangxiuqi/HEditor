@@ -70,6 +70,7 @@ using FlowPos = int;
  */
 class FlowIndex {
 public:
+
     explicit FlowIndex(const NodeTree& tree, FlowVisibility vis);
 
     /**

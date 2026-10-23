@@ -197,8 +197,8 @@ InvariantReport checkInvariants(const NodeTree& tree) {
         const Node* n = tree.find(id);
         if (n->kind != NodeKind::Image) continue;
         const bool px_ok = n->image.px_w > 0 && n->image.px_h > 0;
-        const bool shown_ok = n->image.width.kind != LengthKind::Auto ||
-                              n->image.height.kind != LengthKind::Auto;
+        const bool shown_ok =
+            n->image.width.kind != LengthKind::Auto || n->image.height.kind != LengthKind::Auto;
         if (!px_ok && !shown_ok) {
             add(&r, kAtomSized, id, -1,
                 "图片既没有正的原始像素尺寸，也没有非自动的显示尺寸 —— 排版无从定出它的宽度");

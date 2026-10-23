@@ -10,9 +10,9 @@
 
 #include <cstdint>
 #include <map>
-#include <tuple>
 #include <memory>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -43,6 +43,7 @@ hb_user_data_key_t* fontSourceKey();
  */
 class FontFace {
 public:
+
     FontFace() = default;
 
     /**
@@ -181,6 +182,7 @@ private:
  */
 class FontInstance {
 public:
+
     FontInstance() = default;
 
     /**

@@ -1168,8 +1168,8 @@ void drawBreakMark(Bitmap& target, float along, float cross, float size_pt, floa
         // 竖排：整枚转 90 度 —— 行内轴变 y、块轴变 x。
         target.fillRect(Rect{bar_lo, a0, t, w}, color);
         target.fillRect(Rect{bar_lo - h, right - t, h + t, t}, color);
-        target.fillTriangle(mid, a0, mid - half - t * 0.3f, a0 + head,
-                            mid + half + t * 0.3f, a0 + head, color);
+        target.fillTriangle(mid, a0, mid - half - t * 0.3f, a0 + head, mid + half + t * 0.3f,
+                            a0 + head, color);
     }
 }
 

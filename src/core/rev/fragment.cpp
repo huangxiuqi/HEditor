@@ -217,11 +217,20 @@ std::string escapeHtml(const std::string& utf8) {
     out.reserve(utf8.size());
     for (char c : utf8) {
         switch (c) {
-            case '&': out += "&amp;"; break;
-            case '<': out += "&lt;"; break;
-            case '>': out += "&gt;"; break;
-            case '"': out += "&quot;"; break;
-            default: out += c;
+            case '&':
+                out += "&amp;";
+                break;
+            case '<':
+                out += "&lt;";
+                break;
+            case '>':
+                out += "&gt;";
+                break;
+            case '"':
+                out += "&quot;";
+                break;
+            default:
+                out += c;
         }
     }
     return out;
@@ -273,8 +282,7 @@ std::string runStyleOf(const CharFormat& m, const SerializeOptions& opt) {
  * @param open_para 当前有没有开着的段落（跨调用保持）
  * @param opt 字体身份回调
  */
-void appendHtml(const NodeSpec& s, std::string* out, bool* open_para,
-                const SerializeOptions& opt) {
+void appendHtml(const NodeSpec& s, std::string* out, bool* open_para, const SerializeOptions& opt) {
     if (isText(s.kind)) {
         const std::string text = escapeHtml(codepointsToUtf8(s.text));
         if (text.empty()) return;
@@ -358,6 +366,7 @@ ordered_json nodeJsonOf(const NodeSpec& s, recjson::StringPool* strings) {
  */
 class ClipContext : public recjson::Context {
 public:
+
     ClipContext(std::vector<std::string> strings, std::unordered_map<int, int> fonts)
         : strings_(std::move(strings)), fonts_(std::move(fonts)) {}
 
@@ -383,6 +392,7 @@ public:
     const std::string& error() const { return error_; }
 
 private:
+
     std::vector<std::string> strings_;
     std::unordered_map<int, int> fonts_;
     mutable std::string error_;

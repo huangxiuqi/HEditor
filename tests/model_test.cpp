@@ -4194,8 +4194,8 @@ void checkCompileRuns() {
         const CompileResult r = compileDocument(tree, FlowVisibility::Design, noStyles());
         expectTrue(r.ok(), "接缝 / 字符样式：粗斜下划线不再记诊断（已经进编译）");
         expectTrue(r.blocks.size() == 1 && r.blocks[0].runs.size() == 1 &&
-                       r.blocks[0].runs[0].weight == kWeightBold &&
-                       r.blocks[0].runs[0].italic && r.blocks[0].runs[0].underline,
+                       r.blocks[0].runs[0].weight == kWeightBold && r.blocks[0].runs[0].italic &&
+                       r.blocks[0].runs[0].underline,
                    "接缝 / 字符样式：三个属性都落到 run 上");
         expectTrue(r.blocks[0].runs[0].size_pt == 12.0f,
                    "接缝 / 字符样式：其余字段照常解析（字号仍是段落默认的 12 磅）");

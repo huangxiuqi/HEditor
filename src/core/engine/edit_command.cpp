@@ -8,6 +8,8 @@
 #include "core/engine/edit_command.h"
 
 #include "core/doc/subtree.h"
+#include "core/doc/table.h"
+#include "core/utils/utf8.h"
 
 #include <algorithm>
 #include <functional>
@@ -1196,7 +1198,7 @@ CharFormat EditCommand::marksAtFlow(FlowPos at, std::string* style_ref) const {
 }
 
 CharFormat EditCommand::marksAtSelectionStart(FlowPos lo, FlowPos hi,
-                                             std::string* style_ref) const {
+                                              std::string* style_ref) const {
     if (style_ref != nullptr) style_ref->clear();
     if (!hasFlow() || hi <= lo) return marksAtFlow(lo, style_ref);
     const rev::FlowIndex& idx = flowIndex();
@@ -1321,6 +1323,111 @@ EditCommand::PropResult EditCommand::setControlProp(int index, ControlProp prop,
     return structural ? PropResult::Structural : PropResult::Changed;
 }
 
+bool EditCommand::posAfterParagraph(int para, Pos* out) const {
+    if (out == nullptr || !hasFlow()) return false;
+    if (para < 0 || para >= static_cast<int>(blockSrc().size())) return false;
+    const BlockSource& src = blockSrc()[static_cast<size_t>(para)];
+    // 有标记时锚在标记上，没有时锚在段首元素上 —— 两者都指向"这一段所在的那一层"。
+    const NodeId anchor = (src.mark != kInvalidNodeId) ? src.mark : src.first;
+    const rev::Node* parent = rev::parentOf(doc(), anchor);
+    if (parent == nullptr) return false;
+    int slot = -1;
+    for (size_t i = 0; i < parent->children.size(); ++i) {
+        if (parent->children[i]->id == anchor) {
+            slot = static_cast<int>(i);
+            break;
+        }
+    }
+    if (slot < 0) return false;
+    // 有标记：落点是标记之后那一槽。没有标记：末尾那段之后就是所属容器的末尾 —— 用段首
+    //   元素的槽位 +1 会在"这一段有多个 run"时插到段中间去。
+    *out = (src.mark != kInvalidNodeId)
+               ? Pos{parent->id, slot + 1}
+               : Pos{parent->id, static_cast<int>(parent->children.size())};
+    return true;
+}
+
+bool EditCommand::commitInsert(FlowPos at, const NodeSpec& spec, FlowPos focus) {
+    if (at < 0 || at > flowIndex().size()) {
+        noteBlocked();
+        return false;
+    }
+    InsertNode in;
+    in.at = flowIndex().posAt(at);
+    in.at_flow = at;
+    in.subtree = spec;
+
+    std::vector<Step> steps;
+    steps.push_back(Step{in});
+    // 撤销回到"插入之前光标在哪"，不是回到插入点：两者在"光标停在段首、表格落在段末"这类
+    //   位置上相差一整段，而撤销的语义是回到按下去之前那一拍。
+    pending_before_ = pos().selection();
+    pending_after_ = Range{focus, focus};
+    // 起始脏段按插入点算：表格带来的新段就从那里开始，之后的内容整体后移。
+    if (!commit(std::move(steps), pos().paraForFlow(at))) {
+        noteBlocked();
+        return false;
+    }
+    pos().setCaretAtFlow(focus);
+    return true;
+}
+
+bool EditCommand::insertTable(int rows, int cols, bool header) {
+    if (!hasFlow()) return false;
+    // 插入结构是设计动作：表单模式在填值、只读模式不许改，两者都不该长出新的表。
+    if (mode() != EditMode::Document) {
+        noteBlocked();
+        return false;
+    }
+    NodeSpec spec;
+    if (!makeEmptyTableSpec(rows, cols, header, &spec)) {
+        noteBlocked();
+        return false;
+    }
+
+    Pos at{};
+    if (!posAfterParagraph(pos().caret().para, &at)) {
+        noteBlocked();
+        return false;
+    }
+    const FlowPos at_flow = flowIndex().flowAt(at);
+    if (at_flow < 0) {
+        noteBlocked();
+        return false;
+    }
+    // 光标落进第一格：接着打字就是填这一格（不是落在表之前或表之后）。
+    return commitInsert(at_flow, spec, at_flow + kFirstTableCellOffset);
+}
+
+bool EditCommand::insertControl(const ControlSpec& spec, const std::string& label) {
+    if (!hasFlow()) return false;
+    if (mode() != EditMode::Document) {
+        noteBlocked();
+        return false;
+    }
+
+    NodeSpec node;
+    node.kind = NodeKind::ContentControl;
+    node.control = spec;
+    const std::vector<uint32_t> cps = utf8ToCodepoints(label);
+    if (!cps.empty()) {
+        NodeSpec run;
+        run.kind = NodeKind::TextRun;
+        run.text = cps;
+        node.children.push_back(std::move(run));
+    }
+
+    const TextPos caret = pos().caret();
+    const FlowPos at = pos().flowPosAtSide(caret.para, caret.offset, pos().sideForPos(caret));
+    if (at < 0) {
+        noteBlocked();
+        return false;
+    }
+    // 控件是行内容器，不切断段落：落点始终在光标处。光标摆到内容末尾，与"接着填这个字段"
+    //   一致；标签为空时那就是起始边界之后的第一位（空控件内部）。
+    return commitInsert(at, node, at + 1 + static_cast<FlowPos>(cps.size()));
+}
+
 CharFormat EditCommand::charFormatAtCaret() const {
     if (!hasFlow()) return CharFormat{};
     const Range sel = pos().selection();
@@ -1342,8 +1449,10 @@ CharFormat EditCommand::charFormatAtCaret() const {
                 const bool hit = (e > from && f < to);
                 if (hit) {
                     const CharFormat& m = std::get<rev::RunPayload>(n->payload).marks;
-                    if (found) out = intersectCharFormat(out, m);
-                    else out = m;
+                    if (found)
+                        out = intersectCharFormat(out, m);
+                    else
+                        out = m;
                     found = true;
                 }
             }
@@ -1449,18 +1558,18 @@ bool EditCommand::applyCharFormat(const CharFormat& patch) {
                         if (lo > 0) {
                             InsertNode head;
                             head.at_flow = f;
-                            head.subtree = runSpecOf(
-                                std::vector<uint32_t>(t.begin(), t.begin() + lo), rp.marks,
-                                rp.style, n->hidden);
+                            head.subtree =
+                                runSpecOf(std::vector<uint32_t>(t.begin(), t.begin() + lo),
+                                          rp.marks, rp.style, n->hidden);
                             steps.push_back(Step{head});
                         }
                         // 选区那一段：新标记。hi == len 时它已经由原节点自己担着。
                         if (hi < len) {
                             InsertNode mid;
                             mid.at_flow = f + lo;
-                            mid.subtree = runSpecOf(
-                                std::vector<uint32_t>(t.begin() + lo, t.begin() + hi), next,
-                                rp.style, n->hidden);
+                            mid.subtree =
+                                runSpecOf(std::vector<uint32_t>(t.begin() + lo, t.begin() + hi),
+                                          next, rp.style, n->hidden);
                             steps.push_back(Step{mid});
                         }
                     }

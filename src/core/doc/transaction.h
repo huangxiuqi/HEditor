@@ -58,6 +58,7 @@ struct Transaction {
  */
 class UndoStack {
 public:
+
     explicit UndoStack(NodeTree& tree) : tree_(tree) {}
 
     /**

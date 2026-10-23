@@ -564,7 +564,6 @@ bool EditorEngine::deleteSelectionAndRender() {
     return true;
 }
 
-
 const rev::Doc& EditorEngine::document() const {
     static const rev::Doc kEmpty;
     return session_ ? session_->doc() : kEmpty;
@@ -1762,6 +1761,30 @@ bool EditorEngine::hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* 
         }
         if (ip >= best->cell_box_lo_pt && ip < text_start) *out_cell_para = best->paragraph;
     }
+    return true;
+}
+
+bool EditorEngine::insertTable(int rows, int cols, bool header) {
+    if (!loaded_) return false;
+    return edit_.insertTable(rows, cols, header);
+}
+
+bool EditorEngine::insertTableAndRender(int rows, int cols, bool header) {
+    if (!insertTable(rows, cols, header)) return false;
+    relayout();
+    repaintAfterEdit();
+    return true;
+}
+
+bool EditorEngine::insertControl(const ControlSpec& spec, const std::string& label) {
+    if (!loaded_) return false;
+    return edit_.insertControl(spec, label);
+}
+
+bool EditorEngine::insertControlAndRender(const ControlSpec& spec, const std::string& label) {
+    if (!insertControl(spec, label)) return false;
+    relayout();
+    repaintAfterEdit();
     return true;
 }
 

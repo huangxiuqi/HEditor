@@ -395,7 +395,7 @@ function makeTabs(): Tab[] {
   };
 
   const insert: Group = {
-    label: '文本',
+    label: '插入',
     items: [
       {
         act: 'type',
@@ -403,6 +403,20 @@ function makeTabs(): Tab[] {
         icon: 'type',
         big: true,
         run: () => editor.type('（从这里开始编辑）'),
+      },
+      {
+        act: 'table',
+        label: '表格',
+        icon: 'table',
+        big: true,
+        run: () => editor.insertTable({ rows: 3, cols: 3, header: true }),
+      },
+      {
+        act: 'field',
+        label: '表单字段',
+        icon: 'field',
+        big: true,
+        run: () => editor.insertControl({ type: 'text', key: 'field', label: '（待填）' }),
       },
     ],
   };

@@ -82,6 +82,7 @@ public:
     int nodeCount() const { return static_cast<int>(nodes_.size()); }
 
 private:
+
     /**
      * 节点号到下标的查表槽。id 取 0（kInvalidNodeId）表示空槽，负载因此必须低于一半，
      * 否则线性探测会绕回自身。

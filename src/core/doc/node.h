@@ -279,6 +279,7 @@ enum class FlowVisibility : uint8_t {
  */
 class NodeTree {
 public:
+
     NodeTree();
 
     /**
@@ -452,6 +453,7 @@ public:
     void reserveIdWatermark(NodeId next);
 
 private:
+
     NodeId allocateId() { return next_id_++; }
 
     /**

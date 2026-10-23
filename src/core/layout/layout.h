@@ -1316,6 +1316,7 @@ struct ParaIndex {
  */
 class ShapingCache {
 public:
+
     ShapingCache();
 
     /**
@@ -1354,6 +1355,7 @@ public:
     struct Impl;
 
 private:
+
     friend struct ShapingCacheAccess;
 
     /**

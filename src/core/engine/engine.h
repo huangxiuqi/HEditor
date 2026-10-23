@@ -1251,6 +1251,47 @@ public:
     bool removeControl(int index, bool keep_content, FlowPos caret_before = -1);
 
     /**
+     * 在当前段之后插一张空表格，光标落进第一格。
+     *
+     * 走 InsertNode 那条结构步骤，所以撤销、位置映射与增量排版全部复用现成机制。
+     * 只在文档模式放行：插入表格是设计动作。
+     *
+     * @param rows 行数
+     * @param cols 每行的格数
+     * @param header true = 首行是标题行
+     * @return true = 插进去了
+     */
+    bool insertTable(int rows, int cols, bool header);
+
+    /**
+     * 插入表格 + 重排 + 呈现（理由同上面那组 AndRender）。
+     *
+     * @param rows 行数
+     * @param cols 每行的格数
+     * @param header true = 首行是标题行
+     * @return true = 插进去了
+     */
+    bool insertTableAndRender(int rows, int cols, bool header);
+
+    /**
+     * 在光标处插一个内容控件（表单字段），光标落进它的内容末尾。
+     *
+     * @param spec 控件记录
+     * @param label 控件内容
+     * @return true = 插进去了
+     */
+    bool insertControl(const ControlSpec& spec, const std::string& label);
+
+    /**
+     * 插入控件 + 重排 + 呈现。
+     *
+     * @param spec 控件记录
+     * @param label 控件内容
+     * @return true = 插进去了
+     */
+    bool insertControlAndRender(const ControlSpec& spec, const std::string& label);
+
+    /**
      * 删除控件 + 重排 + 呈现的组合入口（理由同上面那组 AndRender）。
      * 宿主侧一次调用就收尾，不必自己记得再排一次 —— 漏掉那一步的症状是
      * "控件没了但括号还在画布上"。
@@ -2201,9 +2242,7 @@ private:
      *
      * 光栅签名混的是这一位而不是档位 —— 切只读不改内容，只有签名能让页位图作废。
      */
-    bool marksShown() const {
-        return cfg_.marks != MarksMode::None && mode_ != EditMode::ReadOnly;
-    }
+    bool marksShown() const { return cfg_.marks != MarksMode::None && mode_ != EditMode::ReadOnly; }
 
     /**
      * 画表单标记（方括号与小点）到一页的位图上 —— 页内坐标，不认帧。

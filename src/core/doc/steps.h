@@ -449,8 +449,8 @@ struct SetTableCellSpan {
 };
 
 using Step = std::variant<InsertText, InsertFragment, DeleteRange, InsertParaMark, RemoveParaMark,
-                          SetParaMarkFormat, SetRun, InsertNode, RemoveNode, UnwrapNode,
-                          WrapNode, SetControlProp, SetControlValue, SetTableCellSpan>;
+                          SetParaMarkFormat, SetRun, InsertNode, RemoveNode, UnwrapNode, WrapNode,
+                          SetControlProp, SetControlValue, SetTableCellSpan>;
 
 /**
  * 步骤的执行结果。失败时给出原因 —— 位置越界、类型不符都要显式说出来，不静默不做。
@@ -532,8 +532,8 @@ std::vector<Step> makeDeleteTextSteps(const NodeTree& tree, FlowPos from, FlowPo
  * @param to 区间终点（不含）
  * @return 一条删除步骤；区间里有别的东西时为空
  */
-std::vector<Step> makeDeleteRangeOneStep(const NodeTree& tree, const FlowIndex& idx,
-                                         FlowPos from, FlowPos to);
+std::vector<Step> makeDeleteRangeOneStep(const NodeTree& tree, const FlowIndex& idx, FlowPos from,
+                                         FlowPos to);
 
 /**
  * 构造一个删除段落标记的步骤：标记的格式与样式引用从文档里读出来带上。

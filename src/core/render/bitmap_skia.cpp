@@ -84,6 +84,7 @@ void releaseHbBlob(const void* /*ptr*/, void* ctx) {
  */
 class CachedFontStream : public SkStreamAsset {
 public:
+
     explicit CachedFontStream(FontSource& src, uint64_t pos = 0) : src_(src), pos_(pos) {}
 
     size_t read(void* buffer, size_t size) override {
@@ -123,6 +124,7 @@ public:
     size_t getLength() const override { return static_cast<size_t>(src_.size()); }
 
 private:
+
     /**
      * 副本从数据开头开始（Skia 对 duplicate 的约定）。
      */

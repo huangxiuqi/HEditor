@@ -73,6 +73,7 @@ public:
     const std::vector<NodeId>& byKey(const std::string& key) const;
 
 private:
+
     std::unordered_map<NodeId, std::string> key_of_;
 
     /**

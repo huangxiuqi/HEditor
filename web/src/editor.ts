@@ -3,6 +3,7 @@ import type {
   CaretStep,
   ChangeEvent,
   CharFormatPatch,
+  ControlInsertOptions,
   ControlSummary,
   Diag,
   Editor,
@@ -113,6 +114,17 @@ const MARKS_CODE: Record<EditorConfig['showMarks'], number> = {
   none: 0,
   paragraph: 1,
   all: 2,
+};
+
+/**
+ * 值形态 -> 引擎的整数。顺序与 ValueShape 枚举一致（引擎按它决定值放哪、怎么读）。
+ */
+const SHAPE_CODE: Record<NonNullable<ControlInsertOptions['shape']>, number> = {
+  text: 0,
+  bool: 1,
+  enum: 2,
+  list: 3,
+  resource: 4,
 };
 
 const DEFAULT_CONFIG: EditorConfig = {
@@ -480,6 +492,30 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
 
     async insertText(pos, text) {
       return edit('insertText', { para: pos.para, offset: pos.offset, s: String(text) });
+    },
+
+    async insertTable(opts) {
+      alive();
+      // 行列原样传：0 与负数由引擎拒掉（返回 false、文档不动）。在这里改成 1 会让
+      //   "参数写错了"看起来像"插进去了一张一格的表" —— 静默纠正比失败更难查。
+      const rows = Math.trunc(Number(opts?.rows ?? 0)) || 0;
+      const cols = Math.trunc(Number(opts?.cols ?? 0)) || 0;
+      return edit('insertTable', { rows, cols, header: !!opts?.header });
+    },
+
+    async insertControl(opts) {
+      alive();
+      const o = opts ?? {};
+      return edit('insertControl', {
+        opts: {
+          type: o.type,
+          key: o.key,
+          label: o.label === undefined ? '' : String(o.label),
+          ro: !!o.readonly,
+          req: !!o.required,
+          shape: SHAPE_CODE[o.shape ?? 'text'],
+        },
+      });
     },
 
     // 编辑

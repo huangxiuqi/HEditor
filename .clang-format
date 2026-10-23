@@ -9,6 +9,10 @@ AccessModifierOffset: -4
 IndentWidth: 4
 TabWidth: 4
 UseTab: Never
+# 访问修饰符之后空一行：这一层分组是本仓库的既有写法，scripts/check_docs_cpp.py 的
+# missing-gap 规则也按它判（块注释与上一条声明之间必须有空行）。默认的 Never 会把这一行
+# 删掉，于是格式化与文档判据互相打架。
+EmptyLineAfterAccessModifier: Always
 # WebRTC 默认 80 列，本仓库既定为 100（与同系 Skia 一致，也少动既有代码）。
 ColumnLimit: 100
 # 续行缩进 4（Google 默认），与现有代码一致。

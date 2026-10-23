@@ -117,6 +117,7 @@ struct Applied {
  */
 class Session {
 public:
+
     explicit Session(Doc doc, int limit = 100);
 
     /**
@@ -207,6 +208,7 @@ public:
     uint64_t generation() const { return generation_; }
 
 private:
+
     void pushUndo(Doc doc);
 
     /**

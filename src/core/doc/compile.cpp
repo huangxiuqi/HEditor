@@ -41,6 +41,7 @@ struct PendingText {
  */
 class Compiler {
 public:
+
     Compiler(const NodeTree& tree, FlowVisibility vis, const StyleSheet& sheet)
         : tree_(tree), vis_(vis), sheet_(sheet) {}
 
@@ -69,6 +70,7 @@ public:
     }
 
 private:
+
     /**
      * 当前段已经累积了多少个码点 —— 行内对象的锚点就是它。
      *
