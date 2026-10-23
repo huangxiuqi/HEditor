@@ -34,6 +34,7 @@ export const PUBLIC_MEMBERS: readonly string[] = [
   'select',
   'selectAll',
   'clearSelection',
+  'focus',
   'selection',
   'focusControl',
   'setControlProp',

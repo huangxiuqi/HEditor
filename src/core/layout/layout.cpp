@@ -194,6 +194,11 @@ struct BlockShaping {
  * 计算段级整形指纹：涵盖所有影响整形结果的输入。
  * 字符格式从块级字段挪进了 run（1.8 之后），所以这里混的是实际生效的 run 序列 ——
  * 只改一个 run 的字号而文本不变，也必须判成未命中，否则会拿旧字号的字形接着用。
+ *
+ * 字重同理，而且更容易漏：它换的是字体实例（可变字体的 wght 轴），字形对象与推进宽度
+ * 都跟着变。一段文字整段加粗时文本没动、run 边界也没动，指纹若不含字重就会命中上一轮
+ * 的整形结果 —— 画面停在旧字重上，再把字号改一下才跟着变。斜体与下划线不进指纹：
+ * 它们不改字形与推进，摆字形时按 run 现取（见 stampRunMarks）。
  * @note 刻意不含页宽页高、光标、括号占位计划、颜色、行高与段后距 —— 它们只影响落行
  * 或绘制。颜色不进指纹是因为它不改变字形与推进（放置时才按 run 取色），
  * 所以改颜色不该让整形缓存失效。
@@ -211,6 +216,7 @@ uint64_t shapingFingerprint(const BlockSpec& b, const std::vector<FormatRun>& ru
         h = fnvMix(h, static_cast<uint64_t>(fr.cp_end));
         h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(fr.font_index)));
         h = fnvMixFloat(h, fr.size_pt);
+        h = fnvMixFloat(h, fr.weight);
         h = fnvMix(h, static_cast<uint64_t>(fr.fallback_font_indices.size()));
         for (int fi : fr.fallback_font_indices)
             h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(fi)));
@@ -1293,6 +1299,7 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
             pg->italic = r->italic;
             pg->underline = r->underline;
             pg->size_pt = r->size_pt;
+            pg->weight = r->weight;
         };
 
         // 每个簇的行度量：整段算一次，横排的行循环里按行取最大值。

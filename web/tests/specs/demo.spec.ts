@@ -67,6 +67,50 @@ test.describe('示例页的公开面', () => {
     check('★ .heditor-pages 是定位祖先（不是 static）', r.pagesPos !== 'static', r.pagesPos);
   });
 
+  test('工具栏：下拉框拿得住焦点，字体与字号有回显', async ({ open }) => {
+    // 两件事各一条判据：下拉框被外壳抢走焦点就"点开就收回去"（一个选项都选不了）；
+    //   字体字号读的是"实际生效的那一份"，否则正文一个字没改过时控件显示空白。
+    const p = await open('index.html', { viewport: { width: 1280, height: 900 } });
+    const r = await p.ev<any>(`
+      const e = window.__demo;
+      const pick = (act) => document.querySelector('select[data-act="' + act + '"]');
+      const settle = async (fn) => {
+        const t0 = performance.now();
+        while (performance.now() - t0 < 3000) {
+          if (fn()) return true;
+          await new Promise((r) => setTimeout(r, 20));
+        }
+        return false;
+      };
+      await e.setText('甲乙丙丁');
+      await e.setCaret({ para: 0, offset: 1 });
+      await e.flush();
+      const eff = await e.formatAt({ effective: true });
+      const size = pick('size');
+      const font = pick('font');
+      const shown = await settle(() => size.value !== '' && font.value !== '');
+      const before = { size: size.value, font: font.value,
+                       sizeText: size.selectedOptions[0]?.textContent ?? '',
+                       fontText: font.selectedOptions[0]?.textContent ?? '' };
+      // 点一下下拉框：焦点必须还留在它身上。
+      font.focus();
+      const hadFocus = document.activeElement === font;
+      font.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      const keptFocus = document.activeElement === font;
+      return { eff, shown, before, hadFocus, keptFocus,
+               focusTag: document.activeElement?.tagName ?? '' };`);
+    check('实际生效的格式里有字体与字号',
+          r.eff.size !== undefined && r.eff.font !== undefined, JSON.stringify(r.eff));
+    check('两个下拉框都填上了值', r.shown === true, JSON.stringify(r.before));
+    check('字号回显 = 实际生效的字号', Number(r.before.size) === r.eff.size,
+          JSON.stringify({ shown: r.before.size, eff: r.eff.size }));
+    check('字体回显 = 实际生效的字体', Number(r.before.font) === r.eff.font,
+          JSON.stringify({ shown: r.before.font, eff: r.eff.font }));
+    check('字体那一格写的不是空档位', r.before.fontText !== '—', r.before.fontText);
+    check('点下拉框之前焦点在它身上', r.hadFocus === true);
+    check('★ 点一下下拉框不会把焦点抢回编辑器', r.keptFocus === true, r.focusTag);
+  });
+
   test('只有契约成员，六组行为按契约工作', async ({ open }) => {
     const p = await open('index.html', { viewport: { width: 1280, height: 900 } });
 

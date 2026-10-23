@@ -1093,17 +1093,20 @@ bool EditCommand::commitErase(const SelectionErase& plan, const char* label) {
  *
  * 插入的坐标直接用删除区间的起点 —— 那正是选区被删掉之后光标所在的位置（那些删除
  * 都在它右边，删右边不会移动左边的坐标，所以它在整批步骤里始终有效）。沿用的字符
- * 格式得在删除之前取：要的是"落点左边那个字"的格式，删完就取不到了。
+ * 格式得在删除之前取：删完就取不到了。
  */
 bool EditCommand::replaceSelectionWithText(const std::vector<uint32_t>& cps) {
     if (cps.empty()) return false;
+    // 用"选区第一个字"的格式，不是左边的邻居：选中加粗的一段再敲，敲出来的仍是加粗的
+    //   （按左邻居取的话，紧接在普通文字后面的加粗段一改就变普通了）。
+    const Range sel = pos().selection();
     const SelectionErase plan = planEraseSelection();
     if (plan.blocked || plan.steps.empty()) return false;
 
     InsertText s;
     s.at = plan.at;
     s.cps = cps;
-    s.marks = marksAtFlow(s.at, &s.styleRef);
+    s.marks = marksAtSelectionStart(sel.begin(), sel.end(), &s.styleRef);
 
     const FlowPos after = plan.at + static_cast<FlowPos>(cps.size());
     std::vector<Step> steps;
@@ -1128,25 +1131,97 @@ CharFormat EditCommand::marksAtFlow(FlowPos at, std::string* style_ref) const {
     const Pos p = flowIndex().posAt(at);
     const rev::Node* n = rev::findNode(doc(), p.container);
     if (n == nullptr) return CharFormat{};
-    if (isText(n->kind)) {
-        const auto* run = std::get_if<rev::RunPayload>(&n->payload);
-        if (run == nullptr) return CharFormat{};
-        if (style_ref != nullptr) *style_ref = run->style;
-        return run->marks;
-    }
-    // 落在容器里（含"文本之前"的空位置）：看前一个孩子是不是文本 —— 打字接在已有文字
-    //   后面是最常见的一种，沿用它的标记才不会在粗体字后面敲出一个不粗的字。
-    if (isContainer(n->kind) && p.offset > 0) {
-        const rev::Ref& prev = n->children[static_cast<size_t>(p.offset) - 1];
-        if (prev && isText(prev->kind)) {
-            const auto* run = std::get_if<rev::RunPayload>(&prev->payload);
-            if (run != nullptr) {
-                if (style_ref != nullptr) *style_ref = run->style;
-                return run->marks;
+
+    /**
+     * 取一个节点的文本载荷；不是文本节点就给空。
+     * @param node 候选
+     * @return 文本载荷（不是文本节点时为空）
+     */
+    auto runOf = [](const rev::Node* node) -> const rev::RunPayload* {
+        if (node == nullptr || !isText(node->kind)) return nullptr;
+        return std::get_if<rev::RunPayload>(&node->payload);
+    };
+
+    /**
+     * 采用一个文本节点的标记。
+     * @param run 文本载荷
+     * @return 标记（并记下样式引用）
+     */
+    auto adopt = [&](const rev::RunPayload& run) {
+        if (style_ref != nullptr) *style_ref = run.style;
+        return run.marks;
+    };
+
+    // 落点在文本节点内部：左边就是这个节点里的字，直接用它。
+    //   只有 offset > 0 才算里面 —— offset == 0 是一个"两个节点之间"的位置，见下。
+    if (const auto* self = runOf(n); self != nullptr && p.offset > 0) return adopt(*self);
+
+    // 其余的落点统一化成"在父容器的第 slot 个孩子之前"，再按 左 → 右 找最近的文本兄弟。
+    //
+    //   文本节点 offset == 0 也必须走这条路：posAt 把"两段之间的位置"归给右边那个叶子
+    //   （容器的第 0 槽位与第一个孩子的第一个位置是同一个流位置，规范表示取最内层），
+    //   于是"紧挨着粗体字左边"与"粗体字自己第一个字之前"是同一个位置。直接采用它，敲字
+    //   就沿用了右边的格式：在粗体字前面敲出来的也变粗，紧接粗体字后面敲反倒变回普通格式，
+    //   跟"接着已有的字往下写"正好相反。取左边的邻居才是接着写。
+    //
+    //   落在容器槽位、段落标记（不占字符却占一个流位置）与原子上的情形共用这条规则：
+    //   段落末尾敲字时流位置正好是段落标记的起点，左边那一段才是要接着写的。
+    const rev::Node* parent = nullptr;
+    int slot = 0;
+    if (isContainer(n->kind)) {
+        parent = n;
+        slot = p.offset;
+    } else {
+        parent = rev::parentOf(doc(), n->id);
+        if (parent == nullptr) return CharFormat{};
+        for (size_t i = 0; i < parent->children.size(); ++i) {
+            if (parent->children[i] && parent->children[i]->id == n->id) {
+                slot = static_cast<int>(i);
+                break;
             }
         }
     }
+    // 先往左找（敲字接在已有文字后面是最常见的一种），左边没有才往右找（段落开头）。
+    for (int i = slot - 1; i >= 0; --i) {
+        if (const auto* run = runOf(parent->children[static_cast<size_t>(i)].get())) {
+            return adopt(*run);
+        }
+    }
+    for (int i = slot; i < static_cast<int>(parent->children.size()); ++i) {
+        if (const auto* run = runOf(parent->children[static_cast<size_t>(i)].get())) {
+            return adopt(*run);
+        }
+    }
     return CharFormat{};
+}
+
+CharFormat EditCommand::marksAtSelectionStart(FlowPos lo, FlowPos hi,
+                                             std::string* style_ref) const {
+    if (style_ref != nullptr) style_ref->clear();
+    if (!hasFlow() || hi <= lo) return marksAtFlow(lo, style_ref);
+    const rev::FlowIndex& idx = flowIndex();
+    CharFormat out;
+    bool found = false;
+    std::function<void(const rev::Ref&)> walk = [&](const rev::Ref& n) {
+        if (!n || found) return;
+        if (n->kind == NodeKind::TextRun) {
+            int f = 0;
+            int e = 0;
+            // 与选区相交的第一个文本节点。遍历顺序就是文档顺序，所以"第一个"不必比较坐标。
+            if (idx.intervalOf(n->id, &f, &e) && e > lo && f < hi) {
+                const auto& rp = std::get<rev::RunPayload>(n->payload);
+                if (style_ref != nullptr) *style_ref = rp.style;
+                out = rp.marks;
+                found = true;
+            }
+        }
+        for (const rev::Ref& c : n->children) walk(c);
+    };
+    walk(doc().root);
+    // 选区里一个文本节点都没有（整段只有一个控件框）：退回"落点左边"。这种位置上敲字
+    //   本来就是接着左边写的，两个口径在这里不冲突。
+    if (found) return out;
+    return marksAtFlow(lo, style_ref);
 }
 
 /**
@@ -1247,20 +1322,30 @@ EditCommand::PropResult EditCommand::setControlProp(int index, ControlProp prop,
 }
 
 CharFormat EditCommand::charFormatAtCaret() const {
-    CharFormat out;
-    if (!hasFlow()) return out;
-    const FlowPos at = pos().selection().begin();
+    if (!hasFlow()) return CharFormat{};
+    const Range sel = pos().selection();
+    const FlowPos from = sel.begin();
+    const FlowPos to = sel.end();
+    // 空选区问"落点处接着写会用什么格式" —— 与打字同一个函数，回显与行为才不可能分叉
+    //   （逐个节点取"盖住光标的那些"再求交集的话，压在两段边界上会得到两段的交集，
+    //   而敲字用的是左边那一段）。
+    if (from >= to) return marksAtFlow(from);
     const rev::FlowIndex& idx = flowIndex();
     bool found = false;
+    CharFormat out;
     std::function<void(const rev::Ref&)> walk = [&](const rev::Ref& n) {
-        if (!n || found) return;
+        if (!n) return;
         if (n->kind == NodeKind::TextRun) {
             int f = 0;
             int e = 0;
-            if (idx.intervalOf(n->id, &f, &e) && f <= at && at <= e) {
-                out = std::get<rev::RunPayload>(n->payload).marks;
-                found = true;
-                return;
+            if (idx.intervalOf(n->id, &f, &e)) {
+                const bool hit = (e > from && f < to);
+                if (hit) {
+                    const CharFormat& m = std::get<rev::RunPayload>(n->payload).marks;
+                    if (found) out = intersectCharFormat(out, m);
+                    else out = m;
+                    found = true;
+                }
             }
         }
         for (const rev::Ref& c : n->children) walk(c);
@@ -1293,10 +1378,33 @@ ParaFormatPatch EditCommand::paraFormatAtCaret() const {
 }
 
 /**
+ * 造一段"待插入的文本节点"的描述。
+ * @param text 正文
+ * @param marks 字符标记
+ * @param style 字符样式引用
+ * @param hidden 可见性（切分时要跟着原节点走，否则隐藏控件里的文字会露出来）
+ * @return 子树描述（种类是文本节点）
+ */
+static NodeSpec runSpecOf(std::vector<uint32_t> text, const CharFormat& marks,
+                          const std::string& style, bool hidden) {
+    NodeSpec spec;
+    spec.kind = NodeKind::TextRun;
+    spec.hidden = hidden;
+    spec.text = std::move(text);
+    spec.marks = marks;
+    spec.styleRef = style;
+    return spec;
+}
+
+/**
  * 对选区应用字符格式补丁。
  *
- * 作用面取"与选区相交的文本节点"，不是"整段"：字符格式本来就按节点存，
- *   把整段都改掉会让"只选中两个字加粗"变成整段加粗。
+ * 字符标记挂在文本节点上，一个节点只有一套标记。所以"只把选中的两个字加粗"落不到
+ *   一个节点上 —— 得先把节点按选区的两端切成一串：留下的那一段、要改的那一段、
+ *   被切出去的那一段。切分不改总长度，于是同一批里其它节点的流位置仍然有效。
+ *
+ * 切出来的是新节点，身份不保留（rev 层按描述物化）；撤销拿回的是整份旧修订，
+ *   所以"撤销之后那三个节点合成回一个"这件事由快照负责，不需要逆操作去拼。
  */
 bool EditCommand::applyCharFormat(const CharFormat& patch) {
     if (patch.empty() || !hasFlow() || !pos().hasSelection()) return false;
@@ -1307,7 +1415,7 @@ bool EditCommand::applyCharFormat(const CharFormat& patch) {
 
     const rev::FlowIndex& idx = flowIndex();
     std::vector<Step> steps;
-    // 走修订树而不是流索引的下标接口：这里要的是"节点号 + 标记"，而流索引只对外
+    // 走修订树而不是流索引的下标接口：这里要的是"节点号 + 正文 + 标记"，而流索引只对外
     //   给位置换算与区间，节点对象是它的内部表示。
     std::function<void(const rev::Ref&)> walk = [&](const rev::Ref& n) {
         if (!n) return;
@@ -1315,18 +1423,47 @@ bool EditCommand::applyCharFormat(const CharFormat& patch) {
             int f = 0;
             int e = 0;
             if (idx.intervalOf(n->id, &f, &e) && e > from && f < to) {
-                // 修订层的节点把字符标记装在载荷里（与模型层的字段布局不同）。
+                // 修订层的节点把正文与标记装在载荷里（与模型层的字段布局不同）。
                 const auto& rp = std::get<rev::RunPayload>(n->payload);
                 const CharFormat next = mergeCharFormat(rp.marks, patch);
-                // 幂等：格式本来就等于目标值就不提交，撤销栈里不该出现什么都没做的记录。
+                // 幂等：这段正文本来就等于目标值就不动它，撤销栈里不该出现空记录。
                 if (!(next == rp.marks)) {
-                    SetRunMarks s;
-                    s.id = n->id;
-                    s.marks = next;
-                    s.styleRef = rp.style;
-                    s.before = rp.marks;
-                    s.beforeStyleRef = rp.style;
-                    steps.push_back(Step{s});
+                    const int len = static_cast<int>(rp.text.size());
+                    const int lo = std::min(std::max(0, static_cast<int>(from) - f), len);
+                    const int hi = std::min(std::max(0, static_cast<int>(to) - f), len);
+                    if (hi > lo) {
+                        const std::vector<uint32_t>& t = rp.text;
+                        // 原节点只留下"选区之后"的那一段；选区盖到底（hi == len）时它
+                        //   直接持改好的那一段，省掉一次插入。
+                        const int keep = (hi < len) ? hi : lo;
+                        SetRun s;
+                        s.id = n->id;
+                        s.text.assign(t.begin() + keep, t.end());
+                        s.marks = (hi < len) ? rp.marks : next;
+                        s.styleRef = rp.style;
+                        s.beforeText = rp.text;
+                        s.before = rp.marks;
+                        s.beforeStyleRef = rp.style;
+                        steps.push_back(Step{s});
+                        // 选区之前的那一段：原正文、原标记，插在原节点前面。
+                        if (lo > 0) {
+                            InsertNode head;
+                            head.at_flow = f;
+                            head.subtree = runSpecOf(
+                                std::vector<uint32_t>(t.begin(), t.begin() + lo), rp.marks,
+                                rp.style, n->hidden);
+                            steps.push_back(Step{head});
+                        }
+                        // 选区那一段：新标记。hi == len 时它已经由原节点自己担着。
+                        if (hi < len) {
+                            InsertNode mid;
+                            mid.at_flow = f + lo;
+                            mid.subtree = runSpecOf(
+                                std::vector<uint32_t>(t.begin() + lo, t.begin() + hi), next,
+                                rp.style, n->hidden);
+                            steps.push_back(Step{mid});
+                        }
+                    }
                 }
             }
         }

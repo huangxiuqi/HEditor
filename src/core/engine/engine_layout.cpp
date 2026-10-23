@@ -106,6 +106,14 @@ void EditorEngine::computePageFingerprints(int dirty_lo, int dirty_hi) {
         h = fnvMix(h, g.cluster);
         h = fnvMix(h, static_cast<uint64_t>(g.color.r) | (static_cast<uint64_t>(g.color.g) << 8) |
                           (static_cast<uint64_t>(g.color.b) << 16));
+        // 画出来是什么样，不只看字形下标与位置：合成倾斜（不改推进）、下划线（另外画一条
+        //   线）、字号与字重（换的是字体实例）都能让"同一个字形、同一个位置"变成另一份像素。
+        //   只改其中一项时 x/y 一点不动，指纹若不比这几项，这一页就被判成"还是新鲜的"——
+        //   命令返回成功、读回的值也对，画面却停在旧帧上（TRAPS 195）。
+        h = fnvMix(h, g.italic ? 1ULL : 0ULL);
+        h = fnvMix(h, g.underline ? 1ULL : 0ULL);
+        h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(quantPt(g.size_pt))));
+        h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(quantPt(g.weight))));
         return h;
     };
     for (auto it = gb; it != ge; ++it) {

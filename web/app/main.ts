@@ -51,7 +51,7 @@ const SIZES = [9, 10, 10.5, 12, 14, 16, 18, 22, 24, 36, 48];
  * 页面缓存的那份格式，供工具条同步回显。
  *
  * 工具条的回显闭包是同步的（一次光标移动不该变成七八个来回），所以格式由这一侧一次读全，
- *   读完叫一声 refresh。
+ *   读完叫一声 refresh。缓存只用于回显 —— 读改写型的动作一律现读，见 toggle / stepSize。
  */
 let mark: CharFormatPatch = {};
 let para: ParaFormatPatch = {};
@@ -59,34 +59,105 @@ let para: ParaFormatPatch = {};
 /** 动作的键：三个开关型字符格式。 */
 type MarkKey = 'bold' | 'italic' | 'underline';
 
+/** 正在读格式：期间来的刷新请求先记下，读完再补一轮。 */
+let reading = false;
+/** 读的期间又有人要刷新。 */
+let stale = false;
+
 /**
  * 读一次格式并刷新工具条。
+ *
+ * 读与写走同一条通道，上一秒发起的读可能带回上一秒的状态。所以：读在进行时不再并发，
+ *   只记一笔"有新变化"，落地后再补一轮 —— 补的那一轮一定能看见刚才写进去的值。
  */
 async function syncFormat(): Promise<void> {
-  const [m, p] = await Promise.all([editor.formatAt(), editor.paragraphFormatAt()]);
-  mark = m;
-  para = p;
-  chrome.refresh();
+  if (reading) {
+    stale = true;
+    return;
+  }
+  reading = true;
+  try {
+    do {
+      stale = false;
+      // 字符格式读"实际生效的那一份"：正文一个字都没改过时，显式标记是空的，
+      //   而字体与字号在画面上明明有值 —— 工具栏要显示的就是那个值。
+      const [m, p] = await Promise.all([
+        editor.formatAt({ effective: true }),
+        editor.paragraphFormatAt(),
+      ]);
+      mark = m;
+      para = p;
+      chrome.refresh();
+    } while (stale);
+  } finally {
+    reading = false;
+  }
+}
+
+/**
+ * 动作队列：格式是"读—改—写"，两次点击必须一前一后。
+ *
+ * 不等上一条落地就发下一条，第二次读到的还是第一次写之前的值，于是两次算出来的目标值
+ *   相同 —— 表现就是"连点两下只动了一档"。
+ */
+let queue: Promise<unknown> = Promise.resolve();
+
+/**
+ * 排一个动作到队尾。
+ * @param task 要做的事
+ * @returns 这一次的完成信号
+ */
+function enqueue(task: () => Promise<void>): Promise<void> {
+  const next = queue.then(task, task);
+  queue = next.catch(() => undefined);
+  return next;
+}
+
+/**
+ * 写一次字符格式，写完重新回显。
+ * @param patch 要改的字段
+ */
+async function writeMark(patch: CharFormatPatch): Promise<void> {
+  await editor.format(patch);
+  await syncFormat();
+}
+
+/**
+ * 写一次段落格式，写完重新回显。
+ * @param patch 要改的字段
+ */
+async function writePara(patch: ParaFormatPatch): Promise<void> {
+  await editor.paragraphFormat(patch);
+  await syncFormat();
 }
 
 /**
  * 切换一个开关型字符格式。
+ *
+ * 取反用的是"现读的值"而不是缓存：工具栏上的那个按钮亮不亮，取决于缓存什么时候刷新完，
+ *   不该决定点下去会不会生效。
  * @param key 哪个开关
  */
-async function toggle(key: MarkKey): Promise<void> {
-  await editor.format({ [key]: !mark[key] });
+function toggle(key: MarkKey): void {
+  void enqueue(async () => {
+    const now = await editor.formatAt({ effective: true });
+    await writeMark({ [key]: !now[key] });
+  });
 }
 
 /**
  * 按档位放大或缩小字号：取当前字号在候选列上的下一个（上一个）。
  * @param dir 1 = 变大，-1 = 变小
  */
-async function stepSize(dir: number): Promise<void> {
-  const cur = mark.size ?? 14;
-  const next = dir > 0
-    ? SIZES.find((s) => s > cur) ?? SIZES[SIZES.length - 1]
-    : [...SIZES].reverse().find((s) => s < cur) ?? SIZES[0];
-  await editor.format({ size: next });
+function stepSize(dir: number): void {
+  void enqueue(async () => {
+    // 实际生效的那一份总有字号；这里的兜底只是防契约被改坏。
+    const cur = (await editor.formatAt({ effective: true })).size ?? 12;
+    const next = dir > 0
+      ? SIZES.find((s) => s > cur) ?? SIZES[SIZES.length - 1]
+      : [...SIZES].reverse().find((s) => s < cur) ?? SIZES[0];
+    if (next !== cur) await writeMark({ size: next });
+  });
 }
 
 /**
@@ -121,7 +192,7 @@ function makeColorPicker(): () => void {
   document.body.appendChild(input);
   input.addEventListener('change', () => {
     const at = (i: number): number => Number.parseInt(input.value.slice(i, i + 2), 16);
-    void editor.format({ color: [at(1), at(3), at(5)] });
+    void enqueue(() => writeMark({ color: [at(1), at(3), at(5)] }));
   });
   return () => input.click();
 }
@@ -168,14 +239,20 @@ function makeTabs(): Tab[] {
           { value: '2', text: '拉丁' },
         ],
         value: () => (mark.font === undefined ? '' : String(mark.font)),
-        run: (v) => (v ? editor.format({ font: Number(v) }) : undefined),
+        run: (v) => {
+          if (!v) return;
+          void enqueue(() => writeMark({ font: Number(v) }));
+        },
       },
       {
         act: 'size',
         label: '字号',
         options: [{ value: '', text: '—' }].concat(SIZES.map((s) => ({ value: String(s), text: String(s) }))),
         value: () => (mark.size === undefined ? '' : String(mark.size)),
-        run: (v) => (v ? editor.format({ size: Number(v) }) : undefined),
+        run: (v) => {
+          if (!v) return;
+          void enqueue(() => writeMark({ size: Number(v) }));
+        },
       },
       { act: 'grow', label: '增大字号', icon: 'grow-font', run: () => stepSize(1) },
       { act: 'shrink', label: '减小字号', icon: 'shrink-font', run: () => stepSize(-1) },
@@ -215,7 +292,10 @@ function makeTabs(): Tab[] {
           { value: '3', text: '3.0' },
         ],
         value: () => (para.lineFactor === undefined ? '' : String(para.lineFactor)),
-        run: (v) => (v ? editor.paragraphFormat({ lineFactor: Number(v) }) : undefined),
+        run: (v) => {
+          if (!v) return;
+          void enqueue(() => writePara({ lineFactor: Number(v) }));
+        },
       },
       {
         act: 'after',
@@ -229,7 +309,10 @@ function makeTabs(): Tab[] {
           { value: '18', text: '18 磅' },
         ],
         value: () => (para.spaceAfter === undefined ? '' : String(para.spaceAfter)),
-        run: (v) => (v ? editor.paragraphFormat({ spaceAfter: Number(v) }) : undefined),
+        run: (v) => {
+          if (!v) return;
+          void enqueue(() => writePara({ spaceAfter: Number(v) }));
+        },
       },
       { act: 'outdent', label: '减少缩进', icon: 'outdent', run: () => editor.setIndent(-1) },
       { act: 'indent', label: '增加缩进', icon: 'indent', run: () => editor.setIndent(1) },
@@ -240,8 +323,26 @@ function makeTabs(): Tab[] {
   const edit: Group = {
     label: '编辑',
     items: [
-      { act: 'undo', label: '撤销', icon: 'undo', big: true, run: () => editor.undo() },
-      { act: 'redo', label: '重做', icon: 'redo', big: true, run: () => editor.redo() },
+      {
+        act: 'undo',
+        label: '撤销',
+        icon: 'undo',
+        big: true,
+        run: () => void enqueue(async () => {
+          await editor.undo();
+          await syncFormat();
+        }),
+      },
+      {
+        act: 'redo',
+        label: '重做',
+        icon: 'redo',
+        big: true,
+        run: () => void enqueue(async () => {
+          await editor.redo();
+          await syncFormat();
+        }),
+      },
       { act: 'all', label: '全选', icon: 'select-all', run: () => editor.selectAll() },
     ],
   };
@@ -331,6 +432,8 @@ async function boot(): Promise<void> {
     const n = ++window.__demoState!.changes;
     const g = editor.geometry();
     chrome.say(`${editor.paragraphs().length} 段 · ${g.pages} 页 · 变更 ${n} 次`);
+    // 内容变了，光标处能继承的格式也可能变了（撤销、粘贴、格式命令都走这条路）。
+    void syncFormat();
   });
 
   await syncFormat();
@@ -349,3 +452,17 @@ const tabs = makeTabs();
 chrome = mountChrome(document.getElementById('bar')!, 'HEditor', tabs);
 
 void boot();
+
+// 契约与公开成员清单变了就整页重载。
+//
+// 这两份东西被门面捕获进闭包（白名单在 guard 里、成员清单在 facade 里），热更替不掉
+//   已经建好的那个实例 —— 页面会继续用旧白名单，症状是"调了个新加的方法，报它不是
+//   公开 API"，看着像代码错了。示例页是给人看的，重载一次比留着旧状态省事。
+if (import.meta.hot) {
+  import.meta.hot.on('vite:beforeUpdate', (payload) => {
+    const files = (payload?.updates ?? []).map((u) => String(u?.path ?? ''));
+    if (files.some((f) => /public_members\.gen|guard\.ts|src\/types\.ts|engine\/api\.ts/.test(f))) {
+      location.reload();
+    }
+  });
+}

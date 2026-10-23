@@ -1395,9 +1395,10 @@ std::string applyCharFormat(const std::string& text) {
 
 /**
  * 光标处的字符标记（工具栏回显）：键名与落盘同一套。
+ * @param effective 非零 = 报实际生效的那一份（算上样式层与默认值）
  * @return JSON 文本
  */
-std::string charFormatAt() { return g_engine.charFormatAtJson(); }
+std::string charFormatAt(int effective) { return g_engine.charFormatAtJson(effective != 0); }
 
 /**
  * 光标所在段落的格式覆盖（工具栏回显）。

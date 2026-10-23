@@ -194,6 +194,11 @@ export interface ChromeHost {
    * @param z 目标倍数
    */
   setZoom(z: number): Promise<void>;
+
+  /**
+   * 把焦点交回编辑器（动作做完之后要把键盘还回去）。
+   */
+  focus(): void;
 }
 
 /**

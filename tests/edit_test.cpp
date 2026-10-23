@@ -11215,6 +11215,131 @@ int main() {
         checkPartition(&ec, "以表格结尾", 5);
     }
 
+    if (runSection(63)) std::printf("\n[63] 落点格式：敲字沿用左边那一段，不是右边\n");
+    if (runSection(63)) {
+        // 一段字里只有一个字改了格式（其余同格式），在它左边界敲、右边界敲。
+        //   两条判据必须互为反向 —— 左边那一段普通、那一段格式过，所以"沿用左边"
+        //   在两侧给出的答案不同；只看一侧的话，规则取反了也照样绿。
+        EngineConfig c63;
+        c63.zoom = 1.0f;
+        const std::vector<std::string> fonts63 = {cjkPath, mnPath, latinPath};
+
+        // 形状：「abcd」，只有 b 是 14 磅，其余 12 磅。字号当"格式"用：它落在
+        //   FormatRun 上，敲完一个字就能从块产物里读回每一格是多少磅。
+        auto makeTree63 = [&]() {
+            NodeTree tree;
+            const NodeId sec = tree.firstSectionId();
+            NodeId t = tree.appendChild(sec, NodeKind::TextRun);
+            tree.setText(t, utf8ToCodepoints("a"));
+            tree.find(t)->marks.size = Length::abs(ptToEmu(12.0));
+            t = tree.appendChild(sec, NodeKind::TextRun);
+            tree.setText(t, utf8ToCodepoints("b"));
+            tree.find(t)->marks.size = Length::abs(ptToEmu(14.0));
+            t = tree.appendChild(sec, NodeKind::TextRun);
+            tree.setText(t, utf8ToCodepoints("cd"));
+            tree.find(t)->marks.size = Length::abs(ptToEmu(12.0));
+            tree.appendChild(sec, NodeKind::ParagraphMark);
+            return tree;
+        };
+
+        EditorEngine e63;
+        if (!e63.init(fonts63)) {
+            std::fprintf(stderr, "字体加载失败\n");
+            return 2;
+        }
+        e63.setConfig(c63);
+        e63.setDocument(makeTree63(), StyleSheet{});
+        e63.relayout();
+        e63.repaint();
+
+        // 每一格现在是几磅（十分之一磅取整）。找不到覆盖这一格的 run 时给 -1。
+        auto szAt = [&](int cp) {
+            for (const FormatRun& r : e63.blocks()[0].runs) {
+                if (static_cast<int>(r.cp_begin) <= cp && cp < static_cast<int>(r.cp_end)) {
+                    return static_cast<int>(r.size_pt * 10.0f + 0.5f);
+                }
+            }
+            return -1;
+        };
+
+        expectTrue(szAt(0) == 120 && szAt(1) == 140 && szAt(2) == 120,
+                   "形状：三段字号 12 / 14 / 12 磅（改过格式的是中间那一个字）");
+
+        const FlowPos fb = e63.flowPosAt(0, 1);  // b 之前
+        const FlowPos fc = e63.flowPosAt(0, 2);  // b 之后
+
+        // 回显的两份口径：显式标记在没改过的正文上是空的，而"实际生效的那一份"永远有字体
+        //   字号 —— 工具栏上的字体与字号下拉框读的就是后者，否则正文永远显示空白。
+        e63.setCaret(0, 0);
+        const std::string eff_a = e63.charFormatAtJson(true);
+        expectTrue(e63.charFormatAtJson().find("\"fi\"") == std::string::npos &&
+                       eff_a.find("\"fi\"") != std::string::npos,
+                   "★ 显式标记里没有字体，实际生效的那一份有（没设过字体也有字体）：" +
+                       e63.charFormatAtJson() + " / " + eff_a);
+        expectTrue(eff_a.find("\"sz\"") != std::string::npos &&
+                       eff_a.find("\"b\"") != std::string::npos &&
+                       eff_a.find("\"col\"") != std::string::npos,
+                   "★ 实际生效的那一份字段齐全（粗细 / 字体 / 字号 / 字色都在）：" + eff_a);
+        expectTrue(eff_a.find("\"sz\":12") != std::string::npos, "默认字号读回来是 12 磅");
+        e63.setCaret(0, 1);
+        expectTrue(e63.charFormatAtJson(true) == eff_a,
+                   "★ 紧挨格式段左边：实际生效的 = 左边那个字的（与敲字同一个约定）");
+        e63.setCaret(0, 2);
+        expectTrue(e63.charFormatAtJson(true) != eff_a,
+                   "★ 紧挨格式段右边：实际生效的 = 格式段自己的 14 磅（与左边不同）");
+
+        // 回显与敲字是同一份判断的两面：紧挨格式段左边的那一处，回显必须等于左边那个字；
+        //   紧挨它右边的那一处，回显必须等于格式段自己的。两条不等式的差值先量出来，
+        //   否则"两侧本来就一样"时下面两条等于恒真。
+        e63.setCaret(0, 0);
+        const std::string show_before_b = e63.charFormatAtJson();
+        e63.setSelection(Range{fb, fc});
+        const std::string show_b = e63.charFormatAtJson();
+        expectTrue(show_before_b != show_b,
+                   "★ 两侧的格式确实不同（左边 12 磅 / 那一段 14 磅），下面的回显判据才有意义");
+        e63.setCaret(0, 1);
+        expectTrue(e63.charFormatAtJson() == show_before_b,
+                   "★ 紧挨格式段左边的回显 = 左边那个字的回显（不是右边那一段的）");
+        e63.setCaret(0, 2);
+        expectTrue(e63.charFormatAtJson() == show_b,
+                   "★ 紧挨格式段右边的回显 = 格式段自己的回显（回显与敲字同一个函数）");
+
+        // (a) 左边界敲字：沿用左边那一段（12 磅），不是右边那一段（14 磅）。
+        e63.setCaret(0, 1);
+        expectTrue(e63.typeTextAndRender("X"), "在格式段的左边界敲一个字");
+        expectTrue(e63.blocks()[0].cp_text == utf8ToCodepoints("aXbcd"), "左边界敲字：文本接在中间");
+        expectTrue(szAt(1) == 120,
+                   "★ 左边界敲出来的字是 12 磅（沿用左边那一段，不是右边格式段的 14 磅）");
+        expectTrue(szAt(2) == 140, "格式段自己没被带跑，仍是 14 磅");
+
+        // (b) 连打第二下（不重新摆光标）：还在同一段上，不能因为光标落到了格式段之前而翻转。
+        expectTrue(e63.typeTextAndRender("y"), "紧接着再敲一个字");
+        expectTrue(szAt(1) == 120 && szAt(2) == 120,
+                   "★ 连打第二个字仍是 12 磅（落点每格重新判，答案不随光标位置漂）");
+
+        // (c) 反向一半：右边界敲字沿用格式段自己的 14 磅，不是右边那一段普通字的 12 磅。
+        e63.setCaret(0, 4);  // 文本「aXybcd」里 b 之后
+        expectTrue(e63.typeTextAndRender("Y"), "在格式段的右边界敲一个字");
+        expectTrue(szAt(4) == 140,
+                   "★ 右边界敲出来的字是 14 磅（接着左边格式段往下写），不是 12 磅");
+        expectTrue(e63.blocks()[0].cp_text == utf8ToCodepoints("aXybYcd"), "右边界敲字：文本接在中间");
+
+        // (d) 段尾：左边是普通字，沿用 12 磅（这一条在改规则之前就是对的，留作对照）。
+        e63.setCaret(0, 7);
+        expectTrue(e63.typeTextAndRender("Z"), "在段尾敲一个字");
+        expectTrue(szAt(7) == 120, "段尾敲字沿用左边那一段的 12 磅");
+
+        // (e) 打字盖住选区：沿用选区第一个字（14 磅），不是左边的邻居（12 磅）。
+        //   与 (a) 是两条不同的规则，混成一条会让"选中加粗的一段重打"掉格式。
+        const FlowPos ew = e63.flowPosAt(0, 3);
+        const FlowPos ex = e63.flowPosAt(0, 4);
+        expectTrue(e63.setSelection(Range{ew, ex}), "选中格式段（现在在「aXybYcdZ」的第 4 格）");
+        expectTrue(e63.typeTextAndRender("W"), "打字盖住格式段");
+        expectTrue(szAt(3) == 140, "★ 打字盖住格式段沿用 14 磅（取选区第一个字，不是左邻居的 12 磅）");
+        expectTrue(e63.auditCompile() == 0 && e63.auditLayout() == 0,
+                   "这几笔编辑之后增量与全量仍然逐字段一致");
+    }
+
     std::printf("\n──────────────────────────────\n");
     std::printf("共 %d 项断言，失败 %d 项\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

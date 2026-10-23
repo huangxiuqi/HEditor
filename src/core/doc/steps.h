@@ -177,16 +177,25 @@ struct SetParaMarkFormat {
 };
 
 /**
- * 改一个文本节点的字符标记（粗体、斜体、下划线、字体、字号、字色）。
+ * 改一个文本节点的正文与字符标记（粗体、斜体、下划线、字体、字号、字色）。
  *
- * 与 SetParaMarkFormat 同形，记下改之前的值让逆操作自足。载荷里不带文本：文本由 id
- *   指向的节点自己持有，带一份就是同一个内容两个真相。
+ * 与 SetParaMarkFormat 同形，记下改之前的值让逆操作自足。
+ *
+ * 为什么要带正文：字符标记是挂在文本节点上的，一个节点只有一套标记。选区落在节点中间时
+ *   "只把这两个字加粗"没法在同一个节点上表达，只能把它切成一串节点 —— 切出来的那一段
+ *   正文要写进新节点，留下的那一段则是原正文的一个前缀。切分不改总长度，所以它不影响
+ *   同一批里其它步骤的流位置。
  */
-struct SetRunMarks {
+struct SetRun {
     /**
      * 改哪个文本节点。
      */
     NodeId id = kInvalidNodeId;
+
+    /**
+     * 新的正文（码点）。切分时这里是原正文的一个前缀。
+     */
+    std::vector<uint32_t> text;
 
     /**
      * 新的字符标记。
@@ -197,6 +206,11 @@ struct SetRunMarks {
      * 新的字符样式引用。
      */
     std::string styleRef;
+
+    /**
+     * 改之前的正文（逆操作自足）。
+     */
+    std::vector<uint32_t> beforeText;
 
     /**
      * 改之前的字符标记（逆操作自足）。
@@ -435,7 +449,7 @@ struct SetTableCellSpan {
 };
 
 using Step = std::variant<InsertText, InsertFragment, DeleteRange, InsertParaMark, RemoveParaMark,
-                          SetParaMarkFormat, SetRunMarks, InsertNode, RemoveNode, UnwrapNode,
+                          SetParaMarkFormat, SetRun, InsertNode, RemoveNode, UnwrapNode,
                           WrapNode, SetControlProp, SetControlValue, SetTableCellSpan>;
 
 /**

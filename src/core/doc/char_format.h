@@ -79,4 +79,15 @@ struct CharFormat {
  */
 CharFormat mergeCharFormat(const CharFormat& under, const CharFormat& over);
 
+/**
+ * 逐字段取"两个标记都认同的部分"：不相等的那一项清成未设置。
+ *
+ * 它是回显用的：工具栏要回答"选中这一段是什么格式"，而一段里可能有一半是粗体。三态在这里
+ * 正好合适 —— 缺席就表示"这一段没有统一的值"，按钮不点亮，用户按下去等于给它统一成粗体。
+ * @param a 第一个标记
+ * @param b 第二个标记
+ * @return 共同值
+ */
+CharFormat intersectCharFormat(const CharFormat& a, const CharFormat& b);
+
 }  // namespace heditor

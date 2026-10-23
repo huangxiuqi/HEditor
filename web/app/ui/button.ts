@@ -25,6 +25,10 @@ export function createButton(item: Button): Component {
     el.appendChild(text);
   }
 
+  // 按下这一下不许把焦点抢走：焦点一离开键盘承接层，接下来的输入与 Ctrl+Z 就全落到
+  //   这个按钮上 —— 用户看到的是"点了一下加粗，然后键盘就没反应了"。preventDefault
+  //   只拦焦点与选择，click 照常派发，所以动作不受影响。
+  el.addEventListener('mousedown', (ev) => ev.preventDefault());
   el.addEventListener('click', () => {
     void item.run();
   });

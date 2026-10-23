@@ -966,7 +966,9 @@ export interface Editor {
   paste(): Promise<boolean>;
 
   /**
-   * 增减缩进层级（正数加深，负数变浅）。
+   * 增减缩进：正数插一格缩进，负数去掉一格（与按 Tab / Shift+Tab 同一条命令）。
+   *
+   * 有选区时先把光标收到选区左端再插 —— 缩进不该把选中的字换成空格。
    * @param levels 正数加深，负数变浅（绝对值是层级数）
    * @returns 有没有改动
    */
@@ -992,11 +994,13 @@ export interface Editor {
   /**
    * 读光标处的字符标记（工具栏回显）。
    *
-   * 只报"这一处写了什么"，不含样式层与段落默认值：界面据此点亮按钮，
+   * 默认只报"这一处写了什么"，不含样式层与段落默认值：界面据此点亮按钮，
    *   而"看起来是不是粗的"由排版结果回答。
-   * @returns 只含已显式设置的字段
+   * @param opts.effective 传 true 时报实际生效的那一份（样式链与默认值都算进去，
+   *   字体与字号永远有值）—— 工具栏要显示"当前是什么字体、多少磅"就该读它
+   * @returns 只含已显式设置的字段；effective 时上面那些字段全部给出实测值
    */
-  formatAt(): Promise<CharFormatPatch>;
+  formatAt(opts?: { effective?: boolean }): Promise<CharFormatPatch>;
 
   /**
    * 读光标所在段落的格式覆盖（工具栏回显）。
@@ -1041,6 +1045,14 @@ export interface Editor {
    * 取消选区（焦点端不动）。
    */
   clearSelection(): Promise<void>;
+
+  /**
+   * 把键盘焦点交回编辑器。
+   *
+   * 宿主的工具栏、菜单、对话框都会把焦点拿走去处理点击；处理完要还回来，否则之后敲字
+   *   与快捷键全落进那个按钮里。不滚视口（preventScroll）—— 只是还焦点，不该动画面。
+   */
+  focus(): void;
 
   /**
    * 当前选区。

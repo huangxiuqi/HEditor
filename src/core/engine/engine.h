@@ -289,9 +289,22 @@ public:
 
     /**
      * 光标处的字符标记（工具栏回显），JSON 文本。
+     *
+     * 默认报"这一处显式写了什么"（三态：没有、true、false）；effective 为真时报"实际
+     *   生效的那一份" —— 样式链与段落默认值都已算进去，字号字体永远有值。工具栏要显示
+     *   "当前是什么字体、多少磅"就得读后者：正文一个字都没改过，也仍然有一个字体一个字号。
+     * @param effective 是否要算上样式层与默认值
      * @return 标记的 JSON（可能为空对象）
      */
-    std::string charFormatAtJson() const;
+    std::string charFormatAtJson(bool effective = false) const;
+
+    /**
+     * 落点处实际生效的字符格式（字形真正用的那一份），JSON 文本。
+     *
+     * 值来自排版产物里覆盖落点的那个 run，所以它与画面上看见的逐字一致（不是再算一遍）。
+     * @return 标记的 JSON；落点不在任何段里时为空对象
+     */
+    std::string effectiveFormatAtJson() const;
 
     /**
      * 光标所在段落的格式覆盖（工具栏回显），JSON 文本。

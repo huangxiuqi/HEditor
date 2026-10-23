@@ -549,8 +549,10 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       return edit('paraFormat', { s: JSON.stringify(paraPatchJson(patch)) });
     },
 
-    async formatAt() {
-      const raw = await Promise.resolve(link.read('charFormatAt'));
+    async formatAt(opts) {
+      const raw = await Promise.resolve(
+        link.read('charFormatAt', opts?.effective ? { effective: 1 } : undefined),
+      );
       return charPatchOf(raw);
     },
 
@@ -561,6 +563,17 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
 
     async setIndent(levels) {
       const n = Math.abs(Math.trunc(levels));
+      if (n === 0) return false;
+      // 先收起到选区左端：引擎那两条命令（Tab / Shift+Tab）改的是"把选区换成缩进"，
+      //   而这里是"给这一段加缩进"。带着选区过去等于把用户选中的字删掉；收到右端则
+      //   会把空格插进句子中间。两种都不对，所以收到左端再插。
+      const sel = selectionOf(link);
+      if (!sel.empty) {
+        const a = sel.anchor;
+        const f = sel.focus;
+        const left = a.para < f.para || (a.para === f.para && a.offset <= f.offset) ? a : f;
+        await caretOp('setCaret', { para: left.para, offset: left.offset }, true);
+      }
       let changed = false;
       for (let i = 0; i < n; ++i) {
         if (!(await edit(levels > 0 ? 'indent' : 'outdent'))) break;
@@ -637,6 +650,11 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
 
     async clearSelection() {
       await caretOp('clearSelection');
+    },
+
+    focus() {
+      // 与诊断面那条同一个实现：宿主用完工具栏、菜单之后要把键盘还回来。
+      dom.focus();
     },
 
     selection() {

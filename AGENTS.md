@@ -132,10 +132,13 @@ function blitFrame(px, w) {}
   改一行就能测，只有 Worker 壳需要预先构建（`pretest` 会做，不到一秒）；
   `npm run test:dist` 跑构建产物，那是验收基准。配置在 `web/playwright.config.ts`
   与 `web/tests/support/config.ts`，判据在 `web/tests/specs/`。
-  十份 spec 跑一遍：`demo` 24 条、`multi` 11、`saveload` 11、`input` 25、`diag` 39、
+  十一份 spec 跑一遍：`demo` 25 条、`multi` 11、`saveload` 11、`input` 25、`diag` 39、
   `error` 19、`stress` 69 步差分审计、`edit` 367 条、`clipboard` 11 条（复制粘贴的保真、
-  剪切、跨实例、键盘路径、撑长之后的滚动与画布）、`format` 6 条（字符格式落不落到标记上、
-  幂等、字号与行距对页数的影响）。旧的 `scripts/*_probe.mjs` 与
+  剪切、跨实例、键盘路径、撑长之后的滚动与画布）、`format` 14 条（字符格式落不落到标记上、
+  幂等、只改选区那一段、回显取共同值、整段改字重之后增量排版等于全量、**改完格式画面必须
+  重画**（比截图）、敲字沿用落点**左边**那一段 —— 格式段左边界取左边、右边界取它自己，两条互为反向）、`smoke` 3 条
+  （工具栏每个按钮点一遍都要有反应、公开面每个方法调一遍形状与效果都对 —— 常用操作
+  全走一遍，别等用户点了才发现；再加一条"点完按钮键盘还在编辑器里"）。旧的 `scripts/*_probe.mjs` 与
   `scripts/verify_web.ps1` 已删除，别再按那套入口跑。
 - 两个宿主的分工（详见 `docs/正式化架构与迁移路线.md` 4.6）：wasm 是交付物，
   native 只做验证宿主，承担三个断言套件与内存布局诊断。据此有三条规则：

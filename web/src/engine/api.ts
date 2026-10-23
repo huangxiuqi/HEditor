@@ -1272,7 +1272,9 @@ const READ = collect('r', {
    *   回显要用它。走查询而不是命令：读格式不该改任何状态，也不该触发一次呈现。
    * 读写用同一把尺子：format 写、formatAt 读，位置都是光标所在的段与偏移。
    */
-  charFormatAt: () => JSON.parse(mod.charFormatAt()),
+  // effective = 报"实际生效的那一份"（样式层与默认值都算进去）：工具栏要显示字体字号
+  //   就得读它 —— 正文一个字没改过时，标记里只有缺席，读不出"到底几磅"。
+  charFormatAt: (a) => JSON.parse(mod.charFormatAt(a && a.effective ? 1 : 0)),
   paraFormatAt: () => JSON.parse(mod.paraFormatAt()),
 
   // 构建与后端标识：诊断面板与探针报告要用。

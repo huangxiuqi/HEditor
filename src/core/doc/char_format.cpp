@@ -13,4 +13,18 @@ CharFormat mergeCharFormat(const CharFormat& under, const CharFormat& over) {
     return out;
 }
 
+CharFormat intersectCharFormat(const CharFormat& a, const CharFormat& b) {
+    CharFormat out = a;
+    auto keep = [](auto& x, const auto& y) {
+        if (!(x == y)) x.reset();
+    };
+    keep(out.bold, b.bold);
+    keep(out.italic, b.italic);
+    keep(out.underline, b.underline);
+    keep(out.font_index, b.font_index);
+    keep(out.size, b.size);
+    keep(out.color, b.color);
+    return out;
+}
+
 }  // namespace heditor

@@ -695,15 +695,21 @@ StepResult canApply(const NodeTree& tree, const FlowIndex& idx, const Step& step
                        }
                        r.ok = true;
                    },
-                   [&](const SetRunMarks& s) {
+                   [&](const SetRun& s) {
                        const Node* n = tree.find(s.id);
                        if (n == nullptr || n->kind != NodeKind::TextRun) {
                            r.error = "改字符格式：目标不是文本节点";
                            return;
                        }
+                       // 空正文的文本节点没有意义：规范化会把它删掉，撤销就回不到原样。
+                       if (s.text.empty()) {
+                           r.error = "改字符格式：正文不能为空";
+                           return;
+                       }
                        // 与段落格式同一条守卫：记的原值要与文档当前值一致，否则这一步
                        //   是在与别的编辑抢同一个节点（或者被重放到了别的文档上）。
-                       if (!(n->marks == s.before) || n->styleRef != s.beforeStyleRef) {
+                       if (!(n->marks == s.before) || n->styleRef != s.beforeStyleRef ||
+                           n->text != s.beforeText) {
                            r.error = "改字符格式：当前值与步骤记的原值不符（步骤过期了）";
                            return;
                        }
@@ -960,9 +966,10 @@ StepResult applyStep(NodeTree& tree, const Step& step) {
                 n->para = s.para;
                 n->styleRef = s.styleRef;
             },
-            [&](const SetRunMarks& s) {
+            [&](const SetRun& s) {
                 Node* n = tree.find(s.id);
                 if (n == nullptr) return;
+                n->text = s.text;
                 n->marks = s.marks;
                 n->styleRef = s.styleRef;
             },
@@ -1089,11 +1096,13 @@ Step invertStep(const Step& step) {
                               x.beforeStyleRef = s.styleRef;
                               return Step{x};
                           },
-                          [](const SetRunMarks& s) -> Step {
-                              SetRunMarks x;
+                          [](const SetRun& s) -> Step {
+                              SetRun x;
                               x.id = s.id;
+                              x.text = s.beforeText;
                               x.marks = s.before;
                               x.styleRef = s.beforeStyleRef;
+                              x.beforeText = s.text;
                               x.before = s.marks;
                               x.beforeStyleRef = s.styleRef;
                               return Step{x};
@@ -1226,7 +1235,7 @@ FlowPos mapPos(const Step& step, FlowPos pos, Assoc assoc) {
                           [&](const SetTableCellSpan&) -> FlowPos { return pos; },
                           // 段落格式与字符格式同理：改的是节点上的数据，位置一个都不动。
                           [&](const SetParaMarkFormat&) -> FlowPos { return pos; },
-                          [&](const SetRunMarks&) -> FlowPos { return pos; },
+                          [&](const SetRun&) -> FlowPos { return pos; },
                       },
                       step);
 }
@@ -1238,7 +1247,7 @@ bool mapStepPositions(Step* target, const Step& mapped_by, Assoc assoc) {
         std::holds_alternative<SetControlValue>(*target) ||
         std::holds_alternative<SetTableCellSpan>(*target) ||
         std::holds_alternative<SetParaMarkFormat>(*target) ||
-        std::holds_alternative<SetRunMarks>(*target)) {
+        std::holds_alternative<SetRun>(*target)) {
         return true;
     }
     if (auto* s = std::get_if<InsertText>(target)) {

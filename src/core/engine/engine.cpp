@@ -418,8 +418,9 @@ bool EditorEngine::applyParaFormatAndRender(const ParaFormatPatch& patch) {
     return true;
 }
 
-std::string EditorEngine::charFormatAtJson() const {
+std::string EditorEngine::charFormatAtJson(bool effective) const {
     if (!session_) return "{}";
+    if (effective) return effectiveFormatAtJson();
     // 键名与写入那条命令同一套，但尺寸给"磅数"而不是 Length 的文本形式 ——
     //   读与写对称，界面才不用解析两种表示。
     const CharFormat m = edit_.charFormatAtCaret();
@@ -431,6 +432,39 @@ std::string EditorEngine::charFormatAtJson() const {
     if (m.size && m.size->kind == LengthKind::Abs)
         j["sz"] = static_cast<double>(emuToPt(m.size->abs_emu));
     if (m.color) j["col"] = {m.color->r, m.color->g, m.color->b};
+    return j.dump();
+}
+
+std::string EditorEngine::effectiveFormatAtJson() const {
+    nlohmann::ordered_json j = nlohmann::ordered_json::object();
+    const TextPos at = caret();
+    const std::vector<BlockSpec>& bs = blocks();
+    if (at.para < 0 || at.para >= static_cast<int>(bs.size())) return j.dump();
+    const BlockSpec& blk = bs[static_cast<size_t>(at.para)];
+    const std::vector<FormatRun> runs = blk.effectiveRuns();
+    if (runs.empty()) return j.dump();
+    // 取落点左边那个字：与"接着敲字会沿用哪一份格式"同一个约定（段首没有左边，
+    //   取第一个字）。于是工具栏上的字体字号、与敲出来的字的字体字号，永远是同一份。
+    const int cp = static_cast<int>(at.offset);
+    const int probe = cp > 0 ? cp - 1 : 0;
+    const FormatRun* hit = nullptr;
+    for (const FormatRun& r : runs) {
+        if (static_cast<int>(r.cp_begin) <= probe && probe < static_cast<int>(r.cp_end)) {
+            hit = &r;
+            break;
+        }
+    }
+    // 空段（run 的区间是零宽）与"落点越过最后一个 run 的尾部"：取最后一个，它就是
+    //   这一段接着写会用的那一份。
+    if (hit == nullptr) hit = &runs.back();
+    // 加粗没有独立字段，它是可变字体的 wght 轴：写入那一侧 true 落成 700。
+    //   600 及以上算粗（半粗也读作粗），这样"样式层设了 semi-bold"不会被报成不粗。
+    j["b"] = hit->weight >= 600.0f;
+    j["i"] = hit->italic;
+    j["u"] = hit->underline;
+    j["fi"] = hit->font_index;
+    j["sz"] = static_cast<double>(hit->size_pt);
+    j["col"] = {hit->color.r, hit->color.g, hit->color.b};
     return j.dump();
 }
 

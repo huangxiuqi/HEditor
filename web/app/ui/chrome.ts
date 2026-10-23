@@ -36,6 +36,26 @@ export function mountChrome(host: HTMLElement, title: string, tabs: Tab[]): Chro
   let bar: StatusBar | null = null;
 
   /**
+   * 把焦点交回编辑器。
+   *
+   * 按钮自己不抢焦点（见 button.ts），但下拉框必须拿到焦点才能展开 —— 选完焦点留在
+   *   那个 select 上，之后敲字与快捷键就全落进它肚子里。所以外壳这一层统一补一次：
+   *   组件不认实例，只认"动作做完该回到哪"。
+   */
+  const refocus = (): void => {
+    if (editor) editor.focus();
+  };
+  ribbon.el.addEventListener('click', (ev) => {
+    // 点在"自己要拿焦点的控件"上时不能抢：原生下拉靠焦点展开，一抢就"点开就收回去"，
+    //   根本选不了项。下拉框外面还包着一层 label（图标与值的整格），点在那上面同理。
+    //   它收尾走下面那条 change。
+    const t = ev.target instanceof Element ? ev.target : null;
+    if (t && t.closest('select, input, textarea, label')) return;
+    refocus();
+  });
+  ribbon.el.addEventListener('change', refocus);
+
+  /**
    * 把缩放读数追平（实例还没绑上时什么都不做）。
    */
   const syncZoom = (): void => {

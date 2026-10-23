@@ -46,7 +46,20 @@ export function createChoice(item: Choice): Component {
      * 重读当前值。
      */
     update(): void {
-      sel.value = item.value();
+      const want = String(item.value());
+      // 候选列是固定档位，而文档里可以出现别的值（别处存来的 15 磅、样式层给的字体）。
+      //   赋一个不存在的值等于把 select 清空，显示成空白 —— 看起来就像"没有回显"。
+      //   所以补一个临时项，下次重读时先把它摘掉，免得越攒越多。
+      const stale = sel.querySelector('option[data-temp="1"]');
+      if (stale) stale.remove();
+      if (want !== '' && !Array.from(sel.options).some((o) => o.value === want)) {
+        const extra = document.createElement('option');
+        extra.value = want;
+        extra.textContent = want;
+        extra.dataset.temp = '1';
+        sel.appendChild(extra);
+      }
+      sel.value = want;
     },
   };
 }

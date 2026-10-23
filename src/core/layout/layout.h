@@ -843,6 +843,14 @@ struct PlacedGlyph {
     float size_pt = 12.0f;
 
     /**
+     * 这个字形用的字重（可变字体的 wght 轴）。
+     *
+     * 它同时决定"画出来是哪一份字形"与"进位移是多少"，所以在字形上留一份 —— 页指纹
+     *   按字形算，而它看不见字体实例本身（见 engine_layout.cpp 的 mixGlyph）。
+     */
+    float weight = 400.0f;
+
+    /**
      * 落在第几页。
      */
     int page = 0;
