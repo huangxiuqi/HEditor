@@ -1,11 +1,11 @@
 ﻿# 构建 wasm 版 Skia（给引擎链接用）。native 那份见 build_skia_native.ps1，
 # 两者同源同参数，差别只有 target 与 /MD。
 #
-# 产物：.toolchain/skia/src/skia-main/out/wasm/libskia.a
+# 产物：.toolchain/skia/src/skia-main/out/wasm/libskia.wasm.a
 #
 # Skia 的版本钉在 scripts/skia_rev.ps1（唯一来源，native 那份也从那儿取）。
-# 本脚本在树与 pin 不符时会把它挪开、按 pin 重取 —— 不做"就地换版本"，
-# 因为差量未知，而 out/ 里的产物必须跟着源码一起换。
+# 源码与六个外部依赖由 scripts/skia_fetch.ps1 取（native 那条也用它，取数只有一条路）；
+# 本脚本只负责"编"，不负责"取"。
 #
 # ─────────────────────────────────────────────────────────────
 #  这条链路为什么这么长 —— 四个坑，都记下来免得下次重踩
@@ -53,12 +53,13 @@
 #    target_features 一致，否则报 features 冲突）。
 #    代价：产物需要支持 WebAssembly SIMD 的浏览器（2021 年后主流全支持）。
 #
+# 取源码与外部依赖是共享的一步，实现在 scripts/skia_fetch.ps1（native 那条也在用），
+# 不在这里重写一遍。
+#
 # 用法：
 #   powershell -ExecutionPolicy Bypass -File scripts\build_skia_wasm.ps1
-#   powershell -ExecutionPolicy Bypass -File scripts\build_skia_wasm.ps1 -Fetch     # 只补源码与依赖
 #   powershell -ExecutionPolicy Bypass -File scripts\build_skia_wasm.ps1 -Clean     # 删掉 out/wasm 重建
 param(
-    [switch]$Fetch,
     [switch]$Clean,
     [int]$Jobs = 0
 )
@@ -67,8 +68,7 @@ $ErrorActionPreference = 'Stop'
 
 $Root      = Split-Path -Parent $PSScriptRoot
 $Toolchain = Join-Path $Root '.toolchain'
-$SkiaPkg   = Join-Path $Toolchain 'skia'
-$SkiaSrc   = Join-Path $SkiaPkg 'src\skia-main'
+$SkiaSrc   = Join-Path $Toolchain 'skia\src\skia-main'
 $Externals = Join-Path $SkiaSrc 'third_party\externals'
 $Emsdk     = Join-Path $Toolchain 'emsdk'
 $Gn        = Join-Path $Toolchain 'gn\out\gn.exe'
@@ -78,157 +78,28 @@ $Lib       = Join-Path $OutDir 'libskia.wasm.a'
 
 function Say([string]$m) { Write-Host "[skia] $m" }
 
-# Windows 自带的 tar 建不了符号链接（要开发者模式或管理员权限），碰到一条就整次解包失败。
-# 上游归档里这类条目只服务别的构建系统（Skia 那条是 Rust 移植用的 Cargo.toml），本仓库
-# 用不到，所以按路径逐个 exclude，跳过它们而不是让整包解不出来。
-# 列表的列随 locale 变（中文 Windows 上是 "10月 09 18:19"，还多一列链接数），所以只拿
-# 时间 HH:MM 当地锚，不按列号切。
-# 返回 tar 的退出码，由调用方判定。
-function Expand-TarSkippingSymlinks([string]$Tar, [string]$Dest) {
-    $skip = @(& tar.exe -tvzf $Tar | ForEach-Object {
-        if ($_ -match '^l\S+\s.*?\d{1,2}:\d{2}\s+(.+?) -> ') { "--exclude=$($Matches[1])" }
-    })
-    if ($skip.Count) { Say ("跳过 {0} 个符号链接（Windows 建不了）" -f $skip.Count) }
-    & tar.exe -xzf $Tar -C $Dest @skip
-    return $LASTEXITCODE
-}
-
 # ── 0. 工具链体检 ───────────────────────────────────────────
 foreach ($p in @($Emsdk, $Gn, $Ninja)) {
     if (-not (Test-Path $p)) { throw "缺少工具链：$p（先跑 scripts\toolchain_init.ps1）" }
 }
 
-# ── 1. Skia 源码（版本钉在 scripts/skia_rev.ps1）──────────────
-#   "树不在"与"树是别的版本"走同一条路：重取。不做差量替换 —— 差量未知，
-#   而 out/ 里的产物必须跟着源码一起换，留着半新半旧只会得到解释不了的报错。
+# ── 1. 源码与外部依赖（唯一取数入口：scripts/skia_fetch.ps1）──
+#   树不在、或是别的版本，它按 pin 重取（约 80 MB + 六个依赖）；已是这一版就空转。
 . (Join-Path $PSScriptRoot 'skia_rev.ps1')
-Say "Skia pin: $SkiaCommit ($SkiaCommitDate)"
-
-$state = Get-SkiaTreeState $SkiaSrc
-if ($state -ne 'ok') {
-    if (Test-Path $SkiaSrc) {
-        # 不删：本仓库的删除守卫会拦，而且删错了不可逆。同卷改名是一次 rename
-        #   （连 out/ 一起挪也很快），留着还能对照旧版本编出来的产物。
-        #   确认无用后由人手工删 —— 脚本不替人做不可逆的事。
-        $stale = Join-Path (Join-Path $SkiaPkg 'src') ('_stale-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
-        Say "现有源码树与 pin 不符（$state），挪到 $stale"
-        Move-Item -LiteralPath $SkiaSrc -Destination $stale
-    }
-    $tar = Join-Path $SkiaPkg "skia-$SkiaCommit.tar.gz"
-    $part = "$tar.part"
-    # 下载落 .part、验完再改名：断在半路的那份不会冒充完整包，重跑时 curl -C - 从断点接着下。
-    if (-not (Test-Path $tar)) {
-        Say "下载 Skia 源码 $SkiaCommit（约 80 MB，走 codeload；断了重跑会续传）"
-        New-Item -ItemType Directory -Force -Path $SkiaPkg | Out-Null
-        & curl.exe -sSL --retry 5 --retry-delay 3 -C - --max-time 3600 `
-            -o $part "https://codeload.github.com/google/skia/tar.gz/$SkiaCommit"
-        if ($LASTEXITCODE -ne 0) {
-            throw "下载 Skia 源码失败（已下的部分在 $part，重跑会续传）"
-        }
-        Move-Item -LiteralPath $part -Destination $tar
-    }
-    # codeload 对不存在的 commit 回一张 404 的 HTML，而 curl 的退出码仍是 0。
-    #   体积是这里唯一便宜的判据（真包 80 MB，错误页几 KB）。检查放在下载分支之外：
-    #   上一次失败留下的坏包同样会被 Test-Path 放过，而 tar 只会报"解压失败"。
-    $tarLen = (Get-Item $tar).Length
-    if ($tarLen -lt 20MB) {
-        # 改名而不是删：删除守卫会拦，而且留着（换个名字）比消失更好查。
-        Move-Item -LiteralPath $tar -Destination "$tar.bad" -Force
-        throw "这份 tar 只有 $tarLen 字节，不是 Skia 源码（已改名 $tar.bad）：$SkiaCommit 在 codeload 上存在吗？"
-    }
-    # 解到自己的暂存目录再整体挪进去：解压中途失败时，src\ 下不会留半棵树拖累下一次。
-    Say "解压 Skia 源码"
-    $unpack = Join-Path $SkiaPkg '_unpack'
-    if (Test-Path $unpack) { Remove-Item -Recurse -Force $unpack }
-    New-Item -ItemType Directory -Force -Path $unpack | Out-Null
-    if ((Expand-TarSkippingSymlinks -Tar $tar -Dest $unpack) -ne 0) {
-        # 分清是谁的错：清单都读不出来，说明包是坏的（多为上次没下完），改名让它重下；
-        # 清单读得完却解不开，就不是包的问题（文件系统拒绝某类条目），别白扔这 80 MB。
-        & tar.exe -tzf $tar 2>$null | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            if (Test-Path $unpack) { Remove-Item -Recurse -Force $unpack }
-            Move-Item -LiteralPath $tar -Destination "$tar.bad" -Force
-            throw "这份 tar 读不出清单（多半是没下完，已改名 $tar.bad），重跑会重下"
-        }
-        throw "解压 Skia 源码失败，但包是完好的（看上面 tar 的报错）：$tar"
-    }
-    # 归档顶层目录改名成 skia-main —— 下游路径全按它写死（选取规则见 skia_rev.ps1）。
-    $extracted = Find-ExtractedSkia $unpack
-    if (-not $extracted) { throw "解压后找不到含 BUILD.gn 的目录：$unpack" }
-    New-Item -ItemType Directory -Force -Path (Join-Path $SkiaPkg 'src') | Out-Null
-    Move-Item -LiteralPath $extracted.FullName -Destination $SkiaSrc
-    Remove-Item -Recurse -Force $unpack
-    [System.IO.File]::WriteAllText((Join-Path $SkiaSrc '.heditor-skia-rev'),
-        "$SkiaCommit  $SkiaCommitDate`n")
-    $state = Get-SkiaTreeState $SkiaSrc
-    if ($state -ne 'ok') { throw "源码就位后仍与 pin 不符（$state）：$SkiaSrc" }
-    Say "源码就位：$SkiaCommit"
+& (Join-Path $PSScriptRoot 'skia_fetch.ps1')
+# 取数脚本自己有判据，这里再确认一次：它是 libskia 唯一的源头，错了后面全是白编。
+if ((Get-SkiaTreeState $SkiaSrc) -ne 'ok') {
+    throw "取数之后源码树仍与 pin 不符：$SkiaSrc（pin = $SkiaCommit）"
 }
 
-# ── 2. 外部依赖（DEPS 里钉住的 commit，只读归档，不碰 git）──
-#    host 路径前不带斜杠：googlesource 的 +archive 要求这样。
-$Deps = [ordered]@{
-    'freetype'       = 'https://chromium.googlesource.com/chromium/src/third_party/freetype2/+archive/264b5fbf5b912b39f98d038bf75d39be0a73f21b.tar.gz'
-    'harfbuzz'       = 'https://chromium.googlesource.com/external/github.com/harfbuzz/harfbuzz/+archive/9cb1fee51069b206effb4736e443b038d230789d.tar.gz'
-    'zlib'           = 'https://chromium.googlesource.com/chromium/src/third_party/zlib/+archive/646b7f569718921d7d4b5b8e22572ff6c76f2596.tar.gz'
-    'libpng'         = 'https://skia.googlesource.com/third_party/libpng/+archive/d5515b5b8be3901aac04e5bd8bd5c89f287bcd33.tar.gz'
-    'libjpeg-turbo'  = 'https://chromium.googlesource.com/chromium/deps/libjpeg_turbo/+archive/e14cbfaa85529d47f9f55b0f104a579c1061f9ad.tar.gz'
-    'libwebp'        = 'https://chromium.googlesource.com/webm/libwebp/+archive/845d5476a866141ba35ac133f856fa62f0b7445f.tar.gz'
-}
-# 每个依赖判"是否已就位"的哨兵文件（目录存在但为空也会被骗，所以按文件判）
-$Sentinels = @{
-    'freetype'      = 'include\freetype\freetype.h'
-    'harfbuzz'      = 'src\hb.h'
-    'zlib'          = 'zlib.h'
-    'libpng'        = 'png.h'
-    'libjpeg-turbo' = 'src\jpeglib.h'
-    'libwebp'       = 'src\webp\decode.h'
-}
-
-New-Item -ItemType Directory -Force -Path $Externals | Out-Null
-$Tmp = Join-Path $env:TEMP 'heditor_skia_deps'
-New-Item -ItemType Directory -Force -Path $Tmp | Out-Null
-
-foreach ($name in $Deps.Keys) {
-    $dir = Join-Path $Externals $name
-    $sentinel = Join-Path $dir $Sentinels[$name]
-    if (Test-Path $sentinel) { continue }
-    # 半截目录不能留：它里面可能已经解出了哨兵文件，下一次就会被当成"已就位"而跳过。
-    if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
-
-    $tar = Join-Path $Tmp "$name.tar.gz"
-    $part = "$tar.part"
-    Say "取依赖 $name"
-    & curl.exe -sSL --retry 5 --retry-delay 3 -C - --max-time 1800 -o $part $Deps[$name]
-    if ($LASTEXITCODE -ne 0) { throw "下载 $name 失败（已下的部分在 $part，重跑会续传）" }
-    Move-Item -LiteralPath $part -Destination $tar -Force
-
-    # 同样解到暂存目录再整体挪：解压失败不会在 externals 下留半棵树。
-    $stage = Join-Path $Tmp "$name-unpack"
-    if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
-    New-Item -ItemType Directory -Force -Path $stage | Out-Null
-    if ((Expand-TarSkippingSymlinks -Tar $tar -Dest $stage) -ne 0) {
-        # 这几个包都只有几 MB，解不开就当坏的丢掉重下，不值得像 Skia 那样分情况。
-        Remove-Item -LiteralPath $tar -Force
-        throw "解压 $name 失败（包已删，重跑会重下）：$tar"
-    }
-    if (-not (Test-Path (Join-Path $stage $Sentinels[$name]))) {
-        throw "$name 解压后仍找不到哨兵文件：$stage"
-    }
-    Move-Item -LiteralPath $stage -Destination $dir
-}
-Say "外部依赖就位"
-
-if ($Fetch) { Say "-Fetch：只补源码与依赖，到此为止"; exit 0 }
-
-# ── 3. emsdk 挂进树内（gn 的 wasm 工具链按固定相对路径找它）──
+# ── 2. emsdk 挂进树内（gn 的 wasm 工具链按固定相对路径找它）──
 $EmsdkLink = Join-Path $Externals 'emsdk'
 if (-not (Test-Path $EmsdkLink)) {
     Say "创建 emsdk junction → $Emsdk"
     New-Item -ItemType Junction -Path $EmsdkLink -Target $Emsdk | Out-Null
 }
 
-# ── 4. Patch Skia 的 gn 文件（幂等）─────────────────────────
+# ── 3. Patch Skia 的 gn 文件（幂等）─────────────────────────
 #   ★ 幂等判据用一句**独立标记**，绝不能用整段 $new：$new 里的注释随脚本演进
 #   （而且它常引用脚本自己的名字）。拿它当指纹，"脚本改过注释或改过名"就会变成
 #   "补丁点找不到"的假故障 —— 本机真栽过：磁盘上的 BUILD.gn 是旧脚本
@@ -285,14 +156,14 @@ Patch-File $ToolchainGn @'
 }
 '@ '去掉 emsdk activate 依赖'
 
-# ── 4b. 打开 wasm SIMD：撤掉上游那条 SKVX_DISABLE_SIMD（见坑 ⑤）──
+# ── 3b. 打开 wasm SIMD：撤掉上游那条 SKVX_DISABLE_SIMD（见坑 ⑤）──
 #   ★ 只替换这一行、匹配串里不带换行 —— 免得被脚本与 .gni 的行尾差异（CRLF/LF）绊倒。
 $WasmGni = Join-Path $SkiaSrc 'gn\toolchain\wasm.gni'
 Patch-File $WasmGni '  "SKVX_DISABLE_SIMD",' `
   '  # "SKVX_DISABLE_SIMD",  # heditor: wasm SIMD on, see build_skia_wasm.ps1' `
   'wasm 打开 SIMD'
 
-# ── 5. gn 参数 ──────────────────────────────────────────────
+# ── 4. gn 参数 ──────────────────────────────────────────────
 #   ★ 每一条 skia_use_system_* 都是必须的，理由见文件顶部坑 ④。
 $ArgsGn = @'
 # 由 scripts/build_skia_wasm.ps1 生成 —— 请改脚本，不要手改这里。
@@ -348,14 +219,14 @@ if ($Clean -and (Test-Path $OutDir)) { Remove-Item -Recurse -Force $OutDir }
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 [System.IO.File]::WriteAllText((Join-Path $OutDir 'args.gn'), $ArgsGn)
 
-# ── 6. gn gen ───────────────────────────────────────────────
+# ── 5. gn gen ───────────────────────────────────────────────
 Say "gn gen out/wasm"
 Push-Location $SkiaSrc
 try {
     & $Gn gen out/wasm
     if ($LASTEXITCODE -ne 0) { throw "gn gen 失败：exit $LASTEXITCODE" }
 
-    # ── 7. ninja ────────────────────────────────────────────
+    # ── 6. ninja ────────────────────────────────────────────
     # ★ 这里别用 $jobs 当局部变量名 —— param 里的 [int]$Jobs 是**强类型**的，
     #   而 PowerShell 变量名不区分大小写，$jobs = @() 会撞上它并报
     #   "无法将 System.Object[] 转换为 System.Int32"。
@@ -368,7 +239,7 @@ try {
     Pop-Location
 }
 
-# ── 8. 报告 ─────────────────────────────────────────────────
+# ── 7. 报告 ─────────────────────────────────────────────────
 if (-not (Test-Path $Lib)) { throw "构建结束但找不到 $Lib" }
 $mb = (Get-Item $Lib).Length / 1MB
 Say ("libskia.a  {0:N1} MB  ({1})" -f $mb, $Lib)

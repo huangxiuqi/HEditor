@@ -116,15 +116,19 @@ function blitFrame(px, w) {}
 - 依赖归路（源码走 submodule、Skia 走脚本化归档）与判断标准见 `docs/依赖与工具链管理.md`。
   本工程不使用包管理器：唯一的非源码依赖面（native 侧的成品库）目前是空集。
 - **Skia 的版本是钉住的**，唯一来源 `scripts/skia_rev.ps1`（commit + 根 `BUILD.gn` 的
-  blob 哈希）。`build_skia_native.ps1` 发现源码树与 pin 不符会直接拒绝构建；要换版本
-  就改那三个常量、重取、再把两套库与全部断言重跑一遍。不要绕过它手工换一棵树 ——
-  native 与 wasm 的库必须出自同一棵树，否则宏与实现会悄悄分叉且不报错。
+  blob 哈希）。源码与六个外部依赖由 `scripts/skia_fetch.ps1` 取，那是**唯一的取数入口**
+  （只依赖 curl 与 tar，不需要 gn / ninja / emsdk）；`build_skia_wasm.ps1` 与
+  `build_skia_native.ps1` 发现树不是这一版都会先调它。要换版本就改那三个常量、重取、
+  再把两套库与全部断言重跑一遍。不要绕过它手工换一棵树 —— native 与 wasm 的库必须出自
+  同一棵树，否则宏与实现会悄悄分叉且不报错。
 - 预设写在 `CMakePresets.json`：`native` / `native-debug` / `wasm` / `wasm-debug`。
   两套都要 `.toolchain` 下的工具链（emsdk / gn / ninja），换机器先跑
   `powershell -ExecutionPolicy Bypass -File scripts\toolchain_init.ps1`：ninja 与 emsdk
   由它下载并校验，gn 只校验版本（那一份没有可下载的制品，见 `docs/依赖与工具链管理.md` 5.2）。
+  想连 Skia 源码一起取：给同一个脚本加 `-WithSkia`（否则那步跳过，构建脚本会自己补）。
   `native` 还需要 MSVC 环境与 x64 版 Skia 静态库（`scripts\build_skia_native.ps1`，产物
-  `.toolchain/skia/.../out/win-x64/skia.lib`）。MSVC 环境由 `.\scripts\msvc_env.ps1` 进：
+  `.toolchain/skia/.../out/win-x64/skia.lib`；首次跑会先取那 80 MB 源码）。MSVC 环境由
+  `.\scripts\msvc_env.ps1` 进：
   它用 vswhere 找到 VS 实例，再调微软自己的 `Enter-VsDevShell`
   （`Common7\Tools\Microsoft.VisualStudio.DevShell.dll`）—— 跟开始菜单那个
   「Developer PowerShell for VS 2022」是同一件事，环境由 VS 自己算，仓库里没有一个版本号目录。

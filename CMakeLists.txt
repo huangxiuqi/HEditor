@@ -90,7 +90,9 @@ if(NOT EXISTS ${HEDITOR_SKIA_LIB})
   message(FATAL_ERROR
     "找不到 Skia 静态库：${HEDITOR_SKIA_LIB}\n"
     "wasm:   powershell -ExecutionPolicy Bypass -File scripts\\build_skia_wasm.ps1\n"
-    "native: powershell -ExecutionPolicy Bypass -File scripts\\build_skia_native.ps1")
+    "native: powershell -ExecutionPolicy Bypass -File scripts\\build_skia_native.ps1\n"
+    "（两个脚本都会先按 pin 取源码与六个外部依赖，首次约 80 MB；只想取源码就单独跑\n"
+    "  powershell -ExecutionPolicy Bypass -File scripts\\skia_fetch.ps1）")
 endif()
 
 set(HEDITOR_RENDER_SRC src/core/render/bitmap_skia.cpp)

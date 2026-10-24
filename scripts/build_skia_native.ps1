@@ -12,6 +12,9 @@
 # 用法：
 #   powershell -ExecutionPolicy Bypass -File scripts\build_skia_native.ps1
 #   powershell -ExecutionPolicy Bypass -File scripts\build_skia_native.ps1 -Clean
+#
+# 首次跑（或源码树与 pin 不符）会先调 scripts\skia_fetch.ps1 取源码与六个外部依赖
+# （约 80 MB），不需要 emsdk；只需 gn 与 ninja 在位（scripts\toolchain_init.ps1）。
 param(
     [string]$VcRoot = "",
     [int]$Jobs = 0,
@@ -36,15 +39,15 @@ foreach ($p in @($Gn, $Ninja)) {
 
 # ── 0. 源码树版本（钉在 scripts/skia_rev.ps1）───────────────
 #   两份库（wasm 与 native）必须出自同一棵树：宏与实现一旦分叉，症状是
-#   "两边像素不一样"或更糟的 ODR 违规 —— 而不会有任何一处报错。
+#   "两边像素不一样"或更糟的 ODR 违规 —— 而不会有任何一处会报错。
+#   取数只有一条路（scripts/skia_fetch.ps1，native 与 wasm 共用）；它不需要 emsdk，
+#   所以 native 这条路不被那 2 GB 挡着。
 . (Join-Path $PSScriptRoot 'skia_rev.ps1')
-$state = Get-SkiaTreeState $SkiaSrc
-if ($state -ne 'ok') {
-    throw ("Skia 源码与 pin 不符（$state）：$SkiaSrc`n" +
-           "  pin = $SkiaCommit ($SkiaCommitDate)`n" +
-           "  修法：跑 scripts\build_skia_wasm.ps1 -Fetch —— 它按 pin 重取源码与外部依赖，" +
-           "不编 wasm。")
+if ((Get-SkiaTreeState $SkiaSrc) -ne 'ok') {
+    & (Join-Path $PSScriptRoot 'skia_fetch.ps1')
 }
+$state = Get-SkiaTreeState $SkiaSrc
+if ($state -ne 'ok') { throw "取数之后源码树仍与 pin 不符（$state）：$SkiaSrc" }
 Say "Skia $SkiaCommit ($SkiaCommitDate)"
 
 # ── 1. 找 MSVC 与 Windows SDK ───────────────────────────────

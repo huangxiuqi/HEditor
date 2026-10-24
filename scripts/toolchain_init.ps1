@@ -14,11 +14,18 @@
 # 用法：
 #   powershell -ExecutionPolicy Bypass -File scripts\toolchain_init.ps1
 #   powershell -ExecutionPolicy Bypass -File scripts\toolchain_init.ps1 -SkipEmsdk
+#   powershell -ExecutionPolicy Bypass -File scripts\toolchain_init.ps1 -WithSkia
+#
+# Skia 源码不在这三件里：它是**源码依赖**（80 MB + 六个外部依赖，版本钉在
+# scripts/skia_rev.ps1），取数实现在 scripts/skia_fetch.ps1，两个构建脚本共用那一条路。
+# -WithSkia 只是顺手转接一次；不加也行，build_skia_native.ps1 / build_skia_wasm.ps1
+# 发现树不对会自己调它。
 #
 # 网络：走系统代理；设了 HTTPS_PROXY / HTTP_PROXY 就按它走（emsdk.py 也认这两个）。
 
 param(
-    [switch]$SkipEmsdk
+    [switch]$SkipEmsdk,
+    [switch]$WithSkia
 )
 
 $ErrorActionPreference = 'Stop'
@@ -150,7 +157,18 @@ if ($have -eq $NinjaVersion) {
     Say "ninja $have 就位"
 }
 
-# ── 3. emsdk ────────────────────────────────────────────────
+# ── 3. Skia 源码（可选；本体在 scripts\skia_fetch.ps1）────────
+# 它不是工具而是源码依赖，所以不在上面两件的判据表里；这里只在 -WithSkia 时转接一次。
+# 顺序刻意排在 emsdk 之前：native 只要 gn + ninja + 这棵树，不该被 2 GB 的 emsdk 挡在前面。
+$SkiaSrc  = Join-Path $Toolchain 'skia\src\skia-main'
+$SkiaMark = Join-Path $SkiaSrc '.heditor-skia-rev'
+if ($WithSkia) {
+    & (Join-Path $PSScriptRoot 'skia_fetch.ps1')
+} else {
+    Say "跳过 Skia 源码（要的话加 -WithSkia，或单独跑 scripts\skia_fetch.ps1）"
+}
+
+# ── 4. emsdk ────────────────────────────────────────────────
 # emsdk 的引导脚本自己就是 python，它自带的 python 要 install 之后才有，所以这里先要一个。
 function Get-EmsdkVersion {
     if (-not (Test-Path $Emitter)) { return $null }
@@ -215,10 +233,15 @@ if ($SkipEmsdk) {
     }
 }
 
-# ── 4. 汇总 ─────────────────────────────────────────────────
+# ── 5. 汇总 ─────────────────────────────────────────────────
 Write-Host ""
 Say "工具链就位："
 Say ("  gn     {0}   {1}" -f (Get-GnVersion), $GnExe)
 Say ("  ninja  {0}   {1}" -f (Get-NinjaVersion), $NinjaExe)
+if (Test-Path $SkiaMark) {
+    Say ("  skia   {0}   {1}" -f (Get-Content $SkiaMark -Raw).Trim(), $SkiaSrc)
+} else {
+    Say ("  skia   {0}" -f '未取（-WithSkia，或跑 scripts\skia_fetch.ps1）')
+}
 $note = if ($SkipEmsdk) { '（本次跳过）' } else { '' }
 Say ("  emsdk  {0}   {1}{2}" -f (Get-EmsdkVersion), $EmsdkDir, $note)

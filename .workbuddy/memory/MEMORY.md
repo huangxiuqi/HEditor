@@ -96,7 +96,9 @@
 - 会话层：撤销拿回旧修订不做逆操作；撤销后清空重做栈、没变化不占栈（111）。
 - 断行：`breakLine` 切一行 + 度量，`breakBlock` 横排整块；竖排一列一列断。
 - 光栅只有一个实现 `bitmap_skia.cpp`；native 前先 `scripts/build_skia_native.ps1`；
-  Skia 版本钉在 `scripts/skia_rev.ps1`。
+  Skia 版本钉在 `scripts/skia_rev.ps1`，源码与六个外部依赖只走 `scripts/skia_fetch.ps1`
+  （唯一取数入口，只依赖 curl + tar；两个构建脚本成树前都会调它，`toolchain_init.ps1 -WithSkia`
+  只是转接一次）。
 - 注释权威 = 根 `AGENTS.md` + `lint_comments.py`（R1~R13），违规必须 0、不设基线；
   `check_docs.mjs`（TS 按 AST）与 `check_docs_cpp.py` 都在 `npm run check`。
 - **tsc 是 wasm 构建的硬依赖**：`--emit-tsd` 链接期调它，缺了留未优化 wasm（TRAPS 153）。
