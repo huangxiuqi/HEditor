@@ -435,7 +435,7 @@ struct BlockSpec {
     /**
      * 段后距（磅）。
      */
-    float space_after_pt = 10.0f;
+    float space_after_pt = 6.0f;
 
     /**
      * 这一段之前强制分页。
@@ -798,6 +798,35 @@ struct PlacedTable {
      * 这一张表的行片段（跨页拆开的一行每页各一条）。
      */
     std::vector<PlacedRow> placed;
+
+    /**
+     * 找出覆盖某个网格格位的逻辑格。
+     *
+     * 格是按跨度存的，网格列号要按同行的跨度累加才得到 —— 这个换算只有一处（这里），
+     * 命中、选区与绘制都读它，免得三处各自累加出三份结果。
+     * @param row 逻辑行号
+     * @param col 网格列号
+     * @param col_lo 写回这一格覆盖的起始列（含），可为 nullptr
+     * @param col_hi 写回这一格覆盖的结束列（不含），可为 nullptr
+     * @return 覆盖这一点的格；越界或那一格被合并掉时为 nullptr
+     */
+    const LayoutCell* cellAt(int row, int col, int* col_lo, int* col_hi) const;
+
+    /**
+     * 某一格在某一页上的框（页内坐标，磅）。
+     *
+     * 一个逻辑格在跨页的行上会出现多次：每一页那一段各是一个框。选区反白与命中都按它铺，
+     * 而不是按行盒 —— 内容已经在上一页结束的格在续排片段上没有行盒，按行盒铺会漏掉整段。
+     * @param cell 逻辑格
+     * @param page 页号
+     * @param x 写回左边（页内坐标）
+     * @param y 写回上边（页内坐标）
+     * @param w 写回宽
+     * @param h 写回高
+     * @return 这一格在这一页上有框时为 true
+     */
+    bool cellBoxOnPage(const LayoutCell& cell, int page, float* x, float* y, float* w,
+                       float* h) const;
 };
 
 /**

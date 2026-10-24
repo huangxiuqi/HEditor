@@ -2055,6 +2055,15 @@ private:
     void computeLineFingerprints(int dirty_lo, int dirty_hi, bool full);
 
     /**
+     * 某一页上的表格片段摘要：表的位置、列边界与这一页各片段的上下沿。
+     *
+     * 它是"这一页的格线长什么样"的最小充分输入：绘制读的就是这几个数。
+     * @param page 页号
+     * @return 摘要；这一页没有表时等于 kFnvBasis
+     */
+    uint64_t tablePieceDigest(int page) const;
+
+    /**
      * 把 [first_page, 末页) 直接标成"与已画那一版不同"，不去哈希。
      *
      * 用在后缀整体平移那一级：后缀的每一行都沿块轴挪了位，于是它在的每一页内容都变了 ——
@@ -2709,6 +2718,25 @@ private:
      * 已画那一版每一行的块轴下界（页内磅）。
      */
     std::vector<float> line_hi_prev_;
+
+    /**
+     * 每页的表格片段摘要（下标 = 页号）。
+     *
+     * 页上的格线不是行盒画出来的，行指纹看不到"跨页切片的底边从行底挪到了页底"这种变化；
+     * 而这类变化往往伴随某一行也在动，于是行带只盖住文字那一条，页底的边框留在旧位置。
+     * 摘要变了的页一律整页重画（见 computeBand）。
+     */
+    std::vector<uint64_t> table_fp_new_;
+
+    /**
+     * 已经画成像素的那一版表格片段摘要。
+     */
+    std::vector<uint64_t> table_fp_prev_;
+
+    /**
+     * 已画那一版的页数（表格摘要数组的规模）。
+     */
+    int table_fp_prev_count_ = 0;
 
     /**
      * 本次重画那条行带的页内磅范围（computeBand 写、rasterIntoBitmap 读）。

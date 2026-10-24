@@ -59,6 +59,13 @@ let para: ParaFormatPatch = {};
 /** 动作的键：三个开关型字符格式。 */
 type MarkKey = 'bold' | 'italic' | 'underline';
 
+/**
+ * 有未保存的改动。
+ *
+ * 只有它才拦"关页面"：一律拦会让刷新变成两步，而"没改过也问一句"是纯粹的打搅。
+ */
+let dirty = false;
+
 /** 正在读格式：期间来的刷新请求先记下，读完再补一轮。 */
 let reading = false;
 /** 读的期间又有人要刷新。 */
@@ -161,6 +168,24 @@ function stepSize(dir: number): void {
 }
 
 /**
+ * 数一份文本的字数。
+ *
+ * 口径是"字符数（不计空格）"：按码点算，空白（空格、制表、换行、全角空格）不计。
+ *   与字处理软件一致 —— 按字节算会让中文文档的数字虚高两倍，按词算对中文没有意义。
+ * @param text 全文
+ * @returns 字数
+ */
+function countWords(text: string): number {
+  let n = 0;
+  for (const ch of text) {
+    const cp = ch.codePointAt(0) ?? 0;
+    if (cp === 0x20 || cp === 0x09 || cp === 0x0a || cp === 0x0d || cp === 0x3000) continue;
+    n += 1;
+  }
+  return n;
+}
+
+/**
  * 改缩放倍数（夹在库的上下限里）。
  * @param z 目标倍数
  */
@@ -174,7 +199,9 @@ async function zoomTo(z: number): Promise<void> {
  */
 async function saveNow(): Promise<void> {
   const json = await editor.save();
-  chrome.say(`已序列化 ${json.length} 字节`);
+  dirty = false;
+  const g = editor.geometry();
+  chrome.say(`${editor.paragraphs().length} 段 · 已序列化 ${json.length} 字节（${g.pages} 页）`);
 }
 
 /**
@@ -385,6 +412,30 @@ function makeTabs(): Tab[] {
     ],
   };
 
+  // 三种编辑模式是产品语义，不是调试开关：填表与预览都靠它。
+  const mode: Group = {
+    label: '模式',
+    items: [
+      {
+        act: 'mode',
+        label: '编辑模式',
+        options: [
+          { value: 'document', text: '编辑' },
+          { value: 'form', text: '表单' },
+          { value: 'readOnly', text: '只读' },
+        ],
+        value: () => editor.config().mode,
+        run: (v) => {
+          if (!v) return;
+          // 配完重读回显：configure 不发 change，不刷新的话下拉框停在上一档。
+          void editor
+            .configure({ mode: v as 'document' | 'form' | 'readOnly' })
+            .then(() => chrome.refresh());
+        },
+      },
+    ],
+  };
+
   const zoom: Group = {
     label: '缩放',
     items: [
@@ -437,8 +488,18 @@ function makeTabs(): Tab[] {
   return [
     { label: '开始', groups: [doc, clipboard, font, paragraph, edit] },
     { label: '插入', groups: [insert] },
-    { label: '视图', groups: [show, zoom] },
+    { label: '视图', groups: [mode, show, zoom] },
   ];
+}
+
+/**
+ * 重算页数与字数，并把状态行换成这一句。
+ * @param tail 状态行要说的那句话
+ */
+function refreshCounts(tail: string): void {
+  const g = editor.geometry();
+  chrome.setCounts(g.pages, countWords(editor.text()));
+  chrome.say(`${editor.paragraphs().length} 段 · ${tail}`);
 }
 
 async function boot(): Promise<void> {
@@ -466,6 +527,7 @@ async function boot(): Promise<void> {
   window.__demoState = { changes: 0 };
 
   await editor.setText(DEMO_TEXT);
+  dirty = false;
   chrome.bind(editor);
 
   const touch = (): void => {
@@ -475,15 +537,14 @@ async function boot(): Promise<void> {
   editor.on('selection', touch);
   editor.on('change', () => {
     const n = ++window.__demoState!.changes;
-    const g = editor.geometry();
-    chrome.say(`${editor.paragraphs().length} 段 · ${g.pages} 页 · 变更 ${n} 次`);
+    dirty = true;
+    refreshCounts(`变更 ${n} 次`);
     // 内容变了，光标处能继承的格式也可能变了（撤销、粘贴、格式命令都走这条路）。
     void syncFormat();
   });
 
   await syncFormat();
-  const g = editor.geometry();
-  chrome.say(`${editor.paragraphs().length} 段 · ${g.pages} 页 · 就绪`);
+  refreshCounts('就绪');
 
   // 探针的排空点：所有 fire-and-forget 的调用之后读这个。
   window.__demoReady = true;
@@ -497,6 +558,17 @@ const tabs = makeTabs();
 chrome = mountChrome(document.getElementById('bar')!, 'HEditor', tabs);
 
 void boot();
+
+// 有未保存的改动就拦一下"关页面 / 刷新"。
+//
+// 文案由浏览器给（自定义的那一句不显示），所以这里只做"要不要问"的判断：
+//   改过、且之后没存过 —— 拦住；装载示例之后还没改过 —— 直接放行。
+window.addEventListener('beforeunload', (ev) => {
+  if (!dirty) return;
+  ev.preventDefault();
+  // Chrome 只认 returnValue 非空，其余浏览器读 returnValue 的字符串。
+  ev.returnValue = '文档还没保存';
+});
 
 // 契约与公开成员清单变了就整页重载。
 //

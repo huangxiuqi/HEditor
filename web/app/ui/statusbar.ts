@@ -1,7 +1,8 @@
-// 状态栏：左边一行状态，右边缩放（减 / 滑块 / 加 / 百分比）。
+// 状态栏：左边页数 / 字数加一行状态，右边缩放（减 / 滑块 / 加 / 百分比）。
 //
-// 它自己不认识编辑器：缩放只是两个回调（一步一格、直接给百分比）。这样这一件在
-//   没有实例的页面上（比如"两个实例"那一页）也能挂，只是右边那组不接电。
+// 它自己不认识编辑器：缩放只是两个回调（一步一格、直接给百分比），页数与字数由宿主
+//   算好喂进来。这样这一件在没有实例的页面上（比如"两个实例"那一页）也能挂，
+//   只是那几处不接电。
 import { iconHtml } from './icons';
 
 /**
@@ -30,6 +31,13 @@ export interface StatusBar {
    * @param pct 百分比（100 = 原大）
    */
   setZoomPct(pct: number): void;
+
+  /**
+   * 写左边的页数与字数。
+   * @param pages 总页数
+   * @param words 总字数（字符数，不计空白）
+   */
+  setCounts(pages: number, words: number): void;
 }
 
 /**
@@ -46,6 +54,20 @@ export function createStatusBar(
 ): StatusBar {
   const el = document.createElement('footer');
   el.className = 'heditor-status';
+
+  // 页数与字数：左下角常驻的两个数。它们与右边那行状态分开放 —— 那一行是"这一次
+  //   操作说了什么"，会变；这两个数是文档的规模，只在内容变了之后才动。
+  const counts = document.createElement('span');
+  counts.className = 'heditor-status__counts';
+  const pageCount = document.createElement('span');
+  pageCount.className = 'heditor-status__count';
+  pageCount.dataset.count = 'pages';
+  pageCount.textContent = '1 页';
+  const wordCount = document.createElement('span');
+  wordCount.className = 'heditor-status__count';
+  wordCount.dataset.count = 'words';
+  wordCount.textContent = '0 字';
+  counts.append(pageCount, wordCount);
 
   const statusText = document.createElement('span');
   // 这个 id 是页面对外的约定（状态栏文字），类名只管样式。
@@ -75,7 +97,7 @@ export function createStatusBar(
   pct.textContent = '100%';
 
   right.append(out.el, range, into.el, pct);
-  el.append(statusText, right);
+  el.append(counts, statusText, right);
 
   return {
     el,
@@ -103,6 +125,16 @@ export function createStatusBar(
     setZoomPct(value: number): void {
       range.value = String(value);
       pct.textContent = Math.round(value) + '%';
+    },
+
+    /**
+     * 写左边的页数与字数。
+     * @param pages 总页数
+     * @param words 总字数（字符数，不计空白）
+     */
+    setCounts(pages: number, words: number): void {
+      pageCount.textContent = Math.max(1, Math.round(pages)) + ' 页';
+      wordCount.textContent = words.toLocaleString('zh-CN') + ' 字';
     },
   };
 }

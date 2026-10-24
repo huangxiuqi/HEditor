@@ -1678,7 +1678,65 @@ bool EditorEngine::hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* 
     float best_d = 1e30f;
     float best_dx = 1e30f;
     int best_rank = 2;
+    // 表格优先：先看这一点落在哪个格框里，再只在那一格的块区间里挑行。
+    //   跨页切开的一行，续排片段上有些格的内容已经在上一页结束 —— 它们在这一页没有行盒，
+    //   只按行盒找会把这一点判给同一行里唯一还有行盒的那一格（表象是"点空格子，
+    //   光标跳进旁边有字的格"）。格框是行片段 + 列边界给的，与有没有行盒无关。
+    const LayoutCell* cell_hit = nullptr;
+    {
+        float cell_area = 1e30f;
+        for (const PlacedTable& pt : layout_.placed_tables) {
+            if (x_pt_doc < pt.x - 0.5f || x_pt_doc > pt.x + pt.w + 0.5f) continue;
+            for (const PlacedRow& pr : pt.placed) {
+                if (pr.page != page) continue;
+                if (local_y < pr.y - 0.01f || local_y > pr.y + pr.h + 0.01f) continue;
+                int col = -1;
+                const int n_col = static_cast<int>(pt.col_x.size()) - 1;
+                for (int c = 0; c < n_col; ++c) {
+                    const float lo = pt.x + pt.col_x[static_cast<size_t>(c)];
+                    const float hi = pt.x + pt.col_x[static_cast<size_t>(c) + 1];
+                    if (x_pt_doc >= lo - 0.01f && x_pt_doc <= hi + 0.01f) {
+                        col = c;
+                        break;
+                    }
+                }
+                if (col < 0) continue;
+                const LayoutCell* lc = pt.cellAt(pr.row, col, nullptr, nullptr);
+                if (lc == nullptr) continue;
+                // 嵌在别的表里时取最内层那一张：面积最小的框就是最里面那格。
+                const float area = pt.w * pr.h;
+                if (area < cell_area) {
+                    cell_area = area;
+                    cell_hit = lc;
+                }
+            }
+        }
+    }
+    if (cell_hit != nullptr) {
+        // 这一格的块区间里挑最近的一行：先比页号（同一页优先），再比块轴距离。
+        const int first = cell_hit->first_block;
+        const int last = first + std::max(cell_hit->block_count, 1);
+        int pick_pd = 1 << 20;
+        for (const LineBox& lb : layout_.lines) {
+            if (lb.paragraph < first || lb.paragraph >= last) continue;
+            const int pd = std::abs(lb.page - page);
+            const float d =
+                lb.vertical ? 0.0f
+                            : (local_y < lb.block_lo_pt
+                                   ? lb.block_lo_pt - local_y
+                                   : (local_y > lb.block_hi_pt ? local_y - lb.block_hi_pt : 0.0f));
+            if (pd < pick_pd || (pd == pick_pd && d < best_d - 0.01f)) {
+                pick_pd = pd;
+                best_d = d;
+                best = &lb;
+            }
+        }
+        // 这一格一条行盒都没有（格刚被清空、排版还没跟上）：退回按行盒找，
+        //   宁可落点粗一点，也不要让这一下点空。
+        if (best == nullptr) cell_hit = nullptr;
+    }
     for (const LineBox& lb : layout_.lines) {
+        if (cell_hit != nullptr) break;
         float bp = 0.0f;
         float lo = 0.0f;
         float hi = 0.0f;

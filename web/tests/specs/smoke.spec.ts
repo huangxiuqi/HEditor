@@ -154,6 +154,32 @@ test.describe('工具栏', () => {
       btn('field').click();
       out.field = await until(() => e.form().length === 1);
 
+      // 视图：编辑模式三档。只读那一档要真的拒绝编辑 —— 下拉框换成"只读"、读回也是
+      //   只读、而敲字不生效，三件事都算，才说明这一档接到引擎上了。
+      await reset();
+      pick('mode', 'readOnly');
+      out.modeReadOnly = await until(() => e.config().mode === 'readOnly');
+      const roText = e.text();
+      await e.type('该被拒绝');
+      await e.flush();
+      out.modeRejects = e.text() === roText;
+      pick('mode', 'document');
+      out.modeBack = await until(() => e.config().mode === 'document');
+
+      // 左下角的页数与字数：改一次内容就得跟着动，而且页数要与几何一致。
+      await reset();
+      const counts = () => ({
+        pages: document.querySelector('[data-count="pages"]').textContent,
+        words: document.querySelector('[data-count="words"]').textContent,
+      });
+      const c0 = counts();
+      await e.setCaret({ para: 0, offset: 0 });
+      await e.type('三个字');
+      await e.flush();
+      const c1 = counts();
+      out.countsGrow = parseInt(c1.words, 10) === parseInt(c0.words, 10) + 3;
+      out.pagesMatch = c1.pages === e.geometry().pages + ' 页';
+
       // 视图：分页 / 连页 / 三档缩放。
       btn('paged').click();
       out.paged = await until(() => e.config().pageMode === 'paged');
@@ -178,7 +204,8 @@ test.describe('工具栏', () => {
     const want = [
       'paste', 'copy', 'cut', 'font', 'size', 'grow', 'shrink', 'bold', 'italic', 'underline',
       'color', 'line', 'after', 'indent', 'outdent', 'undo', 'redo', 'all', 'load', 'save',
-      'type', 'tablePanel', 'table', 'field', 'paged', 'continuous', 'zoomIn', 'zoomOut',
+      'type', 'tablePanel', 'table', 'field', 'modeReadOnly', 'modeRejects', 'modeBack',
+      'countsGrow', 'pagesMatch', 'paged', 'continuous', 'zoomIn', 'zoomOut',
       'zoomReset', 'alive',
     ];
     for (const k of want) check(`★ ${k} 点下去有反应`, r[k] === true, String(r[k]));

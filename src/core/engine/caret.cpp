@@ -735,6 +735,25 @@ std::vector<PageRect> CaretResolver::selectionRectsIn(int first_page, int count)
     //   按 sel_.empty() 一律返回空，空格就永远没有一像素高亮。
     const bool cell_sel_span = sel_cell_ && !cell_blocks_.empty();
     if (sel_.empty() && !cell_sel_span) return out;
+    // 整格反白按表的几何铺，不按行盒：跨页切开的一行里，内容已经在上一页结束的格
+    //   在续排片段上没有行盒 —— 按行盒铺，那半截格子就一条高亮都没有。
+    //   一格在每一页上的那一段各出一条矩形，于是跨页的格是两条、单页的格仍是一条。
+    if (sel_cell_) {
+        const int page_lo = (count > 0) ? first_page : 0;
+        const int page_hi =
+            (count > 0) ? (first_page + count - 1) : (view_.layout->stats.page_count - 1);
+        for (const PlacedTable& pt : view_.layout->placed_tables) {
+            for (const LayoutCell& lc : pt.cells) {
+                if (!cellCoversPara(lc.first_block)) continue;
+                // 表格排版只按横排算（列边界是一条条 x）：竖排的格不在这里换轴。
+                for (int pg = page_lo; pg <= page_hi; ++pg) {
+                    Rect r;
+                    if (!pt.cellBoxOnPage(lc, pg, &r.x, &r.y, &r.w, &r.h)) continue;
+                    out.push_back(PageRect{pg, r});
+                }
+            }
+        }
+    }
 
     // 渲染读的是"吸附之后"的那一对（整格时它是格边界），与编辑同源 ——
     //   两份读数各算一次，就会出现"反白到这里、删到那里"。
@@ -770,13 +789,6 @@ std::vector<PageRect> CaretResolver::selectionRectsIn(int first_page, int count)
     const int n_lines = static_cast<int>(view_.layout->lines.size());
     // 选区的粒度（见 selectionIsCell）：整格 / 文字。整格只在一次"点格内边距带"之后成立。
     const bool cell_sel = sel_cell_;
-    // 整格的去重账：同一格在同一页有几个行盒就带几份相同的格范围，只画第一份。
-    bool drawn_cell = false;
-    int last_cell_page = -1;
-    float last_cell_lo = 0.0f;
-    float last_cell_hi = 0.0f;
-    float last_cell_top = 0.0f;
-    float last_cell_bottom = 0.0f;
     int k_begin = 0;
     int k_end = n_lines - 1;  // 闭区间
     if (count > 0 && n_lines > 0) {
@@ -807,40 +819,9 @@ std::vector<PageRect> CaretResolver::selectionRectsIn(int first_page, int count)
         //   文字选区不走这条判断（它本来就按行求交）。
         if (cell_sel && !cellCoversPara(para)) continue;
 
-        // 整格反白与文字选区在这里分开，不靠几何猜。整格这一支不读流区间：
-        //   空格的内容长度是 0，按流区间求交永远得到零宽，空格就一条高亮都画不出来。
-        //   它读的是格的几何（外框 + 整行的块轴范围），与格里有几个字无关。
-        const bool cell_row =
-            cell_sel && lb.cell_box_hi_pt > lb.cell_box_lo_pt && lb.cell_bottom_pt > lb.cell_top_pt;
-        Rect r;
-        if (cell_row) {
-            // 一个格的每一行盒都带着同一份格范围 —— 只画一次，否则半透明的选区叠几层，
-            //   格内行数越多颜色越深。
-            if (drawn_cell && lb.page == last_cell_page && lb.cell_box_lo_pt == last_cell_lo &&
-                lb.cell_box_hi_pt == last_cell_hi && lb.cell_top_pt == last_cell_top &&
-                lb.cell_bottom_pt == last_cell_bottom)
-                continue;
-            drawn_cell = true;
-            last_cell_page = lb.page;
-            last_cell_lo = lb.cell_box_lo_pt;
-            last_cell_hi = lb.cell_box_hi_pt;
-            last_cell_top = lb.cell_top_pt;
-            last_cell_bottom = lb.cell_bottom_pt;
-            // 反白用的是格的外框：内容区两侧各有一层内边距，按内容区铺就是"左右还留条缝"。
-            if (!lb.vertical) {
-                r.x = lb.cell_box_lo_pt;
-                r.w = lb.cell_box_hi_pt - lb.cell_box_lo_pt;
-                r.y = lb.cell_top_pt;
-                r.h = lb.cell_bottom_pt - lb.cell_top_pt;
-            } else {
-                r.x = lb.cell_top_pt;
-                r.w = lb.cell_bottom_pt - lb.cell_top_pt;
-                r.y = lb.cell_box_lo_pt;
-                r.h = lb.cell_box_hi_pt - lb.cell_box_lo_pt;
-            }
-            out.push_back(PageRect{lb.page, r});
-            continue;
-        }
+        // 表格里的行归上面那一趟管（整格按表的几何铺）。这一趟只剩正文的行：
+        //   Ctrl+A 时正文照样要按流区间高亮，不能因为粒度是"整格"就整篇不画。
+        if (cell_sel && lb.cell_box_hi_pt > lb.cell_box_lo_pt) continue;
 
         // 文字选区：本段落在选区里的那一段（整段被选中时就是 [0, 本段占的位数]）。
         const FlowPos base = (*view_.block_flow)[static_cast<size_t>(para)];
@@ -900,6 +881,7 @@ std::vector<PageRect> CaretResolver::selectionRectsIn(int first_page, int count)
         //   这一行的字号（与那枚标记本身的大小同一档）。
         float width = std::abs(a1 - a0);
         if (l_lo == l_hi) width = lb.size_pt * 0.35f;
+        Rect r;
         if (!lb.vertical) {
             r.x = std::min(a0, a1);
             r.w = width;

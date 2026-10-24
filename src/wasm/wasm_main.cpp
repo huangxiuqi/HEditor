@@ -1286,7 +1286,7 @@ void loadTextDocument(const std::string& text, int repeat) {
         only.font_index = g_cjk_font;
         only.size_pt = 12.0f;
         only.wm = WritingMode::HorizontalTB();
-        only.line_factor = 1.05f;
+        only.line_factor = 1.0f;
         only.language = "zh";
         only.color = Color::rgb(24, 24, 24);
         only.setText(std::string());
@@ -1314,7 +1314,7 @@ void loadTextDocument(const std::string& text, int repeat) {
             b.font_index = g_cjk_font;
             b.size_pt = 12.0f;
             b.wm = WritingMode::HorizontalTB();
-            b.line_factor = 1.05f;
+            b.line_factor = 1.0f;
             b.language = "zh";
             b.color = Color::rgb(24, 24, 24);
             b.setText(t);

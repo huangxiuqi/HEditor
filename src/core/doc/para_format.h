@@ -26,7 +26,7 @@ namespace heditor {
 /**
  * 段落格式。只对段落结束标记（ParagraphMark）有意义，其余种类读它没有定义。
  *
- * 默认值取自 BlockSpec 的默认值（12 磅字号、1.6 倍行距、10 磅段后距）：于是"末尾还没有
+ * 默认值取自 BlockSpec 的默认值（12 磅字号、单倍行距、6 磅段后距）：于是"末尾还没有
  * 结束标记的那一段"直接用默认格式编译，不需要再引一层文档默认格式（1.6 的样式表才需要）。
  */
 struct ParaFormat {
@@ -55,9 +55,9 @@ struct ParaFormat {
     float line_factor = 1.0f;
 
     /**
-     * 段后距。绝对长度（EMU），默认 10 磅。
+     * 段后距。绝对长度（EMU），默认 6 磅（与 BlockSpec 同一档，比 10 磅紧凑一档）。
      */
-    Length space_after = Length::abs(ptToEmu(10.0));
+    Length space_after = Length::abs(ptToEmu(6.0));
 
     /**
      * 这一段之前强制分页。

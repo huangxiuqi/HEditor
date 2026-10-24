@@ -948,9 +948,10 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
         pieces.push_back(first);
         starts.push_back(0.0f);
 
+        bool retagged = false;
         for (Item& it : items) {
             // 这一行在本片放不下：另起一片，从页面的内容区上沿开始（续排片段的内容
-            //   仍要让出一层内边距，否则第一行的字会压在补画的那条格线上）。
+            //   仍要让出一层内边距，否则第一行的字要压在补画的那条格线上）。
             if (allow_split && it.off > start + 0.01f &&
                 content_top + (it.off - start) + it.h > page_bottom + 0.01f && pieces.size() < 64) {
                 ++page;
@@ -970,6 +971,7 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
             lb.block_lo_pt += it.dy;
             lb.block_hi_pt += it.dy;
             lb.bracket_axis_pt += it.dy;
+            if (lb.page != page) retagged = true;
             lb.page = page;
         }
         // 片段的上下沿：首片从行顶起，续片从页面内容区上沿起；最后一片到行底，
@@ -983,28 +985,49 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
         // 字形跟着它那一行一起挪：行号（不是下标）是字形的归属键，行号在增量续排之后
         //   不一定等于行盒的下标。只在这一行真的被切过时才走一遍 —— 没切时每个 dy 都是 0，
         //   而这张表每出一行都要过一遍字形，大表上的代价是 O(行数 x 字形数)。
-        bool moved = false;
+        bool moved = retagged;
         for (const Item& it : items) {
             if (it.dy != 0.0f) moved = true;
         }
         if (moved) {
-            std::vector<std::pair<int, float>> shifts;
+            /**
+             * 一条行盒的位移：字形的归属键是行号，页号也要跟着走。
+             */
+            struct Shift {
+                /**
+                 * 行号（LineBox::line）。
+                 */
+                int line = 0;
+
+                /**
+                 * 页内 y 的位移（磅）。
+                 */
+                float dy = 0.0f;
+
+                /**
+                 * 这一行落到第几页。
+                 */
+                int page = 0;
+            };
+            std::vector<Shift> shifts;
             shifts.reserve(items.size());
             for (const Item& it : items) {
-                shifts.push_back({res.lines[it.index].line, it.dy});
+                const LineBox& lb = res.lines[it.index];
+                shifts.push_back(Shift{lb.line, it.dy, lb.page});
             }
             std::sort(shifts.begin(), shifts.end(),
-                      [](const std::pair<int, float>& a, const std::pair<int, float>& b) {
-                          return a.first < b.first;
-                      });
+                      [](const Shift& a, const Shift& b) { return a.line < b.line; });
             size_t si = 0;
             // 本行的字形是 glyph_begin 之后那一段（格按流顺序排，前面几行的字形不在这里）。
+            //   页号必须一起改：字形是按页号区间画的，页号留在旧页 = 画到上一页去
+            //   （重叠在别的字上），新页上则一个字都没有 —— 而两份自审都是"同一份错"。
             for (size_t gi = f.glyph_begin; gi < res.glyphs.size(); ++gi) {
                 PlacedGlyph& g = res.glyphs[gi];
-                if (g.line < shifts.front().first) continue;
-                while (si + 1 < shifts.size() && shifts[si + 1].first <= g.line) ++si;
-                if (shifts[si].first != g.line) continue;
-                g.y_pt += shifts[si].second;
+                if (g.line < shifts.front().line) continue;
+                while (si + 1 < shifts.size() && shifts[si + 1].line <= g.line) ++si;
+                if (shifts[si].line != g.line) continue;
+                g.y_pt += shifts[si].dy;
+                g.page = shifts[si].page;
             }
         }
         return pieces;
@@ -1069,11 +1092,13 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
         // 连页下行不拆：条带不是页，切开它会让表格出现分页模式才有的断口。
         std::vector<RowPiece> pieces =
             cont ? sliceRowByBand(top, row_h) : sliceRowByPage(f, top, row_h, allow_split);
-        const int last_page = pieces.back().page;
-        const float last_bottom = pieces.back().box_bottom;
-        page_index = last_page;
-        f.row_top = last_bottom;
-        cursor_y = last_bottom;
+        page_index = pieces.back().page;
+        // 下一行的起点。分页下行的进给是"最后一片的页内下沿"，连页下是"块轴上的
+        //   绝对下沿"—— 两者不能混：条带切片给的是页内坐标，拿它当块轴位置，第二行起
+        //   整张表就会塌到第一条带的顶上（表看上去飞走了）。
+        const float next_top = cont ? (top + row_h) : pieces.back().box_bottom;
+        f.row_top = next_top;
+        cursor_y = next_top;
         // 记录这一行的绘制几何：一片一条。切出来的那两条边记 cont_top / cont_bottom，
         //   绘制据此决定"这一刀要不要画线"（分页要画、连页的条带切口不画）。
         {
@@ -1823,6 +1848,68 @@ bool FormatRun::sameFormat(const FormatRun& o) const {
            italic == o.italic && underline == o.underline && color == o.color &&
            BlockSpec::sameLanguage(language, o.language) &&
            fallback_font_indices == o.fallback_font_indices;
+}
+
+const LayoutCell* PlacedTable::cellAt(int row, int col, int* col_lo, int* col_hi) const {
+    if (col < 0 || col >= cols) return nullptr;
+    int grid = 0;
+    int cur_row = -1;
+    for (const LayoutCell& c : cells) {
+        // 列号按"同一行的格依次累加跨度"得到的，换行就归零。它与排版进格时的累加
+        // 是同一套（见 layout.cpp 的 openCell）：两处口径分叉会让命中落在隔壁列上。
+        if (c.row != cur_row) {
+            cur_row = c.row;
+            grid = 0;
+        }
+        const int lo = grid;
+        grid += std::max(c.col_span, 1);
+        if (col < lo || col >= grid) continue;
+        // 跨行的格：它属于起点那一行，但覆盖到的每一行都该命中它 —— 否则合并格的下半截
+        // 点不中，而那里并没有别的格可以接。
+        if (row < c.row || row >= c.row + std::max(c.row_span, 1)) continue;
+        if (col_lo) *col_lo = lo;
+        if (col_hi) *col_hi = grid;
+        return &c;
+    }
+    return nullptr;
+}
+
+bool PlacedTable::cellBoxOnPage(const LayoutCell& cell, int page, float* x, float* y, float* w,
+                                float* h) const {
+    // 列号要在"这一格所在的那一行"里累加跨度才得到；格号相同但行不同的格是另一个格。
+    int grid = 0;
+    int col_lo = -1;
+    for (const LayoutCell& c : cells) {
+        if (c.row != cell.row) continue;
+        if (c.cell == cell.cell) {
+            col_lo = grid;
+            break;
+        }
+        grid += std::max(c.col_span, 1);
+    }
+    if (col_lo < 0) return false;
+    const int col_hi = col_lo + std::max(cell.col_span, 1);
+    if (col_hi >= static_cast<int>(col_x.size())) return false;
+    float top = 0.0f;
+    float bottom = 0.0f;
+    bool seen = false;
+    for (const PlacedRow& pr : placed) {
+        if (pr.row != cell.row || pr.page != page) continue;
+        if (!seen) {
+            top = pr.y;
+            bottom = pr.y + pr.h;
+            seen = true;
+        } else {
+            top = std::min(top, pr.y);
+            bottom = std::max(bottom, pr.y + pr.h);
+        }
+    }
+    if (!seen) return false;
+    if (x) *x = this->x + col_x[static_cast<size_t>(col_lo)];
+    if (w) *w = col_x[static_cast<size_t>(col_hi)] - col_x[static_cast<size_t>(col_lo)];
+    if (y) *y = top;
+    if (h) *h = bottom - top;
+    return true;
 }
 
 }  // namespace heditor

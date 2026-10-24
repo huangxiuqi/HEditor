@@ -215,6 +215,13 @@ export interface Chrome {
    *   之后自己叫一声 —— 让这里发查询的话，一次光标移动会变成七八个来回。
    */
   refresh(): void;
+
+  /**
+   * 写左下角的页数与字数。
+   * @param pages 总页数
+   * @param words 总字数（字符数，不计空白）
+   */
+  setCounts(pages: number, words: number): void;
 }
 
 /**

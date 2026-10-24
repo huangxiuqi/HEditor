@@ -108,6 +108,10 @@ void EditorEngine::lineBand(int k, float* lo, float* hi) const {
 void EditorEngine::snapshotLineGeometry() {
     line_fp_prev_ = line_fp_new_;
     line_fp_prev_count_ = static_cast<int>(line_fp_new_.size());
+    // 表格片段摘要与行指纹在同一处快照：computeBand 拿两边的新旧值比，
+    //   两者错开一轮时，切过页的那一页会被判成"只动了一行"。
+    table_fp_prev_ = table_fp_new_;
+    table_fp_prev_count_ = static_cast<int>(table_fp_new_.size());
     line_lo_prev_.clear();
     line_hi_prev_.clear();
     const int n = static_cast<int>(layout_.lines.size());
@@ -363,7 +367,11 @@ void EditorEngine::rasterIntoBitmap(Bitmap& target, int page_index, const float*
             const PlacedGlyph& pg = layout_.glyphs[static_cast<size_t>(k)];
             if (!pg.font) continue;
             // 接缝那一趟只取越过带底的字形；其余情况取整页。
-            if (spill_only && !(pg.y_pt > slab_pt - 1.0f)) continue;
+            //   判据用"墨迹可能触到带底"，不是"基线越过带底"：基线上方还有整个字身，
+            //   基线在带底之上一点点的字，下半截照样会越过接缝 —— 那一截只由这一趟画，
+            //   漏掉就是接缝处少一行字。字形的墨迹不会超出以基线为中心的一个字身，
+            //   所以按字身外扩是它的上界（多取的几个由位图自己裁掉）。
+            if (spill_only && !(pg.y_pt + pg.size_pt > slab_pt - 1.0f)) continue;
             // 画带时按字形的纵向位置筛：行盒的块轴范围就是它的 ascent/descent，
             //   所以"落在带内"就是"属于这条带"。带向外扩了 1 像素，相邻带在中线相接。
             //   接缝那一趟要按平移之后的坐标筛（它画在本带的顶部）。
@@ -702,6 +710,12 @@ void EditorEngine::presentInternal(int first_page, int count) {
         caret_.linesOnPage(page, &la, &lb);
         for (int k = la; k <= lb; ++k) {
             if (layout_.lines[static_cast<size_t>(k)].vertical) return 0;
+        }
+        // 这一页的格线换了形状就整页重画：行带只盖住文字那一条，而页底的切口边
+        //   （从"行底"变成"页底"、或反过来）落在带外，留着就是一条旧边框。
+        if (page < table_fp_prev_count_ && page < static_cast<int>(table_fp_new_.size()) &&
+            table_fp_new_[static_cast<size_t>(page)] != table_fp_prev_[static_cast<size_t>(page)]) {
+            return 0;
         }
         int d0 = -1;
         int d1 = -1;

@@ -141,6 +141,21 @@ void EditorEngine::computePageFingerprints(int dirty_lo, int dirty_hi) {
     //     切模式会重编译 + 整篇重排，块流本身就可能变。
     //   把这些混进指纹只会无谓地重画所有页。
 
+    // 表格片段也进页指纹。
+    //
+    //   格线与切出来的那两条边是"片段几何"画出来的，字形与行盒都不带它们：
+    //   行片段的下沿从行底挪到页底（这条行跨页了）时，这一页可能一个字形都不变，
+    //   页被判成新鲜，边框永远停在旧位置。摘要按页算，没表的页等于 kFnvBasis。
+    if (!partial || table_fp_new_.size() < static_cast<size_t>(n)) {
+        table_fp_new_.assign(static_cast<size_t>(n), kFnvBasis);
+    }
+    for (int p = dirty_lo; p <= dirty_hi && p < n; ++p) {
+        if (p < 0) continue;
+        const uint64_t d = tablePieceDigest(p);
+        table_fp_new_[static_cast<size_t>(p)] = d;
+        page_fp_new_[static_cast<size_t>(p)] = fnvMix(page_fp_new_[static_cast<size_t>(p)], d);
+    }
+
     computeLineFingerprints(dirty_lo, dirty_hi, !partial);
 
     // 行结构也进页指纹。
@@ -162,6 +177,40 @@ void EditorEngine::computePageFingerprints(int dirty_lo, int dirty_hi) {
                 fnvMix(page_fp_new_[static_cast<size_t>(p)], line_fp_new_[li]);
         }
     }
+}
+
+/**
+ * 一页上的表格片段摘要：表的位置、列边界，加上这一页各片段的上下沿与切口标记。
+ *
+ * 绘制读的就是这几个数（见 engine_paint.cpp 的 emitTables），所以它是"这一页的格线
+ * 长什么样"的最小充分输入。表的位置与列边界对每一页都要混：列宽变了而片段没变时，
+ * 竖线也会挪。
+ */
+uint64_t EditorEngine::tablePieceDigest(int page) const {
+    uint64_t h = kFnvBasis;
+    for (const PlacedTable& pt : layout_.placed_tables) {
+        bool on_page = false;
+        for (const PlacedRow& pr : pt.placed) {
+            if (pr.page == page) {
+                on_page = true;
+                break;
+            }
+        }
+        if (!on_page) continue;
+        h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(quantPt(pt.x))));
+        h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(quantPt(pt.w))));
+        for (float cx : pt.col_x) {
+            h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(quantPt(cx))));
+        }
+        for (const PlacedRow& pr : pt.placed) {
+            if (pr.page != page) continue;
+            h = fnvMix(h, static_cast<uint64_t>(pr.row));
+            h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(quantPt(pr.y))));
+            h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(quantPt(pr.h))));
+            h = fnvMix(h, (pr.cont_top ? 1ULL : 0ULL) | (pr.cont_bottom ? 2ULL : 0ULL));
+        }
+    }
+    return h;
 }
 
 /**

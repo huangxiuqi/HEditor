@@ -201,6 +201,18 @@ body {
   color: var(--dim);
 }
 
+/* 左下角常驻的两个数：页数与字数。它们不参与省略号的收缩（数被截断没有意义）。 */
+.heditor-status__counts {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.heditor-status__count { white-space: nowrap; }
+
 .heditor-status__text {
   flex: 1;
   min-width: 0;

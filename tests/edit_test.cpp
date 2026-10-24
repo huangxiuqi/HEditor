@@ -9860,10 +9860,11 @@ int main() {
 
     if (runSection(53)) std::printf("\n[53] 排版摘要：重构锁（只改结构时这份摘要必须逐位相同）\n");
     if (runSection(53)) {
-        // 2026-10-24 重取 A/B/C（→ 0xb27e1602e6412913 / 0xe4def2d955859da1 /
-        //   0xb84b78929b637322）：行距的基准从字号换成单倍行高（字体的 ascent + descent），
-        //   同一个倍数（这里的 1.7 / 1.75 / 1.8）因此高了约 45%，页数跟着变。
-        //   行数与字形数一字未变（180/3231 与 157/927）—— 断行只跟字号与格宽有关，与行高无关。
+        // 2026-10-24 重取 A/B/C（→ 0xb27e1602e6412913 / 0xd2495b3ac02349bd /
+        //   0xc3eab2f0dd425de4）：两处排版行为有意变了。
+        //   一、行距的基准从字号换成单倍行高（ascent + descent），同一个倍数因此高了约
+        //   45%，页数跟着变。二、默认段后距 10 磅改成 6 磅（B / C 没有显式设这个字段）。
+        //   行数与字形数一字未变（180/3231 与 157/927）—— 断行只跟字号与格宽有关。
         // 用例 A：六十段横排正文，混排字号 —— 覆盖断行、行距、分页与段后距。
         //   段落够多，必然跨页；混排字号让每行的高度不同，翻页判据不能再用"上一行高度"。
         {
@@ -9956,7 +9957,7 @@ int main() {
             //   改了两处排版口径，两处都是有意的：单元格上下内边距从 0 改成 2 磅（行高
             //   跟着长），以及跨页切行改成按行盒自己的纵向位置分页 —— 同行其它格的行盒
             //   不再被后缀搬走，于是这张"一行高过整页"的表从 15 页变成 13 页。
-            expectTrue(db.hash == 0x6e4147ed798fdb6cull, "表格跨页的摘要未变");
+            expectTrue(db.hash == 0xd2495b3ac02349bdull, "表格跨页的摘要未变");
             expectTrue(eb.layout().stats.page_count >= 3 && !eb.layout().placed_tables.empty() &&
                            eb.layout().placed_tables[0].placed.size() >= 2,
                        "用例 B 确实把一行切到了两页上");
@@ -10010,7 +10011,7 @@ int main() {
             std::printf("     摘要 C = 0x%016llx（%zu 行 / %zu 字形 / %d 页 / 侧倒 %d 列）\n",
                         static_cast<unsigned long long>(dc.hash), ec.layout().lines.size(),
                         ec.layout().glyphs.size(), ec.layout().stats.page_count, sideways_cols);
-            expectTrue(dc.hash == 0xb84b78929b637322ull, "竖排的摘要未变");
+            expectTrue(dc.hash == 0xc3eab2f0dd425de4ull, "竖排的摘要未变");
             expectTrue(ec.layout().stats.page_count >= 2 && sideways_cols > 0,
                        "用例 C 确实跨了多页，且侧倒那一支走到了");
         }
@@ -12357,6 +12358,278 @@ int main() {
                        round.find("\"i\":true") != std::string::npos,
                    "读回之后空单元格仍是粗斜体（实际 " + round + "）");
         expectTrue(e.auditCompile() == 0 && e.auditLayout() == 0, "改格式之后两份自审为 0");
+    }
+
+    if (runSection(72)) std::printf("\n[72] 表格跨页：续排片段的几何、命中、选中与自审\n");
+    if (runSection(72)) {
+        // 跨页切开的一行，续排片段上有些格的内容已经在上一页结束。这些格在这一页
+        //   没有行盒 —— 命中、整格反白与字形归属都不能按行盒推，否则会出这三类错：
+        //   点空格子光标跳到有字的格；空格子只在上一页有反白；切片那一行的字画在上一页。
+        EngineConfig c72;
+        c72.zoom = 1.0f;
+        c72.page.width_pt = 400.0f;
+        c72.page.height_pt = 300.0f;
+        c72.page.margin_pt = 20.0f;
+
+        EditorEngine e;
+        expectTrue(e.init({cjkPath, mnPath, latinPath}), "引擎初始化（跨页表格）");
+        e.setConfig(c72);
+        e.setEditMode(EditMode::Document);
+        {
+            // 表格之前先有一段正文：切片之后"第二页从内容区上沿起"才有对照物。
+            NodeTree t;
+            const NodeId s = t.firstSectionId();
+            t.setText(t.appendChild(s, NodeKind::TextRun), utf8ToCodepoints("首段"));
+            t.appendChild(s, NodeKind::ParagraphMark);
+            e.setDocument(t, StyleSheet{});
+        }
+        e.setCaret(0, 2);
+        expectTrue(e.insertTableAndRender(3, 3, false), "插一张 3x3 表");
+        // 第一格撑满到跨页（每段一行，三十四段远超一页的内容高度，切出两片以上）。
+        for (int i = 0; i < 34; ++i) {
+            e.typeTextAndRender("第一格第" + std::to_string(i) + "行");
+            e.splitParagraphAndRender();
+        }
+        e.relayout();
+        const LayoutResult& lay = e.layout();
+        const PlacedTable& pt = lay.placed_tables.at(0);
+        expectTrue(pt.placed.size() >= 2,
+                   "第一行被切成两片以上（实际 " + std::to_string(pt.placed.size()) + " 片）");
+        expectTrue(pt.placed.front().page == 0 && !pt.placed.front().cont_top &&
+                       pt.placed.front().cont_bottom,
+                   "首片在第一页、下边是切出来的");
+        expectTrue(pt.placed[1].page == 1 && pt.placed[1].cont_top,
+                   "第二片在第二页、上边是切出来的");
+        expectTrue(e.auditLayout() == 0, "跨页切片之后增量排版 == 全量");
+
+        // 前提：续排片段上，另两格确实没有行盒。没有这一条，后面的判据可能是空转
+        //   （比如它本来就还有行盒，那"点得到"根本不需要新逻辑）。
+        // 段号从末尾数：最后六段是行 1、行 2 的各三格，它们之前是行 0 的两个空格。
+        const int n_blocks = static_cast<int>(e.blocks().size());
+        const int empty_col1 = n_blocks - 8;
+        const int empty_col2 = n_blocks - 7;
+        expectTrue(e.blocks()[empty_col1].cp_text.empty() && e.blocks()[empty_col2].cp_text.empty(),
+                   "前提：另两格是空段");
+        bool col1_on_page1 = false;
+        for (const LineBox& lb : lay.lines) {
+            if (lb.paragraph == empty_col1 && lb.page == 1) col1_on_page1 = true;
+        }
+        expectTrue(!col1_on_page1, "前提：续排片段上空格的段落没有行盒（它的行盒在第一页）");
+
+        // 命中：每一页的续排片段上，点第 2、3 列的空白区都落在各自那一格。
+        //   坐标从片段自己取（页内坐标）：取片段的中段与列心，不写死页码。
+        int pieces_checked = 0;
+        int hits_ok = 0;
+        int own_ok = 0;
+        for (const PlacedRow& pr : pt.placed) {
+            if (pr.row != 0 || pr.page == 0) continue;
+            ++pieces_checked;
+            const float local_y = pr.y + pr.h * 0.5f;
+            const float y_doc = static_cast<float>(pr.page) * 320.0f + local_y;
+            for (int col = 1; col <= 2; ++col) {
+                const float x = pt.x + 0.5f * (pt.col_x[static_cast<size_t>(col)] +
+                                               pt.col_x[static_cast<size_t>(col) + 1]);
+                TextPos hit{};
+                const int want = (col == 1) ? empty_col1 : empty_col2;
+                if (e.hitTestPt(x, y_doc, &hit) && hit.para == want) ++hits_ok;
+            }
+            // 反向：同一行里那一格有内容，点在它上面仍落在它自己（不能因为"格框优先"
+            //   把整行都判给第一列）。
+            TextPos own{};
+            if (e.hitTestPt(pt.x + 0.5f * pt.col_x[1], y_doc, &own) && own.para >= 9 &&
+                own.para < empty_col1) {
+                ++own_ok;
+            }
+        }
+        expectTrue(pieces_checked >= 1,
+                   "行 0 在第二页起有续排片段（实际 " + std::to_string(pieces_checked) + " 片）");
+        expectTrue(hits_ok == pieces_checked * 2, "每一页的空格都点得中（" +
+                                                      std::to_string(hits_ok) + "/" +
+                                                      std::to_string(pieces_checked * 2) + "）");
+        expectTrue(own_ok == pieces_checked, "每一页的有字格也点得中（" + std::to_string(own_ok) +
+                                                 "/" + std::to_string(pieces_checked) + "）");
+
+        // 整格反白：选第二页上的空格子，两页各一条，几何与 cellBoxOnPage 一致。
+        {
+            expectTrue(e.selectCellAtPara(empty_col1), "整格选中续排片段上的空格");
+            const std::vector<PageRect> rects = e.selectionRects();
+            expectTrue(rects.size() >= 2,
+                       "空格子的反白铺到每一页（实际 " + std::to_string(rects.size()) + " 条）");
+            const LayoutCell* cell = pt.cellAt(0, 1, nullptr, nullptr);
+            bool shaped = cell != nullptr;
+            if (cell != nullptr) {
+                for (const PageRect& pr : rects) {
+                    float bx = 0.0f;
+                    float by = 0.0f;
+                    float bw = 0.0f;
+                    float bh = 0.0f;
+                    const bool ok = pt.cellBoxOnPage(*cell, pr.page, &bx, &by, &bw, &bh);
+                    shaped = shaped && ok && std::fabs(pr.r_pt.x - bx) < 0.01f &&
+                             std::fabs(pr.r_pt.y - by) < 0.01f &&
+                             std::fabs(pr.r_pt.w - bw) < 0.01f && std::fabs(pr.r_pt.h - bh) < 0.01f;
+                }
+            }
+            expectTrue(shaped, "两条反白都正好是这一格在那一页上的框");
+            bool counted = true;
+            for (size_t i = 0; i < rects.size(); ++i)
+                counted = counted && rects[i].page == static_cast<int>(i);
+            expectTrue(
+                rects.front().page == 0 && counted,
+                "反白按页号从第一页逐页排开（实际 " + std::to_string(rects.size()) + " 条）");
+        }
+
+        // 字形页号必须等于它那一行所在页。行盒挪了页、字形没挪，字就画到上一页去了。
+        auto glyphPageMismatch = [](const LayoutResult& lz) -> int {
+            int bad = 0;
+            for (const PlacedGlyph& g : lz.glyphs) {
+                for (const LineBox& lb : lz.lines) {
+                    if (lb.line != g.line) continue;
+                    if (lb.page != g.page) ++bad;
+                    break;
+                }
+            }
+            return bad;
+        };
+        expectTrue(glyphPageMismatch(lay) == 0, "切片之后每个字形仍跟着它那一行所在页");
+        // 每一片的高加起来等于这一行自己的高：切片不丢内容也不重复。
+        {
+            float sum = 0.0f;
+            for (const PlacedRow& pr : pt.placed) {
+                if (pr.row != 0) continue;
+                sum += pr.h;
+            }
+            float span = 0.0f;
+            for (const LineBox& lb : lay.lines) {
+                if (lb.paragraph >= 1 && lb.paragraph <= 15) {
+                    span = std::max(span, lb.block_hi_pt);
+                }
+            }
+            expectTrue(sum > 0.0f && span > 0.0f && sum >= span, "片段之和覆盖整个多行格");
+        }
+
+        // 跨页之后在后面的行里敲字 + 回车：增量排版与页位图都必须跟得上。
+        {
+            const int last = static_cast<int>(e.blocks().size()) - 1;
+            e.setCaret(last, 0);
+            e.typeTextAndRender("新增");
+            e.splitParagraphAndRender();
+            e.typeTextAndRender("第二行");
+            expectTrue(e.auditLayout() == 0, "跨页之后敲字：增量排版 == 全量");
+            const int np = e.layout().stats.page_count;
+            int diff_sum = 0;
+            for (int pg = 0; pg < np; ++pg) {
+                const std::string j = e.auditPageJson(pg);
+                diff_sum += (j.find("\"diff\":0") != std::string::npos) ? 0 : 1;
+            }
+            if (diff_sum != 0) {
+                for (int pg = 0; pg < np; ++pg) {
+                    std::printf("      page%d %s\n", pg, e.auditPageJson(pg).c_str());
+                }
+            }
+            expectTrue(diff_sum == 0, "跨页之后敲字：每一页的位图都与从零光栅相同");
+            expectTrue(glyphPageMismatch(e.layout()) == 0, "敲字之后字形页号仍然一致");
+            // 交叉判据：字真的在新行上，不是叠在旧行上。
+            const BlockSpec& typed = e.blocks()[static_cast<size_t>(last)];
+            expectTrue(typed.textUtf8() == "新增",
+                       "新敲的字进了原来那一段（实际 " + typed.textUtf8() + "）");
+        }
+
+        // 连页：多行的表逐行下推。切片给的是页内坐标，拿它当块轴位置，第二行起整张表
+        //   会塌到第一条带的顶上 —— 表象是"表格跑到页面外面去了"。
+        {
+            EditorEngine e2;
+            expectTrue(e2.init({cjkPath, mnPath, latinPath}), "引擎初始化（连页多行表）");
+            EngineConfig c2;
+            c2.zoom = 1.0f;
+            c2.page.width_pt = 400.0f;
+            c2.page.height_pt = 300.0f;
+            c2.page.margin_pt = 20.0f;
+            c2.continuous = true;
+            c2.page_gap_pt = 20.0f;
+            e2.setConfig(c2);
+            NodeTree t2;
+            const NodeId s2 = t2.firstSectionId();
+            const NodeId tb = t2.appendChild(s2, NodeKind::Table);
+            for (int r = 0; r < 3; ++r) {
+                const NodeId row = t2.appendChild(tb, NodeKind::TableRow);
+                const NodeId cell = t2.appendChild(row, NodeKind::TableCell);
+                std::string txt;
+                for (int i = 0; i < 40; ++i) txt += "字";
+                t2.setText(t2.appendChild(cell, NodeKind::TextRun), utf8ToCodepoints(txt));
+                t2.appendChild(cell, NodeKind::ParagraphMark);
+            }
+            e2.setDocument(t2, StyleSheet{});
+            e2.relayout();
+            const PlacedTable& pt2 = e2.layout().placed_tables.at(0);
+            // 每行的首片：顶边必须严格递增（行与行不重叠、也不塌回带顶）。
+            std::vector<const PlacedRow*> firsts;
+            for (const PlacedRow& pr : pt2.placed) {
+                if (pr.cont_top) continue;
+                if (!firsts.empty() && firsts.back()->row == pr.row) continue;
+                firsts.push_back(&pr);
+            }
+            expectTrue(firsts.size() == 3,
+                       "三行各有自己的首片（实际 " + std::to_string(firsts.size()) + " 片）");
+            bool growing = firsts.size() == 3;
+            for (size_t i = 1; i < firsts.size() && growing; ++i) {
+                const PlacedRow& a = *firsts[i - 1];
+                const PlacedRow& b = *firsts[i];
+                const float a_bottom = a.y + (a.page - b.page == 0 ? a.h : 0.0f);
+                growing = (a.page < b.page) || (a.page == b.page && b.y >= a_bottom - 0.01f);
+            }
+            expectTrue(growing, "连页下每一行都排在前一行下面（表没有塌回带顶）");
+            expectTrue(e2.auditLayout() == 0, "连页多行表：增量排版 == 全量");
+            // 先画一遍再比：底图自审读的是缓存里的像素，一页都没画过时它是空白。
+            e2.repaint();
+            int page_diffs = 0;
+            for (int pg = 0; pg < e2.layout().stats.page_count; ++pg) {
+                if (e2.auditPageJson(pg).find("\"diff\":0") == std::string::npos) ++page_diffs;
+            }
+            expectTrue(page_diffs == 0, "连页多行表：每一页的位图都与从零光栅相同");
+            expectTrue(e2.auditBaseJson().find("\"diff\":0") != std::string::npos,
+                       "连页多行表：底图自审为 0");
+        }
+
+        // 反向一半：没有跨页的小表里，点格子的空白处仍落在这一格，不会因为"格框优先"
+        //   而把点字上的那一下也判成整格。
+        {
+            EditorEngine e3;
+            expectTrue(e3.init({cjkPath, mnPath, latinPath}), "引擎初始化（小表对照）");
+            e3.setConfig(c72);
+            e3.setEditMode(EditMode::Document);
+            {
+                NodeTree t3;
+                const NodeId s3 = t3.firstSectionId();
+                t3.setText(t3.appendChild(s3, NodeKind::TextRun), utf8ToCodepoints("甲乙"));
+                t3.appendChild(s3, NodeKind::ParagraphMark);
+                e3.setDocument(t3, StyleSheet{});
+            }
+            e3.setCaret(0, 2);
+            expectTrue(e3.insertTableAndRender(2, 2, false), "插一张 2x2 表");
+            // 坐标从行盒取：两列都是空段，格的内框与行顶都在行盒上，比写死一个 y 稳。
+            //   2x2 表占段 1..4：行 0 是 (0,0)=1 与 (0,1)=2。
+            const LineBox* right_cell = nullptr;
+            float row_top = 0.0f;
+            for (const LineBox& lb : e3.layout().lines) {
+                if (lb.paragraph == 2) {
+                    right_cell = &lb;
+                    row_top = lb.cell_top_pt;
+                }
+            }
+            expectTrue(right_cell != nullptr, "前提：第一行第二格有行盒");
+            if (right_cell != nullptr) {
+                const float y = row_top + 3.0f;
+                TextPos hit{};
+                const bool ok = e3.hitTestPt(right_cell->cell_box_lo_pt + 20.0f, y, &hit);
+                expectTrue(ok && hit.para == 2, "点第一行第二格落在它的段（实际 " +
+                                                    std::to_string(ok ? hit.para : -1) + "）");
+                TextPos own{};
+                const bool ok_own = e3.hitTestPt(30.0f, y, &own);
+                expectTrue(ok_own && own.para == 1, "点第一行第一格仍落在它自己那一格（实际 " +
+                                                        std::to_string(ok_own ? own.para : -1) +
+                                                        "）");
+            }
+        }
     }
 
     std::printf("\n──────────────────────────────\n");

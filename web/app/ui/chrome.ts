@@ -108,6 +108,17 @@ export function mountChrome(host: HTMLElement, title: string, tabs: Tab[]): Chro
     },
 
     /**
+     * 写左下角的页数与字数。
+     *
+     * 这两个数由页面算好喂进来：外壳不读文档内容，只负责把它摆到该在的位置。
+     * @param pages 总页数
+     * @param words 总字数
+     */
+    setCounts(pages: number, words: number): void {
+      said.setCounts(pages, words);
+    },
+
+    /**
      * 重读一遍回显。
      */
     refresh(): void {
