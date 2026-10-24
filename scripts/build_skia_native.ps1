@@ -94,36 +94,54 @@ $env:Path    = "$Msvc\bin\Hostx64\x64;$sdkRoot\bin\$($sdkVer.Name)\x64;$env:Path
 # ── 2. gn 参数 ──────────────────────────────────────────────
 # 与 wasm 那份逐条对齐，只有 target 与 /MD 不同。is_official_build=true 会让
 #   third_party 去找系统库，所以下面每条 skia_use_system_* 都显式关掉。
-$argsLine = @(
-    'target_os="win"',
-    'target_cpu="x64"',
-    'is_debug=false',
-    'is_official_build=true',
-    'skia_use_system_zlib=false',
-    'skia_use_system_libpng=false',
-    'skia_use_system_libjpeg_turbo=false',
-    'skia_use_system_libwebp=false',
-    'skia_use_system_freetype2=false',
-    'skia_use_freetype=true',
-    'skia_use_freetype_svg=false',
-    'skia_use_harfbuzz=true',
-    'skia_use_icu=false',
-    'skia_use_expat=false',
-    'skia_use_libpng_decode=false',
-    'skia_use_libjpeg_turbo_decode=false',
-    'skia_use_libwebp_decode=false',
-    'skia_use_libavif=false',
-    'skia_use_dng_sdk=false',
-    'skia_use_piex=false',
-    'skia_use_wuffs=false',
-    'skia_enable_pdf=false',
-    'skia_enable_skottie=false',
-    'skia_enable_svg=false',
-    'skia_enable_ganesh=false',
-    'skia_enable_graphite=false',
-    'skia_use_partition_alloc=false',
-    'extra_cflags=["/MD"]'
-) -join ' '
+#
+# ★ 参数写成 <out>/args.gn，不要拼 "--args=..." 塞在命令行上。这些值必须带引号
+#   （target_os="win"、extra_cflags=["/MD"]），而 PowerShell 把实参递给 native 程序时，
+#   **5.1 不转义内嵌引号**：gn 收到的是 target_os=win / extra_cflags=[/MD]，报
+#   `ERROR at the command-line "--args": Invalid token`。PS 7 的 Windows 参数模式反倒会
+#   保留引号，所以在 7 上试不出来（本机就是这么漏过去的）。写文件这条路过的是 gn 自己的
+#   解析，与 shell 引号规则无关；顺带 args 还留在 out/ 里能直接看（wasm 那份早就是这个写法）。
+$ArgsGn = @'
+target_os = "win"
+target_cpu = "x64"
+is_debug = false
+is_official_build = true
+
+# 外部依赖一律从源码编（is_official_build 默认会去找系统库）
+skia_use_system_zlib = false
+skia_use_system_libpng = false
+skia_use_system_libjpeg_turbo = false
+skia_use_system_libwebp = false
+skia_use_system_freetype2 = false
+
+# 文本：FreeType 后端 + HarfBuzz 整形
+skia_use_freetype = true
+skia_use_freetype_svg = false
+skia_use_harfbuzz = true
+skia_use_icu = false
+skia_use_expat = false
+
+# 编解码：全部关掉（编辑器只要 CPU 光栅 + 文本）
+skia_use_libpng_decode = false
+skia_use_libjpeg_turbo_decode = false
+skia_use_libwebp_decode = false
+skia_use_libavif = false
+skia_use_dng_sdk = false
+skia_use_piex = false
+skia_use_wuffs = false
+
+# 非核心功能：全部关掉
+skia_enable_pdf = false
+skia_enable_skottie = false
+skia_enable_svg = false
+skia_enable_ganesh = false
+skia_enable_graphite = false
+
+skia_use_partition_alloc = false
+
+# 运行库 /MD：cl 不带这一项时默认 /MT，与本工程混链会报 LNK2038
+extra_cflags = [ "/MD" ]
+'@
 
 Push-Location $SkiaSrc
 try {
@@ -132,8 +150,10 @@ try {
         & $Ninja -C $OutDir -t clean | Out-Null
         Remove-Item $OutDir -Recurse -Force -ErrorAction SilentlyContinue
     }
+    New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $OutDir 'args.gn'), $ArgsGn)
     Say "gn gen"
-    & $Gn gen $OutDir "--args=$argsLine"
+    & $Gn gen $OutDir
     if ($LASTEXITCODE -ne 0) { throw "gn gen 失败（exit=$LASTEXITCODE）" }
 
     Say "ninja skia"

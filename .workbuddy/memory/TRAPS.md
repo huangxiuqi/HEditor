@@ -2137,3 +2137,14 @@
       ★ 纪律：核对**副作用**（文件、目录、产物）只用 `*> file.log` 再 `Get-Content`，
       不许在管道上挂 `Select-Object -First` / `head` 之类的提前收工装置；
       `2>&1 |` 尤其危险（它把错误记录也接进管道，更容易先到限额）。
+
+218. **PS 7 上全绿的脚本，用户用 `powershell`（5.1）跑会炸**（2026-10-25）。
+      `build_skia_native.ps1` 原先把 gn 参数拼成 `"--args=target_os="win" ..."` 递给 gn：
+      本机的 PowerShell 工具是 7.6（`$PSNativeCommandArgumentPassing = 'Windows'`），内嵌
+      引号会被正确转义，gn 正常；用户那边 `powershell -File` 是 5.1，**不转义内嵌引号**，
+      gn 收到 `target_os=win` / `extra_cflags=[/MD]`，`ERROR at the command-line "--args":
+      Invalid token` 直接退出 —— 两台机器同一份脚本，一边过一边不过。
+      修法：参数写成 `<out>/args.gn`、`gn gen <out>` 不带 `--args`（wasm 那份一直这么写）。
+      ★ 纪律：凡是**要交给用户用 `powershell -File` 跑**的入口，自测必须在 5.1 下再跑一遍
+      （`powershell -ExecutionPolicy Bypass -File ...`）；"我这台 7 上过了"不算数。
+      ★ 同族：第 19 条（码页）、第 43 条（MSVC 环境）—— 坑都在"命令/环境怎么递到子进程"。
