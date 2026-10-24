@@ -25,7 +25,11 @@ web/types/wasm.gen.d.ts
 # ─────────────────────────────────────────────────────────────
 # .toolchain/ 里有 emsdk（含 LLVM/node/python）、Skia 源码与 gn/ninja。
 # ★ Skia 源码约 79.9 MB，emsdk 更大 —— 重建命令：scripts/build_skia_wasm.ps1
-.toolchain/
+.toolchain/*
+!.toolchain/gn
+!.toolchain/gn/out
+!.toolchain/gn/out/gn.exe
+!.toolchain/gn/gn.zip
 
 # ─────────────────────────────────────────────────────────────
 #  第三方源码
@@ -85,7 +89,6 @@ compile_commands.json
 __pycache__/
 *.pyc
 node_modules/
-.workbuddy
 
 # ─────────────────────────────────────────────────────────────
 #  ★ 下面这些是**要入库**的 —— 列在这里是为了防止将来顺手加规则把它们排掉：

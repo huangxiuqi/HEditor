@@ -80,7 +80,7 @@ function Say([string]$m) { Write-Host "[skia] $m" }
 
 # ── 0. 工具链体检 ───────────────────────────────────────────
 foreach ($p in @($Emsdk, $Gn, $Ninja)) {
-    if (-not (Test-Path $p)) { throw "缺少工具链：$p（gn / ninja / emsdk 需要先就位）" }
+    if (-not (Test-Path $p)) { throw "缺少工具链：$p（先跑 scripts\toolchain_init.ps1）" }
 }
 
 # ── 1. Skia 源码（版本钉在 scripts/skia_rev.ps1）──────────────

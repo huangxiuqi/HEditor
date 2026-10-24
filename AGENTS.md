@@ -120,6 +120,9 @@ function blitFrame(px, w) {}
   就改那三个常量、重取、再把两套库与全部断言重跑一遍。不要绕过它手工换一棵树 ——
   native 与 wasm 的库必须出自同一棵树，否则宏与实现会悄悄分叉且不报错。
 - 预设写在 `CMakePresets.json`：`native` / `native-debug` / `wasm` / `wasm-debug`。
+  两套都要 `.toolchain` 下的工具链（emsdk / gn / ninja），换机器先跑
+  `powershell -ExecutionPolicy Bypass -File scripts\toolchain_init.ps1`：ninja 与 emsdk
+  由它下载并校验，gn 只校验版本（那一份没有可下载的制品，见 `docs/依赖与工具链管理.md` 5.2）。
   `native` 需要先有 MSVC 工具链环境与 x64 版 Skia 静态库
   （`scripts\build_skia_native.ps1`，产物 `.toolchain/skia/.../out/win-x64/skia.lib`）。
   本机 `vcvars64.bat` 跑不起来（它内部调 `reg.exe`，被安全策略拦），所以那份环境
