@@ -873,7 +873,7 @@ export interface ParaFormatPatch {
   size?: number;
 
   /**
-   * 行距倍数（行高 = 字号 x 倍数）。
+   * 行距倍数（行高 = 单倍行高 × 倍数）。单倍行高是字体的 ascent + descent，1.0 即 Word 的单倍行距。
    */
   lineFactor?: number;
 

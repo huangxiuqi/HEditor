@@ -316,10 +316,19 @@ enum class RowHeightRule : uint8_t { Auto, AtLeast, Exact };
 enum class BoxVAlign : uint8_t { Top, Center, Bottom };
 
 /**
- * 单元格内边距（四边相同）。它是引擎配置常数，不来自样式表 —— 等 TableStyle 落地再接。
- * 排版按它算格内可用宽度与行高，绘制按它画内容框；两处共用这一个数，各写一遍必然分叉。
+ * 单元格左右内边距（磅）。引擎配置常数，不来自样式表 —— 等 TableStyle 落地再接。
+ * 排版按它算格内可用宽度，绘制按它画内容框；两处共用这一个数，各写一遍必然分叉。
  */
-inline constexpr float kTableCellPaddingPt = 4.0f;
+inline constexpr float kTableCellPadXPt = 4.0f;
+
+/**
+ * 单元格上下内边距（磅）。
+ *
+ * 取 0 与 Word 的默认格边距同口径：内容是文字时，行盒自己的行距已经留出了上下空白
+ * （ascent 高于字面、行距又多出一截），再补格子内边距只会让短行格显得空。上下都靠
+ * 行高与段落间距控制，格线贴着行盒走。
+ */
+inline constexpr float kTableCellPadYPt = 0.0f;
 
 /**
  * 表格在内容区里的水平位置（引擎侧）。只在表宽小于可用宽度时才有意义。
@@ -415,9 +424,13 @@ struct BlockSpec {
     WritingMode wm = WritingMode::HorizontalTB();
 
     /**
-     * 行高倍数：行高 = size_pt * line_factor（竖排时是列宽）。
+     * 行高倍数：行高 = 单倍行高 × line_factor（竖排时是列宽）。
+     *
+     * 单倍行高是字体自己的 ascent + descent（Noto Sans SC 约 1.448 em），所以 1.0 就是
+     * Word 的单倍行距，倍数与字号脱钩、加多少就松多少。以字号为基准时字体的纵向留白
+     * 会把小倍数吃掉：1.0 到 1.45 都落在同一行高上。
      */
-    float line_factor = 1.6f;
+    float line_factor = 1.0f;
 
     /**
      * 段后距（磅）。
@@ -1045,8 +1058,8 @@ struct LineBox {
      * 横排行盒自己的纵向度量：基线以上、以下各多少，以及沿块轴推进多少（行高）。
      *
      * 排版时由 breakLine 定下（ascent / descent / line_h），增量平移必须拿它们原样重算，
-     * 不能用 block_hi - block_lo 或 size_pt * line_factor 反推：反推出来的是另一个数
-     * （差一个末位），而判据是"增量与从零重排逐位相同"。行高也不等于 size_pt * line_factor ——
+     * 不能用 block_hi - block_lo 或"单倍行高 × 倍数"反推：反推出来的是另一个数
+     * （差一个末位），而判据是"增量与从零重排逐位相同"。行高也不等于单倍行高乘倍数 ——
      * 一行里有比文字更高的行内原子时它更大（见 breakLine 的 line_h）。
      *
      * 竖排的列盒不维护这三个值：列沿块轴的推进是列宽，由换带规则算，不是这三样。

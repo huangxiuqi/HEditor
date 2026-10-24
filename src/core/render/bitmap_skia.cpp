@@ -353,8 +353,10 @@ const SkFont* Bitmap::SkiaImpl::fontFor(hb_font_t* hbf, float units_to_px) {
     f.setHinting(SkFontHinting::kSlight);
     f.setEmbeddedBitmaps(false);   // 不用内嵌点阵：那是 12px 以下的补救手段
     f.setForceAutoHinting(false);  // 强制 auto-hint 会改字形，汉字上没必要
-    f.setBaselineSnap(false);      // 位置由外部给定，不吸附基线
-    f.setSubpixel(true);           // 与 HarfBuzz 的小数推进对齐
+    // 基线吸附由调用方做：drawGlyphs 把 y 取整到整设备像素。这里不再让 Skia 另吸一次，
+    //   两处各吸一遍会让"哪一条是整像素"取决于 Skia 的舍入规则，增量与全量就容易分叉。
+    f.setBaselineSnap(false);
+    f.setSubpixel(true);  // 与 HarfBuzz 的小数推进对齐
     // setLinearMetrics 只影响推进（SkFontHost_FreeType.cpp 里只读
     // linearHoriAdvance），不影响光栅化。这里开不开都行 —— 位置本来就由
     // HarfBuzz 给定，Skia 算出来的 advance 本实现不读。
@@ -611,7 +613,11 @@ void Bitmap::drawGlyphs(hb_font_t* font, const uint32_t* ids, const float* xs, c
     pos.resize(static_cast<size_t>(count));
     for (int i = 0; i < count; ++i) {
         gids[static_cast<size_t>(i)] = static_cast<SkGlyphID>(ids[i]);
-        pos[static_cast<size_t>(i)] = SkPoint::Make(xs[i], ys[i]);
+        // 基线吸附到整设备像素：纵向亚像素定位会让每一条横笔跨两行像素各占一半，
+        //   整页字因此发虚（行高 19.2pt 乘 4/3 是 25.6px，基线逐行漂 0.6px）。
+        //   Word 与浏览器的文本光栅都只做横向亚像素，纵向按整像素落基线。
+        //   横向仍保留小数：那是字间距均匀的来源。
+        pos[static_cast<size_t>(i)] = SkPoint::Make(xs[i], std::round(ys[i]));
     }
 
     // 记账：包围盒一次取完（SkFont::getBounds 的批量重载）。
@@ -656,7 +662,7 @@ void Bitmap::drawGlyphs(hb_font_t* font, const uint32_t* ids, const float* xs, c
         for (int i = 0; i < count; ++i) {
             const SkPoint zero[1] = {SkPoint::Make(0.0f, 0.0f)};
             c.save();
-            c.translate(xs[i], ys[i]);
+            c.translate(pos[static_cast<size_t>(i)].x(), pos[static_cast<size_t>(i)].y());
             c.rotate(rotate_deg);
             c.drawGlyphs(SkSpan<const SkGlyphID>(&gids[static_cast<size_t>(i)], 1),
                          SkSpan<const SkPoint>(zero, 1), origin, *f, p);

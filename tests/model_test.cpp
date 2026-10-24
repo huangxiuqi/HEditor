@@ -1216,7 +1216,7 @@ void checkCompileShapes() {
                        r.blocks[1].cp_text == cps({0x64}),
                    "0.4 / 相邻两个 run 拼成一段，末尾未结束的一段照落");
         expectTrue(r.blocks.size() == 2 && r.blocks[1].size_pt == 12.0f &&
-                       r.blocks[1].line_factor == 1.6f && r.blocks[1].language == nullptr,
+                       r.blocks[1].line_factor == 1.0f && r.blocks[1].language == nullptr,
                    "0.4 / 末尾未结束的一段用默认段落格式");
     }
     // 控件跨段落标记：切段只看段落标记，容器边界不是切分点 —— 于是切出两段。

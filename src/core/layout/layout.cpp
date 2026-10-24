@@ -335,11 +335,12 @@ struct BrokenLine {
 /**
  * 从 start 起断出下一行：容量是 avail，度量取自每个簇所在的 run。
  *
- * 行高 = 行距（字号 × 倍数），但行里塞进比文本更高的东西（原子盒）时，撑高的是内容，
+ * 行高 = 单倍行高 × 倍数，单倍行高取字体自己的 ascent + descent（不是字号：字体的纵向
+ * 留白本来就属于"一行有多高"）。行里塞进比文本更高的东西（原子盒）时，撑高的是内容，
  * 行距本身要留着：max(行距, 内容高 + 行距 - 文本高)。纯文本行两项相等 ⇒ 就是行距；
- * 原子行 ⇒ 盒高 + 行距。只取 max(行距, 盒高) 是错的：那样盒底下面一点空隙都没有，
- * 下一行的字紧贴着盒底排（实测相邻两行的行盒还重叠 3.5 磅）—— 看起来就是"那一行的行距
- * 没了"。行距是段落属性，不该被行里的一枚盒子吃掉。
+ * 原子行 ⇒ 盒高 + 行距 - ascent。只取 max(行距, 盒高) 是错的：那样盒底下面一点空隙都
+ * 没有，下一行的字紧贴着盒底排（实测相邻两行的行盒还重叠 3.5 磅）—— 看起来就是
+ * "那一行的行距没了"。行距是段落属性，不该被行里的一枚盒子吃掉。
  *
  * 横排与竖排用的是同一个式子（那边叫 col_w，这边叫 line_h），所以它只有一份实现。
  */
@@ -355,8 +356,8 @@ BrokenLine breakLine(const BlockShaping& bs, const std::vector<LineMetric>& clus
     float descent = 0.0f;
     float max_size = 0.0f;
     float max_box = 0.0f;
-    // 文本自己的度量（不含原子）：行距是"文本行之间的距离"，它由字号定 ——
-    // 算行高时要把它和"内容撑出来的高度"分开，见上面那段。
+    // 文本自己的度量（不含原子）：行距是"文本行之间的距离"，由文本的 ascent + descent
+    // 定 —— 算行高时要把它和"内容撑出来的高度"分开，见上面那段。
     float text_ascent = 0.0f;
     float text_descent = 0.0f;
     for (size_t i = slice.begin; i < slice.end; ++i) {
@@ -376,10 +377,15 @@ BrokenLine breakLine(const BlockShaping& bs, const std::vector<LineMetric>& clus
         max_size = block_size_pt;
     }
 
-    float text_extent = text_ascent + text_descent;
-    if (!(text_extent > 0.0f)) text_extent = bs.ascent_pt + bs.descent_pt;
-    const float pitch = ((max_size > 0.0f) ? max_size : block_size_pt) * line_factor;
-    const float leading = std::max(0.0f, pitch - text_extent);
+    // 单倍行高 = 字体自己的 ascent + descent（取不到度量时退回块级那套，再退回字号）。
+    //   行距以它为基准，与字号脱钩：字体自带的纵向留白已经算在里面，1.0 就是它本身。
+    //   以字号为基准时这段留白会把小倍数吃掉 —— 1.0 到 1.45 全落在同一个行高上。
+    //   倍数小于 1 时被单倍行高压住（不压缩：两行字会叠在一起）。
+    float natural = text_ascent + text_descent;
+    if (!(natural > 0.0f)) natural = bs.ascent_pt + bs.descent_pt;
+    if (!(natural > 0.0f)) natural = (max_size > 0.0f) ? max_size : block_size_pt;
+    const float pitch = natural * line_factor;
+    const float leading = std::max(0.0f, pitch - natural);
 
     out.ascent = ascent;
     out.descent = descent;
@@ -843,8 +849,8 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
     auto closeCell = [&]() {
         TableFrame& f = tstack.back();
         if (f.cell >= 0) {
-            f.row_content_h = std::max(
-                f.row_content_h, cursor_y - f.row_top - kTableCellPaddingPt - last_space_after);
+            f.row_content_h = std::max(f.row_content_h,
+                                       cursor_y - f.row_top - kTableCellPadYPt - last_space_after);
         }
         f.cell = -1;
     };
@@ -907,7 +913,7 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
             // 本片段第一行就放不下：整片挪走。挪完仍放不下说明这一行比整页还高，
             //   不再挪第二次（否则会一直翻页），让它溢出。
             const bool first = (bad == k);
-            moveToNextPage(bad, cy + kTableCellPaddingPt);
+            moveToNextPage(bad, cy + kTableCellPadYPt);
             if (first && res.lines[k].block_hi_pt > cy + ch + 0.01f) break;
             k = bad;
         }
@@ -921,7 +927,7 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
             if (res.lines[j].page != last_page) continue;
             bottom = std::max(bottom, res.lines[j].block_hi_pt);
         }
-        f.row_top = bottom + kTableCellPaddingPt;
+        f.row_top = bottom + kTableCellPadYPt;
         cursor_y = f.row_top;
     };
 
@@ -936,8 +942,10 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
             rs = f.t->row_specs[static_cast<size_t>(f.row)];
         }
         const float spec_h = rs.height_pt.value_or(0.0f);
-        float row_h = std::max(f.row_content_h + 2.0f * kTableCellPaddingPt, spec_h);
-        if (row_h <= 0.0f) row_h = 2.0f * kTableCellPaddingPt;
+        float row_h = std::max(f.row_content_h + 2.0f * kTableCellPadYPt, spec_h);
+        // 上下内边距为 0 时这条下限不能跟着变成 0：零高的行会让格线、命中与翻页判定
+        //   同时退化。正常路径下每格至少有一枚段落标记，内容高不会是 0。
+        if (!(row_h > 0.0f)) row_h = 1.0f;
         // 放置前的页号与行顶：行被整体挪走或拆开时，第一片段落在哪一页要用这两个值判。
         const int page_before = page_index;
         const float top_before = f.row_top;
@@ -1049,14 +1057,14 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
             cell_w += f.col_w[static_cast<size_t>(c)];
         }
         f.cell = slot.cell;
-        f.cell_cx = f.x + cell_x + kTableCellPaddingPt;
-        f.cell_cw = std::max(1.0f, cell_w - 2.0f * kTableCellPaddingPt);
+        f.cell_cx = f.x + cell_x + kTableCellPadXPt;
+        f.cell_cw = std::max(1.0f, cell_w - 2.0f * kTableCellPadXPt);
         // 外框：格线本身的位置，跨列时按覆盖的列宽加起来。
         f.cell_box_lo = f.x + cell_x;
         f.cell_box_hi = f.x + cell_x + cell_w;
         cur_cx = f.cell_cx;
         cur_cw = f.cell_cw;
-        cursor_y = f.row_top + kTableCellPaddingPt;
+        cursor_y = f.row_top + kTableCellPadYPt;
     };
 
     // 出表：结算最后一行，退回外层上下文（正文或外层格）。
@@ -1088,7 +1096,7 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
         //
         // 切换之前先记下块轴位置：表起点（最外层表刚打开的那一块）的续排锚点必须是
         //   "表顶"，而 openTable/openCell 会把 cursor_y 推进到格内第一行 —— 用它当锚点的话，
-        //   从表起点续排会把整张表下移一个内边距（与全量重排差一个 padding，[61] 抓到的
+        //   从表起点续排会把整张表下移一个上内边距（与全量重排差一个偏移，[61] 抓到的
         //   就是这个）。其余块不受影响：它们的 cursor_y 在切换前后是同一个值。
         const float cursor_before_switch = cursor_y;
         bool opened_outer = false;
@@ -1165,7 +1173,11 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
             for (const BlockShaping::Cluster& c : slotted->clusters) {
                 if (c.atom != InlineAtom::None) box_h = std::max(box_h, c.atom_h_pt);
             }
-            const float line_h = std::max(b.size_pt * b.line_factor, box_h);
+            // 单倍行高与有内容的段同一个基准（ascent + descent），否则同一个格式下空行
+            //   会比有字的行矮一截（两者只差一个"有没有字"）。
+            float natural = ascent + descent;
+            if (!(natural > 0.0f)) natural = b.size_pt;
+            const float line_h = std::max(natural * b.line_factor, box_h);
             const float ascent_eff = std::max(ascent, box_h);
 
             LineBox lb;
@@ -1278,7 +1290,11 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
         // 从这里往下全是只读：断行、放置字形都只读整形结果。
         const BlockShaping& bs = *shaped;
 
-        const float block_line_h = b.size_pt * b.line_factor;
+        // 整段的单倍行高 × 倍数（竖排的列宽上界、首列宽度都用它）：与 breakLine 同一个
+        //   基准，取块的字体度量；取不到字体时按字号估。
+        const float block_natural =
+            (bs.ascent_pt + bs.descent_pt > 0.0f) ? (bs.ascent_pt + bs.descent_pt) : b.size_pt;
+        const float block_line_h = block_natural * b.line_factor;
         // 本行/本列末尾码点：下一个簇的首码点，最后一簇用段长
         auto lastCpOf = [&](size_t slice_end) -> uint32_t {
             return (slice_end < bs.clusters.size()) ? bs.clusters[slice_end].cp : n_cp;
@@ -1501,8 +1517,11 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
             //   从左边缘往右推，两侧各记一个"下一列的边缘"。
             //   列宽要等这一列的内容定下来才知道，而列长与列宽无关（列长就是内容高度），
             //   所以"先取内容、再算宽度、再落列位"没有循环依赖。
-            //   col_w_max 是列宽的上界，只用于分页估计。
-            const float col_w_max = para_metric.size_pt * b.line_factor;
+            //   col_w_max 是列宽的上界，只用于分页估计；基准与 breakLine 相同。
+            const float para_natural = (para_metric.ascent_pt + para_metric.descent_pt > 0.0f)
+                                           ? (para_metric.ascent_pt + para_metric.descent_pt)
+                                           : para_metric.size_pt;
+            const float col_w_max = para_natural * b.line_factor;
             float region_top = cursor_y;
             // 分页下要判"本页还放得下两条列位吗"；连页下没有页底，横带是新开的。
             if (!cont && region_top + col_w_max * 2.0f > cy + ch) {

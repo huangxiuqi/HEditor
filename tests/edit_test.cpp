@@ -778,10 +778,13 @@ int main() {
         Rect first{};
         e3.setCaret(0, starts.front());
         expectTrue(e3.caretRectPt(&first), "竖排光标矩形可查");
-        std::printf("     光标矩形 w=%.2f h=%.2f（列宽 %.2f）\n", first.w, first.h,
-                    b.size_pt * b.line_factor);
+        // 列宽 = 单倍行高（字体的 ascent + descent）x 行距倍数。
+        const FontInstance* mnInst = e3.fonts().instance(1, b.size_pt);
+        const float mnatural = mnInst ? (mnInst->ascenderPt() + mnInst->descenderPt()) : b.size_pt;
+        const float col_w = mnatural * b.line_factor;
+        std::printf("     光标矩形 w=%.2f h=%.2f（列宽 %.2f）\n", first.w, first.h, col_w);
         expectTrue(first.w > first.h, "竖排光标是横条（宽 = 列盒宽 > 高 = 光标粗细）");
-        expectNear(first.w, b.size_pt * b.line_factor, 0.5, "光标宽度 = 列宽（占满列盒）");
+        expectNear(first.w, col_w, 0.5, "光标宽度 = 列宽（占满列盒）");
 
         // 沿列向下：相邻簇边界的光标 y 必须递增
         Rect prev{};
@@ -8337,6 +8340,9 @@ int main() {
             bs40.push_back(b40);
         }
         loadBlocks(e40, bs40);
+        // 行距 = 单倍行高（字体的 ascent + descent）x 倍数。
+        const FontInstance* f40 = e40.fonts().instance(b40.font_index, b40.size_pt);
+        const float natural40 = f40 ? (f40->ascenderPt() + f40->descenderPt()) : b40.size_pt;
 
         // 行盒的"文档 y"（磅）：页号 x 条带高 + 页内块轴位置。
         //   横排的块轴是 y；这份文档全是横排。
@@ -8401,7 +8407,7 @@ int main() {
             "离条带底最近 %.2f 磅\n",
             cont40.slabs, cont40.max_step, cont40.max_pitch, cont40.min_slack);
         expectTrue(cont40.max_back < 0.01f, "连页下文档 y 单调不降（没有一处回跳 = 没有页底）");
-        expectTrue(cont40.max_pitch <= 12.0f * 1.75f + 0.01f,
+        expectTrue(cont40.max_pitch <= natural40 * b40.line_factor + 0.01f,
                    "连页下同段相邻两行的间距就是行距（中间没插页边距）");
         // 连页的最大间距只可能出现在段与段之间（段间距 10 磅），
         //   而分页那条跨页间距的下界是 60 磅 —— 两条判据互不重叠。
@@ -8899,8 +8905,8 @@ int main() {
         if (lay.lines.size() == 4 && lay.placed_tables.size() == 1 &&
             lay.placed_tables[0].col_x.size() >= 2) {
             const PlacedTable& pt = lay.placed_tables[0];
-            expectNear(lay.lines[1].inline_origin_pt, pt.x + pt.col_x[1] + kTableCellPaddingPt,
-                       0.01, "第二格的行内起点落在第二列的起点上（不是内容区左边）");
+            expectNear(lay.lines[1].inline_origin_pt, pt.x + pt.col_x[1] + kTableCellPadXPt, 0.01,
+                       "第二格的行内起点落在第二列的起点上（不是内容区左边）");
             expectTrue(lay.lines[2].block_lo_pt > lay.lines[0].block_lo_pt, "第二行在第一行下面");
         }
 
@@ -8957,6 +8963,10 @@ int main() {
             const NodeId s2 = t2.firstSectionId();
             const NodeId tb2 = t2.appendChild(s2, NodeKind::Table);
             const NodeId r2 = t2.appendChild(tb2, NodeKind::TableRow);
+            // 显式行高撑出一截空白：上下内边距为 0 时，单行格的格高就等于行盒高，
+            //   "文字选区比整行矮"就无从观察了。
+            t2.find(r2)->row.height = Length::abs(ptToEmu(40.0));
+            t2.find(r2)->row.height_rule = HeightRule::AtLeast;
             const NodeId c2 = t2.appendChild(r2, NodeKind::TableCell);
             t2.setText(t2.appendChild(c2, NodeKind::TextRun), utf8ToCodepoints("甲乙丙"));
             t2.appendChild(c2, NodeKind::ParagraphMark);
@@ -9850,12 +9860,10 @@ int main() {
 
     if (runSection(53)) std::printf("\n[53] 排版摘要：重构锁（只改结构时这份摘要必须逐位相同）\n");
     if (runSection(53)) {
-        // 2026-10-21 重取 A/B（0xf0f0d9e785e9abc4 / 0xa56d8ebd65233e40 →
-        //   0x3179bff04e53281d / 0x219fbbbb929318d0）：行盒的上边从"基线 - ascent"
-        //   改成直接记行顶（layout.cpp 的 placeLine）。这是有意改口径，不是重构改坏：
-        //   后缀复用要拿行顶重建整行，"先加 ascent 再减 ascent"多一次舍入，从别处推不回来。
-        //   行数 / 字形数 / 页数一字未变（180/3231/17 与 157/927/15），只有个别行的
-        //   上边差一个末位 —— 肉眼与像素判据都看不见，逐位对拍看得见。
+        // 2026-10-24 重取 A/B/C（→ 0xb27e1602e6412913 / 0xe4def2d955859da1 /
+        //   0xb84b78929b637322）：行距的基准从字号换成单倍行高（字体的 ascent + descent），
+        //   同一个倍数（这里的 1.7 / 1.75 / 1.8）因此高了约 45%，页数跟着变。
+        //   行数与字形数一字未变（180/3231 与 157/927）—— 断行只跟字号与格宽有关，与行高无关。
         // 用例 A：六十段横排正文，混排字号 —— 覆盖断行、行距、分页与段后距。
         //   段落够多，必然跨页；混排字号让每行的高度不同，翻页判据不能再用"上一行高度"。
         {
@@ -9886,7 +9894,7 @@ int main() {
             std::printf("     摘要 A = 0x%016llx（%zu 行 / %zu 字形 / %d 页）\n",
                         static_cast<unsigned long long>(da.hash), ea.layout().lines.size(),
                         ea.layout().glyphs.size(), ea.layout().stats.page_count);
-            expectTrue(da.hash == 0x3179bff04e53281dull, "横排多页正文的摘要未变");
+            expectTrue(da.hash == 0xb27e1602e6412913ull, "横排多页正文的摘要未变");
             expectTrue(ea.layout().stats.page_count >= 3, "用例 A 确实跨了多页");
         }
 
@@ -9950,7 +9958,7 @@ int main() {
             //   改成"表顶"（见 layout.cpp 的 cursor_before_switch）。原值是错的：从它续排
             //   会把整张表下移一个内边距，[61] 的"表里编辑"正是这么红的。摘要含这个字段，
             //   所以它跟着变 —— 这是有意改口径，不是重构改坏了。
-            expectTrue(db.hash == 0x219fbbbb929318d0ull, "表格跨页的摘要未变");
+            expectTrue(db.hash == 0xe4def2d955859da1ull, "表格跨页的摘要未变");
             expectTrue(eb.layout().stats.page_count >= 3 && !eb.layout().placed_tables.empty() &&
                            eb.layout().placed_tables[0].placed.size() >= 2,
                        "用例 B 确实把一行切到了两页上");
@@ -10004,7 +10012,7 @@ int main() {
             std::printf("     摘要 C = 0x%016llx（%zu 行 / %zu 字形 / %d 页 / 侧倒 %d 列）\n",
                         static_cast<unsigned long long>(dc.hash), ec.layout().lines.size(),
                         ec.layout().glyphs.size(), ec.layout().stats.page_count, sideways_cols);
-            expectTrue(dc.hash == 0x53923fb9d204873aull, "竖排的摘要未变");
+            expectTrue(dc.hash == 0xb84b78929b637322ull, "竖排的摘要未变");
             expectTrue(ec.layout().stats.page_count >= 2 && sideways_cols > 0,
                        "用例 C 确实跨了多页，且侧倒那一支走到了");
         }

@@ -51,7 +51,7 @@ std::vector<BlockSpec> wordDemo(int mn_font) {
     v.font_index = mn_font;
     v.size_pt = 56.0f;
     v.wm = WritingMode::VerticalLR();
-    v.line_factor = 1.5f;
+    v.line_factor = 1.05f;
     v.language = "mn";
     v.page_break_before = true;
     v.color = Color::rgb(20, 60, 150);

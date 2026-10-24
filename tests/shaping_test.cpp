@@ -498,6 +498,12 @@ int main() {
         const float big_pt = 24.0f;
         const float small_pt = 12.0f;
         const float factor = 1.6f;
+        // 列宽 = 单倍行高 × 倍数，单倍行高是字体自己的 ascent + descent。
+        auto colWidthOf = [&](float size_pt) {
+            const FontInstance* f = lib.instance(cjk, size_pt);
+            const float natural = f ? (f->ascenderPt() + f->descenderPt()) : size_pt;
+            return natural * factor;
+        };
 
         const LayoutResult r = layoutDocument(
             lib, {mkVertical(WritingMode::VerticalRL(), 4, 4, big_pt, small_pt)}, page);
@@ -514,9 +520,10 @@ int main() {
         for (const LineBox* lb : cols) {
             const bool big = lb->first_cp < 4;
             const float want = big ? big_pt : small_pt;
+            const float want_w = colWidthOf(want);
             const float w = lb->block_hi_pt - lb->block_lo_pt;
             if (std::fabs(lb->size_pt - want) > 0.01f) ++bad_size;
-            if (std::fabs(w - want * factor) > 0.05f) ++bad_w;
+            if (std::fabs(w - want_w) > 0.05f) ++bad_w;
             if (lb->block_lo_pt < cx - 0.01f || lb->block_hi_pt > cx + cw + 0.01f) ++bad_box;
             if (big) {
                 big_w = w;
@@ -546,7 +553,7 @@ int main() {
         expectTrue(overlap == 0, "同一页上的列两两不重叠");
         expectTrue(order_bad == 0, "中日竖排：列号小的更靠右（列序方向没被前缀和带反）");
 
-        // 反向一半：整段一个字号 ⇒ 所有列宽相等，且等于那个字号 × 行距。
+        // 反向一半：整段一个字号 ⇒ 所有列宽相等，且等于单倍行高 × 行距。
         const LayoutResult r1 = layoutDocument(
             lib, {mkVertical(WritingMode::VerticalRL(), 8, 0, small_pt, 0.0f)}, page);
         std::vector<float> widths;
@@ -556,8 +563,8 @@ int main() {
         }
         std::sort(widths.begin(), widths.end());
         widths.erase(std::unique(widths.begin(), widths.end()), widths.end());
-        expectTrue(widths.size() == 1 && std::fabs(widths.front() - small_pt * factor) < 0.05f,
-                   "整段一个字号：所有列宽相等且等于字号 × 行距（与逐列算之前逐字段相同）");
+        expectTrue(widths.size() == 1 && std::fabs(widths.front() - colWidthOf(small_pt)) < 0.05f,
+                   "整段一个字号：所有列宽相等且等于单倍行高 × 行距（与逐列算之前逐字段相同）");
 
         // 列序的正面判据也要有一份：蒙文（LTR）的第一列在最左，中日（RTL）在最右。
         const LayoutResult rl = layoutDocument(
@@ -1009,7 +1016,7 @@ int main() {
         page.margin_pt = 10.0f;
         const float cx = page.margin_pt;
         const float cw = page.contentWidthPt();  // 280
-        const float pad = kTableCellPaddingPt;
+        const float pad = kTableCellPadXPt;      // 只有左右有内边距，上下为 0
 
         auto mkCellBlock = [&](const std::string& text, uint64_t table, int row, int cell) {
             BlockSpec b;
@@ -1063,9 +1070,8 @@ int main() {
                            "同一行的两格在同一基线上");
                 expectTrue(r.lines[2].block_lo_pt > r.lines[0].block_lo_pt + 1.0f,
                            "第二行在第一行下面");
-                expectNear(r.lines[2].block_lo_pt - r.lines[0].block_lo_pt,
-                           kSize * 1.6f + 2.0f * pad, 0.05,
-                           "行高 = 内容高 + 上下内边距（Auto 规则）");
+                expectNear(r.lines[2].block_lo_pt - r.lines[0].block_lo_pt, r.lines[0].advance_pt,
+                           0.05, "行高 = 一行内容高（上下内边距为 0，Auto 规则）");
                 expectNear(r.lines[2].inline_origin_pt, cx + pad, 0.01,
                            "第二行第一格又回到第一列的起点");
             }
@@ -1089,7 +1095,7 @@ int main() {
             expectTrue(fits, "每一行的行内推进都不超过格内可用宽度");
             if (r.lines.size() >= 2) {
                 // 格内相邻行的间距就是行高（内边距只在格的首尾各加一次，由行高结算时加）。
-                const float line_h = kSize * 1.6f;
+                const float line_h = r.lines[0].advance_pt;
                 expectNear(r.lines[1].block_lo_pt - r.lines[0].block_lo_pt, line_h, 0.05,
                            "格内相邻行的间距 = 行高（内边距不逐行加）");
             }
@@ -1176,11 +1182,11 @@ int main() {
             constexpr uint64_t kT = 13;
             PageMetrics small;
             small.width_pt = 200.0f;
-            small.height_pt = 60.0f;
+            small.height_pt = 45.0f;  // 内容区高 25
             small.margin_pt = 10.0f;
             std::vector<BlockSpec> blocks;
-            // 每行 3 个字：行高 19.2 + 上下内边距 8 = 27.2，两行 54.4 —— 第二行在本页
-            //   只剩 40 磅时放不下，整行要换到第 2 页。
+            // 每行 3 个字：行高 = 单倍行高（约 17.4），两行 34.8 —— 第二行在本页
+            //   只剩 7.6 磅时放不下，整行要换到第 2 页。
             for (int r = 0; r < 2; ++r) {
                 for (int c = 0; c < 2; ++c) {
                     blocks.push_back(mkCellBlock("甲乙丙", kT, r, c));
@@ -1194,8 +1200,8 @@ int main() {
                 expectTrue(r.lines[0].page == 0 && r.lines[1].page == 0, "第一行的两格都在第 0 页");
                 expectTrue(r.lines[2].page == 1 && r.lines[3].page == 1,
                            "第二行整行换页（两个格一起走，不拆散）");
-                expectNear(r.lines[2].block_lo_pt, small.margin_pt + pad, 0.05,
-                           "换页后第二行落在新页的内容区顶部（加内边距）");
+                expectNear(r.lines[2].block_lo_pt, small.margin_pt + kTableCellPadYPt, 0.05,
+                           "换页后第二行落在新页的内容区顶部（上下内边距为 0）");
                 expectNear(r.lines[2].block_lo_pt, r.lines[3].block_lo_pt, 0.01,
                            "换页后同一行的两格仍在同一基线上");
             }
@@ -1261,8 +1267,9 @@ int main() {
             expectTrue(r.lines.size() == 5, "格内两段 + 另一格 + 第二行两格，共五行");
             if (r.lines.size() == 5) {
                 // 段 1 是格 (0,0) 的第二段；段 3 是第二行第一格。
-                expectTrue(r.lines[3].block_lo_pt >= r.lines[1].block_hi_pt + pad - 0.01f,
-                           "第二行表格行在格内最后一行之下（格子被撑开）");
+                expectTrue(
+                    r.lines[3].block_lo_pt >= r.lines[1].block_hi_pt + kTableCellPadYPt - 0.01f,
+                    "第二行表格行在格内最后一行之下（格子被撑开）");
                 expectTrue(r.lines[3].block_lo_pt > r.lines[0].block_lo_pt + 2.0f * kSize,
                            "第二行表格行至少让开两行的高度");
             }

@@ -47,11 +47,12 @@ struct ParaFormat {
     WritingMode wm = WritingMode::HorizontalTB();
 
     /**
-     * 行距倍数。为什么还不是 Length：它是"相对字号"的比值，而第十一节的行距三态
-     * （auto / exact / atLeast）要改引擎的块轴推进公式，属于独立的一步。
-     * 这里先保持 BlockSpec 的浮点倍数，也就是三态里的 auto 这一态。
+     * 行距倍数（相对单倍行高，即字体的 ascent + descent）。为什么还不是 Length：它是
+     * "相对行高"的比值，而第十一节的行距三态（auto / exact / atLeast）要改引擎的块轴
+     * 推进公式，属于独立的一步。这里先保持 BlockSpec 的浮点倍数，也就是三态里的 auto。
+     * 默认 1.0 与 Word 的单倍行距同口径。
      */
-    float line_factor = 1.6f;
+    float line_factor = 1.0f;
 
     /**
      * 段后距。绝对长度（EMU），默认 10 磅。

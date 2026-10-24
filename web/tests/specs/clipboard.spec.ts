@@ -307,7 +307,7 @@ test.describe('剪贴板', () => {
     check('★ 可见页的画布上真的有墨（不是白纸）', state.blank.length === 0, JSON.stringify(state));
   });
 
-  test('跨实例：多实例页上 A 复制、B 粘贴', async ({ open }) => {
+  test('跨实例：多实例页上 A 复制、B 粘贴', async ({ open, pageBase }) => {
     const p = await open('multi.html');
     const r = await p.ev<{ a: string; b: string; ok: boolean }>(`
       const a = window.__demoA, b = window.__demoB;
@@ -326,28 +326,36 @@ test.describe('剪贴板', () => {
 
     // 跨实例也要带样式：片段不能只靠"最近一份载荷"（那只活在一个页面里），它还得随
     //   text/html 一起走 —— 这一条直接验那条载体（片段藏进 HTML，再原样取回来）。
-    const carrier = await p.ev<{ same: boolean; hasAttr: boolean }>(`
-      const m = await import('/src/host/clipboard.ts');
-      const frag = '{"v":3,"n":[{"k":"t","t":"甲乙"}]}';
-      const html = m.embedFragment('<p>甲乙</p>', frag);
-      return { same: m.fragmentInHtml(html) === frag, hasAttr: html.includes('data-heditor-fragment') };`);
-    check('★ 片段能藏进 text/html 并原样取回（跨浏览器靠它）', carrier.same === true,
-          JSON.stringify(carrier));
-    check('HTML 里确实带了那个属性', carrier.hasAttr === true, String(carrier.hasAttr));
+    //
+    //   这两段问的是内部模块：库的入口刻意不导出它，构建产物里它只在带哈希的 chunk 里，
+    //   按名字 import 不到。所以只有源码直连口径拿得到读数；上面那几条跨实例行为两种
+    //   口径都跑。
+    if (pageBase.includes('dist-app')) {
+      console.log('（构建产物口径拿不到 host/clipboard 的内部模块，跳过两段载体读数）');
+    } else {
+      const carrier = await p.ev<{ same: boolean; hasAttr: boolean }>(`
+        const m = await import('/src/host/clipboard.ts');
+        const frag = '{"v":3,"n":[{"k":"t","t":"甲乙"}]}';
+        const html = m.embedFragment('<p>甲乙</p>', frag);
+        return { same: m.fragmentInHtml(html) === frag, hasAttr: html.includes('data-heditor-fragment') };`);
+      check('★ 片段能藏进 text/html 并原样取回（跨浏览器靠它）', carrier.same === true,
+            JSON.stringify(carrier));
+      check('HTML 里确实带了那个属性', carrier.hasAttr === true, String(carrier.hasAttr));
 
-    // 缓存只认"本实例写的那一份"：文本相等但来源不同（别处复制来同样的字）不该用缓存 ——
-    //   否则拿旧格式覆盖新内容。判据直接问那个模块。
-    const originRule = await p.ev<any>(`
-      const m = await import('/src/host/clipboard.ts');
-      const dt = new DataTransfer();
-      m.writeToDataTransfer(dt, { fragment: '{"v":3}', text: '甲乙', html: '<p>甲乙</p>',
-                                  origin: 'A' });
-      return { same: m.recallPayload('甲乙', 'A') !== null,
-               other: m.recallPayload('甲乙', 'B') === null,
-               latestSame: m.latestPayload('A') !== null,
-               latestOther: m.latestPayload('B') === null };`);
-    check('★ 同源：缓存命中', originRule.same === true, JSON.stringify(originRule));
-    check('★ 异源：文本相同也不认（不拿旧格式覆盖新内容）', originRule.other === true,
-          JSON.stringify(originRule));
+      // 缓存只认"本实例写的那一份"：文本相等但来源不同（别处复制来同样的字）不该用缓存 ——
+      //   否则拿旧格式覆盖新内容。判据直接问那个模块。
+      const originRule = await p.ev<any>(`
+        const m = await import('/src/host/clipboard.ts');
+        const dt = new DataTransfer();
+        m.writeToDataTransfer(dt, { fragment: '{"v":3}', text: '甲乙', html: '<p>甲乙</p>',
+                                    origin: 'A' });
+        return { same: m.recallPayload('甲乙', 'A') !== null,
+                 other: m.recallPayload('甲乙', 'B') === null,
+                 latestSame: m.latestPayload('A') !== null,
+                 latestOther: m.latestPayload('B') === null };`);
+      check('★ 同源：缓存命中', originRule.same === true, JSON.stringify(originRule));
+      check('★ 异源：文本相同也不认（不拿旧格式覆盖新内容）', originRule.other === true,
+            JSON.stringify(originRule));
+    }
   });
 });
