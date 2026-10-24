@@ -55,13 +55,21 @@ function Get-GitOut {
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        $out = & git @GitArgs 2>$null
+        $out = & git @GitArgs 2>&1
         $code = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $prev
     }
-    if ($code -ne 0) { throw "git $($GitArgs -join ' ') 失败，退出码 $code" }
-    return ($out | Out-String).Trim()
+    # 2>&1 会把 stderr 包成 ErrorRecord 混进同一条流。返回值只取 stdout；
+    # 失败时两路一起抛 —— 只报退出码等于把 git 自己的诊断信息丢掉，剩下无从判断。
+    $all = @($out | ForEach-Object { "$_" })
+    $ok = @($out |
+            Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] } |
+            ForEach-Object { "$_" })
+    if ($code -ne 0) {
+        throw "git $($GitArgs -join ' ') 失败（退出码 $code）：`n$($all -join "`n")"
+    }
+    return ($ok -join "`n").Trim()
 }
 
 if (-not $OnlyJson) {
@@ -95,14 +103,18 @@ if (-not $isSubmodule) {
 }
 
 # ── 2. 钉 tag ────────────────────────────────────────────────
-# 浅克隆只有默认分支的末端，tag 未必在本地，所以按 ref 单独取一次。
-# 显式 refspec 只写 FETCH_HEAD、不会在本地建出 tag 引用，因此下面用 FETCH_HEAD 解析
-# commit，不去引用 refs/tags/<tag>（浅取之后那个引用并不存在，引用它会直接失败）。
+# 浅克隆只有默认分支的末端，tag 未必在本地，所以按 ref 单独取一次，并用显式 refspec 落到
+# 本地 tag 引用上。只写 FETCH_HEAD 的取法把"取到了"和"引用得到"变成两件事，而 FETCH_HEAD
+# 是"最近一次取回"的临时文件，任何一次并发 fetch 都能覆盖它。
+# 剥 commit 用 rev-list --no-walk，不用 FETCH_HEAD^{commit}：^ 在 cmd 里是转义符，git 若被
+# .cmd 垫片包着（Get-Command git 指向 .cmd），表达式会变成 FETCH_HEAD{commit}，
+# 报 ambiguous argument、退出码 128。
 Say "取 tag $HbTag"
-if ((Invoke-Git @('-C', $Dir, 'fetch', '--depth', '1', 'origin', "refs/tags/$HbTag")) -ne 0) {
+if ((Invoke-Git @('-C', $Dir, 'fetch', '--depth', '1', 'origin',
+                  "+refs/tags/${HbTag}:refs/tags/${HbTag}")) -ne 0) {
     throw "取 tag $HbTag 失败"
 }
-$resolved = Get-GitOut @('-C', $Dir, 'rev-parse', 'FETCH_HEAD^{commit}')
+$resolved = Get-GitOut @('-C', $Dir, 'rev-list', '--no-walk', "refs/tags/$HbTag")
 if ($resolved -ne $HbTagCommit) {
     throw "tag $HbTag 解析到 $resolved，与脚本记录的 $HbTagCommit 不一致（上游可能重新打过这个 tag）"
 }
