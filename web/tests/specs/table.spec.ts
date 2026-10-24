@@ -193,6 +193,68 @@ test.describe('表格：跨页切片', () => {
     check('连页：增量排版 == 全量', r.layoutDiff === 0, String(r.layoutDiff));
   });
 
+  test('空格的段落标记：每一页上每一格都要画出来', async ({ open }) => {
+    test.setTimeout(300_000);
+    const p = await open('index.html', { query: { debug: '1' } });
+    const r = await p.read<any>(`
+      const e = ${D};
+      const LONG_TEXT = ${JSON.stringify(LONG)};
+      ${BUILD}
+      // 每个空格的插入点就是那一格空行的行首 —— 空行没有字，段落标记是这一格在版面上
+      //   唯一画得出来的东西，所以"这个位置有没有墨"就是"标记画了没有"。
+      const spots = [];
+      for (const para of [2, 3, 4, 5, 6]) {
+        await e.setCaret({ para, offset: 0 });
+        await e.flush();
+        const c = e.caret();
+        spots.push({ para, page: c.page, x: c.rect.x, y: c.rect.y });
+      }
+      // 光标挪走再数墨：帧里那一条竖线会盖住采样区。
+      await D.stopBlink();
+      await e.setCaret({ para: 0, offset: 0 });
+      await e.flush();
+      const frame = await D.rawFrame();
+      const w = D.frameW();
+      const zp = await D.pagePx();
+      const step = zp.h + zp.gap;
+      const ink = (s) => {
+        const x0 = s.x + 1;
+        const y0 = s.page * step + s.y + 2;
+        let n = 0;
+        for (let y = Math.round(y0); y < Math.round(y0 + 20); y++) {
+          for (let x = Math.round(x0); x < Math.round(x0 + 14); x++) {
+            const at4 = (y * w + x) * 4;
+            if (at4 + 3 < frame.length && frame[at4] < 160) n++;
+          }
+        }
+        return n;
+      };
+      return {
+        spots: spots.map((s) => ({ ...s, ink: ink(s) })),
+        pages: e.geometry().pages,
+        // 每一页的位图都要与从零光栅相同（标记漏画时这一步也会红）。
+        audits: await (async () => {
+          const out = [];
+          const n = e.geometry().pages;
+          for (let pg = 0; pg < n; pg++) out.push((await D.auditPage(pg)).diff);
+          return out;
+        })(),
+      };`);
+    // 第 2、3 段在第 1 页，第 4~6 段在续排之后的第 2 页 —— 两边都要有墨。
+    check('前提：表格确实跨页了', r.pages >= 2, `${r.pages} 页`);
+    check('前提：两类格子落在不同页上（前面两格在这页、后面三格在下一页）',
+          r.spots[0].page === 0 && r.spots[1].page === 0 && r.spots[4].page >= 1,
+          JSON.stringify(r.spots.map((s: any) => [s.para, s.page])));
+    check('★ 第 1 页上那两个空格的标记画出来了',
+          r.spots.slice(0, 2).every((s: any) => s.ink > 0),
+          JSON.stringify(r.spots.map((s: any) => [s.para, s.ink])));
+    check('★ 第 2 页上那三个空格的标记也画出来了',
+          r.spots.slice(2).every((s: any) => s.ink > 0),
+          JSON.stringify(r.spots.map((s: any) => [s.para, s.ink])));
+    check('每一页的位图都与从零光栅相同', r.audits.every((d: number) => d === 0),
+          JSON.stringify(r.audits));
+  });
+
   test('切片之后每一页的位图都自洽，帧指纹稳定', async ({ open }) => {
     test.setTimeout(300_000);
     const p = await open('index.html', { query: { debug: '1' } });

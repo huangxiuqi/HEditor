@@ -79,12 +79,12 @@ void EditorEngine::computePageFingerprints(int dirty_lo, int dirty_hi) {
     }
     page_fp_new_count_ = n;
 
-    // 只遍历受影响页的字形区间。
+    // 只遍历受影响页的字形。
     //
-    // 依据是这条不变式：layout_ 的字形数组按页单调（排版是逐段追加的，
-    // 而页号只增不减），所以"页号落在 [dirty_lo, dirty_hi]"的字形是一段连续区间，
-    // 二分就能定位。它成立的前提是排版永远按段序追加 ——
-    // 单测 [15] 里有一条断言专门钉住它（一旦有人打乱追加顺序，这里会静默算错）。
+    // "按页取字形"读的是 LayoutResult::page_glyphs。旧做法靠"字形数组按页单调"
+    //   二分定位；表格行跨页之后那条不变式已经不成立（一条高格切到第二页时，它的
+    //   续排字形先追加，同一行其余各格的字形还在上一页），二分会漏掉后半截列 ——
+    //   改了这一页却判成"新鲜"，屏幕上留下的是旧墨迹（含段落标记的残影）。
     // 连页的接缝：越过带底的字形在下一条带里也有一份像素（见 rasterIntoBitmap 的
     //   接缝补画），所以它的哈希要同时混进两条带。只混一条的话，改了这一行只会重画
     //   上一带，下一带留着旧的半行。
@@ -94,10 +94,13 @@ void EditorEngine::computePageFingerprints(int dirty_lo, int dirty_hi) {
     //   重算范围里，所以只把溢出混进去，不动它的指纹）。
     const int scan_lo = (partial && cont && dirty_lo > 0) ? dirty_lo - 1 : dirty_lo;
     const std::vector<PlacedGlyph>& gs = layout_.glyphs;
-    const auto gb = std::lower_bound(gs.begin(), gs.end(), scan_lo,
-                                     [](const PlacedGlyph& g, int page) { return g.page < page; });
-    const auto ge = std::upper_bound(gb, gs.end(), dirty_hi,
-                                     [](int page, const PlacedGlyph& g) { return page < g.page; });
+    // 受影响页的字形下标：按页取（见 LayoutResult::page_glyphs），不再按页号二分 ——
+    //   表格行跨页之后字形数组不按页单调，二分定位会漏掉后面各格的字形。
+    std::vector<int> scan;
+    for (int p = scan_lo; p <= dirty_hi; ++p) {
+        const std::vector<int>& list = layout_.glyphsOnPage(p);
+        scan.insert(scan.end(), list.begin(), list.end());
+    }
     auto mixGlyph = [](uint64_t h, const PlacedGlyph& g) {
         h = fnvMix(h, g.glyph_id);
         h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(quantPt(g.x_pt))));
@@ -116,8 +119,8 @@ void EditorEngine::computePageFingerprints(int dirty_lo, int dirty_hi) {
         h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(quantPt(g.weight))));
         return h;
     };
-    for (auto it = gb; it != ge; ++it) {
-        const PlacedGlyph& g = *it;
+    for (int k : scan) {
+        const PlacedGlyph& g = gs[static_cast<size_t>(k)];
         if (g.page < 0 || g.page >= n) continue;
         if (g.page >= dirty_lo)
             page_fp_new_[static_cast<size_t>(g.page)] =
@@ -305,16 +308,13 @@ void EditorEngine::markPagesChangedFrom(int first_page) {
         page_fp_new_[static_cast<size_t>(p)] = dirty_value(base);
     }
 
-    // 行数组只标 [first_page, 末页) 里的行：前缀那些行一个字都没动，标脏只会让它们多画一遍。
-    //   linesOnPage 给的 lo 就是"页号不小于 first 的第一行"，正是这里的起点
-    //   （这一页上没有行时它会指向页号更大的第一行，同样是对的）。
+    // 行数组只标页号 >= first 的行：前面那些行一个字都没动，标脏只会让它们多画一遍。
     const int n_lines = static_cast<int>(layout_.lines.size());
     line_fp_new_.resize(static_cast<size_t>(n_lines), kFnvBasis);
-    int lo = 0;
-    int hi = 0;
-    caret_.linesOnPage(first, &lo, &hi);
-    (void)hi;
-    for (int k = lo; k < n_lines; ++k) {
+    // 逐行比页号，不按"从某一行起往后都脏"推：行数组在表格跨页处不按页单调，
+    //   按起点一路标下去会把后面几页的正文也标脏（多画几页，不至于画错，但没必要）。
+    for (int k = 0; k < n_lines; ++k) {
+        if (layout_.lines[static_cast<size_t>(k)].page < first) continue;
         const uint64_t base = (k < line_fp_prev_count_) ? line_fp_prev_[static_cast<size_t>(k)] : 0;
         line_fp_new_[static_cast<size_t>(k)] = dirty_value(base);
     }
@@ -329,24 +329,6 @@ int EditorEngine::firstPageOfParagraph(int p) const {
     if (pi.line_begin < 0 || pi.line_begin >= pi.line_end) return -1;
     if (pi.line_begin >= static_cast<int>(layout_.lines.size())) return -1;
     return layout_.lines[static_cast<size_t>(pi.line_begin)].page;
-}
-
-/**
- * 第 page 页的字形下标区间。
- *
- * 排版按段流顺序 push 字形，页号只前进不后退，所以 layout_.glyphs 的 page 单调不降。
- *   这条单调性让绘制侧可以二分定位，而不必为每一页把全篇筛一遍。
- * 用 lower_bound 找起点、upper_bound 找终点，两个都从同一个大数组里二分；
- *   终点那一端拿起点当搜索下界，省掉前半截比较。
- */
-void EditorEngine::glyphRangeOnPage(int page, int* begin, int* end) const {
-    const std::vector<PlacedGlyph>& gs = layout_.glyphs;
-    const auto b = std::lower_bound(gs.begin(), gs.end(), page,
-                                    [](const PlacedGlyph& g, int p) { return g.page < p; });
-    const auto e =
-        std::upper_bound(b, gs.end(), page, [](int p, const PlacedGlyph& g) { return p < g.page; });
-    *begin = static_cast<int>(b - gs.begin());
-    *end = static_cast<int>(e - gs.begin());
 }
 
 int EditorEngine::contentBottomPx() const {
@@ -541,6 +523,11 @@ void EditorEngine::relayout() {
     layout_dirty_from_ = n_para;  // 已重排到末尾，没有脏段了
     layout_dirty_to_ = n_para;
     layout_needs_full_ = false;
+    // 页索引：整篇与续排都走排版函数，那里收尾时建过一次；只有"拼接"不经过它 ——
+    //   它用 erase + insert 换掉脏区，再整段平移后缀（页号、行号都变）。
+    //   这一路不补建，索引就带着过期的页号去画：看不见的字、画错页的字，
+    //   以及越界的下标。
+    if (reuse != SuffixReuse::None) layout_.rebuildPageIndex();
 
     // 这一轮排版的耗时。只算排版本身（拼接/续排/全量三种走法都算），
     // 不含页指纹记账与统计同步 —— 那两项是 O(全篇) 的固定开销，

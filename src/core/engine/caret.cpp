@@ -33,25 +33,6 @@ void CaretResolver::placeCaret(int para, size_t offset, int side, bool extend, i
 }
 
 /**
- * 第 page 页上的行下标范围（闭区间）。这一页没有行时把 hi 置成 lo-1。
- * 行数组按页单调（与字形数组同一条不变式），所以两端都能二分。
- */
-void CaretResolver::linesOnPage(int page, int* lo, int* hi) const {
-    const std::vector<LineBox>& ls = view_.layout->lines;
-    const auto b = std::lower_bound(ls.begin(), ls.end(), page,
-                                    [](const LineBox& l, int p) { return l.page < p; });
-    if (b == ls.end() || b->page != page) {
-        *lo = static_cast<int>(b - ls.begin());
-        *hi = *lo - 1;
-        return;
-    }
-    *lo = static_cast<int>(b - ls.begin());
-    int i = *lo;
-    while (i < static_cast<int>(ls.size()) && ls[static_cast<size_t>(i)].page == page) ++i;
-    *hi = i - 1;
-}
-
-/**
  * 重排之后重新投影一次光标：位置的输入（段, 偏移, 侧别）没变，但排版换了簇表，
  * 簇吸附要按新表再来一遍 —— 这就是 EditorEngine::projectCaret 摆两次里的第二次。
  * 收敛：第二次不会再触发重排。
@@ -783,34 +764,26 @@ std::vector<PageRect> CaretResolver::selectionRectsIn(int first_page, int count)
         tail_mark = hi >= doc_end;
     }
 
-    // 行下标范围。行数组按页单调，所以限页时两端都能二分 ——
-    //   不限页时遍历全篇是为了挑出真正落进选区的那几行，那是"文档行数"这个量级；
-    //   而呈现每拍都走这一趟，全选时这笔开销会盖过真正要画的字。
+    // 要看的行：限页时是窗口内各页的行，不限页时是全篇。
+    //   按页取行读的是 LayoutResult::page_lines —— 行数组按流顺序排，表格行跨页之后
+    //   它不再按页单调，按页号二分收窄会把窗口里另一页的行整段跳过（选区少画一截、
+    //   整格反白漏一整列）。
     const int n_lines = static_cast<int>(view_.layout->lines.size());
     // 选区的粒度（见 selectionIsCell）：整格 / 文字。整格只在一次"点格内边距带"之后成立。
     const bool cell_sel = sel_cell_;
-    int k_begin = 0;
-    int k_end = n_lines - 1;  // 闭区间
+    std::vector<int> order;
     if (count > 0 && n_lines > 0) {
-        const int last_page = first_page + count - 1;
-        linesOnPage(first_page, &k_begin, &k_end);
-        int hi_lo = 0;
-        int hi_hi = 0;
-        linesOnPage(last_page, &hi_lo, &hi_hi);
-        // 末页上没有行时 hi_hi == hi_lo - 1：这时窗口内的行止于末页之前。
-        k_end = hi_hi;
-        // k_begin 可能被夹到"页号更大的第一行"上，往前一页兜一下不会错：
-        //   多算的行会被下面的段区间判断滤掉，少算的行却会漏画。
-        if (k_begin > 0) --k_begin;
+        for (int p = first_page; p < first_page + count; ++p) {
+            const std::vector<int>& list = view_.layout->linesOnPage(p);
+            order.insert(order.end(), list.begin(), list.end());
+        }
+    } else {
+        order.resize(static_cast<size_t>(n_lines));
+        for (int i = 0; i < n_lines; ++i) order[static_cast<size_t>(i)] = i;
     }
 
-    for (int k = k_begin; k <= k_end && k < n_lines; ++k) {
-        if (k < 0) continue;
+    for (int k : order) {
         const LineBox& lb = view_.layout->lines[static_cast<size_t>(k)];
-        // 页范围必须逐行再判一次：上面的二分只把范围收窄，端点会为了不漏而往外兜，
-        //   而帧坐标是"相对窗口首页"的 —— 窗口上方那一页的矩形算出来是负 y，
-        //   正好压在帧顶部，会被当成窗口内的选区画出来。
-        if (count > 0 && (lb.page < first_page || lb.page >= first_page + count)) continue;
         const int para = lb.paragraph;
         if (para < pa_lo || para > pa_hi) continue;
         if (para < 0 || para >= n_para) continue;

@@ -72,37 +72,85 @@ void EditorEngine::paintPageRange(int first_page, int count) { presentInternal(f
  *   一定落在带里（字形在行盒内）。用行盒自己的边界会啃掉相邻行的抗锯齿边：
  *   增量帧与从零重画的帧差 339~3550 px、最大通道差 49。
  */
-void EditorEngine::lineBand(int k, float* lo, float* hi) const {
+void EditorEngine::pageLineBands(int page, std::vector<float>* lo, std::vector<float>* hi) const {
     const std::vector<LineBox>& ls = layout_.lines;
-    if (k < 0 || k >= static_cast<int>(ls.size())) {
-        *lo = 0.0f;
-        *hi = 0.0f;
-        return;
-    }
-    const LineBox& lb = ls[static_cast<size_t>(k)];
-    // 同一块轴位置上的行盒是一组：表格一行的几个格各有自己的行盒，y 完全相同。
-    //   行带必须按"组"的上下边界算 —— 拿"本行与下一个行盒的中线"当 hi，在表格里
-    //   取到的是同一行的另一格，带只盖住字的上半，重画之后字被裁成两截。
-    //   正文里不会有两行 y 相同，组大小恒为 1，与加表格之前逐字节相同。
-    auto sameRow = [](const LineBox& a, const LineBox& b) {
-        return a.page == b.page && std::fabs(a.block_lo_pt - b.block_lo_pt) <= 0.01f;
+    const std::vector<int>& ids = layout_.linesOnPage(page);
+    if (lo && lo->size() != ls.size()) lo->assign(ls.size(), 0.0f);
+    if (hi && hi->size() != ls.size()) hi->assign(ls.size(), 0.0f);
+    if (ids.empty()) return;
+
+    /**
+     * 一行在块轴上的位置（排序用：页内的行不按块轴有序 —— 表格里一条行切页之后，
+     *   同一行其余各格的行还在上一页，数组顺序与版面上下顺序不是一回事）。
+     */
+    struct Item {
+        /**
+         * 行的块轴上沿（磅）。
+         */
+        float top = 0.0f;
+
+        /**
+         * 行的块轴下沿（磅）。
+         */
+        float bottom = 0.0f;
+
+        /**
+         * 行下标（lines 里那一条）。
+         */
+        int line = 0;
     };
-    int first = k;
-    while (first > 0 && sameRow(ls[static_cast<size_t>(first - 1)], lb)) --first;
-    int last = k;
-    while (last + 1 < static_cast<int>(ls.size()) &&
-           sameRow(ls[static_cast<size_t>(last + 1)], lb)) {
-        ++last;
+
+    /**
+     * 一组同高的行：表格一行的几个格各有自己的行盒，块轴位置完全相同。
+     */
+    struct Group {
+        /**
+         * 组的块轴上沿（磅）。
+         */
+        float top = 0.0f;
+
+        /**
+         * 组的块轴下沿（磅）。
+         */
+        float bottom = 0.0f;
+    };
+
+    std::vector<Item> items;
+    items.reserve(ids.size());
+    for (int k : ids) {
+        const LineBox& lb = ls[static_cast<size_t>(k)];
+        items.push_back(Item{lb.block_lo_pt, lb.block_hi_pt, k});
     }
-    const bool first_on_page = (first == 0) || (ls[static_cast<size_t>(first - 1)].page != lb.page);
-    const bool last_on_page = (last + 1 >= static_cast<int>(ls.size())) ||
-                              (ls[static_cast<size_t>(last + 1)].page != lb.page);
-    *lo = first_on_page ? 0.0f
-                        : (ls[static_cast<size_t>(first - 1)].block_hi_pt + lb.block_lo_pt) * 0.5f;
-    *hi = last_on_page ? static_cast<float>(pagePxHeight()) / cfg_.zoom
-                       : (ls[static_cast<size_t>(last)].block_hi_pt +
-                          ls[static_cast<size_t>(last + 1)].block_lo_pt) *
-                             0.5f;
+    std::sort(items.begin(), items.end(), [](const Item& a, const Item& b) {
+        if (a.top != b.top) return a.top < b.top;
+        return a.line < b.line;
+    });
+    std::vector<Group> groups;
+    groups.reserve(items.size());
+    for (const Item& it : items) {
+        if (!groups.empty() && std::fabs(groups.back().top - it.top) <= 0.01f) {
+            groups.back().bottom = std::max(groups.back().bottom, it.bottom);
+            continue;
+        }
+        groups.push_back(Group{it.top, it.bottom});
+    }
+
+    // 边界取相邻两组的中线：这样相邻两条带正好拼满，字形不会被裁成两截。
+    //
+    //   这里必须按"块轴上有序的组"算，不能看数组里的相邻项：高格的第 2 行之后，
+    //   数组紧跟着的是同一行另一格的第 1 行（它在上面），拿它当"下一行"会把这条带
+    //   压成零高 —— 那一行的字与段落标记从此不再重画（屏幕上留的是旧墨迹）。
+    const float page_bottom = static_cast<float>(pagePxHeight()) / cfg_.zoom;
+    size_t gi = 0;
+    for (const Item& it : items) {
+        while (gi + 1 < groups.size() && std::fabs(groups[gi].top - it.top) > 0.01f) ++gi;
+        const float top_edge = (gi == 0) ? 0.0f : 0.5f * (groups[gi - 1].bottom + groups[gi].top);
+        const float bottom_edge = (gi + 1 >= groups.size())
+                                      ? page_bottom
+                                      : 0.5f * (groups[gi].bottom + groups[gi + 1].top);
+        if (lo) (*lo)[static_cast<size_t>(it.line)] = top_edge;
+        if (hi) (*hi)[static_cast<size_t>(it.line)] = bottom_edge;
+    }
 }
 
 void EditorEngine::snapshotLineGeometry() {
@@ -117,12 +165,14 @@ void EditorEngine::snapshotLineGeometry() {
     const int n = static_cast<int>(layout_.lines.size());
     line_lo_prev_.resize(static_cast<size_t>(n));
     line_hi_prev_.resize(static_cast<size_t>(n));
-    for (int k = 0; k < n; ++k) {
-        float lo = 0.0f;
-        float hi = 0.0f;
-        lineBand(k, &lo, &hi);
-        line_lo_prev_[static_cast<size_t>(k)] = lo;
-        line_hi_prev_[static_cast<size_t>(k)] = hi;
+    std::vector<float> lo;
+    std::vector<float> hi;
+    for (int p = 0; p < layout_.stats.page_count; ++p) {
+        pageLineBands(p, &lo, &hi);
+        for (int k : layout_.linesOnPage(p)) {
+            line_lo_prev_[static_cast<size_t>(k)] = lo[static_cast<size_t>(k)];
+            line_hi_prev_[static_cast<size_t>(k)] = hi[static_cast<size_t>(k)];
+        }
     }
 }
 
@@ -179,11 +229,8 @@ int EditorEngine::prewarmPageGlyphs(int page) {
         ys.clear();
     };
     int n = 0;
-    // 只过这一页的字形区间，不整篇筛。预热是逐页调用的，整篇筛会让每次预热都付 O(全篇)。
-    int gb = 0;
-    int ge = 0;
-    glyphRangeOnPage(page, &gb, &ge);
-    for (int k = gb; k < ge; ++k) {
+    // 只过这一页的字形，不整篇筛。预热是逐页调用的，整篇筛会让每次预热都付 O(全篇)。
+    for (int k : layout_.glyphsOnPage(page)) {
         const PlacedGlyph& pg = layout_.glyphs[static_cast<size_t>(k)];
         if (!pg.font) continue;
         hb_font_t* f = pg.font->hb();
@@ -357,13 +404,10 @@ void EditorEngine::rasterIntoBitmap(Bitmap& target, int page_index, const float*
             }
             ul_line = -1;
         };
-        // 只过这一页的字形区间（二分，见 glyphRangeOnPage）。
+        // 只过这一页的字形（见 LayoutResult::page_glyphs）。
         //   整篇遍历 + 判页号：2000 段文档约 8 万个字形，每画一页都要过一遍，
         //   反推约 2 ms/页 —— 比真正画这一页的字形（742 个约 0.9 ms）还贵。
-        int gb = 0;
-        int ge = 0;
-        glyphRangeOnPage(page, &gb, &ge);
-        for (int k = gb; k < ge; ++k) {
+        for (int k : layout_.glyphsOnPage(page)) {
             const PlacedGlyph& pg = layout_.glyphs[static_cast<size_t>(k)];
             if (!pg.font) continue;
             // 接缝那一趟只取越过带底的字形；其余情况取整页。
@@ -413,15 +457,10 @@ void EditorEngine::rasterIntoBitmap(Bitmap& target, int page_index, const float*
         flush_ul();
     };
 
-    // 行内原子的占位框。与字形一样只过这一页的行（行数组按页单调，两端二分一次），
+    // 行内原子的占位框。与字形一样只过这一页的行（见 LayoutResult::page_lines），
     //   也照样按行带筛：一条带的边界就是行的块轴范围，框不会跨出它自己那一行。
     auto emitAtoms = [&](int page, float dy, bool spill_only) {
-        int lb_lo = 0;
-        int lb_hi = -1;
-        caret_.linesOnPage(page, &lb_lo, &lb_hi);
-        const int n_lines = static_cast<int>(layout_.lines.size());
-        for (int li = lb_lo; li <= lb_hi && li < n_lines; ++li) {
-            if (li < 0) continue;
+        for (int li : layout_.linesOnPage(page)) {
             const LineBox& lb = layout_.lines[static_cast<size_t>(li)];
             if (spill_only && !(lb.block_hi_pt > slab_pt)) continue;
             const float lo_pt = lb.block_lo_pt + dy / zoom;
@@ -705,10 +744,8 @@ void EditorEngine::presentInternal(int first_page, int count) {
     //   竖排页整页重画：行盒的"块轴"在竖排下是横轴，行带会变成竖条，
     //     而擦除矩形、字形筛选都按纵轴写；竖排文档少，不值得为它多一套几何。
     auto computeBand = [&](int page) -> int {
-        int la = 0;
-        int lb = 0;
-        caret_.linesOnPage(page, &la, &lb);
-        for (int k = la; k <= lb; ++k) {
+        const std::vector<int>& page_line_ids = layout_.linesOnPage(page);
+        for (int k : page_line_ids) {
             if (layout_.lines[static_cast<size_t>(k)].vertical) return 0;
         }
         // 这一页的格线换了形状就整页重画：行带只盖住文字那一条，而页底的切口边
@@ -718,28 +755,34 @@ void EditorEngine::presentInternal(int first_page, int count) {
             return 0;
         }
         int d0 = -1;
-        int d1 = -1;
-        for (int k = la; k <= lb; ++k) {
+        for (int k : page_line_ids) {
             const bool same = k < line_fp_prev_count_ && line_fp_new_[static_cast<size_t>(k)] ==
                                                              line_fp_prev_[static_cast<size_t>(k)];
             if (same) continue;
-            if (d0 < 0) d0 = k;
-            d1 = k;
+            d0 = k;
+            break;
         }
         if (d0 < 0) return -1;
-        float lo = 0.0f;
-        float hi = 0.0f;
-        lineBand(d0, &lo, &hi);
-        float lo2 = 0.0f;
-        float hi2 = 0.0f;
-        lineBand(d1, &lo2, &hi2);
-        hi = std::max(hi, hi2);
-        // 新旧两版里更靠外的那个边界：行往下挪之后旧墨迹在更靠上的位置，
-        //   只擦新位置就会留下幽灵字（auditPage 正是抓这个的判据）。
-        if (d0 < static_cast<int>(line_lo_prev_.size()))
-            lo = std::min(lo, line_lo_prev_[static_cast<size_t>(d0)]);
-        if (d1 < static_cast<int>(line_hi_prev_.size()))
-            hi = std::max(hi, line_hi_prev_[static_cast<size_t>(d1)]);
+        pageLineBands(page, &band_lo_scratch_all_, &band_hi_scratch_all_);
+        // 带的两端取"所有变化行"的并集，而不是下标最小/最大的那两行：
+        //   表格里数组顺序不等于版面上下顺序（一条行切页之后，同一行其余各格的行
+        //   还在上一页），按下标取端点会把带压到页首那一条 —— 页下半截的字与标记
+        //   就再也不会重画（屏幕上留的是旧墨迹）。
+        float lo = 1.0e30f;
+        float hi = -1.0e30f;
+        for (int k : page_line_ids) {
+            const bool same = k < line_fp_prev_count_ && line_fp_new_[static_cast<size_t>(k)] ==
+                                                             line_fp_prev_[static_cast<size_t>(k)];
+            if (same) continue;
+            lo = std::min(lo, band_lo_scratch_all_[static_cast<size_t>(k)]);
+            hi = std::max(hi, band_hi_scratch_all_[static_cast<size_t>(k)]);
+            // 新旧两版里更靠外的那个边界：行往下挪之后旧墨迹在更靠上的位置，
+            //   只擦新位置就会留下幽灵字（auditPage 正是抓这个的判据）。
+            if (k < static_cast<int>(line_lo_prev_.size()))
+                lo = std::min(lo, line_lo_prev_[static_cast<size_t>(k)]);
+            if (k < static_cast<int>(line_hi_prev_.size()))
+                hi = std::max(hi, line_hi_prev_[static_cast<size_t>(k)]);
+        }
         // 页里的行数比已画那一版少（删掉了行）⇒ 尾巴一直擦到页底，否则旧墨迹留在那儿
         if (line_fp_prev_count_ > static_cast<int>(layout_.lines.size()))
             hi = static_cast<float>(page_px_h) / zoom;
@@ -1213,13 +1256,8 @@ void EditorEngine::rasterEditingMarks(Bitmap& target, int page_index, const floa
     const std::vector<BlockSpec>& bs = blocks();
     const bool dot_mode = (mode == MarksMode::All);
 
-    int k_begin = 0;
-    int k_end = -1;
-    caret_.linesOnPage(page_index, &k_begin, &k_end);
     const std::vector<LineBox>& lines = layout_.lines;
-    const int n_lines = static_cast<int>(lines.size());
-    for (int k = k_begin; k <= k_end && k < n_lines; ++k) {
-        if (k < 0) continue;
+    for (int k : layout_.linesOnPage(page_index)) {
         const LineBox& lb = lines[static_cast<size_t>(k)];
         if (!lb.bracket_font) continue;
         if (spill_only && !(lb.block_hi_pt > slab_pt)) continue;
@@ -1319,15 +1357,10 @@ void EditorEngine::rasterControlMarks(Bitmap& target, int page_index, const floa
     // 接缝那一趟：只画越过带底的那一截（见 rasterIntoBitmap），坐标整体上移一个带高。
     const float slab_pt = cfg_.page.slabHeightPt();
 
-    // 括号：只过这一页的行（行数组按页单调，两端二分一次），带外的行跳过。
+    // 括号：只过这一页的行（见 LayoutResult::page_lines），带外的行跳过。
     //   与原子框那段同一个走法：一条带的边界就是行的块轴范围。
-    int k_begin = 0;
-    int k_end = -1;
-    caret_.linesOnPage(page_index, &k_begin, &k_end);
     const std::vector<LineBox>& lines = layout_.lines;
-    const int n_lines = static_cast<int>(lines.size());
-    for (int k = k_begin; k <= k_end && k < n_lines; ++k) {
-        if (k < 0) continue;
+    for (int k : layout_.linesOnPage(page_index)) {
         const LineBox& lb = lines[static_cast<size_t>(k)];
         if (!lb.bracket_font) continue;
         if (spill_only && !(lb.block_hi_pt > slab_pt)) continue;

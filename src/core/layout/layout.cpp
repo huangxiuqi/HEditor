@@ -1823,7 +1823,47 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
     // shape_ms 只计本轮：命中缓存的段不产生整形耗时，本轮耗时才是关心的量。
     res.stats.shape_ms = shape_ms;
     res.stats.layout_ms = msSince(t_layout0);
+    res.rebuildPageIndex();
     return ReflowState{page_index, cursor_y, line_total};
+}
+
+void LayoutResult::rebuildPageIndex() {
+    const size_t n = static_cast<size_t>(std::max(1, stats.page_count));
+    page_lines.assign(n, {});
+    page_glyphs.assign(n, {});
+    // 先数一遍、按页预留，再填第二遍：每页一个 vector，边推边扩容会反复搬元素，
+    //   而这两张表每敲一个字都要重建一次（4000 行 / 4.5 万字形那个量级）。
+    std::vector<int> glyph_count(n, 0);
+    for (const PlacedGlyph& g : glyphs) {
+        if (g.page < 0 || static_cast<size_t>(g.page) >= n) continue;
+        ++glyph_count[static_cast<size_t>(g.page)];
+    }
+    for (size_t p = 0; p < n; ++p) {
+        if (glyph_count[p] > 0) page_glyphs[p].reserve(static_cast<size_t>(glyph_count[p]));
+    }
+    for (size_t i = 0; i < glyphs.size(); ++i) {
+        const int p = glyphs[i].page;
+        if (p < 0 || static_cast<size_t>(p) >= n) continue;
+        page_glyphs[static_cast<size_t>(p)].push_back(static_cast<int>(i));
+    }
+    // 行数比字形少一个量级，直接推。
+    for (size_t i = 0; i < lines.size(); ++i) {
+        const int p = lines[i].page;
+        if (p < 0 || static_cast<size_t>(p) >= n) continue;
+        page_lines[static_cast<size_t>(p)].push_back(static_cast<int>(i));
+    }
+}
+
+const std::vector<int>& LayoutResult::linesOnPage(int page) const {
+    static const std::vector<int> kNone;
+    if (page < 0 || static_cast<size_t>(page) >= page_lines.size()) return kNone;
+    return page_lines[static_cast<size_t>(page)];
+}
+
+const std::vector<int>& LayoutResult::glyphsOnPage(int page) const {
+    static const std::vector<int> kNone;
+    if (page < 0 || static_cast<size_t>(page) >= page_glyphs.size()) return kNone;
+    return page_glyphs[static_cast<size_t>(page)];
 }
 
 void summarizeLayoutStats(LayoutResult* out) {

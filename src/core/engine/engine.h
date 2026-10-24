@@ -2080,21 +2080,15 @@ private:
     void snapshotLineGeometry();
 
     /**
-     * 行带边界：第 k 行独占的块轴区间（页内磅），上下都取与相邻行盒的中线。
-     * 见 engine_paint.cpp 的实现注释（为什么不能用行盒自己的 block_lo/hi）。
-     */
-    void lineBand(int k, float* lo, float* hi) const;
-
-    /**
-     * 第 @p page 页上的字形下标区间（半开区间 [begin, end)）；这一页没有字形时两者相等。
+     * 一页上每一行的行带边界（页内磅，下标 = 行下标；只写这一页的行）。
      *
-     * 依据：排版按段流顺序 push 字形，页号只前进不后退，所以 layout_.glyphs 的 page
-     *   单调不降 —— 两端各二分一次即可。为什么要二分而不能整篇筛：绘制是按页进行的，
-     *   而整篇筛是 O(全篇字形)，每画一页就付一遍；2000 段文档约 8 万个字形，
-     *   反推约 2 ms/页，比真正画那一页的字形还贵。
-     *   单调性是推理 + 运行期审计（auditGlyphPagesJson）双重保证的，不是假设。
+     * 行带按"块轴上相邻的行组"取中线，不按数组相邻项：表格一行的几个格 y 相同算一组，
+     *   而高格的第二行之后数组里紧跟着的是另一格的第一行（在它上面）。见实现注释。
+     * @param page 页号
+     * @param lo 非空时写入各行带的上沿
+     * @param hi 非空时写入各行带的下沿
      */
-    void glyphRangeOnPage(int page, int* begin, int* end) const;
+    void pageLineBands(int page, std::vector<float>* lo, std::vector<float>* hi) const;
 
     /**
      * 第 p 段的第一行落在哪一页；这一段没有行盒时返回 -1。
@@ -2743,6 +2737,16 @@ private:
      * 放成员是为了不把两个 float 在 lambda 之间传来传去。
      */
     float band_lo_scratch_ = 0.0f;
+
+    /**
+     * 算行带时按页写下的逐行上沿（下标 = 行下标）。
+     */
+    std::vector<float> band_lo_scratch_all_;
+
+    /**
+     * 算行带时按页写下的逐行下沿（下标 = 行下标）。
+     */
+    std::vector<float> band_hi_scratch_all_;
 
     /**
      * 本次重画那条行带的上界（页内磅）。

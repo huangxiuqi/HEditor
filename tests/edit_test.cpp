@@ -12632,6 +12632,198 @@ int main() {
         }
     }
 
+    if (runSection(73)) std::printf("\n[73] 表格里的页索引与行带：标记、折行、逐字增量重画\n");
+    if (runSection(73)) {
+        // 表里有两件事不能按"数组相邻 = 版面相邻"推：
+        //   一、行数组按流顺序排，跨页切开的那一行之后，同一行其余各格的行还在上一页
+        //     —— 按页号二分取"这一页的行"会整段漏掉（标记不画、字形不画、页被判成新鲜）。
+        //   二、高格的第二行之后，数组里紧跟着的是另一格的第一行（在它上面）——
+        //     按它推行带边界会把带压成零高，那一行从此不再重画（屏幕上堆着旧标记）。
+        // 这一节把两条都钉住：页索引自洽、每个空格在它自己那一页上都有标记的墨、
+        //   格内逐字输入时每一步的页位图都等于从零光栅。
+        EngineConfig c73;
+        c73.zoom = 1.0f;
+        c73.page.width_pt = 420.0f;
+        c73.page.height_pt = 330.0f;
+        c73.page.margin_pt = 20.0f;
+
+        // 数一个矩形里的墨（页位图，只数深色像素）。坐标是页内设备像素。
+        auto inkIn = [](const EditorEngine& eng, int page, int x0, int y0, int x1, int y1) {
+            const uint8_t* px = eng.pagePixels(page);
+            if (px == nullptr) return 0;
+            const int pw = eng.pagePxWidth();
+            const int ph = eng.pagePxHeight();
+            int dark = 0;
+            for (int y = std::max(0, y0); y < std::min(ph, y1); ++y) {
+                for (int x = std::max(0, x0); x < std::min(pw, x1); ++x) {
+                    const size_t at = (static_cast<size_t>(y) * static_cast<size_t>(pw) +
+                                       static_cast<size_t>(x)) *
+                                      4u;
+                    if (px[at] < 200) ++dark;
+                }
+            }
+            return dark;
+        };
+
+        // (a) 跨页表：行数组确实不按页单调（前提），页索引仍把每一行、每个字形
+        //     归到它自己那一页，且一个不漏。
+        {
+            EditorEngine e;
+            expectTrue(e.init({cjkPath, mnPath, latinPath}), "引擎初始化（页索引）");
+            e.setConfig(c73);
+            e.setEditMode(EditMode::Document);
+            {
+                NodeTree t;
+                const NodeId sec = t.firstSectionId();
+                t.setText(t.appendChild(sec, NodeKind::TextRun), utf8ToCodepoints("首段"));
+                t.appendChild(sec, NodeKind::ParagraphMark);
+                e.setDocument(t, StyleSheet{});
+            }
+            e.setCaret(0, 2);
+            expectTrue(e.insertTableAndRender(2, 5, false), "插 2x5 表");
+            {
+                // 第一格塞到跨页；第二行第一格放两行文字。
+                e.setCaret(1, 0);
+                e.typeTextAndRender("但是发个sdf");
+                for (int i = 0; i < 15; ++i) e.splitParagraphAndRender();
+            }
+            e.relayout();
+            const LayoutResult& lay = e.layout();
+            int inversions = 0;
+            int prev_page = -1;
+            for (const LineBox& lb : lay.lines) {
+                if (lb.page < prev_page) ++inversions;
+                prev_page = lb.page;
+            }
+            expectTrue(inversions > 0, "前提：跨页表里行数组不按页单调（实际 " +
+                                           std::to_string(inversions) + " 处逆序）");
+            // 索引覆盖：每一行恰好出现一次，且出现的那一页就是它自己的页。
+            int covered = 0;
+            int misfiled = 0;
+            for (size_t p = 0; p < lay.page_lines.size(); ++p) {
+                for (int k : lay.page_lines[p]) {
+                    ++covered;
+                    if (lay.lines[static_cast<size_t>(k)].page != static_cast<int>(p)) ++misfiled;
+                }
+            }
+            expectTrue(covered == static_cast<int>(lay.lines.size()) && misfiled == 0,
+                       "页索引把每一行都归到它自己那一页（覆盖 " + std::to_string(covered) + "/" +
+                           std::to_string(lay.lines.size()) + "，错位 " + std::to_string(misfiled) +
+                           "）");
+            int gcovered = 0;
+            int gmisfiled = 0;
+            for (size_t p = 0; p < lay.page_glyphs.size(); ++p) {
+                for (int k : lay.page_glyphs[p]) {
+                    ++gcovered;
+                    if (lay.glyphs[static_cast<size_t>(k)].page != static_cast<int>(p)) ++gmisfiled;
+                }
+            }
+            expectTrue(gcovered == static_cast<int>(lay.glyphs.size()) && gmisfiled == 0,
+                       "页索引把每个字形都归到它自己那一页（覆盖 " + std::to_string(gcovered) +
+                           "/" + std::to_string(lay.glyphs.size()) + "）");
+
+            // 每一页、每一个空段的行，都要有段落标记的墨。空段没有字形，标记是
+            //   它在这一页上唯一画得出来的东西 —— 缺了就是"空行看不见"。
+            e.repaint();
+            int empty_lines = 0;
+            int marked = 0;
+            std::string missing;
+            for (const LineBox& lb : lay.lines) {
+                if (lb.paragraph < 0 || lb.paragraph >= static_cast<int>(e.blocks().size()))
+                    continue;
+                const std::vector<uint32_t>& tx =
+                    e.blocks()[static_cast<size_t>(lb.paragraph)].cp_text;
+                if (!tx.empty() || lb.last_cp != 0) continue;
+                ++empty_lines;
+                const int x = static_cast<int>(lb.inline_origin_pt);
+                const int y = static_cast<int>(lb.bracket_axis_pt - lb.size_pt);
+                if (inkIn(e, lb.page, x, y, x + 14, y + 20) > 0) {
+                    ++marked;
+                } else if (missing.size() < 80) {
+                    missing +=
+                        " p" + std::to_string(lb.page) + "/para" + std::to_string(lb.paragraph);
+                }
+            }
+            expectTrue(empty_lines >= 10,
+                       "前提：表里有一批空段（实际 " + std::to_string(empty_lines) + " 条空行）");
+            expectTrue(marked == empty_lines, "每条空行的段落标记都画在它自己那一页上（" +
+                                                  std::to_string(marked) + "/" +
+                                                  std::to_string(empty_lines) + missing + "）");
+        }
+
+        // (b) 格内两行文字：逐字输入，每一步的页位图都必须等于从零光栅。
+        //     第二行之后行带若被压成零高，这一步会红（旧代码只红在第 14 个字那一步）。
+        {
+            EditorEngine e;
+            expectTrue(e.init({cjkPath, mnPath, latinPath}), "引擎初始化（格内逐字）");
+            e.setConfig(c73);
+            e.setEditMode(EditMode::Document);
+            {
+                NodeTree t;
+                const NodeId sec = t.firstSectionId();
+                t.setText(t.appendChild(sec, NodeKind::TextRun), utf8ToCodepoints("首段"));
+                t.appendChild(sec, NodeKind::ParagraphMark);
+                e.setDocument(t, StyleSheet{});
+            }
+            e.setCaret(0, 2);
+            expectTrue(e.insertTableAndRender(2, 5, false), "插 2x5 表");
+            e.setCaret(1, 0);
+            const std::string line = "asdf asdf asdf";
+            int stale = 0;
+            std::string first_bad;
+            for (size_t i = 0; i < line.size(); ++i) {
+                e.typeTextAndRender(std::string(1, line[i]));
+                const int pages = std::max(1, e.layout().stats.page_count);
+                for (int pg = 0; pg < pages; ++pg) {
+                    const std::string j = e.auditPageJson(pg);
+                    if (j.find("\"diff\":0") != std::string::npos) continue;
+                    ++stale;
+                    if (first_bad.empty()) first_bad = j;
+                }
+            }
+            expectTrue(stale == 0, "格内逐字输入：每一步每一页都与从零光栅相同（不自洽 " +
+                                       std::to_string(stale) + " 次 " + first_bad + "）");
+            // 折出来的第二行必须有墨：行带塌掉时这一条会红。
+            e.relayout();
+            e.repaint();
+            int second_lines = 0;
+            int inked = 0;
+            for (const LineBox& lb : e.layout().lines) {
+                if (lb.paragraph != 1 || lb.first_cp == 0) continue;
+                ++second_lines;
+                const int x0 = static_cast<int>(lb.inline_origin_pt);
+                const int y0 = static_cast<int>(lb.bracket_axis_pt - lb.size_pt);
+                const int x1 = static_cast<int>(lb.inline_origin_pt + lb.inline_end_pt);
+                if (inkIn(e, lb.page, x0, y0, x1 + 2, y0 + 20) > 20) ++inked;
+            }
+            expectTrue(second_lines >= 1, "前提：格内文字折出了第二行（实际 " +
+                                              std::to_string(second_lines) + " 行）");
+            expectTrue(inked == second_lines, "折出来的每一行都有字（" + std::to_string(inked) +
+                                                  "/" + std::to_string(second_lines) + "）");
+        }
+
+        // (c) 反向一半：不在表里的普通段落，逐字输入同样不许留旧墨迹。
+        {
+            EditorEngine e;
+            expectTrue(e.init({cjkPath, mnPath, latinPath}), "引擎初始化（正文逐字）");
+            e.setConfig(c73);
+            NodeTree t;
+            const NodeId sec = t.firstSectionId();
+            t.setText(t.appendChild(sec, NodeKind::TextRun), utf8ToCodepoints(""));
+            t.appendChild(sec, NodeKind::ParagraphMark);
+            e.setDocument(t, StyleSheet{});
+            e.setCaret(0, 0);
+            int stale = 0;
+            for (int i = 0; i < 12; ++i) {
+                e.typeTextAndRender("字");
+                const std::string j = e.auditPageJson(0);
+                if (j.find("\"diff\":0") == std::string::npos) ++stale;
+            }
+            expectTrue(stale == 0,
+                       "正文里逐字输入也一步不留旧墨迹（不自洽 " + std::to_string(stale) + " 次）");
+        }
+    }
+
     std::printf("\n──────────────────────────────\n");
     std::printf("共 %d 项断言，失败 %d 项\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

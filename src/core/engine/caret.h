@@ -303,15 +303,6 @@ public:
     std::vector<PageRect> selectionRectsIn(int first_page, int count) const;
 
     /**
-     * 行盒按页的二分：选区矩形与窗口都要用，放在这里是因为它是行盒查询，不是光标状态。
-     *
-     * @param page 页号
-     * @param lo 写回这一页第一行的下标
-     * @param hi 写回最后一行之后的下标（不含）
-     */
-    void linesOnPage(int page, int* lo, int* hi) const;
-
-    /**
      * 重排之后重新投影一次光标：输入（段, 偏移, 侧别）不变，但排版换了簇表，簇吸附要按
      * 新表再来一遍。收敛 —— 第二次不会再触发重排。
      * @param extend true = 扩展选区

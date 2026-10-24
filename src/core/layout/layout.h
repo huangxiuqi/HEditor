@@ -1501,6 +1501,46 @@ struct LayoutResult {
     std::vector<PlacedTable> placed_tables;
 
     /**
+     * 每页上的行下标（下标 = 页号，值 = lines 里那一行的下标，按流顺序）。
+     *
+     * 行数组按流顺序排，而表格行跨页之后它就不再按页单调：一条高格切到第二页时，
+     * 它的续排行先被追加，同一行其余各格的单行还留在上一页。按页号二分来"取这一页
+     * 的行"因此会漏 —— 漏掉的正是那些格（标记不画、命中判给别人、增量重画的带
+     * 也扫不到它们）。这一份是"页 -> 行"的唯一索引。
+     */
+    std::vector<std::vector<int>> page_lines;
+
+    /**
+     * 每页上的字形下标（同上，值 = glyphs 里的下标，按流顺序）。
+     *
+     * 用途与 page_lines 一样：绘制按页取字形、页指纹按页混字形，都不能再靠
+     * "字形数组按页单调"这条已不成立的不变式去二分。
+     */
+    std::vector<std::vector<int>> page_glyphs;
+
+    /**
+     * 按 lines / glyphs 重建两张页索引表（每次排版收尾，以及"后缀整体平移"之后）。
+     *
+     * O(行数 + 字形数)。行与字形都按流顺序排，页号不保证单调（见 page_lines），
+     * 所以这两张表必须是推出来的，不能按页号二分。
+     */
+    void rebuildPageIndex();
+
+    /**
+     * 第 page 页上的行下标；页号越界时是空表。
+     * @param page 页号
+     * @return 行下标表（按流顺序）
+     */
+    const std::vector<int>& linesOnPage(int page) const;
+
+    /**
+     * 第 page 页上的字形下标；页号越界时是空表。
+     * @param page 页号
+     * @return 字形下标表（按流顺序）
+     */
+    const std::vector<int>& glyphsOnPage(int page) const;
+
+    /**
      * 这一轮排版的账。
      */
     LayoutStats stats;

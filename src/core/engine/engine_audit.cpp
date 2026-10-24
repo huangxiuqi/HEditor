@@ -646,21 +646,19 @@ std::string EditorEngine::auditGlyphPagesJson() const {
         ++ref[static_cast<size_t>(g.page)];
     }
 
-    // 逐页验两条：区间长度等于该页的字形总数（不漏不多），区间内没有别页的字形（不错位）。
+    // 逐页验两条：这一页的字形一个不多一个不少，且表里没有别页的字形（不错位）。
     int bad_pages = 0;
     int first_bad = -1;
     int missing = 0;
     int extra = 0;
     for (int p = 0; p < pages; ++p) {
-        int b = 0;
-        int e = 0;
-        glyphRangeOnPage(p, &b, &e);
+        const std::vector<int>& list = layout_.glyphsOnPage(p);
         const int want = ref[static_cast<size_t>(p)];
         int wrong = 0;
-        for (int k = b; k < e; ++k) {
+        for (int k : list) {
             if (gs[static_cast<size_t>(k)].page != p) ++wrong;
         }
-        const int got = (e - b) - wrong;
+        const int got = static_cast<int>(list.size()) - wrong;
         if (got != want || wrong != 0) {
             ++bad_pages;
             missing += (want > got) ? (want - got) : 0;
