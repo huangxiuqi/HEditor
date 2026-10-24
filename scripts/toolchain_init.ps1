@@ -9,6 +9,8 @@
 # Skia 自己 fetch-gn 钉的是更旧的 2175。所以这一步只校验、不下载，缺了就报错 ——
 # 而且排在最前，免得白等十几分钟下完 emsdk 才发现 gn 没位。
 #
+# 可以反复跑：每一步先认当前状态，能复用就复用；下载坏了按哈希重取，解包不落固定暂存目录。
+#
 # 用法：
 #   powershell -ExecutionPolicy Bypass -File scripts\toolchain_init.ps1
 #   powershell -ExecutionPolicy Bypass -File scripts\toolchain_init.ps1 -SkipEmsdk
@@ -30,6 +32,7 @@ $NinjaDir  = Join-Path $Toolchain 'ninja'
 $NinjaExe  = Join-Path $NinjaDir 'ninja.exe'
 $EmsdkDir  = Join-Path $Toolchain 'emsdk'
 $Emitter   = Join-Path $EmsdkDir 'upstream\emscripten\emscripten-version.txt'
+$EmsdkMark = Join-Path $EmsdkDir '.heditor-emsdk-repo'
 $GnExe     = Join-Path $Toolchain 'gn\out\gn.exe'
 
 # gn 的判据是 --version 的原样输出，它同时含内部版本号与源码 commit 前 12 位。
@@ -54,9 +57,23 @@ function Say([string]$m) { Write-Host "[toolchain] $m" }
 # 速度也慢一个数量级。
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
-# 把 zip 解到一个新目录。目标已存在就报错，不做覆盖 —— 半解包的树比没有更难查。
+# 取包里一个条目直接写成目标文件。不落中间目录，重复跑不会因为残留目录失败。
+function Expand-ZipEntry([string]$Zip, [string]$EntryName, [string]$Dest) {
+    $archive = [System.IO.Compression.ZipFile]::OpenRead($Zip)
+    try {
+        $entry = $archive.Entries |
+            Where-Object { $_.Name -eq $EntryName } |
+            Select-Object -First 1
+        if (-not $entry) { throw "$Zip 里没有 $EntryName" }
+        [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $Dest, $true)
+    } finally {
+        $archive.Dispose()
+    }
+}
+
+# 把 zip 整棵解到指定目录。上次失败留下的半棵树直接丢 —— 留着它只会让下一次重跑更难查。
 function Expand-Zip([string]$Zip, [string]$Dest) {
-    if (Test-Path $Dest) { throw "$Dest 已存在，请先删掉再重跑" }
+    if (Test-Path $Dest) { Remove-Item -Recurse -Force $Dest }
     [System.IO.Compression.ZipFile]::ExtractToDirectory($Zip, $Dest)
 }
 
@@ -70,6 +87,12 @@ function Get-Remote([string]$Url, [string]$Dest) {
     if (-not (Test-Path $Dest) -or (Get-Item $Dest).Length -lt 1024) {
         throw "下载失败或内容过短：$Dest"
     }
+}
+
+# 归档的哈希对得上就说明已有的文件是好的，不必重下。
+function Test-FileSha([string]$Path, [string]$Sha) {
+    if (-not (Test-Path $Path)) { return $false }
+    return ((Get-FileHash -Algorithm SHA256 $Path).Hash.ToLower() -eq $Sha)
 }
 
 # ── 1. gn（只校验）───────────────────────────────────────────
@@ -93,7 +116,7 @@ CIPD 的 gn/gn/windows-amd64 里查不到这个 commit（Skia 自己 fetch-gn �
 两条路，都要人来做：
   从已经装好的机器上拷 .toolchain\gn\out\gn.exe（2.3 MB），拷完跑 gn --version 复核；
   或者现编：clone 出 gn、检出 $GnCommit，python build/gen.py 之后用 ninja -C out gn，
-  编译环境与 native 那套相同（CMakeUserPresets.json 里的 INCLUDE / LIB / Path）。
+  编译环境与 native 那套相同（先跑 .\scripts\msvc_env.ps1 摆好 INCLUDE / LIB / Path）。
 两条路做完都重跑本脚本，版本对上才算数。
 "@ -ForegroundColor Yellow
     throw "gn 版本校验未通过"
@@ -113,17 +136,15 @@ if ($have -eq $NinjaVersion) {
 } else {
     if ($have) { Say "ninja 是 $have，要换成 $NinjaVersion" }
     $zip = Join-Path $env:TEMP "heditor-ninja-$NinjaVersion.zip"
-    Get-Remote -Url $NinjaUrl -Dest $zip
-    $got = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
-    if ($got -ne $NinjaSha) {
-        throw "ninja 包校验失败：$got，应为 $NinjaSha"
+    if (Test-FileSha -Path $zip -Sha $NinjaSha) {
+        Say "复用已下载的包（哈希一致）"
+    } else {
+        Get-Remote -Url $NinjaUrl -Dest $zip
+        $got = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
+        if ($got -ne $NinjaSha) { throw "ninja 包校验失败：$got，应为 $NinjaSha" }
     }
-    $stage = Join-Path $env:TEMP "heditor-ninja-$NinjaVersion"
-    Expand-Zip -Zip $zip -Dest $stage
-    $exe = Join-Path $stage 'ninja.exe'
-    if (-not (Test-Path $exe)) { throw "解包后没有 ninja.exe，包结构可能变了" }
     New-Item -ItemType Directory -Force -Path $NinjaDir | Out-Null
-    Copy-Item -Path $exe -Destination $NinjaExe -Force
+    Expand-ZipEntry -Zip $zip -EntryName 'ninja.exe' -Dest $NinjaExe
     $have = Get-NinjaVersion
     if ($have -ne $NinjaVersion) { throw "ninja 装完报 $have，应为 $NinjaVersion" }
     Say "ninja $have 就位"
@@ -146,29 +167,39 @@ if ($SkipEmsdk) {
         if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
             throw "PATH 上找不到 python。emsdk 的安装器是 python 脚本，它自带的 python 要装完才有"
         }
-        if ($have) {
-            # 不删旧树：换版本失败时还得能退回去，而且删除是不可逆的。
-            $aside = Join-Path $Toolchain "emsdk-$have"
-            Say "已有 emsdk $have，改名保留为 $aside"
-            if (Test-Path $aside) { throw "$aside 已存在，请先自行处理" }
-            Rename-Item -Path $EmsdkDir -NewName (Split-Path $aside -Leaf)
-        }
 
-        # 安装器本身按 commit 取，不校验哈希：GitHub 对同一个 commit 前后两次打包出来的
-        # zip 并不逐字节相同，拿哈希当判据会误报。身份由 commit 与 SDK 版本号两样确定。
-        $zip = Join-Path $env:TEMP "heditor-emsdk-$EmsdkRepo.zip"
-        Get-Remote -Url $EmsdkUrl -Dest $zip
-        $stage = Join-Path $env:TEMP "heditor-emsdk-$EmsdkRepo"
-        Expand-Zip -Zip $zip -Dest $stage
-        $inner = Join-Path $stage "emsdk-$EmsdkRepo"
-        if (-not (Test-Path $inner)) { throw "解包结构不认识：$stage" }
-        New-Item -ItemType Directory -Force -Path $Toolchain | Out-Null
-        Move-Item -Path $inner -Destination $EmsdkDir
+        # 安装器在不在位，看它自己留的标记；标记对得上就只补 install，能接着上次的下载继续。
+        $markerOk = (Test-Path $EmsdkMark) -and
+            ((Get-Content $EmsdkMark -Raw).Trim() -eq $EmsdkRepo)
+        if ($markerOk) {
+            Say "安装器已在位（commit $EmsdkRepo），接着装 SDK"
+        } else {
+            if (Test-Path $EmsdkDir) {
+                # 不是我们钉的那一版，或者是更早留下的残骸：改名挪开，不删（可能还能退回去）。
+                $suffix = if ($have) { $have } else { 'incomplete' }
+                $aside = Join-Path $Toolchain "emsdk-$suffix"
+                if (Test-Path $aside) { $aside = "$aside-" + (Get-Date -Format 'yyyyMMdd-HHmmss') }
+                Say "把现有的 emsdk 挪到 $aside"
+                Rename-Item -Path $EmsdkDir -NewName (Split-Path $aside -Leaf)
+            }
+
+            # 安装器按 commit 取，不校验哈希：GitHub 对同一个 commit 前后两次打包出来的
+            # zip 并不逐字节相同，拿哈希当判据会误报。身份由 commit 与 SDK 版本号两样确定。
+            $zip = Join-Path $env:TEMP "heditor-emsdk-$EmsdkRepo.zip"
+            Get-Remote -Url $EmsdkUrl -Dest $zip
+            $stage = Join-Path $env:TEMP "heditor-emsdk-$EmsdkRepo"
+            Expand-Zip -Zip $zip -Dest $stage
+            $inner = Join-Path $stage "emsdk-$EmsdkRepo"
+            if (-not (Test-Path $inner)) { throw "解包结构不认识：$stage" }
+            New-Item -ItemType Directory -Force -Path $Toolchain | Out-Null
+            Move-Item -Path $inner -Destination $EmsdkDir
+            Set-Content -Path $EmsdkMark -Value $EmsdkRepo -NoNewline -Encoding ascii
+        }
 
         # 安装与激活分开：install 只落盘，activate 才写 .emscripten（emcc 找节点那份配置）。
         Push-Location $EmsdkDir
         try {
-            Say "emsdk install $EmsdkSdk（约 2 GB，耗时十几分钟）"
+            Say "emsdk install $EmsdkSdk（约 2 GB，耗时十几分钟；中断了重跑会接着下）"
             & python emsdk.py install $EmsdkSdk
             if ($LASTEXITCODE -ne 0) { throw "emsdk install 失败（退出码 $LASTEXITCODE）" }
             Say "emsdk activate $EmsdkSdk"

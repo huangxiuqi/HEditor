@@ -8,13 +8,14 @@
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/${presetName}",
       "cacheVariables": {
-        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "CMAKE_MAKE_PROGRAM": "${sourceDir}/.toolchain/ninja/ninja.exe"
       }
     },
     {
       "name": "native",
       "displayName": "原生 Release（验证宿主）",
-      "description": "MSVC + Ninja。要先有 MSVC 工具链环境与 x64 版 Skia 静态库（scripts/build_skia_native.ps1）；本机用 CMakeUserPresets.json 里的 native-local。",
+      "description": "MSVC + Ninja。shell 里先 . scripts/msvc_env.ps1（它现找 VS 与 SDK 并摆好 INCLUDE / LIB / Path，等价 vcvars64），x64 版 Skia 静态库由 scripts/build_skia_native.ps1 出。",
       "inherits": "base",
       "binaryDir": "${sourceDir}/build/native",
       "cacheVariables": {
@@ -52,8 +53,7 @@
       "inherits": "wasm",
       "binaryDir": "${sourceDir}/build/wasm-debug",
       "cacheVariables": {
-        "HEDITOR_WASM_DEBUG": "ON",
-        "CMAKE_MAKE_PROGRAM": "${sourceDir}/.toolchain/ninja/ninja.exe"
+        "HEDITOR_WASM_DEBUG": "ON"
       }
     }
   ],

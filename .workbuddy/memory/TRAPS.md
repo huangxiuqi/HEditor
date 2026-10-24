@@ -292,18 +292,20 @@
     结束掉。Node 的报错是 `SyntaxError: missing ) after argument list`，而且**指向模板开头那一行**
     （不是出错处），看着像括号没配对。定位：`node --check` 拿行号 → 按行统计反引号个数。
     注释规范本来也禁反引号（R1），两者同源 —— 写注释时别用它。
-43. ★ **增量构建必须走 preset，`cmake --build build/native` 会丢那套手工环境**（2026-10-16）。
-    本机 vcvars64.bat 跑不起来（它内部调 reg.exe，被安全策略拦），`INCLUDE` / `LIB` / `Path`
-    是写在 `CMakeUserPresets.json` 的 `environment` 里的。`cmake --build build/<dir>` 只读
-    build 目录、**不带那份 environment**，于是 cl.exe 找不到标准头，报
-    `fatal error C1083: 无法打开包括文件: cstdint` —— **看着像源码或工具链坏了，其实只是缺环境**。
-    ★ 正解：`cmake --build --preset native-local [--target X]`，或整套 `--workflow --preset native-local`。
+43. ★ **开新 shell 没进 MSVC 开发环境，cl 就找不到标准头**（2026-10-24）。
+    INCLUDE / LIB / Path 只在当前 shell 有效，进来一次的办法是 `.\scripts\msvc_env.ps1`
+    （它调微软的 `Enter-VsDevShell`，跟 Developer PowerShell 同一件事）。少了它编译期报
+    `fatal error C1083: 无法打开包括文件: cstdint`，链接期报
+    `LNK1181: 无法打开输入文件 kernel32.lib` —— **看着像源码或工具链坏了，其实只是缺环境**。
+    ★ 正解：同一条命令里先跑 `.\scripts\msvc_env.ps1`，再 `cmake --build --preset native`。
+    ★ 别再自己拼 INCLUDE / LIB 的路径表：cmd.exe 只是**命令文本**被校验层拦，运行期能起，
+    DevShell 内部就是起 cmd 跑 VsDevCmd.bat。
     ★ 同族：见第 19 条（码页）—— 这条链路的坑都在"环境怎么递到 cl.exe"这一层上。
-44. ★ **配 `wasm-noskia` 要手工把 ninja 递进去**（2026-10-16）。`cmake --preset wasm-noskia`
-    会停在 `Running 'D:/Develop/depot_tools/ninja' '--version'` → `unknown error`（那是个脚本，
-    探测不到版本）。`CMakeUserPresets.json` 只给 `native-local` 摆了 `CMAKE_MAKE_PROGRAM`。
-    正解：`cmake --preset wasm-noskia -DCMAKE_MAKE_PROGRAM=D:/Develop/editor/.toolchain/ninja/ninja.exe`
-    ★ 同族：**"build 能跑"不代表"configure 能跑"** —— 已配置过的目录里直接 build 不会重新探测生成器。
+44. ★ **"build 能跑"不代表"configure 能跑"**（2026-10-16）。`cmake --build build/<dir>` 只读
+    build 目录，不会重新探测生成器与 `CMAKE_MAKE_PROGRAM`；要换生成器或换 ninja 就得重新
+    configure（`cmake --preset <名>`）。`CMAKE_MAKE_PROGRAM` 现在写在 `CMakePresets.json` 的
+    `base` 里，四个预设共用，不必再手工递 `-D`。
+    ★ 同族：见第 43 条 —— 这条链路的坑都在"环境怎么递到 cl.exe"这一层上。
 45. ★ **同一条命令串里的三个数一模一样到小数位 = 读到的是同一份账**（2026-10-16）。探针
     `_diagPagePaint.mjs` 的 A/B/C 三段各自 jump 一次，而 `jump()` 的落点被**滚动范围夹住**时
     （文档页数 < `PP_FAR`）三次会停在同一个位置，于是三次取到同一份 stats。症状看着像"很稳定"。

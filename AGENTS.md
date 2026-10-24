@@ -123,12 +123,14 @@ function blitFrame(px, w) {}
   两套都要 `.toolchain` 下的工具链（emsdk / gn / ninja），换机器先跑
   `powershell -ExecutionPolicy Bypass -File scripts\toolchain_init.ps1`：ninja 与 emsdk
   由它下载并校验，gn 只校验版本（那一份没有可下载的制品，见 `docs/依赖与工具链管理.md` 5.2）。
-  `native` 需要先有 MSVC 工具链环境与 x64 版 Skia 静态库
-  （`scripts\build_skia_native.ps1`，产物 `.toolchain/skia/.../out/win-x64/skia.lib`）。
-  本机 `vcvars64.bat` 跑不起来（它内部调 `reg.exe`，被安全策略拦），所以那份环境
-  摊在**不入库**的 `CMakeUserPresets.json` 里 —— 名字带 `-local` 后缀的就是它。
-- 原生：`cmake --workflow --preset native-local`（配置 + 构建 + 跑三个断言套件）。
-  只要构建 `cmake --build --preset native-local`；只要单测 `ctest --preset native-local`。
+  `native` 还需要 MSVC 环境与 x64 版 Skia 静态库（`scripts\build_skia_native.ps1`，产物
+  `.toolchain/skia/.../out/win-x64/skia.lib`）。MSVC 环境由 `.\scripts\msvc_env.ps1` 进：
+  它用 vswhere 找到 VS 实例，再调微软自己的 `Enter-VsDevShell`
+  （`Common7\Tools\Microsoft.VisualStudio.DevShell.dll`）—— 跟开始菜单那个
+  「Developer PowerShell for VS 2022」是同一件事，环境由 VS 自己算，仓库里没有一个版本号目录。
+  **不需要也不再有 `CMakeUserPresets.json`。**
+- 原生：`cmake --workflow --preset native`（配置 + 构建 + 跑三个断言套件）。
+  只要构建 `cmake --build --preset native`；只要单测 `ctest --preset native`。
 - WASM：`cmake --workflow --preset wasm`（工具链取仓库内的 `.toolchain/emsdk`）。
 - 原生渲染出图（验证台要用）：`build/native/heditor_native.exe --out-dir out`。
 - 浏览器端测试（Playwright，TS）：`cd web && npm test`。默认跑 Vite 源码直连，

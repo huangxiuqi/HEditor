@@ -24,10 +24,13 @@
   后拆类**。`demo/`（`heditor_demo`）放样例文书；`third_party/` 只有 `harfbuzz`。
 
 ## 构建与验证（本机）
-- ★ **构建入口是标准 CMake 预设**，不再是包装脚本。`CMakePresets.json` 入库，装本机工具链环境的那半在
-  **不入库**的 `CMakeUserPresets.json`（名字带 `-local` 后缀）：
-  `cmake --preset native-local && cmake --build --preset native-local`（只要编译）、
-  `cmake --workflow --preset native-local`（配置 + 构建 + 跑三个断言套件）、
+- ★ **构建入口是标准 CMake 预设**，不再是包装脚本。`CMakePresets.json` 入库且不含任何本机
+  路径；MSVC 环境由 `.\scripts\msvc_env.ps1` 进 —— 它用 vswhere 找实例、调微软
+  自己的 `Enter-VsDevShell`（`Common7\Tools\Microsoft.VisualStudio.DevShell.dll`），跟开始
+  菜单的「Developer PowerShell for VS 2022」是同一件事。
+  **`CMakeUserPresets.json` 不再使用**（文件已删，`.gitignore` 里那条留着，防止旧副本被提交回来）。
+  `cmake --preset native && cmake --build --preset native`（只要编译）、
+  `cmake --workflow --preset native`（配置 + 构建 + 跑三个断言套件）、
   `cmake --workflow --preset wasm`。★ 2026-10-13 之前那四个包装脚本
   （`build_native.ps1` / `build_wasm.ps1` / `_msvc_env.ps1` / `verify_header_deps.ps1`）**已全部删除**，
   别再找它们；`cmake --list-presets` 可查全部预设名。
@@ -101,7 +104,7 @@
   "页面跑的到底是哪一版当场可判"有意换来的，别改成缓存持久（那会让时间戳停在首次配置）。
 - **`cmake --workflow --preset wasm` 稳态 98 s**：只有 2 个构建步骤（`wasm_main.cpp.o` + emcc 链接），
   时间几乎全在链接上。
-- **`cmake --workflow --preset native-local` 稳态 81 s**（配置 2 s + 构建 2 步 + 套件 60.6 s，另加
+- **`cmake --workflow --preset native` 稳态 81 s**（配置 2 s + 构建 2 步 + 套件 60.6 s，另加
   `cmake --build` 自己的 `GLOB CONFIGURE_DEPENDS` 预检查）。构建那 2 步恒定是
   `native_main.cpp.obj` 重编 + 链接（由上面那条时间戳决定）；`tests/probe_engine_size.cpp` 只在
   自己源码变了时才编 —— `heditor_abi_probe` 不吃那个宏。测试预设带 `verbosity: verbose` ⇒ 日志约

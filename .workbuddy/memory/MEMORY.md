@@ -12,8 +12,11 @@
 - native `ctest --preset native` 4/4：`shaping_and_layout` 151 / `edit_and_caret` 1713 /
   `doc_model` 846 / `rev_layer` 338（[24] 每活节点 ≤ 96 字节）。整套约 110 s。
 - 单节调试用 `HEDITOR_TEST_ONLY="70,72"`；`edit_and_caret` 里 `init` 每次装字体约 56 ms。
-- 构建：preset `native` / `native-local` / `wasm` / `wasm-debug`。**本机 bash 没有 MSVC 环境**：
-  bash 里 `cmake --build` 能跑（preset 自带 INCLUDE/LIB/Path），别去调 vcvars（`reg.exe` 被拦）。
+- 构建：preset `native` / `native-debug` / `wasm` / `wasm-debug`，预设里**不含本机路径**。
+  native 之前先 `.\scripts\msvc_env.ps1`（vswhere 找实例 + 调微软 `Enter-VsDevShell`，
+  与开始菜单的 Developer PowerShell 同一件事）；`CMakeUserPresets.json` 已删、不再需要。
+  **cmd 只是命令文本被校验层拦，运行期可跑**（DevShell 内部就起 cmd），所以别再手拼
+  INCLUDE / LIB / Path 那种路径表。
 - **`.toolchain` 三件换机器先跑 `scripts/toolchain_init.ps1`**（gn 排最前，fail-fast）：gn 钉
   `2222 (3c7785ec2008)` 但**只校验不下载** —— 那一份没有可下载的制品（CIPD 的
   `git_revision:3c7785ec…` 回 no such tag，Skia 自己的 fetch-gn 是更旧的 2175），缺了只能拷

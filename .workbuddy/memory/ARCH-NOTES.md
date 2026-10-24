@@ -9,7 +9,7 @@
 - 判据必须含**反向一半**；**web（wasm）是主线**，native 只当单测与审计宿主；**基准一律以 wasm 为准**；`memory/` 只追加。
 - 两套 Web 宿主：`app.js`（单线程，**行为法器，冻结**）与 `worker_host.js` + `engine_worker.js`（产品主线）；两文件各自包 IIFE（顶层重名 = 整份 SyntaxError）；错误必须降级到用户；命名 `heditor` / `window.__heditor`。
 - 注释权威 = 根 `AGENTS.md` + `scripts/lint_comments.py`（R1~R12：禁反引号 / 星号强调 / 装饰线 / 圈号与编号记号 / 流水账与俚语，块注释 ≤12 行，声明处必须块注释）；**改句子必须手改**。★★ **违规必须为 0，不设基线** —— 2026-10-17 一次清掉积压的 147 处（反引号 16 / 装饰线 14 / `**` 61 / `★` 28 / 单行 `/** */` 13 / 圈号 11 / 措辞 13 / 超长块 1）。基线记账法只会让数字慢慢往上爬：那 147 处就是这么积起来的。
-- 增量构建走 `--preset native-local`（手工摆 INCLUDE 会报 C1083）。文档防覆盖：`docs/文档模型设计.md` `wc -l` = **2814**，必须为 0：`Block[]` / `valueRef` / `悬空引用` / `EditPolicy`，LF。
+- 增量构建走 `--preset native`（先 `.\scripts\msvc_env.ps1`；没有这个环境会报 C1083）。文档防覆盖：`docs/文档模型设计.md` `wc -l` = **2814**，必须为 0：`Block[]` / `valueRef` / `悬空引用` / `EditPolicy`，LF。
 
 ## 核心机制
 - 光标真源 = `Range selection_{anchor, focus}`；`caret()` 是 focus 的投影，写入口只有 `setCaretRel`；重编译必须落基 —— anchor 与 focus 两个读数都要在 `block_flow_.assign` 之前取。
