@@ -2148,3 +2148,13 @@
       ★ 纪律：凡是**要交给用户用 `powershell -File` 跑**的入口，自测必须在 5.1 下再跑一遍
       （`powershell -ExecutionPolicy Bypass -File ...`）；"我这台 7 上过了"不算数。
       ★ 同族：第 19 条（码页）、第 43 条（MSVC 环境）—— 坑都在"命令/环境怎么递到子进程"。
+
+219. **脚本自己是 CRLF 时，多行 here-string 比 tar 解出来的 LF 文件恒不匹配**（2026-10-25）。
+      `build_skia_wasm.ps1` 的 `Patch-File` 用 here-string 里的整段原文 `Contains` 目标文件：
+      本仓库的 `.ps1` 是 LF，用户那台检出成 CRLF → `$old` 每行带 `\r`、目标来自 tar 恒为
+      `\n`，于是两个**多行**补丁全落空（单行那条没事），报"补丁点找不到（工具链改用
+      emcc.exe）—— 上游可能改了结构"，把人往上游引；实测同一份函数 CRLF 版必失败、LF 版通过。
+      修法：`ReadAllText` 后先 `-replace "\r\n","\n"`，`$old`/`$new` 同样归一，写回一律 LF。
+      判据：真树两个 gn 文件换回原版 + 整份脚本的 CRLF 副本 → 三个补丁全打上，产出与旧成品
+      **逐字节一致**（`Get-FileHash`），ninja `no work to do`。
+      ⇒ 凡"拿脚本里的字面文本去匹配外部文件"的地方，匹配前先归一行尾。

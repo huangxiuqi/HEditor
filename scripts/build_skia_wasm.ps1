@@ -105,10 +105,16 @@ if (-not (Test-Path $EmsdkLink)) {
 #   "补丁点找不到"的假故障 —— 本机真栽过：磁盘上的 BUILD.gn 是旧脚本
 #   prepare_skia.ps1 打的补丁，脚本改名成 build_skia_wasm.ps1 之后，
 #   Contains($new) 与 Contains($old) 同时为假，脚本直接抛错。
+#   ★ 行尾先归一到 LF 再比。脚本自己可能是 CRLF（Windows 上检出仓库就是这样，本机是 LF），
+#   而目标文件来自 tar、恒为 LF：$old 里带着 \r 就永远匹配不上，报出来的却是
+#   "补丁点找不到 —— 上游可能改了结构"，把人往上游改结构上带（2026-10-25 真栽过：
+#   F: 那台用 pwsh 跑，脚本是 CRLF，两个多行补丁全落空）。
 function Patch-File([string]$path, [string]$old, [string]$new, [string]$tag) {
-    $text = [System.IO.File]::ReadAllText($path)
+    $text = ([System.IO.File]::ReadAllText($path)) -replace "`r`n", "`n"
     $marker = "# heditor-patch: $tag"
     if ($text.Contains($marker)) { Say "已打过补丁：$tag"; return }
+    $old = $old -replace "`r`n", "`n"
+    $new = $new -replace "`r`n", "`n"
     if (-not $text.Contains($old)) {
         throw "补丁点找不到（$tag）：$path —— 上游可能改了结构；若该文件已被旧版脚本 patch 过，" +
               "从 .toolchain/skia/skia-$SkiaCommit.tar.gz 里取原版覆盖后再跑。"
