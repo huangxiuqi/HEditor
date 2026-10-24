@@ -94,9 +94,49 @@ export interface Stack {
 }
 
 /**
+ * 会开面板的按钮（按下去在它下面弹出一块面板，比如表格尺寸的网格）。
+ *
+ * 与 Choice 的分工：取值是一个离散档位就用下拉框，取值是一块"要看着挑"的版面
+ *   （行列数、取色板）就用面板。两者都不该塞进 Button 里靠 act 特判。
+ */
+export interface Menu {
+  /**
+   * 稳定标识（同上）。
+   */
+  act: string;
+
+  /**
+   * 按钮的名字（大按钮显示在图标下面）。
+   */
+  label: string;
+
+  /**
+   * 图标名（同上）。
+   */
+  icon?: string;
+
+  /**
+   * 大按钮（同上）。
+   */
+  big?: boolean;
+
+  /**
+   * 回显：返回真表示"按下了"。
+   */
+  on?(): boolean;
+
+  /**
+   * 造面板内容。
+   * @param dismiss 关掉面板（选完就关，与点空白关闭同一条时机）
+   * @returns 面板组件
+   */
+  panel(dismiss: () => void): Component;
+}
+
+/**
  * 组里的一项。
  */
-export type Item = Button | Choice | Stack;
+export type Item = Button | Choice | Stack | Menu;
 
 /**
  * 一组同类动作（组名显示在组的下面）。
@@ -217,4 +257,13 @@ export function isChoice(item: Item): item is Choice {
  */
 export function isStack(item: Item): item is Stack {
   return Array.isArray((item as Stack).items);
+}
+
+/**
+ * 是不是会开面板的按钮。
+ * @param item 组里的一项
+ * @returns 真 = 会开面板
+ */
+export function isMenu(item: Item): item is Menu {
+  return typeof (item as Menu).panel === 'function';
 }

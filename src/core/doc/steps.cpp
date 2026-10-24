@@ -187,7 +187,7 @@ void insertTextAt(NodeTree& tree, const FlowIndex& idx, FlowPos at,
  * 把一个段落标记插到流位置 at 上。落在文本中间时先把文本切开，标记插在两半之间。
  */
 void insertParaMarkAt(NodeTree& tree, const FlowIndex& idx, FlowPos at, const ParaFormatPatch& para,
-                      const std::string& style_ref) {
+                      const std::string& style_ref, const CharFormat& marks) {
     const Pos p = idx.posAt(at);
     const Node* n = tree.find(p.container);
     if (n == nullptr) return;
@@ -224,6 +224,7 @@ void insertParaMarkAt(NodeTree& tree, const FlowIndex& idx, FlowPos at, const Pa
     if (mark == kInvalidNodeId) return;
     tree.find(mark)->para = para;
     tree.find(mark)->styleRef = style_ref;
+    tree.find(mark)->marks = marks;
 }
 
 /**
@@ -527,6 +528,7 @@ ParaMarkBuild makeRemoveParaMark(const NodeTree& tree, const FlowIndex& idx, Flo
     s.at = at;
     s.para = n->para;
     s.styleRef = n->styleRef;
+    s.marks = n->marks;
     out.step = Step{s};
     out.ok = true;
     return out;
@@ -689,7 +691,8 @@ StepResult canApply(const NodeTree& tree, const FlowIndex& idx, const Step& step
                        }
                        // 记的原值要与文档当前值一致，否则这一步是在与别的编辑抢同一枚标记
                        // （或者步骤被重放到了别的文档上）。拒绝比改错强。
-                       if (!sameParaPatch(n->para, s.before) || n->styleRef != s.beforeStyleRef) {
+                       if (!sameParaPatch(n->para, s.before) || n->styleRef != s.beforeStyleRef ||
+                           !(n->marks == s.beforeMarks)) {
                            r.error = "改段落格式：当前值与步骤记的原值不符（步骤过期了）";
                            return;
                        }
@@ -943,7 +946,7 @@ StepResult applyStep(NodeTree& tree, const Step& step) {
                 for (const Piece& p : s.content.pieces) {
                     const FlowIndex here = indexOf(tree);
                     if (p.kind == PieceKind::ParaMark) {
-                        insertParaMarkAt(tree, here, pos, p.para, p.styleRef);
+                        insertParaMarkAt(tree, here, pos, p.para, p.styleRef, p.marks);
                     } else {
                         insertTextAt(tree, here, pos, p.cps, p.marks, p.styleRef);
                     }
@@ -954,7 +957,9 @@ StepResult applyStep(NodeTree& tree, const Step& step) {
                 std::string err;
                 eraseRange(tree, idx, s.begin, s.end, &err);
             },
-            [&](const InsertParaMark& s) { insertParaMarkAt(tree, idx, s.at, s.para, s.styleRef); },
+            [&](const InsertParaMark& s) {
+                insertParaMarkAt(tree, idx, s.at, s.para, s.styleRef, s.marks);
+            },
             [&](const RemoveParaMark& s) {
                 const Pos p = idx.posAt(s.at);
                 const Node* n = tree.find(p.container);
@@ -965,6 +970,7 @@ StepResult applyStep(NodeTree& tree, const Step& step) {
                 if (n == nullptr) return;
                 n->para = s.para;
                 n->styleRef = s.styleRef;
+                n->marks = s.marks;
             },
             [&](const SetRun& s) {
                 Node* n = tree.find(s.id);
@@ -1078,6 +1084,7 @@ Step invertStep(const Step& step) {
                               x.at = s.at;
                               x.para = s.para;
                               x.styleRef = s.styleRef;
+                              x.marks = s.marks;
                               return Step{x};
                           },
                           [](const RemoveParaMark& s) -> Step {
@@ -1085,6 +1092,7 @@ Step invertStep(const Step& step) {
                               x.at = s.at;
                               x.para = s.para;
                               x.styleRef = s.styleRef;
+                              x.marks = s.marks;
                               return Step{x};
                           },
                           [](const SetParaMarkFormat& s) -> Step {
@@ -1092,8 +1100,10 @@ Step invertStep(const Step& step) {
                               x.id = s.id;
                               x.para = s.before;
                               x.styleRef = s.beforeStyleRef;
+                              x.marks = s.beforeMarks;
                               x.before = s.para;
                               x.beforeStyleRef = s.styleRef;
+                              x.beforeMarks = s.marks;
                               return Step{x};
                           },
                           [](const SetRun& s) -> Step {

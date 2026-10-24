@@ -143,6 +143,10 @@ export function createDragSelect(opts: DragSelectOptions): DragSelect {
   let pending: DragPoint | null = null; // 最近一个待处理的文档坐标（合并用）
   let inFlight = false; // 有一次命中还没回来
   let waiters: Array<() => void> = []; // settled() 的等待者
+  // 抬手之后还要把已经排队的那个点落地，所以"收尾"分两步：先摘监听（不再接受新点），
+  //   等队列空了再清状态。closing 标记这两步之间；gen 让旧的一次按下作废在途的回包。
+  let closing = false;
+  let gen = 0;
 
   function flushSettled(): void {
     const w = waiters;
@@ -156,7 +160,8 @@ export function createDragSelect(opts: DragSelectOptions): DragSelect {
 
   // 诊断读数：探针与状态栏用它看"现在到底在拖什么"。
   function state(): DragState {
-    if (!st) {
+    // 收尾中（抬手了、最后一个点还在飞）对外就是"没在拖"：用户已经松手了。
+    if (!st || closing) {
       return {
         active: false,
         armed: false,
@@ -199,14 +204,25 @@ export function createDragSelect(opts: DragSelectOptions): DragSelect {
     const pt = pending;
     pending = null;
     inFlight = true;
+    const g = gen;
     const done = (hit: Hit | null): void => {
+      // 这一次按下已经作废（又按了一次、或者换了文档）：回包不能再落到新的选区上。
+      if (g !== gen) return;
       inFlight = false;
       if (st && hit) {
         opts.extendTo(hit);
         st.extends++;
       }
-      if (pending) pump();
-      else if (!raf) flushSettled();
+      if (pending) {
+        pump();
+        return;
+      }
+      if (raf) return;
+      if (closing) {
+        closing = false;
+        st = null;
+      }
+      flushSettled();
     };
     let r: Hit | null | Promise<Hit | null>;
     try {
@@ -335,7 +351,22 @@ export function createDragSelect(opts: DragSelectOptions): DragSelect {
     ev.preventDefault();
   }
 
-  function onUp(): void {
+  /**
+   * 抬手。
+   *
+   * 抬手点算最后一次移动：移动与抬手之间可能还有一次命中在飞（Worker 宿主上那是
+   *   一次往返），只认已经回来的那个点，选区就停在抬手之前那一格上 —— 表象是
+   *   "拖到这儿松手、选中却短一截"。取消类事件（pointercancel）不补这一点：
+   *   取消表示手势作废，不表示指针停在那里。
+   * @param ev 收尾事件
+   */
+  function onUp(ev: Event): void {
+    if (!st) return;
+    const release = ev.type === 'mouseup' || ev.type === 'pointerup';
+    if (release && st.armed && st.moved) {
+      const m = ev as MouseEvent;
+      applyAt(m.clientX, m.clientY);
+    }
     end();
   }
 
@@ -355,18 +386,35 @@ export function createDragSelect(opts: DragSelectOptions): DragSelect {
     if (st) ev.preventDefault();
   }
 
-  function end(): void {
-    if (!st) return;
-    st = null;
-    if (raf) {
-      cancelAnimationFrame(raf);
-      raf = 0;
-    }
+  /**
+   * 摘监听、停自动滚动。
+   *
+   * 只摘输入，不动队列：抬手与最后一次移动之间排着的那个点还要落地。
+   */
+  function detach(): void {
     window.removeEventListener('mousemove', onMove, true);
     for (const t of END_EVENTS) window.removeEventListener(t, onUp, true);
     window.removeEventListener('dragstart', onDragStart, true);
     window.removeEventListener('blur', onWindowBlur);
-    flushSettled();
+    if (raf) {
+      cancelAnimationFrame(raf);
+      raf = 0;
+    }
+  }
+
+  /**
+   * 收尾。
+   * @param force 立刻作废（新手势接管时用：旧手势排着的点不再落地）
+   */
+  function end(force = false): void {
+    if (!st) return;
+    detach();
+    closing = true;
+    if (force || (!inFlight && !pending)) {
+      closing = false;
+      st = null;
+      flushSettled();
+    }
   }
 
   /**
@@ -380,7 +428,11 @@ export function createDragSelect(opts: DragSelectOptions): DragSelect {
    *   命中回来再由宿主调 arm() 补上那半句。
    */
   function begin(ev: { clientX: number; clientY: number }, armed?: boolean): void {
-    end();
+    // 上一次按下直接作废（含它还在飞的那个点）：新手势从这一下重新算。
+    end(true);
+    ++gen;
+    pending = null;
+    inFlight = false;
     st = {
       armed: !!armed,
       moved: false,

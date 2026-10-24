@@ -559,6 +559,20 @@ private:
                 applyParaFormatToBlock(
                     *sheet_, mp.style, mp.para, mark->id, &pb.spec,
                     [this](const CompileDiagnostic& d) { out_.diagnostics.push_back(d); });
+                // 空段落的字符格式只挂在段落标记上（理由见 compile.cpp 同一处）。
+                if (pb.spec.cp_text.empty()) {
+                    const CharFormat& m = mp.marks;
+                    if (m.font_index.has_value()) pb.spec.font_index = *m.font_index;
+                    if (m.size.has_value() && m.size->kind == LengthKind::Abs) {
+                        pb.spec.size_pt = static_cast<float>(emuToPt(m.size->abs_emu));
+                    }
+                    if (m.color.has_value()) pb.spec.color = *m.color;
+                    if (m.bold.has_value()) {
+                        pb.spec.weight = *m.bold ? kWeightBold : kWeightRegular;
+                    }
+                    if (m.italic.has_value()) pb.spec.italic = *m.italic;
+                    if (m.underline.has_value()) pb.spec.underline = *m.underline;
+                }
             }
             // 段落默认字符格式就是刚解析出来的那组块级字段。run 以它为底、三层解析盖在上面。
             const FormatRun para_default = pb.spec.wholeRun();

@@ -1677,22 +1677,27 @@ bool EditorEngine::hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* 
     const LineBox* best = nullptr;
     float best_d = 1e30f;
     float best_dx = 1e30f;
+    int best_rank = 2;
     for (const LineBox& lb : layout_.lines) {
         float bp = 0.0f;
         float lo = 0.0f;
         float hi = 0.0f;
+        float local_bp = 0.0f;  // 与行盒同一个页内口径：判"点是否落在格子里"要用它
         if (lb.vertical) {
             bp = x_pt_doc;
+            local_bp = x_pt_doc;
             lo = lb.block_lo_pt;
             hi = lb.block_hi_pt;
         } else if (cont) {
             const float base = static_cast<float>(lb.page) * static_cast<float>(step_px);
             bp = y_pt_doc * zoom;
+            local_bp = (bp - base) / zoom;
             lo = base + lb.block_lo_pt * zoom;
             hi = base + lb.block_hi_pt * zoom;
         } else {
             if (lb.page != page) continue;
             bp = local_y;
+            local_bp = local_y;
             lo = lb.block_lo_pt;
             hi = lb.block_hi_pt;
         }
@@ -1706,7 +1711,19 @@ bool EditorEngine::hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* 
                                                          : (lb.inline_origin_pt + lb.inline_end_pt);
         const float ipos = lb.vertical ? y_pt_doc : x_pt_doc;
         const float dx = (ipos < a0) ? (a0 - ipos) : (ipos > a1 ? ipos - a1 : 0.0f);
-        if (d < best_d - 0.01f || (std::fabs(d - best_d) <= 0.01f && dx < best_dx)) {
+        // 落在某个格的框内时，别的格的行盒一概不参选。格的纵向范围是整格（含行高
+        //   撑出来的空白），所以"点空格子的下半部分"仍归这一格，而不是跳到同一行里
+        //   行盒更多的那一格上 —— 按块轴距离比，多行格的低位行盒永远更近。
+        int rank = 1;
+        if (lb.cell_box_hi_pt > lb.cell_box_lo_pt && lb.cell_bottom_pt > lb.cell_top_pt &&
+            ipos >= lb.cell_box_lo_pt && ipos <= lb.cell_box_hi_pt && local_bp >= lb.cell_top_pt &&
+            local_bp <= lb.cell_bottom_pt) {
+            rank = 0;
+        }
+        if (rank < best_rank ||
+            (rank == best_rank &&
+             (d < best_d - 0.01f || (std::fabs(d - best_d) <= 0.01f && dx < best_dx)))) {
+            best_rank = rank;
             best_d = d;
             best_dx = dx;
             best = &lb;

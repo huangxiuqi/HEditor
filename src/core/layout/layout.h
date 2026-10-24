@@ -324,11 +324,11 @@ inline constexpr float kTableCellPadXPt = 4.0f;
 /**
  * 单元格上下内边距（磅）。
  *
- * 取 0 与 Word 的默认格边距同口径：内容是文字时，行盒自己的行距已经留出了上下空白
- * （ascent 高于字面、行距又多出一截），再补格子内边距只会让短行格显得空。上下都靠
- * 行高与段落间距控制，格线贴着行盒走。
+ * 取 2 磅而不是 0：零内边距时格内容与格线严丝合缝，光标正好压在上下两条线上
+ * （看上去是光标凸出格子），空单元格尤其明显。上下各让出 2 磅之后，行高按
+ * 内容高加两层内边距结算，格线也不再贴着字顶与字底。
  */
-inline constexpr float kTableCellPadYPt = 0.0f;
+inline constexpr float kTableCellPadYPt = 2.0f;
 
 /**
  * 表格在内容区里的水平位置（引擎侧）。只在表宽小于可用宽度时才有意义。
@@ -453,6 +453,22 @@ struct BlockSpec {
     Color color = Color::rgb(24, 24, 24);
 
     /**
+     * 段落默认字重。空段落（runs 为空）时它就是这一行"接着敲的字"的字重 ——
+     * 空单元格改字重只能落在段落标记上，标记的字符格式从这里带进产物。
+     */
+    float weight = kWeightRegular;
+
+    /**
+     * 段落默认斜体（同 weight：空段落的字符格式只有这一份来源）。
+     */
+    bool italic = false;
+
+    /**
+     * 段落默认下划线（同上）。
+     */
+    bool underline = false;
+
+    /**
      * 字体回退链。font_index 排在最前（不用写进来），其后依次尝试。
      * 为空 = 关闭回退，缺字直接出豆腐块。
      * 典型配置：{ 拉丁字体, 蒙文字体 } —— 主字体是中文字体时，
@@ -521,6 +537,9 @@ struct BlockSpec {
         r.font_index = font_index;
         r.size_pt = size_pt;
         r.color = color;
+        r.weight = weight;
+        r.italic = italic;
+        r.underline = underline;
         r.language = language;
         r.fallback_font_indices = fallback_font_indices;
         return r;
@@ -547,7 +566,8 @@ struct BlockSpec {
         return cell_path == o.cell_path && cp_text == o.cp_text && font_index == o.font_index &&
                size_pt == o.size_pt && wm == o.wm && line_factor == o.line_factor &&
                space_after_pt == o.space_after_pt && page_break_before == o.page_break_before &&
-               sameLanguage(language, o.language) && color == o.color &&
+               sameLanguage(language, o.language) && color == o.color && weight == o.weight &&
+               italic == o.italic && underline == o.underline &&
                fallback_font_indices == o.fallback_font_indices && runs == o.runs &&
                objects == o.objects;
     }
@@ -689,9 +709,9 @@ struct LayoutTable {
 /**
  * 一条已放置的表格行（页片段）。跨页拆开的一行在每页各有一条。
  *
- * cont_top / cont_bottom 说明这一片段的上边或下边是"接着别处"的 —— 绘制跳过那条边，
- * 于是跨页处看起来是裁开的，而不是被分出一条线。这条区分只能在产物里表达：
- * 光看矩形分不出"行的顶边"与"上一片段被我接着的那条切口"。
+ * cont_top / cont_bottom 说明这一片段的上边或下边是"接着别处"的 —— 它不是这一行自己的
+ * 边界，而是切片切出来的。分页模式下这两条边上要补画格线（看起来是表格接着长在下一页），
+ * 连页模式下不画（条带的切口不是页边界，画了就变成断口）。
  */
 struct PlacedRow {
     /**
@@ -715,12 +735,12 @@ struct PlacedRow {
     float h = 0.0f;
 
     /**
-     * 上边接着别处（绘制跳过这条边，跨页处看起来是裁开的）。
+     * 上边是切出来的（接着上一片段），不是这一行自己的边。
      */
     bool cont_top = false;
 
     /**
-     * 下边接着别处（同上）。
+     * 下边是切出来的（接着下一片段）。
      */
     bool cont_bottom = false;
 };

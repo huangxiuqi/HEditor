@@ -108,6 +108,67 @@ test.describe('插入表格', () => {
           settledShot.slice(0, 8) + ' → ' + afterShot.slice(0, 8));
   });
 
+  test('格内换行：第二行要画出来，画面与全量重画逐字节相同', async ({ open }) => {
+    // 敲字撑出第二行时，这一行要同时做到三件事：排版把它排进格子的可用宽度里、
+    //   行高跟着长、页位图重光栅。少最后一件就是"字进了文档、读回也对、屏幕上没有"。
+    const p = await open('index.html', { query: { debug: '1' } });
+    const r = await p.ev<any>(`
+      const e = ${D};
+      await e.setText('甲乙丙丁');
+      await e.flush();
+      await e.insertTable({ rows: 1, cols: 2 });
+      await e.flush();
+      // 光标在第一格：先记第一行的高度与光标的位置，再敲够多的字把它顶成两行以上。
+      const one = e.caret().rect.h;
+      const y0 = e.caret().rect.y;
+      await e.type('很长的一句话要在格子里折行很长的一句话要在格子里折行很长的一句话要在格子里折行');
+      await e.flush();
+      const caret = e.caret();
+      const rects = e.selection().rects;
+      const paragraphs = e.paragraphs();
+      // 三次自审：屏幕上的帧、拼起来的底图、以及这一页的位图。
+      const frame = (await e.diag.auditFrame()).diff;
+      const base = (await e.diag.auditBase()).diff;
+      const page = (await e.diag.auditPage(0)).diff;
+      return { one, y0, caret, rects, paragraphs, frame, base, page };`);
+
+    // 折行的直接证据是光标落到了下一行：行盒高度不变（它是一行的高度），变的是 y。
+    check('★ 格内折行之后光标落到第二行', r.caret && r.caret.rect.y >= r.y0 + r.one * 0.9,
+          JSON.stringify({ one: r.one, y0: r.y0, y1: r.caret && r.caret.rect.y }));
+    check('★ 折行之后帧与全量重画逐字节相同（第二行画出来了）', r.frame === 0, String(r.frame));
+    check('折行之后底图自审为 0', r.base === 0, String(r.base));
+    check('折行之后页位图自审为 0', r.page === 0, String(r.page));
+  });
+
+  test('工具栏的表格按钮：先出尺寸面板，按选的行列插入', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' } });
+    const r = await p.ev<any>(`
+      const e = ${D};
+      await e.setText('甲乙丙丁');
+      await e.flush();
+      const btn = document.querySelector('.heditor-ribbon__button[data-act="table"]');
+      btn.click();
+      await new Promise((r) => setTimeout(r, 30));
+      const panel = document.querySelector('.heditor-popover:not([hidden])');
+      const cells = panel ? panel.querySelectorAll('.heditor-picker__cell').length : 0;
+      const before = e.paragraphs().length;
+      // 挑 2 行 4 列：面板上的格按 data-row / data-col 标着位置。
+      const pick = panel && panel.querySelector('.heditor-picker__cell[data-row="2"][data-col="4"]');
+      if (pick) pick.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+      await e.flush();
+      const after = e.paragraphs();
+      const closed = !document.querySelector('.heditor-popover:not([hidden])');
+      const json = await e.save();
+      return { cells, before, after, closed, cells2: (json.match(/"TableCell"/g) || []).length };`);
+
+    check('★ 点表格按钮先出尺寸面板（不直接插表）', r.cells === 64 && r.before === 1,
+          JSON.stringify({ cells: r.cells, before: r.before }));
+    check('★ 选 2x4 之后插出八格', r.after.length === 9 &&
+          (r.after.filter((t: string) => t === '').length === 8), JSON.stringify(r.after));
+    check('★ 表结构是 2 行 4 列', r.cells2 === 8, String(r.cells2));
+    check('选完面板关掉了', r.closed === true, String(r.closed));
+  });
+
   test('越界参数与模式：不落地、不抛错', async ({ open }) => {
     const p = await open('index.html', { query: { debug: '1' } });
     const r = await p.ev<any>(`

@@ -244,3 +244,67 @@ body {
   color: var(--ink);
   font-variant-numeric: tabular-nums;
 }
+
+/* 弹层：贴在按钮下面的一块面板（表格尺寸之类）。 */
+
+.heditor-popover {
+  position: fixed;
+  z-index: 20;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 8px 24px rgba(20, 24, 30, 0.18);
+}
+
+.heditor-popover[hidden] { display: none; }
+
+/* 表格尺寸网格：8x8 的方格，指针扫过时前 N 格长亮。 */
+
+.heditor-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  user-select: none;
+}
+
+.heditor-picker__head {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.heditor-picker__grid {
+  display: grid;
+  gap: 2px;
+}
+
+.heditor-picker__cell {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: var(--panel);
+  cursor: pointer;
+}
+
+.heditor-picker__cell--on {
+  background: var(--on);
+  border-color: var(--on-line);
+}
+
+.heditor-picker__cell--hover {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.heditor-picker__foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--dim);
+  cursor: pointer;
+}

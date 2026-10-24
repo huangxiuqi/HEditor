@@ -116,6 +116,12 @@ struct InsertParaMark {
      * 从片段插回时由片段带过来。
      */
     std::string styleRef;
+
+    /**
+     * 新标记自己的字符格式。分段时沿用原标记那一份：空段里没有文本节点，
+     * 字符格式只能挂在标记上，丢掉它等于"分段之后格式变了"。
+     */
+    CharFormat marks;
 };
 
 /**
@@ -131,6 +137,11 @@ struct RemoveParaMark {
      * 标记上的段落格式，逆操作要还原它。
      */
     ParaFormatPatch para;
+
+    /**
+     * 标记上的字符格式，逆操作要还原它。
+     */
+    CharFormat marks;
 
     /**
      * 标记上的段落样式引用。
@@ -174,6 +185,19 @@ struct SetParaMarkFormat {
      * 改之前的样式引用。
      */
     std::string beforeStyleRef;
+
+    /**
+     * 段落标记自己的字符格式。
+     *
+     * 空段落没有文本节点，字符格式无处可挂 —— 它与段落格式同挂在结束这一段的标记上。
+     * 有文字的段落也带着它，"接着在段末敲字"读的是左边文本节点的标记，不看它。
+     */
+    CharFormat marks;
+
+    /**
+     * 改之前的字符格式（逆操作自足）。
+     */
+    CharFormat beforeMarks;
 };
 
 /**

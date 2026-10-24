@@ -1070,8 +1070,11 @@ int main() {
                            "同一行的两格在同一基线上");
                 expectTrue(r.lines[2].block_lo_pt > r.lines[0].block_lo_pt + 1.0f,
                            "第二行在第一行下面");
-                expectNear(r.lines[2].block_lo_pt - r.lines[0].block_lo_pt, r.lines[0].advance_pt,
-                           0.05, "行高 = 一行内容高（上下内边距为 0，Auto 规则）");
+                // 行高 = 一行内容高 + 上下内边距（Auto 规则）。内边距不为 0 时格线
+                //   不贴着字顶字底，空单元格的光标才不会压在格线上。
+                expectNear(r.lines[2].block_lo_pt - r.lines[0].block_lo_pt,
+                           r.lines[0].advance_pt + 2.0f * kTableCellPadYPt, 0.05,
+                           "行高 = 一行内容高 + 上下内边距（Auto 规则）");
                 expectNear(r.lines[2].inline_origin_pt, cx + pad, 0.01,
                            "第二行第一格又回到第一列的起点");
             }

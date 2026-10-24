@@ -8,7 +8,7 @@
 // 与库的边界只有三处：createEditor 的选项、实例方法、事件。
 import { createEditor } from '../src/index';
 import type { CharFormatPatch, Editor, ParaFormatPatch } from '../src/index';
-import { mountChrome, type Chrome, type Group, type Tab } from './ui';
+import { createGridPicker, mountChrome, type Chrome, type Group, type Tab } from './ui';
 
 const DEMO_TEXT = [
   'HEditor 示例文档',
@@ -409,7 +409,20 @@ function makeTabs(): Tab[] {
         label: '表格',
         icon: 'table',
         big: true,
-        run: () => editor.insertTable({ rows: 3, cols: 3, header: true }),
+        // 行列数在网格上挑，不写死一张 3x3。网格本身是复用组件（ui/grid-picker），
+        //   这一层只把"选了多少"接到公开面上。
+        panel: (dismiss) =>
+          createGridPicker({
+            rows: 3,
+            cols: 3,
+            maxRows: 8,
+            maxCols: 8,
+            header: true,
+            onPick: (rows, cols, header) => {
+              void editor.insertTable({ rows, cols, header });
+            },
+            dismiss,
+          }),
       },
       {
         act: 'field',

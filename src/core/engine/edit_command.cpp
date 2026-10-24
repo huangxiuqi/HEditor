@@ -593,10 +593,12 @@ bool EditCommand::splitParagraph() {
     const rev::Node* mk = rev::findNode(doc(), mark_a);
     ParaFormatPatch patch;
     std::string style_ref;
+    CharFormat mark_marks;
     if (mk != nullptr) {
         if (const auto* mp = std::get_if<rev::MarkPayload>(&mk->payload)) {
             patch = mp->para;
             style_ref = mp->style;
+            mark_marks = mp->marks;
         }
     }
     // 位置由 (偏移, 侧别) 给出，不从控件下标反推。
@@ -615,6 +617,7 @@ bool EditCommand::splitParagraph() {
     s.at = at_flow;
     s.para = patch;
     s.styleRef = style_ref;
+    s.marks = mark_marks;
     steps.push_back(Step{s});
     if (mk != nullptr && isParagraphMark(mk->kind) &&
         blocksFull()[static_cast<size_t>(p.para)].page_break_before) {
@@ -625,6 +628,8 @@ bool EditCommand::splitParagraph() {
         clear_pbb.styleRef = style_ref;
         clear_pbb.before = patch;
         clear_pbb.beforeStyleRef = style_ref;
+        clear_pbb.marks = mark_marks;
+        clear_pbb.beforeMarks = mark_marks;
         steps.push_back(Step{clear_pbb});
     }
     if (!commit(std::move(steps), p.para)) {
@@ -686,6 +691,8 @@ bool EditCommand::mergeParagraphInto(int head) {
         keep.styleRef = ma_pl->style;
         keep.before = mb_pl->para;
         keep.beforeStyleRef = mb_pl->style;
+        keep.marks = ma_pl->marks;
+        keep.beforeMarks = mb_pl->marks;
         steps.push_back(Step{keep});
         steps.push_back(rm.step);
     } else {
@@ -699,6 +706,7 @@ bool EditCommand::mergeParagraphInto(int head) {
         ins.at = mapPos(rm.step, end_before, Assoc::After);
         ins.para = ma_pl->para;
         ins.styleRef = ma_pl->style;
+        ins.marks = ma_pl->marks;
         steps.push_back(rm.step);
         steps.push_back(Step{ins});
     }
@@ -1194,6 +1202,15 @@ CharFormat EditCommand::marksAtFlow(FlowPos at, std::string* style_ref) const {
             return adopt(*run);
         }
     }
+    // 空段落：这一段一个文本节点都没有，接着敲的字只能沿用结束标记上的字符格式。
+    //   那正是"选中空单元格改格式"落下去的地方，两处读同一份，回显与行为才不分叉。
+    for (const rev::Ref& c : parent->children) {
+        if (!c || !isParagraphMark(c->kind)) continue;
+        const auto* mp = std::get_if<rev::MarkPayload>(&c->payload);
+        if (mp == nullptr) continue;
+        if (style_ref != nullptr) *style_ref = mp->style;
+        return mp->marks;
+    }
     return CharFormat{};
 }
 
@@ -1440,6 +1457,7 @@ CharFormat EditCommand::charFormatAtCaret() const {
     const rev::FlowIndex& idx = flowIndex();
     bool found = false;
     CharFormat out;
+    bool mark_only = false;
     std::function<void(const rev::Ref&)> walk = [&](const rev::Ref& n) {
         if (!n) return;
         if (n->kind == NodeKind::TextRun) {
@@ -1455,6 +1473,16 @@ CharFormat EditCommand::charFormatAtCaret() const {
                         out = m;
                     found = true;
                 }
+            }
+        }
+        // 选区里一个文本节点都没碰到（整段是空单元格）：报段落标记上那一份，
+        //   它就是"接着敲字会用到的格式"。
+        if (!found && !mark_only && isParagraphMark(n->kind)) {
+            int f = 0;
+            int e = 0;
+            if (idx.intervalOf(n->id, &f, &e) && e > from && f < to) {
+                out = std::get<rev::MarkPayload>(n->payload).marks;
+                mark_only = true;
             }
         }
         for (const rev::Ref& c : n->children) walk(c);
@@ -1528,6 +1556,27 @@ bool EditCommand::applyCharFormat(const CharFormat& patch) {
     //   给位置换算与区间，节点对象是它的内部表示。
     std::function<void(const rev::Ref&)> walk = [&](const rev::Ref& n) {
         if (!n) return;
+        // 段落标记：空段落里没有文本节点，字符格式只能落在标记上 —— 否则选中一个空
+        //   单元格改字重时一个节点都碰不到，命令返回"没变"，接着敲的字还是默认样式。
+        if (isParagraphMark(n->kind)) {
+            int f = 0;
+            int e = 0;
+            if (idx.intervalOf(n->id, &f, &e) && e > from && f < to) {
+                const auto& mp = std::get<rev::MarkPayload>(n->payload);
+                const CharFormat next = mergeCharFormat(mp.marks, patch);
+                if (!(next == mp.marks)) {
+                    SetParaMarkFormat s;
+                    s.id = n->id;
+                    s.para = mp.para;
+                    s.styleRef = mp.style;
+                    s.before = mp.para;
+                    s.beforeStyleRef = mp.style;
+                    s.marks = next;
+                    s.beforeMarks = mp.marks;
+                    steps.push_back(Step{s});
+                }
+            }
+        }
         if (n->kind == NodeKind::TextRun) {
             int f = 0;
             int e = 0;
@@ -1605,6 +1654,7 @@ bool EditCommand::applyParaFormat(const ParaFormatPatch& patch) {
         NodeId id = kInvalidNodeId;
         ParaFormatPatch para;
         std::string styleRef;
+        CharFormat marks;
     };
     std::vector<MarkHit> marks;
     std::function<void(const rev::Ref&)> walk = [&](const rev::Ref& n) {
@@ -1614,7 +1664,7 @@ bool EditCommand::applyParaFormat(const ParaFormatPatch& patch) {
             int e = 0;
             if (idx.intervalOf(n->id, &f, &e)) {
                 const auto& mp = std::get<rev::MarkPayload>(n->payload);
-                marks.push_back(MarkHit{f, n->id, mp.para, mp.style});
+                marks.push_back(MarkHit{f, n->id, mp.para, mp.style, mp.marks});
             }
         }
         for (const rev::Ref& c : n->children) walk(c);
@@ -1636,6 +1686,10 @@ bool EditCommand::applyParaFormat(const ParaFormatPatch& patch) {
                 s.styleRef = m.styleRef;
                 s.before = m.para;
                 s.beforeStyleRef = m.styleRef;
+                // 段落格式与字符格式同一枚标记，改一个必须原样带回另一个 ——
+                //   否则"调行距"会静默清掉空单元格上的字重。
+                s.marks = m.marks;
+                s.beforeMarks = m.marks;
                 steps.push_back(Step{s});
             }
         }

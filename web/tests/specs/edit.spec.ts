@@ -59,6 +59,12 @@ async function resetAndGetFullBaseline(probe: ProbePage) {
 
 test.describe('编辑面', () => {
   test('键盘、增量、码点与输入法、控件边界都按契约工作', async ({ open }) => {
+    // 这一份是"整个编辑面"的集成跑法：367 条判据、13 个场景、七次装载文档。单跑约
+    //   95~120 秒；12 份 spec 并行时机器上同时有两份 wasm 引擎与两个 Chromium，实测会
+    //   超过全局那 180 秒（那次报的是 page.evaluate 超时，不是某条判据红）。
+    //   超时在这里的作用是"卡死检测"，不是性能指标 —— 所以按实际体量给预算，
+    //   全局 180 秒留给普通用例，卡死照样当场报错。
+    test.setTimeout(600_000);
     const probe = await open('index.html', {
       query: { debug: '1' },
       viewport: { width: 1500, height: 1200 },
@@ -3585,8 +3591,11 @@ test.describe('编辑面', () => {
   {
     await probe.read(
       'await LOAD.text(' + JSON.stringify(S6) + ', 1); return true;');
-    await probe.read('await H.setCaret({ para: 0, offset: 0 }); return true;');
+    // 顺序有讲究：stopBlink 只把相位写成"可见"，不重绘（它要留着上一次全量的账）；
+    //   所以要在它之后再落一次光标 —— 那一拍 present 才会把光标画进帧里。反过来读到
+    //   的是"相位正好关着"的那一帧，光标像素是白的，与机器负载无关。
     await probe.read('return await D.stopBlink();');
+    await probe.read('await H.setCaret({ para: 0, offset: 0 }); return true;');
 
     // 采样点取光标矩形中心偏下 3 px：一定在光标内，又躲开上缘的取整边界。
     //   读的是引擎帧（rawFrame 是快照），不是画布 —— 两个宿主的画布形状不同。

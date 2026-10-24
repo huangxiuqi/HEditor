@@ -36,7 +36,7 @@ Payload payloadOf(const ModelNode& n) {
         case NodeKind::TextRun:
             return RunPayload{n.text, n.marks, n.styleRef};
         case NodeKind::ParagraphMark:
-            return MarkPayload{n.para, n.styleRef};
+            return MarkPayload{n.para, n.styleRef, n.marks};
         case NodeKind::ContentControl:
             return n.control;
         case NodeKind::Table:
@@ -86,6 +86,7 @@ void toTree(const Doc& doc, NodeTree* out) {
                     const auto& mp = std::get<MarkPayload>(n.payload);
                     m->para = mp.para;
                     m->styleRef = mp.style;
+                    m->marks = mp.marks;
                     break;
                 }
                 case NodeKind::ContentControl:

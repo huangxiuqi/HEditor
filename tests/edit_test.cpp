@@ -9952,13 +9952,11 @@ int main() {
                         static_cast<unsigned long long>(db.hash), eb.layout().lines.size(),
                         eb.layout().glyphs.size(), eb.layout().stats.page_count,
                         eb.layout().placed_tables.size());
-            // 2026-10-21 重取：0x6cc491bde1299030 → 0xa56d8ebd65233e40。
-            //   几何一个字节没变（行 157 / 字形 927 / 页 15 与旧值相同），变的是
-            //   ParaIndex::state_at_start.cursor_y —— 表起点那一段的续排锚点从"格内第一行"
-            //   改成"表顶"（见 layout.cpp 的 cursor_before_switch）。原值是错的：从它续排
-            //   会把整张表下移一个内边距，[61] 的"表里编辑"正是这么红的。摘要含这个字段，
-            //   所以它跟着变 —— 这是有意改口径，不是重构改坏了。
-            expectTrue(db.hash == 0xe4def2d955859da1ull, "表格跨页的摘要未变");
+            // 重取：0xe4def2d955859da1 → 0x6e4147ed798fdb6c（157 行 / 927 字形 / 13 页）。
+            //   改了两处排版口径，两处都是有意的：单元格上下内边距从 0 改成 2 磅（行高
+            //   跟着长），以及跨页切行改成按行盒自己的纵向位置分页 —— 同行其它格的行盒
+            //   不再被后缀搬走，于是这张"一行高过整页"的表从 15 页变成 13 页。
+            expectTrue(db.hash == 0x6e4147ed798fdb6cull, "表格跨页的摘要未变");
             expectTrue(eb.layout().stats.page_count >= 3 && !eb.layout().placed_tables.empty() &&
                            eb.layout().placed_tables[0].placed.size() >= 2,
                        "用例 B 确实把一行切到了两页上");
@@ -12031,6 +12029,334 @@ int main() {
         e69.repaint();
         expectTrue(e69.auditCompile() == 0, "插入控件之后编译自审为 0");
         expectTrue(e69.auditLayout() == 0, "插入控件之后排版自审为 0");
+    }
+
+    if (runSection(70)) std::printf("\n[70] 表格：格内换行、跨页切片、连页切片与命中\n");
+    if (runSection(70)) {
+        // 一行里既有五行的格、也有空格：空格的行盒必须留在第一页。按数组后缀搬行时它
+        //   会被一起搬到下一页 —— 表象就是"空格子的光标跑到下一页去了"。
+        EditorEngine e;
+        expectTrue(e.init({cjkPath, mnPath, latinPath}), "引擎初始化（表格跨页）");
+        EngineConfig c;
+        c.zoom = 1.0f;
+        c.page.width_pt = 300.0f;
+        c.page.height_pt = 300.0f;
+        c.page.margin_pt = 10.0f;
+        e.setConfig(c);
+        {
+            NodeTree t;
+            const NodeId s = t.firstSectionId();
+            const NodeId tb = t.appendChild(s, NodeKind::Table);
+            const NodeId r0 = t.appendChild(tb, NodeKind::TableRow);
+            const NodeId c00 = t.appendChild(r0, NodeKind::TableCell);
+            std::string long_text;
+            for (int i = 0; i < 60; ++i) long_text += "字";
+            t.setText(t.appendChild(c00, NodeKind::TextRun), utf8ToCodepoints(long_text));
+            t.appendChild(c00, NodeKind::ParagraphMark);
+            const NodeId c01 = t.appendChild(r0, NodeKind::TableCell);
+            t.appendChild(c01, NodeKind::ParagraphMark);
+            const NodeId r1 = t.appendChild(tb, NodeKind::TableRow);
+            const NodeId c10 = t.appendChild(r1, NodeKind::TableCell);
+            t.setText(t.appendChild(c10, NodeKind::TextRun), utf8ToCodepoints("第二行"));
+            t.appendChild(c10, NodeKind::ParagraphMark);
+            const NodeId c11 = t.appendChild(r1, NodeKind::TableCell);
+            t.appendChild(c11, NodeKind::ParagraphMark);
+            e.setDocument(t, StyleSheet{});
+        }
+        e.relayout();
+        const LayoutResult& lay = e.layout();
+        expectTrue(lay.lines.size() > 2,
+                   "多行格排出了多行（实际 " + std::to_string(lay.lines.size()) + " 行）");
+        // 空单元格 = 第 1 段；它的行盒落在第一页。
+        int empty_line = -1;
+        for (size_t i = 0; i < lay.lines.size(); ++i) {
+            if (lay.lines[i].paragraph == 1) empty_line = static_cast<int>(i);
+        }
+        expectTrue(empty_line >= 0 && lay.lines[static_cast<size_t>(empty_line)].page == 0,
+                   "同行的空单元格留在第一页（实际页 " +
+                       std::to_string(
+                           empty_line >= 0 ? lay.lines[static_cast<size_t>(empty_line)].page : -1) +
+                       "）");
+        // 命中：点在空单元格的中段与底部，都该落在第 1 段 —— 别跑到同一行里行盒更多的格。
+        if (empty_line >= 0 && !lay.placed_tables.empty() && !lay.placed_tables[0].placed.empty()) {
+            const LineBox& el = lay.lines[static_cast<size_t>(empty_line)];
+            const float mid_x = (el.cell_box_lo_pt + el.cell_box_hi_pt) * 0.5f;
+            const float row_bot =
+                lay.placed_tables[0].placed[0].y + lay.placed_tables[0].placed[0].h;
+            TextPos mid;
+            const bool ok_mid = e.hitTestPt(mid_x, el.block_lo_pt + 20.0f, &mid);
+            expectTrue(ok_mid && mid.para == 1, "点空单元格中段落在这一格（实际段 " +
+                                                    std::to_string(ok_mid ? mid.para : -1) + "）");
+            TextPos bot;
+            const bool ok_bot = e.hitTestPt(mid_x, row_bot - 3.0f, &bot);
+            expectTrue(ok_bot && bot.para == 1, "点空单元格底部仍落在这一格（实际段 " +
+                                                    std::to_string(ok_bot ? bot.para : -1) + "）");
+            TextPos in_text;
+            const bool ok_text = e.hitTestPt(20.0f, row_bot - 3.0f, &in_text);
+            expectTrue(ok_text && in_text.para == 0,
+                       "点多行格底部落在多行格（实际段 " +
+                           std::to_string(ok_text ? in_text.para : -1) + "）");
+        }
+        // 行片段的上下沿：单页里的行，片段正好包住格内容与上下内边距。
+        if (!lay.placed_tables.empty()) {
+            const PlacedTable& pt = lay.placed_tables[0];
+            bool boxed = true;
+            for (const PlacedRow& pr : pt.placed) {
+                boxed =
+                    boxed && pr.h > 1.0f && pr.y >= 10.0f - 0.01f && pr.y + pr.h <= 290.0f + 0.01f;
+            }
+            expectTrue(
+                boxed && pt.placed.size() == 2,
+                "两行的片段都在内容区里（实际 " + std::to_string(pt.placed.size()) + " 片）");
+        }
+
+        // 一行高过整页：必须切开，且每一行落在它自己的纵向位置所属的那一页。
+        {
+            EditorEngine e2;
+            expectTrue(e2.init({cjkPath, mnPath, latinPath}), "引擎初始化（超高行）");
+            EngineConfig c2;
+            c2.zoom = 1.0f;
+            c2.page.width_pt = 300.0f;
+            c2.page.height_pt = 200.0f;
+            c2.page.margin_pt = 10.0f;
+            e2.setConfig(c2);
+            NodeTree t2;
+            const NodeId s2 = t2.firstSectionId();
+            const NodeId tb = t2.appendChild(s2, NodeKind::Table);
+            const NodeId r0 = t2.appendChild(tb, NodeKind::TableRow);
+            const NodeId c00 = t2.appendChild(r0, NodeKind::TableCell);
+            std::string huge;
+            for (int i = 0; i < 300; ++i) huge += "字";
+            t2.setText(t2.appendChild(c00, NodeKind::TextRun), utf8ToCodepoints(huge));
+            t2.appendChild(c00, NodeKind::ParagraphMark);
+            const NodeId c01 = t2.appendChild(r0, NodeKind::TableCell);
+            t2.appendChild(c01, NodeKind::ParagraphMark);
+            e2.setDocument(t2, StyleSheet{});
+            e2.relayout();
+            const LayoutResult& l2 = e2.layout();
+            const PlacedTable& pt2 = l2.placed_tables.at(0);
+            expectTrue(l2.stats.page_count >= 3 && pt2.placed.size() >= 3,
+                       "超高行切成多页（页 " + std::to_string(l2.stats.page_count) + " / 片 " +
+                           std::to_string(pt2.placed.size()) + "）");
+            // 空格那一行仍在第一页；每一页的片段高度为正、顶边在内容区里。
+            int empty2 = -1;
+            for (size_t i = 0; i < l2.lines.size(); ++i) {
+                if (l2.lines[i].paragraph == 1) empty2 = static_cast<int>(i);
+            }
+            expectTrue(empty2 >= 0 && l2.lines[static_cast<size_t>(empty2)].page == 0,
+                       "超高行切片之后，同行空格仍在第一页");
+            bool sane = true;
+            for (size_t i = 0; i < pt2.placed.size(); ++i) {
+                const PlacedRow& pr = pt2.placed[i];
+                sane = sane && pr.h > 1.0f && pr.page == static_cast<int>(i);
+            }
+            expectTrue(sane, "片段逐页递增、每片都非空");
+            expectTrue(
+                pt2.placed.front().cont_top == false && pt2.placed.back().cont_bottom == false,
+                "首片不接上、末片不接下");
+            // 中间那几片的两条边都是切出来的：绘制据此补线（分页）或不补（连页）。
+            bool cuts = true;
+            for (size_t i = 1; i + 1 < pt2.placed.size(); ++i) {
+                cuts = cuts && pt2.placed[i].cont_top && pt2.placed[i].cont_bottom;
+            }
+            expectTrue(cuts, "中间片段的上下两边都是切出来的");
+            // 行盒的页号与它自己的纵向位置一致：第一页的每一行都在页面内容区里。
+            bool inside = true;
+            for (const LineBox& lb : l2.lines) {
+                if (lb.page != 0) continue;
+                inside = inside && lb.block_lo_pt >= 9.99f && lb.block_hi_pt <= 190.01f;
+            }
+            expectTrue(inside, "第一页的行盒都在内容区里（没有溢到页外的行）");
+            e2.repaint();
+            // 跨页切口的两条边要补画：第一页的下边框、第二页的上边框。没有它们，
+            //   表格在换页处看起来是被裁掉的；补上之后它才"接着长在下一页"。
+            {
+                const int pw2 = e2.pagePxWidth();
+                const int ph2 = e2.pagePxHeight();
+                /**
+                 * 取一个像素是不是格线（深色）。
+                 */
+                auto ink = [&](int page, int x, int y) -> bool {
+                    const uint8_t* px = e2.pagePixels(page);
+                    if (px == nullptr) return false;
+                    const size_t at = (static_cast<size_t>(y) * static_cast<size_t>(pw2) +
+                                       static_cast<size_t>(x)) *
+                                      4u;
+                    return px[at] < 100 && px[at + 1] < 100 && px[at + 2] < 100;
+                };
+                /**
+                 * 这一像素行是不是一条横线：格线横跨整张表，文字只占零星几列。
+                 */
+                auto lineLike = [&](int page, int y) -> bool {
+                    if (y < 0 || y >= ph2) return false;
+                    int dark = 0;
+                    int total = 0;
+                    for (int x = 16; x < 284; ++x) {
+                        ++total;
+                        if (ink(page, x, y)) ++dark;
+                    }
+                    return dark * 4 > total * 3;
+                };
+                const int cut0 =
+                    static_cast<int>(std::lround((pt2.placed.front().y + pt2.placed.front().h)));
+                const int cut1 = static_cast<int>(std::lround(pt2.placed[1].y));
+                expectTrue(lineLike(0, cut0),
+                           "第一页的下边框补上了（y=" + std::to_string(cut0) + "）");
+                expectTrue(lineLike(1, cut1),
+                           "第二页的上边框补上了（y=" + std::to_string(cut1) + "）");
+                expectTrue(!lineLike(0, cut0 - 20), "切口上方是格内空白（不是整片黑）");
+            }
+            expectTrue(e2.auditLayout() == 0, "超高行之后排版自审为 0");
+            expectTrue(e2.auditPageJson(0).find("\"diff\":0") != std::string::npos &&
+                           e2.auditPageJson(2).find("\"diff\":0") != std::string::npos,
+                       "页位图自审为 0（含最后一页）");
+        }
+
+        // 连页：表格行按条带切片，片段坐标是页内的，不按分页口径断开。
+        {
+            EditorEngine e3;
+            expectTrue(e3.init({cjkPath, mnPath, latinPath}), "引擎初始化（连页表格）");
+            EngineConfig c3;
+            c3.zoom = 1.0f;
+            c3.page.width_pt = 300.0f;
+            c3.page.height_pt = 200.0f;
+            c3.page.margin_pt = 10.0f;
+            // 连页是配置项（引擎按 page + page_gap 装配 PageMetrics），不是页度量上的开关。
+            c3.continuous = true;
+            c3.page_gap_pt = 20.0f;
+            e3.setConfig(c3);
+            NodeTree t3;
+            const NodeId s3 = t3.firstSectionId();
+            const NodeId tb = t3.appendChild(s3, NodeKind::Table);
+            const NodeId r0 = t3.appendChild(tb, NodeKind::TableRow);
+            const NodeId c00 = t3.appendChild(r0, NodeKind::TableCell);
+            std::string huge;
+            for (int i = 0; i < 300; ++i) huge += "字";
+            t3.setText(t3.appendChild(c00, NodeKind::TextRun), utf8ToCodepoints(huge));
+            t3.appendChild(c00, NodeKind::ParagraphMark);
+            e3.setDocument(t3, StyleSheet{});
+            e3.relayout();
+            const LayoutResult& l3 = e3.layout();
+            const PlacedTable& pt3 = l3.placed_tables.at(0);
+            expectTrue(pt3.placed.size() >= 2, "跨条带的行切成两片以上（实际 " +
+                                                   std::to_string(pt3.placed.size()) + " 片）");
+            // 首片的顶边 = 行顶的页内位置（不是块轴绝对位置）；续片的顶边在内容区上沿。
+            expectTrue(pt3.placed[0].y >= 9.99f && pt3.placed[0].y <= 10.01f,
+                       "首片顶边按页内坐标落（实际 " + std::to_string(pt3.placed[0].y) + "）");
+            // 页内坐标的上界是条带高度（页高 + 页间隙）：贴在页底的那一截落在
+            //   页间隙里，与文字同一条口径（宿主把间隙画在两张纸之间）。续片从条带
+            //   上沿起，首片从行顶起 —— 两者都是页内坐标，不是块轴绝对位置。
+            bool localized = true;
+            for (size_t i = 0; i < pt3.placed.size(); ++i) {
+                const PlacedRow& pr = pt3.placed[i];
+                const float lo = (i == 0) ? 9.99f : -0.01f;
+                localized = localized && pr.y >= lo &&
+                            pr.y + pr.h <= c3.page.height_pt + c3.page_gap_pt + 0.01f;
+            }
+            expectTrue(localized, "每一片都在自己那条带的页内范围里");
+            expectTrue(pt3.placed.front().cont_bottom && pt3.placed.back().cont_top,
+                       "切出来的边都记了 cont 标记（绘制据此判断要不要补线）");
+            e3.repaint();
+            // 连页的条带切口不是页边界：那里不该有横线（有的话表格看上去就断成两页）。
+            {
+                const int pw3 = e3.pagePxWidth();
+                /**
+                 * 取一个像素是不是格线（深色）。
+                 */
+                auto ink = [&](int page, int x, int y) -> bool {
+                    const uint8_t* px = e3.pagePixels(page);
+                    if (px == nullptr) return false;
+                    const size_t at = (static_cast<size_t>(y) * static_cast<size_t>(pw3) +
+                                       static_cast<size_t>(x)) *
+                                      4u;
+                    return px[at] < 100 && px[at + 1] < 100 && px[at + 2] < 100;
+                };
+                /**
+                 * 这一像素行是不是一条横线（同分页那一侧的判据）。
+                 */
+                auto lineLike = [&](int page, int y) -> bool {
+                    const int ph3 = e3.pagePxHeight();
+                    if (y < 0 || y >= ph3) return false;
+                    int dark = 0;
+                    int total = 0;
+                    for (int x = 16; x < 284; ++x) {
+                        ++total;
+                        if (ink(page, x, y)) ++dark;
+                    }
+                    return dark * 4 > total * 3;
+                };
+                const int cut =
+                    static_cast<int>(std::lround(pt3.placed.front().y + pt3.placed.front().h));
+                const int cut_next = static_cast<int>(std::lround(pt3.placed[1].y));
+                expectTrue(!lineLike(0, cut) && !lineLike(1, cut_next), "连页的条带切口不画横线");
+            }
+            expectTrue(e3.auditLayout() == 0, "连页表格的排版自审为 0");
+            expectTrue(e3.auditBaseJson().find("\"diff\":0") != std::string::npos,
+                       "连页底图自审为 0");
+        }
+    }
+
+    if (runSection(71)) std::printf("\n[71] 空单元格的字符格式：落在段落标记上\n");
+    if (runSection(71)) {
+        // 空段落里没有文本节点，改格式只能落在段落标记上。全选之后改字重必须落到
+        //   每一枚标记：命令返回"改了"、回显读得到、接着敲的字带着它、存盘读回还在。
+        EditorEngine e;
+        expectTrue(e.init({cjkPath, mnPath, latinPath}), "引擎初始化（空单元格格式）");
+        EngineConfig c;
+        c.zoom = 1.0f;
+        c.page.width_pt = 300.0f;
+        c.page.height_pt = 300.0f;
+        c.page.margin_pt = 10.0f;
+        e.setConfig(c);
+        e.setEditMode(EditMode::Document);
+        {
+            NodeTree t;
+            const NodeId s = t.firstSectionId();
+            t.setText(t.appendChild(s, NodeKind::TextRun), utf8ToCodepoints("甲乙"));
+            t.appendChild(s, NodeKind::ParagraphMark);
+            e.setDocument(t, StyleSheet{});
+        }
+        e.setCaret(0, 0);
+        expectTrue(e.insertTableAndRender(2, 2, false), "插一张 2x2 表");
+        e.selectAll();
+        CharFormat patch;
+        patch.bold = true;
+        patch.italic = true;
+        expectTrue(e.applyCharFormatAndRender(patch), "全选加粗 + 斜体");
+        // 回显：落在空单元格里读到的是标记上那一份。
+        e.setCaret(1, 0);
+        const std::string at_empty = e.charFormatAtJson(true);
+        expectTrue(at_empty.find("\"b\":true") != std::string::npos &&
+                       at_empty.find("\"i\":true") != std::string::npos,
+                   "空单元格的回显是粗斜体（实际 " + at_empty + "）");
+        // 敲字沿用标记的格式。
+        expectTrue(e.typeTextAndRender("字"), "在空单元格敲一个字");
+        const BlockSpec& typed = e.blocks()[1];
+        expectTrue(typed.textUtf8() == "字" && !typed.runs.empty() &&
+                       typed.runs.front().weight >= 600.0f && typed.runs.front().italic,
+                   "敲出来的字是粗斜体（实际 " + typed.textUtf8() + " / weight " +
+                       std::to_string(typed.runs.empty() ? 0.0f : typed.runs.front().weight) +
+                       "）");
+        // 撤销：字退掉，格式留着（撤销的粒度是这一步操作）。
+        expectTrue(e.undoAndRender() && e.blocks()[1].textUtf8().empty(),
+                   "撤销回到空单元格（实际 \"" + e.blocks()[1].textUtf8() + "\"）");
+        const std::string after_undo = e.charFormatAtJson(true);
+        expectTrue(after_undo.find("\"b\":true") != std::string::npos,
+                   "撤销之后格式仍在（实际 " + after_undo + "）");
+        // 落盘：标记的字符格式是作者意图，读回来必须还在。
+        const rev::SerializeResult saved = e.saveDocument();
+        expectTrue(saved.ok, "序列化");
+        EditorEngine e2;
+        expectTrue(e2.init({cjkPath, mnPath, latinPath}), "引擎初始化（读回）");
+        e2.setConfig(c);
+        expectTrue(e2.loadDocument(saved.text).ok, "读回落盘文本");
+        e2.relayout();
+        e2.setCaret(1, 0);
+        const std::string round = e2.charFormatAtJson(true);
+        expectTrue(round.find("\"b\":true") != std::string::npos &&
+                       round.find("\"i\":true") != std::string::npos,
+                   "读回之后空单元格仍是粗斜体（实际 " + round + "）");
+        expectTrue(e.auditCompile() == 0 && e.auditLayout() == 0, "改格式之后两份自审为 0");
     }
 
     std::printf("\n──────────────────────────────\n");

@@ -58,7 +58,7 @@ struct NodeSpec {
     std::string styleRef;
 
     /**
-     * 字符格式（仅文本节点）。
+     * 字符格式（文本节点与段落标记：后者是空段落的字符格式）。
      */
     CharFormat marks;
 

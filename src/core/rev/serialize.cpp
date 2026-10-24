@@ -176,6 +176,7 @@ void collectFonts(const Ref& n, std::unordered_set<int>* out) {
         if (p.marks.font_index.has_value()) out->insert(*p.marks.font_index);
     } else if (alt == Alt::Mark) {
         const MarkPayload& p = std::get<MarkPayload>(n->payload);
+        if (p.marks.font_index.has_value()) out->insert(*p.marks.font_index);
         if (p.para.font_index.has_value()) out->insert(*p.para.font_index);
         if (p.para.fallback_font_indices.has_value()) {
             for (int index : *p.para.fallback_font_indices) out->insert(index);
@@ -222,6 +223,7 @@ bool writeNode(const Ref& n, recjson::StringPool* strings, NodeId* max_id,
         const MarkPayload& p = std::get<MarkPayload>(n->payload);
         if (!p.para.empty()) j[kPara] = recjson::paraJson(p.para);
         if (!p.style.empty()) j[kStyle] = strings->add(p.style);
+        if (!p.marks.empty()) j[kMarks] = recjson::marksJson(p.marks);
     } else if (alt == Alt::Control) {
         const ControlSpec& p = std::get<ControlSpec>(n->payload);
         if (!(p == ControlSpec{})) j[kControl] = recjson::controlJson(p, strings);
@@ -370,6 +372,7 @@ bool readRunPayload(Reader& r, const ordered_json& j, Payload* out) {
 bool readMarkPayload(Reader& r, const ordered_json& j, Payload* out) {
     MarkPayload p;
     if (!recjson::readPara(r, j, kPara, &p.para)) return r.fail("段落覆盖读不出来");
+    if (!recjson::readMarks(r, j, kMarks, &p.marks)) return r.fail("标记的字符属性读不出来");
     if (j.contains(kStyle)) {
         int index = 0;
         if (!recjson::readInt(j, kStyle, &index)) return r.fail("段落样式引用不是下标");
@@ -411,8 +414,13 @@ bool readNode(Reader& r, const ordered_json& j, int depth, Ref* out) {
     const Alt alt = altForKind(kind);
     // 每种载荷只认自己那几个键。把段落覆盖写进文本节点这种错，宁可读失败，也不要读成
     // "文本节点加一份被忽略的段落覆盖"：那种文档看起来正常，下一次编辑就对它做错事。
-    const bool has_text = j.contains(kText) || j.contains(kMarks);
+    // 字符属性两个种类都带：文本节点用 m，段落标记也用 m（空段落里没有文本节点，
+    //   字符格式只能挂在标记上）。
+    const bool has_text = j.contains(kText) || (alt == Alt::Run && j.contains(kMarks));
     if (alt != Alt::Run && has_text) return r.fail("这一节点种类不带字符属性");
+    if (alt != Alt::Run && alt != Alt::Mark && j.contains(kMarks)) {
+        return r.fail("这一节点种类不带字符属性");
+    }
     if (alt != Alt::Run && alt != Alt::Mark && j.contains(kStyle)) {
         return r.fail("这一节点种类不带样式引用");
     }

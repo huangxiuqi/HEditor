@@ -855,26 +855,6 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
         f.cell = -1;
     };
 
-    // 把 [from_line, 末尾) 的行盒与对应的字形整体挪到下一页的 dest_top。
-    //   字形用 line 号筛：行号是排版顺序递增的，所以"这一行及以后"的行盒与字形是同一个后缀。
-    auto moveToNextPage = [&](size_t from_line, float dest_top) {
-        const float dy = dest_top - res.lines[from_line].block_lo_pt;
-        const int line_no = res.lines[from_line].line;
-        for (size_t j = from_line; j < res.lines.size(); ++j) {
-            LineBox& lb = res.lines[j];
-            lb.block_lo_pt += dy;
-            lb.block_hi_pt += dy;
-            lb.bracket_axis_pt += dy;
-            lb.page += 1;
-        }
-        for (PlacedGlyph& g : res.glyphs) {
-            if (g.line < line_no) continue;
-            g.y_pt += dy;
-            g.page += 1;
-        }
-        ++page_index;
-    };
-
     // 整行挪到下一页（不允许跨页断行的那一档）。
     auto shiftRowDown = [&](TableFrame& f) {
         const float dy = cy - f.row_top;
@@ -896,43 +876,167 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
         cursor_y = cy;
     };
 
-    // 按行盒切片：本页装得下的留在本页，装不下的挪到下一页再试。切点落在行与行之间，
-    //   一行文字本身不被切开。合并单元格跨页时内容重复显示是绘制层的事（这里只保证
-    //   下半片段的内容真的到了下一页）。
-    auto splitRow = [&](TableFrame& f) {
-        size_t k = f.line_begin;
-        while (k < res.lines.size()) {
-            size_t bad = res.lines.size();
-            for (size_t j = k; j < res.lines.size(); ++j) {
-                if (res.lines[j].block_hi_pt > cy + ch + 0.01f) {
-                    bad = j;
-                    break;
-                }
+    // 把这一行占的块轴范围切成若干片段（一块落在某一页上）。切点落在行与行之间，
+    //   一个行盒不被切开；行盒按自己的纵向位置归属片段，不从数组后缀推 ——
+    //   一行的几个格都从行顶起排，它们的行盒在数组里是"格序"而不是"纵向次序"，
+    //   按后缀搬会把同行其它格的行盒一起搬走（空单元格的光标就此跑到下一页）。
+    //
+    // 每片的顶边是格线位置，内容从顶边下 kTableCellPadYPt 起；续排片段从页面内容区
+    //   上沿起画顶边，于是跨页那一刀看起来是"接着上一页"，而不是另起一格。
+    struct RowPiece {
+        /**
+         * 落在第几页（连页下是条带号）。
+         */
+        int page = 0;
+
+        /**
+         * 片段的格线上沿（页内坐标，磅）。
+         */
+        float box_top = 0.0f;
+
+        /**
+         * 片段内容的第一行能落到的位置（页内坐标，磅）。
+         */
+        float content_top = 0.0f;
+
+        /**
+         * 片段的格线下沿（页内坐标，磅）。
+         */
+        float box_bottom = 0.0f;
+
+        /**
+         * 这一片的上边是切出来的（接着上一片），不是这一行自己的边。
+         */
+        bool cont_top = false;
+
+        /**
+         * 这一片的下边是切出来的，不是这一行自己的边。
+         */
+        bool cont_bottom = false;
+    };
+    // 分页切片：返回这一行的片段（升序），并把行盒与字形挪到各自的页上。
+    //   allow_split 为假时整行一片，放不下就溢出（比一整页还高的固定行高）。
+    auto sliceRowByPage = [&](TableFrame& f, float row_top, float row_h,
+                              bool allow_split) -> std::vector<RowPiece> {
+        // 本行行盒的纵向位置（相对行顶）。同高的行盒按块流顺序（列序）稳定排。
+        struct Item {
+            size_t index = 0;
+            float off = 0.0f;
+            float h = 0.0f;
+            float dy = 0.0f;
+        };
+        std::vector<Item> items;
+        items.reserve(res.lines.size() - f.line_begin);
+        for (size_t j = f.line_begin; j < res.lines.size(); ++j) {
+            const LineBox& lb = res.lines[j];
+            items.push_back(
+                Item{j, lb.block_lo_pt - row_top, lb.block_hi_pt - lb.block_lo_pt, 0.0f});
+        }
+        std::stable_sort(items.begin(), items.end(),
+                         [](const Item& a, const Item& b) { return a.off < b.off; });
+
+        std::vector<RowPiece> pieces;
+        std::vector<float> starts;
+        const float page_bottom = cy + ch;
+        int page = page_index;
+        float start = 0.0f;
+        float content_top = row_top;
+        RowPiece first;
+        first.page = page;
+        first.box_top = row_top;
+        first.content_top = row_top;
+        pieces.push_back(first);
+        starts.push_back(0.0f);
+
+        for (Item& it : items) {
+            // 这一行在本片放不下：另起一片，从页面的内容区上沿开始（续排片段的内容
+            //   仍要让出一层内边距，否则第一行的字会压在补画的那条格线上）。
+            if (allow_split && it.off > start + 0.01f &&
+                content_top + (it.off - start) + it.h > page_bottom + 0.01f && pieces.size() < 64) {
+                ++page;
+                start = it.off;
+                content_top = cy + kTableCellPadYPt;
+                RowPiece next;
+                next.page = page;
+                next.box_top = cy;
+                next.content_top = content_top;
+                next.cont_top = true;
+                pieces.back().cont_bottom = true;
+                pieces.push_back(next);
+                starts.push_back(start);
             }
-            if (bad >= res.lines.size()) break;
-            // 本片段第一行就放不下：整片挪走。挪完仍放不下说明这一行比整页还高，
-            //   不再挪第二次（否则会一直翻页），让它溢出。
-            const bool first = (bad == k);
-            moveToNextPage(bad, cy + kTableCellPadYPt);
-            if (first && res.lines[k].block_hi_pt > cy + ch + 0.01f) break;
-            k = bad;
+            it.dy = content_top + (it.off - start) - res.lines[it.index].block_lo_pt;
+            LineBox& lb = res.lines[it.index];
+            lb.block_lo_pt += it.dy;
+            lb.block_hi_pt += it.dy;
+            lb.bracket_axis_pt += it.dy;
+            lb.page = page;
         }
-        // 行底只看最后一个页片段：跨页之后各页的 y 是各自的页内坐标，混在一起比没有意义。
-        int last_page = 0;
-        for (size_t j = f.line_begin; j < res.lines.size(); ++j) {
-            last_page = std::max(last_page, res.lines[j].page);
+        // 片段的上下沿：首片从行顶起，续片从页面内容区上沿起；最后一片到行底，
+        //   其余各片填到页底（跨页的那一刀画在页边界上）。
+        for (size_t k = 0; k < pieces.size(); ++k) {
+            RowPiece& p = pieces[k];
+            const bool last = (k + 1 == pieces.size());
+            p.box_bottom = last ? (p.content_top + (row_h - starts[k])) : page_bottom;
+            if (p.box_bottom < p.box_top) p.box_bottom = p.box_top;
         }
-        float bottom = cy;
-        for (size_t j = f.line_begin; j < res.lines.size(); ++j) {
-            if (res.lines[j].page != last_page) continue;
-            bottom = std::max(bottom, res.lines[j].block_hi_pt);
+        // 字形跟着它那一行一起挪：行号（不是下标）是字形的归属键，行号在增量续排之后
+        //   不一定等于行盒的下标。只在这一行真的被切过时才走一遍 —— 没切时每个 dy 都是 0，
+        //   而这张表每出一行都要过一遍字形，大表上的代价是 O(行数 x 字形数)。
+        bool moved = false;
+        for (const Item& it : items) {
+            if (it.dy != 0.0f) moved = true;
         }
-        f.row_top = bottom + kTableCellPadYPt;
-        cursor_y = f.row_top;
+        if (moved) {
+            std::vector<std::pair<int, float>> shifts;
+            shifts.reserve(items.size());
+            for (const Item& it : items) {
+                shifts.push_back({res.lines[it.index].line, it.dy});
+            }
+            std::sort(shifts.begin(), shifts.end(),
+                      [](const std::pair<int, float>& a, const std::pair<int, float>& b) {
+                          return a.first < b.first;
+                      });
+            size_t si = 0;
+            // 本行的字形是 glyph_begin 之后那一段（格按流顺序排，前面几行的字形不在这里）。
+            for (size_t gi = f.glyph_begin; gi < res.glyphs.size(); ++gi) {
+                PlacedGlyph& g = res.glyphs[gi];
+                if (g.line < shifts.front().first) continue;
+                while (si + 1 < shifts.size() && shifts[si + 1].first <= g.line) ++si;
+                if (shifts[si].first != g.line) continue;
+                g.y_pt += shifts[si].second;
+            }
+        }
+        return pieces;
     };
 
-    // 出一行：结算行高。整行放不下时按行记录的开关分两种走法 —— 允许跨页断行的按行盒切片，
-    //   不允许的整行挪到下一页。
+    // 连页切片：行不拆（条带不是页，切一刀不该改变内容的分页），只按条带边界切出
+    //   若干绘制片段。行盒的页内坐标在放置时已经按条带折过，这里只算片段几何。
+    auto sliceRowByBand = [&](float row_top, float row_h) -> std::vector<RowPiece> {
+        std::vector<RowPiece> pieces;
+        const float slab = page.slabHeightPt();
+        float off = 0.0f;
+        while (pieces.size() < 64) {
+            const float top_global = row_top + off;
+            const int band = static_cast<int>(std::floor(top_global / slab));
+            const float band_top = static_cast<float>(band) * slab;
+            const float bottom_global = std::min(row_top + row_h, band_top + slab);
+            RowPiece p;
+            p.page = band;
+            p.box_top = top_global - band_top;
+            p.content_top = p.box_top;
+            p.box_bottom = bottom_global - band_top;
+            p.cont_top = !pieces.empty();
+            pieces.push_back(p);
+            if (bottom_global >= row_top + row_h - 0.01f) break;
+            off = bottom_global - row_top;
+        }
+        for (size_t k = 0; k + 1 < pieces.size(); ++k) pieces[k].cont_bottom = true;
+        return pieces;
+    };
+
+    // 出一行：结算行高。整行放不下时先看要不要整行挪走，剩下的按行盒切片 ——
+    //   切片按行盒自己的纵向位置分页，同行的几个格各归各的页。
     auto closeRow = [&]() {
         TableFrame& f = tstack.back();
         closeCell();
@@ -946,81 +1050,50 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
         // 上下内边距为 0 时这条下限不能跟着变成 0：零高的行会让格线、命中与翻页判定
         //   同时退化。正常路径下每格至少有一枚段落标记，内容高不会是 0。
         if (!(row_h > 0.0f)) row_h = 1.0f;
-        // 放置前的页号与行顶：行被整体挪走或拆开时，第一片段落在哪一页要用这两个值判。
-        const int page_before = page_index;
-        const float top_before = f.row_top;
+        // 整行挪到下一页的两个条件：本页剩余空间连一行都放不下（留下一条几磅宽的
+        //   碎片格线毫无意义），或者这一行不允许跨页拆开。已经在页顶时不挪 ——
+        //   挪过去也放不下，那就只能溢出或者拆开。
+        float first_line_h = row_h;
+        if (f.line_begin < res.lines.size()) {
+            first_line_h =
+                res.lines[f.line_begin].block_hi_pt - res.lines[f.line_begin].block_lo_pt;
+        }
+        const bool allow_split = rs.can_split_by_page && !rs.page_break_before;
         const bool overflow = (f.row_top + row_h > cy + ch + 0.01f);
-        bool placed = false;
-        if (!cont && (rs.page_break_before || overflow) && f.row_top > cy + 0.01f) {
-            if (rs.can_split_by_page && !rs.page_break_before) {
-                splitRow(f);
-                placed = true;
-            } else {
-                shiftRowDown(f);
-            }
+        const bool sliver = (cy + ch - f.row_top) < first_line_h + 2.0f * kTableCellPadYPt;
+        if (!cont && (rs.page_break_before || overflow) && f.row_top > cy + 0.01f &&
+            (!allow_split || sliver)) {
+            shiftRowDown(f);
         }
-        if (!placed) {
-            f.row_top += row_h;
-            cursor_y = f.row_top;
-        }
-        // 记录这一行的绘制几何：按页给出片段，切点那两条边不画。空格没有行盒，
-        //   整行按放置后的位置记一条。
+        const float top = f.row_top;
+        // 连页下行不拆：条带不是页，切开它会让表格出现分页模式才有的断口。
+        std::vector<RowPiece> pieces =
+            cont ? sliceRowByBand(top, row_h) : sliceRowByPage(f, top, row_h, allow_split);
+        const int last_page = pieces.back().page;
+        const float last_bottom = pieces.back().box_bottom;
+        page_index = last_page;
+        f.row_top = last_bottom;
+        cursor_y = last_bottom;
+        // 记录这一行的绘制几何：一片一条。切出来的那两条边记 cont_top / cont_bottom，
+        //   绘制据此决定"这一刀要不要画线"（分页要画、连页的条带切口不画）。
         {
             PlacedTable& pt = res.placed_tables[f.placed_index];
-            struct PageSpan {
-                int page = 0;
-                float lo = 0.0f;
-                float hi = 0.0f;
-            };
-            std::vector<PageSpan> spans;
-            for (size_t j = f.line_begin; j < res.lines.size(); ++j) {
-                const LineBox& lb = res.lines[j];
-                bool found = false;
-                for (PageSpan& s : spans) {
-                    if (s.page != lb.page) continue;
-                    s.lo = std::min(s.lo, lb.block_lo_pt);
-                    s.hi = std::max(s.hi, lb.block_hi_pt);
-                    found = true;
-                    break;
-                }
-                if (!found) spans.push_back(PageSpan{lb.page, lb.block_lo_pt, lb.block_hi_pt});
-            }
-            std::sort(spans.begin(), spans.end(),
-                      [](const PageSpan& a, const PageSpan& b) { return a.page < b.page; });
-            if (spans.empty()) {
+            for (const RowPiece& piece : pieces) {
                 PlacedRow pr;
                 pr.row = f.row;
-                pr.page = page_index;
-                // 空格没有行盒：整行按"放置前后"的实际范围记。
-                pr.y = (page_index == page_before) ? top_before : cy;
-                pr.h = std::max(0.0f, f.row_top - pr.y);
-                pt.placed.push_back(pr);
-            } else {
-                // 行矩形按"这一行实际占的高度"给，不是按行盒的范围：显式行高（AtLeast）
-                //   比内容高时，中间那段空白也要有格线，否则一行看起来断成两块。
-                //   跨页拆开时按页切：首片段到页底、中间片段占满内容区、末片段到行底。
-                for (size_t i = 0; i < spans.size(); ++i) {
-                    PlacedRow pr;
-                    pr.row = f.row;
-                    pr.page = spans[i].page;
-                    if (i == 0) {
-                        pr.y = (spans[i].page == page_before) ? top_before : cy;
-                    } else {
-                        pr.y = cy;
-                    }
-                    const float bottom = (i + 1 == spans.size()) ? f.row_top : (cy + ch);
-                    pr.h = std::max(0.0f, bottom - pr.y);
-                    pr.cont_top = (i > 0);
-                    pr.cont_bottom = (i + 1 < spans.size());
-                    // 把这一片段的块轴范围回填给落在该页的行盒：选区高亮要铺满整格
-                    //   （含 AtLeast 行高多出来的那两截空白），而行盒本身只有文字那一带。
-                    for (size_t j = f.line_begin; j < res.lines.size(); ++j) {
-                        if (res.lines[j].page != pr.page) continue;
-                        res.lines[j].cell_top_pt = pr.y;
-                        res.lines[j].cell_bottom_pt = pr.y + pr.h;
-                    }
-                    pt.placed.push_back(pr);
+                pr.page = piece.page;
+                pr.y = piece.box_top;
+                pr.h = std::max(0.0f, piece.box_bottom - piece.box_top);
+                pr.cont_top = piece.cont_top;
+                pr.cont_bottom = piece.cont_bottom;
+                // 把这一片段的块轴范围回填给落在该页的行盒：选区高亮要铺满整格
+                //   （含 AtLeast 行高多出来的那两截空白），而行盒本身只有文字那一带。
+                for (size_t j = f.line_begin; j < res.lines.size(); ++j) {
+                    if (res.lines[j].page != pr.page) continue;
+                    res.lines[j].cell_top_pt = pr.y;
+                    res.lines[j].cell_bottom_pt = pr.y + pr.h;
                 }
+                pt.placed.push_back(pr);
             }
         }
         f.line_begin = res.lines.size();

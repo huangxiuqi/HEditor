@@ -67,7 +67,7 @@ Ref fromSpec(const NodeSpec& s, NodeId* next, std::string* error) {
             payload = RunPayload{s.text, s.marks, s.styleRef};
             break;
         case NodeKind::ParagraphMark:
-            payload = MarkPayload{s.para, s.styleRef};
+            payload = MarkPayload{s.para, s.styleRef, s.marks};
             break;
         case NodeKind::ContentControl:
             payload = s.control;
@@ -289,7 +289,8 @@ bool insertRunAt(Ctx* c, FlowPos at, const std::vector<uint32_t>& cps, const Cha
 /**
  * 把一枚段落标记插到流位置 at 上。落在 run 中间时先把 run 切开。
  */
-bool insertMarkAt(Ctx* c, FlowPos at, const ParaFormatPatch& para, const std::string& style) {
+bool insertMarkAt(Ctx* c, FlowPos at, const ParaFormatPatch& para, const std::string& style,
+                  const CharFormat& marks) {
     FlowIndex idx(c->doc, c->vis);
     if (at < 0 || at > idx.size()) return fail(c, "分段位置越界");
     const Pos p = idx.posAt(at);
@@ -336,7 +337,7 @@ bool insertMarkAt(Ctx* c, FlowPos at, const ParaFormatPatch& para, const std::st
 
     const NodeId mark = c->doc.next_id++;
     kids.insert(kids.begin() + ix,
-                makeNode(mark, NodeKind::ParagraphMark, MarkPayload{para, style}, {}));
+                makeNode(mark, NodeKind::ParagraphMark, MarkPayload{para, style, marks}, {}));
     return rewrite(c, parent_path, std::move(kids));
 }
 
@@ -587,7 +588,7 @@ bool applyOne(Ctx* c, const Step& step) {
                 FlowPos pos = s.at;
                 for (const Piece& p : s.content.pieces) {
                     if (p.kind == PieceKind::ParaMark) {
-                        if (!insertMarkAt(c, pos, p.para, p.styleRef)) return false;
+                        if (!insertMarkAt(c, pos, p.para, p.styleRef, p.marks)) return false;
                     } else if (!insertRunAt(c, pos, p.cps, p.marks, p.styleRef)) {
                         return false;
                     }
@@ -597,13 +598,13 @@ bool applyOne(Ctx* c, const Step& step) {
             } else if constexpr (std::is_same_v<T, DeleteRange>) {
                 return eraseFlowRange(c, s.begin, s.end);
             } else if constexpr (std::is_same_v<T, InsertParaMark>) {
-                return insertMarkAt(c, s.at, s.para, s.styleRef);
+                return insertMarkAt(c, s.at, s.para, s.styleRef, s.marks);
             } else if constexpr (std::is_same_v<T, RemoveParaMark>) {
                 return removeParaMarkAt(c, s.at);
             } else if constexpr (std::is_same_v<T, SetParaMarkFormat>) {
                 const Node* n = findNode(c->doc, s.id);
                 if (n == nullptr || !isParagraphMark(n->kind)) return fail(c, "目标不是段落标记");
-                return replaceOne(c, s.id, MarkPayload{s.para, s.styleRef}, n->hidden);
+                return replaceOne(c, s.id, MarkPayload{s.para, s.styleRef, s.marks}, n->hidden);
             } else if constexpr (std::is_same_v<T, SetRun>) {
                 const Node* n = findNode(c->doc, s.id);
                 if (n == nullptr || n->kind != NodeKind::TextRun) {

@@ -136,10 +136,18 @@ test.describe('工具栏', () => {
       btn('type').click();
       out.type = await until(() => e.text().includes('（从这里开始编辑）'));
 
-      // 插入：一张表（3x3 = 9 格，段数该多 9）与一个表单字段（清单该多一个）。
+      // 插入：一张表（网格上挑 3x3 = 9 格，段数该多 9）与一个表单字段（清单该多一个）。
+      //   表格按钮开的是尺寸面板，所以这里要先点开、再点那一格 —— 只点按钮文档不该动。
       await reset();
       const paras0 = e.paragraphs().length;
       btn('table').click();
+      await new Promise((r) => setTimeout(r, 30));
+      const pickCell = document.querySelector(
+        '.heditor-picker__cell[data-row="3"][data-col="3"]');
+      out.tablePanel = !!pickCell && e.paragraphs().length === paras0;
+      if (pickCell) {
+        pickCell.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+      }
       out.table = await until(() => e.paragraphs().length >= paras0 + 9);
 
       await reset();
@@ -170,7 +178,8 @@ test.describe('工具栏', () => {
     const want = [
       'paste', 'copy', 'cut', 'font', 'size', 'grow', 'shrink', 'bold', 'italic', 'underline',
       'color', 'line', 'after', 'indent', 'outdent', 'undo', 'redo', 'all', 'load', 'save',
-      'type', 'table', 'field', 'paged', 'continuous', 'zoomIn', 'zoomOut', 'zoomReset', 'alive',
+      'type', 'tablePanel', 'table', 'field', 'paged', 'continuous', 'zoomIn', 'zoomOut',
+      'zoomReset', 'alive',
     ];
     for (const k of want) check(`★ ${k} 点下去有反应`, r[k] === true, String(r[k]));
     // 点完这一圈之后，引擎自己的两份自审必须干净：编译出来的是最新文档，排出来的是

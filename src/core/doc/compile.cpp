@@ -125,6 +125,20 @@ private:
             applyParaFormatToBlock(
                 sheet_, mark->styleRef, mark->para, mark->id, &b,
                 [this](const CompileDiagnostic& d) { out_.diagnostics.push_back(d); });
+            // 空段落没有文本节点，字符格式只挂在段落标记上：字号决定这一行的高度，
+            //   字色决定它将来打出来的字。粗体、斜体、下划线在块级没有字段，跳过 ——
+            //   它们经由 marksAtFlow 在敲字时带进文本 run。
+            if (b.cp_text.empty()) {
+                const CharFormat& m = mark->marks;
+                if (m.font_index.has_value()) b.font_index = *m.font_index;
+                if (m.size.has_value() && m.size->kind == LengthKind::Abs) {
+                    b.size_pt = static_cast<float>(emuToPt(m.size->abs_emu));
+                }
+                if (m.color.has_value()) b.color = *m.color;
+                if (m.bold.has_value()) b.weight = *m.bold ? kWeightBold : kWeightRegular;
+                if (m.italic.has_value()) b.italic = *m.italic;
+                if (m.underline.has_value()) b.underline = *m.underline;
+            }
         }
         // 本段的行内对象表：进出控件边界时就地攒下（见 walk 里控件那一段），落段时一起带走。
         //   它与 cp_text 共用同一个码点坐标，同一次落段，于是不可能出现"文本进了这一段、

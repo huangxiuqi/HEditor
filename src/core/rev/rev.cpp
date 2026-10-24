@@ -520,6 +520,7 @@ void hashSelf(Hasher& h, const Node& n) {
                 h.u64(2);
                 hashParaPatch(h, p.para);
                 h.str(p.style);
+                hashCharFormat(h, p.marks);
             } else if constexpr (std::is_same_v<T, ControlSpec>) {
                 h.u64(3);
                 hashControlSpec(h, p);

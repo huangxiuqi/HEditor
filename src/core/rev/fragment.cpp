@@ -39,6 +39,7 @@ NodeSpec specOf(const Node& n) {
     } else if (const auto* mark = std::get_if<MarkPayload>(&n.payload)) {
         s.para = mark->para;
         s.styleRef = mark->style;
+        s.marks = mark->marks;
     } else if (const auto* c = std::get_if<ControlSpec>(&n.payload)) {
         s.control = *c;
     } else if (const auto* t = std::get_if<TableSpec>(&n.payload)) {
