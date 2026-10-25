@@ -178,6 +178,68 @@ test.describe('示例页的公开面', () => {
     check('工具栏那一格回显当前档位', after.toolbar === 'paragraph', after.toolbar);
   });
 
+  test('连页末尾：滚动高度跟着内容走，至少留一页', async ({ open }) => {
+    // 连页下"页"只是渲染条带，可滚区该跟着最后一行走。总高按整数页算就会在末尾空出
+    //   一整页；口径是 max(一页, 内容底边)，多出来的白纸由页容器裁掉。
+    //   三条判据：短文档仍留一页、长文档不是整数页、可滚区不被裁掉的那截撑大。
+    const p = await open('index.html', { viewport: { width: 1280, height: 900 } });
+    const r = await p.ev<any>(`
+      const e = window.__demo;
+      const box = () => {
+        const pages = e.element.querySelector('.heditor-pages');
+        const stage = e.element.querySelector('.heditor-stage');
+        const g = e.geometry();
+        const cs = [...e.element.querySelectorAll('.heditor-pages canvas')];
+        const last = cs.filter((c) => c.dataset.page === String(g.pages - 1))[0] || null;
+        const pr = pages.getBoundingClientRect();
+        return {
+          height: pages.offsetHeight,
+          // 可滚区 = 页容器在舞台里的整段（含上边距）。裁剪没生效时它会被画布撑大。
+          scroll: stage.scrollHeight,
+          offsetTop: pages.offsetTop,
+          lastBottom: last ? last.getBoundingClientRect().bottom - pr.top : -1,
+          geo: g.scrollHeight,
+          pageH: g.page.h,
+          gap: g.gap,
+          pages: g.pages,
+        };
+      };
+      await e.configure({ pageMode: 'continuous' });
+      await e.setText('短');
+      await e.flush();
+      const short = box();
+      const line = '连页末尾的高度跟着内容走，不再总是整数页。';
+      await e.setText(Array.from({ length: 60 }, () => line).join('\\n'));
+      await e.flush();
+      const long = box();
+      await e.configure({ pageMode: 'paged' });
+      await e.flush();
+      const paged = box();
+      return { short, long, paged };`);
+
+    const near = (a: number, b: number): boolean => Math.abs(a - b) <= 2;
+    check('前提：长文档排成了两页以上（连页条带）', r.long.pages >= 2, String(r.long.pages));
+    check('★ 短文档在连页下仍留一页高',
+          near(r.short.height, r.short.pageH), `${r.short.height} vs ${r.short.pageH}`);
+    check('★ 长文档的总高不是整数页（末尾不空一整页）',
+          r.long.height > r.long.pageH && r.long.height < r.long.pages * r.long.pageH - 40,
+          `${r.long.height} / ${r.long.pages} x ${r.long.pageH}`);
+    check('★ 可滚区等于页容器的高度（最后那截白纸被裁掉，没撑大滚动范围）',
+          near(r.long.scroll, r.long.offsetTop + r.long.height),
+          `scroll ${r.long.scroll} vs ${r.long.offsetTop + r.long.height}`);
+    check('最后一页的画布仍伸到容器外（被裁的正是它多出来的那一截）',
+          r.long.lastBottom > r.long.height + 2, `${r.long.lastBottom} vs ${r.long.height}`);
+    check('geometry() 报的滚动高度与 DOM 一致',
+          near(r.long.geo, r.long.height), `${r.long.geo} vs ${r.long.height}`);
+    check('分页下仍是整数页（这条行为没被改坏）',
+          near(r.paged.height, r.paged.pages * r.paged.pageH + (r.paged.pages - 1) * r.paged.gap),
+          `${r.paged.height} / ${r.paged.pages} x ${r.paged.pageH}`);
+
+    // 反向一半：切回分页，同一份文档的总高该回到"整数页"。
+    check('★ 切回分页：总高回到页数 x 页高', r.paged.height > r.long.height,
+          `${r.paged.height} vs ${r.long.height}`);
+  });
+
   test('只有契约成员，六组行为按契约工作', async ({ open }) => {
     const p = await open('index.html', { viewport: { width: 1280, height: 900 } });
 

@@ -306,6 +306,7 @@ const COMMANDS: Array<[string, string, string[], string]> = [
   ['setShowBrackets',       'w', ['setShowBrackets'],                                     'host'],  // 会重排（括号占宽度）
   ['setShowControlDots',    'w', ['setShowControlDots'],                                  'host'],  // 不重排，只改光栅签名
   ['setShowMarks',          'w', ['setShowMarks'],                                        'host'],  // 编辑标记：不重排，只改光栅签名
+  ['setShowMarginMarks',    'w', ['setShowMarginMarks'],                                  'host'],  // 裁剪标记：同上
   ['caretStyle',            'w', ['caretStyleJson', 'setCaretStyle'],                     'host'],
   ['selectionStyle',        'w', ['selectionStyleJson', 'setSelectionStyle'],             'host'],
   ['setUndoLimit',          'w', ['setUndoLimit'],                                        'none'],
@@ -341,6 +342,7 @@ const COMMANDS: Array<[string, string, string[], string]> = [
   ['showBrackets',          'r', ['showBrackets'],                                        'none'],
   ['showControlDots',       'r', ['showControlDots'],                                     'none'],
   ['showMarks',             'r', ['showMarks'],                                           'none'],
+  ['showMarginMarks',       'r', ['showMarginMarks'],                                     'none'],
   ['undoLimit',             'r', ['undoLimit'],                                           'none'],
 
   // 查询：几何
@@ -464,6 +466,9 @@ let dpr = 1;
 let viewW = 1;
 let viewH = 1;
 let scrollY = 0;
+// 连页模式。与 setContinuous 同一次调用落地（见 setViewMode），只为让 geom 报得出来 ——
+//   连页下滚动高度按内容底边算，宿主需要知道该不该用那一条口径。
+let continuousMode = false;
 // 宿主报来的提前量（设备像素，连页模式下可能是负的）。它只用来选窗口 —— 真实落点一律按
 //   scrollY 算，两者混用会让连页的内容跑到滚动位置前面去（停稳再弹回来）。
 let scrollLead = 0;
@@ -549,6 +554,8 @@ function geom(st: any) {
     dpr, viewW, viewH, scrollY,
     // 内容底边（设备像素）。连页下宿主拿它当滚动高度 —— 没有页可数，只有内容。
     contentPx: mod.contentPx ? mod.contentPx() : 0,
+    // 连页：宿主据此判"滚动高度按内容底边算"，并裁掉最后一页多出来的空白。
+    continuous: continuousMode,
     // 槽数的上限（与文档位置无关，只随视口与页度量变）。宿主按它建槽、再把自己实际
     //   建了几个报回来（pageCanvas.slots）—— 一个数、一个来源，两侧不会分叉。
     maxWindowPages: maxWindowPages(),
@@ -1057,6 +1064,7 @@ const WRITE = collect('w', {
   setShowBrackets: (a) => mod.setShowBrackets(!!a.on),
   setShowControlDots: (a) => mod.setShowControlDots(!!a.on),
   setShowMarks: (a) => mod.setShowMarks(a.mode | 0),
+  setShowMarginMarks: (a) => mod.setShowMarginMarks(!!a.on),
   /**
    * 光标与选区的样式。缺的字段按现状补 —— 与单线程宿主门面同一套补全规则，
    *   两处不能各写一套（面板只改颜色时，宽度必须原样保留）。
@@ -1313,6 +1321,7 @@ const READ = collect('r', {
   showBrackets: () => mod.showBrackets(),
   showControlDots: () => mod.showControlDots(),
   showMarks: () => mod.showMarks(),
+  showMarginMarks: () => mod.showMarginMarks(),
   undoLimit: () => mod.undoLimit(),
   auditFrame: () => JSON.parse(mod.auditFrame()),
   auditBase: () => JSON.parse(mod.auditBase()),
@@ -1547,6 +1556,7 @@ function view(m: any) {
 function setViewMode(m: any) {
   if (typeof m.gap === 'number') mod.setPageGap(m.gap);
   mod.setContinuous(!!m.continuous);
+  continuousMode = !!m.continuous;
 }
 
 /**

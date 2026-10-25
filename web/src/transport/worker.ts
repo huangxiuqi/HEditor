@@ -314,6 +314,9 @@ export function createWorker(opts: WorkerOptions): {
         totalPages: Math.max(1, Number(mirror.stats?.totalPages ?? 1)),
         first: g?.first ?? 0,
         count: Math.max(1, g?.count ?? 1),
+        // 连页的滚动高度按内容底边算（见 pages.sync）；分页下这两个字段都不作数。
+        continuous: !!g?.continuous,
+        contentPx: Number(g?.contentPx ?? 0),
       };
     },
     setViewMode(gap: number, continuous: boolean) {

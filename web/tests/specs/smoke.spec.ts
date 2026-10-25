@@ -130,6 +130,9 @@ test.describe('工具栏', () => {
       out.load = await until(() => e.text().includes('HEditor 示例文档'));
       btn('save').click();
       out.save = await until(() => status().includes('字节'));
+      // 保存提醒是页面自己的开关，默认关：按一下要真的翻过去（探针读它那份状态）。
+      btn('unsaved-prompt').click();
+      out.unsavedPrompt = await until(() => window.__demoState.unsavedPrompt === true);
 
       // 插入：插入一句。
       await reset();
@@ -180,6 +183,14 @@ test.describe('工具栏', () => {
       out.countsGrow = parseInt(c1.words, 10) === parseInt(c0.words, 10) + 3;
       out.pagesMatch = c1.pages === e.geometry().pages + ' 页';
 
+      // 视图：裁剪标记（只改光栅，画面上是四个角多出的短线）。
+      //   前后各取一次帧指纹：只翻配置不动像素的话，屏幕上什么都不会变。
+      out.marginMarksBefore = e.config().marginMarks;
+      const digest0 = await e.diag.frameDigest();
+      btn('margin-marks').click();
+      out.marginMarks = await until(() => e.config().marginMarks === true);
+      out.marginMarksRedraw = await until(async () => (await e.diag.frameDigest()) !== digest0);
+
       // 视图：分页 / 连页 / 三档缩放。
       btn('paged').click();
       out.paged = await until(() => e.config().pageMode === 'paged');
@@ -205,10 +216,13 @@ test.describe('工具栏', () => {
       'paste', 'copy', 'cut', 'font', 'size', 'grow', 'shrink', 'bold', 'italic', 'underline',
       'color', 'line', 'after', 'indent', 'outdent', 'undo', 'redo', 'all', 'load', 'save',
       'type', 'tablePanel', 'table', 'field', 'modeReadOnly', 'modeRejects', 'modeBack',
-      'countsGrow', 'pagesMatch', 'paged', 'continuous', 'zoomIn', 'zoomOut',
-      'zoomReset', 'alive',
+      'countsGrow', 'pagesMatch', 'marginMarks', 'marginMarksRedraw', 'paged', 'continuous',
+      'zoomIn', 'zoomOut',
+      'zoomReset', 'alive', 'unsavedPrompt',
     ];
     for (const k of want) check(`★ ${k} 点下去有反应`, r[k] === true, String(r[k]));
+    // 默认那一档：裁剪标记与保存提醒都是关的（示例页不该一上来就拦关页面）。
+    check('裁剪标记默认关', r.marginMarksBefore === false, String(r.marginMarksBefore));
     // 点完这一圈之后，引擎自己的两份自审必须干净：编译出来的是最新文档，排出来的是
     //   最新编译。少了这两条，"按钮点了没反应"要靠肉眼才发现。
     check('★ 一圈操作之后编译自审为 0', r.compileDiff === 0, String(r.compileDiff));

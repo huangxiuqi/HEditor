@@ -25,6 +25,11 @@
 
 namespace heditor {
 
+/**
+ * 裁剪标记的臂长（磅）。取 12 磅：约等于一个汉字的宽度，缩放后仍看得出是"角"。
+ */
+constexpr float kMarginMarkPt = 12.0f;
+
 void EditorEngine::repaint() {
     // 窗口取本次布局的页数，不能锁在"上一次画过多少页"上：文档从 N 页涨到 N+1 页时
     //   （页尾敲字、内容溢出到下一页），锁住的话新页永远不进窗口 —— 表现为"字打进去了，
@@ -287,6 +292,36 @@ void EditorEngine::rasterIntoBitmap(Bitmap& target, int page_index, const float*
         target.strokeRect(
             Rect{0.0f, 0.0f, static_cast<float>(page_px_w), static_cast<float>(page_px_h)},
             cfg_.page_border, 1.0f);
+    }
+    // 裁剪标记同理每次都补：分带重画时那一带的底色会把它擦掉，而它只由这一段代码画。
+    //   八条短线（四角各两条）够便宜，不必按带筛。
+    if (cfg_.show_margin_marks && !cfg_.page.continuous) {
+        const float m = cfg_.page.margin_pt * zoom;
+        const float x0 = std::round(m);
+        const float y0 = std::round(m);
+        const float x1 = std::round(static_cast<float>(page_px_w) - m);
+        const float y1 = std::round(static_cast<float>(page_px_h) - m);
+        const float len = std::round(kMarginMarkPt * zoom);
+        if (len >= 1.0f && x1 - x0 > 2.0f * len && y1 - y0 > 2.0f * len) {
+            const Color c = cfg_.margin_mark_color;
+            // 每个角两条臂，都朝页边距那一侧伸（裁切标记的老规矩：线在成品之外）。
+            //   伸进正文里会贴着第一个字的左上角，看着像一撇脏墨。
+            //   朝外那一条多画一格，两个臂才在最角上那一点接住，不留 1 像素缺口。
+            auto hArm = [&](float x, float y, bool left) {
+                target.fillRect(Rect{left ? x - len : x, y, len + (left ? 1.0f : 0.0f), 1.0f}, c);
+            };
+            auto vArm = [&](float x, float y, bool up) {
+                target.fillRect(Rect{x, up ? y - len : y, 1.0f, len + (up ? 1.0f : 0.0f)}, c);
+            };
+            hArm(x0, y0, true);
+            vArm(x0, y0, true);
+            hArm(x1, y0, false);
+            vArm(x1, y0, true);
+            hArm(x0, y1, true);
+            vArm(x0, y1, false);
+            hArm(x1, y1, false);
+            vArm(x1, y1, false);
+        }
     }
     raster_fill_ms_ += msSince(t_fill0);
 
@@ -1275,8 +1310,7 @@ void EditorEngine::rasterEditingMarks(Bitmap& target, int page_index, const floa
         // 空格与制表符：每个簇各画一枚，位置取簇的起点、宽度取到下一簇的起点。
         //   簇的 cp 是段内码点下标（不是码点本身），要拿它回块流里查那一个字。
         if (dot_mode) {
-            // 中点的边长与纵向位置按这一行的字号算：太小看不见，太大就成了脏点。
-            const float d = std::max(1.0f, lb.size_pt * 0.09f * zoom);
+            // 中点的纵向位置按这一行的字号算：太小看不见，太低就跟正文混在一起。
             const float mid = axis - lb.size_pt * 0.30f;
             for (size_t ci = 0; ci < lb.clusters.size(); ++ci) {
                 const LineCluster& c = lb.clusters[ci];
@@ -1293,6 +1327,10 @@ void EditorEngine::rasterEditingMarks(Bitmap& target, int page_index, const floa
                     //   放在全角格里会显得那一格是空的（与字处理软件的画法也一致）。
                     const bool full = (ch == 0x3000);
                     const float s0 = full ? std::max(3.0f, lb.size_pt * 0.42f * zoom) : 0.0f;
+                    // 半角空格的格宽只有 0.22 em：点若按字号取（0.09 em）就占了四成，
+                    //   再经 fillRect 的 floor/ceil 向外取整，1 px 的框会撑成 2 px，
+                    //   连续空格于是挤成一条线。按格宽的三成取，并吸附到整像素。
+                    const float dot_px = std::max(1.0f, std::round((a1 - a0) * 0.30f * zoom));
                     if (!lb.vertical) {
                         if (full) {
                             const float x0 = cx * zoom - s0 * 0.5f;
@@ -1303,13 +1341,16 @@ void EditorEngine::rasterEditingMarks(Bitmap& target, int page_index, const floa
                             target.fillRect(Rect{x0, y0, st, s0}, cfg_.mark_color);
                             target.fillRect(Rect{x0 + s0 - st, y0, st, s0}, cfg_.mark_color);
                         } else {
-                            target.fillRect(Rect{cx * zoom - d * 0.5f, mid * zoom + dy_px, d, d},
+                            target.fillRect(Rect{std::round(cx * zoom - dot_px * 0.5f),
+                                                 std::round(mid * zoom + dy_px), dot_px, dot_px},
                                             cfg_.mark_color);
                         }
                     } else {
                         // 竖排：行内轴是 y、块轴是 x，中点跟着换轴（方块不必转）。
-                        target.fillRect(Rect{mid * zoom, cx * zoom + dy_px - d * 0.5f, d, d},
-                                        cfg_.mark_color);
+                        target.fillRect(
+                            Rect{std::round(mid * zoom),
+                                 std::round(cx * zoom + dy_px - dot_px * 0.5f), dot_px, dot_px},
+                            cfg_.mark_color);
                     }
                 } else if (ch == 0x09) {
                     // 制表符用右箭头字形；字体里没有这一枚就跳过，不画半个箭头。

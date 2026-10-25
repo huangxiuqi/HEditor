@@ -151,6 +151,8 @@ static uint64_t rasterSignature(const EngineConfig& cfg, bool marks_shown) {
     h = fnvMixColor(h, cfg.page_fill);
     h = fnvMixColor(h, cfg.page_border);
     h = fnvMix(h, cfg.draw_page_border ? 1ULL : 0ULL);
+    h = fnvMix(h, cfg.show_margin_marks ? 1ULL : 0ULL);
+    h = fnvMixColor(h, cfg.margin_mark_color);
     h = fnvMixColor(h, cfg.table_line);
     h = fnvMixColor(h, cfg.atom_fill);
     h = fnvMixColor(h, cfg.atom_border);
@@ -1657,7 +1659,16 @@ bool EditorEngine::hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* 
         //   拖选那一路允许夹取：指针拖出画布之后仍要能选，落在缝里就按最近的那条边算，
         //   否则"拖到页外选区就不动了"。单击那一路不夹：点在灰底上本来就不该挪光标。
         if (clamp) {
-            local_px = std::max(0.0f, std::min(local_px, static_cast<float>(page_px_h)));
+            // 夹的是内容区，不是页框：四边页边距里没有正文，夹到页框等于让落点停在
+            //   那一页最靠近的一行上。跨页表格里那一行常常在另一列（高的那格一路排到
+            //   页底），于是"顺着这一列往下拖"会把焦点甩到首列，矩形包络铺满整行。
+            float lo_px = 0.0f;
+            float hi_px = static_cast<float>(page_px_h);
+            if (!cfg_.page.continuous && cfg_.page.height_pt > 2.0f * cfg_.page.margin_pt) {
+                lo_px = cfg_.page.margin_pt * zoom;
+                hi_px = (cfg_.page.height_pt - cfg_.page.margin_pt) * zoom;
+            }
+            local_px = std::max(lo_px, std::min(local_px, hi_px));
             if (x_pt_doc < 0.0f) x_pt_doc = 0.0f;
             if (x_pt_doc > page_w) x_pt_doc = page_w;
         } else {

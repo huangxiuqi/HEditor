@@ -252,7 +252,7 @@ setText(text: string, opts?: { repeat?: number }): Promise<void>   // 明确用�
 | 类别 | 项 | 为什么 |
 | --- | --- | --- |
 | 构造期固定 | `container` `assets` `fonts` | 换容器要重建 DOM；换 Worker 壳要重建引擎；字体装一次最贵 |
-| 运行期可改 | `zoom` `pageMode` `mode` `input` `showBrackets` `showControlDots` `showMarks` `undoLimit` `caretStyle` `selectionStyle` | 有明确语义，代价可分级 |
+| 运行期可改 | `zoom` `pageMode` `mode` `input` `showBrackets` `showControlDots` `showMarks` `marginMarks` `undoLimit` `caretStyle` `selectionStyle` | 有明确语义，代价可分级 |
 | 只读 | `pages` `geometry` `caret` `selection` | 从引擎状态推出来 |
 
 ### 7.2 一个入口，不是 14 个 setter
@@ -272,7 +272,7 @@ const c = editor.config();     // 生效后的值（越界已夹取）
 | 标签 | 项 |
 | --- | --- |
 | `none` | `undoLimit` |
-| `paint` | `mode` `input` `showControlDots` `showMarks` `caretStyle` `selectionStyle` |
+| `paint` | `mode` `input` `showControlDots` `showMarks` `marginMarks` `caretStyle` `selectionStyle` |
 
 `mode` 是三档而不是 `readOnly: boolean`：`document` / `form` / `readOnly`。表单模式（光标自由、
 只有可编辑控件里的字改得动）是填表这个场景的主路径，布尔值表达不了它。三档都要落到引擎
@@ -300,6 +300,17 @@ const c = editor.config();     // 生效后的值（越界已夹取）
 形状用矩形与三角形拼、不借字体字形：这三份字体里都没有 U+21B5，借字形会在缺字的行上
 静默消失；顶点对齐到整数像素并且不开抗锯齿 —— 分带与整带的画布高度不同，AA 的覆盖率会
 差出一两个色阶，而连页接缝的判据是逐字节相同。
+
+---
+
+### 7.6 页边距裁剪标记
+
+`marginMarks`：正文可用区四角的短角线（与文字处理软件里的"显示裁剪标记"同一件事），默认关闭。
+标的是页边距的内沿，不是页框 —— 它回答"这一页能写到哪里"。连页下不画：那里没有页。
+
+与 `showMarks` 同一条成本标签（`paint`）：画进页位图、不占宽度、不进流位置，所以只重光栅。
+颜色与页框分开一项（`EngineConfig::margin_mark_color`，比页框浅一档）：它是辅助线，
+不该比正文与页框更显眼。
 
 ---
 

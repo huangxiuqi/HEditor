@@ -16,6 +16,7 @@
  * 可证伪的基准，前提是基准本身是可以被证伪的。
  */
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -12821,6 +12822,208 @@ int main() {
             }
             expectTrue(stale == 0,
                        "正文里逐字输入也一步不留旧墨迹（不自洽 " + std::to_string(stale) + " 次）");
+        }
+    }
+
+    if (runSection(74)) std::printf("\n[74] 跨页表格：顺着同一列拖到页间，不许铺满整行\n");
+    if (runSection(74)) {
+        // 跨页切开的那一行，页底最靠下的行盒全在高的那一列上。指针落进页底边距或页间
+        //   空隙时按"最近的一行"取落点，就永远取到那一列 —— 从别的列往下拖，矩形包络
+        //   于是横跨整行，看着像"一不小心把整行都选中了"。落点该按指针的横坐标认列。
+        EngineConfig c74;
+        c74.zoom = 1.0f;
+        c74.page.width_pt = 400.0f;
+        c74.page.height_pt = 300.0f;
+        c74.page.margin_pt = 20.0f;
+
+        EditorEngine e;
+        expectTrue(e.init({cjkPath, mnPath, latinPath}), "引擎初始化（跨页拖选）");
+        e.setConfig(c74);
+        e.setEditMode(EditMode::Document);
+        {
+            NodeTree t;
+            const NodeId s = t.firstSectionId();
+            t.setText(t.appendChild(s, NodeKind::TextRun), utf8ToCodepoints("首段"));
+            t.appendChild(s, NodeKind::ParagraphMark);
+            e.setDocument(t, StyleSheet{});
+        }
+        e.setCaret(0, 2);
+        expectTrue(e.insertTableAndRender(3, 3, false), "插一张 3x3 表");
+        for (int i = 0; i < 34; ++i) {
+            e.typeTextAndRender("第一格第" + std::to_string(i) + "行");
+            e.splitParagraphAndRender();
+        }
+        e.relayout();
+        const PlacedTable& pt = e.layout().placed_tables.at(0);
+        const LayoutCell* c0 = pt.cellAt(0, 0, nullptr, nullptr);
+        const LayoutCell* c2 = pt.cellAt(0, 2, nullptr, nullptr);
+        expectTrue(c0 != nullptr && c2 != nullptr, "前提：第 1 行三格都能取到");
+        const float col_w = pt.col_x[3] - pt.col_x[2];
+        // 第三列的中心：指针从头到尾没离开过这一列。
+        const float x_third = pt.x + 0.5f * (pt.col_x[2] + pt.col_x[3]);
+        // 两个纵向落点：页底边距里、真正的页间空隙里（后者要靠 clamp 夹回来）。
+        const float ys[] = {c74.page.height_pt - 4.0f, c74.page.height_pt + 7.0f};
+        // 拖选一条：从第三格开头拖到 (x, y)。
+        auto dragFromThird = [&](float x, float y) -> bool {
+            e.setCaret(c2->first_block, 0);
+            TextPos hit{};
+            int side = 0;
+            int line_aff = 0;
+            if (!e.hitTestPt(x, y, &hit, nullptr, &side, &line_aff, nullptr, true)) return false;
+            e.setFocusAtSideLine(hit.para, hit.offset, side, line_aff);
+            return true;
+        };
+        int hits = 0;
+        int stayed = 0;
+        int whole_row = 0;
+        std::string detail;
+        for (float y : ys) {
+            if (!dragFromThird(x_third, y)) continue;
+            ++hits;
+            // 焦点仍在第三格：第三格是一段空段，落点只能是它的开头。
+            if (e.caret().para >= c2->first_block &&
+                e.caret().para < c2->first_block + c2->block_count)
+                ++stayed;
+            // 整格选区不该出现（两端在同一格），更不该有一条横跨两列以上的矩形。
+            bool wide = e.selectionIsCell();
+            for (const PageRect& r : e.selectionRects())
+                if (r.r_pt.w > col_w + 1.0f) wide = true;
+            if (wide) {
+                ++whole_row;
+                detail += " y=" + std::to_string(static_cast<int>(y));
+            }
+        }
+        expectTrue(hits == 2, "前提：两种纵向落点都命中了（实际 " + std::to_string(hits) + "）");
+        expectTrue(stayed == hits, "★ 顺着同一列拖到页间，落点仍在这一列（" +
+                                       std::to_string(stayed) + "/" + std::to_string(hits) + "）");
+        expectTrue(whole_row == 0, "★ 页底边距与页间空隙都不把选区铺成整行（越界 " +
+                                       std::to_string(whole_row) + " 次" + detail + "）");
+
+        // 反向一半：横坐标落在第一列时，落点该回到第一列 —— 不能一律判给"最靠下的那一行"。
+        int first_col_ok = 0;
+        for (float y : ys) {
+            if (!dragFromThird(pt.x + 10.0f, y)) continue;
+            if (e.caret().para >= c0->first_block &&
+                e.caret().para < c0->first_block + c0->block_count)
+                ++first_col_ok;
+        }
+        expectTrue(first_col_ok == hits, "★ 落点按指针的列走：第一列上的点落回第一列（" +
+                                             std::to_string(first_col_ok) + "/" +
+                                             std::to_string(hits) + "）");
+    }
+
+    if (runSection(75)) std::printf("\n[75] 页边距裁剪标记：四角有墨、边上没有、只改光栅\n");
+    if (runSection(75)) {
+        // 标记标的是正文可用区（页边距的内沿）。它画进页位图，所以判据有三半：
+        //   四角有墨、四条边的中段没有墨（不是"画了一个框"）、关掉之后墨消失。
+        EngineConfig c75;
+        c75.zoom = 1.0f;
+        c75.page.width_pt = 400.0f;
+        c75.page.height_pt = 300.0f;
+        c75.page.margin_pt = 20.0f;
+
+        EditorEngine e;
+        expectTrue(e.init({cjkPath, mnPath, latinPath}), "引擎初始化（裁剪标记）");
+        e.setConfig(c75);
+        {
+            NodeTree t;
+            const NodeId s = t.firstSectionId();
+            t.setText(t.appendChild(s, NodeKind::TextRun), utf8ToCodepoints("甲"));
+            t.appendChild(s, NodeKind::ParagraphMark);
+            e.setDocument(t, StyleSheet{});
+        }
+        e.repaint();
+        auto inkIn = [](const EditorEngine& eng, int page, int x0, int y0, int x1, int y1) {
+            const uint8_t* px = eng.pagePixels(page);
+            if (px == nullptr) return 0;
+            const int pw = eng.pagePxWidth();
+            const int ph = eng.pagePxHeight();
+            int dark = 0;
+            for (int y = std::max(0, y0); y < std::min(ph, y1); ++y) {
+                for (int x = std::max(0, x0); x < std::min(pw, x1); ++x) {
+                    const size_t at = (static_cast<size_t>(y) * static_cast<size_t>(pw) +
+                                       static_cast<size_t>(x)) *
+                                      4u;
+                    if (px[at] < 200) ++dark;
+                }
+            }
+            return dark;
+        };
+        // 四角的取样：只取页边距那一侧的两条臂（各 len 磅长）。窗口不能伸进正文 ——
+        //   第一个字就贴在内容框的左上角上，伸进去会把字算成标记。
+        auto cornerInk = [&](const EditorEngine& eng) {
+            const int m = static_cast<int>(c75.page.margin_pt);
+            const int len = 12;  // kMarginMarkPt = 12 磅，本节的缩放是 1
+            const int x1 = eng.pagePxWidth() - m;
+            const int y1 = eng.pagePxHeight() - m;
+            auto h = [&](int x, int y, int w) { return inkIn(eng, 0, x, y, x + w, y + 1); };
+            auto v = [&](int x, int y, int hh) { return inkIn(eng, 0, x, y, x + 1, y + hh); };
+            return std::array<int, 4>{h(m - len, m, len + 1) + v(m, m - len, len + 1),
+                                      h(x1, m, len + 1) + v(x1, m - len, len + 1),
+                                      h(m - len, y1, len + 1) + v(m, y1, len + 1),
+                                      h(x1, y1, len + 1) + v(x1, y1, len + 1)};
+        };
+        {
+            const auto off = cornerInk(e);
+            expectTrue(off[0] == 0 && off[1] == 0 && off[2] == 0 && off[3] == 0,
+                       "默认不画：四角干净（实际 " + std::to_string(off[0]) + "/" +
+                           std::to_string(off[1]) + "/" + std::to_string(off[2]) + "/" +
+                           std::to_string(off[3]) + "）");
+        }
+        {
+            EngineConfig on = c75;
+            on.show_margin_marks = true;
+            e.setConfig(on);
+            e.repaint();
+            const auto ink = cornerInk(e);
+            const bool all = ink[0] > 0 && ink[1] > 0 && ink[2] > 0 && ink[3] > 0;
+            expectTrue(all, "★ 打开之后四个角都有墨（实际 " + std::to_string(ink[0]) + "/" +
+                                std::to_string(ink[1]) + "/" + std::to_string(ink[2]) + "/" +
+                                std::to_string(ink[3]) + "）");
+            // 不是画框：四条边的中段与页框附近都该干净。
+            const int w = e.pagePxWidth();
+            const int h = e.pagePxHeight();
+            const int mid_x = w / 2;
+            const int mid_y = h / 2;
+            const int m = static_cast<int>(c75.page.margin_pt);
+            const int edge = inkIn(e, 0, mid_x - 8, m - 2, mid_x + 8, m + 8) +
+                             inkIn(e, 0, mid_x - 8, h - m - 8, mid_x + 8, h - m + 2) +
+                             inkIn(e, 0, m - 2, mid_y - 8, m + 8, mid_y + 8) +
+                             inkIn(e, 0, w - m - 8, mid_y - 8, w - m + 2, mid_y + 8);
+            expectTrue(edge == 0, "★ 四条边的中段没有墨：标的是四个角，不是整个框（实际 " +
+                                      std::to_string(edge) + "）");
+            expectTrue(e.auditPageJson(0).find("\"diff\":0") != std::string::npos,
+                       "打开之后页位图 == 从零光栅（" + e.auditPageJson(0) + "）");
+        }
+        {
+            // 关掉：签名一变，同一份缓存就不能再贴 —— 墨必须消失。
+            e.setConfig(c75);
+            e.repaint();
+            const auto off = cornerInk(e);
+            expectTrue(off[0] == 0 && off[1] == 0 && off[2] == 0 && off[3] == 0,
+                       "★ 再关掉，四角的墨消失（缓存按光栅签名作废）");
+        }
+        {
+            // 连页下不画：那里没有页，四角没有意义。这一条用差分判 —— 正文与段落标记就画在
+            //   左上角那一窗里，绝对值分不清"标记没画"与"语料本来有墨"。
+            EngineConfig cont = c75;
+            cont.continuous = true;
+            cont.show_margin_marks = true;
+            e.setConfig(cont);
+            e.repaint();
+            const auto on = cornerInk(e);
+            cont.show_margin_marks = false;
+            e.setConfig(cont);
+            e.repaint();
+            const auto off = cornerInk(e);
+            bool same = true;
+            for (size_t k = 0; k < on.size(); ++k)
+                if (on[k] != off[k]) same = false;
+            expectTrue(same, "连页模式下不画裁剪标记（开 " + std::to_string(on[0]) + "/" +
+                                 std::to_string(on[1]) + "/" + std::to_string(on[2]) + "/" +
+                                 std::to_string(on[3]) + "，关 " + std::to_string(off[0]) + "/" +
+                                 std::to_string(off[1]) + "/" + std::to_string(off[2]) + "/" +
+                                 std::to_string(off[3]) + "）");
         }
     }
 

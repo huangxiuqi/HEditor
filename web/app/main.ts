@@ -34,7 +34,7 @@ declare global {
   interface Window {
     __demo?: Editor;
     __demoReady?: boolean;
-    __demoState?: { changes: number };
+    __demoState?: { changes: number; unsavedPrompt: boolean };
     __demoStartError?: string;
   }
 }
@@ -65,6 +65,11 @@ type MarkKey = 'bold' | 'italic' | 'underline';
  * 只有它才拦"关页面"：一律拦会让刷新变成两步，而"没改过也问一句"是纯粹的打搅。
  */
 let dirty = false;
+
+/**
+ * 关页面前要不要提醒"还没保存"。默认关闭 —— 提醒是可选行为，不是编辑器的默认态度。
+ */
+let unsavedPrompt = false;
 
 /** 正在读格式：期间来的刷新请求先记下，读完再补一轮。 */
 let reading = false;
@@ -236,6 +241,18 @@ function makeTabs(): Tab[] {
     items: [
       { act: 'load', label: '载入示例', icon: 'doc', big: true, run: () => editor.setText(DEMO_TEXT) },
       { act: 'save', label: '保存', icon: 'save', big: true, run: () => saveNow() },
+      {
+        act: 'unsaved-prompt',
+        label: '保存提醒',
+        icon: 'unsaved',
+        big: true,
+        on: () => unsavedPrompt,
+        run: () => {
+          unsavedPrompt = !unsavedPrompt;
+          if (window.__demoState) window.__demoState.unsavedPrompt = unsavedPrompt;
+          chrome.refresh();
+        },
+      },
     ],
   };
 
@@ -396,6 +413,18 @@ function makeTabs(): Tab[] {
         },
       },
       {
+        act: 'margin-marks',
+        label: '裁剪标记',
+        icon: 'margin-marks',
+        on: () => editor.config().marginMarks,
+        run: () => {
+          // 与上面那几个下拉框同一条：配完重读一遍回显，否则按钮停在上一档。
+          void editor
+            .configure({ marginMarks: !editor.config().marginMarks })
+            .then(() => chrome.refresh());
+        },
+      },
+      {
         act: 'paged',
         label: '分页',
         icon: 'paged',
@@ -524,7 +553,7 @@ async function boot(): Promise<void> {
   // 页面创建的实例只能这样交给页面外的脚本：evaluate 在页面里跑，拿不到模块引用。
   //   它同时是测试的唯一入口（web/tests/support/readings.ts 的前言里读一次），改名字要同步。
   window.__demo = editor;
-  window.__demoState = { changes: 0 };
+  window.__demoState = { changes: 0, unsavedPrompt };
 
   await editor.setText(DEMO_TEXT);
   dirty = false;
@@ -559,12 +588,12 @@ chrome = mountChrome(document.getElementById('bar')!, 'HEditor', tabs);
 
 void boot();
 
-// 有未保存的改动就拦一下"关页面 / 刷新"。
+// 有未保存的改动、且用户打开了提醒，才拦一下"关页面 / 刷新"。
 //
 // 文案由浏览器给（自定义的那一句不显示），所以这里只做"要不要问"的判断：
-//   改过、且之后没存过 —— 拦住；装载示例之后还没改过 —— 直接放行。
+//   默认不问 —— 提醒是可选行为；用户可以在工具条上把它打开。
 window.addEventListener('beforeunload', (ev) => {
-  if (!dirty) return;
+  if (!unsavedPrompt || !dirty) return;
   ev.preventDefault();
   // Chrome 只认 returnValue 非空，其余浏览器读 returnValue 的字符串。
   ev.returnValue = '文档还没保存';

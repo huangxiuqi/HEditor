@@ -978,6 +978,20 @@ void setShowMarks(int mode) {
 int showMarks() { return static_cast<int>(g_cfg.marks); }
 
 /**
+ * 页边距裁剪标记（正文四角的短角线）。默认不画。
+ *
+ * 它只是页位图上的一层辅助线：不占宽度、不进流位置，改它不重排 —— 只让页位图重光栅
+ * （见 rasterSignature）。连页下引擎自己不画：那里没有页，四角没有意义。
+ */
+void setShowMarginMarks(bool on) {
+    EngineConfig c = g_cfg;
+    c.show_margin_marks = on;
+    g_cfg = c;
+    applyConfig();
+}
+bool showMarginMarks() { return g_cfg.show_margin_marks; }
+
+/**
  * 删控件：拆壳（保留内容）或连内容一起删。走 AndRender 版 —— 宿主一次调用就收尾，
  * 不必自己记得再排一次（漏掉那步的症状是"控件没了但画布上括号还在"）。
  * 表单模式默认被 structureLock 拒（返回 false），探针要删就得先切文档模式。
@@ -1734,6 +1748,8 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("setShowControlDots", &setShowControlDots);
     emscripten::function("setShowMarks", &setShowMarks);
     emscripten::function("showMarks", &showMarks);
+    emscripten::function("setShowMarginMarks", &setShowMarginMarks);
+    emscripten::function("showMarginMarks", &showMarginMarks);
     emscripten::function("showControlDots", &showControlDots);
     emscripten::function("removeControlAt", &removeControlAt);
     emscripten::function("setControlPropAt", &setControlPropAt);

@@ -62,6 +62,43 @@ export interface PageGeometry {
 }
 
 /**
+ * 纵向总高要用到的两格：连页标志与内容底边。
+ */
+export interface ScrollGeometry extends PageGeometry {
+  /**
+   * 连页模式。
+   */
+  continuous: boolean;
+
+  /**
+   * 内容底边（设备像素，已含末尾那一档下边距）。
+   */
+  contentPx: number;
+}
+
+/**
+ * 滚动区总高（设备像素）。
+ *
+ * 分页：每页都是整页，总高 = 页数 x 步距 - 末尾那段间隙。
+ * 连页：页只是渲染条带，内容一列连到底，所以总高跟着内容走 —— 但至少留一页，
+ *   否则短文档连"点一下页底"的地方都没有。最后一条条带因此只露出自己那一段内容，
+ *   滚动区不再总是整数页（多出来的白纸由页容器的 overflow 裁掉）。
+ * @param total 总页数（连页下是条带数）
+ * @param geom 页度量与内容底边
+ * @returns 总高（设备像素）
+ */
+export function scrollHeightPx(total: number, geom: ScrollGeometry): number {
+  const n = Math.max(1, total);
+  const step = geom.ph + geom.gap;
+  if (!geom.continuous || !(geom.contentPx > 0)) return n * step - geom.gap;
+  const want = Math.max(geom.ph, geom.contentPx);
+  // 最后一页能露出来的高度：内容底边减去它之前的那些条带。多出来时（内容离页底不足
+  //   一档下边距）按整页收；短少时按 1 像素兜住 —— 条带整体高度已经不小于一页。
+  const last = Math.max(1, Math.min(geom.ph, want - (n - 1) * step));
+  return (n - 1) * step + last;
+}
+
+/**
  * 画布存储：按槽复用，宿主只认这几个动作。
  */
 export interface CanvasStore {
@@ -83,9 +120,9 @@ export interface CanvasStore {
    * @param first 窗口首页
    * @param count 窗口页数
    * @param total 总页数（算滚动高度用）
-   * @param geom 页度量
+   * @param geom 页度量与内容底边（后者只在连页下作数）
    */
-  sync(first: number, count: number, total: number, geom: PageGeometry): void;
+  sync(first: number, count: number, total: number, geom: ScrollGeometry): void;
 
   /**
    * 内容整体作废：所有页下次整页贴。
@@ -166,12 +203,15 @@ export class SlotCanvases implements CanvasStore {
 
   /**
    * 让槽与当前窗口对齐（第 p 页永远用第 p 模槽数 个槽）。
+   *
+   * 连页时最后一页只露到内容底边：画布仍是整页（CSS 尺寸就是整页，改小会把位图压扁），
+   *   多出来的白纸由页容器裁掉 —— 容器高度等于总高，且 overflow 是 hidden。
    * @param first 窗口首页
    * @param count 窗口页数
    * @param total 总页数
-   * @param geom 页度量
+   * @param geom 页度量与内容底边（后者只在连页下作数）
    */
-  sync(first: number, count: number, total: number, geom: PageGeometry): void {
+  sync(first: number, count: number, total: number, geom: ScrollGeometry): void {
     const { pw, ph, gap, dpr } = geom;
     const step = ph + gap;
     // 槽数要装得下当前窗口：窗口页数本来由上限截出来，但外部可以把窗口指到上限之外。
@@ -184,7 +224,7 @@ export class SlotCanvases implements CanvasStore {
       this.onCreated?.(k, this.slots[k], this.slots.length);
     }
 
-    const h = (Math.max(1, total) * step - gap) / dpr + 'px';
+    const h = scrollHeightPx(total, geom) / dpr + 'px';
     if (this.pagesEl.style.height !== h) this.pagesEl.style.height = h;
 
     const w = Math.round(pw / dpr) + 'px';

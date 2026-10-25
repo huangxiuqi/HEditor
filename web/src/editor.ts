@@ -18,7 +18,7 @@ import type {
 } from './types';
 import { createDomHost, ensureMarkup, type ChangeSource, type DomHost, type EngineLink } from './host/dom';
 import { createErrorSurface, type ErrorSurface } from './host/errors';
-import type { CanvasStore } from './host/pages';
+import { scrollHeightPx, type CanvasStore } from './host/pages';
 import { stageOf } from './host/parts';
 import { cleanMarkdownLines, then1, type Args, type ZoomControl } from './input/keymap';
 import { assertSimd, simdProbeBytes, simdSupported } from './engine/simd';
@@ -135,6 +135,7 @@ const DEFAULT_CONFIG: EditorConfig = {
   showBrackets: true,
   showControlDots: false,
   showMarks: 'paragraph',
+  marginMarks: false,
   undoLimit: 100,
   caretStyle: { color: [0, 0, 0, 255], widthPt: 1 },
   selectionStyle: { color: [31, 111, 235, 64] },
@@ -742,12 +743,12 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       const g = link.geom();
       const dpr = g.dpr || 1;
       const pages = Math.max(1, Math.round(g.totalPages));
-      const step = g.ph + g.gap;
       return {
         page: { w: g.pw / dpr, h: g.ph / dpr },
         gap: g.gap / dpr,
         pages,
-        scrollHeight: Math.max(1, (pages * step - g.gap) / dpr),
+        // 与页容器实际设的那个高度同一条公式：连页下它跟着内容走，不是整数页。
+        scrollHeight: Math.max(1, scrollHeightPx(pages, g) / dpr),
         window: { first: g.first, count: g.count },
         dpr,
       };
@@ -796,6 +797,7 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       if (patch.input !== undefined) next.input = !!patch.input;
       if (patch.showBrackets !== undefined) next.showBrackets = !!patch.showBrackets;
       if (patch.showControlDots !== undefined) next.showControlDots = !!patch.showControlDots;
+      if (patch.marginMarks !== undefined) next.marginMarks = !!patch.marginMarks;
       if (patch.showMarks !== undefined) {
         const m = patch.showMarks;
         if (m !== 'none' && m !== 'paragraph' && m !== 'all') {
@@ -851,6 +853,9 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       }
       if (changed.showMarks !== undefined) {
         steps.push(() => settleAfter('setShowMarks', { mode: MARKS_CODE[next.showMarks] }));
+      }
+      if (changed.marginMarks !== undefined) {
+        steps.push(() => settleAfter('setShowMarginMarks', { on: next.marginMarks }));
       }
       if (changed.undoLimit !== undefined) {
         steps.push(() => settleAfter('setUndoLimit', { n: next.undoLimit }));
@@ -965,7 +970,13 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
     };
   }
 
-  if (opts.config) await editor.configure(opts.config);
+  if (opts.config) {
+    // 影子先退回默认值再配一次：configure 按"影子与目标值的差集"决定下发，
+    //   而影子在构造时已经并进了调用方给的那一份 —— 不退回的话差集恒为空，
+    //   初始配置会被静默吞掉（只有 mode 与 undoLimit 那两条强制下发，所以只靠它们是漏的）。
+    Object.assign(config, DEFAULT_CONFIG);
+    await editor.configure(opts.config);
+  }
   return guard(editor, !!opts.debug) as Editor;
 }
 

@@ -18,7 +18,7 @@ import {
   writeToDataTransfer,
   writeToSystemClipboard,
 } from './clipboard';
-import { type CanvasStore, type PageGeometry } from './pages';
+import { type CanvasStore, type ScrollGeometry } from './pages';
 import {
   imeOf,
   pagesOf,
@@ -32,7 +32,7 @@ import {
 /**
  * 一次读取的几何：页度量 + 窗口 + 总页数（都是设备像素，除 dpr）。
  */
-export interface HostView extends PageGeometry {
+export interface HostView extends ScrollGeometry {
   totalPages: number;
 
   /**
@@ -330,8 +330,11 @@ export function ensureMarkup(container: HTMLElement): void {
     //   页与窗口边框之间才有呼吸空间。cursor:text 覆盖整个页面区域 —— 那里就是正文。
     // 只留上边距：下边距会在文档末尾多出一段可滚的空白，而"最后一页之后还有一页"
     //   会让窗口算出一个不存在的页号（判据与治疗都指向同一条）。左右交给 auto。
+    // overflow: hidden 是"连页末尾不留整页空白"的必要条件：最后一条条带的画布仍是
+    //   整页高（改小会把位图压扁），多出来的白纸只能由这一层裁掉；顺带把绝对定位的
+    //   画布挡在滚动区之外 —— 它们会撑大滚动的 overflow 区。
     `    <div class="${PART_PAGES}"` +
-      ` style="position:relative;margin:16px auto 0;cursor:text"></div>`,
+      ` style="position:relative;margin:16px auto 0;overflow:hidden;cursor:text"></div>`,
     `    <textarea class="${PART_IME}" rows="1" spellcheck="false"`,
     '      style="position:absolute;left:0;top:0;width:1px;height:1em;opacity:0;',
     '             border:0;padding:0;resize:none;overflow:hidden"></textarea>',

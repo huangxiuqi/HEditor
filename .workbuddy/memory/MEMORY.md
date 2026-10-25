@@ -129,6 +129,8 @@
 - **编辑标记 `showMarks`**（`none`/`paragraph`/`all`，默认 `paragraph`）：画在页位图里、
   不占宽度、只影响重光栅；档位混进 `rasterSignature`；自绘不借字形（202）。条件是
   `lb.last_cp == 该段 cp_text.size()`。
+- **裁剪标记 `marginMarks`**（默认关）：正文四角的短角线，臂朝页边距一侧伸（朝里会压着
+  第一个字）；`show_margin_marks` + `margin_mark_color`，进 `rasterSignature`，连页不画。
 - **`setIndent` 是 Tab 语义**，不是首行缩进；有选区先收到左端（194）。
 - **剪贴板**：片段是结构（`rev::captureRange` 取 `NodeSpec` 串，`writeFragment` 自带字符串
   表）。写 `navigator.clipboard` 必须带 `web ` 前缀；Worker 载荷异步 → 写 `DataTransfer`
@@ -145,6 +147,10 @@
 - 门面形状："路 C" `then1(v, fn)` 把同步值与 Promise 折成一条链。
 - 两宿主文件各自包 IIFE；命名 `heditor` / `window.__heditor`。
 - **页画布必须绝对定位、页容器是它的定位祖先**（189）；白纸由页位图给（188）。
+- **滚动总高只有一条公式** `host/pages.ts` 的 `scrollHeightPx()`：分页 = 页数×步距−末尾间隙；
+  连页 = max(一页, 内容底边)，最后一页只露自己那一段。**画布 CSS 尺寸恒为整页**，多出来的
+  白纸靠页容器 `overflow:hidden` 裁（改 canvas 的 CSS 高度是压扁位图，221）。
+  `geom()` 为此多报 `continuous` / `contentPx`。
 - **库内骨架只按类名认**：`heditor-stage` / `heditor-pages` / `heditor-ime`，
   页画布 `heditor-pages__canvas`，错误面 `heditor-error__title|detail|hint`（191）。
 - **示例页外壳组件化**（`web/app/ui/`）：`update()` 只重读回显、不重建 DOM；动作表在
