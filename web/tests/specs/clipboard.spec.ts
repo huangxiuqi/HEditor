@@ -117,7 +117,9 @@ test.describe('剪贴板', () => {
       await e.selectAll();
       const copied = await e.copy();
       // 换一份空文档再粘：跨文档（也是跨实例内容）的往返。
+      //   粘贴目标切回编辑模式：表单模式下"没有可编辑控件"时整篇拒绝编辑（策略，不是保真问题）。
       await e.setText('');
+      await e.configure({ mode: 'document' });
       await e.paste();
       await e.flush();
       const after = e.form().length;

@@ -256,7 +256,7 @@ int main() {
                    "vertical-lr 的首列在 vertical-rl 的首列之左（列序方向相反）");
 
         // 竖排字形必须在页面内容框内
-        expectTrue(lrMinX >= engine.config().page.margin_pt - 1.0f, "竖排字形没有越出左边距");
+        expectTrue(lrMinX >= engine.config().page.margins.left - 1.0f, "竖排字形没有越出左边距");
 
         // 竖排所有字形的 x 应该只有少数几个离散值（每列一个）
         std::vector<float> xs;
@@ -492,8 +492,8 @@ int main() {
         PageMetrics page;
         page.width_pt = 110.0f;
         page.height_pt = 20.0f;
-        page.margin_pt = 5.0f;
-        const float cx = page.margin_pt;
+        page.margins = PageMargins::all(5.0f);
+        const float cx = page.margins.left;
         const float cw = page.contentWidthPt();
         const float big_pt = 24.0f;
         const float small_pt = 12.0f;
@@ -635,7 +635,7 @@ int main() {
         PageMetrics page;
         page.width_pt = 200.0f;
         page.height_pt = 400.0f;
-        page.margin_pt = 10.0f;
+        page.margins = PageMargins::all(10.0f);
         const float box_w = 60.0f;
         const float box_h = 40.0f;
 
@@ -693,7 +693,7 @@ int main() {
         // 超宽原子：比整行还宽（60 > 50）也独占一行，不产生空行、不丢内容。
         PageMetrics tiny = page;
         tiny.width_pt = 60.0f;  // 内容宽 50 磅，比盒宽窄
-        tiny.margin_pt = 5.0f;
+        tiny.margins = PageMargins::all(5.0f);
         const LayoutResult r_wide =
             layoutDocument(lib, {mkPara("汉字汉字", {mkAtom(2, box_w, box_h)}, 12.0f)}, tiny);
         int wide_lines = 0;
@@ -1013,8 +1013,8 @@ int main() {
         PageMetrics page;
         page.width_pt = 300.0f;
         page.height_pt = 300.0f;
-        page.margin_pt = 10.0f;
-        const float cx = page.margin_pt;
+        page.margins = PageMargins::all(10.0f);
+        const float cx = page.margins.left;
         const float cw = page.contentWidthPt();  // 280
         const float pad = kTableCellPadXPt;      // 只有左右有内边距，上下为 0
 
@@ -1186,7 +1186,7 @@ int main() {
             PageMetrics small;
             small.width_pt = 200.0f;
             small.height_pt = 45.0f;  // 内容区高 25
-            small.margin_pt = 10.0f;
+            small.margins = PageMargins::all(10.0f);
             std::vector<BlockSpec> blocks;
             // 每行 3 个字：行高 = 单倍行高（约 17.4），两行 34.8 —— 第二行在本页
             //   只剩 7.6 磅时放不下，整行要换到第 2 页。
@@ -1203,7 +1203,7 @@ int main() {
                 expectTrue(r.lines[0].page == 0 && r.lines[1].page == 0, "第一行的两格都在第 0 页");
                 expectTrue(r.lines[2].page == 1 && r.lines[3].page == 1,
                            "第二行整行换页（两个格一起走，不拆散）");
-                expectNear(r.lines[2].block_lo_pt, small.margin_pt + kTableCellPadYPt, 0.05,
+                expectNear(r.lines[2].block_lo_pt, small.margins.left + kTableCellPadYPt, 0.05,
                            "换页后第二行落在新页的内容区顶部（上下内边距为 0）");
                 expectNear(r.lines[2].block_lo_pt, r.lines[3].block_lo_pt, 0.01,
                            "换页后同一行的两格仍在同一基线上");
@@ -1215,7 +1215,7 @@ int main() {
             PageMetrics tiny;
             tiny.width_pt = 200.0f;
             tiny.height_pt = 100.0f;  // 内容区高 80
-            tiny.margin_pt = 10.0f;
+            tiny.margins = PageMargins::all(10.0f);
             // 第一行一个字（高 27.2），第二行一长串（格宽 192，每行 16 字，五行 96）。
             const std::string long_text =
                 "一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十"
@@ -1242,7 +1242,7 @@ int main() {
                 }
             }
             expectTrue(p0 >= 2 && p1 >= 1, "允许跨页断行：这一行的行盒分布在两页上");
-            expectTrue(hi_on_p0 <= tiny.margin_pt + tiny.contentHeightPt() + 0.01f,
+            expectTrue(hi_on_p0 <= tiny.margins.left + tiny.contentHeightPt() + 0.01f,
                        "本页上那半片段的底不超过内容区底边");
 
             const LayoutResult whole = build(false);

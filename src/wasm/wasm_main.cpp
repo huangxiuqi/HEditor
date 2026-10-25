@@ -331,10 +331,17 @@ void setZoom(float z) {
     g_cfg.zoom = z;
     applyConfig();
 }
-void setPageMetrics(float w_pt, float h_pt, float margin_pt) {
+/**
+ * 页度量：页宽、页高、四边页边距（都是磅）。
+ *
+ * 纸张规格（A4 / A3 / Letter……）不在这里认：规格只是"一组宽高"，抄进引擎就是第二个
+ *   真相。宿主按规格算出宽高再调用这一条，换纸就是换这四个数。
+ */
+void setPageMetrics(float w_pt, float h_pt, float top_pt, float right_pt, float bottom_pt,
+                    float left_pt) {
     g_cfg.page.width_pt = w_pt;
     g_cfg.page.height_pt = h_pt;
-    g_cfg.page.margin_pt = margin_pt;
+    g_cfg.page.margins = PageMargins{top_pt, right_pt, bottom_pt, left_pt};
     applyConfig();
 }
 

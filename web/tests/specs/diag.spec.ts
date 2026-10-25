@@ -94,6 +94,9 @@ test.describe('诊断面', () => {
     await test.step('四、光标与相位', async () => {
       const r = await p.ev<{ at: { para: number; offset: number }; live: number }>(`
         const d = window.__demo.diag;
+        // 上一节装过表单样例，模式停在"表单"；这一节验的是相位与呈现，先回编辑模式 ——
+        //   表单模式的光标只出现在可编辑控件里，落在正文上时它本来就不画。
+        await window.__demo.configure({ mode: 'document' });
         await d.reset(6, 1.5);
         await d.setCaretAt(0, 2, 0);
         const at = window.__demo.caret().pos;

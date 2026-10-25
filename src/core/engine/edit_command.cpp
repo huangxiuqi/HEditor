@@ -187,7 +187,6 @@ std::vector<Step> deleteTextSteps(const rev::Doc& doc, const rev::FlowIndex& idx
  * 六个编辑入口与四个光标入口都调它，免得十来处各写一遍。
  */
 rev::EditCheck EditCommand::policyAt(TextPos p) const {
-    if (formDegraded()) return rev::EditCheck{true, ""};
     // 侧别由位置自己推（光标这一处用光标自己的侧别，见 sideForPos）——
     //   不从控件下标反推：同一个偏移上可能压着好几枚括号，反推会猜错。
     const FlowPos f = pos().flowPosAtSide(p.para, p.offset, pos().sideForPos(p));
@@ -198,7 +197,6 @@ rev::EditCheck EditCommand::policyAt(TextPos p) const {
 rev::EditCheck EditCommand::policyErase(TextPos a, TextPos b) const {
     // 档 1 的删除不跨段；段落标记的删除走合并那条路（另有判定）。
     if (a.para != b.para) return rev::EditCheck{false, "删除区间跨段"};
-    if (formDegraded()) return rev::EditCheck{true, ""};
     // 区间 = "这段文本码点自己占的那一段"，与实际删除（eraseOnTree）同一把尺子。
     //   端点取错侧就会被判成越出控件而拒掉，表象是"删到只剩一个字就删不动了"；
     //   取宽了又会把相邻的括号圈进来，表象是"删完光标跳一格"。
@@ -208,24 +206,6 @@ rev::EditCheck EditCommand::policyErase(TextPos a, TextPos b) const {
         return rev::EditCheck{false, "删除区间不在文档流里"};
     const FlowPos base = blockFlow()[static_cast<size_t>(a.para)];
     return rev::canEditRange(doc(), mode(), Range{base + rel_from, base + rel_to});
-}
-
-/**
- * 表单模式的安全阀：一份"一个可编辑控件都没有"的文档退化为文档模式，而不是什么都不让改。
- *
- * 理由：一个还没配字段的文档切到表单模式，用户期望的是"跟平时一样"，而不是突然一个字都
- *   打不进去 —— 后者会被当成功能坏了，没人会想到是策略在生效。它是个刻意的安全阀，不是
- *   遗漏；将来若要做"严格表单"，应该另加一个 EditMode，不要改这里。
- *
- * 判据只看导出后的控件集合（隐藏控件在呈现态本就不在里面），有一个非只读的就为真。
- */
-bool EditCommand::formDegraded() const { return mode() == EditMode::Form && !hasEditableControl(); }
-
-bool EditCommand::hasEditableControl() const {
-    for (int i = 0; i < controls().size(); ++i) {
-        if (!controls().at(i).read_only) return true;
-    }
-    return false;
 }
 
 bool EditCommand::insertCodepoints(int para, size_t offset, const std::vector<uint32_t>& cps) {
@@ -336,7 +316,8 @@ int EditCommand::controlStartingAt(FlowPos p) const {
 }
 
 /**
- * 退格贴着控件括号时的四种情形（从左到右的书写方向）。
+ * 退格贴着控件括号时的四种情形（从左到右的书写方向）。只用于文档模式 —— 表单模式走
+ * eraseInControl，那里一条都不许越过控件边界。
  *
  * 光标在闭括号右面：控件有内容 ⇒ 光标进控件（落到内容末尾），再删掉左边那一项；空 ⇒ 删控件。
  * 光标在开括号右面：控件有内容 ⇒ 光标退到开括号左面，一个字都不删；空 ⇒ 删控件
@@ -354,7 +335,13 @@ bool EditCommand::eraseAtomBeside(FlowPos cur, bool left) {
     const Pos p = flowIndex().posAt(f);
     const rev::Node* n = rev::findNode(doc(), p.container);
     if (n == nullptr || !isAtom(n->kind) || p.offset != 0) return false;
-    if (!formDegraded() && !rev::canEditRange(doc(), mode(), Range{f, f + 1}).allowed) {
+    if (!rev::canEditRange(doc(), mode(), Range{f, f + 1}).allowed) {
+        noteBlocked();
+        return false;
+    }
+    // 表单模式再加一道：整枚原子也必须落在光标所在的那个控件里（相邻字段的情形同
+    //   eraseInsideCaretControl 的理由）。
+    if (mode() == EditMode::Form && !eraseInsideCaretControl(f, f + 1)) {
         noteBlocked();
         return false;
     }
@@ -464,6 +451,116 @@ EditCommand::BracketHit EditCommand::bracketDeleteForward(FlowPos* at) {
     return BracketHit::MoveThenErase;
 }
 
+/**
+ * 表单模式的退格 / 前删：只在光标所在控件的内容里动，一格也不越过控件边界。
+ *
+ * 三条后果必须一起成立，缺一条就会在边界上露出另一种形状：不删控件本身（控件的括号不是
+ *   内容）、不把光标带到括号外面（键盘删除不兼职移动）、删到内容尽头就到此为止（不再
+ *   退化成合并那一段）。合并仍然放行 —— 控件跨段时那枚段落标记落在内容里，删它是内容
+ *   删除；控件之外的那一枚自然被能力表挡掉。
+ *
+ * @param left true = 退格（删左边），false = 前删（删右边）
+ * @return true = 删了
+ */
+bool EditCommand::eraseInControl(bool left) {
+    const FlowPos cur = pos().selection().focus;
+    if (!rev::canEditAt(doc(), mode(), cur).allowed) {
+        noteBlocked();
+        return false;
+    }
+    // 紧邻的是一枚原子就整枚删掉：原子是内容，与一个字符同类。
+    if (eraseAtomBeside(cur, left)) return true;
+
+    TextPos p = pos().caret();
+    if (p.para < 0 || p.para >= static_cast<int>(blocks().size())) return false;
+    p.offset = pos().snapToCluster(p.para, p.offset);
+    const size_t len = blocks()[static_cast<size_t>(p.para)].cp_text.size();
+
+    if (left && p.offset == 0) return mergeWithPreviousParagraph();
+    if (!left && p.offset >= len) return mergeWithNextParagraph();
+
+    const TextPos a = left ? TextPos{p.para, pos().snapToCluster(p.para, p.offset - 1)} : p;
+    TextPos b = p;
+    if (!left) {
+        size_t next = p.offset + 1;
+        const size_t ceil_cp = pos().clusterCeilAt(p.para, p.offset);
+        if (ceil_cp > p.offset) next = ceil_cp;
+        if (next > len) next = len;
+        b.offset = next;
+    }
+    if (!policyErase(a, b).allowed) {
+        noteBlocked();
+        return false;
+    }
+    // 端点可编辑还不够：两个字段紧挨着时，"光标在 c 的内容起点"与"删的是 b 的最后一个字"
+    //   是同一个偏移上的两件事 —— 判据必须落在光标所在的那个控件里，否则退格会从下一个
+    //   字段里偷字。
+    int rel_from = 0;
+    int rel_to = 0;
+    if (!pos().textSpanAt(a.para, a.offset, b.offset, &rel_from, &rel_to)) {
+        noteBlocked();
+        return false;
+    }
+    const FlowPos base = blockFlow()[static_cast<size_t>(a.para)];
+    if (!eraseInsideCaretControl(base + rel_from, base + rel_to)) {
+        noteBlocked();
+        return false;
+    }
+    return eraseOnTree(a, b, left ? "退格" : "前删", /*caret_at_end=*/left);
+}
+
+/**
+ * 表单模式：删除区间 [from, to) 必须落在光标所在的那个控件里。
+ *
+ * 只判"区间里没有括号"是不够的：两个字段紧挨着时，前一个字段的最后一个字与后一个字段的
+ * 第一个字落在同一条流上，span 各归各的，但光标在前者的末尾时退格删的是前者（对），
+ * 光标在后者的开头时退格删的仍是前者（错 —— 那是从别的字段里偷字）。
+ *
+ * @param from 区间起点（含）
+ * @param to   区间终点（不含）
+ * @return true = 区间在光标所在控件的内容里
+ */
+bool EditCommand::eraseInsideCaretControl(FlowPos from, FlowPos to) const {
+    const FlowPos cur = pos().selection().focus;
+    FlowPos best_lo = 0;
+    FlowPos best_hi = -1;
+    for (int i = 0; i < static_cast<int>(controlNodeIds().size()); ++i) {
+        FlowPos lo = 0;
+        FlowPos hi = 0;
+        if (!controlFlowSpan(i, &lo, &hi)) continue;
+        if (cur <= lo || cur >= hi) continue;
+        if (best_hi < 0 || (hi - lo) < (best_hi - best_lo)) {
+            best_lo = lo;
+            best_hi = hi;
+        }
+    }
+    if (best_hi < 0) return false;
+    // 内容槽是 (lo, hi)：两枚括号各占一格，删除区间只要碰到它们就已经越界。
+    return from > best_lo && to < best_hi;
+}
+
+/**
+ * 选区是不是整个落在同一个控件的内容里（表单模式的选区删除判据）。
+ *
+ * 判据不是"两端都可编辑"：两端在同一个控件里、中间跨过另一个控件的括号时，按流区间删会
+ *   把那对括号一起带走 —— 那是删掉了控件本身，比越过边界更严重。所以逐个控件看"与区间
+ *   相交就必须整个包住区间"，嵌套的那些自然也被这一条挡住。
+ *
+ * @param from 区间起点（含）
+ * @param to   区间终点（不含）
+ * @return true = 区间没有碰到任何一枚括号
+ */
+bool EditCommand::rangeWithinOneControl(FlowPos from, FlowPos to) const {
+    for (int i = 0; i < static_cast<int>(controlNodeIds().size()); ++i) {
+        FlowPos lo = 0;
+        FlowPos hi = 0;
+        if (!controlFlowSpan(i, &lo, &hi)) continue;
+        if (hi <= from || lo >= to) continue;
+        if (!(lo < from && to < hi)) return false;
+    }
+    return true;
+}
+
 bool EditCommand::backspace() {
     if (blocks().empty()) return false;
     // 选区非空时退格是"删掉选区"，不再往前多删一个字 —— 这是最容易抄错的一条：
@@ -472,6 +569,11 @@ bool EditCommand::backspace() {
     if (plan.blocked) return false;
     if (!plan.steps.empty()) return commitErase(plan, "退格");
     const FlowPos caret_before = pos().selection().focus;
+
+    // 表单模式：一次删除只能发生在光标所在控件的内容里（见 eraseInControl）。
+    //   它必须排在括号那四条规则之前 —— 那四条规则的"退到开括号左面""删掉空控件"在
+    //   文档模式里成立，在填表时却是把用户带出字段。
+    if (mode() == EditMode::Form) return eraseInControl(/*left=*/true);
 
     // 紧邻的是一枚原子就整枚删掉（见 eraseAtomBeside）。它排在括号规则之前：两者不会同时
     //   成立，而"左边那一格是原子"比"光标贴在一枚括号上"更贴近屏幕上看到的那个东西。
@@ -521,6 +623,9 @@ bool EditCommand::deleteForward() {
     if (plan.blocked) return false;
     if (!plan.steps.empty()) return commitErase(plan, "前删");
     const FlowPos caret_before = pos().selection().focus;
+
+    // 与退格同一条：表单模式的删除不越过控件边界。
+    if (mode() == EditMode::Form) return eraseInControl(/*left=*/false);
 
     // 与退格左右对称：右边那一格是原子就整枚删掉。
     if (eraseAtomBeside(caret_before, /*left=*/false)) return true;
@@ -663,8 +768,7 @@ bool EditCommand::mergeParagraphInto(int head) {
 
     // 权限按"这枚段落标记能不能被删"判：区间 [at_a, at_a + 1) 就是标记自己那一位。
     //   判的是标记那一位可不可编辑，不是光标落在哪 —— 光标在字段外、标记在字段内时能合。
-    //   安全阀（表单退化成文档模式）先过一遍，退化的情形该放行。
-    if (!formDegraded() && !rev::canEditRange(doc(), mode(), Range{at_a, at_a + 1}).allowed) {
+    if (!rev::canEditRange(doc(), mode(), Range{at_a, at_a + 1}).allowed) {
         noteBlocked();
         return false;
     }
@@ -852,7 +956,14 @@ EditCommand::SelectionErase EditCommand::planEraseSelection() {
     if (from >= to) return plan;
     // 判定与实际删除同一把尺子：判的是整个区间能不能编辑，删的是同一个区间。
     //   跨段的区间在这里第一次被放行 —— 档 1 的 policyErase 只管同段。
-    if (!formDegraded() && !rev::canEditRange(doc(), mode(), Range{from, to}).allowed) {
+    if (!rev::canEditRange(doc(), mode(), Range{from, to}).allowed) {
+        noteBlocked();
+        plan.blocked = true;
+        return plan;
+    }
+    // 表单模式还有一道更严的门：选区删除不许碰到任何一枚控件括号（见 rangeWithinOneControl）。
+    //   能力表只管"两端能不能编辑"，管不到"中间包住了谁的边界"。
+    if (mode() == EditMode::Form && !rangeWithinOneControl(from, to)) {
         noteBlocked();
         plan.blocked = true;
         return plan;
@@ -1061,8 +1172,7 @@ std::vector<Step> EditCommand::eraseWholeTables(FlowPos from, FlowPos to) const 
         int lo = -1;
         if (!flowIndex().intervalOf(w.id, &lo, nullptr)) return {};
         // 整块包住它必然被拒（与删控件同一条口径）：表单结构锁与只读都落在这里。
-        if (!formDegraded() && !rev::canEditRange(doc(), mode(), Range{w.lo, w.hi}).allowed)
-            return {};
+        if (!rev::canEditRange(doc(), mode(), Range{w.lo, w.hi}).allowed) return {};
         RemoveNode r;
         r.at_flow = lo;
         steps.push_back(Step{r});
@@ -1268,7 +1378,7 @@ bool EditCommand::removeControl(int index, bool keep_content, FlowPos caret_befo
     if (idx < 0) return false;
 
     // 结构操作的门：表单模式默认被 structureLock 锁住，文档模式放行（作者在设计表单）。
-    if (!formDegraded() && !rev::canDoStructureOp(doc(), mode(), id).allowed) {
+    if (!rev::canDoStructureOp(doc(), mode(), id).allowed) {
         noteBlocked();
         return false;
     }

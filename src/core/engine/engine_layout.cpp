@@ -341,7 +341,7 @@ int EditorEngine::contentBottomPx() const {
         if (v > bottom_pt) bottom_pt = v;
     }
     // 末尾补一个下边距：不留的话最后一行会贴着滚动底，鼠标点不到它下面那一小段。
-    return static_cast<int>(std::ceil((bottom_pt + cfg_.page.margin_pt) * cfg_.zoom));
+    return static_cast<int>(std::ceil((bottom_pt + cfg_.page.margins.bottom) * cfg_.zoom));
 }
 
 void EditorEngine::relayout() {
@@ -818,7 +818,7 @@ bool EditorEngine::suffixIsHorizontalOnly(int from, int to) const {
 
 bool EditorEngine::shiftSuffixBlockAxis(int from, size_t first_glyph, int to,
                                         const ReflowState& after, ReflowState* end_state) {
-    const float cy = cfg_.page.margin_pt;
+    const float cy = cfg_.page.margins.top;
     const float ch = cfg_.page.contentHeightPt();
 
     std::vector<PlacedGlyph>& gs = layout_.glyphs;  // 校验与改写共用这一份

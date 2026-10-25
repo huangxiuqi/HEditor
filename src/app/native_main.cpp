@@ -229,10 +229,12 @@ int main(int argc, char** argv) {
 
     if (dumpCount > 0) {
         const LayoutResult& r = engine.layout();
+        const PageMargins& pm = engine.config().page.margins;
         std::printf(
-            "\n=== 前 %d 个已定位字形（页面坐标，单位磅；页面 %.1f x %.1f，边距 %.1f）===\n",
-            dumpCount, engine.config().page.width_pt, engine.config().page.height_pt,
-            engine.config().page.margin_pt);
+            "\n=== 前 %d 个已定位字形（页面坐标，单位磅；页面 %.1f x %.1f，"
+            "边距 上 %.1f / 右 %.1f / 下 %.1f / 左 %.1f）===\n",
+            dumpCount, engine.config().page.width_pt, engine.config().page.height_pt, pm.top,
+            pm.right, pm.bottom, pm.left);
         for (int i = 0; i < dumpCount && i < static_cast<int>(r.glyphs.size()); ++i) {
             const PlacedGlyph& pg = r.glyphs[i];
             std::printf("  [%2d] page=%d line=%2d %s gid=%5u  x=%8.2f  y=%8.2f  cluster=%u\n", i,

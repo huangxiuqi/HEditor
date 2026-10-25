@@ -541,8 +541,8 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
     LayoutResult& res = *out;
     ShapingCache::Impl* cache_impl = ShapingCacheAccess::impl(cache);
 
-    const float cx = page.margin_pt;
-    const float cy = page.margin_pt;
+    const float cx = page.margins.left;
+    const float cy = page.margins.top;
     const float cw = page.contentWidthPt();
     const float ch = page.contentHeightPt();
     const float usToPt = 1.0f / kFontScalePerPt;

@@ -156,6 +156,12 @@ test.describe('工具栏', () => {
       await reset();
       btn('field').click();
       out.field = await until(() => e.form().length === 1);
+      // 插完控件之后光标必须还看得见、还点得动：文档模式没有落点限制。
+      out.fieldCaret = e.caret().visible === true;
+      const p1 = e.caret().pos;
+      await e.setCaret({ para: 0, offset: 0 });
+      await e.flush();
+      out.fieldCaretMoves = e.caret().pos.offset === 0 && p1.offset > 0;
 
       // 视图：编辑模式三档。只读那一档要真的拒绝编辑 —— 下拉框换成"只读"、读回也是
       //   只读、而敲字不生效，三件事都算，才说明这一档接到引擎上了。
@@ -188,8 +194,50 @@ test.describe('工具栏', () => {
       out.marginMarksBefore = e.config().marginMarks;
       const digest0 = await e.diag.frameDigest();
       btn('margin-marks').click();
-      out.marginMarks = await until(() => e.config().marginMarks === true);
+      out.marginMarks = await until(() => e.config().marginMarks === false);
       out.marginMarksRedraw = await until(async () => (await e.diag.frameDigest()) !== digest0);
+
+      // 视图：页面设置面板（纸张 + 四边页边距）。面板里改成 A3 再"应用"，页宽要跟着变。
+      const w0 = e.geometry().page.w;
+      btn('page-setup').click();
+      await new Promise((r) => setTimeout(r, 30));
+      const paper = document.querySelector('select[data-act="page-paper"]');
+      out.pagePanel = !!paper;
+      if (paper) {
+        paper.value = 'A3';
+        paper.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+      const apply = document.querySelector('[data-act="page-apply"]');
+      if (apply) apply.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+      out.pagePaper = await until(() => e.geometry().page.w > w0 + 100);
+
+      // 自定义宽高：选"自定义"、填宽高、应用 —— 页宽要按填的那个数走。
+      btn('page-setup').click();
+      await new Promise((r) => setTimeout(r, 30));
+      const paper2 = document.querySelector('select[data-act="page-paper"]');
+      const wIn = document.querySelector('input[data-act="page-width"]');
+      const hIn = document.querySelector('input[data-act="page-height"]');
+      out.pageCustomPanel = !!paper2 && !!wIn && !!hIn;
+      if (paper2 && wIn && hIn) {
+        paper2.value = 'Custom';
+        paper2.dispatchEvent(new Event('change', { bubbles: true }));
+        // 20 × 30 厘米 = 566.9 × 850.4 磅
+        wIn.value = '20';
+        wIn.dispatchEvent(new Event('input', { bubbles: true }));
+        hIn.value = '30';
+        hIn.dispatchEvent(new Event('input', { bubbles: true }));
+        const apply2 = document.querySelector('[data-act="page-apply"]');
+        if (apply2) apply2.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+      }
+      out.pageCustom = await until(
+        () => Math.abs(e.geometry().page.w - 20 * 28.3465 * (4 / 3)) < 2,
+      );
+
+      // 换回 A4：下面那几条（分页 / 连页 / 缩放）与页度量无关，但别把页面留在一个
+      //   非默认的纸张上，读回配置的那几条会跟着变。
+      await e.configure({ page: { paper: 'A4' } });
+      await e.flush();
+      out.pageBack = e.geometry().page.w === w0;
 
       // 视图：分页 / 连页 / 三档缩放。
       btn('paged').click();
@@ -205,6 +253,18 @@ test.describe('工具栏', () => {
       btn('zoom-reset').click();
       out.zoomReset = await until(() => e.config().zoom === 1);
 
+      // Ctrl + 滚轮：库内接管成编辑器缩放，右下角的百分比读数也要跟着变
+      //   （它不经过工具条的动作表，靠 configchange 那一条回显）。
+      const pctOf = () => document.querySelector('.heditor-status__pct').textContent;
+      const pct0 = pctOf();
+      document.querySelector('.heditor-stage').dispatchEvent(
+        new WheelEvent('wheel', { deltaY: -100, ctrlKey: true, bubbles: true, cancelable: true }),
+      );
+      out.wheelZoom = await until(() => e.config().zoom > 1);
+      out.wheelZoomReadout = await until(() => pctOf() !== pct0);
+      await e.setZoom(1);
+      await e.flush();
+
       // 一路点下来，增量产物还得等于全量：按钮生效了但排版停在旧内容上，正是这里要挡的
       //   （编译与排版两份自审都必须为 0）。
       out.alive = (await e.paragraphs()).length > 0;
@@ -215,14 +275,15 @@ test.describe('工具栏', () => {
     const want = [
       'paste', 'copy', 'cut', 'font', 'size', 'grow', 'shrink', 'bold', 'italic', 'underline',
       'color', 'line', 'after', 'indent', 'outdent', 'undo', 'redo', 'all', 'load', 'save',
-      'type', 'tablePanel', 'table', 'field', 'modeReadOnly', 'modeRejects', 'modeBack',
-      'countsGrow', 'pagesMatch', 'marginMarks', 'marginMarksRedraw', 'paged', 'continuous',
-      'zoomIn', 'zoomOut',
-      'zoomReset', 'alive', 'unsavedPrompt',
+      'type', 'tablePanel', 'table', 'field', 'fieldCaret', 'fieldCaretMoves', 'modeReadOnly',
+      'modeRejects', 'modeBack', 'countsGrow', 'pagesMatch', 'marginMarks', 'marginMarksRedraw',
+      'pagePanel', 'pagePaper', 'pageCustomPanel', 'pageCustom', 'pageBack', 'paged',
+      'continuous', 'zoomIn', 'zoomOut', 'zoomReset', 'wheelZoom', 'wheelZoomReadout', 'alive',
+      'unsavedPrompt',
     ];
     for (const k of want) check(`★ ${k} 点下去有反应`, r[k] === true, String(r[k]));
-    // 默认那一档：裁剪标记与保存提醒都是关的（示例页不该一上来就拦关页面）。
-    check('裁剪标记默认关', r.marginMarksBefore === false, String(r.marginMarksBefore));
+    // 默认那一档：裁剪标记开（它是判断页边距设对了没有的直接读数），保存提醒关。
+    check('裁剪标记默认开', r.marginMarksBefore === true, String(r.marginMarksBefore));
     // 点完这一圈之后，引擎自己的两份自审必须干净：编译出来的是最新文档，排出来的是
     //   最新编译。少了这两条，"按钮点了没反应"要靠肉眼才发现。
     check('★ 一圈操作之后编译自审为 0', r.compileDiff === 0, String(r.compileDiff));

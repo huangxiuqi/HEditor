@@ -11,11 +11,14 @@ import type {
   EditorEvents,
   EditorOptions,
   Geometry,
+  CustomPaper,
+  PageSetup,
   ParaFormatPatch,
   Pos,
   Selection,
   SetCaretOptions,
 } from './types';
+import { PAPER_PT, paperSizePt } from './types';
 import { createDomHost, ensureMarkup, type ChangeSource, type DomHost, type EngineLink } from './host/dom';
 import { createErrorSurface, type ErrorSurface } from './host/errors';
 import { scrollHeightPx, type CanvasStore } from './host/pages';
@@ -127,24 +130,97 @@ const SHAPE_CODE: Record<NonNullable<ControlInsertOptions['shape']>, number> = {
   resource: 4,
 };
 
+/**
+ * 页间隙（磅）：分页档用它，连页档是 0。
+ */
+const kPageGapPt = 14;
+
+/**
+ * 默认页边距（磅）= 2 厘米。与 api.ts 里 boot 用的那一组数是同一个值：两边不一致的话，
+ * 首帧按一组数排、配置影子里记着另一组，第一次 configure 会把页面平白挪一次。
+ */
+const kPageMarginPt = 56.7;
+
+/**
+ * 页面设置的归一：纸张按表认，方向取布尔，四边页边距按磅收。
+ *
+ * 边距不设"合理的下限"，但必须给正文留下位置 —— 上下（左右）各占一半页高（页宽）时
+ *   contentWidthPt / contentHeightPt 就变成 0，断行的可用范围是零，整篇内容会挤成一列
+ *   零宽的行。所以每一对边距的上限是"一半再减 1 磅"。
+ *
+ * @param patch 调用方给的那一份（可以只给其中几项）
+ * @param base 当前生效的那一份（没给的项从这里取）
+ * @returns 归一之后的页面设置
+ */
+function normalizePageSetup(patch: Partial<PageSetup>, base: PageSetup): PageSetup {
+  const paper = patch.paper ?? base.paper;
+  if (paper !== 'Custom' && !(paper in PAPER_PT)) {
+    throw new TypeError(`未知纸张规格 ${String(paper)}`);
+  }
+  const landscape = patch.landscape === undefined ? base.landscape : !!patch.landscape;
+  const raw = { ...base.margins, ...(patch.margins ?? {}) };
+  // 自定义宽高：'Custom' 时必须有正的宽高，固定规格时只把旧值留着（切回去不用重输）。
+  const custom = normalizeCustomPaper(patch.custom ?? base.custom, paper);
+  const dims = paperSizePt(paper, landscape, custom);
+  const clamp = (v: unknown, limit: number): number => {
+    const n = Number(v);
+    if (!Number.isFinite(n) || n < 0) return 0;
+    return Math.min(n, limit);
+  };
+  const halfH = Math.max(0, dims.h / 2 - 1);
+  const halfW = Math.max(0, dims.w / 2 - 1);
+  return {
+    paper,
+    landscape,
+    ...(custom ? { custom } : {}),
+    margins: {
+      top: clamp(raw.top, halfH),
+      right: clamp(raw.right, halfW),
+      bottom: clamp(raw.bottom, halfH),
+      left: clamp(raw.left, halfW),
+    },
+  };
+}
+
+/**
+ * 自定义纸张宽高的归一。上限 5000 磅（约 1.76 米）、下限 36 磅（半英寸）：再小就放不下
+ * 一行字，再大只是把排版撑到没人看。
+ *
+ * @param c 调用方给的宽高（磅，纵向口径）
+ * @param paper 纸张规格：'Custom' 时缺宽高就直接抛错，别的规格只是把旧值留着
+ * @returns 归一之后的宽高；没有可留的值时为 undefined
+ */
+function normalizeCustomPaper(
+  c: Partial<CustomPaper> | undefined,
+  paper: PageSetup['paper'],
+): CustomPaper | undefined {
+  const limit = (v: unknown): number => Math.min(5000, Math.max(36, Number(v)));
+  const has = c && Number.isFinite(Number(c.w)) && Number.isFinite(Number(c.h));
+  if (!has) {
+    if (paper === 'Custom') throw new TypeError('paper = "Custom" 时必须给 custom: { w, h }（磅）');
+    return undefined;
+  }
+  return { w: limit(c!.w), h: limit(c!.h) };
+}
+
 const DEFAULT_CONFIG: EditorConfig = {
   zoom: 1,
   pageMode: 'paged',
+  page: {
+    paper: 'A4',
+    landscape: false,
+    margins: { top: kPageMarginPt, right: kPageMarginPt, bottom: kPageMarginPt, left: kPageMarginPt },
+  },
   mode: 'document',
   input: true,
   showBrackets: true,
   showControlDots: false,
   showMarks: 'paragraph',
-  marginMarks: false,
+  marginMarks: true,
   undoLimit: 100,
   caretStyle: { color: [0, 0, 0, 255], widthPt: 1 },
   selectionStyle: { color: [31, 111, 235, 64] },
 };
-
-/**
- * 页间隙（磅）：分页档用它，连页档是 0。
- */
-const kPageGapPt = 14;
 
 // 工厂
 
@@ -263,7 +339,30 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
         if (!disposed) emitter.emit('render', { pages, ms });
       },
       onPageError: (message: string) => reportError(message, false),
+      onZoomBy: (delta: number) => queueZoom(delta),
+      onZoomReset: () => void editor.setZoom(1),
     };
+  }
+
+  /**
+   * 滚轮缩放的合并器：把一串增量累起来，每帧下发一次。
+   *
+   * 触控板捏合一次会推几十条带 ctrlKey 的 wheel 事件，每条都整篇重排的话画面会排队
+   *   卡住；合并成一帧一档之后，捏合的手感是连续的，而排版的次数与帧数同阶。
+   */
+  let zoomPending = 0;
+  let zoomFrame = 0;
+  function queueZoom(delta: number): void {
+    zoomPending += delta;
+    if (zoomFrame) return;
+    zoomFrame = requestAnimationFrame(() => {
+      zoomFrame = 0;
+      const d = zoomPending;
+      zoomPending = 0;
+      if (d === 0 || disposed) return;
+      // 走公开面那一条（它自己夹取上下限），不直接碰引擎：缩放要同时改密度与配置影子。
+      void editor.setZoom(editor.config().zoom + d);
+    });
   }
 
   try {
@@ -788,6 +887,7 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
         }
         next.pageMode = patch.pageMode;
       }
+      if (patch.page !== undefined) next.page = normalizePageSetup(patch.page, config.page);
       if (patch.mode !== undefined) {
         if (patch.mode !== 'document' && patch.mode !== 'form' && patch.mode !== 'readOnly') {
           throw new TypeError("mode 只能是 'document' / 'form' / 'readOnly'");
@@ -834,6 +934,20 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
         const density = next.zoom * (4 / 3) * dpr;
         dom.zoom.set(density);
         steps.push(() => settleAfter('zoom', { zoom: density, dpr }));
+      }
+      if (changed.page !== undefined) {
+        const dims = paperSizePt(next.page.paper, next.page.landscape, next.page.custom);
+        const pm = next.page.margins;
+        steps.push(() =>
+          settleAfter('pageSetup', {
+            w: dims.w,
+            h: dims.h,
+            top: pm.top,
+            right: pm.right,
+            bottom: pm.bottom,
+            left: pm.left,
+          }),
+        );
       }
       if (changed.pageMode !== undefined) {
         const continuous = next.pageMode === 'continuous';

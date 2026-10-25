@@ -879,7 +879,7 @@ int main() {
         c5.zoom = 1.0f;  // 1 pt = 1 px：便于直接按磅定位像素
         c5.page.width_pt = 200.0f;
         c5.page.height_pt = 80.0f;
-        c5.page.margin_pt = 10.0f;
+        c5.page.margins = PageMargins::all(10.0f);
         c5.page_gap_pt = 10.0f;
         e5.setConfig(c5);
 
@@ -1121,11 +1121,11 @@ int main() {
             expectTrue(!canIns(10), "内层覆盖的 10 也拒");
         }
 
-        // 安全阀 + 只读模式
+        // 空表单 + 只读模式
         {
             loadControls(ep, {});
             ep.setEditMode(EditMode::Form);
-            expectTrue(canIns(3), "一个控件都没配时，表单模式退化为可编辑（不是突然打不进一个字）");
+            expectTrue(!canIns(3), "一个控件都没配时，表单模式整篇不可编辑（没有退化档）");
 
             loadControls(ep, {mk(5, 9, "k1", false)});
             ep.setEditMode(EditMode::ReadOnly);
@@ -1343,93 +1343,54 @@ int main() {
             expectTrue(ef.controls().at(0).range.end.offset == 9, "退格后 end 缩回 9");
             expectTrue(ef.blocks()[0].cp_text.size() == len0, "长度退回");
 
-            // 字段开头（开括号右面）退格：规则 2 —— 光标退到开括号左面，一个字都不删。
-            //   退出去之后落在控件之外，那儿的字在表单模式里本来就不可编辑 ⇒ 再退一次才被拒。
+            // 字段内容起点退格：表单模式的删除不许越过控件边界 —— 不删、不合并，
+            //   也不把光标带到 [ 之前（那是文档模式那套括号规则）。
             ef.setCaret(0, 5);
-            expectTrue(ef.caretSide() == 1, "光标在字段 #0 的开括号之后");
-            expectTrue(ef.backspaceAndRender(),
-                       "★ 开括号之后退格：这次按键没被吞掉（光标退了出去）");
-            expectTrue(ef.blocks()[0].cp_text.size() == len0, "长度仍然不变（一个字都没删）");
-            expectTrue(ef.caret().offset == 5 && ef.caretSide() == 0,
-                       "★ 光标退到了开括号左面（cp 5 侧别 0）—— 实际 " +
-                           std::to_string(ef.caret().offset) + "/" +
-                           std::to_string(ef.caretSide()));
+            expectTrue(ef.caretSide() == 1, "光标在字段 #0 的开括号之后（＝内容起点）");
             const long long b1 = ef.blockedEdits();
-            expectTrue(!ef.backspaceAndRender(),
-                       "★ 再退一次：控件之外那一格不可编辑 → 拒（不许从字段外删到字段里）");
+            expectTrue(!ef.backspaceAndRender(), "★ 内容起点退格：拒（不许从字段外删到字段里）");
             expectTrue(ef.blocks()[0].cp_text.size() == len0 && ef.blockedEdits() == b1 + 1,
-                       "被拒并记账，长度仍然不变");
+                       "长度不变，且这次拒绝被记了账");
+            expectTrue(ef.caret().offset == 5 && ef.caretSide() == 1,
+                       "★ 光标仍在字段里，没被带出去");
         }
 
-        // (d) 方向键一步一格，且能走到字段之外
+        // (d) 方向键在表单模式下停在字段边界上（选区可以越界，光标不行）
         //
-        //   规则调整（用户提出）：光标只在"编辑"上受约束，位置本身不受约束 ——
-        //     字段外、只读字段里都能停。方向键因此能跨字段、能走进正文。
-        //   一次一格 = 一次跨一枚簇：括号占位也是簇，所以共享边界 ][ 要按两下，
-        //     "字与括号之间""两个相邻控件之间"那些位置都有自己的落点。
+        //   选区与光标是两件事：选区（拖选、Shift 扩展、全选）能盖住只读区与正文，光标不能 ——
+        //   它是插入点，只出现在打得进字的地方（表单模式 = 可编辑控件内容里，只读模式 = 哪儿都
+        //   不出现）。于是方向键走到内容两端就停住，换字段用 Tab 或鼠标点。
         {
             ef.setCaret(0, 8);
-            expectTrue(ef.moveCaretAndRender(1) && ef.caret().offset == 9,
-                       "右移到字段 #0 末尾 9 —— 末尾当然可以停");
-            expectTrue(ef.moveCaretAndRender(1) && ef.caret().offset == 9 && ef.caretSide() == 1,
-                       "再右移：停在 ] 与后面的字之间那一格（括号也占一格，光标不是被关在字段里）");
-            expectTrue(ef.moveCaretAndRender(1) && ef.caret().offset == 10,
-                       "再右移：走进字段之间的正文 10");
-            expectTrue(ef.moveCaretAndRender(-1) && ef.caret().offset == 9 && ef.caretSide() == 1,
-                       "左移回到 9（退回 ] 与字之间）");
-            expectTrue(ef.moveCaretAndRender(-1) && ef.caret().offset == 9 && ef.caretSide() == 0,
-                       "再左移：退回 ] 之内（＝字段 #0 的末尾）");
+            expectTrue(ef.moveCaretAndRender(1) && ef.caret().offset == 9 && ef.caretSide() == 0,
+                       "右移到字段 #0 的内容末尾（cp 9 侧别 0，仍在 ] 之内）");
+            expectTrue(!ef.moveCaretAndRender(1), "★ 再右移：目标在 ] 之后（不可插入）→ 不动");
+            expectTrue(ef.caret().offset == 9 && ef.caretSide() == 0,
+                       "★ 光标原地不动，没有被带到括号外");
+            expectTrue(ef.caretInsertable(), "光标在字段里：可插入（画得出竖线）");
 
-            // 那一下：在 #2 起点按左键，要一格一格地退出来
-            ef.setCaret(0, 12);
-            expectTrue(ef.moveCaretAndRender(-1) && ef.caret().offset == 12 && ef.caretSide() == 0,
-                       "在 #2 起点左移：退到 [ 之前（一步一格，不是瞬移）");
-            expectTrue(ef.moveCaretAndRender(-1) && ef.caret().offset == 11,
-                       "再左移：走到 [ 之前的正文 11");
-            expectTrue(ef.moveCaretAndRender(-1) && ef.caret().offset == 10,
-                       "再左移：到字段之间的正文 10");
-
-            ef.setCaret(0, 16);
-            expectTrue(ef.moveCaretAndRender(1) && ef.caret().offset == 16 && ef.caretSide() == 1,
-                       "最后一个字段末尾右移：先跨过 ]");
-            expectTrue(ef.moveCaretAndRender(1) && ef.caret().offset == 17,
-                       "再右移：走到段落末尾 17（后面的正文也去得）");
-            expectTrue(!ef.moveCaretAndRender(1), "到段尾之后右移返回 false（没动就不该重绘）");
-
-            // 穷尽：整段左右各走一趟 —— 单步跨度必须恒为 1，而且这一趟真的走出过 #2。
-            //   只断言"没瞬移"是不够的：光标压根不动也满足它。
-            {
-                ef.setCaret(0, 12);
-                int worst = 0;
-                bool saw_outside = false;
-                for (int i = 0; i < 8; ++i) {
-                    const size_t b = ef.caret().offset;
-                    ef.moveCaretAndRender(1);
-                    const size_t a = ef.caret().offset;
-                    const int d = static_cast<int>(a) - static_cast<int>(b);
-                    if (d > worst) worst = d;
-                    if (a < 12 || a > 16) saw_outside = true;
-                }
-                for (int i = 0; i < 8; ++i) {
-                    const size_t b = ef.caret().offset;
-                    ef.moveCaretAndRender(-1);
-                    const size_t a = ef.caret().offset;
-                    const int d = static_cast<int>(b) - static_cast<int>(a);
-                    if (d > worst) worst = d;
-                    if (a < 12 || a > 16) saw_outside = true;
-                }
-                std::printf("     [诊断] 左右各走 8 步：单步最大跨度 %d（应为 1），走出过字段=%d\n",
-                            worst, saw_outside ? 1 : 0);
-                expectTrue(worst == 1, "左右各走 8 步，单步跨度恒为 1（没有任何一步瞬移）");
-                expectTrue(saw_outside, "这一趟真的走出了 #2 = [12,16)（字段不再是牢笼）");
-            }
-
-            // Home/End：就是行首 / 行尾，不再往字段边界上收
             ef.setCaret(0, 14);
-            expectTrue(ef.moveCaretToLineStartAndRender() && ef.caret().offset == 0,
-                       "Home 到行首 0（落点不在任何字段里也照样到）");
-            expectTrue(ef.moveCaretToLineEndAndRender() && ef.caret().offset == 17,
-                       "End 到行尾 17");
+            for (int i = 0; i < 9; ++i) ef.moveCaretAndRender(-1);
+            expectTrue(ef.caret().offset == 12 && ef.caretSide() == 1,
+                       "★ 一路左移停在 #2 的内容起点（cp 12 侧别 1），不跨过 [ —— 实际 " +
+                           std::to_string(ef.caret().offset) + "/" +
+                           std::to_string(ef.caretSide()));
+
+            // Home/End：行首行尾在字段之外时收进字段内容区间（不是把光标甩到正文里）
+            ef.setCaret(0, 14);
+            expectTrue(ef.moveCaretToLineStartAndRender() && ef.caret().offset == 12 &&
+                           ef.caretSide() == 1,
+                       "Home 收到字段内容起点（行首 0 在字段外，光标不越界）");
+            expectTrue(
+                ef.moveCaretToLineEndAndRender() && ef.caret().offset == 16 && ef.caretSide() == 0,
+                "End 收到字段内容末尾（行尾 17 在字段外）");
+            expectTrue(!ef.caretInsertable() == false, "收进来的位置仍然是可插入的");
+
+            // 反向一半：选区不受这条限制 —— Shift 扩展能盖住字段之外的正文。
+            ef.setCaret(0, 12);
+            expectTrue(ef.moveCaretAndRender(-1, /*extend=*/true), "Shift+左：选区扩展不受限");
+            expectTrue(ef.caret().offset == 12 && ef.caretSide() == 0 && ef.hasSelection(),
+                       "选区端点走到了 [ 那一格 —— 能选区，只是光标不显示在那儿");
         }
 
         // (e) Tab = 缩进（不是跳字段）
@@ -3032,14 +2993,13 @@ int main() {
 
             e.setCaret(1, 0);
             const long long b1 = e.blockedEdits();
-            // 段首这一格同时是字段 ed 的开括号右面 ⇒ 第一次按键按规则 2 把光标退出去
-            //   （不删、不合并），第二次才轮到"合并"那一步判定。
-            expectTrue(e.backspace(), "★ 段首退格：先按括号规则把光标退出字段（不删、不合并）");
-            expectTrue(e.caretSide() == 0 && e.blocks().size() == 2 && e.blockedEdits() == b1,
-                       "光标退到开括号左面，文档一个字都没动，也没有被拒的记录");
-            expectTrue(!e.backspace(), "★ 再按一次：合并点落在只读字段里 → 被拒");
-            expectTrue(e.blockedEdits() == b1 + 1 && e.blocks().size() == 2,
-                       "被拒并计数，且文档一个字都没动");
+            // 段首这一格是字段 ed 的内容起点：表单模式的退格到这里就停住 —— 不删、不合并，
+            //   也不把光标带到括号外面（那是文档模式那套括号规则的走法）。
+            expectTrue(!e.backspace(), "★ 段首退格：表单模式停在字段内容起点，不合并");
+            expectTrue(e.caretSide() == 1 && e.blocks().size() == 2 && e.blockedEdits() == b1 + 1,
+                       "光标仍在字段里（侧别 1），文档一个字都没动，且被拒记了账");
+            expectTrue(!e.backspace(), "★ 再按一次：同样是拒");
+            expectTrue(e.blockedEdits() == b1 + 2 && e.blocks().size() == 2, "仍然一个字都没动");
             e.setCaret(1, 0);  // 重新落回字段里（setCaret 的默认侧别就是"进入控件"）
             expectTrue(e.splitParagraph(), "表单模式：在可编辑字段里回车分段 → 放行");
             expectTrue(e.blocks().size() == 3, "确实断成了三段（空段 + 甲 + 乙）");
@@ -3100,12 +3060,13 @@ int main() {
             expectTrue(es.splitParagraph(), "文档模式：控件之外也能分段");
 
             // 合并判的是"前一段那枚段落标记自己那一位可不可编辑"，不是光标落在哪。
-            //   字段整个落在某一段里时，标记在字段之外 ⇒ 表单模式下拒。
-            //   （第 1 段段首那一格同时是字段 b 的开括号右面，所以先要按括号规则退出去。）
+            //   字段整个落在某一段里时，标记在字段之外 ⇒ 表单模式下拒，而且这一下不会先把
+            //   光标带出字段再拒（删除不兼职移动）。
             reload17({mk17(0, 0, 4, "a", false), mk17(1, 0, 4, "b", false)});
             es.setCaret(1, 0);
-            expectTrue(es.backspaceAndRender(), "★ 段首退格：先按括号规则把光标退出字段 b");
-            expectTrue(!es.backspaceAndRender(), "段落标记落在字段之外：不可以合并");
+            expectTrue(!es.backspaceAndRender(),
+                       "★ 段首退格：段落标记落在字段之外，直接拒（不先把光标退出字段）");
+            expectTrue(es.caret().para == 1 && es.blocks().size() == 2, "光标没动、段数没变");
 
             // 反向一半：先在字段里分段，字段就被拉成跨两段，那枚标记随之落进字段内部 ⇒ 放行。
             reload17({mk17(0, 0, 4, "a", false)});
@@ -3844,12 +3805,15 @@ int main() {
             for (size_t i = 0; i < walk.size() && cell_ok; ++i) {
                 const size_t prev_off = (i == 0) ? 5 : walk[i - 1];
                 const int prev_side = (i == 0) ? 1 : walk_side[i - 1];
+                // 走到内容末尾之后再按就停在原地（落点不可插入 → 收束回边界）。
+                if (walk[i] == prev_off && walk_side[i] == prev_side) continue;
                 const bool in_offset = (walk[i] == prev_off && walk_side[i] == prev_side + 1);
                 const bool next_off = (walk[i] > prev_off && walk_side[i] == 0);
                 if (!in_offset && !next_off) cell_ok = false;
             }
-            expectTrue(cell_ok, "★ 一次跨一枚簇：括号占位也算一格（][ 边界要按两下）");
-            expectTrue(left_field, "★ 越过 7 之后就走出了 #0 —— 方向键不再被字段边界挡住");
+            expectTrue(cell_ok, "★ 一次跨一枚簇：括号占位也算一格（不跳格）");
+            expectTrue(!left_field && walk.back() == 7 && walk_side.back() == 0,
+                       "★ 停在 #0 的内容末尾（cp 7 侧别 0）—— 方向键不越过字段边界");
 
             e9.setCaret(0, 8);  // 在 #2 里（删空之后 #2 = [7,9)）
             std::vector<size_t> back;
@@ -3860,8 +3824,8 @@ int main() {
             std::printf("     从 8 连按 9 次左键：");
             for (size_t o : back) std::printf(" %zu", o);
             std::printf("\n");
-            expectTrue(back.front() == 7 && back.back() == 4,
-                       "★ 从 #2 里往左走同样是逐格退出（8 → 7 … 7 → 6 → 5 → 4，一路走出字段）");
+            expectTrue(back.front() == 7 && back.back() == 7,
+                       "★ 从 #2 里往左走到它自己的内容起点就停住（不再跨进上一个字段）");
         }
     }
 
@@ -4581,71 +4545,73 @@ int main() {
                        "★ 末尾追加也是只撑大自己，右邻居整体右移");
         }
 
-        std::printf("     ---- 光标移动：一步一格、可出字段、点击命中即落点 ----\n");
+        std::printf("     ---- 光标移动：停在字段边界上、选区不受限、点击命中即落点 ----\n");
         {
             reset(kText, {mk21(5, 7, false), mk21(7, 9, false), mk21(9, 11, false)});
+            // 表单模式：光标（插入点）只在可编辑控件的内容里。方向键走到内容两端就停住 ——
+            //   括号占位那两格不属于内容，跨字段移动由 Tab 负责（见 tabFrom）。
             e.setCaret(0, 5);
-            std::vector<size_t> walk;
-            std::vector<int> sides;
-            for (int k = 0; k < 17; ++k) {
-                e.moveCaretBy(1);
-                walk.push_back(e.caret().offset);
-                sides.push_back(e.caretSide());
-            }
-            std::string ws;
-            for (size_t k = 0; k < walk.size(); ++k)
-                ws += " " + std::to_string(walk[k]) + "/" + std::to_string(sides[k]);
-            std::printf("     从 5 连按右 17 次：%s\n", ws.c_str());
-            // 一次跨一枚簇：要么同一个偏移上侧别 +1（括号之间），要么跨到下一个偏移。
-            bool step_ok = (walk.size() == 17);
-            for (size_t k = 0; k < walk.size() && step_ok; ++k) {
-                const size_t prev_off = (k == 0) ? 5 : walk[k - 1];
-                const int prev_side = (k == 0) ? 1 : sides[k - 1];
-                const bool in_offset = (walk[k] == prev_off && sides[k] == prev_side + 1);
-                const bool next_off = (walk[k] > prev_off && sides[k] == 0);
-                if (!in_offset && !next_off) step_ok = false;
-            }
-            expectTrue(step_ok, "★ 方向键一次一格：括号占位也算一格（不跳格、不被字段挡住）");
-            expectTrue(walk.size() == 17 && walk.back() == 17,
-                       "★ 一路走出三个字段，一直走到文档末尾");
+            expectTrue(e.caretSide() == 1, "起点在 #0 的内容开头（cp 5 侧别 1）");
+            e.moveCaretBy(1);
+            expectTrue(e.caret().offset == 6, "右移一格到 6（#0 里第二个字之前）");
+            e.moveCaretBy(1);
+            expectTrue(e.caret().offset == 7 && e.caretSide() == 0,
+                       "★ 右移到 #0 的内容末尾（cp 7 侧别 0，仍在 ] 之内）");
+            expectTrue(!e.moveCaretBy(1), "★ 再右移：目标是 ] 之后那一格（不可插入）→ 不动");
+            expectTrue(e.caret().offset == 7 && e.caretSide() == 0, "光标没有被带到括号外");
+
+            e.setCaret(0, 8);
+            e.moveCaretBy(-1);
+            expectTrue(e.caret().offset == 7 && e.caretSide() == 2,
+                       "★ 从 #1 里左移停在它的内容开头（cp 7 跨过 ] 与 [，侧别 2），不跨过 [ —— "
+                       "实际 " +
+                           std::to_string(e.caret().offset) + "/" + std::to_string(e.caretSide()));
+
+            // 选区不受这条限制：Shift + 左能盖住字段之外的正文（核对上文、复制的刚需）。
+            e.setCaret(0, 7);
+            e.moveCaretBy(-1, /*extend=*/true);
+            expectTrue(e.caret().offset == 6 && e.hasSelection(),
+                       "★ Shift+左：选区扩展到 #0 里（扩展不受落点限制）");
             e.setCaret(0, 5);
-            std::vector<size_t> back;
-            for (int k = 0; k < 6; ++k) {
-                e.moveCaretBy(-1);
-                back.push_back(e.caret().offset);
-            }
-            expectTrue(back.size() == 6 && back.back() == 0,
-                       "★ 反向一步一格、走到 0（字段的左边界不是墙）");
+            e.moveCaretBy(-1, /*extend=*/true);
+            expectTrue(e.caret().offset == 5 && e.caretSide() == 0 && e.hasSelection(),
+                       "★ 从内容开头再 Shift+左：选区端点走到 [ 那一格（选区能越界，光标不画）");
+            expectTrue(!e.caretInsertable(), "★ 那个端点不可插入 —— 光标不显示在那儿（只画选区）");
+
+            // 换字段：Tab 走的是"可编辑控件"这条线，不受光标落点限制。
+            reset(kText, {mk21(5, 7, false), mk21(7, 9, false), mk21(9, 11, false)});
+            e.setCaret(0, 6);
+            expectTrue(e.tabCaret(false) && e.focusedControlIndex() == 1,
+                       "★ Tab：光标从 #0 跳到 #1（跨字段的动作只有它）");
+
+            e.setCaret(0, 9);
+            e.moveCaretToLineStart();
+            expectTrue(e.caret().offset == 7 && e.caretSide() == 2,
+                       "Home 收到字段内容开头（行首 0 在字段外）—— 实际 " +
+                           std::to_string(e.caret().offset) + "/" + std::to_string(e.caretSide()));
+            e.moveCaretToLineEnd();
+            expectTrue(e.caret().offset == 9 && e.caretSide() == 0,
+                       "End 收到字段内容末尾（行尾 17 在字段外）");
+
+            // 程序化定位不受限：探针要能把光标摆到任意位置核对策略，画不画由 caretInsertable 定。
             e.setCaret(0, 4);
-            expectTrue(e.focusedControlIndex() == -1, "★ 光标能停在字段之外（位置不受控件约束）");
+            expectTrue(e.focusedControlIndex() == -1,
+                       "程序化定位可以落在字段之外（宿主/探针的摆位入口）");
+            expectTrue(!e.caretInsertable(), "★ 那个位置的插入点不成立 —— 光标不显示");
             const long long blocked0 = e.blockedEdits();
-            expectTrue(!e.typeTextAndRender("X"), "★ 字段外打字被拒（约束编辑权，不约束光标）");
+            expectTrue(!e.typeTextAndRender("X"), "★ 字段外打字被拒（不可插入 = 打不进字）");
             expectTrue(e.blockedEdits() == blocked0 + 1, "被拒的编辑记了账（宿主能看见）");
-            // 只读字段：光标进得去，字打不进去。
+
+            // 只读字段：程序化定位进得去，字打不进去，光标也不画。
             reset(kText, {mk21(5, 7, false), mk21(7, 9, true)});
             e.setCaret(0, 8);
             expectTrue(e.focusedControlIndex() == 1,
-                       "光标能进只读字段（只读约束编辑，不约束浏览）");
+                       "程序化定位能落在只读字段里（归属照算，策略拒绝的是编辑）");
+            expectTrue(!e.caretInsertable(), "★ 只读字段里的插入点不成立 —— 光标不显示");
             const long long blocked1 = e.blockedEdits();
             expectTrue(!e.typeTextAndRender("X") && e.blockedEdits() == blocked1 + 1,
                        "★ 只读字段里打字被拒，且记账");
-            // 键盘跨过共享边界：归属换人（一次跨一枚簇，所以共享边界要按两下）
-            reset(kText, {mk21(5, 7, false), mk21(7, 9, false), mk21(9, 11, false)});
-            e.setCaret(0, 7);
-            expectTrue(e.focusedControlIndex() == 0, "位置 7 归前一个字段");
-            e.moveCaretBy(1);
-            expectTrue(e.caret().offset == 7 && e.caretSide() == 1,
-                       "★ 右移一格先走到 ] 与 [ 之间那一格（括号也占一格）");
-            e.moveCaretBy(1);
-            expectTrue(e.caret().offset == 7 && e.focusedControlIndex() == 1,
-                       "★ 再一格跨过共享边界，归属换成后一个字段");
-            e.moveCaretBy(-1);
-            expectTrue(e.focusedControlIndex() == 0, "左移回来归属又换回前一个字段");
-            e.setCaret(0, 9);
-            e.moveCaretToLineStart();
-            expectTrue(e.caret().offset == 0, "Home 到行首（不是字段首）");
-            e.moveCaretToLineEnd();
-            expectTrue(e.caret().offset == 17, "End 到行尾（不是字段尾）");
+
             // 点击：横扫整行，每一个采样点都必须"命中即落点"，且没有回跳与空隙。
             reset(kText, {mk21(5, 7, false), mk21(7, 9, false), mk21(9, 11, false)});
             float lo = 1e9f, hi = -1e9f;
@@ -5137,7 +5103,7 @@ int main() {
             narrow.zoom = 1.0f;
             narrow.page.width_pt = 100.0f;
             narrow.page.height_pt = 400.0f;
-            narrow.page.margin_pt = 5.0f;  // 内容宽 90 磅：12 磅字每行七个
+            narrow.page.margins = PageMargins::all(5.0f);  // 内容宽 90 磅：12 磅字每行七个
 
             BlockSpec blk = mkBlock(0, 12.0f, "zh", "两把尺子求交同一段文本会被切两次");
             const uint32_t n = static_cast<uint32_t>(blk.cp_text.size());
@@ -5174,7 +5140,7 @@ int main() {
             narrow.zoom = 1.0f;
             narrow.page.width_pt = 110.0f;   // 内容宽 100 磅：12 磅字每行八个
             narrow.page.height_pt = 100.0f;  // 内容高 90 磅
-            narrow.page.margin_pt = 5.0f;
+            narrow.page.margins = PageMargins::all(5.0f);
 
             BlockSpec head = mkBlock(0, 12.0f, "zh", "一二三四五六七八");
             BlockSpec body = mkBlock(0, 12.0f, "zh", "两把尺子求交同一段文本会被切两次");
@@ -5637,7 +5603,13 @@ int main() {
         }
 
         // (i) 树上编辑：落笔之后仍然持树，两种建树上的编辑逐字节相同；撤销回到落笔之前
+        //   这一节改在文档模式里做：那份文档只有一个只读控件，表单模式下整篇没有可插入的
+        //   位置（这不是缺陷，就是"只看不改"），打字本来就不该落下去。
         {
+            a.setEditMode(EditMode::Document);
+            b.setEditMode(EditMode::Document);
+            a.relayout();
+            b.relayout();
             b.setCaret(0, 7);
             b.showCaret(true);
             b.repaint();
@@ -6257,7 +6229,7 @@ int main() {
                        "只读的 A 一个字都没被改（端点是 -1 之外唯一能露馅的地方）");
         }
 
-        // (c) 安全阀：一个可编辑控件都没有 → 表单退化为文档模式
+        // (c) 没有可编辑控件时，表单模式整篇不可编辑（不存在"退化成文档模式"这一档）
         {
             loadBoth28(true);
             expectTrue(ta.controls().size() == 1 && tm.controls().size() == 1,
@@ -6265,9 +6237,10 @@ int main() {
             const std::vector<uint32_t> x{0x58};
             const bool oka = ta.insertCodepoints(0, 1, x);  // 控件之外
             const bool okm = tm.insertCodepoints(0, 1, x);
-            expectTrue(
-                oka && okm,
-                "★ 安全阀两种建树都亮：没有可编辑控件时表单退化为文档模式（控件外也能打字）");
+            expectTrue(!oka && !okm,
+                       "★ 两种建树都拒：表单模式没有可编辑控件时，控件之外也打不进字");
+            expectTrue(ta.blocks()[0].cp_text.size() == tm.blocks()[0].cp_text.size(),
+                       "两种建树都没改到文档（拒绝是同一个结果）");
         }
 
         // (d) Tab 走能力表：可编辑控件才是落点，到最后一个放行
@@ -6798,7 +6771,14 @@ int main() {
         //   所在的位置）；三连字段删掉"悸"之后光标跑进第三个控件（该停在第一个控件里）。
         //   共同根因：删除区间与落点都是一个码点偏移 + "最内层含端点"猜出来的侧别。
         {
-            auto afterDelete = [&](int variant, size_t from_off, int steps) {
+            // 表单模式：光标落在字段里，删除只在那个字段的内容里发生。
+            struct FormErase {
+                size_t len = 0;         // 删完之后整段码点数
+                size_t controls = 0;    // 控件个数
+                bool accepted = false;  // 最后一下有没有被放行
+                std::string caret;      // 光标（偏移/侧别）
+            };
+            auto formErase = [&](int variant, size_t from_off, int steps) {
                 std::vector<BlockSpec> bl(1);
                 bl[0].setText("患者主诉：反复心悸三天，加重一天。");
                 std::vector<DemoFieldSpec> fd;
@@ -6820,35 +6800,41 @@ int main() {
                     add(9, 11, "c");
                 }
                 EditorEngine ex;
-                if (!ex.init(fonts29)) return std::string("字体加载失败");
+                FormErase r;
+                if (!ex.init(fonts29)) return r;
                 ex.setConfig(ec29);
                 ex.setDocument(demoTree(bl, fd), StyleSheet{});
                 ex.setEditMode(EditMode::Form);
                 ex.relayout();
                 ex.setCaret(0, from_off);
-                for (int i = 0; i < steps; ++i) ex.backspace();
-                return std::to_string(ex.caret().offset) + "/" + std::to_string(ex.caretSide());
+                for (int i = 0; i < steps; ++i) r.accepted = ex.backspace();
+                r.len = ex.blocks()[0].cp_text.size();
+                r.controls = static_cast<size_t>(ex.controls().size());
+                r.caret = std::to_string(ex.caret().offset) + "/" + std::to_string(ex.caretSide());
+                return r;
             };
             // 三层嵌套：光标在 11（段内），退一格删"天" → 落点是"天"所在的位置
             //   （cp 10 上跨过 ]中 之后，侧别 1）；再退一格删"三" → cp 9 跨过 ]内 之后。
-            expectTrue(afterDelete(3, 11, 1) == "10/1",
+            expectTrue(formErase(3, 11, 1).caret == "10/1",
                        "★★ 嵌套删「天」之后光标停在「天」原来的位置（cp 10 跨过 ]中，侧别 1）"
                        "—— 实际 " +
-                           afterDelete(3, 11, 1));
+                           formErase(3, 11, 1).caret);
             expectTrue(
-                afterDelete(3, 11, 2) == "9/1",
-                "★★ 再退一格删「三」→ cp 9 跨过 ]内（侧别 1）—— 实际 " + afterDelete(3, 11, 2));
-            // 三连可编辑：先删"三天"（两下）→ 第三个字段空了；第三下按规则 2 删掉那个空
-            //   控件本身，第四下才删"悸"，落点回到第一个字段的末尾（cp 8 上"所有括号之前"，
-            //   侧别 0），不是被第三个控件吃掉。
-            expectTrue(afterDelete(2, 11, 3) == "9/1",
-                       "★★ 三连字段：第三个删空之后再退一格，删掉的是那个空控件（光标停在它"
-                       "原来那一格，cp 9 跨过 ]b，侧别 1）—— 实际 " +
-                           afterDelete(2, 11, 3));
-            expectTrue(afterDelete(2, 11, 4) == "8/0",
-                       "★★ 再退一格删「悸」：光标停在第一个字段末尾（cp 8 侧别 0），"
-                       "不许跑进第三个控件 —— 实际 " +
-                           afterDelete(2, 11, 3));
+                formErase(3, 11, 2).caret == "9/1",
+                "★★ 再退一格删「三」→ cp 9 跨过 ]内（侧别 1）—— 实际 " + formErase(3, 11, 2).caret);
+            // 三连可编辑：把 c 删空之后再退一格 —— 拒。表单模式不删控件，也不许从 b 里偷字。
+            const FormErase tri = formErase(2, 11, 3);
+            expectTrue(
+                tri.len == 15 && tri.controls == 3,
+                "★★ 三连字段：删掉「三天」之后三个字段都在（零宽的那个没被删掉）—— 实际长度 " +
+                    std::to_string(tri.len) + "、控件 " + std::to_string(tri.controls));
+            expectTrue(!tri.accepted, "★★ 第三次退格被拒（不许删控件，也不许删上一个字段里的字）");
+            expectTrue(tri.caret == "9/2",
+                       "★★ 光标停在第三个字段的内容起点（cp 9 跨过 ]b 与 [c，侧别 2）—— 实际 " +
+                           tri.caret);
+            const FormErase tri2 = formErase(2, 11, 4);
+            expectTrue(tri2.len == 15 && tri2.controls == 3 && !tri2.accepted,
+                       "★★ 第四下同样原地不动 —— 删除的边界就是控件内容");
         }
 
         //   两条现象：三层嵌套字段全删空之后，在最后一枚右括号之前输入，字与光标
@@ -6983,7 +6969,9 @@ int main() {
         ec.zoom = 1.0f;
         e.setConfig(ec);
         e.setDocument(demoTree(bl, {}), StyleSheet{});
-        e.setEditMode(EditMode::Form);
+        // 这一节管的是增量编译的形状，不是表单策略：没有控件时表单模式一个字都改不动，
+        //   所以编辑做在文档模式里（表单模式的落点口径见 [21] 与 [35]）。
+        e.setEditMode(EditMode::Document);
         e.relayout();
         expectTrue(e.auditCompile() == 0, "装载之后：产物与整树全量编译一致");
 
@@ -7491,7 +7479,21 @@ int main() {
             e6.relayout();
             expectTrue(text6(e6, 0) == "AACC",
                        "可见性：字段隐藏后可见文本是 AACC（实际 " + text6(e6, 0) + "）");
-            e6.setCaret(0, 3);  // 第二个 C 之前
+            // 打字要在可编辑区域里：另配一个包住 "CC" 的字段，光标落到它中间。
+            //   （表单模式下没有可插入位置时本来就打不进字 —— 那是策略，不是缺陷。）
+            std::vector<DemoFieldSpec> f6b = f6;
+            DemoFieldSpec tail;
+            tail.para = 0;
+            tail.so = 4;
+            tail.eo = 6;
+            tail.key = "k6b";
+            f6b.push_back(tail);
+            e6.setDocument(demoTree(b6, f6b), StyleSheet{});
+            e6.setEditMode(EditMode::Form);
+            e6.relayout();
+            expectTrue(e6.setControlProp(0, ControlProp::Hidden, true), "可见性：再隐藏一次 BB");
+            e6.relayout();
+            e6.setCaret(0, 3);  // 两个 C 之间（BB 摘除之后整段只剩 AACC）
             expectTrue(e6.typeTextUtf8("Z"), "可见性：在隐藏字段之后打字成功");
             expectTrue(text6(e6, 0) == "AACZC",
                        "★ 字落在光标处，没有落进隐藏字段（实际 " + text6(e6, 0) + "）");
@@ -7763,23 +7765,23 @@ int main() {
                        std::to_string(e5.caret().offset) + "/" + std::to_string(e5.caretSide()));
         expectTrue(e5.auditCompile() == 0, "★ 撤销之后产物仍与整树全量编译逐字段一致");
 
-        // (h) 表单模式：控件结构默认锁住 —— 空控件删不掉，这一次按键退化成"只把光标移出去"
+        // (h) 表单模式：删除的边界就是控件内容 —— 空控件删不掉，光标也不会被带出括号
         reload5();
         e5.setEditMode(EditMode::Form);
         e5.relayout();
-        e5.setCaretAtSide(0, 9, 1);
+        e5.setCaretAtSide(0, 9, 0);
+        expectTrue(e5.caretSide() == 0, "光标在字段 #0 的内容末尾（] 之内）");
         for (int i = 0; i < 4; ++i) expectTrue(e5.backspace(), "表单模式：先把这个字段删空");
-        expectTrue(e5.controls().size() == 2, "k1 还在（空的）");
+        expectTrue(e5.controls().size() == 2, "k1 还在（空的、零宽）");
         {
             const long long b3 = e5.blockedEdits();
-            expectTrue(e5.backspace(), "★ 空控件上退格：按键没被吞掉");
-            expectTrue(e5.controls().size() == 2, "控件还在（结构被锁住，删不掉）");
-            expectTrue(e5.caret().offset == 5 && e5.caretSide() == 0,
-                       "★ 光标退到控件之外（cp 5 侧别 0）—— 实际 " +
+            expectTrue(!e5.backspace(), "★ 空控件上退格：拒（表单模式不删控件）");
+            expectTrue(e5.controls().size() == 2, "控件还在");
+            expectTrue(e5.caret().offset == 5 && e5.caretSide() == 1,
+                       "★ 光标停在内容起点（cp 5 侧别 1），没被带到括号外面 —— 实际 " +
                            std::to_string(e5.caret().offset) + "/" +
                            std::to_string(e5.caretSide()));
-            expectTrue(e5.blockedEdits() == b3 + 1,
-                       "★ 那次被拒的结构操作记了账 —— 按键成功了，但它确实试过一次被锁住的操作");
+            expectTrue(e5.blockedEdits() == b3 + 1, "★ 这次拒绝记了账");
         }
     }
 
@@ -7846,7 +7848,7 @@ int main() {
         c37.zoom = 1.0f;
         // 页宽调窄：上下键与"跨行拆矩形"必须真的跨行才算测到，A4 宽很可能一行装得下。
         c37.page.width_pt = 200.0f;
-        c37.page.margin_pt = 20.0f;
+        c37.page.margins = PageMargins::all(20.0f);
         e37.setConfig(c37);
         e37.setDocument(demoTree(bl37, {}), StyleSheet{});
         e37.setEditMode(EditMode::Document);
@@ -8016,7 +8018,7 @@ int main() {
         EngineConfig c38;
         c38.zoom = 1.0f;
         c38.page.width_pt = 200.0f;
-        c38.page.margin_pt = 20.0f;
+        c38.page.margins = PageMargins::all(20.0f);
         e38.setConfig(c38);
         reload38(e38);
 
@@ -8217,7 +8219,7 @@ int main() {
         EngineConfig c39;
         c39.zoom = 1.0f;
         c39.page.width_pt = 200.0f;
-        c39.page.margin_pt = 20.0f;
+        c39.page.margins = PageMargins::all(20.0f);
         e39.setConfig(c39);
 
         // (a) 按下落在 (0,2)，拖到 (0,6)：anchor 停在按下点，focus 跟着走
@@ -8324,7 +8326,7 @@ int main() {
         //   两者必须彻底分开，判据才不是"恰好比大小"。
         c40.page.width_pt = 240.0f;
         c40.page.height_pt = 120.0f;
-        c40.page.margin_pt = 20.0f;
+        c40.page.margins = PageMargins::all(20.0f);
         c40.page_gap_pt = 20.0f;
         e40.setConfig(c40);
 
@@ -8392,11 +8394,12 @@ int main() {
         expectTrue(paged40.slabs >= 2, "这份文档在分页下确实跨了多条带");
         // 页底让位：跨页那两行的间距 = 页底剩下的空当 + 下边距 + 页间隙 + 上边距，
         //   所以它至少是"页间隙 + 两倍上边距"。这是分页的硬下界，连页下必须被打破。
-        expectTrue(paged40.max_step >= c40.page_gap_pt + 2.0f * c40.page.margin_pt - 0.01f,
+        expectTrue(paged40.max_step >=
+                       c40.page_gap_pt + c40.page.margins.top + c40.page.margins.bottom - 0.01f,
                    "分页下内容在页底让位（跨页那两行的间距至少多出一整条页间隙与两倍边距）");
         // 另一条分页硬下界：行盒底到条带底至少还有一整个上边距加一条页间隙
         //   （断行判据要求"本行放得进内容区"）。
-        expectTrue(paged40.min_slack >= c40.page.margin_pt + c40.page_gap_pt - 0.01f,
+        expectTrue(paged40.min_slack >= c40.page.margins.top + c40.page_gap_pt - 0.01f,
                    "分页下墨迹永远够不到条带底（至少留着上边距 + 页间隙）");
 
         c40.continuous = true;
@@ -8415,7 +8418,7 @@ int main() {
         expectTrue(cont40.max_step <= cont40.max_pitch + 10.0f + 0.01f,
                    "连页下最大的那一跳就是段间距（没有页底那一跳）");
         expectTrue(cont40.slabs < paged40.slabs, "连页下条带数比分页少（内容不再为页边距让位）");
-        expectTrue(cont40.min_slack < c40.page.margin_pt,
+        expectTrue(cont40.min_slack < c40.page.margins.top,
                    "连页下墨迹跑进了下边距那条带（页边距不再约束内容）");
 
         // 内容底边：连页下它就是滚动高度。它必须落在最后一行之下、且在条带范围内。
@@ -8441,7 +8444,7 @@ int main() {
         c41.zoom = 1.0f;  // 1 磅 = 1 像素：命中测试收的磅值与行盒里的磅值同一把尺子
         c41.page.width_pt = 240.0f;
         c41.page.height_pt = 200.0f;
-        c41.page.margin_pt = 20.0f;
+        c41.page.margins = PageMargins::all(20.0f);
         c41.page_gap_pt = 20.0f;
         e41.setConfig(c41);
 
@@ -8547,7 +8550,7 @@ int main() {
         c42.zoom = 1.0f;
         c42.page.width_pt = 240.0f;
         c42.page.height_pt = 200.0f;
-        c42.page.margin_pt = 20.0f;
+        c42.page.margins = PageMargins::all(20.0f);
         e42.setConfig(c42);
         BlockSpec b42;
         b42.font_index = 0;
@@ -8605,7 +8608,7 @@ int main() {
         c43.zoom = 1.0f;
         c43.page.width_pt = 240.0f;
         c43.page.height_pt = 300.0f;
-        c43.page.margin_pt = 20.0f;
+        c43.page.margins = PageMargins::all(20.0f);
         e43.setConfig(c43);
 
         BlockSpec b43;
@@ -8663,7 +8666,7 @@ int main() {
         c44.zoom = 1.0f;
         c44.page.width_pt = 200.0f;
         c44.page.height_pt = 300.0f;
-        c44.page.margin_pt = 10.0f;
+        c44.page.margins = PageMargins::all(10.0f);
         e44.setConfig(c44);
 
         // 三段：纯文本 / 汉字 + 图片 / 纯文本。原子夹在中间，于是"改前一段"这条路上
@@ -8867,7 +8870,7 @@ int main() {
         c45.zoom = 1.0f;
         c45.page.width_pt = 300.0f;
         c45.page.height_pt = 300.0f;
-        c45.page.margin_pt = 10.0f;
+        c45.page.margins = PageMargins::all(10.0f);
         e45.setConfig(c45);
 
         NodeTree t;
@@ -9028,7 +9031,7 @@ int main() {
         c47.zoom = 1.0f;
         c47.page.width_pt = 300.0f;
         c47.page.height_pt = 300.0f;
-        c47.page.margin_pt = 10.0f;
+        c47.page.margins = PageMargins::all(10.0f);
         e47.setConfig(c47);
         NodeTree t;
         const NodeId s = t.firstSectionId();
@@ -9060,7 +9063,7 @@ int main() {
         c46.zoom = 1.0f;
         c46.page.width_pt = 300.0f;
         c46.page.height_pt = 300.0f;
-        c46.page.margin_pt = 10.0f;
+        c46.page.margins = PageMargins::all(10.0f);
         e46.setConfig(c46);
 
         // 段 + 表格（1 行 1 格）+ 段。
@@ -9140,7 +9143,7 @@ int main() {
         c47.zoom = 1.0f;
         c47.page.width_pt = 300.0f;
         c47.page.height_pt = 300.0f;
-        c47.page.margin_pt = 10.0f;
+        c47.page.margins = PageMargins::all(10.0f);
         e47.setConfig(c47);
 
         NodeTree t;
@@ -9230,7 +9233,7 @@ int main() {
         c48.zoom = 1.0f;
         c48.page.width_pt = 320.0f;
         c48.page.height_pt = 320.0f;
-        c48.page.margin_pt = 10.0f;
+        c48.page.margins = PageMargins::all(10.0f);
         e48.setConfig(c48);
 
         // 2x2：一个格一个字。跨格拖选的判据用得到"两格之间还夹着别的格"这一条。
@@ -9393,7 +9396,7 @@ int main() {
         c49.zoom = 1.0f;
         c49.page.width_pt = 360.0f;
         c49.page.height_pt = 480.0f;
-        c49.page.margin_pt = 10.0f;
+        c49.page.margins = PageMargins::all(10.0f);
         e49.setConfig(c49);
 
         // 3x3，每格两个字、一个块。行列都要小：跨行、跨列、斜向各一条判据。
@@ -9558,7 +9561,7 @@ int main() {
         c50.zoom = 1.0f;
         c50.page.width_pt = 320.0f;
         c50.page.height_pt = 400.0f;
-        c50.page.margin_pt = 10.0f;
+        c50.page.margins = PageMargins::all(10.0f);
         e50.setConfig(c50);
 
         // 一格两段、另两格各一段：格内合并该发生，跨格合并不该发生。
@@ -9645,7 +9648,7 @@ int main() {
         c51.zoom = 1.0f;
         c51.page.width_pt = 320.0f;
         c51.page.height_pt = 400.0f;
-        c51.page.margin_pt = 10.0f;
+        c51.page.margins = PageMargins::all(10.0f);
         e51.setConfig(c51);
 
         // 正文 + 一行两格的表 + 正文。前后都有正文，全选才测得到"表外的空隙"。
@@ -9751,7 +9754,7 @@ int main() {
         c52.zoom = 1.0f;
         c52.page.width_pt = 320.0f;
         c52.page.height_pt = 400.0f;
-        c52.page.margin_pt = 10.0f;
+        c52.page.margins = PageMargins::all(10.0f);
         e52.setConfig(c52);
 
         // 段 + 一格两格的表 + 段。第一格先删空，成为"空格"。
@@ -9875,7 +9878,7 @@ int main() {
             ca.zoom = 1.0f;
             ca.page.width_pt = 300.0f;
             ca.page.height_pt = 300.0f;
-            ca.page.margin_pt = 10.0f;
+            ca.page.margins = PageMargins::all(10.0f);
             ea.setConfig(ca);
             std::vector<BlockSpec> blocks;
             for (int i = 0; i < 60; ++i) {
@@ -9909,7 +9912,7 @@ int main() {
             cb.zoom = 1.0f;
             cb.page.width_pt = 320.0f;
             cb.page.height_pt = 240.0f;
-            cb.page.margin_pt = 10.0f;
+            cb.page.margins = PageMargins::all(10.0f);
             eb.setConfig(cb);
 
             NodeTree t;
@@ -9974,7 +9977,7 @@ int main() {
             cc.zoom = 1.0f;
             cc.page.width_pt = 300.0f;
             cc.page.height_pt = 300.0f;
-            cc.page.margin_pt = 10.0f;
+            cc.page.margins = PageMargins::all(10.0f);
             ec.setConfig(cc);
             std::vector<BlockSpec> blocks;
 
@@ -10030,7 +10033,7 @@ int main() {
         c.zoom = 1.0f;
         c.page.width_pt = 360.0f;
         c.page.height_pt = 300.0f;
-        c.page.margin_pt = 12.0f;
+        c.page.margins = PageMargins::all(12.0f);
         e.setConfig(c);
 
         NodeTree t;
@@ -10196,7 +10199,7 @@ int main() {
         c.zoom = 1.0f;
         c.page.width_pt = 360.0f;
         c.page.height_pt = 300.0f;
-        c.page.margin_pt = 12.0f;
+        c.page.margins = PageMargins::all(12.0f);
         e.setConfig(c);
 
         NodeTree t;
@@ -10239,7 +10242,7 @@ int main() {
         c56.zoom = 1.0f;
         c56.page.width_pt = 340.0f;
         c56.page.height_pt = 300.0f;
-        c56.page.margin_pt = 12.0f;
+        c56.page.margins = PageMargins::all(12.0f);
         const std::vector<std::string> fonts56 = {cjkPath, mnPath, latinPath};
         const int kN = 120;
 
@@ -10421,7 +10424,7 @@ int main() {
         c57.zoom = 1.0f;
         c57.page.width_pt = 340.0f;
         c57.page.height_pt = 300.0f;
-        c57.page.margin_pt = 12.0f;
+        c57.page.margins = PageMargins::all(12.0f);
         e57.setConfig(c57);
 
         NodeTree t57;
@@ -10516,7 +10519,7 @@ int main() {
         c58.zoom = 1.0f;
         c58.page.width_pt = 340.0f;
         c58.page.height_pt = 300.0f;
-        c58.page.margin_pt = 12.0f;
+        c58.page.margins = PageMargins::all(12.0f);
         e58.setConfig(c58);
 
         NodeTree t58;
@@ -10669,7 +10672,7 @@ int main() {
         c59.zoom = 1.0f;  // 1 磅 = 1 像素：拼图与整带用的是同一把尺子
         c59.page.width_pt = 320.0f;
         c59.page.height_pt = 150.0f;  // 故意矮：几十条带，接缝足够多
-        c59.page.margin_pt = 20.0f;
+        c59.page.margins = PageMargins::all(20.0f);
         c59.page_gap_pt = 0.0f;
         // 连页开关在 EngineConfig 上；page.continuous 与 page.slab_pt 由 setConfig 装配
         //   （见 EditorEngine::setConfig），直接在 page 上置位不会生效。
@@ -10768,7 +10771,7 @@ int main() {
         EngineConfig c60;
         c60.page.width_pt = 420.0f;
         c60.page.height_pt = 300.0f;
-        c60.page.margin_pt = 24.0f;
+        c60.page.margins = PageMargins::all(24.0f);
 
         std::vector<BlockSpec> b60;
         for (int i = 0; i < 5; ++i) {
@@ -10879,7 +10882,7 @@ int main() {
         c61.zoom = 1.0f;
         c61.page.width_pt = 320.0f;
         c61.page.height_pt = 280.0f;
-        c61.page.margin_pt = 12.0f;
+        c61.page.margins = PageMargins::all(12.0f);
 
         NodeTree t61;
         const NodeId sec = t61.firstSectionId();
@@ -11193,7 +11196,7 @@ int main() {
         c62.zoom = 1.0f;
         c62.page.width_pt = 320.0f;
         c62.page.height_pt = 240.0f;
-        c62.page.margin_pt = 12.0f;
+        c62.page.margins = PageMargins::all(12.0f);
 
         EditorEngine ea;
         expectTrue(ea.init({cjkPath, mnPath, latinPath}), "引擎初始化（位置划分·正文）");
@@ -11360,7 +11363,7 @@ int main() {
         c64.zoom = 1.0f;
         c64.page.width_pt = 320.0f;
         c64.page.height_pt = 240.0f;
-        c64.page.margin_pt = 12.0f;
+        c64.page.margins = PageMargins::all(12.0f);
         const std::vector<std::string> fonts64 = {cjkPath, mnPath, latinPath};
 
         // 形状：两段。第一段中间有两个连续的空格（"全部"档下每一格都要有自己的中点），
@@ -11431,6 +11434,9 @@ int main() {
         expectTrue(e64.config().marks == MarksMode::Paragraph,
                    "默认档 = 只显示段落标记（段落边界是编辑时最该看见的）");
 
+        // 这一节比的是像素差，先把光标熄掉：只读模式下光标本来就不画（见 caretInsertable），
+        //   留着它会往差值里多塞一条竖线的像素。
+        e64.showCaret(false);
         const std::vector<uint8_t> with_para = snap();
         setMarks(MarksMode::None);
         const LayoutResult geom_off = e64.layout();
@@ -11446,8 +11452,10 @@ int main() {
                                      std::to_string(ink_para) + " 个像素）");
         expectTrue(ink_space > 0, "★ 全部标记档多出空格里的中点（比段落档多 " +
                                       std::to_string(ink_space) + " 个像素）");
-        expectTrue(ink_all > ink_para, "全部档的墨迹多于段落档（" + std::to_string(ink_all) +
-                                           " > " + std::to_string(ink_para) + "）");
+        // 两个差值都以"无标记"那一版为基线：墨迹落在同一行上、像素集合互相压住，
+        //   所以"两个差值相加"不成立。这里只钉两件事 —— 全部档确实画了墨迹，
+        //   而且它比段落档多出来的正是空格里的中点（ink_space，上面那条）。
+        expectTrue(ink_all > 0, "全部档确实画了墨迹（" + std::to_string(ink_all) + " 个像素）");
         expectTrue(sameGeometry(geom_off, e64.layout()),
                    "★ 三档的行盒与字形坐标逐位相同（标记不进版面：不占宽度、不改断行）");
         expectTrue(
@@ -11481,7 +11489,7 @@ int main() {
         c65.zoom = 1.0f;
         c65.page.width_pt = 320.0f;
         c65.page.height_pt = 240.0f;
-        c65.page.margin_pt = 12.0f;
+        c65.page.margins = PageMargins::all(12.0f);
         const std::vector<std::string> fonts65 = {cjkPath, mnPath, latinPath};
 
         NodeTree t65;
@@ -11567,7 +11575,7 @@ int main() {
         c66.zoom = 1.0f;
         c66.page.width_pt = 320.0f;
         c66.page.height_pt = 240.0f;
-        c66.page.margin_pt = 12.0f;
+        c66.page.margins = PageMargins::all(12.0f);
         const std::vector<std::string> fonts66 = {cjkPath, mnPath, latinPath};
         NodeTree t66;
         {
@@ -11649,7 +11657,7 @@ int main() {
         c67.zoom = 1.0f;
         c67.page.width_pt = 320.0f;
         c67.page.height_pt = 240.0f;
-        c67.page.margin_pt = 12.0f;
+        c67.page.margins = PageMargins::all(12.0f);
         const std::vector<std::string> fonts67 = {cjkPath, mnPath, latinPath};
         NodeTree t67;
         {
@@ -11846,7 +11854,7 @@ int main() {
         c68.zoom = 1.0f;
         c68.page.width_pt = 320.0f;
         c68.page.height_pt = 420.0f;
-        c68.page.margin_pt = 12.0f;
+        c68.page.margins = PageMargins::all(12.0f);
         const std::vector<std::string> fonts68 = {cjkPath, mnPath, latinPath};
 
         NodeTree t68;
@@ -11950,7 +11958,7 @@ int main() {
         c69.zoom = 1.0f;
         c69.page.width_pt = 320.0f;
         c69.page.height_pt = 420.0f;
-        c69.page.margin_pt = 12.0f;
+        c69.page.margins = PageMargins::all(12.0f);
         const std::vector<std::string> fonts69 = {cjkPath, mnPath, latinPath};
 
         NodeTree t69;
@@ -11981,6 +11989,15 @@ int main() {
         expectTrue(e69.blocks()[0].textUtf8() == "甲乙张三丙丁",
                    "控件不切断段落（实际 " + e69.blocks()[0].textUtf8() + "）");
         expectTrue(e69.blocks().size() == 1, "控件不产生新段");
+        // 光标在文档模式下必须照旧画得出来：判"文档有没有内容"不能拿 blocks_ —— 它只是
+        //   括号筛选后的临时副本，括号不显示（或刚重编译过）时是空的，拿它判会把整条光标判掉。
+        expectTrue(e69.caretInsertable(),
+                   "★ 插入控件之后文档模式的光标仍可插入（点哪儿都没反应的那种坏法）");
+        {
+            Rect cr69{};
+            const bool has69 = e69.caretRectPt(&cr69);
+            expectTrue(has69 && cr69.w > 0.0f, "光标矩形非零宽（画得出来）");
+        }
 
         // 区间就是标签那一段文字：起止都落在同一个段落里。
         bool range_ok = false;
@@ -12043,7 +12060,7 @@ int main() {
         c.zoom = 1.0f;
         c.page.width_pt = 300.0f;
         c.page.height_pt = 300.0f;
-        c.page.margin_pt = 10.0f;
+        c.page.margins = PageMargins::all(10.0f);
         e.setConfig(c);
         {
             NodeTree t;
@@ -12120,7 +12137,7 @@ int main() {
             c2.zoom = 1.0f;
             c2.page.width_pt = 300.0f;
             c2.page.height_pt = 200.0f;
-            c2.page.margin_pt = 10.0f;
+            c2.page.margins = PageMargins::all(10.0f);
             e2.setConfig(c2);
             NodeTree t2;
             const NodeId s2 = t2.firstSectionId();
@@ -12222,7 +12239,7 @@ int main() {
             c3.zoom = 1.0f;
             c3.page.width_pt = 300.0f;
             c3.page.height_pt = 200.0f;
-            c3.page.margin_pt = 10.0f;
+            c3.page.margins = PageMargins::all(10.0f);
             // 连页是配置项（引擎按 page + page_gap 装配 PageMetrics），不是页度量上的开关。
             c3.continuous = true;
             c3.page_gap_pt = 20.0f;
@@ -12308,7 +12325,7 @@ int main() {
         c.zoom = 1.0f;
         c.page.width_pt = 300.0f;
         c.page.height_pt = 300.0f;
-        c.page.margin_pt = 10.0f;
+        c.page.margins = PageMargins::all(10.0f);
         e.setConfig(c);
         e.setEditMode(EditMode::Document);
         {
@@ -12370,7 +12387,7 @@ int main() {
         c72.zoom = 1.0f;
         c72.page.width_pt = 400.0f;
         c72.page.height_pt = 300.0f;
-        c72.page.margin_pt = 20.0f;
+        c72.page.margins = PageMargins::all(20.0f);
 
         EditorEngine e;
         expectTrue(e.init({cjkPath, mnPath, latinPath}), "引擎初始化（跨页表格）");
@@ -12544,7 +12561,7 @@ int main() {
             c2.zoom = 1.0f;
             c2.page.width_pt = 400.0f;
             c2.page.height_pt = 300.0f;
-            c2.page.margin_pt = 20.0f;
+            c2.page.margins = PageMargins::all(20.0f);
             c2.continuous = true;
             c2.page_gap_pt = 20.0f;
             e2.setConfig(c2);
@@ -12646,7 +12663,7 @@ int main() {
         c73.zoom = 1.0f;
         c73.page.width_pt = 420.0f;
         c73.page.height_pt = 330.0f;
-        c73.page.margin_pt = 20.0f;
+        c73.page.margins = PageMargins::all(20.0f);
 
         // 数一个矩形里的墨（页位图，只数深色像素）。坐标是页内设备像素。
         auto inkIn = [](const EditorEngine& eng, int page, int x0, int y0, int x1, int y1) {
@@ -12834,7 +12851,7 @@ int main() {
         c74.zoom = 1.0f;
         c74.page.width_pt = 400.0f;
         c74.page.height_pt = 300.0f;
-        c74.page.margin_pt = 20.0f;
+        c74.page.margins = PageMargins::all(20.0f);
 
         EditorEngine e;
         expectTrue(e.init({cjkPath, mnPath, latinPath}), "引擎初始化（跨页拖选）");
@@ -12920,7 +12937,7 @@ int main() {
         c75.zoom = 1.0f;
         c75.page.width_pt = 400.0f;
         c75.page.height_pt = 300.0f;
-        c75.page.margin_pt = 20.0f;
+        c75.page.margins = PageMargins::all(20.0f);
 
         EditorEngine e;
         expectTrue(e.init({cjkPath, mnPath, latinPath}), "引擎初始化（裁剪标记）");
@@ -12952,8 +12969,8 @@ int main() {
         // 四角的取样：只取页边距那一侧的两条臂（各 len 磅长）。窗口不能伸进正文 ——
         //   第一个字就贴在内容框的左上角上，伸进去会把字算成标记。
         auto cornerInk = [&](const EditorEngine& eng) {
-            const int m = static_cast<int>(c75.page.margin_pt);
-            const int len = 12;  // kMarginMarkPt = 12 磅，本节的缩放是 1
+            const int m = static_cast<int>(c75.page.margins.top);
+            const int len = 18;  // kMarginMarkPt = 18 磅，本节的缩放是 1
             const int x1 = eng.pagePxWidth() - m;
             const int y1 = eng.pagePxHeight() - m;
             auto h = [&](int x, int y, int w) { return inkIn(eng, 0, x, y, x + w, y + 1); };
@@ -12964,28 +12981,17 @@ int main() {
                                       h(x1, y1, len + 1) + v(x1, y1, len + 1)};
         };
         {
-            const auto off = cornerInk(e);
-            expectTrue(off[0] == 0 && off[1] == 0 && off[2] == 0 && off[3] == 0,
-                       "默认不画：四角干净（实际 " + std::to_string(off[0]) + "/" +
-                           std::to_string(off[1]) + "/" + std::to_string(off[2]) + "/" +
-                           std::to_string(off[3]) + "）");
-        }
-        {
-            EngineConfig on = c75;
-            on.show_margin_marks = true;
-            e.setConfig(on);
-            e.repaint();
+            // 默认打开：四角有墨，边的中段没有（标的是四个角，不是整个框）。
             const auto ink = cornerInk(e);
-            const bool all = ink[0] > 0 && ink[1] > 0 && ink[2] > 0 && ink[3] > 0;
-            expectTrue(all, "★ 打开之后四个角都有墨（实际 " + std::to_string(ink[0]) + "/" +
-                                std::to_string(ink[1]) + "/" + std::to_string(ink[2]) + "/" +
-                                std::to_string(ink[3]) + "）");
-            // 不是画框：四条边的中段与页框附近都该干净。
+            expectTrue(ink[0] > 0 && ink[1] > 0 && ink[2] > 0 && ink[3] > 0,
+                       "★ 默认打开：四个角都有墨（实际 " + std::to_string(ink[0]) + "/" +
+                           std::to_string(ink[1]) + "/" + std::to_string(ink[2]) + "/" +
+                           std::to_string(ink[3]) + "）");
             const int w = e.pagePxWidth();
             const int h = e.pagePxHeight();
             const int mid_x = w / 2;
             const int mid_y = h / 2;
-            const int m = static_cast<int>(c75.page.margin_pt);
+            const int m = static_cast<int>(c75.page.margins.top);
             const int edge = inkIn(e, 0, mid_x - 8, m - 2, mid_x + 8, m + 8) +
                              inkIn(e, 0, mid_x - 8, h - m - 8, mid_x + 8, h - m + 2) +
                              inkIn(e, 0, m - 2, mid_y - 8, m + 8, mid_y + 8) +
@@ -12997,11 +13003,22 @@ int main() {
         }
         {
             // 关掉：签名一变，同一份缓存就不能再贴 —— 墨必须消失。
-            e.setConfig(c75);
+            EngineConfig off_cfg = c75;
+            off_cfg.show_margin_marks = false;
+            e.setConfig(off_cfg);
             e.repaint();
             const auto off = cornerInk(e);
             expectTrue(off[0] == 0 && off[1] == 0 && off[2] == 0 && off[3] == 0,
-                       "★ 再关掉，四角的墨消失（缓存按光栅签名作废）");
+                       "★ 关掉之后四角的墨消失（缓存按光栅签名作废）（实际 " +
+                           std::to_string(off[0]) + "/" + std::to_string(off[1]) + "/" +
+                           std::to_string(off[2]) + "/" + std::to_string(off[3]) + "）");
+        }
+        {
+            // 再打开：墨回来（同上，仍然是签名在管缓存）。
+            e.setConfig(c75);
+            e.repaint();
+            const auto on = cornerInk(e);
+            expectTrue(on[0] > 0 && on[1] > 0 && on[2] > 0 && on[3] > 0, "★ 再打开，四角的墨回来");
         }
         {
             // 连页下不画：那里没有页，四角没有意义。这一条用差分判 —— 正文与段落标记就画在

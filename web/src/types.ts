@@ -172,6 +172,108 @@ export interface SelectionStyle {
 }
 
 /**
+ * 纸张规格。固定规格只列这几档，另一档是 'Custom'（宽高由调用方给，见 PageSetup.custom）——
+ * 引擎只认页宽页高，规格名与这张表都只是宿主的书写便利。
+ */
+export type PaperSize = 'A4' | 'A3' | 'A5' | 'B5' | 'Letter' | 'Legal' | 'Custom';
+
+/**
+ * 固定纸张的宽高（磅）。表里是纵向（长边朝上），横排由 paperSizePt 对调。
+ * 'Custom' 不在这张表里：它的尺寸来自调用方。
+ */
+export const PAPER_PT: Record<Exclude<PaperSize, 'Custom'>, { w: number; h: number }> = {
+  A4: { w: 595.276, h: 841.89 },
+  A3: { w: 841.89, h: 1190.551 },
+  A5: { w: 419.528, h: 595.276 },
+  B5: { w: 498.898, h: 708.661 },
+  Letter: { w: 612, h: 792 },
+  Legal: { w: 612, h: 1008 },
+};
+
+/**
+ * 自定义纸张的宽高（磅）。它是"纵向"的口径：横排仍然由 paperSizePt 对调。
+ */
+export interface CustomPaper {
+  /**
+   * 页宽。
+   */
+  w: number;
+
+  /**
+   * 页高。
+   */
+  h: number;
+}
+
+/**
+ * 按规格与方向算页宽页高。'Custom' 用 custom 给的宽高（缺了按 A4 算）。
+ * @param paper 纸张规格
+ * @param landscape true = 横排（宽高对调）
+ * @param custom 'Custom' 的宽高（磅，纵向口径）
+ * @returns 页宽与页高（磅）
+ */
+export function paperSizePt(
+  paper: PaperSize,
+  landscape: boolean,
+  custom?: CustomPaper,
+): { w: number; h: number } {
+  const p: { w: number; h: number } =
+    paper === 'Custom' ? (custom ?? PAPER_PT.A4) : (PAPER_PT[paper] ?? PAPER_PT.A4);
+  return landscape ? { w: p.h, h: p.w } : { w: p.w, h: p.h };
+}
+
+/**
+ * 四边页边距（磅）。
+ */
+export interface PageMargins {
+  /**
+   * 上边距。
+   */
+  top: number;
+
+  /**
+   * 右边距。
+   */
+  right: number;
+
+  /**
+   * 下边距。
+   */
+  bottom: number;
+
+  /**
+   * 左边距。
+   */
+  left: number;
+}
+
+/**
+ * 页面设置：纸张、方向、四边页边距。改它要整篇重排（断行宽度变了）。
+ */
+export interface PageSetup {
+  /**
+   * 纸张规格。'Custom' 时宽高由 custom 给。
+   */
+  paper: PaperSize;
+
+  /**
+   * 横排（宽高对调）。
+   */
+  landscape: boolean;
+
+  /**
+   * 自定义纸张的宽高（磅，纵向口径）。paper 为 'Custom' 时必填：缺了或不是正数就抛 TypeError。
+   * 换成固定规格之后它仍留着 —— 再切回 'Custom' 不用重新输一遍。
+   */
+  custom?: CustomPaper;
+
+  /**
+   * 四边页边距（磅）。1 厘米 = 28.35 磅。
+   */
+  margins: PageMargins;
+}
+
+/**
  * 运行期可改的配置。每项带一个代价标签（none / paint / relayout / reload，见设计文档 §7.3）；
  * 一次 configure 只做其中最贵的那一档 —— configure({zoom, showControlDots}) 是一次重排，
  * 不是"一次重排又一次重绘"。
@@ -186,6 +288,11 @@ export interface EditorConfig {
    * 分页 / 连页。连页时页间隙为 0，排版不在页底断行。
    */
   pageMode: 'paged' | 'continuous';
+
+  /**
+   * 页面设置：纸张、方向、四边页边距。改它整篇重排 —— 断行的可用宽度就是它算出来的。
+   */
+  page: PageSetup;
 
   /**
    * 编辑模式。三档都是产品语义，不是探针口径：
@@ -222,8 +329,9 @@ export interface EditorConfig {
 
   /**
    * 页边距裁剪标记：正文四角的短角线（与文字处理软件里的"显示裁剪标记"同一件事）。
-   * 默认关闭。它是页位图上的一层辅助线，不占宽度、不进流位置 —— 只重光栅，不重排；
-   * 连页模式下没有页，四角也就没有意义，引擎不画。
+   * 默认打开：它是判断"页边距设对了没有"的直接读数。臂长固定 18 磅（1/4 英寸，印刷裁切线
+   * 的惯例），边距比它窄时按边距的一半收。它是页位图上的一层辅助线，不占宽度、不进流位置
+   * —— 只重光栅，不重排；连页模式下没有页，四角也就没有意义，引擎不画。
    */
   marginMarks: boolean;
 

@@ -25,6 +25,62 @@
 
 namespace heditor {
 
+/**
+ * 四边页边距（磅）。四个方向分开给：文字处理软件的页面设置里它们本来就是四个独立的值，
+ * "四边相等"只是其中最省事的一档。
+ */
+struct PageMargins {
+    /**
+     * 上边距。
+     */
+    float top = 56.7f;
+
+    /**
+     * 右边距。
+     */
+    float right = 56.7f;
+
+    /**
+     * 下边距。
+     */
+    float bottom = 56.7f;
+
+    /**
+     * 左边距。
+     */
+    float left = 56.7f;
+
+    /**
+     * 四边取同一个值。
+     * @param pt 边距（磅）
+     * @return 四边相等的边距
+     */
+    static PageMargins all(float pt) {
+        PageMargins m;
+        m.top = pt;
+        m.right = pt;
+        m.bottom = pt;
+        m.left = pt;
+        return m;
+    }
+
+    /**
+     * 精确相等。
+     * @param o 另一份
+     * @return true = 四边都相同
+     */
+    bool operator==(const PageMargins& o) const {
+        return top == o.top && right == o.right && bottom == o.bottom && left == o.left;
+    }
+
+    /**
+     * 不等 = 精确相等取反。
+     * @param o 另一份
+     * @return true = 至少一边不同
+     */
+    bool operator!=(const PageMargins& o) const { return !(*this == o); }
+};
+
 struct PageMetrics {
     /**
      * 页宽（磅）。含左右页边距，正文可用宽度见 contentWidthPt()。
@@ -39,7 +95,7 @@ struct PageMetrics {
     /**
      * 四边页边距（磅）。默认 2cm。
      */
-    float margin_pt = 56.7f;
+    PageMargins margins{};
 
     /**
      * 连页（不分页）：排版不在页底断开，内容一列连到底。
@@ -58,12 +114,12 @@ struct PageMetrics {
 
     /**
      * A4 页度量。
-     * @param margin_pt_ 四边页边距（磅）
+     * @param margin_pt_ 四边页边距（磅），四边相等
      * @return 页宽页高取 A4、边距取给定值的度量
      */
     static PageMetrics A4(float margin_pt_ = 56.7f) {
         PageMetrics p;
-        p.margin_pt = margin_pt_;
+        p.margins = PageMargins::all(margin_pt_);
         return p;
     }
 
@@ -71,13 +127,13 @@ struct PageMetrics {
      * 正文可用宽度（页宽减两侧边距）。断行的可用范围就是它。
      * @return 可用宽度（磅）
      */
-    float contentWidthPt() const { return width_pt - 2.0f * margin_pt; }
+    float contentWidthPt() const { return width_pt - margins.left - margins.right; }
 
     /**
      * 正文可用高度（页高减上下边距）。
      * @return 可用高度（磅）
      */
-    float contentHeightPt() const { return height_pt - 2.0f * margin_pt; }
+    float contentHeightPt() const { return height_pt - margins.top - margins.bottom; }
 
     /**
      * 连页下的条带高度：给 0 或负值时退回页高（永远不能返回 0，它是除数）。
@@ -92,7 +148,7 @@ struct PageMetrics {
      *   切模式不会重排，画面上就是"分页的排版 + 连页的落点"。
      */
     bool operator==(const PageMetrics& o) const {
-        return width_pt == o.width_pt && height_pt == o.height_pt && margin_pt == o.margin_pt &&
+        return width_pt == o.width_pt && height_pt == o.height_pt && margins == o.margins &&
                continuous == o.continuous && slab_pt == o.slab_pt;
     }
 
@@ -1318,7 +1374,7 @@ struct ReflowState {
  * 整篇排版的起始状态（第 0 段之前）。
  */
 inline ReflowState freshReflowState(const PageMetrics& page) {
-    return ReflowState{0, page.margin_pt, 0};
+    return ReflowState{0, page.margins.top, 0};
 }
 
 /**

@@ -252,7 +252,7 @@ setText(text: string, opts?: { repeat?: number }): Promise<void>   // 明确用�
 | 类别 | 项 | 为什么 |
 | --- | --- | --- |
 | 构造期固定 | `container` `assets` `fonts` | 换容器要重建 DOM；换 Worker 壳要重建引擎；字体装一次最贵 |
-| 运行期可改 | `zoom` `pageMode` `mode` `input` `showBrackets` `showControlDots` `showMarks` `marginMarks` `undoLimit` `caretStyle` `selectionStyle` | 有明确语义，代价可分级 |
+| 运行期可改 | `zoom` `pageMode` `page` `mode` `input` `showBrackets` `showControlDots` `showMarks` `marginMarks` `undoLimit` `caretStyle` `selectionStyle` | 有明确语义，代价可分级 |
 | 只读 | `pages` `geometry` `caret` `selection` | 从引擎状态推出来 |
 
 ### 7.2 一个入口，不是 14 个 setter
@@ -274,10 +274,12 @@ const c = editor.config();     // 生效后的值（越界已夹取）
 | `none` | `undoLimit` |
 | `paint` | `mode` `input` `showControlDots` `showMarks` `marginMarks` `caretStyle` `selectionStyle` |
 
-`mode` 是三档而不是 `readOnly: boolean`：`document` / `form` / `readOnly`。表单模式（光标自由、
-只有可编辑控件里的字改得动）是填表这个场景的主路径，布尔值表达不了它。三档都要落到引擎
+`mode` 是三档而不是 `readOnly: boolean`：`document` / `form` / `readOnly`。表单模式（光标只在
+可编辑控件里，只有那些字改得动）是填表这个场景的主路径，布尔值表达不了它。三档都要落到引擎
 （`setEditMode 0/1/2`）—— 宿主侧那道拦截只保护库自己的方法，键盘走输入层，绕得过去（实测过）。
-| `relayout` | `zoom` `pageMode` `showBrackets` |
+三档的落点口径：选区（拖选、Shift 扩展、全选）三种模式都自由；插入点只出现在能打字的地方
+—— 表单模式限于可编辑控件的内容，只读模式一个都不出现。
+| `relayout` | `zoom` `pageMode` `page` `showBrackets` |
 | `reload` | `fonts`（构造期） |
 
 ### 7.4 规范化与错误
@@ -305,12 +307,41 @@ const c = editor.config();     // 生效后的值（越界已夹取）
 
 ### 7.6 页边距裁剪标记
 
-`marginMarks`：正文可用区四角的短角线（与文字处理软件里的"显示裁剪标记"同一件事），默认关闭。
-标的是页边距的内沿，不是页框 —— 它回答"这一页能写到哪里"。连页下不画：那里没有页。
+`marginMarks`：正文可用区四角的短角线（与文字处理软件里的"显示裁剪标记"同一件事），默认打开
+—— 它是"页边距设对了没有"的直接读数。标的是页边距的内沿，不是页框 —— 它回答"这一页能写到哪里"。
+臂长固定 18 磅（1/4 英寸，印刷裁切线的惯例）：它是物理尺寸，不跟字号、页边距、缩放走；
+边距比它窄时按边距的一半收，免得越进正文。连页下不画：那里没有页。
 
 与 `showMarks` 同一条成本标签（`paint`）：画进页位图、不占宽度、不进流位置，所以只重光栅。
 颜色与页框分开一项（`EngineConfig::margin_mark_color`，比页框浅一档）：它是辅助线，
 不该比正文与页框更显眼。
+
+---
+
+### 7.7 页面设置
+
+```ts
+await editor.configure({
+  page: { paper: 'A3', landscape: true, margins: { top: 72, right: 72, bottom: 72, left: 72 } },
+});
+// 自定义宽高：'Custom' 时 custom 必填（磅，纵向口径；横排由 paperSizePt 对调）
+await editor.configure({
+  page: { paper: 'Custom', custom: { w: 566.93, h: 850.39 }, margins: { top: 56.7, right: 56.7, bottom: 56.7, left: 56.7 } },
+});
+```
+
+`page` 是 `{ paper, landscape, custom?, margins }`：纸张列 A4 / A3 / A5 / B5 / Letter / Legal
+六档固定规格（`PAPER_PT` 表，磅）外加 `'Custom'`，方向是布尔，四边页边距分开给（磅，
+1 厘米 = 28.35 磅）。自定义宽高限 36 ~ 5000 磅：再小放不下一行字，再大只是把排版撑爆。
+`custom` 在换成固定规格之后仍然留着，再切回 `'Custom'` 不用重新输。代价标签是
+`relayout`：断行的可用宽度就是它算出来的，改一次整篇重排。
+
+为什么纸张规格不进引擎：规格只是"一组宽高"，抄进引擎就是第二个真相。库按表算出宽高，
+再以 `pageSetup` 命令下发六个浮点数（页宽、页高、上右下左边距）。引擎只认这六个数，
+宿主也可以绕开规格名直接给宽高（`configure` 里 `paper` 仍要填，它是这条配置的身份）。
+
+四边边距各有上限（"一半再减 1 磅"）：再大就不给正文留地方了，`contentWidthPt` 会变成 0，
+断行的可用范围为零。越界按上限收，返回值里是收过的那一份。
 
 ---
 

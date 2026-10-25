@@ -201,12 +201,15 @@ public:
     /**
      * 退格：删光标左边一个字簇。段首时退成合并前一段（见 mergeWithPreviousParagraph）。
      *
+     * 表单模式只删光标所在控件的内容（见 eraseInControl）：控件与它的括号不参与删除，
+     * 光标也不会被带出字段。
+     *
      * @return true = 删了
      */
     bool backspace();
 
     /**
-     * 前删：删光标右边一个字簇。段末时退成合并后一段。
+     * 前删：删光标右边一个字簇。段末时退成合并后一段。表单模式的边界同 backspace。
      *
      * @return true = 删了
      */
@@ -565,20 +568,33 @@ private:
     };
 
     /**
-     * 表单模式的安全阀：一份"一个可编辑控件都没有"的文档退化为文档模式，而不是什么都不让改。
+     * 表单模式的退格 / 前删：只在光标所在控件的内容里动，一格也不越过控件边界。
      *
-     * 理由：一个还没配字段的文档切到表单模式，用户期望的是"跟平时一样"，而不是突然一个字都
-     *   打不进去 —— 后者会被当成功能坏了，没人会想到是策略在生效。它是个刻意的安全阀，不是
-     *   遗漏；将来若要做"严格表单"，应该另加一个 EditMode，不要改这里。
+     * 与文档模式那套括号规则的分工是模式级的：文档模式要能删空字段、能按括号一层层进出，
+     * 填表时这两件事都是事故（删掉控件、把光标带出字段）。
      *
-     * 判据只看导出后的控件集合（隐藏控件在呈现态本就不在里面），有一个非只读的就为真。
+     * @param left true = 退格（删左边），false = 前删（删右边）
+     * @return true = 删了
      */
-    bool formDegraded() const;
+    bool eraseInControl(bool left);
 
     /**
-     * 导出后的控件集合里有没有可编辑的那一个。formDegraded 用它。
+     * 表单模式：删除区间 [from, to) 必须落在光标所在的那个控件里。
+     *
+     * @param from 区间起点（含）
+     * @param to   区间终点（不含）
+     * @return true = 区间在光标所在控件的内容里
      */
-    bool hasEditableControl() const;
+    bool eraseInsideCaretControl(FlowPos from, FlowPos to) const;
+
+    /**
+     * 选区是不是整个落在同一个控件的内容里（表单模式的选区删除判据）。
+     *
+     * @param from 区间起点（含）
+     * @param to   区间终点（不含）
+     * @return true = 区间没有碰到任何一枚控件括号
+     */
+    bool rangeWithinOneControl(FlowPos from, FlowPos to) const;
 
     /**
      * 控件的流区间。不在流里（隐藏、摘除）返回 false。
@@ -603,7 +619,7 @@ private:
     int controlStartingAt(FlowPos p) const;
 
     /**
-     * 退格贴着控件括号时的四种情形（从左到右的书写方向）。
+     * 退格贴着控件括号时的四种情形（从左到右的书写方向）。只用于文档模式。
      *
      * 光标在闭括号右面：控件有内容 ⇒ 光标进控件（落到内容末尾），再删掉左边那一项；空 ⇒ 删控件。
      * 光标在开括号右面：控件有内容 ⇒ 光标退到开括号左面，一个字都不删；空 ⇒ 删控件

@@ -1070,12 +1070,10 @@ test.describe('编辑面', () => {
                     ? '' : '  ← 光标跑到 `]` 右边去了'));
       }
 
-    //  方向键一次一格：光标位置不受控件约束，所以能走出字段、也能跨过只读字段。
-    //  约束编辑的是编辑能力表（插 / 删），不是光标 —— 两者混起来会得到
-    //  "字段外的正文连点都点不进去"这类与编辑边界无关的怪现象。
+    //  方向键一次一格，但只在可编辑内容里走：表单模式的插入点不进括号之间的空档、
+    //  也不进正文（选区才自由）。走到内容两端就停住，换字段用 Tab。
     //
-    //  判据是逐步的：一次只跨一枚簇（括号占位也算一格），到文档末尾就停住。
-    //    只看终点抓不到"投影式移动"：投影也能给出一个看着合法的终点。
+    //  判据是逐步的：一次只跨一枚簇，到内容末尾就停住 —— 只看终点抓不到"投影式移动"。
     {
       await probe.read('return await LOAD.form(0);');
       await probe.read('return await D.stopBlink();');
@@ -1083,11 +1081,11 @@ test.describe('编辑面', () => {
 
       await probe.read(key('ArrowLeft'));                          //  真实键盘
       const afterLeft = await probe.read('return CARET();');
-      check('★ 在 #2 起点按左方向键：先退到 [ 之前（括号占一格，不瞬移）',
-                afterLeft.offset === 12 && afterLeft.side === 0,
-                `12 → ${afterLeft.offset}/${afterLeft.side}`);
+      check('★ 在 #2 内容起点按左方向键：不退出字段（括号之间那一格不可插入）',
+                afterLeft.offset === 12 && afterLeft.side === 1,
+                `12/1 → ${afterLeft.offset}/${afterLeft.side}`);
 
-      // 右走 6 步：13 14 15 16 16(跨 ]) 17（到文档末尾就停住），单步跨度恒为 1
+      // 右走 6 步：13 14 15 16（到内容末尾就停住），单步跨度恒为 1
       await probe.read('return await H.setCaret({ para: 0, offset: 12 });');
       const seq = [];
       for (let i = 0; i < 6; ++i) {
@@ -1097,8 +1095,8 @@ test.describe('编辑面', () => {
       let worst = 0;
       let prev = 12;
       for (const o of seq) { worst = Math.max(worst, o - prev); prev = o; }
-      check('★ 从 #2 起点右走 6 步：一次一格，到文档末尾就停住',
-                seq.join(',') === '13,14,15,16,16,17',
+      check('★ 从 #2 起点右走 6 步：一次一格，到内容末尾就停住',
+                seq.join(',') === '13,14,15,16,16,16',
                 `12 → ${seq.join(' → ')}`);
       check(' 单步跨度恒为 1（没有任何一步瞬移）',
                 worst === 1, `最大单步跨度 ${worst}`);
@@ -1315,6 +1313,9 @@ test.describe('编辑面', () => {
     //   段数不写死：那张文书是演示数据，随时可能被调大调小，而这一节要钉的是
     //   "重排了几段、复用了几段"这个结构，不是那个数本身。
     const DIRTY = 150;
+    // 前面几节装过表单样例，模式停在表单：这一份长文档没有控件，表单模式下打不进字。
+    //   这一节量的是增量排版的账，先回编辑模式。
+    await probe.read('return await SET_MODE(0);');
     const base = await probe.read('return await LOAD.scenario(7, 1.0);');
     check('长文档载入（段数 ≥ 200）', base.totalParagraphs >= 200,
               `${base.totalParagraphs} 段 / ${base.totalLines} 行`);
@@ -1729,8 +1730,8 @@ test.describe('编辑面', () => {
       walk.push(`${a.o}/${a.s}`);
     }
     state.chain3.walk = walk;
-    check('★ 方向键一次一格（括号占格：][][] 上要按好几下才过去）',
-              JSON.stringify(walk) === JSON.stringify(['6/0', '7/0', '7/1', '7/2', '7/3']),
+    check('★ 方向键一次一格，走到字段内容末尾就停住（不跨过 ][）',
+              JSON.stringify(walk) === JSON.stringify(['6/0', '7/0', '7/0', '7/0', '7/0']),
               `落点 ${walk.join(' ')}`);
     // 回到那个零宽字段的位置上：打字应该进它自己，左右两个字段不许被撑大
     await probe.read('return await H.setCaret({ para: 0, offset: 7 });');
@@ -1957,22 +1958,13 @@ test.describe('编辑面', () => {
       const a = await caretOf();
       check('★ 真实鼠标点 ] → 光标停在 9 且归前一个字段', a.o === 9 && a.f === 0,
                 `offset ${a.o} 归属 ${a.f}`);
+      // 点只读字段的开括号内侧：插入点进不去只读区（选区才进得去），光标留在前一个字段。
       await clickOpenInner(g, z, y, 9, 1);
       const b = await caretOf();
-      check('★ 真实鼠标点 [ → 同一个偏移 9，归属换成后一个字段（这就是点得进去）',
-                b.o === 9 && b.f === 1, `offset ${b.o} 归属 ${b.f}`);
+      check('★ 真实鼠标点只读字段的 [ → 光标不进只读区（留在前一个字段的位置上）',
+                b.o === 9 && b.f === 0, `offset ${b.o} 归属 ${b.f}`);
 
-      // 只读字段里打字必须被拒，而且要记账
-      const blk0 = await probe.read('return D.blockedEdits();');
-      await probe.read(key('痛'));
-      const blk1 = await probe.read('return D.blockedEdits();');
-      const it0 = await items();
-      check('★ 在只读字段里打字被拒，且记了账',
-                blk1 === blk0 + 1 && JSON.stringify(it0[1]) === '[9,11]',
-                `blocked ${blk0}→${blk1} ｜ #1 ${JSON.stringify(it0[1])}`);
-
-      // 点前一个字段的闭括号再打字：字进前一个字段
-      await clickPt(g, s9[0].x + pitch * 0.5, y, z);
+      // 于是这一下敲字进的是光标所在的那个字段 —— 只读区的拒绝在引擎判据里单独钉着。
       await probe.read(key('痛'));
       const it1 = await items();
       check('★ 点 ] 之后真实按键 → 字进前一个字段，后一个整体右移',
@@ -2024,8 +2016,10 @@ test.describe('编辑面', () => {
         const a = await caretOf();
         walk.push(`${a.o}/${a.s}`);
       }
-      check('★ 真实方向键一次一格（括号占格：][ 边界要按两下）',
-                JSON.stringify(walk) === JSON.stringify(['6/0', '7/0', '8/0', '8/1', '8/2', '9/0']),
+      // #0 已经被前面那两笔墨迹撑成 [5,8)：一路右走停在 8/0（内容末尾），不出括号。
+      check('★ 真实方向键一次一格，停在 #0 的内容末尾（不跨过 ][）',
+                JSON.stringify(walk) ===
+                  JSON.stringify(['6/0', '7/0', '8/0', '8/0', '8/0', '8/0']),
                 `落点 ${walk.join(' ')}`);
       await probe.read('return await H.setCaret({ para: 0, offset: 12 });');
       const back = [];
@@ -2034,8 +2028,8 @@ test.describe('编辑面', () => {
         const a = await caretOf();
         back.push(`${a.o}/${a.s}`);
       }
-      check('★ 反向同样一次一格（12/0 → 11/0 → 10/2 10/1 10/0）',
-                JSON.stringify(back) === JSON.stringify(['11/0', '10/2', '10/1', '10/0']),
+      check('★ 反向同样一次一格，停在最后一个字段的内容起点',
+                JSON.stringify(back) === JSON.stringify(['11/0', '10/2', '10/2', '10/2']),
                 `落点 ${back.join(' ')}`);
 
       // 归属随位置换人（重新载入样例，让偏移回到干净的三连区间）
@@ -2046,9 +2040,10 @@ test.describe('编辑面', () => {
       const mid = await caretOf();
       await probe.read(key('ArrowRight'));
       const inB = await caretOf();
-      check('★ 跨过共享边界归属依次换人（#0 → 括号之间 → #1）',
-                f7 === 0 && mid.s === 1 && inB.o === 7 && inB.f === 1,
-                `7→${f7} ｜ 中间 ${mid.o}/${mid.s}→归 ${mid.f} ｜ 再一步→${inB.o}/${inB.f}`);
+      check('★ 方向键停在共享边界上（不跨过去，归属也不换人）',
+                f7 === 0 && mid.o === 7 && mid.s === 0 && mid.f === 0 && inB.o === 7 &&
+                  inB.f === 0,
+                `7→${f7} ｜ 右一步 ${mid.o}/${mid.s}→归 ${mid.f} ｜ 再一步→${inB.o}/${inB.f}`);
 
       // Home / End 是行首行尾，不是字段首尾
       const ncp = await probe.read('return CARET().docCodepoints;');
@@ -2057,7 +2052,7 @@ test.describe('编辑面', () => {
       const h = (await caretOf()).o;
       await probe.read(key('End'));
       const e2 = (await caretOf()).o;
-      check('★ 真实 Home/End 到行首行尾（不是字段首尾）', h === 0 && e2 === ncp,
+      check('★ 真实 Home/End 收到字段内容的首尾（行首行尾在字段外）', h === 7 && e2 === 9,
                 `Home→${h} End→${e2}（文档 ${ncp} 个码点）`);
     }
 
@@ -2391,8 +2386,8 @@ test.describe('编辑面', () => {
       await probe.read(key('ArrowLeft'));
       const a1 = await caretOf();
       const x0 = (await probe.read('return CARET().x;')) / z;
-      check('★★ 反字前按左键 → 只退一格到左括号之前（不是一步跳到冒号前）',
-                a1.o === 5 && a1.s === 0 && (x1 - x0) > 2 && (x1 - x0) < 12,
+      check('★★ 反字前按左键 → 停在字段内容起点（不退出括号、也不跳到冒号前）',
+                a1.o === 5 && a1.s === 1 && Math.abs(x1 - x0) < 0.5,
                 `偏移 ${a1.o} 侧别 ${a1.s} ｜ 光标 x ${x1.toFixed(2)} → ${x0.toFixed(2)}` +
                   `（退 ${(x1 - x0).toFixed(2)} pt）`);
 
@@ -2690,17 +2685,19 @@ test.describe('编辑面', () => {
               JSON.stringify(await ids16()) + ' ｜ 侧别 ' + (await side16()));
 
     // (c) 表单模式：结构被 structureLock 锁住 —— 删字那一下照样生效，删控件那一下被拒
+    //   （光标落在 part2 的内容末尾：表单模式的光标只停在可编辑内容里，括号之间那一格
+    //   不可插入，见 docs/文档模型设计.md 第七节。）
     await load16(2);
     const b16 = await blocked16();
-    await probe.read('return await H.setCaret({ para: 0, offset: 9 }, { side: (1) > 0 ? "after" : "before" });');
+    await probe.read('return await H.setCaret({ para: 0, offset: 9 }, { side: (1) > 0 ? "before" : "after" });');
     await probe.read(key('Backspace'));
-    check('★ 表单模式：闭括号之后退格照样进 part2 删掉「悸」（删的是内容，不是结构）',
+    check('★ 表单模式：内容末尾退格删掉 part2 的「悸」（删的是内容，不是结构）',
               (await n16()) === 3 && (await text16()) === '患者主诉：反复心三天，加重一天。' &&
                 (await blocked16()) === b16,
               `${await n16()} 个字段 ｜ ${JSON.stringify(await text16())}`);
     await probe.read(key('Backspace'));
     await probe.read(key('Backspace'));
-    check('★ 空控件上那一下被结构锁拒了：控件还在、按键没被吞掉（光标退了出去）',
+    check('★ 空控件上那一下被拒：控件还在、光标没被带出括号（删除不越过控件边界）',
               (await n16()) === 3 && (await text16()) === '患者主诉：反复三天，加重一天。',
               `${await n16()} 个字段 ｜ ${JSON.stringify(await text16())}`);
     check('★ 那次被拒的结构操作记了账', (await blocked16()) === b16 + 1,

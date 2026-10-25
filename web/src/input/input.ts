@@ -130,6 +130,17 @@ export interface InputEnv {
    * @param p 那条链
    */
   onChain?(p: Maybe<any>): void;
+
+  /**
+   * 缩放编辑器（Ctrl + 滚轮 / 触控板捏合 / Ctrl + 加减号）。
+   * @param delta 缩放倍数的增量（正 = 放大）
+   */
+  zoomBy?(delta: number): void;
+
+  /**
+   * 缩放回到 100%（Ctrl + 0）。
+   */
+  zoomReset?(): void;
 }
 
 export interface InputLayer {
@@ -163,12 +174,44 @@ export interface InputLayer {
   onPointerDown(ev: MouseEvent): Maybe<any>;
 
   /**
+   * 滚轮：带 Ctrl（捏合也是）时转成编辑器缩放。
+   *
+   * 返回 true 表示这一下被接管，调用方要 preventDefault —— 不拦的话浏览器会去缩放
+   *   整个页面。判断是同步的（preventDefault 只在事件派发期间有效），缩放本身异步下发。
+   * @param ev 滚轮事件
+   * @returns true = 这一下归编辑器
+   */
+  onWheel(ev: WheelEvent): boolean;
+
+  /**
    * 按设备像素坐标落光标（自动化入口与按下共用这一条）。
    * @param pt 文档坐标（设备像素）
    */
   placeAt(pt: { x: number; y: number }): Maybe<Hit | null>;
   readonly clickState: ClickState;
   readonly composing: boolean;
+}
+
+/**
+ * 一档缩放。与示例页工具栏的加减号同一个步长，两处按下去的手感才一致。
+ */
+const kZoomStep = 0.125;
+
+/**
+ * 缩放快捷键：Ctrl + 加号 / 减号 / 0。浏览器对这三组的默认行为是缩放整个页面。
+ *
+ * 认 key 而不认 code：Ctrl + 加号在美式键盘上要按 Shift，event.key 那时才是 '+'，
+ *   不按 Shift 时是 '=' —— 两个都收；小键盘给的是 '+' / '-' / '0'，同样落在这几条上。
+ *
+ * @param ev 键盘事件
+ * @returns 缩放增量；NaN = 回到 100%；null = 不是缩放键
+ */
+function zoomKeyOf(ev: KeyboardEvent): number | null {
+  if (!(ev.ctrlKey || ev.metaKey) || ev.altKey) return null;
+  if (ev.key === '=' || ev.key === '+') return kZoomStep;
+  if (ev.key === '-' || ev.key === '_') return -kZoomStep;
+  if (ev.key === '0') return NaN;
+  return null;
 }
 
 /**
@@ -233,6 +276,15 @@ export function createInput(env: InputEnv): InputLayer {
     // 组合期间一律不动文档：输入法在组合时会持续发 keydown，每次都重排会让画面
     // 又卡又闪，这是 WASM 编辑器最容易出问题的一处。
     if (composing || ev.isComposing) return undefined;
+    // 缩放键排在命令表之前：它们不是文档命令（改的是密度，不是内容），而浏览器的
+    //   默认行为是缩放整个页面 —— 不拦的话工具栏与画布会一起放大，画布是位图，放大只是插值。
+    const zoom = zoomKeyOf(ev);
+    if (zoom !== null) {
+      ev.preventDefault();
+      if (Number.isNaN(zoom)) env.zoomReset?.();
+      else env.zoomBy?.(zoom);
+      return true;
+    }
     const op = keyToOp(ev, env.hot());
     if (!op) return undefined; // 不认识的键（含 IME 的 Process 键）放行
     ev.preventDefault();
@@ -301,12 +353,28 @@ export function createInput(env: InputEnv): InputLayer {
     return keep(chain);
   }
 
+  /**
+   * 滚轮缩放：Ctrl（或触控板捏合，浏览器同样带 ctrlKey）时接管，其余放行给宿主的滚动。
+   *
+   * 触控板捏合会给一串密集的小 deltaY，这里按符号取一档 —— 合并交给宿主：
+   *   每一下都整篇重排的话，捏合一次就会排队排几十遍。
+   */
+  function onWheel(ev: WheelEvent): boolean {
+    if (!ev.ctrlKey && !ev.metaKey) return false;
+    if (!env.isReady()) return false;
+    const dir = ev.deltaY < 0 ? 1 : ev.deltaY > 0 ? -1 : 0;
+    if (dir === 0) return true;
+    env.zoomBy?.(dir * kZoomStep);
+    return true;
+  }
+
   return {
     onKeyDown,
     onCompositionStart,
     onCompositionUpdate,
     onCompositionEnd,
     onPointerDown,
+    onWheel,
     placeAt,
     clickState: click,
     get composing(): boolean {

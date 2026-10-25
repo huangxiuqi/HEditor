@@ -6,6 +6,7 @@
 //   button     按钮
 //   choice     下拉框
 //   grid-picker 表格尺寸的网格选择器
+//   page-setup  页面设置（纸张、方向、四边页边距）
 //   menu       会开面板的按钮
 //   popover    弹层（定位与关闭时机）
 //   group      一排动作 + 组名
@@ -17,4 +18,5 @@
 //   而动作表要能在没有浏览器的地方读（它同时是"这一页能做什么"的清单）。
 export { mountChrome } from './chrome';
 export { createGridPicker } from './grid-picker';
+export { createPageSetup } from './page-setup';
 export type { Button, Choice, Chrome, Component, Group, Item, Menu, Stack, Tab } from './types';

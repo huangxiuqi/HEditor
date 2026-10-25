@@ -8,7 +8,14 @@
 // 与库的边界只有三处：createEditor 的选项、实例方法、事件。
 import { createEditor } from '../src/index';
 import type { CharFormatPatch, Editor, ParaFormatPatch } from '../src/index';
-import { createGridPicker, mountChrome, type Chrome, type Group, type Tab } from './ui';
+import {
+  createGridPicker,
+  createPageSetup,
+  mountChrome,
+  type Chrome,
+  type Group,
+  type Tab,
+} from './ui';
 
 const DEMO_TEXT = [
   'HEditor 示例文档',
@@ -425,6 +432,28 @@ function makeTabs(): Tab[] {
         },
       },
       {
+        act: 'page-setup',
+        label: '页面设置',
+        icon: 'page-setup',
+        // 纸张、方向、四边页边距：面板读一份当前的配置，按"应用"才下发（改一次要
+        //   整篇重排，边输边排会让每一次击键都卡一下）。
+        panel: (dismiss) =>
+          createPageSetup({
+            current: () => editor.config().page,
+            // 页面此刻多大只有几何知道：geometry().page 是 CSS 像素（1 英寸 = 96 像素），
+            //   引擎要的是磅 —— 差一个 72/96。
+            pageSizePt: () => {
+              const g = editor.geometry();
+              return { w: g.page.w * 0.75, h: g.page.h * 0.75 };
+            },
+            apply: (page) => {
+              // 配完重读回显：面板以外还有缩放读数要跟着变（见 configchange 那条）。
+              void editor.configure({ page }).then(() => chrome.refresh());
+            },
+            dismiss,
+          }),
+      },
+      {
         act: 'paged',
         label: '分页',
         icon: 'paged',
@@ -564,6 +593,9 @@ async function boot(): Promise<void> {
   };
   editor.on('caret', touch);
   editor.on('selection', touch);
+  // 配置变了也要刷一遍回显：Ctrl+滚轮与 Ctrl+±/0 是库内直接改缩放的，不经过这个页面的
+  //   动作表 —— 不接这一条，右下角的百分比与滑块会停在旧值上。
+  editor.on('configchange', () => chrome.refresh());
   editor.on('change', () => {
     const n = ++window.__demoState!.changes;
     dirty = true;

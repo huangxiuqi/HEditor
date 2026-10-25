@@ -179,6 +179,20 @@ export interface DomHostOptions {
    *   自己记只会得到一串恒零，而"按脏矩形贴"的判据正是靠这个计数器。
    */
   blitStats(): { ms: number; pages: number; px: number };
+
+  /**
+   * 滚轮要缩放编辑器（Ctrl + 滚轮，或触控板捏合）。
+   *
+   * 不传就完全放行：浏览器会去缩放整个页面，而编辑器的字号、页度量都不动 ——
+   *   那是宿主自己的选择，不是库能替它决定的。
+   * @param delta 缩放倍数的增量（正 = 放大）
+   */
+  onZoomBy?(delta: number): void;
+
+  /**
+   * 缩放回到 100%（Ctrl + 0）。
+   */
+  onZoomReset?(): void;
 }
 
 export interface DomHost {
@@ -890,6 +904,8 @@ export function createDomHost(o: DomHostOptions): DomHost {
     },
     status: (text, isErr) => o.status?.(text, isErr),
     preedit: (text) => showPreedit(text),
+    zoomBy: (delta) => o.onZoomBy?.(delta),
+    zoomReset: () => o.onZoomReset?.(),
   });
 
   /**
@@ -1033,6 +1049,18 @@ export function createDomHost(o: DomHostOptions): DomHost {
       );
     });
   }
+  // Ctrl + 滚轮（以及触控板捏合，浏览器同样带 ctrlKey）在页面上的默认行为是缩放整个页面。
+  //   拦下来改成缩放编辑器：整页缩放会把工具栏与画布一起放大，而画布是位图，放大之后
+  //   只剩插值糊，正文该有的清晰度反而没了。
+  //   必须是非被动监听：被动监听里 preventDefault 无效，浏览器那一下缩放拦不住。
+  scroller.addEventListener(
+    'wheel',
+    (ev) => {
+      if (input.onWheel(ev)) ev.preventDefault();
+    },
+    { passive: false },
+  );
+
   scroller.addEventListener('scroll', onScroll, { passive: true });
 
   const stopDprWatch = armDprWatch((next) => {

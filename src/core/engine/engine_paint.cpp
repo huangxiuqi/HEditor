@@ -26,9 +26,11 @@
 namespace heditor {
 
 /**
- * 裁剪标记的臂长（磅）。取 12 磅：约等于一个汉字的宽度，缩放后仍看得出是"角"。
+ * 裁剪标记的臂长（磅）。18 磅 = 1/4 英寸：印刷业的裁切标记就用这个长度，它必须是一个
+ * 与排版无关的固定物理尺寸 —— 臂长跟着字号或页边距变，同一份文档在不同页上就不成一套。
+ * 页边距小于这个长度时按边距的一半收，免得标记越进正文里。
  */
-constexpr float kMarginMarkPt = 12.0f;
+constexpr float kMarginMarkPt = 18.0f;
 
 void EditorEngine::repaint() {
     // 窗口取本次布局的页数，不能锁在"上一次画过多少页"上：文档从 N 页涨到 N+1 页时
@@ -296,12 +298,16 @@ void EditorEngine::rasterIntoBitmap(Bitmap& target, int page_index, const float*
     // 裁剪标记同理每次都补：分带重画时那一带的底色会把它擦掉，而它只由这一段代码画。
     //   八条短线（四角各两条）够便宜，不必按带筛。
     if (cfg_.show_margin_marks && !cfg_.page.continuous) {
-        const float m = cfg_.page.margin_pt * zoom;
-        const float x0 = std::round(m);
-        const float y0 = std::round(m);
-        const float x1 = std::round(static_cast<float>(page_px_w) - m);
-        const float y1 = std::round(static_cast<float>(page_px_h) - m);
-        const float len = std::round(kMarginMarkPt * zoom);
+        const PageMargins& pm = cfg_.page.margins;
+        const float x0 = std::round(pm.left * zoom);
+        const float y0 = std::round(pm.top * zoom);
+        const float x1 = std::round(static_cast<float>(page_px_w) - pm.right * zoom);
+        const float y1 = std::round(static_cast<float>(page_px_h) - pm.bottom * zoom);
+        // 臂长固定 18 磅；边距本身比它窄时按边距的一半收（标记要留在页边距里，
+        //   越进正文就变成压字的脏墨了）。
+        const float narrow = std::min(std::min(pm.left, pm.right), std::min(pm.top, pm.bottom));
+        const float arm_pt = std::min(kMarginMarkPt, narrow * 0.5f);
+        const float len = std::round(arm_pt * zoom);
         if (len >= 1.0f && x1 - x0 > 2.0f * len && y1 - y0 > 2.0f * len) {
             const Color c = cfg_.margin_mark_color;
             // 每个角两条臂，都朝页边距那一侧伸（裁切标记的老规矩：线在成品之外）。
@@ -972,7 +978,8 @@ void EditorEngine::presentInternal(int first_page, int count) {
     edit_stats_.caret_vertical = caretVertical();
     edit_stats_.caret_block_reversed = caretBlockReversed();
     edit_stats_.caret_page = caret_.caretPage();
-    edit_stats_.caret_visible = (caret_visible_ && cr.w > 0.0f);
+    // 光标只在可插入位置上现形：表单模式的控件之外、只读模式里一律不画（见 caretInsertable）。
+    edit_stats_.caret_visible = (caret_visible_ && caretInsertable() && cr.w > 0.0f);
     edit_stats_.caret_x_px = static_cast<int>(cr.x);
     edit_stats_.caret_y_px = static_cast<int>(cr.y);
     edit_stats_.caret_w_px = static_cast<int>(cr.w);
@@ -1043,7 +1050,8 @@ void EditorEngine::collectTransient(int page, PageTransient* out) const {
     for (const PageRect& pr : selectionRectsPxIn(page, 1)) out->sel.push_back(pr.r_pt);
     int cp = -1;
     const Rect cr = caretRectPx(&cp);
-    if (cp == page && caret_visible_ && cr.w > 0.0f && cr.h > 0.0f) out->caret = cr;
+    const bool draw_caret = caret_visible_ && caretInsertable();
+    if (cp == page && draw_caret && cr.w > 0.0f && cr.h > 0.0f) out->caret = cr;
 
     // 连页接缝：上一条带里越过带底的选区与光标，在本带顶部还有一半。
     //   两带各画自己那半，与内容的补画是同一条规则 —— 否则接缝上会出现
@@ -1058,7 +1066,7 @@ void EditorEngine::collectTransient(int page, PageTransient* out) const {
         const float y1 = std::min(ph, bot - slab_px);
         if (y1 > y0) out->sel.push_back(Rect{pr.r_pt.x, y0, pr.r_pt.w, y1 - y0});
     }
-    if (cp == page - 1 && caret_visible_ && cr.w > 0.0f && cr.h > 0.0f && out->caret.w <= 0.0f) {
+    if (cp == page - 1 && draw_caret && cr.w > 0.0f && cr.h > 0.0f && out->caret.w <= 0.0f) {
         const float bot = cr.y + cr.h;
         const float y0 = std::max(0.0f, cr.y - slab_px);
         const float y1 = std::min(ph, bot - slab_px);

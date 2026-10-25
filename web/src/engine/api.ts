@@ -307,6 +307,8 @@ const COMMANDS: Array<[string, string, string[], string]> = [
   ['setShowControlDots',    'w', ['setShowControlDots'],                                  'host'],  // 不重排，只改光栅签名
   ['setShowMarks',          'w', ['setShowMarks'],                                        'host'],  // 编辑标记：不重排，只改光栅签名
   ['setShowMarginMarks',    'w', ['setShowMarginMarks'],                                  'host'],  // 裁剪标记：同上
+  ['pageSetup',             'w', ['setPageMetrics'],                                      'host'],  // 纸张与四边页边距：整篇重排
+
   ['caretStyle',            'w', ['caretStyleJson', 'setCaretStyle'],                     'host'],
   ['selectionStyle',        'w', ['selectionStyleJson', 'setSelectionStyle'],             'host'],
   ['setUndoLimit',          'w', ['setUndoLimit'],                                        'none'],
@@ -405,7 +407,6 @@ const OUTSIDE: Array<[string, string, string]> = [
   ['allocBuffer',      'glue',  '字体的字节从 JS 搬进 wasm 堆'],
   ['freeBuffer',       'glue',  '同上'],
   ['relayoutAndPaint', 'host',  '整篇重排重画：paintFull 与 relayout 用它换文档、换缩放、换页度量'],
-  ['setPageMetrics',   'host',  '页度量只在装载时定一次（app.js 与 boot），没有运行期入口'],
   ['setPageGap',       'host',  '页间隙：由 api.setViewMode 与连页标志一起设'],
   ['setContinuous',    'host',  '连页标志：同上（改的是排版形状，不是一份配置）'],
   ['contentPx',        'state', 'geom() 报的内容底边（连页拿它当滚动高度）'],
@@ -907,7 +908,8 @@ async function boot(m: any) {
   });
   try {
     // 页度量要先设再装载：它会让整篇重排，排在装载之前只会排这一次。
-    mod.setPageMetrics(kPageWidthPt, kPageHeightPt, kPageMarginPt);
+    mod.setPageMetrics(kPageWidthPt, kPageHeightPt, kPageMarginPt, kPageMarginPt, kPageMarginPt,
+                       kPageMarginPt);
     // 缩放也要先设：loadScenario 收 zoom 参数，而 empty 那条路不走它 —— 漏设就会
     //   按 EngineConfig 的默认密度排（1.5 倍），页面比请求的大一整档。
     if (m.zoom) {
@@ -1065,6 +1067,18 @@ const WRITE = collect('w', {
   setShowControlDots: (a) => mod.setShowControlDots(!!a.on),
   setShowMarks: (a) => mod.setShowMarks(a.mode | 0),
   setShowMarginMarks: (a) => mod.setShowMarginMarks(!!a.on),
+  /**
+   * 页面设置：页宽、页高、四边页边距（磅）。引擎只认这四个数，纸张规格由宿主按表算宽高。
+   */
+  pageSetup: (a) =>
+    mod.setPageMetrics(
+      Number(a.w) || 595.276,
+      Number(a.h) || 841.89,
+      Number(a.top) || 0,
+      Number(a.right) || 0,
+      Number(a.bottom) || 0,
+      Number(a.left) || 0,
+    ),
   /**
    * 光标与选区的样式。缺的字段按现状补 —— 与单线程宿主门面同一套补全规则，
    *   两处不能各写一套（面板只改颜色时，宽度必须原样保留）。

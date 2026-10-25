@@ -145,7 +145,10 @@ static uint64_t rasterSignature(const EngineConfig& cfg, bool marks_shown) {
     h = fnvMixFloat(h, cfg.zoom);
     h = fnvMixFloat(h, cfg.page.width_pt);
     h = fnvMixFloat(h, cfg.page.height_pt);
-    h = fnvMixFloat(h, cfg.page.margin_pt);
+    h = fnvMixFloat(h, cfg.page.margins.top);
+    h = fnvMixFloat(h, cfg.page.margins.right);
+    h = fnvMixFloat(h, cfg.page.margins.bottom);
+    h = fnvMixFloat(h, cfg.page.margins.left);
     h = fnvMixFloat(h, cfg.page.slab_pt);
     h = fnvMix(h, cfg.page.continuous ? 1ULL : 0ULL);
     h = fnvMixColor(h, cfg.page_fill);
@@ -1055,10 +1058,11 @@ void EditorEngine::setCaret(int para, size_t offset) {
  * 宿主把 hitTestPt 给的侧别原样带回来，这里与偏移合成 rel（唯一真源）。
  */
 void EditorEngine::setCaretAtSide(int para, size_t offset, int side) {
-    // 光标位置不受控件约束：字段外、只读字段里都能停。约束编辑的是能力表
-    //   （插 / 删 / 分段 / 合并），不是光标 —— 两者混起来会得到"字段外的正文连点都点不进去"
-    //   这种与编辑边界无关的怪现象。所以这里除了吸附到字素簇之外不改写任何东西。
+    // 这是"用户点到哪"，于是它受限：表单模式下点不进不可编辑的正文（见 confineCaret）。
+    //   拖选（setFocusAtSide）不受限 —— 选区与光标是两件事，选区要能盖住只读区。
+    const FlowPos before = caretFlowPos();
     projectCaret(para, offset, side);
+    confineCaret(before);
 }
 
 /**
@@ -1078,7 +1082,9 @@ void EditorEngine::setFocusAtSide(int para, size_t offset, int side) {
  * 否则光标画到上一行行尾（见 caretLineAffinity）。
  */
 void EditorEngine::setCaretAtSideLine(int para, size_t offset, int side, int line_aff) {
+    const FlowPos before = caretFlowPos();
     projectCaret(para, offset, side, /*extend=*/false, line_aff);
+    confineCaret(before);
 }
 
 void EditorEngine::setFocusAtSideLine(int para, size_t offset, int side, int line_aff) {
@@ -1137,17 +1143,117 @@ rev::EditCheck EditorEngine::policyErase(TextPos a, TextPos b) const {
     return edit_.policyErase(a, b);
 }
 
+/**
+ * 光标此刻的流位置（派生）。整格选区时它是钉住的那一格末尾，与 caret() 同源。
+ */
+FlowPos EditorEngine::caretFlowPos() const {
+    const TextPos p = caret();
+    return flowPosAtSide(p.para, p.offset, caretSide());
+}
+
+bool EditorEngine::controlContentSpan(int index, FlowPos* lo, FlowPos* hi) const {
+    if (!flow_.has_value()) return false;
+    if (index < 0 || index >= controls_.size()) return false;
+    const Control& c = controls_.at(index);
+    // 两枚边界各自"自己那一格"的流位置：开括号取内容起点（括号之后）、闭括号取内容末尾。
+    const FlowPos start =
+        flowPosAtSide(c.range.start.para, c.range.start.offset,
+                      caret_.sideFromHint(c.range.start.para, c.range.start.offset, index));
+    const FlowPos end =
+        flowPosAtSide(c.range.end.para, c.range.end.offset,
+                      caret_.sideFromHint(c.range.end.para, c.range.end.offset, index));
+    if (start < 0 || end < start) return false;
+    if (lo != nullptr) *lo = start;
+    if (hi != nullptr) *hi = end;
+    return true;
+}
+
+/**
+ * 光标此刻是不是一个可插入位置 —— 它决定画不画那根竖线。
+ *
+ * 选区与光标是两件事：选区可以盖住只读区（核对上文、复制），光标不能停在打不进字的地方。
+ *   表单模式只认可编辑集合内的位置（含"只读控件里嵌可编辑控件"那一档交集），只读模式
+ *   一个都不认。位置本身不被改写，见 confineCaret。
+ */
+bool EditorEngine::caretInsertable() const {
+    // 文档模式没有落点限制。这里刻意不参数化任何块流：空文档的 caretRectPx 本来就给 0 宽，
+    //   画不出来 —— 而块流有两份（blocks_full_ 与只筛过括号的 blocks_），从其中一份判
+    //   "文档有没有内容"会在括号不显示时把光标整条判掉。
+    if (mode_ == EditMode::Document) return true;
+    if (mode_ != EditMode::Form) return false;  // 只读（以及将来新增的模式）：一律不画
+    const FlowPos f = caretFlowPos();
+    if (f < 0) return false;
+    for (int i = 0; i < controls_.size(); ++i) {
+        FlowPos lo = 0;
+        FlowPos hi = 0;
+        if (!controlContentSpan(i, &lo, &hi)) continue;
+        if (f < lo || f > hi) continue;
+        // 可编辑性是交集：把光标包住的每一层都不能是只读的。
+        for (int k = i; k >= 0; k = controls_.at(k).parent) {
+            if (controls_.at(k).read_only) return false;
+        }
+        return true;
+    }
+    return false;
+}
+
+/**
+ * 把光标收进可插入位置（表单模式的落点规则）。
+ *
+ * 目标落在控件之外时，夹回"移动之前所在控件"的内容区间 —— 视觉上就是"停在字段边界上"，
+ *   而不是把光标摆到一个打不进字的地方去。夹不进去（移位之前就不在任何字段里）就整下不动。
+ *
+ * 程序化定位（setCaret / setCaretAt）不经过这里：宿主与探针要能把光标摆到任意位置去核对
+ *   策略，受限的是用户真的能点到哪、按到哪。
+ *
+ * @param before 这一步移动之前的流位置
+ * @return true = 光标位置真的变了
+ */
+bool EditorEngine::confineCaret(FlowPos before) {
+    const FlowPos now = caretFlowPos();
+    if (mode_ != EditMode::Form) return now != before;
+    if (caretInsertable()) return now != before;
+
+    FlowPos lo = 0;
+    FlowPos hi = 0;
+    bool found = false;
+    for (int i = 0; i < controls_.size(); ++i) {
+        FlowPos a = 0;
+        FlowPos b = 0;
+        if (!controlContentSpan(i, &a, &b)) continue;
+        if (before < a || before > b) continue;
+        // 嵌套时取最内层（区间最短的那一个）：夹进外层会把光标带到两层之间的空档里。
+        if (!found || (b - a) < (hi - lo)) {
+            lo = a;
+            hi = b;
+            found = true;
+        }
+    }
+    if (!found) return false;
+    FlowPos target = now;
+    if (target < lo) target = lo;
+    if (target > hi) target = hi;
+    if (target == now) return now != before;
+    if (!caret_.setCaretAtFlow(target)) return false;
+    return target != before;
+}
+
 bool EditorEngine::moveCaretBy(int dcp, bool extend) {
     // 移动本身在解析器里；"换占位集合要重排"归引擎 —— 聚焦档下显示哪些括号由光标位置定。
     const int plan_before = bracketPlanId();
+    const FlowPos before = caretFlowPos();
     if (!caret_.moveCaretBy(dcp, extend)) return false;
+    // 扩展选区不受落点限制（选区可以盖住只读区），单步移动要收进可插入位置。
+    const bool moved = extend ? true : confineCaret(before);
     relayoutIfBracketPlanChanged(plan_before);
-    return true;
+    return moved;
 }
 
 bool EditorEngine::moveCaretToLineStart(bool extend) {
     const int plan_before = bracketPlanId();
+    const FlowPos before = caretFlowPos();
     if (!caret_.moveCaretToLineStart(extend)) return false;
+    if (!extend) confineCaret(before);
     relayoutIfBracketPlanChanged(plan_before);
     // 行首/行尾是 (偏移, 侧别) 投影出来的，投影要吸附簇 ⇒ 重排换了簇表就得再投影一次。
     caret_.reprojectCaret(extend);
@@ -1156,7 +1262,9 @@ bool EditorEngine::moveCaretToLineStart(bool extend) {
 
 bool EditorEngine::moveCaretToLineEnd(bool extend) {
     const int plan_before = bracketPlanId();
+    const FlowPos before = caretFlowPos();
     if (!caret_.moveCaretToLineEnd(extend)) return false;
+    if (!extend) confineCaret(before);
     relayoutIfBracketPlanChanged(plan_before);
     caret_.reprojectCaret(extend);
     return true;
@@ -1164,21 +1272,27 @@ bool EditorEngine::moveCaretToLineEnd(bool extend) {
 
 bool EditorEngine::moveCaretToDocStart(bool extend) {
     const int plan_before = bracketPlanId();
+    const FlowPos before = caretFlowPos();
     if (!caret_.moveCaretToDocStart(extend)) return false;
+    if (!extend) confineCaret(before);
     relayoutIfBracketPlanChanged(plan_before);
     return true;
 }
 
 bool EditorEngine::moveCaretToDocEnd(bool extend) {
     const int plan_before = bracketPlanId();
+    const FlowPos before = caretFlowPos();
     if (!caret_.moveCaretToDocEnd(extend)) return false;
+    if (!extend) confineCaret(before);
     relayoutIfBracketPlanChanged(plan_before);
     return true;
 }
 
 bool EditorEngine::moveCaretVertical(int dir, bool extend) {
     const int plan_before = bracketPlanId();
+    const FlowPos before = caretFlowPos();
     if (!caret_.moveCaretVertical(dir, extend)) return false;
+    if (!extend) confineCaret(before);
     relayoutIfBracketPlanChanged(plan_before);
     return true;
 }
@@ -1664,9 +1778,10 @@ bool EditorEngine::hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* 
             //   页底），于是"顺着这一列往下拖"会把焦点甩到首列，矩形包络铺满整行。
             float lo_px = 0.0f;
             float hi_px = static_cast<float>(page_px_h);
-            if (!cfg_.page.continuous && cfg_.page.height_pt > 2.0f * cfg_.page.margin_pt) {
-                lo_px = cfg_.page.margin_pt * zoom;
-                hi_px = (cfg_.page.height_pt - cfg_.page.margin_pt) * zoom;
+            const PageMargins& pm = cfg_.page.margins;
+            if (!cfg_.page.continuous && cfg_.page.height_pt > pm.top + pm.bottom) {
+                lo_px = pm.top * zoom;
+                hi_px = (cfg_.page.height_pt - pm.bottom) * zoom;
             }
             local_px = std::max(lo_px, std::min(local_px, hi_px));
             if (x_pt_doc < 0.0f) x_pt_doc = 0.0f;
