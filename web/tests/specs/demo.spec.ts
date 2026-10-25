@@ -194,8 +194,10 @@ test.describe('示例页的公开面', () => {
         const pr = pages.getBoundingClientRect();
         return {
           height: pages.offsetHeight,
-          // 可滚区 = 页容器在舞台里的整段（含上边距）。裁剪没生效时它会被画布撑大。
+          // 可滚区 = 页容器在舞台里的整段（含上边距 + 底部那道呼吸缝）。裁剪没生效时
+          //   它会被画布撑大 —— 那种撑大不受缝的宽度控制，所以两件事要分开判。
           scroll: stage.scrollHeight,
+          padBottom: parseFloat(getComputedStyle(stage).paddingBottom) || 0,
           offsetTop: pages.offsetTop,
           lastBottom: last ? last.getBoundingClientRect().bottom - pr.top : -1,
           geo: g.scrollHeight,
@@ -224,9 +226,12 @@ test.describe('示例页的公开面', () => {
     check('★ 长文档的总高不是整数页（末尾不空一整页）',
           r.long.height > r.long.pageH && r.long.height < r.long.pages * r.long.pageH - 40,
           `${r.long.height} / ${r.long.pages} x ${r.long.pageH}`);
-    check('★ 可滚区等于页容器的高度（最后那截白纸被裁掉，没撑大滚动范围）',
-          near(r.long.scroll, r.long.offsetTop + r.long.height),
-          `scroll ${r.long.scroll} vs ${r.long.offsetTop + r.long.height}`);
+    check('★ 可滚区等于页容器 + 底部那道呼吸缝（没有别的空白）',
+          near(r.long.scroll, r.long.offsetTop + r.long.height + r.long.padBottom),
+          `scroll ${r.long.scroll} vs ${r.long.offsetTop} + ${r.long.height} + ${r.long.padBottom}`);
+    // 反向一半：那道缝必须真的存在（页脚贴着状态栏时它就是 0，而那是这条判据的由来）。
+    check('★ 最后一页底下留了呼吸缝，不贴着状态栏',
+          r.long.padBottom >= 8, `${r.long.padBottom}px`);
     check('最后一页的画布仍伸到容器外（被裁的正是它多出来的那一截）',
           r.long.lastBottom > r.long.height + 2, `${r.long.lastBottom} vs ${r.long.height}`);
     check('geometry() 报的滚动高度与 DOM 一致',

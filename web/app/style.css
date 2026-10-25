@@ -40,6 +40,10 @@ body {
 #ed .heditor-body { height: 100%; }
 #ed .heditor-stage { height: 100%; overflow: auto; background: var(--bg); }
 
+/* 最后一页与状态栏之间那道呼吸缝。加在滚动区上、不加在页容器上：页容器的高度就是文档
+   总高（滚动与换窗的判据都按它算），加在那里等于在文档末尾多出一段可滚的空白。 */
+.heditor-stage { padding-bottom: 16px; }
+
 /* 顶部功能区：一条页签 + 一行分组，照 Word 那一套摆（组名在组的下面）。 */
 
 .heditor-ribbon {
