@@ -14,6 +14,10 @@ import type {
   FontInput,
   Geometry,
   CustomPaper,
+  ImageBox,
+  ImageHit,
+  ImageInsertOptions,
+  ImageRegisterOptions,
   PageSetup,
   ParaFormatPatch,
   Pos,
@@ -671,6 +675,78 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
           req: !!o.required,
           shape: SHAPE_CODE[o.shape ?? 'text'],
         },
+      });
+    },
+
+    async insertImage(opts) {
+      alive();
+      const o: ImageInsertOptions = opts ?? ({} as ImageInsertOptions);
+      // 像素尺寸与显示尺寸一起交给引擎：前者折算 Auto，后者钉死。两者都不给时它是
+      //   一个 4:3 的占位框 —— 引擎不猜图片多大。
+      return edit('insertImage', {
+        opts: {
+          res: o.resourceId === undefined ? '' : String(o.resourceId),
+          pw: o.pxWidth === undefined ? undefined : Math.trunc(o.pxWidth),
+          ph: o.pxHeight === undefined ? undefined : Math.trunc(o.pxHeight),
+          dpi: o.dpi === undefined ? undefined : Math.trunc(o.dpi),
+          w: o.width,
+          h: o.height,
+        },
+      });
+    },
+
+    async registerImage(opts) {
+      alive();
+      const data = opts?.data;
+      if (!(data instanceof Uint8Array)) throw new TypeError('registerImage 需要 Uint8Array');
+      await Promise.resolve(link.write('registerImage', {
+        id: String(opts?.id ?? ''),
+        w: Math.trunc(Number(opts?.width ?? 0)),
+        h: Math.trunc(Number(opts?.height ?? 0)),
+        data,
+      }));
+      await Promise.resolve(link.settle('registerImage'));
+      dom.finish();
+    },
+
+    async dropImage(id) {
+      alive();
+      await Promise.resolve(link.write('dropImage', { id: String(id ?? '') }));
+      await Promise.resolve(link.settle('dropImage'));
+      dom.finish();
+    },
+
+    async images() {
+      alive();
+      // 读要经一次往返（Worker 传输），所以是异步的 —— 与 fonts() 不同：那一份是随状态
+      //   推过来的副本，这里是现场查询。
+      const raw = (await Promise.resolve(link.read('imageList'))) as { images?: unknown[] } | null;
+      return (raw && Array.isArray(raw.images) ? raw.images : []) as ImageBox[];
+    },
+
+    async imageHit(x, y) {
+      alive();
+      const raw = (await Promise.resolve(link.read('imageHit', { x, y }))) as ImageHit | null;
+      return raw && typeof raw.index === 'number' ? raw : { index: -1, handle: -1 };
+    },
+
+    async selectImage(index) {
+      alive();
+      // 选中一张图片改的是"哪套选区"，文档一个字都没变 —— 走 edit() 会被当成一次
+      //   内容变更（change 事件里会带一份没变的文本）。所以只写命令再收尾。
+      await Promise.resolve(link.write('selectImage', { i: Math.trunc(index) }));
+      await Promise.resolve(link.settle('selectImage'));
+      dom.finish();
+    },
+
+    async resizeImage(index, widthPt, heightPt, opts) {
+      alive();
+      // merge 是"与上一帧合成一步撤销"：拖拽的后续每一帧都带它，一次拖拽只留一步。
+      return edit('resizeImage', {
+        i: Math.trunc(index),
+        w: Number(widthPt),
+        h: Number(heightPt),
+        merge: !!opts?.merge,
       });
     },
 

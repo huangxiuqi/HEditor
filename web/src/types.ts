@@ -586,6 +586,121 @@ export interface ControlInsertOptions {
 }
 
 /**
+ * 插入图片的选项。资源 id 与尺寸至少要给一组 —— 三者都不给时插进去的是一个 4:3 的占位框。
+ */
+export interface ImageInsertOptions {
+  /**
+   * 资源 id（registerImage 注册时用的那个）。空串表示先占位。
+   */
+  resourceId?: string;
+
+  /**
+   * 原始像素宽。与高度一起给时，显示尺寸留空就按 DPI 折算。
+   */
+  pxWidth?: number;
+
+  /**
+   * 原始像素高。
+   */
+  pxHeight?: number;
+
+  /**
+   * 原始像素的 DPI，默认 96（行业惯例）。
+   */
+  dpi?: number;
+
+  /**
+   * 显示宽度（磅）。只给一边时按原图比例推另一边。
+   */
+  width?: number;
+
+  /**
+   * 显示高度（磅）。
+   */
+  height?: number;
+}
+
+/**
+ * 注册图片像素的入参。引擎里没有解码器，RGBA 由宿主解码之后交上来。
+ */
+export interface ImageRegisterOptions {
+  /**
+   * 资源 id（文档里存的就是它）。
+   */
+  id: string;
+
+  /**
+   * 像素宽。
+   */
+  width: number;
+
+  /**
+   * 像素高。
+   */
+  height: number;
+
+  /**
+   * RGBA 像素（行优先，未预乘）。长度必须等于宽 x 高 x 4。
+   */
+  data: Uint8Array;
+}
+
+/**
+ * 文档里一张图片的几何与状态。
+ */
+export interface ImageBox {
+  /**
+   * 文档顺序的下标（selectImage / resizeImage 收它）。
+   */
+  index: number;
+
+  /**
+   * 节点 id（编辑之后仍然有效）。
+   */
+  node: number;
+
+  /**
+   * 资源 id。
+   */
+  resourceId: string;
+
+  /**
+   * 显示宽度（磅）。
+   */
+  w: number;
+
+  /**
+   * 显示高度（磅）。
+   */
+  h: number;
+
+  /**
+   * 像素在不在资源表里。不在时画面上是占位框。
+   */
+  ready: boolean;
+
+  /**
+   * 它落在哪几页的哪些矩形上（页内磅）。
+   */
+  rects: Array<{ page: number; x: number; y: number; w: number; h: number }>;
+}
+
+/**
+ * 图片命中：点到哪一张、哪个把手（-1 表示点在图上）。
+ */
+export interface ImageHit {
+  /**
+   * 图片下标；-1 = 没点到图片。
+   */
+  index: number;
+
+  /**
+   * 把手序号（0 左上、1 上、2 右上、3 右、4 右下、5 下、6 左下、7 左）。
+   */
+  handle: number;
+}
+
+/**
  * 表单里的一个控件（form() 的精简视图）。
  */
 export interface ControlSummary {
@@ -1180,6 +1295,62 @@ export interface Editor {
    * @returns 有没有插进去（模式不对时 false，文档不动）
    */
   insertControl(opts?: ControlInsertOptions): Promise<boolean>;
+
+  /**
+   * 在光标处插一张图片。图片是行内原子：与文字同流，参与断行。
+   *
+   * 只在文档模式可用。像素要先注册（见 registerImage）—— 没注册时画面上是一个带资源
+   * 标识的占位框，盒子尺寸照旧。
+   * @param opts 资源 id 与尺寸（像素 / 显示两组至少给一组）
+   * @returns 有没有插进去
+   */
+  insertImage(opts?: ImageInsertOptions): Promise<boolean>;
+
+  /**
+   * 注册一张图片的像素。宿主解码（createImageBitmap / canvas）之后把 RGBA 交进来。
+   *
+   * 重复注册同一个 id 表示"这张图换了"：所有画着它的页重光栅。
+   * @param opts 资源 id、像素宽高与 RGBA
+   */
+  registerImage(opts: ImageRegisterOptions): Promise<void>;
+
+  /**
+   * 删掉一张图片的像素。文档里的引用保留，画面上退回占位框。
+   * @param id 资源 id
+   */
+  dropImage(id: string): Promise<void>;
+
+  /**
+   * 文档里全部图片（文档顺序）。
+   * @returns 每张图的下标、资源 id、显示尺寸与落页矩形
+   */
+  images(): Promise<ImageBox[]>;
+
+  /**
+   * 命中：文档坐标（磅）落在哪张图的哪个把手上。
+   * @param x 文档坐标 x（磅）
+   * @param y 文档坐标 y（磅）
+   * @returns 命中的图片与把手；没点到时 index 为 -1
+   */
+  imageHit(x: number, y: number): Promise<ImageHit>;
+
+  /**
+   * 选中一张图片：画面上出拖拽框与八个把手。传 -1 取消选中。
+   *
+   * 图片选区与文本选区互斥：任何光标定位、选区改动、文档提交都会清掉它。
+   * @param index 图片下标
+   */
+  selectImage(index: number): Promise<void>;
+
+  /**
+   * 改一张图片的显示尺寸（磅）。尺寸落成绝对长度，按 DPI 折算的 Auto 就此钉住。
+   * @param index 图片下标
+   * @param widthPt 新宽度（磅）
+   * @param heightPt 新高度（磅）
+   * @param opts merge 为真时与上一帧合成一步撤销（拖拽的后续每一帧都传它）
+   * @returns 有没有改动
+   */
+  resizeImage(index: number, widthPt: number, heightPt: number, opts?: { merge?: boolean }): Promise<boolean>;
 
   // 编辑（返回"有没有改动"）
 

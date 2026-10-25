@@ -578,6 +578,15 @@ bool setCellSpan(Ctx* c, NodeId id, const CellSpec& span) {
     return replaceOne(c, id, span, n->hidden);
 }
 
+bool setImageSize(Ctx* c, NodeId id, const Length& width, const Length& height) {
+    const Node* n = findNode(c->doc, id);
+    if (n == nullptr || n->kind != NodeKind::Image) return fail(c, "目标不是图片");
+    ImageSpec spec = std::get<ImageSpec>(n->payload);
+    spec.width = width;
+    spec.height = height;
+    return replaceOne(c, id, std::move(spec), n->hidden);
+}
+
 bool applyOne(Ctx* c, const Step& step) {
     return std::visit(
         [&](const auto& s) -> bool {
@@ -627,6 +636,8 @@ bool applyOne(Ctx* c, const Step& step) {
                 return setControlValue(c, s.id, s.value);
             } else if constexpr (std::is_same_v<T, SetTableCellSpan>) {
                 return setCellSpan(c, s.id, s.span);
+            } else if constexpr (std::is_same_v<T, SetImageSize>) {
+                return setImageSize(c, s.id, s.width, s.height);
             }
             return fail(c, "未知步骤");
         },

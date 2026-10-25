@@ -287,6 +287,14 @@ const COMMANDS: Array<[string, string, string[], string]> = [
   // 插入结构：表格与控件都落成 InsertNode，撤销与增量排版跟着走现成那条路。
   ['insertTable',           'w', ['insertTableAt'],                                       'self'],
   ['insertControl',         'w', ['insertControlAt'],                                     'self'],
+  // 图片：像素由宿主解码之后注册（文档只存资源 id），插入与改尺寸都要重排 + 呈现。
+  ['insertImage',           'w', ['insertImageAt'],                                       'self'],
+  ['registerImage',         'w', ['registerImage'],                                       'self'],
+  ['dropImage',             'w', ['dropImage'],                                           'self'],
+  ['selectImage',           'w', ['selectImage'],                                         'self'],
+  ['resizeImage',           'w', ['resizeImageAt'],                                       'self'],
+  ['imageList',             'r', ['imageList'],                                           'none'],
+  ['imageHit',              'r', ['imageHit'],                                            'none'],
   ['focusControl',          'w', ['focusControl'],                                        'self'],
 
   // 选区与光标：选区的几条自己收尾；落光标、拖选、闪烁只改状态，要宿主补呈现
@@ -1224,6 +1232,35 @@ const WRITE = collect('w', {
    *   shape 折成整数、readonly / required 折成 ro / req），这里原样交给引擎。
    */
   insertControl: (a) => mod.insertControlAt(a.opts || {}),
+  /**
+   * 插一张图片。尺寸与像素尺寸都可省：都省掉时引擎按 4:3 的空框放一个占位，
+   *   宿主随后注册资源也照样画得出来（盒子的尺寸不会因为像素到了就变）。
+   */
+  insertImage: (a) => mod.insertImageAt(a.opts || {}),
+  /**
+   * 注册一张图片的像素。宿主解码之后给 RGBA —— 引擎里没有解码器（见资源表的设计）。
+   * 引擎回一个空串表示成功，非空是失败原因；抛出去让调用方看得见。
+   */
+  registerImage: (a) => {
+    const data = a.data as Uint8Array;
+    if (!(data instanceof Uint8Array)) throw new Error('registerImage 需要 Uint8Array');
+    const ptr = mod.allocBuffer(data.length);
+    mod.HEAPU8.set(data, ptr);
+    const err = mod.registerImage(String(a.id || ''), a.w | 0, a.h | 0, ptr, data.length);
+    mod.freeBuffer(ptr);
+    if (err) throw new Error(String(err));
+  },
+  dropImage: (a) => mod.dropImage(String(a.id || '')),
+  /**
+   * 选中 / 取消选中一张图片（-1 表示取消）。选中框与八个把手是瞬态层，
+   *   引擎自己收尾，宿主不要再补一次呈现。
+   */
+  selectImage: (a) => mod.selectImage(a.i | 0),
+  /**
+   * 改图片尺寸。merge 为真时与上一次提交合成一步撤销 —— 拖拽的后续每一帧都带它，
+   *   一次拖拽只留一步。
+   */
+  resizeImage: (a) => mod.resizeImageAt(a.i | 0, Number(a.w), Number(a.h), !!a.merge),
   setFontCacheConfig: (a) => mod.setFontCacheConfig(a.blockSize | 0, a.blocks | 0),
 
   /**
@@ -1270,6 +1307,11 @@ const READ = collect('r', {
    * 5B 的按页接口：宿主按它决定 putImageData 哪几块。光标移动只应该给出两三个小矩形，
    *   而不是整页 —— 那一条的判据在 edit_probe / edit_test [58]。
    */
+  imageList: () => JSON.parse(mod.imageList()),
+  /**
+   * 命中：文档坐标（磅）落在哪张图的哪个把手上。没点到时 index 是 -1。
+   */
+  imageHit: (a) => JSON.parse(mod.imageHit(Number(a.x), Number(a.y))),
   pageDirtyRects: (a) => JSON.parse(mod.pageDirtyRectsJson(a.page | 0)),
   /**
    * 还欠着脏矩形的页号。宿主按它决定贴哪几页 —— 不能用 dirtyPages：

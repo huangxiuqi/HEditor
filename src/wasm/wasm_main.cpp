@@ -828,8 +828,16 @@ std::string hitTest(float x_pt, float y_pt, int clamp) {
     int side = 0;
     int line_aff = 0;
     int cell_para = -1;
-    if (!g_engine.hitTestPt(x_pt, y_pt, &p, &owner, &side, &line_aff, &cell_para, clamp != 0))
-        return pk::checked(pk::hit_test::kSpec, "null");
+    // 图片先算：点在图或把手上时宿主不落光标，而是选中它（把手命中还要起拖）。
+    //   与落点共用同一份坐标，所以不进 hitTestPt 的两个出口，另起两个键带出去。
+    const EditorEngine::ImageHit img = g_engine.imageAtPt(x_pt, y_pt);
+    if (!g_engine.hitTestPt(x_pt, y_pt, &p, &owner, &side, &line_aff, &cell_para, clamp != 0)) {
+        if (img.index < 0) return pk::checked(pk::hit_test::kSpec, "null");
+        std::ostringstream bad;
+        bad << "{\"para\":-1,\"offset\":0,\"field\":-1,\"side\":0,\"line\":0,\"img\":" << img.index
+            << ",\"imgHandle\":" << img.handle << "}";
+        return pk::checked(pk::hit_test::kSpec, bad.str());
+    }
     std::ostringstream o;
     o << "{\"para\":" << p.para << ",\"offset\":" << p.offset << ",\"field\":" << owner
       << ",\"side\":" << side << ",\"line\":" << line_aff;
@@ -848,6 +856,9 @@ std::string hitTest(float x_pt, float y_pt, int clamp) {
         } else {
             o << ",\"cell\":[" << 0 << "," << 0 << "]";
         }
+    }
+    if (img.index >= 0) {
+        o << ",\"img\":" << img.index << ",\"imgHandle\":" << img.handle;
     }
     o << "}";
     return pk::checked(pk::hit_test::kSpec, o.str());
@@ -1058,6 +1069,97 @@ bool insertControlAt(val opts) {
     const std::string label =
         o["label"].isUndefined() ? std::string() : o["label"].as<std::string>();
     return g_engine.insertControlAndRender(spec, label);
+}
+
+/**
+ * 注册一张图片的像素：宿主解码之后把 RGBA 交上来（文档只存资源 id）。
+ *
+ * 返回空串表示成功，否则是失败原因 —— 尺寸为零、字节数对不上、超出资源表上限都要说清，
+ * 静默失败会让宿主以为图已经能画了。
+ */
+std::string registerImage(const std::string& id, int w, int h, uintptr_t ptr, size_t len) {
+    std::string error;
+    const bool ok = g_engine.registerImageAndRepaint(
+        id, w, h, reinterpret_cast<const uint8_t*>(ptr), len, &error);
+    if (ok) return std::string();
+    return error.empty() ? std::string("图片注册失败") : error;
+}
+
+/**
+ * 删掉一张图片的像素。文档里对它的引用保留，画面上退回占位框。
+ */
+bool dropImage(const std::string& id) { return g_engine.dropImageAndRepaint(id); }
+
+/**
+ * 文档里全部图片的清单：下标、资源 id、显示尺寸、落页矩形、像素在不在。
+ * 宿主拿它画自己的辅助层（缩略图列表、属性面板）。
+ */
+std::string imageList() {
+    const std::vector<EditorEngine::ImageBox> all = g_engine.images();
+    std::ostringstream o;
+    o.setf(std::ios::fixed);
+    o.precision(2);
+    o << "{\"count\":" << g_engine.imageCount() << ",\"bytes\":" << g_engine.imageBytes()
+      << ",\"images\":[";
+    for (size_t i = 0; i < all.size(); ++i) {
+        if (i) o << ",";
+        o << "{\"index\":" << all[i].index << ",\"node\":" << all[i].id << ",\"res\":\""
+          << all[i].resource_id << "\",\"w\":" << all[i].w_pt << ",\"h\":" << all[i].h_pt
+          << ",\"ready\":" << (all[i].resource_ready ? "true" : "false") << ",\"rects\":[";
+        for (size_t k = 0; k < all[i].rects.size(); ++k) {
+            if (k) o << ",";
+            o << "{\"page\":" << all[i].rects[k].page << ",\"x\":" << all[i].rects[k].r_pt.x
+              << ",\"y\":" << all[i].rects[k].r_pt.y << ",\"w\":" << all[i].rects[k].r_pt.w
+              << ",\"h\":" << all[i].rects[k].r_pt.h << "}";
+        }
+        o << "]}";
+    }
+    o << "]}";
+    return pk::checked(pk::image_list::kSpec, o.str());
+}
+
+/**
+ * 命中：文档坐标（磅）落在哪张图的哪个把手上。没点到图时 index 与 handle 都是 -1。
+ */
+std::string imageHit(float x_pt, float y_pt) {
+    const EditorEngine::ImageHit hit = g_engine.imageAtPt(x_pt, y_pt);
+    std::ostringstream o;
+    o << "{\"index\":" << hit.index << ",\"handle\":" << hit.handle << "}";
+    return pk::checked(pk::image_hit::kSpec, o.str());
+}
+
+/**
+ * 选中一张图片（出拖拽框与八个把手）。-1 表示取消选中。
+ */
+bool selectImage(int index) {
+    if (index < 0) return g_engine.clearImageSelectionAndRender();
+    return g_engine.selectImageAndRender(index);
+}
+
+/**
+ * 改一张图片的显示尺寸（磅）：拖把手的落点。
+ */
+bool resizeImageAt(int index, float w_pt, float h_pt, bool merge) {
+    return g_engine.resizeImageAndRender(index, w_pt, h_pt, merge);
+}
+
+/**
+ * 在光标处插一张图片。opts 的键：res（资源 id）、w、h（显示尺寸，磅，可省）、
+ * pw、ph（原始像素）、dpi（默认 96）。
+ *
+ * 尺寸两边都不给时按 pw/ph 与 dpi 折算（96 DPI 是行业惯例）；只给一边时按原图比例推
+ * 另一边。res 为空表示先占位、之后由宿主补上资源 —— 画面上是一个带资源标识的空框。
+ */
+bool insertImageAt(val opts) {
+    const val o = (opts.isUndefined() || opts.isNull()) ? val::object() : opts;
+    ImageSpec spec;
+    if (!o["res"].isUndefined()) spec.resource_id = o["res"].as<std::string>();
+    if (!o["pw"].isUndefined()) spec.px_w = o["pw"].as<int>();
+    if (!o["ph"].isUndefined()) spec.px_h = o["ph"].as<int>();
+    if (!o["dpi"].isUndefined()) spec.dpi = o["dpi"].as<int>();
+    if (!o["w"].isUndefined()) spec.width = Length::abs(ptToEmu(o["w"].as<double>()));
+    if (!o["h"].isUndefined()) spec.height = Length::abs(ptToEmu(o["h"].as<double>()));
+    return g_engine.insertImageAndRender(spec);
 }
 
 /**
@@ -1772,6 +1874,13 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("setControlPropAt", &setControlPropAt);
     emscripten::function("insertTableAt", &insertTableAt);
     emscripten::function("insertControlAt", &insertControlAt);
+    emscripten::function("registerImage", &registerImage);
+    emscripten::function("dropImage", &dropImage);
+    emscripten::function("insertImageAt", &insertImageAt);
+    emscripten::function("imageList", &imageList);
+    emscripten::function("imageHit", &imageHit);
+    emscripten::function("selectImage", &selectImage);
+    emscripten::function("resizeImageAt", &resizeImageAt);
     emscripten::function("focusControl", &focusControl);
     emscripten::function("tabCaret", &tabCaret);
     emscripten::function("auditFrame", &auditFrame);

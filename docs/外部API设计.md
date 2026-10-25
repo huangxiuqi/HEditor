@@ -222,6 +222,20 @@ setText(text: string, opts?: { repeat?: number }): Promise<void>   // 明确用�
 `removeControl` 不进产品面：现实里删控件是编辑态动作，由输入层负责（选中控件 + Delete）；
 程序化删控件只在测试里出现 → `diag`。
 
+### 5.5.1 图片（字节外置，文档只存资源 id）
+
+| 签名 | 备注 |
+| --- | --- |
+| `registerImage({ id, width, height, data })` | 宿主解码后的 RGBA；重复注册同一个 id 表示换图，相关页重光栅 |
+| `dropImage(id)` | 删像素，文档里的引用保留（画面退回占位框） |
+| `insertImage({ resourceId, pxWidth, pxHeight, dpi?, width?, height? })` | 光标处插一张图；像素尺寸与显示尺寸至少给一组 |
+| `images()` | 文档里每张图的下标、资源 id、显示尺寸与落页矩形 |
+| `imageHit(x, y)` | 文档坐标（磅）命中哪张图的哪个把手；没命中 index 为 -1 |
+| `selectImage(index)` | 选中出拖拽框与八个把手（-1 取消）；与文本选区互斥 |
+| `resizeImage(index, wPt, hPt, { merge? })` | 改显示尺寸；拖拽的后续帧带 `merge: true`，一次拖拽只留一步撤销 |
+
+把手序号从左上顺时针 0..7。四个角按原图比例缩放（按住 Shift 解除），四条边只动一个轴。
+
 ### 5.6 视图与配置
 
 | 签名 | 备注 |

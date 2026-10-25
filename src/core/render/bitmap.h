@@ -112,6 +112,30 @@ public:
     void strokeRect(const Rect& r, Color c, float thickness);
 
     /**
+     * 把一块 RGBA 像素按目标矩形缩放绘制（行内图片走这一条）。
+     *
+     * key 与 version 只服务后端缓存：同一个 key 换了 version 就重建那一份解码结果。
+     * 传 key 为 0 表示不缓存。坐标是设备像素，越界由画布自带的裁剪兜住。
+     * @param key 资源身份（0 = 不缓存）
+     * @param version 资源版本
+     * @param rgba 像素（预乘 alpha，行优先）
+     * @param src_w 源宽
+     * @param src_h 源高
+     * @param dst 目标矩形（设备像素）
+     */
+    void drawImage(uint64_t key, uint32_t version, const uint8_t* rgba, int src_w, int src_h,
+                   const Rect& dst);
+
+    /**
+     * 丢掉后端为这个资源缓存的解码结果。
+     *
+     * 资源从表里删掉时调它，缓存才不会比资源表活得更久 —— 那是一份按 key 存的图，
+     * 键是资源身份的哈希，删了资源就再没人能找回它。
+     * @param key 资源身份
+     */
+    static void forgetImage(uint64_t key);
+
+    /**
      * 实心填充一个三角形（顶点是设备像素）。
      *
      * 只为"字形里根本没有的图形"而存在（编辑标记里换行符的箭头）。顶点必须由调用方

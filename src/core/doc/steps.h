@@ -23,6 +23,7 @@
 
 #include "core/doc/char_format.h"
 #include "core/doc/fragment.h"
+#include "core/doc/length.h"
 #include "core/doc/para_format.h"
 #include "core/doc/range.h"
 #include "core/doc/subtree.h"
@@ -472,9 +473,43 @@ struct SetTableCellSpan {
     CellSpec before;
 };
 
+/**
+ * 改一张图片的显示尺寸。
+ *
+ * 尺寸是作者意图（ImageSpec 的 width / height），改它只动行盒几何、不动流位置，所以位置映射
+ * 是恒等。与 SetControlProp 同形：记下原值，逆操作因此自足；一次只改一张图，批量的形状由
+ * 事务表达。
+ */
+struct SetImageSize {
+    /**
+     * 改哪一张图。
+     */
+    NodeId id = kInvalidNodeId;
+
+    /**
+     * 新的显示宽度（Auto 表示按原始像素与 DPI 折算）。
+     */
+    Length width;
+
+    /**
+     * 新的显示高度。
+     */
+    Length height;
+
+    /**
+     * 改之前的宽度（逆操作自足）。
+     */
+    Length beforeWidth;
+
+    /**
+     * 改之前的高度。
+     */
+    Length beforeHeight;
+};
+
 using Step = std::variant<InsertText, InsertFragment, DeleteRange, InsertParaMark, RemoveParaMark,
                           SetParaMarkFormat, SetRun, InsertNode, RemoveNode, UnwrapNode, WrapNode,
-                          SetControlProp, SetControlValue, SetTableCellSpan>;
+                          SetControlProp, SetControlValue, SetTableCellSpan, SetImageSize>;
 
 /**
  * 步骤的执行结果。失败时给出原因 —— 位置越界、类型不符都要显式说出来，不静默不做。

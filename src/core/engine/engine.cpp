@@ -128,7 +128,8 @@ static uint64_t fnvMixColor(uint64_t h, const Color& c) {
  *   加进这里，不必再维护一张"记得清缓存"的清单（TRAPS 128 的正解）。
  * 与排版无关的项刻意不收：页间隙只影响落点、背景色只影响帧、光标/选区色只影响瞬态层。
  */
-static uint64_t rasterSignature(const EngineConfig& cfg, bool marks_shown) {
+static uint64_t rasterSignature(const EngineConfig& cfg, bool marks_shown,
+                                uint64_t image_generation) {
     uint64_t h = kFnvBasis;
     h = fnvMixFloat(h, cfg.zoom);
     h = fnvMixFloat(h, cfg.page.width_pt);
@@ -161,7 +162,14 @@ static uint64_t rasterSignature(const EngineConfig& cfg, bool marks_shown) {
     h = fnvMix(h, marks_shown ? 1ULL : 0ULL);
     h = fnvMix(h, static_cast<uint64_t>(cfg.marks));
     h = fnvMixColor(h, cfg.mark_color);
+    // 图片像素不在文档里，页指纹看不见它们：换了图（或删了资源）只有这一个计数能让
+    //   已经光栅好的页作废。漏掉它的症状是"换图之后画面上还是上一张"。
+    h = fnvMix(h, image_generation);
     return h;
+}
+
+uint64_t EditorEngine::rasterSignatureNow() const {
+    return rasterSignature(cfg_, marksShown(), images_.generation());
 }
 
 void EditorEngine::setConfig(const EngineConfig& cfg) {
@@ -189,7 +197,7 @@ void EditorEngine::setConfig(const EngineConfig& cfg) {
     if (cfg_.caret_width_pt < kMinCaretWidthPt) cfg_.caret_width_pt = kMinCaretWidthPt;
     // 光栅签名一变，所有页的像素都不再作数（判据在 pageBitmapFresh）。
     //   这里不再逐项比对再清缓存：那张清单漏一项就是"改了底色屏幕不变"（TRAPS 128）。
-    const uint64_t sig = rasterSignature(cfg_, marksShown());
+    const uint64_t sig = rasterSignatureNow();
     if (sig != raster_sig_) {
         raster_sig_ = sig;
         page_dirty_rects_.clear();  // 旧矩形描述的是旧像素，作废
@@ -768,13 +776,13 @@ void EditorEngine::refreshViews() {
 int EditorEngine::undoLimit() const { return cfg_.undo_limit > 0 ? cfg_.undo_limit : 1000000; }
 
 bool EditorEngine::commitSteps(std::vector<Step> steps, int dirty_para, Range selection_before,
-                               Range selection_after) {
+                               Range selection_after, rev::MergeRun merge) {
     if (!loaded_ || !session_) return false;
     // 旧修订与旧产物一一对应：投影复用要按它们的差算损伤区间。Doc 是不可变的，
     //   拷贝只是一个引用计数（未改的子树与新的那份共享）。
     const rev::Doc before = session_->doc();
     const FlowVisibility vis = flowVisibility();
-    const rev::Applied r = session_->applySteps(steps, vis);
+    const rev::Applied r = session_->applySteps(steps, vis, merge);
     if (!r.ok) return false;
     if (!r.changed) return true;  // 什么都没改：不占撤销栈，也不白跑一次重建
     const rev::Damage dmg = rev::damage(before, session_->doc(), vis);
@@ -842,6 +850,8 @@ bool EditorEngine::undoAndRender() {
     repaintAfterEdit();
     return true;
 }
+
+int EditorEngine::undoDepth() const { return session_ ? session_->undoDepth() : 0; }
 
 bool EditorEngine::redoAndRender() {
     if (!redo()) return false;
@@ -963,6 +973,9 @@ void EditorEngine::setCaretByText(TextPos p) { caret_.setCaretByText(p); }
  * side < 0 = 没有侧别信息，按"最内层含端点"投影一次（见 setCaretByText）。
  */
 void EditorEngine::projectCaret(int para, size_t offset, int side, bool extend, int line_aff) {
+    // 光标一动就说明用户在选文字，图片选区（对象选区）随之作废：两套选区同时存在，
+    //   "按删除键删的是哪一段"就没有答案。
+    image_sel_ = kInvalidNodeId;
     const int plan_before = bracketPlanId();
     caret_.placeCaret(para, offset, side, extend, line_aff);
     relayoutIfBracketPlanChanged(plan_before);
@@ -1101,11 +1114,20 @@ void EditorEngine::setCaretAt(int para, size_t offset, int field) {
 
 bool EditorEngine::setCaretAtFlow(FlowPos flow) { return caret_.setCaretAtFlow(flow); }
 
-bool EditorEngine::setSelection(Range r) { return caret_.setSelection(r); }
+bool EditorEngine::setSelection(Range r) {
+    image_sel_ = kInvalidNodeId;
+    return caret_.setSelection(r);
+}
 
-void EditorEngine::clearSelection() { caret_.clearSelection(); }
+void EditorEngine::clearSelection() {
+    image_sel_ = kInvalidNodeId;
+    caret_.clearSelection();
+}
 
-bool EditorEngine::selectAll() { return caret_.selectAll(); }
+bool EditorEngine::selectAll() {
+    image_sel_ = kInvalidNodeId;
+    return caret_.selectAll();
+}
 
 /**
  * 按段号选一格：段的身份比流区间可靠 —— 空格的内容长度为 0，流区间是一个点，
@@ -1380,12 +1402,14 @@ bool EditorEngine::mergeWithNextParagraphAndRender() {
 
 void EditorEngine::setEditMode(EditMode m) {
     if (mode_ == m) return;
+    // 切模式就是切能力：表单与只读模式里没有图片拖拽框，选中的那份也随之作废。
+    image_sel_ = kInvalidNodeId;
     const int plan_before = bracketPlanId();
     mode_ = m;
     // 编辑标记只读不画，而只读未必改内容（隐藏字段一个都没有时页面指纹不动）。
     //   所以照"光栅签名是唯一判据"那条（TRAPS 128）重算一次：该作废就作废。
     {
-        const uint64_t sig = rasterSignature(cfg_, marksShown());
+        const uint64_t sig = rasterSignatureNow();
         if (sig != raster_sig_) {
             raster_sig_ = sig;
             page_dirty_rects_.clear();

@@ -109,6 +109,15 @@ struct Applied {
 };
 
 /**
+ * 一次提交与上一次提交的关系。连续拖拽靠它把几十帧并成一步撤销。
+ */
+enum class MergeRun : uint8_t {
+    None = 0,      // 与上一次无关：另起一步撤销
+    Start = 1,     // 一次连贯操作的开始：另起一步，并允许后续帧并进来
+    Continue = 2,  // 同一操作的后续帧：并进上一步
+};
+
+/**
  * 会话：当前修订 + 撤销栈 + 重做栈。
  *
  * limit 是撤销栈最多保留几份旧修订（0 表示不留历史，只能前进）。超出时丢最旧的一份 ——
@@ -143,9 +152,11 @@ public:
      * vis 是步骤坐标的可见性口径（见 rev::applySteps）：会话不替调用方猜模式。
      * @param steps 一批步骤（整批算一步撤销）
      * @param vis 步骤坐标的可见性口径
+     * @param merge 与上一次提交的关系（见 MergeRun）
      * @return 提交结果
      */
-    Applied applySteps(const std::vector<Step>& steps, FlowVisibility vis);
+    Applied applySteps(const std::vector<Step>& steps, FlowVisibility vis,
+                       MergeRun merge = MergeRun::None);
 
     /**
      * 回到上一份修订。没有历史时返回 false（不动状态）。
@@ -235,6 +246,12 @@ private:
      * 状态代号，每次修订真的换了就 +1。
      */
     uint64_t generation_ = 0;
+
+    /**
+     * 上一次提交是不是"合并提交"。合并只在两次都带标记时生效，于是宿主只要在拖拽的
+     * 后续每一帧带标记，就不必自己判断"这一帧是不是新的一拖"。
+     */
+    bool last_merged_ = false;
 };
 
 }  // namespace heditor::rev

@@ -35,12 +35,15 @@
 #include "include/core/SkFontMgr.h"
 #include "include/core/SkFontTypes.h"
 #include "include/core/SkGraphics.h"
+#include "include/core/SkImage.h"
 #include "include/core/SkImageInfo.h"
 #include "include/core/SkPaint.h"
 #include "include/core/SkPath.h"
 #include "include/core/SkPathBuilder.h"
+#include "include/core/SkPixmap.h"
 #include "include/core/SkPoint.h"
 #include "include/core/SkRect.h"
+#include "include/core/SkSamplingOptions.h"
 #include "include/core/SkSpan.h"
 #include "include/core/SkStream.h"
 #include "include/core/SkTypeface.h"
@@ -501,6 +504,79 @@ void Bitmap::strokeRect(const Rect& r, Color c, float thickness) {
     fillRect(Rect{r.x, r.y, thickness, r.h}, c);
     fillRect(Rect{r.x + r.w - thickness, r.y, thickness, r.h}, c);
 }
+
+namespace {
+
+/**
+ * 已解码图片的缓存。
+ *
+ * 按资源身份的哈希存一份 SkImage：同一张图在一页上画一次、在每一页上又画一次，逐次
+ * RasterFromPixmapCopy 会把这几十兆的拷贝重复付一遍。缓存与资源表大致同寿（键就是资源），
+ * 所以它自己不再设额度 —— 真正的上限在 ImageStore 里。
+ *
+ * 不设锁：光栅只发生在一条线程上，这一点由引擎的线程模型保证（Worker 里只有一个引擎实例）。
+ */
+struct DecodedImage {
+    /**
+     * 建这份缓存时资源的版本。
+     */
+    uint32_t version = 0;
+
+    /**
+     * 已上传的图。
+     */
+    sk_sp<SkImage> image;
+};
+
+std::unordered_map<uint64_t, DecodedImage>& decodedImages() {
+    static std::unordered_map<uint64_t, DecodedImage> cache;
+    return cache;
+}
+
+}  // namespace
+
+void Bitmap::drawImage(uint64_t key, uint32_t version, const uint8_t* rgba, int src_w, int src_h,
+                       const Rect& dst) {
+    if (rgba == nullptr || src_w <= 0 || src_h <= 0) return;
+    const int x0 = std::max(0, static_cast<int>(std::floor(dst.x)));
+    const int y0 = std::max(0, static_cast<int>(std::floor(dst.y)));
+    const int x1 = std::min(w_, static_cast<int>(std::ceil(dst.x + dst.w)));
+    const int y1 = std::min(h_, static_cast<int>(std::ceil(dst.y + dst.h)));
+    if (x1 <= x0 || y1 <= y0) return;
+    painted_px_ += static_cast<size_t>(x1 - x0) * static_cast<size_t>(y1 - y0);
+    if (!sk_ || !sk_->canvas) return;
+
+    sk_sp<SkImage> image;
+    if (key != 0) {
+        DecodedImage& slot = decodedImages()[key];
+        if (!slot.image || slot.version != version) {
+            const SkImageInfo info =
+                SkImageInfo::Make(src_w, src_h, kRGBA_8888_SkColorType, kPremul_SkAlphaType);
+            const SkPixmap pm(info, rgba, static_cast<size_t>(src_w) * 4u);
+            slot.image = SkImages::RasterFromPixmapCopy(pm);
+            slot.version = version;
+        }
+        image = slot.image;
+    } else {
+        const SkImageInfo info =
+            SkImageInfo::Make(src_w, src_h, kRGBA_8888_SkColorType, kPremul_SkAlphaType);
+        const SkPixmap pm(info, rgba, static_cast<size_t>(src_w) * 4u);
+        image = SkImages::RasterFromPixmapCopy(pm);
+    }
+    if (!image) return;
+
+    SkPaint p;
+    // 图片可能自带透明区（PNG 标志），必须合成在已有内容之上而不是覆盖。
+    p.setBlendMode(SkBlendMode::kSrcOver);
+    const SkRect rect = SkRect::MakeLTRB(static_cast<SkScalar>(x0), static_cast<SkScalar>(y0),
+                                         static_cast<SkScalar>(x1), static_cast<SkScalar>(y1));
+    // 线性采样：图片在多数缩放下不是整数倍，最近邻会把斜线画成锯齿。不做 mipmap ——
+    //   一页上通常只有一两张图，建整条 mip 链的代价比它省下来的采样时间大。
+    const SkSamplingOptions sampling(SkFilterMode::kLinear, SkMipmapMode::kNone);
+    sk_->canvas->drawImageRect(image.get(), rect, sampling, &p);
+}
+
+void Bitmap::forgetImage(uint64_t key) { decodedImages().erase(key); }
 
 /**
  * 按 alpha 混色。与自写后端（bitmap.cpp）逐字节同一段算术。

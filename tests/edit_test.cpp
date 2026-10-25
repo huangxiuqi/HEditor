@@ -497,7 +497,7 @@ const SectionInfo kSections[] = {
     {62, false, 9},  {63, false, 3},  {64, false, 3},  {65, false, 3},  {66, false, 3},
     {67, false, 10}, {68, false, 4},  {69, false, 3},  {70, false, 10}, {71, false, 6},
     {72, false, 10}, {73, false, 9},  {74, false, 3},  {75, false, 3},  {76, false, 3},
-    {77, false, 3},  {78, true, 1},
+    {77, false, 3},  {78, true, 1},   {79, false, 2},
 };
 
 /**
@@ -13370,6 +13370,126 @@ int main() {
                     resume_ms, 100.0 * shift_ms / std::max(resume_ms, 1e-9));
         expectTrue(shift_ms * 1.5 < resume_ms,
                    "★ 后缀平移复用比续排重排快 1.5 倍以上（断行与字形放置全省掉）");
+    }
+
+    if (runSection(79)) std::printf("\n[79] 图片：资源注册、插入、命中、改尺寸\n");
+    if (runSection(79)) {
+        EngineConfig c79;
+        c79.zoom = 1.0f;
+        const std::vector<std::string> fonts79 = {cjkPath, mnPath, latinPath};
+
+        NodeTree t79;
+        {
+            const NodeId sec = t79.firstSectionId();
+            const NodeId a = t79.appendChild(sec, NodeKind::TextRun);
+            t79.setText(a, utf8ToCodepoints("ABCD"));
+            t79.appendChild(sec, NodeKind::ParagraphMark);
+        }
+        EditorEngine e79;
+        if (!e79.init(fonts79)) {
+            std::fprintf(stderr, "字体加载失败\n");
+            return 2;
+        }
+        e79.setConfig(c79);
+        e79.setDocument(t79, StyleSheet{});
+        e79.relayout();
+
+        // 单色块：缩放采样之后中心仍是同一个颜色，判据不必挑采样算法。
+        const int iw = 96;
+        const int ih = 48;
+        std::vector<uint8_t> pixels(static_cast<size_t>(iw) * ih * 4u);
+        for (int i = 0; i < iw * ih; ++i) {
+            pixels[static_cast<size_t>(i) * 4u + 0] = 200;
+            pixels[static_cast<size_t>(i) * 4u + 1] = 30;
+            pixels[static_cast<size_t>(i) * 4u + 2] = 30;
+            pixels[static_cast<size_t>(i) * 4u + 3] = 255;
+        }
+        std::string err79;
+        expectTrue(e79.registerImageAndRepaint("pic", iw, ih, pixels.data(), pixels.size(), &err79),
+                   "注册一张 96x48 的图（" + err79 + "）");
+        expectTrue(e79.imageCount() == 1, "资源表里有一张");
+        expectTrue(e79.imageBytes() == pixels.size(), "资源表按字节记账");
+
+        e79.setCaret(0, 2);
+        ImageSpec im79;
+        im79.resource_id = "pic";
+        im79.px_w = iw;
+        im79.px_h = ih;
+        im79.dpi = 96;
+        expectTrue(e79.insertImageAndRender(im79), "插进文档");
+        std::vector<EditorEngine::ImageBox> boxes79 = e79.images();
+        expectTrue(boxes79.size() == 1, "文档里一张图");
+        if (boxes79.size() == 1) {
+            const float w = boxes79[0].w_pt;
+            const float h = boxes79[0].h_pt;
+            expectTrue(std::fabs(w - 72.0f) < 0.01f && std::fabs(h - 36.0f) < 0.01f,
+                       "Auto 按 DPI 折算：96x48 像素 @96dpi = 72 x 36 磅（实际 " +
+                           std::to_string(w) + " x " + std::to_string(h) + "）");
+            expectTrue(boxes79[0].resource_ready, "像素在资源表里");
+            expectTrue(!boxes79[0].rects.empty(), "它落在某一页上");
+        }
+
+        // 命中：图心在图身上，左上角在 0 号把手上。
+        if (!boxes79.empty() && !boxes79[0].rects.empty()) {
+            const Rect r79 = boxes79[0].rects[0].r_pt;
+            const EditorEngine::ImageHit body79 =
+                e79.imageAtPt(r79.x + r79.w * 0.5f, r79.y + r79.h * 0.5f);
+            expectTrue(body79.index == 0 && body79.handle < 0, "点图身：命中这张图、不在把手上");
+            const EditorEngine::ImageHit corner79 = e79.imageAtPt(r79.x, r79.y);
+            expectTrue(corner79.index == 0 && corner79.handle == 0, "点左上角：命中 0 号把手");
+            expectTrue(e79.imageAtPt(r79.x + r79.w + 40.0f, r79.y + r79.h + 40.0f).index < 0,
+                       "点在图外：什么都没命中");
+        }
+
+        // 真画上去了没有：图心那个像素必须是图里的颜色。
+        if (!boxes79.empty() && !boxes79[0].rects.empty()) {
+            const Rect r79 = boxes79[0].rects[0].r_pt;
+            const int fw = e79.frameWidth();
+            const int step = e79.pagePxHeight() + e79.pageGapPx();
+            const int cx = static_cast<int>(std::lround((r79.x + r79.w * 0.5f) * c79.zoom));
+            const int cy = static_cast<int>(std::lround((r79.y + r79.h * 0.5f) * c79.zoom));
+            const uint8_t* fp = e79.frame();
+            const size_t at =
+                (static_cast<size_t>(cy) * static_cast<size_t>(fw) + static_cast<size_t>(cx)) * 4u;
+            (void)step;
+            const bool red = fp[at] > 180 && fp[at + 1] < 90 && fp[at + 2] < 90;
+            expectTrue(red, "图心像素是图里的颜色（不是占位框的底色）");
+        }
+
+        // 资源没注册时仍然插得进去，画面上是占位框。
+        ImageSpec ghost79;
+        ghost79.resource_id = "missing";
+        ghost79.px_w = 20;
+        ghost79.px_h = 10;
+        expectTrue(e79.insertImageAndRender(ghost79), "没注册像素的图也插得进去");
+        boxes79 = e79.images();
+        expectTrue(boxes79.size() == 2 && !boxes79[1].resource_ready,
+                   "第二张的像素不在资源表里（画面上是占位框）");
+        expectTrue(e79.undoAndRender(), "撤销这次插入");
+        expectTrue(e79.images().size() == 1, "撤销之后只剩一张");
+
+        // 改尺寸：一次拖拽只留一步（合并提交）。
+        expectTrue(e79.selectImageAndRender(0), "选中这张图");
+        expectTrue(e79.selectedImage() == 0, "选中的是第 0 张");
+        const int depth0 = e79.undoDepth();
+        expectTrue(e79.resizeImageAndRender(0, 30.0f, 15.0f), "改成 30 x 15 磅");
+        const int depth1 = e79.undoDepth();
+        expectTrue(depth1 == depth0 + 1, "改尺寸在撤销栈里留下一步");
+        expectTrue(e79.resizeImageAndRender(0, 60.0f, 30.0f, /*merge=*/true),
+                   "拖拽的后续一帧（合并提交）");
+        expectTrue(e79.undoDepth() == depth1, "合并提交不增加撤销步数");
+        expectTrue(std::fabs(e79.images()[0].w_pt - 60.0f) < 0.01f, "尺寸落在 60 磅上");
+        expectTrue(e79.undoAndRender(), "撤销");
+        expectTrue(std::fabs(e79.images()[0].w_pt - 72.0f) < 0.01f,
+                   "一次撤销回到拖拽之前（72 磅），不是回到中间那一帧");
+
+        // 表单模式不放行：改尺寸是设计动作。
+        e79.setEditMode(EditMode::Form);
+        e79.relayout();
+        expectTrue(!e79.resizeImage(0, 40.0f, 20.0f), "表单模式拒绝改图片尺寸");
+        e79.setEditMode(EditMode::Document);
+        e79.relayout();
+        expectTrue(std::fabs(e79.images()[0].w_pt - 72.0f) < 0.01f, "被拒之后尺寸一个字都没动");
     }
 
     checkSectionTable();

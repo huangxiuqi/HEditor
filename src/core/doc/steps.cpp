@@ -629,305 +629,326 @@ StepResult canApply(const NodeTree& tree, const Step& step) {
 StepResult canApply(const NodeTree& tree, const FlowIndex& idx, const Step& step) {
     const int size = idx.size();
     StepResult r;
-    std::visit(Overloaded{
-                   [&](const InsertText& s) {
-                       if (!inRange(s.at, size)) {
-                           r.error = "插入位置越界";
-                           return;
-                       }
-                       r.ok = true;
-                   },
-                   [&](const InsertFragment& s) {
-                       if (!inRange(s.at, size)) {
-                           r.error = "插入位置越界";
-                           return;
-                       }
-                       r.ok = true;
-                   },
-                   [&](const DeleteRange& s) {
-                       if (s.begin > s.end || !inRange(s.begin, size) || !inRange(s.end, size)) {
-                           r.error = "删除区间越界";
-                           return;
-                       }
-                       std::vector<Cover> covers;
-                       std::string err;
-                       if (!collectCovers(tree, idx, Range{s.begin, s.end}, &covers, &err)) {
-                           r.error = err;
-                           return;
-                       }
-                       int span = 0;
-                       for (const Cover& c : covers) span += c.to - c.from;
-                       if (span != s.end - s.begin) {
-                           r.error = "删除区间与文档对不上（步骤过期了）";
-                           return;
-                       }
-                       r.ok = true;
-                   },
-                   [&](const InsertParaMark& s) {
-                       if (!inRange(s.at, size)) {
-                           r.error = "分段位置越界";
-                           return;
-                       }
-                       r.ok = true;
-                   },
-                   [&](const RemoveParaMark& s) {
-                       if (!inRange(s.at, size)) {
-                           r.error = "取消分段的位置越界";
-                           return;
-                       }
-                       const Pos p = idx.posAt(s.at);
-                       const Node* n = tree.find(p.container);
-                       if (n == nullptr || !isParagraphMark(n->kind) || p.offset != 0) {
-                           r.error = "该位置上没有段落标记";
-                           return;
-                       }
-                       r.ok = true;
-                   },
-                   [&](const SetParaMarkFormat& s) {
-                       const Node* n = tree.find(s.id);
-                       if (n == nullptr || !isParagraphMark(n->kind)) {
-                           r.error = "改段落格式：目标不是段落标记";
-                           return;
-                       }
-                       // 记的原值要与文档当前值一致，否则这一步是在与别的编辑抢同一枚标记
-                       // （或者步骤被重放到了别的文档上）。拒绝比改错强。
-                       if (!sameParaPatch(n->para, s.before) || n->styleRef != s.beforeStyleRef ||
-                           !(n->marks == s.beforeMarks)) {
-                           r.error = "改段落格式：当前值与步骤记的原值不符（步骤过期了）";
-                           return;
-                       }
-                       r.ok = true;
-                   },
-                   [&](const SetRun& s) {
-                       const Node* n = tree.find(s.id);
-                       if (n == nullptr || n->kind != NodeKind::TextRun) {
-                           r.error = "改字符格式：目标不是文本节点";
-                           return;
-                       }
-                       // 空正文的文本节点没有意义：规范化会把它删掉，撤销就回不到原样。
-                       if (s.text.empty()) {
-                           r.error = "改字符格式：正文不能为空";
-                           return;
-                       }
-                       // 与段落格式同一条守卫：记的原值要与文档当前值一致，否则这一步
-                       //   是在与别的编辑抢同一个节点（或者被重放到了别的文档上）。
-                       if (!(n->marks == s.before) || n->styleRef != s.beforeStyleRef ||
-                           n->text != s.beforeText) {
-                           r.error = "改字符格式：当前值与步骤记的原值不符（步骤过期了）";
-                           return;
-                       }
-                       r.ok = true;
-                   },
-                   [&](const InsertNode& s) {
-                       // 判据落在流位置上：槽位下标活不过一次规范化（相邻同标记的文本节点
-                       //   会被并成一个，后面的槽位整体前移）—— 与 UnwrapNode 同一条。
-                       if (!inRange(s.at_flow, size)) {
-                           r.error = "插入节点：流位置与文档对不上（越界）";
-                           return;
-                       }
-                       const Pos p = slotForFlow(tree, idx, s.at_flow);
-                       const Node* c = tree.find(p.container);
-                       if (c == nullptr || !isContainer(c->kind)) {
-                           r.error = "插入节点：目标不是容器";
-                           return;
-                       }
-                       if (!acceptsChild(c->kind, s.subtree.kind)) {
-                           r.error = std::string("插入节点：") + nodeKindName(c->kind) +
-                                     " 不接受 " + nodeKindName(s.subtree.kind) + " 作为子节点";
-                           return;
-                       }
-                       if (s.detached != kInvalidNodeId) {
-                           const Node* d = tree.find(s.detached);
-                           if (d == nullptr) {
-                               r.error = "插入节点：要挂回的子树不在池里";
-                               return;
-                           }
-                           // 已经挂在树上说明这一步被应用过却没撤销过，再挂一次会拆散父子链。
-                           if (d->parent != nullptr) {
-                               r.error = "插入节点：要挂回的子树已经挂在树上了";
-                               return;
-                           }
-                           if (d->kind != s.subtree.kind) {
-                               r.error = "插入节点：待挂子树的种类与步骤不符";
-                               return;
-                           }
-                       }
-                       r.ok = true;
-                   },
-                   [&](const RemoveNode& s) {
-                       // 与 UnwrapNode 同一条：槽位下标活不过一次规范化，判据落在流位置上 ——
-                       //   那一格上必须站着一个与记录同种（同身份）的节点。
-                       //   槽位用 slotForFlow 而不是 posAt 取：posAt 会下降进叶子孩子
-                       //   （"流位置等于叶子的起点"归叶子自己），要删的正是那个叶子。
-                       if (!inRange(s.at_flow, size)) {
-                           r.error = "删除节点：流位置与文档对不上（越界）";
-                           return;
-                       }
-                       const Pos p = slotForFlow(tree, idx, s.at_flow);
-                       const Node* c = tree.find(p.container);
-                       if (c == nullptr || !isContainer(c->kind)) {
-                           r.error = "删除节点：目标不是容器";
-                           return;
-                       }
-                       if (p.offset < 0 || p.offset >= static_cast<int>(c->children.size())) {
-                           r.error = "删除节点：槽位没有孩子";
-                           return;
-                       }
-                       const Node* kid = c->children[static_cast<size_t>(p.offset)];
-                       if (kid->kind != s.removed.kind) {
-                           r.error = "删除节点：该位置的孩子与步骤记录不符";
-                           return;
-                       }
-                       if (s.detached != kInvalidNodeId && kid->id != s.detached) {
-                           r.error = "删除节点：该位置的孩子的身份与步骤不符";
-                           return;
-                       }
-                       r.ok = true;
-                   },
-                   [&](const UnwrapNode& s) {
-                       // 槽位下标活不过一次规范化（相邻同标记文本节点会被合并，后面的槽位整体
-                       //   前移），所以判据落在流位置上：那一格上必须站着一个与记录同种的节点。
-                       const Pos p = idx.posAt(s.at_flow);
-                       const Node* c = tree.find(p.container);
-                       if (c == nullptr || !isContainer(c->kind)) {
-                           r.error = "拆开节点：目标不是容器";
-                           return;
-                       }
-                       if (p.container != s.at.container) {
-                           // 流位置落进了文本节点内部 —— 那儿不可能站着一个容器：说明这个流
-                           //  位置上要拆的节点已经不在树上了（步骤过期，或已经应用过）。
-                           r.error = "拆开节点：那个流位置上没有容器（步骤过期了）";
-                           return;
-                       }
-                       if (p.offset < 0 || p.offset >= static_cast<int>(c->children.size())) {
-                           r.error = "拆开节点：槽位没有孩子";
-                           return;
-                       }
-                       const Node* node = c->children[static_cast<size_t>(p.offset)];
-                       if (node->kind != s.node.kind) {
-                           r.error = "拆开节点：该位置的孩子与步骤记录不符";
-                           return;
-                       }
-                       if (s.detached != kInvalidNodeId && node->id != s.detached) {
-                           r.error = "拆开节点：该位置的孩子的身份与步骤不符";
-                           return;
-                       }
-                       // 上提之后每个孩子都要落在父容器里 —— 父容器可能不接受它的种类。
-                       //   先查再动手：半途拒绝会留下"孩子已经搬了一半"的树。
-                       for (const Node* kid : node->children) {
-                           if (!acceptsChild(c->kind, kid->kind)) {
-                               r.error = std::string("拆开节点：") + nodeKindName(c->kind) +
-                                         " 不能直接容纳 " + nodeKindName(kid->kind);
-                               return;
-                           }
-                       }
-                       r.ok = true;
-                   },
-                   [&](const WrapNode& s) {
-                       // 两端的槽位不能各算各的：规范化把整段文字并成一个文本节点之后，
-                       //   两个端点会落在同一个孩子上，各自换算都得到同一个槽位（个数就成了 0）。
-                       //   所以按"这一段流区间在容器里对应哪些切片"一次性算出来。
-                       if (s.span_before < 2) {
-                           r.error = "包起节点：区间太窄，装不下一个容器";
-                           return;
-                       }
-                       const Pos a = slotForFlow(tree, idx, s.at_flow);
-                       const Node* c = tree.find(a.container);
-                       if (c == nullptr || !isContainer(c->kind)) {
-                           r.error = "包起节点：目标不是容器";
-                           return;
-                       }
-                       std::vector<const Node*> run;
-                       int start_slot = -1;
-                       // 区间取 [at_flow, at_flow + span_after)：这是这一步所在状态里的地址，
-                       //   也就是拆开之后（少了那两枚边界）的地址。span_before 是拆之前节点
-                       //   的跨度，只在 mapPos 与校验宽度时用。
-                       if (!runForFlowRange(tree, idx, a.container, s.at_flow,
-                                            s.at_flow + s.span_after, &run, &start_slot)) {
-                           r.error = "包起节点：这段流区间横跨了容器边界";
-                           return;
-                       }
-                       if (run.size() != s.node.children.size()) {
-                           r.error = "包起节点：槽位里有 " + std::to_string(run.size()) +
-                                     " 个孩子，步骤记的是 " +
-                                     std::to_string(s.node.children.size());
-                           return;
-                       }
-                       for (size_t k = 0; k < run.size(); ++k) {
-                           if (run[k]->kind != s.node.children[k].kind) {
-                               r.error = "包起节点：槽位里的孩子与步骤记录不符";
-                               return;
-                           }
-                       }
-                       if (!acceptsChild(c->kind, s.node.kind)) {
-                           r.error = std::string("包起节点：") + nodeKindName(c->kind) +
-                                     " 不接受 " + nodeKindName(s.node.kind);
-                           return;
-                       }
-                       if (s.detached == kInvalidNodeId || tree.find(s.detached) == nullptr) {
-                           r.error = "包起节点：要挂回的节点不在池里";
-                           return;
-                       }
-                       r.ok = true;
-                   },
-                   [&](const SetControlProp& s) {
-                       bool now = false;
-                       if (!readControlProp(tree, s.id, s.prop, &now)) {
-                           r.error = "改属性：目标不是内容控件";
-                           return;
-                       }
-                       // 记的原值要与文档当前值一致，否则这一步是与别的编辑抢同一个属性
-                       // （或者步骤被重放到了别的文档上）。拒绝比改错强。
-                       if (now != s.before) {
-                           r.error = std::string("改属性：") + controlPropName(s.prop) +
-                                     " 的当前值与步骤记的原值不符（步骤过期了）";
-                           return;
-                       }
-                       r.ok = true;
-                   },
-                   [&](const SetControlValue& s) {
-                       const Node* n = tree.find(s.id);
-                       if (n == nullptr || n->kind != NodeKind::ContentControl) {
-                           r.error = "改值：目标不是内容控件";
-                           return;
-                       }
-                       // 文本类的值在内容里，走内容级步骤。在这一层改它的 value 字段等于改一个
-                       // 取值时不会被读到的位置，看起来成功了、实际什么都没变。
-                       if (n->control.valueShape == ValueShape::Text) {
-                           r.error = "改值：文本类的值在内容里，不走属性侧的值步骤";
-                           return;
-                       }
-                       ControlValue now;
-                       if (!readControlValue(tree, s.id, &now)) {
-                           r.error = "改值：目标不是内容控件";
-                           return;
-                       }
-                       if (!(now == s.before)) {
-                           r.error = "改值：当前值与步骤记的原值不符（步骤过期了）";
-                           return;
-                       }
-                       r.ok = true;
-                   },
-                   [&](const SetTableCellSpan& s) {
-                       const Node* n = tree.find(s.id);
-                       if (n == nullptr || n->kind != NodeKind::TableCell) {
-                           r.error = "改跨度：目标不是单元格";
-                           return;
-                       }
-                       // 0 或负数不是可表达的跨度：真放过去，派生网格会把这一行算短，
-                       // 而"每行跨度之和相等"那条不变量要到下一次检查才报出来。
-                       if (s.span.row_span < 1 || s.span.col_span < 1) {
-                           r.error = "改跨度：跨度至少是 1";
-                           return;
-                       }
-                       if (!(n->cell == s.before)) {
-                           r.error = "改跨度：当前跨度与步骤记的原值不符（步骤过期了）";
-                           return;
-                       }
-                       r.ok = true;
-                   },
-               },
-               step);
+    std::visit(
+        Overloaded{
+            [&](const InsertText& s) {
+                if (!inRange(s.at, size)) {
+                    r.error = "插入位置越界";
+                    return;
+                }
+                r.ok = true;
+            },
+            [&](const InsertFragment& s) {
+                if (!inRange(s.at, size)) {
+                    r.error = "插入位置越界";
+                    return;
+                }
+                r.ok = true;
+            },
+            [&](const DeleteRange& s) {
+                if (s.begin > s.end || !inRange(s.begin, size) || !inRange(s.end, size)) {
+                    r.error = "删除区间越界";
+                    return;
+                }
+                std::vector<Cover> covers;
+                std::string err;
+                if (!collectCovers(tree, idx, Range{s.begin, s.end}, &covers, &err)) {
+                    r.error = err;
+                    return;
+                }
+                int span = 0;
+                for (const Cover& c : covers) span += c.to - c.from;
+                if (span != s.end - s.begin) {
+                    r.error = "删除区间与文档对不上（步骤过期了）";
+                    return;
+                }
+                r.ok = true;
+            },
+            [&](const InsertParaMark& s) {
+                if (!inRange(s.at, size)) {
+                    r.error = "分段位置越界";
+                    return;
+                }
+                r.ok = true;
+            },
+            [&](const RemoveParaMark& s) {
+                if (!inRange(s.at, size)) {
+                    r.error = "取消分段的位置越界";
+                    return;
+                }
+                const Pos p = idx.posAt(s.at);
+                const Node* n = tree.find(p.container);
+                if (n == nullptr || !isParagraphMark(n->kind) || p.offset != 0) {
+                    r.error = "该位置上没有段落标记";
+                    return;
+                }
+                r.ok = true;
+            },
+            [&](const SetParaMarkFormat& s) {
+                const Node* n = tree.find(s.id);
+                if (n == nullptr || !isParagraphMark(n->kind)) {
+                    r.error = "改段落格式：目标不是段落标记";
+                    return;
+                }
+                // 记的原值要与文档当前值一致，否则这一步是在与别的编辑抢同一枚标记
+                // （或者步骤被重放到了别的文档上）。拒绝比改错强。
+                if (!sameParaPatch(n->para, s.before) || n->styleRef != s.beforeStyleRef ||
+                    !(n->marks == s.beforeMarks)) {
+                    r.error = "改段落格式：当前值与步骤记的原值不符（步骤过期了）";
+                    return;
+                }
+                r.ok = true;
+            },
+            [&](const SetRun& s) {
+                const Node* n = tree.find(s.id);
+                if (n == nullptr || n->kind != NodeKind::TextRun) {
+                    r.error = "改字符格式：目标不是文本节点";
+                    return;
+                }
+                // 空正文的文本节点没有意义：规范化会把它删掉，撤销就回不到原样。
+                if (s.text.empty()) {
+                    r.error = "改字符格式：正文不能为空";
+                    return;
+                }
+                // 与段落格式同一条守卫：记的原值要与文档当前值一致，否则这一步
+                //   是在与别的编辑抢同一个节点（或者被重放到了别的文档上）。
+                if (!(n->marks == s.before) || n->styleRef != s.beforeStyleRef ||
+                    n->text != s.beforeText) {
+                    r.error = "改字符格式：当前值与步骤记的原值不符（步骤过期了）";
+                    return;
+                }
+                r.ok = true;
+            },
+            [&](const InsertNode& s) {
+                // 判据落在流位置上：槽位下标活不过一次规范化（相邻同标记的文本节点
+                //   会被并成一个，后面的槽位整体前移）—— 与 UnwrapNode 同一条。
+                if (!inRange(s.at_flow, size)) {
+                    r.error = "插入节点：流位置与文档对不上（越界）";
+                    return;
+                }
+                const Pos p = slotForFlow(tree, idx, s.at_flow);
+                const Node* c = tree.find(p.container);
+                if (c == nullptr || !isContainer(c->kind)) {
+                    r.error = "插入节点：目标不是容器";
+                    return;
+                }
+                if (!acceptsChild(c->kind, s.subtree.kind)) {
+                    r.error = std::string("插入节点：") + nodeKindName(c->kind) + " 不接受 " +
+                              nodeKindName(s.subtree.kind) + " 作为子节点";
+                    return;
+                }
+                if (s.detached != kInvalidNodeId) {
+                    const Node* d = tree.find(s.detached);
+                    if (d == nullptr) {
+                        r.error = "插入节点：要挂回的子树不在池里";
+                        return;
+                    }
+                    // 已经挂在树上说明这一步被应用过却没撤销过，再挂一次会拆散父子链。
+                    if (d->parent != nullptr) {
+                        r.error = "插入节点：要挂回的子树已经挂在树上了";
+                        return;
+                    }
+                    if (d->kind != s.subtree.kind) {
+                        r.error = "插入节点：待挂子树的种类与步骤不符";
+                        return;
+                    }
+                }
+                r.ok = true;
+            },
+            [&](const RemoveNode& s) {
+                // 与 UnwrapNode 同一条：槽位下标活不过一次规范化，判据落在流位置上 ——
+                //   那一格上必须站着一个与记录同种（同身份）的节点。
+                //   槽位用 slotForFlow 而不是 posAt 取：posAt 会下降进叶子孩子
+                //   （"流位置等于叶子的起点"归叶子自己），要删的正是那个叶子。
+                if (!inRange(s.at_flow, size)) {
+                    r.error = "删除节点：流位置与文档对不上（越界）";
+                    return;
+                }
+                const Pos p = slotForFlow(tree, idx, s.at_flow);
+                const Node* c = tree.find(p.container);
+                if (c == nullptr || !isContainer(c->kind)) {
+                    r.error = "删除节点：目标不是容器";
+                    return;
+                }
+                if (p.offset < 0 || p.offset >= static_cast<int>(c->children.size())) {
+                    r.error = "删除节点：槽位没有孩子";
+                    return;
+                }
+                const Node* kid = c->children[static_cast<size_t>(p.offset)];
+                if (kid->kind != s.removed.kind) {
+                    r.error = "删除节点：该位置的孩子与步骤记录不符";
+                    return;
+                }
+                if (s.detached != kInvalidNodeId && kid->id != s.detached) {
+                    r.error = "删除节点：该位置的孩子的身份与步骤不符";
+                    return;
+                }
+                r.ok = true;
+            },
+            [&](const UnwrapNode& s) {
+                // 槽位下标活不过一次规范化（相邻同标记文本节点会被合并，后面的槽位整体
+                //   前移），所以判据落在流位置上：那一格上必须站着一个与记录同种的节点。
+                const Pos p = idx.posAt(s.at_flow);
+                const Node* c = tree.find(p.container);
+                if (c == nullptr || !isContainer(c->kind)) {
+                    r.error = "拆开节点：目标不是容器";
+                    return;
+                }
+                if (p.container != s.at.container) {
+                    // 流位置落进了文本节点内部 —— 那儿不可能站着一个容器：说明这个流
+                    //  位置上要拆的节点已经不在树上了（步骤过期，或已经应用过）。
+                    r.error = "拆开节点：那个流位置上没有容器（步骤过期了）";
+                    return;
+                }
+                if (p.offset < 0 || p.offset >= static_cast<int>(c->children.size())) {
+                    r.error = "拆开节点：槽位没有孩子";
+                    return;
+                }
+                const Node* node = c->children[static_cast<size_t>(p.offset)];
+                if (node->kind != s.node.kind) {
+                    r.error = "拆开节点：该位置的孩子与步骤记录不符";
+                    return;
+                }
+                if (s.detached != kInvalidNodeId && node->id != s.detached) {
+                    r.error = "拆开节点：该位置的孩子的身份与步骤不符";
+                    return;
+                }
+                // 上提之后每个孩子都要落在父容器里 —— 父容器可能不接受它的种类。
+                //   先查再动手：半途拒绝会留下"孩子已经搬了一半"的树。
+                for (const Node* kid : node->children) {
+                    if (!acceptsChild(c->kind, kid->kind)) {
+                        r.error = std::string("拆开节点：") + nodeKindName(c->kind) +
+                                  " 不能直接容纳 " + nodeKindName(kid->kind);
+                        return;
+                    }
+                }
+                r.ok = true;
+            },
+            [&](const WrapNode& s) {
+                // 两端的槽位不能各算各的：规范化把整段文字并成一个文本节点之后，
+                //   两个端点会落在同一个孩子上，各自换算都得到同一个槽位（个数就成了 0）。
+                //   所以按"这一段流区间在容器里对应哪些切片"一次性算出来。
+                if (s.span_before < 2) {
+                    r.error = "包起节点：区间太窄，装不下一个容器";
+                    return;
+                }
+                const Pos a = slotForFlow(tree, idx, s.at_flow);
+                const Node* c = tree.find(a.container);
+                if (c == nullptr || !isContainer(c->kind)) {
+                    r.error = "包起节点：目标不是容器";
+                    return;
+                }
+                std::vector<const Node*> run;
+                int start_slot = -1;
+                // 区间取 [at_flow, at_flow + span_after)：这是这一步所在状态里的地址，
+                //   也就是拆开之后（少了那两枚边界）的地址。span_before 是拆之前节点
+                //   的跨度，只在 mapPos 与校验宽度时用。
+                if (!runForFlowRange(tree, idx, a.container, s.at_flow, s.at_flow + s.span_after,
+                                     &run, &start_slot)) {
+                    r.error = "包起节点：这段流区间横跨了容器边界";
+                    return;
+                }
+                if (run.size() != s.node.children.size()) {
+                    r.error = "包起节点：槽位里有 " + std::to_string(run.size()) +
+                              " 个孩子，步骤记的是 " + std::to_string(s.node.children.size());
+                    return;
+                }
+                for (size_t k = 0; k < run.size(); ++k) {
+                    if (run[k]->kind != s.node.children[k].kind) {
+                        r.error = "包起节点：槽位里的孩子与步骤记录不符";
+                        return;
+                    }
+                }
+                if (!acceptsChild(c->kind, s.node.kind)) {
+                    r.error = std::string("包起节点：") + nodeKindName(c->kind) + " 不接受 " +
+                              nodeKindName(s.node.kind);
+                    return;
+                }
+                if (s.detached == kInvalidNodeId || tree.find(s.detached) == nullptr) {
+                    r.error = "包起节点：要挂回的节点不在池里";
+                    return;
+                }
+                r.ok = true;
+            },
+            [&](const SetControlProp& s) {
+                bool now = false;
+                if (!readControlProp(tree, s.id, s.prop, &now)) {
+                    r.error = "改属性：目标不是内容控件";
+                    return;
+                }  // 记的原值要与文档当前值一致，否则这一步是与别的编辑抢同一个属性
+                // （或者步骤被重放到了别的文档上）。拒绝比改错强。
+                if (now != s.before) {
+                    r.error = std::string("改属性：") + controlPropName(s.prop) +
+                              " 的当前值与步骤记的原值不符（步骤过期了）";
+                    return;
+                }
+                r.ok = true;
+            },
+            [&](const SetControlValue& s) {
+                const Node* n = tree.find(s.id);
+                if (n == nullptr || n->kind != NodeKind::ContentControl) {
+                    r.error = "改值：目标不是内容控件";
+                    return;
+                }
+                // 文本类的值在内容里，走内容级步骤。在这一层改它的 value 字段等于改一个
+                // 取值时不会被读到的位置，看起来成功了、实际什么都没变。
+                if (n->control.valueShape == ValueShape::Text) {
+                    r.error = "改值：文本类的值在内容里，不走属性侧的值步骤";
+                    return;
+                }
+                ControlValue now;
+                if (!readControlValue(tree, s.id, &now)) {
+                    r.error = "改值：目标不是内容控件";
+                    return;
+                }
+                if (!(now == s.before)) {
+                    r.error = "改值：当前值与步骤记的原值不符（步骤过期了）";
+                    return;
+                }
+                r.ok = true;
+            },
+            [&](const SetTableCellSpan& s) {
+                const Node* n = tree.find(s.id);
+                if (n == nullptr || n->kind != NodeKind::TableCell) {
+                    r.error = "改跨度：目标不是单元格";
+                    return;
+                }
+                // 0 或负数不是可表达的跨度：真放过去，派生网格会把这一行算短，
+                // 而"每行跨度之和相等"那条不变量要到下一次检查才报出来。
+                if (s.span.row_span < 1 || s.span.col_span < 1) {
+                    r.error = "改跨度：跨度至少是 1";
+                    return;
+                }
+                if (!(n->cell == s.before)) {
+                    r.error = "改跨度：当前跨度与步骤记的原值不符（步骤过期了）";
+                    return;
+                }
+                r.ok = true;
+            },
+            [&](const SetImageSize& s) {
+                const Node* n = tree.find(s.id);
+                if (n == nullptr || n->kind != NodeKind::Image) {
+                    r.error = "改图片尺寸：目标不是图片";
+                    return;
+                }
+                // 原值对不上说明这一步与别的编辑抢同一张图，或者被重放到了别的文档上。
+                if (!(n->image.width == s.beforeWidth) || !(n->image.height == s.beforeHeight)) {
+                    r.error = "改图片尺寸：当前尺寸与步骤记的原值不符（步骤过期了）";
+                    return;
+                }
+                // 零宽或负宽的图不是图片：排版会给它一个零宽的盒子，画面上就是"图没了"。
+                if (s.width.kind == LengthKind::Abs && s.width.abs_emu <= 0) {
+                    r.error = "改图片尺寸：宽度必须为正";
+                    return;
+                }
+                if (s.height.kind == LengthKind::Abs && s.height.abs_emu <= 0) {
+                    r.error = "改图片尺寸：高度必须为正";
+                    return;
+                }
+                r.ok = true;
+            },
+        },
+        step);
     return r;
 }
 
@@ -1046,6 +1067,12 @@ StepResult applyStep(NodeTree& tree, const Step& step) {
             [&](const SetTableCellSpan& s) {
                 Node* n = tree.find(s.id);
                 if (n != nullptr) n->cell = s.span;
+            },
+            [&](const SetImageSize& s) {
+                Node* n = tree.find(s.id);
+                if (n == nullptr) return;
+                n->image.width = s.width;
+                n->image.height = s.height;
             },
         },
         step);
@@ -1176,6 +1203,15 @@ Step invertStep(const Step& step) {
                               x.before = s.span;
                               return Step{x};
                           },
+                          [](const SetImageSize& s) -> Step {
+                              SetImageSize x;
+                              x.id = s.id;
+                              x.width = s.beforeWidth;
+                              x.height = s.beforeHeight;
+                              x.beforeWidth = s.width;
+                              x.beforeHeight = s.height;
+                              return Step{x};
+                          },
                       },
                       step);
 }
@@ -1243,6 +1279,8 @@ FlowPos mapPos(const Step& step, FlowPos pos, Assoc assoc) {
                           [&](const SetControlValue&) -> FlowPos { return pos; },
                           // 跨度不改流位置，也不改流结构：它改的是"这一格覆盖多少格位"。
                           [&](const SetTableCellSpan&) -> FlowPos { return pos; },
+                          // 图片尺寸只改行盒几何，位置一个都不动。
+                          [&](const SetImageSize&) -> FlowPos { return pos; },
                           // 段落格式与字符格式同理：改的是节点上的数据，位置一个都不动。
                           [&](const SetParaMarkFormat&) -> FlowPos { return pos; },
                           [&](const SetRun&) -> FlowPos { return pos; },
@@ -1256,6 +1294,7 @@ bool mapStepPositions(Step* target, const Step& mapped_by, Assoc assoc) {
     if (std::holds_alternative<SetControlProp>(*target) ||
         std::holds_alternative<SetControlValue>(*target) ||
         std::holds_alternative<SetTableCellSpan>(*target) ||
+        std::holds_alternative<SetImageSize>(*target) ||
         std::holds_alternative<SetParaMarkFormat>(*target) ||
         std::holds_alternative<SetRun>(*target)) {
         return true;

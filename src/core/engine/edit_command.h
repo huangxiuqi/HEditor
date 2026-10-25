@@ -36,6 +36,7 @@
 #include "core/rev/capability.h"
 #include "core/rev/flow.h"
 #include "core/rev/rev.h"
+#include "core/rev/session.h"
 
 namespace heditor {
 /**
@@ -56,10 +57,11 @@ public:
      * @param dirty_para 起始脏段（-1 = 整篇重排）
      * @param selection_before 编辑前的选区
      * @param selection_after 编辑后的选区
+     * @param merge 与上一次提交的关系（连续拖拽只留一步，见 rev::MergeRun）
      * @return false = 这一步没做成（步骤没落地、产物没重建）
      */
     virtual bool commitSteps(std::vector<Step> steps, int dirty_para, Range selection_before,
-                             Range selection_after) = 0;
+                             Range selection_after, rev::MergeRun merge) = 0;
 };
 
 /**
@@ -316,6 +318,31 @@ public:
     bool insertControl(const ControlSpec& spec, const std::string& label);
 
     /**
+     * 在光标处插一张图片（行内原子）。光标摆到图片之后。
+     *
+     * 图片是行内叶子：它不切断段落，与文字同流，所以断行、跨页、撤销与增量排版全部
+     * 走现成那条路。只在文档模式放行（插图是设计动作）。
+     *
+     * @param spec 图片记录（资源 id、原始像素尺寸与显示尺寸）
+     * @return true = 插进去了
+     */
+    bool insertImage(const ImageSpec& spec);
+
+    /**
+     * 改一张图片的显示尺寸（磅），落成绝对长度。
+     *
+     * 幂等：目标尺寸与当前尺寸在 0.01 磅以内相同时返回 true 但不产生步骤 ——
+     * 拖拽过程中每移动一像素都提交一次的话，撤销栈会被一步一像素填满。
+     *
+     * @param id 图片节点
+     * @param w_pt 新宽度（磅，必须为正）
+     * @param h_pt 新高度（磅，必须为正）
+     * @param continue_run 拖拽的后续每一帧传 true（并进上一步撤销）；第一帧传 false
+     * @return true = 改成了（或者本来就是这个尺寸）
+     */
+    bool resizeImage(NodeId id, float w_pt, float h_pt, bool continue_run);
+
+    /**
      * 改控件的一个运行时属性。幂等：值没变就不提交 —— 撤销栈里多一条什么都没做的记录
      * 只会让人困惑。
      *
@@ -514,8 +541,23 @@ private:
      * 选区快照随步骤一起给出：修订只记内容、不记光标，而撤销要回到"按下去之前"的那个位置。
      */
     bool commit(std::vector<Step> steps, int dirty_para) const {
-        return view_.host != nullptr && view_.host->commitSteps(std::move(steps), dirty_para,
-                                                                pending_before_, pending_after_);
+        return commit(std::move(steps), dirty_para, rev::MergeRun::None);
+    }
+
+    /**
+     * 把一批步骤交出去，并声明"它与上一次提交是同一次连贯操作的一部分"。
+     *
+     * 拖拽改尺寸是唯一用到它的一路：每移动一像素提交一次，撤销栈里就不该多一条。
+     * 合并的判据在会话层（上一次提交也带这个标记），所以它不依赖时间窗，也不看内容。
+     * @param steps 这一批步骤
+     * @param dirty_para 起始脏段
+     * @param merge 与上一次提交的关系
+     * @return true = 改成了
+     */
+    bool commit(std::vector<Step> steps, int dirty_para, rev::MergeRun merge) const {
+        return view_.host != nullptr &&
+               view_.host->commitSteps(std::move(steps), dirty_para, pending_before_,
+                                       pending_after_, merge);
     }
 
     /**

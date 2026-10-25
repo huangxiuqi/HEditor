@@ -26,6 +26,7 @@
 #include "core/engine/edit_command.h"
 #include "core/engine/engine_config.h"
 #include "core/engine/engine_stats.h"
+#include "core/engine/image_store.h"
 #include "core/layout/layout.h"
 #include "core/render/bitmap.h"
 #include "core/rev/capability.h"
@@ -1227,6 +1228,12 @@ public:
     bool redoAndRender();
 
     /**
+     * 撤销栈里还有几步。宿主用它做禁用态，判据用它验"一次拖拽只留一步"。
+     * @return 步数
+     */
+    int undoDepth() const;
+
+    /**
      * 文档坐标（磅）落在哪个控件上（取最内层）。-1 = 没有。
      * 它走的是 hitTestPt 的同一份几何，所以"视觉上在框里"与
      * "逻辑上在控件里"永远一致。
@@ -1419,6 +1426,221 @@ public:
      * @return true = 落到了一个控件上
      */
     bool focusControlAndRender(bool forward);
+
+    /**
+     * 文档里一张图片的几何与状态：宿主定位选中框、算拖拽落点、读尺寸都用它。
+     */
+    struct ImageBox {
+        /**
+         * 文档顺序的下标（selectImage / resizeImage 收它）。
+         */
+        int index = -1;
+
+        /**
+         * 节点 id（编辑之后仍然有效）。
+         */
+        NodeId id = kInvalidNodeId;
+
+        /**
+         * 资源 id（文档里存的那一个）。
+         */
+        std::string resource_id;
+
+        /**
+         * 它落在哪几页（跨页时多段），页内磅。
+         */
+        std::vector<PageRect> rects;
+
+        /**
+         * 显示宽度（磅）。
+         */
+        float w_pt = 0.0f;
+
+        /**
+         * 显示高度（磅）。
+         */
+        float h_pt = 0.0f;
+
+        /**
+         * 像素在不在资源表里（不在时画面上是占位框）。
+         */
+        bool resource_ready = false;
+    };
+
+    /**
+     * 图片上的一次命中。
+     */
+    struct ImageHit {
+        /**
+         * 图片下标；-1 = 没点到图片。
+         */
+        int index = -1;
+
+        /**
+         * 把手序号（0 左上、1 上、2 右上、3 右、4 右下、5 下、6 左下、7 左）；-1 = 点在图上。
+         */
+        int handle = -1;
+    };
+
+    /**
+     * 注册一张图片的像素。文档只存资源 id，换台机器打开时由宿主重新注册。
+     *
+     * 重复注册同一个 id 表示"这张图换了"：资源版本上调，页位图因此重光栅 ——
+     * 文档与页指纹都没变，光栅签名里混了资源表的变更计数才判得出来。
+     *
+     * @param id 资源 id
+     * @param width 像素宽
+     * @param height 像素高
+     * @param rgba 未预乘的 RGBA（行优先）
+     * @param bytes 字节数（必须等于 width * height * 4）
+     * @param error 写回失败原因（尺寸非法、字节数不符、超出上限）
+     * @return true = 收下了
+     */
+    bool registerImage(const std::string& id, int width, int height, const uint8_t* rgba,
+                       size_t bytes, std::string* error);
+
+    /**
+     * 注册像素 + 立刻重光栅呈现（宿主上传完图片就要看得见）。
+     *
+     * @param id 资源 id
+     * @param width 像素宽
+     * @param height 像素高
+     * @param rgba 未预乘的 RGBA（行优先）
+     * @param bytes 字节数
+     * @param error 写回失败原因
+     * @return true = 收下了
+     */
+    bool registerImageAndRepaint(const std::string& id, int width, int height, const uint8_t* rgba,
+                                 size_t bytes, std::string* error);
+
+    /**
+     * 删掉一张图片的像素。文档里对它的引用不变，画面上退回占位框。
+     * @param id 资源 id
+     * @return true = 真的删掉了一张
+     */
+    bool dropImage(const std::string& id);
+
+    /**
+     * 删掉像素 + 重光栅呈现。
+     * @param id 资源 id
+     * @return true = 真的删掉了一张
+     */
+    bool dropImageAndRepaint(const std::string& id);
+
+    /**
+     * 资源表里的张数与字节数（诊断与容量核算用）。
+     * @return 张数
+     */
+    int imageCount() const { return images_.count(); }
+
+    /**
+     * 资源表占的像素字节数。
+     * @return 字节数
+     */
+    size_t imageBytes() const { return images_.bytes(); }
+
+    /**
+     * 在光标处插一张图片（行内原子）。光标摆到图片之后。
+     *
+     * 只在文档模式放行：插图是设计动作。插进去的图片落在当前段里，与文字同流，
+     * 所以断行、跨页、撤销与增量排版全部走现成那条路。
+     *
+     * @param spec 图片记录（资源 id、原始像素尺寸与显示尺寸）
+     * @return true = 插进去了
+     */
+    bool insertImage(const ImageSpec& spec);
+
+    /**
+     * 插图片 + 重排 + 呈现。
+     * @param spec 图片记录
+     * @return true = 插进去了
+     */
+    bool insertImageAndRender(const ImageSpec& spec);
+
+    /**
+     * 列出文档里全部图片（文档顺序）。
+     * @return 每张图一条几何与状态
+     */
+    std::vector<ImageBox> images() const;
+
+    /**
+     * 按文档顺序取一张图的几何。
+     * @param index 下标
+     * @param out 写回几何
+     * @return true = 下标有效
+     */
+    bool imageBox(int index, ImageBox* out) const;
+
+    /**
+     * 命中：文档坐标（磅）落在哪一张图的哪一部分上。
+     *
+     * 把手优先于图身：把手有一半长在图外，点在图外那一半上时若判成"没点到"，
+     * 边角就拖不动。返回的序号与绘制时用的是同一份几何（见 imageHandleCenters）。
+     *
+     * @param x_pt_doc 文档坐标 x（磅）
+     * @param y_pt_doc 文档坐标 y（磅）
+     * @return 命中的图片与把手；没点到图片时 index 为 -1
+     */
+    ImageHit imageAtPt(float x_pt_doc, float y_pt_doc) const;
+
+    /**
+     * 选中一张图片（画面上出拖拽框与八个把手）。
+     *
+     * 图片选区与文本选区互斥：任何光标定位、选区改动、文档提交都会清掉它。
+     * 只在文档模式放行 —— 表单与只读模式里点图片只是把光标落到它旁边。
+     *
+     * @param index 图片下标
+     * @return true = 选中了
+     */
+    bool selectImage(int index);
+
+    /**
+     * 选中图片 + 呈现（拖拽框是瞬态层，必须重贴一次才看得见）。
+     * @param index 图片下标
+     * @return true = 选中了
+     */
+    bool selectImageAndRender(int index);
+
+    /**
+     * 取消图片选中。
+     */
+    void clearImageSelection();
+
+    /**
+     * 取消图片选中 + 呈现。
+     * @return true = 之前选中着一张
+     */
+    bool clearImageSelectionAndRender();
+
+    /**
+     * 当前选中的图片下标；没有选中时 -1。
+     * @return 图片下标
+     */
+    int selectedImage() const;
+
+    /**
+     * 改一张图片的显示尺寸（磅）。幂等：尺寸没变时返回 true 但不产生步骤。
+     *
+     * 尺寸落成绝对长度（作者意图），按像素与 DPI 折算的 Auto 就此被钉住 ——
+     * 拖过把手之后那张图的显示尺寸不再随 DPI 变动，这是"我把它拖成这么大"的字面意思。
+     *
+     * @param index 图片下标
+     * @param w_pt 新宽度（磅，必须为正）
+     * @param h_pt 新高度（磅，必须为正）
+     * @param continue_run 拖拽的后续每一帧传 true（并进上一步撤销）；第一帧传 false
+     * @return true = 改成了（或者本来就是这个尺寸）
+     */
+    bool resizeImage(int index, float w_pt, float h_pt, bool continue_run = false);
+
+    /**
+     * 改尺寸 + 重排 + 呈现。图片尺寸改的是行盒几何，整段与后续内容都要跟着动。
+     * @param index 图片下标
+     * @param w_pt 新宽度（磅）
+     * @param h_pt 新高度（磅）
+     * @param continue_run 拖拽的后续每一帧传 true；第一帧传 false
+     * @return true = 改成了
+     */
+    bool resizeImageAndRender(int index, float w_pt, float h_pt, bool continue_run = false);
 
     /**
      * 帧自审：把当前这一帧与"整帧重画一遍"的结果逐字节比，返回
@@ -1892,7 +2114,7 @@ private:
      * 会话层保证"被拒的编辑不占撤销栈"，这里再保证产物不跟着半途改。
      */
     bool commitSteps(std::vector<Step> steps, int dirty_para, Range selection_before,
-                     Range selection_after) override;
+                     Range selection_after, rev::MergeRun merge) override;
 
     /**
      * 撤销上限（会话要的那个数）。配置里的 0 是"不限制"，与"不留历史"不是一回事。
@@ -1980,7 +2202,35 @@ private:
          * 这一页上的光标矩形（最多一条）。
          */
         Rect caret{};
+
+        /**
+         * 这一页上的图片拖拽框与把手（细边矩形）。与选区同一层：呈现时叠、导出时不叠 ——
+         * 打印出来带一圈把手是错的。
+         */
+        std::vector<Rect> image_ui;
     };
+
+    /**
+     * "页位图上画出来是什么"的签名：换缩放、换页度量、换底色、换图片像素都算一次变化。
+     * 签名一变，全部页位图作废（判据在 pageBitmapFresh）—— 新增光栅相关配置项时只要
+     * 加进它，不必维护一张"记得清缓存"的清单。
+     * @return 签名
+     */
+    uint64_t rasterSignatureNow() const;
+
+    /**
+     * 文档里的图片节点，按文档顺序。按修订代号缓存 —— 命中测试每次按下与拖动都会问它，
+     * 而一次走树在两千段的文档上是几十微秒，拖选时按帧计就是白花的。
+     * @return 图片节点 id（文档一改就重建）
+     */
+    const std::vector<NodeId>& imageNodeIds() const;
+
+    /**
+     * 这一页上的图片拖拽框与把手（页内像素矩形）。没选中图片、或不在文档模式时为空。
+     * @param page 页号
+     * @param out 写回矩形（追加前会清空）
+     */
+    void collectImageUi(int page, std::vector<Rect>* out) const;
 
     /**
      * 这一页现在该叠哪些瞬态（页内像素坐标）。presentInternal 按页算差集、导出按页取用。
@@ -2520,6 +2770,34 @@ private:
      * 靠它把句柄翻译成本层对外的口径。
      */
     std::unordered_map<int, int> owner_index_;
+
+    /**
+     * 图片资源表（宿主注册的像素）。文档只存 id，这里存字节。
+     */
+    ImageStore images_;
+
+    /**
+     * 图片节点表与它对应的修订代号。
+     */
+    mutable std::vector<NodeId> image_ids_;
+
+    /**
+     * image_ids_ 是按哪一版修订算出来的。
+     */
+    mutable uint64_t image_ids_gen_ = 0;
+
+    /**
+     * image_ids_ 算过没有（代号初值 0 与会话的初值撞车，单靠代号分不出"没算过"）。
+     */
+    mutable bool image_ids_valid_ = false;
+
+    /**
+     * 选中的图片（kInvalid = 没选中）。
+     *
+     * 它是一份对象选区，与文本选区互斥：光标一动、选区一改、文档一提交就清掉 ——
+     * 两套选区同时存在的话，"按删除键删的是哪一段"没有答案。
+     */
+    NodeId image_sel_ = kInvalidNodeId;
 
     /**
      * 树口径的流索引。可见性与编译同一处取（编辑态是设计态，呈现态摘掉隐藏子树），

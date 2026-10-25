@@ -902,6 +902,9 @@ export function createDomHost(o: DomHostOptions): DomHost {
       caretOn = true;
       void afterEdit('cellSelectAt', 'user');
     },
+    images: () => then1(read('imageList'), (r: any) => (r && Array.isArray(r.images) ? r.images : [])),
+    selectImage: (i) => writeOp('selectImage', { i }),
+    resizeImage: (i, w, h, merge) => writeOp('resizeImage', { i, w, h, merge }),
     status: (text, isErr) => o.status?.(text, isErr),
     preedit: (text) => showPreedit(text),
     zoomBy: (delta) => o.onZoomBy?.(delta),

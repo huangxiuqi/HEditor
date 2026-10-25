@@ -102,6 +102,11 @@ struct EngineConfig {
     Color selection_color = Color{178, 214, 255, 90};
 
     /**
+     * 图片拖拽框与把手的颜色。只画在呈现层（瞬态），不进页位图、不进导出。
+     */
+    Color image_mark = Color::rgb(43, 127, 255);
+
+    /**
      * 光标线宽（磅）。下限 0.4，宿主设更小时按 0.4 画。
      */
     float caret_width_pt = 1.0f;

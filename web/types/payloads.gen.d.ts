@@ -85,6 +85,19 @@ export interface HitTest {
   line: number;
   cellPara?: number;
   cell?: unknown[];
+  img?: number;
+  imgHandle?: number;
+}
+
+export interface ImageList {
+  count: number;
+  bytes: number;
+  images: unknown[];
+}
+
+export interface ImageHit {
+  index: number;
+  handle: number;
 }
 
 export interface Controls {
@@ -245,6 +258,8 @@ export interface Payloads {
   flowTextPos: FlowTextPos;
   selectionReport: SelectionReport;
   hitTest: HitTest;
+  imageList: ImageList;
+  imageHit: ImageHit;
   controls: Controls;
   lines: Lines;
   bracketSlots: BracketSlots;

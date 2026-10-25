@@ -281,6 +281,48 @@
           "name": "cell",
           "kind": "arr",
           "optional": true
+        },
+        {
+          "name": "img",
+          "kind": "num",
+          "optional": true
+        },
+        {
+          "name": "imgHandle",
+          "kind": "num",
+          "optional": true
+        }
+      ]
+    },
+    "imageList": {
+      "cxx": "imageList",
+      "file": "src/wasm/wasm_main.cpp",
+      "keys": [
+        {
+          "name": "count",
+          "kind": "num"
+        },
+        {
+          "name": "bytes",
+          "kind": "num"
+        },
+        {
+          "name": "images",
+          "kind": "arr"
+        }
+      ]
+    },
+    "imageHit": {
+      "cxx": "imageHit",
+      "file": "src/wasm/wasm_main.cpp",
+      "keys": [
+        {
+          "name": "index",
+          "kind": "num"
+        },
+        {
+          "name": "handle",
+          "kind": "num"
         }
       ]
     },

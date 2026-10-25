@@ -20,6 +20,7 @@ import {
   type HotState,
   type Maybe,
 } from './keymap';
+import type { ImageBox } from '../types';
 
 export interface InputEnv {
   /**
@@ -141,6 +142,26 @@ export interface InputEnv {
    * 缩放回到 100%（Ctrl + 0）。
    */
   zoomReset?(): void;
+
+  /**
+   * 文档里全部图片（拖拽开始时要取起始尺寸）。
+   */
+  images?(): Maybe<ImageBox[]>;
+
+  /**
+   * 选中一张图片（-1 = 取消选中）。
+   * @param index 图片下标
+   */
+  selectImage?(index: number): Maybe<any>;
+
+  /**
+   * 改图片尺寸（磅）。merge 为真表示与上一帧合成一步撤销。
+   * @param index 图片下标
+   * @param w 新宽度（磅）
+   * @param h 新高度（磅）
+   * @param merge 与上一帧合成一步撤销
+   */
+  resizeImage?(index: number, w: number, h: number, merge: boolean): Maybe<any>;
 }
 
 export interface InputLayer {
@@ -248,12 +269,81 @@ export function createInput(env: InputEnv): InputLayer {
     if (env.drag) env.drag.arm(on);
   };
 
+  /**
+   * 图片把手的拖拽：按下时取一次起始尺寸与指针位置，之后每帧按增量算新尺寸。
+   *
+   * 等比 / 不等比只看把手落在哪：四个角按原图比例推另一边，四条边只动一个轴。
+   * 角上按住 Shift 解除比例约束 —— "角上默认等比、边上默认拉伸"是字处理软件的通行手感。
+   */
+  function beginImageResize(pt: { x: number; y: number }, index: number, handle: number): void {
+    if (typeof env.resizeImage !== 'function' || typeof env.images !== 'function') return;
+    const images = env.images;
+    const resize = env.resizeImage;
+    keep(
+      then1(images(), (list) => {
+        const box = (list || []).find((b) => b.index === index);
+        if (!box || !(box.w > 0) || !(box.h > 0)) return null;
+        const start = env.docPt(pt);
+        const w0 = box.w;
+        const h0 = box.h;
+        const ratio = w0 / h0;
+        const left = handle === 0 || handle === 6 || handle === 7;
+        const right = handle === 2 || handle === 3 || handle === 4;
+        const top = handle === 0 || handle === 1 || handle === 2;
+        const bottom = handle === 4 || handle === 5 || handle === 6;
+        const corner = (left || right) && (top || bottom);
+        let first = true;
+        const onMove = (e: MouseEvent): void => {
+          const p = env.pointOf(e);
+          if (!p) return;
+          const cur = env.docPt(p);
+          const dx = cur.x - start.x;
+          const dy = cur.y - start.y;
+          let w = w0;
+          let h = h0;
+          if (right) w = w0 + dx;
+          else if (left) w = w0 - dx;
+          if (bottom) h = h0 + dy;
+          else if (top) h = h0 - dy;
+          if (corner && !e.shiftKey) h = w / ratio;
+          if (!(w > 0) || !(h > 0)) return;
+          // 下限 8 磅：再小就没有可点的图身与把手，拖到零之后再也拖不回来。
+          const nw = Math.max(8, Math.round(w * 100) / 100);
+          const nh = Math.max(8, Math.round(h * 100) / 100);
+          // 第一帧不带 merge：一次拖拽要在撤销栈里留下自己的一步，不能并进上一次。
+          keep(resize(index, nw, nh, !first));
+          first = false;
+        };
+        const onUp = (): void => {
+          window.removeEventListener('mousemove', onMove);
+          window.removeEventListener('mouseup', onUp);
+          // 尺寸真的变过才收尾一次：change 事件按"一次拖拽一次"发，不是按帧发。
+          if (!first) env.commit(true);
+        };
+        window.addEventListener('mousemove', onMove);
+        window.addEventListener('mouseup', onUp);
+        return null;
+      }),
+    );
+  }
+
   // 命中之后的两条去向：定位、以及"这一下要不要起拖选"。
   // 落在正文之外时不起手 —— 从页外空白拖起不该选中任何东西。
   // 定位这一步必须等：异步宿主的落光标是一次往返，不等它，clickAt 这类入口会在
   // 光标还没摆好时就 resolve，调用方读到的光标是上一拍的。
   const placeAt = (pt: { x: number; y: number }): Maybe<Hit | null> =>
     then1(env.hit(pt.x, pt.y), (h) => {
+      // 图片优先：点在图身或把手上都不落光标 —— 图片是原子，光标只能停在它两侧。
+      //   把手还要起一次拖拽（后续帧由 window 上的监听接手）。
+      if (h && typeof h.img === 'number' && h.img >= 0) {
+        armDrag(false);
+        const selected = typeof env.selectImage === 'function' ? env.selectImage(h.img) : null;
+        return then1(selected, () => {
+          const handle = typeof h.imgHandle === 'number' ? h.imgHandle : -1;
+          if (handle >= 0) beginImageResize(pt, h.img as number, handle);
+          return h;
+        });
+      }
       const act = hitToAction(h);
       if (!act) {
         armDrag(false);

@@ -72,6 +72,7 @@ Applied Session::apply(const Edit& edit) {
         return out;
     }
     pushUndo(std::move(doc_));
+    last_merged_ = false;
     doc_ = r.doc;
     redo_.clear();
     ++generation_;
@@ -81,7 +82,7 @@ Applied Session::apply(const Edit& edit) {
     return out;
 }
 
-Applied Session::applySteps(const std::vector<Step>& steps, FlowVisibility vis) {
+Applied Session::applySteps(const std::vector<Step>& steps, FlowVisibility vis, MergeRun merge) {
     Applied out;
     if (steps.empty()) {
         out.ok = true;
@@ -95,7 +96,11 @@ Applied Session::applySteps(const std::vector<Step>& steps, FlowVisibility vis) 
     }
     out.ok = true;
     if (r.doc.lo == doc_.lo && r.doc.hi == doc_.hi) return out;
-    pushUndo(doc_);
+    // 连续拖拽只压一份旧修订：后续帧不写撤销栈，撤销一下直接回到拖拽开始之前 ——
+    //   否则一次拖拽会留下几十步，用户要按几十次撤销。
+    const bool merge_in = (merge == MergeRun::Continue) && last_merged_;
+    if (!merge_in) pushUndo(doc_);
+    last_merged_ = (merge != MergeRun::None);
     doc_ = r.doc;
     redo_.clear();
     ++generation_;
@@ -105,6 +110,8 @@ Applied Session::applySteps(const std::vector<Step>& steps, FlowVisibility vis) 
 
 bool Session::undo() {
     if (undo_.empty()) return false;
+    // 撤销之后"上一次提交"已经不在栈顶了，再合并会把两步并成一步错的历史。
+    last_merged_ = false;
     redo_.push_back(std::move(doc_));
     doc_ = undo_.back();
     undo_.pop_back();
@@ -114,6 +121,7 @@ bool Session::undo() {
 
 bool Session::redo() {
     if (redo_.empty()) return false;
+    last_merged_ = false;
     pushUndo(doc_);
     doc_ = redo_.back();
     redo_.pop_back();

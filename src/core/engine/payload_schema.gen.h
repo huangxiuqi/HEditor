@@ -125,9 +125,28 @@ inline constexpr KeySpec kKeys[] = {
     {"line", "num", false},
     {"cellPara", "num", true},
     {"cell", "arr", true},
+    {"img", "num", true},
+    {"imgHandle", "num", true},
 };
 inline constexpr PayloadSpec kSpec{"hitTest", kKeys, static_cast<int>(std::size(kKeys)), true};
 }  // namespace hit_test
+
+namespace image_list {
+inline constexpr KeySpec kKeys[] = {
+    {"count", "num", false},
+    {"bytes", "num", false},
+    {"images", "arr", false},
+};
+inline constexpr PayloadSpec kSpec{"imageList", kKeys, static_cast<int>(std::size(kKeys)), false};
+}  // namespace image_list
+
+namespace image_hit {
+inline constexpr KeySpec kKeys[] = {
+    {"index", "num", false},
+    {"handle", "num", false},
+};
+inline constexpr PayloadSpec kSpec{"imageHit", kKeys, static_cast<int>(std::size(kKeys)), false};
+}  // namespace image_hit
 
 namespace controls {
 inline constexpr KeySpec kKeys[] = {

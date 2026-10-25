@@ -10,6 +10,133 @@ import { test } from '../support/probe';
 
 const D = 'window.__demo';
 
+test.describe('插入图片', () => {
+  test('真实鼠标点图片：选中出拖拽框，光标不动；点正文则取消选中', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' } });
+    // 真实鼠标事件这一路必须过一遍：命中 → 图片分支 → 选中，全在输入层里。
+    //   合成事件也能"看起来生效"，但它跳过了坐标换算与按下时的按下记账。
+    const geo = await p.read<any>(`
+      await H.setText('甲乙丙丁');
+      await H.setCaret({ para: 0, offset: 2 });
+      await H.flush();
+      const data = new Uint8Array(32 * 16 * 4).fill(180);
+      await H.registerImage({ id: 'pic', width: 32, height: 16, data });
+      await H.insertImage({ resourceId: 'pic', pxWidth: 32, pxHeight: 16 });
+      await H.flush();
+      await D.stopBlink();
+      const box = (await H.images())[0];
+      const cv = FRAME();
+      const r = cv.getBoundingClientRect();
+      const q = box.rects[0];
+      return {
+        left: r.left, top: r.top, sx: r.width / cv.width, sy: r.height / cv.height,
+        zoom: ZOOM(),
+        cx: q.x + q.w / 2, cy: q.y + q.h / 2,
+        // 图右侧 40 磅处是正文（同一个行盒里的字）
+        tx: q.x + q.w + 40, ty: q.y + q.h / 2,
+        digest0: await D.frameDigest(),
+        caret0: JSON.stringify(H.caret().pos),
+      };`);
+
+    const at = (xPt: number, yPt: number) => ({
+      x: geo.left + xPt * geo.zoom * geo.sx,
+      y: geo.top + yPt * geo.zoom * geo.sy,
+    });
+    const click = async (xPt: number, yPt: number) => {
+      const q = { ...at(xPt, yPt), button: 'left', clickCount: 1, buttons: 1 };
+      await p.send('Input.dispatchMouseEvent', { type: 'mousePressed', ...q });
+      await p.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...q });
+      await p.page.waitForTimeout(40);
+    };
+
+    await click(geo.cx, geo.cy);
+    const afterImage = await p.read<any>(`
+      return { digest: await D.frameDigest(), caret: JSON.stringify(H.caret().pos) };`);
+    check('★ 点图片：拖拽框画出来了（帧变了）', afterImage.digest !== geo.digest0,
+          geo.digest0 + ' → ' + afterImage.digest);
+    check('★ 点图片不落光标', afterImage.caret === geo.caret0,
+          afterImage.caret + ' vs ' + geo.caret0);
+
+    await click(geo.tx, geo.ty);
+    const afterText = await p.read<any>(`
+      return { digest: await D.frameDigest(), caret: JSON.stringify(H.caret().pos) };`);
+    check('★ 点正文：光标移过去了（图片没把这一下吞掉）', afterText.caret !== geo.caret0,
+          afterText.caret + ' vs ' + geo.caret0);
+    check('★ 点正文之后拖拽框消失（帧回到没有框的样子）',
+          afterText.digest !== afterImage.digest, afterText.digest);
+  });
+
+  test('注册像素、插入、命中把手、改尺寸与撤销', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' } });
+    const r = await p.ev<any>(`
+      const e = ${D};
+      await e.setText('甲乙丙丁');
+      await e.setCaret({ para: 0, offset: 2 });
+      await e.flush();
+
+      // 32 x 16 的纯色块（RGBA）。像素由宿主解码之后交给引擎，文档里只留资源 id。
+      const w = 32, h = 16;
+      const data = new Uint8Array(w * h * 4);
+      for (let i = 0; i < w * h; i++) {
+        data[i * 4] = 20; data[i * 4 + 1] = 120; data[i * 4 + 2] = 220; data[i * 4 + 3] = 255;
+      }
+      await e.registerImage({ id: 'pic', width: w, height: h, data });
+      const digestBefore = await e.diag.frameDigest();
+      const ok = await e.insertImage({ resourceId: 'pic', pxWidth: w, pxHeight: h });
+      await e.flush();
+      const digestAfter = await e.diag.frameDigest();
+
+      const list = await e.images();
+      const box = list[0];
+      const rect = box ? box.rects[0] : null;
+      const body = rect ? await e.imageHit(rect.x + rect.w / 2, rect.y + rect.h / 2) : null;
+      const corner = rect ? await e.imageHit(rect.x, rect.y) : null;
+      const outside = rect ? await e.imageHit(rect.x + rect.w + 60, rect.y + rect.h + 60) : null;
+
+      // 选中 → 拖拽框与把手进瞬态层（帧上多出蓝色像素）；取消 → 逐像素回到没选中的样子。
+      await e.selectImage(0);
+      await e.flush();
+      const digestSelected = await e.diag.frameDigest();
+      await e.selectImage(-1);
+      await e.flush();
+      const digestCleared = await e.diag.frameDigest();
+
+      const width0 = box ? box.w : 0;
+      const height0 = box ? box.h : 0;
+      const resized = await e.resizeImage(0, width0 * 2, height0 * 2);
+      await e.flush();
+      const afterResize = (await e.images())[0];
+      await e.undo();
+      await e.flush();
+      const afterUndo = (await e.images())[0];
+
+      return { ok, list, body, corner, outside, digestBefore, digestAfter, digestSelected,
+               digestCleared, width0, height0, resized, afterResize, afterUndo };`);
+
+    check('insertImage 返回 true', r.ok === true, String(r.ok));
+    check('★ 文档里有一张图', Array.isArray(r.list) && r.list.length === 1,
+          JSON.stringify(r.list));
+    check('★ 像素在资源表里', r.list[0]?.ready === true, String(r.list[0]?.ready));
+    check('★ 显示尺寸按 96 DPI 折算：32x16 像素 = 24 x 12 磅',
+          Math.abs(r.width0 - 24) < 0.01 && Math.abs(r.height0 - 12) < 0.01,
+          r.width0 + ' x ' + r.height0);
+    check('插进去之后画面变了', r.digestBefore !== r.digestAfter,
+          r.digestBefore + ' → ' + r.digestAfter);
+    check('★ 点图身命中这张图、不在把手上',
+          r.body?.index === 0 && r.body?.handle < 0, JSON.stringify(r.body));
+    check('★ 点左上角命中 0 号把手',
+          r.corner?.index === 0 && r.corner?.handle === 0, JSON.stringify(r.corner));
+    check('点在图外什么都没命中', r.outside?.index === -1, JSON.stringify(r.outside));
+    check('★ 选中之后拖拽框可见（帧变了）', r.digestSelected !== r.digestCleared,
+          r.digestSelected + ' vs ' + r.digestCleared);
+    check('★ 改尺寸生效', r.resized === true &&
+          Math.abs(r.afterResize.w - r.width0 * 2) < 0.01,
+          r.afterResize?.w + ' / 期望 ' + r.width0 * 2);
+    check('★ 撤销回到改尺寸之前', Math.abs(r.afterUndo.w - r.width0) < 0.01,
+          r.afterUndo?.w + ' / 期望 ' + r.width0);
+  });
+});
+
 test.describe('插入表格', () => {
   test('结构、落点与撤销：表格落在段后，光标进第一格', async ({ open }) => {
     const p = await open('index.html', { query: { debug: '1' } });

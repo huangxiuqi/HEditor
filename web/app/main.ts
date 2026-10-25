@@ -542,6 +542,15 @@ function makeTabs(): Tab[] {
         big: true,
         run: () => editor.insertControl({ type: 'text', key: 'field', label: '（待填）' }),
       },
+      {
+        act: 'image',
+        label: '图片',
+        icon: 'image',
+        big: true,
+        // 解码交给浏览器（createImageBitmap 在原生代码里跑），引擎只收 RGBA ——
+        //   文档里存的是资源 id，像素在资源表里。
+        run: () => pickImage(),
+      },
     ],
   };
 
@@ -550,6 +559,63 @@ function makeTabs(): Tab[] {
     { label: '插入', groups: [insert] },
     { label: '视图', groups: [mode, show, zoom] },
   ];
+}
+
+/**
+ * 选一张本地图片装进编辑器：浏览器解码，像素交给引擎，文档里只留资源 id。
+ *
+ * 太宽的图按版心宽度等比缩一下 —— 一张 4000 像素宽的照片插进 A4 会横着跑出页面，
+ *   而画面上看起来只是"图片不见了"。
+ * @param file 用户挑的文件
+ */
+async function insertImageFile(file: File): Promise<void> {
+  const bitmap = await createImageBitmap(file);
+  const canvas = document.createElement('canvas');
+  canvas.width = bitmap.width;
+  canvas.height = bitmap.height;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) {
+    chrome.say('这台浏览器给不出 2D 画布，图片没法解码');
+    return;
+  }
+  ctx.drawImage(bitmap, 0, 0);
+  const px = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const id = 'img-' + Date.now().toString(36);
+  await editor.registerImage({
+    id,
+    width: canvas.width,
+    height: canvas.height,
+    data: new Uint8Array(px.data.buffer),
+  });
+
+  // 版心宽度（磅）= 页宽 - 左右页边距；100 DPI 的图按 96 折算，留一点余量。
+  const g = editor.geometry();
+  const page = editor.config().page;
+  const textWidthPt = g.page.w * 0.75 - page.margins.left - page.margins.right;
+  const naturalPt = (canvas.width * 72) / 96;
+  const width = Math.min(naturalPt, textWidthPt > 0 ? textWidthPt : naturalPt);
+  await editor.insertImage({
+    resourceId: id,
+    pxWidth: canvas.width,
+    pxHeight: canvas.height,
+    width,
+  });
+  chrome.say('图片已插入：拖它的把手可以改大小');
+}
+
+/**
+ * 弹文件选择器。选完才解码，取消则什么都不做。
+ */
+function pickImage(): void {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'image/*';
+  input.addEventListener('change', () => {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    void insertImageFile(file).catch((e) => chrome.say('插入图片失败：' + String(e)));
+  });
+  input.click();
 }
 
 /**

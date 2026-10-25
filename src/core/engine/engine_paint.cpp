@@ -937,6 +937,12 @@ void EditorEngine::presentInternal(int first_page, int count) {
         for (const Rect& r : now.sel) {
             if (!has(prev.sel, r)) markDirty(page, r);
         }
+        for (const Rect& r : prev.image_ui) {
+            if (!has(now.image_ui, r)) markDirty(page, r);
+        }
+        for (const Rect& r : now.image_ui) {
+            if (!has(prev.image_ui, r)) markDirty(page, r);
+        }
         if (prev.caret.w > 0.0f && !sameRect(prev.caret, now.caret)) markDirty(page, prev.caret);
         if (now.caret.w > 0.0f && !sameRect(prev.caret, now.caret)) markDirty(page, now.caret);
         it->second.transient = now;
@@ -946,6 +952,7 @@ void EditorEngine::presentInternal(int first_page, int count) {
     for (auto& kv : page_cache_) {
         if (kv.first >= first_page && kv.first < first_page + count) continue;
         kv.second.transient.sel.clear();
+        kv.second.transient.image_ui.clear();
         kv.second.transient.caret = Rect{};
     }
 
@@ -1047,6 +1054,8 @@ void EditorEngine::presentInternal(int first_page, int count) {
 void EditorEngine::collectTransient(int page, PageTransient* out) const {
     out->sel.clear();
     out->caret = Rect{};
+    // 图片拖拽框：与选区同一层（呈现时叠、导出时不叠），所以它跟着这里一起算。
+    collectImageUi(page, &out->image_ui);
     for (const PageRect& pr : selectionRectsPxIn(page, 1)) out->sel.push_back(pr.r_pt);
     int cp = -1;
     const Rect cr = caretRectPx(&cp);
@@ -1086,7 +1095,10 @@ const uint8_t* EditorEngine::pageDisplayPixels(int page) const {
     if (it == page_cache_.end() || !it->second.valid) return nullptr;
     const PageBitmap& pb = it->second;
     if (pb.px.width() != pagePxWidth() || pb.px.height() != pagePxHeight()) return nullptr;
-    if (pb.transient.sel.empty() && !(pb.transient.caret.w > 0.0f)) return pb.px.data();
+    if (pb.transient.sel.empty() && pb.transient.image_ui.empty() &&
+        !(pb.transient.caret.w > 0.0f)) {
+        return pb.px.data();
+    }
 
     const int pw = pb.px.width();
     const int ph = pb.px.height();
@@ -1097,6 +1109,8 @@ const uint8_t* EditorEngine::pageDisplayPixels(int page) const {
     page_export_.blitFrom(pb.px, Rect{0.0f, 0.0f, static_cast<float>(pw), static_cast<float>(ph)},
                           0, 0);
     for (const Rect& r : pb.transient.sel) page_export_.blendRect(r, cfg_.selection_color);
+    // 拖拽框与把手画在选区之上、光标之下：它们比选区更需要看得清，而光标是最后一条。
+    for (const Rect& r : pb.transient.image_ui) page_export_.fillRect(r, cfg_.image_mark);
     if (pb.transient.caret.w > 0.0f) page_export_.fillRect(pb.transient.caret, cfg_.caret_color);
     page_export_page_ = page;
     return page_export_.data();
@@ -1172,6 +1186,20 @@ void EditorEngine::drawAtomBox(Bitmap& target, const LineBox& lb, const LineClus
         box = Rect{top * zoom, a0 * zoom + off_y, c.atom_h_pt * zoom, (a1_pt - a0) * zoom};
     }
     if (!(box.w > 0.0f) || !(box.h > 0.0f)) return;
+
+    const rev::Node* n = rev::findNode(document(), static_cast<NodeId>(c.owner_control));
+    const ImageSpec* im = (n != nullptr) ? std::get_if<ImageSpec>(&n->payload) : nullptr;
+    // 图片的字节不进文档（第十一节），资源表里没有它时退回占位框 —— 这是常规状态
+    //   （文件刚打开、宿主还没注册），不是错误。竖排本期仍画占位框：图片在竖排里要不要
+    //   跟着转 90 度是版式决定，按横排的盒子直接铺上去会得到一张被拉长的图。
+    const ImageResource* res =
+        (im != nullptr && !im->resource_id.empty()) ? images_.find(im->resource_id) : nullptr;
+    if (c.atom == InlineAtom::Image && res != nullptr && !lb.vertical) {
+        target.drawImage(imageResourceKey(res->id), res->version, res->rgba.data(), res->width,
+                         res->height, box);
+        return;
+    }
+
     target.fillRect(box, cfg_.atom_fill);
     target.strokeRect(box, cfg_.atom_border, 1.0f);
 
@@ -1179,16 +1207,12 @@ void EditorEngine::drawAtomBox(Bitmap& target, const LineBox& lb, const LineClus
     if (hbf == nullptr) return;
     // 框里写什么：图片写资源标识，公式写表达式；两者都空就写一个说明性的词 ——
     //   空框看不出是哪一种原子，而"看不出"正是这一层要避免的。
-    const rev::Node* n = rev::findNode(document(), static_cast<NodeId>(c.owner_control));
     std::string label;
-    if (n != nullptr) {
-        if (c.atom == InlineAtom::Formula) {
-            const auto* f = std::get_if<FormulaSpec>(&n->payload);
-            if (f != nullptr) label = f->expr;
-        } else {
-            const auto* im = std::get_if<ImageSpec>(&n->payload);
-            if (im != nullptr) label = im->resource_id;
-        }
+    if (im != nullptr) {
+        label = im->resource_id;
+    } else if (n != nullptr && c.atom == InlineAtom::Formula) {
+        const auto* f = std::get_if<FormulaSpec>(&n->payload);
+        if (f != nullptr) label = f->expr;
     }
     if (label.empty()) label = (c.atom == InlineAtom::Formula) ? "公式" : "图片";
 

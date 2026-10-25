@@ -1545,6 +1545,74 @@ bool EditCommand::insertControl(const ControlSpec& spec, const std::string& labe
     return commitInsert(at, node, at + 1 + static_cast<FlowPos>(cps.size()));
 }
 
+bool EditCommand::insertImage(const ImageSpec& spec) {
+    if (!hasFlow()) return false;
+    if (mode() != EditMode::Document) {
+        noteBlocked();
+        return false;
+    }
+    // 既没有资源、也没有像素尺寸与显示尺寸时拒绝：排版会退回一个 4:3 的默认框，
+    //   画面上是一个"不知道多大的空框"，而调用方以为图插进去了。
+    const bool sized = spec.px_w > 0 && spec.px_h > 0;
+    const bool authored =
+        spec.width.kind != LengthKind::Auto || spec.height.kind != LengthKind::Auto;
+    if (spec.resource_id.empty() && !sized && !authored) {
+        noteBlocked();
+        return false;
+    }
+
+    NodeSpec node;
+    node.kind = NodeKind::Image;
+    node.image = spec;
+    const TextPos caret = pos().caret();
+    const FlowPos at = pos().flowPosAtSide(caret.para, caret.offset, pos().sideForPos(caret));
+    if (at < 0) {
+        noteBlocked();
+        return false;
+    }
+    // 图片占一个流位置，光标落到它之后 —— 紧接着敲字就是"图后面那段文字"。
+    return commitInsert(at, node, at + 1);
+}
+
+bool EditCommand::resizeImage(NodeId id, float w_pt, float h_pt, bool continue_run) {
+    if (!(w_pt > 0.0f) || !(h_pt > 0.0f)) return false;
+    // 改图片尺寸是设计动作：表单模式在填值、只读模式不许改，两者都不该动版式。
+    if (mode() != EditMode::Document) {
+        noteBlocked();
+        return false;
+    }
+    const rev::Node* n = rev::findNode(doc(), id);
+    if (n == nullptr || n->kind != NodeKind::Image) return false;
+    const auto* im = std::get_if<ImageSpec>(&n->payload);
+    if (im == nullptr) return false;
+
+    // 幂等按磅比：长度落在 EMU 上，浮点换算回来可能差一位 —— 差一位不该留下一个
+    //   什么都没改的撤销步骤。
+    auto ptOf = [](const Length& len) {
+        return len.kind == LengthKind::Abs ? emuToPt(len.abs_emu) : -1.0;
+    };
+    if (std::fabs(ptOf(im->width) - w_pt) < 0.01 && std::fabs(ptOf(im->height) - h_pt) < 0.01) {
+        return true;
+    }
+
+    SetImageSize s;
+    s.id = id;
+    s.width = Length::abs(ptToEmu(w_pt));
+    s.height = Length::abs(ptToEmu(h_pt));
+    s.beforeWidth = im->width;
+    s.beforeHeight = im->height;
+
+    std::vector<Step> steps;
+    steps.push_back(Step{s});
+    pending_before_ = Range{};
+    pending_after_ = Range{};
+    // 图片在这一段里：行盒变高，从这一段起后面全部要重排。
+    const FlowPos at = flowIndex().flowAt(Pos{id, 0});
+    const int dirty = (at >= 0) ? pos().paraForFlow(at) : 0;
+    return commit(std::move(steps), dirty,
+                  continue_run ? rev::MergeRun::Continue : rev::MergeRun::Start);
+}
+
 CharFormat EditCommand::charFormatAtCaret() const {
     if (!hasFlow()) return CharFormat{};
     const Range sel = pos().selection();
