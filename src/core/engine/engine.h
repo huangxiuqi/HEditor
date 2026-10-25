@@ -1094,18 +1094,15 @@ public:
 
     /**
      * 当前光标所在的最内层控件下标（-1 = 不在任何控件内）。
-     * 由光标位置与侧别推出来（见 caretFieldHint）；推不出来时（光标落在所有控件之外）
-     * 回落成"最内层含端点"—— 与编辑归属同一口径。
      *
-     * 这条回落不只是为了好看：光标落在段落末尾、或刚跳完字段时，光标的"侧别"推不出
-     * 归属，而编辑命令与面板都要一个确定的字段下标（见 edit_command 的归属口径）。
+     * 直接读 caretFieldHint（按光标的流位置查控件内容区间，见 ControlSpans）——
+     * 不再有"侧别推不出来时按文字区间回落"那一层：流位置是确定的，没有推不出来的情形。
      *
      * @return 控件下标；-1 = 不在任何控件里
      */
     int focusedControlIndex() const {
         const int hint = caretFieldHint();
-        if (hint >= 0) return hint;
-        return controls_.empty() ? -1 : controls_.innermostAt(caret(), true);
+        return hint >= 0 ? hint : -1;
     }
 
     /**

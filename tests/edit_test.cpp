@@ -13092,8 +13092,9 @@ int main() {
         //   方向键每一步都要进得去 —— 只判终点会漏掉中间那一格，而"进不去"正是从中间开始的。
         //   每条都先把结果落到字符串再判：断言的两个实参求值顺序不确定，把移动写进判据里
         //   会让失败信息印出移动之前的读数。
-        // 归属只该有一个答案：宿主报的那个（caretFieldHint，按段内对象表推）与按内容区间
-        //   查出来的那个（innermostControlAt）必须是同一个 —— 两套算法在边界上分家的症状是
+        // 归属只该有一个答案：宿主报的那个（caretFieldHint）与落点判据用的那个
+        //   （innermostControlAt）必须是同一个。两者现在读同一份查询面（ControlSpans），
+        //   这条断言钉的是"以后谁把其中一个改回自己那套反推"——分家的症状是
         //   "光标画在 A 里、宿主说在 B 里、编辑按 C 判"。
         auto ownerAgree = [&]() {
             return e76.caretFieldHint() == e76.innermostControlAt(e76.caretFlowPos());

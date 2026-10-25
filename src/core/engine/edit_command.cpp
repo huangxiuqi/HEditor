@@ -9,6 +9,7 @@
 
 #include "core/doc/subtree.h"
 #include "core/doc/table.h"
+#include "core/engine/control_spans.h"
 #include "core/utils/utf8.h"
 
 #include <algorithm>
@@ -278,13 +279,7 @@ bool EditCommand::typeTextUtf8(const std::string& utf8) {
 bool EditCommand::controlFlowSpan(int index, FlowPos* lo, FlowPos* hi) const {
     if (!hasFlow()) return false;
     if (index < 0 || index >= static_cast<int>(controlNodeIds().size())) return false;
-    int first = -1;
-    int end = -1;
-    if (!flowIndex().intervalOf(controlNodeIds()[static_cast<size_t>(index)], &first, &end))
-        return false;
-    if (lo != nullptr) *lo = first;
-    if (hi != nullptr) *hi = end;
-    return true;
+    return controlSpanOf(flowIndex(), controlNodeIds()[static_cast<size_t>(index)], lo, hi);
 }
 
 bool EditCommand::controlIsEmpty(int index) const {
@@ -521,22 +516,17 @@ bool EditCommand::eraseInControl(bool left) {
  * @return true = 区间在光标所在控件的内容里
  */
 bool EditCommand::eraseInsideCaretControl(FlowPos from, FlowPos to) const {
-    const FlowPos cur = pos().selection().focus;
-    FlowPos best_lo = 0;
-    FlowPos best_hi = -1;
-    for (int i = 0; i < static_cast<int>(controlNodeIds().size()); ++i) {
-        FlowPos lo = 0;
-        FlowPos hi = 0;
-        if (!controlFlowSpan(i, &lo, &hi)) continue;
-        if (cur <= lo || cur >= hi) continue;
-        if (best_hi < 0 || (hi - lo) < (best_hi - best_lo)) {
-            best_lo = lo;
-            best_hi = hi;
-        }
-    }
-    if (best_hi < 0) return false;
+    if (!hasFlow()) return false;
+    // "光标在哪个控件里"与落点判据同一个查询面（ControlSpans）—— 两处各写一遍遍历的话，
+    //   嵌套时"取最内层"的规则迟早会有一边写反。
+    const int ci = innermostControlAtFlow(flowIndex(), controlNodeIds(), pos().selection().focus);
+    if (ci < 0) return false;
+    FlowPos lo = 0;
+    FlowPos hi = 0;
+    if (!controlSpanOf(flowIndex(), controlNodeIds()[static_cast<size_t>(ci)], &lo, &hi))
+        return false;
     // 内容槽是 (lo, hi)：两枚括号各占一格，删除区间只要碰到它们就已经越界。
-    return from > best_lo && to < best_hi;
+    return from > lo && to < hi;
 }
 
 /**

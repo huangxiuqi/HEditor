@@ -85,8 +85,8 @@ std::string EditorEngine::describeControls() const {
            << (c.read_only ? " read-only" : " editable") << " depth=" << c.depth
            << " parent=" << c.parent << " boxes=" << controlRects(i).size() << "\n";
     }
-    os << "  caret-control="
-       << (controls_.empty() ? -1 : controls_.innermostAt(caret(), /*include_end=*/true)) << "\n";
+    os << "  caret-control=" << (controls_.empty() ? -1 : innermostControlAt(caretFlowPos()))
+       << "\n";
     return os.str();
 }
 

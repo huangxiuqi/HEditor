@@ -4,6 +4,7 @@
  * 并把"移动光标之后要重排"那一笔交回引擎（见 EditorEngine 的同名转发层）。
  */
 #include "core/engine/caret.h"
+#include "core/engine/control_spans.h"
 
 #include <algorithm>
 #include <cmath>
@@ -130,7 +131,11 @@ bool CaretResolver::textSpanAt(int para, size_t a, size_t b, int* from, int* to)
  * 控件集合为空时没有可归的地方，停在所有括号之前。
  */
 int CaretResolver::defaultSideAt(int para, size_t cp) const {
-    if (!view_.controls->empty()) {
+    // 归属按文字位置判，不能按流位置判：同一个文字偏移上已经压着好几个插入点，
+    //   靠里的那几格可能已经属于下一个控件（两个字段紧挨着时，],"["之后的第二格就在
+    //   后一个字段里）。区间树回答的正是"这个文字偏移归谁"，流位置回答"这一格在哪"，
+    //   两者是链的两端 —— 拿后者当默认侧别的输入会跳过字段边界。
+    if (view_.controls != nullptr && !view_.controls->empty()) {
         const int ci = view_.controls->innermostAt(TextPos{para, cp}, /*include_end=*/true);
         if (ci >= 0) return sideFromHint(para, cp, ci);
     }
@@ -158,79 +163,13 @@ int CaretResolver::sideFromHint(int para, size_t cp, int hint) const {
     return bc.closes;
 }
 
-int CaretResolver::hintFromRel(int para, int rel) const {
-    const std::vector<InlineObject>& objs = objectsFor(para);
-    // 控件的内容区间是 (起始边界锚点, 结束边界锚点]：起始边界属于"控件之前"、
-    //   结束边界属于"内容末尾"（见 flow.h 开头那段）。取起始锚点最大的那个 = 最内层。
-    int best = LineBox::kInlineOffsetOuter;
-    int best_start = -1;
-    for (size_t j = 0; j < objs.size(); ++j) {
-        if (objs[j].kind != InlineObjectKind::ControlEnd) continue;
-        const int end = objs[j].cp + static_cast<int>(j);
-        if (rel > end) continue;
-        for (size_t i = 0; i < j; ++i) {
-            if (objs[i].kind != InlineObjectKind::ControlStart) continue;
-            if (objs[i].owner != objs[j].owner) continue;
-            const int start = objs[i].cp + static_cast<int>(i);
-            if (start < rel && start > best_start) {
-                best_start = start;
-                best = controlIndexOfOwner(static_cast<int>(objs[j].owner));
-            }
-            break;
-        }
-    }
-    if (best != LineBox::kInlineOffsetOuter) return best;
-    // 段内找不到配对的开括号：这个偏移上只有一枚"从上一段跨进来"的结束边界。
-    //   见 hintFromCrossSegment —— 不兜的话，界面会把当前字段显示成紧挨着的下一个控件。
-    return hintFromCrossSegment(para, rel);
-}
-
-/**
- * 跨段控件的归属补判：段内对象表里只有本段那一半边界，所以控件从上一段跨进来时
- * 找不到配对的开括号，hintFromRel 会判成"在所有控件之外"。这里用控件集合的跨段区间补上：
- * 把段内相对流位置换成全局流位置，与每个控件的内容区间 (起始边界, 结束边界] 比，
- * 取起点最晚的那个。
- *
- * 为什么要兜：段落被控件从中间切开之后（在控件内容里回车），光标落在"这个控件在本段的
- * 那一半"里，而它在段内看起来只是孤零零一枚结束边界 —— 不兜的话，"当前字段"会显示成
- * 紧挨着的下一个控件，界面显示的就成了"回车之后光标跑进第三个控件"。
- */
-int CaretResolver::hintFromCrossSegment(int para, int rel) const {
-    if (view_.controls->empty() || !view_.hasFlow()) return LineBox::kInlineOffsetOuter;
-    if (para < 0 || para >= static_cast<int>(view_.block_flow->size()))
-        return LineBox::kInlineOffsetOuter;
-    const FlowPos f = (*view_.block_flow)[static_cast<size_t>(para)] + rel;
-    int pick = -1;
-    int pick_start = -1;
-    for (int i = 0; i < view_.controls->size(); ++i) {
-        const Control& c = view_.controls->at(i);
-        // 两枚边界各自"自己那一格"的流位置：开括号取内容起点（括号之后），闭括号取内容末尾。
-        const FlowPos cs = flowPosAtSide(c.range.start.para, c.range.start.offset,
-                                         sideFromHint(c.range.start.para, c.range.start.offset, i));
-        const FlowPos ce = flowPosAtSide(c.range.end.para, c.range.end.offset,
-                                         sideFromHint(c.range.end.para, c.range.end.offset, i));
-        if (cs < 0 || ce < 0) continue;
-        // 内容区间是 (起始边界, 结束边界]：起始边界属于"控件之前"，结束边界属于内容末尾。
-        if (f <= cs || f > ce) continue;
-        if (cs > pick_start) {
-            pick_start = cs;
-            pick = i;
-        }
-    }
-    return pick >= 0 ? pick : LineBox::kInlineOffsetOuter;
-}
-
 /**
  * 某个位置（不是光标）的侧别：按"最内层含端点"归一次，归不到就是"所有控件之外"。
  * 删除区间的两个端点、诊断打印这类没有侧别信息的入口走它。
  */
 int CaretResolver::sideForPos(TextPos p) const {
     if (p == caret()) return caretSide();
-    const BracketCounts bc = bracketCountsAt(p.para, p.offset);
-    if (view_.controls->empty()) return bc.closes;
-    const int ci = view_.controls->innermostAt(p, /*include_end=*/true);
-    if (ci < 0) return bc.closes;
-    return sideFromHint(p.para, p.offset, ci);
+    return defaultSideAt(p.para, p.offset);
 }
 
 FlowPos CaretResolver::flowPosAtSide(int para, size_t cp_offset, int side) const {
@@ -366,8 +305,10 @@ size_t CaretResolver::clusterCeilAt(int para, size_t offset) const {
 int CaretResolver::caretSide() const { return sideForFlow(caretFlow()); }
 
 int CaretResolver::caretFieldHint() const {
-    if (view_.blocks->empty()) return -1;
-    return hintFromRel(caretPara(), caretRel());
+    if (!view_.hasFlow() || view_.control_node_ids == nullptr || view_.control_node_ids->empty())
+        return -1;
+    const int ci = innermostControlAtFlow(view_.flowIndex(), *view_.control_node_ids, caretFlow());
+    return ci >= 0 ? ci : LineBox::kInlineOffsetOuter;
 }
 
 /**

@@ -14,6 +14,7 @@
 #include "core/engine/engine.h"
 
 #include "core/doc/record_json.h"
+#include "core/engine/control_spans.h"
 
 #include "core/rev/fragment.h"
 #include "core/rev/project.h"
@@ -1151,53 +1152,15 @@ FlowPos EditorEngine::caretFlowPos() const {
     return flowPosAtSide(p.para, p.offset, caretSide());
 }
 
-/**
- * 控件的内容区间（流位置，两端都含）。
- *
- * 区间从流索引直接取，不从文字区间 + 括号排布反推：同一个偏移上可能压着好几枚括号
- *   （三枚空控件套起来就是六枚压在一处），按"第几格"反推要先知道这是第几枚 —— 而那份
- *   知识正是流索引已经算好的东西。两条口径一旦分叉，症状就是光标进得去最内层、
- *   往右一格走不动。
- *
- * 索引给的区间含两枚括号（半开区间，宽 2 就是空控件），内容区间是它退掉两头。
- */
 bool EditorEngine::controlContentSpan(int index, FlowPos* lo, FlowPos* hi) const {
     if (!flow_.has_value()) return false;
-    if (index < 0 || index >= controls_.size()) return false;
-    if (index >= static_cast<int>(control_node_ids_.size())) return false;
-    FlowPos first = 0;
-    FlowPos end = 0;
-    if (!flow_->intervalOf(control_node_ids_[static_cast<size_t>(index)], &first, &end))
-        return false;
-    // 两枚括号各占一格。宽 2 = 空控件，内容区间退化成 first + 1 这一个插入点。
-    if (end - first < 2) return false;
-    if (lo != nullptr) *lo = first + 1;
-    if (hi != nullptr) *hi = end - 1;
-    return true;
+    if (index < 0 || index >= static_cast<int>(control_node_ids_.size())) return false;
+    return controlContentSpanOf(*flow_, control_node_ids_[static_cast<size_t>(index)], lo, hi);
 }
 
-/**
- * 某个流位置落在哪个控件的内容区间里。
- *
- * 嵌套时取最内层：起点最大者，同起点取跨度短者。取外层会让"这一格归谁"与编辑归属
- *   （policyAt 那一套）分家 —— 光标在一个字段里、编辑却按另一个字段的规则判。
- */
 int EditorEngine::innermostControlAt(FlowPos f) const {
-    int best = -1;
-    FlowPos best_lo = 0;
-    FlowPos best_hi = 0;
-    for (int i = 0; i < controls_.size(); ++i) {
-        FlowPos lo = 0;
-        FlowPos hi = 0;
-        if (!controlContentSpan(i, &lo, &hi)) continue;
-        if (f < lo || f > hi) continue;
-        if (best < 0 || lo > best_lo || (lo == best_lo && (hi - lo) < (best_hi - best_lo))) {
-            best = i;
-            best_lo = lo;
-            best_hi = hi;
-        }
-    }
-    return best;
+    if (!flow_.has_value()) return -1;
+    return innermostControlAtFlow(*flow_, control_node_ids_, f);
 }
 
 bool EditorEngine::insertableAtFlow(FlowPos f) const {
@@ -1978,8 +1941,14 @@ bool EditorEngine::hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* 
     if (out_side) *out_side = side;
     if (out_line_aff) *out_line_aff = line_aff;
     int owner = -1;
-    if (controls_.size() > 0)
-        owner = caret_.hintFromRel(best->paragraph, caret_.relAt(best->paragraph, cp, side));
+    if (!control_node_ids_.empty() && flow_.has_value()) {
+        const size_t para = static_cast<size_t>(best->paragraph);
+        if (para < block_flow_.size()) {
+            const FlowPos hit_flow = block_flow_[para] + caret_.relAt(best->paragraph, cp, side);
+            const int ci = innermostControlAtFlow(*flow_, control_node_ids_, hit_flow);
+            owner = ci >= 0 ? ci : LineBox::kInlineOffsetOuter;
+        }
+    }
     // 命中即落点：光标位置不受控件约束，所以这里不再做"就近吸附到最近字段"。
     //   吸附会把"点字段外正文"改写成"停在字段端点"，于是画出来的光标不在点的地方，
     //   表象就是"点了没反应"。归属照实返回，编辑侧自己会按策略拒绝。

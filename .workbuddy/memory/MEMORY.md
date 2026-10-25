@@ -4,7 +4,7 @@
 **阶段约定（2026-10-23）**：开发阶段不考虑向后兼容 —— 不写旧标记/旧签名的兼容分支，改名、
 删选项、换形状直接做，改完把判据与文档一起更新。
 **索引**：`TRAPS.md`（复发陷阱 1~213，按编号引用）· `ARCH-NOTES.md` · `MIGRATION.md` ·
-`ENV.md`。设计文档：`docs/文档模型设计.md`（语义权威，`wc -l` 必须 2843）·
+`ENV.md`。设计文档：`docs/文档模型设计.md`（语义权威，`wc -l` 必须 2854）·
 `正式化架构与迁移路线.md` · `外部API设计.md` · `跑测试.md` · `步5-渲染层方案.md`。
 
 ## 环境与基线
@@ -130,9 +130,13 @@
   `insertableAtFlow(f)` 一处决定（`caretInsertable()` / `editStats.caretVisible` /
   `collectTransient` / 页导出都读它），夹取由 `confineCaret` 做。程序化定位
   （`setCaret`/`setCaretAt`）不受限，受限的是点击、方向键、Home/End。
-  - **控件内容区间只从流索引取**（229）：`flow_->intervalOf(control_node_ids_[i])` 给含两枚
-    括号的半开区间，内容区间退掉两头。**不许用"文字区间 + 括号排布"反推** —— 六枚括号压
-    同一 cp 时（三枚空控件套起来）反推要把区间缩成一个点。
+  - **控件区间只有一个查询面** `core/engine/control_spans.h`（229/230）：`controlSpanOf` /
+    `controlContentSpanOf` / `innermostControlAtFlow`，区间只从 `FlowIndex::intervalOf` 取。
+    引擎、编辑命令、光标解析都调它 —— **不许各自用"文字区间 + 括号排布"反推**（六枚括号压
+    同一 cp 时反推会把三层内容区间缩成一个点）。
+  - **两种输入两个判据，不能互换**（230）：文字位置（段号+偏移）→ `ControlSet::innermostAt`
+    （`defaultSideAt` / `controlAtPt`）；流位置（已含侧别）→ `innermostControlAtFlow`
+    （落点、删除边界、命中归属、宿主报的归属）。"文字位置 + 侧别 = 流位置"是有方向的。
   - **判"这一格归谁"取最内层**（`innermostControlAt`：起点最大，同起点取跨度短），
     不能按遍历顺序取第一个命中的 —— 外层可编辑会替内层只读作证。
   - 夹取后的落点仍不可插入（区间中间嵌着只读层）就退回这一步之前的位置；一步之前

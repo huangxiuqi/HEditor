@@ -2238,13 +2238,16 @@
       ⇒ 顺带：判"这一格归谁"取最内层（起点最大、同起点取跨度短），不能按遍历顺序取第一个
       命中的，否则外层可编辑会替内层只读作证。
 
-230. **"某位置的归属"有三份实现，这是控件这块最大的欠账**（2026-10-25）。
-      `CaretResolver::hintFromRel`（按段内对象表推）、`ControlSet::innermostAt`（按文字区间树
-      判，`defaultSideAt` 用）、`Engine::innermostControlAt`（按流区间判，落点判据用）——
-      同一个概念三种算法。三者一致时什么都看不出来，一旦在边界上分家，症状是"光标画在
-      A 里、宿主报在 B 里、编辑按 C 判"。
-      眼下用 [76] 的两条断言把前两者的结果钉成一致（`caretFieldHint()` ==
-      `innermostControlAt(caretFlowPos())`），算临时护栏，不算收敛。
-      收敛的方向是只留 `containerOf(flow)` 一个查询面（下标 + 区间 + 父链 + 可编辑性），
-      代价是 `hit.field` 的"不在任何控件里"要从 `kInlineOffsetOuter` 改成 -1，宿主与判据要
-      一起改。
+230. **"某位置的归属"曾经有三份实现，收敛时先分清两种输入**（2026-10-25）。
+      原来 `CaretResolver::hintFromRel`（段内对象表）、`ControlSet::innermostAt`（文字区间树）、
+      `Engine::innermostControlAt`（流区间）各算一遍，三者一致时看不出来，一旦分家就是
+      "光标画在 A 里、宿主报在 B 里、编辑按 C 判"。
+      现在收成两处，因为**输入不同、不能互相替代**：
+      - 文字位置（段号 + 偏移）→ `ControlSet::innermostAt`（区间树）。`defaultSideAt` 与
+        `controlAtPt` 用它：同一偏移上压着好几个插入点时，靠内那几格可能已属于下一个字段，
+        只有区间树知道"这个偏移归谁"。
+      - 流位置（已含侧别）→ `control_spans.h` 的 `innermostControlAtFlow`。落点判据、
+        编辑删除边界、命中归属、宿主报的归属都走它。
+      教训：**收敛不是在两种判据里挑一个，而是让每个问题只有一处实现**。中途试过把
+      `defaultSideAt` 也改成按流位置判，50 条判据立刻红（两个字段紧挨着时落点跳过边界），
+      回滚才绿 —— 那条"文字位置 + 侧别 = 流位置"的链是有方向的。
