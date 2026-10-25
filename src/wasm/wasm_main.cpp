@@ -78,10 +78,19 @@ void setFontCacheConfig(int block_size, int max_blocks) {
                                     max_blocks > 0 ? static_cast<size_t>(max_blocks) : 0u);
 }
 
+/**
+ * 已注册的字体清单：宿主拿它填字体下拉框，也拿它把"族名"换成下标。
+ */
+std::string fontsJson() { return g_engine.fontsJson(); }
+
+/**
+ * 三个角色指向哪张脸。负数是"这一档没给"：正文回落到第一张，蒙文跟随正文，
+ *   拉丁关掉回退 —— 只装一份字体也能排版，不必凑齐三条。
+ */
 void setFontRoles(int cjk_index, int mongol_index, int latin_index) {
-    g_cjk_font = cjk_index;
-    g_mn_font = mongol_index;
-    g_latin_font = latin_index;
+    g_cjk_font = cjk_index >= 0 ? cjk_index : 0;
+    g_mn_font = mongol_index >= 0 ? mongol_index : g_cjk_font;
+    g_latin_font = latin_index >= 0 ? latin_index : -1;
 }
 
 /**
@@ -1686,6 +1695,7 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("loadFontFromFile", &loadFontFromFile);
     emscripten::function("setFontCacheConfig", &setFontCacheConfig);
     emscripten::function("setFontRoles", &setFontRoles);
+    emscripten::function("fontsJson", &fontsJson);
 
     emscripten::function("setScenario", &setScenario);
     emscripten::function("setZoom", &setZoom);

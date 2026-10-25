@@ -79,13 +79,37 @@ L2 与 L2' 的分界是本版的核心：**判定进库，像素归属留在传�
 const editor = await createEditor({
   container: el,                  // 只管挂在哪
   assets: { glue?, wasm? },       // 资源定位，默认按当前脚本地址推
-  fonts: [...],                   // 不传用内置默认
+  fonts: ['/f/思源黑体.otf'],      // 可给一项或一整串；不给用内置的三份 Noto
   config: { mode: 'readOnly' },   // 初始配置
   chrome: false,                  // 是否画工具条
 });
 
 await editor.open(savedJson);     // 内容走方法，不走构造参数
 ```
+
+### 4.1 字体：注册一次，按名字选
+
+```ts
+await editor.addFont(file);                       // File / Blob / ArrayBuffer / 地址串都行
+await editor.addFont({ url: '/f/a.otf', lazy: true, role: 'cjk', label: '宋体' });
+editor.fonts();     // [{index, family, label, postScript, file, url, lazy, role}]
+await editor.format({ font: '宋体' });             // 显示名 / 族名 / PostScript 名 / 文件名 / 下标
+```
+
+四条约束：
+
+- **名字由字体文件自己报**（name 表的族名），**显示名由宿主给**（`label`）。两者的分工是
+  "身份 vs 界面"：字体文件里没有中文名（Noto 这三份只有英文族名），而选字体那一格给人看的
+  是中文，所以中文名只能由注册的一方写。不传 `label` 时显示名等于族名。
+- **名字在主线程先折成下标**再下发（引擎只认下标）。引擎那一侧判"名字不存在"在 Worker
+  传输下是一条 15 秒超时，报出来是"命令超时"而不是"字体没注册"。
+- **注册不重排**：已经排好的内容不会因为多装一份字体而变样，新字体从下一次
+  `format` / `paragraphFormat` 起生效，所以它是"写状态、不碰帧"那一档。
+- **同一份只装一次**（键 = 装载方式 + 地址或文件名）。重复注册回同一个下标；
+  存盘用的身份仍是 PostScript 名（退到族名、再退到文件名）。
+
+角色（`cjk` / `mongol` / `latin`）只决定"新文档的正文用哪一份、样例里那几段用哪一份"，
+不是装载的前提：只给一份字体时，正文就是它，蒙文跟随正文，拉丁关掉回退。
 
 **`doc` / `text` 移出构造参数**的理由：
 
@@ -251,8 +275,9 @@ setText(text: string, opts?: { repeat?: number }): Promise<void>   // 明确用�
 
 | 类别 | 项 | 为什么 |
 | --- | --- | --- |
-| 构造期固定 | `container` `assets` `fonts` | 换容器要重建 DOM；换 Worker 壳要重建引擎；字体装一次最贵 |
+| 构造期固定 | `container` `assets` | 换容器要重建 DOM；换 Worker 壳要重建引擎 |
 | 运行期可改 | `zoom` `pageMode` `page` `mode` `input` `showBrackets` `showControlDots` `showMarks` `marginMarks` `undoLimit` `caretStyle` `selectionStyle` | 有明确语义，代价可分级 |
+| 追加式 | `fonts` | 字体可以在任何时刻注册（`addFont`），只加不改 —— 已排好的内容不受影响 |
 | 只读 | `pages` `geometry` `caret` `selection` | 从引擎状态推出来 |
 
 ### 7.2 一个入口，不是 14 个 setter
@@ -280,7 +305,7 @@ const c = editor.config();     // 生效后的值（越界已夹取）
 三档的落点口径：选区（拖选、Shift 扩展、全选）三种模式都自由；插入点只出现在能打字的地方
 —— 表单模式限于可编辑控件的内容，只读模式一个都不出现。
 | `relayout` | `zoom` `pageMode` `page` `showBrackets` |
-| `reload` | `fonts`（构造期） |
+| `none` | `fonts`（`addFont` 只加脸、不重排也不重画） |
 
 ### 7.4 规范化与错误
 

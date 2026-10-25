@@ -282,6 +282,18 @@ private:
 };
 
 /**
+ * 字体文件名：去掉目录。
+ *
+ * 字体身份的最后一级（前两级是 PostScript 名与族名，见 EditorEngine::saveDocument）。
+ * 取 basename 而不是整条路径：绝对路径换台机器就失效，而且路径里常带用户名；同一次装载里
+ * 整份与按需两条路给引擎的名字不同（一个文件名、一个 MEMFS 路径），取 basename 之后
+ * 两边落到同一个标识上。
+ * @param path 装载时的名字或路径
+ * @return 文件名（无目录分隔符时就是它自己）
+ */
+std::string fontFileId(const std::string& path);
+
+/**
  * 字体按需读的账（所有数据源之和）。
  *
  * 判"按需是否划算"就靠这几个数：命中率高、落存储次数远小于字形数，才说明块缓存
@@ -359,6 +371,37 @@ public:
      * @return 字体索引；失败为 -1
      */
     int addFaceFromMemory(const std::string& name, const uint8_t* data, size_t len);
+
+    /**
+     * 按 PostScript 名找一张已装的脸。
+     * @param name PostScript 名（name ID 6）
+     * @return 字体索引；找不到为 -1
+     */
+    int indexOfPostScript(const std::string& name) const;
+
+    /**
+     * 按族名找一张已装的脸。同族多张（Regular / Bold）取先装的那一张。
+     * @param name 族名（name ID 1）
+     * @return 字体索引；找不到为 -1
+     */
+    int indexOfFamily(const std::string& name) const;
+
+    /**
+     * 按文件名找一张已装的脸。
+     * @param id 文件名（见 fontFileId），不是完整路径
+     * @return 字体索引；找不到为 -1
+     */
+    int indexOfFile(const std::string& id) const;
+
+    /**
+     * 按名字找一个已装的脸：PostScript 名 → 族名 → 文件名，与前两级同序。
+     *
+     * 顺序就是字体身份的顺序：宿主用族名注册、用族名选字体，而落盘与文档引用认的是
+     * PostScript 名 —— 两条路都得能查到同一张脸。
+     * @param name PostScript 名、族名或文件名
+     * @return 字体索引；找不到为 -1
+     */
+    int indexOfName(const std::string& name) const;
 
     /**
      * 所有按需数据源的统计之和（整份装载的脸不计）。

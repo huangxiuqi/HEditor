@@ -187,6 +187,42 @@ int FontLibrary::addFaceFromMemory(const std::string& name, const uint8_t* data,
     return static_cast<int>(faces_.size()) - 1;
 }
 
+int FontLibrary::indexOfPostScript(const std::string& name) const {
+    if (name.empty()) return -1;
+    for (size_t i = 0; i < faces_.size(); ++i) {
+        if (faces_[i]->postScriptName() == name) return static_cast<int>(i);
+    }
+    return -1;
+}
+
+int FontLibrary::indexOfFamily(const std::string& name) const {
+    if (name.empty()) return -1;
+    for (size_t i = 0; i < faces_.size(); ++i) {
+        if (faces_[i]->familyName() == name) return static_cast<int>(i);
+    }
+    return -1;
+}
+
+int FontLibrary::indexOfFile(const std::string& id) const {
+    if (id.empty()) return -1;
+    for (size_t i = 0; i < faces_.size(); ++i) {
+        if (fontFileId(faces_[i]->path()) == id) return static_cast<int>(i);
+    }
+    return -1;
+}
+
+int FontLibrary::indexOfName(const std::string& name) const {
+    int i = indexOfPostScript(name);
+    if (i < 0) i = indexOfFamily(name);
+    if (i < 0) i = indexOfFile(name);
+    return i;
+}
+
+std::string fontFileId(const std::string& path) {
+    const size_t sep = path.find_last_of("/\\");
+    return sep == std::string::npos ? path : path.substr(sep + 1);
+}
+
 FontFace* FontLibrary::face(int index) {
     if (index < 0 || index >= static_cast<int>(faces_.size())) return nullptr;
     return faces_[static_cast<size_t>(index)].get();

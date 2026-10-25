@@ -283,12 +283,14 @@ function makeTabs(): Tab[] {
         act: 'font',
         label: '字体',
         wide: true,
-        options: [
-          { value: '', text: '—' },
-          { value: '0', text: '思源黑体' },
-          { value: '1', text: '蒙古文' },
-          { value: '2', text: '拉丁' },
-        ],
+        // 选项按已注册清单现算：库那边注册了什么，这里就有什么。
+        //   写死"下标 → 名字"的话，注册顺序一变，下拉框显示的名字就与实际字体错开。
+        //   显示用 label（注册时给的中文名），没给时它等于字体自己的族名。
+        //   挂工具条发生在 createEditor 之前，那一拍还没有实例，先给空表。
+        options: () =>
+          [{ value: '', text: '—' }].concat(
+            (editor?.fonts() ?? []).map((f) => ({ value: String(f.index), text: f.label })),
+          ),
         value: () => (mark.font === undefined ? '' : String(mark.font)),
         run: (v) => {
           if (!v) return;

@@ -114,6 +114,34 @@ int main() {
         cjk, lib.face(cjk)->glyphCount(), mn, lib.face(mn)->glyphCount(), latin,
         lib.face(latin)->glyphCount());
 
+    std::printf("[0] 字体身份：三种名字查到同一张脸\n");
+    {
+        const std::string cjkFamily = lib.face(cjk)->familyName();
+        const std::string cjkPs = lib.face(cjk)->postScriptName();
+        std::printf("     族名 \"%s\"，PostScript 名 \"%s\"\n", cjkFamily.c_str(), cjkPs.c_str());
+        expectTrue(!cjkFamily.empty() && !cjkPs.empty(), "字体文件自己报得出两种名字");
+        expectTrue(lib.indexOfFamily(cjkFamily) == cjk, "族名查到第一张脸");
+        expectTrue(lib.indexOfPostScript(cjkPs) == cjk, "PostScript 名查到同一张脸");
+        expectTrue(lib.indexOfFile("NotoSansSC-VF.ttf") == cjk, "文件名查到同一张脸");
+        expectTrue(lib.indexOfFile(cjkPath) == -1, "完整路径不算文件名，按名字查不到");
+        expectTrue(lib.indexOfName(cjkFamily) == cjk && lib.indexOfName(cjkPs) == cjk &&
+                       lib.indexOfName("NotoSansSC-VF.ttf") == cjk,
+                   "indexOfName 三种名字都认");
+        expectTrue(lib.indexOfName("") == -1 && lib.indexOfName("没有这份") == -1,
+                   "空名与没注册的名字都回 -1，不挑一张凑数");
+        // 同一份文件装两次会得到两张同族的脸；按族名查必须回先装的那一张，
+        //   否则"按名字选字体"的结果会随注册顺序漂移。
+        FontLibrary twins;
+        const int t0 = twins.addFace(latinPath);
+        const int t1 = twins.addFace(latinPath);
+        expectTrue(t0 == 0 && t1 == 1, "同一份文件装两次是两张脸");
+        expectTrue(twins.indexOfFamily(lib.face(latin)->familyName()) == t0, "同族取先装的那一张");
+        expectTrue(
+            twins.addFaceFromMemory("bad.ttf", reinterpret_cast<const uint8_t*>("x"), 1) == -1,
+            "坏字节装不上脸");
+        expectTrue(twins.faceCount() == 2, "装失败的脸不进清单");
+    }
+
     const float kSize = 12.0f;
 
     std::printf("[1] 中文横排整形\n");

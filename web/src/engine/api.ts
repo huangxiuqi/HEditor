@@ -257,6 +257,10 @@ const COMMANDS: Array<[string, string, string[], string]> = [
   ['formSample',            'w', ['loadFormSample'],                                      'self'],
   ['loadDocument',          'w', ['loadDocument'],                                        'self'],
   ['fonts',                 'w', ['loadFont', 'loadFontFromFile', 'setFontRoles'],        'self'],
+  // 注册字体只往库里加脸，不重排也不上屏；但它要回推状态 —— 主线程的 fonts() 读的是
+  //   随状态推过来的那一份，不回推的话注册完当下读不到新字体。
+  ['addFont',               'w', ['loadFont', 'loadFontFromFile', 'setFontRoles'],        'none'],
+  ['fontList',              'r', ['fontsJson'],                                           'none'],
   ['setFormControls',       'w', ['setFormControls'],                                     'self'],
 
   // 编辑：*AndRender 系在库里就排完画完了，宿主不要再画一遍
@@ -481,8 +485,21 @@ let scrollResetHost = false;
 let bootMs = 0;
 let fontMs = 0;
 let fontBytes = 0;
-let fontList: any[] = [];
 let fontMode = 'full';
+// 构造期给的清单：reloadFonts 换装载方式时重装的就是这一份。
+let bootFonts: any[] = [];
+// 已装的脸：键是"装载方式 + 地址（或名字）"，值是引擎给的字体下标。
+//   注册（addFont）走它去重：同一份字体注册两次必须回同一个下标，否则清单里同一份字体
+//   出现好几遍，"按名字选字体"会命中最早的那一张。
+const installedFaces = new Map<string, number>();
+// 每个下标是从哪儿取的（绝对地址；按字节注册的那一份是空串）。清单报给宿主复核来路。
+const faceUrl = new Map<number, string>();
+// 每个下标的显示名（注册时给的 label）。字体文件只有英文族名，界面要的是这一行。
+const faceLabel = new Map<number, string>();
+// 角色指向哪张脸。只有样例内容与默认正文用它，缺的档按下面的规则补。
+const roleFace: Record<string, number> = {};
+// 引擎报回来的清单（已带角色），随状态推给主线程。
+let fontInfo: any[] = [];
 // 与单线程宿主同一口径：缩放 1 倍 = 96 dpi = 4 / 3。
 const kZoomBase = 4 / 3;
 let zoomLevel = kZoomBase;   // markCheck 要用：括号左缘的像素位置随缩放走
@@ -501,39 +518,107 @@ async function fetchFont(path: string): Promise<Uint8Array> {
 }
 
 /**
- * 两种装载方式。full 把整份字节交给引擎；lazy 先写进 MEMFS 再让引擎按路径按需读。
- *   MEMFS 在 Worker 里同样可用（它就是 JS 侧的内存文件系统），所以两条路都能在这边跑。
+ * 角色回落到引擎的默认口径：正文回落到第一张脸，蒙文跟随正文，拉丁关掉回退。
+ *   只装一份字体也能排版 —— 三个角色是样例内容的分工，不是装载的前提。
  */
-async function installFonts(mode: string): Promise<number> {
-  const t0 = performance.now();
-  const idx: Record<string, number> = {};
-  let bytes = 0;
-  for (const f of fontList) {
-    const buf = await fetchFont(f.path);
-    bytes += buf.length;
-    let ex = -1;
-    if (mode === 'lazy') {
-      const name = '/' + f.path.split('/').pop();
-      try { mod.FS.unlink(name); } catch (e) { /* 不存在就算了 */ }
-      // canOwn=true：MEMFS 直接持有这份字节，省掉一次十几 MB 的拷贝。
-      mod.FS.createDataFile('/', name, buf, true, false, true);
-      ex = mod.loadFontFromFile(name);
-    } else {
-      const ptr = mod.allocBuffer(buf.length);
-      mod.HEAPU8.set(buf, ptr);
-      // 传文件名而不是 label：字体身份要跨装载方式稳定 —— 保存时引擎把它写进文件的字体表，
-      //   两条路各写一个名字的话，"换一种装载方式存一次盘"就成了两份不同的文件。
-      ex = mod.loadFont(f.path.split('/').pop(), ptr, buf.length);
-      mod.freeBuffer(ptr);
-    }
-    if (ex < 0) throw new Error('字体解析失败: ' + f.path);
-    idx[f.role] = ex;
+function applyFontRoles(): void {
+  const cjk = roleFace.cjk ?? 0;
+  mod.setFontRoles(cjk, roleFace.mongol ?? cjk, roleFace.latin ?? -1);
+}
+
+/**
+ * 重算清单：引擎那边是唯一真相，这一层只补引擎不知道的那一项（角色）。
+ *
+ * 名字（族名 / PostScript 名）由字体文件自己给：宿主声明的名字迟早与文件对不上，
+ *   而"界面写着思源黑体、排出来是别的字体"不会报任何错。
+ */
+function refreshFontInfo(): any[] {
+  const raw = JSON.parse(mod.fontsJson());
+  const byIndex: Record<number, string> = {};
+  for (const role of Object.keys(roleFace)) {
+    const i = roleFace[role];
+    if (byIndex[i] === undefined) byIndex[i] = role;
   }
-  mod.setFontRoles(idx.cjk, idx.mongol, idx.latin);
+  fontInfo = raw.map((f: any) => ({
+    index: f.index,
+    family: f.family || f.postScript || f.file,
+    label: faceLabel.get(f.index) || f.family || f.postScript || f.file,
+    postScript: f.postScript || '',
+    file: f.file || '',
+    url: faceUrl.get(f.index) || '',
+    lazy: !!f.lazy,
+    role: byIndex[f.index],
+  }));
+  return fontInfo;
+}
+
+/**
+ * 装一批字体。同一份（方式 + 地址）只装一次，重复的条目复用既有下标。
+ *
+ * 两种装载方式：full 把整份字节交给引擎；lazy 先写进 MEMFS 再让引擎按路径按需读。
+ *   MEMFS 在 Worker 里同样可用（它就是 JS 侧的内存文件系统），所以两条路都能在这边跑。
+ *
+ * @param {Array} entries 每项 { url?, data?, name?, label?, role?, lazy? }
+ * @param {string} mode 默认装载方式（条目没逐条给 lazy 时用它）
+ * @param {boolean} fresh 真 = 重装一遍（不查已装表）；注册那条路用它的是假
+ * @returns {Promise<number>} 这一次真正读进来的字节数
+ */
+async function loadFonts(entries: any[], mode: string, fresh = false): Promise<number> {
+  const t0 = performance.now();
+  let bytes = 0;
+  for (const e of entries) {
+    const lazy = e.lazy === undefined ? mode === 'lazy' : !!e.lazy;
+    const file = String(e.name || e.url || '');
+    // 名字进身份、进 MEMFS 路径：去掉查询串，否则同一个字体换成 ?v=2 就变成另一份，
+    //   而存档里写的文件名会带上 "?v=2"。
+    const base = file.split('/').pop()!.split('?')[0];
+    const key = (lazy ? 'lazy:' : 'full:') + file;
+    let index = fresh ? undefined : installedFaces.get(key);
+    if (index === undefined) {
+      const buf = e.data ? (e.data as Uint8Array) : await fetchFont(e.url);
+      bytes += buf.length;
+      let fresh = -1;
+      if (lazy) {
+        const path = '/' + base;
+        try { mod.FS.unlink(path); } catch (err) { /* 不存在就算了 */ }
+        // canOwn=true：MEMFS 直接持有这份字节，省掉一次十几 MB 的拷贝。
+        mod.FS.createDataFile('/', path, buf, true, false, true);
+        fresh = mod.loadFontFromFile(path);
+      } else {
+        const ptr = mod.allocBuffer(buf.length);
+        mod.HEAPU8.set(buf, ptr);
+        // 传文件名而不是宿主给的名字：字体身份要跨装载方式稳定 —— 保存时引擎把它写进
+        //   文件的字体表，两条路各写一个名字的话，"换一种装载方式存一次盘"就成了两份文件。
+        fresh = mod.loadFont(base, ptr, buf.length);
+        mod.freeBuffer(ptr);
+      }
+      if (!(fresh >= 0)) throw new Error('字体解析失败: ' + base);
+      installedFaces.set(key, fresh);
+      faceUrl.set(fresh, e.url || '');
+      if (e.label) faceLabel.set(fresh, String(e.label));
+      index = fresh;
+    }
+    if (e.role) roleFace[e.role] = index;
+  }
+  applyFontRoles();
+  refreshFontInfo();
   fontMs = performance.now() - t0;
-  fontBytes = bytes;
+  fontBytes += bytes;
   fontMode = mode;
   return bytes;
+}
+
+/**
+ * 装载构造期那一份清单（boot 与 reloadFonts 共用）。
+ *
+ * 每次都是重装一遍，不复用已装的脸：这条命令的用途是"换个装载方式再量一次"，
+ *   而复用同一张脸会让字形缓存仍然命中，量出来的账不反映当前配置（见 reloadFonts）。
+ *   旧的那批脸不回收 —— 它们还在排版结果与实例缓存里被引用着。
+ * @param {string} mode 装载方式
+ * @returns {Promise<number>} 这一次真正读进来的字节数
+ */
+function installFonts(mode: string): Promise<number> {
+  return loadFonts(bootFonts, mode, true);
 }
 
 // 几何
@@ -793,6 +878,9 @@ function sendState(ts: number, label: string, stats: any, changed?: boolean, wor
     //   面板初始化控件要用它，而默认值只在 EngineConfig 里有一份。
     caretStyle: JSON.parse(mod.caretStyleJson()),
     selectionStyle: JSON.parse(mod.selectionStyleJson()),
+    // 字体清单：主线程的 fonts() 是同步读，工具栏建下拉框时不能等一次往返。
+    //   它只在注册字体时变，长度是三到十条，随状态推的成本可以忽略。
+    fonts: fontInfo,
   });
   const pack = performance.now() - tPack;
   packSum += pack;
@@ -896,7 +984,7 @@ async function boot(m: any) {
   dpr = m.dpr || 1;
   viewW = m.viewW || 1;
   viewH = m.viewH || 1;
-  fontList = m.fonts || [];
+  bootFonts = m.fonts || [];
   await installFonts(m.fontMode || 'full');
   // 先把 ready 报出去，后面的装载失败也看得见 —— 顺序反了的话，装载里一抛异常
   //   主线程就永远等不到 ready，表现成"整个页面静默挂住"，是最难查的那种形态。
@@ -959,6 +1047,14 @@ const WRITE = collect('w', {
     if (err) throw new Error(err);
   }),
   fonts: async (a) => { await installFonts(a.mode || 'full'); paintFull(); },
+  /**
+   * 注册字体：只往库里加脸，不重排也不上屏 —— 已排好的内容不会因为多装一份字体而变样，
+   *   新字体从下一次 format / 段落格式开始生效。
+   *
+   * 呈现归属 none（与 setFontCacheConfig 同档）：它要回推状态，但那一拍不该重画 ——
+   *   补一次 present 只会重画一个光标，却把这一拍的重画统计冲掉（探针拿它当分母）。
+   */
+  addFont: async (a) => { await loadFonts(a.list || [], a.mode || 'full'); },
 
   insertText: (a) => mod.insertTextAt(a.para | 0, a.offset | 0, a.s),
   type: (a) => mod.typeText(a.s),
@@ -1180,6 +1276,13 @@ const READ = collect('r', {
    *   那一份是"本拍写过哪几页"，而矩形是累积的，两者不同步就会永久漏贴几块。
    */
   pageDirtyPages: () => JSON.parse(mod.pageDirtyPagesJson()),
+  /**
+   * 已注册的字体清单（引擎那本 + 角色）。主线程的 fonts() 直接读它。
+   *
+   * 不回 JSON 文本而回现成的数组：同一拍里这一层已经解析过一次（见 refreshFontInfo），
+   *   再 dump 一遍只是多一次序列化。
+   */
+  fontList: () => fontInfo,
   text: (a) => mod.documentText(a.i | 0),
   // 整篇一次拼好：宿主每拍都要一份全文（change 事件带它），逐段取是 N 次跨界。
   textAll: () => mod.documentTextAll(),

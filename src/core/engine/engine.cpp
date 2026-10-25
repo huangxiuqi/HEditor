@@ -73,19 +73,6 @@ constexpr float kMinCaretWidthPt = 0.4f;
  */
 constexpr size_t kGlyphCacheBudgetBytes = 48u * 1024u * 1024u;
 
-/**
- * 字体文件名：去掉目录。
- *
- * 字体身份的最后一级（前两级是 PostScript 名与族名，见 saveDocument）—— 文件名可以改，
- * 所以它排在最后。取文件名而不是路径：绝对路径换台机器就失效，而且路径里常带用户名；
- * 同一次装载里 full 与 lazy 两条路给引擎的名字不同（一个文件名、一个 MEMFS 路径），
- * 取 basename 之后两边落到同一个标识上。
- */
-std::string fontIdOf(const std::string& path) {
-    const size_t sep = path.find_last_of("/\\");
-    return sep == std::string::npos ? path : path.substr(sep + 1);
-}
-
 }  // namespace
 
 /**
@@ -278,7 +265,7 @@ rev::SerializeOptions EditorEngine::fontWriteOptions() const {
     opt.font_ref = [this](int index) -> rev::FontRef {
         const FontFace* face = fonts_.face(index);
         if (face == nullptr) return rev::FontRef{};
-        return rev::FontRef{face->postScriptName(), face->familyName(), fontIdOf(face->path())};
+        return rev::FontRef{face->postScriptName(), face->familyName(), fontFileId(face->path())};
     };
     return opt;
 }
@@ -288,25 +275,29 @@ rev::DeserializeOptions EditorEngine::fontReadOptions() const {
     // 与写端同一个顺序找本机那张脸。都找不到就返回 -1（读者保留文件里的原下标，交给
     //   回退链），而不是"随便挑一张" —— 挑错字体比缺字体更难发现。
     opt.resolve_font = [this](const rev::FontRef& ref) -> int {
-        for (int i = 0; i < fonts_.faceCount(); ++i) {
-            const FontFace* face = fonts_.face(i);
-            if (face == nullptr) continue;
-            if (!ref.postscript.empty() && face->postScriptName() == ref.postscript) return i;
-        }
-        for (int i = 0; i < fonts_.faceCount(); ++i) {
-            const FontFace* face = fonts_.face(i);
-            if (face != nullptr && !ref.family.empty() && face->familyName() == ref.family)
-                return i;
-        }
-        if (!ref.file.empty()) {
-            for (int i = 0; i < fonts_.faceCount(); ++i) {
-                const FontFace* face = fonts_.face(i);
-                if (face != nullptr && fontIdOf(face->path()) == ref.file) return i;
-            }
-        }
-        return -1;
+        int i = fonts_.indexOfPostScript(ref.postscript);
+        if (i < 0) i = fonts_.indexOfFamily(ref.family);
+        if (i < 0) i = fonts_.indexOfFile(ref.file);
+        return i;
     };
     return opt;
+}
+
+std::string EditorEngine::fontsJson() const {
+    nlohmann::ordered_json arr = nlohmann::ordered_json::array();
+    for (int i = 0; i < fonts_.faceCount(); ++i) {
+        const FontFace* f = fonts_.face(i);
+        if (f == nullptr) continue;
+        nlohmann::ordered_json o = nlohmann::ordered_json::object();
+        o["index"] = i;
+        o["family"] = f->familyName();
+        o["postScript"] = f->postScriptName();
+        o["file"] = fontFileId(f->path());
+        // 按需装载的脸整份不在内存里 —— 这条决定宿主要不要为它算常驻字节。
+        o["lazy"] = f->source() != nullptr;
+        arr.push_back(std::move(o));
+    }
+    return arr.dump();
 }
 
 rev::SerializeResult EditorEngine::saveDocument() const {

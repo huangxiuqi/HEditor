@@ -65,6 +65,14 @@ interface Mirror {
   caretBlockReversed: boolean;
   caretStyle: any;
   selectionStyle: any;
+
+  /**
+   * 已注册的字体清单。
+   *
+   * 必须是同步读：工具栏在启动时按它建字体下拉框，等一次往返会让"字体"那一格先空着
+   *   再弹出来；注册新字体之后它也要立刻可读（宿主拿返回值直接用）。
+   */
+  fonts: any[];
   heapMB: number;
   scrollReset: boolean;
 
@@ -108,6 +116,7 @@ export function createWorker(opts: WorkerOptions): {
     caretBlockReversed: false,
     caretStyle: null,
     selectionStyle: null,
+    fonts: [],
     heapMB: 0,
     scrollReset: false,
     blit: { ms: 0, pages: 0, px: 0 },
@@ -243,6 +252,8 @@ export function createWorker(opts: WorkerOptions): {
           return mirror.caretStyle;
         case 'selectionStyleJson':
           return mirror.selectionStyle;
+        case 'fontList':
+          return mirror.fonts;
         case 'heap':
           return mirror.heapMB * 1048576;
         case 'pagePxWidth':
@@ -385,6 +396,8 @@ export function createWorker(opts: WorkerOptions): {
     if (typeof m.caretBlockReversed === 'boolean') mirror.caretBlockReversed = m.caretBlockReversed;
     if (m.caretStyle) mirror.caretStyle = m.caretStyle;
     if (m.selectionStyle) mirror.selectionStyle = m.selectionStyle;
+    // 空数组也是有效值（一份字体都没装误配时，宿主该看到"没有字体"而不是上一份清单）。
+    if (Array.isArray(m.fonts)) mirror.fonts = m.fonts;
     if (typeof m.heapMB === 'number') mirror.heapMB = m.heapMB;
     // 引擎把滚动位置归零了：当场应用，不停在镜像里等下一次 finish。
     //   留在镜像里会被"下一次任意一拍"消费 —— 用户已经滚到第十页时来一份状态，视口

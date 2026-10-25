@@ -12,6 +12,8 @@ export const PUBLIC_MEMBERS: readonly string[] = [
   'paragraph',
   'paragraphs',
   'save',
+  'addFont',
+  'fonts',
   'insertText',
   'insertTable',
   'insertControl',

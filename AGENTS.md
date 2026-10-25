@@ -141,7 +141,7 @@ function blitFrame(px, w) {}
   改一行就能测，只有 Worker 壳需要预先构建（`pretest` 会做，不到一秒）；
   `npm run test:dist` 跑构建产物，那是验收基准。配置在 `web/playwright.config.ts`
   与 `web/tests/support/config.ts`，判据在 `web/tests/specs/`。
-  十三份 spec 跑一遍：`demo` 5 个用例 / 47 条判据（含连页末尾的总高：可滚区跟着内容走、
+  十四份 spec 跑一遍：`demo` 5 个用例 / 47 条判据（含连页末尾的总高：可滚区跟着内容走、
   至少留一页）、`multi` 11、`saveload` 11、`input` 25、`diag` 39、
   `error` 19、`stress` 69 步差分审计、`edit` 367 条、`clipboard` 11 条（复制粘贴的保真、
   剪切、跨实例、键盘路径、撑长之后的滚动与画布）、`format` 14 个用例 / 49 条判据（字符格式落不落到标记上、
@@ -153,7 +153,10 @@ function blitFrame(px, w) {}
   公开面每个方法调一遍形状与效果都对 —— 常用操作全走一遍，别等用户点了才发现；
   再加一条"点完按钮键盘还在编辑器里"）。`table` 6 条
   （跨页切片：第二页上点空格子、整格反白铺满每一页、格内折行、连页下逐行下推、
-  空格的段落标记、切片之后每页位图自洽）。旧的 `scripts/*_probe.mjs` 与
+  空格的段落标记、切片之后每页位图自洽）。`fonts` 3 条
+  （注册与选字体：清单里的名字来自字体文件的 name 表、重复注册不增脸、
+  按族名 / PostScript 名 / 文件名都能选到、注册不重排、没注册的名字当场拒绝）。
+  旧的 `scripts/*_probe.mjs` 与
   `scripts/verify_web.ps1` 已删除，别再按那套入口跑。
 - 两个宿主的分工（详见 `docs/正式化架构与迁移路线.md` 4.6）：wasm 是交付物，
   native 只做验证宿主，承担三个断言套件与内存布局诊断。据此有三条规则：

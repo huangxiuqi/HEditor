@@ -378,21 +378,102 @@ export interface Assets {
   base?: string;
 }
 
+/**
+ * 字体在三处样例内容里的角色：正文 / 蒙文竖排 / 拉丁回退。
+ *
+ * 只在"默认正文是谁、样例里那几段用哪份字体"这件事上有意义。它不是装载的前提 ——
+ * 一份字体也能排版，缺的档按"正文回落到第一张、蒙文跟随正文、拉丁关掉回退"补。
+ */
+export type FontRole = 'cjk' | 'mongol' | 'latin';
+
+/**
+ * 一份字体：给地址，或者直接给字节。名字不用声明 —— 显示名由字体文件自己报
+ * （name 表的族名），声明过的那一份迟早与文件对不上。
+ */
 export interface FontSource {
   /**
-   * font-face 名（同时是三级匹配的第一级）。
+   * 取字体的地址（相对 createEditor 的产物目录，或绝对地址）。与 data 二选一。
+   */
+  url?: string;
+
+  /**
+   * 字体字节。File / Blob 会当场读出来；ArrayBuffer 与 Uint8Array 直接用。
+   */
+  data?: File | Blob | ArrayBuffer | Uint8Array;
+
+  /**
+   * 字节的文件名。只用于字体身份的最后一级（存档里写的是 PostScript 名，退到文件名时用它）；
+   * 传 File 时自动取 file.name。
+   */
+  name?: string;
+
+  /**
+   * 显示名（给人看的那一行）。不传就用字体文件自己的族名。
+   *
+   * 只影响界面：身份仍是 PostScript 名 / 族名 / 文件名。注册表里同名多份时，按显示名
+   *   选字体会命中先注册的那一份。
+   */
+  label?: string;
+
+  /**
+   * 角色。不传时该字体只是"可选的一份"，不改变默认正文。
+   */
+  role?: FontRole;
+
+  /**
+   * 按需装载：整份不进常驻，缺哪块取哪块。默认整份装进来。
+   */
+  lazy?: boolean;
+}
+
+/**
+ * 一份字体的给法：一条地址串、一份声明，或者直接把字节递过来。
+ */
+export type FontInput = string | FontSource | Blob | ArrayBuffer | Uint8Array;
+
+/**
+ * 已注册的一份字体。名字是引擎从字体文件的 name 表读出来的，不是宿主声明的。
+ */
+export interface FontInfo {
+  /**
+   * 字体下标。文档里的字体引用存的就是它。
+   */
+  index: number;
+
+  /**
+   * 族名（字体文件里那个，给 format({ font }) 认）。
    */
   family: string;
 
   /**
-   * 取字体的地址（相对或绝对）。
+   * 显示名：注册时给的 label，没给就是族名。界面用这一项。
+   */
+  label: string;
+
+  /**
+   * PostScript 名（存档里写的就是它）；读不到时是空串。
+   */
+  postScript: string;
+
+  /**
+   * 文件名（字体身份的最后一级）。
+   */
+  file: string;
+
+  /**
+   * 装载时的地址（绝对）；按字节注册的那一份是空串 —— 它没有来源地址。
    */
   url: string;
 
   /**
-   * 角色：正文 / 界面 / 等宽。不传按顺序补位。
+   * 是否按需装载。
    */
-  role?: string;
+  lazy: boolean;
+
+  /**
+   * 三个角色里它占了哪一个；都不是时缺席。
+   */
+  role?: FontRole;
 }
 
 /**
@@ -411,9 +492,11 @@ export interface EditorOptions {
   assets?: Assets;
 
   /**
-   * 字体清单；不传用内置的三份 Noto。
+   * 字体清单。可给一项或一整串；不传用内置的三份 Noto（正文 / 蒙文 / 拉丁）。
+   *
+   * 只管"装载"，不管"用哪一份" —— 选字体走 format({ font }) 或 paragraphFormat({ font })。
    */
-  fonts?: FontSource[];
+  fonts?: FontInput | FontInput[];
 
   /**
    * 初始配置（等价于创建之后调一次 configure）。
@@ -961,9 +1044,12 @@ export interface CharFormatPatch {
   underline?: boolean;
 
   /**
-   * 字体下标（见 fonts 清单的顺序）。
+   * 字体：下标（见 fonts()）或族名 / PostScript 名 / 文件名 / 显示名。
+   *
+   * 认名字是为了让调用方不必记下标：注册顺序一变，写死的下标就指向另一份字体，
+   *   而画面"看起来还能用"。
    */
-  font?: number;
+  font?: number | string;
 
   /**
    * 字号（磅）。
@@ -981,9 +1067,9 @@ export interface CharFormatPatch {
  */
 export interface ParaFormatPatch {
   /**
-   * 段落主字体下标。
+   * 段落主字体：下标或族名（与字符格式的 font 同一套名字）。
    */
-  font?: number;
+  font?: number | string;
 
   /**
    * 段落字号（磅）。
@@ -1009,7 +1095,7 @@ export interface ParaFormatPatch {
 /**
  * 编辑器实例。
  *
- * 40 个方法 + element / diag 两个只读属性。分组只为可读，实例上是平铺的。
+ * 44 个方法 + element / diag 两个只读属性。分组只为可读，实例上是平铺的。
  */
 export interface Editor {
   // 内容
@@ -1048,6 +1134,25 @@ export interface Editor {
    * 序列化成 JSON 文本。
    */
   save(): Promise<string>;
+
+  // 字体
+
+  /**
+   * 注册字体。构造之后随时可调，注册完就能用 —— 不必重建编辑器。
+   *
+   * 给地址、给 File / Blob、给 ArrayBuffer 都行；同一份（装载方式 + 地址或文件名）
+   *   重复注册复用既有下标，不会在库里多出一张脸。只加脸，不重排：已经排好的内容
+   *   不会因为多装一份字体而变样，新字体从下一次 format / paragraphFormat 开始生效。
+   * @param sources 一份或几份字体；也可以直接给地址串
+   * @returns 这一次注册的那几份（按入参顺序），带下标、族名与角色
+   */
+  addFont(...sources: Array<FontInput | FontInput[]>): Promise<FontInfo[]>;
+
+  /**
+   * 已注册的字体清单（同步读）。名字由字体文件自己报，工具栏照它建下拉框就行，
+   *   不要另抄一份"下标 → 名字"。
+   */
+  fonts(): FontInfo[];
 
   /**
    * 在指定位置插入一段文本（模板填充），进撤销栈。

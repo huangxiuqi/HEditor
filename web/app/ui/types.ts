@@ -64,9 +64,10 @@ export interface Choice {
   wide?: boolean;
 
   /**
-   * 选项；value 为空串表示"没有显式值"。
+   * 选项；value 为空串表示"没有显式值"。可以给一个函数：候选随状态变的下拉框
+   * （字体那一格按已注册清单现算）在每次回显时重读它。
    */
-  options: Array<{ value: string; text: string }>;
+  options: Array<{ value: string; text: string }> | (() => Array<{ value: string; text: string }>);
 
   /**
    * 回显：当前该选哪个。
@@ -254,7 +255,8 @@ export interface ChromeHost {
  * @returns 真 = 下拉框
  */
 export function isChoice(item: Item): item is Choice {
-  return Array.isArray((item as Choice).options);
+  const options = (item as Choice).options;
+  return Array.isArray(options) || typeof options === 'function';
 }
 
 /**

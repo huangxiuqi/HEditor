@@ -582,7 +582,8 @@ in-thread 侧 `then1` 当场回调，行为零变化。
 | `loadFormSample` | `formSample` |
 | `loadStressDocument` / `loadStressDocumentDiverse` | `stress` / `stressDiverse` |
 | `loadTextDocument` | `textDoc` |
-| `loadFont` / `loadFontFromFile` / `setFontRoles` | `fonts`（三条合成一条 installFonts） |
+| `loadFont` / `loadFontFromFile` / `setFontRoles` | `fonts`（重装，三条合成一条 installFonts）/ `addFont`（注册） |
+| `fontsJson` | `fontList`（登记过的脸与名字） |
 
 ### B.3 特权访问（4 条，不进表）
 

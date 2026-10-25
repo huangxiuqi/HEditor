@@ -1778,6 +1778,16 @@ public:
     const FontLibrary& fonts() const { return fonts_; }
 
     /**
+     * 已注册的字体清单，宿主按它填字体下拉框、按名字选字体。
+     *
+     * 名字由字体文件自己给（族名 / PostScript 名），不由宿主声明 —— 声明的那一份迟早
+     * 与文件对不上，而"界面上写着思源黑体、排出来是别的字体"没有任何报错。
+     *
+     * @return JSON 数组，每项 { index, family, postScript, file, lazy }
+     */
+    std::string fontsJson() const;
+
+    /**
      * 诊断用：把一串文本的整形结果摊成可读文本（字形 id / 推进 / cluster），
      * 让"整形到底有没有发生"这件事可被断言，而不是只看能不能编译。
      *

@@ -10,6 +10,8 @@ import type {
   EditorConfig,
   EditorEvents,
   EditorOptions,
+  FontInfo,
+  FontInput,
   Geometry,
   CustomPaper,
   PageSetup,
@@ -25,7 +27,7 @@ import { scrollHeightPx, type CanvasStore } from './host/pages';
 import { stageOf } from './host/parts';
 import { cleanMarkdownLines, then1, type Args, type ZoomControl } from './input/keymap';
 import { assertSimd, simdProbeBytes, simdSupported } from './engine/simd';
-import { defaultFonts, type AssetPaths } from './transport/assets';
+import { resolveFonts, type AssetPaths } from './transport/assets';
 import { createWorker } from './transport/worker';
 import { guard } from './guard';
 
@@ -51,7 +53,7 @@ function selfDir(): string {
  * 默认布局是"库产物在 web/dist/、页面在 web/、wasm 在 build/wasm/web/"。这不是约定，
  *   只是本仓库开发时的摆法 —— 产品里三项都该显式给（assets.glue / assets.wasm / assets.base）。
  */
-function resolveAssets(opts: EditorOptions): AssetPaths {
+async function resolveAssets(opts: EditorOptions): Promise<AssetPaths> {
   const a = opts.assets ?? {};
   // 默认布局：库在 web/dist/，素材在仓库根下（assets/、build/wasm/web/）。
   //   所以默认 base 是"库目录往上两级"。这不是约定，只是本仓库开发时的摆法 ——
@@ -63,7 +65,7 @@ function resolveAssets(opts: EditorOptions): AssetPaths {
   // Worker 壳默认与库产物同一目录（web/dist/heditor_worker.js），也可以显式给 ——
   //   示例页与探针用的是后一条（它们的页面不在库产物那一层）。
   const worker = a.worker ? new URL(a.worker, document.baseURI).href : new URL('heditor_worker.js', selfDir()).href;
-  return { glue, base, worker, wasm, bust: '', fonts: defaultFonts(base, opts.fonts) };
+  return { glue, base, worker, wasm, bust: '', fonts: await resolveFonts(base, opts.fonts) };
 }
 
 // 事件
@@ -245,7 +247,9 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
   //   标题与下一步的拒绝，而不是一条 CompileError。
   assertSimd();
 
-  const assets = resolveAssets(opts);
+  // 字体清单要在建引擎之前落地：地址按产物目录解析，字节当场读（File 是异步的）。
+  //   读失败就当场拒绝 —— 留到 Worker 里抛的话，报出来的是"引擎启动失败"，与真实原因隔一层。
+  const assets = await resolveAssets(opts);
   const emitter = new Emitter();
   const config: EditorConfig = { ...DEFAULT_CONFIG, ...(opts.config ?? {}) };
   let version = 0;
@@ -397,7 +401,7 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
     if (patch.bold !== undefined) out.b = patch.bold;
     if (patch.italic !== undefined) out.i = patch.italic;
     if (patch.underline !== undefined) out.u = patch.underline;
-    if (patch.font !== undefined) out.fi = patch.font;
+    if (patch.font !== undefined) out.fi = fontIndexOf(patch.font);
     if (patch.size !== undefined) out.sz = patch.size;
     if (patch.color !== undefined) out.col = patch.color;
     return out;
@@ -410,12 +414,35 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
    */
   function paraPatchJson(patch: ParaFormatPatch): Record<string, unknown> {
     const out: Record<string, unknown> = {};
-    if (patch.font !== undefined) out.fi = patch.font;
+    if (patch.font !== undefined) out.fi = fontIndexOf(patch.font);
     if (patch.size !== undefined) out.sz = patch.size;
     if (patch.lineFactor !== undefined) out.lf = patch.lineFactor;
     if (patch.spaceAfter !== undefined) out.sa = patch.spaceAfter;
     if (patch.pageBreakBefore !== undefined) out.pbb = patch.pageBreakBefore;
     return out;
+  }
+
+  /**
+   * 字体引用 → 下标。数字原样，名字按已注册清单查：族名、PostScript 名、文件名、显示名。
+   *
+   * 显示名也认：界面上写的就是它，用户照着界面写 format({ font: '思源黑体' }) 时不该落空。
+   * 名字要在主线程查完再下发：引擎只认下标，而"没注册的名字"若留给引擎去判，
+   *   在 Worker 传输下会变成一次 15 秒的超时，报出来的是"命令超时"而不是"字体没注册"。
+   * @param ref 下标或名字
+   * @returns 字体下标
+   */
+  function fontIndexOf(ref: number | string): number {
+    if (typeof ref === 'number') return Math.trunc(ref);
+    const want = String(ref).trim();
+    const list = (link.read('fontList') || []) as FontInfo[];
+    const hit = list.find(
+      (f) => f.family === want || f.postScript === want || f.file === want || f.label === want,
+    );
+    if (!hit) {
+      const names = list.map((f) => f.label).join('、');
+      throw new TypeError(`没有注册这个字体：${want}（已注册：${names || '无'}）`);
+    }
+    return hit.index;
   }
 
   /**
@@ -588,6 +615,35 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
     async save() {
       alive();
       return String((await Promise.resolve(link.serialize())) ?? '');
+    },
+
+    // 字体
+
+    async addFont(...sources) {
+      alive();
+      // 参数摊平：addFont(a, b) 与 addFont([a, b]) 都要能用（两者混着写也认）。
+      const flat = ([] as FontInput[]).concat(...sources);
+      if (!flat.length) return [];
+      const entries = await resolveFonts(String(assets.base), flat);
+      await Promise.resolve(link.write('addFont', { list: entries }));
+      await Promise.resolve(link.settle('addFont'));
+      // 回哪几份由"这一次交出去的地址或文件名"对回来：引擎只认自己装了什么，
+      //   而清单里那一条正是它。重复注册同一份时对回来的是既有那一条 —— 那正是想要的。
+      const list = editor.fonts();
+      const out: FontInfo[] = [];
+      for (const e of entries) {
+        const key = String(e.name || e.url || '').split('/').pop()!.split('?')[0];
+        const hit = list.find((f) => f.file === key);
+        if (!hit) throw new Error('字体装载之后在清单里找不到：' + key);
+        out.push(hit);
+      }
+      return out;
+    },
+
+    fonts() {
+      alive();
+      const raw = link.read('fontList');
+      return (Array.isArray(raw) ? raw : []) as FontInfo[];
     },
 
     async insertText(pos, text) {
