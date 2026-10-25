@@ -123,6 +123,7 @@ inline constexpr KeySpec kKeys[] = {
     {"field", "num", false},
     {"side", "num", false},
     {"line", "num", false},
+    {"opt", "num", false},
     {"cellPara", "num", true},
     {"cell", "arr", true},
     {"img", "num", true},

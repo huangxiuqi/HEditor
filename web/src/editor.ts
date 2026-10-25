@@ -5,6 +5,8 @@ import type {
   CharFormatPatch,
   ControlInsertOptions,
   ControlSummary,
+  ControlUpdateOptions,
+  ControlValueInput,
   Diag,
   Editor,
   EditorConfig,
@@ -124,6 +126,61 @@ const MARKS_CODE: Record<EditorConfig['showMarks'], number> = {
   paragraph: 1,
   all: 2,
 };
+
+/**
+ * 控件选项 -> 传给引擎的那一份。
+ *
+ * 只放给出的键：没给的保持不出现，引擎读成"这一项不动"。空数组与没给是两件事
+ * （清空选项与不改选项），所以这里按键判断，不用空数组代替。
+ * @param o 控件选项
+ * @returns 引擎侧载荷
+ */
+function controlOptsFrom(o: ControlInsertOptions | ControlUpdateOptions): Record<string, unknown> {
+  const opts: Record<string, unknown> = {};
+  if (o.type !== undefined) opts.type = String(o.type);
+  if (o.key !== undefined) opts.key = String(o.key);
+  if (o.label !== undefined) opts.label = String(o.label);
+  // 选项表：值与标签分开送，值进数据、标签进纸面。
+  if (o.options !== undefined) opts.options = o.options.map((x) => ({ v: x.value, l: x.label }));
+  if (o.group !== undefined) opts.group = String(o.group);
+  if (o.freeInput !== undefined) opts.free = !!o.freeInput;
+  if (o.format !== undefined) opts.format = String(o.format);
+  if (o.dateUnits !== undefined) opts.units = dateUnitsMask(o.dateUnits);
+  return opts;
+}
+
+/**
+ * 日期单位 -> 位掩码。顺序与 kDateUnitXXX 一致（引擎按它决定选择器里能选哪些单位）。
+ */
+const DATE_UNIT_BITS: Record<string, number> = {
+  year: 1,
+  month: 2,
+  day: 4,
+  hour: 8,
+  minute: 16,
+  second: 32,
+};
+
+/**
+ * 位掩码 -> 日期单位名列表。顺序按年月日时分秒，与界面一致。
+ * @param mask 位掩码
+ * @returns 单位名
+ */
+function dateUnitsOf(mask: number): Array<'year' | 'month' | 'day' | 'hour' | 'minute' | 'second'> {
+  const names = ['year', 'month', 'day', 'hour', 'minute', 'second'] as const;
+  return names.filter((_, i) => (mask & (1 << i)) !== 0);
+}
+
+/**
+ * 日期单位名列表 -> 位掩码。
+ * @param units 单位名（year / month / day / hour / minute / second）
+ * @returns 位掩码
+ */
+function dateUnitsMask(units: string[]): number {
+  let mask = 0;
+  for (const u of units) mask |= DATE_UNIT_BITS[u] ?? 0;
+  return mask;
+}
 
 /**
  * 值形态 -> 引擎的整数。顺序与 ValueShape 枚举一致（引擎按它决定值放哪、怎么读）。
@@ -347,6 +404,12 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
         if (!disposed) emitter.emit('render', { pages, ms });
       },
       onPageError: (message: string) => reportError(message, false),
+      // 前置回调：宿主不接就当"一律允许"（切换是常规交互，不该强制每个宿主都写钩子）。
+      beforeControlChange: (change) =>
+        typeof opts.onBeforeControlChange === 'function'
+          ? opts.onBeforeControlChange(change)
+          : true,
+      onControlTap: (index, rect) => opts.onControlTap?.(index, rect),
       onZoomBy: (delta: number) => queueZoom(delta),
       onZoomReset: () => void editor.setZoom(1),
     };
@@ -668,13 +731,37 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       const o = opts ?? {};
       return edit('insertControl', {
         opts: {
-          type: o.type,
-          key: o.key,
-          label: o.label === undefined ? '' : String(o.label),
+          ...controlOptsFrom(o),
           ro: !!o.readonly,
           req: !!o.required,
-          shape: SHAPE_CODE[o.shape ?? 'text'],
+          // 不给 shape 就按类型推断：强制成 text 会把单选组的枚举值形态冲掉。
+          shape: o.shape === undefined ? undefined : SHAPE_CODE[o.shape],
         },
+      });
+    },
+
+    async updateControl(index, opts) {
+      alive();
+      // 只改给出的项：与插入共用同一份键映射，两边不会各认一半字段。
+      return edit('setControlSpec', { i: Math.trunc(index), opts: controlOptsFrom(opts ?? {}) });
+    },
+
+    async setControlValue(index, value) {
+      alive();
+      const v: ControlValueInput = value ?? {};
+      return edit('setControlValue', {
+        i: Math.trunc(index),
+        flag: !!v.flag,
+        text: v.text === undefined ? '' : String(v.text),
+        items: v.items ?? [],
+      });
+    },
+
+    async toggleControl(index, option) {
+      alive();
+      return edit('toggleControl', {
+        i: Math.trunc(index),
+        option: option === undefined ? -1 : Math.trunc(option),
       });
     },
 
@@ -953,7 +1040,22 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
     form(): ControlSummary[] {
       alive();
       const raw = (link.read('controls') ?? {}) as {
-        items?: Array<{ kind?: string; label?: string; ro?: boolean; i?: number }>;
+        items?: Array<{
+          i?: number;
+          kind?: string;
+          type?: string;
+          key?: string;
+          label?: string;
+          group?: string;
+          text?: string;
+          ro?: boolean;
+          flag?: boolean;
+          sel?: string;
+          fmt?: string;
+          du?: number;
+          selItems?: string[];
+          opts?: Array<[string, string]>;
+        }>;
         caret?: number;
       };
       const items = raw.items ?? [];
@@ -961,8 +1063,21 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       return items.map((it, index) => ({
         index,
         kind: String(it.kind ?? ''),
+        type: String(it.type ?? ''),
+        key: String(it.key ?? ''),
         label: String(it.label ?? ''),
-        value: null,
+        group: String(it.group ?? ''),
+        text: String(it.text ?? ''),
+        value: {
+          flag: !!it.flag,
+          text: String(it.sel ?? ''),
+          items: Array.isArray(it.selItems) ? it.selItems.map(String) : [],
+        },
+        options: Array.isArray(it.opts)
+          ? it.opts.map((pair) => ({ value: String(pair[0]), label: String(pair[1]) }))
+          : [],
+        format: String(it.fmt ?? ''),
+        dateUnits: dateUnitsOf(Number(it.du ?? 0)),
         focused: index === focused,
       }));
     },

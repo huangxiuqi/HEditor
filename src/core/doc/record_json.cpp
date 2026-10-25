@@ -180,6 +180,69 @@ ordered_json controlValueJson(const ControlValue& v) {
     return j;
 }
 
+/**
+ * 选项表写成 [[值, 标签], ...]。数组对而不是对象：两个字段、顺序固定，落盘更短。
+ * @param options 选项表
+ * @return JSON 数组
+ */
+ordered_json optionsJson(const std::vector<ControlOption>& options) {
+    ordered_json arr = ordered_json::array();
+    for (const ControlOption& o : options) {
+        ordered_json pair = ordered_json::array();
+        pair.push_back(o.value);
+        pair.push_back(o.label);
+        arr.push_back(std::move(pair));
+    }
+    return arr;
+}
+
+/**
+ * 类型特有层写成一个带 k 标签的对象。没有特有层时返回空对象（调用方不写这个键）。
+ * @param c 控件记录
+ * @return JSON 对象
+ */
+ordered_json detailJson(const ControlSpec& c) {
+    ordered_json j = ordered_json::object();
+    if (const auto* d = textOf(c)) {
+        // 有文本特有层就写下来。Any 也要写：不写的话"有这一层但不过滤"落盘会变成
+        //   "没有这一层"，读回来 operator== 就不等了 —— 往返不变的要求当场破掉。
+        j["k"] = (d->filter == ContentFilter::Number) ? "number" : "text";
+        return j;
+    }
+    if (const auto* d = choiceOf(c)) {
+        j["k"] = "choice";
+        if (!d->label.empty()) j["lbl"] = d->label;
+        if (!d->options.empty()) j["opt"] = optionsJson(d->options);
+        if (!d->group.empty()) j["grp"] = d->group;
+        if (d->multi) j["multi"] = true;
+        // caret_barrier 的默认是 true，只在关掉时写（默认值不写这条最容易漏）。
+        if (!d->caret_barrier) j["cb"] = false;
+        return j;
+    }
+    if (const auto* d = dropdownOf(c)) {
+        j["k"] = "dropdown";
+        if (!d->options.empty()) j["opt"] = optionsJson(d->options);
+        if (d->free_input) j["fi"] = true;
+        return j;
+    }
+    if (const auto* d = dateOf(c)) {
+        j["k"] = "date";
+        if (!d->format.empty()) j["fmt"] = d->format;
+        if (d->units != kDateUnitsAll) j["u"] = static_cast<int>(d->units);
+        return j;
+    }
+    if (const auto* d = customOf(c)) {
+        j["k"] = "custom";
+        if (!d->props.empty()) {
+            ordered_json p = ordered_json::object();
+            for (const auto& kv : d->props) p[kv.first] = kv.second;
+            j["p"] = std::move(p);
+        }
+        return j;
+    }
+    return ordered_json::object();
+}
+
 ordered_json controlJson(const ControlSpec& c, StringPool* strings) {
     ordered_json j = ordered_json::object();
     if (!c.key.empty()) j["key"] = strings->add(c.key);
@@ -192,6 +255,8 @@ ordered_json controlJson(const ControlSpec& c, StringPool* strings) {
     if (!c.structureLock) j["lk"] = false;
     if (!(c.appearance == Appearance{})) j["ap"] = appearanceJson(c.appearance, strings);
     if (!c.validateRef.empty()) j["vr"] = strings->add(c.validateRef);
+    const ordered_json d = detailJson(c);
+    if (!d.empty()) j["d"] = d;
     return j;
 }
 
@@ -574,6 +639,100 @@ bool readAppearance(const Context& ctx, const ordered_json& j, const char* key, 
     return true;
 }
 
+/**
+ * 读选项表。每一项必须是 [值, 标签] 两个字符串。
+ * @param j JSON
+ * @param out 写回选项表
+ * @return true = 形状对
+ */
+bool readOptions(const ordered_json& j, std::vector<ControlOption>* out) {
+    if (!j.is_array()) return false;
+    std::vector<ControlOption> got;
+    for (const ordered_json& item : j) {
+        if (!item.is_array() || item.size() != 2) return false;
+        if (!item[0].is_string() || !item[1].is_string()) return false;
+        ControlOption o;
+        o.value = item[0].get<std::string>();
+        o.label = item[1].get<std::string>();
+        got.push_back(std::move(o));
+    }
+    *out = std::move(got);
+    return true;
+}
+
+/**
+ * 读类型特有层。
+ *
+ * k 不认识时整份读入失败：特有层的形状由 k 决定，猜一个形状填进去等于伪造数据。
+ * 与"不认识的 controlType 原样透传"不是一回事 —— 那个透传的是属性袋（CustomDetail），
+ * 而这里连袋子的形状都还不知道。
+ * @param ctx 读取上下文（报错用）
+ * @param j 控件对象
+ * @param out 写回控件记录
+ * @return true = 读成功
+ */
+bool readDetail(const Context& ctx, const ordered_json& j, ControlSpec* out) {
+    if (!j.contains("d")) return true;
+    if (!j["d"].is_object()) return ctx.fail("control.d 不是对象");
+    const ordered_json& d = j["d"];
+    if (!d.contains("k") || !d["k"].is_string()) return ctx.fail("control.d 缺少类型标签 k");
+    const std::string k = d["k"].get<std::string>();
+    if (k == "number") {
+        TextDetail t;
+        t.filter = ContentFilter::Number;
+        out->detail = t;
+        return true;
+    }
+    if (k == "text") {
+        out->detail = TextDetail{};
+        return true;
+    }
+    if (k == "choice") {
+        ChoiceDetail c;
+        if (!readString(d, "lbl", &c.label)) return ctx.fail("choice.lbl 不是字符串");
+        if (d.contains("opt") && !readOptions(d["opt"], &c.options)) {
+            return ctx.fail("choice.opt 不是 [值, 标签] 数组");
+        }
+        if (!readString(d, "grp", &c.group)) return ctx.fail("choice.grp 不是字符串");
+        if (!readBool(d, "multi", &c.multi)) return ctx.fail("choice.multi 不是布尔");
+        if (!readBool(d, "cb", &c.caret_barrier)) return ctx.fail("choice.cb 不是布尔");
+        out->detail = c;
+        return true;
+    }
+    if (k == "dropdown") {
+        DropdownDetail c;
+        if (d.contains("opt") && !readOptions(d["opt"], &c.options)) {
+            return ctx.fail("dropdown.opt 不是 [值, 标签] 数组");
+        }
+        if (!readBool(d, "fi", &c.free_input)) return ctx.fail("dropdown.fi 不是布尔");
+        out->detail = c;
+        return true;
+    }
+    if (k == "date") {
+        DateDetail c;
+        if (!readString(d, "fmt", &c.format)) return ctx.fail("date.fmt 不是字符串");
+        int units = static_cast<int>(kDateUnitsAll);
+        if (!readInt(d, "u", &units)) return ctx.fail("date.u 不是整数");
+        if (units < 0 || units > 0x3F) return ctx.fail("date.u 超出六个单位的范围");
+        c.units = static_cast<uint16_t>(units);
+        out->detail = c;
+        return true;
+    }
+    if (k == "custom") {
+        CustomDetail c;
+        if (d.contains("p")) {
+            if (!d["p"].is_object()) return ctx.fail("custom.p 不是对象");
+            for (auto it = d["p"].begin(); it != d["p"].end(); ++it) {
+                if (!it.value().is_string()) return ctx.fail("custom.p 的值不是字符串");
+                c.props[it.key()] = it.value().get<std::string>();
+            }
+        }
+        out->detail = c;
+        return true;
+    }
+    return ctx.fail("不认识的类型特有层标签：" + k);
+}
+
 bool readControl(const Context& ctx, const ordered_json& j, const char* key, ControlSpec* out) {
     if (!j.contains(key)) return true;
     if (!j[key].is_object()) return ctx.fail("control 不是对象");
@@ -607,6 +766,7 @@ bool readControl(const Context& ctx, const ordered_json& j, const char* key, Con
         if (!readInt(c, "vr", &index)) return ctx.fail("control.vr 不是下标");
         if (!ctx.stringAt(index, &out->validateRef)) return false;
     }
+    if (!readDetail(ctx, c, out)) return false;
     return true;
 }
 

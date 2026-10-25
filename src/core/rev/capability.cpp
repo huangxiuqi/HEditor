@@ -92,13 +92,36 @@ EditCheck editableAt(const Doc& doc, const FlowIndex& idx, FlowPos pos) {
 
 }  // namespace
 
+bool caretBarrierAt(const Doc& doc, const FlowIndex& idx, FlowPos pos) {
+    if (!doc.root) return false;
+    std::vector<const Node*> all;
+    collectAllControls(doc.root, &all);
+    int f = 0;
+    int e = 0;
+    for (const Node* c : all) {
+        if (!idx.intervalOf(c->id, &f, &e)) continue;
+        // 内容区间 = 两枚括号之间；括号本身与它两侧都不算。
+        if (pos <= f || pos >= e) continue;
+        const ControlSpec* spec = controlOf(*c);
+        if (spec == nullptr) continue;
+        if (const ChoiceDetail* choice = choiceOf(*spec)) {
+            if (choice->caret_barrier) return true;
+        }
+    }
+    return false;
+}
+
 EditCheck canEditAt(const Doc& doc, EditMode mode, FlowPos pos) {
-    if (mode == EditMode::Document) return EditCheck{true, ""};
     if (mode == EditMode::ReadOnly) return EditCheck{false, "只读模式：不接受编辑"};
     if (!doc.root) return EditCheck{false, "文档为空"};
 
     const FlowIndex idx(doc, visibilityOf(mode));
     if (pos < 0 || pos > idx.size()) return EditCheck{false, "位置越界"};
+    // 屏障与模式无关：选择类的内容在三档里都不是可写正文。
+    if (caretBarrierAt(doc, idx, pos)) {
+        return EditCheck{false, "选择类控件的内容不接受编辑"};
+    }
+    if (mode == EditMode::Document) return EditCheck{true, ""};
     return editableAt(doc, idx, pos);
 }
 
@@ -142,7 +165,10 @@ FlowPos stepEditable(const Doc& doc, EditMode mode, FlowPos from, int dir) {
     const FlowIndex idx(doc, visibilityOf(mode));
 
     if (mode != EditMode::Form) {
-        const FlowPos t = from + step;
+        // 文档与只读模式只看屏障：方向键一步一格，撞上选择类就跨过去。
+        //   跨的是一整块（它的内容可能几十个码点），所以这里循环到出界为止。
+        FlowPos t = from + step;
+        while (t >= 0 && t <= idx.size() && caretBarrierAt(doc, idx, t)) t += step;
         if (t < 0) return 0;
         if (t > idx.size()) return idx.size();
         return t;

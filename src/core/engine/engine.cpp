@@ -1176,7 +1176,34 @@ int EditorEngine::innermostControlAt(FlowPos f) const {
     return innermostControlAtFlow(*flow_, control_node_ids_, f);
 }
 
+bool EditorEngine::barrierAtFlow(FlowPos f) const {
+    FlowPos first = 0;
+    FlowPos end = 0;
+    return barrierSpanAt(f, &first, &end);
+}
+
+bool EditorEngine::barrierSpanAt(FlowPos f, FlowPos* first, FlowPos* end) const {
+    for (int i = 0; i < static_cast<int>(control_node_ids_.size()); ++i) {
+        FlowPos a = 0;
+        FlowPos b = 0;
+        if (!controlContentSpan(i, &a, &b)) continue;
+        if (f < a || f > b) continue;
+        const rev::Node* n = rev::findNode(document(), control_node_ids_[static_cast<size_t>(i)]);
+        if (n == nullptr) continue;
+        const auto* spec = std::get_if<ControlSpec>(&n->payload);
+        if (spec == nullptr) continue;
+        const ChoiceDetail* choice = choiceOf(*spec);
+        if (choice == nullptr || !choice->caret_barrier) continue;
+        if (first != nullptr) *first = a - 1;
+        if (end != nullptr) *end = b + 1;
+        return true;
+    }
+    return false;
+}
+
 bool EditorEngine::insertableAtFlow(FlowPos f) const {
+    // 屏障先于模式：选择类的内容三档里都不是插入点（它的"标签"不是可写正文）。
+    if (barrierAtFlow(f)) return false;
     if (mode_ == EditMode::Document) return true;
     if (mode_ != EditMode::Form) return false;  // 只读（以及将来新增的模式）：一个都不认
     const int inner = innermostControlAt(f);
@@ -1219,7 +1246,15 @@ bool EditorEngine::caretInsertable() const {
  */
 bool EditorEngine::confineCaret(FlowPos before) {
     const FlowPos now = caretFlowPos();
-    if (mode_ != EditMode::Form) return now != before;
+    if (mode_ != EditMode::Form) {
+        // 文档与只读模式只挡屏障：目标落进选择类的内容里时贴到块外，按"从哪边过来"选端点。
+        FlowPos first = 0;
+        FlowPos end = 0;
+        if (!barrierSpanAt(now, &first, &end)) return now != before;
+        const FlowPos target = (before <= first) ? first : end;
+        if (!caret_.setCaretAtFlow(target)) return false;
+        return target != before;
+    }
     if (caretInsertable()) return now != before;
 
     FlowPos lo = 0;

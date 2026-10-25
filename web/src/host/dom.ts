@@ -132,6 +132,19 @@ export interface DomHostOptions {
   readOnly(): boolean;
 
   /**
+   * 选择类控件切换之前的裁决（宿主接的前置回调）。没接就一律允许。
+   * @param change 切换请求
+   */
+  beforeControlChange?(change: any): boolean | Promise<boolean>;
+
+  /**
+   * 点到一个"不是选择类"的控件（下拉、日期）时通知宿主 —— 弹出层归宿主。
+   * @param index 控件下标
+   * @param rect 控件在页面坐标下的第一块矩形（磅）；读不到时为 null
+   */
+  onControlTap?(index: number, rect: { page: number; x: number; y: number; w: number; h: number } | null): void;
+
+  /**
    * 状态栏（产品页没有这一格，实现里就什么都不做）。
    * @param text 这句话要说什么
    * @param isErr true = 这是一次失败（要上提示条）
@@ -903,6 +916,40 @@ export function createDomHost(o: DomHostOptions): DomHost {
       void afterEdit('cellSelectAt', 'user');
     },
     images: () => then1(read('imageList'), (r: any) => (r && Array.isArray(r.images) ? r.images : [])),
+    controlToggle: (h: any) => {
+      // 只看"点了哪个控件"：值、类型、选项都在主线程这份状态镜像里，不必再问引擎一趟。
+      const st = (read('controls') ?? {}) as any;
+      const items = Array.isArray(st.items) ? st.items : [];
+      const it = items[h.field];
+      if (!it) return null;
+      const type = String(it.type ?? '');
+      if (type !== 'radioButton' && type !== 'checkBox' && type !== 'radioGroup' &&
+          type !== 'checkBoxGroup') {
+        return null;
+      }
+      return {
+        index: h.field,
+        option: typeof h.opt === 'number' ? h.opt : -1,
+        type,
+        key: String(it.key ?? ''),
+        oldValue: {
+          flag: !!it.flag,
+          text: String(it.sel ?? ''),
+          items: Array.isArray(it.selItems) ? it.selItems.map(String) : [],
+        },
+      };
+    },
+    beforeControlChange: (change: any) =>
+      typeof o.beforeControlChange === 'function' ? o.beforeControlChange(change) : true,
+    toggleControl: (index: number, option: number) =>
+      writeOp('toggleControl', { i: index, option }),
+    onControlTap: (index: number) => {
+      // 弹出层要落在控件上，所以把它的第一块矩形一起带出去（页面坐标、磅）。
+      const st = (read('controls') ?? {}) as any;
+      const items = Array.isArray(st.items) ? st.items : [];
+      const rs = Array.isArray(items[index]?.rects) ? items[index].rects : [];
+      o.onControlTap?.(index, rs.length > 0 ? rs[0] : null);
+    },
     selectImage: (i) => writeOp('selectImage', { i }),
     resizeImage: (i, w, h, merge) => writeOp('resizeImage', { i, w, h, merge }),
     status: (text, isErr) => o.status?.(text, isErr),

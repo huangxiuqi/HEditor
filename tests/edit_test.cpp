@@ -497,7 +497,7 @@ const SectionInfo kSections[] = {
     {62, false, 9},  {63, false, 3},  {64, false, 3},  {65, false, 3},  {66, false, 3},
     {67, false, 10}, {68, false, 4},  {69, false, 3},  {70, false, 10}, {71, false, 6},
     {72, false, 10}, {73, false, 9},  {74, false, 3},  {75, false, 3},  {76, false, 3},
-    {77, false, 3},  {78, true, 1},   {79, false, 2},
+    {77, false, 3},  {78, true, 1},   {79, false, 2},  {80, false, 3},  {81, false, 2},
 };
 
 /**
@@ -13490,6 +13490,318 @@ int main() {
         e79.setEditMode(EditMode::Document);
         e79.relayout();
         expectTrue(std::fabs(e79.images()[0].w_pt - 72.0f) < 0.01f, "被拒之后尺寸一个字都没动");
+    }
+
+    if (runSection(80)) std::printf("\n[80] 控件：八种类型、取值、切换与光标屏障\n");
+    if (runSection(80)) {
+        EngineConfig c80;
+        c80.zoom = 1.0f;
+        const std::vector<std::string> fonts80 = {cjkPath, mnPath, latinPath};
+
+        NodeTree t80;
+        {
+            const NodeId sec = t80.firstSectionId();
+            const NodeId a = t80.appendChild(sec, NodeKind::TextRun);
+            t80.setText(a, utf8ToCodepoints("ABCD"));
+            t80.appendChild(sec, NodeKind::ParagraphMark);
+        }
+        EditorEngine e80;
+        if (!e80.init(fonts80)) {
+            std::fprintf(stderr, "字体加载失败\n");
+            return 2;
+        }
+        e80.setConfig(c80);
+        e80.setDocument(t80, StyleSheet{});
+        e80.relayout();
+
+        const std::vector<ControlOption> opts80 = {
+            {"a", "选项甲"}, {"b", "选项乙"}, {"c", "选项丙"}};
+        auto insert80 = [&](const std::string& type, const std::string& label,
+                            const std::vector<ControlOption>& options, const std::string& group) {
+            ControlSpec spec = makeControlSpec(type);
+            if (auto* c = std::get_if<ChoiceDetail>(&spec.detail)) {
+                c->options = options;
+                c->group = group;
+            }
+            if (auto* d = std::get_if<DropdownDetail>(&spec.detail)) d->options = options;
+            // 插到文末：插在控件内容末尾会落进上一个控件里（容器允许嵌套，那是设计使然）。
+            e80.moveCaretToDocEnd();
+            return e80.insertControlAndRender(spec, label);
+        };
+
+        expectTrue(insert80("text", "文本", {}, ""), "插入文本输入");
+        expectTrue(insert80("number", "0", {}, ""), "插入数值输入");
+        // 插完光标就在内容末尾：正好用来验数值过滤。
+        expectTrue(!e80.typeTextUtf8("abc"), "数值控件拒收字母");
+        expectTrue(e80.typeTextUtf8(".5"), "数值控件收小数点与数字");
+        expectTrue(!e80.typeTextUtf8("a"), "再打字母仍然被拒");
+        expectTrue(!e80.typeTextUtf8(".."), "第二个小数点被拒");
+        expectTrue(e80.controlViews()[1].content == "0.5", "内容只留下数字那部分");
+        expectTrue(insert80("radioButton", "甲", {}, "g1"), "插入单选甲");
+        expectTrue(insert80("radioButton", "乙", {}, "g1"), "插入单选乙");
+        expectTrue(insert80("checkBox", "同意", {}, ""), "插入复选");
+        expectTrue(insert80("radioGroup", "", opts80, ""), "插入单选组");
+        expectTrue(insert80("checkBoxGroup", "", opts80, ""), "插入复选组");
+        expectTrue(insert80("dropdownList", "", opts80, ""), "插入下拉");
+        expectTrue(insert80("date", "", {}, ""), "插入时间选择");
+
+        std::vector<EditorEngine::ControlView> v80 = e80.controlViews();
+        expectTrue(v80.size() == 9, "文档里九个控件（实际 " + std::to_string(v80.size()) + "）");
+        if (v80.size() == 9) {
+            expectTrue(v80[0].controlType == "text" && v80[1].controlType == "number" &&
+                           v80[2].controlType == "radioButton" &&
+                           v80[3].controlType == "radioButton" &&
+                           v80[4].controlType == "checkBox" && v80[5].controlType == "radioGroup" &&
+                           v80[6].controlType == "checkBoxGroup" &&
+                           v80[7].controlType == "dropdownList" && v80[8].controlType == "date",
+                       "九种业务类型按插入顺序排好");
+            expectTrue(v80[5].value.text.empty() && v80[6].value.items.empty() &&
+                           v80[7].value.text.empty() && v80[8].value.text.empty(),
+                       "选择类与下拉、日期插入时都没有值");
+            expectTrue(v80[5].content.find("○ 选项甲") == 0, "单选组的内容是图形加标签");
+            expectTrue(v80[5].options.size() == 3, "单选组带三个选项");
+        }
+
+        // 单选组的互斥：切到第二项，内容里的图形跟着换。
+        expectTrue(e80.toggleControlAndRender(5, 1), "单选组切到第二项");
+        v80 = e80.controlViews();
+        expectTrue(v80[5].value.text == "b", "值落在 b 上");
+        expectTrue(v80[5].content.find("◉ 选项乙") != std::string::npos, "第二项的图形变成选中态");
+        expectTrue(v80[5].content.find("○ 选项甲") != std::string::npos, "第一项回到未选中");
+
+        // 复选组：多选、可取消。
+        expectTrue(e80.toggleControlAndRender(6, 0), "复选组选中第一项");
+        expectTrue(e80.toggleControlAndRender(6, 2), "复选组再选中第三项");
+        v80 = e80.controlViews();
+        expectTrue(v80[6].value.items.size() == 2 && v80[6].value.items[0] == "a" &&
+                       v80[6].value.items[1] == "c",
+                   "复选组同时选中 a 与 c");
+        expectTrue(e80.toggleControlAndRender(6, 0), "取消第一项");
+        expectTrue(e80.controlViews()[6].value.items.size() == 1, "只剩一项");
+
+        // 单选的互斥组：点第二个，第一个自动取消 —— 同一批提交。
+        expectTrue(e80.toggleControlAndRender(2, -1), "选中单选甲");
+        expectTrue(e80.controlViews()[2].value.flag, "甲是选中的");
+        const int depth80 = e80.undoDepth();
+        expectTrue(e80.toggleControlAndRender(3, -1), "选中单选乙");
+        v80 = e80.controlViews();
+        expectTrue(v80[3].value.flag && !v80[2].value.flag, "乙选中、甲取消");
+        expectTrue(v80[2].content.find("○") == 0 && v80[3].content.find("◉") == 0,
+                   "两个单选的图形各自跟着自己的值");
+        expectTrue(e80.undoDepth() == depth80 + 1, "一次切换只留一步撤销");
+
+        // 复选：点一下选中，再点一下取消。
+        expectTrue(e80.toggleControlAndRender(4, -1), "勾上复选");
+        expectTrue(e80.controlViews()[4].value.flag, "复选是勾上的");
+        expectTrue(e80.toggleControlAndRender(4, -1), "再点一下");
+        expectTrue(!e80.controlViews()[4].value.flag, "复选取消了");
+
+        // 下拉：值落在记录上，内容是选中项的标签；不在选项表里的值被拒。
+        ControlValue dv80;
+        dv80.text = "b";
+        expectTrue(e80.setControlValueAndRender(7, dv80), "下拉选中 b");
+        expectTrue(e80.controlViews()[7].content == "选项乙", "内容是选项乙");
+        dv80.text = "zzz";
+        expectTrue(!e80.setControlValueAndRender(7, dv80), "下拉拒收选项表以外的值");
+        expectTrue(e80.controlViews()[7].content == "选项乙", "被拒之后内容不变");
+
+        // 日期：值存 ISO 串，内容按默认格式显示；坏日期被拒。
+        ControlValue dv81;
+        dv81.text = "2026-10-26T01:57:41";
+        expectTrue(e80.setControlValueAndRender(8, dv81), "日期写入 2026-10-26 01:57:41");
+        expectTrue(e80.controlViews()[8].content == "2026年10月26日 01时57分41秒",
+                   "内容按默认格式显示（实际 " + e80.controlViews()[8].content + "）");
+        dv81.text = "2026-02-30T00:00:00";
+        expectTrue(!e80.setControlValueAndRender(8, dv81), "2 月 30 日被拒");
+        dv81.text = "2026-10-26";
+        expectTrue(!e80.setControlValueAndRender(8, dv81), "不完整的 ISO 串被拒");
+
+        // 光标屏障：三档模式都进不去选择类的内容。
+        const ControlRange r82 = e80.controls().at(5).range;
+        e80.setCaret(r82.start.para, r82.start.offset + 2);
+        expectTrue(!e80.caretInsertable(), "文档模式：光标停在单选组内容里不算可插入位置");
+        e80.setEditMode(EditMode::Form);
+        e80.relayout();
+        expectTrue(!e80.caretInsertable(), "表单模式：同样进不去");
+        e80.setEditMode(EditMode::Document);
+        e80.relayout();
+        // 方向键跨过整块：从内容里往外走一格，落点必须在块外。
+        e80.moveCaretBy(1);
+        expectTrue(e80.caretInsertable(), "方向键把光标带出了屏障");
+
+        // 下拉的自由输入：打开之后选项表以外的值也能写。
+        ControlSpec free80 = makeControlSpec("dropdownList");
+        if (auto* d = std::get_if<DropdownDetail>(&free80.detail)) {
+            d->options = opts80;
+            d->free_input = true;
+        }
+        e80.moveCaretToDocEnd();
+        expectTrue(e80.insertControlAndRender(free80, ""), "插入一个允许自由输入的下拉");
+        ControlValue fv80;
+        fv80.text = "手填的值";
+        const int freeIndex = static_cast<int>(e80.controlViews().size()) - 1;
+        expectTrue(e80.setControlValueAndRender(freeIndex, fv80), "自由输入收下选项表以外的值");
+        expectTrue(e80.controlViews()[static_cast<size_t>(freeIndex)].content == "手填的值",
+                   "内容就是那段输入");
+
+        // 空内容控件：光标停在两枚括号之间，连打三个字都得留在里面。
+        //   零宽内容最容易把"内容末尾"与"控件之后"混成同一格 —— 那一格一旦判错，
+        //   第一个字还进得去，第二个字就落到括号外面了。
+        e80.moveCaretToDocEnd();
+        expectTrue(e80.insertControlAndRender(makeControlSpec("text"), ""), "插入一个空内容控件");
+        const int emptyIndex = static_cast<int>(e80.controlViews().size()) - 1;
+        // 走 AndRender 版：真实宿主每敲一个字都会重排一次，簇表因此是新的。
+        expectTrue(
+            e80.typeTextAndRender("a") && e80.typeTextAndRender("b") && e80.typeTextAndRender("c"),
+            "空控件里连打三个字都成立");
+        // 批量提交的宿主：不重排直接接着打。此时簇表记的是重排那一刻的码点数，
+        //   拿它吸附会把落点吸到上一个字 —— 旧表不许用，这是那条判据钉的事。
+        expectTrue(e80.typeTextUtf8("d") && e80.typeTextUtf8("e"), "不重排连打两个字也成立");
+        expectTrue(e80.controlViews()[static_cast<size_t>(emptyIndex)].content == "abcde",
+                   "五个字都留在空控件里（实际 " +
+                       e80.controlViews()[static_cast<size_t>(emptyIndex)].content + "）");
+    }
+
+    if (runSection(81)) std::printf("\n[81] 控件定义可改：选项、标签、格式、孤儿值与撤销\n");
+    if (runSection(81)) {
+        EngineConfig c81;
+        c81.zoom = 1.0f;
+        const std::vector<std::string> fonts81 = {cjkPath, mnPath, latinPath};
+        NodeTree t81;
+        {
+            const NodeId sec = t81.firstSectionId();
+            const NodeId a = t81.appendChild(sec, NodeKind::TextRun);
+            t81.setText(a, utf8ToCodepoints("ABCD"));
+            t81.appendChild(sec, NodeKind::ParagraphMark);
+        }
+        EditorEngine e81;
+        if (!e81.init(fonts81)) {
+            std::fprintf(stderr, "字体加载失败\n");
+            return 2;
+        }
+        e81.setConfig(c81);
+        e81.setDocument(t81, StyleSheet{});
+        e81.relayout();
+
+        const std::vector<ControlOption> opts81 = {
+            {"a", "选项甲"}, {"b", "选项乙"}, {"c", "选项丙"}};
+        // 四个控件：单选组、下拉、日期、文本。各挑一项它收的定义字段来改。
+        auto insert81 = [&](const std::string& type, const std::string& label,
+                            const std::vector<ControlOption>& options) {
+            ControlSpec spec = makeControlSpec(type);
+            if (auto* c = std::get_if<ChoiceDetail>(&spec.detail)) c->options = options;
+            if (auto* d = std::get_if<DropdownDetail>(&spec.detail)) d->options = options;
+            e81.moveCaretToDocEnd();
+            return e81.insertControlAndRender(spec, label);
+        };
+        expectTrue(insert81("radioGroup", "", opts81), "插入单选组");
+        expectTrue(insert81("dropdownList", "", opts81), "插入下拉");
+        expectTrue(insert81("date", "", {}), "插入日期");
+        expectTrue(insert81("text", "乙方", {}), "插入文本控件");
+
+        expectTrue(e81.toggleControlAndRender(0, 1), "单选组选中第二项");
+        ControlValue dv81;
+        dv81.text = "b";
+        expectTrue(e81.setControlValueAndRender(1, dv81), "下拉选中 b");
+        ControlValue iso81;
+        iso81.text = "2026-10-26T01:57:41";
+        expectTrue(e81.setControlValueAndRender(2, iso81), "日期写入 2026-10-26 01:57:41");
+
+        // 改选项表：换标签、删掉选中项。内容按新表重建，指向被删项的值跟着清掉。
+        const int depth81 = e81.undoDepth();
+        ControlPatch p81;
+        p81.options = std::vector<ControlOption>{{"a", "甲（改）"}, {"c", "丙"}};
+        expectTrue(e81.setControlSpecAndRender(0, p81), "改单选组的选项表");
+        std::vector<EditorEngine::ControlView> v81 = e81.controlViews();
+        expectTrue(v81[0].options.size() == 2, "选项表剩两项");
+        expectTrue(v81[0].options[0].label == "甲（改）", "标签改成了甲（改）");
+        expectTrue(v81[0].value.text.empty(), "选中的 b 被删掉，值跟着清空");
+        expectTrue(v81[0].content.find("甲（改）") != std::string::npos &&
+                       v81[0].content.find("选项乙") == std::string::npos,
+                   "内容是新的选项表（实际 " + v81[0].content + "）");
+        expectTrue(e81.undoDepth() == depth81 + 1, "改定义只留一步撤销");
+
+        // 撤销：定义与值一起回到改之前（值与定义在同一步里）。
+        expectTrue(e81.undoAndRender(), "撤销改定义");
+        v81 = e81.controlViews();
+        expectTrue(v81[0].options.size() == 3 && v81[0].value.text == "b",
+                   "撤销之后选项与选中值都回来了");
+        expectTrue(e81.redoAndRender(), "重做");
+        expectTrue(e81.controlViews()[0].value.text.empty(), "重做之后值又是空的");
+
+        // 幂等：同一份补丁再来一次不产生步骤。
+        const int depth82 = e81.undoDepth();
+        expectTrue(e81.setControlSpecAndRender(0, p81), "同一份补丁再来一次");
+        expectTrue(e81.undoDepth() == depth82, "幂等：不产生步骤");
+
+        // 类型不可改。
+        ControlPatch p83;
+        p83.expect_type = std::string("checkBoxGroup");
+        expectTrue(!e81.setControlSpecAndRender(0, p83), "类型不可改（要求 checkBoxGroup）");
+        expectTrue(e81.controlViews()[0].controlType == "radioGroup", "被拒之后类型没动");
+
+        // 收不下的字段要拒：给单选组送 format、给日期送 options、给文本送 group。
+        ControlPatch p84;
+        p84.format = std::string("yyyy");
+        expectTrue(!e81.setControlSpecAndRender(0, p84), "给单选组送日期格式被拒");
+        ControlPatch p85;
+        p85.options = opts81;
+        expectTrue(!e81.setControlSpecAndRender(2, p85), "给日期送选项表被拒");
+        ControlPatch p86;
+        p86.group = std::string("g");
+        expectTrue(!e81.setControlSpecAndRender(3, p86), "给文本控件送互斥组被拒");
+
+        // 日期：改格式串，内容跟着换；单位一个不选被拒。
+        ControlPatch p87;
+        p87.format = std::string("yyyy/MM/dd");
+        expectTrue(e81.setControlSpecAndRender(2, p87), "日期改成 yyyy/MM/dd");
+        expectTrue(e81.controlViews()[2].content == "2026/10/26",
+                   "内容按新格式显示（实际 " + e81.controlViews()[2].content + "）");
+        expectTrue(e81.controlViews()[2].value.text == "2026-10-26T01:57:41",
+                   "值还是那段 ISO，换格式不动数据");
+        ControlPatch p88;
+        p88.units = static_cast<uint16_t>(0);
+        expectTrue(!e81.setControlSpecAndRender(2, p88), "日期单位一个都不选被拒");
+        ControlPatch p89;
+        p89.units = static_cast<uint16_t>(kDateUnitYear | kDateUnitMonth | kDateUnitDay);
+        expectTrue(e81.setControlSpecAndRender(2, p89), "日期只留年月日");
+        expectTrue(
+            e81.controlViews()[2].date_units == (kDateUnitYear | kDateUnitMonth | kDateUnitDay),
+            "单位落进记录");
+        expectTrue(e81.controlViews()[2].content == "2026/10/26", "内容不受单位影响");
+
+        // 只改业务编码：值、内容一个字都不动（文本控件尤其，它的内容不是投影）。
+        ControlPatch p90;
+        p90.key = std::string("party_b");
+        expectTrue(e81.setControlSpecAndRender(3, p90), "改文本控件的业务编码");
+        expectTrue(e81.controlViews()[3].key == "party_b", "编码落进记录");
+        expectTrue(e81.controlViews()[3].content == "乙方", "内容没动（它不是定义的投影）");
+
+        // 下拉：只改 free_input 时值不动；关掉自由输入后选项外的值要清掉。
+        ControlPatch p91;
+        p91.free_input = true;
+        expectTrue(e81.setControlSpecAndRender(1, p91), "打开自由输入");
+        ControlValue fv81;
+        fv81.text = "手填的";
+        expectTrue(e81.setControlValueAndRender(1, fv81), "自由输入收下选项外的值");
+        ControlPatch p92;
+        p92.free_input = false;
+        expectTrue(e81.setControlSpecAndRender(1, p92), "关掉自由输入");
+        expectTrue(e81.controlViews()[1].value.text.empty(), "选项外的值跟着清空");
+        expectTrue(e81.controlViews()[1].content.empty(), "内容也空了");
+
+        // 改定义是设计动作：表单与只读模式都拒绝。
+        e81.setEditMode(EditMode::Form);
+        e81.relayout();
+        ControlPatch p93;
+        p93.key = std::string("other");
+        expectTrue(!e81.setControlSpecAndRender(3, p93), "表单模式拒绝改定义");
+        e81.setEditMode(EditMode::ReadOnly);
+        e81.relayout();
+        expectTrue(!e81.setControlSpecAndRender(3, p93), "只读模式拒绝改定义");
+        e81.setEditMode(EditMode::Document);
+        e81.relayout();
+        expectTrue(e81.controlViews()[3].key == "party_b", "两次被拒之后编码没动");
     }
 
     checkSectionTable();

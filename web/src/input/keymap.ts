@@ -46,6 +46,16 @@ export interface Hit {
   cellPara?: number;
 
   /**
+   * 落点归属的控件下标（-1 或没有这个键 = 不在控件里）。
+   */
+  field?: number;
+
+  /**
+   * 组控件里点在第几个选项上（没有这个键 = 不在组控件上）。
+   */
+  opt?: number;
+
+  /**
    * 点在一张图片上时给出它的下标（-1 或没有这个键 = 不在图片上）。
    */
   img?: number;

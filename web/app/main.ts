@@ -537,10 +537,65 @@ function makeTabs(): Tab[] {
       },
       {
         act: 'field',
-        label: '表单字段',
+        label: '文本输入',
         icon: 'field',
         big: true,
-        run: () => editor.insertControl({ type: 'text', key: 'field', label: '（待填）' }),
+        run: () => insertControl('text', { label: '（待填）' }),
+      },
+      {
+        act: 'number',
+        label: '数值输入',
+        icon: 'number',
+        big: true,
+        // 数值控件只收数字：非数字在编辑入口就被挡住（见引擎的 ContentFilter）。
+        run: () => insertControl('number', { label: '0' }),
+      },
+      {
+        act: 'radio',
+        label: '单选',
+        icon: 'choice',
+        big: true,
+        // 两个同组的单选：点一个，另一个自动取消。
+        run: () => {
+          insertControl('radioButton', { label: '选项甲', group: 'demo-radio' });
+          insertControl('radioButton', { label: '选项乙', group: 'demo-radio' });
+        },
+      },
+      {
+        act: 'checkbox',
+        label: '复选',
+        icon: 'choice',
+        big: true,
+        run: () => insertControl('checkBox', { label: '同意' }),
+      },
+      {
+        act: 'radiogroup',
+        label: '单选组',
+        icon: 'choice',
+        big: true,
+        run: () => insertControl('radioGroup', { options: DEMO_OPTIONS }),
+      },
+      {
+        act: 'checkboxgroup',
+        label: '复选组',
+        icon: 'choice',
+        big: true,
+        run: () => insertControl('checkBoxGroup', { options: DEMO_OPTIONS }),
+      },
+      {
+        act: 'dropdown',
+        label: '下拉',
+        icon: 'dropdown',
+        big: true,
+        run: () => insertControl('dropdownList', { options: DEMO_OPTIONS }),
+      },
+      {
+        act: 'date',
+        label: '时间选择',
+        icon: 'date',
+        big: true,
+        // 默认格式 yyyy年MM月dd日 HH时mm分ss秒；六个单位全可选。
+        run: () => insertControl('date', {}),
       },
       {
         act: 'image',
@@ -559,6 +614,120 @@ function makeTabs(): Tab[] {
     { label: '插入', groups: [insert] },
     { label: '视图', groups: [mode, show, zoom] },
   ];
+}
+
+/**
+ * 演示用的选项表：值与标签分开，值进数据、标签进纸面。
+ */
+const DEMO_OPTIONS = [
+  { value: 'a', label: '选项甲' },
+  { value: 'b', label: '选项乙' },
+  { value: 'c', label: '选项丙' },
+];
+
+/**
+ * 插一个控件。每次给一个不同的业务编码 —— 同编码表示"同一个字段的多处副本"。
+ * @param type 业务类型
+ * @param opts 其余选项（标签、选项表、互斥组、格式）
+ */
+function insertControl(type: string, opts: Record<string, unknown>): void {
+  const key = type + '-' + Math.random().toString(36).slice(2, 6);
+  void editor.insertControl({ type, key, ...opts } as never).then((ok) => {
+    chrome.say(ok ? '插入：' + type : '插入被拒：' + type);
+  });
+}
+
+/**
+ * 控件弹出层：下拉的选项列表与日期的输入框都归宿主画。
+ *
+ * 引擎只画控件本身；这一层是编辑期辅助，不进文档、不进导出。
+ * @param index 控件下标
+ * @param rect 控件在页面坐标下的第一块矩形（磅）
+ */
+function openControlPanel(
+  index: number,
+  rect: { page: number; x: number; y: number; w: number; h: number } | null,
+): void {
+  const c = editor.form()[index];
+  const pages = document.querySelector('.heditor-pages');
+  if (!c || !rect || !(pages instanceof HTMLElement)) return;
+  const g = editor.geometry();
+  const box = pages.getBoundingClientRect();
+  // 磅 -> CSS 像素：缩放倍数乘 4/3（96 dpi / 72 磅），与画布摆放同一套换算。
+  const scale = editor.config().zoom * (4 / 3);
+  const top = box.top + (rect.page * (g.page.h + g.gap) + rect.y + rect.h) * scale;
+  const left = box.left + rect.x * scale;
+
+  const panel = document.createElement('div');
+  panel.className = 'heditor-popover';
+  panel.style.position = 'fixed';
+  panel.style.left = Math.round(left) + 'px';
+  panel.style.top = Math.round(top + 2) + 'px';
+  panel.style.zIndex = '60';
+  panel.style.minWidth = Math.round(rect.w * scale) + 'px';
+
+  const close = (): void => {
+    panel.remove();
+    document.removeEventListener('mousedown', onOutside, true);
+    document.removeEventListener('keydown', onKey, true);
+  };
+  const onOutside = (ev: MouseEvent): void => {
+    if (ev.target instanceof Node && !panel.contains(ev.target)) close();
+  };
+  const onKey = (ev: KeyboardEvent): void => {
+    if (ev.key === 'Escape') close();
+  };
+
+  if (c.type === 'dropdownList') {
+    for (const opt of c.options) {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'heditor-popover-item';
+      item.textContent = opt.label;
+      item.addEventListener('click', () => {
+        void editor.setControlValue(index, { text: opt.value });
+        close();
+      });
+      panel.appendChild(item);
+    }
+  } else if (c.type === 'date') {
+    // 能选哪些单位由控件声明：只到分就把秒的步长设成 60，只有日期就用日期输入。
+    const withTime = c.dateUnits.some((u) => u === 'hour' || u === 'minute' || u === 'second');
+    const withDate = c.dateUnits.some((u) => u === 'year' || u === 'month' || u === 'day');
+    const input = document.createElement('input');
+    input.type = !withDate ? 'time' : withTime ? 'datetime-local' : 'date';
+    input.step = c.dateUnits.includes('second') ? '1' : '60';
+    input.value = input.type === 'time' ? c.value.text.slice(11, 19)
+      : input.type === 'date' ? c.value.text.slice(0, 10)
+      : c.value.text.slice(0, 19);
+    const apply = document.createElement('button');
+    apply.type = 'button';
+    apply.className = 'heditor-popover-item';
+    apply.textContent = '确定';
+    apply.addEventListener('click', () => {
+      // 三种输入控件给的串长度不同，统一补成引擎要的 ISO 串（YYYY-MM-DDTHH:MM:SS）。
+      const raw = input.value;
+      let iso = raw;
+      if (input.type === 'date' && raw) iso = raw.slice(0, 10) + 'T00:00:00';
+      if (input.type === 'time' && raw) {
+        const day = c.value.text.slice(0, 10) || '1970-01-01';
+        iso = day + 'T' + (raw.length === 5 ? raw + ':00' : raw.slice(0, 8));
+      }
+      if (input.type === 'datetime-local' && raw) {
+        iso = raw.length === 16 ? raw + ':00' : raw.slice(0, 19);
+      }
+      void editor.setControlValue(index, { text: iso });
+      close();
+    });
+    panel.appendChild(input);
+    panel.appendChild(apply);
+  } else {
+    return;
+  }
+
+  document.body.appendChild(panel);
+  document.addEventListener('mousedown', onOutside, true);
+  document.addEventListener('keydown', onKey, true);
 }
 
 /**
@@ -632,6 +801,16 @@ async function boot(): Promise<void> {
   editor = await createEditor({
     container: stage,
     chrome: true,
+    // 下拉的选项列表与日期的输入框归宿主画：引擎只画控件本身。
+    onControlTap: (index, rect) => openControlPanel(index, rect),
+    // 前置回调的接缝：判据把它换成"先拒后放"，演示页默认一律允许。
+    onBeforeControlChange: (change) => {
+      const decide = (window as unknown as { __demoBeforeChange?: (c: unknown) => unknown })
+        .__demoBeforeChange;
+      if (typeof decide !== 'function') return true;
+      const r = decide(change);
+      return typeof r === 'boolean' ? r : Promise.resolve(r as Promise<boolean>);
+    },
     // debug 打开的是诊断面（diag）：它不承诺稳定，只给探针与内部验证台。
     debug: params.has('debug'),
     assets: {

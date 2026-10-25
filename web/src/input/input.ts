@@ -149,6 +149,37 @@ export interface InputEnv {
   images?(): Maybe<ImageBox[]>;
 
   /**
+   * 命中的控件是不是选择类；是就给出切换请求（含切换之前的值），否则 null。
+   * @param hit 命中结果
+   */
+  controlToggle?(hit: Hit): {
+    index: number;
+    option: number;
+    type: string;
+    key: string;
+    oldValue: { flag: boolean; text: string; items: string[] };
+  } | null;
+
+  /**
+   * 切换之前问一次宿主（可能是异步的）。没接就一律允许。
+   * @param change 切换请求
+   */
+  beforeControlChange?(change: any): Maybe<boolean>;
+
+  /**
+   * 让引擎切换某个控件的某一项。
+   * @param index 控件下标
+   * @param option 选项下标（单控件 -1）
+   */
+  toggleControl?(index: number, option: number): Maybe<any>;
+
+  /**
+   * 点到一个不是选择类的控件（下拉、日期）时通知宿主 —— 弹出层归宿主。
+   * @param index 控件下标
+   */
+  onControlTap?(index: number): void;
+
+  /**
    * 选中一张图片（-1 = 取消选中）。
    * @param index 图片下标
    */
@@ -343,6 +374,22 @@ export function createInput(env: InputEnv): InputLayer {
           if (handle >= 0) beginImageResize(pt, h.img as number, handle);
           return h;
         });
+      }
+      // 选择类控件：点一下就切。前置回调可能是异步的 —— 等它回来再动文档，
+      //   于是等待期间画面不变，也就没有"先勾上再弹回去"的那一帧。
+      if (h && typeof h.field === 'number' && h.field >= 0 && typeof env.controlToggle === 'function') {
+        const info = env.controlToggle(h);
+        if (info) {
+          armDrag(false);
+          const allowed =
+            typeof env.beforeControlChange === 'function' ? env.beforeControlChange(info) : true;
+          return then1(allowed, (ok) => {
+            if (!ok) return h;
+            keep(env.toggleControl ? env.toggleControl(info.index, info.option) : null);
+            return h;
+          });
+        }
+        env.onControlTap?.(h.field);
       }
       const act = hitToAction(h);
       if (!act) {

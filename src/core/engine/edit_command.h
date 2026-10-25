@@ -318,6 +318,42 @@ public:
     bool insertControl(const ControlSpec& spec, const std::string& label);
 
     /**
+     * 改一个控件的值，并按类型重建它的显示内容（选择类的图形、下拉的标签、日期的格式）。
+     *
+     * 值与内容是同一件事的两面：值在记录上，内容是它的投影。两者只在这一次写入里一起变，
+     * 于是不存在"值改了、画面还是旧的"。文本类控件的值就是内容，改值请走内容编辑。
+     *
+     * @param index 控件下标（文档顺序）
+     * @param value 新值
+     * @return true = 改了（幂等时也成立，但不产生步骤）
+     */
+    bool setControlValue(int index, const ControlValue& value);
+
+    /**
+     * 改一个控件的定义（选项表、标签、互斥组、自由输入开关、日期格式与单位、业务编码）。
+     *
+     * 只改 patch 里给出的那几项：没给的不动 —— "改成空"与"不改"是两件事。改完按新定义重建
+     * 内容，并把指向已删选项的值一起清掉（一次提交，撤销一步回到改之前）。
+     *
+     * @param index 控件下标（文档顺序）
+     * @param patch 要改的项
+     * @return true = 改了（幂等时也成立，但不产生步骤）
+     */
+    bool setControlSpec(int index, const ControlPatch& patch);
+
+    /**
+     * 切换一个控件的第 option 个选项（单控件传 -1，表示它自己那一个选项）。
+     *
+     * 互斥规则在这里落：单选组只能有一个选中；单控件按 group 互斥时，把同组里原本选中的
+     * 那个一并取消。整批一次提交，撤销一下回到切换之前。
+     *
+     * @param index 控件下标（文档顺序）
+     * @param option 选项下标；单控件传 -1
+     * @return true = 改了
+     */
+    bool toggleControl(int index, int option);
+
+    /**
      * 在光标处插一张图片（行内原子）。光标摆到图片之后。
      *
      * 图片是行内叶子：它不切断段落，与文字同流，所以断行、跨页、撤销与增量排版全部
@@ -459,6 +495,33 @@ private:
      * @return true = 插进去了
      */
     bool commitInsert(FlowPos at, const NodeSpec& spec, FlowPos focus);
+
+    /**
+     * 按落点所在控件的字符过滤规则筛一遍（数值控件只收数字）。
+     *
+     * 只筛"打进来的字"：程序化设值与粘贴不走这里 —— 它们是"整段值"，该按值校验拒绝，
+     * 而不是一个字一个字地丢掉。
+     *
+     * @param at_flow 落点（流位置）
+     * @param cps 想打进去的码点
+     * @param out 写回收下的码点
+     * @return true = 至少留下一个码点
+     */
+    bool filterTypedText(FlowPos at_flow, const std::vector<uint32_t>& cps,
+                         std::vector<uint32_t>* out) const;
+
+    /**
+     * 把控件的内容换成一段纯文本：没有就插入、空就删掉、有就改写。
+     *
+     * 只处理"一段纯文本"这一种形状（生成的控件内容都是它）。内容里已经有别的元素时
+     * 返回 false —— 猜一个形状重写会毁掉作者放进去的东西。
+     *
+     * @param id 控件节点
+     * @param text 新的显示内容（UTF-8）
+     * @param steps 追加步骤
+     * @return true = 步骤齐了（内容本来就一样时什么也不追加）
+     */
+    bool buildContentReplace(NodeId id, const std::string& text, std::vector<Step>* steps) const;
 
     /**
      * 位置解析器（光标与选区的真源）：命令算落点、摆光标、查簇边界都经过它。

@@ -273,6 +273,10 @@
           "kind": "num"
         },
         {
+          "name": "opt",
+          "kind": "num"
+        },
+        {
           "name": "cellPara",
           "kind": "num",
           "optional": true

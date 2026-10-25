@@ -572,6 +572,12 @@ bool setControlValue(Ctx* c, NodeId id, const ControlValue& value) {
     return replaceOne(c, id, std::move(spec), n->hidden);
 }
 
+bool setControlSpec(Ctx* c, NodeId id, const ControlSpec& spec) {
+    const Node* n = findNode(c->doc, id);
+    if (n == nullptr || n->kind != NodeKind::ContentControl) return fail(c, "目标不是控件");
+    return replaceOne(c, id, spec, n->hidden);
+}
+
 bool setCellSpan(Ctx* c, NodeId id, const CellSpec& span) {
     const Node* n = findNode(c->doc, id);
     if (n == nullptr || n->kind != NodeKind::TableCell) return fail(c, "目标不是单元格");
@@ -634,6 +640,8 @@ bool applyOne(Ctx* c, const Step& step) {
                 return setControlProp(c, s.id, s.prop, s.value);
             } else if constexpr (std::is_same_v<T, SetControlValue>) {
                 return setControlValue(c, s.id, s.value);
+            } else if constexpr (std::is_same_v<T, SetControlSpec>) {
+                return setControlSpec(c, s.id, s.spec);
             } else if constexpr (std::is_same_v<T, SetTableCellSpan>) {
                 return setCellSpan(c, s.id, s.span);
             } else if constexpr (std::is_same_v<T, SetImageSize>) {

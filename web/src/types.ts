@@ -523,6 +523,28 @@ export interface EditorOptions {
    *   致命横幅上就有一个重试按钮；不给就只剩说明 —— 一条没有出口的失败提示是死胡同。
    */
   onFatalRetry?: () => void;
+
+  /**
+   * 选择类控件切换前问一次宿主：返回 false（或 resolve 出 false）就不切换。
+   *
+   * 允许异步，语义是"先持住不落"：等待期间文档不变、画面不变，也没有"先勾上再弹回去"
+   * 的那一帧。钩子里不要调编辑 API（会把当前事务重入）。
+   * @param change 切换的是哪个控件的哪个选项、切换之前的值
+   * @returns 允许不允许；Promise 也行
+   */
+  onBeforeControlChange?: (change: ControlChange) => boolean | Promise<boolean>;
+
+  /**
+   * 点到一个"不是选择类"的控件（下拉、日期）时通知宿主：选项列表与日历都归宿主画。
+   *
+   * 引擎只负责画控件本身与它的值；弹出层是编辑期辅助，不进文档、不进导出。
+   * @param index 控件下标
+   * @param rect 控件在页面坐标下的第一块矩形（磅）；读不到时为 null
+   */
+  onControlTap?: (
+    index: number,
+    rect: { page: number; x: number; y: number; w: number; h: number } | null,
+  ) => void;
 }
 
 /**
@@ -548,6 +570,76 @@ export interface SetCaretOptions {
    * 同一段里有多行时落第几行。
    */
   line?: 'first' | 'last';
+}
+
+/**
+ * 一个控件值的快照（前置回调用它描述"切换之前是什么"）。
+ */
+export interface ControlValueSnapshot {
+  /**
+   * 单控件的选中态。
+   */
+  flag: boolean;
+
+  /**
+   * 单选组 / 下拉 / 日期的值。
+   */
+  text: string;
+
+  /**
+   * 复选组选中的值集合。
+   */
+  items: string[];
+}
+
+/**
+ * 设值时的入参：只给要改的那几项（值形态决定读哪一项）。
+ */
+export interface ControlValueInput {
+  /**
+   * 单控件的选中态。
+   */
+  flag?: boolean;
+
+  /**
+   * 单选组 / 下拉 / 日期的值。
+   */
+  text?: string;
+
+  /**
+   * 复选组选中的值集合。
+   */
+  items?: string[];
+}
+
+/**
+ * 一次选择类控件的切换请求，交给 onBeforeControlChange 裁决。
+ */
+export interface ControlChange {
+  /**
+   * 控件下标（文档顺序）。
+   */
+  index: number;
+
+  /**
+   * 组控件的选项下标；单控件为 -1。
+   */
+  option: number;
+
+  /**
+   * 业务类型（radioButton / checkBox / radioGroup / checkBoxGroup）。
+   */
+  type: string;
+
+  /**
+   * 业务编码（可能为空）。
+   */
+  key: string;
+
+  /**
+   * 切换之前的值。
+   */
+  oldValue: ControlValueSnapshot;
 }
 
 /**
@@ -580,9 +672,81 @@ export interface ControlInsertOptions {
   required?: boolean;
 
   /**
-   * 值形态（决定值放内容里还是属性上）。默认 text。
+   * 值形态（决定值放内容里还是属性上）。默认按类型推断。
    */
   shape?: 'text' | 'bool' | 'enum' | 'list' | 'resource';
+
+  /**
+   * 选项表：单选组、复选组与下拉用。值与标签分开 —— 值进数据，标签进纸面。
+   */
+  options?: Array<{ value: string; label: string }>;
+
+  /**
+   * 互斥组名：同组的单选最多一个选中（单控件用；组控件自身即一组）。
+   */
+  group?: string;
+
+  /**
+   * 下拉允许输入选项表以外的值。
+   */
+  freeInput?: boolean;
+
+  /**
+   * 日期显示格式（yyyy / MM / dd / HH / mm / ss 与字面字符）。
+   */
+  format?: string;
+
+  /**
+   * 日期能选中哪些单位。默认六个全选。
+   */
+  dateUnits?: Array<'year' | 'month' | 'day' | 'hour' | 'minute' | 'second'>;
+}
+
+/**
+ * 改一个控件定义的选项：只给要改的那几项，没给的不动。
+ *
+ * "不给"与"给空"是两件事：不给 options 是"选项表不动"，给空数组是"清空选项表"。
+ */
+export interface ControlUpdateOptions {
+  /**
+   * 业务类型。给了必须与当前一致 —— 换类型请删掉重插（值形态与内容形状都会变）。
+   */
+  type?: string;
+
+  /**
+   * 业务编码。
+   */
+  key?: string;
+
+  /**
+   * 单控件的标签（选择类）。组控件的文案在选项表里。
+   */
+  label?: string;
+
+  /**
+   * 选项表（选择类与下拉）。
+   */
+  options?: Array<{ value: string; label: string }>;
+
+  /**
+   * 互斥组名（单选）。
+   */
+  group?: string;
+
+  /**
+   * 下拉允许输入选项表以外的值。
+   */
+  freeInput?: boolean;
+
+  /**
+   * 日期显示格式（yyyy / MM / dd / HH / mm / ss 与字面字符）。
+   */
+  format?: string;
+
+  /**
+   * 日期能选中哪些单位。给了就必须至少留一个。
+   */
+  dateUnits?: Array<'year' | 'month' | 'day' | 'hour' | 'minute' | 'second'>;
 }
 
 /**
@@ -710,19 +874,54 @@ export interface ControlSummary {
   index: number;
 
   /**
-   * 控件种类（引擎的种类号原样给出）。
+   * 引擎的种类号（旧口径，保留给已有调用方）。
    */
   kind: string;
 
   /**
-   * 标签（控件名或占位文字）。
+   * 业务类型（text / number / radioButton / ...）。
+   */
+  type: string;
+
+  /**
+   * 业务编码（可能为空）。
+   */
+  key: string;
+
+  /**
+   * 单控件的标签（组控件为空：它的文案在选项表里）。
    */
   label: string;
 
   /**
-   * 当前值；结构化控件才填，普通文本字段是 null。
+   * 互斥组名（空 = 不与任何人互斥）。
    */
-  value: unknown;
+  group: string;
+
+  /**
+   * 内容的纯文本：文本与数值字段的值就是它。
+   */
+  text: string;
+
+  /**
+   * 当前值（记录上的那一份）。
+   */
+  value: ControlValueSnapshot;
+
+  /**
+   * 选项表（选择类与下拉；没有选项时为空）。
+   */
+  options: Array<{ value: string; label: string }>;
+
+  /**
+   * 日期的显示格式串（其余类型为空）。
+   */
+  format: string;
+
+  /**
+   * 日期能选中哪些单位（其余类型为空数组）。
+   */
+  dateUnits: Array<'year' | 'month' | 'day' | 'hour' | 'minute' | 'second'>;
 
   /**
    * 光标是否在这个控件里。
@@ -1295,6 +1494,35 @@ export interface Editor {
    * @returns 有没有插进去（模式不对时 false，文档不动）
    */
   insertControl(opts?: ControlInsertOptions): Promise<boolean>;
+
+  /**
+   * 改一个控件的定义（选项表、标签、互斥组、自由输入、日期格式与单位、业务编码）。
+   *
+   * 只改给出的项。改完内容按新定义重建；指向已删选项的值一起清掉 —— 都算在同一步撤销里。
+   * 只在文档模式可用（改定义是设计动作）。
+   * @param index 控件下标（form() 的第几项）
+   * @param opts 要改的项
+   * @returns 有没有改动
+   */
+  updateControl(index: number, opts?: ControlUpdateOptions): Promise<boolean>;
+
+  /**
+   * 改一个控件的值，并按类型重建它的显示内容（图形、标签、日期格式）。
+   *
+   * 文本类的值就是内容：给 text 会整段替换；选择类改的是记录上的值。
+   * @param index 控件下标（form() 的第几项）
+   * @param value 新值（只给要改的那几项）
+   * @returns 有没有改动
+   */
+  setControlValue(index: number, value?: ControlValueInput): Promise<boolean>;
+
+  /**
+   * 切换一个选择类控件的第 option 个选项（单控件传 -1）。互斥与多选规则在引擎里。
+   * @param index 控件下标
+   * @param option 选项下标；单控件传 -1
+   * @returns 有没有改动
+   */
+  toggleControl(index: number, option?: number): Promise<boolean>;
 
   /**
    * 在光标处插一张图片。图片是行内原子：与文字同流，参与断行。

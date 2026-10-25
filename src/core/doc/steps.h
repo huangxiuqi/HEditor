@@ -451,6 +451,32 @@ struct SetControlValue {
 };
 
 /**
+ * 改控件的定义（整份记录）。
+ *
+ * 与 SetControlProp 的分工：那个改四个运行态开关，这个改记录本身（业务编码、选项表、
+ * 标签、互斥组、自由输入、日期格式与单位）。带 before 整份，逆操作自足；canApply 比
+ * before 与当前记录，对不上就是这一步过期了。
+ *
+ * 位置映射是恒等：定义不改流位置。选项表变短只让内容变短，那是内容步骤自己带坐标的事。
+ */
+struct SetControlSpec {
+    /**
+     * 改哪个控件。
+     */
+    NodeId id = kInvalidNodeId;
+
+    /**
+     * 新的定义。
+     */
+    ControlSpec spec;
+
+    /**
+     * 原定义（逆操作自足）。
+     */
+    ControlSpec before;
+};
+
+/**
  * 改一个单元格的跨度（第九节）。表格的行列操作落到步骤上就是"几个格子的跨度变了 + 插了几个
  * 新格子"—— 跨度是唯一真相，网格是派生的，所以没有"插一列"这种步骤，只有跨度的改动。
  *
@@ -507,9 +533,10 @@ struct SetImageSize {
     Length beforeHeight;
 };
 
-using Step = std::variant<InsertText, InsertFragment, DeleteRange, InsertParaMark, RemoveParaMark,
-                          SetParaMarkFormat, SetRun, InsertNode, RemoveNode, UnwrapNode, WrapNode,
-                          SetControlProp, SetControlValue, SetTableCellSpan, SetImageSize>;
+using Step =
+    std::variant<InsertText, InsertFragment, DeleteRange, InsertParaMark, RemoveParaMark,
+                 SetParaMarkFormat, SetRun, InsertNode, RemoveNode, UnwrapNode, WrapNode,
+                 SetControlProp, SetControlValue, SetControlSpec, SetTableCellSpan, SetImageSize>;
 
 /**
  * 步骤的执行结果。失败时给出原因 —— 位置越界、类型不符都要显式说出来，不静默不做。

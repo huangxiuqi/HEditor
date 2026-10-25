@@ -718,6 +718,28 @@ public:
     bool insertableAtFlow(FlowPos f) const;
 
     /**
+     * 这个流位置是不是落在"光标屏障"控件的内容里（四种选择控件）。
+     *
+     * 与 capability 里的同名判断分工不同：那边收一份调用方的流索引（给命令层用），
+     * 这里用引擎自己的那一份（给光标收约束用），两者口径必须一致。
+     * @param f 流位置
+     * @return true = 落在屏障内容里
+     */
+    bool barrierAtFlow(FlowPos f) const;
+
+    /**
+     * 包住 f 的那个屏障控件的整块区间（含两枚括号）。
+     *
+     * 光标被屏障挡住时要贴到块的外面，而"外面"只能由整块区间的两端给出：
+     * 内容区间的两端仍在块里。
+     * @param f 流位置
+     * @param first 写回开括号那一格
+     * @param end 写回闭括号之后那一格
+     * @return true = f 落在某个屏障的内容里
+     */
+    bool barrierSpanAt(FlowPos f, FlowPos* first, FlowPos* end) const;
+
+    /**
      * 把光标收进可插入位置（表单模式的落点规则）。
      *
      * 目标落在控件之外时夹回"移动之前所在控件"的内容区间，视觉上就是停在字段边界上；
@@ -1641,6 +1663,173 @@ public:
      * @return true = 改成了
      */
     bool resizeImageAndRender(int index, float w_pt, float h_pt, bool continue_run = false);
+
+    /**
+     * 一个控件的对外描述：类型、值、选项与策略。
+     *
+     * 它是"给宿主看的那一份"，不是模型：不含节点指针，也不含设计期属性的完整记录。
+     * 值在这里是快照 —— 要改值走 setControlValue，改完再读一次。
+     */
+    struct ControlView {
+        /**
+         * 文档顺序下标（toggleControl / setControlValue 收它）。
+         */
+        int index = -1;
+
+        /**
+         * 节点 id（编辑之后仍然有效）。
+         */
+        NodeId id = kInvalidNodeId;
+
+        /**
+         * 业务编码。
+         */
+        std::string key;
+
+        /**
+         * 业务类型（text / number / radioButton / ...）。
+         */
+        std::string controlType;
+
+        /**
+         * 值形态。
+         */
+        ValueShape shape = ValueShape::Text;
+
+        /**
+         * 当前值（文本类的值在内容里，见 content）。
+         */
+        ControlValue value;
+
+        /**
+         * 内容的纯文本（文本类的值就是它；其余是显示文字）。
+         */
+        std::string content;
+
+        /**
+         * 内容不可编辑。
+         */
+        bool readonly = false;
+
+        /**
+         * 必填。
+         */
+        bool required = false;
+
+        /**
+         * 选项表（选择类与下拉；没有选项时为空）。
+         */
+        std::vector<ControlOption> options;
+
+        /**
+         * 下拉允许自由输入。
+         */
+        bool free_input = false;
+
+        /**
+         * 多选（复选 / 复选组）。
+         */
+        bool multi = false;
+
+        /**
+         * 单控件的标签（组控件为空：它的文案在选项表里）。
+         */
+        std::string label;
+
+        /**
+         * 互斥组名（空 = 不与任何人互斥）。
+         */
+        std::string group;
+
+        /**
+         * 日期显示格式串（空 = 默认格式）。
+         */
+        std::string format;
+
+        /**
+         * 日期能选中哪些单位（位掩码，见 kDateUnitXXX）。
+         */
+        uint16_t date_units = kDateUnitsAll;
+    };
+
+    /**
+     * 列出文档里全部控件（文档顺序）。
+     * @return 每个控件一条描述
+     */
+    std::vector<ControlView> controlViews() const;
+
+    /**
+     * 改一个控件的定义（选项表、标签、互斥组、自由输入、日期格式与单位、业务编码）。
+     *
+     * 只改 patch 里给出的项；改完按新定义重建内容，并把指向已删选项的值一起清掉。
+     * 只在文档模式放行 —— 改定义是设计动作。
+     *
+     * @param index 控件下标
+     * @param patch 要改的项
+     * @return true = 改了（幂等时也成立）
+     */
+    bool setControlSpec(int index, const ControlPatch& patch);
+
+    /**
+     * 改定义 + 重排 + 呈现。选项表变短会让内容变短，整段与后续内容都要跟着动。
+     * @param index 控件下标
+     * @param patch 要改的项
+     * @return true = 改了
+     */
+    bool setControlSpecAndRender(int index, const ControlPatch& patch);
+
+    /**
+     * 改一个控件的值，并重建它的显示内容。
+     *
+     * @param index 控件下标
+     * @param value 新值
+     * @return true = 改了（幂等时也成立）
+     */
+    bool setControlValue(int index, const ControlValue& value);
+
+    /**
+     * 改值 + 重排 + 呈现。
+     * @param index 控件下标
+     * @param value 新值
+     * @return true = 改了
+     */
+    bool setControlValueAndRender(int index, const ControlValue& value);
+
+    /**
+     * 切换一个控件的第 option 个选项（单控件传 -1）。互斥与多选规则在命令层落地。
+     * @param index 控件下标
+     * @param option 选项下标；单控件传 -1
+     * @return true = 改了
+     */
+    bool toggleControl(int index, int option);
+
+    /**
+     * 切换 + 重排 + 呈现。
+     * @param index 控件下标
+     * @param option 选项下标；单控件传 -1
+     * @return true = 改了
+     */
+    bool toggleControlAndRender(int index, int option);
+
+    /**
+     * 文档坐标（磅）落在某个组控件的第几个选项上。
+     *
+     * 只回答"点了哪个选项"：控件本身由 hitTestPt 的归属给出。不在组控件上时返回 -1。
+     * @param x_pt_doc 文档坐标 x（磅）
+     * @param y_pt_doc 文档坐标 y（磅）
+     * @return 选项下标；不在组控件上为 -1
+     */
+    int controlOptionAtPt(float x_pt_doc, float y_pt_doc) const;
+
+    /**
+     * 同上，但落点已经由调用方量好（命中测试的同一次结果）。
+     *
+     * 宿主一次点击只会做一次命中：再来一次坐标查询等于把命中测试整个跑两遍。
+     * @param p 落点（段 + 段内偏移）
+     * @param side 落点侧别（hitTestPt 的同一份结果）
+     * @return 选项下标；不在组控件上为 -1
+     */
+    int controlOptionAtPos(TextPos p, int side) const;
 
     /**
      * 帧自审：把当前这一帧与"整帧重画一遍"的结果逐字节比，返回

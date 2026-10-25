@@ -240,16 +240,23 @@ bool EditCommand::insertCodepoints(int para, size_t offset, const std::vector<ui
         noteBlocked();
         return false;
     }
+    // 落点判定过了，再看这个控件收不收这些字：数值字段把非数字挡在入口，
+    //   一个都没留下时按"这一下没成立"返回（不静默地吞掉整次输入）。
+    std::vector<uint32_t> typed;
+    if (!filterTypedText(at_flow, cps, &typed)) {
+        noteBlocked();
+        return false;
+    }
     InsertText s;
     s.at = at_flow;
-    s.cps = cps;
+    s.cps = typed;
     // 沿用落点左侧的字符格式：否则在粗体字中间敲出来的字不是粗的。
     s.marks = marksAtFlow(at_flow, &s.styleRef);
     std::vector<Step> steps;
     pending_before_ = Range{};
     pending_after_ = Range{};
     pending_before_ = Range{at_flow, at_flow};
-    const FlowPos after = at_flow + static_cast<FlowPos>(cps.size());
+    const FlowPos after = at_flow + static_cast<FlowPos>(typed.size());
     pending_after_ = Range{after, after};
     steps.push_back(Step{s});
     if (!commit(std::move(steps), para)) {
@@ -1523,10 +1530,28 @@ bool EditCommand::insertControl(const ControlSpec& spec, const std::string& labe
         return false;
     }
 
+    // 只给了类型名的记录在这里补齐：值形态、只读、光标屏障与特有层都按类型定。
+    //   调用方（wasm 绑定、原生判据）给的是"要哪一种控件"，不是一份填满的记录。
+    ControlSpec s = spec;
+    if (std::holds_alternative<std::monostate>(s.detail)) {
+        const ControlSpec def = makeControlSpec(s.controlType);
+        s.detail = def.detail;
+        if (s.valueShape == ValueShape::Text) s.valueShape = def.valueShape;
+        s.readonly = s.readonly || def.readonly;
+    }
+    // 单控件的标签是作者给的文案；组控件的标签来自选项表。
+    if (auto* c = std::get_if<ChoiceDetail>(&s.detail)) {
+        if (c->options.empty() && c->label.empty()) c->label = label;
+    }
+
+    // 文本类的初始内容就是 label；其余按记录生成（图形 + 标签、空的下拉与日期）。
+    const std::string content =
+        (s.valueShape == ValueShape::Text) ? label : controlDisplayText(s, s.value);
+
     NodeSpec node;
     node.kind = NodeKind::ContentControl;
-    node.control = spec;
-    const std::vector<uint32_t> cps = utf8ToCodepoints(label);
+    node.control = s;
+    const std::vector<uint32_t> cps = utf8ToCodepoints(content);
     if (!cps.empty()) {
         NodeSpec run;
         run.kind = NodeKind::TextRun;
@@ -1543,6 +1568,270 @@ bool EditCommand::insertControl(const ControlSpec& spec, const std::string& labe
     // 控件是行内容器，不切断段落：落点始终在光标处。光标摆到内容末尾，与"接着填这个字段"
     //   一致；标签为空时那就是起始边界之后的第一位（空控件内部）。
     return commitInsert(at, node, at + 1 + static_cast<FlowPos>(cps.size()));
+}
+
+bool EditCommand::filterTypedText(FlowPos at_flow, const std::vector<uint32_t>& cps,
+                                  std::vector<uint32_t>* out) const {
+    if (out == nullptr) return false;
+    out->clear();
+    FlowPos lo = 0;
+    FlowPos hi = 0;
+    const int index = innermostControlAtFlow(flowIndex(), controlNodeIds(), at_flow, &lo, &hi);
+    const TextDetail* filter = nullptr;
+    std::string current;
+    if (index >= 0) {
+        const rev::Node* n = rev::findNode(doc(), controlNodeIds()[static_cast<size_t>(index)]);
+        if (n != nullptr) {
+            const auto* spec = std::get_if<ControlSpec>(&n->payload);
+            if (spec != nullptr) filter = textOf(*spec);
+            for (const rev::Ref& c : n->children) {
+                if (c->kind != NodeKind::TextRun) continue;
+                current = codepointsToUtf8(std::get<rev::RunPayload>(c->payload).text);
+                break;
+            }
+        }
+    }
+    for (uint32_t cp : cps) {
+        if (filter != nullptr && filter->filter == ContentFilter::Number) {
+            if (!numberAccepts(current, cp)) continue;
+            current += codepointsToUtf8(std::vector<uint32_t>{cp});
+        }
+        out->push_back(cp);
+    }
+    return !out->empty();
+}
+
+bool EditCommand::buildContentReplace(NodeId id, const std::string& text,
+                                      std::vector<Step>* steps) const {
+    if (steps == nullptr) return false;
+    const rev::Node* n = rev::findNode(doc(), id);
+    if (n == nullptr) return false;
+    // 只认"一段纯文本"：多个文本节点或混着别的元素时不动它 —— 猜一个形状重写会毁掉
+    //   作者放进去的东西。生成的控件内容（图形 + 标签、格式化后的日期）都是这一段。
+    const rev::Node* run = nullptr;
+    for (const rev::Ref& c : n->children) {
+        if (c->kind != NodeKind::TextRun || run != nullptr) return false;
+        run = c.get();
+    }
+    const std::vector<uint32_t> want = utf8ToCodepoints(text);
+    if (run == nullptr) {
+        if (want.empty()) return true;
+        NodeSpec spec;
+        spec.kind = NodeKind::TextRun;
+        spec.text = want;
+        InsertNode in;
+        in.at = Pos{id, 0};
+        const FlowPos at = flowIndex().flowAt(in.at);
+        if (at < 0) return false;
+        in.at_flow = at;
+        in.subtree = std::move(spec);
+        steps->push_back(Step{in});
+        return true;
+    }
+    const auto& payload = std::get<rev::RunPayload>(run->payload);
+    if (payload.text == want) return true;
+    if (!want.empty()) {
+        SetRun sr;
+        sr.id = run->id;
+        sr.text = want;
+        sr.marks = payload.marks;
+        sr.styleRef = payload.style;
+        sr.beforeText = payload.text;
+        sr.before = payload.marks;
+        sr.beforeStyleRef = payload.style;
+        steps->push_back(Step{sr});
+        return true;
+    }
+    // 内容清空：文本节点必须整枚摘掉 —— 规范化会把空文本节点删掉，留一个空节点等于
+    //   留下一个下一次提交就会消失的中间态。
+    RemoveNode rn;
+    rn.at = Pos{id, 0};
+    const FlowPos at = flowIndex().flowAt(rn.at);
+    if (at < 0) return false;
+    rn.at_flow = at;
+    rn.removed.kind = NodeKind::TextRun;
+    rn.removed.text = payload.text;
+    rn.removed.marks = payload.marks;
+    rn.removed.styleRef = payload.style;
+    rn.detached = run->id;
+    steps->push_back(Step{rn});
+    return true;
+}
+
+bool EditCommand::setControlSpec(int index, const ControlPatch& patch) {
+    if (!hasFlow()) return false;
+    // 改定义是设计动作：版式与字段结构归作者，填表的人只碰值。
+    if (mode() != EditMode::Document) {
+        noteBlocked();
+        return false;
+    }
+    if (index < 0 || index >= static_cast<int>(controlNodeIds().size())) return false;
+    const NodeId id = controlNodeIds()[static_cast<size_t>(index)];
+    const rev::Node* n = rev::findNode(doc(), id);
+    if (n == nullptr || n->kind != NodeKind::ContentControl) return false;
+    const auto* spec = std::get_if<ControlSpec>(&n->payload);
+    if (spec == nullptr) return false;
+
+    ControlSpec next = *spec;
+    if (!applyControlPatch(&next, patch, nullptr)) {
+        noteBlocked();
+        return false;
+    }
+    // 选项被删掉时，指向它的值跟着清掉 —— 留着就是"值不在选项表里"的脏数据。
+    pruneControlValue(next, &next.value);
+
+    std::vector<Step> steps;
+    if (!(next == *spec)) {
+        SetControlSpec s;
+        s.id = id;
+        s.spec = next;
+        s.before = *spec;
+        steps.push_back(Step{s});
+    }
+    // 文本类的值就是内容，改定义不该碰它（作者打的字不是配置的投影）。
+    //   其余三类的内容由定义与值共同生成，定义变了就得整段重建。
+    if (next.valueShape != ValueShape::Text) {
+        if (!buildContentReplace(id, controlDisplayText(next, next.value), &steps)) {
+            noteBlocked();
+            return false;
+        }
+    }
+    if (steps.empty()) return true;
+
+    pending_before_ = Range{};
+    pending_after_ = Range{};
+    const int dirty = controls().at(index).range.start.para;
+    return commit(std::move(steps), dirty);
+}
+
+bool EditCommand::setControlValue(int index, const ControlValue& value) {
+    if (!hasFlow()) return false;
+    if (index < 0 || index >= static_cast<int>(controlNodeIds().size())) return false;
+    const NodeId id = controlNodeIds()[static_cast<size_t>(index)];
+    const rev::Node* n = rev::findNode(doc(), id);
+    if (n == nullptr || n->kind != NodeKind::ContentControl) return false;
+    const auto* spec = std::get_if<ControlSpec>(&n->payload);
+    if (spec == nullptr) return false;
+
+    std::string error;
+    if (!controlValueValid(*spec, value, &error)) {
+        noteBlocked();
+        return false;
+    }
+
+    std::vector<Step> steps;
+    if (spec->valueShape == ValueShape::Text) {
+        // 文本类的值就是内容：比较与写入都落在内容上，记录上的 value 不参与。
+        if (const TextDetail* td = textOf(*spec)) {
+            if (td->filter == ContentFilter::Number && !numberTextValid(value.text)) {
+                noteBlocked();
+                return false;
+            }
+        }
+        if (!buildContentReplace(id, value.text, &steps)) {
+            noteBlocked();
+            return false;
+        }
+    } else {
+        if (spec->value == value) return true;
+        // 内容先换：它就是值的显示投影，两者在同一次提交里一起变。
+        if (!buildContentReplace(id, controlDisplayText(*spec, value), &steps)) {
+            noteBlocked();
+            return false;
+        }
+        SetControlValue scv;
+        scv.id = id;
+        scv.value = value;
+        scv.before = spec->value;
+        steps.push_back(Step{scv});
+    }
+    if (steps.empty()) return true;
+
+    pending_before_ = Range{};
+    pending_after_ = Range{};
+    const int dirty = controls().at(index).range.start.para;
+    return commit(std::move(steps), dirty);
+}
+
+bool EditCommand::toggleControl(int index, int option) {
+    if (!hasFlow()) return false;
+    if (index < 0 || index >= static_cast<int>(controlNodeIds().size())) return false;
+    const NodeId id = controlNodeIds()[static_cast<size_t>(index)];
+    const rev::Node* n = rev::findNode(doc(), id);
+    if (n == nullptr || n->kind != NodeKind::ContentControl) return false;
+    const auto* spec = std::get_if<ControlSpec>(&n->payload);
+    if (spec == nullptr) return false;
+    const auto* choice = choiceOf(*spec);
+    if (choice == nullptr) return false;
+
+    // 先算出要改的每一处（控件, 新值），再一次性提交：互斥组里"取消别人"与"选自己"
+    //   必须是同一个撤销步，否则撤销一下会回到"两个都选中"的中间态。
+    std::vector<std::pair<NodeId, ControlValue>> changes;
+    if (choice->options.empty()) {
+        ControlValue v = spec->value;
+        v.flag = choice->multi ? !v.flag : true;
+        changes.emplace_back(id, v);
+        if (!choice->multi && !choice->group.empty()) {
+            for (const NodeId other : controlNodeIds()) {
+                if (other == id) continue;
+                const rev::Node* on = rev::findNode(doc(), other);
+                if (on == nullptr) continue;
+                const auto* os = std::get_if<ControlSpec>(&on->payload);
+                if (os == nullptr) continue;
+                const auto* oc = choiceOf(*os);
+                if (oc == nullptr || oc->multi || oc->options.size() > 0) continue;
+                if (oc->group != choice->group || !os->value.flag) continue;
+                ControlValue ov = os->value;
+                ov.flag = false;
+                changes.emplace_back(other, ov);
+            }
+        }
+    } else {
+        if (option < 0 || option >= static_cast<int>(choice->options.size())) return false;
+        const std::string& val = choice->options[static_cast<size_t>(option)].value;
+        ControlValue v = spec->value;
+        if (choice->multi) {
+            bool found = false;
+            std::vector<std::string> kept;
+            for (const std::string& item : v.items) {
+                if (item == val) {
+                    found = true;
+                } else {
+                    kept.push_back(item);
+                }
+            }
+            if (!found) kept.push_back(val);
+            v.items = std::move(kept);
+            v.text.clear();
+        } else {
+            v.text = val;
+            v.items.clear();
+        }
+        changes.emplace_back(id, v);
+    }
+
+    std::vector<Step> steps;
+    for (const auto& ch : changes) {
+        const rev::Node* target = rev::findNode(doc(), ch.first);
+        if (target == nullptr) continue;
+        const auto* ts = std::get_if<ControlSpec>(&target->payload);
+        if (ts == nullptr) continue;
+        if (!buildContentReplace(ch.first, controlDisplayText(*ts, ch.second), &steps)) {
+            noteBlocked();
+            return false;
+        }
+        SetControlValue s;
+        s.id = ch.first;
+        s.value = ch.second;
+        s.before = ts->value;
+        steps.push_back(Step{s});
+    }
+    if (steps.empty()) return true;
+
+    pending_before_ = Range{};
+    pending_after_ = Range{};
+    const int dirty = controls().at(index).range.start.para;
+    return commit(std::move(steps), dirty);
 }
 
 bool EditCommand::insertImage(const ImageSpec& spec) {

@@ -287,6 +287,10 @@ const COMMANDS: Array<[string, string, string[], string]> = [
   // 插入结构：表格与控件都落成 InsertNode，撤销与增量排版跟着走现成那条路。
   ['insertTable',           'w', ['insertTableAt'],                                       'self'],
   ['insertControl',         'w', ['insertControlAt'],                                     'self'],
+  ['setControlSpec',        'w', ['setControlSpecAt'],                                    'self'],
+  ['setControlValue',       'w', ['setControlValueAt'],                                   'self'],
+  ['toggleControl',         'w', ['toggleControlAt'],                                     'self'],
+  ['controlOptionAt',       'r', ['controlOptionAt'],                                     'none'],
   // 图片：像素由宿主解码之后注册（文档只存资源 id），插入与改尺寸都要重排 + 呈现。
   ['insertImage',           'w', ['insertImageAt'],                                       'self'],
   ['registerImage',         'w', ['registerImage'],                                       'self'],
@@ -1233,6 +1237,20 @@ const WRITE = collect('w', {
    */
   insertControl: (a) => mod.insertControlAt(a.opts || {}),
   /**
+   * 改控件定义：只改 opts 里给出的键。与插入共用同一份键名，两处不会各认一半字段。
+   */
+  setControlSpec: (a) => mod.setControlSpecAt(a.i | 0, a.opts || {}),
+  /**
+   * 改控件值。三项都传：值形态决定读哪一项，多传的字段无害。
+   */
+  setControlValue: (a) =>
+    mod.setControlValueAt(a.i | 0, !!a.flag, String(a.text === undefined ? '' : a.text),
+                          a.items || []),
+  /**
+   * 切换选择类控件的一项。互斥与多选规则在引擎里，宿主只管说"点了哪一项"。
+   */
+  toggleControl: (a) => mod.toggleControlAt(a.i | 0, a.option === undefined ? -1 : a.option | 0),
+  /**
    * 插一张图片。尺寸与像素尺寸都可省：都省掉时引擎按 4:3 的空框放一个占位，
    *   宿主随后注册资源也照样画得出来（盒子的尺寸不会因为像素到了就变）。
    */
@@ -1313,6 +1331,11 @@ const READ = collect('r', {
    */
   imageHit: (a) => JSON.parse(mod.imageHit(Number(a.x), Number(a.y))),
   pageDirtyRects: (a) => JSON.parse(mod.pageDirtyRectsJson(a.page | 0)),
+  /**
+   * 组控件的选项命中：文档坐标（磅）→ 第几个选项。不在组控件上时 -1。
+   */
+  controlOptionAt: (a) => mod.controlOptionAt(Number(a.x), Number(a.y)),
+
   /**
    * 还欠着脏矩形的页号。宿主按它决定贴哪几页 —— 不能用 dirtyPages：
    *   那一份是"本拍写过哪几页"，而矩形是累积的，两者不同步就会永久漏贴几块。

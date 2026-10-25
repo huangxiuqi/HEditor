@@ -137,6 +137,131 @@ test.describe('插入图片', () => {
   });
 });
 
+test.describe('插入控件', () => {
+  test('八种类型、单选组切换与异步前置回调', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' } });
+    const prep = await p.read<any>(`
+      await H.setText('甲乙丙丁');
+      await H.setCaret({ para: 0, offset: 2 });
+      await H.flush();
+      const opts = [{ value: 'a', label: '选项甲' }, { value: 'b', label: '选项乙' },
+                    { value: 'c', label: '选项丙' }];
+      const ok = await H.insertControl({ type: 'radioGroup', key: 'rg', options: opts });
+      await H.flush();
+      const form = H.form();
+      // 引擎侧的切换（不走鼠标）：单选组切到第二项。
+      const toggled = await H.toggleControl(0, 1);
+      await H.flush();
+      const afterToggle = H.form()[0];
+      // 之后再点画布上的第三项：走的是命中 → 前置回调 → 切换这条路。
+      const cv = FRAME();
+      const r = cv.getBoundingClientRect();
+      const q = D.controls().items[0].rects[0];
+      return {
+        ok, form, toggled,
+        type: afterToggle.type, sel: afterToggle.value.text, text: afterToggle.text,
+        left: r.left, top: r.top, sx: r.width / cv.width, sy: r.height / cv.height, zoom: ZOOM(),
+        qx: q.x, qy: q.y, qw: q.w, qh: q.h,
+        caret0: JSON.stringify(H.caret().pos),
+      };`);
+
+    check('insertControl 返回 true', prep.ok === true, String(prep.ok));
+    check('控件有矩形（诊断读数）', prep.qw > 0, JSON.stringify(prep));
+    check('★ 单选组带三个选项', prep.form[0]?.options?.length === 3,
+          JSON.stringify(prep.form[0]?.options));
+    check('★ 引擎侧切换生效：值落在 b 上', prep.sel === 'b', String(prep.sel));
+    check('★ 内容是图形加标签', prep.text.includes('◉ 选项乙') && prep.text.includes('○ 选项甲'),
+          prep.text);
+
+    const at = (fx: number) => ({
+      x: prep.left + (prep.qx + prep.qw * fx) * prep.zoom * prep.sx,
+      y: prep.top + (prep.qy + prep.qh / 2) * prep.zoom * prep.sy,
+    });
+    const click = async (x: number, y: number) => {
+      await p.page.mouse.click(x, y);
+      await p.page.waitForTimeout(60);
+    };
+
+    await p.page.waitForTimeout(400);
+    // 前置回调拒绝：值不变，光标也不动。
+    await p.page.evaluate(() => {
+      (window as any).__calls = 0;
+      (window as any).__demoBeforeChange = () => {
+        (window as any).__calls = ((window as any).__calls || 0) + 1;
+        return Promise.resolve(false);
+      };
+    });
+    const third = at(0.8);
+    await click(third.x, third.y);
+    const denied = await p.read<any>(`return { form: H.form()[0], caret: JSON.stringify(H.caret().pos) };`);
+    check('★ 异步拒绝：切换没有生效', denied.form.value.text === 'b', denied.form.value.text);
+    check('★ 被拒的点击不挪光标（选择类进不去）', denied.caret === prep.caret0,
+          denied.caret + ' vs ' + prep.caret0);
+
+    // 前置回调放行：第三项选中。
+    await p.page.evaluate(() => {
+      (window as any).__demoBeforeChange = () => {
+        (window as any).__calls = ((window as any).__calls || 0) + 1;
+        return true;
+      };
+    });
+    await click(third.x, third.y);
+    const allowed = await p.read<any>(`return H.form()[0];`);
+    check('★ 放行之后第三项选中', allowed.value.text === 'c', String(allowed.value.text));
+  });
+});
+
+test.describe('改控件定义', () => {
+  test('改选项表重建内容、删掉选中项清空值、类型不可改', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' } });
+    const r = await p.ev<any>(`
+      const e = ${D};
+      await e.setText('甲乙丙丁');
+      await e.setCaret({ para: 0, offset: 4 });
+      await e.flush();
+      const opts = [{ value: 'a', label: '选项甲' }, { value: 'b', label: '选项乙' }];
+      await e.insertControl({ type: 'radioGroup', key: 'rg', options: opts });
+      await e.flush();
+      await e.toggleControl(0, 1);
+      await e.flush();
+      const picked = e.form()[0];
+      const digest0 = await e.diag.frameDigest();
+
+      // 换标签 + 删掉正选中的第二项：内容按新表重建，值跟着清空。
+      const ok = await e.updateControl(0, { options: [{ value: 'a', label: '甲（改）' }] });
+      await e.flush();
+      const after = e.form()[0];
+      const digest1 = await e.diag.frameDigest();
+
+      // 类型不可改：换类型是"删掉重插"，这里要显式拒掉。
+      const bad = await e.updateControl(0, { type: 'checkBoxGroup' });
+      const stillSame = e.form()[0];
+
+      await e.undo();
+      await e.flush();
+      const undone = e.form()[0];
+      return { picked, ok, after, digest0, digest1, bad, stillSame, undone };`);
+
+    check('★ 改定义成功', r.ok === true, String(r.ok));
+    check('★ 选项表只剩一项', r.after?.options?.length === 1,
+          JSON.stringify(r.after?.options));
+    check('★ 标签换成甲（改）', r.after?.options?.[0]?.label === '甲（改）',
+          JSON.stringify(r.after?.options?.[0]));
+    check('★ 被删掉的选中项：值清空', r.after?.value?.text === '',
+          JSON.stringify(r.after?.value));
+    check('★ 内容按新选项表重建',
+          String(r.after?.text || '').includes('甲（改）') &&
+            !String(r.after?.text || '').includes('选项乙'),
+          String(r.after?.text));
+    check('★ 画面跟着变', r.digest0 !== r.digest1, r.digest0 + ' → ' + r.digest1);
+    check('★ 类型不可改（被拒）', r.bad === false, String(r.bad));
+    check('被拒之后类型没动', r.stillSame?.type === 'radioGroup', String(r.stillSame?.type));
+    check('★ 撤销回到改之前：选项与选中的值都回来',
+          r.undone?.options?.length === 2 && r.undone?.value?.text === 'b',
+          JSON.stringify({ n: r.undone?.options?.length, v: r.undone?.value?.text }));
+  });
+});
+
 test.describe('插入表格', () => {
   test('结构、落点与撤销：表格落在段后，光标进第一格', async ({ open }) => {
     const p = await open('index.html', { query: { debug: '1' } });

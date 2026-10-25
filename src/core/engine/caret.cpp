@@ -278,6 +278,14 @@ int CaretResolver::sideForFlow(FlowPos f) const {
     return side < 0 ? 0 : side;
 }
 
+bool CaretResolver::clusterTableFresh(int para, const std::vector<uint32_t>& starts) const {
+    if (starts.empty()) return false;
+    if (para < 0 || para >= static_cast<int>(view_.blocks_full->size())) return false;
+    // 表尾是排版那一刻这一段的码点数（见 LayoutResult::para_cluster_starts 的生成）。
+    //   与当前长度对不上，就说明排版之后文档又改过 —— 表是旧尺子。
+    return starts.back() == (*view_.blocks_full)[static_cast<size_t>(para)].cp_text.size();
+}
+
 size_t CaretResolver::snapToCluster(int para, size_t offset) const {
     if (para < 0 || para >= static_cast<int>(view_.blocks->size())) return 0;
     const size_t len = (*view_.blocks)[static_cast<size_t>(para)].cp_text.size();
@@ -285,7 +293,9 @@ size_t CaretResolver::snapToCluster(int para, size_t offset) const {
     if (para < static_cast<int>(view_.layout->para_cluster_starts.size())) {
         const std::vector<uint32_t>& starts =
             view_.layout->para_cluster_starts[static_cast<size_t>(para)];
-        if (!starts.empty()) return clusterFloor(starts, offset);
+        // 旧表不吸附：按旧边界往下吸会吸到上一个字（表象是"第二个字插到第一个字前面"，
+        //   或者落到控件外面）。不吸附最多是不合并组合字符，代价小于整体前移一个字。
+        if (clusterTableFresh(para, starts)) return clusterFloor(starts, offset);
     }
     return offset;
 }
@@ -295,7 +305,7 @@ size_t CaretResolver::clusterCeilAt(int para, size_t offset) const {
         return offset;
     const std::vector<uint32_t>& starts =
         view_.layout->para_cluster_starts[static_cast<size_t>(para)];
-    if (starts.empty()) return offset;
+    if (!clusterTableFresh(para, starts)) return offset;
     return clusterCeil(starts, offset);
 }
 

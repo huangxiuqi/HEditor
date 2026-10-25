@@ -83,6 +83,7 @@ export interface HitTest {
   field: number;
   side: number;
   line: number;
+  opt: number;
   cellPara?: number;
   cell?: unknown[];
   img?: number;

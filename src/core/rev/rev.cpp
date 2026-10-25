@@ -211,6 +211,55 @@ void hashFieldSpec(Hasher& h, const FieldSpec& f) {
 }
 
 /**
+ * 控件特有层的哈希：一个控件只带自己那一组属性，但每一组都要整个进哈希。
+ *
+ * 变体下标先混进去，再按族逐字段混 —— 两个不同的族即使字段值撞了也不会得到同一个哈希。
+ * @param h 哈希器
+ * @param d 特有层
+ */
+void hashControlDetail(Hasher& h, const ControlDetail& d) {
+    h.u8(static_cast<uint8_t>(d.index()));
+    if (const auto* t = std::get_if<TextDetail>(&d)) {
+        h.u8(static_cast<uint8_t>(t->filter));
+        return;
+    }
+    if (const auto* c = std::get_if<ChoiceDetail>(&d)) {
+        h.str(c->label);
+        h.u64(c->options.size());
+        for (const ControlOption& o : c->options) {
+            h.str(o.value);
+            h.str(o.label);
+        }
+        h.str(c->group);
+        h.u8(static_cast<uint8_t>(c->multi ? 1 : 0));
+        h.u8(static_cast<uint8_t>(c->caret_barrier ? 1 : 0));
+        return;
+    }
+    if (const auto* dp = std::get_if<DropdownDetail>(&d)) {
+        h.u64(dp->options.size());
+        for (const ControlOption& o : dp->options) {
+            h.str(o.value);
+            h.str(o.label);
+        }
+        h.u8(static_cast<uint8_t>(dp->free_input ? 1 : 0));
+        return;
+    }
+    if (const auto* dt = std::get_if<DateDetail>(&d)) {
+        h.str(dt->format);
+        h.u64(static_cast<uint64_t>(dt->units));
+        return;
+    }
+    if (const auto* cu = std::get_if<CustomDetail>(&d)) {
+        // props 是 std::map：遍历顺序由键定，跨进程稳定。
+        h.u64(cu->props.size());
+        for (const auto& kv : cu->props) {
+            h.str(kv.first);
+            h.str(kv.second);
+        }
+    }
+}
+
+/**
  * 控件记录的哈希。
  *
  * ControlSpec 的相等是默认生成的（加字段自动比），哈希不会自动跟着变 —— 漏一个字段的表现是
@@ -230,6 +279,7 @@ void hashControlSpec(Hasher& h, const ControlSpec& c) {
     h.u64(c.structureLock ? 1 : 0);
     hashAppearance(h, c.appearance);
     h.str(c.validateRef);
+    hashControlDetail(h, c.detail);
 }
 
 /**

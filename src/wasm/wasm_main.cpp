@@ -845,6 +845,9 @@ std::string hitTest(float x_pt, float y_pt, int clamp) {
     //   这一格的段号。宿主看到它就调 selectCellAtPara —— 那是"选整格"这条操作线，
     //   与"落光标"不是同一件事。给段号而不是流区间：空格的内容长度为 0，它的流区间
     //   与下一格的第一段是同一个位置，按流区间分不出是哪一格。
+    // 组控件：这一点落在第几个选项上。宿主拿它决定切换哪一项（互斥与多选规则在引擎里）。
+    const int option = (owner >= 0) ? g_engine.controlOptionAtPos(p, side) : -1;
+    if (option >= 0) o << ",\"opt\":" << option;
     if (cell_para >= 0) {
         o << ",\"cellPara\":" << cell_para;
         // 顺带给出这一格的内容区间：空格的两端相等（长度 0）。判据拿它区分"有内容"与
@@ -1047,6 +1050,38 @@ bool insertTableAt(int rows, int cols, bool header) {
 }
 
 /**
+ * 把宿主给的 opts 读成一份"要改的几项"。
+ *
+ * 插入与改定义共用它：两处各写一份解析，字段一多必然漂移（插入认 format、改定义不认），
+ * 而那种漂移在宿主侧只表现为"某一项配了没生效"。没给的键保持 nullopt（= 这一项不动）。
+ * @param o opts（键：key / label / options / group / free / format / units / type）
+ * @return 补丁
+ */
+ControlPatch controlPatchFrom(val o) {
+    ControlPatch p;
+    if (!o["key"].isUndefined()) p.key = o["key"].as<std::string>();
+    if (!o["label"].isUndefined()) p.label = o["label"].as<std::string>();
+    if (!o["type"].isUndefined()) p.expect_type = o["type"].as<std::string>();
+    if (o["options"].isArray()) {
+        std::vector<ControlOption> options;
+        const int n = o["options"]["length"].as<int>();
+        for (int i = 0; i < n; ++i) {
+            const val item = o["options"][i];
+            ControlOption opt;
+            if (!item["v"].isUndefined()) opt.value = item["v"].as<std::string>();
+            if (!item["l"].isUndefined()) opt.label = item["l"].as<std::string>();
+            options.push_back(std::move(opt));
+        }
+        p.options = std::move(options);
+    }
+    if (!o["group"].isUndefined()) p.group = o["group"].as<std::string>();
+    if (!o["free"].isUndefined()) p.free_input = o["free"].as<bool>();
+    if (!o["format"].isUndefined()) p.format = o["format"].as<std::string>();
+    if (!o["units"].isUndefined()) p.units = static_cast<uint16_t>(o["units"].as<int>());
+    return p;
+}
+
+/**
  * 插一个内容控件（表单字段），落在光标处，label 是它的初始内容。
  *
  * opts 的键都可省：type 是业务类型（默认 text）、key 是业务编码、label 是内容、
@@ -1055,21 +1090,66 @@ bool insertTableAt(int rows, int cols, bool header) {
  */
 bool insertControlAt(val opts) {
     const val o = (opts.isUndefined() || opts.isNull()) ? val::object() : opts;
-    ControlSpec spec;
-    if (!o["type"].isUndefined()) spec.controlType = o["type"].as<std::string>();
-    if (!o["key"].isUndefined()) spec.key = o["key"].as<std::string>();
+    // 类型决定特有层：这里的 opts 只需要说"要哪一种"，默认值由 makeControlSpec 给。
+    const std::string type =
+        o["type"].isUndefined() ? std::string("text") : o["type"].as<std::string>();
+    ControlSpec spec = makeControlSpec(type);
+    ControlPatch patch = controlPatchFrom(o);
+    // 插入时的 label 是"内容初值"，走 insertControlAndRender 的第二个参数；记录上的标签
+    //   由那一路按类型决定写到哪儿。这里摘掉，免得同一句话写进两个地方。
+    patch.label.reset();
+    // 类型已经由 makeControlSpec 定了，patch 里那一项只剩"要对齐"的意思。
+    patch.expect_type.reset();
+    if (!applyControlPatch(&spec, patch, nullptr)) return false;
     if (!o["ro"].isUndefined()) spec.readonly = o["ro"].as<bool>();
     if (!o["req"].isUndefined()) spec.required = o["req"].as<bool>();
     if (!o["shape"].isUndefined()) {
         const int shape = o["shape"].as<int>();
         if (shape >= 0 && shape <= 4) spec.valueShape = static_cast<ValueShape>(shape);
     }
-    // 空类型名会让宿主的分类型回显没有着落，而文本字段是唯一不需要作者声明的种类。
-    if (spec.controlType.empty()) spec.controlType = "text";
     const std::string label =
         o["label"].isUndefined() ? std::string() : o["label"].as<std::string>();
     return g_engine.insertControlAndRender(spec, label);
 }
+
+/**
+ * 改一个控件的定义（选项表、标签、互斥组、自由输入、日期格式与单位、业务编码）。
+ *
+ * 只改 opts 里给出的键：没给的不动。type 给了就必须与当前一致（换类型请删掉重插）。
+ * 改完内容按新定义重建；指向已删选项的值一起清掉 —— 都算在同一步撤销里。
+ */
+bool setControlSpecAt(int index, val opts) {
+    const val o = (opts.isUndefined() || opts.isNull()) ? val::object() : opts;
+    return g_engine.setControlSpecAndRender(index, controlPatchFrom(o));
+}
+
+/**
+ * 改一个控件的值。三项都传：flag / text / items —— 值形态决定读哪一项，多传的字段无害
+ * （与 ControlValue 的三个字段并存同一个理由：自描述比带标签的联合好读）。
+ * 值不合法时引擎拒绝并返回 false，文档不动。
+ */
+bool setControlValueAt(int index, bool flag, const std::string& text, val items) {
+    ControlValue v;
+    v.flag = flag;
+    v.text = text;
+    if (!items.isUndefined() && items.isArray()) {
+        const int n = items["length"].as<int>();
+        for (int i = 0; i < n; ++i) v.items.push_back(items[i].as<std::string>());
+    }
+    return g_engine.setControlValueAndRender(index, v);
+}
+
+/**
+ * 切换一个控件的第 option 个选项（单控件传 -1）。互斥与多选规则在命令层落地。
+ */
+bool toggleControlAt(int index, int option) {
+    return g_engine.toggleControlAndRender(index, option);
+}
+
+/**
+ * 文档坐标落在组控件的第几个选项上（不在组控件上时 -1）。宿主据此决定点的是哪一项。
+ */
+int controlOptionAt(float x_pt, float y_pt) { return g_engine.controlOptionAtPt(x_pt, y_pt); }
 
 /**
  * 注册一张图片的像素：宿主解码之后把 RGBA 交上来（文档只存资源 id）。
@@ -1247,14 +1327,45 @@ std::string controlsJson() {
       // 归属与落笔口径一致：点画布定下来的提示优先（见 EditorEngine::focusedControlIndex）。
       //   不这么写的话，界面上显示"光标在左边那个字段"，而打出来的字进了右边那个。
       << ",\"caret\":" << g_engine.focusedControlIndex() << ",\"items\":[";
+    // 类型、值、选项来自控件视图；区间与矩形来自控件集合 —— 两者按同一个下标对齐。
+    const std::vector<EditorEngine::ControlView> views = g_engine.controlViews();
+    std::vector<const EditorEngine::ControlView*> byIndex(static_cast<size_t>(cs.size()), nullptr);
+    for (const EditorEngine::ControlView& v : views) {
+        if (v.index >= 0 && v.index < cs.size()) byIndex[static_cast<size_t>(v.index)] = &v;
+    }
     for (int i = 0; i < cs.size(); ++i) {
         const Control& c = cs.at(i);
+        const EditorEngine::ControlView* v = byIndex[static_cast<size_t>(i)];
         if (i) o << ",";
         o << "{\"i\":" << i << ",\"kind\":\"" << jsonEscape(controlKindName(c.kind))
-          << "\",\"id\":\"" << jsonEscape(c.id) << "\",\"label\":\"" << jsonEscape(c.label)
-          << "\",\"ro\":" << (c.read_only ? "true" : "false") << ",\"depth\":" << c.depth
-          << ",\"parent\":" << c.parent << ",\"start\":[" << c.range.start.para << ","
-          << c.range.start.offset << "]"
+          << "\",\"type\":\"" << jsonEscape(v != nullptr ? v->controlType : std::string())
+          << "\",\"key\":\"" << jsonEscape(v != nullptr ? v->key : std::string()) << "\",\"id\":\""
+          << jsonEscape(c.id) << "\",\"label\":\""
+          << jsonEscape(v != nullptr ? v->label : std::string()) << "\",\"group\":\""
+          << jsonEscape(v != nullptr ? v->group : std::string()) << "\",\"text\":\""
+          << jsonEscape(v != nullptr ? v->content : std::string())
+          << "\",\"ro\":" << (c.read_only ? "true" : "false")
+          << ",\"req\":" << ((v != nullptr && v->required) ? "true" : "false")
+          << ",\"multi\":" << ((v != nullptr && v->multi) ? "true" : "false")
+          << ",\"free\":" << ((v != nullptr && v->free_input) ? "true" : "false")
+          << ",\"flag\":" << ((v != nullptr && v->value.flag) ? "true" : "false") << ",\"sel\":\""
+          << jsonEscape(v != nullptr ? v->value.text : std::string()) << "\",\"selItems\":[";
+        if (v != nullptr) {
+            for (size_t k = 0; k < v->value.items.size(); ++k) {
+                if (k) o << ",";
+                o << "\"" << jsonEscape(v->value.items[k]) << "\"";
+            }
+        }
+        o << "],\"opts\":[";
+        if (v != nullptr) {
+            for (size_t k = 0; k < v->options.size(); ++k) {
+                if (k) o << ",";
+                o << "[\"" << jsonEscape(v->options[k].value) << "\",\""
+                  << jsonEscape(v->options[k].label) << "\"]";
+            }
+        }
+        o << "],\"depth\":" << c.depth << ",\"parent\":" << c.parent << ",\"start\":["
+          << c.range.start.para << "," << c.range.start.offset << "]"
           << ",\"end\":[" << c.range.end.para << "," << c.range.end.offset << "],\"rects\":[";
         const std::vector<EditorEngine::ControlRect> rs = g_engine.controlRects(i);
         for (size_t k = 0; k < rs.size(); ++k) {
@@ -1874,6 +1985,10 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("setControlPropAt", &setControlPropAt);
     emscripten::function("insertTableAt", &insertTableAt);
     emscripten::function("insertControlAt", &insertControlAt);
+    emscripten::function("setControlSpecAt", &setControlSpecAt);
+    emscripten::function("setControlValueAt", &setControlValueAt);
+    emscripten::function("toggleControlAt", &toggleControlAt);
+    emscripten::function("controlOptionAt", &controlOptionAt);
     emscripten::function("registerImage", &registerImage);
     emscripten::function("dropImage", &dropImage);
     emscripten::function("insertImageAt", &insertImageAt);

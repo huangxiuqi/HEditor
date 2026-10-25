@@ -481,8 +481,18 @@ public:
     int sideForFlow(FlowPos f) const;
 
     /**
-     * 吸附到字素簇边界：不大于 offset 的最近簇起点。偏移落在一个簇中间时退回它的开头。
+     * 这一段的簇表与当前文本对不对得上。
      *
+     * 排版之后文档又改过（命令改了树但还没重排）时表就是旧的：此时按它吸附会让落点
+     * 落到上一个字。判据是表尾的码点数与当前段落长度是否相等。
+     * @param para 段号
+     * @param starts 簇起点表
+     * @return true = 表与当前文本对得上
+     */
+    bool clusterTableFresh(int para, const std::vector<uint32_t>& starts) const;
+
+    /**
+     * 吸附到字素簇边界：不大于 offset 的最近簇起点。偏移落在一个簇中间时退回它的开头。
      * @param para 段号（块下标）
      * @param offset 段内码点偏移
      * @return 簇起点

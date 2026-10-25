@@ -324,6 +324,101 @@ std::vector<std::pair<const char*, ControlSpec>> controlVariants() {
         s.validateRef = "v1";
         add("validateRef", s);
     }
+    // 特有层：每一族的每一个字段都要换一个哈希。漏一个的表现是"改了这个属性，修订被当成
+    //   没变直接丢掉"——画面上什么都不变，而且不报错。
+    {
+        ControlSpec s = controlBase();
+        TextDetail d;
+        d.filter = ContentFilter::Number;
+        s.detail = d;
+        add("detail.text.filter", s);
+    }
+    {
+        ControlSpec s = controlBase();
+        TextDetail d;
+        d.filter = ContentFilter::Any;
+        s.detail = d;
+        add("detail.text.any", s);
+    }
+    {
+        ControlSpec s = controlBase();
+        ChoiceDetail d;
+        d.label = "甲";
+        s.detail = d;
+        add("detail.choice.label", s);
+    }
+    {
+        ControlSpec s = controlBase();
+        ChoiceDetail d;
+        d.options = {{"a", "甲"}};
+        s.detail = d;
+        add("detail.choice.options", s);
+    }
+    {
+        ControlSpec s = controlBase();
+        ChoiceDetail d;
+        d.options = {{"a", "甲"}};
+        s.detail = d;
+        ControlSpec s2 = s;
+        std::get<ChoiceDetail>(s2.detail).options[0].label = "乙";
+        add("detail.choice.option.label", s2);
+    }
+    {
+        ControlSpec s = controlBase();
+        ChoiceDetail d;
+        d.group = "g";
+        s.detail = d;
+        add("detail.choice.group", s);
+    }
+    {
+        ControlSpec s = controlBase();
+        ChoiceDetail d;
+        d.multi = true;
+        s.detail = d;
+        add("detail.choice.multi", s);
+    }
+    {
+        ControlSpec s = controlBase();
+        ChoiceDetail d;
+        d.caret_barrier = false;
+        s.detail = d;
+        add("detail.choice.caret_barrier", s);
+    }
+    {
+        ControlSpec s = controlBase();
+        DropdownDetail d;
+        d.options = {{"a", "甲"}};
+        s.detail = d;
+        add("detail.dropdown.options", s);
+    }
+    {
+        ControlSpec s = controlBase();
+        DropdownDetail d;
+        d.free_input = true;
+        s.detail = d;
+        add("detail.dropdown.free_input", s);
+    }
+    {
+        ControlSpec s = controlBase();
+        DateDetail d;
+        d.format = "yyyy";
+        s.detail = d;
+        add("detail.date.format", s);
+    }
+    {
+        ControlSpec s = controlBase();
+        DateDetail d;
+        d.units = kDateUnitYear | kDateUnitMonth;
+        s.detail = d;
+        add("detail.date.units", s);
+    }
+    {
+        ControlSpec s = controlBase();
+        CustomDetail d;
+        d.props["p"] = "v";
+        s.detail = d;
+        add("detail.custom.props", s);
+    }
     return out;
 }
 

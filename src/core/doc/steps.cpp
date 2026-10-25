@@ -369,6 +369,16 @@ bool writeControlValue(NodeTree& tree, NodeId id, const ControlValue& value) {
     return true;
 }
 
+/**
+ * 写一份控件定义。目标不是内容控件时返回 false。
+ */
+bool writeControlSpec(NodeTree& tree, NodeId id, const ControlSpec& spec) {
+    Node* n = tree.find(id);
+    if (n == nullptr || n->kind != NodeKind::ContentControl) return false;
+    n->control = spec;
+    return true;
+}
+
 }  // namespace
 
 namespace {
@@ -907,6 +917,20 @@ StepResult canApply(const NodeTree& tree, const FlowIndex& idx, const Step& step
                 }
                 r.ok = true;
             },
+            [&](const SetControlSpec& s) {
+                const Node* n = tree.find(s.id);
+                if (n == nullptr || n->kind != NodeKind::ContentControl) {
+                    r.error = "改定义：目标不是内容控件";
+                    return;
+                }
+                // 原定义对不上说明这一步与别的编辑抢同一个控件（或者被重放到了别的文档）。
+                //   按整份比而不是按"改了哪几项"比：这一层不知道调用方改了什么，也不该知道。
+                if (!(n->control == s.before)) {
+                    r.error = "改定义：当前定义与步骤记的原值不符（步骤过期了）";
+                    return;
+                }
+                r.ok = true;
+            },
             [&](const SetTableCellSpan& s) {
                 const Node* n = tree.find(s.id);
                 if (n == nullptr || n->kind != NodeKind::TableCell) {
@@ -1064,6 +1088,7 @@ StepResult applyStep(NodeTree& tree, const Step& step) {
             },
             [&](const SetControlProp& s) { writeControlProp(tree, s.id, s.prop, s.value); },
             [&](const SetControlValue& s) { writeControlValue(tree, s.id, s.value); },
+            [&](const SetControlSpec& s) { writeControlSpec(tree, s.id, s.spec); },
             [&](const SetTableCellSpan& s) {
                 Node* n = tree.find(s.id);
                 if (n != nullptr) n->cell = s.span;
@@ -1196,6 +1221,13 @@ Step invertStep(const Step& step) {
                               x.before = s.value;
                               return Step{x};
                           },
+                          [](const SetControlSpec& s) -> Step {
+                              SetControlSpec x;
+                              x.id = s.id;
+                              x.spec = s.before;
+                              x.before = s.spec;
+                              return Step{x};
+                          },
                           [](const SetTableCellSpan& s) -> Step {
                               SetTableCellSpan x;
                               x.id = s.id;
@@ -1277,6 +1309,8 @@ FlowPos mapPos(const Step& step, FlowPos pos, Assoc assoc) {
                           // （重建派生索引），不是把某个位置搬到别处。
                           [&](const SetControlProp&) -> FlowPos { return pos; },
                           [&](const SetControlValue&) -> FlowPos { return pos; },
+                          // 定义也不改位置：选项表变短只让内容变短，内容步骤自己带坐标。
+                          [&](const SetControlSpec&) -> FlowPos { return pos; },
                           // 跨度不改流位置，也不改流结构：它改的是"这一格覆盖多少格位"。
                           [&](const SetTableCellSpan&) -> FlowPos { return pos; },
                           // 图片尺寸只改行盒几何，位置一个都不动。
@@ -1293,6 +1327,7 @@ bool mapStepPositions(Step* target, const Step& mapped_by, Assoc assoc) {
     // 属性、跨度与段落格式步骤不带流位置，搬一次等于没搬（但它们不是"搬不动"，所以算成功）。
     if (std::holds_alternative<SetControlProp>(*target) ||
         std::holds_alternative<SetControlValue>(*target) ||
+        std::holds_alternative<SetControlSpec>(*target) ||
         std::holds_alternative<SetTableCellSpan>(*target) ||
         std::holds_alternative<SetImageSize>(*target) ||
         std::holds_alternative<SetParaMarkFormat>(*target) ||

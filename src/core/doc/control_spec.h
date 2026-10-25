@@ -16,13 +16,19 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
+#include <optional>
 #include <string>
+#include <variant>
 #include <vector>
 
 #include "core/doc/length.h"
 #include "core/utils/types.h"
 
 namespace heditor {
+struct ControlSpec;
+struct ControlValue;
+
 /**
  * 值形态：约束这个控件装的是什么值（见 docs/文档模型设计.md 第七节）。
  *
@@ -338,6 +344,355 @@ struct ControlValue {
     bool operator==(const ControlValue& o) const = default;
 };
 
+/**
+ * 一个选项：值 + 显示标签。
+ *
+ * 值与标签分开是刚性要求：值是对外报的业务码（换宿主、换语言都不变），标签是纸面上那段
+ * 文字（可以改文案、可以翻译）。两者合成一个字符串的话，改一次文案就改了数据契约。
+ */
+struct ControlOption {
+    /**
+     * 选项值（业务码）。落盘、比较、回填都用它。
+     */
+    std::string value;
+
+    /**
+     * 显示标签。进控件的内容，也就是纸面上那段文字。
+     */
+    std::string label;
+
+    bool operator==(const ControlOption& o) const = default;
+};
+
+/**
+ * 内容只收哪一类字符。它约束的是编辑入口（打进来的字），不是值的校验 ——
+ * 值怎么校验由业务侧决定，见 controlValueValid。
+ */
+enum class ContentFilter : uint8_t {
+    Any = 0,     // 什么都收
+    Number = 1,  // 只收数字、一个小数点与开头的负号
+};
+
+/**
+ * 数值内容的字符过滤器。它不是"整串合不合法"的判据（中间态 "-"、"1." 都得能打进去），
+ * 只回答"再打这一个字行不行"。
+ * @param current 当前内容（UTF-8）
+ * @param add 想追加的一个码点
+ * @return true = 收下这个字符
+ */
+bool numberAccepts(const std::string& current, uint32_t add);
+
+/**
+ * 整串是不是一个合法的数值（提交时的判据）。空串算合法：那是"没填"，由 required 管。
+ * @param text 内容（UTF-8）
+ * @return true = 空串或一个十进制数
+ */
+bool numberTextValid(const std::string& text);
+
+/**
+ * 单选的日期单位位掩码。没列出的单位不进选择器；显示格式另由 format 决定，两者不互相推导。
+ */
+inline constexpr uint16_t kDateUnitYear = 1u << 0;
+inline constexpr uint16_t kDateUnitMonth = 1u << 1;
+inline constexpr uint16_t kDateUnitDay = 1u << 2;
+inline constexpr uint16_t kDateUnitHour = 1u << 3;
+inline constexpr uint16_t kDateUnitMinute = 1u << 4;
+inline constexpr uint16_t kDateUnitSecond = 1u << 5;
+
+/**
+ * 六个单位全选。默认值 —— 时间选择大多数场合要精确到秒。
+ */
+inline constexpr uint16_t kDateUnitsAll = kDateUnitYear | kDateUnitMonth | kDateUnitDay |
+                                          kDateUnitHour | kDateUnitMinute | kDateUnitSecond;
+
+/**
+ * 日期值的默认格式。与 docs 里那条一致：2026年10月26日 01时57分41秒。
+ */
+inline constexpr const char* kDefaultDateFormat = "yyyy年MM月dd日 HH时mm分ss秒";
+
+/**
+ * 把 ISO 串按格式串折成显示文字。
+ *
+ * 值是 ISO 串（YYYY-MM-DDTHH:MM:SS），显示才是格式串 —— 存与显分开，换格式不改数据。
+ * 认的记号是 yyyy / MM / dd / HH / mm / ss，其余字符原样输出。解析不了就原样返回输入，
+ * 不猜、不补零：把一份坏的日期显示成"看起来正常"的日期，比显示原文更危险。
+ * @param iso ISO 串（YYYY-MM-DDTHH:MM:SS）
+ * @param pattern 格式串（空 = 默认格式）
+ * @return 显示文字
+ */
+std::string formatControlDate(const std::string& iso, const std::string& pattern);
+
+/**
+ * 串是不是一个合法的 ISO 日期时间（YYYY-MM-DDTHH:MM:SS，范围含闰年）。空串算合法。
+ * @param iso ISO 串
+ * @return true = 空串或合法日期时间
+ */
+bool isoDateTimeValid(const std::string& iso);
+
+/**
+ * 选择类控件的特有层：标签、选项、互斥组与是否多选。
+ *
+ * 单控件（一个控件等于一个选项）用 label + group；组控件（一个控件含多个选项）用 options。
+ * 两者的区别是布局，不是选项数量 —— 单控件能分散在文档各处、再按 group 关联，组控件整体断行。
+ */
+struct ChoiceDetail {
+    /**
+     * 单控件的标签（组控件为空）。
+     */
+    std::string label;
+
+    /**
+     * 组控件的选项（单控件为空）。
+     */
+    std::vector<ControlOption> options;
+
+    /**
+     * 互斥组名：同组的单选最多一个选中。空 = 不与任何人互斥。
+     */
+    std::string group;
+
+    /**
+     * 多选还是单选。单控件靠它区分复选框与单选框，组控件靠它区分复选组与单选组。
+     */
+    bool multi = false;
+
+    /**
+     * 光标不许停在内容里（三档模式都生效）。选择类的整体性靠它，默认打开。
+     */
+    bool caret_barrier = true;
+
+    bool operator==(const ChoiceDetail& o) const = default;
+};
+
+/**
+ * 下拉的特有层：选项表与是否允许自由输入。选项在弹出层里，不进文档流。
+ */
+struct DropdownDetail {
+    /**
+     * 选项表。
+     */
+    std::vector<ControlOption> options;
+
+    /**
+     * 允许输入选项表以外的值。关闭时 value 必须是选项表里的某一个值。
+     */
+    bool free_input = false;
+
+    bool operator==(const DropdownDetail& o) const = default;
+};
+
+/**
+ * 日期的特有层：显示格式与可选单位。
+ */
+struct DateDetail {
+    /**
+     * 显示格式串（空 = 默认格式，见 kDefaultDateFormat）。
+     */
+    std::string format;
+
+    /**
+     * 选择器里能选中哪些单位（位掩码，见 kDateUnitXXX）。
+     */
+    uint16_t units = kDateUnitsAll;
+
+    bool operator==(const DateDetail& o) const = default;
+};
+
+/**
+ * 文本类的特有层：内容收哪些字符。纯文本控件没有特有层（monostate），
+ * 只有数值输入需要它。
+ */
+struct TextDetail {
+    /**
+     * 内容接受哪一类字符。
+     */
+    ContentFilter filter = ContentFilter::Any;
+
+    bool operator==(const TextDetail& o) const = default;
+};
+
+/**
+ * 宿主自定义类型的特有层：不认识的属性原样存着。
+ *
+ * 导入外部文档遇到不认识的类型时，属性不能丢 —— 丢一份就是"存一次盘少一份数据"。
+ * 引擎不认识这些属性，只负责搬运与落盘。
+ */
+struct CustomDetail {
+    /**
+     * 属性名到属性值（值按文本存，宿主自己解释）。
+     */
+    std::map<std::string, std::string> props;
+
+    bool operator==(const CustomDetail& o) const = default;
+};
+
+/**
+ * 类型特有层：一个控件只带它真正用的那一组。
+ *
+ * 做成变体而不是把七八个字段摊在 ControlSpec 上：文本控件带 options、日期控件带 group
+ * 这类"永远用不到"的字段会让"这个控件有哪些属性"变成一句空话，序列化也要为每个字段
+ * 判一次默认值。变体把这件事交给类型系统：拿到 ChoiceDetail 就说明它一定有选项语义。
+ *
+ * monostate 是"没有特有层"，给纯文本控件用。
+ */
+using ControlDetail = std::variant<std::monostate, TextDetail, ChoiceDetail, DropdownDetail,
+                                   DateDetail, CustomDetail>;
+
+/**
+ * 取选择类特有层；不是选择类返回 nullptr。
+ * @param spec 控件记录
+ * @return 选择类特有层
+ */
+const ChoiceDetail* choiceOf(const ControlSpec& spec);
+
+/**
+ * 取下拉特有层；不是下拉返回 nullptr。
+ * @param spec 控件记录
+ * @return 下拉特有层
+ */
+const DropdownDetail* dropdownOf(const ControlSpec& spec);
+
+/**
+ * 取日期特有层；不是日期返回 nullptr。
+ * @param spec 控件记录
+ * @return 日期特有层
+ */
+const DateDetail* dateOf(const ControlSpec& spec);
+
+/**
+ * 取文本特有层；纯文本控件返回 nullptr。
+ * @param spec 控件记录
+ * @return 文本特有层
+ */
+const TextDetail* textOf(const ControlSpec& spec);
+
+/**
+ * 取自定义特有层；不是自定义类型返回 nullptr。
+ * @param spec 控件记录
+ * @return 自定义特有层
+ */
+const CustomDetail* customOf(const ControlSpec& spec);
+
+/**
+ * 按业务类型造一份记录：共同层给默认值，特有层按家族填。
+ *
+ * 认识的类型：text / number / radioButton / checkBox / radioGroup / checkBoxGroup /
+ * dropdownList / date。不认识的名字落进 CustomDetail（原样透传）并给文本值形态 ——
+ * 不假装认识，也不拒绝导入。
+ * @param controlType 业务类型名
+ * @return 新记录（key 与标签由调用方填）
+ */
+ControlSpec makeControlSpec(const std::string& controlType);
+
+/**
+ * 按记录与值生成控件的显示内容（进文档流的那段文字）。
+ *
+ * 文本与数值的内容就是值本身，返回空串表示"不改内容"；选择类生成图形加标签；
+ * 下拉取选中项的标签（自由输入时就是那段输入）；日期按格式折。生成与解析只有这一份：
+ * 命中某个选项、切换后重建内容、插入时给初始内容，都走它。
+ * @param spec 控件记录
+ * @param value 控件的值（文本类忽略）
+ * @return 显示文字
+ */
+std::string controlDisplayText(const ControlSpec& spec, const ControlValue& value);
+
+/**
+ * 组控件每个选项在内容里的码点区间 [begin, end)。
+ *
+ * 点击命中靠它把"点了内容里的第几个码点"折成"点了哪个选项"。区间由生成内容的同一套
+ * 排版给出（图形 1 + 空格 1 + 标签，项间两个空格），所以内容与命中不会各算一套。
+ * @param spec 控件记录
+ * @param out 每个选项一对；不是组控件时清空
+ * @return true = 这是个组控件
+ */
+bool controlOptionSpans(const ControlSpec& spec, std::vector<std::pair<int, int>>* out);
+
+/**
+ * 改定义时"要改哪几项"。
+ *
+ * 每个字段都可选，空表示"这一项不动" —— 与"改成空值"是两件事（选项表清空是给空数组，
+ * 不动是不给）。做成补丁而不是"整份记录再传一遍"：调用方只知道要改哪一项，让它把其余
+ * 项抄一遍，抄漏一个就是静默丢配置。
+ *
+ * 这里只收没有别的写入路径的那几项：readonly / required / hidden / structureLock 走
+ * SetControlProp，值走 SetControlValue。同一个字段开第二条写入路径，两条迟早会分叉。
+ */
+struct ControlPatch {
+    /**
+     * 业务编码。
+     */
+    std::optional<std::string> key;
+
+    /**
+     * 单控件的标签（组控件不用它，内容由选项表生成）。
+     */
+    std::optional<std::string> label;
+
+    /**
+     * 选项表（选择类与下拉）。清空传空数组，不动就不给。
+     */
+    std::optional<std::vector<ControlOption>> options;
+
+    /**
+     * 互斥组名（单选）。
+     */
+    std::optional<std::string> group;
+
+    /**
+     * 下拉允许自由输入。
+     */
+    std::optional<bool> free_input;
+
+    /**
+     * 日期显示格式串。
+     */
+    std::optional<std::string> format;
+
+    /**
+     * 日期能选中哪些单位（位掩码）。
+     */
+    std::optional<uint16_t> units;
+
+    /**
+     * 期望的业务类型。给了就必须与当前一致，否则整份拒绝。
+     *
+     * 记录里不存它 —— 它的用处只有一个：把"想换类型"的调用显式挡住。改类型不是改属性：
+     * 值形态、内容形状、命中归属会一起变，那是"删掉再插一个"，该走插入那条路。
+     */
+    std::optional<std::string> expect_type;
+};
+
+/**
+ * 把补丁合并进一份记录。
+ *
+ * 严格而不静默：给了一项这个类型不收的字段就整份拒绝并说明原因（例如给文本控件送 options）。
+ * 静默忽略的后果是调用方以为改成了、实际什么都没发生 —— 那种错查起来最费时间。
+ * @param spec 记录（就地改）
+ * @param patch 要改的项
+ * @param error 写回拒绝原因
+ * @return true = 合并成功
+ */
+bool applyControlPatch(ControlSpec* spec, const ControlPatch& patch, std::string* error);
+
+/**
+ * 定义变了之后把值夹回合法范围：指向已被删掉的选项的值跟着清掉。
+ *
+ * 不清的话会留下"值不在选项表里"的脏数据 —— 显示时找不到标签、报出去业务侧不认，
+ * 而画面上看起来只是少了几个字。
+ * @param spec 记录（新定义）
+ * @param value 值（就地夹）
+ */
+void pruneControlValue(const ControlSpec& spec, ControlValue* value);
+
+/**
+ * 值对这个控件合不合法。空值一律合法（那是"没填"，由 required 管）。
+ * @param spec 控件记录
+ * @param value 值
+ * @param error 写回不合法原因
+ * @return true = 合法
+ */
+bool controlValueValid(const ControlSpec& spec, const ControlValue& value, std::string* error);
+
 struct ControlSpec {
     /**
      * 业务编码（如 chief_complaint）。可重复 —— 同一 key 绑多个控件表示同一个字段的多处显示，
@@ -392,6 +747,11 @@ struct ControlSpec {
      * 凡"换一个宿主仍要生效"的只能是数据。宿主把名字映射到自己的校验钩子；名字为空表示不校验。
      */
     std::string validateRef;
+
+    /**
+     * 类型特有层：只带这个控件真正用的那一组属性（见 ControlDetail）。
+     */
+    ControlDetail detail;
 
     /**
      * 逐字段相等。序列化要拿它判断"这个控件是不是全默认"，从而决定写不写这个条目；
