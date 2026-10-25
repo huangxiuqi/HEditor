@@ -4,7 +4,7 @@
 **阶段约定（2026-10-23）**：开发阶段不考虑向后兼容 —— 不写旧标记/旧签名的兼容分支，改名、
 删选项、换形状直接做，改完把判据与文档一起更新。
 **索引**：`TRAPS.md`（复发陷阱 1~213，按编号引用）· `ARCH-NOTES.md` · `MIGRATION.md` ·
-`ENV.md`。设计文档：`docs/文档模型设计.md`（语义权威，`wc -l` 必须 2840）·
+`ENV.md`。设计文档：`docs/文档模型设计.md`（语义权威，`wc -l` 必须 2843）·
 `正式化架构与迁移路线.md` · `外部API设计.md` · `跑测试.md` · `步5-渲染层方案.md`。
 
 ## 环境与基线
@@ -126,10 +126,17 @@
   在同一控件内（223）。"两端都可编辑"不等于"区间合法"，相邻字段共享偏移时会从隔壁偷字，
   判据锚在光标所在控件（`eraseInsideCaretControl`，224）。
 - **选区与光标是两件事**（225）：选区自由（拖选 / Shift 扩展 / 全选跨控件），插入点只在
-  能打字的地方 —— 表单模式限于可编辑控件内容（`confineCaret` 夹回所在字段），只读模式
-  一个都不画。画不画由 `caretInsertable()` 一处决定（`editStats.caretVisible`、
-  `collectTransient`、页导出都读它）。程序化定位（`setCaret`/`setCaretAt`）不受限，
-  受限的是点击、方向键、Home/End。
+  能打字的地方 —— 表单模式限于可编辑控件内容，只读模式一个都不画。画不画由
+  `insertableAtFlow(f)` 一处决定（`caretInsertable()` / `editStats.caretVisible` /
+  `collectTransient` / 页导出都读它），夹取由 `confineCaret` 做。程序化定位
+  （`setCaret`/`setCaretAt`）不受限，受限的是点击、方向键、Home/End。
+  - **控件内容区间只从流索引取**（229）：`flow_->intervalOf(control_node_ids_[i])` 给含两枚
+    括号的半开区间，内容区间退掉两头。**不许用"文字区间 + 括号排布"反推** —— 六枚括号压
+    同一 cp 时（三枚空控件套起来）反推要把区间缩成一个点。
+  - **判"这一格归谁"取最内层**（`innermostControlAt`：起点最大，同起点取跨度短），
+    不能按遍历顺序取第一个命中的 —— 外层可编辑会替内层只读作证。
+  - 夹取后的落点仍不可插入（区间中间嵌着只读层）就退回这一步之前的位置；一步之前
+    也不在任何控件里就整下不动。
 - **页边距是四个数**（227）：`PageMetrics::margins{top,right,bottom,left}`；纸张规格不进
   引擎，TS 侧 `PAPER_PT` 算宽高，`pageSetup` 命令下发六个浮点数。`configure({page})` 代价
   是 relayout。纸张另有 `'Custom'` 档（`custom:{w,h}`，36~5000 磅），示例页面板里能直接填。

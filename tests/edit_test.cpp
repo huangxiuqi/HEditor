@@ -13044,6 +13044,119 @@ int main() {
         }
     }
 
+    if (runSection(76)) std::printf("\n[76] 空控件嵌套：光标进得去每一层的内容区间\n");
+    if (runSection(76)) {
+        // 三个空控件套在一起（[ [ [ ] ] ]）：六枚括号压在同一处文字偏移上。
+        //   内容区间是 (开括号之后, 闭括号之前)，所以外层跨到最外那枚 ] 之前、内层退化成
+        //   一点。判据按"每一步都进得去"走 —— 只判终点会漏掉中间那几格。
+        EngineConfig c76;
+        c76.zoom = 1.0f;
+        const std::vector<std::string> fonts76 = {cjkPath, mnPath, latinPath};
+
+        NodeTree t76;
+        {
+            const NodeId sec = t76.firstSectionId();
+            const NodeId a = t76.appendChild(sec, NodeKind::TextRun);
+            t76.setText(a, utf8ToCodepoints("ABC"));
+            t76.appendChild(sec, NodeKind::ParagraphMark);
+        }
+        EditorEngine e76;
+        if (!e76.init(fonts76)) {
+            std::fprintf(stderr, "字体加载失败\n");
+            return 2;
+        }
+        e76.setConfig(c76);
+        e76.setDocument(t76, StyleSheet{});
+        e76.relayout();
+
+        ControlSpec sp76;
+        sp76.key = "outer";
+        sp76.controlType = "text";
+        e76.setCaret(0, 1);
+        e76.insertControlAndRender(sp76, "");
+        sp76.key = "mid";
+        e76.insertControlAndRender(sp76, "");
+        sp76.key = "inner";
+        e76.insertControlAndRender(sp76, "");
+        expectTrue(e76.controls().size() == 3,
+                   "三个空控件（实际 " + std::to_string(e76.controls().size()) + "）");
+        e76.setEditMode(EditMode::Form);
+        e76.relayout();
+
+        auto at76 = [&]() {
+            return std::to_string(e76.caret().offset) + "/" + std::to_string(e76.caretSide());
+        };
+        // 流：A(0) [(1) [(2) [(3) ](4) ](5) ](6) B(7) C(8)；三层的内容区间分别是
+        //   内层 [4,4]、中层 [3,5]、外层 [2,6]。光标读数里的侧别就是 cp 处的第几格，
+        //   于是这一处的 1/3、1/4、1/5 分别对应流位置 4、5、6。
+        //   方向键每一步都要进得去 —— 只判终点会漏掉中间那一格，而"进不去"正是从中间开始的。
+        //   每条都先把结果落到字符串再判：断言的两个实参求值顺序不确定，把移动写进判据里
+        //   会让失败信息印出移动之前的读数。
+        // 归属只该有一个答案：宿主报的那个（caretFieldHint，按段内对象表推）与按内容区间
+        //   查出来的那个（innermostControlAt）必须是同一个 —— 两套算法在边界上分家的症状是
+        //   "光标画在 A 里、宿主说在 B 里、编辑按 C 判"。
+        auto ownerAgree = [&]() {
+            return e76.caretFieldHint() == e76.innermostControlAt(e76.caretFlowPos());
+        };
+        expectTrue(ownerAgree(), "装载之后两套归属算法给出同一个控件");
+        auto step76 = [&](int dcp) {
+            const bool m = e76.moveCaretAndRender(dcp);
+            return std::string(m ? "动" : "停") + at76();
+        };
+        const std::string s0 = at76();
+        expectTrue(s0 == "1/3", "装载之后光标落在最内层的内容起点（实际 " + s0 + "）");
+        expectTrue(e76.caretInsertable(), "那个位置可插入（三层里最内层的内容起点）");
+
+        const std::string r1 = step76(1);
+        const bool a1 = ownerAgree();
+        const std::string r2 = step76(1);
+        const bool a2 = ownerAgree();
+        const std::string r3 = step76(1);
+        const bool a3 = ownerAgree();
+        expectTrue(a1 && a2 && a3, "右移三格的每一格上两套归属算法都一致");
+        expectTrue(r1 == "动1/4", "★ 右移一格进中层的内容末尾（实际 " + r1 + "）");
+        expectTrue(r2 == "动1/5", "★ 再右移进外层的内容末尾（实际 " + r2 + "）");
+        expectTrue(r3 == "停1/5",
+                   "★ 再右移：右邻是外层的闭括号（不可插入）→ 不动（实际 " + r3 + "）");
+
+        const std::string l1 = step76(-1);
+        const std::string l2 = step76(-1);
+        const std::string l3 = step76(-1);
+        const std::string l4 = step76(-1);
+        expectTrue(l1 == "动1/4", "★ 反向：左移回到中层的内容末尾（实际 " + l1 + "）");
+        expectTrue(l2 == "动1/3", "★ 再左移回到最内层的内容起点（实际 " + l2 + "）");
+        expectTrue(l3 == "动1/2", "★ 再左移进中层的内容起点（实际 " + l3 + "）");
+        expectTrue(l4 == "动1/1", "★ 再左移进外层的内容起点（实际 " + l4 + "）");
+        const std::string l5 = step76(-1);
+        expectTrue(l5 == "停1/1",
+                   "★ 再左移：左邻是外层的开括号（不可插入）→ 不动（实际 " + l5 + "）");
+
+        // 外层内容起点上退格：左邻是开括号，删不过去（表单模式的删除只在控件内容里）。
+        const bool bs76 = e76.backspaceAndRender();
+        const std::string after_bs = at76();
+        expectTrue(!bs76 && after_bs == "1/1",
+                   "★ 外层内容起点上退格被拒：删不到括号，光标也不动（实际 " + after_bs + "）");
+
+        // 点击最内层的内容起点：进得去（三层共享同一处文字偏移，靠侧别分辨层级）。
+        e76.setCaretAtSide(0, 1, 3);
+        const std::string c1 = at76();
+        expectTrue(c1 == "1/3", "★ 点击最内层的内容起点：进得去（实际 " + c1 + "）");
+
+        // 只读内层：插入点按最内层判 —— 外层可编辑不能替内层作证。
+        expectTrue(e76.setControlProp(2, ControlProp::Readonly, true), "把最内层设成只读");
+        e76.relayout();
+        e76.setCaretAtSide(0, 1, 2);
+        const std::string c2 = at76();
+        expectTrue(c2 == "1/2", "点击中层的内容起点（实际 " + c2 + "）");
+        e76.setCaretAtSide(0, 1, 3);
+        const std::string c3 = at76();
+        expectTrue(c3 == "1/2", "★ 再点击只读内层：进不去，光标留在中层（实际 " + c3 + "）");
+        const bool m1 = e76.moveCaretAndRender(1);
+        const std::string c4 = at76();
+        expectTrue(!m1 && c4 == "1/2",
+                   "★ 从中层内容起点右移：下一格是只读内层 → 不动（实际 " + c4 + "）");
+    }
+
     std::printf("\n──────────────────────────────\n");
     std::printf("共 %d 项断言，失败 %d 项\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

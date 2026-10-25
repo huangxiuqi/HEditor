@@ -698,6 +698,25 @@ public:
     bool controlContentSpan(int index, FlowPos* lo, FlowPos* hi) const;
 
     /**
+     * 某个流位置落在哪个控件的内容区间里。嵌套时取最内层 —— 起点最大者，同起点取跨度短者。
+     *
+     * @param f 流位置
+     * @return 控件下标；-1 = 不在任何控件的内容里
+     */
+    int innermostControlAt(FlowPos f) const;
+
+    /**
+     * 某个流位置能不能放插入点（与光标此刻在哪儿无关）。
+     *
+     * 表单模式要求它落在某个控件的内容区间里，而且那一层的祖先链上一个只读的都没有；
+     * 文档模式没有限制，只读模式一个位置都不认。
+     *
+     * @param f 流位置
+     * @return true = 可以放插入点
+     */
+    bool insertableAtFlow(FlowPos f) const;
+
+    /**
      * 把光标收进可插入位置（表单模式的落点规则）。
      *
      * 目标落在控件之外时夹回"移动之前所在控件"的内容区间，视觉上就是停在字段边界上；

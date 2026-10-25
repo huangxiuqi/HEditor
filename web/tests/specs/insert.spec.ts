@@ -270,6 +270,49 @@ test.describe('插入控件', () => {
           before.slice(0, 8) + ' → ' + after.slice(0, 8));
   });
 
+  test('空控件嵌套：表单模式下方向键进得去每一层', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' } });
+    // 三个都不带内容：后一枚插在前一枚的内容里，于是套成 [ [ [ ] ] ]。三枚括号组的起点
+    //   压在同一处文字偏移上，光标只能靠"第几格"（侧别）分辨层级 —— 内容区间一旦退化成
+    //   一个点，方向键就寸步难行。
+    const r = await p.read<any>(`
+      const e = ${D};
+      await e.setText('ABC');
+      await e.setCaret({ para: 0, offset: 1 });
+      await e.flush();
+      await e.insertControl({ type: 'text', key: 'outer', label: '' });
+      await e.insertControl({ type: 'text', key: 'mid', label: '' });
+      await e.insertControl({ type: 'text', key: 'inner', label: '' });
+      await e.configure({ mode: 'form' });
+      await e.flush();
+
+      // 归属按控件下标（文档顺序 = 外层先）；-1 = 光标不在任何控件里。
+      const focusedIndex = () => e.form().findIndex((x) => x.focused);
+      /**
+       * 派一次真实方向键。
+       * @param k key 字段
+       * @returns 到下一拍为止
+       */
+      const press = async (k) => {
+        IME().dispatchEvent(
+          new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }));
+        await e.flush();
+        return focusedIndex();
+      };
+      const seen = { start: focusedIndex(), right: [], left: [] };
+      for (let i = 0; i < 4; ++i) seen.right.push(await press('ArrowRight'));
+      for (let i = 0; i < 5; ++i) seen.left.push(await press('ArrowLeft'));
+      return { seen, controls: e.form().length, text: e.text() };`);
+
+    check('三个控件都在（嵌套，不是并排）', r.controls === 3, String(r.controls));
+    check('文字没被控件切断', r.text === 'ABC', JSON.stringify(r.text));
+    check('★ 插完之后光标在最内层（下标 2）', r.seen.start === 2, String(r.seen.start));
+    check('★★ 右移逐层往外走：内层 → 中层 → 外层 → 停住',
+          JSON.stringify(r.seen.right) === '[1,0,0,0]', JSON.stringify(r.seen.right));
+    check('★★ 左移逐层往里走：外层 → 中层 → 内层 → 中层 → 外层',
+          JSON.stringify(r.seen.left) === '[1,2,1,0,0]', JSON.stringify(r.seen.left));
+  });
+
   test('只读模式拒绝，且不改文档', async ({ open }) => {
     const p = await open('index.html', { query: { debug: '1' } });
     const r = await p.ev<any>(`

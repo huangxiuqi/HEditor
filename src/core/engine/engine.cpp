@@ -1151,20 +1151,64 @@ FlowPos EditorEngine::caretFlowPos() const {
     return flowPosAtSide(p.para, p.offset, caretSide());
 }
 
+/**
+ * 控件的内容区间（流位置，两端都含）。
+ *
+ * 区间从流索引直接取，不从文字区间 + 括号排布反推：同一个偏移上可能压着好几枚括号
+ *   （三枚空控件套起来就是六枚压在一处），按"第几格"反推要先知道这是第几枚 —— 而那份
+ *   知识正是流索引已经算好的东西。两条口径一旦分叉，症状就是光标进得去最内层、
+ *   往右一格走不动。
+ *
+ * 索引给的区间含两枚括号（半开区间，宽 2 就是空控件），内容区间是它退掉两头。
+ */
 bool EditorEngine::controlContentSpan(int index, FlowPos* lo, FlowPos* hi) const {
     if (!flow_.has_value()) return false;
     if (index < 0 || index >= controls_.size()) return false;
-    const Control& c = controls_.at(index);
-    // 两枚边界各自"自己那一格"的流位置：开括号取内容起点（括号之后）、闭括号取内容末尾。
-    const FlowPos start =
-        flowPosAtSide(c.range.start.para, c.range.start.offset,
-                      caret_.sideFromHint(c.range.start.para, c.range.start.offset, index));
-    const FlowPos end =
-        flowPosAtSide(c.range.end.para, c.range.end.offset,
-                      caret_.sideFromHint(c.range.end.para, c.range.end.offset, index));
-    if (start < 0 || end < start) return false;
-    if (lo != nullptr) *lo = start;
-    if (hi != nullptr) *hi = end;
+    if (index >= static_cast<int>(control_node_ids_.size())) return false;
+    FlowPos first = 0;
+    FlowPos end = 0;
+    if (!flow_->intervalOf(control_node_ids_[static_cast<size_t>(index)], &first, &end))
+        return false;
+    // 两枚括号各占一格。宽 2 = 空控件，内容区间退化成 first + 1 这一个插入点。
+    if (end - first < 2) return false;
+    if (lo != nullptr) *lo = first + 1;
+    if (hi != nullptr) *hi = end - 1;
+    return true;
+}
+
+/**
+ * 某个流位置落在哪个控件的内容区间里。
+ *
+ * 嵌套时取最内层：起点最大者，同起点取跨度短者。取外层会让"这一格归谁"与编辑归属
+ *   （policyAt 那一套）分家 —— 光标在一个字段里、编辑却按另一个字段的规则判。
+ */
+int EditorEngine::innermostControlAt(FlowPos f) const {
+    int best = -1;
+    FlowPos best_lo = 0;
+    FlowPos best_hi = 0;
+    for (int i = 0; i < controls_.size(); ++i) {
+        FlowPos lo = 0;
+        FlowPos hi = 0;
+        if (!controlContentSpan(i, &lo, &hi)) continue;
+        if (f < lo || f > hi) continue;
+        if (best < 0 || lo > best_lo || (lo == best_lo && (hi - lo) < (best_hi - best_lo))) {
+            best = i;
+            best_lo = lo;
+            best_hi = hi;
+        }
+    }
+    return best;
+}
+
+bool EditorEngine::insertableAtFlow(FlowPos f) const {
+    if (mode_ == EditMode::Document) return true;
+    if (mode_ != EditMode::Form) return false;  // 只读（以及将来新增的模式）：一个都不认
+    const int inner = innermostControlAt(f);
+    if (inner < 0) return false;
+    // 可编辑性是交集：把光标包住的每一层都不能是只读的。
+    for (int k = inner; k >= 0; k = controls_.at(k).parent) {
+        if (controls_.at(k).read_only) return false;
+    }
     return true;
 }
 
@@ -1174,27 +1218,15 @@ bool EditorEngine::controlContentSpan(int index, FlowPos* lo, FlowPos* hi) const
  * 选区与光标是两件事：选区可以盖住只读区（核对上文、复制），光标不能停在打不进字的地方。
  *   表单模式只认可编辑集合内的位置（含"只读控件里嵌可编辑控件"那一档交集），只读模式
  *   一个都不认。位置本身不被改写，见 confineCaret。
+ *
+ * 判据不参数化任何块流：空文档的 caretRectPx 本来就给 0 宽，画不出来 —— 而块流有两份
+ *   （blocks_full_ 与只筛过括号的 blocks_），从其中一份判"文档有没有内容"会在括号不显示时
+ *   把光标整条判掉（见 TRAPS 228）。
  */
 bool EditorEngine::caretInsertable() const {
-    // 文档模式没有落点限制。这里刻意不参数化任何块流：空文档的 caretRectPx 本来就给 0 宽，
-    //   画不出来 —— 而块流有两份（blocks_full_ 与只筛过括号的 blocks_），从其中一份判
-    //   "文档有没有内容"会在括号不显示时把光标整条判掉。
-    if (mode_ == EditMode::Document) return true;
-    if (mode_ != EditMode::Form) return false;  // 只读（以及将来新增的模式）：一律不画
     const FlowPos f = caretFlowPos();
     if (f < 0) return false;
-    for (int i = 0; i < controls_.size(); ++i) {
-        FlowPos lo = 0;
-        FlowPos hi = 0;
-        if (!controlContentSpan(i, &lo, &hi)) continue;
-        if (f < lo || f > hi) continue;
-        // 可编辑性是交集：把光标包住的每一层都不能是只读的。
-        for (int k = i; k >= 0; k = controls_.at(k).parent) {
-            if (controls_.at(k).read_only) return false;
-        }
-        return true;
-    }
-    return false;
+    return insertableAtFlow(f);
 }
 
 /**
@@ -1222,18 +1254,27 @@ bool EditorEngine::confineCaret(FlowPos before) {
         FlowPos b = 0;
         if (!controlContentSpan(i, &a, &b)) continue;
         if (before < a || before > b) continue;
-        // 嵌套时取最内层（区间最短的那一个）：夹进外层会把光标带到两层之间的空档里。
-        if (!found || (b - a) < (hi - lo)) {
+        // 嵌套时取最内层（起点最大者，同起点取跨度短的）：夹进外层会把光标带到两层之间的
+        //   空档里，而那个空档下一格还是走不进去。
+        if (!found || a > lo || (a == lo && (b - a) < (hi - lo))) {
             lo = a;
             hi = b;
             found = true;
         }
     }
-    if (!found) return false;
+    if (!found) {
+        // 这一步之前就不在任何控件里（停在正文）：整下不动 —— 表单模式下正文没有插入点，
+        //   方向键不该把它带进去。
+        if (now == before) return false;
+        if (!caret_.setCaretAtFlow(before)) return false;
+        return false;
+    }
     FlowPos target = now;
     if (target < lo) target = lo;
     if (target > hi) target = hi;
-    if (target == now) return now != before;
+    // 夹出来的落点仍可能不可插入：区间中间嵌着一层只读控件时，夹回外层区间还是落在只读的
+    //   内层里。那种情形整下不动 —— 一步之前的那个位置一定是可插入的。
+    if (!insertableAtFlow(target)) target = before;
     if (!caret_.setCaretAtFlow(target)) return false;
     return target != before;
 }

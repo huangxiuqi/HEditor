@@ -2209,8 +2209,10 @@ test.describe('编辑面', () => {
       await probe.read(key('痛'));
       const blk1 = await probe.read('return D.blockedEdits();');
       const itb = await items();
-      check('★ 点嵌套里的只读内层 → 归属是内层、打字被拒（外层可编辑也改不动它）',
-                inB.f === 1 && blk1 === blk0 + 1 && JSON.stringify(itb[1]) === '[20,26]',
+      // 只读控件里没有插入点：点它就跟点正文一样不落光标（选区另算，那是另一条线）。
+      //   这一条同时压住"外层可编辑不能替内层作证" —— 归属取最内层才判得出不可插入。
+      check('★ 点嵌套里的只读内层 → 光标不进（插入点只在能打字的地方），打字被拒',
+                inB.f !== 1 && blk1 === blk0 + 1 && JSON.stringify(itb[1]) === '[20,26]',
                 `归属 ${inB.f} ｜ blocked ${blk0}→${blk1} ｜ #1 ${JSON.stringify(itb[1])}`);
 
       const mA = await fieldSpot(0);
@@ -2227,7 +2229,10 @@ test.describe('编辑面', () => {
 
     log.section('[14.6] 真实鼠标横扫：命中测试说什么，点击就落在什么上（含无死区）');
     {
+      // 这一节量的是坐标链（CDP 取整、y 折算、簇边界），与落点策略无关：表单模式下控件外
+      //   的采样点本来就该被拒（插入点只在能打字的地方），在这里跑会把两件事混成一条。
       await load(2);
+      await probe.read('return await SET_MODE(0);');
       const y = await probe.read(`
         const q = D.controls().items[0].rects[0];
         return q.y + q.h / 2;`);
