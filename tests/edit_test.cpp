@@ -20,7 +20,10 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -461,23 +464,204 @@ LayoutResult layoutBlocksOnly(const std::vector<std::string>& fontPaths,
 }
 
 /**
- * 只跑点名的几节：HEDITOR_TEST_ONLY="15,29" 就只跑 15 与 29。
+ * 分节表：id、是否性能节、权重。
  *
- * 为什么不是"分片并行"：量过了，这台机器上四片并行只快 20%（整跑 50 s → bash 并行 39 s、
- *   起进程那套 54 s），因为单节是内存与光栅重活，多进程互相抢带宽；而分片还要求
- *   "节之间没有隐含依赖"，多一层要维护的假设。真正常用的是另一件事：改哪节跑哪节，
- *   一秒出结果，最后再整跑一次。
+ * 性能节只含耗时比值判据（增量对全量、页指纹对整篇）。它们会被同机上的其它负载顶翻，
+ * 所以不参与分片，只由 HEDITOR_TEST_PERF=1 选中，ctest 里那条用例带 RUN_SERIAL。
  *
- * 判据：不设变量时逐节全跑，与没有这个开关时逐条相同（整跑 1529 条不许变）。
+ * 权重的一个单位约合 250 ms（HEDITOR_TEST_TIMES=1 跑一遍就能重新量出来，别靠猜）。
+ * 只用来把分片切匀：改了一节让它明显变慢，把这里的数调大。
+ *
+ * 表与代码必须一一对应，收尾时对账（见 checkSectionTable）—— 新加的节忘了登记会让它
+ * 永远不跑，删掉的节忘了注销会让分片永远跑不到它。
+ */
+struct SectionInfo {
+    int id;
+    bool perf;
+    int weight;
+};
+
+const SectionInfo kSections[] = {
+    {1, false, 1},   {2, false, 1},   {3, false, 6},   {4, false, 3},   {5, false, 1},
+    {6, false, 1},   {7, false, 3},   {8, false, 3},   {9, false, 3},   {10, false, 7},
+    {11, false, 11}, {12, false, 3},  {13, false, 3},  {14, false, 3},  {15, false, 27},
+    {16, false, 19}, {17, false, 43}, {18, false, 24}, {19, false, 6},  {21, false, 4},
+    {22, false, 3},  {23, false, 53}, {24, false, 5},  {25, false, 25}, {26, false, 3},
+    {27, false, 25}, {28, false, 6},  {29, false, 55}, {30, false, 3},  {31, false, 3},
+    {32, false, 3},  {33, false, 4},  {34, false, 9},  {35, false, 8},  {36, false, 3},
+    {37, false, 3},  {38, false, 8},  {39, false, 2},  {40, false, 3},  {41, false, 3},
+    {42, false, 3},  {43, false, 3},  {44, false, 9},  {45, false, 6},  {46, false, 3},
+    {47, false, 4},  {48, false, 4},  {49, false, 3},  {50, false, 3},  {51, false, 4},
+    {52, false, 4},  {53, false, 9},  {54, false, 3},  {55, false, 3},  {56, false, 7},
+    {57, false, 4},  {58, false, 3},  {59, false, 3},  {60, false, 6},  {61, false, 9},
+    {62, false, 9},  {63, false, 3},  {64, false, 3},  {65, false, 3},  {66, false, 3},
+    {67, false, 10}, {68, false, 4},  {69, false, 3},  {70, false, 10}, {71, false, 6},
+    {72, false, 10}, {73, false, 9},  {74, false, 3},  {75, false, 3},  {76, false, 3},
+    {77, false, 3},  {78, true, 1},
+};
+
+/**
+ * 代码里问过的节（不管选不选中），收尾时与表对账。
+ *
+ * @return 可写的集合
+ */
+std::set<int>& requestedSections() {
+    static std::set<int> ids;
+    return ids;
+}
+
+/**
+ * 每一节实际花掉的时间，只在 HEDITOR_TEST_TIMES=1 时打印。
+ *
+ * @return 可写的时间表（毫秒）
+ */
+std::map<int, double>& sectionMs() {
+    static std::map<int, double> ms;
+    return ms;
+}
+
+/**
+ * 解析分片开关 "i/n"：第 i 片（0 起）共 n 片。
+ *
+ * @param text 开关文本
+ * @param index 输出：片号
+ * @param count 输出：片数
+ * @return 文本合法且 0 <= index < count
+ */
+bool parseShard(const std::string& text, int* index, int* count) {
+    const size_t slash = text.find('/');
+    if (slash == std::string::npos) return false;
+    const int i = std::atoi(text.substr(0, slash).c_str());
+    const int n = std::atoi(text.substr(slash + 1).c_str());
+    if (n <= 0 || i < 0 || i >= n) return false;
+    *index = i;
+    *count = n;
+    return true;
+}
+
+/**
+ * 第 index 片（共 count 片）：按权重从大到小贪心装进当前最轻的一片。
+ *
+ * 不用 id 取模：节号与体量相关（表格那几节都靠后、都重），实测取模的最大片是最小片的两倍。
+ *
+ * @param index 片号，0 起
+ * @param count 片数
+ * @return 这一片要跑的节
+ */
+std::set<int> shardOf(int index, int count) {
+    std::vector<const SectionInfo*> items;
+    for (const SectionInfo& s : kSections) {
+        if (!s.perf) items.push_back(&s);
+    }
+    std::stable_sort(items.begin(), items.end(), [](const SectionInfo* a, const SectionInfo* b) {
+        return a->weight > b->weight;
+    });
+    std::vector<int> load(static_cast<size_t>(count), 0);
+    std::vector<std::set<int>> bins(static_cast<size_t>(count));
+    for (const SectionInfo* s : items) {
+        int lightest = 0;
+        for (int i = 1; i < count; ++i) {
+            if (load[static_cast<size_t>(i)] < load[static_cast<size_t>(lightest)]) lightest = i;
+        }
+        load[static_cast<size_t>(lightest)] += s->weight;
+        bins[static_cast<size_t>(lightest)].insert(s->id);
+    }
+    return bins[static_cast<size_t>(index)];
+}
+
+/**
+ * 造选中的集合。开关按优先级：ONLY 点名、PERF 只跑性能节、SHARD 取一片，都不设就跑全部
+ * 非性能节。
+ *
+ * @return 这一轮要跑的节
+ */
+std::set<int> chooseSections() {
+    std::set<int> out;
+    const char* only = std::getenv("HEDITOR_TEST_ONLY");
+    if (only != nullptr && *only != '\0') {
+        const std::string list = "," + std::string(only) + ",";
+        for (const SectionInfo& s : kSections) {
+            if (list.find("," + std::to_string(s.id) + ",") != std::string::npos) out.insert(s.id);
+        }
+        return out;
+    }
+    const char* perf = std::getenv("HEDITOR_TEST_PERF");
+    if (perf != nullptr && *perf != '\0' && std::strcmp(perf, "0") != 0) {
+        for (const SectionInfo& s : kSections) {
+            if (s.perf) out.insert(s.id);
+        }
+        return out;
+    }
+    const char* shard = std::getenv("HEDITOR_TEST_SHARD");
+    int index = 0;
+    int count = 1;
+    if (shard != nullptr && parseShard(shard, &index, &count) && count > 1) {
+        return shardOf(index, count);
+    }
+    for (const SectionInfo& s : kSections) {
+        if (!s.perf) out.insert(s.id);
+    }
+    return out;
+}
+
+/**
+ * 这一节跑不跑，并记下它的耗时。
+ *
+ * 每节开头调两次（标题一次、正文一次），只有第一次换 id 时才结上一节的账。
+ *
+ * @param n 节号
+ * @return 这一节是否被选中
  */
 bool runSection(int n) {
-    static const std::string only = [] {
-        const char* v = std::getenv("HEDITOR_TEST_ONLY");
-        return std::string(v ? v : "");
-    }();
-    if (only.empty()) return true;
-    const std::string list = "," + only + ",";
-    return list.find("," + std::to_string(n) + ",") != std::string::npos;
+    static const std::set<int> selected = chooseSections();
+    static int previous = -1;
+    static std::chrono::steady_clock::time_point mark = std::chrono::steady_clock::now();
+    const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+    if (n != previous) {
+        if (previous >= 0) {
+            sectionMs()[previous] = std::chrono::duration<double, std::milli>(now - mark).count();
+        }
+        previous = n;
+        mark = now;
+    }
+    requestedSections().insert(n);
+    return selected.count(n) > 0;
+}
+
+/**
+ * 分节表与代码对账。
+ *
+ * 两边任何一边多出来都是漂移：代码里新加的节没登记，分片永远不跑它；表里留着已删的节，
+ * 分片永远跑不到它。这一条放在汇总之前，所以它也计入断言数。
+ */
+void checkSectionTable() {
+    std::set<int> table;
+    for (const SectionInfo& s : kSections) table.insert(s.id);
+    std::string missing;
+    std::string phantom;
+    for (int id : requestedSections()) {
+        if (table.count(id) == 0) missing += " " + std::to_string(id);
+    }
+    for (int id : table) {
+        if (requestedSections().count(id) == 0) phantom += " " + std::to_string(id);
+    }
+    expectTrue(missing.empty(), "分节表：代码里问过的每一节都登记在表里（缺：" + missing + "）");
+    expectTrue(phantom.empty(), "分节表：表里每一节都有对应的代码（多：" + phantom + "）");
+}
+
+/**
+ * 每节实际耗时，按 HEDITOR_TEST_TIMES=1 打印；填权重时用它，不靠猜。
+ */
+void printSectionTimes() {
+    const char* on = std::getenv("HEDITOR_TEST_TIMES");
+    if (on == nullptr || *on == '\0' || std::strcmp(on, "0") == 0) return;
+    std::printf("\n每节耗时（毫秒，含两次 runSection 之间的全部工作）：\n");
+    double total = 0.0;
+    for (const auto& kv : sectionMs()) {
+        total += kv.second;
+        std::printf("  [%d] %.0f\n", kv.first, kv.second);
+    }
+    std::printf("  合计 %.0f ms\n", total);
 }
 
 }  // namespace
@@ -540,38 +724,42 @@ int main() {
         expectTrue(clusterCeil(noSentinel, 6) == 6, "无哨兵时 ceil 返回入参本身（调用方据此退化）");
     }
 
-    // 引擎准备
+    // 共享引擎：第 3、5、6 节接着在它上面做。只在这几节被选中时才装载 —— 三张字体加
+    //   一次整页呈现是每进程 2.5 s 的固定开销，分片跑时不该为别的节白付。
     EditorEngine e;
-    if (!e.init({cjkPath, mnPath, latinPath})) {
-        std::fprintf(stderr, "字体加载失败：%s\n", cjkPath.c_str());
-        return 2;
-    }
-
     EngineConfig cfg;
     cfg.zoom = 1.5f;
-    e.setConfig(cfg);
+    // 首次呈现的两个数：第 3、6 节的像素判据拿它们当分母，所以在块外留一份。
+    long long framePixels = 0;
+    long long fullPaint = 0;
+    if (runSection(3) || runSection(5) || runSection(6)) {
+        if (!e.init({cjkPath, mnPath, latinPath})) {
+            std::fprintf(stderr, "字体加载失败：%s\n", cjkPath.c_str());
+            return 2;
+        }
+        e.setConfig(cfg);
 
-    BlockSpec doc;
-    doc.font_index = 0;  // CJK
-    doc.size_pt = 12.0f;
-    doc.wm = WritingMode::HorizontalTB();
-    doc.line_factor = 1.75f;
-    doc.language = "zh";
-    doc.setText(
-        "\xE6\x82\xA3\xE8\x80\x85\xE4\xB8\xBB\xE8\xAF\x89\xEF\xBC\x9A"
-        "\xE5\x8F\x8D\xE5\xA4\x8D\xE5\xBF\x83\xE6\x82\xB8"
-        "3\xE5\xA4\xA9\xE3\x80\x82");  // 患者主诉：反复心悸3天。
-    loadBlocks(e, {doc});
-    e.relayout();
-    e.repaint();
+        BlockSpec doc;
+        doc.font_index = 0;  // CJK
+        doc.size_pt = 12.0f;
+        doc.wm = WritingMode::HorizontalTB();
+        doc.line_factor = 1.75f;
+        doc.language = "zh";
+        doc.setText(
+            "\xE6\x82\xA3\xE8\x80\x85\xE4\xB8\xBB\xE8\xAF\x89\xEF\xBC\x9A"
+            "\xE5\x8F\x8D\xE5\xA4\x8D\xE5\xBF\x83\xE6\x82\xB8"
+            "3\xE5\xA4\xA9\xE3\x80\x82");  // 患者主诉：反复心悸3天。
+        loadBlocks(e, {doc});
+        e.relayout();
+        e.repaint();
 
-    const long long framePixels =
-        static_cast<long long>(e.editStats().frame_w) * e.editStats().frame_h;
-    const long long fullPaint = e.editStats().repainted_pixels;
-    std::printf("     单页文档：帧 %d × %d = %.2f M 像素；首次全量写入 %.2f M 像素\n",
-                e.editStats().frame_w, e.editStats().frame_h,
-                static_cast<double>(framePixels) / 1e6, static_cast<double>(fullPaint) / 1e6);
-    expectTrue(fullPaint > framePixels / 2, "首次呈现确实是全量（写入量 ≥ 半帧）");
+        framePixels = static_cast<long long>(e.editStats().frame_w) * e.editStats().frame_h;
+        fullPaint = e.editStats().repainted_pixels;
+        std::printf("     单页文档：帧 %d × %d = %.2f M 像素；首次全量写入 %.2f M 像素\n",
+                    e.editStats().frame_w, e.editStats().frame_h,
+                    static_cast<double>(framePixels) / 1e6, static_cast<double>(fullPaint) / 1e6);
+        expectTrue(fullPaint > framePixels / 2, "首次呈现确实是全量（写入量 ≥ 半帧）");
+    }
 
     if (runSection(3)) std::printf("\n[3] 敲字：文档真的变了、光标跟着走\n");
     if (runSection(3)) {
@@ -2417,51 +2605,13 @@ int main() {
         expectTrue(bad == 0, "★ 60 步随机编辑，每一步的增量排版都等于全量");
         expectTrue(incr >= 55, "★ 绝大多数步子走的是增量（只有脏段是第一段时才只能全量）");
 
-        // 相对耗时：与全量在同一次测量里比，不依赖机器绝对速度。
-        //
-        // 单次 layout_ms 的噪声很大（系统调度与缓存抖动都能差出一倍以上），所以两边各测
-        // 5 次取中位数再比 —— 报出去的绝对值也必须是稳的，否则它只是一串好看的数字。
-        // 全量的求法：没有脏段时 relayout() 按全量处理（见 engine/engine.h 的说明）。
-        auto median = [](std::vector<double> v) {
-            std::sort(v.begin(), v.end());
-            return v[v.size() / 2];
-        };
-        std::vector<double> full_s, tail_s, mid_s;
-        for (int i = 0; i < 5; ++i) {
-            e.relayout();
-            full_s.push_back(e.stats().layout_ms);
-            e.setCaret(195 - i, 5);  // 换着段敲，保证每次都是真编辑
-            e.typeTextAndRender("\xE6\xB5\x8B");
-            tail_s.push_back(e.stats().layout_ms);
-        }
-        for (int i = 0; i < 5; ++i) {
-            e.setCaret(100 - i, 5);
-            e.typeTextAndRender("\xE6\xB5\x8B");
-            mid_s.push_back(e.stats().layout_ms);
-        }
-        const double full_ms = median(full_s);
-        const double tail_ms = median(tail_s);
-        const double mid_ms = median(mid_s);
-        std::printf(
-            "     中位数：全量重排 %.3f ms ｜ 尾部敲字 %.3f ms（%.1f%%）｜ 中部敲字 %.3f ms（%.1f%%）\n",
-            full_ms, tail_ms, full_ms > 0.0 ? 100.0 * tail_ms / full_ms : 0.0, mid_ms,
-            full_ms > 0.0 ? 100.0 * mid_ms / full_ms : 0.0);
-        // 文档太小时全量只要零点几毫秒，比值会被计时分辨率主导 —— 那时退成"更快"。
-        // 宁可少判一条，也不要让"机器越快越容易假红"。
-        if (full_ms > 1.0) {
-            expectTrue(tail_ms * 5.0 < full_ms, "★ 靠后敲字：增量耗时不到全量的 20%");
-        } else {
-            expectTrue(tail_ms < full_ms, "靠后敲字的增量耗时小于全量（全量不足 1ms，比值不判）");
-        }
-        // 中部敲字同样走快路（行结构没变）→ 成本与尾部一样接近免费。
-        // 这条同时钉住"靠位置换性能"的假象：中部与尾部都在 10% 以内才算数。
-        expectTrue(mid_ms < full_ms * 0.6, "★ 中部敲字与尾部一样便宜（不是靠离文档末尾近）");
+        // 耗时比值（尾部敲字对全量、中部敲字对全量、后缀平移对续排）不在这里判：
+        //   它们会被同机上的其它负载顶翻，搬到第 78 节，只由 HEDITOR_TEST_PERF=1 选中。
 
-        // 端到端成本：排版 + 统计同步 + 页指纹 + 上屏。
+        // 页指纹的增量化：整篇重算 vs 只算脏段覆盖的那几页。
         //
-        // layout_ms 只量排版本身，看不到另外三项 —— 而用户感觉到的是这一整条。
-        // 所以这里按真实的调用方式再量一遍（typeTextAndRender 内部就是
-        // 编辑 + 重排 + 呈现）。每次测完把文档改回原样，恢复不参与测量。
+        // 端到端（编辑 + 重排 + 上屏）的分段计时不在这里量：它同样是耗时判据，搬到第 78 节。
+        // 这里只留页数这一组结构量 —— 脏页数是确定的，不受调度影响。
         {
             const std::vector<BlockSpec> pristine = e.blocks();
             auto restore = [&]() {
@@ -2469,44 +2619,8 @@ int main() {
                 e.relayout();
                 e.repaint();
             };
-            auto e2e = [&](int para, size_t off, const std::string& text) {
-                e.setCaret(para, static_cast<size_t>(off));
-                const auto t0 = std::chrono::steady_clock::now();
-                e.typeTextAndRender(text);
-                const auto t1 = std::chrono::steady_clock::now();
-                return std::chrono::duration<double, std::milli>(t1 - t0).count();
-            };
             std::string wrap_text;
             for (int i = 0; i < 40; ++i) wrap_text += "\xE6\xB5\x8B";  // 40 个汉字，必定撑出一行
-
-            std::vector<double> v_full, v_tail, v_mid, v_wrap_tail, v_wrap_mid;
-            for (int i = 0; i < 5; ++i) {
-                const auto f0 = std::chrono::steady_clock::now();
-                e.relayout();
-                e.repaint();
-                const auto f1 = std::chrono::steady_clock::now();
-                v_full.push_back(std::chrono::duration<double, std::milli>(f1 - f0).count());
-
-                v_tail.push_back(e2e(195 - i, 5, "\xE6\xB5\x8B"));
-                restore();
-                v_mid.push_back(e2e(100 - i, 5, "\xE6\xB5\x8B"));
-                restore();
-                v_wrap_tail.push_back(e2e(195 - i, 5, wrap_text));
-                restore();
-                v_wrap_mid.push_back(e2e(100 - i, 5, wrap_text));
-                restore();
-            }
-            const double e_full = median(v_full), e_tail = median(v_tail), e_mid = median(v_mid);
-            const double e_wt = median(v_wrap_tail), e_wm = median(v_wrap_mid);
-            std::printf(
-                "     端到端：全量 %.3f ms ｜ 尾部敲 1 字 %.3f ms（%.1f%%）｜ 中部敲 1 字 %.3f ms"
-                "（%.1f%%）\n",
-                e_full, e_tail, 100.0 * e_tail / e_full, e_mid, 100.0 * e_mid / e_full);
-            std::printf(
-                "             撑出一行（后缀要跟着动）：尾部 %.3f ms（%.1f%%）｜ "
-                "中部 %.3f ms（%.1f%%）\n",
-                e_wt, 100.0 * e_wt / e_full, e_wm, 100.0 * e_wm / e_full);
-            expectTrue(e_full > 0.0, "前提：端到端全量可以量");
 
             // 页指纹的增量化：整篇重算 vs 只算脏段覆盖的那几页。
             // 判据落在页数（EditStats::dirty_page_count：内容指纹变了、需要重画的页数），
@@ -2564,73 +2678,8 @@ int main() {
             expectTrue(dp_splice <= dp_shift && dp_shift < total_pages,
                        "★ 平移复用：只重算脏段及其后的页（少于整篇，但省不了那么多）");
 
-            // 分段耗时：一次编辑拆成 编辑 / 重排（排版 + 页指纹）/ 呈现 三段。
-            // 这条打印存在的理由：端到端时间里"排版"只占几个百分点，不拆开就看不出钱花在哪
-            // （实测呈现占 80% 以上：重画一页的字形是大头，脏页多的时候更明显）。
-            for (int i = 0; i < 2; ++i) {
-                const char* tag =
-                    (i == 0) ? "尾部敲 1 字（后缀原样复用）" : "中部撑出一行（后缀平移复用）";
-                e.setCaret(i == 0 ? 195 : 100, 5);
-                const auto a0 = std::chrono::steady_clock::now();
-                e.typeTextUtf8(i == 0 ? "\xE6\xB5\x8B" : wrap_text);
-                const auto a1 = std::chrono::steady_clock::now();
-                e.relayout();
-                const auto a2 = std::chrono::steady_clock::now();
-                e.repaint();
-                const auto a3 = std::chrono::steady_clock::now();
-                const EditStats d = e.editStats();
-                const EngineStats g = e.stats();
-                std::printf(
-                    "     分段：%s ｜ 编辑 %.3f ｜ 重排 %.3f（排版 %.3f + 页指纹 %.3f）｜ 呈现 "
-                    "%.3f（贴图 %.3f 填 %.3f 字形 %.3f）｜ 脏页 %d 重画页 %d\n",
-                    tag, std::chrono::duration<double, std::milli>(a1 - a0).count(),
-                    std::chrono::duration<double, std::milli>(a2 - a1).count(), d.layout_ms,
-                    g.page_fp_ms, std::chrono::duration<double, std::milli>(a3 - a2).count(),
-                    g.paint_present_ms, g.paint_fill_ms, g.paint_glyph_ms, d.dirty_page_count,
-                    d.repainted_pages);
-                restore();
-            }
-
-            // 平移复用省掉了什么：同一个编辑，后缀里塞一个竖排段就把平移路径关掉，
-            // 于是后缀必须真重排。两边各测 3 次取最小值（最小值对负载尖峰最稳），
-            // 报出的两个数就是"后缀重排"与"后缀平移"的对照。
-            std::vector<BlockSpec> with_vertical = pristine;
-            {
-                BlockSpec v;
-                v.font_index = 0;
-                v.size_pt = 14.0f;
-                v.line_factor = 1.9f;
-                v.wm = WritingMode::VerticalRL();
-                v.language = "zh";
-                v.setText("附：本页为竖排附注，与上面的横排正文无关。");
-                with_vertical.push_back(std::move(v));
-            }
-            std::vector<double> v_shift, v_resume;
-            for (int i = 0; i < 3; ++i) {
-                e.setCaret(100, 5);
-                e.typeTextUtf8(wrap_text);
-                const auto s0 = std::chrono::steady_clock::now();
-                e.relayout();
-                const auto s1 = std::chrono::steady_clock::now();
-                v_shift.push_back(std::chrono::duration<double, std::milli>(s1 - s0).count());
-                restore();
-
-                loadBlocks(e, with_vertical);
-                e.relayout();
-                e.repaint();
-                e.setCaret(100, 5);
-                e.typeTextUtf8(wrap_text);
-                const auto r0 = std::chrono::steady_clock::now();
-                e.relayout();
-                const auto r1 = std::chrono::steady_clock::now();
-                v_resume.push_back(std::chrono::duration<double, std::milli>(r1 - r0).count());
-                restore();
-            }
-            const double shift_ms = minOf3(v_shift), resume_ms = minOf3(v_resume);
-            std::printf("     后缀 100 段：平移复用 %.3f ms ｜ 续排重排 %.3f ms（%.0f%%）\n",
-                        shift_ms, resume_ms, 100.0 * shift_ms / std::max(resume_ms, 1e-9));
-            expectTrue(shift_ms * 1.5 < resume_ms,
-                       "★ 后缀平移复用比续排重排快 1.5 倍以上（断行与字形放置全省掉）");
+            // 分段耗时（编辑 / 重排 / 呈现）与"平移复用比续排重排快多少"同样是耗时判据，
+            //   一并搬到第 78 节。
         }
 
         // 边界：脏段就是第 0 段（没有前缀），但后缀仍然可以整块搬回 ——
@@ -9021,10 +9070,11 @@ int main() {
         expectTrue(e45.auditLayout() == 0, "撤销之后仍与整篇重排逐字段一致");
     }
 
+    if (runSection(77)) std::printf("\n[77] 表格后面那个空段落：点得到、放得下光标\n");
     // 表格后面那个空段落（Word 里那个 ¶）：它要能被点到、能放光标。
     //   形状是"表格 + 只含一枚段落标记的段落"—— 示例文书里表格下面就是这个，
     //   而它与表格最后一行只隔一个内边距，命中容易落到表格上。
-    {
+    if (runSection(77)) {
         EditorEngine e47;
         expectTrue(e47.init({cjkPath, mnPath, latinPath}), "引擎初始化");
         EngineConfig c47;
@@ -13157,6 +13207,173 @@ int main() {
         expectTrue(!m1 && c4 == "1/2",
                    "★ 从中层内容起点右移：下一格是只读内层 → 不动（实际 " + c4 + "）");
     }
+
+    if (runSection(78)) std::printf("\n[78] 性能：增量对全量的耗时比（只判比值，独占跑）\n");
+    if (runSection(78)) {
+        // 这一节只判比值：分子分母来自同一次测量，机器快慢互相抵消。绝对值会被同机上的
+        //   其它负载顶翻（同一份代码实测能从 0.5 翻到 0.9 ms），所以只打印、不断言。
+        // 内容与第 15 节同源，只是那几段计时搬到了这里 —— 日常全量不再为它们付时间，
+        //   也就不会因为隔壁在跑别的东西而变红。
+        EditorEngine e;
+        if (!e.init({cjkPath, mnPath, latinPath})) {
+            std::fprintf(stderr, "字体加载失败\n");
+            return 2;
+        }
+        EngineConfig c;
+        c.zoom = 1.0f;
+        e.setConfig(c);
+
+        const int kParas = 200;
+        std::vector<BlockSpec> doc;
+        for (int i = 0; i < kParas; ++i) {
+            BlockSpec b;
+            b.font_index = 0;
+            b.size_pt = 14.0f;
+            b.line_factor = 1.85f;
+            b.space_after_pt = 6.0f;
+            b.language = "zh";
+            b.setText("第 " + std::to_string(i + 1) +
+                      " 次病程记录：患者诉晨起后心悸明显，持续约十分钟，休息后缓解，"
+                      "未见黑矇与晕厥。");
+            doc.push_back(std::move(b));
+        }
+        loadBlocks(e, doc);
+        e.relayout();
+        e.repaint();
+        expectTrue(e.editStats().layout_was_full, "前提：首次排版是全量（整篇都脏）");
+
+        // 一、排版本身：全量、尾部敲字、中部敲字各测 5 次取中位数。
+        //   单次 layout_ms 的噪声很大（系统调度与缓存抖动都能差出一倍以上），
+        //   所以两边各测 5 次取中位数再比 —— 报出去的绝对值也必须是稳的。
+        //   全量的求法：没有脏段时 relayout() 按全量处理（见 engine/engine.h 的说明）。
+        auto median = [](std::vector<double> v) {
+            std::sort(v.begin(), v.end());
+            return v[v.size() / 2];
+        };
+        std::vector<double> full_s, tail_s, mid_s;
+        for (int i = 0; i < 5; ++i) {
+            e.relayout();
+            full_s.push_back(e.stats().layout_ms);
+            e.setCaret(195 - i, 5);  // 换着段敲，保证每次都是真编辑
+            e.typeTextAndRender("\xE6\xB5\x8B");
+            tail_s.push_back(e.stats().layout_ms);
+        }
+        for (int i = 0; i < 5; ++i) {
+            e.setCaret(100 - i, 5);
+            e.typeTextAndRender("\xE6\xB5\x8B");
+            mid_s.push_back(e.stats().layout_ms);
+        }
+        const double full_ms = median(full_s);
+        const double tail_ms = median(tail_s);
+        const double mid_ms = median(mid_s);
+        std::printf(
+            "     中位数：全量重排 %.3f ms ｜ 尾部敲字 %.3f ms（%.1f%%）｜ 中部敲字 %.3f ms"
+            "（%.1f%%）\n",
+            full_ms, tail_ms, full_ms > 0.0 ? 100.0 * tail_ms / full_ms : 0.0, mid_ms,
+            full_ms > 0.0 ? 100.0 * mid_ms / full_ms : 0.0);
+        // 文档太小时全量只要零点几毫秒，比值会被计时分辨率主导 —— 那时退成"更快"。
+        // 宁可少判一条，也不要让"机器越快越容易假红"。
+        if (full_ms > 1.0) {
+            expectTrue(tail_ms * 5.0 < full_ms, "★ 靠后敲字：增量耗时不到全量的 20%");
+        } else {
+            expectTrue(tail_ms < full_ms, "靠后敲字的增量耗时小于全量（全量不足 1ms，比值不判）");
+        }
+        // 中部敲字同样走快路（行结构没变）→ 成本与尾部一样接近免费。
+        // 这条同时钉住"靠位置换性能"的假象：中部与尾部都在 10% 以内才算数。
+        expectTrue(mid_ms < full_ms * 0.6, "★ 中部敲字与尾部一样便宜（不是靠离文档末尾近）");
+
+        // 二、端到端：排版 + 统计同步 + 页指纹 + 上屏。
+        //   layout_ms 只量排版本身，看不到另外三项 —— 而用户感觉到的是这一整条。
+        //   每次测完把文档改回原样，恢复不参与测量。
+        const std::vector<BlockSpec> pristine = e.blocks();
+        auto restore = [&]() {
+            loadBlocks(e, pristine);
+            e.relayout();
+            e.repaint();
+        };
+        auto e2e = [&](int para, size_t off, const std::string& text) {
+            e.setCaret(para, off);
+            const auto t0 = std::chrono::steady_clock::now();
+            e.typeTextAndRender(text);
+            const auto t1 = std::chrono::steady_clock::now();
+            return std::chrono::duration<double, std::milli>(t1 - t0).count();
+        };
+        std::string wrap_text;
+        for (int i = 0; i < 40; ++i) wrap_text += "\xE6\xB5\x8B";  // 40 个汉字，必定撑出一行
+
+        std::vector<double> v_full, v_tail, v_mid, v_wrap_tail, v_wrap_mid;
+        for (int i = 0; i < 5; ++i) {
+            const auto f0 = std::chrono::steady_clock::now();
+            e.relayout();
+            e.repaint();
+            const auto f1 = std::chrono::steady_clock::now();
+            v_full.push_back(std::chrono::duration<double, std::milli>(f1 - f0).count());
+
+            v_tail.push_back(e2e(195 - i, 5, "\xE6\xB5\x8B"));
+            restore();
+            v_mid.push_back(e2e(100 - i, 5, "\xE6\xB5\x8B"));
+            restore();
+            v_wrap_tail.push_back(e2e(195 - i, 5, wrap_text));
+            restore();
+            v_wrap_mid.push_back(e2e(100 - i, 5, wrap_text));
+            restore();
+        }
+        const double e_full = median(v_full), e_tail = median(v_tail), e_mid = median(v_mid);
+        const double e_wt = median(v_wrap_tail), e_wm = median(v_wrap_mid);
+        std::printf(
+            "     端到端：全量 %.3f ms ｜ 尾部敲 1 字 %.3f ms（%.1f%%）｜ 中部敲 1 字 %.3f ms"
+            "（%.1f%%）\n",
+            e_full, e_tail, 100.0 * e_tail / e_full, e_mid, 100.0 * e_mid / e_full);
+        std::printf(
+            "             撑出一行（后缀要跟着动）：尾部 %.3f ms（%.1f%%）｜ 中部 %.3f ms"
+            "（%.1f%%）\n",
+            e_wt, 100.0 * e_wt / e_full, e_wm, 100.0 * e_wm / e_full);
+        expectTrue(e_full > 0.0, "前提：端到端全量可以量");
+
+        // 三、后缀平移复用对续排重排：后缀里塞一个竖排段就把平移路径关掉，于是后缀必须
+        //   真重排。两边各测 3 次取最小值（最小值对负载尖峰最稳）。
+        std::vector<BlockSpec> with_vertical = pristine;
+        {
+            BlockSpec v;
+            v.font_index = 0;
+            v.size_pt = 14.0f;
+            v.line_factor = 1.9f;
+            v.wm = WritingMode::VerticalRL();
+            v.language = "zh";
+            v.setText("附：本页为竖排附注，与上面的横排正文无关。");
+            with_vertical.push_back(std::move(v));
+        }
+        std::vector<double> v_shift, v_resume;
+        for (int i = 0; i < 3; ++i) {
+            e.setCaret(100, 5);
+            e.typeTextUtf8(wrap_text);
+            const auto s0 = std::chrono::steady_clock::now();
+            e.relayout();
+            const auto s1 = std::chrono::steady_clock::now();
+            v_shift.push_back(std::chrono::duration<double, std::milli>(s1 - s0).count());
+            restore();
+
+            loadBlocks(e, with_vertical);
+            e.relayout();
+            e.repaint();
+            e.setCaret(100, 5);
+            e.typeTextUtf8(wrap_text);
+            const auto r0 = std::chrono::steady_clock::now();
+            e.relayout();
+            const auto r1 = std::chrono::steady_clock::now();
+            v_resume.push_back(std::chrono::duration<double, std::milli>(r1 - r0).count());
+            restore();
+        }
+        const double shift_ms = *std::min_element(v_shift.begin(), v_shift.end());
+        const double resume_ms = *std::min_element(v_resume.begin(), v_resume.end());
+        std::printf("     后缀 100 段：平移复用 %.3f ms ｜ 续排重排 %.3f ms（%.0f%%）\n", shift_ms,
+                    resume_ms, 100.0 * shift_ms / std::max(resume_ms, 1e-9));
+        expectTrue(shift_ms * 1.5 < resume_ms,
+                   "★ 后缀平移复用比续排重排快 1.5 倍以上（断行与字形放置全省掉）");
+    }
+
+    checkSectionTable();
+    printSectionTimes();
 
     std::printf("\n──────────────────────────────\n");
     std::printf("共 %d 项断言，失败 %d 项\n", g_checks, g_failures);

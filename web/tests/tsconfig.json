@@ -6,5 +6,11 @@
     "moduleResolution": "Bundler",
     "noEmit": true
   },
-  "include": ["./**/*.ts", "../playwright.config.ts", "../playwright.dist.config.ts"]
+  "include": [
+    "./**/*.ts",
+    "../playwright.config.ts",
+    "../playwright.dist.config.ts",
+    "../playwright.perf.config.ts",
+    "../playwright.dist.perf.config.ts"
+  ]
 }

@@ -133,17 +133,28 @@ function blitFrame(px, w) {}
   （`Common7\Tools\Microsoft.VisualStudio.DevShell.dll`）—— 跟开始菜单那个
   「Developer PowerShell for VS 2022」是同一件事，环境由 VS 自己算，仓库里没有一个版本号目录。
   **不需要也不再有 `CMakeUserPresets.json`。**
-- 原生：`cmake --workflow --preset native`（配置 + 构建 + 跑三个断言套件）。
-  只要构建 `cmake --build --preset native`；只要单测 `ctest --preset native`。
+- 原生：`cmake --workflow --preset native`（配置 + 构建 + 跑功能判据，四片并行）。
+  只要构建 `cmake --build --preset native`；只要单测 `ctest --preset native`
+  （四片并行，45~51 s）。耗时比值判据不在这轮里：改完排版或光栅单独跑
+  `ctest --preset native-perf`，它带 RUN_SERIAL，跑的时候机器上不该有别的活。
 - WASM：`cmake --workflow --preset wasm`（工具链取仓库内的 `.toolchain/emsdk`）。
 - 原生渲染出图（验证台要用）：`build/native/heditor_native.exe --out-dir out`。
 - 浏览器端测试（Playwright，TS）：`cd web && npm test`。默认跑 Vite 源码直连，
   改一行就能测，只有 Worker 壳需要预先构建（`pretest` 会做，不到一秒）；
   `npm run test:dist` 跑构建产物，那是验收基准。配置在 `web/playwright.config.ts`
-  与 `web/tests/support/config.ts`，判据在 `web/tests/specs/`。
-  十四份 spec 跑一遍：`demo` 5 个用例 / 47 条判据（含连页末尾的总高：可滚区跟着内容走、
+  与 `web/tests/support/config.ts`，判据在 `web/tests/specs/`，性能判据在 `web/tests/perf/`。
+  **trace 默认关**：它给每个 test 持续截图并抓 DOM 快照，实测让全部用例的耗时之和从
+  180 s 涨到 298 s。失败时仍有截图、报错与附件，要回放就设 `HEDITOR_TEST_TRACE=1` 重跑。
+  并行度默认 4（本机四个物理核）；六 worker 更慢，而且会把负载敏感的判据顶红。
+  性能判据单独一条命令：`npm run test:perf`（源码直连）或 `npm run test:dist:perf`
+  （构建产物，先跑过一次 `test:dist`），单 worker 独占。
+  十九份 spec 跑一遍：`demo` 5 个用例 / 47 条判据（含连页末尾的总高：可滚区跟着内容走、
   至少留一页）、`multi` 11、`saveload` 11、`input` 25、`diag` 39、
-  `error` 19、`stress` 69 步差分审计、`edit` 367 条、`clipboard` 11 条（复制粘贴的保真、
+  `error` 19、`stress` 69 步差分审计、
+  `edit-core` / `edit-form` / `edit-boundary` / `edit-sweep` / `edit-longdoc` /
+  `edit-fonts` / `edit-selection` 七份合起来 367 条（编辑面按域拆开，各自一个页面：
+  基准与键盘、表单控件、边界归属、边界总覆盖、长文档、字体按需读、选区与样式）、
+  `clipboard` 11 条（复制粘贴的保真、
   剪切、跨实例、键盘路径、撑长之后的滚动与画布）、`format` 14 个用例 / 49 条判据（字符格式落不落到标记上、
   幂等、只改选区那一段、回显取共同值、整段改字重之后增量排版等于全量、**改完格式画面必须
   重画**（比截图）、敲字沿用落点**左边**那一段 —— 格式段左边界取左边、右边界取它自己，两条互为反向）、`insert` 6 条
@@ -159,7 +170,7 @@ function blitFrame(px, w) {}
   旧的 `scripts/*_probe.mjs` 与
   `scripts/verify_web.ps1` 已删除，别再按那套入口跑。
 - 两个宿主的分工（详见 `docs/正式化架构与迁移路线.md` 4.6）：wasm 是交付物，
-  native 只做验证宿主，承担三个断言套件与内存布局诊断。据此有三条规则：
+  native 只做验证宿主，承担四套断言与内存布局诊断。据此有三条规则：
   **新功能不得只在 native 上实现**，否则它从宿主变成了第二个产品；
   逐像素判据只在同一构建内算数（native 与 wasm 的编译器、SIMD 与 CPU 路径不同），
   线上那一侧仍以浏览器端测试为准；

@@ -9,9 +9,13 @@
 ## 环境与基线
 
 - native：`.\scripts\msvc_env.ps1` → `cmake --build --preset native` →
-  `ctest --preset native` 4/4（约 200 s）。wasm：`cmake --build --preset wasm`
-  （tsc 是硬依赖，TRAPS 153）。单节调试 `HEDITOR_TEST_ONLY="70,72"`。
-- 浏览器判据 `cd web && npm test`（dev）/ `npm run test:dist`（验收），14 份 spec。
+  `ctest --preset native`（7 个用例四片并行，约 50 s）。耗时比值判据单独跑
+  `ctest --preset native-perf`（RUN_SERIAL，约 6 s）。wasm：`cmake --build --preset wasm`
+  （tsc 是硬依赖，TRAPS 153）。单节调试 `HEDITOR_TEST_ONLY="70,72"`；
+  `HEDITOR_TEST_SHARD="1/4"` 取一片，`HEDITOR_TEST_TIMES=1` 打印每节耗时（填权重要它）。
+- 浏览器判据 `cd web && npm test`（dev）/ `npm run test:dist`（验收），19 份 spec
+  （编辑面按域拆七份）。**trace 默认关**，要回放设 `HEDITOR_TEST_TRACE=1`；并行度 4。
+  性能判据在 `web/tests/perf/`，`npm run test:perf` / `test:dist:perf`，单 worker 独占。
   硬规则：引擎状态一次性求值（禁 `expect.poll`）、`channel:'chrome'`、
   **构建 wasm 与跑判据不并发**（198）、**跑判据期间不动 `web/`**（Vite 热重启）；
   临时诊断写 `tmp.spec.ts`，用完即删。改 wasm 后 `npm run build:worker`
@@ -26,7 +30,8 @@
 - 针对：改哪个 spec 就跑哪个（native 用 `HEDITOR_TEST_ONLY` 点名几节）；红了先看那一节。
 - **web 侧全量只跑 `npm run test:dist`**（验收口径，顺带重建产物），不再 dev、dist 各一遍；
   dev 只用来快速验单个 spec。同一轮改动跑第二遍全量必须有理由。
-- 时序类判据（edit [9] 的增量/全量比值）受负载影响，单跑 spec 更容易红，别为它改代码。
+- 耗时比值判据已独立成 perf（native 第 78 节 / web `tests/perf/`），跑它们时机器上不许
+  有别的活；红了先查负载，别为它改代码。
 
 ## 方向
 

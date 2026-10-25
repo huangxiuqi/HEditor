@@ -67,20 +67,32 @@
     {
       "name": "native",
       "configurePreset": "native",
+      "displayName": "功能判据：四片并行",
       "output": { "verbosity": "verbose", "outputOnFailure": true },
-      "execution": { "noTestsAction": "error" }
+      "execution": { "jobs": 4, "noTestsAction": "error" },
+      "filter": { "include": { "label": "functional" } }
+    },
+    {
+      "name": "native-perf",
+      "configurePreset": "native",
+      "displayName": "耗时比值判据：独占跑（改完排版或光栅再跑）",
+      "output": { "verbosity": "verbose", "outputOnFailure": true },
+      "execution": { "jobs": 1, "noTestsAction": "error" },
+      "filter": { "include": { "label": "perf" } }
     },
     {
       "name": "native-debug",
       "configurePreset": "native-debug",
+      "displayName": "功能判据：四片并行",
       "output": { "verbosity": "verbose", "outputOnFailure": true },
-      "execution": { "noTestsAction": "error" }
+      "execution": { "jobs": 4, "noTestsAction": "error" },
+      "filter": { "include": { "label": "functional" } }
     }
   ],
   "workflowPresets": [
     {
       "name": "native",
-      "displayName": "配置 + 构建 + 跑三个断言套件",
+      "displayName": "配置 + 构建 + 跑功能判据（四片并行）",
       "steps": [
         { "type": "configure", "name": "native" },
         { "type": "build", "name": "native" },

@@ -16,8 +16,11 @@
     "lint:comments": "python ../scripts/lint_comments.py",
     "pretest": "npm run build:worker",
     "test": "playwright test",
+    "pretest:perf": "npm run build:worker",
+    "test:perf": "playwright test -c playwright.perf.config.ts",
     "pretest:dist": "npm run build:app",
     "test:dist": "playwright test -c playwright.dist.config.ts",
+    "test:dist:perf": "playwright test -c playwright.dist.perf.config.ts",
     "test:report": "playwright show-report ../out/web/pw-report",
     "typecheck:tests": "tsc --noEmit -p tests"
   },

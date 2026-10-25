@@ -47,8 +47,9 @@ export function makeConfig(mode: TestMode): PlaywrightTestConfig<ProbeOptions> {
     testDir: './tests/specs',
     fullyParallel: true,
     forbidOnly: !!process.env.CI,
-    // 并行度默认 2：每个 worker 各自编译一份 wasm、各自解析中文字体，开满核不一定更快。
-    workers: Number(process.env.HEDITOR_TEST_WORKERS ?? 2),
+    // 并行度默认 4（本机四个物理核）。实测六 worker 更慢：每个 worker 各自编译一份 wasm、
+    //   各自解析中文字体，再往上只是互相抢内存带宽，还会把负载敏感的判据顶红。
+    workers: Number(process.env.HEDITOR_TEST_WORKERS ?? 4),
     timeout: 180_000,
     expect: { timeout: 5_000 },
     reporter: [
@@ -71,7 +72,10 @@ export function makeConfig(mode: TestMode): PlaywrightTestConfig<ProbeOptions> {
       //   但那一批"磅 → 屏幕像素"的换算会错位，不是判据的账。
       viewport: { width: 1500, height: 1200 },
       deviceScaleFactor: 1,
-      trace: 'retain-on-failure',
+      // 默认不录 trace：它给每个 test 持续截图并抓 DOM 快照，全量因此多花近一倍时间
+      //   （实测用例耗时之和 180 s → 298 s，最长的那份 45 s → 86 s）。失败时仍有截图、
+      //   报错与附件；要回放就设 HEDITOR_TEST_TRACE=1 重跑那一条。
+      trace: process.env.HEDITOR_TEST_TRACE ? 'retain-on-failure' : 'off',
       screenshot: 'only-on-failure',
       launchOptions: {
         args: ['--hide-scrollbars', '--disable-gpu', '--no-first-run', '--no-default-browser-check'],
@@ -88,6 +92,27 @@ export function makeConfig(mode: TestMode): PlaywrightTestConfig<ProbeOptions> {
       stdout: 'ignore',
       stderr: 'pipe',
     },
+  };
+}
+
+/**
+ * 性能判据的配置：场地与功能判据相同，但独占一个 worker。
+ *
+ * 耗时比值那几条（增量对全量、页指纹对整篇）会被同机上的其它 test 顶翻，所以它们单独
+ * 成一份 spec、单独一条命令；跑的时候机器上不该有别的活。
+ *
+ * @param mode 跑构建产物还是跑 Vite 源码直连
+ * @returns Playwright 配置
+ */
+export function makePerfConfig(mode: TestMode): PlaywrightTestConfig<ProbeOptions> {
+  const base = makeConfig(mode);
+  return {
+    ...base,
+    testDir: './tests/perf',
+    fullyParallel: false,
+    workers: 1,
+    // 录 trace 会持续截图，把正在量的那段拖慢。
+    use: { ...base.use, trace: 'off' },
   };
 }
 

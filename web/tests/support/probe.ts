@@ -79,6 +79,11 @@ export class ProbePage {
   /**
    * 打开示例页并等到宿主报就绪。
    *
+   * 装载最多等两轮：一轮正常路径，一轮给传输层抖动留退路。四 worker 同时起首屏时偶发
+   *   页面只剩一条横幅 —— 既没有 __demoReady 也没有 __demoStartError，说明模块脚本压根
+   *   没跑起来（脚本拉取失败不会触发页面里的任何错误路径）。装载本身只要半秒，
+   *   30 秒还没就绪就当失败，重来一次比等满 90 秒再报一句"超时"有用。
+   *
    * @param page Playwright 页面
    * @param opts 页面文件名与页面根路径
    * @returns 就绪的探针页对象
@@ -88,11 +93,27 @@ export class ProbePage {
     // debug 不给默认值：页面对它是 has 判断，给了 '0' 也算开。诊断面的判据要求它缺席。
     const params = new URLSearchParams(opts.query ?? {});
     const url = opts.pageBase + opts.file + '?' + params.toString();
-    await page.goto(url);
-    await page.waitForFunction(() => {
-      const w = window as BootWindow;
-      return w.__demoReady === true || !!w.__demoStartError;
-    }, undefined, { timeout: 90_000 });
+
+    // 装载期的 console 与未捕获异常全收着：起不来的原因通常只在这里出现。
+    const bootLog: string[] = [];
+    page.on('console', (m) => bootLog.push(m.type() + ': ' + m.text()));
+    page.on('pageerror', (e) => bootLog.push('uncaught: ' + e.message));
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await page.goto(url);
+      try {
+        await page.waitForFunction(() => {
+          const w = window as BootWindow;
+          return w.__demoReady === true || !!w.__demoStartError;
+        }, undefined, { timeout: 30_000 });
+        break;
+      } catch (e) {
+        if (attempt === 1) {
+          throw new Error('页面没有就绪（两次）：' + String((e as Error).message) +
+            '；装载期日志：' + (bootLog.slice(-8).join(' | ') || '（空）'));
+        }
+      }
+    }
 
     const failed = await page.evaluate(() => (window as BootWindow).__demoStartError);
     if (failed) throw new Error('页面启动失败：' + failed);

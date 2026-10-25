@@ -34,6 +34,19 @@ class NoStoreHandler(http.server.SimpleHTTPRequestHandler):
         super().end_headers()
 
 
+class Server(socketserver.ThreadingTCPServer):
+    """多线程静态服务。
+
+    backlog 必须放大：默认的 request_queue_size 只有 5，而四个 worker 同时起首屏时
+    一次要开十几个连接（页面、库、wasm、worker 壳），超出的连接会被直接丢掉 ——
+    表现是某个页面只剩一条横幅、脚本压根没跑起来。
+    """
+
+    allow_reuse_address = True
+    daemon_threads = True
+    request_queue_size = 128
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--port', type=int, default=8781)
@@ -41,8 +54,7 @@ def main():
     args = ap.parse_args()
 
     handler = functools.partial(NoStoreHandler, directory=os.path.abspath(args.root))
-    socketserver.ThreadingTCPServer.allow_reuse_address = True
-    with socketserver.ThreadingTCPServer(('127.0.0.1', args.port), handler) as httpd:
+    with Server(('127.0.0.1', args.port), handler) as httpd:
         print('服务根目录：%s' % os.path.abspath(args.root), flush=True)
         print('验证台地址：http://localhost:%d/web/index.html' % args.port, flush=True)
         print('按 Ctrl+C 停止', flush=True)

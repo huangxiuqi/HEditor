@@ -464,13 +464,36 @@ else()
     target_compile_definitions(heditor_tests PRIVATE HEDITOR_NATIVE_ASSET_DIR="${HEDITOR_ASSET_DIR}")
     heditor_target_flags(heditor_tests)
     add_test(NAME shaping_and_layout COMMAND heditor_tests)
+    set_tests_properties(shaping_and_layout PROPERTIES LABELS functional)
 
-    # 档 1：编辑 / 光标几何 / 命中测试 / 增量呈现
+    # 档 1：编辑 / 光标几何 / 命中测试 / 增量呈现。
+    #
+    # 一份二进制，两种跑法：功能判据按权重切四片并行（HEDITOR_TEST_SHARD），性能判据
+    # 单独一条用例独占跑（HEDITOR_TEST_PERF，RUN_SERIAL）。分节表与权重在
+    # tests/edit_test.cpp 顶部，分片由二进制自己算 —— 这里只认片数，不抄节号，
+    # 新加一节不用改这份文件。
+    #
+    # 为什么能分片：每节自建引擎、自己造文档，节与节之间没有隐含依赖。四片实测
+    # 156 s → 56 s（这台机器四个物理核）。
     add_executable(heditor_edit_tests tests/edit_test.cpp)
     target_link_libraries(heditor_edit_tests PRIVATE heditor_core heditor_demo)
     target_compile_definitions(heditor_edit_tests PRIVATE HEDITOR_NATIVE_ASSET_DIR="${HEDITOR_ASSET_DIR}")
     heditor_target_flags(heditor_edit_tests)
-    add_test(NAME edit_and_caret COMMAND heditor_edit_tests)
+    foreach(shard RANGE 0 3)
+      add_test(NAME edit_and_caret_${shard} COMMAND heditor_edit_tests)
+      set_tests_properties(edit_and_caret_${shard} PROPERTIES
+        ENVIRONMENT "HEDITOR_TEST_SHARD=${shard}/4"
+        LABELS functional)
+    endforeach()
+
+    # 耗时比值判据：会被同机上的其它负载顶翻，所以不进默认那轮（ctest --preset native
+    # 只筛 functional），改完排版或光栅再单独跑 ctest --preset native-perf。
+    # RUN_SERIAL 是第二道保险：万一有人把它和别的用例放进同一次 ctest，它也不会并发。
+    add_test(NAME edit_perf COMMAND heditor_edit_tests)
+    set_tests_properties(edit_perf PROPERTIES
+      ENVIRONMENT "HEDITOR_TEST_PERF=1"
+      RUN_SERIAL TRUE
+      LABELS perf)
 
     # 文档模型：节点、Pos 与流位置的双向换算（0.1）、段落分段（0.2）、
     # 不变量检查器（0.3）、编译到引擎输入（0.4）。
@@ -480,12 +503,14 @@ else()
     target_link_libraries(heditor_model_tests PRIVATE heditor_core heditor_demo)
     heditor_target_flags(heditor_model_tests)
     add_test(NAME doc_model COMMAND heditor_model_tests)
+    set_tests_properties(doc_model PROPERTIES LABELS functional)
 
     # 不可变修订层：路径复制、结构共享、内容哈希（重构方案 D1 的第一层）。
     add_executable(heditor_rev_tests tests/rev_test.cpp)
     target_link_libraries(heditor_rev_tests PRIVATE heditor_core heditor_demo)
     heditor_target_flags(heditor_rev_tests)
     add_test(NAME rev_layer COMMAND heditor_rev_tests)
+    set_tests_properties(rev_layer PROPERTIES LABELS functional)
 
     # 诊断探针（**不进 ctest**）：打印 EditStats / EditorEngine 的尺寸与字段偏移。
     # 用途与"为什么没法自动判定"写在 tests/probe_engine_size.cpp 顶部。
