@@ -26,6 +26,11 @@ import type {
   Pos,
   Selection,
   SetCaretOptions,
+  TableCellOptions,
+  TableOp,
+  TableOptions,
+  TableRowOptions,
+  TableState,
 } from './types';
 import { PAPER_PT, paperSizePt } from './types';
 import { createDomHost, ensureMarkup, type ChangeSource, type DomHost, type EngineLink } from './host/dom';
@@ -412,6 +417,7 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
           ? opts.onBeforeControlChange(change)
           : true,
       onControlTap: (index, rect) => opts.onControlTap?.(index, rect),
+      onContextMenu: (target, at) => opts.onContextMenu?.(target, at),
       onZoomBy: (delta: number) => queueZoom(delta),
       onZoomReset: () => void editor.setZoom(1),
     };
@@ -728,6 +734,74 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       return edit('insertTable', { rows, cols, header: !!opts?.header });
     },
 
+    async tableOp(op) {
+      alive();
+      // 动词表在这里折成整数：编号是引擎那侧的枚举顺序，宿主只认名字。
+      const codes: Record<TableOp, number> = {
+        insertRowAbove: 0,
+        insertRowBelow: 1,
+        removeRow: 2,
+        insertColumnLeft: 3,
+        insertColumnRight: 4,
+        removeColumn: 5,
+        mergeCells: 6,
+        splitCell: 7,
+      };
+      const code = codes[op];
+      if (code === undefined) throw new Error('不认识的表格命令：' + String(op));
+      return edit('tableOp', { op: code });
+    },
+
+    async setTableCell(opts) {
+      alive();
+      const o: TableCellOptions = opts ?? {};
+      const patch: Args = {};
+      if (o.vAlign !== undefined) {
+        const codes: Record<string, number> = { top: 0, middle: 1, bottom: 2 };
+        const code = codes[o.vAlign];
+        if (code === undefined) throw new Error('不认识的垂直对齐：' + String(o.vAlign));
+        patch.vAlign = code;
+      }
+      return edit('setCellSpec', { opts: patch });
+    },
+
+    async setTableRow(opts) {
+      alive();
+      const o: TableRowOptions = opts ?? {};
+      const patch: Args = {};
+      if (o.header !== undefined) patch.header = !!o.header;
+      if (o.split !== undefined) patch.split = !!o.split;
+      if (o.breakBefore !== undefined) patch.breakBefore = !!o.breakBefore;
+      if (o.heightPt !== undefined) patch.heightPt = Number(o.heightPt);
+      if (o.heightRule !== undefined) {
+        const codes: Record<string, number> = { auto: 0, atLeast: 1, exact: 2 };
+        const code = codes[o.heightRule];
+        if (code === undefined) throw new Error('不认识的行高规则：' + String(o.heightRule));
+        patch.heightRule = code;
+      }
+      return edit('setRowSpec', { opts: patch });
+    },
+
+    async setTable(opts) {
+      alive();
+      const o: TableOptions = opts ?? {};
+      const patch: Args = {};
+      if (o.widthPt !== undefined) patch.widthPt = Number(o.widthPt);
+      if (o.align !== undefined) {
+        const codes: Record<string, number> = { start: 0, center: 1, end: 2 };
+        const code = codes[o.align];
+        if (code === undefined) throw new Error('不认识的水平位置：' + String(o.align));
+        patch.align = code;
+      }
+      return edit('setTableSpec', { opts: patch });
+    },
+
+    async tableState() {
+      alive();
+      // 现状是读：走查询而不是命令 —— 属性面板打开时读一次，不该因此重画一次画面。
+      return (await Promise.resolve(link.read('tableState'))) as TableState;
+    },
+
     async insertControl(opts) {
       alive();
       const o = opts ?? {};
@@ -740,6 +814,11 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
           shape: o.shape === undefined ? undefined : SHAPE_CODE[o.shape],
         },
       });
+    },
+
+    async removeControl(index, opts) {
+      alive();
+      return edit('removeControl', { i: Math.trunc(index), keepContent: !!opts?.keepContent });
     },
 
     async updateControl(index, opts) {
@@ -1051,6 +1130,8 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
           group?: string;
           text?: string;
           ro?: boolean;
+          req?: boolean;
+          free?: boolean;
           flag?: boolean;
           sel?: string;
           fmt?: string;
@@ -1071,6 +1152,9 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
         type: String(it.type ?? ''),
         key: String(it.key ?? ''),
         label: String(it.label ?? ''),
+        readonly: !!it.ro,
+        required: !!it.req,
+        freeInput: !!it.free,
         group: String(it.group ?? ''),
         text: String(it.text ?? ''),
         value: {

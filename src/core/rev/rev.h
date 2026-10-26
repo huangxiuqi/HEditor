@@ -33,6 +33,7 @@
 #include "core/doc/node.h"
 #include "core/doc/para_format.h"
 #include "core/doc/section_spec.h"
+#include "core/doc/subtree.h"
 
 namespace heditor::rev {
 /**
@@ -308,6 +309,17 @@ const Node* findNode(const Doc& doc, NodeId id);
  * @return 父节点；找不到或它是根时为 nullptr
  */
 const Node* parentOf(const Doc& doc, NodeId id);
+
+/**
+ * 修订节点 → 节点描述：内容、记录与孩子，不含身份。
+ *
+ * 结构步骤要记"被删掉的是什么"（流位置映射要用它的长度），剪贴板要一份可移植的拷贝 ——
+ * 两处都要的是这份值。身份不进描述：修订层按流位置定位，"是哪一号节点"在换一条路径之后
+ * 已经没有意义。
+ * @param node 修订节点
+ * @return 节点描述
+ */
+NodeSpec toSpec(const Node& node);
 
 /**
  * 反向桥：修订 → 模型树。节点号不保留（模型树的节点由它自己分配），内容逐字段带过去。

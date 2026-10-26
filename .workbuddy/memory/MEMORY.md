@@ -27,24 +27,24 @@
 - 新增 `Node` 字段同步四处：assignFrom / NodeSpec capture / materialize / 序列化。
 - 控件区间只查 `control_spans.h`；"文字位置 + 侧别 = 流位置"两端各有唯一实现（229/230）。
 - 三档模式只裁三件事：光标能不能停、能不能编辑、隐藏控件是否参与流（222）。
-- 光标屏障只挡光标：点控件内部也落点（旧选区塌掉、值照 toggle），插入后光标落整块之后。夹哪一侧
-  由动作定 —— 落点取离点击处最近那侧（同处点两次不换边），移动取来向的对面（方向键才跨得过去）。
-  拖选锚端可以落在屏障里（`drag_anchor_` → `setAnchorAtFlow`；别用 `setSelection`，它清行别）。
-- 折行处行别由流位置定（`lineAffinityAtFlow`）。`setCaretRel` 的 `line_aff`：0/1 显式（点击）、-1 自动；
-  移动类命令先 `showCaret(true)` 再移动。
-- 图片字节不进文档；拖动只更新预览框，松手才 `resizeImage`；提交要记当前选区（空 `Range{}` 会被撤销
-  当成文档开头）。把手命中区就是画出来的方块，不沿边线拉伸；监听在按下这一拍同步挂上（起始尺寸
-  异步取，否则快拖丢点）。选中图片期间不画文本光标（`caretShown()`：对象选区与文本光标互斥）。
-- 宿主骨架的透明承接层（`.heditor-ime`）必须 `pointer-events:none`：它按"光标到页右一行"铺开，
-  `opacity:0` 不穿透 —— 少了它，图片把手落在光标处时按下会被接走（是命中层，与画不画光标无关）。
-- 控件记录 = 共同层 + `ControlDetail` 变体；标签是投影（`controlDisplayText`）；特有层整个进哈希；
-  改定义只走 `ControlPatch`；连打走 `typeTextAndRender`（免得吸旧簇）。
-- 选择类记号全自绘（内容 ☐/☑，成形换 U+25A1 借格宽）：外径 `size_pt * 0.72`，距离覆盖率；颜色
-  `Appearance.glyph.color`（alpha 0 = 跟随文字）。未配 `group` 的单选是独立开关。
+- 光标屏障只挡光标：点控件内部也落点，插入后光标落整块之后。落点取离点击处最近那侧（同处点两次
+  不换边），移动取来向的对面；拖选锚端可落在屏障里（`drag_anchor_`）。
+- 折行处行别由流位置定（`lineAffinityAtFlow`）；`setCaretRel` 的 `line_aff`：0/1 显式、-1 自动。
+- 图片字节不进文档；拖动只更新预览框，松手才 `resizeImage`；提交要记当前选区（空 `Range{}` 会被当成
+  文档开头）。把手命中区就是画出来的方块；选中图片期间不画光标。
+- 宿主承接层（`.heditor-ime`）必须 `pointer-events:none`：它铺在光标到页右那一条上，是命中层。
+- 控件记录 = 共同层 + `ControlDetail` 变体；标签是投影（`controlDisplayText`）；改定义只走 `ControlPatch`。
+- 选择类记号全自绘：外径 `size_pt * 0.72`，颜色 `Appearance.glyph.color`（alpha 0 = 跟随文字）。
 - 控件括号槽宽与字形取边界侧 run 的字体（`bracket_font`，排版绘制共用）。
 - 值不在内容里的控件（选择类 / 下拉 / 日期）编辑上是整块：贴它退格删整块，选区不足时扩到整块。
-- `blocks_` 不是块流真源（228）；页边距是四个数（227）；滚动总高只有 `scrollHeightPx()` 一条公式（221）。
+- `blocks_` 不是块流真源（228）；页边距是四个数（227）；滚动总高只有 `scrollHeightPx()`（221）。
 - 协议表是唯一动词清单；引擎语义只有 `web/src/engine/api.ts`（零 import），引擎只跑 Worker。
-- 字体：身份由文件自报，显示名由宿主给（`label`）；`addFont` 只加脸；同一份只装一次；名字在主线程
-  折下标再下发。光栅只有 `bitmap_skia.cpp`（Skia 版本钉在脚本里）。
+- 字体：身份由文件自报，显示名由宿主给（`label`）；`addFont` 只加脸；同一份只装一次。
 - 注释权威 = 根 `AGENTS.md` + `lint_comments.py`（R1~R13），违规 0。
+- 表格命令的主语是"光标所在那一格"，拒绝条件全在引擎；结构一变流位置就失效，重摆光标按格坐标
+  （`caretIntoCell`）。**改格记录一律整份 `CellSpec`**（只赋跨度会把垂直对齐清成顶端）；
+  插出来的新格必须带 `ParagraphMark`（否则零块格，点不进去）。
+- 右键菜单归宿主：库只拦浏览器菜单 + `input.placeAt` 搬落点 + 回 `onContextMenu(target)`。落点
+  种类是 -1/0/1/2/3（none/text/table/control/image），**跨语言别按下标查数组**。UI 一律建在
+  `ui/layer.ts`（定位与关闭时机）上，菜单 / 属性面板 / 下拉浮层共用它。新增 host 可见 JSON 读：
+  写进 `gen_payloads.py` 的 FILES 才进契约快照。

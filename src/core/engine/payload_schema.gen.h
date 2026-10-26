@@ -328,4 +328,44 @@ inline constexpr KeySpec kKeys[] = {
 inline constexpr PayloadSpec kSpec{"auditCompile", kKeys, static_cast<int>(std::size(kKeys)), true};
 }  // namespace audit_compile
 
+namespace table_state {
+inline constexpr KeySpec kKeys[] = {
+    {"inTable", "num", false},
+    {"rows", "num", false},
+    {"cols", "num", false},
+    {"widthPt", "num", false},
+    {"align", "num", false},
+    {"headerRows", "num", false},
+    {"row", "num", false},
+    {"rowHeader", "num", false},
+    {"rowSplit", "num", false},
+    {"rowBreak", "num", false},
+    {"heightPt", "num", false},
+    {"heightRule", "num", false},
+    {"cellRow", "num", false},
+    {"cellCol", "num", false},
+    {"rowSpan", "num", false},
+    {"colSpan", "num", false},
+    {"vAlign", "num", false},
+    {"selCells", "num", false},
+    {"selRows", "num", false},
+    {"selCols", "num", false},
+};
+inline constexpr PayloadSpec kSpec{"tableState", kKeys, static_cast<int>(std::size(kKeys)), true};
+}  // namespace table_state
+
+namespace context_target {
+inline constexpr KeySpec kKeys[] = {
+    {"kind", "num", false},
+    {"para", "num", false},
+    {"offset", "num", false},
+    {"cellTable", "num", false},
+    {"cellRow", "num", false},
+    {"cellCol", "num", false},
+    {"control", "num", false},
+    {"image", "num", false},
+};
+inline constexpr PayloadSpec kSpec{"contextTarget", kKeys, static_cast<int>(std::size(kKeys)), false};
+}  // namespace context_target
+
 }  // namespace pk

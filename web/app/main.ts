@@ -10,12 +10,14 @@ import { createEditor } from '../src/index';
 import type { CharFormatPatch, Editor, ParaFormatPatch } from '../src/index';
 import {
   createGridPicker,
+  createLayer,
   createPageSetup,
   mountChrome,
   type Chrome,
   type Group,
   type Tab,
 } from './ui';
+import { createMenus, type Menus } from './menus';
 
 const DEMO_TEXT = [
   'HEditor 示例文档',
@@ -50,6 +52,8 @@ const stage = document.getElementById('ed')!;
 
 let editor: Editor;
 let chrome: Chrome;
+/** 右键菜单（实例建好之后才有；库的回调是延迟触发的，所以先声明后装配）。 */
+let menus: Menus | undefined;
 
 /** 字号候选；"增大/减小"就在这一列上走，界面上只给固定档位。 */
 const SIZES = [9, 10, 10.5, 12, 14, 16, 18, 22, 24, 36, 48];
@@ -692,6 +696,7 @@ function insertControl(type: string, opts: Record<string, unknown>): void {
 /**
  * 控件弹出层：下拉的选项列表与日期的输入框都归宿主画。
  *
+ * 位置与关闭时机走 layer（与右键菜单、属性面板同一份实现）：这一层只管"面板里放什么"。
  * 引擎只画控件本身；这一层是编辑期辅助，不进文档、不进导出。
  * @param index 控件下标
  * @param rect 控件在页面坐标下的第一块矩形（磅）
@@ -703,6 +708,7 @@ function openControlPanel(
   const c = editor.form()[index];
   const pages = document.querySelector('.heditor-pages');
   if (!c || !rect || !(pages instanceof HTMLElement)) return;
+
   const g = editor.geometry();
   const box = pages.getBoundingClientRect();
   // 磅 -> CSS 像素：缩放倍数乘 4/3（96 dpi / 72 磅），与画布摆放同一套换算。
@@ -710,25 +716,8 @@ function openControlPanel(
   const top = box.top + (rect.page * (g.page.h + g.gap) + rect.y + rect.h) * scale;
   const left = box.left + rect.x * scale;
 
-  const panel = document.createElement('div');
-  panel.className = 'heditor-popover';
-  panel.style.position = 'fixed';
-  panel.style.left = Math.round(left) + 'px';
-  panel.style.top = Math.round(top + 2) + 'px';
-  panel.style.zIndex = '60';
-  panel.style.minWidth = Math.round(rect.w * scale) + 'px';
-
-  const close = (): void => {
-    panel.remove();
-    document.removeEventListener('mousedown', onOutside, true);
-    document.removeEventListener('keydown', onKey, true);
-  };
-  const onOutside = (ev: MouseEvent): void => {
-    if (ev.target instanceof Node && !panel.contains(ev.target)) close();
-  };
-  const onKey = (ev: KeyboardEvent): void => {
-    if (ev.key === 'Escape') close();
-  };
+  const layer = createLayer('heditor-popover', () => editor.focus());
+  layer.el.style.minWidth = Math.round(rect.w * scale) + 'px';
 
   if (c.type === 'dropdownList') {
     for (const opt of c.options) {
@@ -738,9 +727,9 @@ function openControlPanel(
       item.textContent = opt.label;
       item.addEventListener('click', () => {
         void editor.setControlValue(index, { text: opt.value });
-        close();
+        layer.close();
       });
-      panel.appendChild(item);
+      layer.el.appendChild(item);
     }
   } else if (c.type === 'date') {
     // 能选哪些单位由控件声明：只到分就把秒的步长设成 60，只有日期就用日期输入。
@@ -769,17 +758,15 @@ function openControlPanel(
         iso = raw.length === 16 ? raw + ':00' : raw.slice(0, 19);
       }
       void editor.setControlValue(index, { text: iso });
-      close();
+      layer.close();
     });
-    panel.appendChild(input);
-    panel.appendChild(apply);
+    layer.el.appendChild(input);
+    layer.el.appendChild(apply);
   } else {
     return;
   }
 
-  document.body.appendChild(panel);
-  document.addEventListener('mousedown', onOutside, true);
-  document.addEventListener('keydown', onKey, true);
+  layer.openAtPoint(Math.round(left), Math.round(top + 2));
 }
 
 /**
@@ -855,6 +842,10 @@ async function boot(): Promise<void> {
     chrome: true,
     // 下拉的选项列表与日期的输入框归宿主画：引擎只画控件本身。
     onControlTap: (index, rect) => openControlPanel(index, rect),
+    // 右键菜单也归宿主：库只负责拦掉浏览器那份、把插入点搬过去、告诉我们压着什么。
+    onContextMenu: (target, at) => {
+      void menus?.open(target, at);
+    },
     // 前置回调的接缝：判据把它换成"先拒后放"，演示页默认一律允许。
     onBeforeControlChange: (change) => {
       const decide = (window as unknown as { __demoBeforeChange?: (c: unknown) => unknown })
@@ -882,6 +873,13 @@ async function boot(): Promise<void> {
   //   它同时是测试的唯一入口（web/tests/support/readings.ts 的前言里读一次），改名字要同步。
   window.__demo = editor;
   window.__demoState = { changes: 0, unsavedPrompt };
+  menus = createMenus({
+    editor,
+    say: (text) => chrome.say(text),
+    focusEditor: () => editor.focus(),
+    insertControl,
+    pickImage,
+  });
 
   await editor.setText(DEMO_TEXT);
   dirty = false;

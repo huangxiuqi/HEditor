@@ -28,38 +28,6 @@ bool isShell(NodeKind kind) {
            kind == NodeKind::HeaderFooter;
 }
 
-NodeSpec specOf(const Node& n) {
-    NodeSpec s;
-    s.kind = n.kind;
-    s.hidden = n.hidden;
-    if (const auto* run = std::get_if<RunPayload>(&n.payload)) {
-        s.text = run->text;
-        s.marks = run->marks;
-        s.styleRef = run->style;
-    } else if (const auto* mark = std::get_if<MarkPayload>(&n.payload)) {
-        s.para = mark->para;
-        s.styleRef = mark->style;
-        s.marks = mark->marks;
-    } else if (const auto* c = std::get_if<ControlSpec>(&n.payload)) {
-        s.control = *c;
-    } else if (const auto* t = std::get_if<TableSpec>(&n.payload)) {
-        s.table = *t;
-    } else if (const auto* r = std::get_if<RowSpec>(&n.payload)) {
-        s.row = *r;
-    } else if (const auto* c = std::get_if<CellSpec>(&n.payload)) {
-        s.cell = *c;
-    } else if (const auto* im = std::get_if<ImageSpec>(&n.payload)) {
-        s.image = *im;
-    } else if (const auto* f = std::get_if<FormulaSpec>(&n.payload)) {
-        s.formula = *f;
-    } else if (const auto* fd = std::get_if<FieldSpec>(&n.payload)) {
-        s.field = *fd;
-    }
-    s.children.reserve(n.children.size());
-    for (const Ref& c : n.children) s.children.push_back(specOf(*c));
-    return s;
-}
-
 /**
  * 把区间加宽到"整块容器"的边界。文本节点按码点截，外壳下沉，其余容器整块进来。
  */
@@ -103,7 +71,7 @@ bool collect(const Node& parent, const FlowIndex& idx, FlowPos lo, FlowPos hi,
             continue;
         }
         if (f >= lo && e <= hi) {
-            out->push_back(specOf(*c));
+            out->push_back(toSpec(*c));
             continue;
         }
         if (isText(c->kind)) {

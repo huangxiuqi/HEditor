@@ -676,6 +676,38 @@ const Node* parentOf(const Doc& doc, NodeId id) {
     return nullptr;
 }
 
+NodeSpec toSpec(const Node& node) {
+    NodeSpec s;
+    s.kind = node.kind;
+    s.hidden = node.hidden;
+    if (const auto* run = std::get_if<RunPayload>(&node.payload)) {
+        s.text = run->text;
+        s.marks = run->marks;
+        s.styleRef = run->style;
+    } else if (const auto* mark = std::get_if<MarkPayload>(&node.payload)) {
+        s.para = mark->para;
+        s.styleRef = mark->style;
+        s.marks = mark->marks;
+    } else if (const auto* c = std::get_if<ControlSpec>(&node.payload)) {
+        s.control = *c;
+    } else if (const auto* t = std::get_if<TableSpec>(&node.payload)) {
+        s.table = *t;
+    } else if (const auto* r = std::get_if<RowSpec>(&node.payload)) {
+        s.row = *r;
+    } else if (const auto* c = std::get_if<CellSpec>(&node.payload)) {
+        s.cell = *c;
+    } else if (const auto* im = std::get_if<ImageSpec>(&node.payload)) {
+        s.image = *im;
+    } else if (const auto* f = std::get_if<FormulaSpec>(&node.payload)) {
+        s.formula = *f;
+    } else if (const auto* fd = std::get_if<FieldSpec>(&node.payload)) {
+        s.field = *fd;
+    }
+    s.children.reserve(node.children.size());
+    for (const Ref& c : node.children) s.children.push_back(toSpec(*c));
+    return s;
+}
+
 Doc makeTextDoc(const std::vector<std::u32string>& paragraphs) {
     NodeId next = 1;
     std::vector<Ref> kids;

@@ -194,6 +194,7 @@ add_library(heditor_core STATIC
   src/core/rev/steps.cpp
   src/core/rev/fragment.cpp
   src/core/rev/capability.cpp
+  src/core/rev/table_ops.cpp
   src/core/text/font.cpp
   src/core/text/font_source.cpp
   src/core/text/shaper.cpp
@@ -209,6 +210,7 @@ add_library(heditor_core STATIC
   src/core/engine/engine_diag.cpp
   src/core/engine/engine_image.cpp
   src/core/engine/engine_control.cpp
+  src/core/engine/engine_table.cpp
   src/core/engine/image_store.cpp
   # 载荷契约的运行时校验（键表见 payload_schema.gen.h，由 scripts/gen_payloads.py 生成）。
   src/core/engine/payload_schema.cpp

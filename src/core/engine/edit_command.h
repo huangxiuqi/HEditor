@@ -37,6 +37,7 @@
 #include "core/rev/flow.h"
 #include "core/rev/rev.h"
 #include "core/rev/session.h"
+#include "core/rev/table_ops.h"
 
 namespace heditor {
 /**
@@ -293,6 +294,32 @@ public:
     bool removeControl(int index, bool keep_content, FlowPos caret_before = -1);
 
     /**
+     * 光标所在的最内层格。
+     *
+     * 取法只有一条：段号 → 块的 cell_path 最内层 → 节点号。不能按"光标流区间落在哪一格"
+     * 反推 —— 空格的内容长度是 0，流位置分不出它属于哪一格。
+     *
+     * @param out 写回这一格
+     * @param row 写回它在网格里的原点行（表格结构操作要用）
+     * @param col 写回它在网格里的原点列
+     * @return true = 光标在表格里
+     */
+    bool currentTableCell(rev::CellRef* out, int* row, int* col) const;
+
+    /**
+     * 表格结构命令的收尾：提交一批步骤，再把光标摆回 (row, col) 那一格的首块。
+     *
+     * 结构一动，先前的流位置就不再指向同一个地方（插了一行在上面，整段都往后挪了），
+     * 所以重摆光标按格坐标算，不按流位置搬。坐标越界时夹到最近的一格。
+     *
+     * @param table 表格节点号
+     * @param row 目标行（夹到 [0, 行数)）
+     * @param col 目标列（夹到 [0, 列数)）
+     * @return true = 光标摆好了
+     */
+    bool caretIntoCell(NodeId table, int row, int col);
+
+    /**
      * 在光标所在段的后面插一张空表格（表在块级，不能落在段落内部）。
      *
      * 只在文档模式放行：插入结构是设计动作，表单模式在填值、只读模式不许改，两者都不该
@@ -304,6 +331,81 @@ public:
      * @return true = 插进去了
      */
     bool insertTable(int rows, int cols, bool header);
+
+    /**
+     * 在光标所在格的上方或下方插一行。新行照参照行的横向跨度序列造。
+     *
+     * 行号取光标所在那一格的行号：光标停在表外时整条命令被拒（没有"当前行"这回事）。
+     * 只在文档模式放行（改表结构是设计动作）。
+     *
+     * @param below true = 插在下面
+     * @return true = 插进去了
+     */
+    bool insertTableRow(bool below);
+
+    /**
+     * 删掉光标所在的那一行。取代表格只剩一行时拒绝；行里有纵向合并时拒绝
+     * （那些格子的内容会随行消失，覆盖的下面几行会少一格）。
+     *
+     * @return true = 删掉了
+     */
+    bool removeTableRow();
+
+    /**
+     * 在光标所在格的左边或右边插一列。
+     *
+     * @param right true = 插在右边
+     * @return true = 插进去了
+     */
+    bool insertTableColumn(bool right);
+
+    /**
+     * 删掉光标所在的那一列。取代表格只剩一列时拒绝。
+     *
+     * @return true = 删掉了
+     */
+    bool removeTableColumn();
+
+    /**
+     * 把整格选区合并成一格。
+     *
+     * 要求选中的格子正好铺满一个矩形，且除左上角那一格以外都是空的 —— 合并会删掉它们，
+     * 有内容就是丢数据。没有整格选区时拒绝（"合并"这个动作的主语是那一片格子）。
+     *
+     * @return true = 合并了
+     */
+    bool mergeTableCells();
+
+    /**
+     * 把光标所在的那一格拆回它覆盖的每一个格位。
+     *
+     * @return true = 拆开了（这一格本来就没有合并时拒绝）
+     */
+    bool splitTableCell();
+
+    /**
+     * 改光标所在格的记录（目前是垂直对齐）。幂等：记录没变时返回真但不产生步骤。
+     *
+     * @param patch 要改的项
+     * @return true = 改成了
+     */
+    bool setCellSpec(const CellPatch& patch);
+
+    /**
+     * 改光标所在行的记录（标题行、跨页断行、行前分页、行高）。
+     *
+     * @param patch 要改的项
+     * @return true = 改成了
+     */
+    bool setRowSpec(const RowPatch& patch);
+
+    /**
+     * 改光标所在表格的记录（宽度、水平位置）。
+     *
+     * @param patch 要改的项
+     * @return true = 改成了
+     */
+    bool setTableSpec(const TablePatch& patch);
 
     /**
      * 在光标处插一个内容控件（表单字段）。label 是控件里的初始内容，也是它的"值"。

@@ -870,6 +870,131 @@
           "kind": "num"
         }
       ]
+    },
+    "tableState": {
+      "cxx": "tableStateJson",
+      "file": "src/core/engine/engine_table.cpp",
+      "partial": true,
+      "keys": [
+        {
+          "name": "inTable",
+          "kind": "num"
+        },
+        {
+          "name": "rows",
+          "kind": "num"
+        },
+        {
+          "name": "cols",
+          "kind": "num"
+        },
+        {
+          "name": "widthPt",
+          "kind": "num"
+        },
+        {
+          "name": "align",
+          "kind": "num"
+        },
+        {
+          "name": "headerRows",
+          "kind": "num"
+        },
+        {
+          "name": "row",
+          "kind": "num"
+        },
+        {
+          "name": "rowHeader",
+          "kind": "num"
+        },
+        {
+          "name": "rowSplit",
+          "kind": "num"
+        },
+        {
+          "name": "rowBreak",
+          "kind": "num"
+        },
+        {
+          "name": "heightPt",
+          "kind": "num"
+        },
+        {
+          "name": "heightRule",
+          "kind": "num"
+        },
+        {
+          "name": "cellRow",
+          "kind": "num"
+        },
+        {
+          "name": "cellCol",
+          "kind": "num"
+        },
+        {
+          "name": "rowSpan",
+          "kind": "num"
+        },
+        {
+          "name": "colSpan",
+          "kind": "num"
+        },
+        {
+          "name": "vAlign",
+          "kind": "num"
+        },
+        {
+          "name": "selCells",
+          "kind": "num"
+        },
+        {
+          "name": "selRows",
+          "kind": "num"
+        },
+        {
+          "name": "selCols",
+          "kind": "num"
+        }
+      ]
+    },
+    "contextTarget": {
+      "cxx": "contextTargetJson",
+      "file": "src/core/engine/engine_table.cpp",
+      "keys": [
+        {
+          "name": "kind",
+          "kind": "num"
+        },
+        {
+          "name": "para",
+          "kind": "num"
+        },
+        {
+          "name": "offset",
+          "kind": "num"
+        },
+        {
+          "name": "cellTable",
+          "kind": "num"
+        },
+        {
+          "name": "cellRow",
+          "kind": "num"
+        },
+        {
+          "name": "cellCol",
+          "kind": "num"
+        },
+        {
+          "name": "control",
+          "kind": "num"
+        },
+        {
+          "name": "image",
+          "kind": "num"
+        }
+      ]
     }
   }
 }

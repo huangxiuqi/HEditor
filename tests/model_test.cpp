@@ -4700,23 +4700,23 @@ void checkTableOps() {
         const NodeId table = tableOf(tree);
         const NodeId cell = tree.find(table)->children[0]->children[0]->id;
 
-        SetTableCellSpan zero;
+        SetCellSpec zero;
         zero.id = cell;
-        zero.span = CellSpec{1, 0};
+        zero.spec = CellSpec{1, 0};
         zero.before = CellSpec{1, 1};
         const StepResult r0 = canApply(tree, Step{zero});
         expectTrue(!r0.ok && r0.error.find("至少是 1") != std::string::npos,
                    "1.7 / 改跨度拒绝：跨度小于 1（" + r0.error + "）");
 
-        SetTableCellSpan stale;
+        SetCellSpec stale;
         stale.id = cell;
-        stale.span = CellSpec{1, 2};
+        stale.spec = CellSpec{1, 2};
         stale.before = CellSpec{2, 1};
         const StepResult r1 = canApply(tree, Step{stale});
         expectTrue(!r1.ok && r1.error.find("原值不符") != std::string::npos,
                    "1.7 / 改跨度拒绝：原值不符（" + r1.error + "）");
 
-        SetTableCellSpan on_row;
+        SetCellSpec on_row;
         on_row.id = tree.find(table)->children[0]->id;
         const StepResult r2 = canApply(tree, Step{on_row});
         expectTrue(!r2.ok && r2.error.find("单元格") != std::string::npos,

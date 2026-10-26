@@ -286,6 +286,13 @@ const COMMANDS: Array<[string, string, string[], string]> = [
   ['setControlProp',        'w', ['setControlPropAt'],                                    'self'],
   // 插入结构：表格与控件都落成 InsertNode，撤销与增量排版跟着走现成那条路。
   ['insertTable',           'w', ['insertTableAt'],                                       'self'],
+  // 表格的用户命令：结构六条共用一个动词号，属性三条各一份补丁；两条读给右键菜单与属性面板。
+  ['tableOp',               'w', ['tableOpAt'],                                            'self'],
+  ['setCellSpec',           'w', ['setCellSpecAt'],                                        'self'],
+  ['setRowSpec',            'w', ['setRowSpecAt'],                                         'self'],
+  ['setTableSpec',          'w', ['setTableSpecAt'],                                       'self'],
+  ['tableState',            'r', ['tableStateJson'],                                       'none'],
+  ['contextTarget',         'r', ['contextTargetJson'],                                    'none'],
   ['insertControl',         'w', ['insertControlAt'],                                     'self'],
   ['setControlSpec',        'w', ['setControlSpecAt'],                                    'self'],
   ['setControlValue',       'w', ['setControlValueAt'],                                   'self'],
@@ -1266,6 +1273,24 @@ const WRITE = collect('w', {
    */
   insertTable: (a) => mod.insertTableAt(a.rows | 0, a.cols | 0, !!a.header),
   /**
+   * 表格结构命令：0 上方插行 / 1 下方插行 / 2 删行 / 3 左侧插列 / 4 右侧插列 / 5 删列 /
+   *   6 合并 / 7 拆分。与编辑器那侧的顺序一一对应（见 types.ts 的 TableOp）。
+   * 被拒时引擎返回 false 且文档不动 —— 宿主据此提示，不必先自己判模式。
+   */
+  tableOp: (a) => mod.tableOpAt(a.op | 0),
+  /**
+   * 改光标所在格的记录（垂直对齐）。
+   */
+  setCellSpec: (a) => mod.setCellSpecAt(a.opts || {}),
+  /**
+   * 改光标所在行的记录（标题行、跨页断行、行前分页、行高）。
+   */
+  setRowSpec: (a) => mod.setRowSpecAt(a.opts || {}),
+  /**
+   * 改光标所在表格的记录（宽度、水平位置）。
+   */
+  setTableSpec: (a) => mod.setTableSpecAt(a.opts || {}),
+  /**
    * 插一个内容控件。opts 的键与契约里的 ControlInsertOptions 一一对应（门面已把
    *   shape 折成整数、readonly / required 折成 ro / req），这里原样交给引擎。
    */
@@ -1371,6 +1396,64 @@ const READ = collect('r', {
    * 命中：文档坐标（磅）落在哪张图的哪个把手上。没点到时 index 是 -1。
    */
   imageHit: (a) => JSON.parse(mod.imageHit(Number(a.x), Number(a.y))),
+  /**
+   * 点上一个点上压着什么。引擎给整数，这一层折成人读的名字 —— 宿主不该知道
+   *   "1 是表格"这类编号，那是引擎内部的枚举顺序。
+   */
+  contextTarget: (a) => {
+    const raw = JSON.parse(mod.contextTargetJson(Number(a.x), Number(a.y)));
+    // 引擎给的是 -1 / 0..3（none / text / table / control / image），不是数组下标 ——
+    //   照下标查会整体错一位，症状是"在表格里弹出来的是正文菜单"。
+    const kinds: Record<number, 'none' | 'text' | 'table' | 'control' | 'image'> = {
+      [-1]: 'none',
+      0: 'text',
+      1: 'table',
+      2: 'control',
+      3: 'image',
+    };
+    const kind = kinds[typeof raw.kind === 'number' ? raw.kind : -1] ?? 'none';
+    const inTable = kind === 'table';
+    return {
+      kind,
+      pos: raw.para >= 0 ? { para: raw.para | 0, offset: raw.offset | 0 } : null,
+      cell: inTable
+        ? { table: raw.cellTable | 0, row: raw.cellRow | 0, col: raw.cellCol | 0 }
+        : null,
+      control: raw.control === undefined ? -1 : raw.control | 0,
+      image: raw.image === undefined ? -1 : raw.image | 0,
+    };
+  },
+  /**
+   * 光标所在表格的现状：三层记录 + 整格选区范围。枚举同 contextTarget，折成名字。
+   */
+  tableState: () => {
+    const raw = JSON.parse(mod.tableStateJson());
+    const aligns = ['start', 'center', 'end'];
+    const valigns = ['top', 'middle', 'bottom'];
+    const rules = ['auto', 'atLeast', 'exact'];
+    return {
+      inTable: !!raw.inTable,
+      rows: raw.rows | 0,
+      cols: raw.cols | 0,
+      widthPt: Number(raw.widthPt),
+      align: aligns[raw.align | 0] || 'start',
+      headerRows: raw.headerRows | 0,
+      row: raw.row | 0,
+      rowHeader: !!raw.rowHeader,
+      rowSplit: !!raw.rowSplit,
+      rowBreak: !!raw.rowBreak,
+      heightPt: Number(raw.heightPt),
+      heightRule: rules[raw.heightRule | 0] || 'auto',
+      cellRow: raw.cellRow | 0,
+      cellCol: raw.cellCol | 0,
+      rowSpan: raw.rowSpan | 0,
+      colSpan: raw.colSpan | 0,
+      vAlign: valigns[raw.vAlign | 0] || 'top',
+      selCells: raw.selCells | 0,
+      selRows: raw.selRows | 0,
+      selCols: raw.selCols | 0,
+    };
+  },
   pageDirtyRects: (a) => JSON.parse(mod.pageDirtyRectsJson(a.page | 0)),
   /**
    * 组控件的选项命中：文档坐标（磅）→ 第几个选项。不在组控件上时 -1。

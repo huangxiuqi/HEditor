@@ -307,15 +307,36 @@ EditCheck canEditStep(const Doc& doc, EditMode mode, const Step& step) {
         }
         return EditCheck{true, ""};
     }
-    // 改跨度是结构操作：它改的是表格的形状，不是某个格子里的内容。
-    if (const auto* s = std::get_if<SetTableCellSpan>(&step)) {
+    // 改格记录是结构操作：它改的是表格的形状，不是某个格子里的内容。
+    if (const auto* s = std::get_if<SetCellSpec>(&step)) {
         const Node* n = findNode(doc, s->id);
         if (n == nullptr || n->kind != NodeKind::TableCell) {
-            return EditCheck{false, "改跨度：目标不是单元格"};
+            return EditCheck{false, "改格记录：目标不是单元格"};
         }
         if (mode == EditMode::ReadOnly) return EditCheck{false, "只读模式：不接受结构操作"};
         if (mode == EditMode::Form) {
             return EditCheck{false, "表单模式：表格结构操作要在文档模式里做（开关默认锁住）"};
+        }
+        return EditCheck{true, ""};
+    }
+    // 行与表的记录同样是设计动作：填表的人不该改分页与表宽。
+    if (const auto* s = std::get_if<SetRowSpec>(&step)) {
+        const Node* n = findNode(doc, s->id);
+        if (n == nullptr || n->kind != NodeKind::TableRow) {
+            return EditCheck{false, "改行记录：目标不是表格行"};
+        }
+        if (mode != EditMode::Document) {
+            return EditCheck{false, "改行记录要在文档模式里做（表格式设计动作）"};
+        }
+        return EditCheck{true, ""};
+    }
+    if (const auto* s = std::get_if<SetTableSpec>(&step)) {
+        const Node* n = findNode(doc, s->id);
+        if (n == nullptr || n->kind != NodeKind::Table) {
+            return EditCheck{false, "改表记录：目标不是表格"};
+        }
+        if (mode != EditMode::Document) {
+            return EditCheck{false, "改表记录要在文档模式里做（表格式设计动作）"};
         }
         return EditCheck{true, ""};
     }

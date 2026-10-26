@@ -216,11 +216,13 @@ setText(text: string, opts?: { repeat?: number }): Promise<void>   // 明确用�
 | 签名 | 备注 |
 | --- | --- |
 | `focusControl(index)` | |
-| `setControlProp(index, prop, value)` | `prop` 是字符串（`text` / `checked` …），值按控件种类校验 |
+| `setControlProp(index, prop, value)` | `prop` 是运行态开关号（0 隐藏 / 1 只读 / 2 必填 / 3 结构锁），值是布尔 |
 | `form()` | 精简视图：`[{ index, kind, label, value, focused }]`，给"整表读一遍"的宿主 |
 
-`removeControl` 不进产品面：现实里删控件是编辑态动作，由输入层负责（选中控件 + Delete）；
-程序化删控件只在测试里出现 → `diag`。
+| `removeControl(index, { keepContent? })` | 删控件；`keepContent` 为真时拆壳留内容。只在文档模式可用 |
+
+删控件走进产品面，是因为它有一个宿主要画出来的入口（右键菜单）。它仍然受模式约束：
+表单模式里控件的结构默认锁住，调用返回 false 且文档不动。
 
 八种基础控件由 `insertControl({ type })` 插入，`type` 是 `text` / `number` / `radioButton` /
 `checkBox` / `radioGroup` / `checkBoxGroup` / `dropdownList` / `date`；选项、互斥组、日期格式、
@@ -230,7 +232,7 @@ setText(text: string, opts?: { repeat?: number }): Promise<void>   // 明确用�
 
 | 签名 | 备注 |
 | --- | --- |
-| `form()` | 每个控件一条：`type` / `key` / `label` / `group` / `text`（内容）/ `value`（记录上的值）/ `options` / `glyphColor` / `start`、`end`（区间）/ `focused` |
+| `form()` | 每个控件一条：`type` / `key` / `label` / `group` / `text`（内容）/ `value`（记录上的值）/ `options` / `glyphColor` / `format` / `dateUnits` / `readonly` / `required` / `freeInput` / `start`、`end`（区间）/ `focused` |
 | `setControlValue(index, { flag?, text?, items? })` | 改值并按类型重建显示内容；选择类与下拉、日期的内容是值的投影 |
 | `toggleControl(index, option?)` | 切换一个选项（单控件传 -1）；互斥与多选规则在引擎里，整批一次撤销 |
 | `updateControl(index, { type?, key?, label?, options?, group?, freeInput?, format?, dateUnits?, glyphColor? })` | 改定义：只改给出的项；改完按新定义重建内容，指向已删选项的值跟着清空，同属一步撤销 |
@@ -241,6 +243,12 @@ setText(text: string, opts?: { repeat?: number }): Promise<void>   // 明确用�
 选择类控件"点一下就切"由输入层完成：命中给出控件下标与选项下标，宿主的前置回调
 （`createEditor({ onBeforeControlChange })`）可以返回 boolean 或 Promise&lt;boolean&gt;，
 拒绝时文档与光标都不动。下拉的选项列表与日期的选择面板归宿主画（`onControlTap`）。
+
+右键也一样归宿主：`createEditor({ onContextMenu(target, at) })`。库在这一下里做两件事 ——
+拦掉浏览器自己的菜单、把插入点搬到指的地方（点图片则选中它，走的是与左键同一条落点路径）；
+然后把落点归属交出去（`target.kind` 是 `'text'` / `'table'` / `'control'` / `'image'` /
+`'none'`，带 `pos`、格坐标、控件下标与图片下标，`at` 是指针的客户端坐标）。
+不给这个回调时库完全不拦右键 —— 拦掉一个宿主没打算接的手势，等于把一个能用的功能变成不能用。
 
 ### 5.5.1 图片（字节外置，文档只存资源 id）
 
@@ -257,6 +265,26 @@ setText(text: string, opts?: { repeat?: number }): Promise<void>   // 明确用�
 把手序号从左上顺时针 0..7。四个角按原图比例缩放（按住 Shift 解除），四条边只动一个轴。
 把手命中区就是画出来的那个方块（不沿边线拉长）：边线上离把手远处点下去仍按图身算。
 选中图片时 `caret().visible` 读回 false —— 对象选区与文本光标是两套互斥的选区。
+
+### 5.5.2 表格（结构命令 + 三层记录）
+
+八条结构命令只有动词不同：主语都是"光标所在的那一格 / 那一行 / 那一列"，被拒的条件也都在
+引擎里判（模式、只剩一行一列、行里有纵向合并、合并区域不是矩形）。
+
+| 签名 | 备注 |
+| --- | --- |
+| `tableOp(op)` | `'insertRowAbove'` / `'insertRowBelow'` / `'removeRow'` / `'insertColumnLeft'` / `'insertColumnRight'` / `'removeColumn'` / `'mergeCells'` / `'splitCell'` |
+| `setTableCell({ vAlign? })` | 格记录：垂直对齐（`'top'` / `'middle'` / `'bottom'`） |
+| `setTableRow({ header?, split?, breakBefore?, heightPt?, heightRule? })` | 行记录：标题行、跨页断行、行前分页、行高与规则（`'auto'` / `'atLeast'` / `'exact'`） |
+| `setTable({ widthPt?, align? })` | 表记录：宽度（0 = 自动）与水平位置（`'start'` / `'center'` / `'end'`） |
+| `tableState()` | 一次读全：`inTable` / `rows` / `cols` / 表宽与位置 / 标题行数 / 当前行的四个开关与行高 / 当前格的坐标与两个跨度 / 整格选区的格数行列数 |
+
+三条边界，都不是"暂不支持"而是设计选择：合并要求选中的格子正好铺满一个矩形，且除左上角
+那一格以外都是空的（合并会删掉它们，有内容就是丢数据）；删行遇到行内纵向合并时拒绝（内容会
+随行消失，而下面几行会凭空少一格）；删最后一列 / 最后一行拒绝。
+
+`tableOp` 返回 false 时文档一个字节都不动。一次命令 = 一步撤销（插行与随之的跨度调整是同一
+批步骤）；改属性是幂等的 —— 值与现状相同返回 true 但不产生步骤。
 
 ### 5.6 视图与配置
 

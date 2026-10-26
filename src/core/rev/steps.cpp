@@ -578,10 +578,22 @@ bool setControlSpec(Ctx* c, NodeId id, const ControlSpec& spec) {
     return replaceOne(c, id, spec, n->hidden);
 }
 
-bool setCellSpan(Ctx* c, NodeId id, const CellSpec& span) {
+bool setCellSpec(Ctx* c, NodeId id, const CellSpec& spec) {
     const Node* n = findNode(c->doc, id);
     if (n == nullptr || n->kind != NodeKind::TableCell) return fail(c, "目标不是单元格");
-    return replaceOne(c, id, span, n->hidden);
+    return replaceOne(c, id, spec, n->hidden);
+}
+
+bool setRowSpec(Ctx* c, NodeId id, const RowSpec& spec) {
+    const Node* n = findNode(c->doc, id);
+    if (n == nullptr || n->kind != NodeKind::TableRow) return fail(c, "目标不是表格行");
+    return replaceOne(c, id, spec, n->hidden);
+}
+
+bool setTableSpec(Ctx* c, NodeId id, const TableSpec& spec) {
+    const Node* n = findNode(c->doc, id);
+    if (n == nullptr || n->kind != NodeKind::Table) return fail(c, "目标不是表格");
+    return replaceOne(c, id, spec, n->hidden);
 }
 
 bool setImageSize(Ctx* c, NodeId id, const Length& width, const Length& height) {
@@ -642,8 +654,12 @@ bool applyOne(Ctx* c, const Step& step) {
                 return setControlValue(c, s.id, s.value);
             } else if constexpr (std::is_same_v<T, SetControlSpec>) {
                 return setControlSpec(c, s.id, s.spec);
-            } else if constexpr (std::is_same_v<T, SetTableCellSpan>) {
-                return setCellSpan(c, s.id, s.span);
+            } else if constexpr (std::is_same_v<T, SetCellSpec>) {
+                return setCellSpec(c, s.id, s.spec);
+            } else if constexpr (std::is_same_v<T, SetRowSpec>) {
+                return setRowSpec(c, s.id, s.spec);
+            } else if constexpr (std::is_same_v<T, SetTableSpec>) {
+                return setTableSpec(c, s.id, s.spec);
             } else if constexpr (std::is_same_v<T, SetImageSize>) {
                 return setImageSize(c, s.id, s.width, s.height);
             }

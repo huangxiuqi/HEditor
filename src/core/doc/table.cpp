@@ -321,10 +321,11 @@ StepBatch makeRemoveTableRow(NodeTree& tree, NodeId table, int at_row) {
     for (int r = 0; r < at_row; ++r) {
         for (const Node* cell : table_node->children[static_cast<size_t>(r)]->children) {
             if (r + cell->cell.row_span <= at_row) continue;
-            SetTableCellSpan s;
+            SetCellSpec s;
             s.id = cell->id;
-            s.span.row_span = cell->cell.row_span - 1;
-            s.span.col_span = cell->cell.col_span;
+            // 整份记录先拷一份再改跨度：只赋跨度会把格内垂直对齐静默清成顶端。
+            s.spec = cell->cell;
+            s.spec.row_span = cell->cell.row_span - 1;
             s.before = cell->cell;
             pushMappedStep(&out.steps, Step{s});
         }
@@ -377,8 +378,13 @@ StepBatch makeInsertTableColumn(NodeTree& tree, NodeId table, int at_col) {
                 break;
             }
         }
+        // 新格子也要有段落标记：没有标记的格在流里一位都不占，编译出来是零块格，
+        //   命中测试落不进去（见 makeEmptyTableSpec 同一条理由）。
         NodeSpec cell;
         cell.kind = NodeKind::TableCell;
+        NodeSpec mark;
+        mark.kind = NodeKind::ParagraphMark;
+        cell.children.push_back(std::move(mark));
         const NodeBuild b = makeInsertNode(tree, Pos{row->id, index}, cell);
         if (!b.ok) {
             out.error = b.error;
@@ -390,10 +396,10 @@ StepBatch makeInsertTableColumn(NodeTree& tree, NodeId table, int at_col) {
     // 三、最后改跨度：它不动位置，放在后面免得多算一次映射。
     for (NodeId id : widened_order) {
         const Node* cell = tree.find(id);
-        SetTableCellSpan s;
+        SetCellSpec s;
         s.id = id;
-        s.span.row_span = cell->cell.row_span;
-        s.span.col_span = cell->cell.col_span + 1;
+        s.spec = cell->cell;
+        s.spec.col_span = cell->cell.col_span + 1;
         s.before = cell->cell;
         pushMappedStep(&out.steps, Step{s});
     }
@@ -439,10 +445,10 @@ StepBatch makeRemoveTableColumn(NodeTree& tree, NodeId table, int at_col) {
 
     for (NodeId id : shrink) {
         const Node* cell = tree.find(id);
-        SetTableCellSpan s;
+        SetCellSpec s;
         s.id = id;
-        s.span.row_span = cell->cell.row_span;
-        s.span.col_span = cell->cell.col_span - 1;
+        s.spec = cell->cell;
+        s.spec.col_span = cell->cell.col_span - 1;
         s.before = cell->cell;
         pushMappedStep(&out.steps, Step{s});
     }

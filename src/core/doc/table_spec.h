@@ -15,6 +15,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -188,6 +189,69 @@ struct TableSpec {
      * 逐字段相等。序列化要拿它判断"这张表是不是全默认"，从而决定写不写这个条目。
      */
     bool operator==(const TableSpec& o) const = default;
+};
+
+/**
+ * 改单元格记录时"要改哪几项"。
+ *
+ * 只收垂直对齐：跨度由行列操作与合并拆分唯一改写 —— 那是结构动作，走的是同一批步骤，
+ * 给跨度再开一条属性入口，等于让"格覆盖多少格位"有第二个可写真相。
+ */
+struct CellPatch {
+    /**
+     * 格内垂直对齐。
+     */
+    std::optional<CellVAlign> v_align;
+};
+
+/**
+ * 改一行记录时"要改哪几项"。空表示这一项不动（与"改成假"是两件事）。
+ *
+ * 行高用磅值给：调用方量的是画面，模型存的是长度；<= 0 表示 Auto（按内容）。
+ */
+struct RowPatch {
+    /**
+     * 标题行（跨页时在每页顶端重复）。
+     */
+    std::optional<bool> is_header;
+
+    /**
+     * 允许被分页线切开。
+     */
+    std::optional<bool> can_split_by_page;
+
+    /**
+     * 行前强制分页。
+     */
+    std::optional<bool> page_break_before;
+
+    /**
+     * 行高（磅）。<= 0 表示按内容。
+     */
+    std::optional<float> height_pt;
+
+    /**
+     * 行高规则。
+     */
+    std::optional<HeightRule> height_rule;
+};
+
+/**
+ * 改一张表记录时"要改哪几项"。
+ *
+ * 列定义与列宽不在这里：列定义是"按数据落值"的形状（改它等于换一张表的用法），
+ * 列宽要等排版按列分配落地之后才有可写的入口。
+ */
+struct TablePatch {
+    /**
+     * 表格宽度（磅）。<= 0 表示撑满可用宽度。
+     */
+    std::optional<float> width_pt;
+
+    /**
+     * 表格在内容区里的水平位置。
+     */
+    std::optional<Align> align;
 };
 
 /**

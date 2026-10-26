@@ -498,7 +498,7 @@ const SectionInfo kSections[] = {
     {67, false, 10}, {68, false, 4},  {69, false, 3},  {70, false, 10}, {71, false, 6},
     {72, false, 10}, {73, false, 9},  {74, false, 3},  {75, false, 3},  {76, false, 3},
     {77, false, 3},  {78, true, 1},   {79, false, 2},  {80, false, 3},  {81, false, 2},
-    {82, false, 1},  {83, false, 2},  {84, false, 2},
+    {82, false, 1},  {83, false, 2},  {84, false, 2},  {85, false, 3},
 };
 
 /**
@@ -14396,6 +14396,226 @@ int main() {
             expectTrue(e84.clearImageSelectionAndRender(), "取消选中");
             expectTrue(e84.editStats().caret_visible, "取消选中之后光标回来");
         }
+    }
+
+    if (runSection(85)) std::printf("\n[85] 表格命令：插删行列、合并拆分、三层记录与落点归属\n");
+    if (runSection(85)) {
+        EngineConfig c85;
+        c85.zoom = 1.0f;
+        c85.page.width_pt = 320.0f;
+        c85.page.height_pt = 420.0f;
+        c85.page.margins = PageMargins::all(12.0f);
+        const std::vector<std::string> fonts85 = {cjkPath, mnPath, latinPath};
+
+        // 文档：一段正文 + 一张 2x2 空表 + 结尾一段。表直接建在树里（插入那条路另有一节）。
+        NodeTree t85;
+        {
+            const NodeId sec = t85.firstSectionId();
+            const NodeId head = t85.appendChild(sec, NodeKind::TextRun);
+            t85.setText(head, utf8ToCodepoints("甲乙"));
+            t85.appendChild(sec, NodeKind::ParagraphMark);
+            const NodeId tb = t85.appendChild(sec, NodeKind::Table);
+            for (int r = 0; r < 2; ++r) {
+                const NodeId row = t85.appendChild(tb, NodeKind::TableRow);
+                for (int c = 0; c < 2; ++c) {
+                    const NodeId cell = t85.appendChild(row, NodeKind::TableCell);
+                    t85.appendChild(cell, NodeKind::ParagraphMark);
+                }
+            }
+            t85.appendChild(sec, NodeKind::ParagraphMark);
+        }
+
+        EditorEngine e85;
+        if (!e85.init(fonts85)) {
+            std::fprintf(stderr, "字体加载失败\n");
+            return 2;
+        }
+        e85.setConfig(c85);
+        e85.setDocument(t85, StyleSheet{});
+        e85.relayout();
+        e85.repaint();
+
+        // 某一格的首段段号（格的坐标 → 块下标）。
+        auto cellPara = [&](int row, int cell) {
+            for (size_t i = 0; i < e85.blocks().size(); ++i) {
+                const std::vector<CellSlot>& path = e85.blocks()[i].cell_path;
+                if (!path.empty() && path.back().row == row && path.back().cell == cell) {
+                    return static_cast<int>(i);
+                }
+            }
+            return -1;
+        };
+        auto putCaret = [&](int row, int cell) {
+            const int p = cellPara(row, cell);
+            if (p < 0) return false;
+            e85.setCaret(p, 0);
+            return true;
+        };
+        auto caretCell = [&](int* row, int* cell) {
+            const int para = e85.caret().para;
+            if (para < 0 || para >= static_cast<int>(e85.blocks().size())) return false;
+            const std::vector<CellSlot>& path = e85.blocks()[static_cast<size_t>(para)].cell_path;
+            if (path.empty()) return false;
+            if (row != nullptr) *row = path.back().row;
+            if (cell != nullptr) *cell = path.back().cell;
+            return true;
+        };
+        auto stateIs = [&](const char* needle) {
+            return e85.tableStateJson().find(needle) != std::string::npos;
+        };
+
+        expectTrue(e85.tableSpecs().size() == 1, "装载：一张表");
+        expectTrue(e85.tableSpecs()[0].rows == 2 && e85.tableSpecs()[0].cols == 2, "表是 2x2");
+        expectTrue(putCaret(0, 0), "光标进第 0 行第 0 格");
+
+        // 插行：行数 +1，光标跟着进新行的那一列（接着填是插入行之后最常见的下一步）。
+        expectTrue(e85.tableOpAndRender(EditorEngine::TableOp::InsertRowBelow),
+                   "在第 0 行下方插一行");
+        expectTrue(e85.tableSpecs()[0].rows == 3, "行数变 3");
+        int cr85 = -1;
+        int cc85 = -1;
+        expectTrue(caretCell(&cr85, &cc85) && cr85 == 1 && cc85 == 0,
+                   "光标落在新行第 0 列（实际 " + std::to_string(cr85) + "," +
+                       std::to_string(cc85) + "）");
+        expectTrue(e85.undo(), "撤销插行");
+        e85.relayout();
+        expectTrue(e85.tableSpecs()[0].rows == 2, "撤销之后行数回到 2");
+
+        // 删除行：删到只剩一行时拒绝，而且文档一个字节都不动。
+        expectTrue(putCaret(1, 0), "光标进第 1 行");
+        const size_t blocks85 = e85.blocks().size();
+        expectTrue(e85.tableOpAndRender(EditorEngine::TableOp::RemoveRow), "删掉第 1 行");
+        expectTrue(e85.tableSpecs()[0].rows == 1, "行数变 1");
+        expectTrue(!e85.tableOpAndRender(EditorEngine::TableOp::RemoveRow), "删最后一行被拒");
+        expectTrue(e85.blocks().size() == blocks85 - 2, "被拒时不再少块（拒前拒后一致）");
+        expectTrue(e85.undo(), "撤销删行");
+        e85.relayout();
+        expectTrue(e85.tableSpecs()[0].rows == 2, "撤销之后行数回到 2");
+
+        // 插列：列数 +1；插在右边时光标留在原格。
+        expectTrue(putCaret(0, 0), "光标回第 0 行第 0 格");
+        expectTrue(e85.tableOpAndRender(EditorEngine::TableOp::InsertColumnRight),
+                   "在第 0 列右侧插一列");
+        expectTrue(e85.tableSpecs()[0].cols == 3, "列数变 3");
+        expectTrue(caretCell(&cr85, &cc85) && cr85 == 0 && cc85 == 0, "光标还在原来那一格");
+        expectTrue(e85.undo(), "撤销插列");
+        e85.relayout();
+        expectTrue(e85.tableSpecs()[0].cols == 2, "撤销之后列数回到 2");
+
+        // 合并：拖选两格 → 整格选区 → 合并成 1 格（跨度 2），格子数少一个。
+        const int pa85 = cellPara(0, 0);
+        const int pb85 = cellPara(0, 1);
+        expectTrue(pa85 >= 0 && pb85 >= 0, "找得到第 0 行的两格");
+        e85.setCaretAtSide(pa85, 0, 0);
+        e85.setFocusAtSide(pb85, 0, 0);
+        expectTrue(e85.selectionIsCell(), "拖选跨格之后是整格选区");
+        const size_t cells85 = e85.tableSpecs()[0].cells.size();
+        expectTrue(e85.tableOpAndRender(EditorEngine::TableOp::MergeCells), "合并这两格");
+        expectTrue(e85.tableSpecs()[0].cells.size() == cells85 - 1, "格子数少一个");
+        bool merged85 = false;
+        for (const LayoutCell& lc : e85.tableSpecs()[0].cells) {
+            if (lc.row == 0 && lc.cell == 0) merged85 = lc.col_span == 2;
+        }
+        expectTrue(merged85, "左上角那一格横跨两列");
+        expectTrue(stateIs("\"colSpan\":2"), "tableState 报出这一格的跨度");
+        expectTrue(e85.undo(), "撤销合并");
+        e85.relayout();
+        expectTrue(e85.tableSpecs()[0].cells.size() == cells85, "撤销之后格子数回来");
+
+        // 没有整格选区时合并被拒：不替用户猜"和右边那一格并"。
+        expectTrue(putCaret(0, 0), "光标（不是选区）在第 0 行第 0 格");
+        expectTrue(!e85.tableOpAndRender(EditorEngine::TableOp::MergeCells), "单格不能合并");
+
+        // 拆分：合并之后拆回去，格数与跨度都回到原样；没合并的格拆分被拒。
+        e85.setCaretAtSide(cellPara(0, 0), 0, 0);
+        e85.setFocusAtSide(cellPara(0, 1), 0, 0);
+        expectTrue(e85.tableOpAndRender(EditorEngine::TableOp::MergeCells), "再合并一次");
+        expectTrue(e85.tableOpAndRender(EditorEngine::TableOp::SplitCell), "拆开合并的那一格");
+        expectTrue(e85.tableSpecs()[0].cells.size() == cells85, "拆分之后格子数回来");
+        bool split85 = false;
+        for (const LayoutCell& lc : e85.tableSpecs()[0].cells) {
+            if (lc.row == 0 && lc.cell == 0) split85 = lc.col_span == 1;
+        }
+        expectTrue(split85, "左上角那一格回到 1x1");
+        expectTrue(!e85.tableOpAndRender(EditorEngine::TableOp::SplitCell), "没合并的格不能拆分");
+
+        // 行记录：标题行。上面一步撤销过，这里先确认起始状态是"不是标题行"。
+        expectTrue(putCaret(0, 0), "光标回第 0 行第 0 格");
+        RowPatch rp85;
+        rp85.is_header = true;
+        expectTrue(e85.setRowSpecAndRender(rp85), "把第 0 行设成标题行");
+        expectTrue(e85.tableSpecs()[0].row_specs[0].is_header, "排版输入里这一行是标题行");
+        expectTrue(stateIs("\"rowHeader\":1"), "tableState 报出标题行");
+        // 幂等：同一个值再设一次也要成功，而且不产生新的一步撤销。
+        expectTrue(e85.setRowSpecAndRender(rp85), "再设一次同样的标题行");
+        expectTrue(e85.undo(), "撤销一次");
+        e85.relayout();
+        expectTrue(!e85.tableSpecs()[0].row_specs[0].is_header,
+                   "★ 一次撤销就回到「不是标题行」（幂等没有多压一步）");
+
+        // 格记录：垂直对齐。行列操作不许把它清回顶端（只写跨度的那种写法会）。
+        CellPatch cp85;
+        cp85.v_align = CellVAlign::Center;
+        expectTrue(e85.setCellSpecAndRender(cp85), "把这一格设成垂直居中");
+        expectTrue(stateIs("\"vAlign\":1"), "tableState 报出居中");
+        expectTrue(e85.tableOpAndRender(EditorEngine::TableOp::InsertColumnRight), "再插一列");
+        expectTrue(stateIs("\"vAlign\":1"), "★ 插列之后对齐没被清回顶端");
+        expectTrue(e85.undo(), "撤销插列");
+        e85.relayout();
+
+        // 表记录：宽度。
+        TablePatch tp85;
+        tp85.width_pt = 120.0f;
+        expectTrue(e85.setTableSpecAndRender(tp85), "把表宽设成 120 磅");
+        expectTrue(stateIs("\"widthPt\":120"), "tableState 报出 120 磅");
+        expectTrue(e85.undo(), "撤销表宽");
+        e85.relayout();
+
+        // 删列到底：2 列 → 1 列之后拒绝。
+        expectTrue(putCaret(0, 0), "光标回第 0 行第 0 格");
+        expectTrue(e85.tableOpAndRender(EditorEngine::TableOp::RemoveColumn), "删掉一列");
+        expectTrue(e85.tableSpecs()[0].cols == 1, "列数变 1");
+        expectTrue(!e85.tableOpAndRender(EditorEngine::TableOp::RemoveColumn), "删最后一列被拒");
+        expectTrue(e85.undo(), "撤销删列");
+        e85.relayout();
+        expectTrue(e85.tableSpecs()[0].cols == 2, "撤销之后列数回到 2");
+
+        // 表单模式是填值态：结构命令与属性命令都不该落地。
+        e85.setEditMode(EditMode::Form);
+        expectTrue(!e85.tableOpAndRender(EditorEngine::TableOp::InsertRowBelow),
+                   "表单模式下插行被拒");
+        RowPatch rp85b;
+        rp85b.is_header = true;
+        expectTrue(!e85.setRowSpecAndRender(rp85b), "表单模式下改行记录被拒");
+        expectTrue(!e85.setTableSpecAndRender(tp85), "表单模式下改表记录被拒");
+        e85.setEditMode(EditMode::Document);
+
+        // 落点归属：单元格里给表格，表格外的正文给文本。
+        e85.setCaret(cellPara(0, 0), 0);
+        Rect rc85{};
+        expectTrue(e85.caretRectPt(&rc85), "读得到格内光标矩形");
+        expectTrue(e85.contextTargetJson(rc85.x + 1.0f, rc85.y + 1.0f).find("\"kind\":1") !=
+                       std::string::npos,
+                   "★ 格内落点报的是表格");
+        expectTrue(e85.contextTargetJson(rc85.x + 1.0f, rc85.y + 1.0f).find("\"cellRow\":0") !=
+                       std::string::npos,
+                   "落点带出格坐标");
+        e85.setCaret(0, 1);
+        expectTrue(e85.caretRectPt(&rc85), "读得到正文光标矩形");
+        expectTrue(e85.contextTargetJson(rc85.x + 1.0f, rc85.y + 1.0f).find("\"kind\":0") !=
+                       std::string::npos,
+                   "★ 正文落点报的是文字");
+        expectTrue(e85.contextTargetJson(1e6f, 1e6f).find("\"kind\":-1") != std::string::npos,
+                   "页外落点报 none");
+
+        // 收尾：三次自审都要为 0（结构、编译、排版），页位图与从零重光栅一致。
+        e85.repaint();
+        expectTrue(e85.auditTablesJson().find("\"diff\":0") != std::string::npos,
+                   "表格结构自审为 0（" + e85.auditTablesJson() + "）");
+        expectTrue(e85.auditCompile() == 0, "编译自审为 0");
+        expectTrue(e85.auditLayout() == 0, "排版自审为 0");
+        expectTrue(e85.auditPageJson(0).find("\"diff\":0") != std::string::npos,
+                   "页位图 == 从零重光栅");
     }
 
     checkSectionTable();

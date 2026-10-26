@@ -250,6 +250,40 @@ export interface AuditCompile {
   fullMs: number;
 }
 
+export interface TableState {
+  inTable: number;
+  rows: number;
+  cols: number;
+  widthPt: number;
+  align: number;
+  headerRows: number;
+  row: number;
+  rowHeader: number;
+  rowSplit: number;
+  rowBreak: number;
+  heightPt: number;
+  heightRule: number;
+  cellRow: number;
+  cellCol: number;
+  rowSpan: number;
+  colSpan: number;
+  vAlign: number;
+  selCells: number;
+  selRows: number;
+  selCols: number;
+}
+
+export interface ContextTarget {
+  kind: number;
+  para: number;
+  offset: number;
+  cellTable: number;
+  cellRow: number;
+  cellCol: number;
+  control: number;
+  image: number;
+}
+
 /** 载荷名 -> 形状。readPayload() 用它做运行时校验。 */
 export interface Payloads {
   caretStyle: CaretStyle;
@@ -271,6 +305,8 @@ export interface Payloads {
   auditLayout: AuditLayout;
   auditGlyphPages: AuditGlyphPages;
   auditCompile: AuditCompile;
+  tableState: TableState;
+  contextTarget: ContextTarget;
 }
 
 export type PayloadName = keyof Payloads;

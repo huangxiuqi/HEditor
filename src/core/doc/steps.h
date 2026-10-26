@@ -477,26 +477,79 @@ struct SetControlSpec {
 };
 
 /**
- * 改一个单元格的跨度（第九节）。表格的行列操作落到步骤上就是"几个格子的跨度变了 + 插了几个
- * 新格子"—— 跨度是唯一真相，网格是派生的，所以没有"插一列"这种步骤，只有跨度的改动。
+ * 改一个单元格的记录（第九节）：跨度与格内垂直对齐。
  *
- * 位置映射是恒等：跨度不改流位置，也不改流结构。
+ * 表格的行列操作落到步骤上就是"几个格子的记录变了 + 插了几个新格子"—— 跨度是唯一真相，
+ * 网格是派生的，所以没有"插一列"这种步骤，只有记录的改动。整份 CellSpec 一起带，是因为
+ * 只写跨度会把垂直对齐静默清成顶端。
+ *
+ * 位置映射是恒等：这份记录不改流位置，也不改流结构。
  */
-struct SetTableCellSpan {
+struct SetCellSpec {
     /**
      * 改哪一格。
      */
     NodeId id = kInvalidNodeId;
 
     /**
-     * 新的跨度。
+     * 新的记录。
      */
-    CellSpec span;
+    CellSpec spec;
 
     /**
-     * 改之前的跨度（逆操作自足）。
+     * 改之前的记录（逆操作自足）。
      */
     CellSpec before;
+};
+
+/**
+ * 改一行表格的记录：标题行、允许跨页断行、行前分页、行高与行高规则。
+ *
+ * 与 SetCellSpec 同形：整份记录一起带、带原值。整份而非逐项，是因为调用方拿到的是
+ * "改完之后的这一行"，逐项拼装必然要在命令层再实现一遍"哪些项没给"的语义。
+ *
+ * 位置映射是恒等：行属性只改几何与分页，不改流位置。
+ */
+struct SetRowSpec {
+    /**
+     * 改哪一行。
+     */
+    NodeId id = kInvalidNodeId;
+
+    /**
+     * 新的记录。
+     */
+    RowSpec spec;
+
+    /**
+     * 改之前的记录（逆操作自足）。
+     */
+    RowSpec before;
+};
+
+/**
+ * 改一张表格的记录：表格宽度与水平位置。
+ *
+ * 列定义与列宽不在这里改：列定义是"按数据落值"的形状（改它等于换一张表的用法），
+ * 现在只由新建时给；列宽要等排版层的按列分配落地之后才有可写的入口。
+ *
+ * 位置映射是恒等：表属性只改几何。
+ */
+struct SetTableSpec {
+    /**
+     * 改哪张表。
+     */
+    NodeId id = kInvalidNodeId;
+
+    /**
+     * 新的记录。
+     */
+    TableSpec spec;
+
+    /**
+     * 改之前的记录（逆操作自足）。
+     */
+    TableSpec before;
 };
 
 /**
@@ -533,10 +586,10 @@ struct SetImageSize {
     Length beforeHeight;
 };
 
-using Step =
-    std::variant<InsertText, InsertFragment, DeleteRange, InsertParaMark, RemoveParaMark,
-                 SetParaMarkFormat, SetRun, InsertNode, RemoveNode, UnwrapNode, WrapNode,
-                 SetControlProp, SetControlValue, SetControlSpec, SetTableCellSpan, SetImageSize>;
+using Step = std::variant<InsertText, InsertFragment, DeleteRange, InsertParaMark, RemoveParaMark,
+                          SetParaMarkFormat, SetRun, InsertNode, RemoveNode, UnwrapNode, WrapNode,
+                          SetControlProp, SetControlValue, SetControlSpec, SetCellSpec, SetRowSpec,
+                          SetTableSpec, SetImageSize>;
 
 /**
  * 步骤的执行结果。失败时给出原因 —— 位置越界、类型不符都要显式说出来，不静默不做。

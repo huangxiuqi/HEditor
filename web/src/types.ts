@@ -545,6 +545,20 @@ export interface EditorOptions {
     index: number,
     rect: { page: number; x: number; y: number; w: number; h: number } | null,
   ) => void;
+
+  /**
+   * 右键落在文档上时通知宿主：菜单归宿主画（与 onControlTap 同一分工）。
+   *
+   * 库在这一下里做两件事：把浏览器自己的菜单拦掉、把插入点搬到指的地方（点图片则选中它）。
+   * 给到的落点归属是"搬完光标之后"的那一份，所以宿主可以直接用 tableState() / form() 读
+   * 现状、直接改组选用的动作 —— 不必再自己判一遍点到哪。
+   *
+   * 不给这个回调时库不动右键（浏览器菜单照常弹）：拦掉一个宿主没打算接的手势，等于把一个
+   * 能用的功能变成不能用的。
+   * @param target 落点归属（种类、位置、格坐标、控件与图片下标）
+   * @param at 指针位置（客户端坐标，CSS 像素）
+   */
+  onContextMenu?: (target: ContextTarget, at: { x: number; y: number }) => void;
 }
 
 /**
@@ -875,6 +889,218 @@ export interface ImageHit {
 }
 
 /**
+ * 表格结构命令的动词。
+ *
+ * 八条命令只有动词不同：主语都是"光标所在的那一格 / 那一行 / 那一列"，被拒的条件也都由
+ *   引擎判（模式不对、删到只剩一行一列、要合并的格子不是矩形）。宿主不该自己再判一遍。
+ */
+export type TableOp =
+  | 'insertRowAbove'
+  | 'insertRowBelow'
+  | 'removeRow'
+  | 'insertColumnLeft'
+  | 'insertColumnRight'
+  | 'removeColumn'
+  | 'mergeCells'
+  | 'splitCell';
+
+/**
+ * 改一个单元格的选项。只给要改的项 —— 跨度由行列操作与合并拆分改写，不在这里。
+ */
+export interface TableCellOptions {
+  /**
+   * 格内垂直对齐。
+   */
+  vAlign?: 'top' | 'middle' | 'bottom';
+}
+
+/**
+ * 改一行的选项。只给要改的项（不给 = 这一项不动）。
+ */
+export interface TableRowOptions {
+  /**
+   * 标题行：表格跨页时在每页顶端重复。只有从第 0 行起的连续几行才能是标题行。
+   */
+  header?: boolean;
+
+  /**
+   * 允许被分页线切开。
+   */
+  split?: boolean;
+
+  /**
+   * 行前强制分页。
+   */
+  breakBefore?: boolean;
+
+  /**
+   * 行高（磅）。0 或不给表示按内容。
+   */
+  heightPt?: number;
+
+  /**
+   * 行高规则：按内容 / 不小于 / 固定。
+   */
+  heightRule?: 'auto' | 'atLeast' | 'exact';
+}
+
+/**
+ * 改一张表的选项。只给要改的项。
+ */
+export interface TableOptions {
+  /**
+   * 表格宽度（磅）。0 表示撑满可用宽度。
+   */
+  widthPt?: number;
+
+  /**
+   * 表格在内容区里的水平位置。
+   */
+  align?: 'start' | 'center' | 'end';
+}
+
+/**
+ * 光标所在表格的现状：三层记录 + 整格选区的范围。
+ *
+ * 一份读全是有意的：属性面板要同时显示表宽、行高与格对齐，分三次问会拿到三个不同时刻
+ *   的状态（每次之间光标可能已经变了）。
+ */
+export interface TableState {
+  /**
+   * 光标在不在表格里。为假时下面各字段都是默认值，宿主不该据此施改。
+   */
+  inTable: boolean;
+
+  /**
+   * 网格行数。
+   */
+  rows: number;
+
+  /**
+   * 网格列数。
+   */
+  cols: number;
+
+  /**
+   * 表格宽度（磅）；-1 = 撑满可用宽度。
+   */
+  widthPt: number;
+
+  /**
+   * 表格的水平位置。
+   */
+  align: 'start' | 'center' | 'end';
+
+  /**
+   * 从第 0 行起连续标为标题行的行数。
+   */
+  headerRows: number;
+
+  /**
+   * 光标所在行的行号。
+   */
+  row: number;
+
+  /**
+   * 这一行是不是标题行。
+   */
+  rowHeader: boolean;
+
+  /**
+   * 这一行允不允许被分页线切开。
+   */
+  rowSplit: boolean;
+
+  /**
+   * 这一行之前是不是强制分页。
+   */
+  rowBreak: boolean;
+
+  /**
+   * 行高（磅）；-1 = 按内容。
+   */
+  heightPt: number;
+
+  /**
+   * 行高规则。
+   */
+  heightRule: 'auto' | 'atLeast' | 'exact';
+
+  /**
+   * 光标所在格的行号（合并格的左上角）。
+   */
+  cellRow: number;
+
+  /**
+   * 光标所在格的列号（合并格的左上角）。
+   */
+  cellCol: number;
+
+  /**
+   * 这一格的纵向跨度。
+   */
+  rowSpan: number;
+
+  /**
+   * 这一格的横向跨度。
+   */
+  colSpan: number;
+
+  /**
+   * 格内垂直对齐。
+   */
+  vAlign: 'top' | 'middle' | 'bottom';
+
+  /**
+   * 整格选区覆盖了几格（0 = 没有整格选区）。
+   */
+  selCells: number;
+
+  /**
+   * 整格选区覆盖几行。
+   */
+  selRows: number;
+
+  /**
+   * 整格选区覆盖几列。
+   */
+  selCols: number;
+}
+
+/**
+ * 右键落点上压着什么（onContextMenu 的入参）。
+ *
+ * 优先级由引擎定：图片 → 控件 → 表格 → 正文。宿主拿它决定弹哪一份菜单，不必自己再猜
+ *   —— 猜出来的那份在"图片压在字上"这类位置必然错。
+ */
+export interface ContextTarget {
+  /**
+   * 落点的种类。none = 点在页面之外（页间隙、装订区）。
+   */
+  kind: 'none' | 'text' | 'table' | 'control' | 'image';
+
+  /**
+   * 落点吸附到的文档位置；none 时为 null。
+   */
+  pos: Pos | null;
+
+  /**
+   * 落在表格里时给出格坐标；不在表格里为 null。
+   */
+  cell: { table: number; row: number; col: number } | null;
+
+  /**
+   * 落点上压着的控件下标；不在控件里为 -1。
+   */
+  control: number;
+
+  /**
+   * 落点上压着的图片下标；不在图片上为 -1。
+   */
+  image: number;
+}
+
+/**
  * 表单里的一个控件（form() 的精简视图）。
  */
 export interface ControlSummary {
@@ -902,6 +1128,21 @@ export interface ControlSummary {
    * 单控件的标签（组控件为空：它的文案在选项表里）。
    */
   label: string;
+
+  /**
+   * 内容不可编辑（填表的人只能看）。
+   */
+  readonly: boolean;
+
+  /**
+   * 必填（提交校验用；隐藏的控件不参与）。
+   */
+  required: boolean;
+
+  /**
+   * 下拉允许输入选项表以外的值。
+   */
+  freeInput: boolean;
 
   /**
    * 互斥组名（空 = 不与任何人互斥）。
@@ -1512,6 +1753,52 @@ export interface Editor {
   insertTable(opts: { rows: number; cols: number; header?: boolean }): Promise<boolean>;
 
   /**
+   * 跑一条表格结构命令。主语是光标所在的那一格（或那一行 / 那一列）。
+   *
+   * 只在文档模式可用。被拒时文档一个字节都不动：光标不在表格里、删到只剩一行一列、
+   *   行里有纵向合并（删行会连带删掉内容）、要合并的格子没铺满一个矩形、要并进去的格子
+   *   还有内容 —— 这些都由引擎判，宿主不必先自己算一遍。
+   * @param op 动词
+   * @returns 有没有改（false = 被拒，文档没动）
+   */
+  tableOp(op: TableOp): Promise<boolean>;
+
+  /**
+   * 改光标所在格的记录（目前是垂直对齐）。
+   *
+   * 幂等：给的项与现状相同返回 true 但不进撤销栈。
+   * @param opts 要改的项
+   * @returns 有没有改
+   */
+  setTableCell(opts: TableCellOptions): Promise<boolean>;
+
+  /**
+   * 改光标所在行的记录：标题行、跨页断行、行前分页、行高与行高规则。
+   *
+   * 标题行只能是"从第 0 行起的连续前缀"：把第 2 行单独标成标题行会让这张表不再是合法形状。
+   * @param opts 要改的项
+   * @returns 有没有改
+   */
+  setTableRow(opts: TableRowOptions): Promise<boolean>;
+
+  /**
+   * 改光标所在表格的记录：宽度与水平位置。
+   *
+   * widthPt 传 0 表示撑满可用宽度（不是"零宽"）。
+   * @param opts 要改的项
+   * @returns 有没有改
+   */
+  setTable(opts: TableOptions): Promise<boolean>;
+
+  /**
+   * 光标所在表格的现状：表 / 行 / 格三层记录 + 整格选区范围。
+   *
+   * 一次读全：属性面板要同时显示这三层，分三次问会拿到三个不同时刻的状态。
+   * @returns 现状；光标不在表格里时 inTable 为假
+   */
+  tableState(): Promise<TableState>;
+
+  /**
    * 在光标处插一个内容控件（表单字段），光标落进它的内容末尾。
    *
    * 控件是行内容器：它不切断段落，落点就是光标处。只在文档模式可用（理由同上）。
@@ -1519,6 +1806,16 @@ export interface Editor {
    * @returns 有没有插进去（模式不对时 false，文档不动）
    */
   insertControl(opts?: ControlInsertOptions): Promise<boolean>;
+
+  /**
+   * 删掉一个控件。keepContent 为真时拆壳留内容（那一段文字变成普通正文）。
+   *
+   * 只在文档模式可用：删字段是设计动作。表单模式里结构默认锁住，调用会返回 false。
+   * @param index 控件下标（form() 的第几项）
+   * @param opts keepContent = 保留内容、只拆掉字段本身
+   * @returns 有没有删掉
+   */
+  removeControl(index: number, opts?: { keepContent?: boolean }): Promise<boolean>;
 
   /**
    * 改一个控件的定义（选项表、标签、互斥组、自由输入、日期格式与单位、业务编码）。

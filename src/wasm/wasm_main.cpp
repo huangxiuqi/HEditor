@@ -1093,6 +1093,99 @@ ControlPatch controlPatchFrom(val o) {
 }
 
 /**
+ * 跑一条表格结构命令。op 与 EditorEngine::TableOp 同序：
+ * 0 上方插行 / 1 下方插行 / 2 删行 / 3 左侧插列 / 4 右侧插列 / 5 删列 / 6 合并 / 7 拆分。
+ *
+ * 光标不在表格里、模式不对、或那一格本来就不支持这个动作（删最后一列、合并区域不成立）
+ * 时整条命令被拒并返回 false —— 文档一个字节都不动。
+ */
+bool tableOpAt(int op) {
+    if (op < 0 || op > 7) return false;
+    return g_engine.tableOpAndRender(static_cast<EditorEngine::TableOp>(op));
+}
+
+/**
+ * 把宿主给的 opts 读成一份格记录的补丁。
+ * @param o opts（键：vAlign，0 顶端 / 1 居中 / 2 底端）
+ * @return 补丁
+ */
+CellPatch cellPatchFrom(val o) {
+    CellPatch p;
+    if (!o["vAlign"].isUndefined()) {
+        const int v = o["vAlign"].as<int>();
+        if (v >= 0 && v <= 2) p.v_align = static_cast<CellVAlign>(v);
+    }
+    return p;
+}
+
+/**
+ * 把宿主给的 opts 读成一份行记录的补丁。没给的键保持 nullopt（= 这一项不动）。
+ * @param o opts（键：header / split / breakBefore / heightPt / heightRule）
+ * @return 补丁
+ */
+RowPatch rowPatchFrom(val o) {
+    RowPatch p;
+    if (!o["header"].isUndefined()) p.is_header = o["header"].as<bool>();
+    if (!o["split"].isUndefined()) p.can_split_by_page = o["split"].as<bool>();
+    if (!o["breakBefore"].isUndefined()) p.page_break_before = o["breakBefore"].as<bool>();
+    if (!o["heightPt"].isUndefined()) p.height_pt = static_cast<float>(o["heightPt"].as<double>());
+    if (!o["heightRule"].isUndefined()) {
+        const int r = o["heightRule"].as<int>();
+        if (r >= 0 && r <= 2) p.height_rule = static_cast<HeightRule>(r);
+    }
+    return p;
+}
+
+/**
+ * 把宿主给的 opts 读成一份表记录的补丁。
+ * @param o opts（键：widthPt / align，align 与 Align 同序：0 左 / 1 中 / 2 右）
+ * @return 补丁
+ */
+TablePatch tablePatchFrom(val o) {
+    TablePatch p;
+    if (!o["widthPt"].isUndefined()) p.width_pt = static_cast<float>(o["widthPt"].as<double>());
+    if (!o["align"].isUndefined()) {
+        const int a = o["align"].as<int>();
+        if (a >= 0 && a <= 2) p.align = static_cast<Align>(a);
+    }
+    return p;
+}
+
+/**
+ * 改光标所在格的记录（目前是垂直对齐）。
+ */
+bool setCellSpecAt(val opts) {
+    const val o = (opts.isUndefined() || opts.isNull()) ? val::object() : opts;
+    return g_engine.setCellSpecAndRender(cellPatchFrom(o));
+}
+
+/**
+ * 改光标所在行的记录（标题行、跨页断行、行前分页、行高）。
+ */
+bool setRowSpecAt(val opts) {
+    const val o = (opts.isUndefined() || opts.isNull()) ? val::object() : opts;
+    return g_engine.setRowSpecAndRender(rowPatchFrom(o));
+}
+
+/**
+ * 改光标所在表格的记录（宽度、水平位置）。
+ */
+bool setTableSpecAt(val opts) {
+    const val o = (opts.isUndefined() || opts.isNull()) ? val::object() : opts;
+    return g_engine.setTableSpecAndRender(tablePatchFrom(o));
+}
+
+/**
+ * 光标所在表格的现状（表 / 行 / 格三层记录 + 整格选区范围）。
+ */
+std::string tableStateJson() { return g_engine.tableStateJson(); }
+
+/**
+ * 一个点上压着什么（右键菜单的判定）：文档坐标（磅）进，JSON 出。
+ */
+std::string contextTargetJson(float x, float y) { return g_engine.contextTargetJson(x, y); }
+
+/**
  * 插一个内容控件（表单字段），落在光标处，label 是它的初始内容。
  *
  * opts 的键都可省：type 是业务类型（默认 text）、key 是业务编码、label 是内容、
@@ -1372,8 +1465,16 @@ std::string controlsJson() {
           << jsonEscape(v != nullptr ? v->label : std::string()) << "\",\"group\":\""
           << jsonEscape(v != nullptr ? v->group : std::string()) << "\",\"text\":\""
           << jsonEscape(v != nullptr ? v->content : std::string())
-          << "\",\"ro\":" << (c.read_only ? "true" : "false")
-          << ",\"req\":" << ((v != nullptr && v->required) ? "true" : "false")
+          << "\",\"ro\":" << (c.read_only ? "true" : "false") << ",\"req\":"
+          << ((v != nullptr && v->required) ? "true" : "false")
+          // 日期的格式与可选单位、选择类的记号色：属性面板要按现状回填，缺了就只能显示默认值
+          //   （改一次颜色之后面板再打开还是黑的，用户会以为没改上）。
+          << ",\"fmt\":\"" << jsonEscape(v != nullptr ? v->format : std::string()) << "\""
+          << ",\"du\":" << (v != nullptr ? v->date_units : static_cast<uint16_t>(0))
+          << ",\"glyphColor\":[" << (v != nullptr ? static_cast<int>(v->glyph_color.r) : 0) << ","
+          << (v != nullptr ? static_cast<int>(v->glyph_color.g) : 0) << ","
+          << (v != nullptr ? static_cast<int>(v->glyph_color.b) : 0) << ","
+          << (v != nullptr ? static_cast<int>(v->glyph_color.a) : 0) << "]"
           << ",\"multi\":" << ((v != nullptr && v->multi) ? "true" : "false")
           << ",\"free\":" << ((v != nullptr && v->free_input) ? "true" : "false")
           << ",\"flag\":" << ((v != nullptr && v->value.flag) ? "true" : "false") << ",\"sel\":\""
@@ -2012,6 +2113,12 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("removeControlAt", &removeControlAt);
     emscripten::function("setControlPropAt", &setControlPropAt);
     emscripten::function("insertTableAt", &insertTableAt);
+    emscripten::function("tableOpAt", &tableOpAt);
+    emscripten::function("setCellSpecAt", &setCellSpecAt);
+    emscripten::function("setRowSpecAt", &setRowSpecAt);
+    emscripten::function("setTableSpecAt", &setTableSpecAt);
+    emscripten::function("tableStateJson", &tableStateJson);
+    emscripten::function("contextTargetJson", &contextTargetJson);
     emscripten::function("insertControlAt", &insertControlAt);
     emscripten::function("setControlSpecAt", &setControlSpecAt);
     emscripten::function("setControlValueAt", &setControlValueAt);

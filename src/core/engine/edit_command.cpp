@@ -2402,4 +2402,390 @@ bool EditCommand::pasteNodes(const std::vector<NodeSpec>& nodes) {
     return true;
 }
 
+bool EditCommand::currentTableCell(rev::CellRef* out, int* row, int* col) const {
+    if (!hasFlow() || out == nullptr) return false;
+    const int para = pos().caret().para;
+    const std::vector<BlockSpec>& all = blocks();
+    if (para < 0 || para >= static_cast<int>(all.size())) return false;
+    const std::vector<CellSlot>& path = all[static_cast<size_t>(para)].cell_path;
+    if (path.empty()) return false;
+    const CellSlot& slot = path.back();
+    if (!rev::cellRefAt(doc(), slot.table, slot.row, slot.cell, out)) return false;
+    if (row != nullptr || col != nullptr) {
+        int r = 0;
+        int c = 0;
+        if (!rev::cellOrigin(doc(), out->table, out->cell, &r, &c)) return false;
+        if (row != nullptr) *row = r;
+        if (col != nullptr) *col = c;
+    }
+    return true;
+}
+
+bool EditCommand::caretIntoCell(NodeId table, int row, int col) {
+    TableGrid grid;
+    std::string why;
+    if (!rev::tableGrid(doc(), table, &grid, &why)) return false;
+    if (grid.rows <= 0 || grid.cols <= 0) return false;
+    const int r = std::max(0, std::min(row, grid.rows - 1));
+    const int c = std::max(0, std::min(col, grid.cols - 1));
+    const GridCell* slot = grid.at(r, c);
+    if (slot == nullptr) return false;
+    // 落在合并区域里时给的是原点格 —— 光标要落进那一格的内容，不是那个格位。
+    rev::CellRef target;
+    if (!rev::cellRefOf(doc(), table, slot->row, slot->col, &target)) return false;
+    const std::vector<BlockSpec>& all = blocks();
+    for (size_t i = 0; i < all.size(); ++i) {
+        const std::vector<CellSlot>& path = all[i].cell_path;
+        if (path.empty()) continue;
+        const CellSlot& at = path.back();
+        if (at.table != static_cast<uint64_t>(target.table)) continue;
+        if (at.row != target.row_index || at.cell != target.cell_index) continue;
+        pos().setCaretAtFlow(blockFlow()[i]);
+        return true;
+    }
+    return false;
+}
+
+bool EditCommand::insertTableRow(bool below) {
+    if (!hasFlow()) return false;
+    // 改表结构是设计动作：表单模式在填值、只读模式不许改。
+    if (mode() != EditMode::Document) {
+        noteBlocked();
+        return false;
+    }
+    rev::CellRef cell;
+    int row = 0;
+    int col = 0;
+    if (!currentTableCell(&cell, &row, &col)) {
+        noteBlocked();
+        return false;
+    }
+    rev::TableSteps batch = rev::insertRow(doc(), flowIndex(), cell, below);
+    if (!batch.ok || batch.steps.empty()) {
+        noteBlocked();
+        return false;
+    }
+    pending_before_ = pos().selection();
+    pending_after_ = pending_before_;
+    const int dirty = pos().caret().para;
+    if (!commit(std::move(batch.steps), dirty)) {
+        noteBlocked();
+        return false;
+    }
+    // 光标进新行的那一列：插完就接着填，是"插入行"最常见的下一步。
+    caretIntoCell(cell.table, below ? row + 1 : row, col);
+    return true;
+}
+
+bool EditCommand::removeTableRow() {
+    if (!hasFlow()) return false;
+    if (mode() != EditMode::Document) {
+        noteBlocked();
+        return false;
+    }
+    rev::CellRef cell;
+    int row = 0;
+    int col = 0;
+    if (!currentTableCell(&cell, &row, &col)) {
+        noteBlocked();
+        return false;
+    }
+    rev::TableSteps batch = rev::removeRow(doc(), flowIndex(), cell);
+    if (!batch.ok || batch.steps.empty()) {
+        noteBlocked();
+        return false;
+    }
+    pending_before_ = pos().selection();
+    pending_after_ = pending_before_;
+    const int dirty = pos().caret().para;
+    if (!commit(std::move(batch.steps), dirty)) {
+        noteBlocked();
+        return false;
+    }
+    // 目标行号夹在删完之后的范围里：删的是最后一行时落到新的最后一行。
+    caretIntoCell(cell.table, row, col);
+    return true;
+}
+
+bool EditCommand::insertTableColumn(bool right) {
+    if (!hasFlow()) return false;
+    if (mode() != EditMode::Document) {
+        noteBlocked();
+        return false;
+    }
+    rev::CellRef cell;
+    int row = 0;
+    int col = 0;
+    if (!currentTableCell(&cell, &row, &col)) {
+        noteBlocked();
+        return false;
+    }
+    rev::TableSteps batch = rev::insertColumn(doc(), flowIndex(), cell, right);
+    if (!batch.ok || batch.steps.empty()) {
+        noteBlocked();
+        return false;
+    }
+    pending_before_ = pos().selection();
+    pending_after_ = pending_before_;
+    const int dirty = pos().caret().para;
+    if (!commit(std::move(batch.steps), dirty)) {
+        noteBlocked();
+        return false;
+    }
+    // 插在左边时这一格整体右移一列，光标跟着它走（落在原内容上，不落到新插的空列里）。
+    caretIntoCell(cell.table, row, right ? col : col + 1);
+    return true;
+}
+
+bool EditCommand::removeTableColumn() {
+    if (!hasFlow()) return false;
+    if (mode() != EditMode::Document) {
+        noteBlocked();
+        return false;
+    }
+    rev::CellRef cell;
+    int row = 0;
+    int col = 0;
+    if (!currentTableCell(&cell, &row, &col)) {
+        noteBlocked();
+        return false;
+    }
+    rev::TableSteps batch = rev::removeColumn(doc(), flowIndex(), cell);
+    if (!batch.ok || batch.steps.empty()) {
+        noteBlocked();
+        return false;
+    }
+    pending_before_ = pos().selection();
+    pending_after_ = pending_before_;
+    const int dirty = pos().caret().para;
+    if (!commit(std::move(batch.steps), dirty)) {
+        noteBlocked();
+        return false;
+    }
+    // 这一列没了：光标落到顶替它的那一格（同列号，夹到新的列数里）。
+    caretIntoCell(cell.table, row, col);
+    return true;
+}
+
+bool EditCommand::mergeTableCells() {
+    if (!hasFlow()) return false;
+    if (mode() != EditMode::Document) {
+        noteBlocked();
+        return false;
+    }
+    const std::vector<CaretResolver::CellBlocks>& blocks_of_cells = pos().cellBlocks();
+    if (blocks_of_cells.size() < 2) {
+        // 没有整格选区就没有"要合并的那一片"：不替用户猜"和右边那一格并"。
+        noteBlocked();
+        return false;
+    }
+    std::vector<rev::CellRef> cells;
+    const std::vector<BlockSpec>& all = blocks();
+    for (const CaretResolver::CellBlocks& cb : blocks_of_cells) {
+        if (cb.empty() || cb.first < 0 || cb.first >= static_cast<int>(all.size())) {
+            noteBlocked();
+            return false;
+        }
+        const std::vector<CellSlot>& path = all[static_cast<size_t>(cb.first)].cell_path;
+        if (path.empty()) {
+            noteBlocked();
+            return false;
+        }
+        const CellSlot& slot = path.back();
+        rev::CellRef ref;
+        if (!rev::cellRefAt(doc(), slot.table, slot.row, slot.cell, &ref)) {
+            noteBlocked();
+            return false;
+        }
+        cells.push_back(ref);
+    }
+    const NodeId table = cells.front().table;
+    rev::TableSteps batch = rev::mergeCells(doc(), flowIndex(), cells);
+    if (!batch.ok || batch.steps.empty()) {
+        noteBlocked();
+        return false;
+    }
+    // 合并之后的落点是左上角那一格：整格选区随之收成"光标在合并后的那一格里"。
+    int lo_row = 0;
+    int lo_col = 0;
+    {
+        int row = 0;
+        int col = 0;
+        bool found = false;
+        for (const rev::CellRef& c : cells) {
+            int r = 0;
+            int cc = 0;
+            if (!rev::cellOrigin(doc(), table, c.cell, &r, &cc)) continue;
+            if (!found || r < lo_row || (r == lo_row && cc < lo_col)) {
+                lo_row = r;
+                lo_col = cc;
+                found = true;
+            }
+        }
+        if (!found) {
+            noteBlocked();
+            return false;
+        }
+    }
+    pending_before_ = pos().selection();
+    pending_after_ = pending_before_;
+    const int dirty = pos().caret().para;
+    if (!commit(std::move(batch.steps), dirty)) {
+        noteBlocked();
+        return false;
+    }
+    caretIntoCell(table, lo_row, lo_col);
+    return true;
+}
+
+bool EditCommand::splitTableCell() {
+    if (!hasFlow()) return false;
+    if (mode() != EditMode::Document) {
+        noteBlocked();
+        return false;
+    }
+    rev::CellRef cell;
+    int row = 0;
+    int col = 0;
+    if (!currentTableCell(&cell, &row, &col)) {
+        noteBlocked();
+        return false;
+    }
+    rev::TableSteps batch = rev::splitCell(doc(), flowIndex(), cell);
+    if (!batch.ok || batch.steps.empty()) {
+        noteBlocked();
+        return false;
+    }
+    pending_before_ = pos().selection();
+    pending_after_ = pending_before_;
+    const int dirty = pos().caret().para;
+    if (!commit(std::move(batch.steps), dirty)) {
+        noteBlocked();
+        return false;
+    }
+    // 拆完留在左上角那一格：内容在它身上，用户的注意力也在它身上。
+    caretIntoCell(cell.table, row, col);
+    return true;
+}
+
+bool EditCommand::setCellSpec(const CellPatch& patch) {
+    if (!hasFlow()) return false;
+    if (mode() != EditMode::Document) {
+        noteBlocked();
+        return false;
+    }
+    rev::CellRef cell;
+    if (!currentTableCell(&cell, nullptr, nullptr)) {
+        noteBlocked();
+        return false;
+    }
+    const rev::Node* n = rev::findNode(doc(), cell.cell);
+    if (n == nullptr || n->kind != NodeKind::TableCell) return false;
+    const auto* cur = std::get_if<CellSpec>(&n->payload);
+    if (cur == nullptr) return false;
+
+    CellSpec next = *cur;
+    if (patch.v_align.has_value()) next.v_align = *patch.v_align;
+    if (next == *cur) return true;  // 幂等：不提交、不进撤销栈
+
+    SetCellSpec s;
+    s.id = cell.cell;
+    s.spec = next;
+    s.before = *cur;
+    std::vector<Step> steps;
+    steps.push_back(Step{s});
+    // 改记录不动光标：留着 null Range 会被当成"文档开头"。
+    pending_before_ = pos().selection();
+    pending_after_ = pos().selection();
+    const int dirty = pos().caret().para;
+    if (!commit(std::move(steps), dirty)) {
+        noteBlocked();
+        return false;
+    }
+    return true;
+}
+
+bool EditCommand::setRowSpec(const RowPatch& patch) {
+    if (!hasFlow()) return false;
+    if (mode() != EditMode::Document) {
+        noteBlocked();
+        return false;
+    }
+    rev::CellRef cell;
+    if (!currentTableCell(&cell, nullptr, nullptr)) {
+        noteBlocked();
+        return false;
+    }
+    const rev::Node* n = rev::findNode(doc(), cell.row);
+    if (n == nullptr || n->kind != NodeKind::TableRow) return false;
+    const auto* cur = std::get_if<RowSpec>(&n->payload);
+    if (cur == nullptr) return false;
+
+    RowSpec next = *cur;
+    if (patch.is_header.has_value()) next.is_header = *patch.is_header;
+    if (patch.can_split_by_page.has_value()) next.can_split_by_page = *patch.can_split_by_page;
+    if (patch.page_break_before.has_value()) next.page_break_before = *patch.page_break_before;
+    if (patch.height_pt.has_value()) {
+        const float pt = *patch.height_pt;
+        next.height = pt > 0.0f ? Length::abs(ptToEmu(pt)) : Length{};
+    }
+    if (patch.height_rule.has_value()) next.height_rule = *patch.height_rule;
+    if (next == *cur) return true;
+
+    SetRowSpec s;
+    s.id = cell.row;
+    s.spec = next;
+    s.before = *cur;
+    std::vector<Step> steps;
+    steps.push_back(Step{s});
+    pending_before_ = pos().selection();
+    pending_after_ = pos().selection();
+    const int dirty = pos().caret().para;
+    if (!commit(std::move(steps), dirty)) {
+        noteBlocked();
+        return false;
+    }
+    return true;
+}
+
+bool EditCommand::setTableSpec(const TablePatch& patch) {
+    if (!hasFlow()) return false;
+    if (mode() != EditMode::Document) {
+        noteBlocked();
+        return false;
+    }
+    rev::CellRef cell;
+    if (!currentTableCell(&cell, nullptr, nullptr)) {
+        noteBlocked();
+        return false;
+    }
+    const rev::Node* n = rev::findNode(doc(), cell.table);
+    if (n == nullptr || n->kind != NodeKind::Table) return false;
+    const auto* cur = std::get_if<TableSpec>(&n->payload);
+    if (cur == nullptr) return false;
+
+    TableSpec next = *cur;
+    if (patch.width_pt.has_value()) {
+        const float pt = *patch.width_pt;
+        next.width = pt > 0.0f ? Length::abs(ptToEmu(pt)) : Length{};
+    }
+    if (patch.align.has_value()) next.align = *patch.align;
+    if (next == *cur) return true;
+
+    SetTableSpec s;
+    s.id = cell.table;
+    s.spec = next;
+    s.before = *cur;
+    std::vector<Step> steps;
+    steps.push_back(Step{s});
+    pending_before_ = pos().selection();
+    pending_after_ = pos().selection();
+    const int dirty = pos().caret().para;
+    if (!commit(std::move(steps), dirty)) {
+        noteBlocked();
+        return false;
+    }
+    return true;
+}
+
 }  // namespace heditor

@@ -931,20 +931,44 @@ StepResult canApply(const NodeTree& tree, const FlowIndex& idx, const Step& step
                 }
                 r.ok = true;
             },
-            [&](const SetTableCellSpan& s) {
+            [&](const SetCellSpec& s) {
                 const Node* n = tree.find(s.id);
                 if (n == nullptr || n->kind != NodeKind::TableCell) {
-                    r.error = "改跨度：目标不是单元格";
+                    r.error = "改格记录：目标不是单元格";
                     return;
                 }
                 // 0 或负数不是可表达的跨度：真放过去，派生网格会把这一行算短，
                 // 而"每行跨度之和相等"那条不变量要到下一次检查才报出来。
-                if (s.span.row_span < 1 || s.span.col_span < 1) {
-                    r.error = "改跨度：跨度至少是 1";
+                if (s.spec.row_span < 1 || s.spec.col_span < 1) {
+                    r.error = "改格记录：跨度至少是 1";
                     return;
                 }
                 if (!(n->cell == s.before)) {
-                    r.error = "改跨度：当前跨度与步骤记的原值不符（步骤过期了）";
+                    r.error = "改格记录：当前记录与步骤记的原值不符（步骤过期了）";
+                    return;
+                }
+                r.ok = true;
+            },
+            [&](const SetRowSpec& s) {
+                const Node* n = tree.find(s.id);
+                if (n == nullptr || n->kind != NodeKind::TableRow) {
+                    r.error = "改行记录：目标不是表格行";
+                    return;
+                }
+                if (!(n->row == s.before)) {
+                    r.error = "改行记录：当前记录与步骤记的原值不符（步骤过期了）";
+                    return;
+                }
+                r.ok = true;
+            },
+            [&](const SetTableSpec& s) {
+                const Node* n = tree.find(s.id);
+                if (n == nullptr || n->kind != NodeKind::Table) {
+                    r.error = "改表记录：目标不是表格";
+                    return;
+                }
+                if (!(n->table == s.before)) {
+                    r.error = "改表记录：当前记录与步骤记的原值不符（步骤过期了）";
                     return;
                 }
                 r.ok = true;
@@ -1089,9 +1113,17 @@ StepResult applyStep(NodeTree& tree, const Step& step) {
             [&](const SetControlProp& s) { writeControlProp(tree, s.id, s.prop, s.value); },
             [&](const SetControlValue& s) { writeControlValue(tree, s.id, s.value); },
             [&](const SetControlSpec& s) { writeControlSpec(tree, s.id, s.spec); },
-            [&](const SetTableCellSpan& s) {
+            [&](const SetCellSpec& s) {
                 Node* n = tree.find(s.id);
-                if (n != nullptr) n->cell = s.span;
+                if (n != nullptr) n->cell = s.spec;
+            },
+            [&](const SetRowSpec& s) {
+                Node* n = tree.find(s.id);
+                if (n != nullptr) n->row = s.spec;
+            },
+            [&](const SetTableSpec& s) {
+                Node* n = tree.find(s.id);
+                if (n != nullptr) n->table = s.spec;
             },
             [&](const SetImageSize& s) {
                 Node* n = tree.find(s.id);
@@ -1228,11 +1260,25 @@ Step invertStep(const Step& step) {
                               x.before = s.spec;
                               return Step{x};
                           },
-                          [](const SetTableCellSpan& s) -> Step {
-                              SetTableCellSpan x;
+                          [](const SetCellSpec& s) -> Step {
+                              SetCellSpec x;
                               x.id = s.id;
-                              x.span = s.before;
-                              x.before = s.span;
+                              x.spec = s.before;
+                              x.before = s.spec;
+                              return Step{x};
+                          },
+                          [](const SetRowSpec& s) -> Step {
+                              SetRowSpec x;
+                              x.id = s.id;
+                              x.spec = s.before;
+                              x.before = s.spec;
+                              return Step{x};
+                          },
+                          [](const SetTableSpec& s) -> Step {
+                              SetTableSpec x;
+                              x.id = s.id;
+                              x.spec = s.before;
+                              x.before = s.spec;
                               return Step{x};
                           },
                           [](const SetImageSize& s) -> Step {
@@ -1311,8 +1357,11 @@ FlowPos mapPos(const Step& step, FlowPos pos, Assoc assoc) {
                           [&](const SetControlValue&) -> FlowPos { return pos; },
                           // 定义也不改位置：选项表变短只让内容变短，内容步骤自己带坐标。
                           [&](const SetControlSpec&) -> FlowPos { return pos; },
-                          // 跨度不改流位置，也不改流结构：它改的是"这一格覆盖多少格位"。
-                          [&](const SetTableCellSpan&) -> FlowPos { return pos; },
+                          // 格记录不改流位置，也不改流结构：它改的是"这一格覆盖多少格位"与对齐。
+                          [&](const SetCellSpec&) -> FlowPos { return pos; },
+                          // 行与表的记录同理：分页、行高、表宽都只改行盒几何。
+                          [&](const SetRowSpec&) -> FlowPos { return pos; },
+                          [&](const SetTableSpec&) -> FlowPos { return pos; },
                           // 图片尺寸只改行盒几何，位置一个都不动。
                           [&](const SetImageSize&) -> FlowPos { return pos; },
                           // 段落格式与字符格式同理：改的是节点上的数据，位置一个都不动。
@@ -1328,7 +1377,9 @@ bool mapStepPositions(Step* target, const Step& mapped_by, Assoc assoc) {
     if (std::holds_alternative<SetControlProp>(*target) ||
         std::holds_alternative<SetControlValue>(*target) ||
         std::holds_alternative<SetControlSpec>(*target) ||
-        std::holds_alternative<SetTableCellSpan>(*target) ||
+        std::holds_alternative<SetCellSpec>(*target) ||
+        std::holds_alternative<SetRowSpec>(*target) ||
+        std::holds_alternative<SetTableSpec>(*target) ||
         std::holds_alternative<SetImageSize>(*target) ||
         std::holds_alternative<SetParaMarkFormat>(*target) ||
         std::holds_alternative<SetRun>(*target)) {

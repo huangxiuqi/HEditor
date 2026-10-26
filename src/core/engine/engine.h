@@ -1404,6 +1404,103 @@ public:
     bool insertTableAndRender(int rows, int cols, bool header);
 
     /**
+     * 表格结构命令的动词。
+     *
+     * 一条枚举管住六条命令：它们共享"光标在哪一格""只在文档模式放行""一批步骤一次提交"
+     * 这三件事，只有动词不同。分成六个入口时这四句话要抄六遍，抄漏一遍就是一个能改只读
+     * 文档的后门。
+     */
+    enum class TableOp {
+        InsertRowAbove,     // 在光标所在行之上插一行
+        InsertRowBelow,     // 在光标所在行之下插一行
+        RemoveRow,          // 删掉光标所在行
+        InsertColumnLeft,   // 在光标所在格左侧插一列
+        InsertColumnRight,  // 在光标所在格右侧插一列
+        RemoveColumn,       // 删掉光标所在列
+        MergeCells,         // 把整格选区合并成一格
+        SplitCell           // 把光标所在格拆回它覆盖的格位
+    };
+
+    /**
+     * 跑一条表格结构命令。光标必须落在表格里，否则拒绝（"删一行"的主语是光标所在的那一行）。
+     *
+     * @param op 动词
+     * @return true = 改成了
+     */
+    bool tableOp(TableOp op);
+
+    /**
+     * 表格结构命令 + 重排 + 呈现。
+     * @param op 动词
+     * @return true = 改成了
+     */
+    bool tableOpAndRender(TableOp op);
+
+    /**
+     * 改光标所在格的记录（垂直对齐）。
+     * @param patch 要改的项
+     * @return true = 改成了（幂等时也成立）
+     */
+    bool setCellSpec(const CellPatch& patch);
+
+    /**
+     * 改光标所在格的记录 + 重排 + 呈现。
+     * @param patch 要改的项
+     * @return true = 改成了
+     */
+    bool setCellSpecAndRender(const CellPatch& patch);
+
+    /**
+     * 改光标所在行的记录（标题行、跨页断行、行前分页、行高）。
+     * @param patch 要改的项
+     * @return true = 改成了（幂等时也成立）
+     */
+    bool setRowSpec(const RowPatch& patch);
+
+    /**
+     * 改光标所在行的记录 + 重排 + 呈现。
+     * @param patch 要改的项
+     * @return true = 改成了
+     */
+    bool setRowSpecAndRender(const RowPatch& patch);
+
+    /**
+     * 改光标所在表格的记录（宽度、水平位置）。
+     * @param patch 要改的项
+     * @return true = 改成了（幂等时也成立）
+     */
+    bool setTableSpec(const TablePatch& patch);
+
+    /**
+     * 改光标所在表格的记录 + 重排 + 呈现。
+     * @param patch 要改的项
+     * @return true = 改成了
+     */
+    bool setTableSpecAndRender(const TablePatch& patch);
+
+    /**
+     * 光标所在表格的现状（表格 / 行 / 格三层记录 + 整格选区的范围）。
+     *
+     * 属性面板一次读全：分三次问会拿到三个不同时刻的状态，而"表宽 + 行高 + 格对齐"
+     * 本来就是同一张表单上的三组字段。光标不在表格里时 inTable 为假。
+     *
+     * @return JSON（键见 docs/api/payloads.json 的 tableState）
+     */
+    std::string tableStateJson() const;
+
+    /**
+     * 一个点上压着什么（右键菜单的判定）。
+     *
+     * 优先级是"最具体的那一个"：图片（行内原子，画在最上层）→ 控件 → 表格 → 正文。
+     * 图片先在前面是因为它压在文字上：点图的一半在字上，用户要的是图。
+     *
+     * @param x_pt_doc 文档坐标 x（磅）
+     * @param y_pt_doc 文档坐标 y（磅）
+     * @return JSON（键见 docs/api/payloads.json 的 contextTarget）
+     */
+    std::string contextTargetJson(float x_pt_doc, float y_pt_doc) const;
+
+    /**
      * 在光标处插一个内容控件（表单字段），光标落进它的内容末尾。
      *
      * @param spec 控件记录

@@ -18,6 +18,7 @@ import {
   writeToDataTransfer,
   writeToSystemClipboard,
 } from './clipboard';
+import type { ContextTarget } from '../types';
 import { type CanvasStore, type ScrollGeometry } from './pages';
 import {
   imeOf,
@@ -143,6 +144,13 @@ export interface DomHostOptions {
    * @param rect 控件在页面坐标下的第一块矩形（磅）；读不到时为 null
    */
   onControlTap?(index: number, rect: { page: number; x: number; y: number; w: number; h: number } | null): void;
+
+  /**
+   * 右键落在文档上（库已经把插入点搬过去了）。菜单归宿主画。
+   * @param target 落点归属
+   * @param at 指针位置（客户端坐标，CSS 像素）
+   */
+  onContextMenu?(target: ContextTarget, at: { x: number; y: number }): void;
 
   /**
    * 状态栏（产品页没有这一格，实现里就什么都不做）。
@@ -1055,6 +1063,38 @@ export function createDomHost(o: DomHostOptions): DomHost {
   //   委托给容器就没有那个缺口。合成 MouseEvent（探针）没有配套的 pointerdown，
   //   所以"按下"这一条必须挂在 mousedown 上。
   scroller.addEventListener('mousedown', (ev) => void input.onPointerDown(ev));
+  /**
+   * 右键：先把插入点搬到指的地方，再把"这一下压着什么"交给宿主。
+   *
+   * 顺序有意义 —— 宿主拿到归属时光标已经在那一格 / 那个控件旁边了，它随后的动作（插行、
+   *   改属性）才落在用户指的那一处。点图片时落点走 placeAt 那一路：图片是原子，光标只能
+   *   停在它两侧，选中它才是"我要对这张图做事"。
+   *
+   * 没接 onContextMenu 就完全不拦：拦掉一个宿主没打算接的手势，等于把一个能用的功能
+   *   变成不能用的。
+   */
+  const onContextMenu = (ev: MouseEvent): void => {
+    if (!ready || disposed) return;
+    const notify = o.onContextMenu;
+    if (!notify) return;
+    const px = pointAt(ev.clientX, ev.clientY);
+    const p = docPt(px.x, px.y);
+    ev.preventDefault();
+    fireAndForget(
+      then1(read('contextTarget', { x: p.x, y: p.y }), (target: ContextTarget) => {
+        // 读不回来（引擎还没装载）就什么都不发：宿主拿到一个形状不对的落点只会崩在它自己手里。
+        if (!target || typeof target.kind !== 'string') return undefined;
+        if (target.kind === 'none') {
+          notify(target, { x: ev.clientX, y: ev.clientY });
+          return undefined;
+        }
+        return then1(input.placeAt(px), () => {
+          notify(target, { x: ev.clientX, y: ev.clientY });
+        });
+      }),
+    );
+  };
+  scroller.addEventListener('contextmenu', onContextMenu);
   // 悬停只改光标样式，不动文档：落在图片把手上时换成对应方向的缩放光标。
   scroller.addEventListener('mousemove', (ev) => input.onPointerMove(ev));
   scroller.addEventListener('mouseleave', () => input.onPointerLeave());
