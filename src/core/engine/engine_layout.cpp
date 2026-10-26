@@ -856,9 +856,17 @@ bool EditorEngine::shiftSuffixBlockAxis(int from, size_t first_glyph, int to,
     //   行盒的 size_pt 是排版时按本行最大的字符格式 run 定的，所以混排字号时必须用它，
     //   不能用块的 size_pt：否则后缀的页号会与整篇重排不一致。
     //
+    // 两种页模式在这里是两套坐标，必须分开算：分页的块轴是页内 y，放不下就翻页并把块轴
+    //   挪回页顶；连页的块轴是整篇累加的绝对 y，页号与页内坐标都由它现算（与 layout.cpp
+    //   的 slabOfY / locY 同一个式子）。只按分页算的话，连页文档从第二页起的后缀每一行
+    //   都判成"放不下"，整条后缀被拽回条带顶部：中间空出一块、下面的接不上；后缀里有表
+    //   时表从错误的块轴位置续排，整篇塌回第一页。
+    //
     // 先空跑一遍（apply=false）做校验，通过了再真改。理由：这一趟边走边写
     //   layout_，一旦中途发现"字形与行号对不上"就已经改了一半 —— 那时既不能
     //   继续（结果错）也不能退出（数据已经脏了）。校验与修改必须是两趟。
+    const bool cont = cfg_.page.continuous;
+    const float slab = cfg_.page.slabHeightPt();
     int final_page = after.page_index;  // 走完最后落在哪一页
     ReflowState end;                    // 走完 to 时的续排状态（cut 那一路要用它接着排）
     auto walk = [&](bool apply) -> bool {
@@ -866,6 +874,15 @@ bool EditorEngine::shiftSuffixBlockAxis(int from, size_t first_glyph, int to,
         int page = after.page_index;
         int line_no = after.line_total;
         size_t g = first_glyph;
+        // 块轴位置 -> 页号。分页下页号是循环里那个变量（翻页由下面两处 ++page 决定），
+        //   连页下由位置现算 —— 没有"翻页"这回事。
+        auto bandOf = [&](float y) -> int {
+            return cont ? static_cast<int>(std::floor(y / slab)) : page;
+        };
+        // 块轴位置 -> 写进行盒与字形的页内坐标。分页下块轴本来就是页内坐标。
+        auto localOf = [&](float y, int band) -> float {
+            return cont ? y - static_cast<float>(band) * slab : y;
+        };
         // from 就是后缀的第一段（脏区可能占不止一段，所以调用方另给了 first_glyph）
         for (int p = from; p < to; ++p) {
             const BlockSpec& b = blocks()[static_cast<size_t>(p)];
@@ -873,9 +890,10 @@ bool EditorEngine::shiftSuffixBlockAxis(int from, size_t first_glyph, int to,
             // 状态（页号 / 块轴位置 / 行号都变了）。与主循环一致：在空段判定与翻页
             // 之前记录。
             ParaIndex& pi = layout_.para_index[static_cast<size_t>(p)];
-            if (apply) pi.state_at_start = ReflowState{page, s, line_no};
+            if (apply) pi.state_at_start = ReflowState{bandOf(s), s, line_no};
 
-            if (b.page_break_before && s > cy + 0.01f) {
+            // 段前分页只在分页模式下成立：连页里段落是连着的，没有"另起一页"。
+            if (!cont && b.page_break_before && s > cy + 0.01f) {
                 ++page;
                 s = cy;
             }
@@ -887,33 +905,36 @@ bool EditorEngine::shiftSuffixBlockAxis(int from, size_t first_glyph, int to,
                 LineBox& lb = layout_.lines[static_cast<size_t>(L)];
                 // 行高按行盒自己的字号算（见上面那段说明）：一行里可以混排字号。
                 const float lh = lb.advance_pt;
-                if (s + lh > cy + ch) {
+                if (!cont && s + lh > cy + ch) {
                     ++page;
                     s = cy;
                 }
+                const int band = bandOf(s);
+                const float local = localOf(s, band);
                 // 行的三个纵向字段用行盒自己记的度量重算，公式与 placeLine 同源：
                 //   基线 = 行顶 + ascent，上边 = 行顶，下边 = 基线 + descent。
                 //   不写"老坐标 + 大增量"：那会多一次重新结合，跨页几页的平移（比如删掉
                 //   一张占半页的表）会在末位差一个 ulp，而判据是逐位对拍。
                 const float old_axis = lb.bracket_axis_pt;
-                const float axis = s + lb.ascent_pt;
+                const float axis = local + lb.ascent_pt;
                 // 字形与它的行一一对应：两边都是按行序追加的，并行往前走即可
                 // （某行可能一个字形都没有 —— 全是占位槽的行 —— 指针不动就是对的）。
                 //   字形纵坐标相对基线不变，所以按"新基线 - 到基线的距离"重算，不做增量加法。
+                //   两端的基线都是页内坐标（连页下行盒与字形也存页内），差的传递照样成立。
                 const int old_line = lb.line;
                 while (g < gs.size() && gs[g].line == old_line) {
                     if (apply) {
                         gs[g].y_pt = axis - (old_axis - gs[g].y_pt);
-                        gs[g].page = page;
+                        gs[g].page = band;
                         gs[g].line = line_no;
                     }
                     ++g;
                 }
                 if (apply) {
                     lb.bracket_axis_pt = axis;  // 横排下它就是基线
-                    lb.block_lo_pt = s;
+                    lb.block_lo_pt = local;
                     lb.block_hi_pt = axis + lb.descent_pt;
-                    lb.page = page;
+                    lb.page = band;
                     lb.line = line_no;
                 }
                 s += lh;
@@ -923,8 +944,10 @@ bool EditorEngine::shiftSuffixBlockAxis(int from, size_t first_glyph, int to,
         }
         // 字形必须正好走到 to 的边界：多一个少一个都说明行号与字形对不上 —— 宁可整篇重排，
         // 也不要留下错位的排版（错位是静默的，只在画面上表现为"某个字串行了"）。
-        final_page = page;
-        end = ReflowState{page, s, line_no};
+        //   页数取"走完之后块轴所在的条带"：与 layoutDocumentRangeWithTables 收尾那一步
+        //   同一个口径（那里也是按走完之后的 cursor_y 定页）。
+        final_page = bandOf(s);
+        end = ReflowState{final_page, s, line_no};
         return g == glyph_end;
     };
     if (!walk(/*apply=*/false)) return false;

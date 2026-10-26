@@ -913,7 +913,7 @@ test.describe('插入表格', () => {
       const ok = await H.deleteBackward();
       await H.flush();
       const gone = { inTable: (await H.tableState()).inTable, paras: (await H.paragraphs()).length,
-                     text: await H.text() };
+                     text: await H.text(), caret: CARET() };
       await H.undo();
       await H.flush();
       const back = { inTable: (await H.tableState()).inTable,
@@ -923,6 +923,11 @@ test.describe('插入表格', () => {
     check('★ 删的是整张表（表框一起走，不是只剩一张空表）',
           all.ok === true && all.gone.inTable === false && all.gone.text === '甲\n',
           JSON.stringify({ ok: all.ok, gone: all.gone }));
+    // 光标落回被删表的那一处：表后那一段的段首。整格选区的起点在表格内部，那个流位置
+    //   随表一起消失、被后面的内容顶上来：拿它当落点，光标就落在段中间。
+    check('★ 删完光标停在表原来的位置（表后那一段的段首）',
+          all.gone.caret.para === 1 && all.gone.caret.offset === 0,
+          JSON.stringify({ para: all.gone.caret.para, offset: all.gone.caret.offset }));
     check('★ 一步撤销把表整张恢复', all.back.inTable === true && all.back.paras === 6,
           JSON.stringify(all.back));
 

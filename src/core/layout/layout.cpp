@@ -1335,8 +1335,14 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
         // 续排锚点必须在任何提前返回之前记录，空段也记，否则「从第 k 段续排」在空段上无定义。
         //   表起点那一段用切换之前的块轴位置（见上面 cursor_before_switch）：从表起点续排
         //   要落在表顶，不是格内第一行。
+        //
+        //   页号在连页下必须按块轴位置现算：这条路上 page_index 一路不增（连页不翻页），
+        //   记成它的话全篇每一段的锚点都是 0 号条带。那一项是 ReflowState 的相等判据之一
+        //   —— 它与"脏区排完之后的真实状态"永远不等，增量排版因此从第二页起每次都落到
+        //   "后缀平移"那一路（见 shiftSuffixBlockAxis），多排一遍还有排错的风险。
+        const float anchor_y = opened_outer ? cursor_before_switch : cursor_y;
         pi.state_at_start =
-            ReflowState{page_index, opened_outer ? cursor_before_switch : cursor_y, line_total};
+            ReflowState{cont ? slabOfY(anchor_y) : page_index, anchor_y, line_total};
         pi.line_begin = static_cast<int>(res.lines.size());
         pi.glyph_begin = static_cast<int>(res.glyphs.size());
         pi.cluster_count = 0;

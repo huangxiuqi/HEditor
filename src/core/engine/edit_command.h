@@ -1012,9 +1012,12 @@ private:
      * 表是文档里唯一的内容时不动结构（删完一个块都不剩，光标没有能停的地方）——
      *   那一种退回逐格清空。
      *
+     * @param anchor 出参：删完之后光标该落在的流位置（被删的表里最靠前的那个起点）。
+     *   不能沿用调用方的 selection().begin()：整格选区的那一端在表格内部，删完那个
+     *   位置已经不存在，会被后面的内容顶上来，落点因此不在表格所在的那一处。
      * @return 空 = 没有"整张被盖满"的表，调用方照原路走
      */
-    std::vector<Step> eraseTablesCoveredByCells() const;
+    std::vector<Step> eraseTablesCoveredByCells(FlowPos* anchor) const;
 
     /**
      * 两个相邻块在同一个单元格里（或都不在表格里）。

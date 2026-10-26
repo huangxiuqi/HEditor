@@ -1189,8 +1189,15 @@ EditCommand::SelectionErase EditCommand::planEraseSelection() {
     //   盖满整张表是另一件事：用户选的就是这张表（拖选整张表 = 全选它的格），删该连
     //   表框一起走 —— 只清内容会留下一张空表，看着像"没删掉"。
     if (pos().hasCellRange() && view_.tables && !view_.tables->empty()) {
-        plan.steps = eraseTablesCoveredByCells();
-        if (!plan.steps.empty()) return plan;
+        // 整表删：光标落回被删表的起点，不取选区起点 —— 整格选区的起点在表格内部
+        //   （第一个被选中的格），那个流位置随表一起消失，后面一整段内容会顶上来，
+        //   落点因此不在表格所在的那一处。
+        FlowPos table_at = -1;
+        plan.steps = eraseTablesCoveredByCells(&table_at);
+        if (!plan.steps.empty()) {
+            if (table_at >= 0) plan.at = table_at;
+            return plan;
+        }
         plan.steps = eraseCellContents(from, to);
         if (plan.steps.empty()) {
             noteBlocked();
@@ -1505,7 +1512,7 @@ std::vector<Step> EditCommand::eraseAcrossControls(FlowPos from, FlowPos to) con
  *   退化成点、与下一格的第一段共用一个位置。拖选整张表拿到的就是一串格区间，按它判
  *   "这张表的每一格都在选区里"才是用户那句话的意思。
  */
-std::vector<Step> EditCommand::eraseTablesCoveredByCells() const {
+std::vector<Step> EditCommand::eraseTablesCoveredByCells(FlowPos* anchor) const {
     std::vector<Step> steps;
     if (!hasFlow() || !view_.tables || view_.tables->empty()) return steps;
     if (!pos().hasCellRange()) return steps;
@@ -1562,6 +1569,9 @@ std::vector<Step> EditCommand::eraseTablesCoveredByCells() const {
         RemoveNode r;
         r.at_flow = w.lo;
         steps.push_back(Step{r});
+        // 光标落点取最靠前的那张表的起点：它在所有步骤的左边，删完仍然有效，
+        //   而且正是表格占住的那一处。
+        if (anchor != nullptr && (*anchor < 0 || w.lo < *anchor)) *anchor = w.lo;
     }
     std::sort(steps.begin(), steps.end(),
               [](const Step& a, const Step& b) { return stepStartFlow(a) > stepStartFlow(b); });

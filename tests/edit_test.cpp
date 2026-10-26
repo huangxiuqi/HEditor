@@ -499,7 +499,7 @@ const SectionInfo kSections[] = {
     {72, false, 10}, {73, false, 9},  {74, false, 3},  {75, false, 3},  {76, false, 3},
     {77, false, 3},  {78, true, 1},   {79, false, 2},  {80, false, 3},  {81, false, 2},
     {82, false, 1},  {83, false, 2},  {84, false, 2},  {85, false, 3},  {86, false, 4},
-    {87, false, 3},  {88, false, 3},  {89, false, 3},  {90, false, 2},
+    {87, false, 3},  {88, false, 3},  {89, false, 3},  {90, false, 2},  {91, false, 3},
 };
 
 /**
@@ -9445,6 +9445,13 @@ int main() {
                            std::to_string(e48.blocks().size()) + " 个块）");
             expectTrue(e48.auditTables() == 0, "删整表之后表格自审一致");
 
+            // 光标落在被删表的那一处（表后那一段的段首）。整格选区的起点在表格内部，
+            //   那个流位置随表一起消失、被后面的内容顶上来：拿它当落点，光标就落在段中间。
+            const TextPos c_del = e48.caret();
+            expectTrue(c_del.para == 0 && c_del.offset == 0,
+                       "★ 删完光标停在表原来的位置（实际 段 " + std::to_string(c_del.para) +
+                           " 偏移 " + std::to_string(c_del.offset) + "）");
+
             // 一步撤销把整张表恢复：删是与不是同一个事务的两半。
             expectTrue(e48.undo(), "撤销");
             e48.relayout();
@@ -15950,6 +15957,131 @@ int main() {
             expectTrue(nest.text == "丙丁戊己", "纯文本是选区里那几段（实际 " + nest.text + "）");
             expectTrue(hits == 1, "★ 被完整包住的内层控件进了片段，被切开的外层没有（实际 " +
                                       std::to_string(hits) + " 个）");
+        }
+    }
+
+    if (runSection(91)) std::printf("\n[91] 连页增量：中段插一个空段，整条后缀跟着走\n");
+    if (runSection(91)) {
+        // 连页的块轴是整篇累加的绝对坐标，页号与页内坐标都由它现算；分页的块轴是页内
+        //   坐标，放不下就翻页并把块轴挪回页顶。"后缀整体平移"那一趟只认分页那一套时，
+        //   连页文档从第二页起的后缀每一行都判成放不下、整条被拽回条带顶部：中间空出
+        //   一块、下面的接不上；后缀里带表时表从错误的块轴位置续排，整篇塌回第一页。
+        //
+        //   这里用"增量结果 vs 整篇重排"对拍（auditLayout）：那是唯一抓得住静默错位的
+        //   判据 —— 塌下去的排版自己看着是自洽的，只有与全量比才露馅。
+        EngineConfig c91;
+        c91.zoom = 1.0f;
+        c91.page.width_pt = 400.0f;
+        c91.page.height_pt = 200.0f;
+        c91.page.margins = PageMargins::all(20.0f);
+        c91.continuous = true;
+        c91.page_gap_pt = 20.0f;
+        const float slab91 = c91.page.height_pt + c91.page_gap_pt;
+        const std::vector<std::string> fonts91 = {cjkPath, mnPath, latinPath};
+
+        NodeTree t91;
+        {
+            const NodeId sec = t91.firstSectionId();
+            for (int i = 0; i < 40; ++i) {
+                t91.setText(t91.appendChild(sec, NodeKind::TextRun),
+                            utf8ToCodepoints("第" + std::to_string(i) + "行"));
+                t91.appendChild(sec, NodeKind::ParagraphMark);
+            }
+        }
+        EditorEngine e91;
+        expectTrue(e91.init(fonts91), "引擎初始化（连页增量）");
+        e91.setConfig(c91);
+        e91.setDocument(t91, StyleSheet{});
+        e91.relayout();
+
+        // 一段首行的全局块轴位置 = 页号 x 条带高 + 页内 y。
+        auto axis91 = [&](int para) -> float {
+            const LayoutResult& lay = e91.layout();
+            if (para < 0 || para >= static_cast<int>(lay.para_index.size())) return -1.0f;
+            const ParaIndex& pi = lay.para_index[static_cast<size_t>(para)];
+            if (pi.line_begin < 0 || pi.line_begin >= pi.line_end) return -1.0f;
+            const LineBox& lb = lay.lines[static_cast<size_t>(pi.line_begin)];
+            return static_cast<float>(lb.page) * slab91 + lb.block_lo_pt;
+        };
+        const int pages91 = e91.layout().stats.page_count;
+        expectTrue(pages91 >= 3,
+                   "前提：这份文档跨了好几页（实际 " + std::to_string(pages91) + " 页）");
+        const float line91 = axis91(21) - axis91(20);
+        const float tail0 = axis91(21);
+        expectTrue(line91 > 1.0f, "前提：段间距量得出来（实际 " + std::to_string(line91) + " 磅）");
+
+        // 在第 20 段段首回车：多出一个空段，后面每一段整体下移一行。
+        e91.setCaret(20, 0);
+        expectTrue(e91.splitParagraph(), "中段回车");
+        e91.relayout();
+        expectTrue(e91.auditLayout() == 0, "★ 连页增量 == 整篇重排（逐字段）");
+        const int pages91b = e91.layout().stats.page_count;
+        expectTrue(pages91b >= pages91, "★ 页数没有塌回去（原 " + std::to_string(pages91) +
+                                            " 页，现 " + std::to_string(pages91b) + " 页）");
+        const float tail1 = axis91(22);
+        expectTrue(std::abs((tail1 - tail0) - line91) < 0.51f,
+                   "★ 后缀只让出一行（实际让出 " + std::to_string(tail1 - tail0) + " 磅，行距 " +
+                       std::to_string(line91) + " 磅）—— 让出一条带就是块轴被抹回条带顶");
+        // 一路走到底都不许回头：块轴必须严格递增。
+        bool rising = true;
+        for (int p = 1; p < static_cast<int>(e91.layout().para_index.size()); ++p) {
+            const float a = axis91(p - 1);
+            const float b = axis91(p);
+            if (a < 0.0f || b < 0.0f) continue;
+            if (!(b > a - 0.01f)) rising = false;
+        }
+        expectTrue(rising, "★ 整篇块轴一路递增（没有哪一段被拽到前面去）");
+
+        // 后缀里有表：表跟着整体下移一行，增量与全量仍然逐字段一致。
+        {
+            EditorEngine e92;
+            expectTrue(e92.init(fonts91), "引擎初始化（连页+表）");
+            e92.setConfig(c91);
+            NodeTree t92;
+            {
+                const NodeId sec = t92.firstSectionId();
+                for (int i = 0; i < 12; ++i) {
+                    t92.setText(t92.appendChild(sec, NodeKind::TextRun),
+                                utf8ToCodepoints("甲" + std::to_string(i)));
+                    t92.appendChild(sec, NodeKind::ParagraphMark);
+                }
+                const NodeId tb = t92.appendChild(sec, NodeKind::Table);
+                for (int r = 0; r < 2; ++r) {
+                    const NodeId row = t92.appendChild(tb, NodeKind::TableRow);
+                    for (int c = 0; c < 2; ++c) {
+                        const NodeId cell = t92.appendChild(row, NodeKind::TableCell);
+                        t92.setText(t92.appendChild(cell, NodeKind::TextRun),
+                                    utf8ToCodepoints("格" + std::to_string(r) + std::to_string(c)));
+                        t92.appendChild(cell, NodeKind::ParagraphMark);
+                    }
+                }
+                for (int i = 0; i < 12; ++i) {
+                    t92.setText(t92.appendChild(sec, NodeKind::TextRun),
+                                utf8ToCodepoints("乙" + std::to_string(i)));
+                    t92.appendChild(sec, NodeKind::ParagraphMark);
+                }
+            }
+            e92.setDocument(t92, StyleSheet{});
+            e92.relayout();
+            const auto tableTop = [&e92, slab91]() -> float {
+                if (e92.layout().placed_tables.empty()) return -1.0f;
+                const PlacedTable& pt = e92.layout().placed_tables.front();
+                if (pt.placed.empty()) return -1.0f;
+                return static_cast<float>(pt.placed.front().page) * slab91 + pt.placed.front().y;
+            };
+            const int pages_a = e92.layout().stats.page_count;
+            const float top_a = tableTop();
+            e92.setCaret(5, 0);
+            expectTrue(e92.splitParagraph(), "表之前回车");
+            e92.relayout();
+            expectTrue(e92.auditLayout() == 0, "★ 后缀带表：连页增量 == 整篇重排");
+            expectTrue(e92.layout().stats.page_count >= pages_a,
+                       "★ 后缀带表：页数没有塌回一页（原 " + std::to_string(pages_a) + " 页，现 " +
+                           std::to_string(e92.layout().stats.page_count) + " 页）");
+            const float top_b = tableTop();
+            expectTrue(top_b > top_a - 0.01f && top_b - top_a < 60.0f,
+                       "★ 表跟着下移一行（实际下移 " + std::to_string(top_b - top_a) +
+                           " 磅）—— 塌回条带顶时这个差是一整条带");
         }
     }
 

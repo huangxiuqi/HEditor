@@ -314,6 +314,71 @@ test.describe('编辑面：长文档与跨段编辑', () => {
     await probe.read(`return await LOAD.scenario(6, ${ZOOM});`);
   }
 
+  log.section('[11] 连页：中段插一个空段，整条后缀跟着走');
+  {
+    // 连页的块轴是整篇累加的绝对坐标，页号由它现算；分页的块轴是页内坐标、放不下就
+    //   翻页并把块轴挪回页顶。"后缀整体平移"那一趟只认分页那一套时，连页文档从第二
+    //   页起的后缀每一行都判成放不下，整条被拽回条带顶部：中间空出一块、下面的接不上；
+    //   后缀里带表时表从错误的块轴位置续排，整篇塌回第一页。
+    //   判据用"增量 vs 整篇重排"对拍 + 后缀让出了多少：塌下去的那一版自己看着是自洽的，
+    //   只有与全量比才露馅。
+    const prep = await probe.read<any>(`
+      await H.configure({ pageMode: 'continuous' });
+      await H.flush();
+      const lines = [];
+      for (let i = 0; i < 220; ++i) lines.push('第' + i + '行');
+      await H.setText(lines.join('\\n'));
+      await H.flush();
+      const g = H.geometry();
+      const st = await D.editStats();
+      return { pages: st.totalPages, step: g.page.h + g.gap,
+               paras: (await H.paragraphs()).length };`);
+    // 段首的全局块轴位置 = 页号 × 步距 + 页内 y（页内 y 是设备像素、已取整，所以下面
+    //   比"让出多少"时留 2 px 的余量）。
+    const axis = (para: number) => probe.read<number>(`
+      await H.setCaret({ para: ${para}, offset: 0 });
+      await H.flush();
+      const q = CARET();
+      return q.page * ${prep.step} + q.y;`);
+    check('连页长文档确实跨了好几页', prep.pages >= 3, `${prep.pages} 页`);
+    const a150 = await axis(150);
+    const tail0 = await axis(151);
+    const line = tail0 - a150;
+    // 真实回车（不是往内容里塞一个换行符）：用户按的就是这个键。
+    await probe.read('await H.setCaret({ para: 150, offset: 3 }); await H.flush(); return true;');
+    await probe.read(key('Enter'));
+    const st1 = await probe.read<any>('return D.editStats();');
+    const au = await probe.read<any>('return await D.auditLayout();');
+    const paras1 = await probe.read<number>('return (await H.paragraphs()).length;');
+    // 回车插进第 150 段之后：该段内容整体后移一位，后缀从 152 段起。
+    const tail1 = await axis(152);
+    const back = await probe.read<number>(`
+      let bad = 0;
+      let prev = -1;
+      for (let i = 0; i < 220; i += 7) {
+        await H.setCaret({ para: i, offset: 0 });
+        await H.flush();
+        const q = CARET();
+        const a = q.page * ${prep.step} + q.y;
+        if (prev >= 0 && a < prev - 0.5) ++bad;
+        prev = a;
+      }
+      return bad;`);
+    check('★ 真实回车让段数 +1', paras1 === prep.paras + 1, `${prep.paras} → ${paras1} 段`);
+    check('★★ 连页增量 == 整篇重排（逐字段）', !!au && au.diff === 0,
+          au ? `diff ${au.diff}（字形 ${au.glyphDiff}、行 ${au.lineDiff}、段 ${au.paraDiff}）`
+             : 'null');
+    check('★ 页数没有塌回一页', st1.totalPages >= prep.pages,
+          `${prep.pages} → ${st1.totalPages} 页`);
+    check('★ 后缀只让出一行（让出一条带就是块轴被抹回条带顶）',
+          Math.abs((tail1 - tail0) - line) < 2.0,
+          `让出 ${(tail1 - tail0).toFixed(1)} px / 行距 ${line.toFixed(1)} px`);
+    check('★ 整篇块轴一路递增（没有哪一段被拽到前面去）', back === 0, `${back} 处回头`);
+    await probe.read(`await H.configure({ pageMode: 'paged' });
+      await H.flush();
+      return true;`);
+  }
+
     await finishEdit(probe, consoleErrors, state);
   });
 });
