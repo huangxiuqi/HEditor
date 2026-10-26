@@ -700,6 +700,11 @@ export interface ControlInsertOptions {
    * 日期能选中哪些单位。默认六个全选。
    */
   dateUnits?: Array<'year' | 'month' | 'day' | 'hour' | 'minute' | 'second'>;
+
+  /**
+   * 选择类记号（圆圈 / 方框 / 对勾）的颜色。不给就跟随文字颜色。
+   */
+  glyphColor?: RGBA;
 }
 
 /**
@@ -747,6 +752,11 @@ export interface ControlUpdateOptions {
    * 日期能选中哪些单位。给了就必须至少留一个。
    */
   dateUnits?: Array<'year' | 'month' | 'day' | 'hour' | 'minute' | 'second'>;
+
+  /**
+   * 选择类记号的颜色（圆圈 / 方框 / 对勾）。全透明 = 跟随文字颜色。
+   */
+  glyphColor?: RGBA;
 }
 
 /**
@@ -914,6 +924,11 @@ export interface ControlSummary {
   options: Array<{ value: string; label: string }>;
 
   /**
+   * 选择类记号的颜色（alpha 0 = 跟随文字颜色）。
+   */
+  glyphColor: RGBA;
+
+  /**
    * 日期的显示格式串（其余类型为空）。
    */
   format: string;
@@ -922,6 +937,16 @@ export interface ControlSummary {
    * 日期能选中哪些单位（其余类型为空数组）。
    */
   dateUnits: Array<'year' | 'month' | 'day' | 'hour' | 'minute' | 'second'>;
+
+  /**
+   * 区间起点（段号 + 段内码点偏移）。
+   */
+  start: { para: number; offset: number };
+
+  /**
+   * 区间终点（段号 + 段内码点偏移）。
+   */
+  end: { para: number; offset: number };
 
   /**
    * 光标是否在这个控件里。

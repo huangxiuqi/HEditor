@@ -264,6 +264,19 @@ void EditorEngine::computeLineFingerprints(int dirty_lo, int dirty_hi, bool full
             mixf(c.inline_pt);
             h = fnvMix(h, (c.placeholder ? 1ull : 0ull) | (c.read_only ? 2ull : 0ull) |
                               (static_cast<uint64_t>(c.bracket_side) << 2));
+            // 占位簇的内容指纹：控件边界带的是外观摘要（括号颜色、图元怎么画），原子带的是
+            //   内容（换了一张同样大的图、改了公式表达式）。两者在几何上都看不出来 ——
+            //   不混它，"改了但画面不变"就只能在换页时才自愈。
+            h = fnvMix(h, c.content_hash);
+        }
+        // 对象表这一条不能省：括号宽度为 0 时排版根本不插占位槽（见 layout.cpp 的
+        //   emitSlot 前置判断），上面那一路就不存在，而记号颜色照样会变。直接按对象表
+        //   把落在这一行范围内的摘要混进来，与"插不插槽"无关。
+        if (lb.paragraph >= 0 && lb.paragraph < static_cast<int>(blocks().size())) {
+            for (const InlineObject& o : blocks()[static_cast<size_t>(lb.paragraph)].objects) {
+                if (o.cp < lb.first_cp || o.cp > lb.last_cp) continue;
+                h = fnvMix(h, o.content_hash);
+            }
         }
         // 这一行的字形：按 line 单调，二分定位这一段
         const auto gb = std::lower_bound(
@@ -278,6 +291,15 @@ void EditorEngine::computeLineFingerprints(int dirty_lo, int dirty_hi, bool full
                               (static_cast<uint64_t>(it->color.b) << 16));
         }
         line_fp_new_[static_cast<size_t>(li)] = h & ~kFpDirtyBit;
+        if (li == 0) {
+            unsigned long long ph = 0;
+            int nph = 0;
+            for (const LineCluster& cc : lb.clusters) {
+                if (!cc.placeholder) continue;
+                ++nph;
+                if (ph == 0) ph = cc.content_hash;
+            }
+        }
     }
 }
 

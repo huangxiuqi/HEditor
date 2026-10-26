@@ -1,5 +1,7 @@
 #include "core/doc/control_spec.h"
 
+#include "core/utils/hash.h"
+
 #include "core/doc/document.h"
 
 #include <string>
@@ -344,10 +346,75 @@ ControlSpec makeControlSpec(const std::string& controlType) {
     return spec;
 }
 
+uint64_t controlAppearanceDigest(const Appearance& a) {
+    uint64_t h = kFnvBasis;
+    const auto mixLen = [&h](const Length& len) {
+        h = fnvMix(h, static_cast<uint64_t>(len.kind));
+        h = fnvMix(h, static_cast<uint64_t>(len.abs_emu));
+    };
+    const auto mixColor = [&h](const Color& c) {
+        h = fnvMix(h, static_cast<uint64_t>(c.r) | (static_cast<uint64_t>(c.g) << 8) |
+                          (static_cast<uint64_t>(c.b) << 16) | (static_cast<uint64_t>(c.a) << 24));
+    };
+    const auto mixSide = [&](const BorderSide& b) {
+        h = fnvMix(h, b.on ? 1ull : 0ull);
+        h = fnvMix(h, static_cast<uint64_t>(b.style));
+        mixLen(b.width);
+        mixColor(b.color);
+    };
+    mixLen(a.width);
+    h = fnvMix(h, static_cast<uint64_t>(a.overflow));
+    h = fnvMix(h, static_cast<uint64_t>(a.underline));
+    mixSide(a.border.left);
+    mixSide(a.border.right);
+    mixSide(a.border.top);
+    mixSide(a.border.bottom);
+    mixLen(a.glyph.width);
+    mixLen(a.glyph.size);
+    mixColor(a.glyph.color);
+    mixColor(a.glyph.fill);
+    h = fnvMix(h, static_cast<uint64_t>(a.align));
+    return h;
+}
+
+bool controlMarkerAt(const ControlSpec& spec, int cp_in_content, bool* checked) {
+    if (checked != nullptr) *checked = false;
+    if (cp_in_content < 0) return false;
+    const ChoiceDetail* c = choiceOf(spec);
+    if (c == nullptr) return false;
+    // 单控件：整个内容就是一个选项，记号在第一位。
+    if (c->options.empty()) {
+        if (cp_in_content != 0) return false;
+        if (checked != nullptr) *checked = spec.value.flag;
+        return true;
+    }
+    std::vector<std::pair<int, int>> spans;
+    if (!controlOptionSpans(spec, &spans)) return false;
+    for (size_t i = 0; i < spans.size(); ++i) {
+        if (spans[i].first != cp_in_content) continue;
+        if (checked == nullptr) return true;
+        bool on = false;
+        if (c->multi) {
+            for (const std::string& v : spec.value.items) {
+                if (!c->options[i].value.empty() && v == c->options[i].value) {
+                    on = true;
+                    break;
+                }
+            }
+        } else {
+            on = !spec.value.text.empty() && spec.value.text == c->options[i].value;
+        }
+        *checked = on;
+        return true;
+    }
+    return false;
+}
+
 std::string controlDisplayText(const ControlSpec& spec, const ControlValue& value) {
     if (const auto* c = choiceOf(spec)) {
         if (c->options.empty()) {
-            const char* glyph = c->multi ? (value.flag ? "■" : "□") : (value.flag ? "◉" : "○");
+            const char* glyph =
+                c->multi ? (value.flag ? "\u2611" : "\u2610") : (value.flag ? "\u25C9" : "\u25CB");
             return std::string(glyph) + " " + c->label;
         }
         std::string out;
@@ -364,7 +431,7 @@ std::string controlDisplayText(const ControlSpec& spec, const ControlValue& valu
             } else {
                 on = (!value.text.empty() && value.text == opt.value);
             }
-            const char* glyph = c->multi ? (on ? "■" : "□") : (on ? "◉" : "○");
+            const char* glyph = c->multi ? (on ? "\u2611" : "\u2610") : (on ? "\u25C9" : "\u25CB");
             if (i > 0) out += kOptionGap;
             out += glyph;
             out += " ";
@@ -438,6 +505,13 @@ bool applyControlPatch(ControlSpec* spec, const ControlPatch& patch, std::string
         auto* d = std::get_if<DropdownDetail>(&spec->detail);
         if (d == nullptr) return reject("改定义：这个控件不收自由输入（它不是下拉）");
         d->free_input = *patch.free_input;
+    }
+    if (patch.glyph_color.has_value()) {
+        // 记号色只对选择类有意义：别的控件没有记号，配了也只是空转。
+        if (choiceOf(*spec) == nullptr) {
+            return reject("改定义：这个控件不收记号颜色（它不是选择类）");
+        }
+        spec->appearance.glyph.color = *patch.glyph_color;
     }
     if (patch.format.has_value() || patch.units.has_value()) {
         auto* d = std::get_if<DateDetail>(&spec->detail);

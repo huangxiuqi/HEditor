@@ -37,6 +37,23 @@ ShapedText shapeTextRange(hb_font_t* font, const uint32_t* all, size_t begin, si
     //   调用方不需要任何 "+=" 补偏移的算术。
     hb_buffer_add_utf32(buf, all, static_cast<int>(end), static_cast<int>(begin),
                         static_cast<int>(count));
+    // 记号字形的格宽借"□"：本工程那几个字体里没有 ☐/☑（U+2610/2611），交给 HarfBuzz
+    //   会落到 .notdef 上，而 .notdef 的宽度各家不同（有的 1 em、有的半 em），排版宽度
+    //   就成了"看字体"。图形本身由引擎画（见 paintChoiceMarker），这里只需要一个确定的
+    //   格宽，所以换成形近的那一枚。文字本身（块流里的码点）一个字都不改。
+    //
+    //   在 hb_shape 之前改 buffer 里的 codepoint 是 HarfBuzz 支持的用法（Pango 也这么做）：
+    //   shape 读的就是这张表，而 cluster 下标不受影响。
+    {
+        unsigned infos = 0;
+        hb_glyph_info_t* info = hb_buffer_get_glyph_infos(buf, &infos);
+        for (unsigned i = 0; i < infos; ++i) {
+            if (info[i].codepoint == 0x2610u || info[i].codepoint == 0x2611u) {
+                info[i].codepoint = 0x25A1u;
+            }
+        }
+    }
+
     hb_buffer_set_direction(buf, toHbDirection(wm.shapingDirection()));
     if (language) hb_buffer_set_language(buf, hb_language_from_string(language, -1));
     // 让 HarfBuzz 从文本推断 script（蒙文 → MONGOLIAN，中文 → HAN）。

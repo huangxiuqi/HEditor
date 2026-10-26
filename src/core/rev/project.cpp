@@ -405,16 +405,19 @@ private:
             out_.controls[slot].block = block_index_;
             out_.controls[slot].cp = cpCount();
             noteFirst(n->id);
-            emitObject(InlineObject{static_cast<uint32_t>(cpCount()),
-                                    InlineObjectKind::ControlStart, owner, spec.readonly},
-                       n);
+            emitObject(
+                InlineObject{static_cast<uint32_t>(cpCount()), InlineObjectKind::ControlStart,
+                             owner, spec.readonly, 0.0f, 0.0f, InlineAtom::None,
+                             controlAppearanceDigest(spec.appearance)},
+                n);
             ++flow_;  // 进控件：这一位就是上面那枚起始边界
             for (const Ref& c : n->children) walk(c);
             out_.controls[slot].end_block = block_index_;
             out_.controls[slot].end_cp = cpCount();
             noteFirst(n->id);
             emitObject(InlineObject{static_cast<uint32_t>(cpCount()), InlineObjectKind::ControlEnd,
-                                    owner, spec.readonly},
+                                    owner, spec.readonly, 0.0f, 0.0f, InlineAtom::None,
+                                    controlAppearanceDigest(spec.appearance)},
                        n);
             ++flow_;  // 出控件：结束边界
             return;

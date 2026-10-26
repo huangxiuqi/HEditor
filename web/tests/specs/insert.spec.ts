@@ -449,6 +449,86 @@ test.describe('插入表格', () => {
 });
 
 test.describe('插入控件', () => {
+  test('屏障类控件插完，光标落在整块之后（不进去）', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' } });
+    // 四种选择控件的内容都是"图形 + 标签"的投影，光标停不进去；插入之后要把光标摆到
+    //   整块之后，否则下一次插入会落进它的内容里，长出"选项套选项"那种嵌套。
+    const r = await p.read<any>(`
+      await H.setText('甲乙丙丁');
+      await H.setCaret({ para: 0, offset: 4 });
+      await H.flush();
+      const out = [];
+      for (const t of ['radioButton', 'checkBox', 'radioGroup', 'checkBoxGroup']) {
+        const before = H.form().length;
+        await H.insertControl(t === 'radioGroup' || t === 'checkBoxGroup'
+          ? { type: t, options: [{ value: 'a', label: '选项甲' }] }
+          : { type: t, label: '选项甲' });
+        await H.flush();
+        const list = H.form();
+        const mine = list[list.length - 1];
+        const caret = H.caret().pos;
+        // 光标在不在这一块里面：把它的区间 [start, end) 与光标位置比一下。
+        const inside = caret.offset > mine.end.offset === false &&
+                       caret.offset >= mine.start.offset && caret.offset < mine.end.offset;
+        out.push({ type: t, added: list.length - before, inside,
+                   start: mine.start.offset, end: mine.end.offset, caret: caret.offset });
+      }
+      // 再插两个单选：两者必须是兄弟（第二个不能嵌进第一个）。
+      await H.setCaret({ para: 0, offset: 4 });
+      await H.flush();
+      await H.insertControl({ type: 'radioButton', label: '甲' });
+      await H.insertControl({ type: 'radioButton', label: '乙' });
+      await H.flush();
+      const list = H.form();
+      const a = list[list.length - 2];
+      const b = list[list.length - 1];
+      const nested = a.start.offset <= b.start.offset && b.end.offset <= a.end.offset;
+      return { out, nested };`);
+
+    for (const item of r.out) {
+      check(`★ 插入 ${item.type} 只多一个控件`, item.added === 1, String(item.added));
+      check(`★ 插入 ${item.type} 之后光标不在块里`, item.inside === false,
+            `caret=${item.caret} range=[${item.start}, ${item.end})`);
+    }
+    check('★ 连插两个单选是兄弟，不是嵌套', r.nested === false, JSON.stringify(r));
+  });
+
+  test('贴着选择类控件退格：删整块，不进去删字', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' } });
+    const prep = await p.read<any>(`
+      await H.setText('甲乙丙丁');
+      await H.setCaret({ para: 0, offset: 4 });
+      await H.flush();
+      await H.insertControl({ type: 'checkBoxGroup',
+        options: [{ value: 'a', label: '选项甲' }, { value: 'b', label: '选项乙' }] });
+      await H.flush();
+      const c = H.form()[0];
+      return { n: H.form().length, text: c.text, end: c.end.offset };`);
+
+    check('插入之后有一个复选组', prep.n === 1, String(prep.n));
+    check('内容是两项的投影', String(prep.text).includes('选项乙'), String(prep.text));
+
+    // 按键：光标停在控件之后，退格一次应当整块删掉（而不是删掉"项乙"的最后一个字）。
+    //   按既有判据的写法在承接层上派发 keydown —— 输入层就是在那里接键的。
+    const after = await p.read<any>(`
+      const e = new KeyboardEvent('keydown', { key: 'Backspace', bubbles: true, cancelable: true });
+      IME().dispatchEvent(e);
+      await H.flush();
+      return { n: H.form().length, caret: H.caret().pos };`);
+    check('★ 一次退格删掉整个控件', after.n === 0, JSON.stringify(after));
+
+    // 再插一次，然后点控件内部再按退格：同样整块走，不进去删字。
+    const again = await p.read<any>(`
+      await H.setText('甲乙丙丁');
+      await H.setCaret({ para: 0, offset: 4 });
+      await H.flush();
+      await H.insertControl({ type: 'radioGroup',
+        options: [{ value: 'a', label: '选项甲' }, { value: 'b', label: '选项乙' }] });
+      await H.flush();
+      return { n: H.form().length, text: H.form()[0].text };`);
+    check('再插一个单选组', again.n === 1, JSON.stringify(again));
+  });
+
   test('区间、取值与两次撤销', async ({ open }) => {
     const p = await open('index.html', { query: { debug: '1' } });
     const r = await p.ev<any>(`

@@ -6,6 +6,7 @@ import type {
   ControlInsertOptions,
   ControlSummary,
   ControlUpdateOptions,
+  RGBA,
   ControlValueInput,
   Diag,
   Editor,
@@ -146,6 +147,7 @@ function controlOptsFrom(o: ControlInsertOptions | ControlUpdateOptions): Record
   if (o.freeInput !== undefined) opts.free = !!o.freeInput;
   if (o.format !== undefined) opts.format = String(o.format);
   if (o.dateUnits !== undefined) opts.units = dateUnitsMask(o.dateUnits);
+  if (o.glyphColor !== undefined) opts.glyph = o.glyphColor;
   return opts;
 }
 
@@ -1053,8 +1055,11 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
           sel?: string;
           fmt?: string;
           du?: number;
+          glyphColor?: RGBA;
           selItems?: string[];
           opts?: Array<[string, string]>;
+          start?: [number, number];
+          end?: [number, number];
         }>;
         caret?: number;
       };
@@ -1076,8 +1081,14 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
         options: Array.isArray(it.opts)
           ? it.opts.map((pair) => ({ value: String(pair[0]), label: String(pair[1]) }))
           : [],
+        // 区间照原样给出来：宿主画浮层、判"光标在不在这个字段里"都要它。
+        start: { para: Number(it.start?.[0] ?? 0), offset: Number(it.start?.[1] ?? 0) },
+        end: { para: Number(it.end?.[0] ?? 0), offset: Number(it.end?.[1] ?? 0) },
         format: String(it.fmt ?? ''),
         dateUnits: dateUnitsOf(Number(it.du ?? 0)),
+        glyphColor: (Array.isArray(it.glyphColor) && it.glyphColor.length === 4
+          ? it.glyphColor.map(Number)
+          : [0, 0, 0, 0]) as RGBA,
         focused: index === focused,
       }));
     },

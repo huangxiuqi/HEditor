@@ -397,9 +397,18 @@ private:
             // 身份而不是序号，于是排版与命中测试拿到的句柄在重排之后仍指同一个控件。
             const int owner = static_cast<int>(n->id);
             const bool ro = n->control.readonly;
+            // 边界的内容指纹带外观摘要：改记号色 / 边框粗细时位置一个都不动，行指纹
+            //   只能靠它判"这一段要重画"（与投影入口同一个函数，别各写一份）。
+            const uint64_t look = controlAppearanceDigest(n->control.appearance);
             if (!flagged) {
                 noteFirst(n->id);
-                obj_.push_back(InlineObject{cpCount(), InlineObjectKind::ControlStart, owner, ro});
+                InlineObject o;
+                o.cp = cpCount();
+                o.kind = InlineObjectKind::ControlStart;
+                o.owner = owner;
+                o.read_only = ro;
+                o.content_hash = look;
+                obj_.push_back(o);
             }
             for (const Node* c : n->children) walk(c->id, flagged);
             if (!flagged) {
@@ -408,7 +417,13 @@ private:
                 //   自己的结束标记，而结束标记必然在容器内 —— 增量编译的形状判据据此认为起点
                 //   就在容器里，于是编出缺掉这枚边界的半段，界面上表现为整段的控件一起消失。
                 noteFirst(n->id);
-                obj_.push_back(InlineObject{cpCount(), InlineObjectKind::ControlEnd, owner, ro});
+                InlineObject o;
+                o.cp = cpCount();
+                o.kind = InlineObjectKind::ControlEnd;
+                o.owner = owner;
+                o.read_only = ro;
+                o.content_hash = look;
+                obj_.push_back(o);
             }
             return;
         }

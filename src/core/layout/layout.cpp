@@ -272,10 +272,12 @@ const BlockShaping* withInlineObjects(const BlockSpec& b, uint32_t n_cp, const B
         pc.g0 = pc.g1 = 0;
         pc.placeholder = true;
         pc.owner_control = o.owner;
+        // 内容指纹两族都搬：原子的是"画的是什么"（换了同尺寸的图），控件边界的是外观摘要
+        //   （括号颜色、记号颜色）。少搬一族，那一类改动在几何上看不出来，页就会停在旧帧。
+        pc.content_hash = o.content_hash;
         if (o.kind == InlineObjectKind::Atom) {
             pc.atom = o.atom;
             pc.atom_h_pt = o.h_pt;
-            pc.content_hash = o.content_hash;
             cl2.push_back(pc);
             adv2.push_back(o.w_pt);
             // 盒子之后可以断：它与一个全角字同价，断在它后面不拆开任何东西。

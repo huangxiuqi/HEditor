@@ -247,9 +247,12 @@ struct GlyphStyle {
     Length size;
 
     /**
-     * 描边色。
+     * 描边色，也就是选择类记号（圆圈 / 方框 / 对勾）的颜色。
+     *
+     * 默认全透明 = 跟随那一段文字的颜色。之所以用"透明"当哨兵而不是一个 bool：这一层
+     * 是纯数据（落盘、哈希都按逐字段比），多一个开关字段就多一处要同步的地方。
      */
-    Color color = Color::rgb(0, 0, 0);
+    Color color;
 
     /**
      * 填充色。
@@ -363,6 +366,28 @@ struct ControlOption {
 
     bool operator==(const ControlOption& o) const = default;
 };
+
+/**
+ * 选择类的记号字符（进内容的那一个码点）。
+ *
+ * 方框两种状态用 U+2610 / U+2611：语义正确（复制、导出、别的渲染器都认），但本工程
+ * 那几个字体里没有这一对字形 —— 宽度借"□"（U+25A1）的，图形由引擎自己画（方框 + 对勾）。
+ * 圆点用字体自带的 ○ / ◉，同样由引擎按记号色重画一次（不然单靠正文颜色改不了它）。
+ */
+inline constexpr uint32_t kCheckboxMarkOff = 0x2610;  // ☐ 未选中
+inline constexpr uint32_t kCheckboxMarkOn = 0x2611;   // ☑ 选中
+inline constexpr uint32_t kRadioMarkOff = 0x25CB;     // ○ 未选中
+inline constexpr uint32_t kRadioMarkOn = 0x25C9;      // ◉ 选中
+inline constexpr uint32_t kCheckMark = 0x2713;        // ✓ 画在方框里的对勾
+
+/**
+ * 这个内容偏移是不是某个选项的记号位置（图形占的那一个码点）。
+ * @param spec 控件记录
+ * @param cp_in_content 内容内的码点偏移
+ * @param checked 写回这一项是否选中
+ * @return true = 是记号位置
+ */
+bool controlMarkerAt(const ControlSpec& spec, int cp_in_content, bool* checked);
 
 /**
  * 内容只收哪一类字符。它约束的是编辑入口（打进来的字），不是值的校验 ——
@@ -654,6 +679,11 @@ struct ControlPatch {
     std::optional<uint16_t> units;
 
     /**
+     * 选择类记号的颜色（圆圈 / 方框 / 对勾）。全透明表示跟随文字颜色。
+     */
+    std::optional<Color> glyph_color;
+
+    /**
      * 期望的业务类型。给了就必须与当前一致，否则整份拒绝。
      *
      * 记录里不存它 —— 它的用处只有一个：把"想换类型"的调用显式挡住。改类型不是改属性：
@@ -683,6 +713,17 @@ bool applyControlPatch(ControlSpec* spec, const ControlPatch& patch, std::string
  * @param value 值（就地夹）
  */
 void pruneControlValue(const ControlSpec& spec, ControlValue* value);
+
+/**
+ * 控件外观的摘要（括号颜色、边框粗细、记号颜色与尺寸）。
+ *
+ * 放进块流对象的内容指纹里：边界不占字形，改这些属性时位置一个都不动，行指纹若不比
+ * 它，那一页就被判成新鲜 —— 命令成功了、读回的值也对，画面却停在旧帧（TRAPS 195 同族）。
+ * 两个编译入口（模型树与投影）共用这一份，免得两处各写一份、迟早只改一处。
+ * @param a 控件外观
+ * @return 摘要
+ */
+uint64_t controlAppearanceDigest(const Appearance& a);
 
 /**
  * 值对这个控件合不合法。空值一律合法（那是"没填"，由 required 管）。

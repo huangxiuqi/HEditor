@@ -1078,6 +1078,17 @@ ControlPatch controlPatchFrom(val o) {
     if (!o["free"].isUndefined()) p.free_input = o["free"].as<bool>();
     if (!o["format"].isUndefined()) p.format = o["format"].as<std::string>();
     if (!o["units"].isUndefined()) p.units = static_cast<uint16_t>(o["units"].as<int>());
+    if (o["glyph"].isArray() && o["glyph"]["length"].as<int>() >= 3) {
+        // 记号色：[红, 绿, 蓝, 不透明度]。不给 alpha 就是不透明 —— 少写一个通道不该
+        //   意外变成"全透明 = 跟随文字"。
+        Color c;
+        c.r = static_cast<uint8_t>(o["glyph"][0].as<int>());
+        c.g = static_cast<uint8_t>(o["glyph"][1].as<int>());
+        c.b = static_cast<uint8_t>(o["glyph"][2].as<int>());
+        c.a = o["glyph"]["length"].as<int>() >= 4 ? static_cast<uint8_t>(o["glyph"][3].as<int>())
+                                                  : 255;
+        p.glyph_color = c;
+    }
     return p;
 }
 

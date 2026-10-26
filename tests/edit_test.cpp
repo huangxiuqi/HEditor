@@ -498,6 +498,7 @@ const SectionInfo kSections[] = {
     {67, false, 10}, {68, false, 4},  {69, false, 3},  {70, false, 10}, {71, false, 6},
     {72, false, 10}, {73, false, 9},  {74, false, 3},  {75, false, 3},  {76, false, 3},
     {77, false, 3},  {78, true, 1},   {79, false, 2},  {80, false, 3},  {81, false, 2},
+    {82, false, 1},
 };
 
 /**
@@ -13644,6 +13645,15 @@ int main() {
         expectTrue(e80.controlViews()[static_cast<size_t>(freeIndex)].content == "手填的值",
                    "内容就是那段输入");
 
+        // 整块删除：贴着屏障控件退格，删掉的是整块，不是它内容里的一个字。
+        //   它的内容是"图形 + 标签"的投影，删一半就再也重建不回来。
+        e80.moveCaretToDocEnd();
+        const size_t n_before = e80.controlViews().size();
+        expectTrue(e80.backspace(), "退格");
+        expectTrue(e80.controlViews().size() == n_before - 1, "整块删掉了一个控件（不是删字）");
+        expectTrue(e80.backspace(), "再退格一次");
+        expectTrue(e80.controlViews().size() == n_before - 2, "又整块删掉一个");
+
         // 空内容控件：光标停在两枚括号之间，连打三个字都得留在里面。
         //   零宽内容最容易把"内容末尾"与"控件之后"混成同一格 —— 那一格一旦判错，
         //   第一个字还进得去，第二个字就落到括号外面了。
@@ -13804,6 +13814,121 @@ int main() {
         expectTrue(e81.controlViews()[3].key == "party_b", "两次被拒之后编码没动");
     }
 
+    if (runSection(82)) std::printf("\n[82] 选择类的记号：方框、对勾、颜色与重绘\n");
+    if (runSection(82)) {
+        EngineConfig c82;
+        c82.zoom = 3.0f;
+        const std::vector<std::string> fonts82 = {cjkPath, mnPath, latinPath};
+        NodeTree t82;
+        {
+            const NodeId sec = t82.firstSectionId();
+            const NodeId a = t82.appendChild(sec, NodeKind::TextRun);
+            t82.setText(a, utf8ToCodepoints("A"));
+            t82.appendChild(sec, NodeKind::ParagraphMark);
+        }
+        EditorEngine e82;
+        if (!e82.init(fonts82)) {
+            std::fprintf(stderr, "字体加载失败\n");
+            return 2;
+        }
+        e82.setConfig(c82);
+        e82.setDocument(t82, StyleSheet{});
+        e82.relayout();
+
+        auto ins82 = [&](const std::string& type, const std::string& label) {
+            ControlSpec sp = makeControlSpec(type);
+            e82.moveCaretToDocEnd();
+            return e82.insertControlAndRender(sp, label);
+        };
+        expectTrue(ins82("checkBox", "未选"), "插入未选中的复选");
+        expectTrue(ins82("checkBox", "已选"), "插入要选中的复选");
+        expectTrue(e82.toggleControlAndRender(1, -1), "选中第二个复选");
+
+        // 记号落进内容：方框两种状态用 U+2610 / U+2611（语义正确，字形由引擎画）。
+        const std::vector<EditorEngine::ControlView> v82 = e82.controlViews();
+        expectTrue(v82.size() == 2, "文档里两个复选");
+        if (v82.size() == 2) {
+            expectTrue(!v82[0].content.empty() && static_cast<uint32_t>(v82[0].content[0]) != 0 &&
+                           v82[0].content.substr(0, 3) == "\u2610",
+                       "未选中的记号是 U+2610（实际 " + v82[0].content + "）");
+            expectTrue(v82[1].content.substr(0, 3) == "\u2611",
+                       "选中的记号是 U+2611（实际 " + v82[1].content + "）");
+        }
+
+        // 数一枚记号那一格里的墨：选中了要多个对勾，墨一定更多。位置取内容矩形的头一格。
+        const int fw82 = e82.frameWidth();
+        auto ink82 = [&](size_t index) -> int {
+            const std::vector<EditorEngine::ControlRect> rs = e82.controlRects(index);
+            if (rs.empty()) return -1;
+            const Rect r = rs[0].r_pt;
+            const float zoom = c82.zoom;
+            const int x0 = static_cast<int>(std::floor(r.x * zoom));
+            const int x1 = static_cast<int>(std::ceil((r.x + r.h) * zoom));
+            const int y0 = static_cast<int>(std::floor(r.y * zoom));
+            const int y1 = static_cast<int>(std::ceil((r.y + r.h) * zoom));
+            const uint8_t* fp = e82.frame();
+            int n = 0;
+            for (int y = y0; y < y1; ++y) {
+                for (int x = x0; x < x1; ++x) {
+                    const size_t i = (static_cast<size_t>(y) * static_cast<size_t>(fw82) +
+                                      static_cast<size_t>(x)) *
+                                     4u;
+                    if (fp[i] < 200 || fp[i + 1] < 200 || fp[i + 2] < 200) ++n;
+                }
+            }
+            return n;
+        };
+        const int ink_off = ink82(0);
+        const int ink_on = ink82(1);
+        expectTrue(ink_off > 0, "未选中的方框画出来了（墨 " + std::to_string(ink_off) + "）");
+        expectTrue(ink_on > ink_off, "选中的方框墨更多（对勾加进去了：" + std::to_string(ink_off) +
+                                         " → " + std::to_string(ink_on) + "）");
+
+        // 记号色可配：配成纯蓝之后，那一格里必须出现蓝色像素。
+        auto blue82 = [&](size_t index) -> int {
+            const std::vector<EditorEngine::ControlRect> rs = e82.controlRects(index);
+            if (rs.empty()) return -1;
+            const Rect r = rs[0].r_pt;
+            const float zoom = c82.zoom;
+            const int x0 = static_cast<int>(std::floor(r.x * zoom));
+            const int x1 = static_cast<int>(std::ceil((r.x + r.h) * zoom));
+            const int y0 = static_cast<int>(std::floor(r.y * zoom));
+            const int y1 = static_cast<int>(std::ceil((r.y + r.h) * zoom));
+            const uint8_t* fp = e82.frame();
+            int n = 0;
+            for (int y = y0; y < y1; ++y) {
+                for (int x = x0; x < x1; ++x) {
+                    const size_t i = (static_cast<size_t>(y) * static_cast<size_t>(fw82) +
+                                      static_cast<size_t>(x)) *
+                                     4u;
+                    if (fp[i] < 120 && fp[i + 2] > 150) ++n;
+                }
+            }
+            return n;
+        };
+        expectTrue(blue82(1) == 0, "默认记号色跟随文字（不是蓝的）");
+        ControlPatch cp82;
+        cp82.glyph_color = Color::rgb(20, 110, 220);
+        expectTrue(e82.setControlSpecAndRender(1, cp82), "把选中那个复选的记号色改成蓝");
+        expectTrue(blue82(1) > 20, "记号变蓝了（蓝色像素 " + std::to_string(blue82(1)) + "）");
+        expectTrue(blue82(0) == 0, "另一个控件不受影响（颜色是每个控件自己的）");
+
+        // 只改颜色、不改一个字：画面照样要重绘（页指纹必须覆盖外观）。
+        ControlPatch cp83;
+        cp83.glyph_color = Color::rgb(220, 40, 40);
+        expectTrue(e82.setControlSpecAndRender(1, cp83), "再改成红");
+        expectTrue(blue82(1) == 0, "改成红之后蓝色像素没了");
+        expectTrue(e82.controlViews()[1].glyph_color.r == 220, "记录里是红");
+
+        // 记号色落到不收它的类型上：拒。
+        expectTrue(ins82("text", "文本"), "插入一个文本控件");
+        ControlPatch cp85;
+        cp85.glyph_color = Color::rgb(1, 2, 3);
+        expectTrue(!e82.setControlSpecAndRender(2, cp85), "给文本控件配记号色被拒");
+    }
+
+    checkSectionTable();
+    printSectionTimes();
     checkSectionTable();
     printSectionTimes();
 

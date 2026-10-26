@@ -1742,6 +1742,11 @@ public:
         std::string group;
 
         /**
+         * 选择类记号的颜色（alpha 0 = 跟随文字颜色）。
+         */
+        Color glyph_color;
+
+        /**
          * 日期显示格式串（空 = 默认格式）。
          */
         std::string format;
@@ -2729,6 +2734,35 @@ private:
      * [from, to) 里有没有竖排段 —— 竖排不能走平移复用。
      */
     bool suffixIsHorizontalOnly(int from, int to) const;
+
+    /**
+     * 这个字形是不是选择类控件的记号（方框 / 圆圈那一个码点）。
+     *
+     * 判的是"它正好落在某个选项的记号位置上"，不是"这个字长得像圆圈"：正文里打的 ○
+     * 照旧由字体画，只有控件里那一枚才由引擎按记号色重画。
+     * @param pg 字形
+     * @param checked 写回选中态
+     * @param square 写回"方框还是圆圈"
+     * @param color 写回记号色（alpha 0 = 跟随文字颜色）
+     * @return true = 是记号
+     */
+    bool choiceMarkerOf(const PlacedGlyph& pg, bool* checked, bool* square, Color* color) const;
+
+    /**
+     * 画一枚选择类记号：方框（选中时带对勾）或圆圈，颜色取记号色。
+     *
+     * 自己做图形而不是用字体里的字形：字体里没有 ☑，而"方框里一个对勾"是这个控件唯一
+     * 说得清的选中态；圆圈虽然字体有，也要按记号色重画一次，否则它的颜色只能跟正文。
+     * @param target 页位图
+     * @param pg 字形（位置、字号、推进）
+     * @param checked 选中态
+     * @param square true = 方框（复选），false = 圆圈（单选）
+     * @param color 记号色（alpha 0 = 用字形自己的颜色）
+     * @param units_to_px 字体单位到像素的换算
+     * @param dy 页内纵向偏移（像素）
+     */
+    void paintChoiceMarker(Bitmap& target, const PlacedGlyph& pg, bool checked, bool square,
+                           Color color, float units_to_px, float dy) const;
 
     /**
      * 画不可见字符标记（段落标记、空格里的中点、制表符箭头）到一页的位图上。

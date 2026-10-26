@@ -3,8 +3,8 @@
 **最高约束**：不执行 git 写入命令；不删除/移动 `.git`；`memory/` 只追加。
 **阶段约定**：开发期不考虑向后兼容 —— 改名、删选项、换形状直接做，判据与文档一起改。
 **索引**：`TRAPS.md`（复发陷阱 1~230，按号引用）· `ARCH-NOTES.md` · `ENV.md` ·
-`MIGRATION.md`；语义权威 `docs/文档模型设计.md`（`wc -l` 必须 2854）、
-`docs/外部API设计.md`、`docs/跑测试.md`。
+`MIGRATION.md`；语义权威 `docs/文档模型设计.md`（行数不设固定值，改完看
+`git diff --stat` 的增删是否就是自己写的那几行）、`docs/外部API设计.md`、`docs/跑测试.md`。
 
 ## 环境与基线
 
@@ -66,6 +66,12 @@
 - 控件记录的特有层必须整个进哈希（`hashControlDetail`）：修订层的"没变"按根哈希判，漏一个
   字段那一改就被丢掉（画面不变、不报错）。改定义只走 `ControlPatch` 一条路，改完重建内容
   并清掉指向已删选项的值。写命令不重排：连打要走 `typeTextAndRender`，旧簇表不吸附。
+- 选择类的记号（方框/对勾/圆圈）由绘制层画，**不是字体字形**：内容用 ☐/☑（U+2610/2611），
+  成形时换成 U+25A1 只为借格宽。颜色取 `Appearance.glyph.color`（alpha 0 = 跟随文字）。
+- 值不在内容里的控件（选择类/下拉/日期）在编辑上是**整块**：贴着它退格/前删删整块，
+  选区只盖住一部分时扩到整块；插入选择类之后光标落整块之后（否则连插两次会长出嵌套）。
+- **页指纹必须覆盖控件外观**：`InlineObject::content_hash` 进 `controlAppearanceDigest`，
+  行指纹混它（两个编译入口都要：`doc/compile.cpp` 与 `rev/project.cpp`）。
 - `blocks_` 不是块流真源（228）；页边距是四个数（227）；滚动总高只有
   `host/pages.ts` 的 `scrollHeightPx()` 一条公式，画布 CSS 尺寸恒为整页（221）。
 - 协议表是唯一动词清单（`COMMANDS` + 三张实现表 + `OUTSIDE`）；引擎语义只有一份

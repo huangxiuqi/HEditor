@@ -479,6 +479,16 @@ void EditorEngine::rasterIntoBitmap(Bitmap& target, int page_index, const float*
             } else {
                 flush_ul();
             }
+            // 选择类的记号由引擎自己画（方框 + 对勾 / 圆圈），而且要用记号色 ——
+            //   它可能与该段文字的颜色不同，所以不能混进这一批按字色画掉。
+            bool mark_on = false;
+            bool mark_square = false;
+            Color mark_color{};
+            if (!pg.vertical && choiceMarkerOf(pg, &mark_on, &mark_square, &mark_color)) {
+                flush_run();
+                paintChoiceMarker(target, pg, mark_on, mark_square, mark_color, units_to_px, dy);
+                continue;
+            }
             hb_font_t* f = pg.font->hb();
             if (!run_ids.empty() && (f != run_font || pg.color != run_color ||
                                      pg.rotate_deg != run_rot || pg.italic != run_italic)) {
@@ -1298,6 +1308,98 @@ void drawBreakMark(Bitmap& target, float along, float cross, float size_pt, floa
         target.fillTriangle(mid, a0, mid - half - t * 0.3f, a0 + head, mid + half + t * 0.3f,
                             a0 + head, color);
     }
+}
+
+namespace {
+
+/**
+ * 一段粗线（设备像素）。用两个三角形拼一个四边形：位图那层只有矩形与三角形，
+ * 而对勾是两条斜线 —— 逐像素画阶梯在大字号下会明显发毛。
+ */
+void strokeSegment(Bitmap& target, float x0, float y0, float x1, float y1, float w, Color c) {
+    const float dx = x1 - x0;
+    const float dy = y1 - y0;
+    const float len = std::sqrt(dx * dx + dy * dy);
+    if (!(len > 0.0f) || !(w > 0.0f)) return;
+    const float nx = -dy / len * w * 0.5f;
+    const float ny = dx / len * w * 0.5f;
+    target.fillTriangle(x0 + nx, y0 + ny, x1 + nx, y1 + ny, x1 - nx, y1 - ny, c);
+    target.fillTriangle(x0 + nx, y0 + ny, x1 - nx, y1 - ny, x0 - nx, y0 - ny, c);
+}
+
+}  // namespace
+
+bool EditorEngine::choiceMarkerOf(const PlacedGlyph& pg, bool* checked, bool* square,
+                                  Color* color) const {
+    if (checked != nullptr) *checked = false;
+    if (square != nullptr) *square = false;
+    if (color != nullptr) *color = Color{};
+    if (pg.paragraph < 0 || pg.paragraph >= static_cast<int>(blocks().size())) return false;
+    const std::vector<uint32_t>& text = blocks()[static_cast<size_t>(pg.paragraph)].cp_text;
+    if (pg.cluster < 0 || static_cast<size_t>(pg.cluster) >= text.size()) return false;
+    const uint32_t cp = text[static_cast<size_t>(pg.cluster)];
+    const bool box = (cp == kCheckboxMarkOff || cp == kCheckboxMarkOn);
+    const bool dot = (cp == kRadioMarkOff || cp == kRadioMarkOn);
+    if (!box && !dot) return false;
+
+    // 落在哪个控件上：控件集合的区间是按段给码点偏移的，问一次就知道。
+    for (size_t i = 0; i < control_node_ids_.size(); ++i) {
+        const Control& c = controls().at(static_cast<int>(i));
+        if (c.range.start.para != pg.paragraph) continue;
+        const int off = pg.cluster - static_cast<int>(c.range.start.offset);
+        if (off < 0) continue;
+        const rev::Node* n = rev::findNode(document(), control_node_ids_[i]);
+        if (n == nullptr) continue;
+        const auto* spec = std::get_if<ControlSpec>(&n->payload);
+        if (spec == nullptr) continue;
+        bool on = false;
+        if (!controlMarkerAt(*spec, off, &on)) continue;
+        if (checked != nullptr) *checked = on;
+        if (square != nullptr) *square = box;
+        if (color != nullptr) *color = spec->appearance.glyph.color;
+        return true;
+    }
+    return false;
+}
+
+void EditorEngine::paintChoiceMarker(Bitmap& target, const PlacedGlyph& pg, bool checked,
+                                     bool square, Color color, float units_to_px, float dy) const {
+    if (pg.font == nullptr) return;
+    const float zoom = cfg_.zoom;
+    if (!(zoom > 0.0f)) return;
+    // 记号色没配（全透明）就跟随文字：记号是内容的一部分，正文什么颜色它就什么颜色。
+    if (color.a == 0) color = pg.color;
+
+    const float pen_x = pg.x_pt * zoom;
+    const float pen_y = pg.y_pt * zoom + dy;
+    if (!square) {
+        // 圆圈：字体里有这两枚，按记号色重画一次即可（形状与排版宽度都不用动）。
+        target.drawGlyph(pg.font->hb(), pg.glyph_id, pen_x, pen_y, units_to_px, color,
+                         pg.rotate_deg);
+        return;
+    }
+
+    // 方框：字号决定边长，格宽决定左右居中。底边坐在基线上，与字体里那些方框字一致。
+    const float size_px = pg.size_pt * zoom;
+    const float adv_px = (pg.advance_pt > 0.0f ? pg.advance_pt : pg.size_pt) * zoom;
+    if (!(size_px > 1.0f)) return;
+    const float side = size_px * 0.70f;
+    const float left = std::round(pen_x + (adv_px - side) * 0.5f);
+    const float top = std::round(pen_y - side);
+    const float thick = std::max(1.0f, std::round(size_px * 0.075f));
+    target.strokeRect(Rect{left, top, side, side}, color, thick);
+    if (!checked) return;
+
+    // 对勾：两条斜线，落在框内侧的八成范围里。比例按框边长算，字号变了跟着缩。
+    const float in0_x = left + side * 0.22f;
+    const float in0_y = top + side * 0.54f;
+    const float in1_x = left + side * 0.42f;
+    const float in1_y = top + side * 0.76f;
+    const float in2_x = left + side * 0.80f;
+    const float in2_y = top + side * 0.26f;
+    const float w = std::max(1.0f, std::round(side * 0.15f));
+    strokeSegment(target, in0_x, in0_y, in1_x, in1_y, w, color);
+    strokeSegment(target, in1_x, in1_y, in2_x, in2_y, w, color);
 }
 
 /**

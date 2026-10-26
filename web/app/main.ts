@@ -555,18 +555,17 @@ function makeTabs(): Tab[] {
         label: '单选',
         icon: 'choice',
         big: true,
-        // 两个同组的单选：点一个，另一个自动取消。
-        run: () => {
-          insertControl('radioButton', { label: '选项甲', group: 'demo-radio' });
-          insertControl('radioButton', { label: '选项乙', group: 'demo-radio' });
-        },
+        // 一次插一个：单选控件本身就是"一个选项"，同组互斥靠 group 关联（点第二个控件
+        //   时第一个自动取消）。连插两个会把第二个落到第一个里，那是嵌套不是同组。
+        run: () => insertControl('radioButton', { label: '选项甲', group: 'demo-radio' }),
       },
       {
         act: 'checkbox',
         label: '复选',
         icon: 'choice',
         big: true,
-        run: () => insertControl('checkBox', { label: '同意' }),
+        // 记号色可配：这里给一个主题蓝，不配就跟随文字颜色。
+        run: () => insertControl('checkBox', { label: '同意', glyphColor: [37, 99, 235, 255] }),
       },
       {
         act: 'radiogroup',

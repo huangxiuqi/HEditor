@@ -58,6 +58,7 @@ std::vector<EditorEngine::ControlView> EditorEngine::controlViews() const {
             v.multi = c->multi;
             v.label = c->label;
             v.group = c->group;
+            v.glyph_color = spec->appearance.glyph.color;
         } else if (const DropdownDetail* d = dropdownOf(*spec)) {
             v.options = d->options;
             v.free_input = d->free_input;

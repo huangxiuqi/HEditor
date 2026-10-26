@@ -362,6 +362,73 @@ bool EditCommand::eraseAtomBeside(FlowPos cur, bool left) {
     return true;
 }
 
+bool EditCommand::controlIsWholeUnit(int index) const {
+    if (index < 0 || index >= static_cast<int>(controlNodeIds().size())) return false;
+    const rev::Node* n = rev::findNode(doc(), controlNodeIds()[static_cast<size_t>(index)]);
+    if (n == nullptr) return false;
+    const auto* spec = std::get_if<ControlSpec>(&n->payload);
+    if (spec == nullptr) return false;
+    // 判据是"内容不是作者打的字"：值在记录上（选择类、下拉、日期），内容就是它的投影，
+    //   删一半再也重建不回来。文本与数值控件的值就在内容里，逐字删是正常编辑。
+    //   这条与光标屏障用的不是同一个开关：屏障只管"光标能不能停"，而删除要覆盖
+    //   全部生成内容 —— 下拉与日期没有屏障（它们只读），但同样不该被删成半截。
+    return spec->valueShape != ValueShape::Text;
+}
+
+bool EditCommand::eraseWholeUnitBeside(FlowPos cur, bool left) {
+    if (!hasFlow() || cur < 0) return false;
+    // 三种相邻：左边那一块的右端就是我、右边那一块的左端就是我、光标本来就在某一块里
+    //   （只剩程序化摆位能造出第三种，照样按整块处理，不给"进去删字"留门）。
+    int ci = left ? controlEndingAt(cur) : controlStartingAt(cur);
+    if (ci < 0) {
+        FlowPos lo = 0;
+        FlowPos hi = 0;
+        const int inner = innermostControlAtFlow(flowIndex(), controlNodeIds(), cur, &lo, &hi);
+        if (inner >= 0) ci = inner;
+    }
+    if (ci < 0 || !controlIsWholeUnit(ci)) return false;
+    // 删不掉（只读、或者被结构锁挡住）也算"这一下处理过了"：落回后面的逐字删除
+    //   就等于把字从一块不可编辑的内容里抠出来。
+    removeControl(ci, /*keep_content=*/false, cur);
+    return true;
+}
+
+int EditCommand::soleWholeUnitIn(FlowPos from, FlowPos to) const {
+    if (to <= from) return -1;
+    for (int i = 0; i < static_cast<int>(controlNodeIds().size()); ++i) {
+        if (!controlIsWholeUnit(i)) continue;
+        FlowPos lo = 0;
+        FlowPos hi = 0;
+        if (!controlFlowSpan(i, &lo, &hi)) continue;
+        if (lo == from && hi == to) return i;
+    }
+    return -1;
+}
+
+void EditCommand::expandWholeUnits(FlowPos* from, FlowPos* to) const {
+    if (from == nullptr || to == nullptr || *to <= *from) return;
+    // 反复扫到不再变化：扩出一块可能又与另一块相交（嵌套或紧邻）。
+    for (int guard = 0; guard < 64; ++guard) {
+        bool grew = false;
+        for (int i = 0; i < static_cast<int>(controlNodeIds().size()); ++i) {
+            if (!controlIsWholeUnit(i)) continue;
+            FlowPos lo = 0;
+            FlowPos hi = 0;
+            if (!controlFlowSpan(i, &lo, &hi)) continue;
+            if (*to <= lo || *from >= hi) continue;  // 不相交
+            if (*from > lo) {
+                *from = lo;
+                grew = true;
+            }
+            if (*to < hi) {
+                *to = hi;
+                grew = true;
+            }
+        }
+        if (!grew) return;
+    }
+}
+
 EditCommand::BracketHit EditCommand::bracketBackspace(FlowPos* at) {
     if (at == nullptr || !hasFlow() || controls().empty()) return BracketHit::None;
     *at = -1;
@@ -564,6 +631,7 @@ bool EditCommand::backspace() {
     //   抄成"先折叠选区再退格"的症状是用户删掉三个字，却连带把选区前面那个字也吃了。
     const SelectionErase plan = planEraseSelection();
     if (plan.blocked) return false;
+    if (plan.handled) return true;
     if (!plan.steps.empty()) return commitErase(plan, "退格");
     const FlowPos caret_before = pos().selection().focus;
 
@@ -575,6 +643,10 @@ bool EditCommand::backspace() {
     // 紧邻的是一枚原子就整枚删掉（见 eraseAtomBeside）。它排在括号规则之前：两者不会同时
     //   成立，而"左边那一格是原子"比"光标贴在一枚括号上"更贴近屏幕上看到的那个东西。
     if (eraseAtomBeside(caret_before, /*left=*/true)) return true;
+
+    // 紧邻的是一整块屏障控件就整块删（见 eraseWholeUnitBeside）。它必须排在括号规则之前：
+    //   那四条里有"光标进到内容末尾再删左边那一项"，对选择类就是"进去删字"。
+    if (eraseWholeUnitBeside(caret_before, /*left=*/true)) return true;
 
     // 控件边界上的退格（四条规则见 bracketBackspace）。这一段必须排在"段首退格 = 并入
     //   上一段"之前：控件跨段时它的闭括号落在下一段的段首，从段首那条路走会并段，
@@ -618,6 +690,7 @@ bool EditCommand::deleteForward() {
     // 与退格同一条：选区非空时只删选区，不再往后多删一个字。
     const SelectionErase plan = planEraseSelection();
     if (plan.blocked) return false;
+    if (plan.handled) return true;
     if (!plan.steps.empty()) return commitErase(plan, "前删");
     const FlowPos caret_before = pos().selection().focus;
 
@@ -626,6 +699,9 @@ bool EditCommand::deleteForward() {
 
     // 与退格左右对称：右边那一格是原子就整枚删掉。
     if (eraseAtomBeside(caret_before, /*left=*/false)) return true;
+
+    // 与退格左右对称：右边是一整块屏障控件就整块删。
+    if (eraseWholeUnitBeside(caret_before, /*left=*/false)) return true;
 
     FlowPos at = -1;
     const BracketHit hit = bracketDeleteForward(&at);
@@ -948,9 +1024,18 @@ EditCommand::SelectionErase EditCommand::planEraseSelection() {
     if (!pos().hasSelection() || !hasFlow() || blockFlow().empty()) return plan;
     plan.before = pos().selection();
     plan.at = pos().selection().begin();
-    const FlowPos from = pos().selection().begin();
-    const FlowPos to = pos().selection().end();
+    FlowPos from = pos().selection().begin();
+    FlowPos to = pos().selection().end();
     if (from >= to) return plan;
+    // 只盖住屏障控件一部分时向外扩成整块：删一半的选项表再也重建不回来。
+    expandWholeUnits(&from, &to);
+    plan.at = from;
+    // 扩完正好等于单独一块屏障控件：整块删掉那个节点，而不是把它删成空壳。
+    if (const int only = soleWholeUnitIn(from, to); only >= 0) {
+        plan.handled = true;
+        removeControl(only, /*keep_content=*/false, plan.before.focus);
+        return plan;
+    }
     // 判定与实际删除同一把尺子：判的是整个区间能不能编辑，删的是同一个区间。
     //   跨段的区间在这里第一次被放行 —— 档 1 的 policyErase 只管同段。
     if (!rev::canEditRange(doc(), mode(), Range{from, to}).allowed) {
@@ -1565,9 +1650,15 @@ bool EditCommand::insertControl(const ControlSpec& spec, const std::string& labe
         noteBlocked();
         return false;
     }
-    // 控件是行内容器，不切断段落：落点始终在光标处。光标摆到内容末尾，与"接着填这个字段"
-    //   一致；标签为空时那就是起始边界之后的第一位（空控件内部）。
-    return commitInsert(at, node, at + 1 + static_cast<FlowPos>(cps.size()));
+    // 控件是行内容器，不切断段落：落点始终在光标处。
+    //
+    //   光标摆哪儿分两种：可编辑的字段摆在内容末尾（"接着填这个字段"）；选择类摆在
+    //   整块之后 —— 它的内容里根本停不住，摆进去等于把光标塞进一个按不动的格子，
+    //   下一次插入又会落进它的内容里，于是"连点两次单选"长出嵌套。
+    const auto* ch = choiceOf(s);
+    const bool barrier = (ch != nullptr && ch->caret_barrier);
+    const FlowPos focus = at + 1 + static_cast<FlowPos>(cps.size()) + (barrier ? 1 : 0);
+    return commitInsert(at, node, focus);
 }
 
 bool EditCommand::filterTypedText(FlowPos at_flow, const std::vector<uint32_t>& cps,

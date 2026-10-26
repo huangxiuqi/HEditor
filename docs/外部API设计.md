@@ -223,15 +223,16 @@ setText(text: string, opts?: { repeat?: number }): Promise<void>   // 明确用�
 程序化删控件只在测试里出现 → `diag`。
 
 八种基础控件由 `insertControl({ type })` 插入，`type` 是 `text` / `number` / `radioButton` /
-`checkBox` / `radioGroup` / `checkBoxGroup` / `dropdownList` / `date`；选项、互斥组、日期格式
-与可选单位都在同一个入参里（`options` / `group` / `format` / `dateUnits`）。
+`checkBox` / `radioGroup` / `checkBoxGroup` / `dropdownList` / `date`；选项、互斥组、日期格式、
+可选单位与记号颜色都在同一个入参里（`options` / `group` / `format` / `dateUnits` / `glyphColor`，
+颜色是 `[r, g, b, a]`，不给就跟随文字颜色）。插入选择类控件之后光标落在整块之后。
 
 | 签名 | 备注 |
 | --- | --- |
-| `form()` | 每个控件一条：`type` / `key` / `label` / `text`（内容）/ `value`（记录上的值）/ `options` / `focused` |
+| `form()` | 每个控件一条：`type` / `key` / `label` / `group` / `text`（内容）/ `value`（记录上的值）/ `options` / `glyphColor` / `start`、`end`（区间）/ `focused` |
 | `setControlValue(index, { flag?, text?, items? })` | 改值并按类型重建显示内容；选择类与下拉、日期的内容是值的投影 |
 | `toggleControl(index, option?)` | 切换一个选项（单控件传 -1）；互斥与多选规则在引擎里，整批一次撤销 |
-| `updateControl(index, { type?, key?, label?, options?, group?, freeInput?, format?, dateUnits? })` | 改定义：只改给出的项；改完按新定义重建内容，指向已删选项的值跟着清空，同属一步撤销 |
+| `updateControl(index, { type?, key?, label?, options?, group?, freeInput?, format?, dateUnits?, glyphColor? })` | 改定义：只改给出的项；改完按新定义重建内容，指向已删选项的值跟着清空，同属一步撤销 |
 
 `updateControl` 的 `type` 只能与当前一致（换类型请删掉重插）；给这个控件不收的字段
 （例如给文本控件送 `options`）整份拒绝，不静默忽略。

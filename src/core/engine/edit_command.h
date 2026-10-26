@@ -638,6 +638,44 @@ private:
     bool eraseAtomBeside(FlowPos cur, bool left);
 
     /**
+     * 这个控件在编辑上是不是"一整块"：内容不是作者打的字，而是值投影出来的
+     * （四种选择控件、下拉、日期）。删掉一半就再也重建不回来。
+     * 判的是值形态（值不在内容里），不是类型名 —— 类型名与"内容可不可编辑"是两件事。
+     * @param index 控件下标
+     * @return true = 整块
+     */
+    bool controlIsWholeUnit(int index) const;
+
+    /**
+     * 贴着屏障控件的退格 / 前删：删掉整块，不进去删字。
+     *
+     * 排在括号那四条规则之前：那四条里有"光标进到内容末尾再删左边那一项"，
+     * 对屏障控件就是"进去删字"，正是要避免的那件事。
+     * @param cur 光标流位置
+     * @param left true = 退格，false = 前删
+     * @return true = 这一下已经处理掉（删了，或者被策略拒了但不该落回删字那条路）
+     */
+    bool eraseWholeUnitBeside(FlowPos cur, bool left);
+
+    /**
+     * 区间正好等于单独一块屏障控件的整块时，返回那个控件的下标。
+     *
+     * 只认"完全相等"：区间比一块更大时，剩下的部分照常按内容删 —— 扩到某一块的边界
+     * 不等于要把邻近的控件一起删掉。
+     * @param from 区间起点
+     * @param to 区间终点
+     * @return 控件下标；不是恰好等于某一块时为 -1
+     */
+    int soleWholeUnitIn(FlowPos from, FlowPos to) const;
+
+    /**
+     * 把删除区间向外扩到整块屏障控件的边界：只盖住一部分时扩成整块。
+     * @param from 区间起点（就地改）
+     * @param to 区间终点（就地改）
+     */
+    void expandWholeUnits(FlowPos* from, FlowPos* to) const;
+
+    /**
      * 控件边界上的一次删除落到哪一类（四条规则见 bracketBackspace 的实现处）。
      */
     enum class BracketHit {
@@ -670,6 +708,11 @@ private:
          * 策略拒绝了删除动作（调用方中止整条编辑）。
          */
         bool blocked = false;
+
+        /**
+         * 这一层已经提交完了（整块删掉了一个屏障控件），调用方不要再走后面的路。
+         */
+        bool handled = false;
     };
 
     /**
