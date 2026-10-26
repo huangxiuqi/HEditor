@@ -203,6 +203,12 @@ export function createMenus(host: MenusHost): Menus {
       { kind: 'separator' },
       {
         kind: 'action',
+        label: '删除表格',
+        disabled: !st.canRemoveTable,
+        run: () => runTableOp('removeTable', '已删除表格'),
+      },
+      {
+        kind: 'action',
         label: '表格属性…',
         run: () =>
           openDialog(
@@ -348,6 +354,9 @@ export function createMenus(host: MenusHost): Menus {
 
   /**
    * 任何位置都有的那一组：撤销、剪贴板、插入。
+   *
+   * 不带开头的分隔线：空白处右键时它是菜单的第一项，那会画出一条悬在顶部的空线。
+   *   与上面那几组的分隔由调用方按"上面有没有东西"补。
    * @param at 客户端坐标
    * @returns 菜单项
    */
@@ -356,7 +365,6 @@ export function createMenus(host: MenusHost): Menus {
       host.insertControl(type, opts);
     };
     return [
-      { kind: 'separator' },
       {
         kind: 'action',
         label: '撤销',
@@ -441,6 +449,9 @@ export function createMenus(host: MenusHost): Menus {
         const box = boxes[target.image];
         entries.push(...imageEntries(target.image, { w: box?.w ?? 0, h: box?.h ?? 0 }, at));
       }
+      // 分组之间的那条线按"上面有没有东西"补：空白处右键时上面什么都没有，
+      //   无条件补一条就会在菜单顶部画出一条空线。
+      if (entries.length > 0) entries.push({ kind: 'separator' });
       entries.push(...commonEntries(at));
       menu.open(entries, at);
     },

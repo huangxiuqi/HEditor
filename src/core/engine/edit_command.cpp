@@ -395,6 +395,33 @@ bool EditCommand::controlIsWholeUnit(int index) const {
     return spec->valueShape != ValueShape::Text;
 }
 
+bool EditCommand::eraseAtom(NodeId id) {
+    if (!hasFlow()) return false;
+    FlowPos at = 0;
+    FlowPos end = 0;
+    if (!flowIndex().intervalOf(id, &at, &end) || end <= at) return false;
+    const rev::Node* n = rev::findNode(doc(), id);
+    if (n == nullptr || !isAtom(n->kind)) return false;
+    if (!rev::canEditRange(doc(), mode(), Range{at, at + 1}).allowed) {
+        noteBlocked();
+        return false;
+    }
+    const NodeBuild nb = removeAtomStep(doc(), flowIndex(), at);
+    if (!nb.ok) return false;
+    std::vector<Step> steps;
+    steps.push_back(nb.step);
+    // 撤销回到按键之前那一拍的位置（与 eraseAtomBeside 同一条）：原子没了之后
+    //   那一格指向的是它右边的内容，与按键前的光标不是一回事。
+    pending_before_ = pos().selection();
+    pending_after_ = Range{at, at};
+    if (!commit(std::move(steps), pos().paraForFlow(at))) {
+        noteBlocked();
+        return false;
+    }
+    pos().setCaretAtFlow(at);
+    return true;
+}
+
 bool EditCommand::eraseWholeUnitBeside(FlowPos cur, bool left) {
     if (!hasFlow() || cur < 0) return false;
     // 三种相邻：左边那一块的右端就是我、右边那一块的左端就是我、光标本来就在某一块里
@@ -407,10 +434,25 @@ bool EditCommand::eraseWholeUnitBeside(FlowPos cur, bool left) {
         if (inner >= 0) ci = inner;
     }
     if (ci < 0 || !controlIsWholeUnit(ci)) return false;
+    // 有值的下拉 / 日期：这一下先清值，再按一次才删控件。填表的人按退格想删的是
+    //   "刚才选的那一项"，一下把整个字段删掉等于丢了一格表单结构。
+    if (clearUnitValue(ci)) return true;
     // 删不掉（只读、或者被结构锁挡住）也算"这一下处理过了"：落回后面的逐字删除
     //   就等于把字从一块不可编辑的内容里抠出来。
     removeControl(ci, /*keep_content=*/false, cur);
     return true;
+}
+
+bool EditCommand::clearUnitValue(int index) {
+    if (index < 0 || index >= static_cast<int>(controlNodeIds().size())) return false;
+    const rev::Node* n = rev::findNode(doc(), controlNodeIds()[static_cast<size_t>(index)]);
+    if (n == nullptr) return false;
+    const auto* spec = std::get_if<ControlSpec>(&n->payload);
+    if (spec == nullptr) return false;
+    // 只对"值是投影"的两类生效：选择类的记号与标签是作者写的内容，退格该整块删。
+    if (dropdownOf(*spec) == nullptr && dateOf(*spec) == nullptr) return false;
+    if (spec->value.text.empty()) return false;
+    return setControlValue(index, ControlValue{});
 }
 
 int EditCommand::soleWholeUnitIn(FlowPos from, FlowPos to) const {
@@ -1643,7 +1685,8 @@ bool EditCommand::posAfterParagraph(int para, Pos* out) const {
     return true;
 }
 
-bool EditCommand::commitInsert(FlowPos at, const NodeSpec& spec, FlowPos focus) {
+bool EditCommand::commitInsert(FlowPos at, const NodeSpec& spec, FlowPos focus,
+                               rev::MergeRun merge) {
     if (at < 0 || at > flowIndex().size()) {
         noteBlocked();
         return false;
@@ -1660,7 +1703,7 @@ bool EditCommand::commitInsert(FlowPos at, const NodeSpec& spec, FlowPos focus) 
     pending_before_ = pos().selection();
     pending_after_ = Range{focus, focus};
     // 起始脏段按插入点算：表格带来的新段就从那里开始，之后的内容整体后移。
-    if (!commit(std::move(steps), pos().paraForFlow(at))) {
+    if (!commit(std::move(steps), pos().paraForFlow(at), merge)) {
         noteBlocked();
         return false;
     }
@@ -1692,7 +1735,38 @@ bool EditCommand::insertTable(int rows, int cols, bool header) {
         return false;
     }
     // 光标落进第一格：接着打字就是填这一格（不是落在表之前或表之后）。
-    return commitInsert(at_flow, spec, at_flow + kFirstTableCellOffset);
+    const FlowPos focus = at_flow + kFirstTableCellOffset;
+    const rev::Node* parent = rev::findNode(doc(), at.container);
+    const bool tail = parent == nullptr || at.offset >= static_cast<int>(parent->children.size());
+    if (!tail) return commitInsert(at_flow, spec, focus);
+
+    // 表落在文档（或这一格）的末尾：补一段空的接在表后面。
+    //   文档以表结尾时，表后面没有任何能停光标的地方，点空白处也只是回到上一段 ——
+    //   "在表后接着写"就没有落点。两段插入算同一次操作（Start + Continue 合成一步撤销）。
+    if (!commitInsert(at_flow, spec, focus, rev::MergeRun::Start)) return false;
+    const rev::Node* host = rev::findNode(doc(), at.container);
+    if (host == nullptr || at.offset >= static_cast<int>(host->children.size())) return true;
+    FlowPos table_lo = 0;
+    FlowPos table_hi = 0;
+    if (!flowIndex().intervalOf(host->children[static_cast<size_t>(at.offset)]->id, &table_lo,
+                                &table_hi)) {
+        return true;
+    }
+    NodeSpec mark;
+    mark.kind = NodeKind::ParagraphMark;
+    InsertNode after;
+    after.at = flowIndex().posAt(table_hi);
+    after.at_flow = table_hi;
+    after.subtree = mark;
+    std::vector<Step> steps;
+    steps.push_back(Step{after});
+    const Range keep{focus, focus};
+    pending_before_ = keep;
+    pending_after_ = keep;
+    if (commit(std::move(steps), pos().paraForFlow(table_hi), rev::MergeRun::Continue)) {
+        pos().setCaretAtFlow(focus);
+    }
+    return true;
 }
 
 bool EditCommand::insertControl(const ControlSpec& spec, const std::string& label) {
@@ -1739,11 +1813,10 @@ bool EditCommand::insertControl(const ControlSpec& spec, const std::string& labe
     }
     // 控件是行内容器，不切断段落：落点始终在光标处。
     //
-    //   光标摆哪儿分两种：可编辑的字段摆在内容末尾（"接着填这个字段"）；选择类摆在
-    //   整块之后 —— 它的内容里根本停不住，摆进去等于把光标塞进一个按不动的格子，
-    //   下一次插入又会落进它的内容里，于是"连点两次单选"长出嵌套。
-    const auto* ch = choiceOf(s);
-    const bool barrier = (ch != nullptr && ch->caret_barrier);
+    //   光标摆哪儿分两种：可编辑的字段摆在内容末尾（"接着填这个字段"）；有屏障的
+    //   （选择类、下拉、日期）摆在整块之后 —— 它们的内容里根本停不住，摆进去等于把
+    //   光标塞进一个按不动的格子，下一次插入又会落进它的内容里，于是"连点两次"长出嵌套。
+    const bool barrier = controlCaretBarrier(s);
     const FlowPos focus = at + 1 + static_cast<FlowPos>(cps.size()) + (barrier ? 1 : 0);
     return commitInsert(at, node, focus);
 }
@@ -2765,6 +2838,77 @@ bool EditCommand::splitTableCell() {
     }
     // 拆完留在左上角那一格：内容在它身上，用户的注意力也在它身上。
     caretIntoCell(cell.table, row, col);
+    return true;
+}
+
+NodeId EditCommand::tableAtPara(int para) const {
+    if (!view_.tables) return kInvalidNodeId;
+    const LayoutTable* best_table = nullptr;
+    const LayoutCell* best_cell = nullptr;
+    for (const LayoutTable& t : *view_.tables) {
+        for (const LayoutCell& c : t.cells) {
+            if (c.block_count <= 0) continue;
+            if (para < c.first_block || para >= c.first_block + c.block_count) continue;
+            // 嵌套时取最内层：被包住的那张表才是"光标所在的那张表"。
+            if (best_cell == nullptr || c.block_count < best_cell->block_count) {
+                best_cell = &c;
+                best_table = &t;
+            }
+        }
+    }
+    if (best_table == nullptr) return kInvalidNodeId;
+    return static_cast<NodeId>(best_table->handle);
+}
+
+bool EditCommand::removeTableAtCaret() {
+    if (!hasFlow()) return false;
+    if (mode() != EditMode::Document) {
+        noteBlocked();
+        return false;
+    }
+    const NodeId id = tableAtPara(pos().caret().para);
+    if (id == kInvalidNodeId) {
+        noteBlocked();
+        return false;
+    }
+    FlowPos lo = 0;
+    FlowPos hi = 0;
+    if (!flowIndex().intervalOf(id, &lo, &hi) || hi <= lo) {
+        noteBlocked();
+        return false;
+    }
+    // 表是文档里唯一的内容时拒绝：删完一个块都不剩，光标没有能停的地方。
+    int first_b = -1;
+    int last_b = -1;
+    for (const LayoutTable& t : *view_.tables) {
+        if (static_cast<NodeId>(t.handle) != id) continue;
+        for (const LayoutCell& c : t.cells) {
+            if (c.block_count <= 0) continue;
+            if (first_b < 0 || c.first_block < first_b) first_b = c.first_block;
+            const int b = c.first_block + c.block_count - 1;
+            if (b > last_b) last_b = b;
+        }
+    }
+    if (first_b <= 0 && last_b >= static_cast<int>(blocks().size()) - 1) {
+        noteBlocked();
+        return false;
+    }
+    if (!rev::canEditRange(doc(), mode(), Range{lo, hi}).allowed) {
+        noteBlocked();
+        return false;
+    }
+    RemoveNode r;
+    r.at_flow = lo;
+    std::vector<Step> steps;
+    steps.push_back(Step{r});
+    pending_before_ = pos().selection();
+    pending_after_ = Range{lo, lo};
+    const int dirty = pos().caret().para;
+    if (!commit(std::move(steps), dirty)) {
+        noteBlocked();
+        return false;
+    }
+    pos().setCaretAtFlow(lo);
     return true;
 }
 

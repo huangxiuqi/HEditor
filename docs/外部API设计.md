@@ -281,11 +281,11 @@ setText(text: string, opts?: { repeat?: number }): Promise<void>   // 明确用�
 
 | 签名 | 备注 |
 | --- | --- |
-| `tableOp(op)` | `'insertRowAbove'` / `'insertRowBelow'` / `'removeRow'` / `'insertColumnLeft'` / `'insertColumnRight'` / `'removeColumn'` / `'mergeCells'` / `'splitCell'` |
+| `tableOp(op)` | `'insertRowAbove'` / `'insertRowBelow'` / `'removeRow'` / `'insertColumnLeft'` / `'insertColumnRight'` / `'removeColumn'` / `'mergeCells'` / `'splitCell'` / `'removeTable'` |
 | `setTableCell({ vAlign? })` | 格记录：垂直对齐（`'top'` / `'middle'` / `'bottom'`） |
 | `setTableRow({ header?, split?, breakBefore?, heightPt?, heightRule? })` | 行记录：标题行、跨页断行、行前分页、行高与规则（`'auto'` / `'atLeast'` / `'exact'`） |
 | `setTable({ widthPt?, align? })` | 表记录：宽度（0 = 自动）与水平位置（`'start'` / `'center'` / `'end'`） |
-| `tableState()` | 一次读全：`inTable` / `rows` / `cols` / 表宽与位置 / 标题行数 / 当前行的四个开关与行高 / 当前格的坐标与两个跨度 / 整格选区的格数行列数 / 六条结构命令的可用性（`canInsertRow` 等，引擎试造一遍步骤再回答） |
+| `tableState()` | 一次读全：`inTable` / `rows` / `cols` / 表宽与位置 / 标题行数 / 当前行的四个开关与行高 / 当前格的坐标与两个跨度 / 整格选区的格数行列数 / 七条结构命令的可用性（`canInsertRow` 等，引擎试造一遍步骤再回答） |
 | `describeTable(state)` | 把现状摊成属性面板的字段表（表 / 行 / 格三层在一张里）；纯数据，不读写文档 |
 | `applyTableForm(values)` | 按一份面板值改表格：只提交真的变了的层，一层里改几项也只算一次提交 |
 

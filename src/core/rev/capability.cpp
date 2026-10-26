@@ -104,9 +104,7 @@ bool caretBarrierAt(const Doc& doc, const FlowIndex& idx, FlowPos pos) {
         if (pos <= f || pos >= e) continue;
         const ControlSpec* spec = controlOf(*c);
         if (spec == nullptr) continue;
-        if (const ChoiceDetail* choice = choiceOf(*spec)) {
-            if (choice->caret_barrier) return true;
-        }
+        if (controlCaretBarrier(*spec)) return true;
     }
     return false;
 }

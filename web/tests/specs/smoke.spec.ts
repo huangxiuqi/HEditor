@@ -544,8 +544,10 @@ test.describe('公开面', () => {
           String(r.setControlProp));
     check('focusControl 不抛错', r.focusControl === undefined || r.focusControl !== null,
           String(r.focusControl));
-    check('★ insertTable 落成一张 2x2 的表（段数 +4）',
-          r.insertTable === true && r.afterTable === 5, String(r.afterTable));
+    // 5 = 1 段原正文 + 4 格。这里表落在文档末尾，还该多一段"表后段"（见 insertTable），
+    //   所以是 6 —— 表不能是最后一块，否则表后没有能停光标的地方。
+    check('★ insertTable 落成一张 2x2 的表（段数 +5，含表后那段）',
+          r.insertTable === true && r.afterTable === 6, String(r.afterTable));
     check('★ insertControl 落成一个字段，文字接在光标处',
           r.insertControl === true && r.afterControl === '控件值' && r.controlCount === 1,
           JSON.stringify(r.afterControl) + ' / ' + String(r.controlCount));

@@ -983,6 +983,10 @@
         {
           "name": "canSplit",
           "kind": "num"
+        },
+        {
+          "name": "canRemoveTable",
+          "kind": "num"
         }
       ]
     },

@@ -219,6 +219,17 @@ public:
     bool deleteForward();
 
     /**
+     * 按身份删掉一枚行内原子（图片 / 公式），不等它贴着光标。
+     *
+     * 用于"图片已被选中"那一路：选中不等于光标搬过去（点图片不改光标），
+     *   顺着光标找左邻会删掉无关的正文。
+     *
+     * @param id 原子的节点 id
+     * @return true = 删了
+     */
+    bool eraseAtom(NodeId id);
+
+    /**
      * 跨段编辑：回车在光标处把这一段拆成两段；段首退格、段末 Delete 分别合并前后段 ——
      * 它们是 backspace() / deleteForward() 的自然延伸，不是另外的编辑命令。
      * @return true = 拆了
@@ -382,6 +393,24 @@ public:
      * @return true = 拆开了（这一格本来就没有合并时拒绝）
      */
     bool splitTableCell();
+
+    /**
+     * 删掉光标所在的那一整张表（不只是清空格子里的字）。
+     *
+     * 光标不在表里时拒绝。表是文档唯一的内容时同样拒绝：删完文档一个块都不剩，
+     *   光标没有能停的地方 —— 那种文档本来就是坏的，不该由一条删除命令把它变得更坏。
+     *
+     * @return true = 删掉了
+     */
+    bool removeTableAtCaret();
+
+    /**
+     * 光标所在段属于哪一张表（嵌套时取最内层那张）。
+     *
+     * @param para 段号
+     * @return 表的节点 id；不在任何表里时是 kInvalidNodeId
+     */
+    NodeId tableAtPara(int para) const;
 
     /**
      * 改光标所在格的记录（目前是垂直对齐）。幂等：记录没变时返回真但不产生步骤。
@@ -594,9 +623,11 @@ private:
      * @param at 插入位置（流位置）
      * @param spec 子树
      * @param focus 插完之后光标落在哪（流位置）
+     * @param merge 与上一次提交的关系（一次操作里的第二段用 Continue）
      * @return true = 插进去了
      */
-    bool commitInsert(FlowPos at, const NodeSpec& spec, FlowPos focus);
+    bool commitInsert(FlowPos at, const NodeSpec& spec, FlowPos focus,
+                      rev::MergeRun merge = rev::MergeRun::None);
 
     /**
      * 按落点所在控件的字符过滤规则筛一遍（数值控件只收数字）。
@@ -758,6 +789,16 @@ private:
      * @return true = 这一下已经处理掉（删了，或者被策略拒了但不该落回删字那条路）
      */
     bool eraseWholeUnitBeside(FlowPos cur, bool left);
+
+    /**
+     * 整块删除之前的"先清值"：下拉与日期有值时清成未填，返回真表示这一下用掉了。
+     *
+     * 只有这两类的值是投影（值在记录上、内容由它生成），清掉不会留下半截内容；
+     *   文本与选择类不走这里 —— 它们的内容是作者打的字或记号标签。
+     * @param index 控件下标
+     * @return true = 清掉了（调用方不该再删控件）
+     */
+    bool clearUnitValue(int index);
 
     /**
      * 区间正好等于单独一块屏障控件的整块时，返回那个控件的下标。

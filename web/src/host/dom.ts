@@ -1094,7 +1094,7 @@ export function createDomHost(o: DomHostOptions): DomHost {
           notify(target, { x: ev.clientX, y: ev.clientY });
           return undefined;
         }
-        return then1(input.placeAt(px), () => {
+        return then1(input.placeAt(px, undefined, { tap: false }), () => {
           notify(target, { x: ev.clientX, y: ev.clientY });
         });
       }),

@@ -1094,13 +1094,14 @@ ControlPatch controlPatchFrom(val o) {
 
 /**
  * 跑一条表格结构命令。op 与 EditorEngine::TableOp 同序：
- * 0 上方插行 / 1 下方插行 / 2 删行 / 3 左侧插列 / 4 右侧插列 / 5 删列 / 6 合并 / 7 拆分。
+ * 0 上方插行 / 1 下方插行 / 2 删行 / 3 左侧插列 / 4 右侧插列 / 5 删列 / 6 合并 / 7 拆分 /
+ * 8 删整表。
  *
  * 光标不在表格里、模式不对、或那一格本来就不支持这个动作（删最后一列、合并区域不成立）
  * 时整条命令被拒并返回 false —— 文档一个字节都不动。
  */
 bool tableOpAt(int op) {
-    if (op < 0 || op > 7) return false;
+    if (op < 0 || op > 8) return false;
     return g_engine.tableOpAndRender(static_cast<EditorEngine::TableOp>(op));
 }
 

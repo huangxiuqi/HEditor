@@ -127,6 +127,18 @@ export interface ContextMenu {
 const kSubmenuDelayMs = 120;
 
 /**
+ * 子菜单与触发它的那一行在纵向上的重叠量（磅）。
+ *
+ * 与样式里的 top 用同一个值：正数表示子菜单比那一行高出几个像素，看着像"从那一行长出去"。
+ */
+const kSubmenuOverlap = 5;
+
+/**
+ * 浮层与视口边缘之间至少留多少（CSS 像素）。
+ */
+const kViewportGap = 6;
+
+/**
  * 造一块右键菜单。
  * @param onClose 关掉之后的回调（宿主用它把键盘还回编辑器）
  * @returns 菜单
@@ -250,6 +262,9 @@ export function createContextMenu(onClose?: () => void): ContextMenu {
           ev.preventDefault();
           ev.stopPropagation();
           if (entry.kind === 'submenu') {
+            // 悬停延迟还挂着时点开，定时器随后还会再开一次同一层 —— 同一层压两遍，
+            //   往里面走一步就把自己收掉（二级"打开就关"的来源）。
+            window.clearTimeout(hoverTimer);
             openSubmenu(row, true);
             return;
           }
@@ -260,13 +275,15 @@ export function createContextMenu(onClose?: () => void): ContextMenu {
         });
         row.addEventListener('pointerenter', () => {
           setActive(row);
+          window.clearTimeout(hoverTimer);
           if (entry.kind === 'submenu') {
-            window.clearTimeout(hoverTimer);
             hoverTimer = window.setTimeout(() => openSubmenu(row, false), kSubmenuDelayMs);
-          } else {
-            window.clearTimeout(hoverTimer);
-            hoverTimer = window.setTimeout(() => closeSubmenus(1), kSubmenuDelayMs);
+            return;
           }
+          // 移到没有子菜单的项上：把比它更深的那几层收掉。深度按这一行所在的列表算，
+          //   写成固定值会把这一层自己关掉（二级里的项一被指到，二级就消失）。
+          const depth = Number(listOf(row).dataset.depth ?? '0');
+          hoverTimer = window.setTimeout(() => closeSubmenus(depth), kSubmenuDelayMs);
         });
       }
 
@@ -333,11 +350,28 @@ export function createContextMenu(onClose?: () => void): ContextMenu {
     const depth = Number(listOf(row).dataset.depth ?? '0');
     closeSubmenus(depth + 1);
     list.hidden = false;
-    // 右边放不下就翻到左边：贴着窗口右缘的菜单，往右开等于开到屏幕外。
     const r = row.getBoundingClientRect();
+    // 横向：右边放不下就翻到左边（贴着窗口右缘的菜单，往右开等于开到屏幕外）。
     const w = list.offsetWidth;
-    list.classList.toggle('heditor-menu__list--left', r.right + w > window.innerWidth - 4);
-    openStack.push(list);
+    const flip = r.right + w > window.innerWidth - 4;
+    list.classList.toggle('heditor-menu__list--left', flip);
+    // 纵向：贴着触发它的那一行，但整块必须留在视口里 —— 照 CSS 的 top 原样开，
+    //   一级很长时二级的下半截会跑出窗口底部，那几项点不到。放不下就整块上移，
+    //   移到顶边还不够高时给内部滚动（只对没有下一层的列表开：overflow 会裁掉孙级）。
+    const h = list.offsetHeight;
+    const limit = window.innerHeight - kViewportGap;
+    const want = r.top - kSubmenuOverlap;
+    const top = Math.max(kViewportGap, Math.min(want, limit - h));
+    list.style.top = Math.round(top - r.top) + 'px';
+    if (h > limit - kViewportGap && list.querySelector('.heditor-menu__list--sub') === null) {
+      list.style.maxHeight = limit - kViewportGap + 'px';
+      list.style.overflowY = 'auto';
+    } else {
+      list.style.maxHeight = '';
+      list.style.overflowY = '';
+    }
+    // 同一层已经在栈里就不再压一遍：压重了之后收一层等于把还看得见的那层藏起来。
+    if (openStack[openStack.length - 1] !== list) openStack.push(list);
     if (focusFirst) {
       const first = itemsOf(list)[0] ?? null;
       setActive(first);

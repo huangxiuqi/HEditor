@@ -278,6 +278,7 @@ export interface TableState {
   canRemoveColumn: number;
   canMerge: number;
   canSplit: number;
+  canRemoveTable: number;
 }
 
 export interface ContextTarget {

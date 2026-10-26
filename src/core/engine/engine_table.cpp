@@ -59,6 +59,8 @@ bool EditorEngine::tableOp(TableOp op) {
             return edit_.mergeTableCells();
         case TableOp::SplitCell:
             return edit_.splitTableCell();
+        case TableOp::RemoveTable:
+            return edit_.removeTableAtCaret();
     }
     return false;
 }
@@ -157,6 +159,15 @@ bool EditorEngine::canTableOp(TableOp op) const {
         }
         case TableOp::SplitCell:
             return rev::splitCell(doc, flow, ref).ok;
+        case TableOp::RemoveTable: {
+            // 删整张表只要求光标在表里；"文档不能只剩零个块"这条由命令层再挡一次。
+            FlowPos lo = 0;
+            FlowPos hi = 0;
+            if (!flow.intervalOf(static_cast<NodeId>(table->handle), &lo, &hi) || hi <= lo) {
+                return false;
+            }
+            return rev::canEditRange(doc, mode_, Range{lo, hi}).allowed;
+        }
     }
     return false;
 }
@@ -172,7 +183,7 @@ std::string EditorEngine::tableStateJson() const {
              << ",\"heightRule\":0,\"cellRow\":0,\"cellCol\":0,\"rowSpan\":1,\"colSpan\":1"
              << ",\"vAlign\":0,\"selCells\":0,\"selRows\":0,\"selCols\":0"
              << ",\"canInsertRow\":0,\"canRemoveRow\":0,\"canInsertColumn\":0"
-             << ",\"canRemoveColumn\":0,\"canMerge\":0,\"canSplit\":0}";
+             << ",\"canRemoveColumn\":0,\"canMerge\":0,\"canSplit\":0,\"canRemoveTable\":0}";
         return pk::checked(pk::table_state::kSpec, none.str());
     }
 
@@ -261,6 +272,7 @@ std::string EditorEngine::tableStateJson() const {
     o << ",\"canRemoveColumn\":" << (canTableOp(TableOp::RemoveColumn) ? 1 : 0);
     o << ",\"canMerge\":" << (canTableOp(TableOp::MergeCells) ? 1 : 0);
     o << ",\"canSplit\":" << (canTableOp(TableOp::SplitCell) ? 1 : 0);
+    o << ",\"canRemoveTable\":" << (canTableOp(TableOp::RemoveTable) ? 1 : 0);
     o << "}";
     return pk::checked(pk::table_state::kSpec, o.str());
 }

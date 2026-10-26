@@ -6,7 +6,7 @@
 import { createHash } from 'node:crypto';
 
 import { check } from '../support/check';
-import { test } from '../support/probe';
+import { expect, test } from '../support/probe';
 
 const D = 'window.__demo';
 
@@ -354,6 +354,75 @@ test.describe('插入图片', () => {
       return { w: (await H.images())[0].w };`);
     check('撤销回到原尺寸', Math.abs(undone.w - geo.w0) < 0.01, undone.w + ' / ' + geo.w0);
   });
+
+  test('图片进单元格：按格宽限宽，不横穿表格', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' } });
+    const r = await p.ev<any>(`
+      const e = ${D};
+      await e.setText('甲乙丙丁');
+      await e.flush();
+      await e.insertTable({ rows: 1, cols: 2 });
+      await e.flush();
+      // 光标进第一格，插一张"按版心宽度"的大图（宿主就是这么算的）：版心比格宽得多。
+      await e.setCaret({ para: 1, offset: 0 });
+      await e.flush();
+      const g = e.geometry();
+      const page = e.config().page;
+      const textW = g.page.w * 0.75 - page.margins.left - page.margins.right;
+      const w = 400;
+      const h = 200;
+      await e.registerImage({ id: 'big', width: w, height: h, data: new Uint8Array(w * h * 4).fill(200) });
+      const ok = await e.insertImage({
+        resourceId: 'big', pxWidth: w, pxHeight: h, width: Math.min((w * 72) / 96, textW),
+      });
+      await e.flush();
+      const box = (await e.images())[0];
+      const ts = await e.tableState();
+      // 格宽 = 表宽 / 列数（没给表宽时表撑满版心），再减两侧内边距。
+      const cellW = ts.widthPt > 0 ? ts.widthPt / ts.cols : 0;
+      return { ok, box, textW, cellW };`);
+
+    check('图片插进去了', r.ok === true, String(r.ok));
+    check('★ 格里的图不宽于格（没有横穿表格）',
+          r.box.w < r.textW * 0.8 &&
+          (r.cellW <= 0 || r.box.w <= r.cellW),
+          JSON.stringify({ w: r.box.w, cellW: r.cellW, textW: r.textW }));
+    check('限宽之后保持高宽比', Math.abs(r.box.h / r.box.w - 0.5) < 0.02,
+          String(r.box.h / r.box.w));
+  });
+
+  test('选中图片后按退格删的是图片，不是它前面的正文', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' } });
+    const geo = await p.read<any>(`
+      await H.setText('甲乙丙丁戊己');
+      await H.setCaret({ para: 0, offset: 4 });
+      await H.flush();
+      const w = 40;
+      const h = 20;
+      await H.registerImage({ id: 'p1', width: w, height: h,
+                              data: new Uint8Array(w * h * 4).fill(190) });
+      await H.insertImage({ resourceId: 'p1', pxWidth: w, pxHeight: h });
+      await H.flush();
+      // 光标挪到行首：选中图片之后按退格，删的必须是图片（顺着光标找左邻就删错东西）。
+      await H.setCaret({ para: 0, offset: 0 });
+      await H.flush();
+      await D.stopBlink();
+      const box = (await H.images())[0];
+      const q = box.rects[0];
+      const cv = FRAME();
+      const r = cv.getBoundingClientRect();
+      return { left: r.left, top: r.top, Z: ZOOM(), cx: q.x + q.w / 2, cy: q.y + q.h / 2,
+               text0: (await H.paragraphs())[0] };`);
+    await p.page.mouse.click(geo.left + geo.cx * geo.Z, geo.top + geo.cy * geo.Z);
+    await p.page.waitForTimeout(150);
+    await p.page.keyboard.press('Backspace');
+    await p.page.waitForTimeout(250);
+    const after = await p.read<any>(`
+      return { images: (await H.images()).length, text: (await H.paragraphs())[0] };`);
+    check('★ 退格删掉了选中的图片', after.images === 0, String(after.images));
+    check('★ 图片前面的正文字一个没少', after.text === geo.text0,
+          JSON.stringify({ before: geo.text0, after: after.text }));
+  });
 });
 
 test.describe('插入控件', () => {
@@ -607,7 +676,9 @@ test.describe('插入表格', () => {
                undoneJson };`);
 
     check('insertTable 返回 true', r.ok === true, String(r.ok));
-    check('★ 段数 = 1 段正文 + 6 格', r.paras.length === 7, JSON.stringify(r.paras));
+    // 8 = 1 段正文 + 6 格 + 表后那段。表落在文档末尾时必补一段：文档不能以表格结尾，
+    //   否则表后面没有能停光标的地方。
+    check('★ 段数 = 1 段正文 + 6 格 + 表后一段', r.paras.length === 8, JSON.stringify(r.paras));
     check('原段落没被表格切开', r.paras[0] === '甲乙丙丁', JSON.stringify(r.paras[0]));
     check('★ 光标落在第一格（第 1 段）', r.caret.pos.para === 1, JSON.stringify(r.caret.pos));
     check('★ 打字进的是第一格', r.typed === true && r.firstCell === '甲',
@@ -729,8 +800,9 @@ test.describe('插入表格', () => {
 
     check('★ 点表格按钮先出尺寸面板（不直接插表）', r.cells === 64 && r.before === 1,
           JSON.stringify({ cells: r.cells, before: r.before }));
-    check('★ 选 2x4 之后插出八格', r.after.length === 9 &&
-          (r.after.filter((t: string) => t === '').length === 8), JSON.stringify(r.after));
+    // 10 = 1 段正文 + 8 格 + 表后那段（表落在末尾必补，见 insertTable）。
+    check('★ 选 2x4 之后插出八格，末尾多一段空的', r.after.length === 10 &&
+          (r.after.filter((t: string) => t === '').length === 9), JSON.stringify(r.after));
     check('★ 表结构是 2 行 4 列', r.cells2 === 8, String(r.cells2));
     check('选完面板关掉了', r.closed === true, String(r.closed));
   });
@@ -759,6 +831,49 @@ test.describe('插入表格', () => {
     check('★ 被拒时文档一个字都没动', r.untouched === r.before, r.untouched);
     check('★ 表单模式下插入表格被拒', r.inForm === false, String(r.inForm));
     check('表单模式那一次也没有留下空段', r.paras === 1, String(r.paras));
+  });
+
+  test('表落在文档末尾：后面补一段空的，能接着写；删整表一步撤销回得来', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' } });
+    const r = await p.ev<any>(`
+      const e = ${D};
+      await e.setText('甲乙丙丁');
+      await e.setCaret({ para: 0, offset: 4 });
+      await e.flush();
+      await e.insertTable({ rows: 1, cols: 2 });
+      await e.flush();
+      const n = e.paragraphs().length;
+      // 末尾那一段在表外：光标停得进去，敲的字落在表后面。
+      await e.setCaret({ para: n - 1, offset: 0 });
+      await e.flush();
+      const tailInTable = (await e.tableState()).inTable;
+      const typed = await e.type('表后');
+      await e.flush();
+      const tailText = e.paragraph(n - 1);
+
+      // 光标回到表里：这时整表该删得动。
+      await e.setCaret({ para: 1, offset: 0 });
+      await e.flush();
+      const before = { inTable: (await e.tableState()).inTable, can: (await e.tableState()).canRemoveTable,
+                       n: e.paragraphs().length };
+      const ok = await e.tableOp('removeTable');
+      await e.flush();
+      const after = { inTable: (await e.tableState()).inTable, n: e.paragraphs().length,
+                      text: e.text() };
+      await e.undo();
+      await e.flush();
+      const back = { inTable: (await e.tableState()).inTable, n: e.paragraphs().length };
+      return { n, tailInTable, typed, tailText, before, ok, after, back };`);
+
+    check('★ 表后补了一段（1 + 2 格 + 1）', r.n === 4, String(r.n));
+    check('★ 表后那一段在表外', r.tailInTable === false, String(r.tailInTable));
+    check('★ 表后接着打字真的落在表后面', r.typed === true && r.tailText === '表后',
+          JSON.stringify(r.tailText));
+    check('光标在表里时 engine 说删得动整表', r.before.can === true, JSON.stringify(r.before));
+    check('★ 删整表把表与它的格一起去掉了', r.ok === true && r.after.inTable === false &&
+          r.after.n < r.before.n, JSON.stringify(r));
+    check('★ 一步撤销把表整张恢复', r.back.inTable === true && r.back.n === r.before.n,
+          JSON.stringify(r.back));
   });
 });
 
@@ -996,5 +1111,62 @@ test.describe('插入控件', () => {
     check('★ 只读模式下插入控件被拒', r.refused === false, String(r.refused));
     check('文档没变', r.text === '甲乙丙丁', r.text);
     check('没有留下控件', Array.isArray(r.form) && r.form.length === 0, JSON.stringify(r.form));
+  });
+});
+
+test.describe('空值的下拉与日期', () => {
+  test('插进去看得见、点得开，连插两个不嵌套', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' } });
+    const geo = await p.read<any>(`
+      await H.setText('甲乙丙丁');
+      await H.setCaret({ para: 0, offset: 4 });
+      await H.flush();
+      await H.insertControl({ type: 'dropdownList', key: 'dd',
+                              options: [{ value: 'a', label: '选项甲' },
+                                        { value: 'b', label: '选项乙' }] });
+      await H.flush();
+      // 屏障把光标摆到整块之后：第二个字段与第一个并排，不落进它的内容里。
+      await H.insertControl({ type: 'date', key: 'dt' });
+      await H.flush();
+      const list = await H.form();
+      const items = (await D.controls()).items;
+      const boxes = items.map((c) => c.rects[0]);
+      const cv = FRAME();
+      const r = cv.getBoundingClientRect();
+      const q = boxes[0];
+      return {
+        types: list.map((c) => c.type),
+        starts: list.map((c) => c.start.offset),
+        ends: list.map((c) => c.end.offset),
+        texts: items.map((c) => c.text),
+        nested: boxes.length === 2 ? boxes[0].x + boxes[0].w > boxes[1].x + 1 : true,
+        left: r.left, top: r.top, Z: ZOOM(),
+        cx: q.x + q.w / 2, cy: q.y + q.h / 2,
+      };`);
+
+    check('★ 空的下拉有可点的内容（不是零宽控件）', geo.texts[0].length > 0,
+          JSON.stringify(geo.texts));
+    check('★ 空的日期有可点的内容', geo.texts[1].length > 0, JSON.stringify(geo.texts));
+    check('★ 两个字段是并排的，没嵌在一起', geo.nested === false,
+          JSON.stringify({ starts: geo.starts, ends: geo.ends, nested: geo.nested }));
+
+    await p.page.mouse.click(geo.left + geo.cx * geo.Z, geo.top + geo.cy * geo.Z);
+    const panel = p.page.locator('.heditor-popover--control');
+    await expect(panel).toBeVisible();
+    const items = await panel.locator('.heditor-popover-item').count();
+    check('★ 点空下拉就弹出选项列表', items === 2, String(items));
+    // 方向：候选项竖着排（横着排的一行"下拉"不是下拉）。
+    const stacked = await panel.locator('.heditor-popover-item').evaluateAll((els) => {
+      if (els.length < 2) return true;
+      const a = els[0].getBoundingClientRect();
+      const b = els[1].getBoundingClientRect();
+      return b.top >= a.bottom - 1 && Math.abs(b.left - a.left) < 2;
+    });
+    check('★ 选项是一列（竖排），不是横着一行', stacked === true, String(stacked));
+
+    await panel.locator('.heditor-popover-item').first().click();
+    await p.read(`await H.flush(); return true;`);
+    const got = await p.read<any>(`return (await H.form())[0].value.text;`);
+    check('★ 选中之后值落到控件上', got === 'a', String(got));
   });
 });

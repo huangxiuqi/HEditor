@@ -302,6 +302,15 @@ const DropdownDetail* dropdownOf(const ControlSpec& spec) {
 
 const DateDetail* dateOf(const ControlSpec& spec) { return std::get_if<DateDetail>(&spec.detail); }
 
+bool controlCaretBarrier(const ControlSpec& spec) {
+    if (const auto* c = choiceOf(spec)) return c->caret_barrier;
+    // 值是投影的两类：内容是 value 生成的显示文字，不是作者打的字。
+    if (dropdownOf(spec) != nullptr || dateOf(spec) != nullptr) {
+        return spec.valueShape != ValueShape::Text;
+    }
+    return false;
+}
+
 const TextDetail* textOf(const ControlSpec& spec) { return std::get_if<TextDetail>(&spec.detail); }
 
 const CustomDetail* customOf(const ControlSpec& spec) {
@@ -423,6 +432,21 @@ bool controlMarkerAt(const ControlSpec& spec, int cp_in_content, bool* checked) 
     return false;
 }
 
+/**
+ * 没有值时下拉与日期显示什么。
+ *
+ * 这两类的值不在内容里，内容只是值的投影 —— 空值投影成一句提示，控件才有可点的地方
+ *   （投影为空串时控件只剩两枚相邻括号，宽不到一个字，光标与点击都落不进去）。
+ *   作者写了 placeholder 就用它；没写才退回内置的那一句。
+ * @param spec 控件记录
+ * @param fallback 内置提示
+ * @return 显示文字
+ */
+static std::string emptyValueHint(const ControlSpec& spec, const char* fallback) {
+    return spec.appearance.placeholder.empty() ? std::string(fallback)
+                                               : spec.appearance.placeholder;
+}
+
 std::string controlDisplayText(const ControlSpec& spec, const ControlValue& value) {
     if (const auto* c = choiceOf(spec)) {
         if (c->options.empty()) {
@@ -453,14 +477,17 @@ std::string controlDisplayText(const ControlSpec& spec, const ControlValue& valu
         return out;
     }
     if (const auto* d = dropdownOf(spec)) {
-        if (value.text.empty()) return std::string();
+        if (value.text.empty()) return emptyValueHint(spec, "请选择");
         for (const ControlOption& opt : d->options) {
             if (opt.value == value.text) return opt.label;
         }
         // 自由输入的值没有选项可查，原样显示 —— 显示与值是同一段文字。
         return d->free_input ? value.text : std::string();
     }
-    if (const auto* d = dateOf(spec)) return formatControlDate(value.text, d->format);
+    if (const auto* d = dateOf(spec)) {
+        if (value.text.empty()) return emptyValueHint(spec, "选择日期");
+        return formatControlDate(value.text, d->format);
+    }
     return std::string();
 }
 

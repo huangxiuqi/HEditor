@@ -19,6 +19,7 @@
 #include "core/layout/layout.h"
 #include "core/rev/rev.h"
 #include "core/utils/hash.h"
+#include "core/utils/units.h"
 
 namespace heditor {
 
@@ -146,7 +147,51 @@ bool EditorEngine::dropImageAndRepaint(const std::string& id) {
 
 bool EditorEngine::insertImage(const ImageSpec& spec) {
     if (!loaded_) return false;
-    return edit_.insertImage(spec);
+    return edit_.insertImage(clampImageToContainer(spec));
+}
+
+ImageSpec EditorEngine::clampImageToContainer(const ImageSpec& spec) const {
+    ImageSpec out = spec;
+    if (!session_.has_value()) return out;
+    // 只看单元格：格的宽度是排版算出来的，宿主拿不到（它只知道版心宽度）。
+    //   段落里的图由宿主按版心限宽，这一层不重复判 —— 版心不是插图的上限
+    //   （缩进、分栏都会改变实际可用宽度，那不是这一条要解决的事）。
+    const int para = caret().para;
+    const LayoutCell* cell = layoutCellAt(para, nullptr);
+    if (cell == nullptr || cell->col_span <= 0) return out;
+    float cell_w = 0.0f;
+    for (const PlacedTable& t : layout_.placed_tables) {
+        const LayoutCell* hit = nullptr;
+        for (const LayoutCell& c : t.cells) {
+            if (c.block_count <= 0) continue;
+            if (para < c.first_block || para >= c.first_block + c.block_count) continue;
+            if (hit == nullptr || c.block_count < hit->block_count) hit = &c;
+        }
+        if (hit == nullptr) continue;
+        if (hit->cell + hit->col_span >= static_cast<int>(t.col_x.size())) continue;
+        cell_w = t.col_x[static_cast<size_t>(hit->cell + hit->col_span)] -
+                 t.col_x[static_cast<size_t>(hit->cell)] - 2.0f * kTableCellPadXPt;
+        break;
+    }
+    if (!(cell_w > 8.0f)) return out;
+
+    // 现在的显示宽度：作者给了绝对值就用它，否则按像素与 dpi 推（与 resolveAtomBox 同一口径）。
+    const float dpi = spec.dpi > 0 ? static_cast<float>(spec.dpi) : 96.0f;
+    const bool has_px = spec.px_w > 0 && spec.px_h > 0;
+    float w = 0.0f;
+    if (spec.width.kind == LengthKind::Abs)
+        w = static_cast<float>(emuToPt(spec.width.abs_emu));
+    else if (has_px)
+        w = static_cast<float>(spec.px_w) * 72.0f / dpi;
+    if (!(w > cell_w)) return out;
+
+    // 超出格宽就按比例缩到格宽：直接照原尺寸排出去，图上会盖住右邻格与表格边框。
+    const float scale = cell_w / w;
+    out.width = Length::abs(ptToEmu(cell_w));
+    if (spec.height.kind == LengthKind::Abs) {
+        out.height = Length::abs(ptToEmu(emuToPt(spec.height.abs_emu) * scale));
+    }
+    return out;
 }
 
 bool EditorEngine::insertImageAndRender(const ImageSpec& spec) {

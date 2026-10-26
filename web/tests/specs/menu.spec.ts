@@ -94,7 +94,15 @@ test.describe('右键菜单', () => {
 
     await label.fill('同意条款');
     await p.page.locator('[data-act="prop-apply"]').click();
-    const form = await p.read<any>(`return (await H.form()).map((c) => ({ label: c.label }));`);
+    // 提交是异步下发的：紧接着读会读到提交之前的那一份，等它落到文档上再断言。
+    await expect
+      .poll(async () => {
+        const now = await p.read<any[]>(
+          `return (await H.form()).map((c) => ({ label: c.label }));`);
+        return now[0]?.label;
+      })
+      .toBe('同意条款');
+    const form = await p.read<any[]>(`return (await H.form()).map((c) => ({ label: c.label }));`);
     check('★ 面板改了标签并落到文档', form[0]?.label === '同意条款', JSON.stringify(form));
     check('面板按完就收起来了', (await p.page.locator('.heditor-props').count()) === 0,
           'panel still there');
@@ -134,5 +142,101 @@ test.describe('右键菜单', () => {
     await p.page.mouse.click(4, 4);
     await expect(menu).toBeHidden();
     check('点菜单外面关掉', !(await menu.isVisible()), '还开着');
+  });
+});
+
+test.describe('菜单的分组与多级位置', () => {
+  test('空白处右键：第一项不是那条空分割线', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' } });
+    await p.page.mouse.click(600, 500, { button: 'right' });
+    const menu = p.page.locator('.heditor-menu');
+    await expect(menu).toBeVisible();
+    const firstClass = await p.page.evaluate(() => {
+      const list = document.querySelector('.heditor-menu > .heditor-menu__list');
+      const first = list ? list.firstElementChild : null;
+      return first ? first.className : '';
+    });
+    check('★ 顶上没有多余的分割线', !firstClass.includes('heditor-menu__sep'), firstClass);
+  });
+
+  test('二级贴着触发它的那一行（一级很长时也不跑到菜单顶部）', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' } });
+    // 右键落在页面上部：一级有十七项，"插入"在最后一行，离菜单顶很远。
+    await p.page.mouse.click(600, 220, { button: 'right' });
+    await expect(p.page.locator('.heditor-menu')).toBeVisible();
+
+    const sub = p.page.locator('.heditor-menu__item', { hasText: '插入' }).first();
+    await sub.hover();
+    await p.page.waitForTimeout(350);
+
+    const box = await p.page.evaluate(() => {
+      const row = Array.from(document.querySelectorAll('.heditor-menu__item'))
+        .find((el) => (el.textContent || '').includes('插入'));
+      const list = row && row.querySelector('.heditor-menu__list--sub');
+      const root = document.querySelector('.heditor-menu');
+      if (!row || !list || !root) return null;
+      const rr = row.getBoundingClientRect();
+      const lr = list.getBoundingClientRect();
+      return { rowTop: rr.top, listTop: lr.top, listBottom: lr.bottom,
+               menuTop: root.getBoundingClientRect().top,
+               vh: window.innerHeight };
+    });
+    check('二级开出来了', !!box, String(box));
+    check('★ 二级贴着触发它的那一行（差在十来个像素内）',
+          !!box && Math.abs(box.listTop - box.rowTop) <= 12, JSON.stringify(box));
+    check('★ 二级没有跑到一级顶部（两者相差一整段菜单）',
+          !!box && box.listTop - box.menuTop > 100, JSON.stringify(box));
+
+    // 移进二级：不该被收掉。
+    const leaf = p.page.locator('.heditor-menu__list--sub:not([hidden]) .heditor-menu__item').first();
+    await leaf.hover();
+    await p.page.waitForTimeout(300);
+    const opened = await p.page.locator('.heditor-menu__list--sub:not([hidden])').count();
+    check('★ 鼠标移进二级，二级还在', opened === 1, String(opened));
+  });
+
+  test('二级比视口还高：整块夹进视口（或内部滚动），不留点不到的项', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' }, viewport: { width: 900, height: 420 } });
+    await p.page.mouse.click(450, 330, { button: 'right' });
+    await expect(p.page.locator('.heditor-menu')).toBeVisible();
+
+    const sub = p.page.locator('.heditor-menu__item', { hasText: '插入' }).first();
+    await sub.hover();
+    await p.page.waitForTimeout(350);
+
+    const box = await p.page.evaluate(() => {
+      const row = Array.from(document.querySelectorAll('.heditor-menu__item'))
+        .find((el) => (el.textContent || '').includes('插入'));
+      const list = row && row.querySelector('.heditor-menu__list--sub');
+      if (!row || !list) return null;
+      const lr = list.getBoundingClientRect();
+      return { top: lr.top, bottom: lr.bottom, vh: window.innerHeight,
+               overflow: getComputedStyle(list).overflowY, h: lr.height };
+    });
+    check('二级开出来了', !!box, String(box));
+    check('★ 二级的顶边没跑到视口外', !!box && box.top >= 0, JSON.stringify(box));
+    check('★ 二级的下边没超出视口（最下面那项点得到）',
+          !!box && box.bottom <= box.vh, JSON.stringify(box));
+  });
+
+  test('右键下拉控件：只出菜单，不叠一个值面板', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' } });
+    const geo = await p.read<any>(`
+      await H.setText('甲乙丙');
+      await H.setCaret({ para: 0, offset: 3 });
+      await H.flush();
+      await H.insertControl({ type: 'dropdownList', key: 'dd',
+                              options: [{ value: 'a', label: '选项甲' }] });
+      await H.flush();
+      await D.stopBlink();
+      const q = (await D.controls()).items[0].rects[0];
+      const cv = FRAME();
+      const r = cv.getBoundingClientRect();
+      return { left: r.left, top: r.top, Z: ZOOM(), cx: q.x + q.w / 2, cy: q.y + q.h / 2 };`);
+    await p.page.mouse.click(geo.left + geo.cx * geo.Z, geo.top + geo.cy * geo.Z,
+                             { button: 'right' });
+    await expect(p.page.locator('.heditor-menu')).toBeVisible();
+    const panel = await p.page.locator('.heditor-popover--control').count();
+    check('★ 右键不再弹值面板（不叠两块浮层）', panel === 0, String(panel));
   });
 });

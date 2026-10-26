@@ -1430,7 +1430,8 @@ public:
         InsertColumnRight,  // 在光标所在格右侧插一列
         RemoveColumn,       // 删掉光标所在列
         MergeCells,         // 把整格选区合并成一格
-        SplitCell           // 把光标所在格拆回它覆盖的格位
+        SplitCell,          // 把光标所在格拆回它覆盖的格位
+        RemoveTable         // 删掉光标所在的那张表（不止清空内容）
     };
 
     /**
@@ -1736,6 +1737,17 @@ public:
      * @return true = 插进去了
      */
     bool insertImage(const ImageSpec& spec);
+
+    /**
+     * 把显示尺寸按落点所在的单元格限宽。
+     *
+     * 落在格里的图按版心宽度排会横穿整张表（宿主只知道版心，格宽是排版算出来的）。
+     *   超出时按比例缩到格宽，保持高宽比；高度是自动的时候不必改它，由排版按比例推。
+     *
+     * @param spec 调用方给的图片记录
+     * @return 可能被收窄的记录（不在格里、或本来就不超宽时原样返回）
+     */
+    ImageSpec clampImageToContainer(const ImageSpec& spec) const;
 
     /**
      * 插图片 + 重排 + 呈现。

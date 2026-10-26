@@ -585,6 +585,17 @@ const DropdownDetail* dropdownOf(const ControlSpec& spec);
 const DateDetail* dateOf(const ControlSpec& spec);
 
 /**
+ * 这个控件的内容区算不算光标屏障（光标停不进去、内容不可直接编辑）。
+ *
+ * 两条来源：选择类按自己的开关（作者可以关掉）；值是投影的类型（下拉、日期）恒算 ——
+ *   内容由值生成，光标停进去再敲字就是往投影里塞字，值与显示从此对不上，
+ *   而且连插两个字段时第二个会落进第一个的内容里（嵌套字段）。
+ * @param spec 控件记录
+ * @return true = 内容区不接受光标
+ */
+bool controlCaretBarrier(const ControlSpec& spec);
+
+/**
  * 取文本特有层；纯文本控件返回 nullptr。
  * @param spec 控件记录
  * @return 文本特有层

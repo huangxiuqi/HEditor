@@ -1452,13 +1452,14 @@ const READ = collect('r', {
       selCells: raw.selCells | 0,
       selRows: raw.selRows | 0,
       selCols: raw.selCols | 0,
-      // 六条结构命令的可用性：引擎试造一遍步骤再回答，宿主照着置灰。
+      // 结构命令的可用性：引擎试造一遍步骤再回答，宿主照着置灰。
       canInsertRow: !!raw.canInsertRow,
       canRemoveRow: !!raw.canRemoveRow,
       canInsertColumn: !!raw.canInsertColumn,
       canRemoveColumn: !!raw.canRemoveColumn,
       canMerge: !!raw.canMerge,
       canSplit: !!raw.canSplit,
+      canRemoveTable: !!raw.canRemoveTable,
     };
   },
   pageDirtyRects: (a) => JSON.parse(mod.pageDirtyRectsJson(a.page | 0)),

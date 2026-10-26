@@ -2259,3 +2259,11 @@
       教训：**收敛不是在两种判据里挑一个，而是让每个问题只有一处实现**。中途试过把
       `defaultSideAt` 也改成按流位置判，50 条判据立刻红（两个字段紧挨着时落点跳过边界），
       回滚才绿 —— 那条"文字位置 + 侧别 = 流位置"的链是有方向的。
+
+231. **改了 `web/src/engine/api.ts` 必须 `npm run build:worker`，dev 模式也一样**（2026-10-26）。
+      引擎的读写映射表（`api.ts` 里的 handler 表，含 `tableState` 这类 JSON → 类型化对象的
+      逐字段折返）不是在页面里跑的，它在 **Worker 壳**（`web/dist/heditor_worker.js`，构建产物）里。
+      漏了这一步的症状极具误导性：wasm 已经是新的、命令也生效了（`tableOp('removeTable')` 返回
+      true），可读回来的对象里就是没有新字段 —— 看着像"引擎没写这个键"。
+      ⇒ 判据红在这种地方时，先 `grep 新字段名 web/dist/heditor_worker.js`：没命中就是壳旧了。
+      同族：wasm 改了要重链（`cmake --workflow --preset wasm`），壳改了要重打包，两件事分开算。

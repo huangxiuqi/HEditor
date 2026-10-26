@@ -809,6 +809,7 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
         removeColumn: 5,
         mergeCells: 6,
         splitCell: 7,
+        removeTable: 8,
       };
       const code = codes[op];
       if (code === undefined) throw new Error('不认识的表格命令：' + String(op));

@@ -670,7 +670,7 @@ function openControlPanel(
   const top = box.top + (rect.page * (g.page.h + g.gap) + rect.y + rect.h) * scale;
   const left = box.left + rect.x * scale;
 
-  const layer = createLayer('heditor-popover', () => editor.focus());
+  const layer = createLayer('heditor-popover heditor-popover--control', () => editor.focus());
   layer.el.style.minWidth = Math.round(rect.w * scale) + 'px';
 
   if (c.type === 'dropdownList') {

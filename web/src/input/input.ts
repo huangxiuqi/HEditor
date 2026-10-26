@@ -269,8 +269,10 @@ export interface InputLayer {
   /**
    * 按设备像素坐标落光标（自动化入口与按下共用这一条）。
    * @param pt 文档坐标（设备像素）
+   * @param preHit 已经拿到的命中结果（省一次往返）
+   * @param opts tap 为假时不触发控件的弹出层（右键走这条路：菜单归宿主，不该再弹一个值面板）
    */
-  placeAt(pt: { x: number; y: number }): Maybe<Hit | null>;
+  placeAt(pt: { x: number; y: number }, preHit?: Hit | null, opts?: { tap?: boolean }): Maybe<Hit | null>;
   readonly clickState: ClickState;
   readonly composing: boolean;
 }
@@ -534,7 +536,11 @@ export function createInput(env: InputEnv): InputLayer {
   // 落在正文之外时不起手 —— 从页外空白拖起不该选中任何东西。
   // 定位这一步必须等：异步宿主的落光标是一次往返，不等它，clickAt 这类入口会在
   // 光标还没摆好时就 resolve，调用方读到的光标是上一拍的。
-  const placeAt = (pt: { x: number; y: number }, preHit?: Hit | null): Maybe<Hit | null> =>
+  const placeAt = (
+    pt: { x: number; y: number },
+    preHit?: Hit | null,
+    opts?: { tap?: boolean },
+  ): Maybe<Hit | null> =>
     then1(preHit !== undefined ? preHit : env.hit(pt.x, pt.y), (h) => {
       // 图片优先：点在图身或把手上都不落光标 —— 图片是原子，光标只能停在它两侧。
       //   把手还要起一次拖拽（后续帧由 window 上的监听接手）。
@@ -577,7 +583,8 @@ export function createInput(env: InputEnv): InputLayer {
             return h;
           });
         }
-        env.onControlTap?.(h.field);
+        // 右键：菜单归宿主，值与下拉面板不该同时弹出来（两块浮层会叠在一起）。
+        if (opts?.tap !== false) env.onControlTap?.(h.field);
       }
       const act = hitToAction(h);
       if (!act) {

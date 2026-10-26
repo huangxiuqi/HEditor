@@ -80,16 +80,16 @@ export function createGridPicker(o: GridPickerOptions): { el: HTMLElement; updat
   let cols = Math.max(1, Math.min(o.cols, o.maxCols));
 
   /**
-   * 按当前 rows / cols 重画高亮与那行读数。
+   * 按当前 rows / cols 重画那行读数。
+   *
+   * 不给默认尺寸涂长亮：那几格比别的亮，看着像"这几格坏了 / 已经选中了"，
+   *   而指针还没扫过任何一格。长亮只在指针扫过时给（--hover），读数由标题那一行说。
    */
   const paint = (): void => {
     head.textContent = `${rows} × ${cols}`;
     footText.textContent = '标题行（首行做表头）';
     for (const cell of Array.from(grid.children)) {
-      const b = cell as HTMLElement;
-      const r = Number(b.dataset.row);
-      const c = Number(b.dataset.col);
-      b.classList.toggle('heditor-picker__cell--on', r <= rows && c <= cols);
+      cell.classList.remove('heditor-picker__cell--on', 'heditor-picker__cell--hover');
     }
   };
 

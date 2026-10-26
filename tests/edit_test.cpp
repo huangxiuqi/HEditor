@@ -12476,10 +12476,11 @@ int main() {
 
         // 前提：续排片段上，另两格确实没有行盒。没有这一条，后面的判据可能是空转
         //   （比如它本来就还有行盒，那"点得到"根本不需要新逻辑）。
-        // 段号从末尾数：最后六段是行 1、行 2 的各三格，它们之前是行 0 的两个空格。
+        // 段号从末尾数：最后一段是表后补的那段（表不能是文档的最后一块），再往前六段
+        //   是行 1、行 2 的各三格，它们之前是行 0 的两个空格。
         const int n_blocks = static_cast<int>(e.blocks().size());
-        const int empty_col1 = n_blocks - 8;
-        const int empty_col2 = n_blocks - 7;
+        const int empty_col1 = n_blocks - 9;
+        const int empty_col2 = n_blocks - 8;
         expectTrue(e.blocks()[empty_col1].cp_text.empty() && e.blocks()[empty_col2].cp_text.empty(),
                    "前提：另两格是空段");
         bool col1_on_page1 = false;
@@ -13680,9 +13681,12 @@ int main() {
 
         // 整块删除：贴着屏障控件退格，删掉的是整块，不是它内容里的一个字。
         //   它的内容是"图形 + 标签"的投影，删一半就再也重建不回来。
+        //   有值的下拉先清值（用户想删的是"选的那一项"），再按一次才删控件本身。
         e80.moveCaretToDocEnd();
         const size_t n_before = e80.controlViews().size();
-        expectTrue(e80.backspace(), "退格");
+        expectTrue(e80.backspace(), "退格清掉下拉的值");
+        expectTrue(e80.controlViews().size() == n_before, "这一下只清值，控件还在");
+        expectTrue(e80.backspace(), "再退格一次删控件");
         expectTrue(e80.controlViews().size() == n_before - 1, "整块删掉了一个控件（不是删字）");
         expectTrue(e80.backspace(), "再退格一次");
         expectTrue(e80.controlViews().size() == n_before - 2, "又整块删掉一个");
@@ -13848,7 +13852,9 @@ int main() {
         p92.free_input = false;
         expectTrue(e81.setControlSpecAndRender(1, p92), "关掉自由输入");
         expectTrue(e81.controlViews()[1].value.text.empty(), "选项外的值跟着清空");
-        expectTrue(e81.controlViews()[1].content.empty(), "内容也空了");
+        // 空值的下拉显示的是那句提示（不是空内容）：内容空掉的话控件只剩两枚相邻括号，
+        //   宽不到一个字，点不进去也就弹不出选项。
+        expectTrue(!e81.controlViews()[1].content.empty(), "空值换成提示文字，不是空内容");
 
         // 改定义是设计动作：表单与只读模式都拒绝。
         e81.setEditMode(EditMode::Form);
@@ -15293,8 +15299,9 @@ int main() {
         expectTrue(e87.documentCodepoints() == 6,
                    "码点数 = 6（甲乙 + 空格 + 丙 + 全角空格 + 丁，实际 " +
                        std::to_string(e87.documentCodepoints()) + "）");
-        expectTrue(e87.documentWordCount() == 4,
-                   "★ 字数 = 4：两个空白不计（实际 " + std::to_string(e87.documentWordCount()) + "）");
+        expectTrue(
+            e87.documentWordCount() == 4,
+            "★ 字数 = 4：两个空白不计（实际 " + std::to_string(e87.documentWordCount()) + "）");
 
         // 空段落不产字：全空白的一段加到 0。
         NodeTree t87b;
@@ -15312,29 +15319,28 @@ int main() {
         e87b.setConfig(c87);
         e87b.setDocument(t87b, StyleSheet{});
         e87b.relayout();
-        expectTrue(e87b.documentWordCount() == 0,
-                   "★ 只有空白的一段：字数 0（实际 " + std::to_string(e87b.documentWordCount()) + "）");
+        expectTrue(
+            e87b.documentWordCount() == 0,
+            "★ 只有空白的一段：字数 0（实际 " + std::to_string(e87b.documentWordCount()) + "）");
 
         // 不在表格里：六条结构命令一条都不该报可用。
-        const bool none_ok =
-            !e87.canTableOp(EditorEngine::TableOp::InsertRowAbove) &&
-            !e87.canTableOp(EditorEngine::TableOp::RemoveRow) &&
-            !e87.canTableOp(EditorEngine::TableOp::InsertColumnRight) &&
-            !e87.canTableOp(EditorEngine::TableOp::RemoveColumn) &&
-            !e87.canTableOp(EditorEngine::TableOp::MergeCells) &&
-            !e87.canTableOp(EditorEngine::TableOp::SplitCell);
+        const bool none_ok = !e87.canTableOp(EditorEngine::TableOp::InsertRowAbove) &&
+                             !e87.canTableOp(EditorEngine::TableOp::RemoveRow) &&
+                             !e87.canTableOp(EditorEngine::TableOp::InsertColumnRight) &&
+                             !e87.canTableOp(EditorEngine::TableOp::RemoveColumn) &&
+                             !e87.canTableOp(EditorEngine::TableOp::MergeCells) &&
+                             !e87.canTableOp(EditorEngine::TableOp::SplitCell);
         expectTrue(none_ok, "★ 光标在正文：六条表格命令全部不可用");
 
         // 1×1：插得进、删不掉；没有整格选区不能并，跨度 1 不能拆。
         e87.setCaret(0, 0);
         expectTrue(e87.insertTableAndRender(1, 1, false), "插一张 1×1 表");
-        const bool one_by_one =
-            e87.canTableOp(EditorEngine::TableOp::InsertRowAbove) &&
-            e87.canTableOp(EditorEngine::TableOp::InsertColumnRight) &&
-            !e87.canTableOp(EditorEngine::TableOp::RemoveRow) &&
-            !e87.canTableOp(EditorEngine::TableOp::RemoveColumn) &&
-            !e87.canTableOp(EditorEngine::TableOp::MergeCells) &&
-            !e87.canTableOp(EditorEngine::TableOp::SplitCell);
+        const bool one_by_one = e87.canTableOp(EditorEngine::TableOp::InsertRowAbove) &&
+                                e87.canTableOp(EditorEngine::TableOp::InsertColumnRight) &&
+                                !e87.canTableOp(EditorEngine::TableOp::RemoveRow) &&
+                                !e87.canTableOp(EditorEngine::TableOp::RemoveColumn) &&
+                                !e87.canTableOp(EditorEngine::TableOp::MergeCells) &&
+                                !e87.canTableOp(EditorEngine::TableOp::SplitCell);
         expectTrue(one_by_one, "★ 1×1：只能插，不能删 / 并 / 拆");
 
         // 2×2：删得了（反向一半）。
@@ -15396,13 +15402,11 @@ int main() {
         second.text = "2027-01-01T08:00:00";
         expectTrue(!e88.setControlValue(0, second),
                    "★ 只读之后拒写（这条原来返回真：只读只挡得住键盘）");
-        expectTrue(e88.controlViews()[0].value.text == "2026-10-26T14:30:00",
-                   "值一个字符都没动");
+        expectTrue(e88.controlViews()[0].value.text == "2026-10-26T14:30:00", "值一个字符都没动");
 
         expectTrue(e88.setControlProp(0, ControlProp::Readonly, false), "取消只读");
         expectTrue(e88.setControlValue(0, second), "★ 反向：取消之后同一个写入成功");
-        expectTrue(e88.controlViews()[0].value.text == "2027-01-01T08:00:00",
-                   "改到了新值");
+        expectTrue(e88.controlViews()[0].value.text == "2027-01-01T08:00:00", "改到了新值");
 
         // 表单模式下光标停不进投影内容（值在记录上，那个位置没有可编辑正文）。
         FlowPos inner88 = -1;

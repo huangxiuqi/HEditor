@@ -334,6 +334,54 @@ body {
   overflow: hidden;
 }
 
+/* 控件弹出层里的候选项（下拉的选项、日期面板的"确定"）：一列、占满宽度。
+   少了这一段，按钮是 inline-block，会在浮层里横着排成一行 —— 那不像下拉。 */
+.heditor-popover-item {
+  display: block;
+  width: 100%;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  line-height: 20px;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.heditor-popover-item:hover,
+.heditor-popover-item:focus-visible { background: var(--hover); outline: none; }
+
+.heditor-popover-item + .heditor-popover-item { margin-top: 1px; }
+
+/* 控件值面板（下拉选项、日期）：候选项再多也不长过窗口，内部滚动。
+   不限高的话超出窗口下半截的那几项点不到 —— 与右键菜单的二级同一个道理。 */
+.heditor-popover--control {
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+}
+
+/* 日期面板里的原生日期控件：与属性面板的输入框同一套外观。 */
+.heditor-popover input[type="date"],
+.heditor-popover input[type="time"],
+.heditor-popover input[type="datetime-local"] {
+  display: block;
+  width: 100%;
+  margin-bottom: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+}
+
 .heditor-scrim {
   position: fixed;
   inset: 0;
@@ -482,11 +530,6 @@ body {
   cursor: pointer;
 }
 
-.heditor-picker__cell--on {
-  background: var(--on);
-  border-color: var(--on-line);
-}
-
 .heditor-picker__cell--hover {
   background: var(--accent);
   border-color: var(--accent);
@@ -546,6 +589,9 @@ body {
 .heditor-menu__list--sub[hidden] { display: none; }
 
 .heditor-menu__item {
+  /* 定位基准：子菜单按 top/left 贴的是"这一行"，不是整块列表。
+     少了这一条，一级很长时子菜单会跑到列表顶部，与触发它的那一行隔着一屏。 */
+  position: relative;
   display: flex;
   align-items: center;
   gap: 6px;

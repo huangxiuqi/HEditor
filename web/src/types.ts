@@ -919,7 +919,8 @@ export type TableOp =
   | 'insertColumnRight'
   | 'removeColumn'
   | 'mergeCells'
-  | 'splitCell';
+  | 'splitCell'
+  | 'removeTable';
 
 /**
  * 改一个单元格的选项。只给要改的项 —— 跨度由行列操作与合并拆分改写，不在这里。
@@ -1112,6 +1113,11 @@ export interface TableState {
    * 光标所在格拆得开（跨度大于一）。
    */
   canSplit: boolean;
+
+  /**
+   * 现在删得掉整张表（光标在表里、且删完还剩内容）。
+   */
+  canRemoveTable: boolean;
 }
 
 /**

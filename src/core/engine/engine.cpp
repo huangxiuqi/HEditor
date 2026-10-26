@@ -895,7 +895,8 @@ int EditorEngine::frameHeight() const {
  * @return true = 不计入字数
  */
 static bool isSpaceCodepoint(uint32_t cp) {
-    if (cp == 0x09 || cp == 0x0A || cp == 0x0B || cp == 0x0C || cp == 0x0D || cp == 0x20) return true;
+    if (cp == 0x09 || cp == 0x0A || cp == 0x0B || cp == 0x0C || cp == 0x0D || cp == 0x20)
+        return true;
     if (cp == 0x85 || cp == 0xA0 || cp == 0x1680) return true;
     if (cp >= 0x2000 && cp <= 0x200A) return true;
     if (cp == 0x2028 || cp == 0x2029 || cp == 0x202F || cp == 0x205F || cp == 0x3000) return true;
@@ -1255,8 +1256,7 @@ bool EditorEngine::barrierSpanAt(FlowPos f, FlowPos* first, FlowPos* end) const 
         if (n == nullptr) continue;
         const auto* spec = std::get_if<ControlSpec>(&n->payload);
         if (spec == nullptr) continue;
-        const ChoiceDetail* choice = choiceOf(*spec);
-        if (choice == nullptr || !choice->caret_barrier) continue;
+        if (!controlCaretBarrier(*spec)) continue;
         if (first != nullptr) *first = a - 1;
         if (end != nullptr) *end = b + 1;
         return true;
@@ -1266,8 +1266,7 @@ bool EditorEngine::barrierSpanAt(FlowPos f, FlowPos* first, FlowPos* end) const 
 
 bool EditorEngine::controlContentEditable(int index) const {
     if (index < 0 || index >= static_cast<int>(control_node_ids_.size())) return false;
-    const rev::Node* n =
-        rev::findNode(document(), control_node_ids_[static_cast<size_t>(index)]);
+    const rev::Node* n = rev::findNode(document(), control_node_ids_[static_cast<size_t>(index)]);
     if (n == nullptr) return false;
     const auto* spec = std::get_if<ControlSpec>(&n->payload);
     return spec != nullptr && spec->valueShape == ValueShape::Text;
@@ -1469,9 +1468,23 @@ bool EditorEngine::insertTextAndRender(int para, size_t offset, const std::strin
 
 bool EditorEngine::typeTextUtf8(const std::string& utf8) { return edit_.typeTextUtf8(utf8); }
 
-bool EditorEngine::backspace() { return edit_.backspace(); }
+bool EditorEngine::backspace() {
+    // 选中的图片就是这一下的目标：点图片不落光标，所以"顺着光标删左边那一格"删的是
+    //   别的正文。选中的东西是明确的编辑对象，删除先认它。
+    if (image_sel_ != kInvalidNodeId && edit_.eraseAtom(image_sel_)) {
+        clearImageSelection();
+        return true;
+    }
+    return edit_.backspace();
+}
 
-bool EditorEngine::deleteForward() { return edit_.deleteForward(); }
+bool EditorEngine::deleteForward() {
+    if (image_sel_ != kInvalidNodeId && edit_.eraseAtom(image_sel_)) {
+        clearImageSelection();
+        return true;
+    }
+    return edit_.deleteForward();
+}
 
 bool EditorEngine::splitParagraph() { return edit_.splitParagraph(); }
 

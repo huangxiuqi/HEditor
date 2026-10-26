@@ -357,6 +357,7 @@ inline constexpr KeySpec kKeys[] = {
     {"canRemoveColumn", "num", false},
     {"canMerge", "num", false},
     {"canSplit", "num", false},
+    {"canRemoveTable", "num", false},
 };
 inline constexpr PayloadSpec kSpec{"tableState", kKeys, static_cast<int>(std::size(kKeys)), true};
 }  // namespace table_state
