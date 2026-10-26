@@ -155,7 +155,15 @@ export function createContextMenu(onClose?: () => void): ContextMenu {
   root.tabIndex = -1;
 
   /**
-   * 每一层列表里当前高亮的那一项。
+   * 亮着的那一串项，从最外层到最深那一层。
+   *
+   * 高亮不是"单独一项"：开着子菜单的那一项在老菜单里一直是选中态 —— 手移进二级之后
+   *   父项仍然亮着，眼睛才看得出"这几项是一条路下来的"。最深那一项才是键盘当下的落点。
+   */
+  let chain: HTMLElement[] = [];
+
+  /**
+   * 键盘当下的落点（= 高亮链的最深一项）。
    */
   let active: HTMLElement | null = null;
 
@@ -258,11 +266,11 @@ export function createContextMenu(onClose?: () => void): ContextMenu {
       // 悬停：每一行都要接，置灰的那些也算。
       //   置灰项不走 setActive(row)（高亮代表"回车就执行"，点不动的项不该亮），但必须把
       //   上一项的高亮与更深的层收掉 —— 否则鼠标停在置灰项上，前面那一项还亮着，看着像
-      //   两项都能点，回车的去处也和眼睛看到的不一致。
+      //   两项都能点，回车的去处也和眼睛看到的不一致。祖先留着：它这一层的子菜单还开着。
       row.addEventListener('pointerenter', () => {
         window.clearTimeout(hoverTimer);
         if (entry.disabled) {
-          setActive(null);
+          highlight(chainOf(row).slice(0, -1));
           const depth = Number(listOf(row).dataset.depth ?? '0');
           hoverTimer = window.setTimeout(() => closeSubmenus(depth), kSubmenuDelayMs);
           return;
@@ -321,22 +329,57 @@ export function createContextMenu(onClose?: () => void): ContextMenu {
   };
 
   /**
-   * 设高亮（同一层只亮一项）。
-   * @param row 要亮的项
-   */
-  const setActive = (row: HTMLElement | null): void => {
-    if (active && active !== row) active.classList.remove('heditor-menu__item--active');
-    active = row;
-    if (active) active.classList.add('heditor-menu__item--active');
-  };
-
-  /**
    * 这一项属于哪一层。
    * @param row 菜单项
    * @returns 所在列表
    */
   const listOf = (row: HTMLElement): HTMLElement =>
     (row.parentElement instanceof HTMLElement ? row.parentElement : root);
+
+  /**
+   * 某一层列表挂在哪个菜单项下面（最外层返回 null）。
+   * @param list 列表
+   * @returns 拥有它的那一项
+   */
+  const ownerOf = (list: HTMLElement): HTMLElement | null =>
+    list.parentElement instanceof HTMLElement &&
+    list.parentElement.classList.contains('heditor-menu__item')
+      ? list.parentElement
+      : null;
+
+  /**
+   * 这一项自己加上它的祖先（一路到最外层）。
+   * @param row 菜单项
+   * @returns 从外到内的那一条
+   */
+  const chainOf = (row: HTMLElement): HTMLElement[] => {
+    const out: HTMLElement[] = [];
+    let cur: HTMLElement | null = row;
+    while (cur) {
+      out.unshift(cur);
+      cur = ownerOf(listOf(cur));
+    }
+    return out;
+  };
+
+  /**
+   * 换一条高亮链（同一层仍然只亮一项）。
+   * @param next 从外到内要亮的项
+   */
+  const highlight = (next: HTMLElement[]): void => {
+    for (const el of chain) el.classList.remove('heditor-menu__item--active');
+    chain = next;
+    for (const el of chain) el.classList.add('heditor-menu__item--active');
+    active = chain.length > 0 ? chain[chain.length - 1] : null;
+  };
+
+  /**
+   * 设高亮：这一项连同它的祖先（父项的子菜单既然开着，父项就一直亮着）。
+   * @param row 要亮的项（null = 全灭）
+   */
+  const setActive = (row: HTMLElement | null): void => {
+    highlight(row ? chainOf(row) : []);
+  };
 
   /**
    * 关掉第 depth 层及更深的子菜单。
@@ -500,7 +543,7 @@ export function createContextMenu(onClose?: () => void): ContextMenu {
   const close = (): void => {
     window.clearTimeout(hoverTimer);
     openStack.length = 0;
-    active = null;
+    highlight([]);
     document.removeEventListener('keydown', onKey, true);
     layer.close();
   };

@@ -296,3 +296,45 @@ test.describe('菜单的高亮走向', () => {
           JSON.stringify(r.labels));
   });
 });
+
+test.describe('菜单的高亮走向', () => {
+  test('二级打开之后，一级那一项一直亮着', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' } });
+    await p.page.mouse.click(700, 400, { button: 'right' });
+    await expect(p.page.locator('.heditor-menu')).toBeVisible();
+    await p.page.locator('.heditor-menu__item', { hasText: '插入' }).first().click();
+    await p.page.waitForTimeout(250);
+
+    // 手移进二级、停在其中一项上：一级那一项必须仍然亮着（这是一条路下来的）。
+    const leaf = p.page.locator('.heditor-menu__list--sub:not([hidden]) .heditor-menu__item').first();
+    await leaf.hover();
+    await p.page.waitForTimeout(250);
+    const r = await p.page.evaluate(() => {
+      const row = Array.from(document.querySelectorAll('.heditor-menu__item')).find(
+        (el) => (el.textContent || '').trim().startsWith('插入'),
+      );
+      const active = Array.from(document.querySelectorAll('.heditor-menu__item--active'));
+      return {
+        parentLit: !!row && row.classList.contains('heditor-menu__item--active'),
+        inSub: active.filter((el) => el.closest('.heditor-menu__list--sub')).length,
+        total: active.length,
+      };
+    });
+    check('★ 手移进二级之后，一级那一项仍然亮着', r.parentLit === true, JSON.stringify(r));
+    check('二级里亮着的只有指针下那一项', r.inSub === 1 && r.total === 2, JSON.stringify(r));
+
+    // 移回一级的另一项：二级收起来，那一条高亮跟着灭（不是留着一条尾巴）。
+    await p.page.locator('.heditor-menu__item', { hasText: '撤销' }).first().hover();
+    await p.page.waitForTimeout(300);
+    const back = await p.page.evaluate(() => {
+      const active = Array.from(document.querySelectorAll('.heditor-menu__item--active'));
+      return {
+        labels: active.map((el) => (el.textContent || '').trim()),
+        subOpen: document.querySelectorAll('.heditor-menu__list--sub:not([hidden])').length,
+      };
+    });
+    check('★ 回到一级另一项：只剩那一项亮着',
+          back.labels.length === 1 && back.labels[0].startsWith('撤销'), JSON.stringify(back));
+    check('二级跟着收起来了', back.subOpen === 0, JSON.stringify(back));
+  });
+});

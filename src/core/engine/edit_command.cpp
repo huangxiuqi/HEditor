@@ -1201,6 +1201,10 @@ EditCommand::SelectionErase EditCommand::planEraseSelection() {
     // 整张被覆盖的表：整张删（与上面同一个理由，只是粒度是"表"）。
     plan.steps = eraseWholeTables(from, to);
     if (!plan.steps.empty()) return plan;
+    // 跨过控件括号：按控件边界切开（完整包住的整块删，只包住一半的只删内容）。
+    //   写在按流区间删之前 —— 那一条碰到括号必然被安全阀拒掉。
+    plan.steps = eraseAcrossControls(from, to);
+    if (!plan.steps.empty()) return plan;
     plan.steps = eraseFlowSteps(from, to);
     if (plan.steps.empty()) {
         noteBlocked();
@@ -1402,6 +1406,93 @@ std::vector<Step> EditCommand::eraseWholeTables(FlowPos from, FlowPos to) const 
         steps.insert(steps.end(), part.begin(), part.end());
     }
     // 从后往前：删右边的不会移动左边的坐标。
+    std::sort(steps.begin(), steps.end(),
+              [](const Step& a, const Step& b) { return stepStartFlow(a) > stepStartFlow(b); });
+    return steps;
+}
+
+/**
+ * 选区跨过控件括号时的删除步骤（见头文件）。
+ *
+ * 三件事按次序做：先把"完整包住"的控件整块摘掉（内层随外层一起走），再把剩下的区间
+ *   按括号位置剪开（括号那一位不许删），最后逐段走 eraseFlowSteps。任何一段删不动就
+ *   整条拒绝 —— 与其它删除路径同一条"要么整段，要么不动"。
+ */
+std::vector<Step> EditCommand::eraseAcrossControls(FlowPos from, FlowPos to) const {
+    std::vector<Step> steps;
+    if (!hasFlow() || from >= to || controlNodeIds().empty()) return steps;
+
+    struct Unit {
+        int index = -1;
+        FlowPos lo = 0;
+        FlowPos hi = 0;
+        bool inner = false;  // 落在另一个整块控件里：删外层时一起走
+    };
+    std::vector<Unit> wholes;
+    std::vector<FlowPos> brackets;
+    bool crossed = false;
+    for (int i = 0; i < static_cast<int>(controlNodeIds().size()); ++i) {
+        FlowPos lo = 0;
+        FlowPos hi = 0;
+        if (!controlFlowSpan(i, &lo, &hi) || hi <= lo) continue;
+        if (hi <= from || lo >= to) continue;
+        crossed = true;
+        if (lo >= from && hi <= to) {
+            wholes.push_back(Unit{i, lo, hi, false});
+            continue;
+        }
+        // 只盖住一部分的两个边：这两枚括号不能跟着区间走。
+        if (lo >= from) brackets.push_back(lo);
+        if (hi - 1 < to) brackets.push_back(hi - 1);
+    }
+    if (!crossed) return steps;
+    for (Unit& w : wholes) {
+        for (const Unit& o : wholes) {
+            if (&o == &w) continue;
+            if (o.lo <= w.lo && o.hi >= w.hi) w.inner = true;
+        }
+    }
+    std::sort(wholes.begin(), wholes.end(),
+              [](const Unit& a, const Unit& b) { return a.lo < b.lo; });
+    std::sort(brackets.begin(), brackets.end());
+    brackets.erase(std::unique(brackets.begin(), brackets.end()), brackets.end());
+
+    // 一段可删区间：先把落在它里面的括号位置挖掉，再逐段删。
+    auto emit = [&](FlowPos a, FlowPos b) -> bool {
+        FlowPos p = a;
+        for (FlowPos c : brackets) {
+            if (c < p || c >= b) continue;
+            if (c > p) {
+                const std::vector<Step> part = eraseFlowSteps(p, c);
+                if (part.empty()) return false;
+                steps.insert(steps.end(), part.begin(), part.end());
+            }
+            p = c + 1;  // 括号自己留着
+        }
+        if (b > p) {
+            const std::vector<Step> part = eraseFlowSteps(p, b);
+            if (part.empty()) return false;
+            steps.insert(steps.end(), part.begin(), part.end());
+        }
+        return true;
+    };
+
+    FlowPos cursor = from;
+    for (const Unit& w : wholes) {
+        if (w.inner) continue;
+        if (w.lo > cursor && !emit(cursor, w.lo)) return {};
+        FlowPos at = 0;
+        if (!flowIndex().intervalOf(controlNodeIds()[static_cast<size_t>(w.index)], &at, nullptr)) {
+            return {};
+        }
+        // 整块包住它必然被拒（只读、表单结构锁）：与删控件同一条口径。
+        if (!rev::canEditRange(doc(), mode(), Range{w.lo, w.hi}).allowed) return {};
+        RemoveNode r;
+        r.at_flow = at;
+        steps.push_back(Step{r});
+        cursor = std::max(cursor, w.hi);
+    }
+    if (to > cursor && !emit(cursor, to)) return {};
     std::sort(steps.begin(), steps.end(),
               [](const Step& a, const Step& b) { return stepStartFlow(a) > stepStartFlow(b); });
     return steps;

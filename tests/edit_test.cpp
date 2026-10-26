@@ -499,7 +499,7 @@ const SectionInfo kSections[] = {
     {72, false, 10}, {73, false, 9},  {74, false, 3},  {75, false, 3},  {76, false, 3},
     {77, false, 3},  {78, true, 1},   {79, false, 2},  {80, false, 3},  {81, false, 2},
     {82, false, 1},  {83, false, 2},  {84, false, 2},  {85, false, 3},  {86, false, 4},
-    {87, false, 3},  {88, false, 3},  {89, false, 3},
+    {87, false, 3},  {88, false, 3},  {89, false, 3},  {90, false, 2},
 };
 
 /**
@@ -12319,8 +12319,157 @@ int main() {
                        "页位图自审为 0（含最后一页）");
         }
 
-        // 连页：表格行按条带切片，片段坐标是页内的，不按分页口径断开。
+        // 整行换页（行没被切开，是"这一行排不下就整个挪到下一页"）：换页处同样要补线。
+        //   一类是页脚那一行的下边框 —— 没有人来画它（下一行在下一页）；一类是续页那一行的
+        //   上边框。不然表格在换页处看着像被裁掉的，页脚最后一行没封口。
         {
+            EditorEngine e4;
+            expectTrue(e4.init({cjkPath, mnPath, latinPath}), "引擎初始化（整行换页）");
+            EngineConfig c4;
+            c4.zoom = 1.0f;
+            c4.page.width_pt = 300.0f;
+            c4.page.height_pt = 200.0f;
+            c4.page.margins = PageMargins::all(10.0f);
+            e4.setConfig(c4);
+            NodeTree t4;
+            const NodeId s4 = t4.firstSectionId();
+            const NodeId tb4 = t4.appendChild(s4, NodeKind::Table);
+            const char* rows4[] = {"甲", "乙", "丙", "丁", "戊", "己", "庚", "辛",
+                                   "壬", "癸", "子", "丑", "寅", "卯", "辰", "巳"};
+            for (const char* txt : rows4) {
+                const NodeId r = t4.appendChild(tb4, NodeKind::TableRow);
+                const NodeId c0 = t4.appendChild(r, NodeKind::TableCell);
+                t4.setText(t4.appendChild(c0, NodeKind::TextRun), utf8ToCodepoints(txt));
+                t4.appendChild(c0, NodeKind::ParagraphMark);
+                const NodeId c1 = t4.appendChild(r, NodeKind::TableCell);
+                t4.appendChild(c1, NodeKind::ParagraphMark);
+            }
+            e4.setDocument(t4, StyleSheet{});
+            e4.relayout();
+            const LayoutResult& l4 = e4.layout();
+            const PlacedTable& pt4 = l4.placed_tables.at(0);
+            expectTrue(pt4.placed.size() == 16, "十六行都是整片（没有被切开的行）");
+            bool no_cut = true;
+            for (const PlacedRow& pr : pt4.placed) {
+                no_cut = no_cut && !pr.cont_top && !pr.cont_bottom;
+            }
+            expectTrue(no_cut, "★ 前提：这些行一整行地换页（不是切开的片段）");
+            // 页脚最后一行 / 续页第一行。
+            size_t last0 = pt4.placed.size();
+            size_t first1 = pt4.placed.size();
+            for (size_t i = 0; i < pt4.placed.size(); ++i) {
+                if (pt4.placed[i].page == 0) last0 = i;
+                if (pt4.placed[i].page == 1 && first1 == pt4.placed.size()) first1 = i;
+            }
+            expectTrue(last0 < pt4.placed.size() && first1 < pt4.placed.size(),
+                       "★ 表格确实换页了（第一页最后一行 " + std::to_string(last0) +
+                           " / 续页第一行 " + std::to_string(first1) + "）");
+            e4.repaint();
+            const int pw4 = e4.pagePxWidth();
+            const int ph4 = e4.pagePxHeight();
+            /**
+             * 取一个像素是不是格线（深色）。
+             */
+            auto ink4 = [&](int page, int x, int y) -> bool {
+                const uint8_t* px = e4.pagePixels(page);
+                if (px == nullptr) return false;
+                const size_t at =
+                    (static_cast<size_t>(y) * static_cast<size_t>(pw4) + static_cast<size_t>(x)) *
+                    4u;
+                return px[at] < 100 && px[at + 1] < 100 && px[at + 2] < 100;
+            };
+            /**
+             * 这一像素行是不是一条横线（同上一条判据）。
+             */
+            auto lineLike4 = [&](int page, int y) -> bool {
+                if (y < 0 || y >= ph4) return false;
+                int dark = 0;
+                int total = 0;
+                for (int x = 16; x < 284; ++x) {
+                    ++total;
+                    if (ink4(page, x, y)) ++dark;
+                }
+                return dark * 4 > total * 3;
+            };
+            if (last0 < pt4.placed.size() && first1 < pt4.placed.size()) {
+                const int foot =
+                    static_cast<int>(std::lround(pt4.placed[last0].y + pt4.placed[last0].h));
+                const int head = static_cast<int>(std::lround(pt4.placed[first1].y));
+                expectTrue(lineLike4(0, foot),
+                           "★ 页脚最后一行的下边框补上了（y=" + std::to_string(foot) + "）");
+                expectTrue(lineLike4(1, head), "★ 续页第一行有上边框（表格接着长，不是被裁掉）");
+                expectTrue(!lineLike4(0, foot - 6), "页脚那条线上方是格内空白（不是整片黑）");
+            }
+            expectTrue(e4.auditLayout() == 0, "整行换页之后排版自审为 0");
+            expectTrue(e4.auditPageJson(0).find("\"diff\":0") != std::string::npos &&
+                           e4.auditPageJson(1).find("\"diff\":0") != std::string::npos,
+                       "页位图自审为 0（含续页）");
+        }
+
+        // 回归：一页里的普通表格，三条横线（顶边、行分隔、底边）一条都不能少。
+        //   补页脚那条下边时写成"只在切开的边上画"，顶边与行分隔会一起消失 ——
+        //   一张两行四列的表于是只剩一个开口的方框（用户就是这么看到的）。
+        {
+            EditorEngine e5;
+            expectTrue(e5.init({cjkPath, mnPath, latinPath}), "引擎初始化（一页表格）");
+            EngineConfig c5;
+            c5.zoom = 1.0f;
+            c5.page.width_pt = 595.0f;
+            c5.page.height_pt = 842.0f;
+            c5.page.margins = PageMargins::all(56.0f);
+            e5.setConfig(c5);
+            NodeTree t5;
+            const NodeId s5 = t5.firstSectionId();
+            const NodeId tb5 = t5.appendChild(s5, NodeKind::Table);
+            for (int r = 0; r < 2; ++r) {
+                const NodeId row = t5.appendChild(tb5, NodeKind::TableRow);
+                for (int c = 0; c < 4; ++c) {
+                    const NodeId cell = t5.appendChild(row, NodeKind::TableCell);
+                    t5.appendChild(cell, NodeKind::ParagraphMark);
+                }
+            }
+            e5.setDocument(t5, StyleSheet{});
+            e5.relayout();
+            const PlacedTable& pt5 = e5.layout().placed_tables.at(0);
+            expectTrue(pt5.placed.size() == 2, "两行都在第一页");
+            e5.repaint();
+            const int pw5 = e5.pagePxWidth();
+            const int ph5 = e5.pagePxHeight();
+            /**
+             * 取一个像素是不是格线（深色）。
+             */
+            auto ink5 = [&](int x, int y) -> bool {
+                const uint8_t* px = e5.pagePixels(0);
+                if (px == nullptr) return false;
+                const size_t at =
+                    (static_cast<size_t>(y) * static_cast<size_t>(pw5) + static_cast<size_t>(x)) *
+                    4u;
+                return px[at] < 100 && px[at + 1] < 100 && px[at + 2] < 100;
+            };
+            /**
+             * 这一像素行是不是一条横线（同上一条判据）。
+             */
+            auto lineLike5 = [&](int y) -> bool {
+                if (y < 0 || y >= ph5) return false;
+                int dark = 0;
+                int total = 0;
+                for (int x = 60; x < 530; ++x) {
+                    ++total;
+                    if (ink5(x, y)) ++dark;
+                }
+                return dark * 4 > total * 3;
+            };
+            const int top5 = static_cast<int>(std::lround(pt5.placed[0].y));
+            const int mid5 = static_cast<int>(std::lround(pt5.placed[0].y + pt5.placed[0].h));
+            const int bot5 = static_cast<int>(std::lround(pt5.placed[1].y + pt5.placed[1].h));
+            expectTrue(lineLike5(top5), "★ 表格顶边画出来了（y=" + std::to_string(top5) + "）");
+            expectTrue(lineLike5(mid5),
+                       "★ 行与行之间的分隔线画出来了（y=" + std::to_string(mid5) + "）");
+            expectTrue(lineLike5(bot5), "★ 表格底边画出来了（y=" + std::to_string(bot5) + "）");
+        }
+
+        {
+            // 连页：表格行按条带切片，片段坐标是页内的，不按分页口径断开。
             EditorEngine e3;
             expectTrue(e3.init({cjkPath, mnPath, latinPath}), "引擎初始化（连页表格）");
             EngineConfig c3;
@@ -13886,9 +14035,9 @@ int main() {
         p92.free_input = false;
         expectTrue(e81.setControlSpecAndRender(1, p92), "关掉自由输入");
         expectTrue(e81.controlViews()[1].value.text.empty(), "选项外的值跟着清空");
-        // 空值的下拉显示的是那句提示（不是空内容）：内容空掉的话控件只剩两枚相邻括号，
-        //   宽不到一个字，点不进去也就弹不出选项。
-        expectTrue(!e81.controlViews()[1].content.empty(), "空值换成提示文字，不是空内容");
+        // 空值的下拉：内容是空的，提示是排版层画的那句灰字（与文本控件的 placeholder 同一条）。
+        //   内容空掉不等于控件点不到 —— 提示槽占着宽度，几何由它给（见 [89]）。
+        expectTrue(e81.controlViews()[1].content.empty(), "空值不投影成内容");
 
         // 改定义是设计动作：表单与只读模式都拒绝。
         e81.setEditMode(EditMode::Form);
@@ -15623,10 +15772,187 @@ int main() {
         expectTrue(e89.setCaretAtFlow(lo89), "光标在空控件内部");
         expectTrue(e89.backspace(), "贴空控件退格");
         expectTrue(e89.controlViews().empty(), "★ 空控件被整块删掉（提示没有改变空判定）");
+
+        // 空的下拉与日期也走这一套：内容是空的、提示是排版画的那句灰字。
+        //   这两类的提示如果投影成内容，字号与墨色就跟正文一样（看着不像提示），
+        //   还会被算进字数、被复制带走。
+        {
+            NodeTree td;
+            const NodeId sec = td.firstSectionId();
+            const NodeId a = td.appendChild(sec, NodeKind::TextRun);
+            td.setText(a, utf8ToCodepoints("科室"));
+            td.appendChild(sec, NodeKind::ParagraphMark);
+            EditorEngine e89d;
+            expectTrue(e89d.init(fonts89), "引擎初始化（空下拉）");
+            e89d.setConfig(c89);
+            e89d.setDocument(td, StyleSheet{});
+            e89d.relayout();
+
+            // 提示槽在哪一条行盒上（同一条判据给下面两次用）。
+            auto hintOf = [&]() -> const LineCluster* {
+                for (const LineBox& lb : e89d.layout().lines) {
+                    for (const LineCluster& c : lb.clusters) {
+                        if (c.control_hint) return &c;
+                    }
+                }
+                return nullptr;
+            };
+
+            ControlSpec dd = makeControlSpec("dropdownList");
+            if (auto* d = std::get_if<DropdownDetail>(&dd.detail)) {
+                d->options = {{"a", "内科"}, {"b", "外科"}};
+            }
+            dd.appearance.placeholder = "请选择科室";
+            e89d.setCaret(0, 2);
+            expectTrue(e89d.insertControlAndRender(dd, ""), "插入一个空的下拉");
+            std::vector<EditorEngine::ControlView> vd = e89d.controlViews();
+            expectTrue(vd.size() == 1 && vd[0].content.empty(),
+                       "★ 空下拉的内容是空的（提示不进内容）");
+            expectTrue(vd.size() == 1 && vd[0].placeholder == "请选择科室", "提示记在记录上");
+            expectTrue(hintOf() != nullptr, "★ 空下拉照样有提示槽（不是零宽控件）");
+            expectTrue(!e89d.controlRects(0).empty(), "空下拉有几何（点得中，才弹得出选项）");
+
+            ControlValue dv;
+            dv.text = "b";
+            expectTrue(e89d.setControlValueAndRender(0, dv), "选中外科");
+            expectTrue(e89d.controlViews()[0].content == "外科", "有值之后内容换成选项标签");
+            expectTrue(hintOf() == nullptr, "★ 有值之后不再画提示");
+
+            // 日期同一条；没写 placeholder 时退回内置的那一句（"选择日期"）。
+            ControlSpec dt = makeControlSpec("date");
+            e89d.moveCaretToDocEnd();
+            expectTrue(e89d.insertControlAndRender(dt, ""), "插入一个空日期");
+            const auto views = e89d.controlViews();
+            expectTrue(views.size() == 2 && views[1].content.empty(), "★ 空日期的内容是空的");
+            expectTrue(hintOf() != nullptr, "★ 空日期照样有提示槽");
+        }
     }
 
-    checkSectionTable();
-    printSectionTimes();
+    if (runSection(90)) std::printf("\n[90] 复制：控件只被盖住一半时只取选区那几段文字\n");
+    if (runSection(90)) {
+        EngineConfig c90;
+        c90.zoom = 1.0f;
+        c90.page.width_pt = 400.0f;
+        c90.page.height_pt = 240.0f;
+        c90.page.margins = PageMargins::all(12.0f);
+        const std::vector<std::string> fonts90 = {cjkPath, mnPath, latinPath};
+
+        // 一段文字中间夹一个控件：甲乙[丙丁]戊己。控件的两枚边界落在段中间。
+        NodeTree t90;
+        {
+            const NodeId sec = t90.firstSectionId();
+            const NodeId a = t90.appendChild(sec, NodeKind::TextRun);
+            t90.setText(a, utf8ToCodepoints("甲乙"));
+            const NodeId cc = t90.appendChild(sec, NodeKind::ContentControl);
+            Node* cn = t90.find(cc);
+            cn->control.key = "no";
+            cn->control.controlType = "text";
+            const NodeId inner = t90.appendChild(cc, NodeKind::TextRun);
+            t90.setText(inner, utf8ToCodepoints("丙丁"));
+            const NodeId b = t90.appendChild(sec, NodeKind::TextRun);
+            t90.setText(b, utf8ToCodepoints("戊己"));
+            t90.appendChild(sec, NodeKind::ParagraphMark);
+        }
+        EditorEngine e90;
+        if (!e90.init(fonts90)) {
+            std::fprintf(stderr, "字体加载失败\n");
+            return 2;
+        }
+        e90.setConfig(c90);
+        e90.setDocument(t90, StyleSheet{});
+        e90.relayout();
+
+        // 选区盖住"乙"与控件里的前一段（"丙"）：复制的应当只有这两段文字，
+        //   控件壳（括号）与没选中的"丁"都不进片段。
+        expectTrue(e90.setSelection(Range{e90.flowPosAt(0, 1), e90.flowPosAt(0, 3)}),
+                   "选中「乙」与控件里的一半");
+        const ClipCopy half = e90.copySelection();
+        expectTrue(half.ok, "半覆盖控件时复制成功（不是整块带走，也不是报错）");
+        expectTrue(half.text == "乙丙", "★ 复制的纯文本只有选区那两段（实际 " + half.text + "）");
+        expectTrue(half.fragment.find("ContentControl") == std::string::npos,
+                   "★ 片段里没有控件（半个控件没有可粘贴的形状）");
+
+        // 反向一半：控件被整个包住时照旧整块复制 —— 结构不能因为"半覆盖"这条而丢。
+        expectTrue(e90.setSelection(Range{e90.flowPosAt(0, 0), e90.flowPosAt(0, 6)}),
+                   "选中整段（控件完整在内）");
+        const ClipCopy whole = e90.copySelection();
+        expectTrue(whole.ok, "整段复制成功");
+        expectTrue(whole.fragment.find("ContentControl") != std::string::npos,
+                   "★ 完整包住的控件照旧整块进片段");
+        expectTrue(whole.text == "甲乙丙丁戊己", "纯文本仍是整段（实际 " + whole.text + "）");
+        expectTrue(e90.auditCompile() == 0 && e90.auditLayout() == 0,
+                   "复制不产生改动：增量与全量仍然逐字段一致");
+
+        // 剪切 = 复制 + 删选区：删的必须正好是复制走的那一段。跨控件边界按流区间删会被
+        //   安全阀拒掉（症状是"剪切不好使"），这里钉住它真的删了、而且只删选中的那两段。
+        expectTrue(e90.setSelection(Range{e90.flowPosAt(0, 1), e90.flowPosAt(0, 3)}),
+                   "再选一次同一段");
+        expectTrue(e90.deleteSelection(), "★ 跨控件边界删选区：执行成功（剪切能落地）");
+        e90.relayout();
+        expectTrue(e90.blocks()[0].textUtf8() == "甲丁戊己",
+                   "★ 只删了选区那两段（实际 " + e90.blocks()[0].textUtf8() + "）");
+        expectTrue(e90.controlViews().size() == 1 && e90.controlViews()[0].content == "丁",
+                   "★ 控件留着，内容只剩没选中的那一段");
+        expectTrue(e90.auditCompile() == 0 && e90.auditLayout() == 0,
+                   "跨控件删除之后增量与全量仍然逐字段一致");
+
+        // 反向一半：把控件连括号一起选上再删 —— 整个控件走掉（与复制"完整包住才复制"对称）。
+        FlowPos lo90 = 0;
+        FlowPos hi90 = 0;
+        expectTrue(e90.controlContentSpan(0, &lo90, &hi90), "控件内容区间量得到");
+        expectTrue(e90.setSelection(Range{lo90 - 1, hi90 + 1}), "连两枚括号一起选上");
+        expectTrue(e90.deleteSelection(), "整块删");
+        e90.relayout();
+        expectTrue(e90.controlViews().empty(), "★ 完整选中的控件整块删掉了");
+        expectTrue(e90.blocks()[0].textUtf8() == "甲戊己",
+                   "★ 删完只剩控件外的字（实际 " + e90.blocks()[0].textUtf8() + "）");
+
+        // 嵌套：外层只被盖住一部分、内层整个落在选区里 —— 内层照旧整块进片段，
+        //   跳掉的只有被切开的那一层（"把控件全踢出去"就错在这里）。
+        {
+            NodeTree tn;
+            const NodeId sec = tn.firstSectionId();
+            const NodeId a = tn.appendChild(sec, NodeKind::TextRun);
+            tn.setText(a, utf8ToCodepoints("甲乙"));
+            const NodeId outer = tn.appendChild(sec, NodeKind::ContentControl);
+            Node* on = tn.find(outer);
+            on->control.key = "outer";
+            on->control.controlType = "text";
+            const NodeId oi = tn.appendChild(outer, NodeKind::TextRun);
+            tn.setText(oi, utf8ToCodepoints("丙"));
+            const NodeId inner = tn.appendChild(outer, NodeKind::ContentControl);
+            Node* in = tn.find(inner);
+            in->control.key = "inner";
+            in->control.controlType = "text";
+            const NodeId ii = tn.appendChild(inner, NodeKind::TextRun);
+            tn.setText(ii, utf8ToCodepoints("丁戊"));
+            const NodeId oe = tn.appendChild(outer, NodeKind::TextRun);
+            tn.setText(oe, utf8ToCodepoints("己"));
+            const NodeId b = tn.appendChild(sec, NodeKind::TextRun);
+            tn.setText(b, utf8ToCodepoints("庚辛"));
+            tn.appendChild(sec, NodeKind::ParagraphMark);
+
+            EditorEngine e90b;
+            expectTrue(e90b.init(fonts90), "引擎初始化（嵌套控件）");
+            e90b.setConfig(c90);
+            e90b.setDocument(tn, StyleSheet{});
+            e90b.relayout();
+            // 从外层的第一段文字到外层的最后一个字：外层被切开，内层整个在内。
+            expectTrue(e90b.setSelection(Range{e90b.flowPosAt(0, 2), e90b.flowPosAt(0, 6)}),
+                       "选中外层内容（内层完整在内）");
+            const ClipCopy nest = e90b.copySelection();
+            expectTrue(nest.ok, "嵌套控件也能复制");
+            size_t hits = 0;
+            for (size_t at = nest.fragment.find("ContentControl"); at != std::string::npos;
+                 at = nest.fragment.find("ContentControl", at + 1)) {
+                ++hits;
+            }
+            expectTrue(nest.text == "丙丁戊己", "纯文本是选区里那几段（实际 " + nest.text + "）");
+            expectTrue(hits == 1, "★ 被完整包住的内层控件进了片段，被切开的外层没有（实际 " +
+                                      std::to_string(hits) + " 个）");
+        }
+    }
+
     checkSectionTable();
     printSectionTimes();
 

@@ -626,11 +626,24 @@ ControlSpec makeControlSpec(const std::string& controlType);
  * 文本与数值的内容就是值本身，返回空串表示"不改内容"；选择类生成图形加标签；
  * 下拉取选中项的标签（自由输入时就是那段输入）；日期按格式折。生成与解析只有这一份：
  * 命中某个选项、切换后重建内容、插入时给初始内容，都走它。
+ *
+ * 空值的下拉与日期返回空串 —— 提示文字不是内容（见 controlEmptyHint）。
  * @param spec 控件记录
  * @param value 控件的值（文本类忽略）
  * @return 显示文字
  */
 std::string controlDisplayText(const ControlSpec& spec, const ControlValue& value);
+
+/**
+ * 值为空时该显示的提示文字（排版层画成灰字，占宽度不占位置）。
+ *
+ * 下拉与日期有内置的那一句（"请选择" / "选择日期"），作者给了 placeholder 就用作者的；
+ * 文本与数值没有内置的 —— 没写 placeholder 就不显示提示。选择类不用它：它们的标签是
+ * 作者写的内容，不是提示。
+ * @param spec 控件记录
+ * @return 提示文字（空 = 这类控件没有提示）
+ */
+std::string controlEmptyHint(const ControlSpec& spec);
 
 /**
  * 组控件每个选项在内容里的码点区间 [begin, end)。

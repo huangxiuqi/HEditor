@@ -30,6 +30,9 @@ bool isShell(NodeKind kind) {
 
 /**
  * 把区间加宽到"整块容器"的边界。文本节点按码点截，外壳下沉，其余容器整块进来。
+ *
+ * 内容控件不加宽：它被盖住一半时不该把整块带走（复制一半控件比用户选的多），
+ *   那一半由 collect 下沉成"选区里那几段文字"（控件壳不进片段）。
  */
 void widenToWholeBlocks(const Node& parent, const FlowIndex& idx, FlowPos* lo, FlowPos* hi) {
     bool changed = true;
@@ -42,6 +45,7 @@ void widenToWholeBlocks(const Node& parent, const FlowIndex& idx, FlowPos* lo, F
             if (e <= *lo || f >= *hi) continue;
             if (f >= *lo && e <= *hi) continue;
             if (isShell(c->kind) || isText(c->kind)) continue;
+            if (c->kind == NodeKind::ContentControl) continue;
             if (f < *lo) {
                 *lo = f;
                 changed = true;
@@ -88,6 +92,15 @@ bool collect(const Node& parent, const FlowIndex& idx, FlowPos lo, FlowPos hi,
             out->push_back(std::move(s));
             continue;
         }
+        // 控件只被盖住一部分：下沉成"选区里那几段文字"，控件壳（括号、值、选项表）不进片段。
+        //   整块复制会比用户选的多 —— 选中的是半句话，粘出来的却是一整块带括号的字段；
+        //   而半个控件既没有可粘贴的形状，也不该因为选区蹭到边角就被整块带走。
+        if (c->kind == NodeKind::ContentControl) {
+            const FlowPos clo = std::max(lo, f);
+            const FlowPos chi = std::min(hi, e);
+            if (!collect(*c, idx, clo, chi, out, error)) return false;
+            continue;
+        }
         // 加宽之后不该再出现半覆盖的容器：出现了说明加宽漏了某一层，宁可失败。
         *error = "取片段：容器被切开（加宽没有覆盖到它）";
         return false;
@@ -97,7 +110,8 @@ bool collect(const Node& parent, const FlowIndex& idx, FlowPos lo, FlowPos hi,
 
 /**
  * 复制根：能完整包住区间的最深容器。外壳无条件下沉，真正的容器只在严格内含时下沉 ——
- * 否则"选中了控件的开头到中间"会变成一个没有壳的半个控件。
+ * 否则"选中了控件的开头到中间"会变成一个没有壳的半个控件（被切开的控件由 collect
+ * 下沉成纯文字，见那里的注释）。
  *
  * 表格与它的行、格不下沉：它们是块级容器，行与格离开表格就不是可粘贴的内容，而"半张表"
  * 也没有形状可表达。碰到表格一律由外层加宽到整张表 —— 复制一张表就是复制整张表。

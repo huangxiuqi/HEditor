@@ -418,10 +418,12 @@ private:
                 n);
             ++flow_;  // 进控件：这一位就是上面那枚起始边界
             for (const Ref& c : n->children) walk(c);
+            // 提示是哪一句由控件类型定（下拉 / 日期有内置的，文本 / 数值只认 placeholder）。
+            const std::string hint = controlEmptyHint(spec);
             if (cpCount() == cp_lo && start_slot < objects_.size() &&
                 objects_.size() == start_slot + 1 && objects_[start_slot].owner == owner &&
-                !spec.appearance.placeholder.empty()) {
-                objects_[start_slot].hint = spec.appearance.placeholder;
+                !hint.empty()) {
+                objects_[start_slot].hint = hint;
             }
             out_.controls[slot].end_block = block_index_;
             out_.controls[slot].end_cp = cpCount();

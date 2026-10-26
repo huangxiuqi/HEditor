@@ -1191,6 +1191,7 @@ test.describe('空值的下拉与日期', () => {
       await H.setCaret({ para: 0, offset: 4 });
       await H.flush();
       await H.insertControl({ type: 'dropdownList', key: 'dd',
+                              placeholder: '请选择科室',
                               options: [{ value: 'a', label: '选项甲' },
                                         { value: 'b', label: '选项乙' }] });
       await H.flush();
@@ -1208,14 +1209,53 @@ test.describe('空值的下拉与日期', () => {
         starts: list.map((c) => c.start.offset),
         ends: list.map((c) => c.end.offset),
         texts: items.map((c) => c.text),
+        phs: list.map((c) => c.placeholder),
+        widths: boxes.map((b) => b.w),
         nested: boxes.length === 2 ? boxes[0].x + boxes[0].w > boxes[1].x + 1 : true,
         left: r.left, top: r.top, Z: ZOOM(),
         cx: q.x + q.w / 2, cy: q.y + q.h / 2,
       };`);
 
-    check('★ 空的下拉有可点的内容（不是零宽控件）', geo.texts[0].length > 0,
+    // 提示不是内容：内容空着，提示记在控件上，几何由提示槽给（宽到点得中）。
+    //   日期没写 placeholder ⇒ 记录上是空的，画的是内置那句（"选择日期"）。
+    check('★ 空的下拉内容是空的（提示不写成内容）', geo.texts[0] === '',
           JSON.stringify(geo.texts));
-    check('★ 空的日期有可点的内容', geo.texts[1].length > 0, JSON.stringify(geo.texts));
+    check('★ 空的日期内容是空的', geo.texts[1] === '', JSON.stringify(geo.texts));
+    check('★ 作者写的提示记在控件上（日期没写，用内置那句）',
+          geo.phs[0] === '请选择科室' && geo.phs[1] === '', JSON.stringify(geo.phs));
+    check('★ 空控件仍有可点的几何（不是零宽控件）',
+          geo.widths[0] > 20 && geo.widths[1] > 20, JSON.stringify(geo.widths));
+
+    // 提示画成灰字（与文本控件的 placeholder 同一档墨色），不是正文字色。
+    //   控件矩形的单位是磅（与选区矩形同一档），页画布是设备像素 —— 读像素前先乘 ZOOM。
+    //   读数带从控件左边框再往右 4 像素起：括号是蓝的（三通道差得远），不参与中性色统计。
+    const ink = await p.read<any>(`
+      await H.flush();
+      // 引擎重画进的是页位图，宿主贴到画布上是下一帧的事 —— 少等这两帧，读到的像素与呈现差一拍。
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      const q = (await D.controls()).items[0].rects[0];
+      const Z = ZOOM();
+      const src = document.querySelector('.heditor-pages canvas[data-page="0"]');
+      const w = Math.max(1, Math.round(q.w * Z) - 8);
+      const h = Math.max(1, Math.round(q.h * Z));
+      const cv = document.createElement('canvas');
+      cv.width = w;
+      cv.height = h;
+      const g2 = cv.getContext('2d');
+      g2.drawImage(src, Math.round(q.x * Z) + 5, Math.round(q.y * Z), w, h, 0, 0, w, h);
+      const d = g2.getImageData(0, 0, w, h).data;
+      let gray = 0;
+      let darkest = 255;
+      for (let k = 0; k < d.length; k += 4) {
+        const R = d[k], G = d[k + 1], B = d[k + 2];
+        if (Math.abs(R - G) < 12 && Math.abs(G - B) < 12 && R < 235) {
+          if (R > 90 && R < 220) ++gray;
+          if (R < darkest) darkest = R;
+        }
+      }
+      return { gray, darkest, w, h };`);
+    check('★ 空下拉的提示是灰的（不是当正文画的）', ink.gray > 30 && ink.darkest > 100,
+          JSON.stringify(ink));
     check('★ 两个字段是并排的，没嵌在一起', geo.nested === false,
           JSON.stringify({ starts: geo.starts, ends: geo.ends, nested: geo.nested }));
 

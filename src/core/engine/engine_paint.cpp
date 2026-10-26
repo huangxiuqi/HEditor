@@ -352,12 +352,22 @@ void EditorEngine::rasterIntoBitmap(Bitmap& target, int page_index, const float*
     // 表格格线：画在页位图里（它不随光标变），在字形之前 —— 线压不到字上。
     //   每个格只画自己的外框，于是合并格内部不会多出几条线；跨页切开的那条边要补画
     //   （表格接着长在下一页，不是被裁掉），连页的条带切口不画（那不是页边界）。
+    //
+    //   分页处有两种断法，两种都要有那条边：一种是行被切开（cont_top / cont_bottom 记着），
+    //   另一种是整行挪到下一页。后一种里"页脚最后一行"没有任何人给它画下边（下一行在
+    //   下一页），于是表格在换页处看着没封口 —— 本片是本页最后一片时由它自己补上。
+    //   上边不用管：每一片都画自己的上边（见下面那条），续页第一行本来就有。
     auto emitTables = [&](int page, float dy, bool spill_only) {
         if (layout_.placed_tables.empty()) return;
         for (const PlacedTable& pt : layout_.placed_tables) {
-            for (const PlacedRow& pr : pt.placed) {
+            for (size_t pi = 0; pi < pt.placed.size(); ++pi) {
+                const PlacedRow& pr = pt.placed[pi];
                 if (pr.page != page) continue;
                 if (spill_only && !(pr.y + pr.h > slab_pt)) continue;
+                // 下一片在别的页（或没有下一片）⇒ 这一片的下边没人画，得自己画。
+                //   连页不算：那里的"下一片"只差一条条带，切口不是页边界。
+                const bool seam_bottom =
+                    (!cont) && (pi + 1 >= pt.placed.size() || pt.placed[pi + 1].page != page);
                 const float top = pr.y * zoom + dy;
                 const float bot = top + pr.h * zoom;
                 if (bot <= top) continue;
@@ -395,11 +405,15 @@ void EditorEngine::rasterIntoBitmap(Bitmap& target, int page_index, const float*
                     target.fillRect(Rect{fxl, fyt, 1.0f, fh}, cfg_.table_line);
                     target.fillRect(Rect{static_cast<float>(xr), fyt, 1.0f, fh}, cfg_.table_line);
                     const bool skip_cut = cont;
+                    // 上边：每一片都画自己的上边（表的顶边、每一行的分隔线都靠它）。
+                    //   连页的条带切口不算（那里的"上边"是同一行接下去的断点）。
                     if (!(skip_cut && pr.cont_top))
                         target.fillRect(Rect{fxl, fyt, fw, 1.0f}, cfg_.table_line);
-                    // 下边：切出来的片段要补线；行自己的下边由"下一行的上边"或表尾给。
+                    // 下边：切出来的片段要补；本页最后一片也要补（下一行在下一页时没人给它画）；
+                    //   表尾那一行照旧要画。
                     const bool last_row = (pr.row == pt.rows - 1);
-                    if (!(skip_cut && pr.cont_bottom) && (pr.cont_bottom || last_row))
+                    if (!(skip_cut && pr.cont_bottom) &&
+                        (pr.cont_bottom || last_row || seam_bottom))
                         target.fillRect(Rect{fxl, static_cast<float>(yb), fw, 1.0f},
                                         cfg_.table_line);
                 }

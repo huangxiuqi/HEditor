@@ -421,9 +421,11 @@ private:
             // 提示文字按"这个控件没带来任何内容"判：既没加码点、也没多出行内对象。
             //   两者都判是因为空段落、空控件都不加码点，而那正是最常见的空法；
             //   多出来的对象（嵌套控件、图片）说明里面有东西，提示就不该出现。
+            //   提示是哪一句由控件类型定（下拉 / 日期有内置的，文本 / 数值只认 placeholder）。
+            const std::string hint = controlEmptyHint(n->control);
             if (!flagged && cpCount() == cp_lo && start_slot < obj_.size() &&
-                obj_.size() == obj_lo + 1 && !n->control.appearance.placeholder.empty()) {
-                obj_[start_slot].hint = n->control.appearance.placeholder;
+                obj_.size() == obj_lo + 1 && !hint.empty()) {
+                obj_[start_slot].hint = hint;
             }
             if (!flagged) {
                 // 闭括号同样吃进内容，也要记来源。段落从一枚闭括号起是正常形态（前一段的
