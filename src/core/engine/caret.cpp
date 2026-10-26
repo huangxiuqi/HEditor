@@ -895,8 +895,15 @@ void CaretResolver::hitTestInLine(const LineBox& lb, float inline_page_pt, uint3
         }
     }
     const size_t k0 = lb.firstClusterAt(cp);
+    // 侧别数的是"位置上跨过了几个槽"，而提示文字那一枚槽占宽度不占位置 ——
+    //   按簇下标直接相减会让它算进去：点空字段的提示文字会被判成"跨过两个槽"，
+    //   于是落点跑到闭括号右边（差一个括号宽）。
+    int side = 0;
+    for (size_t i = k0; i < hit_i && i < n; ++i) {
+        if (!lb.clusters[i].control_hint) ++side;
+    }
     if (cp_out) *cp_out = cp;
-    if (side_out) *side_out = (hit_i > k0) ? static_cast<int>(hit_i - k0) : 0;
+    if (side_out) *side_out = side;
 }
 
 /**

@@ -331,6 +331,15 @@ struct InlineObject {
      */
     uint64_t content_hash = 0;
 
+    /**
+     * 空控件（开始与结束边界之间一个码点都没有）要画的提示文字；非空串才画。
+     *
+     * 它挂在起始边界上而不是自成一个对象：提示文字占宽度但不是可停光标的位置 ——
+     * 自成一个对象会让流位置与排版槽一一对应这条不变量破掉，控件的跨度、空判定、
+     * 侧别全都要跟着另立一套。挂在这里，排版只在两枚括号之间插一枚槽，流位置不动。
+     */
+    std::string hint;
+
     bool operator==(const InlineObject& o) const = default;
 };
 
@@ -1031,6 +1040,17 @@ struct PlacedGlyph {
 inline constexpr float kControlBracketSlotGapPt = 1.5f;
 
 /**
+ * 提示文字在某个字体下的排版宽度（磅）。
+ *
+ * 排版（槽宽）与绘制（画灰字）共用它：各算一套的话，槽宽与画出来的字对不上 ——
+ * 要么画出槽外，要么槽里空一段。逐字取名义字形的推进，缺字按 0 宽跳过。
+ * @param f 控件边界那一侧正文 run 的字体
+ * @param utf8 提示文字
+ * @return 宽度（磅）
+ */
+float hintAdvancePt(const FontInstance* f, const std::string& utf8);
+
+/**
  * 表单括号占位是开括号还是闭括号。
  * 这个区分只服务一件事：同一个 cp 上会出现两个视觉位置
  * （[ 的前/后、] 的前/后），而光标必须落在朝向内容的那一侧：
@@ -1120,6 +1140,15 @@ struct LineCluster {
      * 绘制要它：框的高度是原子自己的，不是行盒的 —— 一行里混排大字号文字时行盒会更高。
      */
     float atom_h_pt = 0.0f;
+
+    /**
+     * 这个簇是"空控件的提示文字"：占宽度、不产生字形，也不是一个可以停光标的位置。
+     *
+     * 它夹在一对括号之间（[提示]），所以同一偏移上的簇序是 括号、提示、括号。侧别是
+     * "跨过了几个位置"，数格子时必须跳过它 —— 不跳的话"控件之后"会落在闭括号上（差
+     * 一个括号宽），而控件内部的插入点会多出一个。
+     */
+    bool control_hint = false;
 
     /**
      * 原子的内容指纹（见 InlineObject::content_hash）。行指纹要它 ——
@@ -1297,7 +1326,8 @@ struct LineBox {
 
     /**
      * 本偏移上第一枚簇在 clusters 里的下标；本行没有这个偏移的簇时返回 clusters.size()。
-     * 同一偏移上的簇必然连续：占位括号在前、真实簇在后（见 layout.cpp 的 emitSlot）。
+     * 同一偏移上的簇必然连续：占位槽（括号、提示文字、原子）在前、真实簇在后
+     * （见 layout.cpp 的 emitSlot）。
      * @param cp 段内码点下标
      * @return 第一枚簇的下标；本行没有这个偏移时为 clusters.size()
      */
@@ -1308,14 +1338,16 @@ struct LineBox {
     }
 
     /**
-     * 本偏移上占位括号的枚数 —— 也就是这个偏移的侧别上限。
+     * 本偏移上占位槽的枚数 —— 也就是这个偏移的侧别上限。
+     *
+     * 提示文字那一枚槽不算：它占宽度但不占位置，侧别数的是"跨过了几个位置"。
      * @param cp 段内码点下标
-     * @return 这个偏移上占位括号的枚数（侧别上限）
+     * @return 这个偏移上占位槽的枚数（侧别上限）
      */
     int bracketCountAt(uint32_t cp) const {
         int n = 0;
         for (size_t i = firstClusterAt(cp); i < clusters.size() && clusters[i].cp == cp; ++i)
-            if (clusters[i].placeholder) ++n;
+            if (clusters[i].placeholder && !clusters[i].control_hint) ++n;
         return n;
     }
 
@@ -1345,7 +1377,22 @@ struct LineBox {
         }
         const int n = bracketCountAt(cp);
         const int s = (side < 0) ? 0 : (side > n ? n : side);
-        const size_t k = k0 + static_cast<size_t>(s);
+        // 侧别 0 = 所有槽之前。
+        if (s == 0) return clusters[k0].inline_pt;
+        // 数格子时跳过提示文字：它不占位置，所以"跨过 s 个位置"不能按簇下标直接加 s。
+        //   位置取第 s 枚槽的右缘（紧跟它的那一枚簇的起点），不是下一枚槽的起点 ——
+        //   提示文字夹在两枚括号之间时，两者差着一句话的宽度。
+        int seen = 0;
+        for (size_t k = k0; k < clusters.size() && clusters[k].cp == cp; ++k) {
+            if (clusters[k].control_hint) continue;
+            ++seen;
+            if (seen != s) continue;
+            const size_t next = k + 1;
+            return (next < clusters.size()) ? clusters[next].inline_pt : inline_end_pt;
+        }
+        // 跨过了本偏移上全部槽：位置在最后一个槽的右缘，也就是这一偏移之后第一枚簇的起点。
+        size_t k = k0;
+        while (k < clusters.size() && clusters[k].cp == cp) ++k;
         return (k < clusters.size()) ? clusters[k].inline_pt : inline_end_pt;
     }
 };

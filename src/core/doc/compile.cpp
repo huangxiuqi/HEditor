@@ -401,6 +401,11 @@ private:
             //   变化时字形也不动（两枚码点成形后是同一枚方框）—— 行指纹只能靠它判"这一段
             //   要重画"（与投影入口同一个函数，别各写一份）。
             const uint64_t look = controlPaintDigest(n->control);
+            // 空控件的提示文字要在孩子走完之后才判得出来（"空"= 一个码点都没吃进来），
+            //   所以先记下自己在对象表里的位置，回来再补。
+            size_t start_slot = 0;
+            const uint32_t cp_lo = cpCount();
+            const size_t obj_lo = obj_.size();
             if (!flagged) {
                 noteFirst(n->id);
                 InlineObject o;
@@ -409,9 +414,17 @@ private:
                 o.owner = owner;
                 o.read_only = ro;
                 o.content_hash = look;
+                start_slot = obj_.size();
                 obj_.push_back(o);
             }
             for (const Node* c : n->children) walk(c->id, flagged);
+            // 提示文字按"这个控件没带来任何内容"判：既没加码点、也没多出行内对象。
+            //   两者都判是因为空段落、空控件都不加码点，而那正是最常见的空法；
+            //   多出来的对象（嵌套控件、图片）说明里面有东西，提示就不该出现。
+            if (!flagged && cpCount() == cp_lo && start_slot < obj_.size() &&
+                obj_.size() == obj_lo + 1 && !n->control.appearance.placeholder.empty()) {
+                obj_[start_slot].hint = n->control.appearance.placeholder;
+            }
             if (!flagged) {
                 // 闭括号同样吃进内容，也要记来源。段落从一枚闭括号起是正常形态（前一段的
                 //   控件跨到了这一段，它的结束边界落在段首）。不记的话 first 会退化成这一段

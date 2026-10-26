@@ -230,12 +230,15 @@ setText(text: string, opts?: { repeat?: number }): Promise<void>   // 明确用�
 颜色是 `[r, g, b, a]`，不给就跟随文字颜色）。记号颜色对四种选择类都生效（单选、复选、
 单选组、复选组）。插入选择类控件之后光标落在整块之后。
 
+`placeholder` 是提示文字：值（内容）为空时以灰字画在控件里，填了字就消失，不进内容也不
+进值；只读与打印态不画。`label` 与它是两件事 —— 文本类的 `label` 直接成为内容。
+
 | 签名 | 备注 |
 | --- | --- |
-| `form()` | 每个控件一条：`type` / `key` / `label` / `group` / `text`（内容）/ `value`（记录上的值）/ `options` / `glyphColor` / `format` / `dateUnits` / `readonly` / `required` / `freeInput` / `start`、`end`（区间）/ `focused` |
+| `form()` | 每个控件一条：`type` / `key` / `label` / `group` / `text`（内容）/ `placeholder`（提示文字）/ `value`（记录上的值）/ `options` / `glyphColor` / `format` / `dateUnits` / `readonly` / `required` / `freeInput` / `start`、`end`（区间）/ `focused` |
 | `setControlValue(index, { flag?, text?, items? })` | 改值并按类型重建显示内容；选择类与下拉、日期的内容是值的投影 |
 | `toggleControl(index, option?)` | 切换一个选项（单控件传 -1）；互斥与多选规则在引擎里，整批一次撤销 |
-| `updateControl(index, { type?, key?, label?, options?, group?, freeInput?, format?, dateUnits?, glyphColor?, readonly?, required? })` | 改定义与两个运行态开关：只改给出的项；改完按新定义重建内容，指向已删选项的值跟着清空，同属一步撤销 |
+| `updateControl(index, { type?, key?, label?, placeholder?, options?, group?, freeInput?, format?, dateUnits?, glyphColor?, readonly?, required? })` | 改定义与两个运行态开关：只改给出的项；改完按新定义重建内容，指向已删选项的值跟着清空，同属一步撤销 |
 | `describeControl(control)` | 把一个控件摊成属性面板的字段表（哪种类型有哪些项、当前值是什么）；纯数据。日期给一个 `kind: 'datetime'` 字段：`inputType`（`date` / `time` / `datetime-local`）与 `step` 由精度算出，`value` 已按该类型裁好长度 |
 | `applyControlForm(index, values)` | 按一份面板值改控件：值走内容、定义与开关走各自的入口，只提交真的变了的项。日期只给片段（`2026-10-26`）即可，补成完整 ISO 归库 |
 

@@ -531,7 +531,8 @@ function makeTabs(): Tab[] {
         label: '文本输入',
         icon: 'field',
         big: true,
-        run: () => insertControl('text', { label: '（待填）' }),
+        // 空内容 + 一句提示：提示是灰字、不进内容，填了字它就消失。
+        run: () => insertControl('text', { placeholder: '（待填）' }),
       },
       {
         act: 'number',
@@ -539,7 +540,7 @@ function makeTabs(): Tab[] {
         icon: 'number',
         big: true,
         // 数值控件只收数字：非数字在编辑入口就被挡住（见引擎的 ContentFilter）。
-        run: () => insertControl('number', { label: '0' }),
+        run: () => insertControl('number', { placeholder: '0' }),
       },
       {
         act: 'radio',

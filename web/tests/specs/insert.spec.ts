@@ -1170,3 +1170,120 @@ test.describe('空值的下拉与日期', () => {
     check('★ 选中之后值落到控件上', got === 'a', String(got));
   });
 });
+
+test.describe('空控件的提示文字', () => {
+  test('灰字占位：点得进、打字就消失、只读态不画', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' } });
+    const geo = await p.read<any>(`
+      await H.setText('甲乙');
+      await H.setCaret({ para: 0, offset: 2 });
+      await H.flush();
+      await H.insertControl({ type: 'text', key: 'name', placeholder: '请输入姓名' });
+      await H.flush();
+      await D.stopBlink();
+      const c = (await H.form())[0];
+      const q = CARET();
+      const fr = FRAME().getBoundingClientRect();
+      return {
+        text: c.text, ph: c.placeholder,
+        x: q.x, y: q.y, h: q.h, Z: ZOOM(),
+        left: fr.left, top: fr.top,
+      };`);
+    check('★ 插进去的内容是空的（提示不是内容）', geo.text === '', JSON.stringify(geo.text));
+    check('★ 提示文字记在控件上', geo.ph === '请输入姓名', JSON.stringify(geo.ph));
+
+    // 一条带里的两种墨：括号是蓝色（三通道差得远），提示是中性灰，正文是黑。
+    //   读数带从提示的左沿起（caret.x 就是它），所以左边的"甲乙"不会混进来。
+    // 页画布的控制权在引擎手里（OffscreenCanvas），只能 drawImage 出来再读 ——
+    //   在它自己身上 getContext 会直接抛 InvalidStateError。
+    const rowOf = (x0: number, y0: number, w: number, h: number) => p.read<any>(`
+      // 先排空再等两帧：引擎重画进的是页位图，宿主把它贴到画布上是下一帧的事 ——
+      //   少等这两帧，读出来的像素与呈现差一拍。
+      await H.flush();
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      const src = document.querySelector('.heditor-pages canvas[data-page="0"]');
+      const cv = document.createElement('canvas');
+      cv.width = ${w};
+      cv.height = ${h};
+      const g2 = cv.getContext('2d');
+      g2.drawImage(src, ${x0}, ${y0}, ${w}, ${h}, 0, 0, ${w}, ${h});
+      const d = g2.getImageData(0, 0, ${w}, ${h}).data;
+      let gray = 0;
+      let ink = 0;
+      let darkest = 255;
+      let sig = 0;
+      for (let k = 0; k < d.length; k += 4) {
+        const R = d[k], G = d[k + 1], B = d[k + 2];
+        // 只看中性色：括号是蓝的，三通道差得远，不参与。
+        if (Math.abs(R - G) < 12 && Math.abs(G - B) < 12) {
+          if (R < 235) {
+            ++ink;
+            if (R < darkest) darkest = R;
+            if (R > 90 && R < 220) ++gray;
+          }
+        }
+        sig = (sig * 31 + R * 3 + G * 5 + B) | 0;
+      }
+      return { gray, ink, darkest, sig };`);
+
+    // 读数带从提示左沿再往右 6 像素起：光标那一竖条（2 像素宽、纯黑）正好压在那个位置上，
+    //   它会把"这是灰字"读成"有黑字"。
+    const x0 = Math.round(geo.x) + 6;
+    const y0 = Math.max(0, Math.round(geo.y) - 2);
+    const w = Math.round(250 * geo.Z);
+    const h = Math.round(geo.h) + 4;
+    const empty = await rowOf(x0, y0, w, h);
+    check('★ 空字段画出灰字（提示真的在纸上）', empty.ink > 40 && empty.gray > 40,
+          JSON.stringify(empty));
+    // 灰字与黑字的区别只在灰度：有正文时最暗的那一像素会压到 60 以下。
+    check('★ 提示是灰的，不是当正文画的黑字', empty.darkest > 100, JSON.stringify(empty));
+
+    // 换一句等宽的提示：槽宽一个字都不变，画面必须跟着变 —— 否则页缓存会一直贴旧字。
+    const swapped = await p.read<any>(`
+      await H.updateControl(0, { placeholder: '请输入名字' });
+      await H.flush();
+      await D.stopBlink();
+      return (await H.form())[0].placeholder;`);
+    const after = await rowOf(x0, y0, w, h);
+    check('提示文字改到了控件上', swapped === '请输入名字', JSON.stringify(swapped));
+    check('★ 等宽换一句：灰字仍在，像素确实换了（行指纹认得出内容变了）',
+          after.ink > 40 && after.sig !== empty.sig,
+          JSON.stringify({ before: empty, after }));
+
+    // 只读（呈现与打印）态：提示不画 —— 印在纸上就是凭空多一句话。
+    await p.read(`
+      await H.configure({ mode: 'readOnly' });
+      await H.flush();
+      await D.stopBlink();
+      return true;`);
+    const printed = await rowOf(x0, y0, w, h);
+    check('★ 只读态不画提示（也不给它占位）', printed.ink === 0, JSON.stringify(printed));
+    await p.read(`
+      await H.configure({ mode: 'document' });
+      await H.flush();
+      await D.stopBlink();
+      return true;`);
+
+    // 真实鼠标点在提示上：光标落进这个字段（不是落到字段外）。
+    await p.page.mouse.click(geo.left + (geo.x + 30 * geo.Z), geo.top + geo.y + geo.h / 2);
+    const focused = await p.read<any>(`
+      await H.flush();
+      return { caret: (await D.controls()).caret, count: (await D.controls()).count };`);
+    check('★ 点在提示文字上，光标落进这个字段', focused.caret === 0 && focused.count === 1,
+          JSON.stringify(focused));
+
+    const typed = await p.read<any>(`
+      await H.type('张');
+      await H.flush();
+      await D.stopBlink();
+      const c = (await H.form())[0];
+      return { text: c.text, ph: c.placeholder };`);
+    check('★ 打进去的字就是字段的值（提示没被当成内容吃掉）', typed.text === '张',
+          JSON.stringify(typed));
+    const filled = await rowOf(x0, y0, w, h);
+    // 提示是五个灰字，内容只有一个黑字：墨的量掉一大截，而且最暗的那一像素是黑的。
+    check('★ 有内容之后不再画提示（灰字没了、换成黑字）',
+          filled.darkest < 60 && filled.ink < empty.ink * 0.6,
+          JSON.stringify({ empty, filled }));
+  });
+});

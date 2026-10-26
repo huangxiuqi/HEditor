@@ -155,6 +155,7 @@ static uint64_t rasterSignature(const EngineConfig& cfg, bool marks_shown,
     h = fnvMix(h, cfg.show_control_dots ? 1ULL : 0ULL);
     h = fnvMixColor(h, cfg.control_mark);
     h = fnvMixColor(h, cfg.control_mark_ro);
+    h = fnvMixColor(h, cfg.control_hint);
     h = fnvMixFloat(h, cfg.control_dot_pt);
     // 编辑标记：同样是"画在页位图里、排版看不见"的一层，改档位就是这一页的像素变了。
     //   混的是"此刻画不画"而不是档位本身 —— 只读态不画，而它不进页内容指纹（内容没变），
@@ -1631,7 +1632,29 @@ std::vector<EditorEngine::ControlRect> EditorEngine::controlRects(int index) con
             lo = static_cast<uint32_t>(cr.start.offset);
         if (lb.paragraph == cr.end.para && cr.end.offset < hi)
             hi = static_cast<uint32_t>(cr.end.offset);
-        if (lo >= hi) continue;
+        // 空控件没有码点，矩形量不出来 —— 除非它画着提示文字：那一段就是它的几何，
+        //   宿主画悬停框、贴浮层、算小点的位置都要它。没有提示的空控件仍是零宽，
+        //   照旧不给矩形（给了就是把相邻内容框进去）。
+        if (lo >= hi) {
+            for (size_t i = 0; i < lb.clusters.size(); ++i) {
+                const LineCluster& c = lb.clusters[i];
+                if (!c.control_hint || controlIndexOfOwner(c.owner_control) != index) continue;
+                const float h0 = lb.inline_origin_pt + c.inline_pt;
+                const float h1 = (i + 1 < lb.clusters.size())
+                                     ? lb.inline_origin_pt + lb.clusters[i + 1].inline_pt
+                                     : lb.inline_origin_pt + lb.inline_end_pt;
+                if (!(h1 > h0)) continue;
+                Rect hr;
+                if (!lb.vertical) {
+                    hr = Rect{h0, lb.block_lo_pt, h1 - h0, lb.block_hi_pt - lb.block_lo_pt};
+                } else {
+                    hr = Rect{lb.block_lo_pt, h0, lb.block_hi_pt - lb.block_lo_pt, h1 - h0};
+                }
+                out.push_back(ControlRect{lb.page, hr});
+                break;
+            }
+            continue;
+        }
 
         // 左右边缘不能用同一个函数取，这是最容易写错的地方：
         //   左边缘取"lo 那个簇自己的起点"（对）；
@@ -2139,7 +2162,8 @@ bool EditorEngine::hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* 
         best->cell_bottom_pt > best->cell_top_pt) {
         float text_start = best->inline_origin_pt;
         for (const LineCluster& lc : best->clusters) {
-            if (!lc.placeholder) {
+            // 提示文字算"有字"：它替内容占位，点在它上面要落光标，不是选整格。
+            if (!lc.placeholder || lc.control_hint) {
                 text_start += lc.inline_pt;
                 break;
             }

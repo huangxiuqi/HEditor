@@ -409,9 +409,9 @@ export function createMenus(host: MenusHost): Menus {
           {
             kind: 'action',
             label: '文本输入',
-            run: () => insert('text', { label: '（待填）' }),
+            run: () => insert('text', { placeholder: '（待填）' }),
           },
-          { kind: 'action', label: '数值输入', run: () => insert('number', { label: '0' }) },
+          { kind: 'action', label: '数值输入', run: () => insert('number', { placeholder: '0' }) },
           { kind: 'action', label: '单选', run: () => insert('radioButton', { label: '选项甲' }) },
           { kind: 'action', label: '复选', run: () => insert('checkBox', { label: '同意' }) },
           {

@@ -1075,6 +1075,7 @@ ControlPatch controlPatchFrom(val o) {
         p.options = std::move(options);
     }
     if (!o["group"].isUndefined()) p.group = o["group"].as<std::string>();
+    if (!o["ph"].isUndefined()) p.placeholder = o["ph"].as<std::string>();
     if (!o["free"].isUndefined()) p.free_input = o["free"].as<bool>();
     if (!o["format"].isUndefined()) p.format = o["format"].as<std::string>();
     if (!o["units"].isUndefined()) p.units = static_cast<uint16_t>(o["units"].as<int>());
@@ -1466,6 +1467,8 @@ std::string controlsJson() {
           << jsonEscape(v != nullptr ? v->label : std::string()) << "\",\"group\":\""
           << jsonEscape(v != nullptr ? v->group : std::string()) << "\",\"text\":\""
           << jsonEscape(v != nullptr ? v->content : std::string())
+          // 提示文字：属性面板要回填它，判据要读"空控件上画的是哪一句"。
+          << "\",\"ph\":\"" << jsonEscape(v != nullptr ? v->placeholder : std::string())
           << "\",\"ro\":" << (c.read_only ? "true" : "false") << ",\"req\":"
           << ((v != nullptr && v->required) ? "true" : "false")
           // 日期的格式与可选单位、选择类的记号色：属性面板要按现状回填，缺了就只能显示默认值
@@ -1585,6 +1588,8 @@ std::string bracketSlotsJson() {
               // 行内原子也在这张表里（它同样是"占了一个槽的占位簇"）：kind 0 不是原子，
               //   1 是图片、2 是公式。判据靠它区分"槽是括号还是原子" —— 两者的
               //   side / owner 都是 0 与 -1，光看那两个字段分不开。
+              //   空控件的提示文字也在里面：side 0 且 atom 0 —— 括号不会出现 side 0，
+              //   所以这一组取值唯一地标识"这是提示文字那一枚槽"（它占宽度不占位置）。
               << ",\"atom\":" << static_cast<int>(c.atom) << ",\"h\":" << c.atom_h_pt
               << ",\"x\":" << (lb.inline_origin_pt + c.inline_pt) << "}";
         }

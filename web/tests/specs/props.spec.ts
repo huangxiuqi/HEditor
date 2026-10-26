@@ -120,6 +120,24 @@ test.describe('属性面板', () => {
       ['readonly', 'required', 'key'].every((k) => r.date.includes(k) && r.dropdown.includes(k)),
       JSON.stringify(r.date));
 
+    // 提示文字：值可能为空的那四类（文本 / 数值 / 下拉 / 日期）都给这一项。
+    //   判据走面板那条路（applyControlForm）而不是 updateControl —— 两条路径各写一半时，
+    //   只有面板那一条会漏。
+    const ph = await p.read<any>(`
+      await H.setCaret({ para: 0, offset: 99 });
+      await H.insertControl({ type: 'text', key: 'n', placeholder: '请填写' });
+      await H.flush();
+      const list = await H.form();
+      const last = list[list.length - 1];
+      const keys = H.describeControl(last).fields.map((f) => f.key);
+      const ok = await H.applyControlForm(last.index, { placeholder: '请填写姓名' });
+      await H.flush();
+      return { keys, ok, ph: (await H.form())[last.index].placeholder };`);
+    check('★ 文本控件的属性面板有提示文字这一项', ph.keys.includes('placeholder'),
+          JSON.stringify(ph.keys));
+    check('★ 面板改提示文字落到控件上（不是当内容写进去）',
+          ph.ok === true && ph.ph === '请填写姓名', JSON.stringify(ph));
+
     const empty = await p.read<any>(`
       const fake = (await H.form())[0];
       fake.type = 'unknownKind';

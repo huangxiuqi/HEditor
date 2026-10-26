@@ -1587,6 +1587,64 @@ void EditorEngine::rasterControlMarks(Bitmap& target, int page_index, const floa
         }
     }
 
+    // 提示文字：空控件里那句"该填什么"。几何取占位簇的位置与宽度（槽宽就是它排出来的
+    //   那一段），字体与基线取括号那一套。它替内容占位，所以用灰色 —— 与正文同色会被
+    //   当成已经填好的字读走。
+    //   只读态上面已经返回了：提示是编辑期的辅助，印在纸上就是凭空多出一句话。
+    for (int k : layout_.linesOnPage(page_index)) {
+        const LineBox& lb = lines[static_cast<size_t>(k)];
+        if (!lb.bracket_font) continue;
+        if (spill_only && !(lb.block_hi_pt > slab_pt)) continue;
+        const float lo_pt = lb.block_lo_pt + dy_px / zoom;
+        const float hi_pt = lb.block_hi_pt + dy_px / zoom;
+        if (band && (hi_pt < *band_lo_pt - 1.0f || lo_pt > *band_hi_pt + 1.0f)) continue;
+
+        for (size_t ci = 0; ci < lb.clusters.size(); ++ci) {
+            const LineCluster& c = lb.clusters[ci];
+            if (!c.control_hint) continue;
+            const rev::Node* n = rev::findNode(document(), static_cast<NodeId>(c.owner_control));
+            const auto* spec = (n != nullptr) ? std::get_if<ControlSpec>(&n->payload) : nullptr;
+            if (spec == nullptr || spec->appearance.placeholder.empty()) continue;
+            const FontInstance* face =
+                (c.bracket_font != nullptr) ? c.bracket_font : lb.bracket_font;
+            hb_font_t* hbf = (face != nullptr) ? face->hb() : nullptr;
+            if (hbf == nullptr) continue;
+
+            const float a0 = lb.inline_origin_pt + c.inline_pt;
+            const float a1 = (ci + 1 < lb.clusters.size())
+                                 ? lb.inline_origin_pt + lb.clusters[ci + 1].inline_pt
+                                 : lb.inline_origin_pt + lb.inline_end_pt;
+            // 宽度上限就是槽宽：排版按它截过一次，这里按同一个上限截第二次 ——
+            //   换成另一个上限，截断点就会落在槽外或槽里空一段（见 hintAdvancePt）。
+            const float avail = a1 - a0;
+            if (!(avail > 0.0f)) continue;
+
+            std::vector<uint32_t> ids;
+            std::vector<float> xs;
+            std::vector<float> ys;
+            float pen = 0.0f;
+            for (uint32_t cp : utf8ToCodepoints(spec->appearance.placeholder)) {
+                hb_codepoint_t g = 0;
+                if (!hb_font_get_nominal_glyph(hbf, cp, &g) || g == 0) continue;  // 缺字跳过
+                const float adv = hb_font_get_glyph_h_advance(hbf, g) / kFontScalePerPt;
+                if (pen + adv > avail + 0.01f) break;
+                if (!lb.vertical) {
+                    xs.push_back((a0 + pen) * zoom);
+                    ys.push_back(lb.bracket_axis_pt * zoom + dy_px);
+                } else {
+                    // 竖排：与括号同一套做法，整笔转 90 度，沿列往下推进。
+                    xs.push_back(lb.bracket_axis_pt * zoom);
+                    ys.push_back((a0 + pen) * zoom + dy_px);
+                }
+                ids.push_back(g);
+                pen += adv;
+            }
+            if (ids.empty()) continue;
+            target.drawGlyphs(hbf, ids.data(), xs.data(), ys.data(), static_cast<int>(ids.size()),
+                              units_to_px, cfg_.control_hint, lb.vertical ? 90.0f : 0.0f);
+        }
+    }
+
     // 小点是独立开关，与括号无关：关着就到这儿结束。
     if (!cfg_.show_control_dots) return;
 

@@ -681,6 +681,11 @@ export interface ControlInsertOptions {
   label?: string;
 
   /**
+   * 提示文字：内容为空时画在控件里的那句话（灰字，只读与打印态不画）。
+   */
+  placeholder?: string;
+
+  /**
    * 业务只读：填表的人只能看（插入之后仍然可以改回来）。
    */
   readonly?: boolean;
@@ -746,6 +751,11 @@ export interface ControlUpdateOptions {
    * 单控件的标签（选择类）。组控件的文案在选项表里。
    */
   label?: string;
+
+  /**
+   * 提示文字：内容为空时画在控件里的那句话（不进内容、不进值）。
+   */
+  placeholder?: string;
 
   /**
    * 选项表（选择类与下拉）。
@@ -1206,6 +1216,11 @@ export interface ControlSummary {
    * 内容的纯文本：文本与数值字段的值就是它。
    */
   text: string;
+
+  /**
+   * 提示文字：值（内容）为空时画在控件里的那句话。它不进内容，也不进值。
+   */
+  placeholder: string;
 
   /**
    * 当前值（记录上的那一份）。

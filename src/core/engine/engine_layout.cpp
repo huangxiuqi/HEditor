@@ -263,7 +263,8 @@ void EditorEngine::computeLineFingerprints(int dirty_lo, int dirty_hi, bool full
             h = fnvMix(h, static_cast<uint64_t>(c.cp));
             mixf(c.inline_pt);
             h = fnvMix(h, (c.placeholder ? 1ull : 0ull) | (c.read_only ? 2ull : 0ull) |
-                              (static_cast<uint64_t>(c.bracket_side) << 2));
+                              (static_cast<uint64_t>(c.bracket_side) << 2) |
+                              (c.control_hint ? 32ull : 0ull));
             // 占位簇的内容指纹：控件边界带的是外观摘要（括号颜色、图元怎么画），原子带的是
             //   内容（换了一张同样大的图、改了公式表达式）。两者在几何上都看不出来 ——
             //   不混它，"改了但画面不变"就只能在换页时才自愈。

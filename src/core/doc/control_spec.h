@@ -695,6 +695,14 @@ struct ControlPatch {
     std::optional<Color> glyph_color;
 
     /**
+     * 提示文字：值（内容）为空时画在控件里的那句话。
+     *
+     * 它与 label 不是一件事：label 是单控件的标签、进内容；提示文字只在空值时代替内容
+     * 占位，不进内容、不进值。
+     */
+    std::optional<std::string> placeholder;
+
+    /**
      * 期望的业务类型。给了就必须与当前一致，否则整份拒绝。
      *
      * 记录里不存它 —— 它的用处只有一个：把"想换类型"的调用显式挡住。改类型不是改属性：

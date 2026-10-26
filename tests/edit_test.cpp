@@ -499,7 +499,7 @@ const SectionInfo kSections[] = {
     {72, false, 10}, {73, false, 9},  {74, false, 3},  {75, false, 3},  {76, false, 3},
     {77, false, 3},  {78, true, 1},   {79, false, 2},  {80, false, 3},  {81, false, 2},
     {82, false, 1},  {83, false, 2},  {84, false, 2},  {85, false, 3},  {86, false, 4},
-    {87, false, 3},  {88, false, 3},
+    {87, false, 3},  {88, false, 3},  {89, false, 3},
 };
 
 /**
@@ -15432,6 +15432,163 @@ int main() {
         expectTrue(!e88.toggleControl(cbIndex, -1), "★ 只读的复选勾不动");
         expectTrue(e88.controlViews()[cbIndex].value.flag, "反向：勾选状态没被改掉");
         e88.setEditMode(EditMode::Document);
+    }
+
+    if (runSection(89)) std::printf("\n[89] 空控件的提示文字：占宽度不占位置、有内容就不画\n");
+    if (runSection(89)) {
+        EngineConfig c89;
+        c89.zoom = 1.0f;
+        c89.page.width_pt = 595.0f;
+        c89.page.height_pt = 842.0f;
+        c89.page.margins = PageMargins::all(56.0f);
+        const std::vector<std::string> fonts89 = {cjkPath, mnPath, latinPath};
+
+        NodeTree t89;
+        {
+            const NodeId sec = t89.firstSectionId();
+            const NodeId a = t89.appendChild(sec, NodeKind::TextRun);
+            t89.setText(a, utf8ToCodepoints("甲乙"));
+            t89.appendChild(sec, NodeKind::ParagraphMark);
+        }
+        EditorEngine e89;
+        if (!e89.init(fonts89)) {
+            std::fprintf(stderr, "字体加载失败\n");
+            return 2;
+        }
+        e89.setConfig(c89);
+        e89.setDocument(t89, StyleSheet{});
+        e89.relayout();
+
+        ControlSpec spec89 = makeControlSpec("text");
+        spec89.appearance.placeholder = "请输入姓名";
+        e89.setCaret(0, 2);  // 段末
+        expectTrue(e89.insertControlAndRender(spec89, ""), "插入一个空内容的文本控件");
+
+        const std::vector<EditorEngine::ControlView> v89 = e89.controlViews();
+        expectTrue(v89.size() == 1 && v89[0].content.empty(), "控件内容为空：提示不是内容");
+        expectTrue(v89.size() == 1 && v89[0].placeholder == "请输入姓名", "提示文字记在记录上");
+        // 正文里不能出现那句话的一半：它是画出来的，不是插进去的字。
+        std::string body89;
+        for (uint32_t cp : e89.blocks()[0].cp_text) body89 += codepointsToUtf8({cp});
+        expectTrue(body89 == "甲乙", "正文仍是两个字（提示没进内容）");
+
+        // 槽序：开括号、提示、闭括号，三枚挤在同一个 cp 上。
+        std::vector<const LineCluster*> slots89;
+        for (const LineBox& lb : e89.layout().lines) {
+            for (const LineCluster& c : lb.clusters) {
+                if (c.placeholder) slots89.push_back(&c);
+            }
+        }
+        expectTrue(slots89.size() == 3,
+                   "★ 三枚槽：两枚括号夹一句提示（实 " + std::to_string(slots89.size()) + " 枚）");
+        if (slots89.size() == 3) {
+            expectTrue(slots89[0]->bracket_side == BracketSide::Open, "槽序：先是开括号");
+            expectTrue(slots89[1]->control_hint, "槽序：中间是提示文字");
+            expectTrue(slots89[2]->bracket_side == BracketSide::Close, "槽序：最后是闭括号");
+        }
+
+        // 提示槽的宽度 = 它排出来的那一段，且它确实占着宽度（后面的括号被推开）。
+        float hint_w89 = 0.0f;
+        for (const LineBox& lb : e89.layout().lines) {
+            for (size_t i = 0; i < lb.clusters.size(); ++i) {
+                if (!lb.clusters[i].control_hint) continue;
+                const float a = lb.clusters[i].inline_pt;
+                const float b =
+                    (i + 1 < lb.clusters.size()) ? lb.clusters[i + 1].inline_pt : lb.inline_end_pt;
+                hint_w89 = b - a;
+            }
+        }
+        expectTrue(hint_w89 > 20.0f, "★ 提示占了宽度（" + std::to_string(hint_w89) + " 磅）");
+
+        // 光标：控件内部与控件之后差出这一句话的宽度 —— 提示在流里不是位置，但在版面上是宽度。
+        FlowPos lo89 = 0;
+        FlowPos hi89 = 0;
+        expectTrue(e89.controlContentSpan(0, &lo89, &hi89), "内容区间量得到");
+        expectTrue(lo89 == hi89, "空控件的内容区间退化成一个点（提示没有多造一个位置）");
+        Rect r_in89{};
+        Rect r_out89{};
+        expectTrue(e89.setCaretAtFlow(lo89) && e89.caretRectPt(&r_in89), "光标停在控件内部");
+        expectTrue(e89.setCaretAtFlow(hi89 + 1) && e89.caretRectPt(&r_out89), "光标停在控件之后");
+        expectTrue(r_out89.x - r_in89.x > hint_w89 * 0.5f,
+                   "★ 里面与后面差出一句话的宽（差 " + std::to_string(r_out89.x - r_in89.x) +
+                       " 磅 / 提示 " + std::to_string(hint_w89) + " 磅）");
+
+        // 有内容之后提示消失，光标停在内容里逐字编辑。
+        expectTrue(e89.setCaretAtFlow(lo89), "光标回到空控件内部");
+        expectTrue(e89.typeTextUtf8("张"), "在空控件里打入一个字");
+        e89.relayout();
+        expectTrue(e89.controlViews()[0].content == "张", "字进了控件内容");
+        int hints89 = 0;
+        for (const LineBox& lb : e89.layout().lines) {
+            for (const LineCluster& c : lb.clusters) {
+                if (c.control_hint) ++hints89;
+            }
+        }
+        expectTrue(hints89 == 0, "★ 有内容之后不再画提示");
+
+        // 清空回到空控件：换一句等宽的提示，槽宽一模一样而摘要必须变 ——
+        //   不然画面会停在上一句上（行指纹只看几何）。
+        expectTrue(e89.setControlValueAndRender(0, ControlValue{}), "清空内容");
+        auto hintOf89 = [&]() -> const LineCluster* {
+            for (const LineBox& lb : e89.layout().lines) {
+                for (const LineCluster& c : lb.clusters) {
+                    if (c.control_hint) return &c;
+                }
+            }
+            return nullptr;
+        };
+        auto hintWidth89 = [&]() -> float {
+            for (const LineBox& lb : e89.layout().lines) {
+                for (size_t i = 0; i < lb.clusters.size(); ++i) {
+                    if (!lb.clusters[i].control_hint) continue;
+                    return ((i + 1 < lb.clusters.size()) ? lb.clusters[i + 1].inline_pt
+                                                         : lb.inline_end_pt) -
+                           lb.clusters[i].inline_pt;
+                }
+            }
+            return 0.0f;
+        };
+        const LineCluster* h89a = hintOf89();
+        const float w89a = hintWidth89();
+        const uint64_t hash89a = (h89a != nullptr) ? h89a->content_hash : 0;
+        ControlPatch ph89;
+        ph89.placeholder = std::string("请输入名字");  // 与上一句同字数 = 同宽
+        expectTrue(e89.setControlSpecAndRender(0, ph89), "改提示文字");
+        const LineCluster* h89b = hintOf89();
+        const float w89b = hintWidth89();
+        expectTrue(h89b != nullptr && std::fabs(w89b - w89a) < 0.01f,
+                   "换一句等宽的提示：槽宽一点没变（" + std::to_string(w89a) + " / " +
+                       std::to_string(w89b) + "）");
+        expectTrue(h89b != nullptr && h89b->content_hash != hash89a,
+                   "★ 宽度不变而摘要变了：行指纹靠它判得出要重画");
+
+        // 装不下就截断到容器宽：一句很长的话不该把正文推开一屏。
+        ControlPatch long89;
+        for (int i = 0; i < 40; ++i) long89.placeholder = *long89.placeholder + "字";
+        expectTrue(e89.setControlSpecAndRender(0, long89), "换成一句很长的提示");
+        const float w89c = hintWidth89();
+        expectTrue(w89c > 0.0f && w89c <= c89.page.contentWidthPt() + 0.01f,
+                   "★ 提示宽度压到容器宽（" + std::to_string(w89c) + " / " +
+                       std::to_string(c89.page.contentWidthPt()) + "）");
+
+        // 只读（呈现与打印）态：提示不画，也不占位 —— 与括号同一个口径。
+        e89.setEditMode(EditMode::ReadOnly);
+        e89.relayout();
+        int hintsRo89 = 0;
+        for (const LineBox& lb : e89.layout().lines) {
+            for (const LineCluster& c : lb.clusters) {
+                if (c.control_hint) ++hintsRo89;
+            }
+        }
+        expectTrue(hintsRo89 == 0, "★ 只读态不画提示，也不给它占位");
+        e89.setEditMode(EditMode::Document);
+        e89.relayout();
+
+        // 空判定仍按流跨度（两枚括号）：提示进排版不进流，所以贴它退格仍是"删整块"。
+        expectTrue(e89.controlContentSpan(0, &lo89, &hi89) && lo89 == hi89, "又是空控件");
+        expectTrue(e89.setCaretAtFlow(lo89), "光标在空控件内部");
+        expectTrue(e89.backspace(), "贴空控件退格");
+        expectTrue(e89.controlViews().empty(), "★ 空控件被整块删掉（提示没有改变空判定）");
     }
 
     checkSectionTable();

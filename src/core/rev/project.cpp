@@ -408,12 +408,21 @@ private:
             // 内容指纹带外观与值（与 compile 同一个函数）：勾选状态变化时字形不动，
             //   行指纹得靠它才判得出"这一行要重画"。
             const uint64_t look = controlPaintDigest(spec);
+            // 空控件的提示文字要在孩子走完之后才判得出来（"空"= 一个码点都没吃进来），
+            //   所以先记下自己在对象表里的位置，回来再补。
+            const size_t start_slot = objects_.size();
+            const int cp_lo = cpCount();
             emitObject(
                 InlineObject{static_cast<uint32_t>(cpCount()), InlineObjectKind::ControlStart,
                              owner, spec.readonly, 0.0f, 0.0f, InlineAtom::None, look},
                 n);
             ++flow_;  // 进控件：这一位就是上面那枚起始边界
             for (const Ref& c : n->children) walk(c);
+            if (cpCount() == cp_lo && start_slot < objects_.size() &&
+                objects_.size() == start_slot + 1 && objects_[start_slot].owner == owner &&
+                !spec.appearance.placeholder.empty()) {
+                objects_[start_slot].hint = spec.appearance.placeholder;
+            }
             out_.controls[slot].end_block = block_index_;
             out_.controls[slot].end_cp = cpCount();
             noteFirst(n->id);

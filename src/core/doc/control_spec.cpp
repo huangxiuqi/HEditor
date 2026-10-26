@@ -520,6 +520,8 @@ bool applyControlPatch(ControlSpec* spec, const ControlPatch& patch, std::string
                       *patch.expect_type + "）；换类型请删掉重插");
     }
     if (patch.key.has_value()) spec->key = *patch.key;
+    // 提示文字是纯外观，四类控件都收：它在值非空时不出现，所以不改变任何语义。
+    if (patch.placeholder.has_value()) spec->appearance.placeholder = *patch.placeholder;
 
     // 特有层是变体：每一项只能落到收它的那一层。落到别处就是调用方把字段送错了控件，
     //   说出来比默默无视强 —— 后者会让调用方以为配置生效了。

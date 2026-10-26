@@ -53,6 +53,7 @@ std::vector<EditorEngine::ControlView> EditorEngine::controlViews() const {
         }
         v.readonly = spec->readonly;
         v.required = spec->required;
+        v.placeholder = spec->appearance.placeholder;
         if (const ChoiceDetail* c = choiceOf(*spec)) {
             v.options = c->options;
             v.multi = c->multi;

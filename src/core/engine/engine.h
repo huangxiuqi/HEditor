@@ -1915,6 +1915,11 @@ public:
         std::string content;
 
         /**
+         * 提示文字（值非空时不显示；只读与打印态也不画）。
+         */
+        std::string placeholder;
+
+        /**
          * 内容不可编辑。
          */
         bool readonly = false;

@@ -37,6 +37,7 @@ const kCmPt = 72 / 2.54;
 const kLabels: Record<string, string> = {
   value: '内容',
   label: '标签',
+  placeholder: '提示文字',
   group: '互斥组',
   options: '选项',
   free: '自由输入',
@@ -318,6 +319,18 @@ export function controlFormOf(c: ControlSummary, opts?: FormOptions): ControlFor
     });
   }
 
+  // 提示文字：值（内容）为空时画在控件里的那句话。选择类的值就是记号与标签、没有"空"这一档，
+  //   所以不给它。
+  if (type === 'text' || type === 'number' || type === 'dropdownList' || type === 'date') {
+    fields.push({
+      kind: 'text',
+      key: 'placeholder',
+      label: L('placeholder'),
+      value: c.placeholder,
+      placeholder: type === 'dropdownList' ? '空值时默认显示"请选择"' : '',
+    });
+  }
+
   fields.push({ kind: 'heading', key: '', label: '行为' });
   fields.push({ kind: 'toggle', key: 'readonly', label: L('readonly'), value: c.readonly });
   fields.push({ kind: 'toggle', key: 'required', label: L('required'), value: c.required });
@@ -592,6 +605,9 @@ export function controlWriteOf(c: ControlSummary, values: FormValues): ControlWr
 
   const key = text('key');
   if (key !== null && key !== c.key) update.key = key;
+
+  const ph = text('placeholder');
+  if (ph !== null && ph !== c.placeholder) update.placeholder = ph;
 
   const format = text('format');
   if (format !== null && format !== c.format) update.format = format;

@@ -158,6 +158,8 @@ function controlOptsFrom(o: ControlInsertOptions | ControlUpdateOptions): Record
   if (o.type !== undefined) opts.type = String(o.type);
   if (o.key !== undefined) opts.key = String(o.key);
   if (o.label !== undefined) opts.label = String(o.label);
+  // 提示文字与 label 是两件事：label 进内容（文本类），提示只在内容为空时出现。
+  if (o.placeholder !== undefined) opts.ph = String(o.placeholder);
   // 选项表：值与标签分开送，值进数据、标签进纸面。
   if (o.options !== undefined) opts.options = o.options.map((x) => ({ v: x.value, l: x.label }));
   if (o.group !== undefined) opts.group = String(o.group);
@@ -1239,6 +1241,7 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
           flag?: boolean;
           sel?: string;
           fmt?: string;
+          ph?: string;
           du?: number;
           glyphColor?: RGBA;
           selItems?: string[];
@@ -1261,6 +1264,7 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
         freeInput: !!it.free,
         group: String(it.group ?? ''),
         text: String(it.text ?? ''),
+        placeholder: String(it.ph ?? ''),
         value: {
           flag: !!it.flag,
           text: String(it.sel ?? ''),
