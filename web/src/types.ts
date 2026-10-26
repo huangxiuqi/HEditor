@@ -538,12 +538,17 @@ export interface EditorOptions {
    * 点到一个"不是选择类"的控件（下拉、日期）时通知宿主：选项列表与日历都归宿主画。
    *
    * 引擎只负责画控件本身与它的值；弹出层是编辑期辅助，不进文档、不进导出。
+   *
+   * 只读的控件也会照常通知（标了只读不等于点不动），由宿主决定弹不弹 —— 但写回去
+   *   的路已经封住了：引擎对只读控件拒写，弹出来也只能看。
    * @param index 控件下标
    * @param rect 控件在页面坐标下的第一块矩形（磅）；读不到时为 null
+   * @param readonly 业务只读（填表的人只能看）
    */
   onControlTap?: (
     index: number,
     rect: { page: number; x: number; y: number; w: number; h: number } | null,
+    readonly: boolean,
   ) => void;
 
   /**
@@ -676,7 +681,7 @@ export interface ControlInsertOptions {
   label?: string;
 
   /**
-   * 只读：内容不可编辑。
+   * 业务只读：填表的人只能看（插入之后仍然可以改回来）。
    */
   readonly?: boolean;
 
@@ -1172,7 +1177,7 @@ export interface ControlSummary {
   label: string;
 
   /**
-   * 内容不可编辑（填表的人只能看）。
+   * 业务只读：填表的人只能看。为真时引擎拒写（值与勾选都改不动）。
    */
   readonly: boolean;
 
@@ -1717,7 +1722,15 @@ export interface ParaFormatPatch {
 /**
  * 属性面板的字段种类。渲染器按它挑控件，七种之外不增。
  */
-export type FormFieldKind = 'heading' | 'text' | 'lines' | 'number' | 'select' | 'toggle' | 'color';
+export type FormFieldKind =
+  | 'heading'
+  | 'text'
+  | 'lines'
+  | 'number'
+  | 'select'
+  | 'toggle'
+  | 'color'
+  | 'datetime';
 
 /**
  * 属性面板的一个字段。
@@ -1782,6 +1795,15 @@ export interface FormField {
    * 置灰：看得见、改不动。
    */
   disabled?: boolean;
+
+  /**
+   * 日期与时间字段该用哪种原生输入控件（kind 为 datetime 时给）。
+   *
+   * 值已经按它裁好：date 是 YYYY-MM-DD、time 是 HH:MM[:SS]、datetime-local 是
+   *   YYYY-MM-DDTHH:MM[:SS]。宿主直接塞给 input.value 就行 —— 长度不对的话浏览器
+   *   会把 value 当成空串，表现是"点了日期，框里什么都没有"。
+   */
+  inputType?: 'date' | 'time' | 'datetime-local';
 }
 
 /**

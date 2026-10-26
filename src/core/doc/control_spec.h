@@ -67,7 +67,7 @@ bool valueShapeFromName(const std::string& name, ValueShape* out);
  */
 enum class ControlProp : uint8_t {
     Hidden = 0,         // 落在 Node 上（流位置换算要看它）
-    Readonly = 1,       // 内容不可编辑
+    Readonly = 1,       // 业务只读：填表的人只能看（值改不动、Tab 跳不进）
     Required = 2,       // 必填
     StructureLock = 3,  // 结构操作锁
 };

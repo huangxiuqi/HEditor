@@ -185,4 +185,74 @@ test.describe('属性面板', () => {
     check('★ 应用之后页宽按填的 15 厘米走',
       Math.abs(w1 - 15 * 28.3465 * 4 / 3) < 2, w0 + ' → ' + w1);
   });
+
+  test('日期字段：原生控件类型与值的长度都随精度走，片段由库补成完整 ISO', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' } });
+    const r = await p.read<any>(`
+      await H.setText('甲乙');
+      await H.flush();
+      await H.setCaret({ para: 0, offset: 2 });
+      await H.insertControl({ type: 'date' });
+      await H.flush();
+      const c0 = (await H.form())[0];
+      const f0 = H.describeControl(c0).fields.find((f) => f.kind === 'datetime');
+      // 用户只改到分（16 位）：秒由库补。
+      const wrote = await H.applyControlForm(c0.index, { value: '2026-10-26T14:30' });
+      const c1 = (await H.form())[0];
+      const f1 = H.describeControl(c1).fields.find((f) => f.kind === 'datetime');
+      // 精度改成只到日：原生控件换成 date，值裁到 10 位。
+      await H.updateControl(c1.index, { dateUnits: ['year', 'month', 'day'] });
+      const c2 = (await H.form())[0];
+      const f2 = H.describeControl(c2).fields.find((f) => f.kind === 'datetime');
+      // 只给日期片段：日期换掉，时分秒按原值留着（界面上没给改它们的机会）。
+      const wrote2 = await H.applyControlForm(c2.index, { value: '2026-10-27' });
+      const c3 = (await H.form())[0];
+      const again = await H.applyControlForm(c3.index, { value: '2026-10-27' });
+      return {
+        t0: f0.inputType, step0: f0.step, v0: f0.value,
+        wrote, iso: c1.value.text, v1: f1.value,
+        t2: f2.inputType, step2: f2.step, v2: f2.value,
+        wrote2, iso2: c3.value.text, again,
+      };
+    `);
+    check('★ 默认全精度：原生控件是 datetime-local、步长 1',
+      r.t0 === 'datetime-local' && r.step0 === 1, r.t0 + ' / ' + String(r.step0));
+    check('空值给空串（不伪造一个今天）', r.v0 === '', JSON.stringify(r.v0));
+    check('★ 只给到分的片段也写进去，且补成完整 ISO',
+      r.wrote === true && r.iso === '2026-10-26T14:30:00', r.wrote + ' / ' + r.iso);
+    check('回填的值按类型裁到 19 位', r.v1 === '2026-10-26T14:30:00', JSON.stringify(r.v1));
+    check('★ 精度改到只到日：控件换成 date、步长 60、值 10 位',
+      r.t2 === 'date' && r.step2 === 60 && r.v2 === '2026-10-26',
+      r.t2 + ' / ' + String(r.step2) + ' / ' + r.v2);
+    check('★ 只换日期不动时间（界面上没给改时分秒的机会）',
+      r.wrote2 === true && r.iso2 === '2026-10-27T14:30:00', r.wrote2 + ' / ' + r.iso2);
+    check('同一份值再交一次不算改动', r.again === false, String(r.again));
+  });
+
+  test('★ 只读控件的值写不进去（这条原来返回真，只读只挡得住键盘）', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' } });
+    const r = await p.read<any>(`
+      await H.setText('甲乙');
+      await H.flush();
+      await H.setCaret({ para: 0, offset: 2 });
+      await H.insertControl({ type: 'date' });
+      await H.flush();
+      const c0 = (await H.form())[0];
+      await H.applyControlForm(c0.index, { value: '2026-10-26' });
+      const ro = await H.updateControl(c0.index, { readonly: true });
+      const blocked = await H.applyControlForm(c0.index, { value: '2027-01-01' });
+      const held = (await H.form())[0].value.text;
+      const back = await H.updateControl(c0.index, { readonly: false });
+      const allowed = await H.applyControlForm(c0.index, { value: '2027-01-01' });
+      const moved = (await H.form())[0].value.text;
+      return { ro, blocked, held, back, allowed, moved };
+    `);
+    check('设成只读成功', r.ro === true, String(r.ro));
+    check('★ 只读时提交被拒，值停在原处',
+      r.blocked === false && r.held === '2026-10-26T00:00:00',
+      String(r.blocked) + ' / ' + r.held);
+    check('★ 反向：取消只读之后同一个提交成功', r.back === true && r.allowed === true,
+      String(r.back) + ' / ' + String(r.allowed));
+    check('值改到了新日期', r.moved === '2027-01-01T00:00:00', r.moved);
+  });
 });

@@ -324,20 +324,18 @@ ControlSpec makeControlSpec(const std::string& controlType) {
         spec.detail = d;
         spec.valueShape = d.multi ? (t == "checkBox" ? ValueShape::Bool : ValueShape::List)
                                   : (t == "radioButton" ? ValueShape::Bool : ValueShape::Enum);
-        // 选择类的内容是"图形 + 标签"的投影，不是作者打的字：内容只读，光标也不进。
-        spec.readonly = true;
+        // 这里不设 readonly：位留给业务（"填表的人只能看"）。内容只是投影这件事由
+        //   valueShape 表达 —— 光标进不进、Tab 跳不跳过、退格删不删整块都按它判。
         return spec;
     }
     if (t == "dropdownList") {
         spec.detail = DropdownDetail{};
         spec.valueShape = ValueShape::Enum;
-        spec.readonly = true;
         return spec;
     }
     if (t == "date") {
         spec.detail = DateDetail{};
         spec.valueShape = ValueShape::Enum;
-        spec.readonly = true;
         return spec;
     }
     if (t == "text") return spec;

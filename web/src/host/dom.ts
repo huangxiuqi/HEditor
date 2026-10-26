@@ -142,8 +142,13 @@ export interface DomHostOptions {
    * 点到一个"不是选择类"的控件（下拉、日期）时通知宿主 —— 弹出层归宿主。
    * @param index 控件下标
    * @param rect 控件在页面坐标下的第一块矩形（磅）；读不到时为 null
+   * @param readonly 业务只读：宿主据此决定弹不弹（写回去的路引擎已经封住）
    */
-  onControlTap?(index: number, rect: { page: number; x: number; y: number; w: number; h: number } | null): void;
+  onControlTap?(
+    index: number,
+    rect: { page: number; x: number; y: number; w: number; h: number } | null,
+    readonly: boolean,
+  ): void;
 
   /**
    * 右键落在文档上（库已经把插入点搬过去了）。菜单归宿主画。
@@ -960,10 +965,11 @@ export function createDomHost(o: DomHostOptions): DomHost {
       writeOp('toggleControl', { i: index, option }),
     onControlTap: (index: number) => {
       // 弹出层要落在控件上，所以把它的第一块矩形一起带出去（页面坐标、磅）。
+      //   只读位一并带出：宿主不必再回头查一次镜像，也免得两处读到不同时刻的那一份。
       const st = (read('controls') ?? {}) as any;
       const items = Array.isArray(st.items) ? st.items : [];
       const rs = Array.isArray(items[index]?.rects) ? items[index].rects : [];
-      o.onControlTap?.(index, rs.length > 0 ? rs[0] : null);
+      o.onControlTap?.(index, rs.length > 0 ? rs[0] : null, items[index]?.ro === true);
     },
     selectImage: (i) => writeOp('selectImage', { i }),
     resizeImage: (i, w, h, merge) => writeOp('resizeImage', { i, w, h, merge }),

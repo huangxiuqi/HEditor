@@ -428,7 +428,7 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
         typeof opts.onBeforeControlChange === 'function'
           ? opts.onBeforeControlChange(change)
           : true,
-      onControlTap: (index, rect) => opts.onControlTap?.(index, rect),
+      onControlTap: (index, rect, readonly) => opts.onControlTap?.(index, rect, readonly),
       onContextMenu: (target, at) => opts.onContextMenu?.(target, at),
       onZoomBy: (delta: number) => queueZoom(delta),
       onZoomReset: () => void editor.setZoom(1),

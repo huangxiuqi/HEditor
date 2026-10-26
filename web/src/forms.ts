@@ -135,6 +135,77 @@ function rgbToHex(rgba: RGBA): string {
 }
 
 /**
+ * 日期单位该配哪种原生输入控件、秒的步长是多少。
+ *
+ * 只有时间单位时用 time、只有日期时用 date、两者都有用 datetime-local；步长按有没有
+ *   秒来定（60 = 界面上只到分）。这两项都由 dateUnits 推，宿主不该自己判一遍。
+ * @param units 单位名
+ * @returns 输入控件类型与步长
+ */
+function dateInputOf(units: string[]): {
+  inputType: 'date' | 'time' | 'datetime-local';
+  step: number;
+} {
+  const withTime = units.includes('hour') || units.includes('minute') || units.includes('second');
+  const withDate = units.includes('year') || units.includes('month') || units.includes('day');
+  return {
+    inputType: !withDate ? 'time' : withTime ? 'datetime-local' : 'date',
+    step: units.includes('second') ? 1 : 60,
+  };
+}
+
+/**
+ * 把一个完整 ISO 串裁到该输入控件认的长度。
+ *
+ * 长度必须与控件类型配套：type=date 塞 19 位串时浏览器把 value 当空串，界面上就是
+ *   "点了日期，框里什么都没有"。所以这里按类型裁，不按串里有没有时间来裁。
+ * @param iso 完整 ISO 串（YYYY-MM-DDTHH:MM:SS）
+ * @param inputType 输入控件类型
+ * @param withSecond 精度到不到秒
+ * @returns 该控件认的那一段
+ */
+function isoPartOf(
+  iso: string,
+  inputType: 'date' | 'time' | 'datetime-local',
+  withSecond: boolean,
+): string {
+  if (!iso) return '';
+  if (inputType === 'date') return iso.slice(0, 10);
+  if (inputType === 'time') return iso.slice(11, withSecond ? 19 : 16);
+  return iso.slice(0, withSecond ? 19 : 16);
+}
+
+/**
+ * 把输入控件给的片段补回完整 ISO 串。
+ *
+ * 补的是"控件类型决定不了的那几段"：日期型保留原有的时间（界面上没给改它的机会），
+ *   时间型借原值的日期（只有时间的控件没有自己的日子），到分的那两型补 ":00"。
+ * @param iso 现在的值（借它取缺失的那几段）
+ * @param part 控件给的片段
+ * @param inputType 输入控件类型
+ * @returns 完整 ISO 串；片段为空时返回空串
+ */
+function isoJoinOf(
+  iso: string,
+  part: string,
+  inputType: 'date' | 'time' | 'datetime-local',
+): string {
+  if (!part) return '';
+  if (inputType === 'date') {
+    const time = iso.length >= 19 ? iso.slice(11, 19) : '00:00:00';
+    return part.slice(0, 10) + 'T' + time;
+  }
+  if (inputType === 'time') {
+    const day = iso.length >= 10 ? iso.slice(0, 10) : '1970-01-01';
+    return day + 'T' + (part.length === 5 ? part + ':00' : part.slice(0, 8));
+  }
+  // 只给到日期（10 位）时补零点：宿主把 date 那一型的片段塞给 datetime-local 是常事，
+  //   切片到 10 位会得到一个不带时间的串，引擎按非法 ISO 整份拒绝。
+  if (part.length <= 10) return part.slice(0, 10) + 'T00:00:00';
+  return part.length === 16 ? part + ':00' : part.slice(0, 19);
+}
+
+/**
  * 日期单位折成三档：只到日 / 到分 / 到秒。
  * @param units 单位名
  * @returns 档位
@@ -207,6 +278,15 @@ export function controlFormOf(c: ControlSummary, opts?: FormOptions): ControlFor
       fields.push({ kind: 'toggle', key: 'free', label: L('free'), value: c.freeInput });
     }
   } else if (type === 'date') {
+    const { inputType, step } = dateInputOf(c.dateUnits);
+    fields.push({
+      kind: 'datetime',
+      key: 'value',
+      label: L('value'),
+      value: isoPartOf(c.value.text, inputType, c.dateUnits.includes('second')),
+      inputType,
+      step,
+    });
     fields.push({
       kind: 'text',
       key: 'format',
@@ -541,7 +621,17 @@ export function controlWriteOf(c: ControlSummary, values: FormValues): ControlWr
   if (required !== null && required !== c.required) update.required = required;
 
   const content = text('value');
-  if (content !== null && content !== c.text) value = content;
+  if (content !== null) {
+    if (c.type === 'date') {
+      // 日期控件的值在记录上、内容只是它的投影，所以比的是"裁到精度的值"而不是内容 ——
+      //   拿投影文字比会永远判成改动，一次"确定"平白多出一步撤销。
+      const { inputType } = dateInputOf(c.dateUnits);
+      const cur = isoPartOf(c.value.text, inputType, c.dateUnits.includes('second'));
+      if (content !== cur) value = isoJoinOf(c.value.text, content, inputType);
+    } else if (content !== c.text) {
+      value = content;
+    }
+  }
 
   return { update, value };
 }

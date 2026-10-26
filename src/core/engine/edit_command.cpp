@@ -391,7 +391,7 @@ bool EditCommand::controlIsWholeUnit(int index) const {
     // 判据是"内容不是作者打的字"：值在记录上（选择类、下拉、日期），内容就是它的投影，
     //   删一半再也重建不回来。文本与数值控件的值就在内容里，逐字删是正常编辑。
     //   这条与光标屏障用的不是同一个开关：屏障只管"光标能不能停"，而删除要覆盖
-    //   全部生成内容 —— 下拉与日期没有屏障（它们只读），但同样不该被删成半截。
+    //   全部生成内容 —— 下拉与日期没有屏障，但同样不该被删成半截。
     return spec->valueShape != ValueShape::Text;
 }
 
@@ -1891,6 +1891,13 @@ bool EditCommand::setControlValue(int index, const ControlValue& value) {
     const auto* spec = std::get_if<ControlSpec>(&n->payload);
     if (spec == nullptr) return false;
 
+    // 业务只读：填表的人只能看。光标那条路由 insertableAtFlow 挡着，而弹层（下拉、日期）
+    //   与脚本走的正是这里 —— 不拦就等于只读只管得住键盘。
+    if (spec->readonly) {
+        noteBlocked();
+        return false;
+    }
+
     std::string error;
     if (!controlValueValid(*spec, value, &error)) {
         noteBlocked();
@@ -1941,6 +1948,12 @@ bool EditCommand::toggleControl(int index, int option) {
     if (spec == nullptr) return false;
     const auto* choice = choiceOf(*spec);
     if (choice == nullptr) return false;
+
+    // 与 setControlValue 同一条：业务只读的控件勾不动。
+    if (spec->readonly) {
+        noteBlocked();
+        return false;
+    }
 
     // 先算出要改的每一处（控件, 新值），再一次性提交：互斥组里"取消别人"与"选自己"
     //   必须是同一个撤销步，否则撤销一下会回到"两个都选中"的中间态。

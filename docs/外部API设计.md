@@ -236,8 +236,8 @@ setText(text: string, opts?: { repeat?: number }): Promise<void>   // 明确用�
 | `setControlValue(index, { flag?, text?, items? })` | 改值并按类型重建显示内容；选择类与下拉、日期的内容是值的投影 |
 | `toggleControl(index, option?)` | 切换一个选项（单控件传 -1）；互斥与多选规则在引擎里，整批一次撤销 |
 | `updateControl(index, { type?, key?, label?, options?, group?, freeInput?, format?, dateUnits?, glyphColor?, readonly?, required? })` | 改定义与两个运行态开关：只改给出的项；改完按新定义重建内容，指向已删选项的值跟着清空，同属一步撤销 |
-| `describeControl(control)` | 把一个控件摊成属性面板的字段表（哪种类型有哪些项、当前值是什么）；纯数据 |
-| `applyControlForm(index, values)` | 按一份面板值改控件：值走内容、定义与开关走各自的入口，只提交真的变了的项 |
+| `describeControl(control)` | 把一个控件摊成属性面板的字段表（哪种类型有哪些项、当前值是什么）；纯数据。日期给一个 `kind: 'datetime'` 字段：`inputType`（`date` / `time` / `datetime-local`）与 `step` 由精度算出，`value` 已按该类型裁好长度 |
+| `applyControlForm(index, values)` | 按一份面板值改控件：值走内容、定义与开关走各自的入口，只提交真的变了的项。日期只给片段（`2026-10-26`）即可，补成完整 ISO 归库 |
 
 `updateControl` 的 `type` 只能与当前一致（换类型请删掉重插）；给这个控件不收的字段
 （例如给文本控件送 `options`）整份拒绝，不静默忽略。
@@ -245,6 +245,12 @@ setText(text: string, opts?: { repeat?: number }): Promise<void>   // 明确用�
 选择类控件"点一下就切"由输入层完成：命中给出控件下标与选项下标，宿主的前置回调
 （`createEditor({ onBeforeControlChange })`）可以返回 boolean 或 Promise&lt;boolean&gt;，
 拒绝时文档与光标都不动。下拉的选项列表与日期的选择面板归宿主画（`onControlTap`）。
+
+`onControlTap(index, rect, readonly)` 的第三项是业务只读位：宿主据此决定弹不弹 —— 但
+**写回去的路已经在引擎里封住了**。`setControlValue` 与 `toggleControl` 对 `readonly` 为真的
+控件一律返回 false，与"光标停不进去"是两条独立的线：前者管直接换值（弹层、脚本），
+后者管键入。只读因此不再兼职表达"内容只是投影"——那件事由值形态决定（值在记录上的
+控件，内容本来就不是可编辑正文）。
 
 右键也一样归宿主：`createEditor({ onContextMenu(target, at) })`。库在这一下里做两件事 ——
 拦掉浏览器自己的菜单、把插入点搬到指的地方（点图片则选中它，走的是与左键同一条落点路径）；

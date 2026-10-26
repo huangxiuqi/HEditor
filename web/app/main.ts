@@ -641,20 +641,27 @@ function insertControl(type: string, opts: Record<string, unknown>): void {
 }
 
 /**
- * 控件弹出层：下拉的选项列表与日期的输入框都归宿主画。
+ * 控件弹出层：下拉的选项列表与日期的时间选择器都归宿主画。
  *
  * 位置与关闭时机走 layer（与右键菜单、属性面板同一份实现）：这一层只管"面板里放什么"。
  * 引擎只画控件本身；这一层是编辑期辅助，不进文档、不进导出。
  * @param index 控件下标
  * @param rect 控件在页面坐标下的第一块矩形（磅）
+ * @param readonly 业务只读：只提示一句，不弹
  */
 function openControlPanel(
   index: number,
   rect: { page: number; x: number; y: number; w: number; h: number } | null,
+  readonly: boolean,
 ): void {
   const c = editor.form()[index];
   const pages = document.querySelector('.heditor-pages');
   if (!c || !rect || !(pages instanceof HTMLElement)) return;
+  if (readonly) {
+    // 引擎对只读控件的写入已经拒了，弹出来也只能看；不如直接说清楚它为什么不动。
+    chrome.say('这个字段是只读的');
+    return;
+  }
 
   const g = editor.geometry();
   const box = pages.getBoundingClientRect();
@@ -679,33 +686,21 @@ function openControlPanel(
       layer.el.appendChild(item);
     }
   } else if (c.type === 'date') {
-    // 能选哪些单位由控件声明：只到分就把秒的步长设成 60，只有日期就用日期输入。
-    const withTime = c.dateUnits.some((u) => u === 'hour' || u === 'minute' || u === 'second');
-    const withDate = c.dateUnits.some((u) => u === 'year' || u === 'month' || u === 'day');
+    // 输入控件的类型、步长、以及"该塞多长的串"都在字段表里（按 dateUnits 算好）：
+    //   这一层只建元素，值怎么裁、怎么补回 ISO 都不归它管。
+    const field = editor.describeControl(c).fields.find((f) => f.kind === 'datetime');
+    if (!field) return;
     const input = document.createElement('input');
-    input.type = !withDate ? 'time' : withTime ? 'datetime-local' : 'date';
-    input.step = c.dateUnits.includes('second') ? '1' : '60';
-    input.value = input.type === 'time' ? c.value.text.slice(11, 19)
-      : input.type === 'date' ? c.value.text.slice(0, 10)
-      : c.value.text.slice(0, 19);
+    input.type = field.inputType ?? 'date';
+    input.value = String(field.value ?? '');
+    if (field.step !== undefined) input.step = String(field.step);
     const apply = document.createElement('button');
     apply.type = 'button';
     apply.className = 'heditor-popover-item';
     apply.textContent = '确定';
     apply.addEventListener('click', () => {
-      // 三种输入控件给的串长度不同，统一补成引擎要的 ISO 串（YYYY-MM-DDTHH:MM:SS）。
-      const raw = input.value;
-      let iso = raw;
-      if (input.type === 'date' && raw) iso = raw.slice(0, 10) + 'T00:00:00';
-      if (input.type === 'time' && raw) {
-        const day = c.value.text.slice(0, 10) || '1970-01-01';
-        iso = day + 'T' + (raw.length === 5 ? raw + ':00' : raw.slice(0, 8));
-      }
-      if (input.type === 'datetime-local' && raw) {
-        iso = raw.length === 16 ? raw + ':00' : raw.slice(0, 19);
-      }
-      void editor.setControlValue(index, { text: iso });
-      layer.close();
+      // 片段补齐成完整 ISO、与现状比差值都在 applyControlForm 里；没改动它返回 false。
+      void editor.applyControlForm(index, { value: input.value }).then(() => layer.close());
     });
     layer.el.appendChild(input);
     layer.el.appendChild(apply);
@@ -789,7 +784,7 @@ async function boot(): Promise<void> {
     container: stage,
     chrome: true,
     // 下拉的选项列表与日期的输入框归宿主画：引擎只画控件本身。
-    onControlTap: (index, rect) => openControlPanel(index, rect),
+    onControlTap: (index, rect, readonly) => openControlPanel(index, rect, readonly),
     // 右键菜单也归宿主：库只负责拦掉浏览器那份、把插入点搬过去、把压着什么交回来。
     onContextMenu: (target, at) => {
       void menus?.open(target, at);

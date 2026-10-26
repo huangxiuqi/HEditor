@@ -57,3 +57,9 @@
 - 数的活也在引擎：`counts()` 读 stats 的 docCodepoints / wordCount；`tableState().can*` 是引擎
   用同一批 rev 步骤**干跑**再回答（宿主别重算 "只剩一行不能删"）。`toggleFormat` /
   `stepFontSize` 只在有选区时生效（`applyCharFormat` 对空选区直接 false），光标态无"打字样式"。
+- `readonly` **只表示业务只读**：`setControlValue` / `toggleControl` 对它一律拒写（弹层与脚本走的
+  就是这条路，"光标停不进去"管不到它）。"内容只是投影"按值形态判（`controlContentEditable`），
+  不占这个位 —— `makeControlSpec` 建控件时也不设它。判据见 edit_test 第 88 节。
+- 日期值走 `describeControl` 的 `kind: 'datetime'` 字段：`inputType`（date/time/datetime-local）
+  与 `step` 由精度算，`value` **已按类型裁好长度**（长度不对浏览器把 value 当空串）；宿主只建
+  input。`applyControlForm` 收到片段就补成完整 ISO（日期型保留原时间，到分的补 `:00`）。

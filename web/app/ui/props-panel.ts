@@ -210,6 +210,23 @@ export function createPropsPanel(o: PropsPanelOptions): PropsPanel {
         const next = v[f.key];
         if (typeof next === 'number') input.value = String(next);
       });
+    } else if (f.kind === 'datetime') {
+      // 日期与时间用原生控件：无障碍、locale、移动端的系统选择器都是白拿的。
+      //   值已经按 inputType 裁好，直接塞就行（长度不对浏览器会当空串）。
+      const input = document.createElement('input');
+      input.type = f.inputType ?? 'date';
+      input.className = 'heditor-props__input';
+      input.dataset.act = `prop-${f.key}`;
+      input.value = String(f.value ?? '');
+      if (f.step !== undefined) input.step = String(f.step);
+      input.disabled = !!f.disabled;
+      row.appendChild(input);
+      arm(f.key, input);
+      readers.set(f.key, () => input.value);
+      writers.set(f.key, (v) => {
+        const next = v[f.key];
+        if (typeof next === 'string') input.value = next;
+      });
     } else if (f.kind === 'color') {
       const input = document.createElement('input');
       input.type = 'color';

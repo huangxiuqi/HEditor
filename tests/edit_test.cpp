@@ -499,7 +499,7 @@ const SectionInfo kSections[] = {
     {72, false, 10}, {73, false, 9},  {74, false, 3},  {75, false, 3},  {76, false, 3},
     {77, false, 3},  {78, true, 1},   {79, false, 2},  {80, false, 3},  {81, false, 2},
     {82, false, 1},  {83, false, 2},  {84, false, 2},  {85, false, 3},  {86, false, 4},
-    {87, false, 3},
+    {87, false, 3},  {88, false, 3},
 };
 
 /**
@@ -15350,6 +15350,84 @@ int main() {
                        !e87.canTableOp(EditorEngine::TableOp::RemoveColumn),
                    "★ 只读模式：一条都不报可用");
         e87.setEditMode(EditMode::Document);
+    }
+
+    if (runSection(88)) std::printf("\n[88] 业务只读：投影不再占用这个位\n");
+    if (runSection(88)) {
+        EngineConfig c88;
+        c88.zoom = 1.0f;
+        c88.page.width_pt = 595.0f;
+        c88.page.height_pt = 842.0f;
+        c88.page.margins = PageMargins::all(56.0f);
+        const std::vector<std::string> fonts88 = {cjkPath, mnPath, latinPath};
+
+        NodeTree t88;
+        {
+            const NodeId sec = t88.firstSectionId();
+            const NodeId a = t88.appendChild(sec, NodeKind::TextRun);
+            t88.setText(a, utf8ToCodepoints("甲乙"));
+            t88.appendChild(sec, NodeKind::ParagraphMark);
+        }
+        EditorEngine e88;
+        if (!e88.init(fonts88)) {
+            std::fprintf(stderr, "字体加载失败\n");
+            return 2;
+        }
+        e88.setConfig(c88);
+        e88.setDocument(t88, StyleSheet{});
+        e88.relayout();
+
+        e88.setCaret(0, 1);
+        ControlSpec d88;
+        d88.controlType = "date";
+        expectTrue(e88.insertControlAndRender(d88, ""), "插一个日期控件");
+        const std::vector<EditorEngine::ControlView> v88 = e88.controlViews();
+        expectTrue(v88.size() == 1 && !v88[0].readonly,
+                   "★ 日期控件的业务只读位是假：\"内容只是投影\"不占用它");
+        expectTrue(v88.size() == 1 && v88[0].shape == ValueShape::Enum,
+                   "投影由值形态表达（枚举 = 值在记录上）");
+
+        ControlValue first;
+        first.text = "2026-10-26T14:30:00";
+        expectTrue(e88.setControlValue(0, first), "默认可填：设值成功");
+
+        expectTrue(e88.setControlProp(0, ControlProp::Readonly, true), "设成业务只读");
+        ControlValue second;
+        second.text = "2027-01-01T08:00:00";
+        expectTrue(!e88.setControlValue(0, second),
+                   "★ 只读之后拒写（这条原来返回真：只读只挡得住键盘）");
+        expectTrue(e88.controlViews()[0].value.text == "2026-10-26T14:30:00",
+                   "值一个字符都没动");
+
+        expectTrue(e88.setControlProp(0, ControlProp::Readonly, false), "取消只读");
+        expectTrue(e88.setControlValue(0, second), "★ 反向：取消之后同一个写入成功");
+        expectTrue(e88.controlViews()[0].value.text == "2027-01-01T08:00:00",
+                   "改到了新值");
+
+        // 表单模式下光标停不进投影内容（值在记录上，那个位置没有可编辑正文）。
+        FlowPos inner88 = -1;
+        for (const InlineObject& o : e88.blocks()[0].objects) {
+            if (o.kind == InlineObjectKind::ControlStart) {
+                inner88 = o.cp + 1;
+                break;
+            }
+        }
+        e88.setEditMode(EditMode::Form);
+        expectTrue(inner88 > 0 && !e88.insertableAtFlow(inner88),
+                   "★ 表单模式下光标停不进日期的投影内容");
+        // 插入只在文档模式放行（改结构是设计动作），插第二个控件之前要切回来。
+        e88.setEditMode(EditMode::Document);
+
+        // 复选：只读之后勾不动，且勾选状态留在原处。
+        ControlSpec cb88;
+        cb88.controlType = "checkBox";
+        expectTrue(e88.insertControlAndRender(cb88, "知情同意"), "插一个复选");
+        const int cbIndex = static_cast<int>(e88.controlViews().size()) - 1;
+        expectTrue(e88.toggleControl(cbIndex, -1), "默认可勾");
+        expectTrue(e88.setControlProp(cbIndex, ControlProp::Readonly, true), "复选设成只读");
+        expectTrue(!e88.toggleControl(cbIndex, -1), "★ 只读的复选勾不动");
+        expectTrue(e88.controlViews()[cbIndex].value.flag, "反向：勾选状态没被改掉");
+        e88.setEditMode(EditMode::Document);
     }
 
     checkSectionTable();

@@ -1264,6 +1264,15 @@ bool EditorEngine::barrierSpanAt(FlowPos f, FlowPos* first, FlowPos* end) const 
     return false;
 }
 
+bool EditorEngine::controlContentEditable(int index) const {
+    if (index < 0 || index >= static_cast<int>(control_node_ids_.size())) return false;
+    const rev::Node* n =
+        rev::findNode(document(), control_node_ids_[static_cast<size_t>(index)]);
+    if (n == nullptr) return false;
+    const auto* spec = std::get_if<ControlSpec>(&n->payload);
+    return spec != nullptr && spec->valueShape == ValueShape::Text;
+}
+
 bool EditorEngine::insertableAtFlow(FlowPos f) const {
     // 屏障先于模式：选择类的内容三档里都不是插入点（它的"标签"不是可写正文）。
     if (barrierAtFlow(f)) return false;
@@ -1271,9 +1280,10 @@ bool EditorEngine::insertableAtFlow(FlowPos f) const {
     if (mode_ != EditMode::Form) return false;  // 只读（以及将来新增的模式）：一个都不认
     const int inner = innermostControlAt(f);
     if (inner < 0) return false;
-    // 可编辑性是交集：把光标包住的每一层都不能是只读的。
+    // 可编辑性是交集：包住光标的每一层都要"值在内容里"，且都不是业务只读的。
     for (int k = inner; k >= 0; k = controls_.at(k).parent) {
         if (controls_.at(k).read_only) return false;
+        if (!controlContentEditable(k)) return false;
     }
     return true;
 }
@@ -1653,8 +1663,11 @@ std::vector<EditorEngine::ControlRect> EditorEngine::controlRects(int index) con
 
 bool EditorEngine::focusControl(bool forward) {
     std::vector<TextPos> starts;
-    for (const Control& c : controls_.all()) {
-        if (!c.read_only) starts.push_back(c.range.start);
+    for (int i = 0; i < controls_.size(); ++i) {
+        const Control& c = controls_.at(i);
+        // 业务只读的不跳进去；内容只是投影的也不 —— 那里停不住光标，跳过去等于没动。
+        if (c.read_only || !controlContentEditable(i)) continue;
+        starts.push_back(c.range.start);
     }
     if (starts.empty()) return false;
     std::sort(starts.begin(), starts.end(),
