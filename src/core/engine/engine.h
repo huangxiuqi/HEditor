@@ -2594,6 +2594,15 @@ private:
     const std::vector<NodeId>& imageNodeIds() const;
 
     /**
+     * 撤销/重做之后把"选中的是哪张图"放回去：节点还在就重新选中，已删掉就什么都不做。
+     *
+     * 撤销改尺寸之后图仍该是选中的（否则拖动框消失、文本光标冒到图右边），而恢复选区
+     * 那一步会清掉图片选中 —— 这一处把那个副作用按需抵消。
+     * @param id 撤销之前选中的图片节点
+     */
+    void restoreImageSelection(NodeId id);
+
+    /**
      * 这一页上的图片拖拽框与把手（页内像素矩形）。没选中图片、或不在文档模式时为空。
      * @param page 页号
      * @param out 写回矩形（追加前会清空）

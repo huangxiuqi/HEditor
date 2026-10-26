@@ -534,8 +534,8 @@ export function createInput(env: InputEnv): InputLayer {
   // 落在正文之外时不起手 —— 从页外空白拖起不该选中任何东西。
   // 定位这一步必须等：异步宿主的落光标是一次往返，不等它，clickAt 这类入口会在
   // 光标还没摆好时就 resolve，调用方读到的光标是上一拍的。
-  const placeAt = (pt: { x: number; y: number }): Maybe<Hit | null> =>
-    then1(env.hit(pt.x, pt.y), (h) => {
+  const placeAt = (pt: { x: number; y: number }, preHit?: Hit | null): Maybe<Hit | null> =>
+    then1(preHit !== undefined ? preHit : env.hit(pt.x, pt.y), (h) => {
       // 图片优先：点在图身或把手上都不落光标 —— 图片是原子，光标只能停在它两侧。
       //   把手还要起一次拖拽（后续帧由 window 上的监听接手）。
       if (h && typeof h.img === 'number' && h.img >= 0) {
@@ -596,6 +596,16 @@ export function createInput(env: InputEnv): InputLayer {
       return then1(done, () => h);
     });
 
+  /**
+   * 命中落在行内对象上（控件内部，或图片与图片把手）。
+   * @param h 命中结果
+   * @returns 是否落在行内对象上
+   */
+  const hitsInlineObject = (h: Hit | null | undefined): boolean =>
+    !!h &&
+    ((typeof h.field === 'number' && h.field >= 0) ||
+      (typeof h.img === 'number' && h.img >= 0));
+
   function onKeyDown(ev: KeyboardEvent): Maybe<any> {
     if (!env.isReady() || isBusy()) return undefined;
     // 组合期间一律不动文档：输入法在组合时会持续发 keydown，每次都重排会让画面
@@ -650,25 +660,34 @@ export function createInput(env: InputEnv): InputLayer {
     const pt = env.pointOf(ev);
     if (!pt) return undefined;
     env.capturePointer();
-    const triple = clickCountOf(ev, click) === 3;
+    const count = clickCountOf(ev, click);
+    // 监听必须当场挂上：命中在异步宿主上是往返，等它回来才起手的话，
+    //   按下与第一次移动之间的移动会被整段丢掉，而那一段往往正是"按下去就往右拖"。
+    beginDrag(ev);
     let chain: Maybe<any>;
-    if (triple) {
-      click.seq = 0;
-      // 三击：选整格。走命令而不是查询 —— 选整格会重画帧，查询只回一个值、不重贴
-      // 脏页，画面于是停在旧帧上，看起来是"点了要等一秒才选中"。点不在表格里时
-      // 退回正常落光标，所以 beginDrag 放在回调里而不是前面。
-      chain = then1(env.write('cellSelectAt', env.docPt(pt)), (ok) => {
-        if (ok) {
-          env.cellSelected();
-          return null;
+    if (count >= 3) {
+      // 三击：选整格。但先看命中 —— 控件与图片是"格子里的东西"，连点两下选项之后
+      //   第三下仍落在控件上时，那一下表达的是"再点一次这个选项"，不是"我要这一格"。
+      //   连击计数在这里断掉，后面按普通落点走（拖动也就照常起手）。
+      chain = then1(env.hit(pt.x, pt.y), (h) => {
+        click.seq = 0;
+        if (hitsInlineObject(h)) {
+          armDrag(true);
+          return placeAt(pt, h);
         }
-        beginDrag(ev);
-        return placeAt(pt);
+        // 走命令而不是查询：选整格会重画帧，查询只回一个值、不重贴脏页，
+        //   画面于是停在旧帧上，看起来是"点了要等一秒才选中"。
+        return then1(env.write('cellSelectAt', env.docPt(pt)), (ok) => {
+          if (ok) {
+            armDrag(false);
+            env.cellSelected();
+            return null;
+          }
+          armDrag(true);
+          return placeAt(pt, h);
+        });
       });
     } else {
-      // 监听必须当场挂上：命中在异步宿主上是往返，等它回来才起手的话，
-      // 按下与第一次移动之间的移动会被整段丢掉，而那一段往往正是"按下去就往右拖"。
-      beginDrag(ev);
       chain = placeAt(pt);
     }
     // 末尾那次 focus 是这条路的必要条件：canvas 与 div 都不可聚焦，浏览器在 mousedown

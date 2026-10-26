@@ -282,4 +282,189 @@ test.describe('表格：跨页切片', () => {
     check('增量排版 == 全量', r.layoutDiff === 0, String(r.layoutDiff));
     check('文本没被切片改掉', r.textLen > 2000, String(r.textLen));
   });
+
+  // 控件是格子里的行内对象：连点两下选值、第三下落到控件上时，那一下表达的仍然是
+  //   "再点一次这个选项"。连击计数不能穿透过去变成"我要这一格"。
+  test('格内控件连点三次：只切换取值，不整格选中', async ({ open }) => {
+    test.setTimeout(120_000);
+    const p = await open('index.html', { query: { debug: '1' } });
+    const geo = await p.read<any>(`
+      const e = ${D};
+      await e.setText('首段');
+      await e.setCaret({ para: 0, offset: 2 });
+      await e.flush();
+      await e.insertTable({ rows: 1, cols: 2 });
+      await e.flush();
+      await e.setCaret({ para: 1, offset: 0 });
+      await e.flush();
+      await H.insertControl({ type: 'radioButton', key: 'r1', label: '甲' });
+      await e.flush();
+      await D.stopBlink();
+      const cv = FRAME();
+      const rect = cv.getBoundingClientRect();
+      const q = D.controls().items[0].rects[0];
+      return { left: rect.left, top: rect.top, sx: rect.width / cv.width,
+               sy: rect.height / cv.height, zoom: ZOOM(),
+               qx: q.x, qy: q.y, qw: q.w, qh: q.h,
+               flag: !!H.form()[0].value.flag,
+               cells: (await H.tableState()).selCells };`);
+    check('前置：控件在格里且有矩形', geo.qw > 0 && geo.cells === 0, JSON.stringify(geo));
+
+    const at = {
+      x: geo.left + (geo.qx + geo.qw / 2) * geo.zoom * geo.sx,
+      y: geo.top + (geo.qy + geo.qh / 2) * geo.zoom * geo.sy,
+    };
+    for (let i = 0; i < 3; i++) {
+      await p.page.mouse.click(at.x, at.y);
+      await p.page.waitForTimeout(60);
+    }
+    await p.page.waitForTimeout(200);
+
+    const after = await p.read<any>(`
+      const e = ${D};
+      const ts = await H.tableState();
+      return { flag: !!H.form()[0].value.flag, cells: ts.selCells,
+               sel: H.selection().empty, text: e.text() };`);
+    check('★ 连点三次没有把整格选中（第三下落在控件上）', after.cells === 0,
+          JSON.stringify(after));
+    check('★ 三次切换一次不落（单选从关到开、关、再开）', after.flag === true,
+          JSON.stringify(after));
+  });
+
+  // 格内插图之后敲字：字必须真的画在那一格里。三份自审可能同错（TRAPS 210），所以这一条
+  //   直接数像素：图片下沿之下那块区域里必须数得出墨。
+  test('格内插图后敲字：字画在格子里，同一行另一格也画得对', async ({ open }) => {
+    test.setTimeout(120_000);
+    const p = await open('index.html', { query: { debug: '1' } });
+    const r = await p.read<any>(`
+      const e = ${D};
+      await e.setText('首段');
+      await e.setCaret({ para: 0, offset: 2 });
+      await e.flush();
+      await e.insertTable({ rows: 1, cols: 2 });
+      await e.flush();
+      await e.setCaret({ para: 1, offset: 0 });
+      await e.flush();
+      const data = new Uint8Array(32 * 16 * 4).fill(180);
+      await H.registerImage({ id: 'pic', width: 32, height: 16, data });
+      await H.insertImage({ resourceId: 'pic', pxWidth: 32, pxHeight: 16 });
+      await e.flush();
+      // 光标此刻在图片之后：接着敲的字落在同一段、图片右边。
+      await e.type('戊己庚辛壬癸子丑寅卯');
+      await e.flush();
+      await e.setCaret({ para: 2, offset: 0 });
+      await e.type('右格的字');
+      await e.flush();
+      await D.stopBlink();
+
+      const box = (await H.images())[0];
+      const q = box.rects[0];
+      const Z = ZOOM();
+      // 页画布是逐页一张（帧只是它们的读视图），像素要从页画布上取。
+      const pageCanvas = document.querySelector('.heditor-pages canvas[data-page="0"]');
+      // 一块区域里"墨"的像素数：深色像素才算，白纸与浅底纹不算。
+      const inkIn = (xPt, yPt, wPt, hPt) => {
+        const c = document.createElement('canvas');
+        c.width = Math.max(1, Math.round(wPt * Z));
+        c.height = Math.max(1, Math.round(hPt * Z));
+        const g2 = c.getContext('2d');
+        g2.drawImage(pageCanvas, Math.round(xPt * Z), Math.round(yPt * Z), c.width, c.height,
+                     0, 0, c.width, c.height);
+        const d = g2.getImageData(0, 0, c.width, c.height).data;
+        let n = 0;
+        for (let k = 0; k < d.length; k += 4) if (d[k] < 160) ++n;
+        return n;
+      };
+      const below = inkIn(q.x, q.y + q.h, q.w + 60, 40);
+      const other = inkIn(q.x + q.w + 80, q.y, 60, 30);
+      return { text: e.paragraph(1), otherText: e.paragraph(2), below, other,
+               pages: e.geometry().pages, layoutDiff: (await D.auditLayout()).diff };`);
+    check('前提：格内那一段有图也有字', r.text.includes('戊己庚辛') && r.layoutDiff === 0,
+          JSON.stringify({ text: r.text, diff: r.layoutDiff }));
+    check('★ 图片下沿之下数得出墨（字真的画出来了）', r.below > 20, String(r.below));
+    check('★ 同一行另一格的字也在（没被这一格挤掉）', r.other > 10,
+          JSON.stringify({ other: r.other, text: r.otherText }));
+  });
+
+  // 3x3 表格：第一格插图并缩小到比格宽窄，第二格连续输入 —— 折到第二行之后后面的字
+  //   必须仍画得出来。与上一条的区别是"图在一格、字敲在另一格"：同一表格行里两格
+  //   互相牵连，行高由较高的那格结算，于是两格的行盒会纵向重叠。
+  test('3x3 表格：左格缩放过的图、右格连续输入折行', async ({ open }) => {
+    test.setTimeout(180_000);
+    const p = await open('index.html', { query: { debug: '1' } });
+    const r = await p.read<any>(`
+      const e = ${D};
+      await e.setText('首段');
+      await e.setCaret({ para: 0, offset: 2 });
+      await e.flush();
+      await H.insertTable({ rows: 3, cols: 3 });
+      await e.flush();
+      const ts0 = await H.tableState();
+      // 第一格（表格第一行第一列的那一段）
+      await e.setCaret({ para: 1, offset: 0 });
+      await e.flush();
+      const data = new Uint8Array(32 * 16 * 4).fill(180);
+      await H.registerImage({ id: 'pic', width: 32, height: 16, data });
+      await H.insertImage({ resourceId: 'pic', pxWidth: 32, pxHeight: 16 });
+      await e.flush();
+      // 拖把手缩小：宿主松手发的就是这一次 resizeImage。
+      await H.selectImage(0);
+      await e.resizeImage(0, 60, 30);
+      await e.flush();
+      const box = (await H.images())[0];
+      // 第二格（表格第一行第二列）：段号 = 第一格之后的那一段。
+      await e.setCaret({ para: 2, offset: 0 });
+      await e.flush();
+      const keys = 'asdfa asdf a a asdf asdf asdf asf asf as asdf asdf';
+      const first = [];
+      for (const ch of keys) {
+        const ok = await H.type(ch);
+        const st = D.editStats() || {};
+        first.push({ ok: !!ok, full: !!st.layoutWasFull, relaid: st.relaidParagraphs,
+                     glyphs: st.glyphs, lines: st.lines });
+      }
+      await e.flush();
+      await D.stopBlink();
+      const pz = D.pagePx();
+      const Z = ZOOM();
+      const pageCanvas = document.querySelector('.heditor-pages canvas[data-page="0"]');
+      const inkIn = (xPt, yPt, wPt, hPt) => {
+        const c = document.createElement('canvas');
+        c.width = Math.max(1, Math.round(wPt * Z));
+        c.height = Math.max(1, Math.round(hPt * Z));
+        const g2 = c.getContext('2d');
+        g2.drawImage(pageCanvas, Math.round(xPt * Z), Math.round(yPt * Z), c.width, c.height,
+                     0, 0, c.width, c.height);
+        const d = g2.getImageData(0, 0, c.width, c.height).data;
+        let n = 0;
+        for (let k = 0; k < d.length; k += 4) if (d[k] < 160) ++n;
+        return n;
+      };
+      const q = box.rects[0];
+      const cw = ts0.widthPt > 0 ? ts0.widthPt / ts0.cols : 0;
+      const cell2x = q.x + cw;
+      const cell2 = inkIn(cell2x, q.y, Math.max(20, cw - 4), 90);
+      const cell2row2 = inkIn(cell2x, q.y + 22, Math.max(20, cw - 4), 30);
+      const ts = await H.tableState();
+      const lay = await D.auditLayout();
+      const page = await D.auditPage(0);
+      return { tableWidth: ts0.widthPt, cols: ts0.cols, row: ts.row, cell2, cell2row2,
+               img: { x: q.x, y: q.y, w: q.w, h: q.h },
+               text1: e.paragraph(1), text2: e.paragraph(2),
+               layoutDiff: lay.diff, firstLine: lay.first, pageDiff: page.diff,
+               pageBox: page.box, pagePx: [page.w, page.h], zoom: Z,
+               dirty: D.dirtyPages(), steps: first.length,
+               fulls: first.filter((s) => s.full).length,
+               lastSteps: first.slice(-4) };`);
+    check('前置：3x3、图缩到比格宽窄、第二格有字',
+          r.cols === 3 && r.img.w < 100 && r.text2.length > 20, JSON.stringify(r.lastSteps));
+    check('★ 增量排版与全量一致', r.layoutDiff === 0,
+          JSON.stringify({ diff: r.layoutDiff, first: r.firstLine, text2: r.text2 }));
+    check('★ 页位图与重光栅一致', r.pageDiff === 0,
+          JSON.stringify({ pageDiff: r.pageDiff, box: r.pageBox, dirty: r.dirty }));
+    check('★ 第二格整个格子里数得出墨', r.cell2 > 40, String(r.cell2));
+    check('★ 第二行位置上也有墨（字画在第二行）', r.cell2row2 > 8,
+          JSON.stringify({ row2: r.cell2row2, cell: r.cell2, img: r.img, tw: r.tableWidth }));
+    check('★ 每次击键都是增量重排', r.fulls === 0, String(r.fulls));
+  });
 });

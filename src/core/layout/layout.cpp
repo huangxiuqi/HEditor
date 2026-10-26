@@ -1215,6 +1215,8 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
         if (tstack.empty()) {
             cur_cx = cx;
             cur_cw = cw;
+            // 表底之后让出表与下一块之间的间距（见 kTableGapAfterPt）。
+            cursor_y += kTableGapAfterPt;
         } else {
             TableFrame& outer = tstack.back();
             cur_cx = outer.cell_cx;

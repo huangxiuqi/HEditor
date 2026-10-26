@@ -72,12 +72,15 @@ void EditorEngine::paintPageRange(int first_page, int count) { presentInternal(f
 /**
  * 行带边界：第 k 行独占的块轴区间（页内磅）。
  *
- * 上下边界都取"与相邻行盒的中线"，而不是这一行自己的 block_lo/block_hi：
- *   行盒给的是字体的 ascent/descent，而个别字形（标点、带钩的部件）的墨迹会略微
- *   探出这个范围。取中线之后，相邻两行的带正好相接、互不重叠 ——
- *   于是"擦一条带"绝不会碰到没重画的那一行的墨迹，而这一行自己的全部墨迹
- *   一定落在带里（字形在行盒内）。用行盒自己的边界会啃掉相邻行的抗锯齿边：
- *   增量帧与从零重画的帧差 339~3550 px、最大通道差 49。
+ * 上下边界取"与相邻行盒的中线"，而不是行自己的 block_lo/block_hi：行盒给的是
+ *   ascent/descent，个别字形（标点、带钩部件）的墨迹会探出去 —— 用行盒边界会啃掉
+ *   相邻行的抗锯齿边（增量帧与从零重画差 339~3550 px、最大通道差 49）。相邻带因此
+ *   正好相接，擦一条带碰不到没重画的那一行。
+ *
+ * 表格是这条推论的例外：同一表格行里各格的行数可以不同，图片格的行盒（97..131）
+ *   与邻格第二行（115..132）纵向相交，"相邻中线"就落进其中一组的内部，那半截从此
+ *   不属于任何带 —— 擦除按带做，于是它被擦掉却不再重画（格内折行后半截字变空白或
+ *   与旧墨重叠）。所以分组按纵向重叠合并，组内共一条带：宁可多画几十像素。
  */
 void EditorEngine::pageLineBands(int page, std::vector<float>* lo, std::vector<float>* hi) const {
     const std::vector<LineBox>& ls = layout_.lines;
@@ -135,7 +138,12 @@ void EditorEngine::pageLineBands(int page, std::vector<float>* lo, std::vector<f
     std::vector<Group> groups;
     groups.reserve(items.size());
     for (const Item& it : items) {
-        if (!groups.empty() && std::fabs(groups.back().top - it.top) <= 0.01f) {
+        // 纵向重叠的并成一组，不只是"top 相同"的那些。表格一行里各格的行数可以不同：
+        //   一格是图（行盒 97..131）、隔壁那格折了两行（97..115、115..132），第二行
+        //   的 top 就落在图片那一行的范围里。两组纵向相交时，"相邻两组的中线"会落在
+        //   其中一组的内部，那一组自己的上半截从此不属于任何带 —— 擦除按带做，于是
+        //   这半截字被擦掉却不再重画（页位图与全量光栅差一条横带）。
+        if (!groups.empty() && it.top < groups.back().bottom - 0.01f) {
             groups.back().bottom = std::max(groups.back().bottom, it.bottom);
             continue;
         }
@@ -150,7 +158,9 @@ void EditorEngine::pageLineBands(int page, std::vector<float>* lo, std::vector<f
     const float page_bottom = static_cast<float>(pagePxHeight()) / cfg_.zoom;
     size_t gi = 0;
     for (const Item& it : items) {
-        while (gi + 1 < groups.size() && std::fabs(groups[gi].top - it.top) > 0.01f) ++gi;
+        // 按"item 的 top 落在哪一组"找，不按 top 相等找：组可能是几个纵向重叠的行
+        //   并出来的，它们的 top 各不相同（见上面分组的说明）。
+        while (gi + 1 < groups.size() && it.top >= groups[gi + 1].top - 0.01f) ++gi;
         const float top_edge = (gi == 0) ? 0.0f : 0.5f * (groups[gi - 1].bottom + groups[gi].top);
         const float bottom_edge = (gi + 1 >= groups.size())
                                       ? page_bottom

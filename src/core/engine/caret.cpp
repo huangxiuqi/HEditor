@@ -842,8 +842,11 @@ std::vector<PageRect> CaretResolver::selectionRectsIn(int first_page, int count)
         //   位置，两端落在同一个偏移上 —— 按几何算就是零宽，而零宽的矩形在导出与合成时
         //   会被当作"没有选区"丢掉，于是"能选中、看不见"。给一个字符宽的窄条，宽度取自
         //   这一行的字号（与那枚标记本身的大小同一档）。
+        //   但零宽只是"两端同偏移"的一种结果，不是判据：同一个偏移上压着行内原子（图片）
+        //   时，两端的侧别不同，宽度就是原子的盒宽 —— 按 l_lo == l_hi 一律收成窄条，
+        //   整段只有一张图的选区就只剩一条窄条，盖不住图。
         float width = std::abs(a1 - a0);
-        if (l_lo == l_hi) width = lb.size_pt * 0.35f;
+        if (!(width > 0.0f)) width = lb.size_pt * 0.35f;
         Rect r;
         if (!lb.vertical) {
             r.x = std::min(a0, a1);

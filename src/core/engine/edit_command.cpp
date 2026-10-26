@@ -32,6 +32,26 @@ FlowPos stepStartFlow(const Step& s) {
 }
 
 /**
+ * 区间里整块被覆盖的控件：摘掉这棵子树就等于删掉它占的全部流位置（边界与内容）。
+ *
+ * 控件在流里占两位边界加内容，而文本删除步只能覆盖内容 —— 混着文字一起选时，
+ * 边界那两位没有对应步骤，覆盖校验必然对不上，整条编辑会被拒。所以整块覆盖的控件
+ * 单独走 RemoveNode，其余区间才按文本 / 段落标记 / 原子发步。
+ */
+struct WholeControl {
+    /**
+     * 控件节点身份。
+     */
+    NodeId id = kInvalidNodeId;
+
+    /**
+     * 它在流里的区间（含两枚边界）。
+     */
+    FlowPos lo = 0;
+    FlowPos hi = 0;
+};
+
+/**
  * 读控件的运行时属性。四个分居两处：hidden 在节点上（呈现态的流位置换算要看它），
  * 其余三个在控件数据里。
  */
@@ -955,15 +975,66 @@ bool EditCommand::eraseOnTree(TextPos a, TextPos b, const char* label, bool care
 std::vector<Step> EditCommand::eraseFlowSteps(FlowPos from, FlowPos to) const {
     std::vector<Step> steps;
     if (from < 0 || to <= from) return steps;
+    // 整块覆盖的控件先挑出来：它们摘掉整个节点，剩下的区间才按文本 / 标记 / 原子发步。
+    //   不分开就会两边都发（文本步与整块摘除步各算一份长度），覆盖校验当场对不上。
+    std::vector<WholeControl> units;
+    if (hasFlow()) {
+        for (int i = 0; i < static_cast<int>(controlNodeIds().size()); ++i) {
+            FlowPos lo = 0;
+            FlowPos hi = 0;
+            if (!controlFlowSpan(i, &lo, &hi)) continue;
+            // 只认整块落在区间里的：端点压在选区边界上时那一块是"只选中一部分"，删一半
+            //   的控件再也重建不回来 —— 那种情形由 expandWholeUnits 事先把区间扩到整块。
+            if (lo < from || hi > to) continue;
+            units.push_back(WholeControl{controlNodeIds()[static_cast<size_t>(i)], lo, hi});
+        }
+        // 嵌套：外层整块被覆盖时内层不必再发一步（摘掉外层，内层的节点就不在了）。
+        //   按 lo 升序之后，落在前一块区间里的那几项丢掉即可。
+        std::sort(units.begin(), units.end(),
+                  [](const WholeControl& a, const WholeControl& b) { return a.lo < b.lo; });
+        std::vector<WholeControl> outer;
+        for (const WholeControl& u : units) {
+            if (!outer.empty() && u.hi <= outer.back().hi) continue;
+            outer.push_back(u);
+        }
+        units.swap(outer);
+    }
+    // 结构操作的门与删单个控件同一把尺子：表单模式默认锁住，文档模式放行。
+    for (const WholeControl& u : units) {
+        if (!rev::canDoStructureOp(doc(), mode(), u.id).allowed) {
+            noteBlocked();
+            return {};
+        }
+    }
+    const auto insideUnit = [&units](FlowPos f) {
+        for (const WholeControl& u : units) {
+            if (f >= u.lo && f < u.hi) return true;
+        }
+        return false;
+    };
     // 优先"整段并成一步"：区间里全是文本与段落标记时成立，而整篇删除与跨段删除都是这种。
     //   按节点切分要发几千步，每一步在提交时都要重建一次流索引（O(节点数)）——
     //   2000 段整篇删除实测几秒，其中一多半在这一项上。
-    if (hasFlow()) {
+    if (units.empty() && hasFlow()) {
         steps = deleteWholeRange(doc(), flowIndex(), from, to);
         if (!steps.empty()) return steps;
     }
-    // 文本那一条：按"所属文本节点"切分，落在段落标记、容器边界与原子上的位置不产生步骤。
-    steps = deleteTextSteps(doc(), flowIndex(), from, to);
+    // 文本那一条：按"所属文本节点"切分，落在段落标记、容器边界、原子上的位置不产生步骤。
+    //   整块控件占的那几段先抠掉 —— 它们的内容随节点一起走。
+    if (hasFlow()) {
+        FlowPos cursor = from;
+        for (const WholeControl& u : units) {
+            if (u.lo > cursor) {
+                const std::vector<Step> part = deleteTextSteps(doc(), flowIndex(), cursor, u.lo);
+                steps.insert(steps.end(), part.begin(), part.end());
+            }
+            if (u.hi > cursor) cursor = u.hi;
+        }
+        if (cursor < to) {
+            const std::vector<Step> part = deleteTextSteps(doc(), flowIndex(), cursor, to);
+            steps.insert(steps.end(), part.begin(), part.end());
+        }
+    }
     // 段落标记那一条：标记各占一个流位置，要么整覆盖要么不覆盖。
     //   它不能用 makeDeleteRange 顶替：那条按结构取区间，会把端点向外扩到控件边界
     //   （见 makeDeleteTextSteps 的说明），而这里要的正是"只删掉这一位"。
@@ -975,6 +1046,7 @@ std::vector<Step> EditCommand::eraseFlowSteps(FlowPos from, FlowPos to) const {
         for (size_t k = 1; k < blockFlow().size(); ++k) {
             const FlowPos p = blockFlow()[k] - 1;
             if (p < from || p >= to) continue;
+            if (insideUnit(p)) continue;
             const ParaMarkBuild mb = removeMarkStep(doc(), flowIndex(), p);
             if (mb.ok) steps.push_back(mb.step);
         }
@@ -994,10 +1066,17 @@ std::vector<Step> EditCommand::eraseFlowSteps(FlowPos from, FlowPos to) const {
                 if (objs[i].kind != InlineObjectKind::Atom) continue;
                 const FlowPos f = base + static_cast<FlowPos>(objs[i].cp) + static_cast<FlowPos>(i);
                 if (f < from || f >= to) continue;
+                if (insideUnit(f)) continue;  // 控件里的原子随子树一起走
                 const NodeBuild nb = removeAtomStep(doc(), flowIndex(), f);
                 if (nb.ok) steps.push_back(nb.step);
             }
         }
+    }
+    // 控件那一条：整块摘除。位置用流坐标，应用时由它当场重算槽位。
+    for (const WholeControl& u : units) {
+        RemoveNode r;
+        r.at_flow = u.lo;
+        steps.push_back(Step{r});
     }
     // 从后往前：删右边的不会移动左边的坐标，于是每步的坐标都是它自己那一刻的坐标。
     std::sort(steps.begin(), steps.end(),
@@ -1011,8 +1090,16 @@ std::vector<Step> EditCommand::eraseFlowSteps(FlowPos from, FlowPos to) const {
             covered += d->end - d->begin;
         } else if (std::get_if<RemoveParaMark>(&s) != nullptr) {
             covered += 1;
-        } else if (std::get_if<RemoveNode>(&s) != nullptr) {
-            covered += 1;  // 原子整枚占一格
+        } else if (const auto* n = std::get_if<RemoveNode>(&s)) {
+            // 控件整块占它自己的区间；原子整枚占一格。
+            FlowPos unit_span = 0;
+            for (const WholeControl& u : units) {
+                if (u.lo == n->at_flow) {
+                    unit_span = u.hi - u.lo;
+                    break;
+                }
+            }
+            covered += (unit_span > 0) ? unit_span : 1;
         }
     }
     if (covered != to - from) return {};

@@ -325,6 +325,15 @@ void EditorEngine::collectImageUi(int page, std::vector<Rect>* out) const {
     }
 }
 
+void EditorEngine::restoreImageSelection(NodeId id) {
+    if (id == kInvalidNodeId) return;
+    for (const NodeId x : imageNodeIds()) {
+        if (x != id) continue;
+        image_sel_ = id;
+        return;
+    }
+}
+
 bool EditorEngine::selectImage(int index) {
     if (!loaded_ || mode_ != EditMode::Document) return false;
     // 下标按文档顺序，不是"返回数组里的第几项"：两者只在有节点查不到时才会分家，

@@ -387,6 +387,18 @@ inline constexpr float kTableCellPadXPt = 4.0f;
 inline constexpr float kTableCellPadYPt = 2.0f;
 
 /**
+ * 正文里表格底边之后让出的间距（磅）。
+ *
+ * 块与块之间的间距全靠前一块的段后距给，而表格不是段落、没有那份记录可挂 —— 不补
+ * 这一段，紧跟在表格后面的图片段落或文字会贴着表格底边，与"段落之间空一段"的观感
+ * 不一致。表前不需要它：前一段的段后距已经加过了。
+ *
+ * 只作用于最外层表格，格内嵌套表的底边不额外让出 —— 那里格高由内容决定，多让一段会
+ * 把行撑高。
+ */
+inline constexpr float kTableGapAfterPt = 6.0f;
+
+/**
  * 表格在内容区里的水平位置（引擎侧）。只在表宽小于可用宽度时才有意义。
  */
 enum class TableHAlign : uint8_t { Start, Center, End };

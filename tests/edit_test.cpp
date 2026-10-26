@@ -498,7 +498,7 @@ const SectionInfo kSections[] = {
     {67, false, 10}, {68, false, 4},  {69, false, 3},  {70, false, 10}, {71, false, 6},
     {72, false, 10}, {73, false, 9},  {74, false, 3},  {75, false, 3},  {76, false, 3},
     {77, false, 3},  {78, true, 1},   {79, false, 2},  {80, false, 3},  {81, false, 2},
-    {82, false, 1},  {83, false, 2},  {84, false, 2},  {85, false, 3},
+    {82, false, 1},  {83, false, 2},  {84, false, 2},  {85, false, 3},  {86, false, 4},
 };
 
 /**
@@ -10012,7 +10012,9 @@ int main() {
             //   改了两处排版口径，两处都是有意的：单元格上下内边距从 0 改成 2 磅（行高
             //   跟着长），以及跨页切行改成按行盒自己的纵向位置分页 —— 同行其它格的行盒
             //   不再被后缀搬走，于是这张"一行高过整页"的表从 15 页变成 13 页。
-            expectTrue(db.hash == 0xd2495b3ac02349bdull, "表格跨页的摘要未变");
+            // 再取一次：0x9e22a25843f23449 —— 表格底边之后让出 kTableGapAfterPt，
+            //   表后那段整体下移 6 磅；行数、字形数与页数都没变。
+            expectTrue(db.hash == 0x9e22a25843f23449ull, "表格跨页的摘要未变");
             expectTrue(eb.layout().stats.page_count >= 3 && !eb.layout().placed_tables.empty() &&
                            eb.layout().placed_tables[0].placed.size() >= 2,
                        "用例 B 确实把一行切到了两页上");
@@ -14616,6 +14618,649 @@ int main() {
         expectTrue(e85.auditLayout() == 0, "排版自审为 0");
         expectTrue(e85.auditPageJson(0).find("\"diff\":0") != std::string::npos,
                    "页位图 == 从零重光栅");
+    }
+
+    if (runSection(86))
+        std::printf("\n[86] 格内图片后敲字、整图选区、文字加控件混选删除、图片撤销\n");
+    if (runSection(86)) {
+        EngineConfig c86;
+        c86.zoom = 1.0f;
+        c86.page.width_pt = 320.0f;
+        c86.page.height_pt = 300.0f;
+        c86.page.margins = PageMargins::all(12.0f);
+        const std::vector<std::string> fonts86 = {cjkPath, mnPath, latinPath};
+
+        const int iw86 = 96;
+        const int ih86 = 48;
+        std::vector<uint8_t> px86(static_cast<size_t>(iw86) * ih86 * 4u);
+        for (int i = 0; i < iw86 * ih86; ++i) {
+            px86[static_cast<size_t>(i) * 4u + 0] = 200;
+            px86[static_cast<size_t>(i) * 4u + 1] = 30;
+            px86[static_cast<size_t>(i) * 4u + 2] = 30;
+            px86[static_cast<size_t>(i) * 4u + 3] = 255;
+        }
+        ImageSpec im86;
+        im86.resource_id = "pic86";
+        im86.px_w = iw86;
+        im86.px_h = ih86;
+        im86.dpi = 96;
+
+        // 某一段排出了几个字形 / 几个行盒。
+        auto paraGlyphs = [](const EditorEngine& e, int para) {
+            const ParaIndex& pi = e.layout().para_index[static_cast<size_t>(para)];
+            return pi.glyph_end - pi.glyph_begin;
+        };
+        auto paraLines = [](const EditorEngine& e, int para) {
+            const ParaIndex& pi = e.layout().para_index[static_cast<size_t>(para)];
+            return pi.line_end - pi.line_begin;
+        };
+        // 帧里某一页上某个页内坐标的像素。
+        auto framePixel = [&](EditorEngine& e, int page, float x_pt, float y_pt, uint8_t* rgb) {
+            const int fw = e.frameWidth();
+            const int fh = e.frameHeight();
+            const int step = e.pagePxHeight() + e.pageGapPx();
+            const int px = static_cast<int>(std::lround(x_pt * c86.zoom));
+            const int py = static_cast<int>(std::lround(y_pt * c86.zoom)) + page * step;
+            rgb[0] = 0;
+            rgb[1] = 0;
+            rgb[2] = 0;
+            if (px < 0 || py < 0 || px >= fw || py >= fh) return false;
+            const uint8_t* fp = e.frame();
+            const size_t at =
+                (static_cast<size_t>(py) * static_cast<size_t>(fw) + static_cast<size_t>(px)) * 4u;
+            rgb[0] = fp[at];
+            rgb[1] = fp[at + 1];
+            rgb[2] = fp[at + 2];
+            return true;
+        };
+
+        // 一格宽 296 磅：图 72 磅，一行放得下二十来个字。
+        NodeTree t86;
+        {
+            const NodeId sec = t86.firstSectionId();
+            const NodeId head = t86.appendChild(sec, NodeKind::TextRun);
+            t86.setText(head, utf8ToCodepoints("甲乙"));
+            t86.appendChild(sec, NodeKind::ParagraphMark);
+            const NodeId tb = t86.appendChild(sec, NodeKind::Table);
+            const NodeId row = t86.appendChild(tb, NodeKind::TableRow);
+            const NodeId cell_a = t86.appendChild(row, NodeKind::TableCell);
+            t86.appendChild(cell_a, NodeKind::ParagraphMark);
+            const NodeId cell_b = t86.appendChild(row, NodeKind::TableCell);
+            const NodeId right = t86.appendChild(cell_b, NodeKind::TextRun);
+            t86.setText(right, utf8ToCodepoints("右格"));
+            t86.appendChild(cell_b, NodeKind::ParagraphMark);
+            const NodeId tail = t86.appendChild(sec, NodeKind::TextRun);
+            t86.setText(tail, utf8ToCodepoints("尾段"));
+            t86.appendChild(sec, NodeKind::ParagraphMark);
+        }
+
+        EditorEngine e86;
+        if (!e86.init(fonts86)) {
+            std::fprintf(stderr, "字体加载失败\n");
+            return 2;
+        }
+        e86.setConfig(c86);
+        e86.setDocument(t86, StyleSheet{});
+        e86.relayout();
+        e86.repaint();
+
+        std::string err86;
+        expectTrue(
+            e86.registerImageAndRepaint("pic86", iw86, ih86, px86.data(), px86.size(), &err86),
+            "注册一张 96x48 的图（" + err86 + "）");
+
+        // 格坐标 → 块下标。
+        auto blockInCell = [&](int row, int cell) {
+            for (size_t i = 0; i < e86.blocks().size(); ++i) {
+                const std::vector<CellSlot>& path = e86.blocks()[i].cell_path;
+                if (!path.empty() && path.back().row == row && path.back().cell == cell) {
+                    return static_cast<int>(i);
+                }
+            }
+            return -1;
+        };
+        const int pa86 = blockInCell(0, 0);
+        const int pb86 = blockInCell(0, 1);
+        expectTrue(pa86 >= 0 && pb86 >= 0, "构造：一格一个段（" + std::to_string(pa86) + " / " +
+                                               std::to_string(pb86) + "）");
+        const int right_glyphs0 = (pb86 >= 0) ? paraGlyphs(e86, pb86) : 0;
+
+        expectTrue(pa86 >= 0, "第一格有段落");
+        if (pa86 >= 0) {
+            e86.setCaret(pa86, 0);
+            expectTrue(e86.insertImageAndRender(im86), "图插进格内那个空段");
+            expectTrue(!e86.images().empty(), "文档里有一张图");
+            expectTrue(e86.typeTextAndRender("戊己"), "在图后面敲两个字");
+
+            // 内容真的进了这一段，字形也真的排出来了。
+            expectTrue(e86.blocks()[static_cast<size_t>(pa86)].cp_text.size() == 2,
+                       "格内那一段的内容是两个字（实际 " +
+                           std::to_string(e86.blocks()[static_cast<size_t>(pa86)].cp_text.size()) +
+                           "）");
+            const int gl86 = paraGlyphs(e86, pa86);
+            expectTrue(gl86 == 2, "★ 两个字都排出了字形（实际 " + std::to_string(gl86) + " 个）");
+            expectTrue(
+                paraLines(e86, pa86) == 1,
+                "图与两个字在同一行（实际 " + std::to_string(paraLines(e86, pa86)) + " 行）");
+            // 同一行另一格不受牵连。
+            expectTrue(!e86.images().empty() && !e86.images()[0].rects.empty(), "图落在某一页上");
+            if (pb86 >= 0) {
+                expectTrue(
+                    paraGlyphs(e86, pb86) == right_glyphs0,
+                    "★ 右格的字形数没变（实际 " + std::to_string(paraGlyphs(e86, pb86)) + "）");
+                expectTrue(paraLines(e86, pb86) == 1, "右格仍然只有一行");
+            }
+            // 增量结果与全量逐字段一致。
+            expectTrue(e86.auditLayout() == 0, "★ 格内图片加文字：增量排版 == 全量重排");
+            expectTrue(e86.auditCompile() == 0, "编译自审为 0");
+            expectTrue(e86.auditPageJson(0).find("\"diff\":0") != std::string::npos,
+                       "页位图 == 从零重光栅");
+
+            // 再敲到跨行为止：新起的每一行都得有字，不能是一串空行。
+            std::string more86;
+            for (int i = 0; i < 60; ++i) more86 += "字";
+            expectTrue(e86.typeTextAndRender(more86), "再敲六十个字（跨好几行）");
+            const int gl86b = paraGlyphs(e86, pa86);
+            expectTrue(gl86b == 62,
+                       "★ 六十四个字全部排出字形（实际 " + std::to_string(gl86b) + " 个）");
+            const int lines86 = paraLines(e86, pa86);
+            expectTrue(lines86 >= 3, "真的跨行了（" + std::to_string(lines86) + " 行）");
+            int empty_lines = 0;
+            {
+                const ParaIndex& pi = e86.layout().para_index[static_cast<size_t>(pa86)];
+                for (int L = pi.line_begin; L < pi.line_end; ++L) {
+                    const LineBox& lb = e86.layout().lines[static_cast<size_t>(L)];
+                    int n = 0;
+                    for (const PlacedGlyph& g : e86.layout().glyphs) {
+                        if (g.line == lb.line && g.paragraph == pa86) ++n;
+                    }
+                    if (n == 0) ++empty_lines;
+                }
+            }
+            expectTrue(empty_lines == 0,
+                       "★ 每一行都有字形，没有空行（空行数 " + std::to_string(empty_lines) + "）");
+            expectTrue(e86.auditLayout() == 0, "★ 跨行之后增量排版 == 全量重排");
+        }
+
+        // 整段只有一张图：选区要盖住图片，不是一条窄条。
+        {
+            NodeTree t87;
+            {
+                const NodeId sec = t87.firstSectionId();
+                t87.appendChild(sec, NodeKind::ParagraphMark);
+                t87.appendChild(sec, NodeKind::ParagraphMark);
+            }
+            EditorEngine e87;
+            if (!e87.init(fonts86)) {
+                std::fprintf(stderr, "字体加载失败\n");
+                return 2;
+            }
+            e87.setConfig(c86);
+            e87.setDocument(t87, StyleSheet{});
+            e87.relayout();
+            e87.repaint();
+            std::string err87;
+            expectTrue(
+                e87.registerImageAndRepaint("pic86", iw86, ih86, px86.data(), px86.size(), &err87),
+                "注册一张图（" + err87 + "）");
+            e87.setCaret(0, 0);
+            expectTrue(e87.insertImageAndRender(im86), "插进第一段（那一段只有这张图）");
+            const std::vector<EditorEngine::ImageBox> b87 = e87.images();
+            expectTrue(b87.size() == 1 && !b87[0].rects.empty(), "图落在某一页上");
+            const FlowPos a87 = e87.blockFlowStart(0);
+            e87.setSelection(Range{a87, a87 + e87.blockFlowSpan(0)});
+            e87.repaint();
+            const std::vector<EditorEngine::PageRect> rr87 = e87.selectionRects();
+            expectTrue(rr87.size() == 1,
+                       "整图选区一条矩形（实际 " + std::to_string(rr87.size()) + " 条）");
+            if (rr87.size() == 1) {
+                expectTrue(std::fabs(rr87[0].r_pt.w - 72.0f) < 1.0f,
+                           "★ 选区宽度盖住图片（实际 " + std::to_string(rr87[0].r_pt.w) +
+                               " 磅，图宽 72）");
+                expectTrue(rr87[0].r_pt.h > 30.0f,
+                           "选区高度盖住图片（实际 " + std::to_string(rr87[0].r_pt.h) + " 磅）");
+                if (!b87.empty() && !b87[0].rects.empty()) {
+                    const Rect ir87 = b87[0].rects[0].r_pt;
+                    expectTrue(std::fabs(rr87[0].r_pt.x - ir87.x) < 1.0f &&
+                                   std::fabs(rr87[0].r_pt.y - ir87.y) < 2.0f,
+                               "选区与图片同一位置");
+                }
+            }
+        }
+
+        // 选区里同时有文字与控件：删除要真的落地，不能整条被拒。
+        {
+            NodeTree t88;
+            {
+                const NodeId sec = t88.firstSectionId();
+                const NodeId a = t88.appendChild(sec, NodeKind::TextRun);
+                t88.setText(a, utf8ToCodepoints("甲乙丙丁"));
+                t88.appendChild(sec, NodeKind::ParagraphMark);
+            }
+            EditorEngine e88;
+            if (!e88.init(fonts86)) {
+                std::fprintf(stderr, "字体加载失败\n");
+                return 2;
+            }
+            e88.setConfig(c86);
+            e88.setDocument(t88, StyleSheet{});
+            e88.relayout();
+            e88.repaint();
+            e88.setCaret(0, 2);
+            expectTrue(e88.insertControlAndRender(makeControlSpec("radioButton"), "单甲"),
+                       "光标处插一个单选");
+            expectTrue(e88.controlViews().size() == 1, "文档里一个控件");
+            // 从第一个字选到最后（含控件那一块与末尾段落标记）。
+            e88.setCaret(0, 0);
+            expectTrue(e88.moveCaretToDocEnd(true), "扩选到文档末尾");
+            const Range sel88 = e88.selection();
+            expectTrue(!sel88.empty(), "确实有选区（" + std::to_string(sel88.begin()) + ".." +
+                                           std::to_string(sel88.end()) + "）");
+            const size_t blocks88 = e88.blocks().size();
+            expectTrue(e88.deleteSelectionAndRender(), "★ 文字与控件一起删得掉");
+            expectTrue(e88.controlViews().empty(),
+                       "控件没了（还剩 " + std::to_string(e88.controlViews().size()) + " 个）");
+            {
+                size_t left = 0;
+                for (const BlockSpec& b : e88.blocks()) left += b.cp_text.size();
+                expectTrue(left == 0, "文档里一个字符都不剩（实际 " + std::to_string(left) +
+                                          " 个，原 " + std::to_string(blocks88) + " 段）");
+            }
+            expectTrue(e88.auditCompile() == 0 && e88.auditLayout() == 0, "删完增量与全量一致");
+            expectTrue(e88.undoAndRender(), "撤销这次删除");
+            expectTrue(e88.controlViews().size() == 1, "★ 撤销把控件与文字一起恢复");
+        }
+
+        // 改尺寸之后撤销：图片仍选中（拖动框在），光标不冒到图右边，像素跟着回退。
+        {
+            NodeTree t89;
+            {
+                const NodeId sec = t89.firstSectionId();
+                const NodeId a = t89.appendChild(sec, NodeKind::TextRun);
+                t89.setText(a, utf8ToCodepoints("ABCD"));
+                t89.appendChild(sec, NodeKind::ParagraphMark);
+                t89.appendChild(sec, NodeKind::ParagraphMark);
+            }
+            EditorEngine e89;
+            if (!e89.init(fonts86)) {
+                std::fprintf(stderr, "字体加载失败\n");
+                return 2;
+            }
+            e89.setConfig(c86);
+            e89.setDocument(t89, StyleSheet{});
+            e89.relayout();
+            e89.repaint();
+            std::string err89;
+            expectTrue(
+                e89.registerImageAndRepaint("pic86", iw86, ih86, px86.data(), px86.size(), &err89),
+                "注册一张图（" + err89 + "）");
+            e89.setCaret(1, 0);
+            expectTrue(e89.insertImageAndRender(im86), "插进第二段（那一段只有这张图）");
+            expectTrue(e89.selectImageAndRender(0), "选中这张图");
+            expectTrue(!e89.editStats().caret_visible, "选中图片时不画文本光标");
+
+            // 连改三次（每次一步），再撤销一步。
+            expectTrue(e89.resizeImageAndRender(0, 60.0f, 30.0f), "第一次改尺寸");
+            expectTrue(e89.resizeImageAndRender(0, 100.0f, 50.0f), "第二次改尺寸");
+            expectTrue(e89.resizeImageAndRender(0, 240.0f, 120.0f), "第三次改尺寸（撑到第二页）");
+            const int pages89 = e89.layout().stats.page_count;
+            expectTrue(e89.undoAndRender(), "撤销第三次");
+            expectTrue(std::fabs(e89.images()[0].w_pt - 100.0f) < 0.01f,
+                       "尺寸回到 100 磅（实际 " + std::to_string(e89.images()[0].w_pt) + "）");
+            expectTrue(e89.selectedImage() == 0, "★ 撤销之后图片仍然选中（拖动框在）");
+            expectTrue(!e89.editStats().caret_visible, "★ 撤销之后光标没有冒到图片右边");
+            // 像素与几何一致：图心那个点必须是图里的颜色。
+            const std::vector<EditorEngine::ImageBox> b89 = e89.images();
+            expectTrue(!b89.empty() && !b89[0].rects.empty(), "图仍在某一页上");
+            if (!b89.empty() && !b89[0].rects.empty()) {
+                e89.repaint();
+                const EditorEngine::PageRect pr89 = b89[0].rects[0];
+                uint8_t rgb89[3] = {0, 0, 0};
+                const bool got89 = framePixel(e89, pr89.page, pr89.r_pt.x + pr89.r_pt.w * 0.5f,
+                                              pr89.r_pt.y + pr89.r_pt.h * 0.5f, rgb89);
+                expectTrue(got89 && rgb89[0] > 180 && rgb89[1] < 90,
+                           "★ 撤销之后图心像素是图里的颜色（" +
+                               std::to_string(static_cast<int>(rgb89[0])) + "," +
+                               std::to_string(static_cast<int>(rgb89[1])) + "）");
+                // 页缓存必须是本版排版光栅出来的那份像素。
+                expectTrue(e89.auditPageJson(pr89.page).find("\"diff\":0") != std::string::npos,
+                           "★ 撤销之后页位图 == 从零重光栅");
+            }
+            expectTrue(e89.layout().stats.page_count <= pages89,
+                       "撤销之后页数没有反向增长（" +
+                           std::to_string(e89.layout().stats.page_count) + " vs " +
+                           std::to_string(pages89) + "）");
+        }
+
+        // 格内有图之后敲字的几种排法：都必须排出行盒与字形，且与全量重排一致。
+        //   返回空串表示这一种没问题，否则是失败原因。
+        //   一行没有字形可以接受 —— 那是"图单独占一行"（图比格宽时必然如此），
+        //   但那一行必须真的有原子，否则就是凭空多出来的空行。
+        auto cellVariant = [&](bool table_first, int rows, int cols, int at_row, int at_col,
+                               const char* before, float w_pt, float h_pt, const char* typed,
+                               float page_h, bool undo_after) -> std::string {
+            NodeTree tv;
+            const NodeId sec = tv.firstSectionId();
+            if (!table_first) {
+                const NodeId head = tv.appendChild(sec, NodeKind::TextRun);
+                tv.setText(head, utf8ToCodepoints("甲乙"));
+                tv.appendChild(sec, NodeKind::ParagraphMark);
+            }
+            const NodeId tb = tv.appendChild(sec, NodeKind::Table);
+            for (int r = 0; r < rows; ++r) {
+                const NodeId tr = tv.appendChild(tb, NodeKind::TableRow);
+                for (int c = 0; c < cols; ++c) {
+                    const NodeId tc = tv.appendChild(tr, NodeKind::TableCell);
+                    const bool target = (r == at_row && c == at_col);
+                    if (target) {
+                        if (before[0] != '\0') {
+                            const NodeId run = tv.appendChild(tc, NodeKind::TextRun);
+                            tv.setText(run, utf8ToCodepoints(before));
+                        }
+                    } else {
+                        // 其他格填点字：行高与列宽才像一张真表，跨页也才有东西可切。
+                        const NodeId run = tv.appendChild(tc, NodeKind::TextRun);
+                        tv.setText(run, utf8ToCodepoints("格内"));
+                    }
+                    tv.appendChild(tc, NodeKind::ParagraphMark);
+                }
+            }
+            tv.appendChild(sec, NodeKind::ParagraphMark);
+
+            EngineConfig cv = c86;
+            cv.page.height_pt = page_h;
+            EditorEngine ev;
+            if (!ev.init(fonts86)) return "字体加载失败";
+            ev.setConfig(cv);
+            ev.setDocument(tv, StyleSheet{});
+            ev.relayout();
+            ev.repaint();
+            std::string err;
+            ev.registerImageAndRepaint("pic86", iw86, ih86, px86.data(), px86.size(), &err);
+            int pa = -1;
+            for (size_t i = 0; i < ev.blocks().size(); ++i) {
+                const std::vector<CellSlot>& path = ev.blocks()[i].cell_path;
+                if (!path.empty() && path.back().row == at_row && path.back().cell == at_col) {
+                    pa = static_cast<int>(i);
+                    break;
+                }
+            }
+            if (pa < 0) return "找不到那一格的段";
+            ev.setCaret(pa, ev.blocks()[static_cast<size_t>(pa)].cp_text.size());
+            ImageSpec im;
+            im.resource_id = "pic86";
+            im.px_w = iw86;
+            im.px_h = ih86;
+            im.dpi = 96;
+            im.width = Length::abs(ptToEmu(w_pt));
+            im.height = Length::abs(ptToEmu(h_pt));
+            if (!ev.insertImageAndRender(im)) return "插图失败";
+            if (!ev.typeTextAndRender(typed)) return "敲字失败";
+            if (undo_after) {
+                // 撤销掉刚敲的字，再敲一遍：增量要在"图还在、文字来去"这条路上站得住。
+                if (!ev.undoAndRender()) return "撤销敲字失败";
+                if (!ev.typeTextAndRender(typed)) return "再敲一遍失败";
+            }
+            const size_t want = utf8ToCodepoints(before).size() + utf8ToCodepoints(typed).size();
+            const size_t got = ev.blocks()[static_cast<size_t>(pa)].cp_text.size();
+            if (got != want)
+                return "内容 " + std::to_string(got) + " 个，应为 " + std::to_string(want);
+            const ParaIndex& pi = ev.layout().para_index[static_cast<size_t>(pa)];
+            const int glyphs = pi.glyph_end - pi.glyph_begin;
+            if (glyphs != static_cast<int>(want)) {
+                return "只排出 " + std::to_string(glyphs) + " 个字形，应为 " + std::to_string(want);
+            }
+            for (int L = pi.line_begin; L < pi.line_end; ++L) {
+                const LineBox& lb = ev.layout().lines[static_cast<size_t>(L)];
+                int n = 0;
+                for (const PlacedGlyph& g : ev.layout().glyphs) {
+                    if (g.line == lb.line && g.paragraph == pa) ++n;
+                }
+                if (n > 0) continue;
+                bool holds_atom = false;
+                for (const LineCluster& lc : lb.clusters) {
+                    if (lc.atom != InlineAtom::None) holds_atom = true;
+                }
+                if (!holds_atom) return "第 " + std::to_string(L - pi.line_begin) + " 行没有字形";
+            }
+            if (ev.auditLayout() != 0) return "增量排版与全量重排不一致";
+            // 三份自审都可能同错（见 TRAPS 210）：每个字形必须落在它那一行的页上、
+            //   纵向也在那条行盒里。少这一条，"字画在上一页"这种错不会有人报。
+            for (const PlacedGlyph& g : ev.layout().glyphs) {
+                const LineBox* hit = nullptr;
+                for (const LineBox& lb : ev.layout().lines) {
+                    if (lb.line == g.line && lb.paragraph == g.paragraph) {
+                        hit = &lb;
+                        break;
+                    }
+                }
+                if (hit == nullptr) return "有字形找不到它那一行的行盒";
+                if (hit->page != g.page) {
+                    return "字形画在第 " + std::to_string(g.page) + " 页，行盒在第 " +
+                           std::to_string(hit->page) + " 页";
+                }
+                if (g.y_pt < hit->block_lo_pt - 1.0f || g.y_pt > hit->block_hi_pt + 1.0f) {
+                    return "字形纵向落在行盒之外（行 " + std::to_string(hit->block_lo_pt) + ".." +
+                           std::to_string(hit->block_hi_pt) + "，字形 " + std::to_string(g.y_pt) +
+                           "）";
+                }
+            }
+            ev.repaint();
+            if (ev.auditPageJson(0).find("\"diff\":0") == std::string::npos)
+                return "页位图与重光栅不一致";
+            return std::string();
+        };
+
+        const std::string v1 =
+            cellVariant(/*table_first=*/true, 1, 1, 0, 0, "", 72.0f, 36.0f, "戊己", 300.0f, false);
+        expectTrue(v1.empty(), "★ 表在文首、空格插图后敲字：" + v1);
+        const std::string v2 =
+            cellVariant(false, 2, 2, 1, 1, "甲乙", 72.0f, 36.0f, "丙丁戊", 300.0f, false);
+        expectTrue(v2.empty(), "★ 表格右下格、先有字再插图再敲字：" + v2);
+        const std::string v3 =
+            cellVariant(false, 1, 2, 0, 0, "", 260.0f, 60.0f, "戊己庚辛", 300.0f, false);
+        expectTrue(v3.empty(), "★ 图比格还宽的格内敲字：" + v3);
+        const std::string v4 =
+            cellVariant(false, 1, 1, 0, 0, "", 60.0f, 200.0f, "戊己庚辛壬癸", 300.0f, false);
+        expectTrue(v4.empty(), "★ 图几乎占满一页的格内敲字：" + v4);
+        const std::string v5 =
+            cellVariant(false, 8, 2, 5, 1, "", 72.0f, 36.0f, "戊己庚辛", 200.0f, false);
+        expectTrue(v5.empty(), "★ 表格跨页时在格里的图后敲字：" + v5);
+        const std::string v6 =
+            cellVariant(false, 2, 2, 0, 0, "", 72.0f, 36.0f, "戊己庚辛", 300.0f, true);
+        expectTrue(v6.empty(), "★ 格内图后敲字、撤销、再敲一遍：" + v6);
+        const std::string v7 =
+            cellVariant(false, 1, 1, 0, 0, "", 60.0f, 400.0f, "戊己庚辛", 300.0f, false);
+        expectTrue(v7.empty(), "★ 图比整页还高的格内敲字：" + v7);
+        const std::string v8 =
+            cellVariant(true, 1, 1, 0, 0, "甲乙", 72.0f, 36.0f, "丙丁", 300.0f, false);
+        expectTrue(v8.empty(), "★ 表在文首、格内先有字再插图再敲字：" + v8);
+
+        // 图插在 (0,0) 格、字敲在 (0,1) 格 —— 敲字那格不是插图那格，一行里另一格变高
+        //   之后，图片那一格的行盒与整行的行高都要跟着结算。图片照样走"先插原始尺寸、
+        //   再缩小"这条真实路径（拖动把手松手就是它）。
+        auto neighborVariant = [&](const char* typed) -> std::string {
+            NodeTree tv;
+            const NodeId sec = tv.firstSectionId();
+            // 与真实页面同构：表格前面有一段正文，表格从第 1 段起。
+            {
+                const NodeId head = tv.appendChild(sec, NodeKind::TextRun);
+                tv.setText(head, utf8ToCodepoints("首段"));
+                tv.appendChild(sec, NodeKind::ParagraphMark);
+            }
+            const NodeId tb = tv.appendChild(sec, NodeKind::Table);
+            for (int r = 0; r < 3; ++r) {
+                const NodeId tr = tv.appendChild(tb, NodeKind::TableRow);
+                for (int c = 0; c < 3; ++c) {
+                    const NodeId tc = tv.appendChild(tr, NodeKind::TableCell);
+                    // 与用户点出来的表一致：只有第一行前两格有东西（一格图、一格字），
+                    //   其余格是空段 —— 行高就只由这两格里的高者结算。
+                    if (r == 0 && c == 2) {
+                        const NodeId run = tv.appendChild(tc, NodeKind::TextRun);
+                        tv.setText(run, utf8ToCodepoints("格内"));
+                    }
+                    tv.appendChild(tc, NodeKind::ParagraphMark);
+                }
+            }
+            tv.appendChild(sec, NodeKind::ParagraphMark);
+
+            EditorEngine ev;
+            if (!ev.init(fonts86)) return "字体加载失败";
+            // 与浏览器里那一页同一套度量：A4、72 磅边距、4/3 缩放 —— 行带与脏矩形的
+            //   取整都吃缩放，1.0 下算不出来的接缝在 4/3 下才露。
+            EngineConfig cv = c86;
+            cv.zoom = 4.0f / 3.0f;
+            cv.page.width_pt = 595.0f;
+            cv.page.height_pt = 842.0f;
+            cv.page.margins = PageMargins::all(72.0f);
+            ev.setConfig(cv);
+            ev.setDocument(tv, StyleSheet{});
+            ev.relayout();
+            ev.repaint();
+            std::string err;
+            ev.registerImageAndRepaint("pic86", iw86, ih86, px86.data(), px86.size(), &err);
+            auto para_of = [&](int row, int col) -> int {
+                for (size_t i = 0; i < ev.blocks().size(); ++i) {
+                    const std::vector<CellSlot>& path = ev.blocks()[i].cell_path;
+                    if (!path.empty() && path.back().row == row && path.back().cell == col) {
+                        return static_cast<int>(i);
+                    }
+                }
+                return -1;
+            };
+            const int p_img = para_of(0, 0);
+            const int p_txt = para_of(0, 1);
+            if (p_img < 0 || p_txt < 0) return "找不到那一格的段";
+            ev.setCaret(p_img, 0);
+            ImageSpec im;
+            im.resource_id = "pic86";
+            im.px_w = iw86;
+            im.px_h = ih86;
+            im.dpi = 96;
+            im.width = Length::abs(ptToEmu(150.0f));
+            im.height = Length::abs(ptToEmu(100.0f));
+            if (!ev.insertImageAndRender(im)) return "插图失败";
+            if (!ev.selectImageAndRender(0)) return "选不中这张图";
+            if (!ev.resizeImageAndRender(0, 60.0f, 30.0f)) return "缩小图片失败";
+            ev.setCaret(p_txt, 0);
+            // 逐字敲，与真实击键同频：一次贴一串走的是一条批量路径，跨行只发生一次；
+            //   逐字会反复把"这一格从一行变两行"这个中间态交给增量排版。
+            const std::string one(typed);
+            for (size_t k = 0; k < one.size(); ++k) {
+                if (!ev.typeTextAndRender(std::string(1, one[k]))) return "敲字失败";
+                const EditStats st = ev.editStats();
+                if (st.layout_was_full) return "第 " + std::to_string(k) + " 键走了全量重排";
+                // 每敲一个字都当场对一次页位图。漏画是"某一次局部重绘没盖住变化区"
+                //   攒出来的：只在末尾对一次，看到的是几十次叠加的差异，定位不到那一刀。
+                if (ev.auditPageJson(0).find("\"diff\":0") == std::string::npos) {
+                    return "第 " + std::to_string(k) + " 键之后页位图与重光栅不一致";
+                }
+            }
+
+            const size_t want = utf8ToCodepoints(typed).size();
+            const size_t got = ev.blocks()[static_cast<size_t>(p_txt)].cp_text.size();
+            if (got != want)
+                return "敲字那格内容 " + std::to_string(got) + " 个，应为 " + std::to_string(want);
+            const ParaIndex& pi = ev.layout().para_index[static_cast<size_t>(p_txt)];
+            const int glyphs = pi.glyph_end - pi.glyph_begin;
+            if (glyphs != static_cast<int>(want)) {
+                return "敲字那格只排出 " + std::to_string(glyphs) + " 个字形，应为 " +
+                       std::to_string(want);
+            }
+            if (pi.line_end - pi.line_begin < 2) return "没有折到第二行";
+            for (int L = pi.line_begin; L < pi.line_end; ++L) {
+                const LineBox& lb = ev.layout().lines[static_cast<size_t>(L)];
+                int n = 0;
+                for (const PlacedGlyph& g : ev.layout().glyphs) {
+                    if (g.line == lb.line && g.paragraph == p_txt) ++n;
+                }
+                if (n == 0) return "第 " + std::to_string(L - pi.line_begin) + " 行没有字形";
+            }
+            // 图片那一格的行盒不能被敲字那格带歪：两格各算各的块坐标，能比的是行数 ——
+            //   图缩小到 72x36 之后只占一行，敲字那格折行不该把它的行盒变多。
+            const ParaIndex& pimg = ev.layout().para_index[static_cast<size_t>(p_img)];
+            if (pimg.line_end - pimg.line_begin > 1) {
+                return "图片那格凭空多出了 " + std::to_string(pimg.line_end - pimg.line_begin - 1) +
+                       " 个行盒";
+            }
+            if (ev.auditLayout() != 0) return "增量排版与全量重排不一致";
+            for (const PlacedGlyph& g : ev.layout().glyphs) {
+                const LineBox* hit = nullptr;
+                for (const LineBox& lb : ev.layout().lines) {
+                    if (lb.line == g.line && lb.paragraph == g.paragraph) {
+                        hit = &lb;
+                        break;
+                    }
+                }
+                if (hit == nullptr) return "有字形找不到它那一行的行盒";
+                if (hit->page != g.page) {
+                    return "字形画在第 " + std::to_string(g.page) + " 页，行盒在第 " +
+                           std::to_string(hit->page) + " 页";
+                }
+            }
+            {
+                // 内容没变时再呈现一次：不该重画，也不该把上一次的结果带偏。
+                ev.repaint();
+                if (ev.auditPageJson(0).find("\"diff\":0") == std::string::npos)
+                    return "重复呈现之后页位图与重光栅不一致";
+            }
+            ev.repaint();
+            if (ev.auditPageJson(0).find("\"diff\":0") == std::string::npos)
+                return "页位图与重光栅不一致";
+            return std::string();
+        };
+
+        const std::string n1 =
+            neighborVariant("asdfa asdf a a asdf asdf asdf asf asf as asdf asdf");
+        expectTrue(n1.empty(), "★ 图在左格、字敲在右格并折行：" + n1);
+
+        // 表格与图片段落之间的间距：两种次序各量一次。
+        {
+            NodeTree tg;
+            {
+                const NodeId sec = tg.firstSectionId();
+                tg.appendChild(sec, NodeKind::ParagraphMark);
+                const NodeId tb = tg.appendChild(sec, NodeKind::Table);
+                const NodeId row = tg.appendChild(tb, NodeKind::TableRow);
+                const NodeId cell = tg.appendChild(row, NodeKind::TableCell);
+                tg.appendChild(cell, NodeKind::ParagraphMark);
+                tg.appendChild(sec, NodeKind::ParagraphMark);
+            }
+            EditorEngine eg;
+            if (!eg.init(fonts86)) {
+                std::fprintf(stderr, "字体加载失败\n");
+                return 2;
+            }
+            eg.setConfig(c86);
+            eg.setDocument(tg, StyleSheet{});
+            eg.relayout();
+            eg.repaint();
+            std::string errg;
+            eg.registerImageAndRepaint("pic86", iw86, ih86, px86.data(), px86.size(), &errg);
+            eg.setCaret(0, 0);
+            eg.insertImageAndRender(im86);
+            const int lastg = static_cast<int>(eg.blocks().size()) - 1;
+            eg.setCaret(lastg, 0);
+            eg.insertImageAndRender(im86);
+            const std::vector<EditorEngine::ImageBox> bg = eg.images();
+            expectTrue(bg.size() == 2 && !eg.layout().placed_tables.empty(),
+                       "构造：两张图夹一张表");
+            if (bg.size() == 2 && !bg[0].rects.empty() && !bg[1].rects.empty() &&
+                !eg.layout().placed_tables.empty()) {
+                const PlacedTable& pt = eg.layout().placed_tables[0];
+                const float img1_bottom = bg[0].rects[0].r_pt.y + bg[0].rects[0].r_pt.h;
+                const float table_top = pt.placed.front().y;
+                const float table_bottom = pt.placed.back().y + pt.placed.back().h;
+                const float img2_top = bg[1].rects[0].r_pt.y;
+                // 表前用前一段的段后距，表后补一段同样的间距：两边都不该贴住表格。
+                expectTrue(table_top - img1_bottom >= 5.9f,
+                           "★ 图与表格之间有间距（表顶 " + std::to_string(table_top) + " - 图底 " +
+                               std::to_string(img1_bottom) + "）");
+                expectTrue(img2_top - table_bottom >= 5.9f,
+                           "★ 表格与下一段图之间有间距（图顶 " + std::to_string(img2_top) +
+                               " - 表底 " + std::to_string(table_bottom) + "）");
+            }
+        }
     }
 
     checkSectionTable();

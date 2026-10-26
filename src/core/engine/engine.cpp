@@ -811,6 +811,10 @@ void EditorEngine::recordSelection(Range before, Range after) {
 bool EditorEngine::undo() {
     if (!loaded_ || !session_) return false;
     const int plan_before = bracketPlanId();
+    // 撤销/重做不改"选中的是哪张图"：改尺寸那一步撤销回去，图仍该是选中的。恢复选区
+    //   那一步会清掉图片选中，所以这里先记下、最后一处放回去。
+    const NodeId image_before = image_sel_;
+    clearImageResizePreview();
     const rev::Doc before = session_->doc();
     if (!session_->undo()) return false;
     const rev::Damage dmg = rev::damage(before, session_->doc(), flowVisibility());
@@ -822,6 +826,7 @@ bool EditorEngine::undo() {
         --sel_pos_;
         setSelection(sel_history_[sel_pos_].before);
     }
+    restoreImageSelection(image_before);
     // 撤销可能把"有没有控件"整体改掉（撤销删掉最后一个控件、或把只读控件撤回来），
     //   那样占位集合整个翻转，而损伤区间只报块内容 —— 计划变了就整体重排。
     if (bracketPlanId() != plan_before) markLayoutDirtyForBrackets();
@@ -831,6 +836,8 @@ bool EditorEngine::undo() {
 bool EditorEngine::redo() {
     if (!loaded_ || !session_) return false;
     const int plan_before = bracketPlanId();
+    const NodeId image_before = image_sel_;
+    clearImageResizePreview();
     const rev::Doc before = session_->doc();
     if (!session_->redo()) return false;
     const rev::Damage dmg = rev::damage(before, session_->doc(), flowVisibility());
@@ -840,6 +847,7 @@ bool EditorEngine::redo() {
         setSelection(sel_history_[sel_pos_].after);
         ++sel_pos_;
     }
+    restoreImageSelection(image_before);
     if (bracketPlanId() != plan_before) markLayoutDirtyForBrackets();
     return true;
 }
