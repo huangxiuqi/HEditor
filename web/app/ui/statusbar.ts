@@ -4,6 +4,7 @@
 //   算好喂进来。这样这一件在没有实例的页面上（比如"两个实例"那一页）也能挂，
 //   只是那几处不接电。
 import { iconHtml } from './icons';
+import { createSlider } from './slider';
 
 /**
  * 状态栏的两个写入口。
@@ -79,16 +80,15 @@ export function createStatusBar(
   right.className = 'heditor-status__right';
 
   const out = makeStep('out', '缩小', -1, onStep);
-  const range = document.createElement('input');
-  range.className = 'heditor-status__range';
-  range.type = 'range';
-  range.min = '37';
-  range.max = '225';
-  range.step = '12.5';
-  range.value = '100';
-  range.title = '缩放';
-  range.addEventListener('input', () => {
-    onSet?.(Number(range.value));
+  const range = createSlider({
+    min: 37,
+    max: 225,
+    step: 12.5,
+    value: 100,
+    title: '缩放',
+    onInput: (v) => {
+      onSet?.(v);
+    },
   });
   const into = makeStep('in', '放大', 1, onStep);
 
@@ -96,7 +96,7 @@ export function createStatusBar(
   pct.className = 'heditor-status__pct';
   pct.textContent = '100%';
 
-  right.append(out.el, range, into.el, pct);
+  right.append(out.el, range.el, into.el, pct);
   el.append(counts, statusText, right);
 
   return {
@@ -123,7 +123,7 @@ export function createStatusBar(
      * @param value 百分比
      */
     setZoomPct(value: number): void {
-      range.value = String(value);
+      range.setValue(value);
       pct.textContent = Math.round(value) + '%';
     },
 

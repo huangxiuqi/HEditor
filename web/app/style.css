@@ -10,6 +10,9 @@
   --hover: #eef2f8;
   --on: #dbe8fd;
   --on-line: #a8c6f6;
+  --shadow: 0 10px 30px rgba(20, 24, 30, 0.16), 0 2px 8px rgba(20, 24, 30, 0.08);
+  --scrim: rgba(18, 22, 28, 0.32);
+  --radius: 10px;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -23,6 +26,8 @@
     --hover: #242a30;
     --on: #2b3d55;
     --on-line: #3f5b80;
+    --shadow: 0 12px 32px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.3);
+    --scrim: rgba(0, 0, 0, 0.5);
   }
 }
 
@@ -177,19 +182,14 @@ body {
 
 .heditor-ribbon__choice-icon svg { width: 16px; height: 16px; display: block; }
 
-.heditor-ribbon__choice select {
-  font: inherit;
-  font-size: 12px;
-  color: var(--ink);
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  padding: 2px 3px;
+.heditor-ribbon__choice .heditor-select {
   min-width: 56px;
   height: 24px;
+  padding: 0 5px;
+  border-radius: 5px;
 }
 
-.heditor-ribbon__choice--wide select { min-width: 88px; }
+.heditor-ribbon__choice--wide .heditor-select { min-width: 88px; }
 
 /* 底部状态栏：左边一行状态，右边缩放（减 / 滑块 / 加 / 百分比）。 */
 
@@ -249,10 +249,62 @@ body {
 .heditor-status__step:hover { background: var(--hover); border-color: var(--line); }
 .heditor-status__step svg { width: 16px; height: 16px; display: block; }
 
-.heditor-status__range {
-  width: 104px;
-  accent-color: var(--accent);
+.heditor-status .heditor-slider { width: 104px; }
+
+/* 滑块：轨道 + 圆点。原生 range 的沟槽与高度跟这条状态栏对不齐，也给不出"拖动中"。 */
+
+.heditor-slider {
+  position: relative;
+  display: flex;
+  align-items: center;
+  height: 20px;
+  cursor: pointer;
+  touch-action: none;
 }
+
+.heditor-slider__track {
+  position: relative;
+  width: 100%;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--line);
+}
+
+.heditor-slider__fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.heditor-slider__thumb {
+  position: absolute;
+  top: 50%;
+  width: 14px;
+  height: 14px;
+  margin-left: -7px;
+  border: 2px solid var(--accent);
+  border-radius: 50%;
+  background: var(--panel);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  transform: translateY(-50%);
+  transition: transform 0.1s ease;
+}
+
+.heditor-slider:hover .heditor-slider__thumb,
+.heditor-slider.is-dragging .heditor-slider__thumb {
+  transform: translateY(-50%) scale(1.15);
+}
+
+.heditor-slider:focus-visible { outline: none; }
+
+.heditor-slider:focus-visible .heditor-slider__thumb {
+  box-shadow: 0 0 0 4px rgba(31, 111, 235, 0.25);
+}
+
+.heditor-slider.is-disabled { opacity: 0.45; pointer-events: none; }
 
 .heditor-status__pct {
   min-width: 38px;
@@ -268,12 +320,136 @@ body {
   z-index: 20;
   padding: 8px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--radius);
   background: var(--panel);
-  box-shadow: 0 8px 24px rgba(20, 24, 30, 0.18);
+  box-shadow: var(--shadow);
 }
 
-.heditor-popover[hidden] { display: none; }
+.heditor-popover[hidden],
+.heditor-scrim[hidden] { display: none; }
+
+/* 对话框那一档：外壳由面板自己排（标题栏贴边），所以不留内边距。 */
+.heditor-popover--dialog {
+  padding: 0;
+  overflow: hidden;
+}
+
+.heditor-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 19;
+  background: var(--scrim);
+}
+
+/* 下拉浮层：一块可搜索的候选列表。 */
+.heditor-pop {
+  padding: 0;
+  min-width: 148px;
+  max-width: 320px;
+  overflow: hidden;
+}
+
+.heditor-select__search {
+  display: block;
+  width: 100%;
+  height: 34px;
+  padding: 0 10px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+}
+
+.heditor-select__search::placeholder { color: var(--dim); }
+
+.heditor-select__list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 280px;
+  padding: 5px;
+  overflow: auto;
+}
+
+.heditor-select__item {
+  display: block;
+  flex: none;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  line-height: 20px;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.heditor-select__item:hover,
+.heditor-select__item:focus-visible { background: var(--hover); outline: none; }
+
+.heditor-select__item.is-on { background: var(--on); }
+
+.heditor-select__none {
+  padding: 8px 10px;
+  color: var(--dim);
+  font-size: 12px;
+}
+
+/* 下拉触发器：外观与输入框同一套，右侧一个小三角。 */
+.heditor-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--ink);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.heditor-select:hover { border-color: var(--on-line); }
+
+.heditor-select:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(31, 111, 235, 0.18);
+}
+
+.heditor-select[aria-expanded="true"] { border-color: var(--accent); }
+
+.heditor-select:disabled { opacity: 0.5; cursor: default; }
+
+.heditor-select__text {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.heditor-select__caret {
+  flex: none;
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid var(--dim);
+}
 
 /* 表格尺寸网格：8x8 的方格，指针扫过时前 N 格长亮。 */
 
@@ -431,26 +607,88 @@ body {
 .heditor-props {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  width: 330px;
+  width: 384px;
+  max-height: min(74vh, 660px);
+  color: var(--ink);
 }
 
-.heditor-props__head { font-size: 13px; font-weight: 600; color: var(--ink); }
+/* 标题栏：兼拖动把手，光标与高亮都按"可拖"给。 */
+.heditor-props__bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  height: 38px;
+  padding: 0 8px 0 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--hover);
+  border-radius: var(--radius) var(--radius) 0 0;
+  user-select: none;
+}
 
-.heditor-props__body { display: flex; flex-direction: column; gap: 6px; }
+.heditor-props__bar.is-grab { cursor: grab; }
+.heditor-props__bar.is-grabbing { cursor: grabbing; }
+
+.heditor-props__title {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.heditor-props__close {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dim);
+  font-size: 17px;
+  line-height: 22px;
+  text-align: center;
+  cursor: pointer;
+}
+
+.heditor-props__close:hover { background: var(--line); color: var(--ink); }
+
+.heditor-props__body {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  flex: 1;
+  min-height: 0;
+  padding: 14px;
+  overflow: auto;
+}
 
 .heditor-props__group {
-  margin-top: 2px;
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
   color: var(--dim);
   font-size: 11px;
+  letter-spacing: 0.02em;
 }
 
-.heditor-props__row { display: flex; align-items: center; gap: 8px; }
+.heditor-props__group:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
+
+.heditor-props__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 28px;
+}
 
 .heditor-props__row--wide { flex-wrap: wrap; }
 
 .heditor-props__label {
-  flex: 0 0 96px;
+  flex: 0 0 92px;
   color: var(--dim);
   font-size: 12px;
 }
@@ -460,43 +698,96 @@ body {
 .heditor-props__lines {
   flex: 1;
   min-width: 0;
-  padding: 3px 6px;
+  height: 28px;
+  padding: 0 8px;
   border: 1px solid var(--line);
-  border-radius: 5px;
+  border-radius: 6px;
   background: var(--panel);
   color: var(--ink);
   font: inherit;
   font-size: 12px;
 }
 
+.heditor-props__input:hover,
+.heditor-props__lines:hover { border-color: var(--on-line); }
+
+.heditor-props__input:focus,
+.heditor-props__select:focus,
+.heditor-props__lines:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(31, 111, 235, 0.18);
+}
+
+.heditor-props__input:disabled,
+.heditor-props__lines:disabled {
+  color: var(--dim);
+  background: var(--bg);
+  cursor: not-allowed;
+}
+
+/* 原生日期控件的日历图标太黑太重，压到与其余图标同一条线上。 */
+.heditor-props__input[type="date"]::-webkit-calendar-picker-indicator,
+.heditor-props__input[type="datetime-local"]::-webkit-calendar-picker-indicator,
+.heditor-props__input[type="time"]::-webkit-calendar-picker-indicator {
+  opacity: 0.45;
+  cursor: pointer;
+}
+
+.heditor-props__input[type="date"]::-webkit-calendar-picker-indicator:hover,
+.heditor-props__input[type="datetime-local"]::-webkit-calendar-picker-indicator:hover,
+.heditor-props__input[type="time"]::-webkit-calendar-picker-indicator:hover { opacity: 0.9; }
+
 .heditor-props__lines {
   width: 100%;
+  height: auto;
+  min-height: 76px;
+  padding: 6px 8px;
+  line-height: 1.5;
   resize: vertical;
   font-family: inherit;
 }
 
-.heditor-props__check { width: 14px; height: 14px; }
+.heditor-props__check { width: 15px; height: 15px; accent-color: var(--accent); }
 
 .heditor-props__color {
-  width: 32px;
-  height: 22px;
-  padding: 0;
+  width: 42px;
+  height: 26px;
+  padding: 2px;
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: 6px;
   background: var(--panel);
+  cursor: pointer;
 }
 
 .heditor-props__unit { color: var(--dim); font-size: 11px; }
 
-.heditor-props__hint { flex: 1 0 100%; color: var(--dim); font-size: 11px; }
+.heditor-props__hint {
+  flex: 1 0 100%;
+  margin-top: -2px;
+  color: var(--dim);
+  font-size: 11px;
+}
 
-.heditor-props__foot { display: flex; justify-content: flex-end; gap: 8px; }
+.heditor-props__row .heditor-select { flex: 1; }
+
+.heditor-props__foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  flex: none;
+  padding: 10px 14px;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+  border-radius: 0 0 var(--radius) var(--radius);
+}
 
 .heditor-props__apply,
 .heditor-props__cancel {
-  padding: 4px 12px;
+  height: 28px;
+  padding: 0 14px;
   border: 1px solid var(--line);
-  border-radius: 5px;
+  border-radius: 6px;
   background: var(--panel);
   color: var(--ink);
   font: inherit;
@@ -504,8 +795,19 @@ body {
   cursor: pointer;
 }
 
+.heditor-props__cancel:hover { border-color: var(--on-line); background: var(--hover); }
+
 .heditor-props__apply {
   border-color: var(--accent);
   background: var(--accent);
   color: #fff;
+  font-weight: 500;
+}
+
+.heditor-props__apply:hover { filter: brightness(1.06); }
+
+.heditor-props__apply:focus-visible,
+.heditor-props__cancel:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(31, 111, 235, 0.25);
 }

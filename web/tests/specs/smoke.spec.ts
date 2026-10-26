@@ -9,6 +9,7 @@
 //   契约的方法顺序调一遍。两边都只看可读结果（文本、格式、配置、几何），不比像素。
 import { check } from '../support/check';
 import { test } from '../support/probe';
+import { SELECT_HELPERS } from '../support/readings';
 
 const D = 'window.__demo';
 
@@ -23,13 +24,11 @@ test.describe('工具栏', () => {
   test('每个按钮点一遍：都要有反应', async ({ open }) => {
     const p = await open('index.html', { query: { debug: '1' } });
     const r = await p.ev<Bars>(`
+      ${SELECT_HELPERS}
       const e = ${D};
       const btn = (act) => document.querySelector('.heditor-ribbon__button[data-act="' + act + '"]');
-      const pick = (act, v) => {
-        const sel = document.querySelector('select[data-act="' + act + '"]');
-        sel.value = v;
-        sel.dispatchEvent(new Event('change', { bubbles: true }));
-      };
+      // 下拉不是原生 select：PICK 点触发器开浮层，再点那一项（前言里那两个工具）。
+      const pick = (act, v) => PICK(act, v);
       // 等效果出现（有上限）：界面动作是异步的，直接读会读到上一拍的状态。
       const until = async (fn, ms = 1500) => {
         const t0 = Date.now();
@@ -205,12 +204,9 @@ test.describe('工具栏', () => {
       const w0 = e.geometry().page.w;
       btn('page-setup').click();
       await new Promise((r) => setTimeout(r, 30));
-      const paper = document.querySelector('select[data-act="prop-paper"]');
+      const paper = document.querySelector('.heditor-select[data-act="prop-paper"]');
       out.pagePanel = !!paper;
-      if (paper) {
-        paper.value = 'A3';
-        paper.dispatchEvent(new Event('change', { bubbles: true }));
-      }
+      if (paper) pick('prop-paper', 'A3');
       const apply = document.querySelector('[data-act="prop-apply"]');
       if (apply) apply.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
       out.pagePaper = await until(() => e.geometry().page.w > w0 + 100);
@@ -218,13 +214,12 @@ test.describe('工具栏', () => {
       // 自定义宽高：选"自定义"、填宽高、应用 —— 页宽要按填的那个数走。
       btn('page-setup').click();
       await new Promise((r) => setTimeout(r, 30));
-      const paper2 = document.querySelector('select[data-act="prop-paper"]');
+      const paper2 = document.querySelector('.heditor-select[data-act="prop-paper"]');
       const wIn = document.querySelector('input[data-act="prop-width"]');
       const hIn = document.querySelector('input[data-act="prop-height"]');
       out.pageCustomPanel = !!paper2 && !!wIn && !!hIn;
       if (paper2 && wIn && hIn) {
-        paper2.value = 'Custom';
-        paper2.dispatchEvent(new Event('change', { bubbles: true }));
+        pick('prop-paper', 'Custom');
         // 20 × 30 厘米 = 566.9 × 850.4 磅
         wIn.value = '20';
         wIn.dispatchEvent(new Event('input', { bubbles: true }));

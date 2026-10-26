@@ -119,3 +119,32 @@ export const PRELUDE = `
     return D.editStats();
   };
 `;
+
+/**
+ * 下拉的页面内工具：p.ev 不拼 PRELUDE，所以要用它们的用例自己拼进脚本。
+ *
+ * 下拉不是原生 select —— 值是触发器上的字，选项在浮层里，两项都要自己点。
+ */
+export const SELECT_HELPERS = `
+  const SELECTED = (act) => {
+    const t = document.querySelector(
+      '.heditor-select[data-act="' + act + '"] .heditor-select__text',
+    );
+    return t ? t.textContent : '';
+  };
+  const SELECT_VALUE = (act) => {
+    const el = document.querySelector('.heditor-select[data-act="' + act + '"]');
+    return el ? (el.dataset.value || '') : '';
+  };
+  const PICK = (act, value) => {
+    const trig = document.querySelector('.heditor-select[data-act="' + act + '"]');
+    if (!trig) throw new Error('没有这个下拉：' + act);
+    trig.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0 }));
+    const item = document.querySelector(
+      '.heditor-select__item[data-value="' + String(value).replace(/"/g, '\\"') + '"]',
+    );
+    if (!item) throw new Error('下拉里没有这一项：' + act + ' = ' + value);
+    item.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0 }));
+    return true;
+  };
+`;

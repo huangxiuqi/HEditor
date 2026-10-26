@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto';
 
 import { check } from '../support/check';
 import { test } from '../support/probe';
+import { SELECT_HELPERS } from '../support/readings';
 
 // 第一节的读数。
 type Globals = {
@@ -74,8 +75,9 @@ test.describe('示例页的公开面', () => {
     //   字体字号读的是"实际生效的那一份"，否则正文一个字没改过时控件显示空白。
     const p = await open('index.html', { viewport: { width: 1280, height: 900 } });
     const r = await p.ev<any>(`
+      ${SELECT_HELPERS}
       const e = window.__demo;
-      const pick = (act) => document.querySelector('select[data-act="' + act + '"]');
+      const pick = (act) => document.querySelector('.heditor-select[data-act="' + act + '"]');
       const settle = async (fn) => {
         const t0 = performance.now();
         while (performance.now() - t0 < 3000) {
@@ -90,15 +92,16 @@ test.describe('示例页的公开面', () => {
       const eff = await e.formatAt({ effective: true });
       const size = pick('size');
       const font = pick('font');
-      const shown = await settle(() => size.value !== '' && font.value !== '');
-      const before = { size: size.value, font: font.value,
-                       sizeText: size.selectedOptions[0]?.textContent ?? '',
-                       fontText: font.selectedOptions[0]?.textContent ?? '' };
-      // 点一下下拉框：焦点必须还留在它身上。
+      const shown = await settle(() => SELECTED('size') !== '' && SELECTED('font') !== '');
+      const before = { size: SELECT_VALUE('size'), font: SELECT_VALUE('font'),
+                       sizeText: SELECTED('size'), fontText: SELECTED('font') };
+      // 点一下下拉框：焦点要留在下拉这一套里（触发器或它弹出的候选），不能被外壳抢回编辑器。
       font.focus();
       const hadFocus = document.activeElement === font;
-      font.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-      const keptFocus = document.activeElement === font;
+      font.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0 }));
+      const pop = document.querySelector('.heditor-pop');
+      const keptFocus = document.activeElement === font ||
+        (pop !== null && pop.contains(document.activeElement));
       return { eff, shown, before, hadFocus, keptFocus,
                focusTag: document.activeElement?.tagName ?? '' };`);
     check('实际生效的格式里有字体与字号',
@@ -159,13 +162,12 @@ test.describe('示例页的公开面', () => {
 
     // 走工具栏那一条：改下拉框 → change → configure → 外壳重读回显。
     const after = await p.ev<any>(`
+      ${SELECT_HELPERS}
       const e = window.__demo;
-      const sel = document.querySelector('select[data-act="marks"]');
-      sel.value = 'paragraph';
-      sel.dispatchEvent(new Event('change', { bubbles: true }));
+      PICK('marks', 'paragraph');
       await new Promise((r) => setTimeout(r, 300));
       return { mode: e.config().showMarks, paras: e.paragraphs().length,
-               rect: JSON.stringify(e.caret().rect), toolbar: sel.value };`);
+               rect: JSON.stringify(e.caret().rect), toolbar: SELECT_VALUE('marks') };`);
 
     check('默认档是"只显示段落标记"', state.mode === 'paragraph', String(state.mode));
     check('★ 关掉标记：画面真的变了', withPara !== off, '两拍一模一样');

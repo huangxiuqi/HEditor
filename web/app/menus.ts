@@ -83,19 +83,49 @@ export function createMenus(host: MenusHost): Menus {
   const menu = createContextMenu(() => host.focusEditor());
   // 属性面板与工具条那些面板共用同一块浮层：定位与关闭时机只有一份实现。
   const panel = createLayer('heditor-popover', () => host.focusEditor());
+  // 对话框另起一块：居中、带遮罩、滚动不关 —— 与"贴着指针/按钮"的时机不是一回事。
+  const dialog = createLayer('heditor-popover heditor-popover--dialog', () => host.focusEditor());
 
   /**
-   * 在指针处开一块面板。
+   * 关掉所有面板（两种形态都算）。
+   */
+  const closePanels = (): void => {
+    panel.close();
+    dialog.close();
+  };
+
+  /**
+   * 在指针处开一块面板（小浮层：表格尺寸这种"点一下就收"的）。
    * @param content 面板内容
    * @param at 客户端坐标
    */
   const openPanel = (content: Component, at: { x: number; y: number }): void => {
+    dialog.close();
     panel.el.textContent = '';
     panel.el.appendChild(content.el);
     panel.openAtPoint(at.x, at.y);
     content.update();
-    // 键盘直接落在第一格上：属性面板是"打开就要改"的东西。
-    const first = content.el.querySelector('input, select, textarea');
+    // 键盘直接落在第一格上：这类面板是"打开就要改"的东西。
+    const first = content.el.querySelector('input, textarea');
+    if (first instanceof HTMLElement) first.focus({ preventScroll: true });
+  };
+
+  /**
+   * 居中开一块对话框（属性面板那几种）。
+   *
+   * 标题栏兼拖动把手：位置在打开时算一次，之后归用户 —— 拖到屏幕边上会被夹回来，
+   *   但不会被拉回中间。
+   * @param content 面板内容
+   */
+  const openDialog = (content: Component): void => {
+    panel.close();
+    dialog.el.textContent = '';
+    dialog.el.appendChild(content.el);
+    dialog.openCentered({ scrim: true });
+    content.update();
+    const bar = content.el.querySelector('.heditor-props__bar');
+    if (bar instanceof HTMLElement) dialog.dragBy(bar);
+    const first = content.el.querySelector('input:not([type=checkbox]), textarea');
     if (first instanceof HTMLElement) first.focus({ preventScroll: true });
   };
 
@@ -175,9 +205,8 @@ export function createMenus(host: MenusHost): Menus {
         kind: 'action',
         label: '表格属性…',
         run: () =>
-          openPanel(
-            createTableProps({ state: st, editor, dismiss: () => panel.close(), say: host.say }),
-            at,
+          openDialog(
+            createTableProps({ state: st, editor, dismiss: closePanels, say: host.say }),
           ),
       },
     ];
@@ -236,9 +265,8 @@ export function createMenus(host: MenusHost): Menus {
       kind: 'action',
       label: '属性…',
       run: () =>
-        openPanel(
-          createControlProps({ control: c, editor, dismiss: () => panel.close(), say: host.say }),
-          at,
+        openDialog(
+          createControlProps({ control: c, editor, dismiss: closePanels, say: host.say }),
         ),
     });
     entries.push({ kind: 'separator' });
@@ -279,7 +307,7 @@ export function createMenus(host: MenusHost): Menus {
         kind: 'action',
         label: '大小…',
         run: () =>
-          openPanel(
+          openDialog(
             createPropsPanel({
               title: '图片大小',
               fields: [
@@ -311,9 +339,8 @@ export function createMenus(host: MenusHost): Menus {
                   .resizeImage(index, w > 0 ? w : 1, h > 0 ? h : 1)
                   .then((done) => host.say(done ? '图片大小已改' : '改尺寸被拒'));
               },
-              dismiss: () => panel.close(),
+              dismiss: closePanels,
             }),
-            at,
           ),
       },
     ];

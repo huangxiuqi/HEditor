@@ -32,7 +32,10 @@ export function createMenu(item: Menu): Component {
     // 面板每次打开都新建一份：尺寸选择器的状态（高亮、标题行开关）不该跨开关累积。
     const panel = item.panel(() => pop.close());
     pop.el.appendChild(panel.el);
-    pop.open(btn.el);
+    // 表单类面板（有标题栏的那种）居中开，其余（尺寸选择器）仍贴着按钮。
+    const bar = panel.el.querySelector('.heditor-props__bar');
+    if (bar instanceof HTMLElement) pop.openCentered(bar);
+    else pop.open(btn.el);
     panel.update();
   });
 

@@ -21,6 +21,12 @@ export interface Popover {
   open(anchor: HTMLElement): void;
 
   /**
+   * 居中打开（表单类面板用这一档：标题栏拖得动、带遮罩、滚正文时不跑）。
+   * @param handle 拖动把手（面板的标题栏）
+   */
+  openCentered(handle?: HTMLElement): void;
+
+  /**
    * 关掉（幂等）。
    */
   close(): void;
@@ -41,7 +47,16 @@ export function createPopover(onClose?: () => void): Popover {
   const layer = createLayer('heditor-popover', onClose);
   return {
     el: layer.el,
-    open: (anchor) => layer.openAt(anchor),
+    open: (anchor) => {
+      layer.el.classList.remove('heditor-popover--dialog');
+      layer.openAt(anchor);
+    },
+    openCentered: (handle) => {
+      // 内边距归面板自己排（标题栏要贴边），所以换一个修饰类。
+      layer.el.classList.add('heditor-popover--dialog');
+      layer.openCentered({ scrim: true });
+      if (handle) layer.dragBy(handle);
+    },
     close: () => layer.close(),
     isOpen: () => layer.isOpen(),
   };

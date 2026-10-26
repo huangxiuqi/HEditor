@@ -7,6 +7,11 @@
 // 定位用 fixed + 视口坐标：编辑器在页面流里，absolute 会被滚动容器裁剪；fixed 之下
 //   开一次算一次，滚动与改窗口大小时直接关掉（重算一次位置不如关掉诚实）。
 // 夹取到视口：右键菜单点在窗口右下角时，不夹的话它整个在窗口外 —— 画面上就是"没反应"。
+//
+// 两种形态，时机不同：
+//   锚定（openAt / openAtPoint）—— 跟着某个东西走。锚点滚出视野就没意义了，所以滚动即关。
+//   对话框（openCentered）—— 居中的一块，跟滚动无关。滚正文时它还该在，resize 时重新居中
+//     而不是关掉；拖过之后位置归用户，只夹回视口。
 
 /**
  * 一块浮层。
@@ -31,6 +36,23 @@ export interface Layer {
   openAtPoint(x: number, y: number): void;
 
   /**
+   * 居中打开（对话框形态）。
+   *
+   * 与锚定的两块差别：滚动不关、窗口变化时重新居中而不是关掉。
+   * @param opts scrim 为真时铺一层遮罩，点遮罩关闭
+   */
+  openCentered(opts?: { scrim?: boolean }): void;
+
+  /**
+   * 让一个子元素当拖动把手（通常是标题栏）。
+   *
+   * 只在居中形态下有意义 —— 锚定的浮层位置由锚点决定，拖动它没有语义。
+   *   每次打开换内容时把手元素也跟着换，所以这一项要在开之前调。
+   * @param handle 把手元素
+   */
+  dragBy(handle: HTMLElement): void;
+
+  /**
    * 关掉（幂等）。
    */
   close(): void;
@@ -48,6 +70,14 @@ export interface Layer {
 const kEdgeGap = 8;
 
 /**
+ * 此刻开着的那些浮层。
+ *
+ * 用来判"点外面"：落在另一块浮层里的按下手势，是那一块的内部操作，不是"点到外面"。
+ *   没有这一条时，面板里的下拉一打开就会把面板自己关掉 —— 目标在对话框之外，判成外点。
+ */
+const openedLayers = new Set<HTMLElement>();
+
+/**
  * 造一块浮层。
  * @param className 面板的 class（样式与判据都按它定位）
  * @param onClose 关掉之后的回调（清理内容用）
@@ -61,6 +91,40 @@ export function createLayer(className: string, onClose?: () => void): Layer {
 
   let opened = false;
   let anchorEl: HTMLElement | null = null;
+  // 居中形态：滚动不关、resize 重新居中。
+  let centered = false;
+  // 拖过之后位置归用户，resize 时只夹回视口，不再拉回中间。
+  let dragged = false;
+
+  /**
+   * 遮罩（第一次要的时候才建）。挂在 body 上、比面板低一层。
+   */
+  let scrim: HTMLElement | null = null;
+
+  /**
+   * 铺开遮罩并接管点击。
+   */
+  const showScrim = (): void => {
+    if (scrim === null) {
+      scrim = document.createElement('div');
+      scrim.className = 'heditor-scrim';
+      scrim.hidden = true;
+      document.body.appendChild(scrim);
+      // 点遮罩等于"点面板外面"：先关，再让这一下不再落到正文上。
+      scrim.addEventListener('pointerdown', (ev) => {
+        ev.preventDefault();
+        close();
+      });
+    }
+    scrim.hidden = false;
+  };
+
+  /**
+   * 收起遮罩。
+   */
+  const hideScrim = (): void => {
+    if (scrim !== null) scrim.hidden = true;
+  };
 
   /**
    * 点在面板与锚点之外。
@@ -70,7 +134,12 @@ export function createLayer(className: string, onClose?: () => void): Layer {
   const outside = (ev: Event): boolean => {
     const t = ev.target instanceof Node ? ev.target : null;
     if (!t) return true;
-    return !el.contains(t) && !(anchorEl && anchorEl.contains(t));
+    if (el.contains(t)) return false;
+    if (anchorEl !== null && anchorEl.contains(t)) return false;
+    for (const other of openedLayers) {
+      if (other !== el && other.contains(t)) return false;
+    }
+    return true;
   };
 
   /**
@@ -79,13 +148,19 @@ export function createLayer(className: string, onClose?: () => void): Layer {
   const close = (): void => {
     if (!opened) return;
     opened = false;
+    centered = false;
+    dragged = false;
     el.hidden = true;
     el.textContent = '';
+    el.style.left = '';
+    el.style.top = '';
     anchorEl = null;
+    openedLayers.delete(el);
+    hideScrim();
     document.removeEventListener('pointerdown', onPointer, true);
     document.removeEventListener('keydown', onKey, true);
-    window.removeEventListener('resize', close);
-    window.removeEventListener('scroll', close, true);
+    window.removeEventListener('resize', onResize);
+    window.removeEventListener('scroll', onScroll, true);
     if (onClose) onClose();
   };
 
@@ -110,6 +185,20 @@ export function createLayer(className: string, onClose?: () => void): Layer {
   };
 
   /**
+   * 页面滚了。
+   *
+   * 锚定的浮层跟着锚点走，锚点滚出视野就没意义了，所以滚一下就关。但浮层自己内部的滚动
+   *   不算：候选列表本来就是可滚的，滚它一下把下拉关掉等于选项多的下拉没法用。
+   *   scroll 事件不冒泡，可在 window 上捕获阶段能收到任意元素的滚动 —— 所以这里要认目标。
+   * @param ev 滚动事件（目标是滚动的那个元素）
+   */
+  const onScroll = (ev: Event): void => {
+    const t = ev.target;
+    if (t instanceof Node && el.contains(t)) return;
+    close();
+  };
+
+  /**
    * 把面板夹进视口。先显示再量：隐藏元素的尺寸是 0，按它算会把面板推到屏幕外。
    * @param left 期望的左边（客户端坐标）
    * @param top 期望的上边（客户端坐标）
@@ -124,6 +213,32 @@ export function createLayer(className: string, onClose?: () => void): Layer {
   };
 
   /**
+   * 摆到视口正中（略偏上：重心在上三分之一处比机械居中稳）。
+   */
+  const center = (): void => {
+    const w = el.offsetWidth;
+    const h = el.offsetHeight;
+    place((window.innerWidth - w) / 2, (window.innerHeight - h) / 3);
+  };
+
+  /**
+   * 窗口尺寸变了。
+   *
+   * 锚定的浮层跟着锚点走，锚点位置已经算不清了，关掉最诚实；居中的重新摆。
+   */
+  const onResize = (): void => {
+    if (!centered) {
+      close();
+      return;
+    }
+    if (dragged) {
+      place(el.offsetLeft, el.offsetTop);
+      return;
+    }
+    center();
+  };
+
+  /**
    * 打开之后的公共收尾：挂监听。
    * @param anchor 锚点（没有锚点的按点定位）
    */
@@ -131,10 +246,11 @@ export function createLayer(className: string, onClose?: () => void): Layer {
     opened = true;
     anchorEl = anchor;
     el.hidden = false;
+    openedLayers.add(el);
     document.addEventListener('pointerdown', onPointer, true);
     document.addEventListener('keydown', onKey, true);
-    window.addEventListener('resize', close);
-    window.addEventListener('scroll', close, true);
+    window.addEventListener('resize', onResize);
+    window.addEventListener('scroll', onScroll, true);
   };
 
   return {
@@ -152,7 +268,7 @@ export function createLayer(className: string, onClose?: () => void): Layer {
       }
       arm(anchor);
       const r = anchor.getBoundingClientRect();
-      const below = r.bottom + 2;
+      const below = r.bottom + kEdgeGap / 2;
       const fits = below + el.offsetHeight + kEdgeGap <= window.innerHeight;
       place(r.left, fits ? below : r.top - el.offsetHeight - 2);
     },
@@ -166,6 +282,55 @@ export function createLayer(className: string, onClose?: () => void): Layer {
       if (opened) close();
       arm(null);
       place(x, y);
+    },
+
+    /**
+     * 居中打开：滚动不关（滚正文时对话框还该在），窗口变化时重新居中。
+     * @param opts scrim 为真时铺遮罩
+     */
+    openCentered(opts?: { scrim?: boolean }): void {
+      if (opened) close();
+      arm(null);
+      centered = true;
+      // 居中形态不跟滚动走：把"滚了就关"这条摘掉，其余时机照旧。
+      window.removeEventListener('scroll', onScroll, true);
+      if (opts && opts.scrim) showScrim();
+      center();
+    },
+
+    /**
+     * 让一个子元素当拖动把手。
+     * @param handle 把手元素
+     */
+    dragBy(handle: HTMLElement): void {
+      handle.classList.add('is-grab');
+      handle.addEventListener('pointerdown', (ev) => {
+        if (ev.button !== 0) return;
+        // 把手上的按钮（关闭）是动作，不是拖动起点。
+        const t = ev.target instanceof Element ? ev.target : null;
+        if (t !== null && t.closest('button') !== null) return;
+        ev.preventDefault();
+        dragged = true;
+        const fromLeft = el.offsetLeft;
+        const fromTop = el.offsetTop;
+        const fromX = ev.clientX;
+        const fromY = ev.clientY;
+        handle.setPointerCapture(ev.pointerId);
+        handle.classList.add('is-grabbing');
+        const move = (e: PointerEvent): void => {
+          place(fromLeft + e.clientX - fromX, fromTop + e.clientY - fromY);
+        };
+        const up = (e: PointerEvent): void => {
+          if (handle.hasPointerCapture(e.pointerId)) handle.releasePointerCapture(e.pointerId);
+          handle.removeEventListener('pointermove', move);
+          handle.removeEventListener('pointerup', up);
+          handle.removeEventListener('pointercancel', up);
+          handle.classList.remove('is-grabbing');
+        };
+        handle.addEventListener('pointermove', move);
+        handle.addEventListener('pointerup', up);
+        handle.addEventListener('pointercancel', up);
+      });
     },
 
     close,

@@ -17,6 +17,24 @@ const UNTIL = (expr: string, ms = 1000): string =>
      await new Promise((r) => setTimeout(r, 25));
    }`;
 
+/**
+ * 在一个自定义下拉里选一项。
+ *
+ * 面板里的下拉不是原生 <select>（要搜索框与统一外观），所以不能 selectOption：
+ *   点触发器开浮层，再点那一项。
+ * @param page 页面
+ * @param act 触发器的 data-act
+ * @param value 要选的值
+ */
+const pick = async (
+  page: { locator(sel: string): { click(): Promise<void> } },
+  act: string,
+  value: string,
+): Promise<void> => {
+  await page.locator(`[data-act="${act}"]`).click();
+  await page.locator(`.heditor-select__item[data-value="${value}"]`).click();
+};
+
 test.describe('属性面板', () => {
   test('表格属性：面板字段来自库，改一层两项一起落，一步撤销回到原样', async ({ open }) => {
     const p = await open('index.html', { query: { debug: '1' } });
@@ -53,7 +71,7 @@ test.describe('属性面板', () => {
       await panel.locator('[data-act="prop-rowHeight"]').inputValue());
 
     await panel.locator('[data-act="prop-rowHeight"]').fill('42');
-    await panel.locator('[data-act="prop-rowRule"]').selectOption('exact');
+    await pick(p.page, 'prop-rowRule', 'exact');
     await panel.locator('[data-act="prop-apply"]').click();
 
     const st = await p.read<any>(`
@@ -169,7 +187,7 @@ test.describe('属性面板', () => {
     const width = panel.locator('[data-act="prop-width"]');
     check('★ 固定纸张下宽高是灰的（尺寸是规格本身的一部分）', await width.isDisabled(), 'enabled');
 
-    await panel.locator('[data-act="prop-paper"]').selectOption('Custom');
+    await pick(p.page, 'prop-paper', 'Custom');
     check('★ 选自定义之后宽高可以改了', !(await width.isDisabled()), 'disabled');
     check('宽是当前纸张的尺寸（A4 21 厘米）',
       (await width.inputValue()) === '21', await width.inputValue());

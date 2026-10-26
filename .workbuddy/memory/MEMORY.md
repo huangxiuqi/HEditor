@@ -63,3 +63,9 @@
 - 日期值走 `describeControl` 的 `kind: 'datetime'` 字段：`inputType`（date/time/datetime-local）
   与 `step` 由精度算，`value` **已按类型裁好长度**（长度不对浏览器把 value 当空串）；宿主只建
   input。`applyControlForm` 收到片段就补成完整 ISO（日期型保留原时间，到分的补 `:00`）。
+- 浮层两档：`openAt/openAtPoint`（锚定，滚动即关）与 `openCentered({scrim})`（对话框，滚动不关、
+  resize 重新居中），`dragBy(handle)` 让标题栏拖动、拖过之后位置归用户。**浮层之间互不算"外面"**
+  （模块级 `openedLayers`）—— 少了这条，面板里的下拉一开就把面板自己关掉。
+- 原生 `select` / `input[type=range]` 全换成 `ui/select.ts`（带搜索、键盘、`data-value`）与
+  `ui/slider.ts`。判据不能再 `selectOption`：用 `PICK(act, value)` / `SELECTED(act)` /
+  `SELECT_VALUE(act)`；`p.ev` 不拼 PRELUDE，所以要用它们的用例得拼 `SELECT_HELPERS`。

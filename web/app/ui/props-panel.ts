@@ -6,6 +6,7 @@
 // 取值与下发分开：面板只负责"把字段变成控件、把控件读成一份值"，怎么落到文档由调用方给的
 //   apply 决定（通常是 applyControlForm / applyTableForm，只提交真的变了的那些项）。
 import type { FormField, FormValues } from '../../src/index';
+import { createSelect } from './select';
 
 /**
  * 面板参数。
@@ -55,6 +56,11 @@ export interface PropsPanel {
   el: HTMLElement;
 
   /**
+   * 标题栏（拖拽把手交给浮层用）。
+   */
+  bar: HTMLElement;
+
+  /**
    * 重读一遍值（面板每次打开都是新的一份，这里只为与其它组件同形）。
    * @param values 新的值；不给就保持现状
    */
@@ -83,10 +89,26 @@ export function createPropsPanel(o: PropsPanelOptions): PropsPanel {
   const el = document.createElement('div');
   el.className = 'heditor-props';
 
-  const head = document.createElement('div');
-  head.className = 'heditor-props__head';
-  head.textContent = o.title;
-  el.appendChild(head);
+  // 标题栏兼拖动把手：整块面板靠它挪位置（定位那条线在 layer 的 dragBy 里）。
+  const bar = document.createElement('div');
+  bar.className = 'heditor-props__bar';
+  const title = document.createElement('span');
+  title.className = 'heditor-props__title';
+  title.textContent = o.title;
+  const shut = document.createElement('button');
+  shut.type = 'button';
+  shut.className = 'heditor-props__close';
+  shut.dataset.act = 'prop-close';
+  shut.title = '关闭';
+  shut.setAttribute('aria-label', '关闭');
+  shut.textContent = '\u00d7';
+  shut.addEventListener('pointerdown', (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    o.dismiss();
+  });
+  bar.append(title, shut);
+  el.appendChild(bar);
 
   const body = document.createElement('div');
   body.className = 'heditor-props__body';
@@ -105,17 +127,19 @@ export function createPropsPanel(o: PropsPanelOptions): PropsPanel {
   /**
    * 每个字段的控件（disable 用）。
    */
-  const controls = new Map<string, HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>();
+  const controls = new Map<string, HTMLInputElement | HTMLTextAreaElement>();
+
+  /**
+   * 自定义控件的置灰入口：它们不是表单元素，没有 disabled 这个属性可设。
+   */
+  const customs = new Map<string, (off: boolean) => void>();
 
   /**
    * 记下这个字段的控件，并把"值变了"转给宿主。
    * @param key 字段键
    * @param control 控件元素
    */
-  const arm = (
-    key: string,
-    control: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement,
-  ): void => {
+  const arm = (key: string, control: HTMLInputElement | HTMLTextAreaElement): void => {
     controls.set(key, control);
     const fire = (): void => {
       if (o.onChange) o.onChange(key, values());
@@ -169,23 +193,23 @@ export function createPropsPanel(o: PropsPanelOptions): PropsPanel {
         box.checked = typeof next === 'boolean' ? next : box.checked;
       });
     } else if (f.kind === 'select') {
-      const sel = document.createElement('select');
-      sel.className = 'heditor-props__select';
-      sel.disabled = !!f.disabled;
-      sel.dataset.act = `prop-${f.key}`;
-      for (const opt of f.options ?? []) {
-        const item = document.createElement('option');
-        item.value = opt.value;
-        item.textContent = opt.text;
-        sel.appendChild(item);
-      }
-      sel.value = String(f.value ?? '');
-      row.appendChild(sel);
-      arm(f.key, sel);
-      readers.set(f.key, () => sel.value);
+      const sel = createSelect({
+        options: (f.options ?? []).map((x) => ({ value: x.value, text: x.text })),
+        value: String(f.value ?? ''),
+        act: `prop-${f.key}`,
+        title: f.label,
+        pick: () => {
+          // 选中就算一次改动：条件字段（纸张 → 宽高）靠它开合。
+          if (o.onChange) o.onChange(f.key, values());
+        },
+      });
+      sel.setDisabled(!!f.disabled);
+      row.appendChild(sel.el);
+      customs.set(f.key, (off) => sel.setDisabled(off));
+      readers.set(f.key, () => sel.value());
       writers.set(f.key, (v) => {
         const next = v[f.key];
-        if (typeof next === 'string' || typeof next === 'number') sel.value = String(next);
+        if (typeof next === 'string' || typeof next === 'number') sel.setValue(String(next));
       });
     } else if (f.kind === 'number') {
       const input = document.createElement('input');
@@ -318,6 +342,7 @@ export function createPropsPanel(o: PropsPanelOptions): PropsPanel {
 
   return {
     el,
+    bar,
     update(next?: FormValues): void {
       if (!next) return;
       for (const [key, write] of writers) write(next);
@@ -326,6 +351,8 @@ export function createPropsPanel(o: PropsPanelOptions): PropsPanel {
     disable(key: string, off: boolean): void {
       const c = controls.get(key);
       if (c) c.disabled = off;
+      const custom = customs.get(key);
+      if (custom) custom(off);
     },
   };
 }

@@ -4,6 +4,8 @@
 //   types        描述层（按钮、下拉框、组、页签、组件接口）
 //   icons        图标（web/app/icons 下的 .svg 按原文读进来）
 //   button       按钮
+//   select       下拉的浮层与触发器（带搜索；choice 与属性面板共用）
+//   slider       滑块（状态栏缩放用）
 //   choice       下拉框
 //   grid-picker  表格尺寸的网格选择器
 //   page-setup   页面设置（纸张、方向、四边页边距）
@@ -28,5 +30,7 @@ export { createGridPicker } from './grid-picker';
 export { createLayer, type Layer } from './layer';
 export { createPageSetup } from './page-setup';
 export { createPropsPanel, type PropsPanel, type PropsPanelOptions } from './props-panel';
+export { createSelect, selectOptions, type SelectOption } from './select';
+export { createSlider } from './slider';
 export { createTableProps } from './table-props';
 export type { Button, Choice, Chrome, Component, Group, Item, Menu, Stack, Tab } from './types';
