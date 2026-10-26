@@ -397,9 +397,10 @@ private:
             // 身份而不是序号，于是排版与命中测试拿到的句柄在重排之后仍指同一个控件。
             const int owner = static_cast<int>(n->id);
             const bool ro = n->control.readonly;
-            // 边界的内容指纹带外观摘要：改记号色 / 边框粗细时位置一个都不动，行指纹
-            //   只能靠它判"这一段要重画"（与投影入口同一个函数，别各写一份）。
-            const uint64_t look = controlAppearanceDigest(n->control.appearance);
+            // 边界的内容指纹带外观摘要与值：改记号色 / 边框粗细时位置一个都不动，勾选状态
+            //   变化时字形也不动（两枚码点成形后是同一枚方框）—— 行指纹只能靠它判"这一段
+            //   要重画"（与投影入口同一个函数，别各写一份）。
+            const uint64_t look = controlPaintDigest(n->control);
             if (!flagged) {
                 noteFirst(n->id);
                 InlineObject o;

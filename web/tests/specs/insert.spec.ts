@@ -152,6 +152,70 @@ test.describe('插入图片', () => {
     check('★ 撤销回到改尺寸之前', Math.abs(r.afterUndo.w - r.width0) < 0.01,
           r.afterUndo?.w + ' / 期望 ' + r.width0);
   });
+
+  test('拖右中把手：拖动中只画框，松手才改尺寸，撤销回到原尺寸且光标不动', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' } });
+    const geo = await p.read<any>(`
+      await H.setText('甲乙丙丁戊己庚辛壬癸');
+      await H.setCaret({ para: 0, offset: 2 });
+      await H.flush();
+      const data = new Uint8Array(32 * 16 * 4).fill(180);
+      await H.registerImage({ id: 'pic', width: 32, height: 16, data });
+      await H.insertImage({ resourceId: 'pic', pxWidth: 32, pxHeight: 16 });
+      await H.flush();
+      await D.stopBlink();
+      const box = (await H.images())[0];
+      const cv = FRAME();
+      const r = cv.getBoundingClientRect();
+      const q = box.rects[0];
+      return { left: r.left, top: r.top, sx: r.width / cv.width, sy: r.height / cv.height,
+               zoom: ZOOM(), qx: q.x, qy: q.y, qw: q.w, qh: q.h, w0: box.w,
+               caret0: JSON.stringify(H.caret().pos) };
+    `);
+    const at = (xPt: number, yPt: number) => ({
+      x: geo.left + xPt * geo.zoom * geo.sx,
+      y: geo.top + yPt * geo.zoom * geo.sy,
+    });
+    const imgW = () => p.read<number>(`const b = (await H.images())[0]; return b.w;`);
+
+    // 选中图片：把手才进瞬态层。
+    const center = at(geo.qx + geo.qw / 2, geo.qy + geo.qh / 2);
+    await p.page.mouse.click(center.x, center.y);
+    await p.page.waitForTimeout(120);
+
+    const h0 = at(geo.qx + geo.qw, geo.qy + geo.qh / 2 + 5);
+    const h1 = at(geo.qx + geo.qw + 24, geo.qy + geo.qh / 2 + 5);
+    await p.page.mouse.move(h0.x, h0.y);
+    await p.page.waitForTimeout(100);
+    await p.page.mouse.down();
+    const during: number[] = [];
+    for (let i = 1; i <= 4; i++) {
+      await p.page.mouse.move(h0.x + ((h1.x - h0.x) * i) / 4, h0.y);
+      await p.page.waitForTimeout(60);
+      during.push(await imgW());
+    }
+    // 拖动期间文档里的尺寸一个都没动：只画框，松手才落地。
+    check('★ 拖动过程中尺寸不变（只画预览框）',
+          during.every((w) => Math.abs(w - geo.w0) < 0.01), JSON.stringify(during) + ' vs ' + geo.w0);
+    const digestDuring = await p.read<string>(`return await D.frameDigest();`);
+    await p.page.mouse.up();
+    await p.page.waitForTimeout(250);
+    const afterUp = await imgW();
+    check('★ 松手之后尺寸才落地', afterUp > geo.w0 + 5, geo.w0 + ' → ' + afterUp);
+    const digestAfter = await p.read<string>(`return await D.frameDigest();`);
+    check('松手后画面又变了（框换成真尺寸）', digestAfter !== digestDuring,
+          digestDuring + ' → ' + digestAfter);
+
+    const undone = await p.read<any>(`
+      await H.undo();
+      await H.flush();
+      const b = (await H.images())[0];
+      return { w: b.w, caret: JSON.stringify(H.caret().pos) };`);
+    check('★ 一次撤销回到拖动之前的尺寸', Math.abs(undone.w - geo.w0) < 0.01,
+          undone.w + ' / 期望 ' + geo.w0);
+    check('★ 撤销之后光标没有被甩到文档开头', undone.caret === geo.caret0,
+          undone.caret + ' vs ' + geo.caret0);
+  });
 });
 
 test.describe('插入控件', () => {
@@ -200,7 +264,13 @@ test.describe('插入控件', () => {
     };
 
     await p.page.waitForTimeout(400);
-    // 前置回调拒绝：值不变，光标也不动。
+    // 先全选：接下来那一下点在控件里，"点哪儿就选哪儿"要求旧选区先塌掉。
+    await p.read<any>(`await H.selectAll(); await H.flush(); return null;`);
+    const selectedBefore = await p.read<any>(`return H.selection();`);
+    check('前置：全选之后确实有选区', selectedBefore.empty === false,
+          JSON.stringify({ empty: selectedBefore.empty, rects: selectedBefore.rects?.length }));
+
+    // 前置回调拒绝：值不变，但落点照摆（选区塌掉）。
     await p.page.evaluate(() => {
       (window as any).__calls = 0;
       (window as any).__demoBeforeChange = () => {
@@ -210,10 +280,11 @@ test.describe('插入控件', () => {
     });
     const third = at(0.8);
     await click(third.x, third.y);
-    const denied = await p.read<any>(`return { form: H.form()[0], caret: JSON.stringify(H.caret().pos) };`);
+    const denied = await p.read<any>(`
+      return { form: H.form()[0], sel: H.selection(), caret: JSON.stringify(H.caret().pos) };`);
     check('★ 异步拒绝：切换没有生效', denied.form.value.text === 'b', denied.form.value.text);
-    check('★ 被拒的点击不挪光标（选择类进不去）', denied.caret === prep.caret0,
-          denied.caret + ' vs ' + prep.caret0);
+    check('★ 点控件内部清掉已有选区（落点照摆，只是光标进不去）', denied.sel.empty === true,
+          JSON.stringify({ empty: denied.sel.empty, rects: denied.sel.rects?.length }));
 
     // 前置回调放行：第三项选中。
     await p.page.evaluate(() => {
@@ -225,6 +296,55 @@ test.describe('插入控件', () => {
     await click(third.x, third.y);
     const allowed = await p.read<any>(`return H.form()[0];`);
     check('★ 放行之后第三项选中', allowed.value.text === 'c', String(allowed.value.text));
+  });
+
+  test('从控件内部起拖：选区端点落在控件里，光标仍然进不去', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' } });
+    const geo = await p.read<any>(`
+      await H.setText('甲乙丙丁戊己庚辛壬癸');
+      await H.setCaret({ para: 0, offset: 4 });
+      await H.flush();
+      await H.insertControl({ type: 'checkBox', key: 'cb', label: '同意' });
+      await H.flush();
+      await D.stopBlink();
+      const it = H.form()[0];
+      const cv = FRAME();
+      const r = cv.getBoundingClientRect();
+      const q = D.controls().items[0].rects[0];
+      return { left: r.left, top: r.top, sx: r.width / cv.width, sy: r.height / cv.height,
+               zoom: ZOOM(), start: it.start, end: it.end, qx: q.x, qy: q.y, qw: q.w, qh: q.h,
+               caret: JSON.stringify(H.caret().pos) };
+    `);
+    check('前置：控件有矩形', geo.qw > 0, JSON.stringify(geo));
+
+    const at = (xPt: number, yPt: number) => ({
+      x: geo.left + xPt * geo.zoom * geo.sx,
+      y: geo.top + yPt * geo.zoom * geo.sy,
+    });
+    // 从控件正中间按下，往右拖进正文 —— 起点在屏障里，这是"选区可以从里面开始"。
+    const from = at(geo.qx + geo.qw / 2, geo.qy + geo.qh / 2);
+    const to = at(geo.qx + geo.qw + 70, geo.qy + geo.qh / 2);
+    await p.page.mouse.move(from.x, from.y);
+    await p.page.mouse.down();
+    for (let i = 1; i <= 5; i++) {
+      await p.page.mouse.move(from.x + ((to.x - from.x) * i) / 5, from.y);
+      await p.page.waitForTimeout(40);
+    }
+    await p.page.mouse.up();
+    await p.page.waitForTimeout(150);
+
+    const dragged = await p.read<any>(`
+      return { sel: H.selection(), caret: JSON.stringify(H.caret().pos),
+               visible: H.caret().visible, form: H.form()[0] };`);
+    check('★ 从控件内部起手拖出了选区', dragged.sel.empty === false,
+          JSON.stringify({ empty: dragged.sel.empty, rects: dragged.sel.rects?.length }));
+    check('★ 选区起点落在控件内容里（光标屏障只挡光标，不挡选区）',
+          dragged.sel.anchor.para === geo.start.para &&
+              dragged.sel.anchor.offset >= geo.start.offset &&
+              dragged.sel.anchor.offset <= geo.end.offset,
+          JSON.stringify(dragged.sel.anchor) + ' / 控件 ' + JSON.stringify([geo.start, geo.end]));
+    check('★ 焦点端已经拖到了控件右边', dragged.sel.focus.offset > geo.end.offset,
+          JSON.stringify(dragged.sel.focus));
   });
 });
 

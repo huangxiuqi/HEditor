@@ -1235,6 +1235,23 @@ bool resizeImageAt(int index, float w_pt, float h_pt, bool merge) {
 }
 
 /**
+ * 拖拽改尺寸的预览（不动文档、不重排）：只把瞬态层的框换成"松手会变成多大"。
+ * handle 是正在拖的把手（0 左上顺时针），它决定框往哪个方向长。
+ */
+bool previewImageResizeAt(int index, float w_pt, float h_pt, int handle) {
+    return g_engine.previewImageResizeAndRender(index, w_pt, h_pt, handle);
+}
+
+/**
+ * 收起尺寸预览（松手后由宿主补一次真实 resizeImage；中途取消也走它）。
+ */
+bool clearImagePreview() {
+    if (!g_engine.clearImageResizePreview()) return false;
+    g_engine.repaint();
+    return true;
+}
+
+/**
  * 在光标处插一张图片。opts 的键：res（资源 id）、w、h（显示尺寸，磅，可省）、
  * pw、ph（原始像素）、dpi（默认 96）。
  *
@@ -2007,6 +2024,8 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("imageHit", &imageHit);
     emscripten::function("selectImage", &selectImage);
     emscripten::function("resizeImageAt", &resizeImageAt);
+    emscripten::function("previewImageResizeAt", &previewImageResizeAt);
+    emscripten::function("clearImagePreview", &clearImagePreview);
     emscripten::function("focusControl", &focusControl);
     emscripten::function("tabCaret", &tabCaret);
     emscripten::function("auditFrame", &auditFrame);

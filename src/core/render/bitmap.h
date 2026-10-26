@@ -165,6 +165,28 @@ public:
     void strokePolyline(const float* pts, int count, Color c, float width);
 
     /**
+     * 画一个圆环（描边圆）。选择类里单选的圆圈走它。
+     *
+     * 覆盖率与 strokePolyline 同一口径（像素中心到圆周的距离），于是圆环与方框、
+     * 对勾的笔画边缘一致：一样不毛糙，也一样能分带重画而不差一个色阶。
+     * @param cx 圆心 x（设备像素）
+     * @param cy 圆心 y（设备像素）
+     * @param radius 半径（设备像素，到线身中心）
+     * @param c 颜色
+     * @param thickness 线宽（设备像素）
+     */
+    void strokeCircle(float cx, float cy, float radius, Color c, float thickness);
+
+    /**
+     * 画一个实心圆（单选选中时的圆心）。抗锯齿口径与 strokeCircle 相同。
+     * @param cx 圆心 x（设备像素）
+     * @param cy 圆心 y（设备像素）
+     * @param radius 半径（设备像素）
+     * @param c 颜色
+     */
+    void fillCircle(float cx, float cy, float radius, Color c);
+
+    /**
      * 按 c.a 的透明度把颜色混进 r 覆盖的区域（保留底下已经画好的内容）。
      *
      * 与 fillRect 分开的理由只有一条：选区是盖在文字上的，实心填充会把字一起抹掉，
@@ -314,6 +336,19 @@ public:
     size_t glyphCacheBudgetBytes() const;
 
 private:
+
+    /**
+     * 圆的公共实现：thickness <= 0 画实心，否则画圆环。
+     *
+     * 两个公开入口只差一个参数，覆盖率算法必须共用一份 —— 否则"实心圆点"
+     * 与"圆环"的边缘会对不齐，看着像两套图形。
+     * @param cx 圆心 x（设备像素）
+     * @param cy 圆心 y（设备像素）
+     * @param radius 半径（设备像素）
+     * @param thickness 线宽（设备像素）；<= 0 表示实心
+     * @param c 颜色
+     */
+    void circleImpl(float cx, float cy, float radius, float thickness, Color c);
 
     /**
      * 宽（设备像素）。

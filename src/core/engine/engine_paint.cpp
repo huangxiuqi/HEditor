@@ -486,7 +486,7 @@ void EditorEngine::rasterIntoBitmap(Bitmap& target, int page_index, const float*
             Color mark_color{};
             if (!pg.vertical && choiceMarkerOf(pg, &mark_on, &mark_square, &mark_color)) {
                 flush_run();
-                paintChoiceMarker(target, pg, mark_on, mark_square, mark_color, units_to_px, dy);
+                paintChoiceMarker(target, pg, mark_on, mark_square, mark_color, dy);
                 continue;
             }
             hb_font_t* f = pg.font->hb();
@@ -1344,8 +1344,7 @@ bool EditorEngine::choiceMarkerOf(const PlacedGlyph& pg, bool* checked, bool* sq
 }
 
 void EditorEngine::paintChoiceMarker(Bitmap& target, const PlacedGlyph& pg, bool checked,
-                                     bool square, Color color, float units_to_px, float dy) const {
-    if (pg.font == nullptr) return;
+                                     bool square, Color color, float dy) const {
     const float zoom = cfg_.zoom;
     if (!(zoom > 0.0f)) return;
     // 记号色没配（全透明）就跟随文字：记号是内容的一部分，正文什么颜色它就什么颜色。
@@ -1353,22 +1352,32 @@ void EditorEngine::paintChoiceMarker(Bitmap& target, const PlacedGlyph& pg, bool
 
     const float pen_x = pg.x_pt * zoom;
     const float pen_y = pg.y_pt * zoom + dy;
-    if (!square) {
-        // 圆圈：字体里有这两枚，按记号色重画一次即可（形状与排版宽度都不用动）。
-        target.drawGlyph(pg.font->hb(), pg.glyph_id, pen_x, pen_y, units_to_px, color,
-                         pg.rotate_deg);
-        return;
-    }
 
-    // 方框：字号决定边长，格宽决定左右居中。底边坐在基线上，与字体里那些方框字一致。
-    //   边长与线宽都取整：四条边由整数矩形拼出来，右 / 下边才不会比左 / 上边多占一像素。
+    // 记号的外径统一按字号定：方框与圆圈共用同一个数，两族图标的视觉大小才对得上。
+    //   圆圈若借字体里的字形，它的直径就取决于字体 —— 同一个字号下与方框并排放着
+    //   一个偏小一个偏大，一眼就看出来。
     const float size_px = pg.size_pt * zoom;
     const float adv_px = (pg.advance_pt > 0.0f ? pg.advance_pt : pg.size_pt) * zoom;
     if (!(size_px > 1.0f)) return;
-    const float side = std::max(3.0f, std::round(size_px * 0.70f));
-    const float left = std::round(pen_x + (adv_px - side) * 0.5f);
-    const float top = std::round(pen_y - side);
+    const float side = std::max(5.0f, std::round(size_px * 0.72f));
     const float thick = std::max(1.0f, std::round(size_px * 0.075f));
+    // 格宽决定左右居中；底边坐在基线上，与字体里那些方框字一致。
+    const float cx = pen_x + adv_px * 0.5f;
+    const float cy = pen_y - side * 0.5f;
+
+    if (!square) {
+        // 圆圈：圆环 + 选中时圆心一个实心点。半径收到"外沿正好等于 side/2"，
+        //   于是方框与圆圈的外接框一样大，切换时看着不跳。
+        const float radius = std::max(1.0f, side * 0.5f - thick * 0.5f);
+        target.strokeCircle(cx, cy, radius, color, thick);
+        if (!checked) return;
+        target.fillCircle(cx, cy, std::max(1.0f, radius - thick * 1.6f), color);
+        return;
+    }
+
+    // 方框：四条边由整数矩形拼出来，边长与线宽都取整 —— 右 / 下边才不会比左 / 上边多占一像素。
+    const float left = std::round(cx - side * 0.5f);
+    const float top = std::round(cy - side * 0.5f);
     target.strokeRect(Rect{left, top, side, side}, color, thick);
     if (!checked) return;
 
@@ -1596,6 +1605,8 @@ void EditorEngine::repaintAfterEdit() {
     //   该不变量属于引擎：放在宿主里就成了补救路径，而补救路径本身会引入记账歧义。
     //   顺带重置闪烁相位，符合输入法/编辑器的常见手感。
     caret_visible_ = true;
+    // 编辑之后尺寸预览作废：文档已经按提交后的样子重排，再留一个旧框只会画错位置。
+    clearImageResizePreview();
     repaint();
 }
 

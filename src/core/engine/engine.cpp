@@ -2008,6 +2008,17 @@ bool EditorEngine::hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* 
             owner = ci >= 0 ? ci : LineBox::kInlineOffsetOuter;
         }
     }
+    // 落在行内内容的起止之外（页边距、行末那一段空白）：落点照旧吸附到最近的字，
+    //   但"这一下点的是哪个控件"不能认。跨行控件尤其明显 —— 控件第二行只剩一枚括号时，
+    //   在左边距上随手一点会被算成"点在控件上"，把某个选项直接切掉。
+    //   归属只在行内范围之内成立；范围之外按"不在任何控件里"报。
+    {
+        const float inline_lo = best->inline_origin_pt;
+        const float inline_hi = inline_lo + best->inline_end_pt;
+        if (owner >= 0 && (ip < inline_lo - 0.5f || ip > inline_hi + 0.5f)) {
+            owner = LineBox::kInlineOffsetOuter;
+        }
+    }
     // 命中即落点：光标位置不受控件约束，所以这里不再做"就近吸附到最近字段"。
     //   吸附会把"点字段外正文"改写成"停在字段端点"，于是画出来的光标不在点的地方，
     //   表象就是"点了没反应"。归属照实返回，编辑侧自己会按策略拒绝。

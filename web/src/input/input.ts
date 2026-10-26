@@ -199,6 +199,20 @@ export interface InputEnv {
    * @param merge 与上一帧合成一步撤销
    */
   resizeImage?(index: number, w: number, h: number, merge: boolean): Maybe<any>;
+
+  /**
+   * 拖拽改尺寸的预览（不动文档、不重排）：只把选中框换成"松手会变成多大"。
+   * @param index 图片下标
+   * @param w 预览宽度（磅）
+   * @param h 预览高度（磅）
+   * @param handle 正在拖的把手（0 左上顺时针）
+   */
+  previewImageSize?(index: number, w: number, h: number, handle: number): Maybe<any>;
+
+  /**
+   * 收起尺寸预览（拖拽取消时用；正常松手由 resizeImage 自己收）。
+   */
+  clearImagePreview?(): Maybe<any>;
 }
 
 export interface InputLayer {
@@ -416,11 +430,17 @@ export function createInput(env: InputEnv): InputLayer {
    *
    * 等比 / 不等比只看把手落在哪：四个角按原图比例推另一边，四条边只动一个轴。
    * 角上按住 Shift 解除比例约束 —— "角上默认等比、边上默认拉伸"是字处理软件的通行手感。
+   *
+   * 拖动过程中不改文档：每帧只把瞬态层那个框换成"松手会变成多大"（previewImageSize）。
+   *   每帧真改尺寸要重排 + 重光栅该页，放大图时肉眼可见地卡；而且拖到一半看到的已经是
+   *   最终画面，反而看不出框在跟手。松手才发一次 resizeImage，撤销栈里也只留一步。
    */
   function beginImageResize(pt: { x: number; y: number }, index: number, handle: number): void {
     if (typeof env.resizeImage !== 'function' || typeof env.images !== 'function') return;
     const images = env.images;
     const resize = env.resizeImage;
+    const preview = env.previewImageSize;
+    const dropPreview = env.clearImagePreview;
     keep(
       then1(images(), (list) => {
         const box = (list || []).find((b) => b.index === index);
@@ -434,7 +454,10 @@ export function createInput(env: InputEnv): InputLayer {
         const top = handle === 0 || handle === 1 || handle === 2;
         const bottom = handle === 4 || handle === 5 || handle === 6;
         const corner = (left || right) && (top || bottom);
-        let first = true;
+        // 松手要落地的尺寸：null = 这一趟没动过（既不发预览，也不改文档）。
+        let last: { w: number; h: number } | null = null;
+        // 退路（没有预览入口）用：第一帧不带 merge，一次拖拽留一步撤销。
+        let first_frame = true;
         const onMove = (e: MouseEvent): void => {
           const p = env.pointOf(e);
           if (!p) return;
@@ -452,16 +475,30 @@ export function createInput(env: InputEnv): InputLayer {
           // 下限 8 磅：再小就没有可点的图身与把手，拖到零之后再也拖不回来。
           const nw = Math.max(8, Math.round(w * 100) / 100);
           const nh = Math.max(8, Math.round(h * 100) / 100);
-          // 第一帧不带 merge：一次拖拽要在撤销栈里留下自己的一步，不能并进上一次。
-          keep(resize(index, nw, nh, !first));
-          first = false;
+          last = { w: nw, h: nh };
+          // 预览不可用时退回"每帧真改尺寸"：慢，但至少框跟着手走。
+          if (typeof preview === 'function') keep(preview(index, nw, nh, handle));
+          else {
+            keep(resize(index, nw, nh, !first_frame));
+            first_frame = false;
+          }
         };
         const onUp = (): void => {
           window.removeEventListener('mousemove', onMove);
           window.removeEventListener('mouseup', onUp);
           resizing = false;
+          if (last === null) {
+            // 按下又松开、一磅都没动：预览可能已经闪过一帧，收掉它。
+            if (typeof dropPreview === 'function') keep(dropPreview());
+            return;
+          }
+          const done = last;
           // 尺寸真的变过才收尾一次：change 事件按"一次拖拽一次"发，不是按帧发。
-          if (!first) env.commit(true);
+          keep(
+            then1(resize(index, done.w, done.h, false), () => {
+              env.commit(true);
+            }),
+          );
         };
         resizing = true;
         window.addEventListener('mousemove', onMove);
@@ -493,6 +530,22 @@ export function createInput(env: InputEnv): InputLayer {
       if (h && typeof h.field === 'number' && h.field >= 0 && typeof env.controlToggle === 'function') {
         const info = env.controlToggle(h);
         if (info) {
+          // 落点照摆（选区先塌到这里）：光标不能停在控件里，选区可以 ——
+          //   否则从控件内部起手拖选就成了死路，点一下也清不掉已有选区。
+          //   拖动由下面 armDrag(true) 接着扩；切换与落点的先后不影响观感。
+          const act = hitToAction(h);
+          if (act && act.kind === 'caret') {
+            const placed = env.place(act);
+            armDrag(true);
+            return then1(placed, () => {
+              const allowed =
+                typeof env.beforeControlChange === 'function' ? env.beforeControlChange(info) : true;
+              return then1(allowed, (ok) => {
+                if (ok) keep(env.toggleControl ? env.toggleControl(info.index, info.option) : null);
+                return h;
+              });
+            });
+          }
           armDrag(false);
           const allowed =
             typeof env.beforeControlChange === 'function' ? env.beforeControlChange(info) : true;

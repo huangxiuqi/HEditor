@@ -271,15 +271,15 @@ const COMMANDS: Array<[string, string, string[], string]> = [
   ['splitParagraph',        'w', ['splitParagraph'],                                      'self'],
   ['mergePrev',             'w', ['mergeWithPreviousParagraph'],                          'self'],
   ['mergeNext',             'w', ['mergeWithNextParagraph'],                              'self'],
-  ['move',                  'w', ['moveCaret'],                                           'self'],
-  ['vertical',              'w', ['moveCaretVertical'],                                   'self'],
-  ['docStart',              'w', ['caretToDocStart'],                                     'self'],
-  ['docEnd',                'w', ['caretToDocEnd'],                                       'self'],
-  ['lineStart',             'w', ['caretToLineStart'],                                    'self'],
-  ['lineEnd',               'w', ['caretToLineEnd'],                                      'self'],
+  ['move',                  'w', ['moveCaret', 'showCaret'],                              'self'],
+  ['vertical',              'w', ['moveCaretVertical', 'showCaret'],                      'self'],
+  ['docStart',              'w', ['caretToDocStart', 'showCaret'],                        'self'],
+  ['docEnd',                'w', ['caretToDocEnd', 'showCaret'],                          'self'],
+  ['lineStart',             'w', ['caretToLineStart', 'showCaret'],                       'self'],
+  ['lineEnd',               'w', ['caretToLineEnd', 'showCaret'],                         'self'],
   ['indent',                'w', ['indent'],                                              'self'],
   ['outdent',               'w', ['outdent'],                                             'self'],
-  ['tabCaret',              'w', ['tabCaret'],                                            'self'],
+  ['tabCaret',              'w', ['tabCaret', 'showCaret'],                               'self'],
   ['undo',                  'w', ['undoEdit'],                                            'self'],
   ['redo',                  'w', ['redoEdit'],                                            'self'],
   ['removeControl',         'w', ['removeControlAt'],                                     'self'],
@@ -297,6 +297,8 @@ const COMMANDS: Array<[string, string, string[], string]> = [
   ['dropImage',             'w', ['dropImage'],                                           'self'],
   ['selectImage',           'w', ['selectImage'],                                         'self'],
   ['resizeImage',           'w', ['resizeImageAt'],                                       'self'],
+  ['previewImageResize',    'w', ['previewImageResizeAt'],                                 'self'],
+  ['clearImagePreview',     'w', ['clearImagePreview'],                                    'self'],
   ['imageList',             'r', ['imageList'],                                           'none'],
   ['imageHit',              'r', ['imageHit'],                                            'none'],
   ['focusControl',          'w', ['focusControl'],                                        'self'],
@@ -1106,14 +1108,34 @@ const WRITE = collect('w', {
   splitParagraph: () => mod.splitParagraph(),
   mergePrev: () => mod.mergeWithPreviousParagraph(),
   mergeNext: () => mod.mergeWithNextParagraph(),
-  move: (a) => mod.moveCaret(a.dcp | 0, !!a.extend),
+  move: (a) => {
+    // 相位必须排在移动之前：命令是 self 档，移动这一步自己就 present 一次，
+    //   写晚一步那一帧画出来的仍是隐藏相位 —— 症状是"闪烁正好停在暗那半拍时按方向键，
+    //   光标移了却看不见"，要等下一拍才出现。
+    mod.showCaret(true);
+    mod.moveCaret(a.dcp | 0, !!a.extend);
+    return true;
+  },
   /**
    * 上下键（dir < 0 上 / > 0 下）与文档首尾。extend = Shift 扩展（锚点不动）。
    *   与 move 同一档：引擎的 *AndRender 版自己收尾，这里不额外 present。
+   *   相位同样要先摆（见 move）。
    */
-  vertical: (a) => mod.moveCaretVertical(a.dir | 0, !!a.extend),
-  docStart: (a) => mod.caretToDocStart(!!a.extend),
-  docEnd: (a) => mod.caretToDocEnd(!!a.extend),
+  vertical: (a) => {
+    mod.showCaret(true);
+    mod.moveCaretVertical(a.dir | 0, !!a.extend);
+    return true;
+  },
+  docStart: (a) => {
+    mod.showCaret(true);
+    mod.caretToDocStart(!!a.extend);
+    return true;
+  },
+  docEnd: (a) => {
+    mod.showCaret(true);
+    mod.caretToDocEnd(!!a.extend);
+    return true;
+  },
   /**
    * 选区三个入口。两端是全局流位置（与事务里那份快照同一把尺子），不是段内偏移。
    */
@@ -1163,9 +1185,21 @@ const WRITE = collect('w', {
   },
   indent: () => mod.indent(),
   outdent: () => mod.outdent(),
-  tabCaret: (a) => mod.tabCaret(!!a.backward),
-  lineStart: (a) => mod.caretToLineStart(!!a.extend),
-  lineEnd: (a) => mod.caretToLineEnd(!!a.extend),
+  tabCaret: (a) => {
+    mod.showCaret(true);
+    mod.tabCaret(!!a.backward);
+    return true;
+  },
+  lineStart: (a) => {
+    mod.showCaret(true);
+    mod.caretToLineStart(!!a.extend);
+    return true;
+  },
+  lineEnd: (a) => {
+    mod.showCaret(true);
+    mod.caretToLineEnd(!!a.extend);
+    return true;
+  },
   undo: () => mod.undoEdit(),
   redo: () => mod.redoEdit(),
   setUndoLimit: (a) => mod.setUndoLimit(a.n | 0),
@@ -1279,6 +1313,13 @@ const WRITE = collect('w', {
    *   一次拖拽只留一步。
    */
   resizeImage: (a) => mod.resizeImageAt(a.i | 0, Number(a.w), Number(a.h), !!a.merge),
+  /**
+   * 拖拽改尺寸的预览：只换瞬态层上那个框，不动文档、不重排。
+   *   拖动每帧真改尺寸会重排 + 重光栅该页，放大图时肉眼可见地卡；松手才发 resizeImage。
+   * handle 是正在拖的把手（0 左上顺时针），它决定框往哪个方向长。
+   */
+  previewImageResize: (a) => mod.previewImageResizeAt(a.i | 0, Number(a.w), Number(a.h), a.handle | 0),
+  clearImagePreview: () => mod.clearImagePreview(),
   setFontCacheConfig: (a) => mod.setFontCacheConfig(a.blockSize | 0, a.blocks | 0),
 
   /**

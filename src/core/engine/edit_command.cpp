@@ -1986,8 +1986,10 @@ bool EditCommand::resizeImage(NodeId id, float w_pt, float h_pt, bool continue_r
 
     std::vector<Step> steps;
     steps.push_back(Step{s});
-    pending_before_ = Range{};
-    pending_after_ = Range{};
+    // 改尺寸不动光标：撤销与重做都该回到按下去之前那一拍的位置。
+    //   留空 Range 会被当成"文档开头"，表现是缩几次再撤销，光标跳到全文最前。
+    pending_before_ = pos().selection();
+    pending_after_ = pos().selection();
     // 图片在这一段里：行盒变高，从这一段起后面全部要重排。
     const FlowPos at = flowIndex().flowAt(Pos{id, 0});
     const int dirty = (at >= 0) ? pos().paraForFlow(at) : 0;

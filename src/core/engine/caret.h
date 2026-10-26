@@ -283,7 +283,7 @@ public:
      * @param extend true = 扩展选区
      * @param line_aff 行别
      */
-    void placeCaret(int para, size_t offset, int side, bool extend = false, int line_aff = 0);
+    void placeCaret(int para, size_t offset, int side, bool extend = false, int line_aff = -1);
 
     /**
      * 整篇的选区矩形（页面坐标，磅）。判据与审计用它，呈现不要用 —— 用 selectionRectsIn。
@@ -531,9 +531,25 @@ public:
      * @param para 段号（块下标）
      * @param rel 段内相对流位置
      * @param collapse true = 两端收到一起（否则保留锚点）
-     * @param line_aff 行别（0 = 贴上一行，大于 0 = 贴下一行）
+     * @param line_aff 行别：0 = 贴上一行，大于 0 = 贴下一行，小于 0 = 按流位置自动判
+     *   （"贴着左边那一格所在的行"，见 lineAffinityAtFlow）。点击落点显式给 0/1，
+     *   其余入口走自动 —— 折行处只按偏移投影会把"闭括号之后"画到上一行去。
      */
-    void setCaretRel(int para, int rel, bool collapse = true, int line_aff = 0);
+    void setCaretRel(int para, int rel, bool collapse = true, int line_aff = -1);
+
+    /**
+     * 折行处的行别：这个流位置该贴哪一行（0 = 上一行行尾，1 = 这一行行首）。
+     *
+     * 折行处同一个文字偏移压着两行，光看偏移分不出"上一行行尾"与"下一行行首"。
+     *   行别不能只看"点在哪一行"：方向键跨过折行时没有点击，得由流位置自己说 ——
+     *   光标是"贴着左边那一格"，左边那一格排在哪一行，光标就在那一行。
+     *   症状举例：控件跨行、闭括号落在下一行行首时，闭括号之后那个位置的偏移与
+     *   "内容末尾"相同，按贴上一行画就跳到上一行去了。
+     *
+     * @param f 流位置
+     * @return 0 或 1
+     */
+    int lineAffinityAtFlow(FlowPos f) const;
 
     /**
      * 光标那一段（派生）：focus 落在哪一块。

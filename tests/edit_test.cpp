@@ -498,7 +498,7 @@ const SectionInfo kSections[] = {
     {67, false, 10}, {68, false, 4},  {69, false, 3},  {70, false, 10}, {71, false, 6},
     {72, false, 10}, {73, false, 9},  {74, false, 3},  {75, false, 3},  {76, false, 3},
     {77, false, 3},  {78, true, 1},   {79, false, 2},  {80, false, 3},  {81, false, 2},
-    {82, false, 1},
+    {82, false, 1},  {83, false, 2},
 };
 
 /**
@@ -13440,6 +13440,14 @@ int main() {
             expectTrue(corner79.index == 0 && corner79.handle == 0, "点左上角：命中 0 号把手");
             expectTrue(e79.imageAtPt(r79.x + r79.w + 40.0f, r79.y + r79.h + 40.0f).index < 0,
                        "点在图外：什么都没命中");
+            // 图片右侧的把手要与"图片之后那个光标"重合：光标竖线比把手高，视觉上两者
+            //   叠在一起。点在竖线的上下两端也必须算把手，否则那一段拖不动。
+            const EditorEngine::ImageHit edge79 =
+                e79.imageAtPt(r79.x + r79.w, r79.y + r79.h * 0.5f + 10.0f);
+            expectTrue(edge79.index == 0 && edge79.handle == 3,
+                       "右中把手沿纵向铺开（与光标重叠的上下两端也能拖）");
+            expectTrue(e79.imageAtPt(r79.x + r79.w + 20.0f, r79.y + r79.h * 0.5f).index < 0,
+                       "右把手的横向容差没有跟着放大");
         }
 
         // 真画上去了没有：图心那个像素必须是图里的颜色。
@@ -14105,6 +14113,132 @@ int main() {
         expectTrue(slot_after82 > slot_before82 + 1.0f, "括号槽宽跟着字号变（" +
                                                             std::to_string(slot_before82) + " → " +
                                                             std::to_string(slot_after82) + "）");
+    }
+
+    if (runSection(83)) std::printf("\n[83] 折行与选框：右括号落行首、选区端点、勾选重绘\n");
+    if (runSection(83)) {
+        EngineConfig c83;
+        c83.zoom = 1.0f;
+        c83.page.width_pt = 110.0f;
+        c83.page.height_pt = 400.0f;
+        c83.page.margins = PageMargins::all(5.0f);  // 内容宽 100 磅
+        const std::vector<std::string> fonts83 = {cjkPath, mnPath, latinPath};
+        EditorEngine e83;
+        if (!e83.init(fonts83)) {
+            std::fprintf(stderr, "字体加载失败\n");
+            return 2;
+        }
+        e83.setConfig(c83);
+
+        // 造一版"闭括号被挤到下一行行首"的文档：标签占满第一行，闭括号放不下。
+        //   标签长度按字数试 —— 汉字是全角，但括号槽宽与空格宽由字体定，算不出来就试。
+        auto buildCloseAtLineStart = [&](int chars) {
+            NodeTree t;
+            const NodeId sec = t.firstSectionId();
+            ControlSpec sp = makeControlSpec("checkBox");
+            std::string label;
+            for (int i = 0; i < chars; ++i) label += "字";
+            if (auto* c = std::get_if<ChoiceDetail>(&sp.detail)) c->label = label;
+            const NodeId ctl = t.appendChild(sec, NodeKind::ContentControl);
+            t.find(ctl)->control = sp;
+            const NodeId txt = t.appendChild(ctl, NodeKind::TextRun);
+            t.setText(txt, utf8ToCodepoints(controlDisplayText(sp, sp.value)));
+            // 控件后面紧跟两个字：下一行就成了 "]甲乙"，与用户描述的场景一致。
+            const NodeId tail = t.appendChild(sec, NodeKind::TextRun);
+            t.setText(tail, utf8ToCodepoints("甲乙"));
+            t.appendChild(sec, NodeKind::ParagraphMark);
+            e83.setDocument(t, StyleSheet{});
+            e83.relayout();
+        };
+        int close_line = -1;
+        int total_lines = 0;
+        for (int k = 4; k <= 12 && close_line < 0; ++k) {
+            buildCloseAtLineStart(k);
+            const std::vector<LineBox>& ls = e83.layout().lines;
+            total_lines = static_cast<int>(ls.size());
+            for (size_t i = 0; i < ls.size(); ++i) {
+                if (ls[i].clusters.empty()) continue;
+                const LineCluster& c0 = ls[i].clusters[0];
+                if (c0.placeholder && c0.bracket_side == BracketSide::Close) {
+                    close_line = static_cast<int>(i);
+                    break;
+                }
+            }
+        }
+        expectTrue(close_line > 0,
+                   "构造：闭括号被挤到第二行行首（共 " + std::to_string(total_lines) + " 行）");
+        if (close_line > 0) {
+            const LineBox& cl = e83.layout().lines[static_cast<size_t>(close_line)];
+            FlowPos lo = 0;
+            FlowPos hi = 0;
+            expectTrue(e83.controlContentSpan(0, &lo, &hi), "控件内容区间量得到");
+            // 闭括号之后那一格：内容末尾 + 1。
+            const FlowPos after_close = hi + 1;
+            expectTrue(e83.setCaretAtFlow(after_close), "光标摆到闭括号之后");
+            Rect r_close{};
+            expectTrue(e83.caretRectPt(&r_close), "闭括号之后的光标矩形量得到");
+            expectTrue(std::fabs(r_close.y - cl.block_lo_pt) < 1.0f,
+                       "闭括号之后的光标画在它自己那一行（y=" + std::to_string(r_close.y) +
+                           "，行首 y=" + std::to_string(cl.block_lo_pt) + "）");
+
+            // 从右边一格左移：落点必须是闭括号之后，而且仍画在这一行 ——
+            //   行别若只按"贴上一行"投影，键盘一移就跳到上一行去了。
+            expectTrue(e83.setCaretAtFlow(after_close + 1), "光标再往右一格（甲乙之间）");
+            expectTrue(e83.moveCaretBy(-1), "左移一格");
+            expectTrue(e83.caretFlowPos() == after_close, "落点是闭括号之后（不是内容末尾）");
+            Rect r_after{};
+            expectTrue(e83.caretRectPt(&r_after), "左移之后的光标矩形量得到");
+            expectTrue(std::fabs(r_after.y - cl.block_lo_pt) < 1.0f,
+                       "左移之后仍在这一行（y=" + std::to_string(r_after.y) + "）");
+
+            // 选区与光标是两件事：端点可以落在控件内容里，光标仍不能停在那儿。
+            expectTrue(e83.setSelection(Range{0, hi}), "选区端点落在控件内容末尾");
+            expectTrue(e83.selection().focus == hi, "focus 原样落在内容里（没有被夹到块外）");
+            expectTrue(!e83.insertableAtFlow(hi), "那个位置仍然不是插入点");
+        }
+
+        // 勾选状态变了页就得重画：内容只换一个码点（☐ → ☑），成形后是同一枚方框字形，
+        //   行指纹若不比"值"，这一页会被判成没变 —— 画面停在旧帧，要等别处动一下才刷。
+        {
+            NodeTree t;
+            const NodeId sec = t.firstSectionId();
+            ControlSpec sp = makeControlSpec("checkBox");
+            if (auto* c = std::get_if<ChoiceDetail>(&sp.detail)) c->label = "同意";
+            const NodeId ctl = t.appendChild(sec, NodeKind::ContentControl);
+            t.find(ctl)->control = sp;
+            const NodeId txt = t.appendChild(ctl, NodeKind::TextRun);
+            t.setText(txt, utf8ToCodepoints(controlDisplayText(sp, sp.value)));
+            t.appendChild(sec, NodeKind::ParagraphMark);
+            e83.setDocument(t, StyleSheet{});
+            e83.relayout();
+            expectTrue(e83.controlViews().size() == 1, "构造：一个复选");
+
+            const int fw = e83.frameWidth();
+            const size_t bytes =
+                static_cast<size_t>(fw) * static_cast<size_t>(e83.frameHeight()) * 4u;
+            const uint8_t* fp = e83.frame();
+            std::vector<uint8_t> before(fp, fp + bytes);
+            expectTrue(e83.toggleControlAndRender(0, -1), "勾上这个复选");
+            const uint8_t* fp2 = e83.frame();
+            size_t diff = 0;
+            for (size_t i = 0; i < bytes; i += 4u) {
+                if (fp2[i] != before[i] || fp2[i + 1] != before[i + 1] ||
+                    fp2[i + 2] != before[i + 2]) {
+                    ++diff;
+                }
+            }
+            expectTrue(diff > 0,
+                       "切换选中之后页位图真的变了（差 " + std::to_string(diff) + " 个像素）");
+            // 反向一半：再切回来，画面也要回去。
+            std::vector<uint8_t> on(fp2, fp2 + bytes);
+            expectTrue(e83.toggleControlAndRender(0, -1), "再点一下取消选中");
+            const uint8_t* fp3 = e83.frame();
+            size_t back = 0;
+            for (size_t i = 0; i < bytes; i += 4u) {
+                if (fp3[i] != on[i] || fp3[i + 1] != on[i + 1] || fp3[i + 2] != on[i + 2]) ++back;
+            }
+            expectTrue(back > 0, "取消选中也要重画（差 " + std::to_string(back) + " 个像素）");
+        }
     }
 
     checkSectionTable();

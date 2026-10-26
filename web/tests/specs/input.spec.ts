@@ -278,3 +278,33 @@ test.describe('输入层', () => {
     expect(trail.length).toBeGreaterThan(10);
   });
 });
+
+test.describe('光标相位', () => {
+  test('相位停在隐藏那半拍时按方向键：移动之后光标立刻可见', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' } });
+    const start = await p.read<any>(`
+      await H.setText('甲乙丙丁');
+      await H.setCaret({ para: 0, offset: 2 });
+      await H.flush();
+      await D.stopBlink();
+      return { caret: JSON.stringify(H.caret().pos) };`);
+    // 把相位摆到隐藏并呈现一次：这一刻画面上确实没有光标（闪烁正好停在暗的那半拍）。
+    //   showCaret 是静默写（只改引擎状态、不回推），所以要自己 present 一次，
+    //   主线程那份读数才跟着变。
+    await p.read(`D.showCaret(false); D.present(); await H.flush(); return null;`);
+    const hidden = await p.read<boolean>(`return H.caret().visible;`);
+    check('前置：相位已是隐藏', hidden === false, String(hidden));
+
+    // 键盘事件进的是承接层那个 textarea：先把焦点还给它，否则按键落在 body 上。
+    //   事件本身走原始 CDP（与输入层那几条判据同一个口径）。
+    await p.read(`H.focus(); return null;`);
+    const left = { windowsVirtualKeyCode: 37, nativeVirtualKeyCode: 37, key: 'ArrowLeft' };
+    await p.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...left });
+    await p.send('Input.dispatchKeyEvent', { type: 'keyUp', ...left });
+    await p.page.waitForTimeout(150);
+    const after = await p.read<any>(`
+      return { visible: H.caret().visible, pos: JSON.stringify(H.caret().pos) };`);
+    check('★ 方向键移动之后光标立刻可见', after.visible === true, String(after.visible));
+    check('★ 光标确实移动了一格', after.pos !== start.caret, after.pos + ' vs ' + start.caret);
+  });
+});

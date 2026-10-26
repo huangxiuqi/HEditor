@@ -566,6 +566,52 @@ void Bitmap::strokePolyline(const float* pts, int count, Color c, float width) {
     }
 }
 
+void Bitmap::circleImpl(float cx, float cy, float radius, float thickness, Color c) {
+    if (!(radius > 0.0f) || c.a == 0 || w_ <= 0 || h_ <= 0) return;
+    const bool filled = !(thickness > 0.0f);
+    const float half = filled ? 0.0f : thickness * 0.5f;
+    // 包围盒：实心是半径，圆环是半径加半个线宽。都多留一像素给抗锯齿。
+    const float reach = filled ? radius : radius + half;
+    const int x0 = std::max(0, static_cast<int>(std::floor(cx - reach - 1.0f)));
+    const int y0 = std::max(0, static_cast<int>(std::floor(cy - reach - 1.0f)));
+    const int x1 = std::min(w_, static_cast<int>(std::ceil(cx + reach + 1.0f)));
+    const int y1 = std::min(h_, static_cast<int>(std::ceil(cy + reach + 1.0f)));
+    if (x1 <= x0 || y1 <= y0) return;
+    painted_px_ += static_cast<size_t>(x1 - x0) * static_cast<size_t>(y1 - y0);
+    if (!sk_ || sk_->canvas == nullptr) return;
+
+    const size_t row_bytes = static_cast<size_t>(w_) * 4u;
+    uint8_t* base = px_.data();
+    for (int y = y0; y < y1; ++y) {
+        uint8_t* row = base + static_cast<size_t>(y) * row_bytes;
+        const float py = static_cast<float>(y) + 0.5f - cy;
+        for (int x = x0; x < x1; ++x) {
+            const float pxc = static_cast<float>(x) + 0.5f - cx;
+            const float d = std::sqrt(pxc * pxc + py * py);
+            // 与折线同一个覆盖率公式：half + 0.5 - 距离，截到 [0, 1]。
+            float cov = filled ? (radius + 0.5f - d) : (half + 0.5f - std::fabs(d - radius));
+            if (cov <= 0.0f) continue;
+            cov = std::min(cov, 1.0f);
+            const int a = static_cast<int>(std::lround(static_cast<float>(c.a) * cov));
+            if (a <= 0) continue;
+            const int ia = 255 - a;
+            uint8_t* p = row + static_cast<size_t>(x) * 4u;
+            p[0] = static_cast<uint8_t>((p[0] * ia + c.r * a + 127) / 255);
+            p[1] = static_cast<uint8_t>((p[1] * ia + c.g * a + 127) / 255);
+            p[2] = static_cast<uint8_t>((p[2] * ia + c.b * a + 127) / 255);
+        }
+    }
+}
+
+void Bitmap::strokeCircle(float cx, float cy, float radius, Color c, float thickness) {
+    if (!(thickness > 0.0f)) return;
+    circleImpl(cx, cy, radius, thickness, c);
+}
+
+void Bitmap::fillCircle(float cx, float cy, float radius, Color c) {
+    circleImpl(cx, cy, radius, 0.0f, c);
+}
+
 namespace {
 
 /**

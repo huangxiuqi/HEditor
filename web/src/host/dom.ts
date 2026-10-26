@@ -955,6 +955,9 @@ export function createDomHost(o: DomHostOptions): DomHost {
     },
     selectImage: (i) => writeOp('selectImage', { i }),
     resizeImage: (i, w, h, merge) => writeOp('resizeImage', { i, w, h, merge }),
+    previewImageSize: (i, w, h, handle) =>
+      writeOp('previewImageResize', { i, w, h, handle }) as Maybe<any>,
+    clearImagePreview: () => writeOp('clearImagePreview') as Maybe<any>,
     status: (text, isErr) => o.status?.(text, isErr),
     preedit: (text) => showPreedit(text),
     zoomBy: (delta) => o.onZoomBy?.(delta),

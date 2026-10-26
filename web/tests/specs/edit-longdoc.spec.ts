@@ -41,12 +41,19 @@ test.describe('编辑面：长文档与跨段编辑', () => {
 
     // 在脏段中间敲一个字（走真实键盘路径）
     await probe.read(`return await H.setCaret({ para: ${DIRTY}, offset: 5 });`);
+    const cps_before = await probe.read<number>('const s = D.editStats(); return s.docCodepoints;');
     await probe.read(key('测'));
-    // 等这一下真的落地再读账：键路径在输入层里是异步下发的，不等它，"脏页"与
-    //   增量统计读到的是上一拍（多 worker 并行时最容易撞上）。这不是负载导致的偶发，
-    //   而是判据读得太早。
-    await probe.read('await H.flush();');
-    const st = await probe.read('return D.editStats();');
+    // 等这一下真的落地再读账。两件事叠在一起让"只 flush 一次"不够：
+    //   一是键事件由浏览器派发，evaluate 返回时按键可能还没进输入层；
+    //   二是 flush 只排空"已经入队"的消息，队列空着它当场就回。
+    //   于是按"文档码点数真的 +1"来等（最多四轮），读到的才是这一拍的账。
+    let st: any = null;
+    for (let i = 0; i < 4; i++) {
+      st = await probe.read('return D.editStats();');
+      if (st && st.docCodepoints > cps_before) break;
+      await probe.read('await H.flush();');
+      await probe.page.waitForTimeout(30);
+    }
     check('★ 敲字后是增量排版（不是全量）', st.layoutWasFull === false,
               `重排 ${st.relaidParagraphs} 段 / 复用 ${st.reusedParagraphs} 段 / 共 ${st.totalParagraphs} 段`);
     // 行结构没变 → 快路：只重排脏段自己，后缀整块搬回（一个字节都不动）。

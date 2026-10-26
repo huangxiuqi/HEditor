@@ -264,10 +264,16 @@ EditorEngine::ImageHit EditorEngine::imageAtPt(float x_pt_doc, float y_pt_doc) c
             //   （框只有几个磅宽时，把手加容差比图还大）。
             const float half =
                 std::min(kImageHandlePt * 0.5f + kImageHandleSlackPt, std::min(r.w, r.h) * 0.3f);
+            // 左右中把手要沿纵向铺满一整行：图片右边缘正是"图片之后"那个光标的所在，
+            //   光标竖线比把手高得多，视觉上两者叠在一起 —— 点在竖线的上下两端时若只按
+            //   正方形判，就落成文字了（表象：把手和光标重叠的那一段拖不动）。
+            const float side_half_y =
+                std::max(half, std::max(0.0f, lb.block_hi_pt - lb.block_lo_pt) * 0.5f);
             for (int h = 0; h < 8; ++h) {
                 const float dx = std::fabs(x_pt_doc - centers[h * 2]);
                 const float dy = std::fabs(local_y - centers[h * 2 + 1]);
-                if (dx <= half && dy <= half) {
+                const float hy = (h == 3 || h == 7) ? side_half_y : half;
+                if (dx <= half && dy <= hy) {
                     hit.index = indexOf(c.owner_control);
                     hit.handle = h;
                     return hit;
@@ -298,6 +304,19 @@ void EditorEngine::collectImageUi(int page, std::vector<Rect>* out) const {
             if (static_cast<NodeId>(c.owner_control) != image_sel_) continue;
             Rect r;
             if (!imageClusterRect(lb, c, ci, &r)) continue;
+            // 拖动中：框按"松手会变成多大"画，锚点由把手的方位定 —— 拖左上角时
+            //   右下角不动，框往左上长。页位图里那张图还是旧尺寸（预览本来就不重排）。
+            if (image_preview_.id == image_sel_) {
+                const int hd = image_preview_.handle;
+                const bool grow_left = (hd == 0 || hd == 6 || hd == 7);
+                const bool grow_up = (hd == 0 || hd == 1 || hd == 2);
+                const float right = r.x + r.w;
+                const float bottom = r.y + r.h;
+                if (grow_left) r.x = right - image_preview_.w_pt;
+                if (grow_up) r.y = bottom - image_preview_.h_pt;
+                r.w = image_preview_.w_pt;
+                r.h = image_preview_.h_pt;
+            }
             const Rect px{r.x * zoom, r.y * zoom, r.w * zoom, r.h * zoom};
             appendFrameBars(px, bar, out);
             float centers[16];
@@ -317,6 +336,8 @@ bool EditorEngine::selectImage(int index) {
     const std::vector<ImageBox> all = images();
     for (const ImageBox& b : all) {
         if (b.index != index) continue;
+        // 换了一张图：上一步没走完的尺寸预览跟着作废（它的锚点与把手都是那一张的）。
+        if (image_preview_.id != b.id) clearImageResizePreview();
         image_sel_ = b.id;
         return true;
     }
@@ -329,11 +350,14 @@ bool EditorEngine::selectImageAndRender(int index) {
     return true;
 }
 
-void EditorEngine::clearImageSelection() { image_sel_ = kInvalidNodeId; }
+void EditorEngine::clearImageSelection() {
+    image_sel_ = kInvalidNodeId;
+    clearImageResizePreview();
+}
 
 bool EditorEngine::clearImageSelectionAndRender() {
-    if (image_sel_ == kInvalidNodeId) return false;
-    image_sel_ = kInvalidNodeId;
+    if (image_sel_ == kInvalidNodeId && image_preview_.id == kInvalidNodeId) return false;
+    clearImageSelection();
     repaint();
     return true;
 }
@@ -353,6 +377,8 @@ bool EditorEngine::resizeImage(int index, float w_pt, float h_pt, bool continue_
     const std::vector<ImageBox> all = images();
     for (const ImageBox& b : all) {
         if (b.index != index) continue;
+        // 尺寸真的落地了：预览的使命结束（松手那一下正是"预览尺寸 = 真尺寸"）。
+        clearImageResizePreview();
         return edit_.resizeImage(b.id, w_pt, h_pt, continue_run);
     }
     return false;
@@ -362,6 +388,39 @@ bool EditorEngine::resizeImageAndRender(int index, float w_pt, float h_pt, bool 
     if (!resizeImage(index, w_pt, h_pt, continue_run)) return false;
     relayout();
     repaintAfterEdit();
+    return true;
+}
+
+bool EditorEngine::previewImageResize(int index, float w_pt, float h_pt, int handle) {
+    if (!(w_pt > 0.0f) || !(h_pt > 0.0f)) return false;
+    const std::vector<ImageBox> all = images();
+    for (const ImageBox& b : all) {
+        if (b.index != index) continue;
+        // 幂等按磅比：拖动每帧都会调用一次，没变就不重贴（省下一整页 blit）。
+        if (image_preview_.id == b.id && image_preview_.handle == handle &&
+            std::fabs(image_preview_.w_pt - w_pt) < 0.01f &&
+            std::fabs(image_preview_.h_pt - h_pt) < 0.01f) {
+            return false;
+        }
+        image_preview_.id = b.id;
+        image_preview_.w_pt = w_pt;
+        image_preview_.h_pt = h_pt;
+        image_preview_.handle = handle;
+        return true;
+    }
+    return false;
+}
+
+bool EditorEngine::clearImageResizePreview() {
+    if (image_preview_.id == kInvalidNodeId) return false;
+    image_preview_ = ImagePreview{};
+    return true;
+}
+
+bool EditorEngine::previewImageResizeAndRender(int index, float w_pt, float h_pt, int handle) {
+    if (!previewImageResize(index, w_pt, h_pt, handle)) return false;
+    // 只呈现：预览框在瞬态层上，页位图按缓存命中，不进重排。
+    repaint();
     return true;
 }
 

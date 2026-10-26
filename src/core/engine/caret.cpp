@@ -334,8 +334,32 @@ void CaretResolver::setCaretRel(int para, int rel, bool collapse, int line_aff) 
         // 列位是一串连续上下键之间的事：任何别的定位都让它从头取。
         vertical_goal_valid_ = false;
     }
-    // 行别同理：只有点击落点会带非零值，别的定位一律回到"贴上一行行尾"。
-    caret_line_aff_ = (line_aff > 0) ? 1 : 0;
+    // 行别：显式给了就听（点击落点挨着它点的那一行），否则按"贴着左边那一格所在的行"算。
+    //   只按偏移投影的话，折行处那些位置（闭括号之后、段中最末一格的右沿）会一律
+    //   画成上一行行尾 —— 键盘移过去看着像跳回上一行了。
+    caret_line_aff_ = (line_aff >= 0) ? (line_aff > 0 ? 1 : 0) : lineAffinityAtFlow(sel_.focus);
+}
+
+int CaretResolver::lineAffinityAtFlow(FlowPos f) const {
+    if (!view_.hasFlow() || view_.layout == nullptr || view_.layout->lines.empty()) return 0;
+    const int para = paraForFlow(f);
+    const FlowPos base = (*view_.block_flow)[static_cast<size_t>(para)];
+    const int n = static_cast<int>(view_.layout->lines.size());
+    int aff = 0;
+    for (int i = 0; i < n; ++i) {
+        const LineBox& lb = view_.layout->lines[static_cast<size_t>(i)];
+        if (lb.paragraph < para) continue;
+        if (lb.paragraph > para) break;
+        // 段首那一行没有"上一行行尾"这回事：它前面就是段的开头。
+        if (lb.first_cp == 0) continue;
+        // 这一行从哪个流位置开始（行首若有括号占位，起点就是那枚括号的位置）。
+        const FlowPos start = base + relAt(para, lb.first_cp, 0);
+        if (f < start) break;
+        // 正好压在行首那一格上 = 贴上一行行尾；越过它（括号之后）才是贴这一行。
+        //   取"最后一行 start <= f"的答案，不是第一行 —— 折行点不止一处。
+        aff = (f > start) ? 1 : 0;
+    }
+    return aff;
 }
 
 /**

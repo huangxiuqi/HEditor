@@ -801,4 +801,17 @@ struct ControlSpec {
     bool operator==(const ControlSpec& o) const = default;
 };
 
+/**
+ * 控件在绘制层上的完整摘要：外观 + 值带来的显示差异（记号勾上了没有）。
+ *
+ * 比 controlAppearanceDigest 多这一层是必须的：选择类的内容虽然随值重建（☐ → ☑），
+ * 但成形时两枚码点都换成同一枚方框字形借格宽 —— 行指纹只看字形与位置，切换选中前后
+ * 一个字节都不差，那一行于是被判成"没变"。表现是勾上了却要等别处变动才重画。
+ *
+ * 两个编译入口（模型树与投影）共用这一份。
+ * @param spec 控件记录
+ * @return 摘要
+ */
+uint64_t controlPaintDigest(const ControlSpec& spec);
+
 }  // namespace heditor

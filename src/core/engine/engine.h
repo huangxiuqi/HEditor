@@ -1665,6 +1665,37 @@ public:
     bool resizeImageAndRender(int index, float w_pt, float h_pt, bool continue_run = false);
 
     /**
+     * 拖拽改尺寸时的预览：只记"松手会变成多大"，不动文档、不重排。
+     *
+     * 拖动过程中每一帧都真改尺寸的话，每帧都要重排 + 重光栅该页 —— 放大一张图时
+     * 肉眼可见地卡，而且拖到一半看到的已经是最终画面，反而看不出框在跟手。
+     * 这里只更新瞬态层上的那个框（与选中框同一层），松手时宿主再发一次 resizeImage。
+     *
+     * @param index 图片下标
+     * @param w_pt 预览宽度（磅，必须为正）
+     * @param h_pt 预览高度（磅，必须为正）
+     * @param handle 正在拖的把手（0 左上顺时针）：决定框往哪个方向长
+     * @return true = 预览变了（需要重贴一格）
+     */
+    bool previewImageResize(int index, float w_pt, float h_pt, int handle);
+
+    /**
+     * 收起尺寸预览（松手、换选区、文档提交时都要收）。
+     * @return true = 收掉了一份确实存在的预览
+     */
+    bool clearImageResizePreview();
+
+    /**
+     * 预览 + 呈现（只重贴瞬态层，页位图仍按缓存）。
+     * @param index 图片下标
+     * @param w_pt 预览宽度（磅）
+     * @param h_pt 预览高度（磅）
+     * @param handle 把手序号
+     * @return true = 预览变了
+     */
+    bool previewImageResizeAndRender(int index, float w_pt, float h_pt, int handle);
+
+    /**
      * 一个控件的对外描述：类型、值、选项与策略。
      *
      * 它是"给宿主看的那一份"，不是模型：不含节点指针，也不含设计期属性的完整记录。
@@ -2360,7 +2391,7 @@ private:
      * 把"文本坐标 + 侧别"投影成 rel 并摆好（含重排）。side < 0 = 按"最内层含端点"投影。
      * extend 为真时不动锚点（Shift+Home/End 用）。line_aff 见 caretLineAffinity。
      */
-    void projectCaret(int para, size_t offset, int side, bool extend = false, int line_aff = 0);
+    void projectCaret(int para, size_t offset, int side, bool extend = false, int line_aff = -1);
 
     /**
      * 光标矩形（页内像素坐标，出参 @p page 给它是哪一页）。caret_visible 为 false
@@ -2749,20 +2780,20 @@ private:
     bool choiceMarkerOf(const PlacedGlyph& pg, bool* checked, bool* square, Color* color) const;
 
     /**
-     * 画一枚选择类记号：方框（选中时带对勾）或圆圈，颜色取记号色。
+     * 画一枚选择类记号：方框（选中时带对勾）或圆圈（选中时圆心一个实心点），颜色取记号色。
      *
-     * 自己做图形而不是用字体里的字形：字体里没有 ☑，而"方框里一个对勾"是这个控件唯一
-     * 说得清的选中态；圆圈虽然字体有，也要按记号色重画一次，否则它的颜色只能跟正文。
+     * 两族都是自己画的，不走字体字形：字体里没有 ☑，而"方框里一个对勾"是这个控件唯一
+     * 说得清的选中态；圆圈若借字体字形，它的直径取决于字体，与方框并排放着大小不一
+     * （同一个字号下来回跳），颜色也只能跟正文。自绘之后两者共用同一个外径基准。
      * @param target 页位图
      * @param pg 字形（位置、字号、推进）
      * @param checked 选中态
      * @param square true = 方框（复选），false = 圆圈（单选）
      * @param color 记号色（alpha 0 = 用字形自己的颜色）
-     * @param units_to_px 字体单位到像素的换算
      * @param dy 页内纵向偏移（像素）
      */
     void paintChoiceMarker(Bitmap& target, const PlacedGlyph& pg, bool checked, bool square,
-                           Color color, float units_to_px, float dy) const;
+                           Color color, float dy) const;
 
     /**
      * 画不可见字符标记（段落标记、空格里的中点、制表符箭头）到一页的位图上。
@@ -3021,6 +3052,40 @@ private:
      * 两套选区同时存在的话，"按删除键删的是哪一段"没有答案。
      */
     NodeId image_sel_ = kInvalidNodeId;
+
+    /**
+     * 拖拽改尺寸时的预览（瞬态，不进文档）。
+     *
+     * 为什么不在拖动过程中真的改尺寸：每一帧都提交一次会重排 + 重光栅该页，放大图时
+     *   肉眼可见地卡。拖动只画框（这一份几何），松手才发一次真实的 resizeImage。
+     * 只对选中的那一张有意义；松手、换选区、文档提交都清掉。
+     */
+    struct ImagePreview {
+        /**
+         * 预览中的图片节点（kInvalid = 没有预览）。
+         */
+        NodeId id = kInvalidNodeId;
+
+        /**
+         * 预览的显示尺寸（磅）。
+         */
+        float w_pt = 0.0f;
+
+        /**
+         * 同上，高度。
+         */
+        float h_pt = 0.0f;
+
+        /**
+         * 正在拖的把手序号（0 左上顺时针）：决定预览框往哪个方向长。
+         */
+        int handle = -1;
+    };
+
+    /**
+     * 当前预览。
+     */
+    ImagePreview image_preview_;
 
     /**
      * 树口径的流索引。可见性与编译同一处取（编辑态是设计态，呈现态摘掉隐藏子树），

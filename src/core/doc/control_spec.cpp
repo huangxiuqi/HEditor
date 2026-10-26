@@ -377,6 +377,21 @@ uint64_t controlAppearanceDigest(const Appearance& a) {
     return h;
 }
 
+uint64_t controlPaintDigest(const ControlSpec& spec) {
+    uint64_t h = controlAppearanceDigest(spec.appearance);
+    // 值按"喂进去的字节"混，不按结构：flag / text / items 三个字段的分隔由 0xFFFF
+    //   这种值域外的哨兵负责，免得 ("a","b") 与 ("ab",) 折成同一个摘要。
+    const auto mixText = [&h](const std::string& s) {
+        for (const char ch : s)
+            h = fnvMix(h, static_cast<uint64_t>(static_cast<unsigned char>(ch)));
+        h = fnvMix(h, 0xFFFFull);
+    };
+    h = fnvMix(h, spec.value.flag ? 1ull : 0ull);
+    mixText(spec.value.text);
+    for (const std::string& item : spec.value.items) mixText(item);
+    return h;
+}
+
 bool controlMarkerAt(const ControlSpec& spec, int cp_in_content, bool* checked) {
     if (checked != nullptr) *checked = false;
     if (cp_in_content < 0) return false;
