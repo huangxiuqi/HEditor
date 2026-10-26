@@ -1077,6 +1077,36 @@ export interface TableState {
    * 整格选区覆盖几列。
    */
   selCols: number;
+
+  /**
+   * 现在插得进行。
+   */
+  canInsertRow: boolean;
+
+  /**
+   * 现在删得掉这一行（只剩一行、或行里有纵向合并时为假）。
+   */
+  canRemoveRow: boolean;
+
+  /**
+   * 现在插得进列。
+   */
+  canInsertColumn: boolean;
+
+  /**
+   * 现在删得掉这一列（只剩一列时为假）。
+   */
+  canRemoveColumn: boolean;
+
+  /**
+   * 现在的整格选区合得成（至少两格、铺满矩形、除锚点外是空格）。
+   */
+  canMerge: boolean;
+
+  /**
+   * 光标所在格拆得开（跨度大于一）。
+   */
+  canSplit: boolean;
 }
 
 /**
@@ -2268,6 +2298,39 @@ export interface Editor {
    * @returns 有没有改动（被锁住的控件返回 false）
    */
   setControlProp(index: number, prop: number, value: boolean): Promise<boolean>;
+
+  /**
+   * 切换一个开关型字符格式（粗体 / 斜体 / 下划线）。
+   *
+   * 取反按"光标处实际生效的值"算，不看宿主那份缓存 —— 缓存什么时候刷新完不该决定
+   *   点下去会不会生效。连点两下按顺序落地，不会两次都读到改之前的值。
+   *
+   * 与 format 同一条边界：字符格式只作用在选区上，选区为空（只有光标）时不生效并返回
+   *   false —— 引擎没有"打字样式"这一层，光标处改格式不是"改一个空区间"。
+   * @param field 哪个开关
+   * @returns 有没有改动（没有选区时为 false）
+   */
+  toggleFormat(field: 'bold' | 'italic' | 'underline'): Promise<boolean>;
+
+  /**
+   * 把光标处（或选中范围内）的字号按一份阶梯调大一档或小一档。
+   *
+   * 阶梯归宿主：哪几档是产品口味，不是引擎的事。当前值落在两档之间时取它上方（下方）
+   *   的最近一档。与 toggleFormat 同一条边界：没有选区时不生效。
+   * @param dir 1 = 变大，-1 = 变小
+   * @param sizes 字号阶梯（升序降序都行，库自己排）
+   * @returns 有没有改动（没有选区、或已经在最大 / 最小档时返回 false）
+   */
+  stepFontSize(dir: 1 | -1, sizes: number[]): Promise<boolean>;
+
+  /**
+   * 文档规模：码点数与字数。
+   *
+   * 两个口径都在引擎里，换一个宿主也是同样的数。字数不计空白，控件内容与表格里的字
+   *   算在内 —— 它们就是流里的文字；图片这类原子不产字符。
+   * @returns chars 是全部码点，words 是非空白码点
+   */
+  counts(): { chars: number; words: number };
 
   /**
    * 控件清单。

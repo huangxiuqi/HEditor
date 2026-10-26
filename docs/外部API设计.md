@@ -279,7 +279,7 @@ setText(text: string, opts?: { repeat?: number }): Promise<void>   // 明确用�
 | `setTableCell({ vAlign? })` | 格记录：垂直对齐（`'top'` / `'middle'` / `'bottom'`） |
 | `setTableRow({ header?, split?, breakBefore?, heightPt?, heightRule? })` | 行记录：标题行、跨页断行、行前分页、行高与规则（`'auto'` / `'atLeast'` / `'exact'`） |
 | `setTable({ widthPt?, align? })` | 表记录：宽度（0 = 自动）与水平位置（`'start'` / `'center'` / `'end'`） |
-| `tableState()` | 一次读全：`inTable` / `rows` / `cols` / 表宽与位置 / 标题行数 / 当前行的四个开关与行高 / 当前格的坐标与两个跨度 / 整格选区的格数行列数 |
+| `tableState()` | 一次读全：`inTable` / `rows` / `cols` / 表宽与位置 / 标题行数 / 当前行的四个开关与行高 / 当前格的坐标与两个跨度 / 整格选区的格数行列数 / 六条结构命令的可用性（`canInsertRow` 等，引擎试造一遍步骤再回答） |
 | `describeTable(state)` | 把现状摊成属性面板的字段表（表 / 行 / 格三层在一张里）；纯数据，不读写文档 |
 | `applyTableForm(values)` | 按一份面板值改表格：只提交真的变了的层，一层里改几项也只算一次提交 |
 
@@ -299,6 +299,9 @@ setText(text: string, opts?: { repeat?: number }): Promise<void>   // 明确用�
 | `setZoom(z)` | 转发 `configure({ zoom })`，为可读性保留 |
 | `configure(patch)` | 唯一配置写入口（§7） |
 | `config()` | 只读快照 |
+| `counts()` | `{ chars, words }`：码点数与非空白码点数。口径在引擎里（换宿主同一个数），读它不额外往返 |
+| `toggleFormat(field)` | 点一下开关（粗体 / 斜体 / 下划线）：按光标处实际生效的值取反，连点两下按顺序落地 |
+| `stepFontSize(dir, sizes)` | 按宿主给的阶梯把字号调大一档 / 小一档；已在两端时返回 false |
 | `describePageSetup()` | 把页面设置摊成属性面板的字段表（厘米）；固定纸张下宽高两项带 `disabled` |
 | `applyPageSetupForm(values)` | 按一份面板值改页面设置；与现状相同就不调 `configure`（省掉那次整篇重排） |
 

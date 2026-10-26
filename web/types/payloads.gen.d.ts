@@ -167,6 +167,7 @@ export interface EditStats {
   fontStorageEofs: number;
   caretIndex: number;
   docCodepoints: number;
+  wordCount: number;
   caretSide: number;
   caretVertical: boolean;
   caretBlockReversed: boolean;
@@ -271,6 +272,12 @@ export interface TableState {
   selCells: number;
   selRows: number;
   selCols: number;
+  canInsertRow: number;
+  canRemoveRow: number;
+  canInsertColumn: number;
+  canRemoveColumn: number;
+  canMerge: number;
+  canSplit: number;
 }
 
 export interface ContextTarget {

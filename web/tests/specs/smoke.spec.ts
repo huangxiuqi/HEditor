@@ -188,6 +188,10 @@ test.describe('工具栏', () => {
       const c1 = counts();
       out.countsGrow = parseInt(c1.words, 10) === parseInt(c0.words, 10) + 3;
       out.pagesMatch = c1.pages === e.geometry().pages + ' 页';
+      // 空白不计：敲一个空格，字数不动（码点数会多一个，界面只显示字数）。
+      await e.type(' ');
+      await e.flush();
+      out.countsSpace = parseInt(counts().words, 10) === parseInt(c1.words, 10);
 
       // 视图：裁剪标记（只改光栅，画面上是四个角多出的短线）。
       //   前后各取一次帧指纹：只翻配置不动像素的话，屏幕上什么都不会变。
@@ -276,7 +280,8 @@ test.describe('工具栏', () => {
       'paste', 'copy', 'cut', 'font', 'size', 'grow', 'shrink', 'bold', 'italic', 'underline',
       'color', 'line', 'after', 'indent', 'outdent', 'undo', 'redo', 'all', 'load', 'save',
       'type', 'tablePanel', 'table', 'field', 'fieldCaret', 'fieldCaretMoves', 'modeReadOnly',
-      'modeRejects', 'modeBack', 'countsGrow', 'pagesMatch', 'marginMarks', 'marginMarksRedraw',
+      'modeRejects', 'modeBack', 'countsGrow', 'pagesMatch', 'countsSpace', 'marginMarks',
+      'marginMarksRedraw',
       'pagePanel', 'pagePaper', 'pageCustomPanel', 'pageCustom', 'pageBack', 'paged',
       'continuous', 'zoomIn', 'zoomOut', 'zoomReset', 'wheelZoom', 'wheelZoomReadout', 'alive',
       'unsavedPrompt',
@@ -350,6 +355,8 @@ test.describe('公开面', () => {
       out.text = e.text();
       out.paragraph = e.paragraph(1);
       out.paragraphs = e.paragraphs();
+      // 规模：两段各三个字、没有空白 —— 码点数与字数该相等。
+      out.counts = e.counts();
 
       // 光标：caret / setCaret / moveCaret
       await e.setCaret({ para: 0, offset: 1 });
@@ -401,6 +408,16 @@ test.describe('公开面', () => {
       out.indent = await e.setIndent(1);
       // 缩进不许把选中的字换掉（选区先收起到起点，文字一个都不能少）。
       out.afterIndent = e.text();
+
+      // 点按命令：取反两次回到原样，字号按阶梯上下各走一档。
+      //   先要有选区 —— 字符格式只作用在选区上，光标态（空选区）下两条都返回 false。
+      await e.select({ para: 0, offset: 0 }, { para: 0, offset: 2 });
+      out.toggleFirst = await e.toggleFormat('italic');
+      out.toggleSecond = await e.toggleFormat('italic');
+      out.italicAfterPair = e.formatAt({ effective: true }).italic === true;
+      // 阶梯要跨过选区当前的字号（前面写成 18），不然"调大"本来就没有下一档。
+      out.stepUp = await e.stepFontSize(1, [9, 12, 18, 24]);
+      out.stepDown = await e.stepFontSize(-1, [9, 12, 18, 24]);
 
       // 剪贴板：换一段干净的文本再走复制粘贴
       await e.setText('甲乙丙丁');
@@ -485,6 +502,8 @@ test.describe('公开面', () => {
 
     check('setText / text 一致', r.text === '第一段\n第二段', JSON.stringify(r.text));
     check('paragraph 读得到那一段', r.paragraph === '第二段', r.paragraph);
+    check('counts 的码点数与字数一致（没有空白）',
+      r.counts.chars === 6 && r.counts.words === 6, JSON.stringify(r.counts));
     check('paragraphs 分得开', Array.isArray(r.paragraphs) && r.paragraphs.length === 2,
           JSON.stringify(r.paragraphs));
     check('caret 有位置与矩形', r.caret.pos.para === 0 && r.caret.rect.w > 0,
@@ -509,6 +528,11 @@ test.describe('公开面', () => {
     check('format 写进去了', r.format === true, String(r.format));
     check('formatAt 读回同一个值', r.formatAt.bold === true && r.formatAt.size === 18,
           JSON.stringify(r.formatAt));
+    check('★ toggleFormat 取反两次回到原样',
+      r.toggleFirst === true && r.toggleSecond === true && r.italicAfterPair === false,
+      String(r.toggleFirst) + ' / ' + String(r.toggleSecond) + ' / ' + String(r.italicAfterPair));
+    check('★ stepFontSize 上下各走一档', r.stepUp === true && r.stepDown === true,
+      String(r.stepUp) + ' / ' + String(r.stepDown));
     check('paragraphFormat 写进去了', r.paraFormat === true, String(r.paraFormat));
     check('paragraphFormatAt 读回同一个值', r.paraFormatAt.lineFactor === r.paraWant,
           JSON.stringify(r.paraFormatAt));

@@ -118,25 +118,6 @@ async function syncFormat(): Promise<void> {
 }
 
 /**
- * 动作队列：格式是"读—改—写"，两次点击必须一前一后。
- *
- * 不等上一条落地就发下一条，第二次读到的还是第一次写之前的值，于是两次算出来的目标值
- *   相同 —— 表现就是"连点两下只动了一档"。
- */
-let queue: Promise<unknown> = Promise.resolve();
-
-/**
- * 排一个动作到队尾。
- * @param task 要做的事
- * @returns 这一次的完成信号
- */
-function enqueue(task: () => Promise<void>): Promise<void> {
-  const next = queue.then(task, task);
-  queue = next.catch(() => undefined);
-  return next;
-}
-
-/**
  * 写一次字符格式，写完重新回显。
  * @param patch 要改的字段
  */
@@ -162,10 +143,8 @@ async function writePara(patch: ParaFormatPatch): Promise<void> {
  * @param key 哪个开关
  */
 function toggle(key: MarkKey): void {
-  void enqueue(async () => {
-    const now = await editor.formatAt({ effective: true });
-    await writeMark({ [key]: !now[key] });
-  });
+  // 取反与读写顺序都在库里（toggleFormat）：这里只负责把回显刷新一遍。
+  void editor.toggleFormat(key).then(() => syncFormat());
 }
 
 /**
@@ -173,32 +152,8 @@ function toggle(key: MarkKey): void {
  * @param dir 1 = 变大，-1 = 变小
  */
 function stepSize(dir: number): void {
-  void enqueue(async () => {
-    // 实际生效的那一份总有字号；这里的取值只是防契约被改坏。
-    const cur = (await editor.formatAt({ effective: true })).size ?? 12;
-    const next = dir > 0
-      ? SIZES.find((s) => s > cur) ?? SIZES[SIZES.length - 1]
-      : [...SIZES].reverse().find((s) => s < cur) ?? SIZES[0];
-    if (next !== cur) await writeMark({ size: next });
-  });
-}
-
-/**
- * 数一份文本的字数。
- *
- * 口径是"字符数（不计空格）"：按码点算，空白（空格、制表、换行、全角空格）不计。
- *   与字处理软件一致 —— 按字节算会让中文文档的数字虚高两倍，按词算对中文没有意义。
- * @param text 全文
- * @returns 字数
- */
-function countWords(text: string): number {
-  let n = 0;
-  for (const ch of text) {
-    const cp = ch.codePointAt(0) ?? 0;
-    if (cp === 0x20 || cp === 0x09 || cp === 0x0a || cp === 0x0d || cp === 0x3000) continue;
-    n += 1;
-  }
-  return n;
+  // 阶梯（SIZES）是产品口味，留在页面；取上一档还是下一档由库按当前字号算。
+  void editor.stepFontSize(dir > 0 ? 1 : -1, SIZES).then(() => syncFormat());
 }
 
 /**
@@ -235,7 +190,7 @@ function makeColorPicker(): () => void {
   document.body.appendChild(input);
   input.addEventListener('change', () => {
     const at = (i: number): number => Number.parseInt(input.value.slice(i, i + 2), 16);
-    void enqueue(() => writeMark({ color: [at(1), at(3), at(5)] }));
+    void writeMark({ color: [at(1), at(3), at(5)] });
   });
   return () => input.click();
 }
@@ -338,7 +293,7 @@ function makeTabs(): Tab[] {
         value: () => (mark.font === undefined ? '' : String(mark.font)),
         run: (v) => {
           if (!v) return;
-          void enqueue(() => writeMark({ font: Number(v) }));
+          void writeMark({ font: Number(v) });
         },
       },
       {
@@ -348,7 +303,7 @@ function makeTabs(): Tab[] {
         value: () => (mark.size === undefined ? '' : String(mark.size)),
         run: (v) => {
           if (!v) return;
-          void enqueue(() => writeMark({ size: Number(v) }));
+          void writeMark({ size: Number(v) });
         },
       },
       { act: 'grow', label: '增大字号', icon: 'grow-font', run: () => stepSize(1) },
@@ -391,7 +346,7 @@ function makeTabs(): Tab[] {
         value: () => (para.lineFactor === undefined ? '' : String(para.lineFactor)),
         run: (v) => {
           if (!v) return;
-          void enqueue(() => writePara({ lineFactor: Number(v) }));
+          void writePara({ lineFactor: Number(v) });
         },
       },
       {
@@ -408,7 +363,7 @@ function makeTabs(): Tab[] {
         value: () => (para.spaceAfter === undefined ? '' : String(para.spaceAfter)),
         run: (v) => {
           if (!v) return;
-          void enqueue(() => writePara({ spaceAfter: Number(v) }));
+          void writePara({ spaceAfter: Number(v) });
         },
       },
       { act: 'outdent', label: '减少缩进', icon: 'outdent', run: () => editor.setIndent(-1) },
@@ -425,20 +380,18 @@ function makeTabs(): Tab[] {
         label: '撤销',
         icon: 'undo',
         big: true,
-        run: () => void enqueue(async () => {
-          await editor.undo();
-          await syncFormat();
-        }),
+        run: () => {
+          void editor.undo().then(() => syncFormat());
+        },
       },
       {
         act: 'redo',
         label: '重做',
         icon: 'redo',
         big: true,
-        run: () => void enqueue(async () => {
-          await editor.redo();
-          await syncFormat();
-        }),
+        run: () => {
+          void editor.redo().then(() => syncFormat());
+        },
       },
       { act: 'all', label: '全选', icon: 'select-all', run: () => editor.selectAll() },
     ],
@@ -826,7 +779,8 @@ function pickImage(): void {
  */
 function refreshCounts(tail: string): void {
   const g = editor.geometry();
-  chrome.setCounts(g.pages, countWords(editor.text()));
+  // 字数由引擎数（counts）：同一份文档换个宿主也是同一个数，页面不必搬全文回来扫。
+  chrome.setCounts(g.pages, editor.counts().words);
   chrome.say(`${editor.paragraphs().length} 段 · ${tail}`);
 }
 

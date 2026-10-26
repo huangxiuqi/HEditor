@@ -588,6 +588,26 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
     return out;
   }
 
+  /**
+   * 复合命令的排队：读—写必须一前一后。
+   *
+   * 两次点按之间不排队时，第二次读到的还是第一次写之前的值，于是两次算出的目标值一样，
+   *   表现是"连点两下只动了一档"。串行只在复合命令之间需要：单条写命令在通道上本来就是
+   *   先进先出。
+   */
+  let composedChain: Promise<unknown> = Promise.resolve();
+
+  /**
+   * 排一个复合命令到队尾。
+   * @param task 要做的事
+   * @returns 这一次的完成信号
+   */
+  function composed<T>(task: () => Promise<T>): Promise<T> {
+    const next = composedChain.then(task, task);
+    composedChain = next.catch(() => undefined);
+    return next;
+  }
+
   const edit = (name: string, args?: Args): Promise<boolean> => {
     alive();
     if (config.mode === 'readOnly') return Promise.resolve(false);
@@ -692,6 +712,37 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
     paragraph(i) {
       alive();
       return String(link.read('text', { i }) ?? '');
+    },
+
+    toggleFormat(field) {
+      alive();
+      return composed(async () => {
+        const now = await editor.formatAt({ effective: true });
+        return editor.format({ [field]: !now[field] });
+      });
+    },
+
+    stepFontSize(dir, sizes) {
+      alive();
+      const ladder = sizes.filter((n) => Number.isFinite(n) && n > 0).sort((a, b) => a - b);
+      if (ladder.length === 0) return Promise.resolve(false);
+      return composed(async () => {
+        const now = (await editor.formatAt({ effective: true })).size;
+        const cur = typeof now === 'number' ? now : ladder[0];
+        const next =
+          dir > 0
+            ? ladder.find((s) => s > cur)
+            : [...ladder].reverse().find((s) => s < cur);
+        if (next === undefined) return false;
+        return editor.format({ size: next });
+      });
+    },
+
+    counts() {
+      alive();
+      // 两个数都在每一拍推过来的 stats 里：读它不额外往返，也不必把全文搬到主线程。
+      const st = (link.read('editStats') ?? {}) as { docCodepoints?: number; wordCount?: number };
+      return { chars: Number(st.docCodepoints ?? 0), words: Number(st.wordCount ?? 0) };
     },
 
     paragraphs() {

@@ -1963,6 +1963,8 @@ std::string editStatsJson() {
     o << "\"fontStorageEofs\":" << fc.eof_reads << ",";
     o << "\"caretIndex\":" << e.caret_index << ",";
     o << "\"docCodepoints\":" << e.doc_codepoints << ",";
+    // 字数：非空白码点数。口径在引擎里（engine.cpp 的 isSpaceCodepoint），宿主只显示。
+    o << "\"wordCount\":" << e.word_count << ",";
     o << "\"caretSide\":" << e.caret_side << ",";
     // 竖排标记：宿主靠它把方向键按物理方向映射（竖排上下走字、左右换列）。
     o << "\"caretVertical\":" << (e.caret_vertical ? "true" : "false") << ",";

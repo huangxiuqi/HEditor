@@ -499,6 +499,7 @@ const SectionInfo kSections[] = {
     {72, false, 10}, {73, false, 9},  {74, false, 3},  {75, false, 3},  {76, false, 3},
     {77, false, 3},  {78, true, 1},   {79, false, 2},  {80, false, 3},  {81, false, 2},
     {82, false, 1},  {83, false, 2},  {84, false, 2},  {85, false, 3},  {86, false, 4},
+    {87, false, 3},
 };
 
 /**
@@ -15261,6 +15262,94 @@ int main() {
                                " - 表底 " + std::to_string(table_bottom) + "）");
             }
         }
+    }
+
+    if (runSection(87)) std::printf("\n[87] 字数口径与表格命令的可用性\n");
+    if (runSection(87)) {
+        EngineConfig c87;
+        c87.zoom = 1.0f;
+        c87.page.width_pt = 595.0f;
+        c87.page.height_pt = 842.0f;
+        c87.page.margins = PageMargins::all(56.0f);
+        const std::vector<std::string> fonts87 = {cjkPath, mnPath, latinPath};
+
+        NodeTree t87;
+        {
+            const NodeId sec = t87.firstSectionId();
+            const NodeId a = t87.appendChild(sec, NodeKind::TextRun);
+            // 中间放一个 ASCII 空格与一个全角空格：两个都只在码点数里出现，不在字数里。
+            t87.setText(a, utf8ToCodepoints("甲乙 丙\u3000丁"));
+            t87.appendChild(sec, NodeKind::ParagraphMark);
+        }
+        EditorEngine e87;
+        if (!e87.init(fonts87)) {
+            std::fprintf(stderr, "字体加载失败\n");
+            return 2;
+        }
+        e87.setConfig(c87);
+        e87.setDocument(t87, StyleSheet{});
+        e87.relayout();
+
+        expectTrue(e87.documentCodepoints() == 6,
+                   "码点数 = 6（甲乙 + 空格 + 丙 + 全角空格 + 丁，实际 " +
+                       std::to_string(e87.documentCodepoints()) + "）");
+        expectTrue(e87.documentWordCount() == 4,
+                   "★ 字数 = 4：两个空白不计（实际 " + std::to_string(e87.documentWordCount()) + "）");
+
+        // 空段落不产字：全空白的一段加到 0。
+        NodeTree t87b;
+        {
+            const NodeId sec = t87b.firstSectionId();
+            const NodeId a = t87b.appendChild(sec, NodeKind::TextRun);
+            t87b.setText(a, utf8ToCodepoints(" \u3000 "));
+            t87b.appendChild(sec, NodeKind::ParagraphMark);
+        }
+        EditorEngine e87b;
+        if (!e87b.init(fonts87)) {
+            std::fprintf(stderr, "字体加载失败\n");
+            return 2;
+        }
+        e87b.setConfig(c87);
+        e87b.setDocument(t87b, StyleSheet{});
+        e87b.relayout();
+        expectTrue(e87b.documentWordCount() == 0,
+                   "★ 只有空白的一段：字数 0（实际 " + std::to_string(e87b.documentWordCount()) + "）");
+
+        // 不在表格里：六条结构命令一条都不该报可用。
+        const bool none_ok =
+            !e87.canTableOp(EditorEngine::TableOp::InsertRowAbove) &&
+            !e87.canTableOp(EditorEngine::TableOp::RemoveRow) &&
+            !e87.canTableOp(EditorEngine::TableOp::InsertColumnRight) &&
+            !e87.canTableOp(EditorEngine::TableOp::RemoveColumn) &&
+            !e87.canTableOp(EditorEngine::TableOp::MergeCells) &&
+            !e87.canTableOp(EditorEngine::TableOp::SplitCell);
+        expectTrue(none_ok, "★ 光标在正文：六条表格命令全部不可用");
+
+        // 1×1：插得进、删不掉；没有整格选区不能并，跨度 1 不能拆。
+        e87.setCaret(0, 0);
+        expectTrue(e87.insertTableAndRender(1, 1, false), "插一张 1×1 表");
+        const bool one_by_one =
+            e87.canTableOp(EditorEngine::TableOp::InsertRowAbove) &&
+            e87.canTableOp(EditorEngine::TableOp::InsertColumnRight) &&
+            !e87.canTableOp(EditorEngine::TableOp::RemoveRow) &&
+            !e87.canTableOp(EditorEngine::TableOp::RemoveColumn) &&
+            !e87.canTableOp(EditorEngine::TableOp::MergeCells) &&
+            !e87.canTableOp(EditorEngine::TableOp::SplitCell);
+        expectTrue(one_by_one, "★ 1×1：只能插，不能删 / 并 / 拆");
+
+        // 2×2：删得了（反向一半）。
+        expectTrue(e87.insertTableAndRender(2, 2, false), "另插一张 2×2 表");
+        expectTrue(e87.canTableOp(EditorEngine::TableOp::RemoveRow) &&
+                       e87.canTableOp(EditorEngine::TableOp::RemoveColumn),
+                   "★ 2×2：删行删列都可用");
+
+        // 只读模式：结构命令全关（与 tableOp 同一条判定）。
+        e87.setEditMode(EditMode::ReadOnly);
+        expectTrue(!e87.canTableOp(EditorEngine::TableOp::InsertRowAbove) &&
+                       !e87.canTableOp(EditorEngine::TableOp::RemoveRow) &&
+                       !e87.canTableOp(EditorEngine::TableOp::RemoveColumn),
+                   "★ 只读模式：一条都不报可用");
+        e87.setEditMode(EditMode::Document);
     }
 
     checkSectionTable();

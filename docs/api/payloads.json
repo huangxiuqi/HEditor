@@ -577,6 +577,10 @@
           "kind": "num"
         },
         {
+          "name": "wordCount",
+          "kind": "num"
+        },
+        {
           "name": "caretSide",
           "kind": "num"
         },
@@ -954,6 +958,30 @@
         },
         {
           "name": "selCols",
+          "kind": "num"
+        },
+        {
+          "name": "canInsertRow",
+          "kind": "num"
+        },
+        {
+          "name": "canRemoveRow",
+          "kind": "num"
+        },
+        {
+          "name": "canInsertColumn",
+          "kind": "num"
+        },
+        {
+          "name": "canRemoveColumn",
+          "kind": "num"
+        },
+        {
+          "name": "canMerge",
+          "kind": "num"
+        },
+        {
+          "name": "canSplit",
           "kind": "num"
         }
       ]

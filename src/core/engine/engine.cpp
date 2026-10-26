@@ -649,6 +649,7 @@ void EditorEngine::finishRebuildFromTree(FlowVisibility vis,
     //   页数的输入。段数按全量块流给：聚焦档下可见块更少，但它不是"文档有多少段"。
     edit_stats_.total_paragraphs = static_cast<int>(blocks_full_.size());
     edit_stats_.doc_codepoints = documentCodepoints();
+    edit_stats_.word_count = documentWordCount();
     edit_stats_.control_count = controls_.size();
 }
 
@@ -883,6 +884,33 @@ const uint8_t* EditorEngine::frame() const {
 int EditorEngine::frameHeight() const {
     const int step = pagePxHeight() + pageGapPx();
     return std::max(1, win_page_count_) * step;
+}
+
+/**
+ * 这个码点算不算空白。
+ *
+ * 只收"排版上确实只是间隔"的那一批：ASCII 空白、Unicode 的 Space_Separator、行段分隔符。
+ * 宽字符（全角空格 3000）必须在内 —— 中文稿里它是人按空格打出来的。
+ * @param cp 码点
+ * @return true = 不计入字数
+ */
+static bool isSpaceCodepoint(uint32_t cp) {
+    if (cp == 0x09 || cp == 0x0A || cp == 0x0B || cp == 0x0C || cp == 0x0D || cp == 0x20) return true;
+    if (cp == 0x85 || cp == 0xA0 || cp == 0x1680) return true;
+    if (cp >= 0x2000 && cp <= 0x200A) return true;
+    if (cp == 0x2028 || cp == 0x2029 || cp == 0x202F || cp == 0x205F || cp == 0x3000) return true;
+    return false;
+}
+
+size_t EditorEngine::documentWordCount() const {
+    size_t n = 0;
+    // 与 documentCodepoints 同一条口径：按全量块流数，不受聚焦档的可见块影响。
+    for (const BlockSpec& b : blocks_full_) {
+        for (const uint32_t cp : b.cp_text) {
+            if (!isSpaceCodepoint(cp)) ++n;
+        }
+    }
+    return n;
 }
 
 size_t EditorEngine::documentCodepoints() const {

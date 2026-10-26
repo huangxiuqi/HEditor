@@ -225,6 +225,7 @@ inline constexpr KeySpec kKeys[] = {
     {"fontStorageEofs", "num", false},
     {"caretIndex", "num", false},
     {"docCodepoints", "num", false},
+    {"wordCount", "num", false},
     {"caretSide", "num", false},
     {"caretVertical", "bool", false},
     {"caretBlockReversed", "bool", false},
@@ -350,6 +351,12 @@ inline constexpr KeySpec kKeys[] = {
     {"selCells", "num", false},
     {"selRows", "num", false},
     {"selCols", "num", false},
+    {"canInsertRow", "num", false},
+    {"canRemoveRow", "num", false},
+    {"canInsertColumn", "num", false},
+    {"canRemoveColumn", "num", false},
+    {"canMerge", "num", false},
+    {"canSplit", "num", false},
 };
 inline constexpr PayloadSpec kSpec{"tableState", kKeys, static_cast<int>(std::size(kKeys)), true};
 }  // namespace table_state

@@ -1430,6 +1430,16 @@ public:
     bool tableOp(TableOp op);
 
     /**
+     * 这条表格结构命令现在做不做得成。
+     *
+     * 与 tableOp 同一条判定：模式、光标在不在表里、结构上的前置条件都算。宿主据此置灰，
+     *   不必自己重算"只剩一行不能删"那几条 —— 重算出来的那一份迟早与引擎分叉。
+     * @param op 动词
+     * @return true = 现在执行会成功
+     */
+    bool canTableOp(TableOp op) const;
+
+    /**
      * 表格结构命令 + 重排 + 呈现。
      * @param op 动词
      * @return true = 改成了
@@ -2412,6 +2422,14 @@ public:
      * @return 全文码点数
      */
     size_t documentCodepoints() const;
+
+    /**
+     * 全文非空白码点数（界面上那个"字数"）。
+     *
+     * 空白不计（见 isSpaceCodepoint），控件内容与表格里的字都算 —— 它们就是流里的文字。
+     * @return 字数
+     */
+    size_t documentWordCount() const;
 
     /**
      * 落点判定的唯一入口：一次编辑能不能落在这里 / 能不能删掉这个区间。

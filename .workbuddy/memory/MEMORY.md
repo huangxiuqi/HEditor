@@ -54,3 +54,6 @@
   readonly / required，拆到 `setControlProp` 单独提交 —— **改定义又翻两个开关是三步撤销**。
 - 注释与 JSDoc 判据扫 `web/app`（示例页 4000 行不再靠自觉）：`lint_comments.py` 的 JS 集合与
   `check_docs.mjs` 的 FILES 都含它，违规 0 是硬线。
+- 数的活也在引擎：`counts()` 读 stats 的 docCodepoints / wordCount；`tableState().can*` 是引擎
+  用同一批 rev 步骤**干跑**再回答（宿主别重算 "只剩一行不能删"）。`toggleFormat` /
+  `stepFontSize` 只在有选区时生效（`applyCharFormat` 对空选区直接 false），光标态无"打字样式"。

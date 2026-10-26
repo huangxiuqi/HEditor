@@ -111,7 +111,7 @@ export function createMenus(host: MenusHost): Menus {
   };
 
   /**
-   * 表格那一组菜单。
+   * 表格那一组菜单。置灰全按引擎给的可用性位（can 系列），这里不重算前置条件。
    * @param st 现状
    * @param at 客户端坐标（属性面板开在这里）
    * @returns 菜单项
@@ -119,21 +119,41 @@ export function createMenus(host: MenusHost): Menus {
   const tableEntries = (st: TableState, at: { x: number; y: number }): MenuEntry[] => {
     const entries: MenuEntry[] = [
       { kind: 'heading', label: `表格 ${st.rows} × ${st.cols}` },
-      { kind: 'action', label: '在上方插入行', run: () => runTableOp('insertRowAbove', '已插入一行') },
-      { kind: 'action', label: '在下方插入行', run: () => runTableOp('insertRowBelow', '已插入一行') },
+      {
+        kind: 'action',
+        label: '在上方插入行',
+        disabled: !st.canInsertRow,
+        run: () => runTableOp('insertRowAbove', '已插入一行'),
+      },
+      {
+        kind: 'action',
+        label: '在下方插入行',
+        disabled: !st.canInsertRow,
+        run: () => runTableOp('insertRowBelow', '已插入一行'),
+      },
       {
         kind: 'action',
         label: '删除本行',
-        disabled: st.rows <= 1,
+        disabled: !st.canRemoveRow,
         run: () => runTableOp('removeRow', '已删除一行'),
       },
       { kind: 'separator' },
-      { kind: 'action', label: '在左侧插入列', run: () => runTableOp('insertColumnLeft', '已插入一列') },
-      { kind: 'action', label: '在右侧插入列', run: () => runTableOp('insertColumnRight', '已插入一列') },
+      {
+        kind: 'action',
+        label: '在左侧插入列',
+        disabled: !st.canInsertColumn,
+        run: () => runTableOp('insertColumnLeft', '已插入一列'),
+      },
+      {
+        kind: 'action',
+        label: '在右侧插入列',
+        disabled: !st.canInsertColumn,
+        run: () => runTableOp('insertColumnRight', '已插入一列'),
+      },
       {
         kind: 'action',
         label: '删除本列',
-        disabled: st.cols <= 1,
+        disabled: !st.canRemoveColumn,
         run: () => runTableOp('removeColumn', '已删除一列'),
       },
       { kind: 'separator' },
@@ -141,13 +161,13 @@ export function createMenus(host: MenusHost): Menus {
         kind: 'action',
         label: '合并单元格',
         hint: st.selCells > 1 ? `${st.selRows} × ${st.selCols}` : '先拖选几格',
-        disabled: st.selCells < 2,
+        disabled: !st.canMerge,
         run: () => runTableOp('mergeCells', '已合并'),
       },
       {
         kind: 'action',
         label: '拆分单元格',
-        disabled: st.rowSpan === 1 && st.colSpan === 1,
+        disabled: !st.canSplit,
         run: () => runTableOp('splitCell', '已拆分'),
       },
       { kind: 'separator' },

@@ -106,6 +106,61 @@ bool EditorEngine::setTableSpecAndRender(const TablePatch& patch) {
     return true;
 }
 
+bool EditorEngine::canTableOp(TableOp op) const {
+    if (!loaded_ || !session_ || !flow_.has_value()) return false;
+    // 改结构是设计动作：表单模式与只读模式下表格是锁住的。
+    if (mode_ != EditMode::Document) return false;
+    const TextPos at = caret();
+    const LayoutTable* table = nullptr;
+    const LayoutCell* cell = layoutCellAt(at.para, &table);
+    if (cell == nullptr || table == nullptr) return false;
+
+    const rev::Doc& doc = document();
+    rev::CellRef ref;
+    if (!rev::cellRefOf(doc, static_cast<NodeId>(table->handle), cell->row, cell->cell, &ref)) {
+        return false;
+    }
+    const rev::FlowIndex& flow = *flow_;
+
+    // 干跑：造一批步骤就知道成不成，与真正执行走的是同一批构造函数。
+    switch (op) {
+        case TableOp::InsertRowAbove:
+            return rev::insertRow(doc, flow, ref, false).ok;
+        case TableOp::InsertRowBelow:
+            return rev::insertRow(doc, flow, ref, true).ok;
+        case TableOp::RemoveRow:
+            return rev::removeRow(doc, flow, ref).ok;
+        case TableOp::InsertColumnLeft:
+            return rev::insertColumn(doc, flow, ref, false).ok;
+        case TableOp::InsertColumnRight:
+            return rev::insertColumn(doc, flow, ref, true).ok;
+        case TableOp::RemoveColumn:
+            return rev::removeColumn(doc, flow, ref).ok;
+        case TableOp::MergeCells: {
+            // 合并的主语是整格选区，不是光标所在那一格。
+            std::vector<rev::CellRef> cells;
+            for (const CaretResolver::CellBlocks& cb : caret_.cellBlocks()) {
+                if (cb.empty() || cb.first < 0 ||
+                    cb.first >= static_cast<int>(blocks_full_.size())) {
+                    return false;
+                }
+                const std::vector<CellSlot>& path =
+                    blocks_full_[static_cast<size_t>(cb.first)].cell_path;
+                if (path.empty()) return false;
+                const CellSlot& slot = path.back();
+                rev::CellRef one;
+                if (!rev::cellRefOf(doc, slot.table, slot.row, slot.cell, &one)) return false;
+                cells.push_back(one);
+            }
+            if (cells.size() < 2) return false;
+            return rev::mergeCells(doc, flow, cells).ok;
+        }
+        case TableOp::SplitCell:
+            return rev::splitCell(doc, flow, ref).ok;
+    }
+    return false;
+}
+
 std::string EditorEngine::tableStateJson() const {
     const TextPos at = caret();
     const LayoutTable* table = nullptr;
@@ -115,7 +170,9 @@ std::string EditorEngine::tableStateJson() const {
         none << "{\"inTable\":0,\"rows\":0,\"cols\":0,\"widthPt\":-1,\"align\":0,\"headerRows\":0"
              << ",\"row\":0,\"rowHeader\":0,\"rowSplit\":0,\"rowBreak\":0,\"heightPt\":-1"
              << ",\"heightRule\":0,\"cellRow\":0,\"cellCol\":0,\"rowSpan\":1,\"colSpan\":1"
-             << ",\"vAlign\":0,\"selCells\":0,\"selRows\":0,\"selCols\":0}";
+             << ",\"vAlign\":0,\"selCells\":0,\"selRows\":0,\"selCols\":0"
+             << ",\"canInsertRow\":0,\"canRemoveRow\":0,\"canInsertColumn\":0"
+             << ",\"canRemoveColumn\":0,\"canMerge\":0,\"canSplit\":0}";
         return pk::checked(pk::table_state::kSpec, none.str());
     }
 
@@ -197,6 +254,13 @@ std::string EditorEngine::tableStateJson() const {
     o << ",\"selCells\":" << sel_cells;
     o << ",\"selRows\":" << (sel_any ? sel_hi_row - sel_lo_row + 1 : 0);
     o << ",\"selCols\":" << (sel_any ? sel_hi_col - sel_lo_col + 1 : 0);
+    // 六条结构命令的可用性：宿主据此置灰，不自己重算前置条件。
+    o << ",\"canInsertRow\":" << (canTableOp(TableOp::InsertRowAbove) ? 1 : 0);
+    o << ",\"canRemoveRow\":" << (canTableOp(TableOp::RemoveRow) ? 1 : 0);
+    o << ",\"canInsertColumn\":" << (canTableOp(TableOp::InsertColumnRight) ? 1 : 0);
+    o << ",\"canRemoveColumn\":" << (canTableOp(TableOp::RemoveColumn) ? 1 : 0);
+    o << ",\"canMerge\":" << (canTableOp(TableOp::MergeCells) ? 1 : 0);
+    o << ",\"canSplit\":" << (canTableOp(TableOp::SplitCell) ? 1 : 0);
     o << "}";
     return pk::checked(pk::table_state::kSpec, o.str());
 }
