@@ -152,6 +152,19 @@ public:
     void fillTriangle(float x0, float y0, float x1, float y1, float x2, float y2, Color c);
 
     /**
+     * 画一条折线：圆头圆角，边缘按像素中心到线身的距离算覆盖率。
+     *
+     * 覆盖率只由几何决定，与画布高度、裁剪区域无关 —— 分带重画与整页重画逐字节一致，
+     * 这是它不直接用 Skia 抗锯齿路径的原因。选择类的方框与对勾靠它画出均匀的笔画。
+     * 像素只混 RGB，alpha 保持目标图本身的值（页位图恒不透明）。
+     * @param pts 顶点坐标（设备像素，x0,y0,x1,y1,...）
+     * @param count 顶点数（至少 2）
+     * @param c 颜色
+     * @param width 线宽（设备像素）
+     */
+    void strokePolyline(const float* pts, int count, Color c, float width);
+
+    /**
      * 按 c.a 的透明度把颜色混进 r 覆盖的区域（保留底下已经画好的内容）。
      *
      * 与 fillRect 分开的理由只有一条：选区是盖在文字上的，实心填充会把字一起抹掉，

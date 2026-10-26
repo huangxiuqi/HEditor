@@ -1310,25 +1310,6 @@ void drawBreakMark(Bitmap& target, float along, float cross, float size_pt, floa
     }
 }
 
-namespace {
-
-/**
- * 一段粗线（设备像素）。用两个三角形拼一个四边形：位图那层只有矩形与三角形，
- * 而对勾是两条斜线 —— 逐像素画阶梯在大字号下会明显发毛。
- */
-void strokeSegment(Bitmap& target, float x0, float y0, float x1, float y1, float w, Color c) {
-    const float dx = x1 - x0;
-    const float dy = y1 - y0;
-    const float len = std::sqrt(dx * dx + dy * dy);
-    if (!(len > 0.0f) || !(w > 0.0f)) return;
-    const float nx = -dy / len * w * 0.5f;
-    const float ny = dx / len * w * 0.5f;
-    target.fillTriangle(x0 + nx, y0 + ny, x1 + nx, y1 + ny, x1 - nx, y1 - ny, c);
-    target.fillTriangle(x0 + nx, y0 + ny, x1 - nx, y1 - ny, x0 - nx, y0 - ny, c);
-}
-
-}  // namespace
-
 bool EditorEngine::choiceMarkerOf(const PlacedGlyph& pg, bool* checked, bool* square,
                                   Color* color) const {
     if (checked != nullptr) *checked = false;
@@ -1380,26 +1361,25 @@ void EditorEngine::paintChoiceMarker(Bitmap& target, const PlacedGlyph& pg, bool
     }
 
     // 方框：字号决定边长，格宽决定左右居中。底边坐在基线上，与字体里那些方框字一致。
+    //   边长与线宽都取整：四条边由整数矩形拼出来，右 / 下边才不会比左 / 上边多占一像素。
     const float size_px = pg.size_pt * zoom;
     const float adv_px = (pg.advance_pt > 0.0f ? pg.advance_pt : pg.size_pt) * zoom;
     if (!(size_px > 1.0f)) return;
-    const float side = size_px * 0.70f;
+    const float side = std::max(3.0f, std::round(size_px * 0.70f));
     const float left = std::round(pen_x + (adv_px - side) * 0.5f);
     const float top = std::round(pen_y - side);
     const float thick = std::max(1.0f, std::round(size_px * 0.075f));
     target.strokeRect(Rect{left, top, side, side}, color, thick);
     if (!checked) return;
 
-    // 对勾：两条斜线，落在框内侧的八成范围里。比例按框边长算，字号变了跟着缩。
-    const float in0_x = left + side * 0.22f;
-    const float in0_y = top + side * 0.54f;
-    const float in1_x = left + side * 0.42f;
-    const float in1_y = top + side * 0.76f;
-    const float in2_x = left + side * 0.80f;
-    const float in2_y = top + side * 0.26f;
-    const float w = std::max(1.0f, std::round(side * 0.15f));
-    strokeSegment(target, in0_x, in0_y, in1_x, in1_y, w, color);
-    strokeSegment(target, in1_x, in1_y, in2_x, in2_y, w, color);
+    // 对勾：一条折线，圆头圆角，覆盖率按距离算 —— 与方框同为三像素宽的笔画，
+    //   斜线上不会出现锯齿台阶。比例按框边长算，字号变了跟着缩。
+    const float mark[6] = {
+        left + side * 0.26f, top + side * 0.52f,  left + side * 0.43f,
+        top + side * 0.70f,  left + side * 0.76f, top + side * 0.30f,
+    };
+    const float w = std::max(1.0f, std::round(side * 0.14f));
+    target.strokePolyline(mark, 3, color, w);
 }
 
 /**
@@ -1543,8 +1523,6 @@ void EditorEngine::rasterControlMarks(Bitmap& target, int page_index, const floa
         const float hi_pt = lb.block_hi_pt + dy_px / zoom;
         if (band && (hi_pt < *band_lo_pt - 1.0f || lo_pt > *band_hi_pt + 1.0f)) continue;
 
-        hb_font_t* hbf = lb.bracket_font->hb();
-
         for (const LineCluster& c : lb.clusters) {
             if (!c.placeholder) continue;
             // 占位簇不止括号一种：行内原子也占一个槽（它不产生字形，所以同样是占位）。
@@ -1552,6 +1530,9 @@ void EditorEngine::rasterControlMarks(Bitmap& target, int page_index, const floa
             //   bracket_side 正是 None，那样写会给每枚原子左边长出一枚开括号，
             //   而它用的是括号色、贴在框的左沿上，看着像原子自带的装饰。
             if (c.bracket_side == BracketSide::None) continue;
+            // 括号跟着内容 run 的字体走：排版的槽宽按同一份字体算，绘制必须用同一个，
+            //   否则字形的 advance 与槽宽对不上，括号会压字或留一条空缝。
+            hb_font_t* hbf = (c.bracket_font != nullptr ? c.bracket_font : lb.bracket_font)->hb();
             const bool open = (c.bracket_side == BracketSide::Open);
             hb_codepoint_t g = 0;
             const hb_codepoint_t want = static_cast<hb_codepoint_t>(open ? '[' : ']');

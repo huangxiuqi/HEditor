@@ -237,11 +237,51 @@ function makeColorPicker(): () => void {
 }
 
 /**
+ * 造一个"控件颜色"按钮要用的取色器。
+ *
+ * 只改光标所在的那个选择类控件：单选、复选、单选组、复选组都走同一条 updateControl，
+ *   记号色是控件外观的一部分，改完由引擎重画记号本身。
+ * @returns 点一下就会弹出取色器的入口
+ */
+function makeControlColorPicker(): () => void {
+  const input = document.createElement('input');
+  input.type = 'color';
+  input.value = '#2563eb';
+  input.style.display = 'none';
+  document.body.appendChild(input);
+  const choiceTypes = new Set(['radioButton', 'checkBox', 'radioGroup', 'checkBoxGroup']);
+  input.addEventListener('change', () => {
+    const at = (i: number): number => Number.parseInt(input.value.slice(i, i + 2), 16);
+    const caret = editor.caret().pos;
+    // 选择类的光标停不进去（屏障三档都生效），所以不能只看 focused：插完或点完之后
+    //   光标在整块之后，要按区间找"光标贴着的那个控件"。
+    const target = editor.form().find((c) => {
+      if (!choiceTypes.has(c.type)) return false;
+      const afterStart =
+        caret.para > c.start.para ||
+        (caret.para === c.start.para && caret.offset >= c.start.offset);
+      const beforeEnd =
+        caret.para < c.end.para || (caret.para === c.end.para && caret.offset <= c.end.offset);
+      return (afterStart && beforeEnd) || c.focused;
+    });
+    if (!target) {
+      chrome.say('先把光标放到单选 / 复选 / 单选组 / 复选组里');
+      return;
+    }
+    void editor
+      .updateControl(target.index, { glyphColor: [at(1), at(3), at(5), 255] })
+      .then((ok) => chrome.say(ok ? '记号颜色已改' : '记号颜色被拒（切到编辑模式再试）'));
+  });
+  return () => input.click();
+}
+
+/**
  * 这一页的动作表：三个页签，全部落在公开面上。
  * @returns 页签表
  */
 function makeTabs(): Tab[] {
   const pickColor = makeColorPicker();
+  const pickControlColor = makeControlColorPicker();
 
   const doc: Group = {
     label: '文档',
@@ -555,9 +595,9 @@ function makeTabs(): Tab[] {
         label: '单选',
         icon: 'choice',
         big: true,
-        // 一次插一个：单选控件本身就是"一个选项"，同组互斥靠 group 关联（点第二个控件
-        //   时第一个自动取消）。连插两个会把第二个落到第一个里，那是嵌套不是同组。
-        run: () => insertControl('radioButton', { label: '选项甲', group: 'demo-radio' }),
+        // 一次插一个，且不配互斥组：没有组名的单选是独立开关，点一下选、再点一下取消。
+        //   要同组互斥时由宿主在插入选项里给 group（同组里点第二个会自动取消第一个）。
+        run: () => insertControl('radioButton', { label: '选项甲', glyphColor: [220, 38, 38, 255] }),
       },
       {
         act: 'checkbox',
@@ -572,14 +612,19 @@ function makeTabs(): Tab[] {
         label: '单选组',
         icon: 'choice',
         big: true,
-        run: () => insertControl('radioGroup', { options: DEMO_OPTIONS }),
+        // 组控件的记号色同样是这一个选项：组里所有圆圈用同一种颜色。
+        run: () => insertControl('radioGroup', { options: DEMO_OPTIONS, glyphColor: [22, 163, 74, 255] }),
       },
       {
         act: 'checkboxgroup',
         label: '复选组',
         icon: 'choice',
         big: true,
-        run: () => insertControl('checkBoxGroup', { options: DEMO_OPTIONS }),
+        run: () =>
+          insertControl('checkBoxGroup', {
+            options: DEMO_OPTIONS,
+            glyphColor: [124, 58, 237, 255],
+          }),
       },
       {
         act: 'dropdown',
@@ -595,6 +640,14 @@ function makeTabs(): Tab[] {
         big: true,
         // 默认格式 yyyy年MM月dd日 HH时mm分ss秒；六个单位全可选。
         run: () => insertControl('date', {}),
+      },
+      {
+        act: 'control-color',
+        label: '控件颜色',
+        icon: 'color',
+        big: true,
+        // 改的是"光标所在那个控件"的外观，不是文档正文的字体色。
+        run: pickControlColor,
       },
       {
         act: 'image',

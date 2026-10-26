@@ -505,6 +505,67 @@ void Bitmap::strokeRect(const Rect& r, Color c, float thickness) {
     fillRect(Rect{r.x + r.w - thickness, r.y, thickness, r.h}, c);
 }
 
+void Bitmap::strokePolyline(const float* pts, int count, Color c, float width) {
+    if (pts == nullptr || count < 2 || !(width > 0.0f) || c.a == 0 || w_ <= 0 || h_ <= 0) return;
+
+    float lo_x = pts[0];
+    float hi_x = pts[0];
+    float lo_y = pts[1];
+    float hi_y = pts[1];
+    for (int i = 1; i < count; ++i) {
+        lo_x = std::min(lo_x, pts[i * 2]);
+        hi_x = std::max(hi_x, pts[i * 2]);
+        lo_y = std::min(lo_y, pts[i * 2 + 1]);
+        hi_y = std::max(hi_y, pts[i * 2 + 1]);
+    }
+    const float pad = width * 0.5f + 1.0f;
+    const int x0 = std::max(0, static_cast<int>(std::floor(lo_x - pad)));
+    const int y0 = std::max(0, static_cast<int>(std::floor(lo_y - pad)));
+    const int x1 = std::min(w_, static_cast<int>(std::ceil(hi_x + pad)));
+    const int y1 = std::min(h_, static_cast<int>(std::ceil(hi_y + pad)));
+    if (x1 <= x0 || y1 <= y0) return;
+    painted_px_ += static_cast<size_t>(x1 - x0) * static_cast<size_t>(y1 - y0);
+    if (!sk_ || sk_->canvas == nullptr) return;
+
+    // 覆盖率按"像素中心到折线的最近距离"算：线身是每段两侧各半个线宽的胶囊，
+    //   圆头与圆角由胶囊的并集自然给出。
+    const float half = width * 0.5f;
+    const size_t row_bytes = static_cast<size_t>(w_) * 4u;
+    uint8_t* base = px_.data();
+    for (int y = y0; y < y1; ++y) {
+        uint8_t* row = base + static_cast<size_t>(y) * row_bytes;
+        const float py = static_cast<float>(y) + 0.5f;
+        for (int x = x0; x < x1; ++x) {
+            const float pxc = static_cast<float>(x) + 0.5f;
+            float best2 = 1e30f;
+            for (int i = 1; i < count; ++i) {
+                const float ax = pts[(i - 1) * 2];
+                const float ay = pts[(i - 1) * 2 + 1];
+                const float bx = pts[i * 2];
+                const float by = pts[i * 2 + 1];
+                const float dx = bx - ax;
+                const float dy = by - ay;
+                const float len2 = dx * dx + dy * dy;
+                float t = len2 > 0.0f ? ((pxc - ax) * dx + (py - ay) * dy) / len2 : 0.0f;
+                t = std::clamp(t, 0.0f, 1.0f);
+                const float qx = ax + t * dx - pxc;
+                const float qy = ay + t * dy - py;
+                best2 = std::min(best2, qx * qx + qy * qy);
+            }
+            float cov = half + 0.5f - std::sqrt(best2);
+            if (cov <= 0.0f) continue;
+            cov = std::min(cov, 1.0f);
+            const int a = static_cast<int>(std::lround(static_cast<float>(c.a) * cov));
+            if (a <= 0) continue;
+            const int ia = 255 - a;
+            uint8_t* p = row + static_cast<size_t>(x) * 4u;
+            p[0] = static_cast<uint8_t>((p[0] * ia + c.r * a + 127) / 255);
+            p[1] = static_cast<uint8_t>((p[1] * ia + c.g * a + 127) / 255);
+            p[2] = static_cast<uint8_t>((p[2] * ia + c.b * a + 127) / 255);
+        }
+    }
+}
+
 namespace {
 
 /**

@@ -13630,6 +13630,26 @@ int main() {
         e80.moveCaretBy(1);
         expectTrue(e80.caretInsertable(), "方向键把光标带出了屏障");
 
+        // 从控件一侧跨到另一侧：贴着闭括号按左键要落到开括号之前，反过来也一样。
+        //   贴回"来的这一侧"会让光标在控件边上原地不动，两边的正文互相走不过去。
+        //   这里单独造一个前后都有正文的单选，边界上只有它自己的一对括号，
+        //   相邻控件共享偏移时位置要另外数括号，与这条判据无关。
+        e80.moveCaretToDocEnd();
+        expectTrue(e80.typeTextAndRender("Z"), "在正文末尾打一个字");
+        expectTrue(insert80("checkBox", "隔开", {}, ""), "插入一个前后都有正文的复选");
+        const int cross80 = static_cast<int>(e80.controls().size()) - 1;
+        const ControlRange rc80 = e80.controls().at(cross80).range;
+        const FlowPos after80 = e80.flowPosAtSide(rc80.end.para, rc80.end.offset, 1);
+        const FlowPos before80 = e80.flowPosAtSide(rc80.start.para, rc80.start.offset, 0);
+        expectTrue(after80 > before80, "控件右侧的流位置在左侧之后");
+        expectTrue(e80.setCaretAtFlow(after80), "光标摆到复选右侧");
+        expectTrue(e80.moveCaretBy(-1), "左方向键");
+        expectTrue(e80.caretFlowPos() == before80, "落在控件左侧（实际 " +
+                                                       std::to_string(e80.caretFlowPos()) +
+                                                       "，期望 " + std::to_string(before80) + "）");
+        expectTrue(e80.moveCaretBy(1), "右方向键");
+        expectTrue(e80.caretFlowPos() == after80, "从左侧跨回复选右边");
+
         // 下拉的自由输入：打开之后选项表以外的值也能写。
         ControlSpec free80 = makeControlSpec("dropdownList");
         if (auto* d = std::get_if<DropdownDetail>(&free80.detail)) {
@@ -13670,6 +13690,23 @@ int main() {
         expectTrue(e80.controlViews()[static_cast<size_t>(emptyIndex)].content == "abcde",
                    "五个字都留在空控件里（实际 " +
                        e80.controlViews()[static_cast<size_t>(emptyIndex)].content + "）");
+
+        // 没配互斥组的单选各自独立：点谁选谁，再点一下取消，不牵连另一个。
+        expectTrue(insert80("radioButton", "独立甲", {}, ""), "插入未配组的单选甲");
+        expectTrue(insert80("radioButton", "独立乙", {}, ""), "插入未配组的单选乙");
+        const int solo_a = static_cast<int>(e80.controlViews().size()) - 2;
+        const int solo_b = solo_a + 1;
+        expectTrue(e80.toggleControlAndRender(solo_a, -1), "点独立甲");
+        expectTrue(e80.controlViews()[static_cast<size_t>(solo_a)].value.flag, "独立甲选中");
+        expectTrue(e80.toggleControlAndRender(solo_b, -1), "点独立乙");
+        v80 = e80.controlViews();
+        expectTrue(v80[static_cast<size_t>(solo_b)].value.flag, "独立乙选中");
+        expectTrue(v80[static_cast<size_t>(solo_a)].value.flag,
+                   "独立甲仍然选中（没有组的单选不互斥）");
+        expectTrue(e80.toggleControlAndRender(solo_a, -1), "再点一次独立甲");
+        v80 = e80.controlViews();
+        expectTrue(!v80[static_cast<size_t>(solo_a)].value.flag, "独立甲取消");
+        expectTrue(v80[static_cast<size_t>(solo_b)].value.flag, "独立乙不受影响");
     }
 
     if (runSection(81)) std::printf("\n[81] 控件定义可改：选项、标签、格式、孤儿值与撤销\n");
@@ -13840,6 +13877,15 @@ int main() {
             e82.moveCaretToDocEnd();
             return e82.insertControlAndRender(sp, label);
         };
+        const std::vector<ControlOption> opts82 = {
+            {"a", "选项甲"}, {"b", "选项乙"}, {"c", "选项丙"}};
+        auto insChoice82 = [&](const std::string& type, const std::string& label,
+                               const std::vector<ControlOption>& options) {
+            ControlSpec sp = makeControlSpec(type);
+            if (auto* c = std::get_if<ChoiceDetail>(&sp.detail)) c->options = options;
+            e82.moveCaretToDocEnd();
+            return e82.insertControlAndRender(sp, label);
+        };
         expectTrue(ins82("checkBox", "未选"), "插入未选中的复选");
         expectTrue(ins82("checkBox", "已选"), "插入要选中的复选");
         expectTrue(e82.toggleControlAndRender(1, -1), "选中第二个复选");
@@ -13884,6 +13930,94 @@ int main() {
         expectTrue(ink_on > ink_off, "选中的方框墨更多（对勾加进去了：" + std::to_string(ink_off) +
                                          " → " + std::to_string(ink_on) + "）");
 
+        // 方框四条边一样粗：边长与线宽都对齐整数像素，右 / 下边不会多出一像素。
+        auto frameRuns82 = [&](size_t index) -> std::array<int, 4> {
+            std::array<int, 4> out{0, 0, 0, 0};
+            const std::vector<EditorEngine::ControlRect> rs = e82.controlRects(index);
+            if (rs.empty()) return out;
+            const Rect r = rs[0].r_pt;
+            const float zoom = c82.zoom;
+            const int x0 = static_cast<int>(std::floor(r.x * zoom));
+            const int x1 = static_cast<int>(std::ceil((r.x + r.h) * zoom));
+            const int y0 = static_cast<int>(std::floor(r.y * zoom));
+            const int y1 = static_cast<int>(std::ceil((r.y + r.h) * zoom));
+            const uint8_t* fp = e82.frame();
+            auto dark = [&](int x, int y) {
+                const size_t i =
+                    (static_cast<size_t>(y) * static_cast<size_t>(fw82) + static_cast<size_t>(x)) *
+                    4u;
+                return fp[i] < 128 && fp[i + 1] < 128 && fp[i + 2] < 128;
+            };
+            int minx = x1, maxx = x0 - 1, miny = y1, maxy = y0 - 1;
+            for (int y = y0; y < y1; ++y) {
+                for (int x = x0; x < x1; ++x) {
+                    if (!dark(x, y)) continue;
+                    minx = std::min(minx, x);
+                    maxx = std::max(maxx, x);
+                    miny = std::min(miny, y);
+                    maxy = std::max(maxy, y);
+                }
+            }
+            if (maxx < minx || maxy < miny) return out;
+            // 内容矩形里还有标签的字，不能拿整块墨的包围盒当框。框是最左边那一条
+            //   连续的墨：先找最左的暗列与它最上面的暗点，再沿上边量出边长。
+            int bx = -1;
+            int by = -1;
+            for (int x = x0; x <= maxx && bx < 0; ++x) {
+                for (int y = y0; y <= maxy; ++y) {
+                    if (!dark(x, y)) continue;
+                    bx = x;
+                    by = y;
+                    break;
+                }
+            }
+            if (bx < 0 || by < 0) return out;
+            int side = 0;
+            while (bx + side <= maxx && dark(bx + side, by)) ++side;
+            if (side < 4) return out;
+            const int ymid = by + side / 2;
+            const int xmid = bx + side / 2;
+            while (bx + out[0] < bx + side && dark(bx + out[0], ymid)) ++out[0];
+            while (bx + side - 1 - out[1] >= bx && dark(bx + side - 1 - out[1], ymid)) ++out[1];
+            while (by + out[2] < by + side && dark(xmid, by + out[2])) ++out[2];
+            while (by + side - 1 - out[3] >= by && dark(xmid, by + side - 1 - out[3])) ++out[3];
+            return out;
+        };
+        const std::array<int, 4> runs82 = frameRuns82(0);
+        expectTrue(runs82[0] > 0, "框的左边量得到（" + std::to_string(runs82[0]) + " 像素）");
+        expectTrue(runs82[0] == runs82[1] && runs82[0] == runs82[2] && runs82[0] == runs82[3],
+                   "四条边一样粗（" + std::to_string(runs82[0]) + "/" + std::to_string(runs82[1]) +
+                       "/" + std::to_string(runs82[2]) + "/" + std::to_string(runs82[3]) + "）");
+
+        // 对勾的斜边有抗锯齿的中间灰：非黑即白说明边缘是台阶。
+        auto shade82 = [&](size_t index) -> int {
+            const std::vector<EditorEngine::ControlRect> rs = e82.controlRects(index);
+            if (rs.empty()) return -1;
+            const Rect r = rs[0].r_pt;
+            const float zoom = c82.zoom;
+            const int x0 = static_cast<int>(std::floor(r.x * zoom));
+            const int x1 = static_cast<int>(std::ceil((r.x + r.h) * zoom));
+            const int y0 = static_cast<int>(std::floor(r.y * zoom));
+            const int y1 = static_cast<int>(std::ceil((r.y + r.h) * zoom));
+            const uint8_t* fp = e82.frame();
+            int n = 0;
+            for (int y = y0; y < y1; ++y) {
+                for (int x = x0; x < x1; ++x) {
+                    const size_t i = (static_cast<size_t>(y) * static_cast<size_t>(fw82) +
+                                      static_cast<size_t>(x)) *
+                                     4u;
+                    const int rr = fp[i];
+                    const int gg = fp[i + 1];
+                    const int bb = fp[i + 2];
+                    if (rr > 40 && rr < 215 && std::abs(rr - gg) < 10 && std::abs(gg - bb) < 10) {
+                        ++n;
+                    }
+                }
+            }
+            return n;
+        };
+        expectTrue(shade82(1) > 0, "对勾有抗锯齿的过渡像素（" + std::to_string(shade82(1)) + "）");
+
         // 记号色可配：配成纯蓝之后，那一格里必须出现蓝色像素。
         auto blue82 = [&](size_t index) -> int {
             const std::vector<EditorEngine::ControlRect> rs = e82.controlRects(index);
@@ -13925,6 +14059,52 @@ int main() {
         ControlPatch cp85;
         cp85.glyph_color = Color::rgb(1, 2, 3);
         expectTrue(!e82.setControlSpecAndRender(2, cp85), "给文本控件配记号色被拒");
+
+        // 四种选择类的记号色都能配：单选、单选组、复选组与复选走同一条外观字段。
+        expectTrue(insChoice82("radioButton", "单选", {}), "插入单选");
+        expectTrue(insChoice82("radioGroup", "", opts82), "插入单选组");
+        expectTrue(insChoice82("checkBoxGroup", "", opts82), "插入复选组");
+        const int n82 = static_cast<int>(e82.controlViews().size());
+        const int i_radio = n82 - 3;
+        const int i_rgroup = n82 - 2;
+        const int i_cgroup = n82 - 1;
+        for (const int idx : {i_radio, i_rgroup, i_cgroup}) {
+            ControlPatch cp;
+            cp.glyph_color = Color::rgb(20, 110, 220);
+            expectTrue(e82.setControlSpecAndRender(idx, cp), "给选择类配记号色");
+            const int blue = blue82(static_cast<size_t>(idx));
+            expectTrue(blue > 12, "记号变蓝（下标 " + std::to_string(idx) + "，蓝色像素 " +
+                                      std::to_string(blue) + "）");
+            expectTrue(e82.controlViews()[static_cast<size_t>(idx)].glyph_color.b == 220,
+                       "颜色落进记录");
+        }
+
+        // 括号跟着内容字体走：把内容调成 24 磅，开括号的槽宽必须跟着变宽。
+        expectTrue(ins82("text", "AB"), "插入一个文本控件量括号槽宽");
+        const int i_text = static_cast<int>(e82.controlViews().size()) - 1;
+        const ControlRange br82 = e82.controls().at(i_text).range;
+        const FlowPos open82 = e82.flowPosAtSide(br82.start.para, br82.start.offset, 0);
+        const FlowPos in0_82 = open82 + 1;
+        const FlowPos in1_82 = e82.flowPosAtSide(br82.end.para, br82.end.offset, 0);
+        expectTrue(in1_82 > in0_82, "内容区间在开括号之后、闭括号之前");
+        auto slotWidth82 = [&]() -> float {
+            if (!e82.setCaretAtFlow(open82)) return -1.0f;
+            Rect cr{};
+            if (!e82.caretRectPt(&cr)) return -1.0f;
+            const std::vector<EditorEngine::ControlRect> rs = e82.controlRects(i_text);
+            if (rs.empty()) return -1.0f;
+            return rs[0].r_pt.x - cr.x;
+        };
+        const float slot_before82 = slotWidth82();
+        expectTrue(slot_before82 > 0.0f, "开括号槽宽量得到");
+        expectTrue(e82.setSelection(Range{in0_82, in1_82}), "选中控件内容");
+        CharFormat big82;
+        big82.size = Length::abs(ptToEmu(24.0));
+        expectTrue(e82.applyCharFormatAndRender(big82), "内容改成 24 磅");
+        const float slot_after82 = slotWidth82();
+        expectTrue(slot_after82 > slot_before82 + 1.0f, "括号槽宽跟着字号变（" +
+                                                            std::to_string(slot_before82) + " → " +
+                                                            std::to_string(slot_after82) + "）");
     }
 
     checkSectionTable();

@@ -70,6 +70,12 @@ export interface InputEnv {
   pointOf(ev: { clientX: number; clientY: number }): { x: number; y: number } | null;
 
   /**
+   * 换画布光标样式（空串 = 正文的默认样式）。
+   * @param cursor CSS cursor 值
+   */
+  setCursor?(cursor: string): void;
+
+  /**
    * 把当前按下绑到页容器上（拖出边界也继续收）。
    */
   capturePointer(): void;
@@ -220,6 +226,17 @@ export interface InputLayer {
   onCompositionEnd(ev: CompositionEvent): Maybe<any>;
 
   /**
+   * 鼠标悬停：落在图片把手上时把光标换成对应方向。
+   * @param ev 鼠标事件
+   */
+  onPointerMove(ev: MouseEvent): void;
+
+  /**
+   * 指针离开画布：把光标换回正文的样式。
+   */
+  onPointerLeave(): void;
+
+  /**
    * 指针按下：命中、落光标、起拖选。
    * @param ev 鼠标事件
    */
@@ -267,6 +284,31 @@ function zoomKeyOf(ev: KeyboardEvent): number | null {
 }
 
 /**
+ * 图片把手序号 -> 光标。0 左上起顺时针（见 ImageHit::handle）：角上是对角缩放，
+ * 四条边各管一个轴。认方向而不认具体把手，与尺寸推导用的是同一份序号约定。
+ * @param handle 把手序号（0..7）
+ * @returns CSS cursor 值；不认识的序号给空串
+ */
+function cursorOfHandle(handle: number): string {
+  switch (handle) {
+    case 0:
+    case 4:
+      return 'nwse-resize';
+    case 2:
+    case 6:
+      return 'nesw-resize';
+    case 1:
+    case 5:
+      return 'ns-resize';
+    case 3:
+    case 7:
+      return 'ew-resize';
+    default:
+      return '';
+  }
+}
+
+/**
  * 造输入层。
  * @param env 宿主注入的环境（读写、命中、坐标换算、收尾）
  * @returns 键盘 / 合成 / 指针三个入口
@@ -274,6 +316,13 @@ function zoomKeyOf(ev: KeyboardEvent): number | null {
 export function createInput(env: InputEnv): InputLayer {
   const click: ClickState = { seq: 0, time: 0, x: 0, y: 0 };
   let composing = false;
+  // 正在拖图片把手：这期间悬停命中不参与，光标由把手方向定。
+  let resizing = false;
+  // 悬停命中只允许一条在途：鼠标每秒能发上百次移动，逐次下发会把通道堵住。
+  let hover_busy = false;
+  let hover_next: { x: number; y: number } | null = null;
+  // 悬停结果的代际：指针离开画布之后，在途的那一条回来也不改光标。
+  let hover_seq = 0;
   const isBusy = (): boolean => (typeof env.isBusy === 'function' ? env.isBusy() : false);
   /**
    * 把一串异步动作登记给宿主（测试可以等它），并保证拒绝不会变成未处理的 Promise。
@@ -299,6 +348,68 @@ export function createInput(env: InputEnv): InputLayer {
   const armDrag = (on: boolean): void => {
     if (env.drag) env.drag.arm(on);
   };
+
+  /**
+   * 悬停命中的结果落成光标。
+   * @param hit 命中结果（可能为空）
+   */
+  function applyHoverCursor(hit: Hit | null | undefined): void {
+    if (typeof env.setCursor !== 'function') return;
+    const handle = hit && typeof hit.imgHandle === 'number' ? hit.imgHandle : -1;
+    env.setCursor(handle >= 0 ? cursorOfHandle(handle) : '');
+  }
+
+  /**
+   * 发一次悬停命中（只保留最新坐标，最多一条在途）。
+   */
+  function pumpHover(): void {
+    if (hover_busy || hover_next === null) return;
+    const p = hover_next;
+    hover_next = null;
+    hover_busy = true;
+    const seq = ++hover_seq;
+    const done = (hit: Hit | null | undefined): void => {
+      hover_busy = false;
+      if (seq === hover_seq) applyHoverCursor(hit);
+      pumpHover();
+    };
+    const r = env.hit(p.x, p.y);
+    if (r && typeof (r as Promise<any>).then === 'function') {
+      (r as Promise<any>).then(done, () => {
+        hover_busy = false;
+      });
+    } else {
+      done(r as Hit | null);
+    }
+  }
+
+  /**
+   * 鼠标悬停：图片把手上换成缩放光标，离开把手换回正文光标。
+   * @param ev 鼠标事件
+   */
+  function onPointerMove(ev: MouseEvent): void {
+    // 按着键移动（拖选、拖图片）不改光标：那一路有自己的状态，混进来会互相覆盖。
+    if (ev.buttons !== 0) return;
+    if (!env.isReady() || isBusy() || resizing) return;
+    const p = env.pointOf(ev);
+    if (!p) {
+      hover_next = null;
+      ++hover_seq;
+      if (typeof env.setCursor === 'function') env.setCursor('');
+      return;
+    }
+    hover_next = p;
+    pumpHover();
+  }
+
+  /**
+   * 指针离开画布：光标回到正文的默认样式。
+   */
+  function onPointerLeave(): void {
+    hover_next = null;
+    ++hover_seq;
+    if (typeof env.setCursor === 'function') env.setCursor('');
+  }
 
   /**
    * 图片把手的拖拽：按下时取一次起始尺寸与指针位置，之后每帧按增量算新尺寸。
@@ -348,9 +459,11 @@ export function createInput(env: InputEnv): InputLayer {
         const onUp = (): void => {
           window.removeEventListener('mousemove', onMove);
           window.removeEventListener('mouseup', onUp);
+          resizing = false;
           // 尺寸真的变过才收尾一次：change 事件按"一次拖拽一次"发，不是按帧发。
           if (!first) env.commit(true);
         };
+        resizing = true;
         window.addEventListener('mousemove', onMove);
         window.addEventListener('mouseup', onUp);
         return null;
@@ -510,6 +623,8 @@ export function createInput(env: InputEnv): InputLayer {
     onCompositionStart,
     onCompositionUpdate,
     onCompositionEnd,
+    onPointerMove,
+    onPointerLeave,
     onPointerDown,
     onWheel,
     placeAt,

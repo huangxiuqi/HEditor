@@ -1247,11 +1247,20 @@ bool EditorEngine::caretInsertable() const {
 bool EditorEngine::confineCaret(FlowPos before) {
     const FlowPos now = caretFlowPos();
     if (mode_ != EditMode::Form) {
-        // 文档与只读模式只挡屏障：目标落进选择类的内容里时贴到块外，按"从哪边过来"选端点。
+        // 文档与只读模式只挡屏障：目标落进选择类的内容里时跳到块的另一侧 ——
+        //   从右边过来的落到开括号之前，从左边过来的落到闭括号之后。
+        //   贴回"来的那一侧"会让方向键在控件边上原地不动，永远过不去。
         FlowPos first = 0;
         FlowPos end = 0;
         if (!barrierSpanAt(now, &first, &end)) return now != before;
-        const FlowPos target = (before <= first) ? first : end;
+        FlowPos target = end;
+        if (before >= end) {
+            target = first;
+        } else if (before <= first) {
+            target = end;
+        } else {
+            target = (now < before) ? first : end;
+        }
         if (!caret_.setCaretAtFlow(target)) return false;
         return target != before;
     }

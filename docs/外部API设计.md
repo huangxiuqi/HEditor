@@ -225,7 +225,8 @@ setText(text: string, opts?: { repeat?: number }): Promise<void>   // 明确用�
 八种基础控件由 `insertControl({ type })` 插入，`type` 是 `text` / `number` / `radioButton` /
 `checkBox` / `radioGroup` / `checkBoxGroup` / `dropdownList` / `date`；选项、互斥组、日期格式、
 可选单位与记号颜色都在同一个入参里（`options` / `group` / `format` / `dateUnits` / `glyphColor`，
-颜色是 `[r, g, b, a]`，不给就跟随文字颜色）。插入选择类控件之后光标落在整块之后。
+颜色是 `[r, g, b, a]`，不给就跟随文字颜色）。记号颜色对四种选择类都生效（单选、复选、
+单选组、复选组）。插入选择类控件之后光标落在整块之后。
 
 | 签名 | 备注 |
 | --- | --- |

@@ -1860,7 +1860,9 @@ bool EditCommand::toggleControl(int index, int option) {
     std::vector<std::pair<NodeId, ControlValue>> changes;
     if (choice->options.empty()) {
         ControlValue v = spec->value;
-        v.flag = choice->multi ? !v.flag : true;
+        // 没配互斥组的单选是一个独立开关：点一下选、再点一下取消。配了组才按单选语义
+        //   只许选中（同组里由下面那段把别人取消）；复选本来就是开关。
+        v.flag = (choice->multi || choice->group.empty()) ? !v.flag : true;
         changes.emplace_back(id, v);
         if (!choice->multi && !choice->group.empty()) {
             for (const NodeId other : controlNodeIds()) {

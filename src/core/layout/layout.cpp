@@ -18,8 +18,8 @@ using Clock = std::chrono::steady_clock;
 /**
  * 方括号在某个字体下的 advance（磅）。返回 0 表示该字体没有方括号字形 ——
  * 那就不留位（宁可没有空隙，也不要留一个宽度却画不出东西）。
- * 用块的主字体算：一个块内的字号一致，而括号只是一对细笔画，
- * 不值得为"块里混了几种字体"再去逐段取值。
+ * 字体由调用方按控件边界所在的那一侧正文 run 取（见 bracketFontFor）；块主字体只是
+ * 取不到 run 字体时的退路。
  */
 float bracketAdvancePt(FontInstance* f) {
     if (!f) return 0.0f;
@@ -152,6 +152,11 @@ struct BlockShaping {
          */
         bool read_only = false;
         /**
+         * 画这枚括号用的字体（只有括号占位有意义）。槽宽也按它算 —— 括号跟着内容
+         * run 的字体走，换字体时字形与推进一起变。
+         */
+        const FontInstance* bracket_font = nullptr;
+        /**
          * 这个占位属于哪个控件（控件集合下标）。只有占位簇有意义 ——
          * 命中测试靠它回答"点到的这个括号是谁的"（见 layout.h 的 LineCluster）。
          */
@@ -226,6 +231,34 @@ uint64_t shapingFingerprint(const BlockSpec& b, const std::vector<FormatRun>& ru
 }
 
 /**
+ * 控件边界那一侧的括号该用哪个字体。
+ *
+ * 开口取边界所在的那个字（内容首字），闭口取前一个字（内容末字）：括号属于内容，
+ * 换字体时它跟着变。字体没有方括号字形时退回块主字体 —— 槽宽按 0 算的话括号不会画，
+ * 而边框不该因为选的字体缺一个 ASCII 括号就消失。
+ *
+ * @param o 行内对象（控件边界）
+ * @param fruns 格式 run 表
+ * @param lib 字体库
+ * @param n_cp 段长（码点）
+ * @param primary 块主字体（退路）
+ * @return 画这枚括号用的字体
+ */
+FontInstance* bracketFontFor(const InlineObject& o, const std::vector<FormatRun>& fruns,
+                             FontLibrary& lib, uint32_t n_cp, FontInstance* primary) {
+    if (fruns.empty() || n_cp == 0) return primary;
+    uint32_t probe = (o.kind == InlineObjectKind::ControlEnd && o.cp > 0)
+                         ? static_cast<uint32_t>(o.cp - 1)
+                         : static_cast<uint32_t>(o.cp);
+    if (probe >= n_cp) probe = n_cp - 1;
+    const FormatRun* r = runCovering(fruns, probe);
+    if (r == nullptr) return primary;
+    FontInstance* f = lib.instance(r->font_index, r->size_pt, r->weight);
+    if (f == nullptr || !(bracketAdvancePt(f) > 0.0f)) return primary;
+    return f;
+}
+
+/**
  * 把块流的行内对象插成占位簇（括号与行内原子进文档流的全部实现）。
  * 对象从哪来、该不该显示、谁在外谁在内，全在产生端（见 BlockSpec::objects）；排版层只做
  * 一次线性归并（表已升序，同一处边界上的先后就是数组里的先后，不做第二次排序）。
@@ -237,22 +270,29 @@ uint64_t shapingFingerprint(const BlockSpec& b, const std::vector<FormatRun>& ru
  * shaped 可能正指着只读的段级缓存条目，需要可改副本时用它旁边的 scratch。
  */
 const BlockShaping* withInlineObjects(const BlockSpec& b, uint32_t n_cp, const BlockShaping* shaped,
-                                      BlockShaping* scratch) {
+                                      BlockShaping* scratch, const std::vector<FormatRun>& fruns,
+                                      FontLibrary& lib) {
     if (b.objects.empty()) return shaped;
     const BlockShaping& src = *shaped;
     // 槽宽 = 括号字形 advance + 间隙。间隙必须计入排版，否则 字] 会挤在一起。
-    const float bw = bracketAdvancePt(src.primary);
-    const float slot = bw > 0.0f ? bw + kControlBracketSlotGapPt : 0.0f;
+    //   字体按边界那一侧的 run 现取：同一段里换了字体，两侧括号的宽度可以不同。
+    auto slotOf = [&](const InlineObject& o) {
+        FontInstance* f = bracketFontFor(o, fruns, lib, n_cp, src.primary);
+        const float bw = bracketAdvancePt(f);
+        return bw > 0.0f ? bw + kControlBracketSlotGapPt : 0.0f;
+    };
     // 一个都插不进去（取不到括号字形，表里又只有控件边界）就原样返回。
     //   原子不走这一条：它的宽度是自己给的，没有字体照样排得出。
     bool has_atom = false;
+    bool has_slot = false;
     for (const InlineObject& o : b.objects) {
         if (o.kind == InlineObjectKind::Atom) {
             has_atom = true;
-            break;
+        } else if (slotOf(o) > 0.0f) {
+            has_slot = true;
         }
     }
-    if (!(slot > 0.0f) && !has_atom) return shaped;
+    if (!has_slot && !has_atom) return shaped;
 
     // 这一段要插占位 → 簇序列会被改 → 需要一份可改的副本
     // （shaped 可能正指着只读的缓存条目）。
@@ -287,8 +327,9 @@ const BlockShaping* withInlineObjects(const BlockSpec& b, uint32_t n_cp, const B
         pc.bracket_side =
             (o.kind == InlineObjectKind::ControlStart) ? BracketSide::Open : BracketSide::Close;
         pc.read_only = o.read_only;
+        pc.bracket_font = bracketFontFor(o, fruns, lib, n_cp, src.primary);
         cl2.push_back(pc);
-        adv2.push_back(slot);
+        adv2.push_back(slotOf(o));
         brk2.push_back(false);  // 括号内部不是断点
     };
     size_t oi = 0;
@@ -1267,7 +1308,8 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
             empty_bs.st.vertical = b.wm.isVertical();
             empty_bs.st.sideways = b.wm.isSideways();
             BlockShaping slot_bs;
-            const BlockShaping* slotted = withInlineObjects(b, /*n_cp=*/0, &empty_bs, &slot_bs);
+            const BlockShaping* slotted = withInlineObjects(b, /*n_cp=*/0, &empty_bs, &slot_bs,
+                                                            std::vector<FormatRun>{}, lib);
 
             float box_h = 0.0f;
             for (const BlockShaping::Cluster& c : slotted->clusters) {
@@ -1309,6 +1351,7 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
                     lc.inline_pt = ax;
                     lc.placeholder = slotted->clusters[i].placeholder;
                     lc.bracket_side = slotted->clusters[i].bracket_side;
+                    lc.bracket_font = slotted->clusters[i].bracket_font;
                     lc.read_only = slotted->clusters[i].read_only;
                     lc.owner_control = slotted->clusters[i].owner_control;
                     lc.atom = slotted->clusters[i].atom;
@@ -1385,7 +1428,7 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
         //   哪些对象在这张表里，由产生端决定（引擎按模式与显示开关落成对象表），
         //   排版层不认识「聚焦」：表里有就占位。默认全部控件常显，故对象表与光标无关，
         //   光标移动不引起重排。para_cluster_starts 在此之前已生成，按约定不含占位簇。
-        shaped = withInlineObjects(b, n_cp, shaped, &scratch);
+        shaped = withInlineObjects(b, n_cp, shaped, &scratch, fruns, lib);
 
         // 从这里往下全是只读：断行、放置字形都只读整形结果。
         const BlockShaping& bs = *shaped;
@@ -1510,6 +1553,7 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
                         lc.inline_pt = ax;
                         lc.placeholder = bs.clusters[i].placeholder;
                         lc.bracket_side = bs.clusters[i].bracket_side;
+                        lc.bracket_font = bs.clusters[i].bracket_font;
                         lc.read_only = bs.clusters[i].read_only;
                         lc.owner_control = bs.clusters[i].owner_control;
                         lc.atom = bs.clusters[i].atom;
@@ -1702,6 +1746,7 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
                         lc.inline_pt = ay;
                         lc.placeholder = bs.clusters[i].placeholder;
                         lc.bracket_side = bs.clusters[i].bracket_side;
+                        lc.bracket_font = bs.clusters[i].bracket_font;
                         lc.read_only = bs.clusters[i].read_only;
                         lc.owner_control = bs.clusters[i].owner_control;
                         lc.atom = bs.clusters[i].atom;

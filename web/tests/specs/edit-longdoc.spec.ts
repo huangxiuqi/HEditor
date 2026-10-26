@@ -42,6 +42,10 @@ test.describe('编辑面：长文档与跨段编辑', () => {
     // 在脏段中间敲一个字（走真实键盘路径）
     await probe.read(`return await H.setCaret({ para: ${DIRTY}, offset: 5 });`);
     await probe.read(key('测'));
+    // 等这一下真的落地再读账：键路径在输入层里是异步下发的，不等它，"脏页"与
+    //   增量统计读到的是上一拍（多 worker 并行时最容易撞上）。这不是负载导致的偶发，
+    //   而是判据读得太早。
+    await probe.read('await H.flush();');
     const st = await probe.read('return D.editStats();');
     check('★ 敲字后是增量排版（不是全量）', st.layoutWasFull === false,
               `重排 ${st.relaidParagraphs} 段 / 复用 ${st.reusedParagraphs} 段 / 共 ${st.totalParagraphs} 段`);

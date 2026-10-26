@@ -32,6 +32,7 @@ test.describe('插入图片', () => {
         left: r.left, top: r.top, sx: r.width / cv.width, sy: r.height / cv.height,
         zoom: ZOOM(),
         cx: q.x + q.w / 2, cy: q.y + q.h / 2,
+        qx: q.x, qy: q.y, qw: q.w, qh: q.h,
         // 图右侧 40 磅处是正文（同一个行盒里的字）
         tx: q.x + q.w + 40, ty: q.y + q.h / 2,
         digest0: await D.frameDigest(),
@@ -56,6 +57,22 @@ test.describe('插入图片', () => {
           geo.digest0 + ' → ' + afterImage.digest);
     check('★ 点图片不落光标', afterImage.caret === geo.caret0,
           afterImage.caret + ' vs ' + geo.caret0);
+
+    // 悬停把手上要换成缩放光标：这是纯输入层的行为，不需要按下。
+    const cursorAt = async (xPt: number, yPt: number) => {
+      const q = at(xPt, yPt);
+      await p.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: q.x, y: q.y, buttons: 0 });
+      await p.page.waitForTimeout(100);
+      return p.page.evaluate(
+        () => getComputedStyle(document.querySelector('.heditor-pages') as HTMLElement).cursor,
+      );
+    };
+    const cursorCorner = await cursorAt(geo.qx, geo.qy);
+    check('★ 悬停在角把手：光标变成对角缩放', cursorCorner === 'nwse-resize', cursorCorner);
+    const cursorEdge = await cursorAt(geo.qx + geo.qw, geo.qy + geo.qh / 2);
+    check('★ 悬停在右边把手：光标变成横向缩放', cursorEdge === 'ew-resize', cursorEdge);
+    const cursorText = await cursorAt(geo.tx, geo.ty);
+    check('★ 离开把手回到正文光标', cursorText === 'text', cursorText);
 
     await click(geo.tx, geo.ty);
     const afterText = await p.read<any>(`
@@ -491,6 +508,28 @@ test.describe('插入控件', () => {
             `caret=${item.caret} range=[${item.start}, ${item.end})`);
     }
     check('★ 连插两个单选是兄弟，不是嵌套', r.nested === false, JSON.stringify(r));
+  });
+
+  test('未配组的单选各自独立：点一下选、再点一下取消', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' } });
+    const r = await p.read<any>(`
+      await H.setText('甲乙丙丁');
+      await H.setCaret({ para: 0, offset: 4 });
+      await H.flush();
+      await H.insertControl({ type: 'radioButton', label: '甲' });
+      await H.insertControl({ type: 'radioButton', label: '乙' });
+      await H.flush();
+      await H.toggleControl(0, -1);
+      await H.toggleControl(1, -1);
+      await H.flush();
+      const both = H.form().map((c) => c.value.flag);
+      await H.toggleControl(0, -1);
+      await H.flush();
+      return { both, after: H.form().map((c) => c.value.flag) };`);
+    check('两个未配组的单选都能选中', r.both[0] === true && r.both[1] === true,
+          JSON.stringify(r.both));
+    check('再点第一个只取消自己', r.after[0] === false && r.after[1] === true,
+          JSON.stringify(r.after));
   });
 
   test('贴着选择类控件退格：删整块，不进去删字', async ({ open }) => {

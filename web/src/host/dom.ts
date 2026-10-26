@@ -864,6 +864,9 @@ export function createDomHost(o: DomHostOptions): DomHost {
     hit: (xPx, yPx) => hitAt(xPx, yPx),
     docPt: (pt) => docPt(pt.x, pt.y),
     pointOf: (ev) => pointAt(ev.clientX, ev.clientY),
+    setCursor: (cursor) => {
+      pagesEl.style.cursor = cursor || 'text';
+    },
     capturePointer: () => {
       if (lastPointerId === null) return;
       try {
@@ -1045,6 +1048,9 @@ export function createDomHost(o: DomHostOptions): DomHost {
   //   委托给容器就没有那个缺口。合成 MouseEvent（探针）没有配套的 pointerdown，
   //   所以"按下"这一条必须挂在 mousedown 上。
   scroller.addEventListener('mousedown', (ev) => void input.onPointerDown(ev));
+  // 悬停只改光标样式，不动文档：落在图片把手上时换成对应方向的缩放光标。
+  scroller.addEventListener('mousemove', (ev) => input.onPointerMove(ev));
+  scroller.addEventListener('mouseleave', () => input.onPointerLeave());
   // 指针 id 只能从 pointerdown 上拿（mousedown 没有），而按下时要拿它去 setPointerCapture。
   scroller.addEventListener('pointerdown', (ev) => {
     // 记下指针 id：mousedown 上没有 pointerId，而按下时要拿它去 setPointerCapture。
