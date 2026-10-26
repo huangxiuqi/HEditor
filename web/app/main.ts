@@ -166,13 +166,41 @@ async function zoomTo(z: number): Promise<void> {
 }
 
 /**
- * 保存：序列化当前文档，把长度写到状态栏。
+ * 文件名用的时间戳，精确到分钟。
+ *
+ * 只到分钟：同一分钟内连按两次保存，后一次会覆盖前一次，这是有意的；
+ *   带上秒会让下载目录里堆一串几乎一样的文件。
+ * @returns 形如 20261026-2235 的串
+ */
+function saveStamp(): string {
+  const d = new Date();
+  const p = (n: number): string => String(n).padStart(2, '0');
+  const date = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}`;
+  return `${date}-${p(d.getHours())}${p(d.getMinutes())}`;
+}
+
+/**
+ * 保存：序列化文档，作为 JSON 文件交给浏览器下载。
+ *
+ * 库只负责给出字符串，落盘归宿主。这份 JSON 可以原样喂回 open：库按首字符判断是不是
+ *   文档 JSON，所以下载下来的文件直接当成内容打开即可。
  */
 async function saveNow(): Promise<void> {
   const json = await editor.save();
+  const name = `heditor-${saveStamp()}.json`;
+  const url = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  // 挂在文档上再点：部分浏览器对游离节点的 download 不生效
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  // 同一拍收回会让下载拿到空内容，等浏览器读走再释放
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
   dirty = false;
   const g = editor.geometry();
-  chrome.say(`${editor.paragraphs().length} 段 · 已序列化 ${json.length} 字节（${g.pages} 页）`);
+  chrome.say(`${editor.paragraphs().length} 段 · 已保存 ${name}（${json.length} 字节，${g.pages} 页）`);
 }
 
 /**
