@@ -255,6 +255,29 @@ export function createContextMenu(onClose?: () => void): ContextMenu {
         row.appendChild(sub);
       }
 
+      // 悬停：每一行都要接，置灰的那些也算。
+      //   置灰项不走 setActive(row)（高亮代表"回车就执行"，点不动的项不该亮），但必须把
+      //   上一项的高亮与更深的层收掉 —— 否则鼠标停在置灰项上，前面那一项还亮着，看着像
+      //   两项都能点，回车的去处也和眼睛看到的不一致。
+      row.addEventListener('pointerenter', () => {
+        window.clearTimeout(hoverTimer);
+        if (entry.disabled) {
+          setActive(null);
+          const depth = Number(listOf(row).dataset.depth ?? '0');
+          hoverTimer = window.setTimeout(() => closeSubmenus(depth), kSubmenuDelayMs);
+          return;
+        }
+        setActive(row);
+        if (entry.kind === 'submenu') {
+          hoverTimer = window.setTimeout(() => openSubmenu(row, false), kSubmenuDelayMs);
+          return;
+        }
+        // 移到没有子菜单的项上：把比它更深的那几层收掉。深度按这一行所在的列表算，
+        //   写成固定值会把这一层自己关掉（二级里的项一被指到，二级就消失）。
+        const depth = Number(listOf(row).dataset.depth ?? '0');
+        hoverTimer = window.setTimeout(() => closeSubmenus(depth), kSubmenuDelayMs);
+      });
+
       if (!entry.disabled) {
         // 用 click 而不是 pointerdown：菜单项在浮层内部，浮层的"点外面关"不会抢先；
         //   而 click 是"按下又抬起在同一项上"，手滑按错还能拖开。
@@ -265,25 +288,16 @@ export function createContextMenu(onClose?: () => void): ContextMenu {
             // 悬停延迟还挂着时点开，定时器随后还会再开一次同一层 —— 同一层压两遍，
             //   往里面走一步就把自己收掉（二级"打开就关"的来源）。
             window.clearTimeout(hoverTimer);
-            openSubmenu(row, true);
+            // 点开但不把高亮送到第一项：鼠标还在父项上，亮的是父项；手真的移进二级，
+            //   指针经过哪一项才亮哪一项（键盘那条路才要"进去就落在第一项"）。
+            openSubmenu(row, false);
+            setActive(row);
             return;
           }
           // 先关再跑：动作往往要开另一块面板（属性、取色），菜单留在原地会与它抢 Esc。
           const run = entry.run;
           close();
           run();
-        });
-        row.addEventListener('pointerenter', () => {
-          setActive(row);
-          window.clearTimeout(hoverTimer);
-          if (entry.kind === 'submenu') {
-            hoverTimer = window.setTimeout(() => openSubmenu(row, false), kSubmenuDelayMs);
-            return;
-          }
-          // 移到没有子菜单的项上：把比它更深的那几层收掉。深度按这一行所在的列表算，
-          //   写成固定值会把这一层自己关掉（二级里的项一被指到，二级就消失）。
-          const depth = Number(listOf(row).dataset.depth ?? '0');
-          hoverTimer = window.setTimeout(() => closeSubmenus(depth), kSubmenuDelayMs);
         });
       }
 

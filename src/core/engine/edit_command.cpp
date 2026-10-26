@@ -1179,11 +1179,18 @@ EditCommand::SelectionErase EditCommand::planEraseSelection() {
         plan.blocked = true;
         return plan;
     }
-    // 整格选区（吸附到格边界的那一种）：逐格清空内容，格与格之间的结构不动。
+    // 整格选区（吸附到格边界的那一种）：盖满整张表就整张删，否则逐格清空内容，
+    //   格与格之间的结构不动。
+    //
     //   为什么不能按整条区间删：区间里夹着单元格边界，安全阀（覆盖必须刚好等于区间长）
     //   必然过不去，于是整条编辑被拒 —— 表现就是"选中了好几格，按 Del 没反应"。
     //   逐格清空还把"格"本身保住了：删完每格仍是空段落，表结构不变。
+    //
+    //   盖满整张表是另一件事：用户选的就是这张表（拖选整张表 = 全选它的格），删该连
+    //   表框一起走 —— 只清内容会留下一张空表，看着像"没删掉"。
     if (pos().hasCellRange() && view_.tables && !view_.tables->empty()) {
+        plan.steps = eraseTablesCoveredByCells();
+        if (!plan.steps.empty()) return plan;
         plan.steps = eraseCellContents(from, to);
         if (plan.steps.empty()) {
             noteBlocked();
@@ -1395,6 +1402,76 @@ std::vector<Step> EditCommand::eraseWholeTables(FlowPos from, FlowPos to) const 
         steps.insert(steps.end(), part.begin(), part.end());
     }
     // 从后往前：删右边的不会移动左边的坐标。
+    std::sort(steps.begin(), steps.end(),
+              [](const Step& a, const Step& b) { return stepStartFlow(a) > stepStartFlow(b); });
+    return steps;
+}
+
+/**
+ * 整格选区盖满了某张表的全部格位 ⇒ 整张删（见头文件）。
+ *
+ * 逐格比块区间，不比流区间：一格的身份是它占的那几段（空格也行），而流区间在空格上
+ *   退化成点、与下一格的第一段共用一个位置。拖选整张表拿到的就是一串格区间，按它判
+ *   "这张表的每一格都在选区里"才是用户那句话的意思。
+ */
+std::vector<Step> EditCommand::eraseTablesCoveredByCells() const {
+    std::vector<Step> steps;
+    if (!hasFlow() || !view_.tables || view_.tables->empty()) return steps;
+    if (!pos().hasCellRange()) return steps;
+    const std::vector<CaretResolver::CellBlocks>& picked = pos().cellBlocks();
+    const auto picked_has = [&picked](int first, int count) {
+        for (const CaretResolver::CellBlocks& c : picked) {
+            if (c.first == first && c.count == count) return true;
+        }
+        return false;
+    };
+    struct Whole {
+        NodeId id = kInvalidNodeId;
+        FlowPos lo = 0;
+        FlowPos hi = 0;
+        bool inner = false;  // 落在另一张整表里：删外层时一起走
+    };
+    std::vector<Whole> wholes;
+    for (const LayoutTable& t : *view_.tables) {
+        if (t.cells.empty()) continue;
+        bool all = true;
+        int first_b = -1;
+        int last_b = -1;
+        for (const LayoutCell& c : t.cells) {
+            if (c.block_count <= 0 || !picked_has(c.first_block, c.block_count)) {
+                all = false;
+                break;
+            }
+            if (first_b < 0 || c.first_block < first_b) first_b = c.first_block;
+            const int b = c.first_block + c.block_count - 1;
+            if (b > last_b) last_b = b;
+        }
+        if (!all || first_b < 0) continue;
+        // 表是文档里唯一的内容时不动结构：删完一个块都不剩，光标没有能停的地方。
+        //   这一种退回逐格清空 —— 内容照样没了，只是表框还留着。
+        if (first_b <= 0 && last_b >= static_cast<int>(blocks().size()) - 1) continue;
+        FlowPos lo = 0;
+        FlowPos hi = 0;
+        const NodeId id = static_cast<NodeId>(t.handle);
+        if (!flowIndex().intervalOf(id, &lo, &hi) || hi <= lo) continue;
+        // 整块包住它必然被拒（只读、表单结构锁），与 removeTableAtCaret 同一条口径。
+        if (!rev::canEditRange(doc(), mode(), Range{lo, hi}).allowed) continue;
+        wholes.push_back(Whole{id, lo, hi, false});
+    }
+    if (wholes.empty()) return steps;
+    // 嵌套表：外层整张被删，内层随之消失 —— 再给内层发一步会撞上"节点已经不在了"。
+    for (Whole& w : wholes) {
+        for (const Whole& o : wholes) {
+            if (&o == &w) continue;
+            if (o.lo <= w.lo && o.hi >= w.hi) w.inner = true;
+        }
+    }
+    for (const Whole& w : wholes) {
+        if (w.inner) continue;
+        RemoveNode r;
+        r.at_flow = w.lo;
+        steps.push_back(Step{r});
+    }
     std::sort(steps.begin(), steps.end(),
               [](const Step& a, const Step& b) { return stepStartFlow(a) > stepStartFlow(b); });
     return steps;

@@ -875,6 +875,75 @@ test.describe('插入表格', () => {
     check('★ 一步撤销把表整张恢复', r.back.inTable === true && r.back.n === r.before.n,
           JSON.stringify(r.back));
   });
+
+  test('拖选整张表的全部格：删除连表框一起走；只选一部分则只清内容', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' } });
+    // 两格之间的拖选：起点在字上（从边距带起手会变成"点一下选整格"），终点落在第四格。
+    const geo = await p.read<any>(`
+      await H.setText('甲');
+      await H.flush();
+      await H.insertTable({ rows: 2, cols: 2 });
+      await H.flush();
+      const put = async (para, txt) => {
+        await H.setCaret({ para, offset: 0 });
+        await H.flush();
+        await H.type(txt);
+        await H.flush();
+      };
+      await put(1, 'A'); await put(2, 'B'); await put(3, 'C'); await put(4, 'D');
+      const at = async (para) => {
+        await H.setCaret({ para, offset: 1 });
+        await H.flush();
+        const q = CARET();
+        return { x: q.x, y: q.y, h: q.h };
+      };
+      const fr = FRAME().getBoundingClientRect();
+      return { cell1: await at(1), cell2: await at(2), cell4: await at(4),
+               left: fr.left, top: fr.top };`);
+
+    // 拖选整张表：四个格全在选区里。
+    await p.page.mouse.move(geo.left + geo.cell1.x + 6, geo.top + geo.cell1.y + geo.cell1.h / 2);
+    await p.page.mouse.down();
+    await p.page.mouse.move(geo.left + geo.cell4.x + 3,
+                            geo.top + geo.cell4.y + geo.cell4.h / 2, { steps: 10 });
+    await p.page.mouse.up();
+    const all = await p.read<any>(`
+      await H.flush();
+      const picked = (await H.tableState()).selCells;
+      const ok = await H.deleteBackward();
+      await H.flush();
+      const gone = { inTable: (await H.tableState()).inTable, paras: (await H.paragraphs()).length,
+                     text: await H.text() };
+      await H.undo();
+      await H.flush();
+      const back = { inTable: (await H.tableState()).inTable,
+                     paras: (await H.paragraphs()).length };
+      return { picked, ok, gone, back };`);
+    check('前提：拖选盖住了四格', all.picked === 4, String(all.picked));
+    check('★ 删的是整张表（表框一起走，不是只剩一张空表）',
+          all.ok === true && all.gone.inTable === false && all.gone.text === '甲\n',
+          JSON.stringify({ ok: all.ok, gone: all.gone }));
+    check('★ 一步撤销把表整张恢复', all.back.inTable === true && all.back.paras === 6,
+          JSON.stringify(all.back));
+
+    // 反向一半：只拖两格（不盖满整张表）—— 表留着，选中的那两格内容清空。
+    await p.page.mouse.move(geo.left + geo.cell1.x + 6, geo.top + geo.cell1.y + geo.cell1.h / 2);
+    await p.page.mouse.down();
+    await p.page.mouse.move(geo.left + geo.cell2.x + 3,
+                            geo.top + geo.cell2.y + geo.cell2.h / 2, { steps: 10 });
+    await p.page.mouse.up();
+    const part = await p.read<any>(`
+      await H.flush();
+      const picked = (await H.tableState()).selCells;
+      const ok = await H.deleteBackward();
+      await H.flush();
+      return { picked, ok, inTable: (await H.tableState()).inTable,
+               paras: (await H.paragraphs()).length, text: await H.text() };`);
+    check('前提：只选了两格', part.picked === 2, String(part.picked));
+    check('★ 没盖满整张表：表留着，只有选中的两格清空',
+          part.ok === true && part.inTable === true && part.text === '甲\n\n\nC\nD\n',
+          JSON.stringify(part));
+  });
 });
 
 test.describe('插入控件', () => {

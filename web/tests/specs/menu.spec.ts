@@ -240,3 +240,59 @@ test.describe('菜单的分组与多级位置', () => {
     check('★ 右键不再弹值面板（不叠两块浮层）', panel === 0, String(panel));
   });
 });
+
+test.describe('菜单的高亮走向', () => {
+  test('悬停在置灰项上：前一项的高亮收掉', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' } });
+    const geo = await p.read<any>(`
+      await H.setText('甲');
+      await H.flush();
+      await H.insertTable({ rows: 2, cols: 2 });
+      await H.flush();
+      await H.setCaret({ para: 1, offset: 0 });
+      await H.flush();
+      await D.stopBlink();
+      const q = CARET();
+      const fr = FRAME().getBoundingClientRect();
+      return { left: fr.left, top: fr.top, x: q.x, y: q.y, h: q.h };`);
+    await p.page.mouse.click(geo.left + geo.x + 4, geo.top + geo.y + geo.h / 2,
+                             { button: 'right' });
+    await expect(p.page.locator('.heditor-menu')).toBeVisible();
+    const actives = () => p.page.evaluate(() =>
+      Array.from(document.querySelectorAll('.heditor-menu__item--active')).map(
+        (el) => (el.textContent || '').trim()));
+
+    await p.page.locator('.heditor-menu__item', { hasText: '删除本行' }).first().hover();
+    await expect.poll(actives).toEqual(['删除本行']);
+
+    // 没有格选区时"合并单元格"是置灰的：停上去不能留着上一项亮着。
+    const off = p.page.locator('.heditor-menu__item--off', { hasText: '合并单元格' }).first();
+    await expect(off).toBeVisible();
+    await off.hover();
+    await p.page.waitForTimeout(200);
+    const after = await actives();
+    check('★ 停在置灰项上：前一项的高亮收掉了（不亮着一条点不动的）',
+          after.length === 0, JSON.stringify(after));
+  });
+
+  test('点开带二级的那一项：高亮留在父项，不跳到二级第一项', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' } });
+    await p.page.mouse.click(700, 400, { button: 'right' });
+    await expect(p.page.locator('.heditor-menu')).toBeVisible();
+    await p.page.locator('.heditor-menu__item', { hasText: '插入' }).first().click();
+    await p.page.waitForTimeout(250);
+    const r = await p.page.evaluate(() => {
+      const sub = document.querySelector('.heditor-menu__list--sub:not([hidden])');
+      const active = Array.from(document.querySelectorAll('.heditor-menu__item--active'));
+      return {
+        open: !!sub,
+        inSub: active.filter((el) => el.closest('.heditor-menu__list--sub')).length,
+        labels: active.map((el) => (el.textContent || '').trim()),
+      };
+    });
+    check('二级开出来了', r.open === true, String(r.open));
+    check('★ 高亮没跳到二级第一项（鼠标还在父项上）', r.inSub === 0, JSON.stringify(r));
+    check('★ 父项自己是亮的', r.labels.length === 1 && r.labels[0].includes('插入'),
+          JSON.stringify(r.labels));
+  });
+});

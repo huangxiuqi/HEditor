@@ -9429,14 +9429,42 @@ int main() {
             e48.setFocusAtSideLine(last_para, 0, 0, 0);
             expectTrue(!e48.selectionIsCell(), "拖出表格：不是单元格选区");
 
-            // 跨格选区之后删除：删的是"选中格的内容"，删完排版审计得干净 —— 这条防的是
-            //   "选区吸附到格边界之后，删除区间跨过了格与格的段落标记，把表结构删坏"。
+            // 跨格选区之后删除：盖满整张表就删整张表 —— 这条防的是两件事：
+            //   一、"选区吸附到格边界之后，删除区间跨过了格与格的段落标记，把表结构删坏"；
+            //   二、反过来删得太少：只清内容会留下一张空表，用户按的是删除，得到的是"表还在"。
             e48.setCaretAtSideLine(cp[0].pos.para, cp[0].pos.offset, cp[0].side, 0);
             e48.setFocusAtSideLine(cp[3].pos.para, cp[3].pos.offset, cp[3].side, 0);
             expectTrue(e48.selectionIsCell(), "删除前：跨格选区成立");
+            expectTrue(e48.blocks().size() == 5, "前提：四格加尾段是五个块（实际 " +
+                                                     std::to_string(e48.blocks().size()) + "）");
             expectTrue(e48.backspace(), "跨格选区退格：执行成功");
             e48.relayout();
             expectTrue(e48.auditLayout() == 0, "跨格删除之后排版审计一致");
+            expectTrue(e48.blocks().size() == 1 && e48.blocks()[0].textUtf8() == "尾巴",
+                       "★ 盖满整张表：表框一起删掉了，只剩表后那一段（实际 " +
+                           std::to_string(e48.blocks().size()) + " 个块）");
+            expectTrue(e48.auditTables() == 0, "删整表之后表格自审一致");
+
+            // 一步撤销把整张表恢复：删是与不是同一个事务的两半。
+            expectTrue(e48.undo(), "撤销");
+            e48.relayout();
+            expectTrue(
+                e48.blocks().size() == 5 && e48.blocks()[0].textUtf8() == "甲",
+                "★ 一步撤销把整张表恢复（实际 " + std::to_string(e48.blocks().size()) + " 个块）");
+
+            // 反向一半：只盖住前两格（没盖满整张表）—— 表留着，只有那两格的内容清空。
+            //   判据一并看"没选中的格一个字都不许动"。
+            e48.setCaretAtSideLine(cp[0].pos.para, cp[0].pos.offset, cp[0].side, 0);
+            e48.setFocusAtSideLine(cp[1].pos.para, cp[1].pos.offset, cp[1].side, 0);
+            expectTrue(e48.selectionIsCell(), "只选两格：单元格选区照样成立");
+            expectTrue(e48.backspace(), "只选两格退格：执行成功");
+            e48.relayout();
+            expectTrue(e48.blocks().size() == 5, "★ 没盖满整张表：表还在（块数仍为五）");
+            expectTrue(e48.blocks()[0].textUtf8().empty() && e48.blocks()[1].textUtf8().empty(),
+                       "★ 选中的两格内容清空");
+            expectTrue(e48.blocks()[2].textUtf8() == "丙" && e48.blocks()[3].textUtf8() == "丁",
+                       "★ 没选中的两格一个字都没动");
+            expectTrue(e48.auditTables() == 0, "逐格清空之后表格自审一致");
         }
     }
 
@@ -9897,20 +9925,26 @@ int main() {
                 e52.selectionRects().size() == 2,
                 "两格各一份反白（实际 " + std::to_string(e52.selectionRects().size()) + " 份）");
 
-            // 删除：只清有字的格，空格本来就是空的，格与表的结构不动。
-            expectTrue(e52.backspace(), "跨格选区退格：执行成功");
-            e52.relayout();
-            expectTrue(e52.blocks().size() == 4 && e52.blocks()[1].cp_text.empty() &&
-                           e52.blocks()[2].cp_text.empty(),
-                       "两格都清空，块数不变（格结构一个没动）");
-            expectTrue(e52.auditTables() == 0, "跨格删除之后表格结构自审一致");
-
-            // 反向一半：单独选中空格再按退格 —— 没有内容可删，什么都不发生（表格不会被删）。
-            expectTrue(e52.selectCellAtPara(1), "再选中空格");
+            // 单一格那一支：只选中空格再按退格 —— 没有内容可删，什么都不发生。
+            //   （要放在"整张表被删掉"之前：那之后表已经不在了。）
+            expectTrue(e52.selectCellAtPara(1), "选中空格");
             expectTrue(!e52.backspace(), "选中空格按退格：没有内容可删，拒绝");
             e52.relayout();
             expectTrue(e52.blocks().size() == 4, "拒绝之后四块都在（表格没被删）");
             expectTrue(e52.auditTables() == 0, "拒绝之后表格结构自审一致");
+
+            // 删除：这张表就两个格，拖选两格 = 盖满整张表 ⇒ 删的是表本身。
+            //   只清内容会留下一张空表：用户按的是删除，得到的却是"表还在"。
+            e52.setCaretAtSideLine(1, 0, 0, 0);
+            e52.setFocusAtSideLine(2, 1, 0, 0);
+            expectTrue(e52.selectionIsCell(), "再拖选两格（整张表）：单元格选区");
+            expectTrue(e52.backspace(), "跨格选区退格：执行成功");
+            e52.relayout();
+            expectTrue(e52.blocks().size() == 2 && e52.blocks()[0].textUtf8() == "前" &&
+                           e52.blocks()[1].textUtf8() == "尾",
+                       "★ 盖满整张表：表连同两格一起删掉了，只剩前后两段（实际 " +
+                           std::to_string(e52.blocks().size()) + " 块）");
+            expectTrue(e52.auditTables() == 0, "删整表之后表格结构自审一致");
         }
     }
 
