@@ -235,7 +235,9 @@ setText(text: string, opts?: { repeat?: number }): Promise<void>   // 明确用�
 | `form()` | 每个控件一条：`type` / `key` / `label` / `group` / `text`（内容）/ `value`（记录上的值）/ `options` / `glyphColor` / `format` / `dateUnits` / `readonly` / `required` / `freeInput` / `start`、`end`（区间）/ `focused` |
 | `setControlValue(index, { flag?, text?, items? })` | 改值并按类型重建显示内容；选择类与下拉、日期的内容是值的投影 |
 | `toggleControl(index, option?)` | 切换一个选项（单控件传 -1）；互斥与多选规则在引擎里，整批一次撤销 |
-| `updateControl(index, { type?, key?, label?, options?, group?, freeInput?, format?, dateUnits?, glyphColor? })` | 改定义：只改给出的项；改完按新定义重建内容，指向已删选项的值跟着清空，同属一步撤销 |
+| `updateControl(index, { type?, key?, label?, options?, group?, freeInput?, format?, dateUnits?, glyphColor?, readonly?, required? })` | 改定义与两个运行态开关：只改给出的项；改完按新定义重建内容，指向已删选项的值跟着清空，同属一步撤销 |
+| `describeControl(control)` | 把一个控件摊成属性面板的字段表（哪种类型有哪些项、当前值是什么）；纯数据 |
+| `applyControlForm(index, values)` | 按一份面板值改控件：值走内容、定义与开关走各自的入口，只提交真的变了的项 |
 
 `updateControl` 的 `type` 只能与当前一致（换类型请删掉重插）；给这个控件不收的字段
 （例如给文本控件送 `options`）整份拒绝，不静默忽略。
@@ -278,6 +280,8 @@ setText(text: string, opts?: { repeat?: number }): Promise<void>   // 明确用�
 | `setTableRow({ header?, split?, breakBefore?, heightPt?, heightRule? })` | 行记录：标题行、跨页断行、行前分页、行高与规则（`'auto'` / `'atLeast'` / `'exact'`） |
 | `setTable({ widthPt?, align? })` | 表记录：宽度（0 = 自动）与水平位置（`'start'` / `'center'` / `'end'`） |
 | `tableState()` | 一次读全：`inTable` / `rows` / `cols` / 表宽与位置 / 标题行数 / 当前行的四个开关与行高 / 当前格的坐标与两个跨度 / 整格选区的格数行列数 |
+| `describeTable(state)` | 把现状摊成属性面板的字段表（表 / 行 / 格三层在一张里）；纯数据，不读写文档 |
+| `applyTableForm(values)` | 按一份面板值改表格：只提交真的变了的层，一层里改几项也只算一次提交 |
 
 三条边界，都不是"暂不支持"而是设计选择：合并要求选中的格子正好铺满一个矩形，且除左上角
 那一格以外都是空的（合并会删掉它们，有内容就是丢数据）；删行遇到行内纵向合并时拒绝（内容会
@@ -295,6 +299,8 @@ setText(text: string, opts?: { repeat?: number }): Promise<void>   // 明确用�
 | `setZoom(z)` | 转发 `configure({ zoom })`，为可读性保留 |
 | `configure(patch)` | 唯一配置写入口（§7） |
 | `config()` | 只读快照 |
+| `describePageSetup()` | 把页面设置摊成属性面板的字段表（厘米）；固定纸张下宽高两项带 `disabled` |
+| `applyPageSetupForm(values)` | 按一份面板值改页面设置；与现状相同就不调 `configure`（省掉那次整篇重排） |
 
 ### 5.7 生命周期与事件
 

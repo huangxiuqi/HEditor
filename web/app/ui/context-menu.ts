@@ -463,7 +463,7 @@ export function createContextMenu(onClose?: () => void): ContextMenu {
     /**
      * 打开。
      *
-     * 内容每次重建：菜单项带着"当时"的值（勾选态、禁用态），复用上一份等于显示旧状态。
+     * 内容每次重建：菜单项带着打开那一刻的值（勾选态、禁用态），复用上一份等于显示旧状态。
      * @param items 菜单项
      * @param at 客户端坐标
      */

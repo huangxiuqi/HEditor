@@ -32,7 +32,7 @@ export function createChoice(item: Choice): Component {
 
   /**
    * 把候选写进 select。函数型候选每次都重算，变了才重建 —— 重建会丢掉当前选中项，
-   * 所以要顺手恢复它。
+   * 所以重建之后要把选中项写回去。
    */
   function fill(): void {
     const list = typeof item.options === 'function' ? item.options() : item.options;

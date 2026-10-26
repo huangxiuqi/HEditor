@@ -3,9 +3,12 @@ import type {
   CaretStep,
   ChangeEvent,
   CharFormatPatch,
+  ControlForm,
   ControlInsertOptions,
   ControlSummary,
   ControlUpdateOptions,
+  FormOptions,
+  FormValues,
   RGBA,
   ControlValueInput,
   Diag,
@@ -27,12 +30,21 @@ import type {
   Selection,
   SetCaretOptions,
   TableCellOptions,
+  TableForm,
   TableOp,
   TableOptions,
   TableRowOptions,
   TableState,
 } from './types';
 import { PAPER_PT, paperSizePt } from './types';
+import {
+  controlFormOf,
+  controlWriteOf,
+  pageSetupFormOf,
+  pageSetupWriteOf,
+  tableFormOf,
+  tableWriteOf,
+} from './forms';
 import { createDomHost, ensureMarkup, type ChangeSource, type DomHost, type EngineLink } from './host/dom';
 import { createErrorSurface, type ErrorSurface } from './host/errors';
 import { scrollHeightPx, type CanvasStore } from './host/pages';
@@ -802,6 +814,22 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       return (await Promise.resolve(link.read('tableState'))) as TableState;
     },
 
+    describeTable(state, opts) {
+      return tableFormOf(state, opts);
+    },
+
+    async applyTableForm(values) {
+      alive();
+      const st = await editor.tableState();
+      if (!st.inTable) return false;
+      const w = tableWriteOf(st, values);
+      let changed = false;
+      if (Object.keys(w.table).length > 0) changed = (await editor.setTable(w.table)) || changed;
+      if (Object.keys(w.row).length > 0) changed = (await editor.setTableRow(w.row)) || changed;
+      if (Object.keys(w.cell).length > 0) changed = (await editor.setTableCell(w.cell)) || changed;
+      return changed;
+    },
+
     async insertControl(opts) {
       alive();
       const o = opts ?? {};
@@ -823,8 +851,32 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
 
     async updateControl(index, opts) {
       alive();
+      const o = opts ?? {};
+      let changed = false;
       // 只改给出的项：与插入共用同一份键映射，两边不会各认一半字段。
-      return edit('setControlSpec', { i: Math.trunc(index), opts: controlOptsFrom(opts ?? {}) });
+      const patch = controlOptsFrom(o);
+      if (Object.keys(patch).length > 0) {
+        changed = (await edit('setControlSpec', { i: Math.trunc(index), opts: patch })) || changed;
+      }
+      // 只读与必填不在定义里，是运行态属性，走另一个入口。分开提交是为了让"只改标签"
+      //   仍然只有一步撤销。
+      if (o.readonly !== undefined) {
+        const done = await edit('setControlProp', {
+          i: Math.trunc(index),
+          prop: 1,
+          value: !!o.readonly,
+        });
+        changed = done || changed;
+      }
+      if (o.required !== undefined) {
+        const done = await edit('setControlProp', {
+          i: Math.trunc(index),
+          prop: 2,
+          value: !!o.required,
+        });
+        changed = done || changed;
+      }
+      return changed;
     },
 
     async setControlValue(index, value) {
@@ -1177,6 +1229,26 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       }));
     },
 
+    describeControl(control, opts) {
+      return controlFormOf(control, opts);
+    },
+
+    async applyControlForm(index, values) {
+      alive();
+      const c = editor.form()[index];
+      if (!c) return false;
+      const w = controlWriteOf(c, values);
+      let changed = false;
+      if (Object.keys(w.update).length > 0) {
+        changed = (await editor.updateControl(index, w.update)) || changed;
+      }
+      // 文本类的值就是内容：它不进定义，改它也不重建显示（内容本身就是显示）。
+      if (w.value !== null) {
+        changed = (await editor.setControlValue(index, { text: w.value })) || changed;
+      }
+      return changed;
+    },
+
     // 视图
 
     geometry(): Geometry {
@@ -1352,6 +1424,19 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
 
     config() {
       return Object.freeze({ ...config });
+    },
+
+    describePageSetup(opts) {
+      return pageSetupFormOf(config.page, opts);
+    },
+
+    async applyPageSetupForm(values) {
+      alive();
+      const next = pageSetupWriteOf(config.page, values);
+      // 整篇重排是这一层最贵的代价：面板没改就不该付它。
+      if (!next) return false;
+      await editor.configure({ page: next });
+      return true;
     },
 
     // 事件与生命周期

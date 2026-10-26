@@ -771,6 +771,18 @@ export interface ControlUpdateOptions {
    * 选择类记号的颜色（圆圈 / 方框 / 对勾）。全透明 = 跟随文字颜色。
    */
   glyphColor?: RGBA;
+
+  /**
+   * 只读：填表的人只能看。不给就不动。
+   *
+   * 与其余几项不同，它落在运行态属性上；一次调用要改它又要改定义时是两步撤销。
+   */
+  readonly?: boolean;
+
+  /**
+   * 必填：提交校验用，隐藏的控件不参与。不给就不动。
+   */
+  required?: boolean;
 }
 
 /**
@@ -1673,9 +1685,161 @@ export interface ParaFormatPatch {
 }
 
 /**
+ * 属性面板的字段种类。渲染器按它挑控件，七种之外不增。
+ */
+export type FormFieldKind = 'heading' | 'text' | 'lines' | 'number' | 'select' | 'toggle' | 'color';
+
+/**
+ * 属性面板的一个字段。
+ *
+ * 描述由引擎算（哪种控件该有哪些项、表格三层各有什么），标签与样式由宿主定。
+ *   heading 不是字段，只用来把表单分段。
+ */
+export interface FormField {
+  /**
+   * 种类。
+   */
+  kind: FormFieldKind;
+
+  /**
+   * 取值用的键；heading 为空串。
+   */
+  key: string;
+
+  /**
+   * 左列的标签；heading 时是分段标题。
+   */
+  label: string;
+
+  /**
+   * 当前值：文本类与下拉是字符串，数值是数字，开关是布尔；heading 不给。
+   */
+  value?: string | number | boolean;
+
+  /**
+   * 下拉的候选。
+   */
+  options?: Array<{ value: string; text: string }>;
+
+  /**
+   * 数值的下限、上限与步长。
+   */
+  min?: number;
+  max?: number;
+  step?: number;
+
+  /**
+   * 数值的单位，显示在输入框右边。
+   */
+  unit?: string;
+
+  /**
+   * 输入框的占位提示。
+   */
+  placeholder?: string;
+
+  /**
+   * 字段下方的一句说明。
+   */
+  hint?: string;
+
+  /**
+   * 多行文本显示几行。
+   */
+  rows?: number;
+
+  /**
+   * 置灰：看得见、改不动。
+   */
+  disabled?: boolean;
+}
+
+/**
+ * 面板读出来的一份值，按字段键收好。
+ */
+export type FormValues = Record<string, string | number | boolean>;
+
+/**
+ * 字段标签的替换表：键是字段的 key，值是这家宿主想显示的字。
+ *
+ * 不给就用中文默认标签。要给整套界面换语言，把用到的键各给一条即可。
+ */
+export type FormLabels = Record<string, string>;
+
+/**
+ * 造字段表的选项。
+ */
+export interface FormOptions {
+  /**
+   * 标签替换表。
+   */
+  labels?: FormLabels;
+}
+
+/**
+ * 一个控件的属性表单。
+ */
+export interface ControlForm {
+  /**
+   * 控件下标。
+   */
+  index: number;
+
+  /**
+   * 业务类型。
+   */
+  type: string;
+
+  /**
+   * 面板标题（含类型名）。
+   */
+  title: string;
+
+  /**
+   * 字段表，按显示顺序。
+   */
+  fields: FormField[];
+}
+
+/**
+ * 光标所在表格的属性表单（表 / 行 / 格三层放进同一张）。
+ */
+export interface TableForm {
+  /**
+   * 光标在不在表格里。为假时 fields 为空，宿主不该据此施改。
+   */
+  inTable: boolean;
+
+  /**
+   * 面板标题（含行列数）。
+   */
+  title: string;
+
+  /**
+   * 字段表，按显示顺序。
+   */
+  fields: FormField[];
+}
+
+/**
+ * 页面设置的属性表单（纸张、方向、宽高、四边页边距）。
+ */
+export interface PageSetupForm {
+  /**
+   * 面板标题。
+   */
+  title: string;
+
+  /**
+   * 字段表，按显示顺序。宽高两项只在纸张为自定义时可用。
+   */
+  fields: FormField[];
+}
+
+/**
  * 编辑器实例。
  *
- * 44 个方法 + element / diag 两个只读属性。分组只为可读，实例上是平铺的。
+ * 64 个方法 + element / diag 两个只读属性。分组只为可读，实例上是平铺的。
  */
 export interface Editor {
   // 内容
@@ -1799,6 +1963,25 @@ export interface Editor {
   tableState(): Promise<TableState>;
 
   /**
+   * 把表格现状摊成一张属性表单（表 / 行 / 格三层字段放在一起）。
+   *
+   * 宽度与行高的"自动"在面板上写 0 而不是 -1：用户不该看到负的磅值。
+   * @param state 表格现状（tableState() 的那一份）
+   * @param opts 标签替换表
+   * @returns 字段表；不在表格里时 inTable 为假、字段为空
+   */
+  describeTable(state: TableState, opts?: FormOptions): TableForm;
+
+  /**
+   * 按一份面板值改表格：只提交真的变了的层。
+   *
+   * 三层各走各的写入口，但同一层里的多项是一次提交 —— 一次"确定"因此最多三小步。
+   * @param values 面板读出来的值
+   * @returns 有没有改动（不在表格里、或面板没改时返回 false）
+   */
+  applyTableForm(values: FormValues): Promise<boolean>;
+
+  /**
    * 在光标处插一个内容控件（表单字段），光标落进它的内容末尾。
    *
    * 控件是行内容器：它不切断段落，落点就是光标处。只在文档模式可用（理由同上）。
@@ -1818,7 +2001,8 @@ export interface Editor {
   removeControl(index: number, opts?: { keepContent?: boolean }): Promise<boolean>;
 
   /**
-   * 改一个控件的定义（选项表、标签、互斥组、自由输入、日期格式与单位、业务编码）。
+   * 改一个控件的定义（选项表、标签、互斥组、自由输入、日期格式与单位、业务编码），
+   *   以及只读与必填这两个运行态开关。
    *
    * 只改给出的项。改完内容按新定义重建；指向已删选项的值一起清掉 —— 都算在同一步撤销里。
    * 只在文档模式可用（改定义是设计动作）。
@@ -2091,6 +2275,28 @@ export interface Editor {
    */
   form(): ControlSummary[];
 
+  /**
+   * 把一个控件摊成属性面板的字段表。
+   *
+   * 给哪些项、每项是什么种类、当前值是什么，全按控件类型算 —— 宿主只负责画。
+   *   这是纯数据，不读写文档；现读一份随参数给进来，面板显示的就是菜单看到的那一拍。
+   * @param control 控件现状（form() 的一项）
+   * @param opts 标签替换表
+   * @returns 字段表（不认识类型时只有行为那几项）
+   */
+  describeControl(control: ControlSummary, opts?: FormOptions): ControlForm;
+
+  /**
+   * 按一份面板值改控件：只提交真的变了的项。
+   *
+   * 值的分流由库定（内容走内容、定义走定义、只读与必填走运行态开关），宿主不必记；
+   *   一次"确定"因此是最少的提交步数，撤销不用按三次。
+   * @param index 控件下标（form() 的第几项）
+   * @param values 面板读出来的值
+   * @returns 有没有改动（面板没改就返回 false）
+   */
+  applyControlForm(index: number, values: FormValues): Promise<boolean>;
+
   // 视图
 
   /**
@@ -2125,6 +2331,25 @@ export interface Editor {
    * @returns 生效值的只读快照
    */
   config(): Readonly<EditorConfig>;
+
+  /**
+   * 把页面设置摊成属性面板的字段表。
+   *
+   * 边距与宽高按厘米给值（人按厘米想页边距），折回磅在 applyPageSetupForm 里做。
+   *   纸张不是自定义时，宽高两项带 disabled —— 宿主按纸张字段的变化再开一次。
+   * @param opts 标签替换表
+   * @returns 字段表与面板标题
+   */
+  describePageSetup(opts?: FormOptions): PageSetupForm;
+
+  /**
+   * 按一份面板值改页面设置。
+   *
+   * 与现状相同就不调用 configure：整篇重排是这一层最贵的一档，面板没改不该付它。
+   * @param values 面板读出来的值
+   * @returns 有没有改动
+   */
+  applyPageSetupForm(values: FormValues): Promise<boolean>;
 
   // 事件与生命周期
 

@@ -201,22 +201,22 @@ test.describe('工具栏', () => {
       const w0 = e.geometry().page.w;
       btn('page-setup').click();
       await new Promise((r) => setTimeout(r, 30));
-      const paper = document.querySelector('select[data-act="page-paper"]');
+      const paper = document.querySelector('select[data-act="prop-paper"]');
       out.pagePanel = !!paper;
       if (paper) {
         paper.value = 'A3';
         paper.dispatchEvent(new Event('change', { bubbles: true }));
       }
-      const apply = document.querySelector('[data-act="page-apply"]');
+      const apply = document.querySelector('[data-act="prop-apply"]');
       if (apply) apply.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
       out.pagePaper = await until(() => e.geometry().page.w > w0 + 100);
 
       // 自定义宽高：选"自定义"、填宽高、应用 —— 页宽要按填的那个数走。
       btn('page-setup').click();
       await new Promise((r) => setTimeout(r, 30));
-      const paper2 = document.querySelector('select[data-act="page-paper"]');
-      const wIn = document.querySelector('input[data-act="page-width"]');
-      const hIn = document.querySelector('input[data-act="page-height"]');
+      const paper2 = document.querySelector('select[data-act="prop-paper"]');
+      const wIn = document.querySelector('input[data-act="prop-width"]');
+      const hIn = document.querySelector('input[data-act="prop-height"]');
       out.pageCustomPanel = !!paper2 && !!wIn && !!hIn;
       if (paper2 && wIn && hIn) {
         paper2.value = 'Custom';
@@ -226,7 +226,7 @@ test.describe('工具栏', () => {
         wIn.dispatchEvent(new Event('input', { bubbles: true }));
         hIn.value = '30';
         hIn.dispatchEvent(new Event('input', { bubbles: true }));
-        const apply2 = document.querySelector('[data-act="page-apply"]');
+        const apply2 = document.querySelector('[data-act="prop-apply"]');
         if (apply2) apply2.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
       }
       out.pageCustom = await until(
@@ -446,6 +446,14 @@ test.describe('公开面', () => {
       out.element = !!e.element && e.element.id === 'ed'
         && !!e.element.querySelector('.heditor-stage');
 
+      // 页面设置：把描述层自己给的字段值喂回去，必须判定成"没改动"（不触发整篇重排）。
+      const pageForm = e.describePageSetup();
+      const samePage = {};
+      for (const f of pageForm.fields) if (f.key) samePage[f.key] = f.value;
+      out.pageFields = pageForm.fields.length;
+      out.pageSame = await e.applyPageSetupForm(samePage);
+      out.pageKept = e.config().page.paper;
+
       // 事件：订阅之后打字要收到 change
       let changes = 0;
       const off = e.on('change', () => { ++changes; });
@@ -528,6 +536,9 @@ test.describe('公开面', () => {
     check('setZoom 生效', r.zoom === 1.25, String(r.zoom));
     check('configure 返回生效值', r.configure.zoom === 1, JSON.stringify(r.configure));
     check('element 是容器', r.element === true, String(r.element));
+    check('describePageSetup 给出字段表', r.pageFields > 0, String(r.pageFields));
+    check('applyPageSetupForm 收到同一份值时不改动', r.pageSame === false, String(r.pageSame));
+    check('纸张没被这份空改动带走', r.pageKept === 'A4', String(r.pageKept));
 
     check('on(change) 收到了事件', r.changeEvents >= 1, String(r.changeEvents));
     check('save 给出了 JSON', typeof r.savedLen === 'number' && r.savedLen > 0, String(r.savedLen));

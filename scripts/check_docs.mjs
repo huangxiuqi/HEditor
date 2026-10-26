@@ -1,4 +1,5 @@
-// TS 侧的注释规范检查（JSDoc）。
+// TS 侧的注释规范检查（JSDoc）。扫描 web/src 与 web/app：前者进 dist/*.d.ts，
+//   后者是外部使用者照抄的那一份，两边的注释都有人读。
 //
 // 判据来自三件事，缺一条都会让"注释齐全"变成只看运气：
 //   一、成员与方法必须有 JSDoc 块（不是 // 行注释）—— 生成 .d.ts 之后它才跟着走。
@@ -37,7 +38,7 @@ function walk(dir) {
   return out;
 }
 
-const FILES = walk(join(ROOT, 'web/src'));
+const FILES = [...walk(join(ROOT, 'web/src')), ...walk(join(ROOT, 'web/app'))];
 
 // 取节点挂着的最后一段 JSDoc（ts 把注释挂在 node.jsDoc 上）。
 function docStart(node) {

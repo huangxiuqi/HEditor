@@ -6,7 +6,7 @@ import { createRibbon } from './ribbon';
 import { createStatusBar, type StatusBar } from './statusbar';
 import type { Chrome, ChromeHost, Tab } from './types';
 
-/** 缩放的上下限，与库那一侧同一组数（这里只判一次夹取，不改语义）。 */
+// 缩放的上下限，与库那一侧同一组数（这里只判一次夹取，不改语义）。
 const ZOOM_MIN = 0.375;
 const ZOOM_MAX = 2.25;
 

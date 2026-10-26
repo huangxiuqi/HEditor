@@ -389,7 +389,7 @@ export function createMenus(host: MenusHost): Menus {
         const c = editor.form()[target.control];
         if (c) entries.push(...controlEntries(c, at));
       } else if (target.kind === 'image') {
-        // 现在的尺寸要现读：面板照着它预填，用户看到的才是"改之前是多大"。
+        // 现在的尺寸要现读：面板照着它预填，显示的才是改动之前的那一份。
         const boxes = await editor.images();
         const box = boxes[target.image];
         entries.push(...imageEntries(target.image, { w: box?.w ?? 0, h: box?.h ?? 0 }, at));

@@ -38,7 +38,7 @@ const glue = params.get('glue');
 // 摆法下"上一级 + dist"都指向 web/dist/heditor_worker.js。
 const workerShell = new URL('../dist/heditor_worker.js', new URL('.', location.href)).href;
 
-/** 页面与库之间只有这一个句柄，探针也用它。 */
+// 页面与库之间只有这一个句柄，探针也用它。
 declare global {
   interface Window {
     __demo?: Editor;
@@ -52,10 +52,10 @@ const stage = document.getElementById('ed')!;
 
 let editor: Editor;
 let chrome: Chrome;
-/** 右键菜单（实例建好之后才有；库的回调是延迟触发的，所以先声明后装配）。 */
+// 右键菜单：实例建好之后才有；库的回调是延迟触发的，所以先声明后装配。
 let menus: Menus | undefined;
 
-/** 字号候选；"增大/减小"就在这一列上走，界面上只给固定档位。 */
+// 字号候选；"增大/减小"就在这一列上走，界面上只给固定档位。
 const SIZES = [9, 10, 10.5, 12, 14, 16, 18, 22, 24, 36, 48];
 
 /**
@@ -67,7 +67,7 @@ const SIZES = [9, 10, 10.5, 12, 14, 16, 18, 22, 24, 36, 48];
 let mark: CharFormatPatch = {};
 let para: ParaFormatPatch = {};
 
-/** 动作的键：三个开关型字符格式。 */
+// 动作的键：三个开关型字符格式。
 type MarkKey = 'bold' | 'italic' | 'underline';
 
 /**
@@ -82,9 +82,9 @@ let dirty = false;
  */
 let unsavedPrompt = false;
 
-/** 正在读格式：期间来的刷新请求先记下，读完再补一轮。 */
+// 正在读格式：期间来的刷新请求先记下，读完再补一轮。
 let reading = false;
-/** 读的期间又有人要刷新。 */
+// 读的期间又有人要刷新。
 let stale = false;
 
 /**
@@ -174,7 +174,7 @@ function toggle(key: MarkKey): void {
  */
 function stepSize(dir: number): void {
   void enqueue(async () => {
-    // 实际生效的那一份总有字号；这里的兜底只是防契约被改坏。
+    // 实际生效的那一份总有字号；这里的取值只是防契约被改坏。
     const cur = (await editor.formatAt({ effective: true })).size ?? 12;
     const next = dir > 0
       ? SIZES.find((s) => s > cur) ?? SIZES[SIZES.length - 1]
@@ -485,16 +485,10 @@ function makeTabs(): Tab[] {
         //   整篇重排，边输边排会让每一次击键都卡一下）。
         panel: (dismiss) =>
           createPageSetup({
-            current: () => editor.config().page,
-            // 页面此刻多大只有几何知道：geometry().page 是 CSS 像素（1 英寸 = 96 像素），
-            //   引擎要的是磅 —— 差一个 72/96。
-            pageSizePt: () => {
-              const g = editor.geometry();
-              return { w: g.page.w * 0.75, h: g.page.h * 0.75 };
-            },
-            apply: (page) => {
-              // 配完重读回显：面板以外还有缩放读数要跟着变（见 configchange 那条）。
-              void editor.configure({ page }).then(() => chrome.refresh());
+            editor,
+            // 配完重读回显：面板以外还有缩放读数要跟着变（见 configchange 那条）。
+            applied: () => {
+              void chrome.refresh();
             },
             dismiss,
           }),
@@ -842,7 +836,7 @@ async function boot(): Promise<void> {
     chrome: true,
     // 下拉的选项列表与日期的输入框归宿主画：引擎只画控件本身。
     onControlTap: (index, rect) => openControlPanel(index, rect),
-    // 右键菜单也归宿主：库只负责拦掉浏览器那份、把插入点搬过去、告诉我们压着什么。
+    // 右键菜单也归宿主：库只负责拦掉浏览器那份、把插入点搬过去、把压着什么交回来。
     onContextMenu: (target, at) => {
       void menus?.open(target, at);
     },

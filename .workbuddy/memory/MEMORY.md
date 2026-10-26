@@ -48,3 +48,9 @@
   种类是 -1/0/1/2/3（none/text/table/control/image），**跨语言别按下标查数组**。UI 一律建在
   `ui/layer.ts`（定位与关闭时机）上，菜单 / 属性面板 / 下拉浮层共用它。新增 host 可见 JSON 读：
   写进 `gen_payloads.py` 的 FILES 才进契约快照。
+- 属性面板的**字段表归库**（`describeControl` / `describeTable` / `describePageSetup` 是纯数据），
+  提交走 `applyControlForm` / `applyTableForm` / `applyPageSetupForm`（按白名单只发变化量，
+  页面设置没改就不重排）；宿主只渲染，标签用 `FormOptions.labels` 覆盖。`updateControl` 收
+  readonly / required，拆到 `setControlProp` 单独提交 —— **改定义又翻两个开关是三步撤销**。
+- 注释与 JSDoc 判据扫 `web/app`（示例页 4000 行不再靠自觉）：`lint_comments.py` 的 JS 集合与
+  `check_docs.mjs` 的 FILES 都含它，违规 0 是硬线。

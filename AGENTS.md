@@ -148,7 +148,7 @@ function blitFrame(px, w) {}
   并行度默认 4（本机四个物理核）；六 worker 更慢，而且会把负载敏感的判据顶红。
   性能判据单独一条命令：`npm run test:perf`（源码直连）或 `npm run test:dist:perf`
   （构建产物，先跑过一次 `test:dist`），单 worker 独占。
-  二十份 spec 跑一遍：`demo` 5 个用例 / 47 条判据（含连页末尾的总高：可滚区跟着内容走、
+  二十一份 spec 跑一遍：`demo` 5 个用例 / 47 条判据（含连页末尾的总高：可滚区跟着内容走、
   至少留一页）、`multi` 11、`saveload` 11、`input` 25、`diag` 39、
   `error` 19、`stress` 69 步差分审计、
   `edit-core` / `edit-form` / `edit-boundary` / `edit-sweep` / `edit-longdoc` /
@@ -175,6 +175,10 @@ function blitFrame(px, w) {}
   方向键走项、Esc 与点外面关掉）。`fonts` 3 条
   （注册与选字体：清单里的名字来自字体文件的 name 表、重复注册不增脸、
   按族名 / PostScript 名 / 文件名都能选到、注册不重排、没注册的名字当场拒绝）。
+  `props` 4 个用例 / 22 条判据（属性面板的字段表由库算：表格三层都在且"自动"写 0、
+  改一层两项一起落且一步撤销回原样；控件字段随类型给、不认识的类型只剩行为三项；
+  提交只发变化量、面板不收的键不当成改定义、没改动不算一步、三步撤到改之前；
+  页面设置的宽高在固定纸张下置灰、选自定义后可用、应用之后页宽跟着走）。
   旧的 `scripts/*_probe.mjs` 与
   `scripts/verify_web.ps1` 已删除，别再按那套入口跑。
 - 两个宿主的分工（详见 `docs/正式化架构与迁移路线.md` 4.6）：wasm 是交付物，
@@ -185,8 +189,8 @@ function blitFrame(px, w) {}
   光栅只有一个实现 `bitmap_skia.cpp`，两侧都链接它 —— 不要再引入第二个后端，
   跨后端像素比较没有判据意义。
 - 注释合规检查：`python scripts/lint_comments.py`（加 `-v` 打印违规原文；违规则退出码 1）。
-  扫描 src 与 tests 的 C/C++、scripts 的 .mjs、web 根下的 .js/.ts 与 web/src 下的 .ts；
-  `cd web && npm run check` 里也调它，所以前端那一侧漏不过去。
+  扫描 src 与 tests 的 C/C++、scripts 的 .mjs、web 根下的 .js/.ts、web/src 与 web/app 下的 .ts；
+  `cd web && npm run check` 里也调它，所以前端那一侧漏不过去 —— 示例页那 4000 行也在里面。
   **违规数必须为 0，不设基线**：新写的注释一旦违规就当场改掉，不要把它记成"基线"留到以后。
   基线这种记账法只会让数字慢慢往上爬 —— 本项目就这么积到过 147 处，最后要一次性清掉。
   共 13 条规则，写在脚本文件头：反引号、装饰分隔线、markdown 强调、流水账用语、
@@ -194,7 +198,7 @@ function blitFrame(px, w) {}
   单行块注释、悬空块注释。
 - 文档齐不齐另有两份判据（管"有没有"，不管措辞）：
   `node scripts/check_docs.mjs` 按 AST 查 TS 的方法有没有 JSDoc 与 `@param` / `@returns`、
-  注释块与上一个成员之间有没有空行（**在 `npm run check` 里，当前 0 问题**）。
+  注释块与上一个成员之间有没有空行（web/src 与 web/app 都扫；**在 `npm run check` 里，当前 0 问题**）。
   `python scripts/check_docs_cpp.py` 查 C++ 头文件：类/结构体成员与命名空间层函数的块注释、
   块与上一条声明之间空一行、公开函数的 `@param` / `@return`、以及"有块又写行尾注释"；
   私有段只要求块注释（内部实现的参数说明写在正文里）。

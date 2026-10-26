@@ -11,9 +11,9 @@
 //   layer        浮层（定位与关闭时机，popover 与右键菜单共用）
 //   popover      挂在按钮下面的弹层
 //   context-menu 数据驱动的多级菜单（右键菜单）
-//   props-panel  属性面板（字段描述 → 表单）
+//   props-panel  属性面板（字段描述 → 表单；字段表由库的 describe 系列给）
 //   table-props  表格属性（表 / 行 / 格三层）
-//   control-props 控件属性（按类型给字段）
+//   control-props 控件属性（按类型给字段，字段表在库里）
 //   group        一排动作 + 组名
 //   ribbon       页签条与面板
 //   statusbar    底部状态栏
@@ -27,6 +27,6 @@ export { createControlProps } from './control-props';
 export { createGridPicker } from './grid-picker';
 export { createLayer, type Layer } from './layer';
 export { createPageSetup } from './page-setup';
-export { createPropsPanel, type PropField, type PropValues } from './props-panel';
+export { createPropsPanel, type PropsPanel, type PropsPanelOptions } from './props-panel';
 export { createTableProps } from './table-props';
 export type { Button, Choice, Chrome, Component, Group, Item, Menu, Stack, Tab } from './types';

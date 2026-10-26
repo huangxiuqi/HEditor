@@ -23,7 +23,7 @@ R13 的理由：块注释长在声明前面，读者会把它当作那个声明�
 它描述的就成了"下一段注释"—— 而下一段注释通常描述的是别的成员。R1~R12 都按"行"查，看不见
 这一类；私有段里堆上二十条，读代码会得到"这些是本人的私有方法"这种反结论。
 
-扫描范围：src 与 tests 的 C/C++、scripts 的 .mjs、web 根下的 .js/.ts、web/src 与
+扫描范围：src 与 tests 的 C/C++、scripts 的 .mjs、web 根下的 .js/.ts、web/src、web/app 与
 web/tests 下的 .ts/.js
 （web/types 与 web/dist 里是生成产物，不扫）。
 构建产物不扫 —— web/engine_api.js 与 web/dist 里的注释不是手写的，按源码规范查它只会
@@ -47,7 +47,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 CPP = ['src/**/*.h', 'src/**/*.hpp', 'src/**/*.cpp', 'tests/*.cpp']
 JS = ['scripts/*.mjs', 'scripts/*.js', 'web/*.js', 'web/*.ts', 'web/src/**/*.ts',
-      'web/tests/**/*.ts', 'web/tests/**/*.js']
+      'web/app/**/*.ts', 'web/tests/**/*.ts', 'web/tests/**/*.js']
 
 # 构建产物没有手写注释，按源码规范查它只会查出别人的压缩格式。眼下源码树里没有
 #   这样的文件（web/dist 与 web/dist-app 都不在扫描范围里），留着这个集合给将来。
