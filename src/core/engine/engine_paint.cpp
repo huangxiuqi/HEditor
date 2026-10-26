@@ -996,7 +996,9 @@ void EditorEngine::presentInternal(int first_page, int count) {
     edit_stats_.caret_block_reversed = caretBlockReversed();
     edit_stats_.caret_page = caret_.caretPage();
     // 光标只在可插入位置上现形：表单模式的控件之外、只读模式里一律不画（见 caretInsertable）。
-    edit_stats_.caret_visible = (caret_visible_ && caretInsertable() && cr.w > 0.0f);
+    //   选中图片时也不画：那是一条对象选区，文本光标留着只会叠在图的右边线上，
+    //   把把手盖住（那一段既看不清也点不准）。
+    edit_stats_.caret_visible = (caretShown() && cr.w > 0.0f);
     edit_stats_.caret_x_px = static_cast<int>(cr.x);
     edit_stats_.caret_y_px = static_cast<int>(cr.y);
     edit_stats_.caret_w_px = static_cast<int>(cr.w);
@@ -1069,7 +1071,7 @@ void EditorEngine::collectTransient(int page, PageTransient* out) const {
     for (const PageRect& pr : selectionRectsPxIn(page, 1)) out->sel.push_back(pr.r_pt);
     int cp = -1;
     const Rect cr = caretRectPx(&cp);
-    const bool draw_caret = caret_visible_ && caretInsertable();
+    const bool draw_caret = caretShown();
     if (cp == page && draw_caret && cr.w > 0.0f && cr.h > 0.0f) out->caret = cr;
 
     // 连页接缝：上一条带里越过带底的选区与光标，在本带顶部还有一半。

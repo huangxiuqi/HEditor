@@ -1063,11 +1063,23 @@ void EditorEngine::setCaret(int para, size_t offset) {
  * 宿主把 hitTestPt 给的侧别原样带回来，这里与偏移合成 rel（唯一真源）。
  */
 void EditorEngine::setCaretAtSide(int para, size_t offset, int side) {
-    // 这是"用户点到哪"，于是它受限：表单模式下点不进不可编辑的正文（见 confineCaret）。
-    //   拖选（setFocusAtSide）不受限 —— 选区与光标是两件事，选区要能盖住只读区。
+    placeCaretFromClick(para, offset, side, /*line_aff=*/-1);
+}
+
+/**
+ * 一次落点的唯一实现：投影 → 夹到可插入位置 → 记下"拖选可以从这里起手"。
+ *
+ * 这是"用户点到哪"，于是它受限（见 confineCaret）；拖选（setFocusAtSide）不受限 ——
+ *   选区与光标是两件事，选区要能盖住只读区。按下的那一点若本身就在屏障里，先记下来，
+ *   等拖选第一次搬焦点端时放到锚端上；夹这一步会清掉待定值，所以顺序不能反。
+ */
+void EditorEngine::placeCaretFromClick(int para, size_t offset, int side, int line_aff) {
     const FlowPos before = caretFlowPos();
-    projectCaret(para, offset, side);
-    confineCaret(before);
+    projectCaret(para, offset, side, /*extend=*/false, line_aff);
+    const FlowPos pressed = caretFlowPos();
+    const bool in_barrier = barrierAtFlow(pressed);
+    confineCaret(before, CaretConfine::Place);
+    if (in_barrier) drag_anchor_ = pressed;
 }
 
 /**
@@ -1077,6 +1089,7 @@ void EditorEngine::setCaretAtSide(int para, size_t offset, int side) {
  * 只是位置来自命中测试而不是方向键。所以这里没有第二套几何：落点、吸附、侧别全部复用。
  */
 void EditorEngine::setFocusAtSide(int para, size_t offset, int side) {
+    applyDragAnchor();
     projectCaret(para, offset, side, /*extend=*/true);
 }
 
@@ -1087,13 +1100,27 @@ void EditorEngine::setFocusAtSide(int para, size_t offset, int side) {
  * 否则光标画到上一行行尾（见 caretLineAffinity）。
  */
 void EditorEngine::setCaretAtSideLine(int para, size_t offset, int side, int line_aff) {
-    const FlowPos before = caretFlowPos();
-    projectCaret(para, offset, side, /*extend=*/false, line_aff);
-    confineCaret(before);
+    placeCaretFromClick(para, offset, side, line_aff);
 }
 
 void EditorEngine::setFocusAtSideLine(int para, size_t offset, int side, int line_aff) {
+    applyDragAnchor();
     projectCaret(para, offset, side, /*extend=*/true, line_aff);
+}
+
+/**
+ * 拖选第一次搬焦点端时，把锚端放回按下那一刻的位置。
+ *
+ * 锚端与焦点端是两件事：焦点端夹不进控件，锚端可以停在控件里 —— 从选择类的标签上
+ *   按下往右拖，选区就该从那个字开始，而不是从控件边界开始。
+ * 待定值只在按下之后的第一次搬运用一次；它已经不在屏障里（内容被改短了）就丢掉。
+ */
+void EditorEngine::applyDragAnchor() {
+    if (drag_anchor_ < 0) return;
+    const FlowPos anchor = drag_anchor_;
+    drag_anchor_ = -1;
+    if (!barrierAtFlow(anchor)) return;
+    caret_.setAnchorAtFlow(anchor);
 }
 
 /**
@@ -1233,6 +1260,16 @@ bool EditorEngine::caretInsertable() const {
 }
 
 /**
+ * 这一拍到底画不画光标（相位、可插入位置、图片选区三件事的交集）。
+ *
+ * 图片选区是对象选区，与文本光标互斥：两样同时画出来时，光标那条竖线正落在图的右边线上，
+ *   正好压住右中把手 —— 那一段既看不清也点不准。
+ */
+bool EditorEngine::caretShown() const {
+    return caret_visible_ && image_sel_ == kInvalidNodeId && caretInsertable();
+}
+
+/**
  * 把光标收进可插入位置（表单模式的落点规则）。
  *
  * 目标落在控件之外时，夹回"移动之前所在控件"的内容区间 —— 视觉上就是"停在字段边界上"，
@@ -1242,19 +1279,24 @@ bool EditorEngine::caretInsertable() const {
  *   策略，受限的是用户真的能点到哪、按到哪。
  *
  * @param before 这一步移动之前的流位置
+ * @param why 这一步是落点还是移动（只影响被屏障挡住时贴哪一侧）
  * @return true = 光标位置真的变了
  */
-bool EditorEngine::confineCaret(FlowPos before) {
+bool EditorEngine::confineCaret(FlowPos before, CaretConfine why) {
+    // 任何一次光标写入都让拖选的待定锚点作废；落点那一路在夹完之前重新记（见 setCaretAtSideLine）。
+    drag_anchor_ = -1;
     const FlowPos now = caretFlowPos();
     if (mode_ != EditMode::Form) {
-        // 文档与只读模式只挡屏障：目标落进选择类的内容里时跳到块的另一侧 ——
-        //   从右边过来的落到开括号之前，从左边过来的落到闭括号之后。
-        //   贴回"来的那一侧"会让方向键在控件边上原地不动，永远过不去。
+        // 文档与只读模式只挡屏障：目标落进选择类的内容里时跳到块外。
+        //   移动贴"来的那一侧"的对面 —— 贴回原侧会让方向键在控件边上原地不动，永远过不去。
+        //   落点贴离点击处最近的那一侧 —— 按来向取对面会让同一处点击在控件左右来回跳。
         FlowPos first = 0;
         FlowPos end = 0;
         if (!barrierSpanAt(now, &first, &end)) return now != before;
         FlowPos target = end;
-        if (before >= end) {
+        if (why == CaretConfine::Place) {
+            target = ((now - first) * 2 <= (end - first)) ? first : end;
+        } else if (before >= end) {
             target = first;
         } else if (before <= first) {
             target = end;

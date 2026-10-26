@@ -264,16 +264,12 @@ EditorEngine::ImageHit EditorEngine::imageAtPt(float x_pt_doc, float y_pt_doc) c
             //   （框只有几个磅宽时，把手加容差比图还大）。
             const float half =
                 std::min(kImageHandlePt * 0.5f + kImageHandleSlackPt, std::min(r.w, r.h) * 0.3f);
-            // 左右中把手要沿纵向铺满一整行：图片右边缘正是"图片之后"那个光标的所在，
-            //   光标竖线比把手高得多，视觉上两者叠在一起 —— 点在竖线的上下两端时若只按
-            //   正方形判，就落成文字了（表象：把手和光标重叠的那一段拖不动）。
-            const float side_half_y =
-                std::max(half, std::max(0.0f, lb.block_hi_pt - lb.block_lo_pt) * 0.5f);
+            // 命中区就是画出来的那个方块，不沿边线拉伸：拉伸会让整条边框都变成把手，
+            //   贴着边线想落光标的地方再也落不进去。
             for (int h = 0; h < 8; ++h) {
                 const float dx = std::fabs(x_pt_doc - centers[h * 2]);
                 const float dy = std::fabs(local_y - centers[h * 2 + 1]);
-                const float hy = (h == 3 || h == 7) ? side_half_y : half;
-                if (dx <= half && dy <= hy) {
+                if (dx <= half && dy <= half) {
                     hit.index = indexOf(c.owner_control);
                     hit.handle = h;
                     return hit;

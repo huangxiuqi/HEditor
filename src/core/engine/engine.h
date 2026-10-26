@@ -689,6 +689,16 @@ public:
     bool caretInsertable() const;
 
     /**
+     * 这一拍到底画不画光标（相位、可插入位置、图片选区三件事的交集）。
+     *
+     * 单独成一处是因为它有两个读者：呈现时的瞬态层与编辑账（探针读 caretVisible）。两处
+     * 各写一份的话，"账上说画了、画面上没有"迟早分叉。
+     *
+     * @return true = 这一拍该画
+     */
+    bool caretShown() const;
+
+    /**
      * 一个控件的内容流区间（闭区间）。不在流里（隐藏、摘除）返回假。
      *
      * @param index 控件下标
@@ -740,15 +750,51 @@ public:
     bool barrierSpanAt(FlowPos f, FlowPos* first, FlowPos* end) const;
 
     /**
+     * 光标被挡住时怎么选落点，取决于是哪一种动作把它带到那里的。
+     */
+    enum class CaretConfine {
+        /**
+         * 一次落点（点画布）：夹到离点击处最近的那一侧。同一个位置点两次结果必须一样 ——
+         * 按"来的那一侧"取对面的话，点同一处会在控件左右来回跳。
+         */
+        Place,
+        /**
+         * 一次移动（方向键、Home/End、Tab）：夹到"来的那一侧"的对面 —— 贴回原侧的话
+         * 方向键在控件边上原地不动，永远过不去。
+         */
+        Step,
+    };
+
+    /**
      * 把光标收进可插入位置（表单模式的落点规则）。
      *
      * 目标落在控件之外时夹回"移动之前所在控件"的内容区间，视觉上就是停在字段边界上；
      * 夹不进去（移位之前就不在任何字段里）就整下不动。程序化定位不经过这里。
      *
      * @param before 这一步移动之前的流位置
+     * @param why 这一步是落点还是移动（只影响被屏障挡住时贴哪一侧）
      * @return true = 光标位置真的变了
      */
-    bool confineCaret(FlowPos before);
+    bool confineCaret(FlowPos before, CaretConfine why = CaretConfine::Step);
+
+    /**
+     * 一次落点的唯一实现：投影 → 夹到可插入位置 → 记下"拖选可以从这里起手"。
+     *
+     * 按下的那一点若落在屏障里，先存进 drag_anchor_，等拖选第一次搬焦点端时放到锚端上。
+     * @param para 段号
+     * @param offset 段内码点偏移
+     * @param side 侧别（-1 = 没有侧别信息）
+     * @param line_aff 行别（-1 = 按流位置自动判）
+     */
+    void placeCaretFromClick(int para, size_t offset, int side, int line_aff);
+
+    /**
+     * 拖选第一次搬焦点端时，把锚端放回按下那一刻的位置。
+     *
+     * 锚端可以停在控件里（焦点端不行）：从选择类的标签上按下往右拖，选区就该从那个字
+     * 开始。待定值只用一次，被改短之后已不在屏障里的就丢掉。
+     */
+    void applyDragAnchor();
 
     /**
      * 光标的侧别（派生）：在它那个码点偏移上跨过了几枚边界括号（0 = 在所有括号之前）。
@@ -3052,6 +3098,15 @@ private:
      * 两套选区同时存在的话，"按删除键删的是哪一段"没有答案。
      */
     NodeId image_sel_ = kInvalidNodeId;
+
+    /**
+     * 按下那一刻落在屏障里的位置（-1 = 没有）。
+     *
+     * 光标不能停在控件里，但选区可以从里面起手：按下的那一点先记下来，等拖选第一次搬
+     * 焦点端时把它放回锚端，选区才从按下的那个字开始，而不是从控件边界开始。
+     * 只活到那次搬运为止；别的光标写入都会清掉它（见 confineCaret）。
+     */
+    FlowPos drag_anchor_ = -1;
 
     /**
      * 拖拽改尺寸时的预览（瞬态，不进文档）。

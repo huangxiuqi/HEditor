@@ -455,6 +455,21 @@ bool CaretResolver::setSelection(Range r) {
 }
 
 /**
+ * 只搬锚端，焦点端与行别都不动。
+ *
+ * 不能借 setSelection 做这件事：那会把行别清成 0，折行处的焦点端会画到上一行行尾。
+ */
+bool CaretResolver::setAnchorAtFlow(FlowPos anchor) {
+    if (!view_.hasFlow() || view_.block_flow->empty()) return false;
+    const size_t last = view_.block_flow->size() - 1;
+    const FlowPos hi = (*view_.block_flow)[last] + (*view_.block_flow_span)[last];
+    sel_.anchor = anchor < 0 ? 0 : (anchor > hi ? hi : anchor);
+    // 锚端换了，整格吸附要按新的两端重算（由引擎在扩展之后调 syncCellSelection）。
+    clearCellRange();
+    return true;
+}
+
+/**
  * 取消选区：anchor 收到 focus，焦点端不动 —— 光标留在原地。
  */
 void CaretResolver::clearSelection() {

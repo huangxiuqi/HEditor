@@ -602,6 +602,16 @@ public:
     bool setSelection(Range r);
 
     /**
+     * 只搬锚端，焦点端与行别都不动。
+     *
+     * 拖选从控件内部起手时要它：按下那一刻已经把焦点端夹到块外了，锚端得放回按下的位置。
+     * 不能借 setSelection —— 那会把行别清成 0，折行处的焦点端会画到上一行行尾。
+     * @param anchor 新的锚端流位置（越界夹到文档流两端）
+     * @return true = 搬好了
+     */
+    bool setAnchorAtFlow(FlowPos anchor);
+
+    /**
      * 整格选区：把这几格按"单元格选区"记下来，插入点按 caret_flow 摆。
      * 
      * 收的是块区间而不是流区间（见 CellBlocks）：空格的内容长度为 0，流区间退化成点之后

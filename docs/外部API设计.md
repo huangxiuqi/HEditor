@@ -251,10 +251,12 @@ setText(text: string, opts?: { repeat?: number }): Promise<void>   // 明确用�
 | `insertImage({ resourceId, pxWidth, pxHeight, dpi?, width?, height? })` | 光标处插一张图；像素尺寸与显示尺寸至少给一组 |
 | `images()` | 文档里每张图的下标、资源 id、显示尺寸与落页矩形 |
 | `imageHit(x, y)` | 文档坐标（磅）命中哪张图的哪个把手；没命中 index 为 -1 |
-| `selectImage(index)` | 选中出拖拽框与八个把手（-1 取消）；与文本选区互斥 |
+| `selectImage(index)` | 选中出拖拽框与八个把手（-1 取消）；与文本选区互斥，选中期间不画文本光标 |
 | `resizeImage(index, wPt, hPt, { merge? })` | 改显示尺寸；拖拽的后续帧带 `merge: true`，一次拖拽只留一步撤销 |
 
 把手序号从左上顺时针 0..7。四个角按原图比例缩放（按住 Shift 解除），四条边只动一个轴。
+把手命中区就是画出来的那个方块（不沿边线拉长）：边线上离把手远处点下去仍按图身算。
+选中图片时 `caret().visible` 读回 false —— 对象选区与文本光标是两套互斥的选区。
 
 ### 5.6 视图与配置
 

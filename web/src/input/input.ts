@@ -428,12 +428,13 @@ export function createInput(env: InputEnv): InputLayer {
   /**
    * 图片把手的拖拽：按下时取一次起始尺寸与指针位置，之后每帧按增量算新尺寸。
    *
-   * 等比 / 不等比只看把手落在哪：四个角按原图比例推另一边，四条边只动一个轴。
-   * 角上按住 Shift 解除比例约束 —— "角上默认等比、边上默认拉伸"是字处理软件的通行手感。
+   * 等比 / 不等比只看把手落在哪：四个角按原图比例推另一边，四条边只动一个轴；角上按住
+   * Shift 解除比例约束。拖动过程不改文档：每帧只把瞬态层那个框换成"松手会变成多大"
+   * （previewImageSize），松手才发一次 resizeImage —— 每帧真改尺寸要重排 + 重光栅，
+   * 而且拖到一半看到的已经是最终画面，反而看不出框在跟手。
    *
-   * 拖动过程中不改文档：每帧只把瞬态层那个框换成"松手会变成多大"（previewImageSize）。
-   *   每帧真改尺寸要重排 + 重光栅该页，放大图时肉眼可见地卡；而且拖到一半看到的已经是
-   *   最终画面，反而看不出框在跟手。松手才发一次 resizeImage，撤销栈里也只留一步。
+   * 监听在按下这一拍就挂上，起始尺寸才是异步取的：命中在 Worker 宿主上是一次往返，
+   * 等它回来才挂的话，按下到回来之间的移动全丢（快速一拖表现为"把手拖不动"）。
    */
   function beginImageResize(pt: { x: number; y: number }, index: number, handle: number): void {
     if (typeof env.resizeImage !== 'function' || typeof env.images !== 'function') return;
@@ -441,68 +442,89 @@ export function createInput(env: InputEnv): InputLayer {
     const resize = env.resizeImage;
     const preview = env.previewImageSize;
     const dropPreview = env.clearImagePreview;
+    const start = env.docPt(pt);
+    const left = handle === 0 || handle === 6 || handle === 7;
+    const right = handle === 2 || handle === 3 || handle === 4;
+    const top = handle === 0 || handle === 1 || handle === 2;
+    const bottom = handle === 4 || handle === 5 || handle === 6;
+    const corner = (left || right) && (top || bottom);
+    // 起始尺寸（磅）：取回来之前是 null —— 这时候到达的移动点先存在 pending。
+    let size0: { w: number; h: number } | null = null;
+    let pending: { x: number; y: number } | null = null;
+    // 松手要落地的尺寸：null = 这一趟没动过（既不发预览，也不改文档）。
+    let last: { w: number; h: number } | null = null;
+    // 退路（没有预览入口）用：第一帧不带 merge，一次拖拽留一步撤销。
+    let first_frame = true;
+    const applyAt = (cur: { x: number; y: number }, shift: boolean): void => {
+      if (!size0) return;
+      const dx = cur.x - start.x;
+      const dy = cur.y - start.y;
+      let w = size0.w;
+      let h = size0.h;
+      if (right) w = size0.w + dx;
+      else if (left) w = size0.w - dx;
+      if (bottom) h = size0.h + dy;
+      else if (top) h = size0.h - dy;
+      if (corner && !shift) h = w / (size0.w / size0.h);
+      if (!(w > 0) || !(h > 0)) return;
+      // 下限 8 磅：再小就没有可点的图身与把手，拖到零之后再也拖不回来。
+      const nw = Math.max(8, Math.round(w * 100) / 100);
+      const nh = Math.max(8, Math.round(h * 100) / 100);
+      last = { w: nw, h: nh };
+      // 预览不可用时退回"每帧真改尺寸"：慢，但至少框跟着手走。
+      if (typeof preview === 'function') keep(preview(index, nw, nh, handle));
+      else {
+        keep(resize(index, nw, nh, !first_frame));
+        first_frame = false;
+      }
+    };
+    const detach = (): void => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      resizing = false;
+    };
+    const onMove = (e: MouseEvent): void => {
+      const p = env.pointOf(e);
+      if (!p) return;
+      const cur = env.docPt(p);
+      if (!size0) {
+        pending = cur;
+        return;
+      }
+      applyAt(cur, e.shiftKey);
+    };
+    const onUp = (): void => {
+      detach();
+      if (last === null) {
+        // 按下又松开、一磅都没动：预览可能已经闪过一帧，收掉它。
+        if (typeof dropPreview === 'function') keep(dropPreview());
+        return;
+      }
+      const done = last;
+      // 尺寸真的变过才收尾一次：change 事件按"一次拖拽一次"发，不是按帧发。
+      keep(
+        then1(resize(index, done.w, done.h, false), () => {
+          env.commit(true);
+        }),
+      );
+    };
+    resizing = true;
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
     keep(
       then1(images(), (list) => {
         const box = (list || []).find((b) => b.index === index);
-        if (!box || !(box.w > 0) || !(box.h > 0)) return null;
-        const start = env.docPt(pt);
-        const w0 = box.w;
-        const h0 = box.h;
-        const ratio = w0 / h0;
-        const left = handle === 0 || handle === 6 || handle === 7;
-        const right = handle === 2 || handle === 3 || handle === 4;
-        const top = handle === 0 || handle === 1 || handle === 2;
-        const bottom = handle === 4 || handle === 5 || handle === 6;
-        const corner = (left || right) && (top || bottom);
-        // 松手要落地的尺寸：null = 这一趟没动过（既不发预览，也不改文档）。
-        let last: { w: number; h: number } | null = null;
-        // 退路（没有预览入口）用：第一帧不带 merge，一次拖拽留一步撤销。
-        let first_frame = true;
-        const onMove = (e: MouseEvent): void => {
-          const p = env.pointOf(e);
-          if (!p) return;
-          const cur = env.docPt(p);
-          const dx = cur.x - start.x;
-          const dy = cur.y - start.y;
-          let w = w0;
-          let h = h0;
-          if (right) w = w0 + dx;
-          else if (left) w = w0 - dx;
-          if (bottom) h = h0 + dy;
-          else if (top) h = h0 - dy;
-          if (corner && !e.shiftKey) h = w / ratio;
-          if (!(w > 0) || !(h > 0)) return;
-          // 下限 8 磅：再小就没有可点的图身与把手，拖到零之后再也拖不回来。
-          const nw = Math.max(8, Math.round(w * 100) / 100);
-          const nh = Math.max(8, Math.round(h * 100) / 100);
-          last = { w: nw, h: nh };
-          // 预览不可用时退回"每帧真改尺寸"：慢，但至少框跟着手走。
-          if (typeof preview === 'function') keep(preview(index, nw, nh, handle));
-          else {
-            keep(resize(index, nw, nh, !first_frame));
-            first_frame = false;
-          }
-        };
-        const onUp = (): void => {
-          window.removeEventListener('mousemove', onMove);
-          window.removeEventListener('mouseup', onUp);
-          resizing = false;
-          if (last === null) {
-            // 按下又松开、一磅都没动：预览可能已经闪过一帧，收掉它。
-            if (typeof dropPreview === 'function') keep(dropPreview());
-            return;
-          }
-          const done = last;
-          // 尺寸真的变过才收尾一次：change 事件按"一次拖拽一次"发，不是按帧发。
-          keep(
-            then1(resize(index, done.w, done.h, false), () => {
-              env.commit(true);
-            }),
-          );
-        };
-        resizing = true;
-        window.addEventListener('mousemove', onMove);
-        window.addEventListener('mouseup', onUp);
+        if (!box || !(box.w > 0) || !(box.h > 0)) {
+          // 这一趟起不来（图被删了、尺寸还没量出来）：收掉监听，别让它留着。
+          if (resizing) detach();
+          return null;
+        }
+        size0 = { w: box.w, h: box.h };
+        if (pending) {
+          const p = pending;
+          pending = null;
+          applyAt(p, false);
+        }
         return null;
       }),
     );

@@ -498,7 +498,7 @@ const SectionInfo kSections[] = {
     {67, false, 10}, {68, false, 4},  {69, false, 3},  {70, false, 10}, {71, false, 6},
     {72, false, 10}, {73, false, 9},  {74, false, 3},  {75, false, 3},  {76, false, 3},
     {77, false, 3},  {78, true, 1},   {79, false, 2},  {80, false, 3},  {81, false, 2},
-    {82, false, 1},  {83, false, 2},
+    {82, false, 1},  {83, false, 2},  {84, false, 2},
 };
 
 /**
@@ -13440,14 +13440,16 @@ int main() {
             expectTrue(corner79.index == 0 && corner79.handle == 0, "点左上角：命中 0 号把手");
             expectTrue(e79.imageAtPt(r79.x + r79.w + 40.0f, r79.y + r79.h + 40.0f).index < 0,
                        "点在图外：什么都没命中");
-            // 图片右侧的把手要与"图片之后那个光标"重合：光标竖线比把手高，视觉上两者
-            //   叠在一起。点在竖线的上下两端也必须算把手，否则那一段拖不动。
+            // 把手命中区就是画出来的那个方块：顺着边线拉长会让整条右边线都变成把手，
+            //   贴着边线想落光标的地方就再也落不进去。
+            const EditorEngine::ImageHit mid79 = e79.imageAtPt(r79.x + r79.w, r79.y + r79.h * 0.5f);
+            expectTrue(mid79.index == 0 && mid79.handle == 3, "右中把手中心命中 3 号把手");
             const EditorEngine::ImageHit edge79 =
                 e79.imageAtPt(r79.x + r79.w, r79.y + r79.h * 0.5f + 10.0f);
-            expectTrue(edge79.index == 0 && edge79.handle == 3,
-                       "右中把手沿纵向铺开（与光标重叠的上下两端也能拖）");
+            expectTrue(edge79.index == 0 && edge79.handle < 0,
+                       "边线上离把手 10 磅处不是把手（只算图身）");
             expectTrue(e79.imageAtPt(r79.x + r79.w + 20.0f, r79.y + r79.h * 0.5f).index < 0,
-                       "右把手的横向容差没有跟着放大");
+                       "右把手的横向容差没有放大");
         }
 
         // 真画上去了没有：图心那个像素必须是图里的颜色。
@@ -14238,6 +14240,161 @@ int main() {
                 if (fp3[i] != on[i] || fp3[i + 1] != on[i + 1] || fp3[i + 2] != on[i + 2]) ++back;
             }
             expectTrue(back > 0, "取消选中也要重画（差 " + std::to_string(back) + " 个像素）");
+        }
+    }
+
+    if (runSection(84))
+        std::printf("\n[84] 控件落点：同一处点击不换边、选区从按下处起手、图片选中不画光标\n");
+    if (runSection(84)) {
+        EngineConfig c84;
+        c84.zoom = 1.0f;
+        c84.page.width_pt = 200.0f;
+        c84.page.height_pt = 400.0f;
+        c84.page.margins = PageMargins::all(10.0f);  // 内容宽 180 磅
+        const std::vector<std::string> fonts84 = {cjkPath, mnPath, latinPath};
+        EditorEngine e84;
+        if (!e84.init(fonts84)) {
+            std::fprintf(stderr, "字体加载失败\n");
+            return 2;
+        }
+        e84.setConfig(c84);
+
+        // 造文档：前有两个字、中间一个复选、后面两个字。标签长度可调 —— 长标签会把
+        //   控件挤成两行，跨行时"点边距"才有真实的落点可测。
+        auto buildDoc = [&](const std::string& label, int tail_chars) {
+            NodeTree t;
+            const NodeId sec = t.firstSectionId();
+            const NodeId head = t.appendChild(sec, NodeKind::TextRun);
+            t.setText(head, utf8ToCodepoints("甲乙"));
+            ControlSpec sp = makeControlSpec("checkBox");
+            if (auto* ch = std::get_if<ChoiceDetail>(&sp.detail)) ch->label = label;
+            const NodeId ctl = t.appendChild(sec, NodeKind::ContentControl);
+            t.find(ctl)->control = sp;
+            const NodeId txt = t.appendChild(ctl, NodeKind::TextRun);
+            t.setText(txt, utf8ToCodepoints(controlDisplayText(sp, sp.value)));
+            const NodeId tail = t.appendChild(sec, NodeKind::TextRun);
+            std::string tail_text;
+            for (int i = 0; i < tail_chars; ++i) tail_text += "丙";
+            t.setText(tail, utf8ToCodepoints(tail_text));
+            t.appendChild(sec, NodeKind::ParagraphMark);
+            e84.setDocument(t, StyleSheet{});
+            e84.relayout();
+        };
+
+        // 点画布：命中 → 落点，与宿主那一条路逐字相同。
+        auto clickAt = [&](float x, float y) {
+            TextPos p{};
+            int owner = -1;
+            int side = 0;
+            int line_aff = 0;
+            int cell_para = -1;
+            if (!e84.hitTestPt(x, y, &p, &owner, &side, &line_aff, &cell_para, false)) return false;
+            e84.setCaretAtSideLine(p.para, p.offset, side, line_aff);
+            e84.repaint();
+            return true;
+        };
+
+        buildDoc("选项甲", 2);
+        expectTrue(e84.controlViews().size() == 1, "构造：一个复选");
+        FlowPos lo84 = 0;
+        FlowPos hi84 = 0;
+        expectTrue(e84.controlContentSpan(0, &lo84, &hi84), "控件内容区间量得到");
+        const std::vector<EditorEngine::ControlRect> rects84 = e84.controlRects(0);
+        expectTrue(!rects84.empty(), "控件有一个页面矩形");
+        if (!rects84.empty()) {
+            const float y84 = rects84[0].r_pt.y + rects84[0].r_pt.h * 0.5f;
+            const float x_left = rects84[0].r_pt.x + rects84[0].r_pt.w * 0.25f;
+            const float x_right = rects84[0].r_pt.x + rects84[0].r_pt.w * 0.75f;
+
+            // 同一处点两次：落点必须一样。按"来的那一侧"取对面的话，点同一处会在
+            //   控件左右来回跳 —— 表象就是"光标在控件两边乱跑"。
+            expectTrue(clickAt(x_left, y84), "点在控件左半边");
+            const FlowPos left1 = e84.caretFlowPos();
+            expectTrue(clickAt(x_left, y84), "同一处再点一次");
+            const FlowPos left2 = e84.caretFlowPos();
+            expectTrue(left1 == left2, "左半边点两次光标不换边（" + std::to_string(left1) + " / " +
+                                           std::to_string(left2) + "）");
+            expectTrue(left1 == lo84 - 1, "左半边的落点是开括号之前（实际 " +
+                                              std::to_string(left1) + "，期望 " +
+                                              std::to_string(lo84 - 1) + "）");
+
+            expectTrue(clickAt(x_right, y84), "点在控件右半边");
+            const FlowPos right1 = e84.caretFlowPos();
+            expectTrue(clickAt(x_right, y84), "右半边再点一次");
+            const FlowPos right2 = e84.caretFlowPos();
+            expectTrue(right1 == right2, "右半边点两次光标不换边（" + std::to_string(right1) +
+                                             " / " + std::to_string(right2) + "）");
+            expectTrue(right1 == hi84 + 1, "右半边的落点是闭括号之后（实际 " +
+                                               std::to_string(right1) + "，期望 " +
+                                               std::to_string(hi84 + 1) + "）");
+
+            // 从控件内部按下往右拖：锚端落在按下的那个字上，而不是控件边界。
+            //   按下的那一点先在屏障里被夹到块外（光标不能停在控件里），锚端随后补回去。
+            TextPos pf{};
+            int of = -1;
+            int sf = 0;
+            int lf = 0;
+            int cf = -1;
+            const float x_after = rects84[0].r_pt.x + rects84[0].r_pt.w + 20.0f;
+            expectTrue(e84.hitTestPt(x_after, y84, &pf, &of, &sf, &lf, &cf, false),
+                       "控件右侧有一个可落点");
+            expectTrue(clickAt(x_left, y84), "按下在控件内部");
+            e84.setFocusAtSideLine(pf.para, pf.offset, sf, lf);
+            e84.repaint();
+            const Range sel84 = e84.selection();
+            expectTrue(!sel84.empty(), "拖出了选区");
+            expectTrue(sel84.anchor > lo84 - 1 && sel84.anchor < hi84 + 1,
+                       "锚端落在按下的那个字上（实际 " + std::to_string(sel84.anchor) + "，块是 " +
+                           std::to_string(lo84) + ".." + std::to_string(hi84) + "）");
+            expectTrue(!e84.insertableAtFlow(sel84.anchor), "锚端在屏障里（光标本来停不到那儿）");
+            expectTrue(sel84.focus > sel84.anchor, "焦点端在右边");
+        }
+
+        // 跨行控件：第二行上点左边距。命中会把点吸附到那一行最近的字（在控件里），
+        //   落点于是又被屏障要求换到块外 —— 这里同样不能一左一右地跳。
+        buildDoc("选项甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳", 2);
+        const std::vector<EditorEngine::ControlRect> wrap84 = e84.controlRects(0);
+        expectTrue(wrap84.size() >= 2,
+                   "构造：控件跨行（矩形 " + std::to_string(wrap84.size()) + " 段）");
+        if (wrap84.size() >= 2) {
+            const float y2 = wrap84[1].r_pt.y + wrap84[1].r_pt.h * 0.5f;
+            expectTrue(clickAt(2.0f, y2), "点控件第二行的左边距");
+            const FlowPos m1 = e84.caretFlowPos();
+            expectTrue(clickAt(2.0f, y2), "边距上再点一次");
+            const FlowPos m2 = e84.caretFlowPos();
+            expectTrue(m1 == m2, "边距上重复点击不换边（" + std::to_string(m1) + " / " +
+                                     std::to_string(m2) + "）");
+        }
+
+        // 图片选中时不画文本光标：那条竖线正落在图的右边线上，会把右中把手盖住。
+        {
+            NodeTree t;
+            const NodeId sec = t.firstSectionId();
+            const NodeId txt = t.appendChild(sec, NodeKind::TextRun);
+            t.setText(txt, utf8ToCodepoints("甲乙丙丁"));
+            t.appendChild(sec, NodeKind::ParagraphMark);
+            e84.setDocument(t, StyleSheet{});
+            e84.relayout();
+
+            const int iw = 96;
+            const int ih = 48;
+            std::vector<uint8_t> px(static_cast<size_t>(iw) * ih * 4u, 200);
+            std::string err84;
+            expectTrue(e84.registerImageAndRepaint("pic84", iw, ih, px.data(), px.size(), &err84),
+                       "注册一张图（" + err84 + "）");
+            e84.setCaret(0, 2);
+            ImageSpec im84;
+            im84.resource_id = "pic84";
+            im84.px_w = iw;
+            im84.px_h = ih;
+            im84.dpi = 96;
+            expectTrue(e84.insertImageAndRender(im84), "插进文档");
+            expectTrue(e84.editStats().caret_visible, "插完图光标还在（在图片之后）");
+            expectTrue(e84.selectImage(0), "选中这张图");
+            e84.repaint();
+            expectTrue(!e84.editStats().caret_visible, "选中图片时不画文本光标");
+            expectTrue(e84.clearImageSelectionAndRender(), "取消选中");
+            expectTrue(e84.editStats().caret_visible, "取消选中之后光标回来");
         }
     }
 

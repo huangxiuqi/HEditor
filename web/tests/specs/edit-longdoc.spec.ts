@@ -39,6 +39,10 @@ test.describe('编辑面：长文档与跨段编辑', () => {
     state.longDoc = { paragraphs: base.totalParagraphs, lines: base.totalLines,
                        fullMs: base.layoutMs };
 
+    // 先停闪烁：它每半拍 present 一次，而编辑账里的脏页数、以及帧与整帧重画的对账
+    //   都是"这一拍"的账 —— 读完再闪一下，脏页数就归零、帧里也换了一次光标相位。
+    await probe.read('return await D.stopBlink();');
+
     // 在脏段中间敲一个字（走真实键盘路径）
     await probe.read(`return await H.setCaret({ para: ${DIRTY}, offset: 5 });`);
     const cps_before = await probe.read<number>('const s = D.editStats(); return s.docCodepoints;');

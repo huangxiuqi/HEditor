@@ -216,6 +216,144 @@ test.describe('插入图片', () => {
     check('★ 撤销之后光标没有被甩到文档开头', undone.caret === geo.caret0,
           undone.caret + ' vs ' + geo.caret0);
   });
+
+  test('大图：右中把手能拖、边框别处不能拖、选中时没有文本光标', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' } });
+    const geo = await p.read<any>(`
+      await H.setText('甲乙丙丁');
+      await H.setCaret({ para: 0, offset: 2 });
+      await H.flush();
+      const data = new Uint8Array(400 * 300 * 4).fill(180);
+      await H.registerImage({ id: 'big', width: 400, height: 300, data });
+      await H.insertImage({ resourceId: 'big', pxWidth: 400, pxHeight: 300 });
+      await H.flush();
+      await D.stopBlink();
+      const box = (await H.images())[0];
+      const cv = FRAME();
+      const r = cv.getBoundingClientRect();
+      const q = box.rects[0];
+      return { left: r.left, top: r.top, sx: r.width / cv.width, sy: r.height / cv.height,
+               zoom: ZOOM(), qx: q.x, qy: q.y, qw: q.w, qh: q.h, w0: box.w,
+               caretVisible0: H.caret().visible };`);
+    check('前置：大图插进来了', geo.qw > 100 && geo.qh > 100, JSON.stringify(geo));
+    check('前置：插完图光标是可见的', geo.caretVisible0 === true, String(geo.caretVisible0));
+
+    const at = (xPt: number, yPt: number) => ({
+      x: geo.left + xPt * geo.zoom * geo.sx,
+      y: geo.top + yPt * geo.zoom * geo.sy,
+    });
+    const imgW = () => p.read<number>(`const b = (await H.images())[0]; return b.w;`);
+    const dragBy = async (fromX: number, fromY: number, dxPt: number) => {
+      const from = at(fromX, fromY);
+      const to = at(fromX + dxPt, fromY);
+      await p.page.mouse.move(from.x, from.y);
+      await p.page.waitForTimeout(80);
+      await p.page.mouse.down();
+      await p.page.waitForTimeout(120);
+      for (let i = 1; i <= 4; i++) {
+        await p.page.mouse.move(from.x + ((to.x - from.x) * i) / 4, from.y);
+        await p.page.waitForTimeout(60);
+      }
+      await p.page.mouse.up();
+      await p.page.waitForTimeout(250);
+    };
+
+    // 选中：拖拽框与把手才进瞬态层。
+    const center = at(geo.qx + geo.qw / 2, geo.qy + geo.qh / 2);
+    await p.page.mouse.click(center.x, center.y);
+    await p.page.waitForTimeout(150);
+    const selected = await p.read<any>(`
+      return { visible: H.caret().visible, sel: H.caret().pos };`);
+    // 光标那条竖线正落在图的右边线上，留着只会盖住把手 —— 选中图片时不画。
+    check('★ 选中图片时不画文本光标', selected.visible === false, String(selected.visible));
+
+    // 边框线（离把手很远的那一段）拖不动：命中区就是画出来的那个方块。
+    await dragBy(geo.qx + geo.qw, geo.qy + 20, 30);
+    const afterEdge = await imgW();
+    check('★ 拖右边框线（离把手远处）不改尺寸', Math.abs(afterEdge - geo.w0) < 0.01,
+          geo.w0 + ' → ' + afterEdge);
+
+    // 右中把手：离边线偏移 1 磅也能拖（把手是方块，不沿边线拉伸）。
+    await dragBy(geo.qx + geo.qw, geo.qy + geo.qh / 2, 40);
+    const afterHandle = await imgW();
+    check('★ 拖右中把手改了尺寸', afterHandle > geo.w0 + 20, geo.w0 + ' → ' + afterHandle);
+    const undone = await p.read<any>(`
+      await H.undo();
+      await H.flush();
+      return { w: (await H.images())[0].w };`);
+    check('撤销回到原尺寸', Math.abs(undone.w - geo.w0) < 0.01, undone.w + ' / ' + geo.w0);
+  });
+
+  test('光标压在右中把手上：重合处照样能拖（透明承接层不参与命中）', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' } });
+    // 小图占满行高，光标那条竖线正好落在右中把手上 —— 这是"光标所在处拖不动"的原样。
+    //   承接层按"从光标到页右、一行高"摆放，opacity:0 挡不住命中：那一片按下会被它接走，
+    //   画布这侧收不到，于是把手在那条带子里失效。判据直接看命中层，不只看尺寸变没变。
+    const geo = await p.read<any>(`
+      await H.setText('甲乙丙丁');
+      await H.setCaret({ para: 0, offset: 2 });
+      await H.flush();
+      const data = new Uint8Array(32 * 16 * 4).fill(180);
+      await H.registerImage({ id: 'pic', width: 32, height: 16, data });
+      await H.insertImage({ resourceId: 'pic', pxWidth: 32, pxHeight: 16 });
+      await H.flush();
+      await D.stopBlink();
+      const box = (await H.images())[0];
+      const c = H.caret();
+      const cv = FRAME();
+      const r = cv.getBoundingClientRect();
+      const q = box.rects[0];
+      // 光标矩形是设备像素，折成磅才与图片的页面坐标同一把尺子。
+      return { left: r.left, top: r.top, sx: r.width / cv.width, sy: r.height / cv.height,
+               zoom: ZOOM(), qx: q.x, qy: q.y, qw: q.w, qh: q.h, w0: box.w,
+               cx: c.rect.x / ZOOM(), cy: c.rect.y / ZOOM(), ch: c.rect.h / ZOOM() };`);
+    const at = (xPt: number, yPt: number) => ({
+      x: geo.left + xPt * geo.zoom * geo.sx,
+      y: geo.top + yPt * geo.zoom * geo.sy,
+    });
+    const hx = geo.qx + geo.qw;
+    const hy = geo.qy + geo.qh / 2;
+    check('前置：光标确实压在右中把手上',
+          Math.abs(hx - geo.cx) < 4 && hy > geo.cy && hy < geo.cy + geo.ch,
+          JSON.stringify({ hx, hy, cx: geo.cx, cy: geo.cy, ch: geo.ch }));
+
+    const onHandle = at(hx, hy);
+    const topmost = await p.page.evaluate(({ x, y }) => {
+      const el = document.elementFromPoint(x, y);
+      const ime = document.querySelector('.heditor-ime');
+      return { tag: el ? el.tagName : '(null)', cls: el ? String(el.className) : '',
+               isIme: !!ime && el === ime };
+    }, onHandle);
+    check('★ 重合处最上层是画布，不是承接层',
+          topmost.tag === 'CANVAS' && !topmost.isIme, JSON.stringify(topmost));
+
+    await p.page.mouse.move(onHandle.x, onHandle.y);
+    await p.page.waitForTimeout(120);
+    const hover = await p.page.evaluate(
+      () => getComputedStyle(document.querySelector('.heditor-pages') as HTMLElement).cursor);
+    check('★ 重合处悬停仍是横向缩放光标', hover === 'ew-resize', hover);
+
+    const center = at(geo.qx + geo.qw / 2, geo.qy + geo.qh / 2);
+    await p.page.mouse.click(center.x, center.y);
+    await p.page.waitForTimeout(150);
+    await p.page.mouse.move(onHandle.x, onHandle.y);
+    await p.page.waitForTimeout(80);
+    await p.page.mouse.down();
+    await p.page.waitForTimeout(120);
+    for (let i = 1; i <= 4; i++) {
+      await p.page.mouse.move(onHandle.x + (40 * geo.zoom * geo.sx * i) / 4, onHandle.y);
+      await p.page.waitForTimeout(60);
+    }
+    await p.page.mouse.up();
+    await p.page.waitForTimeout(250);
+    const dragged = await p.read<number>(`const b = (await H.images())[0]; return b.w;`);
+    check('★ 从重合处起拖：尺寸跟着变大', dragged > geo.w0 + 10, geo.w0 + ' → ' + dragged);
+    const undone = await p.read<any>(`
+      await H.undo();
+      await H.flush();
+      return { w: (await H.images())[0].w };`);
+    check('撤销回到原尺寸', Math.abs(undone.w - geo.w0) < 0.01, undone.w + ' / ' + geo.w0);
+  });
 });
 
 test.describe('插入控件', () => {
@@ -338,13 +476,52 @@ test.describe('插入控件', () => {
                visible: H.caret().visible, form: H.form()[0] };`);
     check('★ 从控件内部起手拖出了选区', dragged.sel.empty === false,
           JSON.stringify({ empty: dragged.sel.empty, rects: dragged.sel.rects?.length }));
-    check('★ 选区起点落在控件内容里（光标屏障只挡光标，不挡选区）',
+    // 起点必须真正落在"按下的那一点"上：夹到控件边界（= start.offset）也算错，
+    //   那样从标签中间按下，选区却从控件开头开始。
+    check('★ 选区起点落在按下的那个字上（不是控件边界）',
           dragged.sel.anchor.para === geo.start.para &&
-              dragged.sel.anchor.offset >= geo.start.offset &&
+              dragged.sel.anchor.offset > geo.start.offset &&
               dragged.sel.anchor.offset <= geo.end.offset,
           JSON.stringify(dragged.sel.anchor) + ' / 控件 ' + JSON.stringify([geo.start, geo.end]));
     check('★ 焦点端已经拖到了控件右边', dragged.sel.focus.offset > geo.end.offset,
           JSON.stringify(dragged.sel.focus));
+  });
+
+  test('点控件同一处两次：光标停在同一边，不在控件左右来回跳', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' } });
+    const geo = await p.read<any>(`
+      await H.setText('甲乙丙丁戊己庚辛壬癸');
+      await H.setCaret({ para: 0, offset: 4 });
+      await H.flush();
+      await H.insertControl({ type: 'checkBox', key: 'cb', label: '同意' });
+      await H.flush();
+      await D.stopBlink();
+      const cv = FRAME();
+      const r = cv.getBoundingClientRect();
+      const q = D.controls().items[0].rects[0];
+      return { left: r.left, top: r.top, sx: r.width / cv.width, sy: r.height / cv.height,
+               zoom: ZOOM(), qx: q.x, qy: q.y, qw: q.w, qh: q.h };`);
+    const at = (fx: number) => ({
+      x: geo.left + (geo.qx + geo.qw * fx) * geo.zoom * geo.sx,
+      y: geo.top + (geo.qy + geo.qh / 2) * geo.zoom * geo.sy,
+    });
+    const pos = () => p.read<string>(`return JSON.stringify(H.caret().pos);`);
+    const click = async (x: number, y: number) => {
+      await p.page.mouse.click(x, y);
+      await p.page.waitForTimeout(80);
+    };
+
+    for (const [name, fx] of [['左半边', 0.25], ['右半边', 0.8]] as Array<[string, number]>) {
+      const q = at(fx);
+      await click(q.x, q.y);
+      const first = await pos();
+      await click(q.x, q.y);
+      const second = await pos();
+      await click(q.x, q.y);
+      const third = await pos();
+      check(`★ 点控件${name}三次：光标一个位置都不动`, first === second && second === third,
+            [first, second, third].join(' → '));
+    }
   });
 });
 

@@ -362,9 +362,13 @@ export function ensureMarkup(container: HTMLElement): void {
     //   画布挡在滚动区之外 —— 它们会撑大滚动的 overflow 区。
     `    <div class="${PART_PAGES}"` +
       ` style="position:relative;margin:16px auto 0;overflow:hidden;cursor:text"></div>`,
+    // 承接层要 pointer-events: none：它按"从光标到页右、一行高"摆放，正好压住正文
+    //   那一行。opacity:0 只影响像素，不影响命中 —— 图片把手落在光标处时，按下会被
+    //   这块透明区域接走，画布那侧收不到，表现为"光标那个位置拖不动"。
+    //   键盘与合成事件靠焦点送达，与命中无关；焦点由按下的那一路显式给。
     `    <textarea class="${PART_IME}" rows="1" spellcheck="false"`,
     '      style="position:absolute;left:0;top:0;width:1px;height:1em;opacity:0;',
-    '             border:0;padding:0;resize:none;overflow:hidden"></textarea>',
+    '             border:0;padding:0;resize:none;overflow:hidden;pointer-events:none"></textarea>',
     // 预编辑层：输入法组合中的字没有别的地方显示（承接层是透明的）。
     `    <div class="${PART_PREEDIT}"` +
       ' style="position:absolute;left:0;top:0;display:none;white-space:pre;' +
