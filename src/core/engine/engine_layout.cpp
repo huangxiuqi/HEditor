@@ -86,8 +86,8 @@ void EditorEngine::computePageFingerprints(int dirty_lo, int dirty_hi) {
     //   而"哪一页多了一张图"要按整篇重算的页指纹才看得出来（有浮动图时排版本来
     //   也是整篇重排，见 relayout 的 must_full）。
     const bool has_float = !layout_.placed_floats.empty() || !floats_.empty();
-    const bool partial = dirty_lo >= 0 && dirty_hi >= dirty_lo && page_fp_new_count_ == n &&
-                         page_fp_new_.size() >= static_cast<size_t>(n) && !has_float;
+    const bool partial = dirty_lo >= 0 && dirty_hi >= dirty_lo &&
+                         page_fp_new_.size() == static_cast<size_t>(n) && !has_float;
     if (!partial) {
         page_fp_new_.assign(static_cast<size_t>(n), kFnvBasis);
         dirty_lo = 0;
@@ -102,7 +102,6 @@ void EditorEngine::computePageFingerprints(int dirty_lo, int dirty_hi) {
         // 那些页的字形一个字节都没动，指纹自然不变（这正是增量的依据）。
         for (int p = dirty_lo; p <= dirty_hi; ++p) page_fp_new_[static_cast<size_t>(p)] = kFnvBasis;
     }
-    page_fp_new_count_ = n;
 
     // 只遍历受影响页的字形。
     //
@@ -355,15 +354,6 @@ void EditorEngine::computeLineFingerprints(int dirty_lo, int dirty_hi, bool full
                               (static_cast<uint64_t>(it->color.b) << 16));
         }
         line_fp_new_[static_cast<size_t>(li)] = h & ~kFpDirtyBit;
-        if (li == 0) {
-            unsigned long long ph = 0;
-            int nph = 0;
-            for (const LineCluster& cc : lb.clusters) {
-                if (!cc.placeholder) continue;
-                ++nph;
-                if (ph == 0) ph = cc.content_hash;
-            }
-        }
     }
 }
 
@@ -382,9 +372,9 @@ void EditorEngine::markPagesChangedFrom(int first_page) {
     const int first = std::max(0, first_page);
     const int n = std::max(1, layout_.stats.page_count);
     page_fp_new_.resize(static_cast<size_t>(n), kFnvBasis);
-    page_fp_new_count_ = n;
+    const int prev_pages = static_cast<int>(page_fp_prev_.size());
     for (int p = first; p < n; ++p) {
-        const uint64_t base = (p < page_fp_prev_count_) ? page_fp_prev_[static_cast<size_t>(p)] : 0;
+        const uint64_t base = (p < prev_pages) ? page_fp_prev_[static_cast<size_t>(p)] : 0;
         page_fp_new_[static_cast<size_t>(p)] = dirtyFpValue(base);
     }
 
@@ -393,9 +383,10 @@ void EditorEngine::markPagesChangedFrom(int first_page) {
     line_fp_new_.resize(static_cast<size_t>(n_lines), kFnvBasis);
     // 逐行比页号，不按"从某一行起往后都脏"推：行数组在表格跨页处不按页单调，
     //   按起点一路标下去会把后面几页的正文也标脏（多画几页，不至于画错，但没必要）。
+    const int prev_lines = static_cast<int>(line_fp_prev_.size());
     for (int k = 0; k < n_lines; ++k) {
         if (layout_.lines[static_cast<size_t>(k)].page < first) continue;
-        const uint64_t base = (k < line_fp_prev_count_) ? line_fp_prev_[static_cast<size_t>(k)] : 0;
+        const uint64_t base = (k < prev_lines) ? line_fp_prev_[static_cast<size_t>(k)] : 0;
         line_fp_new_[static_cast<size_t>(k)] = dirtyFpValue(base);
     }
 }
@@ -406,12 +397,13 @@ void EditorEngine::markPageDirty(int page) {
     if (page >= n) return;
     // 页数对不上就说明此前整篇重排过、其余页的旧指纹已经不可信：退回"从这一页
     //   标到末尾"。单页标脏的前提是"别的页还是同一版那份账"。
-    if (page_fp_new_count_ != n || page_fp_new_.size() < static_cast<size_t>(n)) {
+    if (page_fp_new_.size() != static_cast<size_t>(n)) {
         markPagesChangedFrom(page);
         return;
     }
-    const uint64_t base =
-        (page < page_fp_prev_count_) ? page_fp_prev_[static_cast<size_t>(page)] : 0;
+    const uint64_t base = (page < static_cast<int>(page_fp_prev_.size()))
+                              ? page_fp_prev_[static_cast<size_t>(page)]
+                              : 0;
     page_fp_new_[static_cast<size_t>(page)] = dirtyFpValue(base);
 }
 
@@ -598,7 +590,7 @@ void EditorEngine::relayout() {
                                               : std::min(old_first_page, new_first_page);
         if (lo < 0) {
             fp_lo = -1;  // 两版都找不到行盒（空段）—— 保守起见整篇重算
-        } else if (layout_.stats.page_count != page_fp_new_count_) {
+        } else if (layout_.stats.page_count != static_cast<int>(page_fp_new_.size())) {
             // 页数变了 = 从脏段起重新分页了，那之后的每一页都跟着挪位。
             //   computePageFingerprints 遇到页数变化会退回整篇重算，这里不必：直接标脏。
             pages_known_changed = true;

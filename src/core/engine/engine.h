@@ -3848,6 +3848,9 @@ private:
      *
      * 真指纹一律清掉 kFpDirtyBit —— 那一位留给"已知变了"的哨兵（markPagesChangedFrom），
      * 于是"这一页变了没有"永远只有一个判据：new != base。
+     *
+     * 数组长度就是有效范围，不另存 count：两份账总要有一处忘同步，而那一处的症状是
+     * "某几页永远不重画"或"读到越界"。下面四组指纹同一口径。
      */
     std::vector<uint64_t> page_fp_new_;
 
@@ -3855,16 +3858,6 @@ private:
      * 已经画成像素的那一版页指纹。
      */
     std::vector<uint64_t> page_fp_prev_;
-
-    /**
-     * 本次排版算出来的页指数。
-     */
-    int page_fp_new_count_ = 0;
-
-    /**
-     * 已画那一版的页指数。
-     */
-    int page_fp_prev_count_ = 0;
 
     /**
      * 行内容指纹：与页指纹同源、同一把尺子，只是分桶到行（下标 = LineBox::line）。
@@ -3882,11 +3875,6 @@ private:
      * 已经画成像素的那一版行指纹。
      */
     std::vector<uint64_t> line_fp_prev_;
-
-    /**
-     * 已画那一版的行数（行指纹数组的规模）。
-     */
-    int line_fp_prev_count_ = 0;
 
     /**
      * 已画进页位图的那一版里，每一行的块轴范围（页内磅），按行下标。
@@ -3915,11 +3903,6 @@ private:
     std::vector<uint64_t> table_fp_prev_;
 
     /**
-     * 已画那一版的页数（表格摘要数组的规模）。
-     */
-    int table_fp_prev_count_ = 0;
-
-    /**
      * 每页的浮动图摘要（下标 = 页号）。
      *
      * 浮动图不占行盒，行带看不见它：把一张图从行内改成四周型，锚段那几行确实变了，
@@ -3932,11 +3915,6 @@ private:
      * 已经画成像素的那一版浮动图摘要。
      */
     std::vector<uint64_t> float_fp_prev_;
-
-    /**
-     * 已画那一版的页数（浮动图摘要数组的规模）。
-     */
-    int float_fp_prev_count_ = 0;
 
     /**
      * 本次重画那条行带的页内磅范围（computeBand 写、rasterIntoBitmap 读）。
