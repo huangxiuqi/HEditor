@@ -286,8 +286,9 @@ export interface DomHost {
   /**
    * 把光标滚进视口（装载、程序化定位之后用）。
    * @param st 这一拍的账；不传就现读
+   * @param reveal 是否真的改滚动位置（false = 只同步窗口与状态）
    */
-  scrollCaretIntoView(st?: any): Maybe<boolean>;
+  scrollCaretIntoView(st?: any, reveal?: boolean): Maybe<boolean>;
 
   /**
    * 把滚动位置归零（引擎换过文档时它自己已经把滚动位置清了，宿主跟着追平）。
@@ -543,13 +544,17 @@ export function createDomHost(o: DomHostOptions): DomHost {
    * @param st 这一拍的状态读数（省略则现读）
    * @returns 有没有产生视口变化
    */
-  function scrollCaretIntoView(st?: any): Maybe<boolean> {
+  function scrollCaretIntoView(st?: any, reveal = true): Maybe<boolean> {
     const s = st ?? link.read('editStats');
     lastState = s;
 
     if (!s || s.windowPages === undefined) return false;
     const g = view();
     pages.sync(g.first, g.count, g.totalPages, g);
+    // 光标没动就不滚。视口是用户自己滚到的地方，而"搬一张图""改一次格式""提交一个
+    //   表单"都不挪光标 —— 按旧光标回拽一下，看起来就是"松手之后页面自己跳了"。
+    //   窗口与状态上面已经同步过，这里只省掉改滚动那一步。
+    if (!reveal) return false;
     const step = g.ph + g.gap;
     const inWindow =
       s.caretPage >= s.windowFirstPage && s.caretPage < s.windowFirstPage + s.windowPages;
@@ -677,10 +682,16 @@ export function createDomHost(o: DomHostOptions): DomHost {
       // 滚动必须在 settle 之后：settle 之前读到的 editStats 还是上一拍的（它只在
       //   present 时刷新）。拿旧读数决定滚动方向，多页文档上点第二页会把视口拽回
       //   上一次编辑所在的那一页 —— 看起来就是"点一下页面乱跳、光标不见了"。
+      // 光标没动就别滚（见 scrollCaretIntoView 的 reveal）：搬图、改格式、提交表单
+      //   都不挪光标，而这时视口停在用户自己滚到的位置。
+      const prev = lastState;
+      const caretMoved =
+          !prev || !s || prev.caretPara !== s.caretPara || prev.caretOffset !== s.caretOffset ||
+          prev.caretPage !== s.caretPage;
       // 滚动与收尾之间还要等一次视口消息：滚动之后引擎可能得换窗，而 finish 是按
       //   "引擎这一刻的窗口"建画布、贴页的。不等的话这一拍贴的是旧窗口那几页，
       //   新窗口要等下一拍 —— 连续粘贴时就是每一拍都落后一点，越粘差距越大。
-      return then1(scrollCaretIntoView(s), () => {
+      return then1(scrollCaretIntoView(s, caretMoved), () => {
         finish();
         // 计时器在这里重新起：相位从"可见"开始，530 ms 后翻到隐藏。放在 finish 里会
         //   被每一份状态重置（Worker 每拍都推一份），于是永远停在可见那一拍。

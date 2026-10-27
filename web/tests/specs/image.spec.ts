@@ -513,7 +513,19 @@ test.describe('图片环绕', () => {
       out.inline = { rect: (await H.images())[0].rects[0], p: await probe() };
       await H.setImageLayout(0, 'square');
       await H.flush();
-      out.square = { rect: (await H.images())[0].rects[0], p: await probe(),
+      // 逐偏移读插入点：图旁边那一行上分居两侧，就是"文字绕开图"的直接证据。
+      const scan = async () => {
+        const n = (await H.paragraph(1)).length;
+        const pts = [];
+        for (let off = 0; off <= n; off += 2) {
+          await H.setCaret({ para: 1, offset: off });
+          await H.flush();
+          const c = CARET();
+          pts.push({ x: c.x / ZOOM(), y: c.y / ZOOM(), h: c.h / ZOOM() });
+        }
+        return pts;
+      };
+      out.square = { rect: (await H.images())[0].rects[0], p: await probe(), scan: await scan(),
                      audit: (await D.auditPage(0)).diff };
       await H.setImageLayout(0, 'topAndBottom');
       await H.flush();
@@ -536,10 +548,19 @@ test.describe('图片环绕', () => {
       check('★ 切到 ' + k + ' 之后图还在原位置（不跳到段首）', near(r[k].rect, inl),
             JSON.stringify(r[k].rect) + ' vs ' + JSON.stringify(inl));
     }
-    // 四周型：图左边只有一小段（图是左对齐的），文字应从图的右边起。
-    check('★ 四周型：文字让到图的右边',
-          r.square.p.a[0] > r.square.rect.x * 1.0 && r.square.p.a[0] - r.inline.p.a[0] > 20,
-          JSON.stringify(r.square.p.a) + ' / 行内 ' + JSON.stringify(r.inline.p.a));
+    // 四周型：图左边的空间不够排字时整行让到右边，够的话左边也排 —— 两种情况都
+    //   不许有插入点落在图身上，且图的右侧一定有字。
+    {
+      const im = r.square.rect;
+      const pts = r.square.scan.filter((q: any) => q.y + q.h > im.y + 1 && q.y < im.y + im.h - 1);
+      check('★ 四周型：文字绕到图的右边',
+            pts.some((q: any) => q.x > im.x + im.w + 2),
+            '图右 ' + (im.x + im.w).toFixed(1) + ' / 插入点 ' +
+              JSON.stringify(pts.map((q: any) => Math.round(q.x))));
+      check('★ 四周型：没有字压在图身上',
+            !pts.some((q: any) => q.x > im.x - 1 && q.x < im.x + im.w),
+            JSON.stringify(pts.filter((q: any) => q.x > im.x - 1 && q.x < im.x + im.w)));
+    }
     // 上下型：段落文字被推到底边之下。
     check('★ 上下型：文字被推到图片底边之下',
           r.top.p.a[1] > r.top.rect.y + r.top.rect.h - 2,
@@ -553,6 +574,65 @@ test.describe('图片环绕', () => {
     check('★ 改回行内：旧的那张图没有留在页面上（自审 diff = 0）',
           r.back.audit === 0 && r.square.audit === 0 && r.top.audit === 0,
           String(r.back.audit) + ' / ' + String(r.square.audit) + ' / ' + String(r.top.audit));
+  });
+
+  test('四周型：图在中间时一行左右都有字，字与选区都不压图', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' }, viewport: { width: 1200, height: 900 } });
+    const geo = await p.read<any>(`
+      let s = '';
+      for (let i = 0; i < 240; i++) s += '环绕测试';
+      await H.setText(s);
+      await H.flush();
+      await H.setCaret({ para: 0, offset: 0 });
+      await H.flush();
+      const data = new Uint8Array(120 * 90 * 4).fill(160);
+      await H.registerImage({ id: 'mid', width: 120, height: 90, data });
+      await H.insertImage({ resourceId: 'mid', pxWidth: 120, pxHeight: 90 });
+      await H.flush();
+      await H.setImageLayout(0, 'square');
+      await H.flush();
+      await D.stopBlink();
+      const a = (await H.images())[0];
+      const fr = FRAME().getBoundingClientRect();
+      return { r: a.rects[0], left: fr.left, top: fr.top, z: ZOOM() };`);
+    const cx = geo.left + (geo.r.x + geo.r.w / 2) * geo.z;
+    const cy = geo.top + (geo.r.y + geo.r.h / 2) * geo.z;
+    // 把图拖到版心中间：贴着左边时只剩右侧一段，看不出两段的差别。
+    await p.page.mouse.click(cx, cy);
+    await p.page.waitForTimeout(120);
+    await p.page.mouse.move(cx, cy);
+    await p.page.mouse.down();
+    await p.page.mouse.move(cx + 150 * geo.z, cy, { steps: 6 });
+    await p.page.mouse.up();
+    await p.page.waitForTimeout(320);
+    const r = await p.read<any>(`
+      const img = (await H.images())[0].rects[0];
+      // 逐偏移读一次插入点：同一行上分居图两侧，就是"一行两段"的直接证据。
+      const n = (await H.paragraph(0)).length;
+      const pts = [];
+      for (let off = 0; off <= n; off += 2) {
+        await H.setCaret({ para: 0, offset: off });
+        await H.flush();
+        const c = CARET();
+        pts.push({ off, x: c.x / ZOOM(), y: c.y / ZOOM(), h: c.h / ZOOM() });
+      }
+      await H.selectAll();
+      await H.flush();
+      const sel = SEL();
+      return { img, pts, sel };`);
+
+    const img = r.img;
+    const near = r.pts.filter((q: any) => q.y + q.h > img.y && q.y < img.y + img.h);
+    const twoSided = near.some(
+      (a: any) => near.some(
+        (b: any) => Math.abs(a.y - b.y) < 4 && a.x < img.x - 2 && b.x > img.x + img.w + 2));
+    check('★ 图在中间：同一行上图的左边有插入点、右边也有',
+          twoSided, '图旁 ' + near.length + ' 个插入点');
+    const badSel = (r.sel.rects || []).filter(
+      (q: any) => q.page === img.page && q.y < img.y + img.h - 1 && q.y + q.h > img.y + 1 &&
+        Math.min(q.x + q.w, img.x + img.w) - Math.max(q.x, img.x) > 2);
+    check('★ 整段选区不横跨图：每一条矩形都让开图', badSel.length === 0,
+          JSON.stringify(badSel.slice(0, 2)));
   });
 });
 
@@ -657,5 +737,172 @@ test.describe('图片拖动', () => {
           JSON.stringify(landed) + ' vs ' + JSON.stringify(mid.rect));
     check('★ 一步撤销回到原位', Math.abs(undone.x - geo.r.x) < 1 && Math.abs(undone.y - geo.r.y) < 1,
           JSON.stringify(undone) + ' vs ' + JSON.stringify(geo.r));
+  });
+
+  test('拖衬于文字下方的图：一帧只重画它盖住的那一页，不跟着重画后面每一页', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' }, viewport: { width: 1200, height: 900 } });
+    const geo = await p.read<any>(`
+      let s = '';
+      for (let i = 0; i < 150; i++) s += '拖动只重画一页的正文内容，用来撑出多页文档。';
+      await H.setText(s);
+      await H.flush();
+      await H.setCaret({ para: 5, offset: 0 });
+      await H.flush();
+      const data = new Uint8Array(120 * 90 * 4).fill(160);
+      await H.registerImage({ id: 'one', width: 120, height: 90, data });
+      await H.insertImage({ resourceId: 'one', pxWidth: 120, pxHeight: 90 });
+      await H.flush();
+      // 这一下是整篇重排：下面拿它的重画页数当反向的一半（证明"只画一页"不是恒真）。
+      //   衬于下方不占版面，拖动只影响它盖住的那一页 —— 这条走的是轻量那一路。
+      await H.setImageLayout(0, 'behind');
+      await H.flush();
+      await D.stopBlink();
+      const a = (await H.images())[0];
+      const fr = FRAME().getBoundingClientRect();
+      const st = D.editStats();
+      return { r: a.rects[0], left: fr.left, top: fr.top, z: ZOOM(),
+               pages: st.totalPages, window: st.windowPages, atLayout: st.repaintedPages };`);
+    check('文档够多页、窗口也铺得开（否则这条判据恒真）',
+          geo.pages >= 3 && geo.window >= 2, JSON.stringify({ pages: geo.pages, window: geo.window }));
+    check('反向：换环绕档位是整篇重排，重画的不止一页', geo.atLayout > 1, String(geo.atLayout));
+
+    const cx = geo.left + (geo.r.x + geo.r.w / 2) * geo.z;
+    const cy = geo.top + (geo.r.y + geo.r.h / 2) * geo.z;
+    await p.page.mouse.click(cx, cy);
+    await p.page.waitForTimeout(150);
+    await p.page.mouse.move(cx, cy);
+    await p.page.mouse.down();
+    await p.page.mouse.move(cx + 12 * geo.z, cy + 6 * geo.z, { steps: 3 });
+    await p.page.waitForTimeout(160);
+    const mid = await p.read<any>(`
+      const st = D.editStats();
+      const b = (await H.images())[0];
+      return { repainted: st.repaintedPages, paint: st.paintMs, page: b.rects[0].page };`);
+    await p.page.mouse.up();
+    await p.page.waitForTimeout(280);
+    check('★ 拖动一帧只重画图盖住的那一页', mid.repainted === 1, JSON.stringify(mid));
+  });
+
+  test('拖四周型图：文字当场让开，不等松手', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' }, viewport: { width: 1200, height: 900 } });
+    const geo = await p.read<any>(`
+      let s = '';
+      for (let i = 0; i < 60; i++) s += '拖动时文字要跟着让开的正文内容，一行排满才有绕排可言。';
+      await H.setText(s);
+      await H.flush();
+      await H.setCaret({ para: 2, offset: 0 });
+      await H.flush();
+      const data = new Uint8Array(120 * 90 * 4).fill(160);
+      await H.registerImage({ id: 'w', width: 120, height: 90, data });
+      await H.insertImage({ resourceId: 'w', pxWidth: 120, pxHeight: 90 });
+      await H.flush();
+      await H.setImageLayout(0, 'square');
+      await H.flush();
+      await D.stopBlink();
+      const a = (await H.images())[0];
+      const fr = FRAME().getBoundingClientRect();
+      return { r: a.rects[0], left: fr.left, top: fr.top, z: ZOOM() };`);
+    const cx = geo.left + (geo.r.x + geo.r.w / 2) * geo.z;
+    const cy = geo.top + (geo.r.y + geo.r.h / 2) * geo.z;
+    await p.page.mouse.click(cx, cy);
+    await p.page.waitForTimeout(150);
+    await p.page.mouse.move(cx, cy);
+    await p.page.mouse.down();
+    await p.page.mouse.move(cx + 70 * geo.z, cy, { steps: 6 });
+    await p.page.waitForTimeout(240);
+    // 全程没有松手：下面读到的版面就是"拖动中"的那一份。
+    const mid = await p.read<any>(`
+      const im = (await H.images())[0].rects[0];
+      const n = (await H.paragraph(2)).length;
+      const pts = [];
+      for (let off = 0; off <= n; off += 2) {
+        await H.setCaret({ para: 2, offset: off });
+        await H.flush();
+        const c = CARET();
+        pts.push({ x: c.x / ZOOM(), y: c.y / ZOOM(), h: c.h / ZOOM() });
+      }
+      return { im, pts };`);
+    await p.page.mouse.up();
+    await p.page.waitForTimeout(300);
+
+    const band = mid.pts.filter(
+      (q: any) => q.y + q.h > mid.im.y + 1 && q.y < mid.im.y + mid.im.h - 1);
+    check('★ 拖动中图已经挪到位', Math.abs(mid.im.x - geo.r.x - 70) < 8,
+          mid.im.x + ' vs ' + (geo.r.x + 70));
+    check('★ 拖动中没有字压在图身上（文字当场让开，不是松手才排）',
+          !band.some((q: any) => q.x > mid.im.x - 1 && q.x < mid.im.x + mid.im.w),
+          JSON.stringify(band.filter((q: any) => q.x > mid.im.x - 1 && q.x < mid.im.x + mid.im.w)));
+  });
+
+  test('拖完浮动图松手：视口停在原处，不被光标拽走', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' }, viewport: { width: 1200, height: 900 } });
+    await p.read<any>(`
+      let s = '';
+      for (let i = 0; i < 400; i++) s += '松手之后视口不应该被光标拽走的正文内容，一行排满。\\n';
+      await H.setText(s);
+      await H.flush();
+      const data = new Uint8Array(100 * 80 * 4).fill(170);
+      await H.registerImage({ id: 's', width: 100, height: 80, data });
+      await H.setCaret({ para: 3, offset: 0 });
+      await H.flush();
+      await H.insertImage({ resourceId: 's', pxWidth: 100, pxHeight: 80 });
+      await H.flush();
+      await H.setImageLayout(0, 'square');
+      await H.flush();
+      // 光标放到文档末尾，视口滚回第一页：松手时两者分居两端，一拽就看得出来。
+      await H.setCaret({ para: 399, offset: 0 });
+      await H.flush();
+      await D.stopBlink();
+      const stage = document.querySelector('.heditor-stage');
+      stage.scrollTop = 0;
+      await H.flush();
+      return stage.scrollTop;`);
+    await p.page.waitForTimeout(500);
+    const geo = await p.read<any>(`
+      const stage = document.querySelector('.heditor-stage');
+      const a = (await H.images())[0];
+      const fr = FRAME().getBoundingClientRect();
+      const st = D.editStats();
+      return { r: a.rects[0], left: fr.left, top: fr.top, z: ZOOM(),
+               scroll: stage.scrollTop, pages: st.totalPages, caretPage: st.caretPage,
+               pos: (await H.caret()).pos, paras: st.totalParagraphs };`);
+    check('文档够长、光标与视口分居两端（否则这条判据恒真）',
+          geo.pages >= 3 && geo.caretPage + 1 >= geo.pages - 1,
+          JSON.stringify(geo));
+
+    const cx = geo.left + (geo.r.x + geo.r.w / 2) * geo.z;
+    const cy = geo.top + (geo.r.y + geo.r.h / 2) * geo.z;
+    await p.page.waitForTimeout(320);
+    await p.page.mouse.click(cx, cy);
+    await p.page.waitForTimeout(200);
+    await p.page.mouse.move(cx, cy);
+    await p.page.mouse.down();
+    await p.page.mouse.move(cx + 40 * geo.z, cy + 20 * geo.z, { steps: 5 });
+    await p.page.mouse.up();
+    await p.page.waitForTimeout(320);
+    const after = await p.read<any>(`
+      const stage = document.querySelector('.heditor-stage');
+      const st = D.editStats();
+      return { scroll: stage.scrollTop, caretPage: st.caretPage,
+               x: (await H.images())[0].rects[0].x };`);
+    check('★ 松手之后视口停在原地（没被旧光标拽回末尾）',
+          Math.abs(after.scroll - geo.scroll) < 4,
+          geo.scroll + ' → ' + after.scroll);
+    check('图确实落到了新位置（不是因为没搬才不滚）', Math.abs(after.x - geo.r.x - 40) < 8,
+          String(after.x));
+
+    // 反向：光标真的挪了的时候，视口照样要跟过去 —— 证明上面那条不是"把滚动关了"。
+    await p.read<any>(`
+      await H.setCaret({ para: 399, offset: 0 });
+      await H.flush();
+      return 1;`);
+    await p.page.keyboard.type('x');
+    await p.page.waitForTimeout(420);
+    const typed = await p.read<any>(`
+      const stage = document.querySelector('.heditor-stage');
+      return { scroll: stage.scrollTop, caretPage: D.editStats().caretPage };`);
+    check('反向：真的打字（光标动了）时视口照样跟过去',
+          typed.caretPage >= geo.pages - 1 && typed.scroll > geo.scroll + 100,
+          JSON.stringify(typed) + ' vs ' + geo.scroll);
   });
 });

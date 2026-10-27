@@ -446,6 +446,51 @@ int main() {
                        "四周型让出宽度：图旁的行比整宽窄（" + std::to_string(widest_beside) +
                            " < " + std::to_string(inline_end) + "）");
         }
+        // 图挪到版心中间：四周型要把一行分成左右两段（Word 的做法）。
+        //   贴着左边时只有右侧一段，看不出两段的差别；中间这个位置才验得到。
+        expectTrue(e.moveImageToPtAndRender(0, 0.0f, 0.0f, true, 150.0f, 0.0f),
+                   "把图往右挪 150 磅（放到版心中间）");
+        {
+            const PlacedFloat& pf = e.layout().placed_floats.front();
+            int two_sided = 0;
+            bool sides_ok = true;
+            for (const LineBox& lb : e.layout().lines) {
+                if (lb.page != pf.page) continue;
+                if (lb.block_hi_pt <= pf.y || lb.block_lo_pt >= pf.y + pf.h) continue;
+                if (lb.spans.size() < 2) continue;
+                ++two_sided;
+                const float gap_lo = pf.x - lb.inline_origin_pt;
+                const float gap_hi = pf.x + pf.w - lb.inline_origin_pt;
+                bool any_left = false;
+                bool any_right = false;
+                bool in_gap = false;
+                for (const LineCluster& c : lb.clusters) {
+                    if (c.inline_pt < gap_lo - 1.0f) any_left = true;
+                    if (c.inline_pt >= gap_hi) any_right = true;
+                    if (c.inline_pt > gap_lo && c.inline_pt < gap_hi) in_gap = true;
+                }
+                if (!any_left || !any_right || in_gap) sides_ok = false;
+            }
+            expectTrue(two_sided > 0, "图在中间：至少一行分成左右两段");
+            expectTrue(sides_ok, "两段行：左段的字在图左、右段的字在图右、没有簇落在图上");
+            // 选区按段切：一条横跨图的矩形会把图也涂上。
+            e.selectAll();
+            bool overlap = false;
+            for (const EditorEngine::PageRect& pr : e.selectionRects()) {
+                if (pr.page != pf.page) continue;
+                // 只看与图同一条纵向带上的矩形：图上方与下方的行本来是整宽的，
+                //   它们横跨图所在的那几列也不算"盖住图"。
+                if (pr.r_pt.y >= pf.y + pf.h - 1.0f || pr.r_pt.y + pr.r_pt.h <= pf.y + 1.0f) {
+                    continue;
+                }
+                const float lo = std::max(pr.r_pt.x, pf.x);
+                const float hi = std::min(pr.r_pt.x + pr.r_pt.w, pf.x + pf.w);
+                if (hi - lo > 2.0f) overlap = true;
+            }
+            expectTrue(!overlap, "整段选区不横跨图：每一条矩形都让开图");
+            e.clearSelection();
+        }
+        expectTrue(e.moveImageToPtAndRender(0, 0.0f, 0.0f, true, -150.0f, 0.0f), "把图挪回原处");
         expectTrue(e.setImageLayoutAndRender(0, 2), "改成上下型");
         {
             // 上下型：文字不进图片的纵向区间 —— 第二段的行顶在图片底边之下。

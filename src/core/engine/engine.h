@@ -2116,6 +2116,15 @@ public:
     bool previewImageResizeAndRender(int index, float w_pt, float h_pt, int handle);
 
     /**
+     * 丢掉拖动预览并让版面回到文档里的位置（取消拖动时用）。
+     *
+     * 拖动预览改的是版面本身（位移进了浮动图表），所以"丢掉预览"不是擦掉一个框，
+     *   而是重排一次 —— 不重排的话图会停在松手前那一处，文档里却没有这个位移。
+     * @return true = 确实有一份预览被丢掉
+     */
+    bool clearImagePreviewAndRender();
+
+    /**
      * 拖动浮动图的预览：图按位移跟手，不动文档、不重排。
      *
      * 浮动图不占行盒，拖动它可以只挪这一张图的绘制位置（文字保持松手前的位置），
@@ -3090,6 +3099,16 @@ private:
     void markPagesChangedFrom(int first_page);
 
     /**
+     * 只把一页标成"与已画那一版不同"，其余页一个字节都不碰。
+     *
+     * 用在"只有这一页变了"的地方：衬于文字下方 / 浮于文字上方那种图不占版面，
+     *   挪它只影响它盖住的那一页。按 markPagesChangedFrom 标的话，这一页之后
+     *   每一页都会重光栅、每一页位图都回传一次。
+     * @param page 页号（越界或负值忽略）
+     */
+    void markPageDirty(int page);
+
+    /**
      * 把当前行指纹与行盒几何存成"已画进页位图的那一版"。
      * 与 page_fp_prev_ 同一时机调用：页像素变了就要跟着换。
      */
@@ -3504,6 +3523,20 @@ private:
     std::vector<LayoutFloat> floats_;
 
     /**
+     * 叠加了拖动位移的那一份浮动图表（只在拖动浮动图时有内容）。
+     *
+     * 排版吃的是它，于是 placed_floats 直接就是预览位置 —— 文字当场绕开，不用等松手。
+     *   复制一份而不是就地改 floats_：后者是编译产物，取消拖动要恢复原样。
+     */
+    std::vector<LayoutFloat> floats_preview_;
+
+    /**
+     * 本次排版要吃的浮动图表：拖动预览中返回叠加过位移的副本，其余时候返回编译产物。
+     * @returns 浮动图表（引用，生命周期到下一次排版）
+     */
+    const std::vector<LayoutFloat>& floatsForLayout();
+
+    /**
      * 表格结构（编译产物的一种投影，与 blocks_full_ 同源）。排版吃它来按格布局；
      * 它也是"这张表跨了几页、格线画在哪"的输入。没有表格时为空。
      */
@@ -3594,6 +3627,15 @@ private:
          * 同上，纵向。
          */
         float dy_pt = 0.0f;
+
+        /**
+         * 这一次预览是否已经由排版吃进去了。
+         *
+         * 拖动浮动图走的是"真重排"：位移写进排版输入，placed_floats 就是预览位置 ——
+         *   绘制、命中、选中框全读那一边，不能再叠一次位移（叠两次图会飞出一倍远）。
+         *   改尺寸预览则是"只画框不动版面"，那一份仍然靠叠加。
+         */
+        bool placed = false;
     };
 
     /**

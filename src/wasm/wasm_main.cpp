@@ -1435,12 +1435,10 @@ bool previewImageMoveAt(int index, float dx_pt, float dy_pt) {
 
 /**
  * 收起尺寸预览（松手后由宿主补一次真实 resizeImage；中途取消也走它）。
+ *
+ * 拖动浮动图的预览改的是版面本身：丢掉它要连带重排，图才回到文档里的位置。
  */
-bool clearImagePreview() {
-    if (!g_engine.clearImageResizePreview()) return false;
-    g_engine.repaint();
-    return true;
-}
+bool clearImagePreview() { return g_engine.clearImagePreviewAndRender(); }
 
 /**
  * 在光标处插一张图片。opts 的键：res（资源 id）、w、h（显示尺寸，磅，可省）、

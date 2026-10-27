@@ -574,10 +574,24 @@ bool EditorEngine::previewImageResizeAndRender(int index, float w_pt, float h_pt
     return true;
 }
 
+const std::vector<LayoutFloat>& EditorEngine::floatsForLayout() {
+    if (!image_preview_.placed || image_preview_.id == kInvalidNodeId) return floats_;
+    floats_preview_ = floats_;
+    for (LayoutFloat& f : floats_preview_) {
+        if (f.handle != image_preview_.id) continue;
+        f.dx_pt += image_preview_.dx_pt;
+        f.dy_pt += image_preview_.dy_pt;
+        break;
+    }
+    return floats_preview_;
+}
+
 void EditorEngine::imagePreviewPos(const PlacedFloat& pf, float* x, float* y) const {
     float px = pf.x;
     float py = pf.y;
-    if (image_preview_.id != kInvalidNodeId &&
+    // 已经排进版面的位移不再叠一次：那种预览下 placed_floats 就是预览位置，
+    //   再叠一遍图会跑到两倍远的地方（而文字只让开了一倍）。
+    if (!image_preview_.placed && image_preview_.id != kInvalidNodeId &&
         image_preview_.id == static_cast<NodeId>(pf.handle)) {
         px += image_preview_.dx_pt;
         py += image_preview_.dy_pt;
@@ -593,7 +607,7 @@ bool EditorEngine::previewImageMove(int index, float dx_pt, float dy_pt) {
         if (b.index != index) continue;
         // 行内图在文字流里：挪它必须重排（后面的字要让位），没有"只挪绘制位置"这回事。
         if (b.layout == 0) return false;
-        // 幂等按磅比：拖动每帧都会调用一次，没变就不重贴（省下一整页的光栅）。
+        // 幂等按磅比：拖动每帧都会调用一次，没变就不重排（省下一整趟排版与光栅）。
         if (image_preview_.id == b.id && std::fabs(image_preview_.dx_pt - dx_pt) < 0.01f &&
             std::fabs(image_preview_.dy_pt - dy_pt) < 0.01f) {
             return false;
@@ -602,19 +616,41 @@ bool EditorEngine::previewImageMove(int index, float dx_pt, float dy_pt) {
         image_preview_.handle = -1;
         image_preview_.dx_pt = dx_pt;
         image_preview_.dy_pt = dy_pt;
-        // 页位图按页指纹命中：图挪了、版面没变，指纹不变就不会重画。浮动图摘要正是
-        //   "这一页画出来的浮动图"，用新位置重算它再标脏，这一页才真的重光栅。
-        for (const PageRect& pr : b.rects) {
-            const int p = pr.page;
-            if (p < 0) continue;
-            if (static_cast<size_t>(p) < float_fp_new_.size()) {
-                float_fp_new_[static_cast<size_t>(p)] = floatPieceDigest(p);
+        // 衬于文字下方 / 浮于文字上方不占版面：位移只影响绘制，排一次是白花。
+        if (b.layout == 3 || b.layout == 4) {
+            image_preview_.placed = false;
+            for (const PageRect& pr : b.rects) {
+                const int p = pr.page;
+                if (p < 0) continue;
+                if (static_cast<size_t>(p) < float_fp_new_.size()) {
+                    float_fp_new_[static_cast<size_t>(p)] = floatPieceDigest(p);
+                }
+                markPageDirty(p);
             }
-            markPagesChangedFrom(p);
+            return true;
         }
+        image_preview_.placed = true;
+        // 拖动中就把文字排开：位移进浮动图表，整篇重排一次。
+        //   只挪绘制位置的话省下的是排版，代价是图一路压着字走、松手才跳一下 ——
+        //   而"文字跟着让开"正是环绕这个东西本身。这一趟必须整篇：浮动框的纵向位置
+        //   取决于它前面排了多高，续排拿不到那个上下文。
+        markAllLayoutDirty();
+        relayout();
         return true;
     }
     return false;
+}
+
+bool EditorEngine::clearImagePreviewAndRender() {
+    // 拖动预览改的是版面：丢掉预览就等于"图回到文档里的位置"，必须重排一次才算回去。
+    const bool placed = image_preview_.placed;
+    if (!clearImageResizePreview()) return false;
+    if (placed) {
+        markAllLayoutDirty();
+        relayout();
+    }
+    repaint();
+    return true;
 }
 
 /**

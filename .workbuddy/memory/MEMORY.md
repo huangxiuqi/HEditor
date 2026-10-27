@@ -41,9 +41,19 @@
   `hintAdvancePt`、上限容器宽）：数槽 = 数位置处都跳过它（`bracketCountAt`、`offsetAtSide`、
   `hitTestInLine`）；不进流，判空仍按 `hi-lo==2`，没有码点时 `controlRects` 用提示槽。
 - 图片：字节不进文档；改尺寸只更新预览框、松手才 `resizeImage`；浮动图拖动用
-  `previewImageMove` 只挪绘制位置（不重排）、松手才 `moveImage`，且不画插入点（`hit.drag`
-  为 3）；行内图在流里，按 2 走落点提示。进格的图按格宽限宽。
+  `previewImageMove`：四周型 / 上下型把位移叠进 `floatsForLayout()` 的副本**真重排**，
+  文字当场绕开；衬于下方 / 上方不占版面，仍只挪绘制（`ImagePreview::placed` 区分两者，
+  已排进版面的位移 `imagePreviewPos` 不再叠第二次）；松手才 `moveImage`，不画插入点
+  （`hit.drag` 为 3）；行内图在流里，按 2 走落点提示。进格的图按格宽限宽。
 - 浮动图摘要与绘制、命中、选中框一律走 `imagePreviewPos`：各写一份的话拖动中框与图错开。
+- 拖动预览只标图那一页（`markPageDirty`），别用 `markPagesChangedFrom`：后者从该页标到
+  末尾，视口每页都重光栅、每帧回传十几兆。输入层必须只留最新坐标（上一个预览回来再发
+  下一个）—— 事件比一帧密，逐个发就在 Worker 前排队，症状是图落后指针几秒，不是单帧慢。
+- `afterEdit` 之后只在**光标真的挪了**时才滚视口（`caretPara/Offset/Page` 有一项变）。
+  否则搬图、改格式、提交表单都会把视口拽回旧光标处 —— 那是"松手页面自己跳了"。
+- 一行可多片段（四周型图在中间）：`LineBox::spans` 只在段数 > 1 时填，簇的 `inline_pt`
+  在空隙处直接跳过；绘制、命中、光标全按簇走，只有选区要按 spans 切。行高与基线取各段
+  最大值，`advance_pt` 也是。一段都放不下时下推到框底（与上下型同一条规则）。
 - `.heditor-ime` 必须 `pointer-events:none`。右键菜单归宿主：库只拦浏览器菜单 +
   `placeAt({tap:false})` + 回 `onContextMenu(target)`（种类 -1/0/1/2/3）；UI 建在 `ui/layer.ts` 上。
   菜单高亮是**一条链**：子菜单开着时父项一直亮，置灰项也接悬停。

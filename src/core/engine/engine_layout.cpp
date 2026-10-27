@@ -25,6 +25,22 @@
 
 namespace heditor {
 
+/**
+ * 页指纹的"标脏值"。
+ *
+ * 高位恒置（真指纹一律清它，所以它不可能等于真指纹）；低位按已画那一版翻一下 ——
+ * 写完值就变成"已画"，下一次再写同一个值的话，比较读出来是"没变"，那一页从此不再
+ * 重画（症状：连续换行只有第一次把文档推下去，之后屏幕不动）。
+ */
+namespace {
+
+uint64_t dirtyFpValue(uint64_t base) {
+    const uint64_t v = kFnvBasis | kFpDirtyBit;
+    return (v == base) ? (v ^ 1ull) : v;
+}
+
+}  // namespace
+
 // 页内容指纹
 //
 // 用途：判断"这一页的画面对不对"。指纹没变就跳过重画 —— 这是光栅增量的全部依据。
@@ -355,15 +371,9 @@ void EditorEngine::markPagesChangedFrom(int first_page) {
     const int n = std::max(1, layout_.stats.page_count);
     page_fp_new_.resize(static_cast<size_t>(n), kFnvBasis);
     page_fp_new_count_ = n;
-    // 标脏值：高位恒置（真指纹一律清它，所以它不可能等于真指纹），
-    //   低位按已画那一版翻一下 —— 这一下是必须的，见下面那段注释。
-    auto dirty_value = [](uint64_t base) {
-        const uint64_t v = kFnvBasis | kFpDirtyBit;
-        return (v == base) ? (v ^ 1ull) : v;
-    };
     for (int p = first; p < n; ++p) {
         const uint64_t base = (p < page_fp_prev_count_) ? page_fp_prev_[static_cast<size_t>(p)] : 0;
-        page_fp_new_[static_cast<size_t>(p)] = dirty_value(base);
+        page_fp_new_[static_cast<size_t>(p)] = dirtyFpValue(base);
     }
 
     // 行数组只标页号 >= first 的行：前面那些行一个字都没动，标脏只会让它们多画一遍。
@@ -374,8 +384,23 @@ void EditorEngine::markPagesChangedFrom(int first_page) {
     for (int k = 0; k < n_lines; ++k) {
         if (layout_.lines[static_cast<size_t>(k)].page < first) continue;
         const uint64_t base = (k < line_fp_prev_count_) ? line_fp_prev_[static_cast<size_t>(k)] : 0;
-        line_fp_new_[static_cast<size_t>(k)] = dirty_value(base);
+        line_fp_new_[static_cast<size_t>(k)] = dirtyFpValue(base);
     }
+}
+
+void EditorEngine::markPageDirty(int page) {
+    if (page < 0) return;
+    const int n = std::max(1, layout_.stats.page_count);
+    if (page >= n) return;
+    // 页数对不上就说明此前整篇重排过、其余页的旧指纹已经不可信：退回"从这一页
+    //   标到末尾"。单页标脏的前提是"别的页还是同一版那份账"。
+    if (page_fp_new_count_ != n || page_fp_new_.size() < static_cast<size_t>(n)) {
+        markPagesChangedFrom(page);
+        return;
+    }
+    const uint64_t base =
+        (page < page_fp_prev_count_) ? page_fp_prev_[static_cast<size_t>(page)] : 0;
+    page_fp_new_[static_cast<size_t>(page)] = dirtyFpValue(base);
 }
 
 /**
@@ -527,7 +552,7 @@ void EditorEngine::relayout() {
             const int old_cut_page = firstPageOfParagraph(cut);
             truncateLayoutAt(cut);
             layoutDocumentRangeWithTables(fonts_, blocks(), cfg_.page, tables_, cut, n_para,
-                                          cut_state, &shaping_cache_, &layout_, floats_);
+                                          cut_state, &shaping_cache_, &layout_, floatsForLayout());
             last_relaid_paragraphs_ = relaid_paras + (n_para - cut);
             last_relaid_lines_ = layout_.stats.placed_line_count - head_line_begin;
             // 从 cut 起是重排过的：页数可能变，指纹只能从"新旧两版里更靠前的那一页"起标脏。
@@ -547,7 +572,7 @@ void EditorEngine::relayout() {
         const int prefix_lines = layout_.para_index[static_cast<size_t>(from)].line_begin;
         truncateLayoutAt(from);
         layoutDocumentRangeWithTables(fonts_, blocks(), cfg_.page, tables_, from, n_para,
-                                      resume_state, &shaping_cache_, &layout_, floats_);
+                                      resume_state, &shaping_cache_, &layout_, floatsForLayout());
         last_relaid_paragraphs_ = n_para - from;
         last_relaid_lines_ = layout_.stats.placed_line_count - prefix_lines;
         last_layout_full_ = false;
@@ -574,7 +599,7 @@ void EditorEngine::relayout() {
         layout_ = LayoutResult{};
         layoutDocumentRangeWithTables(fonts_, blocks(), cfg_.page, tables_, 0, n_para,
                                       freshReflowState(cfg_.page), &shaping_cache_, &layout_,
-                                      floats_);
+                                      floatsForLayout());
         last_relaid_paragraphs_ = n_para;
         last_relaid_lines_ = layout_.stats.placed_line_count;
         last_layout_full_ = true;

@@ -847,12 +847,35 @@ export function createInput(env: InputEnv): InputLayer {
     let caret_muted = false;
     // 这一趟拖的是浮动图：图已经按预览跟着指针走了，收尾要撤掉那份瞬态位移。
     let previewed = false;
+    // 拖动中每来一次移动事件就发一次预览，而每次预览要走一趟 Worker（重画一页 +
+    //   回传位图）。指针 125 Hz、一帧十几毫秒，逐个发就会在 Worker 前面排成长队 ——
+    //   图落后指针好几秒才跟上是队列长度的问题，不是单帧慢。所以只留最新坐标：
+    //   上一个回来再发下一个，中间那些只记最后一个（拖动只关心当前位置）。
+    let previewing = false;
+    let preview_next: { dx: number; dy: number } | null = null;
+    let preview_idx = -1;
+    const pushPreview = (): void => {
+      if (previewing || preview_next === null || preview_idx < 0) return;
+      if (typeof env.previewImageMove !== 'function') return;
+      const cur = preview_next;
+      preview_next = null;
+      previewing = true;
+      keep(
+        then1(env.previewImageMove(preview_idx, cur.dx, cur.dy), () => {
+          previewing = false;
+          pushPreview();
+        }),
+      );
+    };
     const detach = (): void => {
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
       setCursor('');
       // 落点竖条是"松手会插在这儿"的提示，手势一结束就收起；藏起来的那颗光标放回去。
       if (typeof env.dropMark === 'function') env.dropMark(null);
+      // 还在排队的预览一律作废：手势已经结束了，再补发只会让图在松手之后再跳一下。
+      preview_next = null;
+      preview_idx = -1;
       if (previewed && typeof env.clearImagePreview === 'function') {
         previewed = false;
         env.clearImagePreview();
@@ -928,7 +951,9 @@ export function createInput(env: InputEnv): InputLayer {
         const from = env.docPt(start);
         const cur = env.docPt(p);
         previewed = true;
-        keep(env.previewImageMove(hit.dragImage, cur.x - from.x, cur.y - from.y));
+        preview_idx = hit.dragImage;
+        preview_next = { dx: cur.x - from.x, dy: cur.y - from.y };
+        pushPreview();
         return;
       }
       // 被搬的选区还留在原处（选区不塌），指针下面单独画一条竖线说明落点 ——

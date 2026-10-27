@@ -8,6 +8,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
+#include <vector>
 
 namespace heditor {
 
@@ -838,28 +840,42 @@ std::vector<PageRect> CaretResolver::selectionRectsIn(int first_page, int count)
         // 末段的段落标记并进这一条：另推一条会与它首尾相接甚至重叠，而半透明的选区
         //   叠两次就是一道深色缝。
         if (tail_mark && &lb == tail_line) a1 += lb.size_pt * 0.35f;
-        // 零宽的选区要有宽度：选中一个空段（或一段的段落标记）时，选的是一枚不占字符的
-        //   位置，两端落在同一个偏移上 —— 按几何算就是零宽，而零宽的矩形在导出与合成时
-        //   会被当作"没有选区"丢掉，于是"能选中、看不见"。给一个字符宽的窄条，宽度取自
-        //   这一行的字号（与那枚标记本身的大小同一档）。
-        //   但零宽只是"两端同偏移"的一种结果，不是判据：同一个偏移上压着行内原子（图片）
-        //   时，两端的侧别不同，宽度就是原子的盒宽 —— 按 l_lo == l_hi 一律收成窄条，
-        //   整段只有一张图的选区就只剩一条窄条，盖不住图。
-        float width = std::abs(a1 - a0);
-        if (!(width > 0.0f)) width = lb.size_pt * 0.35f;
-        Rect r;
-        if (!lb.vertical) {
-            r.x = std::min(a0, a1);
-            r.w = width;
-            r.y = lb.block_lo_pt;
-            r.h = lb.block_hi_pt - lb.block_lo_pt;
+        // 这一行被四周型浮动图挖开时，一条横跨图的矩形会把图也涂上：按可用区间切段，
+        //   每段各出一条。单段行（spans 为空）就是端点之间那一条。
+        const float rel_lo = std::min(a0, a1) - lb.inline_origin_pt;
+        const float rel_hi = std::max(a0, a1) - lb.inline_origin_pt;
+        std::vector<std::pair<float, float>> segs;
+        if (!(rel_hi > rel_lo)) {
+            // 零宽：选中一个空段（或一段的段落标记）时，选的是一枚不占字符的位置，
+            //   两端落在同一个偏移上 —— 按几何算就是零宽，而零宽的矩形在导出与合成时
+            //   会被当作"没有选区"丢掉，于是"能选中、看不见"。给一个字符宽的窄条。
+            //   零宽只是"两端同偏移"的一种结果，不是判据：同一个偏移上压着行内原子
+            //   （图片）时，两端的侧别不同，宽度就是原子的盒宽。
+            segs.emplace_back(rel_lo, rel_lo + lb.size_pt * 0.35f);
+        } else if (lb.spans.empty()) {
+            segs.emplace_back(rel_lo, rel_hi);
         } else {
-            r.x = lb.block_lo_pt;
-            r.y = std::min(a0, a1);
-            r.w = lb.block_hi_pt - lb.block_lo_pt;
-            r.h = width;
+            for (const LineBox::Span& sp : lb.spans) {
+                const float lo = std::max(rel_lo, sp.lo_pt);
+                const float hi = std::min(rel_hi, sp.hi_pt);
+                if (hi > lo) segs.emplace_back(lo, hi);
+            }
         }
-        out.push_back(PageRect{lb.page, r});
+        for (const std::pair<float, float>& seg : segs) {
+            Rect r;
+            if (!lb.vertical) {
+                r.x = lb.inline_origin_pt + seg.first;
+                r.w = seg.second - seg.first;
+                r.y = lb.block_lo_pt;
+                r.h = lb.block_hi_pt - lb.block_lo_pt;
+            } else {
+                r.x = lb.block_lo_pt;
+                r.y = lb.inline_origin_pt + seg.first;
+                r.w = lb.block_hi_pt - lb.block_lo_pt;
+                r.h = seg.second - seg.first;
+            }
+            out.push_back(PageRect{lb.page, r});
+        }
     }
     return out;
 }

@@ -1400,6 +1400,30 @@ struct LineBox {
     float cell_bottom_pt = 0.0f;
 
     /**
+     * 一行可用的横向区间（相对 inline_origin_pt，磅）。
+     */
+    struct Span {
+        /**
+         * 区间左沿（相对行首）。
+         */
+        float lo_pt = 0.0f;
+
+        /**
+         * 区间右沿（相对行首）。
+         */
+        float hi_pt = 0.0f;
+    };
+
+    /**
+     * 这一行被四周型浮动图挖开后剩下的横向区间。
+     *
+     * 单段行留空：它的可用区间就是 [0, inline_end_pt] 一段，填上只是重复。
+     * 两段以上才填 —— 簇的 inline_pt 在空隙处直接跳过去，绘制、命中与光标都按簇走，
+     * 不必认识这里；只有选区要按它切矩形，否则一条横跨图的选区会把图也涂上。
+     */
+    std::vector<Span> spans;
+
+    /**
      * 行内簇（cp 升序）
      */
     std::vector<LineCluster> clusters;
