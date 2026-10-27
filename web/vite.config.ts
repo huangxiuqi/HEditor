@@ -61,6 +61,12 @@ export default defineConfig(({ command }) => ({
     port: 5173,
     strictPort: true,
     host: '0.0.0.0',
+    // 开发期既不热更也不整页重载，改完自己刷新。
+    //   只关 hmr 不够：文件监视还在，改动一到 Vite 仍会推一次 full-reload ——
+    //   而这一页的实例把白名单、协议表、宿主事件全都捕获进了闭包，重载换不掉它们，
+    //   只会把文档状态清空。两处一起关，watcher 也就不必占着 CPU 了。
+    hmr: false,
+    watch: null,
   },
   plugins: [repoServe()],
   build: {

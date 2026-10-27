@@ -160,6 +160,21 @@ struct PageMetrics {
 };
 
 /**
+ * 把浮动图的框夹进版心（页内坐标）。
+ *
+ * 版心之外的那一截画不进页位图：图被页边界裁掉一半，看起来像被压扁了。
+ *   比版心还宽的图没有"放进去"这回事，贴住左上角，多出来的部分照旧溢出。
+ *
+ * @param page 页度量（版心由它算）
+ * @param w_pt 框宽（磅）
+ * @param h_pt 框高（磅）
+ * @param x_pt 出参：页内 x（磅）
+ * @param y_pt 出参：页内 y（磅）
+ */
+void clampFloatBoxToTextArea(const PageMetrics& page, float w_pt, float h_pt, float* x_pt,
+                             float* y_pt);
+
+/**
  * 两个字重档：正文与加粗。可变字体的 wght 轴上有更细的档位，工具栏暂时只用到这两档。
  */
 constexpr float kWeightRegular = 400.0f;

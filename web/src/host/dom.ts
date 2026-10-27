@@ -1027,6 +1027,15 @@ export function createDomHost(o: DomHostOptions): DomHost {
       if (vertical) {
         const dx = q.x - start.x;
         const i = col;
+        if (i >= widths0.length) {
+          // 表的右边框：表宽跟着走，只有最后一列变 —— 拖它是"把表加宽"，
+          //   按相邻两列分摊就把表钉死在原宽上了（Word 同一条）。
+          const next = widths0.slice();
+          next[i - 1] = Math.max(12, widths0[i - 1] + dx);
+          outWidths = next;
+          showGuide('col', tableLeft + cols[i] + dx, bandTop, bandBottom);
+          return;
+        }
         const total = widths0[i - 1] + widths0[i];
         // 相邻两列的总宽不变：拖一条边界不该把整张表撑宽或缩窄（Word 同一条）。
         const left = Math.max(12, Math.min(total - 12, widths0[i - 1] + dx));

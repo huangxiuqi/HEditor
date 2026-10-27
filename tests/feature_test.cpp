@@ -224,10 +224,20 @@ int main() {
                        "给的是这张表、第一条内部列边界、没有行边界");
             expectTrue(!e.tableGridLineAt(pt0.x + col_w0 * 0.5f, mid_y, &t, &gc, &gr),
                        "格心不在格线上：判不出来（这一下该落光标）");
-            // 首尾两条边界不是格线：左边界与表宽都判假。
+            // 左边界不是格线（左边没有列可以让给它），右边界是：拖它加宽最后一列，
+            //   表宽跟着走（Word 同一条）。表尾那一行的下边是表的底框，同样照拖。
             expectTrue(!e.tableGridLineAt(pt0.x, mid_y, &t, &gc, &gr), "表格左边界不算格线");
-            expectTrue(!e.tableGridLineAt(pt0.x + pt0.w, mid_y, &t, &gc, &gr),
-                       "表格右边界不算格线");
+            expectTrue(e.tableGridLineAt(pt0.x + pt0.w, mid_y, &t, &gc, &gr),
+                       "表格右边界算格线（拖它加宽最后一列）");
+            expectTrue(t == handle && gc == pt0.cols && gr < 0,
+                       "右边界报的是最后一条列边界、没有行边界");
+            {
+                const PlacedRow& last = pt0.placed.back();
+                expectTrue(e.tableGridLineAt(pt0.x + pt0.w * 0.25f, last.y + last.h, &t, &gc, &gr),
+                           "表格底边框算格线");
+                expectTrue(t == handle && gr == last.row && gc == 0,
+                           "底边框报的是最后一行、没有列边界");
+            }
         }
 
         // 拖拽语义：相邻两列之和不变（表宽不变）。这里给 1:3 的比例，验它落成 1:3。

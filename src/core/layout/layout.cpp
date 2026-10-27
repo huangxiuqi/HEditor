@@ -624,6 +624,16 @@ struct ShapingCacheAccess {
     static ShapingCache::Impl* impl(ShapingCache* c) { return c ? c->impl_ : nullptr; }
 };
 
+void clampFloatBoxToTextArea(const PageMetrics& page, float w_pt, float h_pt, float* x_pt,
+                             float* y_pt) {
+    const float x_lo = page.margins.left;
+    const float x_hi = x_lo + page.contentWidthPt() - w_pt;
+    const float y_lo = page.margins.top;
+    const float y_hi = y_lo + page.contentHeightPt() - h_pt;
+    if (x_pt != nullptr) *x_pt = (x_hi < x_lo) ? x_lo : std::min(std::max(*x_pt, x_lo), x_hi);
+    if (y_pt != nullptr) *y_pt = (y_hi < y_lo) ? y_lo : std::min(std::max(*y_pt, y_lo), y_hi);
+}
+
 /**
  * 全量排版：从第 0 段排到末尾，不使用缓存（对照路径与基准）。
  */
@@ -949,6 +959,9 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
             pf.y = flowLocal(pg, f0);
             pf.w = f.w_pt;
             pf.h = f.h_pt;
+            // 框夹进版心：出去的那一截画不进页位图，图会被页边界切掉一半。
+            clampFloatBoxToTextArea(page, pf.w, pf.h, &pf.x, &pf.y);
+            const float fy = flowY(pg, pf.y);
             pf.wrap = f.wrap;
             pf.content_hash = f.content_hash;
             res.placed_floats.push_back(pf);
@@ -957,8 +970,8 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
                 LiveFloat lf;
                 lf.x0 = pf.x;
                 lf.x1 = pf.x + pf.w;
-                lf.f0 = f0;
-                lf.f1 = f0 + pf.h;
+                lf.f0 = fy;
+                lf.f1 = fy + pf.h;
                 lf.square = (f.wrap == ImageWrap::Square);
                 live_floats.push_back(lf);
             }
@@ -1003,7 +1016,9 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
             case WidthSpec::Kind::Auto:
                 break;
         }
-        w = std::min(std::max(w, 1.0f), cw);
+        // 上限给到"内容区 + 右边距"：拖表格的右边框就是把表加宽，Word 也允许表伸进右边距。
+        //   再往右就越过纸张右沿了，那一截画不进页位图。
+        w = std::min(std::max(w, 1.0f), cw + page.margins.right);
         float shift = 0.0f;
         switch (t.align) {
             case TableHAlign::Center:
@@ -1015,6 +1030,8 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
             case TableHAlign::Start:
                 break;
         }
+        // 表比内容区还宽时居中/右对齐会把表推到左边距里：贴住内容区左边。
+        if (shift < 0.0f) shift = 0.0f;
         f.x = cx + shift;
         f.w = w;
         const int cols = std::max(t.cols, 0);

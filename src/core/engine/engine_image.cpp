@@ -596,6 +596,9 @@ void EditorEngine::imagePreviewPos(const PlacedFloat& pf, float* x, float* y) co
         px += image_preview_.dx_pt;
         py += image_preview_.dy_pt;
     }
+    // 拖动中的位置同样夹进版心：这里不夹的话，衬于文字上下方那两档（不重排、只挪绘制）
+    //   会一路拖出纸外，画出来被页边界切掉一半。
+    clampFloatBoxToTextArea(cfg_.page, pf.w, pf.h, &px, &py);
     if (x != nullptr) *x = px;
     if (y != nullptr) *y = py;
 }
@@ -729,6 +732,9 @@ bool EditorEngine::moveImageToPt(int index, float x_pt_doc, float y_pt_doc, bool
     NodeId id = kInvalidNodeId;
     ImageSpec spec;
     bool found = false;
+    // 版心里的框宽高：夹取要用它，而 spec 存的是宿主给的尺寸（进格之后还要按格宽限一次）。
+    float w_pt = 0.0f;
+    float h_pt = 0.0f;
     for (const ImageBox& b : images()) {
         if (b.index != index) continue;
         const rev::Node* n = rev::findNode(document(), b.id);
@@ -737,6 +743,8 @@ bool EditorEngine::moveImageToPt(int index, float x_pt_doc, float y_pt_doc, bool
         if (s == nullptr) return false;
         id = b.id;
         spec = *s;
+        w_pt = b.w_pt;
+        h_pt = b.h_pt;
         found = true;
         break;
     }
@@ -769,6 +777,19 @@ bool EditorEngine::moveImageToPt(int index, float x_pt_doc, float y_pt_doc, bool
         } else {
             next.dx_pt = x_pt_doc - cfg_.page.margins.left;
             next.dy_pt = docToFlowY(cfg_, pagePxHeight(), pageGapPx(), y_pt_doc) - anchor_flow;
+        }
+        // 存进去的偏移也要夹进版心。预览那一侧已经夹过了（排版与绘制都过同一个函数），
+        //   这里不夹就会把出界的那一段存进文档 —— 下次拖动要先空走那一段图才动。
+        {
+            const float stride =
+                cfg_.page.continuous ? cfg_.page.slabHeightPt() : cfg_.page.height_pt;
+            const float flow = anchor_flow + next.dy_pt;
+            const int pg = static_cast<int>(std::floor(flow / stride));
+            float lx = cfg_.page.margins.left + next.dx_pt;
+            float ly = flow - static_cast<float>(pg) * stride;
+            clampFloatBoxToTextArea(cfg_.page, w_pt, h_pt, &lx, &ly);
+            next.dx_pt = lx - cfg_.page.margins.left;
+            next.dy_pt = (static_cast<float>(pg) * stride + ly) - anchor_flow;
         }
         if (!edit_.setImageSpec(id, next)) return false;
         // 位置真的落地了：预览的使命结束（松手那一下正是"预览位置 = 真位置"）。

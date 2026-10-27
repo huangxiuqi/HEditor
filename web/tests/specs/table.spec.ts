@@ -524,6 +524,61 @@ test.describe('表格拖拽', () => {
           Number(row) >= 59.0, String(row));
   });
 
+  test('拖表格的右边框与底边框：加宽最后一列、加高最后一行', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' }, viewport: { width: 1200, height: 900 } });
+    const geo = await p.read<any>(`
+      await H.setText('表前');
+      await H.flush();
+      await H.insertTable({ rows: 2, cols: 2 });
+      await H.flush();
+      await H.setCaret({ para: 1, offset: 0 });
+      await H.flush();
+      const q = CARET();
+      const Z = ZOOM();
+      const g = await H.tableGrid(q.x / Z + 4, q.y / Z + 4);
+      const fr = FRAME().getBoundingClientRect();
+      await D.stopBlink();
+      return { g, left: fr.left, top: fr.top, z: Z };`);
+    const g = geo.g;
+    check('前置：两列三条边界', g.cols.length === 3, JSON.stringify(g.cols));
+
+    // 右边框：拖它加宽最后一列，表宽跟着走。
+    const dxPt = 60 / geo.z;
+    const rightX = geo.left + (g.x + g.w) * geo.z;
+    const midY = geo.top + (g.rows[0].y + g.rows[0].h / 2) * geo.z;
+    await p.page.mouse.move(rightX, midY);
+    await p.page.mouse.down();
+    await p.page.mouse.move(rightX + 60, midY, { steps: 6 });
+    await p.page.mouse.up();
+    await p.page.waitForTimeout(320);
+    const wide = await p.read<any>(`
+      const g = ${JSON.stringify(g)};
+      return H.tableGrid(g.x + 4, g.rows[0].y + 4);`);
+    check('★ 拖右边框：表宽变宽了（Word 同一条）',
+          Math.abs(wide.w - (g.w + dxPt)) < 2.0, `${g.w} → ${wide.w}，期望 ${g.w + dxPt}`);
+    check('★ 拖右边框：只有最后一列变宽，第一列不动',
+          Math.abs((wide.cols[1] - wide.cols[0]) - (g.cols[1] - g.cols[0])) < 1.0 &&
+            Math.abs((wide.cols[2] - wide.cols[1]) - (g.cols[2] - g.cols[1] + dxPt)) < 2.0,
+          JSON.stringify(wide.cols) + ' vs ' + JSON.stringify(g.cols));
+
+    // 底边框：拖它加高最后一行。
+    const dyPt = 40 / geo.z;
+    const last = wide.rows[wide.rows.length - 1];
+    const botY = geo.top + (last.y + last.h) * geo.z;
+    const midX = geo.left + (wide.x + wide.w / 2) * geo.z;
+    await p.page.mouse.move(midX, botY);
+    await p.page.mouse.down();
+    await p.page.mouse.move(midX, botY + 40, { steps: 6 });
+    await p.page.mouse.up();
+    await p.page.waitForTimeout(320);
+    const tall = await p.read<any>(`
+      const g = ${JSON.stringify(wide)};
+      return H.tableGrid(g.x + 4, g.rows[0].y + 4);`);
+    check('★ 拖底边框：最后一行变高了',
+          tall.rows[tall.rows.length - 1].h >= last.h + dyPt - 2.0,
+          `${last.h} → ${tall.rows[tall.rows.length - 1].h}，期望 +${dyPt}`);
+  });
+
   test('压在表格内部格线上换光标：列边界 col-resize、行边界 row-resize', async ({ open }) => {
     const p = await open('index.html', { query: { debug: '1' }, viewport: { width: 1200, height: 900 } });
     const geo = await p.read<any>(`

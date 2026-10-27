@@ -93,6 +93,11 @@ void EditorEngine::computePageFingerprints(int dirty_lo, int dirty_hi) {
         dirty_lo = 0;
         dirty_hi = n - 1;
     } else {
+        // 连页的接缝是双向的：脏区最后一页上越过带底的那半行，像素画在下一页上
+        //   （见 rasterIntoBitmap 的接缝补画）。所以重算范围要多带一页 —— 少算的
+        //   那一页会被判成"还是新鲜的"，缝上那半行留在旧位置：命令成功、读回的值也对，
+        //   而光标所在的那一段看着像没渲染。
+        if (cfg_.page.continuous && dirty_hi + 1 < n) ++dirty_hi;
         // 只把要重算的那几页清零，其余页保留上一轮的值 ——
         // 那些页的字形一个字节都没动，指纹自然不变（这正是增量的依据）。
         for (int p = dirty_lo; p <= dirty_hi; ++p) page_fp_new_[static_cast<size_t>(p)] = kFnvBasis;

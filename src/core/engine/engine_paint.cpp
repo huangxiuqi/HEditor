@@ -353,7 +353,11 @@ void EditorEngine::rasterIntoBitmap(Bitmap& target, int page_index, const float*
     //   看得见的那半，拼起来才是完整的一行。分页模式下不会发生（断页把行整个挪走）。
     const bool cont = cfg_.page.continuous;
     const float slab_pt = cfg_.page.slabHeightPt();
-    const float spill_dy = -slab_pt * zoom;
+    // 位移量取位图高度（整像素），不取"带高 x 缩放"：后者带小数（A4 下 842 磅 x 1.333
+    //   是 1122.7，而位图 1123 行），合上去之后段落标记的横笔正好落在两行之间 ——
+    //   抗锯齿把它摊成两行浅灰，看着比别的标记粗一档。位图第 0 行就是本带顶端，
+    //   减一整页高才是两带之间的真位移。
+    const float spill_dy = -static_cast<float>(pagePxHeight());
     const bool spill = cont && page_index > 0;
 
     // 表格格线：画在页位图里（它不随光标变），在字形之前 —— 线压不到字上。

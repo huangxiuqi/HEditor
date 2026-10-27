@@ -3228,9 +3228,14 @@ bool EditCommand::setTableGridCols(uint64_t handle, const std::vector<float>& wi
     TableSpec next = *cur;
     next.grid_cols.clear();
     next.grid_cols.reserve(widths.size());
+    float sum = 0.0f;
     for (const float w : widths) {
         next.grid_cols.push_back(w > 0.0f ? Length::abs(ptToEmu(w)) : Length{});
+        if (w > 0.0f) sum += w;
     }
+    // 表宽一起钉住。不钉的话表还是"撑满版心"：各列之和超过它时整体按比例缩回去，
+    //   拖右边框那一下看起来什么都没发生（列宽写入成功、读回的值也对，画面没动）。
+    if (sum > 0.0f) next.width = Length::abs(ptToEmu(sum));
     if (next == *cur) return true;
 
     SetTableSpec s;

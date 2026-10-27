@@ -204,10 +204,12 @@ bool EditorEngine::tableGridLineAt(float x_pt_doc, float y_pt_doc, uint64_t* tab
             }
         }
         if (!on_page) continue;
-        // 列边界取最近的一条：col_x 是含首尾的绝对边界序列，内部边界是 1..n-1。
+        // 列边界取最近的一条：col_x 是含首尾的绝对边界序列，1..n 都算 —— 最后一条是
+        //   表的右边框，拖它改的是最后一列（表宽跟着走）。没有它，用户只能把表往里改窄，
+        //   没法加宽。
         int hit_col = 0;
         float col_dist = kGridLineTolPt;
-        for (size_t i = 1; i + 1 < pt.col_x.size(); ++i) {
+        for (size_t i = 1; i < pt.col_x.size(); ++i) {
             const float d = std::fabs(x_pt_doc - (pt.x + pt.col_x[i]));
             if (d <= col_dist) {
                 col_dist = d;
@@ -215,10 +217,13 @@ bool EditorEngine::tableGridLineAt(float x_pt_doc, float y_pt_doc, uint64_t* tab
             }
         }
         // 行边界：这一行与下一行都在本页之间才算 —— 跨页那条是页边界，拖它没有语义。
+        //   表尾那一行的下边是表的底框（没有下一行），照拖，改的是最后一行的高度。
         int hit_row = -1;
         float row_dist = kGridLineTolPt;
-        for (size_t i = 0; i + 1 < pt.placed.size(); ++i) {
-            if (pt.placed[i].page != page || pt.placed[i + 1].page != page) continue;
+        for (size_t i = 0; i < pt.placed.size(); ++i) {
+            const bool last_row = (pt.placed[i].row == pt.rows - 1);
+            if (pt.placed[i].page != page) continue;
+            if (!last_row && (i + 1 >= pt.placed.size() || pt.placed[i + 1].page != page)) continue;
             const float d = std::fabs(local_y - (pt.placed[i].y + pt.placed[i].h));
             if (d <= row_dist) {
                 row_dist = d;

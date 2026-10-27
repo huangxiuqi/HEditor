@@ -905,4 +905,57 @@ test.describe('图片拖动', () => {
           typed.caretPage >= geo.pages - 1 && typed.scroll > geo.scroll + 100,
           JSON.stringify(typed) + ' vs ' + geo.scroll);
   });
+
+  test('拖出版心：图停在版心上，不越界也不被压扁', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' }, viewport: { width: 1200, height: 900 } });
+    const geo = await p.read<any>(`
+      await H.setText('四周型拖到页边');
+      await H.flush();
+      await H.setCaret({ para: 0, offset: 0 });
+      await H.flush();
+      const data = new Uint8Array(120 * 90 * 4).fill(160);
+      await H.registerImage({ id: 'edge', width: 120, height: 90, data });
+      await H.insertImage({ resourceId: 'edge', pxWidth: 120, pxHeight: 90 });
+      await H.flush();
+      await H.setImageLayout(0, 'square');
+      await H.flush();
+      await D.stopBlink();
+      const z = ZOOM();
+      const g = H.geometry();
+      const b = (await H.images())[0];
+      const fr = FRAME().getBoundingClientRect();
+      return { pageW: g.page.w / z, pageH: g.page.h / z, w: b.w, h: b.h, r: b.rects[0],
+               x: fr.left, y: fr.top, z };`);
+    const at = (r: any): { x: number; y: number } => ({
+      x: geo.x + (r.x + r.w / 2) * geo.z,
+      y: geo.y + (r.y + r.h / 2) * geo.z,
+    });
+    const dragBy = async (from: any, dx: number): Promise<any> => {
+      const c = at(from);
+      await p.page.mouse.move(c.x, c.y);
+      await p.page.mouse.down();
+      await p.page.mouse.move(c.x + dx, c.y, { steps: 8 });
+      await p.page.mouse.up();
+      await p.page.waitForTimeout(320);
+      return p.read<any>(`return (await H.images())[0].rects[0];`);
+    };
+    // 一路往右拖到拖不动（中途的位移量远大于版心宽度）。
+    const r1 = await dragBy(geo.r, 900);
+    const r2 = await dragBy(r1, 200);
+    check('★ 拖出版心就停住：再往右拖 200 px 一点不动',
+          Math.abs(r2.x - r1.x) < 1.0, `x ${r1.x.toFixed(1)} → ${r2.x.toFixed(1)}`);
+    check('★ 停住的位置还在纸上（没被页边界切掉）',
+          r1.x + r1.w <= geo.pageW - 1.0 && r1.x >= 1.0,
+          JSON.stringify(r1) + `，页宽 ${geo.pageW.toFixed(1)}`);
+    check('★ 拖出界也不压扁：尺寸一点没变',
+          Math.abs(r1.w - geo.w) < 0.01 && Math.abs(r1.h - geo.h) < 0.01,
+          JSON.stringify(r1) + ' vs ' + geo.w + ' x ' + geo.h);
+
+    // 反向：从落点往回拖 60 px 要立刻动 —— 存下来的偏移也是夹过的，
+    //   否则前 60 px 只是把出界的那一截走回来（图不动）。
+    const r3 = await dragBy(r1, -60);
+    check('★ 再往回拖 60 px：图当场跟着回来（没有先空走一段）',
+          Math.abs(r3.x - (r1.x - 60 / geo.z)) < 3.0,
+          `${r1.x.toFixed(1)} → ${r3.x.toFixed(1)}，期望 ${(r1.x - 60 / geo.z).toFixed(1)}`);
+  });
 });
