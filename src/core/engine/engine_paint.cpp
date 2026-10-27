@@ -672,22 +672,14 @@ Rect rectUnion(const Rect& a, const Rect& b) {
 }  // namespace
 
 bool EditorEngine::pageBitmapFresh(int page) const {
-    const auto it = page_cache_.find(page);
-    if (it == page_cache_.end()) return false;
-    const PageBitmap& pb = it->second;
-    if (!pb.valid) return false;
-    if (pb.px.width() != pagePxWidth() || pb.px.height() != pagePxHeight()) return false;
     // 页号超出指纹数组时不敢断言"作数"：那种页没有可供比较的版本号。
     if (page < 0 || page >= static_cast<int>(page_fp_new_.size())) return false;
-    // 内容指纹之外还有一份"光栅配置"的签名：底色 / 边框 / 缩放 / 页度量这些变了，
-    //   内容一个字节都没动，但画出来的像素不一样。签名是这里唯一的判据 —— 不再靠
-    //   setConfig 记得清缓存（TRAPS 128）。
-    if (pb.raster_sig != raster_sig_) return false;
-    return pb.fp == page_fp_new_[static_cast<size_t>(page)];
+    return pages_.fresh(page, page_fp_new_[static_cast<size_t>(page)], pagePxWidth(),
+                        pagePxHeight());
 }
 
 void EditorEngine::rasterPageInto(int page, const float* band_lo_pt, const float* band_hi_pt) {
-    PageBitmap& pb = page_cache_[page];
+    PageSlot& pb = pages_.at(page);
     const int pw = pagePxWidth();
     const int ph = pagePxHeight();
     if (pb.px.width() != pw || pb.px.height() != ph) {
@@ -703,37 +695,13 @@ void EditorEngine::rasterPageInto(int page, const float* band_lo_pt, const float
     //   每次都会按已画那一版翻一下低位，同一个哨兵不会连着出现两次。
     pb.fp = (page < static_cast<int>(page_fp_new_.size())) ? page_fp_new_[static_cast<size_t>(page)]
                                                            : 0;
-    pb.raster_sig = raster_sig_;
+    pb.raster_sig = pages_.signature();
     pb.valid = true;
     raster_glyphs_ += static_cast<int>(pb.px.paintedGlyphs());
     raster_glyph_bounds_ms_ += pb.px.glyphBoundsMs();
 }
 
-void EditorEngine::trimPageCache(int first_page, int count) {
-    // 窗口内一页都不丢：它们是下一拍很可能还要用的，而且页位图就是导出像素的唯一来源 ——
-    //   丢了这一段，窗口里就有几页拿不出像素。
-    //   注意别在这里做"整篇窗口就整份清掉"那种省内存的优化：它会让导出图变成一片背景色。
-    const std::size_t cap = static_cast<std::size_t>(std::max(count + 2, 4));
-    if (page_cache_.size() <= cap) return;
-    std::vector<std::pair<int, int>> far;  // (距离, 页号)
-    far.reserve(page_cache_.size());
-    for (const auto& kv : page_cache_) {
-        const int p = kv.first;
-        if (p >= first_page && p < first_page + count) continue;
-        const int d = (p < first_page) ? (first_page - p) : (p - (first_page + count - 1));
-        far.push_back({d, p});
-    }
-    std::sort(far.begin(), far.end(),
-              [](const std::pair<int, int>& a, const std::pair<int, int>& b) {
-                  if (a.first != b.first) return a.first > b.first;
-                  return a.second > b.second;
-              });
-    for (const auto& e : far) {
-        if (page_cache_.size() <= cap) break;
-        page_cache_.erase(e.second);
-        page_dirty_rects_.erase(e.second);
-    }
-}
+void EditorEngine::trimPageCache(int first_page, int count) { pages_.trim(first_page, count); }
 
 /**
  * 记一块"这一页的像素变了"。页内像素坐标，且是累积的（自上次取走以来）。
@@ -742,49 +710,15 @@ void EditorEngine::trimPageCache(int first_page, int count) {
  *   并了会把中间一大片没变的像素也传上去。条数超过 16 时退回一个并集：
  *   一页几十个表单标记时逐条传反而更贵，而这一条只是"上界"，宁可多传不可少传。
  */
-void EditorEngine::notePageDirty(int page, const Rect& r) {
-    if (r.w <= 0.0f || r.h <= 0.0f) return;
-    std::vector<Rect>& v = page_dirty_rects_[page];
-    v.push_back(r);
-    bool merged = true;
-    while (merged) {
-        merged = false;
-        for (size_t i = 0; i < v.size() && !merged; ++i) {
-            for (size_t j = i + 1; j < v.size(); ++j) {
-                if (!rectsTouch(v[i], v[j])) continue;
-                v[i] = rectUnion(v[i], v[j]);
-                v.erase(v.begin() + static_cast<std::ptrdiff_t>(j));
-                merged = true;
-                break;
-            }
-        }
-    }
-    if (v.size() > 16) {
-        Rect u = v.front();
-        for (const Rect& q : v) u = rectUnion(u, q);
-        v.assign(1, u);
-    }
-}
+void EditorEngine::notePageDirty(int page, const Rect& r) { pages_.noteDirty(page, r); }
 
-std::vector<Rect> EditorEngine::takePageDirtyRects(int page) {
-    std::vector<Rect> out;
-    const auto it = page_dirty_rects_.find(page);
-    if (it == page_dirty_rects_.end()) return out;
-    out.swap(it->second);
-    page_dirty_rects_.erase(it);
-    return out;
-}
+std::vector<Rect> EditorEngine::takePageDirtyRects(int page) { return pages_.takeDirty(page); }
 
 /**
  * 有累积脏矩形的页号（升序）。与 takePageDirtyRects 的分工见头文件。
  */
 std::string EditorEngine::pageDirtyPagesJson() const {
-    std::vector<int> pages;
-    pages.reserve(page_dirty_rects_.size());
-    for (const auto& kv : page_dirty_rects_) {
-        if (!kv.second.empty()) pages.push_back(kv.first);
-    }
-    std::sort(pages.begin(), pages.end());
+    const std::vector<int> pages = pages_.dirtyPages();
     std::ostringstream o;
     o << "[";
     for (size_t i = 0; i < pages.size(); ++i) {
@@ -825,9 +759,8 @@ std::string EditorEngine::takePageDirtyRectsJson(int page) {
 
 size_t EditorEngine::pageBytes(int page) const {
     if (!pageBitmapFresh(page)) return 0;
-    const auto it = page_cache_.find(page);
-    if (it == page_cache_.end()) return 0;
-    return it->second.px.byteSize();
+    const PageSlot* pb = pages_.find(page);
+    return (pb == nullptr) ? 0 : pb->px.byteSize();
 }
 
 const uint8_t* EditorEngine::pagePixels(int page) const { return pageDisplayPixels(page); }
@@ -850,13 +783,7 @@ void EditorEngine::presentInternal(int first_page, int count) {
     // 光栅签名在这里按当前状态重算一次：它是"这一页的像素还算不算数"的唯一判据
     //   （pageBitmapFresh 只比它）。写进某几个 setter 里迟早漏 —— 水印是节属性、
     //   图片代际挂在资源表上、编辑标记看模式，漏一项的症状就是"改了之后屏幕不变"。
-    {
-        const uint64_t sig = rasterSignatureNow();
-        if (sig != raster_sig_) {
-            raster_sig_ = sig;
-            page_dirty_rects_.clear();  // 旧矩形描述的是旧像素，作废
-        }
-    }
+    pages_.setSignature(rasterSignatureNow());
     // 光栅那一组由 rasterIntoBitmap 累加，末尾一次性上报。
     raster_glyphs_ = 0;
     raster_glyph_bounds_ms_ = 0.0;
@@ -1004,10 +931,11 @@ void EditorEngine::presentInternal(int first_page, int count) {
         //   否则带外留在 bitmap 里的就是零（黑块），而它永远补不回来
         //   （下一次它已经"有像素"了，这块黑永远补不回来）。整窗帧在时，"首次全建"
         //   那一支会绕过行带；现在没有那一支，判据只能落在这里。
-        const auto it = page_cache_.find(page);
-        const bool has_prev =
-            it != page_cache_.end() && it->second.valid && it->second.raster_sig == raster_sig_ &&
-            it->second.px.width() == page_px_w && it->second.px.height() == page_px_h;
+        const PageSlot* prev_slot = pages_.find(page);
+        const bool has_prev = prev_slot != nullptr && prev_slot->valid &&
+                              prev_slot->raster_sig == pages_.signature() &&
+                              prev_slot->px.width() == page_px_w &&
+                              prev_slot->px.height() == page_px_h;
         const int band = has_prev ? computeBand(page) : 0;
         if (band <= 0) {
             // -1：页指纹变了而行指纹全同（只有页数 / 页间隙 / 页边框这类页外属性变了）
@@ -1043,11 +971,11 @@ void EditorEngine::presentInternal(int first_page, int count) {
     //   选区在前、光标在后：导出时按这个顺序叠（选区混色在下、光标实心在上）。
     for (int i = 0; i < count; ++i) {
         const int page = first_page + i;
-        const auto it = page_cache_.find(page);
-        if (it == page_cache_.end()) continue;
+        PageSlot* slot = pages_.find(page);
+        if (slot == nullptr) continue;
         PageTransient now;
         collectTransient(page, &now);
-        const PageTransient& prev = it->second.transient;
+        const PageTransient& prev = slot->transient;
         auto sameRect = [](const Rect& a, const Rect& b) {
             return a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h;
         };
@@ -1071,11 +999,11 @@ void EditorEngine::presentInternal(int first_page, int count) {
         }
         if (prev.caret.w > 0.0f && !sameRect(prev.caret, now.caret)) markDirty(page, prev.caret);
         if (now.caret.w > 0.0f && !sameRect(prev.caret, now.caret)) markDirty(page, now.caret);
-        it->second.transient = now;
+        slot->transient = now;
     }
     // 窗口外的页不留瞬态账：它记的是"上一拍这一页叠了什么"，而那一页已经不在画布上。
     //   留着的话，读 pageRgba(窗口外的页) 会得到一个过期光标 —— 探针正是那么读的。
-    for (auto& kv : page_cache_) {
+    for (auto& kv : pages_.slots()) {
         if (kv.first >= first_page && kv.first < first_page + count) continue;
         kv.second.transient.sel.clear();
         kv.second.transient.image_ui.clear();
@@ -1219,27 +1147,26 @@ void EditorEngine::collectTransient(int page, PageTransient* out) const {
  *   它从来没被写进任何持久位图里。
  */
 const uint8_t* EditorEngine::pageDisplayPixels(int page) const {
-    const auto it = page_cache_.find(page);
-    if (it == page_cache_.end() || !it->second.valid) return nullptr;
-    const PageBitmap& pb = it->second;
-    if (pb.px.width() != pagePxWidth() || pb.px.height() != pagePxHeight()) return nullptr;
-    if (pb.transient.sel.empty() && pb.transient.image_ui.empty() &&
-        !(pb.transient.caret.w > 0.0f)) {
-        return pb.px.data();
+    const PageSlot* pb = pages_.find(page);
+    if (pb == nullptr || !pb->valid) return nullptr;
+    if (pb->px.width() != pagePxWidth() || pb->px.height() != pagePxHeight()) return nullptr;
+    if (pb->transient.sel.empty() && pb->transient.image_ui.empty() &&
+        !(pb->transient.caret.w > 0.0f)) {
+        return pb->px.data();
     }
 
-    const int pw = pb.px.width();
-    const int ph = pb.px.height();
+    const int pw = pb->px.width();
+    const int ph = pb->px.height();
     if (page_export_.width() != pw || page_export_.height() != ph) {
         page_export_.reset(pw, ph);
         page_export_.shareFonts(font_owner_);
     }
-    page_export_.blitFrom(pb.px, Rect{0.0f, 0.0f, static_cast<float>(pw), static_cast<float>(ph)},
+    page_export_.blitFrom(pb->px, Rect{0.0f, 0.0f, static_cast<float>(pw), static_cast<float>(ph)},
                           0, 0);
-    for (const Rect& r : pb.transient.sel) page_export_.blendRect(r, cfg_.selection_color);
+    for (const Rect& r : pb->transient.sel) page_export_.blendRect(r, cfg_.selection_color);
     // 拖拽框与把手画在选区之上、光标之下：它们比选区更需要看得清，而光标是最后一条。
-    for (const Rect& r : pb.transient.image_ui) page_export_.fillRect(r, cfg_.image_mark);
-    if (pb.transient.caret.w > 0.0f) page_export_.fillRect(pb.transient.caret, cfg_.caret_color);
+    for (const Rect& r : pb->transient.image_ui) page_export_.fillRect(r, cfg_.image_mark);
+    if (pb->transient.caret.w > 0.0f) page_export_.fillRect(pb->transient.caret, cfg_.caret_color);
     page_export_page_ = page;
     return page_export_.data();
 }
@@ -1269,8 +1196,8 @@ void EditorEngine::assembleWindow(bool with_transient, Bitmap* out) const {
         if (with_transient) {
             src = pageDisplayPixels(page);
         } else {
-            const auto it = page_cache_.find(page);
-            if (it != page_cache_.end() && it->second.valid) src = it->second.px.data();
+            const PageSlot* slot = pages_.find(page);
+            if (slot != nullptr && slot->valid) src = slot->px.data();
         }
         if (src == nullptr) continue;
         // 页宽就是帧宽，所以按行整段拷：两侧都不需要裁剪，也不会出现采样。

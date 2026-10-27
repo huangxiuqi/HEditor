@@ -144,8 +144,9 @@ bool EditorEngine::registerImage(const std::string& id, int width, int height, c
     if (!images_.put(id, width, height, rgba, bytes, error)) return false;
     // 资源变了但文档没变：页指纹看不出来，只有光栅签名里的资源变更计数能让页位图作废。
     //   不重光栅的话，画面上一直是上一张图（或者占位框）。
-    raster_sig_ = rasterSignatureNow();
-    page_dirty_rects_.clear();
+    pages_.setSignature(rasterSignatureNow());
+    // 注册与删除都可能让"待上屏的矩形"指向旧像素：签名没变时也要清一次。
+    pages_.clearDirty();
     return true;
 }
 
@@ -161,8 +162,9 @@ bool EditorEngine::dropImage(const std::string& id) {
     // 后端按资源身份缓存了解码结果，表里删了它也不会自己消失 —— 那份缓存按 key 存，
     //   键是资源 id 的哈希，删掉资源之后就再没人能找回它。
     Bitmap::forgetImage(imageResourceKey(id));
-    raster_sig_ = rasterSignatureNow();
-    page_dirty_rects_.clear();
+    pages_.setSignature(rasterSignatureNow());
+    // 注册与删除都可能让"待上屏的矩形"指向旧像素：签名没变时也要清一次。
+    pages_.clearDirty();
     return true;
 }
 

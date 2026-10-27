@@ -124,7 +124,7 @@ static uint64_t fnvMixColor(uint64_t h, const Color& c) {
  * "页位图上画出来是什么"这组配置的签名。
  *
  * 页指纹只哈希字形等内容；页面底色、边框、格线、原子框、缩放、页度量这些一个都不在里面。
- *   把它们混成一个签名记进 PageBitmap，签名一变所有页自动失效 —— 新增光栅配置项时只要
+ *   把它们混成一个签名记进页缓存的页格，签名一变所有页自动失效 —— 新增光栅配置项时只要
  *   加进这里，不必再维护一张"记得清缓存"的清单（TRAPS 128 的正解）。
  * 与排版无关的项刻意不收：页间隙只影响落点、背景色只影响帧、光标/选区色只影响瞬态层。
  */
@@ -206,10 +206,7 @@ void EditorEngine::setConfig(const EngineConfig& cfg) {
     // 光栅签名一变，所有页的像素都不再作数（判据在 pageBitmapFresh）。
     //   这里不再逐项比对再清缓存：那张清单漏一项就是"改了底色屏幕不变"（TRAPS 128）。
     const uint64_t sig = rasterSignatureNow();
-    if (sig != raster_sig_) {
-        raster_sig_ = sig;
-        page_dirty_rects_.clear();  // 旧矩形描述的是旧像素，作废
-    }
+    pages_.setSignature(sig);
     if (plan_changed) markLayoutDirtyForBrackets();
     if (page_changed) markAllLayoutDirty();
     if (plan_changed || page_changed) relayout();
@@ -240,8 +237,7 @@ void EditorEngine::installDocument(rev::Doc doc) {
     sel_history_.clear();
     sel_pos_ = 0;
     setCaretByText(TextPos{0, 0});
-    page_cache_.clear();
-    page_dirty_rects_.clear();
+    pages_.clear();
     rebuildFromTree();
     // 整份文档换了：段数与内容都可能全变，没有可复用的前缀。
     markAllLayoutDirty();
@@ -266,8 +262,7 @@ void EditorEngine::setDocument(const NodeTree& tree, const StyleSheet& sheet) {
         block_extents_.clear();
         tables_.clear();
         flow_.reset();
-        page_cache_.clear();
-        page_dirty_rects_.clear();
+        pages_.clear();
         return;
     }
     sheet_ = sheet;
@@ -1620,11 +1615,7 @@ void EditorEngine::setEditMode(EditMode m) {
     // 编辑标记只读不画，而只读未必改内容（隐藏字段一个都没有时页面指纹不动）。
     //   所以照"光栅签名是唯一判据"那条（TRAPS 128）重算一次：该作废就作废。
     {
-        const uint64_t sig = rasterSignatureNow();
-        if (sig != raster_sig_) {
-            raster_sig_ = sig;
-            page_dirty_rects_.clear();
-        }
+        pages_.setSignature(rasterSignatureNow());
     }
 
     // 切模式要重编译，而且整篇重排：隐藏控件的可见性口径随模式变（文档模式是设计态、

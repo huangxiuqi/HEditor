@@ -206,6 +206,7 @@ add_library(heditor_core STATIC
   src/core/engine/edit_command.cpp
   src/core/engine/engine_layout.cpp
   src/core/engine/engine_paint.cpp
+  src/core/engine/page_cache.cpp
   src/core/engine/engine_audit.cpp
   src/core/engine/engine_diag.cpp
   src/core/engine/engine_image.cpp

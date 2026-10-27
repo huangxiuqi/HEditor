@@ -456,8 +456,7 @@ void EditorEngine::relayout() {
             for (int i = 0; i < nc; ++i) {
                 mark_readonly_prev_[static_cast<size_t>(i)] = controls_.at(i).read_only ? 1 : 0;
             }
-            page_cache_.clear();
-            page_dirty_rects_.clear();  // 旧矩形描述的是旧像素
+            pages_.clear();
         }
     }
 

@@ -27,6 +27,7 @@
 #include "core/engine/engine_config.h"
 #include "core/engine/engine_stats.h"
 #include "core/engine/image_store.h"
+#include "core/engine/page_cache.h"
 #include "core/layout/layout.h"
 #include "core/render/bitmap.h"
 #include "core/rev/capability.h"
@@ -2532,7 +2533,7 @@ public:
     /**
      * 窗口导出图：把窗口内各页的"内容 + 瞬态"按窗口顺序拼成一张，供宿主 / 探针 / 单测读。
      *
-     * 它不是渲染目标 —— 渲染只写页位图（见 PageBitmap），这里是一次读请求时现场拼的
+     * 它不是渲染目标 —— 渲染只写页位图（见 PageSlot），这里是一次读请求时现场拼的
      *   派生视图（第一次读时拼一次，下一次 present 作废重拼）。所以它没有槽、没有增量，
      *   也不可能与页位图分叉：内容全部来自页位图，瞬态全部来自同一份矩形。
      * 保留它是为了让"扫一遍画面"这类判据（像素断言、markCheck、inkRows）不必认识页。
@@ -2877,31 +2878,6 @@ private:
     void presentInternal(int first_page, int count);
 
     /**
-     * 一页上叠的瞬态：选区矩形（可以有多条）+ 光标矩形（最多一条）。
-     *
-     * 分成两份而不是混在一个数组里：导出时选区混色在下、光标实心在上，顺序由类型定，
-     *   而不是由"谁最后被 push 进数组"定 —— 后者只要有一处 push 顺序变了，
-     *   光标就会被半透明地再混一次，而那种错只在重叠的几个像素上看得出。
-     */
-    struct PageTransient {
-        /**
-         * 这一页上的选区矩形（页内像素坐标）。
-         */
-        std::vector<Rect> sel;
-
-        /**
-         * 这一页上的光标矩形（最多一条）。
-         */
-        Rect caret{};
-
-        /**
-         * 这一页上的图片拖拽框与把手（细边矩形）。与选区同一层：呈现时叠、导出时不叠 ——
-         * 打印出来带一圈把手是错的。
-         */
-        std::vector<Rect> image_ui;
-    };
-
-    /**
      * "页位图上画出来是什么"的签名：换缩放、换页度量、换底色、换图片像素都算一次变化。
      * 签名一变，全部页位图作废（判据在 pageBitmapFresh）—— 新增光栅相关配置项时只要
      * 加进它，不必维护一张"记得清缓存"的清单。
@@ -2936,65 +2912,14 @@ private:
      * 这一页现在该叠哪些瞬态（页内像素坐标）。presentInternal 按页算差集、导出按页取用。
      */
     void collectTransient(int page, PageTransient* out) const;
+
     /**
-     * 一页的光栅结果：页内坐标（原点 = 页左上角），不含页间隙。
+     * 页位图缓存与脏矩形账（页格、光栅签名、"哪几块像素变了"）。
      *
-     * 按页缓存是唯一的像素缓存：换窗、换缩放都不作废它（作废的判据是页指纹与
-     *   光栅签名），于是滚过一页不会把已经画好的页重画一遍（一页约 8~9 ms）。
-     * fp 记的是光栅时那一版页指纹（哨兵值也算一版，见 kFpDirtyBit）：
-     *   与 page_fp_new_ 相等就说明这一页的像素还作数，不必重画。
+     * 缓存是唯一的像素存放处，脏矩形与像素分开存活：像素长期留着，脏矩形只活到宿主取走
+     * 那一刻。两者一起搬出去，是因为它们的失效条件只由"画出来是什么"决定。
      */
-    struct PageBitmap {
-        /**
-         * 页像素（页内坐标，不含页间隙）。
-         */
-        Bitmap px;
-
-        /**
-         * 光栅时那一版页指纹。
-         */
-        uint64_t fp = 0;
-
-        /**
-         * 这一份像素是在哪一版"光栅配置"下画的。
-         *
-         * 页指纹只哈希字形等内容，看不见页面底色 / 边框 / 缩放 / 页度量这些"画出来是什么"
-         *   的输入。把它们的哈希记在这里，比一次就是不新鲜 —— 新增一个光栅配置项时只要把它
-         *   加进 rasterSignature()，所有页自动失效，不必再维护一张"记得清缓存"的清单。
-         */
-        uint64_t raster_sig = 0;
-
-        /**
-         * 上一次导出时叠在这一页上的瞬态（页内像素坐标：选区 + 光标）。
-         *
-         * 它只是"上一次记过哪几块"的账，用来算新旧差集 —— 像素本身不在页位图里，
-         *   所以没有"擦"这一步：下一次导出从干净的页位图重来。
-         */
-        PageTransient transient;
-
-        /**
-         * 这一格装着页没有（没有就不用比对指纹）。
-         */
-        bool valid = false;
-    };
-
-    /**
-     * 页缓存。容量按"窗口页数 + 2"条，超出时按离窗口最远淘汰。
-     *
-     * 它是唯一的像素缓存（96 dpi 一页 3.6 MB），所以余量不再放宽：窗口内的页
-     *   一律留着，窗口外只留两条，够"滚回来一页"不重光栅。
-     */
-    std::unordered_map<int, PageBitmap> page_cache_;
-
-    /**
-     * 光栅配置的签名（见 PageBitmap::raster_sig）。由 setConfig 写入。
-     */
-    uint64_t raster_sig_ = 0;
-
-    /**
-     * 每页待上屏的脏矩形（页内像素坐标），"自上次取走以来"累积。
-     */
-    std::unordered_map<int, std::vector<Rect>> page_dirty_rects_;
+    PageCache pages_;
 
     /**
      * 记一笔"这一页上的这块变了"（累积到 takePageDirtyRects 被取走为止）。

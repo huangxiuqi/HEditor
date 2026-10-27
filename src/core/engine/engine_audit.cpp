@@ -385,8 +385,7 @@ std::string EditorEngine::auditFrameJson() {
     Bitmap before;
     assembleWindow(true, &before);
 
-    page_cache_.clear();
-    page_dirty_rects_.clear();
+    pages_.clear();
     repaint();
 
     Bitmap after;
@@ -408,8 +407,7 @@ std::string EditorEngine::auditBaseJson() {
     Bitmap before;
     assembleWindow(false, &before);
 
-    page_cache_.clear();
-    page_dirty_rects_.clear();
+    pages_.clear();
     repaint();
 
     Bitmap after;
@@ -431,9 +429,8 @@ std::string EditorEngine::auditBaseJson() {
 std::string EditorEngine::auditPageJson(int page) {
     const int pw = pagePxWidth();
     const int ph = pagePxHeight();
-    const auto it = page_cache_.find(page);
-    if (it == page_cache_.end() || !it->second.valid || it->second.px.width() != pw ||
-        it->second.px.height() != ph) {
+    const PageSlot* pb = pages_.find(page);
+    if (pb == nullptr || !pb->valid || pb->px.width() != pw || pb->px.height() != ph) {
         return pk::checked(pk::audit_page::kSpec, "{\"diff\":-1,\"cached\":0}");
     }
     Bitmap ref(pw, ph);
@@ -448,7 +445,7 @@ std::string EditorEngine::auditPageJson(int page) {
     raster_fill_ms_ = saved_fill;
     raster_glyph_ms_ = saved_glyph;
 
-    const uint8_t* a = it->second.px.data();
+    const uint8_t* a = pb->px.data();
     const uint8_t* b = ref.data();
     long long diff = 0;
     int minx = 1 << 30;
