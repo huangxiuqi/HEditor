@@ -1424,6 +1424,16 @@ bool previewImageResizeAt(int index, float w_pt, float h_pt, int handle) {
 }
 
 /**
+ * 拖动浮动图的预览（不动文档、不重排）：图按位移画在新位置，文字松手才绕排。
+ * 行内图没有预览：它在文字流里，挪一下就要重排。
+ */
+bool previewImageMoveAt(int index, float dx_pt, float dy_pt) {
+    if (!g_engine.previewImageMove(index, dx_pt, dy_pt)) return false;
+    g_engine.repaint();
+    return true;
+}
+
+/**
  * 收起尺寸预览（松手后由宿主补一次真实 resizeImage；中途取消也走它）。
  */
 bool clearImagePreview() {
@@ -2268,6 +2278,7 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("selectImage", &selectImage);
     emscripten::function("resizeImageAt", &resizeImageAt);
     emscripten::function("previewImageResizeAt", &previewImageResizeAt);
+    emscripten::function("previewImageMoveAt", &previewImageMoveAt);
     emscripten::function("clearImagePreview", &clearImagePreview);
     emscripten::function("focusControl", &focusControl);
     emscripten::function("tabCaret", &tabCaret);

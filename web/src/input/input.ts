@@ -215,6 +215,16 @@ export interface InputEnv {
   clearImagePreview?(): Maybe<any>;
 
   /**
+   * 拖动浮动图的预览（不动文档、不重排）：图按位移跟手，文字松手才绕排。
+   *
+   * 行内图不走这条路 —— 它在文字流里，挪一下就要重排，拖动期间只用落点提示。
+   * @param index 图片下标
+   * @param dx 相对起手位置的横向位移（磅）
+   * @param dy 同上，纵向
+   */
+  previewImageMove?(index: number, dx: number, dy: number): Maybe<any>;
+
+  /**
    * 拖动搬运期间把正文光标收起来（页面上只留一个落点指示）。
    * @param on false = 收起，true = 放回并恢复闪烁
    */
@@ -736,7 +746,7 @@ export function createInput(env: InputEnv): InputLayer {
       //   三击选段的第一下就已经把光标摆在那儿了），把它们判成搬家，双击就再也选
       //   不出词、三击也选不出段 —— 连击的意图比"搬"明确得多。
       // 图片不受连击计数限制：点在图上没有"双击选词"这回事，第二下照样该能拖。
-      const imageDrag = !!h && h.drag === 2;
+      const imageDrag = !!h && (h.drag === 2 || h.drag === 3);
       if ((count === 1 || imageDrag) && h && typeof h.drag === 'number' && h.drag > 0) {
         armDrag(false);
         move.arm(h);
@@ -835,12 +845,18 @@ export function createInput(env: InputEnv): InputLayer {
       if (typeof env.setCursor === 'function') env.setCursor(c);
     };
     let caret_muted = false;
+    // 这一趟拖的是浮动图：图已经按预览跟着指针走了，收尾要撤掉那份瞬态位移。
+    let previewed = false;
     const detach = (): void => {
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
       setCursor('');
       // 落点竖条是"松手会插在这儿"的提示，手势一结束就收起；藏起来的那颗光标放回去。
       if (typeof env.dropMark === 'function') env.dropMark(null);
+      if (previewed && typeof env.clearImagePreview === 'function') {
+        previewed = false;
+        env.clearImagePreview();
+      }
       if (caret_muted && typeof env.setCaretPhase === 'function') {
         caret_muted = false;
         env.setCaretPhase(true);
@@ -863,7 +879,7 @@ export function createInput(env: InputEnv): InputLayer {
       //   跟着指针走多远（发落点的话，图会有一个"左上角跳到指针"的瞬移）。
       const from = env.docPt(start);
       const done =
-        h.drag === 2 && typeof h.dragImage === 'number'
+        typeof h.drag === 'number' && h.drag >= 2 && typeof h.dragImage === 'number'
           ? env.write('moveImage', {
               i: h.dragImage,
               x: dest.x,
@@ -904,9 +920,20 @@ export function createInput(env: InputEnv): InputLayer {
         }
       }
       last = p;
-      // 被搬的东西还留在原处（选区不塌、图不移动），指针下面单独画一条竖线说明
-      //   落点 —— 这是拖动过程中唯一能看见"松手会发生什么"的东西。
-      if (moved && hit !== null && typeof env.dropMark === 'function') env.dropMark(p);
+      if (!moved || hit === null) return;
+      // 浮动图：图本身跟着指针走，文字留到松手再绕排。它不占文字流，没有插入点，
+      //   所以这一路不画落点竖条 —— 画了反而说"松手会插在这儿"。
+      if (hit.drag === 3 && typeof hit.dragImage === 'number' &&
+          typeof env.previewImageMove === 'function') {
+        const from = env.docPt(start);
+        const cur = env.docPt(p);
+        previewed = true;
+        keep(env.previewImageMove(hit.dragImage, cur.x - from.x, cur.y - from.y));
+        return;
+      }
+      // 被搬的选区还留在原处（选区不塌），指针下面单独画一条竖线说明落点 ——
+      //   这是拖动过程中唯一能看见"松手会发生什么"的东西。
+      if (typeof env.dropMark === 'function') env.dropMark(p);
     };
     const onUp = (): void => {
       released = true;

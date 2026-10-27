@@ -2116,6 +2116,30 @@ public:
     bool previewImageResizeAndRender(int index, float w_pt, float h_pt, int handle);
 
     /**
+     * 拖动浮动图的预览：图按位移跟手，不动文档、不重排。
+     *
+     * 浮动图不占行盒，拖动它可以只挪这一张图的绘制位置（文字保持松手前的位置），
+     * 于是拖动期间没有一次整篇重排。松手由宿主发一次 moveImage 落到文档，届时才绕排。
+     * 行内图不走这条路：它在文字流里，挪一下就要重排。
+     *
+     * @param index 图片下标
+     * @param dx_pt 相对松手前位置的横向位移（磅）
+     * @param dy_pt 同上，纵向
+     * @return true = 预览变了（需要重画那一页）
+     */
+    bool previewImageMove(int index, float dx_pt, float dy_pt);
+
+    /**
+     * 拖动预览期间这一张图的有效位置：叠加瞬态位移。
+     *
+     * 绘制、命中、选中框与自审都从这一处取位置 —— 各写一份的话，拖动中框会与图错开。
+     * @param pf 已放置的浮动图
+     * @param x 出参：有效左沿（页内磅），可为空
+     * @param y 出参：有效上沿（页内磅），可为空
+     */
+    void imagePreviewPos(const PlacedFloat& pf, float* x, float* y) const;
+
+    /**
      * 一个控件的对外描述：类型、值、选项与策略。
      *
      * 它是"给宿主看的那一份"，不是模型：不含节点指针，也不含设计期属性的完整记录。
@@ -3560,6 +3584,16 @@ private:
          * 正在拖的把手序号（0 左上顺时针）：决定预览框往哪个方向长。
          */
         int handle = -1;
+
+        /**
+         * 拖动移动的横向瞬态位移（磅）。改尺寸预览不用这一项。
+         */
+        float dx_pt = 0.0f;
+
+        /**
+         * 同上，纵向。
+         */
+        float dy_pt = 0.0f;
     };
 
     /**

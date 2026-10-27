@@ -236,9 +236,14 @@ uint64_t EditorEngine::floatPieceDigest(int page) const {
     uint64_t h = kFnvBasis;
     for (const PlacedFloat& pf : layout_.placed_floats) {
         if (pf.page != page) continue;
+        // 拖动预览也要进摘要：图挪了而摘要不变时，这一页会被判成新鲜，
+        //   拖动中只有第一帧跟手、后面全停在原处。
+        float fx = pf.x;
+        float fy = pf.y;
+        imagePreviewPos(pf, &fx, &fy);
         h = fnvMix(h, pf.handle);
-        h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(quantPt(pf.x))));
-        h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(quantPt(pf.y))));
+        h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(quantPt(fx))));
+        h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(quantPt(fy))));
         h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(quantPt(pf.w))));
         h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(quantPt(pf.h))));
         h = fnvMix(h, static_cast<uint64_t>(static_cast<uint8_t>(pf.wrap)));

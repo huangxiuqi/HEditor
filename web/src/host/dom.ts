@@ -1262,6 +1262,8 @@ export function createDomHost(o: DomHostOptions): DomHost {
     resizeImage: (i, w, h, merge) => writeOp('resizeImage', { i, w, h, merge }),
     previewImageSize: (i, w, h, handle) =>
       writeOp('previewImageResize', { i, w, h, handle }) as Maybe<any>,
+    previewImageMove: (i, dx, dy) =>
+      writeOp('previewImageMove', { i, dx, dy }) as Maybe<any>,
     clearImagePreview: () => writeOp('clearImagePreview') as Maybe<any>,
     tableResize,
     status: (text, isErr) => o.status?.(text, isErr),

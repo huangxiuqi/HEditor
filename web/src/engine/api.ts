@@ -317,6 +317,8 @@ const COMMANDS: Array<[string, string, string[], string]> = [
   ['selectImage',           'w', ['selectImage'],                                         'self'],
   ['resizeImage',           'w', ['resizeImageAt'],                                       'self'],
   ['previewImageResize',    'w', ['previewImageResizeAt'],                                 'self'],
+  // 拖动浮动图的预览：图按位移跟手，文字留在原处（松手才绕排）。行内图不走这条路。
+  ['previewImageMove',      'w', ['previewImageMoveAt'],                                   'self'],
   ['clearImagePreview',     'w', ['clearImagePreview'],                                    'self'],
   ['imageList',             'r', ['imageList'],                                           'none'],
   ['imageHit',              'r', ['imageHit'],                                            'none'],
@@ -1385,6 +1387,11 @@ const WRITE = collect('w', {
    * handle 是正在拖的把手（0 左上顺时针），它决定框往哪个方向长。
    */
   previewImageResize: (a) => mod.previewImageResizeAt(a.i | 0, Number(a.w), Number(a.h), a.handle | 0),
+  /**
+   * 拖动浮动图的预览：图按位移跟手，文字留在原处。
+   *   每帧真改位置要整篇重排（浮动图一律全量），拖动会明显发滞；松手才发 moveImage。
+   */
+  previewImageMove: (a) => mod.previewImageMoveAt(a.i | 0, Number(a.dx) || 0, Number(a.dy) || 0),
   clearImagePreview: () => mod.clearImagePreview(),
   // 拖拽落地：列宽整份给（<= 0 的那一列保持自动），行高给磅值（<= 0 回到按内容）。
   setTableColWidths: (a) => mod.setTableColWidths(a.handle | 0, a.widths || []),

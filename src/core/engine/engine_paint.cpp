@@ -566,10 +566,14 @@ void EditorEngine::rasterIntoBitmap(Bitmap& target, int page_index, const float*
         for (const PlacedFloat& pf : layout_.placed_floats) {
             if (pf.page != page) continue;
             if ((pf.wrap == ImageWrap::Behind) != behind) continue;
-            const float lo_pt = pf.y + dy / zoom;
+            // 拖动移动的预览：图按位移画在新位置，文字先留在原处（松手才绕排）。
+            float fx = pf.x;
+            float fy = pf.y;
+            imagePreviewPos(pf, &fx, &fy);
+            const float lo_pt = fy + dy / zoom;
             const float hi_pt = lo_pt + pf.h;
             if (band && (hi_pt < *band_lo_pt - 1.0f || lo_pt > *band_hi_pt + 1.0f)) continue;
-            const Rect box{pf.x * zoom, lo_pt * zoom, pf.w * zoom, pf.h * zoom};
+            const Rect box{fx * zoom, lo_pt * zoom, pf.w * zoom, pf.h * zoom};
             if (!(box.w > 0.0f) || !(box.h > 0.0f)) continue;
             const rev::Node* n = rev::findNode(document(), static_cast<NodeId>(pf.handle));
             const ImageSpec* im = (n != nullptr) ? std::get_if<ImageSpec>(&n->payload) : nullptr;

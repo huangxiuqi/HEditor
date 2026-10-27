@@ -40,7 +40,10 @@
 - 空控件提示是排版槽不是流位置（`InlineObject::hint` → 一枚 `control_hint` 簇，宽
   `hintAdvancePt`、上限容器宽）：数槽 = 数位置处都跳过它（`bracketCountAt`、`offsetAtSide`、
   `hitTestInLine`）；不进流，判空仍按 `hi-lo==2`，没有码点时 `controlRects` 用提示槽。
-- 图片：字节不进文档；拖动只更新预览框，松手才 `resizeImage`；进格的图按格宽限宽。
+- 图片：字节不进文档；改尺寸只更新预览框、松手才 `resizeImage`；浮动图拖动用
+  `previewImageMove` 只挪绘制位置（不重排）、松手才 `moveImage`，且不画插入点（`hit.drag`
+  为 3）；行内图在流里，按 2 走落点提示。进格的图按格宽限宽。
+- 浮动图摘要与绘制、命中、选中框一律走 `imagePreviewPos`：各写一份的话拖动中框与图错开。
 - `.heditor-ime` 必须 `pointer-events:none`。右键菜单归宿主：库只拦浏览器菜单 +
   `placeAt({tap:false})` + 回 `onContextMenu(target)`（种类 -1/0/1/2/3）；UI 建在 `ui/layer.ts` 上。
   菜单高亮是**一条链**：子菜单开着时父项一直亮，置灰项也接悬停。

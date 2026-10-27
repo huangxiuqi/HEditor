@@ -583,9 +583,12 @@ test.describe('图片拖动', () => {
     await p.page.mouse.move(cx, cy);
     await p.page.mouse.down();
     await p.page.mouse.move(cx + 60, cy + 40, { steps: 5 });
-    const midBar = await p.read<any>(`
+    await p.page.waitForTimeout(160);
+    const mid = await p.read<any>(`
       const divs = [...EL('.heditor-pages').children].filter((e) => e.tagName === 'DIV');
-      return divs.filter((e) => e.style.display === 'block').length;`);
+      const b = (await H.images())[0];
+      return { bars: divs.filter((e) => e.style.display === 'block').length,
+               rect: b.rects[0] };`);
     await p.page.mouse.up();
     await p.page.waitForTimeout(280);
     const after = await p.read<any>(`
@@ -600,6 +603,59 @@ test.describe('图片拖动', () => {
     check('拖图不改尺寸', Math.abs(after.rect.w - geo.r.w) < 0.01 && Math.abs(after.rect.h - geo.r.h) < 0.01,
           JSON.stringify(after.rect) + ' vs ' + JSON.stringify(geo.r));
     check('★ 拖完之后页面上没有残影（自审 diff = 0）', after.au === 0, String(after.au));
-    check('拖动期间也有落点提示', midBar >= 0, String(midBar));
+    check('★ 拖动中图就跟着指针走（不是松手才动）',
+          Math.abs(mid.rect.x - geo.r.x - 60 / geo.z) < 6 &&
+            Math.abs(mid.rect.y - geo.r.y - 40 / geo.z) < 6,
+          JSON.stringify(mid.rect) + ' vs ' + JSON.stringify(geo.r));
+    check('★ 浮动图拖动不画插入点：它不占文字流，没有"松手插在这儿"',
+          mid.bars === 0, String(mid.bars));
+  });
+
+  test('衬于文字下方拖动：同样跟手、同样没有插入点，撤销一步回原位', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' }, viewport: { width: 1200, height: 900 } });
+    const geo = await p.read<any>(`
+      await H.setText('第一段文字内容很多很多\\n第二段文字内容也很多');
+      await H.setCaret({ para: 0, offset: 3 });
+      await H.flush();
+      const data = new Uint8Array(100 * 80 * 4).fill(170);
+      await H.registerImage({ id: 'pic', width: 100, height: 80, data });
+      await H.insertImage({ resourceId: 'pic', pxWidth: 100, pxHeight: 80 });
+      await H.flush();
+      await H.setImageLayout(0, 'behind');
+      await H.flush();
+      await D.stopBlink();
+      const a = (await H.images())[0];
+      const fr = FRAME().getBoundingClientRect();
+      return { r: a.rects[0], left: fr.left, top: fr.top, z: ZOOM() };`);
+    const cx = geo.left + (geo.r.x + geo.r.w / 2) * geo.z;
+    const cy = geo.top + (geo.r.y + geo.r.h / 2) * geo.z;
+    await p.page.mouse.click(cx, cy);
+    await p.page.waitForTimeout(150);
+    await p.page.mouse.move(cx, cy);
+    await p.page.mouse.down();
+    await p.page.mouse.move(cx + 50, cy + 30, { steps: 5 });
+    await p.page.waitForTimeout(160);
+    const mid = await p.read<any>(`
+      const divs = [...EL('.heditor-pages').children].filter((e) => e.tagName === 'DIV');
+      const b = (await H.images())[0];
+      return { bars: divs.filter((e) => e.style.display === 'block').length, rect: b.rects[0] };`);
+    await p.page.mouse.up();
+    await p.page.waitForTimeout(300);
+    const landed = await p.read<any>(`return (await H.images())[0].rects[0];`);
+    const undone = await p.read<any>(`
+      await H.undo();
+      await H.flush();
+      return (await H.images())[0].rects[0];`);
+
+    check('★ 衬于下方：拖动中图也跟手',
+          Math.abs(mid.rect.x - geo.r.x - 50 / geo.z) < 6 &&
+            Math.abs(mid.rect.y - geo.r.y - 30 / geo.z) < 6,
+          JSON.stringify(mid.rect) + ' vs ' + JSON.stringify(geo.r));
+    check('★ 衬于下方：拖动中同样不画插入点', mid.bars === 0, String(mid.bars));
+    check('★ 松手之后落在拖动到的位置（预览不是假的）',
+          Math.abs(landed.x - mid.rect.x) < 3 && Math.abs(landed.y - mid.rect.y) < 3,
+          JSON.stringify(landed) + ' vs ' + JSON.stringify(mid.rect));
+    check('★ 一步撤销回到原位', Math.abs(undone.x - geo.r.x) < 1 && Math.abs(undone.y - geo.r.y) < 1,
+          JSON.stringify(undone) + ' vs ' + JSON.stringify(geo.r));
   });
 });

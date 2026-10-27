@@ -273,7 +273,10 @@ std::vector<EditorEngine::ImageBox> EditorEngine::images() const {
     for (const PlacedFloat& pf : layout_.placed_floats) {
         PageRect pr;
         pr.page = pf.page;
-        pr.r_pt = Rect{pf.x, pf.y, pf.w, pf.h};
+        float fx = pf.x;
+        float fy = pf.y;
+        imagePreviewPos(pf, &fx, &fy);
+        pr.r_pt = Rect{fx, fy, pf.w, pf.h};
         rects[static_cast<int>(pf.handle)].push_back(pr);
     }
 
@@ -342,7 +345,10 @@ EditorEngine::ImageHit EditorEngine::imageAtPt(float x_pt_doc, float y_pt_doc) c
     // 浮动图优先：它可能盖在文字上，而行盒里根本没有它的几何。
     for (const PlacedFloat& pf : layout_.placed_floats) {
         if (pf.page != page) continue;
-        const Rect r{pf.x, pf.y, pf.w, pf.h};
+        float fx = pf.x;
+        float fy = pf.y;
+        imagePreviewPos(pf, &fx, &fy);
+        const Rect r{fx, fy, pf.w, pf.h};
         float centers[16];
         imageHandleCenters(r, centers);
         const float half =
@@ -404,11 +410,14 @@ void EditorEngine::collectImageUi(int page, std::vector<Rect>* out) const {
     const float half = kImageHandlePt * 0.5f * zoom;
     const float bar = std::max(1.0f, kImageFramePt * zoom);
 
-    // 浮动的图框不在行盒里，几何从 placed_floats 取；预览（拖动改尺寸）同样要跟手。
+    // 浮动的图框不在行盒里，几何从 placed_floats 取；预览（拖动改尺寸 / 拖动移动）同样要跟手。
     for (const PlacedFloat& pf : layout_.placed_floats) {
         if (pf.page != page) continue;
         if (static_cast<NodeId>(pf.handle) != image_sel_) continue;
-        Rect r{pf.x, pf.y, pf.w, pf.h};
+        float fx = pf.x;
+        float fy = pf.y;
+        imagePreviewPos(pf, &fx, &fy);
+        Rect r{fx, fy, pf.w, pf.h};
         if (image_preview_.id == image_sel_) {
             const int hd = image_preview_.handle;
             const bool grow_left = (hd == 0 || hd == 6 || hd == 7);
@@ -565,6 +574,49 @@ bool EditorEngine::previewImageResizeAndRender(int index, float w_pt, float h_pt
     return true;
 }
 
+void EditorEngine::imagePreviewPos(const PlacedFloat& pf, float* x, float* y) const {
+    float px = pf.x;
+    float py = pf.y;
+    if (image_preview_.id != kInvalidNodeId &&
+        image_preview_.id == static_cast<NodeId>(pf.handle)) {
+        px += image_preview_.dx_pt;
+        py += image_preview_.dy_pt;
+    }
+    if (x != nullptr) *x = px;
+    if (y != nullptr) *y = py;
+}
+
+bool EditorEngine::previewImageMove(int index, float dx_pt, float dy_pt) {
+    if (!loaded_) return false;
+    const std::vector<ImageBox> all = images();
+    for (const ImageBox& b : all) {
+        if (b.index != index) continue;
+        // 行内图在文字流里：挪它必须重排（后面的字要让位），没有"只挪绘制位置"这回事。
+        if (b.layout == 0) return false;
+        // 幂等按磅比：拖动每帧都会调用一次，没变就不重贴（省下一整页的光栅）。
+        if (image_preview_.id == b.id && std::fabs(image_preview_.dx_pt - dx_pt) < 0.01f &&
+            std::fabs(image_preview_.dy_pt - dy_pt) < 0.01f) {
+            return false;
+        }
+        image_preview_.id = b.id;
+        image_preview_.handle = -1;
+        image_preview_.dx_pt = dx_pt;
+        image_preview_.dy_pt = dy_pt;
+        // 页位图按页指纹命中：图挪了、版面没变，指纹不变就不会重画。浮动图摘要正是
+        //   "这一页画出来的浮动图"，用新位置重算它再标脏，这一页才真的重光栅。
+        for (const PageRect& pr : b.rects) {
+            const int p = pr.page;
+            if (p < 0) continue;
+            if (static_cast<size_t>(p) < float_fp_new_.size()) {
+                float_fp_new_[static_cast<size_t>(p)] = floatPieceDigest(p);
+            }
+            markPagesChangedFrom(p);
+        }
+        return true;
+    }
+    return false;
+}
+
 /**
  * 拖拽移动的起手判定：图片（已选中、点在图身上）优先，其次是"点落在当前文字选区里"。
  */
@@ -573,7 +625,17 @@ int EditorEngine::dragKindAt(const TextPos& p, int side, const ImageHit& ih) con
     // 图片那半：按在图身上（不是把手上）就是"搬这张图"，选没选中都算 ——
     //   先点一下选中再拖，那第二下会落在连击窗口里，按"已选中"卡的话，
     //   想拖一张图就得先等半秒。把手要缩放，按住它再拖是改尺寸，不是搬家。
-    if (ih.index >= 0 && ih.handle < 0) return 2;
+    //
+    //   行内图与浮动图分开编号：行内图在文字流里，拖动要指出"插到哪两个字之间"；
+    //   浮动图不占流，没有插入点，图本身跟着指针走。
+    if (ih.index >= 0 && ih.handle < 0) {
+        const std::vector<ImageBox> all = images();
+        for (const ImageBox& b : all) {
+            if (b.index != ih.index) continue;
+            return (b.layout == 0) ? 2 : 3;
+        }
+        return 2;
+    }
     // 文字那半：按在选区内部才是"搬这段字"。
     //   起点那一格不算内部 —— 从选区开头起手往外拖，用户表达的是"从这里重新选"，
     //   把这一下判成搬家，就再也拖不出反向选区（判据里"拖出去再拖回来收成空"
@@ -673,6 +735,8 @@ bool EditorEngine::moveImageToPt(int index, float x_pt_doc, float y_pt_doc, bool
             next.dy_pt = docToFlowY(cfg_, pagePxHeight(), pageGapPx(), y_pt_doc) - anchor_flow;
         }
         if (!edit_.setImageSpec(id, next)) return false;
+        // 位置真的落地了：预览的使命结束（松手那一下正是"预览位置 = 真位置"）。
+        clearImageResizePreview();
         markAllLayoutDirty();
         clearImageSelection();
         return true;
