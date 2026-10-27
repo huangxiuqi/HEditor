@@ -5,7 +5,7 @@
 //
 // 三份菜单（表格 / 控件 / 图片）共用一个上下文菜单组件与一块属性面板浮层：它们只差数据，
 //   形状（分组、勾选、禁用、子菜单）完全一样。
-import type { ControlSummary, ContextTarget, Editor, TableState } from '../src/index';
+import type { ControlSummary, ContextTarget, Editor, ImageLayout, TableState } from '../src/index';
 import { createContextMenu, type MenuEntry } from './ui/context-menu';
 import { createControlProps } from './ui/control-props';
 import { createGridPicker } from './ui/grid-picker';
@@ -304,7 +304,7 @@ export function createMenus(host: MenusHost): Menus {
    */
   const imageEntries = (
     index: number,
-    size: { w: number; h: number },
+    size: { w: number; h: number; layout: ImageLayout },
     at: { x: number; y: number },
   ): MenuEntry[] => {
     return [
@@ -348,6 +348,28 @@ export function createMenus(host: MenusHost): Menus {
               dismiss: closePanels,
             }),
           ),
+      },
+      { kind: 'separator' },
+      // 四档环绕方式 + 嵌入型。与 Word 的"环绕方式"同一个次序，当前档打勾。
+      {
+        kind: 'submenu',
+        label: '环绕方式',
+        items: ([
+          ['inline', '嵌入型'],
+          ['square', '四周型'],
+          ['topAndBottom', '上下型'],
+          ['behind', '衬于文字下方'],
+          ['inFront', '浮于文字上方'],
+        ] as Array<[ImageLayout, string]>).map(([key, label]) => ({
+          kind: 'action' as const,
+          label,
+          checked: size.layout === key,
+          run: () => {
+            void editor
+              .setImageLayout(index, key)
+              .then((done) => host.say(done ? '已改环绕方式' : '改环绕方式被拒'));
+          },
+        })),
       },
     ];
   };
@@ -430,6 +452,46 @@ export function createMenus(host: MenusHost): Menus {
           { kind: 'action', label: '图片…', run: () => host.pickImage() },
         ],
       },
+      { kind: 'separator' },
+      // 水印：一条衬在正文下方的半透明文字。走属性面板那一套（文字 / 字号 / 开关）。
+      {
+        kind: 'action',
+        label: '水印…',
+        run: () => {
+          void editor.watermark().then((w) => {
+            openDialog(
+              createPropsPanel({
+                title: '水印',
+                fields: [
+                  { kind: 'text', key: 'text', label: '文字', value: w.text },
+                  {
+                    kind: 'number',
+                    key: 'sizePt',
+                    label: '字号',
+                    value: Math.round(w.sizePt),
+                    unit: '磅',
+                    min: 8,
+                    step: 4,
+                  },
+                  { kind: 'toggle', key: 'on', label: '显示水印', value: w.enabled },
+                ],
+                apply: (v) => {
+                  const text = String(v['text'] ?? '');
+                  void editor
+                    .setWatermark({
+                      text,
+                      sizePt: Number(v['sizePt']) || 48,
+                      // 没有文字的水印是个看不见的开关：一并关掉。
+                      enabled: !!v['on'] && text.length > 0,
+                    })
+                    .then((done) => host.say(done ? '水印已更新' : '水印没变'));
+                },
+                dismiss: closePanels,
+              }),
+            );
+          });
+        },
+      },
     ];
   };
 
@@ -447,7 +509,13 @@ export function createMenus(host: MenusHost): Menus {
         // 现在的尺寸要现读：面板照着它预填，显示的才是改动之前的那一份。
         const boxes = await editor.images();
         const box = boxes[target.image];
-        entries.push(...imageEntries(target.image, { w: box?.w ?? 0, h: box?.h ?? 0 }, at));
+        entries.push(
+          ...imageEntries(
+            target.image,
+            { w: box?.w ?? 0, h: box?.h ?? 0, layout: box?.layout ?? 'inline' },
+            at,
+          ),
+        );
       }
       // 分组之间的那条线按"上面有没有东西"补：空白处右键时上面什么都没有，
       //   无条件补一条就会在菜单顶部画出一条空线。

@@ -23,6 +23,7 @@ import type {
   ImageBox,
   ImageHit,
   ImageInsertOptions,
+  ImageLayout,
   ImageRegisterOptions,
   PageSetup,
   ParaFormatPatch,
@@ -33,8 +34,11 @@ import type {
   TableForm,
   TableOp,
   TableOptions,
+  TableGrid,
   TableRowOptions,
   TableState,
+  WatermarkOptions,
+  WatermarkState,
 } from './types';
 import { PAPER_PT, paperSizePt } from './types';
 import {
@@ -868,6 +872,58 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       return (await Promise.resolve(link.read('tableState'))) as TableState;
     },
 
+    async tableGrid(xPt, yPt) {
+      alive();
+      // 几何是读：拖拽判定每一下都问一次，不能因此重画。
+      return (await Promise.resolve(
+        link.read('tableGrid', { x: Number(xPt), y: Number(yPt) }),
+      )) as TableGrid;
+    },
+
+    async setTableColWidths(grid, widths) {
+      alive();
+      const cols = Array.isArray(widths) ? widths.map((w) => Number(w)) : [];
+      // 列数对不上就不发：引擎照给定列宽排，多一条少一条都会把表排歪，
+      //   而"少一条"在画面上只表现为最后一列被拉满，看不出是宿主算错了。
+      if (cols.length !== Number(grid.cols.length) - 1) {
+        throw new Error('列宽数量与栅格列数不符：' + cols.length + ' / ' + (grid.cols.length - 1));
+      }
+      return edit('setTableColWidths', { handle: Number(grid.table), widths: cols });
+    },
+
+    async setWatermark(opts) {
+      alive();
+      const o: WatermarkOptions = opts ?? {};
+      // 只给要改的项：没给的字段沿用现状，命令表那一侧收的是完整记录。
+      const cur = await editor.watermark();
+      return edit('setWatermark', {
+        enabled: o.enabled === undefined ? cur.enabled : !!o.enabled,
+        text: o.text === undefined ? cur.text : String(o.text),
+        sizePt: o.sizePt === undefined ? cur.sizePt : Number(o.sizePt),
+        color: Array.isArray(o.color) ? o.color : cur.color,
+        angle: o.angle === undefined ? cur.angle : Number(o.angle),
+      });
+    },
+
+    async watermark() {
+      alive();
+      return (await Promise.resolve(link.read('watermark'))) as WatermarkState;
+    },
+
+    async setImageLayout(index, layout) {
+      alive();
+      const codes: Record<string, number> = {
+        inline: 0,
+        square: 1,
+        topAndBottom: 2,
+        behind: 3,
+        inFront: 4,
+      };
+      const code = codes[layout];
+      if (code === undefined) throw new Error('不认识的图片版式：' + String(layout));
+      return edit('setImageLayout', { i: index, layout: code });
+    },
+
     describeTable(state, opts) {
       return tableFormOf(state, opts);
     },
@@ -995,7 +1051,14 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       // 读要经一次往返（Worker 传输），所以是异步的 —— 与 fonts() 不同：那一份是随状态
       //   推过来的副本，这里是现场查询。
       const raw = (await Promise.resolve(link.read('imageList'))) as { images?: unknown[] } | null;
-      return (raw && Array.isArray(raw.images) ? raw.images : []) as ImageBox[];
+      const list = raw && Array.isArray(raw.images) ? (raw.images as any[]) : [];
+      // 引擎给的版式是 0..4 的档位（三个字段的投影），对外只认名字：
+      //   折在这里而不是让调用方去比数字，两种传输、两个宿主就只有一个口径。
+      const names: ImageLayout[] = ['inline', 'square', 'topAndBottom', 'behind', 'inFront'];
+      return list.map((b) => {
+        const code = Number(b.layout);
+        return { ...b, layout: names[code] ?? names[0] } as ImageBox;
+      });
     },
 
     async imageHit(x, y) {

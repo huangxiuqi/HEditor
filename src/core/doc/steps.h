@@ -26,6 +26,7 @@
 #include "core/doc/length.h"
 #include "core/doc/para_format.h"
 #include "core/doc/range.h"
+#include "core/doc/section_spec.h"
 #include "core/doc/subtree.h"
 #include "core/doc/table_spec.h"
 
@@ -586,10 +587,60 @@ struct SetImageSize {
     Length beforeHeight;
 };
 
+/**
+ * 改一节页面设置里引擎能理解的那部分：整份 SectionSpec 一起换。
+ *
+ * 与表格那三类记录同形，整份而不是逐项：节的字段多且互相牵扯（纸张名与自定义宽高、
+ * 页码格式与重启标志），逐项拼装要在命令层再实现一遍"哪些项没给"的语义。
+ *
+ * 位置映射是恒等：节属性只改页面几何，不改流位置。
+ */
+struct SetSectionSpec {
+    /**
+     * 改哪一节。
+     */
+    NodeId id = kInvalidNodeId;
+
+    /**
+     * 新的记录。
+     */
+    SectionSpec spec;
+
+    /**
+     * 改之前的记录（逆操作自足）。
+     */
+    SectionSpec before;
+};
+
+/**
+ * 改一张图的整份记录：尺寸、定位方式与环绕方式一起换。
+ *
+ * 与 SetImageSize 分开：那个只改尺寸（高频、拖动时每帧一次），这个改的是"图怎么待在版面上"
+ * （低频、一次成形）。两类改动的影响面不同 —— 环绕方式改的是断行，尺寸改的是行盒。
+ *
+ * 位置映射是恒等：图片是原子，换它的记录不改任何流位置。
+ */
+struct SetImageSpec {
+    /**
+     * 改哪一张图。
+     */
+    NodeId id = kInvalidNodeId;
+
+    /**
+     * 新的记录。
+     */
+    ImageSpec spec;
+
+    /**
+     * 改之前的记录（逆操作自足）。
+     */
+    ImageSpec before;
+};
+
 using Step = std::variant<InsertText, InsertFragment, DeleteRange, InsertParaMark, RemoveParaMark,
                           SetParaMarkFormat, SetRun, InsertNode, RemoveNode, UnwrapNode, WrapNode,
                           SetControlProp, SetControlValue, SetControlSpec, SetCellSpec, SetRowSpec,
-                          SetTableSpec, SetImageSize>;
+                          SetTableSpec, SetImageSize, SetSectionSpec, SetImageSpec>;
 
 /**
  * 步骤的执行结果。失败时给出原因 —— 位置越界、类型不符都要显式说出来，不静默不做。

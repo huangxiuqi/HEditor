@@ -709,6 +709,38 @@ bool cellSelectAt(float x_pt, float y_pt) {
     g_engine.repaint();
     return true;
 }
+
+/**
+ * 双击选词。点用文档坐标（磅），与 hitTest 同一个坐标系。
+ * 落点不在正文上、或那一段是空的时返回 false，宿主据此退回落光标。
+ */
+bool selectWordAt(float x_pt, float y_pt) { return g_engine.selectWordAtPtAndRender(x_pt, y_pt); }
+
+/**
+ * 三击选段（表格内退化成选整格）。返回 false 表示没得选，宿主退回落光标。
+ */
+bool selectParaAt(float x_pt, float y_pt) { return g_engine.selectParaAtPtAndRender(x_pt, y_pt); }
+
+/**
+ * 把当前选区搬到点上（一次事务，撤销一步）。
+ */
+bool moveSelectionTo(float x_pt, float y_pt) {
+    return g_engine.moveSelectionToPtAndRender(x_pt, y_pt);
+}
+
+/**
+ * 把一张图片搬到点上（一次事务，撤销一步）。
+ */
+bool moveImageTo(int index, float x_pt, float y_pt) {
+    return g_engine.moveImageToPtAndRender(index, x_pt, y_pt);
+}
+
+/**
+ * 改图片版式：0 行内、1 四周型、2 上下型、3 衬于文字下方、4 浮于文字上方。
+ */
+bool setImageLayout(int index, int layout) {
+    return g_engine.setImageLayoutAndRender(index, layout);
+}
 /**
  * 段内位置 -> 全局流位置（码点）。
  *
@@ -835,7 +867,15 @@ std::string hitTest(float x_pt, float y_pt, int clamp) {
         if (img.index < 0) return pk::checked(pk::hit_test::kSpec, "null");
         std::ostringstream bad;
         bad << "{\"para\":-1,\"offset\":0,\"field\":-1,\"side\":0,\"line\":0,\"img\":" << img.index
-            << ",\"imgHandle\":" << img.handle << "}";
+            << ",\"imgHandle\":" << img.handle;
+        // 没有文字落点，但"按下去能不能拖"照样要回答（搬图那一半）。
+        TextPos none{};
+        none.para = -1;
+        const int dk = g_engine.dragKindAt(none, 0, img);
+        if (dk > 0) {
+            bad << ",\"drag\":" << dk << ",\"dragImage\":" << img.index;
+        }
+        bad << "}";
         return pk::checked(pk::hit_test::kSpec, bad.str());
     }
     std::ostringstream o;
@@ -862,6 +902,21 @@ std::string hitTest(float x_pt, float y_pt, int clamp) {
     }
     if (img.index >= 0) {
         o << ",\"img\":" << img.index << ",\"imgHandle\":" << img.handle;
+    }
+    // 按下这一下还要回答两件事，而且必须与上面那份落点出自同一次命中：
+    //   能不能开始拖拽移动（drag / dragImage），以及是不是压在表格内部的格线上
+    //   （gridTable / gridCol / gridRow）。分成三条命令问，宿主就要三次往返才轮得到
+    //   落光标 —— 拖选与图片把手都来不及起手（按下到第一次移动只隔几毫秒）。
+    const int drag_kind = g_engine.dragKindAt(p, side, img);
+    if (drag_kind > 0) {
+        o << ",\"drag\":" << drag_kind << ",\"dragImage\":" << img.index;
+    }
+    uint64_t grid_table = 0;
+    int grid_col = 0;
+    int grid_row = -1;
+    if (g_engine.tableGridLineAt(x_pt, y_pt, &grid_table, &grid_col, &grid_row)) {
+        o << ",\"gridTable\":" << grid_table << ",\"gridCol\":" << grid_col
+          << ",\"gridRow\":" << grid_row;
     }
     o << "}";
     return pk::checked(pk::hit_test::kSpec, o.str());
@@ -1183,6 +1238,31 @@ bool setTableSpecAt(val opts) {
 std::string tableStateJson() { return g_engine.tableStateJson(); }
 
 /**
+ * 表格栅格（拖拽列边界与行边界用）。点用文档坐标（磅）。
+ */
+std::string tableGrid(float x, float y) { return g_engine.tableGridJson(x, y); }
+
+/**
+ * 拖拽结束：整份列宽落地。widths 是磅值数组（按网格列序），<= 0 的那一列保持自动。
+ */
+bool setTableColWidths(int handle, val widths) {
+    std::vector<float> ws;
+    if (!widths.isUndefined() && !widths.isNull()) {
+        const int n = widths["length"].as<int>();
+        ws.reserve(static_cast<size_t>(n));
+        for (int i = 0; i < n; ++i) ws.push_back(widths[i].as<float>());
+    }
+    return g_engine.setTableColWidthsAndRender(static_cast<uint64_t>(handle), ws);
+}
+
+/**
+ * 拖拽结束：改一行的高度（磅）。<= 0 表示回到按内容。
+ */
+bool setTableRowHeight(int handle, int row, float h_pt) {
+    return g_engine.setTableRowHeightAndRender(static_cast<uint64_t>(handle), row, h_pt);
+}
+
+/**
  * 一个点上压着什么（右键菜单的判定）：文档坐标（磅）进，JSON 出。
  */
 std::string contextTargetJson(float x, float y) { return g_engine.contextTargetJson(x, y); }
@@ -1291,7 +1371,8 @@ std::string imageList() {
         if (i) o << ",";
         o << "{\"index\":" << all[i].index << ",\"node\":" << all[i].id << ",\"res\":\""
           << all[i].resource_id << "\",\"w\":" << all[i].w_pt << ",\"h\":" << all[i].h_pt
-          << ",\"ready\":" << (all[i].resource_ready ? "true" : "false") << ",\"rects\":[";
+          << ",\"ready\":" << (all[i].resource_ready ? "true" : "false")
+          << ",\"layout\":" << all[i].layout << ",\"rects\":[";
         for (size_t k = 0; k < all[i].rects.size(); ++k) {
             if (k) o << ",";
             o << "{\"page\":" << all[i].rects[k].page << ",\"x\":" << all[i].rects[k].r_pt.x
@@ -1427,6 +1508,37 @@ bool indentText() { return g_engine.indentAndRender(); }
 bool outdentText() { return g_engine.outdentAndRender(); }
 int controlAtPoint(float x_pt, float y_pt) { return g_engine.controlAtPt(x_pt, y_pt); }
 std::string describeControls() { return g_engine.describeControls(); }
+
+/**
+ * 水印记录（第一节）。宿主用它回填页面设置面板。
+ */
+std::string watermarkJson() {
+    const WatermarkSpec w = g_engine.watermark();
+    std::ostringstream o;
+    o.setf(std::ios::fixed);
+    o.precision(2);
+    o << "{\"enabled\":" << (w.enabled ? "true" : "false") << ",\"text\":\"" << jsonEscape(w.text)
+      << "\",\"sizePt\":" << w.size_pt << ",\"color\":[" << static_cast<int>(w.color.r) << ","
+      << static_cast<int>(w.color.g) << "," << static_cast<int>(w.color.b) << ","
+      << static_cast<int>(w.color.a) << "],\"angle\":" << w.angle_deg << "}";
+    return pk::checked(pk::watermark::kSpec, o.str());
+}
+
+/**
+ * 改水印。参数逐个给、不走 JSON：这几个值都是标量，拼一份 JSON 只多一层解析。
+ * 颜色四个通道原样收（0~255），alpha 就是"半透明"的唯一表达。
+ */
+bool setWatermark(bool enabled, const std::string& text, float size_pt, int r, int g, int b, int a,
+                  float angle_deg) {
+    WatermarkSpec w;
+    w.enabled = enabled;
+    w.text = text;
+    w.size_pt = size_pt > 0.0f ? size_pt : 48.0f;
+    const auto clamp255 = [](int v) { return static_cast<uint8_t>(std::max(0, std::min(255, v))); };
+    w.color = Color{clamp255(r), clamp255(g), clamp255(b), clamp255(a)};
+    w.angle_deg = angle_deg;
+    return g_engine.setWatermarkAndRender(w);
+}
 
 /**
  * 累计被拒次数。必须有这个直读接口（而不是只走 editStatsJson）：
@@ -2082,6 +2194,13 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("selectAll", &selectAll);
     emscripten::function("selectCellAtPara", &selectCellAtPara);
     emscripten::function("cellSelectAt", &cellSelectAt);
+    emscripten::function("selectWordAt", &selectWordAt);
+    emscripten::function("selectParaAt", &selectParaAt);
+    emscripten::function("moveSelectionTo", &moveSelectionTo);
+    emscripten::function("moveImageTo", &moveImageTo);
+    emscripten::function("setImageLayout", &setImageLayout);
+    emscripten::function("watermarkJson", &watermarkJson);
+    emscripten::function("setWatermark", &setWatermark);
     emscripten::function("setSelection", &setSelection);
     emscripten::function("flowIndexAt", &flowIndexAt);
     emscripten::function("flowTextPosJson", &flowTextPosJson);
@@ -2126,6 +2245,9 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("setRowSpecAt", &setRowSpecAt);
     emscripten::function("setTableSpecAt", &setTableSpecAt);
     emscripten::function("tableStateJson", &tableStateJson);
+    emscripten::function("tableGrid", &tableGrid);
+    emscripten::function("setTableColWidths", &setTableColWidths);
+    emscripten::function("setTableRowHeight", &setTableRowHeight);
     emscripten::function("contextTargetJson", &contextTargetJson);
     emscripten::function("insertControlAt", &insertControlAt);
     emscripten::function("setControlSpecAt", &setControlSpecAt);

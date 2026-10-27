@@ -338,6 +338,28 @@ EditCheck canEditStep(const Doc& doc, EditMode mode, const Step& step) {
         }
         return EditCheck{true, ""};
     }
+    // 图片的定位与环绕是版式：填表的人与只读态都不该改它（改尺寸另有入口，规则同此）。
+    if (const auto* s = std::get_if<SetImageSpec>(&step)) {
+        const Node* n = findNode(doc, s->id);
+        if (n == nullptr || n->kind != NodeKind::Image) {
+            return EditCheck{false, "改图片记录：目标不是图片"};
+        }
+        if (mode != EditMode::Document) {
+            return EditCheck{false, "改图片记录要在文档模式里做（版式是设计动作）"};
+        }
+        return EditCheck{true, ""};
+    }
+    // 页面设置（含水印）是版式：填表的人与只读态都不该改它。
+    if (const auto* s = std::get_if<SetSectionSpec>(&step)) {
+        const Node* n = findNode(doc, s->id);
+        if (n == nullptr || n->kind != NodeKind::Section) {
+            return EditCheck{false, "改节记录：目标不是节"};
+        }
+        if (mode != EditMode::Document) {
+            return EditCheck{false, "改节记录要在文档模式里做（页面设置是设计动作）"};
+        }
+        return EditCheck{true, ""};
+    }
     return EditCheck{false, "未知步骤"};
 }
 

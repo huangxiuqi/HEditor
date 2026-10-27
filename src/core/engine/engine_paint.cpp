@@ -341,6 +341,10 @@ void EditorEngine::rasterIntoBitmap(Bitmap& target, int page_index, const float*
     }
     raster_fill_ms_ += msSince(t_fill0);
 
+    // 水印：衬在正文下方的那一层。画在格线与字形之前 —— 它是纸上的底纹，
+    //   正文要压在它上面（Word 的"衬于文字下方"同一条）。连页下也画：条带就是一页。
+    rasterWatermark(target, page_index, band_lo_pt, band_hi_pt);
+
     // 连页接缝：行按"行顶所在的条带"归属，一行最多跨一条边界，所以溢出只朝下流。
     //   上一条带的末行越过带底的那一截，要在本带的顶部再画一遍 —— 两条带各画自己
     //   看得见的那半，拼起来才是完整的一行。分页模式下不会发生（断页把行整个挪走）。
@@ -553,14 +557,45 @@ void EditorEngine::rasterIntoBitmap(Bitmap& target, int page_index, const float*
         }
     };
 
+    // 浮动图。衬于文字下方的那一档画在字形之前，其余（四周型 / 上下型 / 浮于文字上方）
+    //   画在字形与原子之后 —— 这个次序就是"环绕方式"在呈现上的全部含义。
+    auto emitFloats = [&](int page, float dy, bool behind) {
+        for (const PlacedFloat& pf : layout_.placed_floats) {
+            if (pf.page != page) continue;
+            if ((pf.wrap == ImageWrap::Behind) != behind) continue;
+            const float lo_pt = pf.y + dy / zoom;
+            const float hi_pt = lo_pt + pf.h;
+            if (band && (hi_pt < *band_lo_pt - 1.0f || lo_pt > *band_hi_pt + 1.0f)) continue;
+            const Rect box{pf.x * zoom, lo_pt * zoom, pf.w * zoom, pf.h * zoom};
+            if (!(box.w > 0.0f) || !(box.h > 0.0f)) continue;
+            const rev::Node* n = rev::findNode(document(), static_cast<NodeId>(pf.handle));
+            const ImageSpec* im = (n != nullptr) ? std::get_if<ImageSpec>(&n->payload) : nullptr;
+            const ImageResource* res = (im != nullptr && !im->resource_id.empty())
+                                           ? images_.find(im->resource_id)
+                                           : nullptr;
+            if (res != nullptr) {
+                target.drawImage(imageResourceKey(res->id), res->version, res->rgba.data(),
+                                 res->width, res->height, box);
+            } else {
+                // 资源没注册（文件刚打开）：画一个浅框占位，与行内图同一口径。
+                target.fillRect(box, cfg_.atom_fill);
+                target.strokeRect(box, cfg_.atom_border, 1.0f);
+            }
+        }
+    };
+
     const auto t_glyph0 = Clock::now();
+    emitFloats(page_index, 0.0f, true);
     emitTables(page_index, 0.0f, false);
     emitGlyphs(page_index, 0.0f, false);
     emitAtoms(page_index, 0.0f, false);
+    emitFloats(page_index, 0.0f, false);
     if (spill) {
+        emitFloats(page_index - 1, spill_dy, true);
         emitTables(page_index - 1, spill_dy, true);
         emitGlyphs(page_index - 1, spill_dy, true);
         emitAtoms(page_index - 1, spill_dy, true);
+        emitFloats(page_index - 1, spill_dy, false);
     }
     raster_glyph_ms_ += msSince(t_glyph0);
 
@@ -774,6 +809,16 @@ void EditorEngine::presentInternal(int first_page, int count) {
         return std::chrono::duration<double, std::milli>(b - a).count();
     };
     ensureRenderSetup();
+    // 光栅签名在这里按当前状态重算一次：它是"这一页的像素还算不算数"的唯一判据
+    //   （pageBitmapFresh 只比它）。写进某几个 setter 里迟早漏 —— 水印是节属性、
+    //   图片代际挂在资源表上、编辑标记看模式，漏一项的症状就是"改了之后屏幕不变"。
+    {
+        const uint64_t sig = rasterSignatureNow();
+        if (sig != raster_sig_) {
+            raster_sig_ = sig;
+            page_dirty_rects_.clear();  // 旧矩形描述的是旧像素，作废
+        }
+    }
     // 光栅那一组由 rasterIntoBitmap 累加，末尾一次性上报。
     raster_glyphs_ = 0;
     raster_glyph_bounds_ms_ = 0.0;
@@ -1427,6 +1472,75 @@ void EditorEngine::paintChoiceMarker(Bitmap& target, const PlacedGlyph& pg, bool
  * last_cp），空格的中点坐在该簇的 inline_pt 与下一簇的 inline_pt 之间。字体与基线取
  * 行盒的 bracket_font / bracket_axis_pt —— 那是块主字体，标记的粗细与风格才跟正文一致。
  */
+void EditorEngine::rasterWatermark(Bitmap& target, int page_index, const float* band_lo_pt,
+                                   const float* band_hi_pt) {
+    (void)page_index;
+    const WatermarkSpec w = watermark();
+    if (!w.enabled || w.text.empty()) return;
+    const std::vector<uint32_t> cps = utf8ToCodepoints(w.text);
+    if (cps.empty()) return;
+
+    // 挑一张画得出第一个字的脸：引擎不知道"哪一号是中文"，只能试。
+    //   水印是一条辅助文字，选错字体的代价是缺字，不会影响正文。
+    FontInstance* face = nullptr;
+    for (int i = 0; i < fonts_.faceCount(); ++i) {
+        FontInstance* f = fonts_.instance(i, w.size_pt, kWeightRegular);
+        if (f == nullptr) continue;
+        hb_codepoint_t g = 0;
+        if (hb_font_get_nominal_glyph(f->hb(), cps.front(), &g) && g != 0) {
+            face = f;
+            break;
+        }
+    }
+    if (face == nullptr) return;
+
+    hb_font_t* hb = face->hb();
+    std::vector<uint32_t> gids;
+    gids.reserve(cps.size());
+    std::vector<float> advs;
+    advs.reserve(cps.size());
+    float total = 0.0f;
+    for (const uint32_t cp : cps) {
+        hb_codepoint_t g = 0;
+        if (!hb_font_get_nominal_glyph(hb, cp, &g)) g = 0;
+        const float a = static_cast<float>(hb_font_get_glyph_h_advance(hb, g)) / kFontScalePerPt;
+        gids.push_back(static_cast<uint32_t>(g));
+        advs.push_back(a);
+        total += a;
+    }
+    if (!(total > 0.0f)) return;
+
+    const float zoom = cfg_.zoom;
+    const float units_to_px = zoom / kFontScalePerPt;
+    // 落在整页的中心，不是正文区的中心：Word 的水印以纸面为参照，页边距改了水印不跟着挪。
+    const float cx = cfg_.page.width_pt * 0.5f;
+    const float cy = cfg_.page.height_pt * 0.5f;
+    const float rad = w.angle_deg * 3.14159265f / 180.0f;
+    const float dx = std::cos(rad);
+    const float dy = std::sin(rad);
+    // 基线沿法线让开一点：字形坐在基线上，不让开的话整行会偏到中心之上。
+    const float nx = -dy;
+    const float ny = dx;
+    const float off = w.size_pt * 0.36f;
+
+    float s = -total * 0.5f;
+    for (size_t i = 0; i < gids.size(); ++i) {
+        const float px = cx + dx * s + nx * off;
+        const float py = cy + dy * s + ny * off;
+        s += advs[i];
+        if (gids[i] == 0) continue;
+        // 分带重画：只画这一带里的字（上下各留一个字身，免得半个字被裁掉）。
+        if (band_lo_pt != nullptr && band_hi_pt != nullptr &&
+            (py < *band_lo_pt - w.size_pt || py > *band_hi_pt + w.size_pt)) {
+            continue;
+        }
+        const uint32_t one = gids[i];
+        const float x = px * zoom;
+        const float y = py * zoom;
+        target.drawGlyphs(hb, &one, &x, &y, 1, units_to_px, w.color, w.angle_deg);
+    }
+}
+
 void EditorEngine::rasterEditingMarks(Bitmap& target, int page_index, const float* band_lo_pt,
                                       const float* band_hi_pt, float dy_px, bool spill_only) {
     // 档位与只读态的合成判断（只读是呈现态，标记会被印出来，与表单括号同一条）。

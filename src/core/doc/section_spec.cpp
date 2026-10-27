@@ -205,7 +205,7 @@ bool SectionSpec::sameAs(const SectionSpec& o) const {
            writing_mode.orientation == o.writing_mode.orientation && numbering == o.numbering &&
            headers[0] == o.headers[0] && headers[1] == o.headers[1] && headers[2] == o.headers[2] &&
            footers[0] == o.footers[0] && footers[1] == o.footers[1] && footers[2] == o.footers[2] &&
-           extra == o.extra;
+           watermark == o.watermark && extra == o.extra;
 }
 
 }  // namespace heditor

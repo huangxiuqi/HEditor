@@ -426,6 +426,13 @@ test.describe('编辑面：控件边界总覆盖', () => {
         const pt = quantizedPt(x);
         const h = await probe.read(`return await D.hit(${pt.toFixed(3)}, ${yq.toFixed(3)});`);
         if (!h || h.offset > 17) continue;
+        // 先断一次连击：横扫是 x 逐 1 磅前进的，相邻两下只差一个像素、又落在 520 ms
+        //   之内 —— 那在后端看来就是双击（Word 同一条：连击要"同一处"才算），于是某几
+        //   个点会被当成"选这个词"，落点跑到词尾，看起来像命中与落点对不上。
+        //   真人的两次单击不会落在同一个像素上，所以这里显式地在正文左边距按一下，
+        //   把连击计数打断，再按待测的那一点 —— 判的仍然是"这一下命中的是什么、
+        //   落点是不是它"。
+        await clickPt(g, lo - 25, y, z);
         await clickPt(g, x, y, z);
         const st = await caretOf();
         ++probed;

@@ -11,12 +11,16 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 #include "core/engine/engine.h"
+
+#include "core/engine/payload_schema.h"
 #include "core/layout/layout.h"
+#include "core/rev/fragment.h"
 #include "core/rev/rev.h"
 #include "core/utils/hash.h"
 #include "core/utils/units.h"
@@ -242,6 +246,14 @@ std::vector<EditorEngine::ImageBox> EditorEngine::images() const {
         }
     }
 
+    // 浮动图在行盒里没有几何（它不占版面），矩形从排版的 placed_floats 取。
+    for (const PlacedFloat& pf : layout_.placed_floats) {
+        PageRect pr;
+        pr.page = pf.page;
+        pr.r_pt = Rect{pf.x, pf.y, pf.w, pf.h};
+        rects[static_cast<int>(pf.handle)].push_back(pr);
+    }
+
     out.reserve(ids.size());
     for (size_t i = 0; i < ids.size(); ++i) {
         const rev::Node* n = rev::findNode(document(), ids[i]);
@@ -261,6 +273,14 @@ std::vector<EditorEngine::ImageBox> EditorEngine::images() const {
             }
         }
         box.resource_ready = images_.find(box.resource_id) != nullptr;
+        // 档位是三个字段的投影（行内 / 四周 / 上下 / 下方 / 上方），宿主只看这一个数。
+        box.layout = (im->anchor == ImageAnchor::Inline)
+                         ? 0
+                         : (im->wrap == ImageWrap::Square
+                                ? 1
+                                : (im->wrap == ImageWrap::Behind
+                                       ? 3
+                                       : (im->wrap == ImageWrap::InFront ? 4 : 2)));
         out.push_back(std::move(box));
     }
     return out;
@@ -295,6 +315,28 @@ EditorEngine::ImageHit EditorEngine::imageAtPt(float x_pt_doc, float y_pt_doc) c
     };
 
     int body_hit = -1;
+
+    // 浮动图优先：它可能盖在文字上，而行盒里根本没有它的几何。
+    for (const PlacedFloat& pf : layout_.placed_floats) {
+        if (pf.page != page) continue;
+        const Rect r{pf.x, pf.y, pf.w, pf.h};
+        float centers[16];
+        imageHandleCenters(r, centers);
+        const float half =
+            std::min(kImageHandlePt * 0.5f + kImageHandleSlackPt, std::min(r.w, r.h) * 0.3f);
+        for (int h = 0; h < 8; ++h) {
+            const float dx = std::fabs(x_pt_doc - centers[h * 2]);
+            const float dy = std::fabs(local_y - centers[h * 2 + 1]);
+            if (dx <= half && dy <= half) {
+                hit.index = indexOf(static_cast<int>(pf.handle));
+                hit.handle = h;
+                return hit;
+            }
+        }
+        if (x_pt_doc >= r.x && x_pt_doc <= r.x + r.w && local_y >= r.y && local_y <= r.y + r.h) {
+            if (body_hit < 0) body_hit = indexOf(static_cast<int>(pf.handle));
+        }
+    }
 
     // 把手先于图身：把手一半在框外，先判图身的话，贴边那几磅永远拖不动。
     for (const int li : layout_.linesOnPage(page)) {
@@ -338,6 +380,32 @@ void EditorEngine::collectImageUi(int page, std::vector<Rect>* out) const {
 
     const float half = kImageHandlePt * 0.5f * zoom;
     const float bar = std::max(1.0f, kImageFramePt * zoom);
+
+    // 浮动的图框不在行盒里，几何从 placed_floats 取；预览（拖动改尺寸）同样要跟手。
+    for (const PlacedFloat& pf : layout_.placed_floats) {
+        if (pf.page != page) continue;
+        if (static_cast<NodeId>(pf.handle) != image_sel_) continue;
+        Rect r{pf.x, pf.y, pf.w, pf.h};
+        if (image_preview_.id == image_sel_) {
+            const int hd = image_preview_.handle;
+            const bool grow_left = (hd == 0 || hd == 6 || hd == 7);
+            const bool grow_up = (hd == 0 || hd == 1 || hd == 2);
+            const float right = r.x + r.w;
+            const float bottom = r.y + r.h;
+            if (grow_left) r.x = right - image_preview_.w_pt;
+            if (grow_up) r.y = bottom - image_preview_.h_pt;
+            r.w = image_preview_.w_pt;
+            r.h = image_preview_.h_pt;
+        }
+        const Rect px{r.x * zoom, r.y * zoom, r.w * zoom, r.h * zoom};
+        appendFrameBars(px, bar, out);
+        float centers[16];
+        imageHandleCenters(r, centers);
+        for (int h = 0; h < 8; ++h) {
+            out->push_back(Rect{centers[h * 2] * zoom - half, centers[h * 2 + 1] * zoom - half,
+                                half * 2.0f, half * 2.0f});
+        }
+    }
     for (const int li : layout_.linesOnPage(page)) {
         const LineBox& lb = layout_.lines[static_cast<size_t>(li)];
         for (size_t ci = 0; ci < lb.clusters.size(); ++ci) {
@@ -471,6 +539,157 @@ bool EditorEngine::previewImageResizeAndRender(int index, float w_pt, float h_pt
     if (!previewImageResize(index, w_pt, h_pt, handle)) return false;
     // 只呈现：预览框在瞬态层上，页位图按缓存命中，不进重排。
     repaint();
+    return true;
+}
+
+/**
+ * 拖拽移动的起手判定：图片（已选中、点在图身上）优先，其次是"点落在当前文字选区里"。
+ */
+int EditorEngine::dragKindAt(const TextPos& p, int side, const ImageHit& ih) const {
+    if (!loaded_) return 0;
+    // 图片那半：按在已选中的图的图身上（不是把手上）才是"搬这张图"。
+    //   把手要缩放，按住它再拖是改变尺寸，不是搬家。
+    if (ih.index >= 0 && ih.handle < 0 && image_sel_ != kInvalidNodeId) {
+        for (const ImageBox& b : images()) {
+            if (b.index != ih.index) continue;
+            if (b.id == image_sel_) return 2;
+            break;
+        }
+    }
+    // 文字那半：按在选区内部才是"搬这段字"。
+    //   起点那一格不算内部 —— 从选区开头起手往外拖，用户表达的是"从这里重新选"，
+    //   把这一下判成搬家，就再也拖不出反向选区（判据里"拖出去再拖回来收成空"
+    //   正是这一手）。
+    //   para 为 -1 是"这一点没有文字落点"，那就只剩搬图那一半。
+    //   整格选区不搬：搬一串格子没有语义（表结构不是"一段文字"），照常拖选。
+    if (p.para >= 0 && caret_.hasSelection() && caret_.cellBlocks().empty()) {
+        const Range sel = caret_.selection();
+        // 选区只要压到表格里的块就不搬。跨格选的文字（撤销整格删除之后恢复的正是
+        //   这一形态）落不到"搬家"上：搬进另一格要把表结构一起搬，搬进正文要把
+        //   表格拆开 —— 两条都没有语义，命令层会拒绝，这里就不该起手。
+        for (size_t i = 0; i < blocks_full_.size() && i < block_flow_.size(); ++i) {
+            if (blocks_full_[i].cell_path.empty()) continue;
+            const FlowPos lo = block_flow_[i];
+            const FlowPos hi = lo + block_flow_span_[i];
+            if (hi > sel.begin() && lo < sel.end()) return 0;
+        }
+        const FlowPos f = flowPosAtSide(p.para, p.offset, side);
+        if (f > sel.begin() && f <= sel.end()) return 1;
+    }
+    return 0;
+}
+
+/**
+ * 把当前文字选区搬到点上。目标位置按命中折出来的流位置算 —— 与落光标同一把尺子。
+ */
+bool EditorEngine::moveSelectionToPt(float x_pt_doc, float y_pt_doc) {
+    if (!session_.has_value()) return false;
+    if (!caret_.hasSelection()) return false;
+    TextPos p{};
+    int side = 0;
+    // clamp：拖到页外也要能落，否则"拖着往外一推就取消"。
+    if (!hitTestPt(x_pt_doc, y_pt_doc, &p, nullptr, &side, nullptr, nullptr, true)) return false;
+    const FlowPos dest = flowPosAtSide(p.para, p.offset, side);
+    const Range sel = caret_.selection();
+    const rev::ClipCapture cap =
+        rev::captureRange(session_->doc(), flowVisibility(), sel.begin(), sel.end());
+    if (!cap.ok || cap.nodes.empty()) return false;
+    return edit_.moveRange(cap.lo, cap.hi, dest, cap.nodes);
+}
+
+bool EditorEngine::moveSelectionToPtAndRender(float x_pt_doc, float y_pt_doc) {
+    if (!moveSelectionToPt(x_pt_doc, y_pt_doc)) return false;
+    relayout();
+    repaintAfterEdit();
+    return true;
+}
+
+/**
+ * 把一张图片搬到点上。搬完之后节点换了 id，对象选区收起来 —— 光标落在图片之后。
+ */
+bool EditorEngine::moveImageToPt(int index, float x_pt_doc, float y_pt_doc) {
+    if (!session_.has_value()) return false;
+    NodeId id = kInvalidNodeId;
+    ImageSpec spec;
+    bool found = false;
+    for (const ImageBox& b : images()) {
+        if (b.index != index) continue;
+        const rev::Node* n = rev::findNode(document(), b.id);
+        if (n == nullptr) return false;
+        const auto* s = std::get_if<ImageSpec>(&n->payload);
+        if (s == nullptr) return false;
+        id = b.id;
+        spec = *s;
+        found = true;
+        break;
+    }
+    if (!found) return false;
+    TextPos p{};
+    int side = 0;
+    if (!hitTestPt(x_pt_doc, y_pt_doc, &p, nullptr, &side, nullptr, nullptr, true)) return false;
+    const FlowPos dest = flowPosAtSide(p.para, p.offset, side);
+    if (!edit_.moveImage(id, spec, dest)) return false;
+    // 块内容哈希看不见"图片换了节点号"：删了又插之后文本一模一样，损伤区间算出来是空的，
+    //   增量排版于是原地不动，行盒里的图片簇还指着已经被删掉的那个节点 —— 画面上图还在
+    //   老位置、选中框却在新位置。搬图是低频动作，整篇重排一次最省心。
+    markAllLayoutDirty();
+    clearImageSelection();
+    return true;
+}
+
+bool EditorEngine::moveImageToPtAndRender(int index, float x_pt_doc, float y_pt_doc) {
+    if (!moveImageToPt(index, x_pt_doc, y_pt_doc)) return false;
+    relayout();
+    repaintAfterEdit();
+    return true;
+}
+
+/**
+ * 改版式：把菜单上的四档翻译成"锚定方式 + 环绕方式"两个字段。
+ */
+bool EditorEngine::setImageLayout(int index, int layout) {
+    if (!loaded_) return false;
+    for (const ImageBox& b : images()) {
+        if (b.index != index) continue;
+        const rev::Node* n = rev::findNode(document(), b.id);
+        if (n == nullptr) return false;
+        const auto* s = std::get_if<ImageSpec>(&n->payload);
+        if (s == nullptr) return false;
+        ImageSpec next = *s;
+        switch (layout) {
+            case 0:
+                next.anchor = ImageAnchor::Inline;
+                next.wrap = ImageWrap::None;
+                break;
+            case 1:
+                next.anchor = ImageAnchor::Float;
+                next.wrap = ImageWrap::Square;
+                break;
+            case 2:
+                next.anchor = ImageAnchor::Float;
+                next.wrap = ImageWrap::None;
+                break;
+            case 3:
+                next.anchor = ImageAnchor::Float;
+                next.wrap = ImageWrap::Behind;
+                break;
+            case 4:
+                next.anchor = ImageAnchor::Float;
+                next.wrap = ImageWrap::InFront;
+                break;
+            default:
+                return false;
+        }
+        return edit_.setImageSpec(b.id, next);
+    }
+    return false;
+}
+
+bool EditorEngine::setImageLayoutAndRender(int index, int layout) {
+    if (!setImageLayout(index, layout)) return false;
+    // 浮动与否改的是断行，必须重排。
+    relayout();
+    repaintAfterEdit();
     return true;
 }
 

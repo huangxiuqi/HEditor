@@ -451,6 +451,8 @@ ordered_json imageJson(const ImageSpec& im) {
     if (im.height != Length{}) j["h"] = printLength(im.height);
     if (im.anchor != ImageAnchor::Inline) j["anchor"] = imageAnchorName(im.anchor);
     if (im.wrap != ImageWrap::None) j["wrap"] = imageWrapName(im.wrap);
+    if (im.dx_pt != 0.0f) j["dx"] = floatText(im.dx_pt);
+    if (im.dy_pt != 0.0f) j["dy"] = floatText(im.dy_pt);
     return j;
 }
 
@@ -843,6 +845,8 @@ bool readImage(const ordered_json& j, const char* key, ImageSpec* out) {
     if (!readLength(im, "h", &out->height)) return false;
     if (!readEnum(im, "anchor", imageAnchorFromName, &out->anchor)) return false;
     if (!readEnum(im, "wrap", imageWrapFromName, &out->wrap)) return false;
+    if (!readFloat(im, "dx", &out->dx_pt)) return false;
+    if (!readFloat(im, "dy", &out->dy_pt)) return false;
     return true;
 }
 
@@ -930,6 +934,17 @@ ordered_json sectionJson(const SectionSpec& sec) {
         ordered_json x = ordered_json::object();
         for (const auto& kv : sec.extra) x[kv.first] = kv.second;
         j["x"] = std::move(x);
+    }
+    if (sec.watermark.enabled) {
+        ordered_json w = ordered_json::object();
+        w["on"] = true;
+        if (!sec.watermark.text.empty()) w["t"] = sec.watermark.text;
+        const WatermarkSpec kDefault;
+        if (sec.watermark.size_pt != kDefault.size_pt) w["sz"] = floatText(sec.watermark.size_pt);
+        if (!(sec.watermark.color == kDefault.color)) w["col"] = colorJson(sec.watermark.color);
+        if (sec.watermark.angle_deg != kDefault.angle_deg)
+            w["ang"] = floatText(sec.watermark.angle_deg);
+        j["wat"] = std::move(w);
     }
     return j;
 }
@@ -1027,6 +1042,15 @@ bool readSection(const ordered_json& j, const char* key, SectionSpec* out) {
             if (!it.value().is_string()) return false;
             out->extra[it.key()] = it.value().get<std::string>();
         }
+    }
+    if (s.contains("wat")) {
+        if (!s["wat"].is_object()) return false;
+        const ordered_json& w = s["wat"];
+        if (!readBool(w, "on", &out->watermark.enabled)) return false;
+        if (!readString(w, "t", &out->watermark.text)) return false;
+        if (!readFloat(w, "sz", &out->watermark.size_pt)) return false;
+        if (!readColor(w, "col", &out->watermark.color)) return false;
+        if (!readFloat(w, "ang", &out->watermark.angle_deg)) return false;
     }
     return true;
 }

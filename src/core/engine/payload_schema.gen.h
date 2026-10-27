@@ -128,6 +128,11 @@ inline constexpr KeySpec kKeys[] = {
     {"cell", "arr", true},
     {"img", "num", true},
     {"imgHandle", "num", true},
+    {"drag", "num", true},
+    {"dragImage", "num", true},
+    {"gridTable", "num", true},
+    {"gridCol", "num", true},
+    {"gridRow", "num", true},
 };
 inline constexpr PayloadSpec kSpec{"hitTest", kKeys, static_cast<int>(std::size(kKeys)), true};
 }  // namespace hit_test
@@ -148,6 +153,17 @@ inline constexpr KeySpec kKeys[] = {
 };
 inline constexpr PayloadSpec kSpec{"imageHit", kKeys, static_cast<int>(std::size(kKeys)), false};
 }  // namespace image_hit
+
+namespace watermark {
+inline constexpr KeySpec kKeys[] = {
+    {"enabled", "bool", false},
+    {"text", "str", false},
+    {"sizePt", "num", false},
+    {"color", "arr", false},
+    {"angle", "num", false},
+};
+inline constexpr PayloadSpec kSpec{"watermark", kKeys, static_cast<int>(std::size(kKeys)), false};
+}  // namespace watermark
 
 namespace controls {
 inline constexpr KeySpec kKeys[] = {
@@ -328,6 +344,19 @@ inline constexpr KeySpec kKeys[] = {
 };
 inline constexpr PayloadSpec kSpec{"auditCompile", kKeys, static_cast<int>(std::size(kKeys)), true};
 }  // namespace audit_compile
+
+namespace table_grid {
+inline constexpr KeySpec kKeys[] = {
+    {"table", "num", true},
+    {"page", "num", true},
+    {"x", "num", true},
+    {"w", "num", true},
+    {"cols", "arr", true},
+    {"rows", "arr", true},
+    {"ok", "bool", false},
+};
+inline constexpr PayloadSpec kSpec{"tableGrid", kKeys, static_cast<int>(std::size(kKeys)), true};
+}  // namespace table_grid
 
 namespace table_state {
 inline constexpr KeySpec kKeys[] = {

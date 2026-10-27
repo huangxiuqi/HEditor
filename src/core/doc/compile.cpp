@@ -201,9 +201,29 @@ private:
             g.px_h = is_img ? atom->image.px_h : 0;
             g.dpi = is_img ? atom->image.dpi : 96;
             g.expr_cp = is_img ? 0 : utf8ToCodepoints(atom->formula.expr).size();
+            g.wrap = is_img ? atom->image.wrap : ImageWrap::None;
+            g.dx_pt = is_img ? atom->image.dx_pt : 0.0f;
+            g.dy_pt = is_img ? atom->image.dy_pt : 0.0f;
             const AtomBox box = resolveAtomBox(g, b.size_pt);
             if (box.width_relative) note(atom->kind, atom->id, atomRelativeDiag(true));
             if (box.height_relative) note(atom->kind, atom->id, atomRelativeDiag(false));
+            // 浮动只在横排正文里成立：竖排的列宽随内容、表格格的宽度是版心的一部分，
+            //   两处都没有可用的环绕几何，退回行内排。
+            if (o.floating && !b.wm.isVertical() && b.cell_path.empty()) {
+                LayoutFloat lf;
+                lf.handle = static_cast<uint64_t>(atom->id);
+                lf.para = static_cast<int>(out_.blocks.size());
+                lf.cp = o.cp;
+                lf.w_pt = box.w_pt;
+                lf.h_pt = box.h_pt;
+                lf.wrap = atom->image.wrap;
+                lf.dx_pt = atom->image.dx_pt;
+                lf.dy_pt = atom->image.dy_pt;
+                lf.content_hash = o.content_hash;
+                out_.floats.push_back(lf);
+                continue;
+            }
+            o.floating = false;
             o.w_pt = box.w_pt;
             o.h_pt = box.h_pt;
         }
@@ -454,6 +474,9 @@ private:
                 o.kind = InlineObjectKind::Atom;
                 o.owner = static_cast<int>(n->id);  // 绘制要靠它回树里取"框里写什么"
                 o.atom = (n->kind == NodeKind::Image) ? InlineAtom::Image : InlineAtom::Formula;
+                // 浮动图仍然进对象表：流位置要能与树对齐。宽高在 flush 里定 ——
+                //   浮动的那一档留 0（版面上一寸不占），几何另记一份 floats。
+                o.floating = (n->kind == NodeKind::Image && n->image.anchor == ImageAnchor::Float);
                 o.content_hash = (n->kind == NodeKind::Image) ? atomContentHash(n->image)
                                                               : atomContentHash(n->formula);
                 obj_.push_back(o);

@@ -517,6 +517,15 @@ else()
     add_test(NAME rev_layer COMMAND heditor_rev_tests)
     set_tests_properties(rev_layer PROPERTIES LABELS functional)
 
+    # 本轮新增功能的判据：双击 / 三击选区、水印、表格列宽与行高、拖拽移动、图片环绕。
+    add_executable(heditor_feature_tests tests/feature_test.cpp)
+    target_link_libraries(heditor_feature_tests PRIVATE heditor_core heditor_demo)
+    target_compile_definitions(heditor_feature_tests PRIVATE
+                               HEDITOR_NATIVE_ASSET_DIR="${HEDITOR_ASSET_DIR}")
+    heditor_target_flags(heditor_feature_tests)
+    add_test(NAME features COMMAND heditor_feature_tests)
+    set_tests_properties(features PROPERTIES LABELS functional)
+
     # 诊断探针（**不进 ctest**）：打印 EditStats / EditorEngine 的尺寸与字段偏移。
     # 用途与"为什么没法自动判定"写在 tests/probe_engine_size.cpp 顶部。
     add_executable(heditor_abi_probe tests/probe_engine_size.cpp)

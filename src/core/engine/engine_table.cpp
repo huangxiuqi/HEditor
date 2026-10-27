@@ -10,6 +10,7 @@
 #include "core/rev/table_ops.h"
 #include "core/utils/units.h"
 
+#include <cmath>
 #include <sstream>
 
 namespace heditor {
@@ -36,6 +37,41 @@ std::vector<const rev::Node*> tableRows(const rev::Node& node) {
         if (c->kind == NodeKind::TableRow) rows.push_back(c.get());
     }
     return rows;
+}
+
+/**
+ * 拖格线时"落在格线附近"的容差（磅）。三条线都从这里取：太窄要瞄准像素、太宽会抢走
+ * 贴边落光标的那几磅。
+ */
+constexpr float kGridLineTolPt = 6.0f;
+
+/**
+ * 文档 y 折成"第几页 + 页内磅"。
+ *
+ * 页在文档里按"页高 + 页间隙"的像素步距摆，折回磅只能反过来除密度 —— 与命中测试同一个
+ * 口径。落在页间隙里的点既不在正文上，也不在表上，判假。
+ *
+ * @param y_pt_doc 文档纵坐标（磅）
+ * @param zoom 缩放
+ * @param page_px_h 一页的像素高
+ * @param gap_px 页间隙（像素）
+ * @param page 写回页号
+ * @param local_y 写回页内磅
+ * @return true = 这一点落在某一页上
+ */
+bool pageLocalYAt(float y_pt_doc, float zoom, int page_px_h, int gap_px, int* page,
+                  float* local_y) {
+    *page = 0;
+    *local_y = y_pt_doc;
+    const int step_px = page_px_h + gap_px;
+    if (step_px <= 0 || !(zoom > 0.0f)) return true;
+    const float y_px = y_pt_doc * zoom;
+    const int p = std::max(0, static_cast<int>(std::floor(y_px / static_cast<float>(step_px))));
+    const float local_px = y_px - static_cast<float>(p) * static_cast<float>(step_px);
+    if (local_px < 0.0f || local_px > static_cast<float>(page_px_h)) return false;
+    *page = p;
+    *local_y = local_px / zoom;
+    return true;
 }
 
 }  // namespace
@@ -103,6 +139,120 @@ bool EditorEngine::setTableSpec(const TablePatch& patch) {
 
 bool EditorEngine::setTableSpecAndRender(const TablePatch& patch) {
     if (!setTableSpec(patch)) return false;
+    relayout();
+    repaintAfterEdit();
+    return true;
+}
+
+/**
+ * 点所在的表格栅格：宿主拖拽列边界 / 行边界时用它换算指针位置。
+ *
+ * 折页与 imageAtPt 同一条（按宿主摆页的像素步距），两处各写一套的话页号会各自累出偏差。
+ */
+std::string EditorEngine::tableGridJson(float x_pt_doc, float y_pt_doc) const {
+    std::ostringstream o;
+    o.setf(std::ios::fixed);
+    o.precision(2);
+    int page = 0;
+    float local_y = 0.0f;
+    if (!pageLocalYAt(y_pt_doc, cfg_.zoom, pagePxHeight(), pageGapPx(), &page, &local_y)) {
+        return pk::checked(pk::table_grid::kSpec, "{\"ok\":false}");
+    }
+    for (const PlacedTable& pt : layout_.placed_tables) {
+        if (x_pt_doc < pt.x - 1.0f || x_pt_doc > pt.x + pt.w + 1.0f) continue;
+        for (const PlacedRow& pr : pt.placed) {
+            if (pr.page != page) continue;
+            if (local_y < pr.y - 1.0f || local_y > pr.y + pr.h + 1.0f) continue;
+            o << "{\"ok\":true,\"table\":" << pt.handle << ",\"page\":" << page << ",\"x\":" << pt.x
+              << ",\"w\":" << pt.w << ",\"cols\":[";
+            for (size_t i = 0; i < pt.col_x.size(); ++i) {
+                if (i != 0) o << ",";
+                o << pt.col_x[i];
+            }
+            o << "],\"rows\":[";
+            bool first_row = true;
+            for (const PlacedRow& r : pt.placed) {
+                if (r.page != page) continue;
+                if (!first_row) o << ",";
+                first_row = false;
+                o << "{\"row\":" << r.row << ",\"y\":" << r.y << ",\"h\":" << r.h << "}";
+            }
+            o << "]}";
+            return pk::checked(pk::table_grid::kSpec, o.str());
+        }
+    }
+    return pk::checked(pk::table_grid::kSpec, "{\"ok\":false}");
+}
+
+bool EditorEngine::tableGridLineAt(float x_pt_doc, float y_pt_doc, uint64_t* table, int* col,
+                                   int* row) const {
+    if (table != nullptr) *table = 0;
+    if (col != nullptr) *col = 0;
+    if (row != nullptr) *row = -1;
+    int page = 0;
+    float local_y = 0.0f;
+    if (!pageLocalYAt(y_pt_doc, cfg_.zoom, pagePxHeight(), pageGapPx(), &page, &local_y)) {
+        return false;
+    }
+    for (const PlacedTable& pt : layout_.placed_tables) {
+        if (x_pt_doc < pt.x - 1.0f || x_pt_doc > pt.x + pt.w + 1.0f) continue;
+        bool on_page = false;
+        for (const PlacedRow& pr : pt.placed) {
+            if (pr.page == page) {
+                on_page = true;
+                break;
+            }
+        }
+        if (!on_page) continue;
+        // 列边界取最近的一条：col_x 是含首尾的绝对边界序列，内部边界是 1..n-1。
+        int hit_col = 0;
+        float col_dist = kGridLineTolPt;
+        for (size_t i = 1; i + 1 < pt.col_x.size(); ++i) {
+            const float d = std::fabs(x_pt_doc - (pt.x + pt.col_x[i]));
+            if (d <= col_dist) {
+                col_dist = d;
+                hit_col = static_cast<int>(i);
+            }
+        }
+        // 行边界：这一行与下一行都在本页之间才算 —— 跨页那条是页边界，拖它没有语义。
+        int hit_row = -1;
+        float row_dist = kGridLineTolPt;
+        for (size_t i = 0; i + 1 < pt.placed.size(); ++i) {
+            if (pt.placed[i].page != page || pt.placed[i + 1].page != page) continue;
+            const float d = std::fabs(local_y - (pt.placed[i].y + pt.placed[i].h));
+            if (d <= row_dist) {
+                row_dist = d;
+                hit_row = pt.placed[i].row;
+            }
+        }
+        if (hit_col == 0 && hit_row < 0) continue;
+        if (table != nullptr) *table = pt.handle;
+        if (col != nullptr) *col = hit_col;
+        if (row != nullptr) *row = hit_row;
+        return true;
+    }
+    return false;
+}
+
+bool EditorEngine::setTableColWidths(uint64_t handle, const std::vector<float>& widths) {
+    if (!loaded_) return false;
+    return edit_.setTableGridCols(handle, widths);
+}
+
+bool EditorEngine::setTableColWidthsAndRender(uint64_t handle, const std::vector<float>& widths) {
+    if (!setTableColWidths(handle, widths)) return false;
+    relayout();
+    repaintAfterEdit();
+    return true;
+}
+
+bool EditorEngine::setTableRowHeight(uint64_t handle, int row, float h_pt) {
+    if (!loaded_) return false;
+    return edit_.setTableRowHeight(handle, row, h_pt);
+}
+
+bool EditorEngine::setTableRowHeightAndRender(uint64_t handle, int row, float h_pt) {
+    if (!setTableRowHeight(handle, row, h_pt)) return false;
     relayout();
     repaintAfterEdit();
     return true;

@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "core/doc/document.h"
+#include "core/doc/image_spec.h"
 #include "core/text/font.h"
 #include "core/text/writing_mode.h"
 #include "core/utils/types.h"
@@ -330,6 +331,14 @@ struct InlineObject {
      * 内容指纹。尺寸没变而内容变了（换了一张同样大的图）在几何上看不出来，行指纹只能靠它。
      */
     uint64_t content_hash = 0;
+
+    /**
+     * 这一枚原子是浮动图：流位置照常占一位，版面上一寸都不占（宽度由排版层按 0 处理）。
+     *
+     * 不占宽而保留流位置是刻意的：流位置要能与树对齐，否则光标与选区整体错位；
+     *   而浮动图的几何由 LayoutFloat 另行给出（见 PlacedFloat）。
+     */
+    bool floating = false;
 
     /**
      * 空控件（开始与结束边界之间一个码点都没有）要画的提示文字；非空串才画。
@@ -781,6 +790,106 @@ struct LayoutTable {
      * 逻辑格（含跨度），按行列顺序。
      */
     std::vector<LayoutCell> cells;
+};
+
+/**
+ * 一张浮动图的排版输入：锚在某一块的某个码点位置，尺寸与环绕方式由作者给。
+ *
+ * 坐标是相对的：dx / dy 相对锚点那一段所在行的内容区原点，于是"改页宽、改字号"
+ * 都不会把图钉死在某个绝对坐标上。
+ */
+struct LayoutFloat {
+    /**
+     * 图片节点的身份（命中和选中靠它回宿主换下标）。编译层填节点 id。
+     */
+    uint64_t handle = 0;
+
+    /**
+     * 锚段（块下标）。
+     */
+    int para = 0;
+
+    /**
+     * 锚点（段内码点下标）。只用于排序与诊断：同一段里多张图的先后。
+     */
+    uint32_t cp = 0;
+
+    /**
+     * 显示尺寸（磅）。
+     */
+    float w_pt = 0.0f;
+
+    /**
+     * 同上，高。
+     */
+    float h_pt = 0.0f;
+
+    /**
+     * 环绕方式。Behind / InFront 不占位。
+     */
+    ImageWrap wrap = ImageWrap::None;
+
+    /**
+     * 相对锚点内容区原点的偏移（磅）。
+     */
+    float dx_pt = 0.0f;
+
+    /**
+     * 同上，纵向。
+     */
+    float dy_pt = 0.0f;
+
+    /**
+     * 内容指纹：换了一张同样大的图时几何不变，行指纹靠它发现"画出来的东西变了"。
+     */
+    uint64_t content_hash = 0;
+
+    bool operator==(const LayoutFloat&) const = default;
+};
+
+/**
+ * 一张已放置的浮动图：页号与页内框（磅），绘制、命中与选中都读它。
+ */
+struct PlacedFloat {
+    /**
+     * 图片节点身份，与 LayoutFloat::handle 同一个值。
+     */
+    uint64_t handle = 0;
+
+    /**
+     * 落在第几页。
+     */
+    int page = 0;
+
+    /**
+     * 页内左边。
+     */
+    float x = 0.0f;
+
+    /**
+     * 页内上边。
+     */
+    float y = 0.0f;
+
+    /**
+     * 宽。
+     */
+    float w = 0.0f;
+
+    /**
+     * 高。
+     */
+    float h = 0.0f;
+
+    /**
+     * 环绕方式（决定绘制次序与是否参与命中优先级）。
+     */
+    ImageWrap wrap = ImageWrap::None;
+
+    /**
+     * 内容指纹。
+     */
+    uint64_t content_hash = 0;
 };
 
 /**
@@ -1624,6 +1733,11 @@ struct LayoutResult {
     std::vector<PlacedTable> placed_tables;
 
     /**
+     * 浮动图的几何（每张图一条）。没有浮动图时为空 —— 空表与"这段代码不存在"逐字节相同。
+     */
+    std::vector<PlacedFloat> placed_floats;
+
+    /**
      * 每页上的行下标（下标 = 页号，值 = lines 里那一行的下标，按流顺序）。
      *
      * 行数组按流顺序排，而表格行跨页之后它就不再按页单调：一条高格切到第二页时，
@@ -1685,10 +1799,12 @@ struct LayoutResult {
  * @param blocks 块流（排版输入）
  * @param page 页度量
  * @param tables 表格结构（空 = 没有表格）
+ * @param floats 浮动图（空 = 文档里没有浮动图，与加这个参数之前逐字节相同）
  * @return 字形、行盒、每段切片与这一轮的账
  */
 LayoutResult layoutDocument(FontLibrary& lib, const std::vector<BlockSpec>& blocks,
-                            const PageMetrics& page, const std::vector<LayoutTable>& tables = {});
+                            const PageMetrics& page, const std::vector<LayoutTable>& tables = {},
+                            const std::vector<LayoutFloat>& floats = {});
 
 /**
  * 续排入口：把 [from_para, to_para) 排入 @p out，返回结束时的续排状态。
@@ -1728,13 +1844,16 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
  * @param state 起始续排状态
  * @param cache 段级整形缓存；nullptr = 不用缓存
  * @param out 结果写到这里
+ * @param floats 浮动图。非空时调用方必须从第 0 段整篇排（浮动框的纵向位置取决于它前面的
+ *        内容，续排拿不到那个上下文）；引擎在有浮动图时禁止走增量。
  * @return 第 to_para 段开始时的续排状态
  */
 ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<BlockSpec>& blocks,
                                           const PageMetrics& page,
                                           const std::vector<LayoutTable>& tables, int from_para,
                                           int to_para, const ReflowState& state,
-                                          ShapingCache* cache, LayoutResult* out);
+                                          ShapingCache* cache, LayoutResult* out,
+                                          const std::vector<LayoutFloat>& floats = {});
 
 /**
  * 按 para_index 逐段求和，写回 stats 里的字面量汇总（字形数、行数、簇数、缺字、run 数）。

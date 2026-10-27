@@ -626,6 +626,102 @@ public:
     bool selectCellAtPara(int para);
 
     /**
+     * 双击选词：按落点所在字符的类别向两侧扩边（空白、字母数字、汉字、标点各成一类）。
+     *
+     * 没有分词器，连续汉字整串选中 —— 这是对"词"最接近的近似，也符合病历里
+     * "双击挑一个术语"的实际用法；英文按字母数字串，标点按连续同类。
+     *
+     * @param x_pt_doc 文档横坐标（磅）
+     * @param y_pt_doc 文档纵坐标（磅）
+     * @return true = 选中了一个非空区间
+     */
+    bool selectWordAtPt(float x_pt_doc, float y_pt_doc);
+
+    /**
+     * 双击选词并重画。
+     *
+     * @param x_pt_doc 文档横坐标（磅）
+     * @param y_pt_doc 文档纵坐标（磅）
+     * @return true = 选中了一个非空区间
+     */
+    bool selectWordAtPtAndRender(float x_pt_doc, float y_pt_doc);
+
+    /**
+     * 三击选段：表格外选整段内容，表格内退化成选整格（与 Word 的三击一致）。
+     *
+     * @param x_pt_doc 文档横坐标（磅）
+     * @param y_pt_doc 文档纵坐标（磅）
+     * @return true = 选中了；空段落返回假（没有可选内容，宿主按落光标处理）
+     */
+    bool selectParaAtPt(float x_pt_doc, float y_pt_doc);
+
+    /**
+     * 三击选段并重画。
+     *
+     * @param x_pt_doc 文档横坐标（磅）
+     * @param y_pt_doc 文档纵坐标（磅）
+     * @return true = 选中了
+     */
+    bool selectParaAtPtAndRender(float x_pt_doc, float y_pt_doc);
+
+    /**
+     * 把当前文字选区搬到这个点上（一次事务：删除 + 插入，撤销只一步）。
+     *
+     * 目标落在选区内部、或选区含块级元素（表格）时拒绝 —— 整表插进段落中间没有语义。
+     *
+     * @param x_pt_doc 文档横坐标（磅）
+     * @param y_pt_doc 文档纵坐标（磅）
+     * @return true = 搬了
+     */
+    bool moveSelectionToPt(float x_pt_doc, float y_pt_doc);
+
+    /**
+     * 搬选区 + 重排 + 呈现。
+     * @param x_pt_doc 文档横坐标（磅）
+     * @param y_pt_doc 文档纵坐标（磅）
+     * @return true = 搬了
+     */
+    bool moveSelectionToPtAndRender(float x_pt_doc, float y_pt_doc);
+
+    /**
+     * 把一张图片搬到这个点上（同样一次事务）。
+     * @param index 图片下标
+     * @param x_pt_doc 文档横坐标（磅）
+     * @param y_pt_doc 文档纵坐标（磅）
+     * @return true = 搬了
+     */
+    bool moveImageToPt(int index, float x_pt_doc, float y_pt_doc);
+
+    /**
+     * 搬图片 + 重排 + 呈现。
+     * @param index 图片下标
+     * @param x_pt_doc 文档横坐标（磅）
+     * @param y_pt_doc 文档纵坐标（磅）
+     * @return true = 搬了
+     */
+    bool moveImageToPtAndRender(int index, float x_pt_doc, float y_pt_doc);
+
+    /**
+     * 改一张图的版式：0 行内、1 四周型、2 上下型、3 衬于文字下方、4 浮于文字上方。
+     *
+     * 后四档都是浮动（anchor = Float）；"上下型"与"四周型"参与断行，后两档只叠在文字上。
+     * 一次一步撤销；同一个档位重复设置不产生修订。
+     *
+     * @param index 图片下标（文档顺序）
+     * @param layout 版式档位
+     * @return true = 改了（幂等时也成立）
+     */
+    bool setImageLayout(int index, int layout);
+
+    /**
+     * 改版式 + 重排 + 呈现。浮动与否会改断行，所以必须重排。
+     * @param index 图片下标
+     * @param layout 版式档位
+     * @return true = 改了
+     */
+    bool setImageLayoutAndRender(int index, int layout);
+
+    /**
      * 选区是不是"单元格选区"。文字选区与它是两条独立的操作线，靠这个标记分开 ——
      * 不靠"选中了多少"去猜（见 CaretResolver::selectionIsCell）。
      *
@@ -1502,6 +1598,30 @@ public:
     bool setTableSpecAndRender(const TablePatch& patch);
 
     /**
+     * 当前水印（第一节的记录）。没有文档时返回默认（不画）。
+     *
+     * @return 水印记录
+     */
+    WatermarkSpec watermark() const;
+
+    /**
+     * 改水印：整份记录一起换，一步撤销。记录没变时不产生修订。
+     *
+     * @param w 新的水印记录
+     * @return true = 改成了（幂等时也成立）
+     */
+    bool setWatermark(const WatermarkSpec& w);
+
+    /**
+     * 改水印 + 呈现。水印只画进页位图、不参与断行，所以只重光栅不重排 ——
+     * 光栅签名里含水印摘要，改完所有页自动作废（见 rasterSignature）。
+     *
+     * @param w 新的水印记录
+     * @return true = 改成了
+     */
+    bool setWatermarkAndRender(const WatermarkSpec& w);
+
+    /**
      * 光标所在表格的现状（表格 / 行 / 格三层记录 + 整格选区的范围）。
      *
      * 属性面板一次读全：分三次问会拿到三个不同时刻的状态，而"表宽 + 行高 + 格对齐"
@@ -1510,6 +1630,72 @@ public:
      * @return JSON（键见 docs/api/payloads.json 的 tableState）
      */
     std::string tableStateJson() const;
+
+    /**
+     * 点所在的表格栅格：表的横向范围、列边界与这一页的行片段。
+     *
+     * 拖拽列边界 / 行边界要用它把指针位置换算成"哪一条线、拖到哪儿"。列边界是相对表左边
+     * 的磅值（长度 = 列数 + 1），行片段是页内磅（一行跨页时每页各有一条）。
+     *
+     * @param x_pt_doc 文档坐标 x（磅）
+     * @param y_pt_doc 文档坐标 y（磅）
+     * @return JSON（键见 docs/api/payloads.json 的 tableGrid）
+     */
+    std::string tableGridJson(float x_pt_doc, float y_pt_doc) const;
+
+    /**
+     * 这一点是不是压在表格内部的某条格线上（拖列宽 / 行高用）。
+     *
+     * 只有"内部"格线算：表格的左、右、下三条边是表格自己的宽高，不是两条相邻列（行）
+     * 之间的分界，拖它们没有"两边和不变"可说。判据与命中同一条 —— 命中在按下那一刻
+     * 只算一次，格线判定跟着它一起回来。
+     *
+     * @param x_pt_doc 文档坐标 x（磅）
+     * @param y_pt_doc 文档坐标 y（磅）
+     * @param table 写回这张表的身份
+     * @param col 写回列边界序号（0 表示没有；n 表示第 n 条内部列边界）
+     * @param row 写回行边界序号（-1 表示没有；n 表示第 n 行与第 n+1 行之间）
+     * @return true = 压在某条内部格线上
+     */
+    bool tableGridLineAt(float x_pt_doc, float y_pt_doc, uint64_t* table, int* col, int* row) const;
+
+    /**
+     * 拖拽结束：把一张表的全部列宽钉成显式值（<= 0 的那一列保持自动）。
+     *
+     * @param handle 表格身份（tableGridJson 给的 table）
+     * @param widths 每列宽度（磅），按网格列序
+     * @return true = 改成了
+     */
+    bool setTableColWidths(uint64_t handle, const std::vector<float>& widths);
+
+    /**
+     * 同上 + 重排 + 呈现。
+     *
+     * @param handle 表格身份
+     * @param widths 每列宽度（磅）
+     * @return true = 改成了
+     */
+    bool setTableColWidthsAndRender(uint64_t handle, const std::vector<float>& widths);
+
+    /**
+     * 拖拽结束：改一行的高度（<= 0 回到按内容）。
+     *
+     * @param handle 表格身份
+     * @param row 逻辑行号
+     * @param h_pt 新高度（磅）
+     * @return true = 改成了
+     */
+    bool setTableRowHeight(uint64_t handle, int row, float h_pt);
+
+    /**
+     * 同上 + 重排 + 呈现。
+     *
+     * @param handle 表格身份
+     * @param row 逻辑行号
+     * @param h_pt 新高度（磅）
+     * @return true = 改成了
+     */
+    bool setTableRowHeightAndRender(uint64_t handle, int row, float h_pt);
 
     /**
      * 一个点上压着什么（右键菜单的判定）。
@@ -1653,6 +1839,12 @@ public:
          * 像素在不在资源表里（不在时画面上是占位框）。
          */
         bool resource_ready = false;
+
+        /**
+         * 版式档位：0 行内、1 四周型、2 上下型、3 衬于文字下方、4 浮于文字上方。
+         * 宿主菜单的回显读它。
+         */
+        int layout = 0;
     };
 
     /**
@@ -1781,6 +1973,20 @@ public:
      * @return 命中的图片与把手；没点到图片时 index 为 -1
      */
     ImageHit imageAtPt(float x_pt_doc, float y_pt_doc) const;
+
+    /**
+     * 拖拽移动的起手判定：这一点按下去能不能开始拖、拖的是什么。
+     *
+     * 不吃坐标而吃已经算好的命中结果：按下那一刻的每一件事（能不能拖、要不要落光标、
+     * 落在哪一格的边距带上）都是同一个瞬间的问题，命中只该算一次。分成两条命令问，
+     * 宿主就先问一条、再问一条，两次往返之后才轮到落光标 —— 拖选与把手都来不及起手。
+     *
+     * @param p 命中出来的位置；para 为 -1 表示这一点没有文字落点（例如只命中了图）
+     * @param side 命中的侧别（与落点同一个身份）
+     * @param img 同一时刻的图片命中（imageAtPt 的结果）
+     * @return 0 不能拖 / 1 拖当前文字选区 / 2 拖已选中的那张图
+     */
+    int dragKindAt(const TextPos& p, int side, const ImageHit& img) const;
 
     /**
      * 选中一张图片（画面上出拖拽框与八个把手）。
@@ -2995,6 +3201,19 @@ private:
                            Color color, float dy) const;
 
     /**
+     * 画水印（衬在正文下方的一行半透明文字，按节记录绘制）。
+     *
+     * 它不参与断行、不进流位置，所以只画进页位图；分带重画时按字形纵向位置筛。
+     *
+     * @param target 光栅目标（页位图）
+     * @param page_index 页号（水印每页都有，页号只用于诊断）
+     * @param band_lo_pt 带下界（磅），可为空
+     * @param band_hi_pt 带上界（磅），可为空
+     */
+    void rasterWatermark(Bitmap& target, int page_index, const float* band_lo_pt,
+                         const float* band_hi_pt);
+
+    /**
      * 画不可见字符标记（段落标记、空格里的中点、制表符箭头）到一页的位图上。
      *
      * 只画进页位图、不占宽度：标记不是内容，改档位只让像素变（见 rasterSignature），
@@ -3206,6 +3425,12 @@ private:
      * 筛过括号的块流。只为"名单真的排除了某些控件"而存在，其余时候为空。
      */
     bool filter_active_ = false;
+
+    /**
+     * 浮动图的排版输入（编译产物）。非空时排版只能整篇重排 —— 浮动框的纵向位置取决于
+     * 它前面排了多高，续排拿不到那个上下文（见 layoutDocumentRangeWithTables 的 floats）。
+     */
+    std::vector<LayoutFloat> floats_;
 
     /**
      * 表格结构（编译产物的一种投影，与 blocks_full_ 同源）。排版吃它来按格布局；

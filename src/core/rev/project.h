@@ -216,6 +216,12 @@ struct Projection {
     std::vector<LayoutTable> tables;
 
     /**
+     * 浮动图的排版输入，按 (para, cp) 升序。与编译产物同一种类型（LayoutFloat）——
+     * 投影与编译是两条产出路，两边的浮动画法必须一致。
+     */
+    std::vector<LayoutFloat> floats;
+
+    /**
      * 投影过程中的诊断（遇到尚未支持的元素）。空 = 产物完整。
      */
     std::vector<CompileDiagnostic> diagnostics;

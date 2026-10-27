@@ -837,8 +837,8 @@ void Bitmap::drawGlyphs(hb_font_t* font, const uint32_t* ids, const float* xs, c
     SkCanvas& c = *sk_->canvas;
     const SkPoint origin = SkPoint::Make(0.0f, 0.0f);
 
-    if (sideways) {
-        // 侧倒（蒙文竖排）：字体的轮廓是横排形态，"整段侧倒"属于呈现层。
+    if (rotate_deg != 0.0f) {
+        // 侧倒（蒙文竖排）与斜排水印都走这里：字形轮廓是横排形态，"整段旋转"属于呈现层。
         //   与自写后端同一定义：绕字形原点顺时针转 rotate_deg。
         // 旋转是逐字形各绕自己的原点转，一次 drawGlyphs 只有一个画布变换表达不了
         //   —— 退回逐字形。这条路少见，不值得为它把变换凑成一个矩阵。

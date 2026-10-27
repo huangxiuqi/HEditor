@@ -30,11 +30,16 @@ enum class ImageAnchor : uint8_t {
 };
 
 /**
- * 环绕方式。Inline 下恒为 None；Float 下再分"浮于文字上下方"与"四周环绕"。
+ * 环绕方式。Inline 下恒为 None；Float 下分四档，与 Word 的"环绕方式"一一对应。
+ *
+ * 前两档参与断行（文字要给图让位），后两档完全不占位（图叠在文字上或压在文字下）——
+ * 这个差别是排版层唯一要分开的一件事。
  */
 enum class ImageWrap : uint8_t {
-    None = 0,    // 不环绕（浮于文字上下方）
-    Square = 1,  // 四周环绕
+    None = 0,     // 上下型：文字不进入图片的纵向区间
+    Square = 1,   // 四周型：文字绕在图片两侧
+    Behind = 2,   // 衬于文字下方：不占位，压在文字底下
+    InFront = 3,  // 浮于文字上方：不占位，盖在文字上面
 };
 
 /**
@@ -111,6 +116,17 @@ struct ImageSpec {
      * 文字怎么绕排。
      */
     ImageWrap wrap = ImageWrap::None;
+
+    /**
+     * 浮动时的相对偏移（磅）：相对锚点段落那一行的内容区原点。只在 Float 下有意义，
+     * 0 表示水平居中、纵向贴着锚点那一行的顶。
+     */
+    float dx_pt = 0.0f;
+
+    /**
+     * 同上，纵向偏移。
+     */
+    float dy_pt = 0.0f;
 
     bool operator==(const ImageSpec&) const = default;
 };

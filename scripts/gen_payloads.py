@@ -32,6 +32,7 @@ FILES = [
     'src/core/engine/engine_paint.cpp',
     'src/core/engine/engine_diag.cpp',
     'src/core/engine/engine_table.cpp',
+    'src/core/engine/engine_image.cpp',
 ]
 SCHEMA = 'docs/api/payloads.json'
 HEADER = 'src/core/engine/payload_schema.gen.h'

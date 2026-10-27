@@ -129,7 +129,7 @@ static uint64_t fnvMixColor(uint64_t h, const Color& c) {
  * 与排版无关的项刻意不收：页间隙只影响落点、背景色只影响帧、光标/选区色只影响瞬态层。
  */
 static uint64_t rasterSignature(const EngineConfig& cfg, bool marks_shown,
-                                uint64_t image_generation) {
+                                uint64_t image_generation, const WatermarkSpec& wat) {
     uint64_t h = kFnvBasis;
     h = fnvMixFloat(h, cfg.zoom);
     h = fnvMixFloat(h, cfg.page.width_pt);
@@ -166,11 +166,18 @@ static uint64_t rasterSignature(const EngineConfig& cfg, bool marks_shown,
     // 图片像素不在文档里，页指纹看不见它们：换了图（或删了资源）只有这一个计数能让
     //   已经光栅好的页作废。漏掉它的症状是"换图之后画面上还是上一张"。
     h = fnvMix(h, image_generation);
+    // 水印画在每一页的像素上，但它不进任何一个块的内容 —— 页指纹看不见它。
+    //   摘要放这里，改水印之后所有页自动重光栅（不必另维护一张"记得清缓存"的清单）。
+    h = fnvMix(h, wat.enabled ? 1ULL : 0ULL);
+    for (const char c : wat.text) h = fnvMix(h, static_cast<uint64_t>(static_cast<uint8_t>(c)));
+    h = fnvMixFloat(h, wat.size_pt);
+    h = fnvMixColor(h, wat.color);
+    h = fnvMixFloat(h, wat.angle_deg);
     return h;
 }
 
 uint64_t EditorEngine::rasterSignatureNow() const {
-    return rasterSignature(cfg_, marksShown(), images_.generation());
+    return rasterSignature(cfg_, marksShown(), images_.generation(), watermark());
 }
 
 void EditorEngine::setConfig(const EngineConfig& cfg) {
@@ -398,6 +405,28 @@ std::string EditorEngine::pastePlainText(const std::string& utf8) {
 
 bool EditorEngine::deleteSelection() { return edit_.deleteSelection(); }
 
+/**
+ * 当前水印：第一节的记录。没有文档、或第一节不是节时返回默认（不画）。
+ */
+WatermarkSpec EditorEngine::watermark() const {
+    if (!session_.has_value()) return WatermarkSpec{};
+    const rev::Doc& d = document();
+    if (!d.root || d.root->children.empty()) return WatermarkSpec{};
+    const rev::Node* sec = d.root->children.front().get();
+    if (sec == nullptr || sec->kind != NodeKind::Section) return WatermarkSpec{};
+    const auto* s = std::get_if<SectionSpec>(&sec->payload);
+    return s != nullptr ? s->watermark : WatermarkSpec{};
+}
+
+bool EditorEngine::setWatermark(const WatermarkSpec& w) { return edit_.setWatermark(w); }
+
+bool EditorEngine::setWatermarkAndRender(const WatermarkSpec& w) {
+    if (!edit_.setWatermark(w)) return false;
+    // 水印不进断行，所以不重排：光栅签名里含它的摘要，下一次 present 会把所有页重光栅。
+    repaint();
+    return true;
+}
+
 std::string EditorEngine::pasteFragmentAndRender(const std::string& text) {
     const std::string err = pasteFragment(text);
     if (!err.empty()) return err;
@@ -604,6 +633,13 @@ void EditorEngine::rebuildFromTree(const rev::BlockDamage* dmg) {
     for (const rev::BlockKey& k : proj_hist_.keys) block_src_.push_back(k.source);
     block_extents_ = std::move(res.extents);
     tables_ = std::move(res.tables);
+    {
+        // 浮动图这一列变了就整篇重排：它影响的是"从这里往后的每一行"，
+        //   而且 from→empty 那一档（从浮动改回行内）连增量起点都无从谈起。
+        std::vector<LayoutFloat> next = std::move(res.floats);
+        if (!(next == floats_)) markAllLayoutDirty();
+        floats_ = std::move(next);
+    }
     edit_stats_.rebuild_compile_ms = msSince(t_compile0);
     finishRebuildFromTree(vis, res.controls);
 }
@@ -1925,6 +1961,83 @@ bool EditorEngine::selectCellAtPt(float x_pt_doc, float y_pt_doc) {
     TextPos p{};
     if (!hitTestPt(x_pt_doc, y_pt_doc, &p)) return false;
     return selectCellAtPara(p.para);
+}
+
+namespace {
+
+/**
+ * 双击扩边用的字符类：0 空白、1 字母数字、2 汉字与假名、3 标点。
+ *
+ * 类内连续就一起选中。汉字不按词切 —— 分词要词典，而词典不属于排版引擎。
+ *
+ * @param cp 码点
+ * @return 类别号
+ */
+int wordClassOf(uint32_t cp) {
+    if (cp == ' ' || cp == '\t' || cp == 0x00A0u || cp == 0x200Bu || cp == 0x3000u) return 0;
+    if ((cp >= '0' && cp <= '9') || (cp >= 'A' && cp <= 'Z') || (cp >= 'a' && cp <= 'z') ||
+        cp == '_' || (cp >= 0x00C0u && cp <= 0x024Fu))
+        return 1;
+    if ((cp >= 0x3040u && cp <= 0x30FFu) || (cp >= 0x3400u && cp <= 0x4DBFu) ||
+        (cp >= 0x4E00u && cp <= 0x9FFFu) || (cp >= 0xF900u && cp <= 0xFAFFu) ||
+        (cp >= 0xAC00u && cp <= 0xD7AFu))
+        return 2;
+    return 3;
+}
+
+}  // namespace
+
+/**
+ * 双击选词。落点落在两个字之间时取右边那个字 —— 点在某个字的右半边时命中的正是它。
+ */
+bool EditorEngine::selectWordAtPt(float x_pt_doc, float y_pt_doc) {
+    if (!loaded_ || layout_.lines.empty()) return false;
+    TextPos p{};
+    if (!hitTestPt(x_pt_doc, y_pt_doc, &p)) return false;
+    const std::vector<BlockSpec>& bs = blocks();
+    if (p.para < 0 || p.para >= static_cast<int>(bs.size())) return false;
+    const std::vector<uint32_t>& cps = bs[static_cast<size_t>(p.para)].cp_text;
+    const size_t n = cps.size();
+    if (n == 0) return false;
+    const size_t i = (p.offset < n) ? p.offset : n - 1;
+    const int cls = wordClassOf(cps[i]);
+    size_t a = i;
+    size_t b = i + 1;
+    while (a > 0 && wordClassOf(cps[a - 1]) == cls) --a;
+    while (b < n && wordClassOf(cps[b]) == cls) ++b;
+    const FlowPos lo = flowPosAtSide(p.para, a, 0);
+    const FlowPos hi = flowPosAtSide(p.para, b, 0);
+    if (hi <= lo) return false;
+    return setSelection(Range{lo, hi});
+}
+
+bool EditorEngine::selectWordAtPtAndRender(float x_pt_doc, float y_pt_doc) {
+    if (!selectWordAtPt(x_pt_doc, y_pt_doc)) return false;
+    repaint();
+    return true;
+}
+
+/**
+ * 三击选段。表格里优先整格：三击在格内表达的是"我要这一格"，与 Word 同。
+ */
+bool EditorEngine::selectParaAtPt(float x_pt_doc, float y_pt_doc) {
+    if (!loaded_ || layout_.lines.empty()) return false;
+    TextPos p{};
+    if (!hitTestPt(x_pt_doc, y_pt_doc, &p)) return false;
+    if (selectCellAtPara(p.para)) return true;
+    const std::vector<BlockSpec>& bs = blocks();
+    if (p.para < 0 || p.para >= static_cast<int>(bs.size())) return false;
+    const size_t n = bs[static_cast<size_t>(p.para)].cp_text.size();
+    const FlowPos lo = flowPosAtSide(p.para, 0, 0);
+    const FlowPos hi = flowPosAtSide(p.para, n, 0);
+    if (hi <= lo) return false;
+    return setSelection(Range{lo, hi});
+}
+
+bool EditorEngine::selectParaAtPtAndRender(float x_pt_doc, float y_pt_doc) {
+    if (!selectParaAtPt(x_pt_doc, y_pt_doc)) return false;
+    repaint();
+    return true;
 }
 
 /**

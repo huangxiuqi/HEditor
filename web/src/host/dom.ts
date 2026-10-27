@@ -869,9 +869,208 @@ export function createDomHost(o: DomHostOptions): DomHost {
     if (preeditEl.style.display !== 'block') preeditEl.style.display = 'block';
   }
 
+  // 表格边界拖拽：列宽与行高。
+  //
+  // 判定与落地都在这一侧：引擎给几何（tableGrid），宿主把指针增量换成磅、画一条指示线、
+  //   松手才提交一次 —— 拖动过程中每帧提交会重排重画整张表，撤销栈也会留下几十步。
+
+  let guideEl: HTMLElement | null = null;
+
+  /**
+   * 指示线元素（懒建）。绝对定位在页容器上，不接指针事件。
+   * @returns 那一个 div
+   */
+  function gridGuide(): HTMLElement {
+    if (guideEl && guideEl.isConnected) return guideEl;
+    const el = document.createElement('div');
+    el.style.position = 'absolute';
+    el.style.background = 'rgba(43, 127, 255, 0.9)';
+    el.style.pointerEvents = 'none';
+    el.style.display = 'none';
+    el.style.zIndex = '3';
+    pagesEl.appendChild(el);
+    guideEl = el;
+    return el;
+  }
+
+  /**
+   * 磅 -> 页容器里的 CSS 像素。x 是页内磅，y 是文档磅（含页偏移）。
+   * @param ptX 页内横坐标（磅）
+   * @param ptYDoc 文档纵坐标（磅）
+   * @returns CSS 像素坐标
+   */
+  function cssOf(ptX: number, ptYDoc: number): { x: number; y: number } {
+    const d = dpr();
+    return { x: (ptX * zoom.density) / d, y: (ptYDoc * zoom.density) / d };
+  }
+
+  /**
+   * 表格格线拖拽：压在内部格线上就接管整条手势，返回真表示"这一下不落光标"。
+   *
+   * 收设备像素（与输入层其他入口同一口径），内部折成磅。哪一条线来自命中（hit 的
+   *   gridTable / gridCol / gridRow），栅格几何则等真的动起来才取：那是一次往返，
+   *   压在按下这一拍上会把起手推到第一次移动之后（拖选与图片把手都因此断过）。
+   *
+   * 格线上点一下不算拖：抬手时一次都没越界，就把这一下还给落点 —— 否则内部格线
+   *   会变成一小片"按下去什么也不发生"的死区。
+   * @param ptPx 文档坐标（设备像素）
+   * @param h 这一下的命中（带格线三格）
+   * @returns 接管了没有
+   */
+  function tableResize(ptPx: { x: number; y: number }, h: any): Maybe<boolean> {
+    const col = typeof h.gridCol === 'number' ? h.gridCol : 0;
+    const row = typeof h.gridRow === 'number' ? h.gridRow : -1;
+    if (col <= 0 && row < 0) return false;
+    const table = Number(h.gridTable);
+    const vertical = col > 0;
+    const start = docPt(ptPx.x, ptPx.y);
+    const guide = gridGuide();
+    // 起手门槛（磅）：格线上点一下是"落点"，不是"改表"。
+    const slop = 2;
+    let last = start;
+    let armed = false;
+    let fetching = false;
+    let outWidths: number[] | null = null;
+    let outHeight = 0;
+    // 栅格几何：首次越界之后才取回来。
+    let cols: number[] = [];
+    let widths0: number[] = [];
+    let tableLeft = 0;
+    let tableRight = 0;
+    let pageTopPt = 0;
+    let bandTop = 0;
+    let bandBottom = 0;
+    let rowEdge = 0;
+    let h0 = 0;
+
+    /**
+     * 画指示线：竖线给页内 x 与文档 y 区间，横线给页内 x 区间与文档 y。
+     * @param axis 竖线还是横线
+     * @param pos 线的位置（磅）
+     * @param lo 区间起点（磅）
+     * @param hi 区间终点（磅）
+     */
+    const showGuide = (axis: 'col' | 'row', pos: number, lo: number, hi: number): void => {
+      if (axis === 'col') {
+        const a = cssOf(pos, lo);
+        const b = cssOf(pos, hi);
+        guide.style.left = Math.round(a.x) + 'px';
+        guide.style.top = Math.round(a.y) + 'px';
+        guide.style.width = '1px';
+        guide.style.height = Math.max(1, Math.round(b.y - a.y)) + 'px';
+      } else {
+        const a = cssOf(lo, pos);
+        guide.style.left = Math.round(a.x) + 'px';
+        guide.style.top = Math.round(a.y) + 'px';
+        guide.style.width = Math.max(1, Math.round(((hi - lo) * zoom.density) / dpr())) + 'px';
+        guide.style.height = '1px';
+      }
+      guide.style.display = 'block';
+    };
+
+    const detach = (): void => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      guide.style.display = 'none';
+    };
+
+    /**
+     * 按最新的指针位置算新尺寸并画线。
+     * @param q 指针位置（文档磅）
+     */
+    const apply = (q: { x: number; y: number }): void => {
+      if (vertical) {
+        const dx = q.x - start.x;
+        const i = col;
+        const total = widths0[i - 1] + widths0[i];
+        // 相邻两列的总宽不变：拖一条边界不该把整张表撑宽或缩窄（Word 同一条）。
+        const left = Math.max(12, Math.min(total - 12, widths0[i - 1] + dx));
+        const next = widths0.slice();
+        next[i - 1] = left;
+        next[i] = total - left;
+        outWidths = next;
+        showGuide('col', tableLeft + cols[i] + dx, bandTop, bandBottom);
+      } else {
+        const dy = q.y - start.y;
+        outHeight = Math.max(8, h0 + dy);
+        showGuide('row', pageTopPt + rowEdge + dy, tableLeft, tableRight);
+      }
+    };
+
+    /**
+     * 取一次栅格几何（列边界、宽度、这一页的行片段与上下范围）。
+     */
+    const fetchGeom = (): void => {
+      fetching = true;
+      void then1(read('tableGrid', { x: start.x, y: start.y }), (g: any) => {
+        fetching = false;
+        if (!g || g.ok !== true || !Array.isArray(g.cols) || g.cols.length < 2) {
+          detach();
+          return;
+        }
+        const gv = view();
+        // 页在文档里按"页高 + 页间隙"的像素步距摆，折回磅要除密度 —— 与命中测试同一个口径。
+        const stepPt = (gv.ph + gv.gap) / zoom.density;
+        pageTopPt = (g.page | 0) * stepPt;
+        cols = (g.cols as any[]).map((v) => Number(v));
+        widths0 = [];
+        for (let i = 0; i + 1 < cols.length; i++) widths0.push(cols[i + 1] - cols[i]);
+        tableLeft = Number(g.x);
+        tableRight = tableLeft + Number(g.w);
+        const rows: any[] = Array.isArray(g.rows) ? g.rows : [];
+        bandTop = pageTopPt + (rows.length ? Number(rows[0].y) : 0);
+        const tail = rows.length ? rows[rows.length - 1] : null;
+        bandBottom = tail ? pageTopPt + Number(tail.y) + Number(tail.h) : bandTop;
+        const at = rows.find((r) => Number(r.row) === row);
+        rowEdge = at ? Number(at.y) + Number(at.h) : bandBottom - pageTopPt;
+        h0 = at ? Number(at.h) : 0;
+        armed = true;
+        apply(last);
+      });
+    };
+
+    const onMove = (e: MouseEvent): void => {
+      if (typeof e.buttons === 'number' && (e.buttons & 1) === 0) {
+        // 在窗口外松手时 mouseup 收不到：移动事件自带按键状态，靠它自愈。
+        onUp();
+        return;
+      }
+      const qp = pointAt(e.clientX, e.clientY);
+      last = docPt(qp.x, qp.y);
+      if (armed) {
+        apply(last);
+        return;
+      }
+      if (fetching) return;
+      const dx = last.x - start.x;
+      const dy = last.y - start.y;
+      if (dx * dx + dy * dy < slop * slop) return;
+      fetchGeom();
+    };
+    const onUp = (): void => {
+      detach();
+      if (!armed) {
+        // 没动过：这一下是落点（格线上点一下不该改表）。
+        void input.placeAt(ptPx);
+        return;
+      }
+      if (vertical && outWidths) {
+        const w = outWidths;
+        void then1(writeOp('setTableColWidths', { handle: table, widths: w }),
+          () => afterEdit('setTableColWidths', 'user'));
+      } else if (!vertical && outHeight > 0) {
+        const hh = outHeight;
+        void then1(writeOp('setTableRowHeight', { handle: table, row, h: hh }),
+          () => afterEdit('setTableRowHeight', 'user'));
+      }
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return true;
+  }
+
   const input = createInput({
-    isReady: () => ready && !disposed,
-    isBusy: () => busy,
+    isReady: () => ready && !disposed,    isBusy: () => busy,
     ta,
     hot: () => ({
       vertical: !!read('caretVerticalNow'),
@@ -976,6 +1175,7 @@ export function createDomHost(o: DomHostOptions): DomHost {
     previewImageSize: (i, w, h, handle) =>
       writeOp('previewImageResize', { i, w, h, handle }) as Maybe<any>,
     clearImagePreview: () => writeOp('clearImagePreview') as Maybe<any>,
+    tableResize,
     status: (text, isErr) => o.status?.(text, isErr),
     preedit: (text) => showPreedit(text),
     zoomBy: (delta) => o.onZoomBy?.(delta),

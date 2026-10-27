@@ -178,6 +178,12 @@ void hashSectionSpec(Hasher& h, const SectionSpec& sec) {
         h.str(kv.first);
         h.str(kv.second);
     }
+    // 水印画在每一页的像素上，但不进任何块的内容 —— 它只能靠节哈希把页指纹带动起来。
+    h.u8(sec.watermark.enabled ? 1 : 0);
+    h.str(sec.watermark.text);
+    h.f32(sec.watermark.size_pt);
+    hashColor(h, sec.watermark.color);
+    h.f32(sec.watermark.angle_deg);
 }
 
 /**
@@ -196,6 +202,8 @@ void hashImageSpec(Hasher& h, const ImageSpec& im) {
     hashLength(h, im.height);
     h.u8(static_cast<uint8_t>(im.anchor));
     h.u8(static_cast<uint8_t>(im.wrap));
+    h.f32(im.dx_pt);
+    h.f32(im.dy_pt);
 }
 
 void hashFormulaSpec(Hasher& h, const FormulaSpec& f) {

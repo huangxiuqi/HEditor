@@ -292,6 +292,14 @@ const COMMANDS: Array<[string, string, string[], string]> = [
   ['setRowSpec',            'w', ['setRowSpecAt'],                                         'self'],
   ['setTableSpec',          'w', ['setTableSpecAt'],                                       'self'],
   ['tableState',            'r', ['tableStateJson'],                                       'none'],
+  // 列宽 / 行高的拖拽：几何查询 + 两次落地。改列宽收整份宽度数组（拖一条边界改相邻两列），
+  //   与表格属性那三条同一档 —— 都是设计动作，只在文档模式放行。
+  ['tableGrid',             'r', ['tableGrid'],                                           'none'],
+  ['setTableColWidths',     'w', ['setTableColWidths'],                                   'self'],
+  ['setTableRowHeight',     'w', ['setTableRowHeight'],                                   'self'],
+  // 水印跟着节记录走：读一条回填面板，写一条落成 SetSectionSpec（一步撤销）。
+  ['watermark',             'r', ['watermarkJson'],                                       'none'],
+  ['setWatermark',          'w', ['setWatermark'],                                        'self'],
   ['contextTarget',         'r', ['contextTargetJson'],                                    'none'],
   ['insertControl',         'w', ['insertControlAt'],                                     'self'],
   ['setControlSpec',        'w', ['setControlSpecAt'],                                    'self'],
@@ -300,6 +308,8 @@ const COMMANDS: Array<[string, string, string[], string]> = [
   ['controlOptionAt',       'r', ['controlOptionAt'],                                     'none'],
   // 图片：像素由宿主解码之后注册（文档只存资源 id），插入与改尺寸都要重排 + 呈现。
   ['insertImage',           'w', ['insertImageAt'],                                       'self'],
+  // 图片版式（行内 / 四周 / 上下 / 下方 / 上方）：改的是断行，必须重排重画。
+  ['setImageLayout',        'w', ['setImageLayout'],                                      'self'],
   ['registerImage',         'w', ['registerImage'],                                       'self'],
   ['dropImage',             'w', ['dropImage'],                                           'self'],
   ['selectImage',           'w', ['selectImage'],                                         'self'],
@@ -314,6 +324,11 @@ const COMMANDS: Array<[string, string, string[], string]> = [
   ['selectAll',             'w', ['selectAll'],                                           'self'],
   ['selectCellAtPara',      'w', ['selectCellAtPara'],                                    'self'],
   ['cellSelectAt',          'w', ['cellSelectAt'],                                        'self'],
+  ['selectWord',            'w', ['selectWordAt'],                                        'self'],
+  ['selectPara',            'w', ['selectParaAt'],                                        'self'],
+  // 拖拽移动：两条命令。能不能拖由 hit 一起答（同一次命中里带 drag 那两个键）。
+  ['moveSelection',         'w', ['moveSelectionTo'],                                     'self'],
+  ['moveImage',             'w', ['moveImageTo'],                                         'self'],
   ['selectPos',             'w', ['setSelection', 'flowIndexAt'],                                        'self'],
   ['setSelection',          'w', ['setSelection'],                                      'self'],
   ['clearSelection',        'w', ['clearSelection'],                                      'self'],
@@ -1153,6 +1168,13 @@ const WRITE = collect('w', {
   //   必须留在这里（命令表）：它会重画帧，而查询那条路不重贴脏页 —— 画面要等下一次
   //   闪烁相位才更新，那就是"点了要等一秒才选中"。
   cellSelectAt: (a) => mod.cellSelectAt(a.x, a.y),
+  // 双击选词 / 三击选段：与 cellSelectAt 同一档（会重画帧，必须走命令表）。
+  //   返回 false 表示这一下没得选（点不在正文上、空段落），宿主退回落光标。
+  selectWord: (a) => mod.selectWordAt(a.x, a.y),
+  selectPara: (a) => mod.selectParaAt(a.x, a.y),
+  // 拖拽移动的两条落地命令。
+  moveSelection: (a) => mod.moveSelectionTo(Number(a.x), Number(a.y)),
+  moveImage: (a) => mod.moveImageTo(a.i | 0, Number(a.x), Number(a.y)),
   // 外部 API 收 {段号, 段内偏移}；换算成全局流位置只在引擎里做（见 flowIndexAt）。
   selectPos: (a) =>
     mod.setSelection(
@@ -1338,6 +1360,7 @@ const WRITE = collect('w', {
    *   一次拖拽只留一步。
    */
   resizeImage: (a) => mod.resizeImageAt(a.i | 0, Number(a.w), Number(a.h), !!a.merge),
+  setImageLayout: (a) => mod.setImageLayout(a.i | 0, a.layout | 0),
   /**
    * 拖拽改尺寸的预览：只换瞬态层上那个框，不动文档、不重排。
    *   拖动每帧真改尺寸会重排 + 重光栅该页，放大图时肉眼可见地卡；松手才发 resizeImage。
@@ -1345,6 +1368,15 @@ const WRITE = collect('w', {
    */
   previewImageResize: (a) => mod.previewImageResizeAt(a.i | 0, Number(a.w), Number(a.h), a.handle | 0),
   clearImagePreview: () => mod.clearImagePreview(),
+  // 拖拽落地：列宽整份给（<= 0 的那一列保持自动），行高给磅值（<= 0 回到按内容）。
+  setTableColWidths: (a) => mod.setTableColWidths(a.handle | 0, a.widths || []),
+  setTableRowHeight: (a) => mod.setTableRowHeight(a.handle | 0, a.row | 0, Number(a.h) || 0),
+  // 水印：颜色四个通道原样给（alpha 就是半透明），角度为负是逆时针。
+  setWatermark: (a) => {
+    const c = Array.isArray(a.color) ? a.color : [128, 128, 128, 128];
+    return mod.setWatermark(!!a.enabled, a.text || '', Number(a.sizePt) || 48,
+                            c[0] | 0, c[1] | 0, c[2] | 0, c[3] | 0, Number(a.angle) || 0);
+  },
   setFontCacheConfig: (a) => mod.setFontCacheConfig(a.blockSize | 0, a.blocks | 0),
 
   /**
@@ -1392,6 +1424,15 @@ const READ = collect('r', {
    *   而不是整页 —— 那一条的判据在 edit_probe / edit_test [58]。
    */
   imageList: () => JSON.parse(mod.imageList()),
+  /**
+   * 点所在的表格栅格：表的横向范围、列边界与这一页的行片段。宿主拖拽列边界 / 行边界用它
+   * 换算指针位置。不在表里时 ok 为假。
+   */
+  tableGrid: (a) => JSON.parse(mod.tableGrid(Number(a.x), Number(a.y))),
+  /**
+   * 水印记录。键名与 setWatermark 的参数同一套，面板回填不必再翻译一次。
+   */
+  watermark: () => JSON.parse(mod.watermarkJson()),
   /**
    * 命中：文档坐标（磅）落在哪张图的哪个把手上。没点到时 index 是 -1。
    */

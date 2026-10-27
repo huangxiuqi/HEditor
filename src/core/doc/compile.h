@@ -105,6 +105,14 @@ struct CompileResult {
     std::vector<LayoutTable> tables;
 
     /**
+     * 浮动图的排版输入，按 (para, cp) 升序。
+     *
+     * 竖排段落与表格格里不产出：那两处没有可用的环绕几何（列宽随内容、格宽是版心的一部分），
+     * 那里的浮动图退回行内排 —— 明确的边界，不做静默的错误布局。
+     */
+    std::vector<LayoutFloat> floats;
+
+    /**
      * 产物完整吗（没有诊断）。
      * @return true = 没有诊断
      */

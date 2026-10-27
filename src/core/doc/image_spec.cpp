@@ -21,6 +21,10 @@ const char* imageWrapName(ImageWrap w) {
             return "none";
         case ImageWrap::Square:
             return "square";
+        case ImageWrap::Behind:
+            return "behind";
+        case ImageWrap::InFront:
+            return "inFront";
     }
     return "none";
 }
@@ -46,6 +50,14 @@ bool imageWrapFromName(const std::string& name, ImageWrap* out) {
     }
     if (name == "square") {
         *out = ImageWrap::Square;
+        return true;
+    }
+    if (name == "behind") {
+        *out = ImageWrap::Behind;
+        return true;
+    }
+    if (name == "inFront") {
+        *out = ImageWrap::InFront;
         return true;
     }
     return false;

@@ -596,6 +596,18 @@ bool setTableSpec(Ctx* c, NodeId id, const TableSpec& spec) {
     return replaceOne(c, id, spec, n->hidden);
 }
 
+bool setImageSpec(Ctx* c, NodeId id, const ImageSpec& spec) {
+    const Node* n = findNode(c->doc, id);
+    if (n == nullptr || n->kind != NodeKind::Image) return fail(c, "目标不是图片");
+    return replaceOne(c, id, spec, n->hidden);
+}
+
+bool setSectionSpec(Ctx* c, NodeId id, const SectionSpec& spec) {
+    const Node* n = findNode(c->doc, id);
+    if (n == nullptr || n->kind != NodeKind::Section) return fail(c, "目标不是节");
+    return replaceOne(c, id, spec, n->hidden);
+}
+
 bool setImageSize(Ctx* c, NodeId id, const Length& width, const Length& height) {
     const Node* n = findNode(c->doc, id);
     if (n == nullptr || n->kind != NodeKind::Image) return fail(c, "目标不是图片");
@@ -662,6 +674,10 @@ bool applyOne(Ctx* c, const Step& step) {
                 return setTableSpec(c, s.id, s.spec);
             } else if constexpr (std::is_same_v<T, SetImageSize>) {
                 return setImageSize(c, s.id, s.width, s.height);
+            } else if constexpr (std::is_same_v<T, SetSectionSpec>) {
+                return setSectionSpec(c, s.id, s.spec);
+            } else if constexpr (std::is_same_v<T, SetImageSpec>) {
+                return setImageSpec(c, s.id, s.spec);
             }
             return fail(c, "未知步骤");
         },

@@ -74,6 +74,22 @@ struct AtomGeometry {
      * 是图片还是公式（两者的默认框规则不同）。
      */
     bool is_image = true;
+
+    /**
+     * 图片的环绕方式与浮动偏移。只有当这是一张锚定为浮动的图片时才有意义 ——
+     * 排版层据此决定它占不占版面、绕在哪一侧。
+     */
+    ImageWrap wrap = ImageWrap::None;
+
+    /**
+     * 浮动时的横向偏移（磅）。
+     */
+    float dx_pt = 0.0f;
+
+    /**
+     * 浮动时的纵向偏移（磅）。
+     */
+    float dy_pt = 0.0f;
 };
 
 /**

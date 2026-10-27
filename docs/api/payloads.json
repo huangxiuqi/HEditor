@@ -295,6 +295,31 @@
           "name": "imgHandle",
           "kind": "num",
           "optional": true
+        },
+        {
+          "name": "drag",
+          "kind": "num",
+          "optional": true
+        },
+        {
+          "name": "dragImage",
+          "kind": "num",
+          "optional": true
+        },
+        {
+          "name": "gridTable",
+          "kind": "num",
+          "optional": true
+        },
+        {
+          "name": "gridCol",
+          "kind": "num",
+          "optional": true
+        },
+        {
+          "name": "gridRow",
+          "kind": "num",
+          "optional": true
         }
       ]
     },
@@ -326,6 +351,32 @@
         },
         {
           "name": "handle",
+          "kind": "num"
+        }
+      ]
+    },
+    "watermark": {
+      "cxx": "watermarkJson",
+      "file": "src/wasm/wasm_main.cpp",
+      "keys": [
+        {
+          "name": "enabled",
+          "kind": "bool"
+        },
+        {
+          "name": "text",
+          "kind": "str"
+        },
+        {
+          "name": "sizePt",
+          "kind": "num"
+        },
+        {
+          "name": "color",
+          "kind": "arr"
+        },
+        {
+          "name": "angle",
           "kind": "num"
         }
       ]
@@ -872,6 +923,47 @@
         {
           "name": "fullMs",
           "kind": "num"
+        }
+      ]
+    },
+    "tableGrid": {
+      "cxx": "tableGridJson",
+      "file": "src/core/engine/engine_table.cpp",
+      "partial": true,
+      "keys": [
+        {
+          "name": "table",
+          "kind": "num",
+          "optional": true
+        },
+        {
+          "name": "page",
+          "kind": "num",
+          "optional": true
+        },
+        {
+          "name": "x",
+          "kind": "num",
+          "optional": true
+        },
+        {
+          "name": "w",
+          "kind": "num",
+          "optional": true
+        },
+        {
+          "name": "cols",
+          "kind": "arr",
+          "optional": true
+        },
+        {
+          "name": "rows",
+          "kind": "arr",
+          "optional": true
+        },
+        {
+          "name": "ok",
+          "kind": "bool"
         }
       ]
     },

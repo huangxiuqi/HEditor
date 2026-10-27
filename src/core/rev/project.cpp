@@ -362,6 +362,8 @@ private:
             o.owner = static_cast<int>(n->id);  // 绘制要靠它回节点取"框里写什么"
             o.atom = is_img ? InlineAtom::Image : InlineAtom::Formula;
             o.content_hash = is_img ? atomContentHash(img) : atomContentHash(fml);
+            // 浮动图仍然进对象表（流位置要能与树对齐），几何在落段时另记一份 floats。
+            o.floating = (is_img && img.anchor == ImageAnchor::Float);
             AtomGeometry g;
             g.is_image = is_img;
             g.width = is_img ? img.width : fml.width;
@@ -370,6 +372,9 @@ private:
             g.px_h = img.px_h;
             g.dpi = img.dpi;
             g.expr_cp = is_img ? 0 : utf8ToCodepoints(fml.expr).size();
+            g.wrap = is_img ? img.wrap : ImageWrap::None;
+            g.dx_pt = is_img ? img.dx_pt : 0.0f;
+            g.dy_pt = is_img ? img.dy_pt : 0.0f;
             emitObject(o, n);
             atoms_.emplace_back(objects_.size() - 1, g);
             ++flow_;  // 原子占一位
@@ -540,7 +545,18 @@ private:
 
         // 增量复用：坐标给出"与上一轮哪一块对应"，哈希与来源身份确认"它真的没变"。
         //   分节强制分页这一位不在块哈希里，所以那一块不复用。
-        if (!pending_section_break_ && canReuse(hash, mark_id, first_id)) {
+        // 含行内原子（图片、公式）或浮动图的块不复用：对象表里存着原子的节点身份，
+        //   而块哈希只哈希内容 —— "删掉一张图再在同一处插一张"文本与图片内容都没变，
+        //   复用就会把对象表里那个已经删掉的节点号一直带下去（行盒里的图片簇指向幽灵）。
+        //   浮动图还有第二个理由：它的纵向位置取决于前面排了多高，复用会把它整条漏掉。
+        bool has_atom = false;
+        for (const InlineObject& o : objects_) {
+            if (o.kind == InlineObjectKind::Atom) {
+                has_atom = true;
+                break;
+            }
+        }
+        if (!pending_section_break_ && !has_atom && canReuse(hash, mark_id, first_id)) {
             objects_.clear();
             atoms_.clear();
             runs_.clear();
@@ -552,28 +568,59 @@ private:
         pb.source.mark = mark_id;
         pb.source.first = first_id;
         pb.hash = hash;
+        pb.spec.cell_path = path_;
+        // 要不要物化这一块：段落格式、字符格式、原子盒子都要查三层样式，样式表缺席就什么都
+        //   查不了。只算哈希的那一路（blockHashes）传空指针，走到这里只留哈希与来源身份 ——
+        //   哈希在上面已经算完，那一趟本来也不需要块的内容。
+        const bool materialize = (sheet_ != nullptr) && (full_ || has_atom);
 
-        if (full_) {
+        // 段落格式先落：浮动图要不要成立取决于这一段是不是横排正文（见下面那一支）。
+        if (materialize && mark != nullptr) {
+            const MarkPayload& mp = std::get<MarkPayload>(mark->payload);
+            applyParaFormatToBlock(
+                *sheet_, mp.style, mp.para, mark->id, &pb.spec,
+                [this](const CompileDiagnostic& d) { out_.diagnostics.push_back(d); });
+        }
+
+        if (materialize) {
+            const bool float_ok = !pb.spec.wm.isVertical() && pb.spec.cell_path.empty();
             // 原子的盒子在这里定：公式的默认框按段落字号估，而字号是段落属性 —— 走到原子
             // 那一刻还看不到它。emit 那一刻只记下"这里有一枚原子"。
             for (const std::pair<std::size_t, AtomGeometry>& a : atoms_) {
+                InlineObject& obj = objects_[a.first];
+                if (!full_ && !obj.floating) continue;
                 const AtomBox box = resolveAtomBox(a.second, pb.spec.size_pt);
                 if (box.width_relative) {
-                    note(NodeKind::Image, objects_[a.first].owner, atomRelativeDiag(true));
+                    note(NodeKind::Image, obj.owner, atomRelativeDiag(true));
                 }
                 if (box.height_relative) {
-                    note(NodeKind::Image, objects_[a.first].owner, atomRelativeDiag(false));
+                    note(NodeKind::Image, obj.owner, atomRelativeDiag(false));
                 }
-                objects_[a.first].w_pt = box.w_pt;
-                objects_[a.first].h_pt = box.h_pt;
+                if (!obj.floating || !float_ok) {
+                    // 行内（含竖排与表格格里退回行内的浮动图）：宽度照常占版面。
+                    obj.floating = false;
+                    obj.w_pt = box.w_pt;
+                    obj.h_pt = box.h_pt;
+                    continue;
+                }
+                // 浮动：版面上一寸不占，几何另记一份 —— 排版层按 floats 排。
+                obj.w_pt = 0.0f;
+                obj.h_pt = 0.0f;
+                LayoutFloat lf;
+                lf.handle = static_cast<uint64_t>(obj.owner);
+                lf.para = static_cast<int>(block_index_);
+                lf.cp = obj.cp;
+                lf.w_pt = box.w_pt;
+                lf.h_pt = box.h_pt;
+                lf.wrap = a.second.wrap;
+                lf.dx_pt = a.second.dx_pt;
+                lf.dy_pt = a.second.dy_pt;
+                lf.content_hash = obj.content_hash;
+                out_.floats.push_back(lf);
             }
-            pb.spec.cell_path = path_;
             pb.spec.objects = std::move(objects_);
             if (mark != nullptr) {
                 const MarkPayload& mp = std::get<MarkPayload>(mark->payload);
-                applyParaFormatToBlock(
-                    *sheet_, mp.style, mp.para, mark->id, &pb.spec,
-                    [this](const CompileDiagnostic& d) { out_.diagnostics.push_back(d); });
                 // 空段落的字符格式只挂在段落标记上（理由见 compile.cpp 同一处）。
                 if (pb.spec.cp_text.empty()) {
                     const CharFormat& m = mp.marks;

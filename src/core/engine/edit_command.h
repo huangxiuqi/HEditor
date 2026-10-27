@@ -437,6 +437,73 @@ public:
     bool setTableSpec(const TablePatch& patch);
 
     /**
+     * 改第一节的水印（整份记录一起换）。幂等：记录没变时返回真但不产生步骤。
+     *
+     * 只改第一节：水印按节生效是 Word 的口径，而引擎现在只有一套页度量，
+     * 多节水印要等按节排版，不做半截。
+     *
+     * @param w 新的水印记录
+     * @return true = 改成了（或本来就是这个值）
+     */
+    bool setWatermark(const WatermarkSpec& w);
+
+    /**
+     * 把一张表的全部列宽钉成显式值（拖拽列边界之后落地）。宽度 <= 0 的那一列保持 Auto。
+     *
+     * 收整份而不是"改第几列"：拖一条列边界改的是相邻两列（一增一减），而表格的列宽
+     * 可能还是自动平分的 —— 落成显式值时要连带把每一列的实际宽度一起写下来。
+     *
+     * @param handle 表格身份（编译层给的 handle，等于表格节点 id）
+     * @param widths 每列宽度（磅），按网格列序
+     * @return true = 改成了（幂等时也成立）
+     */
+    bool setTableGridCols(uint64_t handle, const std::vector<float>& widths);
+
+    /**
+     * 改一行的高度（拖拽行边界之后落地）。h_pt <= 0 表示回到"按内容"。
+     *
+     * 落成"不小于"而不是"固定"：拖高了之后格里的字多了仍然要能长，这是 Word 的行为。
+     *
+     * @param handle 表格身份
+     * @param row 逻辑行号
+     * @param h_pt 新高度（磅）；<= 0 = 按内容
+     * @return true = 改成了（幂等时也成立）
+     */
+    bool setTableRowHeight(uint64_t handle, int row, float h_pt);
+
+    /**
+     * 把 [lo, hi) 的内容搬到 dest：删除与插入合成一批步骤，撤销只有一步。
+     *
+     * nodes 是这一段的内容（调用方已经从树上取好）；含块级元素时拒绝。
+     *
+     * @param lo 源区间起点（全局流位置）
+     * @param hi 源区间终点（不含）
+     * @param dest 目标位置（全局流位置，删除之前的口径）
+     * @param nodes 这一段的内容
+     * @return true = 搬了（被拒时才是 false）
+     */
+    bool moveRange(FlowPos lo, FlowPos hi, FlowPos dest, const std::vector<NodeSpec>& nodes);
+
+    /**
+     * 把一张图片搬到 dest（删除 + 插入一批步骤）。
+     *
+     * @param id 图片节点
+     * @param spec 图片记录（搬过去的是同一份记录）
+     * @param dest 目标位置（全局流位置，删除之前的口径）
+     * @return true = 搬了
+     */
+    bool moveImage(NodeId id, const ImageSpec& spec, FlowPos dest);
+
+    /**
+     * 换一张图的整份记录（版式与环绕）。
+     *
+     * @param id 图片节点
+     * @param spec 新记录
+     * @return true = 改了（幂等时也成立）
+     */
+    bool setImageSpec(NodeId id, const ImageSpec& spec);
+
+    /**
      * 在光标处插一个内容控件（表单字段）。label 是控件里的初始内容，也是它的"值"。
      *
      * 控件是行内容器：它不切断段落，落在光标处就是落在光标处。光标摆到控件内容末尾，

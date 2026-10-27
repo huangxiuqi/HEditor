@@ -973,6 +973,30 @@ StepResult canApply(const NodeTree& tree, const FlowIndex& idx, const Step& step
                 }
                 r.ok = true;
             },
+            [&](const SetImageSpec& s) {
+                const Node* n = tree.find(s.id);
+                if (n == nullptr || n->kind != NodeKind::Image) {
+                    r.error = "改图片记录：目标不是图片";
+                    return;
+                }
+                if (!(n->image == s.before)) {
+                    r.error = "改图片记录：当前记录与步骤记的原值不符（步骤过期了）";
+                    return;
+                }
+                r.ok = true;
+            },
+            [&](const SetSectionSpec& s) {
+                const Node* n = tree.find(s.id);
+                if (n == nullptr || n->kind != NodeKind::Section) {
+                    r.error = "改节记录：目标不是节";
+                    return;
+                }
+                if (!n->section.sameAs(s.before)) {
+                    r.error = "改节记录：当前记录与步骤记的原值不符（步骤过期了）";
+                    return;
+                }
+                r.ok = true;
+            },
             [&](const SetImageSize& s) {
                 const Node* n = tree.find(s.id);
                 if (n == nullptr || n->kind != NodeKind::Image) {
@@ -1130,6 +1154,14 @@ StepResult applyStep(NodeTree& tree, const Step& step) {
                 if (n == nullptr) return;
                 n->image.width = s.width;
                 n->image.height = s.height;
+            },
+            [&](const SetSectionSpec& s) {
+                Node* n = tree.find(s.id);
+                if (n != nullptr) n->section = s.spec;
+            },
+            [&](const SetImageSpec& s) {
+                Node* n = tree.find(s.id);
+                if (n != nullptr) n->image = s.spec;
             },
         },
         step);
@@ -1290,6 +1322,20 @@ Step invertStep(const Step& step) {
                               x.beforeHeight = s.height;
                               return Step{x};
                           },
+                          [](const SetSectionSpec& s) -> Step {
+                              SetSectionSpec x;
+                              x.id = s.id;
+                              x.spec = s.before;
+                              x.before = s.spec;
+                              return Step{x};
+                          },
+                          [](const SetImageSpec& s) -> Step {
+                              SetImageSpec x;
+                              x.id = s.id;
+                              x.spec = s.before;
+                              x.before = s.spec;
+                              return Step{x};
+                          },
                       },
                       step);
 }
@@ -1364,6 +1410,10 @@ FlowPos mapPos(const Step& step, FlowPos pos, Assoc assoc) {
                           [&](const SetTableSpec&) -> FlowPos { return pos; },
                           // 图片尺寸只改行盒几何，位置一个都不动。
                           [&](const SetImageSize&) -> FlowPos { return pos; },
+                          // 节记录是页面设置：纸张与页边距改的是页几何，不是流位置。
+                          [&](const SetSectionSpec&) -> FlowPos { return pos; },
+                          // 图片的整份记录：尺寸与环绕方式都不改流位置。
+                          [&](const SetImageSpec&) -> FlowPos { return pos; },
                           // 段落格式与字符格式同理：改的是节点上的数据，位置一个都不动。
                           [&](const SetParaMarkFormat&) -> FlowPos { return pos; },
                           [&](const SetRun&) -> FlowPos { return pos; },
@@ -1381,6 +1431,8 @@ bool mapStepPositions(Step* target, const Step& mapped_by, Assoc assoc) {
         std::holds_alternative<SetRowSpec>(*target) ||
         std::holds_alternative<SetTableSpec>(*target) ||
         std::holds_alternative<SetImageSize>(*target) ||
+        std::holds_alternative<SetSectionSpec>(*target) ||
+        std::holds_alternative<SetImageSpec>(*target) ||
         std::holds_alternative<SetParaMarkFormat>(*target) ||
         std::holds_alternative<SetRun>(*target)) {
         return true;

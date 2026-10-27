@@ -18,6 +18,7 @@
 #include "core/doc/length.h"
 #include "core/doc/node_id.h"
 #include "core/text/writing_mode.h"
+#include "core/utils/types.h"
 
 namespace heditor {
 /**
@@ -296,6 +297,42 @@ struct HeaderFooter {
 };
 
 /**
+ * 水印：整页衬在正文下方的一行半透明文字（与 Word 的"自定义文字水印"同一种形态）。
+ *
+ * 它挂在节上而不是另立一个文档级记录：水印按节生效是 Word 的口径，而节已经是页面设置的
+ * 归属地。引擎只认一行文字加几个外观参数 —— 平铺、图片水印、每节不同水印都要另一套模型，
+ * 现在没有，也不假装有：enabled 为假时一个字段都不画。
+ */
+struct WatermarkSpec {
+    /**
+     * 画不画。默认不画 —— 没有水印的文档不该因为多了这个字段而变样。
+     */
+    bool enabled = false;
+
+    /**
+     * 水印文字。空串时即使 enabled 为真也不画（没有内容的"水印"只是一个不可见的开关）。
+     */
+    std::string text;
+
+    /**
+     * 字号（磅）。Word 的默认档是 48 磅上下。
+     */
+    float size_pt = 48.0f;
+
+    /**
+     * 颜色与不透明度。alpha 在这里就是"半透明"的唯一表达，不另设 opacity 字段。
+     */
+    Color color = Color{128, 128, 128, 128};
+
+    /**
+     * 倾斜角（度，负值是逆时针）。0 = 水平；Word 的默认斜排是 -45。
+     */
+    float angle_deg = -45.0f;
+
+    bool operator==(const WatermarkSpec&) const = default;
+};
+
+/**
  * 一份节记录。只对 Section 有意义。
  *
  * extra 是属性袋：引擎不认识的页面设置（打印机设置、兼容性标记、主题色）原样放进来、
@@ -359,6 +396,11 @@ struct SectionSpec {
      * 属性袋：引擎不认识的页面设置原样存住、原样写出。
      */
     std::map<std::string, std::string> extra;
+
+    /**
+     * 水印（衬在正文下方的半透明文字）。
+     */
+    WatermarkSpec watermark;
 
     /**
      * 按变体取页眉（可写）。

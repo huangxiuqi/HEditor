@@ -425,7 +425,8 @@ void EditorEngine::relayout() {
     // 四档决策，从严到宽：整篇都脏或没有脏段走全量（前者影响面不可定位，后者是保守
     // 回退）；只重排脏段、后缀原样搬回（trySpliceOnly，要求后缀的行结构没变）；
     // 前缀保留加从脏段续排（常规增量）；其余情况全量。
-    const bool must_full = layout_needs_full_ || layout_dirty_from_ >= n_para;
+    // 有浮动图时只能整篇重排：浮动框的纵向位置取决于它前面排了多高，续排拿不到那个上下文。
+    const bool must_full = layout_needs_full_ || layout_dirty_from_ >= n_para || !floats_.empty();
     // 脏区起点先对齐到表格边界：落在表里就从这张表的起始段重排（见 tableAlignedFrom）。
     //   对齐之后，"从 from 续排"与"整篇重排"在表格这一段上走的是同一条路。
     const int from = tableAlignedFrom(layout_dirty_from_);
@@ -491,7 +492,7 @@ void EditorEngine::relayout() {
             const int old_cut_page = firstPageOfParagraph(cut);
             truncateLayoutAt(cut);
             layoutDocumentRangeWithTables(fonts_, blocks(), cfg_.page, tables_, cut, n_para,
-                                          cut_state, &shaping_cache_, &layout_);
+                                          cut_state, &shaping_cache_, &layout_, floats_);
             last_relaid_paragraphs_ = relaid_paras + (n_para - cut);
             last_relaid_lines_ = layout_.stats.placed_line_count - head_line_begin;
             // 从 cut 起是重排过的：页数可能变，指纹只能从"新旧两版里更靠前的那一页"起标脏。
@@ -511,7 +512,7 @@ void EditorEngine::relayout() {
         const int prefix_lines = layout_.para_index[static_cast<size_t>(from)].line_begin;
         truncateLayoutAt(from);
         layoutDocumentRangeWithTables(fonts_, blocks(), cfg_.page, tables_, from, n_para,
-                                      resume_state, &shaping_cache_, &layout_);
+                                      resume_state, &shaping_cache_, &layout_, floats_);
         last_relaid_paragraphs_ = n_para - from;
         last_relaid_lines_ = layout_.stats.placed_line_count - prefix_lines;
         last_layout_full_ = false;
@@ -537,7 +538,8 @@ void EditorEngine::relayout() {
     } else {
         layout_ = LayoutResult{};
         layoutDocumentRangeWithTables(fonts_, blocks(), cfg_.page, tables_, 0, n_para,
-                                      freshReflowState(cfg_.page), &shaping_cache_, &layout_);
+                                      freshReflowState(cfg_.page), &shaping_cache_, &layout_,
+                                      floats_);
         last_relaid_paragraphs_ = n_para;
         last_relaid_lines_ = layout_.stats.placed_line_count;
         last_layout_full_ = true;

@@ -3210,4 +3210,235 @@ bool EditCommand::setTableSpec(const TablePatch& patch) {
     return true;
 }
 
+/**
+ * 把一张表的全部列宽钉成显式值。宽度 <= 0 的那一列保持 Auto（与拖拽无关的列原样保留）。
+ */
+bool EditCommand::setTableGridCols(uint64_t handle, const std::vector<float>& widths) {
+    if (!hasFlow()) return false;
+    if (mode() != EditMode::Document) {
+        noteBlocked();
+        return false;
+    }
+    const NodeId id = static_cast<NodeId>(handle);
+    const rev::Node* n = rev::findNode(doc(), id);
+    if (n == nullptr || n->kind != NodeKind::Table) return false;
+    const auto* cur = std::get_if<TableSpec>(&n->payload);
+    if (cur == nullptr) return false;
+
+    TableSpec next = *cur;
+    next.grid_cols.clear();
+    next.grid_cols.reserve(widths.size());
+    for (const float w : widths) {
+        next.grid_cols.push_back(w > 0.0f ? Length::abs(ptToEmu(w)) : Length{});
+    }
+    if (next == *cur) return true;
+
+    SetTableSpec s;
+    s.id = id;
+    s.spec = next;
+    s.before = *cur;
+    std::vector<Step> steps;
+    steps.push_back(Step{s});
+    pending_before_ = pos().selection();
+    pending_after_ = pos().selection();
+    if (!commit(std::move(steps), pos().caret().para)) {
+        noteBlocked();
+        return false;
+    }
+    return true;
+}
+
+/**
+ * 改一行的高度。落成"不小于"：拖高之后内容多了仍能长，这是 Word 的行为。
+ */
+bool EditCommand::setTableRowHeight(uint64_t handle, int row, float h_pt) {
+    if (!hasFlow()) return false;
+    if (mode() != EditMode::Document) {
+        noteBlocked();
+        return false;
+    }
+    rev::CellRef ref{};
+    if (!rev::cellRefAt(doc(), handle, row, 0, &ref)) return false;
+    const rev::Node* n = rev::findNode(doc(), ref.row);
+    if (n == nullptr || n->kind != NodeKind::TableRow) return false;
+    const auto* cur = std::get_if<RowSpec>(&n->payload);
+    if (cur == nullptr) return false;
+
+    RowSpec next = *cur;
+    if (h_pt > 0.0f) {
+        next.height = Length::abs(ptToEmu(h_pt));
+        next.height_rule = HeightRule::AtLeast;
+    } else {
+        next.height = Length{};
+        next.height_rule = HeightRule::Auto;
+    }
+    if (next == *cur) return true;
+
+    SetRowSpec s;
+    s.id = ref.row;
+    s.spec = next;
+    s.before = *cur;
+    std::vector<Step> steps;
+    steps.push_back(Step{s});
+    pending_before_ = pos().selection();
+    pending_after_ = pos().selection();
+    if (!commit(std::move(steps), pos().caret().para)) {
+        noteBlocked();
+        return false;
+    }
+    return true;
+}
+
+/**
+ * 把一段内容搬到 dest。删除与插入是同一批步骤：撤销只有一步，位置映射也按同一批算。
+ */
+bool EditCommand::moveRange(FlowPos lo, FlowPos hi, FlowPos dest,
+                            const std::vector<NodeSpec>& nodes) {
+    if (!hasFlow() || nodes.empty()) return false;
+    if (mode() != EditMode::Document) {
+        noteBlocked();
+        return false;
+    }
+    if (!(hi > lo)) return false;
+    // 目标落在源区间内部：搬过去再删掉，等于原地不动 —— 拒绝比"看起来什么都没发生"好。
+    if (dest >= lo && dest <= hi) return false;
+    // 块级元素（表格）不搬：整张表插进段落中间没有语义，而拆开它要另一套结构操作。
+    if (hasBlockLevel(nodes)) return false;
+
+    const FlowPos len = hi - lo;
+    const FlowPos at = (dest >= hi) ? dest - len : dest;
+    std::vector<Step> steps = eraseFlowSteps(lo, hi);
+    if (steps.empty()) return false;
+    FlowPos cur = at;
+    for (const NodeSpec& spec : nodes) {
+        InsertNode in;
+        in.at_flow = cur;
+        in.at = flowIndex().posAt(cur);
+        in.subtree = spec;
+        steps.push_back(Step{in});
+        cur += static_cast<FlowPos>(spec.span());
+    }
+    pending_before_ = pos().selection();
+    pending_after_ = Range{cur, cur};
+    if (!commit(std::move(steps), pos().paraForFlow(at))) {
+        noteBlocked();
+        return false;
+    }
+    pos().setCaretAtFlow(cur);
+    return true;
+}
+
+/**
+ * 把一张图片搬到 dest。图片是原子，在流里占一格；搬它的位置就是"删一格 + 插一格"。
+ */
+bool EditCommand::moveImage(NodeId id, const ImageSpec& spec, FlowPos dest) {
+    if (!hasFlow()) return false;
+    if (mode() != EditMode::Document) {
+        noteBlocked();
+        return false;
+    }
+    const rev::Node* parent = rev::parentOf(doc(), id);
+    if (parent == nullptr) return false;
+    int slot = -1;
+    for (size_t i = 0; i < parent->children.size(); ++i) {
+        if (parent->children[i]->id == id) {
+            slot = static_cast<int>(i);
+            break;
+        }
+    }
+    if (slot < 0) return false;
+    const FlowPos at = flowIndex().flowAt(Pos{parent->id, slot});
+    if (at < 0) return false;
+    // 原地：落点紧挨着图片（它前面或它后面）都不算移动。
+    if (dest == at || dest == at + 1) return false;
+
+    const FlowPos insert_at = (dest > at) ? dest - 1 : dest;
+    NodeSpec sub;
+    sub.kind = NodeKind::Image;
+    sub.image = spec;
+
+    std::vector<Step> steps;
+    RemoveNode r;
+    r.at_flow = at;
+    steps.push_back(Step{r});
+    InsertNode in;
+    in.at_flow = insert_at;
+    in.at = flowIndex().posAt(insert_at);
+    in.subtree = sub;
+    steps.push_back(Step{in});
+
+    pending_before_ = pos().selection();
+    pending_after_ = Range{insert_at + 1, insert_at + 1};
+    if (!commit(std::move(steps), pos().paraForFlow(insert_at))) {
+        noteBlocked();
+        return false;
+    }
+    pos().setCaretAtFlow(insert_at + 1);
+    return true;
+}
+
+/**
+ * 换一张图的整份记录。一次一步撤销，与改尺寸同一档。
+ */
+bool EditCommand::setImageSpec(NodeId id, const ImageSpec& spec) {
+    if (!hasFlow()) return false;
+    if (mode() != EditMode::Document) {
+        noteBlocked();
+        return false;
+    }
+    const rev::Node* n = rev::findNode(doc(), id);
+    if (n == nullptr || n->kind != NodeKind::Image) return false;
+    const auto* cur = std::get_if<ImageSpec>(&n->payload);
+    if (cur == nullptr) return false;
+    if (*cur == spec) return true;
+
+    SetImageSpec s;
+    s.id = id;
+    s.spec = spec;
+    s.before = *cur;
+    std::vector<Step> steps;
+    steps.push_back(Step{s});
+    pending_before_ = pos().selection();
+    pending_after_ = pos().selection();
+    if (!commit(std::move(steps), pos().caret().para)) {
+        noteBlocked();
+        return false;
+    }
+    return true;
+}
+
+/**
+ * 改第一节的水印。脏段取第 0 段：水印画在每一页上，没有更窄的影响面。
+ */
+bool EditCommand::setWatermark(const WatermarkSpec& w) {
+    if (!hasFlow()) return false;
+    if (mode() != EditMode::Document) {
+        noteBlocked();
+        return false;
+    }
+    const rev::Doc& d = doc();
+    if (!d.root || d.root->children.empty()) return false;
+    const rev::Node* sec = d.root->children.front().get();
+    if (sec == nullptr || sec->kind != NodeKind::Section) return false;
+    const auto* cur = std::get_if<SectionSpec>(&sec->payload);
+    if (cur == nullptr) return false;
+    if (cur->watermark == w) return true;
+
+    SectionSpec next = *cur;
+    next.watermark = w;
+    SetSectionSpec s;
+    s.id = sec->id;
+    s.spec = next;
+    s.before = *cur;
+    std::vector<Step> steps;
+    steps.push_back(Step{s});
+    pending_before_ = pos().selection();
+    pending_after_ = pos().selection();
+    if (!commit(std::move(steps), 0)) {
+        noteBlocked();
+        return false;
+    }
+    return true;
+}
+
 }  // namespace heditor

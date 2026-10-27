@@ -88,6 +88,11 @@ export interface HitTest {
   cell?: unknown[];
   img?: number;
   imgHandle?: number;
+  drag?: number;
+  dragImage?: number;
+  gridTable?: number;
+  gridCol?: number;
+  gridRow?: number;
 }
 
 export interface ImageList {
@@ -99,6 +104,14 @@ export interface ImageList {
 export interface ImageHit {
   index: number;
   handle: number;
+}
+
+export interface Watermark {
+  enabled: boolean;
+  text: string;
+  sizePt: number;
+  color: unknown[];
+  angle: number;
 }
 
 export interface Controls {
@@ -251,6 +264,16 @@ export interface AuditCompile {
   fullMs: number;
 }
 
+export interface TableGrid {
+  table?: number;
+  page?: number;
+  x?: number;
+  w?: number;
+  cols?: unknown[];
+  rows?: unknown[];
+  ok: boolean;
+}
+
 export interface TableState {
   inTable: number;
   rows: number;
@@ -303,6 +326,7 @@ export interface Payloads {
   hitTest: HitTest;
   imageList: ImageList;
   imageHit: ImageHit;
+  watermark: Watermark;
   controls: Controls;
   lines: Lines;
   bracketSlots: BracketSlots;
@@ -313,6 +337,7 @@ export interface Payloads {
   auditLayout: AuditLayout;
   auditGlyphPages: AuditGlyphPages;
   auditCompile: AuditCompile;
+  tableGrid: TableGrid;
   tableState: TableState;
   contextTarget: ContextTarget;
 }

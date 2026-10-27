@@ -213,6 +213,16 @@ export interface InputEnv {
    * 收起尺寸预览（拖拽取消时用；正常松手由 resizeImage 自己收）。
    */
   clearImagePreview?(): Maybe<any>;
+
+  /**
+   * 表格边界拖拽：指针落在内部格线上就由宿主接管（返回真），此后不落光标。
+   *
+   * 整条拖拽都归宿主：它要画指示线、把指针增量换算成磅，而那些都是"画面上的
+   *   一条线"，引擎不该知道。哪一条线由命中给出（hit 的 gridTable / gridCol / gridRow）。
+   * @param pt 文档坐标（设备像素）
+   * @param h 这一下的命中结果（带格线三格）
+   */
+  tableResize?(pt: { x: number; y: number }, h: Hit): Maybe<boolean>;
 }
 
 export interface InputLayer {
@@ -281,6 +291,11 @@ export interface InputLayer {
  * 一档缩放。与示例页工具栏的加减号同一个步长，两处按下去的手感才一致。
  */
 const kZoomStep = 0.125;
+
+/**
+ * 拖拽移动的起手门槛（CSS 像素）。与拖选用同一个数：手抖一像素不该把一段字搬走。
+ */
+const kMoveSlop = 3;
 
 /**
  * 缩放快捷键：Ctrl + 加号 / 减号 / 0。浏览器对这三组的默认行为是缩放整个页面。
@@ -613,6 +628,19 @@ export function createInput(env: InputEnv): InputLayer {
     ((typeof h.field === 'number' && h.field >= 0) ||
       (typeof h.img === 'number' && h.img >= 0));
 
+  /**
+   * 命中压在某条内部格线上（拖列宽 / 行高）。
+   *
+   * 三格一起判：引擎只在"确实压着格线"时才把这三个键写出来，缺一个就是没压着。
+   * @param h 命中结果
+   * @returns 是否压在格线上
+   */
+  const onGridLine = (h: Hit | null | undefined): boolean =>
+    !!h &&
+    typeof h.gridTable === 'number' &&
+    ((typeof h.gridCol === 'number' && h.gridCol > 0) ||
+      (typeof h.gridRow === 'number' && h.gridRow >= 0));
+
   function onKeyDown(ev: KeyboardEvent): Maybe<any> {
     if (!env.isReady() || isBusy()) return undefined;
     // 组合期间一律不动文档：输入法在组合时会持续发 keydown，每次都重排会让画面
@@ -671,37 +699,195 @@ export function createInput(env: InputEnv): InputLayer {
     // 监听必须当场挂上：命中在异步宿主上是往返，等它回来才起手的话，
     //   按下与第一次移动之间的移动会被整段丢掉，而那一段往往正是"按下去就往右拖"。
     beginDrag(ev);
+    // 命中只算一次，这一下按的是什么全看它：格线（拖列宽行高）、已选中的内容（拖拽移动）、
+    //   还是普通落点。三件事分成三条命令问的话，宿主就要三次往返才轮得到落光标，而按下
+    //   到第一次移动之间往往只隔几毫秒 —— 拖选会拖到一半就断、图片把手一磅都不动。
+    //
+    //   搬运动作的监听同样在这一拍就挂上（trackMove）：抬手可能赶在命中回来之前到
+    //   —— 一次快速单击就是"按下、抬起"背靠背，等命中回来才挂，那次抬手永远收不到，
+    //   于是既没落光标也没搬家（判据：点控件内部清不掉已有选区）。
+    const move = trackMove(pt);
+    const chain = then1(env.hit(pt.x, pt.y), (h) => {
+      if (onGridLine(h) && typeof env.tableResize === 'function') {
+        // 格线：整条拖拽归宿主（它要画指示线、把指针增量换算成磅）。
+        armDrag(false);
+        move.cancel();
+        // 抬手已经先到了：这一下就是"在格线上点了一下"，按单击落点收尾。
+        //   交给宿主它只会挂上一串等不到的监听。
+        if (move.afterUp()) return placeAt(pt, h);
+        return then1(env.tableResize(pt, h as Hit), () => null);
+      }
+      // 拖拽移动：按住已经落定的选区或图片再拖，表达的是"搬到别处"。
+      //   只认单击之后的拖动：第二下、第三下落在一个已有的选区里是常态（双击选词、
+      //   三击选段的第一下就已经把光标摆在那儿了），把它们判成搬家，双击就再也选
+      //   不出词、三击也选不出段 —— 连击的意图比"搬"明确得多。
+      if (count === 1 && h && typeof h.drag === 'number' && h.drag > 0) {
+        armDrag(false);
+        move.arm(h);
+        return null;
+      }
+      move.cancel();
+      return placeChain(count, pt, h);
+    });
+    // 末尾那次 focus 是这条路的必要条件：canvas 与 div 都不可聚焦，浏览器在 mousedown
+    //   的默认行为里会把 activeElement 打回 body，此后 keydown 再也到不了宿主。
+    env.focus();
+    ev.preventDefault();
+    return keep(chain);
+  }
+
+  /**
+   * 命中之后的三条去向：双击选词、三击选段（表内选整格）、单击落光标。
+   * @param count 这是第几击
+   * @param pt 文档坐标（设备像素）
+   * @param h 这一下的命中结果（与上面那两条判断共用同一次命中）
+   * @returns 这一下的收尾
+   */
+  function placeChain(count: number, pt: { x: number; y: number }, h: Hit | null): Maybe<any> {
     let chain: Maybe<any>;
     if (count >= 3) {
-      // 三击：选整格。但先看命中 —— 控件与图片是"格子里的东西"，连点两下选项之后
-      //   第三下仍落在控件上时，那一下表达的是"再点一次这个选项"，不是"我要这一格"。
-      //   连击计数在这里断掉，后面按普通落点走（拖动也就照常起手）。
-      chain = then1(env.hit(pt.x, pt.y), (h) => {
-        click.seq = 0;
-        if (hitsInlineObject(h)) {
-          armDrag(true);
-          return placeAt(pt, h);
-        }
+      // 三击：表格里选整格、正文里选整段。但先看命中 —— 控件与图片是"格子里的东西"，
+      //   连点两下选项之后第三下仍落在控件上时，那一下表达的是"再点一次这个选项"，
+      //   不是"我要这一格"。连击计数在这里断掉，后面按普通落点走（拖动也就照常起手）。
+      click.seq = 0;
+      if (hitsInlineObject(h)) {
+        armDrag(true);
+        chain = placeAt(pt, h);
+      } else {
         // 走命令而不是查询：选整格会重画帧，查询只回一个值、不重贴脏页，
         //   画面于是停在旧帧上，看起来是"点了要等一秒才选中"。
-        return then1(env.write('cellSelectAt', env.docPt(pt)), (ok) => {
+        chain = then1(env.write('selectPara', env.docPt(pt)), (ok) => {
           if (ok) {
-            armDrag(false);
+            // 选中之后照样起拖：三击再往下拖表达的是"从这里扩展"，而不是"钉住这一段"。
+            armDrag(true);
             env.cellSelected();
             return null;
           }
           armDrag(true);
           return placeAt(pt, h);
         });
-      });
+      }
+    } else if (count === 2) {
+      // 双击：按词选。同样先避开控件与图片 —— 双击选项在 Word 里也不是选词。
+      if (hitsInlineObject(h)) {
+        armDrag(true);
+        chain = placeAt(pt, h);
+      } else {
+        chain = then1(env.write('selectWord', env.docPt(pt)), (ok) => {
+          if (ok) {
+            // 选中之后照样起拖：双击是"选一个词"，双击再往外拖是"从这儿开始选"。
+            //   挂上拖选还兼着一个作用：连点两下之后再拖不能只当成第二击 —— 否则
+            //   "按下不拖"与"按下就拖"混成一件事，拖选再也起不来。
+            armDrag(true);
+            return h;
+          }
+          armDrag(true);
+          return placeAt(pt, h);
+        });
+      }
     } else {
-      chain = placeAt(pt);
+      chain = placeAt(pt, h);
     }
-    // 末尾那次 focus 是这条路的必要条件：canvas 与 div 都不可聚焦，浏览器在 mousedown
-    // 的默认行为里会把 activeElement 打回 body，此后 keydown 再也到不了宿主。
-    env.focus();
-    ev.preventDefault();
     return keep(chain);
+  }
+
+  /**
+   * 搬运动作的按键跟踪：按下这一拍挂上监听，命中回来之后再由 arm 决定它算不算搬。
+   *
+   * 为什么不把"挂监听"推迟到命中回来之后：一次快速单击是"按下、抬起"背靠背，
+   *   命中在异步宿主上要一次往返 —— 等回来再挂，那次抬手永远收不到，于是这一下既
+   *   没落光标也没搬家（症状：点控件内部清不掉已有选区）。
+   *
+   * 拖动过程中什么都不提交：每帧提交要重排重画，撤销栈也会留下几十步。
+   * 没动就还给单击：按在选区里点一下表达的是"把光标放这儿"，不是"搬到原地"。
+   *   不区分这两件事的话，选区里任何一次点击都会变成一次搬家（位置没变、撤销栈里
+   *   却多一步），而且再也点不掉已有选区。
+   * @param start 按下的位置（文档设备像素）
+   * @returns arm（这一下是搬，带命中）与 cancel（不是搬）
+   */
+  function trackMove(start: { x: number; y: number }): {
+    arm(h: Hit): void;
+    cancel(): void;
+    afterUp(): boolean;
+  } {
+    let hit: Hit | null = null;
+    let moved = false;
+    let last = start;
+    let released = false;
+    let settled = false;
+    const setCursor = (c: string): void => {
+      if (typeof env.setCursor === 'function') env.setCursor(c);
+    };
+    const detach = (): void => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      setCursor('');
+    };
+    /**
+     * 收尾：没动过就按单击落点，动过就落地一次搬运。
+     */
+    const settle = (): void => {
+      if (settled) return;
+      settled = true;
+      detach();
+      const h = hit;
+      if (!moved || h === null) {
+        keep(placeAt(start, h));
+        return;
+      }
+      const dest = env.docPt(last);
+      const done =
+        h.drag === 2 && typeof h.dragImage === 'number'
+          ? env.write('moveImage', { i: h.dragImage, x: dest.x, y: dest.y })
+          : env.write('moveSelection', { x: dest.x, y: dest.y });
+      keep(
+        then1(done, (changed) => {
+          if (changed) env.commit(true);
+          return changed;
+        }),
+      );
+    };
+    const onMove = (e: MouseEvent): void => {
+      if (typeof e.buttons === 'number' && (e.buttons & 1) === 0) {
+        // 抬手丢了（在窗口外松手）也要能收尾：移动事件自带按键状态。
+        released = true;
+        if (hit !== null) settle();
+        else detach();
+        return;
+      }
+      const p = env.pointOf(e);
+      if (!p) return;
+      if (!moved) {
+        // 门槛与拖选同一个数：手抖一像素不该把一段字搬到一像素之外。
+        const dx = p.x - start.x;
+        const dy = p.y - start.y;
+        if (dx * dx + dy * dy < kMoveSlop * kMoveSlop) return;
+        moved = true;
+      }
+      last = p;
+    };
+    const onUp = (): void => {
+      released = true;
+      if (hit !== null) settle();
+      else detach();
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return {
+      arm(h: Hit): void {
+        if (settled) return;
+        hit = h;
+        setCursor('move');
+        // 抬手已经先到了：这一下当场收尾（否则它永远等不到第二次抬手）。
+        if (released) settle();
+      },
+      cancel(): void {
+        if (!settled && !released) detach();
+      },
+      afterUp(): boolean {
+        return released;
+      },
+    };
   }
 
   /**

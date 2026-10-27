@@ -267,14 +267,20 @@ test.describe('插入图片', () => {
     // 光标那条竖线正落在图的右边线上，留着只会盖住把手 —— 选中图片时不画。
     check('★ 选中图片时不画文本光标', selected.visible === false, String(selected.visible));
 
-    // 边框线（离把手很远的那一段）拖不动：命中区就是画出来的那个方块。
+    // 边框线（离把手很远的那一段）不缩放：改尺寸只发生在画出来的那八个方块上。
+    //   但按在已选中的图身上拖是"搬这张图"，所以这一拖会换位置、
+    //   不换尺寸 —— 下面量把手之前必须重新取一次几何，否则去找的是一个已经不存在的
+    //   把手，看到的现象是"把手拖不动"。
     await dragBy(geo.qx + geo.qw, geo.qy + 20, 30);
     const afterEdge = await imgW();
     check('★ 拖右边框线（离把手远处）不改尺寸', Math.abs(afterEdge - geo.w0) < 0.01,
           geo.w0 + ' → ' + afterEdge);
+    const moved = await p.read<any>(`return (await H.images())[0].rects[0];`);
+    check('★ 按住已选中的图身拖：换的是位置，不是尺寸', moved.x > geo.qx + 10,
+          geo.qx + ' → ' + moved.x);
 
     // 右中把手：离边线偏移 1 磅也能拖（把手是方块，不沿边线拉伸）。
-    await dragBy(geo.qx + geo.qw, geo.qy + geo.qh / 2, 40);
+    await dragBy(moved.x + moved.w, moved.y + moved.h / 2, 40);
     const afterHandle = await imgW();
     check('★ 拖右中把手改了尺寸', afterHandle > geo.w0 + 20, geo.w0 + ' → ' + afterHandle);
     const undone = await p.read<any>(`

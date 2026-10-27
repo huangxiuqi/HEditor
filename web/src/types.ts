@@ -895,10 +895,23 @@ export interface ImageBox {
   ready: boolean;
 
   /**
+   * 版式档位（见 ImageLayout）。
+   */
+  layout: ImageLayout;
+
+  /**
    * 它落在哪几页的哪些矩形上（页内磅）。
    */
   rects: Array<{ page: number; x: number; y: number; w: number; h: number }>;
 }
+
+/**
+ * 图片在版面上的摆法，与 Word 的"环绕方式"一一对应。
+ *
+ * inline 随文走；后四档都是浮动：square 文字绕在两侧、topAndBottom 文字不进图片的纵向区间、
+ * behind / inFront 完全不占位（图压在文字下或盖在文字上）。
+ */
+export type ImageLayout = 'inline' | 'square' | 'topAndBottom' | 'behind' | 'inFront';
 
 /**
  * 图片命中：点到哪一张、哪个把手（-1 表示点在图上）。
@@ -988,13 +1001,117 @@ export interface TableOptions {
 }
 
 /**
+ * 表格栅格：表的横向范围、列边界与这一页的行片段。长度一律是磅。
+ *
+ * 拖拽列边界 / 行边界要用它把指针位置换算成"哪一条线、拖到哪儿"。列边界相对表格左边
+ *   （长度 = 列数 + 1）；行片段是页内坐标，一行跨页时每页各有一条。
+ */
+export interface TableGrid {
+  /**
+   * 点在不在表格里。为假时其余字段都是默认值。
+   */
+  ok: boolean;
+
+  /**
+   * 表格身份（改列宽 / 行高时原样带回去）。
+   */
+  table: number;
+
+  /**
+   * 这一页的页号。
+   */
+  page: number;
+
+  /**
+   * 表格左边（页内磅）。
+   */
+  x: number;
+
+  /**
+   * 表格总宽（磅）。
+   */
+  w: number;
+
+  /**
+   * 列边界，相对表格左边，长度 = 列数 + 1。
+   */
+  cols: number[];
+
+  /**
+   * 这一页上的行片段：逻辑行号、行顶（页内磅）与高。
+   */
+  rows: Array<{ row: number; y: number; h: number }>;
+}
+
+/**
+ * 水印：衬在正文下方的一行半透明文字。
+ *
+ * 与 Word 的"自定义文字水印"同一种形态：一条文字、居中、可倾斜、半透明。
+ */
+export interface WatermarkOptions {
+  /**
+   * 画不画。省略时保持现状。
+   */
+  enabled?: boolean;
+
+  /**
+   * 水印文字。
+   */
+  text?: string;
+
+  /**
+   * 字号（磅）。
+   */
+  sizePt?: number;
+
+  /**
+   * 颜色与不透明度（RGBA，0~255）。alpha 就是"半透明"的唯一表达。
+   */
+  color?: [number, number, number, number];
+
+  /**
+   * 倾斜角（度，负值是逆时针）。
+   */
+  angle?: number;
+}
+
+/**
+ * 当前水印的记录。字段与 WatermarkOptions 同名同序，面板回填不必翻译。
+ */
+export interface WatermarkState {
+  /**
+   * 画不画。
+   */
+  enabled: boolean;
+
+  /**
+   * 水印文字。
+   */
+  text: string;
+
+  /**
+   * 字号（磅）。
+   */
+  sizePt: number;
+
+  /**
+   * 颜色与不透明度。
+   */
+  color: [number, number, number, number];
+
+  /**
+   * 倾斜角（度）。
+   */
+  angle: number;
+}
+
+/**
  * 光标所在表格的现状：三层记录 + 整格选区的范围。
  *
  * 一份读全是有意的：属性面板要同时显示表宽、行高与格对齐，分三次问会拿到三个不同时刻
  *   的状态（每次之间光标可能已经变了）。
  */
-export interface TableState {
-  /**
+export interface TableState {  /**
    * 光标在不在表格里。为假时下面各字段都是默认值，宿主不该据此施改。
    */
   inTable: boolean;
@@ -2036,6 +2153,43 @@ export interface Editor {
   tableState(): Promise<TableState>;
 
   /**
+   * 表格栅格：点所在的表的横向范围、列边界与这一页的行片段。
+   *
+   * 拖拽列边界 / 行高边界要用它换算指针位置。坐标是文档磅（与 hitTest 同一坐标系）。
+   * @param xPt 文档坐标 x（磅）
+   * @param yPt 文档坐标 y（磅）
+   * @returns 栅格；不在表格里时 ok 为假
+   */
+  tableGrid(xPt: number, yPt: number): Promise<TableGrid>;
+
+  /**
+   * 把一张表的列宽钉成显式值（拖完列边界之后落地用）。
+   *
+   * 传 tableGrid() 的那一份和每列一个宽度（磅，按栅格列序）。列数必须与栅格的列边界
+   * 数减一相同 —— 多一条少一条都会把表排歪，而"少一条"在画面上只表现为最后一列被
+   * 拉满，看不出是宿主算错了，所以这里直接拒绝。
+   * @param grid 这一张表的栅格（tableGrid 的返回值）
+   * @param widths 每列宽度（磅）
+   * @returns 有没有改
+   */
+  setTableColWidths(grid: TableGrid, widths: number[]): Promise<boolean>;
+
+  /**
+   * 改水印（第一节的页面设置）。只给要改的项，其余保持现状。
+   *
+   * 它是设计动作：只在文档模式生效，一步撤销。
+   * @param opts 要改的项
+   * @returns 有没有改
+   */
+  setWatermark(opts: WatermarkOptions): Promise<boolean>;
+
+  /**
+   * 当前水印。
+   * @returns 水印记录；没有水印时 enabled 为假
+   */
+  watermark(): Promise<WatermarkState>;
+
+  /**
    * 把表格现状摊成一张属性表单（表 / 行 / 格三层字段放在一起）。
    *
    * 宽度与行高的"自动"在面板上写 0 而不是 -1：用户不该看到负的磅值。
@@ -2158,6 +2312,16 @@ export interface Editor {
    * @returns 有没有改动
    */
   resizeImage(index: number, widthPt: number, heightPt: number, opts?: { merge?: boolean }): Promise<boolean>;
+
+  /**
+   * 改一张图片的版式（环绕方式）。改的是断行，会整篇重排。
+   *
+   * 一次一步撤销；设成与现状相同的档位不产生修订。
+   * @param index 图片下标
+   * @param layout 版式档位
+   * @returns 有没有改动
+   */
+  setImageLayout(index: number, layout: ImageLayout): Promise<boolean>;
 
   // 编辑（返回"有没有改动"）
 
