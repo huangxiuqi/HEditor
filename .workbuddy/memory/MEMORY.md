@@ -12,6 +12,9 @@
   （映射表在 Worker 壳里；漏了的表现是「命令生效、读回的字段却是旧的」）。
 - 探针：`p.read` 才拼 H/D 前言；`showCaret` 是静默写。读页像素要 `H.flush()` + 两帧 rAF，
   页画布是 OffscreenCanvas（`drawImage` 出来再读）。
+- 判据按**功能域**建 spec：一域一份，域内 `describe` 分节；新功能与修缺陷都加进所属域，
+  不建按批次命名的文件（`feature` / `fixes` 已拆）。域够大就单开（`image` / `table` /
+  `view` / `clipboard` / `format`），`edit-*` 七片只是"一份太大"的切分。
 
 ## 不变量
 

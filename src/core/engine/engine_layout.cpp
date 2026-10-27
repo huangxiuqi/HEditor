@@ -66,8 +66,12 @@ void EditorEngine::computePageFingerprints(int dirty_lo, int dirty_hi) {
 
     // 增量重算的前提：页数没变（页数变了一定整篇的重画判据都要重来），
     // 且上一轮的指纹数组还在（长度够、页数对得上）。不满足就退化成整篇重算。
+    // 有浮动图时不能只重算脏区那几页：图的纵向偏移可以把它推到任何一页上，
+    //   而"哪一页多了一张图"要按整篇重算的页指纹才看得出来（有浮动图时排版本来
+    //   也是整篇重排，见 relayout 的 must_full）。
+    const bool has_float = !layout_.placed_floats.empty() || !floats_.empty();
     const bool partial = dirty_lo >= 0 && dirty_hi >= dirty_lo && page_fp_new_count_ == n &&
-                         page_fp_new_.size() >= static_cast<size_t>(n);
+                         page_fp_new_.size() >= static_cast<size_t>(n) && !has_float;
     if (!partial) {
         page_fp_new_.assign(static_cast<size_t>(n), kFnvBasis);
         dirty_lo = 0;
@@ -159,6 +163,18 @@ void EditorEngine::computePageFingerprints(int dirty_lo, int dirty_hi) {
         page_fp_new_[static_cast<size_t>(p)] = fnvMix(page_fp_new_[static_cast<size_t>(p)], d);
     }
 
+    // 浮动图也进页指纹：它不占行盒，行指纹与字形都看不见它 —— 只改环绕方式时
+    //   页会被判成新鲜，画面上仍是改之前那一版（图留在老位置、或是没有画）。
+    if (!partial || float_fp_new_.size() < static_cast<size_t>(n)) {
+        float_fp_new_.assign(static_cast<size_t>(n), kFnvBasis);
+    }
+    for (int p = dirty_lo; p <= dirty_hi && p < n; ++p) {
+        if (p < 0) continue;
+        const uint64_t d = floatPieceDigest(p);
+        float_fp_new_[static_cast<size_t>(p)] = d;
+        page_fp_new_[static_cast<size_t>(p)] = fnvMix(page_fp_new_[static_cast<size_t>(p)], d);
+    }
+
     computeLineFingerprints(dirty_lo, dirty_hi, !partial);
 
     // 行结构也进页指纹。
@@ -212,6 +228,20 @@ uint64_t EditorEngine::tablePieceDigest(int page) const {
             h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(quantPt(pr.h))));
             h = fnvMix(h, (pr.cont_top ? 1ULL : 0ULL) | (pr.cont_bottom ? 2ULL : 0ULL));
         }
+    }
+    return h;
+}
+
+uint64_t EditorEngine::floatPieceDigest(int page) const {
+    uint64_t h = kFnvBasis;
+    for (const PlacedFloat& pf : layout_.placed_floats) {
+        if (pf.page != page) continue;
+        h = fnvMix(h, pf.handle);
+        h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(quantPt(pf.x))));
+        h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(quantPt(pf.y))));
+        h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(quantPt(pf.w))));
+        h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(quantPt(pf.h))));
+        h = fnvMix(h, static_cast<uint64_t>(static_cast<uint8_t>(pf.wrap)));
     }
     return h;
 }

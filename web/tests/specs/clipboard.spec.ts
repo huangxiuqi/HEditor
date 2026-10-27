@@ -1,5 +1,5 @@
 // 剪贴板：复制粘贴在同一个实例里要保真（文字、段落、控件、表格），跨实例也要保真；
-// 从别的应用粘过来的纯文本按行拆段。
+// 从别的应用粘过来的纯文本按行拆段。对象选区（选中的图片）走同一条复制剪切命令。
 //
 // 判据只看文档内容与控件集合，不比像素：剪贴板是内容层的功能，帧上的差异由别的 spec 管。
 // 载荷来自一次 Worker 往返；复制出来的结构必须与源一致。
@@ -359,5 +359,34 @@ test.describe('剪贴板', () => {
       check('★ 异源：文本相同也不认（不拿旧格式覆盖新内容）', originRule.other === true,
             JSON.stringify(originRule));
     }
+  });
+});
+
+test.describe('对象选区', () => {
+  test('点中图片之后能复制、能剪切，剪切一步撤销回得来', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' } });
+    const r = await p.read<any>(`
+      await H.setText('甲乙丙丁');
+      await H.setCaret({ para: 0, offset: 2 });
+      await H.flush();
+      const data = new Uint8Array(64 * 48 * 4).fill(160);
+      await H.registerImage({ id: 'pic', width: 64, height: 48, data });
+      await H.insertImage({ resourceId: 'pic', pxWidth: 64, pxHeight: 48 });
+      await H.flush();
+      await H.selectImage(0);
+      const copied = await H.copy();
+      const kept = (await H.images()).length;
+      const cut = await H.cut();
+      await H.flush();
+      const afterCut = (await H.images()).length;
+      await H.undo();
+      await H.flush();
+      const afterUndo = (await H.images()).length;
+      return { copied, kept, cut, afterCut, afterUndo };`);
+    check('★ 选中图片后复制成功（不再报"没有选中内容"）', r.copied === true, String(r.copied));
+    check('复制不动文档（图还在）', r.kept === 1, String(r.kept));
+    check('★ 选中图片后剪切成功，图被删掉', r.cut === true && r.afterCut === 0,
+          r.cut + ' / ' + r.afterCut);
+    check('★ 剪切一步撤销，图回来了', r.afterUndo === 1, String(r.afterUndo));
   });
 });

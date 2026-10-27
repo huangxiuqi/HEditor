@@ -729,10 +729,15 @@ bool moveSelectionTo(float x_pt, float y_pt) {
 }
 
 /**
- * 把一张图片搬到点上（一次事务，撤销一步）。
+ * 拖动搬运的落点指示：这一点上松手会插在哪（页内磅）。只读，不动光标与选区。
  */
-bool moveImageTo(int index, float x_pt, float y_pt) {
-    return g_engine.moveImageToPtAndRender(index, x_pt, y_pt);
+std::string dropSpot(float x_pt, float y_pt) { return g_engine.dropSpotJson(x_pt, y_pt); }
+
+/**
+ * 把一张图片搬到点上（一次事务，撤销一步）。两个坐标是落点，dx / dy 是拖动位移。
+ */
+bool moveImageTo(int index, float x_pt, float y_pt, int relative, float dx_pt, float dy_pt) {
+    return g_engine.moveImageToPtAndRender(index, x_pt, y_pt, relative != 0, dx_pt, dy_pt);
 }
 
 /**
@@ -2198,6 +2203,7 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("selectParaAt", &selectParaAt);
     emscripten::function("moveSelectionTo", &moveSelectionTo);
     emscripten::function("moveImageTo", &moveImageTo);
+    emscripten::function("dropSpot", &dropSpot);
     emscripten::function("setImageLayout", &setImageLayout);
     emscripten::function("watermarkJson", &watermarkJson);
     emscripten::function("setWatermark", &setWatermark);

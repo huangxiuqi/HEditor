@@ -1,8 +1,8 @@
-// 格式判据：字符格式（粗/斜/下划线/字号）与段落格式（行距）都要真的落到文档上，
+// 格式判据：字符格式（粗/斜/下划线/字号）、段落格式（行距）与文档水印都要落到文档上，
 // 能在工具栏那套公开面上读写回来，并且画面真的跟着变。
 //
-// 前几类判据读的是文档与几何，最后一类必须比像素：改了格式但画面不重画时，命令返回 true、
-//   读回的值也对、增量产物还等于全量 —— 只有像素能看见"没重画"（§ 画面重画那一条）。
+// 字符与段落那一半读文档与几何；水印与"改完格式画面重画"必须比像素：改了但画面不重画时，
+//   命令返回 true、读回的值也对、增量产物还等于全量 —— 只有像素能看见"没重画"。
 import { createHash } from 'node:crypto';
 
 import { check } from '../support/check';
@@ -10,6 +10,19 @@ import { test } from '../support/probe';
 
 // 页面里的公共入口。
 const D = 'window.__demo';
+
+/**
+ * 帧里"有墨"的像素数：任一通道低于阈值就算画了东西。
+ *
+ * 水印是半透明灰，压在纸面上是浅灰 —— 阈值取 200 时它仍然算墨（纸面是 255）。
+ */
+const INK = `
+  const f = await D.rawFrame();
+  let ink = 0;
+  for (let i = 0; i + 3 < f.length; i += 4) {
+    if (f[i] < 200 || f[i + 1] < 200 || f[i + 2] < 200) ++ink;
+  }
+  return ink;`;
 
 test.describe('格式', () => {
   test('字符格式：加粗落到标记上，一次撤销退掉', async ({ open }) => {
@@ -201,7 +214,7 @@ test.describe('格式', () => {
 
   test('整段改字重/斜体：增量排版必须跟全量一致', async ({ open }) => {
     // 这一条挡的是"改完画面上没变、动一下字号才跟着变"：文本没动、run 边界也没动时，
-    //   整形缓存若把字重漏在指纹之外，就会拿上一轮的字形接着排。自审是唯一能当场
+    //   整形缓存若把字重漏在指纹之外，就会拿旧字形的排版结果接着用。自审是唯一能当场
     //   看见这件事的判据（它拿运行时排版跟一次全量重排逐字形比）。
     const p = await open('index.html', { query: { debug: '1' } });
     const r = await p.ev<any>(`
@@ -384,5 +397,49 @@ test.describe('格式', () => {
       return { ok, mark };`);
     check('空选区返回 false（没有可改的字符）', r.ok === false, String(r.ok));
     check('附近的文字没被改粗', r.mark.bold !== true, JSON.stringify(r.mark));
+  });
+});
+
+test.describe('文档水印', () => {
+  test('水印：设上去画得出来，关掉就回去，一步撤销', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' } });
+    await p.read<any>(`
+      await H.setText('正文一二三四五六七八九十');
+      await H.flush();
+      await D.stopBlink();`);
+    const before = await p.read<any>(`return { st: await H.watermark(), ink: await (async () => {${INK}})() };`);
+    check('前置：还没有水印', before.st.enabled === false, JSON.stringify(before.st));
+
+    await p.read<any>(`
+      await H.setWatermark({ enabled: true, text: '内部资料', sizePt: 48 });
+      await H.flush();
+      await D.stopBlink();
+      return true;`);
+    const after = await p.read<any>(`return { st: await H.watermark(), ink: await (async () => {${INK}})() };`);
+    check('★ 水印设上去了，读回文字与开关',
+          after.st.enabled === true && after.st.text === '内部资料',
+          JSON.stringify(after.st));
+    check('★ 水印真的画进了帧（墨迹像素变多）', Number(after.ink) > Number(before.ink) + 500,
+          `无 ${before.ink} → 有 ${after.ink}`);
+
+    // 关掉：墨迹回落到原位（±60 容许抗锯齿与光标相位的差别）。
+    await p.read<any>(`
+      await H.setWatermark({ enabled: false });
+      await H.flush();
+      await D.stopBlink();
+      return true;`);
+    const off = await p.read<any>(`return { st: await H.watermark(), ink: await (async () => {${INK}})() };`);
+    check('关掉之后水印不画了', off.st.enabled === false, JSON.stringify(off.st));
+    check('★ 关掉之后墨迹回到原样（差 ' + String(Number(off.ink) - Number(before.ink)) + '）',
+          Math.abs(Number(off.ink) - Number(before.ink)) < 60,
+          `${before.ink} → ${off.ink}`);
+
+    // 一步撤销：回到"开着"。
+    const undone = await p.read<any>(`
+      await H.undo();
+      await H.flush();
+      return await H.watermark();`);
+    check('★ 一步撤销把水印开回来', undone.enabled === true && undone.text === '内部资料',
+          JSON.stringify(undone));
   });
 });

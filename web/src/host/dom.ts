@@ -238,6 +238,16 @@ export interface DomHost {
   invalidatePages(): void;
 
   /**
+   * 缩放前后停在同一个文档位置（按密度折算 scrollTop）。
+   *
+   * 换缩放时页的 CSS 尺寸整体乘一个倍率，而滚动位置记的是 CSS 像素 —— 不折算的话
+   *   读者正在看的那一段会跑掉；引擎那边把滚动位置归零过一次的话，画面直接弹回开头。
+   * @param before 缩放前的密度（设备像素 / 磅）
+   * @param after 缩放后的密度
+   */
+  keepScrollAcrossZoom(before: number, after: number): Maybe<boolean>;
+
+  /**
    * 只是一次重贴（配置类命令改的是光栅签名，不是内容）。
    */
   repaint(): Maybe<any>;
@@ -457,6 +467,8 @@ export function createDomHost(o: DomHostOptions): DomHost {
   let ready = false;
   let busy = false;
   let caretOn = true;
+  // 拖动搬运期间把闪的那颗光标收起来：它与落点竖条同时出现时，页面上就是"两个光标"。
+  let caretHidden = false;
   let blinkTimer = 0;
   let lastCaretKey = '';
   let lastSelKey = '';
@@ -875,6 +887,9 @@ export function createDomHost(o: DomHostOptions): DomHost {
   //   松手才提交一次 —— 拖动过程中每帧提交会重排重画整张表，撤销栈也会留下几十步。
 
   let guideEl: HTMLElement | null = null;
+  let dropEl: HTMLElement | null = null;
+  let dropRaf = 0;
+  let hoverRaf = 0;
 
   /**
    * 指示线元素（懒建）。绝对定位在页容器上，不接指针事件。
@@ -890,6 +905,25 @@ export function createDomHost(o: DomHostOptions): DomHost {
     el.style.zIndex = '3';
     pagesEl.appendChild(el);
     guideEl = el;
+    return el;
+  }
+
+  /**
+   * 拖动搬运的落点竖条。与格线指示线同一层（页容器里的绝对定位 div）。
+   * @returns 那个元素（首次调用时创建）
+   */
+  function dropBar(): HTMLElement {
+    if (dropEl && dropEl.isConnected) return dropEl;
+    const el = document.createElement('div');
+    el.style.position = 'absolute';
+    // 与正文光标同一个样子：拖动期间闪的那颗光标是隐起来的，这一条就是"松手插在哪"，
+    //   两者形状不同的话会读成"页面上有两个光标"。
+    el.style.background = '#1a1a1a';
+    el.style.pointerEvents = 'none';
+    el.style.display = 'none';
+    el.style.zIndex = '4';
+    pagesEl.appendChild(el);
+    dropEl = el;
     return el;
   }
 
@@ -1083,6 +1117,60 @@ export function createDomHost(o: DomHostOptions): DomHost {
     setCursor: (cursor) => {
       pagesEl.style.cursor = cursor || 'text';
     },
+    /**
+     * 把正文光标连相位一起收/放（拖动搬运时用）。
+     *
+     * 只改相位不呈现是看不见的：光标画在页位图之上，得重画一次那一小块它才消失。
+     * 拖动一趟只调两次（起手收起、松手放回），这点代价换来"页面上只有一个光标"。
+     * @param on true = 显示（恢复闪烁），false = 收起
+     */
+    setCaretPhase: (on: boolean) => {
+      caretHidden = !on;
+      caretOn = on;
+      writeOp('phase', { on });
+      if (on) resetBlink();
+      return repaint();
+    },
+    /**
+     * 拖动搬运的落点指示：一条竖线，说明"松手会插在这儿"。
+     *
+     * 拖动过程中指针可能停在任意位置（包括页边距与页间空白），判定归引擎（它算得
+     *   出插入位置），这里只负责画。按帧节流：每次移动都问一次会让拖动发滞。
+     * @param pt 指针位置（文档设备像素）；null 表示收起
+     */
+    dropMark: (pt: { x: number; y: number } | null) => {
+      const el = dropBar();
+      if (pt === null) {
+        if (dropRaf) {
+          cancelAnimationFrame(dropRaf);
+          dropRaf = 0;
+        }
+        el.style.display = 'none';
+        return null;
+      }
+      if (dropRaf) return null;
+      dropRaf = requestAnimationFrame(() => {
+        dropRaf = 0;
+        const p = docPt(pt.x, pt.y);
+        void then1(read('dropSpot', { x: p.x, y: p.y }), (r: any) => {
+          if (!r || typeof r.page !== 'number') {
+            el.style.display = 'none';
+            return;
+          }
+          const g = view();
+          const step = g.ph + g.gap;
+          // 宽度取光标自己的（磅 x 密度 = 设备像素，与 caretRectPx 同一个式子）：
+          //   写死一个 2px 比正文光标粗一档，看起来像另一个东西。
+          const wPt = typeof r.w === 'number' && r.w > 0 ? r.w : 1.5;
+          el.style.width = Math.max(1, Math.ceil(wPt * zoom.density) / dpr()) + 'px';
+          el.style.left = Math.round(cssOf(r.x, 0).x) + 'px';
+          el.style.top = Math.round((r.page * step + r.y * zoom.density) / dpr()) + 'px';
+          el.style.height = Math.max(8, Math.round(r.h * zoom.density / dpr())) + 'px';
+          el.style.display = 'block';
+        });
+      });
+      return null;
+    },
     capturePointer: () => {
       if (lastPointerId === null) return;
       try {
@@ -1206,7 +1294,7 @@ export function createDomHost(o: DomHostOptions): DomHost {
     caretOn = true;
     if (blinkTimer) clearInterval(blinkTimer);
     blinkTimer = window.setInterval(() => {
-      if (!ready || busy || disposed || input.composing) return;
+      if (!ready || busy || disposed || input.composing || caretHidden) return;
       caretOn = !caretOn;
       writeOp('phase', { on: caretOn });
       void repaint();
@@ -1372,6 +1460,49 @@ export function createDomHost(o: DomHostOptions): DomHost {
 
   scroller.addEventListener('scroll', onScroll, { passive: true });
 
+  /**
+   * 指针停在哪就换什么形状：格线上是拖列宽 / 行高，图片把手是缩放，图身上是搬走。
+   *
+   * 没有这一步，"这里能拖"完全看不出来 —— 格线只有细细一条，与正文的文字区
+   *   长得一样。判定复用命中（它一次就把格线三格与图片把手带回来），按帧节流；
+   *   按键状态下不判（那时输入层已经在拖，光标由它管）。
+   * @param ev 鼠标移动
+   */
+  function onHoverCursor(ev: MouseEvent): void {
+    if (!ready || disposed) return;
+    if (typeof ev.buttons === 'number' && ev.buttons !== 0) return;
+    if (hoverRaf) return;
+    const px = pointAt(ev.clientX, ev.clientY);
+    if (!px) return;
+    hoverRaf = requestAnimationFrame(() => {
+      hoverRaf = 0;
+      void then1(hitAt(px.x, px.y), (h) => {
+        if (!h) {
+          pagesEl.style.cursor = 'text';
+          return;
+        }
+        if (typeof h.img === 'number' && h.img >= 0) {
+          // 八个把手按方位给形状：角上是斜双箭头，边上是单轴双箭头。
+          const cursors = ['nwse-resize', 'ns-resize', 'nesw-resize', 'ew-resize',
+                           'nwse-resize', 'ns-resize', 'nesw-resize', 'ew-resize'];
+          const k = typeof h.imgHandle === 'number' ? h.imgHandle : -1;
+          pagesEl.style.cursor = k >= 0 ? cursors[k] ?? 'default' : 'move';
+          return;
+        }
+        if (typeof h.gridCol === 'number' && h.gridCol > 0) {
+          pagesEl.style.cursor = 'col-resize';
+          return;
+        }
+        if (typeof h.gridRow === 'number' && h.gridRow >= 0) {
+          pagesEl.style.cursor = 'row-resize';
+          return;
+        }
+        pagesEl.style.cursor = 'text';
+      });
+    });
+  }
+  pagesEl.addEventListener('mousemove', onHoverCursor, { passive: true });
+
   const stopDprWatch = armDprWatch((next) => {
     if (!ready || disposed) return;
     if (next === zoom.dpr) return;
@@ -1413,6 +1544,15 @@ export function createDomHost(o: DomHostOptions): DomHost {
       pages.sync(g.first, g.count, g.totalPages, g);
     },
     invalidatePages: () => pages.invalidate(),
+    keepScrollAcrossZoom: (before: number, after: number) => {
+      if (!(before > 0) || !(after > 0) || before === after) return false;
+      // 折算的是"页顶之上那一段边距之下"的部分：上边距是骨架给的固定 CSS 值，
+      //   不随缩放变，跟着乘倍率会把页整体推下来一截。
+      const docTop = docScrollTop();
+      const prevTop = scroller.scrollTop;
+      scroller.scrollTop = Math.max(0, docTop * (after / before)) + pagesEl.offsetTop;
+      return nudgeViewport(prevTop);
+    },
     repaint,
     finish,
     afterEdit,

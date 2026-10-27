@@ -1,7 +1,9 @@
-// 编辑面（七）：选区与移动族、编辑入口吃选区、拖选、光标与选区样式。
+// 编辑面（七）：选区与移动族、编辑入口吃选区、拖选、光标与选区样式、
+// 选区粒度（词与段）与拖拽搬运。
 //
 // 选区是引擎里的一等状态，不是宿主自己记的两对数：扩展只动焦点端、别的定位
 // 一律折叠、上下键跨短行保住列位、矩形与反白都从同一个真源导出。
+// 粒度决定一次连击选中多少，搬运是选区上的第二条命令路径 —— 两者都要真指针走一遍。
 
 import { check } from '../support/check';
 import { test } from '../support/probe';
@@ -483,7 +485,7 @@ test.describe('编辑面：选区与样式', () => {
     check('★ 抬手之后拖选收尾（诊断面回到不在拖）', d20 && d20.active === false,
               JSON.stringify(d20));
 
-    // (j) 抬起事件丢了也要收尾：用户报过"有时鼠标都松开了还在拖"。
+    // (j) 抬起事件丢了也要收尾，否则拖选状态一直留着。
     //   真实成因都是"页面收不到 mouseup"（在浏览器窗口之外松手、被别的窗口抢走、
     //   被浏览器接管成原生拖放），那些场景 CDP 造不出来。能造的是它的后果：
     //   移动事件里已经带着"按钮抬起了"。
@@ -705,5 +707,177 @@ test.describe('编辑面：选区与样式', () => {
   }
 
     await finishEdit(probe, consoleErrors, state);
+  });
+});
+
+test.describe('编辑面：选区粒度', () => {
+  test('真鼠标：单击不选、双击选词、三击选段', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' } });
+    // 两段：第一段纯汉字（整类连着走），第二段拉丁文（按空格与字母分词的边界更清楚）。
+    const geo = await p.read<any>(`
+      await H.setText('甲乙丙丁\\none two three');
+      await H.flush();
+      await H.setCaret({ para: 1, offset: 5 });
+      await H.flush();
+      await D.stopBlink();
+      const cv = FRAME(), r = cv.getBoundingClientRect();
+      const q = CARET();
+      return { left: r.left, top: r.top, sx: r.width / cv.width, sy: r.height / cv.height,
+               x: q.x, y: q.y, h: q.h };`);
+    const at = { x: geo.left + geo.x * geo.sx, y: geo.top + (geo.y + geo.h / 2) * geo.sy };
+
+    // 单击：没有选区（连击计数从这里起算，下面两下才是第二、第三击）。
+    await p.page.mouse.click(at.x, at.y);
+    await p.page.waitForTimeout(80);
+    const one = await p.read<any>(`return SEL();`);
+    check('单击不产生选区', one.empty === true, JSON.stringify(one));
+
+    // 第二击：选词。'two' 是三个字母。
+    await p.page.mouse.click(at.x, at.y);
+    await p.page.waitForTimeout(80);
+    const two = await p.read<any>(`return SEL();`);
+    check('★ 双击选词：选中的就是这个词（3 个字母）',
+          two.empty === false && Math.abs(Number(two.focus) - Number(two.anchor)) === 3,
+          JSON.stringify(two));
+
+    // 第三击：选整段。'one two three' 整段 13 个字符，明显多于一个词。
+    await p.page.mouse.click(at.x, at.y);
+    await p.page.waitForTimeout(80);
+    const three = await p.read<any>(`return { sel: SEL(), text: await H.text() };`);
+    const len = Math.abs(Number(three.sel.focus) - Number(three.sel.anchor));
+    check('★ 三击选整段：选区远长于一个词', three.sel.empty === false && len >= 13,
+          `长度 ${len} / ${JSON.stringify(three.text)}`);
+    check('三击不越出这一段（还是 2 段）', String(three.text).split('\n').length === 2,
+          JSON.stringify(three.text));
+  });
+});
+
+test.describe('编辑面：拖拽搬运', () => {
+  test('真鼠标：按住选中的文字拖到别处（一步撤销）', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' } });
+    // 用两处光标坐标算出"按住哪儿、放到哪儿"：起点在选区里，终点在段末。
+    const geo = await p.read<any>(`
+      await H.setText('abcdef');
+      await H.flush();
+      const at = async (off) => {
+        await H.setCaret({ para: 0, offset: off });
+        await H.flush();
+        const q = CARET();
+        return { x: q.x, y: q.y, h: q.h };
+      };
+      const cv = FRAME(), r = cv.getBoundingClientRect();
+      await D.stopBlink();
+      return { left: r.left, top: r.top, sx: r.width / cv.width, sy: r.height / cv.height,
+               o2: await at(2), o3: await at(3), o4: await at(4), o6: await at(6) };`);
+    const P = (q: any) => ({
+      x: geo.left + q.x * geo.sx,
+      y: geo.top + (q.y + q.h / 2) * geo.sy,
+    });
+
+    // 先用真鼠标拖出 "cd"（off 2 → 4）。
+    const a = P(geo.o2);
+    const b = P(geo.o4);
+    await p.page.mouse.move(a.x, a.y);
+    await p.page.mouse.down();
+    await p.page.mouse.move(b.x, b.y, { steps: 4 });
+    await p.page.mouse.up();
+    await p.page.waitForTimeout(120);
+    const sel = await p.read<any>(`return SEL();`);
+    check('前置：拖出了两个字', sel.empty === false && Math.abs(sel.focus - sel.anchor) === 2,
+          JSON.stringify(sel));
+
+    // 按住选区中间（off 3，离上一次按下够远，不会被当成双击）拖到段末。
+    const from = P(geo.o3);
+    const to = P(geo.o6);
+    await p.page.mouse.move(from.x, from.y);
+    await p.page.mouse.down();
+    await p.page.mouse.move(to.x + 20, to.y, { steps: 6 });
+    await p.page.mouse.up();
+    await p.page.waitForTimeout(200);
+    const moved = await p.read<any>(`return await H.text();`);
+    check('★ 选中的两个字搬到了段末（abefcd）', moved === 'abefcd', JSON.stringify(moved));
+
+    const undone = await p.read<any>(`
+      await H.undo();
+      await H.flush();
+      return await H.text();`);
+    check('★ 一步撤销把搬走的字放回原处', undone === 'abcdef', JSON.stringify(undone));
+  });
+
+  test('拖动搬运：只留一个落点指示，跟着指针走，松手就收起', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' }, viewport: { width: 1200, height: 900 } });
+    const geo = await p.read<any>(`
+      await H.setText('一二三四五六七八九十\\n甲乙丙丁戊己庚辛壬癸');
+      await H.flush();
+      await D.stopBlink();
+      const at = async (para, offset) => {
+        await H.setCaret({ para, offset });
+        await H.flush();
+        const c = CARET();
+        return { x: c.x, y: c.y, h: c.h };
+      };
+      const a = await at(0, 1);
+      const b = await at(0, 5);
+      const d = await at(1, 3);
+      const fr = FRAME().getBoundingClientRect();
+      return { a, b, d, left: fr.left, top: fr.top };`);
+    const P = (q: any) => ({ x: geo.left + q.x + 1, y: geo.top + q.y + q.h / 2 });
+    const a = P(geo.a);
+    const b = P(geo.b);
+    // 先拖选一段（a → b），松手。
+    await p.page.mouse.move(a.x, a.y);
+    await p.page.mouse.down();
+    await p.page.mouse.move(b.x, b.y, { steps: 6 });
+    await p.page.mouse.up();
+    await p.page.waitForTimeout(250);
+    const sel = await p.read<any>(`return SEL();`);
+    check('先拖出一段选区', sel.empty === false, JSON.stringify(sel));
+
+    // 再按住选区中间往外拖：这一下才算"搬"。
+    await p.page.mouse.move((a.x + b.x) / 2, a.y);
+    await p.page.mouse.down();
+    await p.page.mouse.move((a.x + b.x) / 2 + 26, a.y, { steps: 4 });
+    await p.page.waitForTimeout(200);
+    const mid = await p.read<any>(`
+      const divs = [...EL('.heditor-pages').children].filter((e) => e.tagName === 'DIV');
+      const st = CARET();
+      return { bars: divs.map((e) => ({ d: e.style.display, l: e.style.left, t: e.style.top })),
+               caretVisible: CARET().visible, stats: D.editStats().caretVisible };`);
+    const shown = mid.bars.filter((x: any) => x.d === 'block');
+    check('★ 拖动中有一个落点竖条', shown.length === 1, JSON.stringify(mid.bars));
+    check('★ 拖动中闪的那颗光标收起来了（页面上只有一个光标）',
+          mid.caretVisible === false && mid.stats === false,
+          mid.caretVisible + ' / ' + mid.stats);
+    // 与编辑光标一样宽：宽一档就会读成"另一个东西"。
+    const width = await p.read<any>(`
+      const bar = [...EL('.heditor-pages').children].find(
+        (e) => e.tagName === 'DIV' && e.style.display === 'block');
+      const caretW = CARET().w / (H.geometry().dpr || 1);
+      return { bar: bar ? parseFloat(getComputedStyle(bar).width) : -1, caret: caretW };`);
+    check('★ 落点竖条与编辑光标一样宽', Math.abs(width.bar - width.caret) <= 1,
+          width.bar + ' vs ' + width.caret);
+
+    // 落点跟着指针走：拖到第二段上，竖条也要往下。
+    const firstTop = shown.length ? Number(String(shown[0].t).replace('px', '')) : -1;
+    await p.page.mouse.move(P(geo.d).x, P(geo.d).y, { steps: 6 });
+    await p.page.waitForTimeout(200);
+    const mid2 = await p.read<any>(`
+      const divs = [...EL('.heditor-pages').children].filter((e) => e.tagName === 'DIV');
+      return divs.filter((e) => e.style.display === 'block').map((e) => e.style.top);`);
+    check('★ 落点竖条跟着指针走（换到第二段之后往下移）',
+          mid2.length === 1 && Number(String(mid2[0]).replace('px', '')) > firstTop,
+          firstTop + ' → ' + JSON.stringify(mid2));
+
+    await p.page.mouse.up();
+    await p.page.waitForTimeout(300);
+    const after = await p.read<any>(`
+      const divs = [...EL('.heditor-pages').children].filter((e) => e.tagName === 'DIV');
+      return { bars: divs.map((e) => e.style.display), caret: CARET().visible,
+               text: await H.selectAllText() };`).catch(async () => p.read<any>(`
+      const divs = [...EL('.heditor-pages').children].filter((e) => e.tagName === 'DIV');
+      return { bars: divs.map((e) => e.style.display), caret: CARET().visible };`));
+    check('★ 松手之后落点竖条收起', after.bars.every((d: string) => d === 'none'),
+          JSON.stringify(after.bars));
+    check('松手之后光标回到可见', after.caret === true, String(after.caret));
   });
 });

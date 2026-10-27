@@ -1465,8 +1465,14 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       if (changed.zoom !== undefined) {
         const dpr = window.devicePixelRatio || 1;
         const density = next.zoom * (4 / 3) * dpr;
+        // 先记下旧密度：dom.zoom.set 之后就读不到它了，而折算滚动位置要用这个比值。
+        const prevDensity = dom.zoom.density;
         dom.zoom.set(density);
-        steps.push(() => settleAfter('zoom', { zoom: density, dpr }));
+        steps.push(() =>
+          then1(settleAfter('zoom', { zoom: density, dpr }), () =>
+            dom.keepScrollAcrossZoom(prevDensity, density),
+          ),
+        );
       }
       if (changed.page !== undefined) {
         const dims = paperSizePt(next.page.paper, next.page.landscape, next.page.custom);

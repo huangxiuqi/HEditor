@@ -684,22 +684,35 @@ public:
     bool moveSelectionToPtAndRender(float x_pt_doc, float y_pt_doc);
 
     /**
-     * 把一张图片搬到这个点上（同样一次事务）。
+     * 把一张图片搬到落点上（同样一次事务）。
+     *
+     * 拖动时同时给两种数：落点（x / y，指针在哪）与位移（dx / dy，从按下到松手走了多远）。
+     *   浮动图吃位移 —— 鼠标抓在图身哪一点都行，整张图跟着指针走；行内图吃落点 ——
+     *   它插进文字流的哪个位置，只能由指针那一点命中出来。两件事不能合成一个数：
+     *   把位移加到图的原点上，落点会落在图自己身上（从右边缘起手时偏了整整一张图）。
      * @param index 图片下标
      * @param x_pt_doc 文档横坐标（磅）
      * @param y_pt_doc 文档纵坐标（磅）
+     * @param relative true = 这是一次拖动（浮动图改用 dx / dy）
+     * @param dx_pt 横向位移（磅）
+     * @param dy_pt 纵向位移（磅）
      * @return true = 搬了
      */
-    bool moveImageToPt(int index, float x_pt_doc, float y_pt_doc);
+    bool moveImageToPt(int index, float x_pt_doc, float y_pt_doc, bool relative = false,
+                       float dx_pt = 0.0f, float dy_pt = 0.0f);
 
     /**
      * 搬图片 + 重排 + 呈现。
      * @param index 图片下标
      * @param x_pt_doc 文档横坐标（磅）
      * @param y_pt_doc 文档纵坐标（磅）
+     * @param relative true = 这是一次拖动（浮动图改用 dx / dy）
+     * @param dx_pt 横向位移（磅）
+     * @param dy_pt 纵向位移（磅）
      * @return true = 搬了
      */
-    bool moveImageToPtAndRender(int index, float x_pt_doc, float y_pt_doc);
+    bool moveImageToPtAndRender(int index, float x_pt_doc, float y_pt_doc, bool relative = false,
+                                float dx_pt = 0.0f, float dy_pt = 0.0f);
 
     /**
      * 改一张图的版式：0 行内、1 四周型、2 上下型、3 衬于文字下方、4 浮于文字上方。
@@ -712,6 +725,18 @@ public:
      * @return true = 改了（幂等时也成立）
      */
     bool setImageLayout(int index, int layout);
+
+    /**
+     * 反算一张图相对锚段第一行行顶与内容区左边的偏移（行内 -> 浮动时用）。
+     *
+     * 反算的目标是"位置不动"：改环绕方式只该改文字的流法，不该让图跳到段首。
+     * @param id 图片节点
+     * @param rects 它当前的几何（页内磅，images() 里那一条）
+     * @param dx 写回横向偏移（磅）
+     * @param dy 写回纵向偏移（磅）
+     * @return 反算成功
+     */
+    bool floatOffsetsFor(NodeId id, const std::vector<PageRect>& rects, float* dx, float* dy) const;
 
     /**
      * 改版式 + 重排 + 呈现。浮动与否会改断行，所以必须重排。
@@ -1642,6 +1667,18 @@ public:
      * @return JSON（键见 docs/api/payloads.json 的 tableGrid）
      */
     std::string tableGridJson(float x_pt_doc, float y_pt_doc) const;
+
+    /**
+     * 落点指示：这一点上"松手会把东西插在哪"的竖条矩形（页内像素）。
+     *
+     * 拖动搬运（选区或图片）时画它。只读 —— 不改光标、不动选区：正在被搬的那一段
+     * 必须保持选中，落了光标就等于把它丢下，拖到一半东西就没了。
+     *
+     * @param x_pt_doc 文档坐标 x（磅）
+     * @param y_pt_doc 文档坐标 y（磅）
+     * @return JSON（键见 docs/api/payloads.json 的 dropSpot；没有落点时为 null）
+     */
+    std::string dropSpotJson(float x_pt_doc, float y_pt_doc) const;
 
     /**
      * 这一点是不是压在表格内部的某条格线上（拖列宽 / 行高用）。
@@ -3009,6 +3046,16 @@ private:
     uint64_t tablePieceDigest(int page) const;
 
     /**
+     * 一页上的浮动图摘要：几何（页内框）与环绕方式。
+     *
+     * 绘制读的就是这几个数（见 engine_paint.cpp 的 emitFloats）。不混图片内容 ——
+     *   换资源由光栅签名里的资源代际负责，那一层会整窗作废。
+     * @param page 页号
+     * @returns 摘要（没有浮动图的页等于 FNV 基值）
+     */
+    uint64_t floatPieceDigest(int page) const;
+
+    /**
      * 把 [first_page, 末页) 直接标成"与已画那一版不同"，不去哈希。
      *
      * 用在后缀整体平移那一级：后缀的每一行都沿块轴挪了位，于是它在的每一页内容都变了 ——
@@ -3795,6 +3842,25 @@ private:
      * 已画那一版的页数（表格摘要数组的规模）。
      */
     int table_fp_prev_count_ = 0;
+
+    /**
+     * 每页的浮动图摘要（下标 = 页号）。
+     *
+     * 浮动图不占行盒，行带看不见它：把一张图从行内改成四周型，锚段那几行确实变了，
+     *   可图本身落在行带之外 —— 行带只重画那一条，图上那一块留着旧像素（"图还在老
+     *   位置"）；把图改回行内时同理，旧图永远擦不掉。摘要变了的页一律整页重画。
+     */
+    std::vector<uint64_t> float_fp_new_;
+
+    /**
+     * 已经画成像素的那一版浮动图摘要。
+     */
+    std::vector<uint64_t> float_fp_prev_;
+
+    /**
+     * 已画那一版的页数（浮动图摘要数组的规模）。
+     */
+    int float_fp_prev_count_ = 0;
 
     /**
      * 本次重画那条行带的页内磅范围（computeBand 写、rasterIntoBitmap 读）。

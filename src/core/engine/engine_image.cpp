@@ -114,6 +114,29 @@ void appendFrameBars(const Rect& r, float t, std::vector<Rect>* out) {
     out->push_back(Rect{r.x + w - t, r.y, t, h});
 }
 
+/**
+ * 文档纵坐标 -> 块轴纵坐标（磅）。
+ *
+ * 页号按宿主摆页用的像素步距折，与 hitTestPt 同一口径：磅步距是未取整的页高，
+ *   用它会随页号累积误差（2000 段文档第 160 页上偏下几十像素）。
+ * @param cfg 引擎配置（取缩放与页度量）
+ * @param page_px_h 页位图高度（设备像素）
+ * @param gap_px 页间隙（设备像素）
+ * @param y_doc 文档纵坐标（磅）
+ * @returns 块轴纵坐标（分页下 = 页号 x 页高 + 页内；连页下是那个绝对 y）
+ */
+float docToFlowY(const EngineConfig& cfg, int page_px_h, int gap_px, float y_doc) {
+    const float zoom = cfg.zoom;
+    const int step_px = page_px_h + gap_px;
+    if (!(zoom > 0.0f) || step_px <= 0) return y_doc;
+    const float y_px = y_doc * zoom;
+    const int page = std::max(0, static_cast<int>(std::floor(y_px / static_cast<float>(step_px))));
+    const float local = (y_px - static_cast<float>(page) * static_cast<float>(step_px)) / zoom;
+    // 连页下的"页"是渲染条带（页高 + 页间隙），分页下就是页高 —— 排版层用的是同一套。
+    const float stride = cfg.page.continuous ? cfg.page.slabHeightPt() : cfg.page.height_pt;
+    return static_cast<float>(page) * stride + local;
+}
+
 }  // namespace
 
 bool EditorEngine::registerImage(const std::string& id, int width, int height, const uint8_t* rgba,
@@ -547,15 +570,10 @@ bool EditorEngine::previewImageResizeAndRender(int index, float w_pt, float h_pt
  */
 int EditorEngine::dragKindAt(const TextPos& p, int side, const ImageHit& ih) const {
     if (!loaded_) return 0;
-    // 图片那半：按在已选中的图的图身上（不是把手上）才是"搬这张图"。
-    //   把手要缩放，按住它再拖是改变尺寸，不是搬家。
-    if (ih.index >= 0 && ih.handle < 0 && image_sel_ != kInvalidNodeId) {
-        for (const ImageBox& b : images()) {
-            if (b.index != ih.index) continue;
-            if (b.id == image_sel_) return 2;
-            break;
-        }
-    }
+    // 图片那半：按在图身上（不是把手上）就是"搬这张图"，选没选中都算 ——
+    //   先点一下选中再拖，那第二下会落在连击窗口里，按"已选中"卡的话，
+    //   想拖一张图就得先等半秒。把手要缩放，按住它再拖是改尺寸，不是搬家。
+    if (ih.index >= 0 && ih.handle < 0) return 2;
     // 文字那半：按在选区内部才是"搬这段字"。
     //   起点那一格不算内部 —— 从选区开头起手往外拖，用户表达的是"从这里重新选"，
     //   把这一下判成搬家，就再也拖不出反向选区（判据里"拖出去再拖回来收成空"
@@ -607,7 +625,8 @@ bool EditorEngine::moveSelectionToPtAndRender(float x_pt_doc, float y_pt_doc) {
 /**
  * 把一张图片搬到点上。搬完之后节点换了 id，对象选区收起来 —— 光标落在图片之后。
  */
-bool EditorEngine::moveImageToPt(int index, float x_pt_doc, float y_pt_doc) {
+bool EditorEngine::moveImageToPt(int index, float x_pt_doc, float y_pt_doc, bool relative,
+                                 float dx_pt, float dy_pt) {
     if (!session_.has_value()) return false;
     NodeId id = kInvalidNodeId;
     ImageSpec spec;
@@ -624,6 +643,41 @@ bool EditorEngine::moveImageToPt(int index, float x_pt_doc, float y_pt_doc) {
         break;
     }
     if (!found) return false;
+    // 浮动图的拖动是"挪偏移"，不是"换锚点"：换锚点会让图在段落之间跳，
+    //   而它本来就可以停在任意位置（衬于文字下方那种更没处可锚）。
+    if (spec.anchor == ImageAnchor::Float) {
+        float anchor_flow = 0.0f;
+        bool anchored = false;
+        for (const LayoutFloat& f : floats_) {
+            if (f.handle != id) continue;
+            for (const LineBox& lb : layout_.lines) {
+                if (lb.paragraph != f.para) continue;
+                const float stride =
+                    cfg_.page.continuous ? cfg_.page.slabHeightPt() : cfg_.page.height_pt;
+                const float at = static_cast<float>(lb.page) * stride + lb.block_lo_pt;
+                if (!anchored || at < anchor_flow) {
+                    anchor_flow = at;
+                    anchored = true;
+                }
+            }
+            break;
+        }
+        if (!anchored) return false;
+        ImageSpec next = spec;
+        if (relative) {
+            // 拖动浮动图：偏移跟着指针走，锚点不动 —— 图不会在段落之间跳。
+            next.dx_pt = spec.dx_pt + dx_pt;
+            next.dy_pt = spec.dy_pt + dy_pt;
+        } else {
+            next.dx_pt = x_pt_doc - cfg_.page.margins.left;
+            next.dy_pt = docToFlowY(cfg_, pagePxHeight(), pageGapPx(), y_pt_doc) - anchor_flow;
+        }
+        if (!edit_.setImageSpec(id, next)) return false;
+        markAllLayoutDirty();
+        clearImageSelection();
+        return true;
+    }
+    // 行内图吃落点：插到文字流的哪里，只能由指针那一点命中出来。
     TextPos p{};
     int side = 0;
     if (!hitTestPt(x_pt_doc, y_pt_doc, &p, nullptr, &side, nullptr, nullptr, true)) return false;
@@ -637,8 +691,30 @@ bool EditorEngine::moveImageToPt(int index, float x_pt_doc, float y_pt_doc) {
     return true;
 }
 
-bool EditorEngine::moveImageToPtAndRender(int index, float x_pt_doc, float y_pt_doc) {
-    if (!moveImageToPt(index, x_pt_doc, y_pt_doc)) return false;
+std::string EditorEngine::dropSpotJson(float x_pt_doc, float y_pt_doc) const {
+    TextPos p{};
+    int side = 0;
+    if (!hitTestPt(x_pt_doc, y_pt_doc, &p, nullptr, &side, nullptr, nullptr, true)) {
+        return pk::checked(pk::drop_spot::kSpec, "null");
+    }
+    int page = -1;
+    Rect r{};
+    if (!caret_.caretRectFor(p, &page, &r)) return pk::checked(pk::drop_spot::kSpec, "null");
+    std::ostringstream o;
+    o.setf(std::ios::fixed);
+    o.precision(2);
+    // 磅（页内）：宿主按自己的密度折成 CSS，不必在这边再乘一次缩放。
+    // w 是光标自己的宽度：落点指示要和编辑光标长得一模一样，宽度只能问它要 ——
+    //   宿主按自己的缩放乘一遍，两边才会落在同样的设备像素上。
+    o << "{\"page\":" << page << ",\"x\":" << (r.x + r.w * 0.5f) << ",\"y\":" << r.y
+      << ",\"h\":" << r.h << ",\"w\":" << r.w << ",\"para\":" << p.para
+      << ",\"offset\":" << p.offset << "}";
+    return pk::checked(pk::drop_spot::kSpec, o.str());
+}
+
+bool EditorEngine::moveImageToPtAndRender(int index, float x_pt_doc, float y_pt_doc, bool relative,
+                                          float dx_pt, float dy_pt) {
+    if (!moveImageToPt(index, x_pt_doc, y_pt_doc, relative, dx_pt, dy_pt)) return false;
     relayout();
     repaintAfterEdit();
     return true;
@@ -646,6 +722,10 @@ bool EditorEngine::moveImageToPtAndRender(int index, float x_pt_doc, float y_pt_
 
 /**
  * 改版式：把菜单上的四档翻译成"锚定方式 + 环绕方式"两个字段。
+ *
+ * 从行内改成浮动时，位置不动：图在段落中间就在段落中间。否则一次"改成四周型"
+ *   会让图跳到段首，读者以为图丢了。做法是按当前几何反算 dx / dy（相对锚段
+ *   第一行行顶与内容区左边），排完之后它落的还是原处。
  */
 bool EditorEngine::setImageLayout(int index, int layout) {
     if (!loaded_) return false;
@@ -680,9 +760,77 @@ bool EditorEngine::setImageLayout(int index, int layout) {
             default:
                 return false;
         }
-        return edit_.setImageSpec(b.id, next);
+        // 浮动 -> 浮动只换环绕方式，偏移一个字节都不动（图就留在原地）；
+        //   行内 -> 浮动才需要反算偏移。反算不出来（图还没排过版）就退回 0。
+        if (s->anchor != ImageAnchor::Float && next.anchor == ImageAnchor::Float) {
+            float dx = 0.0f;
+            float dy = 0.0f;
+            if (floatOffsetsFor(b.id, b.rects, &dx, &dy)) {
+                next.dx_pt = dx;
+                next.dy_pt = dy;
+            }
+        }
+        if (!edit_.setImageSpec(b.id, next)) return false;
+        // 环绕方式改的是断行，而"图落在哪一页"可能整个变了：整篇重排一次，
+        //   别指望块哈希算出来的损伤区间（它看得见行、看不见图的落点）。
+        markAllLayoutDirty();
+        return true;
     }
     return false;
+}
+
+/**
+ * 反算一张图"相对锚段第一行行顶与内容区左边"的偏移，用于把它从行内改成浮动。
+ * @param id 图片节点
+ * @param rects 它当前的几何（页内磅）
+ * @param dx 写回横向偏移
+ * @param dy 写回纵向偏移
+ * @returns 反算成功（图排过版、锚段也有行盒）
+ */
+bool EditorEngine::floatOffsetsFor(NodeId id, const std::vector<PageRect>& rects, float* dx,
+                                   float* dy) const {
+    if (dx == nullptr || dy == nullptr || rects.empty()) return false;
+    // 锚段：浮动图取编译结果里的锚段，行内图取它所在的那一行。
+    int para = -1;
+    for (const LayoutFloat& f : floats_) {
+        if (f.handle == id) {
+            para = f.para;
+            break;
+        }
+    }
+    if (para < 0) {
+        for (const LineBox& lb : layout_.lines) {
+            for (size_t ci = 0; ci < lb.clusters.size(); ++ci) {
+                Rect r;
+                if (!imageClusterRect(lb, lb.clusters[ci], ci, &r)) continue;
+                if (static_cast<uint64_t>(lb.clusters[ci].owner_control) != id) continue;
+                para = lb.paragraph;
+                break;
+            }
+            if (para >= 0) break;
+        }
+    }
+    if (para < 0) return false;
+    // 锚段第一行：行盒按块轴自上而下，第一条属于这一段的就是它。
+    const LineBox* first = nullptr;
+    for (const LineBox& lb : layout_.lines) {
+        if (lb.paragraph != para) continue;
+        if (first == nullptr) {
+            first = &lb;
+            continue;
+        }
+        const float a = static_cast<float>(lb.page) * cfg_.page.height_pt + lb.block_lo_pt;
+        const float b0 = static_cast<float>(first->page) * cfg_.page.height_pt + first->block_lo_pt;
+        if (a < b0) first = &lb;
+    }
+    if (first == nullptr) return false;
+    const float stride = cfg_.page.continuous ? cfg_.page.slabHeightPt() : cfg_.page.height_pt;
+    const float anchor_flow = static_cast<float>(first->page) * stride + first->block_lo_pt;
+    const PageRect& pr = rects.front();
+    const float img_flow = static_cast<float>(pr.page) * stride + pr.r_pt.y;
+    *dx = pr.r_pt.x - cfg_.page.margins.left;
+    *dy = img_flow - anchor_flow;
+    return true;
 }
 
 bool EditorEngine::setImageLayoutAndRender(int index, int layout) {

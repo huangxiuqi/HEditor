@@ -405,4 +405,17 @@ inline constexpr KeySpec kKeys[] = {
 inline constexpr PayloadSpec kSpec{"contextTarget", kKeys, static_cast<int>(std::size(kKeys)), false};
 }  // namespace context_target
 
+namespace drop_spot {
+inline constexpr KeySpec kKeys[] = {
+    {"page", "num", false},
+    {"x", "num", false},
+    {"y", "num", false},
+    {"h", "num", false},
+    {"w", "num", false},
+    {"para", "num", false},
+    {"offset", "num", false},
+};
+inline constexpr PayloadSpec kSpec{"dropSpot", kKeys, static_cast<int>(std::size(kKeys)), true};
+}  // namespace drop_spot
+
 }  // namespace pk

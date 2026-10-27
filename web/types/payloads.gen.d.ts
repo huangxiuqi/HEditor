@@ -315,6 +315,16 @@ export interface ContextTarget {
   image: number;
 }
 
+export interface DropSpot {
+  page: number;
+  x: number;
+  y: number;
+  h: number;
+  w: number;
+  para: number;
+  offset: number;
+}
+
 /** 载荷名 -> 形状。readPayload() 用它做运行时校验。 */
 export interface Payloads {
   caretStyle: CaretStyle;
@@ -340,6 +350,7 @@ export interface Payloads {
   tableGrid: TableGrid;
   tableState: TableState;
   contextTarget: ContextTarget;
+  dropSpot: DropSpot;
 }
 
 export type PayloadName = keyof Payloads;

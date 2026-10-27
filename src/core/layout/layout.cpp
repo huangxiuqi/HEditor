@@ -856,14 +856,59 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
     float last_space_after = 0.0f;
 
     /**
-     * 生效中的浮动框（页内坐标）。它们跨段生效，直到自己的底边过去为止。
+     * 块轴纵坐标：分页下 = 页号 x 页高 + 页内 y，连页下就是那个绝对 y。
+     *
+     * 浮动框必须记在这一套里而不是页内：它可能横跨两条带（连页）或跨页（分页），
+     *   而"这一行落不落在框上"是一句纵向区间比较 —— 记成页内坐标就得多判页号，
+     *   漏一处就是"第二页起浮动框完全不生效"。页号由它现算，不另存。
+     * @param pg 页号（分页下用；连页下 y 已经是绝对的，页号不参与）
+     * @param y 页内 y（连页下传绝对 y）
+     * @returns 块轴纵坐标
+     */
+    const float page_stride = cont ? slab : page.height_pt;
+    auto flowY = [&](int pg, float y) -> float {
+        return cont ? y : (static_cast<float>(pg) * page_stride + y);
+    };
+
+    /**
+     * 块轴纵坐标 -> 页号。
+     * @param f 块轴纵坐标
+     * @returns 页号（不小于 0）
+     */
+    auto flowPage = [&](float f) -> int {
+        if (!(page_stride > 0.0f)) return page_index;
+        return std::max(0, static_cast<int>(std::floor(f / page_stride)));
+    };
+
+    /**
+     * 块轴纵坐标 -> 页内 y。
+     * @param pg 页号
+     * @param f 块轴纵坐标
+     * @returns 页内 y（磅）
+     */
+    auto flowLocal = [&](int pg, float f) -> float {
+        return f - static_cast<float>(pg) * page_stride;
+    };
+
+    /**
+     * 生效中的浮动框（块轴坐标）。它们跨段生效，直到自己的下沿过去为止。
      */
     struct LiveFloat {
+        /**
+         * 左沿与右沿（页内 x，磅）。
+         */
         float x0 = 0.0f;
         float x1 = 0.0f;
-        float y0 = 0.0f;
-        float y1 = 0.0f;
-        int page = 0;
+
+        /**
+         * 上沿与下沿（块轴 y，磅）。
+         */
+        float f0 = 0.0f;
+        float f1 = 0.0f;
+
+        /**
+         * 四周型（让两侧）还是上下型（整行下推）。
+         */
         bool square = false;
     };
 
@@ -872,38 +917,36 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
      */
     constexpr float kFloatGapPt = 6.0f;
 
+    // 有浮动图时排版整篇重来（引擎侧 must_full），所以"预先判页"这条规则只在这里成立。
+    const bool wrap_floats = !floats.empty();
     std::vector<LiveFloat> live_floats;
     // floats 按 (para, cp) 升序（编译层保证），游标一路往下走。
     size_t float_cursor = 0;
 
     /**
-     * 把某个锚段的浮动框放上版面：纵向位置 = 该段第一行的行顶 + dy。
+     * 把一个浮动框放上版面：横向左沿 = 内容区左边 + dx，纵向上沿 = 锚段第一行行顶 + dy。
+     *
+     * dx 是"相对内容区左边"，不是"相对版心居中"：居中之后一张宽图两侧各留一条，
+     *   文字只能走一侧，另一侧就空着（看起来像"图跑到了段中间"）。左对齐是 Word
+     *   的默认（列、0 偏移），也让"图在右、文字在左"这种排法真的出现。
      * @param para 当前段号
-     * @param anchor_top 该段第一行的行顶（分页下是页内坐标，连页下是绝对块轴）
      * @param content_x 内容区左边
-     * @param content_w 内容区宽度
-     * @param cur_page 当前页号（连页下按纵向位置重算）
+     * @param anchor_flow 该段第一行行顶的块轴纵坐标
      */
-    auto placeFloatsForPara = [&](int para, float anchor_top, float content_x, float content_w,
-                                  int cur_page) {
+    auto placeFloatsForPara = [&](int para, float content_x, float anchor_flow) {
         if (floats.empty()) return;
         for (; float_cursor < floats.size(); ++float_cursor) {
             const LayoutFloat& f = floats[float_cursor];
             if (f.para > para) break;
             if (f.para < para) continue;
             if (!(f.w_pt > 0.0f) || !(f.h_pt > 0.0f)) continue;
-            const float y_abs = anchor_top + f.dy_pt;
-            int pg = cur_page;
-            float y_in = y_abs;
-            if (cont) {
-                pg = slabOfY(y_abs);
-                y_in = locY(pg, y_abs);
-            }
+            const float f0 = anchor_flow + f.dy_pt;
+            const int pg = flowPage(f0);
             PlacedFloat pf;
             pf.handle = f.handle;
             pf.page = pg;
-            pf.x = content_x + (content_w - f.w_pt) * 0.5f + f.dx_pt;
-            pf.y = y_in;
+            pf.x = content_x + f.dx_pt;
+            pf.y = flowLocal(pg, f0);
             pf.w = f.w_pt;
             pf.h = f.h_pt;
             pf.wrap = f.wrap;
@@ -914,9 +957,8 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
                 LiveFloat lf;
                 lf.x0 = pf.x;
                 lf.x1 = pf.x + pf.w;
-                lf.y0 = pf.y;
-                lf.y1 = pf.y + pf.h;
-                lf.page = pg;
+                lf.f0 = f0;
+                lf.f1 = f0 + pf.h;
                 lf.square = (f.wrap == ImageWrap::Square);
                 live_floats.push_back(lf);
             }
@@ -924,16 +966,15 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
     };
 
     /**
-     * 清掉已经过去的浮动框：页更靠前、或本页上底边已经在当前行顶之上。
-     * @param at_y 当前行顶（页内磅）
+     * 清掉已经过去的浮动框：下沿已经在当前行顶之上。
+     * @param at_flow 当前行顶的块轴纵坐标
      */
-    auto pruneFloats = [&](float at_y) {
+    auto pruneFloats = [&](float at_flow) {
         if (live_floats.empty()) return;
         std::vector<LiveFloat> keep;
         keep.reserve(live_floats.size());
         for (const LiveFloat& lf : live_floats) {
-            if (lf.page < page_index) continue;
-            if (lf.page == page_index && lf.y1 < at_y) continue;
+            if (lf.f1 < at_flow) continue;
             keep.push_back(lf);
         }
         live_floats.swap(keep);
@@ -1696,7 +1737,10 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
                 lb.ascent_pt = line.ascent;
                 lb.descent_pt = line.descent;
                 lb.advance_pt = line.line_h;
-                lb.inline_origin_pt = cur_cx;
+                // 行内起点就是这一行的落笔位置（四周型环绕时它是让开图之后的那一条边）：
+                //   写成 cur_cx 的话，光标与选区会落在"没让开图"的地方，而字画在让开之后
+                //   的位置 —— 选中一个字，矩形却在图的另一边。
+                lb.inline_origin_pt = row_x;
                 // 画括号用：字体与基线（横排下字形原点的 y 就是基线）。
                 // 字体必须是块的主字体（= 上面算占位槽宽那个 bracketAdvancePt 的来源），
                 //   换个字体画括号，字形 advance 就和槽宽对不上了。
@@ -1782,96 +1826,141 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
             // 本段的浮动框在段首行顶着落；段首行若被翻页推走，它们跟着平移。
             const size_t live_base = live_floats.size();
             const size_t placed_base = res.placed_floats.size();
-            const float anchor_y = cursor_y;
-            placeFloatsForPara(static_cast<int>(para_index), anchor_y, cur_cx, cur_cw, page_index);
+            // 锚点用块轴纵坐标记（分页下是"页号 + 页内"，连页下就是绝对 y）：
+            //   段首行可能被翻页推走，而"推走多少"必须在同一套坐标里才加得对。
+            const int anchor_page = page_index;
+            float anchor_flow = wrap_floats ? flowY(anchor_page, cursor_y) : cursor_y;
+            placeFloatsForPara(static_cast<int>(para_index), cur_cx, anchor_flow);
 
             float top = cursor_y;
             float prev_line_h = block_line_h;  // 上一行的行高：本行行顶由它推进
             bool anchor = true;                // 段首或刚翻过页：本行按 cursor_y 重新定位
             bool first_line = true;
+            // 段首行一旦被翻页推走，本段的浮动框跟着平移一次（图随段走）。
+            //   只平一次：第二趟重推时位置已经对齐，再平就会把自己越推越远。
+            bool floats_shifted = false;
             size_t start_cl = 0;
             while (start_cl < bs.clusters.size()) {
-                float line_top = anchor ? cursor_y : top + prev_line_h;
-                // 上下型：行顶落在框的纵向区间里就整行下推到框底。几轮就收敛 ——
-                //   框之间可以上下相接，推一次之后可能又落进下一个框。
-                for (int guard = 0; guard < 4; ++guard) {
-                    bool pushed = false;
-                    for (const LiveFloat& lf : live_floats) {
-                        if (lf.page != page_index || lf.square) continue;
-                        if (line_top + 0.5f >= lf.y1 || line_top + block_line_h <= lf.y0) continue;
-                        line_top = lf.y1;
-                        pushed = true;
-                    }
-                    if (!pushed) break;
-                }
-                // 四周型：这一行让开框所占的那一侧。取空间更大的那一侧 —— 框贴着版心
-                //   一边时文字自然走另一边，框居中时按"哪边宽走哪边"落，读起来不变扭。
+                // 行顶先算成分页无关的块轴纵坐标，再依次过四道关：翻页、浮动框随段走、
+                //   上下型下推、四周型取宽。四道都在块轴上做，最后折回页内坐标画字 ——
+                //   分页的"页底"与连页的"带底"于是只是同一个式子的两种取值。
+                //
+                //   没有浮动图时不做这套换算：块轴坐标在分页下是
+                //   "页号 x 页高 + 页内"，再减回去会有浮点误差（第 190 页上末位差 0.008 磅），
+                //   而增量排版的后缀平移是按行高逐行累加的 —— 两边差一点点，
+                //   auditLayout 就整篇对不上。没有浮动图时这里与改造前逐位相同。
+                float line_top = anchor ? cursor_y : (top + prev_line_h);
+                float line_flow = wrap_floats ? flowY(page_index, line_top) : line_top;
                 float row_x = cur_cx;
                 float row_w = cur_cw;
-                for (const LiveFloat& lf : live_floats) {
-                    if (lf.page != page_index || !lf.square) continue;
-                    if (line_top + 0.5f >= lf.y1 || line_top + block_line_h <= lf.y0) continue;
-                    const float left_space = lf.x0 - cur_cx;
-                    const float right_space = (cur_cx + cur_cw) - lf.x1;
-                    if (right_space >= left_space) {
-                        row_x = lf.x1 + kFloatGapPt;
-                        row_w = (cur_cx + cur_cw) - row_x;
-                    } else {
-                        row_x = cur_cx;
-                        row_w = left_space - kFloatGapPt;
+                BrokenLine line{};
+                // 最多两趟：第一趟按本段行高估着定位，断完发现本行更高、放不下就换页再来。
+                for (int attempt = 0; attempt < 2; ++attempt) {
+                    // 本页放不下就翻页。只在有浮动图时预先判：那时排版本来就是整篇
+                    //   重来（must_full），多一次提前判不会与"后缀整体平移"打架；
+                    //   没有浮动图时提前判会引入一条平移路径复现不出来的规则
+                    //   （平移是整段搬坐标，不会重新回答"这一行放不放得下"），
+                    //   于是增量结果与全量重排对不上（auditLayout 会红）。
+                    if (!cont && tstack.empty() && wrap_floats) {
+                        const int pg = flowPage(line_flow);
+                        const float local = flowLocal(pg, line_flow);
+                        if (pg > page_index || local + block_line_h > cy + ch) {
+                            page_index = std::max(page_index + 1, pg);
+                            cursor_y = cy;
+                            line_flow = flowY(page_index, cy);
+                            anchor = true;
+                        }
                     }
-                }
-                // 让到最后一行放不下几个字了：退回整宽。宁可压在图上，也不排成一列单字。
-                if (!(row_w > 24.0f)) {
+                    // 段首行被翻页推走：本段的浮动框整体平移（否则图留在上一页）。
+                    if (wrap_floats && first_line && !floats_shifted) {
+                        const float shift = line_flow - anchor_flow;
+                        if (std::fabs(shift) > 0.01f) {
+                            for (size_t k = live_base; k < live_floats.size(); ++k) {
+                                live_floats[k].f0 += shift;
+                                live_floats[k].f1 += shift;
+                            }
+                            for (size_t k = placed_base; k < res.placed_floats.size(); ++k) {
+                                PlacedFloat& pf = res.placed_floats[k];
+                                const float f0 = flowY(pf.page, pf.y) + shift;
+                                pf.page = flowPage(f0);
+                                pf.y = flowLocal(pf.page, f0);
+                            }
+                            anchor_flow = line_flow;
+                            floats_shifted = true;
+                        }
+                    }
+                    // 上下型：行顶落在框的纵向区间里就整行下推到框底。几轮就收敛 ——
+                    //   框之间可以上下相接，推一次之后可能又落进下一个框。
+                    for (int guard = 0; guard < 4; ++guard) {
+                        bool pushed = false;
+                        for (const LiveFloat& lf : live_floats) {
+                            if (lf.square) continue;
+                            if (line_flow + 0.5f >= lf.f1 || line_flow + block_line_h <= lf.f0) {
+                                continue;
+                            }
+                            line_flow = lf.f1;
+                            pushed = true;
+                        }
+                        if (!pushed) break;
+                    }
+                    // 被推到本页放不下的位置：换页重新落。框留在它自己那一页（或上一条带），
+                    //   新页上不必再让 —— 这里只往前走一次，不再触发段首行平移。
+                    if (!cont && tstack.empty() && wrap_floats) {
+                        const int pg = flowPage(line_flow);
+                        const float local = flowLocal(pg, line_flow);
+                        if (pg > page_index || local + block_line_h > cy + ch) {
+                            page_index = std::max(page_index + 1, pg);
+                            cursor_y = cy;
+                            line_flow = flowY(page_index, cy);
+                            anchor = true;
+                        }
+                    }
+                    // 四周型：这一行让开框所占的那一侧。取空间更大的那一侧 —— 框贴着版心
+                    //   一边时文字自然走另一边，框居中时按"哪边宽走哪边"落，读起来不变扭。
                     row_x = cur_cx;
                     row_w = cur_cw;
+                    for (const LiveFloat& lf : live_floats) {
+                        if (!lf.square) continue;
+                        if (line_flow + 0.5f >= lf.f1 || line_flow + block_line_h <= lf.f0) {
+                            continue;
+                        }
+                        const float left_space = lf.x0 - cur_cx;
+                        const float right_space = (cur_cx + cur_cw) - lf.x1;
+                        if (right_space >= left_space) {
+                            row_x = lf.x1 + kFloatGapPt;
+                            row_w = (cur_cx + cur_cw) - row_x;
+                        } else {
+                            row_x = cur_cx;
+                            row_w = left_space - kFloatGapPt;
+                        }
+                    }
+                    // 让到最后连几个字都放不下：退回整宽。宁可压在图上，也不排成一列单字。
+                    if (!(row_w > 24.0f)) {
+                        row_x = cur_cx;
+                        row_w = cur_cw;
+                    }
+                    if (wrap_floats) line_top = cont ? line_flow : flowLocal(page_index, line_flow);
+                    line = breakLine(bs, cluster_metric, start_cl, row_w, b.size_pt, b.line_factor);
+                    // 本行自己的高度才作数：上一行结束时还不知道本行多高，拿段行高估会
+                    //   漏判（下一行更高时溢出页底）。连页下没有页底这一条，整段短路。
+                    if (cont || !tstack.empty() || line_top + line.line_h <= cy + ch) break;
+                    ++page_index;
+                    cursor_y = cy;
+                    line_top = cy;
+                    if (wrap_floats) line_flow = flowY(page_index, cy);
+                    anchor = true;
                 }
-
-                const BrokenLine line =
-                    breakLine(bs, cluster_metric, start_cl, row_w, b.size_pt, b.line_factor);
-                const float line_h = line.line_h;
-
-                // 本行放不下就翻页。判定必须用本行自己的高度：上一行结束时还不知道
-                //   本行多高，拿上一行的高度估会漏判（下一行更高时溢出页底）。
-                //   连页下这一整条短路：内容一列连到底，行照样往前排（跨条带也不断）。
-                if (anchor) {
-                    // 段首那一行：本段从 cursor_y 起排。
-                    if (!cont && tstack.empty() && cursor_y + line_h > cy + ch) {
-                        ++page_index;
-                        cursor_y = cy;
-                    }
-                    top = cursor_y;
-                    anchor = false;
-                } else {
-                    top = line_top;
-                    if (!cont && tstack.empty() && top + line_h > cy + ch) {
-                        ++page_index;
-                        cursor_y = cy;
-                        top = cursor_y;
-                    }
-                }
-                // 段首行被翻页推走：本段刚放的浮动框整体平移到新位置（否则它们留在上一页）。
-                if (first_line && std::fabs(top - anchor_y) > 0.01f) {
-                    const float dy_shift = top - anchor_y;
-                    for (size_t k = live_base; k < live_floats.size(); ++k) {
-                        live_floats[k].y0 += dy_shift;
-                        live_floats[k].y1 += dy_shift;
-                        live_floats[k].page = page_index;
-                    }
-                    for (size_t k = placed_base; k < res.placed_floats.size(); ++k) {
-                        res.placed_floats[k].y += dy_shift;
-                        res.placed_floats[k].page = page_index;
-                    }
-                }
+                top = line_top;
+                anchor = false;
                 placeLine(line, top, top + line.ascent, row_x, row_w);
-                prev_line_h = line_h;
+                prev_line_h = line.line_h;
                 first_line = false;
                 if (line.end <= start_cl) break;  // 兜底：断不出新行时不要死循环
                 start_cl = line.end;
                 ++line_total;
             }
             cursor_y = top + prev_line_h + b.space_after_pt;
-            pruneFloats(cursor_y);
+            pruneFloats(wrap_floats ? flowY(page_index, cursor_y) : cursor_y);
 
         } else {
             // 竖排

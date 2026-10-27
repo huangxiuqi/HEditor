@@ -1119,6 +1119,41 @@
           "kind": "num"
         }
       ]
+    },
+    "dropSpot": {
+      "cxx": "dropSpotJson",
+      "file": "src/core/engine/engine_image.cpp",
+      "partial": true,
+      "keys": [
+        {
+          "name": "page",
+          "kind": "num"
+        },
+        {
+          "name": "x",
+          "kind": "num"
+        },
+        {
+          "name": "y",
+          "kind": "num"
+        },
+        {
+          "name": "h",
+          "kind": "num"
+        },
+        {
+          "name": "w",
+          "kind": "num"
+        },
+        {
+          "name": "para",
+          "kind": "num"
+        },
+        {
+          "name": "offset",
+          "kind": "num"
+        }
+      ]
     }
   }
 }

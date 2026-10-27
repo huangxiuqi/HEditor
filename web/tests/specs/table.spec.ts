@@ -1,8 +1,9 @@
-// 表格判据：跨页切片之后，续排片段必须仍然是"点得到、选得中、画得对"的一片。
+// 表格判据：跨页切片之后，续排片段必须仍然是"点得到、选得中、画得对"的一片；
+// 列宽行高由格线拖动改，改完表宽与相邻列的和都不变。
 //
 // 为什么单独一份：切片是排版层唯一一处"同一条行盒换到另一页"的地方，行盒、字形与
 //   格框三者的页号必须一起走。它错了的时候命令全部返回成功、增量与全量自审也全绿
-//   （两边共用同一份错），只有"点一下、看一眼像素"能发现 —— 这一份就按这两件事写。
+//   （两边共用同一份错），只有"点一下、看一眼像素"能发现。
 //
 // 两把尺子要分清：caret().rect 是设备像素，selection().rects 是磅（现状如此，
 //   见 types.ts 里这两个类型下面各写各的）。凡是要送进 diag.hit 的坐标都先折成磅。
@@ -466,5 +467,101 @@ test.describe('表格：跨页切片', () => {
     check('★ 第二行位置上也有墨（字画在第二行）', r.cell2row2 > 8,
           JSON.stringify({ row2: r.cell2row2, cell: r.cell2, img: r.img, tw: r.tableWidth }));
     check('★ 每次击键都是增量重排', r.fulls === 0, String(r.fulls));
+  });
+});
+
+test.describe('表格拖拽', () => {
+  test('表格：栅格查得出来，拖列宽只换两列之间的地方', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' } });
+    const pre = await p.read<any>(`
+      await H.setText('表前');
+      await H.flush();
+      await H.insertTable({ rows: 2, cols: 2 });
+      await H.flush();
+      // 光标进第一格：格几何从 tableGrid 拿。
+      await H.setCaret({ para: 1, offset: 0 });
+      await H.flush();
+      const box = await H.images();
+      const q = CARET();
+      const Z = ZOOM();
+      const grid = await H.tableGrid(q.x / Z + 4, q.y / Z + 4);
+      return { grid, w0: grid.cols[1] - grid.cols[0], table: grid.table, before: await H.text() };`);
+    check('前置：栅格查得出来（两列三条边界）',
+          pre.grid.ok === true && pre.grid.cols.length === 3, JSON.stringify(pre.grid));
+
+    const res = await p.read<any>(`
+      const g = ${JSON.stringify(pre.grid)};
+      const w = g.w;
+      await H.setTableColWidths(g, [w * 0.25, w * 0.75]);
+      await H.flush();
+      const again = await H.tableGrid(g.cols[0] + g.x + 2, g.rows[0].y + 2);
+      const end = await H.tableGrid(g.x + g.w - 2, g.rows[0].y + 2);
+      return { again, end, w };`);
+    const c = res.again.cols;
+    check('★ 拖完之后第一条内部边界挪到 1/4 处',
+          Math.abs(c[1] - c[0] - Number(res.w) * 0.25) < 1.0,
+          JSON.stringify(c));
+    check('★ 表宽没变（相邻两列和不变）',
+          Math.abs(c[2] - c[0] - Number(res.w)) < 1.0,
+          `表宽 ${res.w} → ${c[2] - c[0]}`);
+
+    // 反向：列数对不上要拒绝（多一条少一条都会把表排歪）。
+    const bad = await p.read<any>(`
+      const g = ${JSON.stringify(pre.grid)};
+      let threw = false;
+      try { await H.setTableColWidths(g, [100]); } catch (e) { threw = true; }
+      return threw;`);
+    check('列宽数量与栅格不符时拒绝', bad === true, String(bad));
+
+    // 行高：行记录的 heightPt 落成"不小于"。
+    const row = await p.read<any>(`
+      await H.setTableRow({ heightPt: 60, heightRule: 'atLeast' });
+      await H.flush();
+      const g = ${JSON.stringify(pre.grid)};
+      const again = await H.tableGrid(g.x + 4, g.rows[0].y + 4);
+      return again.rows[0].h;`);
+    check('★ 行高钉到 60 磅之后，这一页量出来也不小于 60',
+          Number(row) >= 59.0, String(row));
+  });
+
+  test('压在表格内部格线上换光标：列边界 col-resize、行边界 row-resize', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' }, viewport: { width: 1200, height: 900 } });
+    const geo = await p.read<any>(`
+      await H.setText('甲乙丙丁');
+      await H.setCaret({ para: 0, offset: 4 });
+      await H.flush();
+      await H.insertTable({ rows: 2, cols: 3 });
+      await H.flush();
+      for (const pg of [1, 2, 3]) {
+        await H.setCaret({ para: pg, offset: 0 });
+        await H.flush();
+        await H.type('X');
+        await H.flush();
+      }
+      await H.setCaret({ para: 1, offset: 1 });
+      await H.flush();
+      const c = CARET();
+      const z = ZOOM();
+      const docY = (c.page * Math.round(H.geometry().page.h) + c.y) / z;
+      const grid = await H.tableGrid(c.x / z, docY);
+      const fr = FRAME().getBoundingClientRect();
+      return { grid, z, left: fr.left, top: fr.top };`);
+    const g = geo.grid;
+    check('拿到表格栅格', !!g && g.ok === true, JSON.stringify(g));
+    if (!g || !g.ok) return;
+    const colX = geo.left + (g.x + g.cols[1]) * geo.z;
+    const rowY = geo.top + (g.rows[0].y + g.rows[0].h) * geo.z;
+    await p.page.mouse.move(colX - 1, geo.top + (g.rows[0].y + g.rows[0].h / 2) * geo.z);
+    await p.page.waitForTimeout(160);
+    const colCur = await p.read<any>(`return EL('.heditor-pages').style.cursor;`);
+    check('★ 压在列边界上：光标变成 col-resize', colCur === 'col-resize', colCur);
+    await p.page.mouse.move(colX - 40, rowY - 1);
+    await p.page.waitForTimeout(160);
+    const rowCur = await p.read<any>(`return EL('.heditor-pages').style.cursor;`);
+    check('★ 压在行边界上：光标变成 row-resize', rowCur === 'row-resize', rowCur);
+    await p.page.mouse.move(colX - 40, rowY - 12);
+    await p.page.waitForTimeout(160);
+    const textCur = await p.read<any>(`return EL('.heditor-pages').style.cursor;`);
+    check('格子里还是文本光标（不是全页都变成拖拽形）', textCur === 'text', textCur);
   });
 });

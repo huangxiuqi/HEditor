@@ -215,6 +215,20 @@ export interface InputEnv {
   clearImagePreview?(): Maybe<any>;
 
   /**
+   * 拖动搬运期间把正文光标收起来（页面上只留一个落点指示）。
+   * @param on false = 收起，true = 放回并恢复闪烁
+   */
+  setCaretPhase?(on: boolean): Maybe<unknown>;
+
+  /**
+   * 拖动搬运的落点提示：一条竖线，说明松手会插在哪。
+   *
+   * 只画提示，不动光标与选区 —— 被搬的那一段必须一直保持选中。
+   * @param pt 指针位置（文档设备像素）；null 表示收起
+   */
+  dropMark?(pt: { x: number; y: number } | null): Maybe<unknown>;
+
+  /**
    * 表格边界拖拽：指针落在内部格线上就由宿主接管（返回真），此后不落光标。
    *
    * 整条拖拽都归宿主：它要画指示线、把指针增量换算成磅，而那些都是"画面上的
@@ -721,7 +735,9 @@ export function createInput(env: InputEnv): InputLayer {
       //   只认单击之后的拖动：第二下、第三下落在一个已有的选区里是常态（双击选词、
       //   三击选段的第一下就已经把光标摆在那儿了），把它们判成搬家，双击就再也选
       //   不出词、三击也选不出段 —— 连击的意图比"搬"明确得多。
-      if (count === 1 && h && typeof h.drag === 'number' && h.drag > 0) {
+      // 图片不受连击计数限制：点在图上没有"双击选词"这回事，第二下照样该能拖。
+      const imageDrag = !!h && h.drag === 2;
+      if ((count === 1 || imageDrag) && h && typeof h.drag === 'number' && h.drag > 0) {
         armDrag(false);
         move.arm(h);
         return null;
@@ -818,10 +834,17 @@ export function createInput(env: InputEnv): InputLayer {
     const setCursor = (c: string): void => {
       if (typeof env.setCursor === 'function') env.setCursor(c);
     };
+    let caret_muted = false;
     const detach = (): void => {
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
       setCursor('');
+      // 落点竖条是"松手会插在这儿"的提示，手势一结束就收起；藏起来的那颗光标放回去。
+      if (typeof env.dropMark === 'function') env.dropMark(null);
+      if (caret_muted && typeof env.setCaretPhase === 'function') {
+        caret_muted = false;
+        env.setCaretPhase(true);
+      }
     };
     /**
      * 收尾：没动过就按单击落点，动过就落地一次搬运。
@@ -836,9 +859,19 @@ export function createInput(env: InputEnv): InputLayer {
         return;
       }
       const dest = env.docPt(last);
+      // 拖图发的是位移而不是落点：鼠标抓在图身上哪一点都行，要的是整张图
+      //   跟着指针走多远（发落点的话，图会有一个"左上角跳到指针"的瞬移）。
+      const from = env.docPt(start);
       const done =
         h.drag === 2 && typeof h.dragImage === 'number'
-          ? env.write('moveImage', { i: h.dragImage, x: dest.x, y: dest.y })
+          ? env.write('moveImage', {
+              i: h.dragImage,
+              x: dest.x,
+              y: dest.y,
+              dx: dest.x - from.x,
+              dy: dest.y - from.y,
+              rel: 1,
+            })
           : env.write('moveSelection', { x: dest.x, y: dest.y });
       keep(
         then1(done, (changed) => {
@@ -863,8 +896,17 @@ export function createInput(env: InputEnv): InputLayer {
         const dy = p.y - start.y;
         if (dx * dx + dy * dy < kMoveSlop * kMoveSlop) return;
         moved = true;
+        // 真开始拖了才换成搬移光标并收起闪的那颗 —— 按下就看手形会把"点一下"也读成"拖"。
+        setCursor('move');
+        if (typeof env.setCaretPhase === 'function') {
+          caret_muted = true;
+          env.setCaretPhase(false);
+        }
       }
       last = p;
+      // 被搬的东西还留在原处（选区不塌、图不移动），指针下面单独画一条竖线说明
+      //   落点 —— 这是拖动过程中唯一能看见"松手会发生什么"的东西。
+      if (moved && hit !== null && typeof env.dropMark === 'function') env.dropMark(p);
     };
     const onUp = (): void => {
       released = true;
@@ -877,7 +919,6 @@ export function createInput(env: InputEnv): InputLayer {
       arm(h: Hit): void {
         if (settled) return;
         hit = h;
-        setCursor('move');
         // 抬手已经先到了：这一下当场收尾（否则它永远等不到第二次抬手）。
         if (released) settle();
       },

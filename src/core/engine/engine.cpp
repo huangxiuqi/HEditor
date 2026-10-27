@@ -339,6 +339,23 @@ ClipCopy EditorEngine::copySelection() const {
         return out;
     }
     if (!caret_.hasSelection()) {
+        // 选中的图片是一份"对象选区"：它不是文本区间，但复制 / 剪切对它同样成立。
+        //   不认它的话，点中一张图按 Ctrl+C 会说"没有选中内容" —— 而画面上明明选着。
+        if (image_sel_ != kInvalidNodeId) {
+            const rev::Node* n = rev::findNode(document(), image_sel_);
+            if (n != nullptr && n->kind == NodeKind::Image) {
+                const std::vector<NodeSpec> nodes{rev::toSpec(*n)};
+                const rev::ClipWriteResult w = rev::writeFragment(nodes, fontWriteOptions());
+                if (!w.ok) {
+                    out.error = w.error;
+                    return out;
+                }
+                out.fragment = w.text;
+                out.html = w.html;
+                out.ok = true;
+                return out;
+            }
+        }
         out.error = "没有选中内容";
         return out;
     }
@@ -403,7 +420,14 @@ std::string EditorEngine::pastePlainText(const std::string& utf8) {
     return std::string();
 }
 
-bool EditorEngine::deleteSelection() { return edit_.deleteSelection(); }
+bool EditorEngine::deleteSelection() {
+    // 选中的图片优先：剪切的后一半要走同一条路（复制认了它，删除也得认）。
+    if (image_sel_ != kInvalidNodeId && edit_.eraseAtom(image_sel_)) {
+        clearImageSelection();
+        return true;
+    }
+    return edit_.deleteSelection();
+}
 
 /**
  * 当前水印：第一节的记录。没有文档、或第一节不是节时返回默认（不画）。

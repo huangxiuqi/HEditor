@@ -295,6 +295,8 @@ const COMMANDS: Array<[string, string, string[], string]> = [
   // 列宽 / 行高的拖拽：几何查询 + 两次落地。改列宽收整份宽度数组（拖一条边界改相邻两列），
   //   与表格属性那三条同一档 —— 都是设计动作，只在文档模式放行。
   ['tableGrid',             'r', ['tableGrid'],                                           'none'],
+  // 拖动搬运的落点指示：跟着指针走，每帧问一次，但只读不写。
+  ['dropSpot',              'r', ['dropSpot'],                                            'none'],
   ['setTableColWidths',     'w', ['setTableColWidths'],                                   'self'],
   ['setTableRowHeight',     'w', ['setTableRowHeight'],                                   'self'],
   // 水印跟着节记录走：读一条回填面板，写一条落成 SetSectionSpec（一步撤销）。
@@ -938,8 +940,13 @@ function push(ts: any, opName: any, changed: any) { sendState(ts, opName, render
  * 锚点必须先钉住、再排 —— 与单线程宿主的 presetWindowForLoad 同一口径。锚点也不能事后留空：
  * 留空会让随后的 retarget 把"窗口从无到有"判成换窗，于是在全量之外再 present 一次 ——
  * 后一次只重画一个光标，首次全量那笔账（探针的分母）就被冲掉了。
+ *
+ * @param keepScroll 缩放倍率（新密度 / 旧密度），1 = 不动滚动位置
  */
-function paintFull() {
+function paintFull(keepScroll = 1) {
+  // 换缩放与换文档不是一回事：换文档要从第 0 页看起，换缩放却必须停在读者正在看的地方，
+  //   否则每滚一下滚轮（Ctrl + 滚轮就是缩放）画面就弹回开头。滚动位置记的是设备像素，
+  //   密度一变，同一处文档内容对应的像素也跟着变，所以按倍率折算而不是原样保留。
   // 换文档、换缩放、换页度量、重设窗口锚点：页像素尺寸或页面内容整体变了，
   //   每个槽里装的都可能是上一份的像素，所以槽表整体作废、这一趟整窗重贴。
   // 这一条必须显式：paintFull 自己先把窗口锚点设好了，随后 render() 里的 retarget
@@ -948,13 +955,19 @@ function paintFull() {
   //   那条隐式触发就没了 —— 表现为切字体之后画布还留着上一窗的像素，而帧是对的
   //   （自审逐像素比对一比就露）。所以这件事必须由上面说出来，不能指望下游有谁代劳。
   host.invalidateSlots();
-  scrollY = 0;
-  // 告诉宿主"引擎把滚动位置归零了"。必须是显式信号，不能让宿主那边
-  //   用"两边不一致就追平"来猜：追平要写 DOM 的 scrollTop，而写它会触发 scroll
-  //   事件、再发一条视口消息回来 —— 与正在滚动的用户（或外部脚本）来回打架，
-  //   窗口跟着反复变、画布反复建与丢。实测症状：跨页滚动后某一页始终没有画布。
-  scrollReset = true;
-  scrollResetHost = true;
+  if (keepScroll === 1) {
+    scrollY = 0;
+    // 告诉宿主"引擎把滚动位置归零了"。必须是显式信号，不能让宿主那边
+    //   用"两边不一致就追平"来猜：追平要写 DOM 的 scrollTop，而写它会触发 scroll
+    //   事件、再发一条视口消息回来 —— 与正在滚动的用户（或外部脚本）来回打架，
+    //   窗口跟着反复变、画布反复建与丢。实测症状：跨页滚动后某一页始终没有画布。
+    scrollReset = true;
+    scrollResetHost = true;
+  } else {
+    // 缩放：滚动位置按密度折算成"同一处内容"，并且不通知宿主归零 ——
+    //   宿主那边也按同样的倍率折算 scrollTop，两边落在同一个文档位置。
+    scrollY = Math.max(0, Math.round(scrollY * keepScroll));
+  }
   const n = maxWindowPages();
   mod.setViewportAnchor(0, n);
   lastAnchor = '0:' + n;
@@ -1060,12 +1073,14 @@ const WRITE = collect('w', {
   scenario: (a) => loadScenario(a.id, a.zoom),
   reset: (a) => loadScenario(a.id === undefined ? 6 : a.id, a.zoom === undefined ? kZoomBase : a.zoom),
   zoom: (a) => {
+    const prevZoom = zoomLevel > 0 ? zoomLevel : a.zoom;
     mod.setZoom(a.zoom);
     zoomLevel = a.zoom;
     // 屏幕像素比会随窗口换显示器而变，宿主每次改缩放都捎一份新的过来。回推的状态里带着
     //   它，宿主拿它折算页画布的 CSS 尺寸 —— 不回传就会按旧值折算，显示尺寸与背衬差一档。
     if (a.dpr) dpr = a.dpr;
-    paintFull();
+    // 缩放保留滚动位置（按密度折算）：Ctrl + 滚轮的每一次都要停在原处。
+    paintFull(prevZoom > 0 ? a.zoom / prevZoom : 1);
   },
   stress: (a) => loadBlocks(() => mod.loadStressDocument(a.paras | 0, a.chars | 0)),
   stressDiverse: (a) => loadBlocks(() => mod.loadStressDocumentDiverse(a.paras | 0, a.chars | 0)),
@@ -1174,7 +1189,10 @@ const WRITE = collect('w', {
   selectPara: (a) => mod.selectParaAt(a.x, a.y),
   // 拖拽移动的两条落地命令。
   moveSelection: (a) => mod.moveSelectionTo(Number(a.x), Number(a.y)),
-  moveImage: (a) => mod.moveImageTo(a.i | 0, Number(a.x), Number(a.y)),
+  // 落点给行内图（插进文字流的哪儿），位移给浮动图（整张图跟着指针走多远）。
+  moveImage: (a) =>
+    mod.moveImageTo(a.i | 0, Number(a.x), Number(a.y), a.rel ? 1 : 0, Number(a.dx || 0),
+                    Number(a.dy || 0)),
   // 外部 API 收 {段号, 段内偏移}；换算成全局流位置只在引擎里做（见 flowIndexAt）。
   selectPos: (a) =>
     mod.setSelection(
@@ -1429,6 +1447,7 @@ const READ = collect('r', {
    * 换算指针位置。不在表里时 ok 为假。
    */
   tableGrid: (a) => JSON.parse(mod.tableGrid(Number(a.x), Number(a.y))),
+  dropSpot: (a) => JSON.parse(mod.dropSpot(Number(a.x), Number(a.y))),
   /**
    * 水印记录。键名与 setWatermark 的参数同一套，面板回填不必再翻译一次。
    */

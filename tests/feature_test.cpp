@@ -397,6 +397,15 @@ int main() {
         expectTrue(inline_floats == 0, "行内图不进浮动表");
         const float inline_end =
             e.layout().lines.empty() ? 0.0f : e.layout().lines.front().inline_end_pt;
+        // 行内时图落在哪儿（磅）。改环绕方式之后要拿它比"图有没有留在原处"。
+        Rect inline_rect{};
+        {
+            const std::vector<EditorEngine::ImageBox> boxes = e.images();
+            if (!boxes.empty() && !boxes.front().rects.empty()) {
+                inline_rect = boxes.front().rects.front().r_pt;
+            }
+        }
+        expectTrue(inline_rect.w > 1.0f, "行内图有几何（后面几条要用它）");
 
         expectTrue(e.setImageLayoutAndRender(0, 1), "改成四周型");
         expectTrue(e.layout().placed_floats.size() == 1, "四周型：浮动表里有一条几何");
@@ -414,6 +423,25 @@ int main() {
                 widest_beside = std::max(widest_beside, lb.inline_end_pt);
             }
             expectTrue(beside > 0, "图旁边确实排了行");
+            // 位置不变：改环绕方式只改文字的流法，图不该跳到段首去 ——
+            //   跳了的话读者会以为图被删了又插了一张。
+            expectTrue(
+                std::fabs(pf.x - inline_rect.x) < 1.0f && std::fabs(pf.y - inline_rect.y) < 1.0f,
+                "四周型：图留在原位置（不跳段首）");
+            // 行盒起点不能晚于这一行的第一个字形：晚于它，光标与选区就落在图左边，
+            //   而字画在图右边 —— 选中一个字，矩形却在图的另一边。
+            bool origin_ok = true;
+            for (const LineBox& lb : e.layout().lines) {
+                if (lb.vertical) continue;
+                if (lb.block_hi_pt <= pf.y || lb.block_lo_pt >= pf.y + pf.h) continue;
+                float min_x = 1.0e9f;
+                for (const PlacedGlyph& g : e.layout().glyphs) {
+                    if (g.line != lb.line || g.vertical) continue;
+                    min_x = std::min(min_x, g.x_pt);
+                }
+                if (min_x < 1.0e8f && min_x < lb.inline_origin_pt - 2.0f) origin_ok = false;
+            }
+            expectTrue(origin_ok, "让宽的那些行：行盒起点不晚于字形（选区与文字同一侧）");
             expectTrue(widest_beside < inline_end - 60.0f,
                        "四周型让出宽度：图旁的行比整宽窄（" + std::to_string(widest_beside) +
                            " < " + std::to_string(inline_end) + "）");
@@ -443,6 +471,15 @@ int main() {
         expectTrue(e.layout().placed_floats.size() == 1, "浮于上方同样只叠不占位");
         expectTrue(e.setImageLayoutAndRender(0, 0), "改回嵌入型");
         expectTrue(e.layout().placed_floats.empty(), "嵌回行内：浮动表清空");
+        {
+            const std::vector<EditorEngine::ImageBox> boxes = e.images();
+            const Rect back = (!boxes.empty() && !boxes.front().rects.empty())
+                                  ? boxes.front().rects.front().r_pt
+                                  : Rect{};
+            expectTrue(std::fabs(back.x - inline_rect.x) < 1.0f &&
+                           std::fabs(back.y - inline_rect.y) < 1.0f,
+                       "改回行内：图还在原来的位置（没有残留一份浮动的几何）");
+        }
         expectTrue(e.undoAndRender(), "撤销回上一档");
         expectTrue(!e.layout().placed_floats.empty(), "撤销之后又是浮动的");
     }

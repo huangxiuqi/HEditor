@@ -177,6 +177,9 @@ void EditorEngine::snapshotLineGeometry() {
     //   两者错开一轮时，切过页的那一页会被判成"只动了一行"。
     table_fp_prev_ = table_fp_new_;
     table_fp_prev_count_ = static_cast<int>(table_fp_new_.size());
+    // 浮动图摘要同理：它与表格一样"不是行盒画出来的东西"，快照必须在同一处。
+    float_fp_prev_ = float_fp_new_;
+    float_fp_prev_count_ = static_cast<int>(float_fp_new_.size());
     line_lo_prev_.clear();
     line_hi_prev_.clear();
     const int n = static_cast<int>(layout_.lines.size());
@@ -872,6 +875,12 @@ void EditorEngine::presentInternal(int first_page, int count) {
         //   （从"行底"变成"页底"、或反过来）落在带外，留着就是一条旧边框。
         if (page < table_fp_prev_count_ && page < static_cast<int>(table_fp_new_.size()) &&
             table_fp_new_[static_cast<size_t>(page)] != table_fp_prev_[static_cast<size_t>(page)]) {
+            return 0;
+        }
+        // 浮动图同理，而且更硬：它整块落在行带之外（一张图可能比一条带还高），
+        //   行带只盖住文字那一条，图那一块永远补不回来。
+        if (page < float_fp_prev_count_ && page < static_cast<int>(float_fp_new_.size()) &&
+            float_fp_new_[static_cast<size_t>(page)] != float_fp_prev_[static_cast<size_t>(page)]) {
             return 0;
         }
         int d0 = -1;
