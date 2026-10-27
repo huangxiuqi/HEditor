@@ -226,9 +226,59 @@ test.describe('格式', () => {
               r.least5.back?.rule === 'atLeast' && r.least5.back?.exact === 5,
               JSON.stringify(r.least5.back));
 
-    // 裁字那一条在原生判据里（edit_test [93]）按帧像素量：段落格式改完之后页面图层
-    //   不重光栅（改行距那一拍画布上还是上一档的墨），浏览器这边读帧会读到旧图层，
-    //   量出来的深度与行距无关。行高与读回走公开面，绘制走同一次全新光栅。
+    // 裁字：同一行字，量"从行槽顶往下多深还有墨"。固定值 8 磅比字矮，墨迹必须在 8 磅处
+    //   停住；改回多倍之后必须又落回基线下面 —— 这一条同时盯着"改完段落格式画面必须重画"：
+    //   单行段落换行距规则时字形坐标一点不动，只有裁切变了，行指纹必须带着裁切与行高，
+    //   否则页位图被判成还新鲜，命令返回 true、读回也对，画布上还是旧墨。
+    //   文档必须短到只有一行：多行时量到的是下一行的墨。
+    const depth = async (spacing: any) => {
+      await p.read(`
+        await H.configure({ showMarks: 'none' });
+        await H.selectAll();
+        await H.paragraphFormat({ lineSpacing: ${JSON.stringify(spacing)} });
+        await H.flush();
+        return true;`);
+      // 换行距要重排重画；读帧前等两帧，否则拿到的是上一拍的位图。
+      await p.page.evaluate(
+        () =>
+          new Promise<void>((done) => {
+            requestAnimationFrame(() => requestAnimationFrame(() => done()));
+          }),
+      );
+      return p.read<any>(`
+        await H.selectAll();
+        await H.flush();
+        const z = ZOOM();
+        const r = SEL().rects[0];
+        const step = D.pagePx().h + D.pagePx().gap;
+        const first = D.editStats().windowFirstPage;
+        const f = await D.rawFrame();
+        const w = D.frameW();
+        const x0 = Math.max(0, Math.floor(r.x * z));
+        const x1 = Math.min(w, Math.ceil((r.x + r.w) * z));
+        const top = Math.floor((r.page - first) * step + r.y * z);
+        let last = top;
+        for (let dy = 0; dy < Math.round(40 * z); ++dy) {
+          let n = 0;
+          for (let x = x0; x < x1; ++x) {
+            const i = ((top + dy) * w + x) * 4;
+            if (f[i] < 128 && f[i + 1] < 128 && f[i + 2] < 128) ++n;
+          }
+          if (n >= 3) last = top + dy;
+        }
+        return { band: r.h, depth: (last - top) / z };`);
+    };
+    // 编辑标记要关掉：段落标记是另一条绘制路径，不跟着字形一起裁，留着会污染"墨到多深"。
+    const marks0 = await p.read<string>('return H.config().showMarks;');
+    await p.read(`await H.setText('甲乙丙丁戊己庚辛'); await H.flush(); return true;`);
+    const full = await depth({ rule: 'auto', factor: 1 });
+    const cut = await depth({ rule: 'exact', exact: 8 });
+    const back = await depth({ rule: 'auto', factor: 1 });
+    check('前提：单倍行距下字的墨迹落到基线下面', full.depth > 12, JSON.stringify(full));
+    check('★ 固定值 8 磅：墨迹在行槽底停住（字的底部被裁掉）', cut.depth <= 8.6, JSON.stringify(cut));
+    check('★ 改回多倍之后墨迹又落下去（改完段落格式画面跟着重画）', back.depth > 12,
+          JSON.stringify(back));
+    await p.read('await H.configure({ showMarks: ' + JSON.stringify(marks0) + ' }); return true;');
   });
 
   // 段前距与上一段的段后距相加，不折叠（CSS 相邻 margin 会折叠成 6，Word 是 12）。

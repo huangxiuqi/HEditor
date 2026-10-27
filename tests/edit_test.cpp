@@ -16411,35 +16411,42 @@ int main() {
         expectNear(lineOf(1, 0).advance_pt, single, 0.01,
                    "★ 固定值 0 视为没设，退回 auto（不排零高的行）");
 
-        // 裁字：固定值比字矮时墨迹要停在行盒底，别的档不许裁。
-        //   两台全新引擎各测一次，而不是在一台上把行距换来换去：段落格式改完之后
-        //   页面图层不重光栅（见 docs 里那条待办），换档之后的帧量到的是上一档的墨。
+        // 裁字：固定值比字矮时墨迹要停在行槽底，别的档不许裁 —— 而且改完行距画面必须跟着
+        //   重画。后半句不是多余的一条：页位图的新鲜度只比指纹，而"字形坐标一个都没动、
+        //   只有裁切变了"是常态（单行段落换行距规则时基线不动），行指纹里必须带着裁切与
+        //   行高，否则页被判成还新鲜，命令返回 true、读回也对，屏幕上仍是旧帧。
         //   段落标记要关掉：它由另一条绘制路径画，本来就不跟着字形一起裁。
         {
             EngineConfig c4 = c93;
             c4.zoom = 2.0f;
             c4.marks = MarksMode::None;
-            // 量"行盒顶往下多深还有墨"（磅）：行盒底就是裁边，装得下时墨迹会落到基线下面。
-            auto inkDepth = [&](LineSpacingRule rule, float exact) -> float {
-                EditorEngine e4;
-                e4.init({cjkPath, mnPath, latinPath});
-                e4.setConfig(c4);
-                NodeTree t4;
+            EditorEngine e4;
+            expectTrue(e4.init({cjkPath, mnPath, latinPath}), "引擎初始化（裁字）");
+            e4.setConfig(c4);
+            NodeTree t4;
+            {
                 const NodeId sec = t4.firstSectionId();
                 t4.setText(t4.appendChild(sec, NodeKind::TextRun), utf8ToCodepoints("甲乙丙丁"));
-                const NodeId mark = t4.appendChild(sec, NodeKind::ParagraphMark);
+                t4.appendChild(sec, NodeKind::ParagraphMark);
+            }
+            e4.setDocument(t4, StyleSheet{});
+            e4.relayout();
+            auto setSpacing4 = [&](LineSpacingRule rule, float exact) {
                 ParaFormatPatch p;
                 p.line_rule = rule;
                 p.line_exact = Length::abs(ptToEmu(exact));
-                t4.find(mark)->para = p;
-                e4.setDocument(t4, StyleSheet{});
-                e4.relayout();
+                e4.setCaret(0, 0);
+                return e4.applyParaFormatAndRender(p);
+            };
+            // 量"行槽顶往下多深还有墨"（磅）：固定值那一档的行槽底就是裁边，
+            //   装得下时墨迹会落到基线下面。
+            auto inkDepth4 = [&]() -> float {
                 e4.repaint();
                 const int fw = e4.frameWidth();
                 const int fh = e4.frameHeight();
                 const uint8_t* px = e4.frame();
                 const LineBox& lb = e4.layout().lines.front();
-                const int top = static_cast<int>(std::floor(lb.block_lo_pt * c4.zoom));
+                const int top = static_cast<int>(std::floor(lb.slotLoPt() * c4.zoom));
                 const int x0 = static_cast<int>(std::floor(lb.inline_origin_pt * c4.zoom));
                 const int x1 =
                     static_cast<int>(std::ceil((lb.inline_origin_pt + lb.inline_end_pt) * c4.zoom));
@@ -16454,15 +16461,29 @@ int main() {
                 }
                 return (last - top) / c4.zoom;
             };
-            const float cutDepth = inkDepth(LineSpacingRule::Exact, 8.0f);
+            const float fullDepth = inkDepth4();
+            expectTrue(fullDepth > 12.0f, "★ 单倍行距下墨迹落到基线下面（实际深 " +
+                                              std::to_string(fullDepth) + " 磅）");
+            expectTrue(setSpacing4(LineSpacingRule::Exact, 8.0f), "改固定值 8 磅");
+            const float cutDepth = inkDepth4();
             expectTrue(cutDepth <= 8.5f, "★ 固定值 8 磅：墨迹在 8 磅处停住（实际深 " +
                                              std::to_string(cutDepth) + " 磅）");
-            const float fullDepth = inkDepth(LineSpacingRule::Auto, 1.0f);
-            expectTrue(fullDepth > 12.0f, "★ 反向：单倍行距下墨迹落到基线下面（实际深 " +
-                                              std::to_string(fullDepth) + " 磅）");
-            const float leastDepth = inkDepth(LineSpacingRule::AtLeast, 30.0f);
+            // 改回多倍：同一台引擎、同一份文档，字形坐标与改之前完全一样 —— 差别只有
+            //   "裁不裁"。这一条量的就是页位图有没有跟着作废。
+            expectTrue(setSpacing4(LineSpacingRule::Auto, 1.0f), "再改回单倍");
+            const float backDepth = inkDepth4();
+            expectTrue(backDepth > 12.0f,
+                       "★ 改回单倍之后墨迹又落到基线下面（画面跟着重画了，实际深 " +
+                           std::to_string(backDepth) + " 磅）");
+            expectTrue(setSpacing4(LineSpacingRule::AtLeast, 30.0f), "再改最小值 30 磅");
+            const float leastDepth = inkDepth4();
             expectTrue(leastDepth > 12.0f,
                        " 最小值档装得下，同样不裁（实际深 " + std::to_string(leastDepth) + " 磅）");
+            // 4 磅与 8 磅都是"裁"，字形同样一个都不动，只有裁边的高度变了。
+            expectTrue(setSpacing4(LineSpacingRule::Exact, 4.0f), "改固定值 4 磅");
+            const float thinDepth = inkDepth4();
+            expectTrue(thinDepth <= 4.5f, "★ 固定值 4 磅：裁边跟着行高走，不是一直按 8（实际深 " +
+                                              std::to_string(thinDepth) + " 磅）");
         }
 
         // 增量与全量必须同一条规则：exact 只改每行的推进量，后缀平移按它累加。

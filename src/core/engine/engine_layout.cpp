@@ -310,6 +310,13 @@ void EditorEngine::computeLineFingerprints(int dirty_lo, int dirty_hi, bool full
         //   行盒的长宽可能一点不动（行高由 line_factor 与块字号压着），而标记画出来变了。
         mixf(lb.size_pt);
         mixf(lb.bracket_axis_pt);
+        // 一行画出来什么样，还有两样不在字形坐标里：裁不裁、按多高的行槽裁。
+        //   固定值小于墨迹时字要裁到 [行槽顶, 行槽顶 + 行高)，而"只有一行、又是同一个
+        //   基线"的文档里，固定值与多倍行距的字形坐标可以完全一样 —— 差别只在裁切。
+        //   漏了这条，页位图被判成"还新鲜"，改行距之后画面停在旧帧上（TRAPS 195 同族）。
+        h = fnvMix(h, lb.clip_text ? 1ull : 0ull);
+        mixf(lb.advance_pt);
+        mixf(lb.lead_top_pt);
         h = fnvMix(h, static_cast<uint64_t>(lb.page));
         h = fnvMix(h, static_cast<uint64_t>(lb.paragraph));
         h = fnvMix(h, static_cast<uint64_t>(lb.first_cp));

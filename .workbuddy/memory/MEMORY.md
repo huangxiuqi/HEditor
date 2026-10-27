@@ -22,6 +22,8 @@
   修订 → `blocks_` → `layout_` → 页位图 → 画布；光标真源 `Range selection_`，写入口 `setCaretRel`。
 - 块流只有一份；脏区必须带右端；后缀复用只重排 `[from, from+count)`；`blocks_` 不是块流真源。
 - 页指纹混行盒指纹与 `controlPaintDigest`；`rasterSignature` 管档位/底色/缩放/资源代际。
+  行指纹必须含"画的时候才用到"的行盒字段（`clip_text`、`advance_pt`、`lead_top_pt`），
+  漏一项就是「改完行距命令成功、画面不动」（TRAPS 232，同族 195）。
 - 单位：`caret().rect` 是设备像素，`selection().rects` 与控件矩形是磅（读像素 / 点控件先乘
   `ZOOM` = zoom×4/3×dpr，`D.stats().zoom` 只是倍数不是密度）；行距基准是单倍行高，空段也要有行盒。
 - 行距三态（auto/exact/atLeast）在 `BlockSpec.line_spacing`，行高统一走 `lineHeightFor`；
