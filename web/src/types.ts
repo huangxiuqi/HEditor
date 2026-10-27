@@ -1828,6 +1828,37 @@ export interface CharFormatPatch {
 }
 
 /**
+ * 行距规则，与 Word 段落面板的三档一一对应。
+ *
+ * auto 按单倍行高的倍数；exact 就是那个磅值，内容更高时裁掉（与 Word 同一档）；
+ * atLeast 取固定值与内容高的较大者。
+ */
+export type LineSpacingRule = 'auto' | 'exact' | 'atLeast';
+
+/**
+ * 行距：规则 + 那一档用的值。
+ *
+ * 倍数与磅值并存而不是折算成一个数：换个字号，倍数的结果该跟着变，磅值不该。
+ * exact 与 atLeast 只看 exact，auto 只看 factor（缺省 1，即单倍）。
+ */
+export interface LineSpacing {
+  /**
+   * 规则。
+   */
+  rule: LineSpacingRule;
+
+  /**
+   * 倍数（auto 档），缺省 1 = 单倍行距。
+   */
+  factor?: number;
+
+  /**
+   * 固定值（exact / atLeast 档，磅）。
+   */
+  exact?: number;
+}
+
+/**
  * 段落格式补丁：只给要改的字段。
  */
 export interface ParaFormatPatch {
@@ -1842,9 +1873,12 @@ export interface ParaFormatPatch {
   size?: number;
 
   /**
-   * 行距倍数（行高 = 单倍行高 × 倍数）。单倍行高是字体的 ascent + descent，1.0 即 Word 的单倍行距。
+   * 行距：规则（auto / exact / atLeast）与那一档的值。
+   *
+   * auto 的倍数是相对单倍行高（字体的 ascent + descent + lineGap），1 即 Word 的单倍行距；
+   * exact / atLeast 收磅值。exact 小于内容时按行裁字，与 Word 一致。
    */
-  lineFactor?: number;
+  lineSpacing?: LineSpacing;
 
   /**
    * 段前距（磅）。页顶那一段不加；与上一段的段后距相加，不折叠。

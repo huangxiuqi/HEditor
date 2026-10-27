@@ -983,11 +983,13 @@ bool EditorEngine::shiftSuffixBlockAxis(int from, size_t first_glyph, int to,
                 const int band = bandOf(s);
                 const float local = localOf(s, band);
                 // 行的三个纵向字段用行盒自己记的度量重算，公式与 placeLine 同源：
-                //   基线 = 行顶 + ascent，上边 = 行顶，下边 = 基线 + descent。
+                //   字面盒顶 = 行槽顶 + 上半截空白，基线 = 字面盒顶 + ascent，
+                //   下边 = 基线 + descent（lead_top_pt 是排版算好的常量，不随平移变）。
                 //   不写"老坐标 + 大增量"：那会多一次重新结合，跨页几页的平移（比如删掉
                 //   一张占半页的表）会在末位差一个 ulp，而判据是逐位对拍。
                 const float old_axis = lb.bracket_axis_pt;
-                const float axis = local + lb.ascent_pt;
+                const float ink_lo = local + lb.lead_top_pt;
+                const float axis = ink_lo + lb.ascent_pt;
                 // 字形与它的行一一对应：两边都是按行序追加的，并行往前走即可
                 // （某行可能一个字形都没有 —— 全是占位槽的行 —— 指针不动就是对的）。
                 //   字形纵坐标相对基线不变，所以按"新基线 - 到基线的距离"重算，不做增量加法。
@@ -1003,7 +1005,7 @@ bool EditorEngine::shiftSuffixBlockAxis(int from, size_t first_glyph, int to,
                 }
                 if (apply) {
                     lb.bracket_axis_pt = axis;  // 横排下它就是基线
-                    lb.block_lo_pt = local;
+                    lb.block_lo_pt = ink_lo;
                     lb.block_hi_pt = axis + lb.descent_pt;
                     lb.page = band;
                     lb.line = line_no;

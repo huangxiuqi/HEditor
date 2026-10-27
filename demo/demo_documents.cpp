@@ -21,7 +21,7 @@ BlockSpec mixedParagraphBlock(int cjk_font_index, int latin_font_index) {
     b.font_index = cjk_font_index;
     b.size_pt = 12.5f;
     b.wm = WritingMode::HorizontalTB();
-    b.line_factor = 1.25f;
+    b.line_spacing.factor = 1.25f;
     b.language = "zh";
     b.color = Color::rgb(24, 24, 24);
     // 拉丁字体挂回退：NotoSansSC-VF 有 ¹²³（U+00B9/B2/B3），
@@ -49,7 +49,7 @@ std::vector<BlockSpec> sampleDocument(int cjk_font_index, int mongol_font_index,
     zh.font_index = cjk_font_index;
     zh.size_pt = 12.0f;
     zh.wm = WritingMode::HorizontalTB();
-    zh.line_factor = 1.2f;
+    zh.line_spacing.factor = 1.2f;
     zh.language = "zh";
     zh.color = Color::rgb(24, 24, 24);
     zh.setText(
@@ -76,7 +76,7 @@ std::vector<BlockSpec> sampleDocument(int cjk_font_index, int mongol_font_index,
     mongo_lr.font_index = mongol_font_index;
     mongo_lr.size_pt = 16.0f;
     mongo_lr.wm = WritingMode::VerticalLR();
-    mongo_lr.line_factor = 1.25f;
+    mongo_lr.line_spacing.factor = 1.25f;
     mongo_lr.language = "mn";
     mongo_lr.page_break_before = true;
     mongo_lr.color = Color::rgb(20, 60, 130);
@@ -92,7 +92,7 @@ std::vector<BlockSpec> sampleDocument(int cjk_font_index, int mongol_font_index,
     zh_v.font_index = cjk_font_index;
     zh_v.size_pt = 15.0f;
     zh_v.wm = WritingMode::VerticalRL();
-    zh_v.line_factor = 1.3f;
+    zh_v.line_spacing.factor = 1.3f;
     zh_v.language = "zh";
     zh_v.page_break_before = true;
     zh_v.color = Color::rgb(150, 60, 30);
@@ -132,7 +132,9 @@ void applyBlockFormat(const BlockSpec& b, Node* mark) {
     mark->para.font_index = b.font_index;
     mark->para.size = Length::abs(ptToEmu(b.size_pt));
     mark->para.wm = b.wm;
-    mark->para.line_factor = b.line_factor;
+    mark->para.line_rule = b.line_spacing.rule;
+    mark->para.line_factor = b.line_spacing.factor;
+    mark->para.line_exact = Length::abs(ptToEmu(b.line_spacing.exact_pt));
     mark->para.space_after = Length::abs(ptToEmu(b.space_after_pt));
     mark->para.page_break_before = b.page_break_before;
     mark->para.language = internLanguage(b.language != nullptr ? b.language : "");
@@ -368,7 +370,7 @@ NodeTree demoTableTree(int cjk_font_index) {
         b.font_index = cjk_font_index;
         b.size_pt = 12.0f;
         b.wm = WritingMode::HorizontalTB();
-        b.line_factor = 1.1f;
+        b.line_spacing.factor = 1.1f;
         b.language = "zh";
         b.color = Color::rgb(24, 24, 24);
         b.setText(text);

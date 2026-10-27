@@ -638,14 +638,15 @@ bool CaretResolver::caretRectFor(const TextPos& pos, int* page_out, Rect* out) c
     const float t = caret_width_pt_;
     Rect r;
     if (!lb->vertical) {
-        // 横排：光标是竖条，贴在行盒左/右，高度 = 整条行槽（含行距）
+        // 横排：光标是竖条，贴在行槽左/右，高度 = 整条行槽（含行距）；多倍行距下字在
+        //   槽中间，光标也把字包在中间（从 slotLoPt 起，不是从字面盒顶起）
         r.x = lb->inline_origin_pt + off - t * 0.5f;
-        r.y = lb->block_lo_pt;
+        r.y = lb->slotLoPt();
         r.w = t;
         r.h = std::max(0.0f, lb->slotSpanPt());
     } else {
         // 竖排（含侧倒）：光标是横条，贴在列盒上/下，宽度 = 整条行槽
-        r.x = lb->block_lo_pt;
+        r.x = lb->slotLoPt();
         r.y = lb->inline_origin_pt + off - t * 0.5f;
         r.w = std::max(0.0f, lb->slotSpanPt());
         r.h = t;
@@ -804,10 +805,10 @@ std::vector<PageRect> CaretResolver::selectionRectsIn(int first_page, int count)
                 if (!lb.vertical) {
                     m.x = lb.inline_origin_pt;
                     m.w = w;
-                    m.y = lb.block_lo_pt;
+                    m.y = lb.slotLoPt();
                     m.h = lb.slotSpanPt();
                 } else {
-                    m.x = lb.block_lo_pt;
+                    m.x = lb.slotLoPt();
                     m.w = lb.slotSpanPt();
                     m.y = lb.inline_origin_pt;
                     m.h = w;
@@ -846,11 +847,18 @@ std::vector<PageRect> CaretResolver::selectionRectsIn(int first_page, int count)
         const float rel_hi = std::max(a0, a1) - lb.inline_origin_pt;
         std::vector<std::pair<float, float>> segs;
         if (!(rel_hi > rel_lo)) {
-            // 零宽：选中一个空段（或一段的段落标记）时，选的是一枚不占字符的位置，
-            //   两端落在同一个偏移上 —— 按几何算就是零宽，而零宽的矩形在导出与合成时
-            //   会被当作"没有选区"丢掉，于是"能选中、看不见"。给一个字符宽的窄条。
+            // 零宽：两端落在同一个偏移上 —— 按几何算就是零宽，而零宽的矩形会被当作
+            //   "没有选区"丢掉，于是"能选中、看不见"。给一个字符宽的窄条。
             //   零宽只是"两端同偏移"的一种结果，不是判据：同一个偏移上压着行内原子
             //   （图片）时，两端的侧别不同，宽度就是原子的盒宽。
+            // 只有"这一行的段落标记真的被选中"才给：选区从软换行处起（或到某行行首止）时，
+            //   本行一个字都没选中，硬给一条就会在上一行末尾凭空多出一个小方块 ——
+            //   Word 那里是空的。
+            const int para_len =
+                static_cast<int>((*view_.block_flow_span)[static_cast<size_t>(para)]);
+            const bool mark_here = static_cast<int>(lb.last_cp) >= para_len &&
+                                   lo <= base + para_len && base + para_len < hi;
+            if (!mark_here) continue;
             segs.emplace_back(rel_lo, rel_lo + lb.size_pt * 0.35f);
         } else if (lb.spans.empty()) {
             segs.emplace_back(rel_lo, rel_hi);
@@ -866,10 +874,10 @@ std::vector<PageRect> CaretResolver::selectionRectsIn(int first_page, int count)
             if (!lb.vertical) {
                 r.x = lb.inline_origin_pt + seg.first;
                 r.w = seg.second - seg.first;
-                r.y = lb.block_lo_pt;
+                r.y = lb.slotLoPt();
                 r.h = lb.slotSpanPt();
             } else {
-                r.x = lb.block_lo_pt;
+                r.x = lb.slotLoPt();
                 r.y = lb.inline_origin_pt + seg.first;
                 r.w = lb.slotSpanPt();
                 r.h = seg.second - seg.first;

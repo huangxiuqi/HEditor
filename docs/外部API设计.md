@@ -160,7 +160,7 @@ setText(text: string, opts?: { repeat?: number }): Promise<void>   // 明确用�
 | 签名 | 备注 |
 | --- | --- |
 | `format(patch)` | 字符格式：`bold` / `italic` / `underline` / `font` / `size`（磅）/ `color`（`[r,g,b]`）；只写补丁里出现的键 |
-| `paragraphFormat(patch)` | 段落格式：`font` / `size` / `lineFactor` / `spaceAfter`（磅）/ `pageBreakBefore` |
+| `paragraphFormat(patch)` | 段落格式：`font` / `size` / `lineSpacing`（`{ rule: 'auto' \| 'exact' \| 'atLeast', factor?, exact? }`）/ `spaceBefore` / `spaceAfter`（磅）/ `pageBreakBefore` |
 | `formatAt(opts?)` | 选区的共同字符格式；字段**缺席 = 没有统一的值**（空选区时是光标处的标记），`false` = 显式取消。`{effective:true}` 改报**实际生效的那一份**（样式链与默认值都算进去，字体字号永远有值） |
 | `paragraphFormatAt()` | 选区起点所在段落的格式覆盖 |
 

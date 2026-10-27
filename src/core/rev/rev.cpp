@@ -56,8 +56,12 @@ void hashParaPatch(Hasher& h, const ParaFormatPatch& p) {
         h.u8(static_cast<uint8_t>(p.wm->block_flow));
         h.u8(static_cast<uint8_t>(p.wm->orientation));
     }
+    h.u64(p.line_rule.has_value() ? 1 : 0);
+    if (p.line_rule) h.u64(static_cast<uint64_t>(*p.line_rule));
     h.u64(p.line_factor.has_value() ? 1 : 0);
     if (p.line_factor) h.f32(*p.line_factor);
+    h.u64(p.line_exact.has_value() ? 1 : 0);
+    if (p.line_exact) hashLength(h, *p.line_exact);
     h.u64(p.space_before.has_value() ? 1 : 0);
     if (p.space_before) hashLength(h, *p.space_before);
     h.u64(p.space_after.has_value() ? 1 : 0);

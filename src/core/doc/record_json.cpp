@@ -112,7 +112,9 @@ ordered_json paraJson(const ParaFormatPatch& p) {
     if (p.font_index.has_value()) j["fi"] = *p.font_index;
     if (p.size.has_value()) j["sz"] = printLength(*p.size);
     if (p.wm.has_value()) j["wm"] = writingModeJson(*p.wm);
+    if (p.line_rule.has_value()) j["lr"] = lineSpacingRuleName(*p.line_rule);
     if (p.line_factor.has_value()) j["lf"] = floatText(*p.line_factor);
+    if (p.line_exact.has_value()) j["lx"] = printLength(*p.line_exact);
     if (p.space_before.has_value()) j["sb"] = printLength(*p.space_before);
     if (p.space_after.has_value()) j["sa"] = printLength(*p.space_after);
     if (p.page_break_before.has_value()) j["pb"] = *p.page_break_before;
@@ -485,10 +487,22 @@ bool readPara(const Context& ctx, const ordered_json& j, const char* key, ParaFo
         if (!readWritingMode(p, "wm", &wm)) return false;
         out->wm = wm;
     }
+    if (p.contains("lr")) {
+        std::string name;
+        LineSpacingRule rule = LineSpacingRule::Auto;
+        if (!readString(p, "lr", &name)) return false;
+        if (!lineSpacingRuleFromName(name, &rule)) return false;
+        out->line_rule = rule;
+    }
     if (p.contains("lf")) {
         float v = 0.0f;
         if (!readFloat(p, "lf", &v)) return false;
         out->line_factor = v;
+    }
+    if (p.contains("lx")) {
+        Length len;
+        if (!readLength(p, "lx", &len)) return false;
+        out->line_exact = len;
     }
     if (p.contains("sb")) {
         Length len;

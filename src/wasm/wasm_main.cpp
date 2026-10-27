@@ -142,7 +142,7 @@ std::vector<BlockSpec> longDocument(int paragraphs, int font_index) {
         b.font_index = font_index;
         b.size_pt = 14.0f;
         b.wm = WritingMode::HorizontalTB();
-        b.line_factor = 1.275f;
+        b.line_spacing.factor = 1.275f;
         b.space_after_pt = 6.0f;
         b.language = "zh";
         b.color = Color::rgb(24, 24, 24);
@@ -176,7 +176,7 @@ std::vector<BlockSpec> buildScenarioBlocks(int scenario) {
             b.font_index = g_mn_font;
             b.size_pt = 20.0f;
             b.wm = WritingMode::VerticalLR();
-            b.line_factor = 1.3f;
+            b.line_spacing.factor = 1.3f;
             b.language = "mn";
             b.color = Color::rgb(20, 60, 150);
             b.setText(mongolianParagraph(18));
@@ -188,7 +188,7 @@ std::vector<BlockSpec> buildScenarioBlocks(int scenario) {
             b.font_index = g_cjk_font;
             b.size_pt = 14.0f;
             b.wm = WritingMode::VerticalRL();
-            b.line_factor = 1.175f;
+            b.line_spacing.factor = 1.175f;
             b.language = "zh";
             b.color = Color::rgb(24, 24, 24);
             b.setText(chineseNote());
@@ -200,7 +200,7 @@ std::vector<BlockSpec> buildScenarioBlocks(int scenario) {
             b.font_index = g_cjk_font;
             b.size_pt = 13.0f;
             b.wm = WritingMode::HorizontalTB();
-            b.line_factor = 1.25f;
+            b.line_spacing.factor = 1.25f;
             b.language = "zh";
             b.color = Color::rgb(24, 24, 24);
             b.setText(chineseNote() + chineseNote());
@@ -216,7 +216,7 @@ std::vector<BlockSpec> buildScenarioBlocks(int scenario) {
             b.font_index = g_mn_font;
             b.size_pt = 20.0f;
             b.wm = WritingMode::VerticalRL();
-            b.line_factor = 1.3f;
+            b.line_spacing.factor = 1.3f;
             b.language = "mn";
             b.color = Color::rgb(150, 60, 30);
             b.setText(mongolianParagraph(18));
@@ -228,7 +228,7 @@ std::vector<BlockSpec> buildScenarioBlocks(int scenario) {
             b.font_index = g_cjk_font;
             b.size_pt = 14.0f;
             b.wm = WritingMode::HorizontalTB();
-            b.line_factor = 1.275f;
+            b.line_spacing.factor = 1.275f;
             b.language = "zh";
             b.color = Color::rgb(24, 24, 24);
             b.setText("患者主诉：反复心悸三天，加重一天。");
@@ -244,7 +244,7 @@ std::vector<BlockSpec> buildScenarioBlocks(int scenario) {
             b.font_index = g_cjk_font;
             b.size_pt = 14.0f;
             b.wm = WritingMode::HorizontalTB();
-            b.line_factor = 1.275f;
+            b.line_spacing.factor = 1.275f;
             b.language = "zh";
             b.color = Color::rgb(24, 24, 24);
             // 先设文本：setText 会清空对象表（锚点是按旧文本算的）。
@@ -270,7 +270,7 @@ std::vector<BlockSpec> buildScenarioBlocks(int scenario) {
             b2.font_index = g_cjk_font;
             b2.size_pt = 14.0f;
             b2.wm = WritingMode::HorizontalTB();
-            b2.line_factor = 1.275f;
+            b2.line_spacing.factor = 1.275f;
             b2.space_after_pt = 6.0f;
             b2.language = "zh";
             b2.color = Color::rgb(24, 24, 24);
@@ -1755,7 +1755,7 @@ void loadStressDocumentImpl(int paras, int chars, bool diverse) {
         b.font_index = g_cjk_font;
         b.size_pt = 12.0f;
         b.wm = WritingMode::HorizontalTB();
-        b.line_factor = 1.05f;
+        b.line_spacing.factor = 1.05f;
         b.language = "zh";
         b.color = Color::rgb(24, 24, 24);
         b.setText(text);
@@ -1789,7 +1789,7 @@ void loadTextDocument(const std::string& text, int repeat) {
         only.font_index = g_cjk_font;
         only.size_pt = 12.0f;
         only.wm = WritingMode::HorizontalTB();
-        only.line_factor = 1.0f;
+        only.line_spacing.factor = 1.0f;
         only.language = "zh";
         only.color = Color::rgb(24, 24, 24);
         only.setText(std::string());
@@ -1817,7 +1817,7 @@ void loadTextDocument(const std::string& text, int repeat) {
             b.font_index = g_cjk_font;
             b.size_pt = 12.0f;
             b.wm = WritingMode::HorizontalTB();
-            b.line_factor = 1.0f;
+            b.line_spacing.factor = 1.0f;
             b.language = "zh";
             b.color = Color::rgb(24, 24, 24);
             b.setText(t);
@@ -1920,7 +1920,15 @@ std::string parseParaPatch(const std::string& text, ParaFormatPatch* out) {
     if (j.contains("fi") && j["fi"].is_number_integer()) out->font_index = j["fi"].get<int>();
     if (j.contains("sz") && j["sz"].is_number())
         out->size = Length::abs(ptToEmu(j["sz"].get<double>()));
+    if (j.contains("lr") && j["lr"].is_string()) {
+        LineSpacingRule rule = LineSpacingRule::Auto;
+        if (!lineSpacingRuleFromName(j["lr"].get<std::string>(), &rule))
+            return "lr 只能是 auto / exact / atLeast";
+        out->line_rule = rule;
+    }
     if (j.contains("lf") && j["lf"].is_number()) out->line_factor = j["lf"].get<float>();
+    if (j.contains("lx") && j["lx"].is_number())
+        out->line_exact = Length::abs(ptToEmu(j["lx"].get<double>()));
     if (j.contains("sb") && j["sb"].is_number())
         out->space_before = Length::abs(ptToEmu(j["sb"].get<double>()));
     if (j.contains("sa") && j["sa"].is_number())

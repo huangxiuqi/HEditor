@@ -104,6 +104,36 @@ public:
     void fillRect(const Rect& r, Color c);
 
     /**
+     * 把后续绘制裁到一块矩形里（设备像素）。
+     *
+     * 必须与 popClip 成对。行距是"固定值"且行高比墨迹矮时，Word 裁掉超出这一行的字；
+     * 这里就是那一步。裁剪只影响绘制，不改几何与命中。
+     *
+     * @param r 裁剪矩形（设备像素，右下开区间）
+     */
+    void pushClipRect(const Rect& r);
+
+    /**
+     * 撤销最近一次 pushClipRect 的裁剪。
+     *
+     * 只能成对用；跨越若干次绘制时用 clipMark / restoreToMark —— 那是无条件退回，
+     * 少退一次就会让后面的绘制一直被裁，症状是"换了行距之后字还缺一截"。
+     */
+    void popClip();
+
+    /**
+     * 记下当前裁剪栈的深度。
+     * @return 深度标记（交给 restoreToMark）
+     */
+    int clipMark() const;
+
+    /**
+     * 退回到某一层裁剪。
+     * @param mark clipMark() 的返回值
+     */
+    void restoreToMark(int mark);
+
+    /**
      * 画一个矩形边框。
      * @param r 矩形（设备像素）
      * @param c 颜色

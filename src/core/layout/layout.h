@@ -20,6 +20,7 @@
 
 #include "core/doc/document.h"
 #include "core/doc/image_spec.h"
+#include "core/doc/para_format.h"
 #include "core/text/font.h"
 #include "core/text/writing_mode.h"
 #include "core/utils/types.h"
@@ -490,6 +491,50 @@ struct WidthSpec {
     bool isAuto() const { return kind == Kind::Auto; }
 };
 
+/**
+ * 行距：三态里的哪一档，以及那一档用的值。
+ *
+ * 磅值只有 exact 与 atLeast 看，倍数只有 auto 看 —— 两栏并存而不是折算成一个数，因为
+ * "1.5 倍"与"26 磅"是两种不同的用户意图：换个字号，倍数的结果该跟着变，磅值不该。
+ *
+ * 值不大于 0 时退回 auto：只有倍数的文档 line_exact 恒为 0，不该因为规则字段被写成
+ * exact 就排出一叠零高的行。
+ */
+struct LineSpacing {
+    /**
+     * 规则。
+     */
+    LineSpacingRule rule = LineSpacingRule::Auto;
+
+    /**
+     * 倍数（auto 档）。
+     */
+    float factor = 1.0f;
+
+    /**
+     * 固定值（exact / atLeast 档，磅）。
+     */
+    float exact_pt = 0.0f;
+
+    /**
+     * 这一档是否真的按磅值排。
+     * @return true = 规则是 exact / atLeast 且值有效
+     */
+    bool usesExact() const {
+        return (rule == LineSpacingRule::Exact || rule == LineSpacingRule::AtLeast) &&
+               exact_pt > 0.0f;
+    }
+
+    /**
+     * 逐字段相等。投影与编译的审计比的就是它。
+     * @param o 另一份行距
+     * @return true = 三个字段都相等
+     */
+    bool operator==(const LineSpacing& o) const {
+        return rule == o.rule && factor == o.factor && exact_pt == o.exact_pt;
+    }
+};
+
 struct BlockSpec {
     /**
      * 这一段所在的单元格路径（外层到内层）。空 = 正文。
@@ -525,13 +570,13 @@ struct BlockSpec {
     WritingMode wm = WritingMode::HorizontalTB();
 
     /**
-     * 行高倍数：行高 = 单倍行高 × line_factor（竖排时是列宽）。
+     * 行距（三态：倍数 / 固定值 / 最小值）。竖排时它决定列宽。
      *
-     * 单倍行高是字体自己的 ascent + descent（Noto Sans SC 约 1.448 em），所以 1.0 就是
-     * Word 的单倍行距，倍数与字号脱钩、加多少就松多少。以字号为基准时字体的纵向留白
-     * 会把小倍数吃掉：1.0 到 1.45 都落在同一行高上。
+     * 单倍行高是字体自己的 ascent + descent + lineGap（Noto Sans SC 约 1.448 em），
+     * 所以 1.0 就是 Word 的单倍行距，倍数与字号脱钩、加多少就松多少。以字号为基准时
+     * 字体的纵向留白会把小倍数吃掉：1.0 到 1.45 都落在同一行高上。
      */
-    float line_factor = 1.0f;
+    LineSpacing line_spacing;
 
     /**
      * 段前距（磅）。页顶让出的那一段不加：分页之后段首的空白属于页边距。
@@ -670,7 +715,7 @@ struct BlockSpec {
      */
     bool operator==(const BlockSpec& o) const {
         return cell_path == o.cell_path && cp_text == o.cp_text && font_index == o.font_index &&
-               size_pt == o.size_pt && wm == o.wm && line_factor == o.line_factor &&
+               size_pt == o.size_pt && wm == o.wm && line_spacing == o.line_spacing &&
                space_before_pt == o.space_before_pt && space_after_pt == o.space_after_pt &&
                page_break_before == o.page_break_before && sameLanguage(language, o.language) &&
                color == o.color && weight == o.weight && italic == o.italic &&
@@ -1328,9 +1373,18 @@ struct LineBox {
 
     /**
      * 行盒在"块轴"上的范围（横排 = y 上下；竖排 = x 左右），页面坐标（磅）。
-     * 横排：block_lo = 基线 - ascent，block_hi = 基线 + descent。
+     * 横排：block_lo = 基线 - ascent，block_hi = 基线 + descent —— 这是字面盒，
+     * 字形、脏区、图片锚点都用它；反白与插入点用的是整条行槽（见 slotLoPt）。
      */
     float block_lo_pt = 0.0f;
+
+    /**
+     * 字面盒之上、行槽之内那一段空白（磅，页面坐标方向）。多倍行距占一半、另一半在字面
+     * 盒之下（见 lineLeadTopFor）；固定值与最小值是 0，竖排也是 0。
+     *
+     * 有它，'行槽顶' 才是 block_lo - lead_top_pt，而不是 block_lo。
+     */
+    float lead_top_pt = 0.0f;
 
     /**
      * 块轴范围的上界（页面坐标，磅）。
@@ -1358,6 +1412,15 @@ struct LineBox {
      * 沿块轴推进多少（行高，磅）。
      */
     float advance_pt = 0.0f;
+
+    /**
+     * 绘制这一行时是否要裁到行盒。
+     *
+     * 只有"固定值行距且行高比墨迹矮"时成立：Word 在这种情形下裁掉超出的字，而按倍数
+     *   压行时不裁（相邻行重叠，字压在一起但看得见）。绘制侧只在它为真时进裁剪栈，
+     *   所以普通文档一个字节的额外开销都没有。
+     */
+    bool clip_text = false;
 
     /**
      * 行内轴的起点（横排 = 基线起始 x；竖排 = 列顶 y），页面坐标（磅）。
@@ -1550,10 +1613,21 @@ struct LineBox {
     }
 
     /**
+     * 行槽顶（块轴上的页面坐标）：字面盒顶再往上让出 lead_top_pt。
+     *
+     * 插入点与反白都从这里起、盖满 slotSpanPt()，于是多倍行距下字落在反白中间。
+     * 竖排的 lead_top_pt 恒为 0（列盒本来就是行槽），这里就退回 block_lo_pt。
+     * @return 行槽起点（磅）
+     */
+    float slotLoPt() const {
+        return (advance_pt > 0.0f) ? (block_lo_pt - lead_top_pt) : block_lo_pt;
+    }
+
+    /**
      * 光标与选区沿块轴的高度：整条行槽，不是字身盒。
      *
      * 字面盒（block_hi - block_lo）负责字形与命中；插入点与反白要盖住这一行占的位置 ——
-     * 多出的行距落在字面之下，不并进去就会出现"1.5 倍行距下反白一条一条断开、光标比行矮一截"。
+     * 不并进去就会出现"1.5 倍行距下反白一条一条断开、光标比行矮一截"。
      * 浏览器按行盒画、Word 按行距画，这里取同一个口径。竖排的列盒不维护 advance_pt，
      * 退回列宽。
      * @return 块轴跨度（磅）

@@ -424,7 +424,7 @@ int main() {
         b.font_index = mn;
         b.size_pt = 16.0f;
         b.wm = WritingMode::VerticalLR();
-        b.line_factor = 1.8f;
+        b.line_spacing.factor = 1.8f;
         b.language = "mn";
         b.setText(kMongol_word);
         const std::string word = b.textUtf8();
@@ -469,7 +469,7 @@ int main() {
             xmax = std::max(xmax, p->x_pt);
         }
         std::printf("     第 0 列基线 x ∈ [%.2f, %.2f]（列宽 %.2f）\n", xmin, xmax,
-                    b.size_pt * b.line_factor);
+                    b.size_pt * b.line_spacing.factor);
         expectTrue(xmax - xmin < 0.5f, "同列字形共用一条基线（x 基本一致 = 确实侧倒在列里）");
 
         // 整列高度 ≈ 该词横排时的推进量
@@ -493,7 +493,7 @@ int main() {
                               float small_pt) {
             BlockSpec b;
             b.wm = wm;
-            b.line_factor = 1.6f;
+            b.line_spacing.factor = 1.6f;
             std::string txt;
             for (int i = 0; i < big_n; ++i) txt += "汉";
             for (int i = 0; i < small_n; ++i) txt += "汉";
@@ -631,7 +631,7 @@ int main() {
             BlockSpec b;
             b.font_index = cjk;
             b.size_pt = size_pt;
-            b.line_factor = 1.6f;
+            b.line_spacing.factor = 1.6f;
             b.space_after_pt = 0.0f;
             b.setText(txt);
             b.objects = std::move(objs);

@@ -468,6 +468,32 @@ void Bitmap::fillRect(const Rect& r, Color c) {
                           p);
 }
 
+void Bitmap::pushClipRect(const Rect& r) {
+    if (!sk_ || !sk_->canvas) return;
+    sk_->canvas->save();
+    // 不做抗锯齿：裁剪边落在整像素上，否则相邻两行的裁边会互相啃掉半像素，
+    //   看起来就是"字底少了一条浅灰"。
+    sk_->canvas->clipRect(
+        SkRect::MakeLTRB(static_cast<SkScalar>(r.x), static_cast<SkScalar>(r.y),
+                         static_cast<SkScalar>(r.x + r.w), static_cast<SkScalar>(r.y + r.h)),
+        SkClipOp::kIntersect, /*doAntiAlias=*/false);
+}
+
+void Bitmap::popClip() {
+    if (!sk_ || !sk_->canvas) return;
+    sk_->canvas->restore();
+}
+
+int Bitmap::clipMark() const {
+    if (!sk_ || !sk_->canvas) return 0;
+    return sk_->canvas->getSaveCount();
+}
+
+void Bitmap::restoreToMark(int mark) {
+    if (!sk_ || !sk_->canvas) return;
+    if (sk_->canvas->getSaveCount() > mark) sk_->canvas->restoreToCount(mark);
+}
+
 void Bitmap::fillTriangle(float x0, float y0, float x1, float y1, float x2, float y2, Color c) {
     const float min_x = std::min({x0, x1, x2});
     const float max_x = std::max({x0, x1, x2});

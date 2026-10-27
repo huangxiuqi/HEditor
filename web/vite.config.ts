@@ -66,7 +66,6 @@ export default defineConfig(({ command }) => ({
     //   而这一页的实例把白名单、协议表、宿主事件全都捕获进了闭包，重载换不掉它们，
     //   只会把文档状态清空。两处一起关，watcher 也就不必占着 CPU 了。
     hmr: false,
-    watch: null,
   },
   plugins: [repoServe()],
   build: {

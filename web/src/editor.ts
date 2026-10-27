@@ -26,6 +26,7 @@ import type {
   ImageLayout,
   ImageRegisterOptions,
   PageSetup,
+  LineSpacingRule,
   ParaFormatPatch,
   Pos,
   Selection,
@@ -501,7 +502,7 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
   }
 
   /**
-   * 段落格式补丁 → 引擎键名（fi / sz / lf / sb / sa / pbb）。
+   * 段落格式补丁 → 引擎键名（fi / sz / lr / lf / lx / sb / sa / pbb）。
    * @param patch 公开面的补丁
    * @returns 引擎认识的载荷
    */
@@ -509,7 +510,11 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
     const out: Record<string, unknown> = {};
     if (patch.font !== undefined) out.fi = fontIndexOf(patch.font);
     if (patch.size !== undefined) out.sz = patch.size;
-    if (patch.lineFactor !== undefined) out.lf = patch.lineFactor;
+    if (patch.lineSpacing !== undefined) {
+      out.lr = patch.lineSpacing.rule;
+      if (patch.lineSpacing.factor !== undefined) out.lf = patch.lineSpacing.factor;
+      if (patch.lineSpacing.exact !== undefined) out.lx = patch.lineSpacing.exact;
+    }
     if (patch.spaceBefore !== undefined) out.sb = patch.spaceBefore;
     if (patch.spaceAfter !== undefined) out.sa = patch.spaceAfter;
     if (patch.pageBreakBefore !== undefined) out.pbb = patch.pageBreakBefore;
@@ -589,7 +594,16 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
     const out: ParaFormatPatch = {};
     if (typeof o.fi === 'number') out.font = o.fi;
     if (typeof o.sz === 'number') out.size = o.sz;
-    if (typeof o.lf === 'number') out.lineFactor = o.lf;
+    if (typeof o.lr === 'string' || typeof o.lf === 'number' || typeof o.lx === 'number') {
+      // 引擎只写出现过的那几个键，两边都不补缺省值：补 0 会让读回与写进去不是一件事
+      //   （exact 20 会读成 factor 0）。
+      const spacing: { rule: LineSpacingRule; factor?: number; exact?: number } = {
+        rule: typeof o.lr === 'string' ? (o.lr as LineSpacingRule) : 'auto',
+      };
+      if (typeof o.lf === 'number') spacing.factor = o.lf;
+      if (typeof o.lx === 'number') spacing.exact = o.lx;
+      out.lineSpacing = spacing;
+    }
     if (typeof o.sb === 'number') out.spaceBefore = o.sb;
     if (typeof o.sa === 'number') out.spaceAfter = o.sa;
     if (typeof o.pbb === 'boolean') out.pageBreakBefore = o.pbb;

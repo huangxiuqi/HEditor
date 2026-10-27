@@ -890,7 +890,9 @@ NodeTree treeFromBlocks(const std::vector<BlockSpec>& blocks) {
         f.font_index = b.font_index;
         f.size = Length::abs(ptToEmu(b.size_pt));
         f.wm = b.wm;
-        f.line_factor = b.line_factor;
+        f.line_rule = b.line_spacing.rule;
+        f.line_factor = b.line_spacing.factor;
+        f.line_exact = Length::abs(ptToEmu(b.line_spacing.exact_pt));
         f.space_after = Length::abs(ptToEmu(b.space_after_pt));
         f.page_break_before = b.page_break_before;
         f.language = b.language;
@@ -915,7 +917,7 @@ std::string diffBlock(const BlockSpec& a, const BlockSpec& b) {
         a.wm.orientation != b.wm.orientation) {
         return "wm";
     }
-    if (a.line_factor != b.line_factor) return "line_factor";
+    if (!(a.line_spacing == b.line_spacing)) return "line_spacing";
     if (a.space_after_pt != b.space_after_pt) return "space_after_pt";
     if (a.page_break_before != b.page_break_before) return "page_break_before";
     const std::string la = a.language != nullptr ? a.language : "";
@@ -1216,7 +1218,7 @@ void checkCompileShapes() {
                        r.blocks[1].cp_text == cps({0x64}),
                    "0.4 / 相邻两个 run 拼成一段，末尾未结束的一段照落");
         expectTrue(r.blocks.size() == 2 && r.blocks[1].size_pt == 12.0f &&
-                       r.blocks[1].line_factor == 1.0f && r.blocks[1].language == nullptr,
+                       r.blocks[1].line_spacing.factor == 1.0f && r.blocks[1].language == nullptr,
                    "0.4 / 末尾未结束的一段用默认段落格式");
     }
     // 控件跨段落标记：切段只看段落标记，容器边界不是切分点 —— 于是切出两段。
@@ -3741,7 +3743,9 @@ std::string diffPara(const ParaFormat& a, const ParaFormat& b) {
         a.wm.orientation != b.wm.orientation) {
         return "wm";
     }
+    if (a.line_rule != b.line_rule) return "line_rule";
     if (a.line_factor != b.line_factor) return "line_factor";
+    if (!(a.line_exact == b.line_exact)) return "line_exact";
     if (!(a.space_after == b.space_after)) return "space_after";
     if (a.page_break_before != b.page_break_before) return "page_break_before";
     const std::string la = a.language != nullptr ? a.language : "";

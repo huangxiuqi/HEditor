@@ -93,7 +93,8 @@ test.describe('工具栏', () => {
       // 段落：行距与段后。
       await reset();
       pick('line', '1.5');
-      out.line = await until(async () => (await e.paragraphFormatAt()).lineFactor === 1.5);
+      out.line = await until(
+        async () => (await e.paragraphFormatAt()).lineSpacing?.factor === 1.5);
       pick('after', '12');
       out.after = await until(async () => (await e.paragraphFormatAt()).spaceAfter === 12);
 
@@ -395,9 +396,10 @@ test.describe('公开面', () => {
       await e.select({ para: 0, offset: 0 }, { para: 0, offset: 3 });
       out.format = await e.format({ bold: true, size: 18 });
       out.formatAt = await e.formatAt();
-      const lf0 = (await e.paragraphFormatAt()).lineFactor;
+      const lf0 = (await e.paragraphFormatAt()).lineSpacing?.factor;
       const lf1 = lf0 === 2 ? 3 : 2;
-      out.paraFormat = await e.paragraphFormat({ lineFactor: lf1 });
+      out.paraFormat = await e.paragraphFormat(
+        { lineSpacing: { rule: 'auto', factor: lf1 } });
       out.paraFormatAt = await e.paragraphFormatAt();
       out.paraWant = lf1;
       out.indent = await e.setIndent(1);
@@ -529,7 +531,7 @@ test.describe('公开面', () => {
     check('★ stepFontSize 上下各走一档', r.stepUp === true && r.stepDown === true,
       String(r.stepUp) + ' / ' + String(r.stepDown));
     check('paragraphFormat 写进去了', r.paraFormat === true, String(r.paraFormat));
-    check('paragraphFormatAt 读回同一个值', r.paraFormatAt.lineFactor === r.paraWant,
+    check('paragraphFormatAt 读回同一个值', r.paraFormatAt.lineSpacing?.factor === r.paraWant,
           JSON.stringify(r.paraFormatAt));
     check('setIndent 改得动', r.indent === true, String(r.indent));
     check('★ 缩进不吃掉选中的字', typeof r.afterIndent === 'string'

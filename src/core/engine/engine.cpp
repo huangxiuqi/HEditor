@@ -609,7 +609,10 @@ std::string EditorEngine::paraFormatAtJson() const {
     if (p.font_index) j["fi"] = *p.font_index;
     if (p.size && p.size->kind == LengthKind::Abs)
         j["sz"] = static_cast<double>(emuToPt(p.size->abs_emu));
+    if (p.line_rule) j["lr"] = lineSpacingRuleName(*p.line_rule);
     if (p.line_factor) j["lf"] = *p.line_factor;
+    if (p.line_exact && p.line_exact->kind == LengthKind::Abs)
+        j["lx"] = static_cast<double>(emuToPt(p.line_exact->abs_emu));
     if (p.space_before && p.space_before->kind == LengthKind::Abs)
         j["sb"] = static_cast<double>(emuToPt(p.space_before->abs_emu));
     if (p.space_after && p.space_after->kind == LengthKind::Abs)
@@ -2175,11 +2178,14 @@ bool EditorEngine::hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* 
         for (const LineBox& lb : layout_.lines) {
             if (lb.paragraph < first || lb.paragraph >= last) continue;
             const int pd = std::abs(lb.page - page);
+            // 纵向按整条行槽比，不按字面盒：多倍行距下字只占槽中间那一截，点槽里的空白
+            //   也该落在这一行（与 Word 一致），而不是被算成"离哪一行都远"。
+            const float slot_lo = lb.slotLoPt();
+            const float slot_hi = slot_lo + lb.slotSpanPt();
             const float d =
                 lb.vertical ? 0.0f
-                            : (local_y < lb.block_lo_pt
-                                   ? lb.block_lo_pt - local_y
-                                   : (local_y > lb.block_hi_pt ? local_y - lb.block_hi_pt : 0.0f));
+                            : (local_y < slot_lo ? slot_lo - local_y
+                                                 : (local_y > slot_hi ? local_y - slot_hi : 0.0f));
             if (pd < pick_pd || (pd == pick_pd && d < best_d - 0.01f)) {
                 pick_pd = pd;
                 best_d = d;
@@ -2196,23 +2202,26 @@ bool EditorEngine::hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* 
         float lo = 0.0f;
         float hi = 0.0f;
         float local_bp = 0.0f;  // 与行盒同一个页内口径：判"点是否落在格子里"要用它
+        // 纵向一律用行槽：点一行里的任意空白都算这一行（见上面那段）。
+        const float slot_lo = lb.slotLoPt();
+        const float slot_hi = slot_lo + lb.slotSpanPt();
         if (lb.vertical) {
             bp = x_pt_doc;
             local_bp = x_pt_doc;
-            lo = lb.block_lo_pt;
-            hi = lb.block_hi_pt;
+            lo = slot_lo;
+            hi = slot_hi;
         } else if (cont) {
             const float base = static_cast<float>(lb.page) * static_cast<float>(step_px);
             bp = y_pt_doc * zoom;
             local_bp = (bp - base) / zoom;
-            lo = base + lb.block_lo_pt * zoom;
-            hi = base + lb.block_hi_pt * zoom;
+            lo = base + slot_lo * zoom;
+            hi = base + slot_hi * zoom;
         } else {
             if (lb.page != page) continue;
             bp = local_y;
             local_bp = local_y;
-            lo = lb.block_lo_pt;
-            hi = lb.block_hi_pt;
+            lo = slot_lo;
+            hi = slot_hi;
         }
         const float d = (bp < lo) ? (lo - bp) : (bp > hi ? bp - hi : 0.0f);
         // 块轴距离并列时用行内轴距离定夺。表格让"同一块轴位置上有多个行盒"成为常态

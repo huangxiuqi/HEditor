@@ -370,11 +370,25 @@ function makeTabs(): Tab[] {
           { value: '1.75', text: '1.75' },
           { value: '2', text: '2.0' },
           { value: '3', text: '3.0' },
+          { value: 'atLeast:18', text: '最小值 18 磅' },
+          { value: 'exact:20', text: '固定值 20 磅' },
         ],
-        value: () => (para.lineFactor === undefined ? '' : String(para.lineFactor)),
+        // 三态共用这一个下拉：倍数写裸数字，另外两档写成"规则:磅值"。
+        value: () => {
+          const ls = para.lineSpacing;
+          if (!ls) return '';
+          if (ls.rule === 'auto') return ls.factor === undefined ? '' : String(ls.factor);
+          return ls.rule + ':' + (ls.exact === undefined ? '' : ls.exact);
+        },
         run: (v) => {
           if (!v) return;
-          void writePara({ lineFactor: Number(v) });
+          const cut = v.indexOf(':');
+          if (cut < 0) {
+            void writePara({ lineSpacing: { rule: 'auto', factor: Number(v) } });
+            return;
+          }
+          const rule = v.slice(0, cut) === 'exact' ? 'exact' : 'atLeast';
+          void writePara({ lineSpacing: { rule, exact: Number(v.slice(cut + 1)) } });
         },
       },
       {

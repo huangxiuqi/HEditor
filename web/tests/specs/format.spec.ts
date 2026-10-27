@@ -125,14 +125,14 @@ test.describe('格式', () => {
       await e.flush();
       const before = e.geometry().pages;
       await e.selectAll();
-      const ok = await e.paragraphFormat({ lineFactor: 2 });
+      const ok = await e.paragraphFormat({ lineSpacing: { rule: 'auto', factor: 2 } });
       await e.flush();
       const after = e.geometry().pages;
       await e.setCaret({ para: 0, offset: 1 });
       const para = await e.paragraphFormatAt();
       return { before, after, ok, para };`);
     check('命令返回 true', r.ok === true, String(r.ok));
-    check('行距写进了段落格式', r.para.lineFactor === 2, JSON.stringify(r.para));
+    check('行距写进了段落格式', r.para.lineSpacing?.factor === 2, JSON.stringify(r.para));
     check('★ 行距放大之后页数增加', r.after > r.before, r.before + ' → ' + r.after);
   });
 
@@ -147,7 +147,7 @@ test.describe('格式', () => {
       await H.flush();
       const pages1 = H.geometry().pages;
       await H.selectAll();
-      await H.paragraphFormat({ lineFactor: 0.8 });
+      await H.paragraphFormat({ lineSpacing: { rule: 'auto', factor: 0.8 } });
       await H.flush();
       const pages08 = H.geometry().pages;
       // 行高改用反白矩形的行距来量：那是磅值，没有设备像素的取整误差。
@@ -162,10 +162,10 @@ test.describe('格式', () => {
       };
       const one = await pitch();
       await H.selectAll();
-      await H.paragraphFormat({ lineFactor: 0.8 });
+      await H.paragraphFormat({ lineSpacing: { rule: 'auto', factor: 0.8 } });
       const tight = await pitch();
       await H.selectAll();
-      await H.paragraphFormat({ lineFactor: 1.5 });
+      await H.paragraphFormat({ lineSpacing: { rule: 'auto', factor: 1.5 } });
       const loose = await pitch();
       return { one, tight, loose, pages1, pages08 };`);
     check('前提：这一段折成两行以上，单倍行高量得出来',
@@ -184,6 +184,51 @@ test.describe('格式', () => {
               `单倍 ${r.one.v}，1.5 倍 ${r.loose.v}`);
     check('★ 0.8 倍下同样的段落排得更少页',
               r.pages08 < r.pages1, `${r.pages1} → ${r.pages08}`);
+  });
+
+  // 三态的后两档按磅值排：fixed 就是那个数（比字矮时按行裁字），至少取固定值与内容高的
+  //   较大者。裁字只在绘制那一步：行高与字面盒各归各的，压行不改基线以上。
+  test('行距：固定值与最小值按磅值排，固定值比字矮时裁掉字的底部', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' } });
+    const r = await p.read<any>(`
+      await H.configure({ zoom: 2 });
+      await H.setText('甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉戌亥');
+      await H.flush();
+      const band = async (spacing) => {
+        await H.selectAll();
+        await H.paragraphFormat({ lineSpacing: spacing });
+        await H.flush();
+        await H.selectAll();
+        await H.flush();
+        const rs = SEL().rects;
+        await H.setCaret({ para: 0, offset: 0 });
+        await H.flush();
+        const back = (await H.paragraphFormatAt()).lineSpacing;
+        return { h: rs[0] ? rs[0].h : 0, back };
+      };
+      const one = await band({ rule: 'auto', factor: 1 });
+      const fixed20 = await band({ rule: 'exact', exact: 20 });
+      const least30 = await band({ rule: 'atLeast', exact: 30 });
+      const least5 = await band({ rule: 'atLeast', exact: 5 });
+      return { one, fixed20, least30, least5 };`);
+    check('前提：单倍行距量得出来', r.one.h > 10, `反白高 ${r.one.h}`);
+    check('★ 固定值 20：反白高就是 20 磅',
+              Math.abs(r.fixed20.h - 20) < 0.05, `反白高 ${r.fixed20.h}`);
+    check(' 读回是固定值 20 磅',
+              r.fixed20.back?.rule === 'exact' && r.fixed20.back?.exact === 20,
+              JSON.stringify(r.fixed20.back));
+    check('★ 最小值 30：内容更矮，按 30 磅排',
+              Math.abs(r.least30.h - 30) < 0.05, `反白高 ${r.least30.h}`);
+    check('★ 最小值 5：内容更高，退回单倍（不是 5）',
+              Math.abs(r.least5.h - r.one.h) < 0.05,
+              `单倍 ${r.one.h}，最小值 5 排出来 ${r.least5.h}`);
+    check(' 读回仍是最小值 5（读回的是写进去的那一份）',
+              r.least5.back?.rule === 'atLeast' && r.least5.back?.exact === 5,
+              JSON.stringify(r.least5.back));
+
+    // 裁字那一条在原生判据里（edit_test [93]）按帧像素量：段落格式改完之后页面图层
+    //   不重光栅（改行距那一拍画布上还是上一档的墨），浏览器这边读帧会读到旧图层，
+    //   量出来的深度与行距无关。行高与读回走公开面，绘制走同一次全新光栅。
   });
 
   // 段前距与上一段的段后距相加，不折叠（CSS 相邻 margin 会折叠成 6，Word 是 12）。

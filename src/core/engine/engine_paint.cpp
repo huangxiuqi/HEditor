@@ -480,6 +480,19 @@ void EditorEngine::rasterIntoBitmap(Bitmap& target, int page_index, const float*
             }
             ul_line = -1;
         };
+        // 这一页有没有"要裁到行盒"的行。绝大多数文档没有，于是逐字形只多一次布尔比较，
+        //   一次 save/restore 都不做 —— 裁字是固定值行距那条少见的路上才付的钱。
+        bool any_clip = false;
+        for (int li : layout_.linesOnPage(page)) {
+            if (layout_.lines[static_cast<size_t>(li)].clip_text) {
+                any_clip = true;
+                break;
+            }
+        }
+        int clip_line = -1;
+        // 进来时的裁剪栈深度。换行、收尾都无条件退回到这一层：裁剪一旦少退一次，
+        //   位图的画布会一直带着它，往后每一拍画出来的字都缺一截。
+        const int clip_mark = target.clipMark();
         // 只过这一页的字形（见 LayoutResult::page_glyphs）。
         //   整篇遍历 + 判页号：2000 段文档约 8 万个字形，每画一页都要过一遍，
         //   反推约 2 ms/页 —— 比真正画这一页的字形（742 个约 0.9 ms）还贵。
@@ -492,6 +505,21 @@ void EditorEngine::rasterIntoBitmap(Bitmap& target, int page_index, const float*
             //   漏掉就是接缝处少一行字。字形的墨迹不会超出以基线为中心的一个字身，
             //   所以按字身外扩是它的上界（多取的几个由位图自己裁掉）。
             if (spill_only && !(pg.y_pt + pg.size_pt > slab_pt - 1.0f)) continue;
+            // 换行就得换裁剪框：先把手上一批画掉，再进出一次裁剪栈。行高比墨迹矮时
+            //   字要裁到行盒里（固定值行距），装得下的行不进栈。
+            if (any_clip && pg.line != clip_line) {
+                clip_line = pg.line;
+                const LineBox& lb = layout_.lines[static_cast<size_t>(pg.line)];
+                // 上一行的裁剪到此为止：先把攒着的字形画掉，再退回进入时的深度。
+                flush_run();
+                flush_ul();
+                target.restoreToMark(clip_mark);
+                if (lb.clip_text) {
+                    target.pushClipRect(Rect{0.0f, lb.slotLoPt() * zoom + dy,
+                                             static_cast<float>(target.width()),
+                                             lb.advance_pt * zoom});
+                }
+            }
             // 画带时按字形的纵向位置筛：行盒的块轴范围就是它的 ascent/descent，
             //   所以"落在带内"就是"属于这条带"。带向外扩了 1 像素，相邻带在中线相接。
             //   接缝那一趟要按平移之后的坐标筛（它画在本带的顶部）。
@@ -541,6 +569,7 @@ void EditorEngine::rasterIntoBitmap(Bitmap& target, int page_index, const float*
         }
         flush_run();
         flush_ul();
+        target.restoreToMark(clip_mark);
     };
 
     // 行内原子的占位框。与字形一样只过这一页的行（见 LayoutResult::page_lines），

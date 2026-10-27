@@ -293,7 +293,8 @@ bool sameWritingMode(const WritingMode& a, const WritingMode& b) {
  * 两个段落格式 patch 是否逐字段相同。检查器与步骤守卫都要问这个问题。
  */
 bool sameParaPatch(const ParaFormatPatch& a, const ParaFormatPatch& b) {
-    if (a.font_index != b.font_index || a.size != b.size || a.line_factor != b.line_factor ||
+    if (a.font_index != b.font_index || a.size != b.size || a.line_rule != b.line_rule ||
+        a.line_factor != b.line_factor || a.line_exact != b.line_exact ||
         a.space_before != b.space_before || a.space_after != b.space_after ||
         a.page_break_before != b.page_break_before || a.language != b.language ||
         a.color != b.color || a.fallback_font_indices != b.fallback_font_indices) {

@@ -500,7 +500,7 @@ const SectionInfo kSections[] = {
     {77, false, 3},  {78, true, 1},   {79, false, 2},  {80, false, 3},  {81, false, 2},
     {82, false, 1},  {83, false, 2},  {84, false, 2},  {85, false, 3},  {86, false, 4},
     {87, false, 3},  {88, false, 3},  {89, false, 3},  {90, false, 2},  {91, false, 3},
-    {92, false, 6},
+    {92, false, 6},  {93, false, 5},
 };
 
 /**
@@ -746,7 +746,7 @@ int main() {
         doc.font_index = 0;  // CJK
         doc.size_pt = 12.0f;
         doc.wm = WritingMode::HorizontalTB();
-        doc.line_factor = 1.75f;
+        doc.line_spacing.factor = 1.75f;
         doc.language = "zh";
         doc.setText(
             "\xE6\x82\xA3\xE8\x80\x85\xE4\xB8\xBB\xE8\xAF\x89\xEF\xBC\x9A"
@@ -956,7 +956,7 @@ int main() {
         b.font_index = 1;  // 蒙文
         b.size_pt = 20.0f;
         b.wm = WritingMode::VerticalLR();
-        b.line_factor = 1.8f;
+        b.line_spacing.factor = 1.8f;
         b.language = "mn";
         b.setText("\xE1\xA0\xAE\xE1\xA0\xA3\xE1\xA0\xA9\xE1\xA0\xAD\xE1\xA0\xA3\xE1\xA0\xAF");
         loadBlocks(e3, {b});
@@ -973,7 +973,7 @@ int main() {
         // 列宽 = 单倍行高（字体的 ascent + descent）x 行距倍数。
         const FontInstance* mnInst = e3.fonts().instance(1, b.size_pt);
         const float mnatural = mnInst ? (mnInst->ascenderPt() + mnInst->descenderPt()) : b.size_pt;
-        const float col_w = mnatural * b.line_factor;
+        const float col_w = mnatural * b.line_spacing.factor;
         std::printf("     光标矩形 w=%.2f h=%.2f（列宽 %.2f）\n", first.w, first.h, col_w);
         expectTrue(first.w > first.h, "竖排光标是横条（宽 = 列盒宽 > 高 = 光标粗细）");
         expectNear(first.w, col_w, 0.5, "光标宽度 = 列宽（占满列盒）");
@@ -1078,7 +1078,7 @@ int main() {
         probe.font_index = 0;  // 中文
         probe.size_pt = 12.0f;
         probe.wm = WritingMode::HorizontalTB();
-        probe.line_factor = 1.75f;
+        probe.line_spacing.factor = 1.75f;
         probe.language = "zh";
 
         // 不硬编码"每页几个字" —— 那是从字体度量推出来的，度量一改断言就假红。
@@ -1265,7 +1265,7 @@ int main() {
             be.font_index = 0;
             be.size_pt = 12.0f;
             be.wm = WritingMode::HorizontalTB();
-            be.line_factor = 1.75f;
+            be.line_spacing.factor = 1.75f;
             be.language = "zh";
             be.setText("患者主诉：反复心悸三天，加重一天。");
             loadBlocks(ep, {be});
@@ -1339,7 +1339,7 @@ int main() {
         bf.font_index = 0;
         bf.size_pt = 12.0f;
         bf.wm = WritingMode::HorizontalTB();
-        bf.line_factor = 1.75f;
+        bf.line_spacing.factor = 1.75f;
         bf.language = "zh";
         bf.setText("患者主诉：反复心悸三天，加重一天。");
         loadBlocks(ef, {bf});
@@ -1988,7 +1988,7 @@ int main() {
             bw.font_index = 0;
             bw.size_pt = 12.0f;
             bw.wm = WritingMode::HorizontalTB();
-            bw.line_factor = 1.75f;
+            bw.line_spacing.factor = 1.75f;
             bw.language = "zh";
             std::string longtext;
             for (int i = 0; i < 4; ++i) longtext += "患者主诉：反复心悸三天，加重一天。";
@@ -2042,7 +2042,7 @@ int main() {
         bg.font_index = 0;
         bg.size_pt = 12.0f;
         bg.wm = WritingMode::HorizontalTB();
-        bg.line_factor = 1.75f;
+        bg.line_spacing.factor = 1.75f;
         bg.language = "zh";
         bg.setText("患者主诉：反复心悸三天，加重一天。");
         loadBlocks(eg, {bg});
@@ -2203,7 +2203,7 @@ int main() {
         bx.font_index = 0;
         bx.size_pt = 12.0f;
         bx.wm = WritingMode::HorizontalTB();
-        bx.line_factor = 1.75f;
+        bx.line_spacing.factor = 1.75f;
         bx.language = "zh";
         bx.setText("患者主诉：反复心悸三天，加重一天。");
         loadBlocks(ex, {bx});
@@ -2296,7 +2296,7 @@ int main() {
         ba.font_index = 0;
         ba.size_pt = 12.0f;
         ba.wm = WritingMode::HorizontalTB();
-        ba.line_factor = 1.75f;
+        ba.line_spacing.factor = 1.75f;
         ba.language = "zh";
         ba.setText("患者主诉：反复心悸三天，加重一天。");
         loadBlocks(ea, {ba});
@@ -2393,7 +2393,7 @@ int main() {
             BlockSpec b;
             b.font_index = 0;
             b.size_pt = 14.0f;
-            b.line_factor = 1.85f;
+            b.line_spacing.factor = 1.85f;
             b.space_after_pt = 6.0f;
             b.language = "zh";
             b.setText("第 " + std::to_string(i + 1) +
@@ -2549,7 +2549,7 @@ int main() {
                 BlockSpec b;
                 b.font_index = 0;
                 b.size_pt = 14.0f;
-                b.line_factor = 1.85f;
+                b.line_spacing.factor = 1.85f;
                 b.space_after_pt = 6.0f;
                 b.language = "zh";
                 b.setText("第 " + std::to_string(i + 1) +
@@ -2559,7 +2559,7 @@ int main() {
             BlockSpec v;
             v.font_index = 0;
             v.size_pt = 14.0f;
-            v.line_factor = 1.9f;
+            v.line_spacing.factor = 1.9f;
             v.wm = WritingMode::VerticalRL();
             v.language = "zh";
             v.setText("患者主诉：反复心悸3天，加重1天。现病史：患者3天前无明显诱因出现心悸。");
@@ -2753,7 +2753,7 @@ int main() {
             BlockSpec b;
             b.font_index = 0;
             b.size_pt = 14.0f;
-            b.line_factor = 1.85f;
+            b.line_spacing.factor = 1.85f;
             b.space_after_pt = 6.0f;
             b.language = "zh";
             b.setText("第 " + std::to_string(i + 1) +
@@ -2838,7 +2838,7 @@ int main() {
                 BlockSpec b;
                 b.font_index = 0;
                 b.size_pt = 14.0f;
-                b.line_factor = 1.85f;
+                b.line_spacing.factor = 1.85f;
                 b.space_after_pt = 6.0f;
                 b.language = "zh";
                 b.setText(t);
@@ -2904,8 +2904,9 @@ int main() {
             const BlockSpec& h = e.blocks()[0];
             const BlockSpec& t = e.blocks()[1];
             expectTrue(t.font_index == h.font_index && t.size_pt == h.size_pt &&
-                           t.line_factor == h.line_factor && t.space_after_pt == h.space_after_pt &&
-                           t.language == h.language && t.wm.inline_axis == h.wm.inline_axis &&
+                           t.line_spacing == h.line_spacing &&
+                           t.space_after_pt == h.space_after_pt && t.language == h.language &&
+                           t.wm.inline_axis == h.wm.inline_axis &&
                            t.wm.block_flow == h.wm.block_flow && t.color.r == h.color.r &&
                            t.color.g == h.color.g && t.color.b == h.color.b,
                        "★ 新段整体继承原段的样式（字体/字号/行距/段后距/书写模式/颜色）");
@@ -3239,7 +3240,7 @@ int main() {
                 BlockSpec b;
                 b.font_index = 0;
                 b.size_pt = 14.0f;
-                b.line_factor = 1.85f;
+                b.line_spacing.factor = 1.85f;
                 b.space_after_pt = 6.0f;
                 b.language = "zh";
                 b.setText("第 " + std::to_string(i + 1) +
@@ -3376,7 +3377,7 @@ int main() {
         b18.font_index = 0;
         b18.size_pt = 12.0f;
         b18.wm = WritingMode::HorizontalTB();
-        b18.line_factor = 1.75f;
+        b18.line_spacing.factor = 1.75f;
         b18.language = "zh";
         b18.setText("患者主诉：反复心悸三天，加重一天。");
         loadBlocks(e, {b18});
@@ -3903,7 +3904,7 @@ int main() {
         b19.font_index = 0;
         b19.size_pt = 12.0f;
         b19.wm = WritingMode::HorizontalTB();
-        b19.line_factor = 1.75f;
+        b19.line_spacing.factor = 1.75f;
         b19.language = "zh";
         b19.setText("患者主诉：反复心悸三天，加重一天。");
         loadBlocks(e, {b19});
@@ -4176,7 +4177,7 @@ int main() {
             b.font_index = 0;
             b.size_pt = 12.0f;
             b.wm = WritingMode::HorizontalTB();
-            b.line_factor = 1.75f;
+            b.line_spacing.factor = 1.75f;
             b.language = "zh";
             b.setText(text);
             loadBlocks(e, {b});
@@ -4798,7 +4799,7 @@ int main() {
             b.font_index = font_index;
             b.size_pt = size_pt;
             b.wm = WritingMode::HorizontalTB();
-            b.line_factor = 1.75f;
+            b.line_spacing.factor = 1.75f;
             b.language = lang;
             b.color = Color::rgb(24, 24, 24);
             b.setText(text);  // 注意：setText 会清 runs，所以 runs 必须在它之后设
@@ -5246,7 +5247,7 @@ int main() {
             b.font_index = font_index;
             b.size_pt = size_pt;
             b.wm = WritingMode::HorizontalTB();
-            b.line_factor = 1.75f;
+            b.line_spacing.factor = 1.75f;
             b.language = "zh";
             b.color = Color::rgb(24, 24, 24);
             b.setText(text);
@@ -6402,7 +6403,7 @@ int main() {
                 const BlockSpec& y = e.blocks()[i];
                 if (x.cp_text != y.cp_text) ++text_bad;
                 if (x.font_index != y.font_index || x.size_pt != y.size_pt ||
-                    !sameLang29(x.wm.name(), y.wm.name()) || x.line_factor != y.line_factor ||
+                    !sameLang29(x.wm.name(), y.wm.name()) || !(x.line_spacing == y.line_spacing) ||
                     x.space_after_pt != y.space_after_pt ||
                     x.page_break_before != y.page_break_before || x.color != y.color ||
                     !sameLang29(x.language, y.language) ||
@@ -6490,7 +6491,7 @@ int main() {
             std::vector<BlockSpec> blocks(1);
             blocks[0].font_index = 0;
             blocks[0].size_pt = 14.0f;
-            blocks[0].line_factor = 1.85f;
+            blocks[0].line_spacing.factor = 1.85f;
             blocks[0].language = "zh";
             blocks[0].setText("患者主诉：反复心悸三天，加重一天。");
 
@@ -7003,7 +7004,7 @@ int main() {
             b.font_index = 0;  // init 的第一个路径就是 cjk
             b.size_pt = 12.0f;
             b.wm = WritingMode::HorizontalTB();
-            b.line_factor = 1.5f;
+            b.line_spacing.factor = 1.5f;
             b.language = "zh";
             b.color = Color::rgb(24, 24, 24);
             b.setText(txt);
@@ -8385,7 +8386,7 @@ int main() {
         b40.font_index = 0;  // 中文
         b40.size_pt = 12.0f;
         b40.wm = WritingMode::HorizontalTB();
-        b40.line_factor = 1.75f;
+        b40.line_spacing.factor = 1.75f;
         b40.language = "zh";
         // 12 段各 40 个「测」：足够跨好几页，而且段与段之间有段间距。
         std::vector<BlockSpec> bs40;
@@ -8462,7 +8463,7 @@ int main() {
             "离条带底最近 %.2f 磅\n",
             cont40.slabs, cont40.max_step, cont40.max_pitch, cont40.min_slack);
         expectTrue(cont40.max_back < 0.01f, "连页下文档 y 单调不降（没有一处回跳 = 没有页底）");
-        expectTrue(cont40.max_pitch <= natural40 * b40.line_factor + 0.01f,
+        expectTrue(cont40.max_pitch <= natural40 * b40.line_spacing.factor + 0.01f,
                    "连页下同段相邻两行的间距就是行距（中间没插页边距）");
         // 连页的最大间距只可能出现在段与段之间（段间距 10 磅），
         //   而分页那条跨页间距的下界是 60 磅 —— 两条判据互不重叠。
@@ -8503,7 +8504,7 @@ int main() {
         b41.font_index = 0;
         b41.size_pt = 12.0f;
         b41.wm = WritingMode::HorizontalTB();
-        b41.line_factor = 1.75f;
+        b41.line_spacing.factor = 1.75f;
         b41.language = "zh";
         // 一段 60 个字：内容宽 200 磅、字宽 12 磅，于是一行放得下十六七个 —— 折成四行。
         b41.cp_text.assign(60, 0x6D4B);
@@ -8568,7 +8569,8 @@ int main() {
         e41.setCaretAtSideLine(pB.para, pB.offset, sideB, affB);
         Rect rB{};
         expectTrue(e41.caretRectPt(&rB), "下一行行首的光标矩形可查");
-        expectTrue(rB.y >= lbB->block_lo_pt - 0.01f,
+        // 光标量的是整条行槽（多倍行距下字在槽中间），所以比的是行槽顶，不是字面盒顶。
+        expectTrue(rB.y >= lbB->slotLoPt() - 0.01f,
                    "★ 点下一行行首，光标画在下一行（不是上一行行尾）");
         expectTrue(std::fabs(rB.x - (lbB->inline_origin_pt - c41.caret_width_pt * 0.5f)) < 0.51f,
                    "落点就是那一行的行首（行内位置贴着行首）");
@@ -8665,7 +8667,7 @@ int main() {
         BlockSpec b43;
         b43.font_index = 0;
         b43.size_pt = 12.0f;
-        b43.line_factor = 1.75f;
+        b43.line_spacing.factor = 1.75f;
         b43.language = "zh";
         // 60 个字、内容高 260 磅 ⇒ 一列二十来个字，折成三列。
         b43.cp_text.assign(60, 0x6D4B);
@@ -9978,7 +9980,7 @@ int main() {
                 BlockSpec b;
                 b.font_index = 0;
                 b.size_pt = (i % 7 == 0) ? 17.0f : 13.0f;
-                b.line_factor = 1.7f;
+                b.line_spacing.factor = 1.7f;
                 b.space_after_pt = (i % 5 == 0) ? 8.0f : 3.0f;
                 b.language = "zh";
                 b.setText(
@@ -9992,7 +9994,9 @@ int main() {
             std::printf("     摘要 A = 0x%016llx（%zu 行 / %zu 字形 / %d 页）\n",
                         static_cast<unsigned long long>(da.hash), ea.layout().lines.size(),
                         ea.layout().glyphs.size(), ea.layout().stats.page_count);
-            expectTrue(da.hash == 0xb27e1602e6412913ull, "横排多页正文的摘要未变");
+            // 摘要在"行距多出的空白上下对半分"之后重取：字形整体下移半个行距，坐标变了，
+            //   行数、字形数、页数都没变（1.7 倍那一段仍是 180 行 / 24 页）。
+            expectTrue(da.hash == 0x65cf7bda39ea3a62ull, "横排多页正文的摘要未变");
             expectTrue(ea.layout().stats.page_count >= 3, "用例 A 确实跨了多页");
         }
 
@@ -10080,7 +10084,7 @@ int main() {
             upright.font_index = 0;
             upright.size_pt = 16.0f;
             upright.wm = WritingMode::VerticalRL();
-            upright.line_factor = 1.8f;
+            upright.line_spacing.factor = 1.8f;
             upright.language = "zh";
             std::string zh;
             for (int i = 0; i < 40; ++i) {
@@ -10093,7 +10097,7 @@ int main() {
             sideways.font_index = 1;  // 蒙文
             sideways.size_pt = 20.0f;
             sideways.wm = WritingMode::VerticalLR();
-            sideways.line_factor = 1.8f;
+            sideways.line_spacing.factor = 1.8f;
             sideways.language = "mn";
             std::string mn;
             for (int i = 0; i < 20; ++i) {
@@ -10346,7 +10350,7 @@ int main() {
             for (int i = 0; i < n; ++i) {
                 BlockSpec b;
                 b.size_pt = 12.0f;
-                b.line_factor = 1.6f;
+                b.line_spacing.factor = 1.6f;
                 b.space_after_pt = 4.0f;
                 b.language = "zh";
                 b.setText("第 " + std::to_string(i + 1) +
@@ -10873,7 +10877,7 @@ int main() {
             BlockSpec b;
             b.size_pt = 12.0f;
             b.wm = WritingMode::HorizontalTB();
-            b.line_factor = 1.5f;
+            b.line_spacing.factor = 1.5f;
             b.language = "zh";
             b.color = Color::rgb(24, 24, 24);
             b.setText("保存第 " + std::to_string(i) + " 段：ABC 存取往返要逐字节回到原样");
@@ -11879,7 +11883,7 @@ int main() {
             v0.font_index = 0;
             v0.size_pt = 12.0f;
             v0.wm = WritingMode::VerticalLR();
-            v0.line_factor = 1.6f;
+            v0.line_spacing.factor = 1.6f;
             v0.setText("甲乙");
             BlockSpec v1 = v0;
             v1.setText("丙丁");
@@ -13424,7 +13428,7 @@ int main() {
             BlockSpec b;
             b.font_index = 0;
             b.size_pt = 14.0f;
-            b.line_factor = 1.85f;
+            b.line_spacing.factor = 1.85f;
             b.space_after_pt = 6.0f;
             b.language = "zh";
             b.setText("第 " + std::to_string(i + 1) +
@@ -13532,7 +13536,7 @@ int main() {
             BlockSpec v;
             v.font_index = 0;
             v.size_pt = 14.0f;
-            v.line_factor = 1.9f;
+            v.line_spacing.factor = 1.9f;
             v.wm = WritingMode::VerticalRL();
             v.language = "zh";
             v.setText("附：本页为竖排附注，与上面的横排正文无关。");
@@ -16260,6 +16264,212 @@ int main() {
             expectNear(lb3.block_lo_pt, c92.page.margins.top + 12.0, 0.01,
                        "文档首段照样让出段前距（与页顶那条规则分开）");
         }
+
+        // 多倍行距多出来的空白上下对半分：字落在行槽中间，反白与插入点才包得住它。
+        //   固定值 / 最小值是"行盒高度"，字从盒顶排起 —— 两档不能共用一个式子。
+        {
+            EditorEngine e6;
+            expectTrue(e6.init(fonts92), "引擎初始化（字在行槽中间）");
+            e6.setConfig(c92);
+            e6.setDocument(t92, StyleSheet{});
+            e6.relayout();
+            expectNear(e6.layout().lines.front().slotLoPt(), e6.layout().lines.front().block_lo_pt,
+                       0.01, "前提：单倍行距下行槽顶就是字面盒顶（没有多余空白）");
+
+            ParaFormatPatch p15b;
+            p15b.line_factor = 1.5f;
+            e6.setCaret(0, 0);
+            expectTrue(e6.applyParaFormatAndRender(p15b), "第一段设 1.5 倍");
+            const LineBox& mid = e6.layout().lines.front();
+            const float ink6 = mid.block_hi_pt - mid.block_lo_pt;
+            const float slot6 = mid.slotSpanPt();
+            expectNear(mid.lead_top_pt, (slot6 - ink6) * 0.5f, 0.01,
+                       "★ 行距多出来的空白上下各一半");
+            expectNear(mid.block_lo_pt - mid.slotLoPt(), mid.lead_top_pt, 0.01,
+                       "★ 字面盒顶比行槽顶低半条行距（字在反白中间）");
+            Rect cr6{};
+            expectTrue(e6.caretRectPt(&cr6), "1.5 倍下光标矩形可查");
+            expectNear(cr6.y, mid.slotLoPt(), 0.01, "★ 光标从行槽顶起");
+            expectNear(cr6.y + cr6.h, mid.slotLoPt() + slot6, 0.01, "★ 光标到行槽底止");
+
+            // 反向：固定值不从中间分。字从盒顶排起，多出来的空白全在下方 —— 与 Word 的
+            //   "固定值"同一档，也是"字比盒高时要裁底"说得通的那个位置。
+            ParaFormatPatch pex;
+            pex.line_rule = LineSpacingRule::Exact;
+            pex.line_exact = Length::abs(ptToEmu(30.0));
+            e6.setCaret(0, 0);
+            expectTrue(e6.applyParaFormatAndRender(pex), "改成固定值 30 磅");
+            const LineBox& fx = e6.layout().lines.front();
+            expectNear(fx.lead_top_pt, 0.0, 0.01, "★ 固定值不从中间分（字贴盒顶）");
+            expectNear(fx.slotLoPt(), fx.block_lo_pt, 0.01, "固定值的字面盒顶就是行槽顶");
+        }
+
+        // 选区从软换行处起（或到某行行首止）时，本行一个字都没选中：上一行末尾不能凭空
+        //   多出一个小方块。只有本行的段落标记真的被选中，零宽才要补一条窄条。
+        {
+            EditorEngine e7;
+            expectTrue(e7.init(fonts92), "引擎初始化（从软换行处起选）");
+            e7.setConfig(c92);
+            e7.setDocument(t92, StyleSheet{});
+            e7.relayout();
+            const ParaIndex pi7 = e7.layout().para_index[0];
+            expectTrue(pi7.line_end - pi7.line_begin >= 2, "前提：第一段折成两行");
+            if (pi7.line_end - pi7.line_begin >= 2) {
+                const uint32_t wrap =
+                    e7.layout().lines[static_cast<size_t>(pi7.line_begin)].last_cp;
+                const FlowPos at_wrap = e7.flowPosAtSide(0, static_cast<int>(wrap), 0);
+                const FlowPos two_later = e7.flowPosAtSide(0, static_cast<int>(wrap) + 2, 0);
+                e7.setSelection(Range{at_wrap, two_later});
+                const std::vector<EditorEngine::PageRect> r7 = e7.selectionRects();
+                expectTrue(r7.size() == 1,
+                           "★ 从软换行处起选：上一行末尾不多出一个小方块（反白条数 " +
+                               std::to_string(r7.size()) + "）");
+                if (r7.size() == 1) {
+                    const LineBox& l2 = e7.layout().lines[static_cast<size_t>(pi7.line_begin + 1)];
+                    expectNear(r7[0].r_pt.y, l2.slotLoPt(), 0.01,
+                               "那一条反白落在下一行、从行槽顶起");
+                }
+                // 反向：从上一行中间起选，两条反白都在（尺子没有把整行吞掉）。
+                const FlowPos earlier = e7.flowPosAtSide(0, static_cast<int>(wrap) - 2, 0);
+                e7.setSelection(Range{earlier, two_later});
+                expectTrue(e7.selectionRects().size() == 2, "反向：真跨过换行处选，两条反白都在");
+            }
+        }
+    }
+
+    if (runSection(93)) {
+        // 行距三态：auto 按倍数；exact 就是那个磅值（比墨迹矮时按行裁字）；atLeast 取固定值
+        //   与内容高的较大者。三档共用同一个"内容高"基准，差别只在行高怎么定 —— 所以
+        //   这里同时钉三件事：行高、字面盒不动（exact 只改推进不改基线以上）、裁不裁。
+        EngineConfig c93;
+        c93.zoom = 1.0f;
+        c93.page.width_pt = 400.0f;
+        c93.page.height_pt = 400.0f;
+        c93.page.margins = PageMargins::all(20.0f);
+        std::string long93;
+        for (int i = 0; i < 40; ++i) long93 += "甲";
+        NodeTree t93;
+        {
+            const NodeId sec = t93.firstSectionId();
+            for (const std::string& text : {std::string("甲"), long93, std::string("乙")}) {
+                t93.setText(t93.appendChild(sec, NodeKind::TextRun), utf8ToCodepoints(text));
+                t93.appendChild(sec, NodeKind::ParagraphMark);
+            }
+        }
+        EditorEngine e;
+        expectTrue(e.init({cjkPath, mnPath, latinPath}), "引擎初始化（行距三态）");
+        e.setConfig(c93);
+        e.setDocument(t93, StyleSheet{});
+        e.relayout();
+        const LayoutResult& lay = e.layout();
+        expectTrue(lay.para_index.size() >= 3, "前提：文档有三段");
+        if (lay.para_index.size() < 3) return 1;
+        expectTrue(lay.para_index[1].line_end - lay.para_index[1].line_begin >= 2,
+                   "前提：第二段折成两行");
+        if (lay.para_index[1].line_end - lay.para_index[1].line_begin < 2) return 1;
+        const float single = lay.lines.front().advance_pt;
+        const float ink = lay.lines.front().block_hi_pt - lay.lines.front().block_lo_pt;
+        expectNear(single, ink, 0.01, "前提：单倍行距下行槽等于字面盒（这些字体没有行间隙）");
+
+        auto setSpacing = [&](LineSpacingRule rule, float exact) {
+            ParaFormatPatch p;
+            p.line_rule = rule;
+            p.line_exact = Length::abs(ptToEmu(exact));
+            e.setCaret(1, 0);
+            return e.applyParaFormatAndRender(p);
+        };
+        auto lineOf = [&](int para, int nth) -> const LineBox& {
+            const ParaIndex& pi = lay.para_index[static_cast<size_t>(para)];
+            return lay.lines[static_cast<size_t>(pi.line_begin + nth)];
+        };
+
+        expectTrue(setSpacing(LineSpacingRule::Exact, 20.0f), "第二段设固定值 20 磅");
+        expectNear(lineOf(1, 0).advance_pt, 20.0, 0.01, "★ 固定值 20：行高就是 20");
+        expectTrue(!lineOf(1, 0).clip_text, " 20 磅装得下墨迹，不进裁剪");
+        expectNear(lineOf(1, 0).block_hi_pt - lineOf(1, 0).block_lo_pt, ink, 0.01,
+                   "反向：固定值只改行高，字面盒不动");
+        expectNear(lineOf(1, 1).block_lo_pt - lineOf(1, 0).block_lo_pt, 20.0, 0.01,
+                   "同一段第二行的行顶正好推进 20 磅");
+
+        expectTrue(setSpacing(LineSpacingRule::Exact, 8.0f), "改成固定值 8 磅");
+        expectNear(lineOf(1, 0).advance_pt, 8.0, 0.01, "★ 固定值 8：行高就是 8（不夹到单倍）");
+        expectTrue(lineOf(1, 0).clip_text, "★ 8 磅比墨迹矮，这一行要裁");
+        expectTrue(!lineOf(0, 0).clip_text, "反向：别的段不受影响，仍不裁");
+        expectNear(lineOf(1, 1).block_lo_pt - lineOf(1, 0).block_lo_pt, 8.0, 0.01,
+                   "要裁的时候行距照样是 8 磅（裁的是绘制，不是排版）");
+
+        expectTrue(setSpacing(LineSpacingRule::AtLeast, 30.0f), "改成最小值 30 磅");
+        expectNear(lineOf(1, 0).advance_pt, 30.0, 0.01, "★ 最小值 30：内容更矮，按 30 排");
+        expectTrue(!lineOf(1, 0).clip_text, " 最小值那一档永远装得下，不裁");
+        expectTrue(setSpacing(LineSpacingRule::AtLeast, 5.0f), "改成最小值 5 磅");
+        expectNear(lineOf(1, 0).advance_pt, single, 0.01,
+                   "★ 最小值 5：内容更高，退回单倍（不是 5）");
+        expectNear(lineOf(1, 0).block_hi_pt - lineOf(1, 0).block_lo_pt, ink, 0.01,
+                   " 最小值档的字面盒同样不动");
+
+        expectTrue(setSpacing(LineSpacingRule::Exact, 0.0f), "固定值写成 0");
+        expectNear(lineOf(1, 0).advance_pt, single, 0.01,
+                   "★ 固定值 0 视为没设，退回 auto（不排零高的行）");
+
+        // 裁字：固定值比字矮时墨迹要停在行盒底，别的档不许裁。
+        //   两台全新引擎各测一次，而不是在一台上把行距换来换去：段落格式改完之后
+        //   页面图层不重光栅（见 docs 里那条待办），换档之后的帧量到的是上一档的墨。
+        //   段落标记要关掉：它由另一条绘制路径画，本来就不跟着字形一起裁。
+        {
+            EngineConfig c4 = c93;
+            c4.zoom = 2.0f;
+            c4.marks = MarksMode::None;
+            // 量"行盒顶往下多深还有墨"（磅）：行盒底就是裁边，装得下时墨迹会落到基线下面。
+            auto inkDepth = [&](LineSpacingRule rule, float exact) -> float {
+                EditorEngine e4;
+                e4.init({cjkPath, mnPath, latinPath});
+                e4.setConfig(c4);
+                NodeTree t4;
+                const NodeId sec = t4.firstSectionId();
+                t4.setText(t4.appendChild(sec, NodeKind::TextRun), utf8ToCodepoints("甲乙丙丁"));
+                const NodeId mark = t4.appendChild(sec, NodeKind::ParagraphMark);
+                ParaFormatPatch p;
+                p.line_rule = rule;
+                p.line_exact = Length::abs(ptToEmu(exact));
+                t4.find(mark)->para = p;
+                e4.setDocument(t4, StyleSheet{});
+                e4.relayout();
+                e4.repaint();
+                const int fw = e4.frameWidth();
+                const int fh = e4.frameHeight();
+                const uint8_t* px = e4.frame();
+                const LineBox& lb = e4.layout().lines.front();
+                const int top = static_cast<int>(std::floor(lb.block_lo_pt * c4.zoom));
+                const int x0 = static_cast<int>(std::floor(lb.inline_origin_pt * c4.zoom));
+                const int x1 =
+                    static_cast<int>(std::ceil((lb.inline_origin_pt + lb.inline_end_pt) * c4.zoom));
+                int last = top;
+                for (int y = std::max(0, top); y < std::min(fh, top + 80); ++y) {
+                    int n = 0;
+                    for (int x = std::max(0, x0); x < std::min(fw, x1); ++x) {
+                        const size_t i = (static_cast<size_t>(y) * fw + x) * 4u;
+                        if (px[i] < 128 && px[i + 1] < 128 && px[i + 2] < 128) ++n;
+                    }
+                    if (n >= 3) last = y;
+                }
+                return (last - top) / c4.zoom;
+            };
+            const float cutDepth = inkDepth(LineSpacingRule::Exact, 8.0f);
+            expectTrue(cutDepth <= 8.5f, "★ 固定值 8 磅：墨迹在 8 磅处停住（实际深 " +
+                                             std::to_string(cutDepth) + " 磅）");
+            const float fullDepth = inkDepth(LineSpacingRule::Auto, 1.0f);
+            expectTrue(fullDepth > 12.0f, "★ 反向：单倍行距下墨迹落到基线下面（实际深 " +
+                                              std::to_string(fullDepth) + " 磅）");
+            const float leastDepth = inkDepth(LineSpacingRule::AtLeast, 30.0f);
+            expectTrue(leastDepth > 12.0f,
+                       " 最小值档装得下，同样不裁（实际深 " + std::to_string(leastDepth) + " 磅）");
+        }
+
+        // 增量与全量必须同一条规则：exact 只改每行的推进量，后缀平移按它累加。
+        expectTrue(setSpacing(LineSpacingRule::Exact, 12.0f), "再设固定值 12 磅");
+        e.setCaret(2, 0);
+        expectTrue(e.typeTextAndRender("丙"), "末段敲一个字（走增量续排）");
+        expectTrue(e.auditLayout() == 0, "固定值行距下的增量续排等于整篇重排");
     }
 
     checkSectionTable();

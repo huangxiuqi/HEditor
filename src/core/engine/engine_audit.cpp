@@ -247,10 +247,11 @@ int diffBlockSpec(const BlockSpec& a, const BlockSpec& b) {
             }
         }
     }
-    if (a.font_index != b.font_index || a.size_pt != b.size_pt || a.line_factor != b.line_factor ||
-        a.space_before_pt != b.space_before_pt || a.space_after_pt != b.space_after_pt ||
-        a.page_break_before != b.page_break_before || a.language != b.language ||
-        a.color != b.color || a.fallback_font_indices != b.fallback_font_indices) {
+    if (a.font_index != b.font_index || a.size_pt != b.size_pt ||
+        !(a.line_spacing == b.line_spacing) || a.space_before_pt != b.space_before_pt ||
+        a.space_after_pt != b.space_after_pt || a.page_break_before != b.page_break_before ||
+        a.language != b.language || a.color != b.color ||
+        a.fallback_font_indices != b.fallback_font_indices) {
         ++d;
     }
     if (a.wm.inline_axis != b.wm.inline_axis || a.wm.block_flow != b.wm.block_flow ||

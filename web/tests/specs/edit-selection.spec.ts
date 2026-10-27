@@ -735,7 +735,7 @@ test.describe('编辑面：选区与样式', () => {
       return { z: ZOOM(), caret: { h: c.h, w: c.w },
                rects: SEL().rects.map((r) => ({ page: r.page, x: r.x, y: r.y, w: r.w, h: r.h })) };`);
     const factor = (f: number) => `await H.selectAll();
-      await H.paragraphFormat({ lineFactor: ${f} });
+      await H.paragraphFormat({ lineSpacing: { rule: 'auto', factor: ${f} } });
       await H.flush();`;
     // 段与段之间的缝：上一行矩形底边到下一行矩形顶边的距离，逐对都该是 0。
     const seams = (b: any): number[] =>
@@ -994,5 +994,40 @@ test.describe('编辑面：拖拽搬运', () => {
     check('★ 松手之后落点竖条收起', after.bars.every((d: string) => d === 'none'),
           JSON.stringify(after.bars));
     check('松手之后光标回到可见', after.caret === true, String(after.caret));
+  });
+
+  // 选区从软换行处起（或到某行行首止）时，本行一个字都没选中：上一行末尾不能凭空多出
+  //   一个小方块。零宽矩形只该在"本行的段落标记真被选中"时补 —— 那时选的是一枚不占字符
+  //   的位置，不补就看不见。软换行处不是段落标记，补了就是在上一行末尾画一块莫名其妙的
+  //   反白（Word 那里是空的）。
+  test('[23] 从软换行处起选：上一行末尾不多出一个小方块', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' } });
+    const r = await p.read<any>(`
+      await H.configure({ zoom: 2 });
+      await H.setText('甲乙丙丁戊己庚辛壬癸'.repeat(6));
+      await H.flush();
+      // 换行点：光标 y 第一次跳上去的那一处就是下一行行首，也就是上一行的末尾。
+      let wrap = -1;
+      let y0 = null;
+      for (let i = 0; i <= 55 && wrap < 0; ++i) {
+        await H.setCaret({ para: 0, offset: i });
+        await H.flush();
+        const y = CARET().y;
+        if (y0 === null) y0 = y;
+        else if (y > y0 + 1) wrap = i;
+      }
+      if (wrap < 0) return { wrap, at: -1, over: -1 };
+      await H.select({ para: 0, offset: wrap }, { para: 0, offset: wrap + 2 });
+      await H.flush();
+      const at = SEL().rects.length;
+      await H.select({ para: 0, offset: wrap - 2 }, { para: 0, offset: wrap + 2 });
+      await H.flush();
+      const over = SEL().rects.length;
+      await H.clearSelection();
+      return { wrap, at, over };`);
+    check('前提：这一段确实折了行（找到换行点）', r.wrap > 0, '换行点在偏移 ' + r.wrap);
+    check('\u2605 从换行处起选：只画下一行那一条，上一行末尾不多小方块',
+          r.at === 1, '反白 ' + r.at + ' 条');
+    check('反向：真跨过换行处选，两条反白都在', r.over === 2, '反白 ' + r.over + ' 条');
   });
 });

@@ -24,8 +24,15 @@
 - 页指纹混行盒指纹与 `controlPaintDigest`；`rasterSignature` 管档位/底色/缩放/资源代际。
 - 单位：`caret().rect` 是设备像素，`selection().rects` 与控件矩形是磅（读像素 / 点控件先乘
   `ZOOM` = zoom×4/3×dpr，`D.stats().zoom` 只是倍数不是密度）；行距基准是单倍行高，空段也要有行盒。
-- 行盒有两个纵向范围，别混：`block_lo/hi` 是字面盒（字形、命中、脏区），`slotSpanPt()`
-  （= `advance_pt`）是行槽；光标与反白取行槽（Word 与浏览器同口径），段距靠光标矩形行顶差量。
+- 行距三态（auto/exact/atLeast）在 `BlockSpec.line_spacing`，行高统一走 `lineHeightFor`；
+  `exact` 比墨迹矮时 `LineBox.clip_text` 为真，绘制侧按行进出裁剪栈 —— 裁剪一律用
+  `Bitmap::clipMark/restoreToMark`（按深度退回），布尔配对少退一次会让整块画布一直被裁。
+- 多出的空白怎么分，两档不同（`lineLeadTopFor`）：auto 上下对半 —— 字落在行槽中间（Word 在
+  文档网格下、CSS 的 line-height 同一口径）；exact/atLeast 贴盒顶、空白全在下方。所以行盒有
+  两个纵向范围：`block_lo/hi` 是字面盒（字形、脏区、图片锚点），行槽是 `slotLoPt()..+slotSpanPt()`
+  （光标与反白）；段距靠光标矩形行顶差量。改这块要同步 `engine_layout` 的增量平移（按 lead 重算基线）。
+- 零宽选区只在"本行段落标记真被选中"时补窄条；软换行处起选（上一行行末 / 下一行行首）不补，
+  否则上一行末尾凭空多一个小方块。
 - 块轴两套坐标：分页是页内 y（放不下就翻页、块轴回页顶），连页是整篇累加的绝对 y（页号与页内
   y 由位置现算）。按行推进块轴的写法（后缀平移）必须分两套，否则第二页起的后缀被拽回条带顶。
 - 删除后的落点：整表 / 整块删取被删节点的起点，不取选区起点（起点在被删范围内部，删完会被
@@ -71,6 +78,6 @@
 - 接缝两半用同一个位移拼，位移必须取整像素（`spill_dy = -pagePxHeight()`）。用
   `slab_pt * zoom` 会带小数（A4 下 1122.7，位图 1123 行），段落标记的横笔正好压在
   两行之间、被抗锯齿摊成两行浅灰 —— 看着比别的标记粗一档（`view` 的接缝用例钉住它）。
-- 开发期没有热更、没有自动重载（`server.hmr:false` + `watch:null`），改完手动刷新。判据那边
-  `reuseExistingServer:true`：残留的 5173/8781 会一直发**旧转译**（症状是"改了宿主的字段映射却
-  不生效"），跑之前先确认端口上没有旧服务。
+- 开发期没有热更（`server.hmr:false`），改完手动刷新。判据侧 `reuseExistingServer:true`：
+  5173/8781 上残留的旧 dev server 会一直发旧转译（症状是"改了宿主的字段映射却不生效"），
+  跑之前先确认端口干净。

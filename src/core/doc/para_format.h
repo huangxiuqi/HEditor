@@ -16,6 +16,7 @@
 #pragma once
 
 #include <optional>
+#include <string>
 #include <vector>
 
 #include "core/doc/length.h"
@@ -23,6 +24,62 @@
 #include "core/utils/types.h"
 
 namespace heditor {
+/**
+ * 行距规则。与 OOXML 的 w:lineRule 一一对应，也是 Word 段落面板上那三档。
+ *
+ * 三态的差别只在"行高怎么定"：auto 按单倍行高的倍数；exact 就是那个磅值，内容更高时
+ * 裁掉（Word 也是裁，不是溢出）；atLeast 取固定值与内容高的较大者。
+ */
+enum class LineSpacingRule : uint8_t {
+    /**
+     * 倍数行距：行高 = 单倍行高 × 倍数。默认档。
+     */
+    Auto = 0,
+
+    /**
+     * 固定值：行高就是给定磅值，内容超出部分裁掉。
+     */
+    Exact = 1,
+
+    /**
+     * 最小值：行高不小于给定磅值，内容更高时跟着长。
+     */
+    AtLeast = 2,
+};
+
+/**
+ * 行距规则的字面量。文档 JSON 与宿主载荷共用这一份，读回来也认它。
+ * @param r 规则
+ * @return auto / exact / atLeast
+ */
+inline const char* lineSpacingRuleName(LineSpacingRule r) {
+    if (r == LineSpacingRule::Exact) return "exact";
+    if (r == LineSpacingRule::AtLeast) return "atLeast";
+    return "auto";
+}
+
+/**
+ * 按字面量认行距规则。
+ * @param name 字面量
+ * @param out  解析结果（认得出时才写）
+ * @return true = 认得这个名字
+ */
+inline bool lineSpacingRuleFromName(const std::string& name, LineSpacingRule* out) {
+    if (name == "auto") {
+        *out = LineSpacingRule::Auto;
+        return true;
+    }
+    if (name == "exact") {
+        *out = LineSpacingRule::Exact;
+        return true;
+    }
+    if (name == "atLeast") {
+        *out = LineSpacingRule::AtLeast;
+        return true;
+    }
+    return false;
+}
+
 /**
  * 段落格式。只对段落结束标记（ParagraphMark）有意义，其余种类读它没有定义。
  *
@@ -47,12 +104,22 @@ struct ParaFormat {
     WritingMode wm = WritingMode::HorizontalTB();
 
     /**
-     * 行距倍数（相对单倍行高，即字体的 ascent + descent）。为什么还不是 Length：它是
-     * "相对行高"的比值，而第十一节的行距三态（auto / exact / atLeast）要改引擎的块轴
-     * 推进公式，属于独立的一步。这里先保持 BlockSpec 的浮点倍数，也就是三态里的 auto。
-     * 默认 1.0 与 Word 的单倍行距同口径。
+     * 行距规则（auto / exact / atLeast）。值在下面两栏：auto 只看倍数，
+     * exact 与 atLeast 只看磅值。默认 auto。
+     */
+    LineSpacingRule line_rule = LineSpacingRule::Auto;
+
+    /**
+     * 倍数行距的倍数（相对单倍行高，即字体的 ascent + descent + lineGap）。
+     * 默认 1.0 与 Word 的单倍行距同口径；只在 line_rule 是 auto 时有意义。
      */
     float line_factor = 1.0f;
+
+    /**
+     * 固定值 / 最小值的磅值（EMU）。0 视为没设，按 auto 处理。
+     * 只在 line_rule 是 exact 或 atLeast 时有意义。
+     */
+    Length line_exact = Length::abs(0.0);
 
     /**
      * 段前距。绝对长度（EMU），默认 0 磅。
@@ -120,9 +187,19 @@ struct ParaFormatPatch {
     std::optional<WritingMode> wm;
 
     /**
-     * 覆盖行距倍数。
+     * 覆盖行距规则。
+     */
+    std::optional<LineSpacingRule> line_rule;
+
+    /**
+     * 覆盖行距倍数（只在 auto 档生效）。
      */
     std::optional<float> line_factor;
+
+    /**
+     * 覆盖行距的固定值（exact / atLeast 档，必须是绝对长度）。
+     */
+    std::optional<Length> line_exact;
 
     /**
      * 覆盖段前距。
@@ -160,7 +237,8 @@ struct ParaFormatPatch {
      */
     bool empty() const {
         return !font_index.has_value() && !size.has_value() && !wm.has_value() &&
-               !line_factor.has_value() && !space_before.has_value() && !space_after.has_value() &&
+               !line_rule.has_value() && !line_factor.has_value() && !line_exact.has_value() &&
+               !space_before.has_value() && !space_after.has_value() &&
                !page_break_before.has_value() && !language.has_value() && !color.has_value() &&
                !fallback_font_indices.has_value();
     }
