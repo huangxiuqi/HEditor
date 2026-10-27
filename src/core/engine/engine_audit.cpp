@@ -6,6 +6,8 @@
  */
 
 #include "core/engine/engine.h"
+
+#include "core/engine/page_raster.h"
 #include "core/engine/payload_schema.h"
 
 #include "core/text/writing_mode.h"
@@ -420,10 +422,10 @@ std::string EditorEngine::auditBaseJson() {
  *
  * 参照物刻意绕开缓存。auditFrameJson 与 auditBaseJson 读的都是缓存里的像素，
  *   缓存本身错了它们照样全绿；而"两条路径都错得一样"正是最难查的一种（与
- *   auditGlyphPagesJson 同一条理由）。这里让同一份 rasterIntoBitmap 画到一块
+ *   auditGlyphPagesJson 同一条理由）。这里让同一份 drawPage 画到一块
  *   临时位图上：写进缓存是更新，写进临时位图是取证。
  *
- * 副作用：只读，不动缓存、不动计时账（光栅计时与字形计数先存后还）。
+ * 副作用：只读，不动缓存、不动计时账（耗时的出参传空）。
  * 页不在缓存里（还没画过，或被淘汰）时返回 diff = -1，不做假绿。
  */
 std::string EditorEngine::auditPageJson(int page) {
@@ -435,15 +437,8 @@ std::string EditorEngine::auditPageJson(int page) {
     }
     Bitmap ref(pw, ph);
     ref.shareFonts(font_owner_);
-    const int saved_glyphs = raster_glyphs_;
-    const double saved_bounds = raster_glyph_bounds_ms_;
-    const double saved_fill = raster_fill_ms_;
-    const double saved_glyph = raster_glyph_ms_;
-    rasterIntoBitmap(ref, page, nullptr, nullptr);
-    raster_glyphs_ = saved_glyphs;
-    raster_glyph_bounds_ms_ = saved_bounds;
-    raster_fill_ms_ = saved_fill;
-    raster_glyph_ms_ = saved_glyph;
+    // 耗时与字形数都走出参，这里传空 —— 取证不记账，也就没有"先存后还"这一步。
+    drawPage(ref, renderInput(), page, nullptr, nullptr, nullptr);
 
     const uint8_t* a = pb->px.data();
     const uint8_t* b = ref.data();

@@ -1985,7 +1985,7 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
                             //   内容就是从"行顶在这一带"的那一行起。按基线取页号会让跨接缝的
                             //   那一行整行落进下一带、页内 y 为负 —— 上半截被位图裁掉，
                             //   而上一带里没有它，接缝处就成了"半行字"。
-                            //   越过带底的那一截由 rasterIntoBitmap 的接缝补画。
+                            //   越过带底的那一截由 drawPage 的接缝补画。
                             const int gpage = lb.page;
                             pg.y_pt = locY(gpage, pen_y - sg.y_offset * usToPt);
                             pg.color = runColorAt(sg.cluster);

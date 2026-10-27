@@ -23,11 +23,13 @@
 #include "core/doc/edit_mode.h"
 #include "core/doc/flow.h"
 #include "core/engine/caret.h"
+#include "core/engine/control_geometry.h"
 #include "core/engine/edit_command.h"
 #include "core/engine/engine_config.h"
 #include "core/engine/engine_stats.h"
 #include "core/engine/image_store.h"
 #include "core/engine/page_cache.h"
+#include "core/engine/render_input.h"
 #include "core/layout/layout.h"
 #include "core/render/bitmap.h"
 #include "core/rev/capability.h"
@@ -1318,10 +1320,7 @@ public:
      * @param owner 产生端句柄（持树时是控件节点号）
      * @return 控件下标；找不到为 -1
      */
-    int controlIndexOfOwner(int owner) const {
-        const auto it = owner_index_.find(owner);
-        return it == owner_index_.end() ? -1 : it->second;
-    }
+    int controlIndexOfOwner(int owner) const { return control_geometry_.indexOfOwner(owner); }
 
     /**
      * 反方向：对外控件下标 → 块流对象表里的 owner 句柄。
@@ -2150,6 +2149,13 @@ public:
     void imagePreviewPos(const PlacedFloat& pf, float* x, float* y) const;
 
     /**
+     * 拖动预览的瞬态位移（绘制输入与命中测试共用同一份，见 floatPreviewPos）。
+     *
+     * @return 预览位移
+     */
+    FloatPreview floatPreview() const;
+
+    /**
      * 一个控件的对外描述：类型、值、选项与策略。
      *
      * 它是"给宿主看的那一份"，不是模型：不含节点指针，也不含设计期属性的完整记录。
@@ -2936,11 +2942,12 @@ private:
     bool pageBitmapFresh(int page) const;
 
     /**
-     * 一页的光栅本体（页内坐标）。band 非空时只画那一条横带。
-     * 与 rasterPageInto 分开是为了让页自审能绕过缓存画到一块临时位图上。
+     * 摆一份绘制输入：把绘制要用到的只读指针、模式与本节水印收成一个结构。
+     *
+     * 填它的只有这一处，读它的只有 page_marks.cpp 那一族 —— 绘制因此不再认识引擎的成员。
+     * @returns 绘制输入（指针指向引擎成员，生命周期到下一次重排）
      */
-    void rasterIntoBitmap(Bitmap& target, int page, const float* band_lo_pt,
-                          const float* band_hi_pt);
+    RenderInput renderInput();
 
     /**
      * 把这一页光栅进缓存，并记下它对应哪一版指纹。
@@ -2960,7 +2967,7 @@ private:
 
     /**
      * 本拍光栅出来的账。字形只画进页位图，所以这几个数由
-     * rasterIntoBitmap 累加，呈现末尾一次性上报；自审路径会先存后还，不污染它们。
+     * drawPage 累加，呈现末尾一次性上报；自审路径传空出参，不污染它们。
      */
     int raster_glyphs_ = 0;
 
@@ -3187,97 +3194,11 @@ private:
     bool suffixIsHorizontalOnly(int from, int to) const;
 
     /**
-     * 这个字形是不是选择类控件的记号（方框 / 圆圈那一个码点）。
-     *
-     * 判的是"它正好落在某个选项的记号位置上"，不是"这个字长得像圆圈"：正文里打的 ○
-     * 照旧由字体画，只有控件里那一枚才由引擎按记号色重画。
-     * @param pg 字形
-     * @param checked 写回选中态
-     * @param square 写回"方框还是圆圈"
-     * @param color 写回记号色（alpha 0 = 跟随文字颜色）
-     * @return true = 是记号
-     */
-    bool choiceMarkerOf(const PlacedGlyph& pg, bool* checked, bool* square, Color* color) const;
-
-    /**
-     * 画一枚选择类记号：方框（选中时带对勾）或圆圈（选中时圆心一个实心点），颜色取记号色。
-     *
-     * 两族都是自己画的，不走字体字形：字体里没有 ☑，而"方框里一个对勾"是这个控件唯一
-     * 说得清的选中态；圆圈若借字体字形，它的直径取决于字体，与方框并排放着大小不一
-     * （同一个字号下来回跳），颜色也只能跟正文。自绘之后两者共用同一个外径基准。
-     * @param target 页位图
-     * @param pg 字形（位置、字号、推进）
-     * @param checked 选中态
-     * @param square true = 方框（复选），false = 圆圈（单选）
-     * @param color 记号色（alpha 0 = 用字形自己的颜色）
-     * @param dy 页内纵向偏移（像素）
-     */
-    void paintChoiceMarker(Bitmap& target, const PlacedGlyph& pg, bool checked, bool square,
-                           Color color, float dy) const;
-
-    /**
-     * 画水印（衬在正文下方的一行半透明文字，按节记录绘制）。
-     *
-     * 它不参与断行、不进流位置，所以只画进页位图；分带重画时按字形纵向位置筛。
-     *
-     * @param target 光栅目标（页位图）
-     * @param page_index 页号（水印每页都有，页号只用于诊断）
-     * @param band_lo_pt 带下界（磅），可为空
-     * @param band_hi_pt 带上界（磅），可为空
-     */
-    void rasterWatermark(Bitmap& target, int page_index, const float* band_lo_pt,
-                         const float* band_hi_pt);
-
-    /**
-     * 画不可见字符标记（段落标记、空格里的中点、制表符箭头）到一页的位图上。
-     *
-     * 只画进页位图、不占宽度：标记不是内容，改档位只让像素变（见 rasterSignature），
-     *   断行、光标落点、命中与流位置一个都不动 —— 这也是它可以随手开关的前提。
-     *
-     * 几何从行盒派生：段落标记坐在"这一段的最后一行"的行末（段内码点数 == 行盒的
-     *   last_cp），空格的中点坐在该簇 inline_pt 与下一簇 inline_pt 的中点。字体与基线取
-     *   行盒的 bracket_font / bracket_axis_pt（块主字体），所以标记的粗细风格跟正文一致。
-     * band 与 spill_only 的语义与 rasterControlMarks 相同。
-     */
-    void rasterEditingMarks(Bitmap& target, int page_index, const float* band_lo_pt,
-                            const float* band_hi_pt, float dy_px, bool spill_only);
-
-    /**
      * 编辑标记此刻画不画：档位不是"不显示"，而且不在只读态（只读是呈现态，标记会被印出来）。
      *
      * 光栅签名混的是这一位而不是档位 —— 切只读不改内容，只有签名能让页位图作废。
      */
     bool marksShown() const { return cfg_.marks != MarksMode::None && mode_ != EditMode::ReadOnly; }
-
-    /**
-     * 画表单标记（方括号与小点）到一页的位图上 —— 页内坐标，不认帧。
-     *
-     * 几何全部从排版的行盒派生（占位簇的位置 + 该簇的括号字体/行盒基线）：
-     * 排版说占位在哪、用哪个字体，就画在哪 —— 空字段（一个字形都没有）也画得出来。
-     * 判据见 docs/步5-渲染层方案.md 的 5D 小节。
-     *
-     * band 非空时只画与这条带相交的行与控件 —— 与字形、原子框同一套裁剪口径。
-     * dy_px 把整笔上移（连页接缝补画那半截时传一个负的带高）；spill_only 为真时
-     *  只画越过带底的那几条行盒与控件 —— 与 rasterIntoBitmap 的接缝补画同一口径。
-     */
-    void rasterControlMarks(Bitmap& target, int page_index, const float* band_lo_pt,
-                            const float* band_hi_pt, float dy_px, bool spill_only);
-
-    /**
-     * 画一枚行内原子的显式占位框到页位图上。
-     *
-     * 与表单标记分开：原子是页面内容（它是流里的一项，进页指纹与行指纹），所以画进页位图、
-     * 不随光标状态擦除；标记跟编辑模式走，换模式要重算页内容，两者都不进瞬态层。
-     *
-     * 几何全部从行盒的占位簇派生：沿行内轴的两端取簇的 inline_pt 与下一个簇的 inline_pt，
-     * 底边坐在行盒的基线上，高度取簇自带的盒高。于是"占了位"与"画了框"共用同一份数据。
-     *
-     * @param target 光栅目标（页位图）
-     * @param a1_pt 框在行内轴上的末端（页内磅）；a0 由 c.inline_pt 与行盒的 inline_origin 给
-     * @param off_y 这一页在目标里的纵向偏移（像素）
-     */
-    void drawAtomBox(Bitmap& target, const LineBox& lb, const LineCluster& c, float a1_pt,
-                     float off_y);
 
     /**
      * 光标 / 编辑模式动过之后调用：括号占位计划变了就重排。
@@ -3477,6 +3398,14 @@ private:
      * 靠它把句柄翻译成本层对外的口径。
      */
     std::unordered_map<int, int> owner_index_;
+
+    /**
+     * 控件几何的只读视图（控件集合 + 排版 + owner 索引三者一起看）。
+     *
+     * 它不存状态，只存三个指针，所以与 owner_index_ 一起在 refreshViews 里绑一次就够 ——
+     * 那三个容器的地址是稳定的，换的是内容。
+     */
+    ControlGeometry control_geometry_;
 
     /**
      * 图片资源表（宿主注册的像素）。文档只存 id，这里存字节。
@@ -3842,7 +3771,7 @@ private:
     std::vector<uint64_t> float_fp_prev_;
 
     /**
-     * 本次重画那条行带的页内磅范围（computeBand 写、rasterIntoBitmap 读）。
+     * 本次重画那条行带的页内磅范围（computeBand 写、rasterPageInto 读）。
      * 放成员是为了不把两个 float 在 lambda 之间传来传去。
      */
     float band_lo_scratch_ = 0.0f;
@@ -3942,7 +3871,7 @@ private:
      * 上一次排版时各控件的只读位（1 = 只读）。
      *
      * 只读位只改括号颜色，不进块哈希 —— 页指纹看不见它。而括号现在画在页位图里
-     * （见 rasterControlMarks），所以 relayout 里比一次这个数组：变了就作废页缓存。
+     * （见 page_marks.h 的 drawControlMarks），所以 relayout 里比一次这个数组：变了就作废页缓存。
      * 不比的话，"把字段改成只读"之后括号还是蓝色，直到别的原因让那一页重光栅。
      */
     std::vector<uint8_t> mark_readonly_prev_;

@@ -589,20 +589,16 @@ const std::vector<LayoutFloat>& EditorEngine::floatsForLayout() {
 }
 
 void EditorEngine::imagePreviewPos(const PlacedFloat& pf, float* x, float* y) const {
-    float px = pf.x;
-    float py = pf.y;
-    // 已经排进版面的位移不再叠一次：那种预览下 placed_floats 就是预览位置，
-    //   再叠一遍图会跑到两倍远的地方（而文字只让开了一倍）。
-    if (!image_preview_.placed && image_preview_.id != kInvalidNodeId &&
-        image_preview_.id == static_cast<NodeId>(pf.handle)) {
-        px += image_preview_.dx_pt;
-        py += image_preview_.dy_pt;
-    }
-    // 拖动中的位置同样夹进版心：这里不夹的话，衬于文字上下方那两档（不重排、只挪绘制）
-    //   会一路拖出纸外，画出来被页边界切掉一半。
-    clampFloatBoxToTextArea(cfg_.page, pf.w, pf.h, &px, &py);
-    if (x != nullptr) *x = px;
-    if (y != nullptr) *y = py;
+    floatPreviewPos(cfg_, floatPreview(), pf, x, y);
+}
+
+FloatPreview EditorEngine::floatPreview() const {
+    FloatPreview pv;
+    pv.id = image_preview_.id;
+    pv.dx_pt = image_preview_.dx_pt;
+    pv.dy_pt = image_preview_.dy_pt;
+    pv.placed = image_preview_.placed;
+    return pv;
 }
 
 bool EditorEngine::previewImageMove(int index, float dx_pt, float dy_pt) {

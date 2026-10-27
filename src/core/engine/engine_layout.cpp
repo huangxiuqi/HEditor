@@ -94,7 +94,7 @@ void EditorEngine::computePageFingerprints(int dirty_lo, int dirty_hi) {
         dirty_hi = n - 1;
     } else {
         // 连页的接缝是双向的：脏区最后一页上越过带底的那半行，像素画在下一页上
-        //   （见 rasterIntoBitmap 的接缝补画）。所以重算范围要多带一页 —— 少算的
+        //   （见 drawPage 的接缝补画）。所以重算范围要多带一页 —— 少算的
         //   那一页会被判成"还是新鲜的"，缝上那半行留在旧位置：命令成功、读回的值也对，
         //   而光标所在的那一段看着像没渲染。
         if (cfg_.page.continuous && dirty_hi + 1 < n) ++dirty_hi;
@@ -109,7 +109,7 @@ void EditorEngine::computePageFingerprints(int dirty_lo, int dirty_hi) {
     //   二分定位；表格行跨页之后那条不变式已经不成立（一条高格切到第二页时，它的
     //   续排字形先追加，同一行其余各格的字形还在上一页），二分会漏掉后半截列 ——
     //   改了这一页却判成"新鲜"，屏幕上留下的是旧墨迹（含段落标记的残影）。
-    // 连页的接缝：越过带底的字形在下一条带里也有一份像素（见 rasterIntoBitmap 的
+    // 连页的接缝：越过带底的字形在下一条带里也有一份像素（见 drawPage 的
     //   接缝补画），所以它的哈希要同时混进两条带。只混一条的话，改了这一行只会重画
     //   上一带，下一带留着旧的半行。
     const bool cont = cfg_.page.continuous;

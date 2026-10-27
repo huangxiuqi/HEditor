@@ -810,6 +810,7 @@ void EditorEngine::refreshViews() {
     v.owner_index = &owner_index_;
     v.layout = &layout_;
     caret_.setView(v);
+    control_geometry_.bind(&controls_, &layout_, &owner_index_);
     caret_.setCaretWidthPt(cfg_.caret_width_pt);
 
     EditView e;
@@ -1674,83 +1675,7 @@ bool EditorEngine::setControlPropAndRender(int index, ControlProp prop, bool val
 }
 
 std::vector<EditorEngine::ControlRect> EditorEngine::controlRects(int index) const {
-    std::vector<ControlRect> out;
-    if (index < 0 || index >= controls_.size()) return out;
-    const ControlRange& cr = controls_.at(index).range;
-
-    for (const LineBox& lb : layout_.lines) {
-        if (lb.paragraph < cr.start.para || lb.paragraph > cr.end.para) continue;
-
-        // 这一行里被区间覆盖的码点范围 [lo, hi)
-        uint32_t lo = lb.first_cp;
-        uint32_t hi = lb.last_cp;
-        if (lb.paragraph == cr.start.para && cr.start.offset > lo)
-            lo = static_cast<uint32_t>(cr.start.offset);
-        if (lb.paragraph == cr.end.para && cr.end.offset < hi)
-            hi = static_cast<uint32_t>(cr.end.offset);
-        // 空控件没有码点，矩形量不出来 —— 除非它画着提示文字：那一段就是它的几何，
-        //   宿主画悬停框、贴浮层、算小点的位置都要它。没有提示的空控件仍是零宽，
-        //   照旧不给矩形（给了就是把相邻内容框进去）。
-        if (lo >= hi) {
-            for (size_t i = 0; i < lb.clusters.size(); ++i) {
-                const LineCluster& c = lb.clusters[i];
-                if (!c.control_hint || controlIndexOfOwner(c.owner_control) != index) continue;
-                const float h0 = lb.inline_origin_pt + c.inline_pt;
-                const float h1 = (i + 1 < lb.clusters.size())
-                                     ? lb.inline_origin_pt + lb.clusters[i + 1].inline_pt
-                                     : lb.inline_origin_pt + lb.inline_end_pt;
-                if (!(h1 > h0)) continue;
-                Rect hr;
-                if (!lb.vertical) {
-                    hr = Rect{h0, lb.block_lo_pt, h1 - h0, lb.block_hi_pt - lb.block_lo_pt};
-                } else {
-                    hr = Rect{lb.block_lo_pt, h0, lb.block_hi_pt - lb.block_lo_pt, h1 - h0};
-                }
-                out.push_back(ControlRect{lb.page, hr});
-                break;
-            }
-            continue;
-        }
-
-        // 左右边缘不能用同一个函数取，这是最容易写错的地方：
-        //   左边缘取"lo 那个簇自己的起点"（对）；
-        //   右边缘若也取"hi 那个簇的起点"，拿到的是区间内最后一个字的左边缘，
-        //   会整整少掉一个字的宽度（症状：框比字窄一格，看着像没框住）。
-        //   所以右边缘取"最后一个 cp < hi 的簇的右边缘"。
-        // 跳过占位簇：括号在内容之外（[内容]），控件矩形只该框住内容。
-        //   不跳的话矩形会把前缀的括号宽度也算进来，左边缘会左移一个括号 ——
-        //   于是"点在字段矩形中心"这类断言会差几像素，而画面看着又是对的。
-        float left = lb.inline_end_pt;
-        for (const LineCluster& c : lb.clusters) {
-            if (c.cp >= lo && !c.placeholder) {
-                left = c.inline_pt;
-                break;
-            }
-        }
-        float right = left;
-        for (size_t i = 0; i < lb.clusters.size(); ++i) {
-            if (lb.clusters[i].cp >= hi) break;
-            right = (i + 1 < lb.clusters.size()) ? lb.clusters[i + 1].inline_pt : lb.inline_end_pt;
-        }
-        if (!(right > left)) continue;
-
-        const float a0 = lb.inline_origin_pt + left;
-        const float a1 = lb.inline_origin_pt + right;
-        Rect r;
-        if (!lb.vertical) {
-            r.x = a0;
-            r.y = lb.block_lo_pt;
-            r.w = a1 - a0;
-            r.h = lb.block_hi_pt - lb.block_lo_pt;
-        } else {
-            r.x = lb.block_lo_pt;
-            r.y = a0;
-            r.w = lb.block_hi_pt - lb.block_lo_pt;
-            r.h = a1 - a0;
-        }
-        out.push_back(ControlRect{lb.page, r});
-    }
-    return out;
+    return control_geometry_.rects(index);
 }
 
 bool EditorEngine::focusControl(bool forward) {
