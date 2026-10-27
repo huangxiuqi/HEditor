@@ -306,7 +306,7 @@ const DEFAULT_CONFIG: EditorConfig = {
   showMarks: 'paragraph',
   marginMarks: true,
   undoLimit: 100,
-  caretStyle: { color: [0, 0, 0, 255], widthPt: 1 },
+  caretStyle: { color: [0, 0, 0, 255], widthPt: 0.5 },
   selectionStyle: { color: [31, 111, 235, 64] },
 };
 
@@ -501,7 +501,7 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
   }
 
   /**
-   * 段落格式补丁 → 引擎键名（fi / sz / lf / sa / pbb）。
+   * 段落格式补丁 → 引擎键名（fi / sz / lf / sb / sa / pbb）。
    * @param patch 公开面的补丁
    * @returns 引擎认识的载荷
    */
@@ -510,6 +510,7 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
     if (patch.font !== undefined) out.fi = fontIndexOf(patch.font);
     if (patch.size !== undefined) out.sz = patch.size;
     if (patch.lineFactor !== undefined) out.lf = patch.lineFactor;
+    if (patch.spaceBefore !== undefined) out.sb = patch.spaceBefore;
     if (patch.spaceAfter !== undefined) out.sa = patch.spaceAfter;
     if (patch.pageBreakBefore !== undefined) out.pbb = patch.pageBreakBefore;
     return out;
@@ -589,6 +590,7 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
     if (typeof o.fi === 'number') out.font = o.fi;
     if (typeof o.sz === 'number') out.size = o.sz;
     if (typeof o.lf === 'number') out.lineFactor = o.lf;
+    if (typeof o.sb === 'number') out.spaceBefore = o.sb;
     if (typeof o.sa === 'number') out.spaceAfter = o.sa;
     if (typeof o.pbb === 'boolean') out.pageBreakBefore = o.pbb;
     return out;

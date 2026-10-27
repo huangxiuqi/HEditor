@@ -484,6 +484,11 @@ else()
     target_link_libraries(heditor_edit_tests PRIVATE heditor_core heditor_demo)
     target_compile_definitions(heditor_edit_tests PRIVATE HEDITOR_NATIVE_ASSET_DIR="${HEDITOR_ASSET_DIR}")
     heditor_target_flags(heditor_edit_tests)
+    # 主函数有上万行，各节的局部变量共用同一批栈槽；Skia 的 FreeType 光栅在深处还要
+    #   几层递归，1 MB 的默认栈会在"某个节之后的第一次绘制"上溢出。给足 8 MB。
+    if (MSVC)
+      target_link_options(heditor_edit_tests PRIVATE "/STACK:8388608")
+    endif()
     foreach(shard RANGE 0 3)
       add_test(NAME edit_and_caret_${shard} COMMAND heditor_edit_tests)
       set_tests_properties(edit_and_caret_${shard} PROPERTIES

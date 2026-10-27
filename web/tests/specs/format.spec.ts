@@ -1,5 +1,8 @@
-// 格式判据：字符格式（粗/斜/下划线/字号）、段落格式（行距）与文档水印都要落到文档上，
-// 能在工具栏那套公开面上读写回来，并且画面真的跟着变。
+// 格式判据：字符格式（粗/斜/下划线/字号）、段落格式（行距倍数与段前距）与文档水印都要
+// 落到文档上，能在工具栏那套公开面上读写回来，并且画面真的跟着变。
+//
+// 段落格式的纵向口径只有两种量法：行高取反白矩形的行距（磅值，不经过设备像素），
+//   段间距取两段首行行顶之差（行顶就是光标矩形的顶边）。两者都不必自己投影。
 //
 // 字符与段落那一半读文档与几何；水印与"改完格式画面重画"必须比像素：改了但画面不重画时，
 //   命令返回 true、读回的值也对、增量产物还等于全量 —— 只有像素能看见"没重画"。
@@ -131,6 +134,115 @@ test.describe('格式', () => {
     check('命令返回 true', r.ok === true, String(r.ok));
     check('行距写进了段落格式', r.para.lineFactor === 2, JSON.stringify(r.para));
     check('★ 行距放大之后页数增加', r.after > r.before, r.before + ' → ' + r.after);
+  });
+
+  // 行高以单倍行高（字体的 ascent + descent）为基准乘倍数，倍数小于 1 时行槽跟着变矮。
+  //   单倍行高与字号之比是字体度量，不是字号本身：自带的三款字体是 1.448 em，行间隙为 0。
+  test('行距：0.8 倍把行高压到单倍的八成，页数跟着少', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' } });
+    const r = await p.read<any>(`
+      const lines = [];
+      for (let i = 0; i < 200; i++) lines.push('第' + (i + 1) + '段的文字内容，用来撑出多页。');
+      await H.setText(lines.join('\\n'));
+      await H.flush();
+      const pages1 = H.geometry().pages;
+      await H.selectAll();
+      await H.paragraphFormat({ lineFactor: 0.8 });
+      await H.flush();
+      const pages08 = H.geometry().pages;
+      // 行高改用反白矩形的行距来量：那是磅值，没有设备像素的取整误差。
+      await H.setText('甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉戌亥'.repeat(6));
+      await H.flush();
+      const pitch = async () => {
+        await H.selectAll();
+        await H.flush();
+        const rs = SEL().rects;
+        return { v: rs[1].y - rs[0].y, h: rs[0].h, n: rs.length,
+                 size: (await H.paragraphFormatAt()).size };
+      };
+      const one = await pitch();
+      await H.selectAll();
+      await H.paragraphFormat({ lineFactor: 0.8 });
+      const tight = await pitch();
+      await H.selectAll();
+      await H.paragraphFormat({ lineFactor: 1.5 });
+      const loose = await pitch();
+      return { one, tight, loose, pages1, pages08 };`);
+    check('前提：这一段折成两行以上，单倍行高量得出来',
+              r.one.n >= 2 && r.one.v > 10, `行距 ${r.one.v} 磅，字号 ${r.one.size}`);
+    check('★ 单倍行高是字体行高，不是字号（自带字体 1.448 em）',
+              Math.abs(r.one.v / r.one.size - 1.448) < 0.01,
+              `行高 ${r.one.v} / 字号 ${r.one.size} = ${r.one.v / r.one.size}`);
+    check('★ 0.8 倍的行高就是单倍的八成',
+              Math.abs(r.tight.v - r.one.v * 0.8) < 0.05,
+              `单倍 ${r.one.v}，0.8 倍 ${r.tight.v}`);
+    check('★ 0.8 倍的反白高度等于压过之后的行高（不是被单倍顶住）',
+              Math.abs(r.tight.h - r.tight.v) < 0.05,
+              `行距 ${r.tight.v}，反白高 ${r.tight.h}`);
+    check('反向：1.5 倍的行高是单倍的一倍半',
+              Math.abs(r.loose.v - r.one.v * 1.5) < 0.05,
+              `单倍 ${r.one.v}，1.5 倍 ${r.loose.v}`);
+    check('★ 0.8 倍下同样的段落排得更少页',
+              r.pages08 < r.pages1, `${r.pages1} → ${r.pages08}`);
+  });
+
+  // 段前距与上一段的段后距相加，不折叠（CSS 相邻 margin 会折叠成 6，Word 是 12）。
+  //   页顶那一段不加：分页之后段首那一截属于页边距；文档第一段照加。
+  test('段前距：与上一段的段后距相加，页顶那一段不加', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' } });
+    const r = await p.read<any>(`
+      await H.configure({ zoom: 2 });
+      await H.setText('甲\\n乙\\n丙');
+      await H.flush();
+      const top = async (para) => {
+        await H.setCaret({ para, offset: 0 });
+        await H.flush();
+        const c = CARET();
+        return { y: c.y, h: c.h, page: c.page };
+      };
+      const gap = async () => {
+        const a = await top(0);
+        const b = await top(1);
+        return { v: (b.y - a.y - a.h) / ZOOM(), a };
+      };
+      // 段落格式挂在段末那枚标记上：选区要盖到下一段开头，那枚标记才在范围内。
+      const setPara1 = async (patch) => {
+        await H.select({ para: 1, offset: 0 }, { para: 2, offset: 0 });
+        return H.paragraphFormat(patch);
+      };
+      const before = await gap();
+      const ok1 = await setPara1({ spaceBefore: 10 });
+      const after = await gap();
+      const kept = (await H.paragraphFormatAt()).spaceBefore;
+      await H.undo();
+      const undone = await gap();
+      const cleared = (await H.paragraphFormatAt()).spaceBefore;
+      await H.select({ para: 0, offset: 0 }, { para: 1, offset: 0 });
+      const ok2 = await H.paragraphFormat({ spaceBefore: 12 });
+      const first = await top(0);
+      const ok3 = await setPara1({ pageBreakBefore: true, spaceBefore: 10 });
+      const paged = await top(1);
+      const ok4 = await setPara1({ spaceBefore: 0 });
+      const pagedNo = await top(1);
+      return { before, after, kept, undone, cleared, first, paged, pagedNo, z: ZOOM(),
+               ok: [ok1, ok2, ok3, ok4] };`);
+    check('四条命令都返回 true', r.ok.every((v: boolean) => v === true), JSON.stringify(r.ok));
+    check('前提：段间只有上一段的段后距（6 磅）',
+              Math.abs(r.before.v - 6) < 0.8, `量得 ${r.before.v}`);
+    check('★ 段前距与上一段的段后距相加（6 + 10 = 16，不是折叠成 10）',
+              Math.abs(r.after.v - 16) < 0.8, `量得 ${r.after.v}`);
+    check(' 段前距写进了段落格式', r.kept === 10, String(r.kept));
+    check(' 一步撤销把段前距退掉，段间回到 6 磅',
+              (r.cleared === 0 || r.cleared === undefined) &&
+              Math.abs(r.undone.v - 6) < 0.8,
+              `读回 ${r.cleared}，量得 ${r.undone.v}`);
+    check('★ 文档第一段照样让出段前距（12 磅）',
+              Math.abs((r.first.y - r.before.a.y) / r.z - 12) < 1,
+              `行顶 ${r.before.a.y} → ${r.first.y} px，密度 ${r.z}`);
+    check('前提：第二段段前分页之后落在第二页',
+              r.paged.page === 1, `第 ${r.paged.page} 页`);
+    check('★ 页顶那一段不加段前距（把 10 磅改成 0，页内行顶一模一样）',
+              r.paged.y === r.pagedNo.y, `带段前距 ${r.paged.y} px，改成 0 之后 ${r.pagedNo.y} px`);
   });
 
   test('选区中间加粗：只有选中的那几个字变，别处不动', async ({ open }) => {

@@ -964,6 +964,10 @@ bool EditorEngine::shiftSuffixBlockAxis(int from, size_t first_glyph, int to,
                 ++page;
                 s = cy;
             }
+            // 段前距：与 layoutDocumentRange 同一条规则 —— 页顶不加（页首的空白属于页边距），
+            //   与上一段的段后距相加、不折叠。两处式子必须逐字对应，否则后缀平移
+            //   与整篇重排差一截，auditLayout 当场红。
+            if (b.space_before_pt > 0.0f && !(page > 0 && s <= cy + 0.01f)) s += b.space_before_pt;
             // 一段占多少块轴空间由"它实际产出了几行"决定：空段落也有一行
             //   （见 layout.cpp 里那段说明），而有文本却取不到字体的段一行都没有 ——
             //   后者在排版里只翻页、不让出 space_after，这里必须与它一致。

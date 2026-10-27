@@ -257,6 +257,16 @@ public:
      */
     float descenderPt() const;
 
+    /**
+     * 字体的行间隙（hhea / OS-2 的 lineGap）。
+     *
+     * 它不是字形的上下沿，而是字体"多留出来的一条缝"：单倍行高 = ascent + descent + gap，
+     * 与 Word 同口径。gap 落在 descent 之下，基线不动；自带的三款字体 gap 都是 0，
+     * 所以加进单倍行高不改变现有画面。
+     * @return 行间隙（磅，非负）
+     */
+    float lineGapPt() const;
+
 private:
 
     /**

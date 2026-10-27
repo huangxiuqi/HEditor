@@ -1909,7 +1909,7 @@ std::string parseCharPatch(const std::string& text, CharFormat* out) {
 }
 
 /**
- * 段落格式补丁：fi（字体）/ sz（字号磅）/ lf（行距倍数）/ sa（段后距磅）/ pbb（段前分页）。
+ * 段落格式补丁：fi（字体）/ sz（字号磅）/ lf（行距倍数）/ sb（段前距磅）/ sa（段后距磅）/ pbb（段前分页）。
  * @param text JSON 文本
  * @param out 解析结果
  * @return 空串 = 成功；否则是给人看的原因
@@ -1921,6 +1921,8 @@ std::string parseParaPatch(const std::string& text, ParaFormatPatch* out) {
     if (j.contains("sz") && j["sz"].is_number())
         out->size = Length::abs(ptToEmu(j["sz"].get<double>()));
     if (j.contains("lf") && j["lf"].is_number()) out->line_factor = j["lf"].get<float>();
+    if (j.contains("sb") && j["sb"].is_number())
+        out->space_before = Length::abs(ptToEmu(j["sb"].get<double>()));
     if (j.contains("sa") && j["sa"].is_number())
         out->space_after = Length::abs(ptToEmu(j["sa"].get<double>()));
     if (j.contains("pbb") && j["pbb"].is_boolean()) out->page_break_before = j["pbb"].get<bool>();

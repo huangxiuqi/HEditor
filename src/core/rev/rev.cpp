@@ -58,6 +58,8 @@ void hashParaPatch(Hasher& h, const ParaFormatPatch& p) {
     }
     h.u64(p.line_factor.has_value() ? 1 : 0);
     if (p.line_factor) h.f32(*p.line_factor);
+    h.u64(p.space_before.has_value() ? 1 : 0);
+    if (p.space_before) hashLength(h, *p.space_before);
     h.u64(p.space_after.has_value() ? 1 : 0);
     if (p.space_after) hashLength(h, *p.space_after);
     h.u64(p.page_break_before.has_value() ? 1 : 0);

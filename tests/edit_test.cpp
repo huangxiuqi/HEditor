@@ -500,6 +500,7 @@ const SectionInfo kSections[] = {
     {77, false, 3},  {78, true, 1},   {79, false, 2},  {80, false, 3},  {81, false, 2},
     {82, false, 1},  {83, false, 2},  {84, false, 2},  {85, false, 3},  {86, false, 4},
     {87, false, 3},  {88, false, 3},  {89, false, 3},  {90, false, 2},  {91, false, 3},
+    {92, false, 6},
 };
 
 /**
@@ -3011,7 +3012,6 @@ int main() {
             e.setCaret(1, 0);
             expectTrue(!e.backspace(), "只读模式：段首退格（合并）被拒");
             expectTrue(e.blockedEdits() == b0 + 2, "两次被拒都记在 blocked_edits 上");
-            e.setEditMode(EditMode::Document);
         }
 
         // 表单策略：断点能不能写，由"插入策略"决定（回车 = 在断点插入一个段落分隔符）
@@ -16082,6 +16082,183 @@ int main() {
             expectTrue(top_b > top_a - 0.01f && top_b - top_a < 60.0f,
                        "★ 表跟着下移一行（实际下移 " + std::to_string(top_b - top_a) +
                            " 磅）—— 塌回条带顶时这个差是一整条带");
+        }
+    }
+
+    if (runSection(92)) std::printf("\n[92] 行盒几何：行槽与字面盒分开、倍数可压行、段前距相加\n");
+    if (runSection(92)) {
+        // 一条行盒要同时回答三个问题，三者的边界必须清楚：
+        //   字面盒（block_hi - block_lo）管字形与命中，行槽（advance_pt）管光标与反白，
+        //   段前距与段后距各算各的、不折叠。混成一个数，表现出来就是
+        //   "1.5 倍行距下反白一条一条断开、光标比行短一截"，或者"两段的 6 磅只让出 6 磅"。
+        EngineConfig c92;
+        c92.zoom = 1.0f;
+        c92.page.width_pt = 400.0f;
+        c92.page.height_pt = 400.0f;
+        c92.page.margins = PageMargins::all(20.0f);
+        const std::vector<std::string> fonts92 = {cjkPath, mnPath, latinPath};
+
+        // 第一段写成两行：反白是否首尾相接要在同一段内量 —— 段与段之间本来就该有段后距。
+        std::string longText;
+        for (int i = 0; i < 40; ++i) longText += "甲";
+        NodeTree t92;
+        {
+            const NodeId sec = t92.firstSectionId();
+            for (std::string text : {longText, std::string("乙"), std::string("丙")}) {
+                t92.setText(t92.appendChild(sec, NodeKind::TextRun), utf8ToCodepoints(text));
+                t92.appendChild(sec, NodeKind::ParagraphMark);
+            }
+        }
+        EditorEngine e;
+        expectTrue(e.init(fonts92), "引擎初始化（行盒几何）");
+        e.setConfig(c92);
+        e.setDocument(t92, StyleSheet{});
+        e.relayout();
+
+        const LayoutResult& lay = e.layout();
+        expectTrue(lay.lines.size() == 4, "前提：三段共四行（第一段折成两行，实际 " +
+                                              std::to_string(lay.lines.size()) + " 行）");
+        if (lay.lines.size() < 4) return 1;
+        auto ink = [&](size_t i) { return lay.lines[i].block_hi_pt - lay.lines[i].block_lo_pt; };
+        auto slot = [&](size_t i) { return lay.lines[i].advance_pt; };
+        const float adv0 = slot(0);
+        const float ink0 = ink(0);
+        expectTrue(adv0 > 1.0f, "前提：单倍行高量得出来（实际 " + std::to_string(adv0) + " 磅）");
+        // 自带三款字体的 lineGap 都是 0，所以单倍行高恰好等于 ascent + descent：
+        //   行槽与字面盒在这一档重合，这是"多出来的行距全在行底"的必然结果。
+        expectNear(adv0, ink0, 0.01, "单倍行高等于字面盒（这些字体没有行间隙）");
+        expectNear(adv0, lay.lines[0].ascent_pt + lay.lines[0].descent_pt, 0.01,
+                   "反向：单倍行高就是 ascent + descent，没有多加一项");
+
+        Rect cr{};
+        expectTrue(e.caretRectPt(&cr), "光标矩形可查");
+        expectNear(cr.h, adv0, 0.01, "单倍行距下光标高度等于行槽");
+
+        // 1.5 倍：行槽跟着长，字面盒一动不动，光标跟的是行槽。
+        ParaFormatPatch p15;
+        p15.line_factor = 1.5f;
+        e.setCaret(0, 0);
+        expectTrue(e.applyParaFormatAndRender(p15), "第一段设 1.5 倍行距");
+        expectNear(slot(0), adv0 * 1.5f, 0.01, "1.5 倍：行槽 = 单倍 x 1.5");
+        expectNear(ink(0), ink0, 0.01, "反向：1.5 倍下字面盒纹丝不动（基线没被拽走）");
+        expectTrue(slot(0) > ink(0) + 1.0f,
+                   "行槽比字面盒高出一条行距（实际 " + std::to_string(slot(0) - ink(0)) + " 磅）");
+        expectTrue(e.caretRectPt(&cr), "1.5 倍下光标矩形可查");
+        expectNear(cr.h, slot(0), 0.01, "光标高度跟行槽走，不是字面盒");
+
+        // 反白同理：一行一条矩形，纵向取行槽，于是相邻两行首尾相接、中间不留缝。
+        e.selectAll();
+        const std::vector<EditorEngine::PageRect> rects = e.selectionRects();
+        expectTrue(rects.size() >= 3,
+                   "全选之后至少三条反白（实际 " + std::to_string(rects.size()) + " 条）");
+        if (rects.size() >= 3) {
+            expectNear(rects[0].r_pt.h, slot(0), 0.01, "反白高度等于行槽");
+            expectNear(rects[1].r_pt.y, rects[0].r_pt.y + rects[0].r_pt.h, 0.01,
+                       "1.5 倍行距下两条反白首尾相接（中间不留缝）");
+        }
+        e.setCaret(0, 0);
+
+        // 0.8 倍：真的压行。行高以单倍为基准乘倍数，倍数小于 1 时行槽跟着变矮。
+        ParaFormatPatch p08;
+        p08.line_factor = 0.8f;
+        expectTrue(e.applyParaFormatAndRender(p08), "改成 0.8 倍");
+        expectNear(slot(0), adv0 * 0.8f, 0.01, "0.8 倍：行槽真的压到单倍的八成");
+        expectTrue(slot(0) < adv0 - 1.0f, "反向：0.8 倍确实比单倍矮");
+        expectNear(ink(0), ink0, 0.01, "反向：压行只动行槽，字面盒不缩");
+        expectTrue(lay.lines.size() == 4, "压行不改断行（仍是四行）");
+
+        // 倍数为 0 时按下限 0.1 算：行高不能是 0，否则一页上所有行叠在一处。
+        ParaFormatPatch p0;
+        p0.line_factor = 0.0f;
+        expectTrue(e.applyParaFormatAndRender(p0), "倍数设成 0");
+        expectTrue(slot(0) > 0.5f,
+                   "倍数 0 被下限顶住（实际行高 " + std::to_string(slot(0)) + " 磅）");
+        expectNear(slot(0), adv0 * 0.1f, 0.01, "下限就是 0.1 倍");
+
+        // 段前距：两段的空白相加，不折叠（CSS 的 margin 会折叠成 6，那是唯一不能照抄的地方）。
+        ParaFormatPatch p1;
+        p1.line_factor = 1.0f;
+        expectTrue(e.applyParaFormatAndRender(p1), "第一段恢复单倍");
+        auto lineTop = [&](int para) -> float {
+            const ParaIndex& pi = lay.para_index[static_cast<size_t>(para)];
+            return lay.lines[static_cast<size_t>(pi.line_begin)].block_lo_pt;
+        };
+        auto paraGap = [&](int upper) -> float {
+            const ParaIndex& pi = lay.para_index[static_cast<size_t>(upper - 1)];
+            const LineBox& prev = lay.lines[static_cast<size_t>(pi.line_end - 1)];
+            return lineTop(upper) - (prev.block_lo_pt + prev.advance_pt);
+        };
+        expectNear(paraGap(1), 6.0, 0.01, "前提：段间只有段后距（6 磅）");
+
+        ParaFormatPatch pbefore;
+        pbefore.space_before = Length::abs(ptToEmu(10.0));
+        e.setCaret(1, 0);
+        expectTrue(e.applyParaFormatAndRender(pbefore), "第二段设段前距 10 磅");
+        expectNear(paraGap(1), 16.0, 0.01, "段前距与上一段的段后距相加（6 + 10 = 16）");
+        {
+            const ParaIndex& pi0 = lay.para_index[0];
+            const LineBox& last0 = lay.lines[static_cast<size_t>(pi0.line_end - 1)];
+            expectNear(lineTop(1), last0.block_lo_pt + last0.advance_pt + 16.0, 0.01,
+                       "第二段首行的行顶落在算出来的那一处");
+        }
+        // 增量与全量必须同一条规则：后缀平移按 advance 逐行累加，段前距只在全量里加的话，
+        //   两边的块轴就差这一截，auditLayout 当场红。
+        e.setCaret(0, 0);
+        expectTrue(e.typeTextAndRender("丁"), "在第一段敲一个字（走增量续排）");
+        expectTrue(e.auditLayout() == 0, "带段前距的增量续排等于整篇重排");
+
+        ParaFormatPatch p_clear;
+        p_clear.space_before = Length::abs(ptToEmu(0.0));
+        e.setCaret(1, 0);
+        expectTrue(e.applyParaFormatAndRender(p_clear), "清掉段前距");
+        expectNear(paraGap(1), 6.0, 0.01, "反向：清掉之后段间回到 6 磅");
+
+        // 页顶不加段前距：分页之后段首那一截属于页边距。
+        {
+            EditorEngine e2;
+            expectTrue(e2.init(fonts92), "引擎初始化（页顶段前距）");
+            EngineConfig c2 = c92;
+            c2.page.height_pt = 200.0f;
+            e2.setConfig(c2);
+            NodeTree t2;
+            {
+                const NodeId sec = t2.firstSectionId();
+                for (const char* text : {"前", "后"}) {
+                    t2.setText(t2.appendChild(sec, NodeKind::TextRun), utf8ToCodepoints(text));
+                    t2.appendChild(sec, NodeKind::ParagraphMark);
+                }
+            }
+            e2.setDocument(t2, StyleSheet{});
+            e2.relayout();
+            ParaFormatPatch pbreak;
+            pbreak.space_before = Length::abs(ptToEmu(10.0));
+            pbreak.page_break_before = true;
+            e2.setCaret(1, 0);
+            expectTrue(e2.applyParaFormatAndRender(pbreak), "第二段：段前分页 + 段前距 10 磅");
+            const LayoutResult& lay2 = e2.layout();
+            const ParaIndex& pi2 = lay2.para_index[1];
+            const LineBox& lb2 = lay2.lines[static_cast<size_t>(pi2.line_begin)];
+            expectTrue(lb2.page == 1,
+                       "第二段落在第二页（实际第 " + std::to_string(lb2.page) + " 页）");
+            expectNear(lb2.block_lo_pt, c2.page.margins.top, 0.01,
+                       "页顶不加段前距（行顶就是版心顶，不多 10 磅）");
+            expectTrue(e2.auditLayout() == 0, "页顶那条规则在增量与全量之间一致");
+        }
+
+        // 文档第一段照样让出段前距：页首那一段与"分页之后的段首"不是一回事。
+        {
+            EditorEngine e3;
+            expectTrue(e3.init(fonts92), "引擎初始化（首段段前距）");
+            e3.setConfig(c92);
+            e3.setDocument(t92, StyleSheet{});
+            e3.relayout();
+            ParaFormatPatch pfirst;
+            pfirst.space_before = Length::abs(ptToEmu(12.0));
+            e3.setCaret(0, 0);
+            expectTrue(e3.applyParaFormatAndRender(pfirst), "第一段设段前距 12 磅");
+            const LineBox& lb3 = e3.layout().lines.front();
+            expectNear(lb3.block_lo_pt, c92.page.margins.top + 12.0, 0.01,
+                       "文档首段照样让出段前距（与页顶那条规则分开）");
         }
     }
 

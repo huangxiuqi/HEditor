@@ -108,8 +108,10 @@ struct EngineConfig {
 
     /**
      * 光标线宽（磅）。下限 0.4，宿主设更小时按 0.4 画。
+     *
+     * 默认 0.5 磅：默认缩放 2.0 下取整后正好一条设备像素，与浏览器和 Word 的插入点同宽。
      */
-    float caret_width_pt = 1.0f;
+    float caret_width_pt = 0.5f;
 
     /**
      * 画不画页框。它只影响光栅，不重排。

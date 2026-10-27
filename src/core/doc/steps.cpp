@@ -294,9 +294,9 @@ bool sameWritingMode(const WritingMode& a, const WritingMode& b) {
  */
 bool sameParaPatch(const ParaFormatPatch& a, const ParaFormatPatch& b) {
     if (a.font_index != b.font_index || a.size != b.size || a.line_factor != b.line_factor ||
-        a.space_after != b.space_after || a.page_break_before != b.page_break_before ||
-        a.language != b.language || a.color != b.color ||
-        a.fallback_font_indices != b.fallback_font_indices) {
+        a.space_before != b.space_before || a.space_after != b.space_after ||
+        a.page_break_before != b.page_break_before || a.language != b.language ||
+        a.color != b.color || a.fallback_font_indices != b.fallback_font_indices) {
         return false;
     }
     if (a.wm.has_value() != b.wm.has_value()) return false;

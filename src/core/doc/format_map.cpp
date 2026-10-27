@@ -35,6 +35,7 @@ void applyParaFormatToBlock(const StyleSheet& sheet, const std::string& style_re
     absToPt(f.size, "字号", mark, &block->size_pt, diag);
     block->wm = f.wm;
     block->line_factor = f.line_factor;
+    absToPt(f.space_before, "段前距", mark, &block->space_before_pt, diag);
     absToPt(f.space_after, "段后距", mark, &block->space_after_pt, diag);
     block->page_break_before = f.page_break_before;
     block->language = f.language;

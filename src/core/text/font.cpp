@@ -164,6 +164,14 @@ float FontInstance::descenderPt() const {
     return -scaleUnitsToPt(ext.descender);
 }
 
+float FontInstance::lineGapPt() const {
+    if (!font_) return 0.0f;
+    hb_font_extents_t ext{};
+    if (!hb_font_get_h_extents(font_, &ext)) return 0.0f;
+    // line_gap 可能是负的（字体重叠），按 0 兜住：行高不该被它吃掉
+    return (ext.line_gap > 0) ? scaleUnitsToPt(ext.line_gap) : 0.0f;
+}
+
 int FontLibrary::addFace(const std::string& path) {
     auto f = std::make_unique<FontFace>();
     if (!f->loadFromFile(path)) return -1;

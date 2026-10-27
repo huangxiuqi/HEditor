@@ -29,6 +29,7 @@ void applyParaFormatPatch(const ParaFormatPatch& patch, ParaFormat* base) {
     if (patch.size.has_value()) base->size = *patch.size;
     if (patch.wm.has_value()) base->wm = *patch.wm;
     if (patch.line_factor.has_value()) base->line_factor = *patch.line_factor;
+    if (patch.space_before.has_value()) base->space_before = *patch.space_before;
     if (patch.space_after.has_value()) base->space_after = *patch.space_after;
     if (patch.page_break_before.has_value()) base->page_break_before = *patch.page_break_before;
     if (patch.language.has_value()) base->language = *patch.language;
@@ -43,6 +44,7 @@ ParaFormatPatch mergeParaFormatPatch(const ParaFormatPatch& under, const ParaFor
     if (over.size.has_value()) out.size = over.size;
     if (over.wm.has_value()) out.wm = over.wm;
     if (over.line_factor.has_value()) out.line_factor = over.line_factor;
+    if (over.space_before.has_value()) out.space_before = over.space_before;
     if (over.space_after.has_value()) out.space_after = over.space_after;
     if (over.page_break_before.has_value()) out.page_break_before = over.page_break_before;
     if (over.language.has_value()) out.language = over.language;

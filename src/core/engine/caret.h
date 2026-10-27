@@ -860,9 +860,9 @@ private:
     float vertical_goal_pt_ = 0.0f;
 
     /**
-     * 光标条宽度（磅）。默认 1.5，由引擎按配置改写。
+     * 光标条宽度（磅）。与 EngineConfig::caret_width_pt 同一档，引擎每次摆视图时覆盖它。
      */
-    float caret_width_pt_ = 1.5f;
+    float caret_width_pt_ = 0.5f;
 };
 
 }  // namespace heditor

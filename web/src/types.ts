@@ -1847,6 +1847,11 @@ export interface ParaFormatPatch {
   lineFactor?: number;
 
   /**
+   * 段前距（磅）。页顶那一段不加；与上一段的段后距相加，不折叠。
+   */
+  spaceBefore?: number;
+
+  /**
    * 段后距（磅）。
    */
   spaceAfter?: number;

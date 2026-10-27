@@ -610,6 +610,8 @@ std::string EditorEngine::paraFormatAtJson() const {
     if (p.size && p.size->kind == LengthKind::Abs)
         j["sz"] = static_cast<double>(emuToPt(p.size->abs_emu));
     if (p.line_factor) j["lf"] = *p.line_factor;
+    if (p.space_before && p.space_before->kind == LengthKind::Abs)
+        j["sb"] = static_cast<double>(emuToPt(p.space_before->abs_emu));
     if (p.space_after && p.space_after->kind == LengthKind::Abs)
         j["sa"] = static_cast<double>(emuToPt(p.space_after->abs_emu));
     if (p.page_break_before) j["pbb"] = *p.page_break_before;

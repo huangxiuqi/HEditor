@@ -69,6 +69,7 @@ inline std::string blockDiff(const BlockSpec& a, const BlockSpec& b) {
     if (a.size_pt != b.size_pt) return "size_pt";
     if (!(a.wm == b.wm)) return "wm";
     if (a.line_factor != b.line_factor) return "line_factor";
+    if (a.space_before_pt != b.space_before_pt) return "space_before_pt";
     if (a.space_after_pt != b.space_after_pt) return "space_after_pt";
     if (a.page_break_before != b.page_break_before) return "page_break_before";
     if (!BlockSpec::sameLanguage(a.language, b.language)) return "language";

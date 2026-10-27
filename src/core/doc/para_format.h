@@ -55,6 +55,15 @@ struct ParaFormat {
     float line_factor = 1.0f;
 
     /**
+     * 段前距。绝对长度（EMU），默认 0 磅。
+     *
+     * 与段后距各算各的：Word 里相邻两段的 6 磅 + 6 磅是 12 磅，不折叠（CSS 的 margin
+     * 会折叠成 6，那是唯一一处不能照抄浏览器的段落属性）。页顶让出的那一段不加
+     * —— 分页之后段首的那截空白属于页边距，不属于段落。
+     */
+    Length space_before = Length::abs(ptToEmu(0.0));
+
+    /**
      * 段后距。绝对长度（EMU），默认 6 磅（与 BlockSpec 同一档，比 10 磅紧凑一档）。
      */
     Length space_after = Length::abs(ptToEmu(6.0));
@@ -116,6 +125,11 @@ struct ParaFormatPatch {
     std::optional<float> line_factor;
 
     /**
+     * 覆盖段前距。
+     */
+    std::optional<Length> space_before;
+
+    /**
      * 覆盖段后距。
      */
     std::optional<Length> space_after;
@@ -146,7 +160,7 @@ struct ParaFormatPatch {
      */
     bool empty() const {
         return !font_index.has_value() && !size.has_value() && !wm.has_value() &&
-               !line_factor.has_value() && !space_after.has_value() &&
+               !line_factor.has_value() && !space_before.has_value() && !space_after.has_value() &&
                !page_break_before.has_value() && !language.has_value() && !color.has_value() &&
                !fallback_font_indices.has_value();
     }

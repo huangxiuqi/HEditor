@@ -109,6 +109,11 @@ struct LineMetric {
      * 所以行高取"字号 × 行距"与盒高的大者，两条来源分开算再取大。
      */
     float box_h_pt = 0.0f;
+
+    /**
+     * 字体自己的行间隙（磅）。只进单倍行高，不进基线 —— gap 落在 descent 之下。
+     */
+    float gap_pt = 0.0f;
 };
 
 /**
@@ -211,6 +216,10 @@ struct BlockShaping {
     FontInstance* primary = nullptr;
     float ascent_pt = 0.0f;
     float descent_pt = 0.0f;
+    /**
+     * 字体行间隙（磅）：单倍行高 = ascent + descent + gap，与 Word 同口径。
+     */
+    float gap_pt = 0.0f;
 
     /**
      * 簇起点表（升序，末尾为段长哨兵）。属于纯整形产物（不含括号占位），可随整形一起缓存。
@@ -421,6 +430,12 @@ const BlockShaping* withInlineObjects(const BlockSpec& b, uint32_t n_cp, const B
 }
 
 /**
+ * 行距倍数的下限。小于它（含 0 与负数）按它算：块轴推进不能是 0，否则一页上几十行
+ * 叠在同一处，分页、命中与滚动都没有尺子可用。0.1 已经压到字叠字，再小没有排版意义。
+ */
+constexpr float kMinLineFactor = 0.1f;
+
+/**
  * 断出来的一行（竖排下是一列）：簇区间与这一行自己的度量。
  *
  * 它刻意不含页号与 y —— 那两样是分页的产物，断行只看"装得下多少"。这条分工是排版拆成
@@ -443,14 +458,15 @@ struct BrokenLine {
 };
 
 /**
- * 从 start 起断出下一行：容量是 avail，度量取自每个簇所在的 run。
- *
  * 行高 = 单倍行高 × 倍数，单倍行高取字体自己的 ascent + descent（不是字号：字体的纵向
  * 留白本来就属于"一行有多高"）。行里塞进比文本更高的东西（原子盒）时，撑高的是内容，
  * 行距本身要留着：max(行距, 内容高 + 行距 - 文本高)。纯文本行两项相等 ⇒ 就是行距；
  * 原子行 ⇒ 盒高 + 行距 - ascent。只取 max(行距, 盒高) 是错的：那样盒底下面一点空隙都
  * 没有，下一行的字紧贴着盒底排（实测相邻两行的行盒还重叠 3.5 磅）—— 看起来就是
  * "那一行的行距没了"。行距是段落属性，不该被行里的一枚盒子吃掉。
+ *
+ * 多出的行距（leading）落在行底，可以为负：倍数小于 1 时就是压行，这是 Word 的
+ * "多倍行距 0.8"那一档。倍数下限见 kMinLineFactor。
  *
  * 横排与竖排用的是同一个式子（那边叫 col_w，这边叫 line_h），所以它只有一份实现。
  */
@@ -470,6 +486,7 @@ BrokenLine breakLine(const BlockShaping& bs, const std::vector<LineMetric>& clus
     // 定 —— 算行高时要把它和"内容撑出来的高度"分开，见上面那段。
     float text_ascent = 0.0f;
     float text_descent = 0.0f;
+    float text_gap = 0.0f;
     for (size_t i = slice.begin; i < slice.end; ++i) {
         ascent = std::max(ascent, cluster_metric[i].ascent_pt);
         descent = std::max(descent, cluster_metric[i].descent_pt);
@@ -478,6 +495,7 @@ BrokenLine breakLine(const BlockShaping& bs, const std::vector<LineMetric>& clus
         if (bs.clusters[i].atom == InlineAtom::None) {
             text_ascent = std::max(text_ascent, cluster_metric[i].ascent_pt);
             text_descent = std::max(text_descent, cluster_metric[i].descent_pt);
+            text_gap = std::max(text_gap, cluster_metric[i].gap_pt);
         }
     }
     // 一个度量都取不到（取不到字体）就退回块级那套：几何必须存在。
@@ -487,15 +505,17 @@ BrokenLine breakLine(const BlockShaping& bs, const std::vector<LineMetric>& clus
         max_size = block_size_pt;
     }
 
-    // 单倍行高 = 字体自己的 ascent + descent（取不到度量时退回块级那套，再退回字号）。
+    // 单倍行高 = 字体自己的 ascent + descent + lineGap（取不到度量时退回块级那套，再退回字号）。
     //   行距以它为基准，与字号脱钩：字体自带的纵向留白已经算在里面，1.0 就是它本身。
     //   以字号为基准时这段留白会把小倍数吃掉 —— 1.0 到 1.45 全落在同一个行高上。
-    //   倍数小于 1 时被单倍行高压住（不压缩：两行字会叠在一起）。
-    float natural = text_ascent + text_descent;
-    if (!(natural > 0.0f)) natural = bs.ascent_pt + bs.descent_pt;
+    //   gap 只在行高里，不进 ascent —— 它落在 descent 之下，基线不动。
+    float natural = text_ascent + text_descent + text_gap;
+    if (!(natural > 0.0f)) natural = bs.ascent_pt + bs.descent_pt + bs.gap_pt;
     if (!(natural > 0.0f)) natural = (max_size > 0.0f) ? max_size : block_size_pt;
-    const float pitch = natural * line_factor;
-    const float leading = std::max(0.0f, pitch - natural);
+    const float pitch = natural * std::max(line_factor, kMinLineFactor);
+    // leading 可以是负的：倍数小于 1 时它把行压扁，字与字上下相接。纯文本行的行高
+    //   于是恰好等于 pitch，与"多倍行距"这个说法一致。
+    const float leading = pitch - natural;
 
     out.ascent = ascent;
     out.descent = descent;
@@ -702,6 +722,17 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
         if (!cont) return y;
         return y - static_cast<float>(pg) * slab;
     };
+    /**
+     * 这一段的段首是不是正好落在版心顶上。Word 在页顶不叠加段前距 —— 页首那截空白
+     * 属于页边距，不属于段落；正文第一段（第 0 页）与格内照常让出。
+     * @param inside_cell 这一段是否在表格里
+     * @param pg 当前页号
+     * @param y 块轴位置
+     * @return true = 版心顶，段前距不加
+     */
+    auto atPageTop = [&](bool inside_cell, int pg, float y) -> bool {
+        return !cont && !inside_cell && pg > 0 && y <= cy + 0.01f;
+    };
 
     // 取出一段的纯整形结果（优先命中段级缓存）。
     //
@@ -738,6 +769,7 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
         bs.primary = font;
         bs.ascent_pt = font->ascenderPt();
         bs.descent_pt = font->descenderPt();
+        bs.gap_pt = font->lineGapPt();
         // 这两个标记只由书写模式决定，先于切段赋值，避免依赖「至少有一段整形成功」。
         bs.st.vertical = (b.wm.shapingDirection() == ShapingDirection::TopToBottom);
         bs.st.sideways = b.wm.isSideways();
@@ -1505,10 +1537,14 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
             // 取不到字体就用字号折算的近似度量：空行的几何必须存在，否则光标没地方画。
             const float ascent = f ? f->ascenderPt() : b.size_pt * 0.8f;
             const float descent = f ? f->descenderPt() : b.size_pt * 0.2f;
+            const float gap = f ? f->lineGapPt() : 0.0f;
             if (!cont && tstack.empty() && b.page_break_before && cursor_y > cy + 0.01f) {
                 ++page_index;
                 cursor_y = cy;
             }
+            // 段前距：页顶那一段不加（页首的空白属于页边距，不属于段落），与段后距各算各的。
+            if (b.space_before_pt > 0.0f && !atPageTop(!tstack.empty(), page_index, cursor_y))
+                cursor_y += b.space_before_pt;
             // 空段落一样要插括号占位：回车正好把字段断在两段之间、或字段所在段被删空时，
             //   这一段里就只剩字段边界了。走的是与有内容段落同一个 withInlineObjects ——
             //   对象表只有一份，不会两边不一致。
@@ -1532,9 +1568,9 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
             }
             // 单倍行高与有内容的段同一个基准（ascent + descent），否则同一个格式下空行
             //   会比有字的行矮一截（两者只差一个"有没有字"）。
-            float natural = ascent + descent;
+            float natural = ascent + descent + gap;
             if (!(natural > 0.0f)) natural = b.size_pt;
-            const float line_h = std::max(natural * b.line_factor, box_h);
+            const float line_h = std::max(natural * std::max(b.line_factor, kMinLineFactor), box_h);
             const float ascent_eff = std::max(ascent, box_h);
 
             LineBox lb;
@@ -1651,9 +1687,10 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
 
         // 整段的单倍行高 × 倍数（竖排的列宽上界、首列宽度都用它）：与 breakLine 同一个
         //   基准，取块的字体度量；取不到字体时按字号估。
-        const float block_natural =
-            (bs.ascent_pt + bs.descent_pt > 0.0f) ? (bs.ascent_pt + bs.descent_pt) : b.size_pt;
-        const float block_line_h = block_natural * b.line_factor;
+        const float block_natural = (bs.ascent_pt + bs.descent_pt + bs.gap_pt > 0.0f)
+                                        ? (bs.ascent_pt + bs.descent_pt + bs.gap_pt)
+                                        : b.size_pt;
+        const float block_line_h = block_natural * std::max(b.line_factor, kMinLineFactor);
         // 本行/本列末尾码点：下一个簇的首码点，最后一簇用段长
         auto lastCpOf = [&](size_t slice_end) -> uint32_t {
             return (slice_end < bs.clusters.size()) ? bs.clusters[slice_end].cp : n_cp;
@@ -1696,6 +1733,7 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
                             lib.instance(fi, m.size_pt, r != nullptr ? r->weight : 400.0f)) {
                         m.ascent_pt = f->ascenderPt();
                         m.descent_pt = f->descenderPt();
+                        m.gap_pt = f->lineGapPt();
                     }
                 }
                 cluster_metric[i] = m;
@@ -1713,14 +1751,21 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
                     std::max(para_metric.ascent_pt, cluster_metric[i].ascent_pt);
                 para_metric.descent_pt =
                     std::max(para_metric.descent_pt, cluster_metric[i].descent_pt);
+                para_metric.gap_pt = std::max(para_metric.gap_pt, cluster_metric[i].gap_pt);
                 para_metric.box_h_pt = std::max(para_metric.box_h_pt, cluster_metric[i].box_h_pt);
             }
             // 一个度量都取不到（取不到字体）：退回块级那套，几何必须存在。
             if (para_metric.size_pt <= 0.0f) {
-                para_metric =
-                    LineMetric{b.size_pt, bs.ascent_pt, bs.descent_pt, para_metric.box_h_pt};
+                para_metric = LineMetric{b.size_pt, bs.ascent_pt, bs.descent_pt,
+                                         para_metric.box_h_pt, bs.gap_pt};
             }
         }
+
+        // 段前距：段首行之前让出这一段空白。页顶那一段不加（分页之后段首的空白属于
+        //   页边距），与上一段的段后距相加、不折叠 —— 那正是 Word 的算法。
+        //   放在这里而不是段前分页之前：先翻页再让距，翻页后若正好落到页顶就不让。
+        if (b.space_before_pt > 0.0f && !atPageTop(!tstack.empty(), page_index, cursor_y))
+            cursor_y += b.space_before_pt;
 
         if (!b.wm.isVertical()) {
             // 横排。推进的是行顶（top）而不是基线：一行里可以混排字号，基线 = 行顶 +
@@ -2110,10 +2155,11 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
             //   列宽要等这一列的内容定下来才知道，而列长与列宽无关（列长就是内容高度），
             //   所以"先取内容、再算宽度、再落列位"没有循环依赖。
             //   col_w_max 是列宽的上界，只用于分页估计；基准与 breakLine 相同。
-            const float para_natural = (para_metric.ascent_pt + para_metric.descent_pt > 0.0f)
-                                           ? (para_metric.ascent_pt + para_metric.descent_pt)
-                                           : para_metric.size_pt;
-            const float col_w_max = para_natural * b.line_factor;
+            const float para_natural =
+                (para_metric.ascent_pt + para_metric.descent_pt + para_metric.gap_pt > 0.0f)
+                    ? (para_metric.ascent_pt + para_metric.descent_pt + para_metric.gap_pt)
+                    : para_metric.size_pt;
+            const float col_w_max = para_natural * std::max(b.line_factor, kMinLineFactor);
             float region_top = cursor_y;
             // 分页下要判"本页还放得下两条列位吗"；连页下没有页底，横带是新开的。
             if (!cont && region_top + col_w_max * 2.0f > cy + ch) {

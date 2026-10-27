@@ -534,6 +534,11 @@ struct BlockSpec {
     float line_factor = 1.0f;
 
     /**
+     * 段前距（磅）。页顶让出的那一段不加：分页之后段首的空白属于页边距。
+     */
+    float space_before_pt = 0.0f;
+
+    /**
      * 段后距（磅）。
      */
     float space_after_pt = 6.0f;
@@ -666,11 +671,11 @@ struct BlockSpec {
     bool operator==(const BlockSpec& o) const {
         return cell_path == o.cell_path && cp_text == o.cp_text && font_index == o.font_index &&
                size_pt == o.size_pt && wm == o.wm && line_factor == o.line_factor &&
-               space_after_pt == o.space_after_pt && page_break_before == o.page_break_before &&
-               sameLanguage(language, o.language) && color == o.color && weight == o.weight &&
-               italic == o.italic && underline == o.underline &&
-               fallback_font_indices == o.fallback_font_indices && runs == o.runs &&
-               objects == o.objects;
+               space_before_pt == o.space_before_pt && space_after_pt == o.space_after_pt &&
+               page_break_before == o.page_break_before && sameLanguage(language, o.language) &&
+               color == o.color && weight == o.weight && italic == o.italic &&
+               underline == o.underline && fallback_font_indices == o.fallback_font_indices &&
+               runs == o.runs && objects == o.objects;
     }
 
     /**
@@ -1542,6 +1547,19 @@ struct LineBox {
         size_t k = k0;
         while (k < clusters.size() && clusters[k].cp == cp) ++k;
         return (k < clusters.size()) ? clusters[k].inline_pt : inline_end_pt;
+    }
+
+    /**
+     * 光标与选区沿块轴的高度：整条行槽，不是字身盒。
+     *
+     * 字面盒（block_hi - block_lo）负责字形与命中；插入点与反白要盖住这一行占的位置 ——
+     * 多出的行距落在字面之下，不并进去就会出现"1.5 倍行距下反白一条一条断开、光标比行矮一截"。
+     * 浏览器按行盒画、Word 按行距画，这里取同一个口径。竖排的列盒不维护 advance_pt，
+     * 退回列宽。
+     * @return 块轴跨度（磅）
+     */
+    float slotSpanPt() const {
+        return (advance_pt > 0.0f) ? advance_pt : (block_hi_pt - block_lo_pt);
     }
 };
 

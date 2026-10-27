@@ -638,16 +638,16 @@ bool CaretResolver::caretRectFor(const TextPos& pos, int* page_out, Rect* out) c
     const float t = caret_width_pt_;
     Rect r;
     if (!lb->vertical) {
-        // 横排：光标是竖条，贴在行盒左/右，高度 = 行盒高
+        // 横排：光标是竖条，贴在行盒左/右，高度 = 整条行槽（含行距）
         r.x = lb->inline_origin_pt + off - t * 0.5f;
         r.y = lb->block_lo_pt;
         r.w = t;
-        r.h = std::max(0.0f, lb->block_hi_pt - lb->block_lo_pt);
+        r.h = std::max(0.0f, lb->slotSpanPt());
     } else {
-        // 竖排（含侧倒）：光标是横条，贴在列盒上/下，宽度 = 列盒宽
+        // 竖排（含侧倒）：光标是横条，贴在列盒上/下，宽度 = 整条行槽
         r.x = lb->block_lo_pt;
         r.y = lb->inline_origin_pt + off - t * 0.5f;
-        r.w = std::max(0.0f, lb->block_hi_pt - lb->block_lo_pt);
+        r.w = std::max(0.0f, lb->slotSpanPt());
         r.h = t;
     }
     if (page_out) *page_out = lb->page;
@@ -805,10 +805,10 @@ std::vector<PageRect> CaretResolver::selectionRectsIn(int first_page, int count)
                     m.x = lb.inline_origin_pt;
                     m.w = w;
                     m.y = lb.block_lo_pt;
-                    m.h = lb.block_hi_pt - lb.block_lo_pt;
+                    m.h = lb.slotSpanPt();
                 } else {
                     m.x = lb.block_lo_pt;
-                    m.w = lb.block_hi_pt - lb.block_lo_pt;
+                    m.w = lb.slotSpanPt();
                     m.y = lb.inline_origin_pt;
                     m.h = w;
                 }
@@ -867,11 +867,11 @@ std::vector<PageRect> CaretResolver::selectionRectsIn(int first_page, int count)
                 r.x = lb.inline_origin_pt + seg.first;
                 r.w = seg.second - seg.first;
                 r.y = lb.block_lo_pt;
-                r.h = lb.block_hi_pt - lb.block_lo_pt;
+                r.h = lb.slotSpanPt();
             } else {
                 r.x = lb.block_lo_pt;
                 r.y = lb.inline_origin_pt + seg.first;
-                r.w = lb.block_hi_pt - lb.block_lo_pt;
+                r.w = lb.slotSpanPt();
                 r.h = seg.second - seg.first;
             }
             out.push_back(PageRect{lb.page, r});

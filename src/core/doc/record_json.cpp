@@ -113,6 +113,7 @@ ordered_json paraJson(const ParaFormatPatch& p) {
     if (p.size.has_value()) j["sz"] = printLength(*p.size);
     if (p.wm.has_value()) j["wm"] = writingModeJson(*p.wm);
     if (p.line_factor.has_value()) j["lf"] = floatText(*p.line_factor);
+    if (p.space_before.has_value()) j["sb"] = printLength(*p.space_before);
     if (p.space_after.has_value()) j["sa"] = printLength(*p.space_after);
     if (p.page_break_before.has_value()) j["pb"] = *p.page_break_before;
     if (p.language.has_value()) {
@@ -488,6 +489,11 @@ bool readPara(const Context& ctx, const ordered_json& j, const char* key, ParaFo
         float v = 0.0f;
         if (!readFloat(p, "lf", &v)) return false;
         out->line_factor = v;
+    }
+    if (p.contains("sb")) {
+        Length len;
+        if (!readLength(p, "sb", &len)) return false;
+        out->space_before = len;
     }
     if (p.contains("sa")) {
         Length len;

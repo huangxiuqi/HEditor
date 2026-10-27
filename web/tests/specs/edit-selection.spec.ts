@@ -1,5 +1,5 @@
 // 编辑面（七）：选区与移动族、编辑入口吃选区、拖选、光标与选区样式、
-// 选区粒度（词与段）与拖拽搬运。
+// 光标与反白的纵向范围（取行槽，不取字面盒）、选区粒度（词与段）与拖拽搬运。
 //
 // 选区是引擎里的一等状态，不是宿主自己记的两对数：扩展只动焦点端、别的定位
 // 一律折叠、上下键跨短行保住列位、矩形与反白都从同一个真源导出。
@@ -582,6 +582,13 @@ test.describe('编辑面：选区与样式', () => {
               !!p0 && p0[0] === 0 && p0[1] === 0 && p0[2] === 0,
               `采样 ${JSON.stringify(p0)}，配置 ${JSON.stringify(defCaret.color)}`);
 
+    // 光标宽度与 Word 同一档：0.5 磅。排版一磅在这个倍率下是一个设备像素，
+    //   一磅以上会在高分屏上糊成两像素宽的一条。下限 0.4 之上才留得住这个取值。
+    const caretW = await probe.read('return { w: CARET().w, z: D.stats().zoom };');
+    check('默认光标线宽 0.5 磅，画出来一个设备像素',
+              defCaret.widthPt === 0.5 && caretW.w === 1,
+              `配置 ${defCaret.widthPt} 磅，画出来 ${caretW.w} px（密度 ${caretW.z}）`);
+
     const st1 = await probe.read(
       'return await CARET_STYLE({ color: [220, 20, 60, 255] });');
     const p1 = await probe.read(FRAME_PIX);
@@ -704,6 +711,114 @@ test.describe('编辑面：选区与样式', () => {
               JSON.stringify(restored.c.color) === JSON.stringify(defCaret.color) &&
               JSON.stringify(restored.s.color) === JSON.stringify(defSel.color),
               JSON.stringify(restored));
+  }
+
+  log.section('[22] 光标与反白的纵向范围：取行槽，不取字面盒');
+  {
+    // 一条行盒有两个纵向范围。字面盒（ascent..descent）管字形与命中，行槽（含行距）管光标
+    //   与反白。Word 与浏览器的插入点、反白都跟着行槽走；按字面盒画时，行距一加大，
+    //   同一段的两行反白之间就露出一道白缝，光标也比一行短一截。
+    //
+    // 三个读数各钉一件事，任一条都能独立翻红：反白高度等于行距、相邻两行的矩形首尾相接
+    //   （行距没有落成缝）、光标高度与反白同高（两者出自同一个来源）。
+    const long = '甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉戌亥'.repeat(6);
+    await probe.read('await LOAD.text(' + JSON.stringify(long) + ', 1); return true;');
+    await probe.read('return await D.stopBlink();');
+
+    const readBands = (setFactor: string) => probe.read(`
+      ${setFactor}
+      await H.setCaret({ para: 0, offset: 0 });
+      await H.flush();
+      const c = CARET();
+      await H.selectAll();
+      await H.flush();
+      return { z: ZOOM(), caret: { h: c.h, w: c.w },
+               rects: SEL().rects.map((r) => ({ page: r.page, x: r.x, y: r.y, w: r.w, h: r.h })) };`);
+    const factor = (f: number) => `await H.selectAll();
+      await H.paragraphFormat({ lineFactor: ${f} });
+      await H.flush();`;
+    // 段与段之间的缝：上一行矩形底边到下一行矩形顶边的距离，逐对都该是 0。
+    const seams = (b: any): number[] =>
+      b.rects.slice(1).map((r: any, i: number) => r.y - (b.rects[i].y + b.rects[i].h));
+    const worst = (xs: number[]) => xs.reduce((m, v) => Math.max(m, Math.abs(v)), 0);
+
+    const one = await readBands('');
+    check('前提：这一段折成三行以上',
+              one.rects.length >= 3, `实际 ${one.rects.length} 条反白`);
+    const pitch1 = one.rects.length > 1 ? one.rects[1].y - one.rects[0].y : 0;
+    check('单倍行距下行槽等于字面盒（这些字体没有行间隙）',
+              Math.abs(pitch1 - one.rects[0].h) < 0.05,
+              `行距 ${pitch1}，反白高 ${one.rects[0].h}`);
+
+    const tall = await readBands(factor(1.5));
+    check('★ 1.5 倍：相邻两行反白首尾相接，行距没有落成缝',
+              tall.rects.length >= 3 && worst(seams(tall)) < 0.05,
+              JSON.stringify(seams(tall)));
+    check('★ 1.5 倍：反白高度等于行距（取的是行槽，不是字面盒）',
+              Math.abs(tall.rects[0].h - pitch1 * 1.5) < 0.05,
+              `反白高 ${tall.rects[0].h}，行距应为 ${pitch1 * 1.5}`);
+    check('★ 光标高度与反白同高（两者都取行槽）',
+              Math.abs(tall.caret.h - tall.rects[0].h * tall.z) <= 1.5,
+              `光标 ${tall.caret.h} px，反白 ${tall.rects[0].h} 磅 x 密度 ${tall.z}`);
+    check('★ 光标跟着行距一起变高（1.5 倍）',
+              Math.abs(tall.caret.h / one.caret.h - 1.5) < 0.1,
+              `单倍 ${one.caret.h} px，1.5 倍 ${tall.caret.h} px`);
+
+    // 压缩方向也要跟行距走：倍数小于 1 时反白比单倍矮。只钉"变大"的话，
+    //   把高度写成 max(行距, 字面盒) 也能全绿。
+    const tight = await readBands(factor(0.8));
+    check('★ 0.8 倍：反白压到单倍的八成（方向没搞反）',
+              Math.abs(tight.rects[0].h - one.rects[0].h * 0.8) < 0.05,
+              `单倍 ${one.rects[0].h}，0.8 倍 ${tight.rects[0].h}`);
+    check('反向：压行时相邻两行照样首尾相接',
+              tight.rects.length >= 3 && worst(seams(tight)) < 0.05,
+              JSON.stringify(seams(tight)));
+
+    // 像素级证据：从第一行的顶扫到第二行的底，逐行都该有反白的颜色。按字面盒画时，
+    //   中间那 8.7 磅的行距是一条纯白的横带，逐行计数当场掉到 0。
+    //   反白是浅蓝（半透明填充混在纸上）：蓝明显高过红，而纸面与字形三通道相等，不会误计。
+    const SCAN = `
+      await H.selectAll();
+      await H.flush();
+      const z = ZOOM();
+      const r = SEL().rects;
+      const a = r[0], b = r[1];
+      const step = D.pagePx().h + D.pagePx().gap;
+      const first = D.editStats().windowFirstPage;
+      const f = await D.rawFrame();
+      const w = D.frameW();
+      // 两条反白的公共 x 区间：短的那一行不会让另一行的涂色越界。
+      const x0 = Math.max(0, Math.floor(Math.max(a.x, b.x) * z));
+      const x1 = Math.min(w, Math.ceil(Math.min(a.x + a.w, b.x + b.w) * z));
+      const y0 = Math.floor(a.y * z);
+      const y1 = Math.ceil((b.y + b.h) * z);
+      const top = Math.floor((a.page - first) * step);
+      let inkRows = 0, least = 1e9;
+      for (let y = y0; y < y1; ++y) {
+        let n = 0;
+        for (let x = x0; x < x1; ++x) {
+          const i = ((top + y) * w + x) * 4;
+          if (f[i + 2] > f[i] + 20) ++n;
+        }
+        if (n > 0) ++inkRows;
+        if (n < least) least = n;
+      }
+      return { inkRows, rows: y1 - y0, least, x0, x1, y0, y1, z, n: r.length };`;
+    await probe.read(factor(1.5) + 'return true;');
+    const seam = await probe.read(SCAN);
+    check('★ 1.5 倍行距下两条反白之间没有一道白缝（逐行都涂上了）',
+              seam.inkRows === seam.rows && seam.least > 10, JSON.stringify(seam));
+
+    // 反向一半：同一把尺子必须量得出"该有的缝"。段与段之间只有段后距，那里本来就该是白的
+    //   —— 否则上面那条只能证明"整片都是蓝的"，证明不了它认得出缝隙。
+    const across = await probe.read(`
+      await LOAD.text('甲\\n乙', 1);
+      await D.stopBlink();
+      ${SCAN}`);
+    check('反向：段与段之间那道空白照旧是白的（尺子认得出缝）',
+              across.rows - across.inkRows >= 4, JSON.stringify(across));
+
+    await probe.read('return await LOAD.text(' + JSON.stringify(long) + ', 1);');
   }
 
     await finishEdit(probe, consoleErrors, state);
