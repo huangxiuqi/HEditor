@@ -662,6 +662,20 @@ int main() {
 
     expectTrue(e.structureIndexValid(), "结构索引：表/格/槽/控件跨度下标自洽");
 
+    // 修订直接装载：绕过模型树，装载后的保存文本与原文本一致。
+    {
+        const rev::SerializeResult saved = e.saveDocument();
+        rev::Doc doc;
+        const rev::DeserializeResult opened =
+            saved.ok ? rev::deserialize(saved.text, &doc) : rev::DeserializeResult{};
+        expectTrue(opened.ok, "修订直接装载：先能反序列化一份修订");
+        if (opened.ok) {
+            e.setDocument(std::move(doc));
+            const rev::SerializeResult again = e.saveDocument();
+            expectTrue(again.ok && again.text == saved.text, "修订直接装载：保存文本与装载前一致");
+        }
+    }
+
     // 块行索引：每块列出的行都属于该块，且覆盖 lines 里的全部行。
     {
         const LayoutResult& L = e.layout();

@@ -166,6 +166,12 @@ std::vector<DemoFieldSpec> g_fields;
 bool g_table_demo = false;
 
 /**
+ * 当前文档是否是演示页用块流建出来的。从 JSON 装入的文档没有块流底稿，控件名单也不能
+ * 再靠"重建整棵树"改：那条路会把用户打开的文件倒回演示底稿。
+ */
+bool g_demo_source = true;
+
+/**
  * 按场景号装配块流。只造数据、不动引擎 —— 装载统一走 rebuildDocument。
  */
 std::vector<BlockSpec> buildScenarioBlocks(int scenario) {
@@ -321,6 +327,7 @@ void rebuildDocument(bool keep_caret) {
 
 void setScenario(int scenario) {
     g_table_demo = (scenario == 10);
+    g_demo_source = true;
     g_blocks = buildScenarioBlocks(scenario);
     g_fields.clear();
     rebuildDocument(false);
@@ -1035,6 +1042,8 @@ std::string jsonEscape(const std::string& s) {
  *   界面上显示的那份是引擎从树里导出的（见 controlsJson）。
  */
 void setFormControls(val list) {
+    // 从 JSON 装入的文档没有块流底稿；演示页的整树重建会把它的内容倒回底稿。
+    if (!g_demo_source) return;
     syncBlocksFromEngine();  // 底稿要是引擎里当前那一份（树上编辑可能已经改过文本）
     g_fields.clear();
     const int n = list["length"].as<int>();
@@ -1795,6 +1804,7 @@ void loadStressDocumentImpl(int paras, int chars, bool diverse) {
     }
     g_blocks = std::move(blocks);
     g_fields.clear();
+    g_demo_source = true;
     rebuildDocument(false);
 }
 
@@ -1826,6 +1836,7 @@ void loadTextDocument(const std::string& text, int repeat) {
         only.color = Color::rgb(24, 24, 24);
         only.setText(std::string());
         g_fields.clear();
+        g_demo_source = true;
         rebuildDocument(false);
         return;
     }
@@ -1858,6 +1869,7 @@ void loadTextDocument(const std::string& text, int repeat) {
     }
     g_blocks = std::move(blocks);
     g_fields.clear();
+    g_demo_source = true;
     rebuildDocument(false);
 }
 
@@ -1877,14 +1889,15 @@ std::string serializeDocument() {
  *
  * 解析失败时引擎一个字节都不动（rev::deserialize 的契约），所以这里的失败
  *   不会把用户手上那份文档弄丢 —— 宿主把这句话显示出来就够了。
- * 成功之后要把 demo 那份"装载底稿"同步过来：后续改控件会按它重建，
- *   不同步的话用户打开的文件会被装载时那份旧底稿覆盖回去。
+ * 成功之后不保留块流底稿：引擎已经持修订，后续保存与编辑都只走修订。演示页的控件
+ *   重建入口对此类文档关闭，避免把用户打开的文件倒回演示底稿。
  */
 std::string loadDocument(const std::string& text) {
     const rev::DeserializeResult r = g_engine.loadDocument(text);
     if (!r.ok) return r.error;
-    syncBlocksFromEngine();
+    g_blocks.clear();
     g_fields.clear();
+    g_demo_source = false;
     return std::string();
 }
 
@@ -2033,6 +2046,7 @@ bool deleteSelectionCommand() { return g_engine.deleteSelectionAndRender(); }
 void loadFormSample(int variant) {
     g_blocks = buildScenarioBlocks(variant == 1 ? 3 : 6);
     g_fields.clear();
+    g_demo_source = true;
     auto push = [&](int so, int eo, ControlKind k, const char* id, bool ro) {
         DemoFieldSpec f;
         f.para = 0;

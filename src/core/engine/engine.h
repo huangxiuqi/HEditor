@@ -188,6 +188,17 @@ public:
     void setDocument(const NodeTree& tree, const StyleSheet& sheet);
 
     /**
+     * 文档装载：直接装入一份修订，不再经过模型树。
+     *
+     * 与 setDocument(tree) 的收尾相同：复位光标、作废页缓存并整篇标脏。修订的节点身份
+     * 原样保留，调用方随后可用 document() / saveDocument() 取回。
+     *
+     * @param doc 修订
+     * @param sheet 样式表
+     */
+    void setDocument(rev::Doc doc, const StyleSheet& sheet = {});
+
+    /**
      * 持有中的文档。引擎只认这一条装载入口，所以它一直有效（未装载时是一份空修订）。
      *
      * @return 持有中的修订（未装载时是一份空修订）

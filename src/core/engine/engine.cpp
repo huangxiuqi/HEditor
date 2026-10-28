@@ -269,6 +269,12 @@ void EditorEngine::setDocument(const NodeTree& tree, const StyleSheet& sheet) {
     installDocument(std::move(doc));
 }
 
+void EditorEngine::setDocument(rev::Doc doc, const StyleSheet& sheet) {
+    refreshViews();
+    sheet_ = sheet;
+    installDocument(std::move(doc));
+}
+
 rev::SerializeOptions EditorEngine::fontWriteOptions() const {
     rev::SerializeOptions opt;
     // 身份按稳定性排：PostScript 名（OpenType 里唯一性有规范保证）→ 族名（给人看）→
