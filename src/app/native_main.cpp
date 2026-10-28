@@ -134,8 +134,11 @@ int main(int argc, char** argv) {
         } else {
             blocks = sampleDocument(0, 1, 2);
         }
-        // 建树交给引擎（与 web 那条路同一份代码）：这里没有字段，字段名单给空。
-        engine.setDocument(demoTree(blocks, {}), StyleSheet{});
+        // 演示树先投影成修订；引擎只接受修订入口。
+        rev::Doc doc;
+        std::string error;
+        if (!rev::fromTree(demoTree(blocks, {}), &doc, &error)) return;
+        engine.setDocument(std::move(doc), StyleSheet{});
         engine.relayout();
         engine.repaint();
     };

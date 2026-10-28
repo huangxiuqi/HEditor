@@ -314,8 +314,11 @@ void rebuildDocument(bool keep_caret) {
     if (keep_caret) {
         for (const BlockSpec& b : g_engine.blocks()) text_before += b.textUtf8();
     }
-    g_engine.setDocument(g_table_demo ? demoTableTree(g_cjk_font) : demoTree(g_blocks, g_fields),
-                         StyleSheet{});
+    const NodeTree tree = g_table_demo ? demoTableTree(g_cjk_font) : demoTree(g_blocks, g_fields);
+    rev::Doc doc;
+    std::string why;
+    if (!rev::fromTree(tree, &doc, &why)) return;
+    g_engine.setDocument(std::move(doc), StyleSheet{});
     if (!keep_caret) return;
     std::string text_after;
     for (const BlockSpec& b : g_engine.blocks()) text_after += b.textUtf8();

@@ -22,6 +22,7 @@
 #include "core/utils/hash.h"
 #include "core/utils/utf8.h"
 #include "demo/demo_documents.h"
+#include "tree_document.h"
 
 #include <hb.h>
 
@@ -319,7 +320,7 @@ int main() {
     {
         EditorEngine engine;
         expectTrue(engine.init({cjkPath, mnPath, latinPath}), "引擎初始化（加载三个字体）");
-        engine.setDocument(demoTree(sampleDocument(0, 1, 2), {}), StyleSheet{});
+        loadTreeDocument(engine, demoTree(sampleDocument(0, 1, 2), {}), StyleSheet{});
         engine.relayout();
         const LayoutResult& r = engine.layout();
         std::printf("     pages=%d glyphs=%d lines/cols=%d clusters=%d shape=%.2fms\n",
@@ -421,9 +422,8 @@ int main() {
         expectTrue(eOff.init({cjkPath, mnPath, latinPath}), "引擎初始化（三个字体）");
         expectTrue(eOn.init({cjkPath, mnPath, latinPath}), "引擎初始化（三个字体）");
 
-        eOff.setDocument(demoTree({mixedParagraphBlock(cjk)}, {}), StyleSheet{});  // 不回退
-        eOn.setDocument(demoTree({mixedParagraphBlock(cjk, latin)}, {}),
-                        StyleSheet{});  // 回退到拉丁
+        loadTreeDocument(eOff, demoTree({mixedParagraphBlock(cjk)}, {}));        // 不回退
+        loadTreeDocument(eOn, demoTree({mixedParagraphBlock(cjk, latin)}, {}));  // 回退到拉丁
         eOff.relayout();
         eOn.relayout();
 
@@ -501,7 +501,7 @@ int main() {
         b.language = "mn";
         b.setText(kMongol_word);
         const std::string word = b.textUtf8();
-        e.setDocument(demoTree({b}, {}), StyleSheet{});
+        loadTreeDocument(e, demoTree({b}, {}), StyleSheet{});
         e.relayout();
 
         const LayoutResult& r = e.layout();

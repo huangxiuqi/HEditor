@@ -180,25 +180,10 @@ public:
     const std::vector<LayoutTable>& tableSpecs() const { return projection_.tables; }
 
     /**
-     * 文档装载：把模型树换成一份修订（rev::fromTree），此后引擎只持修订，不再持树。
-     *
-     * 表示不了的形状（目前是多节）整份拒绝、状态停在"没有装载"——装一半的结果是一份看起来
-     * 完整的修订，而它与模型不是同一份文档，调用方没有别的办法知道。控件边界、段落格式与
-     * 字符格式因此仍只有一个产处（投影），引擎不自己拼。
-     *
-     * 隐藏控件的可见性口径与投影同一处取值（见 rebuildFromTree），所以 setEditMode 必须重建。
-     * 装载会复位光标、作废页缓存并整篇标脏。
-     *
-     * @param tree 模型树
-     * @param sheet 样式表
-     */
-    void setDocument(const NodeTree& tree, const StyleSheet& sheet);
-
-    /**
      * 文档装载：直接装入一份修订，不再经过模型树。
      *
-     * 与 setDocument(tree) 的收尾相同：复位光标、作废页缓存并整篇标脏。修订的节点身份
-     * 原样保留，调用方随后可用 document() / saveDocument() 取回。
+     * 装载会复位光标、作废页缓存并整篇标脏。修订的节点身份原样保留，调用方随后可用
+     * document() / saveDocument() 取回。
      *
      * @param doc 修订
      * @param sheet 样式表
@@ -227,7 +212,7 @@ public:
     rev::SerializeResult saveDocument() const;
 
     /**
-     * 打开：JSON 文本 → 修订 → 装上（与 setDocument(tree) 同一套收尾）。
+     * 打开：JSON 文本 → 修订 → 装上。
      *
      * 失败（版本不符 / 结构坏了 / 节点号重复）时引擎一个字节都不动：先解析到局部变量，
      * 成功了才碰会话。调用方拿到的 error 是给人看的一句话，不是异常路径的副产品。
@@ -2850,7 +2835,7 @@ private:
 
     /**
      * 一份修订装上之后的公共收尾：换会话、复位光标、清页缓存、投影、整篇标脏。
-     * 装载（模型树）与打开（JSON）两条路都走它 —— 两条路的收尾必须是同一份。
+     * 直接装入修订与打开 JSON 两条路都走它 —— 两条路的收尾必须是同一份。
      */
     void installDocument(rev::Doc doc);
 

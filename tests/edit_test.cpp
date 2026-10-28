@@ -39,6 +39,7 @@
 #include "core/text/shaper.h"
 #include "core/utils/hash.h"
 #include "demo/demo_documents.h"
+#include "tree_document.h"
 
 #include "block_compare.h"
 
@@ -431,7 +432,7 @@ std::vector<DemoFieldSpec> toDemoFields(const std::vector<Control>& list) {
 void loadBlocks(EditorEngine& e, const std::vector<BlockSpec>& blocks,
                 const std::vector<Control>& controls) {
     g_last_blocks[&e] = blocks;
-    e.setDocument(demoTree(blocks, toDemoFields(controls)), StyleSheet{});
+    loadTreeDocument(e, demoTree(blocks, toDemoFields(controls)), StyleSheet{});
 }
 
 /**
@@ -444,7 +445,7 @@ void loadControls(EditorEngine& e, const std::vector<Control>& controls) {
     std::vector<BlockSpec> blocks;
     const auto it = g_last_blocks.find(&e);
     if (it != g_last_blocks.end()) blocks = it->second;
-    e.setDocument(demoTree(blocks, toDemoFields(controls)), StyleSheet{});
+    loadTreeDocument(e, demoTree(blocks, toDemoFields(controls)), StyleSheet{});
     e.relayout();
 }
 
@@ -5497,8 +5498,8 @@ int main() {
         }
         a.setConfig(ec25);
         b.setConfig(ec25);
-        setManual25(&a, "住院号甲乙丙丁");                       // 路 A：块流 + 字段名单
-        b.setDocument(makeTree25("text", false), StyleSheet{});  // 路 B：逐节点手建树
+        setManual25(&a, "住院号甲乙丙丁");               // 路 A：块流 + 字段名单
+        loadTreeDocument(b, makeTree25("text", false));  // 路 B：逐节点手建树
         b.setEditMode(EditMode::Form);
         a.relayout();
         a.repaint();
@@ -5598,7 +5599,7 @@ int main() {
                 return 2;
             }
             c.setConfig(ec25);
-            c.setDocument(makeTree25("number", false), StyleSheet{});
+            loadTreeDocument(c, makeTree25("number", false), StyleSheet{});
             expectTrue(
                 c.controls().size() == 1 && c.controls().at(0).kind == ControlKind::NumberField,
                 "★ 控件的业务类型从节点记录来（number → 数值字段）");
@@ -5614,12 +5615,12 @@ int main() {
             }
             h1.setConfig(ec25);
             h2.setConfig(ec25);
-            h1.setDocument(makeTree25("text", true), StyleSheet{});
+            loadTreeDocument(h1, makeTree25("text", true), StyleSheet{});
             h1.setEditMode(EditMode::Form);  // 呈现态
             expectTrue(h1.blocks().size() == 1 && h1.blocks()[0].cp_text.size() == 5 &&
                            h1.blocks()[0].objects.empty() && h1.controls().empty(),
                        "★ 呈现态：隐藏控件整棵摘除（只剩「住院号丙丁」5 个码点，边界也没了）");
-            h2.setDocument(makeTree25("text", true), StyleSheet{});
+            loadTreeDocument(h2, makeTree25("text", true), StyleSheet{});
             expectTrue(h2.blocks().size() == 1 && h2.blocks()[0].cp_text.size() == 7 &&
                            h2.blocks()[0].objects.size() == 2,
                        "设计态：隐藏控件照常参与流（7 个码点、两枚边界都在）");
@@ -5642,7 +5643,7 @@ int main() {
                 if (c->kind == NodeKind::TextRun) tail = c->id;
             }
             t2.setText(tail, utf8ToCodepoints("丙戊"));
-            b2.setDocument(t2, StyleSheet{});
+            loadTreeDocument(b2, t2, StyleSheet{});
             b2.setEditMode(EditMode::Form);
             setManual25(&a2, "住院号甲乙丙戊");
             a2.relayout();
@@ -5715,7 +5716,7 @@ int main() {
                 return 2;
             }
             d.setConfig(ec25);
-            d.setDocument(t3, StyleSheet{});
+            loadTreeDocument(d, t3, StyleSheet{});
             expectTrue(d.blocks()[0].runs.size() == 2,
                        "字符格式不同的文本段切成两个 run（14 磅 / 12 磅）");
             expectTrue(d.blocks()[0].runs[0].cp_end == 3, "首 run 覆盖前 3 个码点");
@@ -5805,7 +5806,7 @@ int main() {
             return 2;
         }
         e26.setConfig(ec26);
-        e26.setDocument(t26, StyleSheet{});
+        loadTreeDocument(e26, t26, StyleSheet{});
         expectTrue(e26.blocks().size() == 3 && e26.blocks()[0].cp_text.size() == 4 &&
                        e26.blocks()[1].cp_text.size() == 2,
                    "装载后 3 段（首段 4 个码点、次段 2 个）");
@@ -5963,7 +5964,7 @@ int main() {
             a.setConfig(ec27);
             b.setConfig(ec27);
             setViaBlocks27(&a);
-            b.setDocument(makeTree27(), StyleSheet{});
+            loadTreeDocument(b, makeTree27(), StyleSheet{});
             a.relayout();
             a.repaint();
             b.relayout();
@@ -6010,7 +6011,7 @@ int main() {
             a.setConfig(ec27);
             b.setConfig(ec27);
             setViaBlocks27(&a);
-            b.setDocument(makeTree27(), StyleSheet{});
+            loadTreeDocument(b, makeTree27(), StyleSheet{});
             a.relayout();
             a.repaint();
             b.relayout();
@@ -6042,7 +6043,7 @@ int main() {
             a.setConfig(ec27);
             b.setConfig(ec27);
             setViaBlocks27(&a);
-            b.setDocument(makeTree27(), StyleSheet{});
+            loadTreeDocument(b, makeTree27(), StyleSheet{});
             a.relayout();
             a.repaint();
             b.relayout();
@@ -6105,7 +6106,7 @@ int main() {
                 blks.push_back(blk);
             }
             loadBlocks(a, blks);
-            b.setDocument(makeLong(), StyleSheet{});
+            loadTreeDocument(b, makeLong(), StyleSheet{});
             a.relayout();
             a.repaint();
             b.relayout();
@@ -6215,7 +6216,7 @@ int main() {
         ta.setConfig(ec28);
         tm.setConfig(ec28);
         auto loadBoth28 = [&](bool only_readonly) {
-            ta.setDocument(makeTree28(only_readonly), StyleSheet{});
+            loadTreeDocument(ta, makeTree28(only_readonly), StyleSheet{});
             ta.setEditMode(EditMode::Form);
             ta.relayout();
             BlockSpec blk;
@@ -6529,7 +6530,7 @@ int main() {
                 return 2;
             }
             e.setConfig(ec29);
-            e.setDocument(demoTree(blocks, fields), StyleSheet{});
+            loadTreeDocument(e, demoTree(blocks, fields), StyleSheet{});
             e.setEditMode(EditMode::Form);
             e.relayout();
             e.repaint();
@@ -6576,7 +6577,7 @@ int main() {
                 return 2;
             }
             b.setConfig(ec29);
-            b.setDocument(demoTree(blocks, fields), StyleSheet{});
+            loadTreeDocument(b, demoTree(blocks, fields), StyleSheet{});
             b.setEditMode(EditMode::Form);
             b.relayout();
             expectTrue(b.controls().size() == 3, "★ 零宽 + 重合的字段只建出三枚控件 —— 实际 " +
@@ -6630,7 +6631,7 @@ int main() {
                 return 2;
             }
             b.setConfig(ec29);
-            b.setDocument(demoTree(blocks, fields), StyleSheet{});
+            loadTreeDocument(b, demoTree(blocks, fields), StyleSheet{});
             b.setEditMode(EditMode::Form);
             b.relayout();
             for (int i = 0; i < 4; ++i) {
@@ -6673,7 +6674,7 @@ int main() {
                 return 2;
             }
             b.setConfig(ec29);
-            b.setDocument(demoTree(blocks, fields), StyleSheet{});
+            loadTreeDocument(b, demoTree(blocks, fields), StyleSheet{});
             b.setEditMode(EditMode::Form);
             b.relayout();
             int slots = 0;
@@ -6715,7 +6716,7 @@ int main() {
                 return 2;
             }
             b.setConfig(ec29);
-            b.setDocument(demoTree(blocks, fields), StyleSheet{});
+            loadTreeDocument(b, demoTree(blocks, fields), StyleSheet{});
             b.setEditMode(EditMode::Form);
             b.relayout();
             b.setCaret(0, 7);                        // 不带归属提示，与探针那一步一致
@@ -6755,7 +6756,7 @@ int main() {
                 return 2;
             }
             b.setConfig(ec29);
-            b.setDocument(demoTree(blocks, fields), StyleSheet{});
+            loadTreeDocument(b, demoTree(blocks, fields), StyleSheet{});
             b.setEditMode(EditMode::Form);
             b.relayout();
 
@@ -6857,7 +6858,7 @@ int main() {
                 FormErase r;
                 if (!ex.init(fonts29)) return r;
                 ex.setConfig(ec29);
-                ex.setDocument(demoTree(bl, fd), StyleSheet{});
+                loadTreeDocument(ex, demoTree(bl, fd), StyleSheet{});
                 ex.setEditMode(EditMode::Form);
                 ex.relayout();
                 ex.setCaret(0, from_off);
@@ -6947,7 +6948,7 @@ int main() {
                 EditorEngine ex;
                 expectTrue(ex.init(fonts29), "字体加载失败（全空嵌套输入）");
                 ex.setConfig(ec29);
-                ex.setDocument(tree, StyleSheet{});
+                loadTreeDocument(ex, tree, StyleSheet{});
                 ex.setEditMode(EditMode::Document);
                 ex.relayout();
                 expectTrue(ex.controls().size() == 3, "三个嵌套控件都在，内容全空");
@@ -6974,7 +6975,7 @@ int main() {
                 EditorEngine ex;
                 expectTrue(ex.init(fonts29), "字体加载失败（跨段归属）");
                 ex.setConfig(ec29);
-                ex.setDocument(demoTree(bl, fd), StyleSheet{});
+                loadTreeDocument(ex, demoTree(bl, fd), StyleSheet{});
                 ex.setEditMode(EditMode::Form);
                 ex.relayout();
                 ex.setCaret(0, 11);
@@ -7022,7 +7023,7 @@ int main() {
         EngineConfig ec;
         ec.zoom = 1.0f;
         e.setConfig(ec);
-        e.setDocument(demoTree(bl, {}), StyleSheet{});
+        loadTreeDocument(e, demoTree(bl, {}), StyleSheet{});
         // 这一节管的是增量编译的形状，不是表单策略：没有控件时表单模式一个字都改不动，
         //   所以编辑做在文档模式里（表单模式的落点口径见 [21] 与 [35]）。
         e.setEditMode(EditMode::Document);
@@ -7083,7 +7084,7 @@ int main() {
         EngineConfig ec;
         ec.zoom = 1.0f;
         e.setConfig(ec);
-        e.setDocument(demoTree(bl, fd), StyleSheet{});
+        loadTreeDocument(e, demoTree(bl, fd), StyleSheet{});
         e.setEditMode(EditMode::Form);
         e.relayout();
         auto textOf = [&]() {
@@ -7192,7 +7193,7 @@ int main() {
         // 两次回车的落点都必须"落在闭括号之内"（侧别 0），否则回车本身就被策略据掉；
         //   退格那一步的侧别两种都试 —— 它是"段首有没有那枚边界"的直接触发点。
         for (int s3 = 0; s3 <= 1; ++s3) {
-            e2.setDocument(demoTree(bl, fd), StyleSheet{});
+            loadTreeDocument(e2, demoTree(bl, fd), StyleSheet{});
             e2.setEditMode(EditMode::Form);
             e2.relayout();
             e2.setCaretAtSide(0, 11, 0);
@@ -7245,7 +7246,7 @@ int main() {
         ec3.zoom = 1.0f;
         e3.setConfig(ec3);
         auto reload = [&]() {
-            e3.setDocument(demoTree(bl, fd), StyleSheet{});
+            loadTreeDocument(e3, demoTree(bl, fd), StyleSheet{});
             e3.setEditMode(EditMode::Form);
             e3.relayout();
         };
@@ -7346,7 +7347,7 @@ int main() {
         ec4.zoom = 1.0f;
         e4.setConfig(ec4);
         auto reload4 = [&]() {
-            e4.setDocument(demoTree(bl, fd), StyleSheet{});
+            loadTreeDocument(e4, demoTree(bl, fd), StyleSheet{});
             e4.setEditMode(EditMode::Document);
             e4.relayout();
         };
@@ -7485,7 +7486,7 @@ int main() {
             EngineConfig ec5;
             ec5.zoom = 1.0f;
             e5.setConfig(ec5);
-            e5.setDocument(demoTree(b5, f5), StyleSheet{});
+            loadTreeDocument(e5, demoTree(b5, f5), StyleSheet{});
             e5.setEditMode(EditMode::Form);
             e5.relayout();
 
@@ -7525,7 +7526,7 @@ int main() {
             EngineConfig ec6;
             ec6.zoom = 1.0f;
             e6.setConfig(ec6);
-            e6.setDocument(demoTree(b6, f6), StyleSheet{});
+            loadTreeDocument(e6, demoTree(b6, f6), StyleSheet{});
             e6.setEditMode(EditMode::Form);
             e6.relayout();
             expectTrue(e6.setControlProp(0, ControlProp::Hidden, true),
@@ -7542,7 +7543,7 @@ int main() {
             tail.eo = 6;
             tail.key = "k6b";
             f6b.push_back(tail);
-            e6.setDocument(demoTree(b6, f6b), StyleSheet{});
+            loadTreeDocument(e6, demoTree(b6, f6b), StyleSheet{});
             e6.setEditMode(EditMode::Form);
             e6.relayout();
             expectTrue(e6.setControlProp(0, ControlProp::Hidden, true), "可见性：再隐藏一次 BB");
@@ -7586,7 +7587,7 @@ int main() {
         ec5.zoom = 1.0f;
         e5.setConfig(ec5);
         auto reload5 = [&]() {
-            e5.setDocument(demoTree(bl, fd), StyleSheet{});
+            loadTreeDocument(e5, demoTree(bl, fd), StyleSheet{});
             e5.setEditMode(EditMode::Document);
             e5.relayout();
         };
@@ -7687,7 +7688,7 @@ int main() {
             EngineConfig ec6;
             ec6.zoom = 1.0f;
             e6.setConfig(ec6);
-            e6.setDocument(demoTree(bl2, fd2), StyleSheet{});
+            loadTreeDocument(e6, demoTree(bl2, fd2), StyleSheet{});
             e6.setEditMode(EditMode::Document);
             e6.relayout();
             expectTrue(e6.controls().size() == 2, "两个字段紧挨着（甲、乙各一个）");
@@ -7731,7 +7732,7 @@ int main() {
             EngineConfig ec7;
             ec7.zoom = 1.0f;
             e7.setConfig(ec7);
-            e7.setDocument(demoTree(bl3, fd3), StyleSheet{});
+            loadTreeDocument(e7, demoTree(bl3, fd3), StyleSheet{});
             e7.setEditMode(EditMode::Document);
             e7.relayout();
             expectTrue(e7.controls().size() == 2, "两个字段（一个套在另一个里）");
@@ -7852,7 +7853,7 @@ int main() {
         c36.zoom = 1.0f;
         c36.undo_limit = 3;
         e36.setConfig(c36);
-        e36.setDocument(demoTree(bl36, {}), StyleSheet{});
+        loadTreeDocument(e36, demoTree(bl36, {}), StyleSheet{});
         e36.setEditMode(EditMode::Document);
         e36.relayout();
         expectTrue(e36.config().undo_limit == 3, "配置里的上限是 3（装载之前就设好了）");
@@ -7904,7 +7905,7 @@ int main() {
         c37.page.width_pt = 200.0f;
         c37.page.margins = PageMargins::all(20.0f);
         e37.setConfig(c37);
-        e37.setDocument(demoTree(bl37, {}), StyleSheet{});
+        loadTreeDocument(e37, demoTree(bl37, {}), StyleSheet{});
         e37.setEditMode(EditMode::Document);
         e37.relayout();
 
@@ -8051,7 +8052,7 @@ int main() {
             bl[0].setText("零一二三四五六七八九十");
             bl[1].setText("甲乙丙丁戊己庚辛壬癸");
             bl[2].setText("子丑寅卯");
-            e.setDocument(demoTree(bl, {}), StyleSheet{});
+            loadTreeDocument(e, demoTree(bl, {}), StyleSheet{});
             e.setEditMode(EditMode::Document);
             e.relayout();
         };
@@ -8252,7 +8253,7 @@ int main() {
             bl[0].setText("零一二三四五六七八九十");
             bl[1].setText("甲乙丙丁戊己庚辛壬癸");
             bl[2].setText("子丑寅卯");
-            e.setDocument(demoTree(bl, {}), StyleSheet{});
+            loadTreeDocument(e, demoTree(bl, {}), StyleSheet{});
             e.setEditMode(EditMode::Document);
             e.relayout();
         };
@@ -8740,7 +8741,7 @@ int main() {
             t.appendChild(s, NodeKind::ParagraphMark);
             return t;
         };
-        e44.setDocument(mkTree(96, 48), StyleSheet{});
+        loadTreeDocument(e44, mkTree(96, 48), StyleSheet{});
         e44.relayout();
         expectTrue(e44.auditLayout() == 0, "装载之后：增量排版与整篇重排逐字段一致");
         expectTrue(e44.auditCompile() == 0, "装载之后：产物与整树全量编译一致");
@@ -8790,7 +8791,7 @@ int main() {
         // 换一枚更高的原子（整篇重载）：行盒必须跟着变高，且与整篇重排一致。
         //   192 px / 96 dpi = 144 磅，远高于一行 19.2 磅 —— 这是"盒高真的进了行盒"的
         //   端到端一半（排版层那一半在 shaping_test 的 [8]）。
-        e44.setDocument(mkTree(96, 192), StyleSheet{});
+        loadTreeDocument(e44, mkTree(96, 192), StyleSheet{});
         e44.relayout();
         expectTrue(e44.auditLayout() == 0, "★ 换一枚更高的原子之后仍与整篇重排一致");
         float line_h = 0.0f;
@@ -8869,7 +8870,7 @@ int main() {
             EditorEngine ea;
             expectTrue(ea.init({cjkPath, mnPath, latinPath}), "引擎初始化（删原子）");
             ea.setConfig(c44);
-            ea.setDocument(mkOne(), StyleSheet{});
+            loadTreeDocument(ea, mkOne(), StyleSheet{});
             ea.setEditMode(EditMode::Document);
             ea.relayout();
             expectTrue(atomCount(ea) == 1 && ea.blocks()[0].textUtf8() == "甲乙丙丁",
@@ -8900,7 +8901,7 @@ int main() {
             EditorEngine es;
             expectTrue(es.init({cjkPath, mnPath, latinPath}), "引擎初始化（选区跨原子）");
             es.setConfig(c44);
-            es.setDocument(mkOne(), StyleSheet{});
+            loadTreeDocument(es, mkOne(), StyleSheet{});
             es.setEditMode(EditMode::Document);
             es.relayout();
             const FlowPos f1 = es.flowPosAtSide(0, 1, 0);
@@ -8942,7 +8943,7 @@ int main() {
                 t.appendChild(cell, NodeKind::ParagraphMark);
             }
         }
-        e45.setDocument(t, StyleSheet{});
+        loadTreeDocument(e45, t, StyleSheet{});
         e45.relayout();
         expectTrue(e45.auditLayout() == 0, "装载之后：增量与整篇重排逐字段一致");
         expectTrue(e45.auditCompile() == 0, "装载之后：产物与整树全量编译一致");
@@ -9029,7 +9030,7 @@ int main() {
             const NodeId c2 = t2.appendChild(r2, NodeKind::TableCell);
             t2.setText(t2.appendChild(c2, NodeKind::TextRun), utf8ToCodepoints("甲乙丙"));
             t2.appendChild(c2, NodeKind::ParagraphMark);
-            e2.setDocument(t2, StyleSheet{});
+            loadTreeDocument(e2, t2, StyleSheet{});
             e2.relayout();
             const LayoutResult& lay2 = e2.layout();
             const float cw2 = lay2.lines[0].cell_hi_pt - lay2.lines[0].cell_lo_pt;
@@ -9097,7 +9098,7 @@ int main() {
         t.setText(t.appendChild(cell, NodeKind::TextRun), utf8ToCodepoints("格"));
         t.appendChild(cell, NodeKind::ParagraphMark);
         t.appendChild(s, NodeKind::ParagraphMark);  // 表格后的空段落
-        e47.setDocument(t, StyleSheet{});
+        loadTreeDocument(e47, t, StyleSheet{});
         e47.relayout();
         const LayoutResult& lay = e47.layout();
         expectTrue(lay.lines.size() == 2, "表格一行 + 空段落一行，共两个行盒");
@@ -9137,7 +9138,7 @@ int main() {
             t.appendChild(s, NodeKind::ParagraphMark);
             return t;
         };
-        e46.setDocument(mkDoc(), StyleSheet{});
+        loadTreeDocument(e46, mkDoc(), StyleSheet{});
         e46.relayout();
         expectTrue(e46.blocks().size() == 3, "前、表格、后共三段");
 
@@ -9215,7 +9216,7 @@ int main() {
         t.setText(t.appendChild(cell, NodeKind::TextRun), utf8ToCodepoints("乙"));
         t.appendChild(cell, NodeKind::ParagraphMark);
 
-        e47.setDocument(t, StyleSheet{});
+        loadTreeDocument(e47, t, StyleSheet{});
         e47.relayout();
         const LayoutResult& lay = e47.layout();
         expectTrue(lay.lines.size() == 2, "格内两段编出两行");
@@ -9310,7 +9311,7 @@ int main() {
         const NodeId tail = t.appendChild(s, NodeKind::TextRun);
         t.setText(tail, utf8ToCodepoints("尾巴"));
         t.appendChild(s, NodeKind::ParagraphMark);
-        e48.setDocument(t, StyleSheet{});
+        loadTreeDocument(e48, t, StyleSheet{});
         e48.relayout();
         const LayoutResult& lay = e48.layout();
         expectTrue(lay.lines.size() >= 4,
@@ -9506,7 +9507,7 @@ int main() {
         const NodeId tail = t.appendChild(s, NodeKind::TextRun);
         t.setText(tail, utf8ToCodepoints("尾"));
         t.appendChild(s, NodeKind::ParagraphMark);
-        e49.setDocument(t, StyleSheet{});
+        loadTreeDocument(e49, t, StyleSheet{});
         e49.relayout();
         const LayoutResult& lay49 = e49.layout();
         expectTrue(lay49.lines.size() == 10, "3x3 表编出九行，加表后正文一行（实际 " +
@@ -9674,7 +9675,7 @@ int main() {
         const NodeId tail = t.appendChild(s, NodeKind::TextRun);
         t.setText(tail, utf8ToCodepoints("尾"));
         t.appendChild(s, NodeKind::ParagraphMark);
-        e50.setDocument(t, StyleSheet{});
+        loadTreeDocument(e50, t, StyleSheet{});
         e50.relayout();
         expectTrue(e50.blocks().size() == 5, "四段格内容加表后正文共五块（实际 " +
                                                  std::to_string(e50.blocks().size()) + " 块）");
@@ -9759,7 +9760,7 @@ int main() {
         const NodeId tail = t.appendChild(s, NodeKind::TextRun);
         t.setText(tail, utf8ToCodepoints("尾"));
         t.appendChild(s, NodeKind::ParagraphMark);
-        e51.setDocument(t, StyleSheet{});
+        loadTreeDocument(e51, t, StyleSheet{});
         e51.relayout();
         expectTrue(e51.blocks().size() == 4,
                    "头、甲、乙、尾共四块（实际 " + std::to_string(e51.blocks().size()) + " 块）");
@@ -9864,7 +9865,7 @@ int main() {
         t.setText(t.appendChild(s, NodeKind::TextRun), utf8ToCodepoints("尾"));
         t.appendChild(s, NodeKind::ParagraphMark);
 
-        e52.setDocument(t, StyleSheet{});
+        loadTreeDocument(e52, t, StyleSheet{});
         e52.relayout();
         expectTrue(e52.blocks().size() == 4,
                    "前、两格、尾共四块（实际 " + std::to_string(e52.blocks().size()) + " 块）");
@@ -10049,7 +10050,7 @@ int main() {
 
             text(sec, "表后");
             mark(sec);
-            eb.setDocument(t, StyleSheet{});
+            loadTreeDocument(eb, t, StyleSheet{});
             eb.relayout();
             const LayoutDigest db = digestOf(eb.layout());
             std::printf("     摘要 B = 0x%016llx（%zu 行 / %zu 字形 / %d 页 / %zu 表）\n",
@@ -10174,7 +10175,7 @@ int main() {
         mark(sec);
 
         const StyleSheet sheet;
-        e.setDocument(t, sheet);
+        loadTreeDocument(e, t, sheet);
         e.relayout();
 
         // 起点与终点必须真的不同 —— 否则"每一轮都相同"是两支都没动。
@@ -10311,7 +10312,7 @@ int main() {
             t.appendChild(sec, NodeKind::ParagraphMark);
         }
         const StyleSheet sheet;
-        e.setDocument(t, sheet);
+        loadTreeDocument(e, t, sheet);
         e.relayout();
         const int blocks = static_cast<int>(e.blocks().size());
         expectTrue(blocks == 6, "六段六块");
@@ -10536,7 +10537,7 @@ int main() {
             t57.appendChild(sec57, NodeKind::ParagraphMark);
         }
         const StyleSheet sheet57;
-        e57.setDocument(t57, sheet57);
+        loadTreeDocument(e57, t57, sheet57);
         e57.relayout();
         e57.setViewportAnchor(0, 4);
         e57.repaint();
@@ -10630,7 +10631,7 @@ int main() {
                         utf8ToCodepoints("第" + std::to_string(i) + "段：按页接口与脏矩形。"));
             t58.appendChild(sec58, NodeKind::ParagraphMark);
         }
-        e58.setDocument(t58, StyleSheet{});
+        loadTreeDocument(e58, t58, StyleSheet{});
         e58.relayout();
         e58.setViewportAnchor(0, 4);
         e58.repaint();
@@ -10767,7 +10768,7 @@ int main() {
             t59.appendChild(sec59, NodeKind::ParagraphMark);
         }
         const StyleSheet sheet59;
-        e59.setDocument(t59, sheet59);
+        loadTreeDocument(e59, t59, sheet59);
 
         EngineConfig c59;
         c59.zoom = 1.0f;  // 1 磅 = 1 像素：拼图与整带用的是同一把尺子
@@ -11018,7 +11019,7 @@ int main() {
         EditorEngine e61;
         expectTrue(e61.init({cjkPath, mnPath, latinPath}), "引擎初始化（表格增量）");
         e61.setConfig(c61);
-        e61.setDocument(t61, StyleSheet{});
+        loadTreeDocument(e61, t61, StyleSheet{});
         e61.relayout();
         e61.repaint();
         // 只打印，不做断言：耗时的绝对值随机器变，判据只认"走了哪条路"。
@@ -11147,7 +11148,7 @@ int main() {
         EditorEngine e62;
         expectTrue(e62.init({cjkPath, mnPath, latinPath}), "引擎初始化（两张表）");
         e62.setConfig(c61);
-        e62.setDocument(t61c, StyleSheet{});
+        loadTreeDocument(e62, t61c, StyleSheet{});
         e62.relayout();
         e62.repaint();
         const int n62 = static_cast<int>(e62.blocks().size());
@@ -11302,7 +11303,7 @@ int main() {
         EditorEngine ea;
         expectTrue(ea.init({cjkPath, mnPath, latinPath}), "引擎初始化（位置划分·正文）");
         ea.setConfig(c62);
-        ea.setDocument(a62, StyleSheet{});
+        loadTreeDocument(ea, a62, StyleSheet{});
         ea.relayout();
         checkPartition(&ea, "正文（文档模式）", 2);
         ea.setEditMode(EditMode::Form);
@@ -11311,7 +11312,7 @@ int main() {
         EditorEngine eb;
         expectTrue(eb.init({cjkPath, mnPath, latinPath}), "引擎初始化（位置划分·表格）");
         eb.setConfig(c62);
-        eb.setDocument(b62, StyleSheet{});
+        loadTreeDocument(eb, b62, StyleSheet{});
         eb.relayout();
         checkPartition(&eb, "表格在中间", 2);
         // 表里改一个字之后再看一遍：位置是每轮重算的，改完就该仍然成立。
@@ -11322,7 +11323,7 @@ int main() {
         EditorEngine ec;
         expectTrue(ec.init({cjkPath, mnPath, latinPath}), "引擎初始化（位置划分·以表结尾）");
         ec.setConfig(c62);
-        ec.setDocument(t62c, StyleSheet{});
+        loadTreeDocument(ec, t62c, StyleSheet{});
         ec.relayout();
         checkPartition(&ec, "以表格结尾", 5);
     }
@@ -11360,7 +11361,7 @@ int main() {
             return 2;
         }
         e63.setConfig(c63);
-        e63.setDocument(makeTree63(), StyleSheet{});
+        loadTreeDocument(e63, makeTree63(), StyleSheet{});
         e63.relayout();
         e63.repaint();
 
@@ -11484,7 +11485,7 @@ int main() {
             return 2;
         }
         e64.setConfig(c64);
-        e64.setDocument(t64, StyleSheet{});
+        loadTreeDocument(e64, t64, StyleSheet{});
         e64.relayout();
         e64.repaint();
 
@@ -11609,7 +11610,7 @@ int main() {
             return 2;
         }
         e65.setConfig(c65);
-        e65.setDocument(t65, StyleSheet{});
+        loadTreeDocument(e65, t65, StyleSheet{});
         e65.relayout();
         e65.repaint();
 
@@ -11695,7 +11696,7 @@ int main() {
             return 2;
         }
         e66.setConfig(c66);
-        e66.setDocument(t66, StyleSheet{});
+        loadTreeDocument(e66, t66, StyleSheet{});
         e66.relayout();
         e66.repaint();
 
@@ -11776,7 +11777,7 @@ int main() {
             return 2;
         }
         e67.setConfig(c67);
-        e67.setDocument(t67, StyleSheet{});
+        loadTreeDocument(e67, t67, StyleSheet{});
         e67.relayout();
         e67.repaint();
 
@@ -11863,7 +11864,7 @@ int main() {
             return 2;
         }
         e68.setConfig(c67);
-        e68.setDocument(t68, StyleSheet{});
+        loadTreeDocument(e68, t68, StyleSheet{});
         e68.relayout();
         e68.repaint();
         e68.selectAll();
@@ -11974,7 +11975,7 @@ int main() {
             return 2;
         }
         e68.setConfig(c68);
-        e68.setDocument(t68, StyleSheet{});
+        loadTreeDocument(e68, t68, StyleSheet{});
         e68.relayout();
         e68.repaint();
         expectTrue(e68.blocks().size() == 2, "装载之后两段");
@@ -12075,7 +12076,7 @@ int main() {
             return 2;
         }
         e69.setConfig(c69);
-        e69.setDocument(t69, StyleSheet{});
+        loadTreeDocument(e69, t69, StyleSheet{});
         e69.relayout();
         e69.repaint();
         expectTrue(e69.controls().size() == 0, "装载之后没有控件");
@@ -12181,7 +12182,7 @@ int main() {
             t.appendChild(c10, NodeKind::ParagraphMark);
             const NodeId c11 = t.appendChild(r1, NodeKind::TableCell);
             t.appendChild(c11, NodeKind::ParagraphMark);
-            e.setDocument(t, StyleSheet{});
+            loadTreeDocument(e, t, StyleSheet{});
         }
         e.relayout();
         const LayoutResult& lay = e.layout();
@@ -12251,7 +12252,7 @@ int main() {
             t2.appendChild(c00, NodeKind::ParagraphMark);
             const NodeId c01 = t2.appendChild(r0, NodeKind::TableCell);
             t2.appendChild(c01, NodeKind::ParagraphMark);
-            e2.setDocument(t2, StyleSheet{});
+            loadTreeDocument(e2, t2, StyleSheet{});
             e2.relayout();
             const LayoutResult& l2 = e2.layout();
             const PlacedTable& pt2 = l2.placed_tables.at(0);
@@ -12357,7 +12358,7 @@ int main() {
                 const NodeId c1 = t4.appendChild(r, NodeKind::TableCell);
                 t4.appendChild(c1, NodeKind::ParagraphMark);
             }
-            e4.setDocument(t4, StyleSheet{});
+            loadTreeDocument(e4, t4, StyleSheet{});
             e4.relayout();
             const LayoutResult& l4 = e4.layout();
             const PlacedTable& pt4 = l4.placed_tables.at(0);
@@ -12441,7 +12442,7 @@ int main() {
                     t5.appendChild(cell, NodeKind::ParagraphMark);
                 }
             }
-            e5.setDocument(t5, StyleSheet{});
+            loadTreeDocument(e5, t5, StyleSheet{});
             e5.relayout();
             const PlacedTable& pt5 = e5.layout().placed_tables.at(0);
             expectTrue(pt5.placed.size() == 2, "两行都在第一页");
@@ -12503,7 +12504,7 @@ int main() {
             for (int i = 0; i < 300; ++i) huge += "字";
             t3.setText(t3.appendChild(c00, NodeKind::TextRun), utf8ToCodepoints(huge));
             t3.appendChild(c00, NodeKind::ParagraphMark);
-            e3.setDocument(t3, StyleSheet{});
+            loadTreeDocument(e3, t3, StyleSheet{});
             e3.relayout();
             const LayoutResult& l3 = e3.layout();
             const PlacedTable& pt3 = l3.placed_tables.at(0);
@@ -12583,7 +12584,7 @@ int main() {
             const NodeId s = t.firstSectionId();
             t.setText(t.appendChild(s, NodeKind::TextRun), utf8ToCodepoints("甲乙"));
             t.appendChild(s, NodeKind::ParagraphMark);
-            e.setDocument(t, StyleSheet{});
+            loadTreeDocument(e, t, StyleSheet{});
         }
         e.setCaret(0, 0);
         expectTrue(e.insertTableAndRender(2, 2, false), "插一张 2x2 表");
@@ -12649,7 +12650,7 @@ int main() {
             const NodeId s = t.firstSectionId();
             t.setText(t.appendChild(s, NodeKind::TextRun), utf8ToCodepoints("首段"));
             t.appendChild(s, NodeKind::ParagraphMark);
-            e.setDocument(t, StyleSheet{});
+            loadTreeDocument(e, t, StyleSheet{});
         }
         e.setCaret(0, 2);
         expectTrue(e.insertTableAndRender(3, 3, false), "插一张 3x3 表");
@@ -12827,7 +12828,7 @@ int main() {
                 t2.setText(t2.appendChild(cell, NodeKind::TextRun), utf8ToCodepoints(txt));
                 t2.appendChild(cell, NodeKind::ParagraphMark);
             }
-            e2.setDocument(t2, StyleSheet{});
+            loadTreeDocument(e2, t2, StyleSheet{});
             e2.relayout();
             const PlacedTable& pt2 = e2.layout().placed_tables.at(0);
             // 每行的首片：顶边必须严格递增（行与行不重叠、也不塌回带顶）。
@@ -12871,7 +12872,7 @@ int main() {
                 const NodeId s3 = t3.firstSectionId();
                 t3.setText(t3.appendChild(s3, NodeKind::TextRun), utf8ToCodepoints("甲乙"));
                 t3.appendChild(s3, NodeKind::ParagraphMark);
-                e3.setDocument(t3, StyleSheet{});
+                loadTreeDocument(e3, t3, StyleSheet{});
             }
             e3.setCaret(0, 2);
             expectTrue(e3.insertTableAndRender(2, 2, false), "插一张 2x2 表");
@@ -12946,7 +12947,7 @@ int main() {
                 const NodeId sec = t.firstSectionId();
                 t.setText(t.appendChild(sec, NodeKind::TextRun), utf8ToCodepoints("首段"));
                 t.appendChild(sec, NodeKind::ParagraphMark);
-                e.setDocument(t, StyleSheet{});
+                loadTreeDocument(e, t, StyleSheet{});
             }
             e.setCaret(0, 2);
             expectTrue(e.insertTableAndRender(2, 5, false), "插 2x5 表");
@@ -13032,7 +13033,7 @@ int main() {
                 const NodeId sec = t.firstSectionId();
                 t.setText(t.appendChild(sec, NodeKind::TextRun), utf8ToCodepoints("首段"));
                 t.appendChild(sec, NodeKind::ParagraphMark);
-                e.setDocument(t, StyleSheet{});
+                loadTreeDocument(e, t, StyleSheet{});
             }
             e.setCaret(0, 2);
             expectTrue(e.insertTableAndRender(2, 5, false), "插 2x5 表");
@@ -13080,7 +13081,7 @@ int main() {
             const NodeId sec = t.firstSectionId();
             t.setText(t.appendChild(sec, NodeKind::TextRun), utf8ToCodepoints(""));
             t.appendChild(sec, NodeKind::ParagraphMark);
-            e.setDocument(t, StyleSheet{});
+            loadTreeDocument(e, t, StyleSheet{});
             e.setCaret(0, 0);
             int stale = 0;
             for (int i = 0; i < 12; ++i) {
@@ -13113,7 +13114,7 @@ int main() {
             const NodeId s = t.firstSectionId();
             t.setText(t.appendChild(s, NodeKind::TextRun), utf8ToCodepoints("首段"));
             t.appendChild(s, NodeKind::ParagraphMark);
-            e.setDocument(t, StyleSheet{});
+            loadTreeDocument(e, t, StyleSheet{});
         }
         e.setCaret(0, 2);
         expectTrue(e.insertTableAndRender(3, 3, false), "插一张 3x3 表");
@@ -13198,7 +13199,7 @@ int main() {
             const NodeId s = t.firstSectionId();
             t.setText(t.appendChild(s, NodeKind::TextRun), utf8ToCodepoints("甲"));
             t.appendChild(s, NodeKind::ParagraphMark);
-            e.setDocument(t, StyleSheet{});
+            loadTreeDocument(e, t, StyleSheet{});
         }
         e.repaint();
         auto inkIn = [](const EditorEngine& eng, int page, int x0, int y0, int x1, int y1) {
@@ -13317,7 +13318,7 @@ int main() {
             return 2;
         }
         e76.setConfig(c76);
-        e76.setDocument(t76, StyleSheet{});
+        loadTreeDocument(e76, t76, StyleSheet{});
         e76.relayout();
 
         ControlSpec sp76;
@@ -13592,7 +13593,7 @@ int main() {
             return 2;
         }
         e79.setConfig(c79);
-        e79.setDocument(t79, StyleSheet{});
+        loadTreeDocument(e79, t79, StyleSheet{});
         e79.relayout();
 
         // 单色块：缩放采样之后中心仍是同一个颜色，判据不必挑采样算法。
@@ -13722,7 +13723,7 @@ int main() {
             return 2;
         }
         e80.setConfig(c80);
-        e80.setDocument(t80, StyleSheet{});
+        loadTreeDocument(e80, t80, StyleSheet{});
         e80.relayout();
 
         const std::vector<ControlOption> opts80 = {
@@ -13940,7 +13941,7 @@ int main() {
             return 2;
         }
         e81.setConfig(c81);
-        e81.setDocument(t81, StyleSheet{});
+        loadTreeDocument(e81, t81, StyleSheet{});
         e81.relayout();
 
         const std::vector<ControlOption> opts81 = {
@@ -14084,7 +14085,7 @@ int main() {
             return 2;
         }
         e82.setConfig(c82);
-        e82.setDocument(t82, StyleSheet{});
+        loadTreeDocument(e82, t82, StyleSheet{});
         e82.relayout();
 
         auto ins82 = [&](const std::string& type, const std::string& label) {
@@ -14354,7 +14355,7 @@ int main() {
             const NodeId tail = t.appendChild(sec, NodeKind::TextRun);
             t.setText(tail, utf8ToCodepoints("甲乙"));
             t.appendChild(sec, NodeKind::ParagraphMark);
-            e83.setDocument(t, StyleSheet{});
+            loadTreeDocument(e83, t, StyleSheet{});
             e83.relayout();
         };
         int close_line = -1;
@@ -14416,7 +14417,7 @@ int main() {
             const NodeId txt = t.appendChild(ctl, NodeKind::TextRun);
             t.setText(txt, utf8ToCodepoints(controlDisplayText(sp, sp.value)));
             t.appendChild(sec, NodeKind::ParagraphMark);
-            e83.setDocument(t, StyleSheet{});
+            loadTreeDocument(e83, t, StyleSheet{});
             e83.relayout();
             expectTrue(e83.controlViews().size() == 1, "构造：一个复选");
 
@@ -14482,7 +14483,7 @@ int main() {
             for (int i = 0; i < tail_chars; ++i) tail_text += "丙";
             t.setText(tail, utf8ToCodepoints(tail_text));
             t.appendChild(sec, NodeKind::ParagraphMark);
-            e84.setDocument(t, StyleSheet{});
+            loadTreeDocument(e84, t, StyleSheet{});
             e84.relayout();
         };
 
@@ -14578,7 +14579,7 @@ int main() {
             const NodeId txt = t.appendChild(sec, NodeKind::TextRun);
             t.setText(txt, utf8ToCodepoints("甲乙丙丁"));
             t.appendChild(sec, NodeKind::ParagraphMark);
-            e84.setDocument(t, StyleSheet{});
+            loadTreeDocument(e84, t, StyleSheet{});
             e84.relayout();
 
             const int iw = 96;
@@ -14636,7 +14637,7 @@ int main() {
             return 2;
         }
         e85.setConfig(c85);
-        e85.setDocument(t85, StyleSheet{});
+        loadTreeDocument(e85, t85, StyleSheet{});
         e85.relayout();
         e85.repaint();
 
@@ -14903,7 +14904,7 @@ int main() {
             return 2;
         }
         e86.setConfig(c86);
-        e86.setDocument(t86, StyleSheet{});
+        loadTreeDocument(e86, t86, StyleSheet{});
         e86.relayout();
         e86.repaint();
 
@@ -14999,7 +15000,7 @@ int main() {
                 return 2;
             }
             e87.setConfig(c86);
-            e87.setDocument(t87, StyleSheet{});
+            loadTreeDocument(e87, t87, StyleSheet{});
             e87.relayout();
             e87.repaint();
             std::string err87;
@@ -15046,7 +15047,7 @@ int main() {
                 return 2;
             }
             e88.setConfig(c86);
-            e88.setDocument(t88, StyleSheet{});
+            loadTreeDocument(e88, t88, StyleSheet{});
             e88.relayout();
             e88.repaint();
             e88.setCaret(0, 2);
@@ -15090,7 +15091,7 @@ int main() {
                 return 2;
             }
             e89.setConfig(c86);
-            e89.setDocument(t89, StyleSheet{});
+            loadTreeDocument(e89, t89, StyleSheet{});
             e89.relayout();
             e89.repaint();
             std::string err89;
@@ -15175,7 +15176,7 @@ int main() {
             EditorEngine ev;
             if (!ev.init(fonts86)) return "字体加载失败";
             ev.setConfig(cv);
-            ev.setDocument(tv, StyleSheet{});
+            loadTreeDocument(ev, tv, StyleSheet{});
             ev.relayout();
             ev.repaint();
             std::string err;
@@ -15317,7 +15318,7 @@ int main() {
             cv.page.height_pt = 842.0f;
             cv.page.margins = PageMargins::all(72.0f);
             ev.setConfig(cv);
-            ev.setDocument(tv, StyleSheet{});
+            loadTreeDocument(ev, tv, StyleSheet{});
             ev.relayout();
             ev.repaint();
             std::string err;
@@ -15435,7 +15436,7 @@ int main() {
                 return 2;
             }
             eg.setConfig(c86);
-            eg.setDocument(tg, StyleSheet{});
+            loadTreeDocument(eg, tg, StyleSheet{});
             eg.relayout();
             eg.repaint();
             std::string errg;
@@ -15489,7 +15490,7 @@ int main() {
             return 2;
         }
         e87.setConfig(c87);
-        e87.setDocument(t87, StyleSheet{});
+        loadTreeDocument(e87, t87, StyleSheet{});
         e87.relayout();
 
         expectTrue(e87.documentCodepoints() == 6,
@@ -15513,7 +15514,7 @@ int main() {
             return 2;
         }
         e87b.setConfig(c87);
-        e87b.setDocument(t87b, StyleSheet{});
+        loadTreeDocument(e87b, t87b, StyleSheet{});
         e87b.relayout();
         expectTrue(
             e87b.documentWordCount() == 0,
@@ -15576,7 +15577,7 @@ int main() {
             return 2;
         }
         e88.setConfig(c88);
-        e88.setDocument(t88, StyleSheet{});
+        loadTreeDocument(e88, t88, StyleSheet{});
         e88.relayout();
 
         e88.setCaret(0, 1);
@@ -15652,7 +15653,7 @@ int main() {
             return 2;
         }
         e89.setConfig(c89);
-        e89.setDocument(t89, StyleSheet{});
+        loadTreeDocument(e89, t89, StyleSheet{});
         e89.relayout();
 
         ControlSpec spec89 = makeControlSpec("text");
@@ -15798,7 +15799,7 @@ int main() {
             EditorEngine e89d;
             expectTrue(e89d.init(fonts89), "引擎初始化（空下拉）");
             e89d.setConfig(c89);
-            e89d.setDocument(td, StyleSheet{});
+            loadTreeDocument(e89d, td, StyleSheet{});
             e89d.relayout();
 
             // 提示槽在哪一条行盒上（同一条判据给下面两次用）。
@@ -15872,7 +15873,7 @@ int main() {
             return 2;
         }
         e90.setConfig(c90);
-        e90.setDocument(t90, StyleSheet{});
+        loadTreeDocument(e90, t90, StyleSheet{});
         e90.relayout();
 
         // 选区盖住"乙"与控件里的前一段（"丙"）：复制的应当只有这两段文字，
@@ -15948,7 +15949,7 @@ int main() {
             EditorEngine e90b;
             expectTrue(e90b.init(fonts90), "引擎初始化（嵌套控件）");
             e90b.setConfig(c90);
-            e90b.setDocument(tn, StyleSheet{});
+            loadTreeDocument(e90b, tn, StyleSheet{});
             e90b.relayout();
             // 从外层的第一段文字到外层的最后一个字：外层被切开，内层整个在内。
             expectTrue(e90b.setSelection(Range{e90b.flowPosAt(0, 2), e90b.flowPosAt(0, 6)}),
@@ -15997,7 +15998,7 @@ int main() {
         EditorEngine e91;
         expectTrue(e91.init(fonts91), "引擎初始化（连页增量）");
         e91.setConfig(c91);
-        e91.setDocument(t91, StyleSheet{});
+        loadTreeDocument(e91, t91, StyleSheet{});
         e91.relayout();
 
         // 一段首行的全局块轴位置 = 页号 x 条带高 + 页内 y。
@@ -16067,7 +16068,7 @@ int main() {
                     t92.appendChild(sec, NodeKind::ParagraphMark);
                 }
             }
-            e92.setDocument(t92, StyleSheet{});
+            loadTreeDocument(e92, t92, StyleSheet{});
             e92.relayout();
             const auto tableTop = [&e92, slab91]() -> float {
                 if (e92.layout().placed_tables.empty()) return -1.0f;
@@ -16118,7 +16119,7 @@ int main() {
         EditorEngine e;
         expectTrue(e.init(fonts92), "引擎初始化（行盒几何）");
         e.setConfig(c92);
-        e.setDocument(t92, StyleSheet{});
+        loadTreeDocument(e, t92, StyleSheet{});
         e.relayout();
 
         const LayoutResult& lay = e.layout();
@@ -16234,7 +16235,7 @@ int main() {
                     t2.appendChild(sec, NodeKind::ParagraphMark);
                 }
             }
-            e2.setDocument(t2, StyleSheet{});
+            loadTreeDocument(e2, t2, StyleSheet{});
             e2.relayout();
             ParaFormatPatch pbreak;
             pbreak.space_before = Length::abs(ptToEmu(10.0));
@@ -16256,7 +16257,7 @@ int main() {
             EditorEngine e3;
             expectTrue(e3.init(fonts92), "引擎初始化（首段段前距）");
             e3.setConfig(c92);
-            e3.setDocument(t92, StyleSheet{});
+            loadTreeDocument(e3, t92, StyleSheet{});
             e3.relayout();
             ParaFormatPatch pfirst;
             pfirst.space_before = Length::abs(ptToEmu(12.0));
@@ -16273,7 +16274,7 @@ int main() {
             EditorEngine e6;
             expectTrue(e6.init(fonts92), "引擎初始化（字在行槽中间）");
             e6.setConfig(c92);
-            e6.setDocument(t92, StyleSheet{});
+            loadTreeDocument(e6, t92, StyleSheet{});
             e6.relayout();
             expectNear(e6.layout().lines.front().slotLoPt(), e6.layout().lines.front().block_lo_pt,
                        0.01, "前提：单倍行距下行槽顶就是字面盒顶（没有多余空白）");
@@ -16312,7 +16313,7 @@ int main() {
             EditorEngine e7;
             expectTrue(e7.init(fonts92), "引擎初始化（从软换行处起选）");
             e7.setConfig(c92);
-            e7.setDocument(t92, StyleSheet{});
+            loadTreeDocument(e7, t92, StyleSheet{});
             e7.relayout();
             const ParaIndex pi7 = e7.layout().para_index[0];
             expectTrue(pi7.line_end - pi7.line_begin >= 2, "前提：第一段折成两行");
@@ -16361,7 +16362,7 @@ int main() {
         EditorEngine e;
         expectTrue(e.init({cjkPath, mnPath, latinPath}), "引擎初始化（行距三态）");
         e.setConfig(c93);
-        e.setDocument(t93, StyleSheet{});
+        loadTreeDocument(e, t93, StyleSheet{});
         e.relayout();
         const LayoutResult& lay = e.layout();
         expectTrue(lay.para_index.size() >= 3, "前提：文档有三段");
@@ -16431,7 +16432,7 @@ int main() {
                 t4.setText(t4.appendChild(sec, NodeKind::TextRun), utf8ToCodepoints("甲乙丙丁"));
                 t4.appendChild(sec, NodeKind::ParagraphMark);
             }
-            e4.setDocument(t4, StyleSheet{});
+            loadTreeDocument(e4, t4, StyleSheet{});
             e4.relayout();
             auto setSpacing4 = [&](LineSpacingRule rule, float exact) {
                 ParaFormatPatch p;

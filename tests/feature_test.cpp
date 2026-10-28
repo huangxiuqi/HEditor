@@ -16,6 +16,7 @@
 #include "core/engine/page_scene.h"
 #include "core/layout/layout.h"
 #include "core/utils/units.h"
+#include "tree_document.h"
 
 #ifndef HEDITOR_NATIVE_ASSET_DIR
 #define HEDITOR_NATIVE_ASSET_DIR "."
@@ -137,7 +138,7 @@ int main() {
     // 1 双击选词
     std::printf("\n[1] 双击选词\n");
     {
-        e.setDocument(makeDoc({"患者主诉：反复心悸三天，加重一天。"}), StyleSheet{});
+        loadTreeDocument(e, makeDoc({"患者主诉：反复心悸三天，加重一天。"}), StyleSheet{});
         e.relayout();
         // "患者主诉：反复心悸三天" —— 心在第 7 位、悸在第 8 位。
         e.setCaret(0, 8);
@@ -153,7 +154,7 @@ int main() {
         expectTrue(e.selectWordAtPt(c2.x, c2.y), "双击落在逗号上");
         expectTrue(selectedText(e) == "，", "标点自成一类（实际「" + selectedText(e) + "」）");
         // 空段落没有可选内容：返回假，宿主据此退回落光标。
-        e.setDocument(makeDoc({"", ""}), StyleSheet{});
+        loadTreeDocument(e, makeDoc({"", ""}), StyleSheet{});
         e.relayout();
         e.setCaret(0, 0);
         const Point c3 = caretCenter(e, nullptr);
@@ -163,7 +164,7 @@ int main() {
     // 2 三击选段
     std::printf("\n[2] 三击选段\n");
     {
-        e.setDocument(makeDoc({"第一段文字内容", "第二段文字"}), StyleSheet{});
+        loadTreeDocument(e, makeDoc({"第一段文字内容", "第二段文字"}), StyleSheet{});
         e.relayout();
         e.setCaret(0, 3);
         const Point c = caretCenter(e, nullptr);
@@ -174,7 +175,7 @@ int main() {
     // 3 水印
     std::printf("\n[3] 水印\n");
     {
-        e.setDocument(makeDoc({"正文一段"}), StyleSheet{});
+        loadTreeDocument(e, makeDoc({"正文一段"}), StyleSheet{});
         e.relayout();
         WatermarkSpec w;
         w.enabled = true;
@@ -199,7 +200,7 @@ int main() {
     // 4 表格列宽与行高
     std::printf("\n[4] 表格列宽与行高\n");
     {
-        e.setDocument(makeDoc({"表格前一段"}), StyleSheet{});
+        loadTreeDocument(e, makeDoc({"表格前一段"}), StyleSheet{});
         e.relayout();
         e.setCaret(0, 0);
         expectTrue(e.insertTableAndRender(2, 2, false), "插入 2x2 表格");
@@ -281,7 +282,7 @@ int main() {
     // 5 拖拽移动
     std::printf("\n[5] 拖拽移动选区与图片\n");
     {
-        e.setDocument(makeDoc({"abcdefghij"}), StyleSheet{});
+        loadTreeDocument(e, makeDoc({"abcdefghij"}), StyleSheet{});
         e.relayout();
         // 目标点先取：段首那个字的位置。
         e.setCaret(0, 0);
@@ -387,7 +388,7 @@ int main() {
     {
         std::string long_line;
         for (int i = 0; i < 40; ++i) long_line += "文字内容";
-        e.setDocument(makeDoc({long_line, "第二段", "第三段"}), StyleSheet{});
+        loadTreeDocument(e, makeDoc({long_line, "第二段", "第三段"}), StyleSheet{});
         e.relayout();
 
         std::vector<uint8_t> px(4u * 4u * 4u, 200);

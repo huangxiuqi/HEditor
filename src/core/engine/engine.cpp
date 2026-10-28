@@ -242,31 +242,8 @@ void EditorEngine::installDocument(rev::Doc doc) {
 }
 
 /**
- * 文档装载：模型树那条路（第十四节的接缝）。
+ * 文档装载：产品只接受修订；模型树由调用方投影后再走这里。
  */
-void EditorEngine::setDocument(const NodeTree& tree, const StyleSheet& sheet) {
-    refreshViews();
-    rev::Doc doc;
-    std::string why;
-    if (!rev::fromTree(tree, &doc, &why)) {
-        // 表示不了的形状拒绝装载：装一半的结果是一份看起来完整的修订，而它与模型不是同一份
-        // 文档，调用方没有别的办法知道。宁可停在"没有装载"这个明确状态上。
-        loaded_ = false;
-        session_.reset();
-        projection_.history = rev::BlockHistory{};
-        projection_.blocks.clear();
-        projection_.blocks_full.clear();
-        projection_.block_src.clear();
-        projection_.block_extents.clear();
-        projection_.tables.clear();
-        flow_.reset();
-        render_.pages.clear();
-        return;
-    }
-    sheet_ = sheet;
-    installDocument(std::move(doc));
-}
-
 void EditorEngine::setDocument(rev::Doc doc, const StyleSheet& sheet) {
     refreshViews();
     sheet_ = sheet;
