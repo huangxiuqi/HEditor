@@ -2451,6 +2451,10 @@ int main() {
         expectTrue(grew.suffix_shifted && grew.relaid_paragraphs == 1 &&
                        grew.reused_paragraphs == kParas - 1 - 100,
                    "★ 撑出一行 → 后缀整体平移复用（只重排 1 段，99 段不重排）");
+        // 平移复用之后页/块/行三张表由同一次 rebuild 收尾；这条钉住"后缀重新分页不是
+        // 只改了行盒、把索引落在旧页上"。
+        expectTrue(e.layout().fragmentIndexValid(),
+                   "★ 平移复用之后 FragmentIndex 仍自洽（页/块/行三表）");
         // 平移是"改坐标"不是"重排"，所以判据落在坐标上：坐标允许 1e-3 pt 的舍入差
         // （两种加法），结构性字段（页号/行号/段号/簇）必须逐位一致。
         expectTrue(e.auditLayout() == 0, "★ 平移复用的结果与全量重排一致（几何差 < 1e-3 pt）");
@@ -12965,8 +12969,8 @@ int main() {
             // 索引覆盖：每一行恰好出现一次，且出现的那一页就是它自己的页。
             int covered = 0;
             int misfiled = 0;
-            for (size_t p = 0; p < lay.page_lines.size(); ++p) {
-                for (int k : lay.page_lines[p]) {
+            for (size_t p = 0; p < lay.fragments.page_lines.size(); ++p) {
+                for (int k : lay.fragments.page_lines[p]) {
                     ++covered;
                     if (lay.lines[static_cast<size_t>(k)].page != static_cast<int>(p)) ++misfiled;
                 }
@@ -12977,8 +12981,8 @@ int main() {
                            "）");
             int gcovered = 0;
             int gmisfiled = 0;
-            for (size_t p = 0; p < lay.page_glyphs.size(); ++p) {
-                for (int k : lay.page_glyphs[p]) {
+            for (size_t p = 0; p < lay.fragments.page_glyphs.size(); ++p) {
+                for (int k : lay.fragments.page_glyphs[p]) {
                     ++gcovered;
                     if (lay.glyphs[static_cast<size_t>(k)].page != static_cast<int>(p)) ++gmisfiled;
                 }

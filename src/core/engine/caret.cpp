@@ -633,16 +633,22 @@ const LineBox* CaretResolver::findLineFor(const TextPos& pos, int aff) const {
     const LineBox* best = nullptr;
     const LineBox* first_hit = nullptr;
     const LineBox* last_hit = nullptr;
-    for (const LineBox& lb : view_.layout->lines) {
-        if (lb.paragraph != pos.para) continue;
+    const auto take = [&](const LineBox& lb) {
+        if (lb.paragraph != pos.para) return;
         if (pos.offset >= lb.first_cp && pos.offset <= lb.last_cp) {
             if (first_hit == nullptr) first_hit = &lb;
             last_hit = &lb;
         }
         if (lb.first_cp <= pos.offset)
             best = &lb;
-        else if (!best)
+        else if (best == nullptr)
             best = &lb;
+    };
+    const std::vector<int>& block = view_.layout->linesOfBlock(pos.para);
+    if (!block.empty()) {
+        for (int index : block) take(view_.layout->lines[static_cast<size_t>(index)]);
+    } else {
+        for (const LineBox& lb : view_.layout->lines) take(lb);
     }
     if (aff > 0 && last_hit != nullptr) return last_hit;
     if (first_hit != nullptr) return first_hit;
@@ -1093,10 +1099,20 @@ bool CaretResolver::moveCaretVertical(int dir, bool extend) {
     const LineBox* cur_lb = findLineFor(caret(), sel_.focus.affinity);
     if (!cur_lb) return false;
     int cur_i = -1;
-    for (int i = 0; i < n; ++i) {
-        if (&view_.layout->lines[static_cast<size_t>(i)] == cur_lb) {
-            cur_i = i;
-            break;
+    const std::vector<int>& block = view_.layout->linesOfBlock(caretPara());
+    if (!block.empty()) {
+        for (int index : block) {
+            if (&view_.layout->lines[static_cast<size_t>(index)] == cur_lb) {
+                cur_i = index;
+                break;
+            }
+        }
+    } else {
+        for (int i = 0; i < n; ++i) {
+            if (&view_.layout->lines[static_cast<size_t>(i)] == cur_lb) {
+                cur_i = i;
+                break;
+            }
         }
     }
     if (cur_i < 0) return false;

@@ -1640,10 +1640,11 @@ struct LineBox {
 // 增量排版（档 2）：续排状态 / 段切片 / 段级整形缓存
 
 /**
- * 段落之间传递的全部排版状态。
+ * 段落之间传递的排版状态。
  * 断行是段内局部决策（只依赖本段的簇推进与内容宽度），跨段传播的只有这三个标量：
- * 页号、当前块轴起点、已排行数。竖排无需额外字段 —— 每个块在块首自行从
- * cursor_y 推出列状态。
+ * 页号、当前块轴起点、已排行数。行数不能由行盒下标现数：竖排块跨多条带时，旧循环的
+ * 行号只按最后一条带的列数推进，前几条带不累加。竖排无需额外字段 —— 每个块在块首
+ * 自行从 cursor_y 推出列状态。
  * 因此「保留前缀 + 从脏段续排」与「整篇重排」的结果逐字节相同；
  * 该等价性由 EditorEngine::auditLayout() 用一次全量重排当场校验。
  */
@@ -1679,6 +1680,8 @@ struct ReflowState {
 
 /**
  * 整篇排版的起始状态（第 0 段之前）。
+ * @param page 页度量
+ * @return 第 0 段开始时的续排状态
  */
 inline ReflowState freshReflowState(const PageMetrics& page) {
     return ReflowState{0, page.margins.top, 0};
@@ -1757,8 +1760,8 @@ public:
     void clear();
 
     /**
-     * 已缓存的段落数。
-     * @return 已缓存的段落数
+     * 已缓存的条目数：按段下标的条目与块局部排版按内容指纹的条目合起来。
+     * @return 已缓存的条目数
      */
     size_t size() const;
 
@@ -1832,7 +1835,131 @@ struct LayoutStats {
     double layout_ms = 0.0;
 };
 
+/**
+ * 片段索引：页 / 块 / 字形三张反查表，也是增量后缀重新分页的块行权威。
+ *
+ * 三张表都从同一次排版结果推出来，放在一个对象里重建，避免"页表已换、块表还是旧值"。
+ * 增量排版拼接之后只刷新后缀的块行表（见 rebuildBlockLinesFrom），后缀重新分页从这里
+ * 取每块的行切片，不再自己扫行盒。
+ */
+struct FragmentIndex {
+    /**
+     * 一段连续的行：同一块、同一页。
+     */
+    struct Fragment {
+        /**
+         * 块号。
+         */
+        int block = 0;
+
+        /**
+         * 页号。
+         */
+        int page = 0;
+
+        /**
+         * 首行下标。
+         */
+        int first_line = 0;
+
+        /**
+         * 末行下标（含）。
+         */
+        int last_line = 0;
+    };
+
+    /**
+     * 每页上的行下标（下标 = 页号，值 = lines 里那一行的下标，按流顺序）。
+     */
+    std::vector<std::vector<int>> page_lines;
+
+    /**
+     * 按行顺序的连续片段。
+     */
+    std::vector<Fragment> fragments;
+
+    /**
+     * 每页上的片段下标。
+     */
+    std::vector<std::vector<int>> page_fragments;
+
+    /**
+     * 每块的行下标（下标 = 块号，值 = lines 里那一行的下标，按行顺序）。
+     */
+    std::vector<std::vector<int>> block_lines;
+
+    /**
+     * 每页上的字形下标（同上，值 = glyphs 里的下标，按流顺序）。
+     */
+    std::vector<std::vector<int>> page_glyphs;
+
+    /**
+     * 重建三张表。
+     * @param lines 行盒
+     * @param glyphs 字形
+     * @param para_count 块数
+     * @param page_count 页数
+     */
+    void rebuild(const std::vector<LineBox>& lines, const std::vector<PlacedGlyph>& glyphs,
+                 size_t para_count, int page_count);
+
+    /**
+     * 只重建 [first_block, para_count) 的块行表，页表保持原样。
+     * 增量排版在拼接之后、后缀重新分页之前用它刷新块行切片；收尾的 rebuild 会把页表一起换掉。
+     * @param lines 行盒
+     * @param para_count 段数
+     * @param first_block 从这里起的块（含）
+     * @param first_line 从这一行起扫（含）：之前的行属于没改动的块
+     */
+    void rebuildBlockLinesFrom(const std::vector<LineBox>& lines, size_t para_count,
+                               int first_block, int first_line);
+
+    /**
+     * 第 page 页上的行下标；越界时是空表。
+     * @param page 页号
+     * @returns 行下标表
+     */
+    const std::vector<int>& linesOnPage(int page) const;
+
+    /**
+     * 第 page 页上的片段下标；越界时是空表。
+     * @param page 页号
+     * @returns 片段下标表
+     */
+    const std::vector<int>& fragmentsOnPage(int page) const;
+
+    /**
+     * 第 para 块的行下标；越界时是空表。
+     * @param para 块号
+     * @returns 行下标表
+     */
+    const std::vector<int>& linesOfBlock(int para) const;
+
+    /**
+     * 第 page 页上的字形下标；越界时是空表。
+     * @param page 页号
+     * @returns 字形下标表
+     */
+    const std::vector<int>& glyphsOnPage(int page) const;
+
+    /**
+     * 三张反查表是否自洽：下标在范围内、页码/块号对得上、覆盖不重不漏。
+     * @param lines 行盒
+     * @param glyphs 字形
+     * @param para_count 块数
+     * @param page_count 页数
+     * @returns true = 索引自洽
+     */
+    bool valid(const std::vector<LineBox>& lines, const std::vector<PlacedGlyph>& glyphs,
+               size_t para_count, int page_count) const;
+};
+
 struct LayoutResult {
+    /**
+     * 页 / 块 / 字形反查表。
+     */
+    FragmentIndex fragments;
+
     /**
      * 字形，按 (块, 簇) 顺序。
      */
@@ -1869,44 +1996,36 @@ struct LayoutResult {
     std::vector<PlacedFloat> placed_floats;
 
     /**
-     * 每页上的行下标（下标 = 页号，值 = lines 里那一行的下标，按流顺序）。
-     *
-     * 行数组按流顺序排，而表格行跨页之后它就不再按页单调：一条高格切到第二页时，
-     * 它的续排行先被追加，同一行其余各格的单行还留在上一页。按页号二分来"取这一页
-     * 的行"因此会漏 —— 漏掉的正是那些格（标记不画、命中判给别人、增量重画的带
-     * 也扫不到它们）。这一份是"页 -> 行"的唯一索引。
-     */
-    std::vector<std::vector<int>> page_lines;
-
-    /**
-     * 每页上的字形下标（同上，值 = glyphs 里的下标，按流顺序）。
-     *
-     * 用途与 page_lines 一样：绘制按页取字形、页指纹按页混字形，都不能再靠
-     * "字形数组按页单调"这条已不成立的不变式去二分。
-     */
-    std::vector<std::vector<int>> page_glyphs;
-
-    /**
-     * 按 lines / glyphs 重建两张页索引表（每次排版收尾，以及"后缀整体平移"之后）。
-     *
-     * O(行数 + 字形数)。行与字形都按流顺序排，页号不保证单调（见 page_lines），
-     * 所以这两张表必须是推出来的，不能按页号二分。
+     * 按 lines / glyphs 重建片段索引（每次排版收尾，以及"后缀整体平移"之后）。
      */
     void rebuildPageIndex();
 
     /**
      * 第 page 页上的行下标；页号越界时是空表。
      * @param page 页号
-     * @return 行下标表（按流顺序）
+     * @return 行下标表
      */
     const std::vector<int>& linesOnPage(int page) const;
 
     /**
+     * 第 para 块的行下标；块号越界时是空表。
+     * @param para 块号
+     * @return 行下标表
+     */
+    const std::vector<int>& linesOfBlock(int para) const;
+
+    /**
      * 第 page 页上的字形下标；页号越界时是空表。
      * @param page 页号
-     * @return 字形下标表（按流顺序）
+     * @return 字形下标表
      */
     const std::vector<int>& glyphsOnPage(int page) const;
+
+    /**
+     * 片段索引自检。
+     * @returns true = 页/块/字形三张反查表自洽
+     */
+    bool fragmentIndexValid() const;
 
     /**
      * 这一轮排版的账。

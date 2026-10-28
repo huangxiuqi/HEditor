@@ -201,6 +201,11 @@ add_library(heditor_core STATIC
   src/core/text/fallback.cpp
   ${HEDITOR_RENDER_SRC}
   src/core/layout/layout.cpp
+  src/core/layout/fragment.cpp
+  src/core/layout/block_shape.cpp
+  src/core/layout/block_layout.cpp
+  src/core/layout/block_pagination.cpp
+  src/core/layout/float_flow.cpp
   src/core/engine/engine.cpp
   src/core/engine/caret.cpp
   src/core/engine/edit_command.cpp

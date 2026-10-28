@@ -479,12 +479,15 @@ PageScene buildPageScene(const RenderInput& in, int page) {
     // 字形：一行一项。
     auto addLines = [&](int p, bool want_spill) {
         const std::vector<Rect> bands = lineBandsForPage(in, p, page_w, page_h);
-        for (int li : L.linesOnPage(p)) {
-            const LineBox& lb = L.lines[static_cast<size_t>(li)];
-            if (want_spill && !(lb.block_hi_pt > slab_pt)) continue;
-            const Rect b = want_spill ? page_rect : bands[static_cast<size_t>(li)];
-            addItem(&scene, SceneLayer::Glyph, SceneKind::GlyphLine, static_cast<uint64_t>(li), 0,
-                    want_spill, lineVersion(in, li), b);
+        for (int fi : L.fragments.fragmentsOnPage(p)) {
+            const FragmentIndex::Fragment& f = L.fragments.fragments[static_cast<size_t>(fi)];
+            for (int li = f.first_line; li <= f.last_line; ++li) {
+                const LineBox& lb = L.lines[static_cast<size_t>(li)];
+                if (want_spill && !(lb.block_hi_pt > slab_pt)) continue;
+                const Rect b = want_spill ? page_rect : bands[static_cast<size_t>(li)];
+                addItem(&scene, SceneLayer::Glyph, SceneKind::GlyphLine, static_cast<uint64_t>(li),
+                        0, want_spill, lineVersion(in, li), b);
+            }
         }
     };
     addLines(page, false);

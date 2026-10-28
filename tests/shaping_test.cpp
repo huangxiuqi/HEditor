@@ -12,10 +12,14 @@
 #include <vector>
 
 #include "core/engine/engine.h"
+#include "core/layout/block_layout.h"
+#include "core/layout/block_pagination.h"
+#include "core/layout/fragment.h"
 #include "core/layout/layout.h"
 #include "core/text/fallback.h"
 #include "core/text/font_source.h"
 #include "core/text/shaper.h"
+#include "core/utils/hash.h"
 #include "core/utils/utf8.h"
 #include "demo/demo_documents.h"
 
@@ -61,6 +65,75 @@ std::string joinPath(const std::string& dir, const std::string& name) {
     const char last = dir.back();
     if (last == '/' || last == '\\') return dir + name;
     return dir + "/" + name;
+}
+
+/**
+ * 浮动图场景的排版指纹：行盒、字形与浮动几何逐项混入。
+ *
+ * 字体指针不进指纹（跨进程地址不同），字形按内容与坐标比。它锁的是"绕排路径切换前后
+ * 逐位相同"，不是"绕排是对的"。
+ * @param r 一次排版的结果
+ * @return 64 位指纹
+ */
+uint64_t floatCaseDigest(const LayoutResult& r) {
+    uint64_t h = kFnvBasis;
+    auto u = [&](uint64_t v) { h = fnvMix(h, v); };
+    auto f = [&](float v) { h = fnvMixFloat(h, v); };
+    u(r.lines.size());
+    for (const LineBox& lb : r.lines) {
+        u(static_cast<uint64_t>(lb.paragraph));
+        u(static_cast<uint64_t>(lb.line));
+        u(static_cast<uint64_t>(lb.page));
+        u(lb.vertical ? 1u : 0u);
+        f(lb.size_pt);
+        f(lb.block_lo_pt);
+        f(lb.block_hi_pt);
+        f(lb.lead_top_pt);
+        f(lb.ascent_pt);
+        f(lb.descent_pt);
+        f(lb.advance_pt);
+        f(lb.inline_origin_pt);
+        f(lb.inline_end_pt);
+        f(lb.bracket_axis_pt);
+        u(lb.first_cp);
+        u(lb.last_cp);
+        u(lb.spans.size());
+        for (const LineBox::Span& s : lb.spans) {
+            f(s.lo_pt);
+            f(s.hi_pt);
+        }
+        u(lb.clusters.size());
+        for (const LineCluster& c : lb.clusters) {
+            u(c.cp);
+            f(c.inline_pt);
+            u(c.placeholder ? 1u : 0u);
+            u(static_cast<uint64_t>(c.bracket_side));
+        }
+    }
+    u(r.glyphs.size());
+    for (const PlacedGlyph& g : r.glyphs) {
+        u(g.glyph_id);
+        f(g.x_pt);
+        f(g.y_pt);
+        u(static_cast<uint64_t>(g.page));
+        u(static_cast<uint64_t>(g.line));
+        u(g.cluster);
+        u(static_cast<uint64_t>(g.paragraph));
+        f(g.advance_pt);
+    }
+    u(r.placed_floats.size());
+    for (const PlacedFloat& pf : r.placed_floats) {
+        u(pf.handle);
+        u(static_cast<uint64_t>(pf.page));
+        f(pf.x);
+        f(pf.y);
+        f(pf.w);
+        f(pf.h);
+        u(static_cast<uint64_t>(pf.wrap));
+        u(pf.content_hash);
+    }
+    u(static_cast<uint64_t>(r.stats.page_count));
+    return h;
 }
 
 /**
@@ -1305,6 +1378,2261 @@ int main() {
                            "第二行表格行至少让开两行的高度");
             }
         }
+    }
+
+    std::printf("\n[10] 块局部排版：与整篇排版的块行几何一致\n");
+    {
+        PageMetrics page;
+        page.width_pt = 300.0f;
+        page.height_pt = 400.0f;
+        page.margins = PageMargins::all(10.0f);
+        const float cw = page.contentWidthPt();  // 280
+
+        auto mkBlock = [&](const std::string& text) {
+            BlockSpec b;
+            b.font_index = cjk;
+            b.size_pt = kSize;
+            b.line_spacing.factor = 1.6f;
+            b.space_after_pt = 0.0f;
+            b.setText(text);
+            return b;
+        };
+        auto mkConstraints = [&](const BlockSpec& b, float width) {
+            BlockConstraints c;
+            c.width_pt = width;
+            c.writing_mode = b.wm;
+            return c;
+        };
+
+        const std::string text =
+            "块局部排版只做三件事：整形、按约束断行、把行放到块内坐标。"
+            "它不认识页，也不认识表格与浮动图。";
+        const BlockSpec block = mkBlock(text);
+        const BlockConstraints constraints = mkConstraints(block, cw);
+        const LayoutResult full = layoutDocument(lib, {block}, page);
+        ShapingCache cache;
+        const BlockLayout local = layoutBlock(lib, block, constraints, &cache);
+
+        expectTrue(local.status == BlockLayoutStatus::Ok, "横排正文块：状态是 Ok");
+        expectTrue(full.lines.size() >= 2, "前提：整篇排版把这个块折成多行（实际 " +
+                                               std::to_string(full.lines.size()) + " 行）");
+        expectTrue(local.lines.size() == full.lines.size(), "块局部与整篇排出的行数相同");
+        expectTrue(local.glyphs.size() == full.glyphs.size(), "字形数相同");
+        // 分页消费的是不含坐标的断行片段；块内行盒由同一份片段落位，两者必须同度量。
+        expectTrue(local.fragments.size() == local.lines.size(),
+                   "块局部结果同时给出与页无关的断行片段");
+        int bad_fragment = 0;
+        if (local.fragments.size() == local.lines.size()) {
+            for (size_t i = 0; i < local.fragments.size(); ++i) {
+                const BrokenLine& f = local.fragments[i];
+                const LineBox& lb = local.lines[i];
+                const bool same = std::fabs(f.line_h - lb.advance_pt) < 1e-4f &&
+                                  std::fabs(f.ascent - lb.ascent_pt) < 1e-4f &&
+                                  std::fabs(f.descent - lb.descent_pt) < 1e-4f &&
+                                  std::fabs(f.lead - lb.lead_top_pt) < 1e-4f &&
+                                  f.clip == lb.clip_text;
+                if (!same) ++bad_fragment;
+            }
+        }
+        expectTrue(bad_fragment == 0, "断行片段的行度量与块内行盒逐条相同");
+
+        // 两份结果的差别应当只有一个平移：整篇是页内坐标，块局部以内容区左上为原点。
+        const float off_x = full.lines.empty() ? 0.0f : full.lines[0].inline_origin_pt;
+        const float off_y =
+            full.lines.empty() ? 0.0f : (full.lines[0].block_lo_pt - full.lines[0].lead_top_pt);
+        expectNear(off_x, page.margins.left, 1e-4, "整篇的行内起点就是左边距");
+        expectNear(off_y, page.margins.top, 1e-4, "整篇的首行行顶就是上边距");
+
+        int bad_line = 0;
+        if (local.lines.size() == full.lines.size()) {
+            for (size_t i = 0; i < full.lines.size(); ++i) {
+                const LineBox& a = full.lines[i];
+                const LineBox& b = local.lines[i];
+                bool same = a.first_cp == b.first_cp && a.last_cp == b.last_cp;
+                same = same && std::fabs(a.ascent_pt - b.ascent_pt) < 1e-4f;
+                same = same && std::fabs(a.descent_pt - b.descent_pt) < 1e-4f;
+                same = same && std::fabs(a.advance_pt - b.advance_pt) < 1e-4f;
+                same = same && std::fabs(a.lead_top_pt - b.lead_top_pt) < 1e-4f;
+                same = same && std::fabs(a.inline_end_pt - b.inline_end_pt) < 1e-3f;
+                same = same && std::fabs((a.block_lo_pt - off_y) - b.block_lo_pt) < 1e-3f;
+                same = same && std::fabs((a.block_hi_pt - off_y) - b.block_hi_pt) < 1e-3f;
+                same = same && std::fabs((a.inline_origin_pt - off_x) - b.inline_origin_pt) < 1e-3f;
+                same = same && a.clip_text == b.clip_text && a.vertical == b.vertical;
+                same = same && a.clusters.size() == b.clusters.size();
+                for (size_t k = 0; same && k < a.clusters.size(); ++k) {
+                    same = same && a.clusters[k].cp == b.clusters[k].cp &&
+                           std::fabs(a.clusters[k].inline_pt - b.clusters[k].inline_pt) < 1e-3f &&
+                           a.clusters[k].placeholder == b.clusters[k].placeholder;
+                }
+                if (!same) ++bad_line;
+            }
+        }
+        expectTrue(bad_line == 0, "每一行的码点范围、行高、基线、簇位置都逐字段相同");
+
+        int bad_glyph = 0;
+        if (local.glyphs.size() == full.glyphs.size()) {
+            for (size_t i = 0; i < full.glyphs.size(); ++i) {
+                const PlacedGlyph& a = full.glyphs[i];
+                const PlacedGlyph& b = local.glyphs[i];
+                bool same = a.glyph_id == b.glyph_id && a.font == b.font && a.cluster == b.cluster;
+                same = same && a.line == b.line && a.paragraph == b.paragraph;
+                same = same && a.page == 0 && b.page == 0;
+                same = same && std::fabs((a.x_pt - off_x) - b.x_pt) < 1e-3f;
+                same = same && std::fabs((a.y_pt - off_y) - b.y_pt) < 1e-3f;
+                same = same && std::fabs(a.advance_pt - b.advance_pt) < 1e-4f;
+                same = same && a.color == b.color && a.size_pt == b.size_pt;
+                same = same && a.weight == b.weight && a.italic == b.italic;
+                same = same && a.underline == b.underline;
+                if (!same) ++bad_glyph;
+            }
+        }
+        expectTrue(bad_glyph == 0, "每一个字形的身份、坐标与字符属性都相同");
+
+        // 行槽高度之和：不含段前距与段后距。
+        if (!full.lines.empty()) {
+            const float last_top = full.lines.back().block_lo_pt - full.lines.back().lead_top_pt;
+            const float want_h = (last_top - off_y) + full.lines.back().advance_pt;
+            expectNear(local.height_pt, want_h, 1e-3,
+                       "height_pt 等于各行行槽高度之和（不含段后距）");
+        }
+
+        // 跨页的简单块：分页只改行盒的页内 y，不重新断行。整篇循环与 layoutBlock
+        //   共用 breakBlock，所以两边的断点与行高必须逐条相同。
+        PageMetrics small_page;
+        small_page.width_pt = 300.0f;
+        small_page.height_pt = 120.0f;
+        small_page.margins = PageMargins::all(10.0f);
+        const BlockSpec long_block = mkBlock(text + text + text);
+        const LayoutResult full_long = layoutDocument(lib, {long_block}, small_page);
+        const BlockLayout local_long =
+            layoutBlock(lib, long_block, mkConstraints(long_block, cw), &cache);
+        expectTrue(full_long.stats.page_count >= 2, "前提：这个块跨了页");
+        expectTrue(local_long.status == BlockLayoutStatus::Ok &&
+                       full_long.lines.size() == local_long.lines.size(),
+                   "跨页块的行数与 layoutBlock 相同");
+        int break_diff = 0;
+        if (full_long.lines.size() == local_long.lines.size()) {
+            for (size_t i = 0; i < full_long.lines.size(); ++i) {
+                const LineBox& a = full_long.lines[i];
+                const LineBox& b = local_long.lines[i];
+                bool same = a.first_cp == b.first_cp && a.last_cp == b.last_cp &&
+                            std::fabs(a.advance_pt - b.advance_pt) < 1e-4f &&
+                            std::fabs(a.lead_top_pt - b.lead_top_pt) < 1e-4f &&
+                            std::fabs(a.ascent_pt - b.ascent_pt) < 1e-4f &&
+                            std::fabs(a.descent_pt - b.descent_pt) < 1e-4f &&
+                            a.clusters.size() == b.clusters.size();
+                for (size_t k = 0; same && k < a.clusters.size(); ++k) {
+                    same = a.clusters[k].cp == b.clusters[k].cp &&
+                           std::fabs(a.clusters[k].inline_pt - b.clusters[k].inline_pt) < 1e-3f;
+                }
+                if (!same) ++break_diff;
+            }
+        }
+        expectTrue(break_diff == 0, "跨页之后每一行的断点与 layoutBlock 相同");
+        int page_tops = 0;
+        int pages = 0;
+        for (size_t i = 0; i < full_long.lines.size(); ++i) {
+            if (i > 0 && full_long.lines[i].page == full_long.lines[i - 1].page) continue;
+            ++pages;
+            if (std::fabs(full_long.lines[i].slotLoPt() - small_page.margins.top) > 1e-4f) {
+                ++page_tops;
+            }
+        }
+        expectTrue(pages >= 2 && page_tops == 0, "每页的第一行都从内容区上沿起排");
+
+        // 长简单块跨多页：块局部断行给出全部行片段，分页只按页高落位。
+        //   页首行必须从内容区上沿起；行片段逐条首尾相接（换页不重排、不漏行）；
+        //   页高只改页数，不改断行。
+        {
+            const BlockSpec long_block6 = mkBlock(text + text + text + text + text + text);
+            const LayoutResult full6 = layoutDocument(lib, {long_block6}, small_page);
+            const BlockLayout local6 =
+                layoutBlock(lib, long_block6, mkConstraints(long_block6, cw), &cache);
+            expectTrue(full6.stats.page_count >= 3, "前提：长简单块跨了至少三页");
+            expectTrue(local6.status == BlockLayoutStatus::Ok &&
+                           local6.fragments.size() == full6.lines.size(),
+                       "跨多页的断行片段数与整篇行数相同");
+
+            int metric_diff = 0;
+            int page_start_diff = 0;
+            int page_jump_diff = 0;
+            int cont_diff = 0;
+            int pages_seen = 0;
+            int prev_page = -1;
+            for (size_t i = 0; i < full6.lines.size() && i < local6.fragments.size(); ++i) {
+                const LineBox& lb = full6.lines[i];
+                const BrokenLine& f = local6.fragments[i];
+                const bool same_metric = std::fabs(lb.advance_pt - f.line_h) < 1e-4f &&
+                                         std::fabs(lb.ascent_pt - f.ascent) < 1e-4f &&
+                                         std::fabs(lb.descent_pt - f.descent) < 1e-4f &&
+                                         std::fabs(lb.lead_top_pt - f.lead) < 1e-4f &&
+                                         lb.clip_text == f.clip;
+                if (!same_metric) ++metric_diff;
+                if (lb.page == prev_page) continue;
+                ++pages_seen;
+                if (std::fabs(lb.slotLoPt() - small_page.margins.top) > 1e-3f) ++page_start_diff;
+                if (prev_page >= 0 && lb.page != prev_page + 1) ++page_jump_diff;
+                if (i > 0 && lb.first_cp != full6.lines[i - 1].last_cp) ++cont_diff;
+                prev_page = lb.page;
+            }
+            expectTrue(metric_diff == 0, "每一页的行度量都与块局部断行片段逐条相同");
+            expectTrue(pages_seen >= 3 && page_start_diff == 0, "每一页的第一行都从内容区上沿起排");
+            expectTrue(page_jump_diff == 0, "单块分页的页号连续，不跳页");
+            expectTrue(cont_diff == 0, "换页处上一行结束偏移就是下一行起始偏移");
+
+            int chain_diff = 0;
+            size_t expect_begin = 0;
+            for (const BrokenLine& f : local6.fragments) {
+                if (f.begin != expect_begin || f.end <= f.begin) ++chain_diff;
+                expect_begin = f.end;
+            }
+            expectTrue(chain_diff == 0, "断行片段首尾相接，没有漏排或重排");
+            if (!full6.para_index.empty()) {
+                expectTrue(expect_begin == static_cast<size_t>(full6.para_index[0].cluster_count),
+                           "断行片段铺满整段的簇（空白段没有丢行）");
+            }
+
+            // 页高只影响页内落位：同一个块换一张更高的页，行数与断点必须分毫不动。
+            PageMetrics tall_page = small_page;
+            tall_page.height_pt = 600.0f;
+            const LayoutResult tall = layoutDocument(lib, {long_block6}, tall_page);
+            expectTrue(tall.lines.size() == full6.lines.size(), "换页高之后行数不变");
+            expectTrue(tall.stats.page_count < full6.stats.page_count,
+                       "页高变大页数变少（证明分页真的按页高走）");
+            int break_diff_tall = 0;
+            if (tall.lines.size() == full6.lines.size()) {
+                for (size_t i = 0; i < tall.lines.size(); ++i) {
+                    const LineBox& a = tall.lines[i];
+                    const LineBox& b = full6.lines[i];
+                    const bool same = a.first_cp == b.first_cp && a.last_cp == b.last_cp &&
+                                      std::fabs(a.advance_pt - b.advance_pt) < 1e-4f &&
+                                      std::fabs(a.lead_top_pt - b.lead_top_pt) < 1e-4f;
+                    if (!same) ++break_diff_tall;
+                }
+            }
+            expectTrue(break_diff_tall == 0, "换页高只改页号与纵坐标，不改断点与行度量");
+        }
+
+        // 反向一半：宽度减半，行数必须变多 —— 约束真的进了断行。
+        const BlockConstraints narrow = mkConstraints(block, cw * 0.5f);
+        const BlockLayout narrow_local = layoutBlock(lib, block, narrow, &cache);
+        expectTrue(narrow_local.status == BlockLayoutStatus::Ok &&
+                       narrow_local.lines.size() > local.lines.size(),
+                   "宽度减半之后行数变多（约束没有被忽略）");
+
+        // 括号占位走同一条路径：行内几何仍然一致。
+        BlockSpec with_controls = mkBlock("甲字段乙");
+        {
+            InlineObject open;
+            open.cp = 0;
+            open.kind = InlineObjectKind::ControlStart;
+            open.owner = 3;
+            with_controls.objects.push_back(open);
+            InlineObject close;
+            close.cp = 4;
+            close.kind = InlineObjectKind::ControlEnd;
+            close.owner = 3;
+            with_controls.objects.push_back(close);
+        }
+        const LayoutResult full_ctl = layoutDocument(lib, {with_controls}, page);
+        const BlockLayout local_ctl =
+            layoutBlock(lib, with_controls, mkConstraints(with_controls, cw), &cache);
+        expectTrue(local_ctl.status == BlockLayoutStatus::Ok &&
+                       local_ctl.lines.size() == full_ctl.lines.size(),
+                   "带控件边界的块：行数相同");
+        if (!local_ctl.lines.empty() && !full_ctl.lines.empty()) {
+            expectNear(local_ctl.lines[0].inline_end_pt, full_ctl.lines[0].inline_end_pt, 1e-3,
+                       "括号占位计入行末位置，两份结果一致");
+            expectTrue(local_ctl.lines[0].clusters.size() == full_ctl.lines[0].clusters.size(),
+                       "簇数相同（括号占位没有被少插或多插）");
+            expectTrue(local_ctl.glyphs.size() == full_ctl.glyphs.size(),
+                       "字形数相同（占位簇不产生字形）");
+        }
+
+        // 行内原子（图片 / 公式）不是浮动图：块局部也要给出同样的行内几何与行高。
+        BlockSpec with_atom = mkBlock("汉字汉字");
+        {
+            InlineObject img;
+            img.cp = 2;
+            img.kind = InlineObjectKind::Atom;
+            img.atom = InlineAtom::Image;
+            img.w_pt = 30.0f;
+            img.h_pt = 24.0f;
+            with_atom.objects.push_back(img);
+        }
+        const LayoutResult full_atom = layoutDocument(lib, {with_atom}, page);
+        const BlockLayout local_atom =
+            layoutBlock(lib, with_atom, mkConstraints(with_atom, cw), &cache);
+        expectTrue(local_atom.status == BlockLayoutStatus::Ok &&
+                       local_atom.lines.size() == full_atom.lines.size(),
+                   "带行内原子的块：行数相同");
+        if (!local_atom.lines.empty() && !full_atom.lines.empty()) {
+            expectNear(local_atom.lines[0].inline_end_pt, full_atom.lines[0].inline_end_pt, 1e-3,
+                       "原子宽度计入行末位置，两份结果一致");
+            expectNear(local_atom.lines[0].block_hi_pt - local_atom.lines[0].block_lo_pt,
+                       full_atom.lines[0].block_hi_pt - full_atom.lines[0].block_lo_pt, 1e-3,
+                       "原子盒高撑起行盒，两份结果一致");
+            expectTrue(local_atom.glyphs.size() == full_atom.glyphs.size(),
+                       "原子不产生字形，字形数相同");
+        }
+
+        // 空段：块局部也要给出一个行盒，几何与整篇一致。
+        const BlockSpec empty = mkBlock("");
+        const LayoutResult full_empty = layoutDocument(lib, {empty}, page);
+        const BlockLayout local_empty = layoutBlock(lib, empty, mkConstraints(empty, cw), &cache);
+        expectTrue(local_empty.status == BlockLayoutStatus::Ok && local_empty.lines.size() == 1 &&
+                       local_empty.glyphs.empty(),
+                   "空段排出一个行盒、没有字形");
+        expectTrue(local_empty.fragments.empty(), "空段没有断行片段（那一行不是断行产物）");
+        if (local_empty.lines.size() == 1 && full_empty.lines.size() == 1) {
+            expectNear(local_empty.lines[0].advance_pt, full_empty.lines[0].advance_pt, 1e-4,
+                       "空段行高与整篇一致");
+            expectNear(local_empty.height_pt, full_empty.lines[0].advance_pt, 1e-4,
+                       "空段高度就是那一行的高度");
+        }
+
+        // 缓存：同内容第二次调用命中按内容指纹那一路，结果不变。
+        const long long hits_before = cache.hits();
+        const BlockLayout again = layoutBlock(lib, block, constraints, &cache);
+        expectTrue(cache.hits() == hits_before + 1, "同内容第二次调用命中缓存");
+        expectTrue(
+            again.status == BlockLayoutStatus::Ok && again.lines.size() == local.lines.size(),
+            "命中缓存后行数不变");
+        if (!again.lines.empty() && !local.lines.empty()) {
+            expectNear(again.height_pt, local.height_pt, 1e-6, "命中缓存后几何不变");
+        }
+
+        // 不支持的情形必须给出明确状态，而不是一份看起来正常的空结果。
+        {
+            BlockSpec vert = mkBlock("竖排");
+            vert.wm = WritingMode::VerticalRL();
+            BlockConstraints vc = mkConstraints(vert, cw);
+            vc.column.left_pt = page.margins.left;
+            vc.column.bottom_pt = page.margins.top + page.contentHeightPt();
+            vc.column.first_top_pt = page.margins.top;
+            vc.column.band_top_pt = page.margins.top;
+            const BlockLayout r = layoutBlock(lib, vert, vc, nullptr);
+            expectTrue(r.status == BlockLayoutStatus::Ok && r.columns.size() == 1 &&
+                           r.lines.size() == 1 && r.lines[0].vertical,
+                       "竖排块：一条带排出一列（块局部也支持竖排）");
+        }
+        {
+            BlockSpec empty_vert = mkBlock("");
+            empty_vert.wm = WritingMode::VerticalRL();
+            BlockConstraints vc = mkConstraints(empty_vert, cw);
+            vc.column.bottom_pt = page.margins.top + page.contentHeightPt();
+            vc.column.first_top_pt = page.margins.top;
+            vc.column.band_top_pt = page.margins.top;
+            const BlockLayout r = layoutBlock(lib, empty_vert, vc, nullptr);
+            expectTrue(r.status == BlockLayoutStatus::Ok && r.columns.size() == 1 &&
+                           r.lines.size() == 1 && r.lines[0].vertical,
+                       "空竖排段：块局部排出一条空列（与整篇共用 placeVerticalColumn）");
+        }
+        {
+            BlockSpec cell = mkBlock("格内文本按格宽断行宽度收窄之后行数变多");
+            cell.cell_path.push_back(CellSlot{7, 0, 0});
+            const BlockLayout wide = layoutBlock(lib, cell, mkConstraints(cell, cw), nullptr);
+            const BlockLayout narrow =
+                layoutBlock(lib, cell, mkConstraints(cell, cw * 0.4f), nullptr);
+            expectTrue(wide.status == BlockLayoutStatus::Ok && wide.lines.size() == 1 &&
+                           wide.fragments.size() == 1,
+                       "横排格内块：块局部按约束里的格宽排版");
+            expectTrue(
+                narrow.status == BlockLayoutStatus::Ok && narrow.lines.size() > wide.lines.size(),
+                "横排格内块：格宽收窄之后行数变多（约束真的进了断行）");
+        }
+        {
+            BlockSpec cell = mkBlock("格内竖排");
+            cell.wm = WritingMode::VerticalRL();
+            cell.cell_path.push_back(CellSlot{7, 0, 0});
+            BlockConstraints vc = mkConstraints(cell, cw);
+            vc.column.left_pt = page.margins.left;
+            vc.column.bottom_pt = page.margins.top + page.contentHeightPt();
+            vc.column.first_top_pt = page.margins.top;
+            vc.column.band_top_pt = page.margins.top;
+            const BlockLayout r = layoutBlock(lib, cell, vc, nullptr);
+            expectTrue(r.status == BlockLayoutStatus::Ok && !r.columns.empty(),
+                       "竖排格内块按传入的版心竖带排成列");
+        }
+        {
+            BlockSpec floating = mkBlock("浮动图");
+            InlineObject img;
+            img.cp = 0;
+            img.kind = InlineObjectKind::Atom;
+            img.atom = InlineAtom::Image;
+            img.w_pt = 20.0f;
+            img.h_pt = 20.0f;
+            img.floating = true;
+            floating.objects.push_back(img);
+            const BlockLayout r = layoutBlock(lib, floating, mkConstraints(floating, cw), nullptr);
+            expectTrue(r.status == BlockLayoutStatus::UnsupportedFloat && r.lines.empty(),
+                       "含浮动图的块明确报告不支持");
+        }
+        {
+            BlockConstraints bad = mkConstraints(block, 0.0f);
+            const BlockLayout r = layoutBlock(lib, block, bad, nullptr);
+            expectTrue(r.status == BlockLayoutStatus::InvalidConstraints && r.lines.empty(),
+                       "宽度不为正时明确报告约束无效");
+        }
+    }
+
+    std::printf("\n[11] 简单块分页：页号与行槽顶只由行片段与页度量给出\n");
+    {
+        // 分页只读行高；begin/end 只为让片段看起来完整。
+        auto mkLines = [](const std::vector<float>& heights) {
+            std::vector<BrokenLine> lines;
+            size_t begin = 0;
+            for (float h : heights) {
+                BrokenLine b;
+                b.begin = begin;
+                b.end = begin + 1;
+                b.line_h = h;
+                lines.push_back(b);
+                ++begin;
+            }
+            return lines;
+        };
+        BlockPaginationInput in;
+        in.content_top_pt = 10.0f;
+        in.content_bottom_pt = 110.0f;  // 版心高 100
+        in.page_index = 0;
+        in.cursor_y_pt = 10.0f;
+
+        // 页内逐行推进，越过版心下沿才翻页，页首行回到版心上沿。
+        {
+            const BlockPaginationResult r =
+                paginateBlockLines(mkLines({30.0f, 30.0f, 30.0f, 30.0f}), in);
+            const int want_pages[] = {0, 0, 0, 1};
+            const float want_tops[] = {10.0f, 40.0f, 70.0f, 10.0f};
+            bool same = r.lines.size() == 4;
+            for (size_t i = 0; same && i < r.lines.size(); ++i) {
+                same = r.lines[i].page == want_pages[i] &&
+                       std::fabs(r.lines[i].top_pt - want_tops[i]) < 1e-6f;
+            }
+            expectTrue(same, "页底溢出的那一行翻页，并从版心上沿起排");
+            expectTrue(r.page_index == 1 && std::fabs(r.cursor_y_pt - 40.0f) < 1e-6f,
+                       "结束页号与结束游标（末行行顶 40 + 行高 30）");
+            expectTrue(r.page_index + 1 == 2, "四行 30 磅的片段恰好占两页");
+        }
+        // 段前分页：块首不在版心顶时翻页；已经在版心顶时不空翻。
+        {
+            BlockPaginationInput mid = in;
+            mid.cursor_y_pt = 60.0f;
+            mid.page_break_before = true;
+            const std::vector<BrokenLine> frags = mkLines({20.0f});
+            const BlockPaginationResult r = paginateBlockLines(frags, mid);
+            expectTrue(r.lines.size() == 1 && r.lines[0].page == 1 &&
+                           std::fabs(r.lines[0].top_pt - 10.0f) < 1e-6f,
+                       "段前分页：块首在页中时翻到下一页的版心上沿");
+            mid.page_index = 4;
+            mid.cursor_y_pt = 10.0f;
+            const BlockPaginationResult at_top = paginateBlockLines(frags, mid);
+            expectTrue(at_top.lines.size() == 1 && at_top.lines[0].page == 4 &&
+                           std::fabs(at_top.lines[0].top_pt - 10.0f) < 1e-6f,
+                       "段前分页：块首已经在版心顶时不空翻一页");
+        }
+        // 段前距：文档首段与页中照加，页顶那一段不加。
+        {
+            BlockPaginationInput sp = in;
+            sp.space_before_pt = 25.0f;
+            const std::vector<BrokenLine> frags = mkLines({20.0f});
+            const BlockPaginationResult r = paginateBlockLines(frags, sp);
+            expectTrue(r.lines.size() == 1 && std::fabs(r.lines[0].top_pt - 35.0f) < 1e-6f,
+                       "段前距：第一页的段首让出段前距");
+            sp.page_index = 2;
+            const BlockPaginationResult top_page = paginateBlockLines(frags, sp);
+            expectTrue(
+                top_page.lines.size() == 1 && std::fabs(top_page.lines[0].top_pt - 10.0f) < 1e-6f,
+                "段前距：页顶那一段不加（页首空白属于页边距）");
+            sp.page_index = 0;
+            sp.cursor_y_pt = 60.0f;
+            sp.page_break_before = true;
+            const BlockPaginationResult after_break = paginateBlockLines(frags, sp);
+            expectTrue(after_break.lines.size() == 1 && after_break.lines[0].page == 1 &&
+                           std::fabs(after_break.lines[0].top_pt - 10.0f) < 1e-6f,
+                       "段前分页之后落在页顶，段前距不再叠加");
+        }
+        // 段后距只进结束游标，不改行位。
+        {
+            BlockPaginationInput sp = in;
+            sp.space_before_pt = 5.0f;
+            sp.space_after_pt = 7.0f;
+            const BlockPaginationResult r = paginateBlockLines(mkLines({20.0f}), sp);
+            expectTrue(r.lines.size() == 1 && std::fabs(r.lines[0].top_pt - 15.0f) < 1e-6f,
+                       "段后距不改最后一行的行槽顶");
+            expectTrue(std::fabs(r.cursor_y_pt - 42.0f) < 1e-6f,
+                       "结束游标 = 行槽顶 15 + 行高 20 + 段后距 7");
+        }
+        // 连页：不在页底断开，页号是行槽顶所在的条带。
+        {
+            BlockPaginationInput cont = in;
+            cont.continuous = true;
+            cont.slab_pt = 100.0f;
+            const BlockPaginationResult r =
+                paginateBlockLines(mkLines({30.0f, 30.0f, 30.0f, 30.0f}), cont);
+            const int want_pages[] = {0, 0, 0, 1};
+            const float want_tops[] = {10.0f, 40.0f, 70.0f, 100.0f};
+            bool same = r.lines.size() == 4;
+            for (size_t i = 0; same && i < r.lines.size(); ++i) {
+                same = r.lines[i].page == want_pages[i] &&
+                       std::fabs(r.lines[i].top_pt - want_tops[i]) < 1e-6f;
+            }
+            expectTrue(same, "连页：行顶一路累加，越过条带边界只换页号不回页顶");
+            expectTrue(std::fabs(r.cursor_y_pt - 130.0f) < 1e-6f,
+                       "连页结束游标是绝对 y（100 + 30）");
+            const BlockPaginationResult r2 =
+                paginateBlockLines(mkLines({95.0f, 95.0f, 95.0f}), cont);
+            const int want_p2[] = {0, 1, 2};
+            const float want_t2[] = {10.0f, 105.0f, 200.0f};
+            bool same2 = r2.lines.size() == 3;
+            for (size_t i = 0; same2 && i < r2.lines.size(); ++i) {
+                same2 = r2.lines[i].page == want_p2[i] &&
+                        std::fabs(r2.lines[i].top_pt - want_t2[i]) < 1e-6f;
+            }
+            expectTrue(same2 && r2.page_index == 0, "连页：条带号由行槽顶现算，结束页号原样回传");
+        }
+        // 没有片段时不落行，游标只走段前距与段后距。
+        {
+            BlockPaginationInput sp = in;
+            sp.page_index = 2;
+            sp.cursor_y_pt = 50.0f;
+            sp.space_before_pt = 7.0f;
+            sp.space_after_pt = 3.0f;
+            const BlockPaginationResult r = paginateBlockLines({}, sp);
+            expectTrue(
+                r.lines.empty() && r.page_index == 2 && std::fabs(r.cursor_y_pt - 60.0f) < 1e-6f,
+                "没有片段时不落行，游标只累计段前距与段后距");
+        }
+        // 比整页还高的一行：两次判据都不通过，页号连进两格，与整篇循环同一口径。
+        {
+            const BlockPaginationResult r = paginateBlockLines(mkLines({150.0f}), in);
+            expectTrue(r.lines.size() == 1 && r.lines[0].page == 2 &&
+                           std::fabs(r.lines[0].top_pt - 10.0f) < 1e-6f,
+                       "比整页还高的一行连翻两页，仍从版心上沿起排");
+        }
+
+        // 与整篇排版对拍：同一个长块，逐行页号与行槽顶必须相同。
+        PageMetrics small_page;
+        small_page.width_pt = 300.0f;
+        small_page.height_pt = 120.0f;
+        small_page.margins = PageMargins::all(10.0f);
+        BlockSpec long_block;
+        long_block.font_index = cjk;
+        long_block.size_pt = kSize;
+        long_block.line_spacing.factor = 1.6f;
+        long_block.space_after_pt = 0.0f;
+        long_block.language = "zh";
+        std::string long_text;
+        for (int i = 0; i < 3; ++i) {
+            long_text +=
+                "患者诉晨起后心悸明显，持续约十分钟，休息后缓解。查体：心率 eighty-eight 次每分。";
+        }
+        long_block.setText(long_text);
+        BlockConstraints lc;
+        lc.width_pt = small_page.contentWidthPt();
+        lc.writing_mode = long_block.wm;
+        ShapingCache cache;
+        const BlockLayout local = layoutBlock(lib, long_block, lc, &cache);
+        const LayoutResult full = layoutDocument(lib, {long_block}, small_page);
+        BlockPaginationInput pin;
+        pin.content_top_pt = small_page.margins.top;
+        pin.content_bottom_pt = small_page.margins.top + small_page.contentHeightPt();
+        pin.page_index = 0;
+        pin.cursor_y_pt = small_page.margins.top;
+        pin.continuous = small_page.continuous;
+        pin.slab_pt = small_page.slabHeightPt();
+        pin.space_before_pt = long_block.space_before_pt;
+        pin.space_after_pt = long_block.space_after_pt;
+        const BlockPaginationResult plan = paginateBlockLines(local.fragments, pin);
+        expectTrue(local.status == BlockLayoutStatus::Ok &&
+                       plan.lines.size() == full.lines.size() && full.stats.page_count >= 2,
+                   "对拍前提：分页结果与整篇行数相同，且真的跨了页");
+        int page_diff = 0;
+        int top_diff = 0;
+        for (size_t i = 0; i < plan.lines.size() && i < full.lines.size(); ++i) {
+            const LineBox& lb = full.lines[i];
+            if (plan.lines[i].page != lb.page) ++page_diff;
+            if (std::fabs(plan.lines[i].top_pt - lb.slotLoPt()) > 1e-3f) ++top_diff;
+        }
+        expectTrue(page_diff == 0, "逐行页号与整篇排版一致");
+        expectTrue(top_diff == 0, "逐行行槽顶与整篇排版一致");
+        expectTrue(plan.page_index + 1 == full.stats.page_count, "结束页号给出精确页数");
+        if (!full.lines.empty()) {
+            const float want_end = full.lines.back().slotLoPt() + full.lines.back().advance_pt +
+                                   long_block.space_after_pt;
+            expectNear(plan.cursor_y_pt, want_end, 1e-3, "结束游标与整篇的块尾位置一致");
+        }
+    }
+
+    std::printf("\n[12] 简单竖排块：列分页与断列\n");
+    {
+        PageMetrics page;
+        page.width_pt = 300.0f;
+        page.height_pt = 300.0f;
+        page.margins = PageMargins::all(10.0f);
+        const float cw = page.contentWidthPt();
+        const float cy = page.margins.top;
+        const float bottom = cy + page.contentHeightPt();
+
+        auto mkVertical = [&](const std::string& text) {
+            BlockSpec b;
+            b.font_index = cjk;
+            b.size_pt = 16.0f;
+            b.line_spacing.factor = 1.8f;
+            b.space_after_pt = 0.0f;
+            b.language = "zh";
+            b.wm = WritingMode::VerticalRL();
+            b.setText(text);
+            return b;
+        };
+        auto mkLead = [&]() {
+            BlockSpec b;
+            b.font_index = cjk;
+            b.size_pt = 14.0f;
+            b.line_spacing.factor = 1.0f;
+            b.space_after_pt = 0.0f;
+            b.language = "zh";
+            b.wm = WritingMode::HorizontalTB();
+            b.setText("甲乙");
+            return b;
+        };
+        auto mkConstraints = [&](const BlockSpec& b, float first_top) {
+            BlockConstraints c;
+            c.width_pt = cw;
+            c.writing_mode = b.wm;
+            c.column.left_pt = page.margins.left;
+            c.column.bottom_pt = bottom;
+            c.column.first_top_pt = first_top;
+            c.column.band_top_pt = cy;
+            return c;
+        };
+        // 竖排约束的两种模式：分页的后续带都从版心上沿起排；连页的带顶是绝对坐标，
+        //   逐带下移版心高。slab 取 320，与版心高 280 不同，页号与带号不会重合。
+        const float cont_slab = 320.0f;
+        auto mkVertBand = [&](const BlockSpec& b, float first_top, float bottom_pt,
+                              float band_top) {
+            BlockConstraints c;
+            c.width_pt = cw;
+            c.writing_mode = b.wm;
+            c.column.left_pt = page.margins.left;
+            c.column.bottom_pt = bottom_pt;
+            c.column.first_top_pt = first_top;
+            c.column.band_top_pt = band_top;
+            return c;
+        };
+        auto mkContBand = [&](const BlockSpec& b, float first_top, float bottom_pt) {
+            BlockConstraints c =
+                mkVertBand(b, first_top, bottom_pt, first_top + page.contentHeightPt());
+            c.column.band_step_pt = page.contentHeightPt();
+            c.column.continuous = true;
+            c.column.slab_pt = cont_slab;
+            return c;
+        };
+        auto mkEmptyVertical = [&](WritingMode wm, int font, float size) {
+            BlockSpec b;
+            b.font_index = font;
+            b.size_pt = size;
+            b.line_spacing.factor = 1.8f;
+            b.space_after_pt = 0.0f;
+            b.language = "zh";
+            b.wm = wm;
+            b.setText("");
+            return b;
+        };
+
+        std::string text;
+        for (int i = 0; i < 30; ++i) text += "患者诉晨起后心悸，持续约十分钟。";
+        const BlockSpec block = mkVertical(text);
+        const LayoutResult full = layoutDocument(lib, {block}, page);
+        ShapingCache cache;
+        const BlockLayout local = layoutBlock(lib, block, mkConstraints(block, cy), &cache);
+
+        expectTrue(local.status == BlockLayoutStatus::Ok && local.columns.size() >= 4 &&
+                       local.columns.size() == full.lines.size() && full.stats.page_count >= 2,
+                   "多列竖排块：块局部的列数与整篇相同（" + std::to_string(local.columns.size()) +
+                       " 列 / " + std::to_string(full.stats.page_count) + " 页）");
+        // 断列：列首尾相接，换带时列号归零、带号逐条递增。
+        int chain_diff = 0;
+        int band_diff = 0;
+        size_t expect_begin = 0;
+        int band_cursor = -1;
+        int col_cursor = -1;
+        for (const BlockColumn& c : local.columns) {
+            if (c.line.begin != expect_begin || c.line.end <= c.line.begin) ++chain_diff;
+            expect_begin = c.line.end;
+            if (c.band == band_cursor) {
+                if (c.column != col_cursor + 1) ++band_diff;
+            } else if (c.band == band_cursor + 1) {
+                if (c.column != 0) ++band_diff;
+            } else {
+                ++band_diff;
+            }
+            band_cursor = c.band;
+            col_cursor = c.column;
+        }
+        expectTrue(chain_diff == 0, "列首尾相接，没有漏排或重排");
+        expectTrue(band_diff == 0, "换带时列号归零、带号逐条递增");
+        if (!full.para_index.empty()) {
+            expectTrue(expect_begin == static_cast<size_t>(full.para_index[0].cluster_count),
+                       "列铺满整段的簇");
+        }
+
+        // 块局部列盒与整篇列盒逐字段对拍：页号（带号）、码点范围、列位、簇位置。
+        int line_diff = 0;
+        for (size_t i = 0; i < full.lines.size() && i < local.lines.size(); ++i) {
+            const LineBox& a = full.lines[i];
+            const LineBox& b = local.lines[i];
+            bool same = a.vertical == b.vertical && a.sideways == b.sideways && a.page == b.page &&
+                        a.first_cp == b.first_cp && a.last_cp == b.last_cp &&
+                        a.size_pt == b.size_pt && a.clusters.size() == b.clusters.size() &&
+                        std::fabs(a.block_lo_pt - b.block_lo_pt) < 1e-4f &&
+                        std::fabs(a.block_hi_pt - b.block_hi_pt) < 1e-4f &&
+                        std::fabs(a.inline_origin_pt - b.inline_origin_pt) < 1e-4f &&
+                        std::fabs(a.inline_end_pt - b.inline_end_pt) < 1e-3f &&
+                        std::fabs(a.bracket_axis_pt - b.bracket_axis_pt) < 1e-4f;
+            for (size_t k = 0; same && k < a.clusters.size(); ++k) {
+                same = a.clusters[k].cp == b.clusters[k].cp &&
+                       std::fabs(a.clusters[k].inline_pt - b.clusters[k].inline_pt) < 1e-3f;
+            }
+            if (!same) ++line_diff;
+        }
+        expectTrue(line_diff == 0, "每一列的码点范围、页号、列位与整篇逐字段相同");
+
+        int glyph_diff = 0;
+        for (size_t i = 0; i < full.glyphs.size() && i < local.glyphs.size(); ++i) {
+            const PlacedGlyph& a = full.glyphs[i];
+            const PlacedGlyph& b = local.glyphs[i];
+            const bool same = a.glyph_id == b.glyph_id && a.page == b.page &&
+                              a.vertical == b.vertical && a.rotate_deg == b.rotate_deg &&
+                              a.cluster == b.cluster && std::fabs(a.x_pt - b.x_pt) < 1e-4f &&
+                              std::fabs(a.y_pt - b.y_pt) < 1e-4f;
+            if (!same) ++glyph_diff;
+        }
+        expectTrue(glyph_diff == 0, "每一枚字形的身份、坐标与页号都相同");
+
+        int band_start_diff = 0;
+        int prev_page = -1;
+        for (const LineBox& lb : full.lines) {
+            if (lb.page == prev_page) continue;
+            if (std::fabs(lb.inline_origin_pt - cy) > 1e-4f) ++band_start_diff;
+            prev_page = lb.page;
+        }
+        expectTrue(band_start_diff == 0, "每条带的第一列都从版心上沿起排");
+        expectTrue(local.columns.back().band == full.stats.page_count - 1, "带号与页号一一对应");
+
+        // 分页纯函数：页号随带号递增，行号在带内重新计数，块尾游标吃掉本页剩余高度。
+        BlockColumnPaginationInput pin;
+        pin.page_index = 0;
+        pin.line_total = 0;
+        pin.content_bottom_pt = bottom;
+        pin.space_after_pt = 0.0f;
+        pin.started_new_band = local.started_new_band;
+        const BlockColumnPaginationResult plan = paginateBlockColumns(local.columns, pin);
+        int plan_diff = 0;
+        for (size_t i = 0; i < plan.columns.size(); ++i) {
+            if (plan.columns[i].page != local.columns[i].band ||
+                plan.columns[i].line != local.columns[i].column ||
+                plan.columns[i].top_pt != local.columns[i].top_pt ||
+                plan.columns[i].center_pt != local.columns[i].center_pt ||
+                plan.columns[i].width_pt != local.columns[i].width_pt) {
+                ++plan_diff;
+            }
+        }
+        expectTrue(!local.started_new_band && plan_diff == 0,
+                   "分页：页号等于带号，行号在带内重新计数");
+        expectTrue(plan.page_index == local.columns.back().band, "结束页号是最后一条带的页号");
+        expectTrue(plan.line_total == local.columns.back().column + 1,
+                   "结束行号只按最后一条带的列数推进（与旧循环同一本账）");
+        expectNear(plan.cursor_y_pt, bottom, 1e-4, "块尾游标是版心下沿");
+
+        // 页中起排：块首那条带更矮，第一列断得比整带起排时更早；后续带仍是满高。
+        const BlockSpec lead = mkLead();
+        const LayoutResult lead_full = layoutDocument(lib, {lead}, page);
+        const float first_top = lead_full.lines[0].slotLoPt() + lead_full.lines[0].advance_pt;
+        const LayoutResult mid_full = layoutDocument(lib, {lead, block}, page);
+        const BlockLayout mid_local =
+            layoutBlock(lib, block, mkConstraints(block, first_top), &cache);
+        const BlockLayout top_local = layoutBlock(lib, block, mkConstraints(block, cy), &cache);
+        expectTrue(mid_local.status == BlockLayoutStatus::Ok && !mid_local.started_new_band &&
+                       mid_local.columns.size() == mid_full.lines.size() - 1,
+                   "页中起排：第一条带仍留在本页，列数与整篇相同");
+        expectTrue(mid_local.columns.size() >= 2 &&
+                       mid_local.columns[0].line.end < top_local.columns[0].line.end,
+                   "页中起排的第一带更矮，第一列断得更早（断列真的按列顶算）");
+        if (!mid_local.columns.empty()) {
+            expectNear(mid_local.columns[0].top_pt, first_top, 1e-4, "首列列顶就是块首列顶");
+        }
+        int later_top_diff = 0;
+        for (const BlockColumn& c : mid_local.columns) {
+            if (c.band == 0) continue;
+            if (std::fabs(c.top_pt - cy) > 1e-4f) ++later_top_diff;
+        }
+        expectTrue(later_top_diff == 0, "第二条带起各列都从版心上沿起排");
+
+        // 块首带放不下两条列位：块布局另起一条带，整篇在此翻页。
+        PageMetrics tiny = page;
+        tiny.height_pt = 80.0f;  // 版心高 60
+        const float tiny_bottom = tiny.margins.top + tiny.contentHeightPt();
+        const LayoutResult lead_tiny = layoutDocument(lib, {lead}, tiny);
+        const float tiny_first_top = lead_tiny.lines[0].slotLoPt() + lead_tiny.lines[0].advance_pt;
+        BlockConstraints fresh = mkConstraints(block, tiny_first_top);
+        fresh.column.bottom_pt = tiny_bottom;
+        const BlockLayout fresh_local = layoutBlock(lib, block, fresh, &cache);
+        expectTrue(fresh_local.status == BlockLayoutStatus::Ok && fresh_local.started_new_band &&
+                       !fresh_local.columns.empty() && fresh_local.columns[0].band == 0,
+                   "块首带放不下两条列位时另起一条带");
+        BlockColumnPaginationInput fresh_pin;
+        fresh_pin.page_index = 3;
+        fresh_pin.line_total = 5;
+        fresh_pin.content_bottom_pt = tiny_bottom;
+        fresh_pin.started_new_band = fresh_local.started_new_band;
+        const BlockColumnPaginationResult fresh_plan =
+            paginateBlockColumns(fresh_local.columns, fresh_pin);
+        expectTrue(!fresh_plan.columns.empty() && fresh_plan.columns[0].page == 4 &&
+                       std::fabs(fresh_plan.columns[0].top_pt - tiny.margins.top) < 1e-4f,
+                   "另起的那条带落在下一页，列顶是版心上沿");
+        const LayoutResult fresh_full = layoutDocument(lib, {lead, block}, tiny);
+        expectTrue(fresh_full.lines.size() >= 2 && fresh_full.lines[1].page == 1 &&
+                       std::fabs(fresh_full.lines[1].inline_origin_pt - tiny.margins.top) < 1e-4f,
+                   "整篇：竖排块因放不下两条列位从第 1 页起");
+
+        // 竖排块吃掉本页剩余高度：后面的横排块另起一页。
+        const BlockSpec lead_block = mkLead();
+        const LayoutResult with_tail = layoutDocument(lib, {block, lead_block}, page);
+        expectTrue(with_tail.lines.size() > full.lines.size() &&
+                       with_tail.lines[full.lines.size()].page == full.stats.page_count,
+                   "竖排块之后的横排块另起一页（竖排吃掉本页剩余高度）");
+
+        // 侧倒（蒙文）走同一条列路径：列序、列位与旋转都要一致。
+        BlockSpec sideways;
+        sideways.font_index = mn;
+        sideways.size_pt = 20.0f;
+        sideways.line_spacing.factor = 1.8f;
+        sideways.language = "mn";
+        sideways.wm = WritingMode::VerticalLR();
+        std::string mnText;
+        for (int i = 0; i < 12; ++i) {
+            mnText += "\xE1\xA0\xAE\xE1\xA0\xA3\xE1\xA0\xA9\xE1\xA0\xAD";
+        }
+        sideways.setText(mnText);
+        const LayoutResult mn_full = layoutDocument(lib, {sideways}, page);
+        const BlockLayout mn_local =
+            layoutBlock(lib, sideways, mkConstraints(sideways, cy), &cache);
+        int mn_diff = 0;
+        for (size_t i = 0; i < mn_full.lines.size() && i < mn_local.lines.size(); ++i) {
+            const LineBox& a = mn_full.lines[i];
+            const LineBox& b = mn_local.lines[i];
+            const bool same = a.sideways == b.sideways && a.page == b.page &&
+                              std::fabs(a.block_lo_pt - b.block_lo_pt) < 1e-4f &&
+                              std::fabs(a.block_hi_pt - b.block_hi_pt) < 1e-4f &&
+                              a.first_cp == b.first_cp && a.last_cp == b.last_cp;
+            if (!same) ++mn_diff;
+        }
+        expectTrue(mn_local.status == BlockLayoutStatus::Ok &&
+                       mn_local.columns.size() == mn_full.lines.size() && mn_diff == 0 &&
+                       !mn_local.lines.empty() && mn_local.lines[0].sideways,
+                   "侧倒块也走块局部列路径（列序与旋转不变）");
+
+        // 约束不成立时不猜几何。
+        BlockConstraints bad = mkConstraints(block, cy);
+        bad.column.bottom_pt = bad.column.band_top_pt;
+        const BlockLayout bad_local = layoutBlock(lib, block, bad, nullptr);
+        expectTrue(
+            bad_local.status == BlockLayoutStatus::InvalidConstraints && bad_local.columns.empty(),
+            "竖带下沿不高于带顶时明确报告约束无效");
+
+        // 空竖排段：块局部给出一条空列，整篇只重打全局页号与行号；列宽是空行行高，
+        //   列心与列盒沿用竖带那把尺子。
+        {
+            const BlockSpec empty_v = mkEmptyVertical(WritingMode::VerticalRL(), cjk, 16.0f);
+            const LayoutResult empty_full = layoutDocument(lib, {empty_v}, page);
+            const BlockLayout empty_local =
+                layoutBlock(lib, empty_v, mkVertBand(empty_v, cy, bottom, cy), &cache);
+            expectTrue(empty_full.lines.size() == 1 && empty_full.lines[0].vertical &&
+                           empty_full.lines[0].clusters.empty() && empty_full.glyphs.empty(),
+                       "空竖排段：整篇只有一个空列盒，没有字形");
+            expectTrue(empty_local.status == BlockLayoutStatus::Ok &&
+                           empty_local.columns.size() == 1 && empty_local.lines.size() == 1 &&
+                           empty_local.glyphs.empty(),
+                       "空竖排段：块局部排出一条空列");
+            expectTrue(empty_full.lines.size() == 1 && empty_local.lines.size() == 1 &&
+                           empty_local.columns.size() == 1,
+                       "空竖排段：块局部与整篇的列数相同");
+            if (empty_full.lines.size() == 1 && empty_local.lines.size() == 1 &&
+                empty_local.columns.size() == 1) {
+                const LineBox& got = empty_full.lines[0];
+                const LineBox& want = empty_local.lines[0];
+                const BlockColumn& col = empty_local.columns[0];
+                const bool same = got.vertical == want.vertical && got.sideways == want.sideways &&
+                                  got.size_pt == want.size_pt && got.first_cp == want.first_cp &&
+                                  got.last_cp == want.last_cp &&
+                                  std::fabs(got.block_lo_pt - want.block_lo_pt) < 1e-4f &&
+                                  std::fabs(got.block_hi_pt - want.block_hi_pt) < 1e-4f &&
+                                  std::fabs(got.inline_origin_pt - want.inline_origin_pt) < 1e-4f &&
+                                  std::fabs(got.inline_end_pt - want.inline_end_pt) < 1e-4f &&
+                                  std::fabs(got.bracket_axis_pt - want.bracket_axis_pt) < 1e-4f;
+                expectTrue(same, "空竖排段：列盒几何与块局部逐字段相同");
+                expectNear(got.block_hi_pt - got.block_lo_pt, col.width_pt, 1e-4,
+                           "空竖排段的列宽就是空行行高");
+                expectNear(got.block_lo_pt + col.width_pt * 0.5f,
+                           page.margins.left + cw - col.width_pt * 0.5f, 1e-4,
+                           "中日竖排空列从右边缘往左推半个列宽");
+                expectTrue(got.page == 0 && got.line == 0 && got.paragraph == 0,
+                           "空竖排段落在第 0 页第 0 行");
+                expectNear(got.inline_origin_pt, cy, 1e-4, "空竖排段的列顶就是版心上沿");
+            }
+            // 空竖排吃掉本页剩余高度：后续横排段另起一页。
+            const LayoutResult after = layoutDocument(lib, {empty_v, lead}, page);
+            expectTrue(after.lines.size() == 2 && after.lines[1].page == 1 &&
+                           std::fabs(after.lines[1].block_lo_pt - cy) < 1e-3f,
+                       "空竖排段吃掉本页剩余高度，后续横排段另起一页");
+            // 页中起排：列顶是前一段结束的位置，不翻页。
+            const LayoutResult mid = layoutDocument(lib, {lead, empty_v}, page);
+            expectTrue(mid.lines.size() == 2 && mid.lines[1].page == 0,
+                       "空竖排段可以接在页中的横排段之后");
+            if (mid.lines.size() == 2) {
+                expectNear(mid.lines[1].inline_origin_pt, mid.lines[0].block_hi_pt, 1e-4,
+                           "页中起排的空竖排段：列顶是前一段的结束位置");
+            }
+            // 段前分页与段前距：翻页之后落在版心顶，段前距不再叠加；页中起排照加。
+            BlockSpec break_v = empty_v;
+            break_v.page_break_before = true;
+            break_v.space_before_pt = 25.0f;
+            const LayoutResult broke = layoutDocument(lib, {lead, break_v}, page);
+            expectTrue(broke.lines.size() == 2 && broke.lines[1].page == 1 &&
+                           std::fabs(broke.lines[1].inline_origin_pt - cy) < 1e-4f,
+                       "空竖排段：段前分页生效，翻页之后段前距不再叠加");
+            BlockSpec spaced_v = empty_v;
+            spaced_v.space_before_pt = 25.0f;
+            const LayoutResult spaced = layoutDocument(lib, {lead, spaced_v}, page);
+            expectTrue(spaced.lines.size() == 2 && spaced.lines[1].page == 0,
+                       "空竖排段：段前距不改变页号");
+            if (spaced.lines.size() == 2) {
+                expectNear(spaced.lines[1].inline_origin_pt, spaced.lines[0].block_hi_pt + 25.0f,
+                           1e-4, "空竖排段：页中起排照样让出段前距");
+            }
+        }
+
+        // 空竖排段的占位：括号与提示文字进簇、原子撑高列盒、侧倒的笔位退回列心。
+        {
+            BlockSpec vctl = mkEmptyVertical(WritingMode::VerticalRL(), cjk, 16.0f);
+            {
+                InlineObject open;
+                open.cp = 0;
+                open.kind = InlineObjectKind::ControlStart;
+                open.owner = 3;
+                open.hint = "请输入";
+                vctl.objects.push_back(open);
+                InlineObject close;
+                close.cp = 0;
+                close.kind = InlineObjectKind::ControlEnd;
+                close.owner = 3;
+                vctl.objects.push_back(close);
+            }
+            const LayoutResult full_ctl = layoutDocument(lib, {vctl}, page);
+            const BlockLayout local_ctl =
+                layoutBlock(lib, vctl, mkVertBand(vctl, cy, bottom, cy), &cache);
+            expectTrue(local_ctl.status == BlockLayoutStatus::Ok && full_ctl.lines.size() == 1 &&
+                           local_ctl.lines.size() == 1 && local_ctl.lines[0].clusters.size() == 3,
+                       "空竖排段的括号与提示文字进簇（开括号 / 提示 / 闭括号）");
+            if (full_ctl.lines.size() == 1 && local_ctl.lines.size() == 1) {
+                const LineBox& got = full_ctl.lines[0];
+                const LineBox& want = local_ctl.lines[0];
+                bool same = got.clusters.size() == want.clusters.size() &&
+                            std::fabs(got.inline_end_pt - want.inline_end_pt) < 1e-4f &&
+                            std::fabs(got.bracket_axis_pt - want.bracket_axis_pt) < 1e-4f;
+                for (size_t k = 0; same && k < got.clusters.size(); ++k) {
+                    same =
+                        got.clusters[k].cp == want.clusters[k].cp &&
+                        got.clusters[k].placeholder == want.clusters[k].placeholder &&
+                        got.clusters[k].control_hint == want.clusters[k].control_hint &&
+                        got.clusters[k].bracket_side == want.clusters[k].bracket_side &&
+                        got.clusters[k].owner_control == want.clusters[k].owner_control &&
+                        std::fabs(got.clusters[k].inline_pt - want.clusters[k].inline_pt) < 1e-4f;
+                }
+                expectTrue(same, "空竖排段的占位簇与块局部逐字段相同");
+            }
+            // 侧倒的空列：没有字形时笔位退回列心（整篇的空列就是这一份几何）。
+            const BlockSpec vside = mkEmptyVertical(WritingMode::VerticalLR(), mn, 20.0f);
+            const LayoutResult full_side = layoutDocument(lib, {vside}, page);
+            expectTrue(full_side.lines.size() == 1 && full_side.lines[0].sideways,
+                       "侧倒空竖排段仍然记侧倒");
+            if (full_side.lines.size() == 1) {
+                const LineBox& lb = full_side.lines[0];
+                expectNear(lb.bracket_axis_pt,
+                           lb.block_lo_pt + (lb.block_hi_pt - lb.block_lo_pt) * 0.5f, 1e-4,
+                           "侧倒空列的笔位退回列心");
+            }
+            // 原子撑高列盒：空段里只有一枚图片时，列宽按盒高定，不是按空行字号。
+            BlockSpec vatom = mkEmptyVertical(WritingMode::VerticalRL(), cjk, 16.0f);
+            {
+                InlineObject img;
+                img.cp = 0;
+                img.kind = InlineObjectKind::Atom;
+                img.atom = InlineAtom::Image;
+                img.w_pt = 30.0f;
+                img.h_pt = 24.0f;
+                vatom.objects.push_back(img);
+            }
+            const LayoutResult full_atom = layoutDocument(lib, {vatom}, page);
+            const LayoutResult full_plain =
+                layoutDocument(lib, {mkEmptyVertical(WritingMode::VerticalRL(), cjk, 16.0f)}, page);
+            expectTrue(full_atom.lines.size() == 1 && full_plain.lines.size() == 1 &&
+                           (full_atom.lines[0].block_hi_pt - full_atom.lines[0].block_lo_pt) >
+                               (full_plain.lines[0].block_hi_pt - full_plain.lines[0].block_lo_pt),
+                       "空竖排段里的原子撑高列盒（列宽按盒高定）");
+            if (full_atom.lines.size() == 1) {
+                expectTrue(full_atom.lines[0].clusters.size() == 1 &&
+                               full_atom.lines[0].clusters[0].atom == InlineAtom::Image,
+                           "空竖排段的原子进簇并带盒高");
+            }
+        }
+
+        // 块首带放不下两条列位：空竖排段也另起一条带，整篇在这里翻页。
+        {
+            PageMetrics tiny = page;
+            tiny.height_pt = 80.0f;  // 版心高 60，空列宽约 41.7
+            const float tiny_bottom = tiny.margins.top + tiny.contentHeightPt();
+            const BlockSpec empty_v = mkEmptyVertical(WritingMode::VerticalRL(), cjk, 16.0f);
+            const LayoutResult tiny_lead = layoutDocument(lib, {lead}, tiny);
+            const float first_top =
+                tiny_lead.lines.empty() ? tiny.margins.top : tiny_lead.lines[0].block_hi_pt;
+            const BlockLayout local =
+                layoutBlock(lib, empty_v,
+                            mkVertBand(empty_v, first_top, tiny_bottom, tiny.margins.top), &cache);
+            expectTrue(local.status == BlockLayoutStatus::Ok && local.started_new_band &&
+                           local.columns.size() == 1 &&
+                           std::fabs(local.columns[0].top_pt - tiny.margins.top) < 1e-4f,
+                       "空竖排段：块首带放不下两条列位时另起一条带");
+            BlockColumnPaginationInput pin;
+            pin.page_index = 3;
+            pin.line_total = 5;
+            pin.content_bottom_pt = tiny_bottom;
+            pin.started_new_band = local.started_new_band;
+            const BlockColumnPaginationResult plan = paginateBlockColumns(local.columns, pin);
+            expectTrue(plan.columns.size() == 1 && plan.columns[0].page == 4 &&
+                           std::fabs(plan.columns[0].top_pt - tiny.margins.top) < 1e-4f,
+                       "空竖排段另起的带落在下一页，列顶是版心上沿");
+            const LayoutResult full = layoutDocument(lib, {lead, empty_v}, tiny);
+            expectTrue(full.lines.size() == 2 && full.lines[1].page == 1 &&
+                           std::fabs(full.lines[1].inline_origin_pt - tiny.margins.top) < 1e-4f,
+                       "整篇：空竖排段因放不下两条列位从第 1 页起");
+        }
+
+        // 连页竖排：带顶是块轴绝对坐标，逐带下移版心高；容量仍是"带下沿减绝对带顶"的
+        //   旧式子，块首带从页中起排时首列断得更早，后续带的容量也不会变成常量带高。
+        {
+            PageMetrics cont = page;
+            cont.continuous = true;
+            cont.slab_pt = cont_slab;
+            std::string czh;
+            for (int i = 0; i < 30; ++i) czh += "患者诉晨起后心悸，持续约十分钟。";
+            const BlockSpec cblock = mkVertical(czh);
+            const LayoutResult lead_cont = layoutDocument(lib, {lead}, cont);
+            expectTrue(lead_cont.lines.size() == 1, "前提：连页首段只排一行");
+            const float first_top = lead_cont.lines.empty() ? cy : lead_cont.lines[0].block_hi_pt;
+            expectTrue(first_top > cy + 1.0f, "前提：竖排块首列顶落在页中");
+            const BlockLayout from_top =
+                layoutBlock(lib, cblock, mkContBand(cblock, cy, bottom), &cache);
+            const BlockLayout local =
+                layoutBlock(lib, cblock, mkContBand(cblock, first_top, bottom), &cache);
+            expectTrue(local.status == BlockLayoutStatus::Ok &&
+                           from_top.status == BlockLayoutStatus::Ok && !local.columns.empty() &&
+                           local.columns.size() == local.lines.size(),
+                       "连页竖排块：块局部支持，每列都有列盒");
+            expectTrue(from_top.columns.size() >= 1 && local.columns.size() >= 2 &&
+                           local.columns[0].line.end < from_top.columns[0].line.end,
+                       "连页首带更矮：首列断得比整带起排时更早");
+            // 带顶逐带累加：换带的那一列，列顶等于上一带列顶加版心高。
+            int band_top_diff = 0;
+            int same_band_top_diff = 0;
+            int prev_band = -1;
+            float prev_band_top = 0.0f;
+            for (const BlockColumn& c : local.columns) {
+                if (c.band != prev_band) {
+                    if (prev_band >= 0 &&
+                        std::fabs(c.top_pt - (prev_band_top + page.contentHeightPt())) > 1e-4f) {
+                        ++band_top_diff;
+                    }
+                    prev_band = c.band;
+                    prev_band_top = c.top_pt;
+                } else if (std::fabs(c.top_pt - prev_band_top) > 1e-4f) {
+                    ++same_band_top_diff;
+                }
+            }
+            expectTrue(band_top_diff == 0, "连页的带顶逐带累加版心高（绝对坐标，不是常量带高）");
+            expectTrue(same_band_top_diff == 0, "同一条带里的列共用一个列顶");
+            // 容量 = 带下沿减绝对带顶：越往后的带顶越靠下，容量随之变成负数，一列只放
+            //   得下一个簇。改成"常量带高"的实现会让后续带仍是满列。
+            expectTrue(local.columns.back().top_pt > bottom,
+                       "连页带顶可以越过带下沿（容量按绝对差值算，不是常量带高）");
+            int short_column_diff = 0;
+            for (const BlockColumn& c : local.columns) {
+                if (c.band < 2) continue;
+                if (c.line.end - c.line.begin != 1) ++short_column_diff;
+            }
+            expectTrue(short_column_diff == 0,
+                       "容量为负的后续带一列只放得下一个簇（绝对带顶公式的直接后果）");
+            // 页号与页内坐标由列顶现算：页号 = floor(列顶 / 条带高)。
+            int page_diff = 0;
+            int origin_diff = 0;
+            for (size_t i = 0; i < local.columns.size() && i < local.lines.size(); ++i) {
+                const BlockColumn& c = local.columns[i];
+                const LineBox& lb = local.lines[i];
+                const int want_page = static_cast<int>(std::floor(c.top_pt / cont_slab));
+                if (lb.page != want_page) ++page_diff;
+                if (std::fabs(lb.inline_origin_pt - (c.top_pt - want_page * cont_slab)) > 1e-4f)
+                    ++origin_diff;
+            }
+            expectTrue(page_diff == 0, "连页列盒的页号由列顶与条带高现算");
+            expectTrue(origin_diff == 0, "连页列盒的 y 折回页内（列顶减页号乘条带高）");
+            // 整篇与块局部对拍：列序、页号、列位与簇位置逐字段相同。
+            const LayoutResult full = layoutDocument(lib, {lead, cblock}, cont);
+            expectTrue(full.lines.size() == local.lines.size() + 1, "连页竖排块的列数与整篇相同");
+            int line_diff = 0;
+            for (size_t i = 0; i < local.lines.size() && i + 1 < full.lines.size(); ++i) {
+                const LineBox& a = full.lines[i + 1];
+                const LineBox& b = local.lines[i];
+                const bool same = a.vertical && b.vertical && a.first_cp == b.first_cp &&
+                                  a.last_cp == b.last_cp && a.page == b.page &&
+                                  std::fabs(a.block_lo_pt - b.block_lo_pt) < 1e-4f &&
+                                  std::fabs(a.block_hi_pt - b.block_hi_pt) < 1e-4f &&
+                                  std::fabs(a.inline_origin_pt - b.inline_origin_pt) < 1e-4f &&
+                                  std::fabs(a.inline_end_pt - b.inline_end_pt) < 1e-3f;
+                if (!same) ++line_diff;
+            }
+            expectTrue(line_diff == 0, "连页竖排块：整篇每一列的码点范围、页号与列位都相同");
+            // 分页纯函数：页号由列顶现算，块尾游标是最后一条带的带顶加版心高。
+            BlockColumnPaginationInput pin;
+            pin.page_index = 4;
+            pin.line_total = 9;
+            pin.content_bottom_pt = bottom;
+            pin.started_new_band = local.started_new_band;
+            pin.continuous = true;
+            pin.slab_pt = cont_slab;
+            pin.band_height_pt = page.contentHeightPt();
+            const BlockColumnPaginationResult plan = paginateBlockColumns(local.columns, pin);
+            expectTrue(plan.page_index == 4, "连页：结束页号原样回传");
+            expectTrue(plan.line_total == 9 + local.columns.back().column + 1,
+                       "连页：行号只按最后一条带的列数推进");
+            expectNear(plan.cursor_y_pt, local.columns.back().top_pt + page.contentHeightPt(), 1e-4,
+                       "连页块尾游标 = 最后列顶 + 版心高");
+            int plan_page_diff = 0;
+            for (size_t i = 0; i < plan.columns.size(); ++i) {
+                if (plan.columns[i].page !=
+                    static_cast<int>(std::floor(local.columns[i].top_pt / cont_slab))) {
+                    ++plan_page_diff;
+                }
+            }
+            expectTrue(plan_page_diff == 0, "连页分页：每一列的页号由列顶现算");
+            // 块尾之后的内容从那个绝对位置接着排。
+            const LayoutResult tail = layoutDocument(lib, {lead, cblock, lead}, cont);
+            expectTrue(tail.lines.size() == full.lines.size() + 1, "连页竖排块之后还能接横排段");
+            if (tail.lines.size() == full.lines.size() + 1) {
+                const LineBox& t = tail.lines.back();
+                const float abs_y = static_cast<float>(t.page) * cont_slab + t.block_lo_pt;
+                expectNear(abs_y, plan.cursor_y_pt, 1e-3, "连页竖排块之后的内容从块尾游标接着排");
+            }
+        }
+
+        // 连页空竖排段：只占一条列宽的横带，块尾游标是列顶加列宽（不是版心高）。
+        {
+            PageMetrics cont = page;
+            cont.continuous = true;
+            cont.slab_pt = cont_slab;
+            const BlockSpec empty_v = mkEmptyVertical(WritingMode::VerticalRL(), cjk, 16.0f);
+            const LayoutResult one = layoutDocument(lib, {empty_v}, cont);
+            expectTrue(one.lines.size() == 1 && one.lines[0].page == 0 &&
+                           std::fabs(one.lines[0].inline_origin_pt - cy) < 1e-4f,
+                       "连页空竖排段：一列落在第一条带，列顶是块轴起点");
+            const float column_w =
+                one.lines.empty() ? 0.0f : (one.lines[0].block_hi_pt - one.lines[0].block_lo_pt);
+            const LayoutResult two = layoutDocument(lib, {empty_v, lead}, cont);
+            expectTrue(two.lines.size() == 2, "连页空竖排段之后还能接横排段");
+            if (two.lines.size() == 2) {
+                const LineBox& t = two.lines[1];
+                const float abs_y = static_cast<float>(t.page) * cont_slab + t.block_lo_pt;
+                expectNear(abs_y, cy + column_w, 1e-3,
+                           "连页空竖排段只占一条列宽的横带（块尾游标 = 列顶 + 列宽）");
+            }
+            const LayoutResult three = layoutDocument(lib, {empty_v, empty_v, lead}, cont);
+            expectTrue(three.lines.size() == 3, "连页多个空竖排段逐段累加");
+            if (three.lines.size() == 3) {
+                const LineBox& t = three.lines[2];
+                const float abs_y = static_cast<float>(t.page) * cont_slab + t.block_lo_pt;
+                expectNear(abs_y, cy + column_w * 2.0f, 1e-3, "连页两个空竖排段让出两条列宽");
+            }
+            // 块局部的页内 y：第一条带上页号 0，列顶与块轴起点重合。
+            const BlockLayout local =
+                layoutBlock(lib, empty_v, mkContBand(empty_v, cy, bottom), &cache);
+            expectTrue(local.status == BlockLayoutStatus::Ok && local.columns.size() == 1 &&
+                           local.lines.size() == 1 && local.lines[0].page == 0,
+                       "连页空竖排段：块局部页号由列顶现算");
+            if (local.lines.size() == 1) {
+                expectNear(local.lines[0].inline_origin_pt, cy, 1e-4,
+                           "连页空竖排段：页内 y 就是块轴 y（第一条带）");
+            }
+        }
+
+        // 连页分页纯函数：页号由列顶现算，块尾游标是最后列顶加带高加段后距。
+        {
+            auto mkCol = [](float top, int band, int col, float width) {
+                BlockColumn c;
+                c.top_pt = top;
+                c.band = band;
+                c.column = col;
+                c.width_pt = width;
+                c.center_pt = top;
+                return c;
+            };
+            const std::vector<BlockColumn> cols = {
+                mkCol(30.0f, 0, 0, 40.0f), mkCol(310.0f, 1, 0, 40.0f), mkCol(590.0f, 2, 1, 40.0f)};
+            BlockColumnPaginationInput pin;
+            pin.continuous = true;
+            pin.slab_pt = 320.0f;
+            pin.band_height_pt = 280.0f;
+            pin.page_index = 7;
+            pin.line_total = 5;
+            pin.space_after_pt = 3.0f;
+            pin.content_bottom_pt = 300.0f;
+            const BlockColumnPaginationResult r = paginateBlockColumns(cols, pin);
+            expectTrue(r.columns.size() == 3 && r.columns[0].page == 0 && r.columns[1].page == 0 &&
+                           r.columns[2].page == 1,
+                       "连页分页：页号 = floor(列顶 / 条带高)");
+            expectTrue(r.page_index == 7, "连页分页：结束页号原样回传");
+            expectTrue(r.line_total == 7, "连页分页：行号按最后一条带的列数推进");
+            expectNear(r.cursor_y_pt, 590.0f + 280.0f + 3.0f, 1e-4,
+                       "连页分页：结束游标 = 最后列顶 + 带高 + 段后距");
+        }
+
+        // 断行层没有整形结果：空块不给片段与列，空行由 layoutBlock 给，两条路径分工明确。
+        {
+            const BlockSpec empty_v = mkEmptyVertical(WritingMode::VerticalRL(), cjk, 16.0f);
+            const BlockLayout r = layoutBlockFragments(empty_v, mkVertBand(empty_v, cy, bottom, cy),
+                                                       BlockShaping{}, {});
+            expectTrue(
+                r.status == BlockLayoutStatus::Ok && r.fragments.empty() && r.columns.empty(),
+                "空块在断行层没有片段与列（空行与空列由 layoutBlock 给）");
+        }
+    }
+
+    std::printf("\n[13] 浮动图排除：块局部绕排与页流\n");
+    {
+        PageMetrics page;
+        page.width_pt = 300.0f;
+        page.height_pt = 300.0f;
+        page.margins = PageMargins::all(10.0f);
+
+        auto mkText = [&](const std::string& text, float space_after) {
+            BlockSpec b;
+            b.font_index = cjk;
+            b.size_pt = 12.0f;
+            b.line_spacing.factor = 1.6f;
+            b.space_after_pt = space_after;
+            b.language = "zh";
+            b.setText(text);
+            return b;
+        };
+        auto mkFloat = [](int para, uint32_t cp, float w, float h, ImageWrap wrap, float dx,
+                          float dy) {
+            LayoutFloat f;
+            f.handle = 100 + static_cast<uint64_t>(para) * 10 + cp;
+            f.para = para;
+            f.cp = cp;
+            f.w_pt = w;
+            f.h_pt = h;
+            f.wrap = wrap;
+            f.dx_pt = dx;
+            f.dy_pt = dy;
+            f.content_hash = 0x1234;
+            return f;
+        };
+        const std::string sentence = "患者诉晨起后心悸明显，持续约十分钟，休息后缓解。";
+        std::string long_text;
+        for (int i = 0; i < 12; ++i) long_text += sentence;
+
+        auto run = [&](const std::string& name, const std::vector<BlockSpec>& blocks,
+                       const PageMetrics& pg,
+                       const std::vector<LayoutFloat>& floats) -> LayoutResult {
+            LayoutResult r = layoutDocument(lib, blocks, pg, {}, floats);
+            std::printf("     %s: digest=0x%016llx lines=%zu glyphs=%zu pages=%d floats=%zu\n",
+                        name.c_str(), static_cast<unsigned long long>(floatCaseDigest(r)),
+                        r.lines.size(), r.glyphs.size(), r.stats.page_count,
+                        r.placed_floats.size());
+            for (const PlacedFloat& pf : r.placed_floats) {
+                std::printf("       float page=%d x=%.3f y=%.3f w=%.1f h=%.1f wrap=%d\n", pf.page,
+                            pf.x, pf.y, pf.w, pf.h, static_cast<int>(pf.wrap));
+            }
+            return r;
+        };
+        auto checkDigest = [&](const LayoutResult& r, uint64_t want, const std::string& what) {
+            const uint64_t got = floatCaseDigest(r);
+            char buf[320] = {};
+            std::snprintf(buf, sizeof(buf), "%s（实际 0x%016llx）", what.c_str(),
+                          static_cast<unsigned long long>(got));
+            expectTrue(got == want, buf);
+        };
+
+        // 指纹取自切换前的旧循环：行盒、字形与浮动几何逐位相同才算没有改输出。
+        const uint64_t kPlainDigest = 0xa83c5f924f6e6252ull;
+        const uint64_t kAroundRightDigest = 0x476081211a78aa59ull;
+        const uint64_t kAroundMiddleDigest = 0x43ec847165b8f2afull;
+        const uint64_t kAboveDigest = 0x44d82abf84a4b6bfull;
+        const uint64_t kBehindDigest = 0x5a5b45cda77eccd6ull;
+        const uint64_t kInFrontDigest = 0xc81d49c2e908b863ull;
+        const uint64_t kAcrossDigest = 0xa25ebaa45bd6a664ull;
+        const uint64_t kShiftDigest = 0x521d737ed50bafbcull;
+        const uint64_t kReflowDigest = 0x53a5e7e76147fddbull;
+        const uint64_t kContinuousDigest = 0xaf22ded7cc6e5eedull;
+
+        const BlockSpec long_block = mkText(long_text, 0.0f);
+        const LayoutResult plain = run("plain", {long_block}, page, {});
+        checkDigest(plain, kPlainDigest, "无浮动图：简单块分页的摘要未变");
+
+        const LayoutResult around_right = run("around-right", {long_block}, page,
+                                              {mkFloat(0, 0, 120, 80, ImageWrap::Square, 0, 0)});
+        checkDigest(around_right, kAroundRightDigest, "四周型贴左：摘要未变");
+        {
+            const PlacedFloat& pf = around_right.placed_floats.front();
+            int narrowed = 0;
+            bool origin_ok = true;
+            for (const LineBox& lb : around_right.lines) {
+                if (lb.page != pf.page) continue;
+                if (lb.block_hi_pt <= pf.y || lb.block_lo_pt >= pf.y + pf.h) continue;
+                ++narrowed;
+                if (lb.inline_origin_pt < pf.x + pf.w + kFloatWrapGapPt - 0.5f) origin_ok = false;
+            }
+            expectTrue(narrowed >= 3 && origin_ok,
+                       "四周型贴左：图旁的行从图右侧起排（" + std::to_string(narrowed) + " 行）");
+            expectTrue(around_right.lines.size() > plain.lines.size(),
+                       "四周型让出宽度之后行变多（排除带真的进了断行）");
+        }
+
+        const LayoutResult around_middle = run("around-middle", {long_block}, page,
+                                               {mkFloat(0, 0, 80, 60, ImageWrap::Square, 100, 0)});
+        checkDigest(around_middle, kAroundMiddleDigest, "四周型居中：摘要未变");
+        {
+            const PlacedFloat& pf = around_middle.placed_floats.front();
+            int two_sided = 0;
+            bool sides_ok = true;
+            for (const LineBox& lb : around_middle.lines) {
+                if (lb.page != pf.page) continue;
+                if (lb.block_hi_pt <= pf.y || lb.block_lo_pt >= pf.y + pf.h) continue;
+                if (lb.spans.size() < 2) continue;
+                ++two_sided;
+                const float gap_lo = pf.x - lb.inline_origin_pt;
+                const float gap_hi = pf.x + pf.w - lb.inline_origin_pt;
+                bool any_left = false;
+                bool any_right = false;
+                bool in_gap = false;
+                for (const LineCluster& c : lb.clusters) {
+                    if (c.inline_pt < gap_lo - 1.0f) any_left = true;
+                    if (c.inline_pt >= gap_hi) any_right = true;
+                    if (c.inline_pt > gap_lo && c.inline_pt < gap_hi) in_gap = true;
+                }
+                if (!any_left || !any_right || in_gap) sides_ok = false;
+            }
+            expectTrue(two_sided > 0 && sides_ok, "四周型居中：一行分成左右两段，簇不落在图上");
+        }
+
+        const LayoutResult above =
+            run("above", {long_block}, page, {mkFloat(0, 0, 120, 80, ImageWrap::None, 0, 0)});
+        checkDigest(above, kAboveDigest, "上下型：摘要未变");
+        {
+            const PlacedFloat& pf = above.placed_floats.front();
+            expectNear(above.lines.front().slotLoPt(), pf.y + pf.h, 1e-3,
+                       "上下型：首行从图底开始（行被整行下推）");
+        }
+
+        const LayoutResult behind =
+            run("behind", {long_block}, page, {mkFloat(0, 0, 120, 80, ImageWrap::Behind, 0, 0)});
+        checkDigest(behind, kBehindDigest, "衬于下方：摘要未变（只记浮动几何）");
+        {
+            bool same = plain.lines.size() == behind.lines.size();
+            for (size_t i = 0; same && i < plain.lines.size(); ++i) {
+                const LineBox& a = plain.lines[i];
+                const LineBox& b = behind.lines[i];
+                same = a.page == b.page && a.first_cp == b.first_cp && a.last_cp == b.last_cp &&
+                       std::fabs(a.slotLoPt() - b.slotLoPt()) < 1e-4f &&
+                       std::fabs(a.inline_origin_pt - b.inline_origin_pt) < 1e-4f &&
+                       std::fabs(a.inline_end_pt - b.inline_end_pt) < 1e-4f &&
+                       a.spans.size() == b.spans.size();
+            }
+            expectTrue(same, "衬于下方不占位：行几何与无浮动图逐行相同");
+        }
+
+        const LayoutResult infront =
+            run("infront", {long_block}, page, {mkFloat(0, 0, 120, 80, ImageWrap::InFront, 0, 0)});
+        checkDigest(infront, kInFrontDigest, "浮于上方：摘要未变（只记浮动几何）");
+        {
+            bool same = plain.lines.size() == infront.lines.size();
+            for (size_t i = 0; same && i < plain.lines.size(); ++i) {
+                const LineBox& a = plain.lines[i];
+                const LineBox& b = infront.lines[i];
+                same = a.page == b.page && a.first_cp == b.first_cp && a.last_cp == b.last_cp &&
+                       std::fabs(a.slotLoPt() - b.slotLoPt()) < 1e-4f &&
+                       std::fabs(a.inline_end_pt - b.inline_end_pt) < 1e-4f;
+            }
+            expectTrue(same, "浮于上方不占位：行几何与无浮动图逐行相同");
+        }
+
+        const BlockSpec short_block = mkText("甲", 0.0f);
+        const LayoutResult across = run("across-blocks", {short_block, long_block}, page,
+                                        {mkFloat(0, 0, 120, 80, ImageWrap::Square, 0, 0)});
+        checkDigest(across, kAcrossDigest, "浮动图跨段生效：摘要未变");
+        {
+            const LineBox* first_next = nullptr;
+            for (const LineBox& lb : across.lines) {
+                if (lb.paragraph == 1) {
+                    first_next = &lb;
+                    break;
+                }
+            }
+            expectTrue(
+                first_next != nullptr && first_next->inline_origin_pt > page.margins.left + 60.0f,
+                "跨段：下一段的首行仍让开上一段锚定的图");
+        }
+
+        PageMetrics small = page;
+        small.height_pt = 120.0f;
+        const BlockSpec lead = mkText("甲乙", 85.0f);
+        const LayoutResult shifted = run("shift", {lead, long_block}, small,
+                                         {mkFloat(1, 0, 120, 30, ImageWrap::Square, 0, 0)});
+        checkDigest(shifted, kShiftDigest, "段首行被翻页推走：摘要未变");
+        {
+            const PlacedFloat& pf = shifted.placed_floats.front();
+            const LineBox* first_next = nullptr;
+            for (const LineBox& lb : shifted.lines) {
+                if (lb.paragraph == 1) {
+                    first_next = &lb;
+                    break;
+                }
+            }
+            expectTrue(pf.page == 1, "段首平移：图跟着段首行落到第 1 页");
+            expectNear(pf.y, 17.194, 0.02, "段首平移：图在页内下移了同一段位移");
+            expectTrue(first_next != nullptr && first_next->page == 1 &&
+                           first_next->inline_origin_pt > pf.x + 60.0f,
+                       "段首平移之后的首行仍按平移后的图让宽");
+        }
+
+        PageMetrics tiny = page;
+        tiny.height_pt = 120.0f;
+        const BlockSpec pad = mkText("甲乙", 57.0f);
+        const LayoutResult reflow = run("page-reflow", {pad, long_block}, tiny,
+                                        {mkFloat(1, 0, 120, 60, ImageWrap::Square, 0, 0)});
+        checkDigest(reflow, kReflowDigest, "页底翻页重排：摘要未变");
+        {
+            const PlacedFloat& pf = reflow.placed_floats.front();
+            size_t first_next = reflow.lines.size();
+            for (size_t i = 0; i < reflow.lines.size(); ++i) {
+                if (reflow.lines[i].paragraph == 1) {
+                    first_next = i;
+                    break;
+                }
+            }
+            expectTrue(pf.page == 0 && first_next + 1 < reflow.lines.size(),
+                       "页底重排：图留在原页，续排在下一页");
+            if (first_next + 1 < reflow.lines.size()) {
+                expectTrue(reflow.lines[first_next].page == 1 &&
+                               reflow.lines[first_next].inline_origin_pt > pf.x + 60.0f,
+                           "页底重排：下一页首行仍让开图（宽度由翻页后的块轴位置给）");
+                expectNear(reflow.lines[first_next + 1].inline_origin_pt, page.margins.left, 1e-3,
+                           "页底重排：图下沿之后恢复整宽");
+            }
+        }
+
+        PageMetrics cont = page;
+        cont.continuous = true;
+        cont.slab_pt = 320.0f;
+        const LayoutResult continuous = run("continuous", {long_block}, cont,
+                                            {mkFloat(0, 0, 120, 80, ImageWrap::Square, 0, 0)});
+        checkDigest(continuous, kContinuousDigest, "连页：摘要未变");
+        expectTrue(continuous.stats.page_count == 2 && continuous.lines.back().page == 1,
+                   "连页：页号由行槽顶与条带高现算");
+
+        // 排除带本身的算术：挖区间、上下型下推、清掉过去的带、块轴换算。
+        {
+            FloatFlow flow;
+            flow.bands.push_back(FloatBand{10.0f, 130.0f, 10.0f, 90.0f, true});
+            flow.bands.push_back(FloatBand{10.0f, 130.0f, 200.0f, 260.0f, false});
+            std::vector<LineSpan> spans{{10.0f, 280.0f}};
+            cutSpansAroundFloats(flow, 20.0f, 27.0f, kFloatWrapGapPt, &spans);
+            expectTrue(spans.size() == 1 && std::fabs(spans[0].x - 136.0f) < 1e-4f &&
+                           std::fabs(spans[0].w - 154.0f) < 1e-4f,
+                       "四周型挖区间：图左侧那一段被切掉，右侧从图边加间隙起");
+            float mid = 10.0f;
+            pushLineBelowFloats(flow, 27.0f, &mid);
+            expectTrue(std::fabs(mid - 10.0f) < 1e-6f, "上下型下推：行在图上方时不动");
+            float low = 200.0f;
+            pushLineBelowFloats(flow, 27.0f, &low);
+            expectTrue(std::fabs(low - 260.0f) < 1e-6f, "上下型下推：行压在图里时移到图底");
+            flow.prune(100.0f);
+            expectTrue(flow.bands.size() == 1 && flow.bands[0].f0 == 200.0f,
+                       "清掉过去的带：下沿已越过行顶的图不再生效");
+            expectNear(floatFlowY(300.0f, false, 2, 10.0f), 610.0f, 1e-4,
+                       "块轴换算：页号乘步距加页内 y");
+            expectTrue(floatFlowPage(300.0f, 610.0f, 0) == 2 &&
+                           std::fabs(floatFlowLocal(300.0f, 2, 610.0f) - 10.0f) < 1e-4f,
+                       "块轴换算：页号与页内 y 能往返");
+        }
+    }
+
+    std::printf("\n[14] 竖排块与文档级浮动图排除：块局部分页接管后逐位不变\n");
+    {
+        PageMetrics page;
+        page.width_pt = 300.0f;
+        page.height_pt = 300.0f;
+        page.margins = PageMargins::all(10.0f);
+
+        auto mkText = [&](const std::string& text) {
+            BlockSpec b;
+            b.font_index = cjk;
+            b.size_pt = 12.0f;
+            b.line_spacing.factor = 1.6f;
+            b.language = "zh";
+            b.setText(text);
+            return b;
+        };
+        auto mkVertical = [&](const std::string& text) {
+            BlockSpec b = mkText(text);
+            b.wm = WritingMode::VerticalRL();
+            return b;
+        };
+        auto mkFloat = [](int para, float w, float h, ImageWrap wrap) {
+            LayoutFloat f;
+            f.handle = 700 + static_cast<uint64_t>(para);
+            f.para = para;
+            f.cp = 0;
+            f.w_pt = w;
+            f.h_pt = h;
+            f.wrap = wrap;
+            f.content_hash = 0x5678;
+            return f;
+        };
+        auto run = [&](const char* name, const std::vector<BlockSpec>& blocks,
+                       const PageMetrics& pg, const std::vector<LayoutFloat>& floats) {
+            LayoutResult r = layoutDocument(lib, blocks, pg, {}, floats);
+            std::printf("     %s: digest=0x%016llx lines=%zu pages=%d floats=%zu\n", name,
+                        static_cast<unsigned long long>(floatCaseDigest(r)), r.lines.size(),
+                        r.stats.page_count, r.placed_floats.size());
+            return r;
+        };
+        // 只取一段的行盒与字形做指纹：锚段自己的绕排会变，比较要跳过它。
+        auto paraDigest = [](const LayoutResult& r, int para) {
+            LayoutResult part;
+            for (const LineBox& lb : r.lines) {
+                if (lb.paragraph == para) part.lines.push_back(lb);
+            }
+            for (const PlacedGlyph& g : r.glyphs) {
+                if (g.paragraph == para) part.glyphs.push_back(g);
+            }
+            return floatCaseDigest(part);
+        };
+
+        const std::string sentence = "患者诉晨起后心悸明显，持续约十分钟，休息后缓解。";
+        std::string long_text;
+        std::string short_text;
+        for (int i = 0; i < 24; ++i) long_text += sentence;
+        for (int i = 0; i < 8; ++i) short_text += sentence;
+
+        const BlockSpec anchor = mkText("甲乙");
+        const BlockSpec vertical = mkVertical(long_text);
+        const BlockSpec vertical_short = mkVertical(short_text);
+
+        const LayoutResult plain = run("vert-plain", {anchor, vertical}, page, {});
+        const LayoutResult square = run("vert-square", {anchor, vertical}, page,
+                                        {mkFloat(0, 60.0f, 200.0f, ImageWrap::Square)});
+        // 指纹取自切换前的旧竖排分支：排除带只作用于横排，竖排列与页号都不该变。
+        expectTrue(floatCaseDigest(square) == 0x8fb006d2716138d1ull,
+                   "竖排块 + 四周型浮动图：整篇摘要未变");
+        expectTrue(paraDigest(square, 1) == paraDigest(plain, 1),
+                   "四周型排除带不改变竖排块的列盒与字形");
+        expectTrue(square.stats.page_count == plain.stats.page_count, "有浮动图时竖排块的页数不变");
+        expectTrue(plain.stats.page_count >= 2, "前提：这一份竖排块跨页");
+        expectTrue(square.placed_floats.size() == 1 && square.placed_floats[0].page == 0,
+                   "浮动图照常落在锚段所在页");
+        expectNear(square.placed_floats[0].x, page.margins.left, 1e-4, "浮动图左沿 = 内容区左边");
+        expectNear(square.placed_floats[0].y, page.margins.top, 1e-4, "浮动图顶 = 锚段首行行顶");
+
+        PageMetrics cont = page;
+        cont.continuous = true;
+        cont.slab_pt = 320.0f;
+        const LayoutResult plain_c = run("vert-cont-plain", {anchor, vertical_short}, cont, {});
+        const LayoutResult square_c = run("vert-cont-square", {anchor, vertical_short}, cont,
+                                          {mkFloat(0, 60.0f, 200.0f, ImageWrap::Square)});
+        expectTrue(floatCaseDigest(square_c) == 0x6ce03c7463c9fb50ull,
+                   "连页竖排块 + 四周型浮动图：整篇摘要未变");
+        expectTrue(paraDigest(square_c, 1) == paraDigest(plain_c, 1),
+                   "连页：排除带不改变竖排块的列盒、字形与条带号");
+
+        BlockSpec breaking = vertical;
+        breaking.page_break_before = true;
+        const LayoutResult plain_b = run("vert-break-plain", {anchor, breaking}, page, {});
+        const LayoutResult square_b = run("vert-break-square", {anchor, breaking}, page,
+                                          {mkFloat(0, 60.0f, 200.0f, ImageWrap::Square)});
+        expectTrue(floatCaseDigest(square_b) == 0x1042579eb2081375ull,
+                   "段前分页的竖排块 + 四周型浮动图：整篇摘要未变");
+        expectTrue(paraDigest(square_b, 1) == paraDigest(plain_b, 1),
+                   "段前分页：排除带不改变竖排块的列盒与字形");
+        {
+            int first_page = -1;
+            for (const LineBox& lb : square_b.lines) {
+                if (lb.paragraph == 1) {
+                    first_page = lb.page;
+                    break;
+                }
+            }
+            expectTrue(first_page == 1, "竖排块的段前分页在浮动图文档里照样另起一页");
+        }
+
+        const BlockSpec empty_vertical = mkVertical("");
+        const LayoutResult plain_e = run("empty-vert-plain", {anchor, empty_vertical}, page, {});
+        const LayoutResult square_e = run("empty-vert-square", {anchor, empty_vertical}, page,
+                                          {mkFloat(0, 60.0f, 200.0f, ImageWrap::Square)});
+        expectTrue(paraDigest(square_e, 1) == paraDigest(plain_e, 1),
+                   "空竖排段的空列不受排除带影响");
+        expectTrue(square_e.stats.page_count == plain_e.stats.page_count,
+                   "空竖排段在浮动图文档里页数不变");
+        expectTrue(square_e.placed_floats.size() == 1, "空竖排文档里的浮动图照常落下");
+
+        const BlockSpec tail = mkText(long_text);
+        const LayoutResult square_t = run("tail-square", {anchor, vertical, tail}, page,
+                                          {mkFloat(0, 60.0f, 200.0f, ImageWrap::Square)});
+        const LayoutResult behind_t = run("tail-behind", {anchor, vertical, tail}, page,
+                                          {mkFloat(0, 60.0f, 200.0f, ImageWrap::Behind)});
+        // 到了横排段时那张图早已过去：只剩"浮动图存在"这一条，没有生效的排除带。
+        expectTrue(paraDigest(square_t, 2) == paraDigest(behind_t, 2),
+                   "竖排块之后的横排段：已过去的排除带不影响它");
+        expectTrue(square_t.stats.page_count == behind_t.stats.page_count, "竖排块之后的页数不变");
+
+        {
+            BlockSpec owning = vertical;
+            InlineObject img;
+            img.cp = 0;
+            img.kind = InlineObjectKind::Atom;
+            img.atom = InlineAtom::Image;
+            img.floating = true;
+            owning.objects.push_back(img);
+            BlockConstraints constraints;
+            constraints.width_pt = page.contentWidthPt();
+            constraints.writing_mode = owning.wm;
+            constraints.column.left_pt = page.margins.left;
+            constraints.column.bottom_pt = page.margins.top + page.contentHeightPt();
+            constraints.column.first_top_pt = page.margins.top;
+            constraints.column.band_top_pt = page.margins.top;
+            const BlockLayout r = layoutBlockFragments(owning, constraints, BlockShaping{}, {});
+            expectTrue(r.status == BlockLayoutStatus::UnsupportedFloat && r.columns.empty(),
+                       "竖排块自身带浮动原子时块局部仍报告不支持（整篇留在旧路径）");
+        }
+    }
+
+    std::printf("\n[15] 表格格内块：断行与落位由块局部排版给出，几何与整篇逐字段相同\n");
+    {
+        PageMetrics page;
+        page.width_pt = 300.0f;
+        page.height_pt = 240.0f;
+        page.margins = PageMargins::all(10.0f);
+        const float cw = page.contentWidthPt();  // 280
+        const float cy = page.margins.top;
+
+        auto mkCell = [&](const std::string& text, uint64_t table, int row, int cell) {
+            BlockSpec b;
+            b.font_index = cjk;
+            b.size_pt = kSize;
+            b.line_spacing.factor = 1.6f;
+            b.language = "zh";
+            b.space_after_pt = 0.0f;
+            b.setText(text);
+            b.cell_path.push_back(CellSlot{table, row, cell});
+            return b;
+        };
+        auto mkTable = [&](uint64_t handle, int rows, int cols, float width) {
+            LayoutTable t;
+            t.handle = handle;
+            t.rows = rows;
+            t.cols = cols;
+            t.col_widths.assign(static_cast<size_t>(cols), WidthSpec{});
+            t.row_specs.assign(static_cast<size_t>(rows), LayoutRow{});
+            t.width = WidthSpec::makeAbs(width);
+            for (int r = 0; r < rows; ++r) {
+                for (int c = 0; c < cols; ++c) {
+                    LayoutCell lc;
+                    lc.row = r;
+                    lc.cell = c;
+                    t.cells.push_back(lc);
+                }
+            }
+            return t;
+        };
+        // 整篇结果里某个块的行盒，按出现顺序。格内的行盒都在自己的段落号下。
+        auto linesOf = [](const LayoutResult& r, int para) {
+            std::vector<const LineBox*> out;
+            for (const LineBox& lb : r.lines) {
+                if (lb.paragraph == para) out.push_back(&lb);
+            }
+            return out;
+        };
+        auto cellConstraints = [&](const BlockSpec& b, float width) {
+            BlockConstraints c;
+            c.width_pt = width;
+            c.writing_mode = b.wm;
+            return c;
+        };
+
+        const std::string cell_text =
+            "格内文本按格宽断行，宽度收窄之后行数必须变多，行高由表格在块排完之后结算。";
+        // 两列：左格长文本，右格一个字。格内容区宽度是列宽减两侧内边距。
+        {
+            constexpr uint64_t kT = 21;
+            std::vector<BlockSpec> blocks = {mkCell(cell_text, kT, 0, 0), mkCell("乙", kT, 0, 1)};
+            LayoutTable t = mkTable(kT, 1, 2, cw);
+            const LayoutResult full = layoutDocument(lib, blocks, page, {t});
+            ShapingCache cache;
+            const float cell_w = cw * 0.5f - 2.0f * kTableCellPadXPt;
+            const BlockLayout local =
+                layoutBlock(lib, blocks[0], cellConstraints(blocks[0], cell_w), &cache);
+            const std::vector<const LineBox*> got = linesOf(full, 0);
+            expectTrue(local.status == BlockLayoutStatus::Ok && local.lines.size() >= 3,
+                       "格内长文本在格宽下折成多行（块局部报告支持并给出片段）");
+            expectTrue(got.size() == local.lines.size(), "整篇的格内行数等于块局部断行片段数");
+
+            int metric_diff = 0;
+            int top_diff = 0;
+            float want_top = cy + kTableCellPadYPt;
+            for (size_t i = 0; i < got.size() && i < local.lines.size(); ++i) {
+                const LineBox& lb = *got[i];
+                const LineBox& bl = local.lines[i];
+                const bool same = std::fabs(lb.advance_pt - bl.advance_pt) < 1e-4f &&
+                                  std::fabs(lb.lead_top_pt - bl.lead_top_pt) < 1e-4f &&
+                                  std::fabs(lb.ascent_pt - bl.ascent_pt) < 1e-4f &&
+                                  std::fabs(lb.descent_pt - bl.descent_pt) < 1e-4f;
+                if (!same) ++metric_diff;
+                if (std::fabs(lb.slotLoPt() - want_top) > 1e-3f) ++top_diff;
+                want_top += bl.advance_pt;
+            }
+            expectTrue(metric_diff == 0, "格内每一行的行度量与块局部逐字段相同");
+            expectTrue(top_diff == 0, "格内行槽顶 = 格内容区上沿 + 逐行累加行高");
+
+            float content_h = 0.0f;
+            for (const BrokenLine& f : local.fragments) content_h += f.line_h;
+            if (!full.placed_tables.empty() && !full.placed_tables[0].placed.empty()) {
+                expectNear(full.placed_tables[0].placed[0].h, content_h + 2.0f * kTableCellPadYPt,
+                           1e-3, "行高 = 格内内容高 + 上下内边距");
+            }
+            // 反向一半：同一批块按正文宽度排，行数必须更少 —— 断行输入是格宽。
+            const LayoutResult body = layoutDocument(lib, blocks, page);
+            expectTrue(body.lines.size() < got.size(),
+                       "同一块按正文宽度排出的行更少（格宽真的决定了断行）");
+        }
+        // 格内两段：段后距与下一段的段前距相加，最后一段的段后距不进行高。
+        {
+            constexpr uint64_t kT = 22;
+            BlockSpec first = mkCell("甲乙丙", kT, 0, 0);
+            first.space_after_pt = 6.0f;
+            BlockSpec second = mkCell("丁戊", kT, 0, 0);
+            second.space_before_pt = 9.0f;
+            std::vector<BlockSpec> blocks = {first, second};
+            LayoutTable t = mkTable(kT, 1, 1, cw);
+            const LayoutResult full = layoutDocument(lib, blocks, page, {t});
+            const std::vector<const LineBox*> a = linesOf(full, 0);
+            const std::vector<const LineBox*> b = linesOf(full, 1);
+            expectTrue(a.size() == 1 && b.size() == 1, "格内两段各排一行");
+            if (a.size() == 1 && b.size() == 1) {
+                const float first_top = cy + kTableCellPadYPt;
+                expectNear(a[0]->slotLoPt(), first_top, 1e-3, "格内首段从格内容区上沿起排");
+                expectNear(b[0]->slotLoPt(), first_top + a[0]->advance_pt + 6.0f + 9.0f, 1e-3,
+                           "格内段后距与下一段的段前距相加，不折叠");
+                if (!full.placed_tables.empty() && !full.placed_tables[0].placed.empty()) {
+                    expectNear(
+                        full.placed_tables[0].placed[0].h,
+                        a[0]->advance_pt + 6.0f + 9.0f + b[0]->advance_pt + 2.0f * kTableCellPadYPt,
+                        1e-3, "行高含两段行高与段间距，不含最后一段的段后距");
+                }
+            }
+        }
+        // 一行高过整页：行盒按自己的纵向位置切片，切片之后行数与断点都不变。
+        {
+            constexpr uint64_t kT = 23;
+            PageMetrics tiny;
+            tiny.width_pt = 200.0f;
+            tiny.height_pt = 100.0f;  // 内容区高 80
+            tiny.margins = PageMargins::all(10.0f);
+            std::string long_text;
+            for (int i = 0; i < 12; ++i) long_text += "一二三四五六七八九十";
+            std::vector<BlockSpec> blocks = {mkCell(long_text, kT, 0, 0)};
+            LayoutTable t = mkTable(kT, 1, 1, tiny.contentWidthPt());
+            const LayoutResult full = layoutDocument(lib, blocks, tiny, {t});
+            ShapingCache cache;
+            const float cell_w = tiny.contentWidthPt() - 2.0f * kTableCellPadXPt;
+            const BlockLayout local =
+                layoutBlock(lib, blocks[0], cellConstraints(blocks[0], cell_w), &cache);
+            const std::vector<const LineBox*> got = linesOf(full, 0);
+            expectTrue(local.status == BlockLayoutStatus::Ok && got.size() == local.lines.size(),
+                       "跨页切片之后行数仍等于块局部断行片段数");
+            expectTrue(full.placed_tables.size() == 1 && full.placed_tables[0].placed.size() >= 3,
+                       "这一行确实被切成跨页的多个片段");
+
+            int page_starts = 0;
+            int pages_seen = 0;
+            int stack_diff = 0;
+            int prev_page = -1;
+            bool first_line = true;
+            const float content_top = tiny.margins.top + kTableCellPadYPt;
+            float prev_slot = 0.0f;
+            for (const LineBox* lb : got) {
+                if (lb->page != prev_page) {
+                    ++pages_seen;
+                    // 续排片段的内容区上沿是页面内容区加一层内边距；首片从行自己的行槽顶起。
+                    const float want_lo =
+                        first_line ? (content_top + lb->lead_top_pt) : content_top;
+                    if (std::fabs(lb->block_lo_pt - want_lo) > 1e-3f) ++page_starts;
+                    prev_page = lb->page;
+                } else if (std::fabs(lb->slotLoPt() - prev_slot) > 1e-3f) {
+                    ++stack_diff;
+                }
+                prev_slot = lb->slotLoPt() + lb->advance_pt;
+                first_line = false;
+            }
+            expectTrue(pages_seen >= 3 && page_starts == 0,
+                       "每一片的第一行都从续排片段的内容区上沿起");
+            expectTrue(stack_diff == 0, "同一片内的行按行高首尾相接，切片不重排");
+        }
+        // 连页：格内行的页号是绝对行顶所在的条带，页内坐标按条带折回。
+        {
+            constexpr uint64_t kT = 24;
+            PageMetrics cont_page;
+            cont_page.width_pt = 200.0f;
+            cont_page.height_pt = 120.0f;
+            cont_page.margins = PageMargins::all(10.0f);
+            cont_page.continuous = true;
+            cont_page.slab_pt = 60.0f;
+            const float slab = cont_page.slabHeightPt();
+            std::string tall;
+            for (int i = 0; i < 6; ++i) tall += "一二三四五六七八九十";
+            std::vector<BlockSpec> blocks = {mkCell(tall, kT, 0, 0)};
+            LayoutTable t = mkTable(kT, 1, 1, cont_page.contentWidthPt());
+            const LayoutResult full = layoutDocument(lib, blocks, cont_page, {t});
+            ShapingCache cache;
+            const float cell_w = cont_page.contentWidthPt() - 2.0f * kTableCellPadXPt;
+            const BlockLayout local =
+                layoutBlock(lib, blocks[0], cellConstraints(blocks[0], cell_w), &cache);
+            const std::vector<const LineBox*> got = linesOf(full, 0);
+            expectTrue(local.status == BlockLayoutStatus::Ok && got.size() == local.lines.size(),
+                       "连页下的格内行数等于块局部断行片段数");
+            float abs_top = cont_page.margins.top + kTableCellPadYPt;
+            int fold_diff = 0;
+            int side_diff = 0;
+            for (const LineBox* lb : got) {
+                const int want_page = static_cast<int>(std::floor(abs_top / slab));
+                if (lb->page != want_page) ++fold_diff;
+                const float want_y =
+                    abs_top + lb->lead_top_pt - static_cast<float>(want_page) * slab;
+                if (std::fabs(lb->block_lo_pt - want_y) > 1e-3f) ++side_diff;
+                abs_top += lb->advance_pt;
+            }
+            expectTrue(fold_diff == 0, "连页下格内行的页号由绝对行顶与条带高现算");
+            expectTrue(side_diff == 0, "连页下格内行按条带折回页内坐标");
+        }
+        // 空格：空行的字体度量、括号占位与原子盒高由块局部给出，页内锚点仍按旧路径的
+        //   加法次序重算；行高、内边距与行切片都读同一份几何。
+        {
+            constexpr uint64_t kT = 25;
+            BlockSpec empty = mkCell("", kT, 0, 0);
+            BlockSpec neighbor = mkCell("乙", kT, 0, 1);
+            LayoutTable t = mkTable(kT, 1, 2, cw);
+            const LayoutResult full = layoutDocument(lib, {empty, neighbor}, page, {t});
+            ShapingCache cache;
+            const float col_w = cw * 0.5f;
+            const float cell_w = col_w - 2.0f * kTableCellPadXPt;
+            const BlockLayout local =
+                layoutBlock(lib, empty, cellConstraints(empty, cell_w), &cache);
+            const std::vector<const LineBox*> got = linesOf(full, 0);
+            expectTrue(got.size() == 1 && local.lines.size() == 1 && local.glyphs.empty(),
+                       "空格：整篇与块局部各排出一行，没有字形");
+            if (got.size() == 1 && local.lines.size() == 1) {
+                const LineBox& a = *got[0];
+                const LineBox& b = local.lines[0];
+                const bool same = std::fabs(a.advance_pt - b.advance_pt) < 1e-4f &&
+                                  std::fabs(a.lead_top_pt - b.lead_top_pt) < 1e-4f &&
+                                  std::fabs(a.ascent_pt - b.ascent_pt) < 1e-4f &&
+                                  std::fabs(a.descent_pt - b.descent_pt) < 1e-4f &&
+                                  a.clip_text == b.clip_text &&
+                                  a.clusters.size() == b.clusters.size();
+                expectTrue(same, "空格的行度量与块局部逐字段相同");
+                expectNear(a.slotLoPt(), cy + kTableCellPadYPt, 1e-3,
+                           "空格的行槽顶就是格内容区上沿");
+                expectNear(a.block_hi_pt - a.block_lo_pt, a.ascent_pt + a.descent_pt, 1e-3,
+                           "空格的行盒高仍是墨迹高");
+                expectNear(a.cell_lo_pt, page.margins.left + kTableCellPadXPt, 1e-3,
+                           "空格的行盒带格内容区左沿");
+                expectNear(a.cell_hi_pt, page.margins.left + col_w - kTableCellPadXPt, 1e-3,
+                           "空格的行盒带格内容区右沿");
+                expectNear(a.cell_box_hi_pt, page.margins.left + col_w, 1e-3,
+                           "空格的外框右沿是格线");
+                if (!full.placed_tables.empty() && !full.placed_tables[0].placed.empty()) {
+                    expectNear(full.placed_tables[0].placed[0].h,
+                               a.advance_pt + 2.0f * kTableCellPadYPt, 1e-3,
+                               "空格的行高仍是内容高加上下内边距");
+                }
+            }
+        }
+        // 空格的占位与原子：括号、提示文字、原子盒高都要进空行，且块局部与整篇同一份。
+        {
+            constexpr uint64_t kT = 26;
+            BlockSpec decorated = mkCell("", kT, 0, 0);
+            InlineObject start;
+            start.kind = InlineObjectKind::ControlStart;
+            start.owner = 7;
+            start.hint = "提示";
+            decorated.objects.push_back(start);
+            InlineObject stop;
+            stop.kind = InlineObjectKind::ControlEnd;
+            stop.owner = 7;
+            decorated.objects.push_back(stop);
+            InlineObject atom;
+            atom.kind = InlineObjectKind::Atom;
+            atom.atom = InlineAtom::Image;
+            atom.w_pt = 24.0f;
+            atom.h_pt = 40.0f;
+            atom.content_hash = 99;
+            decorated.objects.push_back(atom);
+            LayoutTable t = mkTable(kT, 1, 1, cw);
+            const LayoutResult full = layoutDocument(lib, {decorated}, page, {t});
+            ShapingCache cache;
+            const BlockLayout local = layoutBlock(
+                lib, decorated, cellConstraints(decorated, cw - 2.0f * kTableCellPadXPt), &cache);
+            const std::vector<const LineBox*> got = linesOf(full, 0);
+            expectTrue(got.size() == 1 && local.lines.size() == 1 && got[0]->clusters.size() == 4 &&
+                           local.lines[0].clusters.size() == 4,
+                       "空格的括号、提示文字与原子都进簇（块局部与整篇同数）");
+            if (got.size() == 1 && local.lines.size() == 1) {
+                int hints = 0;
+                int atoms = 0;
+                float atom_h = 0.0f;
+                for (const LineCluster& c : got[0]->clusters) {
+                    if (c.control_hint) ++hints;
+                    if (c.atom != InlineAtom::None) {
+                        ++atoms;
+                        atom_h = c.atom_h_pt;
+                    }
+                }
+                expectTrue(hints == 1 && atoms == 1, "空行里有一枚提示文字与一枚原子");
+                expectNear(atom_h, 40.0f, 1e-4, "原子盒高进了簇");
+                expectNear(got[0]->ascent_pt, 40.0f, 1e-4, "原子盒高撑起空行的 ascent");
+                expectNear(got[0]->advance_pt, local.lines[0].advance_pt, 1e-4,
+                           "带原子的空行行高与块局部一致");
+                expectNear(got[0]->block_hi_pt - got[0]->block_lo_pt,
+                           local.lines[0].block_hi_pt - local.lines[0].block_lo_pt, 1e-4,
+                           "带原子的空行墨迹高与块局部一致");
+                if (!full.placed_tables.empty() && !full.placed_tables[0].placed.empty()) {
+                    expectNear(full.placed_tables[0].placed[0].h,
+                               got[0]->advance_pt + 2.0f * kTableCellPadYPt, 1e-3,
+                               "原子撑起的空行照样按内容高结算行高");
+                }
+            }
+        }
+        // 竖排格内块：列长与列位取版心，块局部按页的竖带断列；行高仍由表格结算。
+        {
+            constexpr uint64_t kT = 27;
+            BlockSpec vcell = mkCell("", kT, 0, 0);
+            vcell.wm = WritingMode::VerticalRL();
+            std::string vtext;
+            for (int i = 0; i < 8; ++i) vtext += "患者诉晨起后心悸持续约十分钟。";
+            vcell.setText(vtext);
+            LayoutTable t = mkTable(kT, 1, 1, cw);
+            // 竖排格吃掉本页剩余高度，行高恒超出；不许切片时整行留在原页，便于逐列对拍。
+            t.row_specs[0].can_split_by_page = false;
+            const LayoutResult full = layoutDocument(lib, {vcell}, page, {t});
+            ShapingCache cache;
+            BlockConstraints vc;
+            vc.width_pt = cw;
+            vc.writing_mode = vcell.wm;
+            vc.column.left_pt = page.margins.left;
+            vc.column.bottom_pt = page.margins.top + page.contentHeightPt();
+            vc.column.first_top_pt = page.margins.top + kTableCellPadYPt;
+            vc.column.band_top_pt = page.margins.top;
+            const BlockLayout local = layoutBlock(lib, vcell, vc, &cache);
+            const std::vector<const LineBox*> got = linesOf(full, 0);
+            expectTrue(local.status == BlockLayoutStatus::Ok && got.size() >= 2 &&
+                           got.size() == local.lines.size() && got.size() == local.columns.size(),
+                       "竖排格内块：整篇的列数等于块局部断出的列数");
+            int col_diff = 0;
+            int page_diff = 0;
+            for (size_t i = 0; i < got.size() && i < local.columns.size(); ++i) {
+                const LineBox& lb = *got[i];
+                const BlockColumn& col = local.columns[i];
+                const float w = lb.block_hi_pt - lb.block_lo_pt;
+                const float center = 0.5f * (lb.block_lo_pt + lb.block_hi_pt);
+                if (std::fabs(w - col.width_pt) > 1e-3f ||
+                    std::fabs(center - col.center_pt) > 1e-3f ||
+                    std::fabs(lb.inline_origin_pt - col.top_pt) > 1e-3f) {
+                    ++col_diff;
+                }
+                if (lb.page != 0) ++page_diff;
+            }
+            expectTrue(col_diff == 0, "竖排格内块的列宽、列心与列顶与块局部逐列相同");
+            expectTrue(page_diff == 0, "竖排格内块的首条带落在表格当前页");
+            expectNear(local.columns.front().top_pt, page.margins.top + kTableCellPadYPt, 1e-3,
+                       "竖排格内块的首列顶是格内容区上沿");
+            if (!full.placed_tables.empty() && !full.placed_tables[0].placed.empty()) {
+                expectNear(full.placed_tables[0].placed[0].h,
+                           page.contentHeightPt() + kTableCellPadYPt, 1e-3,
+                           "竖排格吃掉本页剩余高度，行高是版心高加上内边距");
+            }
+        }
+        // 空竖排格：一条空列，列宽是空行行高，列心按书写模式取边。
+        {
+            constexpr uint64_t kT = 28;
+            BlockSpec vempty = mkCell("", kT, 0, 0);
+            vempty.wm = WritingMode::VerticalRL();
+            LayoutTable t = mkTable(kT, 1, 1, cw);
+            t.row_specs[0].can_split_by_page = false;
+            const LayoutResult full = layoutDocument(lib, {vempty}, page, {t});
+            ShapingCache cache;
+            BlockConstraints vc;
+            vc.width_pt = cw;
+            vc.writing_mode = vempty.wm;
+            vc.column.left_pt = page.margins.left;
+            vc.column.bottom_pt = page.margins.top + page.contentHeightPt();
+            vc.column.first_top_pt = page.margins.top + kTableCellPadYPt;
+            vc.column.band_top_pt = page.margins.top;
+            const BlockLayout local = layoutBlock(lib, vempty, vc, &cache);
+            const std::vector<const LineBox*> got = linesOf(full, 0);
+            expectTrue(local.status == BlockLayoutStatus::Ok && local.columns.size() == 1 &&
+                           local.lines.size() == 1 && got.size() == 1 && got[0]->clusters.empty(),
+                       "空竖排格：块局部与整篇各排出一条空列，没有字形");
+            if (got.size() == 1 && local.columns.size() == 1) {
+                const LineBox& lb = *got[0];
+                const float w = lb.block_hi_pt - lb.block_lo_pt;
+                expectNear(w, local.columns[0].width_pt, 1e-3, "空列的列宽就是空行行高");
+                expectNear(0.5f * (lb.block_lo_pt + lb.block_hi_pt), local.columns[0].center_pt,
+                           1e-3, "空列的列心与块局部相同（中日竖排贴右边缘）");
+                expectNear(lb.inline_origin_pt, page.margins.top + kTableCellPadYPt, 1e-3,
+                           "空列的列顶是格内容区上沿");
+                expectNear(lb.cell_lo_pt, page.margins.left + kTableCellPadXPt, 1e-3,
+                           "空格列带格内容区左沿");
+            }
+        }
+        // 带浮动图的格内块：排除带由 FloatFlow 提供，断行逐行取宽；格内不翻页。
+        {
+            constexpr uint64_t kT = 29;
+            BlockSpec lead;
+            lead.font_index = cjk;
+            lead.size_pt = kSize;
+            lead.line_spacing.factor = 1.6f;
+            lead.language = "zh";
+            lead.space_after_pt = 0.0f;
+            lead.setText("图前");
+            std::string cell_text;
+            for (int i = 0; i < 8; ++i) cell_text += "格内绕排文字要避开浮动图占掉的区间。";
+            LayoutTable t = mkTable(kT, 1, 1, cw);
+            std::vector<BlockSpec> blocks = {lead, mkCell(cell_text, kT, 0, 0)};
+            LayoutFloat fl;
+            fl.handle = 1;
+            fl.para = 0;
+            fl.w_pt = 80.0f;
+            fl.h_pt = 80.0f;
+            fl.wrap = ImageWrap::Square;
+            fl.dx_pt = 90.0f;
+            const LayoutResult with = layoutDocument(lib, blocks, page, {t}, {fl});
+            const LayoutResult plain = layoutDocument(lib, blocks, page, {t});
+            const std::vector<const LineBox*> got = linesOf(with, 1);
+            const std::vector<const LineBox*> plain_got = linesOf(plain, 1);
+            expectTrue(with.placed_floats.size() == 1 && with.placed_floats[0].page == 0,
+                       "格内块文档里的浮动图照常落在第 0 页");
+            expectTrue(got.size() > plain_got.size(), "绕排把格内的行切窄，行数比没有浮动图时多");
+            const float content_x = page.margins.left + kTableCellPadXPt;
+            const float cut_lo = with.placed_floats[0].x - kFloatWrapGapPt;
+            const float cut_hi =
+                with.placed_floats[0].x + with.placed_floats[0].w + kFloatWrapGapPt;
+            int split_lines = 0;
+            int gap_clusters = 0;
+            const PlacedFloat& pf = with.placed_floats[0];
+            for (const LineBox* lb : got) {
+                // 只有与图纵向相交的行才受排除带约束；图下面恢复整宽的行照常排进那一带。
+                const float line_top = lb->slotLoPt();
+                const float line_bottom = line_top + lb->advance_pt;
+                const bool overlaps =
+                    lb->page == pf.page && line_top < pf.y + pf.h && line_bottom > pf.y;
+                if (!overlaps) continue;
+                if (lb->spans.size() == 2) {
+                    ++split_lines;
+                    // 左段可能提前断行，只要求不越过排除带左沿；右段必须正好从右沿起排。
+                    const float left_end = lb->inline_origin_pt + lb->spans[0].hi_pt;
+                    const float right_start = lb->inline_origin_pt + lb->spans[1].lo_pt;
+                    if (left_end > cut_lo + 1e-3f || std::fabs(right_start - cut_hi) > 1e-3f) {
+                        ++gap_clusters;
+                    }
+                }
+                for (const LineCluster& c : lb->clusters) {
+                    const float x = lb->inline_origin_pt + c.inline_pt;
+                    if (x > cut_lo + 0.01f && x < cut_hi - 0.01f) ++gap_clusters;
+                }
+            }
+            expectTrue(split_lines >= 1, "与浮动图纵向相交的格内行分成左右两段");
+            expectTrue(gap_clusters == 0, "格内行没有把簇排进浮动图让开的区间");
+            expectNear(got.front()->inline_origin_pt, content_x, 1e-3,
+                       "格内绕排首段的起点仍是格内容区左沿");
+        }
+        // 上下型浮动图：格内行顶被推到图底，页号不变（格内不翻页）。
+        {
+            constexpr uint64_t kT = 30;
+            BlockSpec lead;
+            lead.font_index = cjk;
+            lead.size_pt = kSize;
+            lead.line_spacing.factor = 1.6f;
+            lead.language = "zh";
+            lead.space_after_pt = 0.0f;
+            lead.setText("图前");
+            std::string cell_text;
+            for (int i = 0; i < 4; ++i) cell_text += "格内文字不得压在上方浮动图上。";
+            LayoutTable t = mkTable(kT, 1, 1, cw);
+            std::vector<BlockSpec> blocks = {lead, mkCell(cell_text, kT, 0, 0)};
+            LayoutFloat fl;
+            fl.handle = 2;
+            fl.para = 0;
+            fl.w_pt = 60.0f;
+            fl.h_pt = 40.0f;
+            fl.wrap = ImageWrap::None;
+            fl.dy_pt = 30.0f;
+            const LayoutResult full = layoutDocument(lib, blocks, page, {t}, {fl});
+            const std::vector<const LineBox*> got = linesOf(full, 1);
+            expectTrue(full.placed_floats.size() == 1 && !got.empty(),
+                       "上下型浮动图照常落下，格内有行");
+            if (!got.empty() && full.placed_floats.size() == 1) {
+                const float float_bottom = full.placed_floats[0].y + full.placed_floats[0].h;
+                expectTrue(got.front()->slotLoPt() >= float_bottom - 1e-3f,
+                           "格内首行被上下型浮动图推到图底");
+                bool same_page = true;
+                for (const LineBox* lb : got) same_page = same_page && lb->page == 0;
+                expectTrue(same_page, "格内绕排不翻页：所有行都在表格当前页");
+            }
+        }
+    }
+
+    std::printf("\n[16] 后缀重新分页：FragmentIndex 的块行切片与续排逐字段相同\n");
+    {
+        PageMetrics suffix_page;
+        suffix_page.width_pt = 300.0f;
+        suffix_page.height_pt = 190.0f;
+        suffix_page.margins = PageMargins::all(20.0f);
+        std::vector<BlockSpec> blocks;
+        for (int i = 0; i < 9; ++i) {
+            BlockSpec b;
+            b.font_index = cjk;
+            b.size_pt = 13.0f;
+            b.line_spacing.factor = 1.5f;
+            b.language = "zh";
+            b.space_before_pt = (i == 4) ? 9.0f : 2.0f;
+            b.space_after_pt = 5.0f;
+            b.page_break_before = (i == 6);
+            if (i == 4) {
+                // 空段也占一行：后缀分页不能把它当成"没有内容"跳过。
+                b.setText("");
+            } else {
+                b.setText("第 " + std::to_string(i) +
+                          " 段：后缀重新分页要与从这一段续排逐字段相同，段前距与段后距都算。");
+            }
+            blocks.push_back(std::move(b));
+        }
+        const int n = static_cast<int>(blocks.size());
+        const LayoutResult full = layoutDocument(lib, blocks, suffix_page);
+        const int from = 3;
+        const int line_base = full.para_index[static_cast<size_t>(from)].line_begin;
+        const int glyph_base = full.para_index[static_cast<size_t>(from)].glyph_begin;
+        ReflowState anchor = full.para_index[static_cast<size_t>(from)].state_at_start;
+        anchor.cursor_y += 17.0f;
+
+        LayoutResult by_fragment = full;
+        ReflowState fragment_end;
+        expectTrue(
+            repaginateSuffix(&by_fragment, blocks, suffix_page, from, n, anchor, &fragment_end),
+            "repaginateSuffix 接受纯横排后缀");
+        expectTrue(by_fragment.lines.size() == full.lines.size() &&
+                       by_fragment.glyphs.size() == full.glyphs.size(),
+                   "重新分页不改行数与字形数");
+
+        LayoutResult by_resume = full;
+        by_resume.lines.resize(static_cast<size_t>(line_base));
+        by_resume.glyphs.resize(static_cast<size_t>(glyph_base));
+        by_resume.para_index.resize(static_cast<size_t>(from));
+        by_resume.para_cluster_starts.resize(static_cast<size_t>(from));
+        const ReflowState resume_end = layoutDocumentRangeWithTables(
+            lib, blocks, suffix_page, {}, from, n, anchor, nullptr, &by_resume);
+        expectTrue(fragment_end == resume_end, "后缀结束锚点与续排相同");
+
+        auto samePos = [](float a, float b) { return std::fabs(a - b) <= 1e-3f; };
+        int line_bad = 0;
+        const size_t line_count = std::min(by_fragment.lines.size(), by_resume.lines.size());
+        for (size_t i = 0; i < line_count; ++i) {
+            const LineBox& a = by_fragment.lines[i];
+            const LineBox& b = by_resume.lines[i];
+            if (a.paragraph != b.paragraph || a.line != b.line || a.page != b.page ||
+                a.vertical != b.vertical || a.sideways != b.sideways || a.first_cp != b.first_cp ||
+                a.last_cp != b.last_cp || a.clusters.size() != b.clusters.size() ||
+                !samePos(a.block_lo_pt, b.block_lo_pt) || !samePos(a.block_hi_pt, b.block_hi_pt) ||
+                !samePos(a.bracket_axis_pt, b.bracket_axis_pt) ||
+                !samePos(a.advance_pt, b.advance_pt) || !samePos(a.lead_top_pt, b.lead_top_pt) ||
+                !samePos(a.ascent_pt, b.ascent_pt) || !samePos(a.descent_pt, b.descent_pt)) {
+                ++line_bad;
+            }
+        }
+        expectTrue(line_bad == 0, "后缀每一行的页号、行号与纵向几何都与续排相同");
+        int glyph_bad = 0;
+        const size_t glyph_count = std::min(by_fragment.glyphs.size(), by_resume.glyphs.size());
+        for (size_t i = 0; i < glyph_count; ++i) {
+            const PlacedGlyph& a = by_fragment.glyphs[i];
+            const PlacedGlyph& b = by_resume.glyphs[i];
+            if (a.glyph_id != b.glyph_id || a.font != b.font || a.page != b.page ||
+                a.line != b.line || a.paragraph != b.paragraph || a.cluster != b.cluster ||
+                !samePos(a.x_pt, b.x_pt) || !samePos(a.y_pt, b.y_pt)) {
+                ++glyph_bad;
+            }
+        }
+        expectTrue(glyph_bad == 0, "后缀每个字形的页号、行号与坐标都与续排相同");
+        int para_bad = 0;
+        for (int p = from; p < n; ++p) {
+            const ParaIndex& a = by_fragment.para_index[static_cast<size_t>(p)];
+            const ParaIndex& b = by_resume.para_index[static_cast<size_t>(p)];
+            if (a.line_begin != b.line_begin || a.line_end != b.line_end ||
+                a.glyph_begin != b.glyph_begin || a.glyph_end != b.glyph_end ||
+                a.state_at_start != b.state_at_start) {
+                ++para_bad;
+            }
+        }
+        expectTrue(para_bad == 0, "后缀每段的切片与起始锚点都与续排相同");
+        expectTrue(by_fragment.stats.page_count == by_resume.stats.page_count,
+                   "后缀重新分页的页数与续排相同");
+        by_fragment.rebuildPageIndex();
+        expectTrue(by_fragment.fragmentIndexValid(),
+                   "重新分页之后 FragmentIndex 的页/块/行三表自洽");
+
+        // 竖排后缀明确拒绝：调用方退回续排，且拒绝时一个字段都不许改。
+        BlockSpec vertical;
+        vertical.font_index = cjk;
+        vertical.size_pt = 13.0f;
+        vertical.wm = WritingMode::VerticalRL();
+        vertical.language = "zh";
+        vertical.setText("竖排后缀不进片段重分页。");
+        std::vector<BlockSpec> with_vertical = blocks;
+        with_vertical.push_back(std::move(vertical));
+        const LayoutResult vertical_full = layoutDocument(lib, with_vertical, suffix_page);
+        LayoutResult vertical_copy = vertical_full;
+        ReflowState vertical_end;
+        expectTrue(
+            !repaginateSuffix(&vertical_copy, with_vertical, suffix_page, from,
+                              static_cast<int>(with_vertical.size()),
+                              vertical_full.para_index[static_cast<size_t>(from)].state_at_start,
+                              &vertical_end),
+            "竖排后缀被明确拒绝");
+        expectTrue(vertical_copy.lines.size() == vertical_full.lines.size() &&
+                       vertical_copy.glyphs.size() == vertical_full.glyphs.size() &&
+                       vertical_copy.lines.back().page == vertical_full.lines.back().page &&
+                       vertical_copy.lines.front().block_lo_pt ==
+                           vertical_full.lines.front().block_lo_pt &&
+                       vertical_copy.para_index[static_cast<size_t>(from)].state_at_start ==
+                           vertical_full.para_index[static_cast<size_t>(from)].state_at_start,
+                   "拒绝竖排后缀时行盒、字形与段状态都未改动");
     }
 
     std::printf("\n──────────────────────────────\n");

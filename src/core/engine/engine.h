@@ -3151,39 +3151,23 @@ private:
     enum class SuffixReuse {
         None,       // 复用不成立，调用方走常规续排（从脏段排到末尾）
         Unchanged,  // 后缀一个字节都不用动（续排状态逐位相同）
-        Shifted,    // 后缀整体沿块轴平移 + 重编页码/行号（行结构变了，但只有块轴位置变）
+        Shifted,    // 后缀按片段重新分页（行结构变了，断行结果不重算）
     };
 
     /**
-     * 后缀复用：只重排脏区，然后试着不动后缀。判据两级 —— 同状态（后缀逐位相同，整块搬回）
-     * 与纯横排平移（只有块轴起点变）。后缀里可以包着表，但表只能整张在脏区里或整张在复用区里：
-     * 遇到第一张表就把复用截断在表头，剩下的从那张表续排（表的行高靠结算、跨页靠切片）。
+     * 后缀复用：只重排脏区，然后试着不动后缀或按片段重排后缀。判据两级 —— 同状态
+     * （后缀逐位相同，整块搬回）与片段重分页（只有块轴起点变）。后缀里可以包着表，但表只能
+     * 整张在脏区里或整张在复用区里：遇到第一张表就把复用截断在表头，剩下的从那张表续排
+     * （表的行高靠结算、跨页靠切片）。
      *
      * @param dirty_count 脏区在新版里占几段（右端见 markLayoutDirtyRange）
      * @param relaid_paragraphs 出参：脏区在新版里占几段
-     * @param cut 出参：复用只到第 cut 段之前（后缀第一张表，或段数）；cut_state 是那儿的锚点
+     * @param cut 出参：复用只到第 cut 段之前（后缀第一张表，或段数）
+     * @param cut_state 出参：cut 那一处的续排状态；cut < 段数时续排从它开始
      * @return None 时后缀未被动过（调用方可以安全走续排），其余两种排版已完成
      */
     SuffixReuse trySuffixReuse(int from, int dirty_count, int* relaid_paragraphs, int* cut,
                                ReflowState* cut_state);
-
-    /**
-     * 后缀整体平移：把 [from, to) 的每一行沿块轴挪到新的位置，并重编页码与全局行号，字形跟着
-     * 它的行一起挪，断行结果（簇与行内位置）完全不重算 —— 横排的块轴推进是一条纯折线（每行
-     * 占字号乘行距、段间让出 space_after_pt、放不下就换页），知道起点的续排状态就唯一确定。
-     *
-     * @param from 后缀的第一段（含）；段数变化时它与脏区首段相差不止一
-     * @param first_glyph 后缀的第一个字形在 glyphs 里的下标（脏区的字形之后）
-     * @param to 平移的上界（不含）：后缀里的第一张表，或段数
-     * @param end_state 出参：走到 to 时的续排状态；to < 段数时调用方拿它从那儿的表续排
-     */
-    bool shiftSuffixBlockAxis(int from, size_t first_glyph, int to, const ReflowState& after,
-                              ReflowState* end_state);
-
-    /**
-     * [from, to) 里有没有竖排段 —— 竖排不能走平移复用。
-     */
-    bool suffixIsHorizontalOnly(int from, int to) const;
 
     /**
      * 编辑标记此刻画不画：档位不是"不显示"，而且不在只读态（只读是呈现态，标记会被印出来）。

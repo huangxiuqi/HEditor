@@ -662,6 +662,25 @@ int main() {
 
     expectTrue(e.structureIndexValid(), "结构索引：表/格/槽/控件跨度下标自洽");
 
+    // 块行索引：每块列出的行都属于该块，且覆盖 lines 里的全部行。
+    {
+        const LayoutResult& L = e.layout();
+        bool ok = true;
+        size_t total = 0;
+        for (int para = 0; para < static_cast<int>(L.para_index.size()); ++para) {
+            const std::vector<int>& list = L.linesOfBlock(para);
+            total += list.size();
+            for (int index : list) {
+                if (index < 0 || index >= static_cast<int>(L.lines.size()) ||
+                    L.lines[static_cast<size_t>(index)].paragraph != para) {
+                    ok = false;
+                }
+            }
+        }
+        expectTrue(ok && total == L.lines.size(), "块行索引：每块的行都属于该块且不重不漏");
+        expectTrue(L.fragmentIndexValid(), "片段索引：页/块/字形三张反查表自洽");
+    }
+
     std::printf("\n──────────────────────────────\n");
     std::printf("共 %d 项断言，失败 %d 项\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
