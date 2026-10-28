@@ -99,6 +99,57 @@ void ImageStore::clear() {
     ++generation_;
 }
 
+std::vector<const ImageResource*> ImageStore::list() const {
+    std::vector<const ImageResource*> out;
+    out.reserve(items_.size());
+    for (const auto& item : items_) out.push_back(&item.second);
+    return out;
+}
+
+bool ImageStore::putPremultiplied(const std::string& id, int width, int height, const uint8_t* rgba,
+                                  size_t bytes, std::string* error) {
+    if (error != nullptr) error->clear();
+    if (id.empty()) {
+        if (error != nullptr) *error = "资源 id 不能为空";
+        return false;
+    }
+    if (width <= 0 || height <= 0) {
+        if (error != nullptr) *error = "图片尺寸必须是正数";
+        return false;
+    }
+    if (rgba == nullptr) {
+        if (error != nullptr) *error = "像素指针为空";
+        return false;
+    }
+    const size_t need = static_cast<size_t>(width) * static_cast<size_t>(height) * 4u;
+    if (bytes != need) {
+        if (error != nullptr) {
+            *error = "字节数与尺寸不符：期望 " + std::to_string(need) + "，实得 " +
+                     std::to_string(bytes);
+        }
+        return false;
+    }
+    const auto it = items_.find(id);
+    const size_t old = (it == items_.end()) ? 0u : it->second.rgba.size();
+    if (bytes_ - old + need > kMaxBytes) {
+        if (error != nullptr) {
+            *error = "图片资源超出上限：" + std::to_string(kMaxBytes / (1024u * 1024u)) + " MB";
+        }
+        return false;
+    }
+
+    ImageResource res;
+    res.id = id;
+    res.width = width;
+    res.height = height;
+    res.rgba.assign(rgba, rgba + need);
+    res.version = next_version_++;
+    if (it != items_.end()) items_.erase(it);
+    items_.emplace(id, std::move(res));
+    bytes_ = bytes_ - old + need;
+    ++generation_;
+    return true;
+}
 const ImageResource* ImageStore::find(const std::string& id) const {
     const auto it = items_.find(id);
     return (it == items_.end()) ? nullptr : &it->second;

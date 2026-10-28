@@ -236,7 +236,7 @@ void EditorEngine::installDocument(doc::Doc doc) {
     loaded_ = true;
     setCaretByText(TextPos{0, 0});
     render_.pages.clear();
-    rebuildFromTree();
+    rebuildProjection();
     // 整份文档换了：段数与内容都可能全变，没有可复用的前缀。
     markAllLayoutDirty();
 }
@@ -259,10 +259,17 @@ doc::SerializeOptions EditorEngine::fontWriteOptions() const {
         if (face == nullptr) return doc::FontRef{};
         return doc::FontRef{face->postScriptName(), face->familyName(), fontFileId(face->path())};
     };
+    opt.resources = [this]() -> std::vector<doc::ResourceBlob> {
+        std::vector<doc::ResourceBlob> out;
+        for (const ImageResource* res : images_.list()) {
+            out.push_back(doc::ResourceBlob{res->id, res->width, res->height, res->rgba});
+        }
+        return out;
+    };
     return opt;
 }
 
-doc::DeserializeOptions EditorEngine::fontReadOptions() const {
+doc::DeserializeOptions EditorEngine::fontReadOptions() {
     doc::DeserializeOptions opt;
     // 与写端同一个顺序找本机那张脸。都找不到就返回 -1（读者保留文件里的原下标，交给
     //   回退链），而不是"随便挑一张" —— 挑错字体比缺字体更难发现。
@@ -271,6 +278,11 @@ doc::DeserializeOptions EditorEngine::fontReadOptions() const {
         if (i < 0) i = fonts_.indexOfFamily(ref.family);
         if (i < 0) i = fonts_.indexOfFile(ref.file);
         return i;
+    };
+    opt.on_resource = [this](const doc::ResourceBlob& blob) -> bool {
+        std::string why;
+        return images_.putPremultiplied(blob.id, blob.width, blob.height, blob.rgba.data(),
+                                        blob.rgba.size(), &why);
     };
     return opt;
 }
@@ -294,16 +306,24 @@ std::string EditorEngine::fontsJson() const {
 
 doc::SerializeResult EditorEngine::saveDocument() const {
     if (!session_) return doc::SerializeResult{false, std::string(), "没有装载文档"};
-    return doc::serialize(session_->doc(), fontWriteOptions());
+    return doc::serialize(session_->doc(), sheet_, fontWriteOptions());
 }
 
 doc::DeserializeResult EditorEngine::loadDocument(const std::string& text) {
     doc::Doc doc;
-    doc::DeserializeResult r = doc::deserialize(text, &doc, fontReadOptions());
+    StyleSheet sheet = sheet_;
+    doc::DeserializeResult r = doc::deserialize(text, &doc, &sheet, fontReadOptions());
     // 读坏了就地返回：session_ / 光标 / 页缓存一个字节都没动，调用方拿到的失败
     //   与"这一趟没发生"是同一件事（doc::deserialize 的契约）。
     if (!r.ok) return r;
-    // sheet_ 不动：命名样式表属于宿主的配置，不属于文件（v1 的文件里没有样式表）。
+    std::string unsupported;
+    if (!doc::checkSupportedLayout(doc, &unsupported)) {
+        r.ok = false;
+        r.error = std::move(unsupported);
+        return r;
+    }
+    // 文件带样式表就换成文件里的；老文件没有这一项时保留宿主当前的配置。
+    if (r.has_styles) sheet_ = std::move(sheet);
     installDocument(std::move(doc));
     return r;
 }
@@ -617,7 +637,7 @@ FlowVisibility EditorEngine::flowVisibility() const {
     return (mode_ == EditMode::Document) ? FlowVisibility::Design : FlowVisibility::Display;
 }
 
-void EditorEngine::rebuildFromTree(const doc::BlockDamage* dmg) {
+void EditorEngine::rebuildProjection(const doc::BlockDamage* dmg) {
     // 视图先摆好：下面这一段就要用位置解析（落基、控件导出），而它读的是视图。
     //   容器都是成员、不换对象，所以地址现在取和最后取一样。
     // 块流换了一份：上一轮那份"筛过括号"的副本已经对不上了，先作废。
@@ -650,12 +670,12 @@ void EditorEngine::rebuildFromTree(const doc::BlockDamage* dmg) {
         if (!(next == floats_)) markAllLayoutDirty();
         floats_ = std::move(next);
     }
-    edit_stats_.rebuild_compile_ms = msSince(t_compile0);
+    edit_stats_.rebuild_projection_ms = msSince(t_compile0);
     projection_.structure.control_spans = std::move(res.controls);
-    finishRebuildFromTree(vis);
+    finishRebuildProjection(vis);
 }
 
-void EditorEngine::finishRebuildFromTree(FlowVisibility vis) {
+void EditorEngine::finishRebuildProjection(FlowVisibility vis) {
     const auto t_index0 = Clock::now();
     // 流索引与块起点一起重建：两者是同一份文档的两种说法，分两次建就会出现
     //   "块按新树、流位置按旧树"的错配，而那种错配只表现为光标落偏一个字，很难查。
@@ -847,7 +867,7 @@ bool EditorEngine::commitSteps(std::vector<Step> steps, int dirty_para, Range se
     if (!outcome.applied.ok) return false;
     if (!outcome.applied.changed) return true;  // 什么都没改：不占撤销栈，也不白跑一次重建
     const doc::Damage& dmg = outcome.damage;
-    rebuildFromTree(&dmg.range);
+    rebuildProjection(&dmg.range);
     // 起点取两者更早的那个：dirty_para 是命令层按编辑计划算的落点，damage.lo 是内容上
     //   第一处真实差异 —— 计划可能比差异更早（保守），反过来不该发生，取小就是安全的。
     //   右端只有损伤区间知道，交给后缀复用当"被换掉几段"。
@@ -865,7 +885,7 @@ bool EditorEngine::undo() {
     doc::SelectionSnapshot restored_selection;
     doc::Damage dmg;
     if (!session_.undo(&restored_selection, &dmg, flowVisibility())) return false;
-    rebuildFromTree(&dmg.range);
+    rebuildProjection(&dmg.range);
     // 撤销改到哪一段由损伤区间回答：两份修订一减就是它，不必整篇重排。
     markLayoutDirtyForDamage(dmg.range);
     // 恢复的是整个区间，不是只看焦点端：撤销前那一对快照本来就是 Range。
@@ -885,7 +905,7 @@ bool EditorEngine::redo() {
     doc::SelectionSnapshot restored_selection;
     doc::Damage dmg;
     if (!session_.redo(&restored_selection, &dmg, flowVisibility())) return false;
-    rebuildFromTree(&dmg.range);
+    rebuildProjection(&dmg.range);
     markLayoutDirtyForDamage(dmg.range);
     setSelection(Range{restored_selection.anchor, restored_selection.focus});
     restoreImageSelection(image_before);
@@ -1643,7 +1663,7 @@ void EditorEngine::setEditMode(EditMode m) {
     //   表单与只读是呈现态），所以块流本身可能变 —— 隐藏字段的子树被摘除或放回，段数都可能
     //   跟着变。不重编译的话，呈现态下那些内容还留在版面上，而它们已经不可寻址。
     //   不能走后缀复用：摘除/放回发生在文档任何位置，脏区不是一个后缀。
-    rebuildFromTree();
+    rebuildProjection();
     markAllLayoutDirty();
 
     // 切模式会改变占位集合本身（只读模式一个都不占，文档与表单都要占），

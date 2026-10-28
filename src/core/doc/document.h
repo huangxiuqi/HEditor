@@ -39,13 +39,400 @@
 
 namespace heditor::doc {
 /**
+ * 一段码点文本。当前内部仍是连续数组，接口按后续可切片的方向定。
+ */
+class Text {
+public:
+
+    /**
+     * 只读/可写都用的随机访问迭代器：只记位置，改文本走容器方法。
+     */
+    class const_iterator {
+    public:
+
+        using iterator_category = std::random_access_iterator_tag;
+        using value_type = uint32_t;
+        using difference_type = std::ptrdiff_t;
+        using pointer = const uint32_t*;
+        using reference = uint32_t;
+
+        /**
+         * 构造。
+         * @param owner 文本
+         * @param index 码点下标
+         */
+        const_iterator(const Text* owner, size_t index) : owner_(owner), index_(index) {}
+
+        /**
+         * 解引用。
+         * @returns 当前码点
+         */
+        uint32_t operator*() const { return (*owner_)[index_]; }
+
+        /**
+         * 前进。
+         * @returns 自身
+         */
+        const_iterator& operator++() {
+            ++index_;
+            return *this;
+        }
+
+        /**
+         * 后退。
+         * @returns 自身
+         */
+        const_iterator& operator--() {
+            --index_;
+            return *this;
+        }
+
+        /**
+         * 前进 n 步。
+         * @param n 步数
+         * @returns 新位置
+         */
+        const_iterator operator+(difference_type n) const {
+            return const_iterator(owner_,
+                                  static_cast<size_t>(static_cast<difference_type>(index_) + n));
+        }
+
+        /**
+         * 前进 n 步（复合赋值）。
+         * @param n 步数
+         * @returns 自身
+         */
+        const_iterator& operator+=(difference_type n) {
+            index_ = static_cast<size_t>(static_cast<difference_type>(index_) + n);
+            return *this;
+        }
+
+        /**
+         * 后退 n 步（复合赋值）。
+         * @param n 步数
+         * @returns 自身
+         */
+        const_iterator& operator-=(difference_type n) {
+            index_ = static_cast<size_t>(static_cast<difference_type>(index_) - n);
+            return *this;
+        }
+
+        /**
+         * 下标访问。
+         * @param n 偏移
+         * @returns 那个码点
+         */
+        uint32_t operator[](difference_type n) const {
+            return (*owner_)[static_cast<size_t>(static_cast<difference_type>(index_) + n)];
+        }
+
+        /**
+         * 后退 n 步。
+         * @param n 步数
+         * @returns 新位置
+         */
+        const_iterator operator-(difference_type n) const {
+            return const_iterator(owner_,
+                                  static_cast<size_t>(static_cast<difference_type>(index_) - n));
+        }
+
+        /**
+         * 两位置之差。
+         * @param o 另一位置
+         * @returns 码点距离
+         */
+        difference_type operator-(const const_iterator& o) const {
+            return static_cast<difference_type>(index_) - static_cast<difference_type>(o.index_);
+        }
+
+        /**
+         * 比较。
+         * @param o 另一位置
+         * @returns true = 同一位置
+         */
+        bool operator==(const const_iterator& o) const {
+            return owner_ == o.owner_ && index_ == o.index_;
+        }
+
+        /**
+         * 不等。
+         * @param o 另一位置
+         * @returns true = 不同位置
+         */
+        bool operator!=(const const_iterator& o) const { return !(*this == o); }
+
+        /**
+         * 下标。
+         * @returns 码点下标
+         */
+        size_t index() const { return index_; }
+
+    private:
+
+        /**
+         * 所属文本。
+         */
+        const Text* owner_ = nullptr;
+
+        /**
+         * 码点下标。
+         */
+        size_t index_ = 0;
+    };
+
+    /**
+     * 迭代器类型。
+     */
+    using iterator = const_iterator;
+
+    /**
+     * 构造空文本。
+     */
+    Text() = default;
+
+    /**
+     * 从连续数组构造，拷贝进共享缓冲区。
+     * @param text 码点
+     */
+    Text(std::vector<uint32_t> text) { assignCopy(std::move(text)); }
+
+    /**
+     * 从初始化列表构造。
+     * @param text 码点
+     */
+    Text(std::initializer_list<uint32_t> text) { assignCopy(std::vector<uint32_t>(text)); }
+
+    /**
+     * 码点数。
+     * @returns 码点数
+     */
+    size_t size() const { return size_; }
+
+    /**
+     * 是否为空。
+     * @returns true = 没有码点
+     */
+    bool empty() const { return size_ == 0; }
+
+    /**
+     * 按下标取码点。
+     * @param index 下标
+     * @returns 码点
+     */
+    uint32_t operator[](size_t index) const { return (*buffer_)[offset_ + index]; }
+
+    /**
+     * 起点。
+     * @returns 起点
+     */
+    const_iterator begin() const { return const_iterator(this, 0); }
+
+    /**
+     * 终点。
+     * @returns 终点
+     */
+    const_iterator end() const { return const_iterator(this, size_); }
+
+    /**
+     * 连续码点指针；空文本返回 nullptr。
+     * @returns 码点指针
+     */
+    const uint32_t* data() const {
+        return buffer_ == nullptr ? nullptr : buffer_->data() + offset_;
+    }
+
+    /**
+     * 与另一段文本是否共享缓冲区。
+     * @param o 另一段文本
+     * @returns true = 共享同一缓冲区
+     */
+    bool sharesBufferWith(const Text& o) const { return buffer_ == o.buffer_; }
+
+    /**
+     * 从另一段文本切出一段，共享同一缓冲区。
+     * @param source 源文本
+     * @param offset 起点
+     * @param size 码点数
+     * @returns 切片
+     */
+    static Text slice(const Text& source, size_t offset, size_t size) {
+        Text out;
+        out.buffer_ = source.buffer_;
+        out.offset_ = source.offset_ + offset;
+        out.size_ = size;
+        return out;
+    } /**
+     * 复制成连续数组。
+     * @returns 码点副本
+     */
+    std::vector<uint32_t> toVector() const {
+        if (buffer_ == nullptr) return {};
+        return std::vector<uint32_t>(
+            buffer_->begin() + static_cast<std::ptrdiff_t>(offset_),
+            buffer_->begin() + static_cast<std::ptrdiff_t>(offset_ + size_));
+    }
+
+    /**
+     * 插入一段码点。
+     * @param pos 插入位置
+     * @param first 码点起点
+     * @param last 码点终点
+     * @returns 插入位置
+     */
+    template <typename It>
+    iterator insert(iterator pos, It first, It last) {
+        std::vector<uint32_t> out = toVector();
+        out.insert(out.begin() + static_cast<std::ptrdiff_t>(pos.index()), first, last);
+        const size_t at = pos.index();
+        assignCopy(std::move(out));
+        return const_iterator(this, at);
+    }
+
+    /**
+     * 删除一段码点。
+     * @param first 起点
+     * @param last 终点
+     * @returns 删除之后的位置
+     */
+    iterator erase(iterator first, iterator last) {
+        std::vector<uint32_t> out = toVector();
+        const size_t at = first.index();
+        out.erase(out.begin() + static_cast<std::ptrdiff_t>(first.index()),
+                  out.begin() + static_cast<std::ptrdiff_t>(last.index()));
+        assignCopy(std::move(out));
+        return const_iterator(this, at);
+    }
+
+    /**
+     * 换成一段码点。
+     * @param first 码点起点
+     * @param last 码点终点
+     */
+    template <typename It>
+    void assign(It first, It last) {
+        std::vector<uint32_t> out(first, last);
+        assignCopy(std::move(out));
+    }
+
+    /**
+     * 用重复码点填满。
+     * @param count 码点数
+     * @param value 码点
+     */
+    void assign(size_t count, uint32_t value) { assignCopy(std::vector<uint32_t>(count, value)); }
+
+    /**
+     * 清空。
+     */
+    void clear() {
+        buffer_.reset();
+        offset_ = 0;
+        size_ = 0;
+    }
+
+    /**
+     * 追加一个码点。
+     * @param cp 码点
+     */
+    void push_back(uint32_t cp) {
+        std::vector<uint32_t> out = toVector();
+        out.push_back(cp);
+        assignCopy(std::move(out));
+    }
+
+    /**
+     * 预留容量；切片实现下不预留。
+     * @param n 码点数
+     */
+    void reserve(size_t n) { (void)n; }
+
+    /**
+     * 从连续数组赋值。
+     * @param text 码点
+     * @returns 自身
+     */
+    Text& operator=(std::vector<uint32_t> text) {
+        assignCopy(std::move(text));
+        return *this;
+    }
+
+    /**
+     * 从初始化列表赋值。
+     * @param text 码点
+     * @returns 自身
+     */
+    Text& operator=(std::initializer_list<uint32_t> text) {
+        assignCopy(std::vector<uint32_t>(text));
+        return *this;
+    }
+
+    /**
+     * 隐式转成连续数组；给仍按 vector 接收的旧接口用。
+     * @returns 码点副本
+     */
+    operator std::vector<uint32_t>() const { return toVector(); }
+
+    /**
+     * 与另一段文本比较。
+     * @param o 另一段文本
+     * @returns true = 内容相同
+     */
+    bool operator==(const Text& o) const {
+        if (o.size() != size_) return false;
+        for (size_t i = 0; i < size_; ++i) {
+            if ((*this)[i] != o[i]) return false;
+        }
+        return true;
+    }
+
+    /**
+     * 与连续数组比较。
+     * @param o 另一段码点
+     * @returns true = 内容相同
+     */
+    bool operator==(const std::vector<uint32_t>& o) const {
+        if (o.size() != size_) return false;
+        for (size_t i = 0; i < size_; ++i) {
+            if ((*this)[i] != o[i]) return false;
+        }
+        return true;
+    }
+
+private:
+
+    /**
+     * 共享不可变缓冲区。
+     */
+    std::shared_ptr<const std::vector<uint32_t>> buffer_;
+
+    /**
+     * 本段在缓冲区里的起点。
+     */
+    size_t offset_ = 0;
+
+    /**
+     * 本段码点数。
+     */
+    size_t size_ = 0;
+
+    /**
+     * 换成一份独占缓冲区。
+     * @param text 码点
+     */
+    void assignCopy(std::vector<uint32_t> text) {
+        size_ = text.size();
+        offset_ = 0;
+        buffer_ = std::make_shared<const std::vector<uint32_t>>(std::move(text));
+    }
+};
+/**
  * 文本 run 的载荷：码点、字符属性、字符样式引用。
  */
 struct RunPayload {
     /**
      * 码点序列（偏移就是下标）。
      */
-    std::vector<uint32_t> text;
+    Text text;
 
     /**
      * 字符属性（标记）。
@@ -85,6 +472,405 @@ struct MarkPayload {
 struct Node;
 using Ref = std::shared_ptr<const Node>;
 
+/**
+ * 只读孩子表：当前按连续数组存放，接口与后续分块持久向量保持一致。
+ *
+ * 这一步只替换 Node 的成员类型，编辑算法仍按孩子下标寻址；分块存储与路径复制
+ * 在后续步骤替换内部表示，调用方不需要跟着改。
+ */
+class Children {
+public:
+
+    /**
+     * 迭代器：只读、双向；按块跳转。
+     */
+    class const_iterator {
+    public:
+
+        using iterator_category = std::bidirectional_iterator_tag;
+        using value_type = Ref;
+        using difference_type = std::ptrdiff_t;
+        using pointer = const Ref*;
+        using reference = const Ref&;
+
+        /**
+         * 构造。
+         * @param owner 孩子表
+         * @param index 全局下标
+         */
+        const_iterator(const Children* owner, size_t index) : owner_(owner), index_(index) {}
+
+        /**
+         * 解引用。
+         * @returns 当前孩子
+         */
+        const Ref& operator*() const { return (*owner_)[index_]; }
+
+        /**
+         * 成员访问。
+         * @returns 当前孩子指针
+         */
+        const Ref* operator->() const { return &(*owner_)[index_]; }
+
+        /**
+         * 前进一格。
+         * @returns 自身
+         */
+        const_iterator& operator++() {
+            ++index_;
+            return *this;
+        }
+
+        /**
+         * 后退一格。
+         * @returns 自身
+         */
+        const_iterator& operator--() {
+            --index_;
+            return *this;
+        }
+
+        /**
+         * 比较。
+         * @param o 另一个迭代器
+         * @returns true = 同一位置
+         */
+        bool operator==(const const_iterator& o) const {
+            return owner_ == o.owner_ && index_ == o.index_;
+        }
+
+        /**
+         * 不等。
+         * @param o 另一个迭代器
+         * @returns true = 不同位置
+         */
+        bool operator!=(const const_iterator& o) const { return !(*this == o); }
+
+    private:
+
+        /**
+         * 所属孩子表。
+         */
+        const Children* owner_ = nullptr;
+
+        /**
+         * 全局下标。
+         */
+        size_t index_ = 0;
+    };
+
+    /**
+     * 每个块的孩子数。
+     */
+    static constexpr size_t kChunkSize = 64;
+
+    /**
+     * 构造空表。
+     */
+    Children() = default;
+
+    /**
+     * 从连续数组构造，按固定大小切块。
+     * @param items 孩子
+     */
+    explicit Children(std::vector<Ref> items) {
+        size_ = items.size();
+        chunks_.reserve((size_ + kChunkSize - 1) / kChunkSize);
+        for (size_t at = 0; at < size_; at += kChunkSize) {
+            const size_t n = std::min(kChunkSize, size_ - at);
+            chunks_.push_back(std::make_shared<const std::vector<Ref>>(
+                items.begin() + static_cast<std::ptrdiff_t>(at),
+                items.begin() + static_cast<std::ptrdiff_t>(at + n)));
+        }
+        recomputeAll();
+    }
+
+    /**
+     * 孩子数。
+     * @returns 孩子数
+     */
+    size_t size() const { return size_; }
+
+    /**
+     * 是否为空。
+     * @returns true = 没有孩子
+     */
+    bool empty() const { return size_ == 0; }
+
+    /**
+     * 按下标取孩子。
+     * @param index 下标
+     * @returns 那个孩子
+     */
+    const Ref& operator[](size_t index) const {
+        return (*chunks_[index / kChunkSize])[index % kChunkSize];
+    }
+
+    /**
+     * 第一个孩子。
+     * @returns 第一个孩子
+     */
+    const Ref& front() const { return (*chunks_.front())[0]; }
+
+    /**
+     * 最后一个孩子。
+     * @returns 最后一个孩子
+     */
+    const Ref& back() const {
+        const std::vector<Ref>& last = *chunks_.back();
+        return last.back();
+    }
+
+    /**
+     * 只读起点。
+     * @returns 起点迭代器
+     */
+    const_iterator begin() const { return const_iterator(this, 0); }
+
+    /**
+     * 只读终点。
+     * @returns 终点迭代器
+     */
+    const_iterator end() const { return const_iterator(this, size_); }
+
+    /**
+     * 孩子的聚合哈希低位。
+     * @returns 聚合哈希低位
+     */
+    uint64_t aggregateLo() const { return agg_lo_; }
+
+    /**
+     * 孩子的聚合哈希高位。
+     * @returns 聚合哈希高位
+     */
+    uint64_t aggregateHi() const { return agg_hi_; }
+
+    /**
+     * 子树里的段落标记数。
+     * @returns 段落标记数
+     */
+    int paras() const { return paras_; }
+
+    /**
+     * 从另一段文本切出一段，共享同一缓冲区。
+     * @param source 源文本
+     * @param offset 起点
+     * @param size 码点数
+     * @returns 切片
+     *//**
+     * 呈现态下的段落标记数。
+     * @returns 呈现态段落标记数
+     */
+    int parasDisplay() const { return paras_display_; }
+
+    /**
+     * 复制成连续数组。
+     * @returns 孩子副本
+     */
+    std::vector<Ref> toVector() const {
+        std::vector<Ref> out;
+        out.reserve(size_);
+        for (const auto& chunk : chunks_) out.insert(out.end(), chunk->begin(), chunk->end());
+        return out;
+    }
+
+    /**
+     * 转成连续数组；给仍按 vector 接收的构造入口用。
+     * @returns 孩子副本
+     */
+    operator std::vector<Ref>() const { return toVector(); }
+
+    /**
+     * 用新的连续数组重建，内容相同的块继续共享。
+     * @param items 新孩子
+     * @returns 新的孩子表
+     */
+    Children rebuilt(std::vector<Ref> items) const {
+        Children out;
+        out.size_ = items.size();
+        out.chunks_.reserve((out.size_ + kChunkSize - 1) / kChunkSize);
+        out.chunk_agg_lo_.reserve(out.chunks_.capacity());
+        out.chunk_agg_hi_.reserve(out.chunks_.capacity());
+        out.chunk_paras_.reserve(out.chunks_.capacity());
+        out.chunk_paras_display_.reserve(out.chunks_.capacity());
+        for (size_t at = 0; at < out.size_; at += kChunkSize) {
+            const size_t n = std::min(kChunkSize, out.size_ - at);
+            const size_t chunk_index = at / kChunkSize;
+            if (chunk_index < chunks_.size()) {
+                const std::vector<Ref>& old = *chunks_[chunk_index];
+                bool same = old.size() == n;
+                for (size_t i = 0; same && i < n; ++i) same = old[i] == items[at + i];
+                if (same) {
+                    out.chunks_.push_back(chunks_[chunk_index]);
+                    out.chunk_agg_lo_.push_back(chunk_agg_lo_[chunk_index]);
+                    out.chunk_agg_hi_.push_back(chunk_agg_hi_[chunk_index]);
+                    out.chunk_paras_.push_back(chunk_paras_[chunk_index]);
+                    out.chunk_paras_display_.push_back(chunk_paras_display_[chunk_index]);
+                    continue;
+                }
+            }
+            std::vector<Ref> chunk(items.begin() + static_cast<std::ptrdiff_t>(at),
+                                   items.begin() + static_cast<std::ptrdiff_t>(at + n));
+            out.chunks_.push_back(std::make_shared<const std::vector<Ref>>(std::move(chunk)));
+            appendChunkSummary(out, out.chunks_.back());
+        }
+        out.recomputeSummary();
+        return out;
+    }
+
+    /**
+     * 与另一份孩子表是否共享下标所在的块。
+     * @param o 另一份孩子表
+     * @param index 下标
+     * @returns true = 两边指向同一个块
+     */
+    bool sharesChunkWith(const Children& o, size_t index) const {
+        if (index >= size_ || index >= o.size_) return false;
+        return chunks_[index / kChunkSize] == o.chunks_[index / kChunkSize];
+    }
+
+    /**
+     * 换掉一个孩子，未改动的块共享。
+     * @param index 下标
+     * @param child 新孩子
+     * @returns 新的孩子表；下标越界时返回原表
+     */
+    Children withReplaced(size_t index, Ref child) const {
+        if (index >= size_) return *this;
+        const size_t chunk_index = index / kChunkSize;
+        Children out = *this;
+        std::vector<Ref> chunk = *chunks_[chunk_index];
+        chunk[index % kChunkSize] = std::move(child);
+        out.chunks_[chunk_index] = std::make_shared<const std::vector<Ref>>(std::move(chunk));
+        out.chunk_agg_lo_[chunk_index] = 0;
+        out.chunk_agg_hi_[chunk_index] = 0;
+        out.chunk_paras_[chunk_index] = 0;
+        out.chunk_paras_display_[chunk_index] = 0;
+        appendChunkSummary(out, out.chunks_[chunk_index]);
+        out.recomputeSummary();
+        return out;
+    }
+
+private:
+
+    /**
+     * 分块存储；每块不可变、可共享。
+     */
+    std::vector<std::shared_ptr<const std::vector<Ref>>> chunks_;
+
+    /**
+     * 孩子总数。
+     */
+    size_t size_ = 0;
+
+    /**
+     * 各块的聚合哈希低位。
+     */
+    std::vector<uint64_t> chunk_agg_lo_;
+
+    /**
+     * 各块的聚合哈希高位。
+     */
+    std::vector<uint64_t> chunk_agg_hi_;
+
+    /**
+     * 各块的段落标记数。
+     */
+    std::vector<int> chunk_paras_;
+
+    /**
+     * 各块的呈现态段落标记数。
+     */
+    std::vector<int> chunk_paras_display_;
+
+    /**
+     * 整张孩子表的聚合哈希低位。
+     */
+    uint64_t agg_lo_ = 0;
+
+    /**
+     * 整张孩子表的聚合哈希高位。
+     */
+    uint64_t agg_hi_ = 0;
+
+    /**
+     * 整张孩子表的段落标记数。
+     */
+    int paras_ = 0;
+
+    /**
+     * 整张孩子表的呈现态段落标记数。
+     */
+    int paras_display_ = 0;
+
+    /**
+     * 把一条哈希混进聚合值。
+     * @param lo 聚合低位
+     * @param hi 聚合高位
+     * @param child 孩子
+     */
+    static void mixChild(uint64_t& lo, uint64_t& hi, const Ref& child);
+
+    /**
+     * 把一块的聚合值混进整表。
+     * @param lo 聚合低位
+     * @param hi 聚合高位
+     * @param chunk_index 块下标
+     */
+    void mixChunk(uint64_t& lo, uint64_t& hi, size_t chunk_index) const {
+        lo = (lo ^ chunk_agg_lo_[chunk_index]) * 1099511628211ull;
+        hi = (hi ^ (chunk_agg_hi_[chunk_index] + 0x9E3779B97F4A7C15ull)) * 14029467366897019727ull;
+        hi ^= hi >> 31;
+    }
+
+    /**
+     * 计算一块的摘要，追加到孩子表。
+     * @param out 目标孩子表
+     * @param chunk 那一块
+     */
+    static void appendChunkSummary(Children& out,
+                                   const std::shared_ptr<const std::vector<Ref>>& chunk);
+
+    /**
+     * 把一块的摘要写到指定下标。
+     * @param out 目标孩子表
+     * @param index 块下标
+     * @param chunk 那一块
+     */
+    static void writeChunkSummary(Children& out, size_t index,
+                                  const std::shared_ptr<const std::vector<Ref>>& chunk);
+
+    /**
+     * 从各块摘要重算整表摘要。
+     */
+    void recomputeSummary() {
+        uint64_t lo = 1469598103934665603ull;
+        uint64_t hi = 14695981039346656037ull;
+        int paras = 0;
+        int paras_display = 0;
+        for (size_t i = 0; i < chunks_.size(); ++i) {
+            mixChunk(lo, hi, i);
+            paras += chunk_paras_[i];
+            paras_display += chunk_paras_display_[i];
+        }
+        agg_lo_ = lo;
+        agg_hi_ = hi;
+        paras_ = paras;
+        paras_display_ = paras_display;
+    }
+
+    /**
+     * 从孩子表重建全部块摘要。
+     */
+    void recomputeAll() {
+        chunk_agg_lo_.clear();
+        chunk_agg_hi_.clear();
+        chunk_paras_.clear();
+        chunk_paras_display_.clear();
+        for (size_t i = 0; i < chunks_.size(); ++i) writeChunkSummary(*this, i, chunks_[i]);
+        recomputeSummary();
+    }
+};
 /**
  * 节点载荷：种类决定哪一支（文本带字符属性、段落标记带段落覆盖、控件带控件记录、表格三种
  * 节点各带自己的记录、图片与公式各带自己的记录、域带域记录、节带页面设置，其余不带载荷）。
@@ -147,7 +933,7 @@ struct Node {
     /**
      * 子节点（共享引用，不可变）。
      */
-    std::vector<Ref> children;
+    Children children;
 
     /**
      * 自身哈希的低 64 位 —— 种类、隐藏、载荷。
@@ -166,6 +952,39 @@ struct Node {
  * 根是 Document，其下是一个 Section（本切片不分节），Section 的子序列是 run、段落标记与
  * 控件交替排列的流 —— 与模型层的节点树同一个形状，将来换到真正的树上时不用再翻译一次。
  */
+inline void Children::mixChild(uint64_t& lo, uint64_t& hi, const Ref& child) {
+    lo = (lo ^ child->hash_lo) * 1099511628211ull;
+    hi = (hi ^ (child->hash_hi + 0x9E3779B97F4A7C15ull)) * 14029467366897019727ull;
+    hi ^= hi >> 31;
+}
+
+inline void Children::writeChunkSummary(Children& out, size_t index,
+                                        const std::shared_ptr<const std::vector<Ref>>& chunk) {
+    uint64_t lo = 1469598103934665603ull;
+    uint64_t hi = 14695981039346656037ull;
+    int paras = 0;
+    int paras_display = 0;
+    for (const Ref& child : *chunk) {
+        mixChild(lo, hi, child);
+        paras += child->paras;
+        paras_display += child->paras_display;
+    }
+    if (out.chunk_agg_lo_.size() <= index) {
+        out.chunk_agg_lo_.resize(index + 1);
+        out.chunk_agg_hi_.resize(index + 1);
+        out.chunk_paras_.resize(index + 1);
+        out.chunk_paras_display_.resize(index + 1);
+    }
+    out.chunk_agg_lo_[index] = lo;
+    out.chunk_agg_hi_[index] = hi;
+    out.chunk_paras_[index] = paras;
+    out.chunk_paras_display_[index] = paras_display;
+}
+
+inline void Children::appendChunkSummary(Children& out,
+                                         const std::shared_ptr<const std::vector<Ref>>& chunk) {
+    writeChunkSummary(out, out.chunks_.size() - 1, chunk);
+}
 struct Doc {
     /**
      * 根节点（Document）。
@@ -293,7 +1112,7 @@ void hashSelf(Hasher& h, const Node& node);
  * @param doc 修订
  * @return 正文那一节的孩子表；没有正文时为 nullptr
  */
-const std::vector<Ref>* bodyOf(const Doc& doc);
+const Children* bodyOf(const Doc& doc);
 
 /**
  * 按节点号找节点（只走正文，线性扫描）。本切片没有索引，用途是读属性。
@@ -339,6 +1158,18 @@ Ref makeNode(NodeId id, NodeKind kind, Payload payload, std::vector<Ref> childre
              bool hidden = false);
 
 /**
+ * 从只读孩子表构造节点；未改动的块可以共享。
+ * @param id 节点号
+ * @param kind 种类
+ * @param payload 载荷
+ * @param children 只读孩子表
+ * @param hidden 作者设定的默认可见性
+ * @returns 节点
+ */
+Ref makeNodeFromChildren(NodeId id, NodeKind kind, Payload payload, Children children,
+                         bool hidden = false);
+
+/**
  * 用一棵树与分配器水位装出一份修订；全文哈希取自根。
  *
  * 水位决定后续分配的起点。反序列化按文件里的值恢复它，否则新建的节点会与文件里引用过的
@@ -372,6 +1203,17 @@ int paraCount(const Doc& doc);
  * @return 每段的文本（只拼 run 的码点）
  */
 std::vector<std::u32string> paraTexts(const Doc& doc);
+
+/**
+ * 当前排版是否支持这份文档的节形状。
+ *
+ * 排版只消费正文流、分节分页与第一节水印；按节页度量与页眉页脚还没有实现。这里把
+ * 这两类形状显式判成不支持，避免它们被当成普通内容静默排出错误结果。
+ * @param doc 修订
+ * @param why 失败原因；可以为空指针
+ * @return true = 当前排版能正确表达
+ */
+bool checkSupportedLayout(const Doc& doc, std::string* why);
 
 /**
  * 在第 para 段的第 cp 个码点之前插入文本。

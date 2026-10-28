@@ -645,7 +645,11 @@ private:
                 const RunPayload& rp = std::get<RunPayload>(r->payload);
                 FormatRun fr = para_default;
                 fr.cp_begin = static_cast<uint32_t>(pb.spec.cp_text.size());
-                pb.spec.cp_text.insert(pb.spec.cp_text.end(), rp.text.begin(), rp.text.end());
+                if (pb.spec.cp_text.empty()) {
+                    pb.spec.cp_text = doc::Text::slice(rp.text, 0, rp.text.size());
+                } else {
+                    pb.spec.cp_text.insert(pb.spec.cp_text.end(), rp.text.begin(), rp.text.end());
+                }
                 fr.cp_end = static_cast<uint32_t>(pb.spec.cp_text.size());
 
                 std::vector<std::string> why;
@@ -947,9 +951,10 @@ private:
  * 返回空表示"这棵子树在流里没有任何可见叶子"（整棵被隐藏，或只剩空容器）。
  */
 const Node* lastVisibleLeaf(const Ref& n, bool display) {
-    for (auto it = n->children.rbegin(); it != n->children.rend(); ++it) {
-        if (display && (*it)->hidden) continue;
-        if (const Node* r = lastVisibleLeaf(*it, display)) return r;
+    for (size_t i = n->children.size(); i > 0; --i) {
+        const Ref& child = n->children[i - 1];
+        if (display && child->hidden) continue;
+        if (const Node* r = lastVisibleLeaf(child, display)) return r;
     }
     return n->children.empty() ? n.get() : nullptr;
 }

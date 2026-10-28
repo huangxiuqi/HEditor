@@ -701,7 +701,7 @@ int EditorEngine::auditCompile() const {
     // 来源身份的契约也要盯住：sources 的 first 是"这一段第一枚吃进内容的元素"，所以段的
     //   流起点必须落在这个元素的区间里。这一条破了，任何靠 first 判归属的判据都会跟着失效，
     //   而产物本身可能逐字段全对 —— 闭括号形态漏记时就是这样。这里独立重算段起点
-    //   （与 rebuildParagraphFromTree 同一口径，刻意不共享代码），审计的价值就来自独立。
+    //   （与投影重算同一口径，刻意不共享代码），审计的价值就来自独立。
     {
         const doc::FlowIndex idx(document(), vis);
         for (size_t i = 0; i < projection_.block_src.size(); ++i) {
@@ -758,7 +758,7 @@ std::string EditorEngine::auditCompileJson() {
     o.precision(3);
     // curMs 是本轮提交实际花在投影上的时间，fullMs 是这一次全量投影加自审的耗时。
     o << "{\"diff\":" << d << ",\"paras\":" << projection_.blocks_full.size()
-      << ",\"curMs\":" << edit_stats_.rebuild_compile_ms << ",\"fullMs\":" << full_ms << "}";
+      << ",\"curMs\":" << edit_stats_.rebuild_projection_ms << ",\"fullMs\":" << full_ms << "}";
     return pk::checked(pk::audit_compile::kSpec, o.str());
 }
 

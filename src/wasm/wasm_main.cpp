@@ -153,12 +153,11 @@ std::vector<BlockSpec> longDocument(int paragraphs, int font_index) {
 }
 
 /**
- * 当前文档的两份输入：块流（内容与块级格式）与表单字段。
+ * 当前演示字段的配置。
  *
- * 它们是"重新建树"的全部材料 —— 换场景、换字段、增删控件都只是改这两份再重编一次，
- * 于是控件永远长在树上，不再有"区间是相对旧文本算的"那类错配。
+ * 文档内容只存在引擎里，这里不再并排保存块流底稿：换场景、打开文件都直接换修订，
+ * 换字段时按引擎当前块流临时重建一份带控件的修订。
  */
-std::vector<BlockSpec> g_blocks;
 std::vector<DemoFieldSpec> g_fields;
 /**
  * 表格场景：这一档不走块流建树（表格结构不在 BlockSpec 里），直接建一棵含表格的树。
@@ -293,17 +292,17 @@ std::vector<BlockSpec> buildScenarioBlocks(int scenario) {
 }
 
 /**
- * 按当前的块流与字段重建文档树，一次性交给引擎。
+ * 把一份块流与字段建成修订，一次性交给引擎。
  *
- * 演示页从这里起走"建树"那条路（setDocument）：控件长在树上、编辑落在树上，与单测里
- *   那条路是同一份代码。换文档不再需要"清控件"那一步 —— 控件是树的产物，树换了它自然
- *   跟着换，不存在"区间指向旧文本"的错配。
+ * 块流只在重建这一刻存在：文档内容与编辑结果都由引擎里的修订持有，宿主不再并排保存
+ *   一份块流底稿。
  *
  * keep_caret 为真时把光标原样搬回去（文本没变才搬）：换控件、改只读标记、增删字段都不该
  *   动光标，而 setDocument 会把光标归零。所以"改控件"这条路上必须补这一步，否则光标会自己
  *   在原地跳回段首。
  */
-void rebuildDocument(bool keep_caret) {
+void rebuildDocument(bool keep_caret, const std::vector<BlockSpec>& blocks,
+                     const std::vector<DemoFieldSpec>& fields) {
     const TextPos before = g_engine.caret();
     // 侧别也要一起搬回来：同一个偏移上有好几个位置（括号之间、控件内外），
     //   只搬偏移等于把光标挪到那一处的"默认"位置上 —— 用户会看到它自己跳了一格。
@@ -314,7 +313,7 @@ void rebuildDocument(bool keep_caret) {
     if (keep_caret) {
         for (const BlockSpec& b : g_engine.blocks()) text_before += b.textUtf8();
     }
-    g_engine.setDocument(g_table_demo ? demoTableDoc(g_cjk_font) : demoDoc(g_blocks, g_fields),
+    g_engine.setDocument(g_table_demo ? demoTableDoc(g_cjk_font) : demoDoc(blocks, fields),
                          StyleSheet{});
     if (!keep_caret) return;
     std::string text_after;
@@ -328,20 +327,9 @@ void rebuildDocument(bool keep_caret) {
 void setScenario(int scenario) {
     g_table_demo = (scenario == 10);
     g_demo_source = true;
-    g_blocks = buildScenarioBlocks(scenario);
     g_fields.clear();
-    rebuildDocument(false);
+    rebuildDocument(false, buildScenarioBlocks(scenario), {});
 }
-
-/**
- * 把当前文档从引擎取回来，作为下一次重建的底稿。
- *
- * 树上编辑之后引擎里的文本已经变了，而 g_blocks 还是装载时那一份 —— 不刷新的话，
- *   紧接着"改控件再重建"（setFormControls）会把用户改过的内容整个倒回装载时的
- *   样子：光标跟着归零，字也打不进任何字段（区间还在原处，文本却已经对不上了）。
- * 只取文本与块级字段：demoTree 不读 runs / objects，重新编译会自己再产一份。
- */
-void syncBlocksFromEngine() { g_blocks = g_engine.blocks(); }
 
 void setZoom(float z) {
     g_cfg.zoom = z;
@@ -1044,7 +1032,9 @@ std::string jsonEscape(const std::string& s) {
 void setFormControls(val list) {
     // 从 JSON 装入的文档没有块流底稿；演示页的整树重建会把它的内容倒回底稿。
     if (!g_demo_source) return;
-    syncBlocksFromEngine();  // 底稿要是引擎里当前那一份（树上编辑可能已经改过文本）
+    // 换字段要重建控件，而重建只在这一刻需要当前块流：从引擎的修订取一份临时快照，
+    //   不再在宿主里维护块流底稿。
+    const std::vector<BlockSpec> blocks = g_engine.blocks();
     g_fields.clear();
     const int n = list["length"].as<int>();
     g_fields.reserve(static_cast<size_t>(n));
@@ -1060,7 +1050,7 @@ void setFormControls(val list) {
         f.readonly = !it["ro"].isUndefined() && it["ro"].as<bool>();
         g_fields.push_back(std::move(f));
     }
-    rebuildDocument(true);
+    rebuildDocument(true, blocks, g_fields);
 }
 void setEditMode(int mode) { g_engine.setEditMode(editModeFromCode(mode)); }
 int editMode() { return static_cast<int>(g_engine.editMode()); }
@@ -1802,10 +1792,9 @@ void loadStressDocumentImpl(int paras, int chars, bool diverse) {
         b.setText(text);
         blocks.push_back(std::move(b));
     }
-    g_blocks = std::move(blocks);
     g_fields.clear();
     g_demo_source = true;
-    rebuildDocument(false);
+    rebuildDocument(false, blocks, {});
 }
 
 void loadStressDocument(int paras, int chars) { loadStressDocumentImpl(paras, chars, false); }
@@ -1826,8 +1815,8 @@ void loadTextDocument(const std::string& text, int repeat) {
     //   这条必须有：空串若什么都不做，"清空文档"在引擎里就没有入口 ——
     //   setText('') 只能静默保留旧内容，而那是没法向使用者解释的一种语义。
     if (text.empty()) {
-        g_blocks.assign(1, BlockSpec{});
-        BlockSpec& only = g_blocks.front();
+        std::vector<BlockSpec> blocks(1);
+        BlockSpec& only = blocks.front();
         only.font_index = g_cjk_font;
         only.size_pt = 12.0f;
         only.wm = WritingMode::HorizontalTB();
@@ -1837,7 +1826,7 @@ void loadTextDocument(const std::string& text, int repeat) {
         only.setText(std::string());
         g_fields.clear();
         g_demo_source = true;
-        rebuildDocument(false);
+        rebuildDocument(false, blocks, {});
         return;
     }
     if (repeat < 1) repeat = 1;
@@ -1867,10 +1856,9 @@ void loadTextDocument(const std::string& text, int repeat) {
             blocks.push_back(std::move(b));
         }
     }
-    g_blocks = std::move(blocks);
     g_fields.clear();
     g_demo_source = true;
-    rebuildDocument(false);
+    rebuildDocument(false, blocks, {});
 }
 
 /**
@@ -1889,13 +1877,12 @@ std::string serializeDocument() {
  *
  * 解析失败时引擎一个字节都不动（doc::deserialize 的契约），所以这里的失败
  *   不会把用户手上那份文档弄丢 —— 宿主把这句话显示出来就够了。
- * 成功之后不保留块流底稿：引擎已经持修订，后续保存与编辑都只走修订。演示页的控件
- *   重建入口对此类文档关闭，避免把用户打开的文件倒回演示底稿。
+ * 成功之后引擎持修订，后续保存与编辑都只走修订；演示页的控件重建入口对此类文档关闭，
+ *   避免把用户打开的文件倒回演示底稿。
  */
 std::string loadDocument(const std::string& text) {
     const doc::DeserializeResult r = g_engine.loadDocument(text);
     if (!r.ok) return r.error;
-    g_blocks.clear();
     g_fields.clear();
     g_demo_source = false;
     return std::string();
@@ -1995,7 +1982,6 @@ std::string applyCharFormat(const std::string& text) {
     std::string why = parseCharPatch(text, &patch);
     if (!why.empty()) return why;
     if (!g_engine.applyCharFormatAndRender(patch)) return "noop";
-    syncBlocksFromEngine();
     return std::string();
 }
 
@@ -2022,7 +2008,6 @@ std::string applyParaFormat(const std::string& text) {
     std::string why = parseParaPatch(text, &patch);
     if (!why.empty()) return why;
     if (!g_engine.applyParaFormatAndRender(patch)) return "noop";
-    syncBlocksFromEngine();
     return std::string();
 }
 
@@ -2044,7 +2029,7 @@ bool deleteSelectionCommand() { return g_engine.deleteSelectionAndRender(); }
  *   括号读作 [[[心悸]悸三]，三个开括号在左、闭括号由内到外依次收。
  */
 void loadFormSample(int variant) {
-    g_blocks = buildScenarioBlocks(variant == 1 ? 3 : 6);
+    const std::vector<BlockSpec> blocks = buildScenarioBlocks(variant == 1 ? 3 : 6);
     g_fields.clear();
     g_demo_source = true;
     auto push = [&](int so, int eo, ControlKind k, const char* id, bool ro) {
@@ -2076,7 +2061,7 @@ void loadFormSample(int variant) {
         push(9, 11, ControlKind::NumberField, "duration", true);
         push(12, 16, ControlKind::TextField, "aggravate", false);
     }
-    rebuildDocument(false);
+    rebuildDocument(false, blocks, g_fields);
     g_engine.setEditMode(EditMode::Form);
     // 必须重排：上面换过文档，而 layout_ 还停在上一次的行盒上。
     //   不重排的话控件会投影到旧几何上 —— 症状是"字段框比文本偏了一截、
@@ -2118,7 +2103,7 @@ std::string editStatsJson() {
     o << "\"frameH\":" << e.frame_h << ",";
     o << "\"framePixels\":" << (static_cast<long long>(e.frame_w) * e.frame_h) << ",";
     o << "\"layoutMs\":" << e.layout_ms << ",";
-    o << "\"rebuildCompileMs\":" << e.rebuild_compile_ms << ",";
+    o << "\"rebuildCompileMs\":" << e.rebuild_projection_ms << ",";
     o << "\"rebuildReused\":" << e.rebuild_reused << ",";
     o << "\"rebuildFlowMs\":" << e.rebuild_flow_ms << ",";
     o << "\"rebuildFlowPosMs\":" << e.rebuild_flowpos_ms << ",";

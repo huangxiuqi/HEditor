@@ -499,6 +499,7 @@ const SectionInfo kSections[] = {
     {79, false, 2},  {80, false, 3},  {81, false, 2},  {82, false, 1},  {83, false, 2},
     {84, false, 2},  {85, false, 3},  {86, false, 4},  {87, false, 3},  {88, false, 3},
     {89, false, 3},  {90, false, 2},  {91, false, 3},  {92, false, 6},  {93, false, 5},
+    {94, false, 2},
 };
 
 /**
@@ -5446,7 +5447,7 @@ int main() {
         //   而"只重编译被改的那一段"是按标记的父容器取子节点区间的 —— 那一段的内容其实起自
         //   控件之外，于是控件里的半截被当成整段编译：前半段的字与控件自己的边界一起丢掉，
         //   block_src_ / block_flow_ 又被这半个产物覆盖，控件集合随之空掉。删除本身没错，
-        //   错的是增量重编译的形状判据（rebuildParagraphFromTree）。
+        //   错的是增量重投影的形状判据。
         // 判据两层：产物必须与整树全量编译逐字段一致（自己会报"哪一类形状没覆盖到"，上面那
         //   一条错在 auditCompile 上就是 4 项差异），以及文本与三条控件区间逐个对上 ——
         //   钉住界面上那一行文本。
@@ -14668,6 +14669,37 @@ int main() {
         expectTrue(e.auditLayout() == 0, "固定值行距下的增量续排等于整篇重排");
     }
 
+    if (runSection(94)) {
+        std::printf("\n[94] 图片资源随文档保存\n");
+        std::vector<uint8_t> px(4 * 4 * 4, 255);
+        ImageSpec spec;
+        spec.resource_id = "save-res";
+        spec.px_w = 4;
+        spec.px_h = 4;
+        spec.width = Length::abs(ptToEmu(20.0));
+        spec.height = Length::abs(ptToEmu(20.0));
+        const doc::Ref image = doc::makeNode(3, NodeKind::Image, spec, {});
+        const doc::Ref mark = doc::makeNode(4, NodeKind::ParagraphMark, doc::MarkPayload{}, {});
+        const doc::Ref section = doc::makeNode(2, NodeKind::Section, SectionSpec{}, {image, mark});
+        const doc::Doc doc = doc::adopt(doc::makeNode(1, NodeKind::Document, {}, {section}), 5);
+
+        EditorEngine a;
+        expectTrue(a.init({cjkPath, mnPath, latinPath}), "引擎初始化（资源保存）");
+        a.setConfig(EngineConfig{});
+        expectTrue(a.registerImage("save-res", 4, 4, px.data(), px.size(), nullptr),
+                   "注册图片资源");
+        a.setDocument(doc, StyleSheet{});
+        const doc::SerializeResult saved = a.saveDocument();
+        expectTrue(saved.ok, "带资源的文档保存成功");
+
+        EditorEngine b;
+        expectTrue(b.init({cjkPath, mnPath, latinPath}), "引擎初始化（资源读回）");
+        b.setConfig(EngineConfig{});
+        const doc::DeserializeResult loaded = b.loadDocument(saved.text);
+        expectTrue(loaded.ok, loaded.ok ? "带资源的文档打开成功" : loaded.error);
+        expectTrue(b.imageCount() == 1 && b.imageBytes() == px.size(),
+                   "资源像素随文档读回（张数 " + std::to_string(b.imageCount()) + "）");
+    }
     checkSectionTable();
     printSectionTimes();
 

@@ -85,7 +85,7 @@ struct Site {
  * @param out 写回落法
  * @return true = 落得进去
  */
-bool locate(const std::vector<Ref>& kids, int para, int cp, std::vector<int>* path, Site* out);
+bool locate(const Children& kids, int para, int cp, std::vector<int>* path, Site* out);
 
 /**
  * 第 para 段的结束标记落在哪一层：path 指到那一层，*at 是它在该层孩子表里的下标。
@@ -95,7 +95,7 @@ bool locate(const std::vector<Ref>& kids, int para, int cp, std::vector<int>* pa
  * @param at 写回标记在孩子表里的下标
  * @return 结束标记节点；这一段还没结束标记时为 nullptr
  */
-bool markOf(const std::vector<Ref>& kids, int para, std::vector<int>* path, int* at);
+bool markOf(const Children& kids, int para, std::vector<int>* path, int* at);
 
 /**
  * 按路径取到某一层的孩子表。路径越界时返回 nullptr。
@@ -103,7 +103,7 @@ bool markOf(const std::vector<Ref>& kids, int para, std::vector<int>* path, int*
  * @param path 孩子表路径
  * @return 那一层的孩子表；路径不存在时为 nullptr
  */
-const std::vector<Ref>* kidsAt(const Doc& doc, const std::vector<int>& path);
+const Children* kidsAt(const Doc& doc, const std::vector<int>& path);
 
 /**
  * 沿路径复制：把第 path[0] 个孩子换成 fn(它) 的结果，逐层换到根。

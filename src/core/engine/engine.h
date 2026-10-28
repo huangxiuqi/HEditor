@@ -203,9 +203,7 @@ public:
      * 存的是"形状与身份"，不存任何派生量 —— 打开时重新投影、重排、重光栅，像素必然回到
      * 保存时的样子（判据就是这么写的：存盘 → 新引擎 → 打开 → 整帧逐字节相同）。
      *
-     * 文件里只有文档树：命名样式表（StyleSheet）与二进制资源都还没有进文件 —— 产品至今
-     * 没有"新建命名样式"的入口，样式表恒为空，所以这不丢信息；等样式编辑落地时要带版本号
-     * 加进同一份文件，不能在 v1 里改它们的含义。
+     * 命名样式表随文档写入同一份文件；二进制资源仍由宿主登记，文件里只保存资源标识。
      *
      * @return 文档 JSON 文本与失败原因
      */
@@ -2471,9 +2469,10 @@ public:
     std::string auditGlyphPagesJson() const;
 
     /**
-     * 编译自审：拿"整树全量编译"做一份对照，与当前产物逐字段比对，返回不符项数。
+     * 投影自审：拿一次全量投影做对照，与当前增量产物逐字段比对，返回不符项数。
      *
-     * 与 auditLayout 同一个理由：编译这一层的增量的正确性由"与全量一致"定义。
+     * 名称保留 auditCompile 是为了宿主诊断接口稳定；这一层已没有编译。
+     * 与 auditLayout 同一个理由：投影这一层的增量正确性由"与全量一致"定义。
      * 只比段数看不出来 —— 增量最典型的错法是"某一段的产物还是旧的"，
      * 而段数、行数全都对得上。没装载过文档时返回 0：那时没有可比的东西。
      *
@@ -2482,7 +2481,7 @@ public:
     int auditCompile() const;
 
     /**
-     * 同上的 JSON 版：给出本轮实际编译耗时与一次全量编译耗时，两者同源。
+     * 同上的 JSON 版：给出本轮实际投影耗时与一次全量投影耗时，两者同源。
      * 这是"增量到底省了多少"的唯一证据 —— 没有分母的耗时数说明不了任何事。
      *
      * @return 本轮编译耗时与一次全量编译的耗时
@@ -2843,14 +2842,14 @@ private:
      * 按当前修订重算产物：投影出块流与控件跨度，再把流索引、位置与控件视图带上。
      * 隐藏控件的可见性口径按当前编辑模式取（见 flowVisibility）。
      */
-    void rebuildFromTree(const doc::BlockDamage* dmg = nullptr);
+    void rebuildProjection(const doc::BlockDamage* dmg = nullptr);
 
     /**
      * 重建的收尾：流索引、块位置的前缀和、控件视图。
      *
      * 控件跨度由投影给（它走树时记下的），存在 StructureIndex 里 —— 见 exportControls。
      */
-    void finishRebuildFromTree(FlowVisibility vis);
+    void finishRebuildProjection(FlowVisibility vis);
 
     /**
      * 由 projection_.block_extents 累加出 projection_.block_flow / projection_.block_flow_span。
@@ -2892,7 +2891,7 @@ private:
      * 读进来时的字体反查，与 fontWriteOptions 同一个顺序（PostScript 名 → 族名 → 文件名）。
      * @return 字体身份到本机下标的回调
      */
-    doc::DeserializeOptions fontReadOptions() const;
+    doc::DeserializeOptions fontReadOptions();
 
     /**
      * 从投影给出的跨度建控件集合。

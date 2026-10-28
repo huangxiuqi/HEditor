@@ -62,6 +62,14 @@ constexpr const char* kFormula = "fm";
 constexpr const char* kField = "fd";
 constexpr const char* kSection = "sec";
 constexpr const char* kChildren = "ch";
+constexpr const char* kStyles = "styles";
+constexpr const char* kStylesDefaultsPara = "dp";
+constexpr const char* kStylesDefaultsRun = "dr";
+constexpr const char* kStylesPara = "p";
+constexpr const char* kStylesChar = "c";
+constexpr const char* kStyleName = "n";
+constexpr const char* kStyleBasedOn = "bo";
+constexpr const char* kResources = "res";
 
 /**
  * 载荷是哪一支。
@@ -167,6 +175,72 @@ bool textToUtf8(const std::vector<uint32_t>& cps, std::string* out, std::string*
 }
 
 /**
+ * base64 编码。
+ * @param data 字节
+ * @returns 文本
+ */
+std::string base64Encode(const std::vector<uint8_t>& data) {
+    static constexpr char kAlphabet[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve((data.size() + 2) / 3 * 4);
+    size_t i = 0;
+    while (i + 2 < data.size()) {
+        const uint32_t v = (static_cast<uint32_t>(data[i]) << 16) |
+                           (static_cast<uint32_t>(data[i + 1]) << 8) |
+                           static_cast<uint32_t>(data[i + 2]);
+        out.push_back(kAlphabet[(v >> 18) & 63]);
+        out.push_back(kAlphabet[(v >> 12) & 63]);
+        out.push_back(kAlphabet[(v >> 6) & 63]);
+        out.push_back(kAlphabet[v & 63]);
+        i += 3;
+    }
+    if (i < data.size()) {
+        uint32_t v = static_cast<uint32_t>(data[i]) << 16;
+        if (i + 1 < data.size()) v |= static_cast<uint32_t>(data[i + 1]) << 8;
+        out.push_back(kAlphabet[(v >> 18) & 63]);
+        out.push_back(kAlphabet[(v >> 12) & 63]);
+        out.push_back(i + 1 < data.size() ? kAlphabet[(v >> 6) & 63] : '=');
+        out.push_back('=');
+    }
+    return out;
+}
+
+/**
+ * base64 解码。
+ * @param text 文本
+ * @param out 字节
+ * @returns true = 解码成功
+ */
+bool base64Decode(const std::string& text, std::vector<uint8_t>* out) {
+    uint32_t acc = 0;
+    int bits = 0;
+    out->clear();
+    for (char c : text) {
+        if (c == '=') break;
+        int v = -1;
+        if (c >= 'A' && c <= 'Z')
+            v = c - 'A';
+        else if (c >= 'a' && c <= 'z')
+            v = c - 'a' + 26;
+        else if (c >= '0' && c <= '9')
+            v = c - '0' + 52;
+        else if (c == '+')
+            v = 62;
+        else if (c == '/')
+            v = 63;
+        else
+            return false;
+        acc = (acc << 6) | static_cast<uint32_t>(v);
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out->push_back(static_cast<uint8_t>((acc >> bits) & 0xFF));
+        }
+    }
+    return true;
+}
+/**
  * 这棵子树用到哪些字体下标。字体表只列点过名的那些：把整个库写进文件，等于把装载环境
  * 一起打包（系统字体几十上百张，与这份文档无关）。
  */
@@ -184,6 +258,58 @@ void collectFonts(const Ref& n, std::unordered_set<int>* out) {
         }
     }
     for (const Ref& c : n->children) collectFonts(c, out);
+}
+
+/**
+ * 样式表用到哪些字体下标。
+ */
+void collectStyleFonts(const StyleSheet& sheet, std::unordered_set<int>* out) {
+    const auto add_para = [out](const ParaFormatPatch& p) {
+        if (p.font_index.has_value()) out->insert(*p.font_index);
+        if (p.fallback_font_indices.has_value()) {
+            for (int index : *p.fallback_font_indices) out->insert(index);
+        }
+    };
+    const auto add_run = [out](const CharFormat& r) {
+        if (r.font_index.has_value()) out->insert(*r.font_index);
+    };
+    add_para(sheet.docDefaultsPara());
+    add_run(sheet.docDefaultsRun());
+    for (StyleKind kind : {StyleKind::Paragraph, StyleKind::Character}) {
+        for (const std::string& name : sheet.names(kind)) {
+            const StyleDef* def = sheet.find(kind, name);
+            if (def == nullptr) continue;
+            add_para(def->para);
+            add_run(def->run);
+        }
+    }
+}
+
+/**
+ * 一条样式写成 JSON。名字直接写成字符串，不进字符串池：样式表很小，也便于人读。
+ */
+ordered_json styleJson(const StyleDef& def) {
+    ordered_json j = ordered_json::object();
+    j[kStyleName] = def.name;
+    if (!def.based_on.empty()) j[kStyleBasedOn] = def.based_on;
+    j["p"] = recjson::paraJson(def.para);
+    j["r"] = recjson::marksJson(def.run);
+    return j;
+}
+
+ordered_json stylesJson(const StyleSheet& sheet) {
+    ordered_json j = ordered_json::object();
+    j[kStylesDefaultsPara] = recjson::paraJson(sheet.docDefaultsPara());
+    j[kStylesDefaultsRun] = recjson::marksJson(sheet.docDefaultsRun());
+    for (StyleKind kind : {StyleKind::Paragraph, StyleKind::Character}) {
+        ordered_json list = ordered_json::array();
+        for (const std::string& name : sheet.names(kind)) {
+            const StyleDef* def = sheet.find(kind, name);
+            if (def != nullptr) list.push_back(styleJson(*def));
+        }
+        j[kind == StyleKind::Paragraph ? kStylesPara : kStylesChar] = std::move(list);
+    }
+    return j;
 }
 
 bool writeNode(const Ref& n, recjson::StringPool* strings, NodeId* max_id,
@@ -356,8 +482,12 @@ bool readRunPayload(Reader& r, const ordered_json& j, Payload* out) {
             const std::string utf8 = j[kText].get<std::string>();
             if (!recjson::isValidUtf8(utf8)) return r.fail("文本不是合法 UTF-8");
             p.text = utf8ToCodepoints(utf8);
-        } else if (!recjson::readU32Array(j, kText, &p.text)) {
-            return r.fail("文本既不是 UTF-8 字符串，也不是码点数组");
+        } else {
+            std::vector<uint32_t> cps;
+            if (!recjson::readU32Array(j, kText, &cps)) {
+                return r.fail("文本既不是 UTF-8 字符串，也不是码点数组");
+            }
+            p.text = std::move(cps);
         }
     }
     if (!recjson::readMarks(r, j, kMarks, &p.marks)) return r.fail("字符属性读不出来");
@@ -479,7 +609,8 @@ bool readNode(Reader& r, const ordered_json& j, int depth, Ref* out) {
 
 }  // namespace
 
-SerializeResult serialize(const Doc& doc, const SerializeOptions& opt) {
+SerializeResult serializeImpl(const Doc& doc, const SerializeOptions& opt,
+                              const StyleSheet* sheet) {
     SerializeResult result;
     if (!doc.root) {
         result.error = "空文档";
@@ -504,6 +635,7 @@ SerializeResult serialize(const Doc& doc, const SerializeOptions& opt) {
     if (opt.font_ref) {
         std::unordered_set<int> used;
         collectFonts(doc.root, &used);
+        if (sheet != nullptr) collectStyleFonts(*sheet, &used);
         if (!used.empty()) {
             std::vector<int> sorted(used.begin(), used.end());
             std::sort(sorted.begin(), sorted.end());
@@ -519,6 +651,22 @@ SerializeResult serialize(const Doc& doc, const SerializeOptions& opt) {
             if (!fonts.empty()) j[kFonts] = std::move(fonts);
         }
     }
+    if (sheet != nullptr) j[kStyles] = stylesJson(*sheet);
+    if (opt.resources) {
+        const std::vector<ResourceBlob> blobs = opt.resources();
+        if (!blobs.empty()) {
+            ordered_json resources = ordered_json::array();
+            for (const ResourceBlob& blob : blobs) {
+                ordered_json item = ordered_json::object();
+                item["id"] = blob.id;
+                item["w"] = blob.width;
+                item["h"] = blob.height;
+                item["d"] = base64Encode(blob.rgba);
+                resources.push_back(std::move(item));
+            }
+            j[kResources] = std::move(resources);
+        }
+    }
     j[kRoot] = std::move(root);
 
     // 先自查一遍再写：库对非法 UTF-8 的处理是抛异常或终止进程（wasm 关掉了异常），
@@ -529,7 +677,51 @@ SerializeResult serialize(const Doc& doc, const SerializeOptions& opt) {
     return result;
 }
 
-DeserializeResult deserialize(const std::string& text, Doc* out, const DeserializeOptions& opt) {
+SerializeResult serialize(const Doc& doc, const SerializeOptions& opt) {
+    return serializeImpl(doc, opt, nullptr);
+}
+
+SerializeResult serialize(const Doc& doc, const StyleSheet& sheet, const SerializeOptions& opt) {
+    return serializeImpl(doc, opt, &sheet);
+}
+
+bool readStyleList(Reader& r, const ordered_json& j, const char* key, StyleKind kind,
+                   StyleSheet* sheet) {
+    if (!j.contains(key)) return true;
+    if (!j[key].is_array()) return r.fail("样式列表不是数组");
+    for (const ordered_json& item : j[key]) {
+        if (!item.is_object()) return r.fail("样式条目不是对象");
+        if (!item.contains(kStyleName) || !item[kStyleName].is_string()) {
+            return r.fail("样式缺少名字");
+        }
+        StyleDef def;
+        def.kind = kind;
+        def.name = item[kStyleName].get<std::string>();
+        if (item.contains(kStyleBasedOn) && item[kStyleBasedOn].is_string()) {
+            def.based_on = item[kStyleBasedOn].get<std::string>();
+        }
+        if (!recjson::readPara(r, item, "p", &def.para)) return r.fail("样式段落格式读不出来");
+        if (!recjson::readMarks(r, item, "r", &def.run)) return r.fail("样式字符格式读不出来");
+        sheet->add(def);
+    }
+    return true;
+}
+
+bool readStyleSheet(Reader& r, const ordered_json& j, StyleSheet* sheet) {
+    if (!j.is_object()) return r.fail("样式表不是对象");
+    ParaFormatPatch para;
+    CharFormat run;
+    if (!recjson::readPara(r, j, kStylesDefaultsPara, &para))
+        return r.fail("样式默认段落格式读不出来");
+    if (!recjson::readMarks(r, j, kStylesDefaultsRun, &run))
+        return r.fail("样式默认字符格式读不出来");
+    sheet->setDocDefaults(para, run);
+    if (!readStyleList(r, j, kStylesPara, StyleKind::Paragraph, sheet)) return false;
+    return readStyleList(r, j, kStylesChar, StyleKind::Character, sheet);
+}
+
+DeserializeResult deserializeImpl(const std::string& text, Doc* out, StyleSheet* sheet,
+                                  const DeserializeOptions& opt) {
     DeserializeResult result;
     if (out == nullptr) {
         result.error = "目标修订为空";
@@ -644,9 +836,54 @@ DeserializeResult deserialize(const std::string& text, Doc* out, const Deseriali
         return result;
     }
 
+    if (doc.contains(kStyles)) {
+        StyleSheet styles;
+        if (!readStyleSheet(reader, doc[kStyles], &styles)) return result;
+        if (sheet != nullptr) *sheet = std::move(styles);
+        result.has_styles = true;
+    }
+
+    if (doc.contains(kResources)) {
+        if (!doc[kResources].is_array()) {
+            result.error = "资源表不是数组";
+            return result;
+        }
+        if (opt.on_resource) {
+            for (const ordered_json& item : doc[kResources]) {
+                if (!item.is_object() || !item.contains("id") || !item["id"].is_string() ||
+                    !item.contains("w") || !item.contains("h") || !item.contains("d") ||
+                    !item["d"].is_string()) {
+                    result.error = "资源条目字段不全";
+                    return result;
+                }
+                ResourceBlob blob;
+                blob.id = item["id"].get<std::string>();
+                blob.width = item["w"].get<int>();
+                blob.height = item["h"].get<int>();
+                if (!base64Decode(item["d"].get<std::string>(), &blob.rgba)) {
+                    result.error = "资源像素不是合法 base64";
+                    return result;
+                }
+                if (!opt.on_resource(blob)) {
+                    result.error = "资源回调拒绝了一张图片";
+                    return result;
+                }
+            }
+        }
+    }
+
     *out = adopt(std::move(root), next);
     result.ok = true;
     return result;
+}
+
+DeserializeResult deserialize(const std::string& text, Doc* out, const DeserializeOptions& opt) {
+    return deserializeImpl(text, out, nullptr, opt);
+}
+
+DeserializeResult deserialize(const std::string& text, Doc* out, StyleSheet* sheet,
+                              const DeserializeOptions& opt) {
+    return deserializeImpl(text, out, sheet, opt);
 }
 
 }  // namespace heditor::doc

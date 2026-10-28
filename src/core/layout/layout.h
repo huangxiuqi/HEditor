@@ -18,6 +18,7 @@
 #include <string>
 #include <vector>
 
+#include "core/doc/document.h"
 #include "core/doc/image_spec.h"
 #include "core/doc/para_format.h"
 #include "core/doc/utf8.h"
@@ -552,7 +553,7 @@ struct BlockSpec {
      * "第 N 个字符"的定位需要从头解码（或者维护一张字节↔码点映射表）。
      * 码点数组里 offset 就是下标，插入/删除是 O(1) 定位 + O(n) 搬移。
      */
-    std::vector<uint32_t> cp_text;
+    doc::Text cp_text;
 
     /**
      * 主字体（FontLibrary 里的下标）。

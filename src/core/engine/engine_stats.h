@@ -315,7 +315,7 @@ struct EditStats {
      * 拆到四项而不是合成一个数：3000 段实测下它们各有量级（流索引比编译还贵），
      * 合成一个就分不清该优化谁。
      */
-    double rebuild_compile_ms = 0.0;
+    double rebuild_projection_ms = 0.0;
 
     /**
      * 本轮有多少块是从上一轮整块搬过来的（不重算文本与格式）。

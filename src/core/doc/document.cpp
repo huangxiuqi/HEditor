@@ -302,14 +302,20 @@ void hashControlSpec(Hasher& h, const ControlSpec& c) {
 void hashNode(Hasher& h, const Node& n) {
     hashSelf(h, n);
     h.u64(n.children.size());
-    for (const Ref& c : n.children) {
-        h.u64(c->hash_lo);
-        h.u64(c->hash_hi);
+    if (!n.children.empty()) {
+        h.u64(n.children.aggregateLo());
+        h.u64(n.children.aggregateHi());
     }
 }
 
 Ref withChildren(const Ref& node, std::vector<Ref> children) {
-    return makeNode(node->id, node->kind, node->payload, std::move(children), node->hidden);
+    return makeNodeFromChildren(node->id, node->kind, node->payload,
+                                node->children.rebuilt(std::move(children)), node->hidden);
+}
+
+Ref withChildren(const Ref& node, Children children) {
+    return makeNodeFromChildren(node->id, node->kind, node->payload, std::move(children),
+                                node->hidden);
 }
 
 /**
@@ -373,7 +379,7 @@ bool isBlockContainer(NodeKind kind) {
  * 段落内容在流里的落点：定义在 internal.h，本体与步骤层共用。
  */
 
-bool locate(const std::vector<Ref>& kids, int para, int cp, std::vector<int>* path, Site* out) {
+bool locate(const Children& kids, int para, int cp, std::vector<int>* path, Site* out) {
     int p = 0;
     int off = 0;
     for (int i = 0; i < static_cast<int>(kids.size()); ++i) {
@@ -449,7 +455,7 @@ bool locate(const std::vector<Ref>& kids, int para, int cp, std::vector<int>* pa
 /**
  * 第 para 段的结束标记落在哪一层：path 指到那一层，*at 是它在该层孩子表里的下标。
  */
-bool markOf(const std::vector<Ref>& kids, int para, std::vector<int>* path, int* at) {
+bool markOf(const Children& kids, int para, std::vector<int>* path, int* at) {
     int p = 0;
     for (int i = 0; i < static_cast<int>(kids.size()); ++i) {
         const Ref& n = kids[i];
@@ -477,9 +483,9 @@ bool markOf(const std::vector<Ref>& kids, int para, std::vector<int>* path, int*
  * 按路径取到某一层的孩子表。路径越界时返回 nullptr：路径由同一棵树上的 locate 给出，
  * 越界不该发生，但这一层读的是别人的指针，宁可返回空也不越界读。
  */
-const std::vector<Ref>* kidsAt(const Doc& doc, const std::vector<int>& path) {
+const Children* kidsAt(const Doc& doc, const std::vector<int>& path) {
     if (!doc.root) return nullptr;
-    const std::vector<Ref>* layer = &doc.root->children;
+    const Children* layer = &doc.root->children;
     if (layer == nullptr) return nullptr;
     for (int idx : path) {
         if (idx < 0 || idx >= static_cast<int>(layer->size())) return nullptr;
@@ -499,11 +505,9 @@ Ref applyAtPath(const Ref& node, const std::vector<int>& path, size_t k,
     if (k == path.size()) return fn(node);
     const int idx = path[k];
     if (idx < 0 || idx >= static_cast<int>(node->children.size())) return node;
-    std::vector<Ref> kids = node->children;
-    Ref updated = applyAtPath(kids[idx], path, k + 1, fn);
-    if (updated == kids[idx]) return node;
-    kids[idx] = std::move(updated);
-    return withChildren(node, std::move(kids));
+    const Ref updated = applyAtPath(node->children[static_cast<size_t>(idx)], path, k + 1, fn);
+    if (updated == node->children[static_cast<size_t>(idx)]) return node;
+    return withChildren(node, node->children.withReplaced(static_cast<size_t>(idx), updated));
 }
 
 /**
@@ -616,6 +620,12 @@ void hashSelf(Hasher& h, const Node& n) {
 }
 
 Ref makeNode(NodeId id, NodeKind kind, Payload payload, std::vector<Ref> children, bool hidden) {
+    return makeNodeFromChildren(id, kind, std::move(payload), Children(std::move(children)),
+                                hidden);
+}
+
+Ref makeNodeFromChildren(NodeId id, NodeKind kind, Payload payload, Children children,
+                         bool hidden) {
     auto node = std::make_shared<Node>();
     node->id = id;
     node->kind = kind;
@@ -624,14 +634,12 @@ Ref makeNode(NodeId id, NodeKind kind, Payload payload, std::vector<Ref> childre
     node->children = std::move(children);
     // 段落数与哈希同一趟算出来：两者都只依赖孩子，分两趟走没有意义。它不进哈希 ——
     //   由内容唯一确定的量再哈希一遍，只会让"改一个看不见的字段"看起来像改了内容。
-    int paras = (node->kind == NodeKind::ParagraphMark) ? 1 : 0;
-    for (const Ref& c : node->children) paras += c->paras;
-    node->paras = paras;
+    node->paras = ((node->kind == NodeKind::ParagraphMark) ? 1 : 0) + node->children.paras();
     // 呈现态的那一份：隐藏子树整棵不产生块，所以它自己记 0，孩子也不必再数。
     int paras_display = 0;
     if (!node->hidden) {
-        paras_display = (node->kind == NodeKind::ParagraphMark) ? 1 : 0;
-        for (const Ref& c : node->children) paras_display += c->paras_display;
+        paras_display =
+            ((node->kind == NodeKind::ParagraphMark) ? 1 : 0) + node->children.parasDisplay();
     }
     node->paras_display = paras_display;
     Hasher h;
@@ -651,7 +659,7 @@ Doc adopt(Ref root, NodeId next_id) {
     return d;
 }
 
-const std::vector<Ref>* bodyOf(const Doc& doc) {
+const Children* bodyOf(const Doc& doc) {
     if (!doc.root || doc.root->children.empty()) return nullptr;
     return &doc.root->children.front()->children;
 }
@@ -763,9 +771,9 @@ EditResult insertText(const Doc& doc, int para, int cp, const std::u32string& te
     // 起点是根的孩子表（各节都在里面）：节是块级容器，段落号在节之间连续，
     //   于是"第几段"与"第几节"是两件事，定位只认前者。
     if (!locate(doc.root->children, para, cp, &path, &site)) return fail("码点偏移越界");
-    const std::vector<Ref>* layer = kidsAt(doc, path);
+    const Children* layer = kidsAt(doc, path);
     if (layer == nullptr) return fail("落点路径失效");
-    std::vector<Ref> kids = *layer;
+    std::vector<Ref> kids = layer->toVector();
 
     std::vector<uint32_t> add;
     add.reserve(text.size());
@@ -798,9 +806,9 @@ EditResult eraseText(const Doc& doc, int para, int cp, int count) {
     // 起点是根的孩子表（各节都在里面）：节是块级容器，段落号在节之间连续，
     //   于是"第几段"与"第几节"是两件事，定位只认前者。
     if (!locate(doc.root->children, para, cp, &path, &site)) return fail("码点偏移越界");
-    const std::vector<Ref>* layer = kidsAt(doc, path);
+    const Children* layer = kidsAt(doc, path);
     if (layer == nullptr) return fail("落点路径失效");
-    std::vector<Ref> kids = *layer;
+    std::vector<Ref> kids = layer->toVector();
     if (site.kind == SiteKind::BeforeChild) return fail("该位置没有可删的内容");
 
     int remaining = count;
@@ -843,9 +851,9 @@ EditResult splitPara(const Doc& doc, int para, int cp) {
     // 起点是根的孩子表（各节都在里面）：节是块级容器，段落号在节之间连续，
     //   于是"第几段"与"第几节"是两件事，定位只认前者。
     if (!locate(doc.root->children, para, cp, &path, &site)) return fail("码点偏移越界");
-    const std::vector<Ref>* layer = kidsAt(doc, path);
+    const Children* layer = kidsAt(doc, path);
     if (layer == nullptr) return fail("落点路径失效");
-    std::vector<Ref> kids = *layer;
+    std::vector<Ref> kids = layer->toVector();
 
     NodeId next = doc.next_id;
     if (site.kind == SiteKind::BeforeChild) {
@@ -877,9 +885,9 @@ EditResult mergePara(const Doc& doc, int para) {
     std::vector<int> path;
     int at = -1;
     if (!markOf(doc.root->children, para, &path, &at)) return fail("段落标记丢失");
-    const std::vector<Ref>* layer = kidsAt(doc, path);
+    const Children* layer = kidsAt(doc, path);
     if (layer == nullptr) return fail("落点路径失效");
-    std::vector<Ref> kids = *layer;
+    std::vector<Ref> kids = layer->toVector();
     kids.erase(kids.begin() + at);
 
     Ref root = withLeafChildren(doc, path, std::move(kids));
@@ -898,9 +906,9 @@ EditResult insertControl(const Doc& doc, int para, int cp, const ControlSpec& sp
     // 起点是根的孩子表（各节都在里面）：节是块级容器，段落号在节之间连续，
     //   于是"第几段"与"第几节"是两件事，定位只认前者。
     if (!locate(doc.root->children, para, cp, &path, &site)) return fail("码点偏移越界");
-    const std::vector<Ref>* layer = kidsAt(doc, path);
+    const Children* layer = kidsAt(doc, path);
     if (layer == nullptr) return fail("落点路径失效");
-    std::vector<Ref> kids = *layer;
+    std::vector<Ref> kids = layer->toVector();
 
     NodeId next = doc.next_id;
     std::vector<Ref> inner;
@@ -931,6 +939,57 @@ EditResult insertControl(const Doc& doc, int para, int cp, const ControlSpec& sp
 
     Ref root = withLeafChildren(doc, path, std::move(kids));
     return EditResult{true, adopt(std::move(root), next), {}};
+}
+
+bool checkSupportedLayout(const Doc& doc, std::string* why) {
+    if (!doc.root) return true;
+
+    const auto fail = [why](std::string message) {
+        if (why != nullptr) *why = std::move(message);
+        return false;
+    };
+
+    bool has_hf_node = false;
+    bool has_field = false;
+    std::function<void(const Ref&)> scan = [&](const Ref& n) {
+        if (!n || has_hf_node) return;
+        if (n->kind == NodeKind::HeaderFooter) {
+            has_hf_node = true;
+            return;
+        }
+        if (n->kind == NodeKind::Field) has_field = true;
+        for (const Ref& c : n->children) scan(c);
+    };
+    scan(doc.root);
+    if (has_hf_node) return fail("页眉页脚内容尚未参与排版");
+    if (has_field) return fail("域元素尚未进入排版输入");
+
+    for (const Ref& section : doc.root->children) {
+        if (!section || section->kind != NodeKind::Section) continue;
+        const auto* spec = std::get_if<SectionSpec>(&section->payload);
+        if (spec == nullptr) return fail("节缺少节记录");
+
+        for (const HeaderFooter& hf : spec->headers) {
+            if (hf.root != kInvalidNodeId) return fail("页眉内容尚未参与排版");
+            if (!(hf.distance == Length{}) || !hf.linked_to_previous) {
+                return fail("页眉距离或链接设置尚未参与排版");
+            }
+        }
+        for (const HeaderFooter& hf : spec->footers) {
+            if (hf.root != kInvalidNodeId) return fail("页脚内容尚未参与排版");
+            if (!(hf.distance == Length{}) || !hf.linked_to_previous) {
+                return fail("页脚距离或链接设置尚未参与排版");
+            }
+        }
+
+        // 分节分页与第一节水印是支持的；其余节字段（纸张、页边距、装订线、页码等）
+        // 还没有被排版消费。
+        SectionSpec baseline;
+        baseline.break_kind = spec->break_kind;
+        baseline.watermark = spec->watermark;
+        if (!spec->sameAs(baseline)) return fail("按节页度量尚未参与排版");
+    }
+    return true;
 }
 
 EditResult setHidden(const Doc& doc, NodeId id, bool hidden) {

@@ -105,6 +105,25 @@ public:
     const ImageResource* find(const std::string& id) const;
 
     /**
+     * 列出全部资源，供落盘遍历。
+     * @returns 资源指针表
+     */
+    std::vector<const ImageResource*> list() const;
+
+    /**
+     * 直接放入已经预乘好的像素（从文件读回时用）。
+     * @param id 资源 id
+     * @param width 像素宽
+     * @param height 像素高
+     * @param rgba 预乘像素
+     * @param bytes 字节数
+     * @param error 失败原因
+     * @returns true = 收下了
+     */
+    bool putPremultiplied(const std::string& id, int width, int height, const uint8_t* rgba,
+                          size_t bytes, std::string* error);
+
+    /**
      * 张数。
      * @return 张数
      */

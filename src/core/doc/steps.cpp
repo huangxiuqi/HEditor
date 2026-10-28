@@ -114,9 +114,9 @@ bool fail(Ctx* c, std::string why) {
 }
 
 bool loadKids(const Doc& doc, const std::vector<int>& path, std::vector<Ref>* out) {
-    const std::vector<Ref>* layer = detail::kidsAt(doc, path);
+    const Children* layer = detail::kidsAt(doc, path);
     if (layer == nullptr) return false;
-    *out = *layer;
+    *out = layer->toVector();
     return true;
 }
 

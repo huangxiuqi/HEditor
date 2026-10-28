@@ -1434,7 +1434,7 @@ int main() {
         expectTrue(ser.ok && de.ok && back.lo == doc.lo && back.hi == doc.hi,
                    "表格往返之后全文哈希相同");
         const auto probe = [](const Doc& d) {
-            const std::vector<doc::Ref>* body = doc::bodyOf(d);
+            const doc::Children* body = doc::bodyOf(d);
             return (body != nullptr && body->size() > 2) ? (*body)[2] : doc::Ref{};
         };
         const doc::Ref a = probe(doc);
@@ -1497,11 +1497,9 @@ int main() {
         const auto de = ser.ok ? doc::deserialize(ser.text, &back) : doc::DeserializeResult{};
         expectTrue(ser.ok && de.ok, "原子与域能落盘并读回来");
         expectTrue(de.ok && back.lo == doc.lo && back.hi == doc.hi, "往返之后全文哈希相同");
-        const auto body = [](const Doc& d) -> const std::vector<doc::Ref>* {
-            return doc::bodyOf(d);
-        };
-        const std::vector<doc::Ref>* a = body(doc);
-        const std::vector<doc::Ref>* b = body(back);
+        const auto body = [](const Doc& d) -> const doc::Children* { return doc::bodyOf(d); };
+        const doc::Children* a = body(doc);
+        const doc::Children* b = body(back);
         int compared = 0;
         int mismatched = 0;
         if (a != nullptr && b != nullptr && a->size() == b->size()) {
@@ -2363,6 +2361,120 @@ int main() {
         expectTrue(!half.text.empty(), "表格的纯文本投影非空（有字）");
     }
 
+    std::printf("\n[26] 排版支持边界：按节页度量与页眉页脚显式拒绝\n");
+    {
+        std::string why;
+        expectTrue(doc::checkSupportedLayout(doc::makeTextDoc({U"甲乙"}), &why),
+                   "纯正文文档可排版");
+
+        SectionSpec spec;
+        spec.headers[0].root = 9;  // 有页眉内容
+        const doc::Ref header_sec =
+            doc::makeNode(2, NodeKind::Section, spec,
+                          {doc::makeNode(3, NodeKind::TextRun,
+                                         doc::RunPayload{cpsOf(U"页眉"), CharFormat{}, {}}, {}),
+                           doc::makeNode(4, NodeKind::ParagraphMark, doc::MarkPayload{}, {})});
+        const Doc header_doc =
+            doc::adopt(doc::makeNode(1, NodeKind::Document, {}, {header_sec}), 10);
+        why.clear();
+        expectTrue(!doc::checkSupportedLayout(header_doc, &why) && !why.empty(),
+                   "有页眉内容时拒绝（" + why + "）");
+
+        SectionSpec margins;
+        margins.margins.left = Length::abs(ptToEmu(72.0));
+        const doc::Ref margin_sec =
+            doc::makeNode(2, NodeKind::Section, margins,
+                          {doc::makeNode(4, NodeKind::ParagraphMark, doc::MarkPayload{}, {})});
+        const Doc margin_doc =
+            doc::adopt(doc::makeNode(1, NodeKind::Document, {}, {margin_sec}), 5);
+        why.clear();
+        expectTrue(!doc::checkSupportedLayout(margin_doc, &why) && !why.empty(),
+                   "按节页边距与全局页度量不同时拒绝（" + why + "）");
+
+        why.clear();
+        expectTrue(!doc::checkSupportedLayout(makeAtomDoc(""), &why) && !why.empty(),
+                   "域元素尚未进入排版时拒绝（" + why + "）");
+    }
+
+    std::printf("\n[27] 样式表随文档往返\n");
+    {
+        StyleSheet sheet;
+        ParaFormatPatch defaults_para;
+        defaults_para.space_after = Length::abs(ptToEmu(6.0));
+        CharFormat defaults_run;
+        defaults_run.size = Length::abs(ptToEmu(12.0));
+        sheet.setDocDefaults(defaults_para, defaults_run);
+
+        StyleDef body;
+        body.name = "正文";
+        body.kind = StyleKind::Paragraph;
+        body.para.space_before = Length::abs(ptToEmu(3.0));
+        body.run.bold = true;
+        sheet.add(body);
+
+        StyleDef emphasis;
+        emphasis.name = "强调";
+        emphasis.kind = StyleKind::Character;
+        emphasis.based_on = "正文";
+        emphasis.run.italic = true;
+        sheet.add(emphasis);
+
+        const Doc doc = doc::makeTextDoc({U"甲乙"});
+        const doc::SerializeResult saved = doc::serialize(doc, sheet);
+        expectTrue(saved.ok, "样式表与文档一起写出（" + saved.error + "）");
+
+        Doc loaded;
+        StyleSheet loaded_sheet;
+        const doc::DeserializeResult read = doc::deserialize(saved.text, &loaded, &loaded_sheet);
+        expectTrue(read.ok && read.has_styles, "读回样式表（" + read.error + "）");
+        expectTrue(loaded_sheet.docDefaultsRun().size.has_value() &&
+                       *loaded_sheet.docDefaultsRun().size == Length::abs(ptToEmu(12.0)),
+                   "文档默认字符格式读回");
+        const StyleDef* got_body = loaded_sheet.find(StyleKind::Paragraph, "正文");
+        expectTrue(got_body != nullptr && got_body->run.bold == std::optional<bool>(true),
+                   "段落样式的字符格式读回");
+        const StyleDef* got_emphasis = loaded_sheet.find(StyleKind::Character, "强调");
+        expectTrue(got_emphasis != nullptr && got_emphasis->based_on == "正文" &&
+                       got_emphasis->run.italic == std::optional<bool>(true),
+                   "字符样式的继承与格式读回");
+    }
+
+    std::printf("\n[28] 分块孩子表：路径复制只替换受影响块\n");
+    {
+        std::vector<std::u32string> paras;
+        paras.reserve(80);
+        for (int i = 0; i < 80; ++i)
+            paras.push_back(U"甲" + std::u32string(1, char32_t(U'0' + i % 10)));
+        const Doc before = doc::makeTextDoc(paras);
+        const doc::Children& before_kids = *doc::bodyOf(before);
+        const doc::EditResult edited = doc::insertText(before, 0, 0, U"乙");
+        expectTrue(edited.ok, "改第一段（" + edited.error + "）");
+        const doc::Children& after_kids = *doc::bodyOf(edited.doc);
+        expectTrue(before_kids.size() == after_kids.size(), "孩子数不变");
+        expectTrue(!before_kids.sharesChunkWith(after_kids, 0), "改动所在块被换掉");
+        expectTrue(before_kids.sharesChunkWith(after_kids, 100), "未改动块仍然共享");
+    }
+    std::printf("\n[29] 投影文本切片：不复制整段\n");
+    {
+        const Doc doc = doc::makeTextDoc({U"甲乙丙"});
+        std::vector<BlockSpec> blocks;
+        const doc::Projection pr = doc::project(doc, StyleSheet{}, {}, &blocks);
+        expectTrue(pr.ok() && blocks.size() == 1, "投影出一块");
+        const doc::Node* run = nullptr;
+        for (const doc::Ref& child : *doc::bodyOf(doc)) {
+            if (child->kind == NodeKind::TextRun) {
+                run = child.get();
+                break;
+            }
+        }
+        expectTrue(run != nullptr, "找到第一枚文本节点");
+        if (run != nullptr) {
+            const doc::Text& source = std::get<doc::RunPayload>(run->payload).text;
+            expectTrue(blocks[0].cp_text.sharesBufferWith(source),
+                       "投影块的文本共享修订里的缓冲区");
+            expectTrue(blocks[0].cp_text.data() == source.data(), "码点指针直接指向共享缓冲区");
+        }
+    }
     std::printf("\n结果：%d 项断言，%d 项失败\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

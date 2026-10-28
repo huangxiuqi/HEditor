@@ -35,7 +35,7 @@ namespace heditor {
  *
  * 为什么用视图而不是让解析器持引擎指针：解析器不该知道引擎还有编辑、绘制、审计那些事 ——
  * 一份只读输入把依赖面钉在编译期，多要一样就得改这个结构，看得见。引擎在每次重建文档与
- * 重排之后摆一次（见 EditorEngine::rebuildFromTree 与 relayout）。
+ * 重排之后摆一次（见 EditorEngine::rebuildProjection 与 relayout）。
  */
 class ControlIndex;
 struct StructureIndex;

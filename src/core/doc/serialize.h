@@ -12,10 +12,13 @@
  */
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <string>
+#include <vector>
 
 #include "core/doc/document.h"
+#include "core/doc/style.h"
 
 namespace heditor::doc {
 /**
@@ -65,6 +68,11 @@ struct DeserializeResult {
      * 是哪一处读不下去。
      */
     std::string error;
+
+    /**
+     * 文件里带没带样式表。
+     */
+    bool has_styles = false;
 };
 
 /**
@@ -92,6 +100,31 @@ struct FontRef {
 };
 
 /**
+ * 一张二进制资源的落盘形状。像素是预乘 alpha 的 RGBA。
+ */
+struct ResourceBlob {
+    /**
+     * 资源 id。
+     */
+    std::string id;
+
+    /**
+     * 像素宽。
+     */
+    int width = 0;
+
+    /**
+     * 像素高。
+     */
+    int height = 0;
+
+    /**
+     * 预乘 alpha 的像素。
+     */
+    std::vector<uint8_t> rgba;
+};
+
+/**
  * 写出去时要知道的事实。只有字体一项：文档里存的是字体库下标，而库的装载顺序是进程的事，
  * 文件必须把"第 0 号是哪张脸"一并写下来。
  */
@@ -102,6 +135,12 @@ struct SerializeOptions {
      * @return 这张脸在文件里的身份
      */
     std::function<FontRef(int)> font_ref;
+
+    /**
+     * 取当前文档引用的二进制资源；为空表示不写资源表。
+     * @returns 资源列表
+     */
+    std::function<std::vector<ResourceBlob>()> resources;
 };
 
 /**
@@ -113,6 +152,13 @@ struct DeserializeOptions {
      * （按回退链去挑一张能用的，比换成一个随机的下标强）。
      */
     std::function<int(const FontRef&)> resolve_font;
+
+    /**
+     * 读到一个资源时的回调；为空表示忽略。
+     * @param blob 资源
+     * @returns true = 收下了
+     */
+    std::function<bool(const ResourceBlob&)> on_resource;
 };
 
 /**
@@ -124,6 +170,16 @@ struct DeserializeOptions {
 SerializeResult serialize(const Doc& doc, const SerializeOptions& opt = {});
 
 /**
+ * 把修订与样式表一起写成 JSON。样式表是文档的一部分，不落盘会让样式引用悬空。
+ * @param doc 修订
+ * @param sheet 样式表
+ * @param opt 写端选项
+ * @return 文档 JSON 文本与失败原因
+ */
+SerializeResult serialize(const Doc& doc, const StyleSheet& sheet,
+                          const SerializeOptions& opt = {});
+
+/**
  * 从 JSON 文本重建修订。成功时 next_id 取自文件，节点号原样保留。
  * @param text JSON 文本
  * @param out 写回的修订
@@ -131,6 +187,17 @@ SerializeResult serialize(const Doc& doc, const SerializeOptions& opt = {});
  * @return 结果；失败时 out 不动
  */
 DeserializeResult deserialize(const std::string& text, Doc* out,
+                              const DeserializeOptions& opt = {});
+
+/**
+ * 从 JSON 重建修订与样式表。样式表指针为空时只读修订。
+ * @param text JSON 文本
+ * @param out 修订
+ * @param sheet 样式表；文件里没有样式表时保持原值
+ * @param opt 读端选项
+ * @return 成功与否与给人看的一句话
+ */
+DeserializeResult deserialize(const std::string& text, Doc* out, StyleSheet* sheet,
                               const DeserializeOptions& opt = {});
 
 }  // namespace heditor::doc
