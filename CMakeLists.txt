@@ -161,22 +161,22 @@ add_library(heditor_core STATIC
   src/core/doc/para.cpp
   src/core/doc/invariants.cpp
   src/core/doc/compile.cpp
-  src/core/doc/format_map.cpp
-  src/core/doc/atom_map.cpp
-  src/core/doc/char_format.cpp
-  src/core/doc/para_format.cpp
+  src/core/rev/format_map.cpp
+  src/core/rev/atom_map.cpp
+  src/core/rev/char_format.cpp
+  src/core/rev/para_format.cpp
   src/core/doc/style.cpp
   src/core/doc/table.cpp
-  src/core/doc/length.cpp
+  src/core/rev/length.cpp
   src/core/doc/normalize.cpp
   src/core/doc/range.cpp
   src/core/doc/fragment.cpp
   src/core/doc/subtree.cpp
-  src/core/doc/control_spec.cpp
-  src/core/doc/section_spec.cpp
-  src/core/doc/field_spec.cpp
-  src/core/doc/image_spec.cpp
-  src/core/doc/formula_spec.cpp
+  src/core/rev/control_spec.cpp
+  src/core/rev/section_spec.cpp
+  src/core/rev/field_spec.cpp
+  src/core/rev/image_spec.cpp
+  src/core/rev/formula_spec.cpp
   src/core/doc/control_index.cpp
   src/core/doc/control_api.cpp
   src/core/doc/validation.cpp
@@ -186,8 +186,13 @@ add_library(heditor_core STATIC
   src/core/doc/serialize.cpp
   src/core/doc/record_json.cpp
   src/core/rev/rev.cpp
+  src/core/rev/node_kind.cpp
   src/core/rev/project.cpp
   src/core/rev/serialize.cpp
+  src/core/rev/subtree.cpp
+  src/core/rev/style.cpp
+  src/core/rev/utf8.cpp
+  src/core/rev/fragment_value.cpp
   src/core/rev/from_tree.cpp
   src/core/rev/session.cpp
   src/core/rev/flow.cpp

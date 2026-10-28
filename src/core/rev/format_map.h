@@ -12,8 +12,9 @@
 
 #include <functional>
 
-#include "core/doc/compile.h"
-#include "core/doc/style.h"
+#include "core/rev/compile_result.h"
+#include "core/rev/style.h"
+#include "core/rev/table_spec.h"
 
 namespace heditor {
 /**

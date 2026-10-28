@@ -1,5 +1,7 @@
 #include "core/doc/range.h"
 
+#include "core/doc/flow.h"
+
 namespace heditor {
 
 namespace {

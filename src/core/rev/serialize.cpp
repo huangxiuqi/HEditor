@@ -1,4 +1,6 @@
 #include "core/rev/serialize.h"
+#include "core/rev/utf8.h"
+#include "core/utils/utf8.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -9,7 +11,6 @@
 #include <variant>
 #include <vector>
 
-#include "core/doc/document.h"
 #include "core/doc/record_json.h"
 #include "nlohmann/json.hpp"
 

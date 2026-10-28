@@ -1,8 +1,8 @@
-#include "core/doc/control_spec.h"
+#include "core/rev/control_spec.h"
+#include "core/rev/utf8.h"
+#include "core/utils/utf8.h"
 
 #include "core/utils/hash.h"
-
-#include "core/doc/document.h"
 
 #include <string>
 

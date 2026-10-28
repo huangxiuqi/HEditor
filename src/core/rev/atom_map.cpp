@@ -1,8 +1,8 @@
-#include "core/doc/atom_map.h"
+#include "core/rev/atom_map.h"
 
 #include <algorithm>
 
-#include "core/doc/length.h"
+#include "core/rev/length.h"
 #include "core/utils/hash.h"
 
 namespace heditor {

@@ -1,7 +1,7 @@
 /**
  * 图片记录的名字互换（声明与理由见 image_spec.h）。
  */
-#include "core/doc/image_spec.h"
+#include "core/rev/image_spec.h"
 
 namespace heditor {
 

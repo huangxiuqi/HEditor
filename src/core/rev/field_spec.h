@@ -18,7 +18,7 @@
 #include <map>
 #include <string>
 
-#include "core/doc/node_id.h"
+#include "core/rev/node_id.h"
 
 namespace heditor {
 

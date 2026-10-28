@@ -2,14 +2,6 @@
 
 namespace heditor {
 
-int Piece::span() const { return kind == PieceKind::ParaMark ? 1 : static_cast<int>(cps.size()); }
-
-int Fragment::span() const {
-    int total = 0;
-    for (const Piece& p : pieces) total += p.span();
-    return total;
-}
-
 bool collectCovers(const NodeTree& tree, const Range& range, std::vector<Cover>* out,
                    std::string* error) {
     return collectCovers(tree, FlowIndex(tree, FlowVisibility::Design), range, out, error);

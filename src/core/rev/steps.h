@@ -12,9 +12,9 @@
 
 #include <vector>
 
-#include "core/doc/flow.h"
-#include "core/doc/steps.h"
+#include "core/rev/flow_types.h"
 #include "core/rev/rev.h"
+#include "core/rev/step_types.h"
 
 namespace heditor::rev {
 /**

@@ -24,10 +24,10 @@
 #include <string>
 #include <vector>
 
-#include "core/doc/flow.h"
-#include "core/doc/subtree.h"
+#include "core/rev/flow_types.h"
 #include "core/rev/rev.h"
 #include "core/rev/serialize.h"
+#include "core/rev/subtree.h"
 
 namespace heditor::rev {
 /**

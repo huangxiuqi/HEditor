@@ -3,8 +3,6 @@
 #include <algorithm>
 #include <utility>
 
-#include "core/doc/node.h"
-#include "core/doc/subtree.h"
 #include "core/rev/flow.h"
 #include "core/rev/internal.h"
 

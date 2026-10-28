@@ -1,7 +1,7 @@
 /**
  * 公式记录的名字互换（声明与理由见 formula_spec.h）。
  */
-#include "core/doc/formula_spec.h"
+#include "core/rev/formula_spec.h"
 
 namespace heditor {
 

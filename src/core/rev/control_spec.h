@@ -22,7 +22,7 @@
 #include <variant>
 #include <vector>
 
-#include "core/doc/length.h"
+#include "core/rev/length.h"
 #include "core/utils/types.h"
 
 namespace heditor {

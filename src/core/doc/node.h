@@ -19,130 +19,19 @@
 #include <unordered_map>
 #include <vector>
 
-#include "core/doc/char_format.h"
-#include "core/doc/control_spec.h"
-#include "core/doc/field_spec.h"
-#include "core/doc/formula_spec.h"
-#include "core/doc/image_spec.h"
-#include "core/doc/node_id.h"
-#include "core/doc/para_format.h"
-#include "core/doc/section_spec.h"
-#include "core/doc/table_spec.h"
+#include "core/rev/char_format.h"
+#include "core/rev/control_spec.h"
+#include "core/rev/field_spec.h"
+#include "core/rev/flow_types.h"
+#include "core/rev/formula_spec.h"
+#include "core/rev/image_spec.h"
+#include "core/rev/node_id.h"
+#include "core/rev/node_kind.h"
+#include "core/rev/para_format.h"
+#include "core/rev/section_spec.h"
+#include "core/rev/table_spec.h"
 
 namespace heditor {
-/**
- * 节点种类：只回答"结构上怎么处理"这一个问题。
- *
- * 不按控件的业务类型分：复选框、单选、下拉、日期都是 ContentControl，差别在
- * controlType 这个数据字段上（第七节）：业务类型会一直增加、宿主还能自带一种，
- * 而结构上只有"能不能装子节点"这一条差别。把业务类型写进枚举，等于每加一种控件都要同时改
- * 容器判定、不变量检查器、编译与序列化四处。控件的结构形态（容器型 / 原子型）也是
- * 控件类型声明里的一项数据，不是节点种类 —— 所以控件现在只有 ContentControl 一种种类。
- */
-enum class NodeKind : uint8_t {
-    /**
-     * 容器：持有子节点序列，在流里表现为「起始边界 … 内容 … 结束边界」
-     */
-    Document = 0,
-    Section,
-    Table,
-    TableRow,
-    TableCell,
-    ContentControl,
-    Quote,
-    CodeBlock,
-    ListItem,
-    Link,
-    /**
-     * 页眉页脚的内容片段根（第十节）。它装块级内容，但不在正文流里：位置换算与段落序号
-     * 都看不到它，它由节的记录 HeaderFooter::root 引用，走自己的编译路径。单独一种容器，
-     * 是因为"在哪条流里"是结构差别，不是属性差别。
-     */
-    HeaderFooter,
-    /**
-     * 原子：不可再分，在流里是一个带宽度、参与断行的叶子
-     */
-    Image,
-    Formula,
-    Break,
-    PageBreak,
-    Tab,
-    Field,
-    /**
-     * 文本：一段共享同一套标记的连续文本，边界由标记集合的变化决定
-     */
-    TextRun,
-    /**
-     * 流内分隔元素：标记段落结束，段落属性挂在它身上
-     */
-    ParagraphMark,
-};
-
-/**
- * 是否持有子节点。只有容器能装东西，加子节点前必须过这一关。
- * @param kind 节点种类
- * @return true = 持有子节点
- */
-bool isContainer(NodeKind kind);
-
-/**
- * 是否为文本节点：内部按码点编址，在流里按码点展开。
- * @param kind 节点种类
- * @return true = 文本节点
- */
-bool isText(NodeKind kind);
-
-/**
- * 是否为流内分隔元素。单独判定是因为它既不是容器也不是原子，
- * 但流位置换算必须给它一个位置 —— 段落序号正是数它的个数得来的。
- * @param kind 节点种类
- * @return true = 段落标记
- */
-bool isParagraphMark(NodeKind kind);
-
-/**
- * 是否为原子：在流里整枚占一个位置、没有可寻址的内部（图片、公式、域、制表符、分页符、换行）。
- *
- * 单独判定是因为"删掉它"只有整枚移除这一种做法：文本按码点删、容器按边界进出，而原子既没有
- * 可寻址的内部、也不是结构边界。它同时也是排版层"不可断的盒子"那一类，但两者不是一回事 ——
- * 排版只认已经进了编译产物的那几种（见 InlineObjectKind::Atom）。
- * @param kind 节点种类
- * @return true = 原子（整枚占一个流位置）
- */
-bool isAtom(NodeKind kind);
-
-/**
- * 种类名，与枚举逐项对应。用于诊断与报告文本（拿数字去对照枚举太费事），
- * 也让"新加一个结构种类"这件事集中在一处 —— switch 不写 default，
- * 少写一种时 -Wswitch 会报出来。
- * @param kind 节点种类
- * @return 名字
- */
-const char* nodeKindName(NodeKind kind);
-
-/**
- * 种类名 → 种类。不认识的名字返回 false。
- *
- * 序列化（1.10）按名字落盘、按名字读回，而不是写枚举值：枚举值一旦重排或插入，旧文件里
- * 的数字就会静默变成另一个种类，而名字不会。这个名字来回的唯一真相就是 nodeKindName。
- * @param name 名字
- * @param out 写回种类
- * @return true = 名字认识
- */
-bool nodeKindFromName(const std::string& name, NodeKind* out);
-
-/**
- * 谁允许装谁。只登记第三节已经定下的三条强约束（根只收节、表格只收行、行只收单元格），
- * 其余容器不限制子节点 —— 子节点约束是一个位标志的并集，尚未逐种登记。
- *
- * 放在这一层而不是检查器内部：步骤构造也要用它（未通过就在构造时拒掉，而不是先造出非法文档
- * 再等检查器报）。两处各写一份，迟早会在"新加一种容器"时不一致。
- * @param parent 父节点种类
- * @param child 子节点种类
- * @return true = 允许这样嵌套
- */
-bool acceptsChild(NodeKind parent, NodeKind child);
-
 /**
  * 节点。字段公开：它是纯数据，封装留在树那一层（见 NodeTree）。
  * 给每个字段配一对访问器只会让"谁改了 parent"更难查。
@@ -255,19 +144,6 @@ struct Node {
      * 页面设置的属性袋。其余种类读它没有定义。
      */
     SectionSpec section;
-};
-
-/**
- * 可见性口径：隐藏的控件在哪种模式下生效（第七节）。
- *
- * 编辑模式是设计态，隐藏的控件照常显示、照常参与排版，否则作者没法选中它改回来；
- * 表单与只读模式下它整棵子树从流里摘除，不显示、不占位置。所以位置空间与段落结构
- * 都随模式变 —— 两套派生索引（流位置、段落）都要带上这个参数。
- * 放在这里而不是各自定义，是因为它的成因是 Node.hidden 这一条属性。
- */
-enum class FlowVisibility : uint8_t {
-    Design,   // 编辑（设计）态：隐藏的控件照常参与流
-    Display,  // 表单与只读：隐藏的控件整棵子树摘除，不占流位置
 };
 
 /**

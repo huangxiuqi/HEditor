@@ -2,16 +2,6 @@
 
 namespace heditor {
 
-int NodeSpec::span() const {
-    if (isText(kind)) return static_cast<int>(text.size());
-    if (!isContainer(kind)) return 1;  // 原子与段落标记各占一位
-
-    // 根不含边界（它不嵌在别处），其余容器两头各占一位。
-    int total = (kind == NodeKind::Document) ? 0 : 2;
-    for (const NodeSpec& c : children) total += c.span();
-    return total;
-}
-
 NodeSpec captureSubtree(const NodeTree& tree, NodeId id) {
     NodeSpec spec;
     const Node* n = tree.find(id);

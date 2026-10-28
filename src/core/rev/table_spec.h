@@ -19,8 +19,8 @@
 #include <string>
 #include <vector>
 
-#include "core/doc/control_spec.h"
-#include "core/doc/length.h"
+#include "core/rev/control_spec.h"
+#include "core/rev/length.h"
 
 namespace heditor {
 /**

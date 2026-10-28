@@ -16,13 +16,13 @@
 
 #include <string>
 
-#include "core/doc/edit_mode.h"
-#include "core/doc/flow.h"
 #include "core/doc/node.h"
-#include "core/doc/range.h"
-#include "core/doc/steps.h"
+#include "core/rev/edit_mode.h"
 #include "core/rev/flow.h"
+#include "core/rev/flow_types.h"
+#include "core/rev/range.h"
 #include "core/rev/rev.h"
+#include "core/rev/step_types.h"
 
 namespace heditor::rev {
 /**

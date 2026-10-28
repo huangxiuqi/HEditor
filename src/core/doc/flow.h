@@ -23,39 +23,9 @@
 #include <vector>
 
 #include "core/doc/node.h"
+#include "core/rev/flow_types.h"
 
 namespace heditor {
-/**
- * 节点级位置。offset 的含义由 container 的种类决定：
- * 容器里是子节点槽位序号（0 到 children.size()），文本节点里是码点下标。
- */
-struct Pos {
-    /**
-     * 容器（或文本节点）的 id。
-     */
-    NodeId container = kInvalidNodeId;
-
-    /**
-     * 容器里是子节点槽位；文本节点里是码点下标。
-     */
-    int offset = 0;
-
-    /**
-     * 两个节点级位置相同（容器与偏移都相等）。
-     */
-    bool operator==(const Pos& o) const { return container == o.container && offset == o.offset; }
-
-    /**
-     * 不等 = 相等取反。
-     */
-    bool operator!=(const Pos& o) const { return !(*this == o); }
-};
-
-/**
- * 流位置：摊平后的线性下标，取值 [0, size()]，size() 表示"最后一个元素之后"。
- */
-using FlowPos = int;
-
 /**
  * 流索引：由一棵树一次性预处理出每个节点的展开区间。
  *

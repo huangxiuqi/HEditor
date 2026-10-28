@@ -19,9 +19,9 @@
 #include <vector>
 
 #include "core/doc/control_index.h"
-#include "core/doc/control_spec.h"
 #include "core/doc/node.h"
 #include "core/doc/transaction.h"
+#include "core/rev/control_spec.h"
 
 namespace heditor {
 /**

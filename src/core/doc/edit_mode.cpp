@@ -1,4 +1,4 @@
-#include "core/doc/edit_mode.h"
+#include "core/rev/edit_mode.h"
 
 namespace heditor {
 

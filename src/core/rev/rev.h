@@ -25,15 +25,15 @@
 #include <variant>
 #include <vector>
 
-#include "core/doc/char_format.h"
-#include "core/doc/control_spec.h"
-#include "core/doc/field_spec.h"
-#include "core/doc/formula_spec.h"
-#include "core/doc/image_spec.h"
 #include "core/doc/node.h"
-#include "core/doc/para_format.h"
-#include "core/doc/section_spec.h"
 #include "core/doc/subtree.h"
+#include "core/rev/char_format.h"
+#include "core/rev/control_spec.h"
+#include "core/rev/field_spec.h"
+#include "core/rev/formula_spec.h"
+#include "core/rev/image_spec.h"
+#include "core/rev/para_format.h"
+#include "core/rev/section_spec.h"
 
 namespace heditor::rev {
 /**

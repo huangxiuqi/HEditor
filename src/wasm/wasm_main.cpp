@@ -17,11 +17,11 @@
 #include <string>
 #include <vector>
 
-#include "core/doc/para_format.h"
 #include "core/doc/record_json.h"
 #include "core/engine/engine.h"
 #include "core/engine/payload_schema.h"
 #include "core/rev/fragment.h"
+#include "core/rev/para_format.h"
 #include "core/utils/utf8.h"
 #include "demo/demo_documents.h"
 

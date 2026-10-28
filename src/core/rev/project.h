@@ -19,8 +19,9 @@
 #include <string>
 #include <vector>
 
-#include "core/doc/compile.h"
+#include "core/rev/compile_result.h"
 #include "core/rev/rev.h"
+#include "core/rev/style.h"
 
 namespace heditor::rev {
 /**

@@ -15,7 +15,7 @@
 #include <cstdint>
 #include <string>
 
-#include "core/doc/length.h"
+#include "core/rev/length.h"
 
 namespace heditor {
 /**

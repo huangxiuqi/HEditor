@@ -22,11 +22,9 @@
 #include <string>
 #include <vector>
 
-#include "core/doc/char_format.h"
 #include "core/doc/compile.h"
 #include "core/doc/control.h"
 #include "core/doc/document.h"
-#include "core/doc/edit_mode.h"
 #include "core/doc/flow.h"
 #include "core/doc/node.h"
 #include "core/doc/range.h"
@@ -34,6 +32,8 @@
 #include "core/engine/caret.h"
 #include "core/layout/layout.h"
 #include "core/rev/capability.h"
+#include "core/rev/char_format.h"
+#include "core/rev/edit_mode.h"
 #include "core/rev/flow.h"
 #include "core/rev/rev.h"
 #include "core/rev/session.h"

@@ -1,12 +1,12 @@
 #include "core/doc/compile.h"
 
-#include "core/doc/atom_map.h"
+#include "core/rev/atom_map.h"
 
 #include <algorithm>
 
 #include "core/doc/document.h"
-#include "core/doc/format_map.h"
 #include "core/doc/table.h"
+#include "core/rev/format_map.h"
 #include "core/utils/hash.h"
 
 namespace heditor {

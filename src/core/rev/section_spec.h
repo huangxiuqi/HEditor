@@ -15,8 +15,8 @@
 #include <map>
 #include <string>
 
-#include "core/doc/length.h"
-#include "core/doc/node_id.h"
+#include "core/rev/length.h"
+#include "core/rev/node_id.h"
 #include "core/text/writing_mode.h"
 #include "core/utils/types.h"
 

@@ -13,9 +13,9 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "core/doc/formula_spec.h"
-#include "core/doc/image_spec.h"
-#include "core/doc/length.h"
+#include "core/rev/formula_spec.h"
+#include "core/rev/image_spec.h"
+#include "core/rev/length.h"
 
 namespace heditor {
 /**

@@ -1,13 +1,16 @@
 #include "core/rev/fragment.h"
+#include "core/rev/utf8.h"
+#include "core/utils/utf8.h"
 
 #include <algorithm>
 #include <unordered_map>
 #include <unordered_set>
 
-#include "core/doc/document.h"
 #include "core/doc/record_json.h"
 #include "core/rev/flow.h"
 #include "core/rev/internal.h"
+#include "core/rev/utf8.h"
+#include "core/utils/utf8.h"
 
 namespace heditor::rev {
 namespace {

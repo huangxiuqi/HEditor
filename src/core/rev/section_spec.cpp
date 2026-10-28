@@ -1,4 +1,4 @@
-#include "core/doc/section_spec.h"
+#include "core/rev/section_spec.h"
 
 namespace heditor {
 

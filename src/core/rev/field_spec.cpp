@@ -1,4 +1,4 @@
-#include "core/doc/field_spec.h"
+#include "core/rev/field_spec.h"
 
 #include <string>
 #include <unordered_set>

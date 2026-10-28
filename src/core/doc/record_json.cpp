@@ -4,7 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 
-#include "core/doc/length.h"
+#include "core/rev/length.h"
 
 namespace heditor::recjson {
 

@@ -20,9 +20,9 @@
 #include "core/text/font_source.h"
 #include "core/text/shaper.h"
 #include "core/utils/hash.h"
+#include "core/utils/units.h"
 #include "core/utils/utf8.h"
 #include "demo/demo_documents.h"
-#include "tree_document.h"
 
 #include <hb.h>
 
@@ -66,6 +66,93 @@ std::string joinPath(const std::string& dir, const std::string& name) {
     const char last = dir.back();
     if (last == '/' || last == '\\') return dir + name;
     return dir + "/" + name;
+}
+
+/**
+ * 把 BlockSpec 的段落格式折成 rev 的段落覆盖。
+ * @param b 块
+ * @returns 段落覆盖
+ */
+ParaFormatPatch paraPatchOf(const BlockSpec& b) {
+    ParaFormatPatch p;
+    p.font_index = b.font_index;
+    p.size = Length::abs(ptToEmu(b.size_pt));
+    p.wm = b.wm;
+    p.line_rule = b.line_spacing.rule;
+    p.line_factor = b.line_spacing.factor;
+    if (b.line_spacing.exact_pt > 0.0f)
+        p.line_exact = Length::abs(ptToEmu(b.line_spacing.exact_pt));
+    p.space_before = Length::abs(ptToEmu(b.space_before_pt));
+    p.space_after = Length::abs(ptToEmu(b.space_after_pt));
+    p.page_break_before = b.page_break_before;
+    p.language = b.language;
+    p.color = b.color;
+    if (!b.fallback_font_indices.empty()) p.fallback_font_indices = b.fallback_font_indices;
+    return p;
+}
+
+/**
+ * 把 BlockSpec 的默认字符格式折成 rev 的字符标记。
+ * @param b 块
+ * @returns 字符标记
+ */
+CharFormat marksOf(const BlockSpec& b) {
+    CharFormat m;
+    m.font_index = b.font_index;
+    m.size = Length::abs(ptToEmu(b.size_pt));
+    m.color = b.color;
+    m.bold = b.weight >= 700.0f;
+    m.italic = b.italic;
+    m.underline = b.underline;
+    return m;
+}
+
+/**
+ * 用 BlockSpec 造修订：文本按 FormatRun 切，段落格式与字符格式来自块。
+ * @param blocks 块流
+ * @returns 修订
+ */
+rev::Doc docFromBlocks(const std::vector<BlockSpec>& blocks) {
+    NodeId next = 1;
+    std::vector<rev::Ref> section_kids;
+    for (const BlockSpec& b : blocks) {
+        const CharFormat base = marksOf(b);
+        if (b.runs.empty()) {
+            if (!b.cp_text.empty()) {
+                rev::RunPayload run;
+                run.text = b.cp_text;
+                run.marks = base;
+                section_kids.push_back(
+                    rev::makeNode(next++, NodeKind::TextRun, std::move(run), {}));
+            }
+        } else {
+            for (const FormatRun& fr : b.runs) {
+                const size_t lo = std::min<size_t>(fr.cp_begin, b.cp_text.size());
+                const size_t hi = std::min<size_t>(fr.cp_end, b.cp_text.size());
+                if (hi <= lo) continue;
+                CharFormat m;
+                m.font_index = fr.font_index;
+                m.size = Length::abs(ptToEmu(fr.size_pt));
+                m.color = fr.color;
+                m.bold = fr.weight >= 700.0f;
+                m.italic = fr.italic;
+                m.underline = fr.underline;
+                rev::RunPayload run;
+                run.text.assign(b.cp_text.begin() + static_cast<long>(lo),
+                                b.cp_text.begin() + static_cast<long>(hi));
+                run.marks = m;
+                section_kids.push_back(
+                    rev::makeNode(next++, NodeKind::TextRun, std::move(run), {}));
+            }
+        }
+        rev::MarkPayload mark;
+        mark.para = paraPatchOf(b);
+        mark.marks = base;
+        section_kids.push_back(rev::makeNode(next++, NodeKind::ParagraphMark, std::move(mark), {}));
+    }
+    rev::Ref section = rev::makeNode(next++, NodeKind::Section, {}, std::move(section_kids));
+    rev::Ref root = rev::makeNode(next++, NodeKind::Document, {}, {std::move(section)});
+    return rev::adopt(std::move(root), next);
 }
 
 /**
@@ -320,7 +407,7 @@ int main() {
     {
         EditorEngine engine;
         expectTrue(engine.init({cjkPath, mnPath, latinPath}), "引擎初始化（加载三个字体）");
-        loadTreeDocument(engine, demoTree(sampleDocument(0, 1, 2), {}), StyleSheet{});
+        engine.setDocument(docFromBlocks(sampleDocument(0, 1, 2)));
         engine.relayout();
         const LayoutResult& r = engine.layout();
         std::printf("     pages=%d glyphs=%d lines/cols=%d clusters=%d shape=%.2fms\n",
@@ -422,8 +509,8 @@ int main() {
         expectTrue(eOff.init({cjkPath, mnPath, latinPath}), "引擎初始化（三个字体）");
         expectTrue(eOn.init({cjkPath, mnPath, latinPath}), "引擎初始化（三个字体）");
 
-        loadTreeDocument(eOff, demoTree({mixedParagraphBlock(cjk)}, {}));        // 不回退
-        loadTreeDocument(eOn, demoTree({mixedParagraphBlock(cjk, latin)}, {}));  // 回退到拉丁
+        eOff.setDocument(docFromBlocks({mixedParagraphBlock(cjk)}));        // 不回退
+        eOn.setDocument(docFromBlocks({mixedParagraphBlock(cjk, latin)}));  // 回退到拉丁
         eOff.relayout();
         eOn.relayout();
 
@@ -501,7 +588,7 @@ int main() {
         b.language = "mn";
         b.setText(kMongol_word);
         const std::string word = b.textUtf8();
-        loadTreeDocument(e, demoTree({b}, {}), StyleSheet{});
+        e.setDocument(docFromBlocks({b}));
         e.relayout();
 
         const LayoutResult& r = e.layout();

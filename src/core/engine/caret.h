@@ -23,10 +23,10 @@
 #include "core/doc/control.h"
 #include "core/doc/document.h"
 #include "core/doc/flow.h"
-#include "core/doc/node_id.h"
 #include "core/doc/range.h"
 #include "core/layout/layout.h"
 #include "core/rev/flow.h"
+#include "core/rev/node_id.h"
 #include "core/utils/types.h"
 
 namespace heditor {

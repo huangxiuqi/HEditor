@@ -16,7 +16,7 @@
 
 #include "core/doc/node.h"
 #include "core/doc/steps.h"
-#include "core/doc/table_spec.h"
+#include "core/rev/table_spec.h"
 
 namespace heditor {
 /**

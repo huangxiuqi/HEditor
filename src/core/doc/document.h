@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include "core/rev/utf8.h"
 
 namespace heditor {
 /**
@@ -59,21 +60,6 @@ struct TextPos {
  * @return 码点序列
  */
 std::vector<uint32_t> utf8ToCodepoints(const std::string& s);
-
-/**
- * 码点数组转 UTF-8。
- * @param cps 码点
- * @param n 码点个数
- * @return UTF-8 文本
- */
-std::string codepointsToUtf8(const uint32_t* cps, size_t n);
-
-/**
- * 码点序列转 UTF-8。
- * @param cps 码点
- * @return UTF-8 文本
- */
-std::string codepointsToUtf8(const std::vector<uint32_t>& cps);
 
 /**
  * 编辑原语

@@ -1,4 +1,4 @@
-#include "core/doc/char_format.h"
+#include "core/rev/char_format.h"
 
 namespace heditor {
 

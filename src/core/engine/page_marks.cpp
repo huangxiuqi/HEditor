@@ -13,7 +13,7 @@
 #include <string>
 #include <vector>
 
-#include "core/doc/control_spec.h"
+#include "core/rev/control_spec.h"
 #include "core/utils/types.h"
 
 namespace heditor {
