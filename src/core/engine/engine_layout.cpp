@@ -2,7 +2,8 @@
  * 排版调度与增量。
  *
  * 排版算法本身在 core/layout/：这里只管"什么时候排、排哪一段、排完怎么复用后缀"，
- * 也就是脏段记账（layout_dirty_from_）、页指纹、后缀两级复用与统计同步。
+ * 也就是脏段记账（layout_dirty_from_）、后缀两级复用与统计同步。
+ * 页面的失效不在这里：presentInternal 按 PageScene 与已画场景比差异。
  * 与算法分开的理由是两者的变更理由不同 —— 算法随排版规则变，这里随笔触与增量契约变。
  */
 
@@ -24,31 +25,6 @@
 #include "core/text/shaper.h"
 
 namespace heditor {
-
-/**
- * 页指纹的"标脏值"。
- *
- * 高位恒置（真指纹一律清它，所以它不可能等于真指纹）；低位按已画那一版翻一下 ——
- * 写完值就变成"已画"，下一次再写同一个值的话，比较读出来是"没变"，那一页从此不再
- * 重画（症状：连续换行只有第一次把文档推下去，之后屏幕不动）。
- */
-namespace {
-
-uint64_t dirtyFpValue(uint64_t base) {
-    const uint64_t v = kFnvBasis | kFpDirtyBit;
-    return (v == base) ? (v ^ 1ull) : v;
-}
-
-}  // namespace
-
-// 页内容指纹
-//
-// 用途：判断"这一页的画面对不对"。指纹没变就跳过重画 —— 这是光栅增量的全部依据。
-// 要求不高：不是密码学强度，只要求"内容变了几乎一定会变"。
-//
-// 混合器（kFnvBasis / fnvMix）挪去了 core/utils/hash.h：现在排版层也要用它算
-//   段级整形指纹，两处必须是同一套混合（各写一份的话，"哪一处换了算法"
-//   会静默地退化成"缓存永不命中"或更糟的"两处对同一输入给出不同指纹"）。
 
 /**
  * 布局：重排整篇，并把排版统计同步到 EngineStats。
@@ -77,347 +53,6 @@ void EditorEngine::syncStatsFromLayout() {
     stats_.zoom = cfg_.zoom;
 }
 
-void EditorEngine::computePageFingerprints(int dirty_lo, int dirty_hi) {
-    const int n = std::max(1, layout_.stats.page_count);
-
-    // 增量重算的前提：页数没变（页数变了一定整篇的重画判据都要重来），
-    // 且上一轮的指纹数组还在（长度够、页数对得上）。不满足就退化成整篇重算。
-    // 有浮动图时不能只重算脏区那几页：图的纵向偏移可以把它推到任何一页上，
-    //   而"哪一页多了一张图"要按整篇重算的页指纹才看得出来（有浮动图时排版本来
-    //   也是整篇重排，见 relayout 的 must_full）。
-    const bool has_float = !layout_.placed_floats.empty() || !floats_.empty();
-    const bool partial = dirty_lo >= 0 && dirty_hi >= dirty_lo &&
-                         page_fp_new_.size() == static_cast<size_t>(n) && !has_float;
-    if (!partial) {
-        page_fp_new_.assign(static_cast<size_t>(n), kFnvBasis);
-        dirty_lo = 0;
-        dirty_hi = n - 1;
-    } else {
-        // 连页的接缝是双向的：脏区最后一页上越过带底的那半行，像素画在下一页上
-        //   （见 drawPage 的接缝补画）。所以重算范围要多带一页 —— 少算的
-        //   那一页会被判成"还是新鲜的"，缝上那半行留在旧位置：命令成功、读回的值也对，
-        //   而光标所在的那一段看着像没渲染。
-        if (cfg_.page.continuous && dirty_hi + 1 < n) ++dirty_hi;
-        // 只把要重算的那几页清零，其余页保留上一轮的值 ——
-        // 那些页的字形一个字节都没动，指纹自然不变（这正是增量的依据）。
-        for (int p = dirty_lo; p <= dirty_hi; ++p) page_fp_new_[static_cast<size_t>(p)] = kFnvBasis;
-    }
-
-    // 只遍历受影响页的字形。
-    //
-    // "按页取字形"读的是 LayoutResult::page_glyphs。旧做法靠"字形数组按页单调"
-    //   二分定位；表格行跨页之后那条不变式已经不成立（一条高格切到第二页时，它的
-    //   续排字形先追加，同一行其余各格的字形还在上一页），二分会漏掉后半截列 ——
-    //   改了这一页却判成"新鲜"，屏幕上留下的是旧墨迹（含段落标记的残影）。
-    // 连页的接缝：越过带底的字形在下一条带里也有一份像素（见 drawPage 的
-    //   接缝补画），所以它的哈希要同时混进两条带。只混一条的话，改了这一行只会重画
-    //   上一带，下一带留着旧的半行。
-    const bool cont = cfg_.page.continuous;
-    const float slab_pt = cfg_.page.slabHeightPt();
-    // 起点往前挪一页：dirty_lo 自己那一带也可能有上一带的溢出（那一页本身不在
-    //   重算范围里，所以只把溢出混进去，不动它的指纹）。
-    const int scan_lo = (partial && cont && dirty_lo > 0) ? dirty_lo - 1 : dirty_lo;
-    const std::vector<PlacedGlyph>& gs = layout_.glyphs;
-    // 受影响页的字形下标：按页取（见 LayoutResult::page_glyphs），不再按页号二分 ——
-    //   表格行跨页之后字形数组不按页单调，二分定位会漏掉后面各格的字形。
-    std::vector<int> scan;
-    for (int p = scan_lo; p <= dirty_hi; ++p) {
-        const std::vector<int>& list = layout_.glyphsOnPage(p);
-        scan.insert(scan.end(), list.begin(), list.end());
-    }
-    auto mixGlyph = [](uint64_t h, const PlacedGlyph& g) {
-        h = fnvMix(h, g.glyph_id);
-        h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(quantPt(g.x_pt))));
-        h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(quantPt(g.y_pt))));
-        h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(quantPt(g.rotate_deg))));
-        h = fnvMix(h, g.cluster);
-        h = fnvMix(h, static_cast<uint64_t>(g.color.r) | (static_cast<uint64_t>(g.color.g) << 8) |
-                          (static_cast<uint64_t>(g.color.b) << 16));
-        // 画出来是什么样，不只看字形下标与位置：合成倾斜（不改推进）、下划线（另外画一条
-        //   线）、字号与字重（换的是字体实例）都能让"同一个字形、同一个位置"变成另一份像素。
-        //   只改其中一项时 x/y 一点不动，指纹若不比这几项，这一页就被判成"还是新鲜的"——
-        //   命令返回成功、读回的值也对，画面却停在旧帧上（TRAPS 195）。
-        h = fnvMix(h, g.italic ? 1ULL : 0ULL);
-        h = fnvMix(h, g.underline ? 1ULL : 0ULL);
-        h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(quantPt(g.size_pt))));
-        h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(quantPt(g.weight))));
-        return h;
-    };
-    for (int k : scan) {
-        const PlacedGlyph& g = gs[static_cast<size_t>(k)];
-        if (g.page < 0 || g.page >= n) continue;
-        if (g.page >= dirty_lo)
-            page_fp_new_[static_cast<size_t>(g.page)] =
-                mixGlyph(page_fp_new_[static_cast<size_t>(g.page)], g);
-        const int next = g.page + 1;
-        if (cont && next >= dirty_lo && next < n && next <= dirty_hi && g.y_pt > slab_pt - 1.0f) {
-            page_fp_new_[static_cast<size_t>(next)] =
-                mixGlyph(page_fp_new_[static_cast<size_t>(next)], g);
-        }
-    }
-    // 真指纹一律清掉哨兵位（见 kFpDirtyBit）：这一位只在 markPagesChangedFrom 里置起来，
-    //   于是"标脏"与"真值"在编码上不相交。别的页保留原值 —— 它们可能正是标脏值。
-    for (int p = dirty_lo; p <= dirty_hi; ++p) page_fp_new_[static_cast<size_t>(p)] &= ~kFpDirtyBit;
-
-    // 控件与编辑模式刻意不进页指纹。
-    //
-    //   页指纹算的是块哈希（文本 / 格式 / 表格结构），控件区间与模式不在这份输入里。
-    //   它们的影响由别的路带走：
-    //     显示 / 不显示括号会改占位（进文档流）→ 排版变 → 页指纹自然跟着变；
-    //     只读位只改括号颜色 → relayout 里比 mark_readonly_prev_，变了就作废页缓存；
-    //     切模式会重编译 + 整篇重排，块流本身就可能变。
-    //   把这些混进指纹只会无谓地重画所有页。
-
-    // 表格片段也进页指纹。
-    //
-    //   格线与切出来的那两条边是"片段几何"画出来的，字形与行盒都不带它们：
-    //   行片段的下沿从行底挪到页底（这条行跨页了）时，这一页可能一个字形都不变，
-    //   页被判成新鲜，边框永远停在旧位置。摘要按页算，没表的页等于 kFnvBasis。
-    if (!partial || table_fp_new_.size() < static_cast<size_t>(n)) {
-        table_fp_new_.assign(static_cast<size_t>(n), kFnvBasis);
-    }
-    for (int p = dirty_lo; p <= dirty_hi && p < n; ++p) {
-        if (p < 0) continue;
-        const uint64_t d = tablePieceDigest(p);
-        table_fp_new_[static_cast<size_t>(p)] = d;
-        page_fp_new_[static_cast<size_t>(p)] = fnvMix(page_fp_new_[static_cast<size_t>(p)], d);
-    }
-
-    // 浮动图也进页指纹：它不占行盒，行指纹与字形都看不见它 —— 只改环绕方式时
-    //   页会被判成新鲜，画面上仍是改之前那一版（图留在老位置、或是没有画）。
-    if (!partial || float_fp_new_.size() < static_cast<size_t>(n)) {
-        float_fp_new_.assign(static_cast<size_t>(n), kFnvBasis);
-    }
-    for (int p = dirty_lo; p <= dirty_hi && p < n; ++p) {
-        if (p < 0) continue;
-        const uint64_t d = floatPieceDigest(p);
-        float_fp_new_[static_cast<size_t>(p)] = d;
-        page_fp_new_[static_cast<size_t>(p)] = fnvMix(page_fp_new_[static_cast<size_t>(p)], d);
-    }
-
-    computeLineFingerprints(dirty_lo, dirty_hi, !partial);
-
-    // 行结构也进页指纹。
-    //
-    //   上面那份输入只有字形，而画在页上的东西不止字形：段落标记由行盒给出几何，一个
-    //   字形都不占。于是"在文档末尾回车建一个空段"这种改动在像素上看得见、在指纹上
-    //   看不见 —— 页被判成新鲜，一次都不重光栅，那枚标记永远不出现（TRAPS 195 同族：
-    //   页指纹必须覆盖绘制层的全部输入）。
-    //   行指纹正是"这一行画出来的全部输入"，按页混进来补上这一段；顺序敏感，所以
-    //   增删一条行、两条行换序都会改变页指纹，不必再单独混行数。
-    //   只混重算范围内的页：范围外的页要保留上一轮的指纹，再混一次会让它永远不新鲜。
-    {
-        const std::vector<LineBox>& lines = layout_.lines;
-        const size_t n_lines = std::min(lines.size(), line_fp_new_.size());
-        for (size_t li = 0; li < n_lines; ++li) {
-            const int p = lines[li].page;
-            if (p < dirty_lo || p > dirty_hi || p < 0 || p >= n) continue;
-            page_fp_new_[static_cast<size_t>(p)] =
-                fnvMix(page_fp_new_[static_cast<size_t>(p)], line_fp_new_[li]);
-        }
-    }
-}
-
-/**
- * 一页上的表格片段摘要：表的位置、列边界，加上这一页各片段的上下沿与切口标记。
- *
- * 绘制读的就是这几个数（见 engine_paint.cpp 的 emitTables），所以它是"这一页的格线
- * 长什么样"的最小充分输入。表的位置与列边界对每一页都要混：列宽变了而片段没变时，
- * 竖线也会挪。
- */
-uint64_t EditorEngine::tablePieceDigest(int page) const {
-    uint64_t h = kFnvBasis;
-    for (const PlacedTable& pt : layout_.placed_tables) {
-        bool on_page = false;
-        for (const PlacedRow& pr : pt.placed) {
-            if (pr.page == page) {
-                on_page = true;
-                break;
-            }
-        }
-        if (!on_page) continue;
-        h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(quantPt(pt.x))));
-        h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(quantPt(pt.w))));
-        for (float cx : pt.col_x) {
-            h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(quantPt(cx))));
-        }
-        for (const PlacedRow& pr : pt.placed) {
-            if (pr.page != page) continue;
-            h = fnvMix(h, static_cast<uint64_t>(pr.row));
-            h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(quantPt(pr.y))));
-            h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(quantPt(pr.h))));
-            h = fnvMix(h, (pr.cont_top ? 1ULL : 0ULL) | (pr.cont_bottom ? 2ULL : 0ULL));
-        }
-    }
-    return h;
-}
-
-uint64_t EditorEngine::floatPieceDigest(int page) const {
-    uint64_t h = kFnvBasis;
-    for (const PlacedFloat& pf : layout_.placed_floats) {
-        if (pf.page != page) continue;
-        // 拖动预览也要进摘要：图挪了而摘要不变时，这一页会被判成新鲜，
-        //   拖动中只有第一帧跟手、后面全停在原处。
-        float fx = pf.x;
-        float fy = pf.y;
-        imagePreviewPos(pf, &fx, &fy);
-        h = fnvMix(h, pf.handle);
-        h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(quantPt(fx))));
-        h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(quantPt(fy))));
-        h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(quantPt(pf.w))));
-        h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(quantPt(pf.h))));
-        h = fnvMix(h, static_cast<uint64_t>(static_cast<uint8_t>(pf.wrap)));
-    }
-    return h;
-}
-
-/**
- * 行指纹与行盒几何快照。
- *
- * 与页指纹同一次调用里做，理由有两条：一是同一批字形不必遍历两遍；
- * 二是"哪几页脏"和"这几页里哪几行脏"必须是同一轮排版的两面 —— 分成两次算，
- * 两次之间排版若再动一次，两边就对不上了。
- *
- * 指纹含三样：行盒几何（位置挪了也算变）、簇表（占位槽与括号侧别都在里面）、
- * 这一行的字形（id / 位置 / 朝向 / 颜色）。少一样就会出现"字形没重画但确实变了"的
- * 幽灵墨迹，而 auditFrame（当前帧 vs 整帧重画）正是抓它的判据。
- */
-void EditorEngine::computeLineFingerprints(int dirty_lo, int dirty_hi, bool full) {
-    const int n_lines = static_cast<int>(layout_.lines.size());
-    const bool partial = !full && dirty_lo >= 0 && dirty_hi >= dirty_lo &&
-                         line_fp_new_.size() == static_cast<size_t>(n_lines);
-    if (!partial) {
-        line_fp_new_.assign(static_cast<size_t>(n_lines), kFnvBasis);
-        dirty_lo = 0;
-        dirty_hi = std::max(0, layout_.stats.page_count - 1);
-    }
-    line_fp_new_.resize(static_cast<size_t>(n_lines), kFnvBasis);
-
-    const std::vector<PlacedGlyph>& gs = layout_.glyphs;
-    for (int li = 0; li < n_lines; ++li) {
-        const LineBox& lb = layout_.lines[static_cast<size_t>(li)];
-        if (lb.page < dirty_lo || lb.page > dirty_hi) continue;
-        uint64_t h = kFnvBasis;
-        auto mixf = [&h](float v) {
-            h = fnvMix(h, static_cast<uint64_t>(static_cast<uint32_t>(quantPt(v))));
-        };
-        mixf(lb.block_lo_pt);
-        mixf(lb.block_hi_pt);
-        mixf(lb.inline_origin_pt);
-        mixf(lb.inline_end_pt);
-        // 标记的粗细与基线：段落标记的笔画按字号算，位置按 bracket_axis_pt 算 ——
-        //   行盒的长宽可能一点不动（行高由 line_factor 与块字号压着），而标记画出来变了。
-        mixf(lb.size_pt);
-        mixf(lb.bracket_axis_pt);
-        // 一行画出来什么样，还有两样不在字形坐标里：裁不裁、按多高的行槽裁。
-        //   固定值小于墨迹时字要裁到 [行槽顶, 行槽顶 + 行高)，而"只有一行、又是同一个
-        //   基线"的文档里，固定值与多倍行距的字形坐标可以完全一样 —— 差别只在裁切。
-        //   漏了这条，页位图被判成"还新鲜"，改行距之后画面停在旧帧上（TRAPS 195 同族）。
-        h = fnvMix(h, lb.clip_text ? 1ull : 0ull);
-        mixf(lb.advance_pt);
-        mixf(lb.lead_top_pt);
-        h = fnvMix(h, static_cast<uint64_t>(lb.page));
-        h = fnvMix(h, static_cast<uint64_t>(lb.paragraph));
-        h = fnvMix(h, static_cast<uint64_t>(lb.first_cp));
-        h = fnvMix(h, static_cast<uint64_t>(lb.last_cp));
-        h = fnvMix(h, (lb.vertical ? 1ull : 0ull) | (lb.sideways ? 2ull : 0ull));
-        for (const LineCluster& c : lb.clusters) {
-            h = fnvMix(h, static_cast<uint64_t>(c.cp));
-            mixf(c.inline_pt);
-            h = fnvMix(h, (c.placeholder ? 1ull : 0ull) | (c.read_only ? 2ull : 0ull) |
-                              (static_cast<uint64_t>(c.bracket_side) << 2) |
-                              (c.control_hint ? 32ull : 0ull));
-            // 占位簇的内容指纹：控件边界带的是外观摘要（括号颜色、图元怎么画），原子带的是
-            //   内容（换了一张同样大的图、改了公式表达式）。两者在几何上都看不出来 ——
-            //   不混它，"改了但画面不变"就只能在换页时才自愈。
-            h = fnvMix(h, c.content_hash);
-        }
-        // 对象表这一条不能省：括号宽度为 0 时排版根本不插占位槽（见 layout.cpp 的
-        //   emitSlot 前置判断），上面那一路就不存在，而记号颜色照样会变。直接按对象表
-        //   把落在这一行范围内的摘要混进来，与"插不插槽"无关。
-        if (lb.paragraph >= 0 && lb.paragraph < static_cast<int>(blocks().size())) {
-            for (const InlineObject& o : blocks()[static_cast<size_t>(lb.paragraph)].objects) {
-                if (o.cp < lb.first_cp || o.cp > lb.last_cp) continue;
-                h = fnvMix(h, o.content_hash);
-            }
-        }
-        // 这一行的字形：按 line 单调，二分定位这一段
-        const auto gb = std::lower_bound(
-            gs.begin(), gs.end(), li, [](const PlacedGlyph& g, int line) { return g.line < line; });
-        for (auto it = gb; it != gs.end() && it->line == li; ++it) {
-            h = fnvMix(h, it->glyph_id);
-            mixf(it->x_pt);
-            mixf(it->y_pt);
-            mixf(it->rotate_deg);
-            h = fnvMix(h, static_cast<uint64_t>(it->color.r) |
-                              (static_cast<uint64_t>(it->color.g) << 8) |
-                              (static_cast<uint64_t>(it->color.b) << 16));
-        }
-        line_fp_new_[static_cast<size_t>(li)] = h & ~kFpDirtyBit;
-    }
-}
-
-/**
- * 把 [first_page, 末页) 直接标成"与已画那一版不同"，不去哈希（见声明处的说明）。
- *
- * 标脏值的高位恒置：真指纹一律清掉那一位，所以它与任何真指纹都不可能相等 ——
- * 这不是"大概率不同"，而是编码上就不相交。
- *
- * 低位还要按已画那一版翻一下：present 之后"已画"也会变成标脏值，下一次标脏若写回
- *   同一个值，判据读出来就是"没变"，那一页从此不再重画（症状：连续换行只有第一次
- *   把文档推下去，之后屏幕不动）。
- * 行指纹同一把尺子、同一批页：那些页上的每一行都跟着挪了，行带要覆盖整页。
- */
-void EditorEngine::markPagesChangedFrom(int first_page) {
-    const int first = std::max(0, first_page);
-    const int n = std::max(1, layout_.stats.page_count);
-    page_fp_new_.resize(static_cast<size_t>(n), kFnvBasis);
-    const int prev_pages = static_cast<int>(page_fp_prev_.size());
-    for (int p = first; p < n; ++p) {
-        const uint64_t base = (p < prev_pages) ? page_fp_prev_[static_cast<size_t>(p)] : 0;
-        page_fp_new_[static_cast<size_t>(p)] = dirtyFpValue(base);
-    }
-
-    // 行数组只标页号 >= first 的行：前面那些行一个字都没动，标脏只会让它们多画一遍。
-    const int n_lines = static_cast<int>(layout_.lines.size());
-    line_fp_new_.resize(static_cast<size_t>(n_lines), kFnvBasis);
-    // 逐行比页号，不按"从某一行起往后都脏"推：行数组在表格跨页处不按页单调，
-    //   按起点一路标下去会把后面几页的正文也标脏（多画几页，不至于画错，但没必要）。
-    const int prev_lines = static_cast<int>(line_fp_prev_.size());
-    for (int k = 0; k < n_lines; ++k) {
-        if (layout_.lines[static_cast<size_t>(k)].page < first) continue;
-        const uint64_t base = (k < prev_lines) ? line_fp_prev_[static_cast<size_t>(k)] : 0;
-        line_fp_new_[static_cast<size_t>(k)] = dirtyFpValue(base);
-    }
-}
-
-void EditorEngine::markPageDirty(int page) {
-    if (page < 0) return;
-    const int n = std::max(1, layout_.stats.page_count);
-    if (page >= n) return;
-    // 页数对不上就说明此前整篇重排过、其余页的旧指纹已经不可信：退回"从这一页
-    //   标到末尾"。单页标脏的前提是"别的页还是同一版那份账"。
-    if (page_fp_new_.size() != static_cast<size_t>(n)) {
-        markPagesChangedFrom(page);
-        return;
-    }
-    const uint64_t base = (page < static_cast<int>(page_fp_prev_.size()))
-                              ? page_fp_prev_[static_cast<size_t>(page)]
-                              : 0;
-    page_fp_new_[static_cast<size_t>(page)] = dirtyFpValue(base);
-}
-
-/**
- * 第 p 段的第一行落在哪一页；这一段没有行盒时返回 -1。
- */
-int EditorEngine::firstPageOfParagraph(int p) const {
-    if (p < 0 || p >= static_cast<int>(layout_.para_index.size())) return -1;
-    const ParaIndex& pi = layout_.para_index[static_cast<size_t>(p)];
-    if (pi.line_begin < 0 || pi.line_begin >= pi.line_end) return -1;
-    if (pi.line_begin >= static_cast<int>(layout_.lines.size())) return -1;
-    return layout_.lines[static_cast<size_t>(pi.line_begin)].page;
-}
-
 int EditorEngine::contentBottomPx() const {
     const float slab = cfg_.page.slabHeightPt();
     float bottom_pt = 0.0f;
@@ -436,29 +71,8 @@ void EditorEngine::relayout() {
     // 视图先摆好：下面第一件事就是夹光标，而它读的是视图（地址稳定，摆一次就够）。
     refreshViews();
 
-    // 只读位只改括号颜色：它不进块哈希，页指纹看不见 —— 而括号画在页位图里
-    //   （见 rasterControlMarks），不作废页缓存就会留着旧颜色。这里比一次集合，
-    //   变了才清（清一次 = 整窗重光栅，改只读本来就是低频操作）。
-    {
-        const int nc = static_cast<int>(controls_.size());
-        bool ro_changed = (mark_readonly_prev_.size() != static_cast<size_t>(nc));
-        if (!ro_changed) {
-            for (int i = 0; i < nc; ++i) {
-                if (mark_readonly_prev_[static_cast<size_t>(i)] !=
-                    (controls_.at(i).read_only ? 1 : 0)) {
-                    ro_changed = true;
-                    break;
-                }
-            }
-        }
-        if (ro_changed) {
-            mark_readonly_prev_.assign(static_cast<size_t>(nc), 0);
-            for (int i = 0; i < nc; ++i) {
-                mark_readonly_prev_[static_cast<size_t>(i)] = controls_.at(i).read_only ? 1 : 0;
-            }
-            pages_.clear();
-        }
-    }
+    // 只读位改的是括号颜色。它进 LineCluster::read_only，行场景项的版本随之变化，
+    //   所以这里不需要再比一份集合、也不需要整窗清页缓存。
 
     // 顺序有讲究：先夹光标、再写对象表 —— 对象表要按光标算出来的流位置落锚点，
     //   表写完才是排版的输入。
@@ -517,15 +131,9 @@ void EditorEngine::relayout() {
     }
     if (from + dirty_count > n_para) dirty_count = n_para - from;
     const auto t_layout0 = Clock::now();  // 只量排版本身：拼接/续排/全量三种走法都算
-    // 需要重算页指纹的页区间（-1 = 整篇），由后缀复用那条路带回来：
-    // 它知道脏段新旧两版占了哪几页 —— 那才是"内容真的变了的页"，
-    // 比整篇重扫一遍字形便宜两个数量级。
-    int fp_lo = -1, fp_hi = -1;
     SuffixReuse reuse = SuffixReuse::None;
     // 段数变了也照样试后缀复用：回车分段与退格合并一个字都没改内容，只挪了段边界。
     int relaid_paras = 1;
-    // 后缀整体平移：后缀在的每一页内容都跟着挪了 —— 这个答案已知，不必再去哈希它们。
-    bool pages_known_changed = false;
     // 复用只覆盖到第 cut 段之前（后缀里遇到了表）：剩下的从 cut 续排。
     int cut = n_para;
     ReflowState cut_state;
@@ -536,8 +144,7 @@ void EditorEngine::relayout() {
     //   搬回来的就是带着旧括号的旧行盒。
     const bool splice_ok = (to >= 0);
     if (!must_full && splice_ok && from >= 0 && from < n_para) {
-        reuse = trySuffixReuse(from, dirty_count, &fp_lo, &fp_hi, &relaid_paras, &cut, &cut_state,
-                               &pages_known_changed);
+        reuse = trySuffixReuse(from, dirty_count, &relaid_paras, &cut, &cut_state);
     }
     if (reuse != SuffixReuse::None) {
         // 段表的下标先取出来：cut 那一路会 truncate + 续排，段表可能重新分配。
@@ -552,23 +159,13 @@ void EditorEngine::relayout() {
         if (cut < n_para) {
             // 复用只到后缀里的第一张表：那张表与它之后的内容从表头续排。
             //   截断连表的旧几何一起丢（first_block >= cut），续排重新 openTable 只留一份。
-            const int old_cut_page = firstPageOfParagraph(cut);
             truncateLayoutAt(cut);
             layoutDocumentRangeWithTables(fonts_, blocks(), cfg_.page, tables_, cut, n_para,
                                           cut_state, &shaping_cache_, &layout_, floatsForLayout());
             last_relaid_paragraphs_ = relaid_paras + (n_para - cut);
             last_relaid_lines_ = layout_.stats.placed_line_count - head_line_begin;
-            // 从 cut 起是重排过的：页数可能变，指纹只能从"新旧两版里更靠前的那一页"起标脏。
-            const int new_cut_page = firstPageOfParagraph(cut);
-            int lo = fp_lo;
-            if (old_cut_page >= 0 && (lo < 0 || old_cut_page < lo)) lo = old_cut_page;
-            if (new_cut_page >= 0 && (lo < 0 || new_cut_page < lo)) lo = new_cut_page;
-            pages_known_changed = true;
-            fp_lo = lo;
         }
     } else if (can_resume) {
-        // 脏段在旧版里落在哪一页 —— 截断会把这一段从段表里摘掉，所以先读。
-        const int old_first_page = firstPageOfParagraph(from);
         // 续排锚点必须在截断之前读出来 —— 截断会把它一起丢掉。
         const ReflowState resume_state =
             layout_.para_index[static_cast<size_t>(from)].state_at_start;
@@ -579,25 +176,6 @@ void EditorEngine::relayout() {
         last_relaid_paragraphs_ = n_para - from;
         last_relaid_lines_ = layout_.stats.placed_line_count - prefix_lines;
         last_layout_full_ = false;
-        // 脏页范围：脏段新旧两版的起点取更靠前的那一页（行数变少时内容往上走，
-        //   新页号可能小于旧页号），它之后每一页都可能跟着重排了。
-        //   不框出来的话就得整篇重算：在文档末尾敲一个字要哈希全篇的字形
-        //   （实测 3000 段 = 7.5 ms，而那一步只动了最后一页）。
-        const int new_first_page = firstPageOfParagraph(from);
-        const int lo = (old_first_page < 0)   ? new_first_page
-                       : (new_first_page < 0) ? old_first_page
-                                              : std::min(old_first_page, new_first_page);
-        if (lo < 0) {
-            fp_lo = -1;  // 两版都找不到行盒（空段）—— 保守起见整篇重算
-        } else if (layout_.stats.page_count != static_cast<int>(page_fp_new_.size())) {
-            // 页数变了 = 从脏段起重新分页了，那之后的每一页都跟着挪位。
-            //   computePageFingerprints 遇到页数变化会退回整篇重算，这里不必：直接标脏。
-            pages_known_changed = true;
-            fp_lo = lo;
-        } else {
-            fp_lo = lo;
-            fp_hi = std::max(0, layout_.stats.page_count - 1);
-        }
     } else {
         layout_ = LayoutResult{};
         layoutDocumentRangeWithTables(fonts_, blocks(), cfg_.page, tables_, 0, n_para,
@@ -606,7 +184,6 @@ void EditorEngine::relayout() {
         last_relaid_paragraphs_ = n_para;
         last_relaid_lines_ = layout_.stats.placed_line_count;
         last_layout_full_ = true;
-        fp_lo = -1;  // 整篇重排：没有"没变过的页"可言
     }
     layout_dirty_from_ = n_para;  // 已重排到末尾，没有脏段了
     layout_dirty_to_ = n_para;
@@ -618,19 +195,15 @@ void EditorEngine::relayout() {
     if (reuse != SuffixReuse::None) layout_.rebuildPageIndex();
 
     // 这一轮排版的耗时。只算排版本身（拼接/续排/全量三种走法都算），
-    // 不含页指纹记账与统计同步 —— 那两项是 O(全篇) 的固定开销，
+    // 不含页场景记账与统计同步 —— 那两项是 O(全篇) 的固定开销，
     // 混进来的话"增量到底省了多少"就看不出来了（它们的量级能盖过排版本身）。
     // 必须在 syncStatsFromLayout 之前写：统计是从 layout_.stats 抄过去的。
     layout_.stats.layout_ms = msSince(t_layout0);
     syncStatsFromLayout();
-    const auto t_fp0 = Clock::now();
-    if (pages_known_changed) {
-        markPagesChangedFrom(fp_lo);
-    } else {
-        computePageFingerprints(fp_lo, fp_hi);
-    }
-    stats_.page_fp_ms = msSince(t_fp0);
-    edit_stats_.page_fp_ms = stats_.page_fp_ms;
+    // 页场景在 presentInternal 里按页构建，排版这一侧不再记这一段的耗时。
+    //   这里先清零；呈现那一拍会把它覆盖成场景构建与差异比对的时间。
+    stats_.page_fp_ms = 0.0;
+    edit_stats_.page_fp_ms = 0.0;
 
     // 光标吸附到簇边界 —— 编辑可能让段落变短。吸附只改码点偏移，侧别跟着走
     //   （rel 是唯一真源，见 setCaretRel）：已经落在簇边界上就一个字都别碰，
@@ -659,16 +232,12 @@ void EditorEngine::relayout() {
     stats_.total_ms += msSince(t0);
 }
 
-EditorEngine::SuffixReuse EditorEngine::trySuffixReuse(int from, int dirty_count, int* page_lo,
-                                                       int* page_hi, int* relaid_paragraphs,
-                                                       int* cut, ReflowState* cut_state,
-                                                       bool* all_pages_changed) {
-    *page_lo = -1;
-    *page_hi = -1;
+EditorEngine::SuffixReuse EditorEngine::trySuffixReuse(int from, int dirty_count,
+                                                       int* relaid_paragraphs, int* cut,
+                                                       ReflowState* cut_state) {
     *relaid_paragraphs = 1;
     *cut = static_cast<int>(blocks().size());
     *cut_state = ReflowState{};
-    *all_pages_changed = false;
     const int n_para = static_cast<int>(blocks().size());
     const int n_old = static_cast<int>(layout_.para_index.size());
     // 段数增量：这一次编辑把旧 [from, from + m_old) 段换成了新 [from, from + m_new) 段。
@@ -736,19 +305,6 @@ EditorEngine::SuffixReuse EditorEngine::trySuffixReuse(int from, int dirty_count
     const int new_line_hi = new_last.line_end;
     const int new_glyph_lo = new_first.glyph_begin;
     const int new_glyph_hi = new_last.glyph_end;
-
-    // 脏区新旧两版覆盖的页区间（并集）：只有这几页的内容可能变了，
-    // 页指纹只需重算它们。取不到（两版都没行）就给 -1，让调用方整篇重算。
-    int u_lo = -1, u_hi = -1;
-    auto addPageRange = [&](const std::vector<LineBox>& lines, int b, int e) {
-        if (e <= b) return;
-        const int lo = lines[static_cast<size_t>(b)].page;
-        const int hi = lines[static_cast<size_t>(e - 1)].page;
-        u_lo = (u_lo < 0) ? lo : std::min(u_lo, lo);
-        u_hi = (u_hi < 0) ? hi : std::max(u_hi, hi);
-    };
-    addPageRange(layout_.lines, old_line_lo, old_line_hi);
-    addPageRange(scratch.lines, new_line_lo, new_line_hi);
 
     const int old_lines = old_line_hi - old_line_lo;
     const int new_lines = new_line_hi - new_line_lo;
@@ -870,8 +426,6 @@ EditorEngine::SuffixReuse EditorEngine::trySuffixReuse(int from, int dirty_count
     //   段表挪完槽位之后，新表的第 from+m_new 项就是旧表的第 from+m_old 项
     //   （就是后缀的第一段），它的 state_at_start 被原样搬了过来 —— 直接拿来比。
     if (after == layout_.para_index[static_cast<size_t>(from + m_new)].state_at_start) {
-        *page_lo = u_lo;
-        *page_hi = u_hi;
         return SuffixReuse::Unchanged;
     }
 
@@ -880,19 +434,12 @@ EditorEngine::SuffixReuse EditorEngine::trySuffixReuse(int from, int dirty_count
     //   段数变化几乎总落到这一级：段落边界一变就多让（或少让）一次段间距，
     //   后缀必然整体下移 —— 那不是"同状态"，而是"纯平移"。
     //   段表已经挪好槽位、行盒与字形的段号也已经重编过，平移那一趟按新段号走即可。
-    if (u_lo < 0) return SuffixReuse::None;
     // 平移只走到 cut：那里是第一张表，表的行片段不是折线能推出来的。
     if (!suffixIsHorizontalOnly(from + m_new, cut_at)) return SuffixReuse::None;
     if (!shiftSuffixBlockAxis(from + m_new, static_cast<size_t>(old_glyph_lo + new_glyphs), cut_at,
                               after, cut_state))
         return SuffixReuse::None;
     *cut = cut_at;
-    *page_lo = u_lo;
-    *page_hi = std::max(0, layout_.stats.page_count - 1);
-    // 后缀整体挪位 ⇒ 它在的每一页内容都变了。这个结论不必靠哈希去问：
-    //   后缀每一行都沿块轴平移了（挪量为零的话上面那条"同状态"判据早就命中了），
-    //   而指纹里含行盒几何与每个字形的坐标 —— 它们必然不一样。
-    *all_pages_changed = true;
     return SuffixReuse::Shifted;
 }
 

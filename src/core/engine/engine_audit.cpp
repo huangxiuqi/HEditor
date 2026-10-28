@@ -40,9 +40,8 @@ namespace {
  * （实测最大偏差 6.1e-05 pt）。除非把复用路径的算术写成与全量逐位一致，否则这不可消除。
  *
  * 容差取 1e-3 pt 的界线是量出来的：比舍入噪声大 16 倍（不会假红），
- * 又比引擎自己的可见阈值小 30 倍 —— 页指纹量化位置用 1/16 pt（见 quantPt），
- * 即 0.03 pt 以内的差别在引擎看来本来就"不算变化"。所以容差不会掩盖任何真错位：
- * 真正的错位是"整行挪错"，量级是几十磅。
+ * 又比引擎自己的可见阈值小两个数量级 —— 落位到设备像素之后，远小于 0.03 pt 的差别
+ * 本来就看不出来。所以容差不会掩盖任何真错位：真正的错位是"整行挪错"，量级是几十磅。
  */
 constexpr float kPosTol = 1e-3f;
 inline bool samePos(float a, float b) { return std::fabs(a - b) <= kPosTol; }
@@ -438,7 +437,8 @@ std::string EditorEngine::auditPageJson(int page) {
     Bitmap ref(pw, ph);
     ref.shareFonts(font_owner_);
     // 耗时与字形数都走出参，这里传空 —— 取证不记账，也就没有"先存后还"这一步。
-    drawPage(ref, renderInput(), page, nullptr, nullptr, nullptr);
+    BitmapSink sink(ref);
+    drawPage(sink, renderInput(), page, nullptr, nullptr, nullptr);
 
     const uint8_t* a = pb->px.data();
     const uint8_t* b = ref.data();

@@ -31,7 +31,7 @@ namespace heditor {
  */
 constexpr float kMarginMarkPt = 18.0f;
 
-void drawPage(Bitmap& target, const RenderInput& in, int page_index, const float* band_lo_pt,
+void drawPage(PageSink& target, const RenderInput& in, int page_index, const float* band_lo_pt,
               const float* band_hi_pt, PageRasterCost* cost) {
     const float zoom = in.cfg->zoom;
     const int page_px_w = pagePxWidthOf(*in.cfg);

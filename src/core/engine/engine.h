@@ -389,7 +389,7 @@ public:
     /**
      * 重排版：从 layout_dirty_from_ 起的段重排，之前的段原样复用（续排契约见
      * core/layout/layout.h）。没有脏段时按全量处理 —— 宁可多排一次，也不拿旧前缀
-     * 去接新后缀。页的内容随之作废，呈现时按页指纹增量重画。
+     * 去接新后缀。页的内容随之作废，呈现时按页场景增量重画。
      */
     void relayout();
 
@@ -1903,7 +1903,7 @@ public:
      * 注册一张图片的像素。文档只存资源 id，换台机器打开时由宿主重新注册。
      *
      * 重复注册同一个 id 表示"这张图换了"：资源版本上调，页位图因此重光栅 ——
-     * 文档与页指纹都没变，光栅签名里混了资源表的变更计数才判得出来。
+     * 文档与页场景都没变，光栅签名里混了资源表的变更计数才判得出来。
      *
      * @param id 资源 id
      * @param width 像素宽
@@ -2885,8 +2885,8 @@ private:
 
     /**
      * "页位图上画出来是什么"的签名：换缩放、换页度量、换底色、换图片像素都算一次变化。
-     * 签名一变，全部页位图作废（判据在 pageBitmapFresh）—— 新增光栅相关配置项时只要
-     * 加进它，不必维护一张"记得清缓存"的清单。
+     * 签名一变，全部页位图作废（判据在 PageCache::fresh / usable）—— 新增光栅相关配置项时
+     * 只要加进它，不必维护一张"记得清缓存"的清单。
      * @return 签名
      */
     uint64_t rasterSignatureNow() const;
@@ -2915,9 +2915,9 @@ private:
     void collectImageUi(int page, std::vector<Rect>* out) const;
 
     /**
-     * 这一页现在该叠哪些瞬态（页内像素坐标）。presentInternal 按页算差集、导出按页取用。
+     * 这一页现在该叠哪些覆盖项（页内像素坐标）。presentInternal 按页算差集、导出按页取用。
      */
-    void collectTransient(int page, PageTransient* out) const;
+    void collectTransient(int page, OverlayScene* out) const;
 
     /**
      * 页位图缓存与脏矩形账（页格、光栅签名、"哪几块像素变了"）。
@@ -2936,10 +2936,12 @@ private:
     void notePageDirty(int page, const Rect& r);
 
     /**
-     * 缓存里这一页的像素还作数吗：有条目、有指纹、尺寸对得上、指纹与本次排版相同。
-     * 没有指纹（页号超出指纹数组）一律返回假 —— 不敢断言"作数"的时候就重画。
+     * 缓存里这一页的像素可读吗：有条目、签名与尺寸对得上。
+     *
+     * 它不判断内容是否最新 —— 那是 PageCache::fresh 的事；查询类入口只要求
+     * “不给一份过期的像素”。
      */
-    bool pageBitmapFresh(int page) const;
+    bool pageBitmapUsable(int page) const;
 
     /**
      * 摆一份绘制输入：把绘制要用到的只读指针、模式与本节水印收成一个结构。
@@ -2950,9 +2952,14 @@ private:
     RenderInput renderInput();
 
     /**
-     * 把这一页光栅进缓存，并记下它对应哪一版指纹。
+     * 把这一页光栅进缓存。整页光栅时可同时把绘制指令记进场景；分带光栅不记。
+     * @param page 页号
+     * @param band_lo_pt 带下界（可为 nullptr）
+     * @param band_hi_pt 带上界（可为 nullptr）
+     * @param scene 记录目标；可为 nullptr
      */
-    void rasterPageInto(int page, const float* band_lo_pt, const float* band_hi_pt);
+    void rasterPageInto(int page, const float* band_lo_pt, const float* band_hi_pt,
+                        PageScene* scene);
 
     /**
      * 这一页"画到画布上应该是什么"：有瞬态时把内容 + 瞬态合成进一页的导出图。
@@ -2985,77 +2992,6 @@ private:
      * 本拍画字形花掉的毫秒。
      */
     double raster_glyph_ms_ = 0.0;
-
-    /**
-     * 页指纹：本次 relayout 的结果 / 已画成像素的那一版。
-     *
-     * 只重算受影响页（@p dirty_lo 到 @p dirty_hi，含端点）：没有脏页信息时
-     * 传 -1 走整篇重算。增量成立的前提是"没动过的页，字形一个字节都没动" ——
-     * 它由排版那侧的前缀复用保证，而不是靠这里猜。
-     */
-    void computePageFingerprints(int dirty_lo = -1, int dirty_hi = -1);
-
-    /**
-     * 行指纹：与页指纹同一次遍历里算出来，只是分桶到行（见 line_fp_new_）。
-     * @p dirty_lo / @p dirty_hi 是脏页范围，与页指纹同一口径；同样只重算落在这几页里的行。
-     */
-    void computeLineFingerprints(int dirty_lo, int dirty_hi, bool full);
-
-    /**
-     * 某一页上的表格片段摘要：表的位置、列边界与这一页各片段的上下沿。
-     *
-     * 它是"这一页的格线长什么样"的最小充分输入：绘制读的就是这几个数。
-     * @param page 页号
-     * @return 摘要；这一页没有表时等于 kFnvBasis
-     */
-    uint64_t tablePieceDigest(int page) const;
-
-    /**
-     * 一页上的浮动图摘要：几何（页内框）与环绕方式。
-     *
-     * 绘制读的就是这几个数（见 engine_paint.cpp 的 emitFloats）。不混图片内容 ——
-     *   换资源由光栅签名里的资源代际负责，那一层会整窗作废。
-     * @param page 页号
-     * @returns 摘要（没有浮动图的页等于 FNV 基值）
-     */
-    uint64_t floatPieceDigest(int page) const;
-
-    /**
-     * 把 [first_page, 末页) 直接标成"与已画那一版不同"，不去哈希。
-     *
-     * 用在后缀整体平移那一级：后缀的每一行都沿块轴挪了位，于是它在的每一页内容都变了 ——
-     * 这个答案在进这里之前就已经确定，再把几百页的字形哈希一遍纯属白花
-     * （实测 161 页 = 21 ms，比排版本身贵一个数量级，而它在"回车/合并/敲到换行"上每一下都付）。
-     * 页数变多时新页也落在 [first_page, 末页) 里，一并标脏，不必退回整篇重算。
-     */
-    void markPagesChangedFrom(int first_page);
-
-    /**
-     * 只把一页标成"与已画那一版不同"，其余页一个字节都不碰。
-     *
-     * 用在"只有这一页变了"的地方：衬于文字下方 / 浮于文字上方那种图不占版面，
-     *   挪它只影响它盖住的那一页。按 markPagesChangedFrom 标的话，这一页之后
-     *   每一页都会重光栅、每一页位图都回传一次。
-     * @param page 页号（越界或负值忽略）
-     */
-    void markPageDirty(int page);
-
-    /**
-     * 把当前行指纹与行盒几何存成"已画进页位图的那一版"。
-     * 与 page_fp_prev_ 同一时机调用：页像素变了就要跟着换。
-     */
-    void snapshotLineGeometry();
-
-    /**
-     * 一页上每一行的行带边界（页内磅，下标 = 行下标；只写这一页的行）。
-     *
-     * 行带按"块轴上相邻的行组"取中线，不按数组相邻项：表格一行的几个格 y 相同算一组，
-     *   而高格的第二行之后数组里紧跟着的是另一格的第一行（在它上面）。见实现注释。
-     * @param page 页号
-     * @param lo 非空时写入各行带的上沿
-     * @param hi 非空时写入各行带的下沿
-     */
-    void pageLineBands(int page, std::vector<float>* lo, std::vector<float>* hi) const;
 
     /**
      * 第 p 段的第一行落在哪一页；这一段没有行盒时返回 -1。
@@ -3165,15 +3101,12 @@ private:
      * 遇到第一张表就把复用截断在表头，剩下的从那张表续排（表的行高靠结算、跨页靠切片）。
      *
      * @param dirty_count 脏区在新版里占几段（右端见 markLayoutDirtyRange）
-     * @param page_lo,page_hi 出参：脏区新旧两版覆盖的页区间（-1 = 整篇）
      * @param relaid_paragraphs 出参：脏区在新版里占几段
      * @param cut 出参：复用只到第 cut 段之前（后缀第一张表，或段数）；cut_state 是那儿的锚点
-     * @param all_pages_changed 出参：Shifted 专用 —— 后缀在的每一页都变了
      * @return None 时后缀未被动过（调用方可以安全走续排），其余两种排版已完成
      */
-    SuffixReuse trySuffixReuse(int from, int dirty_count, int* page_lo, int* page_hi,
-                               int* relaid_paragraphs, int* cut, ReflowState* cut_state,
-                               bool* all_pages_changed);
+    SuffixReuse trySuffixReuse(int from, int dirty_count, int* relaid_paragraphs, int* cut,
+                               ReflowState* cut_state);
 
     /**
      * 后缀整体平移：把 [from, to) 的每一行沿块轴挪到新的位置，并重编页码与全局行号，字形跟着
@@ -3698,100 +3631,6 @@ private:
     std::vector<int> last_dirty_pages_;
 
     /**
-     * 页内容指纹：本次 relayout 的结果 / 已画成像素的那一版。
-     *
-     * 真指纹一律清掉 kFpDirtyBit —— 那一位留给"已知变了"的哨兵（markPagesChangedFrom），
-     * 于是"这一页变了没有"永远只有一个判据：new != base。
-     *
-     * 数组长度就是有效范围，不另存 count：两份账总要有一处忘同步，而那一处的症状是
-     * "某几页永远不重画"或"读到越界"。下面四组指纹同一口径。
-     */
-    std::vector<uint64_t> page_fp_new_;
-
-    /**
-     * 已经画成像素的那一版页指纹。
-     */
-    std::vector<uint64_t> page_fp_prev_;
-
-    /**
-     * 行内容指纹：与页指纹同源、同一把尺子，只是分桶到行（下标 = LineBox::line）。
-     *
-     * 它存在的唯一理由是把"这一页要重画"细化成"这一页的哪几行要重画"：
-     * 一页约 1000 个字形，而敲一个字只动其中一两行的字形 —— 页指纹粒度下，
-     * 改一行与改整页同价（实测字形光栅 10~14 ms，其中九成是白画的）。
-     *
-     * 指纹必须含行盒几何（block_lo/hi、inline_origin）：字形一样但位置挪了
-     * 也算变了 —— 那是"后缀整体平移"那一类。
-     */
-    std::vector<uint64_t> line_fp_new_;
-
-    /**
-     * 已经画成像素的那一版行指纹。
-     */
-    std::vector<uint64_t> line_fp_prev_;
-
-    /**
-     * 已画进页位图的那一版里，每一行的块轴范围（页内磅），按行下标。
-     * 重画一条行带时要靠它算"擦到哪儿"：上边界取新旧两版里更靠上的那个，
-     * 否则行往下挪之后旧墨迹会留在原地（幽灵字）。下边界同理取更靠下的。
-     */
-    std::vector<float> line_lo_prev_;
-
-    /**
-     * 已画那一版每一行的块轴下界（页内磅）。
-     */
-    std::vector<float> line_hi_prev_;
-
-    /**
-     * 每页的表格片段摘要（下标 = 页号）。
-     *
-     * 页上的格线不是行盒画出来的，行指纹看不到"跨页切片的底边从行底挪到了页底"这种变化；
-     * 而这类变化往往伴随某一行也在动，于是行带只盖住文字那一条，页底的边框留在旧位置。
-     * 摘要变了的页一律整页重画（见 computeBand）。
-     */
-    std::vector<uint64_t> table_fp_new_;
-
-    /**
-     * 已经画成像素的那一版表格片段摘要。
-     */
-    std::vector<uint64_t> table_fp_prev_;
-
-    /**
-     * 每页的浮动图摘要（下标 = 页号）。
-     *
-     * 浮动图不占行盒，行带看不见它：把一张图从行内改成四周型，锚段那几行确实变了，
-     *   可图本身落在行带之外 —— 行带只重画那一条，图上那一块留着旧像素（"图还在老
-     *   位置"）；把图改回行内时同理，旧图永远擦不掉。摘要变了的页一律整页重画。
-     */
-    std::vector<uint64_t> float_fp_new_;
-
-    /**
-     * 已经画成像素的那一版浮动图摘要。
-     */
-    std::vector<uint64_t> float_fp_prev_;
-
-    /**
-     * 本次重画那条行带的页内磅范围（computeBand 写、rasterPageInto 读）。
-     * 放成员是为了不把两个 float 在 lambda 之间传来传去。
-     */
-    float band_lo_scratch_ = 0.0f;
-
-    /**
-     * 算行带时按页写下的逐行上沿（下标 = 行下标）。
-     */
-    std::vector<float> band_lo_scratch_all_;
-
-    /**
-     * 算行带时按页写下的逐行下沿（下标 = 行下标）。
-     */
-    std::vector<float> band_hi_scratch_all_;
-
-    /**
-     * 本次重画那条行带的上界（页内磅）。
-     */
-    float band_hi_scratch_ = 0.0f;
-
-    /**
      * 导出用的两块临时位图（都只在真被读到时才分配）。
      *
      * page_export_：一页大小，"内容 + 瞬态"的合成落点；
@@ -3866,15 +3705,6 @@ private:
      * 当前处在哪一格历史（与 session_ 的撤销位置同步）。
      */
     size_t sel_pos_ = 0;
-
-    /**
-     * 上一次排版时各控件的只读位（1 = 只读）。
-     *
-     * 只读位只改括号颜色，不进块哈希 —— 页指纹看不见它。而括号现在画在页位图里
-     * （见 page_marks.h 的 drawControlMarks），所以 relayout 里比一次这个数组：变了就作废页缓存。
-     * 不比的话，"把字段改成只读"之后括号还是蓝色，直到别的原因让那一页重光栅。
-     */
-    std::vector<uint8_t> mark_readonly_prev_;
 };
 
 }  // namespace heditor

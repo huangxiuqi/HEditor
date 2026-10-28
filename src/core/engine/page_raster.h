@@ -13,6 +13,7 @@
 
 #include "core/engine/render_input.h"
 #include "core/render/bitmap.h"
+#include "core/render/page_sink.h"
 
 namespace heditor {
 
@@ -48,7 +49,7 @@ struct PageRasterCost {
  * @param band_hi_pt 带上界（磅），可为空
  * @param cost 分项耗时累加到这里（可为空）
  */
-void drawPage(Bitmap& target, const RenderInput& in, int page_index, const float* band_lo_pt,
+void drawPage(PageSink& target, const RenderInput& in, int page_index, const float* band_lo_pt,
               const float* band_hi_pt, PageRasterCost* cost);
 
 }  // namespace heditor

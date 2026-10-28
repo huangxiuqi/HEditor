@@ -142,7 +142,7 @@ float docToFlowY(const EngineConfig& cfg, int page_px_h, int gap_px, float y_doc
 bool EditorEngine::registerImage(const std::string& id, int width, int height, const uint8_t* rgba,
                                  size_t bytes, std::string* error) {
     if (!images_.put(id, width, height, rgba, bytes, error)) return false;
-    // 资源变了但文档没变：页指纹看不出来，只有光栅签名里的资源变更计数能让页位图作废。
+    // 资源变了但文档没变：页场景看不出来，只有光栅签名里的资源变更计数能让页位图作废。
     //   不重光栅的话，画面上一直是上一张图（或者占位框）。
     pages_.setSignature(rasterSignatureNow());
     // 注册与删除都可能让"待上屏的矩形"指向旧像素：签名没变时也要清一次。
@@ -620,14 +620,8 @@ bool EditorEngine::previewImageMove(int index, float dx_pt, float dy_pt) {
         // 衬于文字下方 / 浮于文字上方不占版面：位移只影响绘制，排一次是白花。
         if (b.layout == 3 || b.layout == 4) {
             image_preview_.placed = false;
-            for (const PageRect& pr : b.rects) {
-                const int p = pr.page;
-                if (p < 0) continue;
-                if (static_cast<size_t>(p) < float_fp_new_.size()) {
-                    float_fp_new_[static_cast<size_t>(p)] = floatPieceDigest(p);
-                }
-                markPageDirty(p);
-            }
+            // 拖动预览进 RenderInput::float_preview，下一拍场景根自然变化；
+            //   这里不再手工改指纹或标页脏。
             return true;
         }
         image_preview_.placed = true;

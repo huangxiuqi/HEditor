@@ -8,6 +8,8 @@
 
 #include <algorithm>
 
+#include "core/engine/page_scene.h"
+
 namespace heditor {
 namespace {
 
@@ -95,15 +97,22 @@ void PageCache::trim(int first_page, int count) {
     }
 }
 
-bool PageCache::fresh(int page, uint64_t fp, int px_w, int px_h) const {
+bool PageCache::fresh(int page, const PageScene& scene, int px_w, int px_h) const {
     const PageSlot* pb = find(page);
     if (pb == nullptr || !pb->valid) return false;
     if (pb->px.width() != px_w || pb->px.height() != px_h) return false;
-    // 内容指纹之外还有一份"光栅配置"的签名：底色、边框、缩放、页度量这些变了，
-    //   内容一个字节都没动，但画出来的像素不一样。签名是这里唯一的判据 —— 不再靠
-    //   setConfig 记得清缓存。
+    // 场景之外还有一份"光栅配置"的签名：缩放、页度量这些共同参数变了，场景本身
+    //   看不出来，但画出来的像素不一样。签名是这里唯一的判据。
     if (pb->raster_sig != sig_) return false;
-    return pb->fp == fp;
+    if (!pb->scene) return false;
+    return pb->scene->root == scene.root;
+}
+
+bool PageCache::usable(int page, int px_w, int px_h) const {
+    const PageSlot* pb = find(page);
+    if (pb == nullptr || !pb->valid) return false;
+    if (pb->px.width() != px_w || pb->px.height() != px_h) return false;
+    return pb->raster_sig == sig_;
 }
 
 void PageCache::noteDirty(int page, const Rect& r) {

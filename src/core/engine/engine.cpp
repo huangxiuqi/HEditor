@@ -123,7 +123,7 @@ static uint64_t fnvMixColor(uint64_t h, const Color& c) {
 /**
  * "页位图上画出来是什么"这组配置的签名。
  *
- * 页指纹只哈希字形等内容；页面底色、边框、格线、原子框、缩放、页度量这些一个都不在里面。
+ * 页场景只哈希内容；页面底色、边框、格线、原子框、缩放、页度量这些共同参数不在里面。
  *   把它们混成一个签名记进页缓存的页格，签名一变所有页自动失效 —— 新增光栅配置项时只要
  *   加进这里，不必再维护一张"记得清缓存"的清单（TRAPS 128 的正解）。
  * 与排版无关的项刻意不收：页间隙只影响落点、背景色只影响帧、光标/选区色只影响瞬态层。
@@ -150,7 +150,7 @@ static uint64_t rasterSignature(const EngineConfig& cfg, bool marks_shown,
     h = fnvMixColor(h, cfg.atom_border);
     h = fnvMixColor(h, cfg.atom_text);
     h = fnvMixFloat(h, cfg.atom_pad_pt);
-    // 表单标记：它们画在页位图里，改外观就是"这一页的像素变了"，而排版与页指纹都看不见。
+    // 表单标记：它们画在页位图里，改外观就是"这一页的像素变了"，而排版与页场景都看不见。
     h = fnvMix(h, cfg.show_brackets ? 1ULL : 0ULL);
     h = fnvMix(h, cfg.show_control_dots ? 1ULL : 0ULL);
     h = fnvMixColor(h, cfg.control_mark);
@@ -163,10 +163,10 @@ static uint64_t rasterSignature(const EngineConfig& cfg, bool marks_shown,
     h = fnvMix(h, marks_shown ? 1ULL : 0ULL);
     h = fnvMix(h, static_cast<uint64_t>(cfg.marks));
     h = fnvMixColor(h, cfg.mark_color);
-    // 图片像素不在文档里，页指纹看不见它们：换了图（或删了资源）只有这一个计数能让
+    // 图片像素不在文档里，页场景看不见它们：换了图（或删了资源）只有这一个计数能让
     //   已经光栅好的页作废。漏掉它的症状是"换图之后画面上还是上一张"。
     h = fnvMix(h, image_generation);
-    // 水印画在每一页的像素上，但它不进任何一个块的内容 —— 页指纹看不见它。
+    // 水印画在每一页的像素上，但它不进任何一个块的内容 —— 页场景看不见它。
     //   摘要放这里，改水印之后所有页自动重光栅（不必另维护一张"记得清缓存"的清单）。
     h = fnvMix(h, wat.enabled ? 1ULL : 0ULL);
     for (const char c : wat.text) h = fnvMix(h, static_cast<uint64_t>(static_cast<uint8_t>(c)));
@@ -203,7 +203,7 @@ void EditorEngine::setConfig(const EngineConfig& cfg) {
     if (cfg_.zoom < 0.25f) cfg_.zoom = 0.25f;
     if (cfg_.zoom > 8.0f) cfg_.zoom = 8.0f;
     if (cfg_.caret_width_pt < kMinCaretWidthPt) cfg_.caret_width_pt = kMinCaretWidthPt;
-    // 光栅签名一变，所有页的像素都不再作数（判据在 pageBitmapFresh）。
+    // 光栅签名一变，所有页的像素都不再作数（判据在 PageCache::fresh / usable）。
     //   这里不再逐项比对再清缓存：那张清单漏一项就是"改了底色屏幕不变"（TRAPS 128）。
     const uint64_t sig = rasterSignatureNow();
     pages_.setSignature(sig);

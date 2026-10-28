@@ -13,6 +13,7 @@
 #include "core/doc/image_spec.h"
 #include "core/doc/section_spec.h"
 #include "core/engine/engine.h"
+#include "core/engine/page_scene.h"
 #include "core/layout/layout.h"
 #include "core/utils/units.h"
 
@@ -537,6 +538,57 @@ int main() {
         }
         expectTrue(e.undoAndRender(), "撤销回上一档");
         expectTrue(!e.layout().placed_floats.empty(), "撤销之后又是浮动的");
+    }
+
+    // 场景复用：同一拍没有重排、输入键不变时，第二次呈现直接复用已有场景。
+    {
+        e.relayout();
+        e.repaint();
+        const int built = e.editStats().scene_built_pages;
+        expectTrue(built > 0, "页场景：重排之后第一次呈现会重建场景");
+        e.repaint();
+        expectTrue(e.editStats().scene_built_pages == 0,
+                   "页场景：没有重排时第二次呈现不再重建场景");
+        expectTrue(e.editStats().scene_reused_pages > 0, "页场景：没有重排时第二次呈现走复用路径");
+    }
+
+    // 页场景差异：同根不动、版本变一条带、身份变整页、页级项整页。
+    {
+        const Rect page_rect{0.0f, 0.0f, 1000.0f, 1000.0f};
+        SceneItem item;
+        item.key = SceneItemKey{SceneLayer::Glyph, SceneKind::GlyphLine, 7, 0, false};
+        item.version = 1;
+        item.bounds_pt = Rect{0.0f, 10.0f, 1000.0f, 20.0f};
+
+        PageScene before;
+        before.items.push_back(item);
+        before.root = 1;
+        PageScene same = before;
+        expectTrue(diffPageScene(&before, same, page_rect).full_page == false &&
+                       diffPageScene(&before, same, page_rect).rects.empty(),
+                   "页场景：根相同就不产生脏矩形");
+
+        PageScene version_changed = before;
+        version_changed.items[0].version = 2;
+        version_changed.root = 2;
+        const SceneDiff version_diff = diffPageScene(&before, version_changed, page_rect);
+        expectTrue(!version_diff.full_page && version_diff.rects.size() == 1,
+                   "页场景：只有一项版本变化时给一条脏矩形");
+        expectTrue(std::fabs(version_diff.band_lo_pt - 10.0f) < 0.01f &&
+                       std::fabs(version_diff.band_hi_pt - 30.0f) < 0.01f,
+                   "页场景：版本变化的脏矩形落在这一项的纵向范围内");
+
+        PageScene key_changed = before;
+        key_changed.items[0].key.owner = 8;
+        key_changed.root = 3;
+        expectTrue(diffPageScene(&before, key_changed, page_rect).full_page,
+                   "页场景：身份序列变了就整页重画");
+
+        PageScene page_level = before;
+        page_level.items[0].bounds_pt = page_rect;
+        page_level.root = 4;
+        expectTrue(diffPageScene(&before, page_level, page_rect).full_page,
+                   "页场景：页级项变化就整页重画");
     }
 
     std::printf("\n──────────────────────────────\n");

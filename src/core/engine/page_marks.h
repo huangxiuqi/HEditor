@@ -8,6 +8,7 @@
 
 #include "core/engine/render_input.h"
 #include "core/render/bitmap.h"
+#include "core/render/page_sink.h"
 
 namespace heditor {
 
@@ -25,7 +26,7 @@ namespace heditor {
  * @param a1_pt 原子盒的行内末端（磅）
  * @param off_y 纵向平移（设备像素，连页接缝补画用）
  */
-void drawAtomBox(Bitmap& target, const RenderInput& in, const LineBox& lb, const LineCluster& c,
+void drawAtomBox(PageSink& target, const RenderInput& in, const LineBox& lb, const LineCluster& c,
                  float a1_pt, float off_y);
 
 /**
@@ -58,7 +59,7 @@ bool choiceMarkerOf(const RenderInput& in, const PlacedGlyph& pg, bool* checked,
  * @param color 记号色（alpha 0 = 用字形自己的颜色）
  * @param dy 页内纵向偏移（设备像素）
  */
-void paintChoiceMarker(Bitmap& target, const RenderInput& in, const PlacedGlyph& pg, bool checked,
+void paintChoiceMarker(PageSink& target, const RenderInput& in, const PlacedGlyph& pg, bool checked,
                        bool square, Color color, float dy);
 
 /**
@@ -72,7 +73,7 @@ void paintChoiceMarker(Bitmap& target, const RenderInput& in, const PlacedGlyph&
  * @param band_lo_pt 带下界（磅），可为空
  * @param band_hi_pt 带上界（磅），可为空
  */
-void drawWatermark(Bitmap& target, const RenderInput& in, int page_index, const float* band_lo_pt,
+void drawWatermark(PageSink& target, const RenderInput& in, int page_index, const float* band_lo_pt,
                    const float* band_hi_pt);
 
 /**
@@ -90,7 +91,7 @@ void drawWatermark(Bitmap& target, const RenderInput& in, int page_index, const 
  * @param dy_px 整笔纵向平移（连页接缝补画那半截时是负的带高）
  * @param spill_only 只画越过带底的那几条行盒
  */
-void drawEditingMarks(Bitmap& target, const RenderInput& in, int page_index,
+void drawEditingMarks(PageSink& target, const RenderInput& in, int page_index,
                       const float* band_lo_pt, const float* band_hi_pt, float dy_px,
                       bool spill_only);
 
@@ -112,7 +113,7 @@ void drawEditingMarks(Bitmap& target, const RenderInput& in, int page_index,
  * @param dy_px 整笔纵向平移（设备像素）
  * @param spill_only 只画越过带底的那几条
  */
-void drawControlMarks(Bitmap& target, const RenderInput& in, int page_index,
+void drawControlMarks(PageSink& target, const RenderInput& in, int page_index,
                       const float* band_lo_pt, const float* band_hi_pt, float dy_px,
                       bool spill_only);
 

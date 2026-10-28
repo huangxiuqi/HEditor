@@ -1,11 +1,11 @@
-// 性能判据：增量排版与页指纹的耗时比值。
+// 性能判据：增量排版与页场景记账的耗时与结构量。
 //
-// 这三条判的是比值，分子分母来自同一次测量，所以与机器的绝对快慢无关；但它们仍然会被
-// 同机上的其它 test 顶翻 —— 所以单独成一份 spec、单独一条命令（npm run test:perf），
+// 排版那两条判的是比值，分子分母来自同一次测量，所以与机器的绝对快慢无关；但它们仍然
+// 会被同机上的其它 test 顶翻 —— 所以单独成一份 spec、单独一条命令（npm run test:perf），
 // 跑的时候独占一个 worker，机器上不该有别的活。
 //
-// 结构量（重排了几段、脏页是哪几页）留在 edit-longdoc.spec.ts：那些不受负载影响，
-// 日常全量就该跑。
+// 页场景这一侧不判耗时比值：全量与增量都要为窗口内每一页构建场景，构建耗时本来就接近；
+// 真正说明“增量发生了”的是脏页数（结构量，不受调度影响）。
 import { check } from '../support/check';
 import { test } from '../support/probe';
 import { key, openEdit, finishEdit } from '../support/edit-helpers';
@@ -14,7 +14,7 @@ import { key, openEdit, finishEdit } from '../support/edit-helpers';
 const DIRTY = 150;
 
 test.describe('编辑面：耗时比值', () => {
-  test('增量排版与页指纹都真的省（比值判据）', async ({ open }) => {
+  test('增量排版与页场景都真的省（比值与结构量）', async ({ open }) => {
     const { probe, consoleErrors } = await openEdit(open);
     const state: Record<string, any> = {};
 
@@ -56,15 +56,16 @@ test.describe('编辑面：耗时比值', () => {
             (au.fullMs < 1.0 ? '（全量太小，只判"更快"）' : ''));
     }
 
-    // 页指纹：整篇的耗时在首次全量里（base.pageFpMs），增量编辑之后应当小一个量级。
-    //   两个数都来自同一次会话的同一台机器，所以比值可比。
+    // 页场景：耗时只报出来对照；判据落在脏页数上。
+    //   全量与增量都要构建窗口内每一页的场景，所以两者耗时接近是正常的；
+    //   真正说明“增量发生了”的是只有受影响的页被记为脏。
     const fpFull = base.pageFpMs;
     const fpIncr = st.pageFpMs;
-    console.log(`     页指纹：整篇 ${fpFull.toFixed(3)} ms ｜ 增量 ${fpIncr.toFixed(3)} ms`);
-    check('★ 页指纹增量化：增量编辑之后只重算脏页（< 整篇的 1/4）',
-          fpFull > 0.05 ? fpIncr * 4 < fpFull : fpIncr <= fpFull,
-          `整篇 ${fpFull.toFixed(3)} ms ｜ 增量 ${fpIncr.toFixed(3)} ms` +
-          (fpFull <= 0.05 ? '（整篇太小，只判"不更慢"）' : ''));
+    console.log(`     页场景：整篇 ${fpFull.toFixed(3)} ms ｜ 增量 ${fpIncr.toFixed(3)} ms ｜ ` +
+                `脏页 ${st.dirtyPageCount} / 共 ${st.totalPages} 页`);
+    check('★ 页场景增量化：增量编辑之后只弄脏少数页（≤ 整篇的 1/4）',
+          st.dirtyPageCount > 0 && st.dirtyPageCount * 4 <= st.totalPages,
+          `脏页 ${st.dirtyPageCount} / 共 ${st.totalPages} 页`);
 
     await finishEdit(probe, consoleErrors, state);
   });

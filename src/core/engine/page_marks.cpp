@@ -25,7 +25,7 @@ namespace heditor {
  * 后端本期不做 —— 把表达式按普通文字画出来会得到错误的字距与上下标，那是伪渲染，
  * 比一个明确的框更危险。框里写上它是什么，读者一眼看得出这里是一枚原子。
  */
-void drawAtomBox(Bitmap& target, const RenderInput& in, const LineBox& lb, const LineCluster& c,
+void drawAtomBox(PageSink& target, const RenderInput& in, const LineBox& lb, const LineCluster& c,
                  float a1_pt, float off_y) {
     const float zoom = in.cfg->zoom;
     const float a0 = lb.inline_origin_pt + c.inline_pt;
@@ -125,7 +125,7 @@ namespace {
  * @param color 颜色
  * @param dy_px 整笔的纵向平移（连页接缝补画那半截时是负的带高）
  */
-void drawBreakMark(Bitmap& target, float along, float cross, float size_pt, float zoom,
+void drawBreakMark(PageSink& target, float along, float cross, float size_pt, float zoom,
                    bool vertical, Color color, float dy_px) {
     // 尺寸与落点都取整到设备像素：连页接缝那一趟是同一枚标记整体上移一个带高再画一次，
     //   两趟必须落到同一批像素上（判据是逐字节相同）。取整之前算，两趟会差出半像素的
@@ -191,7 +191,7 @@ bool choiceMarkerOf(const RenderInput& in, const PlacedGlyph& pg, bool* checked,
     return false;
 }
 
-void paintChoiceMarker(Bitmap& target, const RenderInput& in, const PlacedGlyph& pg, bool checked,
+void paintChoiceMarker(PageSink& target, const RenderInput& in, const PlacedGlyph& pg, bool checked,
                        bool square, Color color, float dy) {
     const float zoom = in.cfg->zoom;
     if (!(zoom > 0.0f)) return;
@@ -239,7 +239,7 @@ void paintChoiceMarker(Bitmap& target, const RenderInput& in, const PlacedGlyph&
     target.strokePolyline(mark, 3, color, w);
 }
 
-void drawWatermark(Bitmap& target, const RenderInput& in, int page_index, const float* band_lo_pt,
+void drawWatermark(PageSink& target, const RenderInput& in, int page_index, const float* band_lo_pt,
                    const float* band_hi_pt) {
     (void)page_index;
     const WatermarkSpec w = in.watermark;
@@ -318,7 +318,7 @@ void drawWatermark(Bitmap& target, const RenderInput& in, int page_index, const 
  * last_cp），空格的中点坐在该簇的 inline_pt 与下一簇的 inline_pt 之间。字体与基线取
  * 行盒的 bracket_font / bracket_axis_pt —— 那是块主字体，标记的粗细与风格才跟正文一致。
  */
-void drawEditingMarks(Bitmap& target, const RenderInput& in, int page_index,
+void drawEditingMarks(PageSink& target, const RenderInput& in, int page_index,
                       const float* band_lo_pt, const float* band_hi_pt, float dy_px,
                       bool spill_only) {
     // 档位与只读态的合成判断（只读是呈现态，标记会被印出来，与表单括号同一条）。
@@ -427,7 +427,7 @@ void drawEditingMarks(Bitmap& target, const RenderInput& in, int page_index,
  * 画在页位图里而不是帧上：每一次变化都伴随重排或光栅签名变化（见 docs/步5-渲染层方案.md
  * 的 5D 小节），不需要"矩形出口"；跟着内容缓存反而少一份逐帧擦除的账。
  */
-void drawControlMarks(Bitmap& target, const RenderInput& in, int page_index,
+void drawControlMarks(PageSink& target, const RenderInput& in, int page_index,
                       const float* band_lo_pt, const float* band_hi_pt, float dy_px,
                       bool spill_only) {
     // 只读不画：它是呈现与打印态，括号落进版面就印出来了。
