@@ -16,10 +16,10 @@
 
 #include <string>
 
-#include "core/doc/node.h"
 #include "core/rev/edit_mode.h"
 #include "core/rev/flow.h"
 #include "core/rev/flow_types.h"
+#include "core/rev/node_id.h"
 #include "core/rev/range.h"
 #include "core/rev/rev.h"
 #include "core/rev/step_types.h"

@@ -1,3 +1,4 @@
+#include "core/doc/tree_adapter.h"
 /**
  * 原生宿主。
  * 作用不是"最终产品"，而是轨道 A 的快速迭代载体：

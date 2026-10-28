@@ -12,7 +12,7 @@
 #include <utility>
 
 #include "core/doc/node.h"
-#include "core/rev/rev.h"
+#include "core/doc/tree_adapter.h"
 
 namespace heditor::rev {
 

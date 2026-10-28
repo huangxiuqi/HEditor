@@ -4,10 +4,10 @@
 #include <unordered_set>
 #include <utility>
 
-#include "core/doc/table.h"
 #include "core/rev/atom_map.h"
 #include "core/rev/format_map.h"
 #include "core/rev/length.h"
+#include "core/rev/table_grid.h"
 
 namespace heditor::rev {
 

@@ -16,140 +16,30 @@
 
 #include "core/doc/node.h"
 #include "core/doc/steps.h"
+#include "core/rev/table_grid.h"
 #include "core/rev/table_spec.h"
 
 namespace heditor {
-/**
- * 派生网格里的一个格位：它属于哪个单元格，以及那个单元格的原点在哪。
- *
- * row / col 存的是原点坐标，不是当前格位坐标 —— 这正是"落在合并区域内返回原点格"
- * 这条规则的落点：查任意格位拿到的都是同一个原点。
- */
-struct GridCell {
-    /**
-     * 占这个格位的单元格节点 id。
-     */
-    NodeId id = kInvalidNodeId;
-
-    /**
-     * 原点格的行号（不是当前格位的行号）。
-     */
-    int row = 0;
-
-    /**
-     * 原点格的列号。
-     */
-    int col = 0;
-};
 
 /**
- * 派生网格。行优先，长度是 rows * cols。
- */
-struct TableGrid {
-    /**
-     * 网格行数（= 行记录条数）。
-     */
-    int rows = 0;
-
-    /**
-     * 网格列数（由第一行的跨度之和定）。
-     */
-    int cols = 0;
-
-    /**
-     * 行优先的格位数组，长度 rows * cols。
-     */
-    std::vector<GridCell> slots;
-
-    /**
-     * 查一个格位。越界返回空；落在合并区域内时返回该区域的原点格（左上角）。
-     * 这是唯一能让 cell(r, c) 在任何表上都可用的规则，否则调用方每次都要先自己判断
-     * "这个格位是不是被别人合并了"。
-     * @param row 行号
-     * @param col 列号
-     * @return 格位；越界为 nullptr；落在合并区域内时给原点格
-     */
-    const GridCell* at(int row, int col) const;
-
-    /**
-     * 两个格位是不是同一个单元格（也就是它们之间那条网格线被合并跨过）。
-     * @param row_a 第一个格位所在行
-     * @param col_a 第一个格位所在列
-     * @param row_b 第二个格位所在行
-     * @param col_b 第二个格位所在列
-     * @return true = 两个格位属于同一个单元格
-     */
-    bool sameOrigin(int row_a, int col_a, int row_b, int col_b) const;
-
-    /**
-     * 某个单元格在它所在行里是第几格（按原点格算）。不在网格里时返回 -1。
-     *
-     * 行列操作要靠它定位"新格子插在哪两个格子之间" —— 插在"原列号不小于插入点的第一个
-     * 格子"之前；跨过插入线的格子原列号更小，所以它留在前面吸收新列。
-     * @param id 单元格节点 id
-     * @return 它在所在行里是第几格；不在网格里为 -1
-     */
-    int originColOf(NodeId id) const;
-};
-
-/**
- * 标题行的行数：从第 0 行起连续标了 is_header 的行数。
- *
- * 它不再是存下来的字段 —— 标题行是逐行开关，"几个"只是数出来的。遇到第一个非标题行就停，
- * 所以"第 2 行标了标题而第 1 行没标"这种形状它只数到 0；那种形状由不变量报，不由它纠正。
- * 表格节点无效时返回 0。
+ * 从第 0 行起连续标了标题行的行数。
  * @param tree 文档树
  * @param table 表格节点号
- * @return 从第 0 行起连续标了标题行的行数
+ * @returns 标题行数
  */
 int headerRowCount(const NodeTree& tree, NodeId table);
-
-/**
- * 网格推导的输入：一行里的各个格子。只有身份与跨度，没有内容。
- *
- * 模型层与修订层都要推网格，两边的节点类型不同，能共用的就是这一层 —— 网格规则（重叠、
- * 空洞、跨出表尾）只写一份，两套实现不会各自演化。
- */
-struct GridCellSpan {
-    /**
-     * 单元格节点 id。
-     */
-    NodeId id = kInvalidNodeId;
-
-    /**
-     * 纵向跨度。
-     */
-    int row_span = 1;
-
-    /**
-     * 横向跨度。
-     */
-    int col_span = 1;
-};
-
-/**
- * 由每行的跨度序列推出网格。这是网格规则的唯一实现。
- * @param rows 每行的跨度序列
- * @param out 写回网格
- * @param error 写回失败原因（重叠、空洞、跨出表尾）
- * @return true = 这些跨度能推出一张网格
- */
-bool buildGridFromSpans(const std::vector<std::vector<GridCellSpan>>& rows, TableGrid* out,
-                        std::string* error);
 
 /**
  * 从跨度推导网格。失败时给出原因（重叠、空洞、合并超出表格末尾）。
  *
  * 列数由第一行自己的跨度之和定（第一行没有东西跨进来，所以它的覆盖范围就是列数），之后
  * 每一行都必须被完整覆盖且不留缝隙 —— 这就是"每行的跨度之和相等、等于网格列数"那条不变量
- * 的落点。注意那句话说的是"这一行被覆盖的格位数"，不是"这一行自己的格子的跨度之和"：纵向
- * 合并覆盖的行本来就没有那么多自己的格子（被合并掉的格位在模型里不存在），按后者判会把
- * 合法的表判成非法。
+ * 的落点。
  * @param tree 文档树
  * @param table 表格节点号
  * @param out 写回网格
  * @param error 写回失败原因
- * @return true = 推得出网格
+ * @returns true = 推得出网格
  */
 bool buildGrid(const NodeTree& tree, NodeId table, TableGrid* out, std::string* error);
 

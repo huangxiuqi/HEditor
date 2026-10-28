@@ -11,7 +11,7 @@
 #include <variant>
 #include <vector>
 
-#include "core/doc/record_json.h"
+#include "core/rev/record_json.h"
 #include "nlohmann/json.hpp"
 
 namespace heditor::rev {

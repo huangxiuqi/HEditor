@@ -184,16 +184,19 @@ add_library(heditor_core STATIC
   src/core/doc/transaction.cpp
   src/core/doc/revision.cpp
   src/core/doc/serialize.cpp
-  src/core/doc/record_json.cpp
+  src/core/rev/record_json.cpp
   src/core/rev/rev.cpp
   src/core/rev/node_kind.cpp
   src/core/rev/project.cpp
   src/core/rev/serialize.cpp
   src/core/rev/subtree.cpp
   src/core/rev/style.cpp
+  src/core/rev/table_grid.cpp
+  src/core/rev/step_map.cpp
   src/core/rev/utf8.cpp
   src/core/rev/fragment_value.cpp
-  src/core/rev/from_tree.cpp
+  src/core/doc/tree_adapter.cpp
+  src/core/doc/field_eval.cpp
   src/core/rev/session.cpp
   src/core/rev/flow.cpp
   src/core/rev/steps.cpp

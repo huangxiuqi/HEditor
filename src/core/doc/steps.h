@@ -30,6 +30,7 @@
 #include "core/rev/section_spec.h"
 #include "core/rev/table_spec.h"
 
+#include "core/rev/step_map.h"
 #include "core/rev/step_types.h"
 namespace heditor {
 

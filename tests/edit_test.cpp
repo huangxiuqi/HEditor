@@ -30,6 +30,7 @@
 #include "core/doc/compile.h"
 #include "core/doc/document.h"
 #include "core/doc/flow.h"
+#include "core/doc/tree_adapter.h"
 #include "core/engine/engine.h"
 #include "core/layout/layout.h"
 #include "core/rev/project.h"

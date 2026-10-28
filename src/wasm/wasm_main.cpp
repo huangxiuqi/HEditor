@@ -1,3 +1,4 @@
+#include "core/doc/tree_adapter.h"
 /**
  * WASM 宿主。
  * 只做三件事：接收 JS fetch 下来的字体字节（字体不进 wasm 包）、暴露布局与绘制
@@ -17,11 +18,11 @@
 #include <string>
 #include <vector>
 
-#include "core/doc/record_json.h"
 #include "core/engine/engine.h"
 #include "core/engine/payload_schema.h"
 #include "core/rev/fragment.h"
 #include "core/rev/para_format.h"
+#include "core/rev/record_json.h"
 #include "core/utils/utf8.h"
 #include "demo/demo_documents.h"
 

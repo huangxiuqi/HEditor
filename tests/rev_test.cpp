@@ -19,6 +19,7 @@
 #include "core/doc/flow.h"
 #include "core/doc/steps.h"
 #include "core/doc/transaction.h"
+#include "core/doc/tree_adapter.h"
 #include "core/rev/flow.h"
 #include "core/rev/fragment.h"
 #include "core/rev/project.h"

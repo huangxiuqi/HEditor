@@ -14,10 +14,11 @@
 #include <string>
 #include <vector>
 
-#include "core/doc/table.h"
 #include "core/rev/flow.h"
 #include "core/rev/rev.h"
+#include "core/rev/step_map.h"
 #include "core/rev/step_types.h"
+#include "core/rev/table_grid.h"
 
 namespace heditor::rev {
 /**

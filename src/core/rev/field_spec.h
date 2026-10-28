@@ -22,8 +22,6 @@
 
 namespace heditor {
 
-class NodeTree;
-
 /**
  * 域的种类。排版结果类需要迭代，运行时刻类不需要。PrintDate 的语义是导出或打印那一刻，
  * 不是打开那一刻，否则昨天打开的文档会一直显示昨天的日期；DocProperty 取文档属性表里的
@@ -125,16 +123,5 @@ struct FieldEvalResult {
      */
     int updated = 0;
 };
-
-/**
- * 把全篇的域按给定上下文求值，只写每个域的缓存值。
- *
- * 它不接收事务、也不返回编辑步骤，所以在结构上不可能往撤销栈里塞东西。正文按树顺序走，
- * 页眉页脚的片段由节的记录引用、不在正文流里，所以另外按记录里的根逐个走一遍。
- * @param tree 文档树
- * @param ctx 求值上下文
- * @return 看了几个域、几个缓存值真的变了
- */
-FieldEvalResult evaluateFields(NodeTree& tree, const FieldContext& ctx);
 
 }  // namespace heditor

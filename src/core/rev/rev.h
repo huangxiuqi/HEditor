@@ -25,15 +25,17 @@
 #include <variant>
 #include <vector>
 
-#include "core/doc/node.h"
-#include "core/doc/subtree.h"
 #include "core/rev/char_format.h"
 #include "core/rev/control_spec.h"
 #include "core/rev/field_spec.h"
+#include "core/rev/flow_types.h"
 #include "core/rev/formula_spec.h"
 #include "core/rev/image_spec.h"
+#include "core/rev/node_id.h"
+#include "core/rev/node_kind.h"
 #include "core/rev/para_format.h"
 #include "core/rev/section_spec.h"
+#include "core/rev/subtree.h"
 
 namespace heditor::rev {
 /**
@@ -322,16 +324,6 @@ const Node* parentOf(const Doc& doc, NodeId id);
 NodeSpec toSpec(const Node& node);
 
 /**
- * 反向桥：修订 → 模型树。节点号不保留（模型树的节点由它自己分配），内容逐字段带过去。
- *
- * 它只有一个用途 —— 审计：引擎产物与另一条独立路径（compileDocument）比较时，参照侧需要
- * 一棵模型树。编辑路径不用它，否则就又回到"每条编辑造一棵树"。
- * @param doc 修订
- * @param out 写出的模型树（先清空）
- */
-void toTree(const Doc& doc, NodeTree* out);
-
-/**
  * 建一个节点：哈希与段落数由孩子算出来，调用方给的是内容与身份，不是派生量。
  *
  * 派生量不从外面填，是不给"第二个可写真相"留口子：节点若能带着别人算好的哈希建出来，
@@ -356,23 +348,6 @@ Ref makeNode(NodeId id, NodeKind kind, Payload payload, std::vector<Ref> childre
  * @return 一份修订
  */
 Doc adopt(Ref root, NodeId next_id);
-
-/**
- * 从模型树导出一份修订：节点号原样带过来（身份跨模型同源），载荷按种类一一对应，
- * hidden 与分配器水位一起带。
- *
- * 这是迁移路径，也是等价判据的桥：project(fromTree(tree)) 与 compileDocument(tree)
- * 逐字段相同，才能说两条路是同一件事。
- *
- * 表示不了的形状直接拒绝、并说明原因，不做"能搬多少搬多少"：搬一半的结果是一份看起来
- * 完整的修订 —— 它与模型不是同一份文档，而调用方没有别的办法知道。本切片拒绝不认识的根
- * 与"非文档 / 非节"的子节点。
- * @param tree 模型树
- * @param out 写出的修订（成功时才动）
- * @param error 写回失败原因
- * @return true = 表示得了；false 时 out 不动
- */
-bool fromTree(const NodeTree& tree, Doc* out, std::string* error);
 
 /**
  * 用若干段纯文本建一份修订。空段落被保留：它由一个段落标记单独表示。

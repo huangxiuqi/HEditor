@@ -1,3 +1,4 @@
+#include "core/doc/tree_adapter.h"
 /**
  * 审计判据：增量结果与全量结果的逐字段对照。
  *
