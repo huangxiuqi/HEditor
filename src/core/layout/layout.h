@@ -18,6 +18,8 @@
 #include <string>
 #include <vector>
 
+#include "core/layout/float_band.h"
+
 #include "core/doc/document.h"
 #include "core/doc/image_spec.h"
 #include "core/doc/para_format.h"
@@ -1744,11 +1746,31 @@ struct ReflowState {
     int line_total = 0;
 
     /**
+     * 此刻仍然生效的浮动图排除带（块轴坐标）。
+     *
+     * 从中间某段续排时，前面那些段落的图已经画在纸上了，但它们挖掉的版面还要继续算 ——
+     * 少了这份快照，续排只看得到"本段及之后"的图，行宽会与整篇排版不同。
+     */
+    std::vector<FloatBand> bands;
+
+    /**
      * 精确相等。1ulp 的差异也算不同 —— 它会改变后续落行。
      */
     bool operator==(const ReflowState& o) const {
         // 精确比较：1ulp 的差异也可能改变后续落行，必须重排后缀。
-        return page_index == o.page_index && line_total == o.line_total && cursor_y == o.cursor_y;
+        if (page_index != o.page_index || line_total != o.line_total || cursor_y != o.cursor_y) {
+            return false;
+        }
+        if (bands.size() != o.bands.size()) return false;
+        for (size_t i = 0; i < bands.size(); ++i) {
+            const FloatBand& a = bands[i];
+            const FloatBand& b = o.bands[i];
+            if (a.x0 != b.x0 || a.x1 != b.x1 || a.f0 != b.f0 || a.f1 != b.f1 ||
+                a.square != b.square) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**

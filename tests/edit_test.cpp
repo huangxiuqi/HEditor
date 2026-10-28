@@ -13736,6 +13736,64 @@ int main() {
             const std::vector<EditorEngine::ImageBox> bg = eg.images();
             expectTrue(bg.size() == 2 && !eg.layout().placed_tables.empty(),
                        "构造：两张图夹一张表");
+
+            // 有浮动图的文档在挨着图的那一段改字：只重排脏段，且与整篇重排逐字段相同。
+            //   浮动框的纵向位置取决于它前面排了多高，从中间续排必须带上"此刻还生效的排除带"，
+            //   否则续排只看得到本段及之后的图，挨着图的那几行宽度与整篇排版不同。
+            {
+                int idf = 900;
+                auto runf = [&](const std::string& text) {
+                    return doc::makeNode(idf++, NodeKind::TextRun,
+                                         doc::RunPayload{utf8ToCodepoints(text), CharFormat{}, {}},
+                                         {});
+                };
+                auto markf = [&]() {
+                    return doc::makeNode(idf++, NodeKind::ParagraphMark, doc::MarkPayload{}, {});
+                };
+                ImageSpec flt;
+                flt.px_w = iw86;
+                flt.px_h = ih86;
+                flt.dpi = 96;
+                // 要盖住后面几段才试得出排除带：48 磅只压到第一段那一行，去掉快照也看不出差别。
+                flt.width = Length::abs(ptToEmu(120.0f));
+                flt.height = Length::abs(ptToEmu(120.0f));
+                flt.anchor = ImageAnchor::Float;
+                flt.wrap = ImageWrap::Square;
+                std::vector<doc::Ref> kids;
+                for (int i = 0; i < 8; ++i) {
+                    // 图挂在第一段里：它挖掉的那块版面正好压着第一、二段的头几行。
+                    if (i == 0) kids.push_back(doc::makeNode(idf++, NodeKind::Image, flt, {}));
+                    kids.push_back(runf("横向排开的文字要足够多，才看得出图旁边那几行的宽度变了"));
+                    kids.push_back(markf());
+                }
+                const doc::Ref secf = doc::makeNode(idf++, NodeKind::Section, SectionSpec{}, kids);
+                const NodeId rootf = idf++;
+                EditorEngine ef;
+                if (!ef.init(fonts86)) {
+                    std::fprintf(stderr, "字体加载失败\n");
+                    return 2;
+                }
+                ef.setConfig(c86);
+                ef.setDocument(
+                    doc::adopt(doc::makeNode(rootf, NodeKind::Document, {}, {secf}), idf),
+                    StyleSheet{});
+                ef.relayout();
+                ef.repaint();
+                const int nf = static_cast<int>(ef.blocks().size());
+                expectTrue(nf == 8 && ef.layout().placed_floats.size() == 1,
+                           "前提：八段正文与一张浮动图（实际 " + std::to_string(nf) + " 段 / " +
+                               std::to_string(ef.layout().placed_floats.size()) + " 张浮动图）");
+
+                ef.setCaret(1, 3);
+                expectTrue(ef.typeTextAndRender("\xE6\xB5\x8B"), "挨着图的那一段改一个字");
+                const EditStats stf = ef.editStats();
+                std::printf("     有图增量：重排 %d 段 / 共 %d 段，%s\n", stf.relaid_paragraphs, nf,
+                            stf.layout_was_full ? "全量" : "增量");
+                expectTrue(!stf.layout_was_full, "有浮动图时改字也走增量排版");
+                expectTrue(stf.relaid_paragraphs < nf, "只重排脏段，不是整篇");
+                expectTrue(ef.auditLayout() == 0, "增量结果与整篇重排逐字段一致（排除带带上了）");
+                expectTrue(ef.layout().placed_floats.size() == 1, "浮动几何只有一份（没有重影）");
+            }
             if (bg.size() == 2 && !bg[0].rects.empty() && !bg[1].rects.empty() &&
                 !eg.layout().placed_tables.empty()) {
                 const PlacedTable& pt = eg.layout().placed_tables[0];

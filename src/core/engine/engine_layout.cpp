@@ -103,8 +103,7 @@ void EditorEngine::relayout() {
     // 四档决策，从严到宽：整篇都脏或没有脏段走全量（前者影响面不可定位，后者是保守
     // 回退）；只重排脏段、后缀原样搬回（trySpliceOnly，要求后缀的行结构没变）；
     // 前缀保留加从脏段续排（常规增量）；其余情况全量。
-    // 有浮动图时只能整篇重排：浮动框的纵向位置取决于它前面排了多高，续排拿不到那个上下文。
-    const bool must_full = layout_needs_full_ || layout_dirty_from_ >= n_para || !floats_.empty();
+    const bool must_full = layout_needs_full_ || layout_dirty_from_ >= n_para;
     // 脏区起点先对齐到表格边界：落在表里就从这张表的起始段重排（见 tableAlignedFrom）。
     //   对齐之后，"从 from 续排"与"整篇重排"在表格这一段上走的是同一条路。
     const int from = tableAlignedFrom(layout_dirty_from_);
@@ -144,7 +143,9 @@ void EditorEngine::relayout() {
     //   那个断言就不成立 —— 括号占位就是活例子：聚焦档下换一个字段会挪走旧字段的括号，
     //   而它在脏区起点之后；后缀的空格宽度变了、行盒宽度却没变，续排状态比对看不出来，
     //   搬回来的就是带着旧括号的旧行盒。
-    const bool splice_ok = (to >= 0);
+    // 有浮动图时不走拼接：拼接把后缀原样搬走、只挪页号与行号，而排除带是绝对位置 ——
+    //   搬完文字与带之间的相对关系就变了。续排那条路能带上带（见 ReflowState::bands）。
+    const bool splice_ok = (to >= 0) && floats_.empty();
     if (!must_full && splice_ok && from >= 0 && from < n_para) {
         reuse = trySuffixReuse(from, dirty_count, &relaid_paras, &cut, &cut_state);
     }
@@ -604,6 +605,19 @@ void EditorEngine::truncateLayoutAt(int para) {
                        layout_service_.layout.placed_tables.end(),
                        [para](const PlacedTable& t) { return t.first_block >= para; }),
         layout_service_.layout.placed_tables.end());
+    // 浮动图的几何同理：锚点落在被丢掉那一半的图，续排会重新落一遍，留着就是同一张图
+    //   两份几何（拖动时看见两张错开的框）。锚点在保留那一半的图不在这里删 —— 它们
+    //   已经画在纸上了，续排也不会再产出它们。
+    layout_service_.layout.placed_floats.erase(
+        std::remove_if(layout_service_.layout.placed_floats.begin(),
+                       layout_service_.layout.placed_floats.end(),
+                       [this, para](const PlacedFloat& pf) {
+                           for (const LayoutFloat& f : floats_) {
+                               if (f.handle == pf.handle) return f.para >= para;
+                           }
+                           return false;
+                       }),
+        layout_service_.layout.placed_floats.end());
 }
 
 /**

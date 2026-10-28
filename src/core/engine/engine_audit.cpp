@@ -567,7 +567,12 @@ EditorEngine::TableAudit EditorEngine::auditTablesDetail() const {
  */
 int EditorEngine::auditLayout() {
     if (blocks().empty()) return 0;
-    const LayoutResult ref = layoutDocument(fonts_, blocks(), cfg_.page, projection_.tables);
+    // 对照必须与增量吃同一份输入：浮动图也是排版输入，漏掉它，有图的文档永远对不上 ——
+    //   那会让这条审计在有图的场景里失去意义（永远非 0，于是没人看它）。
+    LayoutResult ref;
+    layoutDocumentRangeWithTables(fonts_, blocks(), cfg_.page, projection_.tables, 0,
+                                  static_cast<int>(blocks().size()), freshReflowState(cfg_.page),
+                                  nullptr, &ref, floatsForLayout());
     return auditLayoutPair(layout_service_.layout, ref).total();
 }
 
@@ -577,7 +582,10 @@ std::string EditorEngine::auditLayoutJson() {
         return pk::checked(pk::audit_layout::kSpec, "{\"diff\":0,\"note\":\"empty\"}");
 
     const auto t0 = Clock::now();
-    const LayoutResult ref = layoutDocument(fonts_, blocks(), cfg_.page, projection_.tables);
+    LayoutResult ref;
+    layoutDocumentRangeWithTables(fonts_, blocks(), cfg_.page, projection_.tables, 0,
+                                  static_cast<int>(blocks().size()), freshReflowState(cfg_.page),
+                                  nullptr, &ref, floatsForLayout());
     const double full_ms = msSince(t0);
     const LayoutAudit a = auditLayoutPair(layout_service_.layout, ref);
 

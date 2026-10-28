@@ -553,7 +553,9 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
 
     // 有浮动图时排版整篇重来（引擎侧 must_full），所以"预先判页"这条规则只在这里成立。
     const bool wrap_floats = !floats.empty();
+    // 续排锚点带来的排除带先铺上：更早段落的图不在本轮的输入里，但它们挖掉的版面还在。
     FloatFlow live_flow;
+    live_flow.bands = state.bands;
     // floats 按 (para, cp) 升序（编译层保证），游标一路往下走。
     size_t float_cursor = 0;
 
@@ -1099,8 +1101,8 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
         //   —— 它与"脏区排完之后的真实状态"永远不等，增量排版因此从第二页起每次都落到
         //   "后缀重新分页"那一路（见 repaginateSuffix），多排一遍还有排错的风险。
         const float anchor_y = opened_outer ? cursor_before_switch : cursor_y;
-        pi.state_at_start =
-            ReflowState{cont ? slabOfY(anchor_y) : page_index, anchor_y, line_total};
+        pi.state_at_start = ReflowState{cont ? slabOfY(anchor_y) : page_index, anchor_y, line_total,
+                                        live_flow.bands};
         pi.line_begin = static_cast<int>(res.lines.size());
         pi.glyph_begin = static_cast<int>(res.glyphs.size());
         pi.cluster_count = 0;

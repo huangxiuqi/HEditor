@@ -14,38 +14,9 @@
 #include <vector>
 
 #include "core/layout/block_shape.h"
+#include "core/layout/float_band.h"
 
 namespace heditor {
-
-/**
- * 一条浮动图的排除带（块轴坐标）。
- */
-struct FloatBand {
-    /**
-     * 左沿（页内 x，磅）。
-     */
-    float x0 = 0.0f;
-
-    /**
-     * 右沿（页内 x，磅）。
-     */
-    float x1 = 0.0f;
-
-    /**
-     * 上沿（块轴 y，磅）。
-     */
-    float f0 = 0.0f;
-
-    /**
-     * 下沿（块轴 y，磅）。
-     */
-    float f1 = 0.0f;
-
-    /**
-     * 四周型：只挖掉两侧；false = 上下型：整行下推到下沿。
-     */
-    bool square = false;
-};
 
 /**
  * 生效中的排除带：按放上版面的先后排列，跨段保留，直到下沿越过当前行顶。
