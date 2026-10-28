@@ -74,7 +74,7 @@ std::vector<EditorEngine::ControlView> EditorEngine::controlViews() const {
 
 bool EditorEngine::setControlSpec(int index, const ControlPatch& patch) {
     if (!loaded_) return false;
-    return edit_.setControlSpec(index, patch);
+    return edit_session_.edit.setControlSpec(index, patch);
 }
 
 bool EditorEngine::setControlSpecAndRender(int index, const ControlPatch& patch) {
@@ -86,7 +86,7 @@ bool EditorEngine::setControlSpecAndRender(int index, const ControlPatch& patch)
 
 bool EditorEngine::setControlValue(int index, const ControlValue& value) {
     if (!loaded_) return false;
-    return edit_.setControlValue(index, value);
+    return edit_session_.edit.setControlValue(index, value);
 }
 
 bool EditorEngine::setControlValueAndRender(int index, const ControlValue& value) {
@@ -98,7 +98,7 @@ bool EditorEngine::setControlValueAndRender(int index, const ControlValue& value
 
 bool EditorEngine::toggleControl(int index, int option) {
     if (!loaded_) return false;
-    return edit_.toggleControl(index, option);
+    return edit_session_.edit.toggleControl(index, option);
 }
 
 bool EditorEngine::toggleControlAndRender(int index, int option) {
@@ -120,13 +120,13 @@ int EditorEngine::controlOptionAtPt(float x_pt_doc, float y_pt_doc) const {
 
 int EditorEngine::controlOptionAtPos(TextPos p, int side) const {
     if (!loaded_) return -1;
-    const FlowPos f = caret_.flowPosAtSide(p.para, p.offset, side);
+    const FlowPos f = edit_session_.caret.flowPosAtSide(p.para, p.offset, side);
     if (f < 0) return -1;
     FlowPos lo = 0;
     FlowPos hi = 0;
     if (!flow_.has_value()) return -1;
-    const int index = !structure_index_.controls.empty()
-                          ? structure_index_.controls.innermost(f, &lo, &hi)
+    const int index = !projection_.structure.controls.empty()
+                          ? projection_.structure.controls.innermost(f, &lo, &hi)
                           : innermostControlAtFlow(*flow_, control_node_ids_, f, &lo, &hi);
     if (index < 0) return -1;
     const rev::Node* n = rev::findNode(document(), control_node_ids_[static_cast<size_t>(index)]);

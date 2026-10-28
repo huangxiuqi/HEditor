@@ -386,7 +386,7 @@ std::string EditorEngine::auditFrameJson() {
     Bitmap before;
     assembleWindow(true, &before);
 
-    pages_.clear();
+    render_.pages.clear();
     repaint();
 
     Bitmap after;
@@ -408,7 +408,7 @@ std::string EditorEngine::auditBaseJson() {
     Bitmap before;
     assembleWindow(false, &before);
 
-    pages_.clear();
+    render_.pages.clear();
     repaint();
 
     Bitmap after;
@@ -430,7 +430,7 @@ std::string EditorEngine::auditBaseJson() {
 std::string EditorEngine::auditPageJson(int page) {
     const int pw = pagePxWidth();
     const int ph = pagePxHeight();
-    const PageSlot* pb = pages_.find(page);
+    const PageSlot* pb = render_.pages.find(page);
     if (pb == nullptr || !pb->valid || pb->px.width() != pw || pb->px.height() != ph) {
         return pk::checked(pk::audit_page::kSpec, "{\"diff\":-1,\"cached\":0}");
     }
@@ -508,8 +508,8 @@ EditorEngine::TableAudit EditorEngine::auditTablesDetail() const {
     };
     std::vector<Ref> refs;
 
-    for (size_t ti = 0; ti < tables_.size(); ++ti) {
-        const LayoutTable& t = tables_[ti];
+    for (size_t ti = 0; ti < projection_.tables.size(); ++ti) {
+        const LayoutTable& t = projection_.tables[ti];
         for (const LayoutCell& c : t.cells) {
             const int ci = static_cast<int>(refs.size());
             ++a.cells;
@@ -554,14 +554,14 @@ EditorEngine::TableAudit EditorEngine::auditTablesDetail() const {
     std::map<std::tuple<uint64_t, int, int>, int> by_slot;
     {
         size_t ci = 0;
-        for (const LayoutTable& t : tables_) {
+        for (const LayoutTable& t : projection_.tables) {
             for (const LayoutCell& c : t.cells) {
                 by_slot[std::make_tuple(t.handle, c.row, c.cell)] = static_cast<int>(ci);
                 ++ci;
             }
         }
     }
-    const bool marks_known = block_src_.size() == blocks().size();
+    const bool marks_known = projection_.block_src.size() == blocks().size();
     for (int i = 0; i < n_blocks; ++i) {
         const size_t k = static_cast<size_t>(i);
         const std::vector<CellSlot>& path = blocks()[k].cell_path;
@@ -575,7 +575,7 @@ EditorEngine::TableAudit EditorEngine::auditTablesDetail() const {
         }
         // 文档最后一块可以没有结束标记（末尾未结束），格里的块不行。
         if (owner[k] >= 0 && i + 1 < n_blocks && marks_known &&
-            block_src_[k].mark == kInvalidNodeId) {
+            projection_.block_src[k].mark == kInvalidNodeId) {
             ++a.block_without_mark;
         }
     }
@@ -583,14 +583,14 @@ EditorEngine::TableAudit EditorEngine::auditTablesDetail() const {
 }
 
 /**
- * 排版自审：拿"不用缓存的全量重排"当对照，与当前 layout_ 逐字段比。
+ * 排版自审：拿"不用缓存的全量重排"当对照，与当前 layout_service_.layout 逐字段比。
  * 为什么要比逐字段而不是只看行数/字形数：增量最典型的错法是"少排了一段"
  * 或者"前缀多留了一段"，两者都只差几行 —— 看总数看不出来，看内容才看得见。
  */
 int EditorEngine::auditLayout() {
     if (blocks().empty()) return 0;
-    const LayoutResult ref = layoutDocument(fonts_, blocks(), cfg_.page, tables_);
-    return auditLayoutPair(layout_, ref).total();
+    const LayoutResult ref = layoutDocument(fonts_, blocks(), cfg_.page, projection_.tables);
+    return auditLayoutPair(layout_service_.layout, ref).total();
 }
 
 std::string EditorEngine::auditLayoutJson() {
@@ -599,9 +599,9 @@ std::string EditorEngine::auditLayoutJson() {
         return pk::checked(pk::audit_layout::kSpec, "{\"diff\":0,\"note\":\"empty\"}");
 
     const auto t0 = Clock::now();
-    const LayoutResult ref = layoutDocument(fonts_, blocks(), cfg_.page, tables_);
+    const LayoutResult ref = layoutDocument(fonts_, blocks(), cfg_.page, projection_.tables);
     const double full_ms = msSince(t0);
-    const LayoutAudit a = auditLayoutPair(layout_, ref);
+    const LayoutAudit a = auditLayoutPair(layout_service_.layout, ref);
 
     o << "{\"diff\":" << a.total();
     o << ",\"glyphDiff\":" << a.glyph_diff << ",\"lineDiff\":" << a.line_diff;
@@ -610,21 +610,22 @@ std::string EditorEngine::auditLayoutJson() {
     o << ",\"statsSame\":" << (a.stats_same ? "true" : "false");
     o << ",\"first\":{\"glyph\":" << a.glyph_first << ",\"line\":" << a.line_first
       << ",\"para\":" << a.para_first << "}";
-    o << ",\"glyphs\":" << layout_.glyphs.size() << ",\"lines\":" << layout_.lines.size();
-    o << ",\"paras\":" << layout_.para_index.size();
+    o << ",\"glyphs\":" << layout_service_.layout.glyphs.size()
+      << ",\"lines\":" << layout_service_.layout.lines.size();
+    o << ",\"paras\":" << layout_service_.layout.para_index.size();
     o << ",\"relaidParagraphs\":" << last_relaid_paragraphs_;
     o << ",\"relaidLines\":" << last_relaid_lines_;
     o << ",\"layoutWasFull\":" << (last_layout_full_ ? "true" : "false");
     // 两个耗时都来自本次调用：curMs 是刚才那次增量续排，fullMs 是审计顺便做的
     // 全量重排 —— 分母与分子同源，不掺历史数字。
-    o << ",\"curMs\":" << layout_.stats.layout_ms << ",\"fullMs\":" << full_ms;
+    o << ",\"curMs\":" << layout_service_.layout.stats.layout_ms << ",\"fullMs\":" << full_ms;
     o << "}";
     return pk::checked(pk::audit_layout::kSpec, o.str());
 }
 
 std::string EditorEngine::auditGlyphPagesJson() const {
-    const std::vector<PlacedGlyph>& gs = layout_.glyphs;
-    const int pages = std::max(0, layout_.stats.page_count);
+    const std::vector<PlacedGlyph>& gs = layout_service_.layout.glyphs;
+    const int pages = std::max(0, layout_service_.layout.stats.page_count);
     std::ostringstream o;
 
     // 参照物：一次全篇扫描，把每个字形登记到它自己声明的页上。
@@ -646,7 +647,7 @@ std::string EditorEngine::auditGlyphPagesJson() const {
     int missing = 0;
     int extra = 0;
     for (int p = 0; p < pages; ++p) {
-        const std::vector<int>& list = layout_.glyphsOnPage(p);
+        const std::vector<int>& list = layout_service_.layout.glyphsOnPage(p);
         const int want = ref[static_cast<size_t>(p)];
         int wrong = 0;
         for (int k : list) {
@@ -680,14 +681,14 @@ int EditorEngine::auditCompile() const {
     rev::toTree(document(), &mirror);
     const CompileResult ref = compileDocument(mirror, vis, sheet_);
     // 段数不同就没法逐段对齐了：报一个大数（不是 1），让"哪里不符"一眼看得出来。
-    if (ref.blocks.size() != blocks_full_.size()) return 1000;
+    if (ref.blocks.size() != projection_.blocks_full.size()) return 1000;
     int d = 0;
     for (size_t i = 0; i < ref.blocks.size(); ++i) {
-        d += diffBlockSpec(blocks_full_[i], ref.blocks[i]);
+        d += diffBlockSpec(projection_.blocks_full[i], ref.blocks[i]);
     }
     // 来源身份只比长度：参照侧的节点号是模型树自己分配的，与修订的节点号不同源，
     //   逐号比较恒不相等。身份契约由下面那段按修订节点号的检查负责。
-    if (ref.sources.size() != block_src_.size()) ++d;
+    if (ref.sources.size() != projection_.block_src.size()) ++d;
     // 控件集合单独数一遍：它是产物的一次派生，而那次派生对"半截边界"是整对丢弃 ——
     //   一条静默降级。产物只错掉一枚边界时，块级差异常常小到看不出来，而界面上控件会
     //   整批消失（"字段没了"就是这么被放大出来的）。独立数一遍，让这一类差异可读。
@@ -708,14 +709,14 @@ int EditorEngine::auditCompile() const {
     //   （与 rebuildParagraphFromTree 同一口径，刻意不共享代码），审计的价值就来自独立。
     {
         const rev::FlowIndex idx(document(), vis);
-        for (size_t i = 0; i < block_src_.size(); ++i) {
+        for (size_t i = 0; i < projection_.block_src.size(); ++i) {
             int seg_start = -1;
             if (i == 0) {
-                if (!idx.intervalOf(block_src_[0].first, &seg_start, nullptr)) {
+                if (!idx.intervalOf(projection_.block_src[0].first, &seg_start, nullptr)) {
                     ++d;
                     continue;
                 }
-            } else if (!idx.intervalOf(block_src_[i - 1].mark, nullptr, &seg_start)) {
+            } else if (!idx.intervalOf(projection_.block_src[i - 1].mark, nullptr, &seg_start)) {
                 ++d;
                 continue;
             }
@@ -725,26 +726,26 @@ int EditorEngine::auditCompile() const {
             //   进入这一格）就夹在两者之间。所以只要求它不越过这个元素的末尾：越过了
             //   说明段起点跑进了下一块的内容里。
             (void)lo;
-            if (!idx.intervalOf(block_src_[i].first, &lo, &hi) || seg_start >= hi) {
+            if (!idx.intervalOf(projection_.block_src[i].first, &lo, &hi) || seg_start >= hi) {
                 ++d;
             }
         }
         // 块区间与流索引对拍：带标记的块，内容末尾必须正好落在自己那枚标记的起点上。
-        //   这一条是独立参照物 —— block_flow_ 由投影的游标累加而来，标记位置由流索引数出，
+        //   这一条是独立参照物 —— projection_.block_flow 由投影的游标累加而来，标记位置由流索引数出，
         //   两条路算同一个数。格边界少算一位、上游变长没跟上，都会在这里现形，而只看
         //   "段起点不越过首元素末尾"那一条是看不出来的。
-        if (block_flow_.size() != block_src_.size() ||
-            block_flow_span_.size() != block_src_.size()) {
+        if (projection_.block_flow.size() != projection_.block_src.size() ||
+            projection_.block_flow_span.size() != projection_.block_src.size()) {
             ++d;
         } else {
-            for (size_t i = 0; i < block_src_.size(); ++i) {
-                if (block_src_[i].mark == kInvalidNodeId) continue;
+            for (size_t i = 0; i < projection_.block_src.size(); ++i) {
+                if (projection_.block_src[i].mark == kInvalidNodeId) continue;
                 int mark_first = -1;
-                if (!idx.intervalOf(block_src_[i].mark, &mark_first, nullptr)) {
+                if (!idx.intervalOf(projection_.block_src[i].mark, &mark_first, nullptr)) {
                     ++d;
                     continue;
                 }
-                if (block_flow_[i] + block_flow_span_[i] != mark_first) ++d;
+                if (projection_.block_flow[i] + projection_.block_flow_span[i] != mark_first) ++d;
             }
         }
     }
@@ -762,7 +763,7 @@ std::string EditorEngine::auditCompileJson() {
     o.precision(3);
     // curMs 是本轮提交实际花在编译上的时间（rebuildFromTree 记的），fullMs 是这一次
     //   整树全量编译 —— 两者同源，所以"增量省了多少"是一个可当场证伪的比值。
-    o << "{\"diff\":" << d << ",\"paras\":" << blocks_full_.size()
+    o << "{\"diff\":" << d << ",\"paras\":" << projection_.blocks_full.size()
       << ",\"curMs\":" << edit_stats_.rebuild_compile_ms << ",\"fullMs\":" << full_ms << "}";
     return pk::checked(pk::audit_compile::kSpec, o.str());
 }

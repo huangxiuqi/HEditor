@@ -32,14 +32,14 @@ namespace heditor {
  */
 
 void EditorEngine::syncStatsFromLayout() {
-    stats_.page_count = layout_.stats.page_count;
-    stats_.glyph_count = layout_.stats.glyph_count;
-    stats_.placed_line_count = layout_.stats.placed_line_count;
-    stats_.cluster_count = layout_.stats.cluster_count;
-    stats_.missing_glyph_count = layout_.stats.missing_glyph_count;
-    stats_.font_run_count = layout_.stats.font_run_count;
-    stats_.shape_ms = layout_.stats.shape_ms;
-    stats_.layout_ms = layout_.stats.layout_ms;
+    stats_.page_count = layout_service_.layout.stats.page_count;
+    stats_.glyph_count = layout_service_.layout.stats.glyph_count;
+    stats_.placed_line_count = layout_service_.layout.stats.placed_line_count;
+    stats_.cluster_count = layout_service_.layout.stats.cluster_count;
+    stats_.missing_glyph_count = layout_service_.layout.stats.missing_glyph_count;
+    stats_.font_run_count = layout_service_.layout.stats.font_run_count;
+    stats_.shape_ms = layout_service_.layout.stats.shape_ms;
+    stats_.layout_ms = layout_service_.layout.stats.layout_ms;
     stats_.face_count = fonts_.faceCount();
     stats_.font_instance_count = static_cast<int>(fonts_.instanceCount());
     const FontCacheTotals fc = fonts_.cacheTotals();
@@ -57,7 +57,7 @@ void EditorEngine::syncStatsFromLayout() {
 int EditorEngine::contentBottomPx() const {
     const float slab = cfg_.page.slabHeightPt();
     float bottom_pt = 0.0f;
-    for (const LineBox& lb : layout_.lines) {
+    for (const LineBox& lb : layout_service_.layout.lines) {
         // 横排的块轴是 y，竖排的块轴是 x（它的 y 是行内轴）—— 两种朝向取不同的字段。
         const float end = lb.vertical ? (lb.inline_origin_pt + lb.inline_end_pt) : lb.block_hi_pt;
         const float v = static_cast<float>(lb.page) * slab + end;
@@ -81,14 +81,14 @@ void EditorEngine::relayout() {
     //   这里只夹数值范围，不吸附簇：簇吸附需要簇表，而此刻尚未排版；用上一轮的簇表
     //     会把光标拉回旧簇边界，表现为"敲字后光标差一个位置"。簇吸附放在排版之后。
     if (!blocks().empty()) {
-        int para = caret_.caretPara();
+        int para = edit_session_.caret.caretPara();
         if (para >= static_cast<int>(blocks().size())) para = static_cast<int>(blocks().size()) - 1;
         const size_t len = blocks()[static_cast<size_t>(para)].cp_text.size();
-        const CaretResolver::BracketCounts bc = caret_.bracketCountsAt(para, len);
+        const CaretResolver::BracketCounts bc = edit_session_.caret.bracketCountsAt(para, len);
         const int span = static_cast<int>(len) + bc.before + bc.closes + bc.opens;
-        if (caret_.caretRel() > span) caret_.setCaretRel(para, span);
+        if (edit_session_.caret.caretRel() > span) edit_session_.caret.setCaretRel(para, span);
     } else {
-        caret_.setCaretRel(0, 0);
+        edit_session_.caret.setCaretRel(0, 0);
     }
 
     // 把要显示括号的那些字段的两个边界写进块流的行内对象表：排版据此插入
@@ -118,7 +118,7 @@ void EditorEngine::relayout() {
     // 后缀复用现在也收表格：平移只走到后缀里第一张表为止，剩下的从那张表续排
     //   （表不是行盒折线能算出来的东西，见 trySuffixReuse 的 cut）。
     const bool can_resume = !must_full && from > 0 && from < n_para &&
-                            layout_.para_index.size() > static_cast<size_t>(from);
+                            layout_service_.layout.para_index.size() > static_cast<size_t>(from);
 
     last_reused_paragraphs_ = 0;
     last_suffix_shifted_ = false;
@@ -128,7 +128,8 @@ void EditorEngine::relayout() {
     if (to >= 0) {
         dirty_count = std::max(1, to - from);
     } else {
-        dirty_count = 1 + std::max(0, n_para - static_cast<int>(layout_.para_index.size()));
+        dirty_count =
+            1 + std::max(0, n_para - static_cast<int>(layout_service_.layout.para_index.size()));
     }
     if (from + dirty_count > n_para) dirty_count = n_para - from;
     const auto t_layout0 = Clock::now();  // 只量排版本身：拼接/续排/全量三种走法都算
@@ -149,9 +150,11 @@ void EditorEngine::relayout() {
     }
     if (reuse != SuffixReuse::None) {
         // 段表的下标先取出来：cut 那一路会 truncate + 续排，段表可能重新分配。
-        const int head_line_begin = layout_.para_index[static_cast<size_t>(from)].line_begin;
+        const int head_line_begin =
+            layout_service_.layout.para_index[static_cast<size_t>(from)].line_begin;
         const int tail_line_end =
-            layout_.para_index[static_cast<size_t>(from + relaid_paras - 1)].line_end;
+            layout_service_.layout.para_index[static_cast<size_t>(from + relaid_paras - 1)]
+                .line_end;
         last_relaid_paragraphs_ = relaid_paras;
         last_reused_paragraphs_ = cut - relaid_paras - from;
         last_suffix_shifted_ = (reuse == SuffixReuse::Shifted);
@@ -161,29 +164,32 @@ void EditorEngine::relayout() {
             // 复用只到后缀里的第一张表：那张表与它之后的内容从表头续排。
             //   截断连表的旧几何一起丢（first_block >= cut），续排重新 openTable 只留一份。
             truncateLayoutAt(cut);
-            layoutDocumentRangeWithTables(fonts_, blocks(), cfg_.page, tables_, cut, n_para,
-                                          cut_state, &shaping_cache_, &layout_, floatsForLayout());
+            layoutDocumentRangeWithTables(fonts_, blocks(), cfg_.page, projection_.tables, cut,
+                                          n_para, cut_state, &layout_service_.cache,
+                                          &layout_service_.layout, floatsForLayout());
             last_relaid_paragraphs_ = relaid_paras + (n_para - cut);
-            last_relaid_lines_ = layout_.stats.placed_line_count - head_line_begin;
+            last_relaid_lines_ = layout_service_.layout.stats.placed_line_count - head_line_begin;
         }
     } else if (can_resume) {
         // 续排锚点必须在截断之前读出来 —— 截断会把它一起丢掉。
         const ReflowState resume_state =
-            layout_.para_index[static_cast<size_t>(from)].state_at_start;
-        const int prefix_lines = layout_.para_index[static_cast<size_t>(from)].line_begin;
+            layout_service_.layout.para_index[static_cast<size_t>(from)].state_at_start;
+        const int prefix_lines =
+            layout_service_.layout.para_index[static_cast<size_t>(from)].line_begin;
         truncateLayoutAt(from);
-        layoutDocumentRangeWithTables(fonts_, blocks(), cfg_.page, tables_, from, n_para,
-                                      resume_state, &shaping_cache_, &layout_, floatsForLayout());
+        layoutDocumentRangeWithTables(fonts_, blocks(), cfg_.page, projection_.tables, from, n_para,
+                                      resume_state, &layout_service_.cache, &layout_service_.layout,
+                                      floatsForLayout());
         last_relaid_paragraphs_ = n_para - from;
-        last_relaid_lines_ = layout_.stats.placed_line_count - prefix_lines;
+        last_relaid_lines_ = layout_service_.layout.stats.placed_line_count - prefix_lines;
         last_layout_full_ = false;
     } else {
-        layout_ = LayoutResult{};
-        layoutDocumentRangeWithTables(fonts_, blocks(), cfg_.page, tables_, 0, n_para,
-                                      freshReflowState(cfg_.page), &shaping_cache_, &layout_,
-                                      floatsForLayout());
+        layout_service_.layout = LayoutResult{};
+        layoutDocumentRangeWithTables(fonts_, blocks(), cfg_.page, projection_.tables, 0, n_para,
+                                      freshReflowState(cfg_.page), &layout_service_.cache,
+                                      &layout_service_.layout, floatsForLayout());
         last_relaid_paragraphs_ = n_para;
-        last_relaid_lines_ = layout_.stats.placed_line_count;
+        last_relaid_lines_ = layout_service_.layout.stats.placed_line_count;
         last_layout_full_ = true;
     }
     layout_dirty_from_ = n_para;  // 已重排到末尾，没有脏段了
@@ -193,13 +199,13 @@ void EditorEngine::relayout() {
     //   它用 erase + insert 换掉脏区，再整段平移后缀（页号、行号都变）。
     //   这一路不补建，索引就带着过期的页号去画：看不见的字、画错页的字，
     //   以及越界的下标。
-    if (reuse != SuffixReuse::None) layout_.rebuildPageIndex();
+    if (reuse != SuffixReuse::None) layout_service_.layout.rebuildPageIndex();
 
     // 这一轮排版的耗时。只算排版本身（拼接/续排/全量三种走法都算），
     // 不含页场景记账与统计同步 —— 那两项是 O(全篇) 的固定开销，
     // 混进来的话"增量到底省了多少"就看不出来了（它们的量级能盖过排版本身）。
-    // 必须在 syncStatsFromLayout 之前写：统计是从 layout_.stats 抄过去的。
-    layout_.stats.layout_ms = msSince(t_layout0);
+    // 必须在 syncStatsFromLayout 之前写：统计是从 layout_service_.layout.stats 抄过去的。
+    layout_service_.layout.stats.layout_ms = msSince(t_layout0);
     syncStatsFromLayout();
     // 页场景在 presentInternal 里按页构建，排版这一侧不再记这一段的耗时。
     //   这里先清零；呈现那一拍会把它覆盖成场景构建与差异比对的时间。
@@ -211,13 +217,13 @@ void EditorEngine::relayout() {
     //   否则按"最内层"重投影一次。
     if (!blocks().empty()) {
         const TextPos cp = caret();
-        const size_t snapped = caret_.snapToCluster(cp.para, cp.offset);
+        const size_t snapped = edit_session_.caret.snapToCluster(cp.para, cp.offset);
         if (snapped != cp.offset) setCaretByText(TextPos{cp.para, snapped});
     }
 
     // 这一轮排版的真实耗时（含截断/拼接/逐段汇总）—— 有些路径不经过
     // layoutDocumentRange（快路），那里算不出这个数，所以在这里统一收口。
-    edit_stats_.layout_ms = layout_.stats.layout_ms;
+    edit_stats_.layout_ms = layout_service_.layout.stats.layout_ms;
     // 排版账在这里发布，不在呈现里：这些数字由这一轮排版决定，呈现只是把它读出去。
     //   挂在呈现上有两处读不到 —— 排版之后、呈现之前读到的是上一轮的账；两次呈现之间
     //   再呈现一次会把数字抹成 0，而抹掉的偏偏是刚算出来的那一份。
@@ -227,7 +233,7 @@ void EditorEngine::relayout() {
     edit_stats_.suffix_shifted = last_suffix_shifted_;
     edit_stats_.relaid_lines = last_relaid_lines_;
     edit_stats_.layout_was_full = last_layout_full_;
-    edit_stats_.total_lines = layout_.stats.placed_line_count;
+    edit_stats_.total_lines = layout_service_.layout.stats.placed_line_count;
     // 呈现只需消费"本轮重排过"这一次信号（见 presentInternal）。
     layout_pending_ = true;
     stats_.total_ms += msSince(t0);
@@ -240,7 +246,7 @@ EditorEngine::SuffixReuse EditorEngine::trySuffixReuse(int from, int dirty_count
     *cut = static_cast<int>(blocks().size());
     *cut_state = ReflowState{};
     const int n_para = static_cast<int>(blocks().size());
-    const int n_old = static_cast<int>(layout_.para_index.size());
+    const int n_old = static_cast<int>(layout_service_.layout.para_index.size());
     // 段数增量：这一次编辑把旧 [from, from + m_old) 段换成了新 [from, from + m_new) 段。
     //   新版那一段有多长由调用方给（损伤区间的右端），旧版那一段由总段数差反推：
     //   m_old = n_old - n_para + m_new —— 两侧的尾巴因此对齐到同一段。
@@ -266,7 +272,7 @@ EditorEngine::SuffixReuse EditorEngine::trySuffixReuse(int from, int dirty_count
         }
     }
 
-    const ParaIndex old_first = layout_.para_index[static_cast<size_t>(from)];
+    const ParaIndex old_first = layout_service_.layout.para_index[static_cast<size_t>(from)];
     // 脏区自己的续排锚点来自上一轮（前缀一个字都没动）。第 0 段没有前缀，用全篇起点。
     const ReflowState resume = (from == 0) ? freshReflowState(cfg_.page) : old_first.state_at_start;
 
@@ -281,7 +287,7 @@ EditorEngine::SuffixReuse EditorEngine::trySuffixReuse(int from, int dirty_count
     //   （tableAlignedFrom / tableAlignedTo），这条不变式是那两处给的。
     //   剩下的部分从 cut 续排，那一趟与全量重排同构。
     int cut_at = n_para;
-    for (const LayoutTable& t : tables_) {
+    for (const LayoutTable& t : projection_.tables) {
         for (const LayoutCell& c : t.cells) {
             if (c.first_block >= from + m_new) cut_at = std::min(cut_at, c.first_block);
         }
@@ -291,11 +297,12 @@ EditorEngine::SuffixReuse EditorEngine::trySuffixReuse(int from, int dirty_count
 
     LayoutResult scratch;
     const ReflowState after =
-        layoutDocumentRangeWithTables(fonts_, blocks(), cfg_.page, tables_, from, from + m_new,
-                                      resume, &shaping_cache_, &scratch);
+        layoutDocumentRangeWithTables(fonts_, blocks(), cfg_.page, projection_.tables, from,
+                                      from + m_new, resume, &layout_service_.cache, &scratch);
 
     // 脏区新旧两版的段范围 → 行/字形范围。段在数组里是连续排列的，两端各取一次就是整段。
-    const ParaIndex& old_last = layout_.para_index[static_cast<size_t>(from + m_old - 1)];
+    const ParaIndex& old_last =
+        layout_service_.layout.para_index[static_cast<size_t>(from + m_old - 1)];
     const int old_line_lo = old_first.line_begin;
     const int old_line_hi = old_last.line_end;
     const int old_glyph_lo = old_first.glyph_begin;
@@ -315,14 +322,16 @@ EditorEngine::SuffixReuse EditorEngine::trySuffixReuse(int from, int dirty_count
     const int dglyph = new_glyphs - old_glyphs;
 
     // 换掉脏区那一段：erase + insert 各一次 memmove，比重新排一遍后缀便宜一到两个数量级。
-    layout_.lines.erase(layout_.lines.begin() + old_line_lo, layout_.lines.begin() + old_line_hi);
-    layout_.lines.insert(layout_.lines.begin() + old_line_lo, scratch.lines.begin() + new_line_lo,
-                         scratch.lines.begin() + new_line_hi);
-    layout_.glyphs.erase(layout_.glyphs.begin() + old_glyph_lo,
-                         layout_.glyphs.begin() + old_glyph_hi);
-    layout_.glyphs.insert(layout_.glyphs.begin() + old_glyph_lo,
-                          scratch.glyphs.begin() + new_glyph_lo,
-                          scratch.glyphs.begin() + new_glyph_hi);
+    layout_service_.layout.lines.erase(layout_service_.layout.lines.begin() + old_line_lo,
+                                       layout_service_.layout.lines.begin() + old_line_hi);
+    layout_service_.layout.lines.insert(layout_service_.layout.lines.begin() + old_line_lo,
+                                        scratch.lines.begin() + new_line_lo,
+                                        scratch.lines.begin() + new_line_hi);
+    layout_service_.layout.glyphs.erase(layout_service_.layout.glyphs.begin() + old_glyph_lo,
+                                        layout_service_.layout.glyphs.begin() + old_glyph_hi);
+    layout_service_.layout.glyphs.insert(layout_service_.layout.glyphs.begin() + old_glyph_lo,
+                                         scratch.glyphs.begin() + new_glyph_lo,
+                                         scratch.glyphs.begin() + new_glyph_hi);
 
     // 表格的绘制几何一起换：脏区里的表（整张都在脏区里）换成 scratch 这一轮刚排出来的那一份，
     //   后面的表段号跟着平移。不换的话，脏区那张表要么没有几何（画不出来），要么留着旧的一份
@@ -331,15 +340,16 @@ EditorEngine::SuffixReuse EditorEngine::trySuffixReuse(int from, int dirty_count
     //   所以两端各二分一次就圈出"脏区里的那些表"。
     {
         auto byFirstBlock = [](const PlacedTable& t, int p) { return t.first_block < p; };
-        const auto lo_it = std::lower_bound(layout_.placed_tables.begin(),
-                                            layout_.placed_tables.end(), from, byFirstBlock);
-        const auto hi_it =
-            std::lower_bound(lo_it, layout_.placed_tables.end(), from + m_old, byFirstBlock);
+        const auto lo_it =
+            std::lower_bound(layout_service_.layout.placed_tables.begin(),
+                             layout_service_.layout.placed_tables.end(), from, byFirstBlock);
+        const auto hi_it = std::lower_bound(lo_it, layout_service_.layout.placed_tables.end(),
+                                            from + m_old, byFirstBlock);
         std::vector<PlacedTable> merged;
-        merged.reserve(layout_.placed_tables.size() + scratch.placed_tables.size());
-        merged.insert(merged.end(), layout_.placed_tables.begin(), lo_it);
+        merged.reserve(layout_service_.layout.placed_tables.size() + scratch.placed_tables.size());
+        merged.insert(merged.end(), layout_service_.layout.placed_tables.begin(), lo_it);
         merged.insert(merged.end(), scratch.placed_tables.begin(), scratch.placed_tables.end());
-        for (auto it = hi_it; it != layout_.placed_tables.end(); ++it) {
+        for (auto it = hi_it; it != layout_service_.layout.placed_tables.end(); ++it) {
             PlacedTable t = *it;
             t.first_block += d_para;
             // 格自己的 first_block 也要跟着走：命中测试与单元格选区都按它把段映射回格
@@ -349,20 +359,20 @@ EditorEngine::SuffixReuse EditorEngine::trySuffixReuse(int from, int dirty_count
             for (LayoutCell& c : t.cells) c.first_block += d_para;
             merged.push_back(std::move(t));
         }
-        layout_.placed_tables = std::move(merged);
+        layout_service_.layout.placed_tables = std::move(merged);
     }
 
     // 段号整体平移：脏区之后那些段的段号全变了，而行盒与字形都把段号记在字段里，
     //   而光标几何、审计都按它找行 —— 不跟着改，光标会落到别的段上（静默错位）。
     //   范围从"脏区在新版里占的那些行/字形之后"起。
     if (d_para != 0) {
-        for (size_t k = static_cast<size_t>(old_line_lo + new_lines); k < layout_.lines.size();
-             ++k) {
-            layout_.lines[k].paragraph += d_para;
+        for (size_t k = static_cast<size_t>(old_line_lo + new_lines);
+             k < layout_service_.layout.lines.size(); ++k) {
+            layout_service_.layout.lines[k].paragraph += d_para;
         }
-        for (size_t k = static_cast<size_t>(old_glyph_lo + new_glyphs); k < layout_.glyphs.size();
-             ++k) {
-            layout_.glyphs[k].paragraph += d_para;
+        for (size_t k = static_cast<size_t>(old_glyph_lo + new_glyphs);
+             k < layout_service_.layout.glyphs.size(); ++k) {
+            layout_service_.layout.glyphs[k].paragraph += d_para;
         }
     }
 
@@ -371,23 +381,23 @@ EditorEngine::SuffixReuse EditorEngine::trySuffixReuse(int from, int dirty_count
     //   往前挪（d_para < 0）要先把项搬到新位置、最后才缩容 —— 反过来会先丢掉末尾那几项，
     //   再读它们就是越界（搬过去的是垃圾，而排版看起来还"成功了"）。
     if (d_para > 0) {
-        layout_.para_index.resize(static_cast<size_t>(n_para));
-        layout_.para_cluster_starts.resize(static_cast<size_t>(n_para));
+        layout_service_.layout.para_index.resize(static_cast<size_t>(n_para));
+        layout_service_.layout.para_cluster_starts.resize(static_cast<size_t>(n_para));
         for (int j = n_old - 1; j >= from + m_old; --j) {
-            layout_.para_index[static_cast<size_t>(j + d_para)] =
-                layout_.para_index[static_cast<size_t>(j)];
-            layout_.para_cluster_starts[static_cast<size_t>(j + d_para)] =
-                layout_.para_cluster_starts[static_cast<size_t>(j)];
+            layout_service_.layout.para_index[static_cast<size_t>(j + d_para)] =
+                layout_service_.layout.para_index[static_cast<size_t>(j)];
+            layout_service_.layout.para_cluster_starts[static_cast<size_t>(j + d_para)] =
+                layout_service_.layout.para_cluster_starts[static_cast<size_t>(j)];
         }
     } else if (d_para < 0) {
         for (int j = from + m_old; j < n_old; ++j) {
-            layout_.para_index[static_cast<size_t>(j + d_para)] =
-                layout_.para_index[static_cast<size_t>(j)];
-            layout_.para_cluster_starts[static_cast<size_t>(j + d_para)] =
-                layout_.para_cluster_starts[static_cast<size_t>(j)];
+            layout_service_.layout.para_index[static_cast<size_t>(j + d_para)] =
+                layout_service_.layout.para_index[static_cast<size_t>(j)];
+            layout_service_.layout.para_cluster_starts[static_cast<size_t>(j + d_para)] =
+                layout_service_.layout.para_cluster_starts[static_cast<size_t>(j)];
         }
-        layout_.para_index.resize(static_cast<size_t>(n_para));
-        layout_.para_cluster_starts.resize(static_cast<size_t>(n_para));
+        layout_service_.layout.para_index.resize(static_cast<size_t>(n_para));
+        layout_service_.layout.para_cluster_starts.resize(static_cast<size_t>(n_para));
     }
 
     // 脏区：m_new 段一段一段填，行/字形下标接着前一段累加（起点仍在原处）。
@@ -406,27 +416,28 @@ EditorEngine::SuffixReuse EditorEngine::trySuffixReuse(int from, int dirty_count
             p.glyph_end = glyph_cursor + gk;
             line_cursor += lk;
             glyph_cursor += gk;
-            layout_.para_index[static_cast<size_t>(from + k)] = p;
-            layout_.para_cluster_starts[static_cast<size_t>(from + k)] =
+            layout_service_.layout.para_index[static_cast<size_t>(from + k)] = p;
+            layout_service_.layout.para_cluster_starts[static_cast<size_t>(from + k)] =
                 scratch.para_cluster_starts[static_cast<size_t>(from + k)];
         }
     }
     for (int j = from + m_new; j < n_para; ++j) {
-        ParaIndex& p = layout_.para_index[static_cast<size_t>(j)];
+        ParaIndex& p = layout_service_.layout.para_index[static_cast<size_t>(j)];
         p.line_begin += dline;
         p.line_end += dline;
         p.glyph_begin += dglyph;
         p.glyph_end += dglyph;
     }
-    summarizeLayoutStats(&layout_);
-    layout_.stats.shape_ms = scratch.stats.shape_ms;
+    summarizeLayoutStats(&layout_service_.layout);
+    layout_service_.layout.stats.shape_ms = scratch.stats.shape_ms;
     *relaid_paragraphs = m_new;
 
     // 一级复用：后缀开始时的续排状态逐位相同 → 后缀的断页、全局行号与坐标
     // 都会与上一轮一模一样，一个字节都不用动。
     //   段表挪完槽位之后，新表的第 from+m_new 项就是旧表的第 from+m_old 项
     //   （就是后缀的第一段），它的 state_at_start 被原样搬了过来 —— 直接拿来比。
-    if (after == layout_.para_index[static_cast<size_t>(from + m_new)].state_at_start) {
+    if (after ==
+        layout_service_.layout.para_index[static_cast<size_t>(from + m_new)].state_at_start) {
         return SuffixReuse::Unchanged;
     }
 
@@ -436,7 +447,8 @@ EditorEngine::SuffixReuse EditorEngine::trySuffixReuse(int from, int dirty_count
     //   段数变化几乎总落到这一级：段落边界一变就多让（或少让）一次段间距，
     //   后缀必然整体下移 —— 那不是"同状态"，而是"按片段重排"。
     //   重排只走到 cut：那里是第一张表，表的行片段不是折线能推出来的。
-    if (!repaginateSuffix(&layout_, blocks(), cfg_.page, from + m_new, cut_at, after, cut_state)) {
+    if (!repaginateSuffix(&layout_service_.layout, blocks(), cfg_.page, from + m_new, cut_at, after,
+                          cut_state)) {
         return SuffixReuse::None;
     }
     *cut = cut_at;
@@ -509,7 +521,7 @@ void EditorEngine::markLayoutDirtyForBrackets() {
 }
 
 int EditorEngine::tableAlignedFrom(int from) const {
-    if (tables_.empty()) return from;
+    if (projection_.tables.empty()) return from;
     const int n = static_cast<int>(blocks().size());
     if (from <= 0 || from >= n) return from;
     const std::vector<CellSlot>& path = blocks()[static_cast<size_t>(from)].cell_path;
@@ -517,7 +529,7 @@ int EditorEngine::tableAlignedFrom(int from) const {
     // 由最外层表定起点：内层表的行高并进外层格的内容高，只从内层重排算不出外层那一行
     //   该多高（"等所有格排完才结算"是行的性质，不是格的）。
     const uint64_t handle = path.front().table;
-    for (const LayoutTable& t : tables_) {
+    for (const LayoutTable& t : projection_.tables) {
         if (t.handle != handle) continue;
         int lo = from;
         for (const LayoutCell& c : t.cells) lo = std::min(lo, c.first_block);
@@ -528,7 +540,7 @@ int EditorEngine::tableAlignedFrom(int from) const {
 }
 
 int EditorEngine::tableAlignedTo(int to) const {
-    if (tables_.empty()) return to;
+    if (projection_.tables.empty()) return to;
     const int n = static_cast<int>(blocks().size());
     if (to <= 0 || to >= n) return to;
     int end = to;
@@ -539,7 +551,7 @@ int EditorEngine::tableAlignedTo(int to) const {
         const std::vector<CellSlot>& path = blocks()[static_cast<size_t>(probe)].cell_path;
         if (path.empty()) continue;
         const uint64_t handle = path.front().table;
-        for (const LayoutTable& t : tables_) {
+        for (const LayoutTable& t : projection_.tables) {
             if (t.handle != handle) continue;
             for (const LayoutCell& c : t.cells) {
                 end = std::max(end, c.first_block + c.block_count);
@@ -551,34 +563,36 @@ int EditorEngine::tableAlignedTo(int to) const {
 
 void EditorEngine::truncateLayoutAt(int para) {
     if (para <= 0) {
-        layout_ = LayoutResult{};
+        layout_service_.layout = LayoutResult{};
         return;
     }
     const size_t k = static_cast<size_t>(para);
-    if (layout_.para_index.size() <= k) {
-        layout_ = LayoutResult{};
+    if (layout_service_.layout.para_index.size() <= k) {
+        layout_service_.layout = LayoutResult{};
         return;
     }
-    const ParaIndex& cut = layout_.para_index[k];
+    const ParaIndex& cut = layout_service_.layout.para_index[k];
     const size_t line_cut = static_cast<size_t>(std::max(0, cut.line_begin));
     const size_t glyph_cut = static_cast<size_t>(std::max(0, cut.glyph_begin));
-    if (line_cut > layout_.lines.size() || glyph_cut > layout_.glyphs.size()) {
-        layout_ = LayoutResult{};
+    if (line_cut > layout_service_.layout.lines.size() ||
+        glyph_cut > layout_service_.layout.glyphs.size()) {
+        layout_service_.layout = LayoutResult{};
         return;
     }
     // 字形与行盒严格按段序追加，所以"第 para 段的起点"就是安全的切点：
     // [0, para) 的切片与内容一个字节都不用动。
-    layout_.lines.resize(line_cut);
-    layout_.glyphs.resize(glyph_cut);
-    layout_.para_index.resize(k);
-    layout_.para_cluster_starts.resize(k);
+    layout_service_.layout.lines.resize(line_cut);
+    layout_service_.layout.glyphs.resize(glyph_cut);
+    layout_service_.layout.para_index.resize(k);
+    layout_service_.layout.para_cluster_starts.resize(k);
     // 表格的绘制几何一起截：起始段 >= para 的那些属于被丢掉的那一半。留下来的话，
     //   续排重新 openTable 会再 push 一条，同一张表就有两份几何（一份是旧的，
     //   绘制时两张都画 —— 症状是表格重影，而像素判据只在"整帧对拍"里才看得见）。
-    layout_.placed_tables.erase(
-        std::remove_if(layout_.placed_tables.begin(), layout_.placed_tables.end(),
+    layout_service_.layout.placed_tables.erase(
+        std::remove_if(layout_service_.layout.placed_tables.begin(),
+                       layout_service_.layout.placed_tables.end(),
                        [para](const PlacedTable& t) { return t.first_block >= para; }),
-        layout_.placed_tables.end());
+        layout_service_.layout.placed_tables.end());
 }
 
 /**
@@ -590,25 +604,25 @@ void EditorEngine::truncateLayoutAt(int para) {
  * 于是要么原样吃，要么把控件边界全部去掉、只留原子。排版层从此只吃块流，
  * "要画"与"要占位"是同一条记录，分不开。
  *
- * 筛是破坏性的（对象表会被删项），所以原件留在 blocks_full_ 里 —— 名单会来回变
+ * 筛是破坏性的（对象表会被删项），所以原件留在 projection_.blocks_full 里 —— 名单会来回变
  * （切只读、开关括号），没有那份原件，被删掉的边界就回不来了。
  */
 void EditorEngine::syncInlineObjects() {
-    // 全部显示：不筛。blocks_ 不存东西，排版直接吃 blocks_full_（同一份）。
+    // 全部显示：不筛。projection_.blocks 不存东西，排版直接吃 projection_.blocks_full（同一份）。
     //   这条分支现在是常态（括号常显），所以它值得放在最前面短路。
     if (bracketsOn()) {
-        blocks_.clear();
+        projection_.blocks.clear();
         filter_active_ = false;
         return;
     }
     // 一个都不显示（只读、或开关关掉）：控件边界全部去掉，只留原子。
     //   原子是内容，不随"显示括号"的开关变 —— 它要么在文档里、要么不在。
     filter_active_ = true;
-    blocks_ = blocks_full_;
-    const size_t n = std::min(blocks_.size(), blocks_full_.size());
+    projection_.blocks = projection_.blocks_full;
+    const size_t n = std::min(projection_.blocks.size(), projection_.blocks_full.size());
     for (size_t p = 0; p < n; ++p) {
-        const std::vector<InlineObject>& src = blocks_full_[p].objects;
-        std::vector<InlineObject>& dst = blocks_[p].objects;
+        const std::vector<InlineObject>& src = projection_.blocks_full[p].objects;
+        std::vector<InlineObject>& dst = projection_.blocks[p].objects;
         dst.clear();
         for (const InlineObject& e : src) {
             if (e.kind == InlineObjectKind::Atom) dst.push_back(e);

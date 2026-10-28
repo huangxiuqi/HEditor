@@ -25,12 +25,17 @@
 #include "core/engine/caret.h"
 #include "core/engine/control_geometry.h"
 #include "core/engine/control_spans.h"
+#include "core/engine/document_session.h"
 #include "core/engine/edit_command.h"
+#include "core/engine/edit_session.h"
 #include "core/engine/engine_config.h"
 #include "core/engine/engine_stats.h"
 #include "core/engine/image_store.h"
+#include "core/engine/layout_service.h"
 #include "core/engine/page_cache.h"
+#include "core/engine/projection_service.h"
 #include "core/engine/render_input.h"
+#include "core/engine/render_service.h"
 #include "core/engine/structure_index.h"
 #include "core/layout/layout.h"
 #include "core/render/bitmap.h"
@@ -155,12 +160,14 @@ public:
     }
 
     /**
-     * 排版输入。名单覆盖全部控件时它就是 blocks_full_（同一份，不拷贝）；
+     * 排版输入。名单覆盖全部控件时它就是 projection_.blocks_full（同一份，不拷贝）；
      * 只有真的筛掉了某些括号时才有另一份。
      *
      * @return 块流（名单覆盖全部控件时就是唯一那一份，不拷贝）
      */
-    const std::vector<BlockSpec>& blocks() const { return filter_active_ ? blocks_ : blocks_full_; }
+    const std::vector<BlockSpec>& blocks() const {
+        return filter_active_ ? projection_.blocks : projection_.blocks_full;
+    }
 
     /**
      * 与块流同一层的产物：表格结构（宽度、列宽、行规则、每格的跨度与块区间）。
@@ -170,7 +177,7 @@ public:
      *
      * @return 表格结构（宽度、列宽、行规则、每格的跨度与块区间）
      */
-    const std::vector<LayoutTable>& tableSpecs() const { return tables_; }
+    const std::vector<LayoutTable>& tableSpecs() const { return projection_.tables; }
 
     /**
      * 文档装载：把模型树换成一份修订（rev::fromTree），此后引擎只持修订，不再持树。
@@ -619,14 +626,14 @@ public:
      *
      * @return 选区（整格时是吸附到格边界的那一对）
      */
-    Range selection() const { return caret_.selection(); }
+    Range selection() const { return edit_session_.caret.selection(); }
 
     /**
      * 选区非空：两端不重合。它判的是"有没有选中东西"，不是"光标在不在"。
      *
      * @return true = 两端不重合（有文字被选中）
      */
-    bool hasSelection() const { return caret_.hasSelection(); }
+    bool hasSelection() const { return edit_session_.caret.hasSelection(); }
 
     /**
      * 程序化设选区（宿主恢复、探针摆位）。两端各自夹到文档流的合法范围内。
@@ -795,14 +802,14 @@ public:
      *
      * @return true = 选的是整格
      */
-    bool selectionIsCell() const { return caret_.selectionIsCell(); }
+    bool selectionIsCell() const { return edit_session_.caret.selectionIsCell(); }
 
     /**
      * 选区是否吸附到了格边界上（跨格拖选、单击边距带、三击）。全选为假：它按整篇删。
      *
      * @return true = 端点已经吸附到格边界
      */
-    bool hasCellRange() const { return caret_.hasCellRange(); }
+    bool hasCellRange() const { return edit_session_.caret.hasCellRange(); }
 
     /**
      * 这一段内容所在那一格的内容区间（全局流位置，左闭右开）。不在表格里返回假。
@@ -1003,7 +1010,7 @@ public:
      *
      * @return 行别（0 = 贴上一行，大于 0 = 贴下一行）
      */
-    int caretLineAffinity() const { return caret_.lineAffinity(); }
+    int caretLineAffinity() const { return edit_session_.caret.lineAffinity(); }
 
     /**
      * 光标是否落在竖排的段里（宿主据此把方向键按物理方向映射，见 keyToOp）。
@@ -2437,7 +2444,7 @@ public:
      * 表格结构自审：块与格这两份记录是否互相撑得住，返回不符项数（0 = 一致）。
      *
      * 为什么不并进 auditLayout：那一条比的是"增量排版与全量排版"，两边吃的是同一份
-     *   blocks_ 与 tables_，结构本身坏了它照样全绿 —— 一格连一个块都不剩时，两边都排不出
+     *   projection_.blocks 与 projection_.tables，结构本身坏了它照样全绿 —— 一格连一个块都不剩时，两边都排不出
      *   那一格的行盒，逐字段比对完全一致。而"格没有块""块没有结束标记"这类损坏恰恰是表格
      *   编辑最典型的失败方式：后果是那一格连行盒都没有，光标点不进去，画面上只是少了几行字。
      *
@@ -2742,7 +2749,7 @@ public:
      *
      * @return 排版产物
      */
-    const LayoutResult& layout() const { return layout_; }
+    const LayoutResult& layout() const { return layout_service_.layout; }
 
     /**
      * 字体库（可写）：装载字体走这一条。
@@ -2861,7 +2868,7 @@ private:
     void finishRebuildFromTree(FlowVisibility vis);
 
     /**
-     * 由 block_extents_ 累加出 block_flow_ / block_flow_span_。
+     * 由 projection_.block_extents 累加出 projection_.block_flow / projection_.block_flow_span。
      *
      * 只是把局部量加起来，不做任何查询、也没有第二种说法要调和 —— 表格的格边界表现为
      * 那一个 gap 等于 2，而不是"两个算法给出不同答案时取较大值"。
@@ -2888,11 +2895,6 @@ private:
      * 撤销上限（会话要的那个数）。配置里的 0 是"不限制"，与"不留历史"不是一回事。
      */
     int undoLimit() const;
-
-    /**
-     * 记下这一批步骤对应的两份选区，并与撤销栈同步裁剪。
-     */
-    void recordSelection(Range before, Range after);
 
     /**
      * 写出去时的字体身份。保存文档与复制片段共用一份 —— 两处各写一遍，等于让"同一张脸"
@@ -2946,7 +2948,7 @@ private:
      * 光标所在页（绝对页号；-1 = 找不到行盒）。
      * 窗口化之后这是必需的一个数：宿主拿它决定窗口该锚在哪、输入法框摆在哪。
      */
-    int caretPage() const { return caret_.caretPage(); }
+    int caretPage() const { return edit_session_.caret.caretPage(); }
 
     /**
      * 统一呈现入口：按窗口逐页光栅 + 记瞬态矩形，不产生整窗帧。
@@ -2995,7 +2997,7 @@ private:
      * 缓存是唯一的像素存放处，脏矩形与像素分开存活：像素长期留着，脏矩形只活到宿主取走
      * 那一刻。两者一起搬出去，是因为它们的失效条件只由"画出来是什么"决定。
      */
-    PageCache pages_;
+    RenderService render_;
 
     /**
      * 记一笔"这一页上的这块变了"（累积到 takePageDirtyRects 被取走为止）。
@@ -3146,7 +3148,7 @@ private:
     int tableAlignedTo(int to) const;
 
     /**
-     * 把 layout_ 截断到第 para 段之前：丢掉 [para, ...) 的行盒、字形与切片，
+     * 把 layout_service_.layout 截断到第 para 段之前：丢掉 [para, ...) 的行盒、字形与切片，
      * 保留 [0, para) 原样，供 layoutDocumentRange 从 para 续排。
      * para <= 0 时清空整个结果。
      *
@@ -3311,15 +3313,15 @@ private:
     FontLibrary fonts_;
 
     /**
-     * 筛过括号的那一份，只在 filter_active_ 为真时有效。
+     * 投影产物：块流、块位置、表格与结构索引的所有者。
      */
-    std::vector<BlockSpec> blocks_;
+    ProjectionService projection_;
 
     /**
-     * 文档（唯一真相）：一份修订加一条历史。blocks_ 与 blocks_full_ 都是它的投影产物，
+     * 文档（唯一真相）：一份修订加一条历史。投影产物都是它的派生量，
      * 没有第二份可写的树 —— 编辑只产步骤，产物每轮由新修订重算。
      */
-    std::optional<rev::Session> session_;
+    DocumentSession session_;
 
     /**
      * 装载时给的样式表（命名段样式 / 字符样式）。
@@ -3327,27 +3329,10 @@ private:
     StyleSheet sheet_;
 
     /**
-     * 上一轮每块的身份（内容哈希 + 来源）与样式表版本，与 blocks_full_ 同长同序。
-     *
-     * 它只是"上一轮的账"，不是第二个真相：块本身就在 blocks_full_ 里，投影按损伤区间
-     * 原地保留区间之外的那些 —— 所以既没有第二份块流，也没有整份拷贝。装载新文档时清掉。
-     */
-    rev::BlockHistory proj_hist_;
-
-    /**
      * 装载过文档没有（setDocument 置位）。没装载过时没有树、没有流、也没有事务栈 ——
      * 编辑入口一律拒绝，审计入口报"没有可比的东西"，而不是拿一棵空树去编出 0 段来。
      */
     bool loaded_ = false;
-
-    /**
-     * 块流（唯一一份）：投影就地更新它，排版也吃它。
-     *
-     * "按要显示括号的名单筛一遍"是破坏性的（对象表会被删项），而名单会来回变，所以
-     * 只有真的需要筛时才把筛过的结果放进 blocks_ —— 名单覆盖全部控件时 blocks_ 是空的，
-     * blocks() 直接给这一份，不存在副本。
-     */
-    std::vector<BlockSpec> blocks_full_;
 
     /**
      * 筛过括号的块流。只为"名单真的排除了某些控件"而存在，其余时候为空。
@@ -3373,22 +3358,6 @@ private:
      * @returns 浮动图表（引用，生命周期到下一次排版）
      */
     const std::vector<LayoutFloat>& floatsForLayout();
-
-    /**
-     * 表格结构（编译产物的一种投影，与 blocks_full_ 同源）。排版吃它来按格布局；
-     * 它也是"这张表跨了几页、格线画在哪"的输入。没有表格时为空。
-     */
-    std::vector<LayoutTable> tables_;
-
-    /**
-     * 结构索引：控件区间与段到格。
-     */
-    StructureIndex structure_index_;
-
-    /**
-     * 投影产出的行内槽（结构索引的行内槽来源）。
-     */
-    std::vector<rev::Slot> projection_slots_;
 
     /**
      * 控件集合下标 → 控件的节点 id（导出时按同一顺序建）。
@@ -3509,46 +3478,9 @@ private:
     std::optional<rev::FlowIndex> flow_;
 
     /**
-     * 每块的局部尺寸，与 blocks_full_ 同长同序，是投影走树时数出来的（见 rev::BlockExtent）。
-     *
-     * 它是位置的唯一来源：下面那两个数组都是它的前缀和。写进这里的只有"这一块多长"与
-     * "它前面那道界多宽"—— 两个局部量。上游变长不会让下游的任何数字过期，因为下游本来
-     * 就没存绝对数。
+     * 排版产物与段级整形缓存的所有者。
      */
-    std::vector<rev::BlockExtent> block_extents_;
-
-    /**
-     * 每块内容起点的流位置（全局），与 blocks_full_ 同长同序。
-     *
-     * 它是 block_extents_ 的前缀和 —— 纯派生，每轮重建时整份重算（一次加法循环）。之所以
-     * 还要物化成数组而不是每次都现累加：光标定位要二分（paraForFlow）、命中测试要随机
-     * 读，O(log n) 次随机访问不能变成 O(n log n)。
-     */
-    std::vector<FlowPos> block_flow_;
-
-    /**
-     * 每块内容在流里占的位数：文本码点数 + 控件边界数。段间那个段落标记不在这里 ——
-     * 它是段与段之间的位置，不属于任何一段的内容。与 block_extents_[i].span 同一个数。
-     */
-    std::vector<int> block_flow_span_;
-
-    /**
-     * 每块的来源身份（编译给出，与 blocks_full_ 同长同序）。编辑要在树上落笔时靠它找到
-     * "这一段是哪一棵子树里的那一段、被哪枚标记结束"。
-     */
-    std::vector<BlockSource> block_src_;
-
-    /**
-     * 当前排版产物（行盒、字形、每段切片、页数）。
-     */
-    LayoutResult layout_;
-
-    /**
-     * 段级整形缓存（HarfBuzz 结果 + 簇推进 + 断点）。
-     * 整形是唯一"必须摸字体"的一步，也是最贵的；它的输入只有文本与字体参数，
-     * 所以改页宽、切编辑模式之后照样命中（见 layout.cpp 的 shapingFingerprint）。
-     */
-    ShapingCache shaping_cache_;
+    LayoutService layout_service_;
 
     /**
      * 需要重排的最小段下标；>= blocks().size() 表示没有脏段。
@@ -3653,23 +3585,9 @@ private:
     void refreshViews();
 
     /**
-     * 光标与位置解析。选区两端、行别、上下键的列位、光标条宽度全在它里面 ——
-     * 引擎这一层只留"读文档产物"与"协调重排"（见 projectCaret 与移动族的转发）。
+     * 编辑会话：光标解析、命令层与光标可见性。
      */
-    CaretResolver caret_;
-
-    /**
-     * 命令层：一次编辑怎么变成一条事务（插入、删除、分段、合并、缩进、结构操作）。
-     *
-     * 它只认 EditView 与 EditHost 两个接口 —— 引擎在这里的角色是"事务的出口"与
-     * "视图的持有者"，编辑本身的做法（策略、步骤、撤销快照、光标落点）全在它里面。
-     */
-    EditCommand edit_;
-
-    /**
-     * 光标这一拍画不画（闪烁相位与 showCaret 共同决定）。
-     */
-    bool caret_visible_ = true;
+    EditSession edit_session_;
 
     /**
      * 本次呈现的窗口（见 windowFirstPage / windowPageCount）。
@@ -3747,33 +3665,6 @@ private:
      * 累计被策略拒掉的编辑次数。
      */
     long long blocked_edits_ = 0;
-    /**
-     * 每一份修订对应的两份选区快照（编辑前 / 编辑后）。历史本体在 session_ 里，
-     * 这里只补它记不了的那一半 —— 撤销与重做都要把光标摆回按下去之前的位置。
-     *
-     * 与 session_ 的撤销栈同步裁剪：超上限时丢最旧的，与"丢更早的状态"同一口径。
-     */
-    struct SelectionRecord {
-        /**
-         * 编辑前的选区。
-         */
-        Range before;
-
-        /**
-         * 编辑后的选区。
-         */
-        Range after;
-    };
-
-    /**
-     * 每一份修订对应的两份选区快照（与撤销栈同步裁剪）。
-     */
-    std::vector<SelectionRecord> sel_history_;
-
-    /**
-     * 当前处在哪一格历史（与 session_ 的撤销位置同步）。
-     */
-    size_t sel_pos_ = 0;
 };
 
 }  // namespace heditor

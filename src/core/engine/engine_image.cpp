@@ -144,9 +144,9 @@ bool EditorEngine::registerImage(const std::string& id, int width, int height, c
     if (!images_.put(id, width, height, rgba, bytes, error)) return false;
     // 资源变了但文档没变：页场景看不出来，只有光栅签名里的资源变更计数能让页位图作废。
     //   不重光栅的话，画面上一直是上一张图（或者占位框）。
-    pages_.setSignature(rasterSignatureNow());
+    render_.pages.setSignature(rasterSignatureNow());
     // 注册与删除都可能让"待上屏的矩形"指向旧像素：签名没变时也要清一次。
-    pages_.clearDirty();
+    render_.pages.clearDirty();
     return true;
 }
 
@@ -162,9 +162,9 @@ bool EditorEngine::dropImage(const std::string& id) {
     // 后端按资源身份缓存了解码结果，表里删了它也不会自己消失 —— 那份缓存按 key 存，
     //   键是资源 id 的哈希，删掉资源之后就再没人能找回它。
     Bitmap::forgetImage(imageResourceKey(id));
-    pages_.setSignature(rasterSignatureNow());
+    render_.pages.setSignature(rasterSignatureNow());
     // 注册与删除都可能让"待上屏的矩形"指向旧像素：签名没变时也要清一次。
-    pages_.clearDirty();
+    render_.pages.clearDirty();
     return true;
 }
 
@@ -176,7 +176,7 @@ bool EditorEngine::dropImageAndRepaint(const std::string& id) {
 
 bool EditorEngine::insertImage(const ImageSpec& spec) {
     if (!loaded_) return false;
-    return edit_.insertImage(clampImageToContainer(spec));
+    return edit_session_.edit.insertImage(clampImageToContainer(spec));
 }
 
 ImageSpec EditorEngine::clampImageToContainer(const ImageSpec& spec) const {
@@ -189,7 +189,7 @@ ImageSpec EditorEngine::clampImageToContainer(const ImageSpec& spec) const {
     const LayoutCell* cell = layoutCellAt(para, nullptr);
     if (cell == nullptr || cell->col_span <= 0) return out;
     float cell_w = 0.0f;
-    for (const PlacedTable& t : layout_.placed_tables) {
+    for (const PlacedTable& t : layout_service_.layout.placed_tables) {
         const LayoutCell* hit = nullptr;
         for (const LayoutCell& c : t.cells) {
             if (c.block_count <= 0) continue;
@@ -259,7 +259,7 @@ std::vector<EditorEngine::ImageBox> EditorEngine::images() const {
     if (ids.empty()) return out;
 
     std::unordered_map<int, std::vector<PageRect>> rects;
-    for (const LineBox& lb : layout_.lines) {
+    for (const LineBox& lb : layout_service_.layout.lines) {
         for (size_t ci = 0; ci < lb.clusters.size(); ++ci) {
             const LineCluster& c = lb.clusters[ci];
             Rect r;
@@ -272,7 +272,7 @@ std::vector<EditorEngine::ImageBox> EditorEngine::images() const {
     }
 
     // 浮动图在行盒里没有几何（它不占版面），矩形从排版的 placed_floats 取。
-    for (const PlacedFloat& pf : layout_.placed_floats) {
+    for (const PlacedFloat& pf : layout_service_.layout.placed_floats) {
         PageRect pr;
         pr.page = pf.page;
         float fx = pf.x;
@@ -316,7 +316,7 @@ std::vector<EditorEngine::ImageBox> EditorEngine::images() const {
 
 EditorEngine::ImageHit EditorEngine::imageAtPt(float x_pt_doc, float y_pt_doc) const {
     ImageHit hit;
-    if (!loaded_ || layout_.lines.empty()) return hit;
+    if (!loaded_ || layout_service_.layout.lines.empty()) return hit;
 
     // 文档坐标 → 页号 + 页内磅。折法与 hitTestPt 逐字相同（按宿主摆页的像素步距），
     //   两处各写一套的话，页号一多就会各自累出不同的偏差。
@@ -345,7 +345,7 @@ EditorEngine::ImageHit EditorEngine::imageAtPt(float x_pt_doc, float y_pt_doc) c
     int body_hit = -1;
 
     // 浮动图优先：它可能盖在文字上，而行盒里根本没有它的几何。
-    for (const PlacedFloat& pf : layout_.placed_floats) {
+    for (const PlacedFloat& pf : layout_service_.layout.placed_floats) {
         if (pf.page != page) continue;
         float fx = pf.x;
         float fy = pf.y;
@@ -370,8 +370,8 @@ EditorEngine::ImageHit EditorEngine::imageAtPt(float x_pt_doc, float y_pt_doc) c
     }
 
     // 把手先于图身：把手一半在框外，先判图身的话，贴边那几磅永远拖不动。
-    for (const int li : layout_.linesOnPage(page)) {
-        const LineBox& lb = layout_.lines[static_cast<size_t>(li)];
+    for (const int li : layout_service_.layout.linesOnPage(page)) {
+        const LineBox& lb = layout_service_.layout.lines[static_cast<size_t>(li)];
         for (size_t ci = 0; ci < lb.clusters.size(); ++ci) {
             const LineCluster& c = lb.clusters[ci];
             Rect r;
@@ -413,7 +413,7 @@ void EditorEngine::collectImageUi(int page, std::vector<Rect>* out) const {
     const float bar = std::max(1.0f, kImageFramePt * zoom);
 
     // 浮动的图框不在行盒里，几何从 placed_floats 取；预览（拖动改尺寸 / 拖动移动）同样要跟手。
-    for (const PlacedFloat& pf : layout_.placed_floats) {
+    for (const PlacedFloat& pf : layout_service_.layout.placed_floats) {
         if (pf.page != page) continue;
         if (static_cast<NodeId>(pf.handle) != image_sel_) continue;
         float fx = pf.x;
@@ -440,8 +440,8 @@ void EditorEngine::collectImageUi(int page, std::vector<Rect>* out) const {
                                 half * 2.0f, half * 2.0f});
         }
     }
-    for (const int li : layout_.linesOnPage(page)) {
-        const LineBox& lb = layout_.lines[static_cast<size_t>(li)];
+    for (const int li : layout_service_.layout.linesOnPage(page)) {
+        const LineBox& lb = layout_service_.layout.lines[static_cast<size_t>(li)];
         for (size_t ci = 0; ci < lb.clusters.size(); ++ci) {
             const LineCluster& c = lb.clusters[ci];
             if (static_cast<NodeId>(c.owner_control) != image_sel_) continue;
@@ -531,7 +531,7 @@ bool EditorEngine::resizeImage(int index, float w_pt, float h_pt, bool continue_
         if (b.index != index) continue;
         // 尺寸真的落地了：预览的使命结束（松手那一下正是"预览尺寸 = 真尺寸"）。
         clearImageResizePreview();
-        return edit_.resizeImage(b.id, w_pt, h_pt, continue_run);
+        return edit_session_.edit.resizeImage(b.id, w_pt, h_pt, continue_run);
     }
     return false;
 }
@@ -673,15 +673,17 @@ int EditorEngine::dragKindAt(const TextPos& p, int side, const ImageHit& ih) con
     //   正是这一手）。
     //   para 为 -1 是"这一点没有文字落点"，那就只剩搬图那一半。
     //   整格选区不搬：搬一串格子没有语义（表结构不是"一段文字"），照常拖选。
-    if (p.para >= 0 && caret_.hasSelection() && caret_.cellBlocks().empty()) {
-        const Range sel = caret_.selection();
+    if (p.para >= 0 && edit_session_.caret.hasSelection() &&
+        edit_session_.caret.cellBlocks().empty()) {
+        const Range sel = edit_session_.caret.selection();
         // 选区只要压到表格里的块就不搬。跨格选的文字（撤销整格删除之后恢复的正是
         //   这一形态）落不到"搬家"上：搬进另一格要把表结构一起搬，搬进正文要把
         //   表格拆开 —— 两条都没有语义，命令层会拒绝，这里就不该起手。
-        for (size_t i = 0; i < blocks_full_.size() && i < block_flow_.size(); ++i) {
-            if (blocks_full_[i].cell_path.empty()) continue;
-            const FlowPos lo = block_flow_[i];
-            const FlowPos hi = lo + block_flow_span_[i];
+        for (size_t i = 0; i < projection_.blocks_full.size() && i < projection_.block_flow.size();
+             ++i) {
+            if (projection_.blocks_full[i].cell_path.empty()) continue;
+            const FlowPos lo = projection_.block_flow[i];
+            const FlowPos hi = lo + projection_.block_flow_span[i];
             if (hi > sel.begin() && lo < sel.end()) return 0;
         }
         const FlowPos f = flowPosAtSide(p.para, p.offset, side);
@@ -695,17 +697,17 @@ int EditorEngine::dragKindAt(const TextPos& p, int side, const ImageHit& ih) con
  */
 bool EditorEngine::moveSelectionToPt(float x_pt_doc, float y_pt_doc) {
     if (!session_.has_value()) return false;
-    if (!caret_.hasSelection()) return false;
+    if (!edit_session_.caret.hasSelection()) return false;
     TextPos p{};
     int side = 0;
     // clamp：拖到页外也要能落，否则"拖着往外一推就取消"。
     if (!hitTestPt(x_pt_doc, y_pt_doc, &p, nullptr, &side, nullptr, nullptr, true)) return false;
     const FlowPos dest = flowPosAtSide(p.para, p.offset, side);
-    const Range sel = caret_.selection();
+    const Range sel = edit_session_.caret.selection();
     const rev::ClipCapture cap =
         rev::captureRange(session_->doc(), flowVisibility(), sel.begin(), sel.end());
     if (!cap.ok || cap.nodes.empty()) return false;
-    return edit_.moveRange(cap.lo, cap.hi, dest, cap.nodes);
+    return edit_session_.edit.moveRange(cap.lo, cap.hi, dest, cap.nodes);
 }
 
 bool EditorEngine::moveSelectionToPtAndRender(float x_pt_doc, float y_pt_doc) {
@@ -748,7 +750,7 @@ bool EditorEngine::moveImageToPt(int index, float x_pt_doc, float y_pt_doc, bool
         bool anchored = false;
         for (const LayoutFloat& f : floats_) {
             if (f.handle != id) continue;
-            for (const LineBox& lb : layout_.lines) {
+            for (const LineBox& lb : layout_service_.layout.lines) {
                 if (lb.paragraph != f.para) continue;
                 const float stride =
                     cfg_.page.continuous ? cfg_.page.slabHeightPt() : cfg_.page.height_pt;
@@ -783,7 +785,7 @@ bool EditorEngine::moveImageToPt(int index, float x_pt_doc, float y_pt_doc, bool
             next.dx_pt = lx - cfg_.page.margins.left;
             next.dy_pt = (static_cast<float>(pg) * stride + ly) - anchor_flow;
         }
-        if (!edit_.setImageSpec(id, next)) return false;
+        if (!edit_session_.edit.setImageSpec(id, next)) return false;
         // 位置真的落地了：预览的使命结束（松手那一下正是"预览位置 = 真位置"）。
         clearImageResizePreview();
         markAllLayoutDirty();
@@ -795,7 +797,7 @@ bool EditorEngine::moveImageToPt(int index, float x_pt_doc, float y_pt_doc, bool
     int side = 0;
     if (!hitTestPt(x_pt_doc, y_pt_doc, &p, nullptr, &side, nullptr, nullptr, true)) return false;
     const FlowPos dest = flowPosAtSide(p.para, p.offset, side);
-    if (!edit_.moveImage(id, spec, dest)) return false;
+    if (!edit_session_.edit.moveImage(id, spec, dest)) return false;
     // 块内容哈希看不见"图片换了节点号"：删了又插之后文本一模一样，损伤区间算出来是空的，
     //   增量排版于是原地不动，行盒里的图片簇还指着已经被删掉的那个节点 —— 画面上图还在
     //   老位置、选中框却在新位置。搬图是低频动作，整篇重排一次最省心。
@@ -812,7 +814,8 @@ std::string EditorEngine::dropSpotJson(float x_pt_doc, float y_pt_doc) const {
     }
     int page = -1;
     Rect r{};
-    if (!caret_.caretRectFor(p, &page, &r)) return pk::checked(pk::drop_spot::kSpec, "null");
+    if (!edit_session_.caret.caretRectFor(p, &page, &r))
+        return pk::checked(pk::drop_spot::kSpec, "null");
     std::ostringstream o;
     o.setf(std::ios::fixed);
     o.precision(2);
@@ -883,7 +886,7 @@ bool EditorEngine::setImageLayout(int index, int layout) {
                 next.dy_pt = dy;
             }
         }
-        if (!edit_.setImageSpec(b.id, next)) return false;
+        if (!edit_session_.edit.setImageSpec(b.id, next)) return false;
         // 环绕方式改的是断行，而"图落在哪一页"可能整个变了：整篇重排一次，
         //   别指望块哈希算出来的损伤区间（它看得见行、看不见图的落点）。
         markAllLayoutDirty();
@@ -912,7 +915,7 @@ bool EditorEngine::floatOffsetsFor(NodeId id, const std::vector<PageRect>& rects
         }
     }
     if (para < 0) {
-        for (const LineBox& lb : layout_.lines) {
+        for (const LineBox& lb : layout_service_.layout.lines) {
             for (size_t ci = 0; ci < lb.clusters.size(); ++ci) {
                 Rect r;
                 if (!imageClusterRect(lb, lb.clusters[ci], ci, &r)) continue;
@@ -926,7 +929,7 @@ bool EditorEngine::floatOffsetsFor(NodeId id, const std::vector<PageRect>& rects
     if (para < 0) return false;
     // 锚段第一行：行盒按块轴自上而下，第一条属于这一段的就是它。
     const LineBox* first = nullptr;
-    for (const LineBox& lb : layout_.lines) {
+    for (const LineBox& lb : layout_service_.layout.lines) {
         if (lb.paragraph != para) continue;
         if (first == nullptr) {
             first = &lb;

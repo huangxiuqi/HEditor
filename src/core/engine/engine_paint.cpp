@@ -120,7 +120,7 @@ constexpr float kPrewarmYOffsetPx = 40.0f;
  *   落进这条带里；纵向相位不进缓存键（掩码的纵向落点由 blit 决定）。
  */
 int EditorEngine::prewarmPageGlyphs(int page) {
-    if (layout_.glyphs.empty() || page < 0) return 0;
+    if (layout_service_.layout.glyphs.empty() || page < 0) return 0;
     ensureRenderSetup();
     const int page_px_w = pagePxWidth();
     const int page_px_h = pagePxHeight();
@@ -153,8 +153,8 @@ int EditorEngine::prewarmPageGlyphs(int page) {
     };
     int n = 0;
     // 只过这一页的字形，不整篇筛。预热是逐页调用的，整篇筛会让每次预热都付 O(全篇)。
-    for (int k : layout_.glyphsOnPage(page)) {
-        const PlacedGlyph& pg = layout_.glyphs[static_cast<size_t>(k)];
+    for (int k : layout_service_.layout.glyphsOnPage(page)) {
+        const PlacedGlyph& pg = layout_service_.layout.glyphs[static_cast<size_t>(k)];
         if (!pg.font) continue;
         hb_font_t* f = pg.font->hb();
         if (!ids.empty() && (f != run_font || pg.color != run_color || pg.rotate_deg != run_rot)) {
@@ -176,13 +176,13 @@ int EditorEngine::prewarmPageGlyphs(int page) {
 }
 
 bool EditorEngine::pageBitmapUsable(int page) const {
-    return pages_.usable(page, pagePxWidth(), pagePxHeight());
+    return render_.pages.usable(page, pagePxWidth(), pagePxHeight());
 }
 
 RenderInput EditorEngine::renderInput() {
     RenderInput in;
     in.doc = &document();
-    in.layout = &layout_;
+    in.layout = &layout_service_.layout;
     in.blocks = &blocks();
     in.control_node_ids = &control_node_ids_;
     in.images = &images_;
@@ -199,7 +199,7 @@ RenderInput EditorEngine::renderInput() {
 
 void EditorEngine::rasterPageInto(int page, const float* band_lo_pt, const float* band_hi_pt,
                                   PageScene* scene) {
-    PageSlot& pb = pages_.at(page);
+    PageSlot& pb = render_.pages.at(page);
     const int pw = pagePxWidth();
     const int ph = pagePxHeight();
     if (pb.px.width() != pw || pb.px.height() != ph) {
@@ -231,13 +231,15 @@ void EditorEngine::rasterPageInto(int page, const float* band_lo_pt, const float
     raster_fill_ms_ += cost.fill_ms;
     raster_glyph_ms_ += cost.glyph_ms;
     // 场景由 present 在光栅之后写回；这里只记光栅配置版本，供查询类入口判断可读性。
-    pb.raster_sig = pages_.signature();
+    pb.raster_sig = render_.pages.signature();
     pb.valid = true;
     raster_glyphs_ += static_cast<int>(pb.px.paintedGlyphs());
     raster_glyph_bounds_ms_ += pb.px.glyphBoundsMs();
 }
 
-void EditorEngine::trimPageCache(int first_page, int count) { pages_.trim(first_page, count); }
+void EditorEngine::trimPageCache(int first_page, int count) {
+    render_.pages.trim(first_page, count);
+}
 
 /**
  * 记一块"这一页的像素变了"。页内像素坐标，且是累积的（自上次取走以来）。
@@ -246,15 +248,17 @@ void EditorEngine::trimPageCache(int first_page, int count) { pages_.trim(first_
  *   并了会把中间一大片没变的像素也传上去。条数超过 16 时退回一个并集：
  *   一页几十个表单标记时逐条传反而更贵，而这一条只是"上界"，宁可多传不可少传。
  */
-void EditorEngine::notePageDirty(int page, const Rect& r) { pages_.noteDirty(page, r); }
+void EditorEngine::notePageDirty(int page, const Rect& r) { render_.pages.noteDirty(page, r); }
 
-std::vector<Rect> EditorEngine::takePageDirtyRects(int page) { return pages_.takeDirty(page); }
+std::vector<Rect> EditorEngine::takePageDirtyRects(int page) {
+    return render_.pages.takeDirty(page);
+}
 
 /**
  * 有累积脏矩形的页号（升序）。与 takePageDirtyRects 的分工见头文件。
  */
 std::string EditorEngine::pageDirtyPagesJson() const {
-    const std::vector<int> pages = pages_.dirtyPages();
+    const std::vector<int> pages = render_.pages.dirtyPages();
     std::ostringstream o;
     o << "[";
     for (size_t i = 0; i < pages.size(); ++i) {
@@ -295,7 +299,7 @@ std::string EditorEngine::takePageDirtyRectsJson(int page) {
 
 size_t EditorEngine::pageBytes(int page) const {
     if (!pageBitmapUsable(page)) return 0;
-    const PageSlot* pb = pages_.find(page);
+    const PageSlot* pb = render_.pages.find(page);
     return (pb == nullptr) ? 0 : pb->px.byteSize();
 }
 
@@ -319,7 +323,7 @@ void EditorEngine::presentInternal(int first_page, int count) {
     // 光栅签名在这里按当前状态重算一次：它只管缩放、页度量这些所有页共同的参数。
     //   内容是否变了由 PageScene 的根判断；两者分开之后，新增一种画法只需要在场景里
     //   加一项，不必再往这里的清单上补一项。
-    pages_.setSignature(rasterSignatureNow());
+    render_.pages.setSignature(rasterSignatureNow());
     // 光栅那一组由 drawPage 累加，末尾一次性上报。
     raster_glyphs_ = 0;
     raster_glyph_bounds_ms_ = 0.0;
@@ -391,7 +395,7 @@ void EditorEngine::presentInternal(int first_page, int count) {
     const Rect page_bounds = pageRectPt();
     // 场景输入键：这一拍没有重排，且这些输入都没变，场景本身就不必重建。
     //   光标闪烁走的是这条路 —— 它只改覆盖层，不该重新哈希整页的字形。
-    uint64_t scene_key = pages_.signature();
+    uint64_t scene_key = render_.pages.signature();
     scene_key = fnvMix(scene_key, static_cast<uint64_t>(mode_));
     for (int ci = 0; ci < controls_.size(); ++ci) {
         scene_key = fnvMix(scene_key, controls_.at(ci).read_only ? 1ull : 0ull);
@@ -406,7 +410,7 @@ void EditorEngine::presentInternal(int first_page, int count) {
     double diff_ms = 0.0;
     for (int i = 0; i < count; ++i) {
         const int page = first_page + i;
-        const PageSlot* prev_slot = pages_.find(page);
+        const PageSlot* prev_slot = render_.pages.find(page);
         PageScene scene;
         if (!layout_pending_ && prev_slot != nullptr && prev_slot->scene != nullptr &&
             prev_slot->scene_input_key == scene_key) {
@@ -414,25 +418,25 @@ void EditorEngine::presentInternal(int first_page, int count) {
             ++edit_stats_.scene_reused_pages;
         } else {
             const auto t_scene = Clock::now();
-            scene = buildPageScene(render_in, page);
+            scene = render_.buildScene(render_in, page);
             // 场景构建本身也要计时：全篇重排那一拍通常所有页都新鲜，若只在“不新鲜”分支累加，
             //   统计会读成 0，看起来像这一项已经不干活了。
             scene_ms += msSince(t_scene);
             ++edit_stats_.scene_built_pages;
         }
-        if (pages_.fresh(page, scene, page_px_w, page_px_h)) continue;
+        if (render_.pages.fresh(page, scene, page_px_w, page_px_h)) continue;
         ++rastered;
         ++edit_stats_.dirty_page_count;
 
         const bool has_prev = prev_slot != nullptr && prev_slot->valid &&
-                              prev_slot->raster_sig == pages_.signature() &&
+                              prev_slot->raster_sig == render_.pages.signature() &&
                               prev_slot->px.width() == page_px_w &&
                               prev_slot->px.height() == page_px_h;
         // 竖排页仍整页重画：行带在竖排下会变成竖条，而擦除与字形筛选都按纵轴写。
         //   本条与旧实现同口径；换成任意矩形重放之后再单独处理。
         bool vertical = false;
-        for (int k : layout_.linesOnPage(page)) {
-            if (layout_.lines[static_cast<size_t>(k)].vertical) {
+        for (int k : layout_service_.layout.linesOnPage(page)) {
+            if (layout_service_.layout.lines[static_cast<size_t>(k)].vertical) {
                 vertical = true;
                 break;
             }
@@ -469,10 +473,10 @@ void EditorEngine::presentInternal(int first_page, int count) {
             edit_stats_.band_y0 = 0;
             edit_stats_.band_y1 = page_px_h;
         }
-        PageSlot& slot = pages_.at(page);
+        PageSlot& slot = render_.pages.at(page);
         slot.scene = std::make_shared<PageScene>(std::move(scene));
         slot.scene_input_key = scene_key;
-        slot.raster_sig = pages_.signature();
+        slot.raster_sig = render_.pages.signature();
         slot.valid = true;
     }
     edit_stats_.repainted_pages = rastered;
@@ -490,7 +494,7 @@ void EditorEngine::presentInternal(int first_page, int count) {
     //   层序由 OverlayScene 的数组顺序表达：选区、图片手柄、光标。
     for (int i = 0; i < count; ++i) {
         const int page = first_page + i;
-        PageSlot* slot = pages_.find(page);
+        PageSlot* slot = render_.pages.find(page);
         if (slot == nullptr) continue;
         OverlayScene now;
         collectTransient(page, &now);
@@ -507,7 +511,7 @@ void EditorEngine::presentInternal(int first_page, int count) {
     }
     // 窗口外的页不留覆盖账：它记的是"上一拍这一页叠了什么"，而那一页已经不在画布上。
     //   留着的话，读 pageRgba(窗口外的页) 会得到一个过期光标 —— 探针正是那么读的。
-    for (auto& kv : pages_.slots()) {
+    for (auto& kv : render_.pages.slots()) {
         if (kv.first >= first_page && kv.first < first_page + count) continue;
         kv.second.overlay.items.clear();
         kv.second.overlay.root = 0;
@@ -541,7 +545,7 @@ void EditorEngine::presentInternal(int first_page, int count) {
     edit_stats_.caret_side = caretSide();
     edit_stats_.caret_vertical = caretVertical();
     edit_stats_.caret_block_reversed = caretBlockReversed();
-    edit_stats_.caret_page = caret_.caretPage();
+    edit_stats_.caret_page = edit_session_.caret.caretPage();
     // 光标只在可插入位置上现形：表单模式的控件之外、只读模式里一律不画（见 caretInsertable）。
     //   选中图片时也不画：那是一条对象选区，文本光标留着只会叠在图的右边线上，
     //   把把手盖住（那一段既看不清也点不准）。
@@ -664,7 +668,7 @@ void EditorEngine::collectTransient(int page, OverlayScene* out) const {
  *   它从来没被写进任何持久位图里。
  */
 const uint8_t* EditorEngine::pageDisplayPixels(int page) const {
-    const PageSlot* pb = pages_.find(page);
+    const PageSlot* pb = render_.pages.find(page);
     if (pb == nullptr || !pb->valid) return nullptr;
     if (pb->px.width() != pagePxWidth() || pb->px.height() != pagePxHeight()) return nullptr;
     if (pb->overlay.items.empty()) return pb->px.data();
@@ -715,7 +719,7 @@ void EditorEngine::assembleWindow(bool with_transient, Bitmap* out) const {
         if (with_transient) {
             src = pageDisplayPixels(page);
         } else {
-            const PageSlot* slot = pages_.find(page);
+            const PageSlot* slot = render_.pages.find(page);
             if (slot != nullptr && slot->valid) src = slot->px.data();
         }
         if (src == nullptr) continue;
@@ -745,7 +749,7 @@ void EditorEngine::repaintAfterEdit() {
     //   像素，画布停在旧排版上）。
     //   该不变量属于引擎：放在宿主里就成了补救路径，而补救路径本身会引入记账歧义。
     //   顺带重置闪烁相位，符合输入法/编辑器的常见手感。
-    caret_visible_ = true;
+    edit_session_.caret_visible = true;
     // 编辑之后尺寸预览作废：文档已经按提交后的样子重排，再留一个旧框只会画错位置。
     clearImageResizePreview();
     repaint();

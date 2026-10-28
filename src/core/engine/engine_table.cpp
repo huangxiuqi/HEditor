@@ -80,23 +80,23 @@ bool EditorEngine::tableOp(TableOp op) {
     if (!loaded_) return false;
     switch (op) {
         case TableOp::InsertRowAbove:
-            return edit_.insertTableRow(false);
+            return edit_session_.edit.insertTableRow(false);
         case TableOp::InsertRowBelow:
-            return edit_.insertTableRow(true);
+            return edit_session_.edit.insertTableRow(true);
         case TableOp::RemoveRow:
-            return edit_.removeTableRow();
+            return edit_session_.edit.removeTableRow();
         case TableOp::InsertColumnLeft:
-            return edit_.insertTableColumn(false);
+            return edit_session_.edit.insertTableColumn(false);
         case TableOp::InsertColumnRight:
-            return edit_.insertTableColumn(true);
+            return edit_session_.edit.insertTableColumn(true);
         case TableOp::RemoveColumn:
-            return edit_.removeTableColumn();
+            return edit_session_.edit.removeTableColumn();
         case TableOp::MergeCells:
-            return edit_.mergeTableCells();
+            return edit_session_.edit.mergeTableCells();
         case TableOp::SplitCell:
-            return edit_.splitTableCell();
+            return edit_session_.edit.splitTableCell();
         case TableOp::RemoveTable:
-            return edit_.removeTableAtCaret();
+            return edit_session_.edit.removeTableAtCaret();
     }
     return false;
 }
@@ -110,7 +110,7 @@ bool EditorEngine::tableOpAndRender(TableOp op) {
 
 bool EditorEngine::setCellSpec(const CellPatch& patch) {
     if (!loaded_) return false;
-    return edit_.setCellSpec(patch);
+    return edit_session_.edit.setCellSpec(patch);
 }
 
 bool EditorEngine::setCellSpecAndRender(const CellPatch& patch) {
@@ -122,7 +122,7 @@ bool EditorEngine::setCellSpecAndRender(const CellPatch& patch) {
 
 bool EditorEngine::setRowSpec(const RowPatch& patch) {
     if (!loaded_) return false;
-    return edit_.setRowSpec(patch);
+    return edit_session_.edit.setRowSpec(patch);
 }
 
 bool EditorEngine::setRowSpecAndRender(const RowPatch& patch) {
@@ -134,7 +134,7 @@ bool EditorEngine::setRowSpecAndRender(const RowPatch& patch) {
 
 bool EditorEngine::setTableSpec(const TablePatch& patch) {
     if (!loaded_) return false;
-    return edit_.setTableSpec(patch);
+    return edit_session_.edit.setTableSpec(patch);
 }
 
 bool EditorEngine::setTableSpecAndRender(const TablePatch& patch) {
@@ -158,7 +158,7 @@ std::string EditorEngine::tableGridJson(float x_pt_doc, float y_pt_doc) const {
     if (!pageLocalYAt(y_pt_doc, cfg_.zoom, pagePxHeight(), pageGapPx(), &page, &local_y)) {
         return pk::checked(pk::table_grid::kSpec, "{\"ok\":false}");
     }
-    for (const PlacedTable& pt : layout_.placed_tables) {
+    for (const PlacedTable& pt : layout_service_.layout.placed_tables) {
         if (x_pt_doc < pt.x - 1.0f || x_pt_doc > pt.x + pt.w + 1.0f) continue;
         for (const PlacedRow& pr : pt.placed) {
             if (pr.page != page) continue;
@@ -194,7 +194,7 @@ bool EditorEngine::tableGridLineAt(float x_pt_doc, float y_pt_doc, uint64_t* tab
     if (!pageLocalYAt(y_pt_doc, cfg_.zoom, pagePxHeight(), pageGapPx(), &page, &local_y)) {
         return false;
     }
-    for (const PlacedTable& pt : layout_.placed_tables) {
+    for (const PlacedTable& pt : layout_service_.layout.placed_tables) {
         if (x_pt_doc < pt.x - 1.0f || x_pt_doc > pt.x + pt.w + 1.0f) continue;
         bool on_page = false;
         for (const PlacedRow& pr : pt.placed) {
@@ -241,7 +241,7 @@ bool EditorEngine::tableGridLineAt(float x_pt_doc, float y_pt_doc, uint64_t* tab
 
 bool EditorEngine::setTableColWidths(uint64_t handle, const std::vector<float>& widths) {
     if (!loaded_) return false;
-    return edit_.setTableGridCols(handle, widths);
+    return edit_session_.edit.setTableGridCols(handle, widths);
 }
 
 bool EditorEngine::setTableColWidthsAndRender(uint64_t handle, const std::vector<float>& widths) {
@@ -253,7 +253,7 @@ bool EditorEngine::setTableColWidthsAndRender(uint64_t handle, const std::vector
 
 bool EditorEngine::setTableRowHeight(uint64_t handle, int row, float h_pt) {
     if (!loaded_) return false;
-    return edit_.setTableRowHeight(handle, row, h_pt);
+    return edit_session_.edit.setTableRowHeight(handle, row, h_pt);
 }
 
 bool EditorEngine::setTableRowHeightAndRender(uint64_t handle, int row, float h_pt) {
@@ -296,13 +296,13 @@ bool EditorEngine::canTableOp(TableOp op) const {
         case TableOp::MergeCells: {
             // 合并的主语是整格选区，不是光标所在那一格。
             std::vector<rev::CellRef> cells;
-            for (const CaretResolver::CellBlocks& cb : caret_.cellBlocks()) {
+            for (const CaretResolver::CellBlocks& cb : edit_session_.caret.cellBlocks()) {
                 if (cb.empty() || cb.first < 0 ||
-                    cb.first >= static_cast<int>(blocks_full_.size())) {
+                    cb.first >= static_cast<int>(projection_.blocks_full.size())) {
                     return false;
                 }
                 const std::vector<CellSlot>& path =
-                    blocks_full_[static_cast<size_t>(cb.first)].cell_path;
+                    projection_.blocks_full[static_cast<size_t>(cb.first)].cell_path;
                 if (path.empty()) return false;
                 const CellSlot& slot = path.back();
                 rev::CellRef one;
@@ -384,11 +384,12 @@ std::string EditorEngine::tableStateJson() const {
     int sel_lo_col = 0;
     int sel_hi_col = 0;
     bool sel_any = false;
-    for (const CaretResolver::CellBlocks& cb : caret_.cellBlocks()) {
+    for (const CaretResolver::CellBlocks& cb : edit_session_.caret.cellBlocks()) {
         if (cb.empty()) continue;
         const int para = cb.first;
-        if (para < 0 || para >= static_cast<int>(blocks_full_.size())) continue;
-        const std::vector<CellSlot>& path = blocks_full_[static_cast<size_t>(para)].cell_path;
+        if (para < 0 || para >= static_cast<int>(projection_.blocks_full.size())) continue;
+        const std::vector<CellSlot>& path =
+            projection_.blocks_full[static_cast<size_t>(para)].cell_path;
         if (path.empty()) continue;
         const CellSlot& slot = path.back();
         ++sel_cells;

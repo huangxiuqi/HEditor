@@ -207,6 +207,7 @@ add_library(heditor_core STATIC
   src/core/layout/block_pagination.cpp
   src/core/layout/float_flow.cpp
   src/core/engine/engine.cpp
+  src/core/engine/document_session.cpp
   src/core/engine/caret.cpp
   src/core/engine/edit_command.cpp
   src/core/engine/engine_layout.cpp

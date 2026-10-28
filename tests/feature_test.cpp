@@ -676,6 +676,22 @@ int main() {
         }
     }
 
+    // 会话持有选区快照：撤销/重做成对恢复，合并提交只更新栈顶。
+    {
+        rev::Session s(rev::Doc{}, 10);
+        s.recordSelection(rev::SelectionSnapshot{1, 1}, rev::SelectionSnapshot{2, 2}, false);
+        s.recordSelection(rev::SelectionSnapshot{2, 2}, rev::SelectionSnapshot{3, 3}, false);
+        rev::SelectionSnapshot got;
+        expectTrue(s.undoSelection(&got) && got.anchor == 2 && got.focus == 2,
+                   "会话选区：撤销恢复编辑前");
+        expectTrue(s.redoSelection(&got) && got.anchor == 3 && got.focus == 3,
+                   "会话选区：重做恢复编辑后");
+        s.recordSelection(rev::SelectionSnapshot{3, 3}, rev::SelectionSnapshot{4, 4}, true);
+        expectTrue(s.selectionDepth() == 2, "会话选区：合并提交不新压一格");
+        expectTrue(s.undoSelection(&got) && got.anchor == 2 && got.focus == 2,
+                   "会话选区：合并后撤销仍回到编辑前");
+    }
+
     // 块行索引：每块列出的行都属于该块，且覆盖 lines 里的全部行。
     {
         const LayoutResult& L = e.layout();

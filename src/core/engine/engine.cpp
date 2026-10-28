@@ -206,7 +206,7 @@ void EditorEngine::setConfig(const EngineConfig& cfg) {
     // 光栅签名一变，所有页的像素都不再作数（判据在 PageCache::fresh / usable）。
     //   这里不再逐项比对再清缓存：那张清单漏一项就是"改了底色屏幕不变"（TRAPS 128）。
     const uint64_t sig = rasterSignatureNow();
-    pages_.setSignature(sig);
+    render_.pages.setSignature(sig);
     if (plan_changed) markLayoutDirtyForBrackets();
     if (page_changed) markAllLayoutDirty();
     if (plan_changed || page_changed) relayout();
@@ -232,12 +232,10 @@ void EditorEngine::setCaretAndSelectionStyle(const Color& caret, float caret_wid
  */
 void EditorEngine::installDocument(rev::Doc doc) {
     session_.emplace(std::move(doc), cfg_.undo_limit);
-    proj_hist_ = rev::BlockHistory{};
+    projection_.history = rev::BlockHistory{};
     loaded_ = true;
-    sel_history_.clear();
-    sel_pos_ = 0;
     setCaretByText(TextPos{0, 0});
-    pages_.clear();
+    render_.pages.clear();
     rebuildFromTree();
     // 整份文档换了：段数与内容都可能全变，没有可复用的前缀。
     markAllLayoutDirty();
@@ -255,14 +253,14 @@ void EditorEngine::setDocument(const NodeTree& tree, const StyleSheet& sheet) {
         // 文档，调用方没有别的办法知道。宁可停在"没有装载"这个明确状态上。
         loaded_ = false;
         session_.reset();
-        proj_hist_ = rev::BlockHistory{};
-        blocks_.clear();
-        blocks_full_.clear();
-        block_src_.clear();
-        block_extents_.clear();
-        tables_.clear();
+        projection_.history = rev::BlockHistory{};
+        projection_.blocks.clear();
+        projection_.blocks_full.clear();
+        projection_.block_src.clear();
+        projection_.block_extents.clear();
+        projection_.tables.clear();
         flow_.reset();
-        pages_.clear();
+        render_.pages.clear();
         return;
     }
     sheet_ = sheet;
@@ -339,7 +337,7 @@ ClipCopy EditorEngine::copySelection() const {
         out.error = "没有装载文档";
         return out;
     }
-    if (!caret_.hasSelection()) {
+    if (!edit_session_.caret.hasSelection()) {
         // 选中的图片是一份"对象选区"：它不是文本区间，但复制 / 剪切对它同样成立。
         //   不认它的话，点中一张图按 Ctrl+C 会说"没有选中内容" —— 而画面上明明选着。
         if (image_sel_ != kInvalidNodeId) {
@@ -360,7 +358,7 @@ ClipCopy EditorEngine::copySelection() const {
         out.error = "没有选中内容";
         return out;
     }
-    const Range sel = caret_.selection();
+    const Range sel = edit_session_.caret.selection();
     const rev::ClipCapture cap =
         rev::captureRange(session_->doc(), flowVisibility(), sel.begin(), sel.end());
     if (!cap.ok) {
@@ -385,7 +383,7 @@ std::string EditorEngine::pasteFragment(const std::string& text) {
     if (!session_) return "没有装载文档";
     const rev::ClipReadResult r = rev::readFragment(text, fontReadOptions());
     if (!r.ok) return r.error;
-    if (!edit_.pasteNodes(r.nodes)) return "粘贴失败：落点不接受这段内容";
+    if (!edit_session_.edit.pasteNodes(r.nodes)) return "粘贴失败：落点不接受这段内容";
     return std::string();
 }
 
@@ -417,17 +415,17 @@ std::string EditorEngine::pastePlainText(const std::string& utf8) {
     }
     flush();
     if (nodes.empty()) return "没有可粘贴的文本";
-    if (!edit_.pasteNodes(nodes)) return "粘贴失败：落点不接受这段内容";
+    if (!edit_session_.edit.pasteNodes(nodes)) return "粘贴失败：落点不接受这段内容";
     return std::string();
 }
 
 bool EditorEngine::deleteSelection() {
     // 选中的图片优先：剪切的后一半要走同一条路（复制认了它，删除也得认）。
-    if (image_sel_ != kInvalidNodeId && edit_.eraseAtom(image_sel_)) {
+    if (image_sel_ != kInvalidNodeId && edit_session_.edit.eraseAtom(image_sel_)) {
         clearImageSelection();
         return true;
     }
-    return edit_.deleteSelection();
+    return edit_session_.edit.deleteSelection();
 }
 
 /**
@@ -443,10 +441,12 @@ WatermarkSpec EditorEngine::watermark() const {
     return s != nullptr ? s->watermark : WatermarkSpec{};
 }
 
-bool EditorEngine::setWatermark(const WatermarkSpec& w) { return edit_.setWatermark(w); }
+bool EditorEngine::setWatermark(const WatermarkSpec& w) {
+    return edit_session_.edit.setWatermark(w);
+}
 
 bool EditorEngine::setWatermarkAndRender(const WatermarkSpec& w) {
-    if (!edit_.setWatermark(w)) return false;
+    if (!edit_session_.edit.setWatermark(w)) return false;
     // 水印不进断行，所以不重排：光栅签名里含它的摘要，下一次 present 会把所有页重光栅。
     repaint();
     return true;
@@ -471,7 +471,7 @@ std::string EditorEngine::pastePlainTextAndRender(const std::string& utf8) {
 bool EditorEngine::applyCharFormatAndRender(const CharFormat& patch) {
     if (!session_) return false;
     // 幂等：格式没变时命令层不提交，这里也不要重排 —— 撤销栈与画面都该一动不动。
-    if (!edit_.applyCharFormat(patch)) return false;
+    if (!edit_session_.edit.applyCharFormat(patch)) return false;
     relayout();
     repaintAfterEdit();
     return true;
@@ -479,7 +479,7 @@ bool EditorEngine::applyCharFormatAndRender(const CharFormat& patch) {
 
 bool EditorEngine::applyParaFormatAndRender(const ParaFormatPatch& patch) {
     if (!session_) return false;
-    if (!edit_.applyParaFormat(patch)) return false;
+    if (!edit_session_.edit.applyParaFormat(patch)) return false;
     relayout();
     repaintAfterEdit();
     return true;
@@ -490,7 +490,7 @@ std::string EditorEngine::charFormatAtJson(bool effective) const {
     if (effective) return effectiveFormatAtJson();
     // 键名与写入那条命令同一套，但尺寸给"磅数"而不是 Length 的文本形式 ——
     //   读与写对称，界面才不用解析两种表示。
-    const CharFormat m = edit_.charFormatAtCaret();
+    const CharFormat m = edit_session_.edit.charFormatAtCaret();
     nlohmann::ordered_json j = nlohmann::ordered_json::object();
     if (m.bold) j["b"] = *m.bold;
     if (m.italic) j["i"] = *m.italic;
@@ -605,7 +605,7 @@ std::string EditorEngine::effectiveFormatAtJson() const {
 
 std::string EditorEngine::paraFormatAtJson() const {
     if (!session_) return "{}";
-    const ParaFormatPatch p = edit_.paraFormatAtCaret();
+    const ParaFormatPatch p = edit_session_.edit.paraFormatAtCaret();
     nlohmann::ordered_json j = nlohmann::ordered_json::object();
     if (p.font_index) j["fi"] = *p.font_index;
     if (p.size && p.size->kind == LengthKind::Abs)
@@ -651,19 +651,21 @@ void EditorEngine::rebuildFromTree(const rev::BlockDamage* dmg) {
     edit_stats_.rebuild_reject = 0;
     const FlowVisibility vis = flowVisibility();
     const auto t_compile0 = Clock::now();
-    // 增量投影：blocks_full_ 既是上一轮的块流、也是这一轮的输出 —— 没变的块原地不动
+    // 增量投影：projection_.blocks_full 既是上一轮的块流、也是这一轮的输出 —— 没变的块原地不动
     //   （不重算、不拷贝），只有损伤区间那一段被新物化的块替换。
-    rev::Projection res = rev::project(document(), sheet_, rev::ViewParams{vis}, &blocks_full_,
-                                       proj_hist_.keys.empty() ? nullptr : &proj_hist_, dmg);
+    rev::Projection res =
+        rev::project(document(), sheet_, rev::ViewParams{vis}, &projection_.blocks_full,
+                     projection_.history.keys.empty() ? nullptr : &projection_.history, dmg);
     edit_stats_.rebuild_reused = res.reused;
-    proj_hist_.style_version = res.style_version;
-    proj_hist_.keys = std::move(res.keys);
-    block_src_.clear();
-    block_src_.reserve(proj_hist_.keys.size());
-    for (const rev::BlockKey& k : proj_hist_.keys) block_src_.push_back(k.source);
-    block_extents_ = std::move(res.extents);
-    tables_ = std::move(res.tables);
-    projection_slots_ = std::move(res.slots);
+    projection_.history.style_version = res.style_version;
+    projection_.history.keys = std::move(res.keys);
+    projection_.block_src.clear();
+    projection_.block_src.reserve(projection_.history.keys.size());
+    for (const rev::BlockKey& k : projection_.history.keys)
+        projection_.block_src.push_back(k.source);
+    projection_.block_extents = std::move(res.extents);
+    projection_.tables = std::move(res.tables);
+    projection_.slots = std::move(res.slots);
     {
         // 浮动图这一列变了就整篇重排：它影响的是"从这里往后的每一行"，
         //   而且 from→empty 那一档（从浮动改回行内）连增量起点都无从谈起。
@@ -672,7 +674,7 @@ void EditorEngine::rebuildFromTree(const rev::BlockDamage* dmg) {
         floats_ = std::move(next);
     }
     edit_stats_.rebuild_compile_ms = msSince(t_compile0);
-    structure_index_.control_spans = std::move(res.controls);
+    projection_.structure.control_spans = std::move(res.controls);
     finishRebuildFromTree(vis);
 }
 
@@ -686,83 +688,86 @@ void EditorEngine::finishRebuildFromTree(FlowVisibility vis) {
     const auto t_pos0 = Clock::now();
 
     // 光标与块起点是同一套坐标的两半，所以重建块起点时必须一起重算光标：光标存的是全局
-    //   流位置，而这个下标只有配上 block_flow_ 才读得出"段与段内位置"。基一换，光标的数字
+    //   流位置，而这个下标只有配上 projection_.block_flow 才读得出"段与段内位置"。基一换，光标的数字
     //   没变、含义却变了 —— 前面某一段变长之后，它会静默漂到相邻位置。
     //   重算按"段内位置"落基而不是保留绝对下标：光标此刻的语义是"停在这一段内容的这个流
     //   位置上"，段落内容变了它该跟着文本走。编辑之后真正的跟随由事务的位置映射负责，
     //   这条只保证"基换过之后读数仍然自洽"。
-    //   两个读数必须在覆盖 block_flow_ 之前取，assign 之后旧基就没了。
+    //   两个读数必须在覆盖 projection_.block_flow 之前取，assign 之后旧基就没了。
     //   选区落地之后 anchor 也要跟着落基：它现在是一个真位置，只落 focus 会把它收成空选区
     //   （症状是"Shift 扩展之后来一次重编译，选区就没了"）。
-    const int rebase_para = caret_.caretPara();
-    const int rebase_rel = caret_.caretRel();
-    const int rebase_anchor_para = caret_.paraForFlow(caret_.selection().anchor);
-    const int rebase_anchor_rel = caret_.relForFlow(caret_.selection().anchor);
+    const int rebase_para = edit_session_.caret.caretPara();
+    const int rebase_rel = edit_session_.caret.caretRel();
+    const int rebase_anchor_para =
+        edit_session_.caret.paraForFlow(edit_session_.caret.selection().anchor);
+    const int rebase_anchor_rel =
+        edit_session_.caret.relForFlow(edit_session_.caret.selection().anchor);
     // 绝对位置在这里由局部量累加出来：投影给的 span（本块几位）与 gap（前面那道边界几位）。
     //   没有"第二遍算法"要调和，也就没有两处 max —— 表格的格边界是 gap=2 这个事实，
     //   而不是"两个读数取较大值"得出的结论。
     buildBlockFlow();
     // 新基写完了才落基（见上面那段说明）。两端一起落。
-    caret_.rebaseSelection(rebase_anchor_para, rebase_anchor_rel, rebase_para, rebase_rel);
+    edit_session_.caret.rebaseSelection(rebase_anchor_para, rebase_anchor_rel, rebase_para,
+                                        rebase_rel);
 
     edit_stats_.rebuild_flowpos_ms = msSince(t_pos0);
     const auto t_copy0 = Clock::now();
     edit_stats_.rebuild_copy_ms = msSince(t_copy0);
     const auto t_ctl0 = Clock::now();
-    exportControls(structure_index_.control_spans);
+    exportControls(projection_.structure.control_spans);
     rebuildStructureIndex();
     edit_stats_.rebuild_controls_ms = msSince(t_ctl0);
 
     // 文档规模在产生处发布：它由这一轮的块流与控件集合决定，与"有没有呈现过"无关。
     //   挂在呈现上时，撤销之后不呈现就读到旧规模 —— 而这个读数正是宿主判断滚动条与
     //   页数的输入。段数按全量块流给：聚焦档下可见块更少，但它不是"文档有多少段"。
-    edit_stats_.total_paragraphs = static_cast<int>(blocks_full_.size());
+    edit_stats_.total_paragraphs = static_cast<int>(projection_.blocks_full.size());
     edit_stats_.doc_codepoints = documentCodepoints();
     edit_stats_.word_count = documentWordCount();
     edit_stats_.control_count = controls_.size();
 }
 
 void EditorEngine::buildBlockFlow() {
-    const size_t n = block_extents_.size();
-    block_flow_.assign(n, 0);
-    block_flow_span_.assign(n, 0);
+    const size_t n = projection_.block_extents.size();
+    projection_.block_flow.assign(n, 0);
+    projection_.block_flow_span.assign(n, 0);
     // gap 是"这一块之前那道界占几位"，所以先跨过去再记起点：普通段界一位（段落标记），
     //   表格格边界两位（出上一格 + 进这一格），正文第一段前面则是节边界。
     FlowPos cursor = 0;
     for (size_t i = 0; i < n; ++i) {
-        cursor += block_extents_[i].gap;
-        block_flow_[i] = cursor;
-        block_flow_span_[i] = block_extents_[i].span;
-        cursor += block_extents_[i].span;
+        cursor += projection_.block_extents[i].gap;
+        projection_.block_flow[i] = cursor;
+        projection_.block_flow_span[i] = projection_.block_extents[i].span;
+        cursor += projection_.block_extents[i].span;
     }
 }
 
-int EditorEngine::caretSide() const { return caret_.caretSide(); }
+int EditorEngine::caretSide() const { return edit_session_.caret.caretSide(); }
 
-int EditorEngine::caretFieldHint() const { return caret_.caretFieldHint(); }
+int EditorEngine::caretFieldHint() const { return edit_session_.caret.caretFieldHint(); }
 
 FlowPos EditorEngine::flowPosAtSide(int para, size_t cp_offset, int side) const {
-    return caret_.flowPosAtSide(para, cp_offset, side);
+    return edit_session_.caret.flowPosAtSide(para, cp_offset, side);
 }
 
 FlowPos EditorEngine::flowPosAt(int para, size_t cp_offset, int owner_hint) const {
-    return caret_.flowPosAt(para, cp_offset, owner_hint);
+    return edit_session_.caret.flowPosAt(para, cp_offset, owner_hint);
 }
 
 bool EditorEngine::flowToTextPos(FlowPos flow, TextPos* out) const {
-    return caret_.flowToTextPos(flow, out);
+    return edit_session_.caret.flowToTextPos(flow, out);
 }
 
 FlowPos EditorEngine::flowSize() const { return flow_ ? flow_->size() : 0; }
 
 FlowPos EditorEngine::blockFlowStart(int para) const {
-    if (para < 0 || para >= static_cast<int>(block_flow_.size())) return 0;
-    return block_flow_[static_cast<size_t>(para)];
+    if (para < 0 || para >= static_cast<int>(projection_.block_flow.size())) return 0;
+    return projection_.block_flow[static_cast<size_t>(para)];
 }
 
 int EditorEngine::blockFlowSpan(int para) const {
-    if (para < 0 || para >= static_cast<int>(block_flow_span_.size())) return 0;
-    return block_flow_span_[static_cast<size_t>(para)];
+    if (para < 0 || para >= static_cast<int>(projection_.block_flow_span.size())) return 0;
+    return projection_.block_flow_span[static_cast<size_t>(para)];
 }
 
 /**
@@ -809,39 +814,39 @@ void EditorEngine::exportControls(const std::vector<rev::ControlSpan>& spans) {
 void EditorEngine::refreshViews() {
     PositionView v;
     v.blocks = &blocks();
-    v.blocks_full = &blocks_full_;
-    v.block_flow = &block_flow_;
-    v.block_flow_span = &block_flow_span_;
+    v.blocks_full = &projection_.blocks_full;
+    v.block_flow = &projection_.block_flow;
+    v.block_flow_span = &projection_.block_flow_span;
     v.flow = &flow_;
     v.controls = &controls_;
     v.control_node_ids = &control_node_ids_;
-    v.control_index = &structure_index_.controls;
-    v.structure = &structure_index_;
+    v.control_index = &projection_.structure.controls;
+    v.structure = &projection_.structure;
     v.owner_index = &owner_index_;
-    v.layout = &layout_;
-    caret_.setView(v);
-    control_geometry_.bind(&controls_, &layout_, &owner_index_);
-    caret_.setCaretWidthPt(cfg_.caret_width_pt);
+    v.layout = &layout_service_.layout;
+    edit_session_.caret.setView(v);
+    control_geometry_.bind(&controls_, &layout_service_.layout, &owner_index_);
+    edit_session_.caret.setCaretWidthPt(cfg_.caret_width_pt);
 
     EditView e;
     e.host = this;
     e.doc = &document();
-    e.caret = &caret_;
+    e.caret = &edit_session_.caret;
     e.flow = &flow_;
     e.blocks = &blocks();
-    e.blocks_full = &blocks_full_;
-    e.block_flow = &block_flow_;
-    e.block_flow_span = &block_flow_span_;
-    e.block_src = &block_src_;
-    e.tables = &tables_;
+    e.blocks_full = &projection_.blocks_full;
+    e.block_flow = &projection_.block_flow;
+    e.block_flow_span = &projection_.block_flow_span;
+    e.block_src = &projection_.block_src;
+    e.tables = &projection_.tables;
     e.controls = &controls_;
-    e.structure = &structure_index_;
+    e.structure = &projection_.structure;
     e.control_node_ids = &control_node_ids_;
-    e.control_index = &structure_index_.controls;
+    e.control_index = &projection_.structure.controls;
     e.mode = &mode_;
     e.tab_spaces = &cfg_.tab_spaces;
     e.blocked_edits = &blocked_edits_;
-    edit_.setView(e);
+    edit_session_.edit.setView(e);
 }
 
 /**
@@ -855,32 +860,22 @@ bool EditorEngine::commitSteps(std::vector<Step> steps, int dirty_para, Range se
     if (!loaded_ || !session_) return false;
     // 旧修订与旧产物一一对应：投影复用要按它们的差算损伤区间。Doc 是不可变的，
     //   拷贝只是一个引用计数（未改的子树与新的那份共享）。
-    const rev::Doc before = session_->doc();
     const FlowVisibility vis = flowVisibility();
-    const rev::Applied r = session_->applySteps(steps, vis, merge);
-    if (!r.ok) return false;
-    if (!r.changed) return true;  // 什么都没改：不占撤销栈，也不白跑一次重建
-    const rev::Damage dmg = rev::damage(before, session_->doc(), vis);
-    recordSelection(selection_before, selection_after);
+    const DocumentSession::CommitOutcome outcome =
+        session_.commitSteps(steps, vis, merge,
+                             rev::SelectionSnapshot{static_cast<int>(selection_before.anchor),
+                                                    static_cast<int>(selection_before.focus)},
+                             rev::SelectionSnapshot{static_cast<int>(selection_after.anchor),
+                                                    static_cast<int>(selection_after.focus)});
+    if (!outcome.applied.ok) return false;
+    if (!outcome.applied.changed) return true;  // 什么都没改：不占撤销栈，也不白跑一次重建
+    const rev::Damage& dmg = outcome.damage;
     rebuildFromTree(&dmg.range);
     // 起点取两者更早的那个：dirty_para 是命令层按编辑计划算的落点，damage.lo 是内容上
     //   第一处真实差异 —— 计划可能比差异更早（保守），反过来不该发生，取小就是安全的。
     //   右端只有损伤区间知道，交给后缀复用当"被换掉几段"。
     markLayoutDirtyRange(std::min(dirty_para, dmg.range.lo), dmg.range.hi);
     return true;
-}
-
-void EditorEngine::recordSelection(Range before, Range after) {
-    // 分支之后原先那条"未来"已经不成立：截断到当前位置再压新的。
-    if (sel_pos_ < sel_history_.size()) sel_history_.resize(sel_pos_);
-    sel_history_.push_back(SelectionRecord{before, after});
-    ++sel_pos_;
-    const int limit = undoLimit();
-    if (static_cast<int>(sel_history_.size()) > limit) {
-        const size_t drop = sel_history_.size() - static_cast<size_t>(limit);
-        sel_history_.erase(sel_history_.begin(), sel_history_.begin() + drop);
-        sel_pos_ = sel_pos_ >= drop ? sel_pos_ - drop : 0;
-    }
 }
 
 bool EditorEngine::undo() {
@@ -890,17 +885,14 @@ bool EditorEngine::undo() {
     //   那一步会清掉图片选中，所以这里先记下、最后一处放回去。
     const NodeId image_before = image_sel_;
     clearImageResizePreview();
-    const rev::Doc before = session_->doc();
-    if (!session_->undo()) return false;
-    const rev::Damage dmg = rev::damage(before, session_->doc(), flowVisibility());
+    rev::SelectionSnapshot restored_selection;
+    rev::Damage dmg;
+    if (!session_.undo(&restored_selection, &dmg, flowVisibility())) return false;
     rebuildFromTree(&dmg.range);
     // 撤销改到哪一段由损伤区间回答：两份修订一减就是它，不必整篇重排。
     markLayoutDirtyForDamage(dmg.range);
     // 恢复的是整个区间，不是只看焦点端：撤销前那一对快照本来就是 Range。
-    if (sel_pos_ > 0 && sel_pos_ <= sel_history_.size()) {
-        --sel_pos_;
-        setSelection(sel_history_[sel_pos_].before);
-    }
+    setSelection(Range{restored_selection.anchor, restored_selection.focus});
     restoreImageSelection(image_before);
     // 撤销可能把"有没有控件"整体改掉（撤销删掉最后一个控件、或把只读控件撤回来），
     //   那样占位集合整个翻转，而损伤区间只报块内容 —— 计划变了就整体重排。
@@ -913,15 +905,12 @@ bool EditorEngine::redo() {
     const int plan_before = bracketPlanId();
     const NodeId image_before = image_sel_;
     clearImageResizePreview();
-    const rev::Doc before = session_->doc();
-    if (!session_->redo()) return false;
-    const rev::Damage dmg = rev::damage(before, session_->doc(), flowVisibility());
+    rev::SelectionSnapshot restored_selection;
+    rev::Damage dmg;
+    if (!session_.redo(&restored_selection, &dmg, flowVisibility())) return false;
     rebuildFromTree(&dmg.range);
     markLayoutDirtyForDamage(dmg.range);
-    if (sel_pos_ < sel_history_.size()) {
-        setSelection(sel_history_[sel_pos_].after);
-        ++sel_pos_;
-    }
+    setSelection(Range{restored_selection.anchor, restored_selection.focus});
     restoreImageSelection(image_before);
     if (bracketPlanId() != plan_before) markLayoutDirtyForBrackets();
     return true;
@@ -980,7 +969,7 @@ static bool isSpaceCodepoint(uint32_t cp) {
 size_t EditorEngine::documentWordCount() const {
     size_t n = 0;
     // 与 documentCodepoints 同一条口径：按全量块流数，不受聚焦档的可见块影响。
-    for (const BlockSpec& b : blocks_full_) {
+    for (const BlockSpec& b : projection_.blocks_full) {
         for (const uint32_t cp : b.cp_text) {
             if (!isSpaceCodepoint(cp)) ++n;
         }
@@ -992,7 +981,7 @@ size_t EditorEngine::documentCodepoints() const {
     size_t n = 0;
     // 按全量块流数：这是文档的码点数，不是"当前可见的码点数"。聚焦档下 blocks()
     //   是一份筛过的副本，用它会让同一个文档在有、无聚焦时给出两个规模。
-    for (const BlockSpec& b : blocks_full_) n += b.cp_text.size();
+    for (const BlockSpec& b : projection_.blocks_full) n += b.cp_text.size();
     return n;
 }
 
@@ -1000,10 +989,10 @@ size_t EditorEngine::documentCodepoints() const {
  * 光标：位置设置、字素簇吸附与光标矩形查询。
  */
 
-bool EditorEngine::caretRectPt(Rect* out) const { return caret_.caretRectPt(out); }
+bool EditorEngine::caretRectPt(Rect* out) const { return edit_session_.caret.caretRectPt(out); }
 
 bool EditorEngine::caretRectFor(const Position& pos, int* page_out, Rect* out) const {
-    return caret_.caretRectFor(pos, page_out, out);
+    return edit_session_.caret.caretRectFor(pos, page_out, out);
 }
 
 /**
@@ -1015,7 +1004,7 @@ Rect EditorEngine::caretRectPx(int* page) const {
     int p = 0;
     Rect r{};
     if (page != nullptr) *page = -1;
-    if (!caret_.caretRectFor(caret(), &p, &r)) return Rect{};
+    if (!edit_session_.caret.caretRectFor(caret(), &p, &r)) return Rect{};
     const float zoom = cfg_.zoom;
     Rect px;
     px.x = std::floor(r.x * zoom);
@@ -1026,12 +1015,12 @@ Rect EditorEngine::caretRectPx(int* page) const {
     return px;
 }
 
-bool EditorEngine::caretVertical() const { return caret_.caretVertical(); }
+bool EditorEngine::caretVertical() const { return edit_session_.caret.caretVertical(); }
 
-bool EditorEngine::caretBlockReversed() const { return caret_.caretBlockReversed(); }
+bool EditorEngine::caretBlockReversed() const { return edit_session_.caret.caretBlockReversed(); }
 
 std::vector<EditorEngine::PageRect> EditorEngine::selectionRects() const {
-    return caret_.selectionRects();
+    return edit_session_.caret.selectionRects();
 }
 
 /**
@@ -1044,7 +1033,7 @@ std::vector<EditorEngine::PageRect> EditorEngine::selectionRectsVisible() const 
 
 std::vector<EditorEngine::PageRect> EditorEngine::selectionRectsIn(int first_page,
                                                                    int count) const {
-    return caret_.selectionRectsIn(first_page, count);
+    return edit_session_.caret.selectionRectsIn(first_page, count);
 }
 
 /**
@@ -1073,9 +1062,9 @@ std::vector<PageRect> EditorEngine::selectionRectsPxIn(int first_page, int count
     return out;
 }
 
-TextPos EditorEngine::caret() const { return caret_.caret(); }
+TextPos EditorEngine::caret() const { return edit_session_.caret.caret(); }
 
-void EditorEngine::setCaretByText(TextPos p) { caret_.setCaretByText(p); }
+void EditorEngine::setCaretByText(TextPos p) { edit_session_.caret.setCaretByText(p); }
 
 /**
  * 把"文本坐标 + 侧别"投影成 rel 并摆好，含重排。
@@ -1092,9 +1081,9 @@ void EditorEngine::projectCaret(int para, size_t offset, int side, bool extend, 
     //   "按删除键删的是哪一段"就没有答案。
     image_sel_ = kInvalidNodeId;
     const int plan_before = bracketPlanId();
-    caret_.placeCaret(para, offset, side, extend, line_aff);
+    edit_session_.caret.placeCaret(para, offset, side, extend, line_aff);
     relayoutIfBracketPlanChanged(plan_before);
-    caret_.placeCaret(para, offset, side, extend, line_aff);
+    edit_session_.caret.placeCaret(para, offset, side, extend, line_aff);
     // 落点换了，粒度跟着重算 —— 扩展跨过格边界就整格，回到同一格就退回文字。
     //   定位（非扩展）不吸附：一次点击落在字上是文字光标，清空由 placeCaret 自己做。
     if (extend) syncCellSelection();
@@ -1107,22 +1096,22 @@ void EditorEngine::projectCaret(int para, size_t offset, int side, bool extend, 
  * 就永远判得出来是同一格 —— 用户把鼠标拖回来时选区不会退回文字那一支。
  */
 void EditorEngine::syncCellSelection() {
-    const Range sel = caret_.rawSelection();
+    const Range sel = edit_session_.caret.rawSelection();
     if (sel.empty()) {
-        caret_.clearCellRange();
+        edit_session_.caret.clearCellRange();
         return;
     }
     const LayoutTable* ta = nullptr;
     const LayoutTable* tf = nullptr;
-    const LayoutCell* ca = layoutCellAt(caret_.paraForFlow(sel.anchor), &ta);
-    const LayoutCell* cf = layoutCellAt(caret_.paraForFlow(sel.focus), &tf);
+    const LayoutCell* ca = layoutCellAt(edit_session_.caret.paraForFlow(sel.anchor), &ta);
+    const LayoutCell* cf = layoutCellAt(edit_session_.caret.paraForFlow(sel.focus), &tf);
     if (ca == nullptr || cf == nullptr || ta != tf) {
-        caret_.clearCellRange();
+        edit_session_.caret.clearCellRange();
         return;
     }
     // 同一个格：两端区间一模一样（格的区间本身就是这两个端点）。
     if (ca == cf) {
-        caret_.clearCellRange();
+        edit_session_.caret.clearCellRange();
         return;
     }
     // 矩形包络：行取两端格覆盖的行，列取两端格覆盖的列。合并格（跨度大于一）按它盖住的
@@ -1141,21 +1130,21 @@ void EditorEngine::syncCellSelection() {
         if (cr1 < r0 || c.row > r1 || cc1 < c0 || c.cell > c1) continue;
         if (c.block_count <= 0) continue;
         const int last_b = c.first_block + c.block_count - 1;
-        if (c.first_block < 0 || last_b >= static_cast<int>(block_flow_.size()) ||
-            last_b >= static_cast<int>(block_flow_span_.size()))
+        if (c.first_block < 0 || last_b >= static_cast<int>(projection_.block_flow.size()) ||
+            last_b >= static_cast<int>(projection_.block_flow_span.size()))
             continue;
         cells.push_back(CaretResolver::CellBlocks{c.first_block, c.block_count});
         if (&c == cf)
-            caret_flow = block_flow_[static_cast<size_t>(last_b)] +
-                         block_flow_span_[static_cast<size_t>(last_b)];
+            caret_flow = projection_.block_flow[static_cast<size_t>(last_b)] +
+                         projection_.block_flow_span[static_cast<size_t>(last_b)];
     }
     // 少于两格说明两端的格在矩形里对不上（表格结构刚变过），眼下按文字选区算更安全。
     if (cells.size() < 2) {
-        caret_.clearCellRange();
+        edit_session_.caret.clearCellRange();
         return;
     }
     // 插入点钉在焦点那一格的末尾（见 setCellBlocks 的 caret_flow）。
-    caret_.setCellBlocks(std::move(cells), caret_flow);
+    edit_session_.caret.setCellBlocks(std::move(cells), caret_flow);
 }
 
 void EditorEngine::setCaret(int para, size_t offset) {
@@ -1235,7 +1224,7 @@ void EditorEngine::applyDragAnchor() {
     const FlowPos anchor = drag_anchor_;
     drag_anchor_ = -1;
     if (!barrierAtFlow(anchor)) return;
-    caret_.setAnchorAtFlow(anchor);
+    edit_session_.caret.setAnchorAtFlow(anchor);
 }
 
 /**
@@ -1250,22 +1239,22 @@ void EditorEngine::setCaretAt(int para, size_t offset, int field) {
     int p = para;
     if (p < 0) p = 0;
     if (p >= static_cast<int>(blocks().size())) p = static_cast<int>(blocks().size()) - 1;
-    const size_t at = caret_.snapToCluster(p, offset);
-    setCaretAtSide(p, at, caret_.sideFromHint(p, at, field));
+    const size_t at = edit_session_.caret.snapToCluster(p, offset);
+    setCaretAtSide(p, at, edit_session_.caret.sideFromHint(p, at, field));
 }
 
-bool EditorEngine::setCaretAtFlow(FlowPos flow) { return caret_.setCaretAtFlow(flow); }
+bool EditorEngine::setCaretAtFlow(FlowPos flow) { return edit_session_.caret.setCaretAtFlow(flow); }
 
 bool EditorEngine::setCaretPosition(const Position& p) {
     image_sel_ = kInvalidNodeId;
-    return caret_.setPosition(p);
+    return edit_session_.caret.setPosition(p);
 }
 
 void EditorEngine::setCaretAtPosition(const Position& p, bool extend) {
     if (!loaded_ || !flow_.has_value()) return;
     TextPos t{};
     if (!flowToTextPos(p.flow, &t)) return;
-    const int side = caret_.sideForFlow(p.flow);
+    const int side = edit_session_.caret.sideForFlow(p.flow);
     if (extend) {
         setFocusAtSideLine(t.para, t.offset, side, p.affinity);
     } else {
@@ -1273,26 +1262,28 @@ void EditorEngine::setCaretAtPosition(const Position& p, bool extend) {
     }
 }
 
-TextSelection EditorEngine::selectionPositions() const { return caret_.selectionPositions(); }
+TextSelection EditorEngine::selectionPositions() const {
+    return edit_session_.caret.selectionPositions();
+}
 
 bool EditorEngine::setSelectionPositions(const TextSelection& s) {
     image_sel_ = kInvalidNodeId;
-    return caret_.setSelectionPositions(s);
+    return edit_session_.caret.setSelectionPositions(s);
 }
 
 bool EditorEngine::setSelection(Range r) {
     image_sel_ = kInvalidNodeId;
-    return caret_.setSelection(r);
+    return edit_session_.caret.setSelection(r);
 }
 
 void EditorEngine::clearSelection() {
     image_sel_ = kInvalidNodeId;
-    caret_.clearSelection();
+    edit_session_.caret.clearSelection();
 }
 
 bool EditorEngine::selectAll() {
     image_sel_ = kInvalidNodeId;
-    return caret_.selectAll();
+    return edit_session_.caret.selectAll();
 }
 
 /**
@@ -1304,23 +1295,24 @@ bool EditorEngine::selectCellAtPara(int para) {
     if (c == nullptr || c->block_count <= 0) return false;
     const int first = c->first_block;
     const int last_b = first + c->block_count - 1;
-    if (first < 0 || last_b >= static_cast<int>(block_flow_.size()) ||
-        last_b >= static_cast<int>(block_flow_span_.size()))
+    if (first < 0 || last_b >= static_cast<int>(projection_.block_flow.size()) ||
+        last_b >= static_cast<int>(projection_.block_flow_span.size()))
         return false;
     // 插入点钉在这一格的末尾（整格选区的光标不跟鼠标走）。
-    const FlowPos prev_lo = block_flow_[static_cast<size_t>(first)];
-    const FlowPos caret_flow =
-        block_flow_[static_cast<size_t>(last_b)] + block_flow_span_[static_cast<size_t>(last_b)];
+    const FlowPos prev_lo = projection_.block_flow[static_cast<size_t>(first)];
+    const FlowPos caret_flow = projection_.block_flow[static_cast<size_t>(last_b)] +
+                               projection_.block_flow_span[static_cast<size_t>(last_b)];
     // 离散动作（单击边距带、三击）要把两端也落到这一格上：拖选那条路不能这么做
     //   （锚点要留着，往回拖才退得回文字选区），所以吸附由这里做而不是 setCellBlocks。
-    if (!caret_.setSelection(Range{prev_lo, caret_flow})) return false;
-    return caret_.setCellBlocks({CaretResolver::CellBlocks{first, c->block_count}}, caret_flow);
+    if (!edit_session_.caret.setSelection(Range{prev_lo, caret_flow})) return false;
+    return edit_session_.caret.setCellBlocks({CaretResolver::CellBlocks{first, c->block_count}},
+                                             caret_flow);
 }
 
-rev::EditCheck EditorEngine::policyAt(TextPos p) const { return edit_.policyAt(p); }
+rev::EditCheck EditorEngine::policyAt(TextPos p) const { return edit_session_.edit.policyAt(p); }
 
 rev::EditCheck EditorEngine::policyErase(TextPos a, TextPos b) const {
-    return edit_.policyErase(a, b);
+    return edit_session_.edit.policyErase(a, b);
 }
 
 /**
@@ -1331,19 +1323,19 @@ FlowPos EditorEngine::caretFlowPos() const {
     return flowPosAtSide(p.para, p.offset, caretSide());
 }
 
-Position EditorEngine::caretPosition() const { return caret_.position(); }
+Position EditorEngine::caretPosition() const { return edit_session_.caret.position(); }
 
 bool EditorEngine::controlContentSpan(int index, FlowPos* lo, FlowPos* hi) const {
     if (!flow_.has_value()) return false;
-    if (!structure_index_.controls.empty())
-        return structure_index_.controls.contentSpan(index, lo, hi);
+    if (!projection_.structure.controls.empty())
+        return projection_.structure.controls.contentSpan(index, lo, hi);
     if (index < 0 || index >= static_cast<int>(control_node_ids_.size())) return false;
     return controlContentSpanOf(*flow_, control_node_ids_[static_cast<size_t>(index)], lo, hi);
 }
 
 int EditorEngine::innermostControlAt(FlowPos f) const {
     if (!flow_.has_value()) return -1;
-    if (!structure_index_.controls.empty()) return structure_index_.controls.innermost(f);
+    if (!projection_.structure.controls.empty()) return projection_.structure.controls.innermost(f);
     return innermostControlAtFlow(*flow_, control_node_ids_, f);
 }
 
@@ -1390,8 +1382,8 @@ bool EditorEngine::insertableAtFlow(FlowPos f) const {
     for (int k = inner; k >= 0;) {
         if (controls_.at(k).read_only) return false;
         if (!controlContentEditable(k)) return false;
-        k = !structure_index_.controls.empty() ? structure_index_.controls.parentOf(k)
-                                               : controls_.at(k).parent;
+        k = !projection_.structure.controls.empty() ? projection_.structure.controls.parentOf(k)
+                                                    : controls_.at(k).parent;
     }
     return true;
 }
@@ -1404,7 +1396,7 @@ bool EditorEngine::insertableAtFlow(FlowPos f) const {
  *   一个都不认。位置本身不被改写，见 confineCaret。
  *
  * 判据不参数化任何块流：空文档的 caretRectPx 本来就给 0 宽，画不出来 —— 而块流有两份
- *   （blocks_full_ 与只筛过括号的 blocks_），从其中一份判"文档有没有内容"会在括号不显示时
+ *   （projection_.blocks_full 与只筛过括号的 projection_.blocks），从其中一份判"文档有没有内容"会在括号不显示时
  *   把光标整条判掉（见 TRAPS 228）。
  */
 bool EditorEngine::caretInsertable() const {
@@ -1420,7 +1412,7 @@ bool EditorEngine::caretInsertable() const {
  *   正好压住右中把手 —— 那一段既看不清也点不准。
  */
 bool EditorEngine::caretShown() const {
-    return caret_visible_ && image_sel_ == kInvalidNodeId && caretInsertable();
+    return edit_session_.caret_visible && image_sel_ == kInvalidNodeId && caretInsertable();
 }
 
 /**
@@ -1457,7 +1449,7 @@ bool EditorEngine::confineCaret(FlowPos before, CaretConfine why) {
         } else {
             target = (now < before) ? first : end;
         }
-        if (!caret_.setCaretAtFlow(target)) return false;
+        if (!edit_session_.caret.setCaretAtFlow(target)) return false;
         return target != before;
     }
     if (caretInsertable()) return now != before;
@@ -1482,7 +1474,7 @@ bool EditorEngine::confineCaret(FlowPos before, CaretConfine why) {
         // 这一步之前就不在任何控件里（停在正文）：整下不动 —— 表单模式下正文没有插入点，
         //   方向键不该把它带进去。
         if (now == before) return false;
-        if (!caret_.setCaretAtFlow(before)) return false;
+        if (!edit_session_.caret.setCaretAtFlow(before)) return false;
         return false;
     }
     FlowPos target = now;
@@ -1491,7 +1483,7 @@ bool EditorEngine::confineCaret(FlowPos before, CaretConfine why) {
     // 夹出来的落点仍可能不可插入：区间中间嵌着一层只读控件时，夹回外层区间还是落在只读的
     //   内层里。那种情形整下不动 —— 一步之前的那个位置一定是可插入的。
     if (!insertableAtFlow(target)) target = before;
-    if (!caret_.setCaretAtFlow(target)) return false;
+    if (!edit_session_.caret.setCaretAtFlow(target)) return false;
     return target != before;
 }
 
@@ -1499,7 +1491,7 @@ bool EditorEngine::moveCaretBy(int dcp, bool extend) {
     // 移动本身在解析器里；"换占位集合要重排"归引擎 —— 聚焦档下显示哪些括号由光标位置定。
     const int plan_before = bracketPlanId();
     const FlowPos before = caretFlowPos();
-    if (!caret_.moveCaretBy(dcp, extend)) return false;
+    if (!edit_session_.caret.moveCaretBy(dcp, extend)) return false;
     // 扩展选区不受落点限制（选区可以盖住只读区），单步移动要收进可插入位置。
     const bool moved = extend ? true : confineCaret(before);
     relayoutIfBracketPlanChanged(plan_before);
@@ -1509,28 +1501,28 @@ bool EditorEngine::moveCaretBy(int dcp, bool extend) {
 bool EditorEngine::moveCaretToLineStart(bool extend) {
     const int plan_before = bracketPlanId();
     const FlowPos before = caretFlowPos();
-    if (!caret_.moveCaretToLineStart(extend)) return false;
+    if (!edit_session_.caret.moveCaretToLineStart(extend)) return false;
     if (!extend) confineCaret(before);
     relayoutIfBracketPlanChanged(plan_before);
     // 行首/行尾是 (偏移, 侧别) 投影出来的，投影要吸附簇 ⇒ 重排换了簇表就得再投影一次。
-    caret_.reprojectCaret(extend);
+    edit_session_.caret.reprojectCaret(extend);
     return true;
 }
 
 bool EditorEngine::moveCaretToLineEnd(bool extend) {
     const int plan_before = bracketPlanId();
     const FlowPos before = caretFlowPos();
-    if (!caret_.moveCaretToLineEnd(extend)) return false;
+    if (!edit_session_.caret.moveCaretToLineEnd(extend)) return false;
     if (!extend) confineCaret(before);
     relayoutIfBracketPlanChanged(plan_before);
-    caret_.reprojectCaret(extend);
+    edit_session_.caret.reprojectCaret(extend);
     return true;
 }
 
 bool EditorEngine::moveCaretToDocStart(bool extend) {
     const int plan_before = bracketPlanId();
     const FlowPos before = caretFlowPos();
-    if (!caret_.moveCaretToDocStart(extend)) return false;
+    if (!edit_session_.caret.moveCaretToDocStart(extend)) return false;
     if (!extend) confineCaret(before);
     relayoutIfBracketPlanChanged(plan_before);
     return true;
@@ -1539,7 +1531,7 @@ bool EditorEngine::moveCaretToDocStart(bool extend) {
 bool EditorEngine::moveCaretToDocEnd(bool extend) {
     const int plan_before = bracketPlanId();
     const FlowPos before = caretFlowPos();
-    if (!caret_.moveCaretToDocEnd(extend)) return false;
+    if (!edit_session_.caret.moveCaretToDocEnd(extend)) return false;
     if (!extend) confineCaret(before);
     relayoutIfBracketPlanChanged(plan_before);
     return true;
@@ -1548,24 +1540,24 @@ bool EditorEngine::moveCaretToDocEnd(bool extend) {
 bool EditorEngine::moveCaretVertical(int dir, bool extend) {
     const int plan_before = bracketPlanId();
     const FlowPos before = caretFlowPos();
-    if (!caret_.moveCaretVertical(dir, extend)) return false;
+    if (!edit_session_.caret.moveCaretVertical(dir, extend)) return false;
     if (!extend) confineCaret(before);
     relayoutIfBracketPlanChanged(plan_before);
     return true;
 }
 
-void EditorEngine::showCaret(bool on) { caret_visible_ = on; }
+void EditorEngine::showCaret(bool on) { edit_session_.caret_visible = on; }
 
 bool EditorEngine::insertCodepoints(int para, size_t offset, const std::vector<uint32_t>& cps) {
-    return edit_.insertCodepoints(para, offset, cps);
+    return edit_session_.edit.insertCodepoints(para, offset, cps);
 }
 
 bool EditorEngine::insertCodepoint(int para, size_t offset, uint32_t cp) {
-    return edit_.insertCodepoint(para, offset, cp);
+    return edit_session_.edit.insertCodepoint(para, offset, cp);
 }
 
 bool EditorEngine::insertTextUtf8(int para, size_t offset, const std::string& utf8) {
-    return edit_.insertTextUtf8(para, offset, utf8);
+    return edit_session_.edit.insertTextUtf8(para, offset, utf8);
 }
 
 bool EditorEngine::insertTextAndRender(int para, size_t offset, const std::string& utf8) {
@@ -1575,31 +1567,35 @@ bool EditorEngine::insertTextAndRender(int para, size_t offset, const std::strin
     return true;
 }
 
-bool EditorEngine::typeTextUtf8(const std::string& utf8) { return edit_.typeTextUtf8(utf8); }
+bool EditorEngine::typeTextUtf8(const std::string& utf8) {
+    return edit_session_.edit.typeTextUtf8(utf8);
+}
 
 bool EditorEngine::backspace() {
     // 选中的图片就是这一下的目标：点图片不落光标，所以"顺着光标删左边那一格"删的是
     //   别的正文。选中的东西是明确的编辑对象，删除先认它。
-    if (image_sel_ != kInvalidNodeId && edit_.eraseAtom(image_sel_)) {
+    if (image_sel_ != kInvalidNodeId && edit_session_.edit.eraseAtom(image_sel_)) {
         clearImageSelection();
         return true;
     }
-    return edit_.backspace();
+    return edit_session_.edit.backspace();
 }
 
 bool EditorEngine::deleteForward() {
-    if (image_sel_ != kInvalidNodeId && edit_.eraseAtom(image_sel_)) {
+    if (image_sel_ != kInvalidNodeId && edit_session_.edit.eraseAtom(image_sel_)) {
         clearImageSelection();
         return true;
     }
-    return edit_.deleteForward();
+    return edit_session_.edit.deleteForward();
 }
 
-bool EditorEngine::splitParagraph() { return edit_.splitParagraph(); }
+bool EditorEngine::splitParagraph() { return edit_session_.edit.splitParagraph(); }
 
-bool EditorEngine::mergeWithPreviousParagraph() { return edit_.mergeWithPreviousParagraph(); }
+bool EditorEngine::mergeWithPreviousParagraph() {
+    return edit_session_.edit.mergeWithPreviousParagraph();
+}
 
-bool EditorEngine::mergeWithNextParagraph() { return edit_.mergeWithNextParagraph(); }
+bool EditorEngine::mergeWithNextParagraph() { return edit_session_.edit.mergeWithNextParagraph(); }
 
 bool EditorEngine::typeTextAndRender(const std::string& utf8) {
     if (!typeTextUtf8(utf8)) return false;
@@ -1663,7 +1659,7 @@ void EditorEngine::setEditMode(EditMode m) {
     // 编辑标记只读不画，而只读未必改内容（隐藏字段一个都没有时页面指纹不动）。
     //   所以照"光栅签名是唯一判据"那条（TRAPS 128）重算一次：该作废就作废。
     {
-        pages_.setSignature(rasterSignatureNow());
+        render_.pages.setSignature(rasterSignatureNow());
     }
 
     // 切模式要重编译，而且整篇重排：隐藏控件的可见性口径随模式变（文档模式是设计态、
@@ -1689,12 +1685,12 @@ int EditorEngine::controlAtPt(float x_pt_doc, float y_pt_doc) const {
 bool EditorEngine::removeControl(int index, bool keep_content, FlowPos caret_before) {
     // "有没有可编辑的东西"是引擎的装载状态，命令层只管"编辑怎么做" —— 这一条留在门面。
     if (!loaded_) return false;
-    return edit_.removeControl(index, keep_content, caret_before);
+    return edit_session_.edit.removeControl(index, keep_content, caret_before);
 }
 
 bool EditorEngine::setControlProp(int index, ControlProp prop, bool value) {
     if (!loaded_) return false;  // 没装载过文档：没有控件可改
-    const EditCommand::PropResult r = edit_.setControlProp(index, prop, value);
+    const EditCommand::PropResult r = edit_session_.edit.setControlProp(index, prop, value);
     if (r == EditCommand::PropResult::Failed) return false;
     // hidden 改的是呈现态的流结构（整棵摘除），影响面不可定位 —— 整篇排版作废。
     if (r == EditCommand::PropResult::Structural) markAllLayoutDirty();
@@ -1710,7 +1706,7 @@ bool EditorEngine::removeControlAndRender(int index, bool keep_content) {
 
 bool EditorEngine::setControlPropAndRender(int index, ControlProp prop, bool value) {
     if (!loaded_) return false;
-    const EditCommand::PropResult r = edit_.setControlProp(index, prop, value);
+    const EditCommand::PropResult r = edit_session_.edit.setControlProp(index, prop, value);
     if (r == EditCommand::PropResult::Failed) return false;
     if (r == EditCommand::PropResult::Structural) markAllLayoutDirty();
     // 幂等（值没变）时状态与呈现一个字都没动 —— 跟着白跑一次重排重绘没有意义，
@@ -1765,9 +1761,9 @@ bool EditorEngine::focusControl(bool forward) {
     return true;
 }
 
-bool EditorEngine::indent() { return edit_.indent(); }
+bool EditorEngine::indent() { return edit_session_.edit.indent(); }
 
-bool EditorEngine::outdent() { return edit_.outdent(); }
+bool EditorEngine::outdent() { return edit_session_.edit.outdent(); }
 
 bool EditorEngine::indentAndRender() {
     if (!indent()) return false;
@@ -1905,33 +1901,34 @@ bool EditorEngine::cellFlowRangeAt(int para, FlowPos* lo, FlowPos* hi) const {
 }
 
 void EditorEngine::rebuildStructureIndex() {
-    if (flow_.has_value()) structure_index_.buildControls(*flow_, control_node_ids_);
-    structure_index_.buildCells(tables_, blocks_full_.size());
-    structure_index_.buildSlots(projection_slots_, blocks_full_.size());
+    if (flow_.has_value()) projection_.structure.buildControls(*flow_, control_node_ids_);
+    projection_.structure.buildCells(projection_.tables, projection_.blocks_full.size());
+    projection_.structure.buildSlots(projection_.slots, projection_.blocks_full.size());
 }
 
 bool EditorEngine::structureIndexValid() const {
-    const int blocks = static_cast<int>(blocks_full_.size());
-    if (static_cast<int>(structure_index_.cells.size()) != blocks) return false;
-    if (structure_index_.table_spans.size() != tables_.size()) return false;
-    if (static_cast<int>(structure_index_.slots.size()) != blocks) return false;
-    for (const CellRef& ref : structure_index_.cells) {
+    const int blocks = static_cast<int>(projection_.blocks_full.size());
+    if (static_cast<int>(projection_.structure.cells.size()) != blocks) return false;
+    if (projection_.structure.table_spans.size() != projection_.tables.size()) return false;
+    if (static_cast<int>(projection_.structure.slots.size()) != blocks) return false;
+    for (const CellRef& ref : projection_.structure.cells) {
         if (ref.table < 0 && ref.cell < 0) continue;
-        if (ref.table < 0 || ref.table >= static_cast<int>(tables_.size())) return false;
+        if (ref.table < 0 || ref.table >= static_cast<int>(projection_.tables.size())) return false;
         if (ref.cell < 0 ||
-            ref.cell >= static_cast<int>(tables_[static_cast<size_t>(ref.table)].cells.size()))
+            ref.cell >=
+                static_cast<int>(projection_.tables[static_cast<size_t>(ref.table)].cells.size()))
             return false;
     }
     int cell_cursor = 0;
-    for (size_t ti = 0; ti < structure_index_.table_spans.size(); ++ti) {
-        const TableSpan& span = structure_index_.table_spans[ti];
+    for (size_t ti = 0; ti < projection_.structure.table_spans.size(); ++ti) {
+        const TableSpan& span = projection_.structure.table_spans[ti];
         if (span.first_cell < 0 || span.first_cell + span.cell_count >
-                                       static_cast<int>(structure_index_.cell_extents.size()))
+                                       static_cast<int>(projection_.structure.cell_extents.size()))
             return false;
         if (span.first_block < 0 && span.last_block >= 0) return false;
         if (span.first_block >= 0 && span.last_block >= blocks) return false;
         if (span.first_cell != cell_cursor) return false;
-        const LayoutTable& table = tables_[ti];
+        const LayoutTable& table = projection_.tables[ti];
         int min_block = -1;
         int max_block = -1;
         for (int ci = 0; ci < static_cast<int>(table.cells.size()); ++ci) {
@@ -1940,8 +1937,10 @@ bool EditorEngine::structureIndexValid() const {
             if (min_block < 0 || c.first_block < min_block) min_block = c.first_block;
             const int cell_last = c.first_block + c.block_count - 1;
             if (cell_last > max_block) max_block = cell_last;
-            if (cell_cursor >= static_cast<int>(structure_index_.cell_extents.size())) return false;
-            const CellExtent& e = structure_index_.cell_extents[static_cast<size_t>(cell_cursor)];
+            if (cell_cursor >= static_cast<int>(projection_.structure.cell_extents.size()))
+                return false;
+            const CellExtent& e =
+                projection_.structure.cell_extents[static_cast<size_t>(cell_cursor)];
             if (e.table != static_cast<int>(ti) || e.cell != ci || e.first_block != c.first_block ||
                 e.block_count != c.block_count)
                 return false;
@@ -1949,12 +1948,12 @@ bool EditorEngine::structureIndexValid() const {
         }
         if (min_block != span.first_block || max_block != span.last_block) return false;
     }
-    if (cell_cursor != static_cast<int>(structure_index_.cell_extents.size())) return false;
+    if (cell_cursor != static_cast<int>(projection_.structure.cell_extents.size())) return false;
     for (int b = 0; b < blocks; ++b) {
-        std::vector<InlineObject> objects = blocks_full_[static_cast<size_t>(b)].objects;
+        std::vector<InlineObject> objects = projection_.blocks_full[static_cast<size_t>(b)].objects;
         std::sort(objects.begin(), objects.end(),
                   [](const InlineObject& a, const InlineObject& z) { return a.cp < z.cp; });
-        const std::vector<rev::Slot>& list = structure_index_.slots[static_cast<size_t>(b)];
+        const std::vector<rev::Slot>& list = projection_.structure.slots[static_cast<size_t>(b)];
         if (objects.size() != list.size()) return false;
         for (size_t k = 0; k < objects.size(); ++k) {
             const InlineObject& o = objects[k];
@@ -1962,7 +1961,7 @@ bool EditorEngine::structureIndexValid() const {
             if (o.cp != s.cp || o.kind != s.kind || o.owner != s.owner) return false;
         }
     }
-    for (const rev::ControlSpan& span : structure_index_.control_spans) {
+    for (const rev::ControlSpan& span : projection_.structure.control_spans) {
         if (span.block >= blocks || span.end_block >= blocks) return false;
     }
     if (flow_.has_value()) {
@@ -1973,7 +1972,7 @@ bool EditorEngine::structureIndexValid() const {
                 controlContentSpanOf(*flow_, control_node_ids_[static_cast<size_t>(i)], &a, &b);
             FlowPos ia = 0;
             FlowPos ib = 0;
-            const bool indexed = structure_index_.controls.contentSpan(i, &ia, &ib);
+            const bool indexed = projection_.structure.controls.contentSpan(i, &ia, &ib);
             if (linear != indexed) return false;
             if (linear && (a != ia || b != ib)) return false;
             FlowPos ba = 0;
@@ -1982,7 +1981,7 @@ bool EditorEngine::structureIndexValid() const {
             FlowPos bib = 0;
             const bool bracket_linear =
                 controlSpanOf(*flow_, control_node_ids_[static_cast<size_t>(i)], &ba, &bb);
-            const bool bracket_indexed = structure_index_.controls.bracketSpan(i, &bia, &bib);
+            const bool bracket_indexed = projection_.structure.controls.bracketSpan(i, &bia, &bib);
             if (bracket_linear != bracket_indexed) return false;
             if (bracket_linear && (ba != bia || bb != bib)) return false;
         }
@@ -1994,9 +1993,9 @@ bool EditorEngine::structureIndexValid() const {
  * 最内层那一格：同一段可能落在好几格里（外层格包着内层表），取块数最少的那个。
  */
 const LayoutCell* EditorEngine::layoutCellAt(int para, const LayoutTable** table_out) const {
-    const CellRef& ref = structure_index_.cellAt(para);
-    if (ref.table >= 0 && ref.table < static_cast<int>(tables_.size())) {
-        const LayoutTable& t = tables_[static_cast<size_t>(ref.table)];
+    const CellRef& ref = projection_.structure.cellAt(para);
+    if (ref.table >= 0 && ref.table < static_cast<int>(projection_.tables.size())) {
+        const LayoutTable& t = projection_.tables[static_cast<size_t>(ref.table)];
         if (ref.cell >= 0 && ref.cell < static_cast<int>(t.cells.size())) {
             if (table_out != nullptr) *table_out = &t;
             return &t.cells[static_cast<size_t>(ref.cell)];
@@ -2013,12 +2012,12 @@ bool EditorEngine::cellFlowRangeOf(const LayoutCell& c, FlowPos* lo, FlowPos* hi
     if (c.block_count <= 0) return false;
     const int first = c.first_block;
     const int last_b = first + c.block_count - 1;
-    if (first < 0 || last_b >= static_cast<int>(block_flow_.size()) ||
-        last_b >= static_cast<int>(block_flow_span_.size()))
+    if (first < 0 || last_b >= static_cast<int>(projection_.block_flow.size()) ||
+        last_b >= static_cast<int>(projection_.block_flow_span.size()))
         return false;
-    const FlowPos a = block_flow_[static_cast<size_t>(first)];
-    const FlowPos b =
-        block_flow_[static_cast<size_t>(last_b)] + block_flow_span_[static_cast<size_t>(last_b)];
+    const FlowPos a = projection_.block_flow[static_cast<size_t>(first)];
+    const FlowPos b = projection_.block_flow[static_cast<size_t>(last_b)] +
+                      projection_.block_flow_span[static_cast<size_t>(last_b)];
     if (b <= a) return false;
     if (lo) *lo = a;
     if (hi) *hi = b;
@@ -2065,7 +2064,7 @@ int wordClassOf(uint32_t cp) {
  * 双击选词。落点落在两个字之间时取右边那个字 —— 点在某个字的右半边时命中的正是它。
  */
 bool EditorEngine::selectWordAtPt(float x_pt_doc, float y_pt_doc) {
-    if (!loaded_ || layout_.lines.empty()) return false;
+    if (!loaded_ || layout_service_.layout.lines.empty()) return false;
     TextPos p{};
     if (!hitTestPt(x_pt_doc, y_pt_doc, &p)) return false;
     const std::vector<BlockSpec>& bs = blocks();
@@ -2095,7 +2094,7 @@ bool EditorEngine::selectWordAtPtAndRender(float x_pt_doc, float y_pt_doc) {
  * 三击选段。表格里优先整格：三击在格内表达的是"我要这一格"，与 Word 同。
  */
 bool EditorEngine::selectParaAtPt(float x_pt_doc, float y_pt_doc) {
-    if (!loaded_ || layout_.lines.empty()) return false;
+    if (!loaded_ || layout_service_.layout.lines.empty()) return false;
     TextPos p{};
     if (!hitTestPt(x_pt_doc, y_pt_doc, &p)) return false;
     if (selectCellAtPara(p.para)) return true;
@@ -2128,7 +2127,7 @@ bool EditorEngine::hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* 
     if (out_side) *out_side = 0;
     if (out_line_aff) *out_line_aff = 0;
     if (out_cell_para) *out_cell_para = -1;
-    if (!out || layout_.lines.empty()) return false;
+    if (!out || layout_service_.layout.lines.empty()) return false;
 
     const float page_w = cfg_.page.width_pt;
     const float zoom = cfg_.zoom;
@@ -2188,7 +2187,7 @@ bool EditorEngine::hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* 
     const LayoutCell* cell_hit = nullptr;
     {
         float cell_area = 1e30f;
-        for (const PlacedTable& pt : layout_.placed_tables) {
+        for (const PlacedTable& pt : layout_service_.layout.placed_tables) {
             if (x_pt_doc < pt.x - 0.5f || x_pt_doc > pt.x + pt.w + 0.5f) continue;
             for (const PlacedRow& pr : pt.placed) {
                 if (pr.page != page) continue;
@@ -2220,7 +2219,7 @@ bool EditorEngine::hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* 
         const int first = cell_hit->first_block;
         const int last = first + std::max(cell_hit->block_count, 1);
         int pick_pd = 1 << 20;
-        for (const LineBox& lb : layout_.lines) {
+        for (const LineBox& lb : layout_service_.layout.lines) {
             if (lb.paragraph < first || lb.paragraph >= last) continue;
             const int pd = std::abs(lb.page - page);
             // 纵向按整条行槽比，不按字面盒：多倍行距下字只占槽中间那一截，点槽里的空白
@@ -2241,7 +2240,7 @@ bool EditorEngine::hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* 
         //   宁可落点粗一点，也不要让这一下点空。
         if (best == nullptr) cell_hit = nullptr;
     }
-    for (const LineBox& lb : layout_.lines) {
+    for (const LineBox& lb : layout_service_.layout.lines) {
         if (cell_hit != nullptr) break;
         float bp = 0.0f;
         float lo = 0.0f;
@@ -2308,7 +2307,7 @@ bool EditorEngine::hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* 
                                     : x_pt_doc;
     uint32_t cp = 0;
     int side = 0;
-    caret_.hitTestInLine(*best, ip, &cp, &side);
+    edit_session_.caret.hitTestInLine(*best, ip, &cp, &side);
 
     TextPos p{best->paragraph, cp};
     // 行别：命中的这一行是不是"以这个偏移开头"。是的话，同一个位置也是上一行的末尾
@@ -2322,10 +2321,11 @@ bool EditorEngine::hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* 
     int owner = -1;
     if (!control_node_ids_.empty() && flow_.has_value()) {
         const size_t para = static_cast<size_t>(best->paragraph);
-        if (para < block_flow_.size()) {
-            const FlowPos hit_flow = block_flow_[para] + caret_.relAt(best->paragraph, cp, side);
-            const int ci = !structure_index_.controls.empty()
-                               ? structure_index_.controls.innermost(hit_flow)
+        if (para < projection_.block_flow.size()) {
+            const FlowPos hit_flow =
+                projection_.block_flow[para] + edit_session_.caret.relAt(best->paragraph, cp, side);
+            const int ci = !projection_.structure.controls.empty()
+                               ? projection_.structure.controls.innermost(hit_flow)
                                : innermostControlAtFlow(*flow_, control_node_ids_, hit_flow);
             owner = ci >= 0 ? ci : LineBox::kInlineOffsetOuter;
         }
@@ -2381,7 +2381,7 @@ bool EditorEngine::hitTestPosition(float x_pt_doc, float y_pt_doc, Position* out
 
 bool EditorEngine::insertTable(int rows, int cols, bool header) {
     if (!loaded_) return false;
-    return edit_.insertTable(rows, cols, header);
+    return edit_session_.edit.insertTable(rows, cols, header);
 }
 
 bool EditorEngine::insertTableAndRender(int rows, int cols, bool header) {
@@ -2393,7 +2393,7 @@ bool EditorEngine::insertTableAndRender(int rows, int cols, bool header) {
 
 bool EditorEngine::insertControl(const ControlSpec& spec, const std::string& label) {
     if (!loaded_) return false;
-    return edit_.insertControl(spec, label);
+    return edit_session_.edit.insertControl(spec, label);
 }
 
 bool EditorEngine::insertControlAndRender(const ControlSpec& spec, const std::string& label) {

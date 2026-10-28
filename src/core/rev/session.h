@@ -106,6 +106,27 @@ struct Applied {
      * 修订换了没有（哈希不同）；失败时为 false。
      */
     bool changed = false;
+
+    /**
+     * 是否并进了上一步（连续拖拽的后续帧）。调用方据此决定选区快照是压新的一格还是
+     * 更新栈顶。
+     */
+    bool merged = false;
+};
+
+/**
+ * 与一步修订对应的选区快照。修订不记光标，撤销/重做要把两端一起恢复。
+ */
+struct SelectionSnapshot {
+    /**
+     * 不动的那一端。
+     */
+    int anchor = 0;
+
+    /**
+     * 跟着光标走的那一端。
+     */
+    int focus = 0;
 };
 
 /**
@@ -180,6 +201,36 @@ public:
     void setLimit(int limit);
 
     /**
+     * 记下与刚才那一步修订对应的选区快照。
+     *
+     * merged 为真时只更新栈顶的 after，不压新的一格；否则压新的一格并清空重做栈。
+     * @param before 编辑前的选区
+     * @param after 编辑后的选区
+     * @param merged 这一步是否并进了上一步
+     */
+    void recordSelection(SelectionSnapshot before, SelectionSnapshot after, bool merged);
+
+    /**
+     * 撤销一格选区。
+     * @param out 撤销后要恢复的选区
+     * @return true = 有可撤销的选区快照
+     */
+    bool undoSelection(SelectionSnapshot* out);
+
+    /**
+     * 重做一格选区。
+     * @param out 重做后要恢复的选区
+     * @return true = 有可重做的选区快照
+     */
+    bool redoSelection(SelectionSnapshot* out);
+
+    /**
+     * 选区快照栈深度（诊断用）。
+     * @return 可撤销的选区快照数
+     */
+    int selectionDepth() const { return static_cast<int>(selection_undo_.size()); }
+
+    /**
      * 有没有可撤销的历史。
      * @return true = 撤销栈非空
      */
@@ -221,6 +272,31 @@ public:
 private:
 
     void pushUndo(Doc doc);
+
+    /**
+     * 一步修订的两端选区。
+     */
+    struct SelectionStep {
+        /**
+         * 编辑前。
+         */
+        SelectionSnapshot before;
+
+        /**
+         * 编辑后。
+         */
+        SelectionSnapshot after;
+    };
+
+    /**
+     * 与 undo_ 对齐的选区快照。
+     */
+    std::vector<SelectionStep> selection_undo_;
+
+    /**
+     * 与 redo_ 对齐的选区快照。
+     */
+    std::vector<SelectionStep> selection_redo_;
 
     /**
      * 当前修订。

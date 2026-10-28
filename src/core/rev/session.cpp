@@ -43,6 +43,9 @@ void Session::setLimit(int limit) {
     limit_ = limit < 0 ? 0 : limit;
     if (limit_ <= 0) return;
     while (static_cast<int>(undo_.size()) > limit_) undo_.erase(undo_.begin());
+    while (static_cast<int>(selection_undo_.size()) > limit_) {
+        selection_undo_.erase(selection_undo_.begin());
+    }
 }
 
 void Session::pushUndo(Doc doc) {
@@ -51,7 +54,38 @@ void Session::pushUndo(Doc doc) {
     // 撤销仍然一步步往回走，只是走不到最开头了。
     if (static_cast<int>(undo_.size()) > limit_) {
         undo_.erase(undo_.begin());
+        if (!selection_undo_.empty()) selection_undo_.erase(selection_undo_.begin());
     }
+}
+
+void Session::recordSelection(SelectionSnapshot before, SelectionSnapshot after, bool merged) {
+    if (merged && !selection_undo_.empty()) {
+        selection_undo_.back().after = after;
+        return;
+    }
+    selection_undo_.push_back(SelectionStep{before, after});
+    selection_redo_.clear();
+    if (static_cast<int>(selection_undo_.size()) > limit_) {
+        selection_undo_.erase(selection_undo_.begin());
+    }
+}
+
+bool Session::undoSelection(SelectionSnapshot* out) {
+    if (selection_undo_.empty()) return false;
+    const SelectionStep step = selection_undo_.back();
+    selection_undo_.pop_back();
+    selection_redo_.push_back(step);
+    if (out != nullptr) *out = step.before;
+    return true;
+}
+
+bool Session::redoSelection(SelectionSnapshot* out) {
+    if (selection_redo_.empty()) return false;
+    const SelectionStep step = selection_redo_.back();
+    selection_redo_.pop_back();
+    selection_undo_.push_back(step);
+    if (out != nullptr) *out = step.after;
+    return true;
 }
 
 Applied Session::apply(const Edit& edit) {
@@ -105,6 +139,7 @@ Applied Session::applySteps(const std::vector<Step>& steps, FlowVisibility vis, 
     redo_.clear();
     ++generation_;
     out.changed = true;
+    out.merged = merge_in;
     return out;
 }
 
