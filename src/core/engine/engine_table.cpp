@@ -159,27 +159,23 @@ std::string EditorEngine::tableGridJson(float x_pt_doc, float y_pt_doc) const {
         return pk::checked(pk::table_grid::kSpec, "{\"ok\":false}");
     }
     for (const PlacedTable& pt : layout_service_.layout.placed_tables) {
-        if (x_pt_doc < pt.x - 1.0f || x_pt_doc > pt.x + pt.w + 1.0f) continue;
-        for (const PlacedRow& pr : pt.placed) {
-            if (pr.page != page) continue;
-            if (local_y < pr.y - 1.0f || local_y > pr.y + pr.h + 1.0f) continue;
-            o << "{\"ok\":true,\"table\":" << pt.handle << ",\"page\":" << page << ",\"x\":" << pt.x
-              << ",\"w\":" << pt.w << ",\"cols\":[";
-            for (size_t i = 0; i < pt.col_x.size(); ++i) {
-                if (i != 0) o << ",";
-                o << pt.col_x[i];
-            }
-            o << "],\"rows\":[";
-            bool first_row = true;
-            for (const PlacedRow& r : pt.placed) {
-                if (r.page != page) continue;
-                if (!first_row) o << ",";
-                first_row = false;
-                o << "{\"row\":" << r.row << ",\"y\":" << r.y << ",\"h\":" << r.h << "}";
-            }
-            o << "]}";
-            return pk::checked(pk::table_grid::kSpec, o.str());
+        if (pt.cellAtPt(page, x_pt_doc, local_y, kCellHitTolX, kCellHitTolY) == nullptr) continue;
+        o << "{\"ok\":true,\"table\":" << pt.handle << ",\"page\":" << page << ",\"x\":" << pt.x
+          << ",\"w\":" << pt.w << ",\"cols\":[";
+        for (size_t i = 0; i < pt.col_x.size(); ++i) {
+            if (i != 0) o << ",";
+            o << pt.col_x[i];
         }
+        o << "],\"rows\":[";
+        bool first_row = true;
+        for (const PlacedRow& r : pt.placed) {
+            if (r.page != page) continue;
+            if (!first_row) o << ",";
+            first_row = false;
+            o << "{\"row\":" << r.row << ",\"y\":" << r.y << ",\"h\":" << r.h << "}";
+        }
+        o << "]}";
+        return pk::checked(pk::table_grid::kSpec, o.str());
     }
     return pk::checked(pk::table_grid::kSpec, "{\"ok\":false}");
 }
@@ -196,14 +192,7 @@ bool EditorEngine::tableGridLineAt(float x_pt_doc, float y_pt_doc, uint64_t* tab
     }
     for (const PlacedTable& pt : layout_service_.layout.placed_tables) {
         if (x_pt_doc < pt.x - 1.0f || x_pt_doc > pt.x + pt.w + 1.0f) continue;
-        bool on_page = false;
-        for (const PlacedRow& pr : pt.placed) {
-            if (pr.page == page) {
-                on_page = true;
-                break;
-            }
-        }
-        if (!on_page) continue;
+        if (!pt.hasRowsOnPage(page)) continue;
         // 列边界取最近的一条：col_x 是含首尾的绝对边界序列，1..n 都算 —— 最后一条是
         //   表的右边框，拖它改的是最后一列（表宽跟着走）。没有它，用户只能把表往里改窄，
         //   没法加宽。

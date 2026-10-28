@@ -1686,51 +1686,97 @@ bool FormatRun::sameFormat(const FormatRun& o) const {
            fallback_font_indices == o.fallback_font_indices;
 }
 
+std::vector<int> PlacedTable::gridColStarts() const {
+    std::vector<int> starts(cells.size(), -1);
+    if (rows <= 0 || cols <= 0) return starts;
+    const size_t width = static_cast<size_t>(cols);
+    std::vector<unsigned char> taken(static_cast<size_t>(rows) * width, 0);
+    for (size_t i = 0; i < cells.size(); ++i) {
+        const LayoutCell& c = cells[i];
+        if (c.row < 0 || c.row >= rows) continue;
+        const int span = std::max(c.col_span, 1);
+        const int r_last = std::min(c.row + std::max(c.row_span, 1), rows);
+        int start = 0;
+        for (; start + span <= cols; ++start) {
+            bool free_run = true;
+            for (int r = c.row; r < r_last && free_run; ++r) {
+                for (int k = 0; k < span; ++k) {
+                    if (taken[static_cast<size_t>(r) * width + static_cast<size_t>(start + k)]) {
+                        free_run = false;
+                        break;
+                    }
+                }
+            }
+            if (free_run) break;
+        }
+        if (start + span > cols) continue;
+        starts[i] = start;
+        for (int r = c.row; r < r_last; ++r) {
+            for (int k = 0; k < span; ++k) {
+                taken[static_cast<size_t>(r) * width + static_cast<size_t>(start + k)] = 1;
+            }
+        }
+    }
+    return starts;
+}
+
 const LayoutCell* PlacedTable::cellAt(int row, int col, int* col_lo, int* col_hi) const {
     if (col < 0 || col >= cols) return nullptr;
-    int grid = 0;
-    int cur_row = -1;
-    for (const LayoutCell& c : cells) {
-        // 列号按"同一行的格依次累加跨度"得到的，换行就归零。它与排版进格时的累加
-        // 是同一套（见 layout.cpp 的 openCell）：两处口径分叉会让命中落在隔壁列上。
-        if (c.row != cur_row) {
-            cur_row = c.row;
-            grid = 0;
-        }
-        const int lo = grid;
-        grid += std::max(c.col_span, 1);
-        if (col < lo || col >= grid) continue;
+    const std::vector<int> starts = gridColStarts();
+    for (size_t i = 0; i < cells.size(); ++i) {
+        const LayoutCell& c = cells[i];
+        const int lo = starts[i];
+        if (lo < 0) continue;
+        const int hi = lo + std::max(c.col_span, 1);
+        if (col < lo || col >= hi) continue;
         // 跨行的格：它属于起点那一行，但覆盖到的每一行都该命中它 —— 否则合并格的下半截
-        // 点不中，而那里并没有别的格可以接。
+        //   点不中，而那里并没有别的格可以接。
         if (row < c.row || row >= c.row + std::max(c.row_span, 1)) continue;
         if (col_lo) *col_lo = lo;
-        if (col_hi) *col_hi = grid;
+        if (col_hi) *col_hi = hi;
         return &c;
     }
     return nullptr;
 }
 
-bool PlacedTable::cellBoxOnPage(const LayoutCell& cell, int page, float* x, float* y, float* w,
-                                float* h) const {
-    // 列号要在"这一格所在的那一行"里累加跨度才得到；格号相同但行不同的格是另一个格。
-    int grid = 0;
-    int col_lo = -1;
-    for (const LayoutCell& c : cells) {
-        if (c.row != cell.row) continue;
-        if (c.cell == cell.cell) {
-            col_lo = grid;
-            break;
+int PlacedTable::gridColOf(const LayoutCell& cell) const {
+    const std::vector<int> starts = gridColStarts();
+    for (size_t i = 0; i < cells.size(); ++i) {
+        const LayoutCell& c = cells[i];
+        if (&c == &cell) return starts[i];
+        // 同一个格也可能以副本传进来（调用方持有的是拷贝）：按行、格号与跨度认。
+        if (c.row == cell.row && c.cell == cell.cell && c.row_span == cell.row_span &&
+            c.col_span == cell.col_span) {
+            return starts[i];
         }
-        grid += std::max(c.col_span, 1);
     }
-    if (col_lo < 0) return false;
-    const int col_hi = col_lo + std::max(cell.col_span, 1);
-    if (col_hi >= static_cast<int>(col_x.size())) return false;
+    return -1;
+}
+
+int PlacedTable::rowIndexAt(int page, float y_pt, float tol_pt) const {
+    int hit = -1;
+    float best = 0.0f;
+    for (const PlacedRow& pr : placed) {
+        if (pr.page != page) continue;
+        if (y_pt < pr.y - tol_pt || y_pt > pr.y + pr.h + tol_pt) continue;
+        const float d =
+            (y_pt < pr.y) ? (pr.y - y_pt) : (y_pt > pr.y + pr.h ? y_pt - (pr.y + pr.h) : 0.0f);
+        // 只沾到容差的两条行都有可能接住这一点（点在行边界上）：取更近的那一条，
+        //   一样近时取先遇到的（行片段自上而下排，先遇到的在上）。
+        if (hit < 0 || d < best) {
+            hit = pr.row;
+            best = d;
+        }
+    }
+    return hit;
+}
+
+bool PlacedTable::rowBandOnPage(int page, int row, float* y, float* h) const {
     float top = 0.0f;
     float bottom = 0.0f;
     bool seen = false;
     for (const PlacedRow& pr : placed) {
-        if (pr.row != cell.row || pr.page != page) continue;
+        if (pr.row != row || pr.page != page) continue;
         if (!seen) {
             top = pr.y;
             bottom = pr.y + pr.h;
@@ -1741,10 +1787,54 @@ bool PlacedTable::cellBoxOnPage(const LayoutCell& cell, int page, float* x, floa
         }
     }
     if (!seen) return false;
+    if (y) *y = top;
+    if (h) *h = bottom - top;
+    return true;
+}
+
+bool PlacedTable::hasRowsOnPage(int page) const {
+    for (const PlacedRow& pr : placed) {
+        if (pr.page == page) return true;
+    }
+    return false;
+}
+
+const LayoutCell* PlacedTable::cellAtPt(int page, float x_pt, float y_pt, float tol_x_pt,
+                                        float tol_y_pt, int* row_out) const {
+    if (x_pt < x - tol_x_pt || x_pt > x + w + tol_x_pt) return nullptr;
+    const int row = rowIndexAt(page, y_pt, tol_y_pt);
+    if (row < 0) return nullptr;
+    // 列按"第一个把这一点连同容差一起盖住的段"取，从左往右找：点在边界上时归左那一格，
+    //   与行边界上归上那一格同一个取向。
+    int col = -1;
+    for (int c = 0; c < cols && c + 1 < static_cast<int>(col_x.size()); ++c) {
+        const float lo = x + col_x[static_cast<size_t>(c)];
+        const float hi = x + col_x[static_cast<size_t>(c) + 1];
+        if (x_pt >= lo - tol_x_pt && x_pt <= hi + tol_x_pt) {
+            col = c;
+            break;
+        }
+    }
+    if (col < 0) return nullptr;
+    const LayoutCell* cell = cellAt(row, col, nullptr, nullptr);
+    if (cell == nullptr) return nullptr;
+    if (row_out) *row_out = row;
+    return cell;
+}
+
+bool PlacedTable::cellBoxOnPage(const LayoutCell& cell, int page, float* x, float* y, float* w,
+                                float* h) const {
+    const int col_lo = gridColOf(cell);
+    if (col_lo < 0) return false;
+    const int col_hi = col_lo + std::max(cell.col_span, 1);
+    if (col_hi >= static_cast<int>(col_x.size())) return false;
+    float top = 0.0f;
+    float band = 0.0f;
+    if (!rowBandOnPage(page, cell.row, &top, &band)) return false;
     if (x) *x = this->x + col_x[static_cast<size_t>(col_lo)];
     if (w) *w = col_x[static_cast<size_t>(col_hi)] - col_x[static_cast<size_t>(col_lo)];
     if (y) *y = top;
-    if (h) *h = bottom - top;
+    if (h) *h = band;
     return true;
 }
 

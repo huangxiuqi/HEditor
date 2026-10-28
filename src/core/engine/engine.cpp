@@ -2183,29 +2183,17 @@ bool EditorEngine::hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* 
     {
         float cell_area = 1e30f;
         for (const PlacedTable& pt : layout_service_.layout.placed_tables) {
-            if (x_pt_doc < pt.x - 0.5f || x_pt_doc > pt.x + pt.w + 0.5f) continue;
-            for (const PlacedRow& pr : pt.placed) {
-                if (pr.page != page) continue;
-                if (local_y < pr.y - 0.01f || local_y > pr.y + pr.h + 0.01f) continue;
-                int col = -1;
-                const int n_col = static_cast<int>(pt.col_x.size()) - 1;
-                for (int c = 0; c < n_col; ++c) {
-                    const float lo = pt.x + pt.col_x[static_cast<size_t>(c)];
-                    const float hi = pt.x + pt.col_x[static_cast<size_t>(c) + 1];
-                    if (x_pt_doc >= lo - 0.01f && x_pt_doc <= hi + 0.01f) {
-                        col = c;
-                        break;
-                    }
-                }
-                if (col < 0) continue;
-                const LayoutCell* lc = pt.cellAt(pr.row, col, nullptr, nullptr);
-                if (lc == nullptr) continue;
-                // 嵌在别的表里时取最内层那一张：面积最小的框就是最里面那格。
-                const float area = pt.w * pr.h;
-                if (area < cell_area) {
-                    cell_area = area;
-                    cell_hit = lc;
-                }
+            int hit_row = -1;
+            const LayoutCell* lc =
+                pt.cellAtPt(page, x_pt_doc, local_y, kCellHitTolX, kCellHitTolY, &hit_row);
+            if (lc == nullptr) continue;
+            float band_h = 0.0f;
+            if (!pt.rowBandOnPage(page, hit_row, nullptr, &band_h)) continue;
+            // 嵌在别的表里时取最内层那一张：面积最小的框就是最里面那格。
+            const float area = pt.w * band_h;
+            if (area < cell_area) {
+                cell_area = area;
+                cell_hit = lc;
             }
         }
     }

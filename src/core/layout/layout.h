@@ -996,6 +996,22 @@ struct PlacedRow {
 };
 
 /**
+ * 页内一点算不算落在格上的横向容差（磅）。
+ *
+ * 放宽到半磅是为了抓住表的左右边框：贴边那一下点仍有格可落。点击命中与悬停取栅格
+ * 手柄共用这一个值，两处各取一套时同一处点两下会给出不同结果。
+ */
+inline constexpr float kCellHitTolX = 0.5f;
+
+/**
+ * 页内一点算不算落在格上的纵向容差（磅）。
+ *
+ * 比横向紧两个数量级：行与行上下相接，纵向一放宽就等于把"表上/表下那一点"也判成格内
+ * —— 表格后面紧跟的那一段就点不进去了。
+ */
+inline constexpr float kCellHitTolY = 0.01f;
+
+/**
  * 一张已放置的表格：位置、列边界（相对表格左边，长度 cols+1）与它的行片段。
  *
  * 它只是绘制与命中用的几何投影，不是排版输入 —— 排版输入是 LayoutTable。
@@ -1061,6 +1077,70 @@ struct PlacedTable {
      * @return 覆盖这一点的格；越界或那一格被合并掉时为 nullptr
      */
     const LayoutCell* cellAt(int row, int col, int* col_lo, int* col_hi) const;
+
+    /**
+     * 每个格的起始网格列，次序与 cells 一致。
+     *
+     * 只能按占位推：跨行的格在它盖住的每一行里都占着列，只按本行的格累加跨度会把下面
+     * 那些行的列整体左移，合并之后右边那些格就点不中了。占位从左上往右下扫一遍，
+     * 每格取第一段在它盖住的每一行都空着的列。
+     * @return 起始网格列，与 cells 等长；放不下的格为 -1
+     */
+    std::vector<int> gridColStarts() const;
+
+    /**
+     * 这一格在本行里占的起始网格列。
+     *
+     * 列号只能按"同一行、格号在前的那些格的跨度之和"得到，不能从格号直接算 —— 合并格
+     * 之后的格号与网格列不是一回事。取格框、取栅格都读这一处。
+     * @param cell 逻辑格
+     * @return 起始网格列；这一格不在表里时为 -1
+     */
+    int gridColOf(const LayoutCell& cell) const;
+
+    /**
+     * 这一页上盖住某个纵向位置的行。
+     *
+     * 行片段跨页拆开时同一行每页各一条，所以查询必须带页号。容差让"点在格的下内边距里"
+     * 仍然算这一行；两条行只沾到容差时取真正包含这一点的那一条。
+     * @param page 页号
+     * @param y_pt 页内纵向坐标（磅）
+     * @param tol_pt 容差（磅）
+     * @return 逻辑行号；这一页上没有行覆盖该位置时为 -1
+     */
+    int rowIndexAt(int page, float y_pt, float tol_pt) const;
+
+    /**
+     * 某一行在某一页上的纵向范围（页内坐标，磅）。
+     * @param page 页号
+     * @param row 逻辑行号
+     * @param y 写回上边，可为 nullptr
+     * @param h 写回高，可为 nullptr
+     * @return 这一行在这一页上有片段时为 true
+     */
+    bool rowBandOnPage(int page, int row, float* y, float* h) const;
+
+    /**
+     * 这一页上有没有这一张表的行片段。
+     * @param page 页号
+     * @return 有片段时为 true
+     */
+    bool hasRowsOnPage(int page) const;
+
+    /**
+     * 页内一点落在哪一格。
+     *
+     * 「点 → 格」只有这一处实现：点击命中与悬停取栅格都读它。
+     * @param page 页号
+     * @param x_pt 页内横向坐标（磅）
+     * @param y_pt 页内纵向坐标（磅）
+     * @param tol_x_pt 横向容差（磅）
+     * @param tol_y_pt 纵向容差（磅）
+     * @param row_out 写回逻辑行号，可为 nullptr
+     * @return 命中那一格；这一点不在这张表上或落在被合并掉的位置时为 nullptr
+     */
+    const LayoutCell* cellAtPt(int page, float x_pt, float y_pt, float tol_x_pt, float tol_y_pt,
+                               int* row_out = nullptr) const;
 
     /**
      * 某一格在某一页上的框（页内坐标，磅）。

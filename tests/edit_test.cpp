@@ -7385,6 +7385,36 @@ int main() {
                            "）");
         }
 
+        // 点 → 格：命中、悬停取栅格、格线拖动读的是同一个查询，判据直接盯那个查询。
+        //   横向容差半磅（抓边框）、纵向只留一线（行与行上下相接，放宽就把表外判成格内）。
+        {
+            const PlacedTable& pt = lay.placed_tables[0];
+            float ry0 = 0.0f;
+            float rh0 = 0.0f;
+            float ry1 = 0.0f;
+            float rh1 = 0.0f;
+            const bool bands =
+                pt.rowBandOnPage(0, 0, &ry0, &rh0) && pt.rowBandOnPage(0, 1, &ry1, &rh1);
+            expectTrue(bands && rh0 > 1.0f && rh1 > 1.0f, "两条行片段的纵向范围都拿得到");
+            if (bands && pt.cols == 2) {
+                const float cx = pt.x + (pt.col_x[1] + pt.col_x[2]) * 0.5f;
+                const LayoutCell* got =
+                    pt.cellAtPt(0, cx, ry1 + rh1 * 0.5f, kCellHitTolX, kCellHitTolY);
+                expectTrue(got != nullptr && got == pt.cellAt(1, 1, nullptr, nullptr),
+                           "第二行第二格内的一点落回同一格");
+                expectTrue(pt.rowIndexAt(0, ry1 + rh1 * 0.5f, kCellHitTolY) == 1,
+                           "带内一点的行号是第二行");
+                expectTrue(
+                    pt.cellAtPt(0, cx, ry1 + rh1 + 0.2f, kCellHitTolX, kCellHitTolY) == nullptr,
+                    "表下沿外 0.2 磅不算格内（表格后面那一段点得进去）");
+                expectTrue(pt.cellAtPt(0, pt.x - 0.3f, ry0 + rh0 * 0.5f, kCellHitTolX,
+                                       kCellHitTolY) == pt.cellAt(0, 0, nullptr, nullptr),
+                           "表左边框外 0.3 磅仍落在第一格（横向容差抓着边框）");
+                expectTrue(pt.gridColOf(*pt.cellAt(0, 1, nullptr, nullptr)) == 1,
+                           "无合并时网格列就是格号");
+            }
+        }
+
         // 选区：整格被选中时高亮铺满格宽（不是只贴着字）—— 这是"单元格选区"与
         //   "文字选区"的差别。参考 Word：一格整段选中时整格反白。
         {
@@ -8488,6 +8518,22 @@ int main() {
                 doc::adopt(doc::makeNode(root_id, NodeKind::Document, {}, {section}), id),
                 StyleSheet{});
             eb.relayout();
+            // 合并格之后的格号与网格列不是一回事：网格列只能由本行的跨度累加得到，
+            //   反推回去必须还是同一格。
+            {
+                bool grid_ok = eb.layout().placed_tables.size() == 1;
+                if (grid_ok) {
+                    const PlacedTable& pt = eb.layout().placed_tables[0];
+                    for (const LayoutCell& c : pt.cells) {
+                        const int col = pt.gridColOf(c);
+                        if (col < 0 || pt.cellAt(c.row, col, nullptr, nullptr) != &c) {
+                            grid_ok = false;
+                            break;
+                        }
+                    }
+                }
+                expectTrue(grid_ok, "每个格的网格列都能反推回它自己（含跨两行的合并格）");
+            }
             const LayoutDigest db = digestOf(eb.layout());
             std::printf("     摘要 B = 0x%016llx（%zu 行 / %zu 字形 / %d 页 / %zu 表）\n",
                         static_cast<unsigned long long>(db.hash), eb.layout().lines.size(),
