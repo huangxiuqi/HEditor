@@ -2441,7 +2441,7 @@ int main() {
                    "字符样式的继承与格式读回");
     }
 
-    std::printf("\n[28] 分块孩子表：路径复制只替换受影响块\n");
+    std::printf("\n[28] 分块孩子表：只有改动所在的那个块被换掉\n");
     {
         std::vector<std::u32string> paras;
         paras.reserve(80);
