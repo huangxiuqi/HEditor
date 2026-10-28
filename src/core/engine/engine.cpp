@@ -1905,22 +1905,22 @@ void EditorEngine::rebuildStructureIndex() {
 
 bool EditorEngine::structureIndexValid() const {
     const int blocks = static_cast<int>(projection_.blocks_full.size());
-    if (static_cast<int>(projection_.structure.cells.size()) != blocks) return false;
-    if (projection_.structure.table_spans.size() != projection_.tables.size()) return false;
+    const CellIndex& cells = projection_.structure.cells_index;
+    if (static_cast<int>(cells.innermost.size()) != blocks) return false;
+    if (cells.spans.size() != projection_.tables.size()) return false;
     if (static_cast<int>(projection_.structure.slots.size()) != blocks) return false;
-    for (const CellRef& ref : projection_.structure.cells) {
-        if (ref.table < 0 && ref.cell < 0) continue;
-        if (ref.table < 0 || ref.table >= static_cast<int>(projection_.tables.size())) return false;
-        if (ref.cell < 0 ||
-            ref.cell >=
-                static_cast<int>(projection_.tables[static_cast<size_t>(ref.table)].cells.size()))
+    for (const CellNode& n : cells.nodes) {
+        if (n.table < 0 || n.table >= static_cast<int>(projection_.tables.size())) return false;
+        if (n.cell < 0 ||
+            n.cell >=
+                static_cast<int>(projection_.tables[static_cast<size_t>(n.table)].cells.size()))
             return false;
     }
     int cell_cursor = 0;
-    for (size_t ti = 0; ti < projection_.structure.table_spans.size(); ++ti) {
-        const TableSpan& span = projection_.structure.table_spans[ti];
-        if (span.first_cell < 0 || span.first_cell + span.cell_count >
-                                       static_cast<int>(projection_.structure.cell_extents.size()))
+    for (size_t ti = 0; ti < cells.spans.size(); ++ti) {
+        const TableSpan& span = cells.spans[ti];
+        if (span.first_cell < 0 ||
+            span.first_cell + span.cell_count > static_cast<int>(cells.nodes.size()))
             return false;
         if (span.first_block < 0 && span.last_block >= 0) return false;
         if (span.first_block >= 0 && span.last_block >= blocks) return false;
@@ -1934,10 +1934,8 @@ bool EditorEngine::structureIndexValid() const {
             if (min_block < 0 || c.first_block < min_block) min_block = c.first_block;
             const int cell_last = c.first_block + c.block_count - 1;
             if (cell_last > max_block) max_block = cell_last;
-            if (cell_cursor >= static_cast<int>(projection_.structure.cell_extents.size()))
-                return false;
-            const CellExtent& e =
-                projection_.structure.cell_extents[static_cast<size_t>(cell_cursor)];
+            if (cell_cursor >= static_cast<int>(cells.nodes.size())) return false;
+            const CellNode& e = cells.nodes[static_cast<size_t>(cell_cursor)];
             if (e.table != static_cast<int>(ti) || e.cell != ci || e.first_block != c.first_block ||
                 e.block_count != c.block_count)
                 return false;
@@ -1945,7 +1943,7 @@ bool EditorEngine::structureIndexValid() const {
         }
         if (min_block != span.first_block || max_block != span.last_block) return false;
     }
-    if (cell_cursor != static_cast<int>(projection_.structure.cell_extents.size())) return false;
+    if (cell_cursor != static_cast<int>(cells.nodes.size())) return false;
     for (int b = 0; b < blocks; ++b) {
         std::vector<InlineObject> objects = projection_.blocks_full[static_cast<size_t>(b)].objects;
         std::sort(objects.begin(), objects.end(),

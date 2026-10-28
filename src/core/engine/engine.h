@@ -180,6 +180,15 @@ public:
     const std::vector<LayoutTable>& tableSpecs() const { return projection_.tables; }
 
     /**
+     * 块↔格索引：每块的格归属与嵌套深度、每张表覆盖的块区间。
+     *
+     * 这是唯一的记录 —— 块自己不声明在哪一格，要问归属的地方都读它。
+     *
+     * @return 块↔格索引
+     */
+    const CellIndex& cellIndex() const { return projection_.structure.cells_index; }
+
+    /**
      * 文档装载：直接装入一份修订，不再经过模型树。
      *
      * 装载会复位光标、作废页缓存并整篇标脏。修订的节点身份原样保留，调用方随后可用
@@ -2424,16 +2433,16 @@ public:
     int auditLayout();
 
     /**
-     * 表格结构自审：块与格这两份记录是否互相撑得住，返回不符项数（0 = 一致）。
+     * 表格结构自审：格声明的块区间是否自洽，返回不符项数（0 = 一致）。
      *
      * 为什么不并进 auditLayout：那一条比的是"增量排版与全量排版"，两边吃的是同一份
      *   projection_.blocks 与 projection_.tables，结构本身坏了它照样全绿 —— 一格连一个块都不剩时，两边都排不出
      *   那一格的行盒，逐字段比对完全一致。而"格没有块""块没有结束标记"这类损坏恰恰是表格
      *   编辑最典型的失败方式：后果是那一格连行盒都没有，光标点不进去，画面上只是少了几行字。
      *
-     * 查六条：格至少一个块；格的块区间在表内且互不重叠；格里的块都有结束标记；块的
-     *   cell_path 与格给出的区间一致（两份记录互为对照）；格行列跨度不越界；表句柄在块
-     *   路径里指同一张表。
+     * 查五条：格至少一个块；格的块区间在表内；同表的格互不重叠、跨表只能严格包含；
+     *   格里的块都有结束标记；格行列跨度不越界。块的归属由这份区间反推，不存在第二份
+     *   记录可对照 —— "块说在格里而格没认领"在结构上不成立。
      *
      * @return 不符项数（0 = 一致）
      */
@@ -3132,6 +3141,17 @@ private:
     int tableAlignedTo(int to) const;
 
     /**
+     * 从第 from 段起（含）覆盖到的表格数。
+     *
+     * 表格是原子重排单位，所以"这一段之后有几张表"就是"这一轮要重排几张表"：
+     * 脏区起点已经由 tableAlignedFrom 对齐到表头，从它往后数不会数到半张表。
+     *
+     * @param from 起始段号；0 表示整篇
+     * @return 覆盖到的表格数
+     */
+    int tablesFrom(int from) const;
+
+    /**
      * 把 layout_service_.layout 截断到第 para 段之前：丢掉 [para, ...) 的行盒、字形与切片，
      * 保留 [0, para) 原样，供 layoutDocumentRange 从 para 续排。
      * para <= 0 时清空整个结果。
@@ -3250,19 +3270,9 @@ private:
         int block_without_mark = 0;
 
         /**
-         * 块的 cell_path 与格给出的区间对不上。
-         */
-        int path_mismatch = 0;
-
-        /**
          * 跨度越出表的尺寸。
          */
         int bad_span = 0;
-
-        /**
-         * 块说自己在正文，格却认领了它。
-         */
-        int blocks_in_no_cell = 0;
 
         /**
          * 首个出问题的格（跨表连续编号）；-1 = 没有。
@@ -3274,8 +3284,7 @@ private:
          * @return 不符合项总数
          */
         int total() const {
-            return empty_cell + bad_range + overlap + block_without_mark + path_mismatch +
-                   bad_span + blocks_in_no_cell;
+            return empty_cell + bad_range + overlap + block_without_mark + bad_span;
         }
     };
 
@@ -3508,6 +3517,11 @@ private:
      * 上一次 relayout 真正重排的行数。
      */
     int last_relaid_lines_ = 0;
+
+    /**
+     * 上一次 relayout 重排到的表格数（见 tablesFrom）。
+     */
+    int last_relaid_tables_ = 0;
 
     /**
      * 上一次 relayout 是全量还是增量。

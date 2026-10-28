@@ -245,7 +245,7 @@ bool repaginateSuffix(LayoutResult* layout, const std::vector<BlockSpec>& blocks
             line.line_h = layout->lines[static_cast<size_t>(index)].advance_pt;
             fragments.push_back(line);
         }
-        BlockPaginationInput in;
+        BlockPlanInput in;
         in.page_index = page_no;
         in.cursor_y_pt = cursor;
         in.content_top_pt = cy;
@@ -255,7 +255,7 @@ bool repaginateSuffix(LayoutResult* layout, const std::vector<BlockSpec>& blocks
         in.page_break_before = block.page_break_before;
         in.space_before_pt = block.space_before_pt;
         in.space_after_pt = block.space_after_pt;
-        const BlockPaginationResult plan = paginateBlockLines(fragments, in);
+        const BlockPlan plan = planBlockLines(fragments, in);
         if (plan.lines.size() != ids.size()) return false;
         for (size_t i = 0; i < ids.size(); ++i) {
             LinePlacement item;

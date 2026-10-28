@@ -2088,6 +2088,7 @@ std::string editStatsJson() {
     o << "\"totalParagraphs\":" << e.total_paragraphs << ",";
     o << "\"layoutWasFull\":" << (e.layout_was_full ? "true" : "false") << ",";
     o << "\"dirtyPageCount\":" << e.dirty_page_count << ",";
+    o << "\"tablesRelaid\":" << e.tables_relaid << ",";
     o << "\"repaintedPages\":" << e.repainted_pages << ",";
     o << "\"totalPages\":" << e.total_pages << ",";
     o << "\"windowPages\":" << e.window_pages << ",";

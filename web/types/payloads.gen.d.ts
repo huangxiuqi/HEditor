@@ -150,6 +150,7 @@ export interface EditStats {
   totalParagraphs: number;
   layoutWasFull: boolean;
   dirtyPageCount: number;
+  tablesRelaid: number;
   repaintedPages: number;
   totalPages: number;
   windowPages: number;
@@ -229,9 +230,7 @@ export interface AuditTables {
   badRange: number;
   overlap: number;
   noMark: number;
-  pathMismatch: number;
   badSpan: number;
-  stray: number;
   firstCell: number;
 }
 

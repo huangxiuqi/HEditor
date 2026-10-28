@@ -196,7 +196,7 @@ struct BlockLayout {
  * 整篇循环为了统计与簇起点已经整过一次形，拿这里的结果驱动分页，不再自己断行。
  * 横排结果里只有 fragments 与 height_pt，lines 与 glyphs 为空；竖排结果里只有 columns，
  * 每列带它的竖带号与列位。分页要的是不含坐标的断行片段，块内落位坐标在那里用不上。
- * 浮动图的排除带不在约束里：横排的绕排由 paginateBlockLinesWithFloats 逐行取宽，
+ * 浮动图的排除带不在约束里：横排的绕排由 planBlockLinesWithFloats 逐行取宽，
  * 竖排列不受排除带约束（竖排里的浮动图在编译层已退回行内）。
  * 空块没有可断的簇（空段的行盒与空列要字体度量，由 layoutBlock 给出），结果是 Ok 且
  * fragments 与 columns 为空。
@@ -216,7 +216,7 @@ BlockLayout layoutBlockFragments(const BlockSpec& block, const BlockConstraints&
  *
  * 整形与断行复用 layoutBlockFragments，括号占位也走同一条路径。横排格内块传格内容区
  * 宽度；竖排格内块传版心宽与页的竖带，因为旧循环的列长与列位取的是版心而不是格框。
- * 含浮动原子的块明确返回 UnsupportedFloat，由 paginateBlockLinesWithFloats 处理。
+ * 含浮动原子的块明确返回 UnsupportedFloat，由 planBlockLinesWithFloats 处理。
  * page_break_before 与段前距在这里不生效。
  *
  * @param lib 字体库

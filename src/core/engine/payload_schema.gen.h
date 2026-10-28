@@ -217,6 +217,7 @@ inline constexpr KeySpec kKeys[] = {
     {"totalParagraphs", "num", false},
     {"layoutWasFull", "bool", false},
     {"dirtyPageCount", "num", false},
+    {"tablesRelaid", "num", false},
     {"repaintedPages", "num", false},
     {"totalPages", "num", false},
     {"windowPages", "num", false},
@@ -305,9 +306,7 @@ inline constexpr KeySpec kKeys[] = {
     {"badRange", "num", false},
     {"overlap", "num", false},
     {"noMark", "num", false},
-    {"pathMismatch", "num", false},
     {"badSpan", "num", false},
-    {"stray", "num", false},
     {"firstCell", "num", false},
 };
 inline constexpr PayloadSpec kSpec{"auditTables", kKeys, static_cast<int>(std::size(kKeys)), false};

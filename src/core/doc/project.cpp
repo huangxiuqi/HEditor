@@ -567,7 +567,6 @@ private:
         pb.source.mark = mark_id;
         pb.source.first = first_id;
         pb.hash = hash;
-        pb.spec.cell_path = path_;
         // 要不要物化这一块：段落格式、字符格式、原子盒子都要查三层样式，样式表缺席就什么都
         //   查不了。只算哈希的那一路（blockHashes）传空指针，走到这里只留哈希与来源身份 ——
         //   哈希在上面已经算完，那一趟本来也不需要块的内容。
@@ -582,7 +581,7 @@ private:
         }
 
         if (materialize) {
-            const bool float_ok = !pb.spec.wm.isVertical() && pb.spec.cell_path.empty();
+            const bool float_ok = !pb.spec.wm.isVertical() && path_.empty();
             // 原子的盒子在这里定：公式的默认框按段落字号估，而字号是段落属性 —— 走到原子
             // 那一刻还看不到它。emit 那一刻只记下"这里有一枚原子"。
             for (const std::pair<std::size_t, AtomGeometry>& a : atoms_) {

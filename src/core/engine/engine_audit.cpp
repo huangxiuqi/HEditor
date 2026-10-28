@@ -21,9 +21,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
-#include <map>
 #include <sstream>
-#include <tuple>
 #include <unordered_map>
 
 #include "core/text/shaper.h"
@@ -472,10 +470,10 @@ std::string EditorEngine::auditPageJson(int page) {
 }
 
 /**
- * 表格结构自审：块与格这两份记录互为对照（见头文件）。
+ * 表格结构自审：格声明的块区间是否自洽（见头文件）。
  *
- * 两份记录说的是同一件事：块用 cell_path 说自己属于哪一格，格用块区间说自己有哪些块。
- *   两边都对才站得住 —— 只看一边，遇到"格还在、块没了"就查不出来。
+ * 块的归属由这些区间反推，不存在第二份记录，所以能查的是区间本身：一格连一个块都不剩、
+ *   区间越界、同表的格互相重叠、格里缺结束标记。
  */
 int EditorEngine::auditTables() const { return auditTablesDetail().total(); }
 
@@ -484,8 +482,7 @@ std::string EditorEngine::auditTablesJson() const {
     std::ostringstream o;
     o << "{\"diff\":" << a.total() << ",\"cells\":" << a.cells << ",\"emptyCell\":" << a.empty_cell
       << ",\"badRange\":" << a.bad_range << ",\"overlap\":" << a.overlap
-      << ",\"noMark\":" << a.block_without_mark << ",\"pathMismatch\":" << a.path_mismatch
-      << ",\"badSpan\":" << a.bad_span << ",\"stray\":" << a.blocks_in_no_cell
+      << ",\"noMark\":" << a.block_without_mark << ",\"badSpan\":" << a.bad_span
       << ",\"firstCell\":" << a.first_cell << "}";
     return pk::checked(pk::audit_tables::kSpec, o.str());
 }
@@ -493,9 +490,9 @@ std::string EditorEngine::auditTablesJson() const {
 /**
  * 表格结构自审的实现（判据见头文件的 auditTables）。
  *
- * 块与格两份记录逐块对照：格说"我有哪些块"，块说"我在哪一格"。嵌套表的两层会同时
- *   认领内层那些块，那是合法重叠 —— 只有同一张表的格互相重叠才是错，跨表则要求一边
- *   严格包含另一边（否则就是"一半重叠"，两份记录都没法用）。
+ * 格说"我有哪些块"：同一张表的格互相重叠是错，跨表则要求一边严格包含另一边
+ *   （否则就是"一半重叠"，块的归属无从反推）。嵌套表的两层同时认领内层那些块，
+ *   那是合法重叠。
  */
 EditorEngine::TableAudit EditorEngine::auditTablesDetail() const {
     TableAudit a;
@@ -550,33 +547,14 @@ EditorEngine::TableAudit EditorEngine::auditTablesDetail() const {
         }
     }
 
-    // 块那一侧：cell_path 的最内层一段应当指向认领它的那一格。
-    std::map<std::tuple<uint64_t, int, int>, int> by_slot;
-    {
-        size_t ci = 0;
-        for (const LayoutTable& t : projection_.tables) {
-            for (const LayoutCell& c : t.cells) {
-                by_slot[std::make_tuple(t.handle, c.row, c.cell)] = static_cast<int>(ci);
-                ++ci;
-            }
-        }
-    }
+    // 文档最后一块可以没有结束标记（末尾未结束），格里的块不行：缺了它这一格就会与
+    //   下一格并成一段。
     const bool marks_known = projection_.block_src.size() == blocks().size();
-    for (int i = 0; i < n_blocks; ++i) {
-        const size_t k = static_cast<size_t>(i);
-        const std::vector<CellSlot>& path = blocks()[k].cell_path;
-        if (path.empty()) {
-            if (owner[k] >= 0) ++a.blocks_in_no_cell;
-        } else {
-            const CellSlot& in = path.back();
-            const auto it = by_slot.find(std::make_tuple(in.table, in.row, in.cell));
-            const int want = (it == by_slot.end()) ? -1 : it->second;
-            if (want < 0 || want != owner[k]) ++a.path_mismatch;
-        }
-        // 文档最后一块可以没有结束标记（末尾未结束），格里的块不行。
-        if (owner[k] >= 0 && i + 1 < n_blocks && marks_known &&
-            projection_.block_src[k].mark == kInvalidNodeId) {
-            ++a.block_without_mark;
+    if (marks_known) {
+        for (int i = 0; i + 1 < n_blocks; ++i) {
+            const size_t k = static_cast<size_t>(i);
+            if (owner[k] < 0) continue;
+            if (projection_.block_src[k].mark == kInvalidNodeId) ++a.block_without_mark;
         }
     }
     return a;

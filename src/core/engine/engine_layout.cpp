@@ -232,6 +232,10 @@ void EditorEngine::relayout() {
     edit_stats_.reused_paragraphs = last_reused_paragraphs_;
     edit_stats_.suffix_shifted = last_suffix_shifted_;
     edit_stats_.relaid_lines = last_relaid_lines_;
+    // 表格数按"脏区起点往后覆盖到几张表"算：全量时整篇都脏，起点取 0。
+    //   表格是原子重排单位（见 tableAlignedFrom），所以这个数直接就是本轮的表格成本。
+    last_relaid_tables_ = tablesFrom(last_layout_full_ ? 0 : from);
+    edit_stats_.tables_relaid = last_relaid_tables_;
     edit_stats_.layout_was_full = last_layout_full_;
     edit_stats_.total_lines = layout_service_.layout.stats.placed_line_count;
     // 呈现只需消费"本轮重排过"这一次信号（见 presentInternal）。
@@ -443,7 +447,7 @@ EditorEngine::SuffixReuse EditorEngine::trySuffixReuse(int from, int dirty_count
 
     // 二级复用：行结构变了（后缀整体挪位），但后缀是纯横排 → 只有块轴位置变，
     // 断行与字形的行内位置一个字都不用重算。重新分页由 repaginateSuffix 按
-    // FragmentIndex 的块行切片完成，与整篇排版共用 paginateBlockLines。
+    // FragmentIndex 的块行切片完成，与整篇排版共用 planBlockLines。
     //   段数变化几乎总落到这一级：段落边界一变就多让（或少让）一次段间距，
     //   后缀必然整体下移 —— 那不是"同状态"，而是"按片段重排"。
     //   重排只走到 cut：那里是第一张表，表的行片段不是折线能推出来的。
@@ -524,41 +528,48 @@ int EditorEngine::tableAlignedFrom(int from) const {
     if (projection_.tables.empty()) return from;
     const int n = static_cast<int>(blocks().size());
     if (from <= 0 || from >= n) return from;
-    const std::vector<CellSlot>& path = blocks()[static_cast<size_t>(from)].cell_path;
-    if (path.empty()) return from;
     // 由最外层表定起点：内层表的行高并进外层格的内容高，只从内层重排算不出外层那一行
     //   该多高（"等所有格排完才结算"是行的性质，不是格的）。
-    const uint64_t handle = path.front().table;
-    for (const LayoutTable& t : projection_.tables) {
-        if (t.handle != handle) continue;
-        int lo = from;
-        for (const LayoutCell& c : t.cells) lo = std::min(lo, c.first_block);
-        return lo;
-    }
-    // 表格输入里找不到这张表（投影与排版输入不同步）：不动起点，交给续排照常处理。
-    return from;
+    const CellIndex& cells = projection_.structure.cells_index;
+    const int ti = cells.outermostTable(from);
+    if (ti < 0) return from;
+    const TableSpan& span = cells.spans[static_cast<size_t>(ti)];
+    if (span.first_block < 0) return from;
+    return std::min(from, span.first_block);
 }
 
 int EditorEngine::tableAlignedTo(int to) const {
     if (projection_.tables.empty()) return to;
     const int n = static_cast<int>(blocks().size());
     if (to <= 0 || to >= n) return to;
+    const CellIndex& cells = projection_.structure.cells_index;
     int end = to;
     // 两侧都要看：to-1 是最后一个脏段（可能还在表里），to 是后缀首段（可能已经是同一张表的
     //   下一格）。任一侧落在表里，就得扩到那张最外层表的末尾 —— 表只排一半是个中间态。
     for (int probe = to - 1; probe <= to; ++probe) {
         if (probe < 0 || probe >= n) continue;
-        const std::vector<CellSlot>& path = blocks()[static_cast<size_t>(probe)].cell_path;
-        if (path.empty()) continue;
-        const uint64_t handle = path.front().table;
-        for (const LayoutTable& t : projection_.tables) {
-            if (t.handle != handle) continue;
-            for (const LayoutCell& c : t.cells) {
-                end = std::max(end, c.first_block + c.block_count);
-            }
-        }
+        const int ti = cells.outermostTable(probe);
+        if (ti < 0) continue;
+        const TableSpan& span = cells.spans[static_cast<size_t>(ti)];
+        if (span.last_block >= 0) end = std::max(end, span.last_block + 1);
     }
     return std::min(end, n);
+}
+
+int EditorEngine::tablesFrom(int from) const {
+    int n = 0;
+    for (const LayoutTable& t : projection_.tables) {
+        bool hit = false;
+        for (const LayoutCell& c : t.cells) {
+            if (c.block_count <= 0 || c.first_block < 0) continue;
+            if (c.first_block + c.block_count > from) {
+                hit = true;
+                break;
+            }
+        }
+        if (hit) ++n;
+    }
+    return n;
 }
 
 void EditorEngine::truncateLayoutAt(int para) {

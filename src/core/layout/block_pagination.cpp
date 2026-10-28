@@ -7,9 +7,8 @@
 
 namespace heditor {
 
-BlockPaginationResult paginateBlockLines(const std::vector<BrokenLine>& fragments,
-                                         const BlockPaginationInput& in) {
-    BlockPaginationResult out;
+BlockPlan planBlockLines(const std::vector<BrokenLine>& fragments, const BlockPlanInput& in) {
+    BlockPlan out;
     out.lines.reserve(fragments.size());
     out.page_index = in.page_index;
     float cursor_y = in.cursor_y_pt;
@@ -33,7 +32,8 @@ BlockPaginationResult paginateBlockLines(const std::vector<BrokenLine>& fragment
         // 用本行自己的行高判页底：拿段行高估值会漏判下一行更高的情形。
         // 最多重试一次；比整页还高的一行两次判据都不通过，页号连进两格。
         for (int attempt = 0; attempt < 2; ++attempt) {
-            if (in.continuous || line_top + line_h <= in.content_bottom_pt) break;
+            if (in.continuous || in.no_page_break || line_top + line_h <= in.content_bottom_pt)
+                break;
             ++out.page_index;
             cursor_y = in.content_top_pt;
             line_top = in.content_top_pt;
@@ -41,23 +41,26 @@ BlockPaginationResult paginateBlockLines(const std::vector<BrokenLine>& fragment
         }
         top = line_top;
         anchor = false;
-        BlockPaginationLine placed;
+        BlockPlanLine placed;
+        // 不绕排时一行就是一段：起点是内容区左沿，片段原样来自块局部断行。
+        placed.parts.assign(1, LinePart{fragment, in.content_x_pt});
         // 连页下页号只由行槽顶现算；分页下就是当前页。
         placed.page =
             in.continuous ? static_cast<int>(std::floor(line_top / in.slab_pt)) : out.page_index;
         placed.top_pt = line_top;
-        out.lines.push_back(placed);
+        placed.line_no = in.line_total + static_cast<int>(out.lines.size());
+        out.lines.push_back(std::move(placed));
         prev_line_h = line_h;
     }
+    out.line_total = in.line_total + static_cast<int>(out.lines.size());
     out.cursor_y_pt = top + prev_line_h + in.space_after_pt;
     return out;
 }
 
-BlockFloatPaginationResult paginateBlockLinesWithFloats(
-    const BlockSpec& block, const BlockShaping& shaped,
-    const std::vector<LineMetric>& cluster_metric, FloatFlow* flow,
-    const BlockFloatPaginationInput& in) {
-    BlockFloatPaginationResult out;
+BlockPlan planBlockLinesWithFloats(const BlockSpec& block, const BlockShaping& shaped,
+                                   const std::vector<LineMetric>& cluster_metric, FloatFlow* flow,
+                                   const BlockPlanInput& in) {
+    BlockPlan out;
     int page_index = in.page_index;
     float cursor_y = in.cursor_y_pt;
     float top = cursor_y;
@@ -156,11 +159,12 @@ BlockFloatPaginationResult paginateBlockLinesWithFloats(
         const bool have_parts = !parts.empty();
         const size_t next_start = have_parts ? parts.back().line.end : start_cl;
         if (have_parts) {
-            BlockFloatPaginationLine placed;
+            BlockPlanLine placed;
             placed.parts = std::move(parts);
             placed.top_pt = top;
             placed.page =
                 in.continuous ? static_cast<int>(std::floor(top / in.slab_pt)) : page_index;
+            placed.line_no = in.line_total + static_cast<int>(out.lines.size());
             out.lines.push_back(std::move(placed));
         }
         prev_line_h = line_h;
@@ -169,13 +173,13 @@ BlockFloatPaginationResult paginateBlockLinesWithFloats(
         start_cl = next_start;
     }
     out.page_index = page_index;
+    out.line_total = in.line_total + static_cast<int>(out.lines.size());
     out.cursor_y_pt = top + prev_line_h + in.space_after_pt;
     return out;
 }
 
-BlockColumnPaginationResult paginateBlockColumns(const std::vector<BlockColumn>& columns,
-                                                 const BlockColumnPaginationInput& in) {
-    BlockColumnPaginationResult out;
+BlockPlan planBlockColumns(const std::vector<BlockColumn>& columns, const BlockPlanInput& in) {
+    BlockPlan out;
     out.page_index = in.page_index;
     out.line_total = in.line_total;
     // 竖排块在分页下吃掉本页剩余高度：后续块从版心下沿之后起排。
@@ -185,19 +189,18 @@ BlockColumnPaginationResult paginateBlockColumns(const std::vector<BlockColumn>&
     // 块首另起的带就是旧循环在这里翻的那一页。连页没有页底，页号只由列顶现算。
     const int base_page =
         in.continuous ? in.page_index : in.page_index + (in.started_new_band ? 1 : 0);
-    out.columns.reserve(columns.size());
+    out.lines.reserve(columns.size());
     int last_band = 0;
     int last_col = 0;
     for (const BlockColumn& column : columns) {
-        BlockColumnPaginationColumn placed;
+        BlockPlanLine placed;
+        // 竖排的一列就是一行：列心进片段的起点，列宽由片段的 line_h 给出（见 BlockColumn）。
+        placed.parts.assign(1, LinePart{column.line, column.center_pt});
+        placed.top_pt = column.top_pt;
         placed.page = in.continuous ? static_cast<int>(std::floor(column.top_pt / in.slab_pt))
                                     : base_page + column.band;
-        placed.line = column.column;
-        placed.top_pt = column.top_pt;
-        placed.center_pt = column.center_pt;
-        placed.width_pt = column.width_pt;
-        placed.fragment = column.line;
-        out.columns.push_back(placed);
+        placed.line_no = in.line_total + column.column;
+        out.lines.push_back(std::move(placed));
         last_band = column.band;
         last_col = column.column;
     }

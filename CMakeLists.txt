@@ -8,6 +8,11 @@ project(HEditor LANGUAGES CXX C)
 #  凡是只在原生编得过的东西，会立刻在 wasm target 上暴露出来。
 # ─────────────────────────────────────────────────────────────
 
+# 头文件依赖由 CMake 自己扫 #include，不用 MSVC 的 /showIncludes。
+#   那条路的提示文字随 VS 安装语言变化（中文版是「注意: 包含文件:」），CMake 只认英文前缀，
+#   对不上时 ninja 拿到 0 条头依赖：改头文件不重编，判据读到的是旧目标，绿得毫无意义。
+set(CMAKE_DEPENDS_USE_COMPILER OFF)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)

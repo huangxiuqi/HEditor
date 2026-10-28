@@ -2733,6 +2733,35 @@ int main() {
                            std::to_string(cs.reused_paragraphs) + " 段");
             expectTrue(e.auditLayout() == 0, "挂控件之后的排版同样与对照一致");
         }
+
+        // 表格粒度的账：表格是原子重排单位（脏区两端对齐到表边界），所以
+        //   "脏区在表之后"应当一张表都不重排，"脏区在表里"则是整张表。
+        {
+            // 上面把模式切到了表单（挂控件那条用例），表单模式下不许插表。
+            e.setEditMode(EditMode::Document);
+            e.setCaret(0, 0);
+            expectTrue(e.insertTableAndRender(2, 2, false), "表格粒度用例：插一张 2x2 表");
+            const int n_after = static_cast<int>(e.blocks().size());
+            // 表在文档开头（前 4 段是格），改最后一段：脏区整段在表之后。
+            e.setCaret(n_after - 1, 0);
+            e.typeTextAndRender("b");
+            const EditStats after_table = e.editStats();
+            std::printf("     表在前、脏区在后：重排 %d 段，重排 %d 张表\n",
+                        after_table.relaid_paragraphs, after_table.tables_relaid);
+            expectTrue(after_table.tables_relaid == 0,
+                       "★ 脏区在表格之后：一张表都不重排（实际 " +
+                           std::to_string(after_table.tables_relaid) + " 张）");
+            // 格内改一个字：脏区贴着表，整张表重排。
+            e.setCaret(0, 0);
+            e.typeTextAndRender("c");
+            const EditStats in_cell = e.editStats();
+            std::printf("     格内改一格：重排 %d 段，重排 %d 张表\n", in_cell.relaid_paragraphs,
+                        in_cell.tables_relaid);
+            expectTrue(in_cell.tables_relaid == 1, "★ 格内改一格：整张表重排（实际 " +
+                                                       std::to_string(in_cell.tables_relaid) +
+                                                       " 张）");
+            expectTrue(e.auditLayout() == 0, "表格粒度的两种走法都与对照一致");
+        }
     }
 
     if (runSection(16))
@@ -7313,9 +7342,9 @@ int main() {
         expectTrue(bl.size() == 4, "2x2 表编出四段");
         bool path_ok = (bl.size() == 4);
         for (size_t i = 0; i < bl.size() && path_ok; ++i) {
-            path_ok = bl[i].cell_path.size() == 1 &&
-                      bl[i].cell_path[0].row == static_cast<int>(i / 2) &&
-                      bl[i].cell_path[0].cell == static_cast<int>(i % 2);
+            const CellNode* n = e45.cellIndex().nodeAt(static_cast<int>(i));
+            path_ok = n != nullptr && n->depth == 1 && n->slot.row == static_cast<int>(i / 2) &&
+                      n->slot.cell == static_cast<int>(i % 2);
         }
         expectTrue(path_ok, "四段各带自己的单元格路径（行优先）");
 
@@ -9274,7 +9303,7 @@ int main() {
         const int n_para = static_cast<int>(e61.blocks().size());
         std::vector<int> in_table;
         for (int p = 0; p < n_para; ++p) {
-            if (!e61.blocks()[static_cast<size_t>(p)].cell_path.empty()) in_table.push_back(p);
+            if (e61.cellIndex().nodeAt(p) != nullptr) in_table.push_back(p);
         }
         expectTrue(n_para > 40 && in_table.size() == 9,
                    "文档形状：表前 8 段 + 九格 + 表后 30 段（" + std::to_string(n_para) + " 段，" +
@@ -9406,7 +9435,7 @@ int main() {
         const int n62 = static_cast<int>(e62.blocks().size());
         std::vector<int> cells62;
         for (int p = 0; p < n62; ++p) {
-            if (!e62.blocks()[static_cast<size_t>(p)].cell_path.empty()) cells62.push_back(p);
+            if (e62.cellIndex().nodeAt(p) != nullptr) cells62.push_back(p);
         }
         expectTrue(cells62.size() == 8 && e62.layout().placed_tables.size() == 2,
                    "两表文档：八格 / 两张表（" + std::to_string(cells62.size()) + " 格，" +
@@ -10220,8 +10249,9 @@ int main() {
         const TextPos after68 = e68.caret();
         bool in_first_cell = after68.para == 1;
         if (in_first_cell) {
-            const std::vector<CellSlot>& path68 = e68.blocks()[1].cell_path;
-            in_first_cell = path68.size() == 1 && path68[0].row == 0 && path68[0].cell == 0;
+            const CellNode* n68 = e68.cellIndex().nodeAt(1);
+            in_first_cell =
+                n68 != nullptr && n68->depth == 1 && n68->slot.row == 0 && n68->slot.cell == 0;
         }
         expectTrue(in_first_cell, "★ 光标落在第一格（段号 " + std::to_string(after68.para) + "）");
 
@@ -10861,6 +10891,40 @@ int main() {
                        round.find("\"i\":true") != std::string::npos,
                    "读回之后空单元格仍是粗斜体（实际 " + round + "）");
         expectTrue(e.auditCompile() == 0 && e.auditLayout() == 0, "改格式之后两份自审为 0");
+
+        // 退化格宽：列多到格内容区被夹到 1 磅下限时，块局部排版仍要给出一份几何 ——
+        //   断行"至少放一个簇"，结果是每簇一行。块层对非正宽度明确报约束无效，
+        //   所以调用方把宽度下限提到 1 磅，这条钉住下限之后的结果是定义好的，不是空白。
+        {
+            EditorEngine narrow;
+            expectTrue(narrow.init({cjkPath, mnPath, latinPath}), "引擎初始化（退化格宽）");
+            narrow.setConfig(c);
+            narrow.setDocument(doc::makeTextDoc({U"甲"}), StyleSheet{});
+            narrow.setCaret(0, 0);
+            expectTrue(narrow.insertTableAndRender(1, 40, false), "插一张 1x40 窄表");
+            expectTrue(narrow.typeTextAndRender("甲乙"), "首格敲两个字");
+            int cell_block = -1;
+            for (size_t i = 0; i < narrow.blocks().size(); ++i) {
+                if (narrow.blocks()[i].textUtf8() == "甲乙") {
+                    cell_block = static_cast<int>(i);
+                    break;
+                }
+            }
+            expectTrue(cell_block >= 0, "找到敲了字的格（" + std::to_string(cell_block) + "）");
+            int cell_lines = 0;
+            int wide_lines = 0;
+            for (const LineBox& lb : narrow.layout().lines) {
+                if (lb.paragraph != cell_block) continue;
+                ++cell_lines;
+                if (lb.clusters.size() > 1) ++wide_lines;
+            }
+            std::printf("     退化格宽：这一格排了 %d 行，超一簇的行 %d 行\n", cell_lines,
+                        wide_lines);
+            expectTrue(cell_lines == 2 && wide_lines == 0,
+                       "★ 格内容区 1 磅：每簇一行（实际 " + std::to_string(cell_lines) +
+                           " 行 / 超一簇 " + std::to_string(wide_lines) + " 行）");
+            expectTrue(narrow.auditLayout() == 0, "退化格宽下仍然与全量重排一致");
+        }
     }
 
     if (runSection(72)) std::printf("\n[72] 表格跨页：续排片段的几何、命中、选中与自审\n");
@@ -12844,15 +12908,7 @@ int main() {
         e85.repaint();
 
         // 某一格的首段段号（格的坐标 → 块下标）。
-        auto cellPara = [&](int row, int cell) {
-            for (size_t i = 0; i < e85.blocks().size(); ++i) {
-                const std::vector<CellSlot>& path = e85.blocks()[i].cell_path;
-                if (!path.empty() && path.back().row == row && path.back().cell == cell) {
-                    return static_cast<int>(i);
-                }
-            }
-            return -1;
-        };
+        auto cellPara = [&](int row, int cell) { return e85.cellIndex().firstBlockIn(row, cell); };
         auto putCaret = [&](int row, int cell) {
             const int p = cellPara(row, cell);
             if (p < 0) return false;
@@ -12860,12 +12916,10 @@ int main() {
             return true;
         };
         auto caretCell = [&](int* row, int* cell) {
-            const int para = e85.caret().para;
-            if (para < 0 || para >= static_cast<int>(e85.blocks().size())) return false;
-            const std::vector<CellSlot>& path = e85.blocks()[static_cast<size_t>(para)].cell_path;
-            if (path.empty()) return false;
-            if (row != nullptr) *row = path.back().row;
-            if (cell != nullptr) *cell = path.back().cell;
+            const CellNode* n = e85.cellIndex().nodeAt(e85.caret().para);
+            if (n == nullptr) return false;
+            if (row != nullptr) *row = n->slot.row;
+            if (cell != nullptr) *cell = n->slot.cell;
             return true;
         };
         auto stateIs = [&](const char* needle) {
@@ -13117,13 +13171,7 @@ int main() {
 
         // 格坐标 → 块下标。
         auto blockInCell = [&](int row, int cell) {
-            for (size_t i = 0; i < e86.blocks().size(); ++i) {
-                const std::vector<CellSlot>& path = e86.blocks()[i].cell_path;
-                if (!path.empty() && path.back().row == row && path.back().cell == cell) {
-                    return static_cast<int>(i);
-                }
-            }
-            return -1;
+            return e86.cellIndex().firstBlockIn(row, cell);
         };
         const int pa86 = blockInCell(0, 0);
         const int pb86 = blockInCell(0, 1);
@@ -13376,14 +13424,7 @@ int main() {
             ev.repaint();
             std::string err;
             ev.registerImageAndRepaint("pic86", iw86, ih86, px86.data(), px86.size(), &err);
-            int pa = -1;
-            for (size_t i = 0; i < ev.blocks().size(); ++i) {
-                const std::vector<CellSlot>& path = ev.blocks()[i].cell_path;
-                if (!path.empty() && path.back().row == at_row && path.back().cell == at_col) {
-                    pa = static_cast<int>(i);
-                    break;
-                }
-            }
+            const int pa = ev.cellIndex().firstBlockIn(at_row, at_col);
             if (pa < 0) return "找不到那一格的段";
             ev.setCaret(pa, ev.blocks()[static_cast<size_t>(pa)].cp_text.size());
             ImageSpec im;
@@ -13529,13 +13570,7 @@ int main() {
             std::string err;
             ev.registerImageAndRepaint("pic86", iw86, ih86, px86.data(), px86.size(), &err);
             auto para_of = [&](int row, int col) -> int {
-                for (size_t i = 0; i < ev.blocks().size(); ++i) {
-                    const std::vector<CellSlot>& path = ev.blocks()[i].cell_path;
-                    if (!path.empty() && path.back().row == row && path.back().cell == col) {
-                        return static_cast<int>(i);
-                    }
-                }
-                return -1;
+                return ev.cellIndex().firstBlockIn(row, col);
             };
             const int p_img = para_of(0, 0);
             const int p_txt = para_of(0, 1);

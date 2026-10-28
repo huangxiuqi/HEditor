@@ -9,6 +9,7 @@
 #include "core/layout/block_layout.h"
 #include "core/layout/block_pagination.h"
 #include "core/layout/block_shape.h"
+#include "core/layout/cell_index.h"
 #include "core/layout/float_flow.h"
 #include "core/text/fallback.h"
 #include "core/text/shaper.h"
@@ -405,6 +406,12 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
     if (from_para < 0) from_para = 0;
     if (to_para > n_para) to_para = n_para;
 
+    // 块到格的归属由表格结构现推。逐块复用同一个缓冲：整篇几千块，每块新造一份
+    //   vector 会多出几千次分配。
+    CellIndex cell_index;
+    cell_index.build(tables, blocks.size());
+    std::vector<CellSlot> cell_path_buf;
+
     // 每个块一份簇起点表；空块给 {0}（只有段首一个插入点）。
     // 只补到需要的长度：前缀可能来自上一轮排版并原样复用（见追加语义）。
     if (res.para_cluster_starts.size() < blocks.size())
@@ -495,6 +502,16 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
     //   横排分支只读这两个变量，于是"在正文里排"与"在格里排"共用同一套断行与放置代码。
     float cur_cx = cx;
     float cur_cw = cw;
+
+    /**
+     * 交给块局部排版的宽度。
+     *
+     * 宽度可能退到 1 磅以下：格宽被夹到下限、页面窄到装不下一行。块局部排版要求宽度为正，
+     * 所以这里取不小于 1 磅 —— 断行"至少放一个簇"，两种取值的结果都是每簇一行，逐位相同。
+     * @param w 当前可用宽度（磅）
+     * @returns 不小于 1 磅的宽度
+     */
+    auto blockWidth = [](float w) { return std::max(w, 1.0f); };
     // 最后排完的那一块的段后距。格内容高要把它扣掉：格的底边由最后一段的文字底加内边距
     //   定，段后距是段与段之间的距离，最后一段后面没有下一段可让。
     float last_space_after = 0.0f;
@@ -1038,7 +1055,7 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
         const BlockSpec& b = blocks[para_index];
         ParaIndex& pi = res.para_index[para_index];
 
-        // 表格上下文切换：让 tstack 与这一块的 cell_path 对齐。逐层比对前缀，不同的层
+        // 表格上下文切换：让 tstack 与这一块的格路径对齐。逐层比对前缀，不同的层
         //   从内往外关、再按需从外往内开。表结构缺失（句柄找不到）时这一块按正文排 ——
         //   宁可位置不对，也不要拿一张错表去排。
         //
@@ -1049,7 +1066,8 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
         const float cursor_before_switch = cursor_y;
         bool opened_outer = false;
         {
-            const std::vector<CellSlot>& path = b.cell_path;
+            cell_index.pathAt(para_i, &cell_path_buf);
+            const std::vector<CellSlot>& path = cell_path_buf;
             size_t keep = 0;
             while (keep < path.size() && keep < tstack.size() &&
                    tstack[keep].t->handle == path[keep].table) {
@@ -1133,9 +1151,9 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
             // 空竖排段：一列到底，列宽就是空行行高。列顶、块首带是否另起、分页与块尾
             //   游标都由块局部排版与分页纯函数给出。文档里的浮动图不约束空列（排除带只作用于
             //   横排），所以有浮动图也走这一条；格内与块自身带浮动原子的空段仍走下面旧路径。
-            const bool simple_empty_vertical = b.wm.isVertical() && b.cell_path.empty() &&
-                                               tstack.empty() && !has_floating_object &&
-                                               cur_cw > 1.0f;
+            const bool simple_empty_vertical =
+                b.wm.isVertical() && cell_index.nodeAt(para_i) == nullptr && tstack.empty() &&
+                !has_floating_object && cur_cw > 1.0f;
             if (simple_empty_vertical) {
                 int col_page = page_index;
                 const float col_top = emptyVerticalTop(&col_page);
@@ -1154,7 +1172,7 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
                 const BlockLayout local = layoutBlock(lib, b, constraints, cache);
                 if (local.status == BlockLayoutStatus::Ok && local.lines.size() == 1 &&
                     local.columns.size() == 1) {
-                    BlockColumnPaginationInput pin;
+                    BlockPlanInput pin;
                     pin.page_index = col_page;
                     pin.line_total = line_total;
                     pin.content_bottom_pt = cy + ch;
@@ -1164,14 +1182,13 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
                     pin.slab_pt = slab;
                     // 空竖排只占一列：带高就是这一列的列宽，旧循环的块尾游标正是列顶加列宽。
                     pin.band_height_pt = local.columns.front().width_pt;
-                    const BlockColumnPaginationResult plan =
-                        paginateBlockColumns(local.columns, pin);
+                    const BlockPlan plan = planBlockColumns(local.columns, pin);
                     LineBox lb = std::move(local.lines.front());
                     // 块局部不认识全局页号与行号，这两项按分页结果重打；几何已落在
                     //   页内坐标上（连页的 y 偏移在 layoutBlock 里按条带折过）。
                     lb.paragraph = static_cast<int>(para_index);
-                    lb.line = line_total + plan.columns.front().line;
-                    lb.page = plan.columns.front().page;
+                    lb.line = plan.lines.front().line_no;
+                    lb.page = plan.lines.front().page;
                     res.lines.push_back(std::move(lb));
                     line_total = plan.line_total;
                     page_index = plan.page_index;
@@ -1186,7 +1203,7 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
             //   块内坐标相对内容区原点，直接平移会换掉加法分组、多一次舍入。竖排的列长
             //   与列位取版心，所以竖带按页传，宽度传版心宽。
             const bool empty_cell_block =
-                !b.cell_path.empty() && !tstack.empty() && !has_floating_object;
+                cell_index.nodeAt(para_i) != nullptr && !tstack.empty() && !has_floating_object;
             if (empty_cell_block) {
                 if (b.space_before_pt > 0.0f) cursor_y += b.space_before_pt;
                 const bool vertical = b.wm.isVertical();
@@ -1224,7 +1241,7 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
                         lb.inline_origin_pt = cur_cx;
                         cursor_y += lb.advance_pt + b.space_after_pt;
                     } else {
-                        BlockColumnPaginationInput pin;
+                        BlockPlanInput pin;
                         pin.page_index = page_index;
                         pin.line_total = line_total;
                         pin.content_bottom_pt = cy + ch;
@@ -1234,10 +1251,9 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
                         pin.slab_pt = slab;
                         // 空列只占一条列宽：块尾游标正是列顶加列宽（旧循环的记法）。
                         pin.band_height_pt = local.columns.front().width_pt;
-                        const BlockColumnPaginationResult plan =
-                            paginateBlockColumns(local.columns, pin);
-                        lb.page = plan.columns.front().page;
-                        lb.line = line_total + plan.columns.front().line;
+                        const BlockPlan plan = planBlockColumns(local.columns, pin);
+                        lb.page = plan.lines.front().page;
+                        lb.line = plan.lines.front().line_no;
                         line_total = plan.line_total;
                         page_index = plan.page_index;
                         cursor_y = plan.cursor_y_pt;
@@ -1371,23 +1387,26 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
             pi.glyph_end = static_cast<int>(res.glyphs.size());
             continue;
         }
-        // 简单块：横排正文、无表格上下文、无浮动图。分页整段交给 paginateBlockLines
+        // 简单块：横排正文、无表格上下文、无浮动图。分页整段交给 planBlockLines
         //   （core/layout/block_pagination.h），它消费块局部断行片段。
         //   条件先算出来：段前分页与段前距对简单块也由那个函数负责，这里不能重复推进。
-        const bool simple_block = !b.wm.isVertical() && b.cell_path.empty() && tstack.empty() &&
-                                  !wrap_floats && !has_floating_object && cur_cw > 1.0f;
+        // 表框栈是"这一块在不在格里"的唯一依据：格路径只用来开关表框（见上面的表上下文
+        //   切换），不能当成第二个判断依据 —— 两处各判一次时，不一致的输入会落到另一条
+        //   落位循环里，而那条循环是同一件事的第二份实现。
+        const bool simple_block =
+            !b.wm.isVertical() && tstack.empty() && !wrap_floats && !has_floating_object;
         // 简单竖排块：非表格、块自身没有浮动原子。列内容由块局部排版按竖带断好，分页只把
         //   每条带映射成页；分页与连页的差别全在约束里的竖带几何上（连页的带顶是绝对坐标）。
         //   文档里有浮动图不影响这一条：排除带只作用于横排（竖排里的浮动图由编译层退回行内），
         //   旧循环的竖排分支从不读它，块局部排版也没有排除带这个输入。块自身的浮动原子仍
         //   排除在外 —— 块局部排版对它明确报告不支持，旧循环同样没有竖排绕排。
-        const bool simple_vertical_block = b.wm.isVertical() && b.cell_path.empty() &&
-                                           tstack.empty() && !has_floating_object && cur_cw > 1.0f;
+        const bool simple_vertical_block =
+            b.wm.isVertical() && tstack.empty() && !has_floating_object;
         // 竖排格内块：列长与列位取版心而不是格框，旧循环的竖带几何因此可以直接由约束
         //   表达 —— 宽度传版心宽、竖带传页的上下沿。块自身带浮动原子时块局部报告不支持，
         //   与正文竖排同一条边界。
         const bool cell_vertical_block =
-            b.wm.isVertical() && !b.cell_path.empty() && !tstack.empty() && !has_floating_object;
+            b.wm.isVertical() && !tstack.empty() && !has_floating_object;
         if (!simple_block) pageBreakBefore();
 
         const std::vector<FormatRun> fruns = b.effectiveRuns();
@@ -1439,47 +1458,33 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
 
         // 段前距：段首行之前让出这一段空白。页顶那一段不加（分页之后段首的空白属于
         //   页边距），与上一段的段后距相加、不折叠 —— 那正是 Word 的算法。
-        //   简单块的段前分页与段前距一起交给 paginateBlockLines，这里跳过。
+        //   简单块的段前分页与段前距一起交给 planBlockLines，这里跳过。
         if (!simple_block && b.space_before_pt > 0.0f &&
             !atPageTop(!tstack.empty(), page_index, cursor_y)) {
             cursor_y += b.space_before_pt;
         }
 
         if (!b.wm.isVertical()) {
-            // 横排。推进的是行顶（top）而不是基线：一行里可以混排字号，基线 = 行顶 +
-            //   本行 ascent，而 ascent 逐行不同 —— 拿基线累加会带着上一行的 ascent 走，
-            //   翻页之后落点就错了。
-            // 断行与放置合成一个循环：四周型浮动图让"这一行的可用宽度"随行的纵向位置变，
-            //   一次断完的话，断行时还不知道每一行会落在哪。没有浮动图（floats 为空）时
-            //   每一轮的容量都是整块可用宽度，结果与"一次断完"逐位相同。
-            // 落位：给这一行的行顶与基线，产出它的行盒与字形。它只认 y，不决定 y ——
-            //   决定 y 的是上面的翻页判据（那是分页的事）。
-
-            // 简单块的断行走块局部排版（layoutBlockFragments）：分页消费不含坐标的
-            //   fragments，页内坐标仍由本循环按原有次序重算。块内落位坐标不能直接搬
-            //   上页：placeHorizontalLine 从落笔原点起算坐标，平移会换掉浮点加法的
-            //   结合顺序，逐位摘要会变。
-            // 格内文本块同样只依赖格宽：格内不翻页，行高由表格在块排完之后结算，切片按
-            //   行盒纵向位置做。文档里有浮动图时断行不能一次做完 —— 排除带会按行顶挖开行，
-            //   那一份由 paginateBlockLinesWithFloats 逐行取宽；格内不翻页，所以给它
-            //   no_page_break，页号恒为表格当前页（编译层不给格内容产出浮动图，但正文的
-            //   排除带可以压到格内行上）。
-            const bool cell_block = !b.cell_path.empty() && !tstack.empty() && cur_cw > 1.0f;
+            // 横排。断行由块局部排版给出（layoutBlockFragments），分页由 planBlockLines
+            //   或 planBlockLinesWithFloats 给出每行的行顶与页号，本循环只负责落位。
+            //   行顶是分页层递推的：这里不再按行高自己累加，两处各加一次会在末位分叉。
+            // 格内文本块只依赖格宽：格内不翻页（no_page_break），行高由表格在块排完之后
+            //   结算，跨页由表格的行切片处理。文档里有浮动图时断行不能一次做完 ——
+            //   排除带会按行顶挖开行，那一份由 planBlockLinesWithFloats 逐行取宽。
+            const bool cell_block = !tstack.empty();
             BlockLayout local_block;
-            if ((simple_block || cell_block) && !wrap_floats) {
+            if (!wrap_floats) {
                 BlockConstraints constraints;
-                constraints.width_pt = cur_cw;
+                constraints.width_pt = blockWidth(cur_cw);
                 constraints.writing_mode = b.wm;
                 local_block = layoutBlockFragments(b, constraints, bs, cluster_metric);
             }
-            // 约束不支持时 fragments 为空，下面的逐段断行接住它：那条路与旧循环同一套
-            //   断行，结果必须逐位相同。
             const std::vector<BrokenLine>& block_lines = local_block.fragments;
-            size_t block_line_cursor = 0;
 
             // 落这一行：页内坐标换算在这里，行盒与字形由 placeHorizontalLine 写。
             //   page 由分页给出：分页下是当前页，连页下是行槽顶所在的条带。
-            auto placeLine = [&](const std::vector<LinePart>& parts, float top, int page) {
+            auto placeLine = [&](const std::vector<LinePart>& parts, float top, int page,
+                                 int line_no) {
                 if (parts.empty()) return;
                 LineCellRange cell;
                 if (!tstack.empty()) {
@@ -1491,47 +1496,8 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
                 // 连页下块轴 y 要减掉条带偏移；分页下这个位移是 0。
                 const float page_y_offset = cont ? -static_cast<float>(page) * slab : 0.0f;
                 placeHorizontalLine(b, bs, fruns, parts, top, page, page_y_offset,
-                                    static_cast<int>(para_index), line_total, cell, &res.lines,
+                                    static_cast<int>(para_index), line_no, cell, &res.lines,
                                     &res.glyphs);
-            };
-
-            /**
-             * 按可用区间把这一行填满。
-             *
-             * 简单块的行片段已经由块局部断行给出，按 start 找回同一条就行；其余块按
-             * 本行的可用区间现场断（片段实现见 fillLineParts）。
-             * @param spans 本行的可用区间（页内磅）
-             * @param start 起始簇下标
-             * @param out_h 出参：本行行高（各段最大值）
-             */
-            auto fillLine = [&](const std::vector<LineSpan>& spans, size_t start,
-                                std::vector<LinePart>* parts, float* out_h) {
-                parts->clear();
-                if (!block_lines.empty()) {
-                    // 分页重试会把同一个 start 再填一遍：按 start 找回同一条行片段，
-                    //   不能顺着游标再取下一行。
-                    if (block_line_cursor >= block_lines.size() ||
-                        block_lines[block_line_cursor].begin != start) {
-                        block_line_cursor = 0;
-                        while (block_line_cursor < block_lines.size() &&
-                               block_lines[block_line_cursor].begin != start) {
-                            ++block_line_cursor;
-                        }
-                    }
-                    if (block_line_cursor < block_lines.size()) {
-                        LinePart p;
-                        p.x = cur_cx;
-                        p.line = block_lines[block_line_cursor];
-                        if (out_h != nullptr) *out_h = p.line.line_h;
-                        parts->push_back(p);
-                        ++block_line_cursor;
-                    } else if (out_h != nullptr) {
-                        *out_h = 0.0f;
-                    }
-                    return;
-                }
-                fillLineParts(bs, cluster_metric, start, spans, b.size_pt, b.line_spacing, parts,
-                              out_h);
             };
 
             // 本段的浮动框在段首行顶着落；段首行若被翻页推走，它们跟着平移。
@@ -1543,218 +1509,64 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
             float anchor_flow = wrap_floats ? flowY(anchor_page, cursor_y) : cursor_y;
             placeFloatsForPara(static_cast<int>(para_index), cur_cx, anchor_flow);
 
-            float top = cursor_y;
-            float prev_line_h = block_line_h;  // 上一行的行高：本行行顶由它推进
-            bool anchor = true;                // 段首或刚翻过页：本行按 cursor_y 重新定位
-            bool first_line = true;
-            // 段首行一旦被翻页推走，本段的浮动框跟着平移一次（图随段走）。
-            //   只平一次：第二趟重推时位置已经对齐，再平就会把自己越推越远。
-            bool floats_shifted = false;
-            size_t start_cl = 0;
-            // 逐行复用的缓冲：整篇几千行，每行都新造一份 vector 会多出几千次分配。
-            std::vector<LinePart> parts;
-            std::vector<LineSpan> row_spans;
-
-            // 简单块的分页已经由纯函数给出，通用循环里那些浮动框、表格与试排分支
-            //   对这条路径全是空操作。这里只按结果落行，页号只有一处推进。
-            bool simple_placed = false;
-            if (simple_block && !block_lines.empty()) {
-                BlockPaginationInput pin;
-                pin.page_index = page_index;
-                pin.cursor_y_pt = cursor_y;
-                pin.content_top_pt = cy;
-                pin.content_bottom_pt = cy + ch;
-                pin.continuous = cont;
-                pin.slab_pt = slab;
-                pin.page_break_before = b.page_break_before;
-                pin.space_before_pt = b.space_before_pt;
-                pin.space_after_pt = b.space_after_pt;
-                const BlockPaginationResult plan = paginateBlockLines(block_lines, pin);
-                for (size_t i = 0; i < plan.lines.size(); ++i) {
-                    parts.assign(1, LinePart{block_lines[i], cur_cx});
-                    placeLine(parts, plan.lines[i].top_pt, plan.lines[i].page);
-                    ++line_total;
-                }
-                cursor_y = plan.cursor_y_pt;
-                page_index = plan.page_index;
-                simple_placed = true;
+            // 分页与落位：三条规则（不绕排、排除带驱动、格内）共用同一个结果类型与
+            //   同一个落位循环。页号与行号都由分页给出，本函数不再自己推进。
+            BlockPlanInput pin;
+            pin.page_index = page_index;
+            pin.line_total = line_total;
+            pin.cursor_y_pt = cursor_y;
+            pin.content_top_pt = cy;
+            pin.content_bottom_pt = cy + ch;
+            pin.content_x_pt = cur_cx;
+            pin.content_width_pt = cur_cw;
+            pin.continuous = cont;
+            pin.slab_pt = slab;
+            pin.page_stride_pt = page_stride;
+            // 格内不翻页：跨页由表格的行切片负责。段前分页与段前距只有简单块交给分页层
+            //   （其余块的块首已经由上面的块级处理加过），所以按键与简单块绑定，避免加两次。
+            pin.no_page_break = cell_block;
+            pin.page_break_before = simple_block && b.page_break_before;
+            pin.space_before_pt = simple_block ? b.space_before_pt : 0.0f;
+            pin.space_after_pt = b.space_after_pt;
+            pin.base_line_h_pt = block_line_h;
+            pin.anchor_flow_pt = anchor_flow;
+            pin.live_base = live_base;
+            BlockPlan plan;
+            if (wrap_floats) {
+                // 行宽随这一行落在哪一页变，断行与分页不能拆成两遍：纯函数按排除带
+                //   驱动断行，上下型下推与四周型让宽在 float_flow 里。
+                plan = planBlockLinesWithFloats(b, bs, cluster_metric, &live_flow, pin);
+            } else {
+                plan = planBlockLines(block_lines, pin);
             }
-            // 带浮动图的横排块（含格内）：行宽随这一行落在哪一页变，断行与分页不能拆成
-            //   两遍。分页纯函数按排除带驱动断行，这里只落行；上下型下推与四周型让宽在
-            //   float_flow 里，与旧循环共用同一份实现。格内不翻页，no_page_break 关掉
-            //   页底判据，页号恒为表格当前页。
-            bool float_placed = false;
-            if (wrap_floats && (tstack.empty() || cell_block)) {
-                BlockFloatPaginationInput fin;
-                fin.page_index = page_index;
-                fin.cursor_y_pt = cursor_y;
-                fin.content_top_pt = cy;
-                fin.content_bottom_pt = cy + ch;
-                fin.content_x_pt = cur_cx;
-                fin.content_width_pt = cur_cw;
-                fin.continuous = cont;
-                fin.no_page_break = cell_block;
-                fin.slab_pt = slab;
-                fin.page_stride_pt = page_stride;
-                fin.base_line_h_pt = block_line_h;
-                fin.anchor_flow_pt = anchor_flow;
-                fin.live_base = live_base;
-                fin.space_after_pt = b.space_after_pt;
-                const BlockFloatPaginationResult plan =
-                    paginateBlockLinesWithFloats(b, bs, cluster_metric, &live_flow, fin);
-                // 段首行被翻页推走时，本段落下的浮动框跟着平移；更早段落的图不动。
-                if (plan.first_line_shift_pt != 0.0f) {
-                    for (size_t k = placed_base; k < res.placed_floats.size(); ++k) {
-                        PlacedFloat& pf = res.placed_floats[k];
-                        const float f0 = flowY(pf.page, pf.y) + plan.first_line_shift_pt;
-                        pf.page = flowPage(f0);
-                        pf.y = flowLocal(pf.page, f0);
-                    }
+            // 段首行被翻页推走时，本段落下的浮动框跟着平移；更早段落的图不动。
+            if (plan.first_line_shift_pt != 0.0f) {
+                for (size_t k = placed_base; k < res.placed_floats.size(); ++k) {
+                    PlacedFloat& pf = res.placed_floats[k];
+                    const float f0 = flowY(pf.page, pf.y) + plan.first_line_shift_pt;
+                    pf.page = flowPage(f0);
+                    pf.y = flowLocal(pf.page, f0);
                 }
-                for (const BlockFloatPaginationLine& line : plan.lines) {
-                    placeLine(line.parts, line.top_pt, line.page);
-                    ++line_total;
-                }
-                cursor_y = plan.cursor_y_pt;
-                page_index = plan.page_index;
-                float_placed = true;
             }
-            // 格内块：断行已由块局部排版给出，落位按旧循环的次序逐行累加行高。格内不翻页，
-            //   页号只由行顶现算（连页下是条带号），行高不够时由表格行切片处理。
-            bool cell_placed = false;
-            if (!wrap_floats && cell_block && local_block.status == BlockLayoutStatus::Ok &&
-                !block_lines.empty()) {
-                for (const BrokenLine& line : block_lines) {
-                    parts.assign(1, LinePart{line, cur_cx});
-                    placeLine(parts, top, slabOfY(top));
-                    top += line.line_h;
-                    ++line_total;
-                }
-                cursor_y = top + b.space_after_pt;
-                cell_placed = true;
+            for (const BlockPlanLine& line : plan.lines) {
+                placeLine(line.parts, line.top_pt, line.page, line.line_no);
             }
-            while (!simple_placed && !float_placed && !cell_placed &&
-                   start_cl < bs.clusters.size()) {
-                // 行顶先算成分页无关的块轴纵坐标，再依次过四道关：翻页、浮动框随段走、
-                //   上下型下推、四周型取宽。四道都在块轴上做，最后折回页内坐标画字 ——
-                //   分页的"页底"与连页的"带底"于是只是同一个式子的两种取值。
-                //
-                //   没有浮动图时不做这套换算：块轴坐标在分页下是
-                //   "页号 x 页高 + 页内"，再减回去会有浮点误差（第 190 页上末位差 0.008 磅），
-                //   而增量排版的后缀平移是按行高逐行累加的 —— 两边差一点点，
-                //   auditLayout 就整篇对不上。没有浮动图时这里与改造前逐位相同。
-                float line_top = anchor ? cursor_y : (top + prev_line_h);
-                float line_flow = wrap_floats ? flowY(page_index, line_top) : line_top;
-                float line_h = 0.0f;
-                // 最多两趟：第一趟按本段行高估着定位，断完发现本行更高、放不下就换页再来。
-                for (int attempt = 0; attempt < 2; ++attempt) {
-                    // 本页放不下就翻页。只在有浮动图时预先判：那时排版本来就是整篇
-                    //   重来（must_full），多一次提前判不会与"后缀整体平移"打架；
-                    //   没有浮动图时提前判会引入一条平移路径复现不出来的规则
-                    //   （平移是整段搬坐标，不会重新回答"这一行放不放得下"），
-                    //   于是增量结果与全量重排对不上（auditLayout 会红）。
-                    if (!cont && tstack.empty() && wrap_floats) {
-                        const int pg = flowPage(line_flow);
-                        const float local = flowLocal(pg, line_flow);
-                        if (pg > page_index || local + block_line_h > cy + ch) {
-                            page_index = std::max(page_index + 1, pg);
-                            cursor_y = cy;
-                            line_flow = flowY(page_index, cy);
-                            anchor = true;
-                        }
-                    }
-                    // 段首行被翻页推走：本段的浮动框整体平移（否则图留在上一页）。
-                    if (wrap_floats && first_line && !floats_shifted) {
-                        const float shift = line_flow - anchor_flow;
-                        if (std::fabs(shift) > 0.01f) {
-                            live_flow.shiftFrom(live_base, shift);
-                            for (size_t k = placed_base; k < res.placed_floats.size(); ++k) {
-                                PlacedFloat& pf = res.placed_floats[k];
-                                const float f0 = flowY(pf.page, pf.y) + shift;
-                                pf.page = flowPage(f0);
-                                pf.y = flowLocal(pf.page, f0);
-                            }
-                            anchor_flow = line_flow;
-                            floats_shifted = true;
-                        }
-                    }
-                    // 上下型：行顶落在框的纵向区间里就整行下推到框底。
-                    pushLineBelowFloats(live_flow, block_line_h, &line_flow);
-                    // 被推到本页放不下的位置：换页重新落。框留在它自己那一页（或上一条带），
-                    //   新页上不必再让 —— 这里只往前走一次，不再触发段首行平移。
-                    if (!cont && tstack.empty() && wrap_floats) {
-                        const int pg = flowPage(line_flow);
-                        const float local = flowLocal(pg, line_flow);
-                        if (pg > page_index || local + block_line_h > cy + ch) {
-                            page_index = std::max(page_index + 1, pg);
-                            cursor_y = cy;
-                            line_flow = flowY(page_index, cy);
-                            anchor = true;
-                        }
-                    }
-                    // 四周型：把框占掉的那一段从本行可用区间里减出去。图贴着一边时只剩
-                    //   另一侧一段（与"整行让开"同形）；图落在中间时剩下左右两段，文字
-                    //   先填左段再填右段 —— 与阅读顺序一致，也是 Word 的四周型。
-                    row_spans.assign(1, LineSpan{cur_cx, cur_cw});
-                    cutSpansAroundFloats(live_flow, line_flow, block_line_h, kFloatWrapGapPt,
-                                         &row_spans);
-                    if (wrap_floats) line_top = cont ? line_flow : flowLocal(page_index, line_flow);
-                    fillLine(row_spans, start_cl, &parts, &line_h);
-                    // 一段都放不下：行顶移到框底再来（与上下型同一条规则）。框高过整页时
-                    //   不再推，直接退回整宽 —— 排不出行比压在图上更糟。
-                    for (int guard = 0; guard < 4 && parts.empty(); ++guard) {
-                        const float next =
-                            nextSquareFloatBottom(live_flow, line_flow, block_line_h);
-                        if (!(next > line_flow + 0.5f)) break;
-                        line_flow = next;
-                        if (wrap_floats)
-                            line_top = cont ? line_flow : flowLocal(page_index, line_flow);
-                        row_spans.assign(1, LineSpan{cur_cx, cur_cw});
-                        cutSpansAroundFloats(live_flow, line_flow, block_line_h, kFloatWrapGapPt,
-                                             &row_spans);
-                        fillLine(row_spans, start_cl, &parts, &line_h);
-                    }
-                    if (parts.empty()) {
-                        row_spans.assign(1, LineSpan{cur_cx, cur_cw});
-                        fillLine(row_spans, start_cl, &parts, &line_h);
-                    }
-                    // 本行自己的高度才作数：上一行结束时还不知道本行多高，拿段行高估会
-                    //   漏判（下一行更高时溢出页底）。连页下没有页底这一条，整段短路。
-                    if (cont || !tstack.empty() || line_top + line_h <= cy + ch) break;
-                    ++page_index;
-                    cursor_y = cy;
-                    line_top = cy;
-                    if (wrap_floats) line_flow = flowY(page_index, cy);
-                    anchor = true;
-                }
-                top = line_top;
-                anchor = false;
-                placeLine(parts, top, slabOfY(top));
-                prev_line_h = line_h;
-                first_line = false;
-                if (parts.empty()) break;  // 兜底：断不出新行时不要死循环
-                start_cl = parts.back().line.end;
-                ++line_total;
-            }
-            if (!simple_placed && !float_placed && !cell_placed) {
-                cursor_y = top + prev_line_h + b.space_after_pt;
-            }
+            line_total = plan.line_total;
+            cursor_y = plan.cursor_y_pt;
+            page_index = plan.page_index;
             pruneFloats(wrap_floats ? flowY(page_index, cursor_y) : cursor_y);
 
         } else {
             // 竖排
             // 列长 = 版心高（一列到底），列宽按这一列自己的行高算 —— 混排字号下小字列
             //   不该占大字列的宽度。列位由前缀和推进：中日（RTL）从右边缘往左推，蒙文
-            //   （LTR）从左边缘往右推。简单竖排块的断列与列位由块局部排版给出
-            //   （layoutBlockFragments 的 columns），分页只把每条竖带映射成页；格内与
-            //   带浮动图的竖排仍走下面这套旧循环。
-            const bool rtl = b.wm.isBlockReversed();
-            int col = 0;
+            //   （LTR）从左边缘往右推。断列与列位由块局部排版给出（layoutBlockFragments
+            //   的 columns），分页只把每条竖带映射成页。
 
-            // 落位：给这一列的列心、列宽与列顶，产出它的列盒与字形。它只认几何，不决定
-            //   几何 —— 换带（分页）在块局部排版或下面那个判据里。
-            auto placeColumn = [&](const BrokenLine& col_line, float col_center, float col_w,
-                                   float pen_y, int page, int line_no) {
+            // 落位：给这一列的列心、列顶，产出它的列盒与字形。它只认几何，不决定
+            //   几何 —— 换带在块局部排版里。列宽就是片段的 line_h（见 BlockColumn），
+            //   所以不再单独传：传进来就能和片段对不上。
+            auto placeColumn = [&](const LinePart& part, float pen_y, int page, int line_no) {
                 LineCellRange cell;
                 if (!tstack.empty()) {
                     cell.cell_lo_pt = cur_cx;
@@ -1762,19 +1574,20 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
                     cell.box_lo_pt = tstack.back().cell_box_lo;
                     cell.box_hi_pt = tstack.back().cell_box_hi;
                 }
-                placeVerticalColumn(b, bs, fruns, col_line, col_center, col_w, pen_y, page, cont,
-                                    slab, static_cast<int>(para_index), line_no, cell, &res.lines,
-                                    &res.glyphs);
+                placeVerticalColumn(b, bs, fruns, part.line, part.x, part.line.line_h, pen_y, page,
+                                    cont, slab, static_cast<int>(para_index), line_no, cell,
+                                    &res.lines, &res.glyphs);
             };
 
             // 竖排块（正文与格内）：块局部排版按竖带断好列，分页只回答每条带落在哪一页。
             //   约束里的竖带：first_top_pt 是块首列顶，bottom_pt 是带下沿 —— 断列直接拿
             //   它们算，不再在这里重算。分页的后续带都从版心上沿起排；连页的后续带顶是
             //   块轴绝对坐标，逐带下移版心高，容量仍是"带下沿减绝对带顶"的旧式子。
-            bool vertical_placed = false;
-            if (simple_vertical_block || cell_vertical_block) {
+            //   块自身带浮动原子的竖排不存在：投影层把竖排里的浮动图降级成行内
+            //   （见 doc::project 的 float_ok），所以这里不需要第二条实现。
+            {
                 BlockConstraints constraints;
-                constraints.width_pt = cw;
+                constraints.width_pt = blockWidth(cw);
                 constraints.writing_mode = b.wm;
                 constraints.column.left_pt = cx;
                 constraints.column.bottom_pt = cy + ch;
@@ -1786,7 +1599,7 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
                 const BlockLayout local_block =
                     layoutBlockFragments(b, constraints, bs, cluster_metric);
                 if (!local_block.columns.empty()) {
-                    BlockColumnPaginationInput pin;
+                    BlockPlanInput pin;
                     pin.page_index = page_index;
                     pin.line_total = line_total;
                     pin.content_bottom_pt = cy + ch;
@@ -1795,97 +1608,15 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
                     pin.continuous = cont;
                     pin.slab_pt = slab;
                     pin.band_height_pt = ch;
-                    const BlockColumnPaginationResult plan =
-                        paginateBlockColumns(local_block.columns, pin);
-                    for (const BlockColumnPaginationColumn& pc : plan.columns) {
-                        placeColumn(pc.fragment, pc.center_pt, pc.width_pt, pc.top_pt, pc.page,
-                                    line_total + pc.line);
+                    const BlockPlan plan = planBlockColumns(local_block.columns, pin);
+                    for (const BlockPlanLine& line : plan.lines) {
+                        if (line.parts.empty()) continue;
+                        placeColumn(line.parts.front(), line.top_pt, line.page, line.line_no);
                     }
                     line_total = plan.line_total;
                     page_index = plan.page_index;
                     cursor_y = plan.cursor_y_pt;
-                    vertical_placed = true;
                 }
-            }
-
-            if (!vertical_placed) {
-                // 列长固定 = 内容高度（一列到底），列宽按这一列自己的最大字号算 —— 混排字号下
-                //   小字列不该占大字列的宽度（与 CSS 竖排一致：列宽由该列的行高决定）。
-                //   于是列位由前缀和推进而不是乘法：中日（RTL）从右边缘往左推，蒙文（LTR）
-                //   从左边缘往右推，两侧各记一个"下一列的边缘"。
-                //   列宽要等这一列的内容定下来才知道，而列长与列宽无关（列长就是内容高度），
-                //   所以"先取内容、再算宽度、再落列位"没有循环依赖。
-                //   col_w_max 是列宽的上界，只用于分页估计；基准与 breakLine 相同。
-                const float para_natural =
-                    (para_metric.ascent_pt + para_metric.descent_pt + para_metric.gap_pt > 0.0f)
-                        ? (para_metric.ascent_pt + para_metric.descent_pt + para_metric.gap_pt)
-                        : para_metric.size_pt;
-                const float col_w_max = lineHeightFor(b.line_spacing, para_natural, para_natural);
-                float region_top = cursor_y;
-                // 分页下要判"本页还放得下两条列位吗"；连页下没有页底，横带是新开的。
-                if (!cont && region_top + col_w_max * 2.0f > cy + ch) {
-                    ++page_index;
-                    cursor_y = cy;
-                    region_top = cy;
-                }
-
-                float pen_y = region_top;
-                float next_edge = rtl ? (cx + cw) : cx;  // 下一列的起始边缘
-                float col_w = col_w_max;                 // 本列宽度，进循环后按内容改写
-
-                // 换一条横带：列位用尽则另起一条（分页下就是翻页）。
-                //   连页下横带的长度取内容高度 ch（竖排的列长本来就是固定的一列），
-                //   下一条带排在它下面 —— 与分页下"另起一页"是同一个位置关系。
-                auto nextBand = [&]() {
-                    if (cont) {
-                        region_top += ch;
-                    } else {
-                        ++page_index;
-                        region_top = cy;
-                    }
-                    col = 0;
-                    next_edge = rtl ? (cx + cw) : cx;
-                    pen_y = region_top;
-                };
-
-                size_t start = 0;
-                while (start < bs.clusters.size()) {
-                    float avail = (cy + ch) - pen_y;
-                    if (avail < para_metric.size_pt) {
-                        nextBand();
-                        avail = (cy + ch) - pen_y;
-                    }
-
-                    // 一列一列地断：容量是这一条带剩下的高度（换带之后重算），所以这里只断
-                    //   一列。列宽（竖排下的"行高"）由 breakLine 算 —— 与横排同一个式子。
-                    const BrokenLine col_line =
-                        breakLine(bs, cluster_metric, start, avail, b.size_pt, b.line_spacing);
-                    col_w = col_line.line_h;
-
-                    // 本列在剩余宽度里放不下就换一条带。这一步只能放在"这一列的内容定下来
-                    //   之后"：列宽是逐列算出来的，事先不知道。列长与列宽无关，换带之后同一段
-                    //   内容仍然装得下（avail 不变），所以不必重新取。
-                    //   第一列例外：放不下也照排，否则永远排不进去。
-                    const float edge_after = rtl ? (next_edge - col_w) : (next_edge + col_w);
-                    const bool overflow =
-                        rtl ? (edge_after < cx - 0.01f) : (edge_after > cx + cw + 0.01f);
-                    if (col > 0 && overflow) nextBand();
-
-                    const float col_center =
-                        rtl ? (next_edge - col_w * 0.5f) : (next_edge + col_w * 0.5f);
-                    placeColumn(col_line, col_center, col_w, pen_y, page_index, line_total + col);
-                    start = col_line.end;
-                    if (start < bs.clusters.size()) {
-                        next_edge = rtl ? (next_edge - col_w) : (next_edge + col_w);
-                        ++col;
-                        pen_y = region_top;
-                    }
-                }
-                line_total += col + 1;
-                // 竖排块在分页下吃掉本页剩余高度（后续块另起一页）；连页下它占的是
-                //   若干条长 ch 的横带，所以下一条从最后那条带的底下开始。
-                cursor_y =
-                    cont ? (region_top + ch + b.space_after_pt) : (cy + ch + b.space_after_pt);
             }
         }
 

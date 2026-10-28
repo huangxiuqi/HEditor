@@ -301,10 +301,9 @@ bool EditorEngine::canTableOp(TableOp op) const {
                     cb.first >= static_cast<int>(projection_.blocks_full.size())) {
                     return false;
                 }
-                const std::vector<CellSlot>& path =
-                    projection_.blocks_full[static_cast<size_t>(cb.first)].cell_path;
-                if (path.empty()) return false;
-                const CellSlot& slot = path.back();
+                const CellNode* node = projection_.structure.cells_index.nodeAt(cb.first);
+                if (node == nullptr) return false;
+                const CellSlot& slot = node->slot;
                 doc::CellRef one;
                 if (!doc::cellRefOf(doc, slot.table, slot.row, slot.cell, &one)) return false;
                 cells.push_back(one);
@@ -388,10 +387,9 @@ std::string EditorEngine::tableStateJson() const {
         if (cb.empty()) continue;
         const int para = cb.first;
         if (para < 0 || para >= static_cast<int>(projection_.blocks_full.size())) continue;
-        const std::vector<CellSlot>& path =
-            projection_.blocks_full[static_cast<size_t>(para)].cell_path;
-        if (path.empty()) continue;
-        const CellSlot& slot = path.back();
+        const CellNode* node = projection_.structure.cells_index.nodeAt(para);
+        if (node == nullptr) continue;
+        const CellSlot& slot = node->slot;
         ++sel_cells;
         if (!sel_any || slot.row < sel_lo_row) sel_lo_row = slot.row;
         if (!sel_any || slot.row > sel_hi_row) sel_hi_row = slot.row;

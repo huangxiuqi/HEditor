@@ -1,6 +1,7 @@
 # 项目长期记忆（HEditor）
 
-**约束**：不执行 git 写入；不动 `.git`；`memory/` 只追加；开发期不留向后兼容（判据与文档同步改）。
+**约束**：git 写操作可用，但 `git stash` 绝对禁止（沙箱已拦，勿等价模拟）；不动 `.git`；
+`memory/` 只追加；开发期不留向后兼容（判据与文档同步改）。
 **索引**：`TRAPS.md` · `ARCH-NOTES.md` · `ENV.md`；语义权威见 `docs/`；
 数据流与特例面的现状见 `docs/架构复核-数据流与特例面-2026-10-27.md`（取代 10-19 那份的数据流部分）。
 
@@ -11,6 +12,10 @@
 - 闸：`format.ps1 -Check` 全合规；`cd web && npm run check` 全 0。构建 wasm 与跑判据不并发；
   跑判据期间不动 `web/`；改 wasm 或 `web/src/engine/api.ts` 后必须 `npm run build:worker`
   （映射表在 Worker 壳里；漏了的表现是「命令生效、读回的字段却是旧的」）。
+- **判据红了先排除构建**：中文 VS 的 `/showIncludes` 前缀是「注意: 包含文件:」，CMake 只认
+  英文 → ninja 头依赖恒为 0（同一份代码三次跑出 28/7/2 项失败）。已在 `CMakeLists.txt` 用
+  `CMAKE_DEPENDS_USE_COMPILER OFF` 让 CMake 自己扫 `#include`；核对：`ninja -t deps <obj>`
+  应 `#deps > 0`。
 - 探针：`p.read` 才拼 H/D 前言；`showCaret` 是静默写。读页像素要 `H.flush()` + 两帧 rAF，
   页画布是 OffscreenCanvas（`drawImage` 出来再读）。
 - 判据按**功能域**建 spec：一域一份，域内 `describe` 分节；新功能与修缺陷都加进所属域，
@@ -45,6 +50,8 @@
 - 控件区间只查 `control_spans.h`；"文字位置 + 侧别 = 流位置"有唯一实现。
 - 表格命令的主语是"光标所在那一格"，拒绝条件全在引擎；改格记录一律整份 `CellSpec`；新格必须带
   `ParagraphMark`；文档不能以表格结尾（末尾补空段）。
+- 块↔格只有一份记录：`CellIndex` 从 `LayoutTable::cells` 的块区间反推（`BlockSpec` 不带
+  `cell_path`，`StructureIndex` 只是它的视图）。要问"这一段在哪一格"就查 `cellIndex()`。
 - 整格选区盖满某张表的**全部格位** = 选的是这张表（拖选整表即此形态）⇒ 删整表删节点；只盖
   一部分才逐格清空（逐格比块区间，空格流长度为 0）。表是文档唯一内容时不动结构。
 - 值是投影的控件（选择类 / 下拉 / 日期）：空值投影成提示、光标屏障生效（否则连插两个会嵌套）；

@@ -497,6 +497,10 @@
           "kind": "num"
         },
         {
+          "name": "tablesRelaid",
+          "kind": "num"
+        },
+        {
           "name": "repaintedPages",
           "kind": "num"
         },
@@ -798,15 +802,7 @@
           "kind": "num"
         },
         {
-          "name": "pathMismatch",
-          "kind": "num"
-        },
-        {
           "name": "badSpan",
-          "kind": "num"
-        },
-        {
-          "name": "stray",
           "kind": "num"
         },
         {

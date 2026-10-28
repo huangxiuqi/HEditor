@@ -25,6 +25,7 @@
 #include "core/doc/step_types.h"
 #include "core/doc/steps.h"
 #include "core/doc/textbuf.h"
+#include "core/layout/cell_index.h"
 
 #include "demo/demo_documents.h"
 
@@ -487,14 +488,6 @@ doc::Doc makeTableDoc(const Length& col0, const Length& row0_height) {
     const doc::Ref section = doc::makeNode(2, NodeKind::Section, SectionSpec{},
                                            {run(U"表前"), mark(), table, run(U"表后"), mark()});
     return doc::adopt(doc::makeNode(1, NodeKind::Document, {}, {section}), id);
-}
-
-/**
- * 两套模型的节点号不同，格路径里的表格句柄没法直接比 —— 比对前把它归零。
- */
-BlockSpec withoutTableHandle(BlockSpec b) {
-    for (CellSlot& slot : b.cell_path) slot.table = 0;
-    return b;
 }
 
 /**
@@ -1375,10 +1368,14 @@ int main() {
         expectTrue(!pr.tables.empty() && pr.tables[0].rows == 2 && pr.tables[0].cols == 3 &&
                        pr.tables[0].cells.size() == 5,
                    "表格结构：两行三列、五个逻辑格");
-        expectTrue(!pr.blocks.empty() && pr.blocks[1].cell_path.size() == 1 &&
-                       pr.blocks[1].cell_path[0].row == 0 && pr.blocks[1].cell_path[0].cell == 0,
+        // 块的归属由格的块区间反推，判据看的就是这条推导。
+        heditor::CellIndex cells;
+        cells.build(pr.tables, pr.blocks.size());
+        std::vector<CellSlot> path;
+        cells.pathAt(1, &path);
+        expectTrue(path.size() == 1 && path[0].row == 0 && path[0].cell == 0,
                    "第一格里的块带着它的格路径");
-        expectTrue(pr.blocks[6].cell_path.empty(), "表后的正文块没有格路径");
+        expectTrue(cells.nodeAt(6) == nullptr, "表后的正文块没有格路径");
         expectTrue(pr.controls.empty(), "表格里没有控件");
 
         // 改一格文字：损伤只落在那一块。
@@ -1557,13 +1554,18 @@ int main() {
         expectTrue(pr.tables.size() == 2, "两张结构表（外 + 内）");
 
         // 格路径是"外层到内层"的序列：内表格里的块带两层，外表格另一格的块只带一层。
-        expectTrue(pr.blocks[2].cell_path.size() == 2 && pr.blocks[3].cell_path.size() == 2,
-                   "内表格的块带两层格路径");
-        expectTrue(pr.blocks[2].cell_path[0].table != pr.blocks[2].cell_path[1].table,
-                   "两层格路径指向两张不同的表");
-        expectTrue(pr.blocks[4].cell_path.size() == 1, "外表格另一格的块只带一层");
-        expectTrue(pr.blocks[1].cell_path.size() == 1 && pr.blocks[5].cell_path.empty(),
-                   "格里的文字一层，表后的正文没有格路径");
+        heditor::CellIndex cells;
+        cells.build(pr.tables, pr.blocks.size());
+        std::vector<CellSlot> p2;
+        std::vector<CellSlot> p4;
+        std::vector<CellSlot> p5;
+        cells.pathAt(2, &p2);
+        cells.pathAt(4, &p4);
+        cells.pathAt(5, &p5);
+        expectTrue(p2.size() == 2 && cells.depthAt(3) == 2, "内表格的块带两层格路径");
+        expectTrue(p2.size() == 2 && p2[0].table != p2[1].table, "两层格路径指向两张不同的表");
+        expectTrue(p4.size() == 1, "外表格另一格的块只带一层");
+        expectTrue(cells.depthAt(1) == 1 && p5.empty(), "格里的文字一层，表后的正文没有格路径");
 
         // 块区间：外表格第一格含 "A" 与内表格两块，所以是三块；第二格一块。
         expectTrue(pr.tables.size() == 2 && pr.tables[0].cells.size() == 2 &&

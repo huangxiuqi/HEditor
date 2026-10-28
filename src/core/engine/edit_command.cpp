@@ -1245,8 +1245,8 @@ EditCommand::SelectionErase EditCommand::planEraseSelection() {
  */
 bool EditCommand::sameCellBlocks(int a, int b) const {
     if (view_.structure == nullptr) return true;
-    const CellRef& ca = view_.structure->cellAt(a);
-    const CellRef& cb = view_.structure->cellAt(b);
+    const CellRef ca = view_.structure->cellAt(a);
+    const CellRef cb = view_.structure->cellAt(b);
     if (ca.table < 0 && cb.table < 0) return true;
     if (ca.table < 0 || cb.table < 0) return false;
     return ca.table == cb.table && ca.cell == cb.cell;
@@ -1298,7 +1298,7 @@ std::vector<Step> EditCommand::eraseCellContents(FlowPos from, FlowPos to) const
             if (last_end <= from || lo >= to) return;
             spans.push_back({first_b, count});
         };
-        for (const CellExtent& c : view_.structure->cell_extents) {
+        for (const CellNode& c : view_.structure->cells_index.nodes) {
             add_cell(c.first_block, c.block_count);
         }
     }
@@ -1543,8 +1543,8 @@ std::vector<Step> EditCommand::eraseTablesCoveredByCells(FlowPos* anchor) const 
         const TableSpan& span = view_.structure->tableSpan(ti);
         bool all = true;
         for (int k = 0; k < span.cell_count; ++k) {
-            const CellExtent& c =
-                view_.structure->cell_extents[static_cast<size_t>(span.first_cell + k)];
+            const CellNode& c =
+                view_.structure->cells_index.nodes[static_cast<size_t>(span.first_cell + k)];
             if (!picked_has(c.first_block, c.block_count)) {
                 all = false;
                 break;
@@ -2764,11 +2764,10 @@ bool EditCommand::pasteNodes(const std::vector<NodeSpec>& nodes) {
 bool EditCommand::currentTableCell(doc::CellRef* out, int* row, int* col) const {
     if (!hasFlow() || out == nullptr) return false;
     const int para = pos().caret().para;
-    const std::vector<BlockSpec>& all = blocks();
-    if (para < 0 || para >= static_cast<int>(all.size())) return false;
-    const std::vector<CellSlot>& path = all[static_cast<size_t>(para)].cell_path;
-    if (path.empty()) return false;
-    const CellSlot& slot = path.back();
+    const CellNode* node =
+        (view_.structure == nullptr) ? nullptr : view_.structure->cells_index.nodeAt(para);
+    if (node == nullptr) return false;
+    const CellSlot& slot = node->slot;
     if (!doc::cellRefAt(doc(), slot.table, slot.row, slot.cell, out)) return false;
     if (row != nullptr || col != nullptr) {
         int r = 0;
@@ -2792,14 +2791,14 @@ bool EditCommand::caretIntoCell(NodeId table, int row, int col) {
     // 落在合并区域里时给的是原点格 —— 光标要落进那一格的内容，不是那个格位。
     doc::CellRef target;
     if (!doc::cellRefOf(doc(), table, slot->row, slot->col, &target)) return false;
-    const std::vector<BlockSpec>& all = blocks();
-    for (size_t i = 0; i < all.size(); ++i) {
-        const std::vector<CellSlot>& path = all[i].cell_path;
-        if (path.empty()) continue;
-        const CellSlot& at = path.back();
-        if (at.table != static_cast<uint64_t>(target.table)) continue;
-        if (at.row != target.row_index || at.cell != target.cell_index) continue;
-        pos().setCaretAtFlow(blockFlow()[i]);
+    if (view_.structure == nullptr) return false;
+    for (const CellNode& n : view_.structure->cells_index.nodes) {
+        if (n.slot.table != static_cast<uint64_t>(target.table)) continue;
+        if (n.slot.row != target.row_index || n.slot.cell != target.cell_index) continue;
+        if (n.first_block < 0 || n.first_block >= static_cast<int>(blockFlow().size())) {
+            return false;
+        }
+        pos().setCaretAtFlow(blockFlow()[static_cast<size_t>(n.first_block)]);
         return true;
     }
     return false;
@@ -2939,18 +2938,18 @@ bool EditCommand::mergeTableCells() {
         return false;
     }
     std::vector<doc::CellRef> cells;
-    const std::vector<BlockSpec>& all = blocks();
     for (const CaretResolver::CellBlocks& cb : blocks_of_cells) {
-        if (cb.empty() || cb.first < 0 || cb.first >= static_cast<int>(all.size())) {
+        if (cb.empty() || cb.first < 0) {
             noteBlocked();
             return false;
         }
-        const std::vector<CellSlot>& path = all[static_cast<size_t>(cb.first)].cell_path;
-        if (path.empty()) {
+        const CellNode* node =
+            (view_.structure == nullptr) ? nullptr : view_.structure->cells_index.nodeAt(cb.first);
+        if (node == nullptr) {
             noteBlocked();
             return false;
         }
-        const CellSlot& slot = path.back();
+        const CellSlot& slot = node->slot;
         doc::CellRef ref;
         if (!doc::cellRefAt(doc(), slot.table, slot.row, slot.cell, &ref)) {
             noteBlocked();
@@ -3029,7 +3028,7 @@ bool EditCommand::splitTableCell() {
 
 NodeId EditCommand::tableAtPara(int para) const {
     if (!view_.tables || view_.structure == nullptr) return kInvalidNodeId;
-    const CellRef& ref = view_.structure->cellAt(para);
+    const CellRef ref = view_.structure->cellAt(para);
     if (ref.table < 0 || ref.table >= static_cast<int>(view_.tables->size())) {
         return kInvalidNodeId;
     }
@@ -3056,7 +3055,7 @@ bool EditCommand::removeTableAtCaret() {
     // 表是文档里唯一的内容时拒绝：删完一个块都不剩，光标没有能停的地方。
     int first_b = -1;
     int last_b = -1;
-    const CellRef& ref = view_.structure->cellAt(pos().caret().para);
+    const CellRef ref = view_.structure->cellAt(pos().caret().para);
     if (ref.table >= 0) {
         const TableSpan& span = view_.structure->tableSpan(ref.table);
         first_b = span.first_block;

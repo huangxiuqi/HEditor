@@ -536,16 +536,14 @@ struct LineSpacing {
     }
 };
 
+/**
+ * 一段的排版输入。
+ *
+ * 块不记"自己在哪一格"：表格结构里的格用块区间声明自己有哪些块，块到格的归属由
+ * CellIndex 从那份声明反推。块上再存一条路径就是同一件事的第二个副本，两者可以互相
+ * 矛盾，而矛盾只会以"块在格里、表框没开"这种形式在很远的地方出现。
+ */
 struct BlockSpec {
-    /**
-     * 这一段所在的单元格路径（外层到内层）。空 = 正文。
-     *
-     * 表格是扁平化进块流的：格里的内容照常编成段落，"它在哪一格"只记在这条路径上。
-     * 嵌套表格就是路径更长一条。句柄不透明 —— 排版层只拿它把同一格的块聚到一起，
-     * 再经结构表换出这一格的几何，不认识节点。
-     */
-    std::vector<CellSlot> cell_path;
-
     /**
      * 段落文本的唯一真源是码点（UCS-4）。UTF-8 只是 I/O 表示，
      * 用 setText()/textUtf8() 在两个表示之间往返。
@@ -715,8 +713,8 @@ struct BlockSpec {
      * 要的：判据漏比一个字段，等于允许两条路在这一点上静默分叉。
      */
     bool operator==(const BlockSpec& o) const {
-        return cell_path == o.cell_path && cp_text == o.cp_text && font_index == o.font_index &&
-               size_pt == o.size_pt && wm == o.wm && line_spacing == o.line_spacing &&
+        return cp_text == o.cp_text && font_index == o.font_index && size_pt == o.size_pt &&
+               wm == o.wm && line_spacing == o.line_spacing &&
                space_before_pt == o.space_before_pt && space_after_pt == o.space_after_pt &&
                page_break_before == o.page_break_before && sameLanguage(language, o.language) &&
                color == o.color && weight == o.weight && italic == o.italic &&
@@ -2081,8 +2079,8 @@ ReflowState layoutDocumentRange(FontLibrary& lib, const std::vector<BlockSpec>& 
                                 const ReflowState& state, ShapingCache* cache, LayoutResult* out);
 
 /**
- * 带表格结构的续排入口。带 cell_path 的块按格矩形排（格内断行、行高按内容结算），
- * 其余与上面那条完全相同。
+ * 带表格结构的续排入口。落在格里的块按格矩形排（格内断行、行高按内容结算），
+ * 其余与上面那条完全相同。块在不在格里由表格结构的格区间反推，块自身不声明。
  *
  * 表格只支持横排：竖排文档里的表格块仍按整页宽排（明确的边界，不做静默的错误布局）。
  * tables 为空时与不带表格的那条入口逐字节相同（所有现有调用点走的就是这条路）。

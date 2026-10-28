@@ -681,7 +681,7 @@ int EditorEngine::dragKindAt(const TextPos& p, int side, const ImageHit& ih) con
         //   表格拆开 —— 两条都没有语义，命令层会拒绝，这里就不该起手。
         for (size_t i = 0; i < projection_.blocks_full.size() && i < projection_.block_flow.size();
              ++i) {
-            if (projection_.blocks_full[i].cell_path.empty()) continue;
+            if (projection_.structure.cells_index.nodeAt(static_cast<int>(i)) == nullptr) continue;
             const FlowPos lo = projection_.block_flow[i];
             const FlowPos hi = lo + projection_.block_flow_span[i];
             if (hi > sel.begin() && lo < sel.end()) return 0;

@@ -1206,12 +1206,15 @@ int main() {
         const float cw = page.contentWidthPt();  // 280
         const float pad = kTableCellPadXPt;      // 只有左右有内边距，上下为 0
 
-        auto mkCellBlock = [&](const std::string& text, uint64_t table, int row, int cell) {
+        // 块在 grid 里的位置。格用块区间声明归属，块流按格序排，两边说的是同一件事，
+        //   所以位置在造块时记下来，由 cellsOf 变成格区间。
+        std::vector<std::pair<int, int>> where;
+        auto mkCellBlock = [&](const std::string& text, int row, int cell) {
+            where.push_back({row, cell});
             BlockSpec b;
             b.font_index = cjk;
             b.size_pt = kSize;
             b.cp_text = utf8ToCodepoints(text);
-            b.cell_path.push_back(CellSlot{table, row, cell});
             return b;
         };
         auto mkTable = [&](uint64_t handle, int rows, int cols) {
@@ -1223,7 +1226,7 @@ int main() {
             t.row_specs.assign(static_cast<size_t>(rows), LayoutRow{});
             return t;
         };
-        // 每格的在 grid 里的原点列（无合并时就是格号）。
+        // 每格的在 grid 里的原点列（无合并时就是格号），块区间按 where 推出来。
         auto cellsOf = [&](int rows, int cols) {
             std::vector<LayoutCell> out;
             for (int r = 0; r < rows; ++r) {
@@ -1231,18 +1234,29 @@ int main() {
                     LayoutCell lc;
                     lc.row = r;
                     lc.cell = c;
+                    int first = -1;
+                    int count = 0;
+                    for (size_t i = 0; i < where.size(); ++i) {
+                        if (where[i].first != r || where[i].second != c) continue;
+                        if (first < 0) first = static_cast<int>(i);
+                        ++count;
+                    }
+                    if (first >= 0) {
+                        lc.first_block = first;
+                        lc.block_count = count;
+                    }
                     out.push_back(lc);
                 }
             }
+            where.clear();
             return out;
         };
 
         // 一：2x2 表，每格一个字 —— 四个行盒，同行的 y 相同、不同列的 x 差一个列宽。
         {
             constexpr uint64_t kT = 7;
-            std::vector<BlockSpec> blocks = {
-                mkCellBlock("甲", kT, 0, 0), mkCellBlock("乙", kT, 0, 1),
-                mkCellBlock("丙", kT, 1, 0), mkCellBlock("丁", kT, 1, 1)};
+            std::vector<BlockSpec> blocks = {mkCellBlock("甲", 0, 0), mkCellBlock("乙", 0, 1),
+                                             mkCellBlock("丙", 1, 0), mkCellBlock("丁", 1, 1)};
             LayoutTable t = mkTable(kT, 2, 2);
             t.width = WidthSpec::makeAbs(cw);  // 撑满 280 → 每列 140
             t.cells = cellsOf(2, 2);
@@ -1272,8 +1286,7 @@ int main() {
             constexpr uint64_t kT = 8;
             // 20 个汉字 = 240 磅；格宽 = 280 - 8 = 272 也装得下 —— 所以缩成两列，
             //   让格宽只有 136，15 个汉字必断行。
-            std::vector<BlockSpec> blocks = {
-                mkCellBlock("一二三四五六七八九十一二三四五", kT, 0, 0)};
+            std::vector<BlockSpec> blocks = {mkCellBlock("一二三四五六七八九十一二三四五", 0, 0)};
             LayoutTable t = mkTable(kT, 1, 2);
             t.cells = cellsOf(1, 2);
             const LayoutResult r = layoutDocument(lib, blocks, page, {t});
@@ -1294,8 +1307,7 @@ int main() {
         // 三：显式行高（Exact）把整行撑到给定高度。
         {
             constexpr uint64_t kT = 9;
-            std::vector<BlockSpec> blocks = {mkCellBlock("甲", kT, 0, 0),
-                                             mkCellBlock("乙", kT, 1, 0)};
+            std::vector<BlockSpec> blocks = {mkCellBlock("甲", 0, 0), mkCellBlock("乙", 1, 0)};
             LayoutTable t = mkTable(kT, 2, 1);
             t.cells = cellsOf(2, 1);
             t.row_specs[0].height_pt = 40.0f;
@@ -1318,8 +1330,7 @@ int main() {
         // 四：显式列宽只占一列，其余列平分剩下的宽度。
         {
             constexpr uint64_t kT = 10;
-            std::vector<BlockSpec> blocks = {mkCellBlock("甲", kT, 0, 0),
-                                             mkCellBlock("乙", kT, 0, 1)};
+            std::vector<BlockSpec> blocks = {mkCellBlock("甲", 0, 0), mkCellBlock("乙", 0, 1)};
             LayoutTable t = mkTable(kT, 1, 2);
             t.width = WidthSpec::makeAbs(200.0f);
             t.col_widths[0] = WidthSpec::makeAbs(60.0f);
@@ -1335,7 +1346,7 @@ int main() {
         // 五：表宽百分比 + 居中 —— 表左边缘按对齐算。
         {
             constexpr uint64_t kT = 11;
-            std::vector<BlockSpec> blocks = {mkCellBlock("甲", kT, 0, 0)};
+            std::vector<BlockSpec> blocks = {mkCellBlock("甲", 0, 0)};
             LayoutTable t = mkTable(kT, 1, 1);
             t.width = WidthSpec::makePercent(0.5f);  // 140
             t.align = TableHAlign::Center;
@@ -1350,8 +1361,7 @@ int main() {
         // 六：反向一半 —— 同一批块不传表格结构时，按正文排（行内起点就是内容区左边）。
         {
             constexpr uint64_t kT = 12;
-            std::vector<BlockSpec> blocks = {mkCellBlock("甲", kT, 0, 0),
-                                             mkCellBlock("乙", kT, 0, 1)};
+            std::vector<BlockSpec> blocks = {mkCellBlock("甲", 0, 0), mkCellBlock("乙", 0, 1)};
             LayoutTable t = mkTable(kT, 1, 2);
             t.cells = cellsOf(1, 2);
             const LayoutResult with = layoutDocument(lib, blocks, page, {t});
@@ -1380,7 +1390,7 @@ int main() {
             //   只剩 7.6 磅时放不下，整行要换到第 2 页。
             for (int r = 0; r < 2; ++r) {
                 for (int c = 0; c < 2; ++c) {
-                    blocks.push_back(mkCellBlock("甲乙丙", kT, r, c));
+                    blocks.push_back(mkCellBlock("甲乙丙", r, c));
                 }
             }
             LayoutTable t = mkTable(kT, 2, 2);
@@ -1409,8 +1419,8 @@ int main() {
                 "一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十一二三四五六七八九十"
                 "一二三四五六七八九十";
             auto build = [&](bool can_split) {
-                std::vector<BlockSpec> blocks = {mkCellBlock("甲", kT, 0, 0),
-                                                 mkCellBlock(long_text, kT, 1, 0)};
+                std::vector<BlockSpec> blocks = {mkCellBlock("甲", 0, 0),
+                                                 mkCellBlock(long_text, 1, 0)};
                 LayoutTable t = mkTable(kT, 2, 1);
                 t.cells = cellsOf(2, 1);
                 t.row_specs[0].can_split_by_page = can_split;
@@ -1448,10 +1458,9 @@ int main() {
         //   它切格与切行同时发生，走的是另一条（会顺带结算的）路径。
         {
             constexpr uint64_t kT = 15;
-            std::vector<BlockSpec> blocks = {
-                mkCellBlock("甲", kT, 0, 0), mkCellBlock("乙", kT, 0, 0),
-                mkCellBlock("丙", kT, 0, 1), mkCellBlock("丁", kT, 1, 0),
-                mkCellBlock("戊", kT, 1, 1)};
+            std::vector<BlockSpec> blocks = {mkCellBlock("甲", 0, 0), mkCellBlock("乙", 0, 0),
+                                             mkCellBlock("丙", 0, 1), mkCellBlock("丁", 1, 0),
+                                             mkCellBlock("戊", 1, 1)};
             LayoutTable t = mkTable(kT, 2, 2);
             t.cells = cellsOf(2, 2);
             const LayoutResult r = layoutDocument(lib, blocks, page, {t});
@@ -1817,7 +1826,6 @@ int main() {
         }
         {
             BlockSpec cell = mkBlock("格内文本按格宽断行宽度收窄之后行数变多");
-            cell.cell_path.push_back(CellSlot{7, 0, 0});
             const BlockLayout wide = layoutBlock(lib, cell, mkConstraints(cell, cw), nullptr);
             const BlockLayout narrow =
                 layoutBlock(lib, cell, mkConstraints(cell, cw * 0.4f), nullptr);
@@ -1831,7 +1839,6 @@ int main() {
         {
             BlockSpec cell = mkBlock("格内竖排");
             cell.wm = WritingMode::VerticalRL();
-            cell.cell_path.push_back(CellSlot{7, 0, 0});
             BlockConstraints vc = mkConstraints(cell, cw);
             vc.column.left_pt = page.margins.left;
             vc.column.bottom_pt = page.margins.top + page.contentHeightPt();
@@ -1879,7 +1886,7 @@ int main() {
             }
             return lines;
         };
-        BlockPaginationInput in;
+        BlockPlanInput in;
         in.content_top_pt = 10.0f;
         in.content_bottom_pt = 110.0f;  // 版心高 100
         in.page_index = 0;
@@ -1887,8 +1894,7 @@ int main() {
 
         // 页内逐行推进，越过版心下沿才翻页，页首行回到版心上沿。
         {
-            const BlockPaginationResult r =
-                paginateBlockLines(mkLines({30.0f, 30.0f, 30.0f, 30.0f}), in);
+            const BlockPlan r = planBlockLines(mkLines({30.0f, 30.0f, 30.0f, 30.0f}), in);
             const int want_pages[] = {0, 0, 0, 1};
             const float want_tops[] = {10.0f, 40.0f, 70.0f, 10.0f};
             bool same = r.lines.size() == 4;
@@ -1903,48 +1909,48 @@ int main() {
         }
         // 段前分页：块首不在版心顶时翻页；已经在版心顶时不空翻。
         {
-            BlockPaginationInput mid = in;
+            BlockPlanInput mid = in;
             mid.cursor_y_pt = 60.0f;
             mid.page_break_before = true;
             const std::vector<BrokenLine> frags = mkLines({20.0f});
-            const BlockPaginationResult r = paginateBlockLines(frags, mid);
+            const BlockPlan r = planBlockLines(frags, mid);
             expectTrue(r.lines.size() == 1 && r.lines[0].page == 1 &&
                            std::fabs(r.lines[0].top_pt - 10.0f) < 1e-6f,
                        "段前分页：块首在页中时翻到下一页的版心上沿");
             mid.page_index = 4;
             mid.cursor_y_pt = 10.0f;
-            const BlockPaginationResult at_top = paginateBlockLines(frags, mid);
+            const BlockPlan at_top = planBlockLines(frags, mid);
             expectTrue(at_top.lines.size() == 1 && at_top.lines[0].page == 4 &&
                            std::fabs(at_top.lines[0].top_pt - 10.0f) < 1e-6f,
                        "段前分页：块首已经在版心顶时不空翻一页");
         }
         // 段前距：文档首段与页中照加，页顶那一段不加。
         {
-            BlockPaginationInput sp = in;
+            BlockPlanInput sp = in;
             sp.space_before_pt = 25.0f;
             const std::vector<BrokenLine> frags = mkLines({20.0f});
-            const BlockPaginationResult r = paginateBlockLines(frags, sp);
+            const BlockPlan r = planBlockLines(frags, sp);
             expectTrue(r.lines.size() == 1 && std::fabs(r.lines[0].top_pt - 35.0f) < 1e-6f,
                        "段前距：第一页的段首让出段前距");
             sp.page_index = 2;
-            const BlockPaginationResult top_page = paginateBlockLines(frags, sp);
+            const BlockPlan top_page = planBlockLines(frags, sp);
             expectTrue(
                 top_page.lines.size() == 1 && std::fabs(top_page.lines[0].top_pt - 10.0f) < 1e-6f,
                 "段前距：页顶那一段不加（页首空白属于页边距）");
             sp.page_index = 0;
             sp.cursor_y_pt = 60.0f;
             sp.page_break_before = true;
-            const BlockPaginationResult after_break = paginateBlockLines(frags, sp);
+            const BlockPlan after_break = planBlockLines(frags, sp);
             expectTrue(after_break.lines.size() == 1 && after_break.lines[0].page == 1 &&
                            std::fabs(after_break.lines[0].top_pt - 10.0f) < 1e-6f,
                        "段前分页之后落在页顶，段前距不再叠加");
         }
         // 段后距只进结束游标，不改行位。
         {
-            BlockPaginationInput sp = in;
+            BlockPlanInput sp = in;
             sp.space_before_pt = 5.0f;
             sp.space_after_pt = 7.0f;
-            const BlockPaginationResult r = paginateBlockLines(mkLines({20.0f}), sp);
+            const BlockPlan r = planBlockLines(mkLines({20.0f}), sp);
             expectTrue(r.lines.size() == 1 && std::fabs(r.lines[0].top_pt - 15.0f) < 1e-6f,
                        "段后距不改最后一行的行槽顶");
             expectTrue(std::fabs(r.cursor_y_pt - 42.0f) < 1e-6f,
@@ -1952,11 +1958,10 @@ int main() {
         }
         // 连页：不在页底断开，页号是行槽顶所在的条带。
         {
-            BlockPaginationInput cont = in;
+            BlockPlanInput cont = in;
             cont.continuous = true;
             cont.slab_pt = 100.0f;
-            const BlockPaginationResult r =
-                paginateBlockLines(mkLines({30.0f, 30.0f, 30.0f, 30.0f}), cont);
+            const BlockPlan r = planBlockLines(mkLines({30.0f, 30.0f, 30.0f, 30.0f}), cont);
             const int want_pages[] = {0, 0, 0, 1};
             const float want_tops[] = {10.0f, 40.0f, 70.0f, 100.0f};
             bool same = r.lines.size() == 4;
@@ -1967,8 +1972,7 @@ int main() {
             expectTrue(same, "连页：行顶一路累加，越过条带边界只换页号不回页顶");
             expectTrue(std::fabs(r.cursor_y_pt - 130.0f) < 1e-6f,
                        "连页结束游标是绝对 y（100 + 30）");
-            const BlockPaginationResult r2 =
-                paginateBlockLines(mkLines({95.0f, 95.0f, 95.0f}), cont);
+            const BlockPlan r2 = planBlockLines(mkLines({95.0f, 95.0f, 95.0f}), cont);
             const int want_p2[] = {0, 1, 2};
             const float want_t2[] = {10.0f, 105.0f, 200.0f};
             bool same2 = r2.lines.size() == 3;
@@ -1980,19 +1984,19 @@ int main() {
         }
         // 没有片段时不落行，游标只走段前距与段后距。
         {
-            BlockPaginationInput sp = in;
+            BlockPlanInput sp = in;
             sp.page_index = 2;
             sp.cursor_y_pt = 50.0f;
             sp.space_before_pt = 7.0f;
             sp.space_after_pt = 3.0f;
-            const BlockPaginationResult r = paginateBlockLines({}, sp);
+            const BlockPlan r = planBlockLines({}, sp);
             expectTrue(
                 r.lines.empty() && r.page_index == 2 && std::fabs(r.cursor_y_pt - 60.0f) < 1e-6f,
                 "没有片段时不落行，游标只累计段前距与段后距");
         }
         // 比整页还高的一行：两次判据都不通过，页号连进两格，与整篇循环同一口径。
         {
-            const BlockPaginationResult r = paginateBlockLines(mkLines({150.0f}), in);
+            const BlockPlan r = planBlockLines(mkLines({150.0f}), in);
             expectTrue(r.lines.size() == 1 && r.lines[0].page == 2 &&
                            std::fabs(r.lines[0].top_pt - 10.0f) < 1e-6f,
                        "比整页还高的一行连翻两页，仍从版心上沿起排");
@@ -2021,7 +2025,7 @@ int main() {
         ShapingCache cache;
         const BlockLayout local = layoutBlock(lib, long_block, lc, &cache);
         const LayoutResult full = layoutDocument(lib, {long_block}, small_page);
-        BlockPaginationInput pin;
+        BlockPlanInput pin;
         pin.content_top_pt = small_page.margins.top;
         pin.content_bottom_pt = small_page.margins.top + small_page.contentHeightPt();
         pin.page_index = 0;
@@ -2030,7 +2034,7 @@ int main() {
         pin.slab_pt = small_page.slabHeightPt();
         pin.space_before_pt = long_block.space_before_pt;
         pin.space_after_pt = long_block.space_after_pt;
-        const BlockPaginationResult plan = paginateBlockLines(local.fragments, pin);
+        const BlockPlan plan = planBlockLines(local.fragments, pin);
         expectTrue(local.status == BlockLayoutStatus::Ok &&
                        plan.lines.size() == full.lines.size() && full.stats.page_count >= 2,
                    "对拍前提：分页结果与整篇行数相同，且真的跨了页");
@@ -2208,20 +2212,22 @@ int main() {
         expectTrue(local.columns.back().band == full.stats.page_count - 1, "带号与页号一一对应");
 
         // 分页纯函数：页号随带号递增，行号在带内重新计数，块尾游标吃掉本页剩余高度。
-        BlockColumnPaginationInput pin;
+        BlockPlanInput pin;
         pin.page_index = 0;
         pin.line_total = 0;
         pin.content_bottom_pt = bottom;
         pin.space_after_pt = 0.0f;
         pin.started_new_band = local.started_new_band;
-        const BlockColumnPaginationResult plan = paginateBlockColumns(local.columns, pin);
+        const BlockPlan plan = planBlockColumns(local.columns, pin);
         int plan_diff = 0;
-        for (size_t i = 0; i < plan.columns.size(); ++i) {
-            if (plan.columns[i].page != local.columns[i].band ||
-                plan.columns[i].line != local.columns[i].column ||
-                plan.columns[i].top_pt != local.columns[i].top_pt ||
-                plan.columns[i].center_pt != local.columns[i].center_pt ||
-                plan.columns[i].width_pt != local.columns[i].width_pt) {
+        for (size_t i = 0; i < plan.lines.size(); ++i) {
+            // 列宽不再是分页的输入：它必须等于片段的 line_h —— 这一条同时钉住
+            //   "BlockColumn.width_pt 与 line.line_h 是同一件事"。
+            if (plan.lines[i].page != local.columns[i].band ||
+                plan.lines[i].line_no != local.columns[i].column ||
+                plan.lines[i].top_pt != local.columns[i].top_pt ||
+                plan.lines[i].parts.front().x != local.columns[i].center_pt ||
+                plan.lines[i].parts.front().line.line_h != local.columns[i].width_pt) {
                 ++plan_diff;
             }
         }
@@ -2268,15 +2274,14 @@ int main() {
         expectTrue(fresh_local.status == BlockLayoutStatus::Ok && fresh_local.started_new_band &&
                        !fresh_local.columns.empty() && fresh_local.columns[0].band == 0,
                    "块首带放不下两条列位时另起一条带");
-        BlockColumnPaginationInput fresh_pin;
+        BlockPlanInput fresh_pin;
         fresh_pin.page_index = 3;
         fresh_pin.line_total = 5;
         fresh_pin.content_bottom_pt = tiny_bottom;
         fresh_pin.started_new_band = fresh_local.started_new_band;
-        const BlockColumnPaginationResult fresh_plan =
-            paginateBlockColumns(fresh_local.columns, fresh_pin);
-        expectTrue(!fresh_plan.columns.empty() && fresh_plan.columns[0].page == 4 &&
-                       std::fabs(fresh_plan.columns[0].top_pt - tiny.margins.top) < 1e-4f,
+        const BlockPlan fresh_plan = planBlockColumns(fresh_local.columns, fresh_pin);
+        expectTrue(!fresh_plan.lines.empty() && fresh_plan.lines[0].page == 4 &&
+                       std::fabs(fresh_plan.lines[0].top_pt - tiny.margins.top) < 1e-4f,
                    "另起的那条带落在下一页，列顶是版心上沿");
         const LayoutResult fresh_full = layoutDocument(lib, {lead, block}, tiny);
         expectTrue(fresh_full.lines.size() >= 2 && fresh_full.lines[1].page == 1 &&
@@ -2491,14 +2496,14 @@ int main() {
                            local.columns.size() == 1 &&
                            std::fabs(local.columns[0].top_pt - tiny.margins.top) < 1e-4f,
                        "空竖排段：块首带放不下两条列位时另起一条带");
-            BlockColumnPaginationInput pin;
+            BlockPlanInput pin;
             pin.page_index = 3;
             pin.line_total = 5;
             pin.content_bottom_pt = tiny_bottom;
             pin.started_new_band = local.started_new_band;
-            const BlockColumnPaginationResult plan = paginateBlockColumns(local.columns, pin);
-            expectTrue(plan.columns.size() == 1 && plan.columns[0].page == 4 &&
-                           std::fabs(plan.columns[0].top_pt - tiny.margins.top) < 1e-4f,
+            const BlockPlan plan = planBlockColumns(local.columns, pin);
+            expectTrue(plan.lines.size() == 1 && plan.lines[0].page == 4 &&
+                           std::fabs(plan.lines[0].top_pt - tiny.margins.top) < 1e-4f,
                        "空竖排段另起的带落在下一页，列顶是版心上沿");
             const LayoutResult full = layoutDocument(lib, {lead, empty_v}, tiny);
             expectTrue(full.lines.size() == 2 && full.lines[1].page == 1 &&
@@ -2590,7 +2595,7 @@ int main() {
             }
             expectTrue(line_diff == 0, "连页竖排块：整篇每一列的码点范围、页号与列位都相同");
             // 分页纯函数：页号由列顶现算，块尾游标是最后一条带的带顶加版心高。
-            BlockColumnPaginationInput pin;
+            BlockPlanInput pin;
             pin.page_index = 4;
             pin.line_total = 9;
             pin.content_bottom_pt = bottom;
@@ -2598,15 +2603,15 @@ int main() {
             pin.continuous = true;
             pin.slab_pt = cont_slab;
             pin.band_height_pt = page.contentHeightPt();
-            const BlockColumnPaginationResult plan = paginateBlockColumns(local.columns, pin);
+            const BlockPlan plan = planBlockColumns(local.columns, pin);
             expectTrue(plan.page_index == 4, "连页：结束页号原样回传");
             expectTrue(plan.line_total == 9 + local.columns.back().column + 1,
                        "连页：行号只按最后一条带的列数推进");
             expectNear(plan.cursor_y_pt, local.columns.back().top_pt + page.contentHeightPt(), 1e-4,
                        "连页块尾游标 = 最后列顶 + 版心高");
             int plan_page_diff = 0;
-            for (size_t i = 0; i < plan.columns.size(); ++i) {
-                if (plan.columns[i].page !=
+            for (size_t i = 0; i < plan.lines.size(); ++i) {
+                if (plan.lines[i].page !=
                     static_cast<int>(std::floor(local.columns[i].top_pt / cont_slab))) {
                     ++plan_page_diff;
                 }
@@ -2674,7 +2679,7 @@ int main() {
             };
             const std::vector<BlockColumn> cols = {
                 mkCol(30.0f, 0, 0, 40.0f), mkCol(310.0f, 1, 0, 40.0f), mkCol(590.0f, 2, 1, 40.0f)};
-            BlockColumnPaginationInput pin;
+            BlockPlanInput pin;
             pin.continuous = true;
             pin.slab_pt = 320.0f;
             pin.band_height_pt = 280.0f;
@@ -2682,9 +2687,9 @@ int main() {
             pin.line_total = 5;
             pin.space_after_pt = 3.0f;
             pin.content_bottom_pt = 300.0f;
-            const BlockColumnPaginationResult r = paginateBlockColumns(cols, pin);
-            expectTrue(r.columns.size() == 3 && r.columns[0].page == 0 && r.columns[1].page == 0 &&
-                           r.columns[2].page == 1,
+            const BlockPlan r = planBlockColumns(cols, pin);
+            expectTrue(r.lines.size() == 3 && r.lines[0].page == 0 && r.lines[1].page == 0 &&
+                           r.lines[2].page == 1,
                        "连页分页：页号 = floor(列顶 / 条带高)");
             expectTrue(r.page_index == 7, "连页分页：结束页号原样回传");
             expectTrue(r.line_total == 7, "连页分页：行号按最后一条带的列数推进");
@@ -3122,7 +3127,9 @@ int main() {
         const float cw = page.contentWidthPt();  // 280
         const float cy = page.margins.top;
 
-        auto mkCell = [&](const std::string& text, uint64_t table, int row, int cell) {
+        std::vector<std::pair<int, int>> where;
+        auto mkCell = [&](const std::string& text, int row, int cell) {
+            where.push_back({row, cell});
             BlockSpec b;
             b.font_index = cjk;
             b.size_pt = kSize;
@@ -3130,7 +3137,6 @@ int main() {
             b.language = "zh";
             b.space_after_pt = 0.0f;
             b.setText(text);
-            b.cell_path.push_back(CellSlot{table, row, cell});
             return b;
         };
         auto mkTable = [&](uint64_t handle, int rows, int cols, float width) {
@@ -3146,9 +3152,21 @@ int main() {
                     LayoutCell lc;
                     lc.row = r;
                     lc.cell = c;
+                    int first = -1;
+                    int count = 0;
+                    for (size_t i = 0; i < where.size(); ++i) {
+                        if (where[i].first != r || where[i].second != c) continue;
+                        if (first < 0) first = static_cast<int>(i);
+                        ++count;
+                    }
+                    if (first >= 0) {
+                        lc.first_block = first;
+                        lc.block_count = count;
+                    }
                     t.cells.push_back(lc);
                 }
             }
+            where.clear();
             return t;
         };
         // 整篇结果里某个块的行盒，按出现顺序。格内的行盒都在自己的段落号下。
@@ -3171,7 +3189,7 @@ int main() {
         // 两列：左格长文本，右格一个字。格内容区宽度是列宽减两侧内边距。
         {
             constexpr uint64_t kT = 21;
-            std::vector<BlockSpec> blocks = {mkCell(cell_text, kT, 0, 0), mkCell("乙", kT, 0, 1)};
+            std::vector<BlockSpec> blocks = {mkCell(cell_text, 0, 0), mkCell("乙", 0, 1)};
             LayoutTable t = mkTable(kT, 1, 2, cw);
             const LayoutResult full = layoutDocument(lib, blocks, page, {t});
             ShapingCache cache;
@@ -3214,9 +3232,9 @@ int main() {
         // 格内两段：段后距与下一段的段前距相加，最后一段的段后距不进行高。
         {
             constexpr uint64_t kT = 22;
-            BlockSpec first = mkCell("甲乙丙", kT, 0, 0);
+            BlockSpec first = mkCell("甲乙丙", 0, 0);
             first.space_after_pt = 6.0f;
-            BlockSpec second = mkCell("丁戊", kT, 0, 0);
+            BlockSpec second = mkCell("丁戊", 0, 0);
             second.space_before_pt = 9.0f;
             std::vector<BlockSpec> blocks = {first, second};
             LayoutTable t = mkTable(kT, 1, 1, cw);
@@ -3246,7 +3264,7 @@ int main() {
             tiny.margins = PageMargins::all(10.0f);
             std::string long_text;
             for (int i = 0; i < 12; ++i) long_text += "一二三四五六七八九十";
-            std::vector<BlockSpec> blocks = {mkCell(long_text, kT, 0, 0)};
+            std::vector<BlockSpec> blocks = {mkCell(long_text, 0, 0)};
             LayoutTable t = mkTable(kT, 1, 1, tiny.contentWidthPt());
             const LayoutResult full = layoutDocument(lib, blocks, tiny, {t});
             ShapingCache cache;
@@ -3296,7 +3314,7 @@ int main() {
             const float slab = cont_page.slabHeightPt();
             std::string tall;
             for (int i = 0; i < 6; ++i) tall += "一二三四五六七八九十";
-            std::vector<BlockSpec> blocks = {mkCell(tall, kT, 0, 0)};
+            std::vector<BlockSpec> blocks = {mkCell(tall, 0, 0)};
             LayoutTable t = mkTable(kT, 1, 1, cont_page.contentWidthPt());
             const LayoutResult full = layoutDocument(lib, blocks, cont_page, {t});
             ShapingCache cache;
@@ -3324,8 +3342,8 @@ int main() {
         //   加法次序重算；行高、内边距与行切片都读同一份几何。
         {
             constexpr uint64_t kT = 25;
-            BlockSpec empty = mkCell("", kT, 0, 0);
-            BlockSpec neighbor = mkCell("乙", kT, 0, 1);
+            BlockSpec empty = mkCell("", 0, 0);
+            BlockSpec neighbor = mkCell("乙", 0, 1);
             LayoutTable t = mkTable(kT, 1, 2, cw);
             const LayoutResult full = layoutDocument(lib, {empty, neighbor}, page, {t});
             ShapingCache cache;
@@ -3366,7 +3384,7 @@ int main() {
         // 空格的占位与原子：括号、提示文字、原子盒高都要进空行，且块局部与整篇同一份。
         {
             constexpr uint64_t kT = 26;
-            BlockSpec decorated = mkCell("", kT, 0, 0);
+            BlockSpec decorated = mkCell("", 0, 0);
             InlineObject start;
             start.kind = InlineObjectKind::ControlStart;
             start.owner = 7;
@@ -3421,7 +3439,7 @@ int main() {
         // 竖排格内块：列长与列位取版心，块局部按页的竖带断列；行高仍由表格结算。
         {
             constexpr uint64_t kT = 27;
-            BlockSpec vcell = mkCell("", kT, 0, 0);
+            BlockSpec vcell = mkCell("", 0, 0);
             vcell.wm = WritingMode::VerticalRL();
             std::string vtext;
             for (int i = 0; i < 8; ++i) vtext += "患者诉晨起后心悸持续约十分钟。";
@@ -3470,7 +3488,7 @@ int main() {
         // 空竖排格：一条空列，列宽是空行行高，列心按书写模式取边。
         {
             constexpr uint64_t kT = 28;
-            BlockSpec vempty = mkCell("", kT, 0, 0);
+            BlockSpec vempty = mkCell("", 0, 0);
             vempty.wm = WritingMode::VerticalRL();
             LayoutTable t = mkTable(kT, 1, 1, cw);
             t.row_specs[0].can_split_by_page = false;
@@ -3512,8 +3530,12 @@ int main() {
             lead.setText("图前");
             std::string cell_text;
             for (int i = 0; i < 8; ++i) cell_text += "格内绕排文字要避开浮动图占掉的区间。";
+            std::vector<BlockSpec> blocks = {lead, mkCell(cell_text, 0, 0)};
+            // 表要在块之后建：格的块区间是归属的唯一记录，而 where 是随 mkCell 记下来的。
+            //   图前那一段在正文里，所以格从第 1 块起 —— 正文块不占格。
             LayoutTable t = mkTable(kT, 1, 1, cw);
-            std::vector<BlockSpec> blocks = {lead, mkCell(cell_text, kT, 0, 0)};
+            t.cells[0].first_block = 1;
+            t.cells[0].block_count = 1;
             LayoutFloat fl;
             fl.handle = 1;
             fl.para = 0;
@@ -3573,8 +3595,12 @@ int main() {
             lead.setText("图前");
             std::string cell_text;
             for (int i = 0; i < 4; ++i) cell_text += "格内文字不得压在上方浮动图上。";
+            std::vector<BlockSpec> blocks = {lead, mkCell(cell_text, 0, 0)};
+            // 表要在块之后建：格的块区间是归属的唯一记录，而 where 是随 mkCell 记下来的。
+            //   图前那一段在正文里，所以格从第 1 块起 —— 正文块不占格。
             LayoutTable t = mkTable(kT, 1, 1, cw);
-            std::vector<BlockSpec> blocks = {lead, mkCell(cell_text, kT, 0, 0)};
+            t.cells[0].first_block = 1;
+            t.cells[0].block_count = 1;
             LayoutFloat fl;
             fl.handle = 2;
             fl.para = 0;
