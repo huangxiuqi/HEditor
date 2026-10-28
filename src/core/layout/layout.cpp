@@ -1397,18 +1397,9 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
         //   落位循环里，而那条循环是同一件事的第二份实现。
         const bool simple_block =
             !b.wm.isVertical() && tstack.empty() && !wrap_floats && !has_floating_object;
-        // 简单竖排块：非表格、块自身没有浮动原子。列内容由块局部排版按竖带断好，分页只把
-        //   每条带映射成页；分页与连页的差别全在约束里的竖带几何上（连页的带顶是绝对坐标）。
-        //   文档里有浮动图不影响这一条：排除带只作用于横排（竖排里的浮动图由编译层退回行内），
-        //   旧循环的竖排分支从不读它，块局部排版也没有排除带这个输入。块自身的浮动原子仍
-        //   排除在外 —— 块局部排版对它明确报告不支持，旧循环同样没有竖排绕排。
-        const bool simple_vertical_block =
-            b.wm.isVertical() && tstack.empty() && !has_floating_object;
-        // 竖排格内块：列长与列位取版心而不是格框，旧循环的竖带几何因此可以直接由约束
-        //   表达 —— 宽度传版心宽、竖带传页的上下沿。块自身带浮动原子时块局部报告不支持，
-        //   与正文竖排同一条边界。
-        const bool cell_vertical_block =
-            b.wm.isVertical() && !tstack.empty() && !has_floating_object;
+        // 竖排（含格内）都由下面的竖排分支走块局部排版：列内容按竖带断好，分页只把每条带
+        //   映射成页；分页与连页的差别全在约束里的竖带几何上（连页的带顶是绝对坐标）。
+        //   排除带只作用于横排，块自身的浮动原子由块局部排版报告不支持 —— 这是竖排的边。
         if (!simple_block) pageBreakBefore();
 
         const std::vector<FormatRun> fruns = b.effectiveRuns();
@@ -1641,7 +1632,7 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
     res.stats.shape_ms = shape_ms;
     res.stats.layout_ms = msSince(t_layout0);
     res.rebuildPageIndex();
-    return ReflowState{page_index, cursor_y, line_total};
+    return ReflowState{page_index, cursor_y, line_total, {}};
 }
 
 bool LayoutResult::fragmentIndexValid() const {

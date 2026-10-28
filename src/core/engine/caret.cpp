@@ -172,12 +172,13 @@ int CaretResolver::sideFromHint(int para, size_t cp, int hint) const {
 }
 
 /**
- * 某个位置（不是光标）的侧别：按"最内层含端点"归一次，归不到就是"所有控件之外"。
- * 删除区间的两个端点、诊断打印这类没有侧别信息的入口走它。
+ * 文本坐标 → 全局流位置：侧别在这里归一次，别处不再各自拼三件套。
+ *
+ * 光标那一处用光标自己存的侧别（可能来自一次点击），其余位置按默认归属。
  */
-int CaretResolver::sideForPos(TextPos p) const {
-    if (p == caret()) return caretSide();
-    return defaultSideAt(p.para, p.offset);
+FlowPos CaretResolver::flowAt(TextPos p) const {
+    const int side = (p == caret()) ? caretSide() : defaultSideAt(p.para, p.offset);
+    return flowPosAtSide(p.para, p.offset, side);
 }
 
 FlowPos CaretResolver::flowPosAtSide(int para, size_t cp_offset, int side) const {

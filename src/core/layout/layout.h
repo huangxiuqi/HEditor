@@ -1785,7 +1785,7 @@ struct ReflowState {
  * @return 第 0 段开始时的续排状态
  */
 inline ReflowState freshReflowState(const PageMetrics& page) {
-    return ReflowState{0, page.margins.top, 0};
+    return ReflowState{0, page.margins.top, 0, {}};
 }
 
 /**

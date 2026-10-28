@@ -209,9 +209,9 @@ std::vector<Step> deleteTextSteps(const doc::Doc& doc, const doc::FlowIndex& idx
  * 六个编辑入口与四个光标入口都调它，免得十来处各写一遍。
  */
 doc::EditCheck EditCommand::policyAt(TextPos p) const {
-    // 侧别由位置自己推（光标这一处用光标自己的侧别，见 sideForPos）——
-    //   不从控件下标反推：同一个偏移上可能压着好几枚括号，反推会猜错。
-    const FlowPos f = pos().flowPosAtSide(p.para, p.offset, pos().sideForPos(p));
+    // 侧别再往下传了：位置自己归一次（见 flowAt）。不从控件下标反推 ——
+    //   同一个偏移上可能压着好几枚括号，反推会猜错。
+    const FlowPos f = pos().flowAt(p);
     if (f < 0) return doc::EditCheck{false, "落点不在文档流里"};
     return doc::canEditAt(doc(), mode(), f);
 }
@@ -256,7 +256,7 @@ bool EditCommand::insertCodepoints(int para, size_t offset, const std::vector<ui
     // 落点的流位置由 (偏移, 侧别) 给出 —— 侧别取光标自己存的那个。
     //   从控件下标反推（老的 flowPosAt）在多枚括号压在同一个偏移上时会猜错：空嵌套里
     //   "最后一枚右括号之前"会被猜成"第一枚左括号之后"，字与光标一起插到别处去。
-    const FlowPos at_flow = pos().flowPosAtSide(para, at, pos().sideForPos(ins));
+    const FlowPos at_flow = pos().flowAt(ins);
     if (at_flow < 0) {
         noteBlocked();
         return false;
@@ -861,7 +861,7 @@ bool EditCommand::splitParagraph() {
     }
     // 位置由 (偏移, 侧别) 给出，不从控件下标反推。
     //   反推在空控件处会猜错侧别，于是标记插到了别的控件里（"回车之后光标跑进第三个控件"）。
-    const FlowPos at_flow = pos().flowPosAtSide(p.para, p.offset, pos().sideForPos(p));
+    const FlowPos at_flow = pos().flowAt(p);
     if (at_flow < 0) {
         noteBlocked();
         return consumed;
@@ -1992,7 +1992,7 @@ bool EditCommand::insertControl(const ControlSpec& spec, const std::string& labe
     }
 
     const TextPos caret = pos().caret();
-    const FlowPos at = pos().flowPosAtSide(caret.para, caret.offset, pos().sideForPos(caret));
+    const FlowPos at = pos().flowAt(caret);
     if (at < 0) {
         noteBlocked();
         return false;
@@ -2306,7 +2306,7 @@ bool EditCommand::insertImage(const ImageSpec& spec) {
     node.kind = NodeKind::Image;
     node.image = spec;
     const TextPos caret = pos().caret();
-    const FlowPos at = pos().flowPosAtSide(caret.para, caret.offset, pos().sideForPos(caret));
+    const FlowPos at = pos().flowAt(caret);
     if (at < 0) {
         noteBlocked();
         return false;
@@ -2716,9 +2716,7 @@ bool EditCommand::pasteNodes(const std::vector<NodeSpec>& nodes) {
 
     // 没有选区时落点就是光标；有选区时 plan.at 已经是区间起点（删除之后光标也落在那里）。
     const TextPos caret = pos().caret();
-    const FlowPos at = plan.steps.empty()
-                           ? pos().flowPosAtSide(caret.para, caret.offset, pos().sideForPos(caret))
-                           : plan.at;
+    const FlowPos at = plan.steps.empty() ? pos().flowAt(caret) : plan.at;
     if (at < 0) {
         noteBlocked();
         return false;
@@ -2967,8 +2965,6 @@ bool EditCommand::mergeTableCells() {
     int lo_row = 0;
     int lo_col = 0;
     {
-        int row = 0;
-        int col = 0;
         bool found = false;
         for (const doc::CellRef& c : cells) {
             int r = 0;
