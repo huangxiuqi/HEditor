@@ -140,6 +140,28 @@ struct BlockHistory {
  * 里 ControlStart 的出现顺序也是文档顺序 —— 两者必须是同一个序，否则同一个字段在产物里是
  * 第 1 个、在控件表里是第 2 个。离开时才登记会让嵌套时内层排到外层前面。
  */
+struct Slot {
+    /**
+     * 所在块。
+     */
+    int block = -1;
+
+    /**
+     * 段内码点锚点。
+     */
+    uint32_t cp = 0;
+
+    /**
+     * 控件开始 / 控件结束 / 原子。
+     */
+    InlineObjectKind kind = InlineObjectKind::ControlStart;
+
+    /**
+     * 产生者句柄。
+     */
+    int owner = -1;
+};
+
 struct ControlSpan {
     /**
      * 控件节点（共享引用）。
@@ -208,6 +230,11 @@ struct Projection {
      * 控件在块坐标里的跨度，按文档顺序。
      */
     std::vector<ControlSpan> controls;
+
+    /**
+     * 行内槽（控件边界与原子），按块序、段内顺序。
+     */
+    std::vector<Slot> slots;
 
     /**
      * 表格结构（出现顺序：外层在前，嵌套的内层在后）。与编译产物同一种类型：排版层认的是

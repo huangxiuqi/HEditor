@@ -37,6 +37,48 @@ namespace heditor {
  * 一份只读输入把依赖面钉在编译期，多要一样就得改这个结构，看得见。引擎在每次重建文档与
  * 重排之后摆一次（见 EditorEngine::rebuildFromTree 与 relayout）。
  */
+class ControlIndex;
+struct StructureIndex;
+
+/**
+ * 光标/选区的位置：流位置与行别。
+ *
+ * affinity 只影响折行/页边处画在哪一行，不改变流位置本身。它是宿主与内部共用的
+ * 位置口径；旧的 (段, 偏移, 侧别) 仍由它派生。
+ */
+struct Position {
+    /**
+     * 全局流位置。
+     */
+    FlowPos flow = 0;
+
+    /**
+     * 行别：0 = 默认，负数贴上一行，正数贴下一行。
+     */
+    int affinity = 0;
+};
+
+/**
+ * 文字选区：一对 Position，anchor 是不动的那一端。
+ */
+struct TextSelection {
+    /**
+     * 不动的端点。
+     */
+    Position anchor;
+
+    /**
+     * 移动的端点。
+     */
+    Position focus;
+
+    /**
+     * 两端重合。
+     * @returns true = 空选区
+     */
+    bool empty() const { return anchor.flow == focus.flow; }
+};
+
 struct PositionView {
     /**
      * 段文本与筛过的行内对象表。
@@ -75,6 +117,16 @@ struct PositionView {
      * 控件下标到节点号的映射。
      */
     const std::vector<NodeId>* control_node_ids = nullptr;
+
+    /**
+     * 控件区间索引；nullptr 时退回线性扫描。
+     */
+    const ControlIndex* control_index = nullptr;
+
+    /**
+     * 结构索引（含行内槽）；nullptr 时退回扫对象表。
+     */
+    const StructureIndex* structure = nullptr;
 
     /**
      * 节点号到控件下标的反查表。
@@ -179,10 +231,10 @@ public:
             // 方向跟着用户焦点走：向前拖的焦点在后，返回值也保持"anchor 在前"；
             //   向后拖则翻过来。begin / end 因此不变，而"删除之后光标落在哪一端"
             //   这类读 focus 的地方看到的仍是用户拖动的那一头。
-            return sel_.focus >= sel_.anchor ? Range{cell_lo_, cell_hi_}
-                                             : Range{cell_hi_, cell_lo_};
+            return sel_.focus.flow >= sel_.anchor.flow ? Range{cell_lo_, cell_hi_}
+                                                       : Range{cell_hi_, cell_lo_};
         }
-        return sel_;
+        return Range{sel_.anchor.flow, sel_.focus.flow};
     }
     /**
      * 一格的身份：它占的块区间，段号连续、半开。
@@ -222,7 +274,7 @@ public:
      *
      * @return 原样的选区
      */
-    Range rawSelection() const { return sel_; }
+    Range rawSelection() const { return Range{sel_.anchor.flow, sel_.focus.flow}; }
 
     /**
      * 有没有文字被选中。整格但内容为空的格不算（那一条问的是 selectionIsCell）。
@@ -272,7 +324,7 @@ public:
      * 行别：折行处同一个位置属于两行（上一行行尾 / 下一行行首），只有点击落点会带非零值。
      * @return 行别
      */
-    int lineAffinity() const { return caret_line_aff_; }
+    int lineAffinity() const { return sel_.focus.affinity; }
 
     /**
      * 把光标摆到 (段, 段内码点偏移, 侧别)。侧别小于零 = 没有侧别信息，按"最内层含端点"
@@ -667,6 +719,15 @@ public:
     bool caretRectFor(const TextPos& pos, int* page_out, Rect* out) const;
 
     /**
+     * 任意 Position 的页面矩形（磅）。行别取 Position.affinity，侧别由流位置派生。
+     * @param pos 位置
+     * @param page_out 写回页号
+     * @param out 写回矩形
+     * @returns true = 找到了行盒
+     */
+    bool caretRectFor(const Position& pos, int* page_out, Rect* out) const;
+
+    /**
      * 当前光标的页面矩形（磅）。光标不可见或找不到行盒时返回假。
      *
      * @param out 写回值
@@ -775,6 +836,32 @@ public:
      */
     bool moveCaretVertical(int dir, bool extend);
 
+    /**
+     * 光标位置（流位置 + 行别）。
+     * @returns 光标位置
+     */
+    Position position() const;
+
+    /**
+     * 按 Position 摆光标。
+     * @param p 位置
+     * @returns true = 摆位成功
+     */
+    bool setPosition(const Position& p);
+
+    /**
+     * 选区两端的位置。
+     * @returns 选区
+     */
+    TextSelection selectionPositions() const;
+
+    /**
+     * 按一对 Position 摆选区。
+     * @param s 选区
+     * @returns true = 摆位成功
+     */
+    bool setSelectionPositions(const TextSelection& s);
+
 private:
 
     /**
@@ -784,6 +871,18 @@ private:
     FlowPos caretFlow() const;
 
     /**
+     * 已解析出文本位置、行别与侧别之后的光标矩形。
+     * @param pos 文本位置
+     * @param line_aff 行别
+     * @param side 侧别
+     * @param page_out 写回页号
+     * @param out 写回矩形
+     * @returns true = 找到了行盒
+     */
+    bool caretRectResolved(const TextPos& pos, int line_aff, int side, int* page_out,
+                           Rect* out) const;
+
+    /**
      * 只读输入（见 PositionView）。每次重建文档与重排之后由引擎摆一次。
      */
     PositionView view_{};
@@ -791,7 +890,7 @@ private:
     /**
      * 选区两端（唯一真源）。方向有意义：anchor 是不动的那一端。
      */
-    Range sel_{};
+    TextSelection sel_{};
 
     /**
      * 选区的粒度（见 selectionIsCell）。它只活在一次"整格"动作之后，直到下一次定位或扩展。
@@ -838,16 +937,11 @@ private:
     /**
      * 整格选区的插入点（全局流位置），-1 = 没有（插入点就是 focus）。
      *
-     * 为什么与 sel_.focus 分开：拖选时 focus 是鼠标落下那一格里的任意位置，每动一下
+     * 为什么与 sel_.focus.flow 分开：拖选时 focus 是鼠标落下那一格里的任意位置，每动一下
      * 就变一次；而整格选区的插入点应当是"焦点那一格的末尾"，格内移动不该让它逐字漂。
      * 读 focus 的那几处（渲染、编辑、输入法定位）因此统一走 caretFlow()。
      */
     FlowPos cell_caret_ = -1;
-
-    /**
-     * 行别（见 lineAffinity）。任何不带行别的定位都会把它清回 0。
-     */
-    int caret_line_aff_ = 0;
 
     /**
      * 上下键的列位有没有取过（见 moveCaretVertical）。

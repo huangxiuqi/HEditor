@@ -340,6 +340,9 @@ const COMMANDS: Array<[string, string, string[], string]> = [
   ['setCaretAt',            'w', ['setCaretAt', 'showCaret'],                             'host'],
   ['setCaretAtSide',        'w', ['setCaretAtSide', 'showCaret'],                         'host'],
   ['setCaretAtSideLine',    'w', ['setCaretAtSideLine', 'showCaret'],                     'host'],
+  ['caretPosition',         'r', ['caretPositionJson'],                                    'none'],
+  ['hitTestPosition',       'r', ['hitTestPositionJson'],                                  'none'],
+  ['setCaretPosition',      'w', ['setCaretPosition', 'showCaret'],                       'host'],
   ['setFocusAtSideLine',    'w', ['setFocusAtSideLine', 'showCaret'],                     'host'],
   ['setFocusAtSide',        'w', ['setFocusAtSide', 'showCaret'],                         'host'],
   ['blinkPhase',            'w', ['showCaret'],                                           'host'],
@@ -1212,6 +1215,10 @@ const WRITE = collect('w', {
     mod.setCaretAt(a.para | 0, a.offset | 0, a.field | 0);
     mod.showCaret(true);
   },
+  setCaretPosition: (a) => {
+    mod.setCaretPosition(a.flow | 0, a.affinity | 0);
+    mod.showCaret(true);
+  },
   setCaretAtSide: (a) => {
     mod.setCaretAtSide(a.para | 0, a.offset | 0, a.side | 0);
     mod.showCaret(true);
@@ -1690,6 +1697,8 @@ const READ = collect('r', {
   editStats: () => JSON.parse(mod.editStatsJson()),
   caretReport: () => mod.caretReport(),
   // clamp：拖选那一路把落在页外/页间的点夹到最近的页边（否则拖出画布选区就不动了）。
+  caretPosition: () => JSON.parse(mod.caretPositionJson()),
+  hitTestPosition: (a) => JSON.parse(mod.hitTestPositionJson(Number(a.x), Number(a.y))),
   hit: (a) => JSON.parse(mod.hitTest(a.x, a.y, a.clamp ? 1 : 0)),
   controlAt: (a) => mod.controlAtPoint(a.x, a.y),
   describeControls: () => mod.describeControls(),

@@ -1303,8 +1303,6 @@ int main() {
             const ControlSet& cs = ep.controls();
             expectTrue(cs.size() == 2 && cs.at(1).parent == 0 && cs.at(1).depth == 1,
                        "内层控件的 parent / depth 建对了（区间树）");
-            expectTrue(cs.at(0).children.size() == 1 && cs.at(0).children[0] == 1,
-                       "外层的 children 里挂着内层");
             expectTrue(cs.innermostAt(T(6), true) == 0, "位置 6 只被外层覆盖 → 最内层是外层");
             expectTrue(cs.innermostAt(T(9), true) == 1, "位置 9 被内外层同时覆盖 → 取最内层");
             expectTrue(canIns(6), "外层可编辑区域：允许");

@@ -40,6 +40,9 @@
 #include "core/rev/table_ops.h"
 
 namespace heditor {
+class ControlIndex;
+struct StructureIndex;
+
 /**
  * 命令层交步骤的出口。引擎实现它：把整批步骤落到修订上，再把产物按新修订重算出来。
  *
@@ -133,9 +136,19 @@ struct EditView {
     const ControlSet* controls = nullptr;
 
     /**
+     * 结构索引（控件与表格格）；可能为空。
+     */
+    const StructureIndex* structure = nullptr;
+
+    /**
      * 控件下标到节点号的映射。
      */
     const std::vector<NodeId>* control_node_ids = nullptr;
+
+    /**
+     * 控件区间索引；nullptr 时退回线性扫描。
+     */
+    const ControlIndex* control_index = nullptr;
 
     /**
      * 编辑模式（文档 / 表单 / 只读）。
@@ -770,6 +783,12 @@ private:
     const std::vector<NodeId>& controlNodeIds() const { return *view_.control_node_ids; }
 
     /**
+     * 控件区间索引；可能为空。
+     * @returns 索引指针，可为 nullptr
+     */
+    const ControlIndex* controlIndex() const { return view_.control_index; }
+
+    /**
      * 编辑模式（决定策略走哪一档）。
      */
     EditMode mode() const { return *view_.mode; }
@@ -956,8 +975,21 @@ private:
 
     /**
      * 控件的流区间。不在流里（隐藏、摘除）返回 false。
+     * @param index 控件下标
+     * @param lo 写回区间起点（可为空）
+     * @param hi 写回区间终点（可为空）
+     * @returns 这个控件在流里吗
      */
     bool controlFlowSpan(int index, FlowPos* lo, FlowPos* hi) const;
+
+    /**
+     * 某个流位置的最内层控件；有索引走索引，没有就退回线性扫描。
+     * @param f 流位置
+     * @param lo 写回内容起点（可为空）
+     * @param hi 写回内容末尾（可为空）
+     * @returns 控件下标；-1 = 不在控件内容里
+     */
+    int innermostControl(FlowPos f, FlowPos* lo = nullptr, FlowPos* hi = nullptr) const;
 
     /**
      * 控件内部除了自己那两枚括号什么都没有。只有它为真才允许一次按键删掉整个控件 ——

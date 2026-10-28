@@ -572,7 +572,8 @@ SceneDiff diffPageScene(const PageScene* before, const PageScene& after, const R
     return diff;
 }
 
-void rasterPageScene(Bitmap& target, const PageScene& scene, PageRasterCost* cost) {
+void rasterPageScene(Bitmap& target, const PageScene& scene, PageRasterCost* cost,
+                     const Rect* clip) {
     struct Replay {
         Bitmap& b;
 
@@ -619,6 +620,11 @@ void rasterPageScene(Bitmap& target, const PageScene& scene, PageRasterCost* cos
         void operator()(const RestoreMarkOp& o) const { b.restoreToMark(o.mark); }
     };
 
+    int clip_mark = 0;
+    if (clip != nullptr) {
+        clip_mark = target.clipMark();
+        target.pushClipRect(*clip);
+    }
     for (const PageOp& op : scene.ops) {
         const auto t0 = Clock::now();
         std::visit(Replay{target}, op);
@@ -636,6 +642,7 @@ void rasterPageScene(Bitmap& target, const PageScene& scene, PageRasterCost* cos
             cost->glyph_ms += msSince(t0);
         }
     }
+    if (clip != nullptr) target.restoreToMark(clip_mark);
 }
 
 }  // namespace heditor

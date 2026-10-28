@@ -24,12 +24,14 @@
 #include "core/doc/flow.h"
 #include "core/engine/caret.h"
 #include "core/engine/control_geometry.h"
+#include "core/engine/control_spans.h"
 #include "core/engine/edit_command.h"
 #include "core/engine/engine_config.h"
 #include "core/engine/engine_stats.h"
 #include "core/engine/image_store.h"
 #include "core/engine/page_cache.h"
 #include "core/engine/render_input.h"
+#include "core/engine/structure_index.h"
 #include "core/layout/layout.h"
 #include "core/render/bitmap.h"
 #include "core/rev/capability.h"
@@ -570,6 +572,33 @@ public:
     bool setCaretAtFlow(FlowPos flow);
 
     /**
+     * 按 Position 摆光标：流位置 + 行别。
+     * @param p 位置
+     * @returns true = 摆位成功
+     */
+    bool setCaretPosition(const Position& p);
+
+    /**
+     * 按 Position 落点：与点击同一套夹取，侧别由流位置派生。
+     * @param p 位置
+     * @param extend true = 只搬焦点端（拖选）
+     */
+    void setCaretAtPosition(const Position& p, bool extend = false);
+
+    /**
+     * 选区两端的位置。
+     * @returns 选区
+     */
+    TextSelection selectionPositions() const;
+
+    /**
+     * 按一对 Position 摆选区。
+     * @param s 选区
+     * @returns true = 摆位成功
+     */
+    bool setSelectionPositions(const TextSelection& s);
+
+    /**
      * 选区：一对流位置，带方向（anchor 是不动的那一端）。
      *
      * 引擎从第一天起就只存这一个值（见 selection_ 的注释），此前对外只露它的 focus；
@@ -800,6 +829,12 @@ public:
      * @return 光标的全局流位置
      */
     FlowPos caretFlowPos() const;
+
+    /**
+     * 光标位置（流位置 + 行别）。
+     * @returns 光标位置
+     */
+    Position caretPosition() const;
 
     /**
      * 光标此刻是不是一个可插入位置 —— 它决定画不画那根竖线。
@@ -2371,6 +2406,12 @@ public:
     std::string auditPageJson(int page);
 
     /**
+     * 结构索引自检：表/格/槽/控件跨度的下标都在范围内。
+     * @returns true = 索引自洽
+     */
+    bool structureIndexValid() const;
+
+    /**
      * 排版自审：用"不用缓存的全量重排"做一份对照，与当前排版结果逐字段比对，
      * 返回不符项数（0 = 一致）。
      * 理由与 auditFrameJson 相同：增量的正确性由"与全量一致"定义，
@@ -2500,6 +2541,15 @@ public:
     bool caretRectPt(Rect* out) const;
 
     /**
+     * 任意 Position 的页面矩形（磅）。
+     * @param pos 位置
+     * @param page_out 写回页号
+     * @param out 写回矩形
+     * @returns true = 找到了行盒
+     */
+    bool caretRectFor(const Position& pos, int* page_out, Rect* out) const;
+
+    /**
      * 反查：文档坐标（磅）→ (段, 偏移) + 侧别 + 行别；点落在页间空隙时返回 false。
      * 文档坐标以第 0 页顶边为原点 —— 与"窗口开在哪一页"无关，也与画布怎么摆无关。
      * out_side 是落点侧别（同一偏移上可能压着几枚括号），out_owner 是它的投影，只给人看。
@@ -2523,6 +2573,15 @@ public:
     bool hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* out_owner = nullptr,
                    int* out_side = nullptr, int* out_line_aff = nullptr,
                    int* out_cell_para = nullptr, bool clamp = false) const;
+
+    /**
+     * 按点查 Position（流位置 + 行别）。
+     * @param x_pt_doc 文档坐标 x（磅）
+     * @param y_pt_doc 文档坐标 y（磅）
+     * @param out 写回位置
+     * @returns true = 点落在页上
+     */
+    bool hitTestPosition(float x_pt_doc, float y_pt_doc, Position* out) const;
 
     /**
      * 按点选整格（三击的入口）：点在格里的任何位置都选中这一格。
@@ -2786,9 +2845,9 @@ private:
     /**
      * 重建的收尾：流索引、块位置的前缀和、控件视图。
      *
-     * 控件跨度由投影给（它走树时记下的），不在这里重扫对象表 —— 见 exportControls。
+     * 控件跨度由投影给（它走树时记下的），存在 StructureIndex 里 —— 见 exportControls。
      */
-    void finishRebuildFromTree(FlowVisibility vis, const std::vector<rev::ControlSpan>& controls);
+    void finishRebuildFromTree(FlowVisibility vis);
 
     /**
      * 由 block_extents_ 累加出 block_flow_ / block_flow_span_。
@@ -3155,6 +3214,11 @@ private:
     const LayoutCell* layoutCellAt(int para, const LayoutTable** table_out = nullptr) const;
 
     /**
+     * 重建结构索引（控件区间与段到格）。
+     */
+    void rebuildStructureIndex();
+
+    /**
      * 一格的内容流区间（左闭右开）。空格子或坐标与块表对不上时返回假。
      */
     bool cellFlowRangeOf(const LayoutCell& c, FlowPos* lo, FlowPos* hi) const;
@@ -3320,6 +3384,16 @@ private:
      * 它也是"这张表跨了几页、格线画在哪"的输入。没有表格时为空。
      */
     std::vector<LayoutTable> tables_;
+
+    /**
+     * 结构索引：控件区间与段到格。
+     */
+    StructureIndex structure_index_;
+
+    /**
+     * 投影产出的行内槽（结构索引的行内槽来源）。
+     */
+    std::vector<rev::Slot> projection_slots_;
 
     /**
      * 控件集合下标 → 控件的节点 id（导出时按同一顺序建）。

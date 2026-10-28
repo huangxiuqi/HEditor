@@ -806,6 +806,38 @@ bool redoEdit() { return g_engine.redoAndRender(); }
 int caretOffsetLive() { return static_cast<int>(g_engine.caret().offset); }
 
 /**
+ * 光标位置：全局流位置 + 行别。宿主拖动、恢复与诊断都用这一份。
+ */
+std::string caretPositionJson() {
+    const Position p = g_engine.caretPosition();
+    std::ostringstream o;
+    o << "{\"flow\":" << p.flow << ",\"affinity\":" << p.affinity << "}";
+    return pk::checked(pk::caret_position::kSpec, o.str());
+}
+
+/**
+ * 按 Position 摆光标；成功之后补一次呈现。
+ */
+bool setCaretPosition(int flow, int affinity) {
+    if (!g_engine.setCaretPosition(Position{static_cast<FlowPos>(flow), affinity})) return false;
+    g_engine.repaint();
+    return true;
+}
+
+/**
+ * 文档坐标命中到 Position；没落在页上时返回 null。
+ */
+std::string hitTestPositionJson(float x_pt, float y_pt) {
+    Position p;
+    if (!g_engine.hitTestPosition(x_pt, y_pt, &p)) {
+        return pk::checked(pk::caret_position::kSpec, "null");
+    }
+    std::ostringstream o;
+    o << "{\"flow\":" << p.flow << ",\"affinity\":" << p.affinity << "}";
+    return pk::checked(pk::caret_position::kSpec, o.str());
+}
+
+/**
  * 光标是否落在竖排的段里（直读）。宿主的方向键映射要用它 ——
  * 竖排的行内轴是竖直的，上下走字、左右换列（见宿主侧的键位表）。
  * 键位映射必须同步问，所以它不能走 editStats 那条异步回传。
@@ -2239,6 +2271,9 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("showCaret", &showCaret);
     emscripten::function("present", &present);
     emscripten::function("caretOffsetLive", &caretOffsetLive);
+    emscripten::function("caretPositionJson", &caretPositionJson);
+    emscripten::function("setCaretPosition", &setCaretPosition);
+    emscripten::function("hitTestPositionJson", &hitTestPositionJson);
     emscripten::function("caretVerticalNow", &caretVerticalNow);
     emscripten::function("caretBlockReversedNow", &caretBlockReversedNow);
     emscripten::function("hitTest", &hitTest);

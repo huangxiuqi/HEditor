@@ -10,6 +10,7 @@
 #include "core/doc/subtree.h"
 #include "core/doc/table.h"
 #include "core/engine/control_spans.h"
+#include "core/engine/structure_index.h"
 #include "core/utils/utf8.h"
 
 #include <algorithm>
@@ -305,8 +306,19 @@ bool EditCommand::typeTextUtf8(const std::string& utf8) {
 
 bool EditCommand::controlFlowSpan(int index, FlowPos* lo, FlowPos* hi) const {
     if (!hasFlow()) return false;
+    if (const ControlIndex* idx = controlIndex(); idx != nullptr && !idx->empty()) {
+        return idx->bracketSpan(index, lo, hi);
+    }
     if (index < 0 || index >= static_cast<int>(controlNodeIds().size())) return false;
     return controlSpanOf(flowIndex(), controlNodeIds()[static_cast<size_t>(index)], lo, hi);
+}
+
+int EditCommand::innermostControl(FlowPos f, FlowPos* lo, FlowPos* hi) const {
+    if (!hasFlow()) return -1;
+    if (const ControlIndex* idx = controlIndex(); idx != nullptr && !idx->empty()) {
+        return idx->innermost(f, lo, hi);
+    }
+    return innermostControlAtFlow(flowIndex(), controlNodeIds(), f, lo, hi);
 }
 
 bool EditCommand::controlIsEmpty(int index) const {
@@ -318,6 +330,9 @@ bool EditCommand::controlIsEmpty(int index) const {
 }
 
 int EditCommand::controlEndingAt(FlowPos p) const {
+    if (const ControlIndex* idx = controlIndex(); idx != nullptr && !idx->empty()) {
+        return idx->endingAt(p);
+    }
     for (int i = 0; i < static_cast<int>(controlNodeIds().size()); ++i) {
         FlowPos lo = 0;
         FlowPos hi = 0;
@@ -328,6 +343,9 @@ int EditCommand::controlEndingAt(FlowPos p) const {
 }
 
 int EditCommand::controlStartingAt(FlowPos p) const {
+    if (const ControlIndex* idx = controlIndex(); idx != nullptr && !idx->empty()) {
+        return idx->startingAt(p);
+    }
     for (int i = 0; i < static_cast<int>(controlNodeIds().size()); ++i) {
         FlowPos lo = 0;
         FlowPos hi = 0;
@@ -430,7 +448,7 @@ bool EditCommand::eraseWholeUnitBeside(FlowPos cur, bool left) {
     if (ci < 0) {
         FlowPos lo = 0;
         FlowPos hi = 0;
-        const int inner = innermostControlAtFlow(flowIndex(), controlNodeIds(), cur, &lo, &hi);
+        const int inner = innermostControl(cur, &lo, &hi);
         if (inner >= 0) ci = inner;
     }
     if (ci < 0 || !controlIsWholeUnit(ci)) return false;
@@ -655,7 +673,7 @@ bool EditCommand::eraseInsideCaretControl(FlowPos from, FlowPos to) const {
     if (!hasFlow()) return false;
     // "光标在哪个控件里"与落点判据同一个查询面（ControlSpans）—— 两处各写一遍遍历的话，
     //   嵌套时"取最内层"的规则迟早会有一边写反。
-    const int ci = innermostControlAtFlow(flowIndex(), controlNodeIds(), pos().selection().focus);
+    const int ci = innermostControl(pos().selection().focus);
     if (ci < 0) return false;
     FlowPos lo = 0;
     FlowPos hi = 0;
@@ -1226,23 +1244,12 @@ EditCommand::SelectionErase EditCommand::planEraseSelection() {
  * 口径与引擎的 layoutCellAt 一致：包含这一段的最短块区间 = 最内层那一格。
  */
 bool EditCommand::sameCellBlocks(int a, int b) const {
-    if (!view_.tables) return true;
-    const auto innermost = [this](int para) -> const LayoutCell* {
-        const LayoutCell* best = nullptr;
-        for (const LayoutTable& t : *view_.tables) {
-            for (const LayoutCell& c : t.cells) {
-                if (c.block_count <= 0) continue;
-                if (para < c.first_block || para >= c.first_block + c.block_count) continue;
-                if (best == nullptr || c.block_count < best->block_count) best = &c;
-            }
-        }
-        return best;
-    };
-    const LayoutCell* ca = innermost(a);
-    const LayoutCell* cb = innermost(b);
-    if (ca == nullptr && cb == nullptr) return true;
-    if (ca == nullptr || cb == nullptr) return false;
-    return ca == cb;
+    if (view_.structure == nullptr) return true;
+    const CellRef& ca = view_.structure->cellAt(a);
+    const CellRef& cb = view_.structure->cellAt(b);
+    if (ca.table < 0 && cb.table < 0) return true;
+    if (ca.table < 0 || cb.table < 0) return false;
+    return ca.table == cb.table && ca.cell == cb.cell;
 }
 
 /**
@@ -1257,7 +1264,7 @@ bool EditCommand::sameCellBlocks(int a, int b) const {
  */
 std::vector<Step> EditCommand::eraseCellContents(FlowPos from, FlowPos to) const {
     std::vector<Step> all;
-    if (!hasFlow() || !view_.tables) return all;
+    if (!hasFlow() || !view_.tables || view_.structure == nullptr) return all;
     // 矩形选区给的是"选中了哪几格"，直接用它 —— 按包络取交集会把矩形两端那两行里没选中的
     //   格一起删掉（跨行拖选就是整行）。只有没有逐格信息时（全选那一路）才按包络求交。
     struct CellSpan {
@@ -1279,19 +1286,20 @@ std::vector<Step> EditCommand::eraseCellContents(FlowPos from, FlowPos to) const
                   blockFlowSpan()[static_cast<size_t>(last_b)];
             return true;
         };
-        for (const LayoutTable& t : *view_.tables) {
-            for (const LayoutCell& c : t.cells) {
-                FlowPos lo = -1;
-                FlowPos hi = -1;
-                if (!span_of(c.first_block, c.block_count, &lo, &hi)) continue;
-                // 交集判据按块看：这一格有没有段落在区间里。空格的段是零长的，
-                //   按流位置判"hi <= from"会把它判成不相交 —— 它本来也不该被删。
-                const int last_b = c.first_block + c.block_count - 1;
-                const FlowPos last_end = blockFlow()[static_cast<size_t>(last_b)] +
-                                         blockFlowSpan()[static_cast<size_t>(last_b)];
-                if (last_end <= from || lo >= to) continue;
-                spans.push_back({c.first_block, c.block_count});
-            }
+        const auto add_cell = [&](int first_b, int count) {
+            FlowPos lo = -1;
+            FlowPos hi = -1;
+            if (!span_of(first_b, count, &lo, &hi)) return;
+            // 交集判据按块看：这一格有没有段落在区间里。空格的段是零长的，
+            //   按流位置判"hi <= from"会把它判成不相交 —— 它本来也不该被删。
+            const int last_b = first_b + count - 1;
+            const FlowPos last_end = blockFlow()[static_cast<size_t>(last_b)] +
+                                     blockFlowSpan()[static_cast<size_t>(last_b)];
+            if (last_end <= from || lo >= to) return;
+            spans.push_back({first_b, count});
+        };
+        for (const CellExtent& c : view_.structure->cell_extents) {
+            add_cell(c.first_block, c.block_count);
         }
     }
     // 去掉被严格包含的那一层（嵌套表的外层）。
@@ -1338,7 +1346,9 @@ std::vector<Step> EditCommand::eraseCellContents(FlowPos from, FlowPos to) const
  */
 std::vector<Step> EditCommand::eraseWholeTables(FlowPos from, FlowPos to) const {
     std::vector<Step> steps;
-    if (!hasFlow() || !view_.tables || view_.tables->empty() || from >= to) return steps;
+    if (!hasFlow() || !view_.tables || view_.tables->empty() || view_.structure == nullptr ||
+        from >= to)
+        return steps;
     if (blockFlow().empty() || blockFlowSpan().empty()) return steps;
     const FlowPos doc_begin = blockFlow()[0];
     const size_t last_block = blockFlow().size() - 1;
@@ -1351,21 +1361,17 @@ std::vector<Step> EditCommand::eraseWholeTables(FlowPos from, FlowPos to) const 
         bool inner = false;  // 被别的整表覆盖：不用单独发步骤
     };
     std::vector<Whole> wholes;
-    for (const LayoutTable& t : *view_.tables) {
+    for (int ti = 0; ti < static_cast<int>(view_.tables->size()); ++ti) {
+        const LayoutTable& t = (*view_.tables)[static_cast<size_t>(ti)];
         FlowPos lo = 0;
         FlowPos hi = 0;
         if (!flowIndex().intervalOf(static_cast<NodeId>(t.handle), &lo, &hi)) continue;
         // 覆盖判据按块算，不按表的节点区间：表的结构位夹在块之间，而选区两端永远落在
         //   块内容上（全选也一样，它到不了最后那个段落标记）。按节点区间判，开头就是表格的
         //   文档永远不会被"整张覆盖"，全选删除照样被拒。
-        int first_b = -1;
-        int last_b = -1;
-        for (const LayoutCell& c : t.cells) {
-            if (c.block_count <= 0) continue;
-            if (first_b < 0 || c.first_block < first_b) first_b = c.first_block;
-            const int b = c.first_block + c.block_count - 1;
-            if (b > last_b) last_b = b;
-        }
+        const TableSpan& span = view_.structure->tableSpan(ti);
+        const int first_b = span.first_block;
+        const int last_b = span.last_block;
         bool covered = (lo >= from && hi <= to);
         bool spans_over = covered;
         if (first_b >= 0 && last_b >= static_cast<int>(blockFlow().size())) continue;
@@ -1514,7 +1520,8 @@ std::vector<Step> EditCommand::eraseAcrossControls(FlowPos from, FlowPos to) con
  */
 std::vector<Step> EditCommand::eraseTablesCoveredByCells(FlowPos* anchor) const {
     std::vector<Step> steps;
-    if (!hasFlow() || !view_.tables || view_.tables->empty()) return steps;
+    if (!hasFlow() || !view_.tables || view_.tables->empty() || view_.structure == nullptr)
+        return steps;
     if (!pos().hasCellRange()) return steps;
     const std::vector<CaretResolver::CellBlocks>& picked = pos().cellBlocks();
     const auto picked_has = [&picked](int first, int count) {
@@ -1530,21 +1537,22 @@ std::vector<Step> EditCommand::eraseTablesCoveredByCells(FlowPos* anchor) const 
         bool inner = false;  // 落在另一张整表里：删外层时一起走
     };
     std::vector<Whole> wholes;
-    for (const LayoutTable& t : *view_.tables) {
+    for (int ti = 0; ti < static_cast<int>(view_.tables->size()); ++ti) {
+        const LayoutTable& t = (*view_.tables)[static_cast<size_t>(ti)];
         if (t.cells.empty()) continue;
+        const TableSpan& span = view_.structure->tableSpan(ti);
         bool all = true;
-        int first_b = -1;
-        int last_b = -1;
-        for (const LayoutCell& c : t.cells) {
-            if (c.block_count <= 0 || !picked_has(c.first_block, c.block_count)) {
+        for (int k = 0; k < span.cell_count; ++k) {
+            const CellExtent& c =
+                view_.structure->cell_extents[static_cast<size_t>(span.first_cell + k)];
+            if (!picked_has(c.first_block, c.block_count)) {
                 all = false;
                 break;
             }
-            if (first_b < 0 || c.first_block < first_b) first_b = c.first_block;
-            const int b = c.first_block + c.block_count - 1;
-            if (b > last_b) last_b = b;
         }
-        if (!all || first_b < 0) continue;
+        if (!all || span.first_block < 0) continue;
+        const int first_b = span.first_block;
+        const int last_b = span.last_block;
         // 表是文档里唯一的内容时不动结构：删完一个块都不剩，光标没有能停的地方。
         //   这一种退回逐格清空 —— 内容照样没了，只是表框还留着。
         if (first_b <= 0 && last_b >= static_cast<int>(blocks().size()) - 1) continue;
@@ -2005,7 +2013,7 @@ bool EditCommand::filterTypedText(FlowPos at_flow, const std::vector<uint32_t>& 
     out->clear();
     FlowPos lo = 0;
     FlowPos hi = 0;
-    const int index = innermostControlAtFlow(flowIndex(), controlNodeIds(), at_flow, &lo, &hi);
+    const int index = innermostControl(at_flow, &lo, &hi);
     const TextDetail* filter = nullptr;
     std::string current;
     if (index >= 0) {
@@ -3020,22 +3028,12 @@ bool EditCommand::splitTableCell() {
 }
 
 NodeId EditCommand::tableAtPara(int para) const {
-    if (!view_.tables) return kInvalidNodeId;
-    const LayoutTable* best_table = nullptr;
-    const LayoutCell* best_cell = nullptr;
-    for (const LayoutTable& t : *view_.tables) {
-        for (const LayoutCell& c : t.cells) {
-            if (c.block_count <= 0) continue;
-            if (para < c.first_block || para >= c.first_block + c.block_count) continue;
-            // 嵌套时取最内层：被包住的那张表才是"光标所在的那张表"。
-            if (best_cell == nullptr || c.block_count < best_cell->block_count) {
-                best_cell = &c;
-                best_table = &t;
-            }
-        }
+    if (!view_.tables || view_.structure == nullptr) return kInvalidNodeId;
+    const CellRef& ref = view_.structure->cellAt(para);
+    if (ref.table < 0 || ref.table >= static_cast<int>(view_.tables->size())) {
+        return kInvalidNodeId;
     }
-    if (best_table == nullptr) return kInvalidNodeId;
-    return static_cast<NodeId>(best_table->handle);
+    return static_cast<NodeId>((*view_.tables)[static_cast<size_t>(ref.table)].handle);
 }
 
 bool EditCommand::removeTableAtCaret() {
@@ -3058,14 +3056,11 @@ bool EditCommand::removeTableAtCaret() {
     // 表是文档里唯一的内容时拒绝：删完一个块都不剩，光标没有能停的地方。
     int first_b = -1;
     int last_b = -1;
-    for (const LayoutTable& t : *view_.tables) {
-        if (static_cast<NodeId>(t.handle) != id) continue;
-        for (const LayoutCell& c : t.cells) {
-            if (c.block_count <= 0) continue;
-            if (first_b < 0 || c.first_block < first_b) first_b = c.first_block;
-            const int b = c.first_block + c.block_count - 1;
-            if (b > last_b) last_b = b;
-        }
+    const CellRef& ref = view_.structure->cellAt(pos().caret().para);
+    if (ref.table >= 0) {
+        const TableSpan& span = view_.structure->tableSpan(ref.table);
+        first_b = span.first_block;
+        last_b = span.last_block;
     }
     if (first_b <= 0 && last_b >= static_cast<int>(blocks().size()) - 1) {
         noteBlocked();

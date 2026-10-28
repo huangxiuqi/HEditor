@@ -70,6 +70,16 @@ export interface FlowTextPos {
   offset: number;
 }
 
+export interface CaretPosition {
+  flow: number;
+  affinity: number;
+}
+
+export interface HitTestPosition {
+  flow: number;
+  affinity: number;
+}
+
 export interface SelectionReport {
   anchor: Record<string, unknown>;
   focus: Record<string, unknown>;
@@ -332,6 +342,8 @@ export interface Payloads {
   stats: Stats;
   benchRelayoutPaint: BenchRelayoutPaint;
   flowTextPos: FlowTextPos;
+  caretPosition: CaretPosition;
+  hitTestPosition: HitTestPosition;
   selectionReport: SelectionReport;
   hitTest: HitTest;
   imageList: ImageList;

@@ -12,6 +12,8 @@
  * 下标约定：控件下标 = 文档顺序 = control_node_ids 的下标 = 控件集合的下标。三者由同一次
  *   投影产出，调用方要保证它们同步（引擎侧见 syncControls）。
  */
+#include <algorithm>
+#include <numeric>
 #include <vector>
 
 #include "core/doc/flow.h"
@@ -97,5 +99,257 @@ inline int innermostControlAtFlow(const rev::FlowIndex& flow, const std::vector<
     }
     return best;
 }
+
+/**
+ * 控件区间索引：把“按流位置找最内层控件”从线性扫描降成 O(log n + 深度)。
+ *
+ * 控件是良构嵌套/并列的区间；构建时按内容起点排序并用栈连出父链，查询时先二分到
+ * 起点不大于 f 的最后一条，再沿父链找第一个包住 f 的项。控件数量大时这条路径每次
+ * 按键都会走，线性扫描的代价会随字段数增长。
+ */
+class ControlIndex {
+public:
+
+    /**
+     * 按一份流索引与控件节点表重建。
+     * @param flow 流索引
+     * @param ids 控件节点表（文档顺序）
+     */
+    void build(const rev::FlowIndex& flow, const std::vector<NodeId>& ids) {
+        entries_.clear();
+        by_control_.assign(ids.size(), -1);
+        for (int i = 0; i < static_cast<int>(ids.size()); ++i) {
+            FlowPos b_lo = 0;
+            FlowPos b_hi = 0;
+            if (!controlSpanOf(flow, ids[static_cast<size_t>(i)], &b_lo, &b_hi)) continue;
+            Entry e;
+            e.control = i;
+            e.bracket_lo = b_lo;
+            e.bracket_hi = b_hi;
+            e.content_lo = b_lo + 1;
+            e.content_hi = b_hi - 1;
+            entries_.push_back(e);
+        }
+        std::sort(entries_.begin(), entries_.end(), [](const Entry& a, const Entry& b) {
+            if (a.content_lo != b.content_lo) return a.content_lo < b.content_lo;
+            if (a.content_hi != b.content_hi) return a.content_hi > b.content_hi;
+            return a.control < b.control;
+        });
+        std::vector<int> stack;
+        stack.reserve(entries_.size());
+        for (int i = 0; i < static_cast<int>(entries_.size()); ++i) {
+            Entry& e = entries_[static_cast<size_t>(i)];
+            while (!stack.empty()) {
+                const Entry& top = entries_[static_cast<size_t>(stack.back())];
+                if (top.content_lo == e.content_lo && top.content_hi == e.content_hi) {
+                    e.parent = top.parent;
+                    stack.pop_back();
+                    continue;
+                }
+                if (top.content_hi < e.content_lo) {
+                    stack.pop_back();
+                    continue;
+                }
+                break;
+            }
+            if (!stack.empty()) e.parent = stack.back();
+            by_control_[static_cast<size_t>(e.control)] = i;
+            stack.push_back(i);
+        }
+        by_start_.resize(entries_.size());
+        std::iota(by_start_.begin(), by_start_.end(), 0);
+        std::sort(by_start_.begin(), by_start_.end(), [this](int a, int b) {
+            const Entry& ea = entries_[static_cast<size_t>(a)];
+            const Entry& eb = entries_[static_cast<size_t>(b)];
+            if (ea.bracket_lo != eb.bracket_lo) return ea.bracket_lo < eb.bracket_lo;
+            return ea.control < eb.control;
+        });
+        by_end_.resize(entries_.size());
+        std::iota(by_end_.begin(), by_end_.end(), 0);
+        std::sort(by_end_.begin(), by_end_.end(), [this](int a, int b) {
+            const Entry& ea = entries_[static_cast<size_t>(a)];
+            const Entry& eb = entries_[static_cast<size_t>(b)];
+            if (ea.bracket_hi != eb.bracket_hi) return ea.bracket_hi < eb.bracket_hi;
+            return ea.control < eb.control;
+        });
+    }
+
+    /**
+     * 有没有可查询的控件。
+     * @returns 是否为空
+     */
+    bool empty() const { return entries_.empty(); }
+
+    /**
+     * 控件个数（含不在流里、因而不进索引的那些，仍按原表长度算）。
+     * @returns 原表长度
+     */
+    int size() const { return static_cast<int>(by_control_.size()); }
+
+    /**
+     * 内容区间。
+     * @param control 控件下标
+     * @param lo 写回内容起点（可为空）
+     * @param hi 写回内容末尾（可为空）
+     * @returns 这个控件在索引里吗
+     */
+    bool contentSpan(int control, FlowPos* lo, FlowPos* hi) const {
+        if (control < 0 || control >= static_cast<int>(by_control_.size())) return false;
+        const int i = by_control_[static_cast<size_t>(control)];
+        if (i < 0) return false;
+        const Entry& e = entries_[static_cast<size_t>(i)];
+        if (lo != nullptr) *lo = e.content_lo;
+        if (hi != nullptr) *hi = e.content_hi;
+        return true;
+    }
+
+    /**
+     * 括号区间（含两枚括号）。
+     * @param control 控件下标
+     * @param lo 写回区间起点（可为空）
+     * @param hi 写回区间终点（可为空）
+     * @returns 这个控件在索引里吗
+     */
+    bool bracketSpan(int control, FlowPos* lo, FlowPos* hi) const {
+        if (control < 0 || control >= static_cast<int>(by_control_.size())) return false;
+        const int i = by_control_[static_cast<size_t>(control)];
+        if (i < 0) return false;
+        const Entry& e = entries_[static_cast<size_t>(i)];
+        if (lo != nullptr) *lo = e.bracket_lo;
+        if (hi != nullptr) *hi = e.bracket_hi;
+        return true;
+    }
+
+    /**
+     * 最内层控件。规则与 innermostControlAtFlow 相同：起点最大者，同起点取跨度短者。
+     * @param f 流位置
+     * @param lo 写回内容起点（可为空）
+     * @param hi 写回内容末尾（可为空）
+     * @returns 控件下标；-1 = 不在任何控件内容里
+     */
+    int innermost(FlowPos f, FlowPos* lo = nullptr, FlowPos* hi = nullptr) const {
+        if (entries_.empty()) return -1;
+        const auto it =
+            std::upper_bound(entries_.begin(), entries_.end(), f,
+                             [](FlowPos v, const Entry& e) { return v < e.content_lo; });
+        int i = static_cast<int>(it - entries_.begin()) - 1;
+        while (i >= 0) {
+            const Entry& e = entries_[static_cast<size_t>(i)];
+            if (e.content_lo <= f && f <= e.content_hi) {
+                if (lo != nullptr) *lo = e.content_lo;
+                if (hi != nullptr) *hi = e.content_hi;
+                return e.control;
+            }
+            i = e.parent;
+        }
+        return -1;
+    }
+
+    /**
+     * 父控件下标。
+     * @param control 控件下标
+     * @returns 父下标；-1 = 顶层或不在索引里
+     */
+    int parentOf(int control) const {
+        if (control < 0 || control >= static_cast<int>(by_control_.size())) return -1;
+        const int i = by_control_[static_cast<size_t>(control)];
+        if (i < 0) return -1;
+        const int p = entries_[static_cast<size_t>(i)].parent;
+        return p < 0 ? -1 : entries_[static_cast<size_t>(p)].control;
+    }
+
+    /**
+     * 起点正好在 p 的控件；多个时取控件下标最小者。
+     * @param p 流位置
+     * @returns 控件下标；-1 = 没有
+     */
+    int startingAt(FlowPos p) const {
+        const auto it =
+            std::lower_bound(by_start_.begin(), by_start_.end(), p, [this](int idx, FlowPos v) {
+                return entries_[static_cast<size_t>(idx)].bracket_lo < v;
+            });
+        for (auto k = it; k != by_start_.end(); ++k) {
+            const Entry& e = entries_[static_cast<size_t>(*k)];
+            if (e.bracket_lo != p) break;
+            return e.control;
+        }
+        return -1;
+    }
+
+    /**
+     * 终点正好在 p 的控件；多个时取控件下标最小者。
+     * @param p 流位置
+     * @returns 控件下标；-1 = 没有
+     */
+    int endingAt(FlowPos p) const {
+        const auto it =
+            std::lower_bound(by_end_.begin(), by_end_.end(), p, [this](int idx, FlowPos v) {
+                return entries_[static_cast<size_t>(idx)].bracket_hi < v;
+            });
+        for (auto k = it; k != by_end_.end(); ++k) {
+            const Entry& e = entries_[static_cast<size_t>(*k)];
+            if (e.bracket_hi != p) break;
+            return e.control;
+        }
+        return -1;
+    }
+
+private:
+
+    /**
+     * 一条控件区间记录。
+     */
+    struct Entry {
+        /**
+         * 括号区间起点。
+         */
+        FlowPos bracket_lo = 0;
+
+        /**
+         * 括号区间终点（不含）。
+         */
+        FlowPos bracket_hi = 0;
+
+        /**
+         * 内容起点。
+         */
+        FlowPos content_lo = 0;
+
+        /**
+         * 内容末尾（含）。
+         */
+        FlowPos content_hi = 0;
+
+        /**
+         * 控件下标。
+         */
+        int control = -1;
+
+        /**
+         * 父项在 entries_ 里的下标；-1 = 顶层。
+         */
+        int parent = -1;
+    };
+
+    /**
+     * 按内容起点排序的区间。
+     */
+    std::vector<Entry> entries_;
+
+    /**
+     * 控件下标 → entries_ 下标；不在流里为 -1。
+     */
+    std::vector<int> by_control_;
+
+    /**
+     * 按括号起点排序的 entries_ 下标。
+     */
+    std::vector<int> by_start_;
+
+    /**
+     * 按括号终点排序的 entries_ 下标。
+     */
+    std::vector<int> by_end_;
+};
 
 }  // namespace heditor

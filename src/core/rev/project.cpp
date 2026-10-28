@@ -740,19 +740,31 @@ private:
     int block_index_ = 0;
 };
 
+void fillSlots(Projection* out, const std::vector<BlockSpec>& blocks) {
+    for (int b = 0; b < static_cast<int>(blocks.size()); ++b) {
+        for (const InlineObject& o : blocks[static_cast<size_t>(b)].objects) {
+            out->slots.push_back(Slot{b, o.cp, o.kind, o.owner});
+        }
+    }
+}
+
 }  // namespace
 
 Projection project(const Doc& doc, const StyleSheet& sheet, const ViewParams& params,
                    std::vector<BlockSpec>* blocks, const BlockHistory* prev,
                    const BlockDamage* dmg) {
     const int v = sheet.version();
-    return Walker(&sheet, params, true, blocks, prev, dmg, v).run(doc);
+    Projection out = Walker(&sheet, params, true, blocks, prev, dmg, v).run(doc);
+    fillSlots(&out, blocks != nullptr ? *blocks : out.blocks);
+    return out;
 }
 
 Projection project(const Doc& doc, const StyleSheet& sheet, const ViewParams& params,
                    std::vector<BlockSpec>* blocks) {
     const int v = sheet.version();
-    return Walker(&sheet, params, true, blocks, nullptr, nullptr, v).run(doc);
+    Projection out = Walker(&sheet, params, true, blocks, nullptr, nullptr, v).run(doc);
+    fillSlots(&out, blocks != nullptr ? *blocks : out.blocks);
+    return out;
 }
 
 std::vector<BlockHash> blockHashes(const Doc& doc, FlowVisibility vis) {

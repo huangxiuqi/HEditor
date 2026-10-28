@@ -106,6 +106,22 @@ inline constexpr KeySpec kKeys[] = {
 inline constexpr PayloadSpec kSpec{"flowTextPos", kKeys, static_cast<int>(std::size(kKeys)), true};
 }  // namespace flow_text_pos
 
+namespace caret_position {
+inline constexpr KeySpec kKeys[] = {
+    {"flow", "num", false},
+    {"affinity", "num", false},
+};
+inline constexpr PayloadSpec kSpec{"caretPosition", kKeys, static_cast<int>(std::size(kKeys)), false};
+}  // namespace caret_position
+
+namespace hit_test_position {
+inline constexpr KeySpec kKeys[] = {
+    {"flow", "num", false},
+    {"affinity", "num", false},
+};
+inline constexpr PayloadSpec kSpec{"hitTestPosition", kKeys, static_cast<int>(std::size(kKeys)), true};
+}  // namespace hit_test_position
+
 namespace selection_report {
 inline constexpr KeySpec kKeys[] = {
     {"anchor", "obj", false},

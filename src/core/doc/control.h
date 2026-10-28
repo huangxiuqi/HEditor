@@ -151,11 +151,6 @@ struct Control {
      * 最小包围它的控件下标；-1 = 顶层。
      */
     int parent = -1;
-
-    /**
-     * 直接子控件的下标。
-     */
-    std::vector<int> children;
 };
 
 /**
@@ -238,6 +233,11 @@ private:
      * 按区间起点排序后的下标序（外层在前）。
      */
     std::vector<int> order_;
+
+    /**
+     * 按区间终点排序后的下标序（终点相同按控件下标）。
+     */
+    std::vector<int> by_end_;
 };
 
 }  // namespace heditor

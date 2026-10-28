@@ -5,6 +5,7 @@
  */
 #include "core/engine/caret.h"
 #include "core/engine/control_spans.h"
+#include "core/engine/structure_index.h"
 
 #include <algorithm>
 #include <cmath>
@@ -56,7 +57,7 @@ int CaretResolver::slotOwnerOf(int control_index) const {
 void CaretResolver::rebaseSelection(int anchor_para, int anchor_rel, int focus_para,
                                     int focus_rel) {
     setCaretRel(focus_para, focus_rel);
-    sel_.anchor = flowForRel(anchor_para, anchor_rel);
+    sel_.anchor.flow = flowForRel(anchor_para, anchor_rel);
 }
 
 void CaretResolver::reprojectCaret(bool extend) {
@@ -78,6 +79,10 @@ const std::vector<InlineObject>& CaretResolver::objectsFor(int para) const {
 
 CaretResolver::BracketCounts CaretResolver::bracketCountsAt(int para, size_t cp) const {
     BracketCounts bc;
+    if (view_.structure != nullptr &&
+        view_.structure->bracketCounts(para, cp, &bc.before, &bc.opens, &bc.closes)) {
+        return bc;
+    }
     for (const InlineObject& o : objectsFor(para)) {
         if (static_cast<size_t>(o.cp) < cp) {
             ++bc.before;
@@ -319,7 +324,10 @@ int CaretResolver::caretSide() const { return sideForFlow(caretFlow()); }
 int CaretResolver::caretFieldHint() const {
     if (!view_.hasFlow() || view_.control_node_ids == nullptr || view_.control_node_ids->empty())
         return -1;
-    const int ci = innermostControlAtFlow(view_.flowIndex(), *view_.control_node_ids, caretFlow());
+    const int ci =
+        (view_.control_index != nullptr)
+            ? view_.control_index->innermost(caretFlow())
+            : innermostControlAtFlow(view_.flowIndex(), *view_.control_node_ids, caretFlow());
     return ci >= 0 ? ci : LineBox::kInlineOffsetOuter;
 }
 
@@ -327,19 +335,20 @@ int CaretResolver::caretFieldHint() const {
  * 唯一写入点：段内流位置。其余入口都只是把它换算成全局流位置再调这里。
  */
 void CaretResolver::setCaretRel(int para, int rel, bool collapse, int line_aff) {
-    sel_.focus = flowForRel(para, rel);
+    sel_.focus.flow = flowForRel(para, rel);
     // 定位与扩展都按文字选区记：整格粒度只属于一次整格动作。
     //   跨格拖选的那一份由引擎在扩展之后补上（见 EditorEngine::syncCellSelection）。
     clearCellRange();
     if (collapse) {
-        sel_.anchor = sel_.focus;
+        sel_.anchor.flow = sel_.focus.flow;
         // 列位是一串连续上下键之间的事：任何别的定位都让它从头取。
         vertical_goal_valid_ = false;
     }
     // 行别：显式给了就听（点击落点挨着它点的那一行），否则按"贴着左边那一格所在的行"算。
     //   只按偏移投影的话，折行处那些位置（闭括号之后、段中最末一格的右沿）会一律
     //   画成上一行行尾 —— 键盘移过去看着像跳回上一行了。
-    caret_line_aff_ = (line_aff >= 0) ? (line_aff > 0 ? 1 : 0) : lineAffinityAtFlow(sel_.focus);
+    sel_.focus.affinity =
+        (line_aff >= 0) ? (line_aff > 0 ? 1 : 0) : lineAffinityAtFlow(sel_.focus.flow);
 }
 
 int CaretResolver::lineAffinityAtFlow(FlowPos f) const {
@@ -369,8 +378,10 @@ int CaretResolver::lineAffinityAtFlow(FlowPos f) const {
  */
 FlowPos CaretResolver::caretFlow() const {
     if (sel_cell_ && cell_caret_ >= 0) return cell_caret_;
-    return sel_.focus;
+    return sel_.focus.flow;
 }
+
+Position CaretResolver::position() const { return Position{caretFlow(), sel_.focus.affinity}; }
 
 /**
  * 光标那一段（派生）：focus 落在哪一块。
@@ -435,6 +446,21 @@ bool CaretResolver::setCaretAtFlow(FlowPos flow) {
     return true;
 }
 
+bool CaretResolver::setPosition(const Position& p) {
+    if (!setCaretAtFlow(p.flow)) return false;
+    sel_.focus.affinity = p.affinity < -1 ? -1 : (p.affinity > 1 ? 1 : p.affinity);
+    return true;
+}
+
+TextSelection CaretResolver::selectionPositions() const { return sel_; }
+
+bool CaretResolver::setSelectionPositions(const TextSelection& s) {
+    if (!setSelection(Range{s.anchor.flow, s.focus.flow})) return false;
+    sel_.focus.affinity =
+        s.focus.affinity < -1 ? -1 : (s.focus.affinity > 1 ? 1 : s.focus.affinity);
+    return true;
+}
+
 /**
  * 程序化设选区（宿主恢复、探针摆位）。两端各自夹到文档流的合法范围内 —— 越界的那
  * 一端收到能到的最远处，不会让一个悬空端点把后面的几何全带偏。
@@ -447,12 +473,12 @@ bool CaretResolver::setSelection(Range r) {
         if (v < 0) return 0;
         return v > hi ? hi : v;
     };
-    sel_.anchor = clamp_flow(r.anchor);
-    sel_.focus = clamp_flow(r.focus);
+    sel_.anchor.flow = clamp_flow(r.anchor);
+    sel_.focus.flow = clamp_flow(r.focus);
     clearCellRange();
     vertical_goal_valid_ = false;
     // 行别同列位一个待遇：它是"点击落点"这一个动作的产物，程序化设选区不带它。
-    caret_line_aff_ = 0;
+    sel_.focus.affinity = 0;
     return true;
 }
 
@@ -465,7 +491,7 @@ bool CaretResolver::setAnchorAtFlow(FlowPos anchor) {
     if (!view_.hasFlow() || view_.block_flow->empty()) return false;
     const size_t last = view_.block_flow->size() - 1;
     const FlowPos hi = (*view_.block_flow)[last] + (*view_.block_flow_span)[last];
-    sel_.anchor = anchor < 0 ? 0 : (anchor > hi ? hi : anchor);
+    sel_.anchor.flow = anchor < 0 ? 0 : (anchor > hi ? hi : anchor);
     // 锚端换了，整格吸附要按新的两端重算（由引擎在扩展之后调 syncCellSelection）。
     clearCellRange();
     return true;
@@ -475,7 +501,7 @@ bool CaretResolver::setAnchorAtFlow(FlowPos anchor) {
  * 取消选区：anchor 收到 focus，焦点端不动 —— 光标留在原地。
  */
 void CaretResolver::clearSelection() {
-    sel_.anchor = sel_.focus;
+    sel_.anchor.flow = sel_.focus.flow;
     clearCellRange();
     vertical_goal_valid_ = false;
 }
@@ -489,8 +515,8 @@ void CaretResolver::clearSelection() {
 bool CaretResolver::selectAll() {
     if (!view_.hasFlow() || view_.block_flow->empty()) return false;
     const size_t last = view_.block_flow->size() - 1;
-    sel_.anchor = (*view_.block_flow)[0];
-    sel_.focus = (*view_.block_flow)[last] + (*view_.block_flow_span)[last];
+    sel_.anchor.flow = (*view_.block_flow)[0];
+    sel_.focus.flow = (*view_.block_flow)[last] + (*view_.block_flow_span)[last];
     // 全选按整格铺满（只影响表格里的格，正文行盒没有格范围，走文字那一支）。
     //   与 Word 同一条：Ctrl+A 之后表格看起来是整片反白，而不是只剩字上有颜色。
     //   端点不吸附：全篇本来就没有"格边界"可言（见 selection() 的那一支）。
@@ -561,7 +587,7 @@ bool CaretResolver::setCellBlocks(std::vector<CellBlocks> cells, FlowPos caret_f
         cell_caret_ = caret_flow > end ? end : caret_flow;
     }
     // 整格选的插入点永远不在折行那边界上（它在格末），行别与列位都归零。
-    caret_line_aff_ = 0;
+    sel_.focus.affinity = 0;
     vertical_goal_valid_ = false;
     return true;
 }
@@ -623,17 +649,10 @@ const LineBox* CaretResolver::findLineFor(const TextPos& pos, int aff) const {
     return best;
 }
 
-bool CaretResolver::caretRectFor(const TextPos& pos, int* page_out, Rect* out) const {
-    // 行别只对"当前光标"这一处有意义（它是点画布时定下来的，见 setCaretAtSideLine）。
-    //   选区另一端与诊断打印没有这个信息，按"贴上一行"算。
-    const bool is_caret = (pos == caret());
-    const LineBox* lb = findLineFor(pos, is_caret ? caret_line_aff_ : 0);
+bool CaretResolver::caretRectResolved(const TextPos& pos, int line_aff, int side, int* page_out,
+                                      Rect* out) const {
+    const LineBox* lb = findLineFor(pos, line_aff);
     if (!lb) return false;
-    // 侧别只对"当前光标"这一处有意义（它是点画布时定下来的，见 setCaretAtSide）。
-    //   其它位置（选区另一端、诊断打印）没有这个信息，按"最内侧"算。
-    // 侧别直接就是排版侧的"跨过几枚簇"，不再经过控件下标 —— 括号占位各占一枚簇，
-    //   两边说的是同一件事，中间那次翻译（下标 ↔ 节点 id）正是"画到另一侧去"的来源。
-    const int side = is_caret ? caretSide() : defaultSideAt(pos.para, pos.offset);
     const float off = lb->offsetAtSide(static_cast<uint32_t>(pos.offset), side);
     const float t = caret_width_pt_;
     Rect r;
@@ -656,6 +675,27 @@ bool CaretResolver::caretRectFor(const TextPos& pos, int* page_out, Rect* out) c
     return true;
 }
 
+bool CaretResolver::caretRectFor(const TextPos& pos, int* page_out, Rect* out) const {
+    // 行别只对"当前光标"这一处有意义（它是点画布时定下来的，见 setCaretAtSideLine）。
+    //   选区另一端与诊断打印没有这个信息，按"贴上一行"算。
+    const bool is_caret = (pos == caret());
+    const int line_aff = is_caret ? sel_.focus.affinity : 0;
+    // 侧别只对"当前光标"这一处有意义（它是点画布时定下来的，见 setCaretAtSide）。
+    //   其它位置（选区另一端、诊断打印）没有这个信息，按"最内侧"算。
+    // 侧别直接就是排版侧的"跨过几枚簇"，不再经过控件下标 —— 括号占位各占一枚簇，
+    //   两边说的是同一件事，中间那次翻译（下标 ↔ 节点 id）正是"画到另一侧去"的来源。
+    const int side = is_caret ? caretSide() : defaultSideAt(pos.para, pos.offset);
+    return caretRectResolved(pos, line_aff, side, page_out, out);
+}
+
+bool CaretResolver::caretRectFor(const Position& pos, int* page_out, Rect* out) const {
+    if (!view_.hasFlow() || pos.flow < 0) return false;
+    TextPos p{};
+    if (!flowToTextPos(pos.flow, &p)) return false;
+    const int aff = pos.affinity < -1 ? -1 : (pos.affinity > 1 ? 1 : pos.affinity);
+    return caretRectResolved(p, aff, sideForFlow(pos.flow), page_out, out);
+}
+
 bool CaretResolver::caretRectPt(Rect* out) const {
     int page = 0;
     return caretRectFor(caret(), &page, out);
@@ -673,7 +713,7 @@ int CaretResolver::caretPage() const {
  * 上下走字、左右换列（见 keyToOp）。
  */
 bool CaretResolver::caretVertical() const {
-    const LineBox* lb = findLineFor(caret(), caret_line_aff_);
+    const LineBox* lb = findLineFor(caret(), sel_.focus.affinity);
     return lb != nullptr && lb->vertical;
 }
 
@@ -750,7 +790,7 @@ std::vector<PageRect> CaretResolver::selectionRectsIn(int first_page, int count)
     //   停在标记之前，不补。
     const LineBox* tail_line = view_.layout->lines.empty() ? nullptr : &view_.layout->lines.back();
     bool tail_mark = false;
-    if (tail_line != nullptr && !sel_.empty() && sel_.anchor < sel_.focus) {
+    if (tail_line != nullptr && !sel_.empty() && sel_.anchor.flow < sel_.focus.flow) {
         const size_t last_block = view_.block_flow->size() - 1;
         const FlowPos doc_end =
             (*view_.block_flow)[last_block] + (*view_.block_flow_span)[last_block];
@@ -935,7 +975,7 @@ void CaretResolver::hitTestInLine(const LineBox& lb, float inline_page_pt, uint3
  */
 float CaretResolver::caretInlineAxisPt() const {
     const TextPos p = caret();
-    const LineBox* lb = findLineFor(p, caret_line_aff_);
+    const LineBox* lb = findLineFor(p, sel_.focus.affinity);
     if (!lb) return 0.0f;
     const float off = lb->offsetAtSide(static_cast<uint32_t>(p.offset), caretSide());
     return lb->inline_origin_pt + off;
@@ -1001,7 +1041,7 @@ bool CaretResolver::moveCaretBy(int dcp, bool extend) {
 }
 
 bool CaretResolver::moveCaretToLineStart(bool extend) {
-    const LineBox* lb = findLineFor(caret(), caret_line_aff_);
+    const LineBox* lb = findLineFor(caret(), sel_.focus.affinity);
     if (!lb) return false;
     // 行首就是行首，不再往字段边界上收：光标位置不受控件约束（见 setCaret）。
     const TextPos p{lb->paragraph, lb->first_cp};
@@ -1011,7 +1051,7 @@ bool CaretResolver::moveCaretToLineStart(bool extend) {
 }
 
 bool CaretResolver::moveCaretToLineEnd(bool extend) {
-    const LineBox* lb = findLineFor(caret(), caret_line_aff_);
+    const LineBox* lb = findLineFor(caret(), sel_.focus.affinity);
     if (!lb) return false;
     const TextPos p{lb->paragraph, lb->last_cp};
     if (p == caret()) return false;
@@ -1027,7 +1067,7 @@ bool CaretResolver::moveCaretToLineEnd(bool extend) {
  */
 bool CaretResolver::moveCaretToDocStart(bool extend) {
     if (view_.block_flow->empty()) return false;
-    if (sel_.focus == (*view_.block_flow)[0]) return false;
+    if (sel_.focus.flow == (*view_.block_flow)[0]) return false;
     setCaretRel(0, 0, !extend);
     return true;
 }
@@ -1035,7 +1075,7 @@ bool CaretResolver::moveCaretToDocStart(bool extend) {
 bool CaretResolver::moveCaretToDocEnd(bool extend) {
     if (view_.block_flow->empty()) return false;
     const size_t last = view_.block_flow->size() - 1;
-    if (sel_.focus == (*view_.block_flow)[last] + (*view_.block_flow_span)[last]) return false;
+    if (sel_.focus.flow == (*view_.block_flow)[last] + (*view_.block_flow_span)[last]) return false;
     setCaretRel(static_cast<int>(last), (*view_.block_flow_span)[last], !extend);
     return true;
 }
@@ -1050,7 +1090,7 @@ bool CaretResolver::moveCaretToDocEnd(bool extend) {
 bool CaretResolver::moveCaretVertical(int dir, bool extend) {
     if (view_.layout->lines.empty() || dir == 0) return false;
     const int n = static_cast<int>(view_.layout->lines.size());
-    const LineBox* cur_lb = findLineFor(caret(), caret_line_aff_);
+    const LineBox* cur_lb = findLineFor(caret(), sel_.focus.affinity);
     if (!cur_lb) return false;
     int cur_i = -1;
     for (int i = 0; i < n; ++i) {

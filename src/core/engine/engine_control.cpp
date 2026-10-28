@@ -125,7 +125,9 @@ int EditorEngine::controlOptionAtPos(TextPos p, int side) const {
     FlowPos lo = 0;
     FlowPos hi = 0;
     if (!flow_.has_value()) return -1;
-    const int index = innermostControlAtFlow(*flow_, control_node_ids_, f, &lo, &hi);
+    const int index = !structure_index_.controls.empty()
+                          ? structure_index_.controls.innermost(f, &lo, &hi)
+                          : innermostControlAtFlow(*flow_, control_node_ids_, f, &lo, &hi);
     if (index < 0) return -1;
     const rev::Node* n = rev::findNode(document(), control_node_ids_[static_cast<size_t>(index)]);
     const ControlSpec* spec = specOf(n);

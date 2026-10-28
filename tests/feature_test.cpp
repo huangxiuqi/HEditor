@@ -552,6 +552,60 @@ int main() {
         expectTrue(e.editStats().scene_reused_pages > 0, "页场景：没有重排时第二次呈现走复用路径");
     }
 
+    // Position 是光标流位置与行别的同一份说法。
+    {
+        const Position pos = e.caretPosition();
+        expectTrue(pos.flow == e.caretFlowPos(), "Position：流位置与光标流位置一致");
+        expectTrue(pos.affinity == e.caretLineAffinity(), "Position：行别与光标行别一致");
+        Rect by_text{};
+        Rect by_pos{};
+        int page_pos = 0;
+        const bool text_ok = e.caretRectPt(&by_text);
+        const bool pos_ok = e.caretRectFor(pos, &page_pos, &by_pos);
+        expectTrue(text_ok && pos_ok, "Position：矩形查询两条路径都找得到行盒");
+        if (text_ok && pos_ok) {
+            expectTrue(by_text.x == by_pos.x && by_text.y == by_pos.y && by_text.w == by_pos.w &&
+                           by_text.h == by_pos.h,
+                       "Position：按 Position 查到的矩形与按文本坐标查到的一致");
+        }
+        Rect caret_rect{};
+        if (e.caretRectPt(&caret_rect)) {
+            Position hit;
+            const bool hit_ok = e.hitTestPosition(caret_rect.x + caret_rect.w * 0.5f,
+                                                  caret_rect.y + caret_rect.h * 0.5f, &hit);
+            expectTrue(hit_ok, "Position：命中测试能返回位置");
+            if (hit_ok) {
+                expectTrue(hit.flow == pos.flow, "Position：光标处命中回到同一个流位置");
+                e.setCaretAtPosition(hit);
+                expectTrue(e.caretFlowPos() == hit.flow, "Position：按位置落点摆到命中处");
+            }
+        }
+        Position moved = pos;
+        moved.affinity = 1;
+        expectTrue(e.setCaretPosition(moved), "Position：能按位置入口摆光标");
+        expectTrue(e.caretPosition().affinity == 1, "Position：摆位之后行别读回同一份");
+        moved.affinity = 0;
+        expectTrue(e.setCaretPosition(moved), "Position：行别能清回默认");
+        expectTrue(e.caretPosition().affinity == 0, "Position：清回默认后读回 0");
+
+        expectTrue(e.selectAll(), "Position 选区：全选");
+        const TextSelection sel = e.selectionPositions();
+        expectTrue(sel.anchor.flow == e.selection().anchor && sel.focus.flow == e.selection().focus,
+                   "Position 选区：两端与现有选区一致");
+        expectTrue(e.setSelectionPositions(sel), "Position 选区：能按位置写回");
+        expectTrue(e.selectionPositions().focus.flow == sel.focus.flow,
+                   "Position 选区：写回后读回同一份");
+        e.clearSelection();
+        expectTrue(e.selectImage(0), "Position 选区：先选中图片");
+        expectTrue(e.selectedImage() == 0, "Position 选区：图片确实选中");
+        expectTrue(e.setSelectionPositions(sel), "Position 选区：按位置写回文字选区");
+        expectTrue(e.selectedImage() < 0, "Position 选区：写回时清掉图片选中");
+        e.clearSelection();
+        expectTrue(e.selectImage(0), "Position 光标：先选中图片");
+        expectTrue(e.setCaretPosition(pos), "Position 光标：按位置摆回光标");
+        expectTrue(e.selectedImage() < 0, "Position 光标：摆位时清掉图片选中");
+    }
+
     // 页场景差异：同根不动、版本变一条带、身份变整页、页级项整页。
     {
         const Rect page_rect{0.0f, 0.0f, 1000.0f, 1000.0f};
@@ -590,6 +644,23 @@ int main() {
         expectTrue(diffPageScene(&before, page_level, page_rect).full_page,
                    "页场景：页级项变化就整页重画");
     }
+
+    // 任意矩形裁剪：只重放裁剪区内，区外像素保持原样。
+    {
+        Bitmap b(20, 20);
+        b.clear(Color::rgb(0, 0, 0));
+        PageScene scene;
+        scene.ops.emplace_back(FillRectOp{Rect{0.0f, 0.0f, 20.0f, 20.0f}, Color::rgb(255, 0, 0)});
+        const Rect clip{0.0f, 0.0f, 10.0f, 10.0f};
+        rasterPageScene(b, scene, nullptr, &clip);
+        const uint8_t* px = b.data();
+        const size_t inside = (5 * 20 + 5) * 4;
+        const size_t outside = (15 * 20 + 15) * 4;
+        expectTrue(px[inside] == 255 && px[inside + 1] == 0, "裁剪：区内的像素被重放");
+        expectTrue(px[outside] == 0 && px[outside + 1] == 0, "裁剪：区外的像素保持原样");
+    }
+
+    expectTrue(e.structureIndexValid(), "结构索引：表/格/槽/控件跨度下标自洽");
 
     std::printf("\n──────────────────────────────\n");
     std::printf("共 %d 项断言，失败 %d 项\n", g_checks, g_failures);

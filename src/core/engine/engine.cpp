@@ -657,6 +657,7 @@ void EditorEngine::rebuildFromTree(const rev::BlockDamage* dmg) {
     for (const rev::BlockKey& k : proj_hist_.keys) block_src_.push_back(k.source);
     block_extents_ = std::move(res.extents);
     tables_ = std::move(res.tables);
+    projection_slots_ = std::move(res.slots);
     {
         // 浮动图这一列变了就整篇重排：它影响的是"从这里往后的每一行"，
         //   而且 from→empty 那一档（从浮动改回行内）连增量起点都无从谈起。
@@ -665,11 +666,11 @@ void EditorEngine::rebuildFromTree(const rev::BlockDamage* dmg) {
         floats_ = std::move(next);
     }
     edit_stats_.rebuild_compile_ms = msSince(t_compile0);
-    finishRebuildFromTree(vis, res.controls);
+    structure_index_.control_spans = std::move(res.controls);
+    finishRebuildFromTree(vis);
 }
 
-void EditorEngine::finishRebuildFromTree(FlowVisibility vis,
-                                         const std::vector<rev::ControlSpan>& controls) {
+void EditorEngine::finishRebuildFromTree(FlowVisibility vis) {
     const auto t_index0 = Clock::now();
     // 流索引与块起点一起重建：两者是同一份文档的两种说法，分两次建就会出现
     //   "块按新树、流位置按旧树"的错配，而那种错配只表现为光标落偏一个字，很难查。
@@ -702,7 +703,8 @@ void EditorEngine::finishRebuildFromTree(FlowVisibility vis,
     const auto t_copy0 = Clock::now();
     edit_stats_.rebuild_copy_ms = msSince(t_copy0);
     const auto t_ctl0 = Clock::now();
-    exportControls(controls);
+    exportControls(structure_index_.control_spans);
+    rebuildStructureIndex();
     edit_stats_.rebuild_controls_ms = msSince(t_ctl0);
 
     // 文档规模在产生处发布：它由这一轮的块流与控件集合决定，与"有没有呈现过"无关。
@@ -807,6 +809,8 @@ void EditorEngine::refreshViews() {
     v.flow = &flow_;
     v.controls = &controls_;
     v.control_node_ids = &control_node_ids_;
+    v.control_index = &structure_index_.controls;
+    v.structure = &structure_index_;
     v.owner_index = &owner_index_;
     v.layout = &layout_;
     caret_.setView(v);
@@ -825,7 +829,9 @@ void EditorEngine::refreshViews() {
     e.block_src = &block_src_;
     e.tables = &tables_;
     e.controls = &controls_;
+    e.structure = &structure_index_;
     e.control_node_ids = &control_node_ids_;
+    e.control_index = &structure_index_.controls;
     e.mode = &mode_;
     e.tab_spaces = &cfg_.tab_spaces;
     e.blocked_edits = &blocked_edits_;
@@ -989,6 +995,10 @@ size_t EditorEngine::documentCodepoints() const {
  */
 
 bool EditorEngine::caretRectPt(Rect* out) const { return caret_.caretRectPt(out); }
+
+bool EditorEngine::caretRectFor(const Position& pos, int* page_out, Rect* out) const {
+    return caret_.caretRectFor(pos, page_out, out);
+}
 
 /**
  * 光标矩形（页内像素）。窗口偏移由宿主按 (页号 x 步距) 自己加 —— 引擎这一侧只认页内坐标，
@@ -1240,6 +1250,30 @@ void EditorEngine::setCaretAt(int para, size_t offset, int field) {
 
 bool EditorEngine::setCaretAtFlow(FlowPos flow) { return caret_.setCaretAtFlow(flow); }
 
+bool EditorEngine::setCaretPosition(const Position& p) {
+    image_sel_ = kInvalidNodeId;
+    return caret_.setPosition(p);
+}
+
+void EditorEngine::setCaretAtPosition(const Position& p, bool extend) {
+    if (!loaded_ || !flow_.has_value()) return;
+    TextPos t{};
+    if (!flowToTextPos(p.flow, &t)) return;
+    const int side = caret_.sideForFlow(p.flow);
+    if (extend) {
+        setFocusAtSideLine(t.para, t.offset, side, p.affinity);
+    } else {
+        placeCaretFromClick(t.para, t.offset, side, p.affinity);
+    }
+}
+
+TextSelection EditorEngine::selectionPositions() const { return caret_.selectionPositions(); }
+
+bool EditorEngine::setSelectionPositions(const TextSelection& s) {
+    image_sel_ = kInvalidNodeId;
+    return caret_.setSelectionPositions(s);
+}
+
 bool EditorEngine::setSelection(Range r) {
     image_sel_ = kInvalidNodeId;
     return caret_.setSelection(r);
@@ -1291,14 +1325,19 @@ FlowPos EditorEngine::caretFlowPos() const {
     return flowPosAtSide(p.para, p.offset, caretSide());
 }
 
+Position EditorEngine::caretPosition() const { return caret_.position(); }
+
 bool EditorEngine::controlContentSpan(int index, FlowPos* lo, FlowPos* hi) const {
     if (!flow_.has_value()) return false;
+    if (!structure_index_.controls.empty())
+        return structure_index_.controls.contentSpan(index, lo, hi);
     if (index < 0 || index >= static_cast<int>(control_node_ids_.size())) return false;
     return controlContentSpanOf(*flow_, control_node_ids_[static_cast<size_t>(index)], lo, hi);
 }
 
 int EditorEngine::innermostControlAt(FlowPos f) const {
     if (!flow_.has_value()) return -1;
+    if (!structure_index_.controls.empty()) return structure_index_.controls.innermost(f);
     return innermostControlAtFlow(*flow_, control_node_ids_, f);
 }
 
@@ -1342,9 +1381,11 @@ bool EditorEngine::insertableAtFlow(FlowPos f) const {
     const int inner = innermostControlAt(f);
     if (inner < 0) return false;
     // 可编辑性是交集：包住光标的每一层都要"值在内容里"，且都不是业务只读的。
-    for (int k = inner; k >= 0; k = controls_.at(k).parent) {
+    for (int k = inner; k >= 0;) {
         if (controls_.at(k).read_only) return false;
         if (!controlContentEditable(k)) return false;
+        k = !structure_index_.controls.empty() ? structure_index_.controls.parentOf(k)
+                                               : controls_.at(k).parent;
     }
     return true;
 }
@@ -1857,24 +1898,106 @@ bool EditorEngine::cellFlowRangeAt(int para, FlowPos* lo, FlowPos* hi) const {
     return cellFlowRangeOf(*c, lo, hi);
 }
 
+void EditorEngine::rebuildStructureIndex() {
+    if (flow_.has_value()) structure_index_.buildControls(*flow_, control_node_ids_);
+    structure_index_.buildCells(tables_, blocks_full_.size());
+    structure_index_.buildSlots(projection_slots_, blocks_full_.size());
+}
+
+bool EditorEngine::structureIndexValid() const {
+    const int blocks = static_cast<int>(blocks_full_.size());
+    if (static_cast<int>(structure_index_.cells.size()) != blocks) return false;
+    if (structure_index_.table_spans.size() != tables_.size()) return false;
+    if (static_cast<int>(structure_index_.slots.size()) != blocks) return false;
+    for (const CellRef& ref : structure_index_.cells) {
+        if (ref.table < 0 && ref.cell < 0) continue;
+        if (ref.table < 0 || ref.table >= static_cast<int>(tables_.size())) return false;
+        if (ref.cell < 0 ||
+            ref.cell >= static_cast<int>(tables_[static_cast<size_t>(ref.table)].cells.size()))
+            return false;
+    }
+    int cell_cursor = 0;
+    for (size_t ti = 0; ti < structure_index_.table_spans.size(); ++ti) {
+        const TableSpan& span = structure_index_.table_spans[ti];
+        if (span.first_cell < 0 || span.first_cell + span.cell_count >
+                                       static_cast<int>(structure_index_.cell_extents.size()))
+            return false;
+        if (span.first_block < 0 && span.last_block >= 0) return false;
+        if (span.first_block >= 0 && span.last_block >= blocks) return false;
+        if (span.first_cell != cell_cursor) return false;
+        const LayoutTable& table = tables_[ti];
+        int min_block = -1;
+        int max_block = -1;
+        for (int ci = 0; ci < static_cast<int>(table.cells.size()); ++ci) {
+            const LayoutCell& c = table.cells[static_cast<size_t>(ci)];
+            if (c.block_count <= 0 || c.first_block < 0) continue;
+            if (min_block < 0 || c.first_block < min_block) min_block = c.first_block;
+            const int cell_last = c.first_block + c.block_count - 1;
+            if (cell_last > max_block) max_block = cell_last;
+            if (cell_cursor >= static_cast<int>(structure_index_.cell_extents.size())) return false;
+            const CellExtent& e = structure_index_.cell_extents[static_cast<size_t>(cell_cursor)];
+            if (e.table != static_cast<int>(ti) || e.cell != ci || e.first_block != c.first_block ||
+                e.block_count != c.block_count)
+                return false;
+            ++cell_cursor;
+        }
+        if (min_block != span.first_block || max_block != span.last_block) return false;
+    }
+    if (cell_cursor != static_cast<int>(structure_index_.cell_extents.size())) return false;
+    for (int b = 0; b < blocks; ++b) {
+        std::vector<InlineObject> objects = blocks_full_[static_cast<size_t>(b)].objects;
+        std::sort(objects.begin(), objects.end(),
+                  [](const InlineObject& a, const InlineObject& z) { return a.cp < z.cp; });
+        const std::vector<rev::Slot>& list = structure_index_.slots[static_cast<size_t>(b)];
+        if (objects.size() != list.size()) return false;
+        for (size_t k = 0; k < objects.size(); ++k) {
+            const InlineObject& o = objects[k];
+            const rev::Slot& s = list[k];
+            if (o.cp != s.cp || o.kind != s.kind || o.owner != s.owner) return false;
+        }
+    }
+    for (const rev::ControlSpan& span : structure_index_.control_spans) {
+        if (span.block >= blocks || span.end_block >= blocks) return false;
+    }
+    if (flow_.has_value()) {
+        for (int i = 0; i < static_cast<int>(control_node_ids_.size()); ++i) {
+            FlowPos a = 0;
+            FlowPos b = 0;
+            const bool linear =
+                controlContentSpanOf(*flow_, control_node_ids_[static_cast<size_t>(i)], &a, &b);
+            FlowPos ia = 0;
+            FlowPos ib = 0;
+            const bool indexed = structure_index_.controls.contentSpan(i, &ia, &ib);
+            if (linear != indexed) return false;
+            if (linear && (a != ia || b != ib)) return false;
+            FlowPos ba = 0;
+            FlowPos bb = 0;
+            FlowPos bia = 0;
+            FlowPos bib = 0;
+            const bool bracket_linear =
+                controlSpanOf(*flow_, control_node_ids_[static_cast<size_t>(i)], &ba, &bb);
+            const bool bracket_indexed = structure_index_.controls.bracketSpan(i, &bia, &bib);
+            if (bracket_linear != bracket_indexed) return false;
+            if (bracket_linear && (ba != bia || bb != bib)) return false;
+        }
+    }
+    return true;
+}
+
 /**
  * 最内层那一格：同一段可能落在好几格里（外层格包着内层表），取块数最少的那个。
  */
 const LayoutCell* EditorEngine::layoutCellAt(int para, const LayoutTable** table_out) const {
-    const LayoutCell* best = nullptr;
-    const LayoutTable* best_table = nullptr;
-    for (const LayoutTable& t : tables_) {
-        for (const LayoutCell& c : t.cells) {
-            if (c.block_count <= 0) continue;
-            if (para < c.first_block || para >= c.first_block + c.block_count) continue;
-            if (best == nullptr || c.block_count < best->block_count) {
-                best = &c;
-                best_table = &t;
-            }
+    const CellRef& ref = structure_index_.cellAt(para);
+    if (ref.table >= 0 && ref.table < static_cast<int>(tables_.size())) {
+        const LayoutTable& t = tables_[static_cast<size_t>(ref.table)];
+        if (ref.cell >= 0 && ref.cell < static_cast<int>(t.cells.size())) {
+            if (table_out != nullptr) *table_out = &t;
+            return &t.cells[static_cast<size_t>(ref.cell)];
         }
     }
-    if (table_out != nullptr) *table_out = best_table;
-    return best;
+    if (table_out != nullptr) *table_out = nullptr;
+    return nullptr;
 }
 
 /**
@@ -2195,7 +2318,9 @@ bool EditorEngine::hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* 
         const size_t para = static_cast<size_t>(best->paragraph);
         if (para < block_flow_.size()) {
             const FlowPos hit_flow = block_flow_[para] + caret_.relAt(best->paragraph, cp, side);
-            const int ci = innermostControlAtFlow(*flow_, control_node_ids_, hit_flow);
+            const int ci = !structure_index_.controls.empty()
+                               ? structure_index_.controls.innermost(hit_flow)
+                               : innermostControlAtFlow(*flow_, control_node_ids_, hit_flow);
             owner = ci >= 0 ? ci : LineBox::kInlineOffsetOuter;
         }
     }
@@ -2234,6 +2359,17 @@ bool EditorEngine::hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* 
         }
         if (ip >= best->cell_box_lo_pt && ip < text_start) *out_cell_para = best->paragraph;
     }
+    return true;
+}
+
+bool EditorEngine::hitTestPosition(float x_pt_doc, float y_pt_doc, Position* out) const {
+    TextPos p{};
+    int side = 0;
+    int line_aff = 0;
+    if (!hitTestPt(x_pt_doc, y_pt_doc, &p, nullptr, &side, &line_aff)) return false;
+    const FlowPos flow = flowPosAtSide(p.para, p.offset, side);
+    if (flow < 0) return false;
+    if (out != nullptr) *out = Position{flow, line_aff};
     return true;
 }
 

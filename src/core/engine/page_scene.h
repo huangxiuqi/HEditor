@@ -452,7 +452,9 @@ SceneDiff diffPageScene(const PageScene* before, const PageScene& after, const R
  * @param target 目标页位图
  * @param scene 场景；ops 为空时什么都不做
  * @param cost 分项耗时；可为 nullptr
+ * @param clip 任意矩形裁剪；可为 nullptr
  */
-void rasterPageScene(Bitmap& target, const PageScene& scene, PageRasterCost* cost = nullptr);
+void rasterPageScene(Bitmap& target, const PageScene& scene, PageRasterCost* cost = nullptr,
+                     const Rect* clip = nullptr);
 
 }  // namespace heditor
