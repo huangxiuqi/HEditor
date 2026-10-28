@@ -1,41 +1,43 @@
 /**
- * 序列化：文档模型 <-> JSON 文本（见 docs/文档模型设计.md 第十三节）。
+ * 修订层的落盘格式：修订与 JSON 文本互转。
  *
- * 形状是扁平不嵌套的：一张节点表（按深度优先序拍平，每个节点只记自己的孩子个数）、
- * 一张符号表（节点种类名与其它名字字符串，正文里只出现下标）、一个根列表（正文根与各节
- * 页眉页脚片段的根），外加一个分配器水位。段落不落盘 —— 段落是派生量，落盘的只有段落标记
- * 与它的属性，重新打开时由标记重新导出段落。
+ * 只存形状与身份，不存派生量：哈希与段落数在重建时由孩子重算。于是往返的判据不是"文本相同"，
+ * 而是"重算出来的全文哈希相同" —— 它比逐字段比对更强：任何一个参与哈希的字段没落盘，哈希就会
+ * 变。反过来，种类、隐藏标记、载荷、孩子都在哈希里，剩下的身份（节点号）与分配器水位单独断言。
  *
- * 落盘的四条硬约定：无空白（只用于人工调试的输出才缩进）、默认值不写、浮点写十进制字符串
- * （否则 parse(print(x)) == x 会失败）、枚举按名字写（按枚举值写的话，将来重排枚举会让旧文件
- * 静默变成另一个意思）。
+ * 记录级字段（字符属性、段落覆盖、外观、控件）的编码与模型层共用 record_json，两套格式里同一个
+ * 字段只有一个名字。这一份覆盖本层表示得了的形状：文字、段落标记、控件。
  *
- * 不带两样东西：摘下的子树（撤销留下的池内节点，它们不是文档内容），以及样式表与资源表
- * （1.6 起由调用方持有、还没挂到 Document 上，所以随"Document 挂样式表"那一步一起进来）。
- * 分配器水位要落盘，于是重新打开之后新分配的 id 不会与文件里的撞上。
- *
- * 记录级（字符属性、段落覆盖、外观、控件）的编解码在 record_json，与修订层的落盘共用
- * 同一份：两处各写一遍字段映射，迟早只改一处而另一处静默读成默认值。nlohmann 的类型只出现
- * 在 record_json.h 与两个序列化 .cpp 里，这里的签名不出现。
+ * 读坏了一份文件时 out 一个字节都不动，调用方拿到的失败回执与"修订没变"是同一件事。
  */
 #pragma once
 
+#include <functional>
 #include <string>
 
-#include "core/doc/node.h"
+#include "core/doc/document.h"
 
-namespace heditor {
+namespace heditor::doc {
 /**
- * 落盘格式的版本号。读到别的版本一律拒绝，不做"尽力而为"的迁移 —— 猜着读会把一份新文件
- * 读成一份看起来正常的旧结构。
+ * 落盘格式的版本号。
+ *
+ * 每一次"改含义"都升一格，读端接受 [kMinReadableVersion, kDocFormatVersion]：
+ *
+ * v2 相对 v1：文本写成 UTF-8 字符串（v1 是码点数组，那是内存里的表示泄漏到文件里），
+ * 顶层带一张字体表（v1 只有 fi 这种库下标，换台机器就是另一个字体）。
+ * v3 相对 v2：字体表每一项从字符串（文件名）变成对象 —— 标识换成 PostScript 名，
+ * 族名给人看，文件名排在最后。文件名可以改，字体本身不能，所以文件名不该是身份。
+ *
+ * 读端按类型分派而不是按版本号分派（文本是字符串还是数组、字体项是对象还是字符串，
+ * 类型本身就是证据），版本号只用来拒绝"未来"的文件。
  */
-inline constexpr int kSerializeFormatVersion = 1;
+inline constexpr int kDocFormatVersion = 3;
 
 /**
- * 序列化结果。写不出来只有一种可能：某个字符串不是合法 UTF-8。写出之前自己查一遍 ——
- * JSON 库对非法字节的处理是抛异常（有异常的环境）或终止进程（wasm 关掉异常），
- * 两条路都不该走到，所以宁可在这里返回失败并说明原因。
+ * 还能读的最低版本。往下加版本时不要动它：老文件不会因为文件格式进步而失效。
  */
+inline constexpr int kMinReadableVersion = 1;
+
 struct SerializeResult {
     /**
      * 写成功了没有。
@@ -43,27 +45,16 @@ struct SerializeResult {
     bool ok = false;
 
     /**
-     * JSON 文本（无空白）。
+     * JSON 文本。
      */
     std::string text;
 
     /**
-     * 失败原因（某个字符串不是合法 UTF-8）。
+     * 失败原因。
      */
     std::string error;
 };
 
-/**
- * 把文档写成 JSON 文本（无空白）。
- * @param tree 文档树
- * @return JSON 文本；写不出来时带原因
- */
-SerializeResult serializeDocument(const NodeTree& tree);
-
-/**
- * 反序列化的结果。失败时 error 写明是哪一处读不下去（键名、节点下标、还是枚举名），
- * 并且 out 不动 —— 读坏了就什么都不改，不交出一棵半截的树。
- */
 struct DeserializeResult {
     /**
      * 读成功了没有。
@@ -71,17 +62,75 @@ struct DeserializeResult {
     bool ok = false;
 
     /**
-     * 是哪一处读不下去（键名、节点下标、枚举名）。
+     * 是哪一处读不下去。
      */
     std::string error;
 };
 
 /**
- * 从 JSON 文本重建文档。out 会被整体替换（先清成空文档再按记录装回去，节点 id 原样保留）。
+ * 一张字体在文件里的身份。
+ *
+ * 三样都指同一张脸，但稳定性递减：PostScript 名（OpenType 里唯一性有规范保证）→ 族名
+ * （同一族可能有多张，只作次选）→ 文件名（可以改，所以排在最后）。写端填它能填的，
+ * 读端按同样的顺序找。
+ */
+struct FontRef {
+    /**
+     * PostScript 名（唯一性有规范保证）。
+     */
+    std::string postscript;
+
+    /**
+     * 族名（同一族可能有多张，只作次选）。
+     */
+    std::string family;
+
+    /**
+     * 文件名（可以改，排在最后）。
+     */
+    std::string file;
+};
+
+/**
+ * 写出去时要知道的事实。只有字体一项：文档里存的是字体库下标，而库的装载顺序是进程的事，
+ * 文件必须把"第 0 号是哪张脸"一并写下来。
+ */
+struct SerializeOptions {
+    /**
+     * 字体下标 → 字体身份。空则表示这一侧不认识字体库，文件里就不带字体表。
+     * @param int 字体库下标
+     * @return 这张脸在文件里的身份
+     */
+    std::function<FontRef(int)> font_ref;
+};
+
+/**
+ * 打开时要知道的事实。与 SerializeOptions 对称：文件里的字体标识换成本机的下标。
+ */
+struct DeserializeOptions {
+    /**
+     * 字体身份 → 本机下标。返回负数表示这一侧没有这张脸，调用方保留文件里的原下标
+     * （按回退链去挑一张能用的，比换成一个随机的下标强）。
+     */
+    std::function<int(const FontRef&)> resolve_font;
+};
+
+/**
+ * 写成 JSON 文本（无空白）。节点种类与枚举按名字写，文本写 UTF-8，浮点写最短十进制。
+ * @param doc 修订
+ * @param opt 写出去要知道的事实
+ * @return JSON 文本；写不出来时带原因
+ */
+SerializeResult serialize(const Doc& doc, const SerializeOptions& opt = {});
+
+/**
+ * 从 JSON 文本重建修订。成功时 next_id 取自文件，节点号原样保留。
  * @param text JSON 文本
- * @param out 写回的文档（先清空）
+ * @param out 写回的修订
+ * @param opt 打开时要知道的事实
  * @return 结果；失败时 out 不动
  */
-DeserializeResult deserializeDocument(const std::string& text, NodeTree* out);
+DeserializeResult deserialize(const std::string& text, Doc* out,
+                              const DeserializeOptions& opt = {});
 
-}  // namespace heditor
+}  // namespace heditor::doc

@@ -18,10 +18,10 @@
 
 #include "core/engine/engine.h"
 
+#include "core/doc/document.h"
+#include "core/doc/fragment.h"
 #include "core/engine/payload_schema.h"
 #include "core/layout/layout.h"
-#include "core/rev/fragment.h"
-#include "core/rev/rev.h"
 #include "core/utils/hash.h"
 #include "core/utils/units.h"
 
@@ -50,10 +50,10 @@ constexpr float kImageFramePt = 1.0f;
  * @param n 子树根
  * @param out 追加收集结果
  */
-void collectImages(const rev::Ref& n, std::vector<NodeId>* out) {
+void collectImages(const doc::Ref& n, std::vector<NodeId>* out) {
     if (!n) return;
     if (n->kind == NodeKind::Image) out->push_back(n->id);
-    for (const rev::Ref& c : n->children) collectImages(c, out);
+    for (const doc::Ref& c : n->children) collectImages(c, out);
 }
 
 /**
@@ -284,7 +284,7 @@ std::vector<EditorEngine::ImageBox> EditorEngine::images() const {
 
     out.reserve(ids.size());
     for (size_t i = 0; i < ids.size(); ++i) {
-        const rev::Node* n = rev::findNode(document(), ids[i]);
+        const doc::Node* n = doc::findNode(document(), ids[i]);
         if (n == nullptr) continue;
         const auto* im = std::get_if<ImageSpec>(&n->payload);
         if (im == nullptr) continue;
@@ -704,8 +704,8 @@ bool EditorEngine::moveSelectionToPt(float x_pt_doc, float y_pt_doc) {
     if (!hitTestPt(x_pt_doc, y_pt_doc, &p, nullptr, &side, nullptr, nullptr, true)) return false;
     const FlowPos dest = flowPosAtSide(p.para, p.offset, side);
     const Range sel = edit_session_.caret.selection();
-    const rev::ClipCapture cap =
-        rev::captureRange(session_->doc(), flowVisibility(), sel.begin(), sel.end());
+    const doc::ClipCapture cap =
+        doc::captureRange(session_->doc(), flowVisibility(), sel.begin(), sel.end());
     if (!cap.ok || cap.nodes.empty()) return false;
     return edit_session_.edit.moveRange(cap.lo, cap.hi, dest, cap.nodes);
 }
@@ -731,7 +731,7 @@ bool EditorEngine::moveImageToPt(int index, float x_pt_doc, float y_pt_doc, bool
     float h_pt = 0.0f;
     for (const ImageBox& b : images()) {
         if (b.index != index) continue;
-        const rev::Node* n = rev::findNode(document(), b.id);
+        const doc::Node* n = doc::findNode(document(), b.id);
         if (n == nullptr) return false;
         const auto* s = std::get_if<ImageSpec>(&n->payload);
         if (s == nullptr) return false;
@@ -847,7 +847,7 @@ bool EditorEngine::setImageLayout(int index, int layout) {
     if (!loaded_) return false;
     for (const ImageBox& b : images()) {
         if (b.index != index) continue;
-        const rev::Node* n = rev::findNode(document(), b.id);
+        const doc::Node* n = doc::findNode(document(), b.id);
         if (n == nullptr) return false;
         const auto* s = std::get_if<ImageSpec>(&n->payload);
         if (s == nullptr) return false;

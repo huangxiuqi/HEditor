@@ -1,47 +1,35 @@
 /**
- * 位置：节点级坐标与流位置的互换。
+ * 修订口径的流索引：节点号 → 展开区间。
  *
- * 两套坐标并存是方案一的直接结果（见 docs/文档模型设计.md 第四节）：节点级用
- * Pos{容器, 槽位}，段级与引擎级用流位置（一个整数）。光标与命中测试这类"贴在内容上"
- * 的接口用前者；段落序号、脏段标记、行内盒子下标用后者。两者必须双向互逆，
- * 判据在 tests/model_test.cpp。
+ * 与模型层的 FlowIndex 同一条展开规则（容器占起止两位、文本按码点、原子与标记各一位），
+ * 所以换掉数据源之后光标与命中的坐标含义不变。两份不能合并：模型层那一份按可变节点走，
+ * 这一份按不可变节点走，而编辑完成之后只保留这一份。
  *
- * 流位置怎么展开，决定了这两者能不能互逆：按深度优先把树摊平，文本节点按码点展开
- * （占"码点数"个位置），其余叶子各占一个，容器占"起始边界 + 全部子节点 + 结束边界"。
- * 粒度与光标一致，所以"流位置到行内盒子下标几乎恒等"（差别只在簇与码点）。
- * 非编辑模式下被隐藏的控件整棵子树不参与展开，展开规则见下面的 FlowVisibility。
- *
- * 边界落在容器上时的归宿（对应参照项目"起始边界归一化为域之前、结束边界归一化为
- * 域内末尾"）：容器的起始边界自己占一个流位置，它属于「容器之前」；结束边界也占一个，
- * 它属于「容器内容的末尾」。于是"控件之前""进入控件""控件内容末尾""控件之后"是四个
- * 互不相同的流位置，控件被删空也不例外 —— 这正是上一轮四个边界缺陷的结构性解法。
- *
- * 根节点（Document）的展开不含边界：它不嵌在别处，没有任何位置指向"根之前/之后"。
+ * 下标按活节点重新编号，不按节点号。节点号是递增水位：修订树每改一次就分配新号，旧号一个
+ * 也不回收，于是"按节点号开数组"等于让索引的占用随会话长度增长，而活节点数并不增长。
+ * 重新编号之后，索引的占用只与文档规模有关；代价是一次节点号到下标的查表。
  */
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
 #include <vector>
 
-#include "core/doc/node.h"
-#include "core/rev/flow_types.h"
+#include "core/doc/document.h"
+#include "core/doc/flow_types.h"
 
-namespace heditor {
-/**
- * 流索引：由一棵树一次性预处理出每个节点的展开区间。
- *
- * 单独成类而不把区间挂在 Node 上，是因为它是派生量：树一改就要重算，而重算的时机
- * 该由调用方决定（1.2 的编辑步骤会在提交后重建）。挂在节点上会诱使人在编辑过程中读它，
- * 读到的是过期值。
- *
- * 被摘除的节点（Display 口径下的 hidden 子树）没有区间，任何指向它的 Pos
- * 都会被 flowAt 拒掉（返回 -1）——"不在流里"与"位置越界"用同一种回执。随之而来的一个
- * 后果要记住：容器槽位按完整的子节点数组编号，所以紧跟被摘除子节点的那个槽位不可寻址
- * （它的含义是"在被摘除者之后"，而那个位置不存在）。
- */
+namespace heditor::doc {
+
 class FlowIndex {
 public:
 
-    explicit FlowIndex(const NodeTree& tree, FlowVisibility vis);
+    /**
+     * 一棵修订的展开区间。vis 与投影同一口径：呈现态下隐藏子树整棵摘除，它没有区间，
+     * 内部任何位置都不可寻址。
+     * @param doc 修订
+     * @param vis 可见性口径
+     */
+    FlowIndex(const Doc& doc, FlowVisibility vis);
 
     /**
      * 流位置的个数 = 最后一个合法位置 + 1。
@@ -51,117 +39,162 @@ public:
 
     /**
      * 流位置 → 节点级位置。入参会被夹到 [0, size()]。
-     * @param flow 流位置（会被夹到 [0, size()]）
-     * @return 对应的节点级位置
+     * @param flow 流位置
+     * @return 节点级位置
      */
     Pos posAt(FlowPos flow) const;
 
     /**
      * 节点级位置 → 流位置。容器或槽位不存在、或 offset 越界时返回 -1。
      * @param pos 节点级位置
-     * @return 流位置；容器或槽位不存在、offset 越界时为 -1
+     * @return 流位置；不在流里为 -1
      */
     FlowPos flowAt(const Pos& pos) const;
 
     /**
-     * 这个节点当前在流里吗？Display 口径下被摘除的子树整个不在。
-     * 公开是因为调用方也要问这个问题（例如"这个控件现在隐藏着，别去动它"），
-     * 而 flowAt 的 -1 分不清"越界"与"不在流里"。
-     *
-     * 越界的 id（不是这棵树的节点）同样判不在流里：只有数组成员才谈得上位置。
-     * @param id 节点 id
-     * @return true = 这个节点当前在流里
+     * 这个节点当前在流里吗。不在流里与越界用同一种回执。
+     * @param id 节点号
+     * @return true = 在流里
      */
-    bool inFlow(NodeId id) const {
-        const size_t i = static_cast<size_t>(id);
-        return i < first_.size() && first_[i] >= 0;
-    }
+    bool inFlow(NodeId id) const { return indexOf(id) >= 0; }
 
     /**
      * 节点占用的流位置区间 [first, end)。不在流里时返回 false。
-     * 用返回值表达"不在流里"而不抛异常：调用方多半是拿它做判断，
-     * 异常会让"节点被摘除"从常规状态变成需要捕获的意外。
-     * @param id 节点 id
+     * @param id 节点号
      * @param first 写回区间起点
      * @param end 写回区间终点（不含）
      * @return true = 在流里
      */
     bool intervalOf(NodeId id, int* first, int* end) const;
 
+    /**
+     * 索引自身占用的堆字节数。判据用它确认占用只随活节点数走，不随会话长度走。
+     * @return 这些数组实际占了多少字节
+     */
+    std::size_t allocatedBytes() const;
+
+    /**
+     * 索引里有几个活节点。把占用折成"每节点字节数"时要用它：水位涨而节点数不涨，
+     * 与两者一起涨，是两种不同的情形，只看总字节数分不开。
+     * @return 活节点数
+     */
+    int nodeCount() const { return static_cast<int>(nodes_.size()); }
+
 private:
 
     /**
-     * 递归算出这个节点的展开起点与跨度，cursor 是"下一个可用流位置"。
+     * 节点号到下标的查表槽。id 取 0（kInvalidNodeId）表示空槽，负载因此必须低于一半，
+     * 否则线性探测会绕回自身。
+     */
+    struct Entry {
+        /**
+         * 节点号（0 = 空槽）。
+         */
+        NodeId id = kInvalidNodeId;
+
+        /**
+         * 节点在紧凑数组里的下标；-1 = 空槽。
+         */
+        int idx = -1;
+    };
+
+    /**
+     * 递归算出展开起点与跨度，cursor 是"下一个可用流位置"。
+     */
+    void measure(const Ref& n, int& cursor, bool is_root);
+
+    /**
+     * 按已收集的节点建查表。放在 measure 之后：遍历只写不读，表可以一次建好。
+     */
+    void buildLookup();
+
+    /**
+     * 节点号 → 紧凑数组下标（开放寻址表查一次）。
      *
-     * 直接吃节点指针而不是 id：重建要按节点走一遍全树，而 find(id) 本身是一次哈希查找 ——
-     * 拿 id 递归等于每个节点多付一次哈希，3000 段的文档里这一项与编译同量级。
-     * @param n 节点
-     * @param cursor 下一个可用流位置（进出一趟）
-     * @param is_root 是不是根（根没有边界）
+     * @param id 节点号
+     * @return 下标；不在流里为 -1
      */
-    void measure(const Node* n, int& cursor, bool is_root);
+    int indexOf(NodeId id) const;
 
     /**
-     * 节点的展开起点（流位置）。
-     * @param id 节点
-     * @return 起点
+     * 按下标取节点。
+     *
+     * @param idx 紧凑数组下标
+     * @return 节点
      */
-    int firstOf(NodeId id) const { return first_[static_cast<size_t>(id)]; }
+    const Node* nodeAt(int idx) const { return nodes_[static_cast<std::size_t>(idx)]; }
 
     /**
-     * 节点的展开跨度（占几个流位置）。
-     * @param id 节点
-     * @return 跨度
+     * 按下标取展开起点。
+     *
+     * @param idx 紧凑数组下标
+     * @return 流位置
      */
-    int spanOf(NodeId id) const { return span_[static_cast<size_t>(id)]; }
+    int firstAt(int idx) const { return first_[static_cast<std::size_t>(idx)]; }
 
     /**
-     * 节点展开之后的位置（= 第一个"不属于它"的流位置）。
-     * @param id 节点
-     * @return 展开之后的位置（第一个不属于它的流位置）
+     * 按下标取展开跨度。
+     *
+     * @param idx 紧凑数组下标
+     * @return 流位置个数
      */
-    int endOf(NodeId id) const { return firstOf(id) + spanOf(id); }
+    int spanAt(int idx) const { return span_[static_cast<std::size_t>(idx)]; }
 
     /**
-     * 容器内容开头。根没有起始边界，所以不加那一位。
-     * @param id 容器
-     * @return 内容开头的流位置（根不加起始边界那一位）
+     * 按下标取展开之后的终点（不含）。
+     *
+     * @param idx 紧凑数组下标
+     * @return 流位置
+     */
+    int endAt(int idx) const { return firstAt(idx) + spanAt(idx); }
+
+    /**
+     * 节点内容起点的流位置（开标记之后那一格）。
+     *
+     * @param id 节点号
+     * @return 流位置；不在流里为 -1
      */
     int contentStartOf(NodeId id) const;
 
     /**
-     * 被索引的树（不持有）。
+     * 流的根节点。
      */
-    const NodeTree* tree_ = nullptr;
+    NodeId root_ = kInvalidNodeId;
 
     /**
-     * 展开时用的可见性口径。
+     * 建这份索引时用的可见性口径。
      */
     FlowVisibility vis_ = FlowVisibility::Design;
 
     /**
-     * 位置表按节点 id 直接下标，既不缓存在节点上，也不走哈希表。
-     *
-     * 缓存在节点上会更快，但同一棵树上可以同时存在两个不同可见性口径的索引 ——
-     * invariants 就是这么用的（design 与 display 各一个，用来判"摘除集合与隐藏声明
-     * 是否相符"）；缓存放节点上，后构造的那个会把先构造的口径覆盖掉，于是 design
-     * 对一个隐藏节点说"不在流里"，不变量当场报红。
-     *
-     * 数组够用是因为 id 是递增水位（node.h 的 maxAllocatedId）：构造时按水位开一次、
-     * 顺序写一遍，比重建哈希表快一个量级。不在流里的节点留 -1（摘下的子树、呈现态下
-     * 被隐藏的子树），inFlow 就是问"这一格不是 -1"。
+     * 活节点的紧凑数组（下标与节点号脱钩）。
+     */
+    std::vector<const Node*> nodes_;
+
+    /**
+     * 每个节点的展开起点（与 nodes_ 同下标）。
      */
     std::vector<int> first_;
 
     /**
-     * 每个节点占几个流位置；不在流里的留 0。
+     * 每个节点占几个流位置（与 nodes_ 同下标）。
      */
     std::vector<int> span_;
 
     /**
-     * 流位置个数。
+     * 节点号 → 下标的开放寻址表。
+     */
+    std::vector<Entry> lookup_;
+
+    /**
+     * 查表用的掩码（表长减一，表长是 2 的幂）。
+     */
+    std::size_t mask_ = 0;
+
+    /**
+     * 流的总长度（最后一个合法位置 + 1）。
      */
     int size_ = 0;
 };
 
-}  // namespace heditor
+}  // namespace heditor::doc

@@ -69,7 +69,7 @@ std::string joinPath(const std::string& dir, const std::string& name) {
 }
 
 /**
- * 把 BlockSpec 的段落格式折成 rev 的段落覆盖。
+ * 把 BlockSpec 的段落格式折成 doc 的段落覆盖。
  * @param b 块
  * @returns 段落覆盖
  */
@@ -92,7 +92,7 @@ ParaFormatPatch paraPatchOf(const BlockSpec& b) {
 }
 
 /**
- * 把 BlockSpec 的默认字符格式折成 rev 的字符标记。
+ * 把 BlockSpec 的默认字符格式折成 doc 的字符标记。
  * @param b 块
  * @returns 字符标记
  */
@@ -112,18 +112,18 @@ CharFormat marksOf(const BlockSpec& b) {
  * @param blocks 块流
  * @returns 修订
  */
-rev::Doc docFromBlocks(const std::vector<BlockSpec>& blocks) {
+doc::Doc docFromBlocks(const std::vector<BlockSpec>& blocks) {
     NodeId next = 1;
-    std::vector<rev::Ref> section_kids;
+    std::vector<doc::Ref> section_kids;
     for (const BlockSpec& b : blocks) {
         const CharFormat base = marksOf(b);
         if (b.runs.empty()) {
             if (!b.cp_text.empty()) {
-                rev::RunPayload run;
+                doc::RunPayload run;
                 run.text = b.cp_text;
                 run.marks = base;
                 section_kids.push_back(
-                    rev::makeNode(next++, NodeKind::TextRun, std::move(run), {}));
+                    doc::makeNode(next++, NodeKind::TextRun, std::move(run), {}));
             }
         } else {
             for (const FormatRun& fr : b.runs) {
@@ -137,22 +137,22 @@ rev::Doc docFromBlocks(const std::vector<BlockSpec>& blocks) {
                 m.bold = fr.weight >= 700.0f;
                 m.italic = fr.italic;
                 m.underline = fr.underline;
-                rev::RunPayload run;
+                doc::RunPayload run;
                 run.text.assign(b.cp_text.begin() + static_cast<long>(lo),
                                 b.cp_text.begin() + static_cast<long>(hi));
                 run.marks = m;
                 section_kids.push_back(
-                    rev::makeNode(next++, NodeKind::TextRun, std::move(run), {}));
+                    doc::makeNode(next++, NodeKind::TextRun, std::move(run), {}));
             }
         }
-        rev::MarkPayload mark;
+        doc::MarkPayload mark;
         mark.para = paraPatchOf(b);
         mark.marks = base;
-        section_kids.push_back(rev::makeNode(next++, NodeKind::ParagraphMark, std::move(mark), {}));
+        section_kids.push_back(doc::makeNode(next++, NodeKind::ParagraphMark, std::move(mark), {}));
     }
-    rev::Ref section = rev::makeNode(next++, NodeKind::Section, {}, std::move(section_kids));
-    rev::Ref root = rev::makeNode(next++, NodeKind::Document, {}, {std::move(section)});
-    return rev::adopt(std::move(root), next);
+    doc::Ref section = doc::makeNode(next++, NodeKind::Section, {}, std::move(section_kids));
+    doc::Ref root = doc::makeNode(next++, NodeKind::Document, {}, {std::move(section)});
+    return doc::adopt(std::move(root), next);
 }
 
 /**

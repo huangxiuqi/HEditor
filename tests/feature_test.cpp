@@ -9,12 +9,12 @@
 #include <string>
 #include <vector>
 
-#include "core/doc/document.h"
+#include "core/doc/image_spec.h"
+#include "core/doc/section_spec.h"
+#include "core/doc/textbuf.h"
 #include "core/engine/engine.h"
 #include "core/engine/page_scene.h"
 #include "core/layout/layout.h"
-#include "core/rev/image_spec.h"
-#include "core/rev/section_spec.h"
 #include "core/utils/units.h"
 
 #ifndef HEDITOR_NATIVE_ASSET_DIR
@@ -105,14 +105,14 @@ Point caretCenter(const EditorEngine& e, Rect* out) {
  * @param paras 每段的文字
  * @returns 修订
  */
-rev::Doc makeDoc(const std::vector<std::string>& paras) {
+doc::Doc makeDoc(const std::vector<std::string>& paras) {
     std::vector<std::u32string> out;
     out.reserve(paras.size());
     for (const std::string& text : paras) {
         const std::vector<uint32_t> cps = utf8ToCodepoints(text);
         out.emplace_back(cps.begin(), cps.end());
     }
-    return rev::makeTextDoc(out);
+    return doc::makeTextDoc(out);
 }
 
 }  // namespace
@@ -662,29 +662,29 @@ int main() {
 
     // 修订直接装载：绕过模型树，装载后的保存文本与原文本一致。
     {
-        const rev::SerializeResult saved = e.saveDocument();
-        rev::Doc doc;
-        const rev::DeserializeResult opened =
-            saved.ok ? rev::deserialize(saved.text, &doc) : rev::DeserializeResult{};
+        const doc::SerializeResult saved = e.saveDocument();
+        doc::Doc doc;
+        const doc::DeserializeResult opened =
+            saved.ok ? doc::deserialize(saved.text, &doc) : doc::DeserializeResult{};
         expectTrue(opened.ok, "修订直接装载：先能反序列化一份修订");
         if (opened.ok) {
             e.setDocument(std::move(doc));
-            const rev::SerializeResult again = e.saveDocument();
+            const doc::SerializeResult again = e.saveDocument();
             expectTrue(again.ok && again.text == saved.text, "修订直接装载：保存文本与装载前一致");
         }
     }
 
     // 会话持有选区快照：撤销/重做成对恢复，合并提交只更新栈顶。
     {
-        rev::Session s(rev::Doc{}, 10);
-        s.recordSelection(rev::SelectionSnapshot{1, 1}, rev::SelectionSnapshot{2, 2}, false);
-        s.recordSelection(rev::SelectionSnapshot{2, 2}, rev::SelectionSnapshot{3, 3}, false);
-        rev::SelectionSnapshot got;
+        doc::Session s(doc::Doc{}, 10);
+        s.recordSelection(doc::SelectionSnapshot{1, 1}, doc::SelectionSnapshot{2, 2}, false);
+        s.recordSelection(doc::SelectionSnapshot{2, 2}, doc::SelectionSnapshot{3, 3}, false);
+        doc::SelectionSnapshot got;
         expectTrue(s.undoSelection(&got) && got.anchor == 2 && got.focus == 2,
                    "会话选区：撤销恢复编辑前");
         expectTrue(s.redoSelection(&got) && got.anchor == 3 && got.focus == 3,
                    "会话选区：重做恢复编辑后");
-        s.recordSelection(rev::SelectionSnapshot{3, 3}, rev::SelectionSnapshot{4, 4}, true);
+        s.recordSelection(doc::SelectionSnapshot{3, 3}, doc::SelectionSnapshot{4, 4}, true);
         expectTrue(s.selectionDepth() == 2, "会话选区：合并提交不新压一格");
         expectTrue(s.undoSelection(&got) && got.anchor == 2 && got.focus == 2,
                    "会话选区：合并后撤销仍回到编辑前");

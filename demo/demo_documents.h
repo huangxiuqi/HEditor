@@ -11,8 +11,8 @@
 #include <vector>
 
 #include "core/doc/control.h"
-#include "core/doc/node.h"
 #include "core/layout/layout.h"
+#include "core/doc/document.h"
 
 namespace heditor {
 
@@ -65,15 +65,19 @@ inline int endParaOf(const DemoFieldSpec& f) { return f.epara < 0 ? f.para : f.e
  * 每段自己的结束标记默认排在它内容之后、与字段并列；某个字段跨段时，中间那些段落连同
  * 它们的标记就落在这个字段里面 —— 那是跨段控件唯一可能的形状（容器的孩子必须连续）。
  */
-NodeTree demoTree(const std::vector<BlockSpec>& blocks, const std::vector<DemoFieldSpec>& fields);
+/**
+ * 把块流与字段布局建成修订。
+ * @param blocks 块流
+ * @param fields 字段布局
+ * @returns 修订
+ */
+doc::Doc demoDoc(const std::vector<BlockSpec>& blocks, const std::vector<DemoFieldSpec>& fields);
 
 /**
- * 表格场景的文书：引导段 + 3 行 3 列表格 + 结尾段。
- *
- * 表格本身值得演示的三件事都在里面：第一行是标题行（跨页时会在每页顶端重复）、
- * 标题行第二格跨两列、第二行用 AtLeast 行高撑开（病历里"一大格用来写字"就是这一档）。
- * 格内的段落一律以标记结束 —— 块与流位置的映射靠标记递推。
+ * 表格场景的演示文书。
+ * @param cjk_font_index 中文字体下标
+ * @returns 修订
  */
-NodeTree demoTableTree(int cjk_font_index);
+doc::Doc demoTableDoc(int cjk_font_index);
 
 }  // namespace heditor

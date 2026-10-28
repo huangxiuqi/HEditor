@@ -1,4 +1,3 @@
-#include "core/doc/tree_adapter.h"
 /**
  * 审计判据：增量结果与全量结果的逐字段对照。
  *
@@ -676,25 +675,20 @@ int EditorEngine::auditCompile() const {
     if (!loaded_) return 0;
     const FlowVisibility vis =
         (mode_ == EditMode::Document) ? FlowVisibility::Design : FlowVisibility::Display;
-    // 参照物走另一条路：修订转回模型树，再让模型层编译一遍。两边都用投影的话，
-    //   自审就退化成"自己跟自己比"，那是没有判据价值的。
-    NodeTree mirror;
-    rev::toTree(document(), &mirror);
-    const CompileResult ref = compileDocument(mirror, vis, sheet_);
+    // 全量投影作参照：验证增量续排留下的块流与从头投影逐字段一致。两边走同一实现，
+    //   所以它查的是增量状态有没有漏更新，不承担"两条独立实现互证"的职责。
+    const doc::Projection full = doc::project(document(), sheet_, doc::ViewParams{vis});
     // 段数不同就没法逐段对齐了：报一个大数（不是 1），让"哪里不符"一眼看得出来。
-    if (ref.blocks.size() != projection_.blocks_full.size()) return 1000;
+    if (full.blocks.size() != projection_.blocks_full.size()) return 1000;
     int d = 0;
-    for (size_t i = 0; i < ref.blocks.size(); ++i) {
-        d += diffBlockSpec(projection_.blocks_full[i], ref.blocks[i]);
+    for (size_t i = 0; i < full.blocks.size(); ++i) {
+        d += diffBlockSpec(projection_.blocks_full[i], full.blocks[i]);
     }
-    // 来源身份只比长度：参照侧的节点号是模型树自己分配的，与修订的节点号不同源，
-    //   逐号比较恒不相等。身份契约由下面那段按修订节点号的检查负责。
-    if (ref.sources.size() != projection_.block_src.size()) ++d;
     // 控件集合单独数一遍：它是产物的一次派生，而那次派生对"半截边界"是整对丢弃 ——
     //   一条静默降级。产物只错掉一枚边界时，块级差异常常小到看不出来，而界面上控件会
     //   整批消失（"字段没了"就是这么被放大出来的）。独立数一遍，让这一类差异可读。
     {
-        const std::vector<ControlRange> want = pairedControlRanges(ref.blocks);
+        const std::vector<ControlRange> want = pairedControlRanges(full.blocks);
         if (want.size() != static_cast<size_t>(controls_.size())) {
             ++d;
         } else {
@@ -709,7 +703,7 @@ int EditorEngine::auditCompile() const {
     //   而产物本身可能逐字段全对 —— 闭括号形态漏记时就是这样。这里独立重算段起点
     //   （与 rebuildParagraphFromTree 同一口径，刻意不共享代码），审计的价值就来自独立。
     {
-        const rev::FlowIndex idx(document(), vis);
+        const doc::FlowIndex idx(document(), vis);
         for (size_t i = 0; i < projection_.block_src.size(); ++i) {
             int seg_start = -1;
             if (i == 0) {
@@ -762,8 +756,7 @@ std::string EditorEngine::auditCompileJson() {
     std::ostringstream o;
     o.setf(std::ios::fixed);
     o.precision(3);
-    // curMs 是本轮提交实际花在编译上的时间（rebuildFromTree 记的），fullMs 是这一次
-    //   整树全量编译 —— 两者同源，所以"增量省了多少"是一个可当场证伪的比值。
+    // curMs 是本轮提交实际花在投影上的时间，fullMs 是这一次全量投影加自审的耗时。
     o << "{\"diff\":" << d << ",\"paras\":" << projection_.blocks_full.size()
       << ",\"curMs\":" << edit_stats_.rebuild_compile_ms << ",\"fullMs\":" << full_ms << "}";
     return pk::checked(pk::audit_compile::kSpec, o.str());

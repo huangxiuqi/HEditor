@@ -17,8 +17,8 @@
 #include <vector>
 
 #include "core/doc/flow.h"
-#include "core/rev/flow.h"
-#include "core/rev/node_id.h"
+#include "core/doc/flow_types.h"
+#include "core/doc/node_id.h"
 
 namespace heditor {
 
@@ -33,7 +33,7 @@ namespace heditor {
  * @param hi 写回区间终点（闭括号之后，不含）
  * @return true = 这个控件在流里
  */
-inline bool controlSpanOf(const rev::FlowIndex& flow, NodeId id, FlowPos* lo, FlowPos* hi) {
+inline bool controlSpanOf(const doc::FlowIndex& flow, NodeId id, FlowPos* lo, FlowPos* hi) {
     FlowPos first = 0;
     FlowPos end = 0;
     if (!flow.intervalOf(id, &first, &end)) return false;
@@ -55,7 +55,7 @@ inline bool controlSpanOf(const rev::FlowIndex& flow, NodeId id, FlowPos* lo, Fl
  * @param hi 写回内容末尾（闭括号之前）
  * @return true = 这个控件在流里
  */
-inline bool controlContentSpanOf(const rev::FlowIndex& flow, NodeId id, FlowPos* lo, FlowPos* hi) {
+inline bool controlContentSpanOf(const doc::FlowIndex& flow, NodeId id, FlowPos* lo, FlowPos* hi) {
     FlowPos first = 0;
     FlowPos end = 0;
     if (!controlSpanOf(flow, id, &first, &end)) return false;
@@ -77,7 +77,7 @@ inline bool controlContentSpanOf(const rev::FlowIndex& flow, NodeId id, FlowPos*
  * @param out_hi 写回它的内容末尾（可为空）
  * @return 控件下标；-1 = 不在任何控件的内容里
  */
-inline int innermostControlAtFlow(const rev::FlowIndex& flow, const std::vector<NodeId>& ids,
+inline int innermostControlAtFlow(const doc::FlowIndex& flow, const std::vector<NodeId>& ids,
                                   FlowPos f, FlowPos* out_lo = nullptr, FlowPos* out_hi = nullptr) {
     int best = -1;
     FlowPos best_lo = 0;
@@ -115,7 +115,7 @@ public:
      * @param flow 流索引
      * @param ids 控件节点表（文档顺序）
      */
-    void build(const rev::FlowIndex& flow, const std::vector<NodeId>& ids) {
+    void build(const doc::FlowIndex& flow, const std::vector<NodeId>& ids) {
         entries_.clear();
         by_control_.assign(ids.size(), -1);
         for (int i = 0; i < static_cast<int>(ids.size()); ++i) {

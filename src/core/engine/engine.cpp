@@ -13,11 +13,11 @@
 
 #include "core/engine/engine.h"
 
+#include "core/doc/record_json.h"
 #include "core/engine/control_spans.h"
-#include "core/rev/record_json.h"
 
-#include "core/rev/fragment.h"
-#include "core/rev/project.h"
+#include "core/doc/fragment.h"
+#include "core/doc/project.h"
 
 #include "core/text/writing_mode.h"
 #include "core/utils/hash.h"
@@ -230,9 +230,9 @@ void EditorEngine::setCaretAndSelectionStyle(const Color& caret, float caret_wid
  *   页缓存与脏矩形一起清：它们描述的是上一份文档的像素，页号相同不代表内容相同，
  *   而"哪个页号对应哪段内容"正是换文档时唯一不能沿用的东西。
  */
-void EditorEngine::installDocument(rev::Doc doc) {
+void EditorEngine::installDocument(doc::Doc doc) {
     session_.emplace(std::move(doc), cfg_.undo_limit);
-    projection_.history = rev::BlockHistory{};
+    projection_.history = doc::BlockHistory{};
     loaded_ = true;
     setCaretByText(TextPos{0, 0});
     render_.pages.clear();
@@ -244,29 +244,29 @@ void EditorEngine::installDocument(rev::Doc doc) {
 /**
  * 文档装载：产品只接受修订；模型树由调用方投影后再走这里。
  */
-void EditorEngine::setDocument(rev::Doc doc, const StyleSheet& sheet) {
+void EditorEngine::setDocument(doc::Doc doc, const StyleSheet& sheet) {
     refreshViews();
     sheet_ = sheet;
     installDocument(std::move(doc));
 }
 
-rev::SerializeOptions EditorEngine::fontWriteOptions() const {
-    rev::SerializeOptions opt;
+doc::SerializeOptions EditorEngine::fontWriteOptions() const {
+    doc::SerializeOptions opt;
     // 身份按稳定性排：PostScript 名（OpenType 里唯一性有规范保证）→ 族名（给人看）→
     //   文件名（可以改，所以排在最后）。文件改名不该让一份文档指向另一张脸。
-    opt.font_ref = [this](int index) -> rev::FontRef {
+    opt.font_ref = [this](int index) -> doc::FontRef {
         const FontFace* face = fonts_.face(index);
-        if (face == nullptr) return rev::FontRef{};
-        return rev::FontRef{face->postScriptName(), face->familyName(), fontFileId(face->path())};
+        if (face == nullptr) return doc::FontRef{};
+        return doc::FontRef{face->postScriptName(), face->familyName(), fontFileId(face->path())};
     };
     return opt;
 }
 
-rev::DeserializeOptions EditorEngine::fontReadOptions() const {
-    rev::DeserializeOptions opt;
+doc::DeserializeOptions EditorEngine::fontReadOptions() const {
+    doc::DeserializeOptions opt;
     // 与写端同一个顺序找本机那张脸。都找不到就返回 -1（读者保留文件里的原下标，交给
     //   回退链），而不是"随便挑一张" —— 挑错字体比缺字体更难发现。
-    opt.resolve_font = [this](const rev::FontRef& ref) -> int {
+    opt.resolve_font = [this](const doc::FontRef& ref) -> int {
         int i = fonts_.indexOfPostScript(ref.postscript);
         if (i < 0) i = fonts_.indexOfFamily(ref.family);
         if (i < 0) i = fonts_.indexOfFile(ref.file);
@@ -292,16 +292,16 @@ std::string EditorEngine::fontsJson() const {
     return arr.dump();
 }
 
-rev::SerializeResult EditorEngine::saveDocument() const {
-    if (!session_) return rev::SerializeResult{false, std::string(), "没有装载文档"};
-    return rev::serialize(session_->doc(), fontWriteOptions());
+doc::SerializeResult EditorEngine::saveDocument() const {
+    if (!session_) return doc::SerializeResult{false, std::string(), "没有装载文档"};
+    return doc::serialize(session_->doc(), fontWriteOptions());
 }
 
-rev::DeserializeResult EditorEngine::loadDocument(const std::string& text) {
-    rev::Doc doc;
-    rev::DeserializeResult r = rev::deserialize(text, &doc, fontReadOptions());
+doc::DeserializeResult EditorEngine::loadDocument(const std::string& text) {
+    doc::Doc doc;
+    doc::DeserializeResult r = doc::deserialize(text, &doc, fontReadOptions());
     // 读坏了就地返回：session_ / 光标 / 页缓存一个字节都没动，调用方拿到的失败
-    //   与"这一趟没发生"是同一件事（rev::deserialize 的契约）。
+    //   与"这一趟没发生"是同一件事（doc::deserialize 的契约）。
     if (!r.ok) return r;
     // sheet_ 不动：命名样式表属于宿主的配置，不属于文件（v1 的文件里没有样式表）。
     installDocument(std::move(doc));
@@ -318,10 +318,10 @@ ClipCopy EditorEngine::copySelection() const {
         // 选中的图片是一份"对象选区"：它不是文本区间，但复制 / 剪切对它同样成立。
         //   不认它的话，点中一张图按 Ctrl+C 会说"没有选中内容" —— 而画面上明明选着。
         if (image_sel_ != kInvalidNodeId) {
-            const rev::Node* n = rev::findNode(document(), image_sel_);
+            const doc::Node* n = doc::findNode(document(), image_sel_);
             if (n != nullptr && n->kind == NodeKind::Image) {
-                const std::vector<NodeSpec> nodes{rev::toSpec(*n)};
-                const rev::ClipWriteResult w = rev::writeFragment(nodes, fontWriteOptions());
+                const std::vector<NodeSpec> nodes{doc::toSpec(*n)};
+                const doc::ClipWriteResult w = doc::writeFragment(nodes, fontWriteOptions());
                 if (!w.ok) {
                     out.error = w.error;
                     return out;
@@ -336,13 +336,13 @@ ClipCopy EditorEngine::copySelection() const {
         return out;
     }
     const Range sel = edit_session_.caret.selection();
-    const rev::ClipCapture cap =
-        rev::captureRange(session_->doc(), flowVisibility(), sel.begin(), sel.end());
+    const doc::ClipCapture cap =
+        doc::captureRange(session_->doc(), flowVisibility(), sel.begin(), sel.end());
     if (!cap.ok) {
         out.error = cap.error;
         return out;
     }
-    const rev::ClipWriteResult w = rev::writeFragment(cap.nodes, fontWriteOptions());
+    const doc::ClipWriteResult w = doc::writeFragment(cap.nodes, fontWriteOptions());
     if (!w.ok) {
         out.error = w.error;
         return out;
@@ -358,7 +358,7 @@ ClipCopy EditorEngine::copySelection() const {
 
 std::string EditorEngine::pasteFragment(const std::string& text) {
     if (!session_) return "没有装载文档";
-    const rev::ClipReadResult r = rev::readFragment(text, fontReadOptions());
+    const doc::ClipReadResult r = doc::readFragment(text, fontReadOptions());
     if (!r.ok) return r.error;
     if (!edit_session_.edit.pasteNodes(r.nodes)) return "粘贴失败：落点不接受这段内容";
     return std::string();
@@ -410,9 +410,9 @@ bool EditorEngine::deleteSelection() {
  */
 WatermarkSpec EditorEngine::watermark() const {
     if (!session_.has_value()) return WatermarkSpec{};
-    const rev::Doc& d = document();
+    const doc::Doc& d = document();
     if (!d.root || d.root->children.empty()) return WatermarkSpec{};
-    const rev::Node* sec = d.root->children.front().get();
+    const doc::Node* sec = d.root->children.front().get();
     if (sec == nullptr || sec->kind != NodeKind::Section) return WatermarkSpec{};
     const auto* s = std::get_if<SectionSpec>(&sec->payload);
     return s != nullptr ? s->watermark : WatermarkSpec{};
@@ -606,8 +606,8 @@ bool EditorEngine::deleteSelectionAndRender() {
     return true;
 }
 
-const rev::Doc& EditorEngine::document() const {
-    static const rev::Doc kEmpty;
+const doc::Doc& EditorEngine::document() const {
+    static const doc::Doc kEmpty;
     return session_ ? session_->doc() : kEmpty;
 }
 
@@ -617,7 +617,7 @@ FlowVisibility EditorEngine::flowVisibility() const {
     return (mode_ == EditMode::Document) ? FlowVisibility::Design : FlowVisibility::Display;
 }
 
-void EditorEngine::rebuildFromTree(const rev::BlockDamage* dmg) {
+void EditorEngine::rebuildFromTree(const doc::BlockDamage* dmg) {
     // 视图先摆好：下面这一段就要用位置解析（落基、控件导出），而它读的是视图。
     //   容器都是成员、不换对象，所以地址现在取和最后取一样。
     // 块流换了一份：上一轮那份"筛过括号"的副本已经对不上了，先作废。
@@ -630,15 +630,15 @@ void EditorEngine::rebuildFromTree(const rev::BlockDamage* dmg) {
     const auto t_compile0 = Clock::now();
     // 增量投影：projection_.blocks_full 既是上一轮的块流、也是这一轮的输出 —— 没变的块原地不动
     //   （不重算、不拷贝），只有损伤区间那一段被新物化的块替换。
-    rev::Projection res =
-        rev::project(document(), sheet_, rev::ViewParams{vis}, &projection_.blocks_full,
+    doc::Projection res =
+        doc::project(document(), sheet_, doc::ViewParams{vis}, &projection_.blocks_full,
                      projection_.history.keys.empty() ? nullptr : &projection_.history, dmg);
     edit_stats_.rebuild_reused = res.reused;
     projection_.history.style_version = res.style_version;
     projection_.history.keys = std::move(res.keys);
     projection_.block_src.clear();
     projection_.block_src.reserve(projection_.history.keys.size());
-    for (const rev::BlockKey& k : projection_.history.keys)
+    for (const doc::BlockKey& k : projection_.history.keys)
         projection_.block_src.push_back(k.source);
     projection_.block_extents = std::move(res.extents);
     projection_.tables = std::move(res.tables);
@@ -755,15 +755,15 @@ int EditorEngine::blockFlowSpan(int para) const {
  * 过去区间算两次（产物一次、这里一次），两份一旦分叉，界面上只表现为"某个字段锁不住"或
  * "括号画在别处"，而两份产物各自看都"对"。
  */
-void EditorEngine::exportControls(const std::vector<rev::ControlSpan>& spans) {
+void EditorEngine::exportControls(const std::vector<doc::ControlSpan>& spans) {
     controls_.clear();
     owner_index_.clear();
     control_node_ids_.clear();
 
     // 插入顺序就是对外下标顺序（controls()[i]、setControlProp(i, ...)）。跨度按文档顺序给
-    //   （见 rev::ControlSpan 的说明），所以这里照原序建，不重排 —— 换一种排法就等于把
+    //   （见 doc::ControlSpan 的说明），所以这里照原序建，不重排 —— 换一种排法就等于把
     //   "第几个字段"换成"按区间排第几个"，而两者在嵌套与零宽字段上不是同一个答案。
-    for (const rev::ControlSpan& s : spans) {
+    for (const doc::ControlSpan& s : spans) {
         if (s.node == nullptr || s.block < 0 || s.end_block < 0) continue;
         Control c;
         c.range.start = TextPos{s.block, static_cast<size_t>(s.cp)};
@@ -833,20 +833,20 @@ void EditorEngine::refreshViews() {
 int EditorEngine::undoLimit() const { return cfg_.undo_limit > 0 ? cfg_.undo_limit : 1000000; }
 
 bool EditorEngine::commitSteps(std::vector<Step> steps, int dirty_para, Range selection_before,
-                               Range selection_after, rev::MergeRun merge) {
+                               Range selection_after, doc::MergeRun merge) {
     if (!loaded_ || !session_) return false;
     // 旧修订与旧产物一一对应：投影复用要按它们的差算损伤区间。Doc 是不可变的，
     //   拷贝只是一个引用计数（未改的子树与新的那份共享）。
     const FlowVisibility vis = flowVisibility();
     const DocumentSession::CommitOutcome outcome =
         session_.commitSteps(steps, vis, merge,
-                             rev::SelectionSnapshot{static_cast<int>(selection_before.anchor),
+                             doc::SelectionSnapshot{static_cast<int>(selection_before.anchor),
                                                     static_cast<int>(selection_before.focus)},
-                             rev::SelectionSnapshot{static_cast<int>(selection_after.anchor),
+                             doc::SelectionSnapshot{static_cast<int>(selection_after.anchor),
                                                     static_cast<int>(selection_after.focus)});
     if (!outcome.applied.ok) return false;
     if (!outcome.applied.changed) return true;  // 什么都没改：不占撤销栈，也不白跑一次重建
-    const rev::Damage& dmg = outcome.damage;
+    const doc::Damage& dmg = outcome.damage;
     rebuildFromTree(&dmg.range);
     // 起点取两者更早的那个：dirty_para 是命令层按编辑计划算的落点，damage.lo 是内容上
     //   第一处真实差异 —— 计划可能比差异更早（保守），反过来不该发生，取小就是安全的。
@@ -862,8 +862,8 @@ bool EditorEngine::undo() {
     //   那一步会清掉图片选中，所以这里先记下、最后一处放回去。
     const NodeId image_before = image_sel_;
     clearImageResizePreview();
-    rev::SelectionSnapshot restored_selection;
-    rev::Damage dmg;
+    doc::SelectionSnapshot restored_selection;
+    doc::Damage dmg;
     if (!session_.undo(&restored_selection, &dmg, flowVisibility())) return false;
     rebuildFromTree(&dmg.range);
     // 撤销改到哪一段由损伤区间回答：两份修订一减就是它，不必整篇重排。
@@ -882,8 +882,8 @@ bool EditorEngine::redo() {
     const int plan_before = bracketPlanId();
     const NodeId image_before = image_sel_;
     clearImageResizePreview();
-    rev::SelectionSnapshot restored_selection;
-    rev::Damage dmg;
+    doc::SelectionSnapshot restored_selection;
+    doc::Damage dmg;
     if (!session_.redo(&restored_selection, &dmg, flowVisibility())) return false;
     rebuildFromTree(&dmg.range);
     markLayoutDirtyForDamage(dmg.range);
@@ -1286,9 +1286,9 @@ bool EditorEngine::selectCellAtPara(int para) {
                                              caret_flow);
 }
 
-rev::EditCheck EditorEngine::policyAt(TextPos p) const { return edit_session_.edit.policyAt(p); }
+doc::EditCheck EditorEngine::policyAt(TextPos p) const { return edit_session_.edit.policyAt(p); }
 
-rev::EditCheck EditorEngine::policyErase(TextPos a, TextPos b) const {
+doc::EditCheck EditorEngine::policyErase(TextPos a, TextPos b) const {
     return edit_session_.edit.policyErase(a, b);
 }
 
@@ -1328,7 +1328,7 @@ bool EditorEngine::barrierSpanAt(FlowPos f, FlowPos* first, FlowPos* end) const 
         FlowPos b = 0;
         if (!controlContentSpan(i, &a, &b)) continue;
         if (f < a || f > b) continue;
-        const rev::Node* n = rev::findNode(document(), control_node_ids_[static_cast<size_t>(i)]);
+        const doc::Node* n = doc::findNode(document(), control_node_ids_[static_cast<size_t>(i)]);
         if (n == nullptr) continue;
         const auto* spec = std::get_if<ControlSpec>(&n->payload);
         if (spec == nullptr) continue;
@@ -1342,7 +1342,7 @@ bool EditorEngine::barrierSpanAt(FlowPos f, FlowPos* first, FlowPos* end) const 
 
 bool EditorEngine::controlContentEditable(int index) const {
     if (index < 0 || index >= static_cast<int>(control_node_ids_.size())) return false;
-    const rev::Node* n = rev::findNode(document(), control_node_ids_[static_cast<size_t>(index)]);
+    const doc::Node* n = doc::findNode(document(), control_node_ids_[static_cast<size_t>(index)]);
     if (n == nullptr) return false;
     const auto* spec = std::get_if<ControlSpec>(&n->payload);
     return spec != nullptr && spec->valueShape == ValueShape::Text;
@@ -1783,7 +1783,7 @@ bool EditorEngine::tabCaret(bool backward) {
     if (!flow_.has_value()) return false;
     const FlowPos from = flowPosAtSide(caret().para, caret().offset, caretSide());
     if (from < 0) return false;
-    const rev::TabStop stop = rev::tabFrom(document(), mode_, from, backward);
+    const doc::TabStop stop = doc::tabFrom(document(), mode_, from, backward);
     // handled 为假 = 已经没有下一个（上一个）可编辑控件了：放行给宿主，不绕回第一个。
     if (!stop.handled) return false;
     // 目标落在控件的内容起点上，共享边界上"前一个控件的末尾"与"这个控件的开头"是
@@ -1930,15 +1930,15 @@ bool EditorEngine::structureIndexValid() const {
         std::vector<InlineObject> objects = projection_.blocks_full[static_cast<size_t>(b)].objects;
         std::sort(objects.begin(), objects.end(),
                   [](const InlineObject& a, const InlineObject& z) { return a.cp < z.cp; });
-        const std::vector<rev::Slot>& list = projection_.structure.slots[static_cast<size_t>(b)];
+        const std::vector<doc::Slot>& list = projection_.structure.slots[static_cast<size_t>(b)];
         if (objects.size() != list.size()) return false;
         for (size_t k = 0; k < objects.size(); ++k) {
             const InlineObject& o = objects[k];
-            const rev::Slot& s = list[k];
+            const doc::Slot& s = list[k];
             if (o.cp != s.cp || o.kind != s.kind || o.owner != s.owner) return false;
         }
     }
-    for (const rev::ControlSpan& span : projection_.structure.control_spans) {
+    for (const doc::ControlSpan& span : projection_.structure.control_spans) {
         if (span.block >= blocks || span.end_block >= blocks) return false;
     }
     if (flow_.has_value()) {

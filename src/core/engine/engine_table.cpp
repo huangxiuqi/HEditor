@@ -6,8 +6,8 @@
  */
 #include "core/engine/engine.h"
 
+#include "core/doc/table_ops.h"
 #include "core/engine/payload_schema.h"
-#include "core/rev/table_ops.h"
 #include "core/utils/units.h"
 
 #include <cmath>
@@ -31,9 +31,9 @@ float ptOfLength(const Length& len) {
  * @param node 表格节点
  * @return 行节点
  */
-std::vector<const rev::Node*> tableRows(const rev::Node& node) {
-    std::vector<const rev::Node*> rows;
-    for (const rev::Ref& c : node.children) {
+std::vector<const doc::Node*> tableRows(const doc::Node& node) {
+    std::vector<const doc::Node*> rows;
+    for (const doc::Ref& c : node.children) {
         if (c->kind == NodeKind::TableRow) rows.push_back(c.get());
     }
     return rows;
@@ -272,30 +272,30 @@ bool EditorEngine::canTableOp(TableOp op) const {
     const LayoutCell* cell = layoutCellAt(at.para, &table);
     if (cell == nullptr || table == nullptr) return false;
 
-    const rev::Doc& doc = document();
-    rev::CellRef ref;
-    if (!rev::cellRefOf(doc, static_cast<NodeId>(table->handle), cell->row, cell->cell, &ref)) {
+    const doc::Doc& doc = document();
+    doc::CellRef ref;
+    if (!doc::cellRefOf(doc, static_cast<NodeId>(table->handle), cell->row, cell->cell, &ref)) {
         return false;
     }
-    const rev::FlowIndex& flow = *flow_;
+    const doc::FlowIndex& flow = *flow_;
 
     // 干跑：造一批步骤就知道成不成，与真正执行走的是同一批构造函数。
     switch (op) {
         case TableOp::InsertRowAbove:
-            return rev::insertRow(doc, flow, ref, false).ok;
+            return doc::insertRow(doc, flow, ref, false).ok;
         case TableOp::InsertRowBelow:
-            return rev::insertRow(doc, flow, ref, true).ok;
+            return doc::insertRow(doc, flow, ref, true).ok;
         case TableOp::RemoveRow:
-            return rev::removeRow(doc, flow, ref).ok;
+            return doc::removeRow(doc, flow, ref).ok;
         case TableOp::InsertColumnLeft:
-            return rev::insertColumn(doc, flow, ref, false).ok;
+            return doc::insertColumn(doc, flow, ref, false).ok;
         case TableOp::InsertColumnRight:
-            return rev::insertColumn(doc, flow, ref, true).ok;
+            return doc::insertColumn(doc, flow, ref, true).ok;
         case TableOp::RemoveColumn:
-            return rev::removeColumn(doc, flow, ref).ok;
+            return doc::removeColumn(doc, flow, ref).ok;
         case TableOp::MergeCells: {
             // 合并的主语是整格选区，不是光标所在那一格。
-            std::vector<rev::CellRef> cells;
+            std::vector<doc::CellRef> cells;
             for (const CaretResolver::CellBlocks& cb : edit_session_.caret.cellBlocks()) {
                 if (cb.empty() || cb.first < 0 ||
                     cb.first >= static_cast<int>(projection_.blocks_full.size())) {
@@ -305,15 +305,15 @@ bool EditorEngine::canTableOp(TableOp op) const {
                     projection_.blocks_full[static_cast<size_t>(cb.first)].cell_path;
                 if (path.empty()) return false;
                 const CellSlot& slot = path.back();
-                rev::CellRef one;
-                if (!rev::cellRefOf(doc, slot.table, slot.row, slot.cell, &one)) return false;
+                doc::CellRef one;
+                if (!doc::cellRefOf(doc, slot.table, slot.row, slot.cell, &one)) return false;
                 cells.push_back(one);
             }
             if (cells.size() < 2) return false;
-            return rev::mergeCells(doc, flow, cells).ok;
+            return doc::mergeCells(doc, flow, cells).ok;
         }
         case TableOp::SplitCell:
-            return rev::splitCell(doc, flow, ref).ok;
+            return doc::splitCell(doc, flow, ref).ok;
         case TableOp::RemoveTable: {
             // 删整张表只要求光标在表里；"文档不能只剩零个块"这条由命令层再挡一次。
             FlowPos lo = 0;
@@ -321,7 +321,7 @@ bool EditorEngine::canTableOp(TableOp op) const {
             if (!flow.intervalOf(static_cast<NodeId>(table->handle), &lo, &hi) || hi <= lo) {
                 return false;
             }
-            return rev::canEditRange(doc, mode_, Range{lo, hi}).allowed;
+            return doc::canEditRange(doc, mode_, Range{lo, hi}).allowed;
         }
     }
     return false;
@@ -342,9 +342,9 @@ std::string EditorEngine::tableStateJson() const {
         return pk::checked(pk::table_state::kSpec, none.str());
     }
 
-    const rev::Doc& doc = document();
+    const doc::Doc& doc = document();
     const TableSpec table_spec = [&]() {
-        const rev::Node* n = rev::findNode(doc, static_cast<NodeId>(table->handle));
+        const doc::Node* n = doc::findNode(doc, static_cast<NodeId>(table->handle));
         if (n == nullptr) return TableSpec{};
         const auto* s = std::get_if<TableSpec>(&n->payload);
         return s == nullptr ? TableSpec{} : *s;
@@ -353,9 +353,9 @@ std::string EditorEngine::tableStateJson() const {
     // 标题行是逐行开关，"几行"只是数出来的：遇到第一个非标题行就停。
     int header_rows = 0;
     {
-        const rev::Node* t = rev::findNode(doc, static_cast<NodeId>(table->handle));
+        const doc::Node* t = doc::findNode(doc, static_cast<NodeId>(table->handle));
         if (t != nullptr) {
-            for (const rev::Node* row : tableRows(*t)) {
+            for (const doc::Node* row : tableRows(*t)) {
                 const auto* rs = std::get_if<RowSpec>(&row->payload);
                 if (rs == nullptr || !rs->is_header) break;
                 ++header_rows;
@@ -364,15 +364,15 @@ std::string EditorEngine::tableStateJson() const {
     }
 
     RowSpec row_spec;
-    rev::CellRef ref;
-    if (rev::cellRefOf(doc, static_cast<NodeId>(table->handle), cell->row, cell->cell, &ref)) {
-        if (const rev::Node* n = rev::findNode(doc, ref.row)) {
+    doc::CellRef ref;
+    if (doc::cellRefOf(doc, static_cast<NodeId>(table->handle), cell->row, cell->cell, &ref)) {
+        if (const doc::Node* n = doc::findNode(doc, ref.row)) {
             if (const auto* rs = std::get_if<RowSpec>(&n->payload)) row_spec = *rs;
         }
     }
     CellSpec cell_spec;
     if (ref.cell != kInvalidNodeId) {
-        if (const rev::Node* n = rev::findNode(doc, ref.cell)) {
+        if (const doc::Node* n = doc::findNode(doc, ref.cell)) {
             if (const auto* cs = std::get_if<CellSpec>(&n->payload)) cell_spec = *cs;
         }
     }

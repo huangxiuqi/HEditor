@@ -10,9 +10,9 @@
 #include <cstddef>
 #include <vector>
 
+#include "core/doc/project.h"
 #include "core/engine/control_spans.h"
 #include "core/layout/layout.h"
-#include "core/rev/project.h"
 
 namespace heditor {
 
@@ -93,7 +93,7 @@ struct StructureIndex {
     /**
      * 投影产出的控件跨度（块坐标）。
      */
-    std::vector<rev::ControlSpan> control_spans;
+    std::vector<doc::ControlSpan> control_spans;
 
     /**
      * 段号 → 最内层格。
@@ -113,14 +113,14 @@ struct StructureIndex {
     /**
      * 每段的行内槽（投影产物），按 cp 升序。
      */
-    std::vector<std::vector<rev::Slot>> slots;
+    std::vector<std::vector<doc::Slot>> slots;
 
     /**
      * 重建控件区间。
      * @param flow 流索引
      * @param ids 控件节点表
      */
-    void buildControls(const rev::FlowIndex& flow, const std::vector<NodeId>& ids) {
+    void buildControls(const doc::FlowIndex& flow, const std::vector<NodeId>& ids) {
         controls.build(flow, ids);
     }
 
@@ -160,15 +160,15 @@ struct StructureIndex {
      * @param source 投影产出的槽
      * @param block_count 段总数
      */
-    void buildSlots(const std::vector<rev::Slot>& source, size_t block_count) {
+    void buildSlots(const std::vector<doc::Slot>& source, size_t block_count) {
         slots.assign(block_count, {});
-        for (const rev::Slot& o : source) {
+        for (const doc::Slot& o : source) {
             if (o.block < 0 || o.block >= static_cast<int>(slots.size())) continue;
             slots[static_cast<size_t>(o.block)].push_back(o);
         }
-        for (std::vector<rev::Slot>& list : slots) {
+        for (std::vector<doc::Slot>& list : slots) {
             std::sort(list.begin(), list.end(),
-                      [](const rev::Slot& a, const rev::Slot& z) { return a.cp < z.cp; });
+                      [](const doc::Slot& a, const doc::Slot& z) { return a.cp < z.cp; });
         }
     }
 
@@ -183,9 +183,9 @@ struct StructureIndex {
      */
     bool bracketCounts(int para, size_t cp, int* before, int* opens, int* closes) const {
         if (para < 0 || para >= static_cast<int>(slots.size())) return false;
-        const std::vector<rev::Slot>& list = slots[static_cast<size_t>(para)];
+        const std::vector<doc::Slot>& list = slots[static_cast<size_t>(para)];
         const auto it = std::lower_bound(list.begin(), list.end(), static_cast<uint32_t>(cp),
-                                         [](const rev::Slot& s, uint32_t v) { return s.cp < v; });
+                                         [](const doc::Slot& s, uint32_t v) { return s.cp < v; });
         if (before != nullptr) *before = static_cast<int>(it - list.begin());
         int o = 0;
         int c = 0;

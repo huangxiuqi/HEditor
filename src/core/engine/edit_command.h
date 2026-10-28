@@ -22,22 +22,21 @@
 #include <string>
 #include <vector>
 
-#include "core/doc/compile.h"
+#include "core/doc/capability.h"
+#include "core/doc/char_format.h"
+#include "core/doc/compile_result.h"
 #include "core/doc/control.h"
 #include "core/doc/document.h"
+#include "core/doc/edit_mode.h"
 #include "core/doc/flow.h"
-#include "core/doc/node.h"
+#include "core/doc/flow_types.h"
 #include "core/doc/range.h"
-#include "core/doc/steps.h"
+#include "core/doc/session.h"
+#include "core/doc/step_types.h"
+#include "core/doc/table_ops.h"
+#include "core/doc/text_pos.h"
 #include "core/engine/caret.h"
 #include "core/layout/layout.h"
-#include "core/rev/capability.h"
-#include "core/rev/char_format.h"
-#include "core/rev/edit_mode.h"
-#include "core/rev/flow.h"
-#include "core/rev/rev.h"
-#include "core/rev/session.h"
-#include "core/rev/table_ops.h"
 
 namespace heditor {
 class ControlIndex;
@@ -61,11 +60,11 @@ public:
      * @param dirty_para 起始脏段（-1 = 整篇重排）
      * @param selection_before 编辑前的选区
      * @param selection_after 编辑后的选区
-     * @param merge 与上一次提交的关系（连续拖拽只留一步，见 rev::MergeRun）
+     * @param merge 与上一次提交的关系（连续拖拽只留一步，见 doc::MergeRun）
      * @return false = 这一步没做成（步骤没落地、产物没重建）
      */
     virtual bool commitSteps(std::vector<Step> steps, int dirty_para, Range selection_before,
-                             Range selection_after, rev::MergeRun merge) = 0;
+                             Range selection_after, doc::MergeRun merge) = 0;
 };
 
 /**
@@ -84,7 +83,7 @@ struct EditView {
     /**
      * 文档（只读）。命令层只从它读"落点处是什么"，写一律经 EditHost 落成新修订。
      */
-    const rev::Doc* doc = nullptr;
+    const doc::Doc* doc = nullptr;
 
     /**
      * 落点与选区的写口。
@@ -97,7 +96,7 @@ struct EditView {
      * 持的是 optional 的地址而不是它内容的地址：流索引是"重建时 emplace 进去"的，第一次
      * 重建之前它还没建，取内容的地址会拿到空指针并一直空下去（见 TRAPS 81）。
      */
-    const std::optional<rev::FlowIndex>* flow = nullptr;
+    const std::optional<doc::FlowIndex>* flow = nullptr;
 
     /**
      * 段文本与筛过的行内对象表。
@@ -288,7 +287,7 @@ public:
      * @param p 文本坐标
      * @return 允许不允许，不允许时带原因
      */
-    rev::EditCheck policyAt(TextPos p) const;
+    doc::EditCheck policyAt(TextPos p) const;
 
     /**
      * 删除区间 [a, b) 的判定。跨段删除一律拒（档 1 的删除不跨段，段落标记的删除走合并）。
@@ -296,7 +295,7 @@ public:
      * @param b 区间终点（不含）
      * @return 允许不允许，不允许时带原因
      */
-    rev::EditCheck policyErase(TextPos a, TextPos b) const;
+    doc::EditCheck policyErase(TextPos a, TextPos b) const;
 
     /**
      * 删除一个控件。keep_content 为真时拆壳留内容（那一段字符变成普通正文），为假时连
@@ -328,7 +327,7 @@ public:
      * @param col 写回它在网格里的原点列
      * @return true = 光标在表格里
      */
-    bool currentTableCell(rev::CellRef* out, int* row, int* col) const;
+    bool currentTableCell(doc::CellRef* out, int* row, int* col) const;
 
     /**
      * 表格结构命令的收尾：提交一批步骤，再把光标摆回 (row, col) 那一格的首块。
@@ -707,7 +706,7 @@ private:
      * @return true = 插进去了
      */
     bool commitInsert(FlowPos at, const NodeSpec& spec, FlowPos focus,
-                      rev::MergeRun merge = rev::MergeRun::None);
+                      doc::MergeRun merge = doc::MergeRun::None);
 
     /**
      * 按落点所在控件的字符过滤规则筛一遍（数值控件只收数字）。
@@ -745,7 +744,7 @@ private:
     /**
      * 当前修订（视图里的那一份，只读）。
      */
-    const rev::Doc& doc() const { return *view_.doc; }
+    const doc::Doc& doc() const { return *view_.doc; }
 
     /**
      * 筛过的块流（按显示名单滤掉部分括号）。
@@ -808,7 +807,7 @@ private:
     /**
      * 流索引（hasFlow 为真时才可用）。
      */
-    const rev::FlowIndex& flowIndex() const { return **view_.flow; }
+    const doc::FlowIndex& flowIndex() const { return **view_.flow; }
 
     /**
      * 记一笔"这一下被策略拒了"。
@@ -823,7 +822,7 @@ private:
      * 选区快照随步骤一起给出：修订只记内容、不记光标，而撤销要回到"按下去之前"的那个位置。
      */
     bool commit(std::vector<Step> steps, int dirty_para) const {
-        return commit(std::move(steps), dirty_para, rev::MergeRun::None);
+        return commit(std::move(steps), dirty_para, doc::MergeRun::None);
     }
 
     /**
@@ -836,7 +835,7 @@ private:
      * @param merge 与上一次提交的关系
      * @return true = 改成了
      */
-    bool commit(std::vector<Step> steps, int dirty_para, rev::MergeRun merge) const {
+    bool commit(std::vector<Step> steps, int dirty_para, doc::MergeRun merge) const {
         return view_.host != nullptr &&
                view_.host->commitSteps(std::move(steps), dirty_para, pending_before_,
                                        pending_after_, merge);

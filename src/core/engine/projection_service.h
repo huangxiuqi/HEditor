@@ -8,10 +8,10 @@
 
 #include <vector>
 
-#include "core/doc/compile.h"
+#include "core/doc/compile_result.h"
+#include "core/doc/project.h"
 #include "core/engine/structure_index.h"
 #include "core/layout/layout.h"
-#include "core/rev/project.h"
 
 namespace heditor {
 
@@ -34,7 +34,7 @@ public:
     /**
      * 每块的局部尺寸。
      */
-    std::vector<rev::BlockExtent> block_extents;
+    std::vector<doc::BlockExtent> block_extents;
 
     /**
      * 每块内容起点的全局流位置。
@@ -59,12 +59,12 @@ public:
     /**
      * 投影槽位。
      */
-    std::vector<rev::Slot> slots;
+    std::vector<doc::Slot> slots;
 
     /**
      * 投影历史。
      */
-    rev::BlockHistory history;
+    doc::BlockHistory history;
 
     /**
      * 结构索引。

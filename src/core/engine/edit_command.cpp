@@ -8,7 +8,7 @@
 #include "core/engine/edit_command.h"
 
 #include "core/doc/subtree.h"
-#include "core/doc/table.h"
+#include "core/doc/table_grid.h"
 #include "core/engine/control_spans.h"
 #include "core/engine/structure_index.h"
 #include "core/utils/utf8.h"
@@ -56,7 +56,7 @@ struct WholeControl {
  * 读控件的运行时属性。四个分居两处：hidden 在节点上（呈现态的流位置换算要看它），
  * 其余三个在控件数据里。
  */
-bool readPropValue(const rev::Node* n, ControlProp p, bool* out) {
+bool readPropValue(const doc::Node* n, ControlProp p, bool* out) {
     if (n == nullptr || n->kind != NodeKind::ContentControl || out == nullptr) return false;
     const auto* spec = std::get_if<ControlSpec>(&n->payload);
     if (spec == nullptr) return false;
@@ -84,14 +84,14 @@ namespace {
 /**
  * 一枚原子整枚删掉：按流位置寻址。原子没有可寻址的内部，它在流里只占自己那一格。
  */
-NodeBuild removeAtomStep(const rev::Doc& doc, const rev::FlowIndex& idx, FlowPos at) {
+NodeBuild removeAtomStep(const doc::Doc& doc, const doc::FlowIndex& idx, FlowPos at) {
     NodeBuild out;
     if (at < 0 || at >= idx.size()) {
         out.error = "删除原子：流位置越界";
         return out;
     }
     const Pos p = idx.posAt(at);
-    const rev::Node* n = rev::findNode(doc, p.container);
+    const doc::Node* n = doc::findNode(doc, p.container);
     if (n == nullptr || !isAtom(n->kind) || p.offset != 0) {
         out.error = "删除原子：该位置上没有原子";
         return out;
@@ -107,19 +107,19 @@ NodeBuild removeAtomStep(const rev::Doc& doc, const rev::FlowIndex& idx, FlowPos
  * 删一枚段落标记。格式与样式引用从文档里读出来带上 —— 撤销要靠它还原，手填一份等于把
  * "这一段长什么样"记两遍。
  */
-ParaMarkBuild removeMarkStep(const rev::Doc& doc, const rev::FlowIndex& idx, FlowPos at) {
+ParaMarkBuild removeMarkStep(const doc::Doc& doc, const doc::FlowIndex& idx, FlowPos at) {
     ParaMarkBuild out;
     if (at < 0 || at >= idx.size()) {
         out.error = "删除段落标记：流位置越界";
         return out;
     }
     const Pos p = idx.posAt(at);
-    const rev::Node* n = rev::findNode(doc, p.container);
+    const doc::Node* n = doc::findNode(doc, p.container);
     if (n == nullptr || !isParagraphMark(n->kind) || p.offset != 0) {
         out.error = "删除段落标记：该位置上没有段落标记";
         return out;
     }
-    const auto* mp = std::get_if<rev::MarkPayload>(&n->payload);
+    const auto* mp = std::get_if<doc::MarkPayload>(&n->payload);
     if (mp == nullptr) {
         out.error = "删除段落标记：载荷不是段落标记";
         return out;
@@ -138,21 +138,21 @@ ParaMarkBuild removeMarkStep(const rev::Doc& doc, const rev::FlowIndex& idx, Flo
  *
  * 区间里出现整块元素或跨层时返回空，由调用方另走结构步骤（删原子、删整表）。
  */
-std::vector<Step> deleteWholeRange(const rev::Doc& doc, const rev::FlowIndex& idx, FlowPos from,
+std::vector<Step> deleteWholeRange(const doc::Doc& doc, const doc::FlowIndex& idx, FlowPos from,
                                    FlowPos to) {
     if (from >= to) return {};
     if (from < 0 || to > idx.size()) return {};
     const Pos b = idx.posAt(from);
-    const rev::Node* bn = rev::findNode(doc, b.container);
+    const doc::Node* bn = doc::findNode(doc, b.container);
     if (bn == nullptr) return {};
-    const rev::Node* parent = isContainer(bn->kind) ? bn : rev::parentOf(doc, bn->id);
+    const doc::Node* parent = isContainer(bn->kind) ? bn : doc::parentOf(doc, bn->id);
     if (parent == nullptr) return {};
 
     // 覆盖总和必须恰好等于区间长：跨层（区间伸出了这一层的孩子表）或中间有洞时
     //   不满足，宁可返回空让调用方另走结构步骤，也不要发出半截区间 —— 那一类症状是
     //   "选中了整张表，只删掉第一格的字"。
     int covered = 0;
-    for (const rev::Ref& c : parent->children) {
+    for (const doc::Ref& c : parent->children) {
         int f = 0;
         int e = 0;
         if (!idx.intervalOf(c->id, &f, &e)) continue;
@@ -174,7 +174,7 @@ std::vector<Step> deleteWholeRange(const rev::Doc& doc, const rev::FlowIndex& id
  *
  * 逐节点跳跃而不是逐位问 posAt：后者每次都要从根下降、每层线性扫孩子，整篇删除是亿级。
  */
-std::vector<Step> deleteTextSteps(const rev::Doc& doc, const rev::FlowIndex& idx, FlowPos from,
+std::vector<Step> deleteTextSteps(const doc::Doc& doc, const doc::FlowIndex& idx, FlowPos from,
                                   FlowPos to) {
     std::vector<Step> out;
     if (from < 0 || to <= from || to > idx.size()) return out;
@@ -182,7 +182,7 @@ std::vector<Step> deleteTextSteps(const rev::Doc& doc, const rev::FlowIndex& idx
     FlowPos p = from;
     while (p < to) {
         const Pos np = idx.posAt(p);
-        const rev::Node* n = rev::findNode(doc, np.container);
+        const doc::Node* n = doc::findNode(doc, np.container);
         int nf = 0;
         int ne = 0;
         if (n == nullptr || !isText(n->kind) || !idx.intervalOf(n->id, &nf, &ne) || ne <= p) {
@@ -208,26 +208,26 @@ std::vector<Step> deleteTextSteps(const rev::Doc& doc, const rev::FlowIndex& idx
  * 落点判定：走模型层的能力表（树 + 流位置）。
  * 六个编辑入口与四个光标入口都调它，免得十来处各写一遍。
  */
-rev::EditCheck EditCommand::policyAt(TextPos p) const {
+doc::EditCheck EditCommand::policyAt(TextPos p) const {
     // 侧别由位置自己推（光标这一处用光标自己的侧别，见 sideForPos）——
     //   不从控件下标反推：同一个偏移上可能压着好几枚括号，反推会猜错。
     const FlowPos f = pos().flowPosAtSide(p.para, p.offset, pos().sideForPos(p));
-    if (f < 0) return rev::EditCheck{false, "落点不在文档流里"};
-    return rev::canEditAt(doc(), mode(), f);
+    if (f < 0) return doc::EditCheck{false, "落点不在文档流里"};
+    return doc::canEditAt(doc(), mode(), f);
 }
 
-rev::EditCheck EditCommand::policyErase(TextPos a, TextPos b) const {
+doc::EditCheck EditCommand::policyErase(TextPos a, TextPos b) const {
     // 档 1 的删除不跨段；段落标记的删除走合并那条路（另有判定）。
-    if (a.para != b.para) return rev::EditCheck{false, "删除区间跨段"};
+    if (a.para != b.para) return doc::EditCheck{false, "删除区间跨段"};
     // 区间 = "这段文本码点自己占的那一段"，与实际删除（eraseOnTree）同一把尺子。
     //   端点取错侧就会被判成越出控件而拒掉，表象是"删到只剩一个字就删不动了"；
     //   取宽了又会把相邻的括号圈进来，表象是"删完光标跳一格"。
     int rel_from = 0;
     int rel_to = 0;
     if (!pos().textSpanAt(a.para, a.offset, b.offset, &rel_from, &rel_to))
-        return rev::EditCheck{false, "删除区间不在文档流里"};
+        return doc::EditCheck{false, "删除区间不在文档流里"};
     const FlowPos base = blockFlow()[static_cast<size_t>(a.para)];
-    return rev::canEditRange(doc(), mode(), Range{base + rel_from, base + rel_to});
+    return doc::canEditRange(doc(), mode(), Range{base + rel_from, base + rel_to});
 }
 
 bool EditCommand::insertCodepoints(int para, size_t offset, const std::vector<uint32_t>& cps) {
@@ -373,9 +373,9 @@ bool EditCommand::eraseAtomBeside(FlowPos cur, bool left) {
     const FlowPos f = left ? (cur - 1) : cur;
     if (f < 0 || f >= flowIndex().size()) return false;
     const Pos p = flowIndex().posAt(f);
-    const rev::Node* n = rev::findNode(doc(), p.container);
+    const doc::Node* n = doc::findNode(doc(), p.container);
     if (n == nullptr || !isAtom(n->kind) || p.offset != 0) return false;
-    if (!rev::canEditRange(doc(), mode(), Range{f, f + 1}).allowed) {
+    if (!doc::canEditRange(doc(), mode(), Range{f, f + 1}).allowed) {
         noteBlocked();
         return false;
     }
@@ -402,7 +402,7 @@ bool EditCommand::eraseAtomBeside(FlowPos cur, bool left) {
 
 bool EditCommand::controlIsWholeUnit(int index) const {
     if (index < 0 || index >= static_cast<int>(controlNodeIds().size())) return false;
-    const rev::Node* n = rev::findNode(doc(), controlNodeIds()[static_cast<size_t>(index)]);
+    const doc::Node* n = doc::findNode(doc(), controlNodeIds()[static_cast<size_t>(index)]);
     if (n == nullptr) return false;
     const auto* spec = std::get_if<ControlSpec>(&n->payload);
     if (spec == nullptr) return false;
@@ -418,9 +418,9 @@ bool EditCommand::eraseAtom(NodeId id) {
     FlowPos at = 0;
     FlowPos end = 0;
     if (!flowIndex().intervalOf(id, &at, &end) || end <= at) return false;
-    const rev::Node* n = rev::findNode(doc(), id);
+    const doc::Node* n = doc::findNode(doc(), id);
     if (n == nullptr || !isAtom(n->kind)) return false;
-    if (!rev::canEditRange(doc(), mode(), Range{at, at + 1}).allowed) {
+    if (!doc::canEditRange(doc(), mode(), Range{at, at + 1}).allowed) {
         noteBlocked();
         return false;
     }
@@ -463,7 +463,7 @@ bool EditCommand::eraseWholeUnitBeside(FlowPos cur, bool left) {
 
 bool EditCommand::clearUnitValue(int index) {
     if (index < 0 || index >= static_cast<int>(controlNodeIds().size())) return false;
-    const rev::Node* n = rev::findNode(doc(), controlNodeIds()[static_cast<size_t>(index)]);
+    const doc::Node* n = doc::findNode(doc(), controlNodeIds()[static_cast<size_t>(index)]);
     if (n == nullptr) return false;
     const auto* spec = std::get_if<ControlSpec>(&n->payload);
     if (spec == nullptr) return false;
@@ -613,7 +613,7 @@ EditCommand::BracketHit EditCommand::bracketDeleteForward(FlowPos* at) {
  */
 bool EditCommand::eraseInControl(bool left) {
     const FlowPos cur = pos().selection().focus;
-    if (!rev::canEditAt(doc(), mode(), cur).allowed) {
+    if (!doc::canEditAt(doc(), mode(), cur).allowed) {
         noteBlocked();
         return false;
     }
@@ -848,12 +848,12 @@ bool EditCommand::splitParagraph() {
     const NodeId mark_a = (p.para < static_cast<int>(blockSrc().size()))
                               ? blockSrc()[static_cast<size_t>(p.para)].mark
                               : kInvalidNodeId;
-    const rev::Node* mk = rev::findNode(doc(), mark_a);
+    const doc::Node* mk = doc::findNode(doc(), mark_a);
     ParaFormatPatch patch;
     std::string style_ref;
     CharFormat mark_marks;
     if (mk != nullptr) {
-        if (const auto* mp = std::get_if<rev::MarkPayload>(&mk->payload)) {
+        if (const auto* mp = std::get_if<doc::MarkPayload>(&mk->payload)) {
             patch = mp->para;
             style_ref = mp->style;
             mark_marks = mp->marks;
@@ -915,13 +915,13 @@ bool EditCommand::mergeParagraphInto(int head) {
     //   于是"合并之后那一段保留前一段的格式"这条约定不能白拿：要显式搬到后一段的标记上。
     const NodeId mark_a = blockSrc()[static_cast<size_t>(head)].mark;
     const NodeId mark_b = blockSrc()[static_cast<size_t>(head + 1)].mark;
-    const rev::Node* ma = rev::findNode(doc(), mark_a);
+    const doc::Node* ma = doc::findNode(doc(), mark_a);
     FlowPos at_a = 0;
     if (ma == nullptr || !flowIndex().intervalOf(mark_a, &at_a, nullptr)) return false;
 
     // 权限按"这枚段落标记能不能被删"判：区间 [at_a, at_a + 1) 就是标记自己那一位。
     //   判的是标记那一位可不可编辑，不是光标落在哪 —— 光标在字段外、标记在字段内时能合。
-    if (!rev::canEditRange(doc(), mode(), Range{at_a, at_a + 1}).allowed) {
+    if (!doc::canEditRange(doc(), mode(), Range{at_a, at_a + 1}).allowed) {
         noteBlocked();
         return false;
     }
@@ -934,13 +934,13 @@ bool EditCommand::mergeParagraphInto(int head) {
 
     const ParaMarkBuild rm = removeMarkStep(doc(), flowIndex(), at_a);
     if (!rm.ok) return false;
-    const auto* ma_pl = std::get_if<rev::MarkPayload>(&ma->payload);
+    const auto* ma_pl = std::get_if<doc::MarkPayload>(&ma->payload);
     if (ma_pl == nullptr) return false;
 
     if (mark_b != kInvalidNodeId) {
-        const rev::Node* mb = rev::findNode(doc(), mark_b);
+        const doc::Node* mb = doc::findNode(doc(), mark_b);
         if (mb == nullptr) return false;
-        const auto* mb_pl = std::get_if<rev::MarkPayload>(&mb->payload);
+        const auto* mb_pl = std::get_if<doc::MarkPayload>(&mb->payload);
         if (mb_pl == nullptr) return false;
         SetParaMarkFormat keep;
         keep.id = mark_b;
@@ -1061,7 +1061,7 @@ std::vector<Step> EditCommand::eraseFlowSteps(FlowPos from, FlowPos to) const {
     }
     // 结构操作的门与删单个控件同一把尺子：表单模式默认锁住，文档模式放行。
     for (const WholeControl& u : units) {
-        if (!rev::canDoStructureOp(doc(), mode(), u.id).allowed) {
+        if (!doc::canDoStructureOp(doc(), mode(), u.id).allowed) {
             noteBlocked();
             return {};
         }
@@ -1185,7 +1185,7 @@ EditCommand::SelectionErase EditCommand::planEraseSelection() {
     }
     // 判定与实际删除同一把尺子：判的是整个区间能不能编辑，删的是同一个区间。
     //   跨段的区间在这里第一次被放行 —— 档 1 的 policyErase 只管同段。
-    if (!rev::canEditRange(doc(), mode(), Range{from, to}).allowed) {
+    if (!doc::canEditRange(doc(), mode(), Range{from, to}).allowed) {
         noteBlocked();
         plan.blocked = true;
         return plan;
@@ -1407,7 +1407,7 @@ std::vector<Step> EditCommand::eraseWholeTables(FlowPos from, FlowPos to) const 
         int lo = -1;
         if (!flowIndex().intervalOf(w.id, &lo, nullptr)) return {};
         // 整块包住它必然被拒（与删控件同一条口径）：表单结构锁与只读都落在这里。
-        if (!rev::canEditRange(doc(), mode(), Range{w.lo, w.hi}).allowed) return {};
+        if (!doc::canEditRange(doc(), mode(), Range{w.lo, w.hi}).allowed) return {};
         RemoveNode r;
         r.at_flow = lo;
         steps.push_back(Step{r});
@@ -1499,7 +1499,7 @@ std::vector<Step> EditCommand::eraseAcrossControls(FlowPos from, FlowPos to) con
             return {};
         }
         // 整块包住它必然被拒（只读、表单结构锁）：与删控件同一条口径。
-        if (!rev::canEditRange(doc(), mode(), Range{w.lo, w.hi}).allowed) return {};
+        if (!doc::canEditRange(doc(), mode(), Range{w.lo, w.hi}).allowed) return {};
         RemoveNode r;
         r.at_flow = at;
         steps.push_back(Step{r});
@@ -1561,7 +1561,7 @@ std::vector<Step> EditCommand::eraseTablesCoveredByCells(FlowPos* anchor) const 
         const NodeId id = static_cast<NodeId>(t.handle);
         if (!flowIndex().intervalOf(id, &lo, &hi) || hi <= lo) continue;
         // 整块包住它必然被拒（只读、表单结构锁），与 removeTableAtCaret 同一条口径。
-        if (!rev::canEditRange(doc(), mode(), Range{lo, hi}).allowed) continue;
+        if (!doc::canEditRange(doc(), mode(), Range{lo, hi}).allowed) continue;
         wholes.push_back(Whole{id, lo, hi, false});
     }
     if (wholes.empty()) return steps;
@@ -1646,7 +1646,7 @@ CharFormat EditCommand::marksAtFlow(FlowPos at, std::string* style_ref) const {
     if (style_ref != nullptr) style_ref->clear();
     if (!hasFlow()) return CharFormat{};
     const Pos p = flowIndex().posAt(at);
-    const rev::Node* n = rev::findNode(doc(), p.container);
+    const doc::Node* n = doc::findNode(doc(), p.container);
     if (n == nullptr) return CharFormat{};
 
     /**
@@ -1654,9 +1654,9 @@ CharFormat EditCommand::marksAtFlow(FlowPos at, std::string* style_ref) const {
      * @param node 候选
      * @return 文本载荷（不是文本节点时为空）
      */
-    auto runOf = [](const rev::Node* node) -> const rev::RunPayload* {
+    auto runOf = [](const doc::Node* node) -> const doc::RunPayload* {
         if (node == nullptr || !isText(node->kind)) return nullptr;
-        return std::get_if<rev::RunPayload>(&node->payload);
+        return std::get_if<doc::RunPayload>(&node->payload);
     };
 
     /**
@@ -1664,7 +1664,7 @@ CharFormat EditCommand::marksAtFlow(FlowPos at, std::string* style_ref) const {
      * @param run 文本载荷
      * @return 标记（并记下样式引用）
      */
-    auto adopt = [&](const rev::RunPayload& run) {
+    auto adopt = [&](const doc::RunPayload& run) {
         if (style_ref != nullptr) *style_ref = run.style;
         return run.marks;
     };
@@ -1683,13 +1683,13 @@ CharFormat EditCommand::marksAtFlow(FlowPos at, std::string* style_ref) const {
     //
     //   落在容器槽位、段落标记（不占字符却占一个流位置）与原子上的情形共用这条规则：
     //   段落末尾敲字时流位置正好是段落标记的起点，左边那一段才是要接着写的。
-    const rev::Node* parent = nullptr;
+    const doc::Node* parent = nullptr;
     int slot = 0;
     if (isContainer(n->kind)) {
         parent = n;
         slot = p.offset;
     } else {
-        parent = rev::parentOf(doc(), n->id);
+        parent = doc::parentOf(doc(), n->id);
         if (parent == nullptr) return CharFormat{};
         for (size_t i = 0; i < parent->children.size(); ++i) {
             if (parent->children[i] && parent->children[i]->id == n->id) {
@@ -1711,9 +1711,9 @@ CharFormat EditCommand::marksAtFlow(FlowPos at, std::string* style_ref) const {
     }
     // 空段落：这一段一个文本节点都没有，接着敲的字只能沿用结束标记上的字符格式。
     //   那正是"选中空单元格改格式"落下去的地方，两处读同一份，回显与行为才不分叉。
-    for (const rev::Ref& c : parent->children) {
+    for (const doc::Ref& c : parent->children) {
         if (!c || !isParagraphMark(c->kind)) continue;
-        const auto* mp = std::get_if<rev::MarkPayload>(&c->payload);
+        const auto* mp = std::get_if<doc::MarkPayload>(&c->payload);
         if (mp == nullptr) continue;
         if (style_ref != nullptr) *style_ref = mp->style;
         return mp->marks;
@@ -1725,23 +1725,23 @@ CharFormat EditCommand::marksAtSelectionStart(FlowPos lo, FlowPos hi,
                                               std::string* style_ref) const {
     if (style_ref != nullptr) style_ref->clear();
     if (!hasFlow() || hi <= lo) return marksAtFlow(lo, style_ref);
-    const rev::FlowIndex& idx = flowIndex();
+    const doc::FlowIndex& idx = flowIndex();
     CharFormat out;
     bool found = false;
-    std::function<void(const rev::Ref&)> walk = [&](const rev::Ref& n) {
+    std::function<void(const doc::Ref&)> walk = [&](const doc::Ref& n) {
         if (!n || found) return;
         if (n->kind == NodeKind::TextRun) {
             int f = 0;
             int e = 0;
             // 与选区相交的第一个文本节点。遍历顺序就是文档顺序，所以"第一个"不必比较坐标。
             if (idx.intervalOf(n->id, &f, &e) && e > lo && f < hi) {
-                const auto& rp = std::get<rev::RunPayload>(n->payload);
+                const auto& rp = std::get<doc::RunPayload>(n->payload);
                 if (style_ref != nullptr) *style_ref = rp.style;
                 out = rp.marks;
                 found = true;
             }
         }
-        for (const rev::Ref& c : n->children) walk(c);
+        for (const doc::Ref& c : n->children) walk(c);
     };
     walk(doc().root);
     // 选区里一个文本节点都没有（整段只有一个控件框）：退回"落点左边"。这种位置上敲字
@@ -1760,9 +1760,9 @@ bool EditCommand::removeControl(int index, bool keep_content, FlowPos caret_befo
     if (!hasFlow()) return false;
     if (index < 0 || index >= controls().size()) return false;
     const NodeId id = controlNodeIds()[static_cast<size_t>(index)];
-    const rev::Node* c = rev::findNode(doc(), id);
+    const doc::Node* c = doc::findNode(doc(), id);
     if (c == nullptr || c->kind != NodeKind::ContentControl) return false;
-    const rev::Node* parent = rev::parentOf(doc(), id);
+    const doc::Node* parent = doc::parentOf(doc(), id);
     if (parent == nullptr) return false;
     const NodeId parent_id = parent->id;
     int idx = -1;
@@ -1775,7 +1775,7 @@ bool EditCommand::removeControl(int index, bool keep_content, FlowPos caret_befo
     if (idx < 0) return false;
 
     // 结构操作的门：表单模式默认被 structureLock 锁住，文档模式放行（作者在设计表单）。
-    if (!rev::canDoStructureOp(doc(), mode(), id).allowed) {
+    if (!doc::canDoStructureOp(doc(), mode(), id).allowed) {
         noteBlocked();
         return false;
     }
@@ -1826,7 +1826,7 @@ EditCommand::PropResult EditCommand::setControlProp(int index, ControlProp prop,
     if (index < 0 || index >= controls().size()) return PropResult::Failed;
     const NodeId id = controlNodeIds()[static_cast<size_t>(index)];
     bool before = false;
-    if (!readPropValue(rev::findNode(doc(), id), prop, &before)) return PropResult::Failed;
+    if (!readPropValue(doc::findNode(doc(), id), prop, &before)) return PropResult::Failed;
     // 幂等：没变就不提交 —— 撤销栈里多一条什么都没做的记录只会让人困惑。
     if (before == value) return PropResult::Unchanged;
 
@@ -1853,7 +1853,7 @@ bool EditCommand::posAfterParagraph(int para, Pos* out) const {
     const BlockSource& src = blockSrc()[static_cast<size_t>(para)];
     // 有标记时锚在标记上，没有时锚在段首元素上 —— 两者都指向"这一段所在的那一层"。
     const NodeId anchor = (src.mark != kInvalidNodeId) ? src.mark : src.first;
-    const rev::Node* parent = rev::parentOf(doc(), anchor);
+    const doc::Node* parent = doc::parentOf(doc(), anchor);
     if (parent == nullptr) return false;
     int slot = -1;
     for (size_t i = 0; i < parent->children.size(); ++i) {
@@ -1872,7 +1872,7 @@ bool EditCommand::posAfterParagraph(int para, Pos* out) const {
 }
 
 bool EditCommand::commitInsert(FlowPos at, const NodeSpec& spec, FlowPos focus,
-                               rev::MergeRun merge) {
+                               doc::MergeRun merge) {
     if (at < 0 || at > flowIndex().size()) {
         noteBlocked();
         return false;
@@ -1922,15 +1922,15 @@ bool EditCommand::insertTable(int rows, int cols, bool header) {
     }
     // 光标落进第一格：接着打字就是填这一格（不是落在表之前或表之后）。
     const FlowPos focus = at_flow + kFirstTableCellOffset;
-    const rev::Node* parent = rev::findNode(doc(), at.container);
+    const doc::Node* parent = doc::findNode(doc(), at.container);
     const bool tail = parent == nullptr || at.offset >= static_cast<int>(parent->children.size());
     if (!tail) return commitInsert(at_flow, spec, focus);
 
     // 表落在文档（或这一格）的末尾：补一段空的接在表后面。
     //   文档以表结尾时，表后面没有任何能停光标的地方，点空白处也只是回到上一段 ——
     //   "在表后接着写"就没有落点。两段插入算同一次操作（Start + Continue 合成一步撤销）。
-    if (!commitInsert(at_flow, spec, focus, rev::MergeRun::Start)) return false;
-    const rev::Node* host = rev::findNode(doc(), at.container);
+    if (!commitInsert(at_flow, spec, focus, doc::MergeRun::Start)) return false;
+    const doc::Node* host = doc::findNode(doc(), at.container);
     if (host == nullptr || at.offset >= static_cast<int>(host->children.size())) return true;
     FlowPos table_lo = 0;
     FlowPos table_hi = 0;
@@ -1949,7 +1949,7 @@ bool EditCommand::insertTable(int rows, int cols, bool header) {
     const Range keep{focus, focus};
     pending_before_ = keep;
     pending_after_ = keep;
-    if (commit(std::move(steps), pos().paraForFlow(table_hi), rev::MergeRun::Continue)) {
+    if (commit(std::move(steps), pos().paraForFlow(table_hi), doc::MergeRun::Continue)) {
         pos().setCaretAtFlow(focus);
     }
     return true;
@@ -2017,13 +2017,13 @@ bool EditCommand::filterTypedText(FlowPos at_flow, const std::vector<uint32_t>& 
     const TextDetail* filter = nullptr;
     std::string current;
     if (index >= 0) {
-        const rev::Node* n = rev::findNode(doc(), controlNodeIds()[static_cast<size_t>(index)]);
+        const doc::Node* n = doc::findNode(doc(), controlNodeIds()[static_cast<size_t>(index)]);
         if (n != nullptr) {
             const auto* spec = std::get_if<ControlSpec>(&n->payload);
             if (spec != nullptr) filter = textOf(*spec);
-            for (const rev::Ref& c : n->children) {
+            for (const doc::Ref& c : n->children) {
                 if (c->kind != NodeKind::TextRun) continue;
-                current = codepointsToUtf8(std::get<rev::RunPayload>(c->payload).text);
+                current = codepointsToUtf8(std::get<doc::RunPayload>(c->payload).text);
                 break;
             }
         }
@@ -2041,12 +2041,12 @@ bool EditCommand::filterTypedText(FlowPos at_flow, const std::vector<uint32_t>& 
 bool EditCommand::buildContentReplace(NodeId id, const std::string& text,
                                       std::vector<Step>* steps) const {
     if (steps == nullptr) return false;
-    const rev::Node* n = rev::findNode(doc(), id);
+    const doc::Node* n = doc::findNode(doc(), id);
     if (n == nullptr) return false;
     // 只认"一段纯文本"：多个文本节点或混着别的元素时不动它 —— 猜一个形状重写会毁掉
     //   作者放进去的东西。生成的控件内容（图形 + 标签、格式化后的日期）都是这一段。
-    const rev::Node* run = nullptr;
-    for (const rev::Ref& c : n->children) {
+    const doc::Node* run = nullptr;
+    for (const doc::Ref& c : n->children) {
         if (c->kind != NodeKind::TextRun || run != nullptr) return false;
         run = c.get();
     }
@@ -2065,7 +2065,7 @@ bool EditCommand::buildContentReplace(NodeId id, const std::string& text,
         steps->push_back(Step{in});
         return true;
     }
-    const auto& payload = std::get<rev::RunPayload>(run->payload);
+    const auto& payload = std::get<doc::RunPayload>(run->payload);
     if (payload.text == want) return true;
     if (!want.empty()) {
         SetRun sr;
@@ -2104,7 +2104,7 @@ bool EditCommand::setControlSpec(int index, const ControlPatch& patch) {
     }
     if (index < 0 || index >= static_cast<int>(controlNodeIds().size())) return false;
     const NodeId id = controlNodeIds()[static_cast<size_t>(index)];
-    const rev::Node* n = rev::findNode(doc(), id);
+    const doc::Node* n = doc::findNode(doc(), id);
     if (n == nullptr || n->kind != NodeKind::ContentControl) return false;
     const auto* spec = std::get_if<ControlSpec>(&n->payload);
     if (spec == nullptr) return false;
@@ -2145,7 +2145,7 @@ bool EditCommand::setControlValue(int index, const ControlValue& value) {
     if (!hasFlow()) return false;
     if (index < 0 || index >= static_cast<int>(controlNodeIds().size())) return false;
     const NodeId id = controlNodeIds()[static_cast<size_t>(index)];
-    const rev::Node* n = rev::findNode(doc(), id);
+    const doc::Node* n = doc::findNode(doc(), id);
     if (n == nullptr || n->kind != NodeKind::ContentControl) return false;
     const auto* spec = std::get_if<ControlSpec>(&n->payload);
     if (spec == nullptr) return false;
@@ -2201,7 +2201,7 @@ bool EditCommand::toggleControl(int index, int option) {
     if (!hasFlow()) return false;
     if (index < 0 || index >= static_cast<int>(controlNodeIds().size())) return false;
     const NodeId id = controlNodeIds()[static_cast<size_t>(index)];
-    const rev::Node* n = rev::findNode(doc(), id);
+    const doc::Node* n = doc::findNode(doc(), id);
     if (n == nullptr || n->kind != NodeKind::ContentControl) return false;
     const auto* spec = std::get_if<ControlSpec>(&n->payload);
     if (spec == nullptr) return false;
@@ -2226,7 +2226,7 @@ bool EditCommand::toggleControl(int index, int option) {
         if (!choice->multi && !choice->group.empty()) {
             for (const NodeId other : controlNodeIds()) {
                 if (other == id) continue;
-                const rev::Node* on = rev::findNode(doc(), other);
+                const doc::Node* on = doc::findNode(doc(), other);
                 if (on == nullptr) continue;
                 const auto* os = std::get_if<ControlSpec>(&on->payload);
                 if (os == nullptr) continue;
@@ -2264,7 +2264,7 @@ bool EditCommand::toggleControl(int index, int option) {
 
     std::vector<Step> steps;
     for (const auto& ch : changes) {
-        const rev::Node* target = rev::findNode(doc(), ch.first);
+        const doc::Node* target = doc::findNode(doc(), ch.first);
         if (target == nullptr) continue;
         const auto* ts = std::get_if<ControlSpec>(&target->payload);
         if (ts == nullptr) continue;
@@ -2322,7 +2322,7 @@ bool EditCommand::resizeImage(NodeId id, float w_pt, float h_pt, bool continue_r
         noteBlocked();
         return false;
     }
-    const rev::Node* n = rev::findNode(doc(), id);
+    const doc::Node* n = doc::findNode(doc(), id);
     if (n == nullptr || n->kind != NodeKind::Image) return false;
     const auto* im = std::get_if<ImageSpec>(&n->payload);
     if (im == nullptr) return false;
@@ -2353,7 +2353,7 @@ bool EditCommand::resizeImage(NodeId id, float w_pt, float h_pt, bool continue_r
     const FlowPos at = flowIndex().flowAt(Pos{id, 0});
     const int dirty = (at >= 0) ? pos().paraForFlow(at) : 0;
     return commit(std::move(steps), dirty,
-                  continue_run ? rev::MergeRun::Continue : rev::MergeRun::Start);
+                  continue_run ? doc::MergeRun::Continue : doc::MergeRun::Start);
 }
 
 CharFormat EditCommand::charFormatAtCaret() const {
@@ -2365,11 +2365,11 @@ CharFormat EditCommand::charFormatAtCaret() const {
     //   （逐个节点取"盖住光标的那些"再求交集的话，压在两段边界上会得到两段的交集，
     //   而敲字用的是左边那一段）。
     if (from >= to) return marksAtFlow(from);
-    const rev::FlowIndex& idx = flowIndex();
+    const doc::FlowIndex& idx = flowIndex();
     bool found = false;
     CharFormat out;
     bool mark_only = false;
-    std::function<void(const rev::Ref&)> walk = [&](const rev::Ref& n) {
+    std::function<void(const doc::Ref&)> walk = [&](const doc::Ref& n) {
         if (!n) return;
         if (n->kind == NodeKind::TextRun) {
             int f = 0;
@@ -2377,7 +2377,7 @@ CharFormat EditCommand::charFormatAtCaret() const {
             if (idx.intervalOf(n->id, &f, &e)) {
                 const bool hit = (e > from && f < to);
                 if (hit) {
-                    const CharFormat& m = std::get<rev::RunPayload>(n->payload).marks;
+                    const CharFormat& m = std::get<doc::RunPayload>(n->payload).marks;
                     if (found)
                         out = intersectCharFormat(out, m);
                     else
@@ -2392,11 +2392,11 @@ CharFormat EditCommand::charFormatAtCaret() const {
             int f = 0;
             int e = 0;
             if (idx.intervalOf(n->id, &f, &e) && e > from && f < to) {
-                out = std::get<rev::MarkPayload>(n->payload).marks;
+                out = std::get<doc::MarkPayload>(n->payload).marks;
                 mark_only = true;
             }
         }
-        for (const rev::Ref& c : n->children) walk(c);
+        for (const doc::Ref& c : n->children) walk(c);
     };
     walk(doc().root);
     return out;
@@ -2406,20 +2406,20 @@ ParaFormatPatch EditCommand::paraFormatAtCaret() const {
     ParaFormatPatch out;
     if (!hasFlow()) return out;
     const FlowPos at = pos().selection().begin();
-    const rev::FlowIndex& idx = flowIndex();
+    const doc::FlowIndex& idx = flowIndex();
     // 段落 = [上一枚标记之后, 本枚标记]：按流位置顺序找第一个盖住光标的标记。
     FlowPos seg_lo = 0;
-    std::function<void(const rev::Ref&)> walk = [&](const rev::Ref& n) {
+    std::function<void(const doc::Ref&)> walk = [&](const doc::Ref& n) {
         if (!n) return;
         if (isParagraphMark(n->kind)) {
             int f = 0;
             int e = 0;
             if (idx.intervalOf(n->id, &f, &e)) {
-                if (seg_lo <= at && at <= f) out = std::get<rev::MarkPayload>(n->payload).para;
+                if (seg_lo <= at && at <= f) out = std::get<doc::MarkPayload>(n->payload).para;
                 seg_lo = f + 1;
             }
         }
-        for (const rev::Ref& c : n->children) walk(c);
+        for (const doc::Ref& c : n->children) walk(c);
     };
     walk(doc().root);
     return out;
@@ -2451,7 +2451,7 @@ static NodeSpec runSpecOf(std::vector<uint32_t> text, const CharFormat& marks,
  *   一个节点上 —— 得先把节点按选区的两端切成一串：留下的那一段、要改的那一段、
  *   被切出去的那一段。切分不改总长度，于是同一批里其它节点的流位置仍然有效。
  *
- * 切出来的是新节点，身份不保留（rev 层按描述物化）；撤销拿回的是整份旧修订，
+ * 切出来的是新节点，身份不保留（doc 层按描述物化）；撤销拿回的是整份旧修订，
  *   所以"撤销之后那三个节点合成回一个"这件事由快照负责，不需要逆操作去拼。
  */
 bool EditCommand::applyCharFormat(const CharFormat& patch) {
@@ -2461,11 +2461,11 @@ bool EditCommand::applyCharFormat(const CharFormat& patch) {
     const FlowPos to = sel.end();
     if (from >= to) return false;
 
-    const rev::FlowIndex& idx = flowIndex();
+    const doc::FlowIndex& idx = flowIndex();
     std::vector<Step> steps;
     // 走修订树而不是流索引的下标接口：这里要的是"节点号 + 正文 + 标记"，而流索引只对外
     //   给位置换算与区间，节点对象是它的内部表示。
-    std::function<void(const rev::Ref&)> walk = [&](const rev::Ref& n) {
+    std::function<void(const doc::Ref&)> walk = [&](const doc::Ref& n) {
         if (!n) return;
         // 段落标记：空段落里没有文本节点，字符格式只能落在标记上 —— 否则选中一个空
         //   单元格改字重时一个节点都碰不到，命令返回"没变"，接着敲的字还是默认样式。
@@ -2473,7 +2473,7 @@ bool EditCommand::applyCharFormat(const CharFormat& patch) {
             int f = 0;
             int e = 0;
             if (idx.intervalOf(n->id, &f, &e) && e > from && f < to) {
-                const auto& mp = std::get<rev::MarkPayload>(n->payload);
+                const auto& mp = std::get<doc::MarkPayload>(n->payload);
                 const CharFormat next = mergeCharFormat(mp.marks, patch);
                 if (!(next == mp.marks)) {
                     SetParaMarkFormat s;
@@ -2493,7 +2493,7 @@ bool EditCommand::applyCharFormat(const CharFormat& patch) {
             int e = 0;
             if (idx.intervalOf(n->id, &f, &e) && e > from && f < to) {
                 // 修订层的节点把正文与标记装在载荷里（与模型层的字段布局不同）。
-                const auto& rp = std::get<rev::RunPayload>(n->payload);
+                const auto& rp = std::get<doc::RunPayload>(n->payload);
                 const CharFormat next = mergeCharFormat(rp.marks, patch);
                 // 幂等：这段正文本来就等于目标值就不动它，撤销栈里不该出现空记录。
                 if (!(next == rp.marks)) {
@@ -2536,7 +2536,7 @@ bool EditCommand::applyCharFormat(const CharFormat& patch) {
                 }
             }
         }
-        for (const rev::Ref& c : n->children) walk(c);
+        for (const doc::Ref& c : n->children) walk(c);
     };
     walk(doc().root);
     if (steps.empty()) return false;
@@ -2559,7 +2559,7 @@ bool EditCommand::applyParaFormat(const ParaFormatPatch& patch) {
     const FlowPos lo = sel.begin();
     const FlowPos hi = sel.empty() ? sel.begin() + 1 : sel.end();
 
-    const rev::FlowIndex& idx = flowIndex();
+    const doc::FlowIndex& idx = flowIndex();
     struct MarkHit {
         FlowPos at = 0;
         NodeId id = kInvalidNodeId;
@@ -2568,17 +2568,17 @@ bool EditCommand::applyParaFormat(const ParaFormatPatch& patch) {
         CharFormat marks;
     };
     std::vector<MarkHit> marks;
-    std::function<void(const rev::Ref&)> walk = [&](const rev::Ref& n) {
+    std::function<void(const doc::Ref&)> walk = [&](const doc::Ref& n) {
         if (!n) return;
         if (isParagraphMark(n->kind)) {
             int f = 0;
             int e = 0;
             if (idx.intervalOf(n->id, &f, &e)) {
-                const auto& mp = std::get<rev::MarkPayload>(n->payload);
+                const auto& mp = std::get<doc::MarkPayload>(n->payload);
                 marks.push_back(MarkHit{f, n->id, mp.para, mp.style, mp.marks});
             }
         }
-        for (const rev::Ref& c : n->children) walk(c);
+        for (const doc::Ref& c : n->children) walk(c);
     };
     walk(doc().root);
     std::sort(marks.begin(), marks.end(),
@@ -2671,7 +2671,7 @@ bool EditCommand::hasBlockLevel(const std::vector<NodeSpec>& nodes) {
 bool EditCommand::startsParagraph(FlowPos at) const {
     if (!hasFlow()) return true;
     const Pos p = flowIndex().posAt(at);
-    const rev::Node* n = rev::findNode(doc(), p.container);
+    const doc::Node* n = doc::findNode(doc(), p.container);
     if (n == nullptr) return true;
     // 落在一个文本节点内部：它前面还有字，当然不是段首。
     if (isText(n->kind)) return p.offset == 0;
@@ -2684,12 +2684,12 @@ bool EditCommand::startsParagraph(FlowPos at) const {
 bool EditCommand::endsParagraph(FlowPos at) const {
     if (!hasFlow()) return true;
     const Pos p = flowIndex().posAt(at);
-    const rev::Node* n = rev::findNode(doc(), p.container);
+    const doc::Node* n = doc::findNode(doc(), p.container);
     if (n == nullptr) return true;
     if (isText(n->kind)) {
         // 文本节点内部：右边还有字。落点正好在末尾时按"容器里的下一个兄弟"判，
         // 那正是下面那一步要做的事，所以这里只区分"中间"与"末尾"。
-        const auto* run = std::get_if<rev::RunPayload>(&n->payload);
+        const auto* run = std::get_if<doc::RunPayload>(&n->payload);
         return run != nullptr && p.offset >= static_cast<int>(run->text.size());
     }
     if (!isContainer(n->kind)) return true;
@@ -2761,7 +2761,7 @@ bool EditCommand::pasteNodes(const std::vector<NodeSpec>& nodes) {
     return true;
 }
 
-bool EditCommand::currentTableCell(rev::CellRef* out, int* row, int* col) const {
+bool EditCommand::currentTableCell(doc::CellRef* out, int* row, int* col) const {
     if (!hasFlow() || out == nullptr) return false;
     const int para = pos().caret().para;
     const std::vector<BlockSpec>& all = blocks();
@@ -2769,11 +2769,11 @@ bool EditCommand::currentTableCell(rev::CellRef* out, int* row, int* col) const 
     const std::vector<CellSlot>& path = all[static_cast<size_t>(para)].cell_path;
     if (path.empty()) return false;
     const CellSlot& slot = path.back();
-    if (!rev::cellRefAt(doc(), slot.table, slot.row, slot.cell, out)) return false;
+    if (!doc::cellRefAt(doc(), slot.table, slot.row, slot.cell, out)) return false;
     if (row != nullptr || col != nullptr) {
         int r = 0;
         int c = 0;
-        if (!rev::cellOrigin(doc(), out->table, out->cell, &r, &c)) return false;
+        if (!doc::cellOrigin(doc(), out->table, out->cell, &r, &c)) return false;
         if (row != nullptr) *row = r;
         if (col != nullptr) *col = c;
     }
@@ -2783,15 +2783,15 @@ bool EditCommand::currentTableCell(rev::CellRef* out, int* row, int* col) const 
 bool EditCommand::caretIntoCell(NodeId table, int row, int col) {
     TableGrid grid;
     std::string why;
-    if (!rev::tableGrid(doc(), table, &grid, &why)) return false;
+    if (!doc::tableGrid(doc(), table, &grid, &why)) return false;
     if (grid.rows <= 0 || grid.cols <= 0) return false;
     const int r = std::max(0, std::min(row, grid.rows - 1));
     const int c = std::max(0, std::min(col, grid.cols - 1));
     const GridCell* slot = grid.at(r, c);
     if (slot == nullptr) return false;
     // 落在合并区域里时给的是原点格 —— 光标要落进那一格的内容，不是那个格位。
-    rev::CellRef target;
-    if (!rev::cellRefOf(doc(), table, slot->row, slot->col, &target)) return false;
+    doc::CellRef target;
+    if (!doc::cellRefOf(doc(), table, slot->row, slot->col, &target)) return false;
     const std::vector<BlockSpec>& all = blocks();
     for (size_t i = 0; i < all.size(); ++i) {
         const std::vector<CellSlot>& path = all[i].cell_path;
@@ -2812,14 +2812,14 @@ bool EditCommand::insertTableRow(bool below) {
         noteBlocked();
         return false;
     }
-    rev::CellRef cell;
+    doc::CellRef cell;
     int row = 0;
     int col = 0;
     if (!currentTableCell(&cell, &row, &col)) {
         noteBlocked();
         return false;
     }
-    rev::TableSteps batch = rev::insertRow(doc(), flowIndex(), cell, below);
+    doc::TableSteps batch = doc::insertRow(doc(), flowIndex(), cell, below);
     if (!batch.ok || batch.steps.empty()) {
         noteBlocked();
         return false;
@@ -2842,14 +2842,14 @@ bool EditCommand::removeTableRow() {
         noteBlocked();
         return false;
     }
-    rev::CellRef cell;
+    doc::CellRef cell;
     int row = 0;
     int col = 0;
     if (!currentTableCell(&cell, &row, &col)) {
         noteBlocked();
         return false;
     }
-    rev::TableSteps batch = rev::removeRow(doc(), flowIndex(), cell);
+    doc::TableSteps batch = doc::removeRow(doc(), flowIndex(), cell);
     if (!batch.ok || batch.steps.empty()) {
         noteBlocked();
         return false;
@@ -2872,14 +2872,14 @@ bool EditCommand::insertTableColumn(bool right) {
         noteBlocked();
         return false;
     }
-    rev::CellRef cell;
+    doc::CellRef cell;
     int row = 0;
     int col = 0;
     if (!currentTableCell(&cell, &row, &col)) {
         noteBlocked();
         return false;
     }
-    rev::TableSteps batch = rev::insertColumn(doc(), flowIndex(), cell, right);
+    doc::TableSteps batch = doc::insertColumn(doc(), flowIndex(), cell, right);
     if (!batch.ok || batch.steps.empty()) {
         noteBlocked();
         return false;
@@ -2902,14 +2902,14 @@ bool EditCommand::removeTableColumn() {
         noteBlocked();
         return false;
     }
-    rev::CellRef cell;
+    doc::CellRef cell;
     int row = 0;
     int col = 0;
     if (!currentTableCell(&cell, &row, &col)) {
         noteBlocked();
         return false;
     }
-    rev::TableSteps batch = rev::removeColumn(doc(), flowIndex(), cell);
+    doc::TableSteps batch = doc::removeColumn(doc(), flowIndex(), cell);
     if (!batch.ok || batch.steps.empty()) {
         noteBlocked();
         return false;
@@ -2938,7 +2938,7 @@ bool EditCommand::mergeTableCells() {
         noteBlocked();
         return false;
     }
-    std::vector<rev::CellRef> cells;
+    std::vector<doc::CellRef> cells;
     const std::vector<BlockSpec>& all = blocks();
     for (const CaretResolver::CellBlocks& cb : blocks_of_cells) {
         if (cb.empty() || cb.first < 0 || cb.first >= static_cast<int>(all.size())) {
@@ -2951,15 +2951,15 @@ bool EditCommand::mergeTableCells() {
             return false;
         }
         const CellSlot& slot = path.back();
-        rev::CellRef ref;
-        if (!rev::cellRefAt(doc(), slot.table, slot.row, slot.cell, &ref)) {
+        doc::CellRef ref;
+        if (!doc::cellRefAt(doc(), slot.table, slot.row, slot.cell, &ref)) {
             noteBlocked();
             return false;
         }
         cells.push_back(ref);
     }
     const NodeId table = cells.front().table;
-    rev::TableSteps batch = rev::mergeCells(doc(), flowIndex(), cells);
+    doc::TableSteps batch = doc::mergeCells(doc(), flowIndex(), cells);
     if (!batch.ok || batch.steps.empty()) {
         noteBlocked();
         return false;
@@ -2971,10 +2971,10 @@ bool EditCommand::mergeTableCells() {
         int row = 0;
         int col = 0;
         bool found = false;
-        for (const rev::CellRef& c : cells) {
+        for (const doc::CellRef& c : cells) {
             int r = 0;
             int cc = 0;
-            if (!rev::cellOrigin(doc(), table, c.cell, &r, &cc)) continue;
+            if (!doc::cellOrigin(doc(), table, c.cell, &r, &cc)) continue;
             if (!found || r < lo_row || (r == lo_row && cc < lo_col)) {
                 lo_row = r;
                 lo_col = cc;
@@ -3003,14 +3003,14 @@ bool EditCommand::splitTableCell() {
         noteBlocked();
         return false;
     }
-    rev::CellRef cell;
+    doc::CellRef cell;
     int row = 0;
     int col = 0;
     if (!currentTableCell(&cell, &row, &col)) {
         noteBlocked();
         return false;
     }
-    rev::TableSteps batch = rev::splitCell(doc(), flowIndex(), cell);
+    doc::TableSteps batch = doc::splitCell(doc(), flowIndex(), cell);
     if (!batch.ok || batch.steps.empty()) {
         noteBlocked();
         return false;
@@ -3066,7 +3066,7 @@ bool EditCommand::removeTableAtCaret() {
         noteBlocked();
         return false;
     }
-    if (!rev::canEditRange(doc(), mode(), Range{lo, hi}).allowed) {
+    if (!doc::canEditRange(doc(), mode(), Range{lo, hi}).allowed) {
         noteBlocked();
         return false;
     }
@@ -3091,12 +3091,12 @@ bool EditCommand::setCellSpec(const CellPatch& patch) {
         noteBlocked();
         return false;
     }
-    rev::CellRef cell;
+    doc::CellRef cell;
     if (!currentTableCell(&cell, nullptr, nullptr)) {
         noteBlocked();
         return false;
     }
-    const rev::Node* n = rev::findNode(doc(), cell.cell);
+    const doc::Node* n = doc::findNode(doc(), cell.cell);
     if (n == nullptr || n->kind != NodeKind::TableCell) return false;
     const auto* cur = std::get_if<CellSpec>(&n->payload);
     if (cur == nullptr) return false;
@@ -3128,12 +3128,12 @@ bool EditCommand::setRowSpec(const RowPatch& patch) {
         noteBlocked();
         return false;
     }
-    rev::CellRef cell;
+    doc::CellRef cell;
     if (!currentTableCell(&cell, nullptr, nullptr)) {
         noteBlocked();
         return false;
     }
-    const rev::Node* n = rev::findNode(doc(), cell.row);
+    const doc::Node* n = doc::findNode(doc(), cell.row);
     if (n == nullptr || n->kind != NodeKind::TableRow) return false;
     const auto* cur = std::get_if<RowSpec>(&n->payload);
     if (cur == nullptr) return false;
@@ -3171,12 +3171,12 @@ bool EditCommand::setTableSpec(const TablePatch& patch) {
         noteBlocked();
         return false;
     }
-    rev::CellRef cell;
+    doc::CellRef cell;
     if (!currentTableCell(&cell, nullptr, nullptr)) {
         noteBlocked();
         return false;
     }
-    const rev::Node* n = rev::findNode(doc(), cell.table);
+    const doc::Node* n = doc::findNode(doc(), cell.table);
     if (n == nullptr || n->kind != NodeKind::Table) return false;
     const auto* cur = std::get_if<TableSpec>(&n->payload);
     if (cur == nullptr) return false;
@@ -3215,7 +3215,7 @@ bool EditCommand::setTableGridCols(uint64_t handle, const std::vector<float>& wi
         return false;
     }
     const NodeId id = static_cast<NodeId>(handle);
-    const rev::Node* n = rev::findNode(doc(), id);
+    const doc::Node* n = doc::findNode(doc(), id);
     if (n == nullptr || n->kind != NodeKind::Table) return false;
     const auto* cur = std::get_if<TableSpec>(&n->payload);
     if (cur == nullptr) return false;
@@ -3257,9 +3257,9 @@ bool EditCommand::setTableRowHeight(uint64_t handle, int row, float h_pt) {
         noteBlocked();
         return false;
     }
-    rev::CellRef ref{};
-    if (!rev::cellRefAt(doc(), handle, row, 0, &ref)) return false;
-    const rev::Node* n = rev::findNode(doc(), ref.row);
+    doc::CellRef ref{};
+    if (!doc::cellRefAt(doc(), handle, row, 0, &ref)) return false;
+    const doc::Node* n = doc::findNode(doc(), ref.row);
     if (n == nullptr || n->kind != NodeKind::TableRow) return false;
     const auto* cur = std::get_if<RowSpec>(&n->payload);
     if (cur == nullptr) return false;
@@ -3337,7 +3337,7 @@ bool EditCommand::moveImage(NodeId id, const ImageSpec& spec, FlowPos dest) {
         noteBlocked();
         return false;
     }
-    const rev::Node* parent = rev::parentOf(doc(), id);
+    const doc::Node* parent = doc::parentOf(doc(), id);
     if (parent == nullptr) return false;
     int slot = -1;
     for (size_t i = 0; i < parent->children.size(); ++i) {
@@ -3386,7 +3386,7 @@ bool EditCommand::setImageSpec(NodeId id, const ImageSpec& spec) {
         noteBlocked();
         return false;
     }
-    const rev::Node* n = rev::findNode(doc(), id);
+    const doc::Node* n = doc::findNode(doc(), id);
     if (n == nullptr || n->kind != NodeKind::Image) return false;
     const auto* cur = std::get_if<ImageSpec>(&n->payload);
     if (cur == nullptr) return false;
@@ -3416,9 +3416,9 @@ bool EditCommand::setWatermark(const WatermarkSpec& w) {
         noteBlocked();
         return false;
     }
-    const rev::Doc& d = doc();
+    const doc::Doc& d = doc();
     if (!d.root || d.root->children.empty()) return false;
-    const rev::Node* sec = d.root->children.front().get();
+    const doc::Node* sec = d.root->children.front().get();
     if (sec == nullptr || sec->kind != NodeKind::Section) return false;
     const auto* cur = std::get_if<SectionSpec>(&sec->payload);
     if (cur == nullptr) return false;

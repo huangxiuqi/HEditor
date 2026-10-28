@@ -1,91 +1,59 @@
 /**
- * 片段：从文档里取出来的一段内容，可以原样插回。
+ * 剪贴板片段：从修订里取出一段内容，变成可移植的值，再插回去。
  *
- * 它只装文本与段落标记 —— 这是 1.2 的可编辑集合。含其它元素的区间在提取时就被拒并给出原因，
- * 不会产出一个半截的片段（静默截断比"还不支持"难查得多）。片段在内存里是内容的一份拷贝，
- * 与文档树没有连接，所以既能当剪贴板内容，也能当步骤的还原数据。
+ * 与 Fragment（扁平的内容片段，只装文本与段落标记）分工不同：这里装的是结构，
+ * 用 NodeSpec 递归表达，于是控件、表格、图片、公式都能原样复制 —— 剪贴板要的是
+ * "粘回来一模一样"，而不只是文字。
  *
- * 为什么片段不记节点 ID：它表达的是"内容"，而内容的落点由插回时的位置决定。文本节点的身份
- * 本来也不参与往返判据 —— 区间边界落在文本中间时原节点被切开，插回时是新的节点。
+ * 三件事各自独立：captureRange 定"取哪一段、取成什么形状"；writeFragment / readFragment
+ * 是这一段的落盘格式（跨实例、跨标签页靠它）；插回去由命令层按 InsertNode 步骤做，
+ * 本模块不碰文档。
+ *
+ * 取内容的粒度规则：区间端点落在容器（控件、表格、行、格、链接）内部时，整块一起复制，
+ * 并把取用区间扩到那块的两端。理由与删除那条路同源 —— 半个控件不是内容，粘回去也没法用；
+ * 而"扩到整块"是唯一不会产出半截结构的选择。文本节点例外，它按码点截断，样式随节点带走。
+ *
+ * 表格比控件更硬：行与格离开表格不是可粘贴的内容，"半张表"也没有形状可表达，所以只碰到
+ * 表格的一部分时复制的是整张表。要支持"复制几格"得先有"按格裁剪一张表"的构造，那是另一步。
+ *
+ * 节与文档是外壳，不复制成节点：它们只表达"在哪条流里"，复制它们等于复制"这份文档的位置"。
+ * 碰到就下沉一层，把内容提上来。
  */
 #pragma once
 
-#include <cstdint>
 #include <string>
 #include <vector>
 
-#include "core/doc/flow.h"
-#include "core/doc/node.h"
-#include "core/doc/range.h"
-#include "core/rev/char_format.h"
-#include "core/rev/fragment_value.h"
-#include "core/rev/para_format.h"
+#include "core/doc/document.h"
+#include "core/doc/flow_types.h"
+#include "core/doc/serialize.h"
+#include "core/doc/subtree.h"
 
-namespace heditor {
+namespace heditor::doc {
 /**
- * 区间覆盖到的一个直接子节点：节点本身，以及被覆盖的那一段（流坐标）。
+ * 取内容的结果。失败时 nodes 为空、error 写明原因（没有选中内容、区间越界、含节）。
  */
-struct Cover {
+struct ClipCapture {
     /**
-     * 被覆盖的直接子节点。
+     * 取到的节点，按流顺序。第一个与最后一个可能是截断过的文本节点。
      */
-    NodeId node = kInvalidNodeId;
-
-    /**
-     * 这个节点自己的流起点。
-     */
-    FlowPos first = 0;
+    std::vector<NodeSpec> nodes;
 
     /**
-     * 被覆盖部分的起点。
+     * 实际取用的流区间。可能比入参宽 —— 端点落在容器内部时向外扩到了整块。
      */
-    FlowPos from = 0;
+    FlowPos lo = 0;
 
     /**
-     * 被覆盖部分的终点（开）。
+     * 实际取用区间的终点（不含）。
      */
-    FlowPos to = 0;
-};
+    FlowPos hi = 0;
 
-/**
- * 区间覆盖到的直接子节点清单，按流顺序。
- *
- * 覆盖到的元素一定同属一个父容器：任何夹在中间的容器都会落进区间，而容器在这个口径下不被
- * 支持、先被拒掉。于是调用方拿到的是同一层的孩子，不需要跨层处理。
- *
- * 有元素既不是文本也不是段落标记时返回 false 并写明是哪一个 —— 不静默截断。
- * @param tree 文档树
- * @param range 区间
- * @param out 写回覆盖清单
- * @param error 写回失败原因（区间里有不支持的节点）
- * @return true = 覆盖到的都是文本与段落标记
- */
-bool collectCovers(const NodeTree& tree, const Range& range, std::vector<Cover>* out,
-                   std::string* error);
-
-/**
- * 同上，复用调用方已建好的流索引（Design 口径）。
- *
- * 批量删除时每一步都要取一次覆盖清单，而建一次索引是 O(节点数) —— 四千步的批次就是
- *   几千次全树遍历。索引必须与 tree 同一口径。
- * @param tree 文档树
- * @param range 区间
- * @param out 写回覆盖清单
- * @param error 写回失败原因（区间里有不支持的节点）
- * @return true = 覆盖到的都是文本与段落标记
- * @param idx 调用方建好的流索引（Design 口径）
- */
-bool collectCovers(const NodeTree& tree, const FlowIndex& idx, const Range& range,
-                   std::vector<Cover>* out, std::string* error);
-
-/**
- * 提取结果。失败时 fragment 为空、error 写明原因。
- */
-struct ExtractResult {
     /**
-     * 取出来的片段。
+     * 这一段的纯文本投影：段落标记折成换行，表格格之间是制表符。
+     * 给系统剪贴板的 text/plain 用，也给"粘贴纯文本"这条退路用。
      */
-    Fragment fragment;
+    std::string text;
 
     /**
      * 取到了没有。
@@ -93,19 +61,102 @@ struct ExtractResult {
     bool ok = false;
 
     /**
-     * 失败原因（区间里有不支持的节点）。
+     * 失败原因。
      */
     std::string error;
 };
 
 /**
- * 取区间（纯读，不产生步骤）。
- *
- * 内部先做端点规范化，于是片段永远良构：不可能切在控件中间，也不会留下落单的边界。
- * @param tree 文档树
- * @param range 区间
- * @return 片段；区间不合法时为空并带原因
+ * 取流区间 [lo, hi) 里的内容。
+ * @param doc 修订
+ * @param vis 这一对位置按哪种可见性算（与投影同一口径）
+ * @param lo 区间起点
+ * @param hi 区间终点（不含）
+ * @return 取到的内容；空区间或越界时失败并带原因
  */
-ExtractResult extractRange(const NodeTree& tree, Range range);
+ClipCapture captureRange(const Doc& doc, FlowVisibility vis, FlowPos lo, FlowPos hi);
 
-}  // namespace heditor
+/**
+ * 写片段的结果。
+ */
+struct ClipWriteResult {
+    /**
+     * 写成功了没有。
+     */
+    bool ok = false;
+
+    /**
+     * JSON 文本（无空白）。
+     */
+    std::string text;
+
+    /**
+     * HTML 文本：给系统剪贴板的 text/html。
+     *
+     * 它不是段内往返的通道（那是上面的 JSON），只为"粘到别的应用里还带着格式"而存在 ——
+     *   只写纯文本的话，粘进 Word 或浏览器就是一段裸字。
+     */
+    std::string html;
+
+    /**
+     * 失败原因（某个字符串不是合法 UTF-8、或某个节点种类装不进 NodeSpec）。
+     */
+    std::string error;
+};
+
+/**
+ * 把片段写成 JSON 文本。
+ *
+ * 格式自带字符串表与字体表，与文档落盘同一套记录级编码（record_json）：换一个进程、
+ * 换一整套字体装载顺序，读回来仍然是同一段内容。没有字体表的话，"第 2 号字体"在另一个
+ * 实例里就是另一张脸 —— 而两边看起来都"成功了"。
+ * @param nodes 片段
+ * @param opt 字体身份（与文档落盘同一份回调）
+ * @return JSON 文本
+ */
+ClipWriteResult writeFragment(const std::vector<NodeSpec>& nodes, const SerializeOptions& opt = {});
+
+/**
+ * 读片段的结果。
+ */
+struct ClipReadResult {
+    /**
+     * 读成功了没有。
+     */
+    bool ok = false;
+
+    /**
+     * 读出来的片段。
+     */
+    std::vector<NodeSpec> nodes;
+
+    /**
+     * 读不下去的那一处。
+     */
+    std::string error;
+};
+
+/**
+ * 从 JSON 文本读片段。读到坏数据时 nodes 为空 —— 不交出一段半截的内容。
+ * @param text JSON 文本
+ * @param opt 字体身份换成本机下标
+ * @return 读出来的片段
+ */
+ClipReadResult readFragment(const std::string& text, const DeserializeOptions& opt = {});
+
+/**
+ * 系统剪贴板上的那一份载荷：{"f": 片段, "t": 纯文本, "h": HTML}，失败时是 {"e": 原因}。
+ *
+ * 为什么给一层信封：一次复制要同时交出两样东西（自家格式与纯文本投影），而 DOM 事件里
+ * 拿数据是同步的 —— 两趟往返在 Worker 传输上会把"用户按 Ctrl+C"拖成两次异步等待，
+ * 而剪贴板写入必须当场发生。信封只有一个键位约定，读的一方只认 f / t / e。
+ * @param fragment 片段 JSON 文本（空表示失败）
+ * @param text 纯文本投影
+ * @param error 失败原因（非空时信封里只有这一项）
+ * @param html 带格式的 HTML（别的应用读的那一份，可为空）
+ * @return 载荷 JSON 文本
+ */
+std::string clipboardPayload(const std::string& fragment, const std::string& text,
+                             const std::string& error, const std::string& html);
+
+}  // namespace heditor::doc

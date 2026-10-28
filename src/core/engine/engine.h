@@ -17,10 +17,17 @@
 #include <unordered_map>
 #include <vector>
 
-#include "core/doc/compile.h"
+#include "core/doc/capability.h"
+#include "core/doc/compile_result.h"
 #include "core/doc/control.h"
 #include "core/doc/document.h"
+#include "core/doc/edit_mode.h"
 #include "core/doc/flow.h"
+#include "core/doc/flow_types.h"
+#include "core/doc/project.h"
+#include "core/doc/serialize.h"
+#include "core/doc/session.h"
+#include "core/doc/text_pos.h"
 #include "core/engine/caret.h"
 #include "core/engine/control_geometry.h"
 #include "core/engine/control_spans.h"
@@ -38,13 +45,6 @@
 #include "core/engine/structure_index.h"
 #include "core/layout/layout.h"
 #include "core/render/bitmap.h"
-#include "core/rev/capability.h"
-#include "core/rev/edit_mode.h"
-#include "core/rev/flow.h"
-#include "core/rev/project.h"
-#include "core/rev/rev.h"
-#include "core/rev/serialize.h"
-#include "core/rev/session.h"
 #include "core/text/font.h"
 #include "core/text/writing_mode.h"
 
@@ -188,17 +188,17 @@ public:
      * @param doc 修订
      * @param sheet 样式表
      */
-    void setDocument(rev::Doc doc, const StyleSheet& sheet = {});
+    void setDocument(doc::Doc doc, const StyleSheet& sheet = {});
 
     /**
      * 持有中的文档。引擎只认这一条装载入口，所以它一直有效（未装载时是一份空修订）。
      *
      * @return 持有中的修订（未装载时是一份空修订）
      */
-    const rev::Doc& document() const;
+    const doc::Doc& document() const;
 
     /**
-     * 保存：把当前修订写成 JSON 文本（格式见 rev::serialize）。
+     * 保存：把当前修订写成 JSON 文本（格式见 doc::serialize）。
      *
      * 存的是"形状与身份"，不存任何派生量 —— 打开时重新投影、重排、重光栅，像素必然回到
      * 保存时的样子（判据就是这么写的：存盘 → 新引擎 → 打开 → 整帧逐字节相同）。
@@ -209,7 +209,7 @@ public:
      *
      * @return 文档 JSON 文本与失败原因
      */
-    rev::SerializeResult saveDocument() const;
+    doc::SerializeResult saveDocument() const;
 
     /**
      * 打开：JSON 文本 → 修订 → 装上。
@@ -223,10 +223,10 @@ public:
      * @param text 文档 JSON 文本
      * @return 成功与否与给人看的一句话（失败时引擎一个字节都不动）
      */
-    rev::DeserializeResult loadDocument(const std::string& text);
+    doc::DeserializeResult loadDocument(const std::string& text);
 
     /**
-     * 复制：把当前选区取成一段可移植的片段（格式见 rev::fragment）。
+     * 复制：把当前选区取成一段可移植的片段（格式见 doc::fragment）。
      *
      * 取的是结构而不是文字：控件、表格、图片、公式连同各自的记录一起带走，粘贴回来是同一段
      * 内容，不是"一段长得像的文字"。片段自带字符串表与字体表，所以跨实例、跨标签页都成立 ——
@@ -2820,7 +2820,7 @@ public:
      * @param p 文本坐标
      * @return 允许不允许，不允许时带原因
      */
-    rev::EditCheck policyAt(TextPos p) const;
+    doc::EditCheck policyAt(TextPos p) const;
 
     /**
      * 删除区间 [a, b) 的判定。跨段删除一律拒（档 1 的删除不跨段，段落标记的删除走合并）。
@@ -2829,7 +2829,7 @@ public:
      * @param b 区间终点（不含）
      * @return 允许不允许，不允许时带原因
      */
-    rev::EditCheck policyErase(TextPos a, TextPos b) const;
+    doc::EditCheck policyErase(TextPos a, TextPos b) const;
 
 private:
 
@@ -2837,13 +2837,13 @@ private:
      * 一份修订装上之后的公共收尾：换会话、复位光标、清页缓存、投影、整篇标脏。
      * 直接装入修订与打开 JSON 两条路都走它 —— 两条路的收尾必须是同一份。
      */
-    void installDocument(rev::Doc doc);
+    void installDocument(doc::Doc doc);
 
     /**
      * 按当前修订重算产物：投影出块流与控件跨度，再把流索引、位置与控件视图带上。
      * 隐藏控件的可见性口径按当前编辑模式取（见 flowVisibility）。
      */
-    void rebuildFromTree(const rev::BlockDamage* dmg = nullptr);
+    void rebuildFromTree(const doc::BlockDamage* dmg = nullptr);
 
     /**
      * 重建的收尾：流索引、块位置的前缀和、控件视图。
@@ -2874,7 +2874,7 @@ private:
      * 会话层保证"被拒的编辑不占撤销栈"，这里再保证产物不跟着半途改。
      */
     bool commitSteps(std::vector<Step> steps, int dirty_para, Range selection_before,
-                     Range selection_after, rev::MergeRun merge) override;
+                     Range selection_after, doc::MergeRun merge) override;
 
     /**
      * 撤销上限（会话要的那个数）。配置里的 0 是"不限制"，与"不留历史"不是一回事。
@@ -2886,23 +2886,23 @@ private:
      * 有了两种说法，而两边看起来都成功。
      * @return 字体下标到字体身份的回调
      */
-    rev::SerializeOptions fontWriteOptions() const;
+    doc::SerializeOptions fontWriteOptions() const;
 
     /**
      * 读进来时的字体反查，与 fontWriteOptions 同一个顺序（PostScript 名 → 族名 → 文件名）。
      * @return 字体身份到本机下标的回调
      */
-    rev::DeserializeOptions fontReadOptions() const;
+    doc::DeserializeOptions fontReadOptions() const;
 
     /**
      * 从投影给出的跨度建控件集合。
      *
-     * 跨度是投影走树时记下的（起止块号与段内码点，见 rev::ControlSpan），业务标识与锁定态
+     * 跨度是投影走树时记下的（起止块号与段内码点，见 doc::ControlSpan），业务标识与锁定态
      * 就在节点载荷里 —— 所以这一层不再扫块流的对象表，也不再对每个控件 findNode 一次。
      * 两边各算一遍的代价不只是慢：区间一旦分叉，界面上只表现为"某个字段锁不住"或"括号画在
      * 别处"，而两份产物各自看都"对"。
      */
-    void exportControls(const std::vector<rev::ControlSpan>& spans);
+    void exportControls(const std::vector<doc::ControlSpan>& spans);
 
     /**
      * 选区矩形（页内像素坐标，与 caretRectPxOf 同口径）。只取落在页范围
@@ -3096,7 +3096,7 @@ private:
      * 区间右端可能落在文档末尾之外（尾部整段删掉时 lo == hi == 块数）：那时没有"新的脏段"，
      * 但旧排版多出来的尾巴必须截掉 —— 从最后一段起排就把它截掉了。
      */
-    void markLayoutDirtyForDamage(const rev::BlockDamage& dmg);
+    void markLayoutDirtyForDamage(const doc::BlockDamage& dmg);
 
     /**
      * 括号占位计划变了（编辑模式切换、控件集合替换）时标脏。
@@ -3460,7 +3460,7 @@ private:
      * 它是派生量：树一改就过期，所以只在重建块流时一起重建，不单独维护。用 optional
      * 而不是常驻对象，是因为 FlowIndex 没有默认构造 —— 它一造出来就要一棵树。
      */
-    std::optional<rev::FlowIndex> flow_;
+    std::optional<doc::FlowIndex> flow_;
 
     /**
      * 排版产物与段级整形缓存的所有者。

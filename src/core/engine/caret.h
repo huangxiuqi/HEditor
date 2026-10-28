@@ -21,12 +21,12 @@
 #include <vector>
 
 #include "core/doc/control.h"
-#include "core/doc/document.h"
 #include "core/doc/flow.h"
+#include "core/doc/flow_types.h"
+#include "core/doc/node_id.h"
 #include "core/doc/range.h"
+#include "core/doc/text_pos.h"
 #include "core/layout/layout.h"
-#include "core/rev/flow.h"
-#include "core/rev/node_id.h"
 #include "core/utils/types.h"
 
 namespace heditor {
@@ -106,7 +106,7 @@ struct PositionView {
      * 持的是 optional 的地址而不是它内容的地址：流索引是"重建时 emplace 进去"的，
      * 第一次重建之前它还没建，取内容的地址会拿到空指针并一直空下去。
      */
-    const std::optional<rev::FlowIndex>* flow = nullptr;
+    const std::optional<doc::FlowIndex>* flow = nullptr;
 
     /**
      * 编译产物里的控件集合（区间树）。
@@ -148,7 +148,7 @@ struct PositionView {
      * 流索引（hasFlow 为真时才可用）。
      * @return 流索引
      */
-    const rev::FlowIndex& flowIndex() const { return **flow; }
+    const doc::FlowIndex& flowIndex() const { return **flow; }
 };
 
 /**

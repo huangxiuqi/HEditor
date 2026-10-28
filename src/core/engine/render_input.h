@@ -16,14 +16,14 @@
 #include <vector>
 
 #include "core/doc/control.h"
+#include "core/doc/document.h"
+#include "core/doc/edit_mode.h"
+#include "core/doc/node_id.h"
+#include "core/doc/section_spec.h"
 #include "core/engine/control_geometry.h"
 #include "core/engine/engine_config.h"
 #include "core/engine/image_store.h"
 #include "core/layout/layout.h"
-#include "core/rev/edit_mode.h"
-#include "core/rev/node_id.h"
-#include "core/rev/rev.h"
-#include "core/rev/section_spec.h"
 #include "core/text/font.h"
 
 namespace heditor {
@@ -67,7 +67,7 @@ struct RenderInput {
     /**
      * 当前修订（控件记录、图片资源标识都从它读）。
      */
-    const rev::Doc* doc = nullptr;
+    const doc::Doc* doc = nullptr;
 
     /**
      * 排版结果（行盒、字形、表格与浮动图的位置）。

@@ -9,6 +9,7 @@
 #include <cstddef>
 
 #include "core/text/writing_mode.h"
+#include "core/doc/utf8.h"
 #include "core/utils/types.h"
 #include "core/utils/units.h"
 
@@ -122,113 +123,6 @@ const char* businessTypeOf(ControlKind kind) {
     return "text";
 }
 
-/**
- * 把块级字段搬到段落结束标记的段落格式上。
- *
- * 逐字段搬而不是"只搬与默认不同的那些"：块流里的值本来就是作者给的完整值，
- * 这里要的是"编译回来一字不差"，少搬一个字段就会静默换成默认值。
- */
-void applyBlockFormat(const BlockSpec& b, Node* mark) {
-    mark->para.font_index = b.font_index;
-    mark->para.size = Length::abs(ptToEmu(b.size_pt));
-    mark->para.wm = b.wm;
-    mark->para.line_rule = b.line_spacing.rule;
-    mark->para.line_factor = b.line_spacing.factor;
-    mark->para.line_exact = Length::abs(ptToEmu(b.line_spacing.exact_pt));
-    mark->para.space_after = Length::abs(ptToEmu(b.space_after_pt));
-    mark->para.page_break_before = b.page_break_before;
-    mark->para.language = internLanguage(b.language != nullptr ? b.language : "");
-    mark->para.color = b.color;
-    if (!b.fallback_font_indices.empty()) {
-        mark->para.fallback_font_indices = b.fallback_font_indices;
-    }
-}
-
-/**
- * 追加一段文本与它中间的行内原子，文本按字符格式 run 切开：一段一个文本节点，格式落在
- * 它的标记上。
- *
- * 为什么要切 run：run 是作者意图，而编译正是从"标记 + 样式表"再解析出 run 的 —— 不切的话，
- * 块流里设了 runs 的文本搬进树就只剩一个节点，编译回来退化成"整段一个 run"，
- * 于是"按 run 取字号 / 颜色"那一整类判据在树这条路上全部失效。
- * 树里没有 run 级的语言与回退链，这两项只跟块级走（见 applyBlockFormat）。
- * runs 为空表示"整段一个 run"，属性取块级字段，与不切之前逐字段相同。
- *
- * 原子按锚点落成自己的节点。它只能按盒子的宽高重建：InlineObject 按设计只带几何，不带
- * 资源标识与表达式（那是模型自己的事，见 layout.h）。于是演示文档里的图片退回"按 96 dpi
- * 折算的像素尺寸 + 空的资源标识"，框里写的是"图片"两个字。对演示而言这就够 —— 框的尺寸
- * 与位置与原来逐字段相同，而复现真实图片本来也要等二进制资源那条路。
- */
-void appendTextRuns(NodeTree& tree, NodeId parent, const BlockSpec& b, int from, int to) {
-    const std::vector<uint32_t>& cps = b.cp_text;
-    // 本窗口该吐的原子：锚点在 [from, to) 里；段末那一枚（锚点等于段长）只在窗口也到段末
-    //   时吐 —— 否则它会同时被相邻的两个窗口吐一遍（窗口端点重合时重复建节点）。
-    const int len = static_cast<int>(cps.size());
-    std::vector<const InlineObject*> atoms;
-    for (const InlineObject& o : b.objects) {
-        if (o.kind != InlineObjectKind::Atom) continue;
-        const int cp = static_cast<int>(o.cp);
-        if (cp < from) continue;
-        if (cp >= to && !(cp == len && to == len)) continue;
-        atoms.push_back(&o);
-    }
-    size_t next_atom = 0;
-    auto flushAtomsUpTo = [&](int at) {
-        while (next_atom < atoms.size() && static_cast<int>(atoms[next_atom]->cp) <= at) {
-            const InlineObject& o = *atoms[next_atom++];
-            const bool formula = (o.atom == InlineAtom::Formula);
-            const NodeId id = tree.appendChild(parent, formula ? NodeKind::Formula : NodeKind::Image);
-            if (formula) {
-                tree.find(id)->formula.expr = "\\frac{a}{b}";
-            } else {
-                Node* n = tree.find(id);
-                // 资源标识写短一点：框里放不下就截断，而"demo-image"截成"demo-i"看着像
-                //   画错了。框宽是盒子自己的（见上），标识该迁就它。
-                n->image.resource_id = "img1";
-                n->image.px_w = std::max(1, static_cast<int>(o.w_pt * 96.0f / 72.0f + 0.5f));
-                n->image.px_h = std::max(1, static_cast<int>(o.h_pt * 96.0f / 72.0f + 0.5f));
-            }
-        }
-    };
-    int pos = from;
-    flushAtomsUpTo(pos);
-    while (pos < to) {
-        const FormatRun* r = nullptr;
-        for (const FormatRun& cand : b.runs) {
-            const int lo = static_cast<int>(cand.cp_begin);
-            const int hi = static_cast<int>(cand.cp_end);
-            if (lo <= pos && pos < hi) {
-                r = &cand;
-                break;
-            }
-        }
-        int end = (r != nullptr) ? std::min(to, static_cast<int>(r->cp_end)) : to;
-        if (end <= pos) end = to;  // runs 没铺满这一段时退回段末，不丢字
-        // 下一枚原子把这一段文本切开。不切的话整段会先落成一个文本节点、原子全被挤到段尾
-        //   —— 锚点就白给了。runs 为空时上面那一步把 end 直接取成段末，正是这种情形：
-        //   演示文档多数段本来就没有 runs，所以这条路不是边角。
-        if (next_atom < atoms.size()) {
-            end = std::min(end, static_cast<int>(atoms[next_atom]->cp));
-        }
-        if (end <= pos) {
-            // 原子正好落在 pos 上：先把它落成节点，下一轮再接着取文本。
-            //   推进由 flushAtomsUpTo 保证 —— 它把 cp <= pos 的都吐掉，于是 next_atom 必前移。
-            flushAtomsUpTo(pos);
-            continue;
-        }
-        const NodeId t = tree.appendChild(parent, NodeKind::TextRun);
-        tree.setText(t, std::vector<uint32_t>(cps.begin() + pos, cps.begin() + end));
-        if (r != nullptr) {
-            Node* n = tree.find(t);
-            n->marks.font_index = r->font_index;
-            n->marks.size = Length::abs(ptToEmu(r->size_pt));
-            n->marks.color = r->color;
-        }
-        pos = end;
-        flushAtomsUpTo(pos);
-    }
-}
-
 /** 零宽字段：两个端点落在同一处。 */
 bool isEmptyField(const DemoFieldSpec* f) { return f->eo <= f->so; }
 
@@ -254,164 +148,281 @@ bool startsBefore(const DemoFieldSpec* a, const DemoFieldSpec* b) {
 }
 
 /**
- * 把 [(pf, off_f) .. (pt, off_t)] 这一段"平文本"建到 parent 下：段落内容 + 段落结束标记。
- *
- * 除最后一段之外，每段都要连它的结束标记一起吐出来 —— 标记是"这一段到此为止"的那一位，
- * 在流里就排在内容之后。最后一段的标记不由这里吐（调用方在它外面接着吐，或由 demoTree
- * 在最后补上）：那一位属于"最后一段的结束"，不该被任何字段的窗口截断。
+ * 块级字段 → 段落覆盖。
+ * @param b 块
+ * @returns 段落格式覆盖
  */
-void emitPlain(NodeTree& tree, NodeId parent, const std::vector<BlockSpec>& blocks, int pf,
-               int off_f, int pt, int off_t) {
-    for (int i = pf; i <= pt; ++i) {
-        const BlockSpec& b = blocks[static_cast<size_t>(i)];
-        const int len = static_cast<int>(b.cp_text.size());
-        appendTextRuns(tree, parent, b, (i == pf) ? off_f : 0, (i == pt) ? off_t : len);
-        if (i == pt) break;
-        const NodeId mark = tree.appendChild(parent, NodeKind::ParagraphMark);
-        applyBlockFormat(b, tree.find(mark));
-    }
+ParaFormatPatch blockPara(const BlockSpec& b) {
+    ParaFormatPatch p;
+    p.font_index = b.font_index;
+    p.size = Length::abs(ptToEmu(b.size_pt));
+    p.wm = b.wm;
+    p.line_rule = b.line_spacing.rule;
+    p.line_factor = b.line_spacing.factor;
+    p.line_exact = Length::abs(ptToEmu(b.line_spacing.exact_pt));
+    p.space_after = Length::abs(ptToEmu(b.space_after_pt));
+    p.page_break_before = b.page_break_before;
+    p.language = internLanguage(b.language != nullptr ? b.language : "");
+    p.color = b.color;
+    if (!b.fallback_font_indices.empty()) p.fallback_font_indices = b.fallback_font_indices;
+    return p;
 }
 
 /**
- * 把 [(pf, off_f) .. (pt, off_t)] 这一段文档流按 rest 里的字段切成"正文 + 内容控件"，
- * 嵌套的递归进去。窗口可以跨段：字段的起点与终点各自带段号。
- *
- * 三条次序规则（取谁当前、谁进内层）：
- *   一，外层先开（起点在前者先取）、同一处边界上闭括号先于开括号（见 startsBefore）；
- *   二，零宽字段贴在别的字段边界上时（端点重合）与它并列当前这一层 —— 它那一对排在
- *     "到此为止"那枚闭括号之后、后一个字段的开括号之前；
- *   三，零宽字段严格落在某字段内部时跟着递归进去，与区间树判父子同一口径。
- *
- * 两个完全相同的区间不互相包含（互为兄弟），各自成对排列。rest 按值收，每轮把这一枚
- * 连同递归吃掉的那些一起消掉：只消这一枚的话，内层字段会留在外层的候选里被再建一遍。
+ * doc 原生的演示文档构造器：与树版本同一套字段切分规则，但直接产出修订。
  */
-void emitFields(NodeTree& tree, NodeId parent, const std::vector<BlockSpec>& blocks, int pf,
-                int off_f, int pt, int off_t, std::vector<const DemoFieldSpec*> rest) {
-    int cur_p = pf;
-    int pos = off_f;
-    while (true) {
-        size_t at = rest.size();
-        for (size_t i = 0; i < rest.size(); ++i) {
-            const DemoFieldSpec* f = rest[i];
-            // 候选 = 整个落在当前窗口里（比大小一律连带段号一起比，跨段字段才不会越界）。
-            if (f->para < cur_p || endParaOf(*f) > pt) continue;
-            if (f->para == cur_p && f->so < pos) continue;
-            if (endParaOf(*f) == pt && f->eo > off_t) continue;
-            if (at == rest.size() || startsBefore(f, rest[at])) at = i;
+struct DemoDocBuilder {
+    int id = 3;
+
+    /**
+     * 一段窗口的文本 run 与行内原子。
+     * @param b 块
+     * @param from 起点码点
+     * @param to 终点码点
+     * @returns 节点序列
+     */
+    std::vector<doc::Ref> textRuns(const BlockSpec& b, int from, int to) {
+        const std::vector<uint32_t>& cps = b.cp_text;
+        const int len = static_cast<int>(cps.size());
+        std::vector<const InlineObject*> atoms;
+        for (const InlineObject& o : b.objects) {
+            if (o.kind != InlineObjectKind::Atom) continue;
+            const int cp = static_cast<int>(o.cp);
+            if (cp < from) continue;
+            if (cp >= to && !(cp == len && to == len)) continue;
+            atoms.push_back(&o);
         }
-        if (at == rest.size()) break;
-        const DemoFieldSpec* pick = rest[at];
-
-        emitPlain(tree, parent, blocks, cur_p, pos, pick->para, pick->so);
-        const NodeId cc = tree.appendChild(parent, NodeKind::ContentControl);
-        Node* cn = tree.find(cc);
-        cn->control.key = pick->key;
-        cn->control.controlType = businessTypeOf(pick->kind);
-        cn->control.readonly = pick->readonly;
-
-        std::vector<const DemoFieldSpec*> inner;
-        std::vector<const DemoFieldSpec*> remaining;
-        remaining.reserve(rest.size());
-        for (size_t i = 0; i < rest.size(); ++i) {
-            const DemoFieldSpec* g = rest[i];
-            if (i == at) continue;
-            const bool same_span = (g->para == pick->para && g->so == pick->so &&
-                                    endParaOf(*g) == endParaOf(*pick) && g->eo == pick->eo);
-            // 零宽字段按位置分两种（见本函数顶上第三条）：贴在边界上的与对方并列，
-            //   严格落在内部的跟着递归进去 —— 后者的端点要真严格，贴边那一侧留给前一条。
-            const bool inside = isEmptyField(g)
-                                    ? (startsBefore(pick, g) && endsAfter(pick, g))
-                                    : (!startsBefore(g, pick) && !endsAfter(g, pick));
-            const bool covered = !isEmptyField(pick) && !same_span && inside;
-            if (covered) {
-                inner.push_back(g);
-            } else {
-                remaining.push_back(g);
+        std::vector<doc::Ref> out;
+        size_t next_atom = 0;
+        auto flushAtomsUpTo = [&](int at) {
+            while (next_atom < atoms.size() && static_cast<int>(atoms[next_atom]->cp) <= at) {
+                const InlineObject& o = *atoms[next_atom++];
+                if (o.atom == InlineAtom::Formula) {
+                    FormulaSpec f;
+                    f.expr = "\\frac{a}{b}";
+                    out.push_back(doc::makeNode(id++, NodeKind::Formula, f, {}));
+                } else {
+                    ImageSpec img;
+                    img.resource_id = "img1";
+                    img.px_w = std::max(1, static_cast<int>(o.w_pt * 96.0f / 72.0f + 0.5f));
+                    img.px_h = std::max(1, static_cast<int>(o.h_pt * 96.0f / 72.0f + 0.5f));
+                    out.push_back(doc::makeNode(id++, NodeKind::Image, img, {}));
+                }
             }
+        };
+        int pos = from;
+        flushAtomsUpTo(pos);
+        while (pos < to) {
+            const FormatRun* r = nullptr;
+            for (const FormatRun& cand : b.runs) {
+                const int lo = static_cast<int>(cand.cp_begin);
+                const int hi = static_cast<int>(cand.cp_end);
+                if (lo <= pos && pos < hi) {
+                    r = &cand;
+                    break;
+                }
+            }
+            int end = (r != nullptr) ? std::min(to, static_cast<int>(r->cp_end)) : to;
+            if (end <= pos) end = to;
+            if (next_atom < atoms.size()) {
+                end = std::min(end, static_cast<int>(atoms[next_atom]->cp));
+            }
+            if (end <= pos) {
+                flushAtomsUpTo(pos);
+                continue;
+            }
+            CharFormat marks;
+            if (r != nullptr) {
+                marks.font_index = r->font_index;
+                marks.size = Length::abs(ptToEmu(r->size_pt));
+                marks.color = r->color;
+            }
+            doc::RunPayload run;
+            run.text.assign(cps.begin() + pos, cps.begin() + end);
+            run.marks = marks;
+            out.push_back(doc::makeNode(id++, NodeKind::TextRun, std::move(run), {}));
+            pos = end;
+            flushAtomsUpTo(pos);
         }
-        emitFields(tree, cc, blocks, pick->para, pick->so, endParaOf(*pick), pick->eo, inner);
-        rest.swap(remaining);
-        cur_p = endParaOf(*pick);
-        pos = pick->eo;
+        return out;
     }
-    emitPlain(tree, parent, blocks, cur_p, pos, pt, off_t);
-}
+
+    /**
+     * 平文本窗口，含中间的段落标记。
+     * @param blocks 块流
+     * @param pf 起点段
+     * @param off_f 起点偏移
+     * @param pt 终点段
+     * @param off_t 终点偏移
+     * @returns 节点序列
+     */
+    std::vector<doc::Ref> emitPlain(const std::vector<BlockSpec>& blocks, int pf, int off_f, int pt,
+                                   int off_t) {
+        std::vector<doc::Ref> out;
+        for (int i = pf; i <= pt; ++i) {
+            const BlockSpec& b = blocks[static_cast<size_t>(i)];
+            const int len = static_cast<int>(b.cp_text.size());
+            std::vector<doc::Ref> runs =
+                textRuns(b, (i == pf) ? off_f : 0, (i == pt) ? off_t : len);
+            out.insert(out.end(), runs.begin(), runs.end());
+            if (i == pt) break;
+            out.push_back(doc::makeNode(id++, NodeKind::ParagraphMark,
+                                        doc::MarkPayload{blockPara(b), "", {}}, {}));
+        }
+        return out;
+    }
+
+    /**
+     * 按字段切分窗口。
+     * @param blocks 块流
+     * @param pf 起点段
+     * @param off_f 起点偏移
+     * @param pt 终点段
+     * @param off_t 终点偏移
+     * @param rest 候选字段
+     * @returns 节点序列
+     */
+    std::vector<doc::Ref> emitFields(const std::vector<BlockSpec>& blocks, int pf, int off_f,
+                                    int pt, int off_t,
+                                    std::vector<const DemoFieldSpec*> rest) {
+        std::vector<doc::Ref> out;
+        int cur_p = pf;
+        int pos = off_f;
+        while (true) {
+            size_t at = rest.size();
+            for (size_t i = 0; i < rest.size(); ++i) {
+                const DemoFieldSpec* f = rest[i];
+                if (f->para < cur_p || endParaOf(*f) > pt) continue;
+                if (f->para == cur_p && f->so < pos) continue;
+                if (endParaOf(*f) == pt && f->eo > off_t) continue;
+                if (at == rest.size() || startsBefore(f, rest[at])) at = i;
+            }
+            if (at == rest.size()) break;
+            const DemoFieldSpec* pick = rest[at];
+
+            std::vector<doc::Ref> plain =
+                emitPlain(blocks, cur_p, pos, pick->para, pick->so);
+            out.insert(out.end(), plain.begin(), plain.end());
+
+            std::vector<const DemoFieldSpec*> inner;
+            std::vector<const DemoFieldSpec*> remaining;
+            remaining.reserve(rest.size());
+            for (size_t i = 0; i < rest.size(); ++i) {
+                const DemoFieldSpec* g = rest[i];
+                if (i == at) continue;
+                const bool same_span = (g->para == pick->para && g->so == pick->so &&
+                                        endParaOf(*g) == endParaOf(*pick) && g->eo == pick->eo);
+                const bool inside = isEmptyField(g)
+                                        ? (startsBefore(pick, g) && endsAfter(pick, g))
+                                        : (!startsBefore(g, pick) && !endsAfter(g, pick));
+                const bool covered = !isEmptyField(pick) && !same_span && inside;
+                if (covered) {
+                    inner.push_back(g);
+                } else {
+                    remaining.push_back(g);
+                }
+            }
+            ControlSpec control;
+            control.key = pick->key;
+            control.controlType = businessTypeOf(pick->kind);
+            control.readonly = pick->readonly;
+            const std::vector<doc::Ref> kids =
+                emitFields(blocks, pick->para, pick->so, endParaOf(*pick), pick->eo, inner);
+            out.push_back(doc::makeNode(id++, NodeKind::ContentControl, control, kids));
+            rest.swap(remaining);
+            cur_p = endParaOf(*pick);
+            pos = pick->eo;
+        }
+        std::vector<doc::Ref> tail = emitPlain(blocks, cur_p, pos, pt, off_t);
+        out.insert(out.end(), tail.begin(), tail.end());
+        return out;
+    }
+};
 
 }  // namespace
 
-NodeTree demoTree(const std::vector<BlockSpec>& blocks, const std::vector<DemoFieldSpec>& fields) {
-    NodeTree tree;
-    const NodeId sec = tree.firstSectionId();
-    if (blocks.empty()) return tree;
+doc::Doc demoDoc(const std::vector<BlockSpec>& blocks, const std::vector<DemoFieldSpec>& fields) {
+    DemoDocBuilder builder;
     std::vector<const DemoFieldSpec*> all;
-    all.reserve(fields.size());
-    for (const DemoFieldSpec& f : fields) {
-        // 段号越界的字段整个丢掉：宁可不摆，也不要拿它去索引别的段。
-        if (f.para < 0 || f.para >= static_cast<int>(blocks.size())) continue;
-        if (endParaOf(f) < f.para || endParaOf(f) >= static_cast<int>(blocks.size())) continue;
-        all.push_back(&f);
+    if (!blocks.empty()) {
+        for (const DemoFieldSpec& f : fields) {
+            if (f.para < 0 || f.para >= static_cast<int>(blocks.size())) continue;
+            if (endParaOf(f) < f.para || endParaOf(f) >= static_cast<int>(blocks.size())) continue;
+            all.push_back(&f);
+        }
     }
-    const int last = static_cast<int>(blocks.size()) - 1;
-    const int last_len = static_cast<int>(blocks[static_cast<size_t>(last)].cp_text.size());
-    emitFields(tree, sec, blocks, 0, 0, last, last_len, all);
-    // 末尾那一段的结束标记：它在流里排在所有内容之后，所以最后补。
-    const NodeId mark = tree.appendChild(sec, NodeKind::ParagraphMark);
-    applyBlockFormat(blocks[static_cast<size_t>(last)], tree.find(mark));
-    return tree;
+    std::vector<doc::Ref> kids;
+    if (!blocks.empty()) {
+        const int last = static_cast<int>(blocks.size()) - 1;
+        const int last_len = static_cast<int>(blocks[static_cast<size_t>(last)].cp_text.size());
+        kids = builder.emitFields(blocks, 0, 0, last, last_len, all);
+        kids.push_back(doc::makeNode(builder.id++, NodeKind::ParagraphMark,
+                                     doc::MarkPayload{blockPara(blocks[static_cast<size_t>(last)]),
+                                                      "", {}},
+                                     {}));
+    }
+    const doc::Ref section = doc::makeNode(builder.id++, NodeKind::Section, SectionSpec{},
+                                           std::move(kids));
+    const NodeId root_id = builder.id++;
+    return doc::adopt(doc::makeNode(root_id, NodeKind::Document, {}, {section}), builder.id);
 }
 
-NodeTree demoTableTree(int cjk_font_index) {
-    NodeTree tree;
-    const NodeId sec = tree.firstSectionId();
 
-    // 一个段落：文本节点 + 结束标记，块级格式搬到标记上（与 demoTree 同一条口径）。
-    auto para = [&](NodeId parent, const char* text) {
-        BlockSpec b;
-        b.font_index = cjk_font_index;
-        b.size_pt = 12.0f;
-        b.wm = WritingMode::HorizontalTB();
-        b.line_spacing.factor = 1.1f;
-        b.language = "zh";
-        b.color = Color::rgb(24, 24, 24);
-        b.setText(text);
-        const NodeId t = tree.appendChild(parent, NodeKind::TextRun);
-        tree.setText(t, b.cp_text);
-        const NodeId m = tree.appendChild(parent, NodeKind::ParagraphMark);
-        applyBlockFormat(b, tree.find(m));
+doc::Doc demoTableDoc(int cjk_font_index) {
+    int id = 3;
+    ParaFormatPatch para;
+    para.font_index = cjk_font_index;
+    para.size = Length::abs(ptToEmu(12.0));
+    para.wm = WritingMode::HorizontalTB();
+    para.line_rule = LineSpacingRule::Auto;
+    para.line_factor = 1.1f;
+    para.language = "zh";
+    para.color = Color::rgb(24, 24, 24);
+
+    auto mkText = [&](const char* text) {
+        return doc::makeNode(id++, NodeKind::TextRun,
+                             doc::RunPayload{utf8ToCodepoints(text), CharFormat{}, {}}, {});
     };
-    auto cell = [&](NodeId row, const char* text, int col_span) {
-        const NodeId c = tree.appendChild(row, NodeKind::TableCell);
-        tree.find(c)->cell.col_span = col_span;
-        para(c, text);
+    auto mkPara = [&](const char* text) {
+        return std::vector<doc::Ref>{
+            mkText(text), doc::makeNode(id++, NodeKind::ParagraphMark,
+                                        doc::MarkPayload{para, "", {}}, {})};
+    };
+    auto cell = [&](const char* text, int col_span) {
+        CellSpec spec;
+        spec.col_span = col_span;
+        return doc::makeNode(id++, NodeKind::TableCell, spec, mkPara(text));
     };
 
-    para(sec, "入院记录：");
-    const NodeId table = tree.appendChild(sec, NodeKind::Table);
-    tree.find(table)->table.align = Align::Start;
+    std::vector<doc::Ref> guide = mkPara("入院记录：");
+    TableSpec table_spec;
+    table_spec.align = Align::Start;
 
-    const NodeId row0 = tree.appendChild(table, NodeKind::TableRow);
-    tree.find(row0)->row.is_header = true;
-    cell(row0, "项目", 1);
-    cell(row0, "结果", 2);
+    RowSpec header_row;
+    header_row.is_header = true;
+    const doc::Ref row0 = doc::makeNode(
+        id++, NodeKind::TableRow, header_row, {cell("项目", 1), cell("结果", 2)});
 
-    const NodeId row1 = tree.appendChild(table, NodeKind::TableRow);
-    tree.find(row1)->row.height = Length::abs(ptToEmu(36.0));
-    tree.find(row1)->row.height_rule = HeightRule::AtLeast;
-    cell(row1, "血压", 1);
-    cell(row1, "120/80", 1);
-    cell(row1, "mmHg", 1);
+    RowSpec second_row;
+    second_row.height = Length::abs(ptToEmu(36.0));
+    second_row.height_rule = HeightRule::AtLeast;
+    const doc::Ref row1 = doc::makeNode(
+        id++, NodeKind::TableRow, second_row,
+        {cell("血压", 1), cell("120/80", 1), cell("mmHg", 1)});
 
-    const NodeId row2 = tree.appendChild(table, NodeKind::TableRow);
-    cell(row2, "心率", 1);
-    cell(row2, "72", 1);
-    cell(row2, "次/分", 1);
+    const doc::Ref row2 = doc::makeNode(
+        id++, NodeKind::TableRow, RowSpec{},
+        {cell("心率", 1), cell("72", 1), cell("次/分", 1)});
 
-    // 表格之后的空段落：Word 里表格后面总有一个可点的空段落（那个 ¶），
-    //   这里按同一种形状摆一份 —— 表格底边与它之间没有别的内容。
-    tree.appendChild(sec, NodeKind::ParagraphMark);
-
-    para(sec, "以上为本次查体记录。");
-    return tree;
+    const doc::Ref table = doc::makeNode(id++, NodeKind::Table, table_spec, {row0, row1, row2});
+    std::vector<doc::Ref> tail{std::move(guide)};
+    tail.push_back(table);
+    tail.push_back(doc::makeNode(id++, NodeKind::ParagraphMark, doc::MarkPayload{}, {}));
+    const std::vector<doc::Ref> last = mkPara("以上为本次查体记录。");
+    tail.insert(tail.end(), last.begin(), last.end());
+    const doc::Ref section = doc::makeNode(id++, NodeKind::Section, SectionSpec{}, std::move(tail));
+    const NodeId root_id = id++;
+    return doc::adopt(doc::makeNode(root_id, NodeKind::Document, {}, {section}), id);
 }
 
 }  // namespace heditor

@@ -18,9 +18,9 @@
 #include <string>
 #include <vector>
 
-#include "core/doc/document.h"
-#include "core/rev/image_spec.h"
-#include "core/rev/para_format.h"
+#include "core/doc/image_spec.h"
+#include "core/doc/para_format.h"
+#include "core/doc/utf8.h"
 #include "core/text/font.h"
 #include "core/text/writing_mode.h"
 #include "core/utils/types.h"

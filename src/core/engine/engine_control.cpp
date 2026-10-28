@@ -11,9 +11,9 @@
 #include <utility>
 #include <vector>
 
+#include "core/doc/document.h"
 #include "core/engine/control_spans.h"
 #include "core/engine/engine.h"
-#include "core/rev/rev.h"
 
 namespace heditor {
 
@@ -24,7 +24,7 @@ namespace {
  * @param n 投影节点
  * @return 记录；不是控件为 nullptr
  */
-const ControlSpec* specOf(const rev::Node* n) {
+const ControlSpec* specOf(const doc::Node* n) {
     if (n == nullptr || n->kind != NodeKind::ContentControl) return nullptr;
     return std::get_if<ControlSpec>(&n->payload);
 }
@@ -36,7 +36,7 @@ std::vector<EditorEngine::ControlView> EditorEngine::controlViews() const {
     if (!loaded_) return out;
     out.reserve(control_node_ids_.size());
     for (size_t i = 0; i < control_node_ids_.size(); ++i) {
-        const rev::Node* n = rev::findNode(document(), control_node_ids_[i]);
+        const doc::Node* n = doc::findNode(document(), control_node_ids_[i]);
         const ControlSpec* spec = specOf(n);
         if (spec == nullptr) continue;
         ControlView v;
@@ -46,9 +46,9 @@ std::vector<EditorEngine::ControlView> EditorEngine::controlViews() const {
         v.controlType = spec->controlType;
         v.shape = spec->valueShape;
         v.value = spec->value;
-        for (const rev::Ref& child : n->children) {
+        for (const doc::Ref& child : n->children) {
             if (child->kind != NodeKind::TextRun) continue;
-            v.content = codepointsToUtf8(std::get<rev::RunPayload>(child->payload).text);
+            v.content = codepointsToUtf8(std::get<doc::RunPayload>(child->payload).text);
             break;
         }
         v.readonly = spec->readonly;
@@ -129,7 +129,7 @@ int EditorEngine::controlOptionAtPos(TextPos p, int side) const {
                           ? projection_.structure.controls.innermost(f, &lo, &hi)
                           : innermostControlAtFlow(*flow_, control_node_ids_, f, &lo, &hi);
     if (index < 0) return -1;
-    const rev::Node* n = rev::findNode(document(), control_node_ids_[static_cast<size_t>(index)]);
+    const doc::Node* n = doc::findNode(document(), control_node_ids_[static_cast<size_t>(index)]);
     const ControlSpec* spec = specOf(n);
     if (spec == nullptr) return -1;
     std::vector<std::pair<int, int>> spans;

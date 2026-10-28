@@ -1,99 +1,142 @@
 #include "core/doc/flow.h"
 
-namespace heditor {
+namespace heditor::doc {
 
-namespace {}  // namespace
+namespace {
 
-FlowIndex::FlowIndex(const NodeTree& tree, FlowVisibility vis) : tree_(&tree), vis_(vis) {
-    // 按水位一次开表并填 -1：重建是每次提交都要走的一步，顺序写一遍比重建哈希表快
-    // 一个量级。水位（maxAllocatedId）+ 1 就是下标上界 —— id 从 1 起，0 那格空着。
-    const size_t slots = static_cast<size_t>(tree.maxAllocatedId()) + 1;
-    first_.assign(slots, -1);
-    span_.assign(slots, 0);
-    int cursor = 0;
-    const Node* root = tree.find(tree.rootId());
-    if (root != nullptr) measure(root, cursor, true);
-    size_ = cursor;
+/**
+ * 文本节点占几个流位置。载荷不是文本那一支时按 0 计 —— 种类与载荷对不上是构造方的错，
+ * 这里退化成"不占位"而不是崩溃：索引是派生量，崩在这里看不出是谁造错了节点。
+ */
+int textLenOf(const Node& n) {
+    const auto* run = std::get_if<RunPayload>(&n.payload);
+    return run == nullptr ? 0 : static_cast<int>(run->text.size());
 }
 
-void FlowIndex::measure(const Node* n, int& cursor, bool is_root) {
-    // 非编辑模式下隐藏的控件整棵子树摘除：不占位置，也不给后代记区间
-    // （于是 flowAt 对它们一律返回 -1，"不在流里"与"越界"同一种回执）。
+/**
+ * 节点号的散列。节点号按 1、2、3 递增分配，低位几乎连续，直接取模会让相邻的号挤在
+ * 同一段槽里；先混一遍高位再取模，探测长度才与"随机"一致。
+ */
+std::size_t hashId(NodeId id) {
+    std::uint64_t x = id;
+    x ^= x >> 33;
+    x *= 0xff51afd7ed558ccdULL;
+    x ^= x >> 33;
+    return static_cast<std::size_t>(x);
+}
+
+}  // namespace
+
+FlowIndex::FlowIndex(const Doc& doc, FlowVisibility vis) : vis_(vis) {
+    if (!doc.root) return;
+    root_ = doc.root->id;
+    int cursor = 0;
+    measure(doc.root, cursor, true);
+    size_ = cursor;
+    buildLookup();
+}
+
+void FlowIndex::measure(const Ref& n, int& cursor, bool is_root) {
     if (vis_ == FlowVisibility::Display && n->hidden) return;
 
     const int start = cursor;
-    const size_t slot = static_cast<size_t>(n->id);
-    first_[slot] = start;
+    const int idx = static_cast<int>(nodes_.size());
+    nodes_.push_back(n.get());
+    first_.push_back(start);
+    span_.push_back(0);
 
     if (isContainer(n->kind)) {
-        // 根的展开不含边界：它不嵌在别处，没有任何位置指向"根之前 / 之后"。
         if (!is_root) ++cursor;
-        for (const Node* child : n->children) measure(child, cursor, false);
+        for (const Ref& child : n->children) measure(child, cursor, false);
         if (!is_root) ++cursor;
     } else if (isText(n->kind)) {
-        cursor += static_cast<int>(n->text.size());
+        cursor += textLenOf(*n);
     } else {
-        ++cursor;  // 原子与段落标记各占一位
+        ++cursor;
     }
 
-    span_[slot] = cursor - start;
+    span_[static_cast<std::size_t>(idx)] = cursor - start;
+}
+
+void FlowIndex::buildLookup() {
+    std::size_t cap = 16;
+    while (cap < nodes_.size() * 2) cap <<= 1;
+    lookup_.assign(cap, Entry{});
+    mask_ = cap - 1;
+    for (std::size_t i = 0; i < nodes_.size(); ++i) {
+        const NodeId id = nodes_[i]->id;
+        std::size_t slot = hashId(id) & mask_;
+        while (lookup_[slot].id != kInvalidNodeId) slot = (slot + 1) & mask_;
+        lookup_[slot].id = id;
+        lookup_[slot].idx = static_cast<int>(i);
+    }
+}
+
+int FlowIndex::indexOf(NodeId id) const {
+    if (id == kInvalidNodeId || lookup_.empty()) return -1;
+    std::size_t slot = hashId(id) & mask_;
+    while (lookup_[slot].id != kInvalidNodeId) {
+        if (lookup_[slot].id == id) return lookup_[slot].idx;
+        slot = (slot + 1) & mask_;
+    }
+    return -1;
+}
+
+std::size_t FlowIndex::allocatedBytes() const {
+    return nodes_.capacity() * sizeof(const Node*) + first_.capacity() * sizeof(int) +
+           span_.capacity() * sizeof(int) + lookup_.capacity() * sizeof(Entry);
 }
 
 int FlowIndex::contentStartOf(NodeId id) const {
-    const bool is_root = (id == tree_->rootId());
-    return firstOf(id) + (is_root ? 0 : 1);
+    const int idx = indexOf(id);
+    if (idx < 0) return -1;
+    return firstAt(idx) + (id == root_ ? 0 : 1);
 }
 
 bool FlowIndex::intervalOf(NodeId id, int* first, int* end) const {
-    if (!inFlow(id)) return false;
-    const int start = firstOf(id);
-    if (first != nullptr) *first = start;
-    if (end != nullptr) *end = start + spanOf(id);
+    const int idx = indexOf(id);
+    if (idx < 0) return false;
+    if (first != nullptr) *first = firstAt(idx);
+    if (end != nullptr) *end = endAt(idx);
     return true;
 }
 
 FlowPos FlowIndex::flowAt(const Pos& pos) const {
-    const Node* n = tree_->find(pos.container);
-    if (n == nullptr || pos.offset < 0) return -1;
-    // 被摘除的子树整个不在流里，它内部任何位置都不可寻址。
-    if (!inFlow(pos.container)) return -1;
+    const int idx = indexOf(pos.container);
+    if (idx < 0 || pos.offset < 0) return -1;
+    const Node* n = nodeAt(idx);
 
     if (isContainer(n->kind)) {
         const int slots = static_cast<int>(n->children.size());
         if (pos.offset > slots) return -1;
         if (pos.offset == 0) return contentStartOf(pos.container);
-        // 槽位 j 的含义是"在第 j-1 个孩子之后"：那个孩子若被摘除，这个位置就不存在。
-        const Node* prev = n->children[static_cast<size_t>(pos.offset) - 1];
-        if (!inFlow(prev->id)) return -1;
-        return endOf(prev->id);
+        const Ref& prev = n->children[static_cast<std::size_t>(pos.offset) - 1];
+        const int prev_idx = indexOf(prev->id);
+        if (prev_idx < 0) return -1;
+        return endAt(prev_idx);
     }
     if (isText(n->kind)) {
-        if (pos.offset > static_cast<int>(n->text.size())) return -1;
-        return firstOf(pos.container) + pos.offset;
+        if (pos.offset > textLenOf(*n)) return -1;
+        return firstAt(idx) + pos.offset;
     }
-    // 原子与段落标记内部没有可寻址的位置，只有"自身之前"这一个。
-    return pos.offset == 0 ? firstOf(pos.container) : -1;
+    return pos.offset == 0 ? firstAt(idx) : -1;
 }
 
 Pos FlowIndex::posAt(FlowPos flow) const {
     if (flow < 0) flow = 0;
     if (flow > size_) flow = size_;
 
-    // 先下降到最内层的"包含"这个流位置的节点。三条规则决定了归属：
-    //   严格内部（firstOf < flow < endOf）→ 属于这个孩子，下降；
-    //   flow == endOf(c) → 属于 c 之后，留在父容器（那个槽位就是"c 之后"）；
-    //   flow == firstOf(c) → 对容器是"c 之前"（留在父容器），对叶子则归它自己
-    //     —— 因为"容器的第 0 槽位"与"第一个孩子的第一个位置"是同一个流位置，
-    //     规范表示取最内层，编辑时才好判断"字要插进谁里面"。
-    NodeId cur = tree_->rootId();
-    while (isContainer(tree_->find(cur)->kind)) {
-        const Node* n = tree_->find(cur);
+    NodeId cur = root_;
+    int cur_idx = indexOf(cur);
+    while (cur_idx >= 0) {
+        const Node* n = nodeAt(cur_idx);
+        if (!isContainer(n->kind)) break;
         NodeId next = kInvalidNodeId;
-        for (Node* child : n->children) {
-            // 被摘除的孩子不参与归属判定：它不在流里，没有位置可归给它。
-            if (!inFlow(child->id)) continue;
-            const int cfirst = firstOf(child->id);
-            const int cend = endOf(child->id);
+        for (const Ref& child : n->children) {
+            const int ci = indexOf(child->id);
+            if (ci < 0) continue;
+            const int cfirst = firstAt(ci);
+            const int cend = endAt(ci);
             const bool inner = (flow > cfirst && flow < cend);
             const bool leaf_head = (!isContainer(child->kind) && flow == cfirst && cfirst < cend);
             if (inner || leaf_head) {
@@ -103,24 +146,22 @@ Pos FlowIndex::posAt(FlowPos flow) const {
         }
         if (next == kInvalidNodeId) break;
         cur = next;
+        cur_idx = indexOf(cur);
     }
 
-    const Node* n = tree_->find(cur);
-    if (!isContainer(n->kind)) {
-        // 叶子内部：文本按码点偏移，原子与标记只会停在"自身之前"。
-        return Pos{cur, flow - firstOf(cur)};
-    }
+    if (cur_idx < 0) return Pos{root_, 0};
+    const Node* n = nodeAt(cur_idx);
+    if (!isContainer(n->kind)) return Pos{cur, flow - firstAt(cur_idx)};
+
     if (flow == contentStartOf(cur)) return Pos{cur, 0};
-    // 末尾槽位要落在最后一个在流里的孩子之后：直接写 children.size() 的话，
-    // 尾部若有被摘除的孩子，那个槽位是不可寻址的（见 flowAt），往返就断了。
     int last_slot = 0;
-    for (size_t i = 0; i < n->children.size(); ++i) {
-        if (!inFlow(n->children[i]->id)) continue;
+    for (std::size_t i = 0; i < n->children.size(); ++i) {
+        const int ci = indexOf(n->children[i]->id);
+        if (ci < 0) continue;
         last_slot = static_cast<int>(i) + 1;
-        if (flow == endOf(n->children[i]->id)) return Pos{cur, last_slot};
+        if (flow == endAt(ci)) return Pos{cur, last_slot};
     }
-    // 剩下的两种：容器结束边界之前（内容末尾），或根的全部内容之后。两者都是上面那个槽位。
     return Pos{cur, last_slot};
 }
 
-}  // namespace heditor
+}  // namespace heditor::doc

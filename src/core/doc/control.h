@@ -18,7 +18,7 @@
 #include <string>
 #include <vector>
 
-#include "core/doc/document.h"
+#include "core/doc/text_pos.h"
 
 namespace heditor {
 /**

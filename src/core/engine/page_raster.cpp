@@ -16,9 +16,9 @@
 #include <utility>
 #include <vector>
 
+#include "core/doc/document.h"
 #include "core/engine/page_marks.h"
 #include "core/layout/layout.h"
-#include "core/rev/rev.h"
 #include "core/utils/time.h"
 #include "core/utils/types.h"
 
@@ -360,7 +360,7 @@ void drawPage(PageSink& target, const RenderInput& in, int page_index, const flo
             if (band && (hi_pt < *band_lo_pt - 1.0f || lo_pt > *band_hi_pt + 1.0f)) continue;
             const Rect box{fx * zoom, lo_pt * zoom, pf.w * zoom, pf.h * zoom};
             if (!(box.w > 0.0f) || !(box.h > 0.0f)) continue;
-            const rev::Node* n = rev::findNode((*in.doc), static_cast<NodeId>(pf.handle));
+            const doc::Node* n = doc::findNode((*in.doc), static_cast<NodeId>(pf.handle));
             const ImageSpec* im = (n != nullptr) ? std::get_if<ImageSpec>(&n->payload) : nullptr;
             const ImageResource* res = (im != nullptr && !im->resource_id.empty())
                                            ? in.images->find(im->resource_id)

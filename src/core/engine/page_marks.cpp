@@ -13,7 +13,7 @@
 #include <string>
 #include <vector>
 
-#include "core/rev/control_spec.h"
+#include "core/doc/control_spec.h"
 #include "core/utils/types.h"
 
 namespace heditor {
@@ -41,7 +41,7 @@ void drawAtomBox(PageSink& target, const RenderInput& in, const LineBox& lb, con
     }
     if (!(box.w > 0.0f) || !(box.h > 0.0f)) return;
 
-    const rev::Node* n = rev::findNode((*in.doc), static_cast<NodeId>(c.owner_control));
+    const doc::Node* n = doc::findNode((*in.doc), static_cast<NodeId>(c.owner_control));
     const ImageSpec* im = (n != nullptr) ? std::get_if<ImageSpec>(&n->payload) : nullptr;
     // 图片的字节不进文档（第十一节），资源表里没有它时退回占位框 —— 这是常规状态
     //   （文件刚打开、宿主还没注册），不是错误。竖排本期仍画占位框：图片在竖排里要不要
@@ -177,7 +177,7 @@ bool choiceMarkerOf(const RenderInput& in, const PlacedGlyph& pg, bool* checked,
         if (c.range.start.para != pg.paragraph) continue;
         const int off = pg.cluster - static_cast<int>(c.range.start.offset);
         if (off < 0) continue;
-        const rev::Node* n = rev::findNode((*in.doc), (*in.control_node_ids)[i]);
+        const doc::Node* n = doc::findNode((*in.doc), (*in.control_node_ids)[i]);
         if (n == nullptr) continue;
         const auto* spec = std::get_if<ControlSpec>(&n->payload);
         if (spec == nullptr) continue;
@@ -509,7 +509,7 @@ void drawControlMarks(PageSink& target, const RenderInput& in, int page_index,
         for (size_t ci = 0; ci < lb.clusters.size(); ++ci) {
             const LineCluster& c = lb.clusters[ci];
             if (!c.control_hint) continue;
-            const rev::Node* n = rev::findNode((*in.doc), static_cast<NodeId>(c.owner_control));
+            const doc::Node* n = doc::findNode((*in.doc), static_cast<NodeId>(c.owner_control));
             const auto* spec = (n != nullptr) ? std::get_if<ControlSpec>(&n->payload) : nullptr;
             if (spec == nullptr || spec->appearance.placeholder.empty()) continue;
             const FontInstance* face =

@@ -473,7 +473,7 @@ void EditorEngine::markLayoutDirty(int para) {
  * 撤销与重做只有这个区间可用（没有命令层算的落点），而它恰好够用：区间左边一个字没变、
  * 右边一个字没变，中间那段必须重排。
  */
-void EditorEngine::markLayoutDirtyForDamage(const rev::BlockDamage& dmg) {
+void EditorEngine::markLayoutDirtyForDamage(const doc::BlockDamage& dmg) {
     const int n = static_cast<int>(blocks().size());
     if (n <= 0) {
         markAllLayoutDirty();

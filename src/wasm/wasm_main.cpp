@@ -1,4 +1,3 @@
-#include "core/doc/tree_adapter.h"
 /**
  * WASM 宿主。
  * 只做三件事：接收 JS fetch 下来的字体字节（字体不进 wasm 包）、暴露布局与绘制
@@ -18,11 +17,11 @@
 #include <string>
 #include <vector>
 
+#include "core/doc/fragment.h"
+#include "core/doc/para_format.h"
+#include "core/doc/record_json.h"
 #include "core/engine/engine.h"
 #include "core/engine/payload_schema.h"
-#include "core/rev/fragment.h"
-#include "core/rev/para_format.h"
-#include "core/rev/record_json.h"
 #include "core/utils/utf8.h"
 #include "demo/demo_documents.h"
 
@@ -315,11 +314,8 @@ void rebuildDocument(bool keep_caret) {
     if (keep_caret) {
         for (const BlockSpec& b : g_engine.blocks()) text_before += b.textUtf8();
     }
-    const NodeTree tree = g_table_demo ? demoTableTree(g_cjk_font) : demoTree(g_blocks, g_fields);
-    rev::Doc doc;
-    std::string why;
-    if (!rev::fromTree(tree, &doc, &why)) return;
-    g_engine.setDocument(std::move(doc), StyleSheet{});
+    g_engine.setDocument(g_table_demo ? demoTableDoc(g_cjk_font) : demoDoc(g_blocks, g_fields),
+                         StyleSheet{});
     if (!keep_caret) return;
     std::string text_after;
     for (const BlockSpec& b : g_engine.blocks()) text_after += b.textUtf8();
@@ -1878,26 +1874,26 @@ void loadTextDocument(const std::string& text, int repeat) {
 }
 
 /**
- * 保存：当前文档 → JSON 文本（格式见 rev::serialize）。
+ * 保存：当前文档 → JSON 文本（格式见 doc::serialize）。
  *
  * 失败只可能是"还没装载文档"，那时返回空串 —— 不返回一段半截 JSON：
  *   宿主拿空串就知道没存成，而半截 JSON 会被写进文件、下次打开才炸。
  */
 std::string serializeDocument() {
-    const rev::SerializeResult r = g_engine.saveDocument();
+    const doc::SerializeResult r = g_engine.saveDocument();
     return r.ok ? r.text : std::string();
 }
 
 /**
  * 打开：JSON 文本 → 当前文档。返回空串 = 成功，否则是给人看的原因。
  *
- * 解析失败时引擎一个字节都不动（rev::deserialize 的契约），所以这里的失败
+ * 解析失败时引擎一个字节都不动（doc::deserialize 的契约），所以这里的失败
  *   不会把用户手上那份文档弄丢 —— 宿主把这句话显示出来就够了。
  * 成功之后不保留块流底稿：引擎已经持修订，后续保存与编辑都只走修订。演示页的控件
  *   重建入口对此类文档关闭，避免把用户打开的文件倒回演示底稿。
  */
 std::string loadDocument(const std::string& text) {
-    const rev::DeserializeResult r = g_engine.loadDocument(text);
+    const doc::DeserializeResult r = g_engine.loadDocument(text);
     if (!r.ok) return r.error;
     g_blocks.clear();
     g_fields.clear();
@@ -1913,7 +1909,7 @@ std::string loadDocument(const std::string& text) {
  */
 std::string copySelection() {
     const ClipCopy c = g_engine.copySelection();
-    return rev::clipboardPayload(c.fragment, c.text, c.error, c.html);
+    return doc::clipboardPayload(c.fragment, c.text, c.error, c.html);
 }
 
 /**
@@ -2362,7 +2358,7 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("loadStressDocumentDiverse", &loadStressDocumentDiverse);
     emscripten::function("loadTextDocument", &loadTextDocument);
     // 保存 / 打开：文档进出的唯一一条路（阶段 6 的落点）。序列化不经过宿主拼字符串 ——
-    //   格式由 rev::serialize 一份实现说了算，宿主只搬字节。
+    //   格式由 doc::serialize 一份实现说了算，宿主只搬字节。
     emscripten::function("serializeDocument", &serializeDocument);
     emscripten::function("loadDocument", &loadDocument);
     // 剪贴板：复制是查询（不动文档），粘贴与删除是命令（自带重排与呈现）。

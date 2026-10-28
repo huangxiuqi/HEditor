@@ -153,56 +153,37 @@ endif()
 #  算法核（平台无关：原生与 wasm 共用）
 # ─────────────────────────────────────────────────────────────
 add_library(heditor_core STATIC
-  src/core/doc/document.cpp
+  src/core/doc/textbuf.cpp
   src/core/doc/control.cpp
   src/core/doc/edit_mode.cpp
-  src/core/doc/node.cpp
-  src/core/doc/flow.cpp
-  src/core/doc/para.cpp
-  src/core/doc/invariants.cpp
-  src/core/doc/compile.cpp
-  src/core/rev/format_map.cpp
-  src/core/rev/atom_map.cpp
-  src/core/rev/char_format.cpp
-  src/core/rev/para_format.cpp
-  src/core/doc/style.cpp
-  src/core/doc/table.cpp
-  src/core/rev/length.cpp
-  src/core/doc/normalize.cpp
-  src/core/doc/range.cpp
-  src/core/doc/fragment.cpp
-  src/core/doc/subtree.cpp
-  src/core/rev/control_spec.cpp
-  src/core/rev/section_spec.cpp
-  src/core/rev/field_spec.cpp
-  src/core/rev/image_spec.cpp
-  src/core/rev/formula_spec.cpp
-  src/core/doc/control_index.cpp
-  src/core/doc/control_api.cpp
-  src/core/doc/validation.cpp
-  src/core/doc/steps.cpp
-  src/core/doc/transaction.cpp
-  src/core/doc/revision.cpp
+    src/core/doc/format_map.cpp
+  src/core/doc/atom_map.cpp
+  src/core/doc/char_format.cpp
+  src/core/doc/para_format.cpp
+  src/core/doc/length.cpp
+  src/core/doc/control_spec.cpp
+  src/core/doc/section_spec.cpp
+  src/core/doc/field_spec.cpp
+  src/core/doc/image_spec.cpp
+  src/core/doc/formula_spec.cpp
+  src/core/doc/record_json.cpp
+  src/core/doc/document.cpp
+  src/core/doc/node_kind.cpp
+  src/core/doc/project.cpp
   src/core/doc/serialize.cpp
-  src/core/rev/record_json.cpp
-  src/core/rev/rev.cpp
-  src/core/rev/node_kind.cpp
-  src/core/rev/project.cpp
-  src/core/rev/serialize.cpp
-  src/core/rev/subtree.cpp
-  src/core/rev/style.cpp
-  src/core/rev/table_grid.cpp
-  src/core/rev/step_map.cpp
-  src/core/rev/utf8.cpp
-  src/core/rev/fragment_value.cpp
-  src/core/doc/tree_adapter.cpp
-  src/core/doc/field_eval.cpp
-  src/core/rev/session.cpp
-  src/core/rev/flow.cpp
-  src/core/rev/steps.cpp
-  src/core/rev/fragment.cpp
-  src/core/rev/capability.cpp
-  src/core/rev/table_ops.cpp
+  src/core/doc/subtree.cpp
+  src/core/doc/style.cpp
+  src/core/doc/table_spec.cpp
+  src/core/doc/table_grid.cpp
+  src/core/doc/step_map.cpp
+  src/core/doc/utf8.cpp
+  src/core/doc/fragment_value.cpp
+  src/core/doc/session.cpp
+  src/core/doc/flow.cpp
+  src/core/doc/steps.cpp
+  src/core/doc/fragment.cpp
+  src/core/doc/capability.cpp
+  src/core/doc/table_ops.cpp
   src/core/text/font.cpp
   src/core/text/font_source.cpp
   src/core/text/shaper.cpp
@@ -240,8 +221,8 @@ target_link_libraries(heditor_core PUBLIC heditor_harfbuzz)
 
 # ── JSON（模型层序列化，1.10）────────────────────────────────────
 #   nlohmann/json 3.12.0，单头文件库、MIT。被 src/core/doc/serialize.cpp 与
-#   src/core/rev/serialize.cpp 经 record_json.h 共用，所以 include 目录仍是 PRIVATE：
-#   对外交付的头（serialize.h / rev 的 serialize.h）不出现 nlohmann 的类型。
+#   src/core/doc/serialize.cpp 经 record_json.h 共用，所以 include 目录仍是 PRIVATE：
+#   对外交付的头（serialize.h / doc 的 serialize.h）不出现 nlohmann 的类型。
 #   取回方式与校验写在 scripts/deps_init.ps1 与 docs/依赖与工具链管理.md。
 set(HEDITOR_JSON_INCLUDE ${HEDITOR_ROOT}/third_party/nlohmann/single_include)
 if(NOT EXISTS "${HEDITOR_JSON_INCLUDE}/nlohmann/json.hpp")
@@ -525,22 +506,12 @@ else()
       RUN_SERIAL TRUE
       LABELS perf)
 
-    # 文档模型：节点、Pos 与流位置的双向换算（0.1）、段落分段（0.2）、
-    # 不变量检查器（0.3）、编译到引擎输入（0.4）。
-    # 链 heditor_demo：0.4 的判据是"编译结果与现有 BlockSpec 路径逐字段一致"，
-    # 参照物就是演示文书那条路径（sampleDocument），不能自造一份对照。
-    add_executable(heditor_model_tests tests/model_test.cpp)
-    target_link_libraries(heditor_model_tests PRIVATE heditor_core heditor_demo)
-    heditor_target_flags(heditor_model_tests)
-    add_test(NAME doc_model COMMAND heditor_model_tests)
-    set_tests_properties(doc_model PROPERTIES LABELS functional)
-
-    # 不可变修订层：路径复制、结构共享、内容哈希（重构方案 D1 的第一层）。
-    add_executable(heditor_rev_tests tests/rev_test.cpp)
-    target_link_libraries(heditor_rev_tests PRIVATE heditor_core heditor_demo)
-    heditor_target_flags(heditor_rev_tests)
-    add_test(NAME rev_layer COMMAND heditor_rev_tests)
-    set_tests_properties(rev_layer PROPERTIES LABELS functional)
+    # 不可变文档层：路径复制、结构共享、内容哈希（重构方案 D1 的第一层）。
+    add_executable(heditor_doc_tests tests/doc_test.cpp)
+    target_link_libraries(heditor_doc_tests PRIVATE heditor_core heditor_demo)
+    heditor_target_flags(heditor_doc_tests)
+    add_test(NAME doc_layer COMMAND heditor_doc_tests)
+    set_tests_properties(doc_layer PROPERTIES LABELS functional)
 
     # 本轮新增功能的判据：双击 / 三击选区、水印、表格列宽与行高、拖拽移动、图片环绕。
     add_executable(heditor_feature_tests tests/feature_test.cpp)

@@ -4,6 +4,7 @@
  * 并把"移动光标之后要重排"那一笔交回引擎（见 EditorEngine 的同名转发层）。
  */
 #include "core/engine/caret.h"
+#include "core/doc/textbuf.h"
 #include "core/engine/control_spans.h"
 #include "core/engine/structure_index.h"
 

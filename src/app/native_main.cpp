@@ -1,4 +1,3 @@
-#include "core/doc/tree_adapter.h"
 /**
  * 原生宿主。
  * 作用不是"最终产品"，而是轨道 A 的快速迭代载体：
@@ -135,11 +134,7 @@ int main(int argc, char** argv) {
         } else {
             blocks = sampleDocument(0, 1, 2);
         }
-        // 演示树先投影成修订；引擎只接受修订入口。
-        rev::Doc doc;
-        std::string error;
-        if (!rev::fromTree(demoTree(blocks, {}), &doc, &error)) return;
-        engine.setDocument(std::move(doc), StyleSheet{});
+        engine.setDocument(demoDoc(blocks, {}), StyleSheet{});
         engine.relayout();
         engine.repaint();
     };
