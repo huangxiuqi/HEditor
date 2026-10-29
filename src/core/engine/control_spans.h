@@ -356,4 +356,25 @@ private:
     std::vector<int> by_end_;
 };
 
+/**
+ * 某个流位置落在哪个控件的内容区间里：索引与线性两版由这一处挑。
+ *
+ * 索引没建（或建出来是空）时退回线性扫。两条规则必须给出同一个答案，所以"用哪一版"
+ *   只判一次 —— 调用点各写一遍的话改一处就会漏，症状是"索引建好前后答案不同"。
+ *
+ * @param index 控件区间索引；nullptr 表示还没建
+ * @param flow 流索引
+ * @param ids 控件节点表（文档顺序）
+ * @param f 流位置
+ * @param out_lo 写回它的内容起点（可为空）
+ * @param out_hi 写回它的内容末尾（可为空）
+ * @return 控件下标；-1 = 不在任何控件的内容里
+ */
+inline int resolveInnermostControl(const ControlIndex* index, const doc::FlowIndex& flow,
+                                   const std::vector<NodeId>& ids, FlowPos f,
+                                   FlowPos* out_lo = nullptr, FlowPos* out_hi = nullptr) {
+    if (index != nullptr && !index->empty()) return index->innermost(f, out_lo, out_hi);
+    return innermostControlAtFlow(flow, ids, f, out_lo, out_hi);
+}
+
 }  // namespace heditor

@@ -33,6 +33,7 @@
 #include "core/doc/flow_types.h"
 #include "core/doc/section_spec.h"
 #include "core/doc/textbuf.h"
+#include "core/engine/control_spans.h"
 #include "core/engine/engine.h"
 #include "core/layout/layout.h"
 #include "core/text/font.h"
@@ -501,6 +502,7 @@ const SectionInfo kSections[] = {
     {84, false, 2},  {85, false, 3},  {86, false, 4},  {87, false, 3},  {88, false, 3},
     {89, false, 3},  {90, false, 2},  {91, false, 3},  {92, false, 6},  {93, false, 5},
     {94, false, 2},  {95, false, 2},  {96, false, 1},  {97, false, 1},  {98, false, 3},
+    {99, false, 2},
 };
 
 /**
@@ -15091,6 +15093,42 @@ int main() {
         const PageMargins back98 = b98.config().page.margins;
         expectTrue(std::abs(back98.left - narrow_margins98.left) < 0.5f,
                    "撤销之后页边距也回到上一份 —— 实际 " + std::to_string(back98.left));
+    }
+    if (runSection(99)) {
+        std::printf("\n[99] 控件归属：索引建好、索引为空与线性扫三路给同一个答案\n");
+        // 嵌套：内层插在外层的内容区间里，走得到父链回溯与"同起点取短者"两条分支。
+        doc::Doc d99 = doc::makeTextDoc({U"甲乙丙丁戊己庚辛壬癸", U"子丑寅卯辰巳午未申酉"});
+        const doc::EditResult outer99 =
+            doc::insertControl(d99, 0, 2, makeControlSpec("text"), U"一二");
+        expectTrue(outer99.ok, outer99.ok ? "插外层控件" : outer99.error);
+        d99 = outer99.doc;
+        const doc::EditResult inner99 =
+            doc::insertControl(d99, 0, 3, makeControlSpec("checkBox"), U"三");
+        expectTrue(inner99.ok, inner99.ok ? "在它内容里插内层控件" : inner99.error);
+        d99 = inner99.doc;
+
+        doc::FlowIndex flow99(d99, FlowVisibility::Design);
+        std::vector<NodeId> ids99;
+        const auto collect99 = [&ids99](const doc::Node& n, const auto& self) -> void {
+            if (n.kind == NodeKind::ContentControl) ids99.push_back(n.id);
+            for (const doc::Ref& c : n.children) self(*c, self);
+        };
+        if (d99.root != nullptr) collect99(*d99.root, collect99);
+        expectTrue(ids99.size() == 2, "文档里两个控件 —— 实际 " + std::to_string(ids99.size()));
+
+        ControlIndex built99;
+        built99.build(flow99, ids99);
+        const ControlIndex empty99;
+        int diff99 = 0;
+        int inside99 = 0;
+        for (FlowPos f = 0; f <= flow99.size(); ++f) {
+            const int linear = resolveInnermostControl(nullptr, flow99, ids99, f);
+            if (linear != resolveInnermostControl(&built99, flow99, ids99, f)) ++diff99;
+            if (linear != resolveInnermostControl(&empty99, flow99, ids99, f)) ++diff99;
+            if (linear >= 0) ++inside99;
+        }
+        expectTrue(inside99 > 0, "至少一个流位置落在控件里 —— " + std::to_string(inside99) + " 个");
+        expectTrue(diff99 == 0, "三路逐位置一致 —— 不一致 " + std::to_string(diff99) + " 处");
     }
     checkSectionTable();
     printSectionTimes();

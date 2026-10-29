@@ -1384,8 +1384,7 @@ bool EditorEngine::controlContentSpan(int index, FlowPos* lo, FlowPos* hi) const
 
 int EditorEngine::innermostControlAt(FlowPos f) const {
     if (!flow_.has_value()) return -1;
-    if (!projection_.structure.controls.empty()) return projection_.structure.controls.innermost(f);
-    return innermostControlAtFlow(*flow_, control_node_ids_, f);
+    return resolveInnermostControl(&projection_.structure.controls, *flow_, control_node_ids_, f);
 }
 
 bool EditorEngine::barrierAtFlow(FlowPos f) const {
@@ -2366,9 +2365,8 @@ bool EditorEngine::hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* 
         if (para < projection_.block_flow.size()) {
             const FlowPos hit_flow =
                 projection_.block_flow[para] + edit_session_.caret.relAt(best->paragraph, cp, side);
-            const int ci = !projection_.structure.controls.empty()
-                               ? projection_.structure.controls.innermost(hit_flow)
-                               : innermostControlAtFlow(*flow_, control_node_ids_, hit_flow);
+            const int ci = resolveInnermostControl(&projection_.structure.controls, *flow_,
+                                                   control_node_ids_, hit_flow);
             owner = ci >= 0 ? ci : LineBox::kInlineOffsetOuter;
         }
     }

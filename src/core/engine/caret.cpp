@@ -325,10 +325,8 @@ int CaretResolver::caretSide() const { return sideForFlow(caretFlow()); }
 int CaretResolver::caretFieldHint() const {
     if (!view_.hasFlow() || view_.control_node_ids == nullptr || view_.control_node_ids->empty())
         return -1;
-    const int ci =
-        (view_.control_index != nullptr)
-            ? view_.control_index->innermost(caretFlow())
-            : innermostControlAtFlow(view_.flowIndex(), *view_.control_node_ids, caretFlow());
+    const int ci = resolveInnermostControl(view_.control_index, view_.flowIndex(),
+                                           *view_.control_node_ids, caretFlow());
     return ci >= 0 ? ci : LineBox::kInlineOffsetOuter;
 }
 
