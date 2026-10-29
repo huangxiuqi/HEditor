@@ -373,6 +373,14 @@ public:
     bool hasCellRange() const { return sel_cell_ && !cell_blocks_.empty(); }
 
     /**
+     * 整格选区的意图（表、行列矩形、焦点格）；没有整格选区时是空矩形（见 CellRange::empty）。
+     *
+     * 读数读它，不要从块区间反算行列：块区间不带行列号，反算一遍就是第二份口径。
+     * @return 当前的整格矩形
+     */
+    const CellRange& cellRange() const { return cell_range_; }
+
+    /**
      * 行别：折行处同一个位置属于两行（上一行行尾 / 下一行行首），只有点击落点会带非零值。
      * @return 行别
      */
@@ -1003,6 +1011,12 @@ private:
      * 读 focus 的那几处（渲染、编辑、输入法定位）因此统一走 caretFlow()。
      */
     FlowPos cell_caret_ = -1;
+
+    /**
+     * 整格选区的意图（见 CellRange）。随 sel_cell_ 一起建立与清除 —— 这份是"用户选了
+     * 什么"的原值，块区间、流包络、掩码、插入点都是它的投影。
+     */
+    CellRange cell_range_;
 
     /**
      * 上下键的列位有没有取过（见 moveCaretVertical）。

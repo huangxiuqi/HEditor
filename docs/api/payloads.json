@@ -258,6 +258,10 @@
         {
           "name": "rects",
           "kind": "arr"
+        },
+        {
+          "name": "cells",
+          "kind": "obj"
         }
       ]
     },

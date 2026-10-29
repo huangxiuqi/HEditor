@@ -690,6 +690,12 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       focus?: number;
       empty?: boolean;
       rects?: Array<{ page?: number; x?: number; y?: number; w?: number; h?: number }>;
+      cells?: {
+        table?: number;
+        rows?: [number, number];
+        cols?: [number, number];
+        focus?: [number, number];
+      } | null;
     };
     // 引擎给的是磅（selectionReport 取 selectionRectsVisible，字段名 r_pt），直接透传。
     //   在这里再按 dpr 除一次就既不是磅也不是 CSS 像素；而 DPR=1 下那次除法是恒等，
@@ -701,13 +707,23 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       w: r.w ?? 0,
       h: r.h ?? 0,
     }));
+    // 整格矩形只在引擎那边有（它是选区的原值），这里原样转出去，不从端点或矩形反算 ——
+    //   行号列号不是几何量，反算出来的会与合并格的占位对不上。
+    const cells = raw.cells
+      ? {
+          table: raw.cells.table ?? 0,
+          rows: [raw.cells.rows?.[0] ?? 0, raw.cells.rows?.[1] ?? -1] as [number, number],
+          cols: [raw.cells.cols?.[0] ?? 0, raw.cells.cols?.[1] ?? -1] as [number, number],
+          focus: [raw.cells.focus?.[0] ?? 0, raw.cells.focus?.[1] ?? 0] as [number, number],
+        }
+      : null;
     const at = (flow: number | undefined): Pos => {
       if (flow === undefined) return { para: 0, offset: 0 };
       // 两端的位置随 selection 一起推过来（Worker 传输下是镜像，同步值）。
       const p = l.read('textPosOf', { flow }) as Pos | null;
       return p && typeof p.para === 'number' ? p : { para: 0, offset: 0 };
     };
-    return { anchor: at(raw.anchor), focus: at(raw.focus), empty: !!raw.empty, rects, cells: null };
+    return { anchor: at(raw.anchor), focus: at(raw.focus), empty: !!raw.empty, rects, cells };
   }
 
   const editor: Editor = {

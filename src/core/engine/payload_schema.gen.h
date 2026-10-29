@@ -120,6 +120,7 @@ inline constexpr KeySpec kKeys[] = {
     {"focus", "obj", false},
     {"empty", "bool", false},
     {"rects", "arr", false},
+    {"cells", "obj", false},
 };
 inline constexpr PayloadSpec kSpec{"selectionReport", kKeys, static_cast<int>(std::size(kKeys)), false};
 }  // namespace selection_report

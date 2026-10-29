@@ -80,6 +80,7 @@ export interface SelectionReport {
   focus: Record<string, unknown>;
   empty: boolean;
   rects: unknown[];
+  cells: Record<string, unknown>;
 }
 
 export interface HitTest {

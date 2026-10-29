@@ -43,10 +43,12 @@ LIT_RE = re.compile(r'"((?:[^"\\]|\\.)*)"')
 UNESCAPE = {'n': '\n', 't': '\t', 'r': '\r', '"': '"', '\\': '\\', "'": "'"}
 
 # 少数键的值是结构体，靠"看源码怎么求值"分不出来（`<< r.anchor` 与 `<< 3` 长得一样）。
-#   这一列只能人补，补的时候写清为什么。目前只有这两个。
+#   这一列只能人补，补的时候写清为什么。前两个是 Range，cells 是整格选区那个对象
+#   （第三支写 null，源码里以字符串 "null" 收尾，按默认规则会判成 num）。
 KIND_OVERRIDES = {
     ('selectionReport', 'anchor'): 'obj',
     ('selectionReport', 'focus'): 'obj',
+    ('selectionReport', 'cells'): 'obj',
 }
 
 

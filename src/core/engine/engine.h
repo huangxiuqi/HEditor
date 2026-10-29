@@ -800,6 +800,14 @@ public:
     bool hasCellRange() const { return edit_session_.caret.hasCellRange(); }
 
     /**
+     * 整格选区的意图（表、行列矩形、焦点格）；没有整格选区时是空矩形。
+     *
+     * 这是选区的唯一原值，其余状态都由它派生（见 CaretResolver::setCellRange）。
+     * @return 当前的整格矩形
+     */
+    const CellRange& cellRange() const { return edit_session_.caret.cellRange(); }
+
+    /**
      * 这一段内容所在那一格的内容区间（全局流位置，左闭右开）。不在表格里返回假。
      *
      * 空格的内容长度是 0（两端相等），所以它同时也是"这一格有没有字"的判据。

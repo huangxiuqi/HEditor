@@ -847,15 +847,15 @@ bool caretVerticalNow() { return g_engine.caretVertical(); }
 bool caretBlockReversedNow() { return g_engine.caretBlockReversed(); }
 
 /**
- * 选区取证：两端（全局流位置）、是否为空，以及它在页面坐标下的矩形。
+ * 选区取证：两端（全局流位置）、是否为空、页面坐标下的矩形、整格选区的矩形。
  *
- * 矩形是判据要的正面证据 —— "选中了哪一段"最终要落到"哪几行被盖住了"。空选区给空数组，
- * 与"光标没有尺寸"是同一条：选区的可视范围就是矩形，没矩形就没选中。
+ * 矩形是判据要的正面证据：选中了哪一段，最终要落到哪几行被盖住。它只给当前窗口内的
+ * 那部分（selectionRectsVisible）—— 整篇给的话 2000 段全选就是 4000 条 / 197 KB，
+ * 而 Worker 宿主每一拍状态都要推一份，拖选会直接不跟手。要看选区盖了多少行，用两端
+ * anchor..focus，它与窗口无关。
  *
- * 矩形只给当前窗口内的那部分（selectionRectsVisible），与"这一帧画了什么"同一口径。
- *   整篇给的话，2000 段全选就是 4000 条 / 197 KB，而 Worker 宿主每一拍状态都要推一份
- *   （实测每次交互的墙钟从 3.4 ms 涨到 50.3 ms，拖选直接不跟手）。
- *   要看"选区到底盖了多少行"，用两端 anchor..focus，它与窗口无关。
+ * cells 是整格选区的意图本身（表、行列矩形、焦点格），文字选区为 null。不要拿块区间
+ * 反算行列：块区间不带行列号，反算一遍就多一份口径。
  */
 std::string selectionReport() {
     const Range r = g_engine.selection();
@@ -871,7 +871,17 @@ std::string selectionReport() {
           << ",\"y\":" << rects[i].r_pt.y << ",\"w\":" << rects[i].r_pt.w
           << ",\"h\":" << rects[i].r_pt.h << "}";
     }
-    o << "]}";
+    o << "],\"cells\":";
+    const CellRange cells = g_engine.cellRange();
+    if (cells.empty()) {
+        o << "null";
+    } else {
+        // 行列都含两端。焦点格单独给：插入点钉在它末尾，不是矩形右下角。
+        o << "{\"table\":" << cells.table << ",\"rows\":[" << cells.r0 << "," << cells.r1
+          << "],\"cols\":[" << cells.c0 << "," << cells.c1 << "],\"focus\":[" << cells.focus_row
+          << "," << cells.focus_cell << "]}";
+    }
+    o << "}";
     return pk::checked(pk::selection_report::kSpec, o.str());
 }
 

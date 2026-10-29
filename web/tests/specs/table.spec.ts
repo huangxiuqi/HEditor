@@ -142,12 +142,38 @@ test.describe('表格：跨页切片', () => {
     const r = await p.read<any>(`
       await H.flush();
       const st = await H.tableState();
+      const sel = H.selection();
       const c = CARET();
-      return { cells: st.selCells, caret: c };`);
+      return { cells: st.selCells, caret: c, range: sel.cells,
+               selRow: st.cellRow, selCol: st.cellCol,
+               selRows: st.selRows, selCols: st.selCols };`);
     check('前提：拖选盖住了四格', r.cells === 4, String(r.cells));
     check('\u2605 插入点在焦点格（左上，段 1）的末尾，不在矩形右下角',
           r.caret.para === 1 && r.caret.offset === 1,
           JSON.stringify({ para: r.caret.para, offset: r.caret.offset }));
+    // 矩形是选区的原值，读它而不是从端点或几何反算：行号列号不是几何量。
+    check('前提：公开面的选区给出了整格矩形', !!r.range, JSON.stringify(r.range));
+    check('\u2605 整格矩形是 2x2，行列都含两端',
+          !!r.range && r.range.rows[0] === 0 && r.range.rows[1] === 1 &&
+          r.range.cols[0] === 0 && r.range.cols[1] === 1,
+          JSON.stringify(r.range));
+    check('行列跨度与 tableState 的整格范围一致',
+          !!r.range && r.range.rows[1] - r.range.rows[0] + 1 === r.selRows &&
+          r.range.cols[1] - r.range.cols[0] + 1 === r.selCols,
+          JSON.stringify({ range: r.range, selRows: r.selRows, selCols: r.selCols }));
+    // 焦点格是松手那一端（左上），与光标所在格是同一格 —— 两条读数各自算，互为交叉验证。
+    check('\u2605 焦点格是松手的左上格，与光标所在格一致',
+          !!r.range && r.range.focus[0] === r.selRow && r.range.focus[1] === r.selCol,
+          JSON.stringify({ focus: r.range?.focus, row: r.selRow, col: r.selCol }));
+
+    const text = await p.read<any>(`
+      await H.select({ para: 0, offset: 0 }, { para: 0, offset: 1 });
+      await H.flush();
+      const sel = H.selection();
+      return { range: sel.cells, empty: sel.empty };`);
+    check('反向：文字选区没有整格矩形（有字被选中，但不是整格）',
+          text.range === null && text.empty === false,
+          JSON.stringify({ range: text.range, empty: text.empty }));
   });
 
   test('格内换行：折行之后的字必须画出来', async ({ open }) => {

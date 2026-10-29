@@ -597,6 +597,7 @@ bool CaretResolver::setCellRange(const CellRange& range, const CellIndex& cells)
         }
     }
     cell_blocks_ = std::move(picked);
+    cell_range_ = range;
     sel_cell_ = true;
     // 插入点钉在焦点格的末尾：焦点格内怎么拖，这个位置都不逐字漂。
     cell_caret_ = caret_flow > end ? end : caret_flow;
@@ -612,6 +613,7 @@ void CaretResolver::clearCellRange() {
     cell_blocks_.clear();
     cell_mask_.clear();
     cell_caret_ = -1;
+    cell_range_ = CellRange{};
     sel_cell_ = false;
 }
 

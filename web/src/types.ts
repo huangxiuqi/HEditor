@@ -119,9 +119,17 @@ export interface Selection {
   rects: Rect[];
 
   /**
-   * 单元格选区时的格区间（行、列各含两端）；文字选区为 null。
+   * 整格选区的矩形：表、行列范围（各含两端）与焦点格；文字选区为 null。
+   *
+   * 行列是逻辑格号（合并格占住的那些行列都算在范围内）。焦点格是插入点钉住的那一格 ——
+   * 从右下往左上拖时它是左上角，不是矩形的右下角；敲字进哪一格由它决定。
    */
-  cells: { rows: [number, number]; cols: [number, number] } | null;
+  cells: {
+    table: number;
+    rows: [number, number];
+    cols: [number, number];
+    focus: [number, number];
+  } | null;
 }
 
 /**
