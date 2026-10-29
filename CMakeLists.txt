@@ -204,6 +204,10 @@ add_library(heditor_core STATIC
   src/core/engine/document_session.cpp
   src/core/engine/caret.cpp
   src/core/engine/edit_command.cpp
+  src/core/engine/edit_command_erase.cpp
+  src/core/engine/edit_command_control.cpp
+  src/core/engine/edit_command_format.cpp
+  src/core/engine/edit_command_table.cpp
   src/core/engine/engine_layout.cpp
   src/core/engine/engine_paint.cpp
   src/core/engine/control_geometry.cpp
