@@ -6,6 +6,7 @@
 #include <unordered_set>
 
 #include "core/doc/flow.h"
+#include "core/doc/font_refs.h"
 #include "core/doc/internal.h"
 #include "core/doc/record_json.h"
 #include "core/utils/utf8.h"
@@ -530,20 +531,8 @@ ClipWriteResult writeFragment(const std::vector<NodeSpec>& nodes, const Serializ
     if (opt.font_ref) {
         std::unordered_set<int> used;
         for (const NodeSpec& s : nodes) collectFonts(s, &used);
-        if (!used.empty()) {
-            std::vector<int> sorted(used.begin(), used.end());
-            std::sort(sorted.begin(), sorted.end());
-            ordered_json fonts = ordered_json::object();
-            for (int index : sorted) {
-                const FontRef ref = opt.font_ref(index);
-                ordered_json entry = ordered_json::object();
-                if (!ref.postscript.empty()) entry["ps"] = ref.postscript;
-                if (!ref.family.empty()) entry["family"] = ref.family;
-                if (!ref.file.empty()) entry["file"] = ref.file;
-                if (!entry.empty()) fonts[std::to_string(index)] = std::move(entry);
-            }
-            if (!fonts.empty()) j[kFonts] = std::move(fonts);
-        }
+        recjson::ordered_json fonts = fontRefsJson(used, opt.font_ref);
+        if (!fonts.empty()) j[kFonts] = std::move(fonts);
     }
     j[kNodes] = std::move(arr);
     if (!recjson::validateStrings(j, &result.error)) return result;

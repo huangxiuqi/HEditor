@@ -1,4 +1,5 @@
 #include "core/doc/serialize.h"
+#include "core/doc/font_refs.h"
 #include "core/utils/utf8.h"
 
 #include <algorithm>
@@ -635,20 +636,8 @@ SerializeResult serializeImpl(const Doc& doc, const SerializeOptions& opt,
         std::unordered_set<int> used;
         collectFonts(doc.root, &used);
         if (sheet != nullptr) collectStyleFonts(*sheet, &used);
-        if (!used.empty()) {
-            std::vector<int> sorted(used.begin(), used.end());
-            std::sort(sorted.begin(), sorted.end());
-            ordered_json fonts = ordered_json::object();
-            for (int index : sorted) {
-                const FontRef ref = opt.font_ref(index);
-                ordered_json entry = ordered_json::object();
-                if (!ref.postscript.empty()) entry["ps"] = ref.postscript;
-                if (!ref.family.empty()) entry["family"] = ref.family;
-                if (!ref.file.empty()) entry["file"] = ref.file;
-                if (!entry.empty()) fonts[std::to_string(index)] = std::move(entry);
-            }
-            if (!fonts.empty()) j[kFonts] = std::move(fonts);
-        }
+        recjson::ordered_json fonts = fontRefsJson(used, opt.font_ref);
+        if (!fonts.empty()) j[kFonts] = std::move(fonts);
     }
     if (sheet != nullptr) j[kStyles] = stylesJson(*sheet);
     if (opt.resources) {
