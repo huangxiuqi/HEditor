@@ -500,7 +500,7 @@ const SectionInfo kSections[] = {
     {79, false, 2},  {80, false, 3},  {81, false, 2},  {82, false, 1},  {83, false, 2},
     {84, false, 2},  {85, false, 3},  {86, false, 4},  {87, false, 3},  {88, false, 3},
     {89, false, 3},  {90, false, 2},  {91, false, 3},  {92, false, 6},  {93, false, 5},
-    {94, false, 2},  {95, false, 2},  {96, false, 1},  {97, false, 1},
+    {94, false, 2},  {95, false, 2},  {96, false, 1},  {97, false, 1},  {98, false, 3},
 };
 
 /**
@@ -14995,16 +14995,84 @@ int main() {
                    "行盒里四枚占位都带着对象表里的序号 —— 带序号 " + std::to_string(numbered97) +
                        " 枚，对上 " + std::to_string(matched97) + " 枚");
 
-        // (c) 序号来自对象表，不随簇变：括号关掉之后同一落点的流位置不变。簇里没有槽
+        // (c) 从控件下标落点：这一路只认 sideFromHint —— 下标换成产生者句柄，再按序号定
+        //   侧别。侧别差一格时字会落到两个控件之间（控件跨度不变），这条就红。
+        const auto span_of97 = [&](int owner) {
+            int start = -1;
+            int end = -1;
+            for (const InlineObject& o : e97.blocks().front().objects) {
+                if (o.owner != owner) continue;
+                if (o.kind == InlineObjectKind::ControlStart) start = static_cast<int>(o.cp);
+                if (o.kind == InlineObjectKind::ControlEnd) end = static_cast<int>(o.cp);
+            }
+            return (start >= 0 && end >= 0) ? end - start : -1;
+        };
+        const int span_before97 = span_of97(owner_b97);
+        e97.setCaretAt(0, static_cast<size_t>(shared_cp97), 1);
+        expectTrue(e97.caretSide() == open_slot97 + 1,
+                   "落点的侧别是开括号序号加一 —— 实际 " + std::to_string(e97.caretSide()) +
+                       "，开括号序号 " + std::to_string(open_slot97));
+        expectTrue(e97.typeTextUtf8("X"), "在控件内容起点敲一个字");
+        expectTrue(span_of97(owner_b97) == span_before97 + 1,
+                   "字进了控件内部，跨度加一 —— 前 " + std::to_string(span_before97) + " 后 " +
+                       std::to_string(span_of97(owner_b97)));
+
+        // (d) 序号来自对象表，不随簇变：括号关掉之后同一落点的流位置不变。簇里没有槽
         //   的时候（括号关掉档）仍要答得出"这个控件下标落在哪一位"。
-        const FlowPos inside97 = e97.flowPosAt(0, static_cast<size_t>(shared_cp97), owner_b97);
+        const FlowPos inside97 = e97.flowPosAt(0, static_cast<size_t>(shared_cp97), 1);
         EngineConfig no_brk97 = c97;
         no_brk97.show_brackets = false;
         e97.setConfig(no_brk97);
-        const FlowPos after97 = e97.flowPosAt(0, static_cast<size_t>(shared_cp97), owner_b97);
+        const FlowPos after97 = e97.flowPosAt(0, static_cast<size_t>(shared_cp97), 1);
         expectTrue(inside97 >= 0 && after97 == inside97, "关掉括号之后同一个落点的流位置不变 —— " +
                                                              std::to_string(inside97) + " / " +
                                                              std::to_string(after97));
+    }
+    if (runSection(98)) {
+        std::printf("\n[98] 页度量跟着文档走：写进第一节，保存之后换个引擎打开还是那张纸\n");
+        EngineConfig wide98;
+        wide98.density = 1.0f;
+        wide98.page.width_pt = 600.0f;
+        wide98.page.height_pt = 300.0f;
+        wide98.page.margins = PageMargins::all(10.0f);
+        EditorEngine a98;
+        expectTrue(a98.init({cjkPath, mnPath, latinPath}), "引擎初始化（页度量随文档）");
+        a98.setConfig(wide98);
+        std::vector<std::u32string> paras98;
+        std::u32string body98;
+        for (int k = 0; k < 6; ++k) body98 += U"一二三四五六七八九十";
+        for (int i = 0; i < 40; ++i) paras98.push_back(body98);
+        a98.setDocument(doc::makeTextDoc(paras98), StyleSheet{});
+        a98.relayout();
+        const size_t lines_wide98 = a98.layout().lines.size();
+
+        // 换成一张很窄的纸：同样的内容折行必然更多（页数对宽度不敏感，行数才敏感）。
+        const PageMargins narrow_margins98{20.0f, 20.0f, 20.0f, 20.0f};
+        expectTrue(a98.rememberPageMetrics(200.0f, 300.0f, narrow_margins98), "纸张写进文档第一节");
+        EngineConfig narrow98 = wide98;
+        narrow98.page.width_pt = 200.0f;
+        narrow98.page.margins = narrow_margins98;
+        a98.setConfig(narrow98);
+        const size_t lines_narrow98 = a98.layout().lines.size();
+
+        const doc::SerializeResult saved98 = a98.saveDocument();
+        expectTrue(saved98.ok, saved98.ok ? "保存成功" : saved98.error);
+
+        // 故意用宽纸的配置打开：页度量必须听文档那一份。
+        EditorEngine b98;
+        expectTrue(b98.init({cjkPath, mnPath, latinPath}), "引擎初始化（读回）");
+        b98.setConfig(wide98);
+        const doc::DeserializeResult loaded98 = b98.loadDocument(saved98.text);
+        expectTrue(loaded98.ok, loaded98.ok ? "打开成功" : loaded98.error);
+        b98.relayout();
+        const size_t lines_read98 = b98.layout().lines.size();
+
+        expectTrue(lines_narrow98 > lines_wide98, "前提：窄纸折行多于宽纸 —— " +
+                                                      std::to_string(lines_narrow98) + " / " +
+                                                      std::to_string(lines_wide98));
+        expectTrue(lines_read98 == lines_narrow98, "读回之后按文档里那张纸排版 —— " +
+                                                       std::to_string(lines_read98) + " / " +
+                                                       std::to_string(lines_narrow98));
     }
     checkSectionTable();
     printSectionTimes();

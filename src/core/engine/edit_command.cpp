@@ -3470,4 +3470,39 @@ bool EditCommand::setWatermark(const WatermarkSpec& w) {
     return true;
 }
 
+/**
+ * 改第一节的纸张与页边距。脏段取第 0 段：它们决定整篇的页度量，没有更窄的影响面。
+ */
+bool EditCommand::setSectionPaper(const Paper& paper, const SectionMargins& margins) {
+    if (!hasFlow()) return false;
+    if (mode() != EditMode::Document) {
+        noteBlocked();
+        return false;
+    }
+    const doc::Doc& d = doc();
+    if (!d.root || d.root->children.empty()) return false;
+    const doc::Node* sec = d.root->children.front().get();
+    if (sec == nullptr || sec->kind != NodeKind::Section) return false;
+    const auto* cur = std::get_if<SectionSpec>(&sec->payload);
+    if (cur == nullptr) return false;
+    if (cur->paper == paper && cur->margins == margins) return true;
+
+    SectionSpec next = *cur;
+    next.paper = paper;
+    next.margins = margins;
+    SetSectionSpec s;
+    s.id = sec->id;
+    s.spec = next;
+    s.before = *cur;
+    std::vector<Step> steps;
+    steps.push_back(Step{s});
+    pending_before_ = pos().selection();
+    pending_after_ = pos().selection();
+    if (!commit(std::move(steps), 0)) {
+        noteBlocked();
+        return false;
+    }
+    return true;
+}
+
 }  // namespace heditor

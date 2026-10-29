@@ -963,10 +963,22 @@ bool checkSupportedLayout(const Doc& doc, std::string* why) {
     if (has_hf_node) return fail("页眉页脚内容尚未参与排版");
     if (has_field) return fail("域元素尚未进入排版输入");
 
+    // 第一节的纸张与页边距：后面的节必须与它相同（整篇一份页度量）。
+    const SectionSpec* first_spec = nullptr;
+
     for (const Ref& section : doc.root->children) {
         if (!section || section->kind != NodeKind::Section) continue;
         const auto* spec = std::get_if<SectionSpec>(&section->payload);
         if (spec == nullptr) return fail("节缺少节记录");
+
+        // 纸张与页边距按"整篇一份"支持：引擎只有一套页度量，文档里记的那一份由装载时
+        //   采用成配置（见 EditorEngine::adoptPageFromDocument）。多节各写各的仍拒绝 ——
+        //   那是按节排版，不是现在的支持范围。
+        if (first_spec == nullptr) {
+            first_spec = spec;
+        } else if (!(spec->paper == first_spec->paper) || !(spec->margins == first_spec->margins)) {
+            return fail("按节页度量尚未参与排版");
+        }
 
         for (const HeaderFooter& hf : spec->headers) {
             if (hf.root != kInvalidNodeId) return fail("页眉内容尚未参与排版");
@@ -986,6 +998,9 @@ bool checkSupportedLayout(const Doc& doc, std::string* why) {
         SectionSpec baseline;
         baseline.break_kind = spec->break_kind;
         baseline.watermark = spec->watermark;
+        // 纸张与页边距在上面按"全篇相同"判过了，这里取本节的同一份，等于不再要求它们是默认值。
+        baseline.paper = spec->paper;
+        baseline.margins = spec->margins;
         if (!spec->sameAs(baseline)) return fail("按节页度量尚未参与排版");
     }
     return true;

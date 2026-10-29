@@ -340,6 +340,8 @@ void setZoom(float z) {
  *
  * 纸张规格（A4 / A3 / Letter……）不在这里认：规格只是"一组宽高"，抄进引擎就是第二个
  *   真相。宿主按规格算出宽高再调用这一条，换纸就是换这四个数。
+ * 同时记进文档第一节：只改配置的话，"改纸张、保存、再打开"会回到默认那张纸 ——
+ *   装载时按文档里这一份决定页度量（见 EditorEngine::adoptPageFromDocument）。
  */
 void setPageMetrics(float w_pt, float h_pt, float top_pt, float right_pt, float bottom_pt,
                     float left_pt) {
@@ -347,6 +349,7 @@ void setPageMetrics(float w_pt, float h_pt, float top_pt, float right_pt, float 
     g_cfg.page.height_pt = h_pt;
     g_cfg.page.margins = PageMargins{top_pt, right_pt, bottom_pt, left_pt};
     applyConfig();
+    g_engine.rememberPageMetrics(w_pt, h_pt, PageMargins{top_pt, right_pt, bottom_pt, left_pt});
 }
 
 /**

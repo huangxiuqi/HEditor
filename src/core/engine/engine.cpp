@@ -237,8 +237,38 @@ void EditorEngine::installDocument(doc::Doc doc) {
     setCaretByText(TextPos{0, 0});
     render_.pages.clear();
     rebuildProjection();
+    adoptPageFromDocument();
     // 整份文档换了：段数与内容都可能全变，没有可复用的前缀。
     markAllLayoutDirty();
+}
+
+/**
+ * 文档里记的纸张与页边距换成页度量。装配规则与 setConfig 同一套（连页要条带高度），
+ * 因为 cfg_.page 存的一直是装配之后的值。
+ */
+void EditorEngine::adoptPageFromDocument() {
+    if (!session_) return;
+    const doc::Doc& d = document();
+    if (!d.root || d.root->children.empty()) return;
+    const doc::Node* sec = d.root->children.front().get();
+    if (sec == nullptr) return;
+    const auto* s = std::get_if<SectionSpec>(&sec->payload);
+    if (s == nullptr) return;
+    // 两项都是默认值 = 这份文档没写过纸张：配置说了算。
+    if (s->paper == Paper{} && s->margins == SectionMargins{}) return;
+    const auto pt = [](const Length& l) { return static_cast<float>(emuToPt(l.abs_emu)); };
+    const float w = pt(s->paper.width);
+    const float h = pt(s->paper.height);
+    if (!(w > 0.0f) || !(h > 0.0f)) return;
+    cfg_.page.width_pt = w;
+    cfg_.page.height_pt = h;
+    cfg_.page.margins = PageMargins{pt(s->margins.top), pt(s->margins.right), pt(s->margins.bottom),
+                                    pt(s->margins.left)};
+    cfg_.page.continuous = cfg_.continuous;
+    cfg_.page.slab_pt =
+        cfg_.continuous ? h + (cfg_.page_gap_pt > 0.0f ? cfg_.page_gap_pt : 0.0f) : 0.0f;
+    // 页度量变了，光栅签名也要跟着换，否则页位图缓存还按旧尺寸认。
+    render_.pages.setSignature(rasterSignatureNow());
 }
 
 /**
@@ -423,6 +453,18 @@ bool EditorEngine::setWatermarkAndRender(const WatermarkSpec& w) {
     // 水印不进断行，所以不重排：光栅签名里含它的摘要，下一次 present 会把所有页重光栅。
     repaint();
     return true;
+}
+
+bool EditorEngine::rememberPageMetrics(float w_pt, float h_pt, const PageMargins& margins) {
+    if (!loaded_ || !session_) return false;
+    Paper paper;
+    paper.width = Length::abs(ptToEmu(w_pt));
+    paper.height = Length::abs(ptToEmu(h_pt));
+    // 字段顺序是 top / bottom / left / right（见 SectionMargins），不是顺时针。
+    const SectionMargins sm{Length::abs(ptToEmu(margins.top)), Length::abs(ptToEmu(margins.bottom)),
+                            Length::abs(ptToEmu(margins.left)),
+                            Length::abs(ptToEmu(margins.right))};
+    return edit_session_.edit.setSectionPaper(paper, sm);
 }
 
 std::string EditorEngine::pasteFragmentAndRender(const std::string& text) {

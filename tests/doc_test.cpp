@@ -2437,9 +2437,26 @@ int main() {
                           {doc::makeNode(4, NodeKind::ParagraphMark, doc::MarkPayload{}, {})});
         const Doc margin_doc =
             doc::adopt(doc::makeNode(1, NodeKind::Document, {}, {margin_sec}), 5);
+        // 整篇一份页度量是支持的：装载时把这一份采用成引擎页度量（见 adoptPageFromDocument），
+        //   所以单节写非默认页边距不再拒绝。
         why.clear();
-        expectTrue(!doc::checkSupportedLayout(margin_doc, &why) && !why.empty(),
-                   "按节页边距与全局页度量不同时拒绝（" + why + "）");
+        expectTrue(doc::checkSupportedLayout(margin_doc, &why),
+                   "单节写了页边距仍然可排版（" + why + "）");
+
+        // 多节各写各的才拒绝 —— 那是按节排版，不在支持范围里。
+        SectionSpec other_margins;
+        other_margins.margins.left = Length::abs(ptToEmu(36.0));
+        const doc::Ref sec_a =
+            doc::makeNode(6, NodeKind::Section, margins,
+                          {doc::makeNode(7, NodeKind::ParagraphMark, doc::MarkPayload{}, {})});
+        const doc::Ref sec_b =
+            doc::makeNode(8, NodeKind::Section, other_margins,
+                          {doc::makeNode(9, NodeKind::ParagraphMark, doc::MarkPayload{}, {})});
+        const Doc two_papers =
+            doc::adopt(doc::makeNode(1, NodeKind::Document, {}, {sec_a, sec_b}), 10);
+        why.clear();
+        expectTrue(!doc::checkSupportedLayout(two_papers, &why) && !why.empty(),
+                   "多节页边距不同时拒绝（" + why + "）");
 
         why.clear();
         expectTrue(!doc::checkSupportedLayout(makeAtomDoc(""), &why) && !why.empty(),

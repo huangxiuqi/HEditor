@@ -479,6 +479,18 @@ public:
     bool setWatermark(const WatermarkSpec& w);
 
     /**
+     * 改第一节的纸张与四边页边距。
+     *
+     * 为什么只改第一节：引擎现在只有一套页度量（多节不同纸张在 doc::checkSupportedLayout
+     * 里显式拒绝），整篇共用一张纸；写进文档是为了"保存之后再打开还是这张纸"。
+     *
+     * @param paper 纸张（方向与宽高）
+     * @param margins 四边页边距
+     * @return true = 改成了（或本来就是这个值）
+     */
+    bool setSectionPaper(const Paper& paper, const SectionMargins& margins);
+
+    /**
      * 把一张表的全部列宽钉成显式值（拖拽列边界之后落地）。宽度 <= 0 的那一列保持 Auto。
      *
      * 收整份而不是"改第几列"：拖一条列边界改的是相邻两列（一增一减），而表格的列宽

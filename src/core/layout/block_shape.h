@@ -79,7 +79,7 @@ struct BlockShaping {
         const FontInstance* bracket_font = nullptr;
 
         /**
-         * 这个占位属于哪个控件（控件集合下标）；非占位恒为 -1。
+         * 这个占位的产生者句柄：持树时是控件（或原子）节点的 id，不是控件集合下标。
          */
         int owner_control = -1;
 

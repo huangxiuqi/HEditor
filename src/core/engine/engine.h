@@ -1708,6 +1708,19 @@ public:
     bool setWatermarkAndRender(const WatermarkSpec& w);
 
     /**
+     * 把页度量记进文档（第一节的纸张与页边距），一步撤销。
+     *
+     * 只改引擎配置不记进文档的话，"改纸张、保存、再打开"会回到默认那张纸 —— 这是这份
+     * 记录唯一的用途。值没变时不产生修订。
+     *
+     * @param w_pt 页宽（磅）
+     * @param h_pt 页高（磅）
+     * @param margins 四边页边距（磅）
+     * @return true = 记下了（没装载文档时为假）
+     */
+    bool rememberPageMetrics(float w_pt, float h_pt, const PageMargins& margins);
+
+    /**
      * 光标所在表格的现状（表格 / 行 / 格三层记录 + 整格选区的范围）。
      *
      * 属性面板一次读全：分三次问会拿到三个不同时刻的状态，而"表宽 + 行高 + 格对齐"
@@ -2846,6 +2859,14 @@ private:
      * 直接装入修订与打开 JSON 两条路都走它 —— 两条路的收尾必须是同一份。
      */
     void installDocument(doc::Doc doc);
+
+    /**
+     * 文档里记了纸张就按它排版：配置只是"还没有文档时的初始值"。
+     *
+     * 只在文档显式写过纸张时生效（纸张与页边距都是默认值等于没写过 —— 序列化那边
+     * 也是这么判的）—— 否则每一份没提纸张的文档都会把宿主设好的页度量冲掉。
+     */
+    void adoptPageFromDocument();
 
     /**
      * 按当前修订重算产物：投影出块流与控件跨度，再把流索引、位置与控件视图带上。

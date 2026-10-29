@@ -86,8 +86,10 @@ struct StructureIndex {
             slots[static_cast<size_t>(o.block)].push_back(o);
         }
         for (std::vector<doc::Slot>& list : slots) {
-            std::sort(list.begin(), list.end(),
-                      [](const doc::Slot& a, const doc::Slot& z) { return a.cp < z.cp; });
+            // 稳定排序：同一个偏移上可能压着好几枚边界（][），它们的次序就是 slot 的次序 ——
+            //   排序不稳定的话，"第几枚"这件事在这张表上不成立，谁读谁错。
+            std::stable_sort(list.begin(), list.end(),
+                             [](const doc::Slot& a, const doc::Slot& z) { return a.cp < z.cp; });
         }
     }
 

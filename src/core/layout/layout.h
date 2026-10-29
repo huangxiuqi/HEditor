@@ -1299,7 +1299,7 @@ struct PlacedGlyph {
  * 画的时候挪，就把"槽"和"字形"分成了两套账 —— 括号会盖到相邻的字上，
  * 或者槽里空一条、字却已经走了。这和"括号必须进文档流"是同一条道理：
  * 凡是占画面的宽度，就必须是排版算出来的那一个。
- * 所以这里只留一个常数，排版和绘制共用它（见 engine_paint.cpp 的 rasterControlMarks）。
+ * 所以这里只留一个常数，排版和绘制共用它（见 page_marks.cpp 的 drawControlMarks）。
  */
 inline constexpr float kControlBracketSlotGapPt = 1.5f;
 
@@ -1381,14 +1381,13 @@ struct LineCluster {
     const FontInstance* bracket_font = nullptr;
 
     /**
-     * 这个占位属于哪个控件（控件集合里的下标）；非占位恒为 -1。
+     * 这个占位的产生者句柄：持树时是控件（或原子）节点的 id。非占位恒为 -1。
+     *
+     * 它不是控件集合里的下标 —— 那个要过 controlIndexOfOwner 换一次，两者差一层。
      * 与 read_only 同一个理由：只有插槽那一步知道答案。命中测试要用它来回答
      * "用户点的这个括号是谁的" —— 共享边界上两个字段的括号挨在一起（][），
-     * 光凭 (cp, 朝向) 反查，空字段与相邻字段会给出同一个答案。
-     *
-     * 原子占位放的是原子的节点 id（它没有控件下标，而节点 id 同样是稳定身份）——
-     * 绘制要靠它回树里取"框里写什么"。两者都是"不透明句柄"的下游形态，见
-     * InlineObject::owner。
+     * 光凭 (cp, 朝向) 反查，空字段与相邻字段会给出同一个答案。绘制要靠它回树里取
+     * "框里写什么"。见 InlineObject::owner。
      */
     int owner_control = -1;
 
