@@ -22,9 +22,9 @@
 #include <string>
 #include <vector>
 
+#include "core/compile/compile_result.h"
 #include "core/doc/capability.h"
 #include "core/doc/char_format.h"
-#include "core/doc/compile_result.h"
 #include "core/doc/control.h"
 #include "core/doc/document.h"
 #include "core/doc/edit_mode.h"

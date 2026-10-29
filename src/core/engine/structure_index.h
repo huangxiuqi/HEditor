@@ -10,7 +10,7 @@
 #include <cstddef>
 #include <vector>
 
-#include "core/doc/project.h"
+#include "core/compile/project.h"
 #include "core/engine/control_spans.h"
 #include "core/layout/cell_index.h"
 #include "core/layout/layout.h"

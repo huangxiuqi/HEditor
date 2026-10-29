@@ -8,8 +8,8 @@
 
 #include <vector>
 
-#include "core/doc/compile_result.h"
-#include "core/doc/project.h"
+#include "core/compile/compile_result.h"
+#include "core/compile/project.h"
 #include "core/engine/structure_index.h"
 #include "core/layout/layout.h"
 

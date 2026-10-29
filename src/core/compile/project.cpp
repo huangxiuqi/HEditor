@@ -1,11 +1,11 @@
-#include "core/doc/project.h"
+#include "core/compile/project.h"
 
 #include <algorithm>
 #include <unordered_set>
 #include <utility>
 
-#include "core/doc/atom_map.h"
-#include "core/doc/format_map.h"
+#include "core/compile/atom_map.h"
+#include "core/compile/format_map.h"
 #include "core/doc/length.h"
 #include "core/doc/table_grid.h"
 

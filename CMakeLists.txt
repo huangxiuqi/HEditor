@@ -162,8 +162,8 @@ add_library(heditor_core STATIC
   src/core/doc/textbuf.cpp
   src/core/doc/control.cpp
   src/core/doc/edit_mode.cpp
-    src/core/doc/format_map.cpp
-  src/core/doc/atom_map.cpp
+  src/core/compile/format_map.cpp
+  src/core/compile/atom_map.cpp
   src/core/doc/char_format.cpp
   src/core/doc/para_format.cpp
   src/core/doc/length.cpp
@@ -175,7 +175,7 @@ add_library(heditor_core STATIC
   src/core/doc/record_json.cpp
   src/core/doc/document.cpp
   src/core/doc/node_kind.cpp
-  src/core/doc/project.cpp
+  src/core/compile/project.cpp
   src/core/doc/serialize.cpp
   src/core/doc/subtree.cpp
   src/core/doc/style.cpp

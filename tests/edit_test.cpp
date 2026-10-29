@@ -27,10 +27,10 @@
 #include <string>
 #include <vector>
 
-#include "core/doc/compile_result.h"
+#include "core/compile/compile_result.h"
+#include "core/compile/project.h"
 #include "core/doc/document.h"
 #include "core/doc/flow_types.h"
-#include "core/doc/project.h"
 #include "core/doc/section_spec.h"
 #include "core/doc/textbuf.h"
 #include "core/engine/engine.h"

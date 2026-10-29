@@ -17,14 +17,14 @@
 #include <unordered_map>
 #include <vector>
 
+#include "core/compile/compile_result.h"
+#include "core/compile/project.h"
 #include "core/doc/capability.h"
-#include "core/doc/compile_result.h"
 #include "core/doc/control.h"
 #include "core/doc/document.h"
 #include "core/doc/edit_mode.h"
 #include "core/doc/flow.h"
 #include "core/doc/flow_types.h"
-#include "core/doc/project.h"
 #include "core/doc/serialize.h"
 #include "core/doc/session.h"
 #include "core/doc/text_pos.h"

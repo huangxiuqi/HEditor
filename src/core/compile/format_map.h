@@ -12,7 +12,7 @@
 
 #include <functional>
 
-#include "core/doc/compile_result.h"
+#include "core/compile/compile_result.h"
 #include "core/doc/style.h"
 #include "core/doc/table_spec.h"
 

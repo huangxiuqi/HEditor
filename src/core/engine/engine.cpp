@@ -16,8 +16,8 @@
 #include "core/doc/record_json.h"
 #include "core/engine/control_spans.h"
 
+#include "core/compile/project.h"
 #include "core/doc/fragment.h"
-#include "core/doc/project.h"
 
 #include "core/text/writing_mode.h"
 #include "core/utils/hash.h"

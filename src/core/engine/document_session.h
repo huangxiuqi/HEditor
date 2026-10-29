@@ -8,7 +8,7 @@
 
 #include <optional>
 
-#include "core/doc/project.h"
+#include "core/compile/project.h"
 #include "core/doc/session.h"
 
 namespace heditor {

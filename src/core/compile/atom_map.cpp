@@ -1,4 +1,4 @@
-#include "core/doc/atom_map.h"
+#include "core/compile/atom_map.h"
 
 #include <algorithm>
 
