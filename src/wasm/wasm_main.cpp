@@ -106,65 +106,6 @@ void setFontRoles(int cjk_index, int mongol_index, int latin_index) {
 }
 
 /**
- * 文本素材：样例里的蒙文段落与中文文书。
- */
-std::string mongolianParagraph(int repeats) {
-    // ᠮᠣᠩᠭᠣᠯ ᠪᠢᠴᠢᠭ（"蒙古文"）重复若干次，用于撑满一列看列序
-    static const char kWord[] =
-        "\xE1\xA0\xAE\xE1\xA0\xA3\xE1\xA0\xA9\xE1\xA0\xAD\xE1\xA0\xA3\xE1\xA0\xAF"
-        " "
-        "\xE1\xA0\xAA\xE1\xA0\xA2\xE1\xA0\xB4\xE1\xA0\xA2\xE1\xA0\xAD";
-    std::string s;
-    for (int i = 0; i < repeats; ++i) {
-        if (i) s += " ";
-        s += kWord;
-    }
-    return s;
-}
-
-std::string chineseNote() {
-    return "患者主诉：反复心悸3天，加重1天。现病史：患者3天前无明显诱因出现心悸，"
-           "伴胸闷、气短，活动后加重，休息后稍缓解。体格检查：体温36.8℃，脉搏92次/分，"
-           "呼吸20次/分，血压138/86mmHg。初步诊断：心律失常、高血压。";
-}
-
-/**
- * 长文档样例：paragraphs 段可编辑病历。
- *
- * 单段文档没有可复用的前缀，增量排版与全量重排必然相等 —— 只有多段文档才能把
- * "只重排脏段"这件事量出来（见 scripts/edit_probe.mjs 的长文档一节）。
- */
-std::vector<BlockSpec> longDocument(int paragraphs, int font_index) {
-    static const char* kSentences[] = {
-        "患者诉晨起后心悸明显，持续约十分钟，休息后缓解，未见黑矇与晕厥，"
-        "夜间睡眠尚可，饮食正常，二便如常。",
-        "查体：神志清楚，双肺呼吸音清，未闻及干湿啰音，心率齐，各瓣膜听诊区未闻及杂音，"
-        "双下肢无水肿。",
-        "复查心电图提示窦性心律，偶发房性早搏，ST-T 改变较前无动态演变，"
-        "继续当前治疗方案并观察。",
-        "医嘱：低盐低脂饮食，避免情绪激动与剧烈活动，规律服药，一周后门诊随访，"
-        "如有胸痛加重随时就诊。",
-    };
-    const int kCount = static_cast<int>(sizeof(kSentences) / sizeof(kSentences[0]));
-
-    std::vector<BlockSpec> blocks;
-    blocks.reserve(static_cast<size_t>(std::max(0, paragraphs)));
-    for (int i = 0; i < paragraphs; ++i) {
-        BlockSpec b;
-        b.font_index = font_index;
-        b.size_pt = 14.0f;
-        b.wm = WritingMode::HorizontalTB();
-        b.line_spacing.factor = 1.275f;
-        b.space_after_pt = 6.0f;
-        b.language = "zh";
-        b.color = Color::rgb(24, 24, 24);
-        b.setText("第 " + std::to_string(i + 1) + " 次病程记录：" + kSentences[i % kCount]);
-        blocks.push_back(std::move(b));
-    }
-    return blocks;
-}
-
-/**
  * 当前演示字段的配置。
  *
  * 文档内容只存在引擎里，这里不再并排保存块流底稿：换场景、打开文件都直接换修订，
@@ -181,127 +122,6 @@ bool g_table_demo = false;
  * 再靠"重建整棵树"改：那条路会把用户打开的文件倒回演示底稿。
  */
 bool g_demo_source = true;
-
-/**
- * 按场景号装配块流。只造数据、不动引擎 —— 装载统一走 rebuildDocument。
- */
-std::vector<BlockSpec> buildScenarioBlocks(int scenario) {
-    std::vector<BlockSpec> blocks;
-    switch (scenario) {
-        case 1: {  // 蒙文竖排 · 列序从左往右（侧倒，正确形态）
-            BlockSpec b;
-            b.font_index = g_mn_font;
-            b.size_pt = 20.0f;
-            b.wm = WritingMode::VerticalLR();
-            b.line_spacing.factor = 1.3f;
-            b.language = "mn";
-            b.color = Color::rgb(20, 60, 150);
-            b.setText(mongolianParagraph(18));
-            blocks.push_back(std::move(b));
-            break;
-        }
-        case 2: {  // 中文竖排 · 列序从右往左（字形正立）
-            BlockSpec b;
-            b.font_index = g_cjk_font;
-            b.size_pt = 14.0f;
-            b.wm = WritingMode::VerticalRL();
-            b.line_spacing.factor = 1.175f;
-            b.language = "zh";
-            b.color = Color::rgb(24, 24, 24);
-            b.setText(chineseNote());
-            blocks.push_back(std::move(b));
-            break;
-        }
-        case 3: {  // 中文长文本横排，看断行与分页
-            BlockSpec b;
-            b.font_index = g_cjk_font;
-            b.size_pt = 13.0f;
-            b.wm = WritingMode::HorizontalTB();
-            b.line_spacing.factor = 1.25f;
-            b.language = "zh";
-            b.color = Color::rgb(24, 24, 24);
-            b.setText(chineseNote() + chineseNote());
-            blocks.push_back(std::move(b));
-            break;
-        }
-        case 4: {  // 中英文混排 + 拉丁回退（验证 10⁹ 这类上标不再出豆腐块）
-            blocks.push_back(mixedParagraphBlock(g_cjk_font, g_latin_font));
-            break;
-        }
-        case 5: {  // 蒙文竖排 · 列序从右往左（对照：故意错的组合）
-            BlockSpec b;
-            b.font_index = g_mn_font;
-            b.size_pt = 20.0f;
-            b.wm = WritingMode::VerticalRL();
-            b.line_spacing.factor = 1.3f;
-            b.language = "mn";
-            b.color = Color::rgb(150, 60, 30);
-            b.setText(mongolianParagraph(18));
-            blocks.push_back(std::move(b));
-            break;
-        }
-        case 6: {  // 档 1：可编辑文档（短文本 —— 一页放得下，便于数增量）
-            BlockSpec b;
-            b.font_index = g_cjk_font;
-            b.size_pt = 14.0f;
-            b.wm = WritingMode::HorizontalTB();
-            b.line_spacing.factor = 1.275f;
-            b.language = "zh";
-            b.color = Color::rgb(24, 24, 24);
-            b.setText("患者主诉：反复心悸三天，加重一天。");
-            blocks.push_back(std::move(b));
-            break;
-        }
-        case 7: {  // 档 2：长文档 —— 多段才有"可复用的前缀"可谈（段数见下面这行）
-            blocks = longDocument(2000, g_cjk_font);
-            break;
-        }
-        case 9: {  // 行内原子：图片与公式的显式占位框（阶段 4）
-            BlockSpec b;
-            b.font_index = g_cjk_font;
-            b.size_pt = 14.0f;
-            b.wm = WritingMode::HorizontalTB();
-            b.line_spacing.factor = 1.275f;
-            b.language = "zh";
-            b.color = Color::rgb(24, 24, 24);
-            // 先设文本：setText 会清空对象表（锚点是按旧文本算的）。
-            b.setText("心电图：图三张，节律规整。");
-            InlineObject img;
-            img.cp = 4;
-            img.kind = InlineObjectKind::Atom;
-            img.atom = InlineAtom::Image;
-            img.w_pt = 60.0f;
-            img.h_pt = 45.0f;
-            b.objects.push_back(img);
-            InlineObject fm;
-            fm.cp = 9;
-            fm.kind = InlineObjectKind::Atom;
-            fm.atom = InlineAtom::Formula;
-            fm.w_pt = 90.0f;
-            fm.h_pt = 28.0f;
-            b.objects.push_back(fm);
-            blocks.push_back(std::move(b));
-
-            // 第二段纯文本：用来看原子把后面的字挤开、以及长到换行时原子整枚走。
-            BlockSpec b2;
-            b2.font_index = g_cjk_font;
-            b2.size_pt = 14.0f;
-            b2.wm = WritingMode::HorizontalTB();
-            b2.line_spacing.factor = 1.275f;
-            b2.space_after_pt = 6.0f;
-            b2.language = "zh";
-            b2.color = Color::rgb(24, 24, 24);
-            b2.setText(chineseNote() + chineseNote());
-            blocks.push_back(std::move(b2));
-            break;
-        }
-        default:
-            blocks = sampleDocument(g_cjk_font, g_mn_font, g_latin_font);
-            break;
-    }
-
-    return blocks;
-}
 
 /**
  * 把一份块流与字段建成修订，一次性交给引擎。
@@ -340,7 +160,7 @@ void setScenario(int scenario) {
     g_table_demo = (scenario == 10);
     g_demo_source = true;
     g_fields.clear();
-    rebuildDocument(false, buildScenarioBlocks(scenario), {});
+    rebuildDocument(false, scenarioBlocks(scenario, g_cjk_font, g_mn_font, g_latin_font), {});
 }
 
 void setZoom(float z) {
@@ -2043,7 +1863,8 @@ bool deleteSelectionCommand() { return g_engine.deleteSelectionAndRender(); }
  *   括号读作 [[[心悸]悸三]，三个开括号在左、闭括号由内到外依次收。
  */
 void loadFormSample(int variant) {
-    const std::vector<BlockSpec> blocks = buildScenarioBlocks(variant == 1 ? 3 : 6);
+    const std::vector<BlockSpec> blocks =
+        scenarioBlocks(variant == 1 ? 3 : 6, g_cjk_font, g_mn_font, g_latin_font);
     g_fields.clear();
     g_demo_source = true;
     auto push = [&](int so, int eo, ControlKind k, const char* id, bool ro) {

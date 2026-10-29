@@ -80,4 +80,19 @@ doc::Doc demoDoc(const std::vector<BlockSpec>& blocks, const std::vector<DemoFie
  */
 doc::Doc demoTableDoc(int cjk_font_index);
 
+/**
+ * 按场景号装配演示块流。
+ *
+ * 只造数据、不动引擎 —— 装载统一走宿主的 rebuildDocument。演示内容归这里：宿主入口
+ *   只负责把场景号翻成调用，不带任何一段样例文本。
+ *
+ * @param scenario 场景号
+ * @param cjk_font_index 中文字体下标
+ * @param mongol_font_index 蒙文字体下标
+ * @param latin_font_index 拉丁回退字体下标；-1 = 关闭回退
+ * @returns 块流
+ */
+std::vector<BlockSpec> scenarioBlocks(int scenario, int cjk_font_index, int mongol_font_index,
+                                      int latin_font_index = -1);
+
 }  // namespace heditor
