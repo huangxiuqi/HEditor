@@ -538,4 +538,32 @@ void placeVerticalColumn(const BlockSpec& b, const BlockShaping& bs,
                          float slab_pt, int para_index, int line_no, const LineCellRange& cell,
                          std::vector<LineBox>* lines, std::vector<PlacedGlyph>* glyphs);
 
+/**
+ * 整形结果的簇搬成行盒的簇：只搬内容字段，行内位置由调用方给。
+ *
+ * 四个装配点（空块、横排、竖排、整篇循环）的推进各不相同 —— 占位簇、被图挖开的段、
+ *   竖排的列心 —— 所以坐标留在各自那儿算，这里只管哪些字段要跟着走。逐个手抄的失败
+ *   方式是新加一个字段只改了其中几处，表现为"某个方向的某种行"读数不对。
+ *
+ * @param from 整形结果里的簇
+ * @param inline_pt 这个簇的行内位置（磅）
+ * @return 行盒里的簇
+ */
+inline LineCluster lineClusterOf(const BlockShaping::Cluster& from, float inline_pt) {
+    LineCluster lc;
+    lc.cp = from.cp;
+    lc.inline_pt = inline_pt;
+    lc.placeholder = from.placeholder;
+    lc.control_hint = from.control_hint;
+    lc.bracket_side = from.bracket_side;
+    lc.bracket_font = from.bracket_font;
+    lc.read_only = from.read_only;
+    lc.owner_control = from.owner_control;
+    lc.slot = from.slot;
+    lc.atom = from.atom;
+    lc.atom_h_pt = from.atom_h_pt;
+    lc.content_hash = from.content_hash;
+    return lc;
+}
+
 }  // namespace heditor

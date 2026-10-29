@@ -466,20 +466,7 @@ void placeHorizontalLine(const BlockSpec& b, const BlockShaping& bs,
             float cur = cur0;
             if (multi) spans.push_back(LineBox::Span{cur0, cur0});
             for (size_t i = p.line.begin; i < p.line.end; ++i) {
-                LineCluster lc;
-                lc.cp = bs.clusters[i].cp;
-                lc.inline_pt = cur;
-                lc.placeholder = bs.clusters[i].placeholder;
-                lc.control_hint = bs.clusters[i].control_hint;
-                lc.bracket_side = bs.clusters[i].bracket_side;
-                lc.bracket_font = bs.clusters[i].bracket_font;
-                lc.read_only = bs.clusters[i].read_only;
-                lc.owner_control = bs.clusters[i].owner_control;
-                lc.slot = bs.clusters[i].slot;
-                lc.atom = bs.clusters[i].atom;
-                lc.atom_h_pt = bs.clusters[i].atom_h_pt;
-                lc.content_hash = bs.clusters[i].content_hash;
-                lb.clusters.push_back(lc);
+                lb.clusters.push_back(lineClusterOf(bs.clusters[i], cur));
                 cur += bs.cluster_adv_pt[i];
             }
             if (multi) spans.back().hi_pt = cur;
@@ -581,20 +568,7 @@ void placeVerticalColumn(const BlockSpec& b, const BlockShaping& bs,
     {
         float ay = 0.0f;
         for (size_t i = col_line.begin; i < col_line.end; ++i) {
-            LineCluster lc;
-            lc.cp = bs.clusters[i].cp;
-            lc.inline_pt = ay;
-            lc.placeholder = bs.clusters[i].placeholder;
-            lc.control_hint = bs.clusters[i].control_hint;
-            lc.bracket_side = bs.clusters[i].bracket_side;
-            lc.bracket_font = bs.clusters[i].bracket_font;
-            lc.read_only = bs.clusters[i].read_only;
-            lc.owner_control = bs.clusters[i].owner_control;
-            lc.slot = bs.clusters[i].slot;
-            lc.atom = bs.clusters[i].atom;
-            lc.atom_h_pt = bs.clusters[i].atom_h_pt;
-            lc.content_hash = bs.clusters[i].content_hash;
-            lb.clusters.push_back(lc);
+            lb.clusters.push_back(lineClusterOf(bs.clusters[i], ay));
             ay += bs.cluster_adv_pt[i];
         }
         lb.inline_end_pt = ay;

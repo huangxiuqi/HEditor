@@ -1332,20 +1332,7 @@ ReflowState layoutDocumentRangeWithTables(FontLibrary& lib, const std::vector<Bl
                 //   括号多宽都从这一份来。
                 float ax = 0.0f;
                 for (size_t i = 0; i < slotted->clusters.size(); ++i) {
-                    LineCluster lc;
-                    lc.cp = slotted->clusters[i].cp;
-                    lc.inline_pt = ax;
-                    lc.placeholder = slotted->clusters[i].placeholder;
-                    lc.control_hint = slotted->clusters[i].control_hint;
-                    lc.bracket_side = slotted->clusters[i].bracket_side;
-                    lc.bracket_font = slotted->clusters[i].bracket_font;
-                    lc.read_only = slotted->clusters[i].read_only;
-                    lc.owner_control = slotted->clusters[i].owner_control;
-                    lc.slot = slotted->clusters[i].slot;
-                    lc.atom = slotted->clusters[i].atom;
-                    lc.atom_h_pt = slotted->clusters[i].atom_h_pt;
-                    lc.content_hash = slotted->clusters[i].content_hash;
-                    lb.clusters.push_back(lc);
+                    lb.clusters.push_back(lineClusterOf(slotted->clusters[i], ax));
                     ax += slotted->cluster_adv_pt[i];
                 }
                 lb.inline_end_pt = ax;
