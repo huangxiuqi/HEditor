@@ -45,9 +45,13 @@ struct WholeControl {
     NodeId id = kInvalidNodeId;
 
     /**
-     * 它在流里的区间（含两枚边界）。
+     * 它在流里的起点（含开括号）。
      */
     FlowPos lo = 0;
+
+    /**
+     * 它在流里的终点（含闭括号）。
+     */
     FlowPos hi = 0;
 };
 

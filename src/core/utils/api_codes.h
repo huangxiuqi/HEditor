@@ -32,13 +32,20 @@ struct PaperSize {
     float h_pt;
 };
 
+// 生成器按"一行一条记录"解析，所以这几张表不交给 clang-format 重排。
+// clang-format off
 /**
  * 纸张规格表。顺序即界面下拉里的顺序，横向由宿主把宽高对调。
  */
 inline constexpr PaperSize kPaperSizes[] = {
-    {"A4", 595.276f, 841.89f},  {"A3", 841.89f, 1190.551f}, {"A5", 419.528f, 595.276f},
-    {"B5", 498.898f, 708.661f}, {"Letter", 612.0f, 792.0f}, {"Legal", 612.0f, 1008.0f},
+    {"A4", 595.276f, 841.89f},
+    {"A3", 841.89f, 1190.551f},
+    {"A5", 419.528f, 595.276f},
+    {"B5", 498.898f, 708.661f},
+    {"Letter", 612.0f, 792.0f},
+    {"Legal", 612.0f, 1008.0f},
 };
+// clang-format on
 
 /**
  * 默认纸张在 kPaperSizes 里的下标（A4）。默认页度量与空白文档的纸张都从那一行取。
@@ -65,13 +72,19 @@ struct DateUnitBit {
     uint16_t bit;
 };
 
+// clang-format off
 /**
  * 六个单位，顺序即界面里的先后。
  */
 inline constexpr DateUnitBit kDateUnitBits[] = {
-    {"year", 1u << 0}, {"month", 1u << 1},  {"day", 1u << 2},
-    {"hour", 1u << 3}, {"minute", 1u << 4}, {"second", 1u << 5},
+    {"year", 1u << 0},
+    {"month", 1u << 1},
+    {"day", 1u << 2},
+    {"hour", 1u << 3},
+    {"minute", 1u << 4},
+    {"second", 1u << 5},
 };
+// clang-format on
 
 /**
  * 年的位（其余同理）。模型层按名字用它们，不从下标取。
@@ -131,13 +144,18 @@ struct ImageLayoutCode {
     int wrap;
 };
 
+// clang-format off
 /**
  * 五种版式，顺序即界面下拉里的顺序。
  */
 inline constexpr ImageLayoutCode kImageLayouts[] = {
-    {"inline", 0, 0, 0}, {"square", 1, 1, 1},  {"topAndBottom", 2, 1, 0},
-    {"behind", 3, 1, 2}, {"inFront", 4, 1, 3},
+    {"inline", 0, 0, 0},
+    {"square", 1, 1, 1},
+    {"topAndBottom", 2, 1, 0},
+    {"behind", 3, 1, 2},
+    {"inFront", 4, 1, 3},
 };
+// clang-format on
 
 /**
  * 一个"名字对应引擎整数"的档位。
@@ -154,6 +172,7 @@ struct EnumCode {
     int code;
 };
 
+// clang-format off
 /**
  * 编辑模式（与 EditMode 枚举同序）。
  */
@@ -162,7 +181,9 @@ inline constexpr EnumCode kEditModes[] = {
     {"form", 1},
     {"readOnly", 2},
 };
+// clang-format on
 
+// clang-format off
 /**
  * 不可见字符标记（与 MarksMode 枚举同序）。
  */
@@ -171,5 +192,6 @@ inline constexpr EnumCode kMarksModes[] = {
     {"paragraph", 1},
     {"all", 2},
 };
+// clang-format on
 
 }  // namespace heditor::codes
