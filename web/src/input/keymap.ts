@@ -345,8 +345,16 @@ export interface ZoomControl {
 }
 
 /**
+ * 缩放基准：1 倍界面缩放 = 96 dpi，而引擎收的密度以 72 dpi 为 1，两者差 4 / 3。
+ *
+ * 只在这一处定义。各处各写一遍 4 / 3 时，改基准要改几处，而漏一处只表现为
+ *   "某个入口的缩放差一点点"，不比截图看不出来。
+ */
+export const ZOOM_BASE = 4 / 3;
+
+/**
  * 缩放换算。口径只有一条：引擎收"密度"（设备像素 / 磅，1 = 72 dpi），
- * 界面收"倍数"（1 = 100% = 96 dpi），两者差 4 / 3。
+ * 界面收"倍数"（1 = 100% = 96 dpi），两者差 ZOOM_BASE。
  *
  * 两个 DPR 必须分开记，这是这一层唯一的难点：
  *   liveDpr   当下屏幕的像素比。算"基准密度"与"倍数转密度"用它 —— 换屏之后新算的
@@ -358,7 +366,7 @@ export interface ZoomControl {
    * @returns 密度 / 倍数的换算器
  */
 export function createZoom(opts?: { base?: number; dpr?: () => number }): ZoomControl {
-  const base = opts?.base ?? 4 / 3;
+  const base = opts?.base ?? ZOOM_BASE;
   const liveDpr = opts?.dpr ?? (() => window.devicePixelRatio || 1);
   let storedDpr = liveDpr();
   let density = base * storedDpr;

@@ -437,7 +437,7 @@ export function createDomHost(o: DomHostOptions): DomHost {
   // 页容器必须是定位祖先（见 ensureMarkup）。调用方自己递进来的那份骨架不一定写了这条
   //   （容器可以带着现成标记进来），补一次 —— 幂等，只在真的是 static 时写。
   if (getComputedStyle(pagesEl).position === 'static') pagesEl.style.position = 'relative';
-  const zoom = createZoom({ base: 4 / 3 });
+  const zoom = createZoom();
   const pages: CanvasStore = o.canvasStore(pagesEl);
 
   const read = (name: string, args?: Args): any => link.read(name, args);

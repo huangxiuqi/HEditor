@@ -1,12 +1,11 @@
 /**
  * 引擎门面：原生宿主与 WASM 宿主共用同一份实现。
- * 这一层就是"平台边界"——向上只暴露三样东西：按页给出的 RGBA 像素（pagePixels()，
- * 宿主贴到各页画布）与一份窗口导出图（frame()，给诊断与取图）；一组度量数字
- * （EngineStats / EditStats），用于性能取证；一组编辑与光标查询入口
- * （insertTextUtf8 / backspace / caretRectPt / hitTestPt）。
+ *
+ * 这一层就是"平台边界"：跨边界流的是大块位图（pagePixels() 逐页的 RGBA、frame() 的窗口
+ * 导出图）与度量数字（EngineStats / EditStats），而不是几千条绘制指令 —— 循环留在引擎内
+ * （Figma 那条纪律的最小可用形态）。
+ * 编辑入口成对出现：xxx 只改状态，xxxAndRender 连呈现一起收尾。宿主一次调用就拿到新的一屏。
  * 坐标一律是"段 + 码点偏移"，不暴露任何内部指针。
- * 边界上流的是"一大块位图"，不是几千条绘制指令——这是 Figma 那条纪律
- * （"循环留在引擎内，跨边界只传大块"）的最小可用形态。
  */
 #pragma once
 

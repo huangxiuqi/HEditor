@@ -18,8 +18,8 @@
 
 #include "core/engine/engine.h"
 
+#include "core/doc/clip_fragment.h"
 #include "core/doc/document.h"
-#include "core/doc/fragment.h"
 #include "core/engine/payload_schema.h"
 #include "core/layout/layout.h"
 #include "core/utils/hash.h"

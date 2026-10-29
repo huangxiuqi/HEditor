@@ -17,7 +17,7 @@
 #include <string>
 #include <vector>
 
-#include "core/doc/fragment.h"
+#include "core/doc/clip_fragment.h"
 #include "core/doc/para_format.h"
 #include "core/doc/record_json.h"
 #include "core/engine/engine.h"

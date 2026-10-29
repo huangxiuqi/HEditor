@@ -64,6 +64,7 @@ import { createErrorSurface, type ErrorSurface } from './host/errors';
 import { scrollHeightPx, type CanvasStore } from './host/pages';
 import { stageOf } from './host/parts';
 import {
+  ZOOM_BASE,
   cleanMarkdownLines,
   createZoom,
   then1,
@@ -366,7 +367,7 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
 
   // 密度只有 createZoom 一个算式（界面的倍数是产品语义，引擎收的是设备像素 / 磅）。
   //   在这里另写一遍乘法就是第二份：改一处忘一处时，症状是缩放比例对了而画面变了。
-  const zoomUnits = createZoom({ base: 4 / 3 });
+  const zoomUnits = createZoom();
   const transport = createWorker({
     container: opts.container,
     assets,
@@ -1729,7 +1730,7 @@ function syncConfigFromEngine(
       cfg.mode = c === 1 ? 'form' : c === 2 ? 'readOnly' : 'document';
       const density = Number((st as { zoom?: number } | null)?.zoom ?? 0);
       if (density > 0) {
-        cfg.zoom = density / ((4 / 3) * (window.devicePixelRatio || 1));
+        cfg.zoom = density / (ZOOM_BASE * (window.devicePixelRatio || 1));
         // 命中把设备像素折成磅时除的就是这个密度。它只跟着 configure 走过，而诊断面
         //   能直接改引擎的 zoom —— 不同步的症状不是"显示大小不对"，是点击落点整体偏：
         //   除错了倍数，点同一个像素会落到右边或左边的一格上。

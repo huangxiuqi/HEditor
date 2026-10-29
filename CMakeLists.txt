@@ -186,7 +186,7 @@ add_library(heditor_core STATIC
   src/core/doc/session.cpp
   src/core/doc/flow.cpp
   src/core/doc/steps.cpp
-  src/core/doc/fragment.cpp
+  src/core/doc/clip_fragment.cpp
   src/core/doc/capability.cpp
   src/core/doc/table_ops.cpp
   src/core/text/font.cpp

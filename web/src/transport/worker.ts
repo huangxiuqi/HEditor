@@ -262,16 +262,15 @@ export function createWorker(opts: WorkerOptions): {
           return mirror.geom?.pageH ?? 0;
         case 'pageGapPx':
           return mirror.geom?.gap ?? 0;
-        // 帧视图的两条几何读数由几何算得，不是引擎里存的第二份真相：
-        //   宽 = 页宽，高 = 窗口页数 x 步距（含末尾那道间隙，与引擎的 frameHeight 同式）。
-        //   它们必须是同步值 —— 读数方按"帧坐标"扫像素（循环上界就是它），给一个
-        //   Promise 会让循环一次都不跑，于是"帧上有字"变成恒零而没有任何异常。
+        // 帧视图的两条几何读数：由引擎随状态推过来，不在这一侧按公式重算。
+        //   重算等于把 frameWidth / frameHeight 的口径抄了第二份，改一处就两边不一样，
+        //   而症状只是"扫码的范围差一行"。它们必须是同步值 —— 读数方按"帧坐标"扫像素
+        //   （循环上界就是它），给一个 Promise 会让循环一次都不跑，于是"帧上有字"
+        //   变成恒零而没有任何异常。
         case 'frameWidth':
-          return mirror.geom?.pageW ?? 0;
-        case 'frameHeight': {
-          const g = mirror.geom;
-          return g ? Number(g.count ?? 1) * (Number(g.pageH ?? 0) + Number(g.gap ?? 0)) : 0;
-        }
+          return mirror.geom?.frameW ?? 0;
+        case 'frameHeight':
+          return mirror.geom?.frameH ?? 0;
         case 'windowFirstPage':
           return mirror.geom?.first ?? 0;
         case 'windowPageCount':

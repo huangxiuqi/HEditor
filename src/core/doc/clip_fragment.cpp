@@ -1,4 +1,4 @@
-#include "core/doc/fragment.h"
+#include "core/doc/clip_fragment.h"
 #include "core/utils/utf8.h"
 
 #include <algorithm>

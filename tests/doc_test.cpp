@@ -16,10 +16,10 @@
 
 #include "core/compile/compile_result.h"
 #include "core/compile/project.h"
+#include "core/doc/clip_fragment.h"
 #include "core/doc/document.h"
 #include "core/doc/flow.h"
 #include "core/doc/flow_types.h"
-#include "core/doc/fragment.h"
 #include "core/doc/serialize.h"
 #include "core/doc/session.h"
 #include "core/doc/step_types.h"

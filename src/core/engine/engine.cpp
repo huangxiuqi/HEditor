@@ -17,7 +17,7 @@
 #include "core/engine/control_spans.h"
 
 #include "core/compile/project.h"
-#include "core/doc/fragment.h"
+#include "core/doc/clip_fragment.h"
 
 #include "core/utils/hash.h"
 #include "core/utils/time.h"
@@ -1836,8 +1836,8 @@ bool EditorEngine::focusControlAndRender(bool forward) {
     //   事件），用它贴只会覆盖画布的一小块，形成"引擎里的页是新的、画布是新旧混合"。
     //
     //   规矩（整个 wasm 接口面都遵守）：凡是会改引擎状态的入口，返回宿主前必须把
-    //   画面收尾。typeText/backspace/moveCaret
-    //   都是 *AndRender，唯独 focusControl 漏了。
+    //   画面收尾。typeText / backspace / moveCaret 都是 *AndRender，focusControl
+    //   也必须补这一下 —— 漏掉的症状是"控件成了焦点，画面却停在上一拍"。
     repaintAfterEdit();
     return true;
 }
@@ -2280,59 +2280,62 @@ bool EditorEngine::hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* 
         //   宁可落点粗一点，也不要让这一下点空。
         if (best == nullptr) cell_hit = nullptr;
     }
-    for (const LineBox& lb : layout_service_.layout.lines) {
-        if (cell_hit != nullptr) break;
-        float bp = 0.0f;
-        float lo = 0.0f;
-        float hi = 0.0f;
-        float local_bp = 0.0f;  // 与行盒同一个页内口径：判"点是否落在格子里"要用它
-        // 纵向一律用行槽：点一行里的任意空白都算这一行（见上面那段）。
-        const float slot_lo = lb.slotLoPt();
-        const float slot_hi = slot_lo + lb.slotSpanPt();
-        if (lb.vertical) {
-            bp = x_pt_doc;
-            local_bp = x_pt_doc;
-            lo = slot_lo;
-            hi = slot_hi;
-        } else if (cont) {
-            const float base = static_cast<float>(lb.page) * static_cast<float>(step_px);
-            bp = y_pt_doc * density;
-            local_bp = (bp - base) / density;
-            lo = base + slot_lo * density;
-            hi = base + slot_hi * density;
-        } else {
-            if (lb.page != page) continue;
-            bp = local_y;
-            local_bp = local_y;
-            lo = slot_lo;
-            hi = slot_hi;
-        }
-        const float d = (bp < lo) ? (lo - bp) : (bp > hi ? bp - hi : 0.0f);
-        // 块轴距离并列时用行内轴距离定夺。表格让"同一块轴位置上有多个行盒"成为常态
-        //   （一行的几个格在同一个 y 上），只按块轴比会一律选中先出现的那一格 ——
-        //   表象是"点第二格的字，光标跳到第一格"。正文里同一 y 不会有两条行盒，
-        //   所以这一条在无表格时不会改变任何选择。
-        const float a0 = (lb.cell_hi_pt > lb.cell_lo_pt) ? lb.cell_lo_pt : lb.inline_origin_pt;
-        const float a1 = (lb.cell_hi_pt > lb.cell_lo_pt) ? lb.cell_hi_pt
-                                                         : (lb.inline_origin_pt + lb.inline_end_pt);
-        const float ipos = lb.vertical ? y_pt_doc : x_pt_doc;
-        const float dx = (ipos < a0) ? (a0 - ipos) : (ipos > a1 ? ipos - a1 : 0.0f);
-        // 落在某个格的框内时，别的格的行盒一概不参选。格的纵向范围是整格（含行高
-        //   撑出来的空白），所以"点空格子的下半部分"仍归这一格，而不是跳到同一行里
-        //   行盒更多的那一格上 —— 按块轴距离比，多行格的低位行盒永远更近。
-        int rank = 1;
-        if (lb.cell_box_hi_pt > lb.cell_box_lo_pt && lb.cell_bottom_pt > lb.cell_top_pt &&
-            ipos >= lb.cell_box_lo_pt && ipos <= lb.cell_box_hi_pt && local_bp >= lb.cell_top_pt &&
-            local_bp <= lb.cell_bottom_pt) {
-            rank = 0;
-        }
-        if (rank < best_rank ||
-            (rank == best_rank &&
-             (d < best_d - 0.01f || (std::fabs(d - best_d) <= 0.01f && dx < best_dx)))) {
-            best_rank = rank;
-            best_d = d;
-            best_dx = dx;
-            best = &lb;
+    // 已经落在格子里就不再扫行盒：两套几何的“最近”会给出不同答案，格优先。
+    if (cell_hit == nullptr) {
+        for (const LineBox& lb : layout_service_.layout.lines) {
+            float bp = 0.0f;
+            float lo = 0.0f;
+            float hi = 0.0f;
+            float local_bp = 0.0f;  // 与行盒同一个页内口径：判"点是否落在格子里"要用它
+            // 纵向一律用行槽：点一行里的任意空白都算这一行（见上面那段）。
+            const float slot_lo = lb.slotLoPt();
+            const float slot_hi = slot_lo + lb.slotSpanPt();
+            if (lb.vertical) {
+                bp = x_pt_doc;
+                local_bp = x_pt_doc;
+                lo = slot_lo;
+                hi = slot_hi;
+            } else if (cont) {
+                const float base = static_cast<float>(lb.page) * static_cast<float>(step_px);
+                bp = y_pt_doc * density;
+                local_bp = (bp - base) / density;
+                lo = base + slot_lo * density;
+                hi = base + slot_hi * density;
+            } else {
+                if (lb.page != page) continue;
+                bp = local_y;
+                local_bp = local_y;
+                lo = slot_lo;
+                hi = slot_hi;
+            }
+            const float d = (bp < lo) ? (lo - bp) : (bp > hi ? bp - hi : 0.0f);
+            // 块轴距离并列时用行内轴距离定夺。表格让"同一块轴位置上有多个行盒"成为常态
+            //   （一行的几个格在同一个 y 上），只按块轴比会一律选中先出现的那一格 ——
+            //   表象是"点第二格的字，光标跳到第一格"。正文里同一 y 不会有两条行盒，
+            //   所以这一条在无表格时不会改变任何选择。
+            const float a0 = (lb.cell_hi_pt > lb.cell_lo_pt) ? lb.cell_lo_pt : lb.inline_origin_pt;
+            const float a1 = (lb.cell_hi_pt > lb.cell_lo_pt)
+                                 ? lb.cell_hi_pt
+                                 : (lb.inline_origin_pt + lb.inline_end_pt);
+            const float ipos = lb.vertical ? y_pt_doc : x_pt_doc;
+            const float dx = (ipos < a0) ? (a0 - ipos) : (ipos > a1 ? ipos - a1 : 0.0f);
+            // 落在某个格的框内时，别的格的行盒一概不参选。格的纵向范围是整格（含行高
+            //   撑出来的空白），所以"点空格子的下半部分"仍归这一格，而不是跳到同一行里
+            //   行盒更多的那一格上 —— 按块轴距离比，多行格的低位行盒永远更近。
+            int rank = 1;
+            if (lb.cell_box_hi_pt > lb.cell_box_lo_pt && lb.cell_bottom_pt > lb.cell_top_pt &&
+                ipos >= lb.cell_box_lo_pt && ipos <= lb.cell_box_hi_pt &&
+                local_bp >= lb.cell_top_pt && local_bp <= lb.cell_bottom_pt) {
+                rank = 0;
+            }
+            if (rank < best_rank ||
+                (rank == best_rank &&
+                 (d < best_d - 0.01f || (std::fabs(d - best_d) <= 0.01f && dx < best_dx)))) {
+                best_rank = rank;
+                best_d = d;
+                best_dx = dx;
+                best = &lb;
+            }
         }
     }
     if (!best) return false;

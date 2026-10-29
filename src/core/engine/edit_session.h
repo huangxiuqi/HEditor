@@ -1,8 +1,8 @@
 /**
  * 编辑会话：光标解析、命令层与光标可见性。
  *
- * 阶段五把编辑侧的所有权从 EditorEngine 里移出来；这一层只持状态，具体命令与解析仍在
- * CaretResolver / EditCommand 里，引擎通过 edit_session_ 访问。
+ * 编辑侧的所有权在这一层：它只持状态，具体命令与解析仍在 CaretResolver / EditCommand
+ * 里，引擎通过 edit_session_ 访问。
  */
 #pragma once
 
