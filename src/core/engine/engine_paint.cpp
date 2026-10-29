@@ -10,8 +10,8 @@
 
 #include "core/engine/page_marks.h"
 #include "core/engine/page_raster.h"
+#include "core/engine/page_recorder.h"
 #include "core/engine/page_scene.h"
-#include "core/render/page_recorder.h"
 
 #include "core/text/writing_mode.h"
 #include "core/utils/hash.h"

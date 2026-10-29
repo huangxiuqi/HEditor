@@ -209,7 +209,7 @@ add_library(heditor_core STATIC
   src/core/engine/control_geometry.cpp
   src/core/engine/page_cache.cpp
   src/core/engine/page_scene.cpp
-  src/core/render/page_recorder.cpp
+  src/core/engine/page_recorder.cpp
   src/core/engine/page_marks.cpp
   src/core/engine/page_raster.cpp
   src/core/engine/engine_audit.cpp

@@ -1,7 +1,7 @@
 /**
  * 记录型绘制接收端的实现：保存参数，并在有目标位图时原样转发。
  */
-#include "core/render/page_recorder.h"
+#include "core/engine/page_recorder.h"
 
 #include <utility>
 
