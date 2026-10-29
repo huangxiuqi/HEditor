@@ -35,12 +35,24 @@ using emscripten::val;
 namespace {
 
 EditorEngine g_engine;
-EngineConfig g_cfg;
 int g_cjk_font = 0;
 int g_mn_font = 1;
 int g_latin_font = -1;  // 回退字体；未提供时为 -1（关闭回退）
 
-void applyConfig() { g_engine.setConfig(g_cfg); }
+/**
+ * 改一项配置再推回引擎。
+ *
+ * 配置只有引擎那一份：宿主不记影子，读-改-写拿到的永远是夹取之后的现状 ——
+ * 记一份影子的话，引擎夹取过的值（缩放上下限、光标最小宽度）不会自动回写。
+ *
+ * @param f 就地修改一份配置
+ */
+template <typename F>
+void updateConfig(F f) {
+    EngineConfig c = g_engine.config();
+    f(c);
+    g_engine.setConfig(c);
+}
 
 WritingMode writingModeFromCode(int code) {
     switch (code) {
@@ -332,24 +344,26 @@ void setScenario(int scenario) {
 }
 
 void setZoom(float z) {
-    g_cfg.density = z;
-    applyConfig();
+    updateConfig([z](EngineConfig& c) { c.density = z; });
 }
 /**
  * 页度量：页宽、页高、四边页边距（都是磅）。
  *
  * 纸张规格（A4 / A3 / Letter……）不在这里认：规格只是"一组宽高"，抄进引擎就是第二个
  *   真相。宿主按规格算出宽高再调用这一条，换纸就是换这四个数。
- * 同时记进文档第一节：只改配置的话，"改纸张、保存、再打开"会回到默认那张纸 ——
- *   装载时按文档里这一份决定页度量（见 EditorEngine::adoptPageFromDocument）。
+ * 装载了文档就写文档第一节：它才是纸张的真源，"改纸张、保存、再打开"要回到同一张纸
+ *   （装载时按文档里这一份决定页度量，见 EditorEngine::adoptPageFromDocument）。
+ * 没有文档时才改配置 —— 那是"还没有文档时的初始值"。
  */
 void setPageMetrics(float w_pt, float h_pt, float top_pt, float right_pt, float bottom_pt,
                     float left_pt) {
-    g_cfg.page.width_pt = w_pt;
-    g_cfg.page.height_pt = h_pt;
-    g_cfg.page.margins = PageMargins{top_pt, right_pt, bottom_pt, left_pt};
-    applyConfig();
-    g_engine.rememberPageMetrics(w_pt, h_pt, PageMargins{top_pt, right_pt, bottom_pt, left_pt});
+    const PageMargins margins{top_pt, right_pt, bottom_pt, left_pt};
+    if (g_engine.rememberPageMetricsAndRender(w_pt, h_pt, margins)) return;
+    updateConfig([&](EngineConfig& c) {
+        c.page.width_pt = w_pt;
+        c.page.height_pt = h_pt;
+        c.page.margins = margins;
+    });
 }
 
 /**
@@ -358,19 +372,17 @@ void setPageMetrics(float w_pt, float h_pt, float top_pt, float right_pt, float 
  * 与页度量分开成一条门面，是因为它只影响页的落点，不影响页本身的宽高与内容区。
  */
 void setPageGap(float gap_pt) {
-    g_cfg.page_gap_pt = gap_pt < 0.0f ? 0.0f : gap_pt;
-    applyConfig();
+    updateConfig([gap_pt](EngineConfig& c) { c.page_gap_pt = gap_pt < 0.0f ? 0.0f : gap_pt; });
 }
 
 /**
  * 连页模式开关（不分页，内容一列连到底）。
  *
- * 它改的是排版的形状，所以走 applyConfig（setConfig 会判"页度量变了"并整篇重排）。
+ * 它改的是排版的形状，推配置之后 setConfig 会判出"页度量变了"并整篇重排。
  *   宿主配合的两件事：页间隙设成 0（条带首尾相接）、滚动高度取 contentPx。
  */
 void setContinuous(bool on) {
-    g_cfg.continuous = on;
-    applyConfig();
+    updateConfig([on](EngineConfig& c) { c.continuous = on; });
 }
 
 /**
@@ -380,13 +392,12 @@ int contentPx() { return g_engine.contentBottomPx(); }
 
 /**
  * 撤销栈的深度上限（条数，0 = 不限制）。与 EngineConfig::undo_limit 是同一处值。
- * 它不影响呈现，所以走 applyConfig 那条路就够了（不重排、不重绘）。
+ * 它不影响呈现，所以推配置就够了（不重排、不重绘）。
  */
 void setUndoLimit(int n) {
-    g_cfg.undo_limit = n < 0 ? 0 : n;
-    applyConfig();
+    updateConfig([n](EngineConfig& c) { c.undo_limit = n < 0 ? 0 : n; });
 }
-int undoLimit() { return g_cfg.undo_limit; }
+int undoLimit() { return g_engine.config().undo_limit; }
 
 /**
  * 色通道夹到 0~255：宿主的面板递进来的可能越界，而截断的失败方式不明显。
@@ -396,25 +407,24 @@ uint8_t channelClamp(int v) { return static_cast<uint8_t>(v < 0 ? 0 : (v > 255 ?
 /**
  * 光标样式：颜色与宽度。色值是各通道 0~255，宽度单位是磅。
  *
- * 走引擎的 setCaretAndSelectionStyle 而不是 applyConfig：后者会改光栅签名，
+ * 走引擎的 setCaretAndSelectionStyle 而不是推配置：后者会改光栅签名，
  *   页位图整份作废，窗口里每一页都要重新光栅（3 页约 32 ms）—— 取色器连续改时每一下都付。
  * 不在这里呈现：与 setZoom 同一档，由宿主决定何时上屏（两个宿主的门面都会补一次 present）。
  */
 void setCaretStyle(int r, int g, int b, int a, float width_pt) {
-    g_cfg.caret_color = Color{channelClamp(r), channelClamp(g), channelClamp(b), channelClamp(a)};
-    g_engine.setCaretAndSelectionStyle(g_cfg.caret_color, width_pt, g_cfg.selection_color);
-    // 引擎会把过窄的宽度夹到下限，取回来才是真正的现状（宿主面板要读它）。
-    g_cfg.caret_width_pt = g_engine.config().caret_width_pt;
+    g_engine.setCaretAndSelectionStyle(
+        Color{channelClamp(r), channelClamp(g), channelClamp(b), channelClamp(a)}, width_pt,
+        g_engine.config().selection_color);
 }
 
 /**
  * 选区样式：底色与 alpha。alpha 不足 255 是刻意的，见 EngineConfig::selection_color。
  */
 void setSelectionStyle(int r, int g, int b, int a) {
-    g_cfg.selection_color =
-        Color{channelClamp(r), channelClamp(g), channelClamp(b), channelClamp(a)};
-    g_engine.setCaretAndSelectionStyle(g_cfg.caret_color, g_cfg.caret_width_pt,
-                                       g_cfg.selection_color);
+    const EngineConfig cur = g_engine.config();
+    g_engine.setCaretAndSelectionStyle(
+        cur.caret_color, cur.caret_width_pt,
+        Color{channelClamp(r), channelClamp(g), channelClamp(b), channelClamp(a)});
 }
 
 /**
@@ -1062,24 +1072,18 @@ int editMode() { return static_cast<int>(g_engine.editMode()); }
  * 移动光标变成整行重排，与"括号常显"的口径也打架。
  */
 void setShowBrackets(bool on) {
-    EngineConfig c = g_cfg;
-    c.show_brackets = on;
-    g_cfg = c;
-    applyConfig();
+    updateConfig([on](EngineConfig& c) { c.show_brackets = on; });
 }
-bool showBrackets() { return g_cfg.show_brackets; }
+bool showBrackets() { return g_engine.config().show_brackets; }
 
 /**
  * 小点（控件右下角的方块）。独立开关，开启时所有控件都画，与焦点无关。
  * 它不占宽度、不进文档流，所以改它不重排 —— 只让页位图重光栅（见 rasterSignature）。
  */
 void setShowControlDots(bool on) {
-    EngineConfig c = g_cfg;
-    c.show_control_dots = on;
-    g_cfg = c;
-    applyConfig();
+    updateConfig([on](EngineConfig& c) { c.show_control_dots = on; });
 }
-bool showControlDots() { return g_cfg.show_control_dots; }
+bool showControlDots() { return g_engine.config().show_control_dots; }
 
 /**
  * 不可见字符标记的档位：0 不显示 / 1 只显示段落标记 / 2 连空格与制表符一起显示。
@@ -1088,12 +1092,11 @@ bool showControlDots() { return g_cfg.show_control_dots; }
  * 档位越界时按"只显示段落标记"处理：它是默认档，也是"看得见段落边界"这一档。
  */
 void setShowMarks(int mode) {
-    EngineConfig c = g_cfg;
-    c.marks = (mode < 0 || mode > 2) ? MarksMode::Paragraph : static_cast<MarksMode>(mode);
-    g_cfg = c;
-    applyConfig();
+    const MarksMode m =
+        (mode < 0 || mode > 2) ? MarksMode::Paragraph : static_cast<MarksMode>(mode);
+    updateConfig([m](EngineConfig& c) { c.marks = m; });
 }
-int showMarks() { return static_cast<int>(g_cfg.marks); }
+int showMarks() { return static_cast<int>(g_engine.config().marks); }
 
 /**
  * 页边距裁剪标记（正文四角的短角线）。默认不画。
@@ -1102,12 +1105,9 @@ int showMarks() { return static_cast<int>(g_cfg.marks); }
  * （见 rasterSignature）。连页下引擎自己不画：那里没有页，四角没有意义。
  */
 void setShowMarginMarks(bool on) {
-    EngineConfig c = g_cfg;
-    c.show_margin_marks = on;
-    g_cfg = c;
-    applyConfig();
+    updateConfig([on](EngineConfig& c) { c.show_margin_marks = on; });
 }
-bool showMarginMarks() { return g_cfg.show_margin_marks; }
+bool showMarginMarks() { return g_engine.config().show_margin_marks; }
 
 /**
  * 删控件：拆壳（保留内容）或连内容一起删。走 AndRender 版 —— 宿主一次调用就收尾，

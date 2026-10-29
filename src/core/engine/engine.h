@@ -1721,6 +1721,18 @@ public:
     bool rememberPageMetrics(float w_pt, float h_pt, const PageMargins& margins);
 
     /**
+     * 记页度量并当场收尾（重排 + 重绘）。
+     *
+     * 页宽变了整篇的断行都会变，没有可定位的影响面；宿主一次调用就拿到新的一屏。
+     *
+     * @param w_pt 页宽（磅）
+     * @param h_pt 页高（磅）
+     * @param margins 四边页边距（磅）
+     * @return true = 记下了（没装载文档、或值没变时为假）
+     */
+    bool rememberPageMetricsAndRender(float w_pt, float h_pt, const PageMargins& margins);
+
+    /**
      * 光标所在表格的现状（表格 / 行 / 格三层记录 + 整格选区的范围）。
      *
      * 属性面板一次读全：分三次问会拿到三个不同时刻的状态，而"表宽 + 行高 + 格对齐"
@@ -2861,12 +2873,23 @@ private:
     void installDocument(doc::Doc doc);
 
     /**
+     * 文档第一节记的纸张与页边距，尚未与配置装配。
+     *
+     * 只在文档显式写过纸张时给出（纸张与页边距都是默认值等于没写过 —— 序列化那边
+     * 也是这么判的）—— 否则每一份没提纸张的文档都会把宿主设好的页度量冲掉。
+     *
+     * @returns 写过时是文档的页度量（continuous / slab_pt 仍是默认值）；否则为空
+     */
+    std::optional<PageMetrics> documentPageMetrics() const;
+
+    /**
      * 文档里记了纸张就按它排版：配置只是"还没有文档时的初始值"。
      *
-     * 只在文档显式写过纸张时生效（纸张与页边距都是默认值等于没写过 —— 序列化那边
-     * 也是这么判的）—— 否则每一份没提纸张的文档都会把宿主设好的页度量冲掉。
+     * 提交、撤销与重做都只改文档，页度量必须在这一步跟上，否则屏幕按新纸、文档按旧纸。
+     *
+     * @returns true = 页度量变了（调用方要整篇标脏）
      */
-    void adoptPageFromDocument();
+    bool adoptPageFromDocument();
 
     /**
      * 按当前修订重算产物：投影出块流与控件跨度，再把流索引、位置与控件视图带上。

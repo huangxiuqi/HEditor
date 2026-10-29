@@ -60,6 +60,23 @@ ControlKind controlKindFromBusinessType(const std::string& type) {
 constexpr float kMinCaretWidthPt = 0.4f;
 
 /**
+ * 把页度量补齐成排版层认的那一份：连页要条带高度，分页下留 0。
+ *
+ * 排版只认装配之后的值，所以页度量的每一处来源（配置、文档）都要过这一道，
+ *   否则切模式时会判不出"要重排"，画面上是"分页的排版 + 连页的落点"。
+ *
+ * @param p 页宽、页高与四边页边距
+ * @param continuous 是否连页
+ * @param gap_pt 页间隙（磅）
+ * @returns 补齐 continuous 与 slab_pt 的页度量
+ */
+PageMetrics assemblePageMetrics(PageMetrics p, bool continuous, float gap_pt) {
+    p.continuous = continuous;
+    p.slab_pt = continuous ? p.height_pt + (gap_pt > 0.0f ? gap_pt : 0.0f) : 0.0f;
+    return p;
+}
+
+/**
  * Skia 全局字形 mask 缓存的字节预算。
  *
  * SkStrikeCache 的默认上限是 2 MB（SK_DEFAULT_FONT_CACHE_LIMIT），而它清理时按
@@ -190,12 +207,12 @@ void EditorEngine::setConfig(const EngineConfig& cfg) {
     // 连页标志与条带高度是引擎从"页度量 + 页间隙"装配出来的，排版层只认 PageMetrics。
     //   必须在比较之前装配 —— 否则切模式时 PageMetrics 没变，判不出"要重排"，
     //   画面上就成了"分页的排版 + 连页的落点"（内容按旧断点排，却按新条带贴）。
-    PageMetrics want = cfg.page;
-    want.continuous = cfg.continuous;
-    // 只有连页才需要条带高度。分页下留 0，排版按 slabHeightPt 的回退值算（页高）；
-    //   这样改页间隙不会牵动分页的"要不要重排"判据 —— 那个改动只影响落点，不影响断行。
-    want.slab_pt =
-        cfg.continuous ? want.height_pt + (cfg.page_gap_pt > 0.0f ? cfg.page_gap_pt : 0.0f) : 0.0f;
+    //   装配之后再看文档：它写过纸张就以它为准，配置里的 page 只是"还没有文档时的初始值"。
+    //   改纸张要写文档（rememberPageMetrics），否则下一次提交就把它冲回去。
+    const auto doc_page = documentPageMetrics();
+    const PageMetrics want = doc_page
+                                 ? assemblePageMetrics(*doc_page, cfg.continuous, cfg.page_gap_pt)
+                                 : assemblePageMetrics(cfg.page, cfg.continuous, cfg.page_gap_pt);
     // 页度量改了整篇的断行位置都会变，没有可定位的影响面 → 整篇标脏。
     const bool page_changed = (want != cfg_.page);
     cfg_ = cfg;
@@ -243,32 +260,41 @@ void EditorEngine::installDocument(doc::Doc doc) {
 }
 
 /**
- * 文档里记的纸张与页边距换成页度量。装配规则与 setConfig 同一套（连页要条带高度），
- * 因为 cfg_.page 存的一直是装配之后的值。
+ * 文档第一节记的纸张与页边距。装配留给调用方 —— 这里的值只描述文档。
  */
-void EditorEngine::adoptPageFromDocument() {
-    if (!session_) return;
+std::optional<PageMetrics> EditorEngine::documentPageMetrics() const {
+    if (!session_) return std::nullopt;
     const doc::Doc& d = document();
-    if (!d.root || d.root->children.empty()) return;
+    if (!d.root || d.root->children.empty()) return std::nullopt;
     const doc::Node* sec = d.root->children.front().get();
-    if (sec == nullptr) return;
+    if (sec == nullptr) return std::nullopt;
     const auto* s = std::get_if<SectionSpec>(&sec->payload);
-    if (s == nullptr) return;
+    if (s == nullptr) return std::nullopt;
     // 两项都是默认值 = 这份文档没写过纸张：配置说了算。
-    if (s->paper == Paper{} && s->margins == SectionMargins{}) return;
+    if (s->paper == Paper{} && s->margins == SectionMargins{}) return std::nullopt;
     const auto pt = [](const Length& l) { return static_cast<float>(emuToPt(l.abs_emu)); };
     const float w = pt(s->paper.width);
     const float h = pt(s->paper.height);
-    if (!(w > 0.0f) || !(h > 0.0f)) return;
-    cfg_.page.width_pt = w;
-    cfg_.page.height_pt = h;
-    cfg_.page.margins = PageMargins{pt(s->margins.top), pt(s->margins.right), pt(s->margins.bottom),
-                                    pt(s->margins.left)};
-    cfg_.page.continuous = cfg_.continuous;
-    cfg_.page.slab_pt =
-        cfg_.continuous ? h + (cfg_.page_gap_pt > 0.0f ? cfg_.page_gap_pt : 0.0f) : 0.0f;
+    if (!(w > 0.0f) || !(h > 0.0f)) return std::nullopt;
+    PageMetrics p;
+    p.width_pt = w;
+    p.height_pt = h;
+    // 字段顺序是 top / right / bottom / left（见 PageMargins），文档里是 top / bottom / left / right。
+    p.margins = PageMargins{pt(s->margins.top), pt(s->margins.right), pt(s->margins.bottom),
+                            pt(s->margins.left)};
+    return p;
+}
+
+bool EditorEngine::adoptPageFromDocument() {
+    const auto doc_page = documentPageMetrics();
+    if (!doc_page) return false;
+    const PageMetrics want = assemblePageMetrics(*doc_page, cfg_.continuous, cfg_.page_gap_pt);
+    // 每次提交都会问一次：值一样就别动，否则一次内容撤销也要整篇重排。
+    if (want == cfg_.page) return false;
+    cfg_.page = want;
     // 页度量变了，光栅签名也要跟着换，否则页位图缓存还按旧尺寸认。
     render_.pages.setSignature(rasterSignatureNow());
+    return true;
 }
 
 /**
@@ -465,6 +491,14 @@ bool EditorEngine::rememberPageMetrics(float w_pt, float h_pt, const PageMargins
                             Length::abs(ptToEmu(margins.left)),
                             Length::abs(ptToEmu(margins.right))};
     return edit_session_.edit.setSectionPaper(paper, sm);
+}
+
+bool EditorEngine::rememberPageMetricsAndRender(float w_pt, float h_pt,
+                                                const PageMargins& margins) {
+    if (!rememberPageMetrics(w_pt, h_pt, margins)) return false;
+    relayout();
+    repaintAfterEdit();
+    return true;
 }
 
 std::string EditorEngine::pasteFragmentAndRender(const std::string& text) {
@@ -890,6 +924,8 @@ bool EditorEngine::commitSteps(std::vector<Step> steps, int dirty_para, Range se
     //   第一处真实差异 —— 计划可能比差异更早（保守），反过来不该发生，取小就是安全的。
     //   右端只有损伤区间知道，交给后缀复用当"被换掉几段"。
     markLayoutDirtyRange(std::min(dirty_para, dmg.range.lo), dmg.range.hi);
+    // 页面设置也是一步：文档里的纸张变了就按它重排，否则屏幕按新纸、文档按旧纸。
+    if (adoptPageFromDocument()) markAllLayoutDirty();
     return true;
 }
 
@@ -912,6 +948,8 @@ bool EditorEngine::undo() {
     // 撤销可能把"有没有控件"整体改掉（撤销删掉最后一个控件、或把只读控件撤回来），
     //   那样占位集合整个翻转，而损伤区间只报块内容 —— 计划变了就整体重排。
     if (bracketPlanId() != plan_before) markLayoutDirtyForBrackets();
+    // 撤销可能把纸张改回旧的那张：页度量是文档的派生值，跟着回退。
+    if (adoptPageFromDocument()) markAllLayoutDirty();
     return true;
 }
 
@@ -928,6 +966,8 @@ bool EditorEngine::redo() {
     setSelection(Range{restored_selection.anchor, restored_selection.focus});
     restoreImageSelection(image_before);
     if (bracketPlanId() != plan_before) markLayoutDirtyForBrackets();
+    // 重做同撤销：纸张是文档的一部分，页度量跟着它走。
+    if (adoptPageFromDocument()) markAllLayoutDirty();
     return true;
 }
 

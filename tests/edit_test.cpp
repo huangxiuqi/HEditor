@@ -15047,12 +15047,10 @@ int main() {
         const size_t lines_wide98 = a98.layout().lines.size();
 
         // 换成一张很窄的纸：同样的内容折行必然更多（页数对宽度不敏感，行数才敏感）。
+        //   写文档那一步会采用它并整篇标脏，重排由调用方在收尾时做（这里不呈现）。
         const PageMargins narrow_margins98{20.0f, 20.0f, 20.0f, 20.0f};
         expectTrue(a98.rememberPageMetrics(200.0f, 300.0f, narrow_margins98), "纸张写进文档第一节");
-        EngineConfig narrow98 = wide98;
-        narrow98.page.width_pt = 200.0f;
-        narrow98.page.margins = narrow_margins98;
-        a98.setConfig(narrow98);
+        a98.relayout();
         const size_t lines_narrow98 = a98.layout().lines.size();
 
         const doc::SerializeResult saved98 = a98.saveDocument();
@@ -15073,6 +15071,26 @@ int main() {
         expectTrue(lines_read98 == lines_narrow98, "读回之后按文档里那张纸排版 —— " +
                                                        std::to_string(lines_read98) + " / " +
                                                        std::to_string(lines_narrow98));
+
+        // 读回之后改缩放：宿主手里那份配置的 page 还是宽纸，页度量不能跟着它回去 ——
+        //   文档写过纸张就以文档为准，配置只是"还没有文档时的初始值"。
+        EngineConfig zoomed98 = b98.config();
+        zoomed98.density = 1.5f;
+        b98.setConfig(zoomed98);
+        expectTrue(
+            std::abs(b98.config().page.width_pt - 200.0f) < 0.5f,
+            "改缩放之后页宽仍是文档那张 —— 实际 " + std::to_string(b98.config().page.width_pt));
+
+        // 改纸张是一步：撤销之后页度量跟着文档一起回退，否则屏幕按新纸、文档按旧纸。
+        expectTrue(b98.rememberPageMetrics(300.0f, 400.0f, narrow_margins98), "再改一次纸张");
+        expectTrue(std::abs(b98.config().page.width_pt - 300.0f) < 0.5f,
+                   "改完页宽是 300 —— 实际 " + std::to_string(b98.config().page.width_pt));
+        expectTrue(b98.undo(), "撤销页面设置");
+        expectTrue(std::abs(b98.config().page.width_pt - 200.0f) < 0.5f,
+                   "撤销之后页宽回到 200 —— 实际 " + std::to_string(b98.config().page.width_pt));
+        const PageMargins back98 = b98.config().page.margins;
+        expectTrue(std::abs(back98.left - narrow_margins98.left) < 0.5f,
+                   "撤销之后页边距也回到上一份 —— 实际 " + std::to_string(back98.left));
     }
     checkSectionTable();
     printSectionTimes();
