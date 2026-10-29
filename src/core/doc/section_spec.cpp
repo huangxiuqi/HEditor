@@ -2,59 +2,6 @@
 
 namespace heditor {
 
-namespace {
-
-/**
- * 内置纸张规格，单位毫米，纵向。B5 取 ISO 176x250（另有 JIS 182x257，本期只登记 ISO）。
- */
-struct MmSize {
-    double w;
-    double h;
-};
-
-bool builtinSizeMm(PaperName name, MmSize* out) {
-    switch (name) {
-        case PaperName::A4:
-            *out = {210.0, 297.0};
-            return true;
-        case PaperName::A5:
-            *out = {148.0, 210.0};
-            return true;
-        case PaperName::B5:
-            *out = {176.0, 250.0};
-            return true;
-        case PaperName::Letter:
-            *out = {215.9, 279.4};
-            return true;
-        case PaperName::Legal:
-            *out = {215.9, 355.6};
-            return true;
-        case PaperName::Custom:
-            return false;
-    }
-    return false;
-}
-
-}  // namespace
-
-const char* paperNameName(PaperName name) {
-    switch (name) {
-        case PaperName::A4:
-            return "A4";
-        case PaperName::A5:
-            return "A5";
-        case PaperName::B5:
-            return "B5";
-        case PaperName::Letter:
-            return "Letter";
-        case PaperName::Legal:
-            return "Legal";
-        case PaperName::Custom:
-            return "Custom";
-    }
-    return "（未知）";
-}
-
 const char* orientationName(Orientation o) {
     switch (o) {
         case Orientation::Portrait:
@@ -107,19 +54,6 @@ const char* pageNumberFormatName(PageNumberFormat f) {
     return "（未知）";
 }
 
-bool paperNameFromName(const std::string& text, PaperName* out) {
-    if (out == nullptr) return false;
-    const PaperName all[] = {PaperName::A4,     PaperName::A5,    PaperName::B5,
-                             PaperName::Letter, PaperName::Legal, PaperName::Custom};
-    for (PaperName p : all) {
-        if (text == paperNameName(p)) {
-            *out = p;
-            return true;
-        }
-    }
-    return false;
-}
-
 bool orientationFromName(const std::string& text, Orientation* out) {
     if (out == nullptr) return false;
     const Orientation all[] = {Orientation::Portrait, Orientation::Landscape};
@@ -169,32 +103,6 @@ bool pageNumberFormatFromName(const std::string& text, PageNumberFormat* out) {
         }
     }
     return false;
-}
-
-PaperSizeEmu paperSize(const Paper& paper) {
-    PaperSizeEmu size;
-    if (paper.name == PaperName::Custom) {
-        // 自定义纸张的宽高必须是绝对长度：没有参照的长度推不出 EMU，返回零尺寸让调用方
-        // 处理，而不是拿一个凭空的数值当纸张。
-        if (paper.width.kind == LengthKind::Abs && paper.height.kind == LengthKind::Abs) {
-            size.width = paper.width.abs_emu;
-            size.height = paper.height.abs_emu;
-        }
-    } else {
-        MmSize mm{};
-        if (builtinSizeMm(paper.name, &mm)) {
-            size.width = mmToEmu(mm.w);
-            size.height = mmToEmu(mm.h);
-        }
-    }
-    // 横向交换宽高：纸张的方向只影响摆放，不改规格本身，所以交换发生在派生这一步，
-    // 而不写回 Paper。
-    if (paper.orient == Orientation::Landscape) {
-        const Emu w = size.width;
-        size.width = size.height;
-        size.height = w;
-    }
-    return size;
 }
 
 bool SectionSpec::sameAs(const SectionSpec& o) const {

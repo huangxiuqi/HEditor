@@ -54,7 +54,7 @@ import { createDomHost, ensureMarkup, type ChangeSource, type DomHost, type Engi
 import { createErrorSurface, type ErrorSurface } from './host/errors';
 import { scrollHeightPx, type CanvasStore } from './host/pages';
 import { stageOf } from './host/parts';
-import { cleanMarkdownLines, then1, type Args, type ZoomControl } from './input/keymap';
+import { cleanMarkdownLines, createZoom, then1, type Args, type ZoomControl } from './input/keymap';
 import { assertSimd, simdProbeBytes, simdSupported } from './engine/simd';
 import { resolveFonts, type AssetPaths } from './transport/assets';
 import { createWorker } from './transport/worker';
@@ -379,11 +379,14 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
     emitter.emit('error', { message, fatal });
   };
 
+  // 密度只有 createZoom 一个算式（界面的倍数是产品语义，引擎收的是设备像素 / 磅）。
+  //   在这里另写一遍乘法就是第二份：改一处忘一处时，症状是缩放比例对了而画面变了。
+  const zoomUnits = createZoom({ base: 4 / 3 });
   const transport = createWorker({
     container: opts.container,
     assets,
     dpr: window.devicePixelRatio || 1,
-    zoom: config.zoom * (4 / 3) * (window.devicePixelRatio || 1),
+    density: zoomUnits.ofFactor(config.zoom),
     empty: true,
     makeHost: (l, store, remoteBlit) => createDomHost(hostOptions(l, store, remoteBlit)),
     // 起来之后才死的那一类：没有 Promise 可拒，只剩"让用户看见"。
@@ -438,7 +441,7 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       onControlTap: (index, rect, readonly) => opts.onControlTap?.(index, rect, readonly),
       onContextMenu: (target, at) => opts.onContextMenu?.(target, at),
       onZoomBy: (delta: number) => queueZoom(delta),
-      onZoomReset: () => void editor.setZoom(1),
+      onZoomReset: () => void editor.configure({ zoom: 1 }),
     };
   }
 
@@ -459,7 +462,7 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       zoomPending = 0;
       if (d === 0 || disposed) return;
       // 走公开面那一条（它自己夹取上下限），不直接碰引擎：缩放要同时改密度与配置影子。
-      void editor.setZoom(editor.config().zoom + d);
+      void editor.configure({ zoom: editor.config().zoom + d });
     });
   }
 
@@ -688,13 +691,15 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       empty?: boolean;
       rects?: Array<{ page?: number; x?: number; y?: number; w?: number; h?: number }>;
     };
-    const dpr = window.devicePixelRatio || 1;
+    // 引擎给的是磅（selectionReport 取 selectionRectsVisible，字段名 r_pt），直接透传。
+    //   在这里再按 dpr 除一次就既不是磅也不是 CSS 像素；而 DPR=1 下那次除法是恒等，
+    //   判据看不见，只在 2x 屏上让选区矩形缩成一半。
     const rects = (raw.rects ?? []).map((r) => ({
       page: r.page ?? 0,
-      x: (r.x ?? 0) / dpr,
-      y: (r.y ?? 0) / dpr,
-      w: (r.w ?? 0) / dpr,
-      h: (r.h ?? 0) / dpr,
+      x: r.x ?? 0,
+      y: r.y ?? 0,
+      w: r.w ?? 0,
+      h: r.h ?? 0,
     }));
     const at = (flow: number | undefined): Pos => {
       if (flow === undefined) return { para: 0, offset: 0 };
@@ -1267,8 +1272,8 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
 
     async select(anchor, focus) {
       // 只读只是"不许改文档"，光标与选区照样能动 —— 所以这里不看 readOnly。
-      // 段内位置 -> 流位置的换算在引擎里（selectPos）；宿主不碰这个口径。
-      await caretOp('selectPos', {
+      // 段内位置 -> 流位置的换算在引擎里（selectByTextPos）；宿主不碰这个口径。
+      await caretOp('selectByTextPos', {
         anchorPara: anchor.para,
         anchorOffset: anchor.offset,
         focusPara: focus.para,
@@ -1413,10 +1418,6 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       await Promise.resolve(then1(link.view(y * g.dpr), () => dom.finish()));
     },
 
-    async setZoom(zoom) {
-      await editor.configure({ zoom });
-    },
-
     // 配置
 
     async configure(patch) {
@@ -1481,12 +1482,12 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
 
       if (changed.zoom !== undefined) {
         const dpr = window.devicePixelRatio || 1;
-        const density = next.zoom * (4 / 3) * dpr;
+        const density = zoomUnits.ofFactor(next.zoom);
         // 先记下旧密度：dom.zoom.set 之后就读不到它了，而折算滚动位置要用这个比值。
         const prevDensity = dom.zoom.density;
         dom.zoom.set(density);
         steps.push(() =>
-          then1(settleAfter('zoom', { zoom: density, dpr }), () =>
+          then1(settleAfter('density', { density, dpr }), () =>
             dom.keepScrollAcrossZoom(prevDensity, density),
           ),
         );
@@ -1745,7 +1746,6 @@ function makeDiag(
     dragState: () => (dom.drag ? dom.drag.state() : null),
     dragSettled: () => (dom.drag ? dom.drag.settled() : Promise.resolve()),
     editStats: () => read('editStats'),
-    edit: () => read('editStats'),
     auditFrame: () => read('auditFrame'),
     auditBase: () => read('auditBase'),
     auditPage: () => read('auditPage'),
@@ -1770,7 +1770,7 @@ function makeDiag(
     describeControls: () => str('describeControls'),
     // 下面三条读的是随状态推过来的镜像：两种传输都是同步值。
     blockedEdits: () => Number(read('blockedEdits') ?? 0),
-    dirtyPages: () => (read('dirtyPages') as number[]) ?? [],
+    pagesWrittenThisFrame: () => (read('pagesWrittenThisFrame') as number[]) ?? [],
     pagePx: () => {
       const g = link.geom();
       return { w: g.pw, h: g.ph, gap: g.gap };

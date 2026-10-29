@@ -199,6 +199,10 @@ public:
     /**
      * 按 UTF-8 文本插入（落点先吸附到簇边界）。
      *
+     * 含换行的文本折成节点走插入节点那条路：换行在文档里只能是段落标记，把一个 U+000A
+     *   塞进段文本会让段号出现两套算法。落点正好在光标上且有选区时，这一次输入是
+     *   "替换选中内容"，与不含换行时同一语义。
+     *
      * @param para 段号（块下标）
      * @param offset 段内码点偏移
      * @param utf8 要插入的文本
@@ -208,10 +212,25 @@ public:
 
     /**
      * 在光标处插字 / 删字（删除按簇，不是按码点）
+     *
+     * 含换行的文本折成节点粘贴：那次粘贴会替换选中内容，与不含换行时同一语义。
+     *
      * @param utf8 要插入的文本
      * @return true = 插进去了
      */
     bool typeTextUtf8(const std::string& utf8);
+
+    /**
+     * 在指定文本位置插入一串节点（文本 run、段落标记、表格……）。
+     *
+     * 与 pasteNodes 的差别只有一处：落点由参数给定，且不动选区 —— 程序化插入的坐标是
+     *   按调用时的文档算出来的，删掉一段会让它整批一起过期。
+     *
+     * @param at 落点（段号 + 段内码点偏移）
+     * @param nodes 节点序列，非空
+     * @return true = 插进去了
+     */
+    bool insertNodesAt(const TextPos& at, const std::vector<NodeSpec>& nodes);
 
     /**
      * 退格：删光标左边一个字簇。段首时退成合并前一段（见 mergeWithPreviousParagraph）。
@@ -680,6 +699,23 @@ private:
      * 空表的每格只有一枚段落标记，结构是固定的，所以这个偏移可以当场算出来。
      */
     static constexpr FlowPos kFirstTableCellOffset = 3;
+
+    /**
+     * 在流位置 at 插入一串节点，可选地带一组"先删掉的选区"步骤。
+     *
+     * 一个节点一条 InsertNode 步骤（而不是一棵大树一条）：片段里可能既有文字又有表格，
+     * 它们本来就按流顺序排列，"第几项插到哪个位置"由前一项的跨度累加决定，不需要一棵假根。
+     * 块级元素（表格）进不了段落内部，前后缺段落标记时各补一枚，让它自成段；本来就落在
+     * 段首 / 段尾时不补，避免多出空段落。
+     *
+     * @param at 插入起点的流位置
+     * @param erase 先执行的删除步骤，可为空
+     * @param before erase 删除的修改前区间，erase 为空时忽略
+     * @param nodes 节点序列，非空
+     * @return true = 提交成功
+     */
+    bool insertNodesAtFlow(FlowPos at, const std::vector<Step>& erase, const Range& before,
+                           const std::vector<NodeSpec>& nodes);
 
     /**
      * 第 para 段结束之后的节点级位置 —— 表格能落脚的地方（块与块之间）。

@@ -155,8 +155,12 @@ struct Control {
 
 /**
  * 控件集合：维护区间树，并提供"某个位置属于哪个控件"的查询。
- * 查询的口径统一走 innermostAt：嵌套时内层优先，
- * 这是嵌套语义的全部内容（"这个区域只有这一小块是锁死的"）。
+ * 查询只有两个入口，区别写在名字上 —— 嵌套都是内层优先，这是嵌套语义的全部内容
+ * （"这个区域只有这一小块是锁死的"）；两个入口的差别只在末尾那个插入点算不算命中。
+ *
+ * 这一层只认文字位置（段号 + 段内码点偏移）。流位置面那一套在 ControlIndex，
+ * 两份不能互相替代：同一个文字偏移上可能压着好几个插入点，而"这个偏移归谁"正是
+ * 要先回答的问题，拿流位置反推会跳过字段边界。
  */
 class ControlSet {
 public:
@@ -208,15 +212,24 @@ public:
     const std::vector<Control>& all() const { return items_; }
 
     /**
-     * 覆盖 pos 的最内层控件下标。
-     * include_end = true  → 区间按闭区间看（用于"插入点/光标能不能停在这儿"）
-     * include_end = false → 半开（用于"这个位置是不是控件的内容"）
-     * 没有任何控件覆盖时返回 -1。
+     * 覆盖 pos 的最内层控件，只看内容区间 —— 末尾那个插入点不算命中。
+     *
+     * 用于"这个位置是不是某个控件的内容"：空控件的两枚括号之间不算内容，所以点在那里
+     * 不会把归属判给这个控件。
      * @param pos 位置
-     * @param include_end true = 按闭区间看（插入点判定）
      * @return 最内层控件的下标；没有覆盖时为 -1
      */
-    int innermostAt(const TextPos& pos, bool include_end = true) const;
+    int innermostContentAt(const TextPos& pos) const;
+
+    /**
+     * 覆盖 pos 的最内层控件，含内容区间末尾那个插入点。
+     *
+     * 用于光标与插入点的归处：在字段末尾追加是合法编辑，落点要算在字段里；空控件的内部
+     * 只有一个插入点，正是它两枚括号之间的那一格。
+     * @param pos 位置
+     * @return 最内层控件的下标；没有覆盖时为 -1
+     */
+    int innermostInsertAt(const TextPos& pos) const;
 
     /**
      * 与 [a, b) 有交集的控件（按 depth 降序 = 由内到外）。
@@ -227,6 +240,17 @@ public:
 
 private:
 
+    /**
+     * innermostContentAt 与 innermostInsertAt 共用的实现。
+     * @param pos 位置
+     * @param include_end 末尾那个插入点算不算命中
+     * @return 最内层控件的下标；没有覆盖时为 -1
+     */
+    int innermostAt(const TextPos& pos, bool include_end) const;
+
+    /**
+     * 全部控件（按 add 的顺序，不是区间顺序）。
+     */
     std::vector<Control> items_;
 
     /**

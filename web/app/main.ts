@@ -161,7 +161,7 @@ function stepSize(dir: number): void {
  * @param z 目标倍数
  */
 async function zoomTo(z: number): Promise<void> {
-  await editor.setZoom(z);
+  await editor.configure({ zoom: z });
   chrome.refresh();
 }
 

@@ -153,7 +153,7 @@ bool PageCache::hasDirty(int page) const {
     return it != dirty_.end() && !it->second.empty();
 }
 
-std::vector<int> PageCache::dirtyPages() const {
+std::vector<int> PageCache::pagesWrittenThisFrame() const {
     std::vector<int> pages;
     pages.reserve(dirty_.size());
     for (const auto& kv : dirty_) {

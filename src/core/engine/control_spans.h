@@ -70,6 +70,9 @@ inline bool controlContentSpanOf(const doc::FlowIndex& flow, NodeId id, FlowPos*
  * 取外层会让"这一格归谁"与编辑归属分家：光标在一个字段里、编辑却按另一个字段的规则判。
  *   按遍历顺序取第一个命中的更糟：外层可编辑会替内层只读作证。
  *
+ * 线性版，只给 ControlIndex 还没建（或建出来是空）的那条路用。规则与 ControlIndex::innermost
+ *   是同一条，两处改一处不改就会让"索引建好前后"给出不同答案。
+ *
  * @param flow 流索引
  * @param ids 控件节点表（文档顺序）
  * @param f 流位置
@@ -221,7 +224,8 @@ public:
     }
 
     /**
-     * 最内层控件。规则与 innermostControlAtFlow 相同：起点最大者，同起点取跨度短者。
+     * 最内层控件。规则与 innermostControlAtFlow 同一条：起点最大者，同起点取跨度短者。
+     * 这一份是索引路径（生产走它），那一份是索引未建时的线性路径。
      * @param f 流位置
      * @param lo 写回内容起点（可为空）
      * @param hi 写回内容末尾（可为空）

@@ -3,11 +3,12 @@
  *
  * 节是唯一会让页度量在文档中途变化的机制：纸张、四边页边距、页眉页脚、页码重编、分栏、
  * 文字方向都能按节变化。模型对页面设置的态度是完整保留、按需理解 —— 引擎真正理解的是
- * 纸张名称与方向、四边页边距、页眉页脚、页码这几项；其余（装订线、镜像页边距、分栏、
+ * 纸张宽高与方向、四边页边距、页眉页脚、页码这几项；其余（装订线、镜像页边距、分栏、
  * 垂直对齐、页边框、行号、脚注尾注、文档网格）只原样存住、不参与排版。这条边界对导入
  * 外院文档尤其要紧：不认识的部分不能丢，否则打开再保存就会损坏文档。
  *
- * 纸张用名称加方向表示，尺寸是派生值，只有自定义纸张才存显式宽高。
+ * 纸张只存宽高与方向：规格名（A4 / Letter / A3……）是宿主的概念，引擎按长度排版。
+ * 文档里存名字就必须有一张表把名字翻成尺寸，而那张表在宿主那一侧 —— 两份表迟早分家。
  */
 #pragma once
 
@@ -21,27 +22,6 @@
 #include "core/utils/types.h"
 
 namespace heditor {
-/**
- * 纸张名称。尺寸由名称与方向推出来（见 paperSize），所以名称与方向是存下来的那份，
- * 宽高是算出来的那份。内置几种常用规格，其余走自定义。
- */
-enum class PaperName : uint8_t { A4 = 0, A5 = 1, B5 = 2, Letter = 3, Legal = 4, Custom = 5 };
-
-/**
- * 纸张名称的名字（落盘与诊断用）。
- * @param name 纸张名称
- * @return 名字
- */
-const char* paperNameName(PaperName name);
-
-/**
- * 名字转纸张名称。
- * @param text 名字
- * @param out 写回纸张名称
- * @return true = 名字认识
- */
-bool paperNameFromName(const std::string& text, PaperName* out);
-
 enum class Orientation : uint8_t { Portrait = 0, Landscape = 1 };
 
 /**
@@ -60,57 +40,29 @@ const char* orientationName(Orientation o);
 bool orientationFromName(const std::string& text, Orientation* out);
 
 /**
- * 纸张。name 为 Custom 时宽高取自 width 与 height（必须是绝对长度），
- * 其余名称下宽高由规格推出、这两个字段不参与。
+ * 纸张：宽高与方向。宽度与高度是绝对长度，默认值取 A4（595.276 x 841.89 磅）——
+ * 与 PageMetrics 的默认页度量、宿主那张规格表是同一串字面量。
+ *
+ * 横向不交换存下来的宽高：方向只改摆放，规格本身不变。
  */
 struct Paper {
-    /**
-     * 纸张名称。尺寸由它加方向推出来（见 paperSize）。
-     */
-    PaperName name = PaperName::A4;
-
     /**
      * 方向（纵向 / 横向）。
      */
     Orientation orient = Orientation::Portrait;
 
     /**
-     * 自定义纸张的宽；其余名称下不参与。
+     * 纸宽。
      */
-    Length width;
+    Length width = Length::abs(ptToEmu(595.276));
 
     /**
-     * 自定义纸张的高；其余名称下不参与。
+     * 纸高。
      */
-    Length height;
+    Length height = Length::abs(ptToEmu(841.89));
 
     bool operator==(const Paper& o) const = default;
 };
-
-/**
- * 纸张尺寸，EMU。自定义纸张的宽高必须都是绝对长度，否则返回零尺寸 —— 没有参照的长度推不出
- * EMU，不如给一个可识别的空值让调用方处理，而不是猜一个。
- */
-struct PaperSizeEmu {
-    /**
-     * 纸宽（EMU）；推不出来时为 0。
-     */
-    Emu width = 0;
-
-    /**
-     * 纸高（EMU）；推不出来时为 0。
-     */
-    Emu height = 0;
-
-    bool operator==(const PaperSizeEmu& o) const = default;
-};
-
-/**
- * 按名称与方向推出纸张尺寸（EMU）。
- * @param paper 纸张
- * @return 宽高；自定义纸张的宽高不是绝对长度时为零尺寸
- */
-PaperSizeEmu paperSize(const Paper& paper);
 
 /**
  * 四边页边距。必须四边独立：病历排版常见上窄下宽、左右不同，单一的一对数字撑不住。

@@ -257,7 +257,7 @@ test.describe('输入层', () => {
 
       const z = await p.ev<{ w: number; pages: number; para: number; text: string }>(`
         const e = window.__demo;
-        await e.setZoom(1.5);
+        await e.configure({ zoom: 1.5 });
         await e.flush?.();
         const g = e.geometry();
         return { w: g.page.w, pages: g.pages, para: e.caret().pos.para, text: e.text() };`);

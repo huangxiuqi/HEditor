@@ -126,12 +126,12 @@ void appendFrameBars(const Rect& r, float t, std::vector<Rect>* out) {
  * @returns 块轴纵坐标（分页下 = 页号 x 页高 + 页内；连页下是那个绝对 y）
  */
 float docToFlowY(const EngineConfig& cfg, int page_px_h, int gap_px, float y_doc) {
-    const float zoom = cfg.zoom;
+    const float density = cfg.density;
     const int step_px = page_px_h + gap_px;
-    if (!(zoom > 0.0f) || step_px <= 0) return y_doc;
-    const float y_px = y_doc * zoom;
+    if (!(density > 0.0f) || step_px <= 0) return y_doc;
+    const float y_px = y_doc * density;
     const int page = std::max(0, static_cast<int>(std::floor(y_px / static_cast<float>(step_px))));
-    const float local = (y_px - static_cast<float>(page) * static_cast<float>(step_px)) / zoom;
+    const float local = (y_px - static_cast<float>(page) * static_cast<float>(step_px)) / density;
     // 连页下的"页"是渲染条带（页高 + 页间隙），分页下就是页高 —— 排版层用的是同一套。
     const float stride = cfg.page.continuous ? cfg.page.slabHeightPt() : cfg.page.height_pt;
     return static_cast<float>(page) * stride + local;
@@ -320,17 +320,17 @@ EditorEngine::ImageHit EditorEngine::imageAtPt(float x_pt_doc, float y_pt_doc) c
 
     // 文档坐标 → 页号 + 页内磅。折法与 hitTestPt 逐字相同（按宿主摆页的像素步距），
     //   两处各写一套的话，页号一多就会各自累出不同的偏差。
-    const float zoom = cfg_.zoom;
+    const float density = cfg_.density;
     const int page_px_h = pagePxHeight();
     const int step_px = page_px_h + pageGapPx();
     int page = 0;
     float local_y = y_pt_doc;
-    if (step_px > 0 && zoom > 0.0f) {
-        const float y_px = y_pt_doc * zoom;
+    if (step_px > 0 && density > 0.0f) {
+        const float y_px = y_pt_doc * density;
         page = std::max(0, static_cast<int>(std::floor(y_px / static_cast<float>(step_px))));
         const float local_px = y_px - static_cast<float>(page) * static_cast<float>(step_px);
         if (local_px < 0.0f || local_px > static_cast<float>(page_px_h)) return hit;
-        local_y = local_px / zoom;
+        local_y = local_px / density;
     }
 
     // 节点 id → 文档顺序下标。命中只要这个映射，不必把每张图的页面矩形都算出来。
@@ -406,11 +406,11 @@ void EditorEngine::collectImageUi(int page, std::vector<Rect>* out) const {
     if (out == nullptr) return;
     out->clear();
     if (image_sel_ == kInvalidNodeId || mode_ != EditMode::Document) return;
-    const float zoom = cfg_.zoom;
-    if (!(zoom > 0.0f)) return;
+    const float density = cfg_.density;
+    if (!(density > 0.0f)) return;
 
-    const float half = kImageHandlePt * 0.5f * zoom;
-    const float bar = std::max(1.0f, kImageFramePt * zoom);
+    const float half = kImageHandlePt * 0.5f * density;
+    const float bar = std::max(1.0f, kImageFramePt * density);
 
     // 浮动的图框不在行盒里，几何从 placed_floats 取；预览（拖动改尺寸 / 拖动移动）同样要跟手。
     for (const PlacedFloat& pf : layout_service_.layout.placed_floats) {
@@ -431,13 +431,13 @@ void EditorEngine::collectImageUi(int page, std::vector<Rect>* out) const {
             r.w = image_preview_.w_pt;
             r.h = image_preview_.h_pt;
         }
-        const Rect px{r.x * zoom, r.y * zoom, r.w * zoom, r.h * zoom};
+        const Rect px{r.x * density, r.y * density, r.w * density, r.h * density};
         appendFrameBars(px, bar, out);
         float centers[16];
         imageHandleCenters(r, centers);
         for (int h = 0; h < 8; ++h) {
-            out->push_back(Rect{centers[h * 2] * zoom - half, centers[h * 2 + 1] * zoom - half,
-                                half * 2.0f, half * 2.0f});
+            out->push_back(Rect{centers[h * 2] * density - half,
+                                centers[h * 2 + 1] * density - half, half * 2.0f, half * 2.0f});
         }
     }
     for (const int li : layout_service_.layout.linesOnPage(page)) {
@@ -460,13 +460,13 @@ void EditorEngine::collectImageUi(int page, std::vector<Rect>* out) const {
                 r.w = image_preview_.w_pt;
                 r.h = image_preview_.h_pt;
             }
-            const Rect px{r.x * zoom, r.y * zoom, r.w * zoom, r.h * zoom};
+            const Rect px{r.x * density, r.y * density, r.w * density, r.h * density};
             appendFrameBars(px, bar, out);
             float centers[16];
             imageHandleCenters(r, centers);
             for (int h = 0; h < 8; ++h) {
-                out->push_back(Rect{centers[h * 2] * zoom - half, centers[h * 2 + 1] * zoom - half,
-                                    half * 2.0f, half * 2.0f});
+                out->push_back(Rect{centers[h * 2] * density - half,
+                                    centers[h * 2 + 1] * density - half, half * 2.0f, half * 2.0f});
             }
         }
     }

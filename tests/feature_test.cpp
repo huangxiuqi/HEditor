@@ -125,7 +125,7 @@ int main() {
 
     EditorEngine e;
     EngineConfig cfg;
-    cfg.zoom = 1.5f;
+    cfg.density = 1.5f;
     e.setConfig(cfg);
     if (!e.init({cjk, latin})) {
         std::fprintf(stderr, "字体加载失败：%s\n", cjk.c_str());
@@ -586,10 +586,10 @@ int main() {
         }
         Position moved = pos;
         moved.affinity = 1;
-        expectTrue(e.setCaretPosition(moved), "Position：能按位置入口摆光标");
+        expectTrue(e.setCaretAtPosition(moved), "Position：能按位置入口摆光标");
         expectTrue(e.caretPosition().affinity == 1, "Position：摆位之后行别读回同一份");
         moved.affinity = 0;
-        expectTrue(e.setCaretPosition(moved), "Position：行别能清回默认");
+        expectTrue(e.setCaretAtPosition(moved), "Position：行别能清回默认");
         expectTrue(e.caretPosition().affinity == 0, "Position：清回默认后读回 0");
 
         expectTrue(e.selectAll(), "Position 选区：全选");
@@ -606,7 +606,7 @@ int main() {
         expectTrue(e.selectedImage() < 0, "Position 选区：写回时清掉图片选中");
         e.clearSelection();
         expectTrue(e.selectImage(0), "Position 光标：先选中图片");
-        expectTrue(e.setCaretPosition(pos), "Position 光标：按位置摆回光标");
+        expectTrue(e.setCaretAtPosition(pos), "Position 光标：按位置摆回光标");
         expectTrue(e.selectedImage() < 0, "Position 光标：摆位时清掉图片选中");
     }
 
@@ -618,7 +618,7 @@ int main() {
         e.relayout();
         e.setCaret(0, 2);
         const FlowPos f0 = e.caretFlowPos();
-        expectTrue(e.setCaretPosition(Position{f0, 0}), "Position：普通位置摆得进去");
+        expectTrue(e.setCaretAtPosition(Position{f0, 0}), "Position：普通位置摆得进去");
         expectTrue(e.caretPosition().flow == f0, "Position：普通位置往返恒等");
 
         // 折行处：同一个流位置带两个行别，两条都要原样读回，而且画在不同的行上。
@@ -636,12 +636,12 @@ int main() {
         expectTrue(wrap_cp > 0, "折行处：这一段确实折了行");
         if (wrap_cp > 0) {
             const FlowPos wf = e.flowPosAt(0, static_cast<size_t>(wrap_cp));
-            expectTrue(e.setCaretPosition(Position{wf, 0}), "折行处：按「上一行」摆位");
+            expectTrue(e.setCaretAtPosition(Position{wf, 0}), "折行处：按「上一行」摆位");
             Rect r_prev{};
             const bool have_prev = e.caretRectPt(&r_prev);
             expectTrue(have_prev && e.caretPosition().flow == wf && e.caretPosition().affinity == 0,
                        "折行处：流位置与行别 0 都原样读回");
-            expectTrue(e.setCaretPosition(Position{wf, 1}), "折行处：按「下一行」摆位");
+            expectTrue(e.setCaretAtPosition(Position{wf, 1}), "折行处：按「下一行」摆位");
             Rect r_next{};
             const bool have_next = e.caretRectPt(&r_next);
             expectTrue(have_next && e.caretPosition().flow == wf && e.caretPosition().affinity == 1,
@@ -663,9 +663,9 @@ int main() {
         if (cell_para > 0) {
             const FlowPos base = e.flowPosAt(cell_para, 0);
             expectTrue(base > 2, "空隙：段首前面确实有表与格的边界位");
-            e.setCaretPosition(Position{base - 1, 0});
+            e.setCaretAtPosition(Position{base - 1, 0});
             expectTrue(e.caretPosition().flow == base, "空隙：进格那一格归一化到本段段首");
-            e.setCaretPosition(Position{base - 2, 0});
+            e.setCaretAtPosition(Position{base - 2, 0});
             expectTrue(e.caretPosition().flow == base, "空隙：出格那一格也归一化到本段段首");
         }
 
@@ -679,9 +679,9 @@ int main() {
             e.clearSelection();
             int unstable = 0;
             for (FlowPos f = 0; f <= hi; ++f) {
-                e.setCaretPosition(Position{f, 0});
+                e.setCaretAtPosition(Position{f, 0});
                 const Position once = e.caretPosition();
-                e.setCaretPosition(once);
+                e.setCaretAtPosition(once);
                 const Position twice = e.caretPosition();
                 if (twice.flow != once.flow || twice.affinity != once.affinity) ++unstable;
             }
@@ -709,7 +709,7 @@ int main() {
                 const FlowPos want = e.flowPosAtSide(0, static_cast<size_t>(cp), side);
                 e.setCaretAtSideLine(0, static_cast<size_t>(cp), side, 0);
                 const FlowPos by_text = e.caretFlowPos();
-                e.setCaretPosition(Position{want, 0});
+                e.setCaretAtPosition(Position{want, 0});
                 const FlowPos by_pos = e.caretFlowPos();
                 ++place_cases;
                 if (by_text != want || by_pos != want) ++place_diff;
@@ -733,14 +733,14 @@ int main() {
             e.repaint();
             expectTrue(e.editStats().selection_anchor != e.editStats().selection_focus,
                        "变化键：拖开之后两端不同");
-            e.setCaretPosition(Position{from, 0});
+            e.setCaretAtPosition(Position{from, 0});
             e.repaint();
         }
 
         // 拖选：anchor 不动，焦点端两条入口给出同一个选区。
         e.setDocument(makeDoc({"甲乙丙丁戊己庚辛"}));
         e.relayout();
-        e.setCaretPosition(Position{e.flowPosAt(0, 0), 0});
+        e.setCaretAtPosition(Position{e.flowPosAt(0, 0), 0});
         const TextSelection drag_anchor = e.selectionPositions();
         int drag_diff = 0;
         int drag_cases = 0;

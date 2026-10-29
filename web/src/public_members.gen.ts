@@ -73,7 +73,6 @@ export const PUBLIC_MEMBERS: readonly string[] = [
   'applyControlForm',
   'geometry',
   'scrollTo',
-  'setZoom',
   'configure',
   'config',
   'describePageSetup',

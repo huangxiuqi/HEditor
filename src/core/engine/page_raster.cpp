@@ -33,17 +33,17 @@ constexpr float kMarginMarkPt = 18.0f;
 
 void drawPage(PageSink& target, const RenderInput& in, int page_index, const float* band_lo_pt,
               const float* band_hi_pt, PageRasterCost* cost) {
-    const float zoom = in.cfg->zoom;
+    const float density = in.cfg->density;
     const int page_px_w = pagePxWidthOf(*in.cfg);
     const int page_px_h = pagePxHeightOf(*in.cfg);
-    const float units_to_px = zoom / kFontScalePerPt;
+    const float units_to_px = density / kFontScalePerPt;
     const bool band = band_lo_pt && band_hi_pt;
 
     const auto t_fill0 = Clock::now();
     if (band) {
         // 擦除范围向外扩 1 像素：相邻两条带的边界取两行中线，留 1 像素免得接缝上留一条线。
-        const float y0 = std::max(0.0f, (*band_lo_pt) * zoom - 1.0f);
-        const float y1 = std::min(static_cast<float>(page_px_h), (*band_hi_pt) * zoom + 1.0f);
+        const float y0 = std::max(0.0f, (*band_lo_pt) * density - 1.0f);
+        const float y1 = std::min(static_cast<float>(page_px_h), (*band_hi_pt) * density + 1.0f);
         target.fillRect(Rect{0.0f, y0, static_cast<float>(page_px_w), std::max(0.0f, y1 - y0)},
                         in.cfg->page_fill);
     } else {
@@ -63,15 +63,15 @@ void drawPage(PageSink& target, const RenderInput& in, int page_index, const flo
     //   八条短线（四角各两条）够便宜，不必按带筛。
     if (in.cfg->show_margin_marks && !in.cfg->page.continuous) {
         const PageMargins& pm = in.cfg->page.margins;
-        const float x0 = std::round(pm.left * zoom);
-        const float y0 = std::round(pm.top * zoom);
-        const float x1 = std::round(static_cast<float>(page_px_w) - pm.right * zoom);
-        const float y1 = std::round(static_cast<float>(page_px_h) - pm.bottom * zoom);
+        const float x0 = std::round(pm.left * density);
+        const float y0 = std::round(pm.top * density);
+        const float x1 = std::round(static_cast<float>(page_px_w) - pm.right * density);
+        const float y1 = std::round(static_cast<float>(page_px_h) - pm.bottom * density);
         // 臂长固定 18 磅；边距本身比它窄时按边距的一半收（标记要留在页边距里，
         //   越进正文就变成压字的脏墨了）。
         const float narrow = std::min(std::min(pm.left, pm.right), std::min(pm.top, pm.bottom));
         const float arm_pt = std::min(kMarginMarkPt, narrow * 0.5f);
-        const float len = std::round(arm_pt * zoom);
+        const float len = std::round(arm_pt * density);
         if (len >= 1.0f && x1 - x0 > 2.0f * len && y1 - y0 > 2.0f * len) {
             const Color c = in.cfg->margin_mark_color;
             // 每个角两条臂，都朝页边距那一侧伸（裁切标记的老规矩：线在成品之外）。
@@ -130,8 +130,8 @@ void drawPage(PageSink& target, const RenderInput& in, int page_index, const flo
                 //   连页不算：那里的"下一片"只差一条条带，切口不是页边界。
                 const bool seam_bottom =
                     (!cont) && (pi + 1 >= pt.placed.size() || pt.placed[pi + 1].page != page);
-                const float top = pr.y * zoom + dy;
-                const float bot = top + pr.h * zoom;
+                const float top = pr.y * density + dy;
+                const float bot = top + pr.h * density;
                 if (bot <= top) continue;
                 int row_seen = -1;
                 int grid_col = 0;
@@ -146,8 +146,8 @@ void drawPage(PageSink& target, const RenderInput& in, int page_index, const flo
                     const int c1 = grid_col;
                     if (c0 >= static_cast<int>(pt.col_x.size())) continue;
                     const int c1s = std::min(c1, static_cast<int>(pt.col_x.size()) - 1);
-                    const float left = (pt.x + pt.col_x[static_cast<size_t>(c0)]) * zoom;
-                    const float right = (pt.x + pt.col_x[static_cast<size_t>(c1s)]) * zoom;
+                    const float left = (pt.x + pt.col_x[static_cast<size_t>(c0)]) * density;
+                    const float right = (pt.x + pt.col_x[static_cast<size_t>(c1s)]) * density;
                     if (right <= left) continue;
                     const int xl = static_cast<int>(std::lround(left));
                     const int xr = static_cast<int>(std::lround(right));
@@ -223,11 +223,11 @@ void drawPage(PageSink& target, const RenderInput& in, int page_index, const flo
                 //   再细会碎、再粗会像删除线。
                 // 粗细按字号算，并且取整到整像素：不取整时 1.28 px 会横跨两行像素，
                 //   看上去比实际粗一倍（而且大字号小字号都是两行，看着像"粗细固定"）。
-                const float thick = std::max(1.0f, std::round(ul_size * zoom * 0.04f));
+                const float thick = std::max(1.0f, std::round(ul_size * density * 0.04f));
                 // 位置比 Word 再低一点点：贴着字底会把相邻字的底部连成一条。
-                const float y = std::round((ul_y + ul_size * 0.14f) * zoom + dy);
-                const float x0 = std::round(ul_x0 * zoom);
-                const float x1 = std::round(ul_x1 * zoom);
+                const float y = std::round((ul_y + ul_size * 0.14f) * density + dy);
+                const float x0 = std::round(ul_x0 * density);
+                const float x1 = std::round(ul_x1 * density);
                 if (x1 > x0) target.fillRect(Rect{x0, y, x1 - x0, thick}, ul_color);
             }
             ul_line = -1;
@@ -267,15 +267,15 @@ void drawPage(PageSink& target, const RenderInput& in, int page_index, const flo
                 flush_ul();
                 target.restoreToMark(clip_mark);
                 if (lb.clip_text) {
-                    target.pushClipRect(Rect{0.0f, lb.slotLoPt() * zoom + dy,
+                    target.pushClipRect(Rect{0.0f, lb.slotLoPt() * density + dy,
                                              static_cast<float>(target.width()),
-                                             lb.advance_pt * zoom});
+                                             lb.advance_pt * density});
                 }
             }
             // 画带时按字形的纵向位置筛：行盒的块轴范围就是它的 ascent/descent，
             //   所以"落在带内"就是"属于这条带"。带向外扩了 1 像素，相邻带在中线相接。
             //   接缝那一趟要按平移之后的坐标筛（它画在本带的顶部）。
-            const float y_pt = pg.y_pt + dy / zoom;
+            const float y_pt = pg.y_pt + dy / density;
             if (band && (y_pt < *band_lo_pt - 1.0f || y_pt > *band_hi_pt + 1.0f)) continue;
             // 下划线：同一行内把连续带下划线的字形合成一条；换行或遇到不带下划线的
             //   字形时把上一段合上。右端取这个字形自己的 advance —— 按 0.6 em 估的话，
@@ -316,8 +316,8 @@ void drawPage(PageSink& target, const RenderInput& in, int page_index, const flo
                 run_italic = pg.italic;
             }
             run_ids.push_back(pg.glyph_id);
-            run_x.push_back(pg.x_pt * zoom);
-            run_y.push_back(pg.y_pt * zoom + dy);
+            run_x.push_back(pg.x_pt * density);
+            run_y.push_back(pg.y_pt * density + dy);
         }
         flush_run();
         flush_ul();
@@ -330,8 +330,8 @@ void drawPage(PageSink& target, const RenderInput& in, int page_index, const flo
         for (int li : in.layout->linesOnPage(page)) {
             const LineBox& lb = in.layout->lines[static_cast<size_t>(li)];
             if (spill_only && !(lb.block_hi_pt > slab_pt)) continue;
-            const float lo_pt = lb.block_lo_pt + dy / zoom;
-            const float hi_pt = lb.block_hi_pt + dy / zoom;
+            const float lo_pt = lb.block_lo_pt + dy / density;
+            const float hi_pt = lb.block_hi_pt + dy / density;
             if (band && (hi_pt < *band_lo_pt - 1.0f || lo_pt > *band_hi_pt + 1.0f)) continue;
             for (size_t ci = 0; ci < lb.clusters.size(); ++ci) {
                 const LineCluster& c = lb.clusters[ci];
@@ -355,10 +355,10 @@ void drawPage(PageSink& target, const RenderInput& in, int page_index, const flo
             float fx = pf.x;
             float fy = pf.y;
             floatPreviewPos(*in.cfg, in.float_preview, pf, &fx, &fy);
-            const float lo_pt = fy + dy / zoom;
+            const float lo_pt = fy + dy / density;
             const float hi_pt = lo_pt + pf.h;
             if (band && (hi_pt < *band_lo_pt - 1.0f || lo_pt > *band_hi_pt + 1.0f)) continue;
-            const Rect box{fx * zoom, lo_pt * zoom, pf.w * zoom, pf.h * zoom};
+            const Rect box{fx * density, lo_pt * density, pf.w * density, pf.h * density};
             if (!(box.w > 0.0f) || !(box.h > 0.0f)) continue;
             const doc::Node* n = doc::findNode((*in.doc), static_cast<NodeId>(pf.handle));
             const ImageSpec* im = (n != nullptr) ? std::get_if<ImageSpec>(&n->payload) : nullptr;

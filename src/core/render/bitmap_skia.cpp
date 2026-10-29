@@ -7,8 +7,8 @@
  *
  * 坐标与字号（最容易错的一处）：按 hb_font_set_scale(font, S, S) 的约定，
  * S = size_pt * kFontScalePerPt，设计单位 d 的设备像素为 d * S / upem * units_to_px。
- * 要让 1 em 等于 size_pt 磅乘 zoom 成立，SkFont 的 size 应取 S * units_to_px（不是
- * upem*units_to_px 或 size_pt 乘 zoom）；S 从 hb_font_get_scale() 读，故不会随之失准。
+ * 要让 1 em 等于 size_pt 磅乘 density 成立，SkFont 的 size 应取 S * units_to_px（不是
+ * upem*units_to_px 或 size_pt 乘 density）；S 从 hb_font_get_scale() 读，故不会随之失准。
  */
 #include "core/render/bitmap.h"
 

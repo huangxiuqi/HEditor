@@ -27,7 +27,7 @@ namespace heditor {
  */
 void drawAtomBox(PageSink& target, const RenderInput& in, const LineBox& lb, const LineCluster& c,
                  float a1_pt, float off_y) {
-    const float zoom = in.cfg->zoom;
+    const float density = in.cfg->density;
     const float a0 = lb.inline_origin_pt + c.inline_pt;
     // 底边坐在基线上（与字形同一个原点），高度是原子自己的 —— 不是行盒的：一行里混排
     //   大字号文字时行盒比盒子高，拿行盒画框会画出一个不对的矩形。
@@ -35,9 +35,11 @@ void drawAtomBox(PageSink& target, const RenderInput& in, const LineBox& lb, con
     const float top = axis - c.atom_h_pt;
     Rect box;
     if (!lb.vertical) {
-        box = Rect{a0 * zoom, top * zoom + off_y, (a1_pt - a0) * zoom, c.atom_h_pt * zoom};
+        box = Rect{a0 * density, top * density + off_y, (a1_pt - a0) * density,
+                   c.atom_h_pt * density};
     } else {
-        box = Rect{top * zoom, a0 * zoom + off_y, c.atom_h_pt * zoom, (a1_pt - a0) * zoom};
+        box = Rect{top * density, a0 * density + off_y, c.atom_h_pt * density,
+                   (a1_pt - a0) * density};
     }
     if (!(box.w > 0.0f) || !(box.h > 0.0f)) return;
 
@@ -73,7 +75,7 @@ void drawAtomBox(PageSink& target, const RenderInput& in, const LineBox& lb, con
     const float pad = in.cfg->atom_pad_pt;
     const float avail = (a1_pt - a0) - pad * 2.0f;
     if (!(avail > 0.0f)) return;
-    const float units_to_px = zoom / kFontScalePerPt;
+    const float units_to_px = density / kFontScalePerPt;
     // 框内居中。横排下"居中"指基线：基线 = 框顶 + (框高 + ascent - descent) / 2；
     //   竖排下标签转 90°，居中指的是列内横轴，取框的横向中心（与括号同一条做法）。
     const float asc = lb.bracket_font->ascenderPt();
@@ -93,11 +95,11 @@ void drawAtomBox(PageSink& target, const RenderInput& in, const LineBox& lb, con
         // 放不下就截断：溢出的字会盖到相邻内容上，比少写几个字更糟。
         if (pen + adv > avail) break;
         if (!lb.vertical) {
-            xs.push_back((a0 + pad + pen) * zoom);
-            ys.push_back(cross * zoom + off_y);
+            xs.push_back((a0 + pad + pen) * density);
+            ys.push_back(cross * density + off_y);
         } else {
-            xs.push_back(cross * zoom);
-            ys.push_back((a0 + pad + pen) * zoom + off_y);
+            xs.push_back(cross * density);
+            ys.push_back((a0 + pad + pen) * density + off_y);
         }
         ids.push_back(g);
         pen += adv;
@@ -120,26 +122,26 @@ namespace {
  * @param along 行末位置（磅，行内轴）
  * @param cross 基线（磅，块轴）
  * @param size_pt 这一行的字号（磅）
- * @param zoom 设备像素 / 磅
+ * @param density 设备像素 / 磅
  * @param vertical 竖排：整枚标记转 90 度
  * @param color 颜色
  * @param dy_px 整笔的纵向平移（连页接缝补画那半截时是负的带高）
  */
-void drawBreakMark(PageSink& target, float along, float cross, float size_pt, float zoom,
+void drawBreakMark(PageSink& target, float along, float cross, float size_pt, float density,
                    bool vertical, Color color, float dy_px) {
     // 尺寸与落点都取整到设备像素：连页接缝那一趟是同一枚标记整体上移一个带高再画一次，
     //   两趟必须落到同一批像素上（判据是逐字节相同）。取整之前算，两趟会差出半像素的
     //   抗锯齿覆盖率 —— 差的正好是带边界那两行。
-    const float t = std::round(std::max(1.0f, size_pt * 0.065f * zoom));  // 笔画宽度
-    const float w = std::round(size_pt * 0.58f * zoom);                   // 横笔长度
-    const float h = std::round(size_pt * 0.28f * zoom);                   // 竖笔高度
-    const float head = std::round(size_pt * 0.28f * zoom);                // 箭头长度
-    const float half = std::round(size_pt * 0.15f * zoom);                // 箭头半高
-    // 平移量在缩放与取整之后加：先除 zoom 再乘回来会引入末位误差，而判据是逐字节比。
-    const float a0 = std::round(along * zoom + size_pt * 0.06f * zoom);
+    const float t = std::round(std::max(1.0f, size_pt * 0.065f * density));  // 笔画宽度
+    const float w = std::round(size_pt * 0.58f * density);                   // 横笔长度
+    const float h = std::round(size_pt * 0.28f * density);                   // 竖笔高度
+    const float head = std::round(size_pt * 0.28f * density);                // 箭头长度
+    const float half = std::round(size_pt * 0.15f * density);                // 箭头半高
+    // 平移量在缩放与取整之后加：先除 density 再乘回来会引入末位误差，而判据是逐字节比。
+    const float a0 = std::round(along * density + size_pt * 0.06f * density);
     // 横笔抬到字高中段（0.28 em）：贴着基线画会显得沉在字底，与字处理软件里那一枚
     //   标记的位置也不同 —— 它大致落在 x 高度上沿那一带。
-    const float bar_lo = std::round(cross * zoom - size_pt * 0.28f * zoom) + dy_px;
+    const float bar_lo = std::round(cross * density - size_pt * 0.28f * density) + dy_px;
     const float right = a0 + w;
     const float mid = bar_lo + t * 0.5f;
     if (!vertical) {
@@ -193,19 +195,19 @@ bool choiceMarkerOf(const RenderInput& in, const PlacedGlyph& pg, bool* checked,
 
 void paintChoiceMarker(PageSink& target, const RenderInput& in, const PlacedGlyph& pg, bool checked,
                        bool square, Color color, float dy) {
-    const float zoom = in.cfg->zoom;
-    if (!(zoom > 0.0f)) return;
+    const float density = in.cfg->density;
+    if (!(density > 0.0f)) return;
     // 记号色没配（全透明）就跟随文字：记号是内容的一部分，正文什么颜色它就什么颜色。
     if (color.a == 0) color = pg.color;
 
-    const float pen_x = pg.x_pt * zoom;
-    const float pen_y = pg.y_pt * zoom + dy;
+    const float pen_x = pg.x_pt * density;
+    const float pen_y = pg.y_pt * density + dy;
 
     // 记号的外径统一按字号定：方框与圆圈共用同一个数，两族图标的视觉大小才对得上。
     //   圆圈若借字体里的字形，它的直径就取决于字体 —— 同一个字号下与方框并排放着
     //   一个偏小一个偏大，一眼就看出来。
-    const float size_px = pg.size_pt * zoom;
-    const float adv_px = (pg.advance_pt > 0.0f ? pg.advance_pt : pg.size_pt) * zoom;
+    const float size_px = pg.size_pt * density;
+    const float adv_px = (pg.advance_pt > 0.0f ? pg.advance_pt : pg.size_pt) * density;
     if (!(size_px > 1.0f)) return;
     const float side = std::max(5.0f, std::round(size_px * 0.72f));
     const float thick = std::max(1.0f, std::round(size_px * 0.075f));
@@ -277,8 +279,8 @@ void drawWatermark(PageSink& target, const RenderInput& in, int page_index, cons
     }
     if (!(total > 0.0f)) return;
 
-    const float zoom = in.cfg->zoom;
-    const float units_to_px = zoom / kFontScalePerPt;
+    const float density = in.cfg->density;
+    const float units_to_px = density / kFontScalePerPt;
     // 落在整页的中心，不是正文区的中心：Word 的水印以纸面为参照，页边距改了水印不跟着挪。
     const float cx = in.cfg->page.width_pt * 0.5f;
     const float cy = in.cfg->page.height_pt * 0.5f;
@@ -302,8 +304,8 @@ void drawWatermark(PageSink& target, const RenderInput& in, int page_index, cons
             continue;
         }
         const uint32_t one = gids[i];
-        const float x = px * zoom;
-        const float y = py * zoom;
+        const float x = px * density;
+        const float y = py * density;
         target.drawGlyphs(hb, &one, &x, &y, 1, units_to_px, w.color, w.angle_deg);
     }
 }
@@ -325,8 +327,8 @@ void drawEditingMarks(PageSink& target, const RenderInput& in, int page_index,
     if (!in.marks_shown) return;
     const MarksMode mode = in.cfg->marks;
 
-    const float zoom = in.cfg->zoom;
-    const float units_to_px = zoom / kFontScalePerPt;
+    const float density = in.cfg->density;
+    const float units_to_px = density / kFontScalePerPt;
     const float slab_pt = in.cfg->page.slabHeightPt();
     const bool band = band_lo_pt && band_hi_pt;
     const std::vector<BlockSpec>& bs = (*in.blocks);
@@ -337,8 +339,8 @@ void drawEditingMarks(PageSink& target, const RenderInput& in, int page_index,
         const LineBox& lb = lines[static_cast<size_t>(k)];
         if (!lb.bracket_font) continue;
         if (spill_only && !(lb.block_hi_pt > slab_pt)) continue;
-        const float lo_pt = lb.block_lo_pt + dy_px / zoom;
-        const float hi_pt = lb.block_hi_pt + dy_px / zoom;
+        const float lo_pt = lb.block_lo_pt + dy_px / density;
+        const float hi_pt = lb.block_hi_pt + dy_px / density;
         if (band && (hi_pt < *band_lo_pt - 1.0f || lo_pt > *band_hi_pt + 1.0f)) continue;
 
         hb_font_t* hbf = lb.bracket_font->hb();
@@ -367,30 +369,30 @@ void drawEditingMarks(PageSink& target, const RenderInput& in, int page_index,
                     // 半角空格画中点，全角空格画空心小方块：两者的占位差四倍，同一个点
                     //   放在全角格里会显得那一格是空的（与字处理软件的画法也一致）。
                     const bool full = (ch == 0x3000);
-                    const float s0 = full ? std::max(3.0f, lb.size_pt * 0.42f * zoom) : 0.0f;
+                    const float s0 = full ? std::max(3.0f, lb.size_pt * 0.42f * density) : 0.0f;
                     // 半角空格的格宽只有 0.22 em：点若按字号取（0.09 em）就占了四成，
                     //   再经 fillRect 的 floor/ceil 向外取整，1 px 的框会撑成 2 px，
                     //   连续空格于是挤成一条线。按格宽的三成取，并吸附到整像素。
-                    const float dot_px = std::max(1.0f, std::round((a1 - a0) * 0.30f * zoom));
+                    const float dot_px = std::max(1.0f, std::round((a1 - a0) * 0.30f * density));
                     if (!lb.vertical) {
                         if (full) {
-                            const float x0 = cx * zoom - s0 * 0.5f;
-                            const float y0 = mid * zoom + dy_px - s0 * 0.5f;
+                            const float x0 = cx * density - s0 * 0.5f;
+                            const float y0 = mid * density + dy_px - s0 * 0.5f;
                             const float st = std::max(1.0f, s0 * 0.12f);
                             target.fillRect(Rect{x0, y0, s0, st}, in.cfg->mark_color);
                             target.fillRect(Rect{x0, y0 + s0 - st, s0, st}, in.cfg->mark_color);
                             target.fillRect(Rect{x0, y0, st, s0}, in.cfg->mark_color);
                             target.fillRect(Rect{x0 + s0 - st, y0, st, s0}, in.cfg->mark_color);
                         } else {
-                            target.fillRect(Rect{std::round(cx * zoom - dot_px * 0.5f),
-                                                 std::round(mid * zoom + dy_px), dot_px, dot_px},
+                            target.fillRect(Rect{std::round(cx * density - dot_px * 0.5f),
+                                                 std::round(mid * density + dy_px), dot_px, dot_px},
                                             in.cfg->mark_color);
                         }
                     } else {
                         // 竖排：行内轴是 y、块轴是 x，中点跟着换轴（方块不必转）。
                         target.fillRect(
-                            Rect{std::round(mid * zoom),
-                                 std::round(cx * zoom + dy_px - dot_px * 0.5f), dot_px, dot_px},
+                            Rect{std::round(mid * density),
+                                 std::round(cx * density + dy_px - dot_px * 0.5f), dot_px, dot_px},
                             in.cfg->mark_color);
                     }
                 } else if (ch == 0x09) {
@@ -398,10 +400,10 @@ void drawEditingMarks(PageSink& target, const RenderInput& in, int page_index,
                     hb_codepoint_t g = 0;
                     if (!hb_font_get_nominal_glyph(hbf, 0x2192, &g) || !g) continue;
                     if (!lb.vertical) {
-                        target.drawGlyph(hbf, g, a0 * zoom, axis * zoom + dy_px, units_to_px,
+                        target.drawGlyph(hbf, g, a0 * density, axis * density + dy_px, units_to_px,
                                          in.cfg->mark_color, 0.0f);
                     } else {
-                        target.drawGlyph(hbf, g, axis * zoom, a0 * zoom + dy_px, units_to_px,
+                        target.drawGlyph(hbf, g, axis * density, a0 * density + dy_px, units_to_px,
                                          in.cfg->mark_color, 90.0f);
                     }
                 }
@@ -411,7 +413,8 @@ void drawEditingMarks(PageSink& target, const RenderInput& in, int page_index,
         // 段落标记只画在这一段的最后一行：段内码点数 == 行盒的 last_cp。
         //   空段（码点 0 个）的最后一行就是它唯一那一行，标记落在行首。
         if (lb.last_cp != static_cast<uint32_t>(text.size())) continue;
-        drawBreakMark(target, x1, axis, lb.size_pt, zoom, lb.vertical, in.cfg->mark_color, dy_px);
+        drawBreakMark(target, x1, axis, lb.size_pt, density, lb.vertical, in.cfg->mark_color,
+                      dy_px);
     }
 }
 
@@ -433,9 +436,9 @@ void drawControlMarks(PageSink& target, const RenderInput& in, int page_index,
     // 只读不画：它是呈现与打印态，括号落进版面就印出来了。
     if (in.mode == EditMode::ReadOnly) return;
 
-    const float zoom = in.cfg->zoom;
-    const float units_to_px = zoom / kFontScalePerPt;
-    const float dot = std::max(1.0f, in.cfg->control_dot_pt * zoom);
+    const float density = in.cfg->density;
+    const float units_to_px = density / kFontScalePerPt;
+    const float dot = std::max(1.0f, in.cfg->control_dot_pt * density);
     const bool band = band_lo_pt && band_hi_pt;
     // 接缝那一趟：只画越过带底的那一截（见 drawPage），坐标整体上移一个带高。
     const float slab_pt = in.cfg->page.slabHeightPt();
@@ -447,8 +450,8 @@ void drawControlMarks(PageSink& target, const RenderInput& in, int page_index,
         const LineBox& lb = lines[static_cast<size_t>(k)];
         if (!lb.bracket_font) continue;
         if (spill_only && !(lb.block_hi_pt > slab_pt)) continue;
-        const float lo_pt = lb.block_lo_pt + dy_px / zoom;
-        const float hi_pt = lb.block_hi_pt + dy_px / zoom;
+        const float lo_pt = lb.block_lo_pt + dy_px / density;
+        const float hi_pt = lb.block_hi_pt + dy_px / density;
         if (band && (hi_pt < *band_lo_pt - 1.0f || lo_pt > *band_hi_pt + 1.0f)) continue;
 
         for (const LineCluster& c : lb.clusters) {
@@ -481,14 +484,14 @@ void drawControlMarks(PageSink& target, const RenderInput& in, int page_index,
 
             if (!lb.vertical) {
                 // 横排：字形原点的 y 就是基线，行内轴是 x。
-                target.drawGlyph(hbf, g, along_pt * zoom, lb.bracket_axis_pt * zoom + dy_px,
+                target.drawGlyph(hbf, g, along_pt * density, lb.bracket_axis_pt * density + dy_px,
                                  units_to_px, col, 0.0f);
             } else {
                 // 竖排：括号跟着转 90°（顺时针）。字形轮廓本身是横排形态，
                 //   [ 转过来开口朝下 —— 正好是"内容继续往下排"的意思。
                 //   不转的话括号会横躺在列里，开口方向与行内轴垂直（错的）。
                 //   旋转后 advance 沿 +y，所以位置分量是 (列内横轴笔位, 行内轴)。
-                target.drawGlyph(hbf, g, lb.bracket_axis_pt * zoom, along_pt * zoom + dy_px,
+                target.drawGlyph(hbf, g, lb.bracket_axis_pt * density, along_pt * density + dy_px,
                                  units_to_px, col, 90.0f);
             }
         }
@@ -502,8 +505,8 @@ void drawControlMarks(PageSink& target, const RenderInput& in, int page_index,
         const LineBox& lb = lines[static_cast<size_t>(k)];
         if (!lb.bracket_font) continue;
         if (spill_only && !(lb.block_hi_pt > slab_pt)) continue;
-        const float lo_pt = lb.block_lo_pt + dy_px / zoom;
-        const float hi_pt = lb.block_hi_pt + dy_px / zoom;
+        const float lo_pt = lb.block_lo_pt + dy_px / density;
+        const float hi_pt = lb.block_hi_pt + dy_px / density;
         if (band && (hi_pt < *band_lo_pt - 1.0f || lo_pt > *band_hi_pt + 1.0f)) continue;
 
         for (size_t ci = 0; ci < lb.clusters.size(); ++ci) {
@@ -536,12 +539,12 @@ void drawControlMarks(PageSink& target, const RenderInput& in, int page_index,
                 const float adv = hb_font_get_glyph_h_advance(hbf, g) / kFontScalePerPt;
                 if (pen + adv > avail + 0.01f) break;
                 if (!lb.vertical) {
-                    xs.push_back((a0 + pen) * zoom);
-                    ys.push_back(lb.bracket_axis_pt * zoom + dy_px);
+                    xs.push_back((a0 + pen) * density);
+                    ys.push_back(lb.bracket_axis_pt * density + dy_px);
                 } else {
                     // 竖排：与括号同一套做法，整笔转 90 度，沿列往下推进。
-                    xs.push_back(lb.bracket_axis_pt * zoom);
-                    ys.push_back((a0 + pen) * zoom + dy_px);
+                    xs.push_back(lb.bracket_axis_pt * density);
+                    ys.push_back((a0 + pen) * density + dy_px);
                 }
                 ids.push_back(g);
                 pen += adv;
@@ -556,19 +559,19 @@ void drawControlMarks(PageSink& target, const RenderInput& in, int page_index,
     if (!in.cfg->show_control_dots) return;
 
     // 开启时所有控件都画 —— 不区分焦点。它只表示"这里有一个字段"，
-    //   不表示"光标不在这里"，所以这里既没有 innermostAt，也没有"跳过聚焦的那个"。
+    //   不表示"光标不在这里"，所以这里不问归属，也不跳过聚焦的那个。
     for (int ci = 0; ci < in.controls->size(); ++ci) {
         const Control& c = in.controls->at(ci);
         const Color col = c.read_only ? in.cfg->control_mark_ro : in.cfg->control_mark;
         for (const PageRect& cr : in.control_geometry->rects(ci)) {
             if (cr.page != page_index) continue;
             if (spill_only && !(cr.r_pt.y + cr.r_pt.h > slab_pt)) continue;
-            const float lo_pt = cr.r_pt.y + dy_px / zoom;
-            const float hi_pt = cr.r_pt.y + cr.r_pt.h + dy_px / zoom;
+            const float lo_pt = cr.r_pt.y + dy_px / density;
+            const float hi_pt = cr.r_pt.y + cr.r_pt.h + dy_px / density;
             if (band && (hi_pt < *band_lo_pt - 1.0f || lo_pt > *band_hi_pt + 1.0f)) continue;
             // 小点：右下角、内缩一点
-            const float x1 = (cr.r_pt.x + cr.r_pt.w) * zoom;
-            const float y1 = (cr.r_pt.y + cr.r_pt.h) * zoom + dy_px;
+            const float x1 = (cr.r_pt.x + cr.r_pt.w) * density;
+            const float y1 = (cr.r_pt.y + cr.r_pt.h) * density + dy_px;
             target.fillRect(Rect{x1 - dot, y1 - dot, dot, dot}, col);
         }
     }

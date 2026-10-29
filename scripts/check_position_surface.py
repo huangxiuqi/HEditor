@@ -75,7 +75,7 @@ COMMANDS = {
     'setCaretPosition',
     'extendTo',
     'select',
-    'selectPos',
+    'selectByTextPos',
     'clearSelection',
     'selectionReport',
     'selectAll',

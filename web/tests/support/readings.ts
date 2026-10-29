@@ -37,8 +37,11 @@ export const PRELUDE = `
     const r = D.selectionRaw() || {};
     return { anchor: r.anchor, focus: r.focus, empty: !!r.empty, rects: r.rects || [] };
   };
-  // 缩放密度：设备像素 / 磅。界面收倍数，这里按装载时写进引擎的那套换算折回去。
+  // 密度：设备像素 / 磅。按公开面的倍数折回来，不读 diag 的 density —— 那是 float32，
+  //   末位差异会让压在字符边界上的采样点翻到另一侧（横扫判据会随机红一个点）。
   const ZOOM = () => H.config().zoom * (4 / 3) * (H.geometry().dpr || 1);
+  // 一磅占多少 CSS 像素：密度除以 DPR。鼠标坐标与 DOM 覆盖物位置都用它，别拿 ZOOM 直接算。
+  const CSSPT = () => ZOOM() / (H.geometry().dpr || 1);
   // 窗口与可见页：引擎装着的窗口来自 geometry，可见页按滚动位置与页步距算 ——
   //   滚动没动窗口时（还在余量内）两者会不一样，判据要能分别看。滚动在 .heditor-stage 上，
   //   它由库的骨架提供，不是页面的滚动容器。

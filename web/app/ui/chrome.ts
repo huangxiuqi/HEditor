@@ -69,7 +69,7 @@ export function mountChrome(host: HTMLElement, title: string, tabs: Tab[]): Chro
   const zoomTo = (z: number): void => {
     if (!editor) return;
     const clamp = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
-    void editor.setZoom(clamp).then(syncZoom);
+    void editor.configure({ zoom: clamp }).then(syncZoom);
   };
 
   bar = createStatusBar(

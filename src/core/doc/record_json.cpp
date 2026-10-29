@@ -895,7 +895,6 @@ ordered_json sectionJson(const SectionSpec& sec) {
     const SectionMargins kDefaultMargins;
     if (!(sec.paper == Paper{})) {
         ordered_json p = ordered_json::object();
-        if (sec.paper.name != PaperName::A4) p["name"] = paperNameName(sec.paper.name);
         if (sec.paper.orient != Orientation::Portrait) {
             p["orient"] = orientationName(sec.paper.orient);
         }
@@ -993,7 +992,6 @@ bool readSection(const ordered_json& j, const char* key, SectionSpec* out) {
     if (s.contains("paper")) {
         if (!s["paper"].is_object()) return false;
         const ordered_json& p = s["paper"];
-        if (!readEnum(p, "name", paperNameFromName, &out->paper.name)) return false;
         if (!readEnum(p, "orient", orientationFromName, &out->paper.orient)) return false;
         if (p.contains("w")) {
             Length len;

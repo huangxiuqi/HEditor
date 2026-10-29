@@ -144,7 +144,7 @@ struct RenderInput {
  * @return 像素宽度
  */
 inline int pagePxWidthOf(const EngineConfig& cfg) {
-    return std::max(1, static_cast<int>(std::lround(cfg.page.width_pt * cfg.zoom)));
+    return std::max(1, static_cast<int>(std::lround(cfg.page.width_pt * cfg.density)));
 }
 
 /**
@@ -154,7 +154,7 @@ inline int pagePxWidthOf(const EngineConfig& cfg) {
  * @return 像素高度
  */
 inline int pagePxHeightOf(const EngineConfig& cfg) {
-    return std::max(1, static_cast<int>(std::lround(cfg.page.height_pt * cfg.zoom)));
+    return std::max(1, static_cast<int>(std::lround(cfg.page.height_pt * cfg.density)));
 }
 
 /**

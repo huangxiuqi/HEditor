@@ -262,7 +262,7 @@ test.describe('工具栏', () => {
       );
       out.wheelZoom = await until(() => e.config().zoom > 1);
       out.wheelZoomReadout = await until(() => pctOf() !== pct0);
-      await e.setZoom(1);
+      await e.configure({ zoom: 1 });
       await e.flush();
 
       // 一路点下来，增量产物还得等于全量：按钮生效了但排版停在旧内容上，正是这里要挡的
@@ -453,7 +453,7 @@ test.describe('公开面', () => {
       out.geometry = e.geometry();
       await e.scrollTo({ page: 0 });
       out.scroll = true;
-      await e.setZoom(1.25);
+      await e.configure({ zoom: 1.25 });
       out.zoom = e.config().zoom;
       out.configure = await e.configure({ zoom: 1 });
       out.config = e.config();
@@ -556,7 +556,7 @@ test.describe('公开面', () => {
 
     check('geometry 有页宽与页数', r.geometry.page.w > 0 && r.geometry.pages >= 1,
           JSON.stringify(r.geometry.page));
-    check('setZoom 生效', r.zoom === 1.25, String(r.zoom));
+    check('设置缩放倍数生效', r.zoom === 1.25, String(r.zoom));
     check('configure 返回生效值', r.configure.zoom === 1, JSON.stringify(r.configure));
     check('element 是容器', r.element === true, String(r.element));
     check('describePageSetup 给出字段表', r.pageFields > 0, String(r.pageFields));

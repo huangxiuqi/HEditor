@@ -250,7 +250,7 @@ const COMMANDS: Array<[string, string, string[], string]> = [
   ['present',               'w', ['present'],                                             'host'],
   ['scenario',              'w', ['setScenario'],                                         'self'],
   ['reset',                 'w', ['setZoom', 'setScenario'],                              'self'],
-  ['zoom',                  'w', ['setZoom'],                                             'self'],
+  ['density',               'w', ['setZoom'],                                             'self'],
   ['stress',                'w', ['loadStressDocument'],                                  'self'],
   ['stressDiverse',         'w', ['loadStressDocumentDiverse'],                           'self'],
   ['textDoc',               'w', ['loadTextDocument'],                                    'self'],
@@ -333,7 +333,7 @@ const COMMANDS: Array<[string, string, string[], string]> = [
   // 拖拽移动：两条命令。能不能拖由 hit 一起答（同一次命中里带 drag 那两个键）。
   ['moveSelection',         'w', ['moveSelectionTo'],                                     'self'],
   ['moveImage',             'w', ['moveImageTo'],                                         'self'],
-  ['selectPos',             'w', ['select', 'flowAt'],                                    'self'],
+  ['selectByTextPos',       'w', ['select', 'flowAt'],                                    'self'],
   ['select',                'w', ['select'],                                             'self'],
   ['clearSelection',        'w', ['clearSelection'],                                      'self'],
   // 地址入口就这一条：修饰按需给（控件下标 / 槽序号 + 行别），都不给就是程序化定位。
@@ -341,7 +341,6 @@ const COMMANDS: Array<[string, string, string[], string]> = [
   ['caretPosition',         'r', ['caretPositionJson'],                                    'none'],
   ['setCaretPosition',      'w', ['setCaretPosition', 'showCaret'],                       'host'],
   ['extendTo',              'w', ['extendTo', 'showCaret'],                                'host'],
-  ['blinkPhase',            'w', ['showCaret'],                                           'host'],
   ['viewport',              'w', ['setViewportAnchor'],                                   'host'],
 
   // 配置：改参数；改到画面的那几条（模式 / 括号 / 小点 / 光标色）要补呈现
@@ -416,9 +415,9 @@ const COMMANDS: Array<[string, string, string[], string]> = [
   ['frameDigest',           'r', ['frameRgba'],                                           'none'],
   ['stats',                 'r', ['statsJson'],                                           'none'],
   ['editStats',             'r', ['editStatsJson'],                                       'none'],
-  ['dirtyPages',            'r', ['dirtyPagesJson'],                                      'none'],
-  ['pageDirtyRects',        'r', ['pageDirtyRectsJson'],                                  'none'],
-  ['pageDirtyPages',        'r', ['pageDirtyPagesJson'],                                  'none'],
+  ['pagesWrittenThisFrame', 'r', ['pagesWrittenThisFrameJson'],                           'none'],
+  ['pendingRects',          'r', ['pendingRectsJson'],                                     'none'],
+  ['pagesPendingBlit',      'r', ['pagesPendingBlitJson'],                                 'none'],
   ['prewarmPage',           'r', ['prewarmPageGlyphs'],                                   'none'],
   ['heap',                  'r', [],                                                      'none'],  // 读的是模块属性 HEAPU8，不是导出
   ['buildStamp',            'r', ['buildStamp'],                                          'none'],
@@ -453,8 +452,6 @@ const OUTSIDE: Array<[string, string, string]> = [
   ['setPageGap',       'host',  '页间隙：由 api.setViewMode 与连页标志一起设'],
   ['setContinuous',    'host',  '连页标志：同上（改的是排版形状，不是一份配置）'],
   ['contentPx',        'state', 'geom() 报的内容底边（连页拿它当滚动高度）'],
-  ['relayout',         'diag',  '只排版不画（手工诊断）；目前没有任何调用方'],
-  ['shapeReport',      'diag',  '单段整形报告（手工诊断）；目前没有任何调用方'],
 ];
 
 // 按类别取命令名。
@@ -541,7 +538,7 @@ const roleFace: Record<string, number> = {};
 let fontInfo: any[] = [];
 // 与单线程宿主同一口径：缩放 1 倍 = 96 dpi = 4 / 3。
 const kZoomBase = 4 / 3;
-let zoomLevel = kZoomBase;   // markCheck 要用：括号左缘的像素位置随缩放走
+let densityLevel = kZoomBase;   // markCheck 要用：括号左缘的像素位置随缩放走
 // 页度量由宿主传，与单线程宿主同一组值（常量与理由见 app.js 的同名声明）。
 // A4 = 595.276 x 841.89 磅；页边距 2 厘米 = 2 x 72 / 2.54 磅。
 const kPageWidthPt = 595.276;
@@ -889,7 +886,7 @@ function sendState(ts: number, label: string, stats: any, changed?: boolean, wor
     textAll: textAllCache,
     controls: JSON.parse(mod.controlsJson()),
     blockedEdits: mod.blockedEdits(),
-    dirtyPages: JSON.parse(mod.dirtyPagesJson()),
+    pagesWrittenThisFrame: JSON.parse(mod.pagesWrittenThisFrameJson()),
     caretReport: mod.caretReport(),
     // 选区取证（两端全局流位置 + 页面坐标矩形）。与 caretReport 同档：小字符串，
     //   随 state 推过去，主线程的 host.selection 于是仍是同步读。
@@ -977,8 +974,8 @@ function paintFull(keepScroll = 1) {
   textAllCache = mod.documentTextAll();
 }
 
-function loadScenario(id: any, zoom: any) {
-  if (zoom) { mod.setZoom(zoom); zoomLevel = zoom; }
+function loadScenario(id: any, density: any) {
+  if (density) { mod.setZoom(density); densityLevel = density; }
   mod.setScenario(id);
   paintFull();
 }
@@ -1050,13 +1047,13 @@ async function boot(m: any) {
                        kPageMarginPt);
     // 缩放也要先设：loadScenario 收 zoom 参数，而 empty 那条路不走它 —— 漏设就会
     //   按 EngineConfig 的默认密度排（1.5 倍），页面比请求的大一整档。
-    if (m.zoom) {
-      mod.setZoom(m.zoom);
-      zoomLevel = m.zoom;
+    if (m.density) {
+      mod.setZoom(m.density);
+      densityLevel = m.density;
     }
     // empty = 库要的初始状态：一份只有一个空段落的文档，不带演示内容。
     if (m.empty) loadBlocks(() => mod.loadTextDocument('', 1));
-    else loadScenario(m.scenario === undefined ? 6 : m.scenario, m.zoom);
+    else loadScenario(m.scenario === undefined ? 6 : m.scenario, m.density);
     // 首帧的几何先报出去，宿主才能按窗口把每页画布建出来并交给这一侧。
     //   这时候还没有画布，所以只推几何；画布到一张贴一张（见 pageCanvas 分支）。
     sendState(0, 'boot', JSON.parse(mod.editStatsJson()));
@@ -1071,17 +1068,18 @@ async function boot(m: any) {
 const WRITE = collect('w', {
   // 什么都不改，只收尾。给宿主的 present() 用 —— 它就是"重画并回推"。
   present: () => {},
-  scenario: (a) => loadScenario(a.id, a.zoom),
-  reset: (a) => loadScenario(a.id === undefined ? 6 : a.id, a.zoom === undefined ? kZoomBase : a.zoom),
-  zoom: (a) => {
-    const prevZoom = zoomLevel > 0 ? zoomLevel : a.zoom;
-    mod.setZoom(a.zoom);
-    zoomLevel = a.zoom;
+  scenario: (a) => loadScenario(a.id, a.density),
+  reset: (a) => loadScenario(a.id === undefined ? 6 : a.id,
+                             a.density === undefined ? kZoomBase : a.density),
+  density: (a) => {
+    const prev = densityLevel > 0 ? densityLevel : a.density;
+    mod.setZoom(a.density);
+    densityLevel = a.density;
     // 屏幕像素比会随窗口换显示器而变，宿主每次改缩放都捎一份新的过来。回推的状态里带着
     //   它，宿主拿它折算页画布的 CSS 尺寸 —— 不回传就会按旧值折算，显示尺寸与背衬差一档。
     if (a.dpr) dpr = a.dpr;
     // 缩放保留滚动位置（按密度折算）：Ctrl + 滚轮的每一次都要停在原处。
-    paintFull(prevZoom > 0 ? a.zoom / prevZoom : 1);
+    paintFull(prev > 0 ? a.density / prev : 1);
   },
   stress: (a) => loadBlocks(() => mod.loadStressDocument(a.paras | 0, a.chars | 0)),
   stressDiverse: (a) => loadBlocks(() => mod.loadStressDocumentDiverse(a.paras | 0, a.chars | 0)),
@@ -1196,7 +1194,7 @@ const WRITE = collect('w', {
                     Number(a.dy || 0)),
   // 外部 API 收 {段号, 段内偏移}；换算成全局流位置只在引擎里做（见 flowAt）。
   //   地址解析出来的位置没有行别，给 0 让引擎按位置自己推。
-  selectPos: (a) =>
+  selectByTextPos: (a) =>
     mod.select(
       mod.flowAt(a.anchorPara | 0, a.anchorOffset | 0),
       mod.flowAt(a.focusPara | 0, a.focusOffset | 0),
@@ -1292,13 +1290,6 @@ const WRITE = collect('w', {
     })));
     paintFull();
   },
-  /**
-   * 闪烁那一拍：摆相位并呈现（对照单线程宿主 tick 里的 showCaret + present）。
-   *   它必须是"会收尾"的那一类 —— 闪烁要在屏幕上看得见，就得重画。
-   *   而门面的 showCaret / stopBlink 走的是 SILENT 那张表（只改状态不呈现），
-   *   两者不能混：混了就会把探针的"全量基线"（分母）覆盖掉。
-   */
-  blinkPhase: (a) => mod.showCaret(!!a.on),
   focusControl: (a) => mod.focusControl(a.forward === undefined ? true : !!a.forward),
   removeControl: (a) => mod.removeControlAt(a.i | 0, !!a.keepContent),
   setControlProp: (a) => mod.setControlPropAt(a.i | 0, a.prop | 0, !!a.value),
@@ -1418,7 +1409,8 @@ const WRITE = collect('w', {
  *   光标'，而探针紧接着要读的往往是'上一次全量呈现'的数字（分母）。停表就只停表。"
  *   搬进 Worker 之后若把这两个入口也走统一收尾，基线就被无声地换掉了：一堆增量断言会以
  *   错误的分母照绿（这是最难发现的一类失真）。
- * ⇒ 门面 showCaret / stopBlink 走这张表；闪烁那一拍走 WRITE.blinkPhase（那个要呈现）。
+ * ⇒ 门面 showCaret / stopBlink / 闪烁那一拍都走它：宿主写完相位自己再 repaint 一次，
+ *   呈现由调用方补，命令本身不收尾 —— 收尾会把探针的分母换掉。
  */
 const SILENT = collect('s', {
   phase: (a) => mod.showCaret(!!a.on),
@@ -1522,17 +1514,17 @@ const READ = collect('r', {
       canRemoveTable: !!raw.canRemoveTable,
     };
   },
-  pageDirtyRects: (a) => JSON.parse(mod.pageDirtyRectsJson(a.page | 0)),
+  pendingRects: (a) => JSON.parse(mod.pendingRectsJson(a.page | 0)),
   /**
    * 组控件的选项命中：文档坐标（磅）→ 第几个选项。不在组控件上时 -1。
    */
   controlOptionAt: (a) => mod.controlOptionAt(Number(a.x), Number(a.y)),
 
   /**
-   * 还欠着脏矩形的页号。宿主按它决定贴哪几页 —— 不能用 dirtyPages：
+   * 还欠着脏矩形的页号。宿主按它决定贴哪几页 —— 不能用 pagesWrittenThisFrame：
    *   那一份是"本拍写过哪几页"，而矩形是累积的，两者不同步就会永久漏贴几块。
    */
-  pageDirtyPages: () => JSON.parse(mod.pageDirtyPagesJson()),
+  pagesPendingBlit: () => JSON.parse(mod.pagesPendingBlitJson()),
   /**
    * 已注册的字体清单（引擎那本 + 角色）。主线程的 fonts() 直接读它。
    *
@@ -1692,7 +1684,7 @@ const READ = collect('r', {
   bracketSlots: () => JSON.parse(mod.bracketSlotsJson()).slots,
   blockedEdits: () => mod.blockedEdits(),
   prewarmPage: (a) => mod.prewarmPageGlyphs(a.page | 0),
-  dirtyPages: () => JSON.parse(mod.dirtyPagesJson()),
+  pagesWrittenThisFrame: () => JSON.parse(mod.pagesWrittenThisFrameJson()),
   editMode: () => mod.editMode(),
   showBrackets: () => mod.showBrackets(),
   showControlDots: () => mod.showControlDots(),
@@ -1779,7 +1771,7 @@ const READ = collect('r', {
       // cssSize / rectPx 要看主线程上的 DOM，由宿主那边补（见 worker_host.js 的 selfCheck 包装）。
       pages: { backing: [mod.pagePxWidth(), ph], cssSize: null, rectPx: null },
       dpr,
-      zoom: zoomLevel,
+      density: densityLevel,
       backend: mod.rasterBackend ? mod.rasterBackend() : '?',
       screenVsEngineDiffPx: diff,
       screenVsEngineDiffBox: diff ? [minx, miny, maxx, maxy] : null,
@@ -1804,8 +1796,8 @@ const READ = collect('r', {
       const it = cc.items[ci];
       if (it.ro || !it.rects.length) continue;
       const cx = it.rects[0].x;
-      const lo = Math.round((cx - 10) * zoomLevel);
-      const hi = Math.round((cx - 1) * zoomLevel);
+      const lo = Math.round((cx - 10) * densityLevel);
+      const hi = Math.round((cx - 1) * densityLevel);
       let n = 0;
       for (let i = 0; i + 3 < f.length; i += 4) {
         const x = (i >> 2) % fw;
@@ -1816,7 +1808,7 @@ const READ = collect('r', {
     }
     return {
       mode: cc.mode, showBrackets: mod.showBrackets(), count: cc.count,
-      caretControl: cc.caret, zoom: zoomLevel, rows,
+      caretControl: cc.caret, density: densityLevel, rows,
       allOk: rows.every((r) => r.ok),
     };
   },

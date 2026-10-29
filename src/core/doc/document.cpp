@@ -153,7 +153,6 @@ void hashCellSpec(Hasher& h, const CellSpec& c) {
  * 它的内容已经在节哈希里了。distance 与 linked 是记录本身，进。
  */
 void hashSectionSpec(Hasher& h, const SectionSpec& sec) {
-    h.u8(static_cast<uint8_t>(sec.paper.name));
     h.u8(static_cast<uint8_t>(sec.paper.orient));
     hashLength(h, sec.paper.width);
     hashLength(h, sec.paper.height);

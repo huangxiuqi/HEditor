@@ -432,12 +432,13 @@ public:
 
     /**
      * 本拍写过（有脏矩形）的页（绝对页号，升序去重）。
-     * 宿主据 pageDirtyPagesJson 决定贴哪几页；这一份是"本拍写过什么"的读数，
-     * 供面板与探针用 —— 两者的区别见 pageDirtyPagesJson 的注释。
+     *
+     * 这只是读数：面板与探针看的是"这一拍写过什么"。宿主决定贴哪几页要看的是"还欠哪几页
+     * 没贴"（见 pagesPendingBlitJson），两者不同步 —— 本拍没写过、但之前欠着的页仍要贴。
      *
      * @return 本拍写过脏矩形的页号（升序去重）
      */
-    const std::vector<int>& dirtyPages() const { return last_dirty_pages_; }
+    const std::vector<int>& pagesWrittenThisFrame() const { return last_dirty_pages_; }
 
     /**
      * 本次呈现覆盖的首页（= 宿主算页偏移与命中换算的基准）。
@@ -459,7 +460,7 @@ public:
 
     /**
      * 页在设备像素下的几何。宿主用它给页画布定位、把页内坐标换成文档坐标。
-     * 三者都是 cfg_ 与 zoom 的纯函数。
+     * 三者都是 cfg_ 与 density 的纯函数。
      *
      * @return 页宽（设备像素）
      */
@@ -582,18 +583,13 @@ public:
     bool setCaretAtFlow(FlowPos flow);
 
     /**
-     * 按 Position 摆光标：流位置 + 行别。
-     * @param p 位置
-     * @returns true = 摆位成功
-     */
-    bool setCaretPosition(const Position& p);
-
-    /**
      * 按 Position 落点：与点击同一套夹取，侧别由流位置派生。
+     *
      * @param p 位置
      * @param extend true = 只搬焦点端（拖选）
+     * @returns true = 摆好了；未装载文档或落点被拒时为假
      */
-    void setCaretAtPosition(const Position& p, bool extend = false);
+    bool setCaretAtPosition(const Position& p, bool extend = false);
 
     /**
      * 选区两端的位置。
@@ -1100,6 +1096,8 @@ public:
 
     /**
      * 编辑入口：坐标是 (段, 段内码点偏移)，落地前吸附到字素簇边界。
+     *
+     * 含换行的文本按段落标记折开插入（一次提交、一步撤销），段文本里不含 U+000A。
      *
      * @param para 段号（块下标）
      * @param offset 段内码点偏移
@@ -2691,27 +2689,28 @@ public:
      * @param page 页号
      * @return 自上次取走以来写过这一页的矩形（读后清零）
      */
-    std::vector<Rect> takePageDirtyRects(int page);
+    std::vector<Rect> takePendingRects(int page);
 
     /**
-     * takePageDirtyRects 的 JSON 版（宿主与探针取证用）。
+     * takePendingRects 的 JSON 版（宿主与探针取证用）。
      *
      * @param page 页号
      * @return 矩形数组的 JSON
      */
-    std::string takePageDirtyRectsJson(int page);
+    std::string takePendingRectsJson(int page);
 
     /**
-     * 有累积脏矩形的页号（升序）。读后不清，清零发生在 takePageDirtyRects。
+     * 有累积脏矩形的页号（升序）。读后不清，清零发生在 takePendingRects。
      *
-     * 与 dirtyPages() 的区别：那一份是"这一拍写过哪几页"，这一份是"还欠哪几页没贴"。
+     * 与 pagesWrittenThisFrame() 的区别：那一份是"这一拍写过哪几页"，这一份是"还欠哪几页
+     * 没贴" —— 贴完（取过矩形）的页从这里消失。
      *   矩形是累积的 —— 某一拍的 present 可能根本没被宿主消费（窗口平移、页面不可见），
      *   那些矩形会留到下一拍。按本拍清单贴就会永久漏掉那几块，
      *   症状是屏幕上留几十像素的旧光标。
      *
      * @return 还欠着没贴的页号（升序，读后不清）
      */
-    std::string pageDirtyPagesJson() const;
+    std::string pagesPendingBlitJson() const;
 
     /**
      * 内容底边（窗口像素）：最后一行墨迹的底，再加一个下边距。
@@ -2790,14 +2789,6 @@ public:
      * @return 可读文本
      */
     std::string describeCaret() const;
-
-    /**
-     * 页坐标 -> 设备像素坐标
-     *
-     * @param pt 磅值
-     * @return 设备像素
-     */
-    float ptToPx(float pt) const { return pt * cfg_.zoom; }
 
     /**
      * 全文码点总数（不含块间分隔）
@@ -2994,7 +2985,7 @@ private:
     RenderService render_;
 
     /**
-     * 记一笔"这一页上的这块变了"（累积到 takePageDirtyRects 被取走为止）。
+     * 记一笔"这一页上的这块变了"（累积到 takePendingRects 被取走为止）。
      *
      * @param page 页号
      * @param r 页内像素矩形
@@ -3612,7 +3603,7 @@ private:
     int vp_count_ = 0;
 
     /**
-     * 本次呈现写过的页（绝对页号，升序去重）。见 dirtyPages()。
+     * 本次呈现写过的页（绝对页号，升序去重）。见 pagesWrittenThisFrame()。
      */
     std::vector<int> last_dirty_pages_;
 

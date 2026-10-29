@@ -2369,6 +2369,54 @@ int main() {
         expectTrue(doc::checkSupportedLayout(doc::makeTextDoc({U"甲乙"}), &why),
                    "纯正文文档可排版");
 
+        // 纸张的默认宽高与引擎默认页度量必须是同一张 A4。两处各写一份数字时差 5 个 EMU
+        //   （0.0004 磅），那种差看不出来，只会在某一行刚好压线时分页多出一行。
+        //   反向：把默认宽高改回零或改回 210mm 口径，这条即红。
+        const Paper a4{};
+        const PageMetrics def = PageMetrics::A4();
+        expectTrue(a4.width == Length::abs(ptToEmu(def.width_pt)) &&
+                       a4.height == Length::abs(ptToEmu(def.height_pt)),
+                   "纸张默认宽高与 PageMetrics 默认同源（" + std::to_string(a4.width.abs_emu) +
+                       " / " + std::to_string(a4.height.abs_emu) + "）");
+
+        // 规格名不进文档：纸张段只写宽高与方向；旧记录里带 name 键也不读。
+        //   反向：把写入端的 name 段恢复，「落盘里没有规格名」即红；把默认宽高改回零，
+        //   「全默认的节不写纸张段」与上面那条同源判据一起红。
+        {
+            const doc::SerializeResult plain = doc::serialize(doc::makeTextDoc({U"甲"}));
+            expectTrue(plain.ok, plain.ok ? "默认文档序列化成功" : plain.error);
+            expectTrue(plain.ok && plain.text.find("\"paper\"") == std::string::npos,
+                       "全默认的节不写纸张段");
+
+            // A3 的宽高在 C++ 侧没有任何规格名，只能按长度给 —— 这条用例本身就是
+            //   「规格名不进文档」的正面证据。
+            SectionSpec a3;
+            a3.paper.width = Length::abs(ptToEmu(841.89));
+            a3.paper.height = Length::abs(ptToEmu(1190.551));
+            const doc::Ref sec =
+                doc::makeNode(2, NodeKind::Section, a3,
+                              {doc::makeNode(3, NodeKind::ParagraphMark, doc::MarkPayload{}, {})});
+            const doc::Doc src = doc::adopt(doc::makeNode(1, NodeKind::Document, {}, {sec}), 4);
+            const doc::SerializeResult saved = doc::serialize(src);
+            expectTrue(saved.ok, saved.ok ? "A3 文档序列化成功" : saved.error);
+            expectTrue(saved.ok && saved.text.find("\"name\"") == std::string::npos,
+                       "落盘里没有纸张规格名");
+
+            doc::Doc back;
+            const doc::DeserializeResult loaded = doc::deserialize(saved.text, &back);
+            expectTrue(loaded.ok, loaded.ok ? "A3 文档读得回来" : loaded.error);
+            const SectionSpec* got = nullptr;
+            if (back.root) {
+                for (const doc::Ref& c : back.root->children) {
+                    if (c && c->kind == NodeKind::Section) {
+                        got = std::get_if<SectionSpec>(&c->payload);
+                        break;
+                    }
+                }
+            }
+            expectTrue(got != nullptr && got->paper == a3.paper, "宽高按磅往返逐值相同");
+        }
+
         SectionSpec spec;
         spec.headers[0].root = 9;  // 有页眉内容
         const doc::Ref header_sec =

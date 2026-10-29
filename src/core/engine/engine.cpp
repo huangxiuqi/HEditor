@@ -60,6 +60,32 @@ ControlKind controlKindFromBusinessType(const std::string& type) {
 constexpr float kMinCaretWidthPt = 0.4f;
 
 /**
+ * 页内磅矩形 → 页内像素矩形。
+ *
+ * 取整方向固定为左上 floor、右下 ceil，使像素矩形完整覆盖磅矩形 —— 少半像素就是把内容
+ * 切掉一条边。宽高为 0 时的处置有两种，都由调用方按语义选：光标必须留下至少一个像素
+ * （看不见的光标与没有光标在界面上无法区分），选区矩形画不出来就不该登记。
+ *
+ * @param r           页内磅矩形
+ * @param density     设备像素 / 磅
+ * @param keep_min_px 为真时宽高保底一个像素；为假时宽高不为正即视为不可画
+ * @param out         结果，仅在返回 true 时写入
+ * @returns 是否产出一个可画的矩形
+ */
+bool ptToPx(const Rect& r, float density, bool keep_min_px, Rect* out) {
+    out->x = std::floor(r.x * density);
+    out->y = std::floor(r.y * density);
+    out->w = std::ceil(r.w * density);
+    out->h = std::ceil(r.h * density);
+    if (keep_min_px) {
+        out->w = std::max(1.0f, out->w);
+        out->h = std::max(1.0f, out->h);
+        return true;
+    }
+    return out->w > 0.0f && out->h > 0.0f;
+}
+
+/**
  * Skia 全局字形 mask 缓存的字节预算。
  *
  * SkStrikeCache 的默认上限是 2 MB（SK_DEFAULT_FONT_CACHE_LIMIT），而它清理时按
@@ -131,7 +157,7 @@ static uint64_t fnvMixColor(uint64_t h, const Color& c) {
 static uint64_t rasterSignature(const EngineConfig& cfg, bool marks_shown,
                                 uint64_t image_generation, const WatermarkSpec& wat) {
     uint64_t h = kFnvBasis;
-    h = fnvMixFloat(h, cfg.zoom);
+    h = fnvMixFloat(h, cfg.density);
     h = fnvMixFloat(h, cfg.page.width_pt);
     h = fnvMixFloat(h, cfg.page.height_pt);
     h = fnvMixFloat(h, cfg.page.margins.top);
@@ -184,7 +210,7 @@ void EditorEngine::setConfig(const EngineConfig& cfg) {
     // 开 / 关括号会改变占位（括号进文档流）→ 必须重排。
     //   不重排的话括号会按新的开关画、正文却按旧的口径排 —— 画的用的还是旧的簇坐标，
     //   表象是括号盖住字/槽里空一条，而且看不出来是哪一边错了。
-    //   （其它配置项不动排版结构：zoom / 页度量只影响几何，光栅签名一变页位图就作废
+    //   （其它配置项不动排版结构：density / 页度量只影响几何，光栅签名一变页位图就作废
     //     —— 宿主改那两项之后本来就会立刻重排重绘。）
     const bool plan_changed = (cfg.show_brackets != cfg_.show_brackets);
     // 连页标志与条带高度是引擎从"页度量 + 页间隙"装配出来的，排版层只认 PageMetrics。
@@ -200,8 +226,8 @@ void EditorEngine::setConfig(const EngineConfig& cfg) {
     const bool page_changed = (want != cfg_.page);
     cfg_ = cfg;
     cfg_.page = want;
-    if (cfg_.zoom < 0.25f) cfg_.zoom = 0.25f;
-    if (cfg_.zoom > 8.0f) cfg_.zoom = 8.0f;
+    if (cfg_.density < 0.25f) cfg_.density = 0.25f;
+    if (cfg_.density > 8.0f) cfg_.density = 8.0f;
     if (cfg_.caret_width_pt < kMinCaretWidthPt) cfg_.caret_width_pt = kMinCaretWidthPt;
     // 光栅签名一变，所有页的像素都不再作数（判据在 PageCache::fresh / usable）。
     //   这里不再逐项比对再清缓存：那张清单漏一项就是"改了底色屏幕不变"（TRAPS 128）。
@@ -386,31 +412,7 @@ std::string EditorEngine::pasteFragment(const std::string& text) {
 
 std::string EditorEngine::pastePlainText(const std::string& utf8) {
     if (!session_) return "没有装载文档";
-    std::vector<NodeSpec> nodes;
-    std::string line;
-    const auto flush = [&nodes, &line]() {
-        if (!line.empty()) {
-            NodeSpec run;
-            run.kind = NodeKind::TextRun;
-            run.text = utf8ToCodepoints(line);
-            nodes.push_back(std::move(run));
-        }
-        line.clear();
-    };
-    for (size_t i = 0; i < utf8.size(); ++i) {
-        const char c = utf8[i];
-        if (c != '\n' && c != '\r') {
-            line.push_back(c);
-            continue;
-        }
-        // CRLF 是两个字符一个换行：吃掉紧随的 LF，否则会多出一个空段落。
-        if (c == '\r' && i + 1 < utf8.size() && utf8[i + 1] == '\n') ++i;
-        flush();
-        NodeSpec mark;
-        mark.kind = NodeKind::ParagraphMark;
-        nodes.push_back(std::move(mark));
-    }
-    flush();
+    const std::vector<NodeSpec> nodes = nodesFromPlainText(utf8);
     if (nodes.empty()) return "没有可粘贴的文本";
     if (!edit_session_.edit.pasteNodes(nodes)) return "粘贴失败：落点不接受这段内容";
     return std::string();
@@ -994,20 +996,15 @@ bool EditorEngine::caretRectFor(const Position& pos, int* page_out, Rect* out) c
 
 /**
  * 光标矩形（页内像素）。窗口偏移由宿主按 (页号 x 步距) 自己加 —— 引擎这一侧只认页内坐标，
- * 于是同一个光标在窗口挪动前后给出的是同一个矩形。旧版在这里加 off_y，使这个值随
- * "窗口首页落在哪个槽"变化，宿主只能再减回去（两处口径必须配对，改一处就整体错位）。
+ * 于是同一个光标在窗口挪动前后给出的是同一个矩形。
  */
 Rect EditorEngine::caretRectPx(int* page) const {
     int p = 0;
     Rect r{};
     if (page != nullptr) *page = -1;
     if (!edit_session_.caret.caretRectFor(caret(), &p, &r)) return Rect{};
-    const float zoom = cfg_.zoom;
     Rect px;
-    px.x = std::floor(r.x * zoom);
-    px.y = std::floor(r.y * zoom);
-    px.w = std::max(1.0f, std::ceil(r.w * zoom));
-    px.h = std::max(1.0f, std::ceil(r.h * zoom));
+    ptToPx(r, cfg_.density, true, &px);
     if (page != nullptr) *page = p;
     return px;
 }
@@ -1034,9 +1031,9 @@ std::vector<EditorEngine::PageRect> EditorEngine::selectionRectsIn(int first_pag
 }
 
 /**
- * 选区矩形（页内像素坐标）。与 caretRectPx 同一套换算（乘 zoom），但不加任何窗口偏移 ——
- * 页号随矩形一起给出，落点由读的一方按 (页号 x 步距) 加。
- * 宽高为 0 的（空行的那个插入点）在这里丢掉 —— 画不出来。
+ * 选区矩形（页内像素坐标）。与 caretRectPx 同一套换算（走 ptToPx），但宽高不为正的
+ * （空行的那个插入点）在这里丢掉 —— 画不出来。页号随矩形一起给出，落点由读的一方
+ * 按 (页号 x 步距) 加。
  */
 std::vector<PageRect> EditorEngine::selectionRectsPx() const { return selectionRectsPxIn(0, 0); }
 
@@ -1044,16 +1041,12 @@ std::vector<PageRect> EditorEngine::selectionRectsPxIn(int first_page, int count
     std::vector<PageRect> out;
     const std::vector<PageRect> prs = selectionRectsIn(first_page, count);
     if (prs.empty()) return out;
-    const float zoom = cfg_.zoom;
+    const float density = cfg_.density;
     out.reserve(prs.size());
     for (const PageRect& pr : prs) {
         PageRect px;
         px.page = pr.page;
-        px.r_pt.x = std::floor(pr.r_pt.x * zoom);
-        px.r_pt.y = std::floor(pr.r_pt.y * zoom);
-        px.r_pt.w = std::ceil(pr.r_pt.w * zoom);
-        px.r_pt.h = std::ceil(pr.r_pt.h * zoom);
-        if (px.r_pt.w <= 0.0f || px.r_pt.h <= 0.0f) continue;
+        if (!ptToPx(pr.r_pt, density, false, &px.r_pt)) continue;
         out.push_back(px);
     }
     return out;
@@ -1242,12 +1235,6 @@ void EditorEngine::setCaretAt(int para, size_t offset, int field) {
 
 bool EditorEngine::setCaretAtFlow(FlowPos flow) { return edit_session_.caret.setCaretAtFlow(flow); }
 
-bool EditorEngine::setCaretPosition(const Position& p) {
-    if (!loaded_ || !flow_.has_value()) return false;
-    setCaretAtPosition(p, /*extend=*/false);
-    return true;
-}
-
 /**
  * 按 Position 落点或扩展：定位与拖选的唯一实现。
  *
@@ -1256,23 +1243,24 @@ bool EditorEngine::setCaretPosition(const Position& p) {
  * 括号占位会改行宽，落点跨过控件边界时括号计划会变，所以排版之后要按新槽宽再落一次：
  *   只落一次的话，那次落点按旧槽宽算出的段内位置会停到相邻的槽上。
  */
-void EditorEngine::setCaretAtPosition(const Position& p, bool extend) {
-    if (!loaded_ || !flow_.has_value()) return;
+bool EditorEngine::setCaretAtPosition(const Position& p, bool extend) {
+    if (!loaded_ || !flow_.has_value()) return false;
     image_sel_ = kInvalidNodeId;
     const FlowPos before = caretFlowPos();
     if (extend) applyDragAnchor();
     const int plan_before = bracketPlanId();
-    if (!edit_session_.caret.setPosition(p, /*collapse=*/!extend)) return;
+    if (!edit_session_.caret.setPosition(p, /*collapse=*/!extend)) return false;
     relayoutIfBracketPlanChanged(plan_before);
-    if (!edit_session_.caret.setPosition(p, /*collapse=*/!extend)) return;
+    if (!edit_session_.caret.setPosition(p, /*collapse=*/!extend)) return false;
     if (extend) {
         syncCellSelection();
-        return;
+        return true;
     }
     const FlowPos pressed = caretFlowPos();
     const bool in_barrier = barrierAtFlow(pressed);
     confineCaret(before, CaretConfine::Place);
     if (in_barrier) drag_anchor_ = pressed;
+    return true;
 }
 
 TextSelection EditorEngine::selectionPositions() const {
@@ -1690,9 +1678,9 @@ void EditorEngine::setEditMode(EditMode m) {
 int EditorEngine::controlAtPt(float x_pt_doc, float y_pt_doc) const {
     TextPos p{};
     if (!hitTestPt(x_pt_doc, y_pt_doc, &p)) return -1;
-    // include_end = false：点在内容上才算"点进了这个控件"。
-    // 点在字段末尾之后一位、视觉上已经在框外，就不该算。
-    return controls_.innermostAt(p, /*include_end=*/false);
+    // 只看内容区间：点要落在内容上才算"点进了这个控件"。点在字段末尾之后一位、
+    // 视觉上已经在框外，就不该算。
+    return controls_.innermostContentAt(p);
 }
 
 bool EditorEngine::removeControl(int index, bool keep_content, FlowPos caret_before) {
@@ -1849,7 +1837,7 @@ bool EditorEngine::moveCaretAndRender(int dcp, bool extend) {
     //   理由：移动光标不是编辑，光标该继续按自己的相位闪；把它强行点亮会让
     //   "按着方向键"时看不出闪烁。而"隐藏相位 + 宿主补救一次 present"这条
     //   双 present 路径是安全的 —— 页脏矩形累积到宿主读走为止，第二次的矩形
-    //   挤不掉第一次的账（见 pageDirtyRects 的注释、单测 [12]）。
+    //   挤不掉第一次的账（见 takePendingRectsJson 的注释、单测 [12]）。
     //   顺带一条：单测里"光标隐藏时写入量更小（只擦不画）"这条断言，
     //   量的正是这条路径 —— 把它改成 repaintAfterEdit 会让它失去意义。
     repaint();
@@ -2147,19 +2135,19 @@ bool EditorEngine::hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* 
     if (!out || layout_service_.layout.lines.empty()) return false;
 
     const float page_w = cfg_.page.width_pt;
-    const float zoom = cfg_.zoom;
+    const float density = cfg_.density;
     const int page_px_h = pagePxHeight();
     const int step_px = page_px_h + pageGapPx();
 
     int page = 0;
     float local_y = y_pt_doc;
-    if (step_px > 0 && zoom > 0.0f) {
+    if (step_px > 0 && density > 0.0f) {
         // 页号按宿主摆页用的那个像素步距折，不按磅步距：宿主把页摆在
         //   pagePxHeight + pageGapPx 这些整数像素上，而磅步距是未取整的页高 + 页间隙
-        //   （本机 855.89 磅对 1142 px / zoom = 856.5 磅）。用磅步距折，误差随页号累积
+        //   （本机 855.89 磅对 1142 px / density = 856.5 磅）。用磅步距折，误差随页号累积
         //   —— 2000 段文档第 160 页上实测偏下约 130 px（0.6 磅/页 x 160 页），
-        //   表象就是"最后几页点哪都偏下"。乘 zoom 折成设备像素再取页号，两边就一致。
-        const float y_px = y_pt_doc * zoom;
+        //   表象就是"最后几页点哪都偏下"。乘 density 折成设备像素再取页号，两边就一致。
+        const float y_px = y_pt_doc * density;
         page = std::max(0, static_cast<int>(std::floor(y_px / static_cast<float>(step_px))));
         float local_px = y_px - static_cast<float>(page) * static_cast<float>(step_px);
         // 落在页间空隙里，或者横向出了页外 —— 没有"这一页的哪一行"可言。
@@ -2173,8 +2161,8 @@ bool EditorEngine::hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* 
             float hi_px = static_cast<float>(page_px_h);
             const PageMargins& pm = cfg_.page.margins;
             if (!cfg_.page.continuous && cfg_.page.height_pt > pm.top + pm.bottom) {
-                lo_px = pm.top * zoom;
-                hi_px = (cfg_.page.height_pt - pm.bottom) * zoom;
+                lo_px = pm.top * density;
+                hi_px = (cfg_.page.height_pt - pm.bottom) * density;
             }
             local_px = std::max(lo_px, std::min(local_px, hi_px));
             if (x_pt_doc < 0.0f) x_pt_doc = 0.0f;
@@ -2183,14 +2171,14 @@ bool EditorEngine::hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* 
             if (local_px < 0.0f || local_px > static_cast<float>(page_px_h)) return false;
             if (x_pt_doc < 0.0f || x_pt_doc > page_w) return false;
         }
-        local_y = local_px / zoom;
+        local_y = local_px / density;
     }
 
     // 块轴：找最近的一行。
     //   连页下按文档像素比：一行可以跨条带，它跨过去的那一段落在下一条带里，
     //   而那个位置的页号已经不是行盒的页号 —— 按页号筛会把这一点判给下一条带上
     //   离得最近的另一行（每跨一条带就有一条这样的窄带点不中）。
-    //   比的是"渲染位置"（页号 x 像素步距 + 页内磅 x zoom），与宿主把页摆在哪无关 ——
+    //   比的是"渲染位置"（页号 x 像素步距 + 页内磅 x density），与宿主把页摆在哪无关 ——
     //   与绘制用的是同一套映射。
     const bool cont = cfg_.page.continuous;
     const LineBox* best = nullptr;
@@ -2261,10 +2249,10 @@ bool EditorEngine::hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* 
             hi = slot_hi;
         } else if (cont) {
             const float base = static_cast<float>(lb.page) * static_cast<float>(step_px);
-            bp = y_pt_doc * zoom;
-            local_bp = (bp - base) / zoom;
-            lo = base + slot_lo * zoom;
-            hi = base + slot_hi * zoom;
+            bp = y_pt_doc * density;
+            local_bp = (bp - base) / density;
+            lo = base + slot_lo * density;
+            hi = base + slot_hi * density;
         } else {
             if (lb.page != page) continue;
             bp = local_y;
@@ -2305,11 +2293,12 @@ bool EditorEngine::hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* 
     // 行内轴：找最近的插入点。势力范围与簇边界的口径在 hitTestInLine 里（上下键也走它）。
     //   竖排的行内轴是 y，页内位置要按"选中那一行自己的页号"折 —— 跨条带时它与
     //   点击位置的页号可以差一条带。
-    const float ip = best->vertical ? (cont ? (y_pt_doc * zoom - static_cast<float>(best->page) *
-                                                                     static_cast<float>(step_px)) /
-                                                  zoom
-                                            : local_y)
-                                    : x_pt_doc;
+    const float ip = best->vertical
+                         ? (cont ? (y_pt_doc * density -
+                                    static_cast<float>(best->page) * static_cast<float>(step_px)) /
+                                       density
+                                 : local_y)
+                         : x_pt_doc;
     uint32_t cp = 0;
     int side = 0;
     edit_session_.caret.hitTestInLine(*best, ip, &cp, &side);

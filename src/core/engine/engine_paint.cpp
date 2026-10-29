@@ -94,7 +94,7 @@ int EditorEngine::pagePxWidth() const { return pagePxWidthOf(cfg_); }
 int EditorEngine::pagePxHeight() const { return pagePxHeightOf(cfg_); }
 
 int EditorEngine::pageGapPx() const {
-    return std::max(0, static_cast<int>(std::lround(cfg_.page_gap_pt * cfg_.zoom)));
+    return std::max(0, static_cast<int>(std::lround(cfg_.page_gap_pt * cfg_.density)));
 }
 
 void EditorEngine::paintPageRange(int first_page, int count) { presentInternal(first_page, count); }
@@ -135,8 +135,8 @@ int EditorEngine::prewarmPageGlyphs(int page) {
     prewarm_.shareFonts(font_owner_);
     prewarm_.clear(cfg_.page_fill);
 
-    const float zoom = cfg_.zoom;
-    const float units_to_px = zoom / kFontScalePerPt;
+    const float density = cfg_.density;
+    const float units_to_px = density / kFontScalePerPt;
     std::vector<uint32_t> ids;
     std::vector<float> xs;
     std::vector<float> ys;
@@ -165,9 +165,9 @@ int EditorEngine::prewarmPageGlyphs(int page) {
             run_color = pg.color;
             run_rot = pg.rotate_deg;
         }
-        const float y = pg.y_pt * zoom;
+        const float y = pg.y_pt * density;
         ids.push_back(pg.glyph_id);
-        xs.push_back(pg.x_pt * zoom);
+        xs.push_back(pg.x_pt * density);
         ys.push_back(y - std::floor(y) + kPrewarmYOffsetPx);
         ++n;
     }
@@ -250,15 +250,13 @@ void EditorEngine::trimPageCache(int first_page, int count) {
  */
 void EditorEngine::notePageDirty(int page, const Rect& r) { render_.pages.noteDirty(page, r); }
 
-std::vector<Rect> EditorEngine::takePageDirtyRects(int page) {
-    return render_.pages.takeDirty(page);
-}
+std::vector<Rect> EditorEngine::takePendingRects(int page) { return render_.pages.takeDirty(page); }
 
 /**
- * 有累积脏矩形的页号（升序）。与 takePageDirtyRects 的分工见头文件。
+ * 有累积脏矩形的页号（升序）。与 takePendingRects 的分工见头文件。
  */
-std::string EditorEngine::pageDirtyPagesJson() const {
-    const std::vector<int> pages = render_.pages.dirtyPages();
+std::string EditorEngine::pagesPendingBlitJson() const {
+    const std::vector<int> pages = render_.pages.pagesWrittenThisFrame();
     std::ostringstream o;
     o << "[";
     for (size_t i = 0; i < pages.size(); ++i) {
@@ -269,8 +267,8 @@ std::string EditorEngine::pageDirtyPagesJson() const {
     return o.str();
 }
 
-std::string EditorEngine::takePageDirtyRectsJson(int page) {
-    const std::vector<Rect> rs = takePageDirtyRects(page);
+std::string EditorEngine::takePendingRectsJson(int page) {
+    const std::vector<Rect> rs = takePendingRects(page);
     const int pw = pagePxWidth();
     const int ph = pagePxHeight();
     std::ostringstream o;
@@ -331,7 +329,7 @@ void EditorEngine::presentInternal(int first_page, int count) {
     raster_glyph_ms_ = 0.0;
 
     const auto t_pre = Clock::now();
-    const float zoom = cfg_.zoom;
+    const float density = cfg_.density;
     const int page_px_w = pagePxWidth();
     const int page_px_h = pagePxHeight();
     const int step = page_px_h + pageGapPx();
@@ -459,9 +457,9 @@ void EditorEngine::presentInternal(int first_page, int count) {
             rasterPageInto(page, &scene_diff.band_lo_pt, &scene_diff.band_hi_pt, nullptr);
             // 取整口径与 notePageDirty 的取整完全一致（floor 起点 / ceil 终点）：
             //   少取一行就是"版面上留一条旧墨迹"，只在恰巧跨半像素时出现。
-            const float y0 = std::max(0.0f, scene_diff.band_lo_pt * zoom - 1.0f);
+            const float y0 = std::max(0.0f, scene_diff.band_lo_pt * density - 1.0f);
             const float y1 =
-                std::min(static_cast<float>(page_px_h), scene_diff.band_hi_pt * zoom + 1.0f);
+                std::min(static_cast<float>(page_px_h), scene_diff.band_hi_pt * density + 1.0f);
             markDirty(page, Rect{0.0f, y0, static_cast<float>(page_px_w), std::max(1.0f, y1 - y0)});
             edit_stats_.band_y0 = static_cast<int>(y0);
             edit_stats_.band_y1 = static_cast<int>(y1);
@@ -645,7 +643,7 @@ void EditorEngine::collectTransient(int page, OverlayScene* out) const {
     //   两带各画自己那半，与内容的补画是同一条规则 —— 否则接缝上会出现
     //   "字补上了、底色高亮只到一半"。
     if (cfg_.page.continuous && page > 0) {
-        const float slab_px = cfg_.page.slabHeightPt() * cfg_.zoom;
+        const float slab_px = cfg_.page.slabHeightPt() * cfg_.density;
         const float ph = static_cast<float>(pagePxHeight());
         for (const PageRect& pr : selectionRectsPxIn(page - 1, 1)) {
             const float bot = pr.r_pt.y + pr.r_pt.h;

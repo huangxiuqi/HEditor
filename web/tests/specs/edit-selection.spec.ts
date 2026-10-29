@@ -584,7 +584,7 @@ test.describe('编辑面：选区与样式', () => {
 
     // 光标宽度与 Word 同一档：0.5 磅。排版一磅在这个倍率下是一个设备像素，
     //   一磅以上会在高分屏上糊成两像素宽的一条。下限 0.4 之上才留得住这个取值。
-    const caretW = await probe.read('return { w: CARET().w, z: D.stats().zoom };');
+    const caretW = await probe.read('return { w: CARET().w, z: D.stats().density };');
     check('默认光标线宽 0.5 磅，画出来一个设备像素',
               defCaret.widthPt === 0.5 && caretW.w === 1,
               `配置 ${defCaret.widthPt} 磅，画出来 ${caretW.w} px（密度 ${caretW.z}）`);
@@ -675,7 +675,7 @@ test.describe('编辑面：选区与样式', () => {
       await H.selectAll();
       const f = await D.rawFrame();
       const w = D.frameW(), h = D.frameH();
-      const z = D.stats().zoom;
+      const z = D.stats().density;
       const step = D.pagePx().h + D.pagePx().gap;
       const first = D.editStats().windowFirstPage;
       const r = SEL().rects[0];
@@ -1029,5 +1029,180 @@ test.describe('编辑面：拖拽搬运', () => {
     check('\u2605 从换行处起选：只画下一行那一条，上一行末尾不多小方块',
           r.at === 1, '反白 ' + r.at + ' 条');
     check('反向：真跨过换行处选，两条反白都在', r.over === 2, '反白 ' + r.over + ' 条');
+  });
+
+  // 落点身份是五项：段、偏移、侧别、行别、页。前三项在软换行处会重合 —— 同一偏移上压着
+  //   上一行行尾与下一行行首两个插入点，只有行别分得开。少判一项就等于"换了落点而宿主
+  //   不知道"，输入法与滚动都按上一次的位置算。
+  test('[24] 软换行处的两个插入点：前三项相同也算换了落点', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' } });
+    const r = await p.read<any>(`
+      await H.configure({ zoom: 2 });
+      await H.setText('甲乙丙丁戊己庚辛壬癸'.repeat(6));
+      await H.flush();
+      let wrap = -1;
+      let y0 = null;
+      for (let i = 0; i <= 55 && wrap < 0; ++i) {
+        await H.setCaret({ para: 0, offset: i });
+        await H.flush();
+        const y = CARET().y;
+        if (y0 === null) y0 = y;
+        else if (y > y0 + 1) wrap = i;
+      }
+      if (wrap < 0) return { wrap, same: false, events: -1, dy: 0 };
+      // 行别只在给了侧别时才下发（setCaret 的无侧别分支是 plain 落点，不看行别）。
+      await H.setCaret({ para: 0, offset: wrap }, { side: 'after', line: 'last' });
+      await H.flush();
+      const a = CARET();
+      const la = D.editStats().caretLineAff;
+      let events = 0;
+      const off = H.on('caret', () => { ++events; });
+      await H.setCaret({ para: 0, offset: wrap }, { side: 'before', line: 'first' });
+      await H.flush();
+      const b = CARET();
+      const lb = D.editStats().caretLineAff;
+      off();
+      const same = a.para === b.para && a.offset === b.offset && a.page === b.page;
+      return { wrap, same, events, la, lb };`);
+    check('前提：这一段确实折了行（找到换行点）', r.wrap > 0, '换行点在偏移 ' + r.wrap);
+    check('前提：两个插入点的段号、偏移、页完全相同', r.same === true, '同一处偏移 ' + r.wrap);
+    check('前提：行别确实分在两个上（其余几项都不动）', r.la !== r.lb,
+          `行别 ${r.la} / ${r.lb}`);
+    check('\u2605 只有行别不同也算换了落点：caret 事件照发', r.events > 0, '事件 ' + r.events);
+  });
+
+  // 相位翻转与位移是两件事：翻转要通知宿主（画不画那颗光标变了），但视口不该跟着回拽。
+  //   这两件事共用一个"变没变"会分叉 —— 按相位滚视口，光标每闪一下就把视口拉回原处。
+  test('[25] 闪烁相位翻转：发 caret 事件，但不拽视口', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' } });
+    const r = await p.read<any>(`
+      const rows = [];
+      for (let i = 0; i < 300; ++i) rows.push('第' + (i + 1) + '段的文字内容，用来把文档撑长。');
+      await H.setText(rows.join('\\n'));
+      await H.flush();
+      // 光标放到末段，视口滚回顶部：此时光标在视口外，任何"按光标回拽"都会把 scrollTop 拉大。
+      await H.setCaret({ para: 299, offset: 3 });
+      await H.flush();
+      const st = document.querySelector('.heditor-stage');
+      st.scrollTop = 0;
+      await new Promise((r) => requestAnimationFrame(r));
+      const before = Math.round(st.scrollTop);
+      const wasVisible = H.caret().visible;
+      let events = 0;
+      const off = H.on('caret', () => { ++events; });
+      // 宿主 530 ms 翻一次相位：等一次翻转再留余量。
+      await new Promise((r) => setTimeout(r, 800));
+      const nowVisible = H.caret().visible;
+      off();
+      return {
+        before, after: Math.round(st.scrollTop), events,
+        flipped: wasVisible !== undefined && wasVisible !== nowVisible,
+        pages: H.geometry().pages,
+      };`);
+    check('前提：文档够长（多页）', r.pages >= 4, String(r.pages));
+    check('前提：等到了相位翻转', r.flipped === true, '相位未翻转');
+    check('\u2605 相位翻转算换了落点：caret 事件照发', r.events > 0, '事件 ' + r.events);
+    check('\u2605 相位翻转不拽视口', r.after === r.before, `${r.before} → ${r.after}`);
+  });
+});
+
+// 公共面的两把尺子：selection().rects 是磅，caret().rect 是设备像素，比值就是密度。
+//
+// 这条必须在 DPR=2 下跑才有判别力：把磅再按 dpr 除一次之后，DPR=1 下那一步是恒等，
+//   全量判据看不出来，只有 2x 屏上选区矩形会缩成一半。
+//   探针读数走 diag.selectionRaw()（引擎原样），绕开了公共面的折算，
+//   所以这条只能用 H.selection()，不能用 SEL()。
+test.describe('DPR=2：选区矩形的单位不随屏幕变', () => {
+  test.use({ deviceScaleFactor: 2 });
+
+  test('rects 是磅、caret 是设备像素，两者之比等于密度', async ({ open }) => {
+    const { probe, consoleErrors } = await openEdit(open);
+    const r = await probe.read<any>(`
+      await H.setText('第一段文字足够长，用来量行高');
+      await H.setCaret({ para: 0, offset: 0 });
+      await H.flush();
+      await H.select({ para: 0, offset: 0 }, { para: 0, offset: 3 });
+      await H.flush();
+      const sel = H.selection();
+      const caret = H.caret();
+      return { rects: sel.rects, caret: caret.rect, density: H.diag.stats().density,
+               dpr: H.geometry().dpr };`);
+    check('前提：DPR 真的是 2', r.dpr === 2, String(r.dpr));
+    check('前提：有选区矩形', Array.isArray(r.rects) && r.rects.length >= 1,
+          JSON.stringify(r.rects));
+    // caret.h 是 ceil(行高磅 × 密度) 且保底 1 像素，所以比的是"乘完差不超过一个像素"，
+    //   不是精确相等。被 /dpr 污染时 rects.h 只剩一半，这个差会到二十几个像素，判据抓得住。
+    const expected = r.rects[0].h * r.density;
+    check('★ rects 是磅、caret 是设备像素（caret.h 等于磅乘密度，差不超过一像素）',
+          Math.abs(r.caret.h - expected) <= 1,
+          `caret.h=${r.caret.h}，rects.h×密度=${expected.toFixed(2)}，` +
+              `rects=${JSON.stringify(r.rects[0])}`);
+    check('取矩形不产生 uncaught', consoleErrors.length === 0, consoleErrors.join('; '));
+  });
+
+  // 覆盖物走同一套换算：磅乘密度得设备像素，再除 DPR 得 CSS 像素。DPR=1 下这两步合成
+  //   恒等，漏一步或重一步都看不出来；2x 屏上少除 DPR 就是整体偏一倍 —— 光标边上那颗
+  //   输入框与拖格线时的蓝线会跑到别处，而判据全绿。
+  test('覆盖物也按磅落位：IME 框与格线引导线在 2x 屏上不漂', async ({ open }) => {
+    const { probe, consoleErrors } = await openEdit(open);
+    const ime = await probe.read<any>(`
+      await H.setText('第一段文字足够长，用来量行高');
+      await H.setCaret({ para: 0, offset: 2 });
+      await H.flush();
+      const c = H.caret();
+      const ta = document.querySelector('.heditor-ime');
+      const st = document.querySelector('.heditor-stage');
+      const pgs = document.querySelector('.heditor-pages');
+      const sr = st.getBoundingClientRect(), pr = pgs.getBoundingClientRect();
+      return {
+        dpr: H.geometry().dpr,
+        caret: c.rect,
+        left: parseFloat(ta.style.left), top: parseFloat(ta.style.top),
+        baseL: pr.left - sr.left, baseT: pr.top - sr.top + st.scrollTop,
+        w: parseFloat(ta.style.width),
+      };`);
+    check('前提：DPR 真的是 2', ime.dpr === 2, String(ime.dpr));
+    check('前提：IME 框按光标摆过（不是收起的 1 像素）', ime.w > 2, '宽 ' + ime.w);
+    const wantL = ime.baseL + ime.caret.x / ime.dpr;
+    const wantT = ime.baseT + ime.caret.y / ime.dpr;
+    check('\u2605 IME 框的左边 = 页偏移 + 光标设备像素 / DPR',
+          Math.abs(ime.left - wantL) <= 1, `left=${ime.left}，期望 ${wantL.toFixed(1)}`);
+    check('\u2605 IME 框的上边 = 页偏移 + 光标设备像素 / DPR',
+          Math.abs(ime.top - wantT) <= 1, `top=${ime.top}，期望 ${wantT.toFixed(1)}`);
+
+    // 格线引导线：压在列边界上按下并拖到一半（不松手），读它落位到哪一列。
+    const grid = await probe.read<any>(`
+      await H.setText('表前');
+      await H.flush();
+      await H.insertTable({ rows: 2, cols: 2 });
+      await H.flush();
+      await H.setCaret({ para: 1, offset: 0 });
+      await H.flush();
+      const q = CARET();
+      const g = await H.tableGrid(q.x / ZOOM() + 4, q.y / ZOOM() + 4);
+      const fr = FRAME().getBoundingClientRect();
+      await D.stopBlink();
+      return { g, z: CSSPT(), left: fr.left, top: fr.top };`);
+    check('前提：两列三条边界', grid.g.cols.length === 3, JSON.stringify(grid.g.cols));
+    const midY = grid.top + (grid.g.rows[0].y + grid.g.rows[0].h / 2) * grid.z;
+    // cols 是相对表左缘的，命中格线要加上表自己的 x。
+    const guidePt = grid.g.x + grid.g.cols[1];
+    const colX = grid.left + guidePt * grid.z;
+    const dx = 30;
+    await probe.page.mouse.move(colX, midY);
+    await probe.page.mouse.down();
+    await probe.page.mouse.move(colX + dx, midY, { steps: 4 });
+    const guide = await probe.read<any>(`
+      const el = document.querySelector('[data-role="grid-guide"]');
+      return el ? { left: parseFloat(el.style.left), display: el.style.display } : null;`);
+    await probe.page.mouse.up();
+    check('前提：拖动时引导线是显示着的', !!guide && guide.display !== 'none',
+          JSON.stringify(guide));
+    // 引导线跟指针走：起点是格线的磅坐标，再加指针挪过的 CSS 像素。
+    const wantG = guidePt * grid.z + dx;
+    check('\u2605 格线引导线落在磅坐标上（磅 x 密度 / DPR）',
+          !!guide && Math.abs(guide.left - wantG) <= 1,
+          guide ? `left=${guide.left}，期望 ${wantG.toFixed(1)}` : '没有引导线');
+    check('覆盖物判据不产生 uncaught', consoleErrors.length === 0, consoleErrors.join('; '));
   });
 });

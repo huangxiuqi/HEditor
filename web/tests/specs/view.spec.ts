@@ -23,12 +23,12 @@ test.describe('缩放与滚动', () => {
       await new Promise((r) => setTimeout(r, 320));
       const before = { top: sc.scrollTop, off: EL('.heditor-pages').offsetTop,
                        h: EL('.heditor-pages').clientHeight };
-      await H.setZoom(1.25);
+      await H.configure({ zoom: 1.25 });
       await H.flush();
       await new Promise((r) => setTimeout(r, 320));
       const zoomIn = { top: sc.scrollTop, off: EL('.heditor-pages').offsetTop,
                        h: EL('.heditor-pages').clientHeight, win: H.geometry().window };
-      await H.setZoom(0.5);
+      await H.configure({ zoom: 0.5 });
       await H.flush();
       await new Promise((r) => setTimeout(r, 320));
       const zoomOut = { top: sc.scrollTop, win: H.geometry().window };

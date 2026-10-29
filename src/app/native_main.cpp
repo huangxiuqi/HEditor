@@ -70,7 +70,7 @@ int main(int argc, char** argv) {
     std::string assetDir = HEDITOR_NATIVE_ASSET_DIR;
     std::string outDir = "out";
     std::string demo;
-    float zoom = 1.5f;
+    float density = 1.5f;
     int onlyPage = -1;
     int dumpCount = 0;
     int repeat = 1;
@@ -85,7 +85,7 @@ int main(int argc, char** argv) {
         } else if (a == "--out-dir") {
             outDir = takeArg();
         } else if (a == "--zoom") {
-            zoom = std::stof(takeArg());
+            density = std::stof(takeArg());
         } else if (a == "--page") {
             onlyPage = std::stoi(takeArg());
         } else if (a == "--demo") {
@@ -119,7 +119,7 @@ int main(int argc, char** argv) {
     }
 
     EngineConfig cfg;
-    cfg.zoom = zoom;
+    cfg.density = density;
     engine.setConfig(cfg);
     // 一轮完整流程：装文档 → 全量排版 → 绘制。
     // 抽成 lambda 是为了让 --repeat 能重复整轮（而不是只重复 repaint —— 那走的是
@@ -200,7 +200,7 @@ int main(int argc, char** argv) {
     std::printf("缺字(.notdef)   : %d   （跑完整条回退链仍无字形）\n", st.missing_glyph_count);
     std::printf("整形耗时        : %.3f ms\n", st.shape_ms);
     std::printf("布局总耗时      : %.3f ms\n", st.layout_ms);
-    std::printf("绘制耗时        : %.3f ms   (zoom=%.2f, %dx%d px)\n", st.paint_ms, st.zoom,
+    std::printf("绘制耗时        : %.3f ms   (zoom=%.2f, %dx%d px)\n", st.paint_ms, st.density,
                 st.frame_width, st.frame_height);
     std::printf("  ├ 铺面积      : %.3f ms\n", st.paint_fill_ms);
     std::printf("  ├ 字形        : %.3f ms   (共 %d 个字形)\n", st.paint_glyph_ms, st.glyph_count);

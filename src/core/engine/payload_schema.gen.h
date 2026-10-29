@@ -82,7 +82,7 @@ inline constexpr KeySpec kKeys[] = {
     {"frameBytes", "num", false},
     {"glyphCacheBytes", "num", false},
     {"glyphCacheLimit", "num", false},
-    {"zoom", "num", false},
+    {"density", "num", false},
 };
 inline constexpr PayloadSpec kSpec{"stats", kKeys, static_cast<int>(std::size(kKeys)), false};
 }  // namespace stats

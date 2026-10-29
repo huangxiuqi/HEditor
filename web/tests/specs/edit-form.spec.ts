@@ -67,7 +67,9 @@ test.describe('编辑面：表单控件', () => {
         const near = ${MARK};
         const f = await D.rawFrame();
         const fw = D.frameW();
-        const lo = ${Math.round((cxPt - 10) * 1.5)}, hi = ${Math.round((cxPt - 1) * 1.5)};
+        const z = ZOOM();
+        const cx = ${cxPt};
+        const lo = Math.round((cx - 10) * z), hi = Math.round((cx - 1) * z);
         let n = 0;
         for (let i = 0; i + 3 < f.length; i += 4) {
           const x = (i >> 2) % fw;
@@ -222,16 +224,17 @@ test.describe('编辑面：表单控件', () => {
         const d = await probe.read(`
           const f = await D.rawFrame();
           const fw = D.frameW();
+          const z = ZOOM();
           const near = ${MARK};
           const it = D.controls().items[0];
           const r0 = it.rects[0];
           const cols = new Set();
           for (let i = 0; i + 3 < f.length; i += 4) {
             const p = i >> 2, x = p % fw, y = (p - x) / fw;
-            if (y < (r0.y - 2) * 1.5 || y > (r0.y + r0.h + 2) * 1.5) continue;
+            if (y < (r0.y - 2) * z || y > (r0.y + r0.h + 2) * z) continue;
             if (near(f[i], f[i+1], f[i+2])) cols.add(x);
           }
-          return { cxPx: Math.round(r0.x * 1.5), rect: r0,
+          return { cxPx: Math.round(r0.x * z), rect: r0,
                    cols: Array.from(cols).sort((a, b) => a - b) };
         `);
         console.log(`     [诊断] #0 内容左缘 ${d.cxPx} px（rect x=${d.rect.x.toFixed(2)} w=${d.rect.w.toFixed(2)}）；`
@@ -316,9 +319,10 @@ test.describe('编辑面：表单控件', () => {
           const fw = D.frameW();
           const cc = D.controls();
           const A = cc.items[0], B = cc.items[1];      // complaint / duration(只读)
-          const slotPx = ${bracketSlotPx};
-          const x0 = Math.round((A.rects[0].x + A.rects[0].w) * 1.5) - 2;
-          const x1 = Math.round((A.rects[0].x + A.rects[0].w) * 1.5 + 2 * slotPx) - 2;
+          const z = ZOOM();
+          const slotPx = (4.055 + 1.5) * z;
+          const x0 = Math.round((A.rects[0].x + A.rects[0].w) * z) - 2;
+          const x1 = Math.round((A.rects[0].x + A.rects[0].w) * z + 2 * slotPx) - 2;
           const isBlue = (r, g, b) => r > 45 && b - r > 60 && b > 140;
           const isGray = (r, g, b) => {
             const drg = Math.abs(r - g), dgb = Math.abs(g - b);
@@ -659,7 +663,8 @@ test.describe('编辑面：表单控件', () => {
           const it = cc.items[ci];
           if (it.ro || !it.rects.length) continue;
           const cx = it.rects[0].x;
-          const lo = Math.round((cx - 10) * 1.5), hi = Math.round((cx - 1) * 1.5);
+          const z = ZOOM();
+          const lo = Math.round((cx - 10) * z), hi = Math.round((cx - 1) * z);
           let n = 0;
           for (let i = 0; i + 3 < f.length; i += 4) {
             const x = (i >> 2) % fw;

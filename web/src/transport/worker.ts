@@ -21,7 +21,7 @@ export interface WorkerOptions {
   /**
    * 密度（设备像素 / 磅）。
    */
-  zoom: number;
+  density: number;
   empty?: boolean;
 
   /**
@@ -58,7 +58,7 @@ interface Mirror {
   controls: any;
   textAll: string;
   blockedEdits: number;
-  dirtyPages: number[];
+  pagesWrittenThisFrame: number[];
   caretReport: string;
   caretLive: number;
   caretVertical: boolean;
@@ -109,7 +109,7 @@ export function createWorker(opts: WorkerOptions): {
     controls: null,
     textAll: '',
     blockedEdits: 0,
-    dirtyPages: [],
+    pagesWrittenThisFrame: [],
     caretReport: '',
     caretLive: -1,
     caretVertical: false,
@@ -235,8 +235,8 @@ export function createWorker(opts: WorkerOptions): {
           return mirror.controls;
         case 'blockedEdits':
           return mirror.blockedEdits;
-        case 'dirtyPages':
-          return mirror.dirtyPages;
+        case 'pagesWrittenThisFrame':
+          return mirror.pagesWrittenThisFrame;
         case 'caretReport':
           return mirror.caretReport;
         case 'caretOffsetLive':
@@ -391,7 +391,7 @@ export function createWorker(opts: WorkerOptions): {
     if (m.controls) mirror.controls = m.controls;
     if (typeof m.textAll === 'string') mirror.textAll = m.textAll;
     if (typeof m.blockedEdits === 'number') mirror.blockedEdits = m.blockedEdits;
-    if (m.dirtyPages) mirror.dirtyPages = m.dirtyPages;
+    if (m.pagesWrittenThisFrame) mirror.pagesWrittenThisFrame = m.pagesWrittenThisFrame;
     if (typeof m.caretReport === 'string') mirror.caretReport = m.caretReport;
     if (typeof m.caretLive === 'number') mirror.caretLive = m.caretLive;
     if (typeof m.caretVertical === 'boolean') mirror.caretVertical = m.caretVertical;
@@ -524,7 +524,7 @@ export function createWorker(opts: WorkerOptions): {
         dpr: dpr(),
         viewW: vs.w,
         viewH: vs.h,
-        zoom: opts.zoom,
+        density: opts.density,
         empty: !!opts.empty,
       });
       await waitReady();

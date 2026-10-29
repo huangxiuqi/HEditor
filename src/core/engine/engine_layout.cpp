@@ -51,7 +51,7 @@ void EditorEngine::syncStatsFromLayout() {
     stats_.font_resident_bytes = static_cast<long long>(fc.resident_bytes);
     stats_.font_storage_failures = static_cast<long long>(fc.read_failures);
     stats_.font_storage_eofs = static_cast<long long>(fc.eof_reads);
-    stats_.zoom = cfg_.zoom;
+    stats_.density = cfg_.density;
 }
 
 int EditorEngine::contentBottomPx() const {
@@ -64,7 +64,7 @@ int EditorEngine::contentBottomPx() const {
         if (v > bottom_pt) bottom_pt = v;
     }
     // 末尾补一个下边距：不留的话最后一行会贴着滚动底，鼠标点不到它下面那一小段。
-    return static_cast<int>(std::ceil((bottom_pt + cfg_.page.margins.bottom) * cfg_.zoom));
+    return static_cast<int>(std::ceil((bottom_pt + cfg_.page.margins.bottom) * cfg_.density));
 }
 
 void EditorEngine::relayout() {

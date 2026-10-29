@@ -233,6 +233,13 @@ doc::EditCheck EditCommand::policyErase(TextPos a, TextPos b) const {
 bool EditCommand::insertCodepoints(int para, size_t offset, const std::vector<uint32_t>& cps) {
     if (cps.empty()) return false;
     if (para < 0 || para >= static_cast<int>(blocks().size())) return false;
+    // 换行不能进段文本：段落边界只由段落标记表达，塞进一个 U+000A 会让段号出现两套算法
+    //   （按块取与按分隔符切），同一份文档给出不同的段数。吃字符串的两条公开入口已经在
+    //   含换行时折成节点，走到这里的换行只剩非法调用，整批拒绝。
+    if (std::any_of(cps.begin(), cps.end(), [](uint32_t cp) { return cp == '\n' || cp == '\r'; })) {
+        noteBlocked();
+        return false;
+    }
     // 落点就是光标（打字与缩进都走这里）而选区非空：这一次输入是"替换选中内容"。
     //   落到别处的插入（程序化插入）不动选区 —— 那种调用的坐标是按调用时的文档算出来
     //   的，删掉一段会让它整批一起过期。
@@ -297,11 +304,34 @@ bool EditCommand::insertCodepoint(int para, size_t offset, uint32_t cp) {
 }
 
 bool EditCommand::insertTextUtf8(int para, size_t offset, const std::string& utf8) {
-    return insertCodepoints(para, offset, utf8ToCodepoints(utf8));
+    if (!hasLineBreak(utf8)) return insertCodepoints(para, offset, utf8ToCodepoints(utf8));
+    const TextPos at{para, offset};
+    const std::vector<NodeSpec> nodes = nodesFromPlainText(utf8);
+    // 落点正好是光标且有选区：这一次输入是"替换选中内容"，与不含换行时同一条分派。
+    if (at == pos().caret() && pos().hasSelection()) return pasteNodes(nodes);
+    return insertNodesAt(at, nodes);
 }
 
 bool EditCommand::typeTextUtf8(const std::string& utf8) {
-    return insertCodepoints(pos().caret().para, pos().caret().offset, utf8ToCodepoints(utf8));
+    if (!hasLineBreak(utf8)) {
+        return insertCodepoints(pos().caret().para, pos().caret().offset, utf8ToCodepoints(utf8));
+    }
+    // 落点就是光标，先把选区删掉再插 —— 与打字替换选中内容同一口径。
+    return pasteNodes(nodesFromPlainText(utf8));
+}
+
+bool EditCommand::insertNodesAt(const TextPos& at, const std::vector<NodeSpec>& nodes) {
+    if (nodes.empty() || !hasFlow()) return false;
+    if (!policyAt(at).allowed) {
+        noteBlocked();
+        return false;
+    }
+    const FlowPos af = pos().flowAt(at);
+    if (af < 0) {
+        noteBlocked();
+        return false;
+    }
+    return insertNodesAtFlow(af, {}, Range{}, nodes);
 }
 
 bool EditCommand::controlFlowSpan(int index, FlowPos* lo, FlowPos* hi) const {
@@ -2721,8 +2751,12 @@ bool EditCommand::pasteNodes(const std::vector<NodeSpec>& nodes) {
         noteBlocked();
         return false;
     }
+    return insertNodesAtFlow(at, plan.steps, plan.before, nodes);
+}
 
-    std::vector<Step> steps = plan.steps;
+bool EditCommand::insertNodesAtFlow(FlowPos at, const std::vector<Step>& erase, const Range& before,
+                                    const std::vector<NodeSpec>& nodes) {
+    std::vector<Step> steps = erase;
     FlowPos cur = at;
     // 块级元素（表格）不在段落内部：它前面后面要是没有段落标记，就各补一枚。
     //   不补的话表格会插在一段文字中间 —— 编译与流索引对"段"的假设当场不成立。
@@ -2748,7 +2782,7 @@ bool EditCommand::pasteNodes(const std::vector<NodeSpec>& nodes) {
         ++cur;
     }
 
-    pending_before_ = plan.steps.empty() ? Range{at, at} : plan.before;
+    pending_before_ = erase.empty() ? Range{at, at} : before;
     pending_after_ = Range{cur, cur};
     if (!commit(std::move(steps), pos().paraForFlow(at))) {
         noteBlocked();

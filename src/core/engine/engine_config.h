@@ -58,7 +58,7 @@ struct EngineConfig {
     /**
      * 设备像素 / 磅。2.0 约等于 144 dpi。
      */
-    float zoom = 2.0f;
+    float density = 2.0f;
 
     /**
      * 页间隙（磅）。连页模式下由宿主设成 0，让条带首尾相接。

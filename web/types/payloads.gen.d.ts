@@ -54,7 +54,7 @@ export interface Stats {
   frameBytes: number;
   glyphCacheBytes: number;
   glyphCacheLimit: number;
-  zoom: number;
+  density: number;
 }
 
 export interface BenchRelayoutPaint {

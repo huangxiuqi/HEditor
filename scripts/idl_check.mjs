@@ -212,7 +212,7 @@ const SHELL_MAY_REACH = new Set([
   'windowFirstPage', 'windowPageCount',           // 这一窗是哪几页
   'pagePxWidth', 'pagePxHeight',                  // 页画布的背衬尺寸
   'pageRgba',                                     // 一页的导出像素（内容 + 瞬态）
-  'pageDirtyPagesJson', 'pageDirtyRectsJson',     // 欠着的脏页与脏矩形
+  'pagesPendingBlitJson', 'pendingRectsJson',     // 欠着的脏页与脏矩形
 ]);
 const SHELL_FILES = ['web/src/transport/worker_main.ts'];
 const shellHits = new Map();

@@ -444,6 +444,16 @@ export function createDomHost(o: DomHostOptions): DomHost {
   const dpr = (): number => window.devicePixelRatio || 1;
 
   /**
+   * 设备像素 -> CSS 像素。DOM 元素只认 CSS 像素，这一步就是除 dpr。
+   *
+   * 页内定位一律经由它（cssOf 是"磅 -> CSS 像素"的那一层）。分散写这个除法的后果是
+   *   漏改一处就让某个覆盖物在 2x 屏上偏半个屏，而 DPR=1 的判据看不出来。
+   * @param px 设备像素
+   * @returns CSS 像素
+   */
+  const pxToCss = (px: number): number => px / dpr();
+
+  /**
    * 这个实例的身份。剪贴板缓存靠它判断"是不是我自己刚写出去的那一份" ——
    *   文本相等不等于同源（别处复制来同样的字，格式可能完全不同）。
    */
@@ -471,7 +481,9 @@ export function createDomHost(o: DomHostOptions): DomHost {
   // 拖动搬运期间把闪的那颗光标收起来：它与落点竖条同时出现时，页面上就是"两个光标"。
   let caretHidden = false;
   let blinkTimer = 0;
-  let lastCaretKey = '';
+  // finish 上一次看到的光标读数。与 afterEdit 里的 lastState 不是同一份：那一份记的是
+  //   scrollCaretIntoView 上一次的读数，两者的"上一次"不是同一拍。
+  let lastCaretState: any = null;
   let lastSelKey = '';
   let pendingOp = '';
   // 窗口自愈的在途标志与"补过哪一处滚动位置"（见 healWindow）。
@@ -486,6 +498,40 @@ export function createDomHost(o: DomHostOptions): DomHost {
   // 几何
 
   const view = (): HostView => link.geom();
+
+  /**
+   * 光标的位置是否挪了（段、偏移、侧别、行别、页）。
+   *
+   * 侧别与行别不能省：相邻控件边界上段号与偏移会重合（两侧括号之间挪一格），少了侧别
+   * 输入法候选框不跟；折行处上下换行时前三项都相同，少了行别同样判成没动。
+   * @param a 上一次读数；空表示还没读过
+   * @param b 这一次读数；空表示文档已卸载
+   * @returns 位置是否变了
+   */
+  function caretRelocated(a: any, b: any): boolean {
+    if (!a || !b) return a !== b;
+    return (
+      a.caretPara !== b.caretPara ||
+      a.caretOffset !== b.caretOffset ||
+      a.caretSide !== b.caretSide ||
+      a.caretLineAff !== b.caretLineAff ||
+      a.caretPage !== b.caretPage
+    );
+  }
+
+  /**
+   * 两次读数之间光标是否换了身份：caretRelocated 的五项再加闪烁相位。
+   *
+   * 两处消费者要的不是同一个答案，所以分成两个函数而不是两个调用点各写一遍：发不发
+   * caret 事件看相位（隐藏的那一拍也要通知宿主），滚不滚视口只看位移（按相位滚会让
+   * 光标每闪一下就把视口拽回原处）。字段表只在 caretRelocated 里有一份。
+   * @param a 上一次读数
+   * @param b 这一次读数
+   * @returns 是否算换了落点
+   */
+  function caretMoved(a: any, b: any): boolean {
+    return caretRelocated(a, b) || (!!a && !!b && a.caretVisible !== b.caretVisible);
+  }
 
   // IME 与滚动
 
@@ -508,14 +554,14 @@ export function createDomHost(o: DomHostOptions): DomHost {
     const sr = stageEl.getBoundingClientRect();
     const pr = pagesEl.getBoundingClientRect();
     const step = g.ph + g.gap;
-    const left = pr.left - sr.left + scroller.scrollLeft + st.caretX / dpr();
+    const left = pr.left - sr.left + scroller.scrollLeft + pxToCss(st.caretX);
     // 页内 y + 页号 x 步距 = 文档坐标（与光标滚入视野同一口径）。
     const top =
-      pr.top - sr.top + scroller.scrollTop + (st.caretPage * step + st.caretY) / dpr();
-    const lineH = Math.max(12, Math.round(st.caretH / dpr()));
+      pr.top - sr.top + scroller.scrollTop + pxToCss(st.caretPage * step + st.caretY);
+    const lineH = Math.max(12, Math.round(pxToCss(st.caretH)));
     ta.style.left = Math.round(left) + 'px';
     ta.style.top = Math.round(top) + 'px';
-    ta.style.width = Math.max(24, Math.round(pagesEl.clientWidth - st.caretX / dpr())) + 'px';
+    ta.style.width = Math.max(24, Math.round(pagesEl.clientWidth - pxToCss(st.caretX))) + 'px';
     ta.style.height = lineH + 'px';
     ta.style.lineHeight = lineH + 'px';
     ta.style.fontSize = Math.max(10, Math.round(lineH * 0.62)) + 'px';
@@ -559,9 +605,9 @@ export function createDomHost(o: DomHostOptions): DomHost {
     const inWindow =
       s.caretPage >= s.windowFirstPage && s.caretPage < s.windowFirstPage + s.windowPages;
     const top = inWindow
-      ? (s.caretPage * step + s.caretY) / dpr()
-      : (s.caretPage * step) / dpr();
-    const bot = top + Math.max(12, s.caretH / dpr());
+      ? pxToCss(s.caretPage * step + s.caretY)
+      : pxToCss(s.caretPage * step);
+    const bot = top + Math.max(12, pxToCss(s.caretH));
     const pad = 18;
     const before = scroller.scrollTop;
     const viewTop = before;
@@ -636,16 +682,11 @@ export function createDomHost(o: DomHostOptions): DomHost {
     pages.sync(g.first, g.count, g.totalPages, g);
     healWindow(g);
     positionIme(s);
-    // 变化键取完整的落点身份：段号与偏移在相邻控件边界上会重合（][ 两侧同段同偏移），
-    //   少了侧别，光标在两枚括号之间挪一格就判成"没动"，输入法候选框不跟着挪；
-    //   少了行别，折行处上下换行也判成没动。这条键只判"变没变"，不参与定位。
-    const caretKey = s
-      ? `${s.caretPara}:${s.caretOffset}:${s.caretSide}:${s.caretLineAff}:${s.caretPage}:${s.caretVisible}`
-      : '';
-    if (caretKey !== lastCaretKey) {
-      lastCaretKey = caretKey;
-      o.onCaret?.();
-    }
+    // 落点身份由 caretMoved 一处判定（段、偏移、侧别、行别、页、相位）：这里决定发不发
+    //   caret 事件。相位翻转也要发 —— 闪烁那一下宿主得知道光标此刻是显示还是隐藏。
+    const prevCaret = lastCaretState;
+    lastCaretState = s;
+    if (caretMoved(prevCaret, s)) o.onCaret?.();
     // 选区两端是流位置：只挪一个槽、另一侧不变时它也得算变。
     const selKey = s ? `${s.selectionAnchor}:${s.selectionFocus}` : '';
     if (selKey !== lastSelKey) {
@@ -690,14 +731,14 @@ export function createDomHost(o: DomHostOptions): DomHost {
       //   上一次编辑所在的那一页 —— 看起来就是"点一下页面乱跳、光标不见了"。
       // 光标没动就别滚（见 scrollCaretIntoView 的 reveal）：搬图、改格式、提交表单
       //   都不挪光标，而这时视口停在用户自己滚到的位置。
-      const prev = lastState;
-      const caretMoved =
-          !prev || !s || prev.caretPara !== s.caretPara || prev.caretOffset !== s.caretOffset ||
-          prev.caretPage !== s.caretPage;
+      // 这里用 caretRelocated 而不是 caretMoved：相位翻转不是挪动，按它滚会让光标每闪
+      //   一下就把视口拽回原处。比较对象是 lastState —— scrollCaretIntoView 上一次的
+      //   读数，与 finish 里那份不是同一拍。
+      const relocated = caretRelocated(lastState, s);
       // 滚动与收尾之间还要等一次视口消息：滚动之后引擎可能得换窗，而 finish 是按
       //   "引擎这一刻的窗口"建画布、贴页的。不等的话这一拍贴的是旧窗口那几页，
       //   新窗口要等下一拍 —— 连续粘贴时就是每一拍都落后一点，越粘差距越大。
-      return then1(scrollCaretIntoView(s, caretMoved), () => {
+      return then1(scrollCaretIntoView(s, relocated), () => {
         finish();
         // 计时器在这里重新起：相位从"可见"开始，530 ms 后翻到隐藏。放在 finish 里会
         //   被每一份状态重置（Worker 每拍都推一份），于是永远停在可见那一拍。
@@ -818,6 +859,15 @@ export function createDomHost(o: DomHostOptions): DomHost {
   }
 
   /**
+   * 设备像素 -> 磅。与 docPt 是同一个换算的单值形态（docPt 吃一对坐标）。
+   *
+   * 页步距、"这一页的顶上多少磅"这类单个量都走它，不要分散写这个除法。
+   * @param px 设备像素
+   * @returns 磅
+   */
+  const pxToPt = (px: number): number => px / zoom.density;
+
+  /**
    * 设备像素 -> 引擎的文档坐标（磅）。
    *
    * 只在这里折算一次。同一条规则写两遍就会分叉：输入层与拖选各自除一次密度，
@@ -825,8 +875,8 @@ export function createDomHost(o: DomHostOptions): DomHost {
    *   拖选落到下一行"，而且只在非 1.0 密度下显形。
    */
   const docPt = (xPx: number, yPx: number): { x: number; y: number } => ({
-    x: xPx / zoom.density,
-    y: yPx / zoom.density,
+    x: pxToPt(xPx),
+    y: pxToPt(yPx),
   });
 
   /**
@@ -880,9 +930,9 @@ export function createDomHost(o: DomHostOptions): DomHost {
     const sr = stageEl.getBoundingClientRect();
     const pr = pagesEl.getBoundingClientRect();
     const step = g.ph + g.gap;
-    const left = pr.left - sr.left + scroller.scrollLeft + st.caretX / dpr();
-    const top = pr.top - sr.top + scroller.scrollTop + (st.caretPage * step + st.caretY) / dpr();
-    const lineH = Math.max(12, Math.round(st.caretH / dpr()));
+    const left = pr.left - sr.left + scroller.scrollLeft + pxToCss(st.caretX);
+    const top = pr.top - sr.top + scroller.scrollTop + pxToCss(st.caretPage * step + st.caretY);
+    const lineH = Math.max(12, Math.round(pxToCss(st.caretH)));
     preeditEl.textContent = text;
     preeditEl.style.left = Math.round(left) + 'px';
     preeditEl.style.top = Math.round(top) + 'px';
@@ -904,11 +954,14 @@ export function createDomHost(o: DomHostOptions): DomHost {
 
   /**
    * 指示线元素（懒建）。绝对定位在页容器上，不接指针事件。
+   *
+   * dataset.role 是给判据认的：这个 div 由库现造、没有类名，判据只能靠标记找到它。
    * @returns 那一个 div
    */
   function gridGuide(): HTMLElement {
     if (guideEl && guideEl.isConnected) return guideEl;
     const el = document.createElement('div');
+    el.dataset.role = 'grid-guide';
     el.style.position = 'absolute';
     el.style.background = 'rgba(43, 127, 255, 0.9)';
     el.style.pointerEvents = 'none';
@@ -945,8 +998,7 @@ export function createDomHost(o: DomHostOptions): DomHost {
    * @returns CSS 像素坐标
    */
   function cssOf(ptX: number, ptYDoc: number): { x: number; y: number } {
-    const d = dpr();
-    return { x: (ptX * zoom.density) / d, y: (ptYDoc * zoom.density) / d };
+    return { x: pxToCss(ptX * zoom.density), y: pxToCss(ptYDoc * zoom.density) };
   }
 
   /**
@@ -1005,9 +1057,10 @@ export function createDomHost(o: DomHostOptions): DomHost {
         guide.style.height = Math.max(1, Math.round(b.y - a.y)) + 'px';
       } else {
         const a = cssOf(lo, pos);
+        const b = cssOf(hi, pos);
         guide.style.left = Math.round(a.x) + 'px';
         guide.style.top = Math.round(a.y) + 'px';
-        guide.style.width = Math.max(1, Math.round(((hi - lo) * zoom.density) / dpr())) + 'px';
+        guide.style.width = Math.max(1, Math.round(b.x - a.x)) + 'px';
         guide.style.height = '1px';
       }
       guide.style.display = 'block';
@@ -1064,7 +1117,7 @@ export function createDomHost(o: DomHostOptions): DomHost {
         }
         const gv = view();
         // 页在文档里按"页高 + 页间隙"的像素步距摆，折回磅要除密度 —— 与命中测试同一个口径。
-        const stepPt = (gv.ph + gv.gap) / zoom.density;
+        const stepPt = pxToPt(gv.ph + gv.gap);
         pageTopPt = (g.page | 0) * stepPt;
         cols = (g.cols as any[]).map((v) => Number(v));
         widths0 = [];
@@ -1182,10 +1235,14 @@ export function createDomHost(o: DomHostOptions): DomHost {
           // 宽度取光标自己的（磅 x 密度 = 设备像素，与 caretRectPx 同一个式子）：
           //   写死一个 2px 比正文光标粗一档，看起来像另一个东西。
           const wPt = typeof r.w === 'number' && r.w > 0 ? r.w : 1.5;
-          el.style.width = Math.max(1, Math.ceil(wPt * zoom.density) / dpr()) + 'px';
-          el.style.left = Math.round(cssOf(r.x, 0).x) + 'px';
-          el.style.top = Math.round((r.page * step + r.y * zoom.density) / dpr()) + 'px';
-          el.style.height = Math.max(8, Math.round(r.h * zoom.density / dpr())) + 'px';
+          // 页步距是设备像素、r.y 是磅：先折回磅再一起走 cssOf，否则密度会乘两次。
+          const pageTopPt = r.page * pxToPt(step);
+          const a = cssOf(r.x, pageTopPt + r.y);
+          const b = cssOf(r.x + wPt, pageTopPt + r.y + r.h);
+          el.style.left = Math.round(a.x) + 'px';
+          el.style.top = Math.round(a.y) + 'px';
+          el.style.width = Math.max(1, pxToCss(Math.ceil(wPt * zoom.density))) + 'px';
+          el.style.height = Math.max(8, Math.round(b.y - a.y)) + 'px';
           el.style.display = 'block';
         });
       });
@@ -1513,9 +1570,9 @@ export function createDomHost(o: DomHostOptions): DomHost {
     const factor = zoom.factorOf(zoom.density);
     const density = zoom.ofFactor(factor);
     zoom.set(density);
-    writeOp('zoom', { zoom: density, dpr: next });
+    writeOp('density', { density, dpr: next });
     pages.invalidate();
-    then1(link.settle('zoom'), () => finish());
+    then1(link.settle('density'), () => finish());
   });
 
   const onWindowError = (e: ErrorEvent): void => {

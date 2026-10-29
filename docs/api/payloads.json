@@ -179,7 +179,7 @@
           "kind": "num"
         },
         {
-          "name": "zoom",
+          "name": "density",
           "kind": "num"
         }
       ]

@@ -460,7 +460,7 @@ test.describe('表格：跨页切片', () => {
                text1: e.paragraph(1), text2: e.paragraph(2),
                layoutDiff: lay.diff, firstLine: lay.first, pageDiff: page.diff,
                pageBox: page.box, pagePx: [page.w, page.h], zoom: Z,
-               dirty: D.dirtyPages(), steps: first.length,
+               dirty: D.pagesWrittenThisFrame(), steps: first.length,
                fulls: first.filter((s) => s.full).length,
                lastSteps: first.slice(-4) };`);
     check('前置：3x3、图缩到比格宽窄、第二格有字',

@@ -332,7 +332,7 @@ void setScenario(int scenario) {
 }
 
 void setZoom(float z) {
-    g_cfg.zoom = z;
+    g_cfg.density = z;
     applyConfig();
 }
 /**
@@ -453,8 +453,6 @@ void relayoutAndPaint() {
     g_engine.repaint();
 }
 
-void layoutOnly() { g_engine.relayout(); }
-
 /**
  * 这份 wasm 自己的构建时间（由构建脚本经 HEDITOR_BUILD_STAMP 注入）。
  * 用途单一但关键：验证台把它显示出来，"页面跑的到底哪一版"就不用猜了 ——
@@ -468,7 +466,7 @@ size_t frameByteSize() { return g_engine.frameBytes(); }
 
 /**
  * 窗口导出图（内容 + 瞬态，窗口顺序拼一张）。给探针与诊断用：
- * 它现场拼一次，宿主上屏走的是 pageRgba / pageDirtyRects —— 那条路不需要窗口帧。
+ * 它现场拼一次，宿主上屏走的是 pageRgba / pendingRects —— 那条路不需要窗口帧。
  */
 val frameRgba() {
     return val(emscripten::typed_memory_view(g_engine.frameBytes(), g_engine.frame()));
@@ -513,21 +511,21 @@ int pageGapPx() { return g_engine.pageGapPx(); }
  * 宿主按这张清单决定 putImageData 哪几块：光标移动只传几十像素，不再是整页 1 Mpx。
  * 内容重光栅与瞬态（光标 / 选区 / 标记）都算在里面，帧的重建不算 —— 那只是落点变了。
  */
-std::string pageDirtyRectsJson(int page) { return g_engine.takePageDirtyRectsJson(page); }
+std::string pendingRectsJson(int page) { return g_engine.takePendingRectsJson(page); }
 
 /**
  * 还欠着脏矩形的页号（升序）。宿主用它决定这一拍要贴哪几页 ——
- *   不能用 dirtyPages（那是"本拍写过哪几页"，矩形却是累积的）。
+ *   不能用 pagesWrittenThisFrame（那是"本拍写过哪几页"，矩形却是累积的）。
  */
-std::string pageDirtyPagesJson() { return g_engine.pageDirtyPagesJson(); }
+std::string pagesPendingBlitJson() { return g_engine.pagesPendingBlitJson(); }
 
 /**
- * 本次呈现写过的页（绝对页号，升序）。宿主据此决定哪几张页画布要重贴。
+ * 本次呈现写过的页（绝对页号，升序）。这是读数，不是"该贴哪几页"。
  */
-std::string dirtyPagesJson() {
+std::string pagesWrittenThisFrameJson() {
     std::ostringstream o;
     o << "[";
-    const std::vector<int>& v = g_engine.dirtyPages();
+    const std::vector<int>& v = g_engine.pagesWrittenThisFrame();
     for (size_t i = 0; i < v.size(); ++i) {
         if (i) o << ",";
         o << v[i];
@@ -591,7 +589,7 @@ std::string statsJson() {
     //   "预热"与"命中"都无从谈起，而面板上只看命中率是看不出来的。
     o << "\"glyphCacheBytes\":" << s.glyph_cache_bytes << ",";
     o << "\"glyphCacheLimit\":" << s.glyph_cache_limit << ",";
-    o << "\"zoom\":" << s.zoom;
+    o << "\"density\":" << s.density;
     o << "}";
     return pk::checked(pk::stats::kSpec, o.str());
 }
@@ -634,12 +632,6 @@ std::string benchRelayoutPaint(int runs) {
     o << "\"totalMs\":" << total / n;
     o << "}";
     return pk::checked(pk::bench_relayout_paint::kSpec, o.str());
-}
-
-std::string shapeReport(int font_index, float size_pt, const std::string& text, int wm_code,
-                        const std::string& language) {
-    return g_engine.describeShaping(font_index, size_pt, text, writingModeFromCode(wm_code),
-                                    language.empty() ? nullptr : language.c_str());
 }
 
 /**
@@ -823,7 +815,7 @@ std::string caretPositionJson() {
  * 按 Position 摆光标；成功之后补一次呈现。
  */
 bool setCaretPosition(int flow, int affinity) {
-    if (!g_engine.setCaretPosition(Position{static_cast<FlowPos>(flow), affinity})) return false;
+    if (!g_engine.setCaretAtPosition(Position{static_cast<FlowPos>(flow), affinity})) return false;
     g_engine.repaint();
     return true;
 }
@@ -2175,6 +2167,8 @@ std::string documentText(int para) {
  * 与 documentText 分开，不是图省事：宿主每敲一个字都要一份全文（change 事件要带它），
  *   而"逐段取再拼"要 N 次跨界调用 —— 2000 段时那一圈是毫秒级的，还是每拍。
  *   这一条在引擎里拼完只回一个字符串。
+ * 按 \n 切就等于段边界，前提是段文本不含换行 —— 这条由 EditCommand 的码点入口
+ *   拒绝 U+000A / U+000D 保证，含换行的输入在上一层的文本入口就折成了段落标记。
  */
 std::string documentTextAll() {
     const auto& blocks = g_engine.blocks();
@@ -2223,7 +2217,6 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("selectionStyleJson", &selectionStyleJson);
     emscripten::function("prewarmPageGlyphs", &prewarmPageGlyphs);
 
-    emscripten::function("relayout", &layoutOnly);
     emscripten::function("relayoutAndPaint", &relayoutAndPaint);
     emscripten::function("benchRelayoutPaint", &benchRelayoutPaint);
 
@@ -2354,8 +2347,8 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("frameByteSize", &frameByteSize);
     emscripten::function("frameRgba", &frameRgba);
     emscripten::function("pageRgba", &pageRgba);
-    emscripten::function("pageDirtyRectsJson", &pageDirtyRectsJson);
-    emscripten::function("pageDirtyPagesJson", &pageDirtyPagesJson);
+    emscripten::function("pendingRectsJson", &pendingRectsJson);
+    emscripten::function("pagesPendingBlitJson", &pagesPendingBlitJson);
 
     emscripten::function("setViewportAnchor", &setViewportAnchor);
     emscripten::function("windowFirstPage", &windowFirstPage);
@@ -2363,9 +2356,8 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("pagePxWidth", &pagePxWidth);
     emscripten::function("pagePxHeight", &pagePxHeight);
     emscripten::function("pageGapPx", &pageGapPx);
-    emscripten::function("dirtyPagesJson", &dirtyPagesJson);
+    emscripten::function("pagesWrittenThisFrameJson", &pagesWrittenThisFrameJson);
 
     emscripten::function("statsJson", &statsJson);
     emscripten::function("buildStamp", &buildStamp);
-    emscripten::function("shapeReport", &shapeReport);
 }

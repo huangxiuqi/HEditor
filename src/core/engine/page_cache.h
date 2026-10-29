@@ -208,7 +208,7 @@ public:
      * 有脏矩形的页号（升序）。
      * @returns 页号表
      */
-    std::vector<int> dirtyPages() const;
+    std::vector<int> pagesWrittenThisFrame() const;
 
     /**
      * 全部页格，供呈现时遍历（窗口外的页要清瞬态账）。

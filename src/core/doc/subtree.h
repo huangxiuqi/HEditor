@@ -106,6 +106,27 @@ inline constexpr int kMaxNewTableRows = 200;
 inline constexpr int kMaxNewTableCols = 50;
 
 /**
+ * 纯文本是否含换行。
+ *
+ * 段文本里出现 U+000A 会让段号有两套算法（按块取与按分隔符切），所以含换行的输入
+ * 必须先折成节点再落笔。判据与 nodesFromPlainText 的折行条件同一份。
+ * @param utf8 待检文本
+ * @returns 含 CR 或 LF 时为真
+ */
+bool hasLineBreak(const std::string& utf8);
+
+/**
+ * 纯文本 → 节点序列：换行折成段落标记，CRLF 算一个换行。
+ *
+ * 空行是有效内容（连续两个换行产出两个段落标记），所以文本 run 只在行非空时产出，
+ * 段落标记无条件产出。粘贴纯文本与插入含换行的字符串共用这一份 —— 两条路对同一段
+ * 文本必须产出同一个节点序列，否则同一份粘贴从两个入口进来会得到不同的段结构。
+ * @param utf8 纯文本（UTF-8）
+ * @returns 节点序列，原文没有任何内容时为空
+ */
+std::vector<NodeSpec> nodesFromPlainText(const std::string& utf8);
+
+/**
  * 造一张空表：每格一枚段落标记。
  * @param rows 行数
  * @param cols 列数

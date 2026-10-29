@@ -499,7 +499,7 @@ const SectionInfo kSections[] = {
     {79, false, 2},  {80, false, 3},  {81, false, 2},  {82, false, 1},  {83, false, 2},
     {84, false, 2},  {85, false, 3},  {86, false, 4},  {87, false, 3},  {88, false, 3},
     {89, false, 3},  {90, false, 2},  {91, false, 3},  {92, false, 6},  {93, false, 5},
-    {94, false, 2},
+    {94, false, 2},  {95, false, 2},
 };
 
 /**
@@ -730,7 +730,7 @@ int main() {
     //   一次整页呈现是每进程 2.5 s 的固定开销，分片跑时不该为别的节白付。
     EditorEngine e;
     EngineConfig cfg;
-    cfg.zoom = 1.5f;
+    cfg.density = 1.5f;
     // 首次呈现的两个数：第 3、6 节的像素判据拿它们当分母，所以在块外留一份。
     long long framePixels = 0;
     long long fullPaint = 0;
@@ -1066,7 +1066,7 @@ int main() {
         expectTrue(e5.init({cjkPath, mnPath, latinPath}), "引擎初始化");
 
         EngineConfig c5;
-        c5.zoom = 1.0f;  // 1 pt = 1 px：便于直接按磅定位像素
+        c5.density = 1.0f;  // 1 pt = 1 px：便于直接按磅定位像素
         c5.page.width_pt = 200.0f;
         c5.page.height_pt = 80.0f;
         c5.page.margins = PageMargins::all(10.0f);
@@ -1146,8 +1146,8 @@ int main() {
                 "page0 最大 y=%.2f pt；page1 y ∈ [%.2f, %.2f] pt\n",
                 g0, g1, gother, maxy0, (g1 ? miny1 : 0.0f), (g1 ? maxy1 : 0.0f));
         }
-        const int page_h_px = static_cast<int>(std::lround(c5.page.height_pt * c5.zoom));
-        const int gap_px = static_cast<int>(std::lround(c5.page_gap_pt * c5.zoom));
+        const int page_h_px = static_cast<int>(std::lround(c5.page.height_pt * c5.density));
+        const int gap_px = static_cast<int>(std::lround(c5.page_gap_pt * c5.density));
         const int last_local = pages2 - 1;
         const int y0 = last_local * (page_h_px + gap_px);
         const int fw = e5.frameWidth();
@@ -1206,7 +1206,7 @@ int main() {
             EditorEngine e;
             if (!e.init({cjkPath, mnPath, latinPath})) return {};
             EngineConfig c = cfg;
-            c.zoom = 1.5f;
+            c.density = 1.5f;
             e.setConfig(c);
             loadBlocks(e, sampleDocument(0, 1, 2));
             e.relayout();
@@ -1257,7 +1257,7 @@ int main() {
             return 2;
         }
         EngineConfig cfge;
-        cfge.zoom = 1.5f;
+        cfge.density = 1.5f;
         ep.setConfig(cfge);
         {
             BlockSpec be;
@@ -1302,8 +1302,8 @@ int main() {
             const ControlSet& cs = ep.controls();
             expectTrue(cs.size() == 2 && cs.at(1).parent == 0 && cs.at(1).depth == 1,
                        "内层控件的 parent / depth 建对了（区间树）");
-            expectTrue(cs.innermostAt(T(6), true) == 0, "位置 6 只被外层覆盖 → 最内层是外层");
-            expectTrue(cs.innermostAt(T(9), true) == 1, "位置 9 被内外层同时覆盖 → 取最内层");
+            expectTrue(cs.innermostInsertAt(T(6)) == 0, "位置 6 只被外层覆盖 → 最内层是外层");
+            expectTrue(cs.innermostInsertAt(T(9)) == 1, "位置 9 被内外层同时覆盖 → 取最内层");
             expectTrue(canIns(6), "外层可编辑区域：允许");
             expectTrue(!canIns(9), "内层只读区域：拒 —— 这就是「嵌套」的全部含义（内层策略优先）");
             expectTrue(!canIns(10), "内层覆盖的 10 也拒");
@@ -1329,7 +1329,7 @@ int main() {
             return 2;
         }
         EngineConfig cfgf;
-        cfgf.zoom = 1.5f;
+        cfgf.density = 1.5f;
         ef.setConfig(cfgf);
 
         BlockSpec bf;
@@ -1702,7 +1702,7 @@ int main() {
                 return n;
             };
 
-            const float zoom = ef.config().zoom;
+            const float density = ef.config().density;
             const int fw = ef.frameWidth();
             // 本测试只配了 2 个控件：#0 = [5,9)「反复心悸」，#1 = [12,16)「加重一天」
             //
@@ -1713,14 +1713,15 @@ int main() {
             auto bandLeft = [&](int ci) -> std::pair<int, int> {
                 const auto r = ef.controlRects(ci);
                 if (r.empty()) return {0, -1};
-                return {static_cast<int>(std::lround((r[0].r_pt.x - 10.0f) * zoom)),
-                        static_cast<int>(std::lround((r[0].r_pt.x - 1.0f) * zoom))};
+                return {static_cast<int>(std::lround((r[0].r_pt.x - 10.0f) * density)),
+                        static_cast<int>(std::lround((r[0].r_pt.x - 1.0f) * density))};
             };
             auto bandRight = [&](int ci) -> std::pair<int, int> {
                 const auto r = ef.controlRects(ci);
                 if (r.empty()) return {0, -1};
-                return {static_cast<int>(std::lround((r[0].r_pt.x + r[0].r_pt.w + 1.2f) * zoom)),
-                        static_cast<int>(std::lround((r[0].r_pt.x + r[0].r_pt.w + 14.0f) * zoom))};
+                return {
+                    static_cast<int>(std::lround((r[0].r_pt.x + r[0].r_pt.w + 1.2f) * density)),
+                    static_cast<int>(std::lround((r[0].r_pt.x + r[0].r_pt.w + 14.0f) * density))};
             };
             auto inkIn = [&](const std::vector<uint8_t>& px, std::pair<int, int> b) {
                 return countCols(px, fw, b.first, b.second);
@@ -1917,16 +1918,16 @@ int main() {
 
                 const std::vector<uint8_t> f = snapshot(ef);
                 const float slot = 4.055f + kControlBracketSlotGapPt;  // 槽宽（参考值）
-                const int x_open = static_cast<int>(std::lround(open_pt * zoom));
-                const int x_close = static_cast<int>(std::lround((open_pt + slot) * zoom));
+                const int x_open = static_cast<int>(std::lround(open_pt * density));
+                const int x_close = static_cast<int>(std::lround((open_pt + slot) * density));
                 // 闭括号的字形贴槽尾（间隙在内侧），所以它的墨迹从
                 //   「闭槽首 + 间隙」开始 —— 窗口要按这个来取，否则数到的是空的。
                 const int x_close_glyph = static_cast<int>(
-                    std::lround((open_pt + slot + kControlBracketSlotGapPt) * zoom));
+                    std::lround((open_pt + slot + kControlBracketSlotGapPt) * density));
                 const size_t ink_open =
-                    countCols(f, fw, x_open - 2, x_open + static_cast<int>(6.0f * zoom));
-                const size_t ink_close = countCols(f, fw, x_close_glyph - 1,
-                                                   x_close_glyph + static_cast<int>(6.0f * zoom));
+                    countCols(f, fw, x_open - 2, x_open + static_cast<int>(6.0f * density));
+                const size_t ink_close = countCols(
+                    f, fw, x_close_glyph - 1, x_close_glyph + static_cast<int>(6.0f * density));
                 std::printf(
                     "     删空前同窗口墨迹 %zu px ｜ 删空后：开括号窗口 %zu px、"
                     "闭括号窗口 %zu px（开槽 x=%d，闭槽 x=%d）\n",
@@ -1979,7 +1980,7 @@ int main() {
                 return 2;
             }
             EngineConfig cw;
-            cw.zoom = 1.5f;
+            cw.density = 1.5f;
             ew.setConfig(cw);
             BlockSpec bw;
             bw.font_index = 0;
@@ -2032,7 +2033,7 @@ int main() {
             return 2;
         }
         EngineConfig cg;
-        cg.zoom = 1.5f;
+        cg.density = 1.5f;
         eg.setConfig(cg);
 
         BlockSpec bg;
@@ -2070,7 +2071,7 @@ int main() {
             const int first = e.windowFirstPage();
             const int step = e.pagePxHeight() + e.pageGapPx();
             for (int p = first; p < first + e.windowPageCount(); ++p) {
-                for (const Rect& r : e.takePageDirtyRects(p)) {
+                for (const Rect& r : e.takePendingRects(p)) {
                     if (r.w <= 0.0f || r.h <= 0.0f) continue;
                     area += static_cast<long long>(std::ceil(r.w)) *
                             static_cast<long long>(std::ceil(r.h));
@@ -2193,7 +2194,7 @@ int main() {
             return 2;
         }
         EngineConfig cx;
-        cx.zoom = 1.5f;
+        cx.density = 1.5f;
         ex.setConfig(cx);
 
         BlockSpec bx;
@@ -2286,7 +2287,7 @@ int main() {
             return 2;
         }
         EngineConfig ca;
-        ca.zoom = 1.5f;
+        ca.density = 1.5f;
         ea.setConfig(ca);
 
         BlockSpec ba;
@@ -2351,12 +2352,12 @@ int main() {
         {
             ea.repaint();
             const std::vector<uint8_t> f(ea.frame(), ea.frame() + ea.frameBytes());
-            const float zoom = ea.config().zoom;
+            const float density = ea.config().density;
             const int fw = ea.frameWidth();
-            const int x0 = static_cast<int>(std::lround(p_close * zoom)) - 2;
+            const int x0 = static_cast<int>(std::lround(p_close * density)) - 2;
             // 止于 B 的开槽末（再往里 1pt 就是「三」的墨迹了）
             const float slot_len = p_open - p_close;
-            const int x1 = static_cast<int>(std::lround((p_open + slot_len - 1.0f) * zoom));
+            const int x1 = static_cast<int>(std::lround((p_open + slot_len - 1.0f) * density));
             int blue_lo = -1, blue_hi = -1, gray_lo = -1, gray_hi = -1;
             scanColumns(f, fw, x0, x1, isBracketBlue, &blue_lo, &blue_hi);
             scanColumns(f, fw, x0, x1, isBracketGray, &gray_lo, &gray_hi);
@@ -2379,7 +2380,7 @@ int main() {
             return 2;
         }
         EngineConfig c;
-        c.zoom = 1.0f;
+        c.density = 1.0f;
         e.setConfig(c);
 
         // 200 段病历：单段文档没有可复用的前缀，增量与全量必然相等，
@@ -2775,7 +2776,7 @@ int main() {
         EditorEngine a;
         expectTrue(a.init({cjkPath, mnPath, latinPath}), "引擎初始化（逐帧比对）");
         EngineConfig cfg16;
-        cfg16.zoom = 1.0f;
+        cfg16.density = 1.0f;
         a.setConfig(cfg16);
 
         std::vector<BlockSpec> doc;
@@ -2887,7 +2888,7 @@ int main() {
             EditorEngine e;
             expectTrue(e.init(fonts17), "引擎初始化（空段落）");
             EngineConfig c;
-            c.zoom = 1.0f;
+            c.density = 1.0f;
             e.setConfig(c);
             loadBlocks(e, mkBlocks({"甲乙丙", "", "丁戊己"}));
             e.relayout();
@@ -2913,7 +2914,7 @@ int main() {
             EditorEngine e;
             expectTrue(e.init(fonts17), "引擎初始化（分段）");
             EngineConfig c;
-            c.zoom = 1.0f;
+            c.density = 1.0f;
             e.setConfig(c);
             loadBlocks(e, mkBlocks({"患者主诉：反复心悸3天加重1天。"}));
             e.relayout();
@@ -2970,7 +2971,7 @@ int main() {
             EditorEngine e;
             expectTrue(e.init(fonts17), "引擎初始化（分段粒度）");
             EngineConfig c;
-            c.zoom = 1.0f;
+            c.density = 1.0f;
             e.setConfig(c);
             loadBlocks(e, mkBlocks({"第一段内容甲乙丙丁。", "第二段内容戊己庚辛。",
                                     "第三段内容壬癸子丑。", "第四段内容寅卯辰巳。"}));
@@ -2995,7 +2996,7 @@ int main() {
             EditorEngine byBack, byDel;
             expectTrue(byBack.init(fonts17) && byDel.init(fonts17), "引擎初始化（两个合并入口）");
             EngineConfig c;
-            c.zoom = 1.0f;
+            c.density = 1.0f;
             byBack.setConfig(c);
             byDel.setConfig(c);
             const std::vector<std::string> texts{"第一段文字", "第二段文字"};
@@ -3021,7 +3022,7 @@ int main() {
             EditorEngine e;
             expectTrue(e.init(fonts17), "引擎初始化（边界）");
             EngineConfig c;
-            c.zoom = 1.0f;
+            c.density = 1.0f;
             e.setConfig(c);
             loadBlocks(e, mkBlocks({"甲", "乙"}));
             e.relayout();
@@ -3050,7 +3051,7 @@ int main() {
             EditorEngine e;
             expectTrue(e.init(fonts17), "引擎初始化（表单策略）");
             EngineConfig c;
-            c.zoom = 1.0f;
+            c.density = 1.0f;
             e.setConfig(c);
             loadBlocks(e, mkBlocks({"甲", "乙"}));
             e.relayout();
@@ -3101,7 +3102,7 @@ int main() {
                 return 2;
             }
             EngineConfig c17;
-            c17.zoom = 1.0f;
+            c17.density = 1.0f;
             es.setConfig(c17);
             auto mk17 = [](int para, int so, int eo, const char* id, bool ro) {
                 Control c;
@@ -3169,7 +3170,7 @@ int main() {
             EditorEngine e;
             expectTrue(e.init(fonts17), "引擎初始化（控件适配）");
             EngineConfig c;
-            c.zoom = 1.0f;
+            c.density = 1.0f;
             e.setConfig(c);
             loadBlocks(e, mkBlocks({"甲乙丙丁戊己庚辛壬癸"}));  // 10 个汉字
             e.relayout();
@@ -3263,7 +3264,7 @@ int main() {
             EditorEngine e;
             expectTrue(e.init(fonts17), "引擎初始化（长文档回车）");
             EngineConfig c;
-            c.zoom = 1.0f;
+            c.density = 1.0f;
             e.setConfig(c);
             std::vector<BlockSpec> doc;
             for (int i = 0; i < 200; ++i) {
@@ -3309,7 +3310,7 @@ int main() {
             EditorEngine e;
             expectTrue(e.init(fonts17), "引擎初始化（随机跨段编辑）");
             EngineConfig c;
-            c.zoom = 1.0f;
+            c.density = 1.0f;
             e.setConfig(c);
             loadBlocks(
                 e, mkBlocks({"第一段：患者诉心悸。", "第二段：休息后缓解。", "第三段：无晕厥。"}));
@@ -3400,7 +3401,7 @@ int main() {
             return 2;
         }
         EngineConfig c18;
-        c18.zoom = 1.5f;
+        c18.density = 1.5f;
         e.setConfig(c18);
 
         BlockSpec b18;
@@ -3477,11 +3478,11 @@ int main() {
         {
             e.repaint();
             const std::vector<uint8_t> f(e.frame(), e.frame() + e.frameBytes());
-            const float zoom = e.config().zoom;
+            const float density = e.config().density;
             const int fw = e.frameWidth();
-            const int x0 = static_cast<int>(std::lround(close_x * zoom)) - 2;
+            const int x0 = static_cast<int>(std::lround(close_x * density)) - 2;
             const float slot_len = open_x - close_x;
-            const int x1 = static_cast<int>(std::lround((open_x + slot_len - 1.0f) * zoom));
+            const int x1 = static_cast<int>(std::lround((open_x + slot_len - 1.0f) * density));
             int blue_lo = -1, blue_hi = -1, gray_lo = -1, gray_hi = -1;
             scanColumns(f, fw, x0, x1, isBracketBlue, &blue_lo, &blue_hi);
             scanColumns(f, fw, x0, x1, isBracketGray, &gray_lo, &gray_hi);
@@ -3672,7 +3673,7 @@ int main() {
             //   蓝括号关在窗口外，断言反而变绿。
             e6.repaint();
             const std::vector<uint8_t> f6(e6.frame(), e6.frame() + e6.frameBytes());
-            const float zoom6 = e6.config().zoom;
+            const float zoom6 = e6.config().density;
             const float x_last = std::max(x_close, x_next);
             const int w0 = static_cast<int>(std::lround(x_open * zoom6)) - 2;
             const int w1 =
@@ -3782,8 +3783,8 @@ int main() {
                 ch_hi = static_cast<int>(x);
                 ++ch_n;
             }
-            const int px_open2 = static_cast<int>(std::lround(xs8[0] * c18.zoom));
-            const int px_open3 = static_cast<int>(std::lround(xs8[3] * c18.zoom));
+            const int px_open2 = static_cast<int>(std::lround(xs8[0] * c18.density));
+            const int px_open3 = static_cast<int>(std::lround(xs8[3] * c18.density));
             std::printf(
                 "     中间字段改只读带来的变化：%d 列 ∈ [%d, %d]；"
                 "左字段闭括号 x=%d px，右字段开括号 x=%d px\n",
@@ -3826,13 +3827,13 @@ int main() {
                 "     删空之后：#1=[%zu,%zu) depth=%d parent=%d，"
                 "偏移 7 归属=%d，光标在 %zu\n",
                 w1.range.start.offset, w1.range.end.offset, w1.depth, w1.parent,
-                e8.controls().innermostAt(TextPos{0, 7}, true), e8.caret().offset);
+                e8.controls().innermostInsertAt(TextPos{0, 7}), e8.caret().offset);
             expectTrue(w1.range.start.offset == 7 && w1.range.end.offset == 7,
                        "中间那个字段被删成零宽的空字段");
             expectTrue(w1.depth == 1,
                        "★ 零宽字段被邻居按闭合区间包含 → 区间树重算后它是内层（depth 1）。"
                        "树停在编辑前那一刻的话这里还是 0，位置会被左邻居抢走");
-            expectTrue(e8.controls().innermostAt(TextPos{0, 7}, true) == 1 &&
+            expectTrue(e8.controls().innermostInsertAt(TextPos{0, 7}) == 1 &&
                            e8.focusedControlIndex() == 1,
                        "★ 它自己那个位置归它（最内层）—— 否则光标再也进不去、字也打不进去");
 
@@ -3928,7 +3929,7 @@ int main() {
             return 2;
         }
         EngineConfig c19;
-        c19.zoom = 1.5f;
+        c19.density = 1.5f;
         e.setConfig(c19);
         BlockSpec b19;
         b19.font_index = 0;
@@ -4080,7 +4081,7 @@ int main() {
                 return 2;
             }
             EngineConfig c;
-            c.zoom = 1.5f;
+            c.density = 1.5f;
             e3.setConfig(c);
             loadBlocks(e3, {b19});
             e3.setEditMode(EditMode::Form);
@@ -4190,7 +4191,7 @@ int main() {
             return 2;
         }
         EngineConfig c21;
-        c21.zoom = 1.5f;
+        c21.density = 1.5f;
         e.setConfig(c21);
 
         const std::string kText = "患者主诉：反复心悸三天，加重一天。";  // 17 个码点
@@ -4377,7 +4378,7 @@ int main() {
                 e.showCaret(false);
                 e.repaint();
                 const std::vector<SlotInfo> sp = slotsAt(7);
-                const float z = e.config().zoom;
+                const float z = e.config().density;
                 const float pitch = (sp.size() >= 2) ? (sp[1].x - sp[0].x) : 6.0f;
                 const std::vector<uint8_t> fr(e.frame(), e.frame() + e.frameBytes());
                 const int fw = e.frameWidth();
@@ -4767,7 +4768,7 @@ int main() {
             return 2;
         }
         EngineConfig ec;
-        ec.zoom = 1.0f;
+        ec.density = 1.0f;
         e.setConfig(ec);
 
         // 用文档模型搭两节：第一节三段、第二节（下一页）一段。编译产物直接喂给引擎 ——
@@ -5184,7 +5185,7 @@ int main() {
         //   两行的行盒必须各按各的来。
         {
             EngineConfig narrow;
-            narrow.zoom = 1.0f;
+            narrow.density = 1.0f;
             narrow.page.width_pt = 100.0f;
             narrow.page.height_pt = 400.0f;
             narrow.page.margins = PageMargins::all(5.0f);  // 内容宽 90 磅：12 磅字每行七个
@@ -5221,7 +5222,7 @@ int main() {
         //   后一段必须跨页（否则页号都一样，错了也看不出来）。
         {
             EngineConfig narrow;
-            narrow.zoom = 1.0f;
+            narrow.density = 1.0f;
             narrow.page.width_pt = 110.0f;   // 内容宽 100 磅：12 磅字每行八个
             narrow.page.height_pt = 100.0f;  // 内容高 90 磅
             narrow.page.margins = PageMargins::all(5.0f);
@@ -5325,7 +5326,7 @@ int main() {
         // (b) 产生端：引擎按"要显示哪些括号"落成对象表，同一处的先后在这里定死
         {
             EngineConfig ec;
-            ec.zoom = 1.0f;
+            ec.density = 1.0f;
 
             EditorEngine e;
             if (!e.init(fonts24)) {
@@ -5497,7 +5498,7 @@ int main() {
         EditorEngine e;
         expectTrue(e.init({cjkPath}), "控件跨段：字体加载成功");
         EngineConfig ec;
-        ec.zoom = 1.0f;
+        ec.density = 1.0f;
         e.setConfig(ec);
         e.setDocument(demoDoc(bl, fd), StyleSheet{});
         e.setEditMode(EditMode::Form);
@@ -5586,7 +5587,7 @@ int main() {
         EditorEngine e2;
         expectTrue(e2.init({cjkPath}), "两次分段：字体加载成功");
         EngineConfig ec2;
-        ec2.zoom = 1.0f;
+        ec2.density = 1.0f;
         e2.setConfig(ec2);
         auto textOf2 = [&]() {
             std::string t;
@@ -5658,7 +5659,7 @@ int main() {
         EditorEngine e3;
         expectTrue(e3.init({cjkPath}), "枚举：字体加载成功");
         EngineConfig ec3;
-        ec3.zoom = 1.0f;
+        ec3.density = 1.0f;
         e3.setConfig(ec3);
         auto reload = [&]() {
             e3.setDocument(demoDoc(bl, fd), StyleSheet{});
@@ -5759,7 +5760,7 @@ int main() {
         EditorEngine e4;
         expectTrue(e4.init({cjkPath}), "删控件：字体加载成功");
         EngineConfig ec4;
-        ec4.zoom = 1.0f;
+        ec4.density = 1.0f;
         e4.setConfig(ec4);
         auto reload4 = [&]() {
             e4.setDocument(demoDoc(bl, fd), StyleSheet{});
@@ -5899,7 +5900,7 @@ int main() {
             EditorEngine e5;
             expectTrue(e5.init({cjkPath}), "落基：字体加载成功");
             EngineConfig ec5;
-            ec5.zoom = 1.0f;
+            ec5.density = 1.0f;
             e5.setConfig(ec5);
             e5.setDocument(demoDoc(b5, f5), StyleSheet{});
             e5.setEditMode(EditMode::Form);
@@ -5939,7 +5940,7 @@ int main() {
             EditorEngine e6;
             expectTrue(e6.init({cjkPath}), "可见性：字体加载成功");
             EngineConfig ec6;
-            ec6.zoom = 1.0f;
+            ec6.density = 1.0f;
             e6.setConfig(ec6);
             e6.setDocument(demoDoc(b6, f6), StyleSheet{});
             e6.setEditMode(EditMode::Form);
@@ -5999,7 +6000,7 @@ int main() {
         EditorEngine e5;
         expectTrue(e5.init({cjkPath}), "控件边界：字体加载成功");
         EngineConfig ec5;
-        ec5.zoom = 1.0f;
+        ec5.density = 1.0f;
         e5.setConfig(ec5);
         auto reload5 = [&]() {
             e5.setDocument(demoDoc(bl, fd), StyleSheet{});
@@ -6101,7 +6102,7 @@ int main() {
             EditorEngine e6;
             expectTrue(e6.init({cjkPath}), "相邻字段：字体加载成功");
             EngineConfig ec6;
-            ec6.zoom = 1.0f;
+            ec6.density = 1.0f;
             e6.setConfig(ec6);
             e6.setDocument(demoDoc(bl2, fd2), StyleSheet{});
             e6.setEditMode(EditMode::Document);
@@ -6145,7 +6146,7 @@ int main() {
             EditorEngine e7;
             expectTrue(e7.init({cjkPath}), "嵌套字段：字体加载成功");
             EngineConfig ec7;
-            ec7.zoom = 1.0f;
+            ec7.density = 1.0f;
             e7.setConfig(ec7);
             e7.setDocument(demoDoc(bl3, fd3), StyleSheet{});
             e7.setEditMode(EditMode::Document);
@@ -6265,7 +6266,7 @@ int main() {
         EditorEngine e36;
         expectTrue(e36.init({cjkPath}), "撤销上限：字体加载成功");
         EngineConfig c36;
-        c36.zoom = 1.0f;
+        c36.density = 1.0f;
         c36.undo_limit = 3;
         e36.setConfig(c36);
         e36.setDocument(demoDoc(bl36, {}), StyleSheet{});
@@ -6315,7 +6316,7 @@ int main() {
         EditorEngine e37;
         expectTrue(e37.init({cjkPath}), "选区：字体加载成功");
         EngineConfig c37;
-        c37.zoom = 1.0f;
+        c37.density = 1.0f;
         // 页宽调窄：上下键与"跨行拆矩形"必须真的跨行才算测到，A4 宽很可能一行装得下。
         c37.page.width_pt = 200.0f;
         c37.page.margins = PageMargins::all(20.0f);
@@ -6486,7 +6487,7 @@ int main() {
         EditorEngine e38;
         expectTrue(e38.init({cjkPath}), "选区吃掉：字体加载成功");
         EngineConfig c38;
-        c38.zoom = 1.0f;
+        c38.density = 1.0f;
         c38.page.width_pt = 200.0f;
         c38.page.margins = PageMargins::all(20.0f);
         e38.setConfig(c38);
@@ -6687,7 +6688,7 @@ int main() {
         EditorEngine e39;
         expectTrue(e39.init({cjkPath}), "拖选：字体加载成功");
         EngineConfig c39;
-        c39.zoom = 1.0f;
+        c39.density = 1.0f;
         c39.page.width_pt = 200.0f;
         c39.page.margins = PageMargins::all(20.0f);
         e39.setConfig(c39);
@@ -6790,7 +6791,7 @@ int main() {
         expectTrue(e40.init({cjkPath, mnPath, latinPath}), "引擎初始化");
 
         EngineConfig c40;
-        c40.zoom = 1.0f;  // 1 pt = 1 px：便于直接按磅定位像素
+        c40.density = 1.0f;  // 1 pt = 1 px：便于直接按磅定位像素
         // 页度量取"边距与页间隙都够大"的那一档：分页下跨页那一跳至少是
         //   页间隙 + 两倍上边距（= 60 磅），而连页下最大的一跳只是段间距（= 31 磅）——
         //   两者必须彻底分开，判据才不是"恰好比大小"。
@@ -6893,7 +6894,7 @@ int main() {
 
         // 内容底边：连页下它就是滚动高度。它必须落在最后一行之下、且在条带范围内。
         const int bottom40 = e40.contentBottomPx();
-        const float slab_px = (c40.page.height_pt + c40.page_gap_pt) * c40.zoom;
+        const float slab_px = (c40.page.height_pt + c40.page_gap_pt) * c40.density;
         std::printf("     内容底边 %d px（最后一条带从 %.0f px 起）\n", bottom40,
                     static_cast<double>((cont40.slabs - 1) * slab_px));
         expectTrue(bottom40 > static_cast<int>((cont40.slabs - 1) * slab_px),
@@ -6911,7 +6912,7 @@ int main() {
         expectTrue(e41.init({cjkPath, mnPath, latinPath}), "引擎初始化");
 
         EngineConfig c41;
-        c41.zoom = 1.0f;  // 1 磅 = 1 像素：命中测试收的磅值与行盒里的磅值同一把尺子
+        c41.density = 1.0f;  // 1 磅 = 1 像素：命中测试收的磅值与行盒里的磅值同一把尺子
         c41.page.width_pt = 240.0f;
         c41.page.height_pt = 200.0f;
         c41.page.margins = PageMargins::all(20.0f);
@@ -7018,7 +7019,7 @@ int main() {
         EditorEngine e42;
         expectTrue(e42.init({cjkPath, mnPath, latinPath}), "引擎初始化");
         EngineConfig c42;
-        c42.zoom = 1.0f;
+        c42.density = 1.0f;
         c42.page.width_pt = 240.0f;
         c42.page.height_pt = 200.0f;
         c42.page.margins = PageMargins::all(20.0f);
@@ -7076,7 +7077,7 @@ int main() {
         EditorEngine e43;
         expectTrue(e43.init({cjkPath, mnPath, latinPath}), "引擎初始化");
         EngineConfig c43;
-        c43.zoom = 1.0f;
+        c43.density = 1.0f;
         c43.page.width_pt = 240.0f;
         c43.page.height_pt = 300.0f;
         c43.page.margins = PageMargins::all(20.0f);
@@ -7134,7 +7135,7 @@ int main() {
         EditorEngine e44;
         expectTrue(e44.init({cjkPath, mnPath, latinPath}), "引擎初始化");
         EngineConfig c44;
-        c44.zoom = 1.0f;
+        c44.density = 1.0f;
         c44.page.width_pt = 200.0f;
         c44.page.height_pt = 300.0f;
         c44.page.margins = PageMargins::all(10.0f);
@@ -7309,7 +7310,7 @@ int main() {
         EditorEngine e45;
         expectTrue(e45.init({cjkPath, mnPath, latinPath}), "引擎初始化");
         EngineConfig c45;
-        c45.zoom = 1.0f;
+        c45.density = 1.0f;
         c45.page.width_pt = 300.0f;
         c45.page.height_pt = 300.0f;
         c45.page.margins = PageMargins::all(10.0f);
@@ -7512,7 +7513,7 @@ int main() {
         EditorEngine e47;
         expectTrue(e47.init({cjkPath, mnPath, latinPath}), "引擎初始化");
         EngineConfig c47;
-        c47.zoom = 1.0f;
+        c47.density = 1.0f;
         c47.page.width_pt = 300.0f;
         c47.page.height_pt = 300.0f;
         c47.page.margins = PageMargins::all(10.0f);
@@ -7549,7 +7550,7 @@ int main() {
         EditorEngine e46;
         expectTrue(e46.init({cjkPath, mnPath, latinPath}), "引擎初始化");
         EngineConfig c46;
-        c46.zoom = 1.0f;
+        c46.density = 1.0f;
         c46.page.width_pt = 300.0f;
         c46.page.height_pt = 300.0f;
         c46.page.margins = PageMargins::all(10.0f);
@@ -7633,7 +7634,7 @@ int main() {
         EditorEngine e47;
         expectTrue(e47.init({cjkPath, mnPath, latinPath}), "引擎初始化");
         EngineConfig c47;
-        c47.zoom = 1.0f;
+        c47.density = 1.0f;
         c47.page.width_pt = 300.0f;
         c47.page.height_pt = 300.0f;
         c47.page.margins = PageMargins::all(10.0f);
@@ -7730,7 +7731,7 @@ int main() {
         EditorEngine e48;
         expectTrue(e48.init({cjkPath, mnPath, latinPath}), "引擎初始化");
         EngineConfig c48;
-        c48.zoom = 1.0f;
+        c48.density = 1.0f;
         c48.page.width_pt = 320.0f;
         c48.page.height_pt = 320.0f;
         c48.page.margins = PageMargins::all(10.0f);
@@ -7935,7 +7936,7 @@ int main() {
         EditorEngine e49;
         expectTrue(e49.init({cjkPath, mnPath, latinPath}), "引擎初始化");
         EngineConfig c49;
-        c49.zoom = 1.0f;
+        c49.density = 1.0f;
         c49.page.width_pt = 360.0f;
         c49.page.height_pt = 480.0f;
         c49.page.margins = PageMargins::all(10.0f);
@@ -8108,7 +8109,7 @@ int main() {
         EditorEngine e50;
         expectTrue(e50.init({cjkPath, mnPath, latinPath}), "引擎初始化");
         EngineConfig c50;
-        c50.zoom = 1.0f;
+        c50.density = 1.0f;
         c50.page.width_pt = 320.0f;
         c50.page.height_pt = 400.0f;
         c50.page.margins = PageMargins::all(10.0f);
@@ -8198,7 +8199,7 @@ int main() {
         EditorEngine e51;
         expectTrue(e51.init({cjkPath, mnPath, latinPath}), "引擎初始化");
         EngineConfig c51;
-        c51.zoom = 1.0f;
+        c51.density = 1.0f;
         c51.page.width_pt = 320.0f;
         c51.page.height_pt = 400.0f;
         c51.page.margins = PageMargins::all(10.0f);
@@ -8307,7 +8308,7 @@ int main() {
         EditorEngine e52;
         expectTrue(e52.init({cjkPath, mnPath, latinPath}), "引擎初始化");
         EngineConfig c52;
-        c52.zoom = 1.0f;
+        c52.density = 1.0f;
         c52.page.width_pt = 320.0f;
         c52.page.height_pt = 400.0f;
         c52.page.margins = PageMargins::all(10.0f);
@@ -8441,7 +8442,7 @@ int main() {
             EditorEngine ea;
             expectTrue(ea.init({cjkPath, mnPath, latinPath}), "引擎初始化（摘要 A）");
             EngineConfig ca;
-            ca.zoom = 1.0f;
+            ca.density = 1.0f;
             ca.page.width_pt = 300.0f;
             ca.page.height_pt = 300.0f;
             ca.page.margins = PageMargins::all(10.0f);
@@ -8477,7 +8478,7 @@ int main() {
             EditorEngine eb;
             expectTrue(eb.init({cjkPath, mnPath, latinPath}), "引擎初始化（摘要 B）");
             EngineConfig cb;
-            cb.zoom = 1.0f;
+            cb.density = 1.0f;
             cb.page.width_pt = 320.0f;
             cb.page.height_pt = 240.0f;
             cb.page.margins = PageMargins::all(10.0f);
@@ -8558,7 +8559,7 @@ int main() {
             EditorEngine ec;
             expectTrue(ec.init({cjkPath, mnPath, latinPath}), "引擎初始化（摘要 C）");
             EngineConfig cc;
-            cc.zoom = 1.0f;
+            cc.density = 1.0f;
             cc.page.width_pt = 300.0f;
             cc.page.height_pt = 300.0f;
             cc.page.margins = PageMargins::all(10.0f);
@@ -8612,7 +8613,7 @@ int main() {
         EditorEngine e;
         expectTrue(e.init({cjkPath, mnPath, latinPath}), "引擎初始化（增量投影）");
         EngineConfig c;
-        c.zoom = 1.0f;
+        c.density = 1.0f;
         c.page.width_pt = 360.0f;
         c.page.height_pt = 300.0f;
         c.page.margins = PageMargins::all(12.0f);
@@ -8653,7 +8654,7 @@ int main() {
         //   照常搬回。四条判据：内容逐块回到编辑之前、增量真的发生、增量与全量逐字段一致、
         //   以及"损伤区间之外还变了什么"（括号占位）也不能漏。
         EngineConfig c56;
-        c56.zoom = 1.0f;
+        c56.density = 1.0f;
         c56.page.width_pt = 340.0f;
         c56.page.height_pt = 300.0f;
         c56.page.margins = PageMargins::all(12.0f);
@@ -8835,7 +8836,7 @@ int main() {
         EditorEngine e57;
         expectTrue(e57.init(fonts57), "引擎初始化（页位图）");
         EngineConfig c57;
-        c57.zoom = 1.0f;
+        c57.density = 1.0f;
         c57.page.width_pt = 340.0f;
         c57.page.height_pt = 300.0f;
         c57.page.margins = PageMargins::all(12.0f);
@@ -8930,7 +8931,7 @@ int main() {
         EditorEngine e58;
         expectTrue(e58.init(fonts58), "引擎初始化（按页接口）");
         EngineConfig c58;
-        c58.zoom = 1.0f;
+        c58.density = 1.0f;
         c58.page.width_pt = 340.0f;
         c58.page.height_pt = 300.0f;
         c58.page.margins = PageMargins::all(12.0f);
@@ -8990,13 +8991,13 @@ int main() {
         // 光标放回来，再把前面几拍攒下的脏矩形取走；下面只看增量。
         e58.showCaret(true);
         e58.repaint();
-        for (int p = 0; p < 4; ++p) e58.takePageDirtyRects(p);
+        for (int p = 0; p < 4; ++p) e58.takePendingRects(p);
 
         // (b) 光标移动：两个小矩形（擦旧、画新），不是整页。
         e58.setCaret(0, 1);
         e58.repaint();
         const int cp = e58.editStats().caret_page;
-        const std::vector<Rect> caret_rects = e58.takePageDirtyRects(cp);
+        const std::vector<Rect> caret_rects = e58.takePendingRects(cp);
         float caret_area = 0.0f;
         for (const Rect& r : caret_rects) caret_area += r.w * r.h;
         // caret_x / caret_y 现在是页内像素（页号另给），不必再减槽偏移 ——
@@ -9017,13 +9018,13 @@ int main() {
                                             std::to_string(static_cast<int>(caret_area)) +
                                             " px²）");
         expectTrue(caret_covered, "脏矩形覆盖了光标矩形（擦旧 + 画新）");
-        expectTrue(e58.takePageDirtyRects(cp).empty(), "脏矩形读后清零（第二次为空）");
+        expectTrue(e58.takePendingRects(cp).empty(), "脏矩形读后清零（第二次为空）");
 
         // (c) 打字：行带级，不是整页；页像素仍与从零光栅一致。
         expectTrue(e58.insertCodepoint(0, 1, 0x7532), "第 0 段插一个字");
         e58.relayout();
         e58.repaint();
-        const std::vector<Rect> type_rects = e58.takePageDirtyRects(0);
+        const std::vector<Rect> type_rects = e58.takePendingRects(0);
         float type_area = 0.0f;
         for (const Rect& r : type_rects) type_area += r.w * r.h;
         expectTrue(type_area > 0.0f && type_area < static_cast<float>(pw) * ph * 0.25f,
@@ -9083,7 +9084,7 @@ int main() {
         e59.setDocument(doc::makeTextDoc(paras59), sheet59);
 
         EngineConfig c59;
-        c59.zoom = 1.0f;  // 1 磅 = 1 像素：拼图与整带用的是同一把尺子
+        c59.density = 1.0f;  // 1 磅 = 1 像素：拼图与整带用的是同一把尺子
         c59.page.width_pt = 320.0f;
         c59.page.height_pt = 150.0f;  // 故意矮：几十条带，接缝足够多
         c59.page.margins = PageMargins::all(20.0f);
@@ -9293,7 +9294,7 @@ int main() {
     if (runSection(61)) std::printf("\n[61] 表格走进增量：表里改一个字，不退回整篇重排\n");
     if (runSection(61)) {
         EngineConfig c61;
-        c61.zoom = 1.0f;
+        c61.density = 1.0f;
         c61.page.width_pt = 320.0f;
         c61.page.height_pt = 280.0f;
         c61.page.margins = PageMargins::all(12.0f);
@@ -9619,7 +9620,7 @@ int main() {
             doc::adopt(doc::makeNode(root_c, NodeKind::Document, {}, {sec_c}), id);
 
         EngineConfig c62;
-        c62.zoom = 1.0f;
+        c62.density = 1.0f;
         c62.page.width_pt = 320.0f;
         c62.page.height_pt = 240.0f;
         c62.page.margins = PageMargins::all(12.0f);
@@ -9658,7 +9659,7 @@ int main() {
         //   两条判据必须互为反向 —— 左边那一段普通、那一段格式过，所以"沿用左边"
         //   在两侧给出的答案不同；只看一侧的话，规则取反了也照样绿。
         EngineConfig c63;
-        c63.zoom = 1.0f;
+        c63.density = 1.0f;
         const std::vector<std::string> fonts63 = {cjkPath, mnPath, latinPath};
 
         // 形状：「abcd」，只有 b 是 14 磅，其余 12 磅。字号当"格式"用：它落在
@@ -9787,7 +9788,7 @@ int main() {
         //   空格里的中点；三种档位的行盒与字形坐标逐位相同（标记不是内容，不进版面）。
         //   反向一半在最后：关回去的像素必须与从未打开时逐字节相同。
         EngineConfig c64;
-        c64.zoom = 1.0f;
+        c64.density = 1.0f;
         c64.page.width_pt = 320.0f;
         c64.page.height_pt = 240.0f;
         c64.page.margins = PageMargins::all(12.0f);
@@ -9912,7 +9913,7 @@ int main() {
         // 判据两半：粘回来的字必须还是粗的、还是 20 磅（片段带标记）；全选粘一遍之后
         //   段数与总高必须一模一样（片段不许多带一个段落标记，也不许把段落格式抹掉）。
         EngineConfig c65;
-        c65.zoom = 1.0f;
+        c65.density = 1.0f;
         c65.page.width_pt = 320.0f;
         c65.page.height_pt = 240.0f;
         c65.page.margins = PageMargins::all(12.0f);
@@ -9995,7 +9996,7 @@ int main() {
     if (runSection(66)) std::printf("\n[66] 空段跨选有高亮 / 选区格式求交（三态缺席）\n");
     if (runSection(66)) {
         EngineConfig c66;
-        c66.zoom = 1.0f;
+        c66.density = 1.0f;
         c66.page.width_pt = 320.0f;
         c66.page.height_pt = 240.0f;
         c66.page.margins = PageMargins::all(12.0f);
@@ -10067,7 +10068,7 @@ int main() {
     if (runSection(67)) {
         std::printf("\n[67] 空段标记与文档末选区\n");
         EngineConfig c67;
-        c67.zoom = 1.0f;
+        c67.density = 1.0f;
         c67.page.width_pt = 320.0f;
         c67.page.height_pt = 240.0f;
         c67.page.margins = PageMargins::all(12.0f);
@@ -10249,7 +10250,7 @@ int main() {
     if (runSection(68)) {
         std::printf("\n[68] 插入表格：块级落点、第一格光标、撤销与自审\n");
         EngineConfig c68;
-        c68.zoom = 1.0f;
+        c68.density = 1.0f;
         c68.page.width_pt = 320.0f;
         c68.page.height_pt = 420.0f;
         c68.page.margins = PageMargins::all(12.0f);
@@ -10345,7 +10346,7 @@ int main() {
     if (runSection(69)) {
         std::printf("\n[69] 插入控件：行内落点、区间、取值与撤销\n");
         EngineConfig c69;
-        c69.zoom = 1.0f;
+        c69.density = 1.0f;
         c69.page.width_pt = 320.0f;
         c69.page.height_pt = 420.0f;
         c69.page.margins = PageMargins::all(12.0f);
@@ -10441,7 +10442,7 @@ int main() {
         EditorEngine e;
         expectTrue(e.init({cjkPath, mnPath, latinPath}), "引擎初始化（表格跨页）");
         EngineConfig c;
-        c.zoom = 1.0f;
+        c.density = 1.0f;
         c.page.width_pt = 300.0f;
         c.page.height_pt = 300.0f;
         c.page.margins = PageMargins::all(10.0f);
@@ -10523,7 +10524,7 @@ int main() {
             EditorEngine e2;
             expectTrue(e2.init({cjkPath, mnPath, latinPath}), "引擎初始化（超高行）");
             EngineConfig c2;
-            c2.zoom = 1.0f;
+            c2.density = 1.0f;
             c2.page.width_pt = 300.0f;
             c2.page.height_pt = 200.0f;
             c2.page.margins = PageMargins::all(10.0f);
@@ -10635,7 +10636,7 @@ int main() {
             EditorEngine e4;
             expectTrue(e4.init({cjkPath, mnPath, latinPath}), "引擎初始化（整行换页）");
             EngineConfig c4;
-            c4.zoom = 1.0f;
+            c4.density = 1.0f;
             c4.page.width_pt = 300.0f;
             c4.page.height_pt = 200.0f;
             c4.page.margins = PageMargins::all(10.0f);
@@ -10730,7 +10731,7 @@ int main() {
             EditorEngine e5;
             expectTrue(e5.init({cjkPath, mnPath, latinPath}), "引擎初始化（一页表格）");
             EngineConfig c5;
-            c5.zoom = 1.0f;
+            c5.density = 1.0f;
             c5.page.width_pt = 595.0f;
             c5.page.height_pt = 842.0f;
             c5.page.margins = PageMargins::all(56.0f);
@@ -10797,7 +10798,7 @@ int main() {
             EditorEngine e3;
             expectTrue(e3.init({cjkPath, mnPath, latinPath}), "引擎初始化（连页表格）");
             EngineConfig c3;
-            c3.zoom = 1.0f;
+            c3.density = 1.0f;
             c3.page.width_pt = 300.0f;
             c3.page.height_pt = 200.0f;
             c3.page.margins = PageMargins::all(10.0f);
@@ -10889,7 +10890,7 @@ int main() {
         EditorEngine e;
         expectTrue(e.init({cjkPath, mnPath, latinPath}), "引擎初始化（空单元格格式）");
         EngineConfig c;
-        c.zoom = 1.0f;
+        c.density = 1.0f;
         c.page.width_pt = 300.0f;
         c.page.height_pt = 300.0f;
         c.page.margins = PageMargins::all(10.0f);
@@ -10979,7 +10980,7 @@ int main() {
         //   没有行盒 —— 命中、整格反白与字形归属都不能按行盒推，否则会出这三类错：
         //   点空格子光标跳到有字的格；空格子只在上一页有反白；切片那一行的字画在上一页。
         EngineConfig c72;
-        c72.zoom = 1.0f;
+        c72.density = 1.0f;
         c72.page.width_pt = 400.0f;
         c72.page.height_pt = 300.0f;
         c72.page.margins = PageMargins::all(20.0f);
@@ -11150,7 +11151,7 @@ int main() {
             EditorEngine e2;
             expectTrue(e2.init({cjkPath, mnPath, latinPath}), "引擎初始化（连页多行表）");
             EngineConfig c2;
-            c2.zoom = 1.0f;
+            c2.density = 1.0f;
             c2.page.width_pt = 400.0f;
             c2.page.height_pt = 300.0f;
             c2.page.margins = PageMargins::all(20.0f);
@@ -11252,7 +11253,7 @@ int main() {
         // 这一节把两条都钉住：页索引自洽、每个空格在它自己那一页上都有标记的墨、
         //   格内逐字输入时每一步的页位图都等于从零光栅。
         EngineConfig c73;
-        c73.zoom = 1.0f;
+        c73.density = 1.0f;
         c73.page.width_pt = 420.0f;
         c73.page.height_pt = 330.0f;
         c73.page.margins = PageMargins::all(20.0f);
@@ -11428,7 +11429,7 @@ int main() {
         //   空隙时按"最近的一行"取落点，就永远取到那一列 —— 从别的列往下拖，矩形包络
         //   于是横跨整行，看着像"一不小心把整行都选中了"。落点该按指针的横坐标认列。
         EngineConfig c74;
-        c74.zoom = 1.0f;
+        c74.density = 1.0f;
         c74.page.width_pt = 400.0f;
         c74.page.height_pt = 300.0f;
         c74.page.margins = PageMargins::all(20.0f);
@@ -11510,7 +11511,7 @@ int main() {
         // 标记标的是正文可用区（页边距的内沿）。它画进页位图，所以判据有三半：
         //   四角有墨、四条边的中段没有墨（不是"画了一个框"）、关掉之后墨消失。
         EngineConfig c75;
-        c75.zoom = 1.0f;
+        c75.density = 1.0f;
         c75.page.width_pt = 400.0f;
         c75.page.height_pt = 300.0f;
         c75.page.margins = PageMargins::all(20.0f);
@@ -11622,7 +11623,7 @@ int main() {
         //   内容区间是 (开括号之后, 闭括号之前)，所以外层跨到最外那枚 ] 之前、内层退化成
         //   一点。判据按"每一步都进得去"走 —— 只判终点会漏掉中间那几格。
         EngineConfig c76;
-        c76.zoom = 1.0f;
+        c76.density = 1.0f;
         const std::vector<std::string> fonts76 = {cjkPath, mnPath, latinPath};
 
         const doc::Doc t76 = doc::makeTextDoc({U"ABC"});
@@ -11736,7 +11737,7 @@ int main() {
             return 2;
         }
         EngineConfig c;
-        c.zoom = 1.0f;
+        c.density = 1.0f;
         e.setConfig(c);
 
         const int kParas = 200;
@@ -11891,7 +11892,7 @@ int main() {
     if (runSection(79)) std::printf("\n[79] 图片：资源注册、插入、命中、改尺寸\n");
     if (runSection(79)) {
         EngineConfig c79;
-        c79.zoom = 1.0f;
+        c79.density = 1.0f;
         const std::vector<std::string> fonts79 = {cjkPath, mnPath, latinPath};
 
         const doc::Doc t79 = doc::makeTextDoc({U"ABCD"});
@@ -11966,8 +11967,8 @@ int main() {
             const Rect r79 = boxes79[0].rects[0].r_pt;
             const int fw = e79.frameWidth();
             const int step = e79.pagePxHeight() + e79.pageGapPx();
-            const int cx = static_cast<int>(std::lround((r79.x + r79.w * 0.5f) * c79.zoom));
-            const int cy = static_cast<int>(std::lround((r79.y + r79.h * 0.5f) * c79.zoom));
+            const int cx = static_cast<int>(std::lround((r79.x + r79.w * 0.5f) * c79.density));
+            const int cy = static_cast<int>(std::lround((r79.y + r79.h * 0.5f) * c79.density));
             const uint8_t* fp = e79.frame();
             const size_t at =
                 (static_cast<size_t>(cy) * static_cast<size_t>(fw) + static_cast<size_t>(cx)) * 4u;
@@ -12015,7 +12016,7 @@ int main() {
     if (runSection(80)) std::printf("\n[80] 控件：八种类型、取值、切换与光标屏障\n");
     if (runSection(80)) {
         EngineConfig c80;
-        c80.zoom = 1.0f;
+        c80.density = 1.0f;
         const std::vector<std::string> fonts80 = {cjkPath, mnPath, latinPath};
 
         const doc::Doc t80 = doc::makeTextDoc({U"ABCD"});
@@ -12228,7 +12229,7 @@ int main() {
     if (runSection(81)) std::printf("\n[81] 控件定义可改：选项、标签、格式、孤儿值与撤销\n");
     if (runSection(81)) {
         EngineConfig c81;
-        c81.zoom = 1.0f;
+        c81.density = 1.0f;
         const std::vector<std::string> fonts81 = {cjkPath, mnPath, latinPath};
         const doc::Doc t81 = doc::makeTextDoc({U"ABCD"});
         EditorEngine e81;
@@ -12366,7 +12367,7 @@ int main() {
     if (runSection(82)) std::printf("\n[82] 选择类的记号：方框、对勾、颜色与重绘\n");
     if (runSection(82)) {
         EngineConfig c82;
-        c82.zoom = 3.0f;
+        c82.density = 3.0f;
         const std::vector<std::string> fonts82 = {cjkPath, mnPath, latinPath};
         const doc::Doc t82 = doc::makeTextDoc({U"A"});
         EditorEngine e82;
@@ -12413,11 +12414,11 @@ int main() {
             const std::vector<EditorEngine::ControlRect> rs = e82.controlRects(index);
             if (rs.empty()) return -1;
             const Rect r = rs[0].r_pt;
-            const float zoom = c82.zoom;
-            const int x0 = static_cast<int>(std::floor(r.x * zoom));
-            const int x1 = static_cast<int>(std::ceil((r.x + r.h) * zoom));
-            const int y0 = static_cast<int>(std::floor(r.y * zoom));
-            const int y1 = static_cast<int>(std::ceil((r.y + r.h) * zoom));
+            const float density = c82.density;
+            const int x0 = static_cast<int>(std::floor(r.x * density));
+            const int x1 = static_cast<int>(std::ceil((r.x + r.h) * density));
+            const int y0 = static_cast<int>(std::floor(r.y * density));
+            const int y1 = static_cast<int>(std::ceil((r.y + r.h) * density));
             const uint8_t* fp = e82.frame();
             int n = 0;
             for (int y = y0; y < y1; ++y) {
@@ -12442,11 +12443,11 @@ int main() {
             const std::vector<EditorEngine::ControlRect> rs = e82.controlRects(index);
             if (rs.empty()) return out;
             const Rect r = rs[0].r_pt;
-            const float zoom = c82.zoom;
-            const int x0 = static_cast<int>(std::floor(r.x * zoom));
-            const int x1 = static_cast<int>(std::ceil((r.x + r.h) * zoom));
-            const int y0 = static_cast<int>(std::floor(r.y * zoom));
-            const int y1 = static_cast<int>(std::ceil((r.y + r.h) * zoom));
+            const float density = c82.density;
+            const int x0 = static_cast<int>(std::floor(r.x * density));
+            const int x1 = static_cast<int>(std::ceil((r.x + r.h) * density));
+            const int y0 = static_cast<int>(std::floor(r.y * density));
+            const int y1 = static_cast<int>(std::ceil((r.y + r.h) * density));
             const uint8_t* fp = e82.frame();
             auto dark = [&](int x, int y) {
                 const size_t i =
@@ -12500,11 +12501,11 @@ int main() {
             const std::vector<EditorEngine::ControlRect> rs = e82.controlRects(index);
             if (rs.empty()) return -1;
             const Rect r = rs[0].r_pt;
-            const float zoom = c82.zoom;
-            const int x0 = static_cast<int>(std::floor(r.x * zoom));
-            const int x1 = static_cast<int>(std::ceil((r.x + r.h) * zoom));
-            const int y0 = static_cast<int>(std::floor(r.y * zoom));
-            const int y1 = static_cast<int>(std::ceil((r.y + r.h) * zoom));
+            const float density = c82.density;
+            const int x0 = static_cast<int>(std::floor(r.x * density));
+            const int x1 = static_cast<int>(std::ceil((r.x + r.h) * density));
+            const int y0 = static_cast<int>(std::floor(r.y * density));
+            const int y1 = static_cast<int>(std::ceil((r.y + r.h) * density));
             const uint8_t* fp = e82.frame();
             int n = 0;
             for (int y = y0; y < y1; ++y) {
@@ -12529,11 +12530,11 @@ int main() {
             const std::vector<EditorEngine::ControlRect> rs = e82.controlRects(index);
             if (rs.empty()) return -1;
             const Rect r = rs[0].r_pt;
-            const float zoom = c82.zoom;
-            const int x0 = static_cast<int>(std::floor(r.x * zoom));
-            const int x1 = static_cast<int>(std::ceil((r.x + r.h) * zoom));
-            const int y0 = static_cast<int>(std::floor(r.y * zoom));
-            const int y1 = static_cast<int>(std::ceil((r.y + r.h) * zoom));
+            const float density = c82.density;
+            const int x0 = static_cast<int>(std::floor(r.x * density));
+            const int x1 = static_cast<int>(std::ceil((r.x + r.h) * density));
+            const int y0 = static_cast<int>(std::floor(r.y * density));
+            const int y1 = static_cast<int>(std::ceil((r.y + r.h) * density));
             const uint8_t* fp = e82.frame();
             int n = 0;
             for (int y = y0; y < y1; ++y) {
@@ -12616,7 +12617,7 @@ int main() {
     if (runSection(83)) std::printf("\n[83] 折行与选框：右括号落行首、选区端点、勾选重绘\n");
     if (runSection(83)) {
         EngineConfig c83;
-        c83.zoom = 1.0f;
+        c83.density = 1.0f;
         c83.page.width_pt = 110.0f;
         c83.page.height_pt = 400.0f;
         c83.page.margins = PageMargins::all(5.0f);  // 内容宽 100 磅
@@ -12758,7 +12759,7 @@ int main() {
         std::printf("\n[84] 控件落点：同一处点击不换边、选区从按下处起手、图片选中不画光标\n");
     if (runSection(84)) {
         EngineConfig c84;
-        c84.zoom = 1.0f;
+        c84.density = 1.0f;
         c84.page.width_pt = 200.0f;
         c84.page.height_pt = 400.0f;
         c84.page.margins = PageMargins::all(10.0f);  // 内容宽 180 磅
@@ -12915,7 +12916,7 @@ int main() {
     if (runSection(85)) std::printf("\n[85] 表格命令：插删行列、合并拆分、三层记录与落点归属\n");
     if (runSection(85)) {
         EngineConfig c85;
-        c85.zoom = 1.0f;
+        c85.density = 1.0f;
         c85.page.width_pt = 320.0f;
         c85.page.height_pt = 420.0f;
         c85.page.margins = PageMargins::all(12.0f);
@@ -13130,7 +13131,7 @@ int main() {
         std::printf("\n[86] 格内图片后敲字、整图选区、文字加控件混选删除、图片撤销\n");
     if (runSection(86)) {
         EngineConfig c86;
-        c86.zoom = 1.0f;
+        c86.density = 1.0f;
         c86.page.width_pt = 320.0f;
         c86.page.height_pt = 300.0f;
         c86.page.margins = PageMargins::all(12.0f);
@@ -13165,8 +13166,8 @@ int main() {
             const int fw = e.frameWidth();
             const int fh = e.frameHeight();
             const int step = e.pagePxHeight() + e.pageGapPx();
-            const int px = static_cast<int>(std::lround(x_pt * c86.zoom));
-            const int py = static_cast<int>(std::lround(y_pt * c86.zoom)) + page * step;
+            const int px = static_cast<int>(std::lround(x_pt * c86.density));
+            const int py = static_cast<int>(std::lround(y_pt * c86.density)) + page * step;
             rgb[0] = 0;
             rgb[1] = 0;
             rgb[2] = 0;
@@ -13605,7 +13606,7 @@ int main() {
             // 与浏览器里那一页同一套度量：A4、72 磅边距、4/3 缩放 —— 行带与脏矩形的
             //   取整都吃缩放，1.0 下算不出来的接缝在 4/3 下才露。
             EngineConfig cv = c86;
-            cv.zoom = 4.0f / 3.0f;
+            cv.density = 4.0f / 3.0f;
             cv.page.width_pt = 595.0f;
             cv.page.height_pt = 842.0f;
             cv.page.margins = PageMargins::all(72.0f);
@@ -13815,7 +13816,7 @@ int main() {
     if (runSection(87)) std::printf("\n[87] 字数口径与表格命令的可用性\n");
     if (runSection(87)) {
         EngineConfig c87;
-        c87.zoom = 1.0f;
+        c87.density = 1.0f;
         c87.page.width_pt = 595.0f;
         c87.page.height_pt = 842.0f;
         c87.page.margins = PageMargins::all(56.0f);
@@ -13891,7 +13892,7 @@ int main() {
     if (runSection(88)) std::printf("\n[88] 业务只读：投影不再占用这个位\n");
     if (runSection(88)) {
         EngineConfig c88;
-        c88.zoom = 1.0f;
+        c88.density = 1.0f;
         c88.page.width_pt = 595.0f;
         c88.page.height_pt = 842.0f;
         c88.page.margins = PageMargins::all(56.0f);
@@ -13961,7 +13962,7 @@ int main() {
     if (runSection(89)) std::printf("\n[89] 空控件的提示文字：占宽度不占位置、有内容就不画\n");
     if (runSection(89)) {
         EngineConfig c89;
-        c89.zoom = 1.0f;
+        c89.density = 1.0f;
         c89.page.width_pt = 595.0f;
         c89.page.height_pt = 842.0f;
         c89.page.margins = PageMargins::all(56.0f);
@@ -14162,7 +14163,7 @@ int main() {
     if (runSection(90)) std::printf("\n[90] 复制：控件只被盖住一半时只取选区那几段文字\n");
     if (runSection(90)) {
         EngineConfig c90;
-        c90.zoom = 1.0f;
+        c90.density = 1.0f;
         c90.page.width_pt = 400.0f;
         c90.page.height_pt = 240.0f;
         c90.page.margins = PageMargins::all(12.0f);
@@ -14300,7 +14301,7 @@ int main() {
         //   这里用"增量结果 vs 整篇重排"对拍（auditLayout）：那是唯一抓得住静默错位的
         //   判据 —— 塌下去的排版自己看着是自洽的，只有与全量比才露馅。
         EngineConfig c91;
-        c91.zoom = 1.0f;
+        c91.density = 1.0f;
         c91.page.width_pt = 400.0f;
         c91.page.height_pt = 200.0f;
         c91.page.margins = PageMargins::all(20.0f);
@@ -14429,7 +14430,7 @@ int main() {
         //   段前距与段后距各算各的、不折叠。混成一个数，表现出来就是
         //   "1.5 倍行距下反白一条一条断开、光标比行短一截"，或者"两段的 6 磅只让出 6 磅"。
         EngineConfig c92;
-        c92.zoom = 1.0f;
+        c92.density = 1.0f;
         c92.page.width_pt = 400.0f;
         c92.page.height_pt = 400.0f;
         c92.page.margins = PageMargins::all(20.0f);
@@ -14665,7 +14666,7 @@ int main() {
         //   与内容高的较大者。三档共用同一个"内容高"基准，差别只在行高怎么定 —— 所以
         //   这里同时钉三件事：行高、字面盒不动（exact 只改推进不改基线以上）、裁不裁。
         EngineConfig c93;
-        c93.zoom = 1.0f;
+        c93.density = 1.0f;
         c93.page.width_pt = 400.0f;
         c93.page.height_pt = 400.0f;
         c93.page.margins = PageMargins::all(20.0f);
@@ -14739,7 +14740,7 @@ int main() {
         //   段落标记要关掉：它由另一条绘制路径画，本来就不跟着字形一起裁。
         {
             EngineConfig c4 = c93;
-            c4.zoom = 2.0f;
+            c4.density = 2.0f;
             c4.marks = MarksMode::None;
             EditorEngine e4;
             expectTrue(e4.init({cjkPath, mnPath, latinPath}), "引擎初始化（裁字）");
@@ -14761,10 +14762,10 @@ int main() {
                 const int fh = e4.frameHeight();
                 const uint8_t* px = e4.frame();
                 const LineBox& lb = e4.layout().lines.front();
-                const int top = static_cast<int>(std::floor(lb.slotLoPt() * c4.zoom));
-                const int x0 = static_cast<int>(std::floor(lb.inline_origin_pt * c4.zoom));
-                const int x1 =
-                    static_cast<int>(std::ceil((lb.inline_origin_pt + lb.inline_end_pt) * c4.zoom));
+                const int top = static_cast<int>(std::floor(lb.slotLoPt() * c4.density));
+                const int x0 = static_cast<int>(std::floor(lb.inline_origin_pt * c4.density));
+                const int x1 = static_cast<int>(
+                    std::ceil((lb.inline_origin_pt + lb.inline_end_pt) * c4.density));
                 int last = top;
                 for (int y = std::max(0, top); y < std::min(fh, top + 80); ++y) {
                     int n = 0;
@@ -14774,7 +14775,7 @@ int main() {
                     }
                     if (n >= 3) last = y;
                 }
-                return (last - top) / c4.zoom;
+                return (last - top) / c4.density;
             };
             const float fullDepth = inkDepth4();
             expectTrue(fullDepth > 12.0f, "★ 单倍行距下墨迹落到基线下面（实际深 " +
@@ -14838,6 +14839,48 @@ int main() {
         expectTrue(loaded.ok, loaded.ok ? "带资源的文档打开成功" : loaded.error);
         expectTrue(b.imageCount() == 1 && b.imageBytes() == px.size(),
                    "资源像素随文档读回（张数 " + std::to_string(b.imageCount()) + "）");
+    }
+    if (runSection(95)) {
+        std::printf("\n[95] 换行折段：含换行的文本折成段落标记，段文本里不留 U+000A\n");
+        EditorEngine e;
+        expectTrue(e.init({cjkPath, mnPath, latinPath}), "引擎初始化（换行折段）");
+        e.setConfig(EngineConfig{});
+        e.setDocument(doc::makeTextDoc({U"头"}), StyleSheet{});
+
+        // (a) 程序化插入：落点在段末，含换行的文本折成两段。
+        expectTrue(e.insertTextUtf8(0, 1, "甲\n乙"), "含换行的文本插得进去");
+        expectTrue(e.blocks().size() == 2,
+                   "折成两段（实际 " + std::to_string(e.blocks().size()) + " 段）");
+        expectTrue(e.blocks().size() == 2 && e.blocks()[0].textUtf8() == "头甲",
+                   "前一段是落点之前的内容加上换行之前那半 —— 实际 " +
+                       (e.blocks().empty() ? std::string() : e.blocks()[0].textUtf8()));
+        expectTrue(e.blocks().size() == 2 && e.blocks()[1].textUtf8() == "乙",
+                   "后一段是换行之后那半 —— 实际 " +
+                       (e.blocks().size() < 2 ? std::string() : e.blocks()[1].textUtf8()));
+        expectTrue(e.undo(), "一步撤销");
+        expectTrue(e.blocks().size() == 1 && e.blocks()[0].textUtf8() == "头",
+                   "撤销之后回到一段（实际 " + std::to_string(e.blocks().size()) + " 段）");
+
+        // (b) 打字入口与纯文本粘贴对同一段文本产出同一份节点序列。
+        e.setDocument(doc::makeTextDoc({U"头"}), StyleSheet{});
+        expectTrue(e.pastePlainText("甲\n乙").empty(), "纯文本粘贴成功");
+        std::string byPaste;
+        for (const BlockSpec& b : e.blocks()) byPaste += "[" + b.textUtf8() + "]";
+        e.setDocument(doc::makeTextDoc({U"头"}), StyleSheet{});
+        expectTrue(e.typeTextUtf8("甲\n乙"), "含换行的打字插得进去");
+        std::string byType;
+        for (const BlockSpec& b : e.blocks()) byType += "[" + b.textUtf8() + "]";
+        expectTrue(byPaste == byType, "粘贴与打字同构 —— 粘贴 " + byPaste + " / 打字 " + byType);
+        // 打字入口落的是光标（文档刚装载时光标在段首），所以换行之前那半在前、后半接在
+        //   原有的字前面。
+        expectTrue(byType == "[甲][乙头]", "两段各是半截 —— 实际 " + byType);
+
+        // (c) 码点入口拒绝换行：段文本里不留 U+000A，这是按 \n 拼全文的前提。
+        e.setDocument(doc::makeTextDoc({U"头"}), StyleSheet{});
+        const long long blocked = e.blockedEdits();
+        expectTrue(!e.insertCodepoints(0, 1, {0x0A}), "码点入口拒绝 U+000A");
+        expectTrue(e.blockedEdits() == blocked + 1, "会计一笔被拒的编辑");
+        expectTrue(e.blocks().size() == 1 && e.blocks()[0].textUtf8() == "头", "被拒时文档不动");
     }
     checkSectionTable();
     printSectionTimes();

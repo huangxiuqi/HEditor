@@ -144,7 +144,7 @@ int CaretResolver::defaultSideAt(int para, size_t cp) const {
     //   后一个字段里）。区间树回答的正是"这个文字偏移归谁"，流位置回答"这一格在哪"，
     //   两者是链的两端 —— 拿后者当默认侧别的输入会跳过字段边界。
     if (view_.controls != nullptr && !view_.controls->empty()) {
-        const int ci = view_.controls->innermostAt(TextPos{para, cp}, /*include_end=*/true);
+        const int ci = view_.controls->innermostInsertAt(TextPos{para, cp});
         if (ci >= 0) return sideFromHint(para, cp, ci);
     }
     return bracketCountsAt(para, cp).closes;

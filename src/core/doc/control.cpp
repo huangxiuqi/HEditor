@@ -99,6 +99,10 @@ void ControlSet::normalize() {
     });
 }
 
+int ControlSet::innermostContentAt(const TextPos& pos) const { return innermostAt(pos, false); }
+
+int ControlSet::innermostInsertAt(const TextPos& pos) const { return innermostAt(pos, true); }
+
 int ControlSet::innermostAt(const TextPos& pos, bool include_end) const {
     if (order_.empty()) {
         int fallback = -1;

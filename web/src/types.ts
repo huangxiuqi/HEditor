@@ -28,7 +28,11 @@ export interface Pos {
 }
 
 /**
- * 一块页面矩形（CSS 像素，页内相对坐标）。
+ * 一块页面矩形（页内相对坐标）。
+ *
+ * 单位由持有它的字段决定，本类型只描述形状：selection().rects 是磅，caret().rect 是设备像素。
+ * 两者不互相换算，因为它们回答的不是同一个问题 —— 一个是被选中的版面区域，一个是位图上
+ * 光标条的位置（后者带"至少一个设备像素"这个光栅约束）。
  */
 export interface Rect {
   /**
@@ -75,6 +79,9 @@ export interface Caret {
 
   /**
    * 页内矩形：x/y 是插入点，w 是粗，h 是行高。
+   *
+   * 单位是设备像素（引擎按密度乘过）：w 至少有 1 像素，否则细线光标在低密度下会消失。
+   * 与 selection().rects 的磅不是同一个量，不要互相比较。
    */
   rect: { x: number; y: number; w: number; h: number };
 
@@ -105,11 +112,14 @@ export interface Selection {
 
   /**
    * 每页上的矩形，跨页会是多条；空选区是空数组。
+   *
+   * 单位是磅（与 caret().rect 的设备像素不同）。只给当前窗口内的那几页：整篇给的话，
+   * 长文档全选会一次推上千条，每一拍都走一遍结构化克隆。
    */
   rects: Rect[];
 
   /**
-   * 单元格选区时给出格区间；文字选区为 null。
+   * 单元格选区时的格区间（行、列各含两端）；文字选区为 null。
    */
   cells: { rows: [number, number]; cols: [number, number] } | null;
 }
@@ -1467,11 +1477,6 @@ export interface Diag {
   editStats(): unknown;
 
   /**
-   * 同 editStats；保留给"读一次编辑账"的老写法。
-   */
-  edit(): unknown;
-
-  /**
    * 帧自审：当前帧与从零重画逐字节比，diff = 0 表示一致。
    */
   auditFrame(): unknown;
@@ -1590,7 +1595,7 @@ export interface Diag {
   /**
    * 本拍写过哪几页。
    */
-  dirtyPages(): number[];
+  pagesWrittenThisFrame(): number[];
 
   /**
    * 页度量（设备像素）：宽、高、间隙。
@@ -2636,12 +2641,6 @@ export interface Editor {
    * @param target page 走页号，y 走纵向位置（给了 y 就用 y）
    */
   scrollTo(target: { page?: number; y?: number }): Promise<void>;
-
-  /**
-   * 转发 configure({ zoom })，为可读性保留。
-   * @param zoom 倍数（1 = 100%），越界夹到 0.375~2.25
-   */
-  setZoom(zoom: number): Promise<void>;
 
   // 配置
 

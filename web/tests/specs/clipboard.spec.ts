@@ -150,6 +150,40 @@ test.describe('剪贴板', () => {
     check('第二行是独立的一段', r.paras[1] === '外部第二行', JSON.stringify(r.paras));
   });
 
+  test('打字与插入含换行的文本：折成段落，段号只有一套算法', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' } });
+    const r = await p.ev<{
+      typed: string[]; same: boolean; undone: string[]; inserted: string[];
+    }>(`
+      const e = ${D};
+      await e.setText('头');
+      await e.setCaret({ para: 0, offset: 1 });
+      await e.type('甲\\n乙');
+      await e.flush();
+      const typed = e.paragraphs();
+      // 两条公开方法必须给出同一个段号空间：paragraph(i) 按块号取，paragraphs() 按分隔符切。
+      const same = typed.every((t, i) => e.paragraph(i) === t) &&
+                   e.paragraph(typed.length) === '';
+      await e.undo();
+      await e.flush();
+      const undone = e.paragraphs();
+      await e.setText('头');
+      await e.setCaret({ para: 0, offset: 1 });
+      await e.insertText({ para: 0, offset: 1 }, '甲\\n乙');
+      await e.flush();
+      return { typed, same, undone, inserted: e.paragraphs() };`);
+    check('打字含换行折成两段', r.typed.length === 2, JSON.stringify(r.typed));
+    check('前一段是落点之前的内容加上换行前半', r.typed[0] === '头甲', r.typed[0]);
+    check('后一段就是换行之后那半', r.typed[1] === '乙', r.typed[1]);
+    check('paragraph(i) 与 paragraphs()[i] 说的是同一件事', r.same,
+          JSON.stringify(r.typed));
+    check('★ 一步撤销回到一段', r.undone.length === 1 && r.undone[0] === '头',
+          JSON.stringify(r.undone));
+    check('insertText 走同一条折段路（程序化插入也一样）',
+          r.inserted.length === 2 && r.inserted[0] === '头甲' && r.inserted[1] === '乙',
+          JSON.stringify(r.inserted));
+  });
+
   test('粘贴之后撤销：一次撤销回到粘贴之前', async ({ open }) => {
     const p = await open('index.html', { query: { debug: '1' } });
     const r = await p.ev<{ before: string; after: string; undone: string }>(`

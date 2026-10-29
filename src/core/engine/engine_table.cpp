@@ -52,25 +52,25 @@ constexpr float kGridLineTolPt = 6.0f;
  * 口径。落在页间隙里的点既不在正文上，也不在表上，判假。
  *
  * @param y_pt_doc 文档纵坐标（磅）
- * @param zoom 缩放
+ * @param density 缩放
  * @param page_px_h 一页的像素高
  * @param gap_px 页间隙（像素）
  * @param page 写回页号
  * @param local_y 写回页内磅
  * @return true = 这一点落在某一页上
  */
-bool pageLocalYAt(float y_pt_doc, float zoom, int page_px_h, int gap_px, int* page,
+bool pageLocalYAt(float y_pt_doc, float density, int page_px_h, int gap_px, int* page,
                   float* local_y) {
     *page = 0;
     *local_y = y_pt_doc;
     const int step_px = page_px_h + gap_px;
-    if (step_px <= 0 || !(zoom > 0.0f)) return true;
-    const float y_px = y_pt_doc * zoom;
+    if (step_px <= 0 || !(density > 0.0f)) return true;
+    const float y_px = y_pt_doc * density;
     const int p = std::max(0, static_cast<int>(std::floor(y_px / static_cast<float>(step_px))));
     const float local_px = y_px - static_cast<float>(p) * static_cast<float>(step_px);
     if (local_px < 0.0f || local_px > static_cast<float>(page_px_h)) return false;
     *page = p;
-    *local_y = local_px / zoom;
+    *local_y = local_px / density;
     return true;
 }
 
@@ -155,7 +155,7 @@ std::string EditorEngine::tableGridJson(float x_pt_doc, float y_pt_doc) const {
     o.precision(2);
     int page = 0;
     float local_y = 0.0f;
-    if (!pageLocalYAt(y_pt_doc, cfg_.zoom, pagePxHeight(), pageGapPx(), &page, &local_y)) {
+    if (!pageLocalYAt(y_pt_doc, cfg_.density, pagePxHeight(), pageGapPx(), &page, &local_y)) {
         return pk::checked(pk::table_grid::kSpec, "{\"ok\":false}");
     }
     for (const PlacedTable& pt : layout_service_.layout.placed_tables) {
@@ -187,7 +187,7 @@ bool EditorEngine::tableGridLineAt(float x_pt_doc, float y_pt_doc, uint64_t* tab
     if (row != nullptr) *row = -1;
     int page = 0;
     float local_y = 0.0f;
-    if (!pageLocalYAt(y_pt_doc, cfg_.zoom, pagePxHeight(), pageGapPx(), &page, &local_y)) {
+    if (!pageLocalYAt(y_pt_doc, cfg_.density, pagePxHeight(), pageGapPx(), &page, &local_y)) {
         return false;
     }
     for (const PlacedTable& pt : layout_service_.layout.placed_tables) {

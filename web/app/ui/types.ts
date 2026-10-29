@@ -238,10 +238,10 @@ export interface ChromeHost {
   config(): { zoom: number };
 
   /**
-   * 改缩放倍数。
-   * @param z 目标倍数
+   * 唯一配置写入口。
+   * @param patch 要改的项（这里只用到缩放倍数）
    */
-  setZoom(z: number): Promise<void>;
+  configure(patch: { zoom?: number }): Promise<{ zoom: number }>;
 
   /**
    * 把焦点交回编辑器（动作做完之后要把键盘还回去）。

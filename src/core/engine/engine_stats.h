@@ -228,7 +228,7 @@ struct EngineStats {
     /**
      * 当前的密度（设备像素 / 磅）。
      */
-    float zoom = 1.0f;
+    float density = 1.0f;
 };
 
 /**
@@ -408,7 +408,7 @@ struct EditStats {
     /**
      * 本次要上屏的像素数（各页脏矩形面积之和，合并之后的），以及它们在窗口坐标下的包围盒。
      *
-     * 口径是"宿主得重传多少"，与 pageDirtyRects 完全一致 —— 旧版记的是"帧缓冲写了多少次"，
+     * 口径是"宿主得重传多少"，与 pendingRects 完全一致 ——
      * 那个数随渲染目标一起消失了。上界仍然成立：它证明的是"真的没写整页"。
      */
     long long repainted_pixels = 0;

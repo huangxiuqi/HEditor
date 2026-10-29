@@ -101,7 +101,7 @@ function blitPage(p: number, rects: Array<{ x: number; y: number; w: number; h: 
       0,
     );
     // 整页贴过了，这一页的矩形就没有意义了 —— 留着下一拍只会白贴一次。
-    e.pageDirtyRectsJson(p);
+    e.pendingRectsJson(p);
     return pw * ph;
   }
   let px = 0;
@@ -135,7 +135,7 @@ function blitPages(): number {
   const count = e.windowPageCount();
   let n = 0;
   let px = 0;
-  const pending = JSON.parse(e.pageDirtyPagesJson()) as number[];
+  const pending = JSON.parse(e.pagesPendingBlitJson()) as number[];
   for (let p = first; p < first + count; ++p) {
     const s = slotOf(p);
     // 两个理由之一成立就要贴：这一页还欠着像素，或者它落的那个槽装的还是别的页
@@ -145,7 +145,7 @@ function blitPages(): number {
     if (!stale && !dirty) continue;
     let rects: Array<{ x: number; y: number; w: number; h: number }> | null = null;
     if (!stale && dirty) {
-      rects = JSON.parse(e.pageDirtyRectsJson(p));
+      rects = JSON.parse(e.pendingRectsJson(p));
       if (!rects || !rects.length) rects = null;
     }
     const got = blitPage(p, rects);
