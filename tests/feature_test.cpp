@@ -568,14 +568,20 @@ int main() {
         }
         Rect caret_rect{};
         if (e.caretRectPt(&caret_rect)) {
-            Position hit;
-            const bool hit_ok = e.hitTestPosition(caret_rect.x + caret_rect.w * 0.5f,
-                                                  caret_rect.y + caret_rect.h * 0.5f, &hit);
-            expectTrue(hit_ok, "Position：命中测试能返回位置");
+            // 命中的落点身份由三样合成：(段, 偏移, 侧别)。侧别只有命中知道 —— 同一个
+            //   偏移上压着几枚括号时，它是"点的到底是哪一个插入点"的答案。
+            TextPos at{};
+            int side = 0;
+            int hit_line = 0;
+            const bool hit_ok =
+                e.hitTestPt(caret_rect.x + caret_rect.w * 0.5f, caret_rect.y + caret_rect.h * 0.5f,
+                            &at, nullptr, &side, &hit_line);
+            expectTrue(hit_ok, "Position：命中测试能返回落点");
             if (hit_ok) {
-                expectTrue(hit.flow == pos.flow, "Position：光标处命中回到同一个流位置");
-                e.setCaretAtPosition(hit);
-                expectTrue(e.caretFlowPos() == hit.flow, "Position：按位置落点摆到命中处");
+                const FlowPos hit_flow = e.flowPosAtSide(at.para, at.offset, side);
+                expectTrue(hit_flow == pos.flow, "Position：光标处命中回到同一个流位置");
+                e.setCaretAtPosition(Position{hit_flow, hit_line});
+                expectTrue(e.caretFlowPos() == hit_flow, "Position：按位置落点摆到命中处");
             }
         }
         Position moved = pos;
@@ -602,6 +608,159 @@ int main() {
         expectTrue(e.selectImage(0), "Position 光标：先选中图片");
         expectTrue(e.setCaretPosition(pos), "Position 光标：按位置摆回光标");
         expectTrue(e.selectedImage() < 0, "Position 光标：摆位时清掉图片选中");
+    }
+
+    // Position 往返：流位置进、流位置出，中间不经过文本投影。
+    std::printf("\n[5] Position 往返\n");
+    {
+        // 普通位置：同一个流位置原样读回。
+        e.setDocument(makeDoc({"甲乙丙丁"}));
+        e.relayout();
+        e.setCaret(0, 2);
+        const FlowPos f0 = e.caretFlowPos();
+        expectTrue(e.setCaretPosition(Position{f0, 0}), "Position：普通位置摆得进去");
+        expectTrue(e.caretPosition().flow == f0, "Position：普通位置往返恒等");
+
+        // 折行处：同一个流位置带两个行别，两条都要原样读回，而且画在不同的行上。
+        std::string long_text;
+        for (int i = 0; i < 40; ++i) long_text += "折行";
+        e.setDocument(makeDoc({long_text}));
+        e.relayout();
+        int wrap_cp = -1;
+        for (const LineBox& lb : e.layout().lines) {
+            if (lb.paragraph == 0 && lb.first_cp > 0) {
+                wrap_cp = static_cast<int>(lb.first_cp);
+                break;
+            }
+        }
+        expectTrue(wrap_cp > 0, "折行处：这一段确实折了行");
+        if (wrap_cp > 0) {
+            const FlowPos wf = e.flowPosAt(0, static_cast<size_t>(wrap_cp));
+            expectTrue(e.setCaretPosition(Position{wf, 0}), "折行处：按「上一行」摆位");
+            Rect r_prev{};
+            const bool have_prev = e.caretRectPt(&r_prev);
+            expectTrue(have_prev && e.caretPosition().flow == wf && e.caretPosition().affinity == 0,
+                       "折行处：流位置与行别 0 都原样读回");
+            expectTrue(e.setCaretPosition(Position{wf, 1}), "折行处：按「下一行」摆位");
+            Rect r_next{};
+            const bool have_next = e.caretRectPt(&r_next);
+            expectTrue(have_next && e.caretPosition().flow == wf && e.caretPosition().affinity == 1,
+                       "折行处：流位置与行别 1 都原样读回");
+            expectTrue(have_prev && have_next && r_prev.y != r_next.y,
+                       "折行处：两个行别画在不同的行上");
+        }
+
+        // 段间空隙：格边界那几位不是可停位置，归一化到下一段的段首。
+        e.setDocument(makeDoc({"表前"}));
+        e.relayout();
+        e.setCaret(0, 0);
+        expectTrue(e.insertTableAndRender(2, 2, false), "空隙：先插一张表");
+        int cell_para = -1;
+        if (!e.layout().placed_tables.empty()) {
+            cell_para = e.layout().placed_tables.front().cells.front().first_block;
+        }
+        expectTrue(cell_para > 0, "空隙：找到表内第一格那一段");
+        if (cell_para > 0) {
+            const FlowPos base = e.flowPosAt(cell_para, 0);
+            expectTrue(base > 2, "空隙：段首前面确实有表与格的边界位");
+            e.setCaretPosition(Position{base - 1, 0});
+            expectTrue(e.caretPosition().flow == base, "空隙：进格那一格归一化到本段段首");
+            e.setCaretPosition(Position{base - 2, 0});
+            expectTrue(e.caretPosition().flow == base, "空隙：出格那一格也归一化到本段段首");
+        }
+
+        // 行为闸：任何流位置落一次、读回、再落一次，两步必须收敛。
+        //   落在段间空隙（段落标记、出格进格、表尾）上的输入不是可停位置，第一次就会被
+        //   归一化 —— 所以判据不是"回到原值"，而是"第一次之后不再动"。全篇扫一遍，
+        //   表与格的位置都在里面，空隙的每一种形状都被走到。
+        {
+            expectTrue(e.selectAll(), "行为闸：先取全篇范围当扫描上界");
+            const FlowPos hi = e.selection().end();
+            e.clearSelection();
+            int unstable = 0;
+            for (FlowPos f = 0; f <= hi; ++f) {
+                e.setCaretPosition(Position{f, 0});
+                const Position once = e.caretPosition();
+                e.setCaretPosition(once);
+                const Position twice = e.caretPosition();
+                if (twice.flow != once.flow || twice.affinity != once.affinity) ++unstable;
+            }
+            expectTrue(unstable == 0, "行为闸：每个流位置落一次就收敛（" + std::to_string(hi + 1) +
+                                          " 个位置，抖动 " + std::to_string(unstable) + "）");
+        }
+
+        // 两条落点入口落在同一处：旧入口收（段, 偏移, 侧别），新入口收 Position。
+        //   控件边界是重点 —— 同一个偏移上压着多个插入点，只有侧别与流位置分得开，
+        //   两套推导在这里最先分叉。基准取 flowPosAtSide：它既是命中的来源，也是
+        //   宿主搬位置时用的那一份，两条入口都该与它一致。
+        ControlSpec inner;
+        inner.key = "inner";
+        inner.controlType = "text";
+        e.setDocument(makeDoc({"甲乙丙丁"}));
+        e.relayout();
+        e.setCaret(0, 2);
+        expectTrue(e.insertControlAndRender(inner, "张三"), "等价：先插一个控件");
+        e.relayout();
+        int place_diff = 0;
+        int place_cases = 0;
+        // 六枚码点（甲乙 + 张三 + 丙丁）：0..6 是全部边界偏移，侧别取 0..2 覆盖三层槽。
+        for (int cp = 0; cp <= 6; ++cp) {
+            for (int side = 0; side <= 2; ++side) {
+                const FlowPos want = e.flowPosAtSide(0, static_cast<size_t>(cp), side);
+                e.setCaretAtSideLine(0, static_cast<size_t>(cp), side, 0);
+                const FlowPos by_text = e.caretFlowPos();
+                e.setCaretPosition(Position{want, 0});
+                const FlowPos by_pos = e.caretFlowPos();
+                ++place_cases;
+                if (by_text != want || by_pos != want) ++place_diff;
+            }
+        }
+        expectTrue(place_diff == 0, "等价：定位两条入口落到同一处（" + std::to_string(place_cases) +
+                                        " 个位置，分歧 " + std::to_string(place_diff) + "）");
+
+        // 宿主拿这几个读数拼"光标有没有动"的变化键：段号与偏移在控件边界上会重合，
+        //   侧别与行别不会。判据钉的是"这几个数确实来自同一次呈现，且和引擎自己的读数
+        //   是同一份"——拼字符串的那一端不再有自己的算法。
+        {
+            e.setCaret(0, 2);
+            e.repaint();
+            const EditStats st_a = e.editStats();
+            expectTrue(st_a.caret_side == e.caretSide(), "变化键：侧别与引擎读数一致");
+            expectTrue(st_a.caret_line_aff == e.caretLineAffinity(), "变化键：行别与引擎读数一致");
+            expectTrue(st_a.selection_anchor == st_a.selection_focus, "变化键：空选区的两端相同");
+            const FlowPos from = static_cast<FlowPos>(st_a.selection_focus);
+            e.setCaretAtPosition(Position{from + 2, 0}, /*extend=*/true);
+            e.repaint();
+            expectTrue(e.editStats().selection_anchor != e.editStats().selection_focus,
+                       "变化键：拖开之后两端不同");
+            e.setCaretPosition(Position{from, 0});
+            e.repaint();
+        }
+
+        // 拖选：anchor 不动，焦点端两条入口给出同一个选区。
+        e.setDocument(makeDoc({"甲乙丙丁戊己庚辛"}));
+        e.relayout();
+        e.setCaretPosition(Position{e.flowPosAt(0, 0), 0});
+        const TextSelection drag_anchor = e.selectionPositions();
+        int drag_diff = 0;
+        int drag_cases = 0;
+        for (int cp = 0; cp <= 8; ++cp) {
+            const FlowPos want = e.flowPosAt(0, static_cast<size_t>(cp));
+            e.setSelectionPositions(drag_anchor);
+            e.setFocusAtSideLine(0, static_cast<size_t>(cp), 0, 0);
+            const TextSelection by_text = e.selectionPositions();
+            e.setSelectionPositions(drag_anchor);
+            e.setCaretAtPosition(Position{want, 0}, /*extend=*/true);
+            const TextSelection by_pos = e.selectionPositions();
+            ++drag_cases;
+            if (by_text.focus.flow != by_pos.focus.flow ||
+                by_text.anchor.flow != by_pos.anchor.flow) {
+                ++drag_diff;
+            }
+        }
+        expectTrue(drag_diff == 0, "等价：拖选两条入口给出同一个选区（" +
+                                       std::to_string(drag_cases) + " 个位置，分歧 " +
+                                       std::to_string(drag_diff) + "）");
     }
 
     // 页场景差异：同根不动、版本变一条带、身份变整页、页级项整页。

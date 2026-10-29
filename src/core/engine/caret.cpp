@@ -439,18 +439,19 @@ void CaretResolver::setCaretByText(TextPos p) {
  * 而它该在 ]中 之后（＝被删那个字所在的位置）。
  */
 bool CaretResolver::setCaretAtFlow(FlowPos flow) {
-    if (!view_.hasFlow() || flow < 0) return false;
-    TextPos p{};
-    if (!flowToTextPos(flow, &p)) return false;
-    if (p.para < 0 || p.para >= static_cast<int>(view_.block_flow->size())) return false;
-    // 段内流位置 = 全局流位置 - 本段起点。位置与侧别由此一次算准（侧别是派生的）。
-    setCaretRel(p.para, static_cast<int>(flow) - (*view_.block_flow)[static_cast<size_t>(p.para)]);
-    return true;
+    return setPosition(Position{flow, -1}, /*collapse=*/true);
 }
 
-bool CaretResolver::setPosition(const Position& p) {
-    if (!setCaretAtFlow(p.flow)) return false;
-    sel_.focus.affinity = p.affinity < -1 ? -1 : (p.affinity > 1 ? 1 : p.affinity);
+bool CaretResolver::setPosition(const Position& p, bool collapse) {
+    if (!view_.hasFlow() || p.flow < 0) return false;
+    TextPos t{};
+    if (!flowToTextPos(p.flow, &t)) return false;
+    if (t.para < 0 || t.para >= static_cast<int>(view_.block_flow->size())) return false;
+    // 段内流位置 = 全局流位置 - 本段起点。位置、侧别、行别在这一处一次算准：
+    //   侧别是派生量（sideForFlow），行别要么听调用方（>= 0），要么按位置推（-1）。
+    const int rel = static_cast<int>(p.flow) - (*view_.block_flow)[static_cast<size_t>(t.para)];
+    const int aff = p.affinity < -1 ? -1 : (p.affinity > 1 ? 1 : p.affinity);
+    setCaretRel(t.para, rel, collapse, aff);
     return true;
 }
 

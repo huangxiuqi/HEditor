@@ -27,28 +27,27 @@ export interface HotState {
  * 引擎的命中结果（hitTest 的载荷）。字段有值就代表那一种归宿。
  */
 export interface Hit {
-  para: number;
-  offset: number;
+  /**
+   * 落点的完整身份：流位置 + 行别。搬运落点只用它，别的键都是它的投影或附件。
+   *
+   * 没有文字落点（只点在图上、或点在页外）时 flow 为 -1。
+   */
+  position?: {
+    // 全局流位置。
+    flow: number;
+    // 行别：折行处同一个位置压着两行，只有它分得开。
+    affinity: number;
+  };
 
   /**
-   * 相邻字段共享边界时要靠它分辨点的是哪一侧。
+   * 点在下方的控件下标（-1 或没有这个键 = 不在控件里）。它不是坐标，是"这一点归哪个控件"。
    */
-  side?: number;
-
-  /**
-   * 折行处同一个偏移压着两行，要带行别。
-   */
-  line?: number;
+  field?: number;
 
   /**
    * 点在格子边距带上：这一下表达的是"选整格"。
    */
   cellPara?: number;
-
-  /**
-   * 落点归属的控件下标（-1 或没有这个键 = 不在控件里）。
-   */
-  field?: number;
 
   /**
    * 组控件里点在第几个选项上（没有这个键 = 不在组控件上）。
@@ -91,14 +90,12 @@ export interface Hit {
 }
 
 /**
- * 落光标（可带侧别 / 行别）。
+ * 落光标：位置由命中直接给出，不再由段号与偏移现拼。
  */
 export interface CaretAction {
   kind: 'caret';
-  para: number;
-  offset: number;
-  side?: number;
-  line?: number;
+  flow: number;
+  affinity: number;
 }
 
 /**
@@ -287,25 +284,20 @@ export function keyToOp(ev: KeyboardEvent, ctx?: HotState): [string, Args] | nul
 /**
  * 命中结果到落点。
  *
- * 三种归宿，判据都在引擎给出的字段上：
- *   cellPara 有值 —— 点的是格子边距带，这一下是"选整格"，不是落光标；
- *   side 有值 —— 落光标并带上侧别；相邻字段共享边界时同一个偏移上压着好几枚括号，
- *               光有偏移分不出点的是哪一侧，两个控件之间整段都点不进去；
- *   line 与 side 同时给 —— 折行处"上一行行尾"与"下一行行首"是同一个偏移与侧别，
- *               不带行别，点下一行行首会画到上一行行尾。
- * 搬的是段号而不是流区间：空格的内容长度为 0，流区间分不出是哪一格。
-   * @param hit 命中结果
-   * @returns 落点动作；落不进正文时返回 null
+ * 两种归宿，判据都在引擎给出的字段上：cellPara 有值表示点的是格子边距带，这一下是
+ *   选整格；否则落光标，位置与行别直接取自 position。
+ * 不由段号与偏移现拼位置：相邻字段共享边界时同一个偏移上压着多个插入点，投影回来
+ *   会丢维（两个控件之间整段都点不进去）；折行处也只有行别分得开两行。
+ * 选整格搬段号而不是流区间：空格的内容长度为 0，它的流区间与下一格第一段是同一个位置。
+ * @param hit 命中结果
+ * @returns 落点动作；落不进正文时返回 null
  */
 export function hitToAction(hit: Hit | null | undefined): HitAction | null {
   if (!hit) return null;
   if (typeof hit.cellPara === 'number') return { kind: 'cell', para: hit.cellPara | 0 };
-  const act: CaretAction = { kind: 'caret', para: hit.para, offset: hit.offset };
-  if (typeof hit.side === 'number') {
-    act.side = hit.side;
-    if (typeof hit.line === 'number') act.line = hit.line | 0;
-  }
-  return act;
+  const pos = hit.position;
+  if (!pos || typeof pos.flow !== 'number' || pos.flow < 0) return null;
+  return { kind: 'caret', flow: pos.flow | 0, affinity: pos.affinity | 0 };
 }
 
 /**

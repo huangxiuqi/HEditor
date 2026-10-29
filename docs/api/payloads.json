@@ -210,8 +210,8 @@
         }
       ]
     },
-    "flowTextPos": {
-      "cxx": "flowTextPosJson",
+    "textPosOf": {
+      "cxx": "textPosOf",
       "file": "src/wasm/wasm_main.cpp",
       "partial": true,
       "keys": [
@@ -228,21 +228,6 @@
     "caretPosition": {
       "cxx": "caretPositionJson",
       "file": "src/wasm/wasm_main.cpp",
-      "keys": [
-        {
-          "name": "flow",
-          "kind": "num"
-        },
-        {
-          "name": "affinity",
-          "kind": "num"
-        }
-      ]
-    },
-    "hitTestPosition": {
-      "cxx": "hitTestPositionJson",
-      "file": "src/wasm/wasm_main.cpp",
-      "partial": true,
       "keys": [
         {
           "name": "flow",
@@ -282,23 +267,11 @@
       "partial": true,
       "keys": [
         {
-          "name": "para",
-          "kind": "num"
-        },
-        {
-          "name": "offset",
-          "kind": "num"
+          "name": "position",
+          "kind": "obj"
         },
         {
           "name": "field",
-          "kind": "num"
-        },
-        {
-          "name": "side",
-          "kind": "num"
-        },
-        {
-          "name": "line",
           "kind": "num"
         },
         {
@@ -666,6 +639,18 @@
         },
         {
           "name": "caretSide",
+          "kind": "num"
+        },
+        {
+          "name": "caretLineAff",
+          "kind": "num"
+        },
+        {
+          "name": "selectionAnchor",
+          "kind": "num"
+        },
+        {
+          "name": "selectionFocus",
           "kind": "num"
         },
         {

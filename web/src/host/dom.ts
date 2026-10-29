@@ -636,12 +636,18 @@ export function createDomHost(o: DomHostOptions): DomHost {
     pages.sync(g.first, g.count, g.totalPages, g);
     healWindow(g);
     positionIme(s);
-    const caretKey = s ? `${s.caretPara}:${s.caretOffset}:${s.caretPage}:${s.caretVisible}` : '';
+    // 变化键取完整的落点身份：段号与偏移在相邻控件边界上会重合（][ 两侧同段同偏移），
+    //   少了侧别，光标在两枚括号之间挪一格就判成"没动"，输入法候选框不跟着挪；
+    //   少了行别，折行处上下换行也判成没动。这条键只判"变没变"，不参与定位。
+    const caretKey = s
+      ? `${s.caretPara}:${s.caretOffset}:${s.caretSide}:${s.caretLineAff}:${s.caretPage}:${s.caretVisible}`
+      : '';
     if (caretKey !== lastCaretKey) {
       lastCaretKey = caretKey;
       o.onCaret?.();
     }
-    const selKey = s ? `${s.selectionAnchor ?? ''}:${s.selectionFocus ?? ''}` : '';
+    // 选区两端是流位置：只挪一个槽、另一侧不变时它也得算变。
+    const selKey = s ? `${s.selectionAnchor}:${s.selectionFocus}` : '';
     if (selKey !== lastSelKey) {
       lastSelKey = selKey;
       o.onSelection?.();
@@ -833,21 +839,15 @@ export function createDomHost(o: DomHostOptions): DomHost {
 
   // 拖选的移动端：搬焦点端，不搬 anchor。走"不滚视口"那一档：拖动过程中每拍都把
   //   光标滚进视口，会与边缘自动滚动抢同一个 scrollTop，看起来是画面在抖。
+  // 位置直接搬命中给的 position（流位置 + 行别）：这不是"从命中里挑两个数"，而是
+  //   把引擎算出来的身份原样送回去 —— 任何时候都不该由宿主把地址拼成位置。
   function dragExtendTo(hit: any): void {
-    if (!hit) return;
-    if (typeof hit.line === 'number') {
-      writeOp('setFocusAtSideLine', {
-        para: hit.para,
-        offset: hit.offset,
-        side: hit.side,
-        line: hit.line,
-      });
-    } else {
-      writeOp('setFocusAtSide', { para: hit.para, offset: hit.offset, side: hit.side });
-    }
+    const pos = hit && hit.position;
+    if (!pos || typeof pos.flow !== 'number' || pos.flow < 0) return;
+    writeOp('extendTo', { flow: pos.flow, affinity: pos.affinity | 0 });
     caretOn = true;
     writeOp('phase', { on: true });
-    then1(link.settle('setFocusAtSide'), () => finish());
+    then1(link.settle('extendTo'), () => finish());
   }
 
   function writeOp(name: string, args?: Args): Maybe<boolean> {
@@ -1219,18 +1219,11 @@ export function createDomHost(o: DomHostOptions): DomHost {
       return afterEdit(pendingOp, 'user');
     },
     place: (act) => {
-      if (typeof act.side === 'number') {
-        writeOp('setCaretAtSideLine', {
-          para: act.para,
-          offset: act.offset,
-          side: act.side,
-          line: act.line ?? 0,
-        });
-        caretOn = true;
-        writeOp('phase', { on: true });
-        return afterEdit('setCaretAtSideLine', 'user');
-      }
-      return setCaretAndPresent(act.para, act.offset);
+      // 落点身份就是命中的 flow：侧别已经含在里面，不必再由段号与偏移现拼一次。
+      writeOp('setCaretPosition', { flow: act.flow, affinity: act.affinity });
+      caretOn = true;
+      writeOp('phase', { on: true });
+      return afterEdit('setCaretPosition', 'user');
     },
     selectCellPara: (para) => {
       writeOp('selectCellAtPara', { para });
@@ -1291,20 +1284,6 @@ export function createDomHost(o: DomHostOptions): DomHost {
     zoomBy: (delta) => o.onZoomBy?.(delta),
     zoomReset: () => o.onZoomReset?.(),
   });
-
-  /**
-   * 移动光标并立即呈现。
-   *
-   * setCaret 只改引擎里的位置，不动像素 —— 漏掉 present 的症状是"点了画布，光标过一会儿
-   *   才跳过去"（下次闪烁 tick 才重绘）。呈现前先把闪烁相位摆到可见：否则
-   *   editStats.caretVisible 为 false，收尾会判定"刚才那次重绘把光标画成隐的"。
-   */
-  function setCaretAndPresent(para: number, offset: number): Maybe<boolean> {
-    writeOp('setCaret', { para, offset });
-    caretOn = true;
-    writeOp('phase', { on: true });
-    return afterEdit('setCaret', 'user');
-  }
 
   /**
    * 光标闪烁。

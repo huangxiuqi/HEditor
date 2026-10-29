@@ -98,13 +98,13 @@ inline constexpr KeySpec kKeys[] = {
 inline constexpr PayloadSpec kSpec{"benchRelayoutPaint", kKeys, static_cast<int>(std::size(kKeys)), false};
 }  // namespace bench_relayout_paint
 
-namespace flow_text_pos {
+namespace text_pos_of {
 inline constexpr KeySpec kKeys[] = {
     {"para", "num", false},
     {"offset", "num", false},
 };
-inline constexpr PayloadSpec kSpec{"flowTextPos", kKeys, static_cast<int>(std::size(kKeys)), true};
-}  // namespace flow_text_pos
+inline constexpr PayloadSpec kSpec{"textPosOf", kKeys, static_cast<int>(std::size(kKeys)), true};
+}  // namespace text_pos_of
 
 namespace caret_position {
 inline constexpr KeySpec kKeys[] = {
@@ -113,14 +113,6 @@ inline constexpr KeySpec kKeys[] = {
 };
 inline constexpr PayloadSpec kSpec{"caretPosition", kKeys, static_cast<int>(std::size(kKeys)), false};
 }  // namespace caret_position
-
-namespace hit_test_position {
-inline constexpr KeySpec kKeys[] = {
-    {"flow", "num", false},
-    {"affinity", "num", false},
-};
-inline constexpr PayloadSpec kSpec{"hitTestPosition", kKeys, static_cast<int>(std::size(kKeys)), true};
-}  // namespace hit_test_position
 
 namespace selection_report {
 inline constexpr KeySpec kKeys[] = {
@@ -134,11 +126,8 @@ inline constexpr PayloadSpec kSpec{"selectionReport", kKeys, static_cast<int>(st
 
 namespace hit_test {
 inline constexpr KeySpec kKeys[] = {
-    {"para", "num", false},
-    {"offset", "num", false},
+    {"position", "obj", false},
     {"field", "num", false},
-    {"side", "num", false},
-    {"line", "num", false},
     {"opt", "num", false},
     {"cellPara", "num", true},
     {"cell", "arr", true},
@@ -260,6 +249,9 @@ inline constexpr KeySpec kKeys[] = {
     {"docCodepoints", "num", false},
     {"wordCount", "num", false},
     {"caretSide", "num", false},
+    {"caretLineAff", "num", false},
+    {"selectionAnchor", "num", false},
+    {"selectionFocus", "num", false},
     {"caretVertical", "bool", false},
     {"caretBlockReversed", "bool", false},
     {"caretPage", "num", false},

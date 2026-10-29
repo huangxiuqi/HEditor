@@ -848,10 +848,15 @@ public:
 
     /**
      * 按 Position 摆光标。
-     * @param p 位置
+     *
+     * 不要先拆成 (段, cp, 侧别) 再拼回来：那样中间要经过一次"文本投影"，而投影对
+     * 段间那些位置（段落标记、格边界）没有对应物。流位置进、流位置落，一步到底。
+     *
+     * @param p 位置；affinity 传 -1 表示按位置自己推
+     * @param collapse true = 顺带清掉选区（定位）；false = 只搬焦点端（扩展）
      * @returns true = 摆位成功
      */
-    bool setPosition(const Position& p);
+    bool setPosition(const Position& p, bool collapse = true);
 
     /**
      * 选区两端的位置。

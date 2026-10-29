@@ -280,14 +280,16 @@ export function createWorker(opts: WorkerOptions): {
           // 命中是输入层的必经之路，不是诊断：少了它，Worker 模式下单击不落光标、
           //   拖选永远是空的。它必须是一次真往返（ask），不能落进下面的 default。
           return ask('hit', args);
-        case 'flowTextPos': {
-          // 两端位置随 selection 一起推过来；别的流位置没有镜像，只能给 null。
+        case 'textPosOf': {
+          // 选区两端的位置随 selection 一起推过来（同步镜像）；别的流位置没有镜像，
+          //   走一次真往返 —— 判据拿它把命中的流位置换成读数，不是每个位置都能预推。
           const sel = mirror.selection;
           const flow = Number(args?.flow ?? -1);
-          if (!sel) return null;
-          if (flow === sel.anchor) return sel.anchorPos ?? null;
-          if (flow === sel.focus) return sel.focusPos ?? null;
-          return null;
+          if (sel) {
+            if (flow === sel.anchor) return sel.anchorPos ?? null;
+            if (flow === sel.focus) return sel.focusPos ?? null;
+          }
+          return ask('textPosOf', args);
         }
         default:
           // 其余读命令（审计、帧摘要、控件表……）没有本地镜像，走一次真往返。

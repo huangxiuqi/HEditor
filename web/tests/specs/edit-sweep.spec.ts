@@ -424,7 +424,13 @@ test.describe('编辑面：控件边界总覆盖', () => {
       const yq = quantizedY();
       for (let x = lo - 4; x <= hi + 4; x += 1) {
         const pt = quantizedPt(x);
-        const h = await probe.read(`return await D.hit(${pt.toFixed(3)}, ${yq.toFixed(3)});`);
+        const h = await probe.read(`
+          const q = await D.hit(${pt.toFixed(3)}, ${yq.toFixed(3)});
+          if (!q) return null;
+          // 命中的位置换成读数：断言比的是"第几个字"，而位置本身是流位置。
+          const tp = q.position && q.position.flow >= 0
+            ? await D.textPosOf(q.position.flow) : null;
+          return { offset: tp ? tp.offset : 0, field: typeof q.field === 'number' ? q.field : -1 };`);
         if (!h || h.offset > 17) continue;
         // 先断一次连击：横扫是 x 逐 1 磅前进的，相邻两下只差一个像素、又落在 520 ms
         //   之内 —— 那在后端看来就是双击（Word 同一条：连击要"同一处"才算），于是某几

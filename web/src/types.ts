@@ -1554,6 +1554,23 @@ export interface Diag {
   hit(x: number, y: number): unknown;
 
   /**
+   * 地址 -> 位置：段号 + 段内偏移换成全局流位置。
+   *
+   * 唯一的"猜归属"处：同一个文本偏移上可能压着几个插入点，这里取最内层那一个。
+   * @param para 段号
+   * @param offset 段内码点偏移
+   */
+  flowAt(para: number, offset: number): unknown;
+
+  /**
+   * 位置 -> 地址：全局流位置换成段号 + 段内偏移。
+   *
+   * 只给读数与判据用（同一偏移上压着多个插入点，换回来会丢维）。
+   * @param flow 全局流位置
+   */
+  textPosOf(flow: number): unknown;
+
+  /**
    * 某个点上压着哪个控件（-1 = 不在任何控件里）。
    * @param x 横坐标（磅）
    * @param y 纵坐标（磅）

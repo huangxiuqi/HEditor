@@ -742,42 +742,51 @@ bool setImageLayout(int index, int layout) {
     return g_engine.setImageLayoutAndRender(index, layout);
 }
 /**
- * 段内位置 -> 全局流位置（码点）。
+ * 地址 -> 位置：{ 段号, 段内偏移 } 换成全局流位置（码点）。
  *
- * 选区两端（setSelection）收的是全局流位置，而外部 API 收的是 { 段号, 段内偏移 }：
- *   两者之间的换算只在引擎里做 —— 段间分隔符算不算一个位置、表格格里怎么数，
- *   这些口径不该由宿主猜（猜错了只在跨段选区上显形）。
+ * 唯一的"猜侧别"处：地址里没有槽序号，同一偏移上压着几枚括号时按最内层投影取一个。
+ *   要精确到某一枚括号，用地址入口 setCaretAt 的 field / side 修饰。
+ * 选区两端（select）收的是全局流位置，而外部 API 收的是段内位置：这个换算只在引擎里做 ——
+ *   段间分隔符算不算一个位置、表格格里怎么数，这些口径不该由宿主猜。
  */
-int flowIndexAt(int para, int offset) {
+int flowAt(int para, int offset) {
     if (offset < 0) offset = 0;
     return static_cast<int>(g_engine.flowPosAt(para, static_cast<size_t>(offset)));
 }
 
 /**
- * 全局流位置 -> { 段号, 段内偏移 }。
+ * 位置 -> 地址：全局流位置换成 { 段号, 段内偏移 }。
  *
- * 与 flowIndexAt 是同一件事的两个方向。选区两端在引擎里是流位置（setSelection 收的
- *   就是它），而外部 API 收的是段内位置 —— 这个换算只能由引擎做：段间分隔符算不算
- *   一个位置、表格格里怎么数，宿主猜不出来。
+ * 与 flowAt 是同一件事的两个方向，只给读数与诊断用（公开面不再拿地址当位置）。
+ *   选区两端在引擎里是流位置，对外 API 的 Pos 是段内位置，那一步换算也走它。
  */
-std::string flowTextPosJson(int flow) {
+std::string textPosOf(int flow) {
     TextPos p{};
     if (!g_engine.flowToTextPos(static_cast<FlowPos>(flow), &p)) return "null";
     std::ostringstream o;
     o << "{\"para\":" << p.para << ",\"offset\":" << p.offset << "}";
-    return pk::checked(pk::flow_text_pos::kSpec, o.str());
+    return pk::checked(pk::text_pos_of::kSpec, o.str());
 }
 
-bool setSelection(int anchor, int focus) {
-    return g_engine.setSelectionAndRender(
-        Range{static_cast<FlowPos>(anchor), static_cast<FlowPos>(focus)});
+/**
+ * 摆选区：两端是流位置，焦点端带行别。
+ *
+ * anchor 的行别不进引擎 —— 画哪一行只由焦点端决定（反白的每一段按它自己的流位置投影，
+ *   与端点无关）。焦点端的行别要带进来：折行处"上一行行尾"与"下一行行首"是同一个流位置，
+ *   少了它，反白的末端会停在上一行。
+ */
+bool select(int anchor, int focus, int affinity) {
+    TextSelection s;
+    s.anchor.flow = static_cast<FlowPos>(anchor);
+    s.focus.flow = static_cast<FlowPos>(focus);
+    s.focus.affinity = affinity;
+    return g_engine.setSelectionAndRender(s);
 }
 bool clearSelection() {
     g_engine.clearSelection();
     g_engine.repaint();
     return true;
 }
-void setCaret(int para, int offset) { g_engine.setCaret(para, static_cast<size_t>(offset)); }
 void showCaret(bool on) { g_engine.showCaret(on); }
 void present() { g_engine.repaint(); }
 
@@ -820,16 +829,16 @@ bool setCaretPosition(int flow, int affinity) {
 }
 
 /**
- * 文档坐标命中到 Position；没落在页上时返回 null。
+ * 拖选：把选区移动的那一端（focus）挪到这个位置，anchor 不动。
+ *
+ * 名字不带 focus：在 Web 语境里 setFocus 会被读成 element.focus()，而这里动的是选区的
+ * 另一端。与 setCaretPosition 是一对，不变量不同：那边夹屏障、两端一起摆到新位置；
+ * 这边不夹屏障 —— 选区要能盖住只读区，否则拖不进去。
  */
-std::string hitTestPositionJson(float x_pt, float y_pt) {
-    Position p;
-    if (!g_engine.hitTestPosition(x_pt, y_pt, &p)) {
-        return pk::checked(pk::caret_position::kSpec, "null");
-    }
-    std::ostringstream o;
-    o << "{\"flow\":" << p.flow << ",\"affinity\":" << p.affinity << "}";
-    return pk::checked(pk::caret_position::kSpec, o.str());
+bool extendTo(int flow, int affinity) {
+    g_engine.setCaretAtPosition(Position{static_cast<FlowPos>(flow), affinity}, /*extend=*/true);
+    g_engine.repaint();
+    return true;
 }
 
 /**
@@ -875,14 +884,14 @@ std::string selectionReport() {
 }
 
 /**
- * 命中测试：文档坐标（磅）→ 位置。返回 "null" 或 {para, offset, field, side, line}。
+ * 命中测试：文档坐标（磅）→ 位置。返回 "null" 或 {position, field, ...}。
  *
- * side 是落点的完整身份：相邻字段共享边界、同一偏移上压着几枚括号时，只给偏移分不开
- *   "前一个字段的末尾"与"后一个字段的开头"（前一个字段只读时那次点击直接失效）。
- *   field 是它的投影，只给人看 —— 宿主搬运落点必须搬 side。
- * line 是行别（见引擎的 caretLineAffinity）：折行处"上一行行尾"与"下一行行首"是同一个
- *   偏移与侧别，只有它分得开；宿主必须原样带回去（setCaretAtSideLine），
- *   否则点下一行行首会画到上一行行尾。
+ * position 是落点的完整身份：流位置 + 行别。相邻字段共享边界、同一偏移上压着几枚括号时，
+ *   只给文本偏移分不开"前一个字段的末尾"与"后一个字段的开头"（前一个字段只读时那次点击
+ *   直接失效）；折行处"上一行行尾"与"下一行行首"又是同一个流位置，只有行别分得开。
+ *   宿主搬运落点只搬它，不要自己拼。
+ * field 是位置的一个投影（落在哪个控件里），给控件点击与读数用；它不是坐标 ——
+ *   拿 (para, offset, side) 那套地址描述落点会丢维，这里不再吐那三个键。
  * clamp 非零时把落在页外/页间空隙的点夹到最近的页边再算：拖选那一路用 —— 指针拖出画布
  *   之后仍要能选，单击那一路不夹（点在灰底上本来就不该挪光标）。
  */
@@ -898,7 +907,7 @@ std::string hitTest(float x_pt, float y_pt, int clamp) {
     if (!g_engine.hitTestPt(x_pt, y_pt, &p, &owner, &side, &line_aff, &cell_para, clamp != 0)) {
         if (img.index < 0) return pk::checked(pk::hit_test::kSpec, "null");
         std::ostringstream bad;
-        bad << "{\"para\":-1,\"offset\":0,\"field\":-1,\"side\":0,\"line\":0,\"img\":" << img.index
+        bad << "{\"position\":{\"flow\":-1,\"affinity\":0},\"field\":-1,\"img\":" << img.index
             << ",\"imgHandle\":" << img.handle;
         // 没有文字落点，但"按下去能不能拖"照样要回答（搬图那一半）。
         TextPos none{};
@@ -911,8 +920,11 @@ std::string hitTest(float x_pt, float y_pt, int clamp) {
         return pk::checked(pk::hit_test::kSpec, bad.str());
     }
     std::ostringstream o;
-    o << "{\"para\":" << p.para << ",\"offset\":" << p.offset << ",\"field\":" << owner
-      << ",\"side\":" << side << ",\"line\":" << line_aff;
+    // position 是落点的完整身份，宿主搬运落点时原样带走 —— 不要把 (段, 偏移, 槽) 那套地址
+    //   解了又拼：中间隔着一次文本投影，段间那些位置（段落标记、格边界）投影不出来。
+    const FlowPos flow = g_engine.flowPosAtSide(p.para, p.offset, side);
+    o << "{\"position\":{\"flow\":" << flow << ",\"affinity\":" << line_aff
+      << "},\"field\":" << owner;
     // cellPara：落点在某个格子的边距带上（格边框到文字左沿之间，空格则是整格）时给出
     //   这一格的段号。宿主看到它就调 selectCellAtPara —— 那是"选整格"这条操作线，
     //   与"落光标"不是同一件事。给段号而不是流区间：空格的内容长度为 0，它的流区间
@@ -955,44 +967,24 @@ std::string hitTest(float x_pt, float y_pt, int clamp) {
 }
 
 /**
- * 带侧别与行别的定位（点画布的落点）。side 与 line 都来自 hitTest 的同一份结果。
- * 宿主不要自己拼这两个数：它只该原样搬运引擎算出来的结论。
+ * 地址入口：按 (段, 偏移) 摆光标，修饰按需给。
+ *
+ * plain 非零表示程序化定位：只是把光标挪过去，不夹屏障（属性面板要能把光标停在只读字段里，
+ *   判据也要能摆到任意位置）。用户落点那一路必须夹，否则"点不进去"与"摆得进去"两套规则并存。
+ * field 是控件下标 —— 按归属定侧别，比槽序号稳（文档改短也不失配），判据与自动化用它；
+ * side 是槽序号，折行处再用 line 说清哪一行。两者都给时归属优先。
  */
-void setCaretAtSideLine(int para, int offset, int side, int line_aff) {
-    g_engine.setCaretAtSideLine(para, static_cast<size_t>(offset < 0 ? 0 : offset), side, line_aff);
-}
-
-/**
- * 带侧别的定位（点画布的落点）。side 来自 hitTest 的同一个字段。
- * 宿主不要自己拼这个侧别：它只该原样搬运引擎算出来的结论。
- */
-void setCaretAtSide(int para, int offset, int side) {
-    g_engine.setCaretAtSide(para, static_cast<size_t>(offset < 0 ? 0 : offset), side);
-}
-
-/**
- * 拖选的移动端：只搬焦点端，anchor 不动。side 与 setCaretAtSide 同一来源。
- * 定位与拖选是两个动作，这里刻意不合并：合并之后"按下"这件事就没有落点了。
- */
-void setFocusAtSide(int para, int offset, int side) {
-    g_engine.setFocusAtSide(para, static_cast<size_t>(offset < 0 ? 0 : offset), side);
-}
-
-/**
- * 拖选的移动端（带行别）。line 与 setCaretAtSideLine 同一来源。
- * 拖到下一行行首时也要贴着那一行，否则选区末端的矩形停在上一行行尾。
- */
-void setFocusAtSideLine(int para, int offset, int side, int line_aff) {
-    g_engine.setFocusAtSideLine(para, static_cast<size_t>(offset < 0 ? 0 : offset), side, line_aff);
-}
-
-/**
- * 按控件归属定位（-1 = 最内层，LineBox::kInlineOffsetOuter = 贴外侧）。
- * 给探针与诊断用：它们手上有的是控件下标，不知道侧别。点击路径请用 setCaretAtSide ——
- * 归属会抹平"同一偏移上好几枚括号"的细节。
- */
-void setCaretAt(int para, int offset, int field) {
-    g_engine.setCaretAt(para, static_cast<size_t>(offset < 0 ? 0 : offset), field);
+void setCaretAt(int para, int offset, int field, int side, int line_aff, int plain) {
+    const size_t at = static_cast<size_t>(offset < 0 ? 0 : offset);
+    if (plain != 0) {
+        g_engine.setCaret(para, at);
+        return;
+    }
+    if (field != -1) {
+        g_engine.setCaretAt(para, at, field);
+        return;
+    }
+    g_engine.setCaretAtSideLine(para, at, side, line_aff);
 }
 
 /**
@@ -2139,6 +2131,9 @@ std::string editStatsJson() {
     // 字数：非空白码点数。口径在引擎里（engine.cpp 的 isSpaceCodepoint），宿主只显示。
     o << "\"wordCount\":" << e.word_count << ",";
     o << "\"caretSide\":" << e.caret_side << ",";
+    o << "\"caretLineAff\":" << e.caret_line_aff << ",";
+    o << "\"selectionAnchor\":" << e.selection_anchor << ",";
+    o << "\"selectionFocus\":" << e.selection_focus << ",";
     // 竖排标记：宿主靠它把方向键按物理方向映射（竖排上下走字、左右换列）。
     o << "\"caretVertical\":" << (e.caret_vertical ? "true" : "false") << ",";
     // 列序：中日竖排往左换列、蒙文往右换列。只给"是竖排"，左右就会按反。
@@ -2257,23 +2252,18 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("setImageLayout", &setImageLayout);
     emscripten::function("watermarkJson", &watermarkJson);
     emscripten::function("setWatermark", &setWatermark);
-    emscripten::function("setSelection", &setSelection);
-    emscripten::function("flowIndexAt", &flowIndexAt);
-    emscripten::function("flowTextPosJson", &flowTextPosJson);
+    emscripten::function("select", &select);
+    emscripten::function("flowAt", &flowAt);
+    emscripten::function("textPosOf", &textPosOf);
     emscripten::function("clearSelection", &clearSelection);
     emscripten::function("selectionReport", &selectionReport);
-    emscripten::function("setCaret", &setCaret);
     emscripten::function("setCaretAt", &setCaretAt);
-    emscripten::function("setCaretAtSide", &setCaretAtSide);
-    emscripten::function("setCaretAtSideLine", &setCaretAtSideLine);
-    emscripten::function("setFocusAtSideLine", &setFocusAtSideLine);
-    emscripten::function("setFocusAtSide", &setFocusAtSide);
     emscripten::function("showCaret", &showCaret);
     emscripten::function("present", &present);
     emscripten::function("caretOffsetLive", &caretOffsetLive);
     emscripten::function("caretPositionJson", &caretPositionJson);
     emscripten::function("setCaretPosition", &setCaretPosition);
-    emscripten::function("hitTestPositionJson", &hitTestPositionJson);
+    emscripten::function("extendTo", &extendTo);
     emscripten::function("caretVerticalNow", &caretVerticalNow);
     emscripten::function("caretBlockReversedNow", &caretBlockReversedNow);
     emscripten::function("hitTest", &hitTest);

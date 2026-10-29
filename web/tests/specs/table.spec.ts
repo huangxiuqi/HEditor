@@ -56,7 +56,13 @@ test.describe('表格：跨页切片', () => {
       const localY = (zp.h / Z * 0.06 + row1.y) * 0.5;
       const yDoc = page * stepPt + localY;
       const hits = [];
-      for (const c of [c1, c2]) hits.push(await D.hit(c.x + 40, yDoc));
+      for (const c of [c1, c2]) {
+        // 命中给的是位置；这条判据要比"落在哪一段"，用诊断的换算读回地址。
+        const q = await D.hit(c.x + 40, yDoc);
+        hits.push(q && q.position && q.position.flow >= 0
+          ? await D.textPosOf(q.position.flow)
+          : null);
+      }
       // 端到端：真的点一下，光标要跟着走。
       await D.clickAt({ x: (c1.x + 40) * Z, y: yDoc * Z });
       await e.flush();

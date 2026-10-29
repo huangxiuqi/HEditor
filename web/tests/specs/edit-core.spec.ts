@@ -222,10 +222,16 @@ test.describe('编辑面：基准与键盘', () => {
     const yPt = (g0.y + g0.h / 2) / z;
     let bok = 0;
     const bad = [];
+    const at = (x: number) => probe.read<{ para: number; offset: number } | null>(`
+        const q = await D.hit(${x}, ${yPt});
+        if (!q || !q.position || q.position.flow < 0) return null;
+        return await D.textPosOf(q.position.flow);`);
     for (let o = 0; o < len; ++o) {
       const mid = (absPt[o] + absPt[o + 1]) / 2;
-      const left = await probe.read(`return await D.hit(${mid - 0.2}, ${yPt});`);
-      const right = await probe.read(`return await D.hit(${mid + 0.2}, ${yPt});`);
+      // 命中给的是位置（流位置 + 行别）；要断言"落到第几个插入点"，用诊断的
+      //   位置→地址换算读回来 —— 不拿命中载荷里的地址键，那套键已经不再吐了。
+      const left = await at(mid - 0.2);
+      const right = await at(mid + 0.2);
       if (left && right && left.offset === o && right.offset === o + 1) ++bok;
       else bad.push(`o=${o}: 左→${left ? left.offset : 'null'} 右→${right ? right.offset : 'null'}`);
     }

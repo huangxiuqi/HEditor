@@ -1300,6 +1300,16 @@ public:
     bool setSelectionAndRender(Range r);
 
     /**
+     * 按一对 Position 设选区 + 收尾重绘。
+     *
+     * 与收 Range 的那条只差坐标类型：Range 里没有行别，折行处的焦点端会被画成上一行。
+     *
+     * @param s 选区
+     * @return true = 摆好了
+     */
+    bool setSelectionAndRender(const TextSelection& s);
+
+    /**
      * 选整格 + 收尾重绘。
      *
      * @param para 段号（块下标）
@@ -2584,15 +2594,6 @@ public:
     bool hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* out_owner = nullptr,
                    int* out_side = nullptr, int* out_line_aff = nullptr,
                    int* out_cell_para = nullptr, bool clamp = false) const;
-
-    /**
-     * 按点查 Position（流位置 + 行别）。
-     * @param x_pt_doc 文档坐标 x（磅）
-     * @param y_pt_doc 文档坐标 y（磅）
-     * @param out 写回位置
-     * @returns true = 点落在页上
-     */
-    bool hitTestPosition(float x_pt_doc, float y_pt_doc, Position* out) const;
 
     /**
      * 按点选整格（三击的入口）：点在格里的任何位置都选中这一格。

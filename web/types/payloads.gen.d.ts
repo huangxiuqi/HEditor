@@ -65,17 +65,12 @@ export interface BenchRelayoutPaint {
   totalMs: number;
 }
 
-export interface FlowTextPos {
+export interface TextPosOf {
   para: number;
   offset: number;
 }
 
 export interface CaretPosition {
-  flow: number;
-  affinity: number;
-}
-
-export interface HitTestPosition {
   flow: number;
   affinity: number;
 }
@@ -88,11 +83,8 @@ export interface SelectionReport {
 }
 
 export interface HitTest {
-  para: number;
-  offset: number;
+  position: Record<string, unknown>;
   field: number;
-  side: number;
-  line: number;
   opt: number;
   cellPara?: number;
   cell?: unknown[];
@@ -193,6 +185,9 @@ export interface EditStats {
   docCodepoints: number;
   wordCount: number;
   caretSide: number;
+  caretLineAff: number;
+  selectionAnchor: number;
+  selectionFocus: number;
   caretVertical: boolean;
   caretBlockReversed: boolean;
   caretPage: number;
@@ -340,9 +335,8 @@ export interface Payloads {
   selectionStyle: SelectionStyle;
   stats: Stats;
   benchRelayoutPaint: BenchRelayoutPaint;
-  flowTextPos: FlowTextPos;
+  textPosOf: TextPosOf;
   caretPosition: CaretPosition;
-  hitTestPosition: HitTestPosition;
   selectionReport: SelectionReport;
   hitTest: HitTest;
   imageList: ImageList;

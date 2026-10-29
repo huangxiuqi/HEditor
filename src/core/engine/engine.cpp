@@ -1243,20 +1243,36 @@ void EditorEngine::setCaretAt(int para, size_t offset, int field) {
 bool EditorEngine::setCaretAtFlow(FlowPos flow) { return edit_session_.caret.setCaretAtFlow(flow); }
 
 bool EditorEngine::setCaretPosition(const Position& p) {
-    image_sel_ = kInvalidNodeId;
-    return edit_session_.caret.setPosition(p);
+    if (!loaded_ || !flow_.has_value()) return false;
+    setCaretAtPosition(p, /*extend=*/false);
+    return true;
 }
 
+/**
+ * 按 Position 落点或扩展：定位与拖选的唯一实现。
+ *
+ * 两条不变量与点击那一路逐字对齐。定位夹屏障、并记下待定的拖选锚，否则程序化落点能停进
+ *   只读字段而点同一处停不进去；扩展不夹屏障、但要重算整格粒度（见 syncCellSelection）。
+ * 括号占位会改行宽，落点跨过控件边界时括号计划会变，所以排版之后要按新槽宽再落一次：
+ *   只落一次的话，那次落点按旧槽宽算出的段内位置会停到相邻的槽上。
+ */
 void EditorEngine::setCaretAtPosition(const Position& p, bool extend) {
     if (!loaded_ || !flow_.has_value()) return;
-    TextPos t{};
-    if (!flowToTextPos(p.flow, &t)) return;
-    const int side = edit_session_.caret.sideForFlow(p.flow);
+    image_sel_ = kInvalidNodeId;
+    const FlowPos before = caretFlowPos();
+    if (extend) applyDragAnchor();
+    const int plan_before = bracketPlanId();
+    if (!edit_session_.caret.setPosition(p, /*collapse=*/!extend)) return;
+    relayoutIfBracketPlanChanged(plan_before);
+    if (!edit_session_.caret.setPosition(p, /*collapse=*/!extend)) return;
     if (extend) {
-        setFocusAtSideLine(t.para, t.offset, side, p.affinity);
-    } else {
-        placeCaretFromClick(t.para, t.offset, side, p.affinity);
+        syncCellSelection();
+        return;
     }
+    const FlowPos pressed = caretFlowPos();
+    const bool in_barrier = barrierAtFlow(pressed);
+    confineCaret(before, CaretConfine::Place);
+    if (in_barrier) drag_anchor_ = pressed;
 }
 
 TextSelection EditorEngine::selectionPositions() const {
@@ -1882,6 +1898,12 @@ bool EditorEngine::setSelectionAndRender(Range r) {
     return true;
 }
 
+bool EditorEngine::setSelectionAndRender(const TextSelection& s) {
+    if (!setSelectionPositions(s)) return false;
+    repaint();
+    return true;
+}
+
 bool EditorEngine::selectCellAtParaAndRender(int para) {
     if (!selectCellAtPara(para)) return false;
     repaint();
@@ -2348,17 +2370,6 @@ bool EditorEngine::hitTestPt(float x_pt_doc, float y_pt_doc, TextPos* out, int* 
         }
         if (ip >= best->cell_box_lo_pt && ip < text_start) *out_cell_para = best->paragraph;
     }
-    return true;
-}
-
-bool EditorEngine::hitTestPosition(float x_pt_doc, float y_pt_doc, Position* out) const {
-    TextPos p{};
-    int side = 0;
-    int line_aff = 0;
-    if (!hitTestPt(x_pt_doc, y_pt_doc, &p, nullptr, &side, &line_aff)) return false;
-    const FlowPos flow = flowPosAtSide(p.para, p.offset, side);
-    if (flow < 0) return false;
-    if (out != nullptr) *out = Position{flow, line_aff};
     return true;
 }
 

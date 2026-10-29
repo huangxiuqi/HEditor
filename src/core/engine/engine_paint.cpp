@@ -543,6 +543,12 @@ void EditorEngine::presentInternal(int first_page, int count) {
     edit_stats_.caret_para = caret_now.para;
     edit_stats_.caret_offset = caret_now.offset;
     edit_stats_.caret_side = caretSide();
+    edit_stats_.caret_line_aff = caretLineAffinity();
+    {
+        const Range sel_now = selection();
+        edit_stats_.selection_anchor = sel_now.anchor;
+        edit_stats_.selection_focus = sel_now.focus;
+    }
     edit_stats_.caret_vertical = caretVertical();
     edit_stats_.caret_block_reversed = caretBlockReversed();
     edit_stats_.caret_page = edit_session_.caret.caretPage();

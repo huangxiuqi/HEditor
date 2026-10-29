@@ -333,18 +333,14 @@ const COMMANDS: Array<[string, string, string[], string]> = [
   // 拖拽移动：两条命令。能不能拖由 hit 一起答（同一次命中里带 drag 那两个键）。
   ['moveSelection',         'w', ['moveSelectionTo'],                                     'self'],
   ['moveImage',             'w', ['moveImageTo'],                                         'self'],
-  ['selectPos',             'w', ['setSelection', 'flowIndexAt'],                                        'self'],
-  ['setSelection',          'w', ['setSelection'],                                      'self'],
+  ['selectPos',             'w', ['select', 'flowAt'],                                    'self'],
+  ['select',                'w', ['select'],                                             'self'],
   ['clearSelection',        'w', ['clearSelection'],                                      'self'],
-  ['setCaret',              'w', ['setCaret', 'showCaret'],                               'host'],
+  // 地址入口就这一条：修饰按需给（控件下标 / 槽序号 + 行别），都不给就是程序化定位。
   ['setCaretAt',            'w', ['setCaretAt', 'showCaret'],                             'host'],
-  ['setCaretAtSide',        'w', ['setCaretAtSide', 'showCaret'],                         'host'],
-  ['setCaretAtSideLine',    'w', ['setCaretAtSideLine', 'showCaret'],                     'host'],
   ['caretPosition',         'r', ['caretPositionJson'],                                    'none'],
-  ['hitTestPosition',       'r', ['hitTestPositionJson'],                                  'none'],
   ['setCaretPosition',      'w', ['setCaretPosition', 'showCaret'],                       'host'],
-  ['setFocusAtSideLine',    'w', ['setFocusAtSideLine', 'showCaret'],                     'host'],
-  ['setFocusAtSide',        'w', ['setFocusAtSide', 'showCaret'],                         'host'],
+  ['extendTo',              'w', ['extendTo', 'showCaret'],                                'host'],
   ['blinkPhase',            'w', ['showCaret'],                                           'host'],
   ['viewport',              'w', ['setViewportAnchor'],                                   'host'],
 
@@ -408,7 +404,7 @@ const COMMANDS: Array<[string, string, string[], string]> = [
   ['caretOffsetLive',       'r', ['caretOffsetLive'],                                     'none'],
   ['caretVerticalNow',      'r', ['caretVerticalNow'],                                    'none'],
   ['caretBlockReversedNow', 'r', ['caretBlockReversedNow'],                               'none'],
-  ['flowTextPos',           'r', ['flowTextPosJson'],                                     'none'],
+  ['textPosOf',             'r', ['textPosOf'],                                          'none'],
   ['selectionReport',       'r', ['selectionReport'],                                     'none'],
   ['caretStyleJson',        'r', ['caretStyleJson'],                                      'none'],
   ['selectionStyleJson',    'r', ['selectionStyleJson'],                                  'none'],
@@ -901,8 +897,8 @@ function sendState(ts: number, label: string, stats: any, changed?: boolean, wor
     //   只有引擎会（段间分隔符算不算一个位置是引擎的口径），主线程不该拿全文去猜。
     selection: (() => {
       const sel = JSON.parse(mod.selectionReport());
-      sel.anchorPos = READ.flowTextPos({ flow: sel.anchor });
-      sel.focusPos = READ.flowTextPos({ flow: sel.focus });
+      sel.anchorPos = READ.textPosOf({ flow: sel.anchor });
+      sel.focusPos = READ.textPosOf({ flow: sel.focus });
       return sel;
     })(),
     // 引擎实时光标偏移（直读，不经过 editStats 那本账）。宿主拿它和 editStats 里的
@@ -1198,45 +1194,35 @@ const WRITE = collect('w', {
   moveImage: (a) =>
     mod.moveImageTo(a.i | 0, Number(a.x), Number(a.y), a.rel ? 1 : 0, Number(a.dx || 0),
                     Number(a.dy || 0)),
-  // 外部 API 收 {段号, 段内偏移}；换算成全局流位置只在引擎里做（见 flowIndexAt）。
+  // 外部 API 收 {段号, 段内偏移}；换算成全局流位置只在引擎里做（见 flowAt）。
+  //   地址解析出来的位置没有行别，给 0 让引擎按位置自己推。
   selectPos: (a) =>
-    mod.setSelection(
-      mod.flowIndexAt(a.anchorPara | 0, a.anchorOffset | 0),
-      mod.flowIndexAt(a.focusPara | 0, a.focusOffset | 0),
+    mod.select(
+      mod.flowAt(a.anchorPara | 0, a.anchorOffset | 0),
+      mod.flowAt(a.focusPara | 0, a.focusOffset | 0),
+      0,
     ),
-  setSelection: (a) => mod.setSelection(a.anchor | 0, a.focus | 0),
+  // 选区两端是流位置，焦点端带行别：折行处的末端靠它决定画在上一行还是下一行。
+  select: (a) => mod.select(a.anchor | 0, a.focus | 0, a.affinity | 0),
   clearSelection: () => mod.clearSelection(),
-  // 落光标的三个入口都要无条件把相位拉回可见，与单线程宿主的 setCaretAndPresent
-  //   逐字对齐（那边就是 mod.setCaret(...); caretOn = true; mod.showCaret(true);
-  //   mod.present();）。漏掉的症状：相位停在隐藏那半拍时落一次光标，光标不出现 ——
-  //   而这正是"点画布换字段后光标看不见"那个用户 bug 的一半。
-  setCaret: (a) => { mod.setCaret(a.para | 0, a.offset | 0); mod.showCaret(true); },
+  // 落光标的每一条入口都要无条件把相位拉回可见：宿主的落点路径就是"写位置、相位置可见、
+  //   呈现"三步。漏掉相位那一步的症状是相位停在隐藏那半拍时落一次光标，光标不出现 ——
+  //   这正是"点画布换字段后光标看不见"那个用户 bug 的一半。
+  // 地址入口：plain 是"只挪位置"（不夹屏障），其余三个是落点修饰。缺省值要在取整之前判：
+  //   undefined | 0 是 0，会把"没给"读成"给了一个默认修饰"，落点的夹取规则就反了。
   setCaretAt: (a) => {
-    mod.setCaretAt(a.para | 0, a.offset | 0, a.field | 0);
+    const field = a.field === undefined ? -1 : a.field | 0;
+    const side = a.side === undefined ? -1 : a.side | 0;
+    mod.setCaretAt(a.para | 0, a.offset | 0, field, side, a.line | 0, a.plain ? 1 : 0);
     mod.showCaret(true);
   },
   setCaretPosition: (a) => {
     mod.setCaretPosition(a.flow | 0, a.affinity | 0);
     mod.showCaret(true);
   },
-  setCaretAtSide: (a) => {
-    mod.setCaretAtSide(a.para | 0, a.offset | 0, a.side | 0);
-    mod.showCaret(true);
-  },
-  // 带行别的版本：折行处"上一行行尾"与"下一行行首"是同一个偏移与侧别，
-  //   只有行别分得开（点击落点走它，见 EditorEngine::caretLineAffinity）。
-  setCaretAtSideLine: (a) => {
-    mod.setCaretAtSideLine(a.para | 0, a.offset | 0, a.side | 0, a.line | 0);
-    mod.showCaret(true);
-  },
-  setFocusAtSideLine: (a) => {
-    mod.setFocusAtSideLine(a.para | 0, a.offset | 0, a.side | 0, a.line | 0);
-    mod.showCaret(true);
-  },
-  // 拖选的移动端：只搬焦点端，anchor 不动。与 setCaretAtSide 同档 ——
-  //   引擎不自己重绘，所以它也在 PRESENT_ALWAYS 里（否则拖动时选区不更新）。
-  setFocusAtSide: (a) => {
-    mod.setFocusAtSide(a.para | 0, a.offset | 0, a.side | 0);
+  // 拖选：把选区移动的那一端挪过去。与 setCaretPosition 同一对不变量（那边夹屏障，这边不夹）。
+  extendTo: (a) => {
+    mod.extendTo(a.flow | 0, a.affinity | 0);
     mod.showCaret(true);
   },
   indent: () => mod.indent(),
@@ -1672,7 +1658,7 @@ const READ = collect('r', {
   caretBlockReversedNow: () => mod.caretBlockReversedNow(),
   selectionReport: () => JSON.parse(mod.selectionReport()),
   // 流位置 -> 段内位置（选区两端的对外形状）。
-  flowTextPos: (a) => JSON.parse(mod.flowTextPosJson(a.flow | 0)),
+  textPosOf: (a) => JSON.parse(mod.textPosOf(a.flow | 0)),
   // 样式现状：写入口是 caretStyle / selectionStyle（缺字段按现状补），读是这两条。
   caretStyleJson: () => JSON.parse(mod.caretStyleJson()),
   selectionStyleJson: () => JSON.parse(mod.selectionStyleJson()),
@@ -1696,9 +1682,9 @@ const READ = collect('r', {
   stats: () => JSON.parse(mod.statsJson()),
   editStats: () => JSON.parse(mod.editStatsJson()),
   caretReport: () => mod.caretReport(),
-  // clamp：拖选那一路把落在页外/页间的点夹到最近的页边（否则拖出画布选区就不动了）。
   caretPosition: () => JSON.parse(mod.caretPositionJson()),
-  hitTestPosition: (a) => JSON.parse(mod.hitTestPositionJson(Number(a.x), Number(a.y))),
+  // 唯一的几何入口。clamp：拖选那一路把落在页外/页间的点夹到最近的页边（否则拖出画布
+  //   选区就不动了）。一次命中就把位置、格、图片、能否起拖四件事一起答回来。
   hit: (a) => JSON.parse(mod.hitTest(a.x, a.y, a.clamp ? 1 : 0)),
   controlAt: (a) => mod.controlAtPoint(a.x, a.y),
   describeControls: () => mod.describeControls(),

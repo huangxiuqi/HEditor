@@ -698,7 +698,8 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
     }));
     const at = (flow: number | undefined): Pos => {
       if (flow === undefined) return { para: 0, offset: 0 };
-      const p = l.read('flowTextPos', { flow }) as Pos | null;
+      // 两端的位置随 selection 一起推过来（Worker 传输下是镜像，同步值）。
+      const p = l.read('textPosOf', { flow }) as Pos | null;
       return p && typeof p.para === 'number' ? p : { para: 0, offset: 0 };
     };
     return { anchor: at(raw.anchor), focus: at(raw.focus), empty: !!raw.empty, rects, cells: null };
@@ -1203,7 +1204,7 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
         const a = sel.anchor;
         const f = sel.focus;
         const left = a.para < f.para || (a.para === f.para && a.offset <= f.offset) ? a : f;
-        await caretOp('setCaret', { para: left.para, offset: left.offset }, true);
+        await caretOp('setCaretAt', { para: left.para, offset: left.offset, plain: 1 }, true);
       }
       let changed = false;
       for (let i = 0; i < n; ++i) {
@@ -1222,16 +1223,16 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
 
     async setCaret(pos, o?: SetCaretOptions) {
       alive();
+      // 地址入口一条就够：给了侧别走"槽序号 + 行别"那支（夹屏障，与点击同档）；
+      //   没给就是 plain —— 只挪位置，属性面板要能把光标停进只读字段。
+      const args: Args = { para: pos.para, offset: pos.offset };
       if (o?.side) {
-        await caretOp('setCaretAtSideLine', {
-          para: pos.para,
-          offset: pos.offset,
-          side: o.side === 'after' ? 1 : 0,
-          line: o.line === 'last' ? 1 : 0,
-        });
-        return;
+        args.side = o.side === 'after' ? 1 : 0;
+        args.line = o.line === 'last' ? 1 : 0;
+      } else {
+        args.plain = 1;
       }
-      await caretOp('setCaret', { para: pos.para, offset: pos.offset }, true);
+      await caretOp('setCaretAt', args, true);
     },
 
     async moveCaret(step: CaretStep) {
@@ -1761,6 +1762,10 @@ function makeDiag(
     controls: () => read('controls'),
     bracketSlots: () => read('bracketSlots'),
     hit: (x: number, y: number) => read('hit', { x, y }),
+    // 两个换算：地址→位置、位置→地址。公开面只把前者当"唯一会猜的地方"，两条都在 diag 里
+    //   给判据与调试用 —— 没有它们，判据就只能拿 (段, 偏移) 当位置判等，而那正是要证伪的写法。
+    flowAt: (para: number, offset: number) => read('flowAt', { para, offset }),
+    textPosOf: (flow: number) => read('textPosOf', { flow }),
     controlAt: (x: number, y: number) => read('controlAt', { x, y }),
     describeControls: () => str('describeControls'),
     // 下面三条读的是随状态推过来的镜像：两种传输都是同步值。
@@ -1829,7 +1834,7 @@ function makeDiag(
     // 光标与相位
 
     setCaretAt: (para, offset, field) => settleAs('setCaretAt', { para, offset, field }),
-    setCaretOnly: (para, offset) => link.write('setCaret', { para, offset }),
+    setCaretOnly: (para, offset) => link.write('setCaretAt', { para, offset, plain: 1 }),
     showCaret: (on) => link.write('phase', { on: !!on }),
     startBlink: () => dom.startBlink(),
     stopBlink: () => dom.stopBlink(),
