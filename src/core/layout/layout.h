@@ -24,6 +24,7 @@
 #include "core/doc/image_spec.h"
 #include "core/doc/para_format.h"
 #include "core/text/font.h"
+#include "core/utils/api_codes.h"
 #include "core/utils/types.h"
 #include "core/utils/utf8.h"
 #include "core/utils/writing_mode.h"
@@ -38,22 +39,22 @@ struct PageMargins {
     /**
      * 上边距。
      */
-    float top = 56.7f;
+    float top = codes::kDefaultMarginPt;
 
     /**
      * 右边距。
      */
-    float right = 56.7f;
+    float right = codes::kDefaultMarginPt;
 
     /**
      * 下边距。
      */
-    float bottom = 56.7f;
+    float bottom = codes::kDefaultMarginPt;
 
     /**
      * 左边距。
      */
-    float left = 56.7f;
+    float left = codes::kDefaultMarginPt;
 
     /**
      * 四边取同一个值。
@@ -90,12 +91,12 @@ struct PageMetrics {
     /**
      * 页宽（磅）。含左右页边距，正文可用宽度见 contentWidthPt()。
      */
-    float width_pt = 595.276f;
+    float width_pt = codes::kPaperSizes[codes::kDefaultPaperIndex].w_pt;
 
     /**
      * 页高（磅）。含上下页边距。
      */
-    float height_pt = 841.89f;
+    float height_pt = codes::kPaperSizes[codes::kDefaultPaperIndex].h_pt;
 
     /**
      * 四边页边距（磅）。默认 2cm。
@@ -115,14 +116,14 @@ struct PageMetrics {
     /**
      * 连页下条带的高度（磅）= 页高 + 页间隙。分页下不用它（页高自己就是约束）。
      */
-    float slab_pt = 841.89f;
+    float slab_pt = codes::kPaperSizes[codes::kDefaultPaperIndex].h_pt;
 
     /**
      * A4 页度量。
      * @param margin_pt_ 四边页边距（磅），四边相等
      * @return 页宽页高取 A4、边距取给定值的度量
      */
-    static PageMetrics A4(float margin_pt_ = 56.7f) {
+    static PageMetrics A4(float margin_pt_ = codes::kDefaultMarginPt) {
         PageMetrics p;
         p.margins = PageMargins::all(margin_pt_);
         return p;

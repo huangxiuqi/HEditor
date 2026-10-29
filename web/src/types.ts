@@ -12,6 +12,8 @@
  *   生成后替换）。
  */
 
+import { PAPER_PT as PAPER_PT_GEN } from './codes.gen';
+
 /**
  * 文档内位置。offset 是段内码点序号（0 起）。
  */
@@ -198,15 +200,10 @@ export type PaperSize = 'A4' | 'A3' | 'A5' | 'B5' | 'Letter' | 'Legal' | 'Custom
 /**
  * 固定纸张的宽高（磅）。表里是纵向（长边朝上），横排由 paperSizePt 对调。
  * 'Custom' 不在这张表里：它的尺寸来自调用方。
+ *
+ * 值来自 codes.gen.ts（由 C++ 的 codes::kPaperSizes 生成）—— 这一层不再手抄一份。
  */
-export const PAPER_PT: Record<Exclude<PaperSize, 'Custom'>, { w: number; h: number }> = {
-  A4: { w: 595.276, h: 841.89 },
-  A3: { w: 841.89, h: 1190.551 },
-  A5: { w: 419.528, h: 595.276 },
-  B5: { w: 498.898, h: 708.661 },
-  Letter: { w: 612, h: 792 },
-  Legal: { w: 612, h: 1008 },
-};
+export const PAPER_PT = PAPER_PT_GEN;
 
 /**
  * 自定义纸张的宽高（磅）。它是"纵向"的口径：横排仍然由 paperSizePt 对调。

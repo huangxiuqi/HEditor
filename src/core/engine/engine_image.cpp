@@ -852,30 +852,18 @@ bool EditorEngine::setImageLayout(int index, int layout) {
         const auto* s = std::get_if<ImageSpec>(&n->payload);
         if (s == nullptr) return false;
         ImageSpec next = *s;
-        switch (layout) {
-            case 0:
-                next.anchor = ImageAnchor::Inline;
-                next.wrap = ImageWrap::None;
+        // 码到 (anchor, wrap) 的对照只有一份（codes::kImageLayouts）：两边各写一张表时，
+        //   漂移的表现是"选了四周型，文字却与行内时一样"，不会报错。
+        const codes::ImageLayoutCode* found = nullptr;
+        for (const codes::ImageLayoutCode& e : codes::kImageLayouts) {
+            if (e.code == layout) {
+                found = &e;
                 break;
-            case 1:
-                next.anchor = ImageAnchor::Float;
-                next.wrap = ImageWrap::Square;
-                break;
-            case 2:
-                next.anchor = ImageAnchor::Float;
-                next.wrap = ImageWrap::None;
-                break;
-            case 3:
-                next.anchor = ImageAnchor::Float;
-                next.wrap = ImageWrap::Behind;
-                break;
-            case 4:
-                next.anchor = ImageAnchor::Float;
-                next.wrap = ImageWrap::InFront;
-                break;
-            default:
-                return false;
+            }
         }
+        if (found == nullptr) return false;
+        next.anchor = static_cast<ImageAnchor>(found->anchor);
+        next.wrap = static_cast<ImageWrap>(found->wrap);
         // 浮动 -> 浮动只换环绕方式，偏移一个字节都不动（图就留在原地）；
         //   行内 -> 浮动才需要反算偏移。反算不出来（图还没排过版）就退回 0。
         if (s->anchor != ImageAnchor::Float && next.anchor == ImageAnchor::Float) {

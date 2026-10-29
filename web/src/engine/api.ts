@@ -542,8 +542,9 @@ let fontInfo: any[] = [];
 // 与单线程宿主同一口径：缩放 1 倍 = 96 dpi = 4 / 3。
 const kZoomBase = 4 / 3;
 let densityLevel = kZoomBase;   // markCheck 要用：括号左缘的像素位置随缩放走
-// 页度量由宿主传，与单线程宿主同一组值（常量与理由见 app.js 的同名声明）。
-// A4 = 595.276 x 841.89 磅；页边距 2 厘米 = 2 x 72 / 2.54 磅。
+// 页度量由宿主传，与单线程宿主同一组值。这一份是唯一没走生成物的常量：本文件零 import
+//   （scripts/idl_check.mjs 直接把它转译执行），引不进 codes.gen.ts。gen_codes.py --check
+//   会拿这三个数与 C++ 的 codes::kPaperSizes 对账，抄错就红。
 const kPageWidthPt = 595.276;
 const kPageHeightPt = 841.89;
 const kPageMarginPt = 56.7;
@@ -1257,8 +1258,8 @@ const WRITE = collect('w', {
    */
   pageSetup: (a) =>
     mod.setPageMetrics(
-      Number(a.w) || 595.276,
-      Number(a.h) || 841.89,
+      Number(a.w) || kPageWidthPt,
+      Number(a.h) || kPageHeightPt,
       Number(a.top) || 0,
       Number(a.right) || 0,
       Number(a.bottom) || 0,

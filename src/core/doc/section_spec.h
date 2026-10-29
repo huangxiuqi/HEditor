@@ -18,6 +18,7 @@
 
 #include "core/doc/length.h"
 #include "core/doc/node_id.h"
+#include "core/utils/api_codes.h"
 #include "core/utils/types.h"
 #include "core/utils/writing_mode.h"
 
@@ -40,8 +41,8 @@ const char* orientationName(Orientation o);
 bool orientationFromName(const std::string& text, Orientation* out);
 
 /**
- * 纸张：宽高与方向。宽度与高度是绝对长度，默认值取 A4（595.276 x 841.89 磅）——
- * 与 PageMetrics 的默认页度量、宿主那张规格表是同一串字面量。
+ * 纸张：宽高与方向。宽度与高度是绝对长度，默认值取 A4 —— 与 PageMetrics 的默认页度量、
+ * 宿主那张规格表都来自 codes::kPaperSizes 的第一行。
  *
  * 横向不交换存下来的宽高：方向只改摆放，规格本身不变。
  */
@@ -54,12 +55,12 @@ struct Paper {
     /**
      * 纸宽。
      */
-    Length width = Length::abs(ptToEmu(595.276));
+    Length width = Length::abs(ptToEmu(codes::kPaperSizes[codes::kDefaultPaperIndex].w_pt));
 
     /**
      * 纸高。
      */
-    Length height = Length::abs(ptToEmu(841.89));
+    Length height = Length::abs(ptToEmu(codes::kPaperSizes[codes::kDefaultPaperIndex].h_pt));
 
     bool operator==(const Paper& o) const = default;
 };

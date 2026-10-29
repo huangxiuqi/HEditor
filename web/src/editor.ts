@@ -42,6 +42,14 @@ import type {
   WatermarkOptions,
   WatermarkState,
 } from './types';
+import {
+  DATE_UNIT_BITS,
+  DEFAULT_MARGIN_PT,
+  DEFAULT_PAPER,
+  EDIT_MODE_CODES,
+  IMAGE_LAYOUT_CODES,
+  MARKS_MODE_CODES,
+} from './codes.gen';
 import { PAPER_PT, pageSetupOfMetrics, paperSizePt } from './types';
 import {
   controlFormOf,
@@ -141,24 +149,6 @@ class Emitter {
 // 默认配置
 
 /**
- * 编辑模式 -> 引擎的整数。顺序与 EditMode 枚举一致。
- */
-const MODE_CODE: Record<EditorConfig['mode'], number> = {
-  document: 0,
-  form: 1,
-  readOnly: 2,
-};
-
-/**
- * 编辑标记档位 -> 引擎的整数。顺序与 MarksMode 枚举一致。
- */
-const MARKS_CODE: Record<EditorConfig['showMarks'], number> = {
-  none: 0,
-  paragraph: 1,
-  all: 2,
-};
-
-/**
  * 控件选项 -> 传给引擎的那一份。
  *
  * 只放给出的键：没给的保持不出现，引擎读成"这一项不动"。空数组与没给是两件事
@@ -182,18 +172,6 @@ function controlOptsFrom(o: ControlInsertOptions | ControlUpdateOptions): Record
   if (o.glyphColor !== undefined) opts.glyph = o.glyphColor;
   return opts;
 }
-
-/**
- * 日期单位 -> 位掩码。顺序与 kDateUnitXXX 一致（引擎按它决定选择器里能选哪些单位）。
- */
-const DATE_UNIT_BITS: Record<string, number> = {
-  year: 1,
-  month: 2,
-  day: 4,
-  hour: 8,
-  minute: 16,
-  second: 32,
-};
 
 /**
  * 位掩码 -> 日期单位名列表。顺序按年月日时分秒，与界面一致。
@@ -231,12 +209,6 @@ const SHAPE_CODE: Record<NonNullable<ControlInsertOptions['shape']>, number> = {
  * 页间隙（磅）：分页档用它，连页档是 0。
  */
 const kPageGapPt = 14;
-
-/**
- * 默认页边距（磅）= 2 厘米。与 api.ts 里 boot 用的那一组数是同一个值：两边不一致的话，
- * 首帧按一组数排、配置影子里记着另一组，第一次 configure 会把页面平白挪一次。
- */
-const kPageMarginPt = 56.7;
 
 /**
  * 页面设置的归一：纸张按表认，方向取布尔，四边页边距按磅收。
@@ -304,9 +276,14 @@ const DEFAULT_CONFIG: EditorConfig = {
   zoom: 1,
   pageMode: 'paged',
   page: {
-    paper: 'A4',
+    paper: DEFAULT_PAPER,
     landscape: false,
-    margins: { top: kPageMarginPt, right: kPageMarginPt, bottom: kPageMarginPt, left: kPageMarginPt },
+    margins: {
+      top: DEFAULT_MARGIN_PT,
+      right: DEFAULT_MARGIN_PT,
+      bottom: DEFAULT_MARGIN_PT,
+      left: DEFAULT_MARGIN_PT,
+    },
   },
   mode: 'document',
   input: true,
@@ -982,14 +959,7 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
 
     async setImageLayout(index, layout) {
       alive();
-      const codes: Record<string, number> = {
-        inline: 0,
-        square: 1,
-        topAndBottom: 2,
-        behind: 3,
-        inFront: 4,
-      };
-      const code = codes[layout];
+      const code = IMAGE_LAYOUT_CODES[layout];
       if (code === undefined) throw new Error('不认识的图片版式：' + String(layout));
       return edit('setImageLayout', { i: index, layout: code });
     },
@@ -1571,7 +1541,7 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
         steps.push(() => settleAfter('setShowControlDots', { on: next.showControlDots }));
       }
       if (changed.showMarks !== undefined) {
-        steps.push(() => settleAfter('setShowMarks', { mode: MARKS_CODE[next.showMarks] }));
+        steps.push(() => settleAfter('setShowMarks', { mode: MARKS_MODE_CODES[next.showMarks] }));
       }
       if (changed.marginMarks !== undefined) {
         steps.push(() => settleAfter('setShowMarginMarks', { on: next.marginMarks }));
@@ -1589,7 +1559,7 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
         // 三档都要落到引擎：只读要引擎的 ReadOnly 才保证"光标可动、一个字都不许改"，
         //   表单要引擎拿可编辑性判定归属。宿主侧那个 edit() 只保护库自己的方法，
         //   键盘走输入层，只改 config 拦不住它。
-        steps.push(() => settleAfter('setEditMode', { mode: MODE_CODE[next.mode] }));
+        steps.push(() => settleAfter('setEditMode', { mode: EDIT_MODE_CODES[next.mode] }));
       }
 
       for (const run of steps) await Promise.resolve(run());

@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "core/doc/length.h"
+#include "core/utils/api_codes.h"
 #include "core/utils/types.h"
 
 namespace heditor {
@@ -416,13 +417,16 @@ bool numberTextValid(const std::string& text);
 
 /**
  * 单选的日期单位位掩码。没列出的单位不进选择器；显示格式另由 format 决定，两者不互相推导。
+ *
+ * 位值来自 codes::kDateUnitBits —— 宿主也要按同一份掩码填选择器，两边各写一份就会
+ * 出现"选得到但存不进去"的单位。
  */
-inline constexpr uint16_t kDateUnitYear = 1u << 0;
-inline constexpr uint16_t kDateUnitMonth = 1u << 1;
-inline constexpr uint16_t kDateUnitDay = 1u << 2;
-inline constexpr uint16_t kDateUnitHour = 1u << 3;
-inline constexpr uint16_t kDateUnitMinute = 1u << 4;
-inline constexpr uint16_t kDateUnitSecond = 1u << 5;
+using codes::kDateUnitDay;
+using codes::kDateUnitHour;
+using codes::kDateUnitMinute;
+using codes::kDateUnitMonth;
+using codes::kDateUnitSecond;
+using codes::kDateUnitYear;
 
 /**
  * 六个单位全选。默认值 —— 时间选择大多数场合要精确到秒。
