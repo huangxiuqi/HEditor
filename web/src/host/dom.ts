@@ -20,6 +20,7 @@ import {
 } from './clipboard';
 import type { ContextTarget } from '../types';
 import { type CanvasStore, type ScrollGeometry } from './pages';
+import { columnWidthsAfterDrag, rowHeightAfterDrag } from './table-metrics';
 import {
   imeOf,
   pagesOf,
@@ -1079,27 +1080,11 @@ export function createDomHost(o: DomHostOptions): DomHost {
     const apply = (q: { x: number; y: number }): void => {
       if (vertical) {
         const dx = q.x - start.x;
-        const i = col;
-        if (i >= widths0.length) {
-          // 表的右边框：表宽跟着走，只有最后一列变 —— 拖它是"把表加宽"，
-          //   按相邻两列分摊就把表钉死在原宽上了（Word 同一条）。
-          const next = widths0.slice();
-          next[i - 1] = Math.max(12, widths0[i - 1] + dx);
-          outWidths = next;
-          showGuide('col', tableLeft + cols[i] + dx, bandTop, bandBottom);
-          return;
-        }
-        const total = widths0[i - 1] + widths0[i];
-        // 相邻两列的总宽不变：拖一条边界不该把整张表撑宽或缩窄（Word 同一条）。
-        const left = Math.max(12, Math.min(total - 12, widths0[i - 1] + dx));
-        const next = widths0.slice();
-        next[i - 1] = left;
-        next[i] = total - left;
-        outWidths = next;
-        showGuide('col', tableLeft + cols[i] + dx, bandTop, bandBottom);
+        outWidths = columnWidthsAfterDrag(widths0, col, dx);
+        showGuide('col', tableLeft + cols[col] + dx, bandTop, bandBottom);
       } else {
         const dy = q.y - start.y;
-        outHeight = Math.max(8, h0 + dy);
+        outHeight = rowHeightAfterDrag(h0, dy);
         showGuide('row', pageTopPt + rowEdge + dy, tableLeft, tableRight);
       }
     };
