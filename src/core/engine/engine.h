@@ -46,7 +46,7 @@
 #include "core/layout/layout.h"
 #include "core/render/bitmap.h"
 #include "core/text/font.h"
-#include "core/text/writing_mode.h"
+#include "core/utils/writing_mode.h"
 
 namespace heditor {
 

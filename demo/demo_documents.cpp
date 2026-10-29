@@ -8,7 +8,7 @@
 
 #include <cstddef>
 
-#include "core/text/writing_mode.h"
+#include "core/utils/writing_mode.h"
 #include "core/utils/types.h"
 #include "core/utils/units.h"
 #include "core/utils/utf8.h"

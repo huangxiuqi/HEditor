@@ -20,8 +20,8 @@
 #include <vector>
 
 #include "core/doc/length.h"
-#include "core/text/writing_mode.h"
 #include "core/utils/types.h"
+#include "core/utils/writing_mode.h"
 
 namespace heditor {
 /**

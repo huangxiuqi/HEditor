@@ -18,8 +18,8 @@
 
 #include "core/doc/length.h"
 #include "core/doc/node_id.h"
-#include "core/text/writing_mode.h"
 #include "core/utils/types.h"
+#include "core/utils/writing_mode.h"
 
 namespace heditor {
 enum class Orientation : uint8_t { Portrait = 0, Landscape = 1 };

@@ -13,10 +13,10 @@
 #include "core/engine/page_recorder.h"
 #include "core/engine/page_scene.h"
 
-#include "core/text/writing_mode.h"
 #include "core/utils/hash.h"
 #include "core/utils/time.h"
 #include "core/utils/units.h"
+#include "core/utils/writing_mode.h"
 
 #include <hb.h>
 
