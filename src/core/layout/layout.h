@@ -23,10 +23,10 @@
 #include "core/doc/document.h"
 #include "core/doc/image_spec.h"
 #include "core/doc/para_format.h"
-#include "core/doc/utf8.h"
 #include "core/text/font.h"
 #include "core/text/writing_mode.h"
 #include "core/utils/types.h"
+#include "core/utils/utf8.h"
 
 namespace heditor {
 

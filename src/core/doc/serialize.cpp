@@ -1,5 +1,4 @@
 #include "core/doc/serialize.h"
-#include "core/doc/utf8.h"
 #include "core/utils/utf8.h"
 
 #include <algorithm>

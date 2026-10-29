@@ -1,11 +1,13 @@
 /**
- * 极简 UTF-8 解码（只做断行判定与码点分类用）
+ * UTF-8 与码点互转：单点解码（断行判定与码点分类）与整串互转。
  */
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace heditor {
 /**
@@ -75,5 +77,27 @@ inline uint32_t decodeUtf8(std::string_view s, size_t pos, size_t* next) {
     if (next) *next = pos + len;
     return cp;
 }
+
+/**
+ * 整串 UTF-8 转码点，非法序列按 decodeUtf8 的口径变成替换字符。
+ * @param s UTF-8 文本
+ * @returns 码点序列
+ */
+std::vector<uint32_t> utf8ToCodepoints(const std::string& s);
+
+/**
+ * 码点数组转 UTF-8。
+ * @param cps 码点
+ * @param n 码点个数
+ * @returns UTF-8 文本
+ */
+std::string codepointsToUtf8(const uint32_t* cps, size_t n);
+
+/**
+ * 码点序列转 UTF-8。
+ * @param cps 码点
+ * @returns UTF-8 文本
+ */
+std::string codepointsToUtf8(const std::vector<uint32_t>& cps);
 
 }  // namespace heditor

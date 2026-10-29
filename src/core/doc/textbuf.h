@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "core/doc/text_pos.h"
-#include "core/doc/utf8.h"
+#include "core/utils/utf8.h"
 
 namespace heditor {
 namespace textbuf {

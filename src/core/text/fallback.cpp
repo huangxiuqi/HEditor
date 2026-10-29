@@ -2,7 +2,6 @@
 
 #include <hb.h>
 
-#include "core/doc/utf8.h"
 #include "core/text/font.h"
 #include "core/utils/utf8.h"
 

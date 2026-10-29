@@ -1,5 +1,4 @@
 #include "core/doc/control_spec.h"
-#include "core/doc/utf8.h"
 #include "core/utils/utf8.h"
 
 #include "core/utils/hash.h"

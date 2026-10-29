@@ -5,8 +5,8 @@
 
 #include <cstdlib>
 
-#include "core/doc/utf8.h"
 #include "core/text/writing_mode.h"
+#include "core/utils/utf8.h"
 
 namespace heditor {
 namespace {

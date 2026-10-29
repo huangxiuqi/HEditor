@@ -9,9 +9,9 @@
 #include <cstddef>
 
 #include "core/text/writing_mode.h"
-#include "core/doc/utf8.h"
 #include "core/utils/types.h"
 #include "core/utils/units.h"
+#include "core/utils/utf8.h"
 
 namespace heditor {
 

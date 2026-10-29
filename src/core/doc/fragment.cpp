@@ -1,5 +1,4 @@
 #include "core/doc/fragment.h"
-#include "core/doc/utf8.h"
 #include "core/utils/utf8.h"
 
 #include <algorithm>
@@ -9,7 +8,6 @@
 #include "core/doc/flow.h"
 #include "core/doc/internal.h"
 #include "core/doc/record_json.h"
-#include "core/doc/utf8.h"
 #include "core/utils/utf8.h"
 
 namespace heditor::doc {

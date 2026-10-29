@@ -1,5 +1,6 @@
-#include "core/doc/utf8.h"
-
+/**
+ * 整串 UTF-8 与码点序列互转。
+ */
 #include "core/utils/utf8.h"
 
 namespace heditor {

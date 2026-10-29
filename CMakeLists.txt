@@ -158,6 +158,7 @@ endif()
 #  算法核（平台无关：原生与 wasm 共用）
 # ─────────────────────────────────────────────────────────────
 add_library(heditor_core STATIC
+  src/core/utils/utf8.cpp
   src/core/doc/textbuf.cpp
   src/core/doc/control.cpp
   src/core/doc/edit_mode.cpp
@@ -181,7 +182,6 @@ add_library(heditor_core STATIC
   src/core/doc/table_spec.cpp
   src/core/doc/table_grid.cpp
   src/core/doc/step_map.cpp
-  src/core/doc/utf8.cpp
   src/core/doc/fragment_value.cpp
   src/core/doc/session.cpp
   src/core/doc/flow.cpp
