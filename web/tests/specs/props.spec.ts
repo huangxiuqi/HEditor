@@ -222,6 +222,36 @@ test.describe('属性面板', () => {
       Math.abs(w1 - 15 * 28.3465 * 4 / 3) < 2, w0 + ' → ' + w1);
   });
 
+  test('★ 打开带纸张的文档：面板读回文档那张纸，之后改缩放也不会换掉它', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' } });
+    const r = await p.read<any>(`
+      const paperField = () =>
+        (H.describePageSetup().fields.find((f) => f.key === 'paper') || {}).value;
+      // 造一份 A5 文档：纸张是文档的一部分，保存之后跟着文档走。
+      await H.configure({
+        page: { paper: 'A5', landscape: false, margins: { top: 40, right: 40, bottom: 40, left: 40 } },
+      });
+      await H.flush();
+      const saved = await H.save();
+      const wA5 = H.geometry().page.w;
+      // 换掉内容再打开它：装载是"文档说了算"那条路，而配置影子里留的是上一次那张纸。
+      await H.setText('一二三');
+      await H.flush();
+      await H.open(saved);
+      await H.flush();
+      const after = { paper: H.config().page.paper, field: paperField(), w: H.geometry().page.w };
+      // 改缩放只改密度：纸张跟着回退的症状是"缩一下就变回默认那张"。
+      await H.configure({ zoom: 1.2 });
+      await H.flush();
+      const zoomed = { paper: H.config().page.paper, w: H.geometry().page.w };
+      return { wA5, after, zoomed };
+    `);
+    check('★ 打开之后面板报的是文档那张纸（A5）', r.after.field === 'A5', String(r.after.field));
+    check('★ 配置影子也是 A5（不是默认那张）', r.after.paper === 'A5', String(r.after.paper));
+    check('★ 页宽是文档那一份', Math.abs(r.after.w - r.wA5) < 1, r.wA5 + ' → ' + r.after.w);
+    check('★ 改缩放之后纸张没被换回默认', r.zoomed.paper === 'A5', String(r.zoomed.paper));
+  });
+
   test('日期字段：原生控件类型与值的长度都随精度走，片段由库补成完整 ISO', async ({ open }) => {
     const p = await open('index.html', { query: { debug: '1' } });
     const r = await p.read<any>(`

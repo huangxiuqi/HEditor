@@ -292,6 +292,55 @@ export interface PageSetup {
 }
 
 /**
+ * 引擎报的页度量。只有宽高与边距 —— 纸张规格由它反推，不反过来存第二份。
+ */
+export interface PageMetricsReport {
+  /**
+   * 页宽（磅），含左右页边距。
+   */
+  widthPt: number;
+
+  /**
+   * 页高（磅），含上下页边距。
+   */
+  heightPt: number;
+
+  /**
+   * 四边页边距（磅）。
+   */
+  margins: PageMargins;
+}
+
+/**
+ * 引擎报的页度量反推成页设置：宽高对上某个规格就是那个规格，否则算自定义。
+ *
+ * 打开一份 A5 文档时面板要显示 A5 而不是默认的 A4 —— 显示错了，下一次提交就把 A4 写回文档。
+ *
+ * @param metrics 引擎报的页宽、页高与四边页边距（磅）
+ * @param prev 上一份页设置；命中固定规格时它的自定义尺寸留着，再切回去不必重输
+ * @returns 反推出来的页设置
+ */
+export function pageSetupOfMetrics(metrics: PageMetricsReport, prev: PageSetup): PageSetup {
+  const w = Number(metrics.widthPt) || 0;
+  const h = Number(metrics.heightPt) || 0;
+  const margins = metrics.margins ?? prev.margins;
+  // 0.5 磅容差：引擎按两位小数出值，纸宽在 emu 与磅之间往返还带舍入。
+  const near = (a: number, b: number): boolean => Math.abs(a - b) < 0.5;
+  const names = Object.keys(PAPER_PT) as Array<Exclude<PaperSize, 'Custom'>>;
+  for (const name of names) {
+    const p = PAPER_PT[name];
+    // 规格表是纵向口径：宽高相同是纵向，对调是横向。
+    if (near(w, p.w) && near(h, p.h)) {
+      return { paper: name, landscape: false, custom: prev.custom, margins };
+    }
+    if (near(w, p.h) && near(h, p.w)) {
+      return { paper: name, landscape: true, custom: prev.custom, margins };
+    }
+  }
+  return { paper: 'Custom', landscape: false, custom: { w, h }, margins };
+}
+
+/**
  * 运行期可改的配置。每项带一个代价标签（none / paint / relayout / reload，见设计文档 §7.3）；
  * 一次 configure 只做其中最贵的那一档 —— configure({zoom, showControlDots}) 是一次重排，
  * 不是"一次重排又一次重绘"。

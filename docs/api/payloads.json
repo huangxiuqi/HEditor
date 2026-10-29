@@ -2,6 +2,24 @@
   "_note": "由 scripts/gen_payloads.py 从 C++ 写出代码抽出，勿手改。",
   "_rule": "keys 的顺序 = 写出顺序；kind 只有 num/str/bool/arr/obj 五类，不区分 int 与小数位；optional 表示该键写在 if 里、可能不出现。",
   "payloads": {
+    "pageMetrics": {
+      "cxx": "pageMetricsJson",
+      "file": "src/wasm/wasm_main.cpp",
+      "keys": [
+        {
+          "name": "widthPt",
+          "kind": "num"
+        },
+        {
+          "name": "heightPt",
+          "kind": "num"
+        },
+        {
+          "name": "margins",
+          "kind": "obj"
+        }
+      ]
+    },
     "caretStyle": {
       "cxx": "caretStyleJson",
       "file": "src/wasm/wasm_main.cpp",

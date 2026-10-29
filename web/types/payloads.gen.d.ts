@@ -7,6 +7,12 @@
  * optional 的键在类型上是可选的（`?`）：它们在 C++ 里写在 if 里，不保证出现。
  */
 
+export interface PageMetrics {
+  widthPt: number;
+  heightPt: number;
+  margins: Record<string, unknown>;
+}
+
 export interface CaretStyle {
   color: unknown[];
   widthPt: number;
@@ -332,6 +338,7 @@ export interface DropSpot {
 
 /** 载荷名 -> 形状。readPayload() 用它做运行时校验。 */
 export interface Payloads {
+  pageMetrics: PageMetrics;
   caretStyle: CaretStyle;
   selectionStyle: SelectionStyle;
   stats: Stats;

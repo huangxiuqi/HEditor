@@ -367,6 +367,23 @@ void setPageMetrics(float w_pt, float h_pt, float top_pt, float right_pt, float 
 }
 
 /**
+ * 页度量的现状（磅，含四边页边距）。
+ *
+ * 读引擎配置而不是文档：装载之后它已被文档那一份覆盖（见 adoptPageFromDocument），
+ *   所以宿主回填面板、算下一次提交的差集用的是同一套口径。
+ */
+std::string pageMetricsJson() {
+    const PageMetrics p = g_engine.config().page;
+    std::ostringstream o;
+    o.setf(std::ios::fixed);
+    o.precision(2);
+    o << "{\"widthPt\":" << p.width_pt << ",\"heightPt\":" << p.height_pt << ",\"margins\":{"
+      << "\"top\":" << p.margins.top << ",\"right\":" << p.margins.right
+      << ",\"bottom\":" << p.margins.bottom << ",\"left\":" << p.margins.left << "}}";
+    return pk::checked(pk::page_metrics::kSpec, o.str());
+}
+
+/**
  * 页间隙（磅）。连页模式把它设成 0：页首尾相接，一屏内容在帧里是连续的一段，
  *   于是"一张视口画布"可以按文档坐标直接贴，页与页之间不会留缝。
  * 与页度量分开成一条门面，是因为它只影响页的落点，不影响页本身的宽高与内容区。
@@ -2219,6 +2236,7 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("setScenario", &setScenario);
     emscripten::function("setZoom", &setZoom);
     emscripten::function("setPageMetrics", &setPageMetrics);
+    emscripten::function("pageMetricsJson", &pageMetricsJson);
     emscripten::function("setPageGap", &setPageGap);
     emscripten::function("setContinuous", &setContinuous);
     emscripten::function("contentPx", &contentPx);

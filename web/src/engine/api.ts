@@ -302,6 +302,9 @@ const COMMANDS: Array<[string, string, string[], string]> = [
   // 水印跟着节记录走：读一条回填面板，写一条落成 SetSectionSpec（一步撤销）。
   ['watermark',             'r', ['watermarkJson'],                                       'none'],
   ['setWatermark',          'w', ['setWatermark'],                                        'self'],
+  // 页度量同理：写一条落成文档的纸张，读一条回填页面设置面板。读这一条是"打开文档之后
+  //   面板显示的是文档那张纸"的唯一来源 —— 只在宿主留一份影子，打开 A5 文档还显示 A4。
+  ['pageMetrics',           'r', ['pageMetricsJson'],                                     'none'],
   ['contextTarget',         'r', ['contextTargetJson'],                                    'none'],
   ['insertControl',         'w', ['insertControlAt'],                                     'self'],
   ['setControlSpec',        'w', ['setControlSpecAt'],                                    'self'],
@@ -1444,6 +1447,11 @@ const READ = collect('r', {
    * 水印记录。键名与 setWatermark 的参数同一套，面板回填不必再翻译一次。
    */
   watermark: () => JSON.parse(mod.watermarkJson()),
+  /**
+   * 页度量的现状（磅）。打开文档、撤销、改纸张之后宿主用它回填页面设置面板 ——
+   *   纸张以文档为准，影子不跟上的后果是面板显示上一张纸。
+   */
+  pageMetrics: () => JSON.parse(mod.pageMetricsJson()),
   /**
    * 命中：文档坐标（磅）落在哪张图的哪个把手上。没点到时 index 是 -1。
    */

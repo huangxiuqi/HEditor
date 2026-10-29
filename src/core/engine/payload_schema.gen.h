@@ -28,6 +28,15 @@ struct PayloadSpec {
     bool partial;
 };
 
+namespace page_metrics {
+inline constexpr KeySpec kKeys[] = {
+    {"widthPt", "num", false},
+    {"heightPt", "num", false},
+    {"margins", "obj", false},
+};
+inline constexpr PayloadSpec kSpec{"pageMetrics", kKeys, static_cast<int>(std::size(kKeys)), false};
+}  // namespace page_metrics
+
 namespace caret_style {
 inline constexpr KeySpec kKeys[] = {
     {"color", "arr", false},

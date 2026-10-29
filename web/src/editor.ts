@@ -25,6 +25,7 @@ import type {
   ImageInsertOptions,
   ImageLayout,
   ImageRegisterOptions,
+  PageMetricsReport,
   PageSetup,
   LineSpacingRule,
   ParaFormatPatch,
@@ -41,7 +42,7 @@ import type {
   WatermarkOptions,
   WatermarkState,
 } from './types';
-import { PAPER_PT, paperSizePt } from './types';
+import { PAPER_PT, pageSetupOfMetrics, paperSizePt } from './types';
 import {
   controlFormOf,
   controlWriteOf,
@@ -54,7 +55,14 @@ import { createDomHost, ensureMarkup, type ChangeSource, type DomHost, type Engi
 import { createErrorSurface, type ErrorSurface } from './host/errors';
 import { scrollHeightPx, type CanvasStore } from './host/pages';
 import { stageOf } from './host/parts';
-import { cleanMarkdownLines, createZoom, then1, type Args, type ZoomControl } from './input/keymap';
+import {
+  cleanMarkdownLines,
+  createZoom,
+  then1,
+  type Args,
+  type Maybe,
+  type ZoomControl,
+} from './input/keymap';
 import { assertSimd, simdProbeBytes, simdSupported } from './engine/simd';
 import { resolveFonts, type AssetPaths } from './transport/assets';
 import { createWorker } from './transport/worker';
@@ -633,12 +641,36 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
     return next;
   }
 
+  /**
+   * 会换文档或改纸张的命令：收尾时要重读页度量。
+   *
+   * 装载类都在里面 —— 换一份文档就可能换一张纸；撤销与重做同理。逐字编辑不在：
+   *   一次按键多一次跨线程往返，而纸张不可能被它改动。
+   */
+  const PAGE_TOUCHING = new Set([
+    'loadDocument',
+    'textDoc',
+    'scenario',
+    'stress',
+    'stressDiverse',
+    'formSample',
+    'reset',
+    'undo',
+    'redo',
+    'pageSetup',
+  ]);
+
   const edit = (name: string, args?: Args): Promise<boolean> => {
     alive();
     if (config.mode === 'readOnly') return Promise.resolve(false);
     return Promise.resolve(then1(link.write(name, args), (changed) => {
       if (!changed) return false;
-      return then1(dom.afterEdit(name, 'api'), () => true);
+      return then1(dom.afterEdit(name, 'api'), () => {
+        // 纸张以文档为准：打开、撤销与改纸张之后要把影子跟上，否则面板显示的是上一张纸，
+        //   下一次提交按它算宽高，把旧纸写回文档。
+        if (!PAGE_TOUCHING.has(name)) return true;
+        return then1(syncPageSetup(link, config), () => true);
+      });
     }) as boolean | Promise<boolean>);
   };
 
@@ -1577,6 +1609,11 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
           link.read('selectionStyleJson'),
         )) as typeof config.selectionStyle;
       }
+      // 页度量同样以引擎为准：文档写过纸张时它会盖过传进来的那一份，照抄用户的输入
+      //   会让面板显示一张并不存在的纸。
+      if (changed.page !== undefined) {
+        config.page = await Promise.resolve(syncPageSetup(link, config));
+      }
       emitter.emit('configchange', { changed, config: { ...config } });
       return { ...config };
     },
@@ -1683,6 +1720,25 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
 // 诊断面
 
 /**
+ * 把引擎报的页度量写回配置影子。
+ *
+ * 纸张以文档为准：打开一份 A5 文档之后影子里还是默认那张 A4，面板就会显示 A4，
+ *   而提交时按 A4 算宽高 —— 旧纸被写回文档。
+ *
+ * @param l 传输
+ * @param cfg 配置影子（就地更新）
+ * @returns 同步之后的页设置
+ */
+function syncPageSetup(l: EngineLink, cfg: EditorConfig): Maybe<PageSetup> {
+  return then1(l.read('pageMetrics'), (raw) => {
+    const m = raw as PageMetricsReport | null;
+    if (!m || !(Number(m.widthPt) > 0) || !(Number(m.heightPt) > 0)) return cfg.page;
+    cfg.page = pageSetupOfMetrics(m, cfg.page);
+    return cfg.page;
+  });
+}
+
+/**
  * 把引擎那一侧的模式与缩放读回库的配置影子。
  *
  * 诊断面能绕过 configure 直接改引擎（装载表单样例就自带表单模式），而对外读的
@@ -1709,6 +1765,8 @@ function syncConfigFromEngine(
         //   除错了倍数，点同一个像素会落到右边或左边的一格上。
         zoom.set(density);
       }
+      // 诊断面能直接装载带纸张的文档：页度量跟上，理由与 edit 的收尾同一条。
+      return then1(syncPageSetup(link, cfg), () => undefined);
     }),
   );
 }
