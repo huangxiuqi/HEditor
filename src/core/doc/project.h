@@ -161,6 +161,11 @@ struct Slot {
      * 产生者句柄。
      */
     int owner = -1;
+
+    /**
+     * 在同一码点偏移上的序号（见 InlineObject::slot）。
+     */
+    int slot = -1;
 };
 
 struct ControlSpan {

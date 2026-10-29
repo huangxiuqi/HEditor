@@ -60,32 +60,6 @@ ControlKind controlKindFromBusinessType(const std::string& type) {
 constexpr float kMinCaretWidthPt = 0.4f;
 
 /**
- * 页内磅矩形 → 页内像素矩形。
- *
- * 取整方向固定为左上 floor、右下 ceil，使像素矩形完整覆盖磅矩形 —— 少半像素就是把内容
- * 切掉一条边。宽高为 0 时的处置有两种，都由调用方按语义选：光标必须留下至少一个像素
- * （看不见的光标与没有光标在界面上无法区分），选区矩形画不出来就不该登记。
- *
- * @param r           页内磅矩形
- * @param density     设备像素 / 磅
- * @param keep_min_px 为真时宽高保底一个像素；为假时宽高不为正即视为不可画
- * @param out         结果，仅在返回 true 时写入
- * @returns 是否产出一个可画的矩形
- */
-bool ptToPx(const Rect& r, float density, bool keep_min_px, Rect* out) {
-    out->x = std::floor(r.x * density);
-    out->y = std::floor(r.y * density);
-    out->w = std::ceil(r.w * density);
-    out->h = std::ceil(r.h * density);
-    if (keep_min_px) {
-        out->w = std::max(1.0f, out->w);
-        out->h = std::max(1.0f, out->h);
-        return true;
-    }
-    return out->w > 0.0f && out->h > 0.0f;
-}
-
-/**
  * Skia 全局字形 mask 缓存的字节预算。
  *
  * SkStrikeCache 的默认上限是 2 MB（SK_DEFAULT_FONT_CACHE_LIMIT），而它清理时按
@@ -1004,7 +978,7 @@ Rect EditorEngine::caretRectPx(int* page) const {
     if (page != nullptr) *page = -1;
     if (!edit_session_.caret.caretRectFor(caret(), &p, &r)) return Rect{};
     Rect px;
-    ptToPx(r, cfg_.density, true, &px);
+    rectPtToPx(r, cfg_.density, true, &px);
     if (page != nullptr) *page = p;
     return px;
 }
@@ -1031,7 +1005,7 @@ std::vector<EditorEngine::PageRect> EditorEngine::selectionRectsIn(int first_pag
 }
 
 /**
- * 选区矩形（页内像素坐标）。与 caretRectPx 同一套换算（走 ptToPx），但宽高不为正的
+ * 选区矩形（页内像素坐标）。与 caretRectPx 同一套换算（走 rectPtToPx），但宽高不为正的
  * （空行的那个插入点）在这里丢掉 —— 画不出来。页号随矩形一起给出，落点由读的一方
  * 按 (页号 x 步距) 加。
  */
@@ -1046,7 +1020,7 @@ std::vector<PageRect> EditorEngine::selectionRectsPxIn(int first_page, int count
     for (const PageRect& pr : prs) {
         PageRect px;
         px.page = pr.page;
-        if (!ptToPx(pr.r_pt, density, false, &px.r_pt)) continue;
+        if (!rectPtToPx(pr.r_pt, density, false, &px.r_pt)) continue;
         out.push_back(px);
     }
     return out;

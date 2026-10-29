@@ -268,6 +268,7 @@ const BlockShaping* withInlineObjects(const BlockSpec& b, uint32_t n_cp, const B
         pc.g0 = pc.g1 = 0;
         pc.placeholder = true;
         pc.owner_control = o.owner;
+        pc.slot = o.slot;
         // 内容指纹两族都搬：原子的是画的是什么，控件边界的是外观摘要。少搬一族，
         // 那一类改动在几何上看不出来，页就会停在旧帧。
         pc.content_hash = o.content_hash;
@@ -305,6 +306,7 @@ const BlockShaping* withInlineObjects(const BlockSpec& b, uint32_t n_cp, const B
         hc.placeholder = true;
         hc.control_hint = true;
         hc.owner_control = o.owner;
+        hc.slot = -1;  // 提示文字占宽度不占位置，侧别数格子时跳过
         hc.read_only = o.read_only;
         hc.bracket_font = pc.bracket_font;
         // 提示文字的摘要必须进簇：改一句话而字数不变时几何一个都不动，行指纹若只看
@@ -473,6 +475,7 @@ void placeHorizontalLine(const BlockSpec& b, const BlockShaping& bs,
                 lc.bracket_font = bs.clusters[i].bracket_font;
                 lc.read_only = bs.clusters[i].read_only;
                 lc.owner_control = bs.clusters[i].owner_control;
+                lc.slot = bs.clusters[i].slot;
                 lc.atom = bs.clusters[i].atom;
                 lc.atom_h_pt = bs.clusters[i].atom_h_pt;
                 lc.content_hash = bs.clusters[i].content_hash;
@@ -587,6 +590,7 @@ void placeVerticalColumn(const BlockSpec& b, const BlockShaping& bs,
             lc.bracket_font = bs.clusters[i].bracket_font;
             lc.read_only = bs.clusters[i].read_only;
             lc.owner_control = bs.clusters[i].owner_control;
+            lc.slot = bs.clusters[i].slot;
             lc.atom = bs.clusters[i].atom;
             lc.atom_h_pt = bs.clusters[i].atom_h_pt;
             lc.content_hash = bs.clusters[i].content_hash;

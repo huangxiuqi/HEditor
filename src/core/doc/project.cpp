@@ -145,7 +145,15 @@ private:
         obj_hash_.u8(o.read_only ? 1 : 0);
         obj_hash_.u64(node != nullptr ? node->hash_lo : 0);
         obj_hash_.u64(node != nullptr ? node->hash_hi : 0);
-        objects_.push_back(o);
+        // 序号在这里分配一次：同一偏移上按对象表顺序递增（闭括号先、开括号后），换偏移
+        //   从零重数。排版与编辑两侧都读它，不再各自数格子。
+        InlineObject item = o;
+        if (item.cp != slot_cp_ || slot_next_ < 0) {
+            slot_cp_ = item.cp;
+            slot_next_ = 0;
+        }
+        item.slot = slot_next_++;
+        objects_.push_back(item);
     }
 
     /**
@@ -674,6 +682,7 @@ private:
         objects_.clear();
         atoms_.clear();
         runs_.clear();
+        slot_next_ = -1;  // 新的一段从零开始数
         fresh_.push_back(std::move(pb.spec));
         fresh_keys_.push_back(BlockKey{pb.hash, pb.source});
         ++block_index_;
@@ -684,6 +693,11 @@ private:
     bool full_;
     std::vector<Ref> runs_;              // 当前段里按流顺序攒下的 run
     std::vector<InlineObject> objects_;  // 当前段里攒下的行内对象（控件边界与原子）
+    /**
+     * 上一次分配序号时的码点偏移，与这个偏移上已分配出去的枚数（-1 = 本段还没有过对象）。
+     */
+    uint32_t slot_cp_ = 0;
+    int slot_next_ = -1;
     /**
      * 当前段里待定几何的原子：对象下标 + 它需要的输入。落段时才定得下来（要块级字号）。
      */
@@ -745,7 +759,7 @@ private:
 void fillSlots(Projection* out, const std::vector<BlockSpec>& blocks) {
     for (int b = 0; b < static_cast<int>(blocks.size()); ++b) {
         for (const InlineObject& o : blocks[static_cast<size_t>(b)].objects) {
-            out->slots.push_back(Slot{b, o.cp, o.kind, o.owner});
+            out->slots.push_back(Slot{b, o.cp, o.kind, o.owner, o.slot});
         }
     }
 }

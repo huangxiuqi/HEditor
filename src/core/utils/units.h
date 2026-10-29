@@ -14,8 +14,11 @@
  */
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
+
+#include "core/utils/types.h"
 
 namespace heditor {
 /**
@@ -100,5 +103,39 @@ inline constexpr Emu halfPtToEmu(int half_points) {
 inline double emuToPt(Emu e) { return fromEmu(e, Unit::Pt); }
 inline double emuToCm(Emu e) { return fromEmu(e, Unit::Cm); }
 inline double emuToMm(Emu e) { return fromEmu(e, Unit::Mm); }
+
+/**
+ * 页内磅矩形 → 页内像素矩形，呈现层的最后一跳。
+ *
+ * 取整方向固定为左上 floor、右下 ceil，使像素矩形完整覆盖磅矩形 —— 少半像素就是把内容
+ * 切掉一条边。宽高为零时的处置有两档，由调用方按语义选，因为它们是两个不同的保证：
+ * 光标必须留下至少一个像素（看不见的光标与没有光标在界面上无法区分），选区矩形画不出来
+ * 就不该登记（零面积的反白条会让上层白贴一次图）。
+ *
+ * @param r           页内磅矩形
+ * @param density     设备像素 / 磅
+ * @param keep_min_px 为真时宽高保底一个像素；为假时宽高不为正即视为不可画
+ * @param out         结果，仅在返回 true 时写入
+ * @return 是否产出一个可画的矩形
+ */
+inline bool rectPtToPx(const Rect& r, float density, bool keep_min_px, Rect* out) {
+    // 取整落在两条边上，不是"角点 + 宽高"各取一次：后者的右边界是
+    //   floor(x*d) + ceil(w*d)，可能小于 ceil((x+w)*d)，右边因此被切掉一小条。
+    const float x0 = std::floor(r.x * density);
+    const float y0 = std::floor(r.y * density);
+    Rect px{};
+    px.x = x0;
+    px.y = y0;
+    px.w = std::ceil((r.x + r.w) * density) - x0;
+    px.h = std::ceil((r.y + r.h) * density) - y0;
+    if (keep_min_px) {
+        px.w = std::max(1.0f, px.w);
+        px.h = std::max(1.0f, px.h);
+    } else if (!(px.w > 0.0f && px.h > 0.0f)) {
+        return false;
+    }
+    *out = px;
+    return true;
+}
 
 }  // namespace heditor

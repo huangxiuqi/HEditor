@@ -267,6 +267,7 @@ BlockLayout layoutBlock(FontLibrary& lib, const BlockSpec& block,
             lc.bracket_font = slotted->clusters[i].bracket_font;
             lc.read_only = slotted->clusters[i].read_only;
             lc.owner_control = slotted->clusters[i].owner_control;
+            lc.slot = slotted->clusters[i].slot;
             lc.atom = slotted->clusters[i].atom;
             lc.atom_h_pt = slotted->clusters[i].atom_h_pt;
             lc.content_hash = slotted->clusters[i].content_hash;

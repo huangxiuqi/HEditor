@@ -368,6 +368,15 @@ struct InlineObject {
      */
     std::string hint;
 
+    /**
+     * 本对象在同一码点偏移上的序号（0 起，按对象表顺序：闭括号先、开括号后）。
+     *
+     * 侧别这份编码的唯一来源：侧别数的是"这个偏移上跨过了几枚占位"，而枚数就是序号加一。
+     * 投影时分配一次，排版搬进簇、编辑侧按它定位 —— 三处不再各自数一遍（数一遍就要
+     * 各自处理提示文字那种不占位的簇）。
+     */
+    int slot = -1;
+
     bool operator==(const InlineObject& o) const = default;
 };
 
@@ -1384,6 +1393,13 @@ struct LineCluster {
     int owner_control = -1;
 
     /**
+     * 这个簇在同一偏移上的占位序号（见 InlineObject::slot）；提示文字那一枚是 -1。
+     *
+     * 侧别直接读它，不再按簇下标数：数的时候要记得跳过提示簇，每个消费点都得记一次。
+     */
+    int slot = -1;
+
+    /**
      * 行内原子：这是哪一种（不是原子时为 None）。绘制按它分派画法。
      */
     InlineAtom atom = InlineAtom::None;
@@ -1643,8 +1659,10 @@ struct LineBox {
      */
     int bracketCountAt(uint32_t cp) const {
         int n = 0;
-        for (size_t i = firstClusterAt(cp); i < clusters.size() && clusters[i].cp == cp; ++i)
-            if (clusters[i].placeholder && !clusters[i].control_hint) ++n;
+        for (size_t i = firstClusterAt(cp); i < clusters.size() && clusters[i].cp == cp; ++i) {
+            // 提示文字那枚不占位置（slot 为 -1），所以序号的最大值加一就是枚数。
+            if (clusters[i].slot >= n) n = clusters[i].slot + 1;
+        }
         return n;
     }
 
@@ -1676,14 +1694,11 @@ struct LineBox {
         const int s = (side < 0) ? 0 : (side > n ? n : side);
         // 侧别 0 = 所有槽之前。
         if (s == 0) return clusters[k0].inline_pt;
-        // 数格子时跳过提示文字：它不占位置，所以"跨过 s 个位置"不能按簇下标直接加 s。
-        //   位置取第 s 枚槽的右缘（紧跟它的那一枚簇的起点），不是下一枚槽的起点 ——
-        //   提示文字夹在两枚括号之间时，两者差着一句话的宽度。
-        int seen = 0;
+        // 位置取第 s 枚槽的右缘（紧跟它的那一枚簇的起点），不是下一枚槽的起点 ——
+        //   提示文字夹在两枚括号之间时，两者差着一句话的宽度。按序号定位，不按簇下标数：
+        //   提示簇的序号是 -1，数下标时会把它算进去。
         for (size_t k = k0; k < clusters.size() && clusters[k].cp == cp; ++k) {
-            if (clusters[k].control_hint) continue;
-            ++seen;
-            if (seen != s) continue;
+            if (clusters[k].slot != s - 1) continue;
             const size_t next = k + 1;
             return (next < clusters.size()) ? clusters[next].inline_pt : inline_end_pt;
         }

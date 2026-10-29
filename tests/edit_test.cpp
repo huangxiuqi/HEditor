@@ -38,6 +38,7 @@
 #include "core/text/font.h"
 #include "core/text/shaper.h"
 #include "core/utils/hash.h"
+#include "core/utils/units.h"
 #include "demo/demo_documents.h"
 
 #include "block_compare.h"
@@ -499,7 +500,7 @@ const SectionInfo kSections[] = {
     {79, false, 2},  {80, false, 3},  {81, false, 2},  {82, false, 1},  {83, false, 2},
     {84, false, 2},  {85, false, 3},  {86, false, 4},  {87, false, 3},  {88, false, 3},
     {89, false, 3},  {90, false, 2},  {91, false, 3},  {92, false, 6},  {93, false, 5},
-    {94, false, 2},  {95, false, 2},
+    {94, false, 2},  {95, false, 2},  {96, false, 1},  {97, false, 1},
 };
 
 /**
@@ -14881,6 +14882,129 @@ int main() {
         expectTrue(!e.insertCodepoints(0, 1, {0x0A}), "码点入口拒绝 U+000A");
         expectTrue(e.blockedEdits() == blocked + 1, "会计一笔被拒的编辑");
         expectTrue(e.blocks().size() == 1 && e.blocks()[0].textUtf8() == "头", "被拒时文档不动");
+    }
+    if (runSection(96)) {
+        std::printf("\n[96] 磅 → 设备像素：取整盖住整个矩形，两档保底各按自己的语义\n");
+        const float density = 4.0f / 3.0f;
+        Rect out{};
+        // (a) 取整：左上 floor、右下 ceil。像素矩形只许多盖，不许切掉半像素的边。
+        const Rect pt{10.4f, 20.6f, 10.2f, 5.1f};
+        expectTrue(rectPtToPx(pt, density, true, &out), "换算出一个可画的矩形");
+        expectTrue(
+            out.x == 13.0f && out.y == 27.0f,
+            "左上取 floor —— 实际 x=" + std::to_string(out.x) + " y=" + std::to_string(out.y));
+        expectTrue(out.w == 15.0f && out.h == 8.0f,
+                   "宽高按两条边的差算 —— 实际 w=" + std::to_string(out.w) +
+                       " h=" + std::to_string(out.h));
+        expectTrue(out.x <= pt.x * density && out.y <= pt.y * density &&
+                       out.x + out.w >= (pt.x + pt.w) * density &&
+                       out.y + out.h >= (pt.y + pt.h) * density,
+                   "像素矩形完整盖住磅矩形");
+
+        // (b) 光标档：宽高为零也留一个像素。看不见的光标与没有光标在界面上分不出来。
+        Rect caret_px{};
+        expectTrue(rectPtToPx(Rect{0.0f, 0.0f, 0.0f, 0.0f}, density, true, &caret_px),
+                   "零面积的磅矩形在光标档仍算可画");
+        expectTrue(caret_px.w == 1.0f && caret_px.h == 1.0f, "光标档保底一个像素 —— 实际 " +
+                                                                 std::to_string(caret_px.w) + "x" +
+                                                                 std::to_string(caret_px.h));
+
+        // (c) 选区档：同样的输入判为不可画，且一个字段都不写回。
+        Rect untouched{1.0f, 2.0f, 3.0f, 4.0f};
+        expectTrue(!rectPtToPx(Rect{0.0f, 0.0f, 0.0f, 0.0f}, density, false, &untouched),
+                   "零面积的磅矩形在选区档判为不可画");
+        expectTrue(untouched.x == 1.0f && untouched.y == 2.0f && untouched.w == 3.0f &&
+                       untouched.h == 4.0f,
+                   "被拒时不写结果 —— 实际 " + std::to_string(untouched.x) + "," +
+                       std::to_string(untouched.y) + "," + std::to_string(untouched.w) + "," +
+                       std::to_string(untouched.h));
+        expectTrue(!rectPtToPx(Rect{0.0f, 0.0f, 10.0f, 0.0f}, density, false, &out),
+                   "只有一条边为零也判不可画（半条反白不登记）");
+
+        // (d) 取整本身在常规密度下就把亚像素宽度抬到一像素：0.4 磅的光标条不是零宽。
+        const bool thin = rectPtToPx(Rect{0.0f, 0.0f, 0.4f, 10.0f}, 1.0f, false, &out);
+        expectTrue(thin && out.w == 1.0f,
+                   "0.4 磅在 1 倍密度下是一个像素 —— 实际 " + std::to_string(out.w));
+    }
+    if (runSection(97)) {
+        std::printf("\n[97] 侧别只有一个来源：投影分配占位序号，排版搬进簇、编辑侧按序号读\n");
+        EngineConfig c97;
+        c97.density = 1.0f;
+        c97.page.width_pt = 200.0f;
+        c97.page.height_pt = 300.0f;
+        c97.page.margins = PageMargins::all(10.0f);
+        EditorEngine e97;
+        expectTrue(e97.init({cjkPath, mnPath, latinPath}), "引擎初始化（占位序号）");
+        e97.setConfig(c97);
+        e97.setDocument(doc::makeTextDoc({U"甲"}), StyleSheet{});
+        expectTrue(e97.insertControlAndRender(makeControlSpec("checkBox"), "一"), "插第一个控件");
+        expectTrue(e97.insertControlAndRender(makeControlSpec("text"), "二"), "紧接着插第二个控件");
+
+        const BlockSpec& blk97 = e97.blocks().front();
+        int opens97 = 0;
+        int closes97 = 0;
+        for (const InlineObject& o : blk97.objects) {
+            if (o.kind == InlineObjectKind::ControlStart) ++opens97;
+            if (o.kind == InlineObjectKind::ControlEnd) ++closes97;
+        }
+        expectTrue(opens97 == 2 && closes97 == 2, "两枚控件共四枚边界 —— 实际 开 " +
+                                                      std::to_string(opens97) + " 闭 " +
+                                                      std::to_string(closes97));
+
+        // (a) 共享偏移上的两枚边界序号连号：闭括号先、开括号后。侧别从此是"序号加一"，
+        //   不再由每个消费点自己数一遍。
+        int shared_cp97 = -1;
+        int close_slot97 = -1;
+        int open_slot97 = -1;
+        int owner_b97 = -1;
+        for (const InlineObject& x : blk97.objects) {
+            for (const InlineObject& y : blk97.objects) {
+                if (x.kind != InlineObjectKind::ControlEnd ||
+                    y.kind != InlineObjectKind::ControlStart) {
+                    continue;
+                }
+                if (x.cp != y.cp || x.owner == y.owner) continue;
+                shared_cp97 = static_cast<int>(x.cp);
+                close_slot97 = x.slot;
+                open_slot97 = y.slot;
+                owner_b97 = y.owner;
+            }
+        }
+        expectTrue(shared_cp97 >= 0 && open_slot97 == close_slot97 + 1,
+                   "紧邻两控件共享一个偏移，序号连号 —— cp=" + std::to_string(shared_cp97) +
+                       " 闭=" + std::to_string(close_slot97) +
+                       " 开=" + std::to_string(open_slot97));
+
+        // (b) 排版把序号搬进簇：行盒里每一枚带序号的簇，都能在对象表里按 (cp, 序号) 找到
+        //   同一个产生者。搬丢了的话，命中与光标就只能再数一遍簇。
+        int numbered97 = 0;
+        int matched97 = 0;
+        for (const LineBox& ln : e97.layout().lines) {
+            for (const LineCluster& c : ln.clusters) {
+                if (c.slot < 0) continue;
+                ++numbered97;
+                for (const InlineObject& o : blk97.objects) {
+                    if (o.cp == c.cp && o.slot == c.slot && o.owner == c.owner_control) {
+                        ++matched97;
+                        break;
+                    }
+                }
+            }
+        }
+        expectTrue(numbered97 == 4 && matched97 == numbered97,
+                   "行盒里四枚占位都带着对象表里的序号 —— 带序号 " + std::to_string(numbered97) +
+                       " 枚，对上 " + std::to_string(matched97) + " 枚");
+
+        // (c) 序号来自对象表，不随簇变：括号关掉之后同一落点的流位置不变。簇里没有槽
+        //   的时候（括号关掉档）仍要答得出"这个控件下标落在哪一位"。
+        const FlowPos inside97 = e97.flowPosAt(0, static_cast<size_t>(shared_cp97), owner_b97);
+        EngineConfig no_brk97 = c97;
+        no_brk97.show_brackets = false;
+        e97.setConfig(no_brk97);
+        const FlowPos after97 = e97.flowPosAt(0, static_cast<size_t>(shared_cp97), owner_b97);
+        expectTrue(inside97 >= 0 && after97 == inside97, "关掉括号之后同一个落点的流位置不变 —— " +
+                                                             std::to_string(inside97) + " / " +
+                                                             std::to_string(after97));
     }
     checkSectionTable();
     printSectionTimes();

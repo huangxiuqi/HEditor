@@ -157,16 +157,14 @@ int CaretResolver::sideFromHint(int para, size_t cp, int hint) const {
     if (hint < 0) return defaultSideAt(para, cp);
     const int owner = slotOwnerOf(hint);
     if (owner < 0) return bc.closes;
-    int local = 0;
     for (const InlineObject& o : objectsFor(para)) {
         if (static_cast<size_t>(o.cp) < cp) continue;
         if (static_cast<size_t>(o.cp) > cp) break;
-        if (o.owner != owner) {
-            ++local;
-            continue;
-        }
-        // 开括号：落点在它之后（内容从此开始）；闭括号：落点在它自己那一格（内容到此为止）。
-        return (o.kind == InlineObjectKind::ControlStart) ? (local + 1) : local;
+        if (o.owner != owner) continue;
+        // 序号是投影分好的同一份编码：开括号之后是它加一，闭括号就是它自己那一格。
+        //   按序号读，不再逐个 +1 数 —— 数一遍就要在这里再处理一次"谁占位"。
+        if (o.slot < 0) return bc.closes;
+        return (o.kind == InlineObjectKind::ControlStart) ? (o.slot + 1) : o.slot;
     }
     // 这个控件在这一处没有自己的边界（落点压在更内层的边界上）→ 位置在那些括号之外。
     return bc.closes;
@@ -981,12 +979,12 @@ void CaretResolver::hitTestInLine(const LineBox& lb, float inline_page_pt, uint3
         }
     }
     const size_t k0 = lb.firstClusterAt(cp);
-    // 侧别数的是"位置上跨过了几个槽"，而提示文字那一枚槽占宽度不占位置 ——
-    //   按簇下标直接相减会让它算进去：点空字段的提示文字会被判成"跨过两个槽"，
-    //   于是落点跑到闭括号右边（差一个括号宽）。
+    // 侧别 = 命中位置之前跨过了几个槽，而槽的序号是排版搬过来的：命中簇的序号就是它，
+    //   落在最后一个簇之后时取下一个本该出现的序号。提示文字那枚不占位（序号 -1），
+    //   按簇下标数会把它算进去 —— 点空字段的提示会被判成跨过两个槽，落点跑到闭括号右边。
     int side = 0;
     for (size_t i = k0; i < hit_i && i < n; ++i) {
-        if (!lb.clusters[i].control_hint) ++side;
+        if (lb.clusters[i].slot >= side) side = lb.clusters[i].slot + 1;
     }
     if (cp_out) *cp_out = cp;
     if (side_out) *side_out = side;

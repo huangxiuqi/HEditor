@@ -75,7 +75,7 @@ bool sameLine(const LineBox& a, const LineBox& b) {
         if (x.cp != y.cp || !samePos(x.inline_pt, y.inline_pt) || x.placeholder != y.placeholder ||
             x.control_hint != y.control_hint || x.bracket_side != y.bracket_side ||
             x.bracket_font != y.bracket_font || x.read_only != y.read_only ||
-            x.owner_control != y.owner_control || x.atom != y.atom ||
+            x.owner_control != y.owner_control || x.slot != y.slot || x.atom != y.atom ||
             !samePos(x.atom_h_pt, y.atom_h_pt) || x.content_hash != y.content_hash) {
             return false;
         }

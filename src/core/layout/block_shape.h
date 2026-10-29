@@ -84,6 +84,11 @@ struct BlockShaping {
         int owner_control = -1;
 
         /**
+         * 这个簇在同一偏移上的占位序号（见 InlineObject::slot）；提示文字那一枚是 -1。
+         */
+        int slot = -1;
+
+        /**
          * 行内原子：这是哪一种。不是原子时为 None。
          */
         InlineAtom atom = InlineAtom::None;
