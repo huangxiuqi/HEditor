@@ -108,6 +108,48 @@ test.describe('表格：跨页切片', () => {
           JSON.stringify(r.rects.map((x: any) => x.w)));
   });
 
+  // 插入点钉在焦点格的末尾，不是矩形右下角：整格拖选之后敲的字进哪一格由它决定。
+  //   从右下拖到左上时焦点在左上格，取矩形右下角会让后续输入落到对角那一格。
+  test('整格拖选：插入点钉在焦点那一格的末尾', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' } });
+    const geo = await p.read<any>(`
+      await H.setText('甲');
+      await H.flush();
+      await H.insertTable({ rows: 2, cols: 2 });
+      await H.flush();
+      const put = async (para, txt) => {
+        await H.setCaret({ para, offset: 0 });
+        await H.flush();
+        await H.type(txt);
+        await H.flush();
+      };
+      await put(1, 'A'); await put(2, 'B'); await put(3, 'C'); await put(4, 'D');
+      const at = async (para) => {
+        await H.setCaret({ para, offset: 1 });
+        await H.flush();
+        const q = CARET();
+        return { x: q.x, y: q.y, h: q.h };
+      };
+      const fr = FRAME().getBoundingClientRect();
+      return { a: await at(1), d: await at(4), left: fr.left, top: fr.top };`);
+
+    // 反向拖：从右下格（D）起手，落在左上格（A）。焦点是后松手的那一端。
+    await p.page.mouse.move(geo.left + geo.d.x + 3, geo.top + geo.d.y + geo.d.h / 2);
+    await p.page.mouse.down();
+    await p.page.mouse.move(geo.left + geo.a.x + 6, geo.top + geo.a.y + geo.a.h / 2,
+                            { steps: 10 });
+    await p.page.mouse.up();
+    const r = await p.read<any>(`
+      await H.flush();
+      const st = await H.tableState();
+      const c = CARET();
+      return { cells: st.selCells, caret: c };`);
+    check('前提：拖选盖住了四格', r.cells === 4, String(r.cells));
+    check('\u2605 插入点在焦点格（左上，段 1）的末尾，不在矩形右下角',
+          r.caret.para === 1 && r.caret.offset === 1,
+          JSON.stringify({ para: r.caret.para, offset: r.caret.offset }));
+  });
+
   test('格内换行：折行之后的字必须画出来', async ({ open }) => {
     test.setTimeout(300_000);
     const p = await open('index.html', { query: { debug: '1' } });

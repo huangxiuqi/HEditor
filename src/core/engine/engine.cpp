@@ -1105,36 +1105,22 @@ void EditorEngine::syncCellSelection() {
         return;
     }
     // 矩形包络：行取两端格覆盖的行，列取两端格覆盖的列。合并格（跨度大于一）按它盖住的
-    //   整块算 —— 跨进合并格的行或列都算选到它。
-    const int r0 = std::min(ca->row, cf->row);
-    const int r1 = std::max(ca->row + ca->row_span - 1, cf->row + cf->row_span - 1);
-    const int c0 = std::min(ca->cell, cf->cell);
-    const int c1 = std::max(ca->cell + ca->col_span - 1, cf->cell + cf->col_span - 1);
-    // 按块区间收：一格的身份是它占的段的区间，不是它的流区间 —— 空格的内容长度为 0，
-    //   流区间退化成点，与下一格的第一段用同一个流位置，按流位置挑格会挑错。
-    std::vector<CaretResolver::CellBlocks> cells;
-    FlowPos caret_flow = -1;
-    for (const LayoutCell& c : ta->cells) {
-        const int cr1 = c.row + c.row_span - 1;
-        const int cc1 = c.cell + c.col_span - 1;
-        if (cr1 < r0 || c.row > r1 || cc1 < c0 || c.cell > c1) continue;
-        if (c.block_count <= 0) continue;
-        const int last_b = c.first_block + c.block_count - 1;
-        if (c.first_block < 0 || last_b >= static_cast<int>(projection_.block_flow.size()) ||
-            last_b >= static_cast<int>(projection_.block_flow_span.size()))
-            continue;
-        cells.push_back(CaretResolver::CellBlocks{c.first_block, c.block_count});
-        if (&c == cf)
-            caret_flow = projection_.block_flow[static_cast<size_t>(last_b)] +
-                         projection_.block_flow_span[static_cast<size_t>(last_b)];
-    }
-    // 少于两格说明两端的格在矩形里对不上（表格结构刚变过），眼下按文字选区算更安全。
-    if (cells.size() < 2) {
+    //   整块算 —— 跨进合并格的行或列都算选到它。展开交给 setCellRange（它按格索引走），
+    //   这里只定矩形与焦点格。
+    CellRange range;
+    range.table = ta->handle;
+    range.r0 = std::min(ca->row, cf->row);
+    range.r1 = std::max(ca->row + ca->row_span - 1, cf->row + cf->row_span - 1);
+    range.c0 = std::min(ca->cell, cf->cell);
+    range.c1 = std::max(ca->cell + ca->col_span - 1, cf->cell + cf->col_span - 1);
+    range.focus_row = cf->row;
+    range.focus_cell = cf->cell;
+    // 只剩一格说明两端的格在矩形里对不上（表格结构刚变过），按文字选区算更安全。
+    //   单格选区不走这里，它由 selectCellAtPara 直接给矩形。
+    if (!edit_session_.caret.setCellRange(range, cellIndex()) ||
+        edit_session_.caret.cellBlocks().size() < 2) {
         edit_session_.caret.clearCellRange();
-        return;
     }
-    // 插入点钉在焦点那一格的末尾（见 setCellBlocks 的 caret_flow）。
-    edit_session_.caret.setCellBlocks(std::move(cells), caret_flow);
 }
 
 void EditorEngine::setCaret(int para, size_t offset) {
@@ -1292,8 +1278,9 @@ bool EditorEngine::selectAll() {
  * 与下一格的第一段共用同一个流位置（见 CaretResolver::CellBlocks）。
  */
 bool EditorEngine::selectCellAtPara(int para) {
-    const LayoutCell* c = layoutCellAt(para, nullptr);
-    if (c == nullptr || c->block_count <= 0) return false;
+    const LayoutTable* ta = nullptr;
+    const LayoutCell* c = layoutCellAt(para, &ta);
+    if (c == nullptr || ta == nullptr || c->block_count <= 0) return false;
     const int first = c->first_block;
     const int last_b = first + c->block_count - 1;
     if (first < 0 || last_b >= static_cast<int>(projection_.block_flow.size()) ||
@@ -1304,10 +1291,15 @@ bool EditorEngine::selectCellAtPara(int para) {
     const FlowPos caret_flow = projection_.block_flow[static_cast<size_t>(last_b)] +
                                projection_.block_flow_span[static_cast<size_t>(last_b)];
     // 离散动作（单击边距带、三击）要把两端也落到这一格上：拖选那条路不能这么做
-    //   （锚点要留着，往回拖才退得回文字选区），所以吸附由这里做而不是 setCellBlocks。
+    //   （锚点要留着，往回拖才退得回文字选区），所以吸附由这里做而不是 setCellRange。
     if (!edit_session_.caret.setSelection(Range{prev_lo, caret_flow})) return false;
-    return edit_session_.caret.setCellBlocks({CaretResolver::CellBlocks{first, c->block_count}},
-                                             caret_flow);
+    CellRange range;
+    range.table = ta->handle;
+    range.r0 = range.r1 = c->row;
+    range.c0 = range.c1 = c->cell;
+    range.focus_row = c->row;
+    range.focus_cell = c->cell;
+    return edit_session_.caret.setCellRange(range, cellIndex());
 }
 
 doc::EditCheck EditorEngine::policyAt(TextPos p) const { return edit_session_.edit.policyAt(p); }

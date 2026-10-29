@@ -38,6 +38,8 @@ namespace heditor {
  * 重排之后摆一次（见 EditorEngine::rebuildProjection 与 relayout）。
  */
 class ControlIndex;
+
+struct CellIndex;
 struct StructureIndex;
 
 /**
@@ -149,6 +151,56 @@ struct PositionView {
      * @return 流索引
      */
     const doc::FlowIndex& flowIndex() const { return **flow; }
+};
+
+/**
+ * 整格选区的意图：一张表上的一块矩形，加上焦点格。
+ *
+ * 只有这一份是"用户选了什么"。块区间、流包络、渲染用的合并区间、插入点全由它派生
+ * （见 CaretResolver::setCellRange）—— 六份状态各算一遍时，改一处忘另一处就出现
+ * "反白与删除范围不一致"这类错。
+ */
+struct CellRange {
+    /**
+     * 表的身份（模型节点 id，见 CellSlot::table）。
+     */
+    uint64_t table = 0;
+
+    /**
+     * 行范围起点（含）。
+     */
+    int r0 = 0;
+
+    /**
+     * 行范围终点（含）。
+     */
+    int r1 = -1;
+
+    /**
+     * 列范围起点（含）。
+     */
+    int c0 = 0;
+
+    /**
+     * 列范围终点（含）。
+     */
+    int c1 = -1;
+
+    /**
+     * 焦点格的行号。
+     */
+    int focus_row = 0;
+
+    /**
+     * 焦点格的逻辑格号。插入点钉在这一格的末尾。
+     */
+    int focus_cell = 0;
+
+    /**
+     * 有没有矩形（端点没设过就是空）。
+     * @return true = 没有可展开的范围
+     */
+    bool empty() const { return r1 < r0 || c1 < c0; }
 };
 
 /**
@@ -668,17 +720,17 @@ public:
     bool setAnchorAtFlow(FlowPos anchor);
 
     /**
-     * 整格选区：把这几格按"单元格选区"记下来，插入点按 caret_flow 摆。
-     * 
-     * 收的是块区间而不是流区间（见 CellBlocks）：空格的内容长度为 0，流区间退化成点之后
-     * 分不出"这是哪一格"。流包络由块区间现算 —— 它只当摘要用（选区报告、撤销快照、
-     * 打字覆盖的范围），渲染与删除都按块区间走。
+     * 整格选区：把 range 这块矩形记成"单元格选区"，其余状态都由它派生。
      *
-     * @param cells 选中的格（块区间）
-     * @param caret_flow 插入点（全局流位置）；-1 = 用 focus
-     * @return true = 记下了（块区间为空时也成立：那是"没有逐格信息"的一支）
+     * 意图只存这一份（表、行列范围、焦点格）。块区间、流包络、渲染用的合并区间、插入点
+     * 都由 setCellRange 一次产出 —— 分散算的话，改一处忘另一处，反白就会与删除范围分家。
+     * 展开按格的合并跨度判相交：跨进矩形的合并格算选到它。
+     *
+     * @param range 选中的矩形与焦点格
+     * @param cells 块↔格索引（块区间由它展开，不再现场扫表格）
+     * @return true = 记下了；矩形里不足两格（表格结构刚变过）时为假，且状态未改
      */
-    bool setCellBlocks(std::vector<CellBlocks> cells, FlowPos caret_flow = -1);
+    bool setCellRange(const CellRange& range, const CellIndex& cells);
 
     /**
      * 取消整格吸附：退回文字选区（选区本身不动）。

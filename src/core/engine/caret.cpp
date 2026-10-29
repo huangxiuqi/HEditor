@@ -7,6 +7,7 @@
 #include "core/doc/textbuf.h"
 #include "core/engine/control_spans.h"
 #include "core/engine/structure_index.h"
+#include "core/layout/cell_index.h"
 
 #include <algorithm>
 #include <cmath>
@@ -530,25 +531,40 @@ bool CaretResolver::selectAll() {
 }
 
 /**
- * 整格选区：收的一串块区间（见 CellBlocks），流包络由它们现算。
+ * 整格选区：意图只有一份（表、矩形、焦点格），其余状态由它一次派生。
  *
- * 包络只当摘要 —— 选的到底是哪几格，只能由块区间回答：空格的内容长度是 0，流区间
- * 退化成点，而"点"与下一格的第一段共用一个流位置，分不开。
+ * 展开按格的合并跨度判相交：跨进矩形的合并格算选到它 —— 与"这块矩形盖住哪几格"同一件事。
+ * 格的身份用块区间而不是流区间：空格的内容长度为 0，流区间退化成点，与下一格的第一段
+ * 共用一个流位置，按流位置挑格会挑错。
  */
-bool CaretResolver::setCellBlocks(std::vector<CellBlocks> cells, FlowPos caret_flow) {
+bool CaretResolver::setCellRange(const CellRange& range, const CellIndex& cells) {
     clearCellRange();
-    if (!view_.hasFlow() || view_.block_flow->empty() || cells.empty()) return false;
+    if (!view_.hasFlow() || view_.block_flow->empty() || range.empty()) return false;
     const size_t n_blocks = view_.block_flow->size();
-    // 越界的块区间丢掉（表格结构刚变过时会出现），剩下的仍是原顺序。
-    cells.erase(std::remove_if(cells.begin(), cells.end(),
-                               [n_blocks](const CellBlocks& c) {
-                                   return c.empty() || c.first < 0 ||
-                                          static_cast<size_t>(c.first) >= n_blocks ||
-                                          static_cast<size_t>(c.first + c.count) > n_blocks;
-                               }),
-                cells.end());
-    if (cells.empty()) return false;
-    std::sort(cells.begin(), cells.end(),
+    std::vector<CellBlocks> picked;
+    FlowPos caret_flow = -1;
+    for (const CellNode& n : cells.nodes) {
+        if (n.slot.table != range.table) continue;
+        if (n.block_count <= 0 || n.first_block < 0) continue;
+        const int last_row = n.slot.row + n.row_span - 1;
+        const int last_col = n.slot.cell + n.col_span - 1;
+        if (last_row < range.r0 || n.slot.row > range.r1) continue;
+        if (last_col < range.c0 || n.slot.cell > range.c1) continue;
+        const int last_b = n.first_block + n.block_count - 1;
+        if (n.first_block >= static_cast<int>(n_blocks) || last_b >= static_cast<int>(n_blocks) ||
+            last_b >= static_cast<int>(view_.block_flow_span->size())) {
+            continue;
+        }
+        picked.push_back(CellBlocks{n.first_block, n.block_count});
+        if (n.slot.row == range.focus_row && n.slot.cell == range.focus_cell) {
+            caret_flow = (*view_.block_flow)[static_cast<size_t>(last_b)] +
+                         (*view_.block_flow_span)[static_cast<size_t>(last_b)];
+        }
+    }
+    // 一格都没展开出来说明矩形与索引对不上（表格结构刚变过），退回文字选区更安全。
+    //   只剩一格是合法的：单击格内边距带与三击选的就是单格。
+    if (picked.empty()) return false;
+    std::sort(picked.begin(), picked.end(),
               [](const CellBlocks& a, const CellBlocks& b) { return a.first < b.first; });
     const size_t last = n_blocks - 1;
     const FlowPos end = (*view_.block_flow)[last] + (*view_.block_flow_span)[last];
@@ -561,19 +577,17 @@ bool CaretResolver::setCellBlocks(std::vector<CellBlocks> cells, FlowPos caret_f
     };
     // 包络：每格取"首块起点 / 末块终点"，再取 min/max。空格两头相等，包络因此可能退化
     //   —— 那是合法的（"选中了一个空格"这件事照样成立，只是没有内容可删）。
-    cell_lo_ = flow_of(cells.front().first);
-    cell_hi_ = flow_end_of(cells.front().first + cells.front().count - 1);
-    for (const CellBlocks& c : cells) {
+    cell_lo_ = flow_of(picked.front().first);
+    cell_hi_ = flow_end_of(picked.front().first + picked.front().count - 1);
+    for (const CellBlocks& c : picked) {
         cell_lo_ = std::min(cell_lo_, flow_of(c.first));
         cell_hi_ = std::max(cell_hi_, flow_end_of(c.first + c.count - 1));
     }
     // sel_ 一个字都不动：它是用户落下的两个原值，拖选每动一下都要靠它判
     //   "首尾还在不在同一格"（往回拖要能退回文字选区）。把它改写成包络，反向拖选
     //   就再也长不回去 —— 锚点被搬到了最早那一格的起点上。
-    //   包络只当摘要交给 selection()（见头文件的这一段），端点吸附由调用方决定：
-    //   单格那一路（selectCellAtPara）自己先 setSelection。
     cell_mask_.clear();
-    for (const CellBlocks& c : cells) {
+    for (const CellBlocks& c : picked) {
         const int lo = c.first;
         const int hi = c.first + c.count;
         if (!cell_mask_.empty() && lo <= cell_mask_.back().focus) {
@@ -582,13 +596,10 @@ bool CaretResolver::setCellBlocks(std::vector<CellBlocks> cells, FlowPos caret_f
             cell_mask_.push_back(Range{lo, hi});
         }
     }
-    cell_blocks_ = std::move(cells);
+    cell_blocks_ = std::move(picked);
     sel_cell_ = true;
-    if (caret_flow < 0) {
-        cell_caret_ = -1;
-    } else {
-        cell_caret_ = caret_flow > end ? end : caret_flow;
-    }
+    // 插入点钉在焦点格的末尾：焦点格内怎么拖，这个位置都不逐字漂。
+    cell_caret_ = caret_flow > end ? end : caret_flow;
     // 整格选的插入点永远不在折行那边界上（它在格末），行别与列位都归零。
     sel_.focus.affinity = 0;
     vertical_goal_valid_ = false;

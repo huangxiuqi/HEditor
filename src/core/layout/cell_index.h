@@ -30,6 +30,16 @@ struct CellNode {
     int cell = -1;
 
     /**
+     * 占几行（合并行）。整格选区按矩形展开时要按它判相交：合并格跨进矩形也算选到。
+     */
+    int row_span = 1;
+
+    /**
+     * 占几列（合并列）。
+     */
+    int col_span = 1;
+
+    /**
      * 首块。
      */
     int first_block = -1;
@@ -166,6 +176,8 @@ struct CellIndex {
                 CellNode n;
                 n.table = ti;
                 n.cell = ci;
+                n.row_span = c.row_span;
+                n.col_span = c.col_span;
                 n.first_block = c.first_block;
                 n.block_count = c.block_count;
                 n.slot = CellSlot{t.handle, c.row, c.cell};
