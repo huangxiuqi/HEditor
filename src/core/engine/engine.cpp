@@ -680,7 +680,7 @@ std::string EditorEngine::paraFormatAtJson() const {
     if (p.size && p.size->kind == LengthKind::Abs)
         j["sz"] = static_cast<double>(emuToPt(p.size->abs_emu));
     if (p.line_rule) j["lr"] = lineSpacingRuleName(*p.line_rule);
-    if (p.line_factor) j["lf"] = *p.line_factor;
+    if (p.line_240) j["lf"] = *p.line_240;
     if (p.line_exact && p.line_exact->kind == LengthKind::Abs)
         j["lx"] = static_cast<double>(emuToPt(p.line_exact->abs_emu));
     if (p.space_before && p.space_before->kind == LengthKind::Abs)

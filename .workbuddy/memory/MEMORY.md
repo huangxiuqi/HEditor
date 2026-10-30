@@ -50,6 +50,8 @@
   矩形没变时差集为空 ⇒ 脏区为空 ⇒ 画布停在旧色上（读引擎帧看不见，帧是现场拼的）。
 - 单位：`caret().rect` 是设备像素，`selection().rects` 与控件矩形是磅（读像素 / 点控件先乘
   `ZOOM` = zoom×4/3×dpr，`D.stats().zoom` 只是倍数不是密度）；行距基准是单倍行高，空段也要有行盒。
+- 行距倍数是 1/240 行的整数（`ParaFormat::line_240`，OOXML `w:line` 同口径，240 = 单倍）；
+  文档 JSON 的 `"lf"` 写整数，公开面仍是小数，折算只在 `web/src/editor.ts` 与 `format_map.cpp`。
 - 行距三态（auto/exact/atLeast）在 `BlockSpec.line_spacing`，行高统一走 `lineHeightFor`；
   `exact` 比墨迹矮时 `LineBox.clip_text` 为真，绘制侧按行进出裁剪栈 —— 裁剪一律用
   `Bitmap::clipMark/restoreToMark`（按深度退回），布尔配对少退一次会让整块画布一直被裁。

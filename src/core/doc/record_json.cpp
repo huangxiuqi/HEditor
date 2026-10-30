@@ -3,6 +3,7 @@
 #include <charconv>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 
 #include "core/doc/length.h"
 
@@ -113,7 +114,7 @@ ordered_json paraJson(const ParaFormatPatch& p) {
     if (p.size.has_value()) j["sz"] = printLength(*p.size);
     if (p.wm.has_value()) j["wm"] = writingModeJson(*p.wm);
     if (p.line_rule.has_value()) j["lr"] = lineSpacingRuleName(*p.line_rule);
-    if (p.line_factor.has_value()) j["lf"] = floatText(*p.line_factor);
+    if (p.line_240.has_value()) j["lf"] = *p.line_240;
     if (p.line_exact.has_value()) j["lx"] = printLength(*p.line_exact);
     if (p.space_before.has_value()) j["sb"] = printLength(*p.space_before);
     if (p.space_after.has_value()) j["sa"] = printLength(*p.space_after);
@@ -375,6 +376,25 @@ bool readFloat(const ordered_json& j, const char* key, float* out) {
     return parseFloatText(j[key].get<std::string>(), out);
 }
 
+/**
+ * 读倍数行距的刻度值（240 分之一行，240 = 单倍）。
+ *
+ * 只收整数：倍数与 OOXML 的 w:line 同口径，1.3 倍的线上形式是 312。收十进制小数会让
+ * 同一个值有两种写法，而小数一旦落进浮点就回不到整数刻度，再写出去就是另一个数。
+ * @param j 对象
+ * @param key 键
+ * @param out 写回刻度值
+ * @return true = 缺键或合法；false = 类型不对或超出范围
+ */
+bool readLineFactor(const ordered_json& j, const char* key, int* out) {
+    if (!j.contains(key)) return true;
+    if (!j[key].is_number_integer()) return false;
+    const long long v = j[key].get<long long>();
+    if (v < 0 || v > std::numeric_limits<int>::max()) return false;
+    *out = static_cast<int>(v);
+    return true;
+}
+
 ordered_json tableJson(const TableSpec& t) {
     ordered_json j = ordered_json::object();
     if (!t.columns.empty()) {
@@ -495,9 +515,9 @@ bool readPara(const Context& ctx, const ordered_json& j, const char* key, ParaFo
         out->line_rule = rule;
     }
     if (p.contains("lf")) {
-        float v = 0.0f;
-        if (!readFloat(p, "lf", &v)) return false;
-        out->line_factor = v;
+        int v = 0;
+        if (!readLineFactor(p, "lf", &v)) return false;
+        out->line_240 = v;
     }
     if (p.contains("lx")) {
         Length len;

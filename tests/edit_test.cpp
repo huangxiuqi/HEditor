@@ -13019,7 +13019,7 @@ int main() {
 
         // 1.5 倍：行槽跟着长，字面盒一动不动，光标跟的是行槽。
         ParaFormatPatch p15;
-        p15.line_factor = 1.5f;
+        p15.line_240 = 360;
         e.setCaret(0, 0);
         expectTrue(e.applyParaFormatAndRender(p15), "第一段设 1.5 倍行距");
         expectNear(slot(0), adv0 * 1.5f, 0.01, "1.5 倍：行槽 = 单倍 x 1.5");
@@ -13043,7 +13043,7 @@ int main() {
 
         // 0.8 倍：真的压行。行高以单倍为基准乘倍数，倍数小于 1 时行槽跟着变矮。
         ParaFormatPatch p08;
-        p08.line_factor = 0.8f;
+        p08.line_240 = 192;
         expectTrue(e.applyParaFormatAndRender(p08), "改成 0.8 倍");
         expectNear(slot(0), adv0 * 0.8f, 0.01, "0.8 倍：行槽真的压到单倍的八成");
         expectTrue(slot(0) < adv0 - 1.0f, "反向：0.8 倍确实比单倍矮");
@@ -13052,7 +13052,7 @@ int main() {
 
         // 倍数为 0 时按下限 0.1 算：行高不能是 0，否则一页上所有行叠在一处。
         ParaFormatPatch p0;
-        p0.line_factor = 0.0f;
+        p0.line_240 = 0;
         expectTrue(e.applyParaFormatAndRender(p0), "倍数设成 0");
         expectTrue(slot(0) > 0.5f,
                    "倍数 0 被下限顶住（实际行高 " + std::to_string(slot(0)) + " 磅）");
@@ -13060,7 +13060,7 @@ int main() {
 
         // 段前距：两段的空白相加，不折叠（CSS 的 margin 会折叠成 6，那是唯一不能照抄的地方）。
         ParaFormatPatch p1;
-        p1.line_factor = 1.0f;
+        p1.line_240 = 240;
         expectTrue(e.applyParaFormatAndRender(p1), "第一段恢复单倍");
         auto lineTop = [&](int para) -> float {
             const ParaIndex& pi = lay.para_index[static_cast<size_t>(para)];
@@ -13148,7 +13148,7 @@ int main() {
                        0.01, "前提：单倍行距下行槽顶就是字面盒顶（没有多余空白）");
 
             ParaFormatPatch p15b;
-            p15b.line_factor = 1.5f;
+            p15b.line_240 = 360;
             e6.setCaret(0, 0);
             expectTrue(e6.applyParaFormatAndRender(p15b), "第一段设 1.5 倍");
             const LineBox& mid = e6.layout().lines.front();

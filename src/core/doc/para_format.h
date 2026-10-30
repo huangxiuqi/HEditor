@@ -81,6 +81,25 @@ inline bool lineSpacingRuleFromName(const std::string& name, LineSpacingRule* ou
 }
 
 /**
+ * 倍数行距的刻度：240 分之一行。
+ *
+ * 与 OOXML 的 w:line 同一口径（lineRule 为 auto 时它就是 240 分之一行），240 即单倍。
+ * 整数刻度让"1.3 倍"这类十进制说法原样存下来：1.3 存 312，写盘读回还是 312。用浮点存
+ * 则 1.3f 只是 1.29999995，最短十进制文本虽然仍是 1.3，二进制里已经不是一个精确的
+ * 十进制值，任何一层按数值比较都会得到"不等于 1.3"。
+ */
+inline constexpr int kLineFactorUnits = 240;
+
+/**
+ * 刻度值换算成排版用的浮点倍数。
+ * @param units 刻度值（240 = 单倍）
+ * @return 倍数（编译产物的表示，文档里不存浮点）
+ */
+inline float lineFactorFloat(int units) {
+    return static_cast<float>(units) / static_cast<float>(kLineFactorUnits);
+}
+
+/**
  * 段落格式。只对段落结束标记（ParagraphMark）有意义，其余种类读它没有定义。
  *
  * 默认值取自 BlockSpec 的默认值（12 磅字号、单倍行距、6 磅段后距）：于是"末尾还没有
@@ -110,10 +129,12 @@ struct ParaFormat {
     LineSpacingRule line_rule = LineSpacingRule::Auto;
 
     /**
-     * 倍数行距的倍数（相对单倍行高，即字体的 ascent + descent + lineGap）。
-     * 默认 1.0 与 Word 的单倍行距同口径；只在 line_rule 是 auto 时有意义。
+     * 倍数行距的刻度值（240 分之一行，240 即单倍，见 kLineFactorUnits）。
+     *
+     * 相对单倍行高（字体的 ascent + descent + lineGap）：240 与 Word 的单倍行距同口径，
+     * 312 就是 1.3 倍。只在 line_rule 是 auto 时有意义。
      */
-    float line_factor = 1.0f;
+    int line_240 = kLineFactorUnits;
 
     /**
      * 固定值 / 最小值的磅值（EMU）。0 视为没设，按 auto 处理。
@@ -192,9 +213,9 @@ struct ParaFormatPatch {
     std::optional<LineSpacingRule> line_rule;
 
     /**
-     * 覆盖行距倍数（只在 auto 档生效）。
+     * 覆盖行距倍数的刻度值（240 分之一行，只在 auto 档生效）。
      */
-    std::optional<float> line_factor;
+    std::optional<int> line_240;
 
     /**
      * 覆盖行距的固定值（exact / atLeast 档，必须是绝对长度）。
@@ -237,7 +258,7 @@ struct ParaFormatPatch {
      */
     bool empty() const {
         return !font_index.has_value() && !size.has_value() && !wm.has_value() &&
-               !line_rule.has_value() && !line_factor.has_value() && !line_exact.has_value() &&
+               !line_rule.has_value() && !line_240.has_value() && !line_exact.has_value() &&
                !space_before.has_value() && !space_after.has_value() &&
                !page_break_before.has_value() && !language.has_value() && !color.has_value() &&
                !fallback_font_indices.has_value();

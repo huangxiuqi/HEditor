@@ -79,7 +79,7 @@ ParaFormatPatch paraPatchOf(const BlockSpec& b) {
     p.size = Length::abs(ptToEmu(b.size_pt));
     p.wm = b.wm;
     p.line_rule = b.line_spacing.rule;
-    p.line_factor = b.line_spacing.factor;
+    p.line_240 = static_cast<int>(b.line_spacing.factor * kLineFactorUnits + 0.5f);
     if (b.line_spacing.exact_pt > 0.0f)
         p.line_exact = Length::abs(ptToEmu(b.line_spacing.exact_pt));
     p.space_before = Length::abs(ptToEmu(b.space_before_pt));

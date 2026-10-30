@@ -29,7 +29,7 @@ void applyParaFormatPatch(const ParaFormatPatch& patch, ParaFormat* base) {
     if (patch.size.has_value()) base->size = *patch.size;
     if (patch.wm.has_value()) base->wm = *patch.wm;
     if (patch.line_rule.has_value()) base->line_rule = *patch.line_rule;
-    if (patch.line_factor.has_value()) base->line_factor = *patch.line_factor;
+    if (patch.line_240.has_value()) base->line_240 = *patch.line_240;
     if (patch.line_exact.has_value()) base->line_exact = *patch.line_exact;
     if (patch.space_before.has_value()) base->space_before = *patch.space_before;
     if (patch.space_after.has_value()) base->space_after = *patch.space_after;
@@ -46,7 +46,7 @@ ParaFormatPatch mergeParaFormatPatch(const ParaFormatPatch& under, const ParaFor
     if (over.size.has_value()) out.size = over.size;
     if (over.wm.has_value()) out.wm = over.wm;
     if (over.line_rule.has_value()) out.line_rule = over.line_rule;
-    if (over.line_factor.has_value()) out.line_factor = over.line_factor;
+    if (over.line_240.has_value()) out.line_240 = over.line_240;
     if (over.line_exact.has_value()) out.line_exact = over.line_exact;
     if (over.space_before.has_value()) out.space_before = over.space_before;
     if (over.space_after.has_value()) out.space_after = over.space_after;

@@ -1609,7 +1609,8 @@ std::string parseCharPatch(const std::string& text, CharFormat* out) {
 }
 
 /**
- * 段落格式补丁：fi（字体）/ sz（字号磅）/ lf（行距倍数）/ sb（段前距磅）/ sa（段后距磅）/ pbb（段前分页）。
+ * 段落格式补丁：fi（字体）/ sz（字号磅）/ lf（行距倍数，240 分之一行）/ sb（段前距磅）/
+ *   sa（段后距磅）/ pbb（段前分页）。
  * @param text JSON 文本
  * @param out 解析结果
  * @return 空串 = 成功；否则是给人看的原因
@@ -1626,7 +1627,14 @@ std::string parseParaPatch(const std::string& text, ParaFormatPatch* out) {
             return "lr 只能是 auto / exact / atLeast";
         out->line_rule = rule;
     }
-    if (j.contains("lf") && j["lf"].is_number()) out->line_factor = j["lf"].get<float>();
+    if (j.contains("lf")) {
+        // 倍数与 OOXML 的 w:line 同口径：整数，240 分之一行。收小数就等于允许同一个值
+        //   有两种写法，而小数落进浮点之后再也回不到整数刻度。
+        if (!j["lf"].is_number_integer()) return "lf 必须是 240 分之一行的整数（1.3 倍 = 312）";
+        const long long v = j["lf"].get<long long>();
+        if (v < 0 || v > 240 * 1000) return "lf 超出范围（0 到 1000 行）";
+        out->line_240 = static_cast<int>(v);
+    }
     if (j.contains("lx") && j["lx"].is_number())
         out->line_exact = Length::abs(ptToEmu(j["lx"].get<double>()));
     if (j.contains("sb") && j["sb"].is_number())

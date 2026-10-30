@@ -491,6 +491,10 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
     return out;
   }
 
+  // 倍数行距的刻度：240 分之一行，与 OOXML 的 w:line 同口径（240 = 单倍）。公开面仍是
+  //   小数倍数，折算只在这一层做 —— 引擎与文件里存的都是整数刻度，不出现浮点。
+  const LINE_FACTOR_UNITS = 240;
+
   /**
    * 段落格式补丁 → 引擎键名（fi / sz / lr / lf / lx / sb / sa / pbb）。
    * @param patch 公开面的补丁
@@ -502,7 +506,16 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
     if (patch.size !== undefined) out.sz = patch.size;
     if (patch.lineSpacing !== undefined) {
       out.lr = patch.lineSpacing.rule;
-      if (patch.lineSpacing.factor !== undefined) out.lf = patch.lineSpacing.factor;
+      if (patch.lineSpacing.factor !== undefined) {
+        const v = patch.lineSpacing.factor;
+        const units = Number.isFinite(v) ? v * LINE_FACTOR_UNITS : Number.NaN;
+        // 折算不上的值直接拒绝，不四舍五入：静默改掉用户给的倍数，读回时才发现对不上，
+        //   比当场报错难查。界面只给 0.05 的档位，全都落在刻度上。
+        if (!(units >= 0) || Math.abs(units - Math.round(units)) > 1e-6) {
+          throw new TypeError(`行距倍数必须是 1/240 行的整数倍（1.3 可以，1.08 不行）：${String(v)}`);
+        }
+        out.lf = Math.round(units);
+      }
       if (patch.lineSpacing.exact !== undefined) out.lx = patch.lineSpacing.exact;
     }
     if (patch.spaceBefore !== undefined) out.sb = patch.spaceBefore;
@@ -590,7 +603,7 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       const spacing: { rule: LineSpacingRule; factor?: number; exact?: number } = {
         rule: typeof o.lr === 'string' ? (o.lr as LineSpacingRule) : 'auto',
       };
-      if (typeof o.lf === 'number') spacing.factor = o.lf;
+      if (typeof o.lf === 'number') spacing.factor = o.lf / LINE_FACTOR_UNITS;
       if (typeof o.lx === 'number') spacing.exact = o.lx;
       out.lineSpacing = spacing;
     }

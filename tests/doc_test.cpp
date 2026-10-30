@@ -1128,7 +1128,7 @@ int main() {
         mark.para.size = Length::abs(ptToEmu(10.5));
         mark.para.wm =
             WritingMode{InlineAxis::Vertical, BlockFlow::RightToLeft, TextOrientation::Upright};
-        mark.para.line_factor = 1.25f;
+        mark.para.line_240 = 300;
         mark.para.space_after = Length::abs(ptToEmu(6.0));
         mark.para.page_break_before = false;
         mark.para.language = internLanguage("zh-CN");
@@ -1164,12 +1164,46 @@ int main() {
             const bool same = mp.para.font_index.has_value() && *mp.para.font_index == 7 &&
                               mp.para.wm.has_value() &&
                               mp.para.wm->inline_axis == InlineAxis::Vertical &&
-                              mp.para.line_factor.has_value() && *mp.para.line_factor == 1.25f &&
+                              mp.para.line_240.has_value() && *mp.para.line_240 == 300 &&
                               mp.para.fallback_font_indices.has_value() &&
                               *mp.para.fallback_font_indices == std::vector<int>({2, 5}) &&
                               mp.para.language.has_value() && *mp.para.language != nullptr &&
                               std::string(*mp.para.language) == "zh-CN" && mp.style == "正文";
             expectTrue(same, "段落覆盖逐项读回来（书写模式、行距、回退字体、语言）");
+        }
+
+        // 倍数行距按 240 分之一行的整数落盘：1.3 倍写出去是 312，读回来还是 312，中间
+        //   不经过浮点。只有这一种写法能保证"写进去的十进制值"与"读回来的值"是同一个数。
+        {
+            doc::MarkPayload mark;
+            mark.para.line_240 = 312;
+            const Doc one = doc::adopt(
+                doc::makeNode(
+                    1, NodeKind::Document, {},
+                    {doc::makeNode(2, NodeKind::Section, SectionSpec{},
+                                   {doc::makeNode(3, NodeKind::ParagraphMark, mark, {})})}),
+                4);
+            const auto ser = doc::serialize(one);
+            expectTrue(ser.ok && ser.text.find("\"lf\":312") != std::string::npos,
+                       "行距倍数写成 240 分之一行的整数（1.3 倍 = 312）");
+            expectTrue(ser.text.find("\"lf\":\"1.3\"") == std::string::npos,
+                       "反向：不写十进制文本形式");
+            Doc back;
+            const auto de = doc::deserialize(ser.text, &back);
+            const doc::Node* got = doc::findNode(back, 3);
+            expectTrue(de.ok && got != nullptr, "带倍数行距的文档读回来了");
+            if (got != nullptr) {
+                const auto& mp = std::get<doc::MarkPayload>(got->payload);
+                expectTrue(mp.para.line_240.has_value() && *mp.para.line_240 == 312,
+                           "读回来仍是 312（1.3 倍没有变成 1.29999995）");
+            }
+            std::string decimal = ser.text;
+            const std::string from = "\"lf\":312";
+            const std::size_t at = decimal.find(from);
+            if (at != std::string::npos) decimal.replace(at, from.size(), "\"lf\":\"1.3\"");
+            Doc bad;
+            expectTrue(!doc::deserialize(decimal, &bad).ok,
+                       "反向：十进制文本形式的 lf 被拒绝，不静默折算");
         }
 
         // 控件逐字段：每个变体都过一遍落盘，读回来必须与写进去的相等。
@@ -1245,8 +1279,8 @@ int main() {
                                           : ("v1 的文件读不进来：" + v1_read.error));
         expectTrue(v1_read.ok && doc::paraTexts(v1_back) == std::vector<std::u32string>{U"我们"},
                    "v1 的码点数组还原成同一段文字");
-        expectTrue(rich_ser.text.find("\"lf\":\"1.25\"") != std::string::npos,
-                   "浮点写最短表示（1.25 而不是 1.25000000）");
+        expectTrue(rich_ser.text.find("\"lf\":300") != std::string::npos,
+                   "倍数行距写成整数刻度（300 即 1.25 倍）");
 
         doc::SerializeOptions with_fonts;
         // 三样都给：PostScript 名当身份、族名给人看、文件名排在最后。

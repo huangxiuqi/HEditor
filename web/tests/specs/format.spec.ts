@@ -266,11 +266,18 @@ test.describe('格式', () => {
         return { h: rs[0] ? rs[0].h : 0, back };
       };
       const one = await band({ rule: 'auto', factor: 1 });
+      const onePointThree = await band({ rule: 'auto', factor: 1.3 });
       const fixed20 = await band({ rule: 'exact', exact: 20 });
       const least30 = await band({ rule: 'atLeast', exact: 30 });
       const least5 = await band({ rule: 'atLeast', exact: 5 });
-      return { one, fixed20, least30, least5 };`);
+      return { one, onePointThree, fixed20, least30, least5 };`);
     check('前提：单倍行距量得出来', r.one.h > 10, `反白高 ${r.one.h}`);
+    // 倍数按 1/240 行存，1.3 就是 312：读回必须还是 1.3，不能变成 1.2999999523162842。
+    check('★ 1.3 倍读回还是 1.3（整数刻度，不经过浮点）',
+              r.onePointThree.back?.factor === 1.3, JSON.stringify(r.onePointThree.back));
+    check(' 1.3 倍的行高就是单倍的 1.3 倍',
+              Math.abs(r.onePointThree.h - r.one.h * 1.3) < 0.05,
+              `单倍 ${r.one.h}，1.3 倍 ${r.onePointThree.h}`);
     check('★ 固定值 20：反白高就是 20 磅',
               Math.abs(r.fixed20.h - 20) < 0.05, `反白高 ${r.fixed20.h}`);
     check(' 读回是固定值 20 磅',

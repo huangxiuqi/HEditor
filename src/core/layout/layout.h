@@ -520,7 +520,8 @@ struct LineSpacing {
     LineSpacingRule rule = LineSpacingRule::Auto;
 
     /**
-     * 倍数（auto 档）。
+     * 倍数（auto 档）。文档侧按 1/240 行的整数存（ParaFormat 的 line_240），编译时换算
+     * 成浮点倍数 —— 排版只做乘法，不再关心刻度。
      */
     float factor = 1.0f;
 
