@@ -18,17 +18,7 @@ namespace heditor {
 /** 样例文书：单测与探针共用的固定内容。 */
 
 BlockSpec mixedParagraphBlock(int cjk_font_index, int latin_font_index) {
-    BlockSpec b;
-    b.font_index = cjk_font_index;
-    b.size_pt = 12.5f;
-    b.wm = WritingMode::HorizontalTB();
-    b.line_spacing.factor = 1.25f;
-    b.language = "zh";
-    b.color = Color::rgb(24, 24, 24);
-    // 拉丁字体挂回退：NotoSansSC-VF 有 ¹²³（U+00B9/B2/B3），
-    //   但没有 ⁰⁹（U+2070/U+2079）——而"10⁹/L"是检验报告的标准写法。
-    if (latin_font_index >= 0) b.fallback_font_indices.push_back(latin_font_index);
-    b.setText(
+    BlockSpec b = cjkBlock(
         "体格检查：T 36.8℃，P 92 次/分，R 20 次/分，BP 138/86 mmHg。"
         "辅助检查：2026-10-01 血常规示 WBC 11.2×10⁹/L，N 78.5%，Hb 132 g/L，PLT 216×10⁹/L；"
         "心电图示 P-R 间期 0.12 s，QRS 波群时限 0.08 s，QTc 0.41 s；"
@@ -37,7 +27,23 @@ BlockSpec mixedParagraphBlock(int cjk_font_index, int latin_font_index) {
         "3. Type 2 Diabetes Mellitus。"
         "处置：Amiodarone 150 mg iv 缓慢推注，继以 1 mg/min 静脉维持 6 h，后 0.5 mg/min 维持 18 h；"
         "Metoprolol 25 mg po bid；复查 ECG、电解质及甲状腺功能。"
-        "医师签名：______________   日期：2026-10-09");
+        "医师签名：______________   日期：2026-10-09",
+        cjk_font_index, 12.5f, 1.25f);
+    // 拉丁字体挂回退：NotoSansSC-VF 有 ¹²³（U+00B9/B2/B3），
+    //   但没有 ⁰⁹（U+2070/U+2079）——而"10⁹/L"是检验报告的标准写法。
+    if (latin_font_index >= 0) b.fallback_font_indices.push_back(latin_font_index);
+    return b;
+}
+
+BlockSpec cjkBlock(std::string text, int cjk_font_index, float size_pt, float line_factor) {
+    BlockSpec b;
+    b.font_index = cjk_font_index;
+    b.size_pt = size_pt;
+    b.wm = WritingMode::HorizontalTB();
+    b.line_spacing.factor = line_factor;
+    b.language = "zh";
+    b.color = Color::rgb(24, 24, 24);
+    b.setText(text);
     return b;
 }
 
@@ -46,14 +52,7 @@ std::vector<BlockSpec> sampleDocument(int cjk_font_index, int mongol_font_index,
     std::vector<BlockSpec> blocks;
 
     // 第 1 页：中文横排
-    BlockSpec zh;
-    zh.font_index = cjk_font_index;
-    zh.size_pt = 12.0f;
-    zh.wm = WritingMode::HorizontalTB();
-    zh.line_spacing.factor = 1.2f;
-    zh.language = "zh";
-    zh.color = Color::rgb(24, 24, 24);
-    zh.setText(
+    BlockSpec zh = cjkBlock(
         "患者主诉：反复心悸3天，加重1天。"
         "现病史：患者3天前无明显诱因出现心悸，伴胸闷、气短，活动后加重，休息后稍缓解，"
         "无黑矇、晕厥，无胸痛、咯血。既往史：高血压病史10年，规律服用氨氯地平5mg每日一次，"
@@ -62,7 +61,8 @@ std::vector<BlockSpec> sampleDocument(int cjk_font_index, int mongol_font_index,
         "双肺呼吸音清，未闻及干湿性啰音。心界不大，心率92次/分，律齐，"
         "各瓣膜听诊区未闻及病理性杂音。腹软，无压痛及反跳痛。双下肢无水肿。"
         "初步诊断：1. 心律失常 阵发性室上性心动过速；2. 高血压病2级（高危）；3. 2型糖尿病。"
-        "医师签名：______________");
+        "医师签名：______________",
+        cjk_font_index, 12.0f, 1.2f);
     blocks.push_back(std::move(zh));
 
     // 第 2 页：蒙文竖排，列序从左往右（vertical-lr）
@@ -385,16 +385,9 @@ std::vector<BlockSpec> longDocument(int paragraphs, int font_index) {
     std::vector<BlockSpec> blocks;
     blocks.reserve(static_cast<size_t>(std::max(0, paragraphs)));
     for (int i = 0; i < paragraphs; ++i) {
-        BlockSpec b;
-        b.font_index = font_index;
-        b.size_pt = 14.0f;
-        b.wm = WritingMode::HorizontalTB();
-        b.line_spacing.factor = 1.275f;
-        b.space_after_pt = 6.0f;
-        b.language = "zh";
-        b.color = Color::rgb(24, 24, 24);
-        b.setText("第 " + std::to_string(i + 1) + " 次病程记录：" + kSentences[i % kCount]);
-        blocks.push_back(std::move(b));
+        blocks.push_back(cjkBlock(
+            "第 " + std::to_string(i + 1) + " 次病程记录：" + kSentences[i % kCount],
+            font_index, 14.0f, 1.275f));
     }
     return blocks;
 }
@@ -522,15 +515,8 @@ std::vector<BlockSpec> scenarioBlocks(int scenario, int cjk_font_index, int mong
             break;
         }
         case 3: {  // 中文长文本横排，看断行与分页
-            BlockSpec b;
-            b.font_index = cjk_font_index;
-            b.size_pt = 13.0f;
-            b.wm = WritingMode::HorizontalTB();
-            b.line_spacing.factor = 1.25f;
-            b.language = "zh";
-            b.color = Color::rgb(24, 24, 24);
-            b.setText(chineseNote() + chineseNote());
-            blocks.push_back(std::move(b));
+            blocks.push_back(
+                cjkBlock(chineseNote() + chineseNote(), cjk_font_index, 13.0f, 1.25f));
             break;
         }
         case 4: {  // 中英文混排 + 拉丁回退（验证 10⁹ 这类上标不再出豆腐块）
@@ -550,15 +536,8 @@ std::vector<BlockSpec> scenarioBlocks(int scenario, int cjk_font_index, int mong
             break;
         }
         case 6: {  // 档 1：可编辑文档（短文本 —— 一页放得下，便于数增量）
-            BlockSpec b;
-            b.font_index = cjk_font_index;
-            b.size_pt = 14.0f;
-            b.wm = WritingMode::HorizontalTB();
-            b.line_spacing.factor = 1.275f;
-            b.language = "zh";
-            b.color = Color::rgb(24, 24, 24);
-            b.setText("患者主诉：反复心悸三天，加重一天。");
-            blocks.push_back(std::move(b));
+            blocks.push_back(cjkBlock("患者主诉：反复心悸三天，加重一天。", cjk_font_index,
+                                      14.0f, 1.275f));
             break;
         }
         case 7: {  // 档 2：长文档 —— 多段才有"可复用的前缀"可谈（段数见下面这行）
@@ -566,15 +545,8 @@ std::vector<BlockSpec> scenarioBlocks(int scenario, int cjk_font_index, int mong
             break;
         }
         case 9: {  // 行内原子：图片与公式的显式占位框（阶段 4）
-            BlockSpec b;
-            b.font_index = cjk_font_index;
-            b.size_pt = 14.0f;
-            b.wm = WritingMode::HorizontalTB();
-            b.line_spacing.factor = 1.275f;
-            b.language = "zh";
-            b.color = Color::rgb(24, 24, 24);
-            // 先设文本：setText 会清空对象表（锚点是按旧文本算的）。
-            b.setText("心电图：图三张，节律规整。");
+            // 文本由 cjkBlock 设好之后再挂对象：setText 会清空对象表。
+            BlockSpec b = cjkBlock("心电图：图三张，节律规整。", cjk_font_index, 14.0f, 1.275f);
             InlineObject img;
             img.cp = 4;
             img.kind = InlineObjectKind::Atom;
@@ -592,16 +564,8 @@ std::vector<BlockSpec> scenarioBlocks(int scenario, int cjk_font_index, int mong
             blocks.push_back(std::move(b));
 
             // 第二段纯文本：用来看原子把后面的字挤开、以及长到换行时原子整枚走。
-            BlockSpec b2;
-            b2.font_index = cjk_font_index;
-            b2.size_pt = 14.0f;
-            b2.wm = WritingMode::HorizontalTB();
-            b2.line_spacing.factor = 1.275f;
-            b2.space_after_pt = 6.0f;
-            b2.language = "zh";
-            b2.color = Color::rgb(24, 24, 24);
-            b2.setText(chineseNote() + chineseNote());
-            blocks.push_back(std::move(b2));
+            blocks.push_back(cjkBlock(chineseNote() + chineseNote(), cjk_font_index, 14.0f,
+                                      1.275f));
             break;
         }
         default:
@@ -610,6 +574,88 @@ std::vector<BlockSpec> scenarioBlocks(int scenario, int cjk_font_index, int mong
     }
 
     return blocks;
+}
+
+std::vector<BlockSpec> stressDocument(int paras, int chars, bool diverse, int cjk_font_index) {
+    if (paras < 1) paras = 1;
+    if (chars < 1) chars = 1;
+    std::vector<BlockSpec> blocks;
+    blocks.reserve(static_cast<size_t>(paras));
+    for (int i = 0; i < paras; ++i) {
+        std::string text;
+        for (int k = 0; k < chars; ++k) {
+            if (diverse) {
+                // 连续的基本汉字码点当池子：真实文档的不同字数在几百到几千之间，这里取 800。
+                //   整篇同一个字时字形集合只有一个，字形缓存与块缓存都命中到失真，
+                //   落存储的次数与字节都量不出来。
+                appendUtf8(&text, 0x4E00u + (static_cast<uint32_t>(i) * chars + k) % 800u);
+            } else {
+                text += "字";
+            }
+        }
+        blocks.push_back(cjkBlock(std::move(text), cjk_font_index, 12.0f, 1.05f));
+    }
+    return blocks;
+}
+
+std::vector<BlockSpec> textDocument(const std::string& text, int repeat, int cjk_font_index) {
+    // 空串 = 只有一个空段落的文档：块流为空的话引擎里没有可编辑的段落，
+    //   "清空文档"就没有入口，而 setText('') 只会静默保留旧内容。
+    if (text.empty()) return {cjkBlock(std::string(), cjk_font_index, 12.0f, 1.0f)};
+    if (repeat < 1) repeat = 1;
+    std::vector<std::string> paras;
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t nl = text.find('\n', pos);
+        if (nl == std::string::npos) nl = text.size();
+        if (nl > pos) paras.emplace_back(text, pos, nl - pos);
+        pos = nl + 1;
+    }
+    if (paras.empty()) return {};
+    std::vector<BlockSpec> blocks;
+    blocks.reserve(paras.size() * static_cast<size_t>(repeat));
+    for (int r = 0; r < repeat; ++r) {
+        for (const std::string& t : paras) {
+            blocks.push_back(cjkBlock(t, cjk_font_index, 12.0f, 1.0f));
+        }
+    }
+    return blocks;
+}
+
+DemoFormSample formSample(int variant, int cjk_font_index, int mongol_font_index,
+                          int latin_font_index) {
+    DemoFormSample out;
+    // 变体 1 用长文本场景（跨行字段要够长才折行），其余用那句 17 字的主诉。
+    out.blocks = scenarioBlocks(variant == 1 ? 3 : 6, cjk_font_index, mongol_font_index,
+                                latin_font_index);
+    auto push = [&out](int so, int eo, ControlKind kind, const char* key, bool readonly) {
+        DemoFieldSpec f;
+        f.para = 0;
+        f.so = so;
+        f.eo = eo;
+        f.kind = kind;
+        f.key = key;
+        f.readonly = readonly;
+        out.fields.push_back(std::move(f));
+    };
+    if (variant == 1) {
+        push(5, 60, ControlKind::TextField, "history", false);
+        push(20, 26, ControlKind::TextField, "onset", true);
+    } else if (variant == 2) {
+        push(5, 7, ControlKind::TextField, "part1", false);
+        push(7, 9, ControlKind::TextField, "part2", false);
+        push(9, 11, ControlKind::TextField, "part3", false);
+    } else if (variant == 3) {
+        // 三层嵌套：外层盖住整串「反复心悸三天」，中层剥掉两端的字，内层只留「心悸」。
+        push(5, 11, ControlKind::TextField, "outer", false);
+        push(6, 10, ControlKind::TextField, "middle", false);
+        push(7, 9, ControlKind::TextField, "inner", false);
+    } else {
+        push(5, 9, ControlKind::TextField, "complaint", false);
+        push(9, 11, ControlKind::NumberField, "duration", true);
+        push(12, 16, ControlKind::TextField, "aggravate", false);
+    }
+    return out;
 }
 
 }  // namespace heditor

@@ -199,6 +199,20 @@ public:
     void setDocument(doc::Doc doc, const StyleSheet& sheet = {});
 
     /**
+     * 换一份文档，可选把光标搬回原位。
+     *
+     * 换文档会把光标归零。但重建同一份文本的树（改控件定义、改只读标记）时光标不该动；
+     *   而宿主按偏移自己搬会丢掉侧别与行别 —— 同一个偏移上有好几个位置（括号之间、控件
+     *   内外），只搬偏移等于把光标挪到那一处的默认位置上。
+     *
+     * @param doc 新修订
+     * @param sheet 样式表
+     * @param keep_caret 为真且文本未变时把光标连同侧别与行别一起搬回
+     * @returns 是否搬回了光标
+     */
+    bool replaceDocument(doc::Doc doc, const StyleSheet& sheet, bool keep_caret);
+
+    /**
      * 持有中的文档。引擎只认这一条装载入口，所以它一直有效（未装载时是一份空修订）。
      *
      * @return 持有中的修订（未装载时是一份空修订）

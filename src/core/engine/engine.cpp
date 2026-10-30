@@ -306,6 +306,26 @@ void EditorEngine::setDocument(doc::Doc doc, const StyleSheet& sheet) {
     installDocument(std::move(doc));
 }
 
+bool EditorEngine::replaceDocument(doc::Doc doc, const StyleSheet& sheet, bool keep_caret) {
+    const TextPos before = caret();
+    const int side = keep_caret ? caretSide() : -1;
+    const int line_aff = keep_caret ? caretLineAffinity() : 0;
+    std::string text_before;
+    if (keep_caret) {
+        for (const BlockSpec& b : blocks()) text_before += b.textUtf8();
+    }
+    setDocument(std::move(doc), sheet);
+    if (!keep_caret) return false;
+    std::string text_after;
+    for (const BlockSpec& b : blocks()) text_after += b.textUtf8();
+    // 换了内容：光标归零才是对的，硬搬会落到新文本的任意处。
+    if (text_before != text_after) return false;
+    if (before.para < 0 || before.para >= static_cast<int>(blocks().size())) return false;
+    if (before.offset > blocks()[static_cast<size_t>(before.para)].cp_text.size()) return false;
+    setCaretAtSideLine(before.para, before.offset, side, line_aff);
+    return true;
+}
+
 doc::SerializeOptions EditorEngine::fontWriteOptions() const {
     doc::SerializeOptions opt;
     // 身份按稳定性排：PostScript 名（OpenType 里唯一性有规范保证）→ 族名（给人看）→
