@@ -48,7 +48,7 @@ test.describe('编辑面：基准与键盘', () => {
 
   // 整页重画的分母，[2] 与 [2b] 的像素判据都拿它作参照。
   const full = state.baseline.repaintedPixels;
-  log.section('[2] 键盘路径：派真实 keydown，文档要变、光标要走（单段文档仍整页重画）');
+  log.section('[2] 键盘路径：派真实 keydown，文档要变、光标要走（单段文档全量重排、只重画一行带）');
   {
     const b = await probe.read(CP_LEN + 'return { n: cplen(H.paragraph(0)), o: CARET().offset };');
     await probe.read(key('心'));
@@ -59,8 +59,9 @@ test.describe('编辑面：基准与键盘', () => {
     check('插入的就是那个字', (await probe.read('return H.paragraph(0).includes("心");')) === true);
     check(' 单段文档：敲字仍是全量重排（脏段就是第一段）',
               a.st.layoutRan === true && a.st.layoutWasFull === true);
-    check(' 单段文档：敲字仍是整页重画（所在页内容变了）',
-              a.st.repaintedPixels >= full * 0.99,
+    // 重排是全量，重画不是：行带只覆盖这一行的墨迹（页顶那段空白不属于任何行）。
+    check(' 单段文档：敲字只重画那一行带，不是整页',
+              a.st.repaintedPixels > 0 && a.st.repaintedPixels < full / 10,
               `${a.st.repaintedPixels} vs 全量 ${full}`);
 
     // 改键不该落字：带 ctrl/alt/meta 一律忽略

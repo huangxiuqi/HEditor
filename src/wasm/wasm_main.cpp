@@ -54,17 +54,6 @@ void updateConfig(F f) {
     g_engine.setConfig(c);
 }
 
-WritingMode writingModeFromCode(int code) {
-    switch (code) {
-        case 1:
-            return WritingMode::VerticalLR();
-        case 2:
-            return WritingMode::VerticalRL();
-        default:
-            return WritingMode::HorizontalTB();
-    }
-}
-
 /**
  * 字体传入：JS 侧 fetch 到字节后在这里申请堆内存，再把指针交给引擎。
  */

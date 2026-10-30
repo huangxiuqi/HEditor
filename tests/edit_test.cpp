@@ -699,9 +699,8 @@ int main() {
                    "单段文档没有可复用的前缀 → 全量（多段增量见 [15]）");
 
         // 行带重画之后，这一格的判据从"整页重画"变成了"只重画脏行那一条带"。
-        //   这一份文档只有一行，而"页首行 + 页末行"的带按定义就是从页顶到页底 ——
-        //   所以这里不能拿"写入量小"当判据（单行页本来就该整页）。真正要钉的是
-        //   下面那条更强的：与"从零重排重画"的参照帧逐像素比。
+        //   这一份文档只有一行：带的上下界只比这一行的墨迹多留一档余量，页顶与页底
+        //   那段空白不属于任何行，不该被算进重贴范围。
         const long long wrote_px = es.repainted_pixels;
         const int band0 = es.band_y0;
         const int band1 = es.band_y1;
@@ -710,8 +709,9 @@ int main() {
                     band0, band1);
         // 判据基准是页高，不是帧高：帧按页号分槽之后，帧高 = 槽数 x 步距
         //   （含页间隙、而且槽数可能大于窗口页数），它不再等于一页。
-        expectTrue(band0 == 0 && band1 == e.pagePxHeight(),
-                   "单行页的行带 = 整页（页首行 + 页末行，带按定义从页顶到页底）");
+        const long long page_px = static_cast<long long>(e.pagePxWidth()) * e.pagePxHeight();
+        expectTrue(band0 > 0 && band1 < e.pagePxHeight() && wrote_px < page_px / 10,
+                   "单行页的行带只覆盖那一行（不从页顶起，也不到页底）");
         expectTrue(e.auditPageJson(0).find("\"diff\":0") != std::string::npos,
                    "敲字之后：页位图 == 从零光栅（增量光栅没留旧像素）");
 

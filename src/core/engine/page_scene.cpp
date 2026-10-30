@@ -25,6 +25,14 @@ namespace heditor {
 namespace {
 
 /**
+ * 行带比墨迹多留的一档余量（磅）。
+ *
+ * 字形抗锯齿会溢出字面盒半个设备像素，行内对象（图、控件括号）也可能贴边。
+ * 6 磅约 8 个设备像素，比实测溢出宽一档，又不至于把单行页推回整页。
+ */
+constexpr float kLineBandPadPt = 6.0f;
+
+/**
  * 混入一个颜色（四个通道）。
  * @param h 累加器
  * @param c 颜色
@@ -176,8 +184,11 @@ uint64_t lineVersion(const RenderInput& in, int li) {
 /**
  * 一页各行独占的块轴区间（页内磅）。
  *
- * 行带规则：相邻两组的分界取中线，第一组从页顶起、最后一组到页底止。
- * 单行页因此是整页 —— 这条判据保证擦除范围不会啃到相邻行的抗锯齿边。
+ * 行带规则：相邻两组的分界取中线（保证擦除范围不啃到相邻行的抗锯齿边）；
+ *   首组与末组只比自己的墨迹多留一档余量，不从页顶/页底起 —— 页边距那一段空白
+ *   不属于任何行，算进去会让"单行页"退化成整页重画。
+ *
+ * 新旧两拍的带由 diffPageScene 取并集，所以"行变高、旧墨在上方"那一档仍被覆盖。
  *
  * @param in 绘制输入
  * @param page 页号
@@ -223,9 +234,11 @@ std::vector<Rect> lineBandsForPage(const RenderInput& in, int page, float page_w
     size_t gi = 0;
     for (const Item& it : items) {
         while (gi + 1 < groups.size() && it.top >= groups[gi + 1].top - 0.01f) ++gi;
-        const float top_edge = (gi == 0) ? 0.0f : 0.5f * (groups[gi - 1].bottom + groups[gi].top);
-        const float bottom_edge =
-            (gi + 1 >= groups.size()) ? page_h : 0.5f * (groups[gi].bottom + groups[gi + 1].top);
+        const float top_edge = (gi == 0) ? std::max(0.0f, groups[gi].top - kLineBandPadPt)
+                                         : 0.5f * (groups[gi - 1].bottom + groups[gi].top);
+        const float bottom_edge = (gi + 1 >= groups.size())
+                                      ? std::min(page_h, groups[gi].bottom + kLineBandPadPt)
+                                      : 0.5f * (groups[gi].bottom + groups[gi + 1].top);
         const LineBox& lb = L.lines[static_cast<size_t>(it.line)];
         if (lb.vertical) {
             out[static_cast<size_t>(it.line)] = Rect{0.0f, 0.0f, page_w, page_h};
