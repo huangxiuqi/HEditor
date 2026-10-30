@@ -136,6 +136,65 @@ test.describe('格式', () => {
     check('★ 行距放大之后页数增加', r.after > r.before, r.before + ' → ' + r.after);
   });
 
+  test('★ 固定值行距比字矮时，墨迹在行槽底停住', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' } });
+
+    // 裁字只在"固定值比字矮"时发生，而且改完行距画面必须跟着重画 —— 后半句不是多余的：
+    //   页位图的新鲜度只比指纹，而"字形坐标一个都没动、只有裁切变了"是常态
+    //   （单行段落换行距规则时基线不动）。行指纹里漏了裁切，命令返回 true、读回也对，
+    //   屏幕上仍是旧帧。
+    const r = await p.read<any>(`
+      await H.setText('甲乙丙丁');
+      await H.setCaret({ para: 0, offset: 0 });
+      await D.stopBlink();
+      await H.flush();
+      const pm = await D.pageMetrics();
+      const depth = async () => {
+        // 呈现挂在 rAF 上：不等两帧读到的是上一拍的画布。
+        await new Promise((res) => requestAnimationFrame(() => requestAnimationFrame(res)));
+        const c = CARET();
+        const el = [...EL('.heditor-pages').querySelectorAll('canvas')]
+          .filter((x) => x.dataset.page === String(c.page))[0];
+        const t = document.createElement('canvas');
+        t.width = el.width;
+        t.height = el.height;
+        const g = t.getContext('2d');
+        g.drawImage(el, 0, 0);
+        const d = g.getImageData(0, 0, el.width, el.height).data;
+        const dens = el.width / pm.widthPt;          // 设备像素 / 磅
+        // 行槽顶 = 光标矩形的上边；"往下多深还有墨"就是裁边到哪。
+        const y0 = Math.floor(c.y);
+        const x0 = Math.max(0, Math.floor(c.x));
+        const x1 = Math.min(el.width, Math.floor(c.x + 200));
+        let last = y0;
+        for (let y = Math.max(0, y0); y < Math.min(el.height, y0 + 80); y++) {
+          let n = 0;
+          for (let x = x0; x < x1; x++) if (d[(y * el.width + x) * 4] < 128) n++;
+          if (n >= 3) last = y;
+        }
+        return { depth: (last - y0) / dens, slot: c.h / dens };
+      };
+      const auto = await depth();
+      await H.paragraphFormat({ lineSpacing: { rule: 'exact', exact: 8 } });
+      await H.flush();
+      const exact8 = await depth();
+      await H.paragraphFormat({ lineSpacing: { rule: 'auto', factor: 1 } });
+      await H.flush();
+      const back = await depth();
+      return { auto, exact8, back };
+    `);
+
+    check('★ 单倍行距下墨迹落到基线以下（不是贴着行顶）',
+      r.auto.depth > 9.5, `深 ${r.auto.depth.toFixed(1)} 磅 / 行槽 ${r.auto.slot.toFixed(1)}`);
+    check('★ 固定值 8 磅：行槽压到 8 磅那一档（比单倍矮两磅以上）',
+      r.exact8.slot < r.auto.slot - 1.5, `${r.auto.slot.toFixed(2)} → ${r.exact8.slot.toFixed(2)} 磅`);
+    check('★ 固定值 8 磅：墨迹在行槽底停住（裁字生效，不是照旧画到基线下面）',
+      r.exact8.depth <= r.exact8.slot + 0.5 && r.exact8.depth < r.auto.depth - 1,
+      `auto ${r.auto.depth.toFixed(1)} / exact ${r.exact8.depth.toFixed(1)} / 行槽 ${r.exact8.slot.toFixed(2)}`);
+    check('★ 改回单倍：墨迹又落到基线以下（页位图跟着重画了，不是留着旧帧）',
+      Math.abs(r.back.depth - r.auto.depth) < 1.0, `深 ${r.back.depth.toFixed(1)} 磅`);
+  });
+
   // 行高以单倍行高（字体的 ascent + descent）为基准乘倍数，倍数小于 1 时行槽跟着变矮。
   //   单倍行高与字号之比是字体度量，不是字号本身：自带的三款字体是 1.448 em，行间隙为 0。
   test('行距：0.8 倍把行高压到单倍的八成，页数跟着少', async ({ open }) => {

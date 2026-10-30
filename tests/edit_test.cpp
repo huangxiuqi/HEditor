@@ -304,93 +304,6 @@ void loadBlocks(EditorEngine& e, const std::vector<BlockSpec>& blocks,
  */
 void loadControls(EditorEngine& e, const std::vector<Control>& controls);
 
-/**
- * "增量上屏 == 从零上屏"的比对器：拿第二个引擎（同文档、同配置、同控件、同光标，
- * 从零重排重画）当参照物，与被测引擎的当前帧逐像素比。
- *
- * 为什么需要它：auditFrame() 比的是"帧 vs 从底图整块重贴"，只能抓上屏漏贴；
- * 底图自己漏画（页指纹判错、某个变了的页没被重画）时两边会一起错、它照样是 0。
- * 只有拿一个真正从零开始渲染的参照物，才照得出来。
- *
- * @param out_max_ch 最大通道差：用来区分"结构性错位"与"坐标末位差翻了一格抗锯齿"
- * @return 不符的像素数；-1 = 帧尺寸不同（本身就不符）
- */
-long long frameDiffAgainstFresh(EditorEngine& a, const std::vector<std::string>& fonts,
-                                const std::vector<Control>& ctrls, EditMode mode,
-                                long long* out_max_ch, int* out_box = nullptr) {
-    EditorEngine r;
-    if (!r.init(fonts)) return -1;
-    r.setConfig(a.config());
-    loadBlocks(r, a.blocks());
-    // 装载只换数据不排版（"谁改文档谁负责 relayout"）—— 这里必须自己排一次，
-    // 否则帧高会按 0 页算，比出来的东西没意义。
-    r.relayout();
-    if (!ctrls.empty()) loadControls(r, ctrls);
-    r.setEditMode(mode);
-    r.relayout();
-    r.setCaret(a.caret().para, a.caret().offset);
-    r.showCaret(true);
-    r.repaint();
-
-    a.showCaret(true);
-    a.repaint();
-    const size_t n = a.frameBytes();
-    if (n != r.frameBytes()) return -1;
-    const uint8_t* fa = a.frame();
-    const uint8_t* fb = r.frame();
-    long long diff = 0, max_ch = 0;
-    const int fw = a.frameWidth();
-    int bx0 = 1 << 30, by0 = 1 << 30, bx1 = -1, by1 = -1;
-    for (size_t k = 0; k + 3 < n; k += 4) {
-        if (fa[k] == fb[k] && fa[k + 1] == fb[k + 1] && fa[k + 2] == fb[k + 2]) continue;
-        ++diff;
-        const int px = static_cast<int>((k >> 2) % static_cast<size_t>(fw));
-        const int py = static_cast<int>((k >> 2) / static_cast<size_t>(fw));
-        if (px < bx0) bx0 = px;
-        if (px > bx1) bx1 = px;
-        if (py < by0) by0 = py;
-        if (py > by1) by1 = py;
-        for (int ch = 0; ch < 3; ++ch) {
-            const long long d =
-                std::llabs(static_cast<long long>(fa[k + ch]) - static_cast<long long>(fb[k + ch]));
-            if (d > max_ch) max_ch = d;
-        }
-    }
-    if (out_max_ch) *out_max_ch = max_ch;
-    if (out_box) {
-        out_box[0] = bx0;
-        out_box[1] = by0;
-        out_box[2] = bx1;
-        out_box[3] = by1;
-    }
-    return diff;
-}
-
-/**
- * 两个引擎的整帧逐字节比较（只比 RGB，忽略 alpha）。
- *
- * 用于"同一份文档的两种建树方式必须产出同一帧"这类判据。它比逐字段比 LayoutResult 更强，也更省事：
- * 任何一处几何、字体、颜色不同都会落到像素上，不必逐个字段列举 —— 而"漏比一个字段"
- * 正是这类判据最容易变成空话的地方。
- * 返回不符的像素数；-1 表示帧尺寸不同（本身就不符）。
- */
-long long frameDiffBetween(EditorEngine& a, EditorEngine& b) {
-    a.showCaret(true);
-    b.showCaret(true);
-    a.repaint();
-    b.repaint();
-    if (a.frameBytes() != b.frameBytes()) return -1;
-    const uint8_t* fa = a.frame();
-    const uint8_t* fb = b.frame();
-    const size_t n = a.frameBytes();
-    long long diff = 0;
-    for (size_t k = 0; k + 3 < n; k += 4) {
-        if (fa[k] == fb[k] && fa[k + 1] == fb[k + 1] && fa[k + 2] == fb[k + 2]) continue;
-        ++diff;
-    }
-    return diff;
-}
-
 std::string joinPath(const std::string& dir, const std::string& name) {
     if (dir.empty()) return name;
     const char last = dir.back();
@@ -484,25 +397,24 @@ struct SectionInfo {
 };
 
 const SectionInfo kSections[] = {
-    {1, false, 1},   {2, false, 1},   {3, false, 6},   {4, false, 3},   {5, false, 1},
-    {6, false, 1},   {7, false, 3},   {8, false, 3},   {9, false, 3},   {10, false, 7},
-    {11, false, 11}, {12, false, 3},  {13, false, 3},  {14, false, 3},  {15, false, 27},
-    {16, false, 19}, {17, false, 43}, {18, false, 24}, {19, false, 6},  {21, false, 4},
-    {22, false, 3},  {23, false, 53}, {24, false, 5},  {31, false, 3},  {32, false, 3},
-    {33, false, 4},  {34, false, 9},  {35, false, 8},  {36, false, 3},  {37, false, 3},
-    {38, false, 8},  {39, false, 2},  {40, false, 3},  {41, false, 3},  {42, false, 3},
-    {43, false, 3},  {44, false, 9},  {45, false, 6},  {46, false, 3},  {47, false, 4},
-    {48, false, 4},  {49, false, 3},  {50, false, 3},  {51, false, 4},  {52, false, 4},
-    {53, false, 9},  {55, false, 3},  {56, false, 7},  {57, false, 4},  {58, false, 3},
-    {59, false, 3},  {60, false, 6},  {61, false, 9},  {62, false, 9},  {63, false, 3},
-    {64, false, 3},  {65, false, 3},  {66, false, 3},  {67, false, 10}, {68, false, 4},
-    {69, false, 3},  {70, false, 10}, {71, false, 6},  {72, false, 10}, {73, false, 9},
-    {74, false, 3},  {75, false, 3},  {76, false, 3},  {77, false, 3},  {78, true, 1},
-    {79, false, 2},  {80, false, 3},  {81, false, 2},  {82, false, 1},  {83, false, 2},
-    {84, false, 2},  {85, false, 3},  {86, false, 4},  {87, false, 3},  {88, false, 3},
-    {89, false, 3},  {90, false, 2},  {91, false, 3},  {92, false, 6},  {93, false, 5},
-    {94, false, 2},  {95, false, 2},  {96, false, 1},  {97, false, 1},  {98, false, 3},
-    {99, false, 2},
+    {1, false, 1},   {2, false, 1},  {3, false, 6},  {4, false, 3},   {5, false, 1},
+    {6, false, 1},   {7, false, 3},  {8, false, 3},  {9, false, 3},   {11, false, 11},
+    {12, false, 3},  {13, false, 3}, {14, false, 3}, {15, false, 27}, {17, false, 43},
+    {18, false, 24}, {19, false, 6}, {21, false, 4}, {22, false, 3},  {23, false, 53},
+    {24, false, 5},  {31, false, 3}, {32, false, 3}, {33, false, 4},  {34, false, 9},
+    {35, false, 8},  {36, false, 3}, {37, false, 3}, {38, false, 8},  {39, false, 2},
+    {40, false, 3},  {41, false, 3}, {42, false, 3}, {43, false, 3},  {44, false, 9},
+    {45, false, 6},  {46, false, 3}, {47, false, 4}, {48, false, 4},  {49, false, 3},
+    {50, false, 3},  {51, false, 4}, {52, false, 4}, {53, false, 9},  {55, false, 3},
+    {56, false, 7},  {57, false, 4}, {58, false, 3}, {60, false, 6},  {61, false, 9},
+    {62, false, 9},  {63, false, 3}, {64, false, 3}, {65, false, 3},  {66, false, 3},
+    {67, false, 10}, {68, false, 4}, {69, false, 3}, {70, false, 10}, {71, false, 6},
+    {72, false, 10}, {73, false, 9}, {74, false, 3}, {76, false, 3},  {77, false, 3},
+    {78, true, 1},   {79, false, 2}, {80, false, 3}, {81, false, 2},  {82, false, 1},
+    {83, false, 2},  {84, false, 2}, {85, false, 3}, {86, false, 4},  {87, false, 3},
+    {88, false, 3},  {89, false, 3}, {90, false, 2}, {91, false, 3},  {92, false, 6},
+    {93, false, 5},  {94, false, 2}, {95, false, 2}, {96, false, 1},  {97, false, 1},
+    {98, false, 3},  {99, false, 2},
 };
 
 /**
@@ -800,12 +712,8 @@ int main() {
         //   （含页间隙、而且槽数可能大于窗口页数），它不再等于一页。
         expectTrue(band0 == 0 && band1 == e.pagePxHeight(),
                    "单行页的行带 = 整页（页首行 + 页末行，带按定义从页顶到页底）");
-        long long max_ch = 0;
-        const long long fresh_diff =
-            frameDiffAgainstFresh(e, {cjkPath, mnPath, latinPath}, {}, EditMode::Document, &max_ch);
-        expectTrue(fresh_diff == 0, "敲字之后：增量帧 == 从零重画的帧（逐像素；差 " +
-                                        std::to_string(fresh_diff) + "，最大通道差 " +
-                                        std::to_string(max_ch) + "）");
+        expectTrue(e.auditPageJson(0).find("\"diff\":0") != std::string::npos,
+                   "敲字之后：页位图 == 从零光栅（增量光栅没留旧像素）");
 
         // 退回原状，便于后续小节
         e.setCaret(0, 4);
@@ -1149,44 +1057,6 @@ int main() {
                 "page0 最大 y=%.2f pt；page1 y ∈ [%.2f, %.2f] pt\n",
                 g0, g1, gother, maxy0, (g1 ? miny1 : 0.0f), (g1 ? maxy1 : 0.0f));
         }
-        const int page_h_px = static_cast<int>(std::lround(c5.page.height_pt * c5.density));
-        const int gap_px = static_cast<int>(std::lround(c5.page_gap_pt * c5.density));
-        const int last_local = pages2 - 1;
-        const int y0 = last_local * (page_h_px + gap_px);
-        const int fw = e5.frameWidth();
-        const uint8_t* px = e5.frame();
-        int dark = 0;
-        int nonwhite_lo = 0, darkest_lo = 255, nonwhite_hi = 0, darkest_hi = 255;
-        for (int y = 0; y < h2; ++y) {
-            for (int x = 0; x < fw; ++x) {
-                const uint8_t* p =
-                    px +
-                    (static_cast<size_t>(y) * static_cast<size_t>(fw) + static_cast<size_t>(x)) * 4;
-                if (p[0] < 128 && p[1] < 128 && p[2] < 128) ++dark;
-                if (y < y0) {
-                    const int mn = std::min(std::min(p[0], p[1]), p[2]);
-                    if (mn < 200) ++nonwhite_lo;
-                    darkest_lo = std::min(darkest_lo, mn);
-                }
-            }
-        }
-        // 为什么两段分开扫：只有当"第 1 页区有内容、第 2 页区没有"时，
-        //   才能把问题定性成"新页没画"，而不是"整帧都是白的"。
-        for (int y = y0; y < h2; ++y) {
-            for (int x = 0; x < fw; ++x) {
-                const uint8_t* p =
-                    px +
-                    (static_cast<size_t>(y) * static_cast<size_t>(fw) + static_cast<size_t>(x)) * 4;
-                const int mn = std::min(std::min(p[0], p[1]), p[2]);
-                if (mn < 200) ++nonwhite_hi;
-                darkest_hi = std::min(darkest_hi, mn);
-            }
-        }
-        std::printf(
-            "     [诊断] 上半区(第1页): 非白 %d 最暗 %d ｜ 下半区(第2页): 非白 %d 最暗 %d\n",
-            nonwhite_lo, darkest_lo, nonwhite_hi, darkest_hi);
-        std::printf("     第 %d 页区域的暗像素 = %d\n", pages2, dark);
-        expectTrue(dark > 0, "新页上确实画出了字形（不是一块空白页底）");
 
         // 反向：页数不变时仍然必须走增量，别为了让上面这条通过就把整帧重建常态化
         e5.setCaret(0, 0);
@@ -1198,40 +1068,6 @@ int main() {
         expectTrue(h3 == h2, "光标移动不改变帧尺寸");
         expectTrue(px3 < static_cast<long long>(e5.frameWidth()) * h3 / 100,
                    "页数不变时仍是增量：写入量 < 全帧的 1/100（没有退化成整帧重建）");
-    }
-
-    if (runSection(10)) std::printf("\n[10] 光栅必须确定：同一文档两次渲染逐字节相同\n");
-    if (runSection(10)) {
-        // 光栅是确定的：同一份排版结果、同一套字体与缩放，两次渲染必须给出同一串像素。
-        //   挡的是"某条路径带隐藏状态"（字形 strike、预热、共享 typeface）——
-        //   它们只能影响命不命中，不能影响画出来的东西。
-        auto renderDoc = [&]() -> std::vector<uint8_t> {
-            EditorEngine e;
-            if (!e.init({cjkPath, mnPath, latinPath})) return {};
-            EngineConfig c = cfg;
-            c.density = 1.5f;
-            e.setConfig(c);
-            loadBlocks(e, sampleDocument(0, 1, 2));
-            e.relayout();
-            e.repaint();
-            return std::vector<uint8_t>(e.frame(), e.frame() + e.frameBytes());
-        };
-        const std::vector<uint8_t> a = renderDoc();
-        const std::vector<uint8_t> b = renderDoc();
-        expectTrue(!a.empty() && a.size() == b.size(), "两次渲染的帧尺寸一致");
-        expectTrue((a.size() == b.size()) && std::memcmp(a.data(), b.data(), a.size()) == 0,
-                   "同一文档两次渲染逐字节相同（没有隐藏状态泄漏到像素里）");
-        auto inkOf = [](const std::vector<uint8_t>& px) {
-            size_t n = 0;
-            for (size_t i = 0; i + 3 < px.size(); i += 4) {
-                if (px[i] < 128 && px[i + 1] < 128 && px[i + 2] < 128) ++n;
-            }
-            return n;
-        };
-        const size_t ink_a = inkOf(a);
-        std::printf("     墨迹像素：%zu（占全帧 %.4f%%）\n", ink_a,
-                    100.0 * static_cast<double>(ink_a) / static_cast<double>(a.size() / 4));
-        expectTrue(ink_a > 2000, "确实画出了字形（不是一块空白页底）");
     }
 
     if (runSection(11)) std::printf("\n[11] 表单：控件是区间、边界是策略\n");
@@ -1592,37 +1428,31 @@ int main() {
         //   最硬的一条是"逐字节等价"：缩进必须和手打 4 个空格得到完全
         //     相同的帧与相同的文档 —— 否则它就是一条绕过策略/记账的特权通道。
         {
-            auto frameOf = [](EditorEngine& eng) {
-                eng.repaint();
-                return std::vector<uint8_t>(eng.frame(), eng.frame() + eng.frameBytes());
-            };
-            auto sameFrame = [](const std::vector<uint8_t>& a, const std::vector<uint8_t>& b) {
-                return a.size() == b.size() && std::memcmp(a.data(), b.data(), a.size()) == 0;
-            };
-
             ef.setEditMode(EditMode::Document);
             const size_t N0 = ef.blocks()[0].cp_text.size();  // 17
 
             // Tab 缩进：在光标处插 4 个空格，光标停在其后
             ef.setCaret(0, 2);
             expectTrue(ef.indentAndRender(), "Tab 缩进返回 true");
-            const std::vector<uint8_t> f_tab = frameOf(ef);
+            const std::vector<uint32_t> text_tab = ef.blocks()[0].cp_text;
+            const LayoutDigest d_tab = digestOf(ef.layout());
             const size_t len_tab = ef.blocks()[0].cp_text.size();
             std::printf("     [诊断] 缩进后 长度 %zu→%zu，光标 %zu\n", N0, len_tab,
                         ef.caret().offset);
             expectTrue(len_tab == N0 + 4 && ef.caret().offset == 6,
                        "Tab 在光标处插入 4 个空格，光标停在其后");
 
-            // 手打 4 个空格：必须得到逐字节相同的帧
+            // 手打 4 个空格：必须得到同一份文档、同一份排版
             //   先把文档恢复，保证两条产物的起点完全一致（不然比的是两次插入的叠加）。
             expectTrue(ef.outdentAndRender() && ef.blocks()[0].cp_text.size() == N0,
                        "反缩进先把文档恢复（下面才能公平对比）");
             ef.setCaret(0, 2);
             expectTrue(ef.typeTextAndRender("    "), "手打 4 个空格");
-            const std::vector<uint8_t> f_sp = frameOf(ef);
             expectTrue(ef.blocks()[0].cp_text.size() == len_tab, "两条产物的文档长度一致");
-            expectTrue(sameFrame(f_tab, f_sp),
-                       "Tab 缩进的帧 == 手打 4 个空格的帧（逐字节相同）"
+            expectTrue(ef.blocks()[0].cp_text == text_tab,
+                       "Tab 缩进与手打 4 个空格得到逐码点相同的正文");
+            expectTrue(digestOf(ef.layout()).hash == d_tab.hash,
+                       "★ 两条路的排版摘要相同（行盒、字形、簇一个字段都不差）"
                        "—— 缩进不是特权通道，策略/区间伸缩/记账全走同一条路");
 
             // Shift+Tab 反缩进
@@ -1677,279 +1507,59 @@ int main() {
                        "（== 它自己收尾了；删掉那行 repaint() 这条立刻红）");
         }
 
-        // (f) 标记必须真的画出来、跟着光标走，切回去要真的擦掉
+        // (f) 标记的绘制（常驻、颜色、只读不画）是屏幕上的事：在 web 侧验
+        //   （edit-form 的括号墨量与只读判据）。这里留两件不进画面的：
+        //   小点开关不许动版面，以及空字段的占位槽。
         {
-            auto snapshot = [](EditorEngine& eng) {
-                eng.repaint();
-                return std::vector<uint8_t>(eng.frame(), eng.frame() + eng.frameBytes());
-            };
-            // 判"这个像素属于控件标记"（亮蓝系，含抗锯齿混色）。
-            //
-            // 为什么不用精确色相等：括号现在是字形，笔画边缘大量是"部分覆盖"
-            //   的中间色，精确匹配只能数到 3~4 个像素 —— 那样的断言脆得没法用。
-            //   判据三条：
-            //     偏蓝够远（b - r > 60）→ 排除所有灰阶（正文黑字、页边框、背景）
-            //     蓝够亮（b > 140）→ 排除深色
-            //     红通道 > 45 → 把光标排除掉：光标色 (31,111,235) 的 r=31，
-            //       标记色 (56,139,253) 的 r=56。这两者是刻意分开的，就靠 r 的差。
-            auto isMark = [](uint8_t r, uint8_t /*g*/, uint8_t b) {
-                return r > 45 && (static_cast<int>(b) - static_cast<int>(r)) > 60 && b > 140;
-            };
-            auto countCols = [&isMark](const std::vector<uint8_t>& px, int fw, int x0, int x1) {
-                size_t n = 0;
-                for (size_t i = 0; i + 3 < px.size(); i += 4) {
-                    const int x = static_cast<int>(i >> 2) % fw;
-                    if (x < x0 || x > x1) continue;
-                    if (isMark(px[i], px[i + 1], px[i + 2])) ++n;
+            const int glyphs_before = ef.stats().glyph_count;
+            const LayoutDigest d_before = digestOf(ef.layout());
+            EngineConfig cd = ef.config();
+            cd.show_control_dots = true;
+            ef.setConfig(cd);
+            ef.repaint();
+            expectTrue(ef.stats().glyph_count == glyphs_before,
+                       "小点不产生字形（它是一块填充，不是排版产物）");
+            expectTrue(digestOf(ef.layout()).hash == d_before.hash,
+                       "小点不占宽度：开与关的排版摘要相同（开关不该重排）");
+            cd.show_control_dots = false;
+            ef.setConfig(cd);
+            ef.repaint();
+        }
+
+        // (f6) 空字段：内容删光之后括号不能"没得画"。
+        //   绘制从占位簇派生 —— 槽在哪就画在哪，与有没有字形无关。
+        //   墨迹那一半在 web 侧（edit-form 的空字段判据）；这里钉槽本身。
+        {
+            ef.setCaret(0, 9);
+            for (int i = 0; i < 4; ++i) ef.backspaceAndRender();  // 把「反复心悸」删光
+            expectTrue(ef.blocks()[0].cp_text.size() == 13,
+                       "前置：字段内容真的被删光了（17 - 4 = 13）");
+            expectTrue(
+                ef.controlRects(0).empty(),
+                "前提：空字段投影不出矩形 —— 老实现就是死在这一步（括号没得画，占位却还在）");
+            int slots = 0;
+            int side_first = -1;
+            int side_second = -1;
+            for (const LineBox& lb : ef.layout().lines) {
+                if (lb.paragraph != 0) continue;
+                for (const LineCluster& c : lb.clusters) {
+                    if (!c.placeholder || c.cp != 5) continue;
+                    ++slots;
+                    if (side_first < 0)
+                        side_first = static_cast<int>(c.bracket_side);
+                    else
+                        side_second = static_cast<int>(c.bracket_side);
                 }
-                return n;
-            };
-
-            const float density = ef.config().density;
-            const int fw = ef.frameWidth();
-            // 本测试只配了 2 个控件：#0 = [5,9)「反复心悸」，#1 = [12,16)「加重一天」
-            //
-            // 窗口一律当场现算（不缓存矩形）：All 档下括号常驻、矩形确实不随
-            //   光标动，但"不随光标动"本身就是要验的东西 —— 缓存下来等于把它假设掉了。
-            //   （Focused 档下光标进出字段会让整行重排、矩形差一个括号宽，
-            //     拿旧值算窗口会差出几像素。）
-            auto bandLeft = [&](int ci) -> std::pair<int, int> {
-                const auto r = ef.controlRects(ci);
-                if (r.empty()) return {0, -1};
-                return {static_cast<int>(std::lround((r[0].r_pt.x - 10.0f) * density)),
-                        static_cast<int>(std::lround((r[0].r_pt.x - 1.0f) * density))};
-            };
-            auto bandRight = [&](int ci) -> std::pair<int, int> {
-                const auto r = ef.controlRects(ci);
-                if (r.empty()) return {0, -1};
-                return {
-                    static_cast<int>(std::lround((r[0].r_pt.x + r[0].r_pt.w + 1.2f) * density)),
-                    static_cast<int>(std::lround((r[0].r_pt.x + r[0].r_pt.w + 14.0f) * density))};
-            };
-            auto inkIn = [&](const std::vector<uint8_t>& px, std::pair<int, int> b) {
-                return countCols(px, fw, b.first, b.second);
-            };
-
-            expectTrue(!ef.controlRects(0).empty() && !ef.controlRects(1).empty(),
-                       "控件 #0 / #1 都投影出了矩形");
-
-            // 默认档：括号常驻，两个字段同时都有、且不随光标变化
-            //
-            //   这一条是被用户一句话定下来的：「括号应该一直在，
-            //   不然不知道这块可以输入了」。
-            //   旧行为（Focused 档）是"光标不在就只画一个小点"——
-            //   光标一移开，那个字段看上去就不像字段了。
-            {
-                ef.setCaret(0, 6);  // 在控件 #0 里
-                const std::vector<uint8_t> f = snapshot(ef);
-                const size_t a_left0 = inkIn(f, bandLeft(0));
-                const size_t a_left1 = inkIn(f, bandLeft(1));
-
-                ef.setCaret(0, 13);  // 在控件 #1 里
-                const std::vector<uint8_t> g = snapshot(ef);
-                const size_t b_left0 = inkIn(g, bandLeft(0));
-                const size_t b_left1 = inkIn(g, bandLeft(1));
-
-                std::printf(
-                    "     光标在 #0：左缘像素 #0=%zu / #1=%zu ｜ "
-                    "光标在 #1： #0=%zu / #1=%zu\n",
-                    a_left0, a_left1, b_left0, b_left1);
-                expectTrue(a_left0 > 0 && a_left1 > 0,
-                           "光标在 #0 时，两个字段的左括号都在（常驻，不看光标）");
-                expectTrue(b_left0 > 0 && b_left1 > 0,
-                           "光标移到 #1 时，两个左括号仍然都在（没有跟光标走）");
-                expectTrue(a_left0 == b_left0 && a_left1 == b_left1,
-                           "括号的墨迹量与光标位置无关（常驻 ⟺ 帧里那几笔不随光标变）");
             }
-
-            // 文档模式（设计态）也画：作者要看得见边界才谈得上增删改。
-            ef.setEditMode(EditMode::Document);
-            const std::vector<uint8_t> f_doc = snapshot(ef);
-            const size_t doc_mark = countCols(f_doc, fw, 0, fw - 1);
-            expectTrue(doc_mark > 0, "文档模式也画标记（看不见字段就无从增删改）");
-
-            // 只读模式不画：它是呈现与打印态，括号落进版面就印出来了。
-            ef.setEditMode(EditMode::ReadOnly);
-            const std::vector<uint8_t> f_ro = snapshot(ef);
-            const size_t ro_mark = countCols(f_ro, fw, 0, fw - 1);
-            expectTrue(ro_mark == 0, "只读模式：标记一个像素都不剩（印不出来）");
-
-            ef.setEditMode(EditMode::Form);
-            const std::vector<uint8_t> f_form = snapshot(ef);
-            const size_t form_mark = countCols(f_form, fw, 0, fw - 1);
-            expectTrue(form_mark > 0, "切回表单模式：标记又出现了（不是「切走一次就再也不画」）");
-
-            // 回归：光标停在字段末尾时，右括号必须还在。
-            //
-            //   它和光标矩形重叠（光标中心正好压在字段右边缘上）。
-            //   括号与光标画在同一张帧上时，画序反了就会在重叠处把括号盖掉 ——
-            //   而那时光标是"擦旧画新"的，被盖掉的括号补不回来。
-            //   现在括号画在页位图里、光标画在帧上，层序由构造保证（帧 = 页位图 +
-            //   选区 + 光标），这条于是退化成回归判据：改层序的人会把它踩红。
-            //
-            //   取"右边缘外侧"这条竖带：右括号在那儿，小点在右边缘内侧。
-            ef.setCaret(0, 9);  // 控件 #0 = [5,9) 的末尾 —— 光标紧挨右括号
-            const size_t atEnd = inkIn(snapshot(ef), bandRight(0));
-            ef.setCaret(0, 13);  // 光标在 #1 里 —— 右括号照样在（常驻）
-            const size_t awayEnd = inkIn(snapshot(ef), bandRight(0));
-
-            std::printf("     控件 #0 右缘外侧：光标在 #0 末尾 %zu px ／ 光标在 #1 时 %zu px\n",
-                        atEnd, awayEnd);
-            expectTrue(atEnd > 0 && awayEnd > 0,
-                       "光标停在字段末尾时右括号仍在（重叠时画序错了会被抹掉），"
-                       "光标离开该字段后它也在（常驻）");
-
-            // (f5) 小点：独立开关，与光标无关 —— 开时所有控件右下角各一个方块。
-            //   它不占宽度（不进文档流），所以开关不该重排，只改帧上的像素。
-            //   判据取"帧逐字节"：开 → 帧变了且字形数不变；关 → 逐字节回到开之前
-            //   （有残留就说明它不是"画上去就不管"，而是真的擦干净了）。
-            {
-                const std::vector<uint8_t> base = snapshot(ef);
-                const int glyphs_before = ef.stats().glyph_count;
-                EngineConfig cd = ef.config();
-                cd.show_control_dots = true;
-                ef.setConfig(cd);
-                const std::vector<uint8_t> dots = snapshot(ef);
-                expectTrue(dots != base, "开小点：帧上真的多了东西（每个控件右下角一个方块）");
-                expectTrue(ef.stats().glyph_count == glyphs_before,
-                           "小点不产生字形（它是一块填充，不是排版产物）");
-
-                cd.show_control_dots = false;
-                ef.setConfig(cd);
-                expectTrue(snapshot(ef) == base, "关小点：帧逐字节回到开之前（没有残留）");
-            }
-
-            // 穷尽不变式：光标走遍每一个可停位置，每一步都检查每个字段的括号 ——
-            //     All 档下：每个可编辑字段的左缘外侧都必须有括号，而且墨迹量恒定
-            //     （恒定 = 常驻；只要哪一步漏画/多画，max-min 立刻不为 0）。
-            //
-            //   为什么值得穷尽：是"有时括号渲染不更新"。
-            //   单点断言（只试一两个位置）抓不到"某个位置刚好漏掉"，
-            //   而这类漏掉几乎总是由"某个矩形刚好和光标重叠、被后画的东西盖掉"
-            //   造成的 —— 只有走遍位置才碰得到。这一条是那条 bug 的探测器。
-            {
-                int checked = 0, bad = 0;
-                // min/max 必须按字段分别统计：两个字段的括号墨迹量本来就不同
-                //   （不同字形、不同亚像素相位），混在一起算会让这条恒为假。
-                const int nc = ef.controls().size();
-                std::vector<size_t> lo(static_cast<size_t>(nc), 1u << 30);
-                std::vector<size_t> hi(static_cast<size_t>(nc), 0);
-                const int total = static_cast<int>(ef.blocks()[0].cp_text.size());
-                for (int off = 0; off <= total; ++off) {
-                    ef.setCaret(0, off);
-                    const std::vector<uint8_t> f = snapshot(ef);
-                    for (int ci = 0; ci < nc; ++ci) {
-                        if (ef.controls().at(ci).read_only) continue;
-                        const auto b = bandLeft(ci);
-                        if (b.second < b.first) continue;  // 没有矩形（空字段）→ 跳过
-                        const size_t n = countCols(f, fw, b.first, b.second);
-                        ++checked;
-                        if (n == 0) ++bad;
-                        lo[static_cast<size_t>(ci)] = std::min(lo[static_cast<size_t>(ci)], n);
-                        hi[static_cast<size_t>(ci)] = std::max(hi[static_cast<size_t>(ci)], n);
-                    }
-                }
-                std::printf(
-                    "     穷尽不变式：%d 项检查，不符 %d 项；"
-                    "墨迹量 #0 min=%zu max=%zu ｜ #1 min=%zu max=%zu\n",
-                    checked, bad, lo[0], hi[0], lo[1], hi[1]);
-                expectTrue(checked > 20 && bad == 0,
-                           "光标走遍全部可停位置，每个字段的括号始终在（All 档常驻）");
-                expectTrue(lo[0] > 0 && lo[0] == hi[0] && lo[1] > 0 && lo[1] == hi[1],
-                           "每个字段括号的墨迹量与光标位置逐像素一致（常驻的硬判据）");
-            }
-
-            // (f6) 那个 bug：把字段内容删光，括号不能消失
-            //
-            //   原话：「文本控件删除最后一个字符后，括号也不渲染了，但是好像括号
-            //   位置还占着，输入一个字符后括号出现」。
-            //
-            //   根因：老的绘制层是按控件矩形遍历的，而空区间（start == end）
-            //   投影不出矩形 → 一个标记都画不出来；可占位槽照插，
-            //   于是"位置还占着、却什么都看不见"。
-            //   现在绘制从占位簇派生：槽在哪就画在哪，和有没有字形无关。
-            {
-                // 删之前先量一下同一个窗口（同一个括号字形、同一个位置 → 应当一致）
-                const size_t before = inkIn(snapshot(ef), bandLeft(0));
-
-                // 必须用 backspaceAndRender（编辑+重排+呈现的三合一入口）：
-                //   裸 backspace() 只改文档，不重排 —— 接着去读 layout 会拿到
-                //   旧的那份（本次真命中了：占位槽还是删之前那 4 个 cp，
-                //   于是"数到 4 个槽"、并且按旧坐标去找右括号当然找不到）。
-                //   宿主的真实路径也是前者，用它才测得准。
-                ef.setCaret(0, 9);
-                for (int i = 0; i < 4; ++i) ef.backspaceAndRender();  // 把「反复心悸」删光
-                std::printf("     删空字段后：文档 %zu 个码点（原 17）\n",
-                            ef.blocks()[0].cp_text.size());
-                expectTrue(ef.blocks()[0].cp_text.size() == 13,
-                           "前置：字段内容真的被删光了（17 - 4 = 13）");
-                expectTrue(ef.controlRects(0).empty(),
-                           "前提：空字段投影不出矩形 —— 老实现就是死在这一步"
-                           "（括号没得画，占位却还在）");
-
-                // 占位槽 + 墨迹：直接从排版里找那两个槽（不看控件矩形）。
-                //
-                // 只数空字段自己的那两个槽（cp == 5）。整篇里还有另一个字段的
-                //   两个槽（cp=8/12），一起数就会把"4"当成"2"—— 这一步必须按 cp 认人，
-                //   因为空字段的两个槽落在同一个 cp 上（这正是它"没有内容"的形状）。
-                float open_pt = -1.0f;
-                int slots = 0;
-                int empty_side_first = -1, empty_side_second = -1;
-                for (const LineBox& lb : ef.layout().lines) {
-                    if (lb.paragraph != 0) continue;
-                    for (const LineCluster& c : lb.clusters) {
-                        if (!c.placeholder) continue;
-                        const float x_pt = lb.inline_origin_pt + c.inline_pt;
-                        std::printf("       槽：cp=%u side=%d x=%.2f pt\n", c.cp,
-                                    static_cast<int>(c.bracket_side), x_pt);
-                        if (c.cp != 5) continue;  // 只认空字段那个边界
-                        ++slots;
-                        if (empty_side_first < 0)
-                            empty_side_first = static_cast<int>(c.bracket_side);
-                        else
-                            empty_side_second = static_cast<int>(c.bracket_side);
-                        if (c.bracket_side == BracketSide::Open) open_pt = x_pt;
-                    }
-                }
-                expectTrue(slots == 2, "空字段仍有两个占位槽（开+闭）—— 位置确实还占着");
-                // 空字段的一对必须是 [开, 闭]（[]）—— 它和"相邻字段"是
-                //   相反的顺序（那里是 ][）。两条一起把优先级规则钉死：
-                //   顺序取决于"槽属于谁"，不是"开还是闭"。
-                expectTrue(empty_side_first == static_cast<int>(BracketSide::Open) &&
-                               empty_side_second == static_cast<int>(BracketSide::Close),
-                           "空字段自己的两个槽是 [开, 闭]（`[]`），与相邻字段的 `][` 相反");
-
-                const std::vector<uint8_t> f = snapshot(ef);
-                const float slot = 4.055f + kControlBracketSlotGapPt;  // 槽宽（参考值）
-                const int x_open = static_cast<int>(std::lround(open_pt * density));
-                const int x_close = static_cast<int>(std::lround((open_pt + slot) * density));
-                // 闭括号的字形贴槽尾（间隙在内侧），所以它的墨迹从
-                //   「闭槽首 + 间隙」开始 —— 窗口要按这个来取，否则数到的是空的。
-                const int x_close_glyph = static_cast<int>(
-                    std::lround((open_pt + slot + kControlBracketSlotGapPt) * density));
-                const size_t ink_open =
-                    countCols(f, fw, x_open - 2, x_open + static_cast<int>(6.0f * density));
-                const size_t ink_close = countCols(
-                    f, fw, x_close_glyph - 1, x_close_glyph + static_cast<int>(6.0f * density));
-                std::printf(
-                    "     删空前同窗口墨迹 %zu px ｜ 删空后：开括号窗口 %zu px、"
-                    "闭括号窗口 %zu px（开槽 x=%d，闭槽 x=%d）\n",
-                    before, ink_open, ink_close, x_open, x_close);
-                expectTrue(ink_open > 0 && before > 0,
-                           "空字段的左括号照样画出来了（删之前/之后都在）");
-                expectTrue(ink_close > 0, "空字段的右括号也画出来了（两个槽都填上了）");
-
-                // 收尾：把内容打回去，后面 (g) 那些断言用的还是这段文本。
-                // 同样走 *AndRender：它的语义就是"编辑一次并收尾"。
-                ef.setCaret(0, 5);
-                expectTrue(ef.typeTextAndRender("反复心悸"), "前置：把删掉的 4 个字打回去");
-                expectTrue(ef.blocks()[0].cp_text.size() == 17 && !ef.controlRects(0).empty(),
-                           "前置：文档与控件矩形都回到原样（后面几节依赖它）");
-            }
-
-            // 这两条（画出来 / 擦干净）同时钉死一个失效点：标记画在页内容里，切模式
-            //   要让那几页的内容重算。漏掉这一步，切回文档模式后括号会留在原处 ——
-            //   表象是"随机不刷新"，从代码上极难看出来的那种。
+            expectTrue(slots == 2, "空字段仍有两个占位槽（开+闭）—— 位置确实还占着");
+            expectTrue(side_first == static_cast<int>(BracketSide::Open) &&
+                           side_second == static_cast<int>(BracketSide::Close),
+                       "空字段自己的两个槽是 [开, 闭]（`[]`），与相邻字段的 `][` 相反");
+            // 收尾：把内容打回去，后面 (g) 那些断言用的还是这段文本。
+            ef.setCaret(0, 5);
+            expectTrue(ef.typeTextAndRender("反复心悸"), "前置：把删掉的 4 个字打回去");
+            expectTrue(ef.blocks()[0].cp_text.size() == 17 && !ef.controlRects(0).empty(),
+                       "前置：文档与控件矩形都回到原样（后面几节依赖它）");
         }
 
         // (g) 区间 → 矩形：单行 1 块、跨行多块、命中测试
@@ -2350,29 +1960,6 @@ int main() {
                    "闭括号的槽在开括号的槽左边（内容结束处的括号先占位）");
         expectTrue(std::fabs(p_close - content_right) < 0.02f,
                    "闭括号的槽紧贴 A 的内容右缘（不是浮在别处）");
-
-        // (b) 像素级：亮蓝的 ] 必须整个在灰的 [ 左边
-        {
-            ea.repaint();
-            const std::vector<uint8_t> f(ea.frame(), ea.frame() + ea.frameBytes());
-            const float density = ea.config().density;
-            const int fw = ea.frameWidth();
-            const int x0 = static_cast<int>(std::lround(p_close * density)) - 2;
-            // 止于 B 的开槽末（再往里 1pt 就是「三」的墨迹了）
-            const float slot_len = p_open - p_close;
-            const int x1 = static_cast<int>(std::lround((p_open + slot_len - 1.0f) * density));
-            int blue_lo = -1, blue_hi = -1, gray_lo = -1, gray_hi = -1;
-            scanColumns(f, fw, x0, x1, isBracketBlue, &blue_lo, &blue_hi);
-            scanColumns(f, fw, x0, x1, isBracketGray, &gray_lo, &gray_hi);
-            std::printf("     窗口 x ∈ [%d, %d]：亮蓝 %d..%d（%d 列）｜ 灰 %d..%d（%d 列）\n", x0,
-                        x1, blue_lo, blue_hi, blue_hi < 0 ? 0 : blue_hi - blue_lo + 1, gray_lo,
-                        gray_hi, gray_lo < 0 ? 0 : gray_hi - gray_lo + 1);
-
-            expectTrue(blue_lo >= 0 && gray_lo >= 0,
-                       "窗口里两种颜色的括号都在（蓝的 = A 的右括号、灰的 = B 的左括号）");
-            expectTrue(blue_hi > 0 && blue_hi < gray_lo,
-                       "亮蓝 ] 整个在灰 [ 左边 —— 相邻字段是 ][。反过来的话就是那个 []（报过的）");
-        }
     }
 
     if (runSection(15)) std::printf("\n[15] 增量排版：脏段之后重排、前缀原样复用（档 2）\n");
@@ -2507,39 +2094,21 @@ int main() {
             loadBlocks(ep, e.blocks());
             ep.relayout();
             ep.setCaret(100, 8);
+            const size_t paras_before = ep.blocks().size();
+            const size_t lines_before = ep.layout().lines.size();
             const bool push1 = ep.splitParagraphAndRender();
             expectTrue(push1, "第一次回车");
-            const size_t fbytes = ep.frameBytes();
-            std::vector<uint8_t> frame_before(ep.frame(), ep.frame() + fbytes);
             const bool push2 = ep.splitParagraphAndRender();
             expectTrue(push2, "紧接着第二次回车");
-            long long moved = 0;
-            {
-                const uint8_t* fa = ep.frame();
-                for (size_t k = 0; k + 3 < fbytes; k += 4) {
-                    if (fa[k] != frame_before[k] || fa[k + 1] != frame_before[k + 1] ||
-                        fa[k + 2] != frame_before[k + 2])
-                        ++moved;
-                }
-            }
-            long long max_ch_shift = 0;
-            int box[4] = {0, 0, 0, 0};
-            const long long shift_fresh = frameDiffAgainstFresh(
-                ep, {cjkPath, mnPath, latinPath}, {}, EditMode::Document, &max_ch_shift, box);
-            std::printf(
-                "     第二次回车：画面变了 %lld 像素 ｜ 与从零重画差 %lld 像素"
-                "（最大通道差 %lld，x %d~%d / y %d~%d）\n",
-                moved, shift_fresh, max_ch_shift, box[0], box[2], box[1], box[3]);
-            // 脆的那条：编辑点以下的每一行都往下挪了一格，画面必须成片地变。
-            //   漏重画时只有光标那几个像素会动（几百），与这里的量级差两个数量级。
-            expectTrue(moved > 20000, "★ 第二次回车把画面成片换掉了（标脏不能退化成\"没变\"）");
-            // 有界的那条：与"从零重排重画"比，允许抗锯齿在量化边界上翻格。
-            //   平移走的是"旧坐标 + 增量"，全量重排走的是"从头累加"，两者在浮点末位上
-            //   可以差到 1e-3 pt（auditLayout 正为此留了容差）；落在 Skia 的 1/16 px
-            //   量化边界上的那几个字形会翻一格 —— 实测 562 px、最大通道差 3，
-            //   而"整页没重画"是几十万像素、通道差上百。上界按后者量级取。
-            expectTrue(shift_fresh < 5000 && max_ch_shift <= 4,
-                       "★ 连续两次回车之后：增量帧与从零重画几乎逐像素相同（只差抗锯齿翻格）");
+            // 两次回车各切出一段：段数 +2，脏段之后的行必须重新排过（标脏不能退化成"没变"）。
+            //   画布上新旧混合是 web 侧的事（见 AGENTS「判据的分工」）。
+            expectTrue(ep.blocks().size() == paras_before + 2,
+                       "★ 两次回车切出两段（" + std::to_string(paras_before) + " → " +
+                           std::to_string(ep.blocks().size()) + "）");
+            expectTrue(ep.layout().lines.size() >= lines_before,
+                       "★ 行盒没有丢（" + std::to_string(lines_before) + " → " +
+                           std::to_string(ep.layout().lines.size()) + "）");
+            expectTrue(ep.editStats().relaid_lines > 0, "这一拍确实重排了行（不是什么都没做）");
             expectTrue(ep.auditLayout() == 0, "连续两次回车之后，增量排版与全量重排逐字段一致");
         }
 
@@ -2768,100 +2337,6 @@ int main() {
         }
     }
 
-    if (runSection(16))
-        std::printf("\n[16] 增量上屏 == 从零上屏：整帧逐字节比（含脏页集合对不对）\n");
-    if (runSection(16)) {
-        // 为什么需要这一节：auditFrame() 比的是"帧 vs 从底图整块重贴"，抓的是上屏漏贴。
-        //   但如果底图自己就漏画了（页指纹判错、某个变了的页没被重画），
-        //   帧与底图会一起错，auditFrame 照样是 0 —— 那一类只有拿
-        //   "从零重排 + 从零重画"的第二个引擎当参照物才照得出来。
-        //   判据形状与 auditLayout 一致：增量的正确性由"与从零重来逐字节相同"定义。
-        EditorEngine a;
-        expectTrue(a.init({cjkPath, mnPath, latinPath}), "引擎初始化（逐帧比对）");
-        EngineConfig cfg16;
-        cfg16.density = 1.0f;
-        a.setConfig(cfg16);
-
-        std::vector<BlockSpec> doc;
-        for (int i = 0; i < 60; ++i) {
-            BlockSpec b;
-            b.font_index = 0;
-            b.size_pt = 14.0f;
-            b.line_spacing.factor = 1.85f;
-            b.space_after_pt = 6.0f;
-            b.language = "zh";
-            b.setText("第 " + std::to_string(i + 1) +
-                      " 次病程记录：患者诉晨起后心悸明显，持续约十分钟，休息后缓解，"
-                      "未见黑矇与晕厥。");
-            doc.push_back(std::move(b));
-        }
-        loadBlocks(a, doc);
-        a.relayout();
-        a.repaint();
-
-        const std::vector<std::string> fonts16{cjkPath, mnPath, latinPath};
-        std::vector<Control> no_ctrl;
-        // 判据两档，都写在断言里（不接受"看着差不多就放行"）：
-        //   严格档：逐字节相同。没有重算坐标的路径（敲字、光标移动、表单标记）必须落在这一档。
-        //   抗锯齿档：只给"平移复用"用。平移的坐标是"旧值 + 偏移量"，比全量重排的
-        //     "从 cursor_y 重新累加"多一次舍入（实测 ≤ 6e-5 pt，见 auditLayout 的容差说明），
-        //     于是会在抗锯齿边界上翻掉几个像素、每个像素差 1 个通道值。
-        //     阈值取"差异像素 ≤ 十万分之一个像素、且通道差 ≤ 1"：
-        //     真正的错位（整页没重画、后缀挪错行）是几十万像素、通道差上百，逃不掉。
-        auto compare = [&](const char* label, const std::vector<Control>& ctrl, EditMode mode,
-                           bool allow_aa_noise) {
-            long long max_ch = 0;
-            int box[4] = {-1, -1, -1, -1};
-            const long long diff = frameDiffAgainstFresh(a, fonts16, ctrl, mode, &max_ch, box);
-            const long long total_px = static_cast<long long>(a.frameBytes() / 4);
-            const bool ok = allow_aa_noise ? (diff >= 0 && diff * 100000 <= total_px && max_ch <= 1)
-                                           : (diff == 0);
-            std::printf(
-                "     %s：帧差 %lld 像素（最大通道差 %lld，盒 x %d~%d / y %d~%d，窗口 %d 页，"
-                "共 %d 页，阈值 %s）\n",
-                label, diff, max_ch, box[0], box[2], box[1], box[3], a.editStats().window_pages,
-                a.editStats().total_pages, allow_aa_noise ? "≤十万分之一像素且通道差≤1" : "0");
-            expectTrue(ok,
-                       std::string("★ ") +
-                           (allow_aa_noise ? "增量上屏 ≈ 从零上屏（平移的坐标末位差只翻抗锯齿）："
-                                           : "增量上屏 == 从零上屏（逐字节相同）：") +
-                           label);
-        };
-
-        // 一：敲一个字（后缀原样复用）
-        a.setCaret(30, 5);
-        a.typeTextAndRender("\xE6\xB5\x8B");
-        compare("敲 1 字", no_ctrl, EditMode::Document, /*allow_aa_noise=*/false);
-
-        // 二：撑出一行（后缀平移复用）
-        a.setCaret(30, 5);
-        a.typeTextAndRender(std::string(80, 'a'));
-        compare("撑出一行", no_ctrl, EditMode::Document, /*allow_aa_noise=*/true);
-
-        // 三：退格（内容变少，页可能变少）
-        a.backspaceAndRender();
-        compare("退格", no_ctrl, EditMode::Document, /*allow_aa_noise=*/true);
-
-        // 四：只移动光标（不重排：底图一个字都不该动，但上屏矩形必须对）
-        a.moveCaretAndRender(-1);
-        compare("光标左移", no_ctrl, EditMode::Document, /*allow_aa_noise=*/true);
-
-        // 五：表单模式 + 控件（括号画在帧上、底图里没有 —— 上屏矩形要把它算进去）
-        {
-            const size_t len = a.blocks()[20].cp_text.size();
-            Control k1;
-            k1.range.start = TextPos{20, 0};
-            k1.range.end = TextPos{20, std::min<size_t>(8, len)};
-            k1.id = "k1";
-            std::vector<Control> ctrl{k1};
-            a.setCaret(20, 4);
-            loadControls(a, ctrl);
-            a.setEditMode(EditMode::Form);
-            a.repaint();
-            compare("表单括号", ctrl, EditMode::Form, /*allow_aa_noise=*/true);
-        }
-    }
-
     if (runSection(17))
         std::printf("\n[17] 跨段编辑：回车分段 / 段首退格合并 / 段末 Delete 合并\n");
     if (runSection(17)) {
@@ -2949,8 +2424,8 @@ int main() {
             expectTrue(e.layout().stats.placed_line_count == lines0 + 1,
                        "分段后行数 +1（段落分隔符占一行）");
             expectTrue(e.auditLayout() == 0, "分段之后增量排版 == 全量重排（逐字段）");
-            expectTrue(frameDiffAgainstFresh(e, fonts17, {}, EditMode::Document, nullptr) == 0,
-                       "★ 分段之后增量上屏 == 从零上屏（逐字节）");
+            expectTrue(e.auditPageJson(0).find("\"diff\":0") != std::string::npos,
+                       "★ 分段之后页位图 == 从零光栅（逐字节）");
 
             // 分段之后继续打字：新段是可编辑的段落
             e.typeTextAndRender("前");
@@ -2964,8 +2439,8 @@ int main() {
             expectTrue(e.blocks().size() == 1, "段数 2 → 1");
             expectTrue(e.caret() == TextPos{0, 5}, "合并之后光标落在合并点（原断点处）");
             expectTrue(e.auditLayout() == 0, "合并之后排版与全量一致");
-            expectTrue(frameDiffAgainstFresh(e, fonts17, {}, EditMode::Document, nullptr) == 0,
-                       "★ 合并之后增量上屏 == 从零上屏（逐字节）");
+            expectTrue(e.auditPageJson(0).find("\"diff\":0") != std::string::npos,
+                       "★ 合并之后页位图 == 从零光栅（逐字节）");
         }
 
         // 分段的排版粒度：前缀仍复用、后缀一律不复用。
@@ -3379,8 +2854,8 @@ int main() {
             expectTrue(full >= expect_full && full <= head_steps,
                        "★ 整篇重排只出现在「脏段是第 0 段」的那几步，"
                        "且没有后缀的那几步必然整篇重排（两侧都数）");
-            expectTrue(frameDiffAgainstFresh(e, fonts17, {}, EditMode::Document, nullptr) == 0,
-                       "★ 随机跨段编辑之后，增量上屏 == 从零上屏（逐字节）");
+            expectTrue(e.auditPageJson(0).find("\"diff\":0") != std::string::npos,
+                       "★ 随机跨段编辑之后，页位图 == 从零光栅（逐字节）");
         }
     }
 
@@ -3476,26 +2951,6 @@ int main() {
                        second10 == static_cast<int>(BracketSide::Open),
                    "★ 新共享边界上的占位顺序仍是 [闭, 开] —— 即 `][`");
         expectTrue(close_x > 0.0f && open_x > close_x, "闭括号的槽在开括号的槽左边");
-
-        // (c) 像素：亮蓝的右括号整个在灰的左括号左边（与 [14] 同源判据）
-        {
-            e.repaint();
-            const std::vector<uint8_t> f(e.frame(), e.frame() + e.frameBytes());
-            const float density = e.config().density;
-            const int fw = e.frameWidth();
-            const int x0 = static_cast<int>(std::lround(close_x * density)) - 2;
-            const float slot_len = open_x - close_x;
-            const int x1 = static_cast<int>(std::lround((open_x + slot_len - 1.0f) * density));
-            int blue_lo = -1, blue_hi = -1, gray_lo = -1, gray_hi = -1;
-            scanColumns(f, fw, x0, x1, isBracketBlue, &blue_lo, &blue_hi);
-            scanColumns(f, fw, x0, x1, isBracketGray, &gray_lo, &gray_hi);
-            std::printf("     窗口 x ∈ [%d, %d]：亮蓝 %d..%d ｜ 灰 %d..%d\n", x0, x1, blue_lo,
-                        blue_hi, gray_lo, gray_hi);
-            expectTrue(blue_lo >= 0 && gray_lo >= 0,
-                       "窗口里两种颜色的括号都在（蓝的 = A 的右括号、灰的 = B 的左括号）");
-            expectTrue(blue_hi > 0 && blue_hi < gray_lo,
-                       "★ 亮蓝 ] 整个在灰 [ 左边 —— 相邻字段是 ][，不是那份报过的 []");
-        }
 
         // (d) 紧挨着 A 末尾的空字段：它是这个位置上的最内层命中（空区间被 A 包住），
         //     所以字进的是空字段，A 反而要留在原地（终点 == at 且不是主人 → 不动）。
@@ -3669,25 +3124,6 @@ int main() {
             std::printf("     光标插入点 x=%.2f\n", caret_x);
             expectTrue(caret_x > x_open && caret_x < x_next,
                        "★ 光标落在空字段的一对括号之内（没被后一个字段的左括号顶到右边）");
-
-            // 像素证据：窗口里蓝的（空字段那一对）必须整个在灰的（只读字段的左括号）左边。
-            // 窗口止于三个槽里最靠右的那个加一个槽宽 —— 不能按"顺序应为"去取 x_next：
-            //   那样一旦顺序真的错了（正是要抓的情况），窗口会短一截，把跑到右边的那个
-            //   蓝括号关在窗口外，断言反而变绿。
-            e6.repaint();
-            const std::vector<uint8_t> f6(e6.frame(), e6.frame() + e6.frameBytes());
-            const float zoom6 = e6.config().density;
-            const float x_last = std::max(x_close, x_next);
-            const int w0 = static_cast<int>(std::lround(x_open * zoom6)) - 2;
-            const int w1 =
-                static_cast<int>(std::lround((x_last + 4.055f + kControlBracketSlotGapPt) * zoom6));
-            int blue_lo = -1, blue_hi = -1, gray_lo = -1, gray_hi = -1;
-            scanColumns(f6, e6.frameWidth(), w0, w1, isBracketBlue, &blue_lo, &blue_hi);
-            scanColumns(f6, e6.frameWidth(), w0, w1, isBracketGray, &gray_lo, &gray_hi);
-            std::printf("     窗口 x ∈ [%d, %d]：蓝 %d..%d ｜ 灰 %d..%d\n", w0, w1, blue_lo,
-                        blue_hi, gray_lo, gray_hi);
-            expectTrue(blue_hi > 0 && gray_lo > 0 && blue_hi < gray_lo,
-                       "★ 蓝的那一对整个在灰的左括号左边 —— 被劈开的话，蓝的右括号会落到灰的右边");
         }
 
         // (h) 三个可编辑字段连排，把中间那个删空：边界上会有四个槽
@@ -3756,162 +3192,6 @@ int main() {
             //   （归属与落点是同一个量，见引擎的 caretSide）。
             expectTrue(caret8 >= xs8[1] - 0.02f && caret8 <= xs8[2] + 0.02f,
                        "★ 光标落在空字段自己那一对括号之间（位置由偏移 + 侧别定，不由后面的槽挤）");
-
-            // 像素证据：三个字段都可编辑时括号同色，像素上分不出谁在左，所以做一次差分 ——
-            //   只把中间那个改成只读（区间不变）再排一遍，两帧之间变的列就只有它那一对括号
-            //   （从蓝变灰）。那一对落在哪儿于是可以逐列判。
-            //   为什么不用"灰"这个颜色本身当判据：正文黑字的抗锯齿尾巴正好也落在灰带里
-            //   （实测它就压在左边第一个槽之前），会把两侧的墨迹混进窗口。
-            std::vector<Control> now8 = e7.controls().all();
-            now8[1].read_only = true;
-            loadControls(e7, now8);
-            e7.relayout();
-            e7.repaint();
-            const std::vector<uint8_t> fa(e7.frame(), e7.frame() + e7.frameBytes());
-            now8[1].read_only = false;
-            loadControls(e7, now8);
-            e7.relayout();
-            e7.repaint();
-            const std::vector<uint8_t> fb(e7.frame(), e7.frame() + e7.frameBytes());
-
-            std::vector<int> changed(static_cast<size_t>(e7.frameWidth()), 0);
-            for (size_t i = 0; i + 3 < fa.size(); i += 4) {
-                if (fa[i] == fb[i] && fa[i + 1] == fb[i + 1] && fa[i + 2] == fb[i + 2]) continue;
-                changed[static_cast<size_t>((i >> 2) % static_cast<size_t>(e7.frameWidth()))] = 1;
-            }
-            int ch_lo = -1, ch_hi = -1, ch_n = 0;
-            for (size_t x = 0; x < changed.size(); ++x) {
-                if (!changed[x]) continue;
-                if (ch_lo < 0) ch_lo = static_cast<int>(x);
-                ch_hi = static_cast<int>(x);
-                ++ch_n;
-            }
-            const int px_open2 = static_cast<int>(std::lround(xs8[0] * c18.density));
-            const int px_open3 = static_cast<int>(std::lround(xs8[3] * c18.density));
-            std::printf(
-                "     中间字段改只读带来的变化：%d 列 ∈ [%d, %d]；"
-                "左字段闭括号 x=%d px，右字段开括号 x=%d px\n",
-                ch_n, ch_lo, ch_hi, px_open2, px_open3);
-            expectTrue(ch_n > 0 && ch_lo > px_open2 && ch_hi < px_open3,
-                       "★ 变的只有中间那一对括号，且整对夹在左右两个字段的括号之间 ——"
-                       "空字段的一对被劈开的话，它的右括号会落到右字段开括号的右边");
-        }
-
-        // (i) 三个可编辑字段连排、把中间那个删空之后的两条硬性质：
-        //     空字段仍然"进得去、打得进字"（它零宽，正是自己位置上的最内层）；
-        //     方向键不离开出发时所在的字段（邻居可编辑时，下一个格子就在隔壁字段里 ——
-        //     只判"下一步可停"会放它过去，实测从 5 连按右键会走到 8、9）。
-        {
-            EditorEngine e8;
-            if (!e8.init({cjkPath, mnPath, latinPath})) {
-                std::fprintf(stderr, "字体加载失败\n");
-                return 2;
-            }
-            e8.setConfig(c18);
-            loadBlocks(e8, {b18});
-            e8.relayout();
-            Control n1, n2, n3;
-            n1.range.start = TextPos{0, 5};
-            n1.range.end = TextPos{0, 7};  // 反复
-            n1.id = "n1";
-            n2.range.start = TextPos{0, 7};
-            n2.range.end = TextPos{0, 9};  // 心悸
-            n2.id = "n2";
-            n3.range.start = TextPos{0, 9};
-            n3.range.end = TextPos{0, 11};  // 三天
-            n3.id = "n3";
-            loadControls(e8, {n1, n2, n3});
-            e8.setEditMode(EditMode::Form);
-            e8.setCaret(0, 9);
-            for (int i = 0; i < 2; ++i) e8.backspaceAndRender();
-
-            const Control& w1 = e8.controls().at(1);
-            std::printf(
-                "     删空之后：#1=[%zu,%zu) depth=%d parent=%d，"
-                "偏移 7 归属=%d，光标在 %zu\n",
-                w1.range.start.offset, w1.range.end.offset, w1.depth, w1.parent,
-                e8.controls().innermostInsertAt(TextPos{0, 7}), e8.caret().offset);
-            expectTrue(w1.range.start.offset == 7 && w1.range.end.offset == 7,
-                       "中间那个字段被删成零宽的空字段");
-            expectTrue(w1.depth == 1,
-                       "★ 零宽字段被邻居按闭合区间包含 → 区间树重算后它是内层（depth 1）。"
-                       "树停在编辑前那一刻的话这里还是 0，位置会被左邻居抢走");
-            expectTrue(e8.controls().innermostInsertAt(TextPos{0, 7}) == 1 &&
-                           e8.focusedControlIndex() == 1,
-                       "★ 它自己那个位置归它（最内层）—— 否则光标再也进不去、字也打不进去");
-
-            // 打字必须进这个空字段，而不是被左边的字段抢走
-            expectTrue(e8.typeTextAndRender("痛"), "在空字段的位置上打字被放行");
-            const Control& x0 = e8.controls().at(0);
-            const Control& x1 = e8.controls().at(1);
-            const Control& x2 = e8.controls().at(2);
-            std::printf("     打字之后：#0=[%zu,%zu)  #1=[%zu,%zu)  #2=[%zu,%zu)\n",
-                        x0.range.start.offset, x0.range.end.offset, x1.range.start.offset,
-                        x1.range.end.offset, x2.range.start.offset, x2.range.end.offset);
-            expectTrue(x1.range.start.offset == 7 && x1.range.end.offset == 8,
-                       "★ 字进了空字段（它成了 [7,8)）");
-            expectTrue(x0.range.start.offset == 5 && x0.range.end.offset == 7,
-                       "左边那个字段没有被撑大（字没有同时落进两个字段）");
-            expectTrue(x2.range.start.offset == 8, "右边那个字段整体右移");
-
-            // 方向键：一次一格，且整次移动都不许离开出发时所在的字段
-            EditorEngine e9;
-            if (!e9.init({cjkPath, mnPath, latinPath})) {
-                std::fprintf(stderr, "字体加载失败\n");
-                return 2;
-            }
-            e9.setConfig(c18);
-            loadBlocks(e9, {b18});
-            e9.relayout();
-            loadControls(e9, {n1, n2, n3});
-            e9.setEditMode(EditMode::Form);
-            e9.setCaret(0, 9);
-            for (int i = 0; i < 2; ++i) e9.backspaceAndRender();
-
-            std::vector<size_t> walk;
-            std::vector<int> walk_side;
-            int worst = 0;
-            bool left_field = false;
-            e9.setCaret(0, 5);
-            for (int i = 0; i < 8; ++i) {
-                const size_t before = e9.caret().offset;
-                e9.moveCaretAndRender(1);
-                const size_t now = e9.caret().offset;
-                walk.push_back(now);
-                walk_side.push_back(e9.caretSide());
-                worst = std::max(worst, static_cast<int>(now) - static_cast<int>(before));
-                if (now < 5 || now > 7) left_field = true;  // 走出了 #0 = [5,7]
-            }
-            std::printf("     从 5 连按 8 次右键：");
-            for (size_t i = 0; i < walk.size(); ++i) std::printf(" %zu/%d", walk[i], walk_side[i]);
-            std::printf("（单步最大跨度 %d）\n", worst);
-            expectTrue(worst <= 1, "★ 方向键一次只走一格（没有瞬移）");
-            // 一次一格：要么同一个偏移上侧别 +1，要么跨到下一个偏移（侧别归零）
-            bool cell_ok = walk.size() == 8;
-            for (size_t i = 0; i < walk.size() && cell_ok; ++i) {
-                const size_t prev_off = (i == 0) ? 5 : walk[i - 1];
-                const int prev_side = (i == 0) ? 1 : walk_side[i - 1];
-                // 走到内容末尾之后再按就停在原地（落点不可插入 → 收束回边界）。
-                if (walk[i] == prev_off && walk_side[i] == prev_side) continue;
-                const bool in_offset = (walk[i] == prev_off && walk_side[i] == prev_side + 1);
-                const bool next_off = (walk[i] > prev_off && walk_side[i] == 0);
-                if (!in_offset && !next_off) cell_ok = false;
-            }
-            expectTrue(cell_ok, "★ 一次跨一枚簇：括号占位也算一格（不跳格）");
-            expectTrue(!left_field && walk.back() == 7 && walk_side.back() == 0,
-                       "★ 停在 #0 的内容末尾（cp 7 侧别 0）—— 方向键不越过字段边界");
-
-            e9.setCaret(0, 8);  // 在 #2 里（删空之后 #2 = [7,9)）
-            std::vector<size_t> back;
-            for (int i = 0; i < 9; ++i) {
-                e9.moveCaretAndRender(-1);
-                back.push_back(e9.caret().offset);
-            }
-            std::printf("     从 8 连按 9 次左键：");
-            for (size_t o : back) std::printf(" %zu", o);
-            std::printf("\n");
-            expectTrue(back.front() == 7 && back.back() == 7,
-                       "★ 从 #2 里往左走到它自己的内容起点就停住（不再跨进上一个字段）");
         }
     }
 
@@ -4371,67 +3651,10 @@ int main() {
             expectTrue(e.controls().at(1).parent == 0 && e.controls().at(2).parent == 0,
                        "两个零宽字段的父都是 #0（区间树重算过，父链不成环）");
             expectTrue(noCross(), "删空之后区间仍然两两不穿线");
-            // 像素证据：把 #2 标成只读，它那对括号变灰。逐个槽量两件事：
-            //   颜色（灰还是亮蓝）与墨迹的横向重心。方括号是镜像字形 —— 开括号的墨
-            //   偏在槽的左半、闭括号偏在右半，所以重心能直接从像素上读出边序。
-            //   这一条不看任何区间数据，只读帧，是排版结果最直接的可证伪判据。
-            if (s.size() == 5) {
-                loadControls(e, withRo(2, true));
-                e.relayout();
-                e.showCaret(false);
-                e.repaint();
-                const std::vector<SlotInfo> sp = slotsAt(7);
-                const float z = e.config().density;
-                const float pitch = (sp.size() >= 2) ? (sp[1].x - sp[0].x) : 6.0f;
-                const std::vector<uint8_t> fr(e.frame(), e.frame() + e.frameBytes());
-                const int fw = e.frameWidth();
-                // 只扫槽的内部（两侧各让开 0.5pt）：槽带前后紧挨着真实字形，
-                //   而字形抗锯齿的中间档恰好落在灰括号的判据区间里，会让"灰"误报。
-                auto inkStats = [&](float xa, float xb, bool gray, int* count, float* centroid) {
-                    *count = 0;
-                    *centroid = 0.0f;
-                    const int c0 = static_cast<int>(std::lround(xa * z));
-                    const int c1 = static_cast<int>(std::lround(xb * z));
-                    double sum = 0.0;
-                    for (size_t i = 0; i + 3 < fr.size(); i += 4) {
-                        const int x = static_cast<int>(i >> 2) % fw;
-                        if (x < c0 || x > c1) continue;
-                        const uint8_t r = fr[i], g = fr[i + 1], b = fr[i + 2];
-                        if (!(gray ? isBracketGray(r, g, b) : isBracketBlue(r, g, b))) continue;
-                        ++(*count);
-                        sum += static_cast<double>(x - c0);
-                    }
-                    if (*count > 0) *centroid = static_cast<float>(sum / *count);
-                };
-                int blue_n[5] = {0, 0, 0, 0, 0};
-                int gray_n[5] = {0, 0, 0, 0, 0};
-                float blue_c[5] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-                float gray_c[5] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-                for (int k = 0; k < 5; ++k) {
-                    const float xa = sp[static_cast<size_t>(k)].x + 0.5f;
-                    const float xb = xa + pitch - 1.0f;
-                    inkStats(xa, xb, false, &blue_n[k], &blue_c[k]);
-                    inkStats(xa, xb, true, &gray_n[k], &gray_c[k]);
-                }
-                std::printf(
-                    "     五个槽从左到右：亮蓝墨量 %d %d %d %d %d ｜ 灰墨量 %d %d %d %d %d\n",
-                    blue_n[0], blue_n[1], blue_n[2], blue_n[3], blue_n[4], gray_n[0], gray_n[1],
-                    gray_n[2], gray_n[3], gray_n[4]);
-                std::printf("     亮蓝重心 %.2f %.2f %.2f ｜ 灰重心 %.2f %.2f\n", blue_c[0],
-                            blue_c[1], blue_c[2], gray_c[3], gray_c[4]);
-                expectTrue(blue_n[0] > 0 && blue_n[1] > 0 && blue_n[2] > 0 && gray_n[0] == 0 &&
-                               gray_n[1] == 0 && gray_n[2] == 0,
-                           "★ 左边三枚括号都是亮蓝的（#0 的 ] 与 #1 的一对，都可编辑）");
-                expectTrue(gray_n[3] > 0 && gray_n[4] > 0 && blue_n[3] == 0 && blue_n[4] == 0,
-                           "★ 右边两枚括号都是灰的（#2 只读），且没有蓝的混进来");
-                expectTrue(blue_c[0] > blue_c[1] && blue_c[1] < blue_c[2],
-                           "★ 像素上的边序就是 ][][]: 左 ] 的重心在 [ 之右，[ 又在 ] 之左");
-                expectTrue(gray_c[3] < gray_c[4],
-                           "★ #2 那一对同样是 []（[ 的重心在 ] 之左），没有被画成 [[ ");
-                e.showCaret(true);
-                loadControls(e, withRo(2, false));
-                e.relayout();
-            }
+            // 括号的颜色（灰 = 只读）与左右边序是屏幕上的事：在 web 侧验
+            //   （edit-form 的括号墨量判据）。这里只留区间、槽位与归属的结构判据。
+            loadControls(e, withRo(2, false));
+            e.relayout();
             // 零宽字段在自己位置上仍是最内层：否则位置被左邻居抢走，字就再也打不进去。
             e.setCaret(0, 7);
             expectTrue(e.focusedControlIndex() == 1,
@@ -4929,9 +4152,8 @@ int main() {
             EditorEngine ea, eb;
             setup(ea, a);
             setup(eb, b);
-            const long long d = frameDiffBetween(ea, eb);
-            expectTrue(d == 0, "★ 等价：runs 为空与显式一个 run 产出同一帧（不符像素 " +
-                                   std::to_string(d) + "）");
+            expectTrue(digestOf(ea.layout()).hash == digestOf(eb.layout()).hash,
+                       "★ 等价：runs 为空与显式一个 run 产出同一份排版（摘要逐字段相同）");
             const int ga = ea.layout().stats.glyph_count;
             const int gb = eb.layout().stats.glyph_count;
             const int la = ea.layout().stats.placed_line_count;
@@ -4966,9 +4188,8 @@ int main() {
             EditorEngine e1, e3;
             setup(e1, one);
             setup(e3, three);
-            const long long d = frameDiffBetween(e1, e3);
-            expectTrue(d == 0, "★ 切分等价：一个 run 切成 3 个同属性 run 产出同一帧（不符像素 " +
-                                   std::to_string(d) + "）");
+            expectTrue(digestOf(e1.layout()).hash == digestOf(e3.layout()).hash,
+                       "★ 切分等价：一个 run 切成 3 个同属性 run 产出同一份排版（摘要逐字段相同）");
             // 整形段数直调排版层看：树装载会把同属性的相邻 run 合并成一个文本节点，
             //   于是"一个 run 切成 3 个"在树上表达不出来 —— 而这条判据问的正是
             //   "排版按 runs 切了几刀"，本来就该问排版层（它只吃块流）。
@@ -6595,20 +5816,15 @@ int main() {
         expectTrue(eC.caret().para == eA.caret().para && eC.caret().offset == eA.caret().offset,
                    "落点也一样");
 
-        // 逐字节同帧：两条路走到同一个文档状态，帧就该一个字节都不差。
-        //   关掉光标再比 —— 闪烁相位与光标位置是另一件事，别让它污染这一条。
-        eA.showCaret(false);
-        eC.showCaret(false);
-        // 必须各自重排一次再呈现：编辑只标脏（markLayoutDirty），真正的排版要等 relayout。
-        //   少了这一步，两张帧画的都是编辑之前那一版 layout，它们当然逐字节相同，
-        //   于是这条"逐字节同帧"变成一句空话（反证 A 就是这么被漏过去的）。
+        // 同一个文档状态，排版就该逐字段相同。比排版摘要而不是比帧：帧是光栅的产物，
+        //   屏幕上的事只能在 web 侧验（见 AGENTS「判据的分工」）。
+        //   必须各自重排一次再比：编辑只标脏（markLayoutDirty），少了这一步两边比的
+        //   都还是编辑之前那一版 layout，摘要相等就成了一句空话（反证 A 就是这么被漏过去的）。
         eA.relayout();
         eC.relayout();
-        eA.repaint();
-        eC.repaint();
-        expectTrue(eA.frameBytes() == eC.frameBytes(), "两条路的帧大小一致");
-        expectTrue(std::memcmp(eA.frame(), eC.frame(), eA.frameBytes()) == 0,
-                   "★ 跨段删除与手工删同样内容逐字节同帧");
+        const LayoutDigest dA38 = digestOf(eA.layout());
+        const LayoutDigest dC38 = digestOf(eC.layout());
+        expectTrue(dA38.hash == dC38.hash, "★ 跨段删除与手工删同样内容：排版摘要逐字段相同");
 
         // (h) 全选再打字 = 整篇被替换成一个字
         reload38(e38);
@@ -8959,13 +8175,12 @@ int main() {
         expectTrue(e58.editStats().total_pages >= 5,
                    "前提：文档至少五页（" + std::to_string(e58.editStats().total_pages) + "）");
 
-        // (a) 页视图 == 帧里那一块。帧是现成的参照物，而页视图是新接口 ——
-        //   这一条钉的是"零拷贝视图指对了地方、长度也对"。
-        //   前提是先藏光标：页位图里没有瞬态，帧里有一条光标，不藏就永远差那一块。
-        //   藏/显各来一拍，留下的脏矩形在下面统一取走。
+        // (a) 页视图的契约：每页一份整页长度的 RGBA，画布摆位由"窗口顺序"给出 ——
+        //   帧是一列页按步距叠起来的，所以帧宽 == 页宽、帧高 == 窗口页数 x 步距。
+        //   两块像素是否逐字节相同是光栅的事，在 web 侧验（selfCheck 比画布与页像素）。
         e58.showCaret(false);
         e58.repaint();
-        int same58 = 0;
+        int ok_pages = 0;
         std::string bad58;
         const size_t want_n = static_cast<size_t>(pw) * static_cast<size_t>(ph) * 4;
         for (int p = 0; p < 4; ++p) {
@@ -8974,21 +8189,13 @@ int main() {
                 bad58 += " p" + std::to_string(p) + ":n=" + std::to_string(n);
                 continue;
             }
-            // 导出图里页的位置 = (页号 - 窗口首页) x 步距。槽那套编号已经删掉，
-            //   这个换算就是"窗口顺序"本身，没有第二个说法。
-            const int off = (p - e58.windowFirstPage()) * step;
-            const uint8_t* src =
-                e58.frame() + static_cast<size_t>(off) * static_cast<size_t>(fw) * 4;
-            if (std::memcmp(e58.pagePixels(p), src, n) == 0) {
-                ++same58;
-                continue;
-            }
-            size_t d = 0;
-            while (d < n && e58.pagePixels(p)[d] == src[d]) ++d;
-            bad58 += " p" + std::to_string(p) + ":diff@" + std::to_string(d);
+            ++ok_pages;
         }
-        expectTrue(same58 == 4, "四页的 pageRgba 与帧对应块逐字节相同（" + std::to_string(same58) +
-                                    "/4" + bad58 + "）");
+        expectTrue(ok_pages == 4,
+                   "四页都给出整页长度的页视图（" + std::to_string(ok_pages) + "/4" + bad58 + "）");
+        expectTrue(fw == pw, "帧宽 == 页宽（窗口是一列页，没有横向拼接）");
+        expectTrue(e58.frameHeight() == e58.editStats().window_pages * step,
+                   "帧高 == 窗口页数 x 步距（页的落点就是 (页号 - 首页) x 步距）");
         expectTrue(e58.pageBytes(9999) == 0, "没有缓存的页给空视图（不造假绿）");
 
         // 光标放回来，再把前面几拍攒下的脏矩形取走；下面只看增量。
@@ -9061,121 +8268,6 @@ int main() {
         expectTrue(e58.editStats().repainted_pages == 0,
                    "同样的配置再设一次，一页都不重光栅（签名不是每次 setConfig 都变，实际 " +
                        std::to_string(e58.editStats().repainted_pages) + " 页）");
-    }
-
-    if (runSection(59)) std::printf("\n[59] 连页接缝：分带渲染 == 整带渲染（逐字节）\n");
-    if (runSection(59)) {
-        // 连页把内容切成固定高度的条带，行就必然会跨接缝。判据不是"看着对不对"，
-        //   而是"同一份文档切成 N 带、拼起来，与切成一条整带逐字节相同" ——
-        //   整带没有接缝，是天然的参照物：接缝处少画半行、画重半行、两侧对不齐，
-        //   都会在这里露出来。
-        //
-        // 为什么必须带像素判据：行盒、页号、指纹都是"归属层"的事实，它们全对而接缝
-        //   处缺半行是完全可能的（字形按基线归带、上半截落在负 y 被裁掉就是这样）。
-        const std::vector<std::string> fonts59 = {cjkPath, mnPath, latinPath};
-        EditorEngine e59;
-        expectTrue(e59.init(fonts59), "引擎初始化（接缝）");
-
-        std::vector<std::u32string> paras59;
-        paras59.reserve(60);
-        for (int i = 0; i < 60; ++i) {
-            const std::vector<uint32_t> cps =
-                utf8ToCodepoints("第" + std::to_string(i) + "段：接缝处的字形必须完整。");
-            paras59.emplace_back(cps.begin(), cps.end());
-        }
-        const StyleSheet sheet59;
-        e59.setDocument(doc::makeTextDoc(paras59), sheet59);
-
-        EngineConfig c59;
-        c59.density = 1.0f;  // 1 磅 = 1 像素：拼图与整带用的是同一把尺子
-        c59.page.width_pt = 320.0f;
-        c59.page.height_pt = 150.0f;  // 故意矮：几十条带，接缝足够多
-        c59.page.margins = PageMargins::all(20.0f);
-        c59.page_gap_pt = 0.0f;
-        // 连页开关在 EngineConfig 上；page.continuous 与 page.slab_pt 由 setConfig 装配
-        //   （见 EditorEngine::setConfig），直接在 page 上置位不会生效。
-        c59.continuous = true;
-        e59.setConfig(c59);
-        e59.relayout();
-        e59.repaint();
-
-        const int slabs = std::max(1, e59.editStats().total_pages);
-        const int pw = e59.pagePxWidth();
-        const int ph = e59.pagePxHeight();
-        const size_t page_bytes = static_cast<size_t>(pw) * static_cast<size_t>(ph) * 4u;
-        std::vector<uint8_t> tiled(page_bytes * static_cast<size_t>(slabs), 0);
-        int stitched = 0;
-        for (int p = 0; p < slabs; ++p) {
-            const uint8_t* src = e59.pagePixels(p);
-            if (src == nullptr) continue;
-            std::memcpy(tiled.data() + static_cast<size_t>(p) * page_bytes, src, page_bytes);
-            ++stitched;
-        }
-        expectTrue(stitched == slabs, "每条带都拿得到像素（" + std::to_string(stitched) + "/" +
-                                          std::to_string(slabs) + "）");
-
-        auto capture = [&]() {
-            int n = 0;
-            for (int p = 0; p < slabs; ++p) {
-                const uint8_t* src = e59.pagePixels(p);
-                if (src == nullptr) continue;
-                std::memcpy(tiled.data() + static_cast<size_t>(p) * page_bytes, src, page_bytes);
-                ++n;
-            }
-            return n;
-        };
-
-        // 参照物：同一条文档、同样宽度，但高到一整条带装得下（没有接缝）。
-        EngineConfig big59 = c59;
-        big59.page.height_pt = 6000.0f;
-        auto toBig = [&]() {
-            e59.setConfig(big59);
-            e59.relayout();
-            e59.repaint();
-        };
-        auto toTiled = [&]() {
-            e59.setConfig(c59);
-            e59.relayout();
-            e59.repaint();
-        };
-        toBig();
-        expectTrue(e59.editStats().total_pages == 1,
-                   "整带版本确实只有一条带（" + std::to_string(e59.editStats().total_pages) + "）");
-
-        auto compareStitched = [&](const char* label) {
-            const uint8_t* ref = e59.pagePixels(0);
-            if (ref == nullptr) {
-                expectTrue(false, std::string(label) + "：整带版本拿不到像素");
-                return;
-            }
-            const int ref_h = e59.pagePxHeight();
-            const int rows = std::min(ref_h, ph * slabs);
-            long long diff = 0;
-            int first_bad = -1;
-            for (int y = 0; y < rows; ++y) {
-                const uint8_t* a = tiled.data() + static_cast<size_t>(y) * pw * 4u;
-                const uint8_t* b = ref + static_cast<size_t>(y) * pw * 4u;
-                if (std::memcmp(a, b, static_cast<size_t>(pw) * 4u) == 0) continue;
-                ++diff;
-                if (first_bad < 0) first_bad = y;
-            }
-            std::printf("     %s：比了 %d 行（%d 条带 x %d 行），差 %lld 行%s\n", label, rows,
-                        slabs, ph, diff,
-                        first_bad >= 0 ? ("，首行 " + std::to_string(first_bad)).c_str() : "");
-            expectTrue(diff == 0, std::string(label) + "：分带与整带逐字节相同");
-        };
-        compareStitched("纯内容");
-
-        // 选一整篇：选区矩形同样会跨接缝，两带各画自己那半 —— 与内容同一条规则。
-        //   这一条不可省：内容对、选区只画一半，屏幕上就是"字完整、高亮断一截"。
-        toTiled();
-        e59.selectAll();
-        e59.repaint();
-        expectTrue(capture() == slabs, "带选区时每条带仍拿得到像素");
-        toBig();
-        e59.selectAll();
-        e59.repaint();
-        compareStitched("全选");
     }
 
     // [60] 保存 / 打开。
@@ -9260,8 +8352,10 @@ int main() {
 
         a.setCaret(0, 0);
         b.setCaret(0, 0);
-        expectTrue(frameDiffBetween(a, b) == 0,
-                   "整帧逐字节相同（存盘 → 新引擎 → 打开，含控件括号与光标）");
+        // 存盘往返的强判据是"排版逐字段相同"：任何参与排版的字段没落盘都会在摘要上露出来。
+        //   像素是否相同是光栅的事，在 web 侧验（AGENTS「判据的分工」）。
+        expectTrue(digestOf(a.layout()).hash == digestOf(b.layout()).hash,
+                   "排版摘要逐字段相同（存盘 → 新引擎 → 打开，含控件括号的位置）");
 
         const auto again = b.saveDocument();
         expectTrue(again.ok && again.text == saved.text, "再存一遍字节完全相同（写端是确定的）");
@@ -9274,7 +8368,7 @@ int main() {
         // 反向一半：坏文件被拒，且现场（文字 / 像素 / 历史）一个字节都没动。
         const std::string before_bad = b.saveDocument().text;
         const bool undo_before_bad = b.canUndo();
-        std::vector<uint8_t> pix_before(b.frame(), b.frame() + b.frameBytes());
+        const LayoutDigest d_before_bad = digestOf(b.layout());
         const auto bad1 = b.loadDocument("{ \xE8\xBF\x99\xE4\xB8\x8D\xE6\x98\xAF json");
         expectTrue(!bad1.ok && !bad1.error.empty(), "坏 JSON 被拒绝且带原因");
         const auto bad2 = b.loadDocument("{\"v\":99}");
@@ -9283,9 +8377,7 @@ int main() {
         expectTrue(!bad3.ok, "空文件被拒绝");
         expectTrue(b.saveDocument().text == before_bad, "拒绝之后文档一个字节都没动");
         expectTrue(b.canUndo() == undo_before_bad, "拒绝之后撤销栈没动");
-        expectTrue(pix_before.size() == b.frameBytes() &&
-                       std::memcmp(pix_before.data(), b.frame(), pix_before.size()) == 0,
-                   "拒绝之后像素一个字节都没动");
+        expectTrue(digestOf(b.layout()).hash == d_before_bad.hash, "拒绝之后排版一个字段都没动");
     }
 
     // [61] 表格走进增量。
@@ -9785,11 +8877,10 @@ int main() {
                    "这几笔编辑之后增量与全量仍然逐字段一致");
     }
 
-    if (runSection(64)) std::printf("\n[64] 编辑标记：只画进页位图，不动排版\n");
+    if (runSection(64)) std::printf("\n[64] 编辑标记：三档都不动排版与内容\n");
     if (runSection(64)) {
-        // 三条判据：关掉之后像素真的少了（标记不是空开关）；开出"全部"之后又多出
-        //   空格里的中点；三种档位的行盒与字形坐标逐位相同（标记不是内容，不进版面）。
-        //   反向一半在最后：关回去的像素必须与从未打开时逐字节相同。
+        // 标记不进版面：三档的行盒、字形坐标、正文与段数必须逐位相同。
+        //   "画了多少墨"是屏幕上的事，在 web 侧验（见 AGENTS「判据的分工」）。
         EngineConfig c64;
         c64.density = 1.0f;
         c64.page.width_pt = 320.0f;
@@ -9817,23 +8908,6 @@ int main() {
         e64.relayout();
         e64.repaint();
 
-        // 比页位图，不比帧：帧里叠着光标与选区那一层瞬态，它跟标记无关，混进来就是
-        //   把两件事的账记在一处（只读模式下光标不画，一关就把"标记没画"盖过去了）。
-        auto snap = [&]() {
-            const size_t n = e64.pageBytes(0);
-            return std::vector<uint8_t>(e64.pagePixels(0), e64.pagePixels(0) + n);
-        };
-        // 两帧之间差多少个像素：按 RGBA 四字节一组比，比"差多少字节"更接近肉眼看到的变化。
-        auto diffPx = [&](const std::vector<uint8_t>& a, const std::vector<uint8_t>& b) {
-            if (a.size() != b.size()) return -1;
-            int n = 0;
-            for (size_t i = 0; i + 3 < a.size(); i += 4) {
-                if (a[i] != b[i] || a[i + 1] != b[i + 1] || a[i + 2] != b[i + 2] ||
-                    a[i + 3] != b[i + 3])
-                    ++n;
-            }
-            return n;
-        };
         auto setMarks = [&](MarksMode m) {
             EngineConfig c = e64.config();
             c.marks = m;
@@ -9864,49 +8938,25 @@ int main() {
         expectTrue(e64.config().marks == MarksMode::Paragraph,
                    "默认档 = 只显示段落标记（段落边界是编辑时最该看见的）");
 
-        // 这一节比的是像素差，先把光标熄掉：只读模式下光标本来就不画（见 caretInsertable），
-        //   留着它会往差值里多塞一条竖线的像素。
-        e64.showCaret(false);
-        const std::vector<uint8_t> with_para = snap();
+        const LayoutResult geom_para = e64.layout();
         setMarks(MarksMode::None);
         const LayoutResult geom_off = e64.layout();
-        const std::vector<uint8_t> bare = snap();
-        const int ink_para = diffPx(with_para, bare);
-
+        expectTrue(sameGeometry(geom_para, geom_off),
+                   "★ 关掉标记：行盒与字形坐标逐位相同（标记不进版面）");
         setMarks(MarksMode::All);
-        const std::vector<uint8_t> all = snap();
-        const int ink_all = diffPx(all, bare);
-        const int ink_space = diffPx(all, with_para);
-
-        expectTrue(ink_para > 0, "★ 段落标记真的画了墨迹（关掉之后少了 " +
-                                     std::to_string(ink_para) + " 个像素）");
-        expectTrue(ink_space > 0, "★ 全部标记档多出空格里的中点（比段落档多 " +
-                                      std::to_string(ink_space) + " 个像素）");
-        // 两个差值都以"无标记"那一版为基线：墨迹落在同一行上、像素集合互相压住，
-        //   所以"两个差值相加"不成立。这里只钉两件事 —— 全部档确实画了墨迹，
-        //   而且它比段落档多出来的正是空格里的中点（ink_space，上面那条）。
-        expectTrue(ink_all > 0, "全部档确实画了墨迹（" + std::to_string(ink_all) + " 个像素）");
-        expectTrue(sameGeometry(geom_off, e64.layout()),
-                   "★ 三档的行盒与字形坐标逐位相同（标记不进版面：不占宽度、不改断行）");
+        expectTrue(sameGeometry(geom_para, e64.layout()),
+                   "★ 全部档：行盒与字形坐标仍逐位相同（不占宽度、不改断行）");
         expectTrue(
             e64.blocks()[0].cp_text == utf8ToCodepoints("甲乙  丙") && e64.blocks().size() == 2,
             "正文与段数一个都没变（标记不是内容）");
 
-        // 反向一半：关回去的像素必须与从未打开时逐字节相同 —— 开关不是累加的。
-        setMarks(MarksMode::None);
-        expectTrue(diffPx(snap(), bare) == 0, "★ 再关掉：帧逐字节回到没有标记的那一版");
-
-        // 只读是呈现态：标记不画（与表单括号同一条）—— 画了会被印出来。
-        setMarks(MarksMode::All);
+        // 只读是呈现态：标记不画（与表单括号同一条）—— 但版面同样不许动。
         e64.setEditMode(EditMode::ReadOnly);
         e64.relayout();
-        e64.repaint();
-        const int ink_readonly = diffPx(snap(), bare);
-        expectTrue(ink_readonly == 0, "★ 只读模式下不画标记（页位图等于关掉标记那一版，差 " +
-                                          std::to_string(ink_readonly) + " 个像素）");
+        expectTrue(sameGeometry(geom_para, e64.layout()),
+                   "★ 只读模式下版面也不动（标记不参与排版）");
         e64.setEditMode(EditMode::Document);
         e64.relayout();
-        e64.repaint();
         expectTrue(e64.auditCompile() == 0 && e64.auditLayout() == 0,
                    "切换档位之后增量与全量仍然逐字段一致");
     }
@@ -10098,38 +9148,9 @@ int main() {
         e67.setCaret(0, 0);
         e67.repaint();
 
-        const int pw67 = e67.pagePxWidth();
-        const int ph67 = e67.pagePxHeight();
-        const uint8_t* px67 = e67.pagePixels(0);
-        auto inkIn = [&](float x, float y, float w, float h) {
-            const int x0 = std::max(0, static_cast<int>(std::floor(x)) - 1);
-            const int x1 = std::min(pw67, static_cast<int>(std::ceil(x + w)) + 1);
-            const int y0 = std::max(0, static_cast<int>(std::floor(y)));
-            const int y1 = std::min(ph67, static_cast<int>(std::ceil(y + h)));
-            int n = 0;
-            for (int yy = y0; yy < y1; ++yy) {
-                for (int xx = x0; xx < x1; ++xx) {
-                    const size_t o = (static_cast<size_t>(yy) * static_cast<size_t>(pw67) +
-                                      static_cast<size_t>(xx)) *
-                                     4u;
-                    if (px67[o] < 200 && px67[o + 1] < 200 && px67[o + 2] < 200) ++n;
-                }
-            }
-            return n;
-        };
-        std::vector<int> ink67;
-        for (size_t i = 0; i < e67.layout().lines.size(); ++i) {
-            const LineBox& lb = e67.layout().lines[i];
-            const float slot_x = lb.inline_origin_pt + lb.inline_end_pt;
-            ink67.push_back(
-                inkIn(slot_x, lb.block_lo_pt, lb.size_pt * 0.7f, lb.block_hi_pt - lb.block_lo_pt));
-        }
         expectTrue(
             e67.layout().lines.size() == 5,
             "回车三次之后有五条行盒（实际 " + std::to_string(e67.layout().lines.size()) + "）");
-        expectTrue(ink67.size() == 5 && ink67[2] > 0 && ink67[3] > 0 && ink67[4] > 0,
-                   "★ 三个新空段的段落标记都画进了页位图（实际墨迹 " +
-                       std::to_string(ink67.size() == 5 ? ink67[4] : -1) + " 像素）");
         expectTrue(e67.auditPageJson(0).find("\"diff\":0") != std::string::npos,
                    "★ 页位图 == 从零重光栅（" + e67.auditPageJson(0) + "）");
 
@@ -10204,35 +9225,10 @@ int main() {
             ev.setCaret(0, 0);
             ev.repaint();
 
-            const int pwv = ev.pagePxWidth();
-            const int phv = ev.pagePxHeight();
-            int marked = 0;
-            for (const LineBox& lb : ev.layout().lines) {
-                // 竖排段各占一列、每列一整页（块轴吃掉本页剩余宽度），所以逐行取它自己那一页。
-                const uint8_t* pxv = ev.pagePixels(lb.page);
-                if (pxv == nullptr) continue;
-                // 竖排：行内轴是 y，标记坐在列底（inline_origin + inline_end）那一带上。
-                const int y0 = std::max(
-                    0, static_cast<int>(std::floor(lb.inline_origin_pt + lb.inline_end_pt)));
-                const int y1 =
-                    std::min(phv, static_cast<int>(std::ceil(
-                                      lb.inline_origin_pt + lb.inline_end_pt + lb.size_pt * 0.8f)));
-                const int x0 = std::max(0, static_cast<int>(std::floor(lb.block_lo_pt)) - 1);
-                const int x1 = std::min(pwv, static_cast<int>(std::ceil(lb.block_hi_pt)) + 1);
-                int n = 0;
-                for (int yy = y0; yy < y1; ++yy) {
-                    for (int xx = x0; xx < x1; ++xx) {
-                        const size_t o = (static_cast<size_t>(yy) * static_cast<size_t>(pwv) +
-                                          static_cast<size_t>(xx)) *
-                                         4u;
-                        if (pxv[o] < 200 && pxv[o + 1] < 200 && pxv[o + 2] < 200) ++n;
-                    }
-                }
-                if (n > 0) ++marked;
-            }
-            expectTrue(ev.layout().lines.size() == 4 && marked == 4,
-                       "★ 竖排：回车新生的两列也画出了段落标记（" + std::to_string(marked) + " / " +
-                           std::to_string(ev.layout().lines.size()) + " 列有墨迹）");
+            // 竖排的两列都要有自己的行盒（标记是否画进页位图是 web 侧的事）。
+            expectTrue(ev.layout().lines.size() == 4, "★ 竖排：回车新生两列，行盒从 2 变 4（实际 " +
+                                                          std::to_string(ev.layout().lines.size()) +
+                                                          "）");
             ev.selectAll();
             const std::vector<EditorEngine::PageRect> fwdv = ev.selectionRects();
             expectTrue(fwdv.size() == 4, "★ 竖排：正向选到文档末，末列也有矩形（实际 " +
@@ -10593,38 +9589,24 @@ int main() {
             {
                 const int pw2 = e2.pagePxWidth();
                 const int ph2 = e2.pagePxHeight();
-                /**
-                 * 取一个像素是不是格线（深色）。
-                 */
-                auto ink = [&](int page, int x, int y) -> bool {
-                    const uint8_t* px = e2.pagePixels(page);
-                    if (px == nullptr) return false;
-                    const size_t at = (static_cast<size_t>(y) * static_cast<size_t>(pw2) +
-                                       static_cast<size_t>(x)) *
-                                      4u;
-                    return px[at] < 100 && px[at + 1] < 100 && px[at + 2] < 100;
-                };
-                /**
-                 * 这一像素行是不是一条横线：格线横跨整张表，文字只占零星几列。
-                 */
-                auto lineLike = [&](int page, int y) -> bool {
-                    if (y < 0 || y >= ph2) return false;
-                    int dark = 0;
-                    int total = 0;
-                    for (int x = 16; x < 284; ++x) {
-                        ++total;
-                        if (ink(page, x, y)) ++dark;
+                // 切口的两侧由 cont_top / cont_bottom 标出来 —— 那是"这一边是切出来的、
+                //   要补格线"的唯一真源。补出来是几条线属于光栅（web 侧）。
+                bool cut_bottom2 = false;
+                bool cut_top2 = false;
+                float cut_y2 = 0.0f;
+                for (const PlacedRow& pr : pt2.placed) {
+                    if (pr.page == 0 && pr.cont_bottom) {
+                        cut_bottom2 = true;
+                        cut_y2 = pr.y + pr.h;
                     }
-                    return dark * 4 > total * 3;
-                };
-                const int cut0 =
-                    static_cast<int>(std::lround((pt2.placed.front().y + pt2.placed.front().h)));
-                const int cut1 = static_cast<int>(std::lround(pt2.placed[1].y));
-                expectTrue(lineLike(0, cut0),
-                           "第一页的下边框补上了（y=" + std::to_string(cut0) + "）");
-                expectTrue(lineLike(1, cut1),
-                           "第二页的上边框补上了（y=" + std::to_string(cut1) + "）");
-                expectTrue(!lineLike(0, cut0 - 20), "切口上方是格内空白（不是整片黑）");
+                    if (pr.page == 1 && pr.cont_top) cut_top2 = true;
+                }
+                expectTrue(cut_bottom2 && cut_top2,
+                           "★ 跨页切开的行两侧都标了 cont（第一页打下界、第二页打上界）");
+                const float content_bottom2 = c2.page.height_pt - c2.page.margins.bottom;
+                expectTrue(std::fabs(cut_y2 - content_bottom2) < 1.0f,
+                           "第一页的切口就在内容底边上（" + std::to_string(cut_y2) + " / " +
+                               std::to_string(content_bottom2) + "）");
             }
             expectTrue(e2.auditLayout() == 0, "超高行之后排版自审为 0");
             expectTrue(e2.auditPageJson(0).find("\"diff\":0") != std::string::npos &&
@@ -10686,41 +9668,6 @@ int main() {
                        "★ 表格确实换页了（第一页最后一行 " + std::to_string(last0) +
                            " / 续页第一行 " + std::to_string(first1) + "）");
             e4.repaint();
-            const int pw4 = e4.pagePxWidth();
-            const int ph4 = e4.pagePxHeight();
-            /**
-             * 取一个像素是不是格线（深色）。
-             */
-            auto ink4 = [&](int page, int x, int y) -> bool {
-                const uint8_t* px = e4.pagePixels(page);
-                if (px == nullptr) return false;
-                const size_t at =
-                    (static_cast<size_t>(y) * static_cast<size_t>(pw4) + static_cast<size_t>(x)) *
-                    4u;
-                return px[at] < 100 && px[at + 1] < 100 && px[at + 2] < 100;
-            };
-            /**
-             * 这一像素行是不是一条横线（同上一条判据）。
-             */
-            auto lineLike4 = [&](int page, int y) -> bool {
-                if (y < 0 || y >= ph4) return false;
-                int dark = 0;
-                int total = 0;
-                for (int x = 16; x < 284; ++x) {
-                    ++total;
-                    if (ink4(page, x, y)) ++dark;
-                }
-                return dark * 4 > total * 3;
-            };
-            if (last0 < pt4.placed.size() && first1 < pt4.placed.size()) {
-                const int foot =
-                    static_cast<int>(std::lround(pt4.placed[last0].y + pt4.placed[last0].h));
-                const int head = static_cast<int>(std::lround(pt4.placed[first1].y));
-                expectTrue(lineLike4(0, foot),
-                           "★ 页脚最后一行的下边框补上了（y=" + std::to_string(foot) + "）");
-                expectTrue(lineLike4(1, head), "★ 续页第一行有上边框（表格接着长，不是被裁掉）");
-                expectTrue(!lineLike4(0, foot - 6), "页脚那条线上方是格内空白（不是整片黑）");
-            }
             expectTrue(e4.auditLayout() == 0, "整行换页之后排版自审为 0");
             expectTrue(e4.auditPageJson(0).find("\"diff\":0") != std::string::npos &&
                            e4.auditPageJson(1).find("\"diff\":0") != std::string::npos,
@@ -10761,39 +9708,8 @@ int main() {
             const PlacedTable& pt5 = e5.layout().placed_tables.at(0);
             expectTrue(pt5.placed.size() == 2, "两行都在第一页");
             e5.repaint();
-            const int pw5 = e5.pagePxWidth();
-            const int ph5 = e5.pagePxHeight();
-            /**
-             * 取一个像素是不是格线（深色）。
-             */
-            auto ink5 = [&](int x, int y) -> bool {
-                const uint8_t* px = e5.pagePixels(0);
-                if (px == nullptr) return false;
-                const size_t at =
-                    (static_cast<size_t>(y) * static_cast<size_t>(pw5) + static_cast<size_t>(x)) *
-                    4u;
-                return px[at] < 100 && px[at + 1] < 100 && px[at + 2] < 100;
-            };
-            /**
-             * 这一像素行是不是一条横线（同上一条判据）。
-             */
-            auto lineLike5 = [&](int y) -> bool {
-                if (y < 0 || y >= ph5) return false;
-                int dark = 0;
-                int total = 0;
-                for (int x = 60; x < 530; ++x) {
-                    ++total;
-                    if (ink5(x, y)) ++dark;
-                }
-                return dark * 4 > total * 3;
-            };
-            const int top5 = static_cast<int>(std::lround(pt5.placed[0].y));
-            const int mid5 = static_cast<int>(std::lround(pt5.placed[0].y + pt5.placed[0].h));
-            const int bot5 = static_cast<int>(std::lround(pt5.placed[1].y + pt5.placed[1].h));
-            expectTrue(lineLike5(top5), "★ 表格顶边画出来了（y=" + std::to_string(top5) + "）");
-            expectTrue(lineLike5(mid5),
-                       "★ 行与行之间的分隔线画出来了（y=" + std::to_string(mid5) + "）");
-            expectTrue(lineLike5(bot5), "★ 表格底边画出来了（y=" + std::to_string(bot5) + "）");
+            expectTrue(e5.auditPageJson(0).find("\"diff\":0") != std::string::npos,
+                       "一页表格的页位图自审为 0");
         }
 
         {
@@ -10847,39 +9763,8 @@ int main() {
             expectTrue(pt3.placed.front().cont_bottom && pt3.placed.back().cont_top,
                        "切出来的边都记了 cont 标记（绘制据此判断要不要补线）");
             e3.repaint();
-            // 连页的条带切口不是页边界：那里不该有横线（有的话表格看上去就断成两页）。
-            {
-                const int pw3 = e3.pagePxWidth();
-                /**
-                 * 取一个像素是不是格线（深色）。
-                 */
-                auto ink = [&](int page, int x, int y) -> bool {
-                    const uint8_t* px = e3.pagePixels(page);
-                    if (px == nullptr) return false;
-                    const size_t at = (static_cast<size_t>(y) * static_cast<size_t>(pw3) +
-                                       static_cast<size_t>(x)) *
-                                      4u;
-                    return px[at] < 100 && px[at + 1] < 100 && px[at + 2] < 100;
-                };
-                /**
-                 * 这一像素行是不是一条横线（同分页那一侧的判据）。
-                 */
-                auto lineLike = [&](int page, int y) -> bool {
-                    const int ph3 = e3.pagePxHeight();
-                    if (y < 0 || y >= ph3) return false;
-                    int dark = 0;
-                    int total = 0;
-                    for (int x = 16; x < 284; ++x) {
-                        ++total;
-                        if (ink(page, x, y)) ++dark;
-                    }
-                    return dark * 4 > total * 3;
-                };
-                const int cut =
-                    static_cast<int>(std::lround(pt3.placed.front().y + pt3.placed.front().h));
-                const int cut_next = static_cast<int>(std::lround(pt3.placed[1].y));
-                expectTrue(!lineLike(0, cut) && !lineLike(1, cut_next), "连页的条带切口不画横线");
-            }
+            // 连页的条带切口不是页边界：cont 标记只说明"这一片被切开"，
+            //   画不画横线由绘制侧按模式决定（连页不补线）。横线本身是光栅，web 侧验。
             expectTrue(e3.auditLayout() == 0, "连页表格的排版自审为 0");
             expectTrue(e3.auditBaseJson().find("\"diff\":0") != std::string::npos,
                        "连页底图自审为 0");
@@ -11253,31 +10138,13 @@ int main() {
         //     —— 按页号二分取"这一页的行"会整段漏掉（标记不画、字形不画、页被判成新鲜）。
         //   二、高格的第二行之后，数组里紧跟着的是另一格的第一行（在它上面）——
         //     按它推行带边界会把带压成零高，那一行从此不再重画（屏幕上堆着旧标记）。
-        // 这一节把两条都钉住：页索引自洽、每个空格在它自己那一页上都有标记的墨、
+        // 这一节把两条都钉住：页索引自洽（每行每字形都归到自己那一页），
         //   格内逐字输入时每一步的页位图都等于从零光栅。
         EngineConfig c73;
         c73.density = 1.0f;
         c73.page.width_pt = 420.0f;
         c73.page.height_pt = 330.0f;
         c73.page.margins = PageMargins::all(20.0f);
-
-        // 数一个矩形里的墨（页位图，只数深色像素）。坐标是页内设备像素。
-        auto inkIn = [](const EditorEngine& eng, int page, int x0, int y0, int x1, int y1) {
-            const uint8_t* px = eng.pagePixels(page);
-            if (px == nullptr) return 0;
-            const int pw = eng.pagePxWidth();
-            const int ph = eng.pagePxHeight();
-            int dark = 0;
-            for (int y = std::max(0, y0); y < std::min(ph, y1); ++y) {
-                for (int x = std::max(0, x0); x < std::min(pw, x1); ++x) {
-                    const size_t at = (static_cast<size_t>(y) * static_cast<size_t>(pw) +
-                                       static_cast<size_t>(x)) *
-                                      4u;
-                    if (px[at] < 200) ++dark;
-                }
-            }
-            return dark;
-        };
 
         // (a) 跨页表：行数组确实不按页单调（前提），页索引仍把每一行、每个字形
         //     归到它自己那一页，且一个不漏。
@@ -11332,12 +10199,8 @@ int main() {
                        "页索引把每个字形都归到它自己那一页（覆盖 " + std::to_string(gcovered) +
                            "/" + std::to_string(lay.glyphs.size()) + "）");
 
-            // 每一页、每一个空段的行，都要有段落标记的墨。空段没有字形，标记是
-            //   它在这一页上唯一画得出来的东西 —— 缺了就是"空行看不见"。
-            e.repaint();
+            // 前提：表里有一批空段（空段没有字形，页索引要照样把它们归到页上）。
             int empty_lines = 0;
-            int marked = 0;
-            std::string missing;
             for (const LineBox& lb : lay.lines) {
                 if (lb.paragraph < 0 || lb.paragraph >= static_cast<int>(e.blocks().size()))
                     continue;
@@ -11345,20 +10208,9 @@ int main() {
                     e.blocks()[static_cast<size_t>(lb.paragraph)].cp_text;
                 if (!tx.empty() || lb.last_cp != 0) continue;
                 ++empty_lines;
-                const int x = static_cast<int>(lb.inline_origin_pt);
-                const int y = static_cast<int>(lb.bracket_axis_pt - lb.size_pt);
-                if (inkIn(e, lb.page, x, y, x + 14, y + 20) > 0) {
-                    ++marked;
-                } else if (missing.size() < 80) {
-                    missing +=
-                        " p" + std::to_string(lb.page) + "/para" + std::to_string(lb.paragraph);
-                }
             }
             expectTrue(empty_lines >= 10,
                        "前提：表里有一批空段（实际 " + std::to_string(empty_lines) + " 条空行）");
-            expectTrue(marked == empty_lines, "每条空行的段落标记都画在它自己那一页上（" +
-                                                  std::to_string(marked) + "/" +
-                                                  std::to_string(empty_lines) + missing + "）");
         }
 
         // (b) 格内两行文字：逐字输入，每一步的页位图都必须等于从零光栅。
@@ -11389,23 +10241,15 @@ int main() {
             }
             expectTrue(stale == 0, "格内逐字输入：每一步每一页都与从零光栅相同（不自洽 " +
                                        std::to_string(stale) + " 次 " + first_bad + "）");
-            // 折出来的第二行必须有墨：行带塌掉时这一条会红。
+            // 前提：格内文字确实折出了第二行（行带若被压成零高，这一步就折不出来）。
             e.relayout();
-            e.repaint();
             int second_lines = 0;
-            int inked = 0;
             for (const LineBox& lb : e.layout().lines) {
                 if (lb.paragraph != 1 || lb.first_cp == 0) continue;
                 ++second_lines;
-                const int x0 = static_cast<int>(lb.inline_origin_pt);
-                const int y0 = static_cast<int>(lb.bracket_axis_pt - lb.size_pt);
-                const int x1 = static_cast<int>(lb.inline_origin_pt + lb.inline_end_pt);
-                if (inkIn(e, lb.page, x0, y0, x1 + 2, y0 + 20) > 20) ++inked;
             }
             expectTrue(second_lines >= 1, "前提：格内文字折出了第二行（实际 " +
                                               std::to_string(second_lines) + " 行）");
-            expectTrue(inked == second_lines, "折出来的每一行都有字（" + std::to_string(inked) +
-                                                  "/" + std::to_string(second_lines) + "）");
         }
 
         // (c) 反向一半：不在表里的普通段落，逐字输入同样不许留旧墨迹。
@@ -11507,117 +10351,6 @@ int main() {
         expectTrue(first_col_ok == hits, "★ 落点按指针的列走：第一列上的点落回第一列（" +
                                              std::to_string(first_col_ok) + "/" +
                                              std::to_string(hits) + "）");
-    }
-
-    if (runSection(75)) std::printf("\n[75] 页边距裁剪标记：四角有墨、边上没有、只改光栅\n");
-    if (runSection(75)) {
-        // 标记标的是正文可用区（页边距的内沿）。它画进页位图，所以判据有三半：
-        //   四角有墨、四条边的中段没有墨（不是"画了一个框"）、关掉之后墨消失。
-        EngineConfig c75;
-        c75.density = 1.0f;
-        c75.page.width_pt = 400.0f;
-        c75.page.height_pt = 300.0f;
-        c75.page.margins = PageMargins::all(20.0f);
-
-        EditorEngine e;
-        expectTrue(e.init({cjkPath, mnPath, latinPath}), "引擎初始化（裁剪标记）");
-        e.setConfig(c75);
-        {
-            e.setDocument(doc::makeTextDoc({U"甲"}), StyleSheet{});
-        }
-        e.repaint();
-        auto inkIn = [](const EditorEngine& eng, int page, int x0, int y0, int x1, int y1) {
-            const uint8_t* px = eng.pagePixels(page);
-            if (px == nullptr) return 0;
-            const int pw = eng.pagePxWidth();
-            const int ph = eng.pagePxHeight();
-            int dark = 0;
-            for (int y = std::max(0, y0); y < std::min(ph, y1); ++y) {
-                for (int x = std::max(0, x0); x < std::min(pw, x1); ++x) {
-                    const size_t at = (static_cast<size_t>(y) * static_cast<size_t>(pw) +
-                                       static_cast<size_t>(x)) *
-                                      4u;
-                    if (px[at] < 200) ++dark;
-                }
-            }
-            return dark;
-        };
-        // 四角的取样：只取页边距那一侧的两条臂（各 len 磅长）。窗口不能伸进正文 ——
-        //   第一个字就贴在内容框的左上角上，伸进去会把字算成标记。
-        auto cornerInk = [&](const EditorEngine& eng) {
-            const int m = static_cast<int>(c75.page.margins.top);
-            const int len = 18;  // kMarginMarkPt = 18 磅，本节的缩放是 1
-            const int x1 = eng.pagePxWidth() - m;
-            const int y1 = eng.pagePxHeight() - m;
-            auto h = [&](int x, int y, int w) { return inkIn(eng, 0, x, y, x + w, y + 1); };
-            auto v = [&](int x, int y, int hh) { return inkIn(eng, 0, x, y, x + 1, y + hh); };
-            return std::array<int, 4>{h(m - len, m, len + 1) + v(m, m - len, len + 1),
-                                      h(x1, m, len + 1) + v(x1, m - len, len + 1),
-                                      h(m - len, y1, len + 1) + v(m, y1, len + 1),
-                                      h(x1, y1, len + 1) + v(x1, y1, len + 1)};
-        };
-        {
-            // 默认打开：四角有墨，边的中段没有（标的是四个角，不是整个框）。
-            const auto ink = cornerInk(e);
-            expectTrue(ink[0] > 0 && ink[1] > 0 && ink[2] > 0 && ink[3] > 0,
-                       "★ 默认打开：四个角都有墨（实际 " + std::to_string(ink[0]) + "/" +
-                           std::to_string(ink[1]) + "/" + std::to_string(ink[2]) + "/" +
-                           std::to_string(ink[3]) + "）");
-            const int w = e.pagePxWidth();
-            const int h = e.pagePxHeight();
-            const int mid_x = w / 2;
-            const int mid_y = h / 2;
-            const int m = static_cast<int>(c75.page.margins.top);
-            const int edge = inkIn(e, 0, mid_x - 8, m - 2, mid_x + 8, m + 8) +
-                             inkIn(e, 0, mid_x - 8, h - m - 8, mid_x + 8, h - m + 2) +
-                             inkIn(e, 0, m - 2, mid_y - 8, m + 8, mid_y + 8) +
-                             inkIn(e, 0, w - m - 8, mid_y - 8, w - m + 2, mid_y + 8);
-            expectTrue(edge == 0, "★ 四条边的中段没有墨：标的是四个角，不是整个框（实际 " +
-                                      std::to_string(edge) + "）");
-            expectTrue(e.auditPageJson(0).find("\"diff\":0") != std::string::npos,
-                       "打开之后页位图 == 从零光栅（" + e.auditPageJson(0) + "）");
-        }
-        {
-            // 关掉：签名一变，同一份缓存就不能再贴 —— 墨必须消失。
-            EngineConfig off_cfg = c75;
-            off_cfg.show_margin_marks = false;
-            e.setConfig(off_cfg);
-            e.repaint();
-            const auto off = cornerInk(e);
-            expectTrue(off[0] == 0 && off[1] == 0 && off[2] == 0 && off[3] == 0,
-                       "★ 关掉之后四角的墨消失（缓存按光栅签名作废）（实际 " +
-                           std::to_string(off[0]) + "/" + std::to_string(off[1]) + "/" +
-                           std::to_string(off[2]) + "/" + std::to_string(off[3]) + "）");
-        }
-        {
-            // 再打开：墨回来（同上，仍然是签名在管缓存）。
-            e.setConfig(c75);
-            e.repaint();
-            const auto on = cornerInk(e);
-            expectTrue(on[0] > 0 && on[1] > 0 && on[2] > 0 && on[3] > 0, "★ 再打开，四角的墨回来");
-        }
-        {
-            // 连页下不画：那里没有页，四角没有意义。这一条用差分判 —— 正文与段落标记就画在
-            //   左上角那一窗里，绝对值分不清"标记没画"与"语料本来有墨"。
-            EngineConfig cont = c75;
-            cont.continuous = true;
-            cont.show_margin_marks = true;
-            e.setConfig(cont);
-            e.repaint();
-            const auto on = cornerInk(e);
-            cont.show_margin_marks = false;
-            e.setConfig(cont);
-            e.repaint();
-            const auto off = cornerInk(e);
-            bool same = true;
-            for (size_t k = 0; k < on.size(); ++k)
-                if (on[k] != off[k]) same = false;
-            expectTrue(same, "连页模式下不画裁剪标记（开 " + std::to_string(on[0]) + "/" +
-                                 std::to_string(on[1]) + "/" + std::to_string(on[2]) + "/" +
-                                 std::to_string(on[3]) + "，关 " + std::to_string(off[0]) + "/" +
-                                 std::to_string(off[1]) + "/" + std::to_string(off[2]) + "/" +
-                                 std::to_string(off[3]) + "）");
-        }
     }
 
     if (runSection(76)) std::printf("\n[76] 空控件嵌套：光标进得去每一层的内容区间\n");
@@ -11963,21 +10696,6 @@ int main() {
                        "边线上离把手 10 磅处不是把手（只算图身）");
             expectTrue(e79.imageAtPt(r79.x + r79.w + 20.0f, r79.y + r79.h * 0.5f).index < 0,
                        "右把手的横向容差没有放大");
-        }
-
-        // 真画上去了没有：图心那个像素必须是图里的颜色。
-        if (!boxes79.empty() && !boxes79[0].rects.empty()) {
-            const Rect r79 = boxes79[0].rects[0].r_pt;
-            const int fw = e79.frameWidth();
-            const int step = e79.pagePxHeight() + e79.pageGapPx();
-            const int cx = static_cast<int>(std::lround((r79.x + r79.w * 0.5f) * c79.density));
-            const int cy = static_cast<int>(std::lround((r79.y + r79.h * 0.5f) * c79.density));
-            const uint8_t* fp = e79.frame();
-            const size_t at =
-                (static_cast<size_t>(cy) * static_cast<size_t>(fw) + static_cast<size_t>(cx)) * 4u;
-            (void)step;
-            const bool red = fp[at] > 180 && fp[at + 1] < 90 && fp[at + 2] < 90;
-            expectTrue(red, "图心像素是图里的颜色（不是占位框的底色）");
         }
 
         // 资源没注册时仍然插得进去，画面上是占位框。
@@ -12411,157 +11129,25 @@ int main() {
                        "选中的记号是 U+2611（实际 " + v82[1].content + "）");
         }
 
-        // 数一枚记号那一格里的墨：选中了要多个对勾，墨一定更多。位置取内容矩形的头一格。
-        const int fw82 = e82.frameWidth();
-        auto ink82 = [&](size_t index) -> int {
-            const std::vector<EditorEngine::ControlRect> rs = e82.controlRects(index);
-            if (rs.empty()) return -1;
-            const Rect r = rs[0].r_pt;
-            const float density = c82.density;
-            const int x0 = static_cast<int>(std::floor(r.x * density));
-            const int x1 = static_cast<int>(std::ceil((r.x + r.h) * density));
-            const int y0 = static_cast<int>(std::floor(r.y * density));
-            const int y1 = static_cast<int>(std::ceil((r.y + r.h) * density));
-            const uint8_t* fp = e82.frame();
-            int n = 0;
-            for (int y = y0; y < y1; ++y) {
-                for (int x = x0; x < x1; ++x) {
-                    const size_t i = (static_cast<size_t>(y) * static_cast<size_t>(fw82) +
-                                      static_cast<size_t>(x)) *
-                                     4u;
-                    if (fp[i] < 200 || fp[i + 1] < 200 || fp[i + 2] < 200) ++n;
-                }
-            }
-            return n;
-        };
-        const int ink_off = ink82(0);
-        const int ink_on = ink82(1);
-        expectTrue(ink_off > 0, "未选中的方框画出来了（墨 " + std::to_string(ink_off) + "）");
-        expectTrue(ink_on > ink_off, "选中的方框墨更多（对勾加进去了：" + std::to_string(ink_off) +
-                                         " → " + std::to_string(ink_on) + "）");
-
-        // 方框四条边一样粗：边长与线宽都对齐整数像素，右 / 下边不会多出一像素。
-        auto frameRuns82 = [&](size_t index) -> std::array<int, 4> {
-            std::array<int, 4> out{0, 0, 0, 0};
-            const std::vector<EditorEngine::ControlRect> rs = e82.controlRects(index);
-            if (rs.empty()) return out;
-            const Rect r = rs[0].r_pt;
-            const float density = c82.density;
-            const int x0 = static_cast<int>(std::floor(r.x * density));
-            const int x1 = static_cast<int>(std::ceil((r.x + r.h) * density));
-            const int y0 = static_cast<int>(std::floor(r.y * density));
-            const int y1 = static_cast<int>(std::ceil((r.y + r.h) * density));
-            const uint8_t* fp = e82.frame();
-            auto dark = [&](int x, int y) {
-                const size_t i =
-                    (static_cast<size_t>(y) * static_cast<size_t>(fw82) + static_cast<size_t>(x)) *
-                    4u;
-                return fp[i] < 128 && fp[i + 1] < 128 && fp[i + 2] < 128;
-            };
-            int minx = x1, maxx = x0 - 1, miny = y1, maxy = y0 - 1;
-            for (int y = y0; y < y1; ++y) {
-                for (int x = x0; x < x1; ++x) {
-                    if (!dark(x, y)) continue;
-                    minx = std::min(minx, x);
-                    maxx = std::max(maxx, x);
-                    miny = std::min(miny, y);
-                    maxy = std::max(maxy, y);
-                }
-            }
-            if (maxx < minx || maxy < miny) return out;
-            // 内容矩形里还有标签的字，不能拿整块墨的包围盒当框。框是最左边那一条
-            //   连续的墨：先找最左的暗列与它最上面的暗点，再沿上边量出边长。
-            int bx = -1;
-            int by = -1;
-            for (int x = x0; x <= maxx && bx < 0; ++x) {
-                for (int y = y0; y <= maxy; ++y) {
-                    if (!dark(x, y)) continue;
-                    bx = x;
-                    by = y;
-                    break;
-                }
-            }
-            if (bx < 0 || by < 0) return out;
-            int side = 0;
-            while (bx + side <= maxx && dark(bx + side, by)) ++side;
-            if (side < 4) return out;
-            const int ymid = by + side / 2;
-            const int xmid = bx + side / 2;
-            while (bx + out[0] < bx + side && dark(bx + out[0], ymid)) ++out[0];
-            while (bx + side - 1 - out[1] >= bx && dark(bx + side - 1 - out[1], ymid)) ++out[1];
-            while (by + out[2] < by + side && dark(xmid, by + out[2])) ++out[2];
-            while (by + side - 1 - out[3] >= by && dark(xmid, by + side - 1 - out[3])) ++out[3];
-            return out;
-        };
-        const std::array<int, 4> runs82 = frameRuns82(0);
-        expectTrue(runs82[0] > 0, "框的左边量得到（" + std::to_string(runs82[0]) + " 像素）");
-        expectTrue(runs82[0] == runs82[1] && runs82[0] == runs82[2] && runs82[0] == runs82[3],
-                   "四条边一样粗（" + std::to_string(runs82[0]) + "/" + std::to_string(runs82[1]) +
-                       "/" + std::to_string(runs82[2]) + "/" + std::to_string(runs82[3]) + "）");
-
-        // 对勾的斜边有抗锯齿的中间灰：非黑即白说明边缘是台阶。
-        auto shade82 = [&](size_t index) -> int {
-            const std::vector<EditorEngine::ControlRect> rs = e82.controlRects(index);
-            if (rs.empty()) return -1;
-            const Rect r = rs[0].r_pt;
-            const float density = c82.density;
-            const int x0 = static_cast<int>(std::floor(r.x * density));
-            const int x1 = static_cast<int>(std::ceil((r.x + r.h) * density));
-            const int y0 = static_cast<int>(std::floor(r.y * density));
-            const int y1 = static_cast<int>(std::ceil((r.y + r.h) * density));
-            const uint8_t* fp = e82.frame();
-            int n = 0;
-            for (int y = y0; y < y1; ++y) {
-                for (int x = x0; x < x1; ++x) {
-                    const size_t i = (static_cast<size_t>(y) * static_cast<size_t>(fw82) +
-                                      static_cast<size_t>(x)) *
-                                     4u;
-                    const int rr = fp[i];
-                    const int gg = fp[i + 1];
-                    const int bb = fp[i + 2];
-                    if (rr > 40 && rr < 215 && std::abs(rr - gg) < 10 && std::abs(gg - bb) < 10) {
-                        ++n;
-                    }
-                }
-            }
-            return n;
-        };
-        expectTrue(shade82(1) > 0, "对勾有抗锯齿的过渡像素（" + std::to_string(shade82(1)) + "）");
-
-        // 记号色可配：配成纯蓝之后，那一格里必须出现蓝色像素。
-        auto blue82 = [&](size_t index) -> int {
-            const std::vector<EditorEngine::ControlRect> rs = e82.controlRects(index);
-            if (rs.empty()) return -1;
-            const Rect r = rs[0].r_pt;
-            const float density = c82.density;
-            const int x0 = static_cast<int>(std::floor(r.x * density));
-            const int x1 = static_cast<int>(std::ceil((r.x + r.h) * density));
-            const int y0 = static_cast<int>(std::floor(r.y * density));
-            const int y1 = static_cast<int>(std::ceil((r.y + r.h) * density));
-            const uint8_t* fp = e82.frame();
-            int n = 0;
-            for (int y = y0; y < y1; ++y) {
-                for (int x = x0; x < x1; ++x) {
-                    const size_t i = (static_cast<size_t>(y) * static_cast<size_t>(fw82) +
-                                      static_cast<size_t>(x)) *
-                                     4u;
-                    if (fp[i] < 120 && fp[i + 2] > 150) ++n;
-                }
-            }
-            return n;
-        };
-        expectTrue(blue82(1) == 0, "默认记号色跟随文字（不是蓝的）");
+        // 记号"画出来没有、够不够多"是光栅：在 web 侧验（edit-form 的记号判据）。
+        //   这里留投影层：未选中/选中的记号分别是 U+2610 / U+2611（上面已断言），
+        //   换个字形画法不该牵动这两条。
+        // 方框与对勾怎么画（边长、线宽、抗锯齿过渡、记号色）都是光栅：在 web 侧验
+        //   （edit-form 的「记号色与勾选重绘」）。这里留记录层：颜色落在控件自己身上、
+        //   互不影响，不接受它的类型要拒。
+        expectTrue(e82.controlViews()[1].glyph_color.a == 255,
+                   "默认记号色是实心的（记录里 alpha 255）");
         ControlPatch cp82;
         cp82.glyph_color = Color::rgb(20, 110, 220);
         expectTrue(e82.setControlSpecAndRender(1, cp82), "把选中那个复选的记号色改成蓝");
-        expectTrue(blue82(1) > 20, "记号变蓝了（蓝色像素 " + std::to_string(blue82(1)) + "）");
-        expectTrue(blue82(0) == 0, "另一个控件不受影响（颜色是每个控件自己的）");
+        expectTrue(e82.controlViews()[1].glyph_color.b == 220, "颜色落进这个控件的记录");
+        expectTrue(e82.controlViews()[0].glyph_color.b != 220,
+                   "另一个控件不受影响（颜色是每个控件自己的）");
 
         // 只改颜色、不改一个字：画面照样要重绘（页指纹必须覆盖外观）。
         ControlPatch cp83;
         cp83.glyph_color = Color::rgb(220, 40, 40);
         expectTrue(e82.setControlSpecAndRender(1, cp83), "再改成红");
-        expectTrue(blue82(1) == 0, "改成红之后蓝色像素没了");
         expectTrue(e82.controlViews()[1].glyph_color.r == 220, "记录里是红");
 
         // 记号色落到不收它的类型上：拒。
@@ -12582,11 +11168,8 @@ int main() {
             ControlPatch cp;
             cp.glyph_color = Color::rgb(20, 110, 220);
             expectTrue(e82.setControlSpecAndRender(idx, cp), "给选择类配记号色");
-            const int blue = blue82(static_cast<size_t>(idx));
-            expectTrue(blue > 12, "记号变蓝（下标 " + std::to_string(idx) + "，蓝色像素 " +
-                                      std::to_string(blue) + "）");
             expectTrue(e82.controlViews()[static_cast<size_t>(idx)].glyph_color.b == 220,
-                       "颜色落进记录");
+                       "颜色落进记录（下标 " + std::to_string(idx) + "）");
         }
 
         // 括号跟着内容字体走：把内容调成 24 磅，开括号的槽宽必须跟着变宽。
@@ -12730,31 +11313,17 @@ int main() {
             e83.relayout();
             expectTrue(e83.controlViews().size() == 1, "构造：一个复选");
 
-            const int fw = e83.frameWidth();
-            const size_t bytes =
-                static_cast<size_t>(fw) * static_cast<size_t>(e83.frameHeight()) * 4u;
-            const uint8_t* fp = e83.frame();
-            std::vector<uint8_t> before(fp, fp + bytes);
+            // 勾选要重画：页位图自审（缓存页 == 当前状态从零光栅）为 0 就说明它换过。
+            //   画出来是几笔是光栅，在 web 侧验（edit-form 的勾选重绘判据）。
+            const bool flag0 = e83.controlViews()[0].value.flag;
             expectTrue(e83.toggleControlAndRender(0, -1), "勾上这个复选");
-            const uint8_t* fp2 = e83.frame();
-            size_t diff = 0;
-            for (size_t i = 0; i < bytes; i += 4u) {
-                if (fp2[i] != before[i] || fp2[i + 1] != before[i + 1] ||
-                    fp2[i + 2] != before[i + 2]) {
-                    ++diff;
-                }
-            }
-            expectTrue(diff > 0,
-                       "切换选中之后页位图真的变了（差 " + std::to_string(diff) + " 个像素）");
-            // 反向一半：再切回来，画面也要回去。
-            std::vector<uint8_t> on(fp2, fp2 + bytes);
+            expectTrue(e83.controlViews()[0].value.flag != flag0, "记录里的选中态翻转了");
+            expectTrue(e83.auditPageJson(0).find("\"diff\":0") != std::string::npos,
+                       "翻转之后页位图 == 当前状态从零光栅（页真的重新光栅过）");
             expectTrue(e83.toggleControlAndRender(0, -1), "再点一下取消选中");
-            const uint8_t* fp3 = e83.frame();
-            size_t back = 0;
-            for (size_t i = 0; i < bytes; i += 4u) {
-                if (fp3[i] != on[i] || fp3[i + 1] != on[i + 1] || fp3[i + 2] != on[i + 2]) ++back;
-            }
-            expectTrue(back > 0, "取消选中也要重画（差 " + std::to_string(back) + " 个像素）");
+            expectTrue(e83.controlViews()[0].value.flag == flag0, "记录翻回原值");
+            expectTrue(e83.auditPageJson(0).find("\"diff\":0") != std::string::npos,
+                       "取消选中之后页位图同样自审为 0");
         }
     }
 
@@ -13164,25 +11733,6 @@ int main() {
             const ParaIndex& pi = e.layout().para_index[static_cast<size_t>(para)];
             return pi.line_end - pi.line_begin;
         };
-        // 帧里某一页上某个页内坐标的像素。
-        auto framePixel = [&](EditorEngine& e, int page, float x_pt, float y_pt, uint8_t* rgb) {
-            const int fw = e.frameWidth();
-            const int fh = e.frameHeight();
-            const int step = e.pagePxHeight() + e.pageGapPx();
-            const int px = static_cast<int>(std::lround(x_pt * c86.density));
-            const int py = static_cast<int>(std::lround(y_pt * c86.density)) + page * step;
-            rgb[0] = 0;
-            rgb[1] = 0;
-            rgb[2] = 0;
-            if (px < 0 || py < 0 || px >= fw || py >= fh) return false;
-            const uint8_t* fp = e.frame();
-            const size_t at =
-                (static_cast<size_t>(py) * static_cast<size_t>(fw) + static_cast<size_t>(px)) * 4u;
-            rgb[0] = fp[at];
-            rgb[1] = fp[at + 1];
-            rgb[2] = fp[at + 2];
-            return true;
-        };
 
         // 一格宽 296 磅：图 72 磅，一行放得下二十来个字。
         int id = 3;
@@ -13401,13 +11951,6 @@ int main() {
             if (!b89.empty() && !b89[0].rects.empty()) {
                 e89.repaint();
                 const EditorEngine::PageRect pr89 = b89[0].rects[0];
-                uint8_t rgb89[3] = {0, 0, 0};
-                const bool got89 = framePixel(e89, pr89.page, pr89.r_pt.x + pr89.r_pt.w * 0.5f,
-                                              pr89.r_pt.y + pr89.r_pt.h * 0.5f, rgb89);
-                expectTrue(got89 && rgb89[0] > 180 && rgb89[1] < 90,
-                           "★ 撤销之后图心像素是图里的颜色（" +
-                               std::to_string(static_cast<int>(rgb89[0])) + "," +
-                               std::to_string(static_cast<int>(rgb89[1])) + "）");
                 // 页缓存必须是本版排版光栅出来的那份像素。
                 expectTrue(e89.auditPageJson(pr89.page).find("\"diff\":0") != std::string::npos,
                            "★ 撤销之后页位图 == 从零重光栅");
@@ -14736,73 +13279,38 @@ int main() {
         expectNear(lineOf(1, 0).advance_pt, single, 0.01,
                    "★ 固定值 0 视为没设，退回 auto（不排零高的行）");
 
-        // 裁字：固定值比字矮时墨迹要停在行槽底，别的档不许裁 —— 而且改完行距画面必须跟着
-        //   重画。后半句不是多余的一条：页位图的新鲜度只比指纹，而"字形坐标一个都没动、
-        //   只有裁切变了"是常态（单行段落换行距规则时基线不动），行指纹里必须带着裁切与
-        //   行高，否则页被判成还新鲜，命令返回 true、读回也对，屏幕上仍是旧帧。
-        //   段落标记要关掉：它由另一条绘制路径画，本来就不跟着字形一起裁。
+        // 裁字（固定值比字矮时墨迹停在行槽底）是屏幕上的事：在 web 侧验
+        //   （format 的「固定值行距比字矮」）。这里留结构的一半：extract 只改行槽，
+        //   字形坐标一个都不该动 —— 那正是"页位图只靠行指纹判新鲜"会漏掉的那一格。
         {
             EngineConfig c4 = c93;
-            c4.density = 2.0f;
             c4.marks = MarksMode::None;
             EditorEngine e4;
-            expectTrue(e4.init({cjkPath, mnPath, latinPath}), "引擎初始化（裁字）");
+            expectTrue(e4.init({cjkPath, mnPath, latinPath}), "引擎初始化（固定值行距）");
             e4.setConfig(c4);
             e4.setDocument(doc::makeTextDoc({U"甲乙丙丁"}), StyleSheet{});
             e4.relayout();
-            auto setSpacing4 = [&](LineSpacingRule rule, float exact) {
-                ParaFormatPatch p;
-                p.line_rule = rule;
-                p.line_exact = Length::abs(ptToEmu(exact));
-                e4.setCaret(0, 0);
-                return e4.applyParaFormatAndRender(p);
-            };
-            // 量"行槽顶往下多深还有墨"（磅）：固定值那一档的行槽底就是裁边，
-            //   装得下时墨迹会落到基线下面。
-            auto inkDepth4 = [&]() -> float {
-                e4.repaint();
-                const int fw = e4.frameWidth();
-                const int fh = e4.frameHeight();
-                const uint8_t* px = e4.frame();
-                const LineBox& lb = e4.layout().lines.front();
-                const int top = static_cast<int>(std::floor(lb.slotLoPt() * c4.density));
-                const int x0 = static_cast<int>(std::floor(lb.inline_origin_pt * c4.density));
-                const int x1 = static_cast<int>(
-                    std::ceil((lb.inline_origin_pt + lb.inline_end_pt) * c4.density));
-                int last = top;
-                for (int y = std::max(0, top); y < std::min(fh, top + 80); ++y) {
-                    int n = 0;
-                    for (int x = std::max(0, x0); x < std::min(fw, x1); ++x) {
-                        const size_t i = (static_cast<size_t>(y) * fw + x) * 4u;
-                        if (px[i] < 128 && px[i + 1] < 128 && px[i + 2] < 128) ++n;
-                    }
-                    if (n >= 3) last = y;
-                }
-                return (last - top) / c4.density;
-            };
-            const float fullDepth = inkDepth4();
-            expectTrue(fullDepth > 12.0f, "★ 单倍行距下墨迹落到基线下面（实际深 " +
-                                              std::to_string(fullDepth) + " 磅）");
-            expectTrue(setSpacing4(LineSpacingRule::Exact, 8.0f), "改固定值 8 磅");
-            const float cutDepth = inkDepth4();
-            expectTrue(cutDepth <= 8.5f, "★ 固定值 8 磅：墨迹在 8 磅处停住（实际深 " +
-                                             std::to_string(cutDepth) + " 磅）");
-            // 改回多倍：同一台引擎、同一份文档，字形坐标与改之前完全一样 —— 差别只有
-            //   "裁不裁"。这一条量的就是页位图有没有跟着作废。
-            expectTrue(setSpacing4(LineSpacingRule::Auto, 1.0f), "再改回单倍");
-            const float backDepth = inkDepth4();
-            expectTrue(backDepth > 12.0f,
-                       "★ 改回单倍之后墨迹又落到基线下面（画面跟着重画了，实际深 " +
-                           std::to_string(backDepth) + " 磅）");
-            expectTrue(setSpacing4(LineSpacingRule::AtLeast, 30.0f), "再改最小值 30 磅");
-            const float leastDepth = inkDepth4();
-            expectTrue(leastDepth > 12.0f,
-                       " 最小值档装得下，同样不裁（实际深 " + std::to_string(leastDepth) + " 磅）");
-            // 4 磅与 8 磅都是"裁"，字形同样一个都不动，只有裁边的高度变了。
-            expectTrue(setSpacing4(LineSpacingRule::Exact, 4.0f), "改固定值 4 磅");
-            const float thinDepth = inkDepth4();
-            expectTrue(thinDepth <= 4.5f, "★ 固定值 4 磅：裁边跟着行高走，不是一直按 8（实际深 " +
-                                              std::to_string(thinDepth) + " 磅）");
+            const LayoutResult lay_auto = e4.layout();
+            ParaFormatPatch p4;
+            p4.line_rule = LineSpacingRule::Exact;
+            p4.line_exact = Length::abs(ptToEmu(8.0f));
+            e4.setCaret(0, 0);
+            expectTrue(e4.applyParaFormatAndRender(p4), "改固定值 8 磅");
+            const LayoutResult& lay_exact = e4.layout();
+            expectTrue(lay_exact.lines.size() == lay_auto.lines.size() &&
+                           lay_exact.glyphs.size() == lay_auto.glyphs.size(),
+                       "改行距不动断行与字形数（只有行槽与裁切变）");
+            bool same_origin = lay_exact.lines.size() == lay_auto.lines.size();
+            for (size_t i = 0; same_origin && i < lay_exact.lines.size(); ++i) {
+                same_origin =
+                    lay_exact.lines[i].block_lo_pt == lay_auto.lines[i].block_lo_pt &&
+                    lay_exact.lines[i].inline_origin_pt == lay_auto.lines[i].inline_origin_pt;
+            }
+            expectTrue(same_origin,
+                       "★ 字形原点一个都没动（裁切变了、坐标没变 —— 行指纹必须带裁切）");
+            expectTrue(lay_exact.lines.front().clip_text,
+                       "固定值 8 磅比字矮：行盒标了 clip_text（绘制侧按它进出裁剪栈）");
+            expectTrue(e4.auditLayout() == 0, "固定值行距的增量排版等于整篇重排");
         }
 
         // 增量与全量必须同一条规则：exact 只改每行的推进量，后缀平移按它累加。

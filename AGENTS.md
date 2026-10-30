@@ -112,6 +112,15 @@ function blitFrame(px, w) {}
 
 引用判据的结论时要说清它验的是哪一层。**native 绿不能用来反驳交互类问题。**
 
+这条有机械保证：`scripts/check_native_tests.mjs`（在 `npm run check` 里）扫 `tests/`，
+命中读帧像素、光栅入口、事件模拟的断言当场红，豁免表已清空，不设存量。native 侧要验
+"画了没有"时，改问数据层：页位图自审（`auditPageJson` 的 `diff:0` = 缓存页 == 当前状态
+从零光栅）、排版摘要（`digestOf`）、`PlacedRow.cont_top/cont_bottom` 这类标志。
+
+浏览器侧读像素优先读**页画布**（用户看得见的那一层），不是 `diag.rawFrame()`（引擎自述）。
+需要证明"画布就是引擎当前输出"时同时断 `selfCheck().screenVsEngineDiffPx === 0`；
+呈现挂在 rAF 上，读画布前先等两帧，否则两边都旧、差额也是 0。
+
 ## 格式化
 
 代码格式由 clang-format 统一，配置在仓库根目录的 `.clang-format`：基准取 Google 家族风格

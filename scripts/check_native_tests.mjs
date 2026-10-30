@@ -28,17 +28,9 @@ const BANNED = [
     why: '交互模拟' },
 ];
 
-// 存量的豁免：按节号。清掉一节就必须从 here 删掉它的号 —— 号留着不删会被查出来。
-//   这条是"存量只能减不能增"的机械保证：加新豁免要改这个常量，评审时看得见。
-const BASELINE = new Set([
-  'edit_test.cpp:0',   // 帧比对的两个工具函数（frameDiffBetween 等），是下面各节的根基
-  'edit_test.cpp:9',   'edit_test.cpp:10',  'edit_test.cpp:11',  'edit_test.cpp:14',
-  'edit_test.cpp:15',  'edit_test.cpp:16',  'edit_test.cpp:18',  'edit_test.cpp:21',  'edit_test.cpp:23',
-  'edit_test.cpp:38',  'edit_test.cpp:58',  'edit_test.cpp:59',  'edit_test.cpp:60',
-  'edit_test.cpp:64',  'edit_test.cpp:67',  'edit_test.cpp:70',  'edit_test.cpp:73',
-  'edit_test.cpp:75',  'edit_test.cpp:79',  'edit_test.cpp:82',  'edit_test.cpp:83',
-  'edit_test.cpp:86',  'edit_test.cpp:93',
-]);
+// 存量的豁免：按节号。现在清空了 —— 一条都不许再加。
+//   加豁免要改这个常量，评审时看得见；这正是"存量只能减不能增"的机械保证。
+const BASELINE = new Set([]);
 
 const files = fs.readdirSync(DIR).filter((f) => f.endsWith('.cpp')).sort();
 const problems = [];
@@ -78,7 +70,7 @@ for (const name of files) {
   });
 }
 
-// 已经清干净但仍挂在豁免表里 —— 顺手查出来，避免这份表只增不减。
+// 已经清干净但仍挂在豁免表里：一并查出来，避免这份表只增不减。
 const stale = [...BASELINE].filter((k) => !waived.has(k));
 const total = [...waived.values()].reduce((a, b) => a + b, 0);
 

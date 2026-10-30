@@ -1509,6 +1509,15 @@ export interface EditorEvents {
 }
 
 /**
+ * 页度量（磅）：纸宽高与四边页边距。
+ */
+export interface PageMetricsPt {
+  widthPt: number;
+  heightPt: number;
+  margins: { top: number; right: number; bottom: number; left: number };
+}
+
+/**
  * 诊断面：给无头探针与审计用。不承诺跨版本稳定，产品代码不该依赖它。
  *
  * 参数与返回暂为 unknown：它们对应引擎内部的账本载荷（19 份 / 245 个键），
@@ -1517,7 +1526,7 @@ export interface EditorEvents {
  * 带 Direct 的那几个是"每次都真的问引擎一次"的读：同线程传输下是同步值，
  * Worker 传输下是一次往返。调用方写成 await，两种传输都对（await 普通值是恒等）。
  */
-type Direct<T> = T | Promise<T>;
+export type Direct<T> = T | Promise<T>;
 
 export interface Diag {
   /**
@@ -1604,6 +1613,14 @@ export interface Diag {
    * 括号槽清单：每枚括号的位置、侧别、属于哪个控件。
    */
   bracketSlots(): unknown;
+
+  /**
+   * 页度量（磅）：纸宽高与四边页边距。
+   *
+   * 判据拿它把"磅"换成设备像素：页画布的宽 / widthPt 就是当前那一拍的密度，
+   *   缩放与 dpr 都在里面，不需要另行推导。
+   */
+  pageMetrics(): Direct<PageMetricsPt>;
 
   /**
    * 命中测试：文档坐标（磅）折成段内位置与控件归属。

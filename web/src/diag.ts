@@ -2,7 +2,7 @@ import { simdProbeBytes, simdSupported } from './engine/simd';
 import type { EngineLink, DomHost } from './host/dom';
 import { cleanMarkdownLines, then1, type Args, type Maybe } from './input/keymap';
 import type { AssetPaths } from './transport/assets';
-import type { Diag, Pos } from './types';
+import type { Diag, Direct, PageMetricsPt, Pos } from './types';
 
 /**
  * diag 是"debug 开关下的公开面"：成员不承诺稳定，所以参数与返回暂时是 unknown。
@@ -69,6 +69,7 @@ export function makeDiag(
     selfCheck: () => read('selfCheck'),
     markCheck: () => read('markCheck'),
     rawFrame: () => read('rawFrame'),
+    pageMetrics: () => read('pageMetrics') as Direct<PageMetricsPt>,
     frameDigest: () => num('frameDigest'),
     frameW: () => num('frameWidth'),
     frameH: () => num('frameHeight'),

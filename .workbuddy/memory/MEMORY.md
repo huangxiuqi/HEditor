@@ -26,6 +26,12 @@
 - 判据按**功能域**建 spec：一域一份，域内 `describe` 分节；新功能与修缺陷都加进所属域，
   不建按批次命名的文件（`feature` / `fixes` 已拆）。域够大就单开（`image` / `table` /
   `view` / `clipboard` / `format`），`edit-*` 七片只是"一份太大"的切分。
+- 分工有机械闸：`scripts/check_native_tests.mjs`（在 `npm run check` 里）扫 `tests/`，
+  命中读帧像素/光栅入口/事件模拟当场红；豁免表已清空。native 要验"画了没有"就改问数据层：
+  `auditPageJson` 的 `diff:0`（缓存页 == 当前状态从零光栅）、`digestOf`、
+  `PlacedRow.cont_top/cont_bottom`。浏览器侧读像素读**页画布**，读前等两帧（呈现挂在 rAF 上；
+  不等时画布与引擎缓存都旧、`selfCheck` 差额也是 0，判据假绿）；`rawFrame` 是引擎自述，
+  只能配 `selfCheck().screenVsEngineDiffPx === 0` 一起用，单独用它证明"屏幕对"是循环论证。
 
 ## 不变量
 

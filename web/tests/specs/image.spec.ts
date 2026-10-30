@@ -105,6 +105,30 @@ test.describe('插入图片', () => {
       const list = await e.images();
       const box = list[0];
       const rect = box ? box.rects[0] : null;
+      // 图心那个像素必须是图里的颜色 —— 读的是页画布，不是引擎的帧：
+      //   帧只能证明"光栅器认为画对了"，画布才跨着 wasm 拷贝、Worker、putImageData 三层。
+      //   呈现挂在 rAF 上，先等两帧再取，否则拿到的是上一拍的画布。
+      let center = null;
+      let drawDiff = null;
+      if (rect) {
+        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+        const sc = await e.diag.selfCheck();
+        drawDiff = sc && sc.screenVsEngineDiffPx;
+        const pm = await e.diag.pageMetrics();
+        const cv = [...document.querySelector('.heditor-pages').querySelectorAll('canvas')]
+          .filter((c) => c.dataset.page === String(rect.page))[0];
+        const t = document.createElement('canvas');
+        t.width = cv.width;
+        t.height = cv.height;
+        const g2 = t.getContext('2d');
+        g2.drawImage(cv, 0, 0);
+        const px = g2.getImageData(0, 0, cv.width, cv.height).data;
+        const dens = cv.width / pm.widthPt;      // 设备像素 / 磅（页内坐标）
+        const cx = Math.round((rect.x + rect.w / 2) * dens);
+        const cy = Math.round((rect.y + rect.h / 2) * dens);
+        const at = (cy * cv.width + cx) * 4;
+        center = [px[at], px[at + 1], px[at + 2]];
+      }
       const body = rect ? await e.imageHit(rect.x + rect.w / 2, rect.y + rect.h / 2) : null;
       const corner = rect ? await e.imageHit(rect.x, rect.y) : null;
       const outside = rect ? await e.imageHit(rect.x + rect.w + 60, rect.y + rect.h + 60) : null;
@@ -126,7 +150,7 @@ test.describe('插入图片', () => {
       await e.flush();
       const afterUndo = (await e.images())[0];
 
-      return { ok, list, body, corner, outside, digestBefore, digestAfter, digestSelected,
+      return { ok, list, center, drawDiff, body, corner, outside, digestBefore, digestAfter, digestSelected,
                digestCleared, width0, height0, resized, afterResize, afterUndo };`);
 
     check('insertImage 返回 true', r.ok === true, String(r.ok));
@@ -136,6 +160,11 @@ test.describe('插入图片', () => {
     check('★ 显示尺寸按 96 DPI 折算：32x16 像素 = 24 x 12 磅',
           Math.abs(r.width0 - 24) < 0.01 && Math.abs(r.height0 - 12) < 0.01,
           r.width0 + ' x ' + r.height0);
+    check('画布与引擎页像素一致（差额 0）', r.drawDiff === 0, String(r.drawDiff));
+    check('★ 图心像素是图里的颜色（不是占位框的底色）',
+          !!r.center && Math.abs(r.center[0] - 20) <= 2 && Math.abs(r.center[1] - 120) <= 2 &&
+            Math.abs(r.center[2] - 220) <= 2,
+          JSON.stringify(r.center));
     check('插进去之后画面变了', r.digestBefore !== r.digestAfter,
           r.digestBefore + ' → ' + r.digestAfter);
     check('★ 点图身命中这张图、不在把手上',

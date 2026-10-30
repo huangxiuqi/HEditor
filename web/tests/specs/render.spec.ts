@@ -47,6 +47,9 @@ test.describe('上屏：脏区、设备像素比、缩放', () => {
   });
 
   test('★ 单段文档打字同样只重贴一行（已知缺口，红了就是它）', async ({ open }) => {
+    // 已知缺口：这一段现在会红（贴了整页）。标成"预期失败"而不是删掉 ——
+    //   修好之后它会变成"意外通过"，Playwright 会报出来，提醒把这行删掉。
+    test.fail();
     const p = await open('index.html', { query: { debug: '1' } });
 
     // 单段文档是"新建之后开始写"的那条路：整篇只有一段，段落级重排等于整篇重排。
@@ -71,6 +74,136 @@ test.describe('上屏：脏区、设备像素比、缩放', () => {
       r.px > 0 && r.px < r.pagePx / 10,
       `贴了 ${r.px} / 页 ${r.pagePx}（${(r.px / r.pagePx * 100).toFixed(1)}%，` +
       `重排 ${r.relaidLines} 行，全量=${r.wasFull}）`);
+  });
+
+  test('★ 裁剪标记只画四个角，关掉就消失', async ({ open }) => {
+    const p = await open('index.html', { query: { debug: '1' } });
+
+    // 标记标的是正文可用区（页边距的内沿），所以它必须是四个角的短线，不是一整圈框；
+    //   关掉之后缓存要按光栅签名作废，墨必须真的消失。
+    //   取样只取页边距那一侧的两条臂：第一个字就贴在内容框左上角，伸进正文会把字算成标记。
+    const r = await p.read(`
+      await LOAD.text('甲', 1);
+      await H.configure({ marginMarks: true });
+      await H.flush();
+      const pm = await D.pageMetrics();
+      // 读的是页画布，不是引擎的帧：帧是被测对象的自述，只能证明"光栅器认为画对了"。
+      //   画布跨了 wasm 拷贝、Worker 传递、putImageData 三层，才是用户看见的那一层。
+      const grab = async () => {
+        // 呈现挂在 rAF 上：不等两帧就读，拿到的是上一拍的画布 ——
+        //   而 selfCheck 比的是"画布 vs 引擎页缓存"，两边都旧时差额也是 0，判据会假绿。
+        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+        // selfCheck 先把欠着的上屏贴完再比（它内部调 blitPages），顺带给出
+        //   "画布 vs 引擎页像素"的差额：差额 0 才说明画布确实是最新那一拍。
+        const sc = await D.selfCheck();
+        const el = [...EL('.heditor-pages').querySelectorAll('canvas')]
+          .filter((c) => c.dataset.page === '0')[0];
+        const t = document.createElement('canvas');
+        t.width = el.width;
+        t.height = el.height;
+        const g2 = t.getContext('2d');
+        g2.drawImage(el, 0, 0);
+        const d = g2.getImageData(0, 0, el.width, el.height).data;
+        const fw = el.width;
+        const fh = el.height;
+        const k = fw / pm.widthPt;              // 设备像素 / 磅
+        const m = pm.margins.top * k;           // 上边距（四边同一档）
+        const len = 18 * k;                     // kMarginMarkPt = 18 磅
+        const dark = (x0, y0, x1, y1) => {
+          let n = 0;
+          for (let y = Math.max(0, Math.floor(y0)); y < Math.min(fh, Math.ceil(y1)); y++) {
+            for (let x = Math.max(0, Math.floor(x0)); x < Math.min(fw, Math.ceil(x1)); x++) {
+              if (d[(y * fw + x) * 4] < 200) n++;
+            }
+          }
+          return n;
+        };
+        const h = (x, y, w) => dark(x, y, x + w, y + 1);
+        const v = (x, y, hh) => dark(x, y, x + 1, y + hh);
+        const x1 = fw - m;
+        const y1 = fh - m;
+        const cx = fw / 2;
+        const cy = fh / 2;
+        return {
+          diff: sc && sc.screenVsEngineDiffPx,
+          // 取样严格在内容框外侧（到 m-1 为止）：第一个字就贴在内容框左上角，
+          //   窗口只要含 m 这一列/行，关掉标记后残留的就是字的顶横、不是标记。
+          corners: [
+            h(m - len, m, len - 1) + v(m, m - len, len - 1),
+            h(x1 + 1, m, len - 1) + v(x1, m - len, len - 1),
+            h(m - len, y1, len - 1) + v(m, y1, len - 1),
+            h(x1 + 1, y1, len - 1) + v(x1, y1, len - 1),
+          ],
+          edges: dark(cx - 8, m - 2, cx + 8, m + 8) + dark(cx - 8, y1 - 8, cx + 8, y1 + 2) +
+                 dark(m - 2, cy - 8, m + 8, cy + 8) + dark(x1 - 8, cy - 8, x1 + 2, cy + 8),
+        };
+      };
+      const on = await grab();
+      await H.configure({ marginMarks: false });
+      await H.flush();
+      const off = await grab();
+      return { on, off };
+    `);
+
+    check('画布与引擎页像素一致（差额 0）',
+      r.on.diff === 0 && r.off.diff === 0,
+      `on ${r.on.diff} / off ${r.off.diff}`);
+    check('★ 打开时四个角都有墨',
+      r.on.corners.every((n: number) => n > 0), JSON.stringify(r.on.corners));
+    check('★ 四条边的中段没有墨（标的是四角，不是一整圈框）',
+      r.on.edges === 0, String(r.on.edges));
+    check('★ 关掉之后四角的墨消失（页位图缓存按签名作废）',
+      r.off.corners.every((n: number) => n === 0), JSON.stringify(r.off.corners));
+
+    // 连页没有页，四角没有意义：开与关必须给出同一张帧（差分判，绝对值分不清
+    //   "标记没画"与"语料本来有墨"）。
+    const cont = await p.read(`
+      await H.configure({ pageMode: 'continuous', marginMarks: true });
+      await H.flush();
+      const grabCv = async () => {
+        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+        const el = [...EL('.heditor-pages').querySelectorAll('canvas')]
+          .filter((c) => c.dataset.page === '0')[0];
+        const t = document.createElement('canvas');
+        t.width = el.width;
+        t.height = el.height;
+        const g2 = t.getContext('2d');
+        g2.drawImage(el, 0, 0);
+        return Array.from(g2.getImageData(0, 0, el.width, el.height).data);
+      };
+      const onF = await grabCv();
+      await H.configure({ marginMarks: false });
+      await H.flush();
+      const offF = await grabCv();
+      let diff = 0;
+      const n = Math.min(onF.length, offF.length);
+      for (let i = 0; i < n; i++) if (onF[i] !== offF[i]) { diff++; }
+      return { diff, sameSize: onF.length === offF.length };
+    `);
+    check('★ 连页模式下不画裁剪标记（开与关同一张画布）',
+      cont.sameSize && cont.diff === 0, `差 ${cont.diff} 字节 / 同尺寸=${cont.sameSize}`);
+  });
+
+  test('★ 同一份文档两次冷启动，光栅逐字节相同', async ({ open }) => {
+    // 光栅必须确定：字形 strike、预热、共享 typeface 这些隐藏状态只能影响命不命中，
+    //   不能影响画出来的像素。两次冷启动各起一个引擎，比整帧的摘要。
+    const shot = async (): Promise<{ hash: number; w: number; h: number }> => {
+      const p = await open('index.html', { query: { debug: '1' } });
+      return p.read(`
+        await LOAD.text('甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉戌亥', 8);
+        await D.stopBlink();
+        await H.flush();
+        const f = await D.rawFrame();
+        let h = 2166136261 >>> 0;
+        for (let i = 0; i < f.length; i++) { h ^= f[i]; h = Math.imul(h, 16777619) >>> 0; }
+        return { hash: h >>> 0, w: D.frameW(), h: D.frameH() };
+      `);
+    };
+    const a = await shot();
+    const b = await shot();
+    check('两次的帧尺寸一致', a.w === b.w && a.h === b.h, `${a.w}x${a.h} / ${b.w}x${b.h}`);
+    check('★ 同一文档两次冷启动逐字节相同（没有隐藏状态泄漏到像素里）',
+      a.hash === b.hash, `${a.hash} / ${b.hash}`);
   });
 
   test.describe('设备像素比 2', () => {
