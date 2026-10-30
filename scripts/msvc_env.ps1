@@ -48,9 +48,21 @@ Import-Module $devShell
 # 它会打一行 VS 横幅（Developer PowerShell 启动时那四行），去不掉，当它是环境就绪的标记。
 Enter-VsDevShell $instanceId -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
 
-# 判据：cl 能起来并报出版本。起不来就别让后面的构建替它报错。
+# 判据：cl 起得来。起不来就别让后面的构建替它报错。
+#
+# 探这一下要放在降过 EAP 的子作用域里：cl 无参数会把横幅写 stderr，而 Windows PowerShell
+#   5.1 把原生命令的 stderr 当错误记录（`2>&1`、`*>` 都一样），配上本脚本开头的
+#   $ErrorActionPreference = 'Stop' 就直接中止 —— 于是"检查 cl"这件事本身成了故障源。
 if (-not (Get-Command cl -ErrorAction SilentlyContinue)) { throw "进了开发环境但 Path 上没有 cl" }
-$banner = & cl 2>&1 | Select-Object -First 1
-if ("$banner" -notmatch '(\d+\.\d+\.\d+)') { throw "cl 的输出不认识：$banner" }
+$null = & { $ErrorActionPreference = 'Continue'; & cl *> $null }
+if ($LASTEXITCODE -ne 0) { throw "cl 起来了但退出码是 $LASTEXITCODE（环境不完整）" }
 
-Say ("MSVC {0} + SDK {1}" -f $Matches[1], ($env:WindowsSDKVersion -replace '\\$', ''))
+# 版本不从 cl 的横幅里读（那行在 stderr，且文字随界面语言变）。取工具集自己的名字：
+#   VsDevCmd 摆好的 VCToolsVersion（如 14.44.35207），缺席时退回 VCToolsInstallDir 的
+#   末段目录名 —— 两者都是目录名，与语言、码页无关。
+$tools = $env:VCToolsVersion
+if (-not $tools -and $env:VCToolsInstallDir) { $tools = Split-Path $env:VCToolsInstallDir -Leaf }
+if (-not $tools) { $tools = '版本未知' }
+$sdk = $env:WindowsSDKVersion -replace '\\$', ''
+
+Say ("MSVC {0}{1}" -f $tools, $(if ($sdk) { " + SDK $sdk" } else { '' }))

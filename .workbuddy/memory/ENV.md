@@ -28,6 +28,12 @@
   路径；MSVC 环境由 `.\scripts\msvc_env.ps1` 进 —— 它用 vswhere 找实例、调微软
   自己的 `Enter-VsDevShell`（`Common7\Tools\Microsoft.VisualStudio.DevShell.dll`），跟开始
   菜单的「Developer PowerShell for VS 2022」是同一件事。
+  ★ 别再从 `cl` 的横幅里读版本（2026-10-30 修）：中文 VS 的 `cl` 把横幅写 **stderr**、
+  把「用法:」写 **stdout**，两股流合并顺序不保证 ⇒ 取「第一行」会时而拿到「用法: cl [...]」，
+  症状是同一台 shell 里第一次进环境成功、第二次抛「cl 的输出不认识」。版本取
+  `$env:VCToolsVersion`（工具集目录名，如 `14.44.35207`，与语言无关）。
+  ★ 且 `cl` 那一下探针必须放进降过 EAP 的子作用域：Windows PowerShell 5.1 把原生命令的
+  stderr 当错误记录（`2>&1` 与 `*>` 都一样），配 `Stop` 直接中止，`powershell -File` 一路必挂。
   **`CMakeUserPresets.json` 不再使用**（文件已删，`.gitignore` 里那条留着，防止旧副本被提交回来）。
   `cmake --preset native && cmake --build --preset native`（只要编译）、
   `cmake --workflow --preset native`（配置 + 构建 + 跑三个断言套件）、
