@@ -466,12 +466,6 @@ if(EMSCRIPTEN)
 
 else()
 
-  add_executable(heditor_native src/app/native_main.cpp)
-  target_link_libraries(heditor_native PRIVATE heditor_core heditor_demo)
-  target_compile_definitions(heditor_native PRIVATE HEDITOR_NATIVE_ASSET_DIR="${HEDITOR_ASSET_DIR}"
-                                                HEDITOR_BUILD_STAMP="${HEDITOR_BUILD_STAMP}")
-  heditor_target_flags(heditor_native)
-
   if(HEDITOR_BUILD_TESTS)
     enable_testing()
     add_executable(heditor_tests tests/shaping_test.cpp)

@@ -10,7 +10,7 @@
     "build:app": "npm run build:lib && npm run build:worker && vite build",
     "build:lib": "vite build --config vite.lib.config.ts",
     "typecheck": "tsc --noEmit -p .",
-    "check": "npm run build:types && python ../scripts/gen_payloads.py --check && python ../scripts/gen_codes.py --check && python ../scripts/gen_public_members.py --check && python ../scripts/check_position_surface.py && node ../scripts/check_layers.mjs && python ../scripts/lint_comments.py && python ../scripts/check_docs_cpp.py && node ../scripts/idl_check.mjs && node ../scripts/api_check.mjs && node ../scripts/check_docs.mjs && npm run typecheck && npm run typecheck:tests",
+    "check": "npm run build:types && python ../scripts/gen_payloads.py --check && python ../scripts/gen_codes.py --check && python ../scripts/gen_public_members.py --check && python ../scripts/check_position_surface.py && node ../scripts/check_layers.mjs && node ../scripts/check_native_tests.mjs && python ../scripts/lint_comments.py && python ../scripts/check_docs_cpp.py && node ../scripts/idl_check.mjs && node ../scripts/api_check.mjs && node ../scripts/check_docs.mjs && npm run typecheck && npm run typecheck:tests",
     "build:worker": "vite build --config vite.worker.config.ts",
     "build:types": "tsc -p tsconfig.build.json",
     "lint:comments": "python ../scripts/lint_comments.py",

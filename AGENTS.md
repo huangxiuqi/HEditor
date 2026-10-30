@@ -154,7 +154,7 @@ function blitFrame(px, w) {}
   （四片并行，45~51 s）。耗时比值判据不在这轮里：改完排版或光栅单独跑
   `ctest --preset native-perf`，它带 RUN_SERIAL，跑的时候机器上不该有别的活。
 - WASM：`cmake --workflow --preset wasm`（工具链取仓库内的 `.toolchain/emsdk`）。
-- 原生渲染出图（验证台要用）：`build/native/heditor_native.exe --out-dir out`。
+- 原生侧只构建判据，不出图也不做交互模拟 —— 呈现与操作看浏览器（见「判据的分工」）。
 - 浏览器端测试（Playwright，TS）：`cd web && npm test`。默认跑 Vite 源码直连，
   改一行就能测，只有 Worker 壳需要预先构建（`pretest` 会做，不到一秒）；
   `npm run test:dist` 跑构建产物，那是验收基准。配置在 `web/playwright.config.ts`
