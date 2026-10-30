@@ -150,14 +150,57 @@ export const PRELUDE = `
     D.focus();
     return r;
   };
+  // 装载：全部走公开面。
+  //   夹具 = 一份 .json 文档 + open()（用户"打开文件"就是这条路）；
+  //   样例 = 页面上那组用公开方法搭出来的文档（见 app/samples/）；
+  //   批量 = setText 的 repeat（压测用的就是它的产品语义）。
+  //   返回的都是这一拍的账 —— 判据拿它当分母。
+  const loaded = async (run) => {
+    await run();
+    return D.editStats();
+  };
+  // 换文档先回"文档模式"：只读/表单模式下 open 与编辑命令都会被策略拒掉（这是编辑策略的
+  //   本意，不是缺陷），而"装载"这件事与当前模式无关。各 LOAD 自己按需要再切回去。
+  const DOC_MODE = () => H.configure({ mode: 'document' });
   const LOAD = {
-    scenario: (id, z) => FOCUSED(D.loadScenario(id, z)),
-    reset: (id, z) => FOCUSED(D.reset(id, z)),
-    stress: (p, c) => FOCUSED(D.stress(p, c)),
-    stressDiverse: (p, c) => FOCUSED(D.stressDiverse(p, c)),
-    form: (v) => FOCUSED(D.loadFormSample(v)),
-    medical: (n) => FOCUSED(D.loadMedicalSample(n)),
-    controls: (l) => FOCUSED(D.setFormControls(l)),
+    // 短文档夹具：一段 14 磅正文（判据要"一页放得下"的那份）。
+    short: (z) => FOCUSED(loaded(async () => {
+      await DOC_MODE();
+      const res = await fetch('/assets/samples/fixtures/scenario-6.json', { cache: 'no-store' });
+      if (!res.ok) throw new Error('夹具读取失败：scenario-6');
+      await H.open(await res.text());
+      if (z !== undefined) await H.configure({ zoom: z });
+    })),
+    // 长文档：2000 段，用 setText 的 repeat 铺（与压测同一条产品语义）。
+    long: (z) => FOCUSED(loaded(async () => {
+      await DOC_MODE();
+      await H.setText('患者主诉：反复心悸三天，加重一天。', { repeat: 2000 });
+      if (z !== undefined) await H.configure({ zoom: z });
+    })),
+    // 批量：paras 段、每段 chars 个字。
+    bulk: (paras, chars, z) => FOCUSED(loaded(async () => {
+      await DOC_MODE();
+      const one = '字'.repeat(Math.max(1, chars | 0));
+      await H.setText(one, { repeat: Math.max(1, paras | 0) });
+      if (z !== undefined) await H.configure({ zoom: z });
+    })),
+    // 表单夹具：四份 .json（区间与只读位都在文件里，不是靠"载入场景"造的）。
+    //   打开之后切到表单模式：夹具只描述文档，模式是宿主的配置，两件事分开。
+    form: (v, z) => FOCUSED(loaded(async () => {
+      await DOC_MODE();
+      const res = await fetch('/assets/samples/fixtures/form-' + (v | 0) + '.json',
+                              { cache: 'no-store' });
+      if (!res.ok) throw new Error('夹具读取失败：form-' + v);
+      await H.open(await res.text());
+      await H.configure({ mode: 'form' });
+      if (z !== undefined) await H.configure({ zoom: z });
+    })),
+    // 页面上的样例：与菜单里点出来的是同一段代码。
+    sample: (id, repeat, z) => FOCUSED(loaded(async () => {
+      await DOC_MODE();
+      await window.__samples.run(id, repeat === undefined ? undefined : { repeat });
+      if (z !== undefined) await H.configure({ zoom: z });
+    })),
     text: (t, r) => FOCUSED(H.setText(t, { repeat: r })),
   };
   // 编辑模式：旧接口收 0/1/2，公开面收三个名字。

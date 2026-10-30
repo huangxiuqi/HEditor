@@ -239,11 +239,8 @@ test.describe('编辑面：控件边界总覆盖', () => {
                 s.map((q2: any) => q2.owner).join(' '));
 
       // 颜色跟着字段走：把 #2 标成只读，它那一对括号必须变灰且排在右侧。
-      //   只读标记只有建控件时给得进去，所以整份重建一次（区间不变，只翻 ro）。
-      await probe.read(`
-        const it2 = D.controls().items;
-        return await LOAD.controls(it2.map((x, i) => ({
-          start: x.start, end: x.end, kind: 0, id: x.id, ro: i === 2 })));`);
+      //   只读是运行态属性，走公开的 updateControl —— 文档内容与区间都不动。
+      await probe.read(`return await H.updateControl(2, { readonly: true });`);
       const sr = await slotsOf(7);
       check('★ 只读字段的一对括号变灰（左三枚可编辑、右两枚只读）',
                 sr.length === 5 && sr.map((q2: any) => (q2.ro ? 1 : 0)).join('') === '00011',

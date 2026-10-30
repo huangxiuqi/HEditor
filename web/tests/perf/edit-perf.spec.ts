@@ -20,7 +20,7 @@ test.describe('编辑面：耗时比值', () => {
 
     // 前面几节装过表单样例时模式会停在表单，长文档没有控件，表单模式下打不进字。
     await probe.read('return await SET_MODE(0);');
-    const base = await probe.read('return await LOAD.scenario(7, 1.0);');
+    const base = await probe.read('return await LOAD.long(1.0);');
     check('前提：长文档载入（段数 ≥ 200）', base.totalParagraphs >= 200,
           `${base.totalParagraphs} 段 / ${base.totalLines} 行`);
     check('前提：首次排版是全量（整篇都脏）', base.layoutWasFull === true);

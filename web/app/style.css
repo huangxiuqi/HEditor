@@ -152,6 +152,21 @@ body {
 
 .heditor-ribbon__button svg { width: 16px; height: 16px; display: block; }
 
+/* 下拉按钮右下角的小三角：这个按钮点下去开一列，不是立刻执行。
+   绝对定位而不是再塞一行 —— 它不能让 54 高的大按钮多出一行内容。 */
+.heditor-ribbon__button--menu { position: relative; }
+
+.heditor-ribbon__button--menu::after {
+  content: '';
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  border-left: 3px solid transparent;
+  border-right: 3px solid transparent;
+  border-top: 4px solid currentColor;
+  opacity: 0.5;
+}
+
 .heditor-ribbon__button--big {
   height: 54px;
   min-width: 44px;

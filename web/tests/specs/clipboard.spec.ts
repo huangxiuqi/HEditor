@@ -111,7 +111,8 @@ test.describe('剪贴板', () => {
     const p = await open('index.html', { query: { debug: '1' } });
     const r = await p.ev<{ before: number; after: number; text: string; labels: string[] }>(`
       const e = ${D};
-      await e.diag.loadFormSample(0);
+      await e.open(await (await fetch('/assets/samples/fixtures/form-0.json')).text());
+      await e.configure({ mode: 'form' });
       await e.flush();
       const before = e.form().length;
       await e.selectAll();

@@ -15,20 +15,11 @@ import {
   mountChrome,
   type Chrome,
   type Group,
+  type MenuEntry,
   type Tab,
 } from './ui';
 import { createMenus, type Menus } from './menus';
-
-const DEMO_TEXT = [
-  'HEditor 示例文档',
-  '',
-  '这一页由 Vite 直接跑源码：改 web/src 下的任何文件，保存即热更，不用先构建。',
-  '引擎（wasm）、命令表、输入层、画布与滚动都在库里面 —— 页面拿到的是一个编辑器对象。',
-  '',
-  '可以试试：点画布落光标、敲字、Ctrl+Z 撤销、拖选。这些都没有在本文件里写一行事件处理。',
-  '',
-  '上面那排按钮全部走公开面：格式走 format / paragraphFormat，回显走 formatAt。',
-].join('\n');
+import { SAMPLES, runSample } from './samples';
 
 const params = new URLSearchParams(location.search);
 // 探针用 ?glue= 造"产物不存在"这种真实配置错误。产品页不会有这一行。
@@ -45,6 +36,12 @@ declare global {
     __demoReady?: boolean;
     __demoState?: { changes: number; unsavedPrompt: boolean };
     __demoStartError?: string;
+    // 样例：判据按编号点名跑同一段代码（见 samples/）。
+    __samples?: {
+      list: string[];
+      run(id: string, opts?: { repeat?: number }): Promise<void>;
+      settled(): Promise<void>;
+    };
   }
 }
 
@@ -273,7 +270,25 @@ function makeTabs(): Tab[] {
   const doc: Group = {
     label: '文档',
     items: [
-      { act: 'load', label: '载入示例', icon: 'doc', big: true, run: () => editor.setText(DEMO_TEXT) },
+      // 示例：点开是一列样例，每一份都由 samples/ 里的公开方法搭出来（不是引擎里的专用入口）。
+      //   不摊成竖排栈：栈的合理长度是两个（正好与大按钮同高），五份叠起来会把整条功能区
+      //   顶到 200 往上 —— 下拉多长都不占版面。
+      {
+        act: 'sample',
+        label: '示例',
+        icon: 'doc',
+        big: true,
+        entries: (): MenuEntry[] =>
+          SAMPLES.map((s) => ({
+            kind: 'action',
+            act: 'sample-' + s.id,
+            label: s.label,
+            run: () => {
+              void loadSample(s.id);
+            },
+          })),
+        closed: () => editor.focus(),
+      },
       { act: 'save', label: '保存', icon: 'save', big: true, run: () => saveNow() },
       {
         act: 'unsaved-prompt',
@@ -822,6 +837,29 @@ function refreshCounts(tail: string): void {
   chrome.say(`${editor.paragraphs().length} 段 · ${tail}`);
 }
 
+/**
+ * 最近一次样例装载。菜单是"点了就走"的，而装载要跑几十条命令 —— 探针要等它落地，
+ *   所以把这一份交出去（见 window.__samples.settled）。
+ */
+let sampleTask: Promise<void> = Promise.resolve();
+
+/**
+ * 装载一份样例（菜单与探针共用这一条）。
+ *
+ * 样例本身在 samples/ 里，全部由公开方法搭出来 —— 这里只负责"跑完说一声"。
+ * @param id 样例编号（见 SAMPLES）
+ * @param opts 可选项（repeat：整篇重复几遍）
+ * @returns 装载完成
+ */
+function loadSample(id: string, opts?: { repeat?: number }): Promise<void> {
+  sampleTask = (async () => {
+    await runSample(editor, id, opts);
+    const hit = SAMPLES.find((s) => s.id === id);
+    refreshCounts(`示例「${hit ? hit.label : id}」`);
+  })();
+  return sampleTask;
+}
+
 async function boot(): Promise<void> {
   editor = await createEditor({
     container: stage,
@@ -859,6 +897,12 @@ async function boot(): Promise<void> {
   //   它同时是测试的唯一入口（web/tests/support/readings.ts 的前言里读一次），改名字要同步。
   window.__demo = editor;
   window.__demoState = { changes: 0, unsavedPrompt };
+  // 样例也交出去：判据要的那份文档与用户在菜单里点出来的是同一段代码。
+  window.__samples = {
+    list: SAMPLES.map((s) => s.id),
+    run: loadSample,
+    settled: () => sampleTask,
+  };
   menus = createMenus({
     editor,
     say: (text) => chrome.say(text),
@@ -867,7 +911,8 @@ async function boot(): Promise<void> {
     pickImage,
   });
 
-  await editor.setText(DEMO_TEXT);
+  // 启动装载第一份样例（samples/SAMPLES 的第一条）。
+  await runSample(editor, SAMPLES[0].id);
   dirty = false;
   chrome.bind(editor);
 

@@ -42,6 +42,11 @@ export type MenuEntry =
       label: string;
 
       /**
+       * 稳定标识（写进 data-act：判据按它点名，不认中文标签）。
+       */
+      act?: string;
+
+      /**
        * 图标名（web/app/icons 下的文件名，不含扩展名）。
        */
       icon?: string;
@@ -108,6 +113,13 @@ export interface ContextMenu {
    * @param at 客户端坐标（CSS 像素），通常是右键落点
    */
   open(items: MenuEntry[], at: { x: number; y: number }): void;
+
+  /**
+   * 锚在某个元素下面打开（工具条上的下拉按钮走这一档）。
+   * @param items 菜单项
+   * @param anchor 锚点元素（按钮）
+   */
+  openAt(items: MenuEntry[], anchor: HTMLElement): void;
 
   /**
    * 关掉（幂等）。
@@ -225,6 +237,7 @@ export function createContextMenu(onClose?: () => void): ContextMenu {
       row.className = 'heditor-menu__item';
       row.setAttribute('role', 'menuitem');
       row.tabIndex = -1;
+      if (entry.kind === 'action' && entry.act) row.dataset.act = entry.act;
       if (entry.disabled) {
         row.classList.add('heditor-menu__item--off');
         row.setAttribute('aria-disabled', 'true');
@@ -548,25 +561,46 @@ export function createContextMenu(onClose?: () => void): ContextMenu {
     layer.close();
   };
 
+  /**
+   * 打开一份菜单：先建内容，再交给调用方定位。
+   *
+   * 内容每次重建：菜单项带着打开那一刻的值（勾选态、禁用态），复用上一份等于显示旧状态。
+   * @param items 菜单项
+   * @param place 定位（按点 / 锚在元素上两条）
+   */
+  const show = (items: MenuEntry[], place: () => void): void => {
+    close();
+    root.textContent = '';
+    const top = buildList(items, 0);
+    root.appendChild(top);
+    place();
+    document.addEventListener('keydown', onKey, true);
+    root.focus({ preventScroll: true });
+    setActive(itemsOf(top)[0] ?? null);
+  };
+
   return {
     el: root,
 
     /**
-     * 打开。
-     *
-     * 内容每次重建：菜单项带着打开那一刻的值（勾选态、禁用态），复用上一份等于显示旧状态。
+     * 在视口坐标处打开（右键那一档）。
      * @param items 菜单项
      * @param at 客户端坐标
      */
     open(items: MenuEntry[], at: { x: number; y: number }): void {
-      close();
-      root.textContent = '';
-      const top = buildList(items, 0);
-      root.appendChild(top);
-      layer.openAtPoint(at.x, at.y);
-      document.addEventListener('keydown', onKey, true);
-      root.focus({ preventScroll: true });
-      setActive(itemsOf(top)[0] ?? null);
+      show(items, () => layer.openAtPoint(at.x, at.y));
+    },
+
+    /**
+     * 锚在元素下面打开（工具条下拉）。
+     *
+     * 与按点定位的差别不只在位置：锚定之后"点在锚点上"不算点在外面（见 layer 的 outside），
+     *   再点一次按钮时菜单不会被 pointerdown 抢先关掉 —— 开关归按钮自己管。
+     * @param items 菜单项
+     * @param anchor 锚点元素（按钮）
+     */
+    openAt(items: MenuEntry[], anchor: HTMLElement): void {
+      show(items, () => layer.openAt(anchor));
     },
 
     close,

@@ -39,7 +39,7 @@ test.describe('编辑面：字体按需读', () => {
     // 三个数要在真实排版上量：装 2000 段并把它排一遍。
     //   用 diverse 那一个入口 —— stress 文档整篇是同一个字，字形集合只有一个，
     //   字形缓存与块缓存都会命中到失真（量出来的数完全不反映真文档）。
-    await probe.read('await LOAD.stressDiverse(2000, 20); return true;');
+    await probe.read('await LOAD.bulk(2000, 20); return true;');
     await probe.read('return await D.present();');
     // 再换几个窗口位置。只量"当前窗口那 3 页"会低估浏览成本 —— 换到新区域
     //   要读它自己的字形。这里直接设视口锚点（比模拟滚动稳），前中后各一次。
@@ -118,7 +118,7 @@ test.describe('编辑面：字体按需读', () => {
     await probe.read('return await D.setViewportAnchor(0, 3);');
     const inkLazy = await probe.read(INK);
     await probe.read('return await D.reloadFonts("full");');
-    await probe.read('await LOAD.stressDiverse(2000, 20); return true;');
+    await probe.read('await LOAD.bulk(2000, 20); return true;');
     await probe.read('return await D.setViewportAnchor(0, 3);');
     const inkFull = await probe.read(INK);
     state.inkCompare = { lazy: inkLazy, full: inkFull };
@@ -139,7 +139,7 @@ test.describe('编辑面：字体按需读', () => {
       const blocks = Math.floor(CAP / bs);
       await probe.read(`return await D.setFontCacheConfig(${bs}, ${blocks});`);
       await probe.read('return await D.reloadFonts("lazy");');
-      await probe.read('await LOAD.stressDiverse(2000, 20); return true;');
+      await probe.read('await LOAD.bulk(2000, 20); return true;');
       await probe.read('return await D.present();');
       const s = await probe.read('return D.editStats();');
       const hits = Number(s.fontCacheHits);
@@ -175,7 +175,7 @@ test.describe('编辑面：字体按需读', () => {
   log.section('[19] 真病历文本：用字更分散，缓存账更紧');
   {
     // 真文本由门面读文件并清洗（清洗逻辑只此一份，页面下拉用的是同一条路）。
-    const textInfo = await probe.read('return await LOAD.medical(1);');
+    const textInfo = await probe.read("return await LOAD.sample('medical');");
     console.log(`     病历文本：${textInfo.paragraphs} 段 / ${textInfo.chars} 字`);
     // 这一条查的是页面自己的下拉：旧宿主页把场景做成了 UI，库不带 UI。
     //   在库页面上跳过它（而不是为了它给库加一个 select —— 那是把页面塞进库）。
@@ -201,7 +201,7 @@ test.describe('编辑面：字体按需读', () => {
       const blocks = Math.floor((v.capMB * 1024 * 1024) / bs);
       await probe.read(`return await D.setFontCacheConfig(${bs}, ${blocks});`);
       await probe.read('return await D.reloadFonts("lazy");');
-      await probe.read('return await LOAD.medical(7);');
+      await probe.read("return await LOAD.sample('medical', 7);");
       await probe.read('return await D.present();');
       const s = await probe.read('return D.editStats();');
       const hits = Number(s.fontCacheHits);

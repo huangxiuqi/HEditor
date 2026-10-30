@@ -240,22 +240,9 @@ if(NOT EXISTS "${HEDITOR_JSON_INCLUDE}/nlohmann/json.hpp")
     "跑 scripts/deps_init.ps1 取回（见 docs/依赖与工具链管理.md）。")
 endif()
 target_include_directories(heditor_core PRIVATE ${HEDITOR_JSON_INCLUDE})
-
-# 演示与测试共用的固定文书。单独成库是为了不让核心库带上演示数据 ——
-#   核心库提供的是能力，样例内容是喂给它的输入（见 docs/正式化架构与迁移路线.md 4.7）。
-#   include 目录给到仓库根，于是各处写 #include "demo/demo_documents.h"。
-add_library(heditor_demo STATIC demo/demo_documents.cpp)
-target_include_directories(heditor_demo PUBLIC ${HEDITOR_ROOT})
-target_link_libraries(heditor_demo PUBLIC heditor_core)
 # ★ 每个 target 都要走这个函数，漏掉它只在 MSVC 上炸：源码无 BOM，
 #   少了 /utf-8 就按 cp936 读，症状是"中文注释那一行报语法错"（见函数定义处的说明）。
-heditor_target_flags(heditor_demo)
 heditor_target_flags(heditor_core)
-# ★ 这个静态库对头依赖尤其敏感：demo_documents.cpp 直接构造 BlockSpec（改 layout.h
-#   的字段就是改它的类布局），而它被所有测试链着。一旦它的 .obj 没跟着重编，后果不是
-#   编译错误，而是"它的 .obj 用旧布局、测试的 .obj 用新布局"混链 —— 症状是析构时随机
-#   段错误，而断言已经全过（实测：给 BlockSpec 加一个 vector 成员后，model_test 打到
-#   0.4 就崩）。这条在 2026-10-12 真的发生过：heditor_demo 当时漏挂了头依赖。
 
 # ── 与 Skia 静态库对齐的编译期契约（一个都不能少）────────────────
 #
@@ -388,7 +375,8 @@ if(EMSCRIPTEN)
   message(STATUS "wasm 声明文件由 tsc ${HEDITOR_TSC_VERSION} 生成（${HEDITOR_TSC}）")
 
   add_executable(heditor_wasm src/wasm/wasm_main.cpp)
-  target_link_libraries(heditor_wasm PRIVATE heditor_core heditor_demo)
+  # 只链 core：演示/测试内容不进产物（样例在 web/app/samples，判据夹具是 .json）。
+  target_link_libraries(heditor_wasm PRIVATE heditor_core)
   # wasm 壳也要读写载荷 JSON（格式补丁、片段），而 heditor_core 的 include 是 PRIVATE。
   target_include_directories(heditor_wasm PRIVATE ${HEDITOR_JSON_INCLUDE})
   target_compile_definitions(heditor_wasm PRIVATE HEDITOR_BUILD_STAMP="${HEDITOR_BUILD_STAMP}")
@@ -469,7 +457,8 @@ else()
   if(HEDITOR_BUILD_TESTS)
     enable_testing()
     add_executable(heditor_tests tests/shaping_test.cpp)
-    target_link_libraries(heditor_tests PRIVATE heditor_core heditor_demo)
+    target_link_libraries(heditor_tests PRIVATE heditor_core)
+    target_include_directories(heditor_tests PRIVATE ${HEDITOR_ROOT}/tests)
     target_compile_definitions(heditor_tests PRIVATE HEDITOR_NATIVE_ASSET_DIR="${HEDITOR_ASSET_DIR}")
     heditor_target_flags(heditor_tests)
     add_test(NAME shaping_and_layout COMMAND heditor_tests)
@@ -485,7 +474,8 @@ else()
     # 为什么能分片：每节自建引擎、自己造文档，节与节之间没有隐含依赖。四片实测
     # 156 s → 56 s（这台机器四个物理核）。
     add_executable(heditor_edit_tests tests/edit_test.cpp)
-    target_link_libraries(heditor_edit_tests PRIVATE heditor_core heditor_demo)
+    target_link_libraries(heditor_edit_tests PRIVATE heditor_core)
+    target_include_directories(heditor_edit_tests PRIVATE ${HEDITOR_ROOT}/tests)
     target_compile_definitions(heditor_edit_tests PRIVATE HEDITOR_NATIVE_ASSET_DIR="${HEDITOR_ASSET_DIR}")
     heditor_target_flags(heditor_edit_tests)
     # 主函数有上万行，各节的局部变量共用同一批栈槽；Skia 的 FreeType 光栅在深处还要
@@ -511,14 +501,14 @@ else()
 
     # 不可变文档层：路径复制、结构共享、内容哈希（重构方案 D1 的第一层）。
     add_executable(heditor_doc_tests tests/doc_test.cpp)
-    target_link_libraries(heditor_doc_tests PRIVATE heditor_core heditor_demo)
+    target_link_libraries(heditor_doc_tests PRIVATE heditor_core)
     heditor_target_flags(heditor_doc_tests)
     add_test(NAME doc_layer COMMAND heditor_doc_tests)
     set_tests_properties(doc_layer PROPERTIES LABELS functional)
 
     # 本轮新增功能的判据：双击 / 三击选区、水印、表格列宽与行高、拖拽移动、图片环绕。
     add_executable(heditor_feature_tests tests/feature_test.cpp)
-    target_link_libraries(heditor_feature_tests PRIVATE heditor_core heditor_demo)
+    target_link_libraries(heditor_feature_tests PRIVATE heditor_core)
     target_compile_definitions(heditor_feature_tests PRIVATE
                                HEDITOR_NATIVE_ASSET_DIR="${HEDITOR_ASSET_DIR}")
     heditor_target_flags(heditor_feature_tests)

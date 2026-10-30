@@ -23,7 +23,6 @@
 #include "core/engine/engine.h"
 #include "core/engine/payload_schema.h"
 #include "core/utils/utf8.h"
-#include "demo/demo_documents.h"
 
 #ifndef HEDITOR_BUILD_STAMP
 #define HEDITOR_BUILD_STAMP "dev"
@@ -36,8 +35,6 @@ namespace {
 
 EditorEngine g_engine;
 int g_cjk_font = 0;
-int g_mn_font = 1;
-int g_latin_font = -1;  // 回退字体；未提供时为 -1（关闭回退）
 
 /**
  * 改一项配置再推回引擎。
@@ -85,50 +82,30 @@ void setFontCacheConfig(int block_size, int max_blocks) {
 std::string fontsJson() { return g_engine.fontsJson(); }
 
 /**
- * 三个角色指向哪张脸。负数是"这一档没给"：正文回落到第一张，蒙文跟随正文，
- *   拉丁关掉回退 —— 只装一份字体也能排版，不必凑齐三条。
+ * 正文用哪张脸。负数是"这一档没给"，回落到第一张。
+ *
+ * 蒙文与拉丁两个角色已经不再影响排版：文档内容由宿主送来（每段的字体、书写模式、回退链
+ *   都是文档自己的属性），引擎里没有"按角色挑字体"的样例内容了。参数留着是为了让宿主的
+ *   字体清单（role 字段）有一个下发的落点，删除要连着 api.ts 的协议表一起改。
+ *
+ * @param cjk_index 正文字体下标；负数按 0
+ * @param mongol_index 保留（蒙文字体角色）
+ * @param latin_index 保留（拉丁回退角色）
  */
 void setFontRoles(int cjk_index, int mongol_index, int latin_index) {
     g_cjk_font = cjk_index >= 0 ? cjk_index : 0;
-    g_mn_font = mongol_index >= 0 ? mongol_index : g_cjk_font;
-    g_latin_font = latin_index >= 0 ? latin_index : -1;
+    (void)mongol_index;
+    (void)latin_index;
 }
 
 /**
- * 当前演示字段的配置。
- *
- * 文档内容只存在引擎里，这里不再并排保存块流底稿：换场景、打开文件都直接换修订，
- * 换字段时按引擎当前块流临时重建一份带控件的修订。
- */
-std::vector<DemoFieldSpec> g_fields;
-
-/**
- * 当前文档是否是演示页用块流建出来的。从 JSON 装入的文档没有块流底稿，控件名单也不能
- * 再靠"重建整棵树"改：那条路会把用户打开的文件倒回演示底稿。
- */
-bool g_demo_source = true;
-
-/**
- * 换一份演示文档并交给引擎。
- *
- * 块流只在重建这一刻存在：文档内容与编辑结果都由引擎里的修订持有，宿主不再并排保存
- *   一份块流底稿。表格场景不走块流（表格结构不在 BlockSpec 里），由调用方直接给树。
+ * 换一份修订并交给引擎。
  *
  * @param doc 要装入的修订
  * @param keep_caret 为真且文本未变时保住光标、侧别与行别
  */
 void installDoc(doc::Doc doc, bool keep_caret) {
     g_engine.replaceDocument(std::move(doc), StyleSheet{}, keep_caret);
-}
-
-void setScenario(int scenario) {
-    g_demo_source = true;
-    g_fields.clear();
-    if (scenario == 10) {
-        installDoc(demoTableDoc(g_cjk_font), false);
-        return;
-    }
-    installDoc(demoDoc(scenarioBlocks(scenario, g_cjk_font, g_mn_font, g_latin_font), {}), false);
 }
 
 void setZoom(float z) {
@@ -826,39 +803,6 @@ std::string jsonEscape(const std::string& s) {
     return o;
 }
 
-/**
- * 整批换上一份字段名单，重建一次文档树（探针用）。
- *
- * 为什么是"整批"而不是"清空 + 逐个加"：控件是树的产物，改控件就是换一份字段名单再建一次
- *   树。拆成两步做的话，中间态里一枚括号都没有 —— 那一刻"侧别"没有对应物，引擎搬光标只
- *   能抹成 0（实测 7/2 变 7/0，接着打字就进了左边那个字段）。合成一次调用，中间态不存在，
- *   宿主也不必自己存光标再摆回去（见 docs/正式化架构与迁移路线.md 4.2）。
- * 每项形如 {start:[段,偏移], end:[段,偏移], kind, id, ro}。不收 label：树里不存它，
- *   界面上显示的那份是引擎从树里导出的（见 controlsJson）。
- */
-void setFormControls(val list) {
-    // 从 JSON 装入的文档没有块流底稿；演示页的整树重建会把它的内容倒回底稿。
-    if (!g_demo_source) return;
-    // 换字段要重建控件，而重建只在这一刻需要当前块流：从引擎的修订取一份临时快照，
-    //   不再在宿主里维护块流底稿。
-    const std::vector<BlockSpec> blocks = g_engine.blocks();
-    g_fields.clear();
-    const int n = list["length"].as<int>();
-    g_fields.reserve(static_cast<size_t>(n));
-    for (int i = 0; i < n; ++i) {
-        const val it = list[i];
-        DemoFieldSpec f;
-        f.para = it["start"][0].as<int>();
-        f.so = it["start"][1].as<int>();
-        f.epara = it["end"][0].as<int>();  // 跨段字段（终段 != 起段）照建：中间那些段落在它里面
-        f.eo = it["end"][1].as<int>();
-        if (!it["kind"].isUndefined()) f.kind = controlKindFromCode(it["kind"].as<int>());
-        if (!it["id"].isUndefined()) f.key = it["id"].as<std::string>();
-        f.readonly = !it["ro"].isUndefined() && it["ro"].as<bool>();
-        g_fields.push_back(std::move(f));
-    }
-    installDoc(demoDoc(blocks, g_fields), true);
-}
 void setEditMode(int mode) { g_engine.setEditMode(editModeFromCode(mode)); }
 int editMode() { return static_cast<int>(g_engine.editMode()); }
 
@@ -1552,38 +1496,39 @@ std::string bracketSlotsJson() {
 }
 
 /**
- * 压力文档：段数与每段字数由宿主给，内容由 demo 库造。
+ * 用一段纯文本造文档：一行一段，每段挂同一份段落格式。
  *
- * 性能判据只能在大文档上做，而且要能调长度 —— 同一份代码在 10 段与 1000 段上的差别，
- *   才是可证伪的证据。
+ * 切段规则是这条命令的契约：换行符切行、空行丢弃、结尾的换行不产生空段、空串给一份
+ *   只有一个空段落的文档（那是"清空文档"的唯一入口 —— 块流为空的话引擎里没有可编辑的段落）。
+ * 每段长什么样由宿主的字体与这一档默认字号决定，命令本身不带任何样例内容。
  *
- * @param paras 段数
- * @param chars 每段字数
- * @param diverse 为真时每段用不同的字，让字形集合有规模
- */
-void loadStressDocumentImpl(int paras, int chars, bool diverse) {
-    g_fields.clear();
-    g_demo_source = true;
-    installDoc(demoDoc(stressDocument(paras, chars, diverse, g_cjk_font), {}), false);
-}
-
-void loadStressDocument(int paras, int chars) { loadStressDocumentImpl(paras, chars, false); }
-
-/**
- * 同上，但每段用一批不同的常用字 —— 给"字形集合要有规模"的判据用。
- */
-void loadStressDocumentDiverse(int paras, int chars) { loadStressDocumentImpl(paras, chars, true); }
-
-/**
- * 用一段真实文本造文档。切段与块格式都在 demo 库，这里只收宿主读来的文本。
- *
- * 判据要用真文本才准：合成文本的字形集合与用字分布都不像真病历，量出来的缓存账会偏。
- *   文本由宿主读进来并清洗掉 markdown 记号后传进来。
+ * @param text 纯文本（UTF-8，按换行切段）
+ * @param repeat 整篇重复几遍（小于 1 按 1）
  */
 void loadTextDocument(const std::string& text, int repeat) {
-    g_fields.clear();
-    g_demo_source = true;
-    installDoc(demoDoc(textDocument(text, repeat, g_cjk_font), {}), false);
+    std::vector<std::u32string> paras;
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t nl = text.find('\n', pos);
+        if (nl == std::string::npos) nl = text.size();
+        if (nl > pos) {
+            const std::vector<uint32_t> cps = utf8ToCodepoints(text.substr(pos, nl - pos));
+            paras.emplace_back(cps.begin(), cps.end());
+        }
+        pos = nl + 1;
+    }
+    if (paras.empty()) paras.emplace_back();
+    if (repeat > 1) {
+        const std::vector<std::u32string> one = paras;
+        paras.clear();
+        paras.reserve(one.size() * static_cast<size_t>(repeat));
+        for (int r = 0; r < repeat; ++r) paras.insert(paras.end(), one.begin(), one.end());
+    }
+    ParaFormatPatch para;
+    para.font_index = g_cjk_font;
+    para.size = Length::abs(ptToEmu(12.0f));
+    para.language = internLanguage("zh");
+    installDoc(doc::makeTextDoc(paras, para), false);
 }
 
 /**
@@ -1608,8 +1553,6 @@ std::string serializeDocument() {
 std::string loadDocument(const std::string& text) {
     const doc::DeserializeResult r = g_engine.loadDocument(text);
     if (!r.ok) return r.error;
-    g_fields.clear();
-    g_demo_source = false;
     return std::string();
 }
 
@@ -1740,23 +1683,6 @@ std::string applyParaFormat(const std::string& text) {
  * 删掉选区（剪切的后一半）。没有选区时返回 false。
  */
 bool deleteSelectionCommand() { return g_engine.deleteSelectionAndRender(); }
-
-/**
- * 表单样例。块流与字段布局都由 demo 库给：区间按文本的码点坐标算，
- *   两者分居两处时改一个字就会整组错位，而控件数据本身看着完全正常。
- *
- * @param variant 变体号（0 到 3）
- */
-void loadFormSample(int variant) {
-    const DemoFormSample sample = formSample(variant, g_cjk_font, g_mn_font, g_latin_font);
-    g_fields = sample.fields;
-    g_demo_source = true;
-    installDoc(demoDoc(sample.blocks, sample.fields), false);
-    g_engine.setEditMode(EditMode::Form);
-    // 必须重排：换过文档，而排版还停在上一次的行盒上。不重排的话控件会投影到旧几何上
-    //   ——症状是"字段框比文本偏了一截、或者在错误的行上被切成两块"。
-    g_engine.relayout();
-}
 
 /**
  * 编辑统计。这几个数字是档 1 的验收依据：
@@ -1908,7 +1834,6 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("setFontRoles", &setFontRoles);
     emscripten::function("fontsJson", &fontsJson);
 
-    emscripten::function("setScenario", &setScenario);
     emscripten::function("setZoom", &setZoom);
     emscripten::function("setPageMetrics", &setPageMetrics);
     emscripten::function("pageMetricsJson", &pageMetricsJson);
@@ -1974,7 +1899,6 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("redoEdit", &redoEdit);
 
     // 表单（控件是区间 + 编辑策略）
-    emscripten::function("setFormControls", &setFormControls);
     emscripten::function("setEditMode", &setEditMode);
     emscripten::function("editMode", &editMode);
     emscripten::function("setShowBrackets", &setShowBrackets);
@@ -2028,9 +1952,6 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("linesJson", &linesJson);
     emscripten::function("describeControls", &describeControls);
     emscripten::function("blockedEdits", &blockedEdits);
-    emscripten::function("loadFormSample", &loadFormSample);
-    emscripten::function("loadStressDocument", &loadStressDocument);
-    emscripten::function("loadStressDocumentDiverse", &loadStressDocumentDiverse);
     emscripten::function("loadTextDocument", &loadTextDocument);
     // 保存 / 打开：文档进出的唯一一条路（阶段 6 的落点）。序列化不经过宿主拼字符串 ——
     //   格式由 doc::serialize 一份实现说了算，宿主只搬字节。

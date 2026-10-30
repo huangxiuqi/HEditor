@@ -1724,47 +1724,7 @@ export interface Diag {
    */
   removeControl(index: number, keepContent?: boolean): Promise<boolean>;
 
-  // 装载：内置场景与压力文档
-
-  /**
-   * 装载内置场景（id 同旧宿主：6 单段演示、7 多段长文）。zoom 是密度，不是倍数。
-   * @param id 场景号
-   * @param zoom 密度（设备像素 / 磅），不是倍数
-   */
-  loadScenario(id: number, zoom?: number): Promise<unknown>;
-
-  /**
-   * 回到默认场景。
-   * @param id 场景号，默认 6
-   * @param zoom 密度，默认沿用引擎当前值
-   */
-  reset(id?: number, zoom?: number): Promise<unknown>;
-
-  /**
-   * 造 N 段、每段 M 字的压力文档（整篇同一个字）。
-   * @param paras 段数
-   * @param chars 每段字数
-   */
-  stress(paras: number, chars: number): Promise<unknown>;
-
-  /**
-   * 同上，但每段字不同；量字形缓存要用它，否则全命中失真。
-   * @param paras 段数
-   * @param chars 每段字数
-   */
-  stressDiverse(paras: number, chars: number): Promise<unknown>;
-
-  /**
-   * 表单样例（控件区间与只读标记都在里面）。
-   * @param variant 样例档位（0 单字段、2 相邻、3 嵌套）
-   */
-  loadFormSample(variant?: number): Promise<unknown>;
-
-  /**
-   * 病历样例：读 assets/samples/medical-records.md，清洗后按段落建文档。
-   * @param repeat 正文重复几遍
-   */
-  loadMedicalSample(repeat?: number): Promise<unknown>;
+  // 光标与相位：装载归宿主（样例与 .json 夹具），诊断面只管测量
 
   /**
    * 把焦点放回承接层：装载之后要让真实键盘能打进文档。
@@ -1785,12 +1745,6 @@ export interface Diag {
    * 在途的命中都回来才 resolve。
    */
   dragSettled(): Promise<void>;
-
-  /**
-   * 整批重建控件（区间树的父子关系是全局性质，只能整棵换）。
-   * @param list 每个控件的区间与属性
-   */
-  setFormControls(list: Array<{ start: number; end: number; kind?: number; id?: string; ro?: boolean }>): Promise<unknown>;
 
   // 光标与相位：复现手势、定格一帧
 

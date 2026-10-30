@@ -40,7 +40,7 @@
 #include "core/text/shaper.h"
 #include "core/utils/hash.h"
 #include "core/utils/units.h"
-#include "demo/demo_documents.h"
+#include "fixtures/doc_fixtures.h"
 
 #include "block_compare.h"
 
@@ -50,6 +50,7 @@
 
 using namespace heditor;
 using heditor::doc::Doc;
+using heditor::fixtures::DemoFieldSpec;
 using testcmp::blockDiff;
 using testcmp::sameBlock;
 
@@ -346,7 +347,7 @@ std::vector<DemoFieldSpec> toDemoFields(const std::vector<Control>& list) {
 void loadBlocks(EditorEngine& e, const std::vector<BlockSpec>& blocks,
                 const std::vector<Control>& controls) {
     g_last_blocks[&e] = blocks;
-    e.setDocument(demoDoc(blocks, toDemoFields(controls)), StyleSheet{});
+    e.setDocument(fixtures::demoDoc(blocks, toDemoFields(controls)), StyleSheet{});
 }
 
 /**
@@ -359,7 +360,7 @@ void loadControls(EditorEngine& e, const std::vector<Control>& controls) {
     std::vector<BlockSpec> blocks;
     const auto it = g_last_blocks.find(&e);
     if (it != g_last_blocks.end()) blocks = it->second;
-    e.setDocument(demoDoc(blocks, toDemoFields(controls)), StyleSheet{});
+    e.setDocument(fixtures::demoDoc(blocks, toDemoFields(controls)), StyleSheet{});
     e.relayout();
 }
 
@@ -4724,7 +4725,7 @@ int main() {
         EngineConfig ec;
         ec.density = 1.0f;
         e.setConfig(ec);
-        e.setDocument(demoDoc(bl, fd), StyleSheet{});
+        e.setDocument(fixtures::demoDoc(bl, fd), StyleSheet{});
         e.setEditMode(EditMode::Form);
         e.relayout();
         auto textOf = [&]() {
@@ -4833,7 +4834,7 @@ int main() {
         // 两次回车的落点都必须"落在闭括号之内"（侧别 0），否则回车本身就被策略据掉；
         //   退格那一步的侧别两种都试 —— 它是"段首有没有那枚边界"的直接触发点。
         for (int s3 = 0; s3 <= 1; ++s3) {
-            e2.setDocument(demoDoc(bl, fd), StyleSheet{});
+            e2.setDocument(fixtures::demoDoc(bl, fd), StyleSheet{});
             e2.setEditMode(EditMode::Form);
             e2.relayout();
             e2.setCaretAtSide(0, 11, 0);
@@ -4886,7 +4887,7 @@ int main() {
         ec3.density = 1.0f;
         e3.setConfig(ec3);
         auto reload = [&]() {
-            e3.setDocument(demoDoc(bl, fd), StyleSheet{});
+            e3.setDocument(fixtures::demoDoc(bl, fd), StyleSheet{});
             e3.setEditMode(EditMode::Form);
             e3.relayout();
         };
@@ -4987,7 +4988,7 @@ int main() {
         ec4.density = 1.0f;
         e4.setConfig(ec4);
         auto reload4 = [&]() {
-            e4.setDocument(demoDoc(bl, fd), StyleSheet{});
+            e4.setDocument(fixtures::demoDoc(bl, fd), StyleSheet{});
             e4.setEditMode(EditMode::Document);
             e4.relayout();
         };
@@ -5126,7 +5127,7 @@ int main() {
             EngineConfig ec5;
             ec5.density = 1.0f;
             e5.setConfig(ec5);
-            e5.setDocument(demoDoc(b5, f5), StyleSheet{});
+            e5.setDocument(fixtures::demoDoc(b5, f5), StyleSheet{});
             e5.setEditMode(EditMode::Form);
             e5.relayout();
 
@@ -5166,7 +5167,7 @@ int main() {
             EngineConfig ec6;
             ec6.density = 1.0f;
             e6.setConfig(ec6);
-            e6.setDocument(demoDoc(b6, f6), StyleSheet{});
+            e6.setDocument(fixtures::demoDoc(b6, f6), StyleSheet{});
             e6.setEditMode(EditMode::Form);
             e6.relayout();
             expectTrue(e6.setControlProp(0, ControlProp::Hidden, true),
@@ -5183,7 +5184,7 @@ int main() {
             tail.eo = 6;
             tail.key = "k6b";
             f6b.push_back(tail);
-            e6.setDocument(demoDoc(b6, f6b), StyleSheet{});
+            e6.setDocument(fixtures::demoDoc(b6, f6b), StyleSheet{});
             e6.setEditMode(EditMode::Form);
             e6.relayout();
             expectTrue(e6.setControlProp(0, ControlProp::Hidden, true), "可见性：再隐藏一次 BB");
@@ -5227,7 +5228,7 @@ int main() {
         ec5.density = 1.0f;
         e5.setConfig(ec5);
         auto reload5 = [&]() {
-            e5.setDocument(demoDoc(bl, fd), StyleSheet{});
+            e5.setDocument(fixtures::demoDoc(bl, fd), StyleSheet{});
             e5.setEditMode(EditMode::Document);
             e5.relayout();
         };
@@ -5328,7 +5329,7 @@ int main() {
             EngineConfig ec6;
             ec6.density = 1.0f;
             e6.setConfig(ec6);
-            e6.setDocument(demoDoc(bl2, fd2), StyleSheet{});
+            e6.setDocument(fixtures::demoDoc(bl2, fd2), StyleSheet{});
             e6.setEditMode(EditMode::Document);
             e6.relayout();
             expectTrue(e6.controls().size() == 2, "两个字段紧挨着（甲、乙各一个）");
@@ -5372,7 +5373,7 @@ int main() {
             EngineConfig ec7;
             ec7.density = 1.0f;
             e7.setConfig(ec7);
-            e7.setDocument(demoDoc(bl3, fd3), StyleSheet{});
+            e7.setDocument(fixtures::demoDoc(bl3, fd3), StyleSheet{});
             e7.setEditMode(EditMode::Document);
             e7.relayout();
             expectTrue(e7.controls().size() == 2, "两个字段（一个套在另一个里）");
@@ -5493,7 +5494,7 @@ int main() {
         c36.density = 1.0f;
         c36.undo_limit = 3;
         e36.setConfig(c36);
-        e36.setDocument(demoDoc(bl36, {}), StyleSheet{});
+        e36.setDocument(fixtures::demoDoc(bl36, {}), StyleSheet{});
         e36.setEditMode(EditMode::Document);
         e36.relayout();
         expectTrue(e36.config().undo_limit == 3, "配置里的上限是 3（装载之前就设好了）");
@@ -5545,7 +5546,7 @@ int main() {
         c37.page.width_pt = 200.0f;
         c37.page.margins = PageMargins::all(20.0f);
         e37.setConfig(c37);
-        e37.setDocument(demoDoc(bl37, {}), StyleSheet{});
+        e37.setDocument(fixtures::demoDoc(bl37, {}), StyleSheet{});
         e37.setEditMode(EditMode::Document);
         e37.relayout();
 
@@ -5692,7 +5693,7 @@ int main() {
             bl[0].setText("零一二三四五六七八九十");
             bl[1].setText("甲乙丙丁戊己庚辛壬癸");
             bl[2].setText("子丑寅卯");
-            e.setDocument(demoDoc(bl, {}), StyleSheet{});
+            e.setDocument(fixtures::demoDoc(bl, {}), StyleSheet{});
             e.setEditMode(EditMode::Document);
             e.relayout();
         };
@@ -5888,7 +5889,7 @@ int main() {
             bl[0].setText("零一二三四五六七八九十");
             bl[1].setText("甲乙丙丁戊己庚辛壬癸");
             bl[2].setText("子丑寅卯");
-            e.setDocument(demoDoc(bl, {}), StyleSheet{});
+            e.setDocument(fixtures::demoDoc(bl, {}), StyleSheet{});
             e.setEditMode(EditMode::Document);
             e.relayout();
         };

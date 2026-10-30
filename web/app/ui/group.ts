@@ -4,18 +4,28 @@
 //   所以"加一个组"只需要给一份描述，不需要在这里加分支。
 import { createButton } from './button';
 import { createChoice } from './choice';
+import { createDropdown } from './dropdown';
 import { createMenu } from './menu';
 import { createStack } from './stack';
-import { isChoice, isMenu, isStack, type Component, type Group, type Item } from './types';
+import {
+  isChoice,
+  isDropdown,
+  isMenu,
+  isStack,
+  type Component,
+  type Group,
+  type Item,
+} from './types';
 
 /**
- * 造一项（按钮 / 下拉框 / 竖排按钮列）。
+ * 造一项（按钮 / 下拉框 / 竖排按钮列 / 下拉菜单 / 面板按钮）。
  * @param item 描述
  * @returns 组件
  */
 function makeItem(item: Item): Component {
   if (isStack(item)) return createStack(item);
   if (isChoice(item)) return createChoice(item);
+  if (isDropdown(item)) return createDropdown(item);
   if (isMenu(item)) return createMenu(item);
   return createButton(item);
 }

@@ -132,4 +132,70 @@ test.describe('弹窗与控件层', () => {
     const p2 = await pct();
     check('方向键退一档', parseInt(p2, 10) < parseInt(p1, 10), p1 + ' → ' + p2);
   });
+
+  test('功能区：三个页签都是一行高，下拉开在按钮下面且键盘归菜单', async ({ open }) => {
+    // 这条挡的是"往组里塞一个长竖排栈"：项行的设计高度是 56（大按钮 54 + 间隔），
+    //   栈只有两个时才与它同高。多出来的项不会溢出，而是把整条功能区顶高 ——
+    //   页面顶部多出上百像素的空白，按钮却还浮在中间。量高度是唯一能发现它的办法。
+    const p = await open('index.html', { query: { debug: '1' } });
+
+    const rows = await p.read<any>(`
+      const tabs = [...document.querySelectorAll('.heditor-ribbon__tab')];
+      const out = [];
+      for (const t of tabs) {
+        t.click();
+        const pane = document.querySelector('.heditor-ribbon__pane--active');
+        const items = [...pane.querySelectorAll('.heditor-ribbon__items')];
+        const heights = items.map((el) => +el.getBoundingClientRect().height.toFixed(1));
+        out.push({
+          tab: t.textContent,
+          max: heights.length ? Math.max(...heights) : 0,
+          ribbon: +document.querySelector('.heditor-ribbon').getBoundingClientRect().height.toFixed(1),
+        });
+      }
+      return out;`);
+    for (const r of rows) {
+      check(`★ 页签「${r.tab}」的项行不超过一行的高度`, r.max <= 57, `${r.max} px`);
+      check(`页签「${r.tab}」的功能区不超过 120 px`, r.ribbon <= 120, `${r.ribbon} px`);
+    }
+    // 切页签不该让文档上下跳：项数不一样，高度钉住才有这个效果。
+    const spread = Math.max(...rows.map((r: any) => r.ribbon)) - Math.min(...rows.map((r: any) => r.ribbon));
+    check('切页签时功能区高度不变', spread <= 1, spread + ' px');
+
+    // 下拉：开在按钮下面、键盘归它、Esc 收起并把焦点还回编辑器。
+    await p.page.locator('.heditor-ribbon__tab').first().click();
+    const btn = p.page.locator('.heditor-ribbon__button[data-act="sample"]');
+    await btn.click();
+    const menu = p.page.locator('.heditor-menu:not([hidden])');
+    await expect(menu).toBeVisible();
+    const bb = await btn.boundingBox();
+    const mb = await menu.boundingBox();
+    check('★ 下拉开在按钮下面（左右对齐，纵向贴着按钮底边）',
+      bb !== null && mb !== null &&
+        Math.abs(mb.x - bb.x) <= 2 && mb.y >= bb.y + bb.height - 1 && mb.y <= bb.y + bb.height + 8,
+      JSON.stringify({ btn: bb, menu: mb }));
+    check('菜单里是五份样例',
+      (await menu.locator('.heditor-menu__item').count()) === 5,
+      String(await menu.locator('.heditor-menu__item').count()));
+
+    const focusIn = await p.read<boolean>(
+      'return document.activeElement !== null && document.activeElement.closest(".heditor-menu") !== null;');
+    check('★ 菜单开着时焦点在菜单上（否则方向键会去挪正文光标）', focusIn === true, String(focusIn));
+
+    // 键盘走一项：高亮从第一项挪到第二项。
+    const activeBefore = await p.read<string | null>(`
+      const el = document.querySelector('.heditor-menu__item--active');
+      return el ? el.dataset.act || null : null;`);
+    await p.page.keyboard.press('ArrowDown');
+    const activeAfter = await p.read<string | null>(`
+      const el = document.querySelector('.heditor-menu__item--active');
+      return el ? el.dataset.act || null : null;`);
+    check('★ 方向键在菜单里走一项', activeBefore !== activeAfter,
+      `${activeBefore} → ${activeAfter}`);
+
+    await p.page.keyboard.press('Escape');
+    await expect(menu).toBeHidden();
+    const back = await p.read<string>(`return document.activeElement?.className || '';`);
+    check('Esc 收起之后焦点回到编辑器的承接层', back === 'heditor-ime', back);
+  });
 });

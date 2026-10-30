@@ -3,6 +3,7 @@
 // 分成"描述"与"组件"两半的理由：动作表要能单独读（它是这一页能做什么的清单），
 //   而组件只管把描述变成元素与回显。两半混在一起时，加一个按钮要同时改 DOM、
 //   事件与状态刷新三处，改错一次就是"按钮点得动但回显不动"。
+import type { MenuEntry } from './context-menu';
 
 /**
  * 一个按钮。
@@ -135,9 +136,57 @@ export interface Menu {
 }
 
 /**
+ * 下拉菜单按钮：按下去在它下面弹出一列动作。
+ *
+ * 与 Menu 的分工：Menu 弹的是一块"要看着挑"的版面（页面设置的表单、表格尺寸的网格），
+ *   Dropdown 弹的是一列点一条就走一条的动作 —— 与右键菜单共用同一份实现，所以键盘走向、
+ *   Esc、贴边夹取都不必在这里再写一遍。
+ *
+ * 为什么不是 Stack：栈是"并排摆着随时点"，数量一多就把整条功能区顶高（栈的合理长度是
+ *   两个，正好与大按钮同高）；而下拉是一列，多长都不占版面。
+ */
+export interface Dropdown {
+  /**
+   * 稳定标识（同上）。
+   */
+  act: string;
+
+  /**
+   * 按钮的名字（大按钮显示在图标下面）。
+   */
+  label: string;
+
+  /**
+   * 图标名（同上）。
+   */
+  icon?: string;
+
+  /**
+   * 大按钮（同上）。
+   */
+  big?: boolean;
+
+  /**
+   * 回显：返回真表示"按下了"。
+   */
+  on?(): boolean;
+
+  /**
+   * 打开那一刻的动作清单（每次打开都重读：清单里的勾选态可能是现算的）。
+   * @returns 一列动作
+   */
+  entries(): MenuEntry[];
+
+  /**
+   * 菜单关掉之后做什么（把键盘交回编辑器）。
+   */
+  closed?(): void;
+}
+
+/**
  * 组里的一项。
  */
-export type Item = Button | Choice | Stack | Menu;
+export type Item = Button | Choice | Stack | Menu | Dropdown;
 
 /**
  * 一组同类动作（组名显示在组的下面）。
@@ -275,4 +324,13 @@ export function isStack(item: Item): item is Stack {
  */
 export function isMenu(item: Item): item is Menu {
   return typeof (item as Menu).panel === 'function';
+}
+
+/**
+ * 是不是下拉菜单按钮。
+ * @param item 组里的一项
+ * @returns 真 = 弹一列动作
+ */
+export function isDropdown(item: Item): item is Dropdown {
+  return typeof (item as Dropdown).entries === 'function';
 }

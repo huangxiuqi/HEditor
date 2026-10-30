@@ -1191,6 +1191,19 @@ Doc adopt(Ref root, NodeId next_id);
 Doc makeTextDoc(const std::vector<std::u32string>& paragraphs);
 
 /**
+ * 同上，但每段的段落标记挂一份内联格式。
+ *
+ * 宿主"打开纯文本"要的不是一串裸段落：字体、字号、行距、语言都决定怎么排。这些属性只能
+ * 挂在段落标记上（段落格式的来源就是它），所以建文档时一次给全 —— 建完再逐段
+ * applyParaFormat 等于把同一件事做两遍，而中间那一拍是没有任何格式的文档。
+ *
+ * @param paragraphs 每段一份码点序列
+ * @param para 每一段的段落格式（内联覆盖）
+ * @return 一份修订
+ */
+Doc makeTextDoc(const std::vector<std::u32string>& paragraphs, const ParaFormatPatch& para);
+
+/**
  * 段落数（等于流里段落标记的个数，含控件内部的标记）。
  *
  * 直接读根的 paras。现数一遍的写法在 locate 的循环里就是 O(段数 × 每段节点数)——

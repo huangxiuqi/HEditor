@@ -629,11 +629,6 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
   const PAGE_TOUCHING = new Set([
     'loadDocument',
     'textDoc',
-    'scenario',
-    'stress',
-    'stressDiverse',
-    'formSample',
-    'reset',
     'undo',
     'redo',
     'pageSetup',
@@ -663,6 +658,8 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
    * reveal = "把光标滚进视野"。它只属于"我要看这个位置"的那几个入口（程序化定位、
    *   行首行尾、文档首尾）；选区类（select / selectAll / clearSelection）不做 ——
    *   选区可以在任何地方，把视口拽到焦点端是另一回事。
+   *   "不做"不等于"不管"：位置仍要记进滚动判据的基线，否则该位移会被下一条命令消费
+   *   （见下面的 if 分支）。
    */
   const caretOp = (name: string, args?: Args, reveal = false): Promise<void> => {
     alive();
@@ -673,6 +670,10 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
           // 与宿主 afterEdit 同一口径：滚动要先把位置交给引擎（可能换窗），收尾再按
           //   新窗口建画布 —— 顺序颠倒就是"这一拍贴的是旧窗口那几页"。
           if (!reveal) {
+            // 位置要记进这一拍的基线（只记账，不滚）：不记的话该位移会留给下一条命令
+            //   去消费 —— 全选之后改一次段落格式，afterEdit 拿文首的旧基线比文末的光标，
+            //   判成"光标挪了"并把视口拽到文末，中间那一下是白跳的。
+            dom.noteCaret(stats as never);
             dom.finish(stats as never);
             return undefined;
           }
@@ -1637,7 +1638,7 @@ export async function createEditor(opts: EditorOptions): Promise<Editor> {
       if (!opts.debug) {
         throw new TypeError('diag 只在 createEditor({ debug: true }) 时可用');
       }
-      return makeDiag(link, dom, assets, pageErrors, () => syncConfigFromEngine(link, config, dom.zoom));
+      return makeDiag(link, dom, pageErrors, () => syncConfigFromEngine(link, config, dom.zoom));
     },
   };
 

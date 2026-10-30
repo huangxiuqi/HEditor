@@ -73,7 +73,7 @@ export async function openEdit(
  */
 export async function resetAndGetFullBaseline(probe: ProbePage) {
   return probe.read(`
-    const s = await LOAD.reset(6, ${ZOOM});
+    const s = await LOAD.short();
     await D.stopBlink();
     return s;`);
 }

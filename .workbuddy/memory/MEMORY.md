@@ -39,6 +39,10 @@
 - web（wasm）主线，native 只当单测宿主；判据必须含反向一半；改帧的入口必须是命令。数据流：
   修订 → `blocks_` → `layout_` → 页位图 → 画布；光标真源 `Range selection_`，写入口 `setCaretRel`。
 - 块流只有一份；脏区必须带右端；后缀复用只重排 `[from, from+count)`；`blocks_` 不是块流真源。
+- 样例文档归宿主（`web/app/samples`，全用公开方法搭），判据跑同一段代码（`window.__samples`,
+  可用 `settled()` 等它落地）；结构固定的夹具是 `assets/samples/fixtures/*.json` + `open()`。
+  C++ 侧既没有"载入场景"入口也不放样例正文（wasm 只链 core）；`tests/fixtures/doc_fixtures.h`
+  只管"块流 + 字段 → 修订"，只进测试二进制。
 - 页指纹混行盒指纹与 `controlPaintDigest`；`rasterSignature` 管档位/底色/缩放/资源代际。
   行指纹必须含"画的时候才用到"的行盒字段（`clip_text`、`advance_pt`、`lead_top_pt`），
   漏一项就是「改完行距命令成功、画面不动」（TRAPS 232，同族 195）。覆盖层的**配色**

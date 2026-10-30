@@ -41,9 +41,16 @@ export function mountChrome(host: HTMLElement, title: string, tabs: Tab[]): Chro
    * 按钮自己不抢焦点（见 button.ts），但下拉框必须拿到焦点才能展开 —— 选完焦点留在
    *   那个 select 上，之后敲字与快捷键就全落进它肚子里。所以外壳这一层统一补一次：
    *   组件不认实例，只认"动作做完该回到哪"。
+   *
+   * 例外是菜单：右键菜单与工具条上的下拉开着时，焦点归它（键盘上下与回车在那份实现里）。
+   *   抢回来的话菜单看着是开的，方向键却把正文的光标挪走了 —— 同一下按键两处都响应。
+   *   菜单关掉时自己会把键盘还回来（Dropdown 的 closed、右键菜单的 onClose）。
    */
   const refocus = (): void => {
-    if (editor) editor.focus();
+    if (!editor) return;
+    const active = document.activeElement;
+    if (active instanceof Element && active.closest('.heditor-menu') !== null) return;
+    editor.focus();
   };
   ribbon.el.addEventListener('click', (ev) => {
     // 点在"自己要拿焦点的控件"上时不能抢：原生下拉靠焦点展开，一抢就"点开就收回去"，

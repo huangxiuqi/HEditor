@@ -279,7 +279,7 @@ test.describe('编辑面：选区与样式', () => {
     // 本节自己钉住缩放：坐标换算读的是实时的实际缩放（自洽），但 (i) 那一节还依赖
     //   "文档有多高"（自动滚动要跑得够久），那是缩放决定的。不钉住的话，前一节把
     //   缩放留在别的值上，这一节就在另一种高度下跑，红项看起来像拖选坏了。
-    await probe.read(`return await LOAD.reset(6, ${ZOOM});`);
+    await probe.read(`return await LOAD.short();`);
     await probe.read('return await D.stopBlink();');
 
     const DOC20 = '零一二三四五六七八九十';
@@ -420,7 +420,7 @@ test.describe('编辑面：选区与样式', () => {
               JSON.stringify(s20f));
 
     // (i) 拖出可视区：指针停在容器下缘之外，容器自己滚起来、选区继续长
-    await probe.read('await LOAD.stress(200, 20); return true;');
+    await probe.read('await LOAD.bulk(200, 20); return true;');
     // 显式回到文档顶部：这一节要的是"往下还有得滚"，视口停在哪一层不该由前面的节决定。
     await probe.read('EL(".heditor-stage").scrollTop = 0; return true;');
     await sleep(250);
@@ -495,7 +495,7 @@ test.describe('编辑面：选区与样式', () => {
     //   Chrome 用它自己的按钮状态覆盖那个字段（实测读到的还是 1，于是那条移动把选区
     //   又扩了一格）。被测的只是"onMove 读到按钮已抬起就收尾"这一条，
     //   坐标换算与命中都不在它里面，所以合成事件在这里是恰当的刺激而不是绕过接线。
-    await probe.read('await LOAD.stress(200, 20); return true;');
+    await probe.read('await LOAD.bulk(200, 20); return true;');
     await probe.read('EL(".heditor-stage").scrollTop = 0; return true;');
     await sleep(250);
     await probe.read('await H.setCaret({ para: 0, offset: 0 }); return true;');
@@ -612,8 +612,8 @@ test.describe('编辑面：选区与样式', () => {
     //   判据恒红。换文档是保证这一拍真的是整篇重排重绘的唯一稳当办法。
     const fullPix = await probe.read(`
       await CARET_STYLE({ color: [31, 111, 235, 255] });
-      await LOAD.scenario(7, ${ZOOM});
-      const s = await LOAD.scenario(6, ${ZOOM});
+      await LOAD.long();
+      const s = await LOAD.short();
       return s.repaintedPixels;`);
     // 分母是窗口内几页的像素，不是整个帧：帧按页号分槽之后帧高 = 槽数 x 步距，
     //   槽数可以多于窗口页数（多出来的是空槽，永远不写），拿 frameArea 当分母会让这条
@@ -649,6 +649,9 @@ test.describe('编辑面：选区与样式', () => {
     //   而"存下来但没画"正是这类参数最常见的失败方式。
     const caretArea = async (w: any) => probe.read(`
       await CARET_STYLE({ color: [0, 128, 0, 255], widthPt: ${w} });
+      // 改档之后先让流水线空一次：上屏是 Worker 贴完才在主线程可见的，连着跑两次读数
+      //   时头一次可能还停在上一档的位图上（负载高时尤其），量出来的是旧宽度。
+      await H.flush();
       const F = await PIX();
       const f = F.data;
       let n = 0;

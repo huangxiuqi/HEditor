@@ -125,9 +125,15 @@ test.describe('工具栏', () => {
       btn('all').click();
       out.all = await until(() => !e.selection().empty && e.selection().rects.length > 0);
 
-      // 文档：载入示例 / 保存。
-      btn('load').click();
-      out.load = await until(() => e.text().includes('HEditor 示例文档'));
+      // 文档：示例是下拉（点开是一列样例，见 app/samples/）/ 保存。
+      //   按钮只负责开菜单、菜单里点中某一项才换文档 —— 两步都要有反应。
+      btn('sample').click();
+      out.sampleMenu = await until(() => document.querySelector('[data-act="sample-prose"]') !== null);
+      const pickSample = document.querySelector('[data-act="sample-prose"]');
+      if (pickSample instanceof HTMLElement) pickSample.click();
+      out.sample = await until(() => e.text().includes('HEditor 示例文档'));
+      // 样例是几十条命令搭出来的：等它整份落地再往下点，否则"保存"会撞在装载中间。
+      await window.__samples.settled();
       btn('save').click();
       out.save = await until(() => status().includes('字节'));
       // 保存提醒是页面自己的开关，默认关：按一下要真的翻过去（探针读它那份状态）。
@@ -274,7 +280,7 @@ test.describe('工具栏', () => {
 
     const want = [
       'paste', 'copy', 'cut', 'font', 'size', 'grow', 'shrink', 'bold', 'italic', 'underline',
-      'color', 'line', 'after', 'indent', 'outdent', 'undo', 'redo', 'all', 'load', 'save',
+      'color', 'line', 'after', 'indent', 'outdent', 'undo', 'redo', 'all', 'sample', 'sampleMenu', 'save',
       'type', 'tablePanel', 'table', 'field', 'fieldCaret', 'fieldCaretMoves', 'modeReadOnly',
       'modeRejects', 'modeBack', 'countsGrow', 'pagesMatch', 'countsSpace', 'marginMarks',
       'marginMarksRedraw',

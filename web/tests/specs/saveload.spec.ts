@@ -39,8 +39,9 @@ test.describe('保存与打开', () => {
 
     await test.step('存出来的是一份文档', async () => {
       stored = await p.read<Snapshot>(`
-        const e = window.__demo, d = e.diag;
-        await d.reset(6, 1.5);
+        const e = window.__demo;
+        await e.open(await (await fetch('/assets/samples/fixtures/scenario-6.json')).text());
+        await e.configure({ zoom: 1.5 });
         await e.type('保存');
         await e.type('测试');
         ${SNAP}`);

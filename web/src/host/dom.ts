@@ -292,6 +292,17 @@ export interface DomHost {
   scrollCaretIntoView(st?: any, reveal?: boolean): Maybe<boolean>;
 
   /**
+   * 把这一拍的光标记成"滚动判据的基线"，但不动视口也不对窗口。
+   *
+   * 给"只挪光标、不该滚"的那几条命令用（选区类：select / selectAll / clearSelection）。
+   *   不记的话那次位移会留给下一条命令去消费：全选之后改一次段落格式，afterEdit 拿文首
+   *   的旧基线比文末的光标，判成"挪了"并把视口拽到文末。
+   * 与 scrollCaretIntoView(st, false) 的区别是它还会 pages.sync 一遍；这里只记账。
+   * @param st 这一拍的账；不传就现读
+   */
+  noteCaret(st?: any): void;
+
+  /**
    * 把滚动位置归零（引擎换过文档时它自己已经把滚动位置清了，宿主跟着追平）。
    */
   resetScroll(): void;
@@ -501,10 +512,32 @@ export function createDomHost(o: DomHostOptions): DomHost {
   const view = (): HostView => link.geom();
 
   /**
-   * 光标的位置是否挪了（段、偏移、侧别、行别、页）。
+   * 光标在文本流里是否挪了（段、偏移、侧别）。
    *
-   * 侧别与行别不能省：相邻控件边界上段号与偏移会重合（两侧括号之间挪一格），少了侧别
-   * 输入法候选框不跟；折行处上下换行时前三项都相同，少了行别同样判成没动。
+   * 滚动只认这三个字段，其余都是排版给的：页会随"文档变长"而变，行别会随"折行位置变了"
+   *   而翻 —— 改一次行距，两者都可能变，而光标在文档里一步没动。少这一层，切样例时
+   *   "全选 + 改行距"就会把视口拽到文末（8 页的样例从第 6 页跑到第 8 页，
+   *   afterEdit 判成"挪了"，于是滚过去）。
+   * 侧别要留：相邻控件边界上段号与偏移会重合（两侧括号之间挪一格），那一步真的换了位置。
+   * @param a 上一次读数；空表示还没读过
+   * @param b 这一次读数；空表示文档已卸载
+   * @returns 位置是否变了
+   */
+  function caretsMovedInText(a: any, b: any): boolean {
+    if (!a || !b) return a !== b;
+    return (
+      a.caretPara !== b.caretPara ||
+      a.caretOffset !== b.caretOffset ||
+      a.caretSide !== b.caretSide
+    );
+  }
+
+  /**
+   * 光标的位置是否挪了：文本流位置再加行别与页。
+   *
+   * 行别与页只进这一份、不进滚动那一份（见 caretsMovedInText）：折行处上下换行时前三项
+   *   都相同，少了行别输入法候选框就不跟；换了页同理。但那两样都不代表用户移动了光标，
+   *   视口不该跟着跑。字段表只在 caretsMovedInText 里有一份，这两项各在各自那一层加。
    * @param a 上一次读数；空表示还没读过
    * @param b 这一次读数；空表示文档已卸载
    * @returns 位置是否变了
@@ -512,11 +545,7 @@ export function createDomHost(o: DomHostOptions): DomHost {
   function caretRelocated(a: any, b: any): boolean {
     if (!a || !b) return a !== b;
     return (
-      a.caretPara !== b.caretPara ||
-      a.caretOffset !== b.caretOffset ||
-      a.caretSide !== b.caretSide ||
-      a.caretLineAff !== b.caretLineAff ||
-      a.caretPage !== b.caretPage
+      caretsMovedInText(a, b) || a.caretLineAff !== b.caretLineAff || a.caretPage !== b.caretPage
     );
   }
 
@@ -525,7 +554,8 @@ export function createDomHost(o: DomHostOptions): DomHost {
    *
    * 两处消费者要的不是同一个答案，所以分成两个函数而不是两个调用点各写一遍：发不发
    * caret 事件看相位（隐藏的那一拍也要通知宿主），滚不滚视口只看位移（按相位滚会让
-   * 光标每闪一下就把视口拽回原处）。字段表只在 caretRelocated 里有一份。
+   * 光标每闪一下就把视口拽回原处）。字段表只在 caretsMovedInText 里有一份，页与相位
+   * 各在各自那一层加。
    * @param a 上一次读数
    * @param b 这一次读数
    * @returns 是否算换了落点
@@ -732,10 +762,11 @@ export function createDomHost(o: DomHostOptions): DomHost {
       //   上一次编辑所在的那一页 —— 看起来就是"点一下页面乱跳、光标不见了"。
       // 光标没动就别滚（见 scrollCaretIntoView 的 reveal）：搬图、改格式、提交表单
       //   都不挪光标，而这时视口停在用户自己滚到的位置。
-      // 这里用 caretRelocated 而不是 caretMoved：相位翻转不是挪动，按它滚会让光标每闪
-      //   一下就把视口拽回原处。比较对象是 lastState —— scrollCaretIntoView 上一次的
-      //   读数，与 finish 里那份不是同一拍。
-      const relocated = caretRelocated(lastState, s);
+      // 这里用 caretsMovedInText 而不是 caretRelocated：行别与页都是排版给的，改一次格式
+      //   就可能翻（文档变长换页、折行位置变了换行别），按它们滚等于"改一次行距，视口
+      //   跳到文末"。相位同理不算（按相位滚会让光标每闪一下就把视口拽回原处）。
+      //   比较对象是 lastState —— scrollCaretIntoView 上一次的读数，与 finish 里那份不是同一拍。
+      const relocated = caretsMovedInText(lastState, s);
       // 滚动与收尾之间还要等一次视口消息：滚动之后引擎可能得换窗，而 finish 是按
       //   "引擎这一刻的窗口"建画布、贴页的。不等的话这一拍贴的是旧窗口那几页，
       //   新窗口要等下一拍 —— 连续粘贴时就是每一拍都落后一点，越粘差距越大。
@@ -1630,6 +1661,13 @@ export function createDomHost(o: DomHostOptions): DomHost {
       return false;
     },
     scrollCaretIntoView,
+    /**
+     * 只把滚动判据的基线挪到这一拍（见接口处的说明）：不改视口、不对窗口。
+     * @param st 这一拍的账；不传就现读
+     */
+    noteCaret(st?: any): void {
+      lastState = st ?? link.read('editStats');
+    },
     resetScroll: applyScrollReset,
     blitStats,
     startBlink: () => resetBlink(),

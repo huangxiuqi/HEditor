@@ -299,7 +299,7 @@ test.describe('编辑面：基准与键盘', () => {
     //
     //   为什么偏偏是 f：liga 连字表里 ff / fi / fl / ffi / ffl 全是以 f 开头的，
     //   而中文测试一个都盖不到 —— 这正是这个 bug 能活到现在的原因。
-    await probe.read(`await LOAD.reset(6, ${ZOOM}); await D.stopBlink(); return true;`);
+    await probe.read(`await LOAD.short(); await D.stopBlink(); return true;`);
     await probe.read('await H.setCaret({ para: 0, offset: 0 }); return true;');
 
     const b = await probe.read(CP_LEN + 'return cplen(H.paragraph(0));');
@@ -344,7 +344,7 @@ test.describe('编辑面：基准与键盘', () => {
               `${d.n} → ${fwd.n}，offset=${fwd.o}`);
 
     // 收尾：把文档恢复成 reset 后的原样，后面几节才不会被这一节带偏
-    await probe.read(`await LOAD.reset(6, ${ZOOM}); await D.stopBlink(); return true;`);
+    await probe.read(`await LOAD.short(); await D.stopBlink(); return true;`);
     const restored = await probe.read(CP_LEN + 'return cplen(H.paragraph(0));');
     check('收尾：文档已恢复（后续小节的起点干净）', restored === Array.from(S6).length,
               `${restored} / ${Array.from(S6).length}`);
@@ -415,7 +415,7 @@ test.describe('编辑面：基准与键盘', () => {
     `);
 
     const resetTo = async () => probe.read(`
-      await LOAD.reset(6, ${ZOOM});
+      await LOAD.short();
       await H.setCaret({ para: 0, offset: ${AT} });
       return true;`);
 

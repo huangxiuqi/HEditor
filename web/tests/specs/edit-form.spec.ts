@@ -149,7 +149,7 @@ test.describe('编辑面：表单控件', () => {
       //   这条数字同时钉死了"默认档 = 全部字段占位"：改回 Focused 档会变成 2 个槽。
       const expectSlots = 6;
 
-      await probe.read(`await LOAD.reset(6, ${ZOOM}); await D.stopBlink(); return true;`);
+      await probe.read(`await LOAD.short(); await D.stopBlink(); return true;`);
       await probe.read('await D.present(); return true;');
       const base = await probe.read(lastInkLeft);
 

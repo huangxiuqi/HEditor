@@ -10,6 +10,7 @@
 //   grid-picker  表格尺寸的网格选择器
 //   page-setup   页面设置（纸张、方向、四边页边距）
 //   menu         会开面板的按钮
+//   dropdown     下拉菜单按钮（弹一列动作）
 //   layer        浮层（定位与关闭时机，popover 与右键菜单共用）
 //   popover      挂在按钮下面的弹层
 //   context-menu 数据驱动的多级菜单（右键菜单）
@@ -26,6 +27,7 @@
 export { mountChrome } from './chrome';
 export { createContextMenu, type ContextMenu, type MenuEntry } from './context-menu';
 export { createControlProps } from './control-props';
+export { createDropdown } from './dropdown';
 export { createGridPicker } from './grid-picker';
 export { createLayer, type Layer } from './layer';
 export { createPageSetup } from './page-setup';
@@ -33,4 +35,15 @@ export { createPropsPanel, type PropsPanel, type PropsPanelOptions } from './pro
 export { createSelect, selectOptions, type SelectOption } from './select';
 export { createSlider } from './slider';
 export { createTableProps } from './table-props';
-export type { Button, Choice, Chrome, Component, Group, Item, Menu, Stack, Tab } from './types';
+export type {
+  Button,
+  Choice,
+  Chrome,
+  Component,
+  Dropdown,
+  Group,
+  Item,
+  Menu,
+  Stack,
+  Tab,
+} from './types';

@@ -730,6 +730,10 @@ NodeSpec toSpec(const Node& node) {
 }
 
 Doc makeTextDoc(const std::vector<std::u32string>& paragraphs) {
+    return makeTextDoc(paragraphs, ParaFormatPatch{});
+}
+
+Doc makeTextDoc(const std::vector<std::u32string>& paragraphs, const ParaFormatPatch& para) {
     NodeId next = 1;
     std::vector<Ref> kids;
     for (const std::u32string& p : paragraphs) {
@@ -739,7 +743,7 @@ Doc makeTextDoc(const std::vector<std::u32string>& paragraphs) {
             for (char32_t c : p) cps.push_back(static_cast<uint32_t>(c));
             kids.push_back(runNode(next++, std::move(cps), CharFormat{}, std::string()));
         }
-        kids.push_back(makeNode(next++, NodeKind::ParagraphMark, MarkPayload{}, {}));
+        kids.push_back(makeNode(next++, NodeKind::ParagraphMark, MarkPayload{para, "", {}}, {}));
     }
     Ref section = makeNode(next++, NodeKind::Section, SectionSpec{}, std::move(kids));
     Ref root = makeNode(next++, NodeKind::Document, {}, {std::move(section)});

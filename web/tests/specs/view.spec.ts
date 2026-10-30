@@ -47,6 +47,40 @@ test.describe('缩放与滚动', () => {
     check('缩小之后窗口页数与总页数对得上（没有留下空窗）',
           r.zoomOut.win.count >= 1 && r.zoomOut.win.first >= 0, JSON.stringify(r.zoomOut.win));
   });
+
+  test('全选之后改段落格式，视口不跳到文末', async ({ open }) => {
+    // 这条钉的是"位置记账的时机"：全选把光标挪到文末但不滚（选区可以在任何地方），
+    //   若这一拍的位置不记下来，下一条命令（改格式）就会拿旧位置比新光标、判成"挪了"，
+    //   于是把视口拽到文末 —— 屏幕上就是"改个行距，页面自己翻到最后"。
+    const p = await open('index.html', { query: { debug: '1' }, viewport: { width: 1400, height: 900 } });
+    const r = await p.read<any>(`
+      const lines = [];
+      for (let i = 0; i < 200; i++) lines.push('第' + i + '段内容一二三四五六七八九十');
+      await H.setText(lines.join(String.fromCharCode(10)));
+      await H.flush();
+      const sc = EL('.heditor-stage');
+      sc.scrollTop = 800;
+      await new Promise((r) => setTimeout(r, 240));
+      const start = sc.scrollTop;
+      await H.selectAll();
+      await H.flush();
+      const afterAll = sc.scrollTop;
+      await H.paragraphFormat({ size: 12, spaceAfter: 6, lineSpacing: { rule: 'auto', factor: 1.4 } });
+      await H.flush();
+      const afterFmt = sc.scrollTop;
+      await H.setCaret({ para: 0, offset: 0 });
+      await H.flush();
+      const afterCaret = sc.scrollTop;
+      return { start, afterAll, afterFmt, afterCaret, pages: H.geometry().pages };`);
+    check('文档够长（多页，才谈得上"跳"）', r.pages > 3, r.pages + ' 页');
+    check('全选本身不搬视口', Math.abs(r.afterAll - r.start) <= 1, `${r.start} → ${r.afterAll}`);
+    check('★ 全选之后改段落格式，视口不动（不看那条旧位移）',
+      Math.abs(r.afterFmt - r.start) <= 1, `${r.start} → ${r.afterFmt}`);
+    // 反向一半：reveal 那条路没被一起关掉 —— 程序化定位到文首仍然把视口带回去。
+    //   落点不是 0 是有意的：滚进视野只保证光标离顶边留一段余量（见 scrollCaretIntoView）。
+    check('★ 程序化定位到文首仍然会滚（回到文首附近）',
+      r.afterCaret < r.start - 100 && r.afterCaret <= 100, `${r.start} → ${r.afterCaret}`);
+  });
 });
 
 test.describe('连页接缝', () => {

@@ -4,22 +4,11 @@
 //   TypeError，平时一条都不会被调用。类型对上不代表命令接通：diag 的每个成员都是
 //   "读一个命令 / 写一个命令 + 补收尾"，接错一个只会让探针读到 undefined。
 //
-// 十二节逐条对应旧 diag_probe：装载、控件表、光标与相位、字体与窗口、错误历史、
-//   页画布可见性、场景装载、SIMD 探测、多页点击、光标闪烁、console 错误。
+// 十节逐条对应旧 diag_probe：光标与相位、字体与窗口、错误历史、页画布可见性、
+//   文档大小与字形数、SIMD 探测、多页点击、光标闪烁、console 错误。
+// 装载不在这里：文档由样例（公开方法）或夹具（open）装，见 samples.spec。
 import { check } from '../support/check';
 import { test } from '../support/probe';
-
-// 装载与控件表一节的读数。
-type Loads = {
-  s6: { layoutWasFull?: boolean } | null | undefined;
-  p6: number;
-  s7: { layoutWasFull?: boolean } | null | undefined;
-  p7: number;
-  back: unknown;
-  pBack: number;
-  full6: boolean;
-  full7: boolean;
-};
 
 test.describe('诊断面', () => {
   test('debug 打开时 diag 每个成员都接通', async ({ page, open }) => {
@@ -42,62 +31,16 @@ test.describe('诊断面', () => {
       check('diag 成员数 > 40', r.keys > 40, String(r.keys));
     });
 
-    await test.step('二、装载', async () => {
-      const r = await p.ev<Loads>(`
-        const d = window.__demo.diag;
-        const s6 = await d.loadScenario(6, 1.5);
-        const p6 = window.__demo.paragraphs().length;
-        const s7 = await d.loadScenario(7, 1.5);
-        const p7 = window.__demo.paragraphs().length;
-        const back = await d.reset(6, 1.5);
-        const pBack = window.__demo.paragraphs().length;
-        return { s6, p6, s7, p7, back, pBack,
-                 full6: !!(s6 && s6.layoutWasFull), full7: !!(s7 && s7.layoutWasFull) };`);
-      check('loadScenario(6) 返回那一拍的账', r.full6 === true, String(r.p6));
-      check('场景 6 是短文档', r.p6 > 0 && r.p6 < 10, r.p6 + ' 段');
-      check('场景 7 是长文档', r.p7 >= 200, r.p7 + ' 段');
-      check('场景 7 首次排版是全量', r.full7 === true);
-      check('reset() 回到默认场景', r.pBack === r.p6, r.pBack + ' 对 ' + r.p6);
-
-      const stress = await p.ev<{ a: number; b: number }>(`
-        const d = window.__demo.diag;
-        await d.stress(300, 10);
-        const a = window.__demo.paragraphs().length;
-        await d.stressDiverse(200, 12);
-        const b = window.__demo.paragraphs().length;
-        return { a, b };`);
-      check('stress 造出 300 段', stress.a === 300, String(stress.a));
-      check('stressDiverse 造出 200 段', stress.b === 200, String(stress.b));
-
-      const sample = await p.ev<{ a: number; p: number }>(`
-        const d = window.__demo.diag;
-        await d.loadFormSample(0);
-        const a = window.__demo.form().length;
-        await d.loadMedicalSample(1);
-        const p = window.__demo.paragraphs().length;
-        return { a, p };`);
-      check('loadFormSample 装出了控件', sample.a > 0, String(sample.a));
-      check('loadMedicalSample 装出了病历（> 20 段）', sample.p > 20, sample.p + ' 段');
-    });
-
-    await test.step('三、整批建控件', async () => {
-      const r = await p.ev<{ n: number }>(`
-        const d = window.__demo.diag;
-        await d.setFormControls([
-          { start: 0, end: 3, kind: 0 },
-          { start: 5, end: 8, kind: 0, ro: true },
-        ]);
-        return { n: window.__demo.form().length };`);
-      check('setFormControls 换掉了控件表', r.n === 2, String(r.n));
-    });
-
-    await test.step('四、光标与相位', async () => {
+    await test.step('二、光标与相位', async () => {
       const r = await p.ev<{ at: { para: number; offset: number }; live: number }>(`
         const d = window.__demo.diag;
-        // 上一节装过表单样例，模式停在"表单"；这一节验的是相位与呈现，先回编辑模式 ——
-        //   表单模式的光标只出现在可编辑控件里，落在正文上时它本来就不画。
+        // 相位与呈现要在"文档模式、光标在正文上"的前提里验：表单模式下光标只出现在
+        //   可编辑控件里，落在正文上时它本来就不画。
         await window.__demo.configure({ mode: 'document' });
-        await d.reset(6, 1.5);
+        await window.__demo.open(
+          await (await fetch('/assets/samples/fixtures/scenario-6.json')).text());
+        await window.__demo.configure({ zoom: 1.0 });
+        await window.__demo.flush();
         await d.setCaretAt(0, 2, 0);
         const at = window.__demo.caret().pos;
         // 只改位置不呈现：真源在引擎里，读 caretLive（直读），不读 editStats（上一拍的账）。
@@ -128,7 +71,7 @@ test.describe('诊断面', () => {
       check('startBlink / stopBlink 不抛', true);
     });
 
-    await test.step('五、字体与窗口', async () => {
+    await test.step('三、字体与窗口', async () => {
       const r = await p.ev<{ lazy: { mode: string }; full: { mode: string }; anchor: unknown }>(`
         const d = window.__demo.diag;
         const lazy = await d.reloadFonts('lazy');
@@ -144,7 +87,7 @@ test.describe('诊断面', () => {
             !!r.anchor && typeof r.anchor === 'object', JSON.stringify(r.anchor).slice(0, 40));
     });
 
-    await test.step('六、错误历史与既有诊断', async () => {
+    await test.step('四、错误历史与既有诊断', async () => {
       const r = await p.ev<{
         isArr: boolean; n: number; diff: number; sel: boolean; compared: number;
         diffPx: number; px: { w: number; h: number }; hasBrackets: boolean;
@@ -169,12 +112,17 @@ test.describe('诊断面', () => {
       check('bracketSlots 可读', r.hasBrackets === true);
     });
 
-    await test.step('七、页画布：一页一张、都在窗口里、都真的可见', async () => {
+    await test.step('五、页画布：一页一张、都在窗口里、都真的可见', async () => {
       const r = await p.ev<{
         n: number; want: number; pages: number[]; hidden: number[]; first: number;
       }>(`
         const d = window.__demo.diag;
-        await d.reset(6, 1.5);
+        await window.__demo.open(
+          await (await fetch('/assets/samples/fixtures/scenario-6.json')).text());
+        await window.__demo.configure({ zoom: 1.0 });
+        // 回到首页：前面几节可能把视口滚走过，而"画布在屏幕上可见"要以首页居中为前提。
+        await window.__demo.scrollTo({ page: 0 });
+        await window.__demo.flush();
         const g = window.__demo.geometry();
         // Worker 传输按槽复用（槽数固定，窗口之外的槽挂 display:none），所以这里只看
         //   此刻真的在显示画布 —— 槽数是实现细节，页号才算数。
@@ -195,26 +143,28 @@ test.describe('诊断面', () => {
             r.hidden.length === 0, '看不见的页：' + JSON.stringify(r.hidden));
     });
 
-    await test.step('八、场景装载：页数与字形数随内容变', async () => {
-      const r = await p.ev<{ id: number; pages: number; glyphs: number; paras: number }[]>(`
+    await test.step('六、换文档：页数与字形数跟着变', async () => {
+      const r = await p.ev<{ id: string; pages: number; glyphs: number; paras: number }[]>(`
         const d = window.__demo.diag;
         const rows = [];
-        for (const id of [6, 7]) {
-          const st = await d.loadScenario(id, 1.0);
+        for (const id of ['prose', 'long']) {
+          await window.__samples.run(id);
+          await window.__demo.configure({ zoom: 1.0 });
+          const st = window.__demo.diag.editStats();
           const lay = d.stats();
           rows.push({ id, pages: st.totalPages, glyphs: lay.glyphCount, paras: st.totalParagraphs });
         }
         return rows;`);
-      // 单段演示与多段长文：页数与字形数都必须跟着变（恒等说明参数没接上）。
-      check('场景 6 是单页', r[0].pages >= 1 && r[0].paras <= 4,
+      // 短样例与长样例：页数与字形数都必须跟着变（恒等说明装载没真的换掉文档）。
+      check('短样例是单页', r[0].pages >= 1 && r[0].paras <= 10,
             r[0].pages + ' 页 / ' + r[0].paras + ' 段');
-      check('场景 7 是多页长文', r[1].pages > 1 && r[1].paras > 200,
+      check('长样例是多页长文', r[1].pages > 1 && r[1].paras > 200,
             r[1].pages + ' 页 / ' + r[1].paras + ' 段');
-      check('字形数是正数且随场景变', r[0].glyphs > 0 && r[1].glyphs > r[0].glyphs,
+      check('字形数是正数且随文档变', r[0].glyphs > 0 && r[1].glyphs > r[0].glyphs,
             r[0].glyphs + ' 变 ' + r[1].glyphs);
     });
 
-    await test.step('九、能力探测：WebAssembly SIMD', async () => {
+    await test.step('七、能力探测：WebAssembly SIMD', async () => {
       const r = await p.ev<{ supported: boolean; valid: boolean; len: number; hasSimdOp: boolean }>(`
         const d = window.__demo.diag;
         const s = d.simd();
@@ -232,12 +182,13 @@ test.describe('诊断面', () => {
             r.len > 100 && r.hasSimdOp === true, r.len + ' 字节，含 0xFD=' + r.hasSimdOp);
     });
 
-    await test.step('十、多页点击：落点跟着点走，视口不跟着跑', async () => {
+    await test.step('八、多页点击：落点跟着点走，视口不跟着跑', async () => {
       const r = await p.ev<{
         page: number; caretPage: number; before: number; after: number; dy: number; line: number;
       }[]>(`
         const H = window.__demo, d = H.diag;
-        await d.loadScenario(7, 1.0);
+        await window.__samples.run('long');
+        await window.__demo.configure({ zoom: 1.0 });
         d.stopBlink();
         await H.setCaret({ para: 0, offset: 0 });
         await d.present();
@@ -283,7 +234,7 @@ test.describe('诊断面', () => {
             JSON.stringify(r.map((x) => [x.dy, x.line])));
     });
 
-    await test.step('十一、光标闪烁：点完一直闪，不是亮一下就灭', async () => {
+    await test.step('九、光标闪烁：点完一直闪，不是亮一下就灭', async () => {
       const r = await p.ev<{ text: string; flips: number; hasOn: boolean; hasOff: boolean }>(`
         const H = window.__demo;
         await H.setCaret({ para: 0, offset: 0 });
@@ -302,7 +253,7 @@ test.describe('诊断面', () => {
       check('至少翻转两次（不是亮一下就灭）', r.flips >= 3, '翻转 ' + r.flips + ' 次：' + r.text);
     });
 
-    await test.step('十二、没有 console 错误', async () => {
+    await test.step('十、没有 console 错误', async () => {
       const real = errors.filter((t) => !/favicon/i.test(t));
       check('没有 console 错误', real.length === 0, real.slice(0, 2).join(' | '));
     });

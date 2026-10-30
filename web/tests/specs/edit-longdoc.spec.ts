@@ -32,7 +32,7 @@ test.describe('编辑面：长文档与跨段编辑', () => {
     // 前面几节装过表单样例，模式停在表单：这一份长文档没有控件，表单模式下打不进字。
     //   这一节量的是增量排版的账，先回编辑模式。
     await probe.read('return await SET_MODE(0);');
-    const base = await probe.read('return await LOAD.scenario(7, 1.0);');
+    const base = await probe.read('return await LOAD.long(1.0);');
     check('长文档载入（段数 ≥ 200）', base.totalParagraphs >= 200,
               `${base.totalParagraphs} 段 / ${base.totalLines} 行`);
     check('首次排版是全量（整篇都脏）', base.layoutWasFull === true);
@@ -130,7 +130,11 @@ test.describe('编辑面：长文档与跨段编辑', () => {
     const clickP2 = await probe.read(`
       const stage = EL('.heditor-stage');
       const dpr = window.devicePixelRatio || 1;
-      await H.setCaret({ para: 20, offset: 5 });   // 第 20 段在 16 页的那一份里是第二页
+      // 挑一个真的落在第二页及以后的段：文档内容换了不该让这条判据退化成"在首页上验不乱滚"。
+      for (let para = 20; para < 2000; para += 20) {
+        await H.setCaret({ para, offset: 5 });
+        if (CARET().page >= 1) break;
+      }
       const cr0 = CARET();                      // 光标要页号与页内 y，公开面一次给全
       const before = stage.scrollTop;
       const cv = FRAME(), r = cv.getBoundingClientRect();
@@ -256,7 +260,7 @@ test.describe('编辑面：长文档与跨段编辑', () => {
   {
     // 用真实的 Enter 按键走一遍（不是直接调引擎）—— 键盘路径与引擎路径是两处接线，
     //   只测引擎会漏掉"宿主没把 Enter 接上"这类问题。
-    await probe.read('return await LOAD.scenario(6, 1.0);');
+    await probe.read('return await LOAD.short(1.0);');
     await probe.read('return await D.stopBlink();');
     const before = await probe.read('return D.editStats();');
     const textBefore = await probe.read('return H.text();');
@@ -311,7 +315,7 @@ test.describe('编辑面：长文档与跨段编辑', () => {
     //   只有依赖"文档有多高"的小节会失真：拖选出可视区那一节就是这样，文档矮了
     //   三分之一，自动滚动很快滚到底，"还在继续滚"于是永远量不出来。
     //   判据必须自己钉住前提，不靠前一节留下的状态。
-    await probe.read(`return await LOAD.scenario(6, ${ZOOM});`);
+    await probe.read(`return await LOAD.short();`);
   }
 
   log.section('[11] 连页：中段插一个空段，整条后缀跟着走');

@@ -1,7 +1,6 @@
 import { simdProbeBytes, simdSupported } from './engine/simd';
 import type { EngineLink, DomHost } from './host/dom';
-import { cleanMarkdownLines, then1, type Args, type Maybe } from './input/keymap';
-import type { AssetPaths } from './transport/assets';
+import { then1, type Args, type Maybe } from './input/keymap';
 import type { Diag, Direct, PageMetricsPt, Pos } from './types';
 
 /**
@@ -14,7 +13,6 @@ import type { Diag, Direct, PageMetricsPt, Pos } from './types';
  *
  * @param link 引擎通道
  * @param dom DOM 宿主（装载类要它把这一拍收尾）
- * @param assets 素材地址（字体装载与探测读它）
  * @param errors 页面级错误表（原地追加，诊断面只给切片）
  * @param syncConfig 把引擎的编辑模式与缩放读回配置影子
  * @returns 诊断面
@@ -22,7 +20,6 @@ import type { Diag, Direct, PageMetricsPt, Pos } from './types';
 export function makeDiag(
   link: EngineLink,
   dom: DomHost,
-  assets: AssetPaths,
   errors: string[],
   syncConfig: () => void,
 ): Diag {
@@ -125,22 +122,6 @@ export function makeDiag(
       if (ok) dom.finish();
       return !!ok;
     },
-
-    // 装载
-
-    loadScenario: (id, zoom) => settleAs('scenario', { id, zoom }),
-    reset: (id, zoom) => settleAs('reset', { id: id === undefined ? 6 : id, zoom }),
-    stress: (paras, chars) => settleAs('stress', { paras, chars }),
-    stressDiverse: (paras, chars) => settleAs('stressDiverse', { paras, chars }),
-    loadFormSample: (variant) => settleAs('formSample', { variant: variant ?? 0 }),
-    loadMedicalSample: async (repeat) => {
-      // 病历正文是一份可替换的文件（服务端下发那条路），不编进产物。
-      const res = await fetch(new URL('assets/samples/medical-records.md', assets.base));
-      if (!res.ok) throw new Error(`病历样例读取失败：HTTP ${res.status}`);
-      const text = cleanMarkdownLines(await res.text());
-      return settleAs('textDoc', { text, repeat: Math.max(1, repeat || 1) });
-    },
-    setFormControls: (list) => settleAs('setFormControls', { list }),
 
     // 光标与相位
 

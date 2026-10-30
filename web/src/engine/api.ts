@@ -248,20 +248,14 @@ const COMMANDS: Array<[string, string, string[], string]> = [
   // 呈现与装载：整份换文档，引擎自己重排重画
   // 实现是空的：render() 认这个名字去补一次 mod.present()
   ['present',               'w', ['present'],                                             'host'],
-  ['scenario',              'w', ['setScenario'],                                         'self'],
-  ['reset',                 'w', ['setZoom', 'setScenario'],                              'self'],
   ['density',               'w', ['setZoom'],                                             'self'],
-  ['stress',                'w', ['loadStressDocument'],                                  'self'],
-  ['stressDiverse',         'w', ['loadStressDocumentDiverse'],                           'self'],
   ['textDoc',               'w', ['loadTextDocument'],                                    'self'],
-  ['formSample',            'w', ['loadFormSample'],                                      'self'],
   ['loadDocument',          'w', ['loadDocument'],                                        'self'],
   ['fonts',                 'w', ['loadFont', 'loadFontFromFile', 'setFontRoles'],        'self'],
   // 注册字体只往库里加脸，不重排也不上屏；但它要回推状态 —— 主线程的 fonts() 读的是
   //   随状态推过来的那一份，不回推的话注册完当下读不到新字体。
   ['addFont',               'w', ['loadFont', 'loadFontFromFile', 'setFontRoles'],        'none'],
   ['fontList',              'r', ['fontsJson'],                                           'none'],
-  ['setFormControls',       'w', ['setFormControls'],                                     'self'],
 
   // 编辑：*AndRender 系在库里就排完画完了，宿主不要再画一遍
   ['insertText',            'w', ['insertTextAt'],                                           'self'],
@@ -967,12 +961,6 @@ function paintFull(keepScroll = 1) {
   textAllCache = mod.documentTextAll();
 }
 
-function loadScenario(id: any, density: any) {
-  if (density) { mod.setZoom(density); densityLevel = density; }
-  mod.setScenario(id);
-  paintFull();
-}
-
 /**
  * 换块流之后的统一收尾（与 loadScenario 同理，只是入口在别处）。
  *
@@ -1038,15 +1026,14 @@ async function boot(m: any) {
     // 页度量要先设再装载：它会让整篇重排，排在装载之前只会排这一次。
     mod.setPageMetrics(kPageWidthPt, kPageHeightPt, kPageMarginPt, kPageMarginPt, kPageMarginPt,
                        kPageMarginPt);
-    // 缩放也要先设：loadScenario 收 zoom 参数，而 empty 那条路不走它 —— 漏设就会
-    //   按 EngineConfig 的默认密度排（1.5 倍），页面比请求的大一整档。
+    // 缩放要先设：装载会让整篇重排，排在装载之后等于白排一次。
     if (m.density) {
       mod.setZoom(m.density);
       densityLevel = m.density;
     }
-    // empty = 库要的初始状态：一份只有一个空段落的文档，不带演示内容。
-    if (m.empty) loadBlocks(() => mod.loadTextDocument('', 1));
-    else loadScenario(m.scenario === undefined ? 6 : m.scenario, m.density);
+    // 库的初始状态：一份只有一个空段落的文档。内容由宿主用公开方法装（见 editor.ts 的
+    //   open / setText）—— 引擎里没有"载入场景 N"这种入口，也不该有。
+    loadBlocks(() => mod.loadTextDocument('', 1));
     // 首帧的几何先报出去，宿主才能按窗口把每页画布建出来并交给这一侧。
     //   这时候还没有画布，所以只推几何；画布到一张贴一张（见 pageCanvas 分支）。
     sendState(0, 'boot', JSON.parse(mod.editStatsJson()));
@@ -1061,9 +1048,6 @@ async function boot(m: any) {
 const WRITE = collect('w', {
   // 什么都不改，只收尾。给宿主的 present() 用 —— 它就是"重画并回推"。
   present: () => {},
-  scenario: (a) => loadScenario(a.id, a.density),
-  reset: (a) => loadScenario(a.id === undefined ? 6 : a.id,
-                             a.density === undefined ? kZoomBase : a.density),
   density: (a) => {
     const prev = densityLevel > 0 ? densityLevel : a.density;
     mod.setZoom(a.density);
@@ -1074,10 +1058,7 @@ const WRITE = collect('w', {
     // 缩放保留滚动位置（按密度折算）：Ctrl + 滚轮的每一次都要停在原处。
     paintFull(prev > 0 ? a.density / prev : 1);
   },
-  stress: (a) => loadBlocks(() => mod.loadStressDocument(a.paras | 0, a.chars | 0)),
-  stressDiverse: (a) => loadBlocks(() => mod.loadStressDocumentDiverse(a.paras | 0, a.chars | 0)),
   textDoc: (a) => loadBlocks(() => mod.loadTextDocument(a.text, (a.repeat | 0) || 1)),
-  formSample: (a) => loadBlocks(() => mod.loadFormSample(a.variant | 0)),
   /**
    * 打开一份保存过的文档（JSON 文本）。
    *
@@ -1270,18 +1251,6 @@ const WRITE = collect('w', {
     const cur = JSON.parse(mod.selectionStyleJson());
     const c = s.color || cur.color;
     mod.setSelectionStyle(c[0] | 0, c[1] | 0, c[2] | 0, (c[3] === undefined ? 255 : c[3]) | 0);
-  },
-  /**
-   * 换字段名单。必须重排，不能只 present —— 括号标记（含只读的灰括号）是排进
-   *   布局结果里的，只 present 的话标记还是上一轮的：症状是"控件清单里 ro=true，
-   *   可槽清单里 ro 全是 false"（一条自相矛盾的读数，很难往"没重排"上想）。
-   *   对照单线程宿主的 setFormControls：它就是 return relayoutAndBlit();。
-   */
-  setFormControls: (a) => {
-    mod.setFormControls((a.list || []).map((it: any) => ({
-      start: it.start, end: it.end, kind: it.kind || 0, id: it.id || '', ro: !!it.ro,
-    })));
-    paintFull();
   },
   focusControl: (a) => mod.focusControl(a.forward === undefined ? true : !!a.forward),
   removeControl: (a) => mod.removeControlAt(a.i | 0, !!a.keepContent),

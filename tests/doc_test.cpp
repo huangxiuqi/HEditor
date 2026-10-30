@@ -27,8 +27,6 @@
 #include "core/doc/textbuf.h"
 #include "core/layout/cell_index.h"
 
-#include "demo/demo_documents.h"
-
 #include "block_compare.h"
 
 using namespace heditor;

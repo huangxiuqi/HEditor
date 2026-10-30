@@ -279,9 +279,12 @@ function blitFrame(px, w) {}
   不会报错，于是错误看起来像"native 独有的怪问题"。新增 target 后按
   `grep -c "add_library(<tgt>\|add_executable(<tgt>"` 与 `grep -c "heditor_target_flags(<tgt>)"`
   各应为 1。
-- ★ **演示数据在 `demo/`（`heditor_demo` 库），不在 `src/`**：`sampleDocument` 与
-  `mixedParagraphBlock` 是喂给引擎的样例内容，不是引擎能力。改它们会影响单测与探针里
-  依赖页序的断言，改之前先看那些断言。
+- ★ **样例文档归宿主（`web/app/samples/`），装配归测试（`tests/fixtures/`）**：
+  演示页那几份文档全部由公开方法搭出来（`setText` / `insertControl` / `insertTable` /
+  `paragraphFormat`），判据按编号跑同一段代码（`window.__samples`）。C++ 侧没有"载入场景 N"
+  这类入口，也没有样例正文 —— wasm 只链 `heditor_core`。
+  判据要一份结构固定的文档时，用 `assets/samples/fixtures/*.json` + `open()`（与用户打开文件
+  同一条路）；`tests/fixtures/doc_fixtures.h` 只放"块流 → 修订"的装配，只进测试二进制。
 - 比对 git 里的文件与工作区文件时**不要用 md5**：本机 `core.autocrlf=true`，
   工作区是 CRLF 检出，每个换行比 blob 多一字节；要比就比 git 对象标识
   （`git rev-parse HEAD:<path>`），或者给 diff 加 `--strip-trailing-cr`。
