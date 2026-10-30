@@ -112,10 +112,6 @@ void setFontRoles(int cjk_index, int mongol_index, int latin_index) {
  * 换字段时按引擎当前块流临时重建一份带控件的修订。
  */
 std::vector<DemoFieldSpec> g_fields;
-/**
- * 表格场景：这一档不走块流建树（表格结构不在 BlockSpec 里），直接建一棵含表格的树。
- */
-bool g_table_demo = false;
 
 /**
  * 当前文档是否是演示页用块流建出来的。从 JSON 装入的文档没有块流底稿，控件名单也不能
@@ -124,43 +120,26 @@ bool g_table_demo = false;
 bool g_demo_source = true;
 
 /**
- * 把一份块流与字段建成修订，一次性交给引擎。
+ * 换一份演示文档并交给引擎。
  *
  * 块流只在重建这一刻存在：文档内容与编辑结果都由引擎里的修订持有，宿主不再并排保存
- *   一份块流底稿。
+ *   一份块流底稿。表格场景不走块流（表格结构不在 BlockSpec 里），由调用方直接给树。
  *
- * keep_caret 为真时把光标原样搬回去（文本没变才搬）：换控件、改只读标记、增删字段都不该
- *   动光标，而 setDocument 会把光标归零。所以"改控件"这条路上必须补这一步，否则光标会自己
- *   在原地跳回段首。
+ * @param doc 要装入的修订
+ * @param keep_caret 为真且文本未变时保住光标、侧别与行别
  */
-void rebuildDocument(bool keep_caret, const std::vector<BlockSpec>& blocks,
-                     const std::vector<DemoFieldSpec>& fields) {
-    const TextPos before = g_engine.caret();
-    // 侧别也要一起搬回来：同一个偏移上有好几个位置（括号之间、控件内外），
-    //   只搬偏移等于把光标挪到那一处的"默认"位置上 —— 用户会看到它自己跳了一格。
-    const int side = keep_caret ? g_engine.caretSide() : -1;
-    // 行别同一待遇：折行处的光标贴哪一行是用户点出来的，重建之后不该变。
-    const int line_aff = keep_caret ? g_engine.caretLineAffinity() : 0;
-    std::string text_before;
-    if (keep_caret) {
-        for (const BlockSpec& b : g_engine.blocks()) text_before += b.textUtf8();
-    }
-    g_engine.setDocument(g_table_demo ? demoTableDoc(g_cjk_font) : demoDoc(blocks, fields),
-                         StyleSheet{});
-    if (!keep_caret) return;
-    std::string text_after;
-    for (const BlockSpec& b : g_engine.blocks()) text_after += b.textUtf8();
-    if (text_before != text_after) return;  // 换了文档：光标归零才是对的
-    if (before.para < 0 || before.para >= static_cast<int>(g_engine.blocks().size())) return;
-    if (before.offset > g_engine.blocks()[static_cast<size_t>(before.para)].cp_text.size()) return;
-    g_engine.setCaretAtSideLine(before.para, before.offset, side, line_aff);
+void installDoc(doc::Doc doc, bool keep_caret) {
+    g_engine.replaceDocument(std::move(doc), StyleSheet{}, keep_caret);
 }
 
 void setScenario(int scenario) {
-    g_table_demo = (scenario == 10);
     g_demo_source = true;
     g_fields.clear();
-    rebuildDocument(false, scenarioBlocks(scenario, g_cjk_font, g_mn_font, g_latin_font), {});
+    if (scenario == 10) {
+        installDoc(demoTableDoc(g_cjk_font), false);
+        return;
+    }
+    installDoc(demoDoc(scenarioBlocks(scenario, g_cjk_font, g_mn_font, g_latin_font), {}), false);
 }
 
 void setZoom(float z) {
@@ -894,7 +873,7 @@ void setFormControls(val list) {
         f.readonly = !it["ro"].isUndefined() && it["ro"].as<bool>();
         g_fields.push_back(std::move(f));
     }
-    rebuildDocument(true, blocks, g_fields);
+    installDoc(demoDoc(blocks, g_fields), true);
 }
 void setEditMode(int mode) { g_engine.setEditMode(editModeFromCode(mode)); }
 int editMode() { return static_cast<int>(g_engine.editMode()); }
@@ -1589,46 +1568,19 @@ std::string bracketSlotsJson() {
 }
 
 /**
- * 压力文档：造 paras 段、每段 chars 个汉字的横排中文。
+ * 压力文档：段数与每段字数由宿主给，内容由 demo 库造。
  *
- * 为什么必须有这个口子：演示场景只有一段，量出来的编译与索引耗时全是 0.0x ms ——
- * 既看不出 O(文档) 的那一层，也证明不了"增量到底省了多少"。性能判据只能在大文档上做，
- * 而且要能调长度：同一份代码在 10 段与 1000 段上的差别，才是可证伪的证据。
+ * 性能判据只能在大文档上做，而且要能调长度 —— 同一份代码在 10 段与 1000 段上的差别，
+ *   才是可证伪的证据。
  *
- * diverse 为真时按一批不同的常用字轮着填，否则整篇是同一个字。这个开关是为字体
- * 按需读的账设的：同一个字重复时字形集合只有一个，字形缓存与块缓存都会命中到失真，
- * 落存储的次数与字节都量不出来。真实中文的重复率本来就高，所以"有重复但集合有
- * 规模"才像真文档。
+ * @param paras 段数
+ * @param chars 每段字数
+ * @param diverse 为真时每段用不同的字，让字形集合有规模
  */
 void loadStressDocumentImpl(int paras, int chars, bool diverse) {
-    if (paras < 1) paras = 1;
-    if (chars < 1) chars = 1;
-
-    std::vector<BlockSpec> blocks;
-    for (int i = 0; i < paras; ++i) {
-        std::string text;
-        for (int k = 0; k < chars; ++k) {
-            if (diverse) {
-                // 用一段连续的基本汉字码点当池子：只为了让字形集合有规模。
-                //   真实文档的不同字数在几百到几千之间，这里取 800 个。
-                appendUtf8(&text, 0x4E00u + (static_cast<uint32_t>(i) * chars + k) % 800u);
-            } else {
-                text += "字";
-            }
-        }
-        BlockSpec b;
-        b.font_index = g_cjk_font;
-        b.size_pt = 12.0f;
-        b.wm = WritingMode::HorizontalTB();
-        b.line_spacing.factor = 1.05f;
-        b.language = "zh";
-        b.color = Color::rgb(24, 24, 24);
-        b.setText(text);
-        blocks.push_back(std::move(b));
-    }
     g_fields.clear();
     g_demo_source = true;
-    rebuildDocument(false, blocks, {});
+    installDoc(demoDoc(stressDocument(paras, chars, diverse, g_cjk_font), {}), false);
 }
 
 void loadStressDocument(int paras, int chars) { loadStressDocumentImpl(paras, chars, false); }
@@ -1639,60 +1591,15 @@ void loadStressDocument(int paras, int chars) { loadStressDocumentImpl(paras, ch
 void loadStressDocumentDiverse(int paras, int chars) { loadStressDocumentImpl(paras, chars, true); }
 
 /**
- * 用一段真实文本造文档：按换行切段，每段一个块，整体重复 repeat 遍。
+ * 用一段真实文本造文档。切段与块格式都在 demo 库，这里只收宿主读来的文本。
  *
- * 判据要用真文本才准：合成文本（一批码点循环）的字形集合与用字分布都不像真病历，
- * 量出来的缓存账会偏。文本由宿主读进来并清洗掉 markdown 记号后传进来。
+ * 判据要用真文本才准：合成文本的字形集合与用字分布都不像真病历，量出来的缓存账会偏。
+ *   文本由宿主读进来并清洗掉 markdown 记号后传进来。
  */
 void loadTextDocument(const std::string& text, int repeat) {
-    // 空串 = 新建一份"只有一个空段落"的文档。
-    //   这条必须有：空串若什么都不做，"清空文档"在引擎里就没有入口 ——
-    //   setText('') 只能静默保留旧内容，而那是没法向使用者解释的一种语义。
-    if (text.empty()) {
-        std::vector<BlockSpec> blocks(1);
-        BlockSpec& only = blocks.front();
-        only.font_index = g_cjk_font;
-        only.size_pt = 12.0f;
-        only.wm = WritingMode::HorizontalTB();
-        only.line_spacing.factor = 1.0f;
-        only.language = "zh";
-        only.color = Color::rgb(24, 24, 24);
-        only.setText(std::string());
-        g_fields.clear();
-        g_demo_source = true;
-        rebuildDocument(false, blocks, {});
-        return;
-    }
-    if (repeat < 1) repeat = 1;
-
-    std::vector<std::string> paras;
-    size_t pos = 0;
-    while (pos < text.size()) {
-        size_t nl = text.find('\n', pos);
-        if (nl == std::string::npos) nl = text.size();
-        if (nl > pos) paras.emplace_back(text, pos, nl - pos);
-        pos = nl + 1;
-    }
-    if (paras.empty()) return;
-
-    std::vector<BlockSpec> blocks;
-    blocks.reserve(paras.size() * static_cast<size_t>(repeat));
-    for (int r = 0; r < repeat; ++r) {
-        for (const std::string& t : paras) {
-            BlockSpec b;
-            b.font_index = g_cjk_font;
-            b.size_pt = 12.0f;
-            b.wm = WritingMode::HorizontalTB();
-            b.line_spacing.factor = 1.0f;
-            b.language = "zh";
-            b.color = Color::rgb(24, 24, 24);
-            b.setText(t);
-            blocks.push_back(std::move(b));
-        }
-    }
     g_fields.clear();
     g_demo_source = true;
-    rebuildDocument(false, blocks, {});
+    installDoc(demoDoc(textDocument(text, repeat, g_cjk_font), {}), false);
 }
 
 /**
@@ -1851,56 +1758,19 @@ std::string applyParaFormat(const std::string& text) {
 bool deleteSelectionCommand() { return g_engine.deleteSelectionAndRender(); }
 
 /**
- * 一处演示数据，覆盖表单的四条关键语义（区间之外是没有控件的普通正文）：
- * variant 0（短文档）：[5,9)「反复心悸」可编辑 ｜ [9,11)「三天」只读 ｜ [12,16)「加重一天」可编辑
- * → 0..4、11、16..17 打不进字；从 8 往右移跨过只读的 9~11 落到 12。
- * variant 1（长文档）：一个跨行的长字段，里面嵌一个只读小字段
- * → 演示"控件不是矩形"（矩形块数 > 1）与"内层策略优先"。
- * variant 2（短文档）：三个可编辑字段紧挨着 —— [5,7)、[7,9)、[9,11) 共享两条边界
- * → 边界两侧都可写，"在边界上打字 / 把中间那个删空 / 在两段之间退格"都能当场试出来。
- * variant 3（短文档）：三层嵌套、三层都可编辑 —— [5,11) ⊃ [6,10) ⊃ [7,9)
- * → 归属取最内层，且改内层时中/外层必须一起长（区间不许互相穿过）；
- *   括号读作 [[[心悸]悸三]，三个开括号在左、闭括号由内到外依次收。
+ * 表单样例。块流与字段布局都由 demo 库给：区间按文本的码点坐标算，
+ *   两者分居两处时改一个字就会整组错位，而控件数据本身看着完全正常。
+ *
+ * @param variant 变体号（0 到 3）
  */
 void loadFormSample(int variant) {
-    const std::vector<BlockSpec> blocks =
-        scenarioBlocks(variant == 1 ? 3 : 6, g_cjk_font, g_mn_font, g_latin_font);
-    g_fields.clear();
+    const DemoFormSample sample = formSample(variant, g_cjk_font, g_mn_font, g_latin_font);
+    g_fields = sample.fields;
     g_demo_source = true;
-    auto push = [&](int so, int eo, ControlKind k, const char* id, bool ro) {
-        DemoFieldSpec f;
-        f.para = 0;
-        f.so = so;
-        f.eo = eo;
-        f.kind = k;
-        f.key = id;
-        f.readonly = ro;
-        g_fields.push_back(std::move(f));
-    };
-    if (variant == 1) {
-        push(5, 60, ControlKind::TextField, "history", false);
-        push(20, 26, ControlKind::TextField, "onset", true);
-    } else if (variant == 2) {
-        push(5, 7, ControlKind::TextField, "part1", false);
-        push(7, 9, ControlKind::TextField, "part2", false);
-        push(9, 11, ControlKind::TextField, "part3", false);
-    } else if (variant == 3) {
-        // 三层嵌套：外层盖住整串「反复心悸三天」，中层剥掉两端的字，
-        //   内层只留中间两个字「心悸」。三层都可编辑 —— 这是"嵌套"最需要覆盖的一格：
-        //   归属必须取最内层（否则改内层会改成外层），而内层一动，中/外层都要跟着长。
-        push(5, 11, ControlKind::TextField, "outer", false);
-        push(6, 10, ControlKind::TextField, "middle", false);
-        push(7, 9, ControlKind::TextField, "inner", false);
-    } else {
-        push(5, 9, ControlKind::TextField, "complaint", false);
-        push(9, 11, ControlKind::NumberField, "duration", true);
-        push(12, 16, ControlKind::TextField, "aggravate", false);
-    }
-    rebuildDocument(false, blocks, g_fields);
+    installDoc(demoDoc(sample.blocks, sample.fields), false);
     g_engine.setEditMode(EditMode::Form);
-    // 必须重排：上面换过文档，而 layout_ 还停在上一次的行盒上。
-    //   不重排的话控件会投影到旧几何上 —— 症状是"字段框比文本偏了一截、
-    //   或者在错误的行上被切成两块"，而控件数据本身看着完全正常。
+    // 必须重排：换过文档，而排版还停在上一次的行盒上。不重排的话控件会投影到旧几何上
+    //   ——症状是"字段框比文本偏了一截、或者在错误的行上被切成两块"。
     g_engine.relayout();
 }
 
