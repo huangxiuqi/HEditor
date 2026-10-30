@@ -435,7 +435,7 @@ test.describe('编辑面：基准与键盘', () => {
     const textA = await probe.read('return H.paragraph(0);');
     // 定格成确定的相位再取 A 帧，否则和 B 帧的差异里混着闪烁
     await probe.read(`await D.stopBlink(); await D.present(); return true;`);
-    await probe.read('window.__frameA = await D.rawFrame(); return true;');
+    await probe.read('window.__frameA = (await PIX()).data; return true;');
     await probe.shot('typing-state');
 
     // B：同样的文档，一次性插入，同样定格
@@ -446,8 +446,9 @@ test.describe('编辑面：基准与键盘', () => {
 
     const d = await probe.read(`
       const A = window.__frameA;
-      const B = await D.rawFrame();
-      const w = D.frameW();
+      const F = await PIX();
+      const B = F.data;
+      const w = F.w;
       const n = Math.min(A.length, B.length);
       let diff = 0, minx = 1e9, miny = 1e9, maxx = -1, maxy = -1;
       for (let i = 0; i + 3 < n; i += 4) {
@@ -458,7 +459,7 @@ test.describe('编辑面：基准与键盘', () => {
           if (y < miny) miny = y; if (y > maxy) maxy = y;
         }
       }
-      return { diff, w, h: D.frameH(), minx, miny, maxx, maxy,
+      return { diff, w, h: F.h, minx, miny, maxx, maxy,
                lenA: A.length, lenB: B.length };
     `);
 

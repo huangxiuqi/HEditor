@@ -182,7 +182,7 @@ test.describe('插入控件', () => {
 test.describe('改控件定义', () => {
   test('改选项表重建内容、删掉选中项清空值、类型不可改', async ({ open }) => {
     const p = await open('index.html', { query: { debug: '1' } });
-    const r = await p.ev<any>(`
+    const r = await p.read<any>(`
       const e = ${D};
       await e.setText('甲乙丙丁');
       await e.setCaret({ para: 0, offset: 4 });
@@ -193,13 +193,13 @@ test.describe('改控件定义', () => {
       await e.toggleControl(0, 1);
       await e.flush();
       const picked = e.form()[0];
-      const digest0 = await e.diag.frameDigest();
+      const digest0 = await PIXH();
 
       // 换标签 + 删掉正选中的第二项：内容按新表重建，值跟着清空。
       const ok = await e.updateControl(0, { options: [{ value: 'a', label: '甲（改）' }] });
       await e.flush();
       const after = e.form()[0];
-      const digest1 = await e.diag.frameDigest();
+      const digest1 = await PIXH();
 
       // 类型不可改：换类型是"删掉重插"，这里要显式拒掉。
       const bad = await e.updateControl(0, { type: 'checkBoxGroup' });
@@ -283,20 +283,20 @@ test.describe('插入表格', () => {
     // 两张判据分工不同：
     //   截图证明"上屏了"（页位图变了之后画布要跟着换，否则用户看不见）；
     //   帧指纹证明"撤销之后内容逐像素回到原样"—— 它不受 DOM 层（滚动条、光标残影）影响。
-    const r = await p.ev<any>(`
+    const r = await p.read<any>(`
       const e = ${D};
       // 读指纹前先落一次光标：setCaret 会把相位拉回可见，两次读的瞬态因而可比。
       const digestAt = async (para, offset) => {
         await e.setCaret({ para, offset });
         await e.flush();
-        return await e.diag.frameDigest();
+        return await PIXH();
       };
       await e.setText('甲乙丙丁');
       await e.flush();
       const before = await digestAt(0, 0);
       await e.insertTable({ rows: 2, cols: 3 });
       await e.flush();
-      const after = await e.diag.frameDigest();
+      const after = await PIXH();
       await e.undo();
       await e.flush();
       const undone = await digestAt(0, 0);

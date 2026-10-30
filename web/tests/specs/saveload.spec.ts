@@ -15,13 +15,14 @@ type Usable = { before: number; typed: number; ok: boolean; undone: number };
 type Rejection = { threw: boolean; same: boolean };
 
 // 取样前先停表并把光标钉住：闪烁相位与光标位置都会进指纹。
+// 指纹从画布算（PIXH），所以这几段要用 p.read —— 它会拼上读数前言。
 const SNAP = `
   window.__demo.diag.stopBlink();
   await window.__demo.setCaret({ para: 0, offset: 0 });
   window.__demo.diag.present();
   await window.__demo.flush();
   return {
-    digest: await window.__demo.diag.frameDigest(),
+    digest: String(await PIXH()),
     text: window.__demo.text(),
     pages: window.__demo.geometry().pages,
   };`;
@@ -37,7 +38,7 @@ test.describe('保存与打开', () => {
     let stored: Snapshot = { digest: '', text: '', pages: 0 };
 
     await test.step('存出来的是一份文档', async () => {
-      stored = await p.ev<Snapshot>(`
+      stored = await p.read<Snapshot>(`
         const e = window.__demo, d = e.diag;
         await d.reset(6, 1.5);
         await e.type('保存');
@@ -58,13 +59,13 @@ test.describe('保存与打开', () => {
     });
 
     await test.step('存盘、改一笔、再打开', async () => {
-      const mutated = await p.ev<Snapshot>(`
+      const mutated = await p.read<Snapshot>(`
         const e = window.__demo;
         await e.type('污染');
         ${SNAP}`);
       check('改过之后正文确实变了（前置条件，否则下面那条恒真）',
             mutated.text !== stored.text, stored.text.length + ' 字变 ' + mutated.text.length + ' 字');
-      const reopened = await p.ev<Snapshot>(`
+      const reopened = await p.read<Snapshot>(`
         const e = window.__demo;
         await e.open(${JSON.stringify(saved)});
         ${SNAP}`);

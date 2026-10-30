@@ -289,17 +289,12 @@ void relayoutAndPaint() {
  */
 std::string buildStamp() { return HEDITOR_BUILD_STAMP; }
 
-int frameWidth() { return g_engine.frameWidth(); }
-int frameHeight() { return g_engine.frameHeight(); }
-size_t frameByteSize() { return g_engine.frameBytes(); }
-
 /**
- * 窗口导出图（内容 + 瞬态，窗口顺序拼一张）。给探针与诊断用：
- * 它现场拼一次，宿主上屏走的是 pageRgba / pendingRects —— 那条路不需要窗口帧。
+ * 空像素视图的落点：pageRgba 拿不出这一页时用它。
+ *
+ * 不能拿 nullptr 拼一个零长视图 —— typed_memory_view 要一个真指针。
  */
-val frameRgba() {
-    return val(emscripten::typed_memory_view(g_engine.frameBytes(), g_engine.frame()));
-}
+uint8_t kEmptyPixels[4] = {0, 0, 0, 0};
 
 /**
  * 一页"画到画布上应该是什么"（页内坐标，RGBA），零拷贝视图：内容 + 这一页的瞬态。
@@ -312,7 +307,7 @@ val frameRgba() {
  */
 val pageRgba(int page) {
     const size_t n = g_engine.pageBytes(page);
-    if (n == 0) return val(emscripten::typed_memory_view(static_cast<size_t>(0), g_engine.frame()));
+    if (n == 0) return val(emscripten::typed_memory_view(static_cast<size_t>(0), kEmptyPixels));
     return val(emscripten::typed_memory_view(n, g_engine.pagePixels(page)));
 }
 
@@ -2064,10 +2059,6 @@ EMSCRIPTEN_BINDINGS(heditor) {
     emscripten::function("charFormatAt", &charFormatAt);
     emscripten::function("paraFormatAt", &paraFormatAt);
 
-    emscripten::function("frameWidth", &frameWidth);
-    emscripten::function("frameHeight", &frameHeight);
-    emscripten::function("frameByteSize", &frameByteSize);
-    emscripten::function("frameRgba", &frameRgba);
     emscripten::function("pageRgba", &pageRgba);
     emscripten::function("pendingRectsJson", &pendingRectsJson);
     emscripten::function("pagesPendingBlitJson", &pagesPendingBlitJson);

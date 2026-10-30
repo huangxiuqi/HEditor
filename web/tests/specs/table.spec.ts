@@ -202,8 +202,9 @@ test.describe('表格：跨页切片', () => {
       const tail = await at(cp);
       await D.stopBlink();
       await at(0);
-      const frame = await D.rawFrame();
-      const w = D.frameW();
+      const FF = await PIX();
+      const frame = FF.data;
+      const w = FF.w;
       // 帧与 caret 都是设备像素：直接取第二行的带，数一块矩形里的墨。
       const ink = (yTop, h) => {
         let n = 0;
@@ -288,8 +289,9 @@ test.describe('表格：跨页切片', () => {
       await D.stopBlink();
       await e.setCaret({ para: 0, offset: 0 });
       await e.flush();
-      const frame = await D.rawFrame();
-      const w = D.frameW();
+      const FF = await PIX();
+      const frame = FF.data;
+      const w = FF.w;
       const zp = await D.pagePx();
       const step = zp.h + zp.gap;
       const ink = (s) => {
@@ -343,10 +345,10 @@ test.describe('表格：跨页切片', () => {
       await D.stopBlink();
       await e.setCaret({ para: 0, offset: 0 });
       await e.flush();
-      const before = await D.frameDigest();
+      const before = await PIXH();
       await e.configure({ pageMode: 'paged', zoom: 1 });
       await e.flush();
-      const after = await D.frameDigest();
+      const after = await PIXH();
       const text = e.text();
       return { pages, digests, before, after, textLen: Array.from(text).length,
                layoutDiff: (await D.auditLayout()).diff };`);

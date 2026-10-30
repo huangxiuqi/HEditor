@@ -62,21 +62,75 @@ export const PRELUDE = `
   };
   // 帧：窗口那一整块在屏幕上占的矩形（顶边是窗口首页的顶边）。
   //   库没有帧元素（帧是本轮页位图的读视图），可整条坐标链都是按"帧在屏幕上那块"建立的。
+  //   宽高由页度量算：帧宽就是页宽，帧高就是窗口页数 x 步距（见引擎的 frameHeight）。
   const FRAME = () => {
     const pages = EL('.heditor-pages');
     const r = pages.getBoundingClientRect();
     const g = H.geometry();
+    const px = D.pagePx();                                   // 设备像素
+    const count = Math.max(1, g.window.count);
+    const pixelH = count * (px.h + px.gap);
     const top = r.top + g.window.first * (g.page.h + g.gap);
-    const width = D.frameW() / g.dpr;
-    const height = D.frameH() / g.dpr;
+    const width = px.w / g.dpr;
+    const height = pixelH / g.dpr;
     return {
-      width: D.frameW(), height: D.frameH(),
+      width: px.w, height: pixelH,
       getBoundingClientRect() {
         return { left: r.left, top, right: r.left + width, bottom: top + height,
                  width, height, x: r.left, y: top };
       },
       dispatchEvent(ev) { return pages.dispatchEvent(ev); },
     };
+  };
+  // 窗口像素：逐页从画布取，按"页号 x 步距"摆成与旧帧同形的一张。
+  //   为什么不再有 PIX 之外的"帧"：引擎那条 frame 导出是"把页位图拼起来"的派生物 ——
+  //   判据读它等于让被测对象自述。画布跨了 wasm 拷贝、Worker 传递、putImageData 三层，
+  //   才是用户看见的那一层。判据按帧坐标写的（扫行、扫列、逐字节比），所以这里拼回同形，
+  //   断言逻辑一个字不用改。
+  //   页间隙填白：引擎的导出图那一格填的是背景色，默认就是白。
+  const PIX = async () => {
+    // 呈现挂在 rAF 上：不等两帧读到的是上一拍。selfCheck 比"画布 vs 引擎页像素"时
+    //   两边都旧，差额也是 0 —— 判据会假绿，所以这个等待不是保守，是必要条件。
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    const g = H.geometry();
+    const px = D.pagePx();                                   // 设备像素
+    const step = px.h + px.gap;
+    const count = Math.max(1, g.window.count);
+    const w = px.w;
+    const h = count * step;
+    const out = new Uint8ClampedArray(w * h * 4).fill(255);
+    const byPage = {};
+    for (const c of EL('.heditor-pages').querySelectorAll('canvas')) {
+      byPage[c.dataset.page] = c;
+    }
+    for (let p = g.window.first; p < g.window.first + count; ++p) {
+      const el = byPage[p];
+      if (!el) throw new Error('窗口内缺页画布：' + p);
+      if (el.width !== w) throw new Error('页画布宽 ' + el.width + ' 与页度量 ' + w + ' 不一致');
+      const t = document.createElement('canvas');
+      t.width = el.width;
+      t.height = el.height;
+      const c2 = t.getContext('2d');
+      c2.drawImage(el, 0, 0);
+      const d = c2.getImageData(0, 0, el.width, el.height).data;
+      const base = (p - g.window.first) * step;
+      for (let y = 0; y < el.height && base + y < h; ++y) {
+        out.set(d.subarray(y * w * 4, (y + 1) * w * 4), (base + y) * w * 4);
+      }
+    }
+    return { w, h, data: out };
+  };
+  // 帧指纹（FNV-1a，只算 RGB）：回答"同一个状态重画一次，屏幕上是不是一个字都没变"。
+  //   判据只比较两次取值是否相等，所以算法本身不必与任何引擎侧的口径一致。
+  const PIXH = async () => {
+    const f = (await PIX()).data;
+    let h = 2166136261;
+    for (let i = 0; i + 3 < f.length; i += 4) {
+      h ^= f[i]; h = Math.imul(h, 16777619);
+      h ^= f[i + 1]; h = Math.imul(h, 16777619);
+      h ^= f[i + 2]; h = Math.imul(h, 16777619);
+    }
+    return h >>> 0;
   };
   // 输入一个字符串，交回这一拍的记账（判据要读重排段数 / 后缀平移）。
   const TYPE = async (s) => {

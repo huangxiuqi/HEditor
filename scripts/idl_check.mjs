@@ -106,7 +106,7 @@ const problems = [];
 const note = (where, msg) => problems.push({ where, msg });
 
 
-const KIND = new Set(['w', 'r', 's', 'q']);
+const KIND = new Set(['w', 'r', 's']);
 const RENDER = new Set(['self', 'host', 'none']);
 const seen = new Map();
 for (const [name, kind, calls, render] of IDL.commands) {
@@ -116,10 +116,9 @@ for (const [name, kind, calls, render] of IDL.commands) {
   }
   if (seen.has(name)) note('协议表', `命令重名：${name}`);
   seen.set(name, true);
-  if (!KIND.has(kind)) note('协议表', `${name}：类别 ${kind} 不是 w/r/s/q`);
+  if (!KIND.has(kind)) note('协议表', `${name}：类别 ${kind} 不是 w/r/s`);
   if (!RENDER.has(render)) note('协议表', `${name}：呈现归属 ${render} 不是 self/host/none`);
   if (!Array.isArray(calls)) { note('协议表', `${name}：第三列必须是数组`); continue; }
-  if (kind === 'q' && name !== 'rawFrame') note('协议表', `${name}：q 只给 askOp 特判的那几条`);
   if (kind !== 'w' && render === 'host') note('协议表', `${name}：只有写命令才会要求宿主补呈现`);
 }
 
@@ -186,8 +185,8 @@ function checkCalls(file, re, wantKinds, label) {
   }
 }
 checkCalls('web/src/editor.ts', /link\.write\('([A-Za-z0-9_]+)'/, ['w', 's'], '写命令');
-checkCalls('web/src/editor.ts', /link\.read\('([A-Za-z0-9_]+)'/, ['r', 'q'], '读命令');
-checkCalls('web/src/host/dom.ts', /link\.read\('([A-Za-z0-9_]+)'/, ['r', 'q'], '读命令');
+checkCalls('web/src/editor.ts', /link\.read\('([A-Za-z0-9_]+)'/, ['r'], '读命令');
+checkCalls('web/src/host/dom.ts', /link\.read\('([A-Za-z0-9_]+)'/, ['r'], '读命令');
 checkCalls('web/src/host/dom.ts', /link\.write\('([A-Za-z0-9_]+)'/, ['w', 's'], '写命令');
 checkCalls('web/src/input/input.ts', /env\.write\('([A-Za-z0-9_]+)'/, ['w', 's'], '写命令');
 
@@ -247,7 +246,7 @@ for (const key of shellHits.keys()) {
 const byKindCount = (k) => IDL.byKind(k).length;
 const present = IDL.presentAlways();
 console.log(`协议表：${IDL.commands.length} 条（写 ${byKindCount('w')} / 读 ${byKindCount('r')} / ` +
-            `静默 ${byKindCount('s')} / 特判 ${byKindCount('q')}）`);
+            `静默 ${byKindCount('s')}）`);
 console.log(`wasm 导出：${exports.size} 个 —— 命令调用 ${calledBy.size} 个，` +
             `不经过命令表 ${outside.size} 个`);
 console.log(`要宿主补呈现：${present.size} 条（${[...present].join(' ')}）`);

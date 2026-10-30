@@ -34,7 +34,7 @@ test.describe('插入图片', () => {
         qx: q.x, qy: q.y, qw: q.w, qh: q.h,
         // 图右侧 40 磅处是正文（同一个行盒里的字）
         tx: q.x + q.w + 40, ty: q.y + q.h / 2,
-        digest0: await D.frameDigest(),
+        digest0: await PIXH(),
         caret0: JSON.stringify(H.caret().pos),
       };`);
 
@@ -51,7 +51,7 @@ test.describe('插入图片', () => {
 
     await click(geo.cx, geo.cy);
     const afterImage = await p.read<any>(`
-      return { digest: await D.frameDigest(), caret: JSON.stringify(H.caret().pos) };`);
+      return { digest: await PIXH(), caret: JSON.stringify(H.caret().pos) };`);
     check('★ 点图片：拖拽框画出来了（帧变了）', afterImage.digest !== geo.digest0,
           geo.digest0 + ' → ' + afterImage.digest);
     check('★ 点图片不落光标', afterImage.caret === geo.caret0,
@@ -75,7 +75,7 @@ test.describe('插入图片', () => {
 
     await click(geo.tx, geo.ty);
     const afterText = await p.read<any>(`
-      return { digest: await D.frameDigest(), caret: JSON.stringify(H.caret().pos) };`);
+      return { digest: await PIXH(), caret: JSON.stringify(H.caret().pos) };`);
     check('★ 点正文：光标移过去了（图片没把这一下吞掉）', afterText.caret !== geo.caret0,
           afterText.caret + ' vs ' + geo.caret0);
     check('★ 点正文之后拖拽框消失（帧回到没有框的样子）',
@@ -84,7 +84,7 @@ test.describe('插入图片', () => {
 
   test('注册像素、插入、命中把手、改尺寸与撤销', async ({ open }) => {
     const p = await open('index.html', { query: { debug: '1' } });
-    const r = await p.ev<any>(`
+    const r = await p.read<any>(`
       const e = ${D};
       await e.setText('甲乙丙丁');
       await e.setCaret({ para: 0, offset: 2 });
@@ -97,10 +97,10 @@ test.describe('插入图片', () => {
         data[i * 4] = 20; data[i * 4 + 1] = 120; data[i * 4 + 2] = 220; data[i * 4 + 3] = 255;
       }
       await e.registerImage({ id: 'pic', width: w, height: h, data });
-      const digestBefore = await e.diag.frameDigest();
+      const digestBefore = await PIXH();
       const ok = await e.insertImage({ resourceId: 'pic', pxWidth: w, pxHeight: h });
       await e.flush();
-      const digestAfter = await e.diag.frameDigest();
+      const digestAfter = await PIXH();
 
       const list = await e.images();
       const box = list[0];
@@ -136,10 +136,10 @@ test.describe('插入图片', () => {
       // 选中 → 拖拽框与把手进瞬态层（帧上多出蓝色像素）；取消 → 逐像素回到没选中的样子。
       await e.selectImage(0);
       await e.flush();
-      const digestSelected = await e.diag.frameDigest();
+      const digestSelected = await PIXH();
       await e.selectImage(-1);
       await e.flush();
-      const digestCleared = await e.diag.frameDigest();
+      const digestCleared = await PIXH();
 
       const width0 = box ? box.w : 0;
       const height0 = box ? box.h : 0;
@@ -225,12 +225,12 @@ test.describe('插入图片', () => {
     // 拖动期间文档里的尺寸一个都没动：只画框，松手才落地。
     check('★ 拖动过程中尺寸不变（只画预览框）',
           during.every((w) => Math.abs(w - geo.w0) < 0.01), JSON.stringify(during) + ' vs ' + geo.w0);
-    const digestDuring = await p.read<string>(`return await D.frameDigest();`);
+    const digestDuring = await p.read<number>(`return await PIXH();`);
     await p.page.mouse.up();
     await p.page.waitForTimeout(250);
     const afterUp = await imgW();
     check('★ 松手之后尺寸才落地', afterUp > geo.w0 + 5, geo.w0 + ' → ' + afterUp);
-    const digestAfter = await p.read<string>(`return await D.frameDigest();`);
+    const digestAfter = await p.read<number>(`return await PIXH();`);
     check('松手后画面又变了（框换成真尺寸）', digestAfter !== digestDuring,
           digestDuring + ' → ' + digestAfter);
 

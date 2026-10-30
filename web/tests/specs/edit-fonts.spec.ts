@@ -106,8 +106,9 @@ test.describe('编辑面：字体按需读', () => {
     //   只数第一页那几行也正是判据名字里的"同一页"：帧是窗口大的，按整帧数会掺进
     //   "窗口盖着哪几页"，那个数随窗口策略变，测的就成了窗口在哪而不是字画没画出来。
     const INK = `
-      const f = await D.rawFrame();
-      const rows = D.frameW() * D.pagePx().h * 4;
+      const F = await PIX();
+      const f = F.data;
+      const rows = F.w * D.pagePx().h * 4;
       let n = 0;
       for (let i = 0; i + 3 < rows; i += 4) {
         if (f[i] < 200 || f[i+1] < 200 || f[i+2] < 200) ++n;

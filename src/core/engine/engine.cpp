@@ -1009,14 +1009,9 @@ bool EditorEngine::redoAndRender() {
 
 size_t EditorEngine::frameBytes() const {
     // 尺寸是算出来的，不是"拼出来之后数一数"。这一条是给 statsJson 用的：它每一份状态
-    //   都带这个数，而拼一次窗口导出图（2000 段 / 6 页窗口在 dpr 2 下实测 83 MB）比
-    //   整个呈现还贵。把"问大小"与"要像素"分开，问大小就只剩两次乘法。
+    //   都带这个数，而拼一次窗口拼图（2000 段 / 6 页窗口在 dpr 2 下实测 83 MB）比
+    //   整个呈现还贵。问大小就只剩两次乘法。
     return static_cast<size_t>(frameWidth()) * static_cast<size_t>(frameHeight()) * 4u;
-}
-
-const uint8_t* EditorEngine::frame() const {
-    ensureFrameExport();
-    return frame_export_.data();
 }
 
 int EditorEngine::frameHeight() const {

@@ -117,7 +117,9 @@ function blitFrame(px, w) {}
 "画了没有"时，改问数据层：页位图自审（`auditPageJson` 的 `diff:0` = 缓存页 == 当前状态
 从零光栅）、排版摘要（`digestOf`）、`PlacedRow.cont_top/cont_bottom` 这类标志。
 
-浏览器侧读像素优先读**页画布**（用户看得见的那一层），不是 `diag.rawFrame()`（引擎自述）。
+浏览器侧读像素优先读**页画布**（用户看得见的那一层），不是引擎导出的窗口帧（那只是一份自述）。
+判据要按窗口坐标扫像素时，在测试侧从页画布拼（`web/tests/support/readings.ts` 的 PIX），
+不向引擎要一份拼好的。
 需要证明"画布就是引擎当前输出"时同时断 `selfCheck().screenVsEngineDiffPx === 0`；
 呈现挂在 rAF 上，读画布前先等两帧，否则两边都旧、差额也是 0。
 

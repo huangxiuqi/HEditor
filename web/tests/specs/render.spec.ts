@@ -30,7 +30,6 @@ test.describe('上屏：脏区、设备像素比、缩放', () => {
         typed: { px: typed.px, pages: typed.pages },
         pagePx: g.page.w * g.page.h,
         linePx: g.page.w * Math.max(1, Math.round(g.page.h / 30)),
-        framePx: D.frameW() * D.frameH(),
       };
     `);
 
@@ -193,10 +192,11 @@ test.describe('上屏：脏区、设备像素比、缩放', () => {
         await LOAD.text('甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉戌亥', 8);
         await D.stopBlink();
         await H.flush();
-        const f = await D.rawFrame();
+        const F = await PIX();
+        const f = F.data;
         let h = 2166136261 >>> 0;
         for (let i = 0; i < f.length; i++) { h ^= f[i]; h = Math.imul(h, 16777619) >>> 0; }
-        return { hash: h >>> 0, w: D.frameW(), h: D.frameH() };
+        return { hash: h >>> 0, w: F.w, h: F.h };
       `);
     };
     const a = await shot();

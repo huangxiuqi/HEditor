@@ -38,6 +38,8 @@ namespace {
  */
 uint64_t overlayRoot(const OverlayScene& s) {
     uint64_t h = kFnvBasis;
+    // 配色先混：改颜色不改矩形，但矩形里画出来的像素全变（见 OverlayScene::style）。
+    h = fnvMix(h, s.style);
     for (const OverlayItem& it : s.items) {
         h = fnvMix(h, static_cast<uint64_t>(it.layer));
         h = fnvMixFloat(h, it.rect.x);
@@ -342,8 +344,6 @@ void EditorEngine::presentInternal(int first_page, int count) {
 
     win_first_page_ = first_page;
     win_page_count_ = count;
-    // 导出图是派生量：这一拍之后重拼（见 ensureFrameExport）。
-    frame_export_valid_ = false;
 
     // 场景在这里按页构建；新旧两版一比就知道哪几项变了、脏矩形在哪。
     //   旧实现用页/行/表/浮动图四组指纹分别回答“哪里变了”，现在只剩一份场景。
@@ -499,11 +499,13 @@ void EditorEngine::presentInternal(int first_page, int count) {
         now.root = overlayRoot(now);
         const OverlayScene& prev = slot->overlay;
         if (prev.root == now.root) continue;
+        // 配色变了：同样的矩形里画的是另一种颜色，整个矩形都得重贴。
+        const bool restyled = prev.style != now.style;
         for (const OverlayItem& it : prev.items) {
-            if (!overlayHas(now, it.layer, it.rect)) markDirty(page, it.rect);
+            if (restyled || !overlayHas(now, it.layer, it.rect)) markDirty(page, it.rect);
         }
         for (const OverlayItem& it : now.items) {
-            if (!overlayHas(prev, it.layer, it.rect)) markDirty(page, it.rect);
+            if (restyled || !overlayHas(prev, it.layer, it.rect)) markDirty(page, it.rect);
         }
         slot->overlay = std::move(now);
     }
@@ -620,6 +622,15 @@ void EditorEngine::presentInternal(int first_page, int count) {
  */
 void EditorEngine::collectTransient(int page, OverlayScene* out) const {
     out->items.clear();
+    // 配色指纹：这三色决定覆盖项画出来的像素。光标色变了而矩形没变时，靠它判这一页脏。
+    const Color colors[3] = {cfg_.selection_color, cfg_.image_mark, cfg_.caret_color};
+    out->style = kFnvBasis;
+    for (const Color& c : colors) {
+        out->style = fnvMix(out->style, c.r);
+        out->style = fnvMix(out->style, c.g);
+        out->style = fnvMix(out->style, c.b);
+        out->style = fnvMix(out->style, c.a);
+    }
     auto add = [&](OverlayLayer layer, const Rect& r) {
         if (r.w <= 0.0f || r.h <= 0.0f) return;
         out->items.push_back(OverlayItem{layer, r});
@@ -694,17 +705,15 @@ const uint8_t* EditorEngine::pageDisplayPixels(int page) const {
             page_export_.fillRect(it.rect, cfg_.caret_color);
         }
     }
-    page_export_page_ = page;
     return page_export_.data();
 }
 
 /**
- * 窗口导出图：按窗口顺序把各页拼成一张。
+ * 窗口拼图：按窗口顺序把各页拼成一张。
  *
- * 它只是给"扫一遍画面"那类判据（像素断言、markCheck、inkRows、auditFrame）的一个只读视图，
- *   不是渲染目标：唯一的数据源是页位图，拼完就缓存到下一次 present。页与页之间那一格
- *   间隙填背景色 —— 引擎不再拥有它（页间隙归宿主），这里留着只是为了保持旧帧的形状，
- *   让那些按 y 扫的判据不必认识"窗口里有几页"。
+ * 唯一的调用方是审计（auditFrame / auditBase）：它要回答"增量拼装 == 从零重来"，
+ *   两边的输入都得是同一份窗口视图。不是渲染目标、也不对外导出 —— 上屏走的是
+ *   pageRgba 逐页，判据读的是页画布。
  *
  * @p with_transient 为假时只拼内容（审计用它区分"内容画错"与"瞬态叠错"）。
  */
@@ -733,17 +742,6 @@ void EditorEngine::assembleWindow(bool with_transient, Bitmap* out) const {
         if (rows <= 0) break;
         std::memcpy(dst, src, row_bytes * static_cast<size_t>(rows));
     }
-}
-
-size_t EditorEngine::ensureFrameExport() const {
-    const int fw = pagePxWidth();
-    const int fh = frameHeight();
-    if (frame_export_valid_ && frame_export_.width() == fw && frame_export_.height() == fh) {
-        return frame_export_.byteSize();
-    }
-    assembleWindow(true, &frame_export_);
-    frame_export_valid_ = true;
-    return frame_export_.byteSize();
 }
 
 void EditorEngine::repaintAfterEdit() {

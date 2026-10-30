@@ -29,9 +29,10 @@
 - 分工有机械闸：`scripts/check_native_tests.mjs`（在 `npm run check` 里）扫 `tests/`，
   命中读帧像素/光栅入口/事件模拟当场红；豁免表已清空。native 要验"画了没有"就改问数据层：
   `auditPageJson` 的 `diff:0`（缓存页 == 当前状态从零光栅）、`digestOf`、
-  `PlacedRow.cont_top/cont_bottom`。浏览器侧读像素读**页画布**，读前等两帧（呈现挂在 rAF 上；
-  不等时画布与引擎缓存都旧、`selfCheck` 差额也是 0，判据假绿）；`rawFrame` 是引擎自述，
-  只能配 `selfCheck().screenVsEngineDiffPx === 0` 一起用，单独用它证明"屏幕对"是循环论证。
+  `PlacedRow.cont_top/cont_bottom`。浏览器侧读像素读**页画布**，用测试侧的 `PIX()` / `PIXH()`
+  （`readings.ts`：等两帧 → 逐页 drawImage → 按页号拼窗口视图）；引擎那条 frame 导出已删，
+  再向引擎要一份拼好的画面就是循环论证。`selfCheck().screenVsEngineDiffPx === 0` 是
+  "画布 == 引擎当前输出"的显式证明（它收尾时先 blitPages，等两帧不等于已贴）。
 
 ## 不变量
 
@@ -40,7 +41,9 @@
 - 块流只有一份；脏区必须带右端；后缀复用只重排 `[from, from+count)`；`blocks_` 不是块流真源。
 - 页指纹混行盒指纹与 `controlPaintDigest`；`rasterSignature` 管档位/底色/缩放/资源代际。
   行指纹必须含"画的时候才用到"的行盒字段（`clip_text`、`advance_pt`、`lead_top_pt`），
-  漏一项就是「改完行距命令成功、画面不动」（TRAPS 232，同族 195）。
+  漏一项就是「改完行距命令成功、画面不动」（TRAPS 232，同族 195）。覆盖层的**配色**
+  （光标/选区/图片手柄）也要进 `OverlayScene.style` 并混进 `overlayRoot`：颜色变了而
+  矩形没变时差集为空 ⇒ 脏区为空 ⇒ 画布停在旧色上（读引擎帧看不见，帧是现场拼的）。
 - 单位：`caret().rect` 是设备像素，`selection().rects` 与控件矩形是磅（读像素 / 点控件先乘
   `ZOOM` = zoom×4/3×dpr，`D.stats().zoom` 只是倍数不是密度）；行距基准是单倍行高，空段也要有行盒。
 - 行距三态（auto/exact/atLeast）在 `BlockSpec.line_spacing`，行高统一走 `lineHeightFor`；

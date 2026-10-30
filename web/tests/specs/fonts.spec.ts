@@ -39,13 +39,13 @@ test.describe('字体注册', () => {
 
   test('注册：重复的那份复用下标，字节注册加一张新脸，名字三种都能选', async ({ open }) => {
     const p = await open('index.html', { query: { debug: '1' } });
-    const r = await p.ev<any>(`
+    const r = await p.read<any>(`
       const e = ${D};
       await e.setText('甲乙丙');
       await e.select({ para: 0, offset: 0 }, { para: 0, offset: 2 });
       await e.flush();
       const before = e.fonts();
-      const digest0 = await e.diag.frameDigest();
+      const digest0 = await PIXH();
 
       // 同一份地址再注册一次：不该多出一张脸。地址取清单报的那一个 —— 两个口径下
       //   （源码直连 / 构建产物）字体所在的位置不同，测试不该各写一遍。
@@ -58,7 +58,7 @@ test.describe('字体注册', () => {
       const added = await e.addFont(new File([bytes], 'copy.ttf'));
       await e.flush();
       const afterAdd = e.fonts();
-      const digest1 = await e.diag.frameDigest();
+      const digest1 = await PIXH();
 
       // 三种名字各选一次，读回生效的下标。
       const byFile = await e.format({ font: 'copy.ttf' });

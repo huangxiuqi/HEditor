@@ -1575,29 +1575,9 @@ export interface Diag {
   selfCheck(): unknown;
 
   /**
-   * 每个可编辑字段的左括号在帧上画了没有（扫左缘那一列）。
+   * 每个可编辑字段的左括号在画布上画了没有（扫左缘那一列）。
    */
   markCheck(): unknown;
-
-  /**
-   * 帧的一份快照（RGBA），拷出来之后不受后续呈现影响。
-   */
-  rawFrame(): unknown;
-
-  /**
-   * 帧指纹（FNV-1a，只算 RGB 三通道）。
-   */
-  frameDigest(): Direct<number>;
-
-  /**
-   * 帧宽（设备像素）。
-   */
-  frameW(): Direct<number>;
-
-  /**
-   * 帧高（设备像素）= 窗口页数 x 步距。
-   */
-  frameH(): Direct<number>;
 
   /**
    * 呈现一次（不重排）。

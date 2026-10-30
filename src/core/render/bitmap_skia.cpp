@@ -400,7 +400,7 @@ void Bitmap::reset(int w, int h) {
     if (w_ > 0 && h_ > 0 && sk_->fonts_shared && sk_->fonts_shared->font_mgr) {
         const SkImageInfo info =
             SkImageInfo::Make(w_, h_, kRGBA_8888_SkColorType, kPremul_SkAlphaType);
-        // 行跨度 = w_*4：与 frame() 交给宿主的口径一致，中间不留 padding。
+        // 行跨度 = w_*4：与 pagePixels() 交给宿主的口径一致，中间不留 padding。
         if (sk_->bm.installPixels(info, px_.data(), static_cast<size_t>(w_) * 4u)) {
             sk_->canvas = std::make_unique<SkCanvas>(sk_->bm);
         }

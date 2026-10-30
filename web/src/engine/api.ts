@@ -235,7 +235,7 @@ export interface EngineApi {
  * 宿主与引擎之间的每一个动词，一条一行：[命令名, 类别, 调的 wasm 导出, 呈现归属]。
  *
  * 类别：'w' 写（跑完收尾并回推状态），'r' 读（只回值），'s' 静默写（改状态但不上屏、
- *   不回推），'q' 查询但在 askOp 里特判（rawFrame 帧太大，要转移所有权而不是克隆）。
+ *   不回推）。
  * 呈现归属：'self' 引擎在库里就排完画完，'host' 引擎只改状态、宿主补一次 present，
  *   'none' 根本不碰画面。
  *
@@ -393,9 +393,6 @@ const COMMANDS: Array<[string, string, string[], string]> = [
   ['undoLimit',             'r', ['undoLimit'],                                           'none'],
 
   // 查询：几何
-  ['frameWidth',            'r', ['frameWidth'],                                          'none'],
-  ['frameHeight',           'r', ['frameHeight'],                                         'none'],
-  ['frameByteSize',         'r', ['frameByteSize'],                                       'none'],
   ['pagePxWidth',           'r', ['pagePxWidth'],                                         'none'],
   ['pagePxHeight',          'r', ['pagePxHeight'],                                        'none'],
   ['pageGapPx',             'r', ['pageGapPx'],                                           'none'],
@@ -413,9 +410,6 @@ const COMMANDS: Array<[string, string, string[], string]> = [
   ['caretReport',           'r', ['caretReport'],                                         'none'],
 
   // 查询：像素与账本
-  ['ink',                   'r', ['frameRgba'],                                           'none'],
-  ['inkRows',               'r', ['frameRgba', 'frameWidth', 'pageGapPx', 'pagePxHeight', 'windowFirstPage', 'windowPageCount'], 'none'],
-  ['frameDigest',           'r', ['frameRgba'],                                           'none'],
   ['stats',                 'r', ['statsJson'],                                           'none'],
   ['editStats',             'r', ['editStatsJson'],                                       'none'],
   ['pagesWrittenThisFrame', 'r', ['pagesWrittenThisFrameJson'],                           'none'],
@@ -434,11 +428,8 @@ const COMMANDS: Array<[string, string, string[], string]> = [
   ['auditLayout',           'r', ['auditLayout'],                                         'none'],
   ['auditCompile',          'r', ['auditCompile'],                                        'none'],
   ['auditGlyphPages',       'r', ['auditGlyphPages'],                                     'none'],
-  ['selfCheck',             'r', ['documentText', 'editStatsJson', 'frameHeight', 'frameWidth', 'pagePxHeight', 'pagePxWidth', 'pageRgba', 'rasterBackend', 'windowFirstPage', 'windowPageCount'], 'none'],
-  ['markCheck',             'r', ['controlsJson', 'frameRgba', 'frameWidth', 'showBrackets'], 'none'],
-
-  // 问答特判：帧太大，要转移所有权而不是结构化克隆（见 askOp 里的 rawFrame 分支）
-  ['rawFrame',              'q', ['frameRgba'],                                           'none'],
+  ['selfCheck',             'r', ['documentText', 'editStatsJson', 'pagePxHeight', 'pagePxWidth', 'pageRgba', 'rasterBackend', 'windowFirstPage', 'windowPageCount'], 'none'],
+  ['markCheck',             'r', ['controlsJson', 'showBrackets'], 'none'],
 ];
 
 /**
@@ -675,8 +666,6 @@ function geom(st: any) {
     count: mod.windowPageCount(),
     // 页画布在文档里的落点（设备像素）：纵向 = 页号 × 步距，横向由宿主居中。
     pageStep: step,
-    frameW: mod.frameWidth(),
-    frameH: mod.frameHeight(),
     dpr, viewW, viewH, scrollY,
     // 内容底边（设备像素）。连页下宿主拿它当滚动高度 —— 没有页可数，只有内容。
     contentPx: mod.contentPx ? mod.contentPx() : 0,
@@ -1558,95 +1547,10 @@ const READ = collect('r', {
    */
   copy: () => mod.copySelection(),
   /**
-   * 整帧里"非白"的像素数。主线程读不到画布（所有权在 Worker 这边），所以"帧上到底
-   *   有没有字"这个判据只能在这里数 —— 与单线程版探针的口径一致（任一通道 < 200 算一个）。
-   */
-  ink: () => {
-    const v = mod.frameRgba();
-    let n = 0;
-    for (let i = 0; i + 3 < v.length; i += 4) {
-      if (v[i] < 200 || v[i + 1] < 200 || v[i + 2] < 200) ++n;
-    }
-    return n;
-  },
-  /**
-   * 逐行的墨迹与底色，按文档顺序给出窗口内每一条带的那一段。
-   *
-   * 判据用它回答两个问题，都是"连页到底连不连"的直接读数：
-   *   一、条带里有没有"不是白底"的行 —— 有就是还有页间隙或页边框（分页的痕迹）。
-   *   二、相邻条带的文字行距是不是与条带内部一样 —— 不一样就是内容在边界上断开了。
-   * 为什么在 Worker 侧数：帧的所有权在这一侧（主线程拿不到画布）。这是测量，
-   *   走的是与绘制不同的代码路径（只读帧、不做任何布局判断），不会自我循环验证。
-   */
-  inkRows: () => {
-    const f = mod.frameRgba();
-    const fw = mod.frameWidth();
-    const ph = mod.pagePxHeight();
-    const step = ph + mod.pageGapPx();
-    const first = mod.windowFirstPage();
-    const count = mod.windowPageCount();
-    const out = [];
-    for (let p = first; p < first + count; ++p) {
-      // 导出图里第 k 页（相对窗口首页）落在 k x 步距 —— 槽那套编号已经删掉。
-      const base = (p - first) * step;
-      const ink = [];
-      const sel = [];
-      const selDeep = [];
-      let gray = 0;
-      for (let y = 0; y < step; ++y) {
-        const off = (base + y) * fw * 4;
-        if (off + fw * 4 > f.length) { ink.push(-1); sel.push(-1); selDeep.push(-1); continue; }
-        // 左边那一列（x = 1）是不是白：不是就是页间隙或页边框。
-        const l = off + 4;
-        if (f[l] < 250 || f[l + 1] < 250 || f[l + 2] < 250) ++gray;
-        // 暗像素 = 字；偏蓝的浅色 = 选区（默认选区色混白之后约 228/241/255，
-        //   而背景灰 238/240/243 的蓝红差只有 5，页边框 206/212/218 是 12 —— 取 15 分得开）。
-        let n = 0;
-        let s = 0;
-        let deep = 0;
-        for (let x = 0; x < fw; x += 2) {
-          const i = off + x * 4;
-          if (f[i] < 128 && f[i + 1] < 128 && f[i + 2] < 128) ++n;
-          else if (f[i + 2] - f[i] > 15 && f[i] > 150) {
-            ++s;
-            // "深"的选区像素：混一次应当是 228/241/255（红 228），叠加多次会往 178 走。
-            //   这一格是"选区被反复混色"的直接读数（见 engine_paint 里 sel_paint 的说明）。
-            if (f[i] < 205) ++deep;
-          }
-        }
-        ink.push(n);
-        sel.push(s);
-        selDeep.push(deep);
-      }
-      out.push({ page: p, step, ink, sel, selDeep, gray });
-    }
-    return { first, count, step, ph, slabs: out };
-  },
-  /**
    * 某几段的行盒与字形（诊断"字画到哪儿去了"）。见 wasm 侧 linesJson 的说明。
    */
   lines: (a) => JSON.parse(mod.linesJson(a.from | 0, a.to | 0)),
-  /**
-   * 帧的指纹（FNV-1a，只算 RGB 三通道）。
-   *
-   * 判据用它回答"同一份逻辑状态重画一次，像素是不是一个字都没变" —— 增量绘制最容易犯的
-   *   错是"重画时把叠加式的效果又叠了一遍"（选区混色就是这么变深的）。整帧搬回去比太贵
-   *   （一份就是窗口像素 x 4，dpr 2 下可达 80 MB），指纹在这一侧算完只回一个数。
-   */
-  frameDigest: () => {
-    const v = mod.frameRgba();
-    let h = 2166136261;
-    for (let i = 0; i + 3 < v.length; i += 4) {
-      h ^= v[i]; h = Math.imul(h, 16777619);
-      h ^= v[i + 1]; h = Math.imul(h, 16777619);
-      h ^= v[i + 2]; h = Math.imul(h, 16777619);
-    }
-    return h >>> 0;
-  },
-  // 帧与页的几何读数：宿主排版、滚动条与自检都要用。都是标量，跨传输安全。
-  frameWidth: () => mod.frameWidth(),
-  frameHeight: () => mod.frameHeight(),
-  frameByteSize: () => mod.frameByteSize(),
+  // 页的几何读数：宿主排版、滚动条与自检都要用。都是标量，跨传输安全。
   pagePxWidth: () => mod.pagePxWidth(),
   pagePxHeight: () => mod.pagePxHeight(),
   pageGapPx: () => mod.pageGapPx(),
@@ -1712,7 +1616,7 @@ const READ = collect('r', {
   heap: () => mod.HEAPU8.length / 1048576,
 
   /**
-   * 自检：把每页画布上真正的像素与帧里对应的一段逐点比。
+   * 自检：把每页画布上真正的像素与这一页的导出像素逐点比。
    *
    * 返回形状必须与单线程宿主的 selfCheck 一致 —— 它是给用户的取证入口
    *   （F12 里 __heditor.selfCheck() 把对象发出来），也是探针的主判据：
@@ -1727,12 +1631,14 @@ const READ = collect('r', {
     //   而那不是贴图逻辑的错 —— 是两次操作之间的时序（闪烁拍 present 之后、blit 之前）。
     //   诊断接口要回答的是"贴得对不对"，不是"凑不凑巧"。
     host.blitPages();
-    const fw = mod.frameWidth();
-    const fh = mod.frameHeight();
     const pw = mod.pagePxWidth();
     const ph = mod.pagePxHeight();
     const first = mod.windowFirstPage();
     const count = mod.windowPageCount();
+    // 帧尺寸（设备像素）：帧宽就是页宽，帧高 = 窗口页数 x 步距。这两个数由页度量拼出来，
+    //   引擎不再单独导出 —— 报给判据的形状不变（探针读 sc.framePx）。
+    const fw = pw;
+    const fh = Math.max(1, count) * (ph + mod.pageGapPx());
     let diff = 0;
     let compared = 0;
     let missing = 0;
@@ -1791,15 +1697,25 @@ const READ = collect('r', {
   },
 
   /**
-   * 每个可编辑字段的左括号在帧上到底画了没有（扫左缘那一列里的"括号蓝"）。
+   * 每个可编辑字段的左括号在画布上到底画了没有（扫左缘那一列里的"括号蓝"）。
    *   判据与探针一致：偏蓝够远 + 够亮 + 红通道 > 45（把光标色排除掉）。
    *   括号常显之后每个可编辑字段都必须有；"只画聚焦字段"那一档已经删了。
+   *   数据源是页画布（主线程读不到，所有权在 Worker 这边；这里的 ctx 就是贴完的那一张），
+   *   不是引擎导出的帧 —— 后者是被测对象的自述。
    */
   markCheck: () => {
     const cc = JSON.parse(mod.controlsJson());
-    const f = mod.frameRgba();
-    const fw = mod.frameWidth();
     const near = (r: number, g: number, b: number) => r > 45 && b - r > 60 && b > 140;
+    const pw = mod.pagePxWidth();
+    const ph = mod.pagePxHeight();
+    const first = mod.windowFirstPage();
+    const count = mod.windowPageCount();
+    const pages = [];
+    for (let p = first; p < first + count; ++p) {
+      const c = host.ctxOfPage(p);
+      if (!c || c.canvas.width !== pw || c.canvas.height !== ph) continue;
+      pages.push(c.getImageData(0, 0, pw, ph).data);
+    }
     const rows = [];
     for (let ci = 0; ci < cc.items.length; ++ci) {
       const it = cc.items[ci];
@@ -1808,10 +1724,12 @@ const READ = collect('r', {
       const lo = Math.round((cx - 10) * densityLevel);
       const hi = Math.round((cx - 1) * densityLevel);
       let n = 0;
-      for (let i = 0; i + 3 < f.length; i += 4) {
-        const x = (i >> 2) % fw;
-        if (x < lo || x > hi) continue;
-        if (near(f[i], f[i + 1], f[i + 2])) ++n;
+      for (const f of pages) {
+        for (let i = 0; i + 3 < f.length; i += 4) {
+          const x = (i >> 2) % pw;
+          if (x < lo || x > hi) continue;
+          if (near(f[i], f[i + 1], f[i + 2])) ++n;
+        }
       }
       rows.push({ control: ci, focused: ci === cc.caret, leftEdgePx: n, ok: n > 0 });
     }
@@ -1874,15 +1792,6 @@ async function doOp(m: any) {
 }
 
 async function askOp(m: any) {
-  // rawFrame 要单独走：帧是窗口像素 x 4（dpr 2 下可达 80 MB），按值结构化克隆会白拷
-  //   两份；拷到新 buffer 再转移所有权过去是 O(1)。探针要拿它做逐字节比对，所以
-  //   必须是一份快照（wasm 堆上那个视图任何一次 present 都会被原地覆盖）。
-  if (m.name === 'rawFrame') {
-    const v = mod.frameRgba();
-    const copy = new Uint8ClampedArray(v.length);
-    copy.set(v);
-    return void post({ t: 'reply', id: m.id, value: copy }, [copy.buffer]);
-  }
   const fn = READ[m.name];
   if (!fn) throw new Error('未知查询 ' + m.name);
   return void post({ t: 'reply', id: m.id, value: await fn(m.args || {}) });
@@ -1995,14 +1904,6 @@ function settle(opName: string, m: Args): { moved: boolean; scrolled: boolean; s
  * @returns {*} 命令结果；未知命令抛错
  */
 function read(name: any, args: any) {
-  // rawFrame 不在 READ 表里：它要拷一份（wasm 堆上的视图下一次 present 就被覆盖），
-  //   与 askOp 里那条特判是同一件事。少了它，diag.rawFrame 直接抛。
-  if (name === 'rawFrame') {
-    const v = mod.frameRgba();
-    const copy = new Uint8ClampedArray(v.length);
-    copy.set(v);
-    return copy;
-  }
   const fn = READ[name];
   if (!fn) throw new Error('未知读取 ' + name);
   return fn(args || {});

@@ -82,7 +82,8 @@ test.describe('编辑面：选区与样式', () => {
     //   所以门限取 r >= 170：实心填充的 r 是 178，仍然算"偏蓝"，
     //   两条才能各自只钉一件事，而不是一起红。
     const scanExpr = `
-      const f = await D.rawFrame();
+      const F = await PIX();
+      const f = F.data;
       let ink = 0, blue = 0;
       for (let i = 0; i + 3 < f.length; i += 4) {
         const r = f[i], g = f[i + 1], b = f[i + 2];
@@ -563,17 +564,19 @@ test.describe('编辑面：选区与样式', () => {
     await probe.read('await H.setCaret({ para: 0, offset: 0 }); return true;');
 
     // 采样点取光标矩形中心偏下 3 px：一定在光标内，又躲开上缘的取整边界。
-    //   读的是引擎帧（rawFrame 是快照），不是画布 —— 两个宿主的画布形状不同。
+    //   读的是页画布（PIX 逐页取再按窗口拼），不是引擎导出的帧 —— 后者是被测对象的自述。
     const FRAME_PIX = `
-      const f = await D.rawFrame();
-      const w = D.frameW(), h = D.frameH();
+      const F = await PIX();
+      const f = F.data;
+      const w = F.w, h = F.h;
       const cr = CARET();
       const x = cr.x + Math.max(0, Math.floor(cr.w / 2));
       const y = cr.y + Math.min(3, Math.max(0, cr.h - 1));
       if (!(x >= 0 && y >= 0 && x < w && y < h)) return null;
       const i = (y * w + x) * 4;
       return [f[i], f[i + 1], f[i + 2], f[i + 3]];`;
-    const frameArea = await probe.read('return D.frameW() * D.frameH();');
+    const frameArea = await probe.read(`const g = H.geometry(); const p = D.pagePx();
+      return p.w * Math.max(1, g.window.count) * (p.h + p.gap);`);
 
     const defCaret = await probe.read('return H.config().caretStyle;');
     const defSel = await probe.read('return H.config().selectionStyle;');
@@ -617,7 +620,7 @@ test.describe('编辑面：选区与样式', () => {
     //   判据随槽数一起松掉（空槽越多越松，最后恒真）。
     const winArea = await probe.read(`
       const st = D.editStats() || {};
-      return (st.windowPages || 1) * D.frameW() * D.pagePx().h;`);
+      return (st.windowPages || 1) * D.pagePx().w * D.pagePx().h;`);
     check('参考臂：整篇重排重绘确实写了大半个窗口（否则下面那条判据是恒真的）',
               fullPix > winArea * 0.5, `写 ${fullPix} / 窗口 ${winArea} px（帧 ${frameArea}）`);
     const st2 = await probe.read(
@@ -646,7 +649,8 @@ test.describe('编辑面：选区与样式', () => {
     //   而"存下来但没画"正是这类参数最常见的失败方式。
     const caretArea = async (w: any) => probe.read(`
       await CARET_STYLE({ color: [0, 128, 0, 255], widthPt: ${w} });
-      const f = await D.rawFrame();
+      const F = await PIX();
+      const f = F.data;
       let n = 0;
       for (let i = 0; i + 3 < f.length; i += 4) {
         if (f[i] === 0 && f[i + 1] === 128 && f[i + 2] === 0) ++n;
@@ -673,8 +677,9 @@ test.describe('编辑面：选区与样式', () => {
     const selPix = await probe.read(`
       await SEL_STYLE({ color: [255, 0, 0, 255] });
       await H.selectAll();
-      const f = await D.rawFrame();
-      const w = D.frameW(), h = D.frameH();
+      const F = await PIX();
+      const f = F.data;
+      const w = F.w, h = F.h;
       const z = D.stats().density;
       const step = D.pagePx().h + D.pagePx().gap;
       const first = D.editStats().windowFirstPage;
@@ -691,8 +696,9 @@ test.describe('编辑面：选区与样式', () => {
               ` 得到 ${JSON.stringify(selPix.px)}`);
     const selBack = await probe.read(`
       await SEL_STYLE({ color: ${JSON.stringify(defSel.color)} });
-      const f = await D.rawFrame();
-      const i = (${selPix.at[1]} * D.frameW() + ${selPix.at[0]}) * 4;
+      const F = await PIX();
+      const f = F.data;
+      const i = (${selPix.at[1]} * F.w + ${selPix.at[0]}) * 4;
       return [f[i], f[i + 1], f[i + 2], f[i + 3]];`);
     check(' 换回默认的半透明色之后同一点不再是纯红（说明上一条读的是真像素）',
               !(selBack[0] === 255 && selBack[1] === 0 && selBack[2] === 0),
@@ -785,8 +791,9 @@ test.describe('编辑面：选区与样式', () => {
       const a = r[0], b = r[1];
       const step = D.pagePx().h + D.pagePx().gap;
       const first = D.editStats().windowFirstPage;
-      const f = await D.rawFrame();
-      const w = D.frameW();
+      const F = await PIX();
+      const f = F.data;
+      const w = F.w;
       // 两条反白的公共 x 区间：短的那一行不会让另一行的涂色越界。
       const x0 = Math.max(0, Math.floor(Math.max(a.x, b.x) * z));
       const x1 = Math.min(w, Math.ceil(Math.min(a.x + a.w, b.x + b.w) * z));

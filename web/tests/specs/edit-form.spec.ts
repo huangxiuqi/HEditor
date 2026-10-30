@@ -43,7 +43,8 @@ test.describe('编辑面：表单控件', () => {
     const MARK = `(r, g, b) => r > 45 && b - r > 60 && b > 140`;
     const inkMark = `
       const mark = ${MARK};   // 光标色 r=31 被排除
-      const f = await D.rawFrame();
+      const F = await PIX();
+      const f = F.data;
       let n = 0;
       for (let i = 0; i + 3 < f.length; i += 4) {
         if (mark(f[i], f[i+1], f[i+2])) ++n;
@@ -65,8 +66,9 @@ test.describe('编辑面：表单控件', () => {
     const bandAt = (cxPt: any) => `
       return (async function () {
         const near = ${MARK};
-        const f = await D.rawFrame();
-        const fw = D.frameW();
+        const F = await PIX();
+        const f = F.data;
+        const fw = F.w;
         const z = ZOOM();
         const cx = ${cxPt};
         const lo = Math.round((cx - 10) * z), hi = Math.round((cx - 1) * z);
@@ -106,8 +108,9 @@ test.describe('编辑面：表单控件', () => {
     {
       const lastInkLeft = `
         return (async function () {
-          const f = await D.rawFrame();
-          const W = D.frameW(), H = D.frameH();
+          const F = await PIX();
+          const f = F.data;
+          const W = F.w, H = F.h;
           const at = (x, y) => { const i = (y * W + x) * 4; return [f[i], f[i+1], f[i+2]]; };
           const dark = (r, g, b) => r < 120 && g < 120 && b < 120;
           const rows = [];
@@ -222,8 +225,9 @@ test.describe('编辑面：表单控件', () => {
       // [诊断] 把 #0 那一行的蓝色列打出来 —— 用来核对"竖带窗口是否真的框住了括号"。
       {
         const d = await probe.read(`
-          const f = await D.rawFrame();
-          const fw = D.frameW();
+          const F = await PIX();
+          const f = F.data;
+          const fw = F.w;
           const z = ZOOM();
           const near = ${MARK};
           const it = D.controls().items[0];
@@ -268,8 +272,9 @@ test.describe('编辑面：表单控件', () => {
         const slotPx = bracketSlotPx;
         const empty = await probe.read(`
           const st = D.editStats();
-          const f = await D.rawFrame();
-          const fw = D.frameW();
+          const F = await PIX();
+          const f = F.data;
+          const fw = F.w;
           const winY = (st.caretPage - D.editStats().windowFirstPage) * (D.pagePx().h + D.pagePx().gap) +
                        st.caretY;
           const mark = (r, g, b) => r > 45 && b - r > 60 && b > 140;   // 光标色 r=31 被排除
@@ -315,8 +320,9 @@ test.describe('编辑面：表单控件', () => {
         await probe.read('await D.present(); return true;');
 
         const ord = await probe.read(`
-          const f = await D.rawFrame();
-          const fw = D.frameW();
+          const F = await PIX();
+          const f = F.data;
+          const fw = F.w;
           const cc = D.controls();
           const A = cc.items[0], B = cc.items[1];      // complaint / duration(只读)
           const z = ZOOM();
@@ -486,8 +492,11 @@ test.describe('编辑面：表单控件', () => {
 
         await probe.read('return await H.setCaret({ para: 0, offset: 14 });');      // 换字段
         const cst = await probe.read('return D.editStats();');
-        const fw = await probe.read('return D.frameW();');
-        const fh = await probe.read('return D.frameH();');
+        // 整帧的尺寸：页宽就是帧宽，帧高 = 窗口页数 x 步距（与引擎的 frameHeight 同口径）。
+        const fr = await probe.read(`const g = H.geometry(); const p = D.pagePx();
+          return { w: p.w, h: Math.max(1, g.window.count) * (p.h + p.gap) };`);
+        const fw = fr.w;
+        const fh = fr.h;
         check(' 换字段：不重排（layoutRan=false）',
                   cst.layoutRan === false, `layoutRan=${cst.layoutRan}`);
         check(' 换字段：上屏量远小于整帧（括号常驻的收益）',
@@ -515,8 +524,9 @@ test.describe('编辑面：表单控件', () => {
 
         const cmp = await probe.read(`
           const st = D.editStats();
-          const f = await D.rawFrame();
-          const fw = D.frameW();
+          const F = await PIX();
+          const f = F.data;
+          const fw = F.w;
           const winY = (st.caretPage - D.editStats().windowFirstPage) * (D.pagePx().h + D.pagePx().gap) +
                        st.caretY;
           const near = ${MARK};   // 标记亮蓝；光标色 r=31 被排除
@@ -657,8 +667,9 @@ test.describe('编辑面：表单控件', () => {
       for (let off = 0; off <= total; ++off) {
         await H.setCaret({ para: 0, offset: off });
         const cc = D.controls();
-        const f = await D.rawFrame();
-        const fw = D.frameW();
+        const F = await PIX();
+        const f = F.data;
+        const fw = F.w;
         for (let ci = 0; ci < cc.items.length; ++ci) {
           const it = cc.items[ci];
           if (it.ro || !it.rects.length) continue;

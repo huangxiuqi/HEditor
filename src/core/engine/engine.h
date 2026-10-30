@@ -1,8 +1,8 @@
 /**
  * 引擎门面：原生宿主与 WASM 宿主共用同一份实现。
  *
- * 这一层就是"平台边界"：跨边界流的是大块位图（pagePixels() 逐页的 RGBA、frame() 的窗口
- * 导出图）与度量数字（EngineStats / EditStats），而不是几千条绘制指令 —— 循环留在引擎内
+ * 这一层就是"平台边界"：跨边界流的是大块位图（pagePixels() 逐页的 RGBA）与度量数字
+ * （EngineStats / EditStats），而不是几千条绘制指令 —— 循环留在引擎内
  * （Figma 那条纪律的最小可用形态）。
  * 编辑入口成对出现：xxx 只改状态，xxxAndRender 连呈现一起收尾。宿主一次调用就拿到新的一屏。
  * 坐标一律是"段 + 码点偏移"，不暴露任何内部指针。
@@ -2652,18 +2652,6 @@ public:
     bool selectCellAtPt(float x_pt_doc, float y_pt_doc);
 
     /**
-     * 窗口导出图：把窗口内各页的"内容 + 瞬态"按窗口顺序拼成一张，供宿主 / 探针 / 单测读。
-     *
-     * 它不是渲染目标 —— 渲染只写页位图（见 PageSlot），这里是一次读请求时现场拼的
-     *   派生视图（第一次读时拼一次，下一次 present 作废重拼）。所以它没有槽、没有增量，
-     *   也不可能与页位图分叉：内容全部来自页位图，瞬态全部来自同一份矩形。
-     * 保留它是为了让"扫一遍画面"这类判据（像素断言、markCheck、inkRows）不必认识页。
-     *
-     * @return 窗口导出图的像素（第一次读时现场拼）
-     */
-    const uint8_t* frame() const;
-
-    /**
      * 窗口的横向像素：与页同宽（页在窗口里只纵向排列）。
      *
      * @return 窗口的横向像素（与页同宽）
@@ -2671,29 +2659,21 @@ public:
     int frameWidth() const { return pagePxWidth(); }
 
     /**
-     * 窗口的纵向像素：窗口页数 x 步距（末页之后那一格页间隙也留着，导出图因此整格对齐）。
+     * 窗口的纵向像素：窗口页数 x 步距。
      *
      * @return 窗口的纵向像素（窗口页数 x 步距）
      */
     int frameHeight() const;
 
     /**
-     * 窗口导出图的大小（字节）。
+     * 窗口像素的大小（字节）。
      *
-     * 只做乘法，不拼图：调用方（statsJson 每份状态都带一格）问的是"多大"，
-     *   不是"给我像素"。要像素走 frame()，那一条才真的按需拼一次。
+     * 只做乘法，不拼图：调用方（statsJson 每份状态都带一格）问的是"多大"。
+     * 窗口像素本身只由 assembleWindow 拼，那一份只服务审计。
      *
-     * @return 窗口导出图的大小（字节）
+     * @return 窗口像素的大小（字节）
      */
     size_t frameBytes() const;
-
-    /**
-     * 窗口导出图拼一次（见 frame 的说明）。返回它的字节数。
-     * 只在导出图被 presentInternal 作废之后才真的重拼 —— 拼的是页位图的副本。
-     *
-     * @return 窗口导出图的字节数（必要时重拼一次）
-     */
-    size_t ensureFrameExport() const;
 
     /**
      * 把窗口内各页拼进 @p out。@p with_transient 为假时只拼内容（审计用）。
@@ -3673,28 +3653,12 @@ private:
     std::vector<int> last_dirty_pages_;
 
     /**
-     * 导出用的两块临时位图（都只在真被读到时才分配）。
+     * 单页导出的临时位图（只在真被读到、且这一页有瞬态时才分配）。
      *
-     * page_export_：一页大小，"内容 + 瞬态"的合成落点；
-     * frame_export_：窗口大小，把各页拼起来给"扫画面"那类判据用。
-     * 它们是派生物、不是第二个真相：下一次 present 就作废，重拼时唯一的数据源是页位图。
+     * 一页大小，"内容 + 瞬态"的合成落点。它是派生物、不是第二个真相：
+     *   唯一的数据源是页位图，下一次导出从干净的页位图重来。
      */
     mutable Bitmap page_export_;
-
-    /**
-     * 单页导出图当前装的是哪一页（-1 = 没装）。
-     */
-    mutable int page_export_page_ = -1;
-
-    /**
-     * 窗口导出图（读时现场拼，present 作废）。
-     */
-    mutable Bitmap frame_export_;
-
-    /**
-     * 窗口导出图还作不作数。
-     */
-    mutable bool frame_export_valid_ = false;
 
     /**
      * relayout() 置位、presentInternal() 消费。

@@ -23,7 +23,7 @@ test.describe('工具栏', () => {
 
   test('每个按钮点一遍：都要有反应', async ({ open }) => {
     const p = await open('index.html', { query: { debug: '1' } });
-    const r = await p.ev<Bars>(`
+    const r = await p.read<Bars>(`
       ${SELECT_HELPERS}
       const e = ${D};
       const btn = (act) => document.querySelector('.heditor-ribbon__button[data-act="' + act + '"]');
@@ -196,10 +196,10 @@ test.describe('工具栏', () => {
       // 视图：裁剪标记（只改光栅，画面上是四个角多出的短线）。
       //   前后各取一次帧指纹：只翻配置不动像素的话，屏幕上什么都不会变。
       out.marginMarksBefore = e.config().marginMarks;
-      const digest0 = await e.diag.frameDigest();
+      const digest0 = await PIXH();
       btn('margin-marks').click();
       out.marginMarks = await until(() => e.config().marginMarks === false);
-      out.marginMarksRedraw = await until(async () => (await e.diag.frameDigest()) !== digest0);
+      out.marginMarksRedraw = await until(async () => (await PIXH()) !== digest0);
 
       // 视图：页面设置面板（纸张 + 四边页边距）。面板里改成 A3 再"应用"，页宽要跟着变。
       const w0 = e.geometry().page.w;

@@ -20,7 +20,7 @@ const D = 'window.__demo';
  * 水印是半透明灰，压在纸面上是浅灰 —— 阈值取 200 时它仍然算墨（纸面是 255）。
  */
 const INK = `
-  const f = await D.rawFrame();
+  const f = (await PIX()).data;
   let ink = 0;
   for (let i = 0; i + 3 < f.length; i += 4) {
     if (f[i] < 200 || f[i + 1] < 200 || f[i + 2] < 200) ++ink;
@@ -311,8 +311,9 @@ test.describe('格式', () => {
         const r = SEL().rects[0];
         const step = D.pagePx().h + D.pagePx().gap;
         const first = D.editStats().windowFirstPage;
-        const f = await D.rawFrame();
-        const w = D.frameW();
+        const F = await PIX();
+        const f = F.data;
+        const w = F.w;
         const x0 = Math.max(0, Math.floor(r.x * z));
         const x1 = Math.min(w, Math.ceil((r.x + r.w) * z));
         const top = Math.floor((r.page - first) * step + r.y * z);
